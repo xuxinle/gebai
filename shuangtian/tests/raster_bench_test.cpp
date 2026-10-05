@@ -55,6 +55,27 @@ inline constexpr int kCanvasHeight = 800;
 /// 取多次的**最小值**而不是平均值：清屏是纯内存写、无分支，最小次最能代表
 /// "本机不受干扰时有多快"，被调度噪声抬高的那些次不该把分母做大（分母偏大会
 /// 让所有比值偏小 → 阈值变松，方向正好是错的那一边）。
+/// 噪声鲁棒测量：把一次测量重复 `kMeasureRepeats` 遍，取**最小值**。
+///
+/// 为什么必须这样：本机是共享环境（cgroup 限 4 核、loadavg 常 >2），单次测量会飘。
+/// 实测同一份代码连跑 4 次，渐变填充的比值在 **1.10×~1.68×** 之间跳（+53%）——
+/// 这不是被测代码在变，是调度噪声。噪声**只会抬高**耗时，所以最小值最接近真实成本，
+/// 也是唯一能让"余量上限"这类断言有意义的取法。
+///
+/// ⚠ 这不是"把阈值调松"：阈值一律不动，只是把**测量**做稳。
+/// 对比：`baseline_ms_per_pixel()` 用的是"每像素成本"（已除以面积），
+/// 这里的四个负载是**整块**负载，不能那样等效缩小。
+inline constexpr int kMeasureRepeats{3};
+
+template <class Measure>
+[[nodiscard]] auto best_of(Measure&& measure) -> double {
+  double best = 1e9;
+  for (int index = 0; index < kMeasureRepeats; ++index) {
+    best = std::min(best, measure());
+  }
+  return best;
+}
+
 [[nodiscard]] auto baseline_ms_per_pixel() -> double {
   st::raster::Canvas canvas = make_canvas();
   constexpr int kRuns = 7;
@@ -73,6 +94,46 @@ struct Measurement {
   double ratio{0.0};  ///< 每单位代价 / 清屏每像素成本（机器无关）
 };
 
+/// 当前构建是否带 sanitizer（即 `st test --san`）。
+///
+/// ## 为什么性能门禁必须认出它
+///
+/// 本文件的"机器无关"靠的是**比值**：被测操作成本 / 清屏每像素成本。
+/// 这条推理成立的前提是"两者被同样地加速/减速"——而 **sanitizer 打破了这个前提**：
+/// ASan 的插桩开销正比于**内存访问量**，而清屏是纯 `memset`（几乎不插桩）。
+/// 实测同一份代码在 san 档下的比值膨胀得**极不均匀**：清屏快得少、圆角卡片 4.36×、
+/// 文本 56.5×、阴影 15.4×（发布档分别是 0.38 ms、1.4×、33×、14×）。
+///
+/// 于是"余量 = 阈值/实测"这个量在插桩档下**失去意义**：它既可能 0.92（看起来
+/// "阈值太松"），也可能 2.59（看起来"还好"），而两者都不反映真实性能。
+///
+/// ## 处理方式：跳过上界断言，不是放宽阈值
+///
+/// 把阈值按插桩档调宽会**真的**把发布档门禁变松（同一份阈值两边共用）。
+/// 所以这里的选择是：插桩档**跳过余量上界断言**并在报告里写明，
+/// 门禁的标定与把关只在发布档完成（这也正是 `st test` 默认档）。
+/// **不是静默跳过**：`st::print` 明说跳过了什么、为什么。
+[[nodiscard]] constexpr auto instrumented_build() noexcept -> bool {
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+  return true;
+#else
+  return false;
+#endif
+}
+
+/// 插桩档下跳过**比值型**阈值断言，并说明跳过了哪一条。
+/// 返回 `true` = 调用方应当返回（跳过）。
+///
+/// 统一成一个入口，是为了让"插桩档到底跳了多少东西"在一处可见——
+/// 分散写 `if (instrumented_build()) return;` 久了就没人说得清跳过面有多大。
+[[nodiscard]] inline auto skip_ratios_under_instrumentation(const char* name) -> bool {
+  if (!instrumented_build()) return false;
+  st::print("[bench] {}：插桩档（san）跳过比值阈值——ASan 开销 ∝ 内存访问量，\n"
+            "        而分母（清屏）是纯内存写，比值不再机器无关。标定以发布档为准。\n",
+            name);
+  return true;
+}
+
 }  // namespace
 
 // ————————————————————————————————————————————————————————————————————————————
@@ -88,15 +149,17 @@ namespace {
   constexpr int kCards = 60;
   constexpr double kCardWidth = 320.0;
   constexpr double kCardHeight = 160.0;
-  const auto start = Clock::now();
-  for (int index = 0; index < kCards; ++index) {
-    const float x = static_cast<float>(index % 6) * 200.0f + 20.0f;
-    const float y = static_cast<float>(index / 6) * 130.0f + 20.0f;
-    canvas.fill_rect(
-        st::math::Rect{x, y, static_cast<float>(kCardWidth), static_cast<float>(kCardHeight)}, paint,
-        12.0f);
-  }
-  const double ms = elapsed_ms(start);
+  const double ms = best_of([&] {
+    const auto start = Clock::now();
+    for (int index = 0; index < kCards; ++index) {
+      const float x = static_cast<float>(index % 6) * 200.0f + 20.0f;
+      const float y = static_cast<float>(index / 6) * 130.0f + 20.0f;
+      canvas.fill_rect(
+          st::math::Rect{x, y, static_cast<float>(kCardWidth), static_cast<float>(kCardHeight)},
+          paint, 12.0f);
+    }
+    return elapsed_ms(start);
+  });
   const double per_card = ms / kCards;
   return Measurement{ms, per_card / (kCardWidth * kCardHeight) / unit};
 }
@@ -110,15 +173,17 @@ namespace {
   constexpr double kCardHeight = 140.0;
   constexpr double kBlur = 16.0;
   const double area = (kCardWidth + kBlur * 4.0 + 4.0) * (kCardHeight + kBlur * 4.0 + 4.0);
-  const auto start = Clock::now();
-  for (int index = 0; index < kShadows; ++index) {
-    const float x = static_cast<float>(index % 4) * 320.0f + 24.0f;
-    const float y = static_cast<float>(index / 4) * 160.0f + 24.0f;
-    canvas.draw_shadow(
-        st::math::Rect{x, y, static_cast<float>(kCardWidth), static_cast<float>(kCardHeight)}, 12.0f,
-        static_cast<float>(kBlur), color, st::math::Point{0.0f, 4.0f});
-  }
-  const double ms = elapsed_ms(start);
+  const double ms = best_of([&] {
+    const auto start = Clock::now();
+    for (int index = 0; index < kShadows; ++index) {
+      const float x = static_cast<float>(index % 4) * 320.0f + 24.0f;
+      const float y = static_cast<float>(index / 4) * 160.0f + 24.0f;
+      canvas.draw_shadow(
+          st::math::Rect{x, y, static_cast<float>(kCardWidth), static_cast<float>(kCardHeight)},
+          12.0f, static_cast<float>(kBlur), color, st::math::Point{0.0f, 4.0f});
+    }
+    return elapsed_ms(start);
+  });
   const double per_shadow = ms / kShadows;
   return Measurement{ms, per_shadow / area / unit};
 }
@@ -137,15 +202,20 @@ namespace {
   const std::string sample = "霜天 · 组件画廊 1280x800 headless control 0123456789";
   constexpr int kLines = 60;
   const double unit = baseline_ms_per_pixel();
-  const auto start = Clock::now();
-  double glyph_pixels = 0.0;
-  for (int index = 0; index < kLines; ++index) {
-    const float y = static_cast<float>(index % 24) * 30.0f + 20.0f;
-    (void)renderer.draw(canvas, sample, st::math::Point{24.0f, y}, 14.0f,
-                        st::math::Color::rgb(0x1F, 0x24, 0x2C));
-    glyph_pixels += static_cast<double>(sample.size()) * 14.0 * 14.0 * 0.5;
-  }
-  const double ms = elapsed_ms(start);
+  const double ms = best_of([&] {
+    const auto start = Clock::now();
+    for (int index = 0; index < kLines; ++index) {
+      const float y = static_cast<float>(index % 24) * 30.0f + 20.0f;
+      (void)renderer.draw(canvas, sample, st::math::Point{24.0f, y}, 14.0f,
+                          st::math::Color::rgb(0x1F, 0x24, 0x2C));
+    }
+    return elapsed_ms(start);
+  });
+  // 总字形墨量的估算（下面按 `glyph_pixels / kLines` 折算到单行）：
+  // 每行按 "字符数 × 字号² × 0.5" 估，**必须乘回总行数**——
+  // 否则比值会被静默放大 60 倍（这里踩过一次：改成 best_of 时漏了乘）。
+  const double glyph_pixels =
+      static_cast<double>(sample.size()) * 14.0 * 14.0 * 0.5 * static_cast<double>(kLines);
   const double per_line = ms / kLines;
   return Measurement{ms, (per_line / (glyph_pixels / kLines)) / unit};
 }
@@ -162,16 +232,18 @@ namespace {
   constexpr int kSweeps = 10;
   constexpr double kRectWidth = 1200.0;
   constexpr double kRectHeight = 36.0;
-  const auto start = Clock::now();
-  for (int sweep = 0; sweep < kSweeps; ++sweep) {
-    for (int index = 0; index < kRects; ++index) {
-      const float y = static_cast<float>(index) * 40.0f;
-      canvas.fill_rect(
-          st::math::Rect{40.0f, y, static_cast<float>(kRectWidth), static_cast<float>(kRectHeight)},
-          paint, 8.0f);
+  const double ms = best_of([&] {
+    const auto start = Clock::now();
+    for (int sweep = 0; sweep < kSweeps; ++sweep) {
+      for (int index = 0; index < kRects; ++index) {
+        const float y = static_cast<float>(index) * 40.0f;
+        canvas.fill_rect(st::math::Rect{40.0f, y, static_cast<float>(kRectWidth),
+                                        static_cast<float>(kRectHeight)},
+                         paint, 8.0f);
+      }
     }
-  }
-  const double ms = elapsed_ms(start);
+    return elapsed_ms(start);
+  });
   const double per_rect = ms / static_cast<double>(kRects * kSweeps);
   return Measurement{ms, per_rect / (kRectWidth * kRectHeight) / unit};
 }
@@ -184,14 +256,21 @@ namespace {
 
 namespace {
 
-/// 圆角卡片：实测 ≈1.7× 清屏单位 → 阈值 4×（余量 ≈2.4 倍）。
-inline constexpr double kRoundedCardsLimit{4.0};
-/// 投影：实测 ≈14× → 阈值 30×（余量 ≈2.1）。
-inline constexpr double kShadowLimit{30.0};
-/// 文本：实测 ≈39× → 阈值 90×（余量 ≈2.3）。本项比值最稳（三次测量 ±0.3%）。
-inline constexpr double kTextLimit{90.0};
-/// 渐变：实测 ≈2× → 阈值 6×（余量 ≈3）。负载已加大到毫秒级以压低噪声。
-inline constexpr double kGradientLimit{6.0};
+/// 各项的"实测"是**去掉调度噪声后**的稳定值（`best_of` 取最小值，见该函数注释），
+/// 阈值按它给 ≈2.2~2.5 倍余量。余量上限 `kMaxHeadroom`(3.5) 由自检盯住。
+///
+/// ⚠ 2026-10 性能轮把这里的阈值**收紧了**（因为测量变准了）：加 `best_of` 之前，
+/// 单次测量把噪声当成本，实测值虚高（如文本 33× 而真值 23×），阈值只能跟着放宽，
+/// 于是"余量"看着合理、实际抓不住退化。收紧后 4 项都在 `kFaultFactor`(3×) 下越线。
+///
+/// 圆角卡片：实测 ≈1.35× → 阈值 3×（余量 ≈2.2）。
+inline constexpr double kRoundedCardsLimit{3.0};
+/// 投影：实测 ≈10.3× → 阈值 24×（余量 ≈2.3）。
+inline constexpr double kShadowLimit{24.0};
+/// 文本：实测 ≈23×（本项最稳）→ 阈值 50×（余量 ≈2.2）。
+inline constexpr double kTextLimit{50.0};
+/// 渐变：实测 ≈1.6× → 阈值 4×（余量 ≈2.5）。
+inline constexpr double kGradientLimit{4.0};
 
 /// 我们希望"至少这么多次退化"能被门禁抓住（2 倍以内可能是机器差异，不必报警）。
 inline constexpr double kFaultFactor{3.0};
@@ -210,6 +289,7 @@ ST_TEST(bench_rounded_card_fill) {
   const Measurement m = measure_rounded_cards(unit);
   st::print("[bench] 圆角卡片填充 ×60: {:.2f} ms（{:.3f} ms/张，{:.2f}× 清屏单位，阈值 {}×）\n",
             m.ms, m.ms / 60.0, m.ratio, kRoundedCardsLimit);
+  if (skip_ratios_under_instrumentation("圆角卡片填充")) return;
   ST_CHECK(m.ratio <= kRoundedCardsLimit);
 }
 
@@ -218,6 +298,7 @@ ST_TEST(bench_card_shadow) {
   const Measurement m = measure_card_shadows(unit);
   st::print("[bench] 卡片投影 ×20（blur=16）: {:.2f} ms（{:.3f} ms/个，{:.2f}× 清屏单位，阈值 {}×）\n",
             m.ms, m.ms / 20.0, m.ratio, kShadowLimit);
+  if (skip_ratios_under_instrumentation("卡片投影")) return;
   ST_CHECK(m.ratio <= kShadowLimit);
 }
 
@@ -230,6 +311,7 @@ ST_TEST(bench_text_draw) {
   }
   st::print("[bench] 文本 ×60（59 字符/行，字型缓存命中）: {:.2f} ms（{:.3f} ms/行，{:.2f}× 清屏单位，阈值 {}×）\n",
             m.ms, m.ms / 60.0, m.ratio, kTextLimit);
+  if (skip_ratios_under_instrumentation("文本绘制")) return;
   ST_CHECK(m.ratio <= kTextLimit);
 }
 
@@ -238,6 +320,7 @@ ST_TEST(bench_gradient_fill) {
   const Measurement m = measure_gradients(unit);
   st::print("[bench] 渐变填充 ×200（1200×36）: {:.2f} ms（{:.3f} ms/块，{:.2f}× 清屏单位，阈值 {}×）\n",
             m.ms, m.ms / 200.0, m.ratio, kGradientLimit);
+  if (skip_ratios_under_instrumentation("渐变填充")) return;
   ST_CHECK(m.ratio <= kGradientLimit);
 }
 
@@ -261,6 +344,11 @@ ST_TEST(bench_thresholds_have_bounded_headroom) {
     st::print("[bench-guard] {}: 阈值 {:.1f}× / 实测 {:.2f}× = 余量 {:.2f} 倍（上限 {}）\n", name,
               limit, m.ratio, headroom, kMaxHeadroom);
     // 余量太小 → 机器噪声就会误报；太大 → 抓不住退化。两头都要卡住。
+    //
+    // ⚠ 插桩档（`st test --san`）下这条**不适用**：ASan 的插桩开销正比于内存访问量，
+    // 而清屏是纯 `memset`——比值膨胀得极不均匀（见 `instrumented_build()` 的说明）。
+    // 这里如实跳过并说明，而不是把阈值放宽（那会真的把发布档门禁变松）。
+    if (instrumented_build()) return;
     ST_CHECK(headroom <= kMaxHeadroom);
     ST_CHECK(headroom >= 1.3);
   };
@@ -268,6 +356,11 @@ ST_TEST(bench_thresholds_have_bounded_headroom) {
   check("卡片投影", kShadowLimit, measure_card_shadows(unit));
   check("渐变填充", kGradientLimit, measure_gradients(unit));
 
+  if (instrumented_build()) {
+    st::print("[bench-guard] 插桩档（san）：**跳过余量上下界断言**——ASan 的开销与内存访问量\n"
+              "              成正比，而清屏是纯内存写，比值不再机器无关。性能标定以发布档为准。\n");
+    return;
+  }
   bool available = false;
   const Measurement text = measure_text(&available);
   if (available) check("文本绘制", kTextLimit, text);

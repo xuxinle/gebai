@@ -118,6 +118,15 @@ class Canvas final : public Surface {
   /// 投影（半径 `blur` 的近似高斯模糊，偏移 `offset`）。
   void draw_shadow(math::Rect rect, float radius, float blur, math::Color color,
                    math::Point offset = {}, DrawOptions options = {}) override;
+  /// **两层投影合一**：把两层预合成成**一张**缓存贴图，只做一次逐像素合成。
+  ///
+  /// 收益与正确性论证见 `Surface::draw_shadow_layered`（接口处）与
+  /// `docs/PAINT_DIAGNOSIS.md` §3.1：合成核从"每层读遮罩 + 查表 + `over_premul`"（4.82 ns/px）
+  /// 退化成纯 `over_premul`（2.17 ns/px），且两层的非零区域并集只有各自之和的 ~57%。
+  void draw_shadow_layered(math::Rect rect, float radius, math::Color key_color, float key_blur,
+                           math::Point key_offset, math::Color ambient_color,
+                           float ambient_blur, math::Point ambient_offset,
+                           DrawOptions options = {}) override;
   /// 位图合成（双线性缩放）。
   void draw_canvas(const Surface& source, math::Rect destination, DrawOptions options = {}) override;
   void draw_canvas_at(const Surface& source, int x, int y, DrawOptions options = {}) override;
@@ -203,6 +212,26 @@ class Canvas final : public Surface {
   /// 参数按 0.25 像素量化后做键——几何量在帧间有浮点噪声，不量化则永远命不中。
   [[nodiscard]] auto shadow_mask(float width, float height, float radius, float blur,
                                  math::Point offset) -> std::shared_ptr<const Mask>;
+  /// 取（或生成并缓存）**两层合一的阴影贴图**（预乘 RGBA + 每行非零跨度）。
+  ///
+  /// 与 `shadow_mask` 同一思路（键 = 几何 + 两层的模糊/偏移/颜色，按 0.25 像素量化），
+  /// 但把两层**预合成**在一张中性缓冲上：于是往画布上贴只是一次 `over_premul`
+  /// （不需要逐像素读遮罩 + 查表），而且两层的非零区域取并集后重叠部分只合成一次。
+  /// 贴图存的是**阴影自身的预乘色**（不含目标），因此对任何底色都正确——
+  /// `src-over` 满足结合律，"先合并两层再贴" 与 "依次贴两次" 逐像素等价。
+  struct LayeredShadow {
+    std::shared_ptr<const std::vector<std::uint32_t>> pixels{};   ///< 预乘，行优先
+    /// 每行 [first, last] 的非零跨度（相对贴图原点）；`first < 0` = 该行全零。
+    std::shared_ptr<const std::vector<std::pair<int, int>>> spans{};
+    int x{0};
+    int y{0};
+    int width{0};
+    int height{0};
+  };
+  [[nodiscard]] auto layered_shadow(float width, float height, float radius,
+                                    math::Color key_color, float key_blur, math::Point key_offset,
+                                    math::Color ambient_color, float ambient_blur,
+                                    math::Point ambient_offset) -> const LayeredShadow*;
   /// 物理像素坐标 → 逻辑坐标（画笔/渐变采样用）。
   [[nodiscard]] auto to_logical_point(float physical_x, float physical_y) const noexcept
       -> math::Point;
@@ -215,6 +244,8 @@ class Canvas final : public Surface {
   std::vector<ClipFrame> clip_stack_{};
   /// 阴影遮罩缓存（键 → 遮罩）。上限 `kShadowMaskCacheLimit`，超限丢弃最早的一项。
   std::vector<std::pair<std::uint64_t, std::shared_ptr<const Mask>>> shadow_masks_{};
+  /// 两层合一阴影贴图缓存（键 → 贴图）。上限同 `shadow_mask`，超限丢弃最早一项。
+  std::vector<std::pair<std::uint64_t, LayeredShadow>> layered_shadows_{};
   PaintProfiler* profiler_{nullptr};  ///< 空 = 不剖析
 };
 

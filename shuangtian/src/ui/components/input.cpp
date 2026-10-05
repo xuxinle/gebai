@@ -64,10 +64,10 @@ void sync_control_style(Element& element, const RenderContext& context) {
 void paint_border(raster::Surface& canvas, math::Rect rect, float radius, math::Color color,
                   float width) {
   if (width <= 0.0f || color.a == 0U) return;
-  const float half = width * 0.5f;
-  raster::Path outline;
-  outline.add_rounded_rect(rect.inset(math::Insets::all(half)), radius > half ? radius - half : 0.0f);
-  canvas.stroke_path(outline, raster::Paint::solid(color), width);
+  // 走「环形填充」而不是描边：描边把每一段扩展成独立四边形，几何量是环形的两倍
+  // （见 `make_rounded_border_ring` 的注释与实测）。
+  canvas.fill_path(raster::make_rounded_border_ring(rect, radius, width),
+                   raster::Paint::solid(color));
 }
 
 /// 光标闪烁相位（1s 周期，亮 55% / 灭 45%）。

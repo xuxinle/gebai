@@ -476,4 +476,40 @@ auto make_line(math::Point from, math::Point to) -> Path {
   return path;
 }
 
+auto make_rounded_border_ring(math::Rect rect, float radius, float width) -> Path {
+  Path path;
+  if (rect.is_empty()) return path;
+  const float limit = std::min(rect.width, rect.height) * 0.5f;
+  const float outer_radius = radius < 0.0f ? 0.0f : (radius > limit ? limit : radius);
+  path.add_rounded_rect(rect, outer_radius);
+  if (!(width > 0.0f)) return path;   // 非正厚度 → 实心圆角矩形
+
+  const math::Rect inner_box = rect.inset(math::Insets::all(width));
+  // 内圈放不下（矩形被线宽吃穿）→ 视觉上就是"全涂"，实心是正确退化。
+  if (inner_box.is_empty()) return path;
+  const float inner_limit = std::min(inner_box.width, inner_box.height) * 0.5f;
+  const float inner_radius_raw = outer_radius - width;
+  const float inner_radius = inner_radius_raw < 0.0f
+                                 ? 0.0f
+                                 : (inner_radius_raw > inner_limit ? inner_limit
+                                                                   : inner_radius_raw);
+
+  // 内圈**反向**：同一组圆角矩形的命令按逆序重发，并把每个三次贝塞尔的
+  // 两个控制点交换——这样控制点保持完整（`Path::reverse()` 会把控制点丢掉）。
+  Path forward;
+  forward.add_rounded_rect(inner_box, inner_radius);
+  const auto commands = forward.commands();
+  for (std::size_t index = commands.size(); index-- > 0;) {
+    const PathCommand& command = commands[index];
+    switch (command.kind) {
+      case PathCommand::Kind::MoveTo: path.line_to(command.p1); break;
+      case PathCommand::Kind::LineTo: path.line_to(command.p1); break;
+      case PathCommand::Kind::QuadTo: path.quad_to(command.p2, command.p1); break;
+      case PathCommand::Kind::CubicTo: path.cubic_to(command.p3, command.p2, command.p1); break;
+      case PathCommand::Kind::Close: path.close(); break;
+    }
+  }
+  return path;
+}
+
 }  // namespace st::raster

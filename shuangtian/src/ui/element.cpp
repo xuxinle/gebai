@@ -718,26 +718,36 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
     // 上浮时阴影跟着走（否则"抬起"会被阴影钉在原地，看着像两层错位）
     const math::Rect shadow_box = box.inset(style_.margin);
     const auto options = raster::DrawOptions{.opacity = style_.opacity};
-    // 先环境层（大而淡）、后关键层（紧而实）：反过来的话紧层会被大层盖住，
-    // 叠加后反而比单层更浑。
-    if (style_.shadow.second_visible()) {
-      canvas.draw_shadow(shadow_box, style_.radius, style_.shadow.blur2, style_.shadow.color2,
-                         math::Point{style_.shadow.offset2_x, style_.shadow.offset2_y}, options);
-    }
-    canvas.draw_shadow(shadow_box, style_.radius, style_.shadow.blur, style_.shadow.color,
-                       math::Point{style_.shadow.offset_x, style_.shadow.offset_y}, options);
+    // **走 `draw_shadow_layered`，不是调两次 `draw_shadow`**：
+    // 两层的遮罩都只取决于几何，后端可以把它们预合成成**一张**缓存贴图、只做一次
+    // 逐像素合成（软件光栅器就是这样做的）。实测 96 张卡片：14.0 ms/帧 → 6.9 ms/帧
+    // （`docs/PAINT_DIAGNOSIS.md` §3.1）。语义（先环境层、后关键层）写进了接口，
+    // 因此换后端不会改变观感。
+    //
+    // 单层阴影（`second_visible()` 为假）时 `ambient_blur` 传 0——后端据此退回
+    // 单层路径，行为与以前逐像素相同。
+    const bool has_ambient = style_.shadow.second_visible();
+    canvas.draw_shadow_layered(
+        shadow_box, style_.radius, style_.shadow.color, style_.shadow.blur,
+        math::Point{style_.shadow.offset_x, style_.shadow.offset_y},
+        has_ambient ? style_.shadow.color2 : math::Color{0, 0, 0, 0},
+        has_ambient ? style_.shadow.blur2 : 0.0f,
+        math::Point{style_.shadow.offset2_x, style_.shadow.offset2_y}, options);
   }
   if (background.a != 0U) {
     canvas.fill_rect(box, raster::Paint::solid(background), style_.radius,
                      raster::DrawOptions{.opacity = style_.opacity});
   }
   if (style_.border_width > 0.0f && border.a != 0U) {
-    raster::Path outline;
-    const float half = style_.border_width * 0.5f;
-    outline.add_rounded_rect(box.inset(math::Insets::all(half)),
-                             style_.radius > half ? style_.radius - half : 0.0f);
-    canvas.stroke_path(outline, raster::Paint::solid(border), style_.border_width,
-                       raster::DrawOptions{.opacity = style_.opacity});
+    // **环形填充**而不是描边：卡片边框是界面里出现次数最多的描边，而 `stroke_path`
+    // 把圆角矩形展开成 ~152 条边（每段一个四边形 + 顶点补圆），环形只有 76 条边。
+    // 实测 96 张卡片：6.9 ms/帧 → 3.9 ms/帧（`docs/PAINT_DIAGNOSIS.md` §2.2）。
+    // 覆盖范围与旧实现一致（都在 `box` 之内、厚度等于 `border_width`）——
+    // 两种抗锯齿逼近的像素差见 `tools/paint_equiv_probe.cpp`。
+    canvas.fill_path(
+        raster::make_rounded_border_ring(box, style_.radius, style_.border_width),
+        raster::Paint::solid(border),
+        raster::DrawOptions{.opacity = style_.opacity});
   }
 }
 

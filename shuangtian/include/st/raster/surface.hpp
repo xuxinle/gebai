@@ -169,6 +169,35 @@ class Surface {
   /// 投影（半径 `blur` 的近似高斯模糊，偏移 `offset`）。
   virtual void draw_shadow(math::Rect rect, float radius, float blur, math::Color color,
                            math::Point offset = {}, DrawOptions options = {}) = 0;
+
+  /// **两层投影（关键光 + 环境光）**——主题的 `Shadow` 就是这个形状，卡片/弹层都要它。
+  ///
+  /// 为什么合并成一个原语而不是"调两次 `draw_shadow`"：这两层的**遮罩都是几何参数的
+  /// 纯函数**（尺寸/圆角/模糊/偏移），合起来可以缓存成**一张**预乘贴图并只做**一次**
+  /// 逐像素合成。实测（`docs/PAINT_DIAGNOSIS.md` §3.1，96 张卡片场景）：两层各自合成
+  /// 14.0 ms/帧 → 合并 **6.9 ms/帧**（端到端 7.15 ms 里有 5.56 ms 是纯内存流量的下界），因为
+  /// ① 两层的非零区域高度重叠（并集只有各自之和的 57%）；
+  /// ② 合并后在**中性缓冲**里做一次"源合成"，贴图存的是**阴影自身的预乘 RGBA**，
+  ///    往目标上贴只是一次 `src-over`——比"每层都要读遮罩 + 查表 + 合成"便宜一半以上。
+  ///
+  /// `offset2` 等参数对应 `Shadow::blur2/blur2...`；只给第一层时行为与单层 `draw_shadow` 一致。
+  /// 默认实现退化为两次 `draw_shadow`（**顺序与 `Element::paint_box` 相同**：先环境层、
+  /// 后关键层——反过来的话紧层会被大而淡的层盖住），因此各后端不实现也能正确工作。
+  ///
+  /// 顺序之所以要写进接口语义：调用方（UI 层）不该知道"哪层先画"，那是后端的实现细节；
+  /// 而"环境层在下、关键层在上"是**视觉定义**，必须两端一致。
+  virtual void draw_shadow_layered(math::Rect rect, float radius, math::Color key_color, float key_blur,
+                                   math::Point key_offset, math::Color ambient_color,
+                                   float ambient_blur, math::Point ambient_offset,
+                                   DrawOptions options = {}) {
+    if (ambient_color.a != 0U && ambient_blur > 0.0f) {
+      draw_shadow(rect, radius, ambient_blur, ambient_color, ambient_offset, options);
+    }
+    if (key_color.a != 0U && key_blur > 0.0f) {
+      draw_shadow(rect, radius, key_blur, key_color, key_offset, options);
+    }
+  }
+
   /// 位图合成（双线性缩放；`source` 可为软件画布或 GPU 目标）。
   virtual void draw_canvas(const Surface& source, math::Rect destination,
                            DrawOptions options = {}) = 0;

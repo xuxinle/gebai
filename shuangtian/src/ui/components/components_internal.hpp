@@ -127,13 +127,17 @@ inline void paint_focus_ring(const RenderContext& context, raster::Surface& canv
 }
 
 /// 圆角描边：线宽完全落在矩形内侧。
+///
+/// **走环形填充，不走描边**：描边（`stroke_path`）把路径每一段扩展成独立四边形 +
+/// 顶点补圆，一个圆角矩形要 ~152 条边；环形只有 2 条子路径、76 条边。
+/// 实测 0.051 ms → 0.018 ms（2.8×，见 `make_rounded_border_ring` 与
+/// `docs/PAINT_DIAGNOSIS.md` §2.2）。视觉上是同一条边框的两种抗锯齿逼近
+/// （像素容差对照见 `tools/paint_equiv_probe.cpp`）。
 inline void paint_outline(raster::Surface& canvas, math::Rect rect, float radius, math::Color color,
                           float width) {
   if (width <= 0.0f || color.a == 0U || rect.is_empty()) return;
-  const float half = width * 0.5f;
-  raster::Path outline;
-  outline.add_rounded_rect(rect.inset(math::Insets::all(half)), radius > half ? radius - half : 0.0f);
-  canvas.stroke_path(outline, raster::Paint::solid(color), width);
+  canvas.fill_path(raster::make_rounded_border_ring(rect, radius, width),
+                   raster::Paint::solid(color));
 }
 
 }  // namespace st::ui::components_internal

@@ -1014,6 +1014,234 @@ auto Canvas::shadow_mask(float width, float height, float radius, float blur, ma
   return mask;
 }
 
+auto Canvas::layered_shadow(float width, float height, float radius, math::Color key_color,
+                            float key_blur, math::Point key_offset, math::Color ambient_color,
+                            float ambient_blur, math::Point ambient_offset) -> const LayeredShadow* {
+  // 键：几何 + 两层的模糊/偏移/颜色（同样的 0.25 像素量化；颜色按字节精确参与）。
+  const auto quantize = [](float value) -> std::uint64_t {
+    return static_cast<std::uint64_t>(static_cast<std::int64_t>(std::lround(value * 4.0f)) +
+                                      0x40000000);
+  };
+  std::uint64_t hash = 1469598103934665603ULL;
+  const auto mix = [&hash](std::uint64_t part) {
+    hash ^= part;
+    hash *= 1099511628211ULL;
+  };
+  for (const std::uint64_t part :
+       {quantize(width), quantize(height), quantize(radius), quantize(key_blur),
+        quantize(key_offset.x), quantize(key_offset.y), quantize(ambient_blur),
+        quantize(ambient_offset.x), quantize(ambient_offset.y)}) {
+    mix(part);
+  }
+  mix(static_cast<std::uint64_t>(key_color.r) | (static_cast<std::uint64_t>(key_color.g) << 8U) |
+      (static_cast<std::uint64_t>(key_color.b) << 16U) |
+      (static_cast<std::uint64_t>(key_color.a) << 24U));
+  mix(static_cast<std::uint64_t>(ambient_color.r) |
+      (static_cast<std::uint64_t>(ambient_color.g) << 8U) |
+      (static_cast<std::uint64_t>(ambient_color.b) << 16U) |
+      (static_cast<std::uint64_t>(ambient_color.a) << 24U));
+  for (const auto& [cached_key, cached] : layered_shadows_) {
+    if (cached_key == hash) return &cached;
+  }
+
+  constexpr std::size_t kLayeredShadowLimit = 48;
+  if (layered_shadows_.size() >= kLayeredShadowLimit) {
+    layered_shadows_.erase(layered_shadows_.begin());
+  }
+
+  // 每一层各在自己的局部坐标里光栅化（与 `shadow_mask` 同一口径），再取两层的**并集**区域：
+  // 两层的非零区高度重叠，取并集才让"重叠处只合成一次"这个收益真正落地。
+  struct Local {
+    std::shared_ptr<const Mask> mask{};
+    int x{0};
+    int y{0};
+    int width{0};
+    int height{0};
+    math::Color color{};
+    float opacity{1.0f};
+  };
+  const auto make_local = [&](float blur, math::Point offset, math::Color color) -> Local {
+    const float padding = blur * 2.0f + 2.0f;
+    const math::IntRect region =
+        math::Rect{0.0f, 0.0f, width, height}.offset(offset.x, offset.y).inflate(padding)
+            .round_out();
+    if (region.is_empty()) return Local{};
+    auto mask = std::make_shared<Mask>(region.width, region.height);
+    const math::Rect local{offset.x - static_cast<float>(region.x),
+                           offset.y - static_cast<float>(region.y), width, height};
+    detail::rasterize_mask(*mask, make_rounded_rect(local, radius), 0.0f, 0.0f);
+    blur_mask(*mask, blur);
+    return Local{mask, region.x, region.y, region.width, region.height, color, 1.0f};
+  };
+
+  const Local ambient = make_local(ambient_blur, ambient_offset, ambient_color);
+  const Local key = make_local(key_blur, key_offset, key_color);
+  if (key.mask == nullptr && ambient.mask == nullptr) return nullptr;
+
+  LayeredShadow entry;
+  entry.x = std::min(key.mask != nullptr ? key.x : ambient.x,
+                     ambient.mask != nullptr ? ambient.x : key.x);
+  entry.y = std::min(key.mask != nullptr ? key.y : ambient.y,
+                     ambient.mask != nullptr ? ambient.y : key.y);
+  const int right = std::max(key.mask != nullptr ? key.x + key.width : ambient.x + ambient.width,
+                             ambient.mask != nullptr ? ambient.x + ambient.width
+                                                     : key.x + key.width);
+  const int bottom =
+      std::max(key.mask != nullptr ? key.y + key.height : ambient.y + ambient.height,
+               ambient.mask != nullptr ? ambient.y + ambient.height : key.y + key.height);
+  entry.width = right - entry.x;
+  entry.height = bottom - entry.y;
+  if (entry.width <= 0 || entry.height <= 0) return nullptr;
+
+  auto pixels = std::make_shared<std::vector<std::uint32_t>>(
+      static_cast<std::size_t>(entry.width) * static_cast<std::size_t>(entry.height), 0U);
+  // ⚠ 从**全透明**开始合成，贴图存的是"阴影自身的预乘色"——不能烘进任何目标底色
+  // （烘了的话，元素底下是渐变/别的元素时贴上去就是错的）。
+  // src-over 满足结合律 ⇒ "先合并两层再贴" 与 "依次贴两次" 逐像素等价。
+  const auto paint = [&](const Local& layer) {
+    if (layer.mask == nullptr) return;
+    const std::uint32_t premul = math::premultiply(layer.color);
+    std::array<std::uint32_t, 256> scaled{};
+    for (std::size_t level = 0; level < scaled.size(); ++level) {
+      const float normalized = static_cast<float>(level) / 255.0f * layer.opacity;
+      scaled[level] = scale_premul(
+          premul, static_cast<std::uint32_t>(math::clamp01(normalized) * 255.0f + 0.5f));
+    }
+    const auto values = layer.mask->values();
+    const int mask_width = layer.mask->width();
+    const int mask_height = layer.mask->height();
+    const int y_begin = std::max(entry.y, layer.y);
+    const int y_end = std::min(entry.y + entry.height, layer.y + layer.height);
+    const int x_begin = std::max(entry.x, layer.x);
+    const int x_end = std::min(entry.x + entry.width, layer.x + layer.width);
+    for (int y = y_begin; y < y_end; ++y) {
+      const int local_y = y - layer.y;
+      if (local_y < 0 || local_y >= mask_height) continue;
+      const std::uint8_t* mask_row =
+          values.data() + static_cast<std::size_t>(local_y) * static_cast<std::size_t>(mask_width);
+      auto* row = pixels->data() + static_cast<std::size_t>(y - entry.y) *
+                                       static_cast<std::size_t>(entry.width);
+      for (int x = x_begin; x < x_end; ++x) {
+        const std::uint8_t mask_byte = mask_row[x - layer.x];
+        if (mask_byte == 0U) continue;
+        row[x - entry.x] = over_premul(row[x - entry.x], scaled[mask_byte]);
+      }
+    }
+  };
+  // 先环境层（大而淡）、后关键层（紧而实）——与 `Element::paint_box` 的视觉定义一致。
+  paint(ambient);
+  paint(key);
+
+  auto spans = std::make_shared<std::vector<std::pair<int, int>>>(
+      static_cast<std::size_t>(entry.height), std::pair<int, int>{-1, -1});
+  for (int row = 0; row < entry.height; ++row) {
+    const auto* source = pixels->data() + static_cast<std::size_t>(row) *
+                                              static_cast<std::size_t>(entry.width);
+    for (int column = 0; column < entry.width; ++column) {
+      if (source[column] == 0U) continue;
+      if ((*spans)[static_cast<std::size_t>(row)].first < 0) {
+        (*spans)[static_cast<std::size_t>(row)].first = column;
+      }
+      (*spans)[static_cast<std::size_t>(row)].second = column;
+    }
+  }
+  entry.pixels = std::move(pixels);
+  entry.spans = std::move(spans);
+  layered_shadows_.emplace_back(hash, std::move(entry));
+  return &layered_shadows_.back().second;
+}
+
+void Canvas::draw_shadow_layered(math::Rect rect, float radius, math::Color key_color,
+                                 float key_blur, math::Point key_offset, math::Color ambient_color,
+                                 float ambient_blur, math::Point ambient_offset,
+                                 DrawOptions options) {
+  OpScope scope(*this, PaintOp::Shadow);
+  if (rect.is_empty()) return;
+  // DPI：几何与偏移按 scale 放大（与 `draw_shadow` 同一口径）。
+  if (scale_ != 1.0f) {
+    rect = math::Rect{rect.x * scale_, rect.y * scale_, rect.width * scale_, rect.height * scale_};
+    radius *= scale_;
+    key_blur *= scale_;
+    ambient_blur *= scale_;
+    key_offset = math::Point{key_offset.x * scale_, key_offset.y * scale_};
+    ambient_offset = math::Point{ambient_offset.x * scale_, ambient_offset.y * scale_};
+  }
+  if (clip_rect().is_empty()) return;
+
+  const bool has_key = key_color.a != 0U && key_blur > 0.0f;
+  const bool has_ambient = ambient_color.a != 0U && ambient_blur > 0.0f;
+  if (!has_key && !has_ambient) return;
+  if (!has_ambient) {
+    draw_shadow(rect, radius, key_blur, key_color, key_offset, options);
+    return;
+  }
+  if (!has_key) {
+    draw_shadow(rect, radius, ambient_blur, ambient_color, ambient_offset, options);
+    return;
+  }
+
+  // 贴图在**规范化坐标**下缓存（与绘制位置无关）——键里已含几何与两层颜色。
+  const LayeredShadow* sprite = layered_shadow(rect.width, rect.height, radius, key_color,
+                                               key_blur, key_offset, ambient_color, ambient_blur,
+                                               ambient_offset);
+  if (sprite == nullptr || sprite->pixels == nullptr) return;
+
+  // 贴图原点 = 规范化区域 + 本次绘制位置（round_out 与缓存里的取整口径一致）。
+  const int origin_x = static_cast<int>(std::lround(rect.x)) + sprite->x;
+  const int origin_y = static_cast<int>(std::lround(rect.y)) + sprite->y;
+  const math::IntRect clip = clip_rect();
+  const bool masked = has_mask_clip();
+  const float opacity = options.opacity;
+  const bool plain = !masked && options.blend == BlendMode::SrcOver && opacity >= 0.999f;
+  scope.set_pixels(static_cast<std::uint64_t>(sprite->width) *
+                   static_cast<std::uint64_t>(sprite->height));
+
+  const auto* const pixels = sprite->pixels.get();
+  const auto* const spans = sprite->spans.get();
+  for (int row = 0; row < sprite->height; ++row) {
+    const int y = origin_y + row;
+    if (y < clip.y || y >= clip.bottom()) continue;
+    const auto [first, last] = (*spans)[static_cast<std::size_t>(row)];
+    if (first < 0) continue;
+    const auto* src =
+        pixels->data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(sprite->width);
+    auto* dst = pixels_.data() + static_cast<std::size_t>(y) *
+                                     static_cast<std::size_t>(physical_width_);
+    // 行内非零跨度与裁剪区求交（一次算好，避免逐像素判边界）。
+    const int x_begin = std::max(origin_x + first, clip.x);
+    const int x_end = std::min(origin_x + last + 1, clip.right());
+    if (x_begin >= x_end) continue;
+    if (plain) {
+      for (int x = x_begin; x < x_end; ++x) {
+        const std::uint32_t source = src[x - origin_x];
+        if (source == 0U) continue;
+        dst[x] = over_premul(dst[x], source);
+      }
+      continue;
+    }
+    for (int x = x_begin; x < x_end; ++x) {
+      const std::uint32_t source = src[x - origin_x];
+      const std::uint32_t source_alpha = channel(source, 0);
+      if (source_alpha == 0U) continue;
+      float alpha = static_cast<float>(source_alpha) / 255.0f * opacity;
+      if (masked) {
+        alpha = effective_alpha(x, y, alpha);
+        if (alpha <= kCoverageEpsilon) continue;
+      }
+      // 非常规合成路径：把贴图像素还原成预乘源 × α 的形式再走通用混合。
+      const auto scale_alpha = [alpha](std::uint32_t value) noexcept -> std::uint32_t {
+        return fast_div255(value * static_cast<std::uint32_t>(math::clamp01(alpha) * 255.0f +
+                                                              0.5f) +
+                           127U);
+      };
+      const std::uint32_t scaled =
+          pack(scale_alpha(channel(source, 24)), scale_alpha(channel(source, 16)),
+               scale_alpha(channel(source, 8)), scale_alpha(source_alpha));
+      dst[x] = blend_pixel_premul(dst[x], scaled, alpha, options.blend);
+    }
+  }
+}
+
 void Canvas::draw_canvas(const Surface& source, math::Rect destination, DrawOptions options) {
   OpScope scope(*this, PaintOp::Image);
   const int source_width = source.physical_width();

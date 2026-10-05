@@ -87,4 +87,26 @@ class Path {
 [[nodiscard]] auto make_circle(math::Point center, float radius) -> Path;
 [[nodiscard]] auto make_line(math::Point from, math::Point to) -> Path;
 
+/// **圆角边框的「填充环」形式**：外圈圆角矩形（正向）+ 内圈（**反向**）——
+/// 非零环绕规则下内圈自然挖出孔洞，得到一条厚度精确等于 `width` 的边框。
+///
+/// ## 为什么要有这个工厂（而不是让调用方描边）
+///
+/// `stroke_path` 把路径的**每一段**扩展成独立四边形再当普通路径填充
+/// （见 `detail::stroke_to_path`）：一个圆角矩形会被展开成 ~192 条命令、~152 条边，
+/// 还要在每个顶点补圆。而"环"只有 2 条子路径、76 条边——**几何量不到一半**。
+/// 实测（140×48 / r=12 / 1px，`tools/paint_ablation_probe.cpp`）：
+/// 描边 0.051 ms vs 环形填充 **0.018 ms**（2.8×）。卡片边框这类
+/// 「矩形 + 圆角」是界面里最常见的描边，值得走这条。
+///
+/// ## 为什么不用 `Path::reverse()`
+///
+/// 那个函数反向遍历命令流时把每一段都写成独立 `MoveTo`（曲线控制点直接丢掉），
+/// 内圈会被打散、根本不成形——`src/ui/svg.cpp` 里已记着这条坑。本工厂按
+/// 「外圈正向、内圈反向」**显式构造**两条子路径，贝塞尔控制点保持完整，不做扁平化
+/// （因此不引入折线逼近误差）。
+///
+/// `width ≤ 0` 时返回实心圆角矩形；`width` 大到放不下内圈时同样退化为实心。
+[[nodiscard]] auto make_rounded_border_ring(math::Rect rect, float radius, float width) -> Path;
+
 }  // namespace st::raster
