@@ -292,3 +292,94 @@ ST_TEST(file_dialog_property_and_semantics_surface) {
   }
   ST_CHECK(has_entry);
 }
+
+// ── 无头 / 自动化选路（`pending_path` / `select`）─────────────────────────────
+//
+// 起因（真实应用）：`FileDialog` 选路全靠鼠标点列表 + 在文件名行打字，而 **headless
+// 下没有真实鼠标键盘**——智能体根本"选不了文件"（实测「点选择图片无反应」），
+// 整条 OCR 流程端到端验证不了。于是补一条程序化入口。
+//
+// 判据是**端到端**：注入路径 → `on_confirm` 真收到 → 拼出的全路径就是注入的那个。
+// 只断言"`set_pending_path` 返回 true"不够——那是"接口存在"，不是"流程跑得通"。
+
+ST_TEST(file_dialog_pending_path_completes_open_flow) {
+  Sandbox sandbox;
+  Hosted hosted;
+  hosted.dialog->set_directory(sandbox.dir);
+  hosted.layout();
+
+  std::string confirmed;
+  hosted.dialog->on_confirm = [&](const std::string& path) { confirmed = path; };
+
+  // ① 注入一个**已存在的文件** → 进它所在目录 + 回填文件名
+  const std::string target = st::fs::join(sandbox.dir, "a.txt");
+  ST_CHECK(hosted.dialog->set_pending_path(target));
+  ST_CHECK_EQ(hosted.dialog->directory(), sandbox.dir);
+  ST_CHECK_EQ(hosted.dialog->filename(), std::string("a.txt"));
+  // 列表里那一项也应被选中（程序化状态与"用户在界面上看到的"必须一致）
+  const st::fs::DirEntry* selected = hosted.dialog->selected_entry();
+  ST_REQUIRE(selected != nullptr);
+  ST_CHECK_EQ(selected->name, std::string("a.txt"));
+
+  // ② 确认 → `on_confirm` 收到**同一个**路径（整条链路打通）
+  ST_CHECK(hosted.dialog->invoke_action("confirm", {}));
+  ST_CHECK_EQ(confirmed, target);
+}
+
+ST_TEST(file_dialog_pending_path_enters_directory) {
+  Sandbox sandbox;
+  Hosted hosted;
+  hosted.dialog->set_directory(sandbox.dir);
+  hosted.layout();
+
+  // 目录路径：进入该目录，**不改文件名**（与双击目录同语义）
+  ST_CHECK(hosted.dialog->set_pending_path(st::fs::join(sandbox.dir, "sub")));
+  ST_CHECK_EQ(hosted.dialog->directory(), st::fs::join(sandbox.dir, "sub"));
+  ST_CHECK_EQ(hosted.dialog->filename(), std::string{});
+  ST_CHECK_EQ(hosted.dialog->entry_count(), std::size_t{1});   // 只有 c.txt
+  ST_CHECK_EQ(hosted.dialog->entry(0)->name, std::string("c.txt"));
+}
+
+ST_TEST(file_dialog_pending_path_rejects_missing_without_moving) {
+  Sandbox sandbox;
+  Hosted hosted;
+  hosted.dialog->set_directory(sandbox.dir);
+  hosted.layout();
+
+  // 不存在的路径：**返回 false 且不改变任何状态**。
+  // 这条比"能选文件"更重要：自动化最怕的是"调了没报错但去了别处"——
+  // 那会让下游拿到一个看似正常的错目录，错误在很远的地方才炸。
+  ST_CHECK(!hosted.dialog->set_pending_path(st::fs::join(sandbox.dir, "nope.txt")));
+  ST_CHECK_EQ(hosted.dialog->directory(), sandbox.dir);
+  ST_CHECK_EQ(hosted.dialog->filename(), std::string{});
+  ST_CHECK(!hosted.dialog->set_pending_path(""));
+
+  // 属性面（控制通道 `set` 的落点）也如实报错，不静默成功
+  ST_CHECK(!hosted.dialog->set_property("pending_path", st::fs::join(sandbox.dir, "nope.txt")));
+  ST_CHECK(hosted.dialog->set_property("pending_path", st::fs::join(sandbox.dir, "b.md")));
+  ST_CHECK_EQ(hosted.dialog->filename(), std::string("b.md"));
+}
+
+ST_TEST(file_dialog_select_action_matches_mouse_click) {
+  Sandbox sandbox;
+  Hosted hosted;
+  hosted.dialog->set_directory(sandbox.dir);
+  hosted.layout();
+
+  // `select 2` = 第 2 项（排序后是 a.txt）；与鼠标点它**同一条** `activate_entry`，
+  // 因此文件名回填、选中态、`on_confirm` 全部一致。
+  std::string confirmed;
+  hosted.dialog->on_confirm = [&](const std::string& path) { confirmed = path; };
+  ST_CHECK(hosted.dialog->invoke_action("select", "2"));
+  ST_CHECK_EQ(hosted.dialog->filename(), std::string("a.txt"));
+  ST_CHECK_EQ(confirmed, st::fs::join(sandbox.dir, "a.txt"));
+
+  // 越界如实返回 false（不假装成功）
+  ST_CHECK(!hosted.dialog->invoke_action("select", "99"));
+  ST_CHECK(!hosted.dialog->invoke_action("select", "not-a-number"));
+  // 选目录项 = 进入目录（不触发 on_confirm），与双击目录同语义
+  confirmed.clear();
+  ST_CHECK(hosted.dialog->invoke_action("select", "0"));   // 排序后第 0 项是 sub/
+  ST_CHECK_EQ(hosted.dialog->directory(), st::fs::join(sandbox.dir, "sub"));
+  ST_CHECK_EQ(confirmed, std::string{});
+}

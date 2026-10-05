@@ -71,6 +71,27 @@ class FileDialog : public Element {
   /// 错误行文本（`fs` 失败时呈现；空 = 无错误）。
   [[nodiscard]] auto error_text() const noexcept -> const std::string& { return error_; }
 
+  /// **程序化指向一个路径**（无头 / 自动化选路的入口）。
+  ///
+  /// 为何必须有（2026-10-05，来自实战）：`FileDialog` 是框架自绘组件，选路全靠鼠标
+  /// 在列表里点、在文件名行里打字——而 **headless 下没有真实鼠标键盘**，
+  /// 智能体根本"选不了文件"：实测「点选择图片无反应」，整条 OCR 流程端到端验不了。
+  ///
+  /// 语义（一条路径 = 一次完整的"用户选路"意图）：
+  /// - 目录 → 进入该目录（`set_directory`），不改文件名；
+  /// - 文件 → 进入它所在目录 + 回填文件名（等价于"点进那个目录再点那个文件"）；
+  /// - **不存在 → 返回 false 且不改变任何状态**（不静默改成别的目录——自动化最怕的
+  ///   就是"调了没报错但去了别处"）。
+  ///
+  /// 文件已存在且就在当前目录时，**同时选中列表里那一项**，让画面确实高亮它——
+  /// 否则"程序化选路"与"用户在界面上看到的"会不一致。
+  [[nodiscard]] auto set_pending_path(const std::string& path) -> bool;
+
+  /// 程序化选中第 index 个条目（越界返回 false）。与鼠标点击走**同一个**
+  /// `activate_entry`，因此回填文件名等副作用完全一致
+  /// （避免"程序化路径是另一套语义"这类分叉）。
+  [[nodiscard]] auto select_entry(std::size_t index) -> bool;
+
   /// 确认（按钮/Enter/双击文件）：文件名空则不触发。参数为「目录/文件名」拼好的全路径。
   std::function<void(const std::string& full_path)> on_confirm{};
   /// 取消（Esc/按钮/遮罩点击）。

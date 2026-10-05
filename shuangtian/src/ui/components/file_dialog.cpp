@@ -115,6 +115,38 @@ void FileDialog::set_filename(std::string name) {
   mark_dirty();
 }
 
+auto FileDialog::set_pending_path(const std::string& path) -> bool {
+  if (path.empty() || !st::fs::exists(path)) return false;   // 不存在的路径：不改任何状态
+  if (st::fs::is_directory(path)) {
+    set_directory(path);
+    mark_dirty();
+    return true;
+  }
+  // 文件：先进入它所在目录（`reload` 会把 selected_ 复位），再回填文件名。
+  // 顺序不能反——`set_directory` 内部会清选中态。
+  set_directory(st::fs::parent(path));
+  filename_ = st::fs::file_name(path);
+  // 在列表里把那一项选中（让画面确实高亮它，与实际状态一致）
+  for (std::size_t index = 0; index < entries_.size(); ++index) {
+    if (entries_[index].name == filename_) {
+      selected_ = index;
+      break;
+    }
+  }
+  mark_dirty();
+  return true;
+}
+
+auto FileDialog::select_entry(std::size_t index) -> bool {
+  if (index >= entries_.size()) return false;
+  // 与鼠标点击**同一个** `activate_entry`：回填文件名等副作用完全一致。
+  // 目录项会「进入目录」而不触发 `on_confirm`（与双击目录同语义）——
+  // 这正是"模拟选了一个目录"该有的行为。
+  activate_entry(index);
+  mark_dirty();
+  return true;
+}
+
 void FileDialog::reload() {
   error_.clear();
   entries_.clear();
@@ -498,12 +530,20 @@ auto FileDialog::set_property(std::string_view name, std::string_view value) -> 
     set_filename(std::string(value));
     return true;
   }
+  // `pending_path`：**程序化选路**（无头/自动化唯一的选路入口，见 `set_pending_path`）。
+  // 走属性面而不是只留 C++ 接口：控制通道的 `set` 是外部（智能体）与界面之间
+  // **唯一**的通用写入口——只开 C++ 接口等于"能力存在但外部用不到"。
+  // 失败（路径不存在）返回 false，`set` 会如实报错，不静默。
+  if (name == "pending_path") {
+    return set_pending_path(std::string(value));
+  }
   return Element::set_property(name, value);
 }
 
 auto FileDialog::property_names() const -> std::vector<std::string_view> {
   std::vector<std::string_view> names = Element::property_names();
-  names.insert(names.end(), {"directory", "filename", "mode", "error", "selected"});
+  names.insert(names.end(),
+               {"directory", "filename", "mode", "error", "selected", "pending_path"});
   return names;
 }
 
@@ -519,6 +559,14 @@ auto FileDialog::invoke_action(std::string_view action, std::string_view argumen
   if (action == "up") {
     set_directory(st::fs::parent(directory_));
     return true;
+  }
+  // `select`：程序化选中第 index 个条目（与鼠标点它同一条 `activate_entry`）。
+  // 与 `pending_path` 分工：前者给"第几项"（列表位置稳定时方便），
+  // 后者给"哪个路径"（真正想表达的东西）。两者都走同一套副作用。
+  if (action == "select") {
+    const auto parsed = st::parse_u64(argument);
+    if (!parsed.has_value()) return false;
+    return select_entry(static_cast<std::size_t>(*parsed));
   }
   if (action == "reload") {
     reload();
