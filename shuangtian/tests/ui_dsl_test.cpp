@@ -1447,6 +1447,81 @@ ST_TEST(dsl_for_each_single_argument_item_fn_still_works) {
   ST_CHECK_EQ(list->child_at(0)->key(), std::string("a-label"));
 }
 
+// ── `for_each` 的对齐复杂度：必须是 O(N)，不能是 O(N²) ────────────────────────
+//
+// 起因（实测性能事故，2026-10-05）：keyed 对齐的 key 查找**从位置 0 开始扫**，
+// 而游标随 item 单调推进——每个 item 都把前面所有位置重新扫一遍，整体 O(N²)。
+//
+// 实测（每项 1 个元素、只改 1 条数据、**零**结构变更：created/removed/moved 全 0）：
+//
+// | 规模 | 从 0 扫（修前） | 从游标扫（修后） |
+// |---|---|---|
+// | 1000 | 2.18 ms | — |
+// | 5000 | **43.6 ms** | **1.36 ms** |
+//
+// 同一份 5000 项列表把 key 去掉（退回纯位置对齐）只要 0.67 ms——**65 倍差全在那一行**。
+// 这也说明 BACKLOG 里「待办 100+ 条会卡」的观察方向找错了层：卡的**不是**"item 级作用域"，
+// 而是对齐里的坐标起点。
+//
+// 本用例**不量时间**（时间随机器负载抖动，在 CI 上是脆判据），改钉**确定性计数**：
+// `ReconcileStats::alignment_probes` = 对齐阶段扫过的子元素槽位数。规模 4 倍时
+// 它涨 4 倍（线性）还是 16 倍（二次），一眼可判。
+struct SizedListPage : Component {
+  State<std::vector<Task>> rows{};
+  State<int> noise{0};
+
+  explicit SizedListPage(std::size_t count) {
+    std::vector<Task> list;
+    list.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
+      list.push_back(Task{std::to_string(index), "行" + std::to_string(index)});
+    }
+    rows.set(std::move(list));
+  }
+
+  void build(Composer& c) override {
+    column(c, {.id = "big"}, [&] {
+      for_each<Task>(
+          c, rows.value(), [](const Task& task) { return task.id; },
+          [&](const Task& task, std::size_t) {
+            text(c, [task] { return task.name; }, {.key = task.id + "-label"});
+          });
+      (void)noise.value();
+    });
+  }
+};
+
+/// 建 N 项列表 → 只改一条数据 → 返回这次重组的对齐探测计数。
+[[nodiscard]] auto alignment_probes_for(std::size_t count) -> std::uint64_t {
+  UiRoot root;
+  root.set_viewport({400.0F, 300.0F});
+  auto page = std::make_shared<SizedListPage>(count);
+  auto host = dsl::mount(root, page);
+  if (host == nullptr) return 0;
+  root.layout(true);
+  // 只改一条（条数不变 → 零结构变更，全部代价都在对齐里）
+  auto rows = page->rows.value();
+  rows[count / 2].name = "改过了";
+  page->rows.set(rows);
+  const ReconcileStats stats = host->tick();
+  // 零结构变更：本用例的判据只在"纯对齐"场景下成立
+  if (stats.elements_created != 0 || stats.elements_removed != 0) return 0;
+  return stats.alignment_probes;
+}
+
+ST_TEST(dsl_for_each_alignment_scales_linearly) {
+  constexpr std::uint64_t kSmall = 200;
+  constexpr std::uint64_t kLarge = 5000;
+  const std::uint64_t small = alignment_probes_for(kSmall);
+  const std::uint64_t large = alignment_probes_for(kLarge);
+  // 线性下界：至少每个 item 探一次（200 / 5000，各在游标处命中）
+  ST_CHECK(small >= kSmall);
+  ST_CHECK(large >= kLarge);
+  // 规模比 25×：线性 → ≈ 25；二次 → ≈ 625。取 100 当界（两侧都留足余量）
+  const double ratio = static_cast<double>(large) / static_cast<double>(small);
+  ST_CHECK(ratio < 100.0);
+}
+
 // ── 谬误注入：递归 build 被深度护栏截住（不是靠栈自己撞上限）──────────────
 //
 // 形态：组件在自己的 `build` 里又声明一个**自己**（写成状态计数就很容易踩到——

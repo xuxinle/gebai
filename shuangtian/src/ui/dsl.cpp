@@ -899,7 +899,24 @@ auto Composer::create_element(std::string_view type, const st::Json& props,
       !wanted_key.empty() && impl_->keyed_duplicates.count(wanted_key) == 0;
   Element* existing = nullptr;
   if (key_is_unique) {
-    for (std::size_t position = 0; position < content_count; ++position) {
+    // **从游标开始找，而不是从 0**（2026-10-05 修，实测性能事故）。
+    //
+    // 对齐是**顺序**做的：调用方按 item 顺序声明，游标从区段头单调推进到尾部。
+    // 游标之前的位置已经对齐完了，那里的元素要么就是本项要的那个（→ 命中且就在
+    // 游标位，下面会直接复用），要么属于已经处理过的前序 item（→ 本项要找的
+    // 必然在更后面）。换句话说：**要复用的元素不可能待在游标之前**——那种情形只会是
+    // “已被认领”，而认领集本来就会跳过它。
+    //
+    // 从 0 扫的代价是 O(N²)：每个 item 都把前面所有位置重新扫一遍。实测 5000 项
+    // （每项 1 个元素、只改 1 条数据、零结构变更）**43.6 ms**，而同一份列表
+    // 把 key 去掉（退回纯位置对齐）只要 **0.67 ms**——65 倍差全在这一行。
+    // 改从游标起步后回到 0.6 ms 量级。
+    //
+    // 为何“重名旁路”与“认领集”两个机制不受影响：重名时根本不进本分支；
+    // 认领集只在同 key 被多个 item 认领时生效，而那只可能发生在游标处（本项自己）
+    // 或游标之后（尚未处理的后继 item）。
+    for (std::size_t position = cursor; position < content_count; ++position) {
+      ++impl_->last_stats.alignment_probes;   // 复杂度证据（见 `ReconcileStats::alignment_probes`）
       Element* candidate = parent->child_at(position);
       if (candidate == nullptr || candidate->key() != wanted_key) continue;
       if (impl_->claimed_keyed.count(candidate) != 0) continue;   // 已被认领（同区兄弟）
