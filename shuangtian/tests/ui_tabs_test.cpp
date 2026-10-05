@@ -465,9 +465,15 @@ ST_TEST(ui_select_opens_via_overlay_host) {
   ST_REQUIRE(fixture.changes.size() == 1U);
   ST_CHECK_EQ(fixture.changes[0], std::string("gamma"));
   ST_CHECK(!select->open());
-  ST_CHECK(!overlay->visible());
+  // 面板已摘除。注意：**摘除后不得再解引用先前取得的 `overlay` 指针**——
+  // `click_at` 内部的 `dispatch → layout → Select::arrange → flush_dismiss →
+  // remove_overlay` 已把它移出激活列表，并在**该次派发末尾**经
+  // `reap_overlays()` 释放其存储（见 `UiRoot::remove_overlay`）。
+  // 本用例原先正是这里读 `overlay->visible()`，构成 ASan heap-use-after-free。
+  // 摘除结果改用容器查询表达（"已隐藏"由下一次布局不再可见兜底）：
+  ST_CHECK_EQ(root.overlay_count(), std::size_t{0});
 
-  // ④ 摘除在布局期执行（不在事件分发内析构正在处理事件的面板）。
+  // ④ 值/属性面已落定；再次布局不再看到面板，重建入口（下方再次展开）不受延迟析构影响。
   root.layout(true);
   ST_CHECK_EQ(root.overlay_count(), std::size_t{0});
   ST_CHECK_EQ(select->get_property("value").value_or(""), std::string("gamma"));

@@ -3,6 +3,20 @@
 > 本文件是唯一权威清单，完成后移入「已完成」并在 DESIGN.md 更新里程碑。
 > **诚实原则**：写着「待做」却已完成的条目会误导读者；写着「已完成」却没落地的条目更糟。
 
+## 已完成（2026-10 代码重构轮）
+
+- [x] **组件绘制层重复助手收敛**（`components_internal.hpp`）：`oriented`(4 逐字副本，已变死代码)、
+  `fill_round_rect`(5)、`paint_focus_ring`(5)、`paint_outline`(3)、`text_port_of`(11)、
+  `tone_from_name`(2)、`draw_line`/`draw_triangle`——共 18 文件 +236/-398。
+- [x] **空模块 `src/gpu` 归置**：目录空置但被跟踪，`st.pkg` 模块名 12→11。
+- [x] **`st test --san` 全量档恢复零报告**（预先存在的 heap-use-after-free）：
+  `ui_select_opens_via_overlay_host`（`tests/ui_tabs_test.cpp`）在 `click_at` 后解引用
+  `overlay = root.overlay_at(0)`——该指针已在 `dispatch → layout → Select::arrange →
+  flush_dismiss → remove_overlay → reap_overlays` 链里被释放。框架的延迟析构**是对的**
+  （作者为此用例旧修过 SIGSEGV），是**测试跨派发持有裸指针**违规：改为用 `overlay_count()==0`
+  断言摘除结果，不再解引用失效指针。修后 `st test --san` = 697 passed/0 failed/0 ASan 报告。
+  （已先实验确认该 UAF **先于重构存在**：组件目录整目录回退到 2089c30 后仍 5/5 失败。）
+
 ## 2026-10-05 实战反馈轮：新发现（P1）
 
 来自一个 7 页真实应用（`dev-tools`，霜天原生重写）的反馈。前四项（`for_each` 索引、
@@ -40,18 +54,6 @@
   `input.cpp` 的删字/选字与 `code_editor.cpp:585` 是裸调用，两者对“文本末尾光标”行为不同。
   骨架层已有 `st/core/string.hpp` 的 `decode_utf8`/`utf8_offset` 可作基准。
   建议：以正式 UTF-8 边界语义（含“末尾”）为准收敛为一份，**补边界单测**后统一（勿盲合）。
-- [ ] **`st test --san` 全量档当前非零报告（预先存在的 UAF，已定位，未修）**：
-  `ui_select_opens_via_overlay_host`（`tests/ui_tabs_test.cpp:468`）在 san 档 **5/5 稳定**报
-  heap-use-after-free：测试持有的 `overlay = root.overlay_at(0)` 指针，在 `click_at`（第 ③ 步选行）
-  触发 `Select::handle_pick` → `dismiss_pending_` → overlay 宿主延迟摘除 →
-  `UiRoot::reap_overlays()`（`dispatch` 末尾）析构 `SelectPanel` 后**悬垂**，紧接着第 468 行
-  `overlay->visible()` 读已释放对象。
-  **已验证与 2026-10 组件重构无关**：将 `src/ui/components/` 整目录回退到重构前提交
-  （`git checkout 2089c30 -- shuangtian/src/ui/components`）后，同一用例仍 5/5 失败。
-  涉及 `UiRoot` 的 overlay 延迟析构（`remove_overlay`/`graveyard_`）与 `Select` 的
-  `panel_`/`dismiss_pending_` 生命周期——需专项修（测试侧要么不跨移除持有指针、要么改用
-  `overlay_at` 后立即拷 `visible()`；框架侧要明确 `handle_pick` 后的摘除时序）。
-  影响：`st test --san`（CI sanitizer 门禁）因此非零，其它用例与 dev/release 档均通过。
 
 ### 画廊全场景补全（v0.1.5，2026-09-30 第二轮审视）
 
