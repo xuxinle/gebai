@@ -10,6 +10,7 @@
 #include <unordered_map>
 
 #include "st/core/fs.hpp"
+#include "st/core/font_platform.hpp"
 #include "st/core/hash.hpp"
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
@@ -40,119 +41,67 @@ struct FontCandidate {
   bool prefer_cjk_face;
 };
 
-/// 粗体候选（与 `font_candidates` 同序同族，只是换成 Bold 面）。
+/// 系统字体候选（按回退优先级：平台首选 → 拉丁 → CJK → 符号）。
 ///
-/// 存在理由（实测）：此前粗体靠**合成加粗**（同轮廓水平平移重复填充），
-/// 导致「中文粗体糊、英文不够均匀锐利」（中文过渡带 0.246 / 英文字间离散 14.1%）。
-/// 用真粗体面后：中文过渡带 0.155（锐 37%）、**英文字间离散 0.0%**。
-[[nodiscard]] auto bold_font_candidates() -> std::vector<FontCandidate> {
+/// **候选路径全部来自平台层**（`st/core/font_platform.hpp`）：字体目录与
+/// “首选哪一族”都是平台知识，引擎只管按顺序探测。环境变量覆盖仍是最高优先
+/// （调试/特殊环境用：插在首选之前会让新字体接管**全部**字符，正是“我要换字体”的语义）。
+[[nodiscard]] auto font_candidates() -> std::vector<FontCandidate> {
   std::vector<FontCandidate> candidates;
-  const auto push = [&candidates](std::string path, bool cjk) {
-    if (path.empty()) return;
-    if (!fs::is_regular_file(path)) return;
-    candidates.push_back(FontCandidate{std::move(path), cjk});
+  const auto push = [&candidates](const platform::FontPreference& entry) {
+    if (entry.path.empty()) return;
+    if (!fs::is_regular_file(entry.path)) return;
+    candidates.push_back(FontCandidate{entry.path, entry.cjk});
   };
-  if (const auto custom = fs::read_env("ST_FONT_LATIN_BOLD"); custom.has_value()) {
-    push(*custom, false);
+  if (const auto custom = fs::read_env("ST_FONT_LATIN"); custom.has_value()) {
+    push(platform::FontPreference{*custom, false});
   }
-  if (const auto custom = fs::read_env("ST_FONT_CJK_BOLD"); custom.has_value()) {
-    push(*custom, true);
+  if (const auto custom = fs::read_env("ST_FONT_CJK"); custom.has_value()) {
+    push(platform::FontPreference{*custom, true});
   }
-  for (const auto* path : {
-           "C:/Windows/Fonts/segoeuib.ttf",
-           "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-           "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-           "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
-           "C:/Windows/Fonts/arialbd.ttf",
-           "/System/Library/Fonts/SFNS-Bold.ttf",
-       }) {
-    push(path, false);
-  }
-  for (const auto* path : {
-           "C:/Windows/Fonts/msyhbd.ttc",
-           "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-           "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-           "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
-           "C:/Windows/Fonts/msjhbd.ttc",
-           "/System/Library/Fonts/PingFang.ttc",
-       }) {
-    push(path, true);
-  }
+  for (const auto& entry : platform::preferred_text_fonts()) push(entry);
   return candidates;
 }
 
-[[nodiscard]] auto font_candidates() -> std::vector<FontCandidate> {
+/// 粗体候选（与 `font_candidates` **逐位同序**，只是换成 Bold 面）。
+///
+/// 为什么要同序（实测踩到，2026-10-04）：`find_face(..., bold)` 按**下标**把常规档
+/// 配到同族粗体面；两张表顺序不一致时，拉丁粗体（`segoeuib.ttf`）会接管中文字——
+/// 而它没有真正的汉字轮廓，整串中文渲染成**豆腐块**。
+///
+/// 另外，粗体**不再靠合成加粗**（同轮廓水平平移重复填充）：实测「中文粗体糊、
+/// 英文不够均匀锐利」（中文过渡带 0.246 / 英文字间离散 14.1%）。用真粗体面后：
+/// 中文过渡带 0.155（锐 37%）、**英文字间离散 0.0%**。
+[[nodiscard]] auto bold_font_candidates() -> std::vector<FontCandidate> {
   std::vector<FontCandidate> candidates;
-  const auto push = [&candidates](std::string path, bool cjk) {
-    if (path.empty()) return;
-    if (!fs::is_regular_file(path)) return;
-    candidates.push_back(FontCandidate{std::move(path), cjk});
+  const auto push = [&candidates](const platform::FontPreference& entry) {
+    if (entry.path.empty()) return;
+    if (!fs::is_regular_file(entry.path)) return;
+    candidates.push_back(FontCandidate{entry.path, entry.cjk});
   };
-  if (const auto custom = fs::read_env("ST_FONT_LATIN"); custom.has_value()) {
-    push(*custom, false);
+  if (const auto custom = fs::read_env("ST_FONT_LATIN_BOLD"); custom.has_value()) {
+    push(platform::FontPreference{*custom, false});
   }
-  if (const auto custom = fs::read_env("ST_FONT_CJK"); custom.has_value()) {
-    push(*custom, true);
+  if (const auto custom = fs::read_env("ST_FONT_CJK_BOLD"); custom.has_value()) {
+    push(platform::FontPreference{*custom, true});
   }
-  for (const auto* path : {
-           "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-           "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-           "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-           "C:/Windows/Fonts/segoeui.ttf",
-           "C:/Windows/Fonts/arial.ttf",
-           "/System/Library/Fonts/SFNS.ttf",
-           "/System/Library/Fonts/Helvetica.ttc",
-       }) {
-    push(path, false);
-  }
-  for (const auto* path : {
-           "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-           "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
-           "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-           "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-           "C:/Windows/Fonts/msyh.ttc",
-           "C:/Windows/Fonts/simhei.ttf",
-           "/System/Library/Fonts/PingFang.ttc",
-       }) {
-    push(path, true);
-  }
-  // **符号回退**：拉丁与 CJK 字体都缺的几何/箭头/勾叉符号（✓ U+2713、✗ U+2717
-  // 这类），在 Windows 上只有 Segoe UI Symbol 覆盖。
-  //
-  // 为什么必须显式加（2026-10-04 与浏览器逐像素对照时发现）：缺的回退表现为
-  // **该字符整块空白**——界面里写 "✓ 已通过" 只见「已通过」，而浏览器能显示。
-  // 单独放**最后**：它是符号字体、字面风格与正文不同，只应在别的字体都没有时才接管。
-  for (const auto* path : {
-           "C:/Windows/Fonts/seguisym.ttf",
-           "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-           "/System/Library/Fonts/Apple Symbols.ttf",
-       }) {
-    push(path, false);
-  }
+  for (const auto& entry : platform::preferred_text_fonts_bold()) push(entry);
   return candidates;
 }
 
 /// 等宽候选（代码用）。与正文档**分开探测**：等宽字体失败只是"没有等宽"
 /// （代码块退化成正文字体仍可读），不该让整个字体栈失败。
+/// 平台首选（Windows：Consolas）位于首位。
 [[nodiscard]] auto mono_font_candidates() -> std::vector<FontCandidate> {
   std::vector<FontCandidate> candidates;
-  const auto push = [&candidates](const std::string& path) {
-    if (path.empty() || !fs::is_regular_file(path)) return;
-    candidates.push_back(FontCandidate{path, false});
+  const auto push = [&candidates](const platform::FontPreference& entry) {
+    if (entry.path.empty() || !fs::is_regular_file(entry.path)) return;
+    candidates.push_back(FontCandidate{entry.path, false});
   };
-  if (const auto custom = fs::read_env("ST_FONT_MONO"); custom.has_value()) push(*custom);
-  for (const auto* path : {
-           "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-           "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-           "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
-           "C:/Windows/Fonts/CascadiaMono.ttf",
-           "C:/Windows/Fonts/consola.ttf",
-           "C:/Windows/Fonts/cour.ttf",
-           "/System/Library/Fonts/Menlo.ttc",
-           "/System/Library/Fonts/SFNSMono.ttf",
-       }) {
-    push(path);
+  if (const auto custom = fs::read_env("ST_FONT_MONO"); custom.has_value()) {
+    push(platform::FontPreference{*custom, false});
   }
+  for (const auto& entry : platform::preferred_mono_fonts()) push(entry);
   return candidates;
 }
 

@@ -68,7 +68,9 @@
                   "exclude_sources": ["src/pkg/*"],
                   "embed": ["examples/codeeditor/assets/*"] },
     "caret_ink_probe": { "kind": "executable", "sources": ["tools/caret_ink_probe.cpp"],
-                         "exclude_sources": ["src/pkg/*"] }
+                         "exclude_sources": ["src/pkg/*"] },
+    "font_stack_probe": { "kind": "executable", "sources": ["tools/font_stack_probe.cpp"],
+                          "exclude_sources": ["src/pkg/*"] }
   },
   "dependencies": {
     "modules": [],

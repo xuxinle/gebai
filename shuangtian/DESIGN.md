@@ -509,7 +509,24 @@ class TextRenderer {                               // 字形 → 位图缓存（
   字形与整形缓存均为**真 LRU + 内存预算**（字形 24 MiB、整形 16 MiB，超预算从
   尾部增量淘汰）——旧实现超 512 条目全清，CJK 大文档滚动时会有周期性重栅格化尖峰
   （由 2026-09-30 审视定位并修复）。
-- 回退链默认：`ST_FONT_LATIN` / `ST_FONT_CJK` / 系统探测（`/usr/share/fonts`、`C:\Windows\Fonts`、`/System/Library/Fonts`）。
+- 回退链默认由 **平台层**给出（`st/core/font_platform.hpp`）：路径与「首选哪一族」
+  都是平台知识，按平台集中一处（Windows / Linux / macOS 各一张表），
+  环境变量 `ST_FONT_LATIN` / `ST_FONT_CJK` / `ST_FONT_MONO`（及 `*_BOLD`）
+  仍是最高的逐档覆盖。
+
+  链形：**平台首选 → 通用拉丁 → 通用 CJK → 符号回退**。
+  | 平台 | 正文档首选 | 等宽首选 |
+  |---|---|---|
+  | Windows | 微软雅黑（`msyh.ttc`）——**中英文同族**（它自带拉丁字形） | Consolas（`consola.ttf`） |
+  | Linux / macOS | 不指定取向（只用通用回退层） | 不指定取向 |
+
+  首选档必须在拉丁回退层**之前**：`find_face` 返回首个覆盖该码点的面，
+  排在后面就会被 Segoe UI 接管英文，界面成了“中文雅黑、英文 Segoe”的两族混排。
+  粗体链与常规链**逐位同序**（`find_face(..., bold)` 按下标配同族粗体面），
+  否则拉丁粗体会接管中文字（它没有汉字轮廓 → 整串豆腐块）。
+  等宽链里没有汉字，`find_face(role=Monospace)` 按“等宽库 → 正文档”回退补足，
+  代码注释里的中文仍可读。
+
 ### 4.3.1 文字抗锯齿：灰度 vs 亚像素（LCD）
 
 **起因**：屏幕上 125% DPI、13.5px 正文「看着就是糊的」，而 Chrome/VSCode 的字看着锐。
@@ -3013,7 +3030,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
 | 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case
- 超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限） | `st test` | 全绿（**748 用例 / 17767 断言**，debug 档实测；`st test --san` 全绿 0 报告） |
+ 超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限） | `st test` | 全绿（**755 用例 / 17812 断言**，debug 档实测；`st test --san` 全绿 0 报告） |
 | 独立工程集成 | **真建一个引用 framework 的最小工程**、真构建真跑（`tests/pkg_integration_test.cpp`）
  | `st test pkg_integration` | 全绿（`ST_INTEGRATION_BUILD=0` 可关；关掉时明确跳过而非假绿） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告（需带 sanitizer 运行库的编译器；MinGW 发行版不带时构建前明确报错） |

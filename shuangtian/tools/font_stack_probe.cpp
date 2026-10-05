@@ -34,7 +34,7 @@ auto main(int argc, char** argv) -> int {
           const auto& m = face->metrics();
           const float units = m.units_per_em > 0.0f ? m.units_per_em : 1000.0f;
           // 用 bearing_y 估墨迹高度不精确；这里只报 advance 与 ascender，够判断"是不是同一面"。
-          ink_h = static_cast<double>(g->advance) / units;
+          ink_h = static_cast<double>(g->advance) / static_cast<double>(units);
         }
       }
       const auto& m = face->metrics();
@@ -65,6 +65,14 @@ auto main(int argc, char** argv) -> int {
   }
   st::print("  等宽 {} 个 / 粗体 {} 个\n", fonts.monospace_faces().size(), fonts.bold_faces().size());
 
+  // 等宽链与粗体链的**逐档路径**：这两条链的“首位是谁”同样是产品约定
+  //（等宽要 Consolas；粗体必须与常规链**逐位同族**，否则拉丁粗体会接管中文字）。
+  st::print("  等宽链：");
+  for (const auto& face : fonts.monospace_faces()) st::print(" {};", face.path());
+  st::print("\n  粗体链：");
+  for (const auto& face : fonts.bold_faces()) st::print(" {};", face.path());
+  st::print("\n");
+
   st::print("\n=== 码点归属 ===\n");
   for (const char32_t cp : probes) {
     const auto* face = fonts.find_face(cp, FontRole::Proportional);
@@ -82,6 +90,23 @@ auto main(int argc, char** argv) -> int {
     } else {
       st::print("  U+{:04X}  ← {}（glyph_for 失败）\n", static_cast<unsigned>(cp), face->path());
     }
+  }
+
+  // —— 等宽与粗体的归属：两条独立回退链，同样只看"谁接管"是客观事实 ——
+  // 等宽链：ASCII 应是 Consolas；汉字不在 Consolas 里 → 回退正文档（雅黑）。
+  // 粗体链：中英文都应在**雅黑粗体**（msyhbd）——若英文落到 segoeuib、中文落到
+  // 别的面，说明两条链的下标没对齐。
+  st::print("\n=== 等宽链归属 ===\n");
+  for (const char32_t cp : {U'i', U'M', U'W', U'霜'}) {
+    const auto* mono_face = fonts.find_face(cp, FontRole::Monospace);
+    st::print("  U+{:04X}  ← {}\n", static_cast<unsigned>(cp),
+              mono_face != nullptr ? mono_face->path() : std::string("<无覆盖>"));
+  }
+  st::print("\n=== 粗体归属 ===\n");
+  for (const char32_t cp : {U'A', U'霜'}) {
+    const auto* bold_face = fonts.find_face(cp, FontRole::Proportional, /*bold=*/true);
+    st::print("  U+{:04X}  ← {}\n", static_cast<unsigned>(cp),
+              bold_face != nullptr ? bold_face->path() : std::string("<无覆盖>"));
   }
   return 0;
 }
