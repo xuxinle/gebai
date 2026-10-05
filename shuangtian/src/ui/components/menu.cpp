@@ -8,33 +8,18 @@
 #include "st/raster/path.hpp"
 #include "st/ui/text_port.hpp"
 
+#include "components_internal.hpp"
+
 namespace st::ui {
+
+using components_internal::draw_line;
+using components_internal::fill_round_rect;
+
 namespace {
 
 /// 文本端口取用（`RenderContext::text` 可为空 → 退化为 no-op 端口）。
 [[nodiscard]] auto text_port_of(const RenderContext& context) -> const TextPort& {
   return context.text != nullptr ? *context.text : NullTextPort::instance();
-}
-
-/// 单行文本（省略号截断 + 垂直居中，左对齐）。
-void draw_line(const RenderContext& context, raster::Surface& canvas, std::string_view text,
-               math::Rect box, float size, math::Color color) {
-  if (text.empty() || box.width <= 0.0f || box.height <= 0.0f) return;
-  const TextPort& port = text_port_of(context);
-  const std::string clipped = port.ellipsize(text, size, box.width);
-  if (clipped.empty()) return;
-  const float line = port.line_height(size);
-  const float y = box.y + (box.height - line) * 0.5f;
-  port.draw(canvas, clipped, math::Point{box.x, y}, size, color);
-}
-
-/// 四角同半径纯色填充。
-void fill_round_rect(raster::Surface& canvas, math::Rect rect, float radius,
-                     const raster::Paint& paint) {
-  if (rect.is_empty()) return;
-  raster::Path path;
-  path.add_rounded_rect(rect, radius);
-  canvas.fill_path(path, paint);
 }
 
 /// 勾选标记（✓：两段折线，笔画宽 1.6；颜色由调用方给）。

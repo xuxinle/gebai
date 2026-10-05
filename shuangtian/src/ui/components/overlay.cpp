@@ -10,7 +10,13 @@
 #include "st/raster/path.hpp"
 #include "st/ui/text_port.hpp"
 
+#include "components_internal.hpp"
+
 namespace st::ui {
+
+using components_internal::draw_line;
+using components_internal::fill_round_rect;
+
 namespace {
 
 /// 文本端口取用（`RenderContext::text` 可为空 → 退化为 no-op 端口）。
@@ -35,53 +41,9 @@ namespace {
   return std::nullopt;
 }
 
-/// 单行文本（省略 + 左对齐；标题不折行）。
-void draw_line(const RenderContext& context, raster::Surface& canvas, std::string_view text,
-               math::Rect box, float size, math::Color color) {
-  if (text.empty() || box.width <= 0.0f || box.height <= 0.0f) return;
-  const TextPort& port = text_port_of(context);
-  const std::string clipped = port.ellipsize(text, size, box.width);
-  if (clipped.empty()) return;
-  const float line = port.line_height(size);
-  const float y = box.y + (box.height - line) * 0.5f;
-  port.draw(canvas, clipped, math::Point{box.x, y}, size, color);
-}
-
 /// 正文最多折行数（超出以省略号收尾）。
 inline constexpr std::size_t kMaxBodyLines = 12;
 
-/// 覆盖率取向归一（raster 层现况）：`Canvas::blend_coverage_row` 只接受**正绕向**覆盖率
-/// （`rasterize_mask` 用 `abs(coverage)`，二者语义不一致），而 `Path` 工厂
-/// （`add_rect`/`add_rounded_rect`/`add_circle`）产出的是反向绕向——直接 `fill_path` 会整块
-/// 不可见。这里把路径按扁平化折线反转重建，使填充在两个语义下都真实落地；
-/// raster 层统一为 `abs` 语义后本函数退化为等价直通（可安全移除）。
-[[nodiscard]] auto oriented(const raster::Path& path) -> raster::Path {
-  raster::Path out;
-  for (const raster::Polyline& polyline : path.flatten(0.25f)) {
-    const std::span<const math::Point> points = polyline.points;
-    if (points.size() < 2U) continue;
-    out.move_to(points.back());
-    for (std::size_t index = points.size() - 1U; index > 0U; --index) {
-      out.line_to(points[index - 1U]);
-    }
-    if (polyline.closed) out.close();
-  }
-  return out;
-}
-
-/// 矩形/圆角矩形填充（四角独立半径；经 `oriented` 归一后落盘）。
-void fill_round_rect(raster::Surface& canvas, math::Rect rect, float top_left, float top_right,
-                     float bottom_right, float bottom_left, const raster::Paint& paint) {
-  if (rect.is_empty()) return;
-  raster::Path path;
-  path.add_rounded_rect(rect, top_left, top_right, bottom_right, bottom_left);
-  canvas.fill_path(oriented(path), paint);
-}
-
-/// 四角同半径的纯色填充（`radius == 0` 即普通矩形）。
-void fill_round_rect(raster::Surface& canvas, math::Rect rect, float radius, math::Color color) {
-  fill_round_rect(canvas, rect, radius, radius, radius, radius, raster::Paint::solid(color));
-}
 
 }  // namespace
 

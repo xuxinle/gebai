@@ -11,68 +11,16 @@
 #include "st/raster/path.hpp"
 #include "st/ui/text_port.hpp"
 
+#include "components_internal.hpp"
+
 namespace st::ui {
+
+using components_internal::draw_line;
+using components_internal::draw_triangle;
+using components_internal::fill_round_rect;
+using components_internal::text_port_of;
+
 namespace {
-
-/// 文本端口取用（`RenderContext::text` 可为空 → 退化为 no-op 端口）。
-[[nodiscard]] auto text_port_of(const RenderContext& context) -> const TextPort& {
-  return context.text != nullptr ? *context.text : NullTextPort::instance();
-}
-
-/// 单行文本（省略 + 垂直居中；与 `Dialog` 的 draw_line 同一做法）。
-void draw_line(const RenderContext& context, raster::Surface& canvas, std::string_view text,
-               math::Rect box, float size, math::Color color) {
-  if (text.empty() || box.width <= 0.0f || box.height <= 0.0f) return;
-  const TextPort& port = text_port_of(context);
-  const std::string clipped = port.ellipsize(text, size, box.width);
-  if (clipped.empty()) return;
-  const float line = port.line_height(size);
-  const float y = box.y + (box.height - line) * 0.5f;
-  port.draw(canvas, clipped, math::Point{box.x, y}, size, color);
-}
-
-/// 覆盖率取向归一（与 `overlay.cpp` 的 oriented 同因：raster 层只吃正绕向覆盖率，
-/// `Path` 工厂产出反向绕向；按扁平化折线反转重建）。
-[[nodiscard]] auto oriented(const raster::Path& path) -> raster::Path {
-  raster::Path out;
-  for (const raster::Polyline& polyline : path.flatten(0.25f)) {
-    const std::span<const math::Point> points = polyline.points;
-    if (points.size() < 2U) continue;
-    out.move_to(points.back());
-    for (std::size_t index = points.size() - 1U; index > 0U; --index) {
-      out.line_to(points[index - 1U]);
-    }
-    if (polyline.closed) out.close();
-  }
-  return out;
-}
-
-void fill_round_rect(raster::Surface& canvas, math::Rect rect, float radius, math::Color color) {
-  if (rect.is_empty()) return;
-  raster::Path path;
-  path.add_rounded_rect(rect, radius, radius, radius, radius);
-  canvas.fill_path(oriented(path), raster::Paint::solid(color));
-}
-
-/// 展开三角（目录行前导；`expanded` 时旋转 90°）。
-void draw_triangle(raster::Surface& canvas, math::Point center, float radius, math::Color color,
-                   bool expanded) {
-  raster::Path path;
-  const float r = radius;
-  if (expanded) {
-    // 向下：顶点在下
-    path.move_to(math::Point{center.x - r, center.y - r * 0.6f});
-    path.line_to(math::Point{center.x + r, center.y - r * 0.6f});
-    path.line_to(math::Point{center.x, center.y + r * 0.6f});
-  } else {
-    // 向右：顶点在右
-    path.move_to(math::Point{center.x - r * 0.6f, center.y - r});
-    path.line_to(math::Point{center.x - r * 0.6f, center.y + r});
-    path.line_to(math::Point{center.x + r * 0.6f, center.y});
-  }
-  path.close();
-  canvas.fill_path(oriented(path), raster::Paint::solid(color));
-}
 
 /// 文件大小可读化（`1234` → `1.2 KB`；目录返回空）。
 [[nodiscard]] auto human_size(std::uint64_t bytes) -> std::string {

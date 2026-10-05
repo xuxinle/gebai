@@ -8,24 +8,14 @@
 #include "st/ui/icon.hpp"
 #include "st/ui/text_port.hpp"
 
+#include "components_internal.hpp"
+
 namespace st::ui {
+
+using components_internal::draw_line;
+using components_internal::text_port_of;
+
 namespace {
-
-/// 文本端口取用（`RenderContext::text` 可为空 → 退化为 no-op 端口）。
-[[nodiscard]] auto text_port_of(const RenderContext& context) -> const TextPort& {
-  return context.text != nullptr ? *context.text : NullTextPort::instance();
-}
-
-/// 单行文本绘制（省略号截断、左对齐垂直居中；不碰 `style_`）。
-void draw_line(const RenderContext& context, raster::Surface& canvas, std::string_view text,
-               math::Rect box, float size, math::Color color) {
-  if (text.empty() || box.is_empty() || box.width <= 0.0f) return;
-  const TextPort& port = text_port_of(context);
-  const std::string clipped = port.ellipsize(text, size, box.width);
-  if (clipped.empty()) return;
-  const float line = port.line_height(size);
-  port.draw(canvas, clipped, math::Point{box.x, box.y + (box.height - line) * 0.5f}, size, color);
-}
 
 constexpr float kTextInset{14.0f};  ///< 行文本左边距（与 List 同口径）
 
