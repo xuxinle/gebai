@@ -498,8 +498,21 @@ class BuildScope {
 struct BoxProps {
   // 布局
   float gap{-1.0f};                       ///< -1 = 不设置
-  float padding{-1.0f};
+  float padding{-1.0f};                   ///< 四边统一内边距（-1 = 不设置）
   float margin{-1.0f};
+  /// 水平/垂直内边距（-1 = 不设置；在 `padding` 之后应用，故可只覆盖一侧）。
+  ///
+  /// 为何必须有（2026-10-05，来自实测故障）：只有四边统一的 `padding` 时，
+  /// 「固定高度的行 + 想要左右留白」这个最常见的组合写不出来——`padding = 10`
+  /// 会把上下各 10px 也吃掉。实测后果很隐蔽：状态栏 `height = 26` 的**每个子元素
+  /// 只剩 6px 高**（26 − 10×2），图标与文字全被压扁，而容器本身尺寸「正确」，
+  /// 单看容器 bounds 看不出问题。
+  ///
+  /// 名字与控制通道属性面的 `padding_x`/`padding_y` **对齐**（见 `actions.cpp`
+  /// 的布局属性表）——同一概念不另起名字，否则「协议能设、DSL 不能写」会变成
+  /// 又一个静默分裂。
+  float padding_x{-1.0f};
+  float padding_y{-1.0f};
   float width{kAuto};
   float height{kAuto};
   bool grow{false};

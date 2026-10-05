@@ -1280,6 +1280,16 @@ void apply_box(Element& element, const BoxProps& props) {
   if (props.gap >= 0.0f) style.gap = props.gap;
   if (props.padding >= 0.0f) style.padding = math::Insets::all(props.padding);
   if (props.margin >= 0.0f) style.margin = math::Insets::all(props.margin);
+  // 轴向外边距在整体内边距**之后**应用：于是「padding=8, padding_x=12」
+  // 表达的是「上下 8、左右 12」，与协议属性面的先后语义一致。
+  if (props.padding_x >= 0.0f) {
+    style.padding.left = props.padding_x;
+    style.padding.right = props.padding_x;
+  }
+  if (props.padding_y >= 0.0f) {
+    style.padding.top = props.padding_y;
+    style.padding.bottom = props.padding_y;
+  }
   if (props.width != kAuto) style.width = props.width;
   if (props.height != kAuto) style.height = props.height;
   style.grow = props.grow;

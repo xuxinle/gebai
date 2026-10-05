@@ -1192,6 +1192,69 @@ ST_TEST(dsl_markdown_wrapper_reevaluates_source) {
   ST_CHECK(view->block_count() > blocks_before);
 }
 
+// ————————————————————————————————————————————————————————————————————————
+// `BoxProps` 的轴向内边距（padding_x / padding_y）
+// ————————————————————————————————————————————————————————————————————————
+//
+// 起因（真实故障）：只有四边统一的 `padding` 时，「固定高度的行 + 只要左右留白」
+// 这个组合写不出来。codeeditor 的状态栏写了 `height = 26, padding = 10`，
+// 于是**每个子元素只剩 6px 高**（26 − 10×2）——图标与文字被压扁成一条，
+// 而**容器本身的尺寸完全正确**，单看容器 bounds 看不出问题。
+//
+// 本组用例钉三件事：
+// ① 轴向内边距真的落到 `Style::padding` 的四边上；
+// ② 它在整体 `padding` **之后**应用（于是可以只覆盖一侧）；
+// ③ 名字与协议属性面一致（`actions.cpp` 的 `padding_x`/`padding_y`）——
+//    同一概念两套名字会让「协议能设、DSL 不能写」变成静默分裂。
+
+/// 轴向内边距的页：一根只设 `padding_x` 的固定高度行 + 一根两个都设的行。
+struct AxisPaddingPage : Component {
+  Element* axis_bar{nullptr};
+  Element* mixed_bar{nullptr};
+
+  void build(Composer& c) override {
+    // ⚠ 指定初始化器必须按声明顺序：padding_x/padding_y 在 margin 之后、width 之前。
+    axis_bar = &row(c, {.gap = 5.0F, .padding_x = 10.0F, .height = 26.0F, .id = "axis"}, [&] {
+      (void)text(c, [] { return std::string("内容"); }, {.id = "axis-text"});
+    });
+    mixed_bar =
+        &row(c, {.padding = 4.0F, .padding_x = 12.0F, .height = 26.0F, .id = "mixed"}, [&] {
+          (void)text(c, [] { return std::string("内容"); }, {.id = "mixed-text"});
+        });
+  }
+};
+
+ST_TEST(dsl_box_props_axis_padding_reaches_layout) {
+  UiRoot root;
+  root.set_viewport({400.0F, 120.0F});
+  auto page = std::make_shared<AxisPaddingPage>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  (void)host->tick();
+  root.layout(true);
+
+  // ① 轴向内边距跑到 Style 四边
+  const Style& axis_style = page->axis_bar->style();
+  ST_CHECK(std::abs(axis_style.padding.left - 10.0F) < 0.001F);
+  ST_CHECK(std::abs(axis_style.padding.right - 10.0F) < 0.001F);
+  ST_CHECK(std::abs(axis_style.padding.top) < 0.001F);       // 上下**不被改**
+  ST_CHECK(std::abs(axis_style.padding.bottom) < 0.001F);
+  // ② 整体 padding 后再覆盖：两侧各不同
+  const Style& mixed = page->mixed_bar->style();
+  ST_CHECK(std::abs(mixed.padding.top - 4.0F) < 0.001F);     // 来自 padding
+  ST_CHECK(std::abs(mixed.padding.bottom - 4.0F) < 0.001F);
+  ST_CHECK(std::abs(mixed.padding.left - 12.0F) < 0.001F);   // 被 padding_x 覆盖
+  ST_CHECK(std::abs(mixed.padding.right - 12.0F) < 0.001F);
+
+  // ③ **关键行为**：固定高度的行里，子元素必须拿到几乎全部可用高度。
+  // 压扁时排布出来的子元素只有「高度 − 2×padding」——这就是"看不出问题"的那个数值。
+  Element* bar = page->axis_bar;
+  ST_REQUIRE(bar != nullptr);
+  ST_REQUIRE(bar->content_child_count() >= 1);
+  const float child_height = bar->child_at(0)->bounds().height;
+  ST_CHECK(child_height > bar->bounds().height - 4.0F);
+}
+
 // ── `BoxProps` 的排版三件套（color / hex_color / size / weight）────────────────
 //
 // 起因（真实应用）：错误提示想标红（设计稿给的是 `#dc2626`）、标题想加大加粗，而

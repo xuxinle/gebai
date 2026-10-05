@@ -71,6 +71,7 @@
 
 namespace {
 
+
 using namespace st::ui;
 using namespace st::ui::dsl;
 
@@ -387,8 +388,31 @@ struct CodeEditorPage : Component {
   /// 窗口动作出口（由 `run_app` 注入 `Application`；为空时窗框**如实拒绝**动作，
   /// 但画面照旧——这正是 `ui::WindowControl` 端口要分离的那两件事）。
   WindowControl* window_control_{nullptr};
+  /// 真值源读取口（`run_app` 注入为 `UiRoot::theme().mode()`）。
+  ///
+  /// **主题不在页面里存影子状态**：真值源是 `UiRoot::theme()`（由 App 持有）。
+  /// 页面自存一个 `dark_` 会与它**静默分岔**——按钮文案与状态栏都跟着影子走，
+  /// 而画面一点没变（实测故障：按了「暗色」、状态栏还报「视觉令牌已切换」）。
+  /// 本页只负责「按当前真值算出下一档」，像个按钮该做的那样。
+  std::function<ThemeMode()> theme_mode{};
+  /// 主题切换出口（`run_app` 注入为 `Application::set_theme_mode`）。
+  std::function<void(ThemeMode)> theme_setter{};
+  /// 当前是否暗色——**从真值源读**，不缓存。
+  [[nodiscard]] auto theme_is_dark() const -> bool {
+    return theme_mode && theme_mode() == ThemeMode::Dark;
+  }
   /// 外层窗框（由 `run_app` 装配后回填）：标题栏归它所有，本页只负责推标题。
   WindowFrame* frame_{nullptr};
+  /// 菜单的**声明式宿主**（由 `run_app` 把本页 mount 进标题栏的 `leading` 槽）。
+  ///
+  /// 为什么不直接在 `build()` 里声明菜单：标题栏是**外壳**（`WindowFrame` 自持，
+  /// 在声明树之外），而菜单要长在标题栏一行里——两者不在同一棵树上。
+  /// `mount_into` 正好表达「声明式的一小块挂到既有元素的槽位」，于是整个 IDE
+  /// 仍是一个 `Component`（只是它现在占两处树位），菜单与标题栏合并成一行。
+  dsl::DeclarativeHost* menu_host_{nullptr};
+  /// 菜单头部的**所有权**（`mount_into` 返回；`MenuHeader` 定义在本类之后，
+  /// 此处只能前向声明）。
+  std::unique_ptr<dsl::DeclarativeHost> menu_host_owned_{};
 
   // —— 状态 ——
   State<std::vector<OpenBuffer>> buffers_{std::vector<OpenBuffer>{}};
@@ -402,7 +426,6 @@ struct CodeEditorPage : Component {
   State<std::string> output_{"[启动] codeeditor · 声明式构建"};
   State<std::vector<std::string>> terminal_log_{
       std::vector<std::string>{"shuangtian dev terminal", "> 输入 help 查看可用命令，Enter 提交"}};
-  State<bool> dark_{false};
   State<std::size_t> menu_open_{kNoMenu};
   State<bool> palette_open_{false};
   State<std::string> palette_query_{""};
@@ -530,10 +553,16 @@ struct CodeEditorPage : Component {
     buffers_.set(std::move(list));
   }
 
+  /// 切换亮/暗主题。
+  ///
+  /// 唯一的真值源是 `UiRoot::theme()`（App 持有）：这里**读**它算下一档、
+  /// **写回**它（经 `theme_setter` → `Application::set_theme_mode`，后者会连带
+  /// 处理好字号缩放与文本 gamma），然后只更新本页的文案。
+  /// 不在这里维护自己的 `dark_`——那正是故障的来源（影子状态永不落地到主题）。
   auto toggle_theme() -> void {
-    const bool next = !dark_.value();
-    dark_.set(next);
-    status_.set(next ? "主题 dark · 视觉令牌已切换" : "主题 light · 视觉令牌已切换");
+    const bool next_dark = !theme_is_dark();
+    if (theme_setter) theme_setter(next_dark ? ThemeMode::Dark : ThemeMode::Light);
+    status_.set(next_dark ? "主题 dark · 视觉令牌已切换" : "主题 light · 视觉令牌已切换");
   }
 
   /// 编辑器被编辑：标脏 + 重跑轻量检查（问题面板与状态栏计数同源）。
@@ -626,6 +655,16 @@ struct CodeEditorPage : Component {
   // build()：只描述形态
   // ══════════════════════════════════════════════════════════════════════════
 
+  /// 标题栏**文案**：窗框（外壳）自持标题栏，本页只把“现在该显示什么”推过去
+  /// （文件名 + 脏点，与 VSCode 把当前文件名写进标题栏同构）。
+  ///
+  /// 为什么保留这个“推”而不把标题也搬进 `MenuHeader`：标题属于**窗框**的状态
+  /// （它决定窗口叫什么），菜单只是恰好与它同行；两者合并不等于所有权合并。
+  void push_title() {
+    if (frame_ == nullptr || frame_->title_bar() == nullptr) return;
+    frame_->title_bar()->set_title(window_title());
+  }
+
   void build(Composer& c) override {
     const auto& buffers = buffers_.value();
     const std::size_t active = active_.value();
@@ -634,13 +673,12 @@ struct CodeEditorPage : Component {
     // 编辑器实例可能在本次重组中新建/换绑：先置空，由 build_editor_area 重新取得
     editor = nullptr;
     column(c, {.gap = 0.0f, .id = "editor-page"}, [&] {
-      build_title_bar(c);
-      build_menu(c);
       build_main(c, buffers, active, has_editor);
       build_bottom(c);
       build_status_bar(c);
       build_find_bar(c);
     });
+    push_title();   // 标题栏（外壳）的文案仍由本页推——见 `push_title` 的注释
     // 帧首处理“查找条已出现→聚焦查找输入框”（构建期拿不到输入框实例）。
     apply_pending_focus();
     // 命令面板：**条件声明**（关掉 = 本帧不声明 → 框架 sweep 摘除）
@@ -654,63 +692,71 @@ struct CodeEditorPage : Component {
     }
   }
 
-  // —— 1. 标题栏：**推给窗框**（本页是内容槽子树，窗框在外层由应用装配）——
+  // ————————————————————————————————————————————————————————————————————————
+  // `MenuHeader`：长在标题栏 `leading` 槽里的那一小块（菜单栏 + 它的下拉面板）
+  // ————————————————————————————————————————————————————————————————————————
   //
-  // 为什么不再自建：窗框（`ui::WindowFrame`）自带标题栏，标题栏内部的分区排版
-  // （标题带 / 附属槽 / 控制按钮）是它自己的责任；示例里再手写一遍就是两份真相。
-  // 页面只需要把"现在该显示什么"推过去（文件名 + 脏点），与 VSCode 把当前文件名
-  // 写进标题栏同构。旧实现里那句注释留着，因为它是那个坑的原始记录：
-  //   早先这里写成 `spacer(c, 0.0f)` 且当时它=固定 0 宽 → 右对齐静默失效
-  //   （三个图标跟在标题后面，实测 x=209 而非 1268）。现在 `size<=0` = `grow=true`。
-  void build_title_bar(Composer& c) {
-    (void)c;
-    if (frame_ == nullptr || frame_->title_bar() == nullptr) return;
-    frame_->title_bar()->set_title(window_title());
-  }
+  // 挂载点：标题栏的 `leading` 槽（`[leading…][标题][trailing…][控制按钮]`）。
+  // 为什么用 `leading`（而不是 `trailing`）：这一版的产品形态是**菜单在左、标题跟在其后**
+  // （省下一整行 32px 给内容区，窗口顶部的拖动/双击语义仍归标题栏）。
+  // 挂在 `leading` 后 `TitleBar::arrange` 会自动做三件事：标题**让到菜单右侧**、
+  // 图标让位给槽（两者都画会叠在一起）、`drag_rect` 不再把这一行算成拖动区。
+  //
+  // 为什么单独成一个 `Component` 而不是让本页 `build()` 多画一块：标题栏是
+  // **外壳**（`WindowFrame` 自持、在声明树之外），本页的 `build()` 只管内容槽。
+  // `mount_into` 正好表达「声明式的一小块挂到既有元素的槽位」——于是整个 IDE
+  // 仍是一个 `Component`（只是它现在占两处树位），菜单与标题栏合并成一行。
+  //
+  // 它只借宿主两样东西：`menu_open_`（打开的是哪一个，本页也要读它做快捷键）
+  // 与 `on_menu`（选条目）。菜单数据与面板 overlay 都归它自己。
 
-  // —— 2. 菜单栏（下拉面板经 overlay：`menu_panel_overlay` 是声明式入口）——
-  void build_menu(Composer& c) {
-    static const std::vector<MenuData> kMenus = {
-        {"file", "文件",
-         {{.id = "new", .label = "新建文件"},
-          {.id = "open", .label = "打开文件…"},
-          {.separator = true},
-          {.id = "save", .label = "保存（Ctrl+S）"},
-          {.id = "close-tab", .label = "关闭编辑器（Ctrl+W）"}}},
-        {"edit", "编辑",
-         {{.id = "undo", .label = "撤销"},
-          {.id = "redo", .label = "重做"},
-          {.separator = true},
-          {.id = "comment", .label = "切换行注释（Ctrl+/）"},
-          {.id = "select-all", .label = "全选"}}},
-        {"selection", "选择",
-         {{.id = "select-all", .label = "全选（Ctrl+A）"},
-          {.id = "goto-line", .label = "转到行…"},
-          {.id = "copy", .label = "复制"},
-          {.id = "paste", .label = "粘贴"}}},
-        {"view", "查看",
-         {{.id = "command-palette", .label = "命令面板…（Ctrl+Shift+P）"},
-          {.separator = true},
-          {.id = "toggle-sidebar", .label = "切换侧栏可见性（Ctrl+B）"},
-          {.id = "find", .label = "查找（Ctrl+F）"},
-          {.id = "toggle-theme", .label = "切换亮/暗主题"}}},
-        {"run", "运行",
-         {{.id = "run-task", .label = "运行任务：构建 gallery"},
-          {.id = "run-test", .label = "运行任务：st test"},
-          {.separator = true},
-          {.id = "toggle-terminal", .label = "切换终端（底部面板）"}}},
-        {"help", "帮助", {{.id = "about", .label = "关于 codeeditor"}}}};
-    menu_bar_ptr = dsl::menu_bar(
-        c, kMenus,
-        [this](const std::string& menu, const std::string& item) { on_menu(menu, item); },
-        [this](std::size_t index) {
-          menu_open_.set(menu_open_.value() == index ? kNoMenu : index);
-        },
-        {.id = "menubar"});
-    // 打开状态 → 下一帧声明面板 overlay（不声明 = 自动消失，框架 sweep）
-    const std::size_t open = menu_open_.value();
-    if (open != kNoMenu && menu_bar_ptr != nullptr) dsl::menu_panel_overlay(c, *menu_bar_ptr, open);
-  }
+  struct MenuHeader : Component {
+    CodeEditorPage* page{nullptr};
+    MenuBar* bar{nullptr};
+
+    void build(Composer& c) override {
+      static const std::vector<MenuData> kMenus = {
+          {"file", "文件",
+           {{.id = "new", .label = "新建文件"},
+            {.id = "open", .label = "打开文件…"},
+            {.separator = true},
+            {.id = "save", .label = "保存（Ctrl+S）"},
+            {.id = "close-tab", .label = "关闭编辑器（Ctrl+W）"}}},
+          {"edit", "编辑",
+           {{.id = "undo", .label = "撤销"},
+            {.id = "redo", .label = "重做"},
+            {.separator = true},
+            {.id = "comment", .label = "切换行注释（Ctrl+/）"},
+            {.id = "select-all", .label = "全选"}}},
+          {"selection", "选择",
+           {{.id = "select-all", .label = "全选（Ctrl+A）"},
+            {.id = "goto-line", .label = "转到行…"},
+            {.id = "copy", .label = "复制"},
+            {.id = "paste", .label = "粘贴"}}},
+          {"view", "查看",
+           {{.id = "command-palette", .label = "命令面板…（Ctrl+Shift+P）"},
+            {.separator = true},
+            {.id = "toggle-sidebar", .label = "切换侧栏可见性（Ctrl+B）"},
+            {.id = "find", .label = "查找（Ctrl+F）"},
+            {.id = "toggle-theme", .label = "切换亮/暗主题"}}},
+          {"run", "运行",
+           {{.id = "run-task", .label = "运行任务：构建 gallery"},
+            {.id = "run-test", .label = "运行任务：st test"},
+            {.separator = true},
+            {.id = "toggle-terminal", .label = "切换终端（底部面板）"}}},
+          {"help", "帮助", {{.id = "about", .label = "关于 codeeditor"}}}};
+      bar = dsl::menu_bar(
+          c, kMenus,
+          [this](const std::string& menu, const std::string& item) { page->on_menu(menu, item); },
+          [this](std::size_t index) {
+            page->menu_open_.set(page->menu_open_.value() == index ? kNoMenu : index);
+          },
+          {.id = "menubar"});
+      // 打开状态 → 下一帧声明面板 overlay（不声明 = 自动消失，框架 sweep）
+      const std::size_t open = page->menu_open_.value();
+      if (open != kNoMenu && bar != nullptr) dsl::menu_panel_overlay(c, *bar, open);
+    }
+  };
 
   void on_menu(const std::string& menu, const std::string& item) {
     menu_open_.set(kNoMenu);   // 选完即关
@@ -912,7 +958,6 @@ struct CodeEditorPage : Component {
       (void)custom<CodeEditor>(c, [this](CodeEditor& ed) {
         ed.set_id("editor");   // 控制通道钩子：tools/*.py 依赖
         ed.set_font_size(13.5f);
-        ed.set_tab_width(4);
         ed.style().grow = true;
         ed.style().padding = st::math::Insets{8.0f, 4.0f, 8.0f, 4.0f};
         ed.on_change = [this](std::string_view) { on_edit(); };
@@ -995,7 +1040,7 @@ struct CodeEditorPage : Component {
 
   // —— 5. 状态栏（兼容钩子 id 全保留：`status` / `btn-theme` / 计数 / 光标 / 语言）——
   void build_status_bar(Composer& c) {
-    row(c, {.gap = 12.0f, .padding = 10.0f, .height = 26.0f, .id = "statusbar"}, [&] {
+  row(c, {.gap = 12.0f, .padding_x = 10.0f, .height = 26.0f, .id = "statusbar"}, [&] {
       (void)icon(c, "git-branch", 12.0f);
       (void)text(c, [] { return std::string("main*"); }, {.id = "branch-label"});
       (void)icon(c, "error", 12.0f);
@@ -1008,7 +1053,7 @@ struct CodeEditorPage : Component {
       (void)text(c, [] { return std::string("·  空格: 4  ·  UTF-8"); });
       (void)text(c, [this] { return active_language(); }, {.id = "language-label"});
       (void)text(c, [this] { return status_.value(); }, {.id = "status"});
-      (void)button(c, dark_.value() ? "亮色" : "暗色", [this] { toggle_theme(); },
+        (void)button(c, theme_is_dark() ? "亮色" : "暗色", [this] { toggle_theme(); },
                    {.id = "btn-theme"});
     });
   }
@@ -1591,6 +1636,12 @@ auto run_app(int argc, char** argv) -> int {
   // 窗框的窗口动作出口：`Application` 实现了 `ui::WindowControl`（转发给后端）。
   // 在这一处"装"进去，页面内的组件就不需要知道应用/后端的存在（依赖方向单向）。
   page->window_control_ = &app;
+  // 主题的两个口子（**同一处装配**、依赖方向依然是单向的）：
+  // 读 = `UiRoot::theme()`（真值源）；写 = `Application::set_theme_mode`
+  // （它会连带处理字号缩放与文本 gamma——直接改 `root().theme()` 会把
+  // `--ui-font-scale` 调好的字号悄悄还原）。
+  page->theme_mode = [&app] { return app.root().theme().mode(); };
+  page->theme_setter = [&app](ThemeMode mode) { app.set_theme_mode(mode); };
   // 外壳：`WindowFrame`（与 gallery 同一形态：标题栏 + 内容槽 + 八向缩放边缘）。
   // 为什么由应用装配而不是写进 `build()`：窗框是**外壳**（也是窗口唯一的拖动/缩放区），
   // 应当先于声明式内容存在、且不随页面重组而重建；页面只把标题推给它。
@@ -1604,12 +1655,32 @@ auto run_app(int argc, char** argv) -> int {
   // 内容挂进**窗框内容槽**（`mount_into` 的子树语义正好：声明式只占内容槽）。
   // 指针在 `set_content` 搬移前取好——之后从根部按 id 取回（与容器无关、更稳）。
   Element* slot = frame->content();
+  // 菜单栏挂进**标题栏的前部槽**：标题栏与菜单栏合并成一行（菜单在左、标题跟在其后）。
+  // 同样在 `set_content` 搬移前取好指针；两个 `mount_into` 各占一处树位，
+  // 都属同一个声明式页面（`page`）。
+  Element* menu_slot = frame->title_bar();
   app.set_content(std::move(frame));
   page->frame_ = dynamic_cast<WindowFrame*>(app.root().find("window-frame"));
   auto host = dsl::mount_into(app.root(), *slot, page);
   if (host == nullptr) {
     std::fprintf(stderr, "声明式挂载失败\n");
     return 1;
+  }
+  // 菜单头部：单独一个 `Component`（标题栏那一行归它描述），挂进 `leading` 槽。
+  // 先 `add_leading` 一个占位容器，再 `mount_into` 它——`mount_into` 需要
+  // 一个**既有元素**作宿主，而 `leading` 槽按语义是「标题前的一块」。
+  if (menu_slot != nullptr) {
+    auto menu_block = std::make_unique<Panel>(FlexDirection::Row);
+    menu_block->set_id("menu-block");
+    Element* menu_root = page->frame_->title_bar()->add_leading(std::move(menu_block));
+    auto header = std::make_shared<CodeEditorPage::MenuHeader>();
+    header->page = page.get();
+    page->menu_host_owned_ = dsl::mount_into(app.root(), *menu_root, header);
+    if (page->menu_host_owned_ == nullptr) {
+      std::fprintf(stderr, "菜单头部挂载失败\n");
+      return 1;
+    }
+    page->menu_host_ = page->menu_host_owned_.get();
   }
   // 初始文件（--language 指定；都没有则第一个）
   const Sample* initial = page->files_.empty() ? nullptr : &page->files_.front();
@@ -1620,7 +1691,6 @@ auto run_app(int argc, char** argv) -> int {
     }
   }
   if (initial != nullptr) page->open_sample(*initial);
-  page->dark_.set(options.theme == "dark");
   // 首帧重组 + 聚焦编辑器：**必须在 `start()` 之前完成**。
   // `start()` 内会开控制通道，而客户端（脚本）一看到控制文件就连——
   // 那时如果界面还没建好（或焦点还没设），它拿到的是半成品状态
@@ -1693,7 +1763,11 @@ auto run_app(int argc, char** argv) -> int {
     const std::int64_t frame_start_ms = st::time::now_ms();
     // 帧首推进：先在编辑器上补做「上一帧记下的跳转」（切标签/打开文件后
     // 编辑器实例要等重组才拿到，所以跳转请求排队到这一帧落地）。
+    // 两棵声明树各自推进：`host` 描述内容槽，`menu_host_` 描述标题栏那一行。
+    // 漏掉后者的话菜单状态改了、面板永远不会出现（而点击仍“命中 menubar”，
+    // 看上去像菜单坏了）——实测踩到。
     if (host->dirty()) (void)host->tick();
+    if (page->menu_host_ != nullptr && page->menu_host_->dirty()) (void)page->menu_host_->tick();
     app.tick();
     ++frames;
     if (options.frames > 0 && frames >= options.frames) break;

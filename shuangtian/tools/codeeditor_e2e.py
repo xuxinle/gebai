@@ -120,6 +120,25 @@ def main():
         check("renderer.cpp" in client.title("titlebar"), "标题栏未显示初始文件")
         print("[2] 初始标签 renderer.cpp 已打开（语言 cpp）")
 
+        # —— 2b. 标题栏与菜单栏**合并成一行** ——
+        #
+        # 形态约束（产品决策：菜单在左、标题跟在其后）：菜单栏必须完整落在标题栏内，
+        # 且标题栏只占一行——它不能再贡献第二个 32px 行。
+        titlebar_box = client.ok("find", {"selector": "#titlebar"})["matches"][0]["bounds"]
+        menubar_box = client.ok("find", {"selector": "#menubar"})["matches"][0]["bounds"]
+        check(menubar_box["y"] >= titlebar_box["y"] - 1 and
+              menubar_box["y"] + menubar_box["height"] <= titlebar_box["y"] + titlebar_box["height"] + 1,
+              f"菜单栏不在标题栏内: 标题栏 {titlebar_box}, 菜单栏 {menubar_box}")
+        check(menubar_box["x"] <= titlebar_box["x"] + 100,
+              f"菜单栏不在标题栏左部: x={menubar_box['x']}")
+        check(menubar_box["height"] >= titlebar_box["height"] - 1,
+              f"菜单栏未占满行高: {menubar_box['height']} vs {titlebar_box['height']}")
+        # 内容区必须紧跟这一行（合并不应该留下空心：`editor-page` 的 y == 标题栏底缘）
+        page_box = client.ok("find", {"selector": "#editor-page"})["matches"][0]["bounds"]
+        check(abs(page_box["y"] - (titlebar_box["y"] + titlebar_box["height"])) <= 1.0,
+              f"内容区未紧跟合并后的标题行: page.y={page_box['y']}, 标题栏底={titlebar_box['y'] + titlebar_box['height']}")
+        print(f"[2b] 标题栏与菜单栏合并成一行（{titlebar_box['height']:.0f}px 行内：菜单 {menubar_box['x']:.0f}→{menubar_box['x'] + menubar_box['width']:.0f}）")
+
         # —— 3. 打开第二个文件（资源管理器按钮）——
         buttons = client.ok("find", {"selector": "Button"})["matches"]
         deploy = [b for b in buttons if "deploy.py" in json.dumps(b, ensure_ascii=False)]
@@ -165,7 +184,7 @@ def main():
         # 菜单面板永远不出现。现在 MouseDown 只标命中、Click 才打开。
         client.ok("invoke", {"id": "activity-explorer", "action": "click"})
         time.sleep(0.4)
-        client.click_at(16, 52)
+        client.click_at(60, 20)
         check(client.count("MenuPanel") == 1, "点击「文件」后菜单面板未出现")
         panel = client.ok("find", {"selector": "MenuPanel"})["matches"][0]
         check(panel["bounds"]["height"] > 0, "菜单面板高度为零")
@@ -186,11 +205,51 @@ def main():
         time.sleep(0.4)
         ratio1 = float(client.ok("get", {"id": "sidebar-split"})["props"]["ratio"])
         check(ratio1 > ratio0, f"分栏比例未变化: {ratio0} → {ratio1}")
+
+        # 主题切换：**断言真值源与像素**，而不是按钮文案。
+        #
+        # 旧断言只看 `label in ("亮色","暗色")`——而缺陷恰恰是「文案翻转、画面不动」：
+        # 页面维护了一个从不落地到主题的影子状态 `dark_`，于是这条断言**恒为真**，
+        # 把一个完全不能用的功能报成通过（用户实测发现时就是这样）。
+        mode_before = client.ok("theme", {})["mode"]
+        pixels_before = client.ok("capture.hash", {})["hash"]
         client.ok("invoke", {"id": "btn-theme", "action": "click"})
-        time.sleep(0.4)
-        check(client.ok("get", {"id": "btn-theme"})["props"].get("label") in ("亮色", "暗色"),
-              "主题按钮文案异常")
-        print(f"[8] 分栏可拖（{ratio0:.2f} → {ratio1:.2f}）+ 主题切换")
+        time.sleep(0.6)
+        mode_after = client.ok("theme", {})["mode"]
+        pixels_after = client.ok("capture.hash", {})["hash"]
+        check(mode_after != mode_before,
+              f"主题按钮未切换主题真值: {mode_before} → {mode_after}")
+        check(pixels_after != pixels_before, "主题切换后画面没有变化")
+        # 再切回，确认是**双向**可用（只能单向切也是坏的）
+        client.ok("invoke", {"id": "btn-theme", "action": "click"})
+        time.sleep(0.6)
+        check(client.ok("theme", {})["mode"] == mode_before,
+              f"主题切不回原档: 期望 {mode_before}，实际 {client.ok('theme', {})['mode']}")
+        print(f"[8] 分栏可拖（{ratio0:.2f} → {ratio1:.2f}）+ 主题真值来回切换（{mode_before} ⇄ {mode_after}）")
+
+        # —— 8b. 状态栏子元素占满行高 ——
+        #
+        # 回归：状态栏 `height=26` 但用了四边 `padding=10` → 子元素只剩 **6px** 高，
+        # 图标与文字全被压扁，而容器自身尺寸「正确」（单看容器 bounds 看不出问题）。
+        # 判据：固定高度的行里，子元素必须拿到几乎全部可用高度。
+        bar = client.ok("find", {"selector": "#statusbar"})["matches"][0]["bounds"]
+        button = client.ok("find", {"selector": "#btn-theme"})["matches"][0]["bounds"]
+        check(button["height"] >= bar["height"] - 2,
+              f"状态栏子元素被内边距压扁: 容器 {bar['height']:.0f}px，按钮 {button['height']:.0f}px")
+        # 且按钮真的能被点到（压扁时 y 中心偏出自身范围）
+        hit = client.ok("input.mouse", {"kind": "click",
+                                        "x": button["x"] + button["width"] / 2,
+                                        "y": button["y"] + button["height"] / 2,
+                                        "button": 1})
+        check(hit.get("hit", {}).get("id") == "btn-theme",
+              f"状态栏按钮命中异常: {hit.get('hit', {}).get('id')}")
+        # 上面那次真实点击会翻转主题：显式切回，别让后续步骤依赖隐式状态。
+        time.sleep(0.5)
+        if client.ok("theme", {})["mode"] != mode_before:
+            client.ok("invoke", {"id": "btn-theme", "action": "click"})
+            time.sleep(0.5)
+        check(client.ok("theme", {})["mode"] == mode_before, "状态栏用例未能复原主题")
+        print(f"[8b] 状态栏子元素占满行高（{bar['height']:.0f}px 容器 / {button['height']:.0f}px 按钮）且可点击")
 
         # —— 9. 截图（视觉核验素材）——
         shot = client.ok("capture", {"encode": "file",
@@ -201,7 +260,7 @@ def main():
         # —— 10. 菜单面板的**关闭路径**（本轮修复；旧行为：打开后关不掉）——
         # 根因：声明式 overlay 宿主是铺满视口的 `Panel`，命中按整块矩形算 → 吞掉全屏点击；
         # 而浮层键盘分派只问最外层宿主（它不认 Esc），真正的 `MenuPanel` 在子树里收不到。
-        client.click_at(16, 52)
+        client.click_at(60, 20)
         time.sleep(0.4)
         # 面板外的点击：瞬态浮层（菜单）应**关闭且不穿透**——
         # 旧行为：overlay 宿主是铺满视口的 Panel，把整屏点击都吃掉（什么都点不到）；
@@ -213,7 +272,7 @@ def main():
         check(outside.get("hit", {}).get("id") != "content",
               "瞬态浮层应屏障面板外点击（不应穿透到下层内容）")
         # 关闭后重新打开必须还能开（反向验证“关闭”真回到了可交互状态）
-        client.click_at(16, 52)
+        client.click_at(60, 20)
         time.sleep(0.4)
         check(client.count("MenuPanel") == 1, "关闭后无法重新打开菜单")
         client.ok("input.key", {"key": "Escape"})

@@ -454,7 +454,6 @@ CJK 多轮廓字形不糊块、Latin/CJK 带孔字形墨迹占比上限）。
   悬停行底纹、行号槽内的当前行高亮、竖向 + 横向**两条可拖拽滚动条**（悬停加宽）
 - **视口可驱动**：属性 `first_visible_line`/`last_visible_line`/`visible_lines`/`scroll`、
   动作 `scroll_to_line`/`reveal_line`——智能体可断言“视口停在哪一行”
-
 > **x 坐标的唯一量尺**：`x_for_index()` 是光标/选择/查找高亮/缩进线/鼠标命中的共同量尺，
 > 它必须与**绘制同源**（同 `FontRole`、同一种量宽口径）。这一条踩过真缺陷：漏传
 > `FontRole::Monospace` 后落到接口默认的 Proportional，于是“量宽用比例字体、绘字用等宽字体”，
@@ -526,6 +525,17 @@ class TextRenderer {                               // 字形 → 位图缓存（
   否则拉丁粗体会接管中文字（它没有汉字轮廓 → 整串豆腐块）。
   等宽链里没有汉字，`find_face(role=Monospace)` 按“等宽库 → 正文档”回退补足，
   代码注释里的中文仍可读。
+
+**主题（`ThemeMode`）是真值源，不在页面里存影子状态**
+
+主题的唯一真值源是 `UiRoot::theme()`（由 `Application` 持有）。页面要切主题，
+必须经 `Application::set_theme_mode`——它附带处理两件容易漏的事：把
+`--ui-font-scale` 调好的字号缩放一起带过去（直接 `Theme::by_mode` 会把字号
+静默还原），以及让文本 gamma 跟着主题走。
+
+页面自存一个 `bool dark_` 会与真值源**静默分岔**：按钮文案、状态栏都跟着影子走，
+而画面一点没变——「按了切主题、界面不动」那个故障就是这么来的，而且只看按钮
+文案的断言会**恒为真**（详情与回归断言见 `docs/BACKLOG.md`）。
 
 ### 4.3.1 文字抗锯齿：灰度 vs 亚像素（LCD）
 
@@ -1884,6 +1894,16 @@ if (palette_open_.value()) {          // 条件声明
 `CommandPalette::grab_focus()` 只能走兜底路径（面板打开了、键盘焦点还在编辑器里）。
 继承点因此收敛到 `Element::add_child/insert_child`，新元素随挂入自动继承父元素的宿主。
 
+**声明式只占一处树位，但可以占多处**
+
+`mount_into(host_element, component)` 把声明式树挂到**既有元素的子位**。
+于是“同一个页面”可以同时描述两处不相邻的树位：codeeditor 的菜单栏长在
+**外壳（`WindowFrame` 自持的 `TitleBar`）**的 `leading` 槽里，而编辑器主体在内容槽——
+标题栏与菜单栏合并成一行就是这么做的（见 `docs/BACKLOG.md`）。
+
+代价是**两棵声明树各需推进**：主循环要 `host->tick()` 与 `menu_host->tick()` 都调。
+漏掉后者时“点击命中、状态也变了、但面板不出现”——看上去像组件坏了。
+
 实测：一个 2063 行的命令式 IDE 界面（`examples/codeeditor`）用声明式重写后，**连同它原本的
 声明式分身（当时叫 `codeeditor-dsl`，695 行，已在整合中删除）一起合并成 1605 行**（−40%）
 ——差的不是控件数而是**同步代码**：声明式里所有「改完要点哪里」的手工同步都不存在了
@@ -3030,7 +3050,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
 | 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case
- 超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限） | `st test` | 全绿（**755 用例 / 17812 断言**，debug 档实测；`st test --san` 全绿 0 报告） |
+ 超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限） | `st test` | 全绿（**756 用例 / 17824 断言**，debug 档实测；`st test --san` 全绿 0 报告） |
 | 独立工程集成 | **真建一个引用 framework 的最小工程**、真构建真跑（`tests/pkg_integration_test.cpp`）
  | `st test pkg_integration` | 全绿（`ST_INTEGRATION_BUILD=0` 可关；关掉时明确跳过而非假绿） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告（需带 sanitizer 运行库的编译器；MinGW 发行版不带时构建前明确报错） |
