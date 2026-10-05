@@ -436,6 +436,14 @@ auto Input::semantics_flags() const -> SemanticsFlags {
 
 TextArea::TextArea() { set_focusable(true); }
 
+void TextArea::set_read_only(bool value) noexcept {
+  if (read_only_ == value) return;
+  read_only_ = value;
+  // 只读时要确保焦点不在“正在编辑”的状态里：光标保留（可看/可选中），
+  // 但不该再由键盘改动。此处只标脏——真正的拦截在 `on_event` 的编辑分支。
+  mark_dirty();
+}
+
 void TextArea::set_text(std::string text) {
   text_ = std::move(text);
   // 光标回到文首：加载文档/程序化替换文本后应当从头展示，
@@ -731,10 +739,18 @@ auto TextArea::on_event(const RenderContext& context, Event& event) -> bool {
       return true;
     case EventKind::TextInput:
       if (event.text.empty()) return false;
+      // 只读：**不进字**（但落到底部的 KeyDown 导航分支仍放行——
+      // 只读展示仍要能按方向键/Home/End 看内容，这正是它区别于 disabled 的地方）
+      if (read_only_) return true;
       insert_text(event.text);
       return true;
     case EventKind::KeyDown: {
       const std::string& key = event.key;
+      // 编辑类按键在只读下**消费但不落字**（消费=不让它冒泡出去触发页面级快捷键；
+      // 不落字=真的没改内容）。导航类按键（方向/Home/End/PageUp/PageDown）则照常。
+      if (read_only_) {
+        if (key == "Enter" || key == "Backspace" || key == "Delete") return true;
+      }
       if (key == "Enter") {
         insert_text("\n");
         return true;
@@ -803,7 +819,9 @@ auto TextArea::semantics_value() const -> std::string { return text_; }
 
 auto TextArea::semantics_flags() const -> SemanticsFlags {
   SemanticsFlags flags = Element::semantics_flags();
-  flags.editable = enabled();
+  // 只读仍是“可编辑控件”（只是不接受修改），仍可聚焦/选中/滚动——
+  // 这与 disabled 在无障碍语义上是两件事（屏幕阅读器据此决定“可以读”还是“不可用”）。
+  flags.editable = enabled() && !read_only_;
   flags.scrollable = true;
   return flags;
 }
@@ -813,6 +831,7 @@ auto TextArea::get_property(std::string_view name) const -> std::optional<std::s
   if (name == "placeholder") return placeholder_;
   if (name == "cursor_index") return std::format("{}", cursor_);
   if (name == "scroll_offset") return std::format("{:.1f}", static_cast<double>(scroll_));
+  if (name == "read_only") return read_only_ ? "true" : "false";
   return std::nullopt;
 }
 
@@ -837,11 +856,15 @@ auto TextArea::set_property(std::string_view name, std::string_view value) -> bo
     set_scroll_offset(static_cast<float>(*parsed));
     return true;
   }
+  if (name == "read_only") {
+    set_read_only(value == "true" || value == "1");
+    return true;
+  }
   return false;
 }
 
 auto TextArea::property_names() const -> std::vector<std::string_view> {
-  return {"value", "text", "placeholder", "cursor_index", "scroll_offset"};
+  return {"value", "text", "placeholder", "cursor_index", "scroll_offset", "read_only"};
 }
 
 auto TextArea::invoke_action(std::string_view action, std::string_view argument) -> bool {

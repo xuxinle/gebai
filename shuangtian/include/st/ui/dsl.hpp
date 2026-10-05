@@ -511,9 +511,14 @@ auto switch_(Composer& c, bool checked, std::function<void(bool)> on_change = {}
 /// 滑杆。
 auto slider(Composer& c, float value, std::function<void(float)> on_change = {},
             const BoxProps& props = {}) -> Element&;
-/// 输入框。
+/// 输入框。`password = true` 时显示为掩码 `•`（`Input::value()` 仍返回明文）。
+///
+/// 为何要在 DSL 主路径暴露它（2026-10-05）：`Input::set_password` 一直存在，但声明式
+/// 入口没有这个形参——设设置页的 API Key 输入框只能 `custom<Input>` 逃生船手动
+/// `set_password(true)`。那是**安全相关**的能力（键/令牌/口令），不该只对
+/// “愿意写逃生船”的调用方开放。
 auto input(Composer& c, std::string value, std::function<void(std::string)> on_input = {},
-           const BoxProps& props = {}) -> Element&;
+           const BoxProps& props = {}, bool password = false) -> Element&;
 /// 进度条。
 auto progress(Composer& c, float value, const BoxProps& props = {}) -> Element&;
 /// 徽标。

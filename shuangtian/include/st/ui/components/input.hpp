@@ -107,6 +107,17 @@ class TextArea : public Element {
   void set_cursor_index(std::size_t index);
   /// 内部滚动偏移（像素），自动夹取到 `[0, 内容高 - 可视高]`。
   void set_scroll_offset(float offset);
+  /// **只读**：编辑禁入（文本插入/删除/换行一律忽略），但**光标仍可定位**、
+  /// 仍可滚动、仍可获得焦点。
+  ///
+  /// 存在的理由（2026-10-05，来自实战）：JSON 格式化输出想做成只读展示，
+  /// 当时只能 `set_enabled(false)` 凑合——而 disabled 的语义是"这个控件不可用"：
+  /// 视觉上变灰（读起来像出错/未就绪），且不可交互（没法选中看、没法滚动）。
+  /// "只读"与"禁用"是两件不同的事，不该靠后者将就。
+  ///
+  /// 与 `Input` 的动作面对齐（`clear` 已有先例）：属性面 `read_only` 读写同一状态。
+  void set_read_only(bool value) noexcept;
+  [[nodiscard]] auto read_only() const noexcept -> bool { return read_only_; }
 
   [[nodiscard]] auto value() const noexcept -> const std::string& { return text_; }
   [[nodiscard]] auto placeholder() const noexcept -> const std::string& { return placeholder_; }
@@ -161,6 +172,9 @@ class TextArea : public Element {
   std::string placeholder_{};
   std::size_t cursor_{0};
   float scroll_{0.0f};
+  /// 只读（编辑禁入，但可聚焦/定位光标/滚动）。与 `enabled_` **无关**：
+  /// 后者是“控件不可用”（变灰、不响应），两者语义不同，不要用一个代替另一个。
+  bool read_only_{false};
 };
 
 }  // namespace st::ui

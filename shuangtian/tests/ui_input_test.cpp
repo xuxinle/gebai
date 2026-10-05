@@ -13,7 +13,9 @@
 
 #include "st/raster/canvas.hpp"
 #include "st/ui/components/input.hpp"
+#include "st/ui/dsl.hpp"
 #include "st/ui/theme.hpp"
+#include "st/ui/ui_root.hpp"
 
 namespace {
 
@@ -21,6 +23,7 @@ using st::math::Color;
 using st::math::Rect;
 using st::ui::Input;
 using st::ui::RenderContext;
+using st::ui::TextArea;
 using st::ui::Theme;
 
 inline constexpr int kWidth = 320;
@@ -192,4 +195,109 @@ ST_TEST(ui_input_invoke_unknown_action_falls_through) {
   Input input;
   // 未知动作回落到基类（返回 false 而非假装成功——假成功会让自动化误判）
   ST_CHECK(!input.invoke_action("definitely_not_an_action", {}));
+}
+
+// ————————————————————————————————————————————————————————————————————————————
+// DSL `input(password=...)` 与 `TextArea` 只读
+// ————————————————————————————————————————————————————————————————————————————
+
+/// `Input::set_password` 一直存在，但声明式入口（`dsl::input`）此前没有这个形参——
+/// 设设置页的 API Key 输入框**只能** `custom<Input>` 逃生船手动开。
+/// 那是安全相关能力（键/令牌/口令），不该只对"愿意写逃生船"的调用方开放。
+///
+/// 本条钉两件事：① 秘密**从 DSL 就能设**；② 掩码只影响**显示**，`value()` 仍是明文
+/// （提交给后端的是真值，不是那串圆点——这条最容易写反）。
+ST_TEST(ui_input_password_mode_masks_display_only) {
+  // 用真实声明式路径（`dsl::mount` + `Component::build`）——而不是手搭 Composer：
+  // 后者绕过了宿主与作用域机制，测到的不是应用真正走的那条路。
+  struct KeyPage : st::ui::dsl::Component {
+    // **必须是 State**（不是普通 bool）：普通成员改了不会标脏，`tick()` 就不会重跑 build——
+    // 于是“切成非秘密模式”根本没生效，测试会挂在一个看不出原因的地方。
+    st::ui::dsl::State<bool> secret{true};
+    void build(st::ui::dsl::Composer& c) override {
+      st::ui::dsl::input(c, "sk-secret", {}, {.id = "key"}, secret.value());
+    }
+  };
+
+  st::ui::UiRoot root;
+  root.set_viewport({320.0F, 200.0F});
+  auto page = std::make_shared<KeyPage>();
+  auto host = st::ui::dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  root.layout(true);
+
+  auto* field = dynamic_cast<Input*>(root.find("key"));
+  ST_REQUIRE(field != nullptr);
+  ST_CHECK(field->password());                             // ① 秘密真的开了
+  ST_CHECK_EQ(field->value(), std::string("sk-secret"));   // ② 读出来的是明文
+  ST_CHECK_EQ(field->semantics_value(), std::string("•••••••••"));   // 语义面是掩码
+
+  // 关掉后回到明文显示（同一入口可逆；且走重组路径）
+  page->secret.set(false);
+  (void)host->tick();
+  root.layout(true);
+  field = dynamic_cast<Input*>(root.find("key"));
+  ST_REQUIRE(field != nullptr);
+  ST_CHECK(!field->password());
+  ST_CHECK_EQ(field->value(), std::string("sk-secret"));   // 内容不因切模式而丢
+}
+
+/// `TextArea` 只读：**编辑禁入，但光标仍可定位、仍可滚动、仍可获得焦点**。
+///
+/// 为何不能拿 `set_enabled(false)` 凑合（本用例的全部意义）：disabled 的语义是
+/// "这个控件不可用"——视觉变灰、不可交互，连滚动看内容都不行。而 JSON 格式化输出
+/// 这类只读展示**必须能滚动看**，只是不接受修改。两者是不同的事。
+///
+/// 反例（故意破坏）：把 `on_event` 里 `read_only_` 的两处判断去掉，本用例当场变红。
+ST_TEST(ui_text_area_read_only_blocks_editing_but_keeps_navigation) {
+  TextArea area;
+  area.set_text("第一行\n第二行");
+  area.set_read_only(true);
+  ST_CHECK(area.read_only());
+  ST_CHECK(area.enabled());   // 只读 ≠ 禁用（这是本用例的判据核心）
+
+  Theme theme = Theme::light();
+  RenderContext context{theme, nullptr, 0.0};
+  area.measure(context, st::ui::Constraints{.max_width = 320.0F, .max_height = 200.0F});
+  area.arrange(context, Rect{0.0F, 0.0F, 320.0F, 200.0F});
+
+  const std::string original = area.value();
+  // ① 打字/回车/退格/删除一律不落字
+  st::ui::Event typed;
+  typed.kind = st::ui::EventKind::TextInput;
+  typed.text = "偷偷插入";
+  ST_CHECK(area.on_event(context, typed));
+  ST_CHECK_EQ(area.value(), original);
+  for (const std::string& key : {std::string("Enter"), std::string("Backspace"),
+                                 std::string("Delete")}) {
+    st::ui::Event event;
+    event.kind = st::ui::EventKind::KeyDown;
+    event.key = key;
+    ST_CHECK(area.on_event(context, event));
+    ST_CHECK_EQ(area.value(), original);
+  }
+  // ② 程序化写入仍可改（`set_text` 不是"用户编辑"，与 Input 的 `clear` 同口径）
+  area.set_text("换一份内容");
+  ST_CHECK_EQ(area.value(), std::string("换一份内容"));
+
+  // ③ 导航仍可用：点击能定位光标、滚轮能滚（只读展示要能看）
+  st::ui::Event click;
+  click.kind = st::ui::EventKind::Click;
+  click.position = st::math::Point{20.0F, 10.0F};
+  ST_CHECK(area.on_event(context, click));
+  st::ui::Event wheel;
+  wheel.kind = st::ui::EventKind::Wheel;
+  wheel.wheel_delta = 10.0F;
+  ST_CHECK(area.on_event(context, wheel));
+
+  // ④ 属性面读写同一状态
+  ST_CHECK(area.set_property("read_only", "false"));
+  ST_CHECK(!area.read_only());
+  const auto readable = area.get_property("read_only");
+  ST_REQUIRE(readable.has_value());
+  ST_CHECK_EQ(*readable, std::string("false"));
+  // 语义面：只读时 editable=false（但组件仍在场、仍可读）
+  area.set_read_only(true);
+  ST_CHECK(!area.semantics_flags().editable);
+  ST_CHECK(area.semantics_flags().visible);
 }
