@@ -758,6 +758,73 @@ struct FrameworkFlags {
   return out;
 }
 
+/// 组装 C++ 与 C **两套**编译标志（顺序即语义，见下方注释）。
+///
+/// 抽成函数的理由（结构评审 P2）：`compile_units` 原先在一个函数里同时承担
+/// 「标志组装」「增量判定」「缓存查询」「并发调度」「错误汇总」五件事（349 行）。
+/// 这是其中最独立的一段——纯计算、不碰文件系统、可单独推敲。
+/// 顺序语义仍然是这里的核心不变量，故注释随代码一起搬过来。
+struct LanguageFlags {
+  std::vector<std::string> cxx{};  ///< C++ 标志（PCH 建立与 C++ 单元共用，顺序必须一致）
+  std::vector<std::string> c{};    ///< C 标志（`c_flags` + 档位 + 宏 + 包含路径）
+};
+
+[[nodiscard]] auto build_language_flags(const Manifest& manifest, const BuildOptions& options,
+                                        const std::vector<std::string>& include_dirs,
+                                        const std::vector<std::string>& target_defines,
+                                        const std::vector<std::string>& profile_flags_list,
+                                        const ResolvedToolchain& toolchain) -> LanguageFlags {
+  // 顺序语义：工程全局严格集（清单 `flags`）在前，**分档标志在后**——
+  // 分档可以针对优化等级做有据可查的例外（如优化档关闭 GCC 误报的 -Wnull-dereference）。
+  // **C 与 C++ 各自一套语言标志**：`manifest.flags` 是本工程的 *C++* 严格集
+  // （含 `-Wnon-virtual-dtor`/`-Woverloaded-virtual` 这类 C++ 专属告警），给 C 源会直接报
+  // 「option is valid for C++ but not for C」。因此 C 源只取 `c_flags` + 档位 + 宏 + 包含路径；
+  // 想让自家 C 源也严格，就在 `c_flags` 里显式写 `-Wall -Werror`（第三方源则另有 `-w`）。
+  LanguageFlags out;
+  out.cxx.push_back("-std=c++20");
+  for (const auto& item : manifest.flags) out.cxx.push_back(item);
+  for (const auto& item : options.extra_flags) out.cxx.push_back(item);
+  for (const auto& item : manifest.defines) out.cxx.push_back(std::format("-D{}", item));
+  for (const auto& item : target_defines) out.cxx.push_back(std::format("-D{}", item));
+  for (const auto& dir : include_dirs) out.cxx.push_back(std::format("-I{}", dir));
+  for (const auto& item : profile_flags_list) out.cxx.push_back(item);
+
+  for (const auto& item : manifest.c_flags) out.c.push_back(item);
+  for (const auto& item : options.extra_flags) out.c.push_back(item);
+  for (const auto& item : manifest.defines) out.c.push_back(std::format("-D{}", item));
+  for (const auto& item : target_defines) out.c.push_back(std::format("-D{}", item));
+  for (const auto& dir : include_dirs) out.c.push_back(std::format("-I{}", dir));
+  for (const auto& item : profile_flags_list) out.c.push_back(item);
+  // `-x c` 强制按 C 编译：同一个编译器二进制即可，无需第二套工具链
+  // （MSVC 由扩展名定语言，翻译层会把这两个参数丢掉，见 `translate_flags`）
+  out.c.push_back("-x");
+  out.c.push_back("c");
+
+  // 编译器族翻译：清单恒为跨平台写法，差异在这里落到具体编译器。
+  // 必须在**缓存键与命令行之前**完成：两者必须来自同一份标志。
+  if (toolchain.kind == CompilerKind::Msvc) {
+    std::vector<std::string> dropped;
+    out.cxx = translate_flags(toolchain.kind, out.cxx, &dropped);
+    out.c = translate_flags(toolchain.kind, out.c, nullptr);
+    if (!dropped.empty()) {
+      // 不静默：这些开关在 MSVC 上没有等价物，"以为还在检查"比"没检查"更危险
+      std::string listed;
+      for (const auto& item : dropped) listed.append(" ").append(item);
+      log::info("MSVC 下无等价标志（已丢弃 {} 项）:{}", dropped.size(), listed);
+    }
+  }
+  const auto add_dialect_flags = [&toolchain](std::vector<std::string>& list,
+                                              SourceLanguage language) {
+    const auto pins = dialect_flags(toolchain.kind, language);
+    list.insert(list.end(), pins.begin(), pins.end());
+  };
+  add_dialect_flags(out.cxx, SourceLanguage::Cxx);
+  add_dialect_flags(out.c, SourceLanguage::C);
+
+  // 重名与包含路径校验放在这里（原先紧跟在组装之后），保持"组装即校验"的一处性。
+  return out;
+}
+
 [[nodiscard]] auto compile_units(const Manifest& manifest, const BuildOptions& options,
                                  const std::vector<CompileUnit>& units,
                                  const std::vector<std::string>& profile_flags_list,
@@ -781,46 +848,11 @@ struct FrameworkFlags {
   // （含 `-Wnon-virtual-dtor`/`-Woverloaded-virtual` 这类 C++ 专属告警），给 C 源会直接报
   // 「option is valid for C++ but not for C」。因此 C 源只取 `c_flags` + 档位 + 宏 + 包含路径；
   // 想让自家 C 源也严格，就在 `c_flags` 里显式写 `-Wall -Werror`（第三方源则另有 `-w`）。
-  std::vector<std::string> flags;  // C++ 标志（PCH 建立与 C++ 单元共用，顺序必须一致）
-  flags.push_back("-std=c++20");
-  for (const auto& item : manifest.flags) flags.push_back(item);
-  for (const auto& item : options.extra_flags) flags.push_back(item);
-  for (const auto& item : manifest.defines) flags.push_back(std::format("-D{}", item));
-  for (const auto& item : target_defines) flags.push_back(std::format("-D{}", item));
-  for (const auto& dir : include_dirs) flags.push_back(std::format("-I{}", dir));
-  for (const auto& item : profile_flags_list) flags.push_back(item);
-
-  std::vector<std::string> c_flags;
-  for (const auto& item : manifest.c_flags) c_flags.push_back(item);
-  for (const auto& item : options.extra_flags) c_flags.push_back(item);
-  for (const auto& item : manifest.defines) c_flags.push_back(std::format("-D{}", item));
-  for (const auto& item : target_defines) c_flags.push_back(std::format("-D{}", item));
-  for (const auto& dir : include_dirs) c_flags.push_back(std::format("-I{}", dir));
-  for (const auto& item : profile_flags_list) c_flags.push_back(item);
-  // `-x c` 强制按 C 编译：同一个编译器二进制即可，无需第二套工具链
-  // （MSVC 由扩展名定语言，翻译层会把这两个参数丢掉，见 `translate_flags`）
-  c_flags.push_back("-x");
-  c_flags.push_back("c");
-
-  // 编译器族翻译：清单恒为跨平台写法，差异在这里落到具体编译器。
-  // 必须在**缓存键与命令行之前**完成：两者必须来自同一份标志。
-  if (toolchain.kind == CompilerKind::Msvc) {
-    std::vector<std::string> dropped;
-    flags = translate_flags(toolchain.kind, flags, &dropped);
-    c_flags = translate_flags(toolchain.kind, c_flags, nullptr);
-    if (!dropped.empty()) {
-      // 不静默：这些开关在 MSVC 上没有等价物，"以为还在检查"比"没检查"更危险
-      std::string listed;
-      for (const auto& item : dropped) listed.append(" ").append(item);
-      log::info("MSVC 下无等价标志（已丢弃 {} 项）:{}", dropped.size(), listed);
-    }
-  }
-  const auto add_dialect_flags = [&toolchain](std::vector<std::string>& list, SourceLanguage language) {
-    const auto pins = dialect_flags(toolchain.kind, language);
-    list.insert(list.end(), pins.begin(), pins.end());
-  };
-  add_dialect_flags(flags, SourceLanguage::Cxx);
-  add_dialect_flags(c_flags, SourceLanguage::C);
+  const LanguageFlags language_flags = build_language_flags(manifest, options, include_dirs,
+                                                            target_defines, profile_flags_list,
+                                                            toolchain);
+  std::vector<std::string> flags = language_flags.cxx;
+  std::vector<std::string> c_flags = language_flags.c;
 
   const std::string build_dir = fs::join(
       manifest.directory,
@@ -1109,6 +1141,35 @@ struct FrameworkFlags {
   return done.load();
 }
 
+/// 解析要链接的系统库（结构评审 P2：从 `link` 里抽出的纯计算段）。
+///
+/// 两条规则，都很容易被"顺手改错"：
+/// 1. **交叉工具链声明了 `system_libs` 就整体接管**——同一份清单要同时服务多平台，
+///    而"本机需要哪些系统库"（Linux 的 pthread/dl/m）对目标可能是错的甚至不存在
+///    （mingw 没有 dl/m，链接直接失败）。接管后不再追加本机默认。
+/// 2. **POSIX 专属库在 Windows 目标上要过滤**（同上：`cannot find -ldl`）。
+[[nodiscard]] auto resolve_system_libraries(const Manifest& manifest,
+                                            const ResolvedToolchain& toolchain)
+    -> std::vector<std::string> {
+  std::vector<std::string> libraries;
+  const bool toolchain_takes_over = toolchain.cross() && !toolchain.system_libs.empty();
+  if (!toolchain_takes_over) {
+    const auto keep = [&toolchain](const std::string& lib) {
+      return !(toolchain.platform == "windows" && (lib == "dl" || lib == "rt"));
+    };
+    for (const auto& lib : manifest.system_libs) {
+      if (keep(lib)) libraries.push_back(lib);
+    }
+    for (const auto& lib : manifest.dependency_system) {
+      if (keep(lib)) libraries.push_back(lib);
+    }
+    const auto defaults = default_system_libs(toolchain.platform);
+    libraries.insert(libraries.end(), defaults.begin(), defaults.end());
+  }
+  libraries.insert(libraries.end(), toolchain.system_libs.begin(), toolchain.system_libs.end());
+  return libraries;
+}
+
 [[nodiscard]] auto link(const Manifest& manifest, const BuildOptions& options,
                         const std::vector<CompileUnit>& units, const std::string& output,
                         const std::vector<std::string>& profile_flags_list,
@@ -1119,27 +1180,7 @@ struct FrameworkFlags {
   }
   if (auto status = fs::ensure_parent(output); !status) return forward_error(status.error());
 
-  // 系统库：**交叉工具链声明了 system_libs 就整体接管**——
-  // 同一份清单要同时服务多平台，而"本机需要哪些系统库"（Linux 的 pthread/dl/m）
-  // 对目标可能是错的甚至不存在（mingw 没有 dl/m，链接直接失败）。
-  // 接管后不再追加本机默认，避免把宿主的东西塞进目标产物。
-  std::vector<std::string> libraries;
-  const bool toolchain_takes_over = toolchain.cross() && !toolchain.system_libs.empty();
-  if (!toolchain_takes_over) {
-    for (const auto& lib : manifest.system_libs) {
-      // POSIX 专属库在 Windows 目标不存在（mingw 没有 dl/rt），照单全收会直接
-      // 链接失败（cannot find -ldl）；同一份清单要同时服务多平台，在这里过滤。
-      if (toolchain.platform == "windows" && (lib == "dl" || lib == "rt")) continue;
-      libraries.push_back(lib);
-    }
-    for (const auto& lib : manifest.dependency_system) {
-      if (toolchain.platform == "windows" && (lib == "dl" || lib == "rt")) continue;
-      libraries.push_back(lib);
-    }
-    const auto defaults = default_system_libs(toolchain.platform);
-    libraries.insert(libraries.end(), defaults.begin(), defaults.end());
-  }
-  libraries.insert(libraries.end(), toolchain.system_libs.begin(), toolchain.system_libs.end());
+  const std::vector<std::string> libraries = resolve_system_libraries(manifest, toolchain);
 
   std::vector<std::string> args;
   // MSVC 专用：消费 PCH 的对象要求链接包含 **PCH 创建对象**（`/Yc` 的产物，
