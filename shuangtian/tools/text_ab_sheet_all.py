@@ -115,6 +115,11 @@ def main() -> int:
         print("没有可拼的页")
         return 1
 
+    # 输出目录自建：否则首次使用（目标目录还不存在）会直接 `FileNotFoundError`
+    # ——实测踩到；仓库里其他量具（`text_ab_shot.mjs` 等）同样自建父目录。
+    out_path = pathlib.Path(out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
     width = max(img.width for _, img in images)
     gap = 26 * zoom
     total = sum(img.height for _, img in images) + gap * (len(images) - 1)
@@ -123,8 +128,8 @@ def main() -> int:
     for _, img in images:
         sheet.paste(img, (0, y))
         y += img.height + gap
-    sheet.save(out)
-    print(f"已写 {out}（{sheet.width}x{sheet.height}，{len(images)} 页："
+    sheet.save(out_path)
+    print(f"已写 {out_path}（{sheet.width}x{sheet.height}，{len(images)} 页："
           f"{', '.join(n for n, _ in images)}）")
     return 0
 
