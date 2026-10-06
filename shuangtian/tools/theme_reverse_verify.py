@@ -177,6 +177,8 @@ def run_test(name: str) -> tuple[bool, str]:
 
 def main() -> int:
     ok = True
+    # 自报条目数（文档不写死这个数字，否则改一点就漂）。
+    print(f"逆向验证：{len(CASES)} 条关键契约\n")
     for label, path, original, reverted, test_name in CASES:
         text = open(path, encoding="utf-8").read()
         if original not in text:
@@ -209,7 +211,7 @@ def main() -> int:
     if not ok:
         print("\n存在未能抓住缺陷的用例，需要修测试或修实现。")
         return 1
-    print("\n全部用例都通过了逆向验证：回退即变红。")
+    print(f"\n全部 {len(CASES)} 条都通过了逆向验证：回退即变红。")
     return 0
 
 
