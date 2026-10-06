@@ -98,20 +98,29 @@ std::string utf8_of(unsigned long cp) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  // 字号用物理像素：与 A/B 对照（逻辑 15 × DPI 1.5）一致。
-  std::vector<double> ppems{22.5};
-  for (int i = 1; i < argc; ++i) ppems.push_back(std::atof(argv[i]));
+  // **参数解析：按前缀分流，不靠"顺序"猜**。
+  // 踩过的坑：早期写成"`--cp` 之后所有数字都是码点"——于是 `--cp 0x30 15` 把 15 当成了
+  // U+000F（画出豆腐块、霜天侧为 0，看起来像崩溃）。现在 `0x…` 一律是码点、
+  // 其余数字一律是物理字号，两种参数可在命令行任意顺序混写。
   std::string path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
   int face_index = 2;
-  std::vector<unsigned long> cps{0x4E00UL, 0x4E2DUL, 0x56FDUL, 0x971CUL, 0x6F22UL, 0x9F98UL,
-                                 0x0041UL, 0x0067UL};
+  std::vector<unsigned long> cps;
+  std::vector<double> ppems;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--font") path = argv[++i];
     else if (a == "--face") face_index = std::atoi(argv[++i]);
-    else if (a == "--cp") cps.clear();
-    else if (!a.empty() && a[0] != '-') cps.push_back(std::strtoul(a.c_str(), nullptr, 0));
+    else if (!a.empty() && a[0] == '-') continue;
+    else if (a.size() > 2U && a[0] == '0' && (a[1] == 'x' || a[1] == 'X')) {
+      cps.push_back(std::strtoul(a.c_str(), nullptr, 0));
+    } else {
+      ppems.push_back(std::atof(a.c_str()));
+    }
   }
+  if (cps.empty()) {
+    cps = {0x4E00UL, 0x4E2DUL, 0x56FDUL, 0x971CUL, 0x6F22UL, 0x9F98UL, 0x0041UL, 0x0067UL};
+  }
+  if (ppems.empty()) ppems = {22.5};
   const float scale = 1.5f;
 
   FT_Library library = nullptr;
