@@ -39,7 +39,6 @@
 | `text_quality_probe.cpp` | **文字质量量尺**：字形覆盖率矩阵（ASCII 直接看轮廓连续性）+ 笔画横截面（宽度一致性：沿长 sd/质心漂移/过渡像素）+ **覆盖率档位直方图**（50% 像素过多 = 拟合把边缘推进了像素正中间）；支持与浏览器截图对照 |
 | `lcd_ink_probe.cpp` | **ink 口径分解探针**：逐字形打印「亚像素 vs 灰度」的逐像素平均偏差（滤波开/关两栏），用于定位 ink 口径超阈的构成（2026-10-02 用它确认超阈来自滤波摊墨而非字形走样） |
 | `text_sharpness_probe.cpp` | **全组合锐度量尺**：同一段真实界面文本按 (亚像素 on/off) × (LCD 滤波 on/off) × (拟合 off/light/normal) × (画布 DPI) 全组合渲染，逐组合报 `dark/solid/mid/mid(solid)/ink`。**画布 DPI 口径必须与实际一致**——2026-10-04 的第一次测量就是口径错位才漏掉了真缺陷 |
-| `text_ab_probe.cpp` + `text_ab_report.py` | **与浏览器逐像素 A/B**：同一对照串、同色、同字号，霜天侧落 PNG，浏览器侧 `edge --headless --force-device-scale-factor=1.5 --screenshot`；报告按覆盖率口径（相对背景与前景的投影）给出 `peak/solid/mid/half/mid(solid)/ink`，口径一致才可比 |
 | `text_diff_report.py` | **差异分档定位**：把霜天与浏览器图按最优位移对齐后，按覆盖率分档（实心/深过渡/半覆盖/浅过渡/极浅）报差异——先对齐再比，否则 4 物理像素的基线差会把所有过渡带指标污染成噪声 |
 | `text_transfer_report.py` | **覆盖率传递曲线拟合**：按霜天的覆盖率分箱看浏览器覆盖率的中位数与幂律/线性拟合——用来区分「几何差」与「色调映射差」，两者的修法完全不同 |
 | `text_preblend_fit.py` | **预混合参数寻优**：把 Skia/ClearType 式 `a^gamma` + 对比度拉伸施加到现有覆盖率上，按 `mean|Δ|` 排序选参数。⚠ 它的“预混合收益 < 2%，不值得做”结论建立在**反解口径**上，已在 2026-10-04 被推翻（详见 DESIGN §4.3.6）；该方向现在**重新开放**：参照比我们黑 ⇒ 该往**加墨**走 |
@@ -72,6 +71,15 @@
 | `st_gdb_probe.py` | 崩溃现场信息提取 |
 | `st_shot_region.py` | 指定区域截图 |
 | `check_docs.py` | **文档引用一致性检查**：扫全部文档/源码里的 `DESIGN.md §X` / `CONVENTIONS.md §X` 引用，确认目标章节真的存在；并核对若干“旧值已清零”与“新内容已到位”。改了章节号或文档结构后跑一下 |
+| `gen_text_ab.py` | **文字 A/B 对照的单一真源**：生成两侧的 HTML / C++ 行表 / JSON 元数据（字符集页 + 字号阶梯页）。三份表手工维护必然漂移，而漂移出来的错位会被读成"渲染差异" |
+| `text_ab_shot.mjs` | **浏览器侧参照截图**（真窗口 headed + Xvfb，非 headless）+ 导出逐行**实际字体归属**（CDP）与 DOM 像素框。字体不同源时量到的是字体差异——`text_ab_diff.py` 会据此直接报错 |
+| `text_ab_diff.py` | **逐带 A/B 量化**：两侧各自按行投影切带、按序配对（两侧基线口径不同源，@15px/1.5 差 7.8 物理像素），逐通道覆盖率投影。报墨量/实心/过渡三个比值 + 带高带宽比 |
+| `text_ab_sheet.py` | **人眼对照图**：上=霜天、下=浏览器，逐行配对、最近邻放大（不插值，避免伪造锐度） |
+| `text_ab_sweep.py` | **档位扫描**：同一套口径跑各候选档（fit/gamma/滤波/加墨），输出三类字的墨量/实心/过渡比 |
+| `freetype_ink_decompose.cpp` | **机制拆解**：2×2（CFF hint 与 stem darkening 各开/关）逐字形对账，回答"差距来自哪个机制" |
+| `glyph_outline_compare.cpp` | **轮廓几何对照**：霜天 CFF/TTF 解释器 vs FreeType，比填充面积/周长/包围盒（实测 1.0000） |
+| `stems_probe.cpp` | **hints 验收入口**：逐字形报字体自带提示数、接上轮廓点数、参与拟合数 |
+| `stem_darkening_probe.cpp` | **加墨曲线测量台**：FreeType 侧逐样本开/关加墨的墨量比（确认 `darkening-parameters` 的实际效果） |
 | `visual_assert_e2e.py` | **视觉断言原语端到端**：真实应用上验证 `capture.hash`（稳定性/区域敏感）与 `visual.diff`（写基线/同帧零差异/改动检出/tolerance/错误码） |
 | `events_e2e.py` | **事件流端到端**：验证订阅后 `ui.changed` 携带 changed 清单（set/invoke/input.text 三路）且 version 递增 |
 | `split_view_e2e.py` | **SplitView 端到端**：真实应用上验证初始比例/拖拽改比例/越界夹取/动作面/截图留证 |

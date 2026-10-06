@@ -232,6 +232,8 @@ struct FontData {
   std::mutex cff_mutex{};
   std::mutex outline_mutex{};
   std::unordered_map<GlyphId, std::shared_ptr<const raster::Path>> outlines{};
+  std::mutex hints_mutex{};
+  std::unordered_map<GlyphId, std::vector<StemHint>> hints{};
 
   [[nodiscard]] auto span() const noexcept -> std::span<const std::uint8_t> { return bytes; }
 
@@ -1293,6 +1295,9 @@ struct Type2State {
   float width{0.0f};
   int stems{0};
   bool width_seen{false};
+  /// 笔画提示的收集口（nullptr = 不收集，仅出轮廓）。
+  /// 与 `path` 在同一次 charstring 解释中产出——**不重复解释**，也就不存在两次结果不一致。
+  std::vector<StemHint>* hints{nullptr};
 };
 
 [[nodiscard]] auto cff_bias(std::size_t count) noexcept -> std::size_t {
@@ -1326,12 +1331,29 @@ auto type2_take_width(Type2State& state, std::size_t expected) -> void {
   }
 }
 
-auto type2_take_stems(Type2State& state) -> void {
+auto type2_take_stems(Type2State& state, bool vertical) -> void {
   if (!state.width_seen) {
     state.width_seen = true;
     if (state.stack.size() % 2 != 0 && !state.stack.empty()) {
       state.width = static_cast<float>(state.priv->nominal_width_x) + state.stack.front();
       state.stack.erase(state.stack.begin());
+    }
+  }
+  // **记录笔画提示**（`vstem`/`hstem` 的操作数是"成对的位置与宽度"）。
+  //
+  // 位置相对**当前点 y**（Type2 规格：stem hints 的坐标基于 rmoveto 之前的临时原点），
+  // 宽度可为负（表示 bottom/top 顺序相反），因此统一取 min/max 归一。
+  //
+  // 为什么要它们：CFF charstring **不存标准宽度**（与 Type1 不同），宽度信息只存在于
+  // stem hints 里；而按轮廓几何反推笔画实测召回只有 ~19%，于是同一字里只有一部分笔画
+  // 被吸附、另一部分留着分数相位——那正是"线条粗细不均匀"的来源。
+  if (state.hints != nullptr) {
+    const std::size_t count = state.stack.size() / 2;
+    for (std::size_t k = 0; k < count; ++k) {
+      const float a = state.stack[k * 2];
+      const float b = state.stack[k * 2 + 1];
+      state.hints->push_back(StemHint{state.y + std::min(a, a + b), state.y + std::max(a, a + b),
+                                      vertical});
     }
   }
   state.stems += static_cast<int>(state.stack.size() / 2);
@@ -1376,7 +1398,7 @@ auto type2_curve(Type2State& state, float dx1, float dy1, float dx2, float dy2, 
   const auto size = [&state]() noexcept { return state.stack.size(); };
   switch (ext) {
     case 0: case 1: case 2:  // dotsection / vstem3 / hstem3（已废弃，按提示算子处理）
-      type2_take_stems(state);
+      type2_take_stems(state, ext == 1);
       return ok();
     case 3: case 4: {  // and / or
       float b = 0.0f;
@@ -1605,11 +1627,12 @@ auto type2_curve(Type2State& state, float dx1, float dy1, float dx2, float dy2, 
       case 3:
       case 18:
       case 23:  // hstem / vstem / hstemhm / vstemhm
-        type2_take_stems(state);
+        // 方向：`vstem`(3) 与 `vstemhm`(23) 是竖笔画；`hstem`(1) 与 `hstemhm`(18) 是横笔画。
+        type2_take_stems(state, op == 3 || op == 23);
         break;
       case 19:
       case 20: {  // hintmask / cntrmask
-        type2_take_stems(state);
+        type2_take_stems(state, false);
         const std::size_t mask_bytes = (static_cast<std::size_t>(state.stems) + 7) / 8;
         if (i + mask_bytes > code.size()) return unexpected(ErrorCode::Parse, "CFF hintmask 截断");
         i += mask_bytes;
@@ -1810,7 +1833,8 @@ auto type2_curve(Type2State& state, float dx1, float dy1, float dx2, float dy2, 
   return ok();
 }
 
-[[nodiscard]] auto outline_cff(FontData& data, GlyphId id, raster::Path& out) -> Status {
+[[nodiscard]] auto outline_cff(FontData& data, GlyphId id, raster::Path& out,
+                               std::vector<StemHint>* hints = nullptr) -> Status {
   const Status ready = ensure_cff(data);
   if (!ready) return ready;
   const CffTable& table = data.cff;
@@ -1830,6 +1854,7 @@ auto type2_curve(Type2State& state, float dx1, float dy1, float dx2, float dy2, 
   state.fd = fd;
   state.local_bias = cff_bias(priv->subrs.count());
   state.global_bias = cff_bias(table.global_subrs.count());
+  state.hints = hints;
   const Status status = type2_exec(state, code, 0);
   if (!status) return status;
   out = std::move(state.path);
@@ -1979,6 +2004,12 @@ auto FontFace::path() const -> const std::string& {
   return data_->value.path;
 }
 
+auto FontFace::is_cff() const noexcept -> bool {
+  if (data_ == nullptr) return false;
+  const FontData& data = data_->value;
+  return !data.glyf.present && data.table(tag_of('C', 'F', 'F', ' ')) != nullptr;
+}
+
 auto FontFace::face_index() const noexcept -> int {
   return data_ == nullptr ? 0 : data_->value.face_index;
 }
@@ -2015,6 +2046,25 @@ auto FontFace::kerning(GlyphId left, GlyphId right) const noexcept -> float {
   const auto it = data_->value.kern.find(key);
   if (it == data_->value.kern.end()) return 0.0f;
   return static_cast<float>(it->second);
+}
+
+auto FontFace::stem_hints(GlyphId id) const -> const std::vector<StemHint>& {
+  static const std::vector<StemHint> kEmpty{};
+  if (data_ == nullptr) return kEmpty;
+  FontData& data = data_->value;
+  {
+    const std::scoped_lock lock(data.hints_mutex);
+    const auto it = data.hints.find(id);
+    if (it != data.hints.end()) return it->second;
+  }
+  // 只在 CFF 字上有提示（`glyf` 真型字体走另一条 hinting 路线，本引擎不实现）。
+  std::vector<StemHint> collected{};
+  if (!data.glyf.present && data.table(tag_of('C', 'F', 'F', ' ')) != nullptr) {
+    raster::Path ignored{};
+    (void)outline_cff(data, id, ignored, &collected);
+  }
+  const std::scoped_lock lock(data.hints_mutex);
+  return data.hints.emplace(id, std::move(collected)).first->second;
 }
 
 }  // namespace st::text

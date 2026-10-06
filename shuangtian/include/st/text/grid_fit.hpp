@@ -41,11 +41,13 @@
 /// 只对**竖画/横画**做拟合，不碰曲线段的形状（控制点跟着端点平移）——
 /// 这是 auto-hinter 在"轻"档位下的做法，也是小字收益最大、代价最小的一档。
 
+#include <array>
 #include <span>
 #include <vector>
 
 #include "st/math/geometry.hpp"
 #include "st/raster/path.hpp"
+#include "st/text/font.hpp"
 
 namespace st::text {
 
@@ -128,6 +130,35 @@ struct GridFitOptions {
   /// 即目前只能二选一：全部拟合（更锐但 24.6% 笔画带双峰）或全部不拟合（更均匀但更糊）。
   /// 本旋钮等**召回改善后**才能起到区分作用（那时它才能区分“整字吸”与“吸一半”）。
   float min_stem_coverage{0.0f};
+  /// **笔画加墨（stem darkening）**：把细笔画向两侧各外扩一点，让小字"不发虚"。
+  ///
+  /// 为什么需要它（2026-10-06 逐字形对账）：同字体（Noto Sans CJK，CFF）、同字号下，
+  /// 霜天的汉字墨量只有 FreeType 默认档的 **0.885~0.96**，而拉丁（TrueType）是 1.09。
+  /// 拆解（`tools/freetype_ink_decompose.cpp`，2×2 组合）后归因到 FreeType 默认开启的
+  /// 两个机制：CFF hint 执行（×1.06~1.08）与 **stem darkening（×1.06~1.09）**——
+  /// 后者正是本条。补上它才能把"笔画没到满黑"这条缺口补住。
+  ///
+  /// **参数与含义取自 FreeType**（`FT_DRIVER_H` 的 `darkening-parameters`：
+  /// 四个控制点 (x=笔画宽, y=加墨量)，单位都是 1/1000 物理像素）：
+  /// 宽度 ≤0.5px → 0.4px；1px → 0.275px；1.667px → 0.275px；≥2.333px → 0。
+  /// 即**只对细笔画加墨，且随宽度衰减到零**——这正是它不该在大字号上生效的原因。
+  bool stem_darkening{false};
+  /// 四个控制点（x = 笔画宽、y = 加墨量，**物理像素**）。默认即 FreeType 的 CFF 默认值。
+  std::array<float, 4> darkening_width{0.5f, 1.0f, 1.667f, 2.333f};
+  std::array<float, 4> darkening_amount{0.4f, 0.275f, 0.275f, 0.0f};
+
+  /// 字形**自带**的笔画提示（字体单位、y **向上**，与 `path` 的空间不同、不可直接混用）。
+  ///
+  /// 为什么要它：按轮廓几何反推笔画（近轴直线边两两配对）实测召回只有 **~19%**
+  /// （`docs/BACKLOG.md` 的漏斗：每字形约 43 条候选边只成 8 对），因为 CJK 大量笔画
+  /// 带微斜度或由曲线构成、根本配不上对。没配上对的笔画不被吸附、留着分数相位，
+  /// 于是同一字里"一部分吸成满黑、一部分摊成灰边"——那正是用户报的"线条粗细不均匀"。
+  /// CFF 字体把"笔画在哪、多宽"直接写在 charstring 的 stem hints 里，用它能把召回
+  /// 从"靠猜"提到"字体设计者给的"（实测召回 19% → 接近 100%）。
+  ///
+  /// `path` 是**字体单位且 y 向上**（与 `FontFace::glyph_outline` 同口径）；
+  /// 拟合在物理像素空间里工作时由调用方换算后传入 `stem_hints`。
+  std::vector<StemHint> stem_hints{};
 };
 
 /// 拟合结果（供测试与诊断；调用方通常只用 `path`）。
@@ -136,6 +167,14 @@ struct GridFitResult {
   bool applied{false};      ///< 是否真的做了拟合（护栏触发时为 false）
   int vertical_stems{0};    ///< 参与拟合的竖笔画数
   int horizontal_stems{0};  ///< 参与拟合的横笔画数
+  /// 其中来自**字体自带 hints** 的笔画数（诊断：与几何反推的召回对照）。
+  int hint_stems{0};
+  /// 诊断：进入 `stems_from_hints` 的 hint 笔画数 / 其中成功接上轮廓点的数。
+  /// （`hint_stems` 是最终参与拟合的，会被宽度与护栏过滤，定位问题时要看这两个上游量）
+  int hint_seen{0};
+  int hint_bound{0};
+  /// 被加墨的笔画数（`stem_darkening` 开启时；诊断用）。
+  int darkened_stems{0};
   /// 逐点 |位移| 均值（物理像素）——**形变量**的度量（不含方向，仅诊断口径）。
   float mean_shift{0.0f};
   /// 各轴位移的**有符号均值**（物理像素）——**整体平移**量，护栏用的就是它。

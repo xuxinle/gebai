@@ -17,6 +17,9 @@ struct Stem {
   /// 两侧边缘各自的点（`raw_points()` 索引）——**分开存**，因为两侧要独立吸附。
   std::vector<std::size_t> lo_points{};
   std::vector<std::size_t> hi_points{};
+  /// 是否来自**字体自带 hints**。为什么用标记而不是"前 N 个"：笔画表要按横轴排序，
+  /// 排序后 hint 笔画就散落在各处了——按下标判定会随排序悄悄错位。
+  bool from_font{false};
 };
 
 /// 沿笔画方向是否重叠（同一竖列的多个笔画一起处理）。
@@ -265,6 +268,75 @@ inline constexpr float kWidthClassTolerancePx = 0.35f;
   return edges;
 }
 
+/// 由**字形自带的 stem hints** 构造笔画（已换算到拟合坐标空间）。
+///
+/// 与 `collect_stems`（从轮廓几何反推、近轴直线边两两配对）的关系：
+/// **hints 优先，几何只补缺**。理由：几何法的召回实测只有 ~19%，漏掉的那些笔画
+/// 不被吸附、留着分数相位，直接造成"同一字里粗细不一"；而 hints 是字体设计者写下的
+/// 权威位置与宽度，召回接近 100%。几何法保留用于没有 hints 的字体（`glyf` 轮廓）。
+///
+/// `path` 是**字体单位且 y 向上**，而本空间是物理像素、y 向下——调用方（`TextRenderer`）
+/// 传入的 hints 应先按同一变换换算过（见 `text.cpp` 的 `stems_from_hints` 调用点）。
+auto stems_from_hints(const std::vector<StemHint>& hints, int axis, float grid,
+                                    float max_stem_width, float x_min, float x_max, float y_min,
+                                    float y_max, std::vector<Stem>& out) -> void {
+  out.reserve(out.size() + hints.size());
+  for (const StemHint& hint : hints) {
+    if (hint.vertical != (axis == 0)) continue;
+    const float a = hint.lo * grid;   // 已换算：该空间下 1 物理像素 = `grid` 单位
+    const float b = hint.hi * grid;
+    if (!(b > a)) continue;
+    if (b - a > max_stem_width) continue;   // 过宽部件不是笔画，不吸
+    Stem stem{};
+    if (axis == 0) {
+      stem.edge_lo = std::max(a, x_min);
+      stem.edge_hi = std::min(b, x_max);
+      stem.span_lo = y_min;
+      stem.span_hi = y_max;
+    } else {
+      stem.edge_lo = std::max(a, y_min);
+      stem.edge_hi = std::min(b, y_max);
+      stem.span_lo = x_min;
+      stem.span_hi = x_max;
+    }
+    if (!(stem.edge_hi > stem.edge_lo)) continue;
+    out.push_back(std::move(stem));
+  }
+}
+
+/// 笔画加墨量（物理像素）：按 FreeType 的 `darkening-parameters` 四点折线插值。
+///
+/// 控制点语义：x = 笔画宽度、y = 加墨量（都是物理像素）；超出最后一个点 → 0（不加墨）。
+/// 之所以照搬这条曲线而不是自己定：它是 FreeType CFF 引擎的出厂默认，
+/// 而我们的参照（浏览器）走的就是那条路——**照搬才有可比性**。
+[[nodiscard]] auto stem_darkening_amount(float width_px, const GridFitOptions& options) -> float {
+  const auto& x = options.darkening_width;
+  const auto& y = options.darkening_amount;
+  if (!(width_px > 0.0f)) return 0.0f;
+  if (width_px <= x[0]) return y[0];
+  for (std::size_t index = 1; index < x.size(); ++index) {
+    if (width_px <= x[index]) {
+      const float span = x[index] - x[index - 1];
+      const float t = span > 0.0f ? (width_px - x[index - 1]) / span : 0.0f;
+      return y[index - 1] + t * (y[index] - y[index - 1]);
+    }
+  }
+  return 0.0f;
+}
+
+/// 把一条 hint 笔画的某个边缘接到轮廓点上：取该边缘**容差内**的全部点。
+///
+/// 为什么不能要求"坐标完全相等"：stem hints 是设计者对笔画的**近似描述**，
+/// 与轮廓实际坐标并不逐位吻合（典型差 0.5~3 字体单位）——按等号匹配会几乎找不到点，
+/// 拟合看上去"什么都没做"。
+auto bind_hint_points(const std::vector<math::Point>& points, int axis, float edge,
+                                    float tolerance, std::vector<std::size_t>& out) -> void {
+  for (std::size_t index = 0; index < points.size(); ++index) {
+    const float value = axis == 0 ? points[index].x : points[index].y;
+    if (std::abs(value - edge) <= tolerance) out.push_back(index);
+  }
+}
+
 }  // namespace
 
 auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFitResult {
@@ -302,6 +374,11 @@ auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFi
   const auto edges = collect_edges(path, offsets, 0);  // 两轴共用一套点，边集按轴重建
   if (edges.empty()) return result;
 
+  // 轮廓的横轴范围（两个方向各一份）：用于把 hint 裁到字身内。
+  const math::Rect raw_bounds = path.bounds();
+  const float axis_lo[2] = {raw_bounds.x, raw_bounds.y};
+  const float axis_hi[2] = {raw_bounds.right(), raw_bounds.bottom()};
+
   // 两轴各自的位移表（x 位移给竖笔画、y 位移给横笔画）——**必须分开**：
   // 同一个端点可以既是竖笔画的边、又是横笔画的边，合成一个标量会把它推错方向。
   Shifts shift_x;
@@ -324,16 +401,85 @@ auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFi
   const float max_shift = options.max_shift * grid;            // 采样单位
 
   const float max_slant = options.max_edge_slant * grid;       // 采样单位（按物理像素定义）
-  const int axes = options.mode == GridFitMode::Normal ? 2 : 1;  // Light 只拟合竖笔画
-  for (int axis = 0; axis < axes; ++axis) {
+  // **每一轴的笔画来源分别决定**：
+  //   · 竖笔画（axis 0）：Light/Normal 都做（几何反推 + 自带 hints 都可用）；
+  //   · 横笔画（axis 1）：只有 Normal 做**几何反推**，但**自带 hints 任何档都采用**。
+  //
+  // 为什么横笔画要给 hints 开口子：hints 是字体设计者写下的权威笔画位置与宽度，
+  // 用它吸附**不会**引入"猜错笔画把字形吸歪"的风险——而那正是 Light 档只做竖笔画的
+  // 原因（横笔画靠几何反推容易把撇捺的横跨误判成一横，形变风险高）。
+  // 而 CJK 的横提示远比竖提示多（实测「霜」19 条提示里 19 条都是横），
+  // 关掉它等于把最有价值的信息挡在门外。
+  const int axes = options.mode == GridFitMode::Normal ? 2 : 1;
+  const bool hints_on_horizontal = true;
+  for (int axis = 0; axis < (hints_on_horizontal ? 2 : axes); ++axis) {
+    if (axis == 1 && axes < 2 && options.stem_hints.empty() && options.mode != GridFitMode::Normal) {
+      continue;   // 没有 hints 可用的 Light 档不做横笔画（与旧行为一致）
+    }
     Shifts& shifts = axis == 0 ? shift_x : shift_y;
-    std::vector<Stem> stems =
-        collect_stems(collect_edges(path, offsets, axis), max_stem_width, max_slant, grid,
-                      result.funnel);
+    // **笔画来源：字体自带 hints 优先，几何反推补缺**（2026-10-06 方案 B）。
+    //
+    // 为什么优先用 hints：几何法（近轴直线边两两配对）的召回实测只有 ~19%，
+    // 漏掉的笔画不被吸附、留着分数相位——那正是“同一字里有的笔画实、有的发灰”。
+    // hints 是字体设计者给的权威位置与宽度，召回接近 100%。
+    // 几何法保留：`glyf` 字体没有 CFF hints，且 hints 偶尔不含某些画笔。
+    std::vector<Stem> stems;
+    stems_from_hints(options.stem_hints, axis, grid, max_stem_width, axis_lo[axis],
+                     axis_hi[axis], axis_lo[axis == 0 ? 1 : 0], axis_hi[axis == 0 ? 1 : 0], stems);
+    for (Stem& stem : stems) stem.from_font = true;
+    if (axis == 0 || options.mode == GridFitMode::Normal) {
+      // 几何法只补 hints **没盖住**的笔画：与已有 hint 横轴重叠过半就视为同一根。
+      std::vector<Stem> geometric =
+          collect_stems(collect_edges(path, offsets, axis), max_stem_width, max_slant, grid,
+                        result.funnel);
+      for (Stem& candidate : geometric) {
+        bool covered = false;
+        for (const Stem& taken : stems) {
+          if (!taken.from_font) continue;
+          const float overlap = std::min(candidate.edge_hi, taken.edge_hi) -
+                                std::max(candidate.edge_lo, taken.edge_lo);
+          if (overlap > (candidate.edge_hi - candidate.edge_lo) * 0.5f) covered = true;
+        }
+        if (!covered) stems.push_back(std::move(candidate));
+      }
+    }
     if (stems.empty()) continue;
     std::ranges::sort(stems, {}, &Stem::edge_lo);
-    // 归组：沿笔画方向重叠者同组（同一竖列的多个笔画要一起动，否则间距会乱）
     std::vector<std::vector<Stem>> groups;
+    // **按整个字形（而不是按组）建宽度类表**——这是结构修复的关键：
+    // 组 = 沿笔画方向重叠的同一竖列，通常只 1~2 条笔画（配对率低）——在组内聚类
+    // 等于什么都没做（类就是自己，`round` 原样）。而“同类笔画”是**跨组**的概念
+    //（同一个字里的两根竖画），所以类表必须跨字形统计。
+    //
+    // 宽度量化只对**几何反推**的笔画做：字体自带 hints 已经给出设计者定义的宽度，
+    // 再去 `round` 反而把"设计上就不同宽"的笔画拉平（与 hints 的本意相反）。
+    std::vector<float> axis_widths;
+    if (options.quantize_width) {
+      axis_widths.reserve(stems.size());
+      for (const Stem& stem : stems) {
+        if (!stem.from_font) axis_widths.push_back((stem.edge_hi - stem.edge_lo) / grid);
+      }
+      std::ranges::sort(axis_widths);
+    }
+    // **把 hint 笔画接到轮廓点上**：hints 与轮廓坐标**并不逐位吻合**
+    // （提示本就是设计者对笔画的近似描述），所以按"距离边缘在容差内的点"认定归属。
+    // 容差取笔画宽度的 1/3（足够吸收提示与轮廓的差距，又不会抳到相邻笔画）。
+    for (Stem& stem : stems) {
+      if (!stem.from_font) continue;
+      result.hint_seen += 1;
+      const float tol = std::max((stem.edge_hi - stem.edge_lo) / 3.0f, grid * 0.34f);
+      bind_hint_points(points, axis, stem.edge_lo, tol, stem.lo_points);
+      bind_hint_points(points, axis, stem.edge_hi, tol, stem.hi_points);
+    }
+    // 一侧都没接上点的 hint 无法驱动任何点，如实丢弃（否则会计入生效数、骗过验收）。
+    const std::size_t before_bind = stems.size();
+    std::erase_if(stems, [](const Stem& stem) {
+      return stem.lo_points.empty() && stem.hi_points.empty();
+    });
+    result.hint_bound += static_cast<int>(before_bind - stems.size());
+    if (stems.empty()) continue;
+    std::ranges::sort(stems, {}, &Stem::edge_lo);
+    groups.clear();
     for (const Stem& stem : stems) {
       bool merged = false;
       for (auto& group : groups) {
@@ -345,16 +491,9 @@ auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFi
       }
       if (!merged) groups.push_back({stem});
     }
-    // **按整个字形（而不是按组）建宽度类表**——这是结构修复的关键：
-    // 组 = 沿笔画方向重叠的同一竖列，通常只 1~2 条笔画（配对率低）——在组内聚类
-    // 等于什么都没做（类就是自己，`round` 原样）。而“同类笔画”是**跨组**的概念
-    //（同一个字里的两根竖画），所以类表必须跨字形统计。
-    std::vector<float> axis_widths;
-    if (options.quantize_width) {
-      axis_widths.reserve(stems.size());
-      for (const Stem& stem : stems) axis_widths.push_back((stem.edge_hi - stem.edge_lo) / grid);
-      std::ranges::sort(axis_widths);
-    }
+    // **hint 笔画数在这里才定**：上面那两处统计把"被宽度/护栏滤掉的 hint"也算进去了。
+    result.hint_stems = static_cast<int>(
+        std::count_if(stems.begin(), stems.end(), [](const Stem& s) { return s.from_font; }));
     for (const auto& group : groups) {
       // **宽度量化 + 单边锚定**（而不是整条笔画平移，也不是两侧各自吸整数）：
       // 只平移的话另一侧仍在分数相位上（只解决一半）；两侧各自独立吸整数又会
@@ -367,7 +506,8 @@ auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFi
       // 改法是**先按宽度聚类，每类统一取一个整数**（类内宽度差 ≤ `kWidthClassPx`，
       // 远小于 1px，所以设计上真不同宽的主笔与细横仍分属不同类、不会被拉平）。
       for (const Stem& stem : group) {
-        const bool quantize = options.quantize_width;
+        // hint 笔画不量化宽度：hints 本身就是设计者定义的宽度（见上）。
+        const bool quantize = options.quantize_width && !stem.from_font && !axis_widths.empty();
         const float quantized =
             quantize ? quantized_width_for((stem.edge_hi - stem.edge_lo) / grid, axis_widths) * grid
                      : 0.0f;
@@ -395,6 +535,22 @@ auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFi
         //
         // 未量化时不加：那时两条边各自吸到最近网格（位移 ≤ grid/2，
         // 已在 `max_shift` 范围内），加宽预算只会白改墨量。
+        // **笔画加墨（stem darkening）**：两条边各自向**外**挪 `amount/2`。
+        //
+        // 为什么按"每条笔画"而不是"整个字形"：FreeType 的加墨量是**按该笔画的宽度**
+        // 查表得到的（细笔画加得多、宽笔画不加），加墨也**只加在笔画上**、不动字腔。
+        // 外扩方向由边缘在笔画哪一侧决定——`lo` 往外是负方向、`hi` 往外是正方向。
+        // 加墨量与吸附位移**分开记账**：护栏只该管吸附（几何对齐），加墨是刻意的形变。
+        float darken_lo = 0.0f;
+        float darken_hi = 0.0f;
+        if (options.stem_darkening) {
+          const float amount = stem_darkening_amount((stem.edge_hi - stem.edge_lo) / grid, options);
+          if (amount > 0.0f) {
+            darken_lo = -amount * 0.5f * grid;
+            darken_hi = amount * 0.5f * grid;
+            result.darkened_stems += 1;
+          }
+        }
         const float budget = quantize ? max_shift + grid * 0.5f : max_shift;
         // 两侧要么**一起动**、要么都不动。
         //
@@ -402,8 +558,8 @@ auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFi
         // 远边被拒，这条笔画就只被**平移**而没被改宽——既拿不到网格对齐，
         // 又把字形推了一点，净效果是更糊。
         if (std::abs(lo_delta) <= budget && std::abs(hi_delta) <= budget) {
-          for (const std::size_t point : stem.lo_points) record(shifts, point, lo_delta);
-          for (const std::size_t point : stem.hi_points) record(shifts, point, hi_delta);
+          for (const std::size_t point : stem.lo_points) record(shifts, point, lo_delta + darken_lo);
+          for (const std::size_t point : stem.hi_points) record(shifts, point, hi_delta + darken_hi);
         } else {
           // **预算不足时如实上报**（2026-10-04 新增，为定位“线条粗细不均匀”）。
           //

@@ -21,6 +21,7 @@
 #include "st/test/test.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <memory>
 #include <string>
@@ -510,4 +511,70 @@ ST_TEST(grid_fit_snaps_to_physical_pixel_lattice_at_any_supersample) {
   // 不被当作笔画——这正是“阈值必须乘 grid”的反面证据。
   ST_CHECK(st::text::grid_fit(wide(2.0f), {.mode = GridFitMode::Light, .grid = 1.0f}).vertical_stems ==
            0);
+}
+
+/// ③ **字体自带的 stem hints 必须真的进入拟合**（方案 B 的回归防线）。
+///
+/// 背景：CFF（OTF）字体把"笔画在哪、多宽"写在 charstring 的 `vstem`/`hstem` 里，
+/// 而按轮廓几何反推笔画（近轴直线边两两配对）实测**召回只有 ~19%**——漏掉的笔画
+/// 不被吸附、留着分数相位，正是"同一字里有的笔画实、有的发灰"。本用例钉住：
+///   ① 解释器确实解析出了 hints（字体单位、宽度为正、方向正确）；
+///   ② 这些 hints 在拟合里**被采用**（`hint_seen`/`hint_bound`/`hint_stems` 均非零）。
+///
+/// ⚠ 本用例对"换算口径"特别敏感——实现过程中踩过两次同类错，每次的表现都是
+/// `hint_stems` 恒为 0（看起来像"字体没有 hints"，其实是把提示喂到了错的空间）：
+///   · hint 在 `stems_from_hints` 内部要再乘 `grid`，调用方不得重复乘；
+///   · 亚像素分支的轮廓横轴是 3 倍（`build_path(horizontal=3)`），
+///     hints 必须按**同一空间**换算。
+/// 所以断言用"非零且随字号合理"而不是精确值：精确值会随字体版本变。
+ST_TEST(font_stem_hints_reach_the_fitter) {
+  FontFixture fixture;
+  if (!fixture.ok) return;
+  // 挑一个**确定有 hints** 的汉字（Noto Sans CJK 的「中」有 3 条竖提示）。
+  const char32_t kProbe = U'中';
+  const auto* face = fixture.stack->find_face(kProbe, st::text::FontRole::Proportional);
+  if (face == nullptr) return;
+  const auto glyph = face->glyph_index(kProbe);
+  if (!glyph.has_value()) return;
+  const auto& hints = face->stem_hints(*glyph);
+  if (hints.empty()) return;   // 字体没有 CFF hints（例如换成 TrueType）：本用例不适用
+  std::size_t vertical = 0;
+  for (const auto& hint : hints) {
+    if (!hint.vertical) continue;
+    ++vertical;
+    ST_CHECK(hint.hi > hint.lo);              // 归一后的边界必须有序
+    ST_CHECK(hint.hi - hint.lo > 0.0f);
+  }
+  ST_CHECK(vertical >= 1);
+
+  // ⚠ hints 的**采用**默认关闭（实验能力，见 `text.cpp` 里那段说明）：本用例因此分两段——
+  //    ① 任何时候都断言"解析正确"；
+  //    ② 只有开启 `ST_TEXT_USE_FONT_HINTS` 时才断言"接上了轮廓点"。
+  //    这样开关两态都被钉住，又不会让默认路径依赖一个未定档的能力。
+  const bool hints_enabled = std::getenv("ST_TEXT_USE_FONT_HINTS") != nullptr;
+  TextRenderer renderer(*fixture.stack, 1.0f);
+  renderer.set_subpixel(true);
+  renderer.set_grid_fit(GridFitMode::Normal);
+  // **每次都是新渲染器**：位图缓存按 (face, glyph, 尺寸, 超采样, 拟合模式, 参数桶) 索引，
+  // 同一渲染器重复取同一字形会直接命中缓存、绕过重算。逆向验证时（改坏换算口径后重跑
+  // 同一个可执行文件）曾因此**读到上一轮的位图**、让测试恒绿——那正是"恒绿的护栏"。
+  // 缓存键不含本次的换算实现，所以这里只能换尺寸来强制重算。
+  const auto bitmap = renderer.glyph_bitmap_of(kProbe, 15.0f + static_cast<float>(
+                                                        std::getenv("ST_HINT_SIZE_OFFSET") == nullptr
+                                                            ? 0.0
+                                                            : 0.25));
+  if (bitmap == nullptr) return;
+  st::print("[hint] U+4E2D 提示 {} 条；拟合内 seen={} bound={} 参与={}\n", hints.size(),
+            bitmap->fit_hint_seen, bitmap->fit_hint_bound, bitmap->fit_hint_stems);
+  // 断言到「接上轮廓点」为止，不断言「最终参与拟合的条数 > 0」：
+  // 后者取决于字体给的是哪种提示（CJK 的「中」给的竖提示算下来是整字宽的边框，
+  // 被 `max_stem_width` 正确拒绝——那不是缺陷，是笔画判定的正常结果）。
+  // 而 `bound > 0` 恰好是**换算口径**的判据：口径一错（重复乘 grid、或没跟上
+  // 亚像素的 3 倍横轴），提示边缘会偏出容差、一条都接不上（实测口径错时 seen=3/bound=0）。
+  if (hints_enabled) {
+    ST_CHECK(bitmap->fit_hint_seen > 0);
+    ST_CHECK(bitmap->fit_hint_bound > 0);
+  } else {
+    ST_CHECK_EQ(bitmap->fit_hint_seen, 0);   // 默认路径不得采用 hints（未定档的能力）
+  }
 }

@@ -1,0 +1,186 @@
+{
+ "width": 900.0,
+ "height": 1268.8,
+ "rows": [
+  {
+   "row": 0,
+   "label": "10px 霜天组件画廊 Overview 2026 ABC abc",
+   "size": 10,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": "字号阶梯（同一串逐档）",
+   "top": 4.0
+  },
+  {
+   "row": 1,
+   "label": "11px 霜天组件画廊 Overview 2026 ABC abc",
+   "size": 11,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 73.6
+  },
+  {
+   "row": 2,
+   "label": "12px 霜天组件画廊 Overview 2026 ABC abc",
+   "size": 12,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 143.2
+  },
+  {
+   "row": 3,
+   "label": "13px 霜天组件画廊 Overview 2026 ABC abc",
+   "size": 13,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 212.79999999999998
+  },
+  {
+   "row": 4,
+   "label": "13.5px 霜天组件画廊 Overview 2026 ABC",
+   "size": 13.5,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 282.4
+  },
+  {
+   "row": 5,
+   "label": "14px 霜天组件画廊 Overview 2026 ABC abc",
+   "size": 14,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 352.0
+  },
+  {
+   "row": 6,
+   "label": "15px 霜天组件画廊 Overview 2026 ABC abc",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 421.6
+  },
+  {
+   "row": 7,
+   "label": "16px 霜天组件画廊 Overview 2026 ABC abc",
+   "size": 16,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 491.20000000000005
+  },
+  {
+   "row": 8,
+   "label": "17px 霜天组件画廊 Overview 2026 ABC abc",
+   "size": 17,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 560.8000000000001
+  },
+  {
+   "row": 9,
+   "label": "20px 霜天组件画廊 Overview 2026 ABC abc",
+   "size": 20,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 630.4000000000001
+  },
+  {
+   "row": 10,
+   "label": "24px 霜天组件画廊 Overview 2026 ABC",
+   "size": 24,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 700.0000000000001
+  },
+  {
+   "row": 11,
+   "label": "32px 霜天组件画廊 Overview",
+   "size": 32,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 769.6000000000001
+  },
+  {
+   "row": 12,
+   "label": "48px 霜天组件",
+   "size": 48,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 839.2000000000002
+  },
+  {
+   "row": 13,
+   "label": "（空行）",
+   "size": 13.5,
+   "color": "#0F172A",
+   "mono": true,
+   "bold": false,
+   "group": "等宽字号阶梯",
+   "top": 908.8000000000002
+  },
+  {
+   "row": 14,
+   "label": "13.5px const auto p = x->y;",
+   "size": 13.5,
+   "color": "#0F172A",
+   "mono": true,
+   "bold": false,
+   "group": null,
+   "top": 978.4000000000002
+  },
+  {
+   "row": 15,
+   "label": "15px const auto p = x->y;",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": true,
+   "bold": false,
+   "group": null,
+   "top": 1048.0000000000002
+  },
+  {
+   "row": 16,
+   "label": "17px const auto p = x->y;",
+   "size": 17,
+   "color": "#0F172A",
+   "mono": true,
+   "bold": false,
+   "group": null,
+   "top": 1117.6000000000001
+  },
+  {
+   "row": 17,
+   "label": "20px const auto p = x->y;",
+   "size": 20,
+   "color": "#0F172A",
+   "mono": true,
+   "bold": false,
+   "group": null,
+   "top": 1187.2
+  }
+ ]
+}

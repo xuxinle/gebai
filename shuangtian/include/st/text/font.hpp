@@ -34,6 +34,22 @@ struct FontMetrics {
   std::uint32_t glyph_count{0};
 };
 
+/// 字体**自带**的笔画提示（CFF `hstem`/`vstem`/`hstemhm`/`vstemhm`，字体单位）。
+///
+/// 为什么需要它：CFF（OTF）字体把"笔画在哪、多宽"直接写在 charstring 的 stem hints 里，
+/// 而按轮廓几何反推笔画（两两配对直线边）的**召回只有 ~19%**（实测，见
+/// `docs/BACKLOG.md` 的拟合漏斗）——因为汉字大量笔画带微斜度或由曲线构成，配不上对，
+/// 于是同一字里一部分笔画被吸附、另一部分留着分数相位，正是"线条粗细不均匀"的来源。
+/// 有了自带 hints，笔画位置与宽度都是**字体设计者给的**，召回不再靠猜。
+///
+/// `lo`/`hi` 是横轴（vstem 为 x、hstem 为 y）上的两个边缘；**顺序不保证**（取 `min`/`max`）。
+/// 无 hint 的字体（TrueType `glyf` 轮廓）返回空——那时仍走几何拟合那条路。
+struct StemHint {
+  float lo{0.0f};
+  float hi{0.0f};
+  bool vertical{true};  ///< true = `vstem`（竖笔画，横轴是 x）
+};
+
 /// 单字形度量（字体单位）。
 struct Glyph {
   GlyphId id{0};
@@ -77,6 +93,15 @@ class FontFace {
   /// 加载时使用的字体文件路径。
   [[nodiscard]] auto path() const -> const std::string&;
 
+  /// 是否是 **CFF（OTF）轮廓**字体（`glyf` 缺席且有 `CFF ` 表）。
+  ///
+  /// 为什么需要它：**笔画加墨（stem darkening）只该对 CFF 字体做**——
+  /// 这是 FreeType 自身的规则（`cff` 引擎的 `no-stem-darkening` 默认为 FALSE；
+  /// 而 TrueType 的指令本身就保证笔画不为零宽，再加墨会过粗）。
+  /// 实测（2026-10-06）：同字号下 DejaVu（真型）已经比浏览器**深 1.09**，
+  /// 而 Noto Sans CJK（CFF）只有 0.89——不对字体类型分档就会"补了 CFF、过深了 TTF"。
+  [[nodiscard]] auto is_cff() const noexcept -> bool;
+
   /// 加载时使用的 face 序号。
   [[nodiscard]] auto face_index() const noexcept -> int;
 
@@ -87,6 +112,12 @@ class FontFace {
 
   /// `kern` 表（格式 0）字距调整，**字体单位**；无该对返回 0（`noexcept`，不报错）。
   [[nodiscard]] auto kerning(GlyphId left, GlyphId right) const noexcept -> float;
+
+  /// 该字形**字体自带**的笔画提示（字体单位；顺序即 charstring 里的出现顺序）。
+  ///
+  /// 仅 CFF（OTF）字体有；`glyf` 轮廓或解释失败时返回空表（调用方回退到几何拟合）。
+  /// 结果按字形缓存（与轮廓缓存同一生命周期）。
+  [[nodiscard]] auto stem_hints(GlyphId id) const -> const std::vector<StemHint>&;
 
  private:
   struct Data;  ///< 内部实现（见 `src/text/font.cpp`；不可变解析结果 + 缓存）

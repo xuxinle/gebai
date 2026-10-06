@@ -381,6 +381,15 @@ class TextRenderer {
   /// 只改墨色深浅；**只提亮不压暗**（拟合主要让字变轻，反向压暗会弄坏本来就对的字）。
   /// 依据与应用层数据见 `app.cpp` 的 `resolve_text_fit` 与 DESIGN「字间不一致」一节。
   void set_ink_compensation(bool enabled) noexcept;
+  /// **笔画加墨（stem darkening）开关**（默认关；`app.cpp` 按需开）。
+  ///
+  /// 开启后，细笔画的两侧各自向**外**挪半个「该笔画的加墨量」——
+  /// 曲线与 FreeType CFF 引擎的 `darkening-parameters` 一致（见 `GridFitOptions`）。
+  /// 它是**几何外扩**而非覆盖率映射：因此与 gamma 正交，两者可以叠加，
+  /// 而且**对小字有效、多大字自动归零**（加墨量随笔画宽衰减到 0）。
+  /// 只在拟合开启时生效（它需要笔画列表）。
+  void set_stem_darkening(bool enabled) noexcept { stem_darkening_ = enabled; }
+  [[nodiscard]] auto stem_darkening() const noexcept -> bool { return stem_darkening_; }
   [[nodiscard]] auto ink_compensation() const noexcept -> bool { return ink_compensation_; }
   [[nodiscard]] auto min_stem_coverage() const noexcept -> float { return min_stem_coverage_; }
   [[nodiscard]] auto stack() const noexcept -> const FontStack& { return *stack_; }
@@ -439,6 +448,15 @@ class TextRenderer {
     /// `funnel.pairs_failed` 大 ⇒ **配对失败**（宽度超 `max_stem_width` / 跨度不重叠）；
     /// `fit_rejected_stems` 大 ⇒ **预算不足**（调 `max_shift`）。
       int fit_stems{0};
+    /// 其中来自**字体自带 hints** 的笔画数。
+    ///
+    /// 为什么要单列：它把“找不到笔画”（几何法召回不足，`fit_stems` 小且本值为 0）
+    /// 与“找到了但推不动”（`fit_rejected_stems` 大）分开，而且能直接验收 hint 路径
+    /// 是否真的生效（CFF 字体上本值应接近该字形的实际笔画数）。
+    int fit_hint_stems{0};
+    /// 诊断：字体给出的 hint 笔画数 / 其中成功接上轮廓点的数（方案 B 的验收入口）。
+    int fit_hint_seen{0};
+    int fit_hint_bound{0};
   /// 本次渲染**是否真的做了拟合**（`GridFitResult::applied`）。
   ///
   /// 与 `fit_stems` 的区别很重要：`fit_stems` 是“找到多少条笔画”，而它才是“这个字形
@@ -506,6 +524,7 @@ class TextRenderer {
   float min_stem_coverage_{-1.0f};
   /// 拟合墨量补偿开关（见 `set_ink_compensation`）。
   bool ink_compensation_{false};
+  bool stem_darkening_{false};
   struct Cache;
   std::unique_ptr<Cache> cache_{};
 };

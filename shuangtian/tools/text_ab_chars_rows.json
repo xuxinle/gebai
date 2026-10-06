@@ -1,0 +1,286 @@
+{
+ "width": 900.0,
+ "height": 625.0,
+ "rows": [
+  {
+   "row": 0,
+   "label": "中文标题：组件画廊·资源管理器",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": "中文字形（简单→复杂）",
+   "top": 4.0
+  },
+  {
+   "row": 1,
+   "label": "一二十丁厂七卜人入八九几儿了力乃刀又",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 25.75
+  },
+  {
+   "row": 2,
+   "label": "三上下个大天大地小口山日月水火木金土",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 47.5
+  },
+  {
+   "row": 3,
+   "label": "中文测试字体渲染清晰组件画廊",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 69.25
+  },
+  {
+   "row": 4,
+   "label": "霜天字体渲染粗细均匀锐利清晰",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 91.0
+  },
+  {
+   "row": 5,
+   "label": "魏蜀黍龘龗爨蠹灩鬱麤齉齾",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 112.75
+  },
+  {
+   "row": 6,
+   "label": "藏彝僰瓯鼍蠡饕餮麒麟麒麟",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 134.5
+  },
+  {
+   "row": 7,
+   "label": "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": "拉丁字母（全量大写）",
+   "top": 156.25
+  },
+  {
+   "row": 8,
+   "label": "abcdefghijklmnopqrstuvwxyz",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": "拉丁字母（全量小写）",
+   "top": 178.0
+  },
+  {
+   "row": 9,
+   "label": "0123456789 !\"#$%&'()*+,-./:;<=>?@",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": "数字与 ASCII 符号",
+   "top": 199.75
+  },
+  {
+   "row": 10,
+   "label": "[]^_`{|}~ \\ / | 0123456789",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 221.5
+  },
+  {
+   "row": 11,
+   "label": "Il1| O0 oO 8B S5 2Z rn m cl dq",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": "易混字形",
+   "top": 243.25
+  },
+  {
+   "row": 12,
+   "label": "AVATAR To Wa fi fl ffi ffl",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": "连字与组合",
+   "top": 265.0
+  },
+  {
+   "row": 13,
+   "label": "标点，。、；：？！“”‘’（）《》—…",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": "中文标点与全角",
+   "top": 286.75
+  },
+  {
+   "row": 14,
+   "label": "全角ＡＢＣａｂｃ１２３　全角空格",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 308.5
+  },
+  {
+   "row": 15,
+   "label": "符号 →←↑↓ ✓✗ ●○■□ ★☆ §¶†‡ °±×÷ ≠≤≥ ∞≈",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": "符号与几何",
+   "top": 330.25
+  },
+  {
+   "row": 16,
+   "label": "路径 src/raster/renderer.cpp:128",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": "混合与界面串",
+   "top": 352.0
+  },
+  {
+   "row": 17,
+   "label": "中英混排 Mixed 中英 2026 版 v0.1.0",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 373.75
+  },
+  {
+   "row": 18,
+   "label": "text #0F172A 正文",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": "颜色 token",
+   "top": 395.5
+  },
+  {
+   "row": 19,
+   "label": "text_muted #56647C 次要",
+   "size": 15,
+   "color": "#56647C",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 417.25
+  },
+  {
+   "row": 20,
+   "label": "text_faint #66768C 辅助",
+   "size": 15,
+   "color": "#66768C",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 439.0
+  },
+  {
+   "row": 21,
+   "label": "primary #2563EB 主色",
+   "size": 15,
+   "color": "#2563EB",
+   "mono": false,
+   "bold": false,
+   "group": null,
+   "top": 460.75
+  },
+  {
+   "row": 22,
+   "label": "常规 霜天组件画廊 Regular",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "group": "字重",
+   "top": 482.5
+  },
+  {
+   "row": 23,
+   "label": "粗体 霜天组件画廊 Bold",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": true,
+   "group": null,
+   "top": 504.25
+  },
+  {
+   "row": 24,
+   "label": "const auto polylines = points[i];",
+   "size": 13.5,
+   "color": "#0F172A",
+   "mono": true,
+   "bold": false,
+   "group": "等宽（代码）",
+   "top": 526.0
+  },
+  {
+   "row": 25,
+   "label": "namespace st::raster { return a->b; }",
+   "size": 13.5,
+   "color": "#0F172A",
+   "mono": true,
+   "bold": false,
+   "group": null,
+   "top": 547.75
+  },
+  {
+   "row": 26,
+   "label": "0123456789 => (){}[];: iIl1|0O",
+   "size": 13.5,
+   "color": "#0F172A",
+   "mono": true,
+   "bold": false,
+   "group": null,
+   "top": 569.5
+  },
+  {
+   "row": 27,
+   "label": "中文注释必须能显示 汉字宽度",
+   "size": 13.5,
+   "color": "#0F172A",
+   "mono": true,
+   "bold": false,
+   "group": null,
+   "top": 591.25
+  }
+ ]
+}

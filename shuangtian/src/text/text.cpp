@@ -12,6 +12,7 @@
 #include "st/core/fs.hpp"
 #include "st/core/font_platform.hpp"
 #include "st/core/hash.hpp"
+#include "st/core/print.hpp"
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
 #include "st/raster/paint.hpp"
@@ -755,6 +756,10 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   // `unsigned long` ≠ `unsigned long long`，而初始化列表要求**所有**元素同一类型——
   // 一个 `1ULL` 会让整条链推导失败（-Werror 下直接编译不过，且只在 Linux/macOS 暴露）。
   const auto ink_bucket = ink_compensation_ ? std::uint64_t{1} : std::uint64_t{0};
+  // **笔画加墨同样进键**：它改的是位图里笔画的宽度（形变），与墨量补偿/gamma 同一类疏漏
+  // ——漏了就会"开了加墨看不出变化"。
+  const auto darken_bucket =
+      (stem_darkening_ && face.is_cff()) ? std::uint64_t{1} : std::uint64_t{0};
   // **亚像素滤波强度也进键**：它直接改位图的子像素值（锐度与彩边的取舍），
   // 漏掉就会“改了 ST_TEXT_LCD_TAPS 看不出变化”（与 gamma/墨量补偿同一类疏漏）。
   std::uint64_t taps_bucket = 0;
@@ -771,7 +776,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
        {static_cast<std::uint64_t>(face.face_index()), static_cast<std::uint64_t>(glyph),
         static_cast<std::uint64_t>(size_bucket), supersample_bucket, gamma_bucket,
         correct_bucket, lcd ? std::uint64_t{1} : std::uint64_t{0}, fit_bucket, fit_shift_bucket,
-        ink_bucket, taps_bucket, static_cast<std::uint64_t>(steps)}) {
+        ink_bucket, darken_bucket, taps_bucket, static_cast<std::uint64_t>(steps)}) {
     key = mix(key, field);
   }
   {
@@ -949,7 +954,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
     // 位图原点是 `floor(bounds)-1`，与轮廓坐标的整数格点相差一个任意小数部分。
     const raster::Path local_unfitted =
         transformed.translated(static_cast<float>(-min_x), static_cast<float>(-min_y));
-    const st::text::GridFitOptions fit_options{.mode = grid_fit_,
+    st::text::GridFitOptions fit_options{.mode = grid_fit_,
                                                // **细笔画才量化宽度**：量化的收益（根笔画落成满黑像素）只存在于
                                                // 「宽度 < 2 物理像素」的字号区间；粗笔画自己就有满黑像素，
                                                // 量化只剩墨量偏差（实测 22px CJK 从 +2.5% 升到 +3.5%）。
@@ -957,10 +962,24 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
                                                // **吸附幅度上限**（物理像素）：见下方常量说明。
                                                .max_shift = fit_max_shift,
                                                .grid = static_cast<float>(supersample)};
+    // 加墨在**指定初始化器之外**单独赋值：`-Werror` 下指定初始化器的顺序必须与
+    // 结构体声明顺序一致，而加墨字段声明在 `grid` 之后——写在列表里就会编译失败。
+    // **加墨只对 CFF 字体**（FreeType 的规则：TrueType 的指令已保证笔画不为零宽，
+    // 再加墨会过粗。实测真型字体本来就比浏览器深 1.09）。
+    fit_options.stem_darkening = stem_darkening_ && face.is_cff();
     // `fit_slant_ == 0` = 不覆盖，用头文件的默认值（不在两处各写一份常数）。
     st::text::GridFitOptions effective_options = fit_options;
     if (fit_slant_ > 0.0f) effective_options.max_edge_slant = fit_slant_;
     if (min_stem_coverage_ >= 0.0f) effective_options.min_stem_coverage = min_stem_coverage_;
+    // **字体自带的笔画提示**（CFF `vstem`/`hstem`）——把"笔画在哪"从猜测换成权威数据。
+    //
+    // 按 `build_path` 的同一变换换算到拟合空间（y 翻转、乘 `scale`），
+    // 并缩放到**拟合坐标空间**（`supersample`）。两条轴分开传：`vertical=true` 的
+    // 横轴是 x（用 `scale * horizontal`），`false` 的横轴是 y（用 `-scale`）。
+    // ⚠ **hints 只在亚像素分支（3× 横轴）注入**，见下方 `local_lcd` 处：
+    //    上面这次拟合跑在 `horizontal=1` 的轮廓上，把 1× 空间的提示喂进去会与
+    //    “该空间的 1 物理像素 = 3 子像素”口径冲突（`stems_from_hints` 按 `options.grid`
+    //    把 hint 乘到空间单位里）；而亚像素分支会重建 3× 空间及其提示。
     const st::text::GridFitResult fit_result = st::text::grid_fit(local_unfitted, effective_options);
     const raster::Path& fitted = fit_result.path;
     // 把“本可以对齐却没对”的漏网报出来（见 `GlyphBitmap::fit_rejected_stems`）：
@@ -968,6 +987,9 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
     bitmap->fit_rejected_stems = fit_result.rejected_stems;
     bitmap->fit_worst_rejected_shift = fit_result.worst_rejected_shift;
     bitmap->fit_stems = fit_result.vertical_stems + fit_result.horizontal_stems;
+    bitmap->fit_hint_stems = fit_result.hint_stems;
+    bitmap->fit_hint_seen = fit_result.hint_seen;
+    bitmap->fit_hint_bound = fit_result.hint_bound;
     bitmap->fit_applied = fit_result.applied;
     bitmap->fit_funnel = fit_result.funnel;
     if (width > 0 && height > 0 && width <= 4096 && height <= 4096) {
@@ -1013,10 +1035,85 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
         // （症状：文字像被切成两半。实测就踩到了，靠 1:1 截图对比定位）。
         // 只因为“反正是同一个轮廓”而换成 scaled 是错的：那两个函数的语义不同。
         raster::Path local = build_path(static_cast<float>(kSubpixelColumns));
+        // **亚像素空间里用字体自带的笔画提示重跑一次拟合**（方案 B 的落点）。
+        //
+        // 为什么必须在这里重跑而不是沿用上面那次：上面那次拟合跑在 `horizontal=1`
+        // 的轮廓上（1 物理像素 = `supersample` 单位），而本分支的轮廓水平放大了 3 倍
+        // （1 物理像素 = 3·supersample 单位）。hints 是按**物理像素**给的
+        // （`stems_from_hints` 内部乘 `options.grid` 换算），在 3× 空间里必须重新换算，
+        // 否则提示边缘会偏出三个子像素、`bind_hint_points` 接不上任何点
+        // （实测症状：`fit_hint_seen` 恒为 0，看起来像"hint 没生效"，其实是换算口径错）。
+        //
+        // 位移的**水平 ×3** 由 `options.grid` 自身承担——吸附目标、宽度阈值、护栏预算
+        // 全部按物理像素定义再乘 `grid`，所以这里只需换 hint 的换算与轮廓。
+        // **字体自带的 hints：默认关闭（实验能力）**。
+        //
+        // 实测结论（2026-10-06，`docs/BACKLOG.md` P1 有完整数据）：解析、绑定、参与拟合
+        // 三条链路都通了（`fit_hint_seen/bound/stems` 非零），但**收益极小**
+        // （实心像素比 1.033 → 1.013），而且会破坏一条核心不变式——
+        // `grid_fit_combines_with_subpixel_without_distortion` 报出「墨迹贴到位图上下边」
+        // 与墨量变化 >6%：位图网格是**拟合之前**按未拟合轮廓定的、按设计不能随拟合变，
+        // 而 hints 带来的额外位移把轮廓推出了那个预计算的包围盒。
+        //
+        // 语义错配是根因：hints 的正确用法是**先把提示吸附到网格、再让轮廓跟随**
+        // （FreeType Adobe 引擎），那需要"提示 → 轮廓边"的归属并在提示后重算包围盒；
+        // 当前实现是在"预计算网格 + 位移预算"的框架里复用几何法的路径。
+        // 因此默认关闭，`ST_TEXT_USE_FONT_HINTS=1` 可开启（配合 `ST_TEXT_HINT_LOOSE=1`
+        // 可复现上面那组缺陷，用于后续把它做对时对照）。
+        const bool use_font_hints = [] {
+          const auto value = fs::read_env("ST_TEXT_USE_FONT_HINTS");
+          return value.has_value() && !(*value == "0" || *value == "false" || *value == "off");
+        }();
+        std::optional<st::text::GridFitResult> lcd_fit;
+        if (grid_fit_ != GridFitMode::Off && use_font_hints) {
+          st::text::GridFitOptions lcd_options = effective_options;
+          lcd_options.stem_hints.clear();
+          const auto& raw_hints = face.stem_hints(glyph);
+          // 传**物理像素**（`to_pixels`），`grid` 由 `options.grid` 自己承担。
+          const float to_pixels = effective_size / units;
+          lcd_options.stem_hints.reserve(raw_hints.size());
+          for (const auto& hint : raw_hints) {
+            const float factor = hint.vertical ? to_pixels : -to_pixels;
+            lcd_options.stem_hints.push_back(
+                StemHint{hint.lo * factor, hint.hi * factor, hint.vertical});
+          }
+          lcd_options.grid = static_cast<float>(supersample * kSubpixelColumns);
+          // **hints 默认守几何法同一套护栏**（实测决定，不是保守起见）：
+          //
+          // 曾把 hints 的护栏放宽到 `max_stem_width=4 / max_shift=1 / max_drift=0.75`
+          // （理由是"提示是字体设计者的权威数据，不该被猜错用的护栏拦住"），
+          // 后果由回归测试当场抓住：`grid_fit_combines_with_subpixel_without_distortion`
+          // 出现**墨迹贴到位图上下边**（形变把轮廓推出了预计算的包围盒——而网格是
+          // 拟合**之前**定的、按设计不能随拟合变）与墨量变化 >6%。
+          //
+          // 根因是语义错配：hints 的"正确"用法是**先把提示吸附到网格、再让轮廓去跟随**
+          // （FreeType Adobe 引擎），那需要"提示 → 轮廓边"的归属信息并在提示后重算包围盒；
+          // 而我们是在"预计算的网格 + 0.5px 位移预算"下复用几何法的框架。
+          // 因此这里如实退回同一套护栏（此时 Noto CJK 上多数提示会被拒，
+          // 收益有限——见 `docs/BACKLOG.md` P1 的那条，别再重复调松它）。
+          // `ST_TEXT_HINT_LOOSE=1` 保留宽松档，仅用于复现上面那组缺陷。
+          if (fs::read_env("ST_TEXT_HINT_LOOSE").has_value()) {
+            lcd_options.max_stem_width = 4.0f;
+            lcd_options.max_shift = 1.0f;
+            lcd_options.max_drift = 0.75f;
+          }
+          const raster::Path local_lcd = local.translated(static_cast<float>(-min_x * kSubpixelColumns),
+                                                          static_cast<float>(-min_y));
+          lcd_fit = st::text::grid_fit(local_lcd, lcd_options);
+          bitmap->fit_hint_stems = lcd_fit->hint_stems;
+          bitmap->fit_hint_seen = lcd_fit->hint_seen;
+          bitmap->fit_hint_bound = lcd_fit->hint_bound;
+          bitmap->fit_stems = lcd_fit->vertical_stems + lcd_fit->horizontal_stems;
+          bitmap->fit_applied = lcd_fit->applied;
+          bitmap->fit_rejected_stems = lcd_fit->rejected_stems;
+          bitmap->fit_worst_rejected_shift = lcd_fit->worst_rejected_shift;
+          bitmap->fit_funnel = lcd_fit->funnel;
+          local = lcd_fit->path;
+        }
         // 网格拟合的位移是**灰度口径**的，水平放大后同步 ×3；竖直方向不动。
         // （不这么做的话，亚像素路径会把拟合后的轮廓直接放大，
         //   位移也跟着被乘 3——相位就完全错了。）
-        if (grid_fit_ != GridFitMode::Off) {
+        if (grid_fit_ != GridFitMode::Off && !lcd_fit.has_value()) {
           const auto base_points = local_unfitted.raw_points();
           const auto fitted_points = fitted.raw_points();
           if (base_points.size() == fitted_points.size() &&
@@ -1033,8 +1130,10 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
             (void)local.set_raw_points(scaled_points);
           }
         }
-        local = local.translated(static_cast<float>(-min_x * kSubpixelColumns),
-                                 static_cast<float>(-min_y));
+        if (!lcd_fit.has_value()) {
+          local = local.translated(static_cast<float>(-min_x * kSubpixelColumns),
+                                   static_cast<float>(-min_y));
+        }
         // **合成加粗**：把同一份轮廓沿水平正方向按**采样格**平移后重复填充。
         //
         // 为什么在**位图内**做而不是在贴图外层叠绘：位图的采样格固定（1 个 scratch 列

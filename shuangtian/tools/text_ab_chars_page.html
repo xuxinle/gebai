@@ -1,0 +1,45 @@
+<!doctype html>
+<!-- 本文件由 `tools/gen_text_ab.py` 生成——**不要手改**（改了会在下次生成时丢失，
+     而且两侧会漂移，漂移会被误读成"渲染差异"）。
+     字体族必须与霜天 `FontStack` 候选链对齐，否则量到的是字体差异而不是渲染差异。 -->
+<meta charset="utf-8">
+<title>霜天文字 A/B — 字符集</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #FFFFFF; }
+  /* 高度必须显式给：子元素全是 `position:absolute`、不撑开父容器，
+     而 `overflow:hidden` 会按父容器**实际盒子**裁剪——body 高度 0 时整页被裁空
+     （实测：截图全白、DOM 却完好）。 */
+  body { position: relative; width: 900px; height: 625px; overflow: hidden; }
+  /* `text-rendering: geometricPrecision` 关掉浏览器的"整数像素推进"优化：
+     我们要比的是**字形栅格化**，不是排版取整（取整会让字距在两侧各偏一半像素）。 */
+  .t { position: absolute; left: 4px; white-space: nowrap; line-height: 1;
+        text-rendering: geometricPrecision; }
+</style>
+<div class="t" id="r00" style="top:4px; font-size:15px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">中文标题：组件画廊·资源管理器</div>
+<div class="t" id="r01" style="top:25.75px; font-size:15px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">一二十丁厂七卜人入八九几儿了力乃刀又</div>
+<div class="t" id="r02" style="top:47.5px; font-size:15px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">三上下个大天大地小口山日月水火木金土</div>
+<div class="t" id="r03" style="top:69.25px; font-size:15px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">中文测试字体渲染清晰组件画廊</div>
+<div class="t" id="r04" style="top:91px; font-size:15px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">霜天字体渲染粗细均匀锐利清晰</div>
+<div class="t" id="r05" style="top:112.75px; font-size:15px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">魏蜀黍龘龗爨蠹灩鬱麤齉齾</div>
+<div class="t" id="r06" style="top:134.5px; font-size:15px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">藏彝僰瓯鼍蠡饕餮麒麟麒麟</div>
+<div class="t" id="r07" style="top:156.25px; font-size:15px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">ABCDEFGHIJKLMNOPQRSTUVWXYZ</div>
+<div class="t" id="r08" style="top:178px; font-size:15px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">abcdefghijklmnopqrstuvwxyz</div>
+<div class="t" id="r09" style="top:199.75px; font-size:15px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">0123456789 !"#$%&'()*+,-./:;<=>?@</div>
+<div class="t" id="r10" style="top:221.5px; font-size:15px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">[]^_`{|}~ \ / | 0123456789</div>
+<div class="t" id="r11" style="top:243.25px; font-size:15px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">Il1| O0 oO 8B S5 2Z rn m cl dq</div>
+<div class="t" id="r12" style="top:265px; font-size:15px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">AVATAR To Wa fi fl ffi ffl</div>
+<div class="t" id="r13" style="top:286.75px; font-size:15px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">标点，。、；：？！“”‘’（）《》—…</div>
+<div class="t" id="r14" style="top:308.5px; font-size:15px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">全角ＡＢＣａｂｃ１２３　全角空格</div>
+<div class="t" id="r15" style="top:330.25px; font-size:15px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">符号 →←↑↓ ✓✗ ●○■□ ★☆ §¶†‡ °±×÷ ≠≤≥ ∞≈</div>
+<div class="t" id="r16" style="top:352px; font-size:15px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">路径 src/raster/renderer.cpp:128</div>
+<div class="t" id="r17" style="top:373.75px; font-size:15px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">中英混排 Mixed 中英 2026 版 v0.1.0</div>
+<div class="t" id="r18" style="top:395.5px; font-size:15px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">text #0F172A 正文</div>
+<div class="t" id="r19" style="top:417.25px; font-size:15px; color:#56647C; font-family:'DejaVu Sans','Noto Sans CJK SC'">text_muted #56647C 次要</div>
+<div class="t" id="r20" style="top:439px; font-size:15px; color:#66768C; font-family:'DejaVu Sans','Noto Sans CJK SC'">text_faint #66768C 辅助</div>
+<div class="t" id="r21" style="top:460.75px; font-size:15px; color:#2563EB; font-family:'DejaVu Sans','Noto Sans CJK SC'">primary #2563EB 主色</div>
+<div class="t" id="r22" style="top:482.5px; font-size:15px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">常规 霜天组件画廊 Regular</div>
+<div class="t" id="r23" style="top:504.25px; font-size:15px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'; font-weight:700">粗体 霜天组件画廊 Bold</div>
+<div class="t" id="r24" style="top:526px; font-size:13.5px; color:#0F172A; font-family:'DejaVu Sans Mono','Noto Sans CJK SC'">const auto polylines = points[i];</div>
+<div class="t" id="r25" style="top:547.75px; font-size:13.5px; color:#0F172A; font-family:'DejaVu Sans Mono','Noto Sans CJK SC'">namespace st::raster { return a->b; }</div>
+<div class="t" id="r26" style="top:569.5px; font-size:13.5px; color:#0F172A; font-family:'DejaVu Sans Mono','Noto Sans CJK SC'">0123456789 => (){}[];: iIl1|0O</div>
+<div class="t" id="r27" style="top:591.25px; font-size:13.5px; color:#0F172A; font-family:'DejaVu Sans Mono','Noto Sans CJK SC'">中文注释必须能显示 汉字宽度</div>

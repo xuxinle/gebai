@@ -538,6 +538,18 @@ auto Application::start() -> Status {
   // / normal+补偿 40% / **light+补偿 18%**——所以本项与 `resolve_text_fit` 的
   // 默认档位（light）是一对，单独改任一个都拿不到这个结果。
   impl_->renderer->set_ink_compensation(true);
+  // **笔画加墨（stem darkening）**：与浏览器逐带对照后（`docs/TEXT_AB_REPORT.md`）确认，
+  // 汉字的差距是"笔画没到满黑"（实心像素比 0.87~0.90）而非几何——FreeType 在这条路上
+  // 做的是**笔画加墨**（CFF 引擎默认开、随 ppem 衰减），霜天原先没有。
+  // 开启后汉字过渡像素比 0.874 → 0.960（更接近浏览器），而**拉丁/等宽逐位不变**
+  // （实现里按轮廓类型只对 CFF 生效：真型字体本来就比浏览器重 1.09，加墨会过粗）。
+  // 可用 `ST_TEXT_DARKEN=0` 关掉做对照。
+  {
+    const auto flag = fs::read_env("ST_TEXT_DARKEN");
+    const bool enabled = !(flag.has_value() &&
+                           (*flag == "0" || *flag == "false" || *flag == "off"));
+    impl_->renderer->set_stem_darkening(enabled);
+  }
   // **Skia 式逐颜色校正**（见 `docs/SKIA_TEXT_RENDERING_STUDY.md`）：默认仍走 Gamma 模式，
   // 因为它是已验证过的现网观感；这条曲线留作对照与深色主题的候选。
   if (impl_->renderer->coverage_gamma() == 1.0f) {
