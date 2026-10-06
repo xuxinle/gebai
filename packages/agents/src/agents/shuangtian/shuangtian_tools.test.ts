@@ -732,6 +732,22 @@ describe("框架与提示词装配", () => {
   expect(prompt).toContain("visual_diff")
 })
 
+  test("系统提示词含观感类改动的入口（手册必被引用，而非内联复述）", async () => {
+    const mod = await import("./shuangtian")
+    const prompt = mod.def.systemPrompt
+    // 完整的观感方法论在外置文档里；提示词只做"何时用、去看哪一份"的索引。
+    // 少了这条指引，新会话就无从知道手册存在（实测：手册写好后提示词里 0 次提及）。
+    expect(prompt).toContain("shuangtian/docs/perceptual_changes.md")
+    // 开工前清单里也要有（否则它只是"某处提了一句"）
+    expect(prompt).toContain("观感")
+    // 七条硬约束里最容易被忽略的三条：正交量、统计量、默认值抽取
+    expect(prompt).toContain("正交量")
+    expect(prompt).toContain("统计量")
+    expect(prompt).toContain("总墨量之比")
+    // 反向守卫：不得把文档内容整段复述回提示词（两处同义内容必然漂移）
+    expect(prompt).not.toContain("十节：")
+  })
+
   test("系统提示词含框架协同自进化机制（发现框架问题→当场修/写 BACKLOG）", async () => {
     const mod = await import("./shuangtian")
     const prompt = mod.def.systemPrompt

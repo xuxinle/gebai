@@ -1528,6 +1528,7 @@ C++20、全自绘（软硬件渲染兼容）、**支持无头模式**，并对�
   - **审批姿态**：只读类免审批；`run`/`set`/`invoke`/`click`/`type`/`key`/`call` 需审批（写与输入面）。`call` 可到达控制通道的**任何**方法——包括可选开启的 `script`（应用侧默认关闭）
   - **环境变量**：`SHUANGTIAN_PROJECT`（框架工程根，缺省仓库 `shuangtian/`，二进制形态回落 `{GEBAI_HOME}/vendor/shuangtian`）、`SHUANGTIAN_TARGET`（默认控制目标）、`SHUANGTIAN_FRAMEWORK`（随包分发位置）
   - **闭环**：`run(build) → run(start) → find/tree → capture 看 → set/invoke/click/type → capture 复验 → run(stop)`；所有"改完界面"的结论都要求有截图支撑（无头模式像素与有窗口一致）
+  - **观感类改动的入口**：提示词的"开工前"清单要求，改字体/配色/动画/手感这类**验收标准在用户身上**的功能时，先读 `shuangtian/docs/perceptual_changes.md`（正交量拆解、量尺三坑、可复用的八步协同循环、反模式清单），硬约束在 `shuangtian/CONVENTIONS.md §9.2`。**提示词只作索引、不复述文档内容**——两处同义内容必然漂移；回归用例同时断言"手册被引用"与"未整段复述"（双向）
 - **实战校验（框架自身的硬证据）**：用该子代理在无头环境下开发霜天本身，两轮共暴露并修复了 20 类问题：填充未隐式闭合子路径导致 CJK 字形糊块、覆盖率为带符号量被当成透明度导致圆角/阴影/字形全失效、Type2 子程序负索引（bias）误判、字形缓存"插入后淘汰"返回悬垂指针（ASan 定位）、`process::run` 二次 waitpid 失败把失败退出码当成 0（掩盖编译/链接失败）、非阻塞读把空闲客户端误判断开、PCH 与消费端标志不一致导致 PCH 失效、PCH 塞入项目头反而更慢、运行时切 DPI 内容缩在左上 1/4（`Canvas` 移动语义漏搬缩放）、HiDPI 下截图只截到 1/4、2x 屏上卡片内子项整片消失（圆角裁剪未做逻辑→物理换算）、根页面 `grow` 失效、控制通道 `input.mouse` 因 nlohmann `at()` 抛异常而**整进程终止**（现已有 lint 规则 L12 机械拦住同类写法）等——**没有一条能靠读代码发现，全部来自「无头运行 + 控制通道观察 + 截图核验 + sanitizer 复跑」的闭环**（清单见 `shuangtian/DESIGN.md` §8.2）
 - **验证手段**（随框架交付）：`st test`（102 项单测 / 2018 断言）、`st test --san`（ASan+UBSan）、`st lint`（11 条禁用特性规则，0 违规 + 7 处登记豁免）、`tools/st_visual_check.py`（dev/san 两档 × 两个示例 × 查询/操作/输入/主题/DPI 全序列 + 截图 + sanitizer 报告检查）、`tools/ft_compare.cpp`（用 FreeType 对照自研字体引擎的轮廓/包围盒）
 
