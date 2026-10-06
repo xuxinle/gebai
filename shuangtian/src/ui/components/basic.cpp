@@ -243,12 +243,18 @@ Button::Button(std::string label, Variant variant, Size size)
   // 那里在同向提亮/压暗的幅度上做、而且**保持色相**（主按钮仍看得出是蓝的），
   // 按下比悬停再深一档。`Button::apply_theme` 只管各变体的**常态语气**。
   //
+  // **不上浮**（`.lift = false`）：按钮的悬浮反馈是“悬停高亮”，而不是“抬起”——
+  // 上浮会把整块（含文字与图标）在 hover 时上移 `metrics.hover_lift`（默认 1.5px），
+  // 鼠标掠过时按钮看着在**抖/跳**（用户报「按钮悬浮时不要上移」）。
+  // 反馈仍由 `background` + `border` 承担（实测两者都有可见变化）。
+  // 卡片这类“浮起来”的容器仍可用 `lift`（那是它们该有的手感，不是按钮的）。
+  //
   // 为什么必须分开：`apply_theme` **只在 layout 时跑**（见 `DESIGN.md` §4.2.6），
   // 而悬停/按下只标重绘、不触发布局——组件里那份 `hovered_ ? ... : ...` 分支
   // 算出的色会**永远停在旧状态**（实测：真实应用里按下态与悬停态像素完全一样）。
   // 两处同时做还会**叠乘**（组件一层 + 通用层）——`Soft` 因此被洗成中性灰。
   set_hover_effect(HoverEffect{.enabled = true, .background = true, .border = true,
-                               .lift = true, .glow = false, .cursor = true});
+                               .lift = false, .glow = false, .cursor = true});
 }
 
 void Button::set_label(std::string label) {
@@ -346,7 +352,14 @@ void Button::measure(const RenderContext& context, const Constraints& constraint
   const float horizontal_padding = size_ == Size::Small ? metrics.space_md : metrics.space_lg;
   const TextPort& port = port_of(context);
   float width = port.measure_width(label_, style_.font_size) + horizontal_padding * 2.0f;
-  if (!icon_.empty()) width += style_.font_size + metrics.space_sm;
+  // 图标宽度只在图标**真画得出来**时计入——与 `paint_content` 同一判据
+  // （名字无效时那里不画、这里若算了宽度，按钮就会宽出一截且内容偏移）。
+  // 间距只在**图标与文字同时存在**时计入（与 `paint_content` 的 `gap` 同规则）；
+  // 纯图标按钮只有图标本身。
+  if (!icon_.empty() && Icon::has(icon_)) {
+    width += style_.font_size;
+    if (!label_.empty()) width += metrics.space_sm;
+  }
   width = std::max(width, height);
   // **显式宽度优先**：与其它组件同口径（`style_.width` 是宿主/DSL 的明确意图）。
   if (style_.has_explicit_width()) width = style_.width;
@@ -365,8 +378,18 @@ void Button::paint_content(const RenderContext& context, raster::Surface& canvas
   const TextPort& port = port_of(context);
   const float font_size = style_.font_size;
   const float icon_size = font_size + 2.0f;
-  const float gap = (!icon_.empty() && !label_.empty()) ? metrics.space_sm : 0.0f;
-  const float icon_extent = icon_.empty() ? 0.0f : icon_size + gap;
+  // **图标名必须真的画得出来，才给它预留空间**。
+  //
+  // `icon_` 非空 ≠ 画得出来：名字不在内置表（也不是已装载的 SVG id）时，
+  // `Icon::draw` 静默什么都不画，但这里仍按 `icon_size + gap` 预留了空位——
+  // 文字于是被推到一侧。实测：画廊把 `btn-refresh` 的图标写成 `activity`
+  // （内置 73 个图标里没有它，正确的是 `refresh`），结果**文字右偏 11.9px**。
+  //
+  // 判据用 `Icon::has`（与 `Icon::draw` 内部同一个查找）——
+  // “算不算宽度”与“画不画得出”必须是同一个事实，否则这类静默偏移会反复出现。
+  const bool draws_icon = !icon_.empty() && Icon::has(icon_);
+  const float gap = (draws_icon && !label_.empty()) ? metrics.space_sm : 0.0f;
+  const float icon_extent = draws_icon ? icon_size + gap : 0.0f;
   // **文本先按可用宽度截断再加省略号**：不截断时超长标签会画到按钮之外
   // （按钮被父容器夹窄了，但文本宽度还是它自己的量法），于是相邻面板上会多出
   // 一截看不清源头的字——实测就是侧栏 Git 变更项的路径叠到了代码上。
@@ -377,7 +400,7 @@ void Button::paint_content(const RenderContext& context, raster::Surface& canvas
   float cursor = bounds_.x + (bounds_.width - total) * 0.5f;
   const float center_y = bounds_.center().y;
 
-  if (!icon_.empty() && icon_leading) {
+  if (draws_icon && icon_leading) {
     Icon::draw(canvas, icon_, math::Rect{cursor, center_y - icon_size * 0.5f, icon_size, icon_size},
                style_.color);
     cursor += icon_extent;
@@ -389,7 +412,7 @@ void Button::paint_content(const RenderContext& context, raster::Surface& canvas
                                                            bounds_.height);
     port.draw(canvas, clipped, math::Point{cursor, y}, font_size, style_.color);
   }
-  if (!icon_.empty() && !icon_leading) {
+  if (draws_icon && !icon_leading) {
     Icon::draw(canvas, icon_, math::Rect{cursor, center_y - icon_size * 0.5f, icon_size, icon_size},
                style_.color);
   }

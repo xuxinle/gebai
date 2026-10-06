@@ -2506,6 +2506,18 @@ class Compositor {                                  // UI 图层 → GPU 合成
 两处同时做还会**叠乘**（组件一层 + 通用层），`Variant::Soft` 因此被洗成中性灰。
 `Button::apply_theme` 因此只管各变体的**常态语气**。
 
+**上浮（`HoverEffect::lift`）按钮不开**。`paint_box` 在 `lift` 时把整块（含内容）
+上移 `metrics.hover_lift`（默认 1.5px）——用户报「按钮悬浮时不要上移」
+（实测：整块包围盒恰好位移 **−1.500px**，即该令牌值）。
+按钮的悬浮反馈由 `background` + `border` 承担（两者都有可见变化，有对偶用例钉住）；
+`lift` 留给卡片这类“浮起来”的容器（那是它们该有的手感）。
+
+**图标名画不出来时不得预留空间**。`icon_` 非空 ≠ 画得出来：名字不在内置表
+（也不是已装载的 SVG id）时 `Icon::draw` 静默不画，而旧实现仍按
+`icon_size + gap` 预留空位——文字被推到一侧。实测：画廊 `btn-refresh` 写成
+`activity`（内置 73 个图标里没这个名字，正确的是 `refresh`），文字**右偏 11.9px**。
+判据统一用 `Icon::has`（与 `Icon::draw` 内部同一查找），`measure` 与 `paint_content` 共用。
+
 ### 5.0.2 单行文本的垂直居中（一份口径）
 
 把一行字放进一个盒子时，**对齐的是墨迹，不是行盒**。全仓唯一公式：
@@ -2519,9 +2531,19 @@ class Compositor {                                  // UI 图层 → GPU 合成
    **系统性推下约 2.4px**（实测 5 个按钮平均偏差 +2.35px）。
    依据必须是 `TextPort::ink_metrics`（字形包围盒顶/底）。
 2. **基线位不能用 `ascent(size)`**。`TextPort::draw` 排版时取的是**跨 run 的最大
-   ascender**（汉字回退到 CJK 面时明显大于主面），而 `ascent(size)` 只反映主面。
-   拿它代儙会有系统性残差——实测第一版“改了跟没改差不多”
-   （偏差反而从 +2.50 变 +3.50）。正确来源是 `shaped_ascent(utf8, size)`。
+ascender**（汉字回退到 CJK 面时明显大于主面），而 `ascent(size)` 只反映主面。
+拿它代儙会有系统性残差——实测第一版“改了跟没改差不多”
+（偏差反而从 +2.50 变 +3.50）。正确来源是 `shaped_ascent(utf8, size)`。
+3. **墨迹中心在基线的哪一侧要算对**。`InkMetrics` 的语义是「基线上方 `above`、
+下方 `below`」，墨迹跨 `[基线-above, 基线+below]`，**中心在基线下方 `(below-above)/2`**。
+写成 `(above+below)/2` 就把中心放到了基线**上方**，差一个 `below`，文字被系统性**压下 `below`**。
+实测（真字体、`tools/button_center_probe.cpp`、字号 14）：汉字 `below=1.91` → 偏 **+2.00px**；
+拉丁 `below=0.18` → +0.50px；纯拉丁界面几乎看不出来，**汉字/混排才明显**。
+
+> **为何旧桩没能挡住第 3 条**：旧桩的 `ink_metrics` 把 `below` 恒报 **0**，
+> 而 `below == 0` 时两种写法**恰好相等**——桩把差异抹平了
+> （`CONVENTIONS` §7.2 的同类坑）。现桩给 `below` 一个真实量级
+> （`0.136em`，即 DejaVu 汉字回退面的实测值），逆向验证才能把它揪出来。
 
 端口报不出墨迹时（无字体环境）自动退回行盒居中。新增绘制文本的地方
 （组件/装饰层）请直接调 `centered_line_top`，**不要各自算一份**——

@@ -384,7 +384,9 @@ auto run_app(int argc, char** argv) -> int {
   auto refresh_button =
       std::make_unique<Button>("刷新指标", Button::Variant::Ghost, Button::Size::Small);
   refresh_button->set_id("btn-refresh");
-  refresh_button->set_icon("activity");
+  // 图标名取**内置表**里的：写成表外的名字会不画图标（内容被空位推偏 12px）。
+  // 内置表用 `Icon::names()` 拿（73 个，见 `icon.cpp`）；`activity` 并不在其中。
+  refresh_button->set_icon("refresh");
   auto* refresh_ptr = refresh_button.get();
   status_bar->add_child(std::move(refresh_button));
   auto status_right = std::make_unique<Text>("等待控制通道…");

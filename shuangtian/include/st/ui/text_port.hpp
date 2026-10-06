@@ -196,10 +196,22 @@ class NullTextPort final : public TextPort {
   if (!ink) return box_centered;
   // 墨迹中心相对行盒顶的位置：
   //   行盒顶 → 基线   = `shaped_ascent`（与 `draw` 同源；**不要**用 `ascent(size)`）
-  //   基线   → 墨迹中心 = `above - (above + below) / 2`
-  // 目标是它落在行盒中心（`line / 2`）上，差值即需要下移的量。
+  //   基线   → 墨迹中心 = `(below - above) / 2`
+  //
+  // ⚠ 这里曾写作 `shaped_ascent - (above + below) / 2`——**多减了一个 `below`**。
+  // `InkMetrics` 的语义是「基线上方 `above`、下方 `below`」，墨迹跨 `[基线-above, 基线+below]`，
+  // 中心在基线**下方** `(below - above)/2`（不是上方 `(above + below)/2`）。
+  // 两者差一个 `below`，于是文字被系统性**压下 `below`**。
+  // 实测（真字体，`tools/button_center_probe.cpp`，字号 14）：
+  //   汉字 `below=1.91` → 墨迹中心偏 **+2.00px**；拉丁 `below=0.18` → +0.50px。
+  // 这正是用户报的「按钮文本没有居中」。
+  //
+  // **为何整套测试都没拓住它**：旧桩的 `ink_metrics` 把 `below` 恒报 0，
+  // 而 `below == 0` 时两个公式**恰好相等**——桩把差异抹平了
+  // （`CONVENTIONS` §7.2 记的正是这类“桩替身复现不全”的假绿）。
+  // 现已在桩里给 `below` 一个真实量级，这条推导才真的被盯住。
   const float ink_center_from_top =
-      port.shaped_ascent(text, size) - (ink->above + ink->below) * 0.5f;
+      port.shaped_ascent(text, size) + (ink->below - ink->above) * 0.5f;
   return box_centered + (line * 0.5f - ink_center_from_top);
 }
 

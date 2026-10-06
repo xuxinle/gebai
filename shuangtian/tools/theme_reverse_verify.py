@@ -22,6 +22,8 @@ CANVAS_CPP = "src/raster/canvas.cpp"
 RASTERIZER_CPP = "src/raster/rasterizer.cpp"
 D3D11_CPP = "src/raster/platform_d3d11.cpp"
 TEXT_CPP = "src/text/text.cpp"
+TEXT_PORT_HPP = "include/st/ui/text_port.hpp"
+BASIC_CPP = "src/ui/components/basic.cpp"
 
 # (说明, 文件, 原文, 回退后的文本, 期望变红的用例名)
 CASES = [
@@ -199,6 +201,27 @@ CASES = [
         # 该闸门在应用默认档（拟合 = off）下会**如实跳过**，必须把档位抬回 light
         # 才能跑到断言——否则回退修复后它依旧跳过，脚本会把“什么都没验”报成通过。
         {"ST_TEST_FIT": "light"},
+    ),
+    (
+        "文字居中：把墨迹中心公式改回“多减一个 below”",
+        TEXT_PORT_HPP,
+        "      port.shaped_ascent(text, size) + (ink->below - ink->above) * 0.5f;",
+        "      port.shaped_ascent(text, size) - (ink->above + ink->below) * 0.5f;",
+        "button_content_is_centered_without_icon",
+    ),
+    (
+        "按钮悬浮：把 lift 改回 true（整块上移 hover_lift）",
+        BASIC_CPP,
+        "                               .lift = false, .glow = false, .cursor = true});",
+        "                               .lift = true, .glow = false, .cursor = true});",
+        "button_hover_does_not_shift_the_whole_button",
+    ),
+    (
+        "未知图标：去掉 `Icon::has` 判据（预留空位但不画）",
+        BASIC_CPP,
+        "  const bool draws_icon = !icon_.empty() && Icon::has(icon_);",
+        "  const bool draws_icon = !icon_.empty();",
+        "button_with_unknown_icon_stays_centered",
     ),
 ]
 

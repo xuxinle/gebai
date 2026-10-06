@@ -481,6 +481,44 @@ namespace {
   button_card->add_child(std::move(button_row));
   button_card->add_child(std::make_unique<Divider>(false));
 
+  // 图标按钮：**纯图标**（常用操作）与**图标 + 文字**（带语义的主/次操作）。
+  // 两者都必须内容居中——纯图标按钮靠“只有图标”时的宽度规则，
+  // 图标+文字靠“图标 + 间距 + 文字”整块居中（见 `Button::paint_content`）。
+  auto icon_button_row = make_row(8.0f, /*wrap=*/true);
+  icon_button_row->set_id("icon-button-row");
+  for (const auto& [icon_name, variant] : std::vector<std::pair<std::string, Button::Variant>>{
+           {"refresh", Button::Variant::Secondary},
+           {"settings", Button::Variant::Secondary},
+           {"search", Button::Variant::Ghost},
+           {"edit", Button::Variant::Ghost},
+           {"trash", Button::Variant::Ghost},
+           {"send", Button::Variant::Primary}}) {
+    // 空标签 = 纯图标按钮；`set_icon` 的名字必须在内置表里（否则不画也不占位）
+    auto icon_button = std::make_unique<Button>("", variant);
+    icon_button->set_id("btn-icon-" + icon_name);
+    icon_button->set_icon(icon_name);
+    icon_button_row->add_child(std::move(icon_button));
+  }
+  button_card->add_child(std::move(icon_button_row));
+  button_card->add_child(std::make_unique<Divider>(false));
+
+  // 图标 + 文字按钮：三种变体各一个，验证“合成整块居中”而非“文字居中”。
+  auto icon_text_row = make_row(8.0f, /*wrap=*/true);
+  icon_text_row->set_id("icon-text-row");
+  for (const auto& [icon_name, label, variant] : std::vector<std::tuple<std::string, std::string, Button::Variant>>{
+           {"plus", "新建", Button::Variant::Primary},
+           {"upload", "上传", Button::Variant::Secondary},
+           {"download", "导出", Button::Variant::Secondary},
+           {"refresh", "刷新", Button::Variant::Ghost},
+           {"trash", "删除", Button::Variant::Danger}}) {
+    auto icon_text = std::make_unique<Button>(label, variant);
+    icon_text->set_id("btn-icon-text-" + icon_name);
+    icon_text->set_icon(icon_name);
+    icon_text_row->add_child(std::move(icon_text));
+  }
+  button_card->add_child(std::move(icon_text_row));
+  button_card->add_child(std::make_unique<Divider>(false));
+
   auto icon_strip = make_row(14.0f);
   icon_strip->set_id("icon-strip");
   for (const auto* icon_name :
