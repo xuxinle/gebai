@@ -51,7 +51,12 @@ auto resolve_text_fit(std::string_view mode) -> st::text::GridFitMode {
   if (const auto value = fs::read_env("ST_TEXT_FIT"); value.has_value() && !value->empty()) {
     if (const auto parsed = from_word(*value); parsed.has_value()) return *parsed;
   }
-  // 默认 **light**（不是 normal）——依据是**应用层逐字墨量**而非库内平均指标。
+  // **默认 `off`**（2026-10-06 定，以真窗口浏览器为基准逐轴标定）。
+  //
+  // 下面这段 light 的推导仍然成立，但它是**单指标、无参照**的推理——"比不拟合更锐/更均匀"
+  // 成立，却回答不了"该有多锐"。补上真窗口浏览器这个参照后：**参照的锐度就在不拟合那一档**
+  // （边缘柔度：不拟合 3.27~6.66、拟合 light 2.81~4.86、浏览器 3.22~8.74），
+  // 即拟合偏锐；覆盖离散上拟合也更大。三个正交轴都指向 `off`，详见 `docs/BACKLOG.md` P1。
   //
   // 用户线索（同一菜单栏）：同一字号字重下「运行」0.684 而「文件」0.511，**差 34%**。
   // 实测（codeeditor 菜单栏，同一构建）：
@@ -66,7 +71,7 @@ auto resolve_text_fit(std::string_view mode) -> st::text::GridFitMode {
   // 即：normal 的吸附幅度大、对字间墨量的扰乱已无法用补偿救回，而 light
   //（吸附幅度更小）+ 墨量补偿能同时拿到“锐度基本无损（过渡带 0.435 vs 不拟合 0.439）”
   // 与“字间均匀度追平不拟合”。这正是“全面优化、不要顾此失彼”的解。
-  return st::text::GridFitMode::Light;
+  return st::text::GridFitMode::Off;
 }
 
 /// 解析覆盖率 gamma：命令行 > 环境变量 > `fallback`。
@@ -558,82 +563,67 @@ auto Application::start() -> Status {
   // 三档各自可用环境变量覆盖（诊断/复标用）：
   // `ST_TEXT_DIGIT_GAMMA` / `ST_TEXT_LETTER_GAMMA` / `ST_TEXT_HAN_GAMMA`。
   {
+    // **类 gamma 用内置默认档**（`ClassGammas`：亮底 0.84/0.84/0.88、暗底 0.64/0.62/0.75）。
+    // 它与 `--text-fit`（默认 off）共同构成"以真窗口浏览器三轴标定"的默认观感；
+    // 两者是**正交参数**，各自可单独覆盖，不做"打包成一个档位名"的设计——
+    // 打包出来的代号（A/B/C 之类）对使用者毫无意义，且把两个可独立调的旋钮捆成一个，
+    // 想只改其中一个就不得不整体换档。
     st::app::ClassGammas gammas{};
-    // **预设档**（`--text-preset` / `ST_TEXT_PRESET`）：把"候选方案"做成一个开关，
-    // 便于在真实应用里对比，不必记一串环境变量。**它不改变默认**——默认仍是 `A`。
-    //
-    // | 档 | 拟合 | 类 γ（数字/字母/汉字） | 依据（两个正交轴，见 `docs/BACKLOG.md` P1） |
-    // |---|---|---|---|
-    // | `A` | 全部字号 | 0.92 / 0.98 / 0.93 | 旧的"拟合 light"档，保留作对照 |
-    // | **`B`（默认）** | **关** | **0.84 / 0.84 / 0.88** | 三个轴同时对齐真窗口浏览器（见下） |
-    // | `C` | ≤15 逻辑 px（=22.5 物理） | 0.92 / 0.98 / 0.93 | 大字号关、小字号仍拟合 |
-    //
-    // **为什么默认是 B**（2026-10-06，以"真窗口浏览器"为基准逐轴量）：
-    // | 轴 | 拟合（A） | **拟合关（B）** | 浏览器 |
-    // |---|---|---|---|
-    // | 覆盖墨量比（10~13px 字母/数字、11~15px 汉字） | 0.998~1.013 | **0.976~1.010（γ 重标后）** | 1.000 |
-    // | 覆盖离散（越低越均匀） | 0.281~0.304 | **0.256~0.289** | 0.263~0.290 |
-    // | 边缘柔度（部分覆盖/实心，越低越锐） | 2.81~4.86 | 3.27~6.66 | 3.22~8.74 |
-    // ⇒ 浏览器在**三个轴上都站在"拟合关"一侧**（10px 一档例外，浏览器在该档特别糊）。
-    //   "拟合开更锐"在**旧的单指标尺子**下成立，但那是**没有参照**的"更锐"——
-    //   参照的实际锐度就在拟合关那一档。详见 `docs/BACKLOG.md` P1。
-    //
-    // 命令行优先于环境变量（与 `--text-fit`/`ST_TEXT_FIT` 同一层级规则）。
-    const std::string preset = options_.text_preset != "auto"
-                                   ? options_.text_preset
-                                   : fs::read_env("ST_TEXT_PRESET").value_or("B");
-    float fit_max_size = 0.0f;
-    if (preset == "A" || preset == "a") {
-      // A 档 = 旧的"拟合 light"默认：**显式写自己的 γ**，不能靠 `ClassGammas` 的默认值
-      // （那个默认值属于当前默认档 B；靠它会让 A 档静默变成"拟合开 + B 的 γ"这种
-      //  不存在的组合——实测踩到：A 与 B 打印出同一组 γ）。
-      gammas = st::app::ClassGammas{0.92f, 0.98f, 0.93f};
-    } else if (preset == "B" || preset == "b") {
-      // 三档 γ 按"**三个轴同时对齐真窗口浏览器**"重标（2026-10-06，拟合一关掉后重扫）：
-      // | 轴 | B 档（γ 0.84/0.84/0.88） | 浏览器 |
-      // |---|---|---|
-      // | 覆盖墨量比（10~13px 字母） | 0.997~1.010 | 1.000 |
-      // | 同上（数字） | 0.976~1.001 | 1.000 |
-      // | 同上（汉字 11~15px） | 0.995~1.005 | 1.000 |
-      // | 覆盖离散（汉字，越低越均匀） | 差 −0.003~+0.002 | —（对齐到 ±0.003） |
-      // | 中间调/实心（越低越锐） | 差 −0.09~−0.21（仅 11~13px） | — |
-      // 注：10px 字母的中间调仍比参照低 1.4（参照在该档特别"糊"，属参照本身的特性，
-      // 不追——追它会把 11~13px 推过头）。
-      impl_->renderer->set_grid_fit(st::text::GridFitMode::Off);
-      gammas = st::app::ClassGammas{0.84f, 0.84f, 0.88f};
-    } else if (preset == "C" || preset == "c") {
-      fit_max_size = 22.5f;
-      gammas = st::app::ClassGammas{0.92f, 0.98f, 0.93f};
-    }
-    // **暗色主题换一组 γ**（见 `DarkClassGammas` 的说明）：覆盖率→码值的映射在亮/暗底下
-    // 不对称，沿用亮色档会让暗底系统性偏轻 5~6%（真窗口实测）。全局 γ 早已按主题分档
-    // （`default_gamma_for`），但**类 γ 分档此前只在亮底标定过**——本条补上这一层。
+    // 暗色主题换一组（见 `DarkClassGammas`：覆盖率→码值的映射在亮/暗底下不对称，
+    // 沿用亮底 γ 会让暗底系统性偏轻 5~6%，真窗口实测）。
     if (impl_->renderer->coverage_gamma() < 1.0f) {
       const st::app::DarkClassGammas dark{};
-      // 只覆盖"未被显式指定"的类：命令行/环境变量给了值就尊重它（诊断与复标要用）。
-      if (gammas.digit == st::app::ClassGammas{}.digit && dark.digit > 0.0f) gammas.digit = dark.digit;
-      if (gammas.letter == st::app::ClassGammas{}.letter && dark.letter > 0.0f) gammas.letter = dark.letter;
-      if (gammas.han == st::app::ClassGammas{}.han && dark.han > 0.0f) gammas.han = dark.han;
+      gammas.digit = dark.digit;
+      gammas.letter = dark.letter;
+      gammas.han = dark.han;
     }
-    if (const auto value = fs::read_env("ST_TEXT_DIGIT_GAMMA"); value.has_value()) {
-      gammas.digit = std::stof(*value);
-    }
-    if (const auto value = fs::read_env("ST_TEXT_LETTER_GAMMA"); value.has_value()) {
-      gammas.letter = std::stof(*value);
-    }
-    if (const auto value = fs::read_env("ST_TEXT_HAN_GAMMA"); value.has_value()) {
-      gammas.han = std::stof(*value);
-    }
-    if (const auto value = fs::read_env("ST_TEXT_FIT_MAX_SIZE"); value.has_value()) {
-      fit_max_size = std::stof(*value);
+    // 逐类覆盖：命令行 > 环境变量 > 内置默认。
+    // 三类的 γ 本就是**独立旋钮**（各字形的度量特性不同），命令行因此也按类给。
+    const auto class_gamma = [&](std::string_view cli_value, std::string_view env_name,
+                                 float fallback) {
+      if (!cli_value.empty() && cli_value != "auto") {
+        try {
+          return std::stof(std::string(cli_value));
+        } catch (const std::exception&) {
+          // 解析失败落到环境变量/默认——不静默用一个错值（`resolve_text_gamma` 同一姿态）。
+        }
+      }
+      if (const auto value = fs::read_env(std::string(env_name));
+          value.has_value() && !value->empty()) {
+        try {
+          return std::stof(*value);
+        } catch (const std::exception&) {
+          return fallback;
+        }
+      }
+      return fallback;
+    };
+    gammas.digit = class_gamma(options_.text_digit_gamma, "ST_TEXT_DIGIT_GAMMA", gammas.digit);
+    gammas.letter = class_gamma(options_.text_letter_gamma, "ST_TEXT_LETTER_GAMMA", gammas.letter);
+    gammas.han = class_gamma(options_.text_han_gamma, "ST_TEXT_HAN_GAMMA", gammas.han);
+    // 拟合的适用字号上限（`0` = 不限）：大字号上拟合两轴都无收益（见 BACKLOG P1），
+    // 需要"只在小字号拟合"时用它，而不必整体关掉拟合。
+    float fit_max_size = 0.0f;
+    if (!options_.text_fit_max_size.empty() && options_.text_fit_max_size != "auto") {
+      try {
+        fit_max_size = std::stof(options_.text_fit_max_size);
+      } catch (const std::exception&) {
+        fit_max_size = 0.0f;
+      }
+    } else if (const auto value = fs::read_env("ST_TEXT_FIT_MAX_SIZE");
+               value.has_value() && !value->empty()) {
+      try {
+        fit_max_size = std::stof(*value);
+      } catch (const std::exception&) {
+        fit_max_size = 0.0f;
+      }
     }
     if (fit_max_size > 0.0f) impl_->renderer->set_grid_fit_max_size(fit_max_size);
     apply_class_gammas(*impl_->renderer, gammas);
-    // 生效值自检（`ST_TEXT_PRESET_DEBUG=1`）：测"档位是否真的生效"的**唯一**可靠手段——
-    // 实测踩到：patch 被回退后三档渲染出了几乎一样的图（B vs C 只差 20 像素），
-    // 当时差点把它当成"三档观感接近"的结论。
-    if (fs::read_env("ST_TEXT_PRESET_DEBUG").has_value()) {
-      st::print("[preset] {} theme_gamma={:.2f} fit={} max_size={} gamma={}/{}/{}\n", preset,
+    // 生效值自检（`ST_TEXT_DEBUG=1`）：测"参数是否真的生效"的**唯一**可靠手段——
+    // 实测踩到两次：补丁被回退后两份渲染出几乎一样的图、应用自带解析器把新参数静默吃掉。
+    if (fs::read_env("ST_TEXT_DEBUG").has_value()) {
+      st::print("[text] theme_gamma={:.2f} fit={} fit_max_size={} class_gamma={}/{}/{}\n",
                 impl_->renderer->coverage_gamma(),
                 static_cast<int>(impl_->renderer->grid_fit()), fit_max_size, gammas.digit,
                 gammas.letter, gammas.han);

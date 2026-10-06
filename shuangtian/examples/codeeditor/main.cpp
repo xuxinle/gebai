@@ -76,7 +76,11 @@ namespace {
 /// 为什么用档位而不是绝对像素：主题是字号缩放的唯一真值源——
 /// 绝对像素会与 `--ui-font-scale` 脱钩（实测踩到：UI 文字 15→22.5，
 /// 编辑器恒为 13.5）。档位还让“设置面板列几档字号”变成一件自然的事。
-constexpr float kEditorFontScale{1.15f};   // 比正文大一号，代码行距更松
+/// 编辑器字号档位默认值（相对正文 `font_base` 的倍数）。
+///
+/// `0.85` = **比正文小一号**：代码行密度大、等宽字每字同宽，与正文同级时偏大；
+/// 同行能看到更多字符对编辑器更重要。`--editor-font-scale` 可覆盖。
+constexpr float kEditorFontScale{0.85f};
 
 using namespace st::ui;
 using namespace st::ui::dsl;
@@ -388,8 +392,10 @@ struct OpenBuffer {
 
 struct CodeEditorPage : Component {
  public:
-  CodeEditorPage(std::vector<Sample> files, std::string workspace)
-      : files_(std::move(files)), workspace_(std::move(workspace)) {}
+  CodeEditorPage(std::vector<Sample> files, std::string workspace,
+                 float editor_font_scale = kEditorFontScale)
+      : editor_font_scale_(editor_font_scale), files_(std::move(files)),
+        workspace_(std::move(workspace)) {}
 
   /// 窗口动作出口（由 `run_app` 注入 `Application`；为空时窗框**如实拒绝**动作，
   /// 但画面照旧——这正是 `ui::WindowControl` 端口要分离的那两件事）。
@@ -970,7 +976,7 @@ struct CodeEditorPage : Component {
         // 每帧无条件写会把控制通道 / 设置项的 `set font_scale=…` 当场抹掉——
         // 与 `read_only` 同一类缺陷（实测：把档位改成 1.0，下一帧就变回 1.15）。
         if (!editor_configured_) {
-          ed.set_font_scale(kEditorFontScale);
+          ed.set_font_scale(editor_font_scale_);
           ed.set_tab_width(4);
           editor_configured_ = true;
         }
@@ -1543,6 +1549,9 @@ struct CodeEditorPage : Component {
 
  public:
   // —— 供入口与主循环使用 ——
+  /// 编辑器字号档位（构造时定，`--editor-font-scale` 可覆盖）。
+  /// 声明在 `files_` 之前：初始化顺序按**声明序**，否则 -Werror=reorder 直接编译失败。
+  float editor_font_scale_{kEditorFontScale};
   std::vector<Sample> files_{};
   std::string workspace_{};
   std::vector<Problem> problems_{};
@@ -1573,13 +1582,22 @@ struct Options {
   /// 框架侧的 `st::app::parse_cli` 到不了这里——**漏接就是静默忽略**。
   std::string text_gamma{"auto"};
   std::string text_gamma_small{};
-  /// 字形观感档位（`--text-preset`）：A（默认）/ B / C。见 `AppOptions::text_preset`。
-  std::string text_preset{"auto"};
+  /// 拟合的适用字号上限（物理 px；auto = 不限）。见 `AppOptions::text_fit_max_size`。
+  std::string text_fit_max_size{"auto"};
+  /// 逐字形类的覆盖率 gamma（auto = 内置默认档）。见 `AppOptions::text_digit_gamma`。
+  std::string text_digit_gamma{"auto"};
+  std::string text_letter_gamma{"auto"};
+  std::string text_han_gamma{"auto"};
   /// 界面字号缩放：auto/数值（见 `AppOptions::ui_font_scale`）。
   ///
   /// 与 `--text-*` 同一姿态：应用层有自己的参数解析，框架侧的
   /// `st::app::parse_cli` 到不了这里——**漏接就是静默忽略**。
   std::string ui_font_scale{"auto"};
+  /// 编辑器字号档位（`--editor-font-scale`）：相对正文 `font_base` 的倍数，auto = 用内置默认。
+  ///
+  /// 与 `--ui-font-scale` 的区别：后者按主题整体缩放（`Theme::scaled`，影响**所有**文字），
+  /// 本项只动编辑器（代码区与行号）。两者可叠加。
+  std::string editor_font_scale{"auto"};
   std::uint16_t control_port{0};
   std::string control_file{};
   std::string shots{};
@@ -1593,6 +1611,41 @@ struct Options {
   std::string workspace{};
 };
 
+/// 用法说明。**必须有**：未知参数会报错退出，没有 `--help` 就等于"报错了也没处查"。
+auto print_usage(std::string_view program) -> void {
+  st::print(
+      "用法: {} [选项]\n"
+      "\n"
+      "窗口/主题\n"
+      "  --headless            无头模式（无窗口；控制通道照常可用）\n"
+      "  --scale N             DPI 缩放（如 2.0）\n"
+      "  --theme light|dark    主题\n"
+      "  --decorations         用系统标题栏（默认自绘）\n"
+      "\n"
+      "字体与字形（观感调参）\n"
+      "  --editor-font-scale N 编辑器字号**档位**（相对正文的倍数，默认 0.85 = 比正文小一号）\n"
+      "  --ui-font-scale N     界面整体字号缩放（auto = 跟随系统/默认；影响所有文字）\n"
+      "  --text-fit-max-size N 拟合的适用字号上限（物理 px，0 = 不限）\n"
+      "  --text-digit-gamma V  数字类的覆盖率 gamma（auto = 内置默认）\n"
+      "  --text-letter-gamma V 字母类的覆盖率 gamma（auto = 内置默认）\n"
+      "  --text-han-gamma V    汉字类的覆盖率 gamma（auto = 内置默认）\n"
+      "  --text-fit MODE       网格拟合：auto / off / light / normal\n"
+      "  --text-lcd MODE       亚像素抗锯齿：auto / on / off\n"
+      "  --text-gamma V        覆盖率 gamma（auto / off / 数值）\n"
+      "  --text-gamma-small V  小字号的覆盖率 gamma（同上）\n"
+      "\n"
+      "内容/自动化\n"
+      "  --language NAME       初始语言（默认 cpp；--list-languages 可列）\n"
+      "  --workspace DIR       工作区目录（真实文件；缺省用内置样例）\n"
+      "  --control-port N      控制通道端口（0 = 自动）\n"
+      "  --control-file PATH   控制信息落盘路径\n"
+      "  --shots DIR           无头截图目录\n"
+      "  --frames N / --ms N   跑够 N 帧 / N 毫秒后退出\n"
+      "  --enable-script       开启进程内脚本能力（默认关）\n"
+      "  -h, --help            显示本帮助\n",
+      program);
+}
+
 [[nodiscard]] auto parse_options(int argc, char** argv) -> Options {
   Options options;
   for (int index = 1; index < argc; ++index) {
@@ -1600,6 +1653,10 @@ struct Options {
     const auto value = [&](std::string fallback) {
       return index + 1 < argc ? std::string(argv[++index]) : std::move(fallback);
     };
+    if (raw == "--help" || raw == "-h") {
+      print_usage(argv[0]);
+      std::exit(0);
+    }
     if (raw == "--headless") options.headless = true;
     else if (raw == "--enable-script") options.enable_script = true;
     else if (raw == "--scale") options.scale = static_cast<float>(std::stod(value("1")));
@@ -1607,10 +1664,14 @@ struct Options {
     else if (raw == "--language") options.language = value("cpp");
     else if (raw == "--text-lcd") options.text_lcd = value("auto");
     else if (raw == "--text-fit") options.text_fit = value("auto");
-    else if (raw == "--text-preset") options.text_preset = value("A");
+    else if (raw == "--text-fit-max-size") options.text_fit_max_size = value("auto");
+    else if (raw == "--text-digit-gamma") options.text_digit_gamma = value("auto");
+    else if (raw == "--text-letter-gamma") options.text_letter_gamma = value("auto");
+    else if (raw == "--text-han-gamma") options.text_han_gamma = value("auto");
     else if (raw == "--text-gamma") options.text_gamma = value("auto");
     else if (raw == "--text-gamma-small") options.text_gamma_small = value("auto");
     else if (raw == "--ui-font-scale") options.ui_font_scale = value("auto");
+    else if (raw == "--editor-font-scale") options.editor_font_scale = value("auto");
     else if (raw == "--control-port") options.control_port = static_cast<std::uint16_t>(std::stoi(value("0")));
     else if (raw == "--control-file") options.control_file = value({});
     else if (raw == "--shots") options.shots = value({});
@@ -1619,7 +1680,7 @@ struct Options {
     else if (raw == "--workspace") options.workspace = value(".");
     else if (raw == "--decorations") options.decorations = true;
     // **未知参数报错，不静默忽略**：本应用曾经自带一份参数解析器（不走
-    // `parse_common_options`），于是 `--text-preset=B` 被静默吃掉——
+    // `parse_common_options`），于是新加的开关被静默吃掉——
     // 表现是"三档渲染出来的图几乎一样"（实测 B vs C 只差 20 像素），
     // 差点被当成"三档观感接近"的结论。静默忽略未知参数正是这类事故的温床。
     else {
@@ -1650,7 +1711,10 @@ auto run_app(int argc, char** argv) -> int {
   app_options.text_fit = options.text_fit;
   app_options.text_gamma = options.text_gamma;
   app_options.text_gamma_small = options.text_gamma_small;
-  app_options.text_preset = options.text_preset;
+  app_options.text_fit_max_size = options.text_fit_max_size;
+  app_options.text_digit_gamma = options.text_digit_gamma;
+  app_options.text_letter_gamma = options.text_letter_gamma;
+  app_options.text_han_gamma = options.text_han_gamma;
   app_options.ui_font_scale = options.ui_font_scale;
   app_options.control_port = options.control_port;
   app_options.control_file = options.control_file;
@@ -1660,7 +1724,12 @@ auto run_app(int argc, char** argv) -> int {
   st::app::Application app("codeeditor", "0.1.0", app_options);
 
   // 声明式页面（整个 IDE 是一个 Component：内容槽里的一切由 `build()` 描述）。
-  auto page = std::make_shared<CodeEditorPage>(samples(), options.workspace);
+  float editor_font_scale = kEditorFontScale;
+  if (options.editor_font_scale != "auto") {
+    editor_font_scale = static_cast<float>(std::stod(options.editor_font_scale));
+  }
+  auto page =
+      std::make_shared<CodeEditorPage>(samples(), options.workspace, editor_font_scale);
   // 窗框的窗口动作出口：`Application` 实现了 `ui::WindowControl`（转发给后端）。
   // 在这一处"装"进去，页面内的组件就不需要知道应用/后端的存在（依赖方向单向）。
   page->window_control_ = &app;

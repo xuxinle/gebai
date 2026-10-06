@@ -108,14 +108,24 @@ struct AppOptions {
   std::string text_lcd{"auto"};
   /// 字形网格拟合（hinting）：`auto` / `off` / `light` / `normal`。
   ///
-  /// 默认 `normal`，与 `text_lcd` 同一理由：内置通道与桌面同源（拟合**刻意**
-  /// 改变字形边沿，两侧不同源时截图与实机就是两种字）。实测收益见
-  /// `tools/stem_phase_probe.cpp`：中文「每边一个过渡像素」的糊笔画 90.9% → 21.8%。
-  /// 需要不改变字形边沿的基准时显式传 `--text-fit=off`。
+  /// **默认 `off`**（= `auto` 的解析结果）：以真窗口浏览器为基准逐轴标定后，
+  /// 拟合在"覆盖墨量 / 覆盖离散 / 边缘柔度"三个正交轴上**都偏离参照**——
+  /// 它在单指标（边缘落网格比例）下看着更"锐"，而参照本身的锐度就在不拟合那一档
+  /// （详见 `docs/BACKLOG.md` P1）。
+  /// 需要它带来的锐度时显式传 `--text-fit=light|normal`。
   std::string text_fit{"auto"};
-  /// 字形观感档位（`--text-preset` / `ST_TEXT_PRESET`）：默认 `B`（三轴对齐真窗口浏览器）。
-  /// 三档的定义与实测依据见 `src/app/app.cpp` 里那段表格；改默认值前先读 `docs/BACKLOG.md` P1。
-  std::string text_preset{"auto"};
+  /// 拟合的**适用字号上限**（物理 px；`auto` = 不限）。
+  ///
+  /// 拟合在 10~15px 对覆盖墨量是正收益、20px 以上转负；要"只在小字号拟合"时用它，
+  /// 不必整体关掉拟合。
+  std::string text_fit_max_size{"auto"};
+  /// 逐字形类的覆盖率 gamma（`auto` = 用内置默认档；数值直接给）。
+  ///
+  /// 三类的度量特性不同（数字笔画最细、汉字最密），本就是**独立旋钮**——
+  /// 因此按类给参数，而不是打包成一个"观感档位"名。
+  std::string text_digit_gamma{"auto"};
+  std::string text_letter_gamma{"auto"};
+  std::string text_han_gamma{"auto"};
   /// 覆盖率 gamma 预校正：`auto` / `off` / 数值字面量（见 `resolve_text_gamma`）。
   ///
   /// **默认 0.6（加墨）**：γ < 1 压黑加墨、γ > 1 提亮减墨。

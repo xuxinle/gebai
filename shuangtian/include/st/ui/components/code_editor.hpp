@@ -95,7 +95,9 @@ class CodeEditor : public Element {
   /// （实测：`--ui-font-scale 1.5` 时 UI 文字 15→22.5，而编辑器恒为 13.5）。
   /// 档位表达还能让「编辑器字体大小」设置面板直接列出 0.85/1.0/1.15…。
   ///
-  /// 默认 `1.0` = 与正文同级（`font_base`）。代码编辑器与正文同号即可读性而言是合适的。
+  /// 默认 `0.85`（**比正文小一号**）：代码行密度大、且等宽字每字同宽，
+  /// 与正文同级时会显得偏大；同行能看到更多字符对编辑器更重要。
+  /// 想要与正文同级就显式 `set_font_scale(1.0F)`。
   void set_font_scale(float scale);
   [[nodiscard]] auto font_scale() const noexcept -> float { return font_scale_; }
 
@@ -324,7 +326,7 @@ class CodeEditor : public Element {
   std::size_t anchor_{0};
   float scroll_x_{0.0f};
   float scroll_y_{0.0f};
-  float font_scale_{1.0f};
+  float font_scale_{0.85f};
   /// 显式绝对字号（<=0 = 未设，按 `font_scale_` 跟主题）。
   float font_size_px_{-1.0f};
   /// 主题的基准字号（`apply_theme` 记下）。实际字号由它 **惰性算出**：

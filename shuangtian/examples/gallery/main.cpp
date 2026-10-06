@@ -63,6 +63,10 @@ struct Options {
   /// 覆盖率 gamma 预校正：auto/off/数值（见 AppOptions::text_gamma）。
   std::string text_gamma{"auto"};
   std::string text_gamma_small{};
+  std::string text_digit_gamma{"auto"};
+  std::string text_letter_gamma{"auto"};
+  std::string text_han_gamma{"auto"};
+  std::string text_fit_max_size{"auto"};
 /// 界面字号缩放：auto/数值（见 `AppOptions::ui_font_scale`）。
 std::string ui_font_scale{"auto"};
   std::uint16_t control_port{0};
@@ -93,6 +97,12 @@ std::string ui_font_scale{"auto"};
     // 这正是本工程反复记录的那类缺陷（静默失效字段），所以每加一个文字开关都要两处一起加。
     else if (raw == "--text-gamma") options.text_gamma = next("auto");
     else if (raw == "--text-gamma-small") options.text_gamma_small = next("auto");
+    // 逐类覆盖率 gamma 与拟合字号上限：同属"加一个文字开关就要两处一起加"的那类
+    // （应用自带解析器，`st::app::parse_cli` 到不了这里）。
+    else if (raw == "--text-digit-gamma") options.text_digit_gamma = next("auto");
+    else if (raw == "--text-letter-gamma") options.text_letter_gamma = next("auto");
+    else if (raw == "--text-han-gamma") options.text_han_gamma = next("auto");
+    else if (raw == "--text-fit-max-size") options.text_fit_max_size = next("auto");
     else if (raw == "--ui-font-scale") options.ui_font_scale = next("auto");
     else if (raw == "--scale") options.scale = static_cast<float>(std::stod(next("1")));
     else if (raw == "--dpi") options.scale = static_cast<float>(std::stod(next("1")));
@@ -205,6 +215,10 @@ auto run_app(int argc, char** argv) -> int {
       app_options.text_fit = options.text_fit;
     app_options.text_gamma = options.text_gamma;
   app_options.text_gamma_small = options.text_gamma_small;
+  app_options.text_digit_gamma = options.text_digit_gamma;
+  app_options.text_letter_gamma = options.text_letter_gamma;
+  app_options.text_han_gamma = options.text_han_gamma;
+  app_options.text_fit_max_size = options.text_fit_max_size;
   app_options.ui_font_scale = options.ui_font_scale;
   app_options.control_port = options.control_port;
   app_options.control_file = options.control_file;

@@ -679,7 +679,11 @@ Chrome 边缘：  背景(24,24,29) → 蓝(24,24,133) → 亮(172,205,211)   ←
 这套量尺口径的教训见 `docs/perceptual_changes.md`。
 
 **机制保留**：拟合仍可通过 `--text-fit=light|normal` / `ST_TEXT_FIT` 开启，
-`--text-preset=A`（拟合开 + 旧 γ）保留作对照；预设档定义与实测见 `src/app/app.cpp`。
+拟合仍可用 `--text-fit=light|normal` 开启（对照用）；逐字形类的覆盖率 gamma 有
+`--text-digit-gamma` / `--text-letter-gamma` / `--text-han-gamma` 三个独立入口，
+拟合的适用字号上限有 `--text-fit-max-size`。**不做"打包档位名"**（A/B/C 这类）：
+它们是我做对照实验时的内部代号，对使用者无意义，且把可独立调的旋钮捆成一个——
+想只改其中一个就不得不整体换档。实测依据见 `docs/BACKLOG.md` P1。
 相关取舍的完整数据与"未闭合项"见 `docs/BACKLOG.md` P1。
 
 ### 4.3.2 字形网格拟合（grid fitting / hinting）
