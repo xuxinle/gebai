@@ -16,7 +16,7 @@ mkdir -p "$outdir"
 mapfile -t objs < <(ls "$objdir"/*.o | grep -E '_shuangtian_src_(core|math|codec|raster|text)_' \
   | grep -v -E 'raster_platform_|shell_platform_|platform_gl|_test\.|test_runner|zz_probe')
 case "$name" in
-  svg_ab_probe)
+  svg_ab_probe|icon_gallery_probe)
     mapfile -t svgobjs < <(ls "$objdir"/*.o | grep -E '_shuangtian_src_ui_svg\.cpp\.o$')
     objs+=("${svgobjs[@]}")
     ;;
