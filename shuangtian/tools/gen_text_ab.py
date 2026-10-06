@@ -270,12 +270,31 @@ def glyph_rows():
     return rows
 
 
+# ── 页 5：全量字母数字 × 小字号（**一行一个字符**） ──────────────────────────
+# 用途：小字号下逐字形核对（`A`~`Z`、`a`~`z`、`0`~`9` 共 62 个）。
+# 为什么只取小字号：实测大字号两侧已基本一致（孤立字形的实心比在 13/15px 上的差异
+# 来自"孤立字形 vs 文本串"的口径差，不是缺陷），而小字号才是量化/吸附的活跃区间。
+ALL_GLYPH_SIZES = [10, 11, 12, 13]
+
+
+def all_glyph_rows():
+    chars = [chr(c) for c in range(ord("A"), ord("Z") + 1)]
+    chars += [chr(c) for c in range(ord("a"), ord("z") + 1)]
+    chars += [chr(c) for c in range(ord("0"), ord("9") + 1)]
+    rows = []
+    for size in ALL_GLYPH_SIZES:
+        for ch in chars:
+            rows.append((ch, size, TEXT, SANS, 0, f"{size}px {ch}"))
+    return rows
+
+
 def main() -> int:
     root = pathlib.Path(__file__).resolve().parent
     emit(root, "chars", CHARS_ROWS, "霜天文字 A/B — 字符集")
     emit(root, "sizes", SIZE_ROWS, "霜天文字 A/B — 字号阶梯")
     emit(root, "families", family_rows(), "霜天文字 A/B — 字族 × 字号")
     emit(root, "glyphs", glyph_rows(), "霜天文字 A/B — 逐字形")
+    emit(root, "allglyphs", all_glyph_rows(), "霜天文字 A/B — 全量字母数字（小字号）")
     return 0
 
 
