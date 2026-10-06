@@ -18,10 +18,12 @@
 #include <utility>
 #include <vector>
 
+#include "st/core/print.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/path.hpp"
 #include "st/test/test.hpp"
+#include "st/ui/icon.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/title_bar.hpp"
 #include "st/ui/components/window_frame.hpp"
@@ -491,10 +493,48 @@ ST_TEST(restore_icon_differs_from_maximize_icon) {
   const Rect box{0.0f, 0.0f, 16.0f, 16.0f};
   const auto restore = st::ui::Icon::path("restore", box, 2.0f);
   const auto maximize = st::ui::Icon::path("square", box, 2.0f);
-  const Rect restore_bounds = restore.flattened_bounds(0.25f);
-  const Rect maximize_bounds = maximize.flattened_bounds(0.25f);
-  ST_CHECK(restore_bounds.width != maximize_bounds.width ||
-           restore_bounds.height != maximize_bounds.height);
+
+  // 判据必须落在**“多出来的那个叠框”**上，而不是包围盒尺寸。
+  //
+  // ⚠ 旧写法的漏洞（实测拓到）：它比的是两者的 `flattened_bounds` 宽/高不等。
+  // 而 `restore` 当时有一个真 bug（后窗竖线 `L16 16` 伸进了前窗内部）——
+  // 那多出来的一截把包围盒撞大了，于是**断言靠 bug 才能通过**：
+  // 修好几何后两者尺寸完全一致（都是 17px 归一化尺寸），这条就红了。
+  // 一个“因为缺陷而绿”的护栏比没有护栏更坑：它会在修缺陷时把人指向错的方向。
+  //
+  // 正确的量是**路径本身的几何差**：两者应当不是同一条路径，
+  // 且 `restore` 应当比 `square` **多出一段子路径**（叠在后面那个方框）。
+  const auto restore_polylines = restore.flatten(0.25f);
+  const auto maximize_polylines = maximize.flatten(0.25f);
+  ST_CHECK(restore_polylines.size() > maximize_polylines.size());
+  ST_CHECK_EQ(maximize_polylines.size(), 1U);
+  ST_CHECK_EQ(restore_polylines.size(), 2U);
+}
+
+/// `restore` 的**视觉重心**必须真的偏——两个叠框与单个方框不能长得一样。
+///
+/// 上一条只证“结构不同”；这一条盯“画出来看得不一样”：
+/// 两者都在各自包围盒内居中的话，像素分布必然不同（`restore` 有左上一个角）。
+ST_TEST(restore_icon_ink_differs_from_maximize_icon) {
+  constexpr int kSize = 32;
+  const auto render = [](std::string_view name) {
+    st::raster::Canvas canvas{kSize, kSize, 1.0f};
+    canvas.clear(st::math::Color::rgb(0xFF, 0xFF, 0xFF));
+    st::ui::Icon::draw(canvas, name, Rect{0.0f, 0.0f, 32.0f, 32.0f},
+                       st::math::Color::rgb(0x00, 0x00, 0x00), 2.0f);
+    return canvas;
+  };
+  const st::raster::Canvas restore = render("restore");
+  const st::raster::Canvas maximize = render("square");
+  std::size_t differing = 0;
+  for (int y = 0; y < kSize; ++y) {
+    for (int x = 0; x < kSize; ++x) {
+      if (!(restore.pixel_at(x, y) == maximize.pixel_at(x, y))) ++differing;
+    }
+  }
+  st::print("[restore-vs-maximize] 不同像素 {} / {}\n", differing, kSize * kSize);
+  // “看得出不一样”：至少要有可观的一片像素不同（不是抗锯齿的单像素抖动）
+  ST_CHECK(differing > 60U);
 }
 
 ST_TEST(title_bar_maximized_state_drives_button_icon) {

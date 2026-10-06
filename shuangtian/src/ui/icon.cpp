@@ -8,6 +8,21 @@ namespace st::ui {
 namespace {
 
 /// 图标表（24×24 视图框；描边式为主，`filled` 为实心）。
+///
+/// ## 坐标不必“画满”视框——绘制时按**各自墨迹**做光学归一化
+///
+/// 每个图标只需画成它自己的比例正确；`Icon::path` 会把它的墨迹
+/// 等比缩放到统一的可视尺寸并居中（参见其注释），所以这张表里
+/// “这个字形占 24 里的多少”**只影响起始相位**，不影响最终光感大小。
+/// 好处是修正一个图标不会牵动另一个，也不必手算 73 组缩放。
+inline constexpr float kOpticalTargetPx = 17.0f;
+/// 光学放大的上界：小字形（`chevron`/`minus`/`more-*`）需要明显放大，
+/// 但不把它们放到超过视框（否则笔画会顶到邻居）。
+inline constexpr float kOpticalMaxScale = 1.9f;
+/// 光学缩小的下界：大字形要收一点才能与其余对齐；下界只防病态数据，
+/// 正常数据离它很远（实测最大那枚只需 0.78×）。
+inline constexpr float kOpticalMinScale = 0.7f;
+
 inline constexpr auto kIcons = std::to_array<IconGlyph>({
     {"check", "M4 12.5 L9.5 18 L20 6", 2.2f, false},
     {"close", "M6 6 L18 18 M18 6 L6 18", 2.2f, false},
@@ -201,7 +216,12 @@ inline constexpr auto kIcons = std::to_array<IconGlyph>({
     // 还原（窗口已最大化时"最大化"按钮的形态）：**两个叠放的方框**。
     // 之前它复用 `square`，于是"最大化"与"还原"两种形态在像素上**完全一样**——
     // 用户看不出这个按钮此刻是哪个动作。图形与名字并排的图标墙（gallery）才能看出这类问题。
-    {"restore", "M8 8 L20 8 L20 20 L8 20 Z M4 4 L16 4 L16 16", 1.6f, false},
+    //
+    // ⚠ 后窗（`4,4`–`16,16`）被前窗（`8,8`–`20,20`）遮住的部分**不能画**：
+    // 旧写法 `M4 4 L16 4 L16 16` 把后窗右边缘一路画到 `y=16`——那已经在前窗**内部**，
+    // 于是多出一截“插进窗里”的竖线（用户截图报的就是它）。
+    // 正确收尾点是后窗右边缘与前窗上缘的交点 `y=8`（再往下就进了前窗内部）。
+    {"restore", "M16 8 L16 4 L4 4 L4 16 L8 16 M8 8 L20 8 L20 20 L8 20 Z", 1.6f, false},
     {"triangle", "M12 4.5 L20.5 19.5 L3.5 19.5 Z", 1.6f, false},
 });
 
@@ -335,17 +355,58 @@ auto Icon::path(std::string_view name, math::Rect box, float stroke_width) -> ra
   raster::Path path;
   const IconGlyph* glyph = find(name);
   if (glyph == nullptr || box.is_empty()) return path;
+  (void)stroke_width;
+
+  // **光学归一化**：把每个图标的墨迹等比缩放并居中到统一的视觉尺寸。
+  //
+  // 为何要做：一套图标里各图标的**光感大小**必须一致——“看着一样大”是图标库的基本要求。
+  // 而真实图标不可能用同一个 24×24 盒：方形、三角形、圆形按包围盒等高对齐时
+  // （“几何居中”）**视觉大小不同**（圆形/三角形看起来明显偏小）。实测这套表：
+  // 最大/最小光感尺寸相差 **2.2 倍**（`list` 0.42 对 `git-branch` 0.78），
+  // 同一排里有的像实心有的像发丝，是“不精致”的首要来源。
+  //
+  // 归一化按**各自墨迹范围**做（`view_bounds`，即排版对齐用的同一份几何），
+  // 于是“画多大”与“占多宽”永远一致。
+  //
+  // ⚠ 描边不跟着缩放：`Icon::draw` 传的是**绝对线宽**，一缩放它就会让
+  // 小字形（`chevron` 等）的笔画变粗、破坏笔画粗细的一致性——那是另一个正交量。
+  const math::Rect ink = view_bounds(name);
+  const float target = kOpticalTargetPx;
+  // ⚠ 用 `extent`（较大边）而不是要求两边都为正：`minus`/`more-horizontal` 这类
+  // **零高度**字形（一条横线）的 `view_bounds.height` 恰为 0，
+  // 要求两边都 > 0 会让它们**完全跳过归一化**（实测踩到：其余图标都归到 0.604，
+  // 只有它们停在 0.500/0.438）。
+  const float extent = std::max(ink.width, ink.height);
+  float fit = 1.0f;
+  if (extent > 0.0f) {
+    // 以较大边对齐目标（“同等大”看的是最长那个方向）。
+    //
+    // ⚠ **两个方向都要允许**：只放大不缩小的话，本来就大的字形（`git-branch`
+    // 等）停在原地，实测归一化后仍差 **1.35 倍**（min 16.3 / max 22.0）——
+    // 等于只修了一半。上下夹取只是防极端值（远离目标的病态数据）把图标拉爆。
+    fit = std::clamp(target / extent, kOpticalMinScale, kOpticalMaxScale);
+  }
+  // 先按 24 视框映射，再在**同一坐标系**里围绕墨迹中心做光学缩放。
   const float scale = std::min(box.width, box.height) / 24.0f;
   const float offset_x = box.x + (box.width - 24.0f * scale) * 0.5f;
   const float offset_y = box.y + (box.height - 24.0f * scale) * 0.5f;
-  const auto map = [scale, offset_x, offset_y](float x, float y) -> math::Point {
-    return math::Point{offset_x + x * scale, offset_y + y * scale};
+  // 归一化后的落点：把**墨迹中心**对齐到**视框中心**。
+  //
+  // 为何要居中而不是保持原位置：① 光感大小一致之后，位置也得一致——
+  // 否则同一排里有的图标偏上、有的偏下；② 它同时是一个**护栏**：
+  // 目标尺寸 17px 居中到 24 视框后，墨迹必然落在 `[3.5, 20.5]`，
+  // 永远不会被放大推到视框之外（否则会与邻居视觉重叠）。
+  const float box_cx = offset_x + 12.0f * scale;
+  const float box_cy = offset_y + 12.0f * scale;
+  const float ink_cx = (ink.x + ink.width * 0.5f) * scale;
+  const float ink_cy = (ink.y + ink.height * 0.5f) * scale;
+  const auto map = [scale, box_cx, box_cy, fit, ink_cx, ink_cy](float x, float y) -> math::Point {
+    return math::Point{box_cx + (x * scale - ink_cx) * fit, box_cy + (y * scale - ink_cy) * fit};
   };
 
   Cursor cursor{glyph->data, 0};
   bool has_subpath = false;
   math::Point subpath_start{};
-  (void)stroke_width;
 
   // ⚠️ **每个 `next_number` 必须单独成句**——不要写成
   // `map(next_number(cursor), next_number(cursor))`。C++ **没有规定函数实参的求值顺序**，
@@ -492,7 +553,19 @@ void Icon::draw(raster::Surface& canvas, std::string_view name, math::Rect box, 
     canvas.fill_path(path, raster::Paint::solid(color));
     return;
   }
-  canvas.stroke_path(path, raster::Paint::solid(color), width);
+  // 描边样式：**圆角连接 + 圆头端帽**（不用 raster 缺省的 miter/butt）。
+  //
+  // 为何必须在这里指定：缺省 miter/butt 下，**折线转角是尖角、线段两端是平切**，
+  // 观感偏硬；更实际的是，两端平切让**零长度风格的圆点完全画不出来**——
+  // `more-horizontal`/`more-vertical` 用 `M6 12 L6.02 12` 这类 0.02 长的线段当圆点，
+  // 截面虽被补圆覆盖，但带的**矩形两端仍与端点平齐**，外侧那半个圆被切掉，
+  // 再经抗锯齿平摊到几乎不可见（接触印相实测：两格墨迹 **完全为空**）。
+  // 圆头端帽把带外扩到端点之外，那半个圆才真的存在，圆点自然显现。
+  //
+  // 顶点的转角补圆是**几何必需**（见 `stroke_to_path` 的缺口深度判据），
+  // 与这里选圆角/尖角是两件事：`join` 只决定补出来的形状。
+  static constexpr raster::StrokeStyle kIconStroke{raster::LineCap::Round, raster::LineJoin::Round};
+  canvas.stroke_path(path, raster::Paint::solid(color), width, kIconStroke);
 }
 
 }  // namespace st::ui

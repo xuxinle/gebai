@@ -82,7 +82,9 @@
     "gpu_structural_probe": { "kind": "executable", "sources": ["tools/gpu_structural_probe.cpp"],
                               "exclude_sources": ["src/pkg/*"] },
     "button_center_probe": { "kind": "executable", "sources": ["tools/button_center_probe.cpp"],
-                             "exclude_sources": ["src/pkg/*"] }
+                             "exclude_sources": ["src/pkg/*"] },
+    "icon_sheet_probe": { "kind": "executable", "sources": ["tools/icon_sheet_probe.cpp"],
+                          "exclude_sources": ["src/pkg/*"] }
   },
   "dependencies": {
     "modules": [],
