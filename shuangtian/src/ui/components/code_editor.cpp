@@ -1406,6 +1406,12 @@ auto CodeEditor::on_event(const RenderContext& context, Event& event) -> bool {
   switch (event.kind) {
     case EventKind::MouseDown: {
       rebuild_line_geometry(context);
+      // **右键不改光标**：它属于“上下文菜单”这条独立语义（主流编辑器同款）。
+      // 先于滚动条判定——右键在滚动条上也不应触发拖拽滑块。
+      if (event.button == 2) {
+        if (on_context_menu) on_context_menu(event.position);
+        return true;
+      }
       // 滚动条优先：两条滚动条都**不能落到“移光标”分支**上——
       // 拖滚动条是“看另一个地方”，把光标一起挪走是错的（实测：拖垂直条后光标从第 1 行跳到第 30 行）。
       const math::Rect v_track = v_scroll_bar_rect(context);

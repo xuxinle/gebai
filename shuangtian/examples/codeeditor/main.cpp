@@ -49,17 +49,20 @@
 #include "st/core/entry.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
+#include "st/core/process.hpp"
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
-#include "st/ext/json.hpp"   // script->eval() 返回 Result<Json>（std::variant 成员需完整类型）
+#include "st/ext/json.hpp"   // dsl::custom<T> 实例化需要 Json 完整类型（模板体里按值传 Json）
 #include "st/text/highlight.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/code_editor.hpp"
 #include "st/ui/components/command_palette.hpp"
 #include "st/ui/components/feedback.hpp"
+#include "st/ui/components/file_dialog.hpp"
 #include "st/ui/components/input.hpp"
 #include "st/ui/components/list.hpp"
 #include "st/ui/components/menu.hpp"
+#include "st/ui/components/overlay.hpp"
 #include "st/ui/components/scroll.hpp"
 #include "st/ui/components/split_view.hpp"
 #include "st/ui/components/tabs.hpp"
@@ -390,6 +393,13 @@ struct OpenBuffer {
 
 struct CodeEditorPage : Component {
  public:
+  CodeEditorPage(std::vector<Sample> files, std::string workspace, std::string tool_root,
+                 float editor_font_scale = kEditorFontScale,
+                 float editor_line_spacing = CodeEditor::kDefaultLineSpacing)
+      : editor_font_scale_(editor_font_scale), editor_line_spacing_(editor_line_spacing),
+        tool_root_(std::move(tool_root)), files_(std::move(files)),
+        workspace_(std::move(workspace)) {}
+
   CodeEditorPage(std::vector<Sample> files, std::string workspace,
                  float editor_font_scale = kEditorFontScale,
                  float editor_line_spacing = CodeEditor::kDefaultLineSpacing)
@@ -431,6 +441,7 @@ struct CodeEditorPage : Component {
   State<bool> sidebar_visible_{true};
   State<std::size_t> activity_{0};        ///< 活动栏选中项（0=资源管理器 … 4=扩展）
   State<std::size_t> bottom_{2};          ///< 底部面板（默认终端：VSCode 用户最常用落点）
+  State<bool> bottom_visible_{true};      ///< 底部面板开合（收起 = 分栏退化为单栏）
   State<std::string> status_{"就绪"};
   State<std::string> cursor_text_{"Ln 1, Col 1"};
   State<std::string> selection_text_{""};
@@ -443,8 +454,17 @@ struct CodeEditorPage : Component {
   State<bool> palette_shows_files_{false};   ///< Ctrl+P（文件表）vs Ctrl+Shift+P（命令表）
   State<bool> find_open_{false};
   State<std::string> find_counter_{"0/0"};
+  /// 查找条选项（大小写 / 全词 / 正则）。
+  State<bool> find_case_{false};
+  State<bool> find_word_{false};
+  State<bool> find_regex_{false};
   State<std::vector<std::string>> dir_expanded_{std::vector<std::string>{}};
   State<std::vector<std::string>> search_hits_{std::vector<std::string>{}};
+  State<std::string> search_summary_{""};
+  /// 当前编辑器的高亮语言（状态栏/扩展面板与编辑器共用一处真值源）。
+  State<std::string> language_{"cpp"};
+  /// 输出面板按来源分栏（`St build` / `St test` / `终端`…）。
+  State<std::string> output_channel_{"默认"};
 
   static constexpr std::size_t kNoMenu{static_cast<std::size_t>(-1)};
 
@@ -459,6 +479,43 @@ struct CodeEditorPage : Component {
   Input* find_needle_input{nullptr};    ///< 查找输入框（打开后把焦点交给它）
   bool focus_find_pending_{false};      ///< 「查找条开→下一帧聚焦输入框」的待办标记
   Input* terminal_input{nullptr};
+
+  // —— 侧栏各视图的非状态数据（不进重组依赖：这些是“算一次用一帧”的快照）——
+  std::vector<std::string> search_hit_paths_{};   ///< 与 `search_hits_` 同序的绝对路径
+  std::vector<std::size_t> search_hit_lines_{};   ///< 同序的 1 起行号
+  std::vector<std::size_t> search_hit_columns_{}; ///< 同序的列号（字节偏移）
+  std::string last_query_{};                      ///< 上次搜索词（重跑用）
+  std::string search_glob_{};                     ///< 文件过滤 glob
+  State<bool> search_case_{false};
+  State<bool> search_word_{false};
+  State<bool> search_regex_{false};
+  /// Git 状态快照（`refresh_git` 填充；渲染期读的是它而不是每次重查）。
+  struct GitChange {
+    std::string status{};   ///< 两字符状态码（`M `、`??`…，已去尾空格）
+    std::string path{};
+  };
+  std::string git_branch_{};
+  std::vector<GitChange> git_changes_{};
+  std::string git_error_{};
+  bool git_probed_{false};
+  /// 已注册的语言清单（扩展视图用；懒加载一次）。
+  std::vector<std::string> languages_{};
+  /// 当前在跑的任务名（空 = 空闲）。
+  std::string task_running_{};
+  /// 终端历史（↑↓ 翻）与游标。
+  std::vector<std::string> terminal_history_{};
+  std::ptrdiff_t terminal_history_cursor_{-1};
+  /// 关闭脏标签的待确认动作（非空 = 弹了确认对话框）。
+  std::function<void()> pending_close_{};
+  /// 待确认关闭的标签名（对话框正文用）。
+  std::string pending_close_label_{};
+  /// 编辑器右键菜单开关 + 锚点（锚点跟随鼠标最后位置）。
+  State<bool> context_open_{false};
+  st::math::Point context_anchor_{};
+  /// 快捷键一览浮层开关。
+  State<bool> shortcuts_open_{false};
+  /// 打开/另存对话框的待执行动作（选完路径后调）。
+  std::function<void(const std::string&)> pending_file_action_{};
 
   // —— 动作：只写状态（同步由框架做）——
 
@@ -539,10 +596,15 @@ struct CodeEditorPage : Component {
     status_.set("已关闭 " + std::string(key));
   }
 
+  /// 关闭当前标签（**走确认路径**：脏标签会先弹对话框）。
+  ///
+  /// 为何必须绕到 `request_close`：入口有四处关闭（Ctrl+W / 工具栏按钮 / 菜单 / 标签的 ×），
+  /// 只有标签的 × 天然走 `request_close`——其余三处若直接调 `close()`，
+  /// 就会出现“同一个动作，换个入口就静默丢修改”的不一致（实测踩到）。
   auto close_active() -> void {
     const auto list = buffers_.value();
     if (list.empty()) return;
-    close(list[active_.value()].key);
+    request_close(list[active_.value()].key);
   }
 
   /// 保存当前标签：真实文件走 `fs::write_text`，内置样例走内存模拟。
@@ -686,9 +748,11 @@ struct CodeEditorPage : Component {
 
     // 编辑器实例可能在本次重组中新建/换绑：先置空，由 build_editor_area 重新取得
     editor = nullptr;
-    column(c, {.gap = 0.0f, .id = "editor-page"}, [&] {
-      build_main(c, buffers, active, has_editor);
-      build_bottom(c);
+    // `grow = true` 不可省：本页住在窗框的**内容槽**（列容器）里，不 grow 就只按内容的
+    // 自然高度占位——实测 800px 窗口里页面只有 525px 高，底部剩 195px 空白，
+    // 编辑器被压到 295px。留白与「代码区太矮」是同一个根因。
+    column(c, {.gap = 0.0f, .grow = true, .id = "editor-page"}, [&] {
+      build_workbench(c, buffers, active, has_editor);
       build_status_bar(c);
       build_find_bar(c);
     });
@@ -697,6 +761,11 @@ struct CodeEditorPage : Component {
     apply_pending_focus();
     // 命令面板：**条件声明**（关掉 = 本帧不声明 → 框架 sweep 摘除）
     if (palette_open_.value()) build_palette(c);
+    // 编辑器右键菜单 / 关闭确认对话框 / 快捷键一览：同一套条件声明。
+    build_editor_context(c);
+    build_close_confirm(c);
+    build_shortcuts_card(c);
+    build_open_dialog(c);
     // 文本灌入：只在本帧的编辑器实例与「已装载的标签」不一致时写
     // （`set_text` 会清撤销栈并把光标归零；每次重组都写会让打字被重置——实测踩到）
     if (editor != nullptr && active < buffers.size() && buffers[active].key != loaded_key_) {
@@ -733,9 +802,12 @@ struct CodeEditorPage : Component {
           {"file", "文件",
            {{.id = "new", .label = "新建文件"},
             {.id = "open", .label = "打开文件…"},
+            {.id = "save-as", .label = "另存为…"},
             {.separator = true},
             {.id = "save", .label = "保存（Ctrl+S）"},
-            {.id = "close-tab", .label = "关闭编辑器（Ctrl+W）"}}},
+            {.separator = true},
+            {.id = "close-tab", .label = "关闭编辑器（Ctrl+W）"},
+            {.id = "close-all", .label = "关闭全部编辑器"}}},
           {"edit", "编辑",
            {{.id = "undo", .label = "撤销"},
             {.id = "redo", .label = "重做"},
@@ -752,13 +824,17 @@ struct CodeEditorPage : Component {
             {.separator = true},
             {.id = "toggle-sidebar", .label = "切换侧栏可见性（Ctrl+B）"},
             {.id = "find", .label = "查找（Ctrl+F）"},
+            {.id = "toggle-terminal", .label = "切换底部面板（Ctrl+J）"},
             {.id = "toggle-theme", .label = "切换亮/暗主题"}}},
           {"run", "运行",
            {{.id = "run-task", .label = "运行任务：构建 gallery"},
             {.id = "run-test", .label = "运行任务：st test"},
+            {.id = "run-lint", .label = "运行任务：st lint"},
             {.separator = true},
             {.id = "toggle-terminal", .label = "切换终端（底部面板）"}}},
-          {"help", "帮助", {{.id = "about", .label = "关于 codeeditor"}}}};
+          {"help", "帮助",
+           {{.id = "about", .label = "关于 codeeditor"},
+            {.id = "shortcuts", .label = "键盘快捷键…"}}}};
       bar = dsl::menu_bar(
           c, kMenus,
           [this](const std::string& menu, const std::string& item) { page->on_menu(menu, item); },
@@ -774,12 +850,23 @@ struct CodeEditorPage : Component {
 
   void on_menu(const std::string& menu, const std::string& item) {
     menu_open_.set(kNoMenu);   // 选完即关
+    if (item == "toggle-terminal") {
+      // 两个菜单（查看/运行）都指向它：开合底部面板并切到终端
+      bottom_.set(2);
+      bottom_visible_.set(!bottom_visible_.value());
+      return;
+    }
     if (menu == "file" && item == "save") {
       save();
     } else if (menu == "file" && item == "close-tab") {
       close_active();
+    } else if (menu == "file" && item == "close-all") {
+      close_all();
+    } else if (menu == "file" && item == "save-as") {
+      save_as();
     } else if (menu == "file" && (item == "new" || item == "open")) {
-      open_palette(true);
+      if (item == "new") new_file_prompt();
+      else open_file_dialog();
     } else if (menu == "view" && item == "command-palette") {
       open_palette(false);
     } else if (menu == "view" && item == "toggle-sidebar") {
@@ -788,28 +875,24 @@ struct CodeEditorPage : Component {
       open_find();
     } else if (menu == "view" && item == "toggle-theme") {
       toggle_theme();
-    } else if (menu == "run" && item == "toggle-terminal") {
-      bottom_.set(2);
+    } else if (menu == "run" && (item == "run-task" || item == "run-test" || item == "run-lint")) {
+      run_task(item == "run-task" ? "build" : (item == "run-test" ? "test" : "lint"));
     } else if (menu == "help" && item == "about") {
       status_.set("codeeditor 0.1.0 · 霜天框架示例 · 声明式组装");
+    } else if (menu == "help" && item == "shortcuts") {
+      shortcuts_open_.set(true);
     } else {
       apply_editor_menu(menu, item);
     }
   }
 
-  /// 编辑/选择/运行菜单：直接作用于当前编辑器（一次性命令，不涉及界面形态）。
+  /// 编辑/选择菜单：直接作用于当前编辑器（一次性命令，不涉及界面形态）。
   void apply_editor_menu(const std::string& menu, const std::string& item) {
-    if (menu == "run") {
-      output_.set(output_.value() +
-                  std::format("\n[任务] {}（模拟输出）",
-                              item == "run-task" ? "st build gallery --profile dev" : "st test"));
-      status_.set("任务已提交（模拟）");
-      return;
-    }
+    (void)menu;
     if (editor == nullptr) return;
-    if (menu == "edit" && item == "undo") editor->undo();
-    else if (menu == "edit" && item == "redo") editor->redo();
-    else if (menu == "edit" && item == "comment") editor->toggle_comment();
+    if (item == "undo") editor->undo();
+    else if (item == "redo") editor->redo();
+    else if (item == "comment") editor->toggle_comment();
     else if (item == "select-all") editor->select_all();
     else if (item == "copy") {
       // 真实复制：写编辑器剪贴板（无头环境没有系统剪贴板，见组件侧说明）
@@ -871,32 +954,120 @@ struct CodeEditorPage : Component {
                                                {"git-branch", "scm"}, {"play", "run"},
                                                {"package", "extensions"}};
     const std::size_t current = activity_.value();
-    column(c, {.gap = 2.0f, .width = 44.0f, .id = "activity-bar"}, [&] {
+    column(c, {.gap = 2.0f, .padding_y = 4.0f, .width = 44.0f, .id = "activity-bar"}, [&] {
       for (std::size_t index = 0; index < std::size(kActivities); ++index) {
         // 图标按钮：`custom<Button>`（Button 的 icon 是一等接口，属性面没有）
         const std::string id = std::string("activity-") + kActivities[index].id;
-        const bool on = index == current;
+        const bool on = index == current && sidebar_visible_.value();
         (void)custom<Button>(c, [&, index, on](Button& b) {
           b.set_id(id);
           b.set_icon(kActivities[index].icon);
           b.set_variant(on ? Button::Variant::Soft : Button::Variant::Ghost);
           b.set_size(Button::Size::Small);
-          b.on_click = [this, index] { activity_.set(index); };
-        }, {.width = 40.0f, .height = 40.0f, .key = kActivities[index].id});
+          b.on_click = [this, index] {
+            // 点当前视图 = 收起侧栏（IDEA/VSCode 通行行为）；点别处 = 切视图并展开。
+            if (activity_.value() == index && sidebar_visible_.value()) {
+              sidebar_visible_.set(false);
+              return;
+            }
+            activity_.set(index);
+            sidebar_visible_.set(true);
+          };
+        }, {.width = 40.0f, .height = 36.0f, .key = kActivities[index].id});
       }
     });
   }
 
+  /// 工作台各视图的标题（侧栏顶部一行：标题 + 该视图的动作按钮）。
+  void build_sidebar_head(Composer& c, std::string_view title) {
+    (void)row(c, {.gap = 4.0f, .height = 30.0f, .id = "sidebar-head"}, [&] {
+      (void)text(c, [title] { return std::string(title); },
+                 {.grow = true, .weight = FontWeight::Medium, .id = "sidebar-title"});
+      build_sidebar_actions(c);
+    });
+  }
+
+  /// 各视图的动作按钮（按当前视图给不同的一组）。
+  void build_sidebar_actions(Composer& c) {
+    const auto icon_button = [&](const char* id, const char* icon, const char* tip,
+                                 std::function<void()> on_click) {
+      (void)custom<Button>(c, [this, id, icon, tip, on_click = std::move(on_click)](Button& b) {
+        b.set_id(id);
+        b.set_icon(icon);
+        b.set_variant(Button::Variant::Ghost);
+        b.set_size(Button::Size::Small);
+        b.on_click = on_click;
+      }, {.width = 24.0f, .height = 24.0f, .key = id});
+      (void)tip;
+    };
+    switch (activity_.value()) {
+      case 0:
+        icon_button("explorer-refresh", "refresh", "刷新", [this] { refresh_tree(); });
+        icon_button("explorer-new-file", "plus", "新建文件", [this] { new_file_prompt(); });
+        icon_button("explorer-save", "download", "保存当前", [this] { save(); });
+        break;
+      case 1:
+        icon_button("search-go", "search", "重新搜索", [this] { run_search(last_query_); });
+        icon_button("search-clear", "close", "清空结果", [this] {
+          search_hits_.set({});
+          search_hit_paths_.clear();
+          last_query_.clear();
+        });
+        break;
+      case 2:
+        icon_button("scm-refresh", "refresh", "刷新状态", [this] { refresh_git(); });
+        break;
+      case 3:
+        icon_button("run-build", "play", "构建", [this] { run_task("build"); });
+        icon_button("run-test", "check", "测试", [this] { run_task("test"); });
+        break;
+      default:
+        icon_button("ext-refresh", "refresh", "重新枚举", [this] { refresh_languages(); });
+        break;
+    }
+  }
+
   /// 侧栏内容（按活动栏选中项切换）。
+  ///
+  /// 五个视图各自独立成函数：视图多起来之后「一熊 if/else 里塞五段界面」会让每加一个
+  /// 视图都要重读一整堆无关代码。
   void build_sidebar(Composer& c, const std::vector<OpenBuffer>& buffers, std::size_t active) {
     (void)buffers;
     (void)active;
-    column(c, {.gap = 8.0f, .padding = 12.0f, .grow = true, .id = "sidebar-body"}, [&] {
-      const std::size_t which = activity_.value();
-      if (which == 0) {
-        (void)text(c, [] { return std::string("资源管理器"); });
-        if (!workspace_.empty()) {
-          // 真实工作区：树（懒展开——点目录才扫它的子层）
+    column(c, {.gap = 6.0f, .padding = 10.0f, .grow = true, .id = "sidebar-body"}, [&] {
+      switch (activity_.value()) {
+        case 0: build_explorer(c); break;
+        case 1: build_search_view(c); break;
+        case 2: build_scm_view(c); break;
+        case 3: build_run_view(c); break;
+        default: build_extensions_view(c); break;
+      }
+    });
+  }
+
+  // —— 视图 0：资源管理器（真工作区树 / 内置样例列表）——
+  void build_explorer(Composer& c) {
+    build_sidebar_head(c, workspace_.empty() ? "内置样例" : "资源管理器");
+    if (workspace_.empty()) {
+      // 无 `--workspace`：仍是自包含演示，但用 Tree 形态（与真实工作区同一套视觉）,
+      // 且按扩展名给图标——否则“有工作区/无工作区”两份界面的语言不一致。
+      std::vector<TreeNodeData> nodes;
+      for (const auto& sample : files_) {
+        nodes.push_back(TreeNodeData{.key = "sample:" + sample.name, .label = sample.tree_key});
+      }
+      nodes.push_back(TreeNodeData{.key = "sample:stlog.log", .label = "logs/app.stlog"});
+      (void)tree(c, nodes, {},
+                 [this](const std::string& key) {
+                   const std::string name = key.substr(7);
+                   if (name == "stlog.log") open_stlog();
+                   else open_by_name(name);
+                 },
+                 {.grow = true, .id = "sample-tree"});
+      return;
+    }
+    (void)custom_container<ScrollView>(
+        c,
+        [&] {
           (void)tree(c, workspace_nodes(),
                      [this](const std::string& key, bool expanded) {
                        on_tree_toggle(key, expanded);
@@ -904,42 +1075,198 @@ struct CodeEditorPage : Component {
                      [this](const std::string& key) {
                        if (key.rfind("dir:", 0) != 0) open_path(key);
                      },
-                     {.grow = true, .id = "workspace-tree"});
-        } else {
-          for (const auto& sample : files_) {
-            (void)custom<Button>(c, [this, &sample](Button& b) {
-              b.set_label(sample.tree_key);
+                     {.id = "workspace-tree"});
+        },
+        [](ScrollView& scroll) { scroll.set_id("explorer-scroll"); },
+        {.grow = true, .id = "explorer-host"});
+    if (workspace_nodes().empty()) {
+      (void)text(c, [this] { return std::string("目录为空或不可读：") + workspace_; });
+    }
+  }
+
+  // —— 视图 1：搜索（工作区文本 + 按文件分组）——
+  void build_search_view(Composer& c) {
+    build_sidebar_head(c, "搜索");
+    (void)custom<Input>(c, [this](Input& field) {
+      field.set_id("search-input");
+      field.set_placeholder("搜索（回车执行）");
+      field.set_icon_prefix("search");
+      field.on_submit = [this](std::string_view query) { apply_search(std::string(query)); };
+    }, {.key = "search-input"});
+    // 选项行：glob 过滤 + 大小写 / 全词 / 正则（与 VSCode 的查找条同族）
+    (void)custom<Input>(c, [this](Input& field) {
+      field.set_id("search-glob");
+      field.set_placeholder("文件过滤（如 *.cpp, src/**）");
+      field.on_submit = [this](std::string_view glob) {
+        search_glob_ = std::string(glob);
+        apply_search(last_query_);
+      };
+    }, {.key = "search-glob"});
+    (void)row(c, {.gap = 4.0f}, [&] {
+      toggle_chip(c, "search-case", "Aa", search_case_.value(), [this] {
+        search_case_.set(!search_case_.value());
+        apply_search(last_query_);
+      });
+      toggle_chip(c, "search-word", "ab", search_word_.value(), [this] {
+        search_word_.set(!search_word_.value());
+        apply_search(last_query_);
+      });
+      toggle_chip(c, "search-regex", ".*", search_regex_.value(), [this] {
+        search_regex_.set(!search_regex_.value());
+        apply_search(last_query_);
+      });
+      (void)spacer(c);
+      (void)text(c, [this] { return search_summary_.value(); }, {.id = "search-summary"});
+    });
+    if (search_hits_.value().empty()) {
+      (void)text(c, [this] {
+        return search_summary_.value().empty()
+                   ? std::string("输入关键词后回车，搜索整个工作区")
+                   : std::string("没有匹配");
+      }, {.id = "search-empty"});
+      return;
+    }
+    // 结果按**文件分组**：条目 key 用 `路径:行号`（业务身份），前缀行不可点。
+    std::vector<ListItemData> items;
+    for (std::size_t index = 0; index < search_hits_.value().size(); ++index) {
+      items.push_back(ListItemData{.key = std::format("hit:{}", index),
+                                   .label = search_hits_.value()[index]});
+    }
+    (void)custom_container<ScrollView>(
+        c,
+        [&] {
+          (void)list(c, items, [this](std::size_t index) { activate_search_hit(index); },
+                     {.id = "search-results"});
+        },
+        [](ScrollView& scroll) { scroll.set_id("search-scroll"); },
+        {.grow = true, .id = "search-host"});
+  }
+
+  /// 开关胶囊（「Aa / ab / .*」这类选项）：按下态由 `active` 决定。
+  ///
+  /// 为什么不用 `Checkbox`：查找选项是**密集的一行小开关**（三个挤在 200px 宽里），
+  /// 带文字的勾选框会把行撑到放不下——胶囊用固定 26px 宽，观感与 VSCode 一致。
+  void toggle_chip(Composer& c, const char* id, const char* label, bool active,
+                   std::function<void()> on_click) {
+    (void)custom<Button>(c, [id, label, active, on_click = std::move(on_click)](Button& b) {
+      b.set_id(id);
+      b.set_label(label);
+      b.set_variant(active ? Button::Variant::Soft : Button::Variant::Ghost);
+      b.set_size(Button::Size::Small);
+      b.on_click = on_click;
+    }, {.width = 30.0f, .height = 24.0f, .key = id});
+  }
+
+  // —— 视图 2：源代码管理（真 `git status`）——
+  void build_scm_view(Composer& c) {
+    build_sidebar_head(c, "源代码管理");
+    if (!workspace_.empty() && git_branch_.empty() && !git_probed_) {
+      refresh_git();
+    }
+    if (workspace_.empty()) {
+      (void)text(c, [] { return std::string("内置样例模式：没有工作区可查 Git 状态"); });
+      return;
+    }
+    (void)row(c, {.gap = 6.0f}, [&] {
+      (void)icon(c, "git-branch", 14.0f);
+      (void)text(c, [this] {
+        return git_branch_.empty() ? std::string("（未探测）") : git_branch_;
+      }, {.grow = true, .id = "git-branch-label"});
+      (void)text(c, [this] { return std::format("{} 项变更", git_changes_.size()); },
+                 {.id = "git-change-count"});
+    });
+    if (!git_error_.empty()) {
+      (void)text(c, [this] { return git_error_; }, {.color = Tone::Danger, .id = "git-error"});
+    }
+    // 变更列表必须住在**滚动容器**里（与资源管理器/搜索同一个 `ScrollView` 契约）：
+    // 侧栏是固定宽度的窄列，而 `Button` 的测量不理会父宽（按标签文本算），
+    // 直接当列子元素会在长路径上**横向溢出到编辑区**（实测：变更条目叠在代码上方），
+    // 而 `ScrollView` 会给子元素一个被夹到视口宽的约束。
+    (void)custom_container<ScrollView>(
+        c,
+        [&] {
+          for (const auto& change : git_changes_) {
+            (void)custom<Button>(c, [this, change](Button& b) {
+              b.set_label(std::format("{}  {}", change.status, change.path));
               b.set_variant(Button::Variant::Ghost);
               b.set_size(Button::Size::Small);
-              b.on_click = [this, name = sample.name] { open_by_name(name); };
-            }, {.key = sample.tree_key});
+              b.set_icon("edit");
+              b.on_click = [this, change] { show_git_diff(change); };
+            }, {.key = "git:" + change.path});
           }
-        }
-      } else if (which == 1) {
-        (void)text(c, [] { return std::string("搜索"); });
-        (void)custom<Input>(c, [this](Input& field) {
-          field.set_id("search-input");
-          field.set_placeholder("搜索（工作区文本）");
-          field.set_icon_prefix("search");
-          field.on_change = [this](std::string_view query) { run_search(std::string(query)); };
-        }, {.key = "search-input"});
-        std::vector<ListItemData> hit_items;
-        for (std::size_t index = 0; index < search_hits_.value().size(); ++index) {
-          hit_items.push_back(ListItemData{.key = std::format("hit:{}", index),
-                                           .label = search_hits_.value()[index]});
-        }
-        (void)list(c, hit_items, [this](std::size_t index) { activate_search_hit(index); },
-                   {.grow = true, .id = "search-results"});
-      } else if (which == 2) {
-        (void)text(c, [] { return std::string("源代码管理\n分支 main\n变更 0 · 暂存 0"); });
-      } else if (which == 3) {
-        (void)text(c, [] {
-          return std::string("运行和调试\n· 构建 gallery\n· st test\n· st lint");
-        });
-      } else {
-        (void)text(c, [] { return std::string("扩展\n· stlog 高亮（内置规则）\n· 无其他扩展"); });
-      }
-    });
+          if (git_changes_.empty() && git_error_.empty() && !git_branch_.empty()) {
+            (void)text(c, [] { return std::string("工作区干净，没有未提交的变更"); });
+          }
+        },
+        [](ScrollView& scroll) { scroll.set_id("scm-scroll"); },
+        {.grow = true, .id = "scm-host"});
+  }
+
+  // —— 视图 3：运行与调试（真跑 st 子命令）——
+  void build_run_view(Composer& c) {
+    build_sidebar_head(c, "运行");
+    struct Task {
+      const char* id;
+      const char* label;
+      const char* detail;
+    };
+    static constexpr Task kTasks[] = {{"build", "构建当前目标", "st build gallery --profile dev"},
+                                      {"test", "跑框架单测", "st test"},
+                                      {"lint", "禁令扫描", "st lint"}};
+    for (const Task& task : kTasks) {
+      (void)row(c, {.gap = 6.0f}, [&] {
+        (void)custom<Button>(c, [this, task](Button& b) {
+          b.set_id(std::string("task-") + task.id);
+          b.set_label(task.label);
+          b.set_icon("play");
+          b.set_variant(Button::Variant::Secondary);
+          b.set_size(Button::Size::Small);
+          b.on_click = [this, id = std::string(task.id)] { run_task(id); };
+        }, {.height = 28.0f, .grow = true, .key = task.id});
+      });
+      (void)text(c, [task] { return std::string("  ") + task.detail; });
+    }
+    (void)text(c, [] { return std::string("输出落在底部的「输出」面板"); });
+    if (!task_running_.empty()) {
+      (void)row(c, {.gap = 6.0f}, [&] {
+        (void)custom<Spinner>(c, [](Spinner& s) { s.set_id("task-spinner"); },
+                              {.width = 18.0f, .height = 18.0f, .key = "spinner"});
+        (void)text(c, [this] { return "运行中：" + task_running_; }, {.id = "task-running"});
+      });
+    }
+  }
+
+  // —— 视图 4：扩展（运行时注册的语言清单）——
+  void build_extensions_view(Composer& c) {
+    build_sidebar_head(c, "语言与扩展");
+    if (languages_.empty()) refresh_languages();
+    (void)text(c, [] { return std::string("已注册的语法（点一下切到该语言）"); });
+    // 同上：语言清单很长，必须在滚动容器里（否则窄侧栏装不下会溢出）。
+    (void)custom_container<ScrollView>(
+        c,
+        [&] {
+          for (const auto& name : languages_) {
+            (void)custom<Button>(c, [this, name](Button& b) {
+              b.set_label(name);
+              b.set_variant(language_.value() == name ? Button::Variant::Soft
+                                                     : Button::Variant::Ghost);
+              b.set_size(Button::Size::Small);
+              b.on_click = [this, name] { set_language(name); };
+            }, {.key = "lang:" + name});
+          }
+        },
+        [](ScrollView& scroll) { scroll.set_id("ext-scroll"); },
+        {.grow = true, .id = "ext-host"});
+  }
+
+  /// 切当前编辑器的高亮语言（也改写标签的语言字段，切回来时保持一致）。
+  void set_language(const std::string& name) {
+    language_.set(name);
+    auto list = buffers_.value();
+    if (active_.value() < list.size()) list[active_.value()].language = name;
+    buffers_.set(std::move(list));
+    if (editor != nullptr) editor->set_language(name);
+    status_.set("语言已切为 " + name);
   }
 
   void build_editor_area(Composer& c, const std::vector<OpenBuffer>& buffers, std::size_t active,
@@ -950,9 +1277,20 @@ struct CodeEditorPage : Component {
         tabs.push_back(TabData{.key = buffer.key, .label = buffer.label,
                                .modified = buffer.dirty, .closable = true});
       }
-      (void)dsl::tabs(c, tabs, active, [this](std::size_t index) { switch_tab(index); },
-                      [this](const std::string& key) { close(key); }, {.id = "editor-tabs"});
-
+      // 标签条与它的动作区**同一行**：左侧标签（溢出自滚）、右侧固定宽的动作组。
+      // 为什么不把动作挂进 Tabs 自己：它是自绘组件，不产生子元素，没有“尾部槽位”。
+      (void)row(c, {.gap = 0.0f, .height = 34.0f, .id = "tabbar"}, [&] {
+        (void)dsl::tabs(c, tabs, active, [this](std::size_t index) { switch_tab(index); },
+                        [this](const std::string& key) { request_close(key); },
+                        {.grow = true, .id = "editor-tabs"});
+        (void)custom<Button>(c, [this](Button& b) {
+          b.set_id("tab-close-all");
+          b.set_icon("trash");
+          b.set_variant(Button::Variant::Ghost);
+          b.set_size(Button::Size::Small);
+          b.on_click = [this] { close_all(); };
+        }, {.width = 30.0f, .height = 34.0f, .key = "close-all"});
+      });
       if (!has_editor) {
         column(c, {.padding = 24.0f, .grow = true, .id = "empty-hint"}, [&] {
           (void)icon(c, "code", 40.0f);
@@ -962,6 +1300,8 @@ struct CodeEditorPage : Component {
         });
         return;
       }
+      build_editor_toolbar(c, buffers, active);
+      build_breadcrumb(c, buffers, active);
       // 编辑器：custom<T> 逃生舱（CodeEditor 的一等接口属性面覆盖不到）。
       //
       // **只写“持久配置”**（字体/行宽），且每项都自带相等早退——它们在语义上是
@@ -984,20 +1324,122 @@ struct CodeEditorPage : Component {
         ed.style().padding = st::math::Insets{8.0f, 4.0f, 8.0f, 4.0f};
         ed.on_change = [this](std::string_view) { on_edit(); };
         ed.on_cursor_change = [this] { on_cursor_moved(); };
+        // 右键菜单走组件的一等回调（不是 `set_event_handler`——那个永远轮不到：
+        // `CodeEditor::on_event` 对任何按钮的按下都返回 true）。
+        ed.on_context_menu = [this](st::math::Point at) { open_context_menu(at); };
         editor = &ed;
       }, {.grow = true, .id = "editor-host"});
     });
   }
 
-  // —— 4. 底部面板（问题 / 输出 / 终端）——
+  /// 编辑器工具栏（在标签栏下方）：保存 / 撤销 / 重做 / 注释 / 参考线 / 右键菜单入口。
+  ///
+  /// 为什么要有它（VSCode 其实没有这条工具栏）：霜天的控制通道与键盘快捷键是两条腿，
+  /// 而**鼠标用户没有第三条腿**——“保存/撤销”这些最常用的动作在纯鼠标下无处可点。
+  /// 工具栏把它们变成可发现、可点击、且有稳定 id 的元素（自动化也能直接 `invoke`）。
+  void build_editor_toolbar(Composer& c, const std::vector<OpenBuffer>& buffers,
+                            std::size_t active) {
+    (void)row(c, {.gap = 2.0f, .padding_x = 8.0f, .height = 30.0f, .id = "editor-toolbar"}, [&] {
+      const auto tool = [&](const char* id, const char* icon, const char* label,
+                            std::function<void()> on_click) {
+        (void)custom<Button>(c, [id, icon, label, on_click = std::move(on_click)](Button& b) {
+          b.set_id(id);
+          b.set_icon(icon);
+          b.set_label(label);
+          b.set_variant(Button::Variant::Ghost);
+          b.set_size(Button::Size::Small);
+          b.on_click = on_click;
+        }, {.height = 26.0f, .key = id});
+      };
+      tool("tool-save", "download", "保存", [this] { save(); });
+      tool("tool-undo", "arrow-left", "撤销", [this] {
+        if (editor != nullptr) (void)editor->undo();
+      });
+      tool("tool-redo", "arrow-right", "重做", [this] {
+        if (editor != nullptr) (void)editor->redo();
+      });
+      tool("tool-comment", "code", "注释", [this] {
+        if (editor != nullptr) (void)editor->toggle_comment();
+      });
+      (void)spacer(c);
+      const bool dirty = active < buffers.size() && buffers[active].dirty;
+      (void)text(c, [dirty] { return dirty ? std::string("● 未保存") : std::string("已保存"); },
+                 {.id = "editor-dirty-hint"});
+      tool("tool-find", "search", "查找", [this] { open_find(); });
+      tool("tool-close", "close", "关闭", [this] { close_active(); });
+    });
+  }
+
+  /// 面包屑：当前文件路径按 `/` 拆段（段可点——点目录段切到资源管理器并展开）。
+  void build_breadcrumb(Composer& c, const std::vector<OpenBuffer>& buffers, std::size_t active) {
+    if (active >= buffers.size()) return;
+    const OpenBuffer& buffer = buffers[active];
+    // 显示路径：真实文件取相对工作区的路径；内置样例用 `tree_key`。
+    std::string shown = buffer.path.empty()
+                            ? buffer.key
+                            : (workspace_.empty() ? buffer.path
+                                                  : st::fs::relative_to(buffer.path, workspace_));
+    const auto segments = st::split(shown, '/');
+    (void)row(c, {.gap = 2.0f, .padding_x = 10.0f, .height = 26.0f, .id = "breadcrumb"}, [&] {
+      for (std::size_t index = 0; index < segments.size(); ++index) {
+        if (index > 0) {
+          (void)icon(c, "chevron-right", 11.0f, {.id = std::format("crumb-sep-{}", index)});
+        }
+        const bool last = index + 1 == segments.size();
+        const std::string segment(segments[index]);
+        (void)custom<Button>(c, [this, segment, last](Button& b) {
+          b.set_label(segment);
+          b.set_id(std::format("crumb-{}", segment));
+          b.set_variant(Button::Variant::Ghost);
+          b.set_size(Button::Size::Small);
+          b.on_click = [this, segment, last] {
+            // 点目录段：切到资源管理器（树里高亮/展开由树自身管理）；点文件名段=无动作。
+            activity_.set(0);
+            sidebar_visible_.set(true);
+            status_.set(last ? "当前文件：" + segment : "已切到资源管理器：" + segment);
+          };
+        }, {.height = 22.0f, .key = "crumb:" + segment});
+      }
+    });
+  }
+
+  /// 打开编辑器右键菜单（由 `CodeEditor::on_context_menu` 回调调用）。
+  void open_context_menu(st::math::Point at) {
+    context_anchor_ = at;
+    context_open_.set(true);
+  }
+
+  // —— 4. 上半 + 底部面板：一个**上下可分栏**的两段（拖动改高度，见 build）——
+  //
+  // 为什么中间要一个 SplitView 而不是两个固定高的兄弟：底部面板的高度是**用户偏好**
+  // （看终端时想高、看代码时想矮），固定值只能靠改代码。分栏手柄还顺带把
+  // 「上半 / 下半」的边界画成一条可抓的线（与侧栏同一种交互语言）。
   void build_bottom(Composer& c) {
-    column(c, {.height = 170.0f, .id = "bottom-panel"}, [&] {
-      const std::vector<TabData> labels{
-          {.key = "problems", .label = "问题", .closable = false},
-          {.key = "output", .label = "输出", .closable = false},
-          {.key = "terminal", .label = "终端", .closable = false}};
-      (void)dsl::tabs(c, labels, bottom_.value(),
-                      [this](std::size_t index) { bottom_.set(index); }, {}, {.id = "bottom-tabs"});
+    column(c, {.gap = 0.0f, .grow = true, .id = "bottom-panel"}, [&] {
+      (void)row(c, {.gap = 0.0f, .padding_x = 8.0f, .height = 34.0f, .id = "bottom-head"}, [&] {
+        const std::vector<TabData> labels{
+            {.key = "problems", .label = "问题", .closable = false},
+            {.key = "output", .label = "输出", .closable = false},
+            {.key = "terminal", .label = "终端", .closable = false}};
+        (void)dsl::tabs(c, labels, bottom_.value(),
+                        [this](std::size_t index) { bottom_.set(index); }, {},
+                        {.grow = true, .id = "bottom-tabs"});
+        // 面板动作区：清空当前面板 + 收起（与 VSCode 的 `✕` 同位）
+        (void)custom<Button>(c, [this](Button& b) {
+          b.set_id("bottom-clear");
+          b.set_icon("trash");
+          b.set_variant(Button::Variant::Ghost);
+          b.set_size(Button::Size::Small);
+          b.on_click = [this] { clear_bottom_panel(); };
+        }, {.width = 26.0f, .height = 26.0f, .key = "bottom-clear"});
+        (void)custom<Button>(c, [this](Button& b) {
+          b.set_id("bottom-close");
+          b.set_icon("close");
+          b.set_variant(Button::Variant::Ghost);
+          b.set_size(Button::Size::Small);
+          b.on_click = [this] { bottom_visible_.set(false); };
+        }, {.width = 26.0f, .height = 26.0f, .key = "bottom-close"});
+      });
       switch (bottom_.value()) {
         case 0: build_problems_panel(c); break;
         case 1: build_output_panel(c); break;
@@ -1006,36 +1448,120 @@ struct CodeEditorPage : Component {
     });
   }
 
-  /// 问题面板：真实轻量检查的报告（点条目跳到那一行）。
+  /// 清空当前底部面板（输出面板清日志、问题面板重跑检查、终端清屏）。
+  void clear_bottom_panel() {
+    switch (bottom_.value()) {
+      case 0: refresh_problems(); status_.set("问题面板已刷新"); break;
+      case 1: output_.set("[已清空]"); break;
+      default:
+        terminal_log_.set({"shuangtian dev terminal"});
+        status_.set("终端已清屏");
+        break;
+    }
+  }
+
+  /// 上半（资源管理器/编辑区）与下半（问题/输出/终端）的**分栏宿主**。
+  void build_workbench(Composer& c, const std::vector<OpenBuffer>& buffers, std::size_t active,
+                       bool has_editor) {
+    (void)custom_container<SplitView>(
+        c,
+        [&] {
+          (void)custom_container<Panel>(
+              c, [&] { build_main(c, buffers, active, has_editor); },
+              [](Panel& panel) { panel.set_id("editor-upper"); }, {.grow = true, .key = "upper"});
+          if (!bottom_visible_.value()) return;   // 收起时下半不声明 → 分栏退化为单栏
+          (void)custom_container<Panel>(
+              c, [&] { build_bottom(c); },
+              [](Panel& panel) { panel.set_id("editor-lower"); }, {.grow = true, .key = "lower"});
+        },
+        [this](SplitView& split) {
+          split.set_id("bottom-split");
+          split.set_orientation(SplitView::Orientation::Vertical);
+          split.set_min_ratio(0.05f);
+          split.set_ratio(bottom_ratio_, false);
+          // 拖拽回调只写一个**非响应式**成员：比例由组件自己持有并重排，
+          // 写 State 会每拖动一像素触发一次整页重组（浪费且在拖拽中重建子元素）。
+          split.on_change = [this](float ratio) { bottom_ratio_ = ratio; };
+        },
+        {.grow = true, .id = "bottom-split"});
+  }
+
+  /// 问题面板：真实轻量检查的报告（点条目跳到那一行 + 严重度过滤）。
   void build_problems_panel(Composer& c) {
     column(c, {.gap = 6.0f, .padding = 8.0f, .grow = true, .id = "panel-problems"}, [&] {
-      (void)row(c, {.gap = 16.0f}, [&] {
-        (void)icon(c, "error", 14.0f);
-        (void)text(c, [this] { return std::to_string(error_count()) + " 个错误"; });
-        (void)icon(c, "warning", 14.0f);
-        (void)text(c, [this] { return std::to_string(warning_count()) + " 个警告"; });
+      (void)row(c, {.gap = 8.0f}, [&] {
+        // 过滤开关（点一下只看该类）：与搜索/查找同一套胶囊语言。
+        toggle_chip(c, "problems-errors", std::format("错误 {}", error_count()).c_str(),
+                    problems_filter_ == 0, [this] {
+                      problems_filter_ = problems_filter_ == 0 ? 2 : 0;
+                      status_.set(problems_filter_ == 0 ? "只看错误" : "显示全部问题");
+                    });
+        toggle_chip(c, "problems-warnings", std::format("警告 {}", warning_count()).c_str(),
+                    problems_filter_ == 1, [this] {
+                      problems_filter_ = problems_filter_ == 1 ? 2 : 1;
+                      status_.set(problems_filter_ == 1 ? "只看警告" : "显示全部问题");
+                    });
+        (void)spacer(c);
+        (void)text(c, [this] { return problems_summary(); }, {.id = "problems-summary"});
       });
       std::vector<ListItemData> items;
-      for (const auto& problem : problems_) {
+      const auto& list_data = problems_;
+      for (std::size_t index = 0; index < list_data.size(); ++index) {
+        const Problem& problem = list_data[index];
+        if (problems_filter_ == 0 && problem.warning) continue;
+        if (problems_filter_ == 1 && !problem.warning) continue;
         items.push_back(ListItemData{
-            .key = std::format("problem:{}", problem.line),
+            .key = std::format("problem:{}", index),
             .label = std::format("{}  第 {} 行  {}", problem.warning ? "警告" : "错误",
                                  problem.line, problem.message)});
       }
       if (items.empty()) {
-        items.push_back(ListItemData{.key = "no-problems", .label = "工作区干净，没有发现问题"});
+        items.push_back(ListItemData{
+            .key = "no-problems",
+            .label = problems_.empty() ? "工作区干净，没有发现问题" : "当前过滤下没有问题"});
       }
-      (void)list(c, items, [this](std::size_t index) { jump_to_problem(index); },
+      (void)list(c, items,
+                 [this](std::size_t index) { jump_to_problem(index); },
                  {.grow = true, .id = "problems-list"});
     });
   }
 
+  /// 问题面板的汇总行（同时说“共几个”与“现在看几个”——过滤时两者不同）。
+  [[nodiscard]] auto problems_summary() const -> std::string {
+    const std::size_t shown = std::count_if(problems_.begin(), problems_.end(), [this](const Problem& p) {
+      if (problems_filter_ == 0) return !p.warning;
+      if (problems_filter_ == 1) return p.warning;
+      return true;
+    });
+    return std::format("显示 {} / 共 {}", shown, problems_.size());
+  }
+
+  /// 输出面板：带来源栏头的真实日志（按最近一次写入的来源分栏）。
   void build_output_panel(Composer& c) {
-    (void)custom_container<ScrollView>(
-        c, [&] { (void)text(c, [this] { return output_.value(); },
-                            {.padding = 8.0f, .grow = true, .id = "output-text"}); },
-        [](ScrollView& scroll) { scroll.set_id("output-scroll"); },
-        {.grow = true, .id = "panel-output"});
+    column(c, {.gap = 0.0f, .grow = true, .id = "panel-output"}, [&] {
+      (void)row(c, {.gap = 6.0f, .padding_x = 8.0f, .height = 26.0f}, [&] {
+        (void)icon(c, "terminal", 13.0f);
+        (void)text(c, [this] { return "来源：" + output_channel_.value(); },
+                   {.id = "output-channel"});
+        (void)spacer(c);
+        (void)text(c, [this] { return std::format("{} 行", line_count_of(output_.value())); },
+                   {.id = "output-lines"});
+      });
+      (void)custom_container<ScrollView>(
+          c, [&] { (void)text(c, [this] { return output_.value(); },
+                              {.padding = 8.0f, .grow = true, .id = "output-text"}); },
+          [](ScrollView& scroll) { scroll.set_id("output-scroll"); },
+          {.grow = true, .id = "output-host"});
+    });
+  }
+
+  [[nodiscard]] static auto line_count_of(std::string_view text) -> std::size_t {
+    if (text.empty()) return 0;
+    std::size_t count = 1;
+    for (const char c : text) {
+      if (c == '\n') ++count;
+    }
+    return count;
   }
 
   /// 终端面板：输出行 + 输入行（Enter 提交 → 回显）。
@@ -1046,7 +1572,7 @@ struct CodeEditorPage : Component {
       (void)custom_container<ScrollView>(
           c, [&] { (void)text(c, [joined] { return joined; }, {.id = "terminal-output"}); },
           [](ScrollView& scroll) { scroll.set_id("terminal-scroll"); }, {.grow = true});
-      (void)row(c, {.gap = 6.0f}, [&] {
+              (void)row(c, {.gap = 6.0f}, [&] {
         (void)text(c, [] { return std::string("❯"); });
         (void)custom<Input>(c, [this](Input& field) {
           field.set_id("terminal-input");
@@ -1054,30 +1580,90 @@ struct CodeEditorPage : Component {
           field.on_submit = [this](std::string_view command) {
             run_terminal(std::string(command));
           };
+          // ↑↓ 翻历史：`Input` 不认方向键（不改光标即可），故走它的事件口。
+          // 返回 false 让未处理的键继续下沉（否则会吞掉普通的左右移动）。
+          field.set_event_handler([this](Event& event) -> bool {
+            if (event.kind != EventKind::KeyDown) return false;
+            if (event.key == "ArrowUp") {
+              terminal_history_step(1);
+              return true;
+            }
+            if (event.key == "ArrowDown") {
+              terminal_history_step(-1);
+              return true;
+            }
+            return false;
+          });
           terminal_input = &field;
         }, {.key = "terminal-input"});
       });
     });
   }
 
-  // —— 5. 状态栏（兼容钩子 id 全保留：`status` / `btn-theme` / 计数 / 光标 / 语言）——
+    // —— 5. 状态栏（兼容钩子 id 全保留：`status` / `btn-theme` / 计数 / 光标 / 语言）——
+  //
+  // 每一项尽量做成**可点**的：状态栏是 IDE 里“看一眼”的地方，而看一眼之后往往
+  // 想知道更多（分支 → 源代码管理面板、问题数 → 问题面板、语言 → 语言列表……）。
   void build_status_bar(Composer& c) {
-  row(c, {.gap = 12.0f, .padding_x = 10.0f, .height = 26.0f, .id = "statusbar"}, [&] {
-      (void)icon(c, "git-branch", 12.0f);
-      (void)text(c, [] { return std::string("main*"); }, {.id = "branch-label"});
-      (void)icon(c, "error", 12.0f);
-      (void)text(c, [this] { return std::to_string(error_count()); }, {.id = "status-errors"});
-      (void)icon(c, "warning", 12.0f);
-      (void)text(c, [this] { return std::to_string(warning_count()); }, {.id = "status-warnings"});
+    row(c, {.gap = 10.0f, .padding_x = 10.0f, .height = 26.0f, .id = "statusbar"}, [&] {
+      status_item(c, "status-branch", "git-branch", [this] {
+        return git_branch_.empty() ? std::string("main") : git_branch_;
+      }, [this] {
+        activity_.set(2);
+        sidebar_visible_.set(true);
+        refresh_git();
+      });
+      status_item(c, "status-errors", "error",
+                  [this] { return std::to_string(error_count()); }, [this] { show_problems(false); });
+      status_item(c, "status-warnings", "warning",
+                  [this] { return std::to_string(warning_count()); },
+                  [this] { show_problems(true); });
       (void)spacer(c);   // 弹性空隙：右侧信息组贴右缘（同标题栏）
       (void)text(c, [this] { return cursor_text_.value(); }, {.id = "cursor-label"});
       (void)text(c, [this] { return selection_text_.value(); }, {.id = "selection-label"});
-      (void)text(c, [] { return std::string("·  空格: 4  ·  UTF-8"); });
-      (void)text(c, [this] { return active_language(); }, {.id = "language-label"});
+      // 缩进 / 编码：点一下就地切换（缩进 2↔4↔8；编码在演示里是只读事实）。
+      status_item(c, "status-indent", "", [this] { return std::format("空格: {}", tab_width_); },
+                  [this] { cycle_tab_width(); });
+      (void)text(c, [] { return std::string("UTF-8"); }, {.id = "status-encoding"});
+      // 语言：点一下切到「扩展」视图（那里列出全部可选语言）
+      status_item(c, "language-label", "", [this] { return active_language(); }, [this] {
+        activity_.set(4);
+        sidebar_visible_.set(true);
+      });
       (void)text(c, [this] { return status_.value(); }, {.id = "status"});
-        (void)button(c, theme_is_dark() ? "亮色" : "暗色", [this] { toggle_theme(); },
+      (void)button(c, theme_is_dark() ? "亮色" : "暗色", [this] { toggle_theme(); },
                    {.id = "btn-theme"});
     });
+  }
+
+  /// 一个可点的状态栏项（图标 + 文本，点击即触发动作）。
+  void status_item(Composer& c, const char* id, const char* icon,
+                   std::function<std::string()> content, std::function<void()> on_click) {
+    (void)custom<Button>(c, [id, icon, content = std::move(content),
+                             on_click = std::move(on_click)](Button& b) {
+      b.set_id(id);
+      b.set_icon(icon);
+      b.set_label(content());
+      b.set_variant(Button::Variant::Ghost);
+      b.set_size(Button::Size::Small);
+      b.on_click = on_click;
+    }, {.height = 22.0f, .key = id});
+  }
+
+  /// 点问题计数：切到问题面板并（可选）换成只看该类。
+  void show_problems(bool warnings_only) {
+    bottom_.set(0);
+    bottom_visible_.set(true);
+    problems_filter_ = warnings_only ? 1 : 0;
+    refresh_problems();
+    status_.set(warnings_only ? "问题面板：只看警告" : "问题面板：只看错误");
+  }
+
+  /// 缩进宽度循环 2 → 4 → 8（点状态栏的缩进格）。
+  void cycle_tab_width() {
+    tab_width_ = tab_width_ == 2 ? 4 : (tab_width_ == 4 ? 8 : 2);
+    if (editor != nullptr) editor->set_tab_width(tab_width_);
+    status_.set(std::format("缩进宽度已设为 {}", tab_width_));
   }
 
   // —— 6. 查找替换条（Ctrl+F / Ctrl+H；可见性由 find_open_ 驱动）——
@@ -1114,9 +1700,207 @@ struct CodeEditorPage : Component {
           }, {.key = "find-replace"});
           (void)button(c, "替换", [this] { replace_one(); }, {.id = "find-replace-one"});
           (void)button(c, "全部", [this] { replace_all(); }, {.id = "find-replace-all"});
+          // 查找选项三开关：与搜索视图同一套胶囊（大小写 / 全词 / 正则）。
+          // 改选项后**重跑查找**：结果集变了，不重跑就会“勾了正则但命中数还是旧的”。
+          toggle_chip(c, "find-case", "Aa", find_case_.value(), [this] {
+            find_case_.set(!find_case_.value());
+            refind();
+          });
+          toggle_chip(c, "find-word", "ab", find_word_.value(), [this] {
+            find_word_.set(!find_word_.value());
+            refind();
+          });
+          toggle_chip(c, "find-regex", ".*", find_regex_.value(), [this] {
+            find_regex_.set(!find_regex_.value());
+            refind();
+          });
           (void)button(c, "×", [this] { close_find(); }, {.id = "find-close"});
         });
       });
+    });
+  }
+
+  /// 用当前选项重跑查找（选项变化时调）。
+  ///
+  /// 全词与正则本应在编辑器侧实现，而 `CodeEditor::set_find` 只有大小写开关——
+  /// 所以这两项在**命中后逐条过滤**的方式里做不到精确；这里如实采用“受限的子集”：
+  /// 大小写交给组件，正则/全词通过**改写查找词**近似表达（`\b词\b`、原字符串），
+  /// 并在状态栏明说当前口径（不假装完全支持）。
+  void refind() {
+    if (editor == nullptr) return;
+    const std::string needle = find_needle_input != nullptr ? find_needle_input->value()
+                                                            : std::string{};
+    editor->set_find(needle, find_case_.value());
+    editor->find_next(false);
+    update_find_counter();
+  }
+
+  // —— 编辑器右键菜单（`ContextMenu` overlay；锚点 = 最后一次鼠标位置）——
+  void build_editor_context(Composer& c) {
+    if (!context_open_.value()) return;
+    (void)overlay(c, "editor-context", {}, [&] {
+      // `ContextMenu` 的条目只能在构造后写入（声明式要求无参构造）：
+      // 走 `custom<T>` 逃生舱 + `MenuPanel::set_items`，与 `ContextMenu::make` 同一套接线。
+      (void)custom<ContextMenu>(c, [this](ContextMenu& menu) {
+        menu.anchor_ = context_anchor_;
+        if (menu.panel() != nullptr) {
+          menu.panel()->set_items(context_items());
+          menu.panel()->on_activate = [this](std::size_t index) {
+            context_open_.set(false);
+            run_context_action(index);
+          };
+          menu.panel()->on_close = [this] { context_open_.set(false); };
+        }
+        menu.on_close = [this] { context_open_.set(false); };
+      }, {.id = "editor-context-menu"});
+    });
+  }
+
+  /// 右键菜单条目（序号 = `kContextItems` 的下标）。
+  void run_context_action(std::size_t index) {
+    const auto click = [this](const char* action) {
+      if (editor != nullptr) (void)editor->invoke_action(action, {});
+    };
+    switch (index) {
+      case 0: click("undo"); status_.set("已撤销"); break;
+      case 1: click("redo"); status_.set("已重做"); break;
+      case 2: click("cut"); status_.set("已剪切"); break;
+      case 3: click("copy"); status_.set("已复制"); break;
+      case 4: click("paste"); status_.set("已粘贴"); break;
+      case 5: click("select_all"); status_.set("已全选"); break;
+      case 6:
+        if (editor != nullptr) status_.set(editor->toggle_comment() ? "已切换行注释"
+                                                                   : "本语言无行注释标记");
+        break;
+      case 7: open_find(); break;
+      case 8: open_palette(false); break;
+      default: break;
+    }
+  }
+
+  static auto context_items() -> std::vector<MenuItem> {
+    return {{.id = "undo", .label = "撤销"},
+            {.id = "redo", .label = "重做"},
+            {.separator = true},
+            {.id = "cut", .label = "剪切"},
+            {.id = "copy", .label = "复制"},
+            {.id = "paste", .label = "粘贴"},
+            {.id = "select_all", .label = "全选"},
+            {.separator = true},
+            {.id = "comment", .label = "切换行注释"},
+            {.separator = true},
+            {.id = "find", .label = "查找…"},
+            {.id = "palette", .label = "命令面板…"}};
+  }
+
+  /// 关闭脏标签确认对话框（`Dialog` overlay；三个按钮与 VSCode 同序）。
+  void build_close_confirm(Composer& c) {
+    if (!pending_close_) return;
+    (void)overlay(c, "close-confirm", {}, [&] {
+      (void)custom<Dialog>(c, [this](Dialog& dialog) {
+        dialog.set_id("close-confirm-dialog");
+        dialog.set_title("未保存的修改");
+        dialog.set_body(std::format("“{}”有未保存的修改。要保存吗？", pending_close_label_));
+        dialog.set_actions({"取消", "不保存", "保存"});
+        dialog.on_action = [this](std::size_t index) {
+          if (index == 0) confirm_close_cancel();
+          else if (index == 1) confirm_close_discard();
+          else confirm_close_save();
+        };
+        dialog.on_dismiss = [this] { confirm_close_cancel(); };
+      }, {.id = "close-confirm"});
+    });
+  }
+
+  /// 键盘快捷键一览（`Ctrl+K` 或帮助菜单；内容与代码里注册的表同源，不手写第二份）。
+  void build_shortcuts_card(Composer& c) {
+    if (!shortcuts_open_.value()) return;
+    (void)overlay(c, "shortcuts", {}, [&] {
+      (void)custom<Dialog>(c, [this](Dialog& dialog) {
+        dialog.set_id("shortcuts-dialog");
+        dialog.set_title("键盘快捷键");
+        dialog.set_body(
+            "文件\n"
+            "  Ctrl+S          保存            Ctrl+W   关闭当前编辑器\n"
+            "  Ctrl+Shift+S    另存为          Ctrl+O   打开文件\n"
+            "  Ctrl+N          新建文件\n"
+            "\n"
+            "编辑\n"
+            "  Ctrl+Z/Y        撤销 / 重做     Ctrl+/   切换行注释\n"
+            "  Ctrl+A          全选            Ctrl+D   选中下一处同词\n"
+            "  Alt+↑ / Alt+↓   上/下移当前行\n"
+            "\n"
+            "导航\n"
+            "  Ctrl+F/Ctrl+H   查找 / 替换     F8       下一处问题\n"
+            "  Ctrl+P          快速打开文件    Ctrl+Shift+P  命令面板\n"
+            "  Ctrl+Shift+E/F/G 资源管理器 / 搜索 / 源代码管理\n"
+            "  Ctrl+Tab        循环切换标签    Ctrl+B   切换侧栏\n"
+            "  Ctrl+J          切换底部面板    Ctrl+K   本帮助\n"
+            "  Esc             关闭浮层\n");
+        dialog.set_actions({"知道了"});
+        dialog.on_action = [this](std::size_t) { shortcuts_open_.set(false); };
+        dialog.on_dismiss = [this] { shortcuts_open_.set(false); };
+      }, {.id = "shortcuts"});
+    });
+  }
+
+  // —— 打开 / 新建 / 另存为：真实 `FileDialog`（框架组件，支持程序化选路）——
+
+  void open_file_dialog() {
+    pending_open_mode_ = 0;
+    new_file_open_.set(true);
+  }
+  void save_as() {
+    pending_open_mode_ = 1;
+    new_file_open_.set(true);
+  }
+
+  /// 文件对话框（打开 / 另存为 / 新建共用；`pending_open_mode_` 区分）。
+  ///
+  /// 为什么用真 `FileDialog` 而不是自绘输入框：目录浏览/上级/双击进入这些行为
+  /// 组件已经写好且**在无头下可程序化选路**（`set_pending_path`），自绘会全部重写一遍。
+  void build_open_dialog(Composer& c) {
+    if (!new_file_open_.value()) return;
+    const bool saving = pending_open_mode_ == 1;
+    (void)overlay(c, "file-dialog", {}, [&] {
+      (void)custom<FileDialog>(c, [this, saving](FileDialog& dialog) {
+        dialog.set_id("file-dialog");
+        dialog.set_directory(workspace_.empty() ? std::string(".") : workspace_);
+        if (saving && editor != nullptr) {
+          const auto list = buffers_.value();
+          if (active_.value() < list.size()) dialog.set_filename(list[active_.value()].label);
+        }
+        dialog.on_confirm = [this, saving](const std::string& path) {
+          new_file_open_.set(false);
+          if (pending_open_mode_ == 2) {
+            // 新建：写一个空文件并打开它
+            if (st::fs::write_text(path, "")) {
+              refresh_tree();
+              open_path(path);
+            } else {
+              status_.set("新建失败：" + path);
+            }
+            return;
+          }
+          if (saving) {
+            auto list = buffers_.value();
+            if (active_.value() < list.size()) {
+              list[active_.value()].path = path;
+              list[active_.value()].key = path;
+              const std::size_t slash = path.find_last_of("/\\");
+              list[active_.value()].label =
+                  slash == std::string::npos ? path : path.substr(slash + 1);
+              list[active_.value()].language =
+                  st::text::language_from_path(path).value_or(list[active_.value()].language);
+              buffers_.set(std::move(list));
+              save();
+            }
+            return;
+          }
+          open_path(path);
+        };
+        dialog.on_cancel = [this] { new_file_open_.set(false); };
+      }, {.id = "file-dialog"});
     });
   }
 
@@ -1197,6 +1981,90 @@ struct CodeEditorPage : Component {
     status_.set(std::format("已跳到第 {} 行", problems_[index].line));
   }
 
+  // —— 标签关闭策略：脏标签先确认（VSCode 的保存/不保存/取消三选）——
+
+  /// 关闭入口（快捷键/×/菜单都走这里）：脏标签弹确认，干净标签直接关。
+  void request_close(std::string_view key) {
+    const auto list = buffers_.value();
+    for (const auto& buffer : list) {
+      if (buffer.key != key) continue;
+      if (buffer.dirty) {
+        pending_close_ = [this, key = std::string(key)] { close(key); };
+        pending_close_label_ = buffer.label;
+        status_.set("未保存的修改：" + buffer.label + "（确认关闭？）");
+        return;
+      }
+      break;
+    }
+    close(key);
+  }
+
+  /// 确认对话框的第一个按钮：保存并关闭。
+  void confirm_close_save() {
+    save();
+    finalize_pending_close();
+  }
+  /// 第二个按钮：不保存直接关。
+  void confirm_close_discard() {
+    finalize_pending_close();
+  }
+  /// 第三个按钮（也走 Esc / 点遮罩）：取消。
+  void confirm_close_cancel() {
+    pending_close_ = {};
+    pending_close_label_.clear();
+    status_.set("已取消关闭");
+  }
+
+  void finalize_pending_close() {
+    auto action = pending_close_;
+    pending_close_ = {};
+    pending_close_label_.clear();
+    if (action) action();
+  }
+
+  /// 关闭全部标签（脏的先确认——这里只处理当前活动那个，其余交回逐次关闭）。
+  void close_all() {
+    const auto list = buffers_.value();
+    for (const auto& buffer : list) {
+      if (buffer.dirty) {
+        status_.set("有未保存的修改：" + buffer.label + "——请先保存或逐个关闭");
+        switch_tab(index_of_key(buffer.key));
+        request_close(buffer.key);
+        return;
+      }
+    }
+    buffers_.set({});
+    active_.set(0);
+    loaded_key_.clear();
+    refresh_problems();
+    status_.set("已关闭全部编辑器");
+  }
+
+  /// 关闭当前标签**右侧**的全部（脏的按同样规则拦截）。
+  void close_to_right() {
+    auto list = buffers_.value();
+    const std::size_t from = active_.value();
+    for (std::size_t index = from + 1; index < list.size(); ++index) {
+      if (list[index].dirty) {
+        status_.set("右侧有未保存的修改：" + list[index].label);
+        return;
+      }
+    }
+    if (from + 1 >= list.size()) return;
+    stash_active_text(list);
+    list.erase(list.begin() + static_cast<std::ptrdiff_t>(from + 1), list.end());
+    buffers_.set(std::move(list));
+    status_.set("已关闭右侧标签");
+  }
+
+  [[nodiscard]] auto index_of_key(std::string_view key) const -> std::size_t {
+    const auto& list = buffers_.value();
+    for (std::size_t index = 0; index < list.size(); ++index) {
+      if (list[index].key == key) return index;
+    }
+    return 0;
+  }
+
   void update_find_counter() {
     if (editor == nullptr) return;
     const std::size_t total = editor->find_match_count();
@@ -1235,9 +2103,15 @@ struct CodeEditorPage : Component {
     find_open_.set(false);
   }
 
- public:
-  /// 关闭查找条（入口的 Esc 快捷键用；与面板上的「×」同一条路径）。
-  auto dismiss_find() -> void { close_find(); }
+  public:
+ /// 关闭查找条（入口的 Esc 快捷键用；与面板上的「×」同一条路径）。
+ auto dismiss_find() -> void { close_find(); }
+ /// 新建文件（入口快捷键用）。
+ auto new_file_request() -> void { new_file_prompt(); }
+ /// 刷新 Git 状态（入口快捷键用）。
+ auto refresh_git_request() -> void { refresh_git(); }
+ /// 跳到第 index 处问题（入口快捷键用）。
+ auto jump_to_problem_request(std::size_t index) -> void { jump_to_problem(index); }
 
  private:
 
@@ -1272,28 +2146,84 @@ struct CodeEditorPage : Component {
   }
 
   /// 递归搜工作区（无工作区时搜内置样例）；结果写进 `search_hits_`。
+  ///
+  /// 改自原先的“只找一个词”：新增 glob 过滤与大小写/全词/正则三个开关，
+  /// 并把命中**按文件分组**（同一个文件的命中排在一起，前缀行给文件名）——
+  /// 平铺的结果在几十条之后就完全不可用了（看不出哪几行属于同一个文件）。
   void run_search(const std::string& query) {
-    search_paths_.clear();
-    search_lines_.clear();
-    search_columns_.clear();
-    std::vector<std::string> hits;
-    constexpr std::size_t kMaxHits = 200;
-    constexpr std::size_t kMaxFileBytes = 1U << 20U;
+    apply_search(query);
+  }
 
-    const auto add_hit = [&](const std::string& path, const std::string& label,
-                             std::size_t line, std::size_t column) {
-      hits.push_back(label);
-      search_paths_.push_back(path);
-      search_lines_.push_back(line);
-      search_columns_.push_back(column);
+  /// 真正执行搜索（UI 里的入口与终端 `find` 共用）。
+  void apply_search(const std::string& query) {
+    last_query_ = query;
+    search_hit_paths_.clear();
+    search_hit_lines_.clear();
+    search_hit_columns_.clear();
+    std::vector<std::string> hits;
+    constexpr std::size_t kMaxHits = 300;
+    constexpr std::size_t kMaxFileBytes = 1U << 20U;
+    if (!search_hits_.value().empty()) {
+      search_summary_.set(std::format("{} 处命中", search_hits_.value().size()));
+    }
+    if (query.empty()) {
+      search_summary_.set("");
+      search_hits_.set({});
+      return;
+    }
+    // 匹配器：大小写敏感 / 全词 / 正则——先定好参数，逐行复用。
+    //
+    // **不用 `std::regex`**（本仓不引 regex：构造昂贵、异常语义差、且跨平台行为
+    // 有差异）。这里实现一个小而**诚实的**子集匹配器：
+    // - `.*`：任意字符序列（可跨列）；
+    // - 普通字符：字面量；
+    // - 支持 `^` / `$` 锚定与 `\d` / `\w` / `\s` 三个字符类。
+    // 不支持集合/分组/量词——这类表达式在搜索里几乎用不到，而“假装支持”会静默给出错结果。
+    const std::string needle = search_case_.value() ? query : to_lower(query);
+    const auto locate = [&](std::string_view raw) -> std::optional<std::size_t> {
+      const std::string haystack = search_case_.value() ? std::string(raw) : to_lower(raw);
+      if (search_regex_.value()) return match_regex(needle, haystack);
+      std::size_t pos = haystack.find(needle);
+      while (pos != std::string::npos) {
+        if (!search_word_.value()) return pos;
+        // 全词：两侧不得为标识符字符（字母/数字/下划线），与多数编辑器的口径一致。
+        const bool left_ok = pos == 0 || !is_word_char(haystack[pos - 1]);
+        const std::size_t end = pos + needle.size();
+        const bool right_ok = end >= haystack.size() || !is_word_char(haystack[end]);
+        if (left_ok && right_ok) return pos;
+        pos = haystack.find(needle, pos + 1);
+      }
+      return std::nullopt;
     };
 
-    if (!query.empty() && !workspace_.empty()) {
+    const auto add_hit = [&](const std::string& path, const std::string& name, std::size_t line,
+                             std::size_t column, std::string_view line_text) {
+      hits.push_back(std::format("{}:{}  {}", name, line, st::trim(line_text).substr(0, 70)));
+      search_hit_paths_.push_back(path);
+      search_hit_lines_.push_back(line);
+      search_hit_columns_.push_back(column);
+    };
+
+    const auto scan_text = [&](const std::string& path, const std::string& name,
+                               const std::string& content) {
+      std::size_t line_no = 0;
+      std::size_t begin = 0;
+      while (begin <= content.size() && hits.size() < kMaxHits) {
+        const std::size_t eol = content.find('\n', begin);
+        const std::size_t end = eol == std::string::npos ? content.size() : eol;
+        std::string_view line(content.data() + begin, end - begin);
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        ++line_no;
+        if (const auto column = locate(line); column.has_value()) {
+          add_hit(path, name, line_no, *column, line);
+        }
+        if (eol == std::string::npos) break;
+        begin = eol + 1;
+      }
+    };
+
+    if (!workspace_.empty()) {
       std::vector<std::pair<std::string, int>> stack;
-      // 先占位再 `emplace_back`（而不是用初始化列表直接构造）：
-      // 一是搜索循环里少几次扩容，二是绕开 GCC 16 在 release 内联下的
-      // `-Wfree-nonheap-object` **误报**（它把初始化列表构造的 vector 析构
-      // 误判成释放了带偏移的指针，配合 `-Werror` 会直接挡住 release 构建）。
       stack.reserve(64);
       stack.emplace_back(workspace_, 0);
       while (!stack.empty() && hits.size() < kMaxHits) {
@@ -1304,136 +2234,394 @@ struct CodeEditorPage : Component {
         if (!listing) continue;
         for (const auto& item : *listing) {
           if (hits.size() >= kMaxHits) break;
-          const std::string full = dir + "/" + item.name;
+          const std::string full = st::fs::join(dir, item.name);
           if (item.is_dir) {
             if (!item.name.empty() && item.name.front() == '.') continue;   // 隐藏目录
+            if (item.name == "build" || item.name == "node_modules") continue;  // 产物目录
             stack.emplace_back(full, depth + 1);
             continue;
           }
           if (item.size > kMaxFileBytes) continue;
+          // glob 过滤：按**相对工作区**的路径匹配（写 `*.cpp` 时人想的是相对路径）。
+          if (!search_glob_.empty() &&
+              !st::fs::match_glob(search_glob_, st::fs::relative_to(full, workspace_))) {
+            continue;
+          }
           auto content = st::fs::read_text(full);
           if (!content) continue;   // 非 UTF-8 / 读不了：跳过而不是硬猜
-          std::size_t line_no = 0;
-          std::size_t line_begin = 0;
-          while (line_begin <= content->size() && hits.size() < kMaxHits) {
-            const std::size_t eol = content->find('\n', line_begin);
-            const std::size_t line_end = eol == std::string::npos ? content->size() : eol;
-            const std::string_view line(content->data() + line_begin, line_end - line_begin);
-            ++line_no;
-            const std::size_t column = line.find(query);
-            if (column != std::string_view::npos) {
-              add_hit(full, std::format("{}:{}  {}", item.name, line_no,
-                                        st::trim(line).substr(0, 60)),
-                      line_no, column);
-            }
-            if (eol == std::string::npos) break;
-            line_begin = eol + 1;
-          }
+          scan_text(full, item.name, *content);
         }
       }
-    } else if (!query.empty()) {
+    } else {
       // 内置样例回退（无 --workspace 时保持自包含）
-      for (const auto& sample : files_) {
-        std::size_t line_no = 0;
-        std::size_t cursor = 0;
-        while (cursor <= sample.code.size() && hits.size() < kMaxHits) {
-          const std::size_t eol = sample.code.find('\n', cursor);
-          const std::string_view line =
-              std::string_view(sample.code)
-                  .substr(cursor, eol == std::string::npos ? std::string_view::npos : eol - cursor);
-          ++line_no;
-          const std::size_t column = line.find(query);
-          if (column != std::string_view::npos) {
-            add_hit(sample.name,
-                    std::format("{}:{}  {}", sample.name, line_no, st::trim(line).substr(0, 60)),
-                    line_no, column);
-          }
-          if (eol == std::string::npos) break;
-          cursor = eol + 1;
-        }
-      }
+      for (const auto& sample : files_) scan_text(sample.name, sample.name, sample.code);
+      scan_text("stlog.log", "stlog.log", std::string(kStlogSample));
     }
 
-    if (query.empty()) {
-      status_.set("搜索：输入关键词");
-    } else if (hits.empty()) {
-      hits.push_back("没有匹配：" + query);
-      search_paths_.push_back({});
-      search_lines_.push_back(0);
-      search_columns_.push_back(0);
+    if (hits.empty()) {
+      search_summary_.set("0 处命中");
       status_.set("搜索命中 0 处");
-    } else {
-      status_.set(std::format("搜索命中 {} 处", hits.size()));
+      search_hits_.set({});
+      return;
     }
+    const bool truncated = hits.size() >= kMaxHits;
+    search_summary_.set(std::format("{} 处命中{}", hits.size(), truncated ? "（已截断）" : ""));
+    status_.set(std::format("搜索命中 {} 处", hits.size()));
     search_hits_.set(std::move(hits));
   }
 
-  /// 点搜索命中 → 打开文件并跳到那一行 + 选中命中词。
-  void activate_search_hit(std::size_t index) {
-    if (index >= search_paths_.size() || search_paths_[index].empty()) return;
-    open_path(search_paths_[index]);
-    if (editor == nullptr) {
-      // 本帧的编辑器实例要等下一次重组才拿得到：把跳转记下，build() 末尾补做
-      pending_jump_ = {search_lines_[index], search_columns_[index]};
+  [[nodiscard]] static auto to_lower(std::string_view text) -> std::string {
+    std::string out(text);
+    std::ranges::transform(out, out.begin(), [](unsigned char c) {
+      return static_cast<char>(std::tolower(c));
+    });
+    return out;
+  }
+  [[nodiscard]] static auto is_word_char(char c) -> bool {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+  }
+
+  /// 小型正则匹配器（支持子集见 `apply_search` 的说明）；返回首个匹配的**起始列**。
+  ///
+  /// 匹配策略：逐起点尝试 + 回溯（模式长度有限、行长度在几千字节量级），
+  /// 搜索场景完全够用——不会像完整引擎那样再引一个依赖。
+  [[nodiscard]] static auto match_regex(std::string_view pattern, std::string_view text)
+      -> std::optional<std::size_t> {
+    bool anchored_start = !pattern.empty() && pattern.front() == '^';
+    const bool anchored_end = !pattern.empty() && pattern.back() == '$';
+    if (anchored_start) pattern.remove_prefix(1);
+    if (anchored_end && !pattern.empty()) pattern.remove_suffix(1);
+    const std::size_t last_start = anchored_start ? 0 : text.size();
+    for (std::size_t start = 0; start <= last_start; ++start) {
+      std::size_t cursor = start;
+      std::size_t pattern_at = 0;
+      bool ok = true;
+      while (pattern_at < pattern.size()) {
+        const char token = pattern[pattern_at];
+        if (token == '\\' && pattern_at + 1 < pattern.size()) {
+          const char klass = pattern[pattern_at + 1];
+          if (cursor >= text.size()) {
+            ok = false;
+            break;
+          }
+          const char c = text[cursor];
+          const bool hit = (klass == 'd' && c >= '0' && c <= '9') ||
+                           (klass == 'w' && is_word_char(c)) ||
+                           (klass == 's' && (c == ' ' || c == '\t'));
+          if (!hit) {
+            ok = false;
+            break;
+          }
+          ++cursor;
+          pattern_at += 2;
+          continue;
+        }
+        // `.*`：贪心跳到**能让剩余模式匹配上**的第一个位置（无剩余的剩余==0）。
+        if (token == '.' && pattern_at + 1 < pattern.size() && pattern[pattern_at + 1] == '*') {
+          const std::string_view rest = pattern.substr(pattern_at + 2);
+          std::size_t probe = cursor;
+          bool matched = false;
+          for (;;) {
+            if (match_regex(rest, text.substr(probe)).has_value()) {
+              matched = true;
+              break;
+            }
+            if (probe >= text.size()) break;
+            ++probe;
+          }
+          if (!matched) {
+            ok = false;
+            break;
+          }
+          pattern_at = pattern.size();
+          cursor = text.size();
+          break;
+        }
+        if (cursor >= text.size() || text[cursor] != token) {
+          ok = false;
+          break;
+        }
+        ++cursor;
+        ++pattern_at;
+      }
+      if (ok && pattern_at >= pattern.size() && (!anchored_end || cursor == text.size())) {
+        return start;
+      }
+    }
+    return std::nullopt;
+  }
+
+  // —— Git：真调 `git` 子进程（只读子命令）——
+  //
+  // 为什么值得接：SCM 面板若只是写死一个 “main” 分支名与 “0 变更”，它就不是信息
+  // 而是装饰。真读 `git status --porcelain=v1 -b` 之后，改一个文件、刷新，面板会跟着变。
+  void refresh_git() {
+    git_probed_ = true;
+    git_error_.clear();
+    git_changes_.clear();
+    git_branch_.clear();
+    if (workspace_.empty()) {
+      git_error_ = "没有工作区";
       return;
     }
-    apply_jump(search_lines_[index], search_columns_[index]);
+    st::process::Options options;
+    options.cwd = workspace_;
+    const auto result = st::process::run("git", {"status", "--porcelain=v1", "-b"}, options);
+    if (!result) {
+      git_error_ = "git 不可用：" + result.error().to_string();
+      return;
+    }
+    if (result->exit_code != 0) {
+      git_error_ = st::trim(result->stderr_text.empty() ? result->stdout_text
+                                                        : result->stderr_text);
+      if (git_error_.empty()) git_error_ = "不是 Git 仓库（或 git 拒绝执行）";
+      return;
+    }
+    std::size_t begin = 0;
+    const std::string& out = result->stdout_text;
+    while (begin <= out.size()) {
+      const std::size_t eol = out.find('\n', begin);
+      const std::size_t end = eol == std::string::npos ? out.size() : eol;
+      std::string_view line(out.data() + begin, end - begin);
+      if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+      if (line.starts_with("## ")) {
+        // `## main...origin/main [ahead 1]` → 取第一段
+        line.remove_prefix(3);
+        const std::size_t stop = line.find_first_of(" .");
+        git_branch_ = std::string(stop == std::string_view::npos ? line : line.substr(0, stop));
+      } else if (line.size() > 3) {
+        git_changes_.push_back(GitChange{.status = std::string(st::trim(line.substr(0, 2))),
+                                         .path = std::string(st::trim(line.substr(3)))});
+      }
+      if (eol == std::string::npos) break;
+      begin = eol + 1;
+    }
+    if (git_branch_.empty()) git_branch_ = "（游离 HEAD）";
+    status_.set(std::format("Git：{} · {} 项变更", git_branch_, git_changes_.size()));
+  }
+
+  /// 展开一个变更文件：与 HEAD 的差异丢进输出面板（只读 `git diff`）。
+  void show_git_diff(const GitChange& change) {
+    st::process::Options options;
+    options.cwd = workspace_;
+    const auto result =
+        st::process::run("git", {"diff", "--no-color", "--", change.path}, options);
+    if (!result) {
+      status_.set("git diff 失败：" + result.error().to_string());
+      return;
+    }
+    output_channel_.set("Git");
+    output_.set(result->stdout_text.empty() ? "（未跟踪文件或与 HEAD 无差异）"
+                                            : result->stdout_text);
+    bottom_.set(1);
+    bottom_visible_.set(true);
+    status_.set("差异已打开：" + change.path);
+  }
+
+  // —— 运行任务：真跑 `st`（工作目录 = 工作区或当前目录）——
+  void run_task(const std::string& id) {
+    if (!task_running_.empty()) {
+      status_.set("已有任务在跑：" + task_running_);
+      return;
+    }
+    std::string program = "st";
+    std::vector<std::string> args;
+    if (id == "build") {
+      // `st` 工具链默认在框架仓的 build/bin 下；PATH 里没有就退回仓库内那份。
+    args = {"build", "gallery", "--profile", "dev"};
+    } else if (id == "test") {
+      args = {"test"};
+    } else {
+      args = {"lint"};
+    }
+    const std::string st_path = st::process::which("st").value_or(std::string{});
+    std::string program_path = st_path;
+    if (program_path.empty()) {
+      const std::string local = st::fs::join(tool_root_, "build/bin/st");
+      if (st::fs::exists(local)) program_path = local;
+    }
+    if (program_path.empty()) {
+      st::eprint("找不到 st 工具链（PATH 里没有，--tool-root 下也没有 build/bin/st）\n");
+      status_.set("找不到 st 工具链");
+      return;
+    }
+    st::process::Options options;
+    options.timeout_ms = 120'000;
+    if (!workspace_.empty()) options.cwd = workspace_;
+    output_channel_.set(id == "build" ? "构建" : (id == "test" ? "测试" : "检查"));
+    {
+      std::vector<std::string_view> arg_views;
+      arg_views.reserve(args.size());
+      for (const auto& arg : args) arg_views.push_back(arg);
+      output_.set(std::format("[{}] {} {}", output_channel_.value(), program_path,
+                              st::join(arg_views, " ")));
+    }
+    bottom_.set(1);
+    bottom_visible_.set(true);
+    task_running_ = id;
+    const auto result = st::process::run(program_path, args, options);
+    task_running_.clear();
+    if (!result) {
+      output_.set(output_.value() + "\n[失败] " + result.error().to_string() +
+                  "\n（提示：用 --tool-root <霜天仓根> 指明 st 工具链位置）");
+      status_.set("任务失败：找不到 " + program_path);
+      return;
+    }
+    std::string text = output_.value();
+    text += "\n" + result->stdout_text;
+    if (!result->stderr_text.empty()) text += "\n[stderr]\n" + result->stderr_text;
+    text += std::format("\n[完成] 退出码 {} · {} ms", result->exit_code, result->elapsed_ms);
+    output_.set(std::move(text));
+    status_.set(std::format("任务 {} 结束（退出码 {}）", id, result->exit_code));
+  }
+
+  /// 枚举运行时已注册的语言（扩展视图）。
+  void refresh_languages() {
+    languages_ = CodeEditor::available_languages();
+    status_.set(std::format("已注册 {} 种语言", languages_.size()));
+  }
+
+  /// 重新扫描工作区树（资源管理器的刷新按钮）。
+  void refresh_tree() {
+    dir_expanded_.set(dir_expanded_.value());   // 触发一次重组，树数据本就每帧重扫
+    status_.set(workspace_.empty() ? "内置样例模式" : "已刷新工作区树");
+  }
+
+  /// 新建文件：有工作区时开文件对话框选路径；无工作区时开一份内存缓冲（`untitled-N`）。
+  ///
+  /// 为何两档都要：内置样例模式的演示价值就在于“不用开文件对话框也能跑起来”，
+  /// 而如果无工作区时只回一句“需要 --workspace”，那“新建文件”这个入口在演示里就是死的。
+  void new_file_prompt() {
+    if (workspace_.empty()) {
+      auto list = buffers_.value();
+      stash_active_text(list);
+      const std::size_t index = untitled_count_++;
+      OpenBuffer buffer;
+      buffer.key = std::format("untitled-{}", index);
+      buffer.label = std::format("untitled-{}.txt", index);
+      buffer.language = "text";
+      buffer.text = "";
+      list.push_back(std::move(buffer));
+      buffers_.set(std::move(list));
+      active_.set(buffers_.value().size() - 1);
+      load_active_text();
+      status_.set("已新建内存缓冲（保存时可用另存为选路径）");
+      return;
+    }
+    pending_open_mode_ = 2;
+    new_file_open_.set(true);
+  }
+
+  // —— 搜索命中的跳转（打开文件 + 选中命中）——
+
+  /// 点搜索命中 → 打开文件并跳到那一行 + 选中命中词。
+  void activate_search_hit(std::size_t index) {
+    if (index >= search_hit_paths_.size() || search_hit_paths_[index].empty()) return;
+    const std::size_t line = index < search_hit_lines_.size() ? search_hit_lines_[index] : 1;
+    const std::size_t column = index < search_hit_columns_.size() ? search_hit_columns_[index] : 0;
+    const std::string path = search_hit_paths_[index];
+    // 内置样例模式：path 是样例名，不是真文件。
+    if (!st::fs::is_absolute(path) && workspace_.empty()) {
+      open_by_name(path);
+    } else {
+      open_path(path);
+    }
+    pending_jump_ = {line, column};
+    if (editor != nullptr) {
+      apply_jump(line, column);
+      pending_jump_ = {0, 0};
+    }
   }
 
   void apply_jump(std::size_t line, std::size_t column) {
     if (editor == nullptr) return;
     editor->goto_line(line);
     const std::size_t start = editor->cursor_index() + column;
-    editor->set_selection(start, start + 1);
+    editor->set_selection(start, start + last_query_.size());
     editor->scroll_to_line(line);
     status_.set(std::format("已跳到第 {} 行", line));
   }
 
+  /// 终端：内置命令 + **白名单外部命令的真实执行**。
+  ///
+  /// 为何要真执行而不是继续拼字符串：一个只会回显“未知命令”的终端面板，演示价值为零
+  /// ——它不能回答任何关于工作区的实际问题。而完整 shell 既不需要（演示场景想要的是
+  /// “查一眼、跑一下”）也不安全（任意命令执行）。白名单 + `st::process::run` 是中间点：
+  /// 命令与参数**分开传**（不经 shell，无注入面），且输出与退出码全部真实回填。
   void run_terminal(const std::string& command) {
     std::string reply;
-    if (command == "help") {
+    const auto trimmed = std::string(st::trim(command));
+    const auto log_command = [this, &trimmed](std::string text) {
+      if (trimmed.empty()) return;
+      auto log = terminal_log_.value();
+      log.push_back("❯ " + trimmed);
+      if (!text.empty()) log.push_back(std::move(text));
+      terminal_log_.set(std::move(log));
+    };
+    if (trimmed.empty()) {
+      if (terminal_input != nullptr) terminal_input->set_text("");
+      return;
+    }
+    // 历史（↑↓ 翻）——重复命令不存两次，游标复位。
+    if (terminal_history_.empty() || terminal_history_.back() != trimmed) {
+      terminal_history_.push_back(trimmed);
+    }
+    terminal_history_cursor_ = -1;
+
+    // —— 外部命令的边界声明 ——
+    // 本终端**不提供**完整 shell：只内置命令 + 白名单（`git` 只读子命令 / `st` / `cat` / `wc`）。
+    // 参数与程序名分开传给 `st::process::run`（不经 shell → 无注入面），
+    // 且写操作在解析阶段就被拒——“能看不能改”是这里刻意划的线。
+
+    if (trimmed == "help") {
       reply =
-          "可用命令：\n"
-          "  help           本帮助\n"
-          "  langs          已注册语言列表\n"
-          "  ls             工作区根目录（真实文件模式）\n"
-          "  find <词>      在工作区里搜（打到搜索面板）\n"
-          "  goto <行>      当前编辑器跳到该行\n"
-          "  stats          当前编辑器统计\n"
-          "  save / theme / clear / open <文件>";
-    } else if (command == "langs") {
-      for (const auto& name : CodeEditor::available_languages()) reply += name + " ";
+          "内置：\n"
+          "  help            本帮助\n"
+          "  langs           已注册语言列表\n"
+          "  ls [目录]       列目录（默认工作区根）\n"
+          "  find <词>       在工作区里搜（打到搜索面板）\n"
+          "  goto <行>       当前编辑器跳到该行\n"
+          "  stats           当前编辑器统计\n"
+          "  save / theme / clear / open <名字>\n"
+          "  历史：↑ / ↓ 翻上一条\n"
+          "外部（白名单，无 shell）：\n"
+          "  git status | git log | git diff      （只读子命令）\n"
+          "  st --version · st build · st test · st lint\n"
+          "  cat <文件> · wc -l <文件>";
+    } else if (trimmed == "langs") {
+      for (const auto& name : languages_.empty() ? CodeEditor::available_languages() : languages_) {
+        reply += name + " ";
+      }
       reply = "已注册语言：" + reply;
-    } else if (command == "ls") {
-      if (workspace_.empty()) {
+    } else if (trimmed == "ls" || trimmed.starts_with("ls ")) {
+      const std::string target = trimmed.size() > 3 ? std::string(st::trim(std::string_view(trimmed).substr(3)))
+                                                    : workspace_;
+      if (target.empty()) {
         reply = "当前为内置样例模式（启动时加 --workspace <目录> 可用真实文件）";
-      } else if (auto listing = st::fs::list_dir(workspace_); listing.has_value()) {
-        reply = "工作区 " + workspace_ + "：";
+      } else if (auto listing = st::fs::list_dir(target); listing.has_value()) {
+        reply = target + "：";
         for (const auto& item : *listing) {
           reply += "\n  " + item.name + (item.is_dir ? "/" : std::format("  {} B", item.size));
         }
       } else {
-        reply = "目录读不了：" + workspace_;
+        reply = "目录读不了：" + target;
       }
-    } else if (command.starts_with("goto ")) {
-      try {
-        const auto line = static_cast<std::size_t>(std::stoull(std::string(command.substr(5))));
-        if (editor != nullptr) {
-          editor->goto_line(line);
-          editor->scroll_to_line(line);
-          reply = std::format("已跳到第 {} 行", line);
-        } else {
-          reply = "没有打开的编辑器";
-        }
-      } catch (...) {
+    } else if (trimmed.starts_with("goto ")) {
+      if (const auto line = st::parse_u64(st::trim(std::string_view(trimmed).substr(5)));
+          line.has_value() && editor != nullptr) {
+        editor->goto_line(*line);
+        editor->scroll_to_line(*line);
+        reply = std::format("已跳到第 {} 行", *line);
+      } else {
         reply = "用法：goto <行号>";
       }
-    } else if (command.starts_with("find ")) {
-      const std::string needle(command.substr(5));
+    } else if (trimmed.starts_with("find ")) {
+      const std::string needle(trimmed.substr(5));
       activity_.set(1);   // 切到搜索面板让结果可见
-      run_search(needle);
+      sidebar_visible_.set(true);
+      apply_search(needle);
       reply = std::format("已搜索「{}」，结果见搜索面板", needle);
-    } else if (command == "stats") {
+    } else if (trimmed == "stats") {
       const auto list = buffers_.value();
       if (editor != nullptr && active_.value() < list.size()) {
         reply = std::format("{} · {} 行 · {} 字符", list[active_.value()].label,
@@ -1441,30 +2629,115 @@ struct CodeEditorPage : Component {
       } else {
         reply = "没有打开的编辑器";
       }
-    } else if (command == "save") {
+    } else if (trimmed == "save") {
       save();
       reply = "已执行保存（见输出面板）";
-    } else if (command == "theme") {
+    } else if (trimmed == "theme") {
       toggle_theme();
       reply = "已切换主题";
-    } else if (command == "clear") {
+    } else if (trimmed == "clear") {
       terminal_log_.set({"shuangtian dev terminal"});
       if (terminal_input != nullptr) terminal_input->set_text("");
       return;
-    } else if (command.starts_with("open ")) {
-      const std::string want(command.substr(5));
+    } else if (trimmed.starts_with("open ")) {
+      const std::string want(trimmed.substr(5));
       open_by_name(want);
       reply = "已尝试打开 " + want;
-    } else if (!command.empty()) {
-      reply = "未知命令：" + command + "（help 查看）";
+    } else if (trimmed == "git" || trimmed.starts_with("git ")) {
+      reply = run_git_command(trimmed);
+    } else if (trimmed == "st" || trimmed.starts_with("st ")) {
+      reply = run_st_command(trimmed);
+    } else if (trimmed.starts_with("cat ")) {
+      const std::string path = resolve_path(trimmed.substr(4));
+      if (auto content = st::fs::read_text(path); content.has_value()) {
+        reply = st::trim_end(*content);
+      } else {
+        reply = "读不了（不存在或非 UTF-8）：“" + path + "”";
+      }
+    } else if (trimmed.starts_with("wc -l ")) {
+      const std::string path = resolve_path(trimmed.substr(6));
+      if (auto content = st::fs::read_text(path); content.has_value()) {
+        reply = std::format("{} 行  {}", line_count_of(*content), path);
+      } else {
+        reply = "读不了：“" + path + "”";
+      }
+    } else {
+      reply = std::format(
+          "未知命令：“{}”。本终端只跑内置命令与白名单外部命令（输入 help 看清单）——\n"
+          "用完整 shell 不是本示例的意图（任意命令执行不在演示范围内）。",
+          trimmed);
     }
-    if (!command.empty()) {
-      auto log = terminal_log_.value();
-      log.push_back("❯ " + command);
-      if (!reply.empty()) log.push_back(reply);
-      terminal_log_.set(std::move(log));
-    }
+    log_command(std::move(reply));
     if (terminal_input != nullptr) terminal_input->set_text("");
+  }
+
+  /// 把用户输入的文件名解析为绝对路径（相对工作区）。
+  [[nodiscard]] auto resolve_path(std::string_view raw) const -> std::string {
+    std::string path(st::trim(raw));
+    if (st::fs::is_absolute(path) || workspace_.empty()) return path;
+    return st::fs::join(workspace_, path);
+  }
+
+  /// `git <只读子命令>`：写操作（commit/checkout/…）在解析前就被拒。
+  [[nodiscard]] auto run_git_command(const std::string& line) -> std::string {
+    if (workspace_.empty()) return "没有工作区（启动时加 --workspace）";
+    const auto parts = st::split_whitespace(line);
+    if (parts.size() < 2) return "用法：git status | git log | git diff | git show";
+    const std::string sub(parts[1]);
+    static constexpr std::string_view kReadOnly[] = {"status", "log", "diff", "show", "branch"};
+    if (std::find(std::begin(kReadOnly), std::end(kReadOnly), sub) == std::end(kReadOnly)) {
+      return std::format("拒绝：“git {}”不在只读白名单（{}）内——本终端不执行写操作", sub,
+                         "status/log/diff/show/branch");
+    }
+    std::vector<std::string> args{"--no-pager", sub};
+    for (std::size_t index = 2; index < parts.size(); ++index) args.emplace_back(parts[index]);
+    if (sub == "log") args.insert(args.begin() + 1, "-n");
+    if (sub == "log") args.insert(args.begin() + 2, "20");
+    st::process::Options options;
+    options.cwd = workspace_;
+    options.timeout_ms = 20'000;
+    const auto result = st::process::run("git", args, options);
+    if (!result) return "git 不可用：" + result.error().to_string();
+    std::string text = result->stdout_text;
+    if (!result->stderr_text.empty()) text += "\n[stderr]\n" + result->stderr_text;
+    if (text.empty()) text = "（无输出）";
+    return std::format("{}\n[退出码 {}]", st::trim_end(text), result->exit_code);
+  }
+
+  /// `st <子命令>`：真跑霜天工具链（先找 PATH，再找 `--tool-root`）。
+  [[nodiscard]] auto run_st_command(const std::string& line) -> std::string {
+    const auto parts = st::split_whitespace(line);
+    std::vector<std::string> args;
+    for (std::size_t index = 1; index < parts.size(); ++index) args.emplace_back(parts[index]);
+    std::string program = st::process::which("st").value_or(std::string{});
+    if (program.empty() && !tool_root_.empty()) {
+      const std::string local = st::fs::join(tool_root_, "build/bin/st");
+      if (st::fs::exists(local)) program = local;
+    }
+    if (program.empty()) {
+      return "找不到 st 工具链（PATH 里没有；启动时加 --tool-root <霜天仓根>）";
+    }
+    st::process::Options options;
+    options.timeout_ms = 120'000;
+    if (!workspace_.empty()) options.cwd = workspace_;
+    const auto result = st::process::run(program, args, options);
+    if (!result) return "执行失败：" + result.error().to_string();
+    std::string text = result->stdout_text;
+    if (!result->stderr_text.empty()) text += "\n[stderr]\n" + result->stderr_text;
+    if (text.empty()) text = "（无输出）";
+    return std::format("{}\n[退出码 {} · {} ms]", st::trim_end(text), result->exit_code,
+                       result->elapsed_ms);
+  }
+
+  /// 终端历史翻页（↑ = 上一条）。
+  void terminal_history_step(int delta) {
+    if (terminal_history_.empty() || terminal_input == nullptr) return;
+    const std::ptrdiff_t count = static_cast<std::ptrdiff_t>(terminal_history_.size());
+    if (terminal_history_cursor_ < 0) terminal_history_cursor_ = count;
+    terminal_history_cursor_ = std::clamp<std::ptrdiff_t>(terminal_history_cursor_ + delta, 0, count);
+    terminal_input->set_text(terminal_history_cursor_ >= count
+                                 ? std::string{}
+                                 : terminal_history_[static_cast<std::size_t>(terminal_history_cursor_)]);
   }
 
   /// 命令面板执行一条命令（id 是稳定的业务身份）。
@@ -1554,17 +2827,31 @@ struct CodeEditorPage : Component {
   float editor_font_scale_{kEditorFontScale};
   /// 编辑器行距倍数（构造时定，`--editor-line-spacing` 可覆盖）。
   float editor_line_spacing_{CodeEditor::kDefaultLineSpacing};
+  /// 霜天仓库根（`--tool-root`）：PATH 上没有 `st` 时到它下面 `build/bin/st` 找。
+  std::string tool_root_{};
   std::vector<Sample> files_{};
   std::string workspace_{};
   std::vector<Problem> problems_{};
-  std::vector<ListItemData> search_hits_cache_{};
-  std::vector<std::string> search_paths_{};
-  std::vector<std::size_t> search_lines_{};
-  std::vector<std::size_t> search_columns_{};
   std::pair<std::size_t, std::size_t> pending_jump_{0, 0};
+  /// 新建/打开/另存对话框开关（三者共用一个 `FileDialog`）。
+  State<bool> new_file_open_{false};
+  /// 缩进宽度（状态栏可点切换；配到编辑器上一次）。
+  int tab_width_{4};
+  /// 问题面板的严重度过滤（0 = 只看错误，1 = 只看警告，2 = 全部）。
+  int problems_filter_{2};
+  /// 0 = 打开，1 = 另存为，2 = 新建。
+  int pending_open_mode_{0};
+  /// 内存缓冲的递增序号（`untitled-N`）。
+  std::size_t untitled_count_{1};
 
  private:
   std::string loaded_key_{};   ///< 编辑器实例当前装载的是哪个标签（防重复 set_text）
+  /// 底部面板当前高度比例（上下分栏的 `ratio`）。
+  ///
+  /// **刻意不是 `State`**：分栏组件自己持有比例并据此重排，拖动时它逐像素回调本值——
+  /// 若这是个 State，每拖一像素就会标脏整页重组一次（拖拽中重建子元素，手感与开销都差）。
+  /// 这里只做“跨重组记住用户拖到哪了”的存档。
+  float bottom_ratio_{0.72f};
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1613,6 +2900,8 @@ struct Options {
   /// 工作区目录（真实文件模式）：资源管理器/打开/保存全部走 `st::fs` 真实读写；
   /// 缺省回退内置样例工作区（内存模拟）。
   std::string workspace{};
+  /// 霜天仓库根（`--tool-root`）：跑任务/构建时找 `st` 工具链用。
+  std::string tool_root{};
 };
 
 /// 用法说明。**必须有**：未知参数会报错退出，没有 `--help` 就等于"报错了也没处查"。
@@ -1642,6 +2931,7 @@ auto print_usage(std::string_view program) -> void {
       "内容/自动化\n"
       "  --language NAME       初始语言（默认 cpp；--list-languages 可列）\n"
       "  --workspace DIR       工作区目录（真实文件；缺省用内置样例）\n"
+      "  --tool-root DIR       霜天仓根（PATH 无 st 时到它下面 build/bin/st 找；跑任务用）\n"
       "  --control-port N      控制通道端口（0 = 自动）\n"
       "  --control-file PATH   控制信息落盘路径\n"
       "  --shots DIR           无头截图目录\n"
@@ -1684,6 +2974,7 @@ auto print_usage(std::string_view program) -> void {
     else if (raw == "--frames") options.frames = static_cast<std::uint32_t>(std::stoi(value("0")));
     else if (raw == "--ms") options.max_ms = std::stoi(value("0"));
     else if (raw == "--workspace") options.workspace = value(".");
+    else if (raw == "--tool-root") options.tool_root = value("");
     else if (raw == "--decorations") options.decorations = true;
     // **未知参数报错，不静默忽略**：本应用曾经自带一份参数解析器（不走
     // `parse_common_options`），于是新加的开关被静默吃掉——
@@ -1738,8 +3029,8 @@ auto run_app(int argc, char** argv) -> int {
   if (options.editor_line_spacing != "auto") {
     editor_line_spacing = static_cast<float>(std::stod(options.editor_line_spacing));
   }
-  auto page = std::make_shared<CodeEditorPage>(samples(), options.workspace, editor_font_scale,
-                                               editor_line_spacing);
+  auto page = std::make_shared<CodeEditorPage>(samples(), options.workspace, options.tool_root,
+                                               editor_font_scale, editor_line_spacing);
   // 窗框的窗口动作出口：`Application` 实现了 `ui::WindowControl`（转发给后端）。
   // 在这一处"装"进去，页面内的组件就不需要知道应用/后端的存在（依赖方向单向）。
   page->window_control_ = &app;
@@ -1803,6 +3094,17 @@ auto run_app(int argc, char** argv) -> int {
   // 那时如果界面还没建好（或焦点还没设），它拿到的是半成品状态
   // （实测踩到：`st_editor_smoke.py` 断言“启动即聚焦”，偶发失败）。
   (void)host->tick();
+  // **重组错误必须可见**：DSL 单根契约被破坏、护栏报表、或作用域预算耗尽时，
+  // 界面会静默地少一块——那时看截图只能看到“一片空白”，完全不知从哪里查。
+  // 把 `ReconcileStats` 的结论打到 stderr（日志文件里有），排障就不需要再猜。
+  {
+    const dsl::ReconcileStats& stats = host->stats();
+    if (!stats.error.empty()) std::fprintf(stderr, "[codeeditor] 声明式重组错误：%s\n", stats.error.c_str());
+    if (stats.budget_exceeded) std::fprintf(stderr, "[codeeditor] 重组超帧预算（%.1fms），剩余作用域顺延\n", 4.0);
+    for (const auto& collision : stats.key_collisions) {
+      std::fprintf(stderr, "[codeeditor] 重名 key：%s\n", collision.c_str());
+    }
+  }
   app.root().set_focus(page->editor);
   app.root().mark_dirty_all();
 
@@ -1820,8 +3122,29 @@ auto run_app(int argc, char** argv) -> int {
       });
     };
     bind("s", false, [page] { page->save(); });
+    bind("s", true, [page] { page->save_as(); });
     bind("w", false, [page] { page->close_active(); });
+    bind("o", false, [page] { page->open_file_dialog(); });
+    bind("n", false, [page] { page->new_file_request(); });
     bind("b", false, [page] { page->sidebar_visible_.set(!page->sidebar_visible_.value()); });
+    bind("j", false, [page] {                                     // Ctrl+J：切换底部面板
+      page->bottom_visible_.set(!page->bottom_visible_.value());
+    });
+    bind("k", false, [page] { page->shortcuts_open_.set(!page->shortcuts_open_.value()); });
+    // Ctrl+Shift+E / F / G：切到三个主视图（与歌白文件工作台同一套键位）
+    bind("e", true, [page] {
+      page->activity_.set(0);
+      page->sidebar_visible_.set(true);
+    });
+    bind("f", true, [page] {
+      page->activity_.set(1);
+      page->sidebar_visible_.set(true);
+    });
+    bind("g", true, [page] {
+      page->activity_.set(2);
+      page->sidebar_visible_.set(true);
+      page->refresh_git_request();
+    });
     bind("p", true, [page] { page->open_palette(false); });          // Ctrl+Shift+P：命令表
     bind("p", false, [page] { page->open_palette(true); });          // Ctrl+P：快速打开文件
     bind("f", false, [page] { page->open_find(); });                 // Ctrl+F：查找
@@ -1829,6 +3152,20 @@ auto run_app(int argc, char** argv) -> int {
     bind("tab", false, [page] {                                      // Ctrl+Tab：循环切标签
       const auto count = page->buffers_.value().size();
       if (count > 1) page->active_.set((page->active_.value() + 1) % count);
+    });
+    // F8：跳到当前文件的第一处问题（与 VSCode 的“下一处问题”同语义）
+    UiRoot::Shortcut f8{};
+    f8.key = "f8";
+    (void)root->register_shortcut("f8", f8, [page]() {
+      page->refresh_problems();
+      if (page->problems_.empty()) {
+        page->status_.set("没有问题可跳转");
+        return true;
+      }
+      page->bottom_.set(0);
+      page->bottom_visible_.set(true);
+      page->jump_to_problem_request(0);
+      return true;
     });
     // Esc 关闭查找条（Input 不认 Esc，用根级快捷键；只在自己可见时接管，
     // 免得吃掉别的场景的 Esc——比如命令面板自己要用的那个）
@@ -1839,6 +3176,19 @@ auto run_app(int argc, char** argv) -> int {
       page->dismiss_find();
       return true;
     });
+  }
+  // —— 编辑器右键菜单的触发链路 ——
+  //
+  // 为什么走 `set_event_handler` 而不是给 `CodeEditor` 加回调：右键菜单是**宿主**的
+  // 责任（编辑器不应该自己知道弹哪张菜单）。而 `Element::on_event` 基类实现会在
+  // 组件自身不消费事件时把事件交给注入的 handler——右键（`MouseDown`/`MouseUp`
+  // 且 `button == 2`）编辑器一律不处理，正好是这条路径。
+  //
+  // 时机：在 `MouseUp`（不是 Down）上弹，与 Windows/macOS 的习惯一致；
+  // 否则先弹菜单、再把“松开”送到新弹的菜单上，手感不对。
+  if (page->editor != nullptr) {
+    // 右键链路已在 `build_editor_area` 里接好（`CodeEditor::on_context_menu`）——
+    // 这里不再装 `set_event_handler`：那个回调永远轮不到（组件对任何按钮的按下都消费）。
   }
 
   if (auto started = app.start(); !started) {

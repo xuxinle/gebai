@@ -493,6 +493,10 @@ CJK 多轮廓字形不糊块、Latin/CJK 带孔字形墨迹占比上限）。
 > 新组件手改、天然滞后。新口径：动作直接交给元素，`handled` 就是权威答复——
 > 拼错的动作名仍是 `handled=false`（不假装成功），真正的组件动作终于可达。
 - **语义值**：`semantics_value()` 给**当前行内容**（整篇代码塞进语义树既无意义也会撑爆控制通道响应）
+- **右键**：`on_context_menu(Point)` —— 组件不自己弹菜单（那是宿主的责任），但**必须把
+  “右键点了这里”告诉宿主**：`on_event` 对任何按钮的 `MouseDown` 都返回 `true`，
+  宿主既接不到右键、也阻止不了“右键改了光标”（实测：右键本该弹菜单，结果反而挪了光标）。
+  当前语义：右键触发本回调并**不改光标**（与主流编辑器一致）。
 
 **剪贴板**：使用进程内剪贴板而非系统剪贴板——无头模式没有系统剪贴板（服务器无 X/Wayland），
 而编辑器必须具备可用的复制/粘贴语义。进程内剪贴板在无头与有窗口下行为**完全一致**，
@@ -1868,6 +1872,14 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
 - **MenuBar / ContextMenu**：声明式 `Menu{id,label,items[]}`；`make_panel(i)` 锚定标题
   正下方（Stack overlay 不锚定，面板自己落到 anchor）；ContextMenu 挂 FillViewport、
   dismiss barrier（面板外点击关闭并消费，MouseMove 照常穿透）、越界翻转/夹入视口。
+  `MenuPanel::set_items(items)` 支持**构造后换条目**——声明式路径要求无参构造，
+  没有它就只能整块重建（面板内的高亮/尺寸缓存全丢）。
+- **`Button` 的宽度契约**：显式 `style.width` 优先，否则按内容宽并**夹到
+  `constraints.max_width`**；文本超长先 `ellipsize` 再量宽。
+  旧实现里 `measure` 是 `(void)constraints` —— 窄容器里的长标签按钮会**横向溢出**
+  到相邻面板之上（实测：侧栏 Git 变更项的路径叠在代码编辑器上）。
+- **`Spacer` 的非负尺寸**：`arrange` 把副轴尺寸夹到 `≥ 0`（容器比占位块矮时，
+  旧实现会给出负高度矩形——协议/测试读到的“这块多大”不该是负数）。
 - **FileDialog**：打开/保存（目录导航 + 自绘文件列表 + 自绘文件名输入行 +
   `on_confirm(full_path)`/`on_cancel`；fs 失败呈现错误行不崩溃）。
 - **工具链（stpm）**：**Windows 默认 g++（MinGW-w64，主版本 ≥ 13）**，MSVC 可回退——
@@ -3264,7 +3276,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
 | 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case
- 超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑） | `st test` | 全绿（**769 用例 / 18093 断言**，debug 档实测；`st test --san` 全绿 0 报告；另 12 个慢用例默认跳过） |
+ 超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑） | `st test` | 全绿（**771 用例 / 18099 断言**，debug 档实测；`st test --san` 全绿 0 报告；另 12 个慢用例默认跳过） |
 | 独立工程集成 | **真建一个引用 framework 的最小工程**、真构建真跑（`tests/pkg_integration_test.cpp`）
  | `st test pkg_integration` | 全绿（`ST_INTEGRATION_BUILD=0` 可关；关掉时明确跳过而非假绿） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告（需带 sanitizer 运行库的编译器；MinGW 发行版不带时构建前明确报错） |

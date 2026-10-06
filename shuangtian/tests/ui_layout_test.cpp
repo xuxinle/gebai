@@ -208,3 +208,36 @@ ST_TEST(ui_layout_wrap_handles_many_small_items) {
   // 最后一个（index 71）在第 6 行
   ST_CHECK_EQ(static_cast<int>(grid->child_at(71)->bounds().y), 300);
 }
+
+ST_TEST(ui_layout_button_respects_width_constraint) {
+  // 回归（2026-10-06）：`Button::measure` 曾 `(void)constraints` ——宽度只看标签文本，
+  // 而**不听父容器给的可用宽**。实测后果：270px 宽的侧栏里，一个带长路径标签的
+  // 按钮被量成 400+px 宽，直接画到相邻的编辑器面板上方（看起来像绘制错乱）。
+  //
+  // 为何用 20px 这么窄的约束：`NullTextPort` 量宽恒 0，自然宽 = 控件高（几十像素）。
+  // 约束必须**小于控件高**，否则夹与不夹结果一样——测试会变得**恒绿**
+  // （实测踩过：约束写成 120 时，回退修复后测试依然通过）。
+  Fixture fixture;
+  auto button = std::make_unique<st::ui::Button>("ok");
+  button->measure(fixture.context, Constraints{.max_width = 20.0f, .max_height = kUnbounded});
+  ST_CHECK(button->measured_size().width <= 20.0f);
+  // 宽松约束下不应被无条件压小
+  auto wide = std::make_unique<st::ui::Button>("ok");
+  wide->measure(fixture.context, Constraints{.max_width = kUnbounded, .max_height = kUnbounded});
+  ST_CHECK(wide->measured_size().width > 20.0f);
+}
+
+ST_TEST(ui_layout_spacer_never_reports_negative_extent) {
+  // 回归（2026-10-06）：`Spacer` 曾把负尺寸矩形原样当 `bounds`（实测：应用里
+  // 30px 高的工具栏行内，`grow` 占位块的 `bounds.height == −18`）。
+  // 负尺寸会被协议/测试当成异常值读走——“这块多大”的答案不该是负数。
+  //
+  // 这里直接钉住 `Spacer::arrange` 的不变量（容器给什么都要夹到非负）；
+  // 不声称复现了那次的产生路径（它由父容器的交叉轴计算得出，尚未定位到单个表达式）。
+  Fixture fixture;
+  auto spacer = std::make_unique<st::ui::Spacer>();
+  spacer->arrange(fixture.context, Rect{10.0f, 20.0f, 100.0f, -18.0f});
+  ST_CHECK(spacer->bounds().height >= 0.0f);
+  spacer->arrange(fixture.context, Rect{10.0f, 20.0f, -5.0f, 30.0f});
+  ST_CHECK(spacer->bounds().width >= 0.0f);
+}

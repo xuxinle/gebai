@@ -215,6 +215,15 @@ class CodeEditor : public Element {
   std::function<void(std::string_view)> on_change{};       ///< 内容变化（传最新全文）
   std::function<void()> on_cursor_change{};                ///< 光标/选择变化
   std::function<void(std::string_view)> on_submit{};       ///< Ctrl+Enter 提交
+  /// 右键按下（参数为事件坐标，逻辑像素）。
+  ///
+  /// 为何必须有（2026-10-06，来自 codeeditor 右键菜单实战）：`on_event` 对
+  /// **任何按钮**的 `MouseDown` 都走同一个“把光标搬到点的位置”的分支并返回 `true`，
+  /// 于是宿主既拿不到右键（被组件吃掉）、也无法阻止“右键改了光标位置”。
+  /// 结果是一个**能做到却不能做对**的局面：宿主只有两条路——接管整个命中路径，
+  /// 或者放弃组件自带的鼠标行为。这个回调把“右键点了这里”作为一件事告诉宿主，
+  /// 同时**不动光标**（右键不改选择，与主流编辑器一致）。
+  std::function<void(math::Point)> on_context_menu{};
 
   // —— Element 覆写 ——
 

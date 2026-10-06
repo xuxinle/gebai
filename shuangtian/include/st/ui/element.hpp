@@ -743,6 +743,8 @@ class Spacer : public Element {
  public:
   explicit Spacer(float size = 0.0f);
   [[nodiscard]] auto type() const noexcept -> std::string_view override { return "Spacer"; }
+  /// 副轴尺寸夹到非负（见实现处说明：容器比占位块矮时会得到负高度矩形）。
+  void arrange(const RenderContext& context, math::Rect rect) override;
 };
 
 }  // namespace st::ui

@@ -857,4 +857,12 @@ Spacer::Spacer(float size) {
   style_.grow = false;
 }
 
+void Spacer::arrange(const RenderContext& context, math::Rect rect) {
+  // 副轴尺寸夹到非负：占位块没有内容，比它的容器还高时只会得到一个**负高度矩形**
+  // （实测：30px 高的行里 `grow` 占位块的 `bounds.height == −18`）。矩形本身不画东西，
+  // 但负尺寸会被协议/测试当成异常值读走——“这块多大”的答案不该是负数。
+  Element::arrange(context, math::Rect{rect.x, rect.y, std::max(0.0f, rect.width),
+                                       std::max(0.0f, rect.height)});
+}
+
 }  // namespace st::ui

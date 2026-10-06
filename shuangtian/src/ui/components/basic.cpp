@@ -333,7 +333,6 @@ void Button::apply_theme(const Theme& theme) {
 }
 
 void Button::measure(const RenderContext& context, const Constraints& constraints) {
-  (void)constraints;
   const Metrics& metrics = context.theme.metrics();
   const float height = size_ == Size::Small ? metrics.control_height_sm
                                             : (size_ == Size::Large ? metrics.control_height_lg
@@ -342,7 +341,17 @@ void Button::measure(const RenderContext& context, const Constraints& constraint
   const TextPort& port = port_of(context);
   float width = port.measure_width(label_, style_.font_size) + horizontal_padding * 2.0f;
   if (!icon_.empty()) width += style_.font_size + metrics.space_sm;
-  measured_ = math::Size{std::max(width, height), height};
+  width = std::max(width, height);
+  // **显式宽度优先**：与其它组件同口径（`style_.width` 是宿主/DSL 的明确意图）。
+  if (style_.has_explicit_width()) width = style_.width;
+  // **约束要听**：旧实现在这里 `(void)constraints`——宽度只看标签文本，
+  // 于是窄容器里的长标签按钮**横向溢出**到相邻面板之上（实测：侧栏 Git 变更项
+  // 叠在代码编辑器上面，看起来像绘制错乱，实质是测量忽略了可用宽度）。
+  // 夹到 `constraints` 后，超长文本由 `paint_content` 末位省略号收束。
+  if (constraints.max_width < kUnbounded) width = std::min(width, constraints.max_width);
+  if (style_.min_width > 0.0f) width = std::max(width, style_.min_width);
+  width = std::min(width, style_.max_width);
+  measured_ = math::Size{width, height};
 }
 
 void Button::paint_content(const RenderContext& context, raster::Surface& canvas) const {
@@ -350,20 +359,26 @@ void Button::paint_content(const RenderContext& context, raster::Surface& canvas
   const TextPort& port = port_of(context);
   const float font_size = style_.font_size;
   const float icon_size = font_size + 2.0f;
-  const float text_width = port.measure_width(label_, font_size);
   const float gap = (!icon_.empty() && !label_.empty()) ? metrics.space_sm : 0.0f;
-  const float total = text_width + (icon_.empty() ? 0.0f : icon_size + gap);
+  const float icon_extent = icon_.empty() ? 0.0f : icon_size + gap;
+  // **文本先按可用宽度截断再加省略号**：不截断时超长标签会画到按钮之外
+  // （按钮被父容器夹窄了，但文本宽度还是它自己的量法），于是相邻面板上会多出
+  // 一截看不清源头的字——实测就是侧栏 Git 变更项的路径叠到了代码上。
+  const float available = std::max(0.0f, bounds_.width - icon_extent);
+  const std::string clipped = port.ellipsize(label_, font_size, available);
+  const float text_width = port.measure_width(clipped, font_size);
+  const float total = text_width + icon_extent;
   float cursor = bounds_.x + (bounds_.width - total) * 0.5f;
   const float center_y = bounds_.center().y;
 
   if (!icon_.empty() && icon_leading) {
     Icon::draw(canvas, icon_, math::Rect{cursor, center_y - icon_size * 0.5f, icon_size, icon_size},
                style_.color);
-    cursor += icon_size + gap;
+    cursor += icon_extent;
   }
-  if (!label_.empty()) {
+  if (!clipped.empty()) {
     const float line_height = port.line_height(font_size);
-    port.draw(canvas, label_, math::Point{cursor, center_y - line_height * 0.5f}, font_size,
+    port.draw(canvas, clipped, math::Point{cursor, center_y - line_height * 0.5f}, font_size,
               style_.color);
   }
   if (!icon_.empty() && !icon_leading) {

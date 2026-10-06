@@ -58,6 +58,12 @@ MenuPanel::MenuPanel(std::vector<MenuItem> items) : items_(std::move(items)) {
 
 auto MenuPanel::item_count() const noexcept -> std::size_t { return items_.size(); }
 
+void MenuPanel::set_items(std::vector<MenuItem> items) {
+  items_ = std::move(items);
+  if (highlighted_ != kNoIndex && highlighted_ >= items_.size()) highlighted_ = kNoIndex;
+  mark_layout_dirty();
+}
+
 auto MenuPanel::item_id(std::size_t index) const -> std::string_view {
   if (index >= items_.size()) return {};
   return items_[index].id;

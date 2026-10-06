@@ -65,6 +65,13 @@ class MenuPanel : public Element {
 
   [[nodiscard]] auto item_count() const noexcept -> std::size_t;
   [[nodiscard]] auto item_id(std::size_t index) const -> std::string_view;
+  /// 替换条目清单（越界的高亮夹回合法值并重排）。
+  ///
+  /// 为何需要（2026-10-06，来自 codeeditor 右键菜单实战）：面板的条目原本只能在
+  /// 构造时给（`MenuPanel(items)`），而声明式创建路径要求**无参构造**——
+  /// 于是“同 key 复用宿主面板、只在打开时填条目”这条路走不通（只能整块重建，
+  /// 面板内的高亮/尺寸缓存全丢）。有了它，两种创建路径共用同一个更新入口。
+  void set_items(std::vector<MenuItem> items);
   /// 键盘导航选中序号（无选中为 `kNoIndex`）。
   [[nodiscard]] auto highlighted() const noexcept -> std::size_t { return highlighted_; }
   /// 高亮移动（跳过分隔线；越界夹取；`notify` 触发 hover 视觉刷新）。

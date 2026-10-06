@@ -1439,6 +1439,50 @@ SVG 图元 17 例 16/17→**17/17**。
     `remove_child` + `insert_child`）；大量重排（如整表排序）是 O(n × 子元素数)。
     量级真成为瓶颈时再换「先算目标序、再一次遍历重排」。
 
+## P1（2026-10-06 codeeditor 全面优化轮：框架层缺口）
+
+背景：把 `examples/codeeditor` 做到“真正可用”（对标歌白文件工作台）时挖出的框架问题。
+**已当场修的三项**（见各自段落），**仍未做的在下面**。
+
+### ✅ 已修：`Button::measure` 忽略宽度约束（窄容器里横向溢出）
+
+- **现象**：侧栏（270px）里的 Git 变更项是 `Button`，长路径**画到编辑区上面**，
+  看起来像绘制错乱。
+- **实测**：`#scm-host` 内条目的 `bounds` 右缘超出侧栏右缘 100+ px；
+  `Button::measure` 首行是 `(void)constraints;`——完全无视可用宽度。
+- **修法**：`measure` 夹到 `constraints.max_width`；`paint_content` 先 `ellipsize` 再量宽。
+  与 `Text`/`Tabs` 等同口径（“显式宽度优先、否则听约束”）。
+
+### ✅ 已修：`Spacer` 在矮容器里给出**负高度**矩形
+
+- **现象**：`grow` 的 `Spacer` 在 30px 高的行里 `bounds.height == −18`。
+- **修法**：`Spacer::arrange` 把副轴尺寸夹到非负（占位块没有内容，“多大”不该是负数）。
+- **为何值得修**：负尺寸会被协议/测试当成异常值读走，也让任何“区域面积”类的断言失效。
+
+### ✅ 已修：`CodeEditor` 吞掉右键（宿主无法做右键菜单）
+
+- **现象**：`on_event` 对**任何按钮**的 `MouseDown` 都进“把光标搬到点的位置”
+  分支并返回 `true`——宿主既收不到右键，也阻止不了“右键改了光标”。
+- **修法**：新增 `CodeEditor::on_context_menu`（一等回调）；右键分支先于滚动条判定，
+  **不改光标**（右键不改选择，与主流编辑器一致）。
+- 回归：右键不动光标（实测 cursor 108 → 108）。
+
+### [ ] `ContextMenu` 未进声明式注册表（本轮绕过）
+
+- **现象**：`ContextMenu` 是框架组件，但 `ST_COMPONENT_LIST` 里没有它——声明式里
+  只能用 `custom<ContextMenu>` 逃生舱，且条目只能在构造时给（表要求无参构造）。
+- **本轮绕法**：`MenuPanel::set_items`（新增的一等接口）+ `custom<ContextMenu>`。
+- **方向**：把它加进注册表并给一个 `dsl::context_menu(anchor, items)` 包装；
+  当前未做是因为 `dsl.hpp` 对 `MenuItem` 只有前向声明，加声明要顺带梳理那个头的依赖面。
+
+### [ ] `Panel` 不对子元素做裁剪 / 副轴尺寸传播
+
+- **现象**：`Button` 溢出时直接画到相邻面板之上（无裁剪）；窄侧栏里 `Text` 长内容
+  也会超宽（靠调用方自己 `ellipsize`）。
+- **修法方向**：要么 `Style` 上加 `clip: bool`（默认关，开时 `paint` 推裁剪矩形），
+  要么明确“面板不裁剪”是设计取向并写进 `DESIGN.md §4.5`。
+- 本轮在示例层用 `ScrollView` 包一层规避（它会给子元素夹宽的约束）。
+
 ## P2
 
 - [ ] 多窗口抽象（Window/WindowManager 进 shell，control::Host 带窗口维度）。

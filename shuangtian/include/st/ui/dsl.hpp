@@ -695,7 +695,7 @@ struct MenuData {
                                                const std::string& item)> on_action,
                             std::function<void(std::size_t)> on_open_menu,
                             const BoxProps& props = {}) -> MenuBar*;
-/// 把 `bar` 的第 `index` 个菜单的下拉面板挂成 overlay（**只在菜单打开时调用**）。
+  /// 把 `bar` 的第 `index` 个菜单的下拉面板挂成 overlay（**只在菜单打开时调用**）。
 /// 槽位 key 取 `bar->menu_id(index)`；不调用 → 下一帧 sweep 自动移除。
 void menu_panel_overlay(Composer& c, MenuBar& bar, std::size_t index);
 

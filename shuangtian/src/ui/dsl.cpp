@@ -1264,8 +1264,9 @@ auto Composer::root() noexcept -> UiRoot& { return impl_->root; }
   X(Tooltip, "Tooltip", std::make_unique<Tooltip>())                      \
   X(Dialog, "Dialog", std::make_unique<Dialog>())                         \
   X(Toast, "Toast", std::make_unique<Toast>())                            \
-  X(MenuBar, "MenuBar", std::make_unique<MenuBar>())                      \
+    X(MenuBar, "MenuBar", std::make_unique<MenuBar>())                                \
   X(MenuPanel, "MenuPanel", std::make_unique<MenuPanel>(std::vector<MenuItem>{})) \
+  X(ContextMenu, "ContextMenu", std::make_unique<ContextMenu>(math::Point{}, std::vector<MenuItem>{})) \
   X(FileDialog, "FileDialog", std::make_unique<FileDialog>())             \
   X(CodeEditor, "CodeEditor", std::make_unique<CodeEditor>())             \
   X(CommandPalette, "CommandPalette", std::make_unique<CommandPalette>()) \
@@ -1651,6 +1652,25 @@ auto menu_bar(Composer& c, const std::vector<MenuData>& menus,
     if (on_open_menu) on_open_menu(MenuBar::kNoIndex);
   };
   return bar;
+}
+
+auto context_menu(Composer& c, math::Point anchor, std::vector<MenuItem> items,
+                  const BoxProps& props) -> ContextMenu& {
+  Element* element = c.create_element("ContextMenu", st::Json::object(), props.key);
+  if (element == nullptr) {
+    fail_missing_element_factory("ContextMenu");
+  }
+  apply_box(*element, props);
+  // 锚点与条目是构造后写入的一等接口（与 `ContextMenu::make` 同一套：
+  // 工厂里也走 `anchor_` + `MenuPanel` 两段，语义一致）。
+  auto* menu = dynamic_cast<ContextMenu*>(element);
+  if (menu != nullptr) {
+    menu->anchor_ = anchor;
+    if (menu->panel() != nullptr) {
+      menu->panel()->set_items(std::move(items));
+    }
+  }
+  return *menu;
 }
 
 void menu_panel_overlay(Composer& c, MenuBar& bar, std::size_t index) {

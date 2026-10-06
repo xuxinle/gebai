@@ -139,17 +139,21 @@ def main():
               f"内容区未紧跟合并后的标题行: page.y={page_box['y']}, 标题栏底={titlebar_box['y'] + titlebar_box['height']}")
         print(f"[2b] 标题栏与菜单栏合并成一行（{titlebar_box['height']:.0f}px 行内：菜单 {menubar_box['x']:.0f}→{menubar_box['x'] + menubar_box['width']:.0f}）")
 
-        # —— 3. 打开第二个文件（资源管理器按钮）——
-        buttons = client.ok("find", {"selector": "Button"})["matches"]
-        deploy = [b for b in buttons if "deploy.py" in json.dumps(b, ensure_ascii=False)]
-        check(deploy, "资源管理器里没有 deploy.py")
-        client.ok("invoke", {"id": deploy[0]["id"], "action": "click"})
+        # —— 3. 打开第二个文件（资源管理器）——
+        #
+        # 资源管理器现在是 `Tree`（兼容钩子 `#workspace-tree` / 无工作区时的 `#sample-tree`），
+        # 条目是**树行**而不是 Button——故改用树的行命中区点击，与“用户真去点那一行”一致。
+        tree_sel = "#workspace-tree" if client.count("#workspace-tree") == 1 else "#sample-tree"
+        tree_box = client.ok("find", {"selector": tree_sel})["matches"][0]["bounds"]
+        # 第二行 = 第二个条目（无工作区时是 deploy.py）
+        row_y = tree_box["y"] + 40 * 1.5
+        client.click_at(tree_box["x"] + 60, row_y)
         time.sleep(0.6)
         props = client.ok("get", {"id": "editor-tabs"})["props"]
         check("deploy.py" in props.get("options", ""), f"标签栏未加 deploy.py: {props}")
         check(client.ok("get", {"id": "editor"})["props"].get("language") == "python",
               "语言未跟随标签")
-        print("[3] 打开 deploy.py → 标签 + 语言 + 编辑器内容联动")
+        print("[3] 点资源管理器树行 → 标签 + 语言 + 编辑器内容联动")
 
         # —— 4. 底部面板三态互切（声明式分支切换：曾在此处段错误）——
         for index, want in ((0, "#problems-list"), (1, "#output-text"), (2, "#terminal-input")):
@@ -168,15 +172,22 @@ def main():
         check("ADDED_TOKEN" not in client.text("editor"), "撤销未回退输入")
         print("[5] 编辑 → 脏标记 → 撤销 全链路正确")
 
-        # —— 6. 搜索（真实输入 → 递归搜工作区/样例文本）——
+        # —— 6. 搜索（真实输入 → 回车 → 递归搜工作区/样例文本）——
+        #
+        # 搜索现在是“回车执行”（不再是每敲一键全量扫盘），故这里补一次 submit；
+        # 断言也从状态栏改成**搜索面板自己的汇总**（状态栏文案会被其他动作盖掉）。
         client.ok("invoke", {"id": "activity-search", "action": "click"})
         time.sleep(0.45)
         check(client.count("#search-input") == 1, "搜索面板未出现")
         client.ok("invoke", {"id": "search-input", "action": "focus"})
         client.ok("input.text", {"id": "search-input", "text": "raster"})
-        time.sleep(0.7)
-        check("命中" in client.text("status"), f"搜索未报命中: {client.text('status')}")
-        print(f"[6] 搜索工作区 → {client.text('status')}")
+        time.sleep(0.3)
+        client.ok("invoke", {"id": "search-input", "action": "submit"})
+        time.sleep(0.9)
+        summary = client.text("search-summary")
+        check("命中" in summary, f"搜索未报命中: {summary!r}")
+        check(client.count("ListItem") > 0, "搜索有汇总但结果列表为空")
+        print(f"[6] 搜索工作区 → {summary}（{client.count('ListItem')} 行结果）")
 
         # —— 7. 菜单下拉 → 点条目执行命令 ——
         # 回归：`MenuBar` 曾把 `Click` 与 `MouseDown` 合在一个 case（两边都调
@@ -193,11 +204,17 @@ def main():
         item_y = panel["bounds"]["y"] + 16
         client.click_at(item_x, item_y)
         check(client.count("MenuPanel") == 0, "点了菜单条目后面板未关闭")
-        check(client.count("#command-palette") == 1, "菜单条目未触发命令面板（快速打开）")
+        # 「新建文件」有工作区时开文件对话框、无工作区时新建内存缓冲——两者都是“开了个新编辑器”。
+        check(client.count("#file-dialog") + client.count("#editor-tabs") > 0,
+              "菜单条目未触发任何新建路径")
         print("[7] 菜单下拉 → 点条目执行命令（面板自动关闭）")
-        # 关掉命令面板，恢复干净状态
-        client.ok("invoke", {"id": "command-palette", "action": "close"})
-        time.sleep(0.45)
+        # 关掉可能弹出的浮层，恢复干净状态（未开则跳过——“关不存在的面板”不该算失败）。
+        if client.count("#command-palette") == 1:
+            client.ok("invoke", {"id": "command-palette", "action": "close"})
+            time.sleep(0.45)
+        if client.count("#file-dialog") == 1:
+            client.ok("invoke", {"id": "file-dialog", "action": "cancel"})
+            time.sleep(0.45)
 
         # —— 8. 分栏拖拽 + 主题 ——
         ratio0 = float(client.ok("get", {"id": "sidebar-split"})["props"]["ratio"])
@@ -379,6 +396,56 @@ def main():
         check(props["read_only"] == "true", f"重组后只读态被重置: {props['read_only']}")
         client.ok("set", {"id": "editor", "props": {"read_only": "false"}})
         print("[15] 属性面在重组后保持（language / read_only）")
+
+        # —— 16. 页面撑满窗口（旧行为：页面只有 525px 高，底部 195px 空白）——
+        #
+        # 回归：页面根 `column` 漏写 `grow` 时，声明式布局只给它内容的自然高度，
+        # 而根容器仍是全高——两个数的差值就是那截空白。断言用**比例**而不是绝对像素：
+        # 窗口尺寸可配，而“根子元素应等于父内容槽”与尺寸无关。
+        content_box = client.ok("find", {"selector": "#content"})["matches"][0]["bounds"]
+        page_box = client.ok("find", {"selector": "#editor-page"})["matches"][0]["bounds"]
+        check(abs(page_box["height"] - content_box["height"]) <= 1.0,
+              f"页面未撑满内容槽: {page_box['height']:.0f} vs {content_box['height']:.0f}")
+        # 编辑器应占编辑区的一半以上（否则“代码区太矮”还是没修）
+        editor_box = client.ok("find", {"selector": "#editor"})["matches"][0]["bounds"]
+        check(editor_box["height"] >= page_box["height"] * 0.35,
+              f"编辑器高度不足（{editor_box['height']:.0f}px / 页面 {page_box['height']:.0f}px）")
+        print(f"[16] 页面撑满内容槽（{page_box['height']:.0f}px；编辑器 {editor_box['height']:.0f}px）")
+
+        # —— 17. 底部面板可拖（旧行为：固定 170px）——
+        split_box = client.ok("find", {"selector": "#bottom-split"})["matches"][0]["bounds"]
+        upper_before = client.ok("find", {"selector": "#editor-upper"})["matches"][0]["bounds"]
+        ratio = float(client.ok("get", {"id": "bottom-split"})["props"]["ratio"])
+        handle_x = split_box["x"] + split_box["width"] * 0.5
+        handle_y = split_box["y"] + (split_box["height"] - 8) * ratio + 4
+        client.ok("input.mouse", {"kind": "down", "x": handle_x, "y": handle_y, "button": 1})
+        client.ok("input.mouse", {"kind": "move", "x": handle_x, "y": handle_y - 120,
+                                  "button": 1})
+        client.ok("input.mouse", {"kind": "up", "x": handle_x, "y": handle_y - 120, "button": 1})
+        time.sleep(0.5)
+        upper_after = client.ok("find", {"selector": "#editor-upper"})["matches"][0]["bounds"]
+        check(upper_after["height"] < upper_before["height"] - 40,
+              f"拖分隔柄未改变上区高度: {upper_before['height']:.0f} → {upper_after['height']:.0f}")
+        print(f"[17] 底部面板可拖（上区 {upper_before['height']:.0f} → {upper_after['height']:.0f}px）")
+
+        # —— 18. 关闭脏标签会先确认（旧行为：直接丢修改）——
+        #
+        # 这是“可用”与“危险”的分界线：一个点一下就把用户未保存的修改抹掉的编辑器，
+        # 不能算可用。三个按钮与 VSCode 同序（取消/不保存/保存）。
+        client.ok("set", {"id": "editor", "props": {"read_only": "false"}})
+        client.ok("invoke", {"id": "tool-close", "action": "click"})
+        time.sleep(0.6)
+        check(client.count("#close-confirm-dialog") == 1, "关闭脏标签未弹确认对话框")
+        actions = [b["text"] for b in client.ok("find", {"selector": "#close-confirm-dialog Button"})["matches"]]
+        check(actions == ["取消", "不保存", "保存"], f"确认对话框按钮不符: {actions}")
+        # 选“不保存”→标签真关闭
+        tabs_before = client.ok("get", {"id": "editor-tabs"})["props"]["options"]
+        client.ok("invoke", {"id": "close-confirm-dialog", "action": "invoke", "argument": "1"})
+        time.sleep(0.6)
+        check(client.count("#close-confirm-dialog") == 0, "选了“不保存”后对话框未关闭")
+        tabs_after = client.ok("get", {"id": "editor-tabs"})["props"]["options"]
+        check(tabs_after != tabs_before, "选了“不保存”后标签没关掉")
+        print(f"[18] 关闭脏标签先确认（{tabs_before} → {tabs_after or '（无标签）'}）")
 
         print("\n[OK] codeeditor 端到端全部通过")
         return 0
