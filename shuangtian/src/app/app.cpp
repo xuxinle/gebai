@@ -605,6 +605,16 @@ auto Application::start() -> Status {
       fit_max_size = 22.5f;
       gammas = st::app::ClassGammas{0.92f, 0.98f, 0.93f};
     }
+    // **暗色主题换一组 γ**（见 `DarkClassGammas` 的说明）：覆盖率→码值的映射在亮/暗底下
+    // 不对称，沿用亮色档会让暗底系统性偏轻 5~6%（真窗口实测）。全局 γ 早已按主题分档
+    // （`default_gamma_for`），但**类 γ 分档此前只在亮底标定过**——本条补上这一层。
+    if (impl_->renderer->coverage_gamma() < 1.0f) {
+      const st::app::DarkClassGammas dark{};
+      // 只覆盖"未被显式指定"的类：命令行/环境变量给了值就尊重它（诊断与复标要用）。
+      if (gammas.digit == st::app::ClassGammas{}.digit && dark.digit > 0.0f) gammas.digit = dark.digit;
+      if (gammas.letter == st::app::ClassGammas{}.letter && dark.letter > 0.0f) gammas.letter = dark.letter;
+      if (gammas.han == st::app::ClassGammas{}.han && dark.han > 0.0f) gammas.han = dark.han;
+    }
     if (const auto value = fs::read_env("ST_TEXT_DIGIT_GAMMA"); value.has_value()) {
       gammas.digit = std::stof(*value);
     }
@@ -623,7 +633,8 @@ auto Application::start() -> Status {
     // 实测踩到：patch 被回退后三档渲染出了几乎一样的图（B vs C 只差 20 像素），
     // 当时差点把它当成"三档观感接近"的结论。
     if (fs::read_env("ST_TEXT_PRESET_DEBUG").has_value()) {
-      st::print("[preset] {} fit={} max_size={} gamma={}/{}/{}\n", preset,
+      st::print("[preset] {} theme_gamma={:.2f} fit={} max_size={} gamma={}/{}/{}\n", preset,
+                impl_->renderer->coverage_gamma(),
                 static_cast<int>(impl_->renderer->grid_fit()), fit_max_size, gammas.digit,
                 gammas.letter, gammas.han);
     }

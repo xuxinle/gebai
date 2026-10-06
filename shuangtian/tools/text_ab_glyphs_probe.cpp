@@ -6,11 +6,14 @@
 /// 用法：text_ab_chars_probe <outdir> [scale] [gamma] [--gray] [--nofit] [--nofilter] [--nocomp]
 #include "text_ab_common.hpp"
 
+#include "text_ab_glyphs_rows.inc"        // 亮底行表（kLines）
+#include "text_ab_glyphs_rows_dark.inc"   // 暗底行表（kLinesDark）——同文本/同字号/同位置，仅换色
+
+
 #include <array>
 #include <cmath>
 #include <string>
 
-#include "text_ab_glyphs_rows.inc"
 
 using ab::Color;
 using ab::Point;
@@ -30,6 +33,7 @@ auto main(int argc, char** argv) -> int {
     else if (a.rfind("--fit-max-size=", 0) == 0) options.fit_max_size = std::stof(a.substr(std::string("--fit-max-size=").size()));
     else if (a.rfind("--han-gamma=", 0) == 0) options.han_gamma = std::stof(a.substr(std::string("--han-gamma=").size()));
     else if (a == "--darken") options.darken = true;
+    else if (a == "--dark") { options.dark = true; }
     else if (a == "--fit-normal") options.fit_normal = true;
     else if (a == "--darken") options.darken = true;
     else if (a == "--strict-hints") options.strict_hints = true;
@@ -45,15 +49,15 @@ auto main(int argc, char** argv) -> int {
   }
   ab::print_font_stack(*stack);
   st::print("device_scale={}  画布={}x{} 逻辑  {} 行  subpixel={} fit={}\n", scale, kWidth, kHeight,
-            kLines.size(), options.subpixel, options.fit);
+            ab::rows_for<Line, kLines, kLinesDark>(options.dark).size(), options.subpixel, options.fit);
 
   const int width = static_cast<int>(kWidth * scale);
   const int height = static_cast<int>(kHeight * scale);
   st::raster::Canvas canvas{width, height, scale};
-  canvas.clear(ab::kBackground);
+  canvas.clear(ab::background_for(options));
   TextRenderer renderer{*stack, scale};
   ab::apply(renderer, options, scale);
-  for (const Line& line : kLines) {
+  for (const Line& line : ab::rows_for<Line, kLines, kLinesDark>(options.dark)) {
     if (line.text.empty()) continue;
     (void)renderer.draw(canvas, line.text, Point{4.0f, line.top}, line.size, line.color, line.role,
                         0.0f, line.bold);

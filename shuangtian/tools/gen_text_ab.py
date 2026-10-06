@@ -154,7 +154,52 @@ def layout(rows):
     return y + 12.0, tops
 
 
-def gen_html(rows, tops, height, title: str) -> str:
+# **主题**：亮/暗两套，两侧（HTML 与探针）都从这里取，避免各写一份而漂移。
+# 暗色不是简单反色：文字色也要换成暗色主题的令牌值（见各页的行表）。
+THEMES = {
+    "light": {"background": "#FFFFFF", "canvas": (0xFF, 0xFF, 0xFF, 0xFF)},
+    "dark": {"background": "#0F1115", "canvas": (0x0F, 0x11, 0x15, 0xFF)},
+}
+
+
+def svg_text_page(rows, tops, height, theme: str) -> str:
+    """生成 **SVG 文本页**：与 HTML 页同一批行、同一位置，但用 SVG `<text>` 渲染。
+
+    为什么单独一页（2026-10-06）：用户给出的参照体系里不只有 HTML —— SVG 是另一条链路，
+    而**浏览器对 SVG `<text>` 的默认抗锯齿与 HTML 不同**（SVG 默认不走 LCD 亚像素）。
+    与 HTML 页逐行对照即可回答"浏览器自己在这两条链路上是否一致"，
+    这是判断"该以谁为基准"的前置问题。
+    """
+    bg = THEMES[theme]["background"]
+    head = f"""<!doctype html>
+<!-- 本文件由 tools/gen_text_ab.py 生成，不要手改（同 HTML 页的理由）。 -->
+<meta charset="utf-8">
+<title>svg</title>
+<style>
+  html, body {{ margin: 0; padding: 0; background: {bg}; }}
+  body {{ position: relative; width: {WIDTH:.0f}px; height: {height:.0f}px; overflow: hidden; }}
+  svg {{ position: absolute; left: 0; top: 0; }}
+</style>
+<svg width="{WIDTH:.0f}" height="{height:.0f}" viewBox="0 0 {WIDTH:.0f} {height:.0f}" xmlns="http://www.w3.org/2000/svg">"""
+    out = [head]
+    for i, (text, size, color, family, weight, _group) in enumerate(rows):
+        if not text:
+            continue
+        # **必须用完整字体栈**，不能只取第一个族：SVG 只给 `DejaVu Sans` 时，
+        # 汉字会 fallback 到**系统默认的 CJK 面**（实测落到 Noto Sans CJK **JP**），
+        # 而 HTML 页走完整栈（落到 **SC**）——两侧字体不同源，量到的是字体差异。
+        fam = family
+        esc = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        attrs = (f'x="{LEFT:g}" y="{tops[i] + size:g}" font-size="{size:g}" fill="{color}" '
+                 f'font-family="{fam}"')
+        if weight:
+            attrs += f' font-weight="{weight}"'
+        out.append(f'<text id="r{i:02d}" {attrs} '
+                   f'style="text-rendering:geometricPrecision">{esc}</text>')
+    return "\n".join(out) + "\n</svg>\n"
+
+
+def gen_html(rows, tops, height, title: str, theme: str = "light") -> str:
     out = [f"""<!doctype html>
 <!-- 本文件由 `tools/gen_text_ab.py` 生成——**不要手改**（改了会在下次生成时丢失，
      而且两侧会漂移，漂移会被误读成"渲染差异"）。
@@ -162,7 +207,7 @@ def gen_html(rows, tops, height, title: str) -> str:
 <meta charset="utf-8">
 <title>{title}</title>
 <style>
-  html, body {{ margin: 0; padding: 0; background: #FFFFFF; }}
+  html, body {{ margin: 0; padding: 0; background: {THEMES[theme]['background']}; }}
   /* 高度必须显式给：子元素全是 `position:absolute`、不撑开父容器，
      而 `overflow:hidden` 会按父容器**实际盒子**裁剪——body 高度 0 时整页被裁空
      （实测：截图全白、DOM 却完好）。 */
@@ -183,7 +228,7 @@ def gen_html(rows, tops, height, title: str) -> str:
     return "\n".join(out) + "\n"
 
 
-def gen_rows_inc(rows, tops, height, ns: str) -> str:
+def gen_rows_inc(rows, tops, height, ns: str, array_name: str = "kLines") -> str:
     out = [f"""// 本文件由 `tools/gen_text_ab.py` 生成——**不要手改**（见该脚本说明）。
 // 行表与同名 HTML **同源**：改行内容请改生成器再重跑。
 constexpr int kWidth = {WIDTH:.0f};
@@ -198,7 +243,7 @@ struct Line {{
   bool bold;
 }};
 
-constexpr std::array<Line, {len(rows)}> kLines{{{{"""]
+constexpr std::array<Line, {len(rows)}> {array_name}{{{{"""]
     for i, (text, size, color, family, weight, _group) in enumerate(rows):
         role = ("st::text::FontRole::Monospace" if family == MONO
                 else "st::text::FontRole::Proportional")
@@ -209,12 +254,26 @@ constexpr std::array<Line, {len(rows)}> kLines{{{{"""]
     return "\n".join(out) + "\n"
 
 
-def emit(root: pathlib.Path, name: str, rows, title: str) -> None:
+def emit(root: pathlib.Path, name: str, rows, title: str, theme: str = "light") -> None:
+    """生成一页的**两侧同源**产物。
+
+    `theme` 决定背景：亮色写 `text_ab_<name>_page.html`，暗色写 `..._page_dark.html`；
+    **行表（`_rows.inc` / `_rows.json`）两边共用**——只换背景与文字色，行内容/字号/位置不变，
+    这样"亮暗差异"能被干净地归因到主题本身。
+    """
     height, tops = layout(rows)
-    (root / f"text_ab_{name}_page.html").write_text(gen_html(rows, tops, height, title),
-                                                    encoding="utf-8", newline="\n")
-    (root / f"text_ab_{name}_rows.inc").write_text(gen_rows_inc(rows, tops, height, name),
-                                                   encoding="utf-8", newline="\n")
+    suffix = "" if theme == "light" else f"_{theme}"
+    (root / f"text_ab_{name}_page{suffix}.html").write_text(
+        gen_html(rows, tops, height, title, theme), encoding="utf-8", newline="\n")
+    # ⚠ 行表也带主题后缀：否则暗色那遍会**覆盖亮色的行表**（实测踩到——亮色页的
+    # `_rows.inc` 变成了暗色值，两侧就对不上了；而错位/错色会被读成"渲染差异"）。
+    inc = gen_rows_inc(rows, tops, height, name, "kLines" if theme == "light" else "kLinesDark")
+    if theme != "light":
+        # 暗色版**只出数组**：`kWidth`/`kHeight`/`struct Line` 已由亮色版定义，
+        # 两版都出会重定义（实测编译报 redefinition）。两版的画布尺寸本就相同。
+        head, sep, tail = inc.partition("constexpr std::array<Line,")
+        inc = "// 本文件由 `tools/gen_text_ab.py` 生成——**只含数组**（类型与画布尺寸见亮色版）。\n" + sep + tail
+    (root / f"text_ab_{name}_rows{suffix}.inc").write_text(inc, encoding="utf-8", newline="\n")
     # 行元数据（JSON）：供 `text_ab_diff.py` / `text_ab_sheet.py` 读**同一张表**。
     # 它们原先各自硬编码行表，改一次字号/文本就要改三处——必然漂移，
     # 而漂移出来的错位会被读成"渲染差异"。
@@ -222,11 +281,11 @@ def emit(root: pathlib.Path, name: str, rows, title: str) -> None:
              "color": color, "mono": family == MONO, "bold": bool(weight),
              "class": text_class(text, family), "group": group, "top": tops[i]}
             for i, (text, size, color, family, weight, group) in enumerate(rows)]
-    (root / f"text_ab_{name}_rows.json").write_text(
+    (root / f"text_ab_{name}_rows{suffix}.json").write_text(
         json.dumps({"width": WIDTH, "height": height, "rows": meta},
                    ensure_ascii=False, indent=1), encoding="utf-8", newline="\n")
-    print(f"已生成 text_ab_{name}_page.html / _rows.inc / _rows.json（{len(rows)} 行，"
-          f"画布 {WIDTH:.0f}×{height:.0f} 逻辑 px）")
+    print(f"已生成 text_ab_{name}_page{suffix}.html / _rows{suffix}.inc / _rows{suffix}.json"
+          f"（{len(rows)} 行，画布 {WIDTH:.0f}×{height:.0f} 逻辑 px）")
 
 
 # ── 页 3：字族 × 字号（回答"差异是否随字族/字号变化"） ──────────────────────
@@ -345,6 +404,28 @@ def ce_rows():
     return rows
 
 
+# 暗底行表：与亮底**同一批**行（文本/字号/位置都不变），只把颜色换成暗色主题令牌。
+# 暗底上"看得清"的门槛与亮底不同，所以颜色不是简单反相——取与亮底**对比度同量级**的值。
+DARK_TEXT = "#E6EAF2"
+DARK_MUTED = "#9AA4B2"
+DARK_FAINT = "#6B7480"
+DARK_PRIMARY = "#7FA8FF"
+DARK_DANGER = "#FF8A8A"
+DARK_SUCCESS = "#6EE7A8"
+DARK_SURFACE = "#171A21"
+DARKON = {"#0F172A": DARK_TEXT, "#56647C": DARK_MUTED, "#66768C": DARK_FAINT,
+          "#2563EB": DARK_PRIMARY, "#DC2626": DARK_DANGER, "#059669": DARK_SUCCESS,
+          "#FFFFFF": DARK_TEXT}
+
+
+def to_dark(rows):
+    """亮底行表 → 暗底行表（同文本、同字号、同位置，仅换色）。"""
+    out = []
+    for text, size, color, family, weight, group in rows:
+        out.append((text, size, DARKON.get(color.upper(), DARK_TEXT), family, weight, group))
+    return out
+
+
 def main() -> int:
     root = pathlib.Path(__file__).resolve().parent
     emit(root, "chars", CHARS_ROWS, "霜天文字 A/B — 字符集")
@@ -355,6 +436,17 @@ def main() -> int:
     emit(root, "string", string_rows(), "霜天文字 A/B — 拼串（口径对照）")
     emit(root, "han", han_rows(), "霜天文字 A/B — 汉字专项")
     emit(root, "ce", ce_rows(), "霜天文字 A/B — 单字 × 字号")
+    # 暗色：**同一批行**的暗底版本（两侧同源生成，见 `to_dark` 与 `emit` 的说明）。
+    for th in ("light", "dark"):
+        rows_th = CHARS_ROWS if th == "light" else to_dark(CHARS_ROWS)
+        hh, tt = layout(rows_th)
+        sfx = "" if th == "light" else "_dark"
+        (root / f"text_ab_chars_svg{sfx}.html").write_text(
+            svg_text_page(rows_th, tt, hh, th), encoding="utf-8", newline="\n")
+    print("已生成 text_ab_chars_svg.html / _svg_dark.html（SVG 文本页，与 HTML 页同行同位置）")
+    emit(root, "chars", to_dark(CHARS_ROWS), "霜天文字 A/B — 字符集（暗色）", "dark")
+    emit(root, "allglyphs", to_dark(all_glyph_rows()), "霜天文字 A/B — 全量字母数字（暗色）", "dark")
+    emit(root, "han", to_dark(han_rows()), "霜天文字 A/B — 汉字专项（暗色）", "dark")
     return 0
 
 

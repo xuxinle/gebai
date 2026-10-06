@@ -12,7 +12,6 @@
 
 #include <string>
 
-#include "text_ab_sizes_rows.inc"
 
 using ab::Point;
 using ab::TextRenderer;
@@ -31,6 +30,7 @@ auto main(int argc, char** argv) -> int {
     else if (a.rfind("--fit-max-size=", 0) == 0) options.fit_max_size = std::stof(a.substr(std::string("--fit-max-size=").size()));
     else if (a.rfind("--han-gamma=", 0) == 0) options.han_gamma = std::stof(a.substr(std::string("--han-gamma=").size()));
     else if (a == "--darken") options.darken = true;
+    else if (a == "--dark") { options.dark = true; }
     else if (a == "--fit-normal") options.fit_normal = true;
     else if (a == "--darken") options.darken = true;
     else if (a == "--nofit") options.fit = false;
@@ -49,7 +49,7 @@ auto main(int argc, char** argv) -> int {
   const int width = static_cast<int>(kWidth * scale);
   const int height = static_cast<int>(kHeight * scale);
   st::raster::Canvas canvas{width, height, scale};
-  canvas.clear(ab::kBackground);
+  canvas.clear(ab::background_for(options));
   TextRenderer renderer{*stack, scale};
   ab::apply(renderer, options, scale);
   for (const Line& line : kLines) {

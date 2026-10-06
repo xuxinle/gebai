@@ -29,7 +29,22 @@ using st::text::GlyphClass;
 using st::text::GridFitMode;
 using st::text::TextRenderer;
 
-constexpr Color kBackground{0xFF, 0xFF, 0xFF, 0xFF};
+/// 该选项对应的背景色（亮/暗）。**必须在 `canvas.clear` 之前取用**——
+/// 实测踩到：把背景色赋值塞在 `apply(renderer, …)` 里，而 `clear` 在它**之前**调用，
+/// 于是 `--dark` 只换了文字色、背景仍是白的（覆盖率口径立刻失真，量出 2.7~6.4 的荒唐比值）。
+[[nodiscard]] inline auto background_for(const struct Options& options) -> Color;
+
+/// 按 `--dark` 选亮/暗行表（两版由生成器同源产出，见 `tools/gen_text_ab.py`）。
+template <typename LineT, const auto& LightRows, const auto& DarkRows>
+[[nodiscard]] inline auto rows_for(bool dark) -> const auto& {
+  return dark ? DarkRows : LightRows;
+}
+
+/// 亮底 / 暗底（与 `tools/gen_text_ab.py` 的 `THEMES` **同一组值**——两处必须一致，
+/// 否则"暗色对照"量到的是背景色差而不是渲染差）。
+constexpr Color kBackgroundLight{0xFF, 0xFF, 0xFF, 0xFF};
+constexpr Color kBackgroundDark{0x0F, 0x11, 0x15, 0xFF};
+inline Color g_background = kBackgroundLight;
 
 /// 与应用程序同一档的渲染器（参数可由命令行覆盖，用于关掉某一项做对照）。
 struct Options {
@@ -43,9 +58,15 @@ struct Options {
   float letter_gamma{0.0f}; ///< **只对拉丁字母类**覆盖 gamma（0 = 不覆盖）
   float han_gamma{0.0f};    ///< **只对汉字类**覆盖 gamma（0 = 不覆盖）
   float fit_max_size{0.0f}; ///< 拟合的适用字号上限（物理 px，0 = 不限）
+  bool dark{false};         ///< 暗底（背景色与文字色都由行表给）
   bool strict_hints{false}; ///< hints 用几何法同款护栏（对照用）
   float gamma{0.0f};        ///< 0 = 用出厂默认（按主题）
 };
+
+/// `background_for` 的实现（放在 `Options` 之后：它需要完整类型）。
+inline auto background_for(const Options& options) -> Color {
+  return options.dark ? kBackgroundDark : kBackgroundLight;
+}
 
 inline void apply(TextRenderer& renderer, const Options& options, float scale) {
   (void)scale;
