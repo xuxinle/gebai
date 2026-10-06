@@ -743,7 +743,7 @@ Chrome 边缘：  背景(24,24,29) → 蓝(24,24,133) → 亮(172,205,211)   ←
 > 加上 `origin_x/origin_y` 后断言才有抓手：`origin % supersample == 0`
 > （回退后当场变红，已实测）。
 
-**实测收益**（`tools/text_ab_report.py` 同一口径，1.5× DPI）：
+**实测收益**（当时的 A/B 脚本口径，1.5× DPI；该脚本已被 §4.3.7.20 的设施取代）：
 
 | 判据（13.5px 正文） | 修复前 | 修复后 |
 |---|---|---|
@@ -867,7 +867,7 @@ Chrome 边缘：  背景(24,24,29) → 蓝(24,24,133) → 亮(172,205,211)   ←
 
 用户反馈「字体还是不够清晰」。§4.3.1~§4.3.5 已把“糊”拆成**几何**与**抗锯齿形态**并各自修完，
 数值上霜天已“比浏览器更锐”，观感仍有差。于是与**无头 Edge** 逐像素比
-（`tools/text_ab_probe.cpp` + `--headless --screenshot`），并把覆盖率换算到**线性光口径**。
+（当时的 `text_ab` 探针 + 无头 Edge `--headless --screenshot`；两者都已被 §4.3.7.20 取代——**无头浏览器正是它被推翻的原因之一**），并把覆盖率换算到**线性光口径**。
 四条行带给出“同向偏重”（墨量 +3.9%~+24.9%、实心像素 +2.7%~+23.1%），据此**提亮**字形：
 
 ```
@@ -1338,14 +1338,17 @@ ST_UI_FONT_SCALE=1.2 build/release/bin/codeeditor.exe
 
 | 文件 | 作用 |
 |---|---|
-| `tools/gen_text_ab.py` | **单一真源**：行表只写在这里，生成下面两个文件 |
-| `tools/text_ab_page.html` | 浏览器对照页（生成物，勿手改） |
-| `tools/text_ab_page_rows.inc` | C++ 行表（生成物，被探针 `#include`） |
-| `tools/text_ab_page_probe.cpp` | 霜天侧：与应用程序**同一档**渲染（LCD + 低通 + light 拟合 + 墨量补偿） |
-| `tools/text_ab_diff.py` | 逐行量化对比 |
+| `tools/gen_text_ab.py` | **单一真源**：行表只写在这里，生成两侧的 HTML / C++ 行表 / JSON 元数据 |
+| `tools/text_ab_chars_page.html` · `text_ab_sizes_page.html` | 浏览器对照页（生成物，勿手改） |
+| `tools/text_ab_{chars,sizes}_probe.cpp` | 霜天侧：与应用程序**同一档**渲染（LCD + 低通 + light 拟合 + 墨量补偿 + 加墨） |
+| `tools/text_ab_diff.py` | 逐带量化对比 |
 | `tools/glyph_coverage_check.py` | 查某码点在哪些系统字体里有 glyph |
 
-约定：700×1024 逻辑 px、`deviceScaleFactor 1.5`、行距 36（> 最大字号 20×1.5）。
+> **本小节设施已于 2026-10-06 换代**（口径、字体同源、切带方式与量具全部重做，
+> 见 §4.3.7.20 与 `docs/TEXT_AB_REPORT.md`）。这里保留的是当时那代的形态与踩坑记录，
+> 仍有效的是下面「量尺自身的三个坑」。
+
+约定（当时那代）：700×1024 逻辑 px、`deviceScaleFactor 1.5`、行距 36（> 最大字号 20×1.5）。
 
 **量尺自身的三个坑**（都实际踩过，写下来避免重走）：
 
