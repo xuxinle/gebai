@@ -28,8 +28,6 @@
 
 namespace {
 
-FT_Library g_library = nullptr;
-
 /// 行表（由 `gen_text_ab.py` 生成；这里只取「文本 / 字号 / 颜色」三列）。
 struct Line {
   std::string text;
@@ -102,7 +100,7 @@ std::vector<unsigned long> decode(const std::string& text) {
 }
 
 /// 按霜天那套「文本框顶 + ascender」放置基线，尽量与探针同口径。
-void render(FT_Face face, const std::vector<Line>& rows, int width, int height, float scale,
+void render(FT_Library library, FT_Face face, const std::vector<Line>& rows, int width, int height, float scale,
             bool hinting, const std::string& path) {
   st::codec::PngImage image;
   image.width = static_cast<std::uint32_t>(width);
@@ -201,8 +199,8 @@ auto main(int argc, char** argv) -> int {
     st::print("行表为空：{}\n", rows_path);
     return 1;
   }
-  FT_Init_FreeType(&g_library);
-  FT_Library library = g_library;
+  FT_Library library = nullptr;
+  FT_Init_FreeType(&library);
   FT_Face face = nullptr;
   if (FT_New_Face(library, font.c_str(), face_index, &face) != 0) {
     st::print("打不开 {} face {}\n", font, face_index);
@@ -210,8 +208,8 @@ auto main(int argc, char** argv) -> int {
   }
   st::print("字体 {} face={} 行数 {} 画布 {}x{} scale={}\n", font, face_index, rows.size(), width,
             height, scale);
-  render(face, rows, width, height, scale, true, out_dir + "/ft-hint-on.png");
-  render(face, rows, width, height, scale, false, out_dir + "/ft-hint-off.png");
+  render(library, face, rows, width, height, scale, true, out_dir + "/ft-hint-on.png");
+  render(library, face, rows, width, height, scale, false, out_dir + "/ft-hint-off.png");
   st::print("已写 {}/ft-hint-on.png 与 ft-hint-off.png\n", out_dir);
   FT_Done_Face(face);
   FT_Done_FreeType(library);
