@@ -169,8 +169,16 @@ auto main(int argc, char** argv) -> int {
   const std::string path = argc > 1 ? argv[1]
                                     : "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
   const int face_index = argc > 2 ? std::atoi(argv[2]) : 2;
-  const unsigned long codepoints[] = {0x4E2DUL, 0x56FDUL, 0x4E00UL, 0x971CUL, 0x9F98UL,
-                                      0x8C61UL, 0x0041UL, 0x0067UL};
+  // 默认查一批**有代表性**的字形（简单/复杂汉字 + 拉丁 + 数字）；
+  // 命令行可给码点覆盖：`--cp 0x30 0x31`（本探针是"比几何"的通用工具，
+  // 不同调查要看不同字形——2026-10-06 查数字/字母时就是这么用的）。
+  std::vector<unsigned long> codepoints{0x4E2DUL, 0x56FDUL, 0x4E00UL, 0x971CUL,
+                                        0x9F98UL, 0x8C61UL, 0x0041UL, 0x0067UL};
+  for (int i = 3; i < argc; ++i) {
+    const std::string a = argv[i];
+    if (a == "--cp") codepoints.clear();
+    else if (!a.empty() && a[0] != '-') codepoints.push_back(std::strtoul(a.c_str(), nullptr, 0));
+  }
 
   auto face = st::text::FontFace::load(path, face_index);
   if (!face.has_value()) {

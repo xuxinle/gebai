@@ -76,10 +76,12 @@
 | `text_ab_diff.py` | **逐带 A/B 量化**：两侧各自按行投影切带、按序配对（两侧基线口径不同源，@15px/1.5 差 7.8 物理像素），逐通道覆盖率投影。报墨量/实心/过渡三个比值 + 带高带宽比 |
 | `text_ab_sheet.py` | **人眼对照图**：上=霜天、下=浏览器，逐行配对、最近邻放大（不插值，避免伪造锐度） |
 | `text_ab_families_page.html` + `text_ab_families_probe.cpp` | **分族页**：同一字族单独成行、只变字号（对照页把三族混在混排串里，测出的差异**无法归因**——曾因此得出方向相反的结论） |
+| `text_ab_allglyphs_page.html` + `text_ab_allglyphs_probe.cpp` | **全量字母数字页**（62 字符 × 10/11/12/13px，一行一字）：小字号逐字形核对。实测结论：字形盒宽/高比**全部 1.000**；数字类墨量比稳定 0.88~0.92（四个字号一致），字母 0.94~0.96 |
 | `text_ab_luminance.py` | **朴素亮度口径**：把"覆盖更多"与"压得更黑"分开（共享墨迹掩码下的面积比 × 每墨像素暗度比）。⚠ 它与覆盖率口径在尾部不一致（外缘像素），**不要拿它单独定方向** |
 | `text_ab_sweep.py` | **档位扫描**：同一套口径跑各候选档（fit/gamma/滤波/加墨），输出三类字的墨量/实心/过渡比 |
 | `freetype_ink_decompose.cpp` | **机制拆解**：2×2（CFF hint 与 stem darkening 各开/关）逐字形对账，回答"差距来自哪个机制" |
-| `glyph_outline_compare.cpp` | **轮廓几何对照**：霜天 CFF/TTF 解释器 vs FreeType，比填充面积/周长/包围盒（实测 1.0000） |
+| `glyph_outline_compare.cpp` | **轮廓几何对照**：霜天 CFF/TTF 解释器 vs FreeType，比填充面积/周长/包围盒（实测 1.0000）。默认查汉字+拉丁，`--cp 0x30 0x31` 可指定码点 |
+| `freetype_ink_decompose.cpp` | **机制拆解**：2×2（hinting × stem darkening）逐字形对账，回答"差距来自哪个机制"。`--font/--face/--cp` 可切字体与字形——**这一条是区分 CFF 与 TrueType 的关键**：CFF 上 hint 贡献 1.06~1.08、加墨 1.06~1.09；TrueType 上加墨 1.000、**指令 1.055~1.075** |
 | `stems_probe.cpp` | **hints 验收入口**：逐字形报字体自带提示数、接上轮廓点数、参与拟合数 |
 | `stem_darkening_probe.cpp` | **加墨曲线测量台**：FreeType 侧逐样本开/关加墨的墨量比（确认 `darkening-parameters` 的实际效果） |
 | `visual_assert_e2e.py` | **视觉断言原语端到端**：真实应用上验证 `capture.hash`（稳定性/区域敏感）与 `visual.diff`（写基线/同帧零差异/改动检出/tolerance/错误码） |

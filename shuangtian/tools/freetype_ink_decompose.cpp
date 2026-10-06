@@ -15,6 +15,7 @@
 ///       $(ls build/dev/obj/*.o | grep -E '_shuangtian_src_(core|math|raster|text)_' | grep -v -E 'raster_platform_|_test\.') \
 ///       -o build/probe/freetype_ink_decompose -lfreetype -lpthread -ldl -lm
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -100,8 +101,17 @@ int main(int argc, char** argv) {
   // 字号用物理像素：与 A/B 对照（逻辑 15 × DPI 1.5）一致。
   std::vector<double> ppems{22.5};
   for (int i = 1; i < argc; ++i) ppems.push_back(std::atof(argv[i]));
-  const std::string path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
-  const int face_index = 2;
+  std::string path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
+  int face_index = 2;
+  std::vector<unsigned long> cps{0x4E00UL, 0x4E2DUL, 0x56FDUL, 0x971CUL, 0x6F22UL, 0x9F98UL,
+                                 0x0041UL, 0x0067UL};
+  for (int i = 1; i < argc; ++i) {
+    const std::string a = argv[i];
+    if (a == "--font") path = argv[++i];
+    else if (a == "--face") face_index = std::atoi(argv[++i]);
+    else if (a == "--cp") cps.clear();
+    else if (!a.empty() && a[0] != '-') cps.push_back(std::strtoul(a.c_str(), nullptr, 0));
+  }
   const float scale = 1.5f;
 
   FT_Library library = nullptr;
@@ -111,8 +121,6 @@ int main(int argc, char** argv) {
   auto stack = st::text::FontStack::system_default();
   if (!stack) { st::print("无可用字体\n"); return 1; }
 
-  const unsigned long cps[] = {0x4E00UL, 0x4E2DUL, 0x56FDUL, 0x971CUL, 0x6F22UL, 0x9F98UL,
-                               0x0041UL, 0x0067UL};
   for (double ppem : ppems) {
     st::print("\n物理字号 {:.1f}px（逻辑 {:.1f} × DPI {:.1f}）\n", ppem,
               ppem / static_cast<double>(scale), static_cast<double>(scale));
