@@ -42,6 +42,7 @@ struct Options {
   float digit_gamma{0.0f};  ///< **只对数字类**覆盖 gamma（0 = 不覆盖）
   float letter_gamma{0.0f}; ///< **只对拉丁字母类**覆盖 gamma（0 = 不覆盖）
   float han_gamma{0.0f};    ///< **只对汉字类**覆盖 gamma（0 = 不覆盖）
+  float fit_max_size{0.0f}; ///< 拟合的适用字号上限（物理 px，0 = 不限）
   bool strict_hints{false}; ///< hints 用几何法同款护栏（对照用）
   float gamma{0.0f};        ///< 0 = 用出厂默认（按主题）
 };
@@ -54,6 +55,7 @@ inline void apply(TextRenderer& renderer, const Options& options, float scale) {
                                      : (options.fit_normal ? GridFitMode::Normal
                                                            : GridFitMode::Light));
   renderer.set_ink_compensation(options.compensate);
+  if (options.fit_max_size > 0.0f) renderer.set_grid_fit_max_size(options.fit_max_size);
   renderer.set_stem_darkening(options.darken);
   if (options.digit_gamma > 0.0f) {
     renderer.set_class_gamma(GlyphClass::Digit, options.digit_gamma);

@@ -741,7 +741,11 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   // 墨量补偿由渲染器开关决定（`set_ink_compensation`）：它是**位图内容**的一部分，
   // 所以既进缓存键、也由调用方（app）按默认档位设置，而不是在这里读环境变量——
   // 读写环境变量的开关既不可测、也不会进键。
-  const bool ink_compensate = ink_compensation_ && grid_fit_ != GridFitMode::Off;
+  // ⚠ 这里 `effective_size` 还没定义（缓存键在函数前段），用 `size_bucket` 自己换算——
+  // 与下面 `gamma_bucket` 同一手法。漏了这一步会在编译期报"使用未定义变量"。
+  const float fit_size_px = static_cast<float>(size_bucket) / 4.0f;
+  const bool ink_compensate =
+      ink_compensation_ && effective_grid_fit(fit_size_px) != GridFitMode::Off;
   const auto supersample_bucket = static_cast<std::uint64_t>(std::lround(supersample_ * 8.0f));
   // 覆盖率 gamma 同样进键：它是对**同一字形**的位图做不同映射，不进键就会取到上一个指数的字
   // （症状是“改了参数却看不出变化”，直到某个字形被淘汰才“突然生效”）。
@@ -766,7 +770,11 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   const bool lcd = subpixel_;
   // 网格拟合模式同样要进键：拟合前后是两份不同的位图（边缘相位不同），
   // 与亚像素同理——混用会取到“不符合当前模式”的字形（症状是“开关看起来没生效”）。
-    const auto fit_bucket = static_cast<std::uint64_t>(grid_fit_);
+    // **拟合的字号上限也必须进键**：同一 `grid_fit_` 下，上限 15 与 16 在 15.5px 上
+    // 产生不同位图（一个拟合、一个不拟合）——不进键就会互相取到对方的位图。
+    const auto fit_bucket = static_cast<std::uint64_t>(grid_fit_) * 100000U +
+                            static_cast<std::uint64_t>(
+                                std::lround(grid_fit_max_size_ * 10.0f));
   // **拟合的数值参数也必须进键**（`max_shift` 等）：它们改变的是**位图内容**
   //（边缘吸附到哪、吸不吸），与模式位同理。
   // 实测踩到：加了 `ST_TEXT_MAXSHIFT` 对照开关后扫描四个值得到**逐位相同**的结果，
@@ -989,7 +997,11 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
     // 位图原点是 `floor(bounds)-1`，与轮廓坐标的整数格点相差一个任意小数部分。
     const raster::Path local_unfitted =
         transformed.translated(static_cast<float>(-min_x), static_cast<float>(-min_y));
-    st::text::GridFitOptions fit_options{.mode = grid_fit_,
+    // **该字号下实际生效的拟合模式**（见 `set_grid_fit_max_size`）：拟合在 UI 字号段
+    // 对覆盖墨量是正收益、大字号转为轻微负收益；本变量是所有拟合路径的**唯一入口**，
+    // 漏改任何一处都会让"按字号闸"只对某一条分支生效。
+    const st::text::GridFitMode active_fit = effective_grid_fit(effective_size);
+    st::text::GridFitOptions fit_options{.mode = active_fit,
                                                // **细笔画才量化宽度**：量化的收益（根笔画落成满黑像素）只存在于
                                                // 「宽度 < 2 物理像素」的字号区间；粗笔画自己就有满黑像素，
                                                // 量化只剩墨量偏差（实测 22px CJK 从 +2.5% 升到 +3.5%）。
@@ -1100,7 +1112,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
           return value.has_value() && !(*value == "0" || *value == "false" || *value == "off");
         }();
         std::optional<st::text::GridFitResult> lcd_fit;
-        if (grid_fit_ != GridFitMode::Off && use_font_hints) {
+        if (active_fit != GridFitMode::Off && use_font_hints) {
           st::text::GridFitOptions lcd_options = effective_options;
           lcd_options.stem_hints.clear();
           const auto& raw_hints = face.stem_hints(glyph);
@@ -1148,7 +1160,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
         // 网格拟合的位移是**灰度口径**的，水平放大后同步 ×3；竖直方向不动。
         // （不这么做的话，亚像素路径会把拟合后的轮廓直接放大，
         //   位移也跟着被乘 3——相位就完全错了。）
-        if (grid_fit_ != GridFitMode::Off && !lcd_fit.has_value()) {
+        if (active_fit != GridFitMode::Off && !lcd_fit.has_value()) {
           const auto base_points = local_unfitted.raw_points();
           const auto fitted_points = fitted.raw_points();
           if (base_points.size() == fitted_points.size() &&

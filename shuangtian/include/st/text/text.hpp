@@ -405,6 +405,25 @@ class TextRenderer {
   /// 可逐像素复现的基准**——两者不能兼顾，所以默认关、由应用按“有无窗口”开。
   /// 缓存键含该模式位（拟合前后是两份不同的位图，不能混用）。
   void set_grid_fit(GridFitMode mode) noexcept { grid_fit_ = mode; }
+
+  /// **拟合的适用字号上限**（物理像素，0 = 不限）。超过它的字号**不做拟合**。
+  ///
+  /// 为什么要这一层（2026-10-06 实测，两个正交轴）：
+  /// - **覆盖墨量轴**：拟合在 10~15px 是**正收益**（霜天/浏览器的墨量比从 0.973~0.986
+  ///   拉到 1.000~1.013），20px 以上转**轻微负收益**（≤1%，见 `docs/BACKLOG.md` P1）；
+  /// - **均匀度轴**（覆盖率离散）：拟合开一律**偏离散**（12px 汉字 0.287 vs 浏览器 0.264），
+  ///   这是"拟合只吸得住找得到的笔画、剩下的留原相位"的固有代价。
+  ///
+  /// 于是"分段"成为一个候选：小字号取墨量轴的正收益，大字号不再付均匀度轴的代价。
+  /// 本闸只提供机制；**是否启用、上限取多少是产品决策**（见 BACKLOG P1 的三个选项）。
+  void set_grid_fit_max_size(float pixel_size) noexcept { grid_fit_max_size_ = pixel_size; }
+  [[nodiscard]] auto grid_fit_max_size() const noexcept -> float { return grid_fit_max_size_; }
+  /// 该**物理字号**下实际生效的拟合模式。
+  [[nodiscard]] auto effective_grid_fit(float pixel_size) const noexcept -> GridFitMode {
+    if (grid_fit_ == GridFitMode::Off) return GridFitMode::Off;
+    if (grid_fit_max_size_ > 0.0f && pixel_size > grid_fit_max_size_) return GridFitMode::Off;
+    return grid_fit_;
+  }
   [[nodiscard]] auto grid_fit() const noexcept -> GridFitMode { return grid_fit_; }
 
   /// 拟合时认定的**直线边最大横向斜率**（物理像素，整条边的横跨量）。
@@ -566,6 +585,8 @@ class TextRenderer {
   std::uint32_t background_color_{0xFFFFFFFFU};
   /// 网格拟合模式（见 `set_grid_fit`）；默认关，保证无头/回归的可复现性。
   GridFitMode grid_fit_{GridFitMode::Off};
+  /// 拟合的适用字号上限（0 = 不限），见 `set_grid_fit_max_size`。
+  float grid_fit_max_size_{0.0f};
   /// 拟合的直线边最大横向斜率（物理像素；见 `set_fit_slant`）。
   /// 0 = 用 `GridFitOptions` 的默认值（不在渲染器里另立一份常数）。
   float fit_slant_{0.0f};

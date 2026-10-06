@@ -809,3 +809,65 @@ ST_TEST(app_default_sets_all_three_class_gammas) {
   ST_CHECK(GlyphClass::Default == st::text::glyph_class_of(U'\u3002'));  // 句号：标点不该被当汉字
   ST_CHECK(GlyphClass::Default == st::text::glyph_class_of(U' '));
 }
+
+/// ⑦ **按字号闸**：拟合的"生效模式"必须随字号变，且**每条拟合路径都走同一个入口**。
+///
+/// 起因（2026-10-06 实测，两个正交轴）：拟合在 UI 字号段（10~15px）对**覆盖墨量**是
+/// 正收益（把 0.973~0.986 拉到 1.000~1.013），20px 以上转**轻微负收益**（≤1%）；
+/// 而"均匀度"轴（覆盖率离散）在**所有**字号上都被拟合拉高（12px 汉字 +0.022）。
+/// 于是"分段"成为候选：小字号取墨量轴的正收益，大字号不再付均匀度轴的代价。
+///
+/// 本用例钉住**机制**（不钉默认值——是否启用、上限取多少是产品决策，见 BACKLOG P1）：
+/// 1. `effective_grid_fit` 在上下限两侧返回正确的模式；
+/// 2. 该闸**真的**改变了大字号位图（不是只改了返回值）；
+/// 3. 上限进缓存键——否则边界字号两档会互相取到对方的位图
+///    （症状是"改了上限看不出变化"，直到缓存淘汰才突然生效）。
+ST_TEST(grid_fit_size_cap_takes_effect_and_enters_cache) {
+  FontFixture fixture;
+  if (!fixture.ok) return;
+  const auto ink_of = [](const std::shared_ptr<const TextRenderer::GlyphBitmap>& bitmap) {
+    if (bitmap == nullptr) return -1.0;
+    double sum = 0.0;
+    for (float value : bitmap->coverage) sum += static_cast<double>(value);
+    return sum;
+  };
+  // ① 生效模式：上限之下的字号保留、之上关掉
+  {
+    TextRenderer renderer(*fixture.stack, 2.0f);
+    renderer.set_grid_fit(GridFitMode::Light);
+    renderer.set_grid_fit_max_size(22.0f);
+    ST_CHECK(GridFitMode::Light == renderer.effective_grid_fit(20.0f));
+    ST_CHECK(GridFitMode::Off == renderer.effective_grid_fit(30.0f));
+    ST_CHECK(GridFitMode::Off == renderer.effective_grid_fit(22.5f));   // 边界：超过即关
+    ST_CHECK(GridFitMode::Light == renderer.effective_grid_fit(22.0f)); // 恰好等于仍生效
+    renderer.set_grid_fit_max_size(0.0f);                               // 0 = 不限
+    ST_CHECK(GridFitMode::Light == renderer.effective_grid_fit(200.0f));
+  }
+  // ② 该闸真的改变位图：上限 22 时，大字号位的"是否有拟合"必须不同
+  {
+    TextRenderer capped(*fixture.stack, 2.0f);
+    capped.set_subpixel(true);
+    capped.set_grid_fit(GridFitMode::Light);
+    capped.set_grid_fit_max_size(22.0f);
+    const auto large = capped.glyph_bitmap_of(U'霜', 40.0f);   // 物理 40 > 上限
+    ST_CHECK(large != nullptr);
+    ST_CHECK(!large->fit_applied);                             // 大字号：闸已关掉拟合
+    const auto small = capped.glyph_bitmap_of(U'霜', 20.0f);
+    ST_CHECK(small != nullptr);
+    ST_CHECK(small->fit_applied);                              // 小字号：仍拟合
+  }
+  // ③ 上限进缓存键：同一渲染器先后切两个上限，两个位图必须不同
+  {
+    TextRenderer renderer(*fixture.stack, 2.0f);
+    renderer.set_subpixel(true);
+    renderer.set_grid_fit(GridFitMode::Light);
+    renderer.set_grid_fit_max_size(0.0f);                      // 不限：30 物理也拟合
+    const double unlimited = ink_of(renderer.glyph_bitmap_of(U'测', 30.0f));
+    renderer.set_grid_fit_max_size(22.0f);                     // 上限 22：30 物理不拟合
+    const double capped = ink_of(renderer.glyph_bitmap_of(U'测', 30.0f));
+    st::print("[fitmax] 30 物理 px 的「测」墨量：不限 {:.1f} vs 上限22 {:.1f}\n", unlimited, capped);
+    ST_CHECK(unlimited > 0.0 && capped > 0.0);
+    // 键里漏掉上限 ⇒ 第二次会命中第一次的位图，两者逐位相同（本断言即为此设）
+    ST_CHECK(std::fabs(unlimited - capped) > 0.5);
+  }
+}
