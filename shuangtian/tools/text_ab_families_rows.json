@@ -1,0 +1,171 @@
+{
+ "width": 900.0,
+ "height": 711.9999999999998,
+ "rows": [
+  {
+   "row": 0,
+   "label": "Handgloves 0123 ABC abc",
+   "size": 11,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "class": "latin",
+   "group": "latin 11px",
+   "top": 4.0
+  },
+  {
+   "row": 1,
+   "label": "霜天组件画廊渲染测试",
+   "size": 11,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "class": "cjk",
+   "group": "cjk 11px",
+   "top": 50.4
+  },
+  {
+   "row": 2,
+   "label": "const auto p = x;",
+   "size": 11,
+   "color": "#0F172A",
+   "mono": true,
+   "bold": false,
+   "class": "mono",
+   "group": null,
+   "top": 96.8
+  },
+  {
+   "row": 3,
+   "label": "Handgloves 0123 ABC abc",
+   "size": 13,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "class": "latin",
+   "group": "latin 13px",
+   "top": 143.2
+  },
+  {
+   "row": 4,
+   "label": "霜天组件画廊渲染测试",
+   "size": 13,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "class": "cjk",
+   "group": "cjk 13px",
+   "top": 189.6
+  },
+  {
+   "row": 5,
+   "label": "const auto p = x;",
+   "size": 13,
+   "color": "#0F172A",
+   "mono": true,
+   "bold": false,
+   "class": "mono",
+   "group": null,
+   "top": 236.0
+  },
+  {
+   "row": 6,
+   "label": "Handgloves 0123 ABC abc",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "class": "latin",
+   "group": "latin 15px",
+   "top": 282.4
+  },
+  {
+   "row": 7,
+   "label": "霜天组件画廊渲染测试",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "class": "cjk",
+   "group": "cjk 15px",
+   "top": 328.79999999999995
+  },
+  {
+   "row": 8,
+   "label": "const auto p = x;",
+   "size": 15,
+   "color": "#0F172A",
+   "mono": true,
+   "bold": false,
+   "class": "mono",
+   "group": null,
+   "top": 375.19999999999993
+  },
+  {
+   "row": 9,
+   "label": "Handgloves 0123 ABC abc",
+   "size": 20,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "class": "latin",
+   "group": "latin 20px",
+   "top": 421.5999999999999
+  },
+  {
+   "row": 10,
+   "label": "霜天组件画廊渲染测试",
+   "size": 20,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "class": "cjk",
+   "group": "cjk 20px",
+   "top": 467.9999999999999
+  },
+  {
+   "row": 11,
+   "label": "const auto p = x;",
+   "size": 20,
+   "color": "#0F172A",
+   "mono": true,
+   "bold": false,
+   "class": "mono",
+   "group": null,
+   "top": 514.3999999999999
+  },
+  {
+   "row": 12,
+   "label": "Handgloves 0123 ABC abc",
+   "size": 32,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "class": "latin",
+   "group": "latin 32px",
+   "top": 560.7999999999998
+  },
+  {
+   "row": 13,
+   "label": "霜天组件画廊渲染测试",
+   "size": 32,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "class": "cjk",
+   "group": "cjk 32px",
+   "top": 607.1999999999998
+  },
+  {
+   "row": 14,
+   "label": "const auto p = x;",
+   "size": 32,
+   "color": "#0F172A",
+   "mono": true,
+   "bold": false,
+   "class": "mono",
+   "group": null,
+   "top": 653.5999999999998
+  }
+ ]
+}

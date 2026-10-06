@@ -103,6 +103,29 @@ SIZE_ROWS = [
 ]
 
 
+def text_class(text: str, family: str) -> str:
+    """按**实际渲染的文本**分类，而不是按行的标签。
+
+    ⚠ 为什么必须显式给（2026-10-06 实测踩到）：下游脚本原先按行的**标签文本**分类，
+    而标签里常混着两种字（如「常规 霜天组件画廊 Regular」「text #0F172A 正文」）——
+    于是那些**以拉丁/等宽为主**的行被算进了汉字类，把汉字类的结果拉高，
+    得出"拉丁/等宽偏重 1.10~1.16"的**错误方向**（干净分族测量是三类都在 0.95 附近）。
+    分类是数据，不能靠猜字符串。
+    """
+    if not text:
+        return "blank"
+    has_cjk = any('\u4e00' <= ch <= '\u9fff' or '\u3000' <= ch <= '\u303f'
+                  or '\uff00' <= ch <= '\uffef' for ch in text)
+    has_latin = any(ch.isascii() and (ch.isalnum()) for ch in text)
+    if family == MONO:
+        return "mono"
+    if has_cjk and has_latin:
+        return "mixed"
+    if has_cjk:
+        return "cjk"
+    return "latin"
+
+
 def cpp_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
@@ -197,7 +220,7 @@ def emit(root: pathlib.Path, name: str, rows, title: str) -> None:
     # 而漂移出来的错位会被读成"渲染差异"。
     meta = [{"row": i, "label": text if text else "（空行）", "size": size,
              "color": color, "mono": family == MONO, "bold": bool(weight),
-             "group": group, "top": tops[i]}
+             "class": text_class(text, family), "group": group, "top": tops[i]}
             for i, (text, size, color, family, weight, group) in enumerate(rows)]
     (root / f"text_ab_{name}_rows.json").write_text(
         json.dumps({"width": WIDTH, "height": height, "rows": meta},
@@ -206,10 +229,33 @@ def emit(root: pathlib.Path, name: str, rows, title: str) -> None:
           f"画布 {WIDTH:.0f}×{height:.0f} 逻辑 px）")
 
 
+# ── 页 3：字族 × 字号（回答"差异是否随字族/字号变化"） ──────────────────────
+# 为什么单独一页：字符集页把三个字族**混在同一段文字**里，测出来的差异无法归因；
+# 而字号阶梯页每行都是中英混排，同样分不开。要判"fit 对真型字体是否过锐"，
+# 必须让**同一字族在同一行里、只变字号**。
+FAMILY_SIZES = [11, 13, 15, 20, 32]
+FAMILY_TEXT = {
+    "latin": ("Handgloves 0123 ABC abc", SANS),
+    "cjk": ("霜天组件画廊渲染测试", SANS),
+    "mono": ("const auto p = x;", MONO),
+}
+
+
+def family_rows():
+    rows = []
+    for size in FAMILY_SIZES:
+        for key in ("latin", "cjk", "mono"):
+            text, family = FAMILY_TEXT[key]
+            rows.append((f"{text}", size, TEXT, family, 0,
+                         f"{key} {size}px" if key != "mono" else None))
+    return rows
+
+
 def main() -> int:
     root = pathlib.Path(__file__).resolve().parent
     emit(root, "chars", CHARS_ROWS, "霜天文字 A/B — 字符集")
     emit(root, "sizes", SIZE_ROWS, "霜天文字 A/B — 字号阶梯")
+    emit(root, "families", family_rows(), "霜天文字 A/B — 字族 × 字号")
     return 0
 
 

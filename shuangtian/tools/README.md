@@ -75,6 +75,8 @@
 | `text_ab_shot.mjs` | **浏览器侧参照截图**（真窗口 headed + Xvfb，非 headless）+ 导出逐行**实际字体归属**（CDP）与 DOM 像素框。字体不同源时量到的是字体差异——`text_ab_diff.py` 会据此直接报错 |
 | `text_ab_diff.py` | **逐带 A/B 量化**：两侧各自按行投影切带、按序配对（两侧基线口径不同源，@15px/1.5 差 7.8 物理像素），逐通道覆盖率投影。报墨量/实心/过渡三个比值 + 带高带宽比 |
 | `text_ab_sheet.py` | **人眼对照图**：上=霜天、下=浏览器，逐行配对、最近邻放大（不插值，避免伪造锐度） |
+| `text_ab_families_page.html` + `text_ab_families_probe.cpp` | **分族页**：同一字族单独成行、只变字号（对照页把三族混在混排串里，测出的差异**无法归因**——曾因此得出方向相反的结论） |
+| `text_ab_luminance.py` | **朴素亮度口径**：把"覆盖更多"与"压得更黑"分开（共享墨迹掩码下的面积比 × 每墨像素暗度比）。⚠ 它与覆盖率口径在尾部不一致（外缘像素），**不要拿它单独定方向** |
 | `text_ab_sweep.py` | **档位扫描**：同一套口径跑各候选档（fit/gamma/滤波/加墨），输出三类字的墨量/实心/过渡比 |
 | `freetype_ink_decompose.cpp` | **机制拆解**：2×2（CFF hint 与 stem darkening 各开/关）逐字形对账，回答"差距来自哪个机制" |
 | `glyph_outline_compare.cpp` | **轮廓几何对照**：霜天 CFF/TTF 解释器 vs FreeType，比填充面积/周长/包围盒（实测 1.0000） |

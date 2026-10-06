@@ -21,7 +21,7 @@ $probes = @(
   'text_fit_by_size', 'fit_shift_probe', 'text_weight_probe', 'text_phase_probe',
   'lcd_compare', 'grid_fit_report', 'text_weight_cost', 'weight_spread_probe', 'dpi_raster_probe', 'ui_text_probe',
   'grid_fit_sampling_diag', 'fit_apply_diag', 'glyph_phase_probe', 'stroke_uniformity_probe', 'stroke_two_axis_probe', 'fit_reject_probe', 'fit_recall_probe',
-  'text_ab_chars_probe', 'text_ab_sizes_probe', 'size_line_probe', 'stems_probe',
+  'text_ab_chars_probe', 'text_ab_sizes_probe', 'text_ab_families_probe', 'size_line_probe', 'stems_probe',
   'stem_darkening_probe', 'freetype_ink_decompose', 'glyph_outline_compare'
 )
 if ($Only) { $probes = @($Only) }

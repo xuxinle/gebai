@@ -9,6 +9,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "cjk",
    "group": "中文字形（简单→复杂）",
    "top": 4.0
   },
@@ -19,6 +20,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "cjk",
    "group": null,
    "top": 25.75
   },
@@ -29,6 +31,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "cjk",
    "group": null,
    "top": 47.5
   },
@@ -39,6 +42,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "cjk",
    "group": null,
    "top": 69.25
   },
@@ -49,6 +53,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "cjk",
    "group": null,
    "top": 91.0
   },
@@ -59,6 +64,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "cjk",
    "group": null,
    "top": 112.75
   },
@@ -69,6 +75,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "cjk",
    "group": null,
    "top": 134.5
   },
@@ -79,6 +86,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "latin",
    "group": "拉丁字母（全量大写）",
    "top": 156.25
   },
@@ -89,6 +97,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "latin",
    "group": "拉丁字母（全量小写）",
    "top": 178.0
   },
@@ -99,6 +108,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "latin",
    "group": "数字与 ASCII 符号",
    "top": 199.75
   },
@@ -109,6 +119,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "latin",
    "group": null,
    "top": 221.5
   },
@@ -119,6 +130,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "latin",
    "group": "易混字形",
    "top": 243.25
   },
@@ -129,6 +141,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "latin",
    "group": "连字与组合",
    "top": 265.0
   },
@@ -139,6 +152,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "cjk",
    "group": "中文标点与全角",
    "top": 286.75
   },
@@ -149,6 +163,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "cjk",
    "group": null,
    "top": 308.5
   },
@@ -159,6 +174,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "cjk",
    "group": "符号与几何",
    "top": 330.25
   },
@@ -169,6 +185,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "mixed",
    "group": "混合与界面串",
    "top": 352.0
   },
@@ -179,6 +196,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "mixed",
    "group": null,
    "top": 373.75
   },
@@ -189,6 +207,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "mixed",
    "group": "颜色 token",
    "top": 395.5
   },
@@ -199,6 +218,7 @@
    "color": "#56647C",
    "mono": false,
    "bold": false,
+   "class": "mixed",
    "group": null,
    "top": 417.25
   },
@@ -209,6 +229,7 @@
    "color": "#66768C",
    "mono": false,
    "bold": false,
+   "class": "mixed",
    "group": null,
    "top": 439.0
   },
@@ -219,6 +240,7 @@
    "color": "#2563EB",
    "mono": false,
    "bold": false,
+   "class": "mixed",
    "group": null,
    "top": 460.75
   },
@@ -229,6 +251,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "mixed",
    "group": "字重",
    "top": 482.5
   },
@@ -239,6 +262,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": true,
+   "class": "mixed",
    "group": null,
    "top": 504.25
   },
@@ -249,6 +273,7 @@
    "color": "#0F172A",
    "mono": true,
    "bold": false,
+   "class": "mono",
    "group": "等宽（代码）",
    "top": 526.0
   },
@@ -259,6 +284,7 @@
    "color": "#0F172A",
    "mono": true,
    "bold": false,
+   "class": "mono",
    "group": null,
    "top": 547.75
   },
@@ -269,6 +295,7 @@
    "color": "#0F172A",
    "mono": true,
    "bold": false,
+   "class": "mono",
    "group": null,
    "top": 569.5
   },
@@ -279,6 +306,7 @@
    "color": "#0F172A",
    "mono": true,
    "bold": false,
+   "class": "mono",
    "group": null,
    "top": 591.25
   }

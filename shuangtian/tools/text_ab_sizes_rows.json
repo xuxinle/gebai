@@ -9,6 +9,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "mixed",
    "group": "字号阶梯（同一串逐档）",
    "top": 4.0
   },
@@ -19,6 +20,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "mixed",
    "group": null,
    "top": 73.6
   },
@@ -29,6 +31,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "mixed",
    "group": null,
    "top": 143.2
   },
@@ -39,6 +42,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "mixed",
    "group": null,
    "top": 212.79999999999998
   },
@@ -49,6 +53,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "mixed",
    "group": null,
    "top": 282.4
   },
@@ -59,6 +64,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "mixed",
    "group": null,
    "top": 352.0
   },
@@ -69,6 +75,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "mixed",
    "group": null,
    "top": 421.6
   },
@@ -79,6 +86,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "mixed",
    "group": null,
    "top": 491.20000000000005
   },
@@ -89,6 +97,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "mixed",
    "group": null,
    "top": 560.8000000000001
   },
@@ -99,6 +108,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "mixed",
    "group": null,
    "top": 630.4000000000001
   },
@@ -109,6 +119,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "mixed",
    "group": null,
    "top": 700.0000000000001
   },
@@ -119,6 +130,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "mixed",
    "group": null,
    "top": 769.6000000000001
   },
@@ -129,6 +141,7 @@
    "color": "#0F172A",
    "mono": false,
    "bold": false,
+   "class": "mixed",
    "group": null,
    "top": 839.2000000000002
   },
@@ -139,6 +152,7 @@
    "color": "#0F172A",
    "mono": true,
    "bold": false,
+   "class": "blank",
    "group": "等宽字号阶梯",
    "top": 908.8000000000002
   },
@@ -149,6 +163,7 @@
    "color": "#0F172A",
    "mono": true,
    "bold": false,
+   "class": "mono",
    "group": null,
    "top": 978.4000000000002
   },
@@ -159,6 +174,7 @@
    "color": "#0F172A",
    "mono": true,
    "bold": false,
+   "class": "mono",
    "group": null,
    "top": 1048.0000000000002
   },
@@ -169,6 +185,7 @@
    "color": "#0F172A",
    "mono": true,
    "bold": false,
+   "class": "mono",
    "group": null,
    "top": 1117.6000000000001
   },
@@ -179,6 +196,7 @@
    "color": "#0F172A",
    "mono": true,
    "bold": false,
+   "class": "mono",
    "group": null,
    "top": 1187.2
   }
