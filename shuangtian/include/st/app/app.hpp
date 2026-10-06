@@ -34,9 +34,9 @@ namespace st::app {
 /// `app.cpp` 当时只接了数字，于是"探针测得好、实际应用没变"，接口层测试抓不到。
 /// 抽成常量后，回归用例可以直接断言它，改档位时测试与实现必须一起动。
 struct ClassGammas {
-  float digit{0.92f};   ///< ASCII 数字（扫描定：不覆盖时偏轻 8~10%）
-  float letter{0.98f};  ///< 拉丁字母（不覆盖时 12/13px 偏轻 5~6%）
-  float han{0.93f};     ///< 汉字（不覆盖时 10~20px 稳定偏轻 5~7%）
+  float digit{0.84f};   ///< ASCII 数字（按真窗口浏览器三轴标定，见 `docs/BACKLOG.md` P1）
+  float letter{0.84f};  ///< 拉丁字母（同上）
+  float han{0.88f};     ///< 汉字（同上）
 };
 
 /// 把三档**真的**应用到渲染器上——`app.cpp` 与回归用例共用这一个函数。
@@ -99,6 +99,9 @@ struct AppOptions {
   /// `tools/stem_phase_probe.cpp`：中文「每边一个过渡像素」的糊笔画 90.9% → 21.8%。
   /// 需要不改变字形边沿的基准时显式传 `--text-fit=off`。
   std::string text_fit{"auto"};
+  /// 字形观感档位（`--text-preset` / `ST_TEXT_PRESET`）：默认 `B`（三轴对齐真窗口浏览器）。
+  /// 三档的定义与实测依据见 `src/app/app.cpp` 里那段表格；改默认值前先读 `docs/BACKLOG.md` P1。
+  std::string text_preset{"auto"};
   /// 覆盖率 gamma 预校正：`auto` / `off` / 数值字面量（见 `resolve_text_gamma`）。
   ///
   /// **默认 0.6（加墨）**：γ < 1 压黑加墨、γ > 1 提亮减墨。

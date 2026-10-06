@@ -8,6 +8,7 @@
 
 #include "st/codec/png.hpp"
 #include "st/core/fs.hpp"
+#include "st/core/print.hpp"
 #include "st/core/log.hpp"
 #include "st/core/process.hpp"
 #include "st/core/string.hpp"
@@ -557,21 +558,75 @@ auto Application::start() -> Status {
   // 三档各自可用环境变量覆盖（诊断/复标用）：
   // `ST_TEXT_DIGIT_GAMMA` / `ST_TEXT_LETTER_GAMMA` / `ST_TEXT_HAN_GAMMA`。
   {
-    st::app::ClassGammas defaults{};
-    float digit_gamma = defaults.digit;
-    float letter_gamma = defaults.letter;
-    float han_gamma = defaults.han;
+    st::app::ClassGammas gammas{};
+    // **预设档**（`--text-preset` / `ST_TEXT_PRESET`）：把"候选方案"做成一个开关，
+    // 便于在真实应用里对比，不必记一串环境变量。**它不改变默认**——默认仍是 `A`。
+    //
+    // | 档 | 拟合 | 类 γ（数字/字母/汉字） | 依据（两个正交轴，见 `docs/BACKLOG.md` P1） |
+    // |---|---|---|---|
+    // | `A` | 全部字号 | 0.92 / 0.98 / 0.93 | 旧的"拟合 light"档，保留作对照 |
+    // | **`B`（默认）** | **关** | **0.84 / 0.84 / 0.88** | 三个轴同时对齐真窗口浏览器（见下） |
+    // | `C` | ≤15 逻辑 px（=22.5 物理） | 0.92 / 0.98 / 0.93 | 大字号关、小字号仍拟合 |
+    //
+    // **为什么默认是 B**（2026-10-06，以"真窗口浏览器"为基准逐轴量）：
+    // | 轴 | 拟合（A） | **拟合关（B）** | 浏览器 |
+    // |---|---|---|---|
+    // | 覆盖墨量比（10~13px 字母/数字、11~15px 汉字） | 0.998~1.013 | **0.976~1.010（γ 重标后）** | 1.000 |
+    // | 覆盖离散（越低越均匀） | 0.281~0.304 | **0.256~0.289** | 0.263~0.290 |
+    // | 边缘柔度（部分覆盖/实心，越低越锐） | 2.81~4.86 | 3.27~6.66 | 3.22~8.74 |
+    // ⇒ 浏览器在**三个轴上都站在"拟合关"一侧**（10px 一档例外，浏览器在该档特别糊）。
+    //   "拟合开更锐"在**旧的单指标尺子**下成立，但那是**没有参照**的"更锐"——
+    //   参照的实际锐度就在拟合关那一档。详见 `docs/BACKLOG.md` P1。
+    //
+    // 命令行优先于环境变量（与 `--text-fit`/`ST_TEXT_FIT` 同一层级规则）。
+    const std::string preset = options_.text_preset != "auto"
+                                   ? options_.text_preset
+                                   : fs::read_env("ST_TEXT_PRESET").value_or("B");
+    float fit_max_size = 0.0f;
+    if (preset == "A" || preset == "a") {
+      // A 档 = 旧的"拟合 light"默认：**显式写自己的 γ**，不能靠 `ClassGammas` 的默认值
+      // （那个默认值属于当前默认档 B；靠它会让 A 档静默变成"拟合开 + B 的 γ"这种
+      //  不存在的组合——实测踩到：A 与 B 打印出同一组 γ）。
+      gammas = st::app::ClassGammas{0.92f, 0.98f, 0.93f};
+    } else if (preset == "B" || preset == "b") {
+      // 三档 γ 按"**三个轴同时对齐真窗口浏览器**"重标（2026-10-06，拟合一关掉后重扫）：
+      // | 轴 | B 档（γ 0.84/0.84/0.88） | 浏览器 |
+      // |---|---|---|
+      // | 覆盖墨量比（10~13px 字母） | 0.997~1.010 | 1.000 |
+      // | 同上（数字） | 0.976~1.001 | 1.000 |
+      // | 同上（汉字 11~15px） | 0.995~1.005 | 1.000 |
+      // | 覆盖离散（汉字，越低越均匀） | 差 −0.003~+0.002 | —（对齐到 ±0.003） |
+      // | 中间调/实心（越低越锐） | 差 −0.09~−0.21（仅 11~13px） | — |
+      // 注：10px 字母的中间调仍比参照低 1.4（参照在该档特别"糊"，属参照本身的特性，
+      // 不追——追它会把 11~13px 推过头）。
+      impl_->renderer->set_grid_fit(st::text::GridFitMode::Off);
+      gammas = st::app::ClassGammas{0.84f, 0.84f, 0.88f};
+    } else if (preset == "C" || preset == "c") {
+      fit_max_size = 22.5f;
+      gammas = st::app::ClassGammas{0.92f, 0.98f, 0.93f};
+    }
     if (const auto value = fs::read_env("ST_TEXT_DIGIT_GAMMA"); value.has_value()) {
-      digit_gamma = std::stof(*value);
+      gammas.digit = std::stof(*value);
     }
     if (const auto value = fs::read_env("ST_TEXT_LETTER_GAMMA"); value.has_value()) {
-      letter_gamma = std::stof(*value);
+      gammas.letter = std::stof(*value);
     }
     if (const auto value = fs::read_env("ST_TEXT_HAN_GAMMA"); value.has_value()) {
-      han_gamma = std::stof(*value);
+      gammas.han = std::stof(*value);
     }
-    apply_class_gammas(*impl_->renderer,
-                       st::app::ClassGammas{digit_gamma, letter_gamma, han_gamma});
+    if (const auto value = fs::read_env("ST_TEXT_FIT_MAX_SIZE"); value.has_value()) {
+      fit_max_size = std::stof(*value);
+    }
+    if (fit_max_size > 0.0f) impl_->renderer->set_grid_fit_max_size(fit_max_size);
+    apply_class_gammas(*impl_->renderer, gammas);
+    // 生效值自检（`ST_TEXT_PRESET_DEBUG=1`）：测"档位是否真的生效"的**唯一**可靠手段——
+    // 实测踩到：patch 被回退后三档渲染出了几乎一样的图（B vs C 只差 20 像素），
+    // 当时差点把它当成"三档观感接近"的结论。
+    if (fs::read_env("ST_TEXT_PRESET_DEBUG").has_value()) {
+      st::print("[preset] {} fit={} max_size={} gamma={}/{}/{}\n", preset,
+                static_cast<int>(impl_->renderer->grid_fit()), fit_max_size, gammas.digit,
+                gammas.letter, gammas.han);
+    }
   }
   // **笔画加墨（stem darkening）**：与浏览器逐带对照后（`docs/TEXT_AB_REPORT.md`）确认，
   // 汉字的差距是"笔画没到满黑"（实心像素比 0.87~0.90）而非几何——FreeType 在这条路上

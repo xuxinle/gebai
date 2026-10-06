@@ -1573,6 +1573,8 @@ struct Options {
   /// 框架侧的 `st::app::parse_cli` 到不了这里——**漏接就是静默忽略**。
   std::string text_gamma{"auto"};
   std::string text_gamma_small{};
+  /// 字形观感档位（`--text-preset`）：A（默认）/ B / C。见 `AppOptions::text_preset`。
+  std::string text_preset{"auto"};
   /// 界面字号缩放：auto/数值（见 `AppOptions::ui_font_scale`）。
   ///
   /// 与 `--text-*` 同一姿态：应用层有自己的参数解析，框架侧的
@@ -1605,6 +1607,7 @@ struct Options {
     else if (raw == "--language") options.language = value("cpp");
     else if (raw == "--text-lcd") options.text_lcd = value("auto");
     else if (raw == "--text-fit") options.text_fit = value("auto");
+    else if (raw == "--text-preset") options.text_preset = value("A");
     else if (raw == "--text-gamma") options.text_gamma = value("auto");
     else if (raw == "--text-gamma-small") options.text_gamma_small = value("auto");
     else if (raw == "--ui-font-scale") options.ui_font_scale = value("auto");
@@ -1615,6 +1618,14 @@ struct Options {
     else if (raw == "--ms") options.max_ms = std::stoi(value("0"));
     else if (raw == "--workspace") options.workspace = value(".");
     else if (raw == "--decorations") options.decorations = true;
+    // **未知参数报错，不静默忽略**：本应用曾经自带一份参数解析器（不走
+    // `parse_common_options`），于是 `--text-preset=B` 被静默吃掉——
+    // 表现是"三档渲染出来的图几乎一样"（实测 B vs C 只差 20 像素），
+    // 差点被当成"三档观感接近"的结论。静默忽略未知参数正是这类事故的温床。
+    else {
+      st::eprint("未知参数：{}（用 --help 看可用项）\n", raw);
+      std::exit(2);
+    }
   }
   return options;
 }
@@ -1639,6 +1650,7 @@ auto run_app(int argc, char** argv) -> int {
   app_options.text_fit = options.text_fit;
   app_options.text_gamma = options.text_gamma;
   app_options.text_gamma_small = options.text_gamma_small;
+  app_options.text_preset = options.text_preset;
   app_options.ui_font_scale = options.ui_font_scale;
   app_options.control_port = options.control_port;
   app_options.control_file = options.control_file;

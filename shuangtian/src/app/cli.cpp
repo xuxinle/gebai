@@ -49,6 +49,7 @@ auto common_options_usage(std::string_view program) -> std::string {
               "  --renderer MODE       渲染器：auto（按实测帧耗时选更快）/ gpu / software\n"
         "  --text-lcd MODE       文字抗锯齿：auto（默认亚像素 LCD）/ on / off（灰度基准）\n"
         "  --text-fit MODE       字形网格拟合：auto（默认 normal）/ off / light / normal\n"
+        "  --text-preset NAME    字形观感档位（对照用）：A（默认）/ B / C\n"
       "  --control-port N      控制通道端口（0 = 自动选空闲端口）\n"
       "  --control-file PATH   把端口等写入该文件（自动化流程据此连接）\n"
       "  --shots DIR           无头截图的落盘目录（控制通道 `encode=file` 且未给 path 时用）\n"
@@ -121,6 +122,16 @@ auto parse_common_options(int argc, char** argv, CommonOptions& options) -> Stat
             std::format("--text-fit 只接受 auto / off / light / normal，收到「{}」", mode));
       }
       options.app.text_fit = mode;
+    } else if (argument == "--text-preset") {
+      auto parsed = value(argument);
+      if (!parsed) return forward_error(parsed.error());
+      const std::string mode = *parsed;
+      // 白名单同口径：拼错就报错（静默落回 A 会把"我明明选了 B"变成谜案）。
+      if (mode != "A" && mode != "B" && mode != "C" && mode != "a" && mode != "b" && mode != "c") {
+        return unexpected(ErrorCode::Invalid,
+                          std::format("--text-preset 只接受 A / B / C，收到「{}」", mode));
+      }
+      options.app.text_preset = mode;
     } else if (argument == "--text-gamma") {
       auto parsed = value(argument);
       if (!parsed) return forward_error(parsed.error());
