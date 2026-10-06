@@ -410,6 +410,10 @@ TextRenderer::TextRenderer(const FontStack& stack, float supersample)
 
 TextRenderer::~TextRenderer() = default;
 
+auto glyph_class_of(char32_t codepoint) noexcept -> GlyphClass {
+  return (codepoint >= U'0' && codepoint <= U'9') ? GlyphClass::Digit : GlyphClass::Default;
+}
+
 void TextRenderer::set_coverage_correct(CoverageCorrect mode) noexcept {
   if (mode == coverage_correct_) return;
   coverage_correct_ = mode;
@@ -577,6 +581,7 @@ auto TextRenderer::shape_uncached(std::string_view utf8, float size, FontRole ro
     run.face = face;
     run.glyph = glyph->id;
     run.codepoint = codepoint.value;
+    run.glyph_class = glyph_class_of(static_cast<char32_t>(codepoint.value));
     run.x = pen;
     run.advance = glyph->advance / units * size;
     pen += run.advance;
@@ -677,7 +682,7 @@ auto TextRenderer::glyph_bitmap_of(char32_t codepoint, float pixel_size, FontRol
   if (face == nullptr) return nullptr;
   const auto id = face->glyph_index(codepoint);
   if (!id.has_value()) return nullptr;
-  return glyph_bitmap(*face, *id, pixel_size, embolden_steps);
+  return glyph_bitmap(*face, *id, pixel_size, embolden_steps, glyph_class_of(codepoint));
 }
 
 /// 合成加粗的步数换算：把物理像素半径换成**当前模式下的采样格步数**。
@@ -696,7 +701,8 @@ auto TextRenderer::embolden_steps(float pixel_radius) const noexcept -> int {
 }
 
 auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel_size,
-                                int embolden_steps) const -> std::shared_ptr<const GlyphBitmap> {
+                                int embolden_steps, GlyphClass glyph_class) const
+    -> std::shared_ptr<const GlyphBitmap> {
   const std::uint32_t size_bucket = size_key(pixel_size);
   const int steps = std::clamp(embolden_steps, 0, TextRenderer::kMaxEmboldenSteps);
   // 缓存键 = 逐字段 FNV-1a 混合，而不是"移位后 XOR 拼装"。
@@ -731,8 +737,14 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   // **用逐字形实际生效值**：分档覆盖生效时，`coverage_gamma_` 不足以区分两个字号档。
   // **用逐字形实际生效值**：分档覆盖生效时，`coverage_gamma_` 不足以区分两个字号档。
   // 这里必须用 `size_bucket` 自己换算（`effective_size` 到后面才定义——缓存键在函数前段）。
-  const auto gamma_bucket = static_cast<std::uint64_t>(
-      std::lround(effective_gamma(static_cast<float>(size_bucket) / 4.0f) * 100.0f));
+  // **字形类分档也必须进键**：同一个字形在"默认档"与"类覆盖档"下是两份不同位图，
+  // 键里只放 `effective_gamma` 会让两档互相取到对方的位图（症状：改了类 γ 看不出变化，
+  // 直到缓存淘汰才"突然生效"——与 gamma/加墨/量化同类的疏漏）。
+  const float size_px = static_cast<float>(size_bucket) / 4.0f;
+  const float class_gamma_for_key =
+      glyph_class == GlyphClass::Digit ? digit_gamma_ : default_class_gamma_;
+  const auto gamma_bucket = static_cast<std::uint64_t>(std::lround(
+      (      class_gamma_for_key > 0.0f ? class_gamma_for_key : effective_gamma(size_px)) * 100.0f));
   // 校正模式与 Skia 模式的对比度也要进键：同理由——不同映射 = 不同位图。
   const auto correct_bucket =
       static_cast<std::uint64_t>(coverage_correct_) * 1000U +
@@ -836,7 +848,10 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   const bool use_skia_lut = coverage_correct_ == CoverageCorrect::Skia;
   // **按物理字号**取该字形实际生效的 gamma（见 `set_fitted_gamma`）：
   // 小字号笔画细，单档压两端消不掉“小字偏重”，必须能分档。
-  const float glyph_gamma = effective_gamma(effective_size);
+  // **生效 gamma = 字号分档，再被"字形类分档"覆盖**（见 `set_class_gamma`）。
+  // 顺序刻意如此：类分档是"只动这一类"的窄口径修正，理应有最高优先级。
+  const float class_gamma = glyph_class == GlyphClass::Digit ? digit_gamma_ : default_class_gamma_;
+  const float glyph_gamma = class_gamma > 0.0f ? class_gamma : effective_gamma(effective_size);
   const auto correct = [this, &skia_lut, use_skia_lut, glyph_gamma](float value) noexcept -> float {
     if (value <= 0.0f || value >= 1.0f) return value;
     if (use_skia_lut) {
@@ -1325,8 +1340,12 @@ auto TextRenderer::draw(raster::Surface& surface, std::string_view utf8, math::P
   for (const auto& run : shaped.runs) {
     if (run.face == nullptr) continue;
     const float pixel_size = size * device_scale;
+    // **绘制路径也必须按字形类取位图**（见 `set_class_gamma`）：漏传就会让
+    // "类 γ 覆盖"只在 `glyph_bitmap_of`（诊断/探针）里生效、**实际绘制却仍用默认档**
+    // ——实测症状是"改了类 γ 看不出任何变化"（量尺全绿、画面不动）。
+    // 这是本功能唯一容易漏的接线点，故显式写在这一行而不是靠默认实参。
     const std::shared_ptr<const GlyphBitmap> bitmap =
-        glyph_bitmap(*run.face, run.glyph, pixel_size, embolden_steps);
+        glyph_bitmap(*run.face, run.glyph, pixel_size, embolden_steps, run.glyph_class);
     if (bitmap == nullptr || bitmap->coverage.empty()) continue;
     profile_pixels += static_cast<std::uint64_t>(bitmap->width) *
                       static_cast<std::uint64_t>(bitmap->height);

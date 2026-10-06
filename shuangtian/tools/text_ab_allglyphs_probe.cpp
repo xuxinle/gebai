@@ -25,6 +25,7 @@ auto main(int argc, char** argv) -> int {
     // 第 3 个位置参数可以是 gamma（纯数字），也可以是开关——**必须先判开关**，
     // 否则 `std::stof("--nofit")` 直接抛异常（实测：探针 SIGABRT，看起来像渲染崩溃）。
     if (a == "--gray") options.subpixel = false;
+    else if (a.rfind("--digit-gamma=", 0) == 0) options.digit_gamma = std::stof(a.substr(std::string("--digit-gamma=").size()));
     else if (a == "--fit-normal") options.fit_normal = true;
     else if (a == "--darken") options.darken = true;
     else if (a == "--strict-hints") options.strict_hints = true;
@@ -39,8 +40,8 @@ auto main(int argc, char** argv) -> int {
     return 1;
   }
   ab::print_font_stack(*stack);
-  st::print("device_scale={}  画布={}x{} 逻辑  {} 行  subpixel={} fit={}\n", scale, kWidth, kHeight,
-            kLines.size(), options.subpixel, options.fit);
+  st::print("device_scale={}  画布={}x{} 逻辑  {} 行  subpixel={} fit={} digit_gamma={}\n", scale,
+            kWidth, kHeight, kLines.size(), options.subpixel, options.fit, options.digit_gamma);
 
   const int width = static_cast<int>(kWidth * scale);
   const int height = static_cast<int>(kHeight * scale);

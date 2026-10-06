@@ -40,6 +40,7 @@ using st::math::Color;
 using st::math::Point;
 using st::raster::Canvas;
 using st::text::FontStack;
+using st::text::GlyphClass;
 using st::text::GridFitMode;
 using st::text::GridFitOptions;
 using st::text::TextRenderer;
@@ -667,4 +668,78 @@ ST_TEST(quantize_does_not_amplify_design_width_differences) {
   // 参照（真窗口浏览器）的同一比值是 1.099；量化放大后实测 1.56。
   ST_CHECK(ratio < 1.25f);
   ST_CHECK(ratio > 1.0f);   // 大写确实略粗于小写（字体设计如此），不能反向
+}
+
+/// ⑤ **按字形类的覆盖率分档**：只动该类、其余字形逐位不变（且缓存按类区分）。
+///
+/// 起因（2026-10-06 全量逐字形 A/B）：字母与汉字已与浏览器对齐（0.94~0.96），
+/// 而**数字类稳定偏轻 8~10%**（10~13px 符号一致）。按用户要求"已对好的不要动"，
+/// 因此引入**按类**这一层（`set_class_gamma`），而不是回头去改全局 γ。
+///
+/// 本用例钉住三条最容易写错的地方：
+/// 1. **类 γ 只影响该类**——同一渲染器里改数字类 γ，字母的位图必须**逐位不变**；
+/// 2. **缓存按类区分**——同一个字形先以默认档取、再以类覆盖档取，两次必须不同
+///    （键里漏掉类覆盖会取到对方的位图，症状是"改了类 γ 看不出变化"）；
+/// 3. **绘制路径也走类**——`TextRun::glyph_class` 在整形时定好、`draw` 照它取位图。
+///    这条最难从接口层看出来（`glyph_bitmap_of` 与 `draw` 是两条路径），
+///    实测就漏过一次：改了类 γ 后 PNG **逐像素不变**，而接口层的墨量却变了。
+ST_TEST(class_gamma_affects_only_its_class_and_survives_cache) {
+  FontFixture fixture;
+  if (!fixture.ok) return;
+  const auto ink = [](const TextRenderer::GlyphBitmap& bitmap) {
+    double sum = 0.0;
+    for (float value : bitmap.coverage) sum += static_cast<double>(value);
+    return sum;
+  };
+  TextRenderer renderer(*fixture.stack, 1.5f);
+  renderer.set_subpixel(true);
+  renderer.set_coverage_gamma(1.10f);
+  const auto digit_before = renderer.glyph_bitmap_of(U'3', 15.0f);
+  const auto letter_before = renderer.glyph_bitmap_of(U'A', 15.0f);
+  if (digit_before == nullptr || letter_before == nullptr) return;
+  const double digit_ink_0 = ink(*digit_before);
+  const double letter_ink_0 = ink(*letter_before);
+
+  // ① 只压数字类
+  renderer.set_class_gamma(GlyphClass::Digit, 0.92f);
+  const auto digit_after = renderer.glyph_bitmap_of(U'3', 15.0f);
+  const auto letter_after = renderer.glyph_bitmap_of(U'A', 15.0f);
+  ST_CHECK(digit_after != nullptr && letter_after != nullptr);
+  st::print("[class] 数字 3：{:.1f} -> {:.1f}；字母 A：{:.1f} -> {:.1f}\n", digit_ink_0,
+            ink(*digit_after), letter_ink_0, ink(*letter_after));
+  // 数字变重（γ<1 压黑），且幅度可观（实测 ~7%）
+  ST_CHECK(ink(*digit_after) > digit_ink_0 * 1.03);
+  // **字母逐位不变**（这是"已对好的不要动"的硬要求）
+  ST_CHECK_EQ(static_cast<int>(std::lround(ink(*letter_after) * 100.0)),
+              static_cast<int>(std::lround(letter_ink_0 * 100.0)));
+
+  // ② 缓存不串档：改回不覆盖后，数字必须回到原值
+  renderer.set_class_gamma(GlyphClass::Digit, 0.0f);
+  const auto digit_back = renderer.glyph_bitmap_of(U'3', 15.0f);
+  ST_CHECK(digit_back != nullptr);
+  ST_CHECK_EQ(static_cast<int>(std::lround(ink(*digit_back) * 100.0)),
+              static_cast<int>(std::lround(digit_ink_0 * 100.0)));
+
+  // ③ 绘制路径：同一段含数字与字母的文字，只压数字类后**只有数字那块变**
+  const auto render_row = [&](float digit_gamma) {
+    st::raster::Canvas canvas{160, 40, 1.5f};
+    canvas.clear(st::math::Color{0xFF, 0xFF, 0xFF, 0xFF});
+    TextRenderer local(*fixture.stack, 1.5f);
+    local.set_subpixel(true);
+    local.set_coverage_gamma(1.10f);
+    if (digit_gamma > 0.0f) local.set_class_gamma(GlyphClass::Digit, digit_gamma);
+    (void)local.draw(canvas, "3A3A", st::math::Point{2.0f, 2.0f}, 15.0f,
+                     st::math::Color{0x0F, 0x17, 0x2A, 0xFF});
+    return canvas.to_rgba8();
+  };
+  const auto plain = render_row(0.0f);
+  const auto darkened = render_row(0.92f);
+  ST_CHECK_EQ(static_cast<int>(plain.size()), static_cast<int>(darkened.size()));
+  std::size_t changed = 0;
+  for (std::size_t index = 0; index < plain.size(); ++index) {
+    if (plain[index] != darkened[index]) ++changed;
+  }
+  st::print("[class] 绘制路径：{} / {} 字节变化（数字像素应占少数，字母必须不动）\n", changed,
+            plain.size());
+  ST_CHECK(changed > 0);   // 变了 ⇒ 绘制路径确实走了类（这一条就是漏接线时的红点）
 }

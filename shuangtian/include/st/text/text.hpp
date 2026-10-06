@@ -22,11 +22,34 @@
 
 namespace st::text {
 
-/// 一段同字体的连续字形（整形结果单元）。
+/// 字形类：**覆盖率分档**的维度。
+///
+/// 为什么需要它（2026-10-06 实测）：全量逐字形与真窗口浏览器比对后发现——在
+/// **应用默认档**（拟合 light + 墨量补偿 + 笔画加墨）下，字母类的墨量比已经在
+/// **0.94~0.96**（判定为"已对齐"，用户明确要求**不要动**），而**数字类只有 0.88~0.92**，
+/// 且在 10/11/12/13px 上**符号一致**（四个字号都偏轻）。
+/// 实测（只压 γ、其余档位不动）：**γ≈0.90 让数字落到 0.963~0.978**，
+/// 而同批字母只从 0.939~0.961 抬到 0.999~1.016（过冲 2%）——
+/// 全局 γ 做不到"只抬数字、不动字母"，所以需要**按类**这一层。
+///
+/// 判据用**字符类**而不是字号：实测字母的偏差不随字号变（四档 0.94~0.96 恒定），
+/// 而数字恒定偏轻——所以"按类"才是正确的分档维度（"按字号分档"那条已被
+/// DESIGN §4.3.7.17 的标定证明不成立）。
+enum class GlyphClass : std::uint8_t {
+  Default,   ///< 其它一切字形（拉丁字母、汉字、标点、符号…）
+  Digit,     ///< ASCII 数字 `0`~`9`（与拉丁**同字体面**，仅覆盖率映射不同）
+};
+
+/// 码点 → 字形类（ASCII 数字单独一类，其余归 `Default`）。
+[[nodiscard]] auto glyph_class_of(char32_t codepoint) noexcept -> GlyphClass;
+
 struct TextRun {
   const FontFace* face{nullptr};  ///< 非拥有（指向 FontStack 内的 face）
   GlyphId glyph{0};
   std::uint32_t codepoint{0};
+  /// 该字形所属的**覆盖率类**（ASCII 数字单独一类）。整形时定好、**绘制时照它取位图**
+  /// ——这一条漏了，"按类覆盖 γ"就只在诊断接口上生效、实际绘制仍用默认档。
+  GlyphClass glyph_class{GlyphClass::Default};
   float x{0.0f};        ///< 逻辑单位：相对行首的笔位
   float advance{0.0f};  ///< 逻辑单位
 };
@@ -252,6 +275,14 @@ class TextRenderer {
     return fitted_gamma_size_ > 0.0f && pixel_size <= fitted_gamma_size_ ? fitted_gamma_
                                                                         : coverage_gamma_;
   }
+
+  void set_class_gamma(GlyphClass glyph_class, float gamma) noexcept {
+    (glyph_class == GlyphClass::Digit ? digit_gamma_ : default_class_gamma_) = gamma;
+  }
+  [[nodiscard]] auto class_gamma(GlyphClass glyph_class) const noexcept -> float {
+    return glyph_class == GlyphClass::Digit ? digit_gamma_ : default_class_gamma_;
+  }
+
 
   /// 覆盖率预校正模式（默认 `Gamma`）。
   ///
@@ -488,7 +519,8 @@ class TextRenderer {
   /// 返回 `shared_ptr`：即使该条目随后被淘汰，调用方手里的位图依然有效
   /// （曾因缓存「插入后淘汰」并返回裸指针导致 use-after-free，见 text.cpp 注释）。
   [[nodiscard]] auto glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel_size,
-                                  int embolden_steps) const
+                                  int embolden_steps,
+                                  GlyphClass glyph_class = GlyphClass::Default) const
       -> std::shared_ptr<const GlyphBitmap>;
   /// 无缓存版整形（`shape_cached` 未命中时的计算体）。
   [[nodiscard]] auto shape_uncached(std::string_view utf8, float size, FontRole role,
@@ -508,6 +540,9 @@ class TextRenderer {
   /// 按物理字号覆盖 gamma 的阈值（0 = 不覆盖）与取值，见 `set_fitted_gamma`。
   float fitted_gamma_size_{0.0f};
   float fitted_gamma_{0.0f};
+  /// 按**字形类**覆盖 gamma（0 = 不覆盖），见 `set_class_gamma`。
+  float digit_gamma_{0.0f};
+  float default_class_gamma_{0.0f};
   /// 覆盖率预校正模式（见 `set_coverage_correct`）。
   CoverageCorrect coverage_correct_{CoverageCorrect::Gamma};
   /// Skia 模式的对比度（只影响深字浅底）。

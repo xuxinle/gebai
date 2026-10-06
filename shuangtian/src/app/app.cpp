@@ -538,6 +538,30 @@ auto Application::start() -> Status {
   // / normal+补偿 40% / **light+补偿 18%**——所以本项与 `resolve_text_fit` 的
   // 默认档位（light）是一对，单独改任一个都拿不到这个结果。
   impl_->renderer->set_ink_compensation(true);
+  // **数字类的覆盖率分档**（`TextRenderer::set_class_gamma`）。
+  //
+  // 为什么只给数字加这一档：全量逐字形（A~Z / a~z / 0~9 × 10~13px）与真窗口浏览器比对后——
+  // **字母与汉字已经对齐**（字母 0.94~0.96、汉字 0.95~0.96），而**数字稳定偏轻 8~10%**
+  // 且在四个字号上**符号一致**。按用户要求"已对好的不要动"，所以只在**数字类**上收紧一档，
+  // 其余字形逐位不变（实测确认）。
+  //
+  // 档位由扫描定（`tools/text_ab_allglyphs_page.html` + 逐字形墨量比）：
+  // | 数字类 γ | 数字（10/11/12/13px） | 字母 |
+  // |---|---|---|
+  // | 不覆盖（基准） | 0.880 / 0.917 / 0.908 / 0.921 | 0.94~0.96 |
+  // | **0.92（采用）** | **0.957 / 0.969 / 0.974 / 0.973** | **逐位不变** |
+  // | 0.90 | 0.963 / 0.975 / 0.979 / 0.988 | 逐位不变 |
+  // | 0.85 | 0.978 / 0.989 / 0.992 / 1.017（13px 过冲） | 逐位不变 |
+  //
+  // 取 0.92 而不是更黑的档：它在四个字号上都落进 0.95~0.98，而 0.85 在 13px 会过冲到 1.017。
+  // 可用 `ST_TEXT_DIGIT_GAMMA` 覆盖（诊断/复标用）。
+  {
+    float digit_gamma = 0.92f;
+    if (const auto value = fs::read_env("ST_TEXT_DIGIT_GAMMA"); value.has_value()) {
+      digit_gamma = std::stof(*value);
+    }
+    impl_->renderer->set_class_gamma(st::text::GlyphClass::Digit, digit_gamma);
+  }
   // **笔画加墨（stem darkening）**：与浏览器逐带对照后（`docs/TEXT_AB_REPORT.md`）确认，
   // 汉字的差距是"笔画没到满黑"（实心像素比 0.87~0.90）而非几何——FreeType 在这条路上
   // 做的是**笔画加墨**（CFF 引擎默认开、随 ppem 衰减），霜天原先没有。
