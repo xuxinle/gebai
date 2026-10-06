@@ -56,6 +56,13 @@ struct Glyph {
   float advance{0.0f};
   float bearing_x{0.0f};
   float bearing_y{0.0f};
+  /// 字形包围盒的**底边**（字体单位，基线上为正）。
+  ///
+  /// 与 `bearing_y` 配对才拿得到墨迹的垂直跨度——而那是"把一行字在一片高度里
+  /// 真正居中"的唯一依据（行盒/ascent 都含字体预留的头尾空间，见
+  /// `TextRenderer::ink_metrics`）。
+  /// 字母通常为 0（坐在基线上），`g`/`，` 这类下探字形为负。
+  float ink_bottom{0.0f};
   bool empty{true};
 };
 

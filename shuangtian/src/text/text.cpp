@@ -497,6 +497,48 @@ auto TextRenderer::ascent(float size) const -> float {
   return metrics.ascender / units * size;
 }
 
+auto TextRenderer::ink_metrics(std::string_view utf8, float size, FontRole role) const
+    -> std::optional<InkMetrics> {
+  if (stack_->empty() || utf8.empty() || size <= 0.0f) return std::nullopt;
+  bool any = false;
+  float above = 0.0f;
+  float below = 0.0f;
+  std::size_t index = 0;
+  while (index < utf8.size()) {
+    const Codepoint codepoint = decode_utf8(utf8, index);
+    if (codepoint.bytes == 0) break;
+    const FontFace* face = stack_->find_face(codepoint.value, role, false);
+    if (face == nullptr) continue;
+    const auto glyph = face->glyph_for(codepoint.value);
+    // 无字形的码点（空格、无覆盖）不参与墨迹——它们本来就不画东西。
+    if (!glyph || glyph->empty) continue;
+    const FontMetrics& metrics = face->metrics();
+    const float units = metrics.units_per_em > 0.0f ? metrics.units_per_em : 1000.0f;
+    const float scale = size / units;
+    above = std::max(above, glyph->bearing_y * scale);
+    below = std::max(below, -glyph->ink_bottom * scale);
+    any = true;
+  }
+  if (!any) return std::nullopt;
+  return InkMetrics{above, std::max(below, 0.0f)};
+}
+
+auto TextRenderer::shaped_ascent(std::string_view utf8, float size, FontRole role) const -> float {
+  if (stack_->empty() || utf8.empty()) return ascent(size);
+  float max_ascent = 0.0f;
+  std::size_t index = 0;
+  while (index < utf8.size()) {
+    const Codepoint codepoint = decode_utf8(utf8, index);
+    if (codepoint.bytes == 0) break;
+    const FontFace* face = stack_->find_face(codepoint.value, role, false);
+    if (face == nullptr) continue;
+    const FontMetrics& metrics = face->metrics();
+    const float units = metrics.units_per_em > 0.0f ? metrics.units_per_em : 1000.0f;
+    max_ascent = std::max(max_ascent, metrics.ascender / units * size);
+  }
+  return max_ascent > 0.0f ? max_ascent : ascent(size);
+}
+
 auto TextRenderer::line_height(float size) const -> float {
   if (stack_->empty()) return size * 1.45f;
   const FontMetrics& metrics = stack_->primary().metrics();

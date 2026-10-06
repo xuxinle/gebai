@@ -566,7 +566,17 @@ class Element {
   /// 行为注入：在组件自身实现**之后**、冒泡**之前**追加一次回调（免子类化的小交互，
   /// 如「拖拽把手改宽度」）。返回 true = 已消费（冒泡停止）。仅对直接派发到本元素的
   /// 事件调用（祖先/后代的不经过本 handler）。
+  ///
+  /// 分发由 `UiRoot::dispatch_to` 统一做：先 `on_event`（组件覆写），未消费再调它。
+  /// **不要在组件覆写里自己调它**——那样每个覆写点都得记得，漏一个就静默失效
+  /// （实测：`Input` 上装的 ↑↓ 历史处理器从未被调用，因为 `Input::on_event` 覆写
+  /// 直接 `return handle_key(...)`，根本没给 handler 机会；而调用方看到的是
+  /// “设了处理器、没报错、也没效果”）。
   void set_event_handler(std::function<bool(Event&)> handler) { event_handler_ = std::move(handler); }
+  /// 行为注入回调的调用口（**仅供 `UiRoot::dispatch_to`**）。
+  [[nodiscard]] auto invoke_event_handler(Event& event) -> bool {
+    return event_handler_ ? event_handler_(event) : false;
+  }
   [[nodiscard]] auto has_event_handler() const noexcept -> bool {
     return static_cast<bool>(event_handler_);
   }

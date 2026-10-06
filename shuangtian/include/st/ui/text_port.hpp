@@ -6,6 +6,7 @@
 /// 由 `app` 层用 `text::TextRenderer` 适配（见 `include/st/app/text_port.hpp`）。
 
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -27,6 +28,55 @@ class TextPort {
       std::string_view utf8, float size,
       text::FontRole role = text::FontRole::Proportional) const -> float = 0;
   [[nodiscard]] virtual auto line_height(float size) const -> float = 0;
+  /// 行盒内**基线到行顶**的距离（逻辑单位）。默认按行高估（`line_height × 0.8`）。
+  ///
+  /// 为什么需要它：把一行字在一段高度里**垂直居中**，正确做法是让
+  /// **墨迹区（ascent..descent）**居中，而不是让**行盒**居中——行高含 `line_gap`
+  /// 与字体的上下留白，两者不等时文字会系统性偏移
+  /// （实测：按钮里偏下 2.55px，上留白 13.55 / 下留白 8.45）。
+  [[nodiscard]] virtual auto ascent(float size) const -> float {
+    return line_height(size) * 0.8f;
+  }
+  /// `draw` 真正使用的**基线位**（跨 run 最大 ascender；无字体时回退 `ascent`）。
+  ///
+  /// 存在的理由：「把一行字在盒子里垂直居中」需要**反推 draw 把基线放在哪**。
+  /// 拿 `ascent()` 代儙会在中英混排时引入系统性残差：实测一个中文按钮上
+  /// 只挪了 1px（预期 2.5px），偏差反而从 +2.50 变成 +3.50。
+  [[nodiscard]] virtual auto shaped_ascent(
+      std::string_view utf8, float size,
+      text::FontRole role = text::FontRole::Proportional) const -> float {
+    (void)utf8;
+    (void)role;
+    return ascent(size);
+  }
+  /// 行盒内基线到行底的距离（逻辑单位，**正数**）。
+  [[nodiscard]] virtual auto descent(float size) const -> float {
+    const float height = line_height(size);
+    const float top = ascent(size);
+    return height > top ? height - top : 0.0f;
+  }
+  /// **墨迹区**相对基线的高度（`up` 向上、`down` 向下，都是正值、逻辑单位）。
+  ///
+  /// 把一行字放进一个盒子垂直居中时，要对齐的是**实际画出来的墨迹**，不是字体的
+  /// 行盒、也不是 `ascent`——后两者都含大量预留空间：实测 DejaVu Sans 的
+  /// `hhea.ascender = 0.928em` / `descender = 0.236em`（`line_height = 1.164em`），
+  /// 而字母的实际墨迹只有 `x-height ≈ 0.547em`（小写）到 `cap ≈ 0.729em`（大写）。
+  /// 按行盒居中会把文字**系统性推下 2~3px**（用户报的"按钮文字没有居中"）。
+  ///
+  /// 返回 `nullopt` = 该端口报不出墨迹量（无字体环境/未实现）——调用方应退回
+  /// 行盒居中的近似。
+  struct InkMetrics {
+    float above{0.0f};  ///< 墨迹顶到基线的距离
+    float below{0.0f};  ///< 基线到墨迹底的距离
+  };
+  [[nodiscard]] virtual auto ink_metrics(std::string_view utf8, float size,
+                                         text::FontRole role = text::FontRole::Proportional) const
+      -> std::optional<InkMetrics> {
+    (void)utf8;
+    (void)size;
+    (void)role;
+    return std::nullopt;
+  }
   /// `origin` 为行左上角。
   ///
   /// `embolden` 为**合成加粗的笔画外扩半径（物理像素）**，0 = 不加粗。
@@ -43,8 +93,7 @@ class TextPort {
                     math::Color color, text::FontRole role = text::FontRole::Proportional,
                     float embolden = 0.0f, bool bold = false) const = 0;
   /// 字体栈是否提供**真粗体面**（没有时调用方仍可用合成加粗补足；默认无）。
-  [[nodiscard]] virtual auto has_real_bold() const -> bool { return false; }
-  [[nodiscard]] virtual auto ellipsize(std::string_view utf8, float size, float max_width) const
+  [[nodiscard]] virtual auto has_real_bold() const -> bool { return false; }  [[nodiscard]] virtual auto ellipsize(std::string_view utf8, float size, float max_width) const
       -> std::string = 0;
   [[nodiscard]] virtual auto wrap(std::string_view utf8, float size, float max_width) const
       -> std::vector<std::string_view> = 0;
@@ -61,6 +110,17 @@ class NullTextPort final : public TextPort {
       std::string_view utf8, float size,
       text::FontRole role = text::FontRole::Proportional) const -> float override;
   [[nodiscard]] auto line_height(float size) const -> float override;
+  [[nodiscard]] auto ascent(float size) const -> float override;
+  [[nodiscard]] auto descent(float size) const -> float override;
+  /// 无字体环境：报不出墨迹量 → 调用方退回行盒居中（`nullopt`）。
+  [[nodiscard]] auto ink_metrics(std::string_view utf8, float size,
+                                 text::FontRole role = text::FontRole::Proportional) const
+      -> std::optional<InkMetrics> override {
+    (void)utf8;
+    (void)size;
+    (void)role;
+    return std::nullopt;
+  }
   /// `bold=true` = 该字重**已由真粗体字体面承担**（见 `prefers_real_bold`）：
   /// 此时合成加粗不要叠加（叠了会把已加粗的字再撑开，字腔粘住）。
   void draw(raster::Surface& canvas, std::string_view utf8, math::Point origin, float size,
@@ -114,6 +174,33 @@ class NullTextPort final : public TextPort {
 /// 叠加合成加粗补足）；`Medium`/`SemiBold` 在系统里没有对应字体面，仍走合成加粗。
 [[nodiscard]] inline auto prefers_real_bold(FontWeight weight) noexcept -> bool {
   return weight == FontWeight::Bold;
+}
+
+/// 一行文本的**行盒顶**（= 传给 `TextPort::draw` 的 origin.y），使它在一段高度里居中。
+///
+/// 对齐的是**墨迹**（`ink_metrics`）而不是行盒：行盒含字体预留的头尾空间。
+/// 实测 DejaVu Sans 的 `hhea.ascender = 0.928em`，而大写字母的墨迹只有
+/// `0.729em`（小写 `x-height` 更低，`0.547em`）——按行盒居中会把文字
+/// **系统性推下约 2.5px**（用户报的"按钮文字没有居中"）。
+///
+/// 端口报不出墨迹时（无字体环境）退回行盒居中。
+///
+/// **全仓所有"把一行字放进一个盒子"的绘制都应走这里**（`Element::paint_text`、
+/// 按钮标签、菜单项、表格单元格、键值行……）：各自算一份的结果是
+/// "某些组件的字偏一两像素"——单看都正常，并排就能看出。
+[[nodiscard]] inline auto centered_line_top(const TextPort& port, std::string_view text, float size,
+                                            float box_y, float box_height) -> float {
+  const float line = port.line_height(size);
+  const float box_centered = box_y + (box_height - line) * 0.5f;
+  const auto ink = port.ink_metrics(text, size);
+  if (!ink) return box_centered;
+  // 墨迹中心相对行盒顶的位置：
+  //   行盒顶 → 基线   = `shaped_ascent`（与 `draw` 同源；**不要**用 `ascent(size)`）
+  //   基线   → 墨迹中心 = `above - (above + below) / 2`
+  // 目标是它落在行盒中心（`line / 2`）上，差值即需要下移的量。
+  const float ink_center_from_top =
+      port.shaped_ascent(text, size) - (ink->above + ink->below) * 0.5f;
+  return box_centered + (line * 0.5f - ink_center_from_top);
 }
 
 }  // namespace st::ui

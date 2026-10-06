@@ -194,7 +194,7 @@ void UiRoot::paint(raster::Surface& canvas) {
   context.painted_elements = &painted_elements_;
   // 叠加层在内容之后绘制（浮层在景上；与 paint_frame 同一 z 序，见其注释）。
   if (content_ != nullptr) paint_subtree(context, *content_, canvas);
-  for (auto& overlay : overlays_) overlay->paint(context, canvas);
+  paint_overlays(context, canvas);
   // ⚠ 必须在**所有绘制之后**汇总。
   //
   // 早先这一行放在内容绘制之前（插在了浮层绘制后面）——于是它看不到本帧刚产生的
@@ -203,6 +203,44 @@ void UiRoot::paint(raster::Surface& canvas) {
   // 现象：鼠标划过某项时过渡走到 1.0，移开后开始淡出却停在 1.0 → **该项永久高亮**，
   // 侧栏看起来有两个"选中项"（实测现象）。
   collect_animation_requests();
+}
+
+/// 逐个绘制叠加层，并在**两个绘制之间**回收上一轮摘除的对象。
+///
+/// 为什么不能直接 `for (auto& overlay : overlays_) overlay->paint(...)`：
+/// 叠加层的 `paint` **可以摘除自己**（单帧不再重绘的约定）——`Toast` 的自动消失就是
+/// 在 `paint` 里置 `expired_`、`record_damage()`、调 `on_dismiss()`，而宿主的
+/// `on_dismiss` 会 `remove_overlay`。若那时 `dispatching_` 为假（帧循环里就是如此），
+/// `remove_overlay` 会**立即释放**该对象，而它的 `paint` 还在栈上——
+/// 回调返回后继续读成员就是 use-after-free。
+///
+/// 这不是假想：ASan 实测（2026-10-06 主题轮，`tools/` 里的重现脚本）给出的现场是
+/// `Toast::paint → on_dismiss → 宿主 lambda 读已释放的 Toast` 与
+/// `paint_frame 的 overlays 循环 → Toast::paint → on_dismiss` 两条都指着同一块内存。
+/// 症状是偶发 SIGSEGV（依赖编译器把窄回调优化成内联还是真调用，因而是脆弱的）。
+///
+/// 修法与事件派发**同源**（`dispatch` 的 `graveyard_`）：绘制期间摘除的一律进墓场，
+/// 延到本轮绘制结束再统一释放。这样指针在整个绘制过程里始终有效。
+void UiRoot::paint_overlays(const RenderContext& context, raster::Surface& canvas) {
+  // 只对**当轮**的叠加层遍历：paint 内部新加的（如弹层链式打开）下一帧才画，
+  // 与 `dispatch` 的"派发期间不改容器"同一约定。
+  //
+  // 游标不用 `for (auto& overlay : overlays_)`：叠加层的 `paint` 可能经
+  // `remove_overlay` 改动容器（见 `remove_overlay` 的注释），范围 for 的迭代器
+  // 会当场失效。按下标 + 每轮重查 `size()` 是安全的形式。
+  const bool was_painting = painting_overlays_;
+  painting_overlays_ = true;
+  const std::size_t count = overlays_.size();
+  for (std::size_t index = 0; index < count; ++index) {
+    if (index >= overlays_.size()) break;  // 自己或别人把它摘了
+    overlays_[index]->paint(context, canvas);
+    // 本叠加层摘除了自己（或别人）：先回收墓场再继续。
+    // 回收必须在**当前对象已绘制完**之后（此时它的栈帧已退，不再有人持其指针）。
+    reap_overlays();
+  }
+  painting_overlays_ = was_painting;
+  // 统一收尾：`paint` 里摘除的都延到这里才真的析构（与事件派发同源）。
+  reap_overlays();
 }
 
 void UiRoot::paint_subtree(const RenderContext& context, Element& element, raster::Surface& canvas) {
@@ -260,6 +298,13 @@ auto UiRoot::dispatch_to(Element& element, Event& event) -> bool {
   bool handled = false;
   for (Element* current = &element; current != nullptr; current = current->parent()) {
     if (current->on_event(context, event)) {
+      handled = true;
+      break;
+    }
+    // 行为注入的 handler 在**组件自身未消费之后**给机会（免子类化的小交互）。
+    // 放在这一层而不是让每个组件覆写自己调：覆写点有二十多个，漏一个就是
+    // “设了处理器、无报错、无效果”的静默失效（实测：`Input` 的 ↑↓ 历史就是这样丢的）。
+    if (current->invoke_event_handler(event)) {
       handled = true;
       break;
     }
@@ -790,7 +835,9 @@ auto UiRoot::paint_frame(raster::Surface& canvas) -> bool {
     canvas.fill_rect(clipped_damage, raster::Paint::solid(theme_.colors().bg), 0.0f,
                      raster::DrawOptions{.blend = raster::BlendMode::Src});
     if (content_ != nullptr) paint_subtree(context, *content_, canvas);
-    for (auto& overlay : overlays_) overlay->paint(context, canvas);
+    // 叠加层绘制与回收走 `paint_overlays`（`paint` 里摘除自己的那条路要延后析构，
+    // 见其注释——范围 for 在这里会因容器被改而迭代器失效）。
+    paint_overlays(context, canvas);
     canvas.pop_clip();
     last_frame_partial_ = true;
     dirty_rect_ = clipped_damage.round_out();
@@ -842,7 +889,12 @@ void UiRoot::remove_overlay(Element* overlay) {
       // 修法：从激活列表里立即摘掉（`find/query/绘制/命中` 当场看不到它），
       // 但**对象延到事件派发结束或下一帧布局前再释放**——指针保持有效，
       // 回溯链上的任何访问都不会踩到已释放内存。
-      if (dispatching_) {
+      //
+      // **叠加层自身也可能主动摘除自己**（`Toast` 在 `paint` 里到期）——那条路径
+      // 上 `dispatching_` 为假，曾经就是**立即 delete**，而它的 `paint` 栈帧
+      // 还在用 `this`（ASan 现场见 `paint_overlays` 的注释）。现在只要处于
+      // "正在绘制叠加层"或"正在派发事件"，就一律进墓场延后释放。
+      if (dispatching_ || painting_overlays_) {
         graveyard_.push_back(std::move(*iterator));
       }
       const auto index = static_cast<std::size_t>(std::distance(overlays_.begin(), iterator));

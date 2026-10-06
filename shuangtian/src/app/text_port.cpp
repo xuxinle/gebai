@@ -18,6 +18,29 @@ auto RendererTextPort::line_height(float size) const -> float {
   return renderer_.line_height(size);
 }
 
+auto RendererTextPort::ascent(float size) const -> float { return renderer_.ascent(size); }
+
+auto RendererTextPort::descent(float size) const -> float {
+  // 由行高与基线位反推（渲染器不单独暴露 descent）：行盒 = ascent + descent。
+  const float height = renderer_.line_height(size);
+  const float top = renderer_.ascent(size);
+  return height > top ? height - top : 0.0f;
+}
+
+auto RendererTextPort::shaped_ascent(std::string_view utf8, float size, text::FontRole role) const
+    -> float {
+  return renderer_.shaped_ascent(utf8, size, role);
+}
+
+auto RendererTextPort::ink_metrics(std::string_view utf8, float size, text::FontRole role) const
+    -> std::optional<InkMetrics> {
+  // `text` 与 `ui` 两层各自声明了同名结构（`ui` 层刻意不依赖 `text` 层的类型，
+  // 见 `text_port.hpp` 的依赖倒置说明）——这里显式转换，不靠隐式。
+  const auto ink = renderer_.ink_metrics(utf8, size, role);
+  if (!ink) return std::nullopt;
+  return InkMetrics{ink->above, ink->below};
+}
+
 void RendererTextPort::draw(raster::Surface& canvas, std::string_view utf8, math::Point origin,
                             float size, math::Color color, text::FontRole role,
                             float embolden, bool bold) const {

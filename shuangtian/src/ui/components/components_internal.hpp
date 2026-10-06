@@ -76,15 +76,65 @@ inline void fill_round_rect(raster::Surface& canvas, math::Rect rect, float radi
   fill_round_rect(canvas, rect, radius, radius, radius, radius, raster::Paint::solid(color));
 }
 
-/// 单行文本（省略号截断 + 垂直居中，左对齐；标题 / 单元格 / 按钮标签通用）。
+/// **顶部内高光**（亚克力的「玻璃边缘」）：在圆角内沿顶边画一条
+/// `width` 高的横向渐变亮线（两端 alpha 归零）。
+///
+/// 为什么不是一条等宽实线：等宽线在两端会被读成「多了一道边框」，
+/// 而玻璃边缘的受光是中间强、向两侧衰减的。渐变两端归零后自然消失在圆角处，
+/// 也就不需要在圆角处另做处理（仍会裁剪到圆角内，免得直角探出）。
+///
+/// 与 `Element::paint_box` 里那份是同一套几何：组件自绘底时（弹层/菜单/对话框）
+/// 没有 `style_.top_highlight` 可填，只能自己调本函数，两边必须看起来一样。
+inline void draw_glass_edge(const RenderContext& context, raster::Surface& canvas, math::Rect rect,
+                            float radius, float width = 1.0f) {
+  const math::Color edge = context.theme.colors().highlight;
+  if (edge.a == 0U || width <= 0.0f || rect.is_empty()) return;
+  const math::Color fading = edge.with_alpha(0);
+  const math::Rect band{rect.x, rect.y, rect.width, width};
+  const raster::Gradient gradient = raster::Gradient::linear(
+      math::Point{band.x, band.y}, math::Point{band.right(), band.y},
+      std::vector<raster::GradientStop>{raster::GradientStop{0.0f, fading},
+                                        raster::GradientStop{0.5f, edge},
+                                        raster::GradientStop{1.0f, fading}});
+  if (radius > 0.0f) canvas.push_clip_rounded_rect(rect, radius);
+  canvas.fill_rect(band, raster::Paint::with_gradient(gradient));
+  if (radius > 0.0f) canvas.pop_clip();
+}
+
+/// 弹层表面三件套：阴影（环境层 + 关键层）→ `surface_raised` 底 → 玻璃边缘。
+///
+/// 存在的理由：菜单 / 对话框 / 气泡 / 命令面板五处各自抄过一段几乎相同的
+/// 「画阴影 + 填底」，而亚克力把「抬升感」托付给了这三步的组合——
+/// 分散写的话，改一处漏一处的结果是“某个浮层没有边缘光”，肉眼看得出、测试难抓。
+inline void paint_raised_surface(const RenderContext& context, raster::Surface& canvas,
+                                 math::Rect rect, float radius, const Shadow& shadow) {
+  if (rect.is_empty()) return;
+  const Palette& colors = context.theme.colors();
+  if (shadow.visible()) {
+    const bool has_ambient = shadow.second_visible();
+    canvas.draw_shadow_layered(
+        rect, radius, shadow.color, shadow.blur,
+        math::Point{shadow.offset_x, shadow.offset_y},
+        has_ambient ? shadow.color2 : math::Color{0, 0, 0, 0},
+        has_ambient ? shadow.blur2 : 0.0f,
+        math::Point{shadow.offset2_x, shadow.offset2_y});
+  }
+  fill_round_rect(canvas, rect, radius, colors.surface_raised);
+  draw_glass_edge(context, canvas, rect, radius);
+}
+
+/// 单行文本（省略号截断 + **按墨迹区**垂直居中，左对齐；标题 / 单元格 / 按钮标签通用）。
+///
+/// 居中口径由 `st::ui::centered_line_top` 统一给（见 `text_port.hpp`）——那是全仓唯一的
+/// "把一行字放进盒子"公式；按钮 / 菜单 / 表格各自算一份时，改一处漏一处的表现
+/// 就是"某些组件的字偏一两像素"。
 inline void draw_line(const RenderContext& context, raster::Surface& canvas, std::string_view text,
                       math::Rect box, float size, math::Color color) {
   if (text.empty() || box.width <= 0.0f || box.height <= 0.0f) return;
   const TextPort& port = text_port_of(context);
   const std::string clipped = port.ellipsize(text, size, box.width);
   if (clipped.empty()) return;
-  const float line = port.line_height(size);
-  const float y = box.y + (box.height - line) * 0.5f;
+  const float y = centered_line_top(port, clipped, size, box.y, box.height);
   port.draw(canvas, clipped, math::Point{box.x, y}, size, color);
 }
 

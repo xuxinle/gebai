@@ -14,7 +14,9 @@
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
 #include "st/core/wait.hpp"
+#include "st/ext/json.hpp"
 #include "st/text/text.hpp"
+#include "st/ui/theme_io.hpp"
 
 namespace st::app {
 namespace {
@@ -143,6 +145,13 @@ auto resolve_ui_font_scale(std::string_view mode) -> float {
   return theme;
 }
 
+/// 解析生效的自定义主题文件（命令行 > `ST_THEME_FILE`）。
+[[nodiscard]] auto resolve_theme_file(std::string_view configured) -> std::string {
+  if (!configured.empty()) return std::string(configured);
+  const auto from_env = fs::read_env("ST_THEME_FILE");
+  return from_env.has_value() ? *from_env : std::string{};
+}
+
 struct Application::Impl {
   shell::Backend* backend{nullptr};
   std::unique_ptr<shell::Backend> backend_holder{};
@@ -158,6 +167,15 @@ struct Application::Impl {
   float device_scale{1.0f};
   /// 界面字号缩放（构造时解析一次，切主题时复用）——见 `Metrics::scale_fonts`。
   float font_scale{1.0f};
+  /// 主题文件的**原文**（含 `base`；合成时跳过 `base`，它由 `apply_theme_file` 消费）。
+  /// 住 `Impl` 而不是 `Application` 成员：`Json` 在 `app.hpp` 里只有前向声明
+  /// （该头刻意不拉入 nlohmann 的 25,526 行），而**成员必须是完整类型**。
+  Json theme_spec{Json::object()};
+  /// 运行期 `theme.set` 累加的覆盖（优先级最高）。
+  ///
+  /// 必须**累加**而不是替换：控制通道分多次发 `colors` / `metrics` 时，
+  /// 后一笔不能把前一笔抹掉。
+  Json runtime_overlay{Json::object()};
   double last_frame_ms{0.0};
   /// 最后一帧的分阶段耗时（排版/绘制/送显），用于定位"帧耗时高"到底花在哪里。
   double layout_ms{0.0};
@@ -194,6 +212,83 @@ Application::Application(std::string name, std::string version, AppOptions optio
     impl_->log_lines.push_back(std::format("[{}] {}", to_string(level), message));
     if (impl_->log_lines.size() > 512) impl_->log_lines.erase(impl_->log_lines.begin());
   });
+  // **自定义主题在日志监听器之后加载**：加载失败要写告警，而告警必须能被
+  // 控制通道的 `logs` 读到（否则"主题没生效"在自动化流程里完全不可见）。
+  apply_theme_file();
+}
+
+/// 装载 `--theme-file` / `ST_THEME_FILE` 指定的自定义主题（无配置时不动）。
+///
+/// 失败**不阻止启动**：主题是外观配置而非运行前提。但也不能静默——
+/// 用户改了文件却没生效，是本类问题里最难查的一种（与"JSON 未知键要报错"同一个理由）。
+void Application::apply_theme_file() {
+  const std::string path = resolve_theme_file(options_.theme_file);
+  if (path.empty()) return;
+  options_.theme_file = path;
+  // **先只读出配置本身**（不构造成品主题）：切模式时要拿它重新叠。
+  const auto file_json = ui::load_theme_json_file(path);
+  if (!file_json) {
+    log::warn("自定义主题加载失败，已退回内置主题：{}", file_json.error().message);
+    return;
+  }
+  // ⚠ `base` 是**基准选择器**，不是覆盖项：它决定用哪个内置主题做底。
+  // 所以要在同一处、一次就从 JSON 里消费掉——留着它会让后面每次叠覆盖都报
+  // "base 与当前模式不符"（实测踩过：文件里写着 `base: "dark"`，于是切到亮色后
+  // **整份文件覆盖都被拒绝**，用户看到的是"我的配色全没了"）。
+  impl_->theme_spec = file_json->is_object() ? *file_json : Json::object();
+  ui::ThemeMode base_mode = options_.theme;
+  if (const auto* base_value = json_find(impl_->theme_spec, "base"); base_value != nullptr) {
+    const std::string base = json_as_string(*base_value, "");
+    const auto parsed = ui::theme_mode_from_name(base);
+    if (!parsed) {
+      log::warn("自定义主题加载失败，已退回内置主题：未知基准主题 base=\"{}\"", base);
+      impl_->theme_spec = Json::object();
+      return;
+    }
+    base_mode = *parsed;
+  }
+  // **先校验后落地**：在拷贝上走一遍完整合成，失败则回退内置且不改任何状态。
+  const auto composed = compose_theme_with(base_mode, impl_->runtime_overlay);
+  if (!composed) {
+    log::warn("自定义主题加载失败，已退回内置主题：{}", composed.error().message);
+    impl_->theme_spec = Json::object();
+    return;
+  }
+  custom_theme_ = *composed;
+  options_.theme = base_mode;
+  root_.set_theme(custom_theme_);
+}
+
+/// 重新构造生效主题（内置基准 + 文件覆盖 + 运行期覆盖）。
+///
+/// 一切会改变生效主题的动作（切模式、控制通道 `theme.set`）都走这里，
+/// 而不是各自拼一份——否则"三层来源的优先级"就会在多个地方各实现一遍，
+/// 迟早不一致（实测已踩：切模式时直接重读文件，把运行期改色静默抹掉）。
+///
+/// 优先级（后者覆盖前者）：内置基准 → 主题文件 → 运行期 `theme.set`。
+[[nodiscard]] auto Application::compose_theme(ui::ThemeMode mode) const -> Result<ui::Theme> {
+  return compose_theme_with(mode, impl_->runtime_overlay);
+}
+
+/// `compose_theme` 的显式变体：用指定的运行期覆盖（供"先校验后落地"用）。
+///
+/// `base` 在这里被**跳过**：它是基准选择器（由 `apply_theme_file` 消费），
+/// 不是覆盖项。留着它会让每次叠覆盖都报"与当前模式不符"。
+[[nodiscard]] auto Application::compose_theme_with(ui::ThemeMode mode,
+                                                   const Json& runtime) const
+    -> Result<ui::Theme> {
+  ui::Theme theme = scaled_theme(mode, impl_->font_scale);
+  if (impl_->theme_spec.is_object() && !impl_->theme_spec.empty()) {
+    Json spec = impl_->theme_spec;
+    spec.erase("base");
+    const auto applied = ui::apply_theme_overrides(theme, spec);
+    if (!applied) return forward_error(applied.error());
+  }
+  if (runtime.is_object() && !runtime.empty()) {
+    const auto applied = ui::apply_theme_overrides(theme, runtime);
+    if (!applied) return forward_error(applied.error());
+  }
+  return theme;
 }
 
 auto Application::backend_name() const -> std::string_view {
@@ -277,9 +372,16 @@ void Application::request_repaint() {
 }
 
 void Application::set_theme_mode(ui::ThemeMode mode) {
-  // **必须带上字号缩放**：主题对象自带 `Metrics`，直接 `Theme::by_mode` 会把
-  // `--ui-font-scale` 调好的字号悄悄还原（切主题 → 字号跳回去）。
-  root_.set_theme(scaled_theme(mode, impl_->font_scale));
+  // 三种来源（内置基准 / 主题文件 / 运行期改色）的合成统一走 `compose_theme`：
+  // 早先是"切模式时直接重读文件"，于是运行期用 `theme.set` 改过的色
+  // 会在切一次亮暗后被**静默抹掉**（用户看到"我设的颜色过一会儿就没了"）。
+  const auto composed = compose_theme(mode);
+  if (!composed) {
+    log::warn("切换主题失败，保持当前主题：{}", composed.error().message);
+    return;
+  }
+  custom_theme_ = *composed;
+  root_.set_theme(custom_theme_);
   options_.theme = mode;
   // **gamma 跟着主题走**：不切的话深色会拿到浅色标定的值（偏亮）、浅色拿到深色的（偏暗）。
   // 只在用户没显式配置时覆盖——显式值是他自己要的，不该被主题悄悄改掉。
@@ -287,6 +389,21 @@ void Application::set_theme_mode(ui::ThemeMode mode) {
     impl_->renderer->set_coverage_gamma(default_gamma_for(mode));
   }
 }
+
+auto Application::apply_theme_overrides(const st::Json& overrides) -> Status {
+  // 先**校验并并合**：失败时 `impl_->runtime_overlay` 与界面都不变。
+  Json merged = impl_->runtime_overlay.is_object() ? impl_->runtime_overlay : Json::object();
+  const auto combined = ui::merge_overrides(merged, overrides);
+  if (!combined) return forward_error(combined.error());
+  const auto composed = compose_theme_with(options_.theme, *combined);
+  if (!composed) return forward_error(composed.error());
+  impl_->runtime_overlay = *combined;
+  custom_theme_ = *composed;
+  root_.set_theme(custom_theme_);
+  return {};
+}
+
+auto Application::theme_snapshot() const -> st::Json { return ui::theme_to_json(root_.theme()); }
 
 auto Application::quit_requested() const noexcept -> bool { return impl_->quit; }
 

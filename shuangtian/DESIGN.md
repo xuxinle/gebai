@@ -1880,6 +1880,13 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
   到相邻面板之上（实测：侧栏 Git 变更项的路径叠在代码编辑器上）。
 - **`Spacer` 的非负尺寸**：`arrange` 把副轴尺寸夹到 `≥ 0`（容器比占位块矮时，
   旧实现会给出负高度矩形——协议/测试读到的“这块多大”不该是负数）。
+- **`ScrollView::set_follow_end(bool)` / `at_end()`**：跟随底部是**持续意图**，
+  在 `arrange` 里量完新几何后执行。调用方自己 `scroll_to(1e9)` 不行——
+  `max_scroll()` 取的是上一次布局的 `content_height_`，会被旧上限夹住（详见 BACKLOG）。
+- **`Element::set_event_handler` 由分发层统一调用**：组件覆写 `on_event` 不再让它失效
+  （旧行为：任何覆写了 `on_event` 的组件上装的 handler 永远不被调用）。
+- **`Text` 显示多行内容必须 `set_multiline(true)`**：缺省是单行省略，
+  用它显示日志/滚回时不报错、内容也不丢——只是全被折在一行里。
 - **FileDialog**：打开/保存（目录导航 + 自绘文件列表 + 自绘文件名输入行 +
   `on_confirm(full_path)`/`on_cancel`；fs 失败呈现错误行不崩溃）。
 - **工具链（stpm）**：**Windows 默认 g++（MinGW-w64，主版本 ≥ 13）**，MSVC 可回退——
@@ -2428,39 +2435,154 @@ class Compositor {                                  // UI 图层 → GPU 合成
 
 ## 5. 设计系统（token）
 
-**品牌意象**：霜天——冷冽清晨、冰蓝与霜白。中性色偏冷，品牌色取**冰蓝**，辅以**青色**点缀；深色模式为「极夜霜原」。
+**品牌意象**：**亚克力黑白**（与歌白同名主题同源）——近中性而略偏冷的层叠表面，
+层次靠**表面阶梯 + 描边 + 内高光 + 柔和阴影**表达，而不是靠高饱和品牌色。
+亮色为「白色亚克力」（近白面板叠在冷灰底上），暗色为「黑色亚克力」（近黑面板逐级抬升）。
+
+> **自绘管线没有 `backdrop-filter`**：歌白用半透明面板 + 毛玻璃，霜天把同样的 alpha
+> **预合成成实色**（如 `rgba(255,255,255,0.8)` 叠在 `#E8E8EE` 上 = `#FAFAFC`）。
+> 玻璃感因此靠 `highlight`（顶部内高光）+ 阴影重建，而不是靠模糊。
 
 | 类别 | token | 亮色 | 暗色 |
 |---|---|---|---|
-| 背景 | `bg` | `#F6F8FC` | `#0A0F1A` |
-| 表面 | `surface` | `#FFFFFF` | `#121A2B` |
-| 表面次 | `surface_alt` | `#EEF2F9` | `#1A2438` |
-| 边框 | `border` | `#DDE4EF` | `#26324A` |
-| 边框强 | `border_strong` | `#C3CEDF` | `#33425F` |
-| 文本 | `text` | `#0F172A` | `#E8EEF9` |
-| 次要文本 | `text_muted` | `#64748B` | `#94A3BD` |
-| 弱文本 | `text_faint` | `#94A3B8` | `#64748B` |
-| 主色 | `primary` | `#2563EB` | `#4C8DFF` |
-| 主色 hover | `primary_hover` | `#1D4ED8` | `#6BA1FF` |
-| 主色弱底 | `primary_soft` | `#E4ECFE` | `#16233D` |
-| 强调 | `accent` | `#0891B2` | `#22D3EE` |
-| 成功 | `success` | `#059669` | `#34D399` |
-| 警告 | `warning` | `#D97706` | `#FBBF24` |
-| 危险 | `danger` | `#DC2626` | `#F87171` |
-| 焦点环 | `focus_ring` | `#2563EB66` | `#4C8DFF66` |
+| 背景 | `bg` | `#E8E8EE` | `#08080A` |
+| 面板 | `surface` | `#FAFAFC` | `#15151A` |
+| 面板次 | `surface_alt` | `#EDEDF2` | `#1F1F26` |
+| 凹槽 | `surface_sunken` | `#DDDDE4` | `#050507` |
+| 抬升面（弹层） | `surface_raised` | `#FFFFFF` | `#25252D` |
+| 边框 | `border` | `#D2D2D9` | `#313136` |
+| 边框强 | `border_strong` | `#B8B8C1` | `#4A4A4E` |
+| 分隔线（弱） | `border_subtle` | `#E1E1E7` | `#2A2A2E` |
+| 文本 | `text` | `#141418` | `#F2F2F5` |
+| 次要文本 | `text_muted` | `#4E4E5A` | `#B4B4BE` |
+| 弱文本 | `text_faint` | `#6E6E7C` | `#80808C` |
+| 主色 | `primary` | `#4655D8` | `#8B9AFF` |
+| 主色 hover | `primary_hover` | `#3A48C8` | `#A0ADFF` |
+| 主色弱底 | `primary_soft` | `#EDEEF9` | `#282B40` |
+| 强调 | `accent` | `#0E849C` | `#6FD8E8` |
+| 成功 | `success` | `#1B8B55` | `#55D396` |
+| 警告 | `warning` | `#8F6614` | `#E6BD6D` |
+| 危险 | `danger` | `#D13B40` | `#FF7A7A` |
+| 焦点环 | `focus_ring` | `#4655D866` | `#8B9AFF66` |
+| **顶部内高光** | `highlight` | 透明（浅底用 `border` 收边） | `#2F2F33` |
+
+**三条改 token 时必须守的约定**（对应 `tests/ui_theme_test.cpp` 的断言）：
+
+1. **表面阶梯要逐级可辨**：`bg`→`surface`、`surface`→`surface_alt` 相邻对比 ≥ 1.08；
+   凹槽在两个模式下都**比背景更暗**（语义是「凹进去」，不随亮暗反转）。
+2. **`surface_raised` 永远不比 `surface` 暗**：深色下阴影几乎不可见，弹层只能靠底色抬升。
+3. **`highlight` 只在深色档有效**：浅底已近纯白，叠白光不可见（歌白浅色档用的是
+   一条**暗色发丝线**，而那正是 `border` 的职责，不重复一层）。
 
 | 类别 | token | 值 |
 |---|---|---|
 | 间距 | `space.xs/sm/md/lg/xl/2xl` | 4 / 8 / 12 / 16 / 24 / 32 |
 | 圆角 | `radius.sm/md/lg/xl/pill` | 6 / 10 / 14 / 20 / 999 |
-| 字号 | `font.xs/sm/base/lg/xl/2xl/3xl` | 12 / 13 / 14 / 16 / 20 / 26 / 34 |
+| 字号 | `font.xs/sm/base/lg/xl/2xl/3xl` | 13 / 14 / 15 / 17 / 20 / 26 / 34 |
 | 行高 | 倍数 | 1.45（正文）/ 1.25（标题）/ 1.6（Markdown 段落） |
 | 字重 | `regular/medium/semibold/bold` | 400 / 500 / 600 / 700 |
-| 阴影 | `shadow.sm/md/lg` | 2/8/24 模糊，`rgba(15,23,42,0.06/0.10/0.18)`，y 偏移 1/2/6 |
+| 阴影 | `shadow.sm/md/lg` | 关键层 3/6/10 模糊 + 环境层 10/22/40，基色 `#0A0A12` α 0x26 |
+| 阴影响度 | `shadow_strength` / `shadow_spread` | 1.0 / 1.0（自定义主题可调；非正值忽略） |
 | 动效 | `motion.fast/normal/slow` | 120 / 180 / 260 ms |
 | 缓动 | `ease.standard/entrance/exit` | `cubic-bezier(0.2,0,0,1)` / `(0,0,0.2,1)` / `(0.4,0,1,1)` |
 
-排版原则：4px 栅格；文本对比度 ≥ 4.5:1（正文）/ 3:1（大字与图形）；1px 发丝边框统一 `border`；聚焦态一律焦点环；动效只用于状态过渡（不做装饰性抖动）。
+排版原则：4px 栅格；文本对比度 ≥ 4.5:1（正文）/ 4.0:1（辅助小字）/ 3:1（大字与图形）；
+1px 发丝边框统一 `border`；聚焦态一律焦点环；动效只用于状态过渡（不做装饰性抖动）。
+
+### 5.0.1 交互态的底色变化（一份状态、一个机制）
+
+悬浮与按下改变底色的地方**只有一处**：`Element::paint_box`。规则：
+
+- 底色**不透明**时按亮度同向调整（深底提亮 / 浅底压暗），幅度取
+  `surface_hover` 相对 `surface` 的实际明度偏移（**不是 alpha**——亚克力调色板里
+  这两个 token 已是实色，用 alpha 会得到荒谬的 0.45 幅度）；
+- 底色**透明**时（Ghost）平铺一层 `surface_hover`；
+- **按下比悬停再深一档**（系数 1.6），否则两者像素完全相同、看不出"按下去了"；
+- **色相必须保住**：主按钮悬停后仍看得出是蓝的（只差一档明度）。
+
+**组件不要自己按 `hovered_`/`pressed_` 算悬浮色**。`apply_theme` 只在
+`UiRoot::layout` 里跑（见 §4.2.6），而悬停/按下**只标重绘、不触发布局**——
+组件里那份分支算出的色会永远停在旧状态（实测：真实应用里按下态与悬停态像素完全一样）。
+两处同时做还会**叠乘**（组件一层 + 通用层），`Variant::Soft` 因此被洗成中性灰。
+`Button::apply_theme` 因此只管各变体的**常态语气**。
+
+### 5.0.2 单行文本的垂直居中（一份口径）
+
+把一行字放进一个盒子时，**对齐的是墨迹，不是行盒**。全仓唯一公式：
+`st::ui::centered_line_top`（`include/st/ui/text_port.hpp`）。
+
+两条必须守的约定（各对应一个实测缺陷）：
+
+1. **不能用行盒居中**。`line_height` 是字体的行盒（含大把头尾预留）：
+   实测 DejaVu Sans 的 `hhea.ascender = 0.928em`，而大写字母的墨迹只有
+   `cap = 0.729em`（小写 `x-height` 更低，`0.547em`）。按行盒居中会把文字
+   **系统性推下约 2.4px**（实测 5 个按钮平均偏差 +2.35px）。
+   依据必须是 `TextPort::ink_metrics`（字形包围盒顶/底）。
+2. **基线位不能用 `ascent(size)`**。`TextPort::draw` 排版时取的是**跨 run 的最大
+   ascender**（汉字回退到 CJK 面时明显大于主面），而 `ascent(size)` 只反映主面。
+   拿它代儙会有系统性残差——实测第一版“改了跟没改差不多”
+   （偏差反而从 +2.50 变 +3.50）。正确来源是 `shaped_ascent(utf8, size)`。
+
+端口报不出墨迹时（无字体环境）自动退回行盒居中。新增绘制文本的地方
+（组件/装饰层）请直接调 `centered_line_top`，**不要各自算一份**——
+那样改一处漏一处的表现是“某些组件的字偏一两像素”，单看都正常、并排才看得出。
+
+### 5.0.3 卡片描边的像素对齐
+
+卡片边框是**向内**的环形填充，所以只要外缘落在整像素上，1px 的边就恰好盖满
+一整行（列）像素。`Element::paint_box` 因此把矩形 **`round` 到整像素后再画边**。
+
+不对齐时外缘被抗锯齿摊在两行、各约 50%——肉眼看到的就是“边缘不够平滑”。
+实测：小数坐标的卡片上缘 `#131317 + #2a2a2f` 两行各半（峰值 84/126），
+对齐后是一行满值 `#313136`（峰值 126/126）。
+
+**只对齐边框这一道**，不对齐背景/阴影/文本：它们的观感取决于面积与连续位置，
+硬吸到格上会让卡片高度跳变、圆角起阶梯（弧线无法同时对齐两边）。
+
+> 回归判据见 `tests/paint_optimization_test.cpp` 的
+> `border_edge_lands_on_whole_pixels_after_snapping`——它走**真实的 `Element::paint_box`**。
+> 该用例第一版是自己造两个矩形直接调 ring 函数，结果**回退实现后仍然全绿**
+> （它量的是“手写的对齐 vs 手写的不对齐”，根本没经过被测代码）。
+
+### 5.1 主题自定义（`st/ui/theme_io.hpp`）
+
+`Theme` 是运行期对象，不能直接当配置格式（字段改名会破坏所有既有主题文件，
+也无法表达「只改两项、其余继承基准」）。自定义主题因此是**稀疏覆盖**：
+
+```json
+{
+  "name": "coral-dusk",
+  "base": "dark",
+  "colors": { "primary": "#FF7A59", "border": "rgba(255,255,255,0.14)" },
+  "metrics": { "radius_md": 12, "shadow_strength": 1.6 },
+  "font_family": "Noto Sans CJK SC"
+}
+```
+
+**三层来源，后者覆盖前者**（统一由 `Application::compose_theme_with` 合成）：
+
+| 层 | 来源 | 典型用途 |
+|---|---|---|
+| 基准 | `base` 选定的内置主题（`light`/`dark`） | 决定 `mode()`（影响文本 gamma、卡片描边强度） |
+| 文件 | `--theme-file PATH` / `ST_THEME_FILE` | 产品皮肤、用户偏好的持久配置 |
+| 运行期 | 控制通道 `theme` 的 `set`（**累加**） | 智能体/设置面板边调边看 |
+
+关键约定（每条都对应一个实测缺陷）：
+
+- **`base` 在装载时被消费掉，不参与覆盖合成**。留在 JSON 里会让&#27599;次叠覆盖都报
+  「与当前模式不符」——实测现象是「切一次亮暗，整份自定义配色全没了」。
+- **未知 token 一律报错并列出键名**。静默忽略会变成「我改了但没生效」，
+  是这类配置里最难查的一种。
+- **`set` 累加而不替换**：控制通道分多次发 `colors` / `metrics` 时，
+  后一笔不能把前一笔抹掉。
+- **装载/切模式失败不改变任何状态**（先在拷贝上跑一遍完整合成再落地）。
+- 颜色语法取 `#RGB` / `#RRGGBB` / `#RRGGBBAA` / `rgb()` / `rgba()`；
+  `rgba()` 是为了让从 CSS（歌白主题文件）搬来的值能直接粘。
+  小数 alpha（`0.5`）与整数 alpha（`128`）**靠有没有小数点区分**。
+
+验证设施：`tests/ui_theme_io_test.cpp`（令牌名表往返、颜色语法、失败安全、
+稀疏覆盖累加）+ `tools/theme_reverse_verify.py`（逐条回退改动、断言必须变红）
++ `tools/theme_file_e2e.py`（真进程验两条装载路径）。
 
 ## 6. 控制协议规范（`st-control/1`）
 
@@ -3276,7 +3398,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
 | 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case
- 超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑） | `st test` | 全绿（**771 用例 / 18099 断言**，debug 档实测；`st test --san` 全绿 0 报告；另 12 个慢用例默认跳过） |
+ 超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑） | `st test` | **803 用例 / 19636 断言**（debug 档实测；`st test --san` 全绿 0 报告；另 12 个慢用例默认跳过） |
 | 独立工程集成 | **真建一个引用 framework 的最小工程**、真构建真跑（`tests/pkg_integration_test.cpp`）
  | `st test pkg_integration` | 全绿（`ST_INTEGRATION_BUILD=0` 可关；关掉时明确跳过而非假绿） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告（需带 sanitizer 运行库的编译器；MinGW 发行版不带时构建前明确报错） |

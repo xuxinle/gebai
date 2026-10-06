@@ -1187,7 +1187,6 @@ void MarkdownView::paint_table_row(const RenderContext& context, raster::Surface
   const Palette& colors = context.theme.colors();
   const TextPort& port = text_port_of(context);
   const float size = metrics_.table;
-  const float line_height = port.line_height(size);
   const math::Rect box = row.box.offset(origin.x, origin.y);
   if (row.table_header) fill_rect_shape(canvas, box, colors.surface_alt);
   if (row.table_top) {
@@ -1205,7 +1204,8 @@ void MarkdownView::paint_table_row(const RenderContext& context, raster::Surface
                       colors.border);
     }
     if (cell.text.empty()) continue;
-    const float text_y = cell_box.y + (cell_box.height - line_height) * 0.5f;
+    // 与全仓同一口径（按墨迹区居中）。
+    const float text_y = centered_line_top(port, cell.text, size, cell_box.y, cell_box.height);
     port.draw(canvas, cell.text, math::Point{cell_box.x + kTableCellPad, text_y}, size,
               color_of(context.theme, row.table_header ? ColorRole::Muted : ColorRole::Text));
   }

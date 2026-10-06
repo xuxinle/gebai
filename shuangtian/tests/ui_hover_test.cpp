@@ -9,6 +9,9 @@
 
 #include "st/test/test.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <memory>
 #include <vector>
 
 #include "st/core/time.hpp"
@@ -154,6 +157,66 @@ ST_TEST(hover_effect_changes_pixels_and_restores) {
   fixture.paint(after);
   const double restored = average_luma(after, Rect{20.0f, 20.0f, 120.0f, 40.0f});
   ST_CHECK(std::abs(restored - before) < 0.5);
+}
+
+ST_TEST(hover_keeps_the_surface_tone_instead_of_flattening_it) {
+  // 回归（2026-10-06 主题轮）：悬浮特效曾把背景**整个换成** `surface_hover`——
+  // 因为 `hover_t` 会收敛到 1，`mix(surface_hover, 1.0)` 就是完全替换。
+  // 实测现象（真实应用的像素）：暗色下主按钮 `#8b9aff` 悬停后变成 `#2b2b30`
+  // 中性灰，按钮看上去像"被禁用"。
+  //
+  // 判据选"色相是否还在"：主按钮是蓝色，悬停后必须仍然是蓝色（可以亮一档，
+  // 但不能变成中性灰）。这是单看"变没变"或"亮度差多少"都抓不到的那个正交量。
+  Theme dark = Theme::dark();
+  UiRoot root;
+  root.set_theme(dark);
+  auto owned = std::make_unique<Button>("确定", Button::Variant::Primary);
+  Button* button = owned.get();
+  button->set_id("btn");
+  root.set_content(std::move(owned));
+  root.set_viewport(st::math::Size{static_cast<float>(kWidth), static_cast<float>(kHeight)});
+  root.layout();
+  const auto context = st::ui::RenderContext{dark, nullptr, 0.0};
+  button->measure(context, st::ui::Constraints{});
+  button->arrange(context, Rect{20.0f, 20.0f, 120.0f, 40.0f});
+
+  // 取按钮内部一点（避开文字：文字在垂直中线附近，所以往里收 6px 后取靠左一列）
+  const auto probe = [&](const char* tag) {
+    Canvas canvas{kWidth, kHeight};
+    canvas.clear(Color{0x00, 0x00, 0x00, 0xFF});
+    root.paint(canvas);
+    (void)tag;
+    return canvas.pixel_at(28, 40);  // 按钮 y 范围 20..60 的中线上、x 左侧内边距
+  };
+
+  const Color rest = probe("rest");
+  // 主按钮常态应是主题主色（蓝色系）
+  ST_CHECK(static_cast<int>(rest.b) > static_cast<int>(rest.r));
+
+  Event move;
+  move.kind = EventKind::MouseMove;
+  move.position = Point{60.0f, 40.0f};
+  (void)root.dispatch(move);
+  ST_CHECK(button->hovered());
+
+  // 动画收敛到 1 之后再看（这是旧实现真正翻车的地方，中间帧反而看不出）
+  for (int i = 0; i < 40; ++i) {
+    const auto ctx = st::ui::RenderContext{dark, nullptr, 0.1 * (i + 1)};
+    button->measure(ctx, st::ui::Constraints{});
+    button->arrange(ctx, Rect{20.0f, 20.0f, 120.0f, 40.0f});
+    Canvas canvas{kWidth, kHeight};
+    canvas.clear(Color{0x00, 0x00, 0x00, 0xFF});
+    root.paint(canvas);
+  }
+  const Color hovered = probe("hovered");
+  // ① 仍然看得出是"蓝按钮"：B 通道仍明显高于 R
+  ST_CHECK(static_cast<int>(hovered.b) > static_cast<int>(hovered.r) + 40);
+  // ② 而且确实与常态不同（特效没有被取消，只是换了实现）
+  ST_CHECK(!(hovered == rest));
+  // ③ 不是中性灰（旧实现的失败形态：三通道接近）
+  const int spread = std::max({hovered.r, hovered.g, hovered.b}) -
+                     std::min({hovered.r, hovered.g, hovered.b});
+  ST_CHECK(spread > 40);
 }
 
 ST_TEST(hover_effect_only_where_declared) {

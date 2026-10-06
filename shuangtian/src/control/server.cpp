@@ -1511,23 +1511,36 @@ auto Server::Impl::handle_theme([[maybe_unused]] Client& client, [[maybe_unused]
                                 [[maybe_unused]] const Json& params,
                                 [[maybe_unused]] bool& deferred) -> Result<Json> {
   [[maybe_unused]] auto& root = host.root();
-if (const std::string mode = json_get_string(params, "mode"); !mode.empty()) {
-  if (mode == "light") {
-    host.set_theme_mode(ui::ThemeMode::Light);
-  } else if (mode == "dark") {
-    host.set_theme_mode(ui::ThemeMode::Dark);
-  } else if (mode == "toggle") {
-    host.set_theme_mode(root.theme().mode() == ui::ThemeMode::Dark ? ui::ThemeMode::Light
-                                                                 : ui::ThemeMode::Dark);
-  } else {
-    return unexpected(ErrorCode::Invalid, std::format("未知主题模式: {}", mode));
+  if (const std::string mode = json_get_string(params, "mode"); !mode.empty()) {
+    if (mode == "light") {
+      host.set_theme_mode(ui::ThemeMode::Light);
+    } else if (mode == "dark") {
+      host.set_theme_mode(ui::ThemeMode::Dark);
+    } else if (mode == "toggle") {
+      host.set_theme_mode(root.theme().mode() == ui::ThemeMode::Dark ? ui::ThemeMode::Light
+                                                                   : ui::ThemeMode::Dark);
+    } else {
+      return unexpected(ErrorCode::Invalid, std::format("未知主题模式: {}", mode));
+    }
+    host.request_repaint();
   }
-  host.request_repaint();
-}
-Json result = Json::object();
-result["mode"] = root.theme().mode() == ui::ThemeMode::Dark ? "dark" : "light";
-return result;
-  
+  // `set`：运行时改 token（稀疏覆盖，与主题文件同一套 token 名与颜色语法）。
+  // 存在的理由：外观调优（"把主色换成这个值看看"）不应要求改文件 + 重启——
+  // 而控制通道本来就是"让智能体可驱动应用"的入口，主题是它的一个旋钮。
+  if (const Json* overrides = json_find(params, "set"); overrides != nullptr) {
+    const auto applied = host.apply_theme_overrides(*overrides);
+    if (!applied) return forward_error(applied.error());
+    host.request_repaint();
+  }
+  Json result = Json::object();
+  result["mode"] = root.theme().mode() == ui::ThemeMode::Dark ? "dark" : "light";
+  result["name"] = root.theme().name();
+  // `tokens=true`：回传完整 token 快照（导出当前主题 / 校对改动是否落地）。
+  // 默认不返回：一份完整快照有 30+ 颜色 + 30+ 尺度，每次切主题都收发一遍是浪费。
+  if (json_get_bool(params, "tokens", false)) {
+    result["tokens"] = host.theme_snapshot();
+  }
+  return result;
 }
 
 auto Server::Impl::handle_wait([[maybe_unused]] Client& client, [[maybe_unused]] std::uint64_t id,
@@ -1660,6 +1673,11 @@ return result;
 }
 
 Server::Server(Host& host) : impl_(std::make_unique<Impl>(host)) {}
+
+// 定义在**本翻译单元**（`server.cpp` 已含完整 `st/ext/json.hpp`）：
+// `control.hpp` 只前向声明了 `Json`（不拉入 nlohmann 的 2.5 万行），
+// 而按值返回需要完整类型——把定义放在这里两边都成立。
+auto Host::theme_snapshot() const -> st::Json { return st::Json::object(); }
 
 Server::~Server() { stop(); }
 

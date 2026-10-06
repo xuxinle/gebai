@@ -46,6 +46,7 @@ auto common_options_usage(std::string_view program) -> std::string {
       "  --scale F             DPI 缩放（物理像素 = 逻辑 × scale；缺省跟随系统显示缩放）\n"
       "  --title TEXT          窗口标题\n"
       "  --theme MODE          light / dark / system\n"
+      "  --theme-file PATH     自定义主题 JSON（稀疏覆盖；也看 ST_THEME_FILE）\n"
               "  --renderer MODE       渲染器：auto（按实测帧耗时选更快）/ gpu / software\n"
         "  --text-lcd MODE       文字抗锯齿：auto（默认亚像素 LCD）/ on / off（灰度基准）\n"
         "  --text-fit MODE       字形网格拟合：auto（默认 off）/ off / light / normal\n"
@@ -213,6 +214,10 @@ auto parse_common_options(int argc, char** argv, CommonOptions& options) -> Stat
       auto parsed = value(argument);
       if (!parsed) return forward_error(parsed.error());
       options.app.theme = *parsed == "dark" ? ui::ThemeMode::Dark : ui::ThemeMode::Light;
+    } else if (argument == "--theme-file") {
+      auto parsed = value(argument);
+      if (!parsed) return forward_error(parsed.error());
+      options.app.theme_file = *parsed;
     } else if (argument == "--control-port") {
       auto parsed = value(argument);
       if (!parsed) return forward_error(parsed.error());

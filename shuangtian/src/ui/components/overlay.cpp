@@ -16,6 +16,7 @@ namespace st::ui {
 
 using components_internal::draw_line;
 using components_internal::fill_round_rect;
+using components_internal::paint_raised_surface;
 using components_internal::text_port_of;
 using components_internal::tone_from_name;
 
@@ -163,11 +164,9 @@ void Dialog::paint_content(const RenderContext& context, raster::Surface& canvas
   canvas.fill_rect(bounds_, raster::Paint::solid(colors.overlay));
   if (card_.is_empty()) return;
 
-  // 卡片：阴影 + surface 底 + radius_xl（底自绘，见 fill_round_rect 说明）。
-  const Shadow shadow = shadow_lg(context.theme);
-  canvas.draw_shadow(card_, metrics.radius_xl, shadow.blur, shadow.color,
-                     math::Point{shadow.offset_x, shadow.offset_y});
-  fill_round_rect(canvas, card_, metrics.radius_xl, colors.surface);
+  // 卡片：阴影 + `surface_raised` 底 + 玻璃边缘（亚克力抬升三件套，见 `paint_raised_surface`）。
+  // 对话框是最高的一层，必须与它压着的遮罩/内容拉出层次——深色下尤其只能靠底色。
+  paint_raised_surface(context, canvas, card_, metrics.radius_xl, shadow_lg(context.theme));
 
   const TextPort& port = text_port_of(context);
   const float content_width = std::max(0.0f, card_.width - kPadding * 2.0f);

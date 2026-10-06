@@ -21,9 +21,9 @@
 // （从全透明开始合成），不是"合成到背景上的结果"——后者会把底色烘进贴图，
 // 元素底下一有渐变/别的元素就错。所以断言要**在非纯色底上**也成立。
 
+#include <cmath>
 #include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <cstdint>
 #include <format>
 #include <string>
@@ -36,6 +36,8 @@
 #include "st/raster/path.hpp"
 #include "st/raster/surface.hpp"
 #include "st/test/test.hpp"
+#include "st/ui/components/basic.hpp"
+#include "st/ui/element.hpp"
 #include "st/ui/theme.hpp"
 
 namespace {
@@ -189,6 +191,54 @@ ST_TEST(border_ring_edge_matches_stroke_within_tolerance) {
     ST_CHECK(result.ratio() < 0.01);
     ST_CHECK(result.max_delta <= 64);
   }
+}
+
+/// 小数坐标的边框必须**先对齐到整像素**再画环，否则 1px 边会被抗锯齿
+/// 摊到两行上各一半，看上去就是「边缘发虚」。
+///
+/// 判据选**峰值强度**而不是面积：摊开与铺满的总墨量接近，面积判据分不出来；
+/// 而肉眼看到的是「那一条线黑不黑」。
+///
+/// ⚠ 必须走**真实的 `Element::paint_box`**。本用例第一版是自己造两个矩形
+/// 直接调 `make_rounded_border_ring`，结果**回退实现后仍然全绿**——因为它量的
+/// 是“手写的对齐 vs 手写的不对齐”，根本没经过被测代码，是个纯摆设。
+ST_TEST(border_edge_lands_on_whole_pixels_after_snapping) {
+  st::ui::Theme theme = st::ui::Theme::dark();
+  const st::math::Color border = theme.colors().border;
+  const st::math::Color background = theme.colors().bg;
+
+  // 一个语体卡片，**刻意放在小数 y 上**（实测 gallery 里 `y = 243.992` 这类几何很常见）。
+  const st::math::Rect box{20.0f, 40.453125f, 120.0f, 60.0f};
+
+  st::ui::Card card{};
+  card.set_radius(8.0f);
+  card.apply_theme(theme);
+  card.arrange(st::ui::RenderContext{theme, nullptr, 0.0}, box);
+
+  Canvas canvas = make_canvas();
+  canvas.clear(background);
+  card.paint(st::ui::RenderContext{theme, nullptr, 0.0}, canvas);
+
+  // 沿卡片上缘纵向取样（取中段避开圆角），看**最强的那一行**有多接近边框色。
+  const int col = static_cast<int>(box.x) + 40;
+  const int top_row = static_cast<int>(box.y);  // 40（floor）
+  int peak = 0;
+  for (int y = top_row - 2; y <= top_row + 3; ++y) {
+    const st::math::Color c = canvas.pixel_at(col, y);
+    const int diff = std::abs(static_cast<int>(c.r) - static_cast<int>(background.r)) +
+                     std::abs(static_cast<int>(c.g) - static_cast<int>(background.g)) +
+                     std::abs(static_cast<int>(c.b) - static_cast<int>(background.b));
+    // 只统计“靠背景那一侧”的方向，避免卡片内部底色干扰
+    peak = std::max(peak, diff);
+  }
+  const int full = std::abs(static_cast<int>(border.r) - static_cast<int>(background.r)) +
+                   std::abs(static_cast<int>(border.g) - static_cast<int>(background.g)) +
+                   std::abs(static_cast<int>(border.b) - static_cast<int>(background.b));
+  st::print("[border-snap] 上缘峰值 {}（满分 {}）\n", peak, full);
+
+  // 对齐后那条边必须**铺满一整像素行**：峰值接近满值。
+  // 不对齐时它被摊到两行、每行约一半——这就是用户看到的“边缘不够平滑”。
+  ST_CHECK(peak >= full * 8 / 10);
 }
 
 /// 退化边界：非正厚度、超大厚度、放不下内圈的窄矩形都不能崩、不能画错。

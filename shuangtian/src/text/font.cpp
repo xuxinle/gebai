@@ -1974,6 +1974,7 @@ auto FontFace::glyph(GlyphId id) const -> Result<Glyph> {
   if (!outline) return st::forward_error(outline.error());
   const math::Rect bounds = outline->bounds();
   result.bearing_y = bounds.y + bounds.height;
+  result.ink_bottom = bounds.y;
   result.empty = outline->is_empty();
   return result;
 }

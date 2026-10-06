@@ -109,6 +109,12 @@ auto NullTextPort::measure_width(std::string_view utf8, float size, text::FontRo
 
 auto NullTextPort::line_height(float size) const -> float { return size * 1.45f; }
 
+/// 无字体环境下的基线位：按常见的 ascent/descent 比例给（约 0.8 / 0.2）。
+/// 布局单测用不上精确值，但**垂直居中**的公式需要它，否则除数会是 0。
+auto NullTextPort::ascent(float size) const -> float { return size * 1.16f; }
+
+auto NullTextPort::descent(float size) const -> float { return size * 0.29f; }
+
 void NullTextPort::draw(raster::Surface& canvas, std::string_view utf8, math::Point origin, float size,
                         math::Color color, text::FontRole role, float embolden,
                         bool bold) const {
@@ -713,14 +719,43 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
                              : bounds_;
   math::Color background = style_.background;
   math::Color border = style_.border_color;
-  if (hovering && hover_effect_.background && colors.surface_hover.a != 0U) {
-    // 混合而非直接替换：`Ghost`/`Soft` 这类背景很淡的按钮也需要可见的反馈，
-    // 而直接换成 surface_hover 会把它们的语气抹平（全部变成一个样子的方块）。
-    background = background.a == 0U
-                     ? math::Color{colors.surface_hover.r, colors.surface_hover.g,
-                                   colors.surface_hover.b,
-                                   static_cast<std::uint8_t>(colors.surface_hover.a * hover_t)}
-                     : background.mix(colors.surface_hover, hover_t);
+  if (hovering && hover_effect_.background) {
+    // **不透明底要"同向提亮/压暗"，不能换成中性灰**。
+    //
+    // 旧实现是 `background.mix(surface_hover, hover_t)`，而 `hover_t` 会收敛到 1——
+    // 于是 hover 稳定后它是一个**完全替换**：实测暗色下主按钮 `#8b9aff`
+    // 悬停后变成 `#2b2b30` 中性灰，按钮看起来像"被禁用"。
+    //
+    // 幅度取 `surface_hover` 相对 `surface` 的**实际明度偏移**（两个都是实色：
+    // 亚克力调色板里它们已经不透明了），命中 `surface` 时正好等于主题定的悬浮档。
+    // ⚠ 不要用 `surface_hover.a / 255` 当幅度：那是 alpha（现在恒为 1），
+    // 会得到 0.45 的荒谬幅度（实测把 `#15151a` 直接抬到 `#7e7e81`）。
+    const float up = static_cast<float>(colors.surface_hover.r) -
+                     static_cast<float>(colors.surface.r);
+    const float down = static_cast<float>(colors.surface.r) -
+                       static_cast<float>(colors.surface_pressed.r);
+    if (background.a == 0U) {
+      // 无底（Ghost）平铺一层半透明中性色：它的"语气"本就不在底色上。
+      background = math::Color{colors.surface_hover.r, colors.surface_hover.g,
+                               colors.surface_hover.b,
+                               static_cast<std::uint8_t>(colors.surface_hover.a * hover_t)};
+    } else {
+      const bool dark_base = static_cast<float>(background.r) < 128.0f;
+      const float delta = dark_base ? up : -down;
+      // **按下比悬停再深一档**：否则两者像素完全相同，用户看不到"按下去了"
+      // （实测：`pressed_` 在旧实现里算出的色因为 `apply_theme` 不重跑而永远不生效，
+      // 于是按下与悬停一模一样）。系数 1.6 取自 `surface_pressed` 相对 `surface_hover`
+      // 的额外偏移量级（暗色 36 vs 23、亮色 23 vs 13）。
+      const float pressed_boost = pressed_ ? 1.6f : 1.0f;
+      const float amount = delta / 255.0f * hover_t * pressed_boost;
+      background = amount >= 0.0f ? background.lighten(amount) : background.darken(-amount);
+      // 按下时把透明度抬满：`Soft` 这类带 alpha 的底在叠加后仍要看得出变化。
+      if (pressed_ && background.a != 0U) background.a = 255U;
+    }
+  } else if (pressed_ && hover_effect_.background && style_.background.a != 0U) {
+    // 极窄的一条缝：按下了但 hover_t 尚未起来（如程序化 `set_pressed`）。
+    // 给一个固定压暗，保证"按下"本身在任何情况下都可见。
+    background = background.darken(0.08f);
   }
   if (hovering && hover_effect_.border && colors.border_hover.a != 0U) {
     border = border.mix(colors.border_hover, hover_t);
@@ -757,14 +792,46 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
     canvas.fill_rect(box, raster::Paint::solid(background), style_.radius,
                      raster::DrawOptions{.opacity = style_.opacity});
   }
+  // 顶部内高光（亚克力的"玻璃边缘"）：最后画，压在描边之上。
+  //
+  // 为什么用**横向渐变**而不是一条实线：等宽实线在两端会被读成"多了一道边框"，
+  // 而玻璃边缘的受光是中间强、向两侧衰减的。渐变两端 alpha 归零，于是就自然消失在
+  // 圆角处——不需要额外的圆角裁剪（也不会在圆角处露出直角）。
+  if (style_.top_highlight.a != 0U && style_.highlight_width > 0.0f && box.width > 0.0f) {
+    const math::Color edge = style_.top_highlight;
+    const math::Color fading = edge.with_alpha(0);
+    // 只在顶边**内沿**那一条（高度 = highlight_width）内绘制。
+    const math::Rect band{box.x, box.y, box.width, style_.highlight_width};
+    const raster::Gradient gradient = raster::Gradient::linear(
+        math::Point{band.x, band.y}, math::Point{band.right(), band.y},
+        std::vector<raster::GradientStop>{raster::GradientStop{0.0f, fading},
+                                          raster::GradientStop{0.5f, edge},
+                                          raster::GradientStop{1.0f, fading}});
+    // 裁剪到圆角内：半径大于 0 时顶边那段会被圆角削掉，不裁就会在角上多出一小块。
+    if (style_.radius > 0.0f) canvas.push_clip_rounded_rect(box, style_.radius);
+    canvas.fill_rect(band, raster::Paint::with_gradient(gradient), 0.0f,
+                     raster::DrawOptions{.opacity = style_.opacity});
+    if (style_.radius > 0.0f) canvas.pop_clip();
+  }
   if (style_.border_width > 0.0f && border.a != 0U) {
     // **环形填充**而不是描边：卡片边框是界面里出现次数最多的描边，而 `stroke_path`
     // 把圆角矩形展开成 ~152 条边（每段一个四边形 + 顶点补圆），环形只有 76 条边。
     // 实测 96 张卡片：6.9 ms/帧 → 3.9 ms/帧（`docs/PAINT_DIAGNOSIS.md` §2.2）。
-    // 覆盖范围与旧实现一致（都在 `box` 之内、厚度等于 `border_width`）——
-    // 两种抗锯齿逼近的像素差见 `tools/paint_equiv_probe.cpp`。
+    //
+    // **矩形先对齐到整像素再画边**：环形填充是**向内**的，所以只要外缘落在整像素上，
+    // 1px 的边就恰好盖满一整行（列）像素——这是边框锐利的充分条件。
+    // 不齐时外缘被抗锯齿摊在两行上、各约 50%，看上去就是"边缘发虚"：
+    // 实测小数坐标的卡片 `y=143.727` 上缘是 `#131317`+`#2a2f2f` 两行各半，
+    // 而整像素的 `y=244` 是一行满值 `#313136`。
+    //
+    // 只对齐**边框这一道**（不对齐背景/阴影/文本）：它们的观感取决于面积与
+    // 连续位置，硬吸到格上会让卡片高度跳变、圆角起阶梯（弧线无法同时对齐两边）。
+    const math::Rect snapped{
+        std::round(box.x), std::round(box.y),
+        std::max(0.0f, std::round(box.right()) - std::round(box.x)),
+        std::max(0.0f, std::round(box.bottom()) - std::round(box.y))};
     canvas.fill_path(
-        raster::make_rounded_border_ring(box, style_.radius, style_.border_width),
+        raster::make_rounded_border_ring(snapped, style_.radius, style_.border_width),
         raster::Paint::solid(border),
         raster::DrawOptions{.opacity = style_.opacity});
   }
@@ -784,8 +851,12 @@ auto Element::paint_text(const RenderContext& context, raster::Surface& canvas, 
   } else if (style_.text_align == TextAlign::End) {
     x = box.right() - width;
   }
-  const float height = port.line_height(size);
-  const float y = box.y + (box.height - height) * 0.5f;
+  // **按墨迹区居中**（全仓统一口径，见 `st::ui::centered_line_top`）。
+  //
+  // 行高含字体预留的头尾空间（实测 DejaVu Sans `hhea.ascender = 0.928em`，
+  // 而大写字母墨迹只有 `0.729em`），按行盒居中会把文字**推下约 2.5px**。
+  // `centered_line_top` 在端口报不出墨迹时自动退回行盒居中。
+  const float y = centered_line_top(port, clipped, size, box.y, box.height);
   // **字重落像素**：框架没有独立字重的字体面，非 Regular 档用合成加粗（沿水平外扩）。
   // 不读 `style_.font_weight` 时，界面里所有 SemiBold/Bold 都与 Regular 逐像素相同——
   // 「字重」就只是个落不到画面上的属性。

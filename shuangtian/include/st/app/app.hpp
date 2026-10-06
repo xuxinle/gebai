@@ -160,6 +160,13 @@ struct AppOptions {
   std::string font_latin{};           ///< 显式指定拉丁字体文件（空=自动探测）
   std::string font_cjk{};             ///< 显式指定 CJK 字体文件（空=自动探测）
   ui::ThemeMode theme{ui::ThemeMode::Light};
+  /// **自定义主题文件**（JSON，稀疏覆盖，见 `st/ui/theme_io.hpp`）。
+  ///
+  /// 命令行 `--theme-file PATH` > 环境变量 `ST_THEME_FILE`。空 = 用内置主题。
+  /// 加载失败（文件不在 / 语法错 / 未知 token）**不阻止启动**，也不静默——
+  /// 退回内置主题并写一条告警日志：主题是外观配置，不是运行前提
+  /// （与“配置写错不该让进程崩”的失败安全姿态一致）。
+  std::string theme_file{};
   std::string log_level{"info"};
   std::uint32_t max_frames{0};        ///< >0 时跑满即退出（无头冒烟/CI 用）
   bool exit_on_ready{false};          ///< 首帧后立即退出（自检用）
@@ -212,6 +219,10 @@ class Application final : public control::Host, public ui::WindowControl {
   auto set_device_scale(float scale) -> Status override;
   [[nodiscard]] auto metrics() const -> control::Metrics override;
   void set_theme_mode(ui::ThemeMode mode) override;
+  /// 控制通道 `theme.set`：在当前主题上施加稀疏覆盖，成功即重绘。
+  [[nodiscard]] auto apply_theme_overrides(const st::Json& overrides) -> Status override;
+  /// 控制通道 `theme.tokens`：当前生效主题的完整快照。
+  [[nodiscard]] auto theme_snapshot() const -> st::Json override;
   [[nodiscard]] auto capture_to_file(std::string_view path, math::IntRect region)
       -> Result<std::string> override;
   [[nodiscard]] auto capture_png(math::IntRect region)
@@ -265,6 +276,13 @@ class Application final : public control::Host, public ui::WindowControl {
  private:
   /// 主循环（`run()` 的公共部分）。
   auto run_loop() -> Result<int>;
+  /// 装载 `--theme-file` / `ST_THEME_FILE` 指定的自定义主题（构造函数末尾调用）。
+  void apply_theme_file();
+  /// 重新构造生效主题（内置基准 + 文件覆盖 + 运行期覆盖）。
+  [[nodiscard]] auto compose_theme(ui::ThemeMode mode) const -> Result<ui::Theme>;
+  /// `compose_theme` 的显式变体（用指定的运行期覆盖；供"先校验后落地"用）。
+  [[nodiscard]] auto compose_theme_with(ui::ThemeMode mode, const st::Json& runtime) const
+      -> Result<ui::Theme>;
 
   struct Impl;
   std::unique_ptr<Impl> impl_;
@@ -272,6 +290,11 @@ class Application final : public control::Host, public ui::WindowControl {
   std::string version_{};
   AppOptions options_{};
   ui::UiRoot root_{};
+  /// 生效主题（= 内置基准 + 下面两层覆盖的合成结果）。
+  ///
+  /// 为什么**留住一份**而不是每次 `Theme::by_mode`：自定义主题是稀疏覆盖的产物，
+  /// 切主题模式时若直接重建，用户改过的 token 会静默丢失（"切一下主题，我的配色又没了"）。
+  ui::Theme custom_theme_{};
   bool started_{false};
 };
 

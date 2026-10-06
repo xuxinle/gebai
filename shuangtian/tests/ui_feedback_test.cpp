@@ -329,7 +329,9 @@ ST_TEST(ui_dialog_scrim_and_dismiss) {
   const st::math::Color corner = canvas.pixel_at_point(st::math::Point{5.0f, 5.0f});
   ST_CHECK(!(corner == theme.colors().bg));
   ST_CHECK(near_color(corner, composite(theme.colors().bg, theme.colors().overlay), 4));
-  ST_CHECK(canvas.pixel_at_point(card.center()) == theme.colors().surface);
+  // 对话框卡片用的是**抬升面**（`surface_raised`）而不是 `surface`：
+  // 弹层要压过它下面的面板一层，而深色下阴影几乎不可见，只能靠底色本身拉开。
+  ST_CHECK(canvas.pixel_at_point(card.center()) == theme.colors().surface_raised);
   // 卡片外仍是遮罩
   const st::math::Color scrim = composite(theme.colors().bg, theme.colors().overlay);
   ST_CHECK(near_color(canvas.pixel_at_point(st::math::Point{20.0f, 580.0f}), scrim, 4));
@@ -401,6 +403,64 @@ ST_TEST(ui_toast_tone_bar) {
 }
 
 // —— Toast 自动消失（v0.1.5：帧时间轴驱动 + on_dismiss + 属性面）——
+
+ST_TEST(ui_overlay_can_remove_itself_from_paint_safely) {
+  // 回归（2026-10-06 主题轮，ASan 现场）：叠加层在 `paint` 里**撞除自己**时
+  // 沿用了一段 use-after-free。
+  //
+  // 具体链路（真实应用）：`Toast` 到期 → 它在自己的 `paint` 里置 `expired_`、
+  // `record_damage()`、调 `on_dismiss()` → 宿主的 `on_dismiss` 调
+  // `UiRoot::remove_overlay()`。而那时 `dispatching_` 为假（当前是**绘制**而非事件派发），
+  // 于是 `remove_overlay` 走的是**立即 delete** 分支——而 `Toast::paint` 的栈帧
+  // 还在用 `this`（回调返回后继续算绘制）。
+  //
+  // 为什么旧用例拦不住：`ui_feedback_test` 里的自动消失用例是**直接调
+  // `toast->paint(...)`**，Toast 的宿主是那个 lambda、根本不碰 `UiRoot`。
+  // 只有把 Toast 挂进 `UiRoot` 的叠加层、且 `on_dismiss` 真的调 `remove_overlay`，
+  // 这条路径才成立——所以本用例走的必须是 UiRoot。
+  st::ui::Theme theme = st::ui::Theme::light();
+  FixedAdvanceTextPort port;
+  st::ui::UiRoot root;
+  root.set_theme(theme);
+  root.set_text_port(&port);
+  root.set_viewport(st::math::Size{320.0f, 200.0f});
+
+  auto owned = st::ui::Toast::make("已保存", st::ui::Tone::Success);
+  st::ui::Toast* toast = owned.get();
+  toast->set_id("toast");
+  toast->set_auto_dismiss_ms(500.0);
+  int dismiss_calls = 0;
+  // 宿主在回调里摘除——正是这一步触发 use-after-free
+  toast->on_dismiss = [&root, &dismiss_calls, toast]() {
+    ++dismiss_calls;
+    root.remove_overlay(toast);
+  };
+  root.add_overlay(std::move(owned), st::ui::UiRoot::OverlayLayout::FillViewport);
+
+  st::raster::Canvas canvas(320, 200);
+  canvas.clear(st::math::Color{0, 0, 0, 0});
+
+  // 静态时间轴：首帧起算，不触发
+  root.set_time(1.0);
+  root.paint(canvas);
+  ST_CHECK(!toast->expired());
+
+  // 推进过到期点：`paint` 内部摘除自己。
+  // 修复前：此处就是 ASan 报的 use-after-free 现场（窄回调可能被编译器内联而
+  // 恰好不崩，但行为是未定义的）。修复后：延到本轮绘制结束才析构。
+  root.set_time(2.0);
+  root.paint(canvas);
+  ST_CHECK_EQ(dismiss_calls, 1);
+  // 已从叠加层列表里摘掉：后续绘制/查询都不应再看到它
+  ST_CHECK_EQ(root.overlay_count(), 0U);
+  ST_CHECK(root.find("toast") == nullptr);
+  // 再画几帧：不能因为墓场回收而崩溃，也不能重复触发 on_dismiss
+  for (int frame = 0; frame < 5; ++frame) {
+    root.set_time(3.0 + static_cast<double>(frame) * 0.1);
+    root.paint(canvas);
+  }
+  ST_CHECK_EQ(dismiss_calls, 1);
+}
 
 ST_TEST(ui_toast_auto_dismiss) {
   st::ui::Theme theme = st::ui::Theme::light();
@@ -556,5 +616,7 @@ ST_TEST(ui_feedback_with_null_text_port) {
   dialog_canvas.clear(theme.colors().bg);
   dialog->paint(context, dialog_canvas);
   ST_CHECK(dialog_canvas.pixel_at_point(st::math::Point{2.0f, 2.0f}) != theme.colors().bg);
-  ST_CHECK(dialog_canvas.pixel_at_point(dialog->card_rect().center()) == theme.colors().surface);
+  // 同上一处：对话框卡片底是 `surface_raised`（弹层抬升一档）。
+  ST_CHECK(dialog_canvas.pixel_at_point(dialog->card_rect().center()) ==
+           theme.colors().surface_raised);
 }

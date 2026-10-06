@@ -69,6 +69,15 @@ struct Style {
   math::Color border_color{0, 0, 0, 0};
   float border_width{0.0f};
   Shadow shadow{};
+  /// **顶部内高光**（亚克力的「玻璃边缘」）：不为透明时，在圆角内沿顶边画一条
+  /// `highlight_width` 高的横向亮线（两端淡出）。
+  ///
+  /// 为什么是「顶部」而不是四周描边：真实玻璃的边缘受光只在**上缘**，四周一圈会把
+  /// 色块封成"双层轮廓"反而显脏（与 `Card::apply_theme` 里"有阴影的卡片再配一道
+  /// 同样明显的描边会变脏"同因）。
+  /// 消费点是 `Element::paint_box`——组件只需填本字段，不必各自绘制。
+  math::Color top_highlight{0, 0, 0, 0};
+  float highlight_width{1.0f};
   float opacity{1.0f};
   bool clip_children{false};
 

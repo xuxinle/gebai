@@ -124,6 +124,23 @@ class Host {
   virtual void request_quit() = 0;
   virtual void request_repaint() = 0;
   virtual void set_theme_mode(ui::ThemeMode mode) = 0;
+  /// 在当前主题上施加稀疏覆盖（控制通道 `theme` 的 `set` 分支）。
+  ///
+  /// 为什么放在 `Host` 而不是让 Server 直接改 `root().theme()`：
+  /// 主题有**多个持有者**（`UiRoot` 持一份、`Application` 还要记住自定义主题与
+  /// `--ui-font-scale`），直接改 `UiRoot` 那份会让下次切主题把改动抹掉。
+  /// 返回失败时**不修改任何状态**（先校验后落地）。
+  [[nodiscard]] virtual auto apply_theme_overrides(const st::Json& overrides) -> Status {
+    (void)overrides;
+    return unexpected(ErrorCode::Unsupported, "该应用不支持运行时修改主题 token");
+  }
+  /// 当前生效主题的完整 token 快照（控制通道 `theme` 的 `tokens` 分支）。
+  ///
+  /// 声明在这里、定义在 `server.cpp`：返回类型 `Json` 在 `control.hpp` 里只有前向声明
+  /// （本头刻意不拉入 nlohmann 的 25,526 行，见 `st/ext/json_fwd.hpp`），而
+  /// **按值返回**需要完整类型。改为返回 `const Json&` 可以避开，但那会把生命周期
+  /// 绑到 `Host` 身上——快照是「当下这一刻」的值，不该让外部持着引用。
+  [[nodiscard]] virtual auto theme_snapshot() const -> st::Json;
   /// 截图并写 PNG 到 `path`（空=自动命名；`region` 为空=全屏）；返回实际路径。
   [[nodiscard]] virtual auto capture_to_file(std::string_view path, math::IntRect region)
       -> Result<std::string> = 0;

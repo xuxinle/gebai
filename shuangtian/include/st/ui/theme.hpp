@@ -4,8 +4,10 @@
 /// 霜天意象——冷冽清晨：中性色偏冷，品牌色冰蓝，辅以青色点缀。
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "st/math/color.hpp"
 #include "st/ui/style.hpp"
@@ -13,13 +15,34 @@
 namespace st::ui {
 
 /// 颜色 token（亮/暗各一套）。
+///
+/// ## 亚克力口径（默认主题）
+///
+/// 默认调色板是**黑色亚克力 / 白色亚克力**（与歌白同名主题同源）：近中性而略偏冷的
+/// 半透明层叠，层次靠**表面阶梯 + 描边 + 内高光**表达，而不是靠高饱和品牌色。
+/// 三条因此而来的约定，改 token 时不要破坏：
+///
+/// 1. **描边与交互态是半透明的**（`border*`/`surface_hover`/`surface_pressed`/`highlight`）。
+///    亚克力的描边是「叠在任意底色上的一道白光/黑光」，而不是一个固定灰值——
+///    固定灰值在 `bg` 与 `surface` 上会显出两种强度，这也是浅色主题里
+///    「同一个 `border` 在卡片上清楚、在页底上糊掉」的根因。
+///    测量这类 token 时必须先**合成到底色**（`ui_theme_test.cpp` 的 `composite`）。
+/// 2. **表面阶梯必须逐级可辨**：`bg` → `surface` → `surface_alt`/`surface_raised` 相邻
+///    对比度差要够（否则「同色系」退化成「一片同色」）。
+/// 3. **`surface_sunken` 在两个模式下都更暗**（凹槽/输入底/代码底）：
+///    语义是「凹进去」，不随亮暗反转。
 struct Palette {
   math::Color bg{};
   math::Color surface{};
   math::Color surface_alt{};
   math::Color surface_sunken{};
+  /// 抬升面：弹出层 / 菜单 / 对话框 / Toast 的底色，比 `surface` 再亮一档。
+  /// 浅色下与 `surface` 同为白系（抬升靠阴影表达），深色下必须**比 `surface` 亮**。
+  math::Color surface_raised{};
   math::Color border{};
   math::Color border_strong{};
+  /// 更弱的分隔线（列表行 / 区段之间）：比 `border` 再淡一档，用于「同组内」的细分。
+  math::Color border_subtle{};
   math::Color text{};
   math::Color text_muted{};
   math::Color text_faint{};
@@ -33,6 +56,10 @@ struct Palette {
   math::Color border_hover{};
   /// 悬浮外发光（"特效"）：一圈低不透明度的强调色，用于卡片/列表项的聚焦提示。
   math::Color glow{};
+  /// **顶部内高光**（亚克力的"玻璃边缘"）：抬升面顶端一道极弱亮线。
+  /// 由 `Style::top_highlight` 消费（`Element::paint_box` 统一绘制），
+  /// 在圆角内裁剪后只画顶边那一条——这才有"一块玻璃"而不是"一个色块"的观感。
+  math::Color highlight{};
   math::Color primary_soft{};
   math::Color on_primary{};
   math::Color accent{};
@@ -130,6 +157,15 @@ struct Metrics {
   /// 调用时机：构造主题之后、组件 `apply_theme` 之前（见 `scale_fonts`）。
   float font_scale{1.0f};
 
+  /// **阴影强度档位**（1.0 = 默认；`shadow_sm/md/lg` 依次乘上）。
+  ///
+  /// 为什么是旋钮而不是写死的数：亚克力的"浮起"全靠阴影，而**浅底与深底对同一道
+  /// 阴影的感知差好几倍**（深底几乎看不见、浅底一浓就显脏）。把强度与扩散拆成两个
+  /// 可调量，自定义主题才不必改代码就能把投影调到合适——见 `shadow_*()`。
+  float shadow_strength{1.0f};
+  /// **阴影扩散档位**（1.0 = 默认；乘在两层模糊半径上）。调大可让投影更"散"而不更"黑"。
+  float shadow_spread{1.0f};
+
   /// 按 `factor` 缩放全部 `font_*` 档位（结果写回各字段，并记录 `font_scale`）。
   /// 只接受正数；非正值忽略（不要静默把字号变成 0——那会让整屏文字消失）。
   void scale_fonts(float factor) noexcept {
@@ -178,6 +214,11 @@ class Theme {
   [[nodiscard]] auto font_family() const -> const std::string& { return font_family_; }
   void set_font_family(std::string family) { font_family_ = std::move(family); }
 
+  /// 主题名（`light`/`dark` 等内置名，或自定义主题自报的名字）。
+  /// 只作标识与上报用：不改色、不影响渲染。
+  [[nodiscard]] auto name() const -> const std::string& { return name_; }
+  void set_name(std::string name) { name_ = std::move(name); }
+
   /// 基础间距的倍数（4px 栅格）。
   [[nodiscard]] auto space(float steps) const noexcept -> float { return 4.0f * steps; }
 
@@ -187,6 +228,7 @@ class Theme {
   SyntaxPalette syntax_{};
   Metrics metrics_{};
   std::string font_family_{"Noto Sans CJK SC"};
+  std::string name_{"light"};
 };
 
 /// 色调 → 实际颜色（亮/暗主题通用）。
@@ -209,9 +251,34 @@ class Theme {
 /// 色调的浅底（徽标/Chip 背景）。
 [[nodiscard]] auto tone_soft_color(const Theme& theme, Tone tone) -> math::Color;
 
-/// 阴影 token（随主题取色）。
+/// 阴影 token（随主题取色，并受 `Metrics::shadow_strength/shadow_spread` 调节）。
 [[nodiscard]] auto shadow_sm(const Theme& theme) -> Shadow;
 [[nodiscard]] auto shadow_md(const Theme& theme) -> Shadow;
 [[nodiscard]] auto shadow_lg(const Theme& theme) -> Shadow;
+
+/// **令牌名表**（`"bg"` `"surface"` `"text_muted"` …）——自定义主题与控制通道共用同一份。
+///
+/// 为什么把名字集中在这里而不是各写各的字符串：
+/// 主题文件的键、控制通道 `theme` 方法的 `set` 键、以及错误消息里的提示
+/// 必须是**同一套拼写**。分散写时改一处漏一处的结果是「文件里写对了、通道不认」，
+/// 而两边都只报「未知 token」。
+///
+/// 返回的向量顺序即设计文档里的叙述顺序；每项是 `std::string_view`（指向静态存储）。
+[[nodiscard]] auto palette_token_names() -> const std::vector<std::string_view>&;
+/// 按名取色；未知名返回 `nullopt`。
+[[nodiscard]] auto palette_token(const Palette& palette, std::string_view name)
+    -> std::optional<math::Color>;
+/// 按名写色；未知名返回 `false`（且不碰 `palette`）。
+[[nodiscard]] auto set_palette_token(Palette& palette, std::string_view name, math::Color color)
+    -> bool;
+
+/// 尺度令牌名（`"radius_md"` `"font_base"` `"shadow_strength"` …），同上。
+[[nodiscard]] auto metric_token_names() -> const std::vector<std::string_view>&;
+/// 按名取尺度值；未知名返回 `nullopt`。
+[[nodiscard]] auto metric_token(const Metrics& metrics, std::string_view name)
+    -> std::optional<float>;
+/// 按名写尺度值；未知名返回 `false`。`font_scale` 是**派生量**（记录缩放倍数），
+/// 直接写它不会重算字号阶梯——要整体缩放字号用 `Metrics::scale_fonts`。
+[[nodiscard]] auto set_metric_token(Metrics& metrics, std::string_view name, float value) -> bool;
 
 }  // namespace st::ui

@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -167,6 +168,29 @@ class TextRenderer {
   [[nodiscard]] auto line_height(float size) const -> float;
   /// 基线相对行顶的偏移（逻辑单位）。
   [[nodiscard]] auto ascent(float size) const -> float;
+
+  /// **墨迹区**：`utf8` 实际画出来的部分相对基线的上下边界（正值，逻辑单位）。
+  ///
+  /// 垂直居中的正确依据。`line_height` 与 `ascent` 都是**行盒**度量，含字体预留的
+  /// 头尾空间：实测 DejaVu Sans 的 `hhea` 给出 `ascender = 0.928em` /
+  /// `descender = 0.236em`，而 `H` 的墨迹只有 `cap height = 0.729em`
+  /// （`x` 更低，`x-height = 0.547em`）。按行盒居中会把文字推下 2~3px。
+  ///
+  /// 无字形可量（空串/无字体覆盖）时返回 `nullopt`，调用方应退回行盒居中。
+  struct InkMetrics {
+    float above{0.0f};  ///< 墨迹顶到基线的距离
+    float below{0.0f};  ///< 基线到墨迹底的距离
+  };
+  [[nodiscard]] auto ink_metrics(std::string_view utf8, float size,
+                                 FontRole role = FontRole::Proportional) const
+      -> std::optional<InkMetrics>;
+  /// `draw` 真正使用的**基线位** = 该文本**跨 run 的最大 ascender**
+  /// （与 `shape()` 里的 `shaped.ascent` 同源，只是这里不建整形结果）。
+  ///
+  /// 中英混排时它与 `ascent(size)`（主面）**不等**：汉字回退到 CJK 面，
+  /// 而 CJK 面的 ascender 明显更大——用它做垂直对齐才有意义。
+  [[nodiscard]] auto shaped_ascent(std::string_view utf8, float size,
+                                   FontRole role = FontRole::Proportional) const -> float;
 
   /// 绘制：`origin` 为**逻辑坐标**下的行左上角；字形按画布 DPI 物理栅格化。
   ///

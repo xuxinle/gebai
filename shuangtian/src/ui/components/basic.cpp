@@ -239,10 +239,16 @@ auto IconView::set_property(std::string_view name, std::string_view value) -> bo
 Button::Button(std::string label, Variant variant, Size size)
     : label_(std::move(label)), variant_(variant), size_(size) {
   set_focusable(true);
-  // 悬浮特效：背景提亮 + 上浮（"可点"的手感）；参数由主题令牌统一给，
-  // 组件只声明要哪几项——这样按钮/列表/表格的悬浮反馈不会各走一套。
-  set_hover_effect(HoverEffect{.enabled = true, .background = true, .border = true, .lift = true, .glow = false, .cursor = true});
-
+  // 悬浮/按下的**底色变化由基类通用层统一做**（`Element::paint_box`）：
+  // 那里在同向提亮/压暗的幅度上做、而且**保持色相**（主按钮仍看得出是蓝的），
+  // 按下比悬停再深一档。`Button::apply_theme` 只管各变体的**常态语气**。
+  //
+  // 为什么必须分开：`apply_theme` **只在 layout 时跑**（见 `DESIGN.md` §4.2.6），
+  // 而悬停/按下只标重绘、不触发布局——组件里那份 `hovered_ ? ... : ...` 分支
+  // 算出的色会**永远停在旧状态**（实测：真实应用里按下态与悬停态像素完全一样）。
+  // 两处同时做还会**叠乘**（组件一层 + 通用层）——`Soft` 因此被洗成中性灰。
+  set_hover_effect(HoverEffect{.enabled = true, .background = true, .border = true,
+                               .lift = true, .glow = false, .cursor = true});
 }
 
 void Button::set_label(std::string label) {
@@ -283,37 +289,37 @@ void Button::apply_theme(const Theme& theme) {
   style_.direction = FlexDirection::Row;
   style_.text_align = TextAlign::Center;
 
+  // **悬浮/按下的底色变化交给基类的通用层**（`Element::paint_box`）——
+  // 那里在同向提亮/压暗的幅度上做，且**保持色相**（主按钮仍看得出是蓝的）。
+  // 本函数只管"**静态语气**"：每个变体的常态色。
+  //
+  // 为什么不在这里按 `hovered_`/`pressed_` 分支：`apply_theme` **只在 layout 时跑**
+  // （见 `DESIGN.md` §4.2.6 与 `UiRoot::layout` 的早退条件），而悬停/按下只标
+  // 重绘、不触发布局——于是那些分支算出来的色**永远停在旧状态上**，真实应用里
+  // 按下态根本不生效（实测：按下与悬停像素完全一样）。
+  // 两处同时做还会**叠乘**（组件一层 + 通用层）——Soft 变体因此被洗成中性灰。
   const bool inactive = !enabled_;
   switch (variant_) {
     case Variant::Primary:
-      style_.background = inactive ? colors.primary_soft
-                                   : (pressed_ ? colors.primary_active
-                                               : (hovered_ ? colors.primary_hover : colors.primary));
+      style_.background = inactive ? colors.primary_soft : colors.primary;
       style_.color = inactive ? colors.primary : colors.on_primary;
       break;
     case Variant::Secondary:
-      style_.background =
-          pressed_ ? colors.surface_sunken : (hovered_ ? colors.surface_alt : colors.surface);
+      style_.background = colors.surface;
       style_.color = inactive ? colors.text_faint : colors.text;
       style_.border_width = metrics.border_width;
-      style_.border_color = hovered_ ? colors.border_strong : colors.border;
+      style_.border_color = colors.border;
       break;
     case Variant::Ghost:
-      style_.background = pressed_ ? colors.surface_sunken
-                                   : (hovered_ ? colors.surface_alt : math::Color{0, 0, 0, 0});
+      style_.background = math::Color{0, 0, 0, 0};
       style_.color = inactive ? colors.text_faint : colors.text_muted;
       break;
     case Variant::Soft:
-      style_.background = pressed_ ? colors.primary_soft.darken(0.06f)
-                                   : (hovered_ ? colors.primary_soft.lighten(0.04f)
-                                               : colors.primary_soft);
+      style_.background = colors.primary_soft;
       style_.color = inactive ? colors.text_faint : colors.primary;
       break;
     case Variant::Danger:
-      style_.background = inactive ? colors.danger.with_alpha_f(0.2f)
-                                   : (pressed_ ? colors.danger.darken(0.12f)
-                                               : (hovered_ ? colors.danger.darken(0.06f)
-                                                           : colors.danger));
+      style_.background = inactive ? colors.danger.with_alpha_f(0.2f) : colors.danger;
       style_.color = colors.on_primary;
       break;
   }
@@ -377,9 +383,11 @@ void Button::paint_content(const RenderContext& context, raster::Surface& canvas
     cursor += icon_extent;
   }
   if (!clipped.empty()) {
-    const float line_height = port.line_height(font_size);
-    port.draw(canvas, clipped, math::Point{cursor, center_y - line_height * 0.5f}, font_size,
-              style_.color);
+    // 垂直居中走**全仓统一口径**（`centered_line_top`：按墨迹区居中，不是行盒）。
+    // 自己算一份的表现是"按钮字比菜单字偏一两像素"。
+    const float y = centered_line_top(port, clipped, font_size, bounds_.y,
+                                                           bounds_.height);
+    port.draw(canvas, clipped, math::Point{cursor, y}, font_size, style_.color);
   }
   if (!icon_.empty() && !icon_leading) {
     Icon::draw(canvas, icon_, math::Rect{cursor, center_y - icon_size * 0.5f, icon_size, icon_size},
@@ -501,14 +509,19 @@ void Card::apply_theme(const Theme& theme) {
   style_.radius = radius_override_ > 0.0f ? radius_override_ : theme.metrics().radius_lg;
   style_.padding = math::Insets::all(padding_);
   // 阴影档位：0=无、1=sm、≥2=md；`elevated_` 为真时一律 lg
-  style_.shadow = shadow_level_ == 0   ? Shadow{}
-                  : elevated_          ? shadow_lg(theme)
+  style_.shadow = shadow_level_ == 0 ? Shadow{}
+                  : elevated_ ? shadow_lg(theme)
                   : shadow_level_ >= 2 ? shadow_md(theme)
                                        : shadow_sm(theme);
   // 卡片边框在浅色主题下**淡到几乎看不见**（它只用来在深色主题/高对比场景收边）：
   // 有阴影的卡片再配一道同等明显的描边，会变成“双层轮廓”，显得脏。
   style_.border_color = theme.colors().border.with_alpha_f(
       theme.mode() == ThemeMode::Dark ? 1.0f : 0.55f);
+  // 亚克力的「玻璃边缘」：抬升的卡片顶部一道极弱亮线。
+  // 只给**真抬升**的卡片（有阴影的那些）——平铺的内容块加边缘光会变成"到处在发光"。
+  // 浅色档本令牌是透明的（见 `Theme::light()` 的说明），所以这里无需分模式判断。
+  style_.top_highlight = (elevated_ || shadow_level_ > 0) ? theme.colors().highlight
+                                                         : math::Color{0, 0, 0, 0};
 }
 
 // —— Divider ——
@@ -560,8 +573,9 @@ void KeyValueRow::measure(const RenderContext& context, const Constraints& const
 void KeyValueRow::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   const TextPort& port = port_of(context);
   const float size = style_.font_size;
-  const float line_height = port.line_height(size);
-  const float y = bounds_.y + (bounds_.height - line_height) * 0.5f;
+  // 与 `Element::paint_text` / `draw_line` / `Button` 同一口径：按**墨迹区**居中。
+  const float y = centered_line_top(port, label_, size, bounds_.y,
+                                                         bounds_.height);
   port.draw(canvas, label_, math::Point{bounds_.x, y}, size, context.theme.colors().text_muted);
   const float value_width = port.measure_width(value_, size);
   port.draw(canvas, value_, math::Point{bounds_.right() - value_width, y}, size,

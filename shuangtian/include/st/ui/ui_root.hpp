@@ -206,8 +206,13 @@ class UiRoot : public Element::HostFocus {
 
  private:
   void assign_ids(Element& element, const std::string& prefix);
-  /// 回收“分发期间摘除的叠加层”（延迟析构的墓场）。
+  /// 回收"派发或绘制期间摘除的叠加层"（延迟析构的墓场）。
   void reap_overlays();
+  /// 逐个绘制叠加层，并在对象之间回收墓场。
+  ///
+  /// 单独抽出来是因为 **叠加层的 `paint` 可以摘除自己**（`Toast` 到期），
+  /// 那时 `remove_overlay` 必须延后释放，而延后就得有人在绘完当前对象之后回收。
+  void paint_overlays(const RenderContext& context, raster::Surface& canvas);
   /// 把宿主契约（`this`，作为 `Element::HostFocus`）写到整棵子树（`Element::set_host`）。
   /// 子组件据此请求焦点，同时保持 `element.hpp` 不反向依赖 `ui_root.hpp`。
   void wire_owner(Element& element);
@@ -244,6 +249,10 @@ class UiRoot : public Element::HostFocus {
   /// 分发末尾 `reap_overlays()` 统一回收。
   std::vector<std::unique_ptr<Element>> graveyard_{};
   bool dispatching_{false};
+  /// 是否正在绘制叠加层（`paint_overlays` 置位）。
+  /// 与 `dispatching_` 并列：摘除发生在**绘制**里时同样要延后释放，
+  /// 否则当前对象的 `paint` 栈帧还在用 `this`（use-after-free，ASan 有现场）。
+  bool painting_overlays_{false};
   const TextPort* text_port_{nullptr};
   math::Size viewport_{1280.0f, 720.0f};
   Element* focused_{nullptr};

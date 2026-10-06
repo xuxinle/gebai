@@ -14,6 +14,7 @@ namespace st::ui {
 
 using components_internal::draw_line;
 using components_internal::fill_round_rect;
+using components_internal::paint_raised_surface;
 using components_internal::text_port_of;
 
 namespace {
@@ -139,12 +140,10 @@ void MenuPanel::paint_content(const RenderContext& context, raster::Surface& can
   const auto& colors = context.theme.colors();
   const auto& metrics = context.theme.metrics();
 
-  // 面板：阴影 + surface 底 + radius_md（自绘，见头文件纪律）。
-  const Shadow shadow = shadow_md(context.theme);
-  canvas.draw_shadow(bounds_, metrics.radius_md, shadow.blur, shadow.color,
-                     math::Point{shadow.offset_x, shadow.offset_y});
-  fill_round_rect(canvas, bounds_, metrics.radius_md,
-                  raster::Paint::solid(colors.surface));
+  // 面板：阴影 + `surface_raised` 底 + 玻璃边缘（亚克力抬升三件套，见 `paint_raised_surface`）。
+  // 用 `surface_raised` 而不是 `surface`：弹层必须比它下的面板**更亮一档**——
+  // 深色主题下阴影几乎不可见，层次只能靠底色本身拉开（歌白 `--bg-elev-2` 同理）。
+  paint_raised_surface(context, canvas, bounds_, metrics.radius_md, shadow_md(context.theme));
 
   for (std::size_t index = 0; index < items_.size(); ++index) {
     const MenuItem& item = items_[index];

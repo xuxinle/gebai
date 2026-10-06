@@ -168,6 +168,122 @@ ST_TEST(theme_focus_ring_is_visible_on_surfaces) {
   }
 }
 
+ST_TEST(theme_surface_ladder_is_monotone_and_distinguishable) {
+  // 亚克力的"层次"全部靠底色阶梯表达（没有品牌色块、没有粗描边），因此
+  // **相邻档必须真的分得开**。实测踩过：亮色 bg→surface 只差 1.063，卡片像"贴"在
+  // 背景上而不是浮在上面，而当时的测试只检查了"有值"、没检查"差得出来"。
+  const auto luminance = [](const Color& color) {
+    return static_cast<double>(st::math::relative_luminance(color));
+  };
+  const st::ui::Theme light = st::ui::Theme::light();
+  const st::ui::Palette& lp = light.colors();
+  // 浅色：背景（灰）→ 面板（近白）→ 抬升面（白），阶梯逐级向上
+  ST_CHECK(luminance(lp.bg) < luminance(lp.surface));
+  ST_CHECK(luminance(lp.bg) < luminance(lp.surface_alt));
+  ST_CHECK(luminance(lp.surface_alt) < luminance(lp.surface));
+  // 凹槽要**比背景暗到看得见**。这里取 1.08 而不是 1.05：
+  // `1.05` 太松了——实测 逆向验证 时发现 `#E0E0E6`（旧值，凹陷感几乎为零）
+  // 也有 1.077，照样能过，于是这条断言根本拦不住"把凹槽调回贴平"。
+  ST_CHECK(luminance(lp.surface_sunken) < luminance(lp.bg));
+  ST_CHECK(contrast(lp.surface, lp.bg) >= 1.08);
+  ST_CHECK(contrast(lp.surface, lp.surface_alt) >= 1.05);
+  ST_CHECK(contrast(lp.surface_sunken, lp.bg) >= 1.08);
+
+  const st::ui::Theme dark = st::ui::Theme::dark();
+  const st::ui::Palette& dp = dark.colors();
+  // 深色：背景（近黑）→ 面板 → 抬升面（更亮），同为逐级向上
+  ST_CHECK(luminance(dp.bg) < luminance(dp.surface));
+  ST_CHECK(luminance(dp.surface) < luminance(dp.surface_alt));
+  ST_CHECK(luminance(dp.surface_alt) <= luminance(dp.surface_raised));
+  // **凹槽在两个模式下都更暗**：语义是"凹进去"，不随亮暗反转。
+  // 旧深色主题的 `surface_sunken` 比 `surface` 更亮（1.040），语义是反的。
+  ST_CHECK(luminance(dp.surface_sunken) < luminance(dp.surface));
+  ST_CHECK(contrast(dp.surface, dp.bg) >= 1.08);
+  ST_CHECK(contrast(dp.surface_alt, dp.surface) >= 1.08);
+  ST_CHECK(contrast(dp.surface_sunken, dp.surface) >= 1.10);
+}
+
+ST_TEST(theme_elevated_surface_is_never_darker_than_panel) {
+  // 弹层压在面板上：深色下阴影几乎不可见，若抬升面不比面板亮，弹层会"陷"进去。
+  // 浅色下两者同为白系（抬升靠阴影表达），所以断言是"不更暗"而不是"更亮"。
+  for (const st::ui::Theme& theme : {st::ui::Theme::light(), st::ui::Theme::dark()}) {
+    const st::ui::Palette& palette = theme.colors();
+    const double panel = static_cast<double>(st::math::relative_luminance(palette.surface));
+    const double raised = static_cast<double>(st::math::relative_luminance(palette.surface_raised));
+    ST_CHECK(raised >= panel);
+    if (theme.mode() == st::ui::ThemeMode::Dark) ST_CHECK(raised > panel);
+  }
+}
+
+ST_TEST(theme_border_subtle_is_lighter_than_border_but_visible) {
+  // 分隔线的第三档：必须在 `bg` 上看得见（它就是列表行/区段的分隔依据），
+  // 又必须比 `border` 轻（否则"同组内"与"组之间"的区分就没了）。
+  for (const st::ui::Theme& theme : {st::ui::Theme::light(), st::ui::Theme::dark()}) {
+    const st::ui::Palette& palette = theme.colors();
+    for (const Color& background : {palette.surface, palette.surface_alt}) {
+      ST_CHECK(contrast(palette.border_subtle, background) >= 1.10);
+    }
+    const double subtle =
+        static_cast<double>(st::math::relative_luminance(palette.border_subtle));
+    const double normal = static_cast<double>(st::math::relative_luminance(palette.border));
+    if (theme.mode() == st::ui::ThemeMode::Light) {
+      ST_CHECK(subtle > normal);   // 浅色：更淡 = 更亮
+    } else {
+      ST_CHECK(subtle < normal);   // 深色：更淡 = 更暗
+    }
+  }
+}
+
+ST_TEST(theme_glass_edge_is_visible_only_where_it_helps) {
+  // 亚克力的"玻璃边缘"（顶部内高光）只用在一个方向：**深底上提亮**。
+  // 浅底已经接近纯白，叠白光不会可见——歌白浅色档用的是一条**暗色发丝线**，
+  // 而那正是 `border` 已经承担的职责，不该重复一层。
+  const st::ui::Theme light_theme = st::ui::Theme::light();
+  ST_CHECK(light_theme.colors().highlight.a == 0U);
+
+  const st::ui::Theme dark_theme = st::ui::Theme::dark();
+  const Color& edge = dark_theme.colors().highlight;
+  ST_CHECK(edge.a > 0U);
+  // 深色的边缘光必须是**弱白光**：比面板亮，但对比度很低（它是"受光"不是"描边"）
+  ST_CHECK(st::math::relative_luminance(edge) >
+           st::math::relative_luminance(dark_theme.colors().surface));
+  ST_CHECK(contrast(edge, dark_theme.colors().surface_raised) < 2.0);
+  ST_CHECK(contrast(edge, dark_theme.colors().surface_raised) > 1.05);
+}
+
+ST_TEST(theme_shadow_tuning_knobs_scale_without_touching_defaults) {
+  // 强度/扩散旋钮是给自定义主题用的；**默认值下结果必须与旧值逐位相同**，
+  // 否则"加了两个旋钮"就变成了"偷偷改了所有主题的阴影"。
+  const st::ui::Theme base = st::ui::Theme::light();
+  const st::ui::Shadow md = st::ui::shadow_md(base);
+  st::ui::Theme tweaked = base;
+  tweaked.metrics().shadow_strength = 2.0f;
+  const st::ui::Shadow strong = st::ui::shadow_md(tweaked);
+  ST_CHECK(strong.color.a > md.color.a);
+  ST_CHECK(strong.blur == md.blur);   // 强度只改浓淡，不改扩散
+
+  st::ui::Theme spread = base;
+  spread.metrics().shadow_spread = 2.0f;
+  const st::ui::Shadow wide = st::ui::shadow_md(spread);
+  ST_CHECK(wide.blur > md.blur);
+  ST_CHECK(wide.color.a == md.color.a);  // 扩散只改模糊，不改浓淡
+
+  // 非正值被忽略（宁可保留默认，也不要静默把阴影变成 0）
+  st::ui::Theme broken = base;
+  broken.metrics().shadow_strength = -1.0f;
+  broken.metrics().shadow_spread = 0.0f;
+  const st::ui::Shadow fallback = st::ui::shadow_md(broken);
+  ST_CHECK(fallback.color.a == md.color.a);
+  ST_CHECK(fallback.blur == md.blur);
+}
+
+ST_TEST(theme_name_survives_construction) {
+  // 主题名是控制通道 `theme` 的上报字段（"我现在用的是哪份主题"）。
+  // `dark()` 曾经漏设名字，于是切到暗色后仍上报 "light"——用户以为没切过去。
+  ST_CHECK(st::ui::Theme::light().name() == "light");
+  ST_CHECK(st::ui::Theme::dark().name() == "dark");
+}
+
 ST_TEST(theme_metrics_scale_is_consistent) {
   // 尺度令牌：间距与圆角都要**成阶梯**，否则布局会出现"差 1px"的脏边
   const st::ui::Metrics metrics = st::ui::Theme::light().metrics();

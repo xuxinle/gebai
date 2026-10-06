@@ -29,6 +29,14 @@ class RendererTextPort final : public ui::TextPort {
       std::string_view utf8, float size,
       text::FontRole role = text::FontRole::Proportional) const -> float override;
   [[nodiscard]] auto line_height(float size) const -> float override;
+  [[nodiscard]] auto ascent(float size) const -> float override;
+  [[nodiscard]] auto descent(float size) const -> float override;
+  [[nodiscard]] auto shaped_ascent(std::string_view utf8, float size,
+                                   text::FontRole role = text::FontRole::Proportional) const
+      -> float override;
+  [[nodiscard]] auto ink_metrics(std::string_view utf8, float size,
+                                 text::FontRole role = text::FontRole::Proportional) const
+      -> std::optional<InkMetrics> override;
   [[nodiscard]] auto has_real_bold() const -> bool override {
     return renderer_.stack().has_bold();
   }

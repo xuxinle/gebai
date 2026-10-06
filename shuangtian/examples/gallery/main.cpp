@@ -54,6 +54,8 @@ struct Options {
   bool headless{false};
   float scale{0.0f};
   std::string theme{"light"};
+  /// 自定义主题 JSON（稀疏覆盖；`--theme-file` 或 `ST_THEME_FILE`）。
+  std::string theme_file{};
   /// 渲染器：auto（按实测帧耗时选更快）/ gpu / software。
   std::string renderer{"auto"};
   /// 文字抗锯齿：auto（有窗口 → LCD 亚像素；无头 → 灰度）/ on / off。
@@ -114,8 +116,9 @@ std::string ui_font_scale{"auto"};
     else if (raw == "--frames") options.frames = static_cast<std::uint32_t>(std::stoi(next("0")));
     else if (raw == "--bench") options.bench = static_cast<std::uint32_t>(std::stoi(next("0")));
     else if (raw == "--ms") options.max_ms = std::stoi(next("0"));
+    else if (raw == "--theme-file") options.theme_file = next("");
     else if (raw == "--help" || raw == "-h") {
-      st::print("用法: gallery [--headless] [--scale 2.0] [--theme dark] [--control-port 0]\n"
+      st::print("用法: gallery [--headless] [--scale 2.0] [--theme dark] [--theme-file PATH] [--control-port 0]\n"
                 "               [--control-file PATH] [--shots DIR] [--frames N] [--bench N] [--ms N]\n"
                 "               [--renderer auto|gpu|software] [--text-lcd auto|on|off] [--text-fit auto|off|light|normal]\n"
                 "               [--text-gamma auto|off|<数值>] [--ui-font-scale auto|<数值>]\n");
@@ -223,6 +226,7 @@ auto run_app(int argc, char** argv) -> int {
   app_options.control_port = options.control_port;
   app_options.control_file = options.control_file;
   app_options.screenshot_dir = options.shots;
+  app_options.theme_file = options.theme_file;
   app_options.theme = options.theme == "dark" ? st::ui::ThemeMode::Dark : st::ui::ThemeMode::Light;
 
   st::app::Application app("gallery", "0.1.0", app_options);
