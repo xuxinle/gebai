@@ -1,0 +1,50 @@
+{
+ "width": 900.0,
+ "height": 91.39999999999999,
+ "rows": [
+  {
+   "row": 0,
+   "label": "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+   "size": 10,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "class": "latin",
+   "group": "10px 拼串（62 字）",
+   "top": 4.0
+  },
+  {
+   "row": 1,
+   "label": "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+   "size": 11,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "class": "latin",
+   "group": "11px 拼串（62 字）",
+   "top": 22.849999999999998
+  },
+  {
+   "row": 2,
+   "label": "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+   "size": 12,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "class": "latin",
+   "group": "12px 拼串（62 字）",
+   "top": 41.699999999999996
+  },
+  {
+   "row": 3,
+   "label": "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+   "size": 13,
+   "color": "#0F172A",
+   "mono": false,
+   "bold": false,
+   "class": "latin",
+   "group": "13px 拼串（62 字）",
+   "top": 60.55
+  }
+ ]
+}

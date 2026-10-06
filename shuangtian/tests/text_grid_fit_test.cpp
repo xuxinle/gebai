@@ -702,6 +702,7 @@ ST_TEST(class_gamma_affects_only_its_class_and_survives_cache) {
 
   // ① 只压数字类
   renderer.set_class_gamma(GlyphClass::Digit, 0.92f);
+  renderer.set_class_gamma(GlyphClass::Letter, 0.98f);
   const auto digit_after = renderer.glyph_bitmap_of(U'3', 15.0f);
   const auto letter_after = renderer.glyph_bitmap_of(U'A', 15.0f);
   ST_CHECK(digit_after != nullptr && letter_after != nullptr);
@@ -709,9 +710,28 @@ ST_TEST(class_gamma_affects_only_its_class_and_survives_cache) {
             ink(*digit_after), letter_ink_0, ink(*letter_after));
   // 数字变重（γ<1 压黑），且幅度可观（实测 ~7%）
   ST_CHECK(ink(*digit_after) > digit_ink_0 * 1.03);
-  // **字母逐位不变**（这是"已对好的不要动"的硬要求）
-  ST_CHECK_EQ(static_cast<int>(std::lround(ink(*letter_after) * 100.0)),
+  // **字母只受自己那一档影响**：本轮给字母类也定了档（γ=0.98），所以它**应当**变重
+  // ——但变的是这一档，不是数字档。判据是"两个类各自独立可调"：
+  // 这一段把字母档也设上，随后单独把字母档归零、数字档不动，字母必须回到原值。
+  ST_CHECK(ink(*letter_after) > letter_ink_0 * 1.005);
+  renderer.set_class_gamma(GlyphClass::Letter, 0.0f);
+  const auto letter_restored = renderer.glyph_bitmap_of(U'A', 15.0f);
+  ST_CHECK(letter_restored != nullptr);
+  ST_CHECK_EQ(static_cast<int>(std::lround(ink(*letter_restored) * 100.0)),
               static_cast<int>(std::lround(letter_ink_0 * 100.0)));
+  renderer.set_class_gamma(GlyphClass::Letter, 0.98f);
+
+  // ①b **汉字（Default 类）不受数字/字母档影响**——这是"已对好的不要动"的核心
+  const auto han = renderer.glyph_bitmap_of(U'中', 15.0f);
+  if (han != nullptr) {
+    TextRenderer reference(*fixture.stack, 1.5f);
+    reference.set_subpixel(true);
+    reference.set_coverage_gamma(1.10f);
+    const auto han_reference = reference.glyph_bitmap_of(U'中', 15.0f);
+    ST_CHECK(han_reference != nullptr);
+    ST_CHECK_EQ(static_cast<int>(std::lround(ink(*han) * 100.0)),
+                static_cast<int>(std::lround(ink(*han_reference) * 100.0)));
+  }
 
   // ② 缓存不串档：改回不覆盖后，数字必须回到原值
   renderer.set_class_gamma(GlyphClass::Digit, 0.0f);

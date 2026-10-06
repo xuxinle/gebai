@@ -36,9 +36,18 @@ namespace st::text {
 /// 而数字恒定偏轻——所以"按类"才是正确的分档维度（"按字号分档"那条已被
 /// DESIGN §4.3.7.17 的标定证明不成立）。
 enum class GlyphClass : std::uint8_t {
-  Default,   ///< 其它一切字形（拉丁字母、汉字、标点、符号…）
-  Digit,     ///< ASCII 数字 `0`~`9`（与拉丁**同字体面**，仅覆盖率映射不同）
+  Default,   ///< 其它一切字形（汉字、标点、符号…）
+  Digit,     ///< ASCII 数字 `0`~`9`
+  Letter,    ///< ASCII 拉丁字母 `A`~`Z` / `a`~`z`
 };
+
+/// 字形类的数量（用于按类保存覆盖参数的数组下标）。
+inline constexpr std::size_t kGlyphClassCount = 3;
+
+/// 类 → 数组下标。
+[[nodiscard]] constexpr auto glyph_class_index(GlyphClass glyph_class) noexcept -> std::size_t {
+  return static_cast<std::size_t>(glyph_class);
+}
 
 /// 码点 → 字形类（ASCII 数字单独一类，其余归 `Default`）。
 [[nodiscard]] auto glyph_class_of(char32_t codepoint) noexcept -> GlyphClass;
@@ -277,10 +286,10 @@ class TextRenderer {
   }
 
   void set_class_gamma(GlyphClass glyph_class, float gamma) noexcept {
-    (glyph_class == GlyphClass::Digit ? digit_gamma_ : default_class_gamma_) = gamma;
+    class_gamma_[glyph_class_index(glyph_class)] = gamma;
   }
   [[nodiscard]] auto class_gamma(GlyphClass glyph_class) const noexcept -> float {
-    return glyph_class == GlyphClass::Digit ? digit_gamma_ : default_class_gamma_;
+    return class_gamma_[glyph_class_index(glyph_class)];
   }
 
 
@@ -541,8 +550,7 @@ class TextRenderer {
   float fitted_gamma_size_{0.0f};
   float fitted_gamma_{0.0f};
   /// 按**字形类**覆盖 gamma（0 = 不覆盖），见 `set_class_gamma`。
-  float digit_gamma_{0.0f};
-  float default_class_gamma_{0.0f};
+  std::array<float, kGlyphClassCount> class_gamma_{0.0f, 0.0f, 0.0f};
   /// 覆盖率预校正模式（见 `set_coverage_correct`）。
   CoverageCorrect coverage_correct_{CoverageCorrect::Gamma};
   /// Skia 模式的对比度（只影响深字浅底）。

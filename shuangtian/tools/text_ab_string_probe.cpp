@@ -1,19 +1,18 @@
-/// 文字渲染 A/B：**字号阶梯页**霜天侧（仅验证用，不进框架构建、不进 `st.pkg`）。
+/// 文字渲染 A/B：**字符集页**霜天侧（仅验证用，不进框架构建、不进 `st.pkg`）。
 ///
-/// 与 `tools/text_ab_sizes_page.html` 同源同布局：同一串文字逐档字号，
-/// 用来回答「霜天与浏览器的差异是否随字号变化」（小字号与大字号本来该用不同修法）。
+/// 与 `tools/text_ab_chars_page.html` 逐字、逐字号、逐颜色、逐位置相同地渲染，
+/// 输出物理像素 1:1 的 PNG，供 `tools/text_ab_diff.py` 与**真窗口**浏览器截图比较。
 ///
-/// 说明：本文件取代旧的 `text_ab_sizes_probe.cpp`（那份依赖
-/// `text_ab_sizes_rows.inc` 的单一 `kSample` + 独立生成的 HTML，两侧字号表已经漂移；
-/// 现在行表与 HTML 由同一个生成器产出，探针只按行表渲染）。
-///
-/// 用法：text_ab_sizes_probe <outdir> [scale] [gamma] [--gray] [--nofit] [--nofilter] [--nocomp]
+/// 用法：text_ab_string_probe <outdir> [scale] [gamma] [--gray] [--nofit] [--nofilter] [--nocomp]
 #include "text_ab_common.hpp"
 
+#include <array>
+#include <cmath>
 #include <string>
 
-#include "text_ab_sizes_rows.inc"
+#include "text_ab_string_rows.inc"
 
+using ab::Color;
 using ab::Point;
 using ab::TextRenderer;
 
@@ -28,9 +27,9 @@ auto main(int argc, char** argv) -> int {
     if (a == "--gray") options.subpixel = false;
     else if (a.rfind("--digit-gamma=", 0) == 0) options.digit_gamma = std::stof(a.substr(std::string("--digit-gamma=").size()));
     else if (a.rfind("--letter-gamma=", 0) == 0) options.letter_gamma = std::stof(a.substr(std::string("--letter-gamma=").size()));
-    else if (a == "--darken") options.darken = true;
     else if (a == "--fit-normal") options.fit_normal = true;
     else if (a == "--darken") options.darken = true;
+    else if (a == "--strict-hints") options.strict_hints = true;
     else if (a == "--nofit") options.fit = false;
     else if (a == "--nofilter") options.filter = false;
     else if (a == "--nocomp") options.compensate = false;
@@ -42,7 +41,8 @@ auto main(int argc, char** argv) -> int {
     return 1;
   }
   ab::print_font_stack(*stack);
-  st::print("device_scale={}  画布={}x{} 逻辑  {} 行\n", scale, kWidth, kHeight, kLines.size());
+  st::print("device_scale={}  画布={}x{} 逻辑  {} 行  subpixel={} fit={}\n", scale, kWidth, kHeight,
+            kLines.size(), options.subpixel, options.fit);
 
   const int width = static_cast<int>(kWidth * scale);
   const int height = static_cast<int>(kHeight * scale);
@@ -55,8 +55,9 @@ auto main(int argc, char** argv) -> int {
     (void)renderer.draw(canvas, line.text, Point{4.0f, line.top}, line.size, line.color, line.role,
                         0.0f, line.bold);
   }
-  const std::string path = out_dir + "/ab-sizes-st.png";
+  const std::string path = out_dir + "/ab-string-st.png";
   ab::save(canvas.to_rgba8(), width, height, path);
-  st::print("  已写 {}（{}x{} 物理像素）\n", path, width, height);
+  st::print("  已写 {}（{}x{} 物理像素，coverage_gamma={}）\n", path, width, height,
+            renderer.coverage_gamma());
   return 0;
 }

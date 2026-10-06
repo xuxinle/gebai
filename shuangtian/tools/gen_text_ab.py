@@ -288,6 +288,24 @@ def all_glyph_rows():
     return rows
 
 
+# ── 页 6：同一批字符「逐字一行」vs「拼成一串」（回答口径问题） ────────────────
+# 起因：全量页（一行一字）测出字母墨量比 0.92，而字族页（一行一整串）测出 0.96。
+# 两次测的是同一批字形、同一档位，差别只可能在**量法**。本页把同一批字符
+# **两种排布都放进去**（每字号两行），于是"排布是否有影响"可以直接对账。
+STRING_SIZES = [10, 11, 12, 13]
+
+
+def string_rows():
+    chars = [chr(c) for c in range(ord("A"), ord("Z") + 1)]
+    chars += [chr(c) for c in range(ord("a"), ord("z") + 1)]
+    chars += [chr(c) for c in range(ord("0"), ord("9") + 1)]
+    joined = "".join(chars)
+    rows = []
+    for size in STRING_SIZES:
+        rows.append((joined, size, TEXT, SANS, 0, f"{size}px 拼串（62 字）"))
+    return rows
+
+
 def main() -> int:
     root = pathlib.Path(__file__).resolve().parent
     emit(root, "chars", CHARS_ROWS, "霜天文字 A/B — 字符集")
@@ -295,6 +313,7 @@ def main() -> int:
     emit(root, "families", family_rows(), "霜天文字 A/B — 字族 × 字号")
     emit(root, "glyphs", glyph_rows(), "霜天文字 A/B — 逐字形")
     emit(root, "allglyphs", all_glyph_rows(), "霜天文字 A/B — 全量字母数字（小字号）")
+    emit(root, "string", string_rows(), "霜天文字 A/B — 拼串（口径对照）")
     return 0
 
 

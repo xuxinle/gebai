@@ -411,7 +411,11 @@ TextRenderer::TextRenderer(const FontStack& stack, float supersample)
 TextRenderer::~TextRenderer() = default;
 
 auto glyph_class_of(char32_t codepoint) noexcept -> GlyphClass {
-  return (codepoint >= U'0' && codepoint <= U'9') ? GlyphClass::Digit : GlyphClass::Default;
+  if (codepoint >= U'0' && codepoint <= U'9') return GlyphClass::Digit;
+  if ((codepoint >= U'A' && codepoint <= U'Z') || (codepoint >= U'a' && codepoint <= U'z')) {
+    return GlyphClass::Letter;
+  }
+  return GlyphClass::Default;
 }
 
 void TextRenderer::set_coverage_correct(CoverageCorrect mode) noexcept {
@@ -741,8 +745,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   // 键里只放 `effective_gamma` 会让两档互相取到对方的位图（症状：改了类 γ 看不出变化，
   // 直到缓存淘汰才"突然生效"——与 gamma/加墨/量化同类的疏漏）。
   const float size_px = static_cast<float>(size_bucket) / 4.0f;
-  const float class_gamma_for_key =
-      glyph_class == GlyphClass::Digit ? digit_gamma_ : default_class_gamma_;
+  const float class_gamma_for_key = class_gamma_[glyph_class_index(glyph_class)];
   const auto gamma_bucket = static_cast<std::uint64_t>(std::lround(
       (      class_gamma_for_key > 0.0f ? class_gamma_for_key : effective_gamma(size_px)) * 100.0f));
   // 校正模式与 Skia 模式的对比度也要进键：同理由——不同映射 = 不同位图。
@@ -850,7 +853,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   // 小字号笔画细，单档压两端消不掉“小字偏重”，必须能分档。
   // **生效 gamma = 字号分档，再被"字形类分档"覆盖**（见 `set_class_gamma`）。
   // 顺序刻意如此：类分档是"只动这一类"的窄口径修正，理应有最高优先级。
-  const float class_gamma = glyph_class == GlyphClass::Digit ? digit_gamma_ : default_class_gamma_;
+  const float class_gamma = class_gamma_[glyph_class_index(glyph_class)];
   const float glyph_gamma = class_gamma > 0.0f ? class_gamma : effective_gamma(effective_size);
   const auto correct = [this, &skia_lut, use_skia_lut, glyph_gamma](float value) noexcept -> float {
     if (value <= 0.0f || value >= 1.0f) return value;

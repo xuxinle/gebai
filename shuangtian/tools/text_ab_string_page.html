@@ -1,0 +1,21 @@
+<!doctype html>
+<!-- 本文件由 `tools/gen_text_ab.py` 生成——**不要手改**（改了会在下次生成时丢失，
+     而且两侧会漂移，漂移会被误读成"渲染差异"）。
+     字体族必须与霜天 `FontStack` 候选链对齐，否则量到的是字体差异而不是渲染差异。 -->
+<meta charset="utf-8">
+<title>霜天文字 A/B — 拼串（口径对照）</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #FFFFFF; }
+  /* 高度必须显式给：子元素全是 `position:absolute`、不撑开父容器，
+     而 `overflow:hidden` 会按父容器**实际盒子**裁剪——body 高度 0 时整页被裁空
+     （实测：截图全白、DOM 却完好）。 */
+  body { position: relative; width: 900px; height: 91px; overflow: hidden; }
+  /* `text-rendering: geometricPrecision` 关掉浏览器的"整数像素推进"优化：
+     我们要比的是**字形栅格化**，不是排版取整（取整会让字距在两侧各偏一半像素）。 */
+  .t { position: absolute; left: 4px; white-space: nowrap; line-height: 1;
+        text-rendering: geometricPrecision; }
+</style>
+<div class="t" id="r00" style="top:4px; font-size:10px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789</div>
+<div class="t" id="r01" style="top:22.85px; font-size:11px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789</div>
+<div class="t" id="r02" style="top:41.7px; font-size:12px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789</div>
+<div class="t" id="r03" style="top:60.55px; font-size:13px; color:#0F172A; font-family:'DejaVu Sans','Noto Sans CJK SC'">ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789</div>
