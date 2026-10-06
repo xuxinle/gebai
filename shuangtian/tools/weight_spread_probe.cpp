@@ -85,7 +85,7 @@ auto main(int argc, char** argv) -> int {
     st::print("未找到可用字体\n");
     return 1;
   }
-  TextRenderer renderer(*stack, static_cast<int>(std::lround(scale)));
+  TextRenderer renderer(*stack, static_cast<float>(std::lround(scale)));
   renderer.set_subpixel(true);
   renderer.set_grid_fit(GridFitMode::Off);
   renderer.set_coverage_gamma(gamma);
@@ -102,7 +102,7 @@ auto main(int argc, char** argv) -> int {
       if (reference == nullptr || reference->coverage.empty()) continue;
       const double ink_reference = measure(*reference).ink;
       if (ink_reference <= 0.0) continue;
-      TextRenderer fitted(*stack, static_cast<int>(std::lround(scale)));
+      TextRenderer fitted(*stack, static_cast<float>(std::lround(scale)));
       fitted.set_subpixel(true);
       fitted.set_grid_fit(fit);
       fitted.set_coverage_gamma(gamma);

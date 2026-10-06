@@ -24,8 +24,24 @@ namespace st::app {
 [[nodiscard]] auto resolve_text_lcd(std::string_view mode) -> bool;
 
 /// 解析字形网格拟合模式（命令行 `--text-fit` 取值；`auto` 时再看 `ST_TEXT_FIT`）。
-/// 默认 `Normal`，与 `text_lcd` 同一理由（内置通道与桌面同源）。
+///
+/// **默认档位由 `resolve_text_fit("auto")` 给出**（当前是 `Off`，以真窗口浏览器
+/// 为基准逐轴标定后的结论）。下面那句“默认 `Normal`”是**单指标、无参照**时的推理，
+/// 已被参照推翻；留这个提醒是因为“实现改了、注释不改”正是默认档静默漂移的温床。
+///
+/// **测试必须走 `resolve_text_fit("auto")` 拿默认档**，不要自己写 `GridFitMode::Normal`：
+/// 实测踩过——`text_ink_compensation_evens_out_glyph_weight` 一直钉的是 `Normal`，
+/// 而产品默认早已是 `Off`，于是它变成一条**与产品行为无关的恒红**：
+/// 既不能证明补偿坏了，也不能证明它好着。
 [[nodiscard]] auto resolve_text_fit(std::string_view mode) -> st::text::GridFitMode;
+
+/// **拟合墨量补偿是否应开启**。与 `resolve_text_fit` 成对——补偿解决的是「拟合对每个字
+/// 的墨量改变幅度不一致」，所以**只有拟合开着时才需要它**（拟合关掉时逐字墨量恒为 1.000）。
+///
+/// 抽成函数而不是在 `app.cpp` 里写 `set_ink_compensation(true)`：实测踩过“三处各写一份默认值”
+/// 的错位——应用无条件开补尝、而拟合默认档已改为 `Off`；回归用例又自己写死 `Normal`，
+/// 于是它测的不是产品行为（详见 `text_ink_compensation_evens_out_glyph_weight`）。
+[[nodiscard]] auto resolve_ink_compensation(st::text::GridFitMode fit) -> bool;
 
 /// **按字形类的覆盖率 gamma 档位**（数字 / 拉丁字母 / 汉字）。
 ///

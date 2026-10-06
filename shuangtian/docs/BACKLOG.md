@@ -3,6 +3,111 @@
 > 本文件是唯一权威清单，完成后移入「已完成」并在 DESIGN.md 更新里程碑。
 > **诚实原则**：写着「待做」却已完成的条目会误导读者；写着「已完成」却没落地的条目更糟。
 
+## 已完成（2026-10-06 三个既有红项：全量崩溃 / 文字补偿闸门 / GPU 边界丢行）
+
+上轮收尾时如实记下三个「与本次改动无关」的红/崩，本轮逐个修完。**全量 `st test`
+从 807 passed / 2 failed + 中途 abort 变为 809 passed / 0 failed**。
+
+### ① 全量 `st test` 跑到 capture 用例崩在 nlohmann 断言（P0）
+
+`tests/control_protocol_test.cpp:595` 的 `capture_pixel_size_comes_from_the_export_…`
+单跑即崩。两个缺陷叠在一起：
+
+- **用例硬编码 `/tmp/gebai-capture-size-probe.png`**。捕获落盘有白名单（默认 = 临时目录
+  + 可执行文件目录 + 控制文件目录），`/tmp/...` 在 Linux 能过、**在 Windows 不是白名单**，
+  `capture` 如实例返回错误帧。修：改用 `st::fs::make_temp_dir()` + `st::fs::join`
+  （这正是仓库里其他用例已有的写法，我没照抄）。
+- **`reply["result"]` 在 const Json 上取缺键是 nlohmann 的 UB**——它会直接 abort 进程，
+  而不是报“一条用例失败”。于是错误帧一出现，整个测试进程就没了：
+  后面所有用例不再执行，且崩溃点看起来与真因毫无关系（这也是
+  `tools/theme_reverse_verify.py` 把它误判为“仍绿”的原因，见下）。
+  修：取值一律走 `find` + 缺键时报断言失败。同一教训在提交 `92abd9c` 里已写过（§7.1），
+  这个文件当时没改到。
+
+**逆向验证**：把实现改回「`region × scale`」→ 用例变红（不再是崩进程）。
+
+### ② `text_ink_compensation_evens_out_glyph_weight` 恒红：闸门钉错了档位
+
+零构退化——**用例的档位与产品默认脱节**：
+
+| | 拟合档位 | 逐字墨量极差（无补尝→有补尝） | 结果 |
+|---|---|---|---|
+| 用例写死的（`Normal`） | `normal` | 0.265 → 0.224（收窄 16%） | 卡在 ≥20% 阈值上恒红 |
+| **应用默认（`Off`）** | `off` | 1.000 → 1.000 | 拟合不扰乱，契约无适用场景 |
+| 应用曾经的默认（`light`） | `light` | **0.169 → 0.115（收窄 32%）** | 稳过阈值 |
+
+即：补尝本身好着，而用例拿一个**已在产品里被放弃的激进档位**去卡它。
+`app.cpp:56` 写得很清楚：默认已改为 `off`（以真窗口浏览器为基准逐轴标定，
+拟合偏锐、三个正交轴都指向 off）。
+
+修（按仓库既有纪律“默认档要抽成可测常量、实现与测试同一入口”）：
+
+- 新增 `st::app::resolve_ink_compensation(fit)`——**拟合关则不补尝**（拟合不扰乱墨量时无事可做）；
+  `app.cpp` 由无条件 `set_ink_compensation(true)` 改为走它；
+- 用例改为 `resolve_text_fit("auto")` + `resolve_ink_compensation(...)` 取默认档，
+  默认档为 `off` 时**如实跳过**（并断言“拟合关 ⇒ 补尝也关”的成对约定）；
+- 新增 `ST_TEST_FIT` 环境变量**覆盖档位**——否则默认档关掉后，这条闸门永远跑不到断言，
+  就变成一条无人验证的摆设。`ST_TEST_FIT=light st test text_ink_compensation` 走完整断言。
+
+**逆向验证**（`ST_TEST_FIT=light`）：把补尝计算短路 → 极差 0.169 → 0.169，用例变红。
+`app.hpp` 里那句错误的注释（“默认 `Normal`”）已一并改正——实现改了、注释不改
+正是默认档静默漂移的温床。
+
+### ③ `gpu_matches_software_for_layout_of_real_widgets` 结构性差异超阈
+
+现象：结构性 0.307%（阈值 0.1%）、最大 Δ95。`tools/gpu_structural_probe.cpp`（新）
+按行统计把它定位到**两整行**：y=124 共 350 像素、y=75 共 18 像素——
+分别落在 `Input`（底边 y=124.3）与 `Switch`（底边 y=78.3）的**边界那一行**上。
+
+**根因**：GPU 顶点着色器画的四边形**刚好贴住矩形边界**，而光栅化**按像素中心**
+判图元内外——底边在 124.3 时，第 124 行的中心 124.5 落在四边形外，
+**这一整行不产生片元**，SDF 再准也来不及（它本应给出 ~70% 覆盖率）。
+软件光栅器对像素做面积积分，不会丢这一行。
+
+修：顶点四边形**向外扩 1 像素**（`vs_main` 的 `pad`）。`local`/`pixel` 都是 `uv` 的
+仿射函数，扩张只加余量、同片元处取值不变（梯度与位图采样不受影响）。
+
+效果：**结构性 0.307% → 0.000%**，最大 Δ 95 → 30（纯边缘抗锯齿级）。
+
+**逆向验证**：`pad` 改回 0 → 结构性回到 0.307%、用例变红。
+
+### 同时修的两个基础设施缺陷（都是“让下次不用再猜”）
+
+- `tools/theme_reverse_verify.py`：① 把「进程撞断言崩溃」误判成「仍绿」
+  （旧口径只看有没有 `FAIL`）——实测就因此把上述 ① 误指为嫌疑人；
+  ② Windows 上 `text=True` 的 GBK 解码崩（后台读线程吞异常 ⇒ `stdout` 变 `None`）；
+  ③ 恢复阶段的 `os.remove` 失败会抩出 `finally`，**把源码永久留在回退状态**
+  （实测把 `server.cpp`/`rasterizer.cpp` 各弄挂一次）——改为容错 + 恢复后校验原文。
+- `tools/weight_spread_probe.cpp`：从未注册进 `st.pkg`，因此**一直没编译过**
+  （两个 `-Werror=conversion` 错误）；已注册并修好。没有它就无法快速区分
+  “拟合哪个档位扰得少”，上面 ② 的定档依据就无处复核。
+
+### 新增工具
+
+- `tools/ink_spread_probe.cpp`：逐字 dump（基准 / 拟合 / 拟合+补尝 / 补尝率），
+  用来判“残差是补尝的固有边界还是实现退化”；
+- `tools/gpu_structural_probe.cpp`：GPU/软件结构性差异的**空间分布**（按行统计 +
+  最差像素坐标与两侧颜色 + 元素包围盒），用来把“哪一类内容对不上”变成可指认的对象。
+
+### 逆向验证又拓出一个错归因（已修）
+
+加上上面三条后跑 `theme_reverse_verify.py`，报了“回退后仍然是绿的”：
+**`border_ring_total_ink_matches_perimeter_times_width` 其实量不到 `rasterize_mask`**。
+它走的是 `Canvas::fill_path` → `detail::fill_path_aa` → `blend_coverage_runs`（缺陷①），
+而 `rasterize_mask`（缺陷②）是**另一条通路**——我当初把二者当成同一条的两种口径，归错了。
+真正走遮罩的入口是**路径裁剪**（`push_clip_path`）：
+
+- 新增 `clip_mask_coverage_accumulates_instead_of_maxing`：用**圆角环**作裁剪路径，
+  在全屏填色后量几何面积。为何是环而不是实心块：实心块只有边缘一圈受影响，
+  取最大值/累加的差只有 0.18%（实测 0.9982 vs 0.9997）——**太小，抓不住**；
+  而环让每个像素都是边界像素（实测 **0.9178 vs 1.0009**）。
+  这恰好就是用户看到的那个形状。
+- 这是“**回退验证必须跑一遍**”的又一例证：不跑这一步，这个错归因会静静躺在台账里，
+  而证据链指向一个根本不测该缺陷的用例。
+- 注释里还留下一处踩过的坑：拿“同外框的直角矩形”当圆角那份的参照会把真实面积比
+  读成 0.974（那 2.6% 全是四角被切的几何，与覆盖率无关）；现在改为对**解析面积**，
+  直角框只充当量尺自检。
+
 ## 已完成（2026-10-06 圆角边框：两处覆盖率缺陷 → “圆角比直边细”）
 
 用户现象：“圆角是不是要稍微加厚点，看着比直线细一点”。**量化成立**，且不是“该加粗”，
@@ -58,14 +163,13 @@
 - `border_ring_total_ink_matches_perimeter_times_width`（环总墨量 = 中心线周长×宽）
 - 两条都已纳入 `tools/theme_reverse_verify.py`；**逆向验证：回退任一修复即变红**
 
-### 同机发现的既有红项（非本次改动，已逐个回退对照确认）
+### 同机发现的既有红项（已在本轮后续会话逐个修完）
 
 `text_ink_compensation_evens_out_glyph_weight` 与
 `gpu_matches_software_for_layout_of_real_widgets`（结构性 0.307% vs 阈值 0.1%）——
-两条在基线工作树上同样红（后者还与本轮修复无关地**略微变好**：超差 0.393% → 0.345%）。
-分别需要单独排查（后者是 GPU/软件几何一致性，前者是文字墨量补偿）。
+两条在基线工作树上同样红。**两者已于下一个会话修完，见本文件顶部「三个既有红项」那条**。
 
-## P0（2026-10-06 发现：全量 `st test` 在 capture 类用例后崩在 nlohmann 断言）
+## 已完成（2026-10-06 P0：全量 `st test` 在 capture 类用例后崩在 nlohmann 断言）
 
 ### 现象
 
@@ -76,12 +180,9 @@ Assertion failed: it != m_data.m_value.object->end(),
   file third_party/nlohmann/json.hpp, line 22188
 ```
 
-最后一条 PASS 是 `capture_region_rejects_half_formed_params`（`tests/control_protocol_test.cpp:538`），
-下一条用例的日志行是 `hello` + 4×`capture`（无 `capture.hash` 之后的输出）。
-
 ### 已排除
 
-- **与本轮圆角环修复无关**：把 `src/raster/path.cpp` 回退后重编再跑，同样崩在同一断言；
+- **与当时的圆角环修复无关**：把 `src/raster/path.cpp` 回退后重编再跑，同样崩在同一断言；
 - 崩点是**制品侧**（`third_party/nlohmann/json.hpp`）而不是被测代码：断言的含义是
   「用 `at()`/`operator[]` 撞了一个不存在的 object 键」。
 
@@ -94,32 +195,23 @@ Assertion failed: it != m_data.m_value.object->end(),
   退出码不落进任何一条汇总结论里；
 - `tools/theme_reverse_verify.py` 也不受影响（它每次只跑一个指名用例）。
 
-### 实测触发条件（供定位）
+### 实测触发条件
 
 | 顺序 | 结果 |
 |---|---|
 | 单跑 `st test capture` | 全绿 |
 | 单跑 `st test control_protocol` | 未观察到崩 |
-| 单跑 `st test capture_pixel_size_comes_from_the_export_not_the_request` | **崩**（就是它在崩） |
+| 单跑 `st test capture_pixel_size_comes_from_the_export_not_the_request` | **崩** |
 | `st test`（全量、无 filter） | 必崩（重复 3 次一致） |
 
-**已定位到用例**（上表第三行）：`tests/control_protocol_test.cpp:595`
-的 `capture_pixel_size_comes_from_the_export_not_the_request`——单跑它即复现。
-该用例走 `Probe::call(...)` 后读 `reply["result"]["pixel_size"].value(...)`；
-崩在断言 4 次 `capture` 调用之后，怀疑是某个分支的回包结构不是预期的嵌套形状。
+**已定位并修好**：两个缺陷叠在一起（硬编码 `/tmp/` 路径 + `const Json` 取缺键是 UB），
+详见本文件顶部「三个既有红项」那条。全量现已 809 passed / 0 failed。
 
-### 一处配套坑：逆向验证脚本把“崩溃”当成“仍然绿”
+### 一处配套坑（已修）
 
 `tools/theme_reverse_verify.py` 原本只看输出里有没有 `FAIL`；进程**撞断言退出**时
 既无 PASS 也无 FAIL，于是被报成「回退后仍绿」——实测就因此把这条**原版也崩**的
-用例误指为嫌疑人（白查一轮）。已修：退出码非零或输出含 `Assertion failed` 一律算「没抓住」。
-（同一个文件还修了一处 Windows 上的 `text=True`（GBK 解码）崩：改用显式 UTF-8 解码。）
-
-### 方向
-
-1. 拿单跑复现（已可用）：在 `control_protocol_test.cpp:595` 那段把四个分支的
-   回包 JSON 逐个打出来，对照**何时** `pixel_size` 不在了；
-2. 修完必须把「全量跑不崩」变成可断言的东西（否则同一个坑下次依旧只能靠人眼看末尾）。
+用例误指为嫌疑人（白查一轮）。
 
 ## 已完成（2026-10-06 P0：`st test` 偶发段错误 + DSL 单根契约静默破坏）
 

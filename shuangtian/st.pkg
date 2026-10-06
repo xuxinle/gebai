@@ -74,7 +74,13 @@
     "ring_path_probe": { "kind": "executable", "sources": ["tools/ring_path_probe.cpp"],
                          "exclude_sources": ["src/pkg/*"] },
     "ring_raster_probe": { "kind": "executable", "sources": ["tools/ring_raster_probe.cpp"],
-                           "exclude_sources": ["src/pkg/*"] }
+                           "exclude_sources": ["src/pkg/*"] },
+    "ink_spread_probe": { "kind": "executable", "sources": ["tools/ink_spread_probe.cpp"],
+                          "exclude_sources": ["src/pkg/*"] },
+    "weight_spread_probe": { "kind": "executable", "sources": ["tools/weight_spread_probe.cpp"],
+                             "exclude_sources": ["src/pkg/*"] },
+    "gpu_structural_probe": { "kind": "executable", "sources": ["tools/gpu_structural_probe.cpp"],
+                              "exclude_sources": ["src/pkg/*"] }
   },
   "dependencies": {
     "modules": [],

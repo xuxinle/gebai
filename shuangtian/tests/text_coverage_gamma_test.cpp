@@ -29,6 +29,8 @@
 #include <string_view>
 #include <vector>
 
+#include "st/app/app.hpp"
+#include "st/core/fs.hpp"
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
 #include "st/math/color.hpp"
@@ -313,24 +315,58 @@ ST_TEST(text_coverage_gamma_changes_rendered_weight) {
 /// 为什么这个量是对的判据（此前的教训）：应用层实测「同一菜单栏里有的字清晰、有的字发灰」
 /// （用户线索：「运行」比其它项黑 34%），而根因是**拟合对每个字的墨量改变幅度不一致**
 /// （−27%~+10%）。平均亮度看不见它——它把字间差异平均掉了。
+///
+/// ## 闸门的档位必须来自 `resolve_text_fit("auto")`（实测踩到的错位）
+///
+/// 本用例曾把自己的拟合档位写死为 `GridFitMode::Normal`，而**产品默认早已改为 `Off`**
+/// （`app.cpp` 以真窗口浏览器为基准逐轴标定后的结论）。后果：拿 `Normal` 测出来
+/// 补偿只收窄 16%（`0.265 → 0.224`），卡在 `≥20%` 阈值上恒红——
+/// 而真实默认档下拟合根本不扰乱墨量，本闸门所要保护的那个场景**已经不存在**。
+/// 即它既不能证明补偿坏了，也不能证明它好着；而失败信息指向“补偿退化”，
+/// 把排查引到错的方向。现在改为：**档位与开关都走应用同一个入口**。
 ST_TEST(text_ink_compensation_evens_out_glyph_weight) {
   FontFixture fixture;
   if (!fixture.ok) return;
   constexpr std::string_view kText = "文件编辑选择查看运行帮助";
   constexpr std::size_t kWidth = 320;
   constexpr std::size_t kHeight = 60;
+  // 应用默认档（与实现同一入口，不再自己写死一个模式）。
+  //
+  // ⚠ 档位可由 `ST_TEST_FIT` 覆盖——这是**让本用例保持可验证**的必要手段：
+  // 默认档为 `Off` 时下面会如实跳过，那就无人能证明“补偿真的还能收窄字间差异”。
+  // 指定档位后完整走一遍断言（CI/本地手工验：`ST_TEST_FIT=light st test text_ink_compensation`）。
+  st::text::GridFitMode fit = st::app::resolve_text_fit("auto");
+  if (const auto override_value = st::fs::read_env("ST_TEST_FIT");
+      override_value.has_value() && !override_value->empty()) {
+    fit = st::app::resolve_text_fit(*override_value);
+    st::print("[ink] 档位被 ST_TEST_FIT={} 覆盖\n", *override_value);
+  }
+  const bool compensation_enabled = st::app::resolve_ink_compensation(fit);
+  st::print("[ink] 档位 fit={} 补偿={}\n",
+            fit == st::text::GridFitMode::Off
+                ? "off"
+                : (fit == st::text::GridFitMode::Light ? "light" : "normal"),
+            compensation_enabled ? "on" : "off");
+  // 拟合关着时逐字墨量恒为 1.000（无扰乱）⇒ “收窄极差”这个契约无从谈起，如实跳过，
+  // 而不是继续拿一个与产品无关的档位去卡阈值。
+  if (fit == st::text::GridFitMode::Off) {
+    ST_CHECK(!compensation_enabled);   // 拟合关 ⇒ 补偿也必须关（成对约定）
+    st::print("[ink] 拟合默认关 ⇒ 无字间扰乱，本闸门在当前档位下无适用场景（已跳过）；"
+              "可用 ST_TEST_FIT=light 跑完整断言\n");
+    return;
+  }
 
   /// 逐字墨量：每个字形单独渲染，返回（该字墨量, 该字不拟合基准墨量）。
   const auto ratios = [&](bool compensate) {
     std::vector<double> out;
     for (const char32_t codepoint : st::utf8_decode(kText)) {
       const std::string single = st::utf8_encode(std::u32string(1, codepoint));
-      const auto ink_of = [&](st::text::GridFitMode fit, bool comp) -> double {
+      const auto ink_of = [&](st::text::GridFitMode mode, bool comp) -> double {
         st::raster::Canvas canvas{static_cast<int>(kWidth), static_cast<int>(kHeight), 1.0f};
         canvas.clear(st::math::Color{0xFF, 0xFF, 0xFF, 0xFF});
         TextRenderer renderer(*fixture.stack, 1.0f);
         renderer.set_subpixel(true);
-        renderer.set_grid_fit(fit);
+        renderer.set_grid_fit(mode);
         renderer.set_ink_compensation(comp);
         renderer.set_coverage_gamma(0.6f);
         (void)renderer.draw(canvas, single, st::math::Point{2.0f, 2.0f}, 20.25f,
@@ -343,9 +379,8 @@ ST_TEST(text_ink_compensation_evens_out_glyph_weight) {
         return ink;
       };
       const double reference = ink_of(st::text::GridFitMode::Off, false);
-      const double fitted =
-          ink_of(st::text::GridFitMode::Normal, compensate);
-      if (reference > 0.0) out.push_back(fitted / reference);
+      const double value = ink_of(fit, compensate);
+      if (reference > 0.0) out.push_back(value / reference);
     }
     return out;
   };

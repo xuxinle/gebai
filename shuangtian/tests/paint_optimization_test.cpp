@@ -326,6 +326,70 @@ ST_TEST(border_ring_total_ink_matches_perimeter_times_width) {
   ST_CHECK(ratio > 0.99 && ratio < 1.01);
 }
 
+/// 遮罩光栅化（`detail::rasterize_mask`）的覆盖率必须按像素累加，不是逐段取最大值。
+///
+/// 为什么另开一条（而不是用 `border_ring_total_ink_…`）：那条量的是**填充路径**
+/// （`Canvas::fill_path` → `detail::fill_path_aa` → `blend_coverage_runs`），
+/// 它归 `blend_coverage_runs` 管，**不经过 `rasterize_mask`**。
+/// 逆向验证当场报出这个错归因：把 `rasterize_mask` 改回取最大值时，
+/// 那条依然是绿的——它根本量不到这个缺陷。真正走遮罩的入口是**路径裁剪**。
+///
+/// 为何量**细环**而不是实心块：实心块只有边缘一圈受影响，取最大值/累加的差
+/// 只有 0.18%（实测：实心块 0.9982 vs 0.9997）——**太小，抓不住**。
+/// 而“环”让每个像素都是边界像素（环宽 = 1 逻辑 px），缺陷信号被放到最大
+/// （实测：取最大值 0.9178 vs 累加 1.0009）。这恰好也是用户看到的那个形状（圆角边框）。
+///
+/// 为何用**填满裁剪区看几何面积**而不是看“弧比直边细”：屏幕像素上混了两次
+/// 抗锯齿（先遮罩、再混合），逐像素权重与几何厚度不是线性关系；
+/// 而“裁剪区填满后剩下的墨迹 = 那部分几何”，是可直接与解析面积对齐的量。
+ST_TEST(clip_mask_coverage_accumulates_instead_of_maxing) {
+  const Color background = Color::rgb(0xF7, 0xF8, 0xFA);
+  const Color ink = Color::rgb(0x10, 0x14, 0x1A);
+  // 填充面积（逻辑 px²）= 对全屏填色，但被裁剪路径限住的部分。
+  const auto clipped_area = [&](const st::raster::Path& clip) -> double {
+    Canvas canvas = make_canvas();
+    canvas.clear(background);
+    canvas.push_clip_path(clip);
+    canvas.fill_rect(st::math::Rect{0.0f, 0.0f, static_cast<float>(kWidth),
+                                    static_cast<float>(kHeight)},
+                     Paint::solid(ink));
+    canvas.pop_clip();
+    double sum = 0.0;
+    for (int y = 0; y < kHeight; ++y) {
+      for (int x = 0; x < kWidth; ++x) {
+        const Color pixel = canvas.pixel_at(x, y);
+        sum += (static_cast<double>(background.r) - static_cast<double>(pixel.r)) /
+               (static_cast<double>(background.r) - static_cast<double>(ink.r));
+      }
+    }
+    return sum;
+  };
+  constexpr double kPi = 3.14159265358979323846;
+  const st::math::Rect box{30.0f, 25.0f, 120.0f, 90.0f};
+  constexpr float kRadius = 18.0f;
+  constexpr float kWidthPx = 1.0f;
+
+  // 量尺自检：直角满矩形应当精确等于长×宽。
+  st::raster::Path square_clip;
+  square_clip.add_rect(box);
+  const double square_area = clipped_area(square_clip);
+  ST_CHECK_NEAR(square_area, 120.0 * 90.0, 120.0 * 90.0 * 0.005);
+
+  // 圆角环 = 外圈正向 + 内圈反向（与卡片边框同一个工厂）。
+  st::raster::Path ring = st::raster::make_rounded_border_ring(box, kRadius, kWidthPx);
+  const double ring_area = clipped_area(ring);
+  const double mid_radius = static_cast<double>(kRadius) - static_cast<double>(kWidthPx) * 0.5;
+  const double analytic = (2.0 * (120.0 - 2.0 * static_cast<double>(kRadius)) +
+                           2.0 * (90.0 - 2.0 * static_cast<double>(kRadius)) +
+                           2.0 * kPi * mid_radius) *
+                          static_cast<double>(kWidthPx);
+  const double ratio = ring_area / analytic;
+  st::print("[clip-mask] 直角自检 {:.1f}（应为 {:.1f}）· 环 {:.2f}（解析 {:.2f}）· 比 {:.4f}\n",
+            square_area, 120.0 * 90.0, ring_area, analytic, ratio);
+  // 取最大值（旧）实测 0.9178；累加实测 1.0009。
+  ST_CHECK(ratio > 0.99 && ratio < 1.01);
+}
+
 /// 边缘等价：与描边比，**绝大多数像素完全一致**，其余差异只来自抗锯齿逼近。
 ST_TEST(border_ring_edge_matches_stroke_within_tolerance) {
   const Color border = Color::rgb(0xD3, 0xDC, 0xE9);

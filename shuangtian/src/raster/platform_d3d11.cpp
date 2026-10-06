@@ -296,7 +296,20 @@ struct VsOut {
 VsOut vs_main(uint vertex_id : SV_VertexID) {
   // 三角带四个角：(0,0) (1,0) (0,1) (1,1)
   float2 uv = float2(vertex_id & 1u, (vertex_id >> 1u) & 1u);
-  float2 p = g_rect.xy + uv * g_rect.zw;
+  // ⚠ 四边形必须**向外扩 1 像素**。
+  //
+  // 光栅化按**像素中心**判定图元内外，而矩形边界一般不在像素中心上：
+  // 例如 Input 的底边在 y=124.3，像素行 124 的中心是 124.5 —— 落在四边形外，
+  // 那一整行**根本不会产生片元**，SDF 再准也来不及（它本应给出 70% 的覆盖率）。
+  // 软件光栅器对像素做面积积分，不会丢这一行；于是两边差**一整行**
+  // （实测 `gpu_matches_software_for_layout_of_real_widgets`：350/120000 = 0.29% 结构性差异，
+  //   全部集中在元素边界那一行——正是本测试 0.307% 超阈的真因）。
+  // 扩 1 像素后，被部分覆盖的边界像素落在图元内，覆盖率完全由 SDF/纹理给出。
+  //
+  // 对 `local`/`pixel` 无副作用：二者都是 `uv` 的仿射函数，扩张只是加了余量，
+  // 同一片元处的取值不变（梯度与位图采样因此不受影响）。
+  const float2 pad = float2(1.0, 1.0);
+  float2 p = g_rect.xy - pad + uv * (g_rect.zw + pad * 2.0);
   VsOut o;
   float2 ndc = p / g_viewport.xy * 2.0 - 1.0;
   o.position = float4(ndc.x, -ndc.y, 0.0, 1.0);  // 画布 Y 向下，D3D NDC Y 向上

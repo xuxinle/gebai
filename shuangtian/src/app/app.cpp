@@ -76,6 +76,22 @@ auto resolve_text_fit(std::string_view mode) -> st::text::GridFitMode {
   return st::text::GridFitMode::Off;
 }
 
+/// 拟合墨量补偿是否应开启（与 `resolve_text_fit` 成对，测试与实现走同一入口）。
+///
+/// **只有拟合开着时才需要它**：补偿解决的是「拟合对每个字的墨量改变幅度不一致」
+/// （实测 normal 下逐字变化率极差 14.0%、light 11.4%），拟合关掉时逐字墨量
+/// 恒为 1.000（无扰乱），补偿无事可做。
+///
+/// 为何要抽成函数：应用层实测（codeeditor 菜单栏逐项墨量极差，同一构建）
+/// `fit=off 18% / normal 34% / normal+补偿 40%（更差） / light+补偿 18%（追平不拟合）`
+/// ——“light+补偿”那行是**成对**的结论（吸附幅度小的拟合配补偿才划算）。
+/// 默认档后来改为 `Off`（浏览器基准），补偿也随之无事可做；
+/// 状态当时只改了该函数的返回值，而 `app.cpp` 仍无条件 `set_ink_compensation(true)`、
+/// 测试也自己写死 `Normal`——三处各自写一份默认值，必然错位。
+[[nodiscard]] auto resolve_ink_compensation(st::text::GridFitMode fit) -> bool {
+  return fit != st::text::GridFitMode::Off;
+}
+
 /// 解析覆盖率 gamma：命令行 > 环境变量 > `fallback`。
 ///
 /// `fallback` 由调用方按**当前主题**给（见 `default_gamma_for`）——浅底/深底的正确值
@@ -652,7 +668,8 @@ auto Application::start() -> Status {
     impl_->renderer = std::make_unique<st::text::TextRenderer>(*impl_->fonts, resolved_scale);
     // 文字形态：命令行 > 环境变量 > 默认（两侧同源，见 resolve_text_* 的说明）。
     impl_->renderer->set_subpixel(resolve_text_lcd(options_.text_lcd));
-    impl_->renderer->set_grid_fit(resolve_text_fit(options_.text_fit));
+    const st::text::GridFitMode fit = resolve_text_fit(options_.text_fit);
+    impl_->renderer->set_grid_fit(fit);
     impl_->renderer->set_coverage_gamma(
       resolve_text_gamma(options_.text_gamma, default_gamma_for(options_.theme)));
     // **小字号分档**（见 `AppOptions::text_gamma_small`）：单档 gamma 消不掉“小字比正文
@@ -662,12 +679,13 @@ auto Application::start() -> Status {
           resolve_text_gamma(options_.text_gamma_small, default_gamma_for(options_.theme));
       impl_->renderer->set_fitted_gamma(options_.text_gamma_small_max, small);
     }
-  // **拟合墨量补偿**：拟合对每个字的墨量改变幅度不一致（−27%~+10%），是“有的字清晰、
-  // 有的字发灰”的来源。打开它把墨量归一化回不拟合基准（只改墨色、不动几何）。
-  // 应用层实测（codeeditor 菜单栏逐项墨量极差）：fit=off 18% / normal 34%
-  // / normal+补偿 40% / **light+补偿 18%**——所以本项与 `resolve_text_fit` 的
-  // 默认档位（light）是一对，单独改任一个都拿不到这个结果。
-  impl_->renderer->set_ink_compensation(true);
+    // **拟合墨量补偿**：拟合对每个字的墨量改变幅度不一致，是“有的字清晰、有的字发灰”
+    // 的来源；补偿把它归一化回不拟合基准（只改墨色、不动几何）。
+    //
+    // 它与拟合档位是**一对**（应用层实测：fit=off 18% / normal 34% / normal+补偿 40%
+    // / **light+补偿 18%**），所以开关跟着上面解析出的 `fit` 走（`resolve_ink_compensation`）
+    // ——不再无条件 `true`：默认档已改为 `Off`，那里拟合不再扰乱墨量、补偿无事可做。
+    impl_->renderer->set_ink_compensation(resolve_ink_compensation(fit));
   // **按字形类的覆盖率分档**（`TextRenderer::set_class_gamma`）。
   //
   // 为什么要分档：各字类的偏差**方向与幅度不同**，全局 γ 只能整体压黑，

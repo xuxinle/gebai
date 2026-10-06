@@ -20,6 +20,8 @@ SERVER_CPP = "src/control/server.cpp"
 PATH_CPP = "src/raster/path.cpp"
 CANVAS_CPP = "src/raster/canvas.cpp"
 RASTERIZER_CPP = "src/raster/rasterizer.cpp"
+D3D11_CPP = "src/raster/platform_d3d11.cpp"
+TEXT_CPP = "src/text/text.cpp"
 
 # (说明, 文件, 原文, 回退后的文本, 期望变红的用例名)
 CASES = [
@@ -179,12 +181,29 @@ CASES = [
         RASTERIZER_CPP,
         "                              accumulated[static_cast<std::size_t>(x - lo)] += (right - left) * weight;",
         "                              accumulated[static_cast<std::size_t>(x - lo)] = std::max(\n                                  accumulated[static_cast<std::size_t>(x - lo)], (right - left) * weight);",
-        "border_ring_total_ink_matches_perimeter_times_width",
+        "clip_mask_coverage_accumulates_instead_of_maxing",
+    ),
+    (
+        "GPU 顶点四边形：去掉向外扩的 1 像素（边界像素中心落在图元外 → 整行丢墨）",
+        D3D11_CPP,
+        "  const float2 pad = float2(1.0, 1.0);",
+        "  const float2 pad = float2(0.0, 0.0);",
+        "gpu_matches_software_for_layout_of_real_widgets",
+    ),
+    (
+        "文字补尝：把补尝计算短路（ST_TEST_FIT=light 下应测出极差未收窄）",
+        TEXT_CPP,
+        "    if (ink_compensate && bitmap->width > 0 && bitmap->height > 0) {",
+        "    if (false && ink_compensate && bitmap->width > 0 && bitmap->height > 0) {",
+        "text_ink_compensation_evens_out_glyph_weight",
+        # 该闸门在应用默认档（拟合 = off）下会**如实跳过**，必须把档位抬回 light
+        # 才能跑到断言——否则回退修复后它依旧跳过，脚本会把“什么都没验”报成通过。
+        {"ST_TEST_FIT": "light"},
     ),
 ]
 
 
-def run_test(name: str) -> tuple[bool, str]:
+def run_test(name: str, extra_env: dict | None = None) -> tuple[bool, str]:
     # ⚠ `text=True` 会用**系统编码**解码：Windows 上是 GBK，而 `st` / 测试输出是 UTF-8
     # （带方框字符、✓ 等）——实测直接 `UnicodeDecodeError` 在读取线程里崩，
     # 而且因为那是后台线程，异常不会让 `subprocess.run` 失败，只会让 `stdout` 变 `None`。
@@ -192,6 +211,7 @@ def run_test(name: str) -> tuple[bool, str]:
     proc = subprocess.run(
         ["./build/bin/st", "test", "--profile", "debug", name],
         capture_output=True, timeout=900,
+        env={**os.environ, **(extra_env or {})},
     )
     out = (proc.stdout or b"").decode("utf-8", "replace") + (proc.stderr or b"").decode(
         "utf-8", "replace")
@@ -217,7 +237,15 @@ def main() -> int:
     ok = True
     # 自报条目数（文档不写死这个数字，否则改一点就漂）。
     print(f"逆向验证：{len(CASES)} 条关键契约\n")
-    for label, path, original, reverted, test_name in CASES:
+    for entry in CASES:
+        # 兼容两种形状：5 元组（无额外环境）与 6 元组（最后一项是 env dict）。
+        # 6 元组是为「默认档下会如实跳过的闸门」准备的——不把它的档位抬回被测状态，
+        # 回退修复后它依旧会跳过，于是**报绿而实际什么都没验**（假绿）。
+        if len(entry) == 6:
+            label, path, original, reverted, test_name, extra_env = entry
+        else:
+            label, path, original, reverted, test_name = entry
+            extra_env = None
         text = open(path, encoding="utf-8").read()
         if original not in text:
             print(f"[跳过] {label}\n       原文未找到（可能已被改动）：{original[:60]!r}")
@@ -227,7 +255,7 @@ def main() -> int:
         shutil.copy(path, backup)
         try:
             open(path, "w", encoding="utf-8").write(text.replace(original, reverted, 1))
-            passed, out = run_test(test_name)
+            passed, out = run_test(test_name, extra_env)
             if passed:
                 print(f"[红][失败] {label}\n       回退后「{test_name}」**仍然是绿的**——这条测试抓不住这个缺陷")
                 ok = False

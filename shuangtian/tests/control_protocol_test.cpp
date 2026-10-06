@@ -597,11 +597,32 @@ ST_TEST(capture_pixel_size_comes_from_the_export_not_the_request) {
   Probe probe(fx.port, fx.token);
   ST_CHECK(probe.call("hello").value("ok", false));
 
-  auto size_of = [](const Json& reply) {
-    return std::pair<std::int64_t, std::int64_t>{
-        reply["result"]["pixel_size"].value("width", std::int64_t{0}),
-        reply["result"]["pixel_size"].value("height", std::int64_t{0})};
+  // ⚠ `reply["result"]` 在 **const Json** 上取缺键是 nlohmann 的 UB（它会直接
+  // `Assertion failed` 杀掉进程，而不是报个测试失败）。成功路径上该键必在，
+  // 但一旦前面某步返回了错误帧，这里就会把“一条用例红了”变成“整个测试进程没了”——
+  // 全量跑时后面所有用例都不再执行，且崩溃点看起来完全与真正原因无关。
+  // 因此取值一律走 `find_result`：取不到就**报断言失败**并返回空。
+  const auto find_result = [](const Json& reply) -> const Json* {
+    const auto it = reply.find("result");
+    return it != reply.end() && it->is_object() ? &(*it) : nullptr;
   };
+  auto size_of = [&](const Json& reply) -> std::pair<std::int64_t, std::int64_t> {
+    const Json* result = find_result(reply);
+    ST_CHECK(result != nullptr);
+    if (result == nullptr) return {0, 0};
+    const auto it = result->find("pixel_size");
+    ST_CHECK(it != result->end());
+    if (it == result->end()) return {0, 0};
+    return std::pair<std::int64_t, std::int64_t>{it->value("width", std::int64_t{0}),
+                                                 it->value("height", std::int64_t{0})};
+  };
+  // ⚠ file 分支的落盘路径**必须落在白名单内**（默认白名单 = 临时目录 + 可执行文件目录
+  // + 控制文件目录）。硬编码 `/tmp/...` 在 Linux 上能过、在 Windows 上不是白名单目录，
+  // `capture` 会如实例地返回错误帧——于是旧写法的 `reply["result"]` 当场把进程断言掉。
+  // 这正是全量 `st test` “跑到 capture 用例就崩”的真因（而单跑因为不看后续分支一直没暴露）。
+  const auto temp_dir_result = st::fs::make_temp_dir("st-capture-size");
+  ST_REQUIRE(temp_dir_result.has_value());
+  const std::string temp_dir = *temp_dir_result;
   // base64 分支：请求 37×40 完全在帧内（桩帧 64×48）→ 实际就是 37×40。
   {
     Json region = Json::object();
@@ -647,7 +668,7 @@ ST_TEST(capture_pixel_size_comes_from_the_export_not_the_request) {
     Json params = Json::object();
     params["region"] = region;
     params["encode"] = "file";
-    params["path"] = "/tmp/gebai-capture-size-probe.png";
+    params["path"] = st::fs::join(temp_dir, "capture-size-probe.png");
     const Json reply = probe.call("capture", params);
     ST_CHECK(reply.value("ok", false));
     ST_CHECK_EQ(size_of(reply).first, 21);
@@ -660,7 +681,7 @@ ST_TEST(capture_pixel_size_comes_from_the_export_not_the_request) {
     Json params = Json::object();
     params["region"] = region;
     params["encode"] = "file";
-    params["path"] = "/tmp/gebai-capture-size-probe2.png";
+    params["path"] = st::fs::join(temp_dir, "capture-size-probe2.png");
     const Json reply = probe.call("capture", params);
     ST_CHECK(reply.value("ok", false));
     ST_CHECK_EQ(size_of(reply).first, 4);
