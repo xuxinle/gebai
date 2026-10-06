@@ -85,6 +85,28 @@ using Funnel = GridFitResult::Funnel;
 /// 而粗细两类的中心相距 ≥ 0.4px——0.35 刚好卡在中间。
 inline constexpr float kWidthClassTolerancePx = 0.35f;
 
+/// **量化安全上限**：当"取整"会把真实宽度改动超过这么多（物理像素）时，放弃量化。
+///
+/// 存在的理由（2026-10-06 用户反馈「最小字号里 H/1/B 的竖线比浏览器粗、a/n/l 比浏览器细」）：
+/// 逐字形实测（`tools/stroke_width_stats.py` + `tools/text_ab_glyphs_page.html`，11px）——
+///
+/// | | 大写竖笔 | 小写竖笔 | 比 |
+/// |---|---|---|---|
+/// | 浏览器（参照） | 1.69 | 1.54 | 1.10 |
+/// | 霜天默认（**量化开**） | **2.00** | **1.28** | **1.56** |
+/// | 霜天（量化关 / 拟合关） | 1.42~1.58 | 1.30~1.45 | 1.09 |
+///
+/// 即：字体给大写 ~1.7px、小写 ~1.5px（相差 10%），而 `round()` 把大写推到 **2**、
+/// 小写推到 **1**（相差 56%）——**量化把小差异放大成大差异**，正是用户看到的那一对现象。
+/// 而量化的初衷（2026-10-04 修「同字里同类笔画宽窄不一」）只在"1.4 与 1.6 各自取整成
+/// 1 与 2"那种**同类内**分叉时才成立；跨类（大写 vs 小写本来就是不同宽度）被一起放大
+/// 是它的副作用。
+///
+/// 折中：**量化只在"取整误差够小"时做**——误差超过本值时该笔画不量化（只做边缘吸附）。
+/// 这样"薄笔画吸成满黑像素"的收益大多保留（它们本来就接近整数），
+/// 而 1.76 这类"取整要挪 0.24px"的笔画不再被硬拉成 2。
+inline constexpr float kMaxQuantizeErrorPx = 0.2f;
+
 /// 按宽度聚类取样——每类取一个整数（物理像素）。
 ///
 /// 存在理由（2026-10-04）：宽度量化原来是**每条笔画各自 `round`**，
@@ -507,10 +529,16 @@ auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFi
       // 远小于 1px，所以设计上真不同宽的主笔与细横仍分属不同类、不会被拉平）。
       for (const Stem& stem : group) {
         // hint 笔画不量化宽度：hints 本身就是设计者定义的宽度（见上）。
-        const bool quantize = options.quantize_width && !stem.from_font && !axis_widths.empty();
-        const float quantized =
-            quantize ? quantized_width_for((stem.edge_hi - stem.edge_lo) / grid, axis_widths) * grid
-                     : 0.0f;
+        // **量化的适用闸**：取整量超过 `kMaxQuantizeErrorPx` 就不量化这一条。
+        // `quantized_width_for` 给的是"类中心取整"，先算出来再判误差。
+        float quantized_px = 0.0f;
+        if (options.quantize_width && !stem.from_font && !axis_widths.empty()) {
+          const float width_px = (stem.edge_hi - stem.edge_lo) / grid;
+          quantized_px = quantized_width_for(width_px, axis_widths);
+          if (std::abs(quantized_px - width_px) > kMaxQuantizeErrorPx) quantized_px = 0.0f;
+        }
+        const bool quantize = quantized_px > 0.0f;
+        const float quantized = quantize ? quantized_px * grid : 0.0f;
         // 锚点取**移动更小**的一侧：吸住它，另一侧由量化后的宽度推出
         // （整数宽度 ⇒ 两边都在网格上）。选更小的一侧是为了少动字形。
         const float lo_anchor = snap_target(stem.edge_lo, grid);

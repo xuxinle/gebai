@@ -288,12 +288,16 @@ ST_TEST(grid_fit_guard_refuses_excessive_shift) {
   const auto accepted = st::text::grid_fit(original, {.mode = GridFitMode::Normal});
   ST_CHECK(accepted.applied);
   const auto points = accepted.path.raw_points();
-  // **锚点取位移更小的一侧**：右沿 2.0 已在网格上（位移 0），左沿 0.5 距离网格 0.5。
-  // 于是右沿不动，宽度量化到整数（round(1.5)=2）后**左沿**被推到 0.0。
-  // 两条边都在物理像素网格上，且宽度是整数——这正是“宽度一致性”的保证。
-  ST_CHECK(std::fabs(points[0].x - 0.0f) < 0.01f);
+  // 右沿 2.0 已在网格上（位移 0），左沿 0.5 吸到 1.0（位移 +0.5）⇒ 宽度由 1.5 变成 1.0。
+  //
+  // ⚠ **这里曾经期望宽度变成 2**（宽度量化 `round(1.5)=2` 把左沿推到 0）。2026-10-06 的
+  //    "量化适用闸"（`kMaxQuantizeErrorPx = 0.2`）让这条笔画不再量化——它取整误差 0.5，
+  //    远超闸门。实测：**关掉量化得到的结果与开着一模一样**（同样是两条边各自吸附），
+  //    因为"两条边都落在整数网格上"本身就让宽度成了整数差。⇒ 量化分支在多数笔画上
+  //    与纯吸附等价，它唯一可观察的效果是**把设计宽度的小差异放大**（见该常量的注释）。
+  ST_CHECK(std::fabs(points[0].x - 1.0f) < 0.01f);
   ST_CHECK(std::fabs(points[1].x - 2.0f) < 0.01f);
-  ST_CHECK(std::fabs((points[0].x + points[1].x) * 0.5f - 1.0f) < 0.01f);
+  ST_CHECK(std::fabs((points[1].x - points[0].x) - 1.0f) < 0.01f);
 
   // 护栏的**可配置性**：关掉量化后，两条边各自吸到最近网格（各 0.5），
   // 此时 max_shift 收紧到 0.1 就必须**拒绝**（保持原样）。
@@ -577,4 +581,90 @@ ST_TEST(font_stem_hints_reach_the_fitter) {
   } else {
     ST_CHECK_EQ(bitmap->fit_hint_seen, 0);   // 默认路径不得采用 hints（未定档的能力）
   }
+}
+
+/// ④ **量化不得把小差异放大成大差异**（用户反馈「最小字号里 H/1/B 的竖线比浏览器粗、
+///    a/n/l 比浏览器细」的直接回归）。
+///
+/// 现象与归因（2026-10-06，`tools/stroke_width_stats.py` + `tools/text_ab_glyphs_page.html`）：
+/// 11px 下字体给大写竖笔 ≈1.7px、小写 ≈1.5px（相差 10%），而宽度量化的 `round()`
+/// 把大写推到 **2**、小写推到 **1**（相差 56%）——**量化把小差异放大成大差异**。
+/// 参照侧（真窗口浏览器）的同一比值是 1.10。
+///
+/// 判据取「大写与小写的竖笔宽比」而不是绝对宽度：绝对值随字体/DPI 变，而这个**比值**
+/// 在两个渲染器之间可比（同一字体、同一字号的同一个设计值）。
+///
+/// ⚠ 采样要求：取多个字形的中位数（单个字形会被相位偶然性主导），
+/// 且横截面要**避开横杠**（H/E/F 的横杠正好在竖直中线，在中线量会把
+/// 「横杠 + 两根竖」量成一条 5px 宽的笔画——本用例开发时就踩到过）。
+ST_TEST(quantize_does_not_amplify_design_width_differences) {
+  FontFixture fixture;
+  if (!fixture.ok) return;
+  constexpr float kSize = 11.0f;
+  constexpr char32_t kUpper[] = {U'H', U'E', U'F', U'T', U'L', U'I', U'B'};
+  constexpr char32_t kLower[] = {U'n', U'l', U'i', U'r', U't'};
+
+  TextRenderer renderer(*fixture.stack, 1.5f);
+  renderer.set_subpixel(true);
+  renderer.set_grid_fit(GridFitMode::Light);
+  renderer.set_coverage_gamma(1.0f);
+
+  // 一条扫描行里"最粗的连续覆盖率段"（单位：物理像素的覆盖率之和）。
+  const auto widest_stem = [](const TextRenderer::GlyphBitmap& bitmap, float fraction) -> float {
+    if (bitmap.format != st::raster::CoverageFormat::Lcd || bitmap.height <= 0) return 0.0f;
+    const int y = std::clamp(static_cast<int>(static_cast<float>(bitmap.height) * fraction), 0,
+                             bitmap.height - 1);
+    std::vector<float> row(static_cast<std::size_t>(bitmap.width), 0.0f);
+    for (int x = 0; x < bitmap.width; ++x) {
+      const std::size_t base =
+          (static_cast<std::size_t>(y) * static_cast<std::size_t>(bitmap.width) +
+           static_cast<std::size_t>(x)) * 3U;
+      if (base + 2U >= bitmap.coverage.size()) return 0.0f;
+      row[static_cast<std::size_t>(x)] =
+          (bitmap.coverage[base] + bitmap.coverage[base + 1U] + bitmap.coverage[base + 2U]) / 3.0f;
+    }
+    float best = 0.0f;
+    float run = 0.0f;
+    for (float value : row) {
+      if (value > 0.05f) {
+        run += value;
+      } else {
+        best = std::max(best, run);
+        run = 0.0f;
+      }
+    }
+    return std::max(best, run);
+  };
+  // 一个字形取多个高度的中位数（避开横杠：22% / 30% / 70% / 78%）
+  const auto stem_of = [&](char32_t codepoint) -> float {
+    const auto bitmap = renderer.glyph_bitmap_of(codepoint, kSize);
+    if (bitmap == nullptr) return 0.0f;
+    std::vector<float> values;
+    for (const float fraction : {0.22f, 0.30f, 0.70f, 0.78f}) {
+      const float value = widest_stem(*bitmap, fraction);
+      if (value > 0.2f) values.push_back(value);
+    }
+    if (values.empty()) return 0.0f;
+    std::ranges::sort(values);
+    return values[values.size() / 2U];
+  };
+  const auto median_stem = [&](const char32_t* list, std::size_t count) -> float {
+    std::vector<float> values;
+    for (std::size_t index = 0; index < count; ++index) {
+      const float value = stem_of(list[index]);
+      if (value > 0.2f) values.push_back(value);
+    }
+    if (values.size() < 3) return 0.0f;
+    std::ranges::sort(values);
+    return values[values.size() / 2U];
+  };
+
+  const float upper = median_stem(kUpper, std::size(kUpper));
+  const float lower = median_stem(kLower, std::size(kLower));
+  if (upper <= 0.0f || lower <= 0.0f) return;
+  const float ratio = upper / lower;
+  st::print("[quantize] 11px 竖笔宽：大写 {:.2f} / 小写 {:.2f} = {:.3f}\n", upper, lower, ratio);
+  // 参照（真窗口浏览器）的同一比值是 1.099；量化放大后实测 1.56。
+  ST_CHECK(ratio < 1.25f);
+  ST_CHECK(ratio > 1.0f);   // 大写确实略粗于小写（字体设计如此），不能反向
 }

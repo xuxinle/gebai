@@ -251,11 +251,31 @@ def family_rows():
     return rows
 
 
+# ── 页 4：逐字形（**一行一个字符**） ────────────────────────────────────────
+# 为什么必须单独一页：要量"H/1/B 的竖线 vs a/n/l 的竖线"这种**逐字形**差异，
+# 而小字号下相邻字母会粘连——按列投影切字形会切错（实测 11px 下 23 个字符只切出 7~9 段），
+# 一切错后面的按序配对就全错位，量出来的"笔宽比"是假的。
+# 一行一个字符就没有切分问题：行带本身就是那个字形。
+GLYPH_CHARS = ["H", "1", "B", "E", "F", "L", "T", "I",
+               "a", "n", "l", "i", "r", "t", "o", "e", "s", "c",
+               "0", "8", "3"]
+GLYPH_SIZES = [11, 13, 15]
+
+
+def glyph_rows():
+    rows = []
+    for size in GLYPH_SIZES:
+        for ch in GLYPH_CHARS:
+            rows.append((ch, size, TEXT, SANS, 0, f"{size}px {ch}"))
+    return rows
+
+
 def main() -> int:
     root = pathlib.Path(__file__).resolve().parent
     emit(root, "chars", CHARS_ROWS, "霜天文字 A/B — 字符集")
     emit(root, "sizes", SIZE_ROWS, "霜天文字 A/B — 字号阶梯")
     emit(root, "families", family_rows(), "霜天文字 A/B — 字族 × 字号")
+    emit(root, "glyphs", glyph_rows(), "霜天文字 A/B — 逐字形")
     return 0
 
 

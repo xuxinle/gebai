@@ -1597,6 +1597,14 @@ python tools/calibrate_text_gamma.py measure --theme light --ref <截图.png>
 hints 的正确用法是**先把提示吸附到网格、再让轮廓跟随**（需"提示 → 轮廓边"的归属
 并在提示后重算包围盒），而当前是在"预计算网格 + 位移预算"的框架里复用几何法路径。
 
+**用户反馈追加（2026-10-06）：「最小字号里 H/1/B 的竖线比浏览器粗，a/n/l 比浏览器细」**
+——定位到**宽度量化在放大设计差异**：11px 下字体给大写竖笔 ≈1.7px、小写 ≈1.5px（相差 10%），
+而 `round()` 把大写推到 2、小写推到 1（相差 **56%**）；真窗口浏览器同口径比值是 1.10。
+修法是给量化加一道适用闸（`kMaxQuantizeErrorPx = 0.2` 物理像素，取整误差超限就不量化），
+修复后霜天 11px 的比值 = **1.09**（与浏览器 1.10 一致）。
+量尺：`tools/stroke_width_stats.py` + 一行一字的 `tools/text_ab_glyphs_page.html`。
+细节与三条量尺陷阱见 `docs/BACKLOG.md`。
+
 **未闭合**：三类字一致的**过渡像素比偏高约 5%**（边缘略软），杠杆是亚像素滤波强度，
 而它同时决定彩边强度——按字族分档是候选，但**属产品决策**。
 详见 `docs/BACKLOG.md` P1 与 `docs/TEXT_AB_REPORT.md`。
@@ -3170,7 +3178,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
 | 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case
- 超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑） | `st test` | 全绿（**756 用例 / 18029 断言**，debug 档实测；`st test --san` 全绿 0 报告；另 12 个慢用例默认跳过） |
+ 超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑） | `st test` | 全绿（**757 用例 / 18044 断言**，debug 档实测；`st test --san` 全绿 0 报告；另 12 个慢用例默认跳过） |
 | 独立工程集成 | **真建一个引用 framework 的最小工程**、真构建真跑（`tests/pkg_integration_test.cpp`）
  | `st test pkg_integration` | 全绿（`ST_INTEGRATION_BUILD=0` 可关；关掉时明确跳过而非假绿） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告（需带 sanitizer 运行库的编译器；MinGW 发行版不带时构建前明确报错） |
