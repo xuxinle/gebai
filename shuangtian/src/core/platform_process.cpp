@@ -25,6 +25,7 @@
 #include <process.h>
 #include <windows.h>
 #else
+#include <csignal>
 #include <fcntl.h>
 #include <poll.h>
 #include <spawn.h>
@@ -507,6 +508,186 @@ auto run(std::string_view program, const std::vector<std::string>& args, const O
   return result;
 #endif
 }
+
+// —— StreamHandle：长命令的实时输出 ——
+//
+// 两个平台共用的**对外语义**：open（非阻塞起进程）→ read_line（阻塞取行，给工作线程）
+// → finish（回收 + 退出码）→ terminate（杀进程）。缓冲区逐字节组行，不依赖平台的
+// 文本模式（否则 Windows 的 \r\n 会漏到显示层）。
+
+struct StreamHandle::Impl {
+#if defined(_WIN32)
+  Handle process{};
+  Handle pipe{};        // 读端（stdout+stderr 合并）
+#else
+  int read_fd{-1};
+  int child{-1};
+#endif
+  std::string pending{};   // 已读未成行的字节
+  bool finished{false};
+  int exit_code{0};
+};
+
+// 析构/移动**必须定义在 `Impl` 完整类型之后**：`unique_ptr<Impl>` 的析构器
+// 内联展开时要 `sizeof(Impl)`，而头里只有一个前置声明（实测报 “incomplete type”）。
+StreamHandle::StreamHandle() = default;
+StreamHandle::~StreamHandle() = default;
+StreamHandle::StreamHandle(StreamHandle&&) noexcept = default;
+auto StreamHandle::operator=(StreamHandle&&) noexcept -> StreamHandle& = default;
+
+void StreamHandle::open(std::string_view program, const std::vector<std::string>& args,
+                        std::string_view cwd, bool merge_stderr) {
+  (void)merge_stderr;   // 两个平台都合并：终端要的是时间顺序
+  impl_ = std::make_unique<Impl>();
+  error_.clear();
+  const std::string program_text(program);
+#if defined(_WIN32)
+  SECURITY_ATTRIBUTES attributes{};
+  attributes.nLength = sizeof(attributes);
+  attributes.bInheritHandle = TRUE;
+  HANDLE raw_read = nullptr;
+  HANDLE raw_write = nullptr;
+  if (::CreatePipe(&raw_read, &raw_write, &attributes, 0) == 0) {
+    error_ = "创建管道失败";
+    impl_.reset();
+    return;
+  }
+  impl_->pipe.reset(raw_read);
+  Handle write_handle(raw_write);
+  (void)::SetHandleInformation(impl_->pipe.get(), HANDLE_FLAG_INHERIT, 0);
+  std::wstring command_line = build_command_line(program_text, args);
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  startup.dwFlags = STARTF_USESTDHANDLES;
+  startup.hStdOutput = write_handle.get();
+  startup.hStdError = write_handle.get();
+  startup.hStdInput = ::GetStdHandle(STD_INPUT_HANDLE);
+  PROCESS_INFORMATION child{};
+  const std::wstring working_directory = to_wide(std::string(cwd));
+  const BOOL created = ::CreateProcessW(
+      nullptr, command_line.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
+      working_directory.empty() ? nullptr : working_directory.c_str(), &startup, &child);
+  const DWORD create_error = ::GetLastError();
+  write_handle.reset(nullptr);   // 父进程立刻关写端：子进程退出后读端才 EOF
+  if (created == 0) {
+    error_ = std::format("无法启动 '{}': {}", program_text, system_message(create_error));
+    impl_.reset();
+    return;
+  }
+  impl_->process.reset(child.hProcess);
+  (void)::CloseHandle(child.hThread);
+#else
+  int fds[2] = {-1, -1};
+  if (::pipe(fds) != 0) {
+    error_ = "创建管道失败";
+    impl_.reset();
+    return;
+  }
+  impl_->read_fd = fds[0];
+  const int write_fd = fds[1];
+  posix_spawn_file_actions_t actions;
+  posix_spawn_file_actions_init(&actions);
+  posix_spawn_file_actions_adddup2(&actions, write_fd, STDOUT_FILENO);
+  posix_spawn_file_actions_adddup2(&actions, write_fd, STDERR_FILENO);
+  posix_spawn_file_actions_addclose(&actions, fds[0]);
+  posix_spawn_file_actions_addclose(&actions, fds[1]);
+  if (!cwd.empty()) posix_spawn_file_actions_addchdir_np(&actions, std::string(cwd).c_str());
+  std::vector<std::string> storage;
+  storage.reserve(args.size() + 1);
+  storage.push_back(program_text);
+  for (const auto& argument : args) storage.push_back(argument);
+  std::vector<char*> argv;
+  argv.reserve(storage.size() + 1);
+  for (auto& item : storage) argv.push_back(item.data());
+  argv.push_back(nullptr);
+  pid_t child = -1;
+  const int spawn_result =
+      posix_spawnp(&child, program_text.c_str(), &actions, nullptr, argv.data(), environ);
+  posix_spawn_file_actions_destroy(&actions);
+  (void)::close(write_fd);
+  if (spawn_result != 0) {
+    (void)::close(impl_->read_fd);
+    error_ = std::format("无法启动 '{}': {}", program_text, std::strerror(spawn_result));
+    impl_.reset();
+    return;
+  }
+  impl_->child = child;
+#endif
+}
+
+auto StreamHandle::read_line(std::string& out) -> bool {
+  if (!impl_) return false;
+  // 先在已缓冲的字节里找完整行（一次读可能含多行）
+  const auto take_buffered = [this, &out]() -> bool {
+    const std::size_t newline = impl_->pending.find('\n');
+    if (newline == std::string::npos) return false;
+    out = impl_->pending.substr(0, newline);
+    if (!out.empty() && out.back() == '\r') out.pop_back();
+    impl_->pending.erase(0, newline + 1);
+    return true;
+  };
+  if (take_buffered()) return true;
+  std::array<char, 4096> buffer{};
+  while (true) {
+#if defined(_WIN32)
+    DWORD read = 0;
+    if (::ReadFile(impl_->pipe.get(), buffer.data(), static_cast<DWORD>(buffer.size()), &read,
+                   nullptr) == 0 ||
+        read == 0) {
+      break;
+    }
+    impl_->pending.append(buffer.data(), read);
+#else
+    const auto count = ::read(impl_->read_fd, buffer.data(), buffer.size());
+    if (count <= 0) {
+      if (count < 0 && errno == EINTR) continue;
+      break;
+    }
+    impl_->pending.append(buffer.data(), static_cast<std::size_t>(count));
+#endif
+    if (take_buffered()) return true;
+  }
+  // EOF：把最后一行（无换行结尾）也交出去
+  if (!impl_->pending.empty()) {
+    out = impl_->pending;
+    impl_->pending.clear();
+    if (!out.empty() && out.back() == '\r') out.pop_back();
+    return true;
+  }
+  return false;
+}
+
+auto StreamHandle::finish() -> int {
+  if (!impl_) return -1;
+  if (!impl_->finished) {
+#if defined(_WIN32)
+    (void)::WaitForSingleObject(impl_->process.get(), INFINITE);
+    DWORD code = 0;
+    (void)::GetExitCodeProcess(impl_->process.get(), &code);
+    impl_->exit_code = static_cast<int>(code);
+#else
+    int status = 0;
+    while (::waitpid(impl_->child, &status, 0) < 0 && errno == EINTR) {
+    }
+    impl_->exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+#endif
+    impl_->finished = true;
+  }
+  return impl_->exit_code;
+}
+
+void StreamHandle::terminate() {
+  if (!impl_) return;
+#if defined(_WIN32)
+  (void)::TerminateProcess(impl_->process.get(), 1);
+#else
+  if (impl_->child > 0) (void)::kill(impl_->child, SIGTERM);
+#endif
+}
+
+auto StreamHandle::valid() const noexcept -> bool { return impl_ != nullptr; }
+
+auto StreamHandle::error() const -> std::string_view { return error_; }
 
 auto which(std::string_view program) -> std::optional<std::string> {
   const std::string name(program);

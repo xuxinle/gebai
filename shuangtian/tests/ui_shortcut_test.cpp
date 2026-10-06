@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "st/ui/components/code_editor.hpp"
+#include "st/ui/components/input.hpp"
 #include "st/ui/components/overlay.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/theme.hpp"
@@ -25,6 +26,7 @@ using st::ui::CodeEditor;
 using st::ui::Dialog;
 using st::ui::Event;
 using st::ui::EventKind;
+using st::ui::Input;
 using st::ui::UiRoot;
 
 [[nodiscard]] auto key_event(const std::string& key, bool ctrl = false, bool shift = false)
@@ -311,4 +313,43 @@ ST_TEST(event_handler_injects_behavior) {
   const bool f6 = press(root, "F6");
   ST_CHECK(!f6);                                   // 放行 → 全局无处理
   ST_CHECK_EQ(handled_keys, 1);
+}
+
+ST_TEST(event_handler_reaches_components_that_override_on_event) {
+  // 回归（2026-10-06）：`set_event_handler` 的注释写着“在组件自身实现**之后**”，
+  // 但**没有任何组件覆写真的调它**，分发层也没调。于是覆写了 `on_event` 的组件
+  // （Input/Button/CodeEditor… 二十多个）上装的处理器**静默失效**：
+  // 调用方看到的是“设了处理器、无报错、无效果”。
+  //
+  // 实测场景：终端输入框装 ↑↓ 翻历史 → 按 ↑ 毫无反应；
+  // 而同一份处理器装在自定义元素上就正常（所以上面那条旧用例全绿也拦不住）。
+  // 修法：分发层（`UiRoot::dispatch_to`）在组件未消费之后统一调 handler。
+  UiRoot root;
+  auto input = std::make_unique<Input>();
+  input->set_focusable(true);
+  Input* input_ptr = input.get();
+  root.set_content(std::move(input));
+  root.layout(true);
+
+  int handler_calls = 0;
+  input_ptr->set_event_handler([&handler_calls](Event& event) {
+    // 只认 ArrowUp——`Input` 自己**不处理**方向键的上下（`handle_key` 对它返回 false），
+    // 所以这正好能区分“handler 被调用”与“组件自己吃了”。
+    if (event.kind == EventKind::KeyDown && event.key == "ArrowUp") {
+      ++handler_calls;
+      return true;
+    }
+    return false;
+  });
+  root.set_focus(input_ptr);
+  const bool up = press(root, "ArrowUp");
+  ST_CHECK(up);                          // 组件未消费 → handler 接手
+  ST_CHECK_EQ(handler_calls, 1);
+  // 组件自己能处理的键仍归组件（handler 不该抢走）
+  const bool enter = press(root, "Enter");
+  ST_CHECK(enter);
+  ST_CHECK_EQ(handler_calls, 1);
+  const bool left = press(root, "ArrowLeft");
+  ST_CHECK(left);                        // Input 自己处理光标移动
+  ST_CHECK_EQ(handler_calls, 1);
 }

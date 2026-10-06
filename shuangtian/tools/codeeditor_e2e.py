@@ -13,6 +13,7 @@ import struct
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_BIN = os.path.join(ROOT, "build", "dev", "bin", "codeeditor.exe")
@@ -74,8 +75,12 @@ def start(binary, shots):
         except FileNotFoundError:
             pass
     log = open(os.path.join(shots, "codeeditor-e2e.log"), "wb")
+    # `--tool-root` 指向框架仓根：终端测例要真跑 `st test`，
+    # 而 PATH 里通常没有 `st`（工具链就在仓库的 build/bin 下）。
+    framework_root = str(Path(__file__).resolve().parent.parent)
     process = subprocess.Popen([binary, "--headless", "--control-port", "0",
-                                "--control-file", ctl, "--shots", shots],
+                                "--control-file", ctl, "--shots", shots,
+                                "--tool-root", framework_root],
                                stdout=log, stderr=subprocess.STDOUT)
     for _ in range(100):
         if os.path.exists(ctl):
@@ -104,7 +109,7 @@ def main():
 
         # —— 1. 五层骨架与兼容钩子 id ——
         for want in ("editor-page", "titlebar", "menubar", "activity-bar", "sidebar",
-                     "editor-tabs", "editor", "bottom-panel", "bottom-tabs", "statusbar",
+                     "editor-tabs", "editor", "bottom-panel", "terminal-input", "statusbar",
                      "status", "btn-theme", "language-label", "cursor-label", "sidebar-split"):
             check(client.count("#" + want) == 1, f"缺少元素 #{want}")
         print("[1] 五层骨架与兼容钩子 id 齐备")
@@ -155,12 +160,14 @@ def main():
               "语言未跟随标签")
         print("[3] 点资源管理器树行 → 标签 + 语言 + 编辑器内容联动")
 
-        # —— 4. 底部面板三态互切（声明式分支切换：曾在此处段错误）——
-        for index, want in ((0, "#problems-list"), (1, "#output-text"), (2, "#terminal-input")):
-            client.ok("invoke", {"id": "bottom-tabs", "action": "select", "argument": str(index)})
-            time.sleep(0.45)
-            check(client.count(want) == 1, f"底部面板切到 {index} 后 {want} 不在")
-        print("[4] 底部面板 问题/输出/终端 三态互切稳定")
+        # —— 4. 终端面板（底部只有一个视图；问题/输出已删）——
+        check(client.count("#problems-list") == 0, "问题面板应已删除")
+        check(client.count("#output-text") == 0, "输出面板应已删除")
+        check(client.count("#bottom-tabs") == 0, "底部标签栏应已删除（只剩终端）")
+        check(client.count("#terminal-input") == 1, "终端输入框不在")
+        check(client.count("#terminal-cwd") == 1, "终端栏未显示工作目录")
+        check(client.count("#terminal-prompt") == 1, "终端提示行不在")
+        print("[4] 终端是底部唯一视图（问题/输出已删，标签栏已去）")
 
         # —— 5. 编辑器：真实输入 + 撤销 ——
         client.ok("invoke", {"id": "editor", "action": "focus"})
@@ -389,8 +396,12 @@ def main():
         # —— 15. 属性面不被每次重组重置（旧行为：切底部面板 → language/read_only 回默认）——
         client.ok("set", {"id": "editor", "props": {"language": "python", "read_only": "true"}})
         time.sleep(0.3)
-        client.ok("invoke", {"id": "bottom-tabs", "action": "select", "argument": "0"})
-        time.sleep(0.7)
+        # 用**侧栏开合**触发一次重组（以前用底部标签切换）——不碰终端面板，
+        # 否则后面的拖拽测例会因面板已收起而失去分栏（实测踩到）。
+        client.ok("invoke", {"id": "btn-theme", "action": "click"})
+        time.sleep(0.6)
+        client.ok("invoke", {"id": "btn-theme", "action": "click"})
+        time.sleep(0.6)
         props = client.ok("get", {"id": "editor"})["props"]
         check(props["language"] == "python", f"重组后语言被重置: {props['language']}")
         check(props["read_only"] == "true", f"重组后只读态被重置: {props['read_only']}")
@@ -413,6 +424,10 @@ def main():
         print(f"[16] 页面撑满内容槽（{page_box['height']:.0f}px；编辑器 {editor_box['height']:.0f}px）")
 
         # —— 17. 底部面板可拖（旧行为：固定 170px）——
+        # 重新展开终端（前面的测例可能把它收起了）
+        if client.count("#terminal-input") == 0:
+            client.ok("invoke", {"id": "bottom-close", "action": "click"})
+            time.sleep(0.6)
         split_box = client.ok("find", {"selector": "#bottom-split"})["matches"][0]["bounds"]
         upper_before = client.ok("find", {"selector": "#editor-upper"})["matches"][0]["bounds"]
         ratio = float(client.ok("get", {"id": "bottom-split"})["props"]["ratio"])
@@ -446,6 +461,127 @@ def main():
         tabs_after = client.ok("get", {"id": "editor-tabs"})["props"]["options"]
         check(tabs_after != tabs_before, "选了“不保存”后标签没关掉")
         print(f"[18] 关闭脏标签先确认（{tabs_before} → {tabs_after or '（无标签）'}）")
+
+        # 终端长命令测例要 cd 到真仓根（`st test` 需要一个带 `st.pkg` 的目录）。
+        root = Path(__file__).resolve().parent.parent
+
+        # —— 19. 终端：内置命令 / cd / 真实外部命令 ——
+        #
+        # 终端是“可用”的硬指标：它得真回答关于工作区的问题，而不是回一句“未知命令”。
+        # 这一组逐条跑真实命令，断言**输出内容**（不是“有没有反应”）。
+        # 终端面板的收起/展开走 Ctrl+J（收起时 `#bottom-close` 本身就不存在，
+        # 不能拿它当开合开关）。
+        if client.count("#terminal-input") == 0:
+            client.ok("input.key", {"key": "j", "ctrl": True, "kind": "press"})
+            time.sleep(0.6)
+        check(client.count("#terminal-input") == 1, "Ctrl+J 未展开终端面板")
+        client.ok("invoke", {"id": "bottom-close", "action": "click"})
+        time.sleep(0.5)
+        check(client.count("#panel-terminal") == 0, "终端收起后面板仍在")
+        client.ok("input.key", {"key": "j", "ctrl": True, "kind": "press"})
+        time.sleep(0.6)
+        check(client.count("#terminal-input") == 1, "Ctrl+J 未重新展开终端")
+
+        def terminal(cmd, wait=1.2):
+            client.ok("invoke", {"id": "terminal-input", "action": "focus"})
+            client.ok("input.text", {"id": "terminal-input", "text": cmd})
+            time.sleep(0.25)
+            client.ok("invoke", {"id": "terminal-input", "action": "submit"})
+            time.sleep(wait)
+            return client.text("terminal-output")
+
+        # 先 cd 到真仓根：后续测例（`st test` 需要一个带 `st.pkg` 的目录）都靠它。
+        # 放在最前面还有一个工艺理由：示例模式的 `pwd` 回的是占位串「(内置样例)」，
+        # 先切目录才能对绝对路径做断言。
+        text = terminal("cd " + str(root))
+        check(client.text("terminal-prompt-cwd") == str(root),
+              f"cd 后提示行未跟随: {client.text('terminal-prompt-cwd')}")
+        text = terminal("pwd")
+        check(str(root) in text, f"pwd 无输出工作目录: {text[-120:]}")
+        text = terminal("cd /不存在的目录")
+        check("目录不存在" in text, "cd 到不存在的目录未被拒")
+        text = terminal("cd /tmp")
+        check(client.text("terminal-prompt-cwd") == "/tmp",
+              f"cd /tmp 后提示行未跟随: {client.text('terminal-prompt-cwd')}")
+        # 白名单外的 git 写操作必须在**解析阶段**就被拒
+        text = terminal("git commit -m x")
+        check("拒绝" in text and "白名单" in text, f"git 写操作未被拒: {text[-160:]}")
+        text = terminal("git", wait=1.5)
+        check("用法" in text, f"`git` 无参数未给用法提示: {text[-120:]}")
+        text = terminal("unknown-cmd-xyz")
+        check("未知命令" in text, "未知命令未给提示")
+        print("[19] 终端：cd（含拒绝不存在的目录）/pwd/git 白名单/未知命令")
+
+        # —— 20. 终端长命令：工作线程 + 实时输出 + 中止 ——
+        #
+        # 回归（本轮修）：旧实现是同步 `st::process::run`——一条几十秒的命令会把
+        # 主循环卡住整段时长（连“中止”按钮都点不到）。现在输出逐行回流、
+        # 中止能真杀进程（`StreamHandle`）。
+        client.ok("invoke", {"id": "terminal-input", "action": "focus"})
+        client.ok("input.text", {"id": "terminal-input", "text": "cd " + str(root)})
+        client.ok("invoke", {"id": "terminal-input", "action": "submit"})
+        time.sleep(0.6)
+        client.ok("invoke", {"id": "terminal-input", "action": "focus"})
+        client.ok("input.text", {"id": "terminal-input", "text": "cd " + str(root)})
+        client.ok("invoke", {"id": "terminal-input", "action": "submit"})
+        time.sleep(0.6)
+        client.ok("invoke", {"id": "terminal-input", "action": "focus"})
+        client.ok("input.text", {"id": "terminal-input", "text": "st test"})
+        client.ok("invoke", {"id": "terminal-input", "action": "submit"})
+        # 跑起来后应该：① 出现“运行中”提示 ② 中止按钮出现 ③ 已经有输出（流式）
+        deadline = time.time() + 4.0
+        running_text = ""
+        while time.time() < deadline:
+            running_text = client.text("terminal-output")
+            if "运行中" in running_text:
+                break
+            time.sleep(0.2)
+        check("运行中" in running_text, f"长命令未进入“运行中”（同步阻塞？）: {running_text[-160:]}")
+        check(client.count("#terminal-stop") == 1, "运行中未出现中止按钮")
+        client.ok("invoke", {"id": "terminal-stop", "action": "click"})
+        deadline = time.time() + 8.0
+        stopped = ""
+        while time.time() < deadline:
+            stopped = client.text("terminal-output")
+            if "已中止" in stopped:
+                break
+            time.sleep(0.2)
+        check("已中止" in stopped, f"点中止后未见“已中止”: {stopped[-200:]}")
+        check(client.count("#terminal-stop") == 0, "中止后按钮未消失")
+        print("[20] 终端长命令：运行中提示 + 实时输出 + 中止按钮真杀进程")
+
+        # —— 21. 终端历史：↑ 翻出上一条 ——
+        #
+        # `Input` 不认方向键，所以这条链路只能整条测：键 → `set_event_handler`
+        # → `terminal_history_step` → 回填输入框。
+        client.ok("invoke", {"id": "terminal-input", "action": "focus"})
+        client.ok("input.key", {"key": "ArrowUp", "kind": "press"})
+        time.sleep(0.5)
+        recalled = client.ok("get", {"id": "terminal-input"})["props"].get("value", "")
+        check(recalled == "st test", f"↑ 未翻出上一条历史: {recalled!r}")
+        print(f"[21] 终端历史：↑ 翻出上一条（{recalled}）")
+
+        # —— 22. 终端滚回：多行显示 + 自动贴底 ——
+        #
+        # 回归（本轮修）：`Text` 默认**单行省略**——不调 `set_multiline(true)` 时
+        # 整份滚回被折成一行，看着就像“输出只有一行”。而贴底判据若拿**当前**
+        # `max_scroll` 去比，会因为“内容本帧又长高了”而恒判“用户不在底部”，
+        # 表现为**永远不跟**（停在上方不滚）。这里两条一起钉。
+        client.ok("invoke", {"id": "terminal-clear", "action": "click"})
+        time.sleep(0.6)
+        for _ in range(6):
+            client.ok("invoke", {"id": "terminal-input", "action": "focus"})
+            client.ok("input.text", {"id": "terminal-input", "text": "pwd"})
+            client.ok("invoke", {"id": "terminal-input", "action": "submit"})
+            time.sleep(0.5)
+        rendered = client.text("terminal-output")
+        check(rendered.count("\n") >= 8, f"滚回未多行渲染（被折成一行？）: {rendered[:120]!r}")
+        scroll = client.ok("get", {"id": "terminal-scroll"})["props"]
+        max_scroll = float(scroll["max_scroll"])
+        offset = float(scroll["offset"])
+        check(max_scroll > 0.0, "内容未超出视口（无法测贴底）")
+        check(offset >= max_scroll - 2.0, f"未自动贴底: offset={offset} max={max_scroll}")
+        print(f"[22] 终端滚回：多行 + 自动贴底（{rendered.count(chr(10)) + 1} 行，offset {offset:.0f}/{max_scroll:.0f}）")
 
         print("\n[OK] codeeditor 端到端全部通过")
         return 0

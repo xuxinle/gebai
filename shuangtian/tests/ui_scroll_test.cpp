@@ -140,3 +140,41 @@ ST_TEST(scroll_view_scroll_to_clamps_and_notifies) {
   view.scroll_to(-50.0f);
   ST_CHECK_EQ(static_cast<int>(view.scroll_offset()), 0);
 }
+
+ST_TEST(scroll_view_follow_end_pins_after_content_grows) {
+  // 回归（2026-10-06）：日志/终端/输出窗要的是“新内容出现就在底部”。
+  // 旧的提议做法（调用方自己 `scroll_to`）会**失败得很隐蔽**：
+  // `max_scroll()` 取的是**上一次布局**的 `content_height_`，追加后立即滚会被旧上限夹住
+  // （实测：内容已 331.8、上限还是 175.6 → 停在 175.6；等布局重新夹取时它已是合法偏移，
+  // 没人知道它本该在底部——表现为滚动条永远差两行到底）。
+  // `set_follow_end(true)` 把“在底部”变成持续意图：`arrange` 里量完新几何、
+  // 归一化偏移后立即回到底。这条测试钉的就是这个时刻。
+  st::ui::ScrollView view;
+  (void)make_tall_scroll(view);
+  view.set_follow_end(true);
+  ST_CHECK(view.follow_end());
+
+  // 再加一个高块：内容变长，重排后应自动在底部
+  auto extra = std::make_unique<st::ui::Panel>(st::ui::FlexDirection::Column);
+  extra->style().height = 300.0f;
+  extra->style().width = 300.0f;
+  view.add_child(std::move(extra));
+  st::ui::RenderContext context{st::ui::Theme::light(), nullptr, 0.0};
+  view.measure(context, st::ui::Constraints{.max_width = 320.0f, .max_height = 200.0f});
+  view.arrange(context, Rect{0.0f, 0.0f, 320.0f, 200.0f});
+  ST_CHECK(view.at_end());
+  // 内容 1300 / 视口 200 → 底部偏移 1100
+  ST_CHECK_EQ(static_cast<int>(view.scroll_offset()), 1100);
+
+  // 关掉跟随（用户往上翻的场景）→ 不应再被拉回底部
+  view.set_follow_end(false);
+  view.scroll_to(0.0f);
+  auto more = std::make_unique<st::ui::Panel>(st::ui::FlexDirection::Column);
+  more->style().height = 300.0f;
+  more->style().width = 300.0f;
+  view.add_child(std::move(more));
+  view.measure(context, st::ui::Constraints{.max_width = 320.0f, .max_height = 200.0f});
+  view.arrange(context, Rect{0.0f, 0.0f, 320.0f, 200.0f});
+  ST_CHECK_EQ(static_cast<int>(view.scroll_offset()), 0);
+  ST_CHECK(!view.at_end());
+}

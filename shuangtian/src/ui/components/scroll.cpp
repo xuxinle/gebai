@@ -282,6 +282,9 @@ void ScrollView::arrange(const RenderContext& context, math::Rect rect) {
   }
   recompute_content_height();
   offset_ = clamp_scroll(offset_, max_scroll());
+  // 跟随模式：内容量完、偏移归一化后立即回到底（见 `set_follow_end` 的说明——
+  // 关键就在这个时刻：`content_height_` 刚更新，`max_scroll()` 已是新值）。
+  if (follow_end_) offset_ = max_scroll();
 
   float cursor = rect.y + style_.padding.top - offset_;
   for (auto& child : children_) {

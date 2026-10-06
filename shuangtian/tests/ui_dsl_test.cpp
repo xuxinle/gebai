@@ -1379,8 +1379,8 @@ struct StyledPage : Component {
       // color/hex_color/size/weight 在 `BoxProps` 里排在 id/key **之前**。
       text(c, [] { return std::string("错误：出错了"); },
            {.color = Tone::Danger, .id = "err"});
-      // 字面色值（对标设计稿）：`#dc2626` 就是主题 danger 的浅色主题取值
-      text(c, [] { return std::string("红色字面"); }, {.hex_color = "#dc2626", .id = "hex"});
+      // 字面色值（对标设计稿）：亚克力亮色主题的 danger 就是 `#d13b40`
+      text(c, [] { return std::string("红色字面"); }, {.hex_color = "#d13b40", .id = "hex"});
       // 字号 + 字重（标题的诉求：加大加粗）
       text(c, [] { return std::string("大字重"); },
            {.size = 24.0F, .weight = FontWeight::Bold, .id = "big"});
@@ -1412,9 +1412,9 @@ ST_TEST(dsl_box_props_carry_text_style) {
   // ① 颜色真的落到了样式上（视觉树上报——语义树里没有颜色，像素里又难断言）
   const st::math::Color danger = tone_color(Theme::light(), Tone::Danger);
   ST_CHECK_EQ(err->text_color, danger.to_css());
-  // 字面色值走同一条路（`#dc2626` 解析成同一个色）
+  // 字面色值走同一条路（`#d13b40` 解析成同一个色）
   ST_CHECK_EQ(hex->text_color, danger.to_css());
-  ST_CHECK_EQ(hex->text_color, std::string("#dc2626"));
+  ST_CHECK_EQ(hex->text_color, std::string("#d13b40"));
 
   // ② 字号/字重（标题的"加大加粗"）
   ST_CHECK(std::abs(big->font_size - 24.0F) < 0.001F);
@@ -1465,7 +1465,7 @@ ST_TEST(dsl_box_props_survive_theme_reapply) {
   ST_REQUIRE(dark_err != nullptr);
   ST_REQUIRE(dark_hex != nullptr);
   ST_CHECK_EQ(dark_err->text_color, tone_color(Theme::dark(), Tone::Danger).to_css());
-  ST_CHECK_EQ(dark_hex->text_color, std::string("#dc2626"));   // 字面色值不随主题变
+  ST_CHECK_EQ(dark_hex->text_color, std::string("#d13b40"));   // 字面色值不随主题变
 }
 
 // ── `for_each` 的 index 参数（重复文案的列表项不再串台）────────────────────────

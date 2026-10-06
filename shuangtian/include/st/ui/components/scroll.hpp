@@ -95,6 +95,16 @@ class ScrollView : public Element {
   auto add_child(std::unique_ptr<Element> child) -> Element* override;
   auto insert_child(std::size_t index, std::unique_ptr<Element> child) -> Element* override;
 
+  /// 滚到底部（等价 `scroll_to(1e9)`，但**语义明确**）。
+  ///
+  /// 注意时机：`max_scroll()` 取的是**上一次布局**的 `content_height_`。
+  /// 刚追加内容就调，会被**旧上限夹住**、停在中间（实测：终端跟随输出时尾部两行看不到）。
+  /// 要在内容变化后的**下一帧**再调（那时几何已经是新的）。
+  void scroll_to_end() { scroll_to(1.0e9f); }
+  /// 是否已在底部（容差 1px）。判定“要不要自动跟随”用它，别与 `max_scroll()` 手算。
+  [[nodiscard]] auto at_end() const noexcept -> bool {
+    return scroll_offset() >= max_scroll() - 1.0f;
+  }
   [[nodiscard]] auto scroll_offset() const noexcept -> float { return offset_; }
 
   // —— 列表类通用视口契约（与 Tree/List 同口径）——
@@ -115,6 +125,21 @@ class ScrollView : public Element {
   void set_show_scrollbar(bool show) noexcept;
   [[nodiscard]] auto show_scrollbar() const noexcept -> bool { return show_bar_; }
   void set_on_scroll(std::function<void(float)> callback) { on_scroll_ = std::move(callback); }
+  /// **跟随模式**：每次布局后自动停在底部（日志/终端/输出窗的语义）。
+  ///
+  /// 为何必须在 `arrange` 里做而不能让调用方“先滚一下”（2026-10-06，实测）：
+  /// `max_scroll()` 取的是**上一次布局**的 `content_height_`。调用方在追加内容后
+  /// 立即 `scroll_to_end()`，会被**旧上限夹住**（例：内容追加到 331.8、而上限还是
+  /// 175.6，就停在了 175.6）；等布局把内容量成新值并重新夹取时，它已经是一个
+  /// 合法偏移，没有人知道它本该在底部——于是**每次都差新追加的那几行**
+  /// （表现为滚动条永远差两行到底，尾部看不到）。
+  /// 开启这个模式后，“在底部”是**持续意图**而非一次性动作：布局算完新几何、
+  /// 归一化偏移后立即跟到底，无论追加了多少。
+  ///
+  /// 用户往上翻时应关掉（否则每来一行输出就把人拉回底部）；
+  /// 典型做法是在 `set_on_scroll` 回调里关。
+  void set_follow_end(bool follow) noexcept { follow_end_ = follow; }
+  [[nodiscard]] auto follow_end() const noexcept -> bool { return follow_end_; }
   [[nodiscard]] auto scroll_bar() noexcept -> ScrollBar* { return bar_; }
   [[nodiscard]] auto scroll_bar() const noexcept -> const ScrollBar* { return bar_; }
 
@@ -137,6 +162,7 @@ class ScrollView : public Element {
   float offset_{0.0f};
   float step_{kStep};
   bool show_bar_{true};
+  bool follow_end_{false};
   std::function<void(float)> on_scroll_{};
 };
 
