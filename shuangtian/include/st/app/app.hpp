@@ -224,9 +224,9 @@ class Application final : public control::Host, public ui::WindowControl {
   /// 控制通道 `theme.tokens`：当前生效主题的完整快照。
   [[nodiscard]] auto theme_snapshot() const -> st::Json override;
   [[nodiscard]] auto capture_to_file(std::string_view path, math::IntRect region)
-      -> Result<std::string> override;
+      -> Result<control::Host::SavedShot> override;
   [[nodiscard]] auto capture_png(math::IntRect region)
-      -> Result<std::vector<std::uint8_t>> override;
+      -> Result<control::Host::PngView> override;
   /// 截取像素（RGBA8、物理分辨率）——视觉断言（像素哈希/基线比对）的取数口。
   [[nodiscard]] auto capture_pixels(math::IntRect region)
       -> Result<control::PixelView> override;

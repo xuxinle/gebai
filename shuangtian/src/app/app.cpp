@@ -521,20 +521,23 @@ auto Application::capture_pixels(math::IntRect region) -> Result<control::PixelV
   return view;
 }
 
-auto Application::capture_png(math::IntRect region) -> Result<std::vector<std::uint8_t>> {
+auto Application::capture_png(math::IntRect region) -> Result<control::Host::PngView> {
   auto view = capture_pixels(region);
   if (!view) return forward_error(view.error());
   codec::PngImage image;
   image.width = static_cast<std::uint32_t>(view->width);
   image.height = static_cast<std::uint32_t>(view->height);
+  // 尺寸必须在 `rgba` 被 move 走之**前**抄下来。
+  const int width = view->width;
+  const int height = view->height;
   image.rgba = std::move(view->rgba);
   auto encoded = codec::png_encode(image, 6);
   if (!encoded) return forward_error(encoded.error());
-  return encoded;
+  return control::Host::PngView{std::move(*encoded), width, height};
 }
 
 auto Application::capture_to_file(std::string_view path, math::IntRect region)
-    -> Result<std::string> {
+    -> Result<control::Host::SavedShot> {
   auto png = capture_png(region);
   if (!png) return forward_error(png.error());
   std::string target(path);
@@ -546,11 +549,15 @@ auto Application::capture_to_file(std::string_view path, math::IntRect region)
     target = fs::join(directory, std::format("shot-{}-{:03d}.png", time::unix_ms(),
                                              impl_->frames % 1000));
   }
-  if (auto status = fs::write_bytes(target, std::span<const std::uint8_t>(*png)); !status) {
+  // 尺寸取自 `capture_png` 的返回（= 已夹取的**实际**值），**不重算**：
+  // 拿 `region` 重算会在区域被夹取时谎报（见 `control::Host::capture_to_file` 注释）。
+  const int width = png->width;
+  const int height = png->height;
+  if (auto status = fs::write_bytes(target, std::span<const std::uint8_t>(png->png)); !status) {
     return forward_error(status.error());
   }
   log::info("截图已保存 {}", target);
-  return target;
+  return control::Host::SavedShot{std::move(target), width, height};
 }
 
 auto Application::start() -> Status {

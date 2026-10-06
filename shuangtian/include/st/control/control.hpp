@@ -141,17 +141,35 @@ class Host {
   /// **按值返回**需要完整类型。改为返回 `const Json&` 可以避开，但那会把生命周期
   /// 绑到 `Host` 身上——快照是「当下这一刻」的值，不该让外部持着引用。
   [[nodiscard]] virtual auto theme_snapshot() const -> st::Json;
-  /// 截图并写 PNG 到 `path`（空=自动命名；`region` 为空=全屏）；返回实际路径。
+  /// 截图并写 PNG 到 `path`（空=自动命名；`region` 为空=全屏）。
+  ///
+  /// ⚠ **不要改回「只回路径」**：调用方需要向外部报告"实际导出了多大的图"，
+  /// 而 `region` 会被画布夹取（超出视口/起点为负都是合法输入）。尺寸由**导出结果**
+  /// 给出时不可能报错；由调用方拿 `region` 自己算就会在夹取时**谎报**
+  /// （实测：请求 200×200 落在右下角、文件实际 80×50，响应却写 200×200）。
+  struct SavedShot {
+    std::string path;
+    int width{0};   ///< 实际导出的**物理像素**宽
+    int height{0};  ///< 实际导出的**物理像素**高
+  };
   [[nodiscard]] virtual auto capture_to_file(std::string_view path, math::IntRect region)
-      -> Result<std::string> = 0;
+      -> Result<SavedShot> = 0;
   /// 截取像素（`region` 为空=全屏；逻辑坐标入参、物理像素回传）。
   ///
   /// 与 `capture_png` 的区别：不编码 PNG，直接给 RGBA8 原始字节——供**视觉断言**
   /// （`capture.hash` / `visual.diff`）在应用进程内比较像素用，省去编解码一圈。
+  /// `width`/`height` 是**实际**尺寸（已夹取），不是请求值。
   [[nodiscard]] virtual auto capture_pixels(math::IntRect region) -> Result<PixelView> = 0;
-  /// 截图 PNG 字节（`region` 为空=全屏；base64 回传用）。
-  [[nodiscard]] virtual auto capture_png(math::IntRect region)
-      -> Result<std::vector<std::uint8_t>> = 0;
+  /// 截取 PNG 字节（`region` 为空=全屏；逻辑坐标入参）。
+  ///
+  /// 连同**实际尺寸**一起返回，理由同 `capture_to_file`：`region` 会被夹取，
+  /// 尺寸必须源于导出结果。
+  struct PngView {
+    std::vector<std::uint8_t> png{};
+    int width{0};
+    int height{0};
+  };
+  [[nodiscard]] virtual auto capture_png(math::IntRect region) -> Result<PngView> = 0;
   [[nodiscard]] virtual auto log_lines(std::size_t limit) const -> std::vector<std::string> = 0;
   /// 脚本宿主（**宿主应用拥有**；未启用脚本能力时返回 `nullptr`）。
   ///

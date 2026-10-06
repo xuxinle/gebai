@@ -300,6 +300,13 @@ struct Server::Impl {
   /// 解析 `capture` / `capture.hash` / `visual.diff` 共用的区域参数：
   /// `id`（元素边框，逻辑坐标）> `region`（显式逻辑矩形）> 空（全屏）。
   /// 三处必须同一口径——分开写会让「同一个 region 在三个方法里含义不同」。
+  ///
+  /// **两侧都不接受"半形参数"**：
+  /// - 扁平 `x`/`y`/`width`/`height`（没用 `region` 包起来）→ 报错。
+  ///   实测踩到：调用方发扁平参数、而这里只认 `region` 对象，于是**静默截了全屏**，
+  ///   调用方拿到"成功"却是一张完全不对的图（比报错险得多）。
+  /// - `region` 宽/高 ≤ 0 → 报错，而不是当成全屏。`IntRect{}` 在全屏分支里兼做哨兵，
+  ///   若把 `width=0` 静默当全屏，"忘了传宽高"看起来就像成功。
   [[nodiscard]] auto capture_region_of(const Json& params) -> Result<math::IntRect> {
     if (const std::string target = json_get_string(params, "id"); !target.empty()) {
       ui::Element* element = find_element(target);
@@ -308,13 +315,31 @@ struct Server::Impl {
       }
       return element->bounds().round_out();
     }
-    if (const Json* raw = json_find(params, "region"); raw != nullptr && raw->is_object()) {
-      return math::IntRect{static_cast<int>(json_get_i64(*raw, "x", 0)),
-                           static_cast<int>(json_get_i64(*raw, "y", 0)),
-                           static_cast<int>(json_get_i64(*raw, "width", 0)),
-                           static_cast<int>(json_get_i64(*raw, "height", 0))};
+    const Json* raw = json_find(params, "region");
+    if (raw == nullptr) {
+      // 没给 `region`，但给了扁平的四个字段之一 ⇒ 几乎可以肯定是忘了嵌套。
+      const bool has_flat = json_find(params, "x") != nullptr || json_find(params, "y") != nullptr ||
+                            json_find(params, "width") != nullptr ||
+                            json_find(params, "height") != nullptr;
+      if (has_flat) {
+        return unexpected(ErrorCode::Invalid,
+                          "区域参数必须包在 region 对象里，如 {region:{x,y,width,height}}"
+                          "（扁平的 x/y/width/height 会被忽略并静默截全屏）");
+      }
+      return math::IntRect{};   // 全屏：**唯一**合法的空区域
     }
-    return math::IntRect{};
+    if (!raw->is_object()) {
+      return unexpected(ErrorCode::Invalid, "region 必须是对象 {x,y,width,height}");
+    }
+    const math::IntRect area{static_cast<int>(json_get_i64(*raw, "x", 0)),
+                             static_cast<int>(json_get_i64(*raw, "y", 0)),
+                             static_cast<int>(json_get_i64(*raw, "width", 0)),
+                             static_cast<int>(json_get_i64(*raw, "height", 0))};
+    if (area.width <= 0 || area.height <= 0) {
+      return unexpected(ErrorCode::Invalid,
+                        std::format("region 宽高必须为正：{}×{}", area.width, area.height));
+    }
+    return area;
   }
 
 
@@ -1165,6 +1190,9 @@ if (!region_result) return forward_error(region_result.error());
 const math::IntRect region = *region_result;
 const std::string encode = json_get_string(params, "encode", "base64");
 Json result = Json::object();
+// 实际导出的**物理像素**尺寸。由两个分支各自从导出结果抄下，不在末尾重算（详见下方注释）。
+int actual_width = 0;
+int actual_height = 0;
 if (encode == "file" || params.contains("path")) {
   const std::string path = json_get_string(params, "path");
   // 落盘白名单：capture 是「让应用进程写文件」的原语，不限制路径等于本地越权写
@@ -1177,36 +1205,34 @@ if (encode == "file" || params.contains("path")) {
   }
   auto saved = host.capture_to_file(path, region);
   if (!saved) return forward_error(saved.error());
-  result["path"] = *saved;
+  result["path"] = saved->path;
+  actual_width = saved->width;
+  actual_height = saved->height;
 } else {
   auto png = host.capture_png(region);
   if (!png) return forward_error(png.error());
-  result["base64"] = base64_encode(std::span<const std::uint8_t>(*png));
-  result["bytes"] = static_cast<std::uint64_t>(png->size());
+  result["base64"] = base64_encode(std::span<const std::uint8_t>(png->png));
+  result["bytes"] = static_cast<std::uint64_t>(png->png.size());
+  actual_width = png->width;
+  actual_height = png->height;
 }
 result["format"] = "png";
-// 回包标注：region 为**逻辑坐标**（协议口径），pixel_size 为实际导出的**物理像素**尺寸——
+// 回包标注：region 为**请求的**逻辑坐标（协议口径），pixel_size 为**实际导出**的物理像素尺寸。
 // 两者在 HiDPI 下不同（2x 时像素尺寸是逻辑尺寸的两倍），调用方据此换算而不必猜。
+//
+// ⚠ `pixel_size` **必须来自导出结果**，不能拿 `region` 乘 `scale` 算：
+// `region` 会被画布夹取（超出视口、起点为负都是合法输入），算出来的值在那些情况下
+// 就是**谎报**——实测请求 200×200 落在右下角、文件实际 80×50，而响应写着 200×200。
+// 那让"按响应校验尺寸"这件事彻底失效（比报错险得多）。
 result["region"] = bounds_to_json(math::Rect{static_cast<float>(region.x),
                                                static_cast<float>(region.y),
                                                static_cast<float>(region.width),
                                                static_cast<float>(region.height)});
 {
-  const float scale = host.device_scale();
-  const math::Size viewport = host.viewport();
   Json pixels = Json::object();
-  if (region.is_empty()) {
-    pixels["width"] = static_cast<std::int64_t>(
-                            std::lround(static_cast<double>(viewport.width) * static_cast<double>(scale)));
-    pixels["height"] = static_cast<std::int64_t>(
-                             std::lround(static_cast<double>(viewport.height) * static_cast<double>(scale)));
-  } else {
-    pixels["width"] = static_cast<std::int64_t>(
-                            std::lround(static_cast<double>(region.width) * static_cast<double>(scale)));
-    pixels["height"] = static_cast<std::int64_t>(
-                             std::lround(static_cast<double>(region.height) * static_cast<double>(scale)));
-  }
-  pixels["device_scale"] = static_cast<double>(scale);
+  pixels["width"] = static_cast<std::int64_t>(actual_width);
+  pixels["height"] = static_cast<std::int64_t>(actual_height);
+  pixels["device_scale"] = static_cast<double>(host.device_scale());
   result["pixel_size"] = pixels;
 }
 return result;

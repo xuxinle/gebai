@@ -481,7 +481,7 @@ auto run_app(int argc, char** argv) -> int {
   shot_button_ptr->on_click = [app_ptr, status_ptr, root_ptr]() {
     auto saved = app_ptr->capture_to_file("", {});
     if (saved.has_value()) {
-      status_ptr->set_content("已截图: " + st::fs::file_name(*saved));
+      status_ptr->set_content("已截图: " + st::fs::file_name(saved->path));
     } else {
       status_ptr->set_content("截图失败: " + saved.error().message);
     }

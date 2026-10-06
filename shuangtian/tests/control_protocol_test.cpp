@@ -51,6 +51,25 @@ class TestHost final : public st::control::Host {
   int quits{0};
   int repaints{0};
 
+  /// 与真实画布同语义的夹取：`region` 为空 = 全屏（合成帧 64×48），
+  /// 否则与帧缓冲求交（视口 64×48）。
+  ///
+  /// ⚠ 桩**必须真的夹取**，否则 "尺寸来自导出而非请求" 那条契约根本测不出来：
+  /// 不夹取时请求值恒等于实际值，把一个直接从 `region` 算尺寸的错误实现
+  /// 也会判绿（实测：本用例第一版就是这么假绿的）。
+  [[nodiscard]] auto clamp_like_real_canvas(const st::math::IntRect& region) const
+      -> std::pair<int, int> {
+    constexpr int kFrameW = 64;
+    constexpr int kFrameH = 48;
+    if (region.is_empty()) return {kFrameW, kFrameH};
+    const int x0 = std::max(0, region.x);
+    const int y0 = std::max(0, region.y);
+    const int x1 = std::min(kFrameW, region.x + region.width);
+    const int y1 = std::min(kFrameH, region.y + region.height);
+    if (x1 <= x0 || y1 <= y0) return {0, 0};
+    return {x1 - x0, y1 - y0};
+  }
+
   [[nodiscard]] auto root() -> UiRoot& override { return root_; }
   [[nodiscard]] auto app_name() const -> std::string override { return app_name_; }
   [[nodiscard]] auto app_version() const -> std::string override { return app_version_; }
@@ -59,20 +78,21 @@ class TestHost final : public st::control::Host {
   [[nodiscard]] auto viewport() const -> st::math::Size override { return {400, 300}; }
   [[nodiscard]] auto device_scale() const -> float override { return 1.0f; }
   auto set_device_scale(float) -> st::Status override { return st::ok(); }
-  [[nodiscard]] auto metrics() const -> st::control::Metrics override { return {}; }
-  void request_quit() override { ++quits; }
+  [[nodiscard]] auto metrics() const -> st::control::Metrics override { return {}; }  void request_quit() override { ++quits; }
   void request_repaint() override { ++repaints; }
   void set_theme_mode(st::ui::ThemeMode mode) override { root_.set_theme(mode == st::ui::ThemeMode::Dark ? st::ui::Theme::dark() : st::ui::Theme::light()); }
-  [[nodiscard]] auto capture_to_file(std::string_view, st::math::IntRect) -> st::Result<std::string> override {
-    return std::string("/tmp/fake.png");
-  }
-  [[nodiscard]] auto capture_png(st::math::IntRect) -> st::Result<std::vector<std::uint8_t>> override {
-    return std::vector<std::uint8_t>{0x89, 0x50, 0x4E, 0x47};
+  [[nodiscard]] auto capture_to_file(std::string_view, st::math::IntRect region)
+      -> st::Result<st::control::Host::SavedShot> override {
+    const auto [width, height] = clamp_like_real_canvas(region);
+    return st::control::Host::SavedShot{"/tmp/fake.png", width, height};
+  }  [[nodiscard]] auto capture_png(st::math::IntRect region)
+      -> st::Result<st::control::Host::PngView> override {
+    const auto [width, height] = clamp_like_real_canvas(region);
+    return st::control::Host::PngView{{0x89, 0x50, 0x4E, 0x47}, width, height};
   }
   /// 合成像素视图：微小渐变图案（视觉断言测试用——内容可预测、足够区分）。
   [[nodiscard]] auto capture_pixels(st::math::IntRect region) -> st::Result<st::control::PixelView> override {
-    const int width = region.is_empty() ? 64 : region.width;
-    const int height = region.is_empty() ? 48 : region.height;
+    const auto [width, height] = clamp_like_real_canvas(region);
     st::control::PixelView view;
     view.width = width;
     view.height = height;
@@ -504,6 +524,154 @@ ST_TEST(capture_path_outside_whitelist_is_rejected) {
   ST_CHECK(!reply.value("ok", false));
   if (reply.contains("error")) {
     ST_CHECK_EQ(reply["error"].value("code", std::string()), "invalid");
+  }
+}
+
+/// 区域参数：**半形参数一律报错，不静默当全屏**。
+///
+/// 回归（2026-10-06）：这里曾经只认 `region` 对象，于是调用方发扁平的
+/// `x`/`y`/`width`/`height` 时**静默截了全屏**——调用方拿到 "ok" 却是一张
+/// 完全不对的图。同样，`region` 宽高为 0/负也被静默当全屏。
+///
+/// 为何静默比报错危险：两个后续动作（量尺寸、像素断言）都基于"这图是那个区域"——
+/// 错了不会崩，只会让结论静默失真。
+ST_TEST(capture_region_rejects_half_formed_params) {
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_CHECK(probe.call("hello").value("ok", false));
+
+  // 扁平参数（没用 region 包起来）→ 报 invalid，且错误信息要指名怎么改。
+  //
+  // ⚠ 断言顺序：**先 `ST_CHECK(!ok)` 再读 `error`**。反过来写会踩一个尴尬的坑：
+  // 回退实现后（不报错）响应里根本没有 `error` 字段，而 nlohmann 的
+  // `operator[] const` 缺键是 **UB（断言崩溃）**——测试会“没优雅地抓住”，
+  // 逆向验证脚本判它失败，而真正的问题是断言写法不稳。
+  {
+    Json flat = Json::object();
+    flat["x"] = 10; flat["y"] = 20; flat["width"] = 30; flat["height"] = 40;
+    const Json reply = probe.call("capture", flat);
+    ST_CHECK(!reply.value("ok", false));
+    if (reply.contains("error")) {
+      ST_CHECK_EQ(reply["error"].value("code", std::string()), "invalid");
+      ST_CHECK(reply["error"].value("message", std::string()).find("region") != std::string::npos);
+    }
+  }
+  // 只给一个扁平字段也是同样的错（半个参数比全不给危险）。
+  {
+    Json half = Json::object();
+    half["width"] = 30;
+    ST_CHECK(!probe.call("capture", half).value("ok", false));
+  }
+  // `region` 宽/高 ≤ 0 → 报 invalid（不能当成全屏）。
+  for (const auto width : {0, -3}) {
+    Json region = Json::object();
+    region["x"] = 0; region["y"] = 0; region["width"] = width; region["height"] = 8;
+    Json params = Json::object();
+    params["region"] = region;
+    const Json reply = probe.call("capture", params);
+    ST_CHECK(!reply.value("ok", false));
+    if (reply.contains("error")) {
+      ST_CHECK_EQ(reply["error"].value("code", std::string()), "invalid");
+    }
+  }
+  // `region` 不是对象 → 报 invalid。
+  {
+    Json params = Json::object();
+    params["region"] = "0,0,8,8";
+    ST_CHECK(!probe.call("capture", params).value("ok", false));
+  }
+  // 不给区域 = 全屏，仍然合法（全屏是唯一的空区域语义）。
+  ST_CHECK(probe.call("capture.hash").value("ok", false));
+}
+
+/// `capture` 回包的 `pixel_size` 必须是**实际导出**尺寸，而不是拿 `region` 算的。
+///
+/// 回归（2026-10-06）：`pixel_size` 曾由 `region × scale` 算出，而 `region` 会被画布
+/// 夹取——请求 200×200 落在右下角时，**文件实际 80×50，响应却写 200×200**。
+/// 那让"按响应校验尺寸"彻底失效，而调用方正是靠它确认"拿到的是哪一块"。
+///
+/// 桩里 `capture_png`/`capture_to_file` 的尺寸随 `region` 线性变化（测试桩刻意不含夹取），
+/// 所以这里锁的是**接线**：尺寸必须来自 Host 的返回，不能自己算。
+ST_TEST(capture_pixel_size_comes_from_the_export_not_the_request) {
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_CHECK(probe.call("hello").value("ok", false));
+
+  auto size_of = [](const Json& reply) {
+    return std::pair<std::int64_t, std::int64_t>{
+        reply["result"]["pixel_size"].value("width", std::int64_t{0}),
+        reply["result"]["pixel_size"].value("height", std::int64_t{0})};
+  };
+  // base64 分支：请求 37×40 完全在帧内（桩帧 64×48）→ 实际就是 37×40。
+  {
+    Json region = Json::object();
+    region["x"] = 0; region["y"] = 0; region["width"] = 37; region["height"] = 40;
+    Json params = Json::object();
+    params["region"] = region;
+    const Json reply = probe.call("capture", params);
+    ST_CHECK(reply.value("ok", false));
+    // 桩回的是 region 尺寸；若实现改用 viewport×scale（旧写法），这里会是 64×48。
+    ST_CHECK_EQ(size_of(reply).first, 37);
+    ST_CHECK_EQ(size_of(reply).second, 40);
+  }
+  // **关键用例：请求超出帧缓冲**（帧 64×48，从 (50,40) 请求 30×30）。
+  // 实际只有 14×8，而 `region` 写的是 30×30——这两者必须报后者（实际值），
+  // 报前者就是谎报，也是旧实现的真实行为（`region × scale`）。
+  {
+    Json region = Json::object();
+    region["x"] = 50; region["y"] = 40; region["width"] = 30; region["height"] = 30;
+    Json params = Json::object();
+    params["region"] = region;
+    const Json reply = probe.call("capture", params);
+    ST_CHECK(reply.value("ok", false));
+    ST_CHECK_EQ(size_of(reply).first, 14);
+    ST_CHECK_EQ(size_of(reply).second, 8);
+    // 响应的 `region` 仍是**请求值**（调用方靠它区分"我要的"与"得到的"）。
+    ST_CHECK_EQ(reply["result"]["region"].value("width", 0.0), 30.0);
+  }
+  // 起点为负：从 (-10,-10) 请求 20×20 → 实际只有帧内那 10×10。
+  {
+    Json region = Json::object();
+    region["x"] = -10; region["y"] = -10; region["width"] = 20; region["height"] = 20;
+    Json params = Json::object();
+    params["region"] = region;
+    const Json reply = probe.call("capture", params);
+    ST_CHECK(reply.value("ok", false));
+    ST_CHECK_EQ(size_of(reply).first, 10);
+    ST_CHECK_EQ(size_of(reply).second, 10);
+  }
+  // file 分支也必须带上尺寸（旧实现在这条路径上根本没有任何尺寸信息）。
+  {
+    Json region = Json::object();
+    region["x"] = 0; region["y"] = 0; region["width"] = 21; region["height"] = 11;
+    Json params = Json::object();
+    params["region"] = region;
+    params["encode"] = "file";
+    params["path"] = "/tmp/gebai-capture-size-probe.png";
+    const Json reply = probe.call("capture", params);
+    ST_CHECK(reply.value("ok", false));
+    ST_CHECK_EQ(size_of(reply).first, 21);
+    ST_CHECK_EQ(size_of(reply).second, 11);
+  }
+  // file 分支的夹取同样不能谎报。
+  {
+    Json region = Json::object();
+    region["x"] = 60; region["y"] = 44; region["width"] = 20; region["height"] = 20;
+    Json params = Json::object();
+    params["region"] = region;
+    params["encode"] = "file";
+    params["path"] = "/tmp/gebai-capture-size-probe2.png";
+    const Json reply = probe.call("capture", params);
+    ST_CHECK(reply.value("ok", false));
+    ST_CHECK_EQ(size_of(reply).first, 4);
+    ST_CHECK_EQ(size_of(reply).second, 4);
+  }
+  // 全屏：桩的全屏约定是 64×48（也验证了"尺寸来自导出"而非写死）。
+  {
+    const Json reply = probe.call("capture");
+    ST_CHECK(reply.value("ok", false));
+    ST_CHECK_EQ(size_of(reply).first, 64);
+    ST_CHECK_EQ(size_of(reply).second, 48);
   }
 }
 

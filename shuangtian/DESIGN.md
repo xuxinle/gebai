@@ -2633,7 +2633,7 @@ class Compositor {                                  // UI 图层 → GPU 合成
 | `input.mouse` | `{kind, x, y, button?, buttons?, modifiers?, delta?, to?}` | `{handled, hit}` | kind: `move` `down` `up` `click` `dblclick` `triple` `scroll` `drag` |
 | `input.key` | `{kind, key?, code?, text?, modifiers?, repeat?}` | `{handled, focused}` | kind: `press` `down` `up` `text` |
 | `input.text` | `{text, id?}` | `{handled, inserted}` | 便捷输入（聚焦或指定输入框追加文本） |
-| `capture` | `{id?, region?, scale?, format?, encode?}` | `{width,height,format,base64? ,path?}` | 截图（元素区域或全屏；`encode=file` 直接落盘） |
+| `capture` | `{id?, region?, scale?, format?, encode?}` | `{path?, base64?, bytes?, format, region, pixel_size:{width,height,device_scale}}` | 截图（元素区域或全屏；`encode=file` 直接落盘） |
 | `capture.hash` | `{id?, region?}` | `{hash, algorithm, width, height, bytes}` | 区域像素的 FNV-1a 64 哈希（RGBA 字节；「画面变了没有」的快速判定） |
 | `visual` | `{id?, depth?, include_paint?}` | `{layers:[{id,type,bounds,z,visible,opacity,fill,radius,text,hit_region}], hits:[...]}` | **视觉元素树**：绘制层与实际命中区（区别于语义树） |
 | `visual.diff` | `{path, write_baseline?, threshold?, tolerance?, id?, region?}` | `{changed, diff_pixels, total_pixels, diff_ratio, mean_diff, max_diff, diff_bounds?, baseline_hash, current_hash}` 或写基线时 `{written, path, width, height, hash}` | **视觉回归断言**：与基线 PNG 逐像素比对（尺寸必须一致，不做缩放对齐）；`threshold` 不计入差异像素、`tolerance` 允许的差异占比 |
@@ -2644,6 +2644,31 @@ class Compositor {                                  // UI 图层 → GPU 合成
 | `app` | `{action, args?}` | `{ok}` | `resize` `quit` `reload` `screenshot_dir` `title` |
 | `script` | `{code?, function?, args?, filename?}` | `{result, ops?, memory?}` | **默认禁用**（需 `--enable-script`）。`code` 直接执行；或 `function`+`args` 调用已定义函数；受内存/栈/时长/转换深度四重配额 |
 | `shutdown` | `{graceful?}` | `{ok}` | 关闭服务（应用退出） |
+
+#### 区域参数（`capture` / `capture.hash` / `visual.diff` 共用）
+
+优先级：`id`（元素边框，逻辑坐标）> `region` > 全屏。
+
+```jsonc
+{"region": {"x": 266, "y": 291, "width": 92, "height": 34}}   // ✅
+{"x": 266, "y": 291, "width": 92, "height": 34}                 // ❌ invalid
+```
+
+两条必守的约定（各对应一个实测缺陷，都是"静默失效"型）：
+
+1. **扁平参数报错，不静默当全屏**。曾经只认 `region` 对象，而扁平字段被忽略
+   ⇒ 调用方拿到 `ok:true` 却是一张**全屏图**。`region` 宽/高 ≤ 0 同样报错
+   （`IntRect{}` 在全屏分支里兼做哨兵，静默当全屏会让"忘传宽高"看起来像成功）。
+2. **`pixel_size` 是导出后的实际尺寸，不是拿 `region` 算的**。`region` 会被画布
+   夹取（超出视口/起点为负都是合法输入）——实测请求 200×200 落在右下角时，
+   **文件实际 80×50 而响应写 200×200**。
+
+   > 为何把尺寸塞进返回值：它必须**不可能**报错。曾经的接口是
+   > `capture_to_file → Result<std::string>`（只回路径），调用方除了拿 `region`
+   > 自己算别无办法；改成回 `SavedShot{path,width,height}` / `PngView{png,width,height}`
+   > 后，尺寸只有一个来源（导出结果），错报在结构上就不成立了。
+
+   响应里的 `region` 仍是**请求值**（调用方靠两者之差识别"被夹取了"）。
 
 ### 6.3 选择器语法
 ```
@@ -3398,7 +3423,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
 | 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case
- 超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑） | `st test` | **803 用例 / 19636 断言**（debug 档实测；`st test --san` 全绿 0 报告；另 12 个慢用例默认跳过） |
+ 超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑） | `st test` | **805 用例 / 19713 断言**（debug 档实测；`st test --san` 全绿 0 报告；另 12 个慢用例默认跳过） |
 | 独立工程集成 | **真建一个引用 framework 的最小工程**、真构建真跑（`tests/pkg_integration_test.cpp`）
  | `st test pkg_integration` | 全绿（`ST_INTEGRATION_BUILD=0` 可关；关掉时明确跳过而非假绿） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告（需带 sanitizer 运行库的编译器；MinGW 发行版不带时构建前明确报错） |

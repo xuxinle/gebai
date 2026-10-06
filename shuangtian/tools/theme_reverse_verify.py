@@ -16,6 +16,7 @@ THEME_CPP = "src/ui/theme.cpp"
 THEME_IO_CPP = "src/ui/theme_io.cpp"
 ELEMENT_CPP = "src/ui/element.cpp"
 TEXT_PORT_HPP = "include/st/ui/text_port.hpp"
+SERVER_CPP = "src/control/server.cpp"
 
 # (说明, 文件, 原文, 回退后的文本, 期望变红的用例名)
 CASES = [
@@ -125,6 +126,36 @@ CASES = [
         std::max(0.0f, std::round(box.bottom()) - std::round(box.y))};""",
         "    const math::Rect snapped = box;",
         "border_edge_lands_on_whole_pixels_after_snapping",
+    ),
+    (
+        "capture 区域：把扁平参数改回“静默忽略”（而不是报错）",
+        SERVER_CPP,
+        """      if (has_flat) {
+        return unexpected(ErrorCode::Invalid,
+                          "区域参数必须包在 region 对象里，如 {region:{x,y,width,height}}"
+                          "（扁平的 x/y/width/height 会被忽略并静默截全屏）");
+      }""",
+        """      (void)has_flat;   // 逆向验证：静默忽略扁平参数""",
+        "capture_region_rejects_half_formed_params",
+    ),
+    (
+        "capture 尺寸：把 pixel_size 改回“拿 region 算”（夹取时谎报）",
+        SERVER_CPP,
+        """  Json pixels = Json::object();
+  pixels["width"] = static_cast<std::int64_t>(actual_width);
+  pixels["height"] = static_cast<std::int64_t>(actual_height);""",
+        """  Json pixels = Json::object();
+  {
+    const double reverse_scale = static_cast<double>(host.device_scale());
+    const math::Size reverse_vp = host.viewport();
+    const int rw = region.is_empty() ? static_cast<int>(reverse_vp.width) : region.width;
+    const int rh = region.is_empty() ? static_cast<int>(reverse_vp.height) : region.height;
+    pixels["width"] = static_cast<std::int64_t>(std::lround(static_cast<double>(rw) * reverse_scale));
+    pixels["height"] = static_cast<std::int64_t>(std::lround(static_cast<double>(rh) * reverse_scale));
+  }
+  (void)actual_width;
+  (void)actual_height;""",
+        "capture_pixel_size_comes_from_the_export_not_the_request",
     ),
 ]
 
