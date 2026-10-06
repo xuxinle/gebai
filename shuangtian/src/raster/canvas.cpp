@@ -891,7 +891,8 @@ void Canvas::fill_circle(math::Point center, float radius, const Paint& paint,
   detail::fill_path_aa(*this, path, paint, options);
 }
 
-void Canvas::stroke_path(const Path& path, const Paint& paint, float width, DrawOptions options) {
+void Canvas::stroke_path(const Path& path, const Paint& paint, float width,
+                         const StrokeStyle& style, DrawOptions options) {
   OpScope scope(*this, PaintOp::Stroke);
   if (width <= 0.0f || path.is_empty()) return;
   // DPI：描边宽度同比例放大，1px 发丝线在 2x 屏上是 2 物理像素（视觉等宽且更锐利）
@@ -900,7 +901,7 @@ void Canvas::stroke_path(const Path& path, const Paint& paint, float width, Draw
   Path scaled_path = scale_ == 1.0f ? Path{} : source.scaled(scale_);
   const Path& effective = scale_ == 1.0f ? source : scaled_path;
   Path outline = detail::stroke_to_path(effective, physical_width_value,
-                                        options.antialias ? 0.25f : 0.5f);
+                                        options.antialias ? 0.25f : 0.5f, style);
   detail::fill_path_aa(*this, outline, paint, options);
 }
 

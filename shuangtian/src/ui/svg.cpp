@@ -316,6 +316,21 @@ auto attr(const XmlToken& token, std::string_view name) -> std::string_view {
   return {};
 }
 
+/// 解析 `stroke-linecap` / `stroke-linejoin` 并写入 `style`（元素级与继承级共用一处）。
+auto apply_line_style(const XmlToken& token, Style& style) -> void {
+  if (const auto cap = attr(token, "stroke-linecap"); !cap.empty()) {
+    if (cap == "round") style.line_cap = raster::LineCap::Round;
+    else if (cap == "square") style.line_cap = raster::LineCap::Square;
+    else style.line_cap = raster::LineCap::Butt;
+  }
+  if (const auto join = attr(token, "stroke-linejoin"); !join.empty()) {
+    if (join == "round") style.line_join = raster::LineJoin::Round;
+    else if (join == "bevel") style.line_join = raster::LineJoin::Bevel;
+    else style.line_join = raster::LineJoin::Miter;
+  }
+}
+
+
 /// CSS 长度：数字或百分比（`length` 是该维度满值——width/height 单独处理）。
 auto parse_length_percent(std::string_view text, float full, float& out) -> bool {
   double value = 0.0;
@@ -868,6 +883,9 @@ auto apply_shape(const XmlToken& token, const StyleContext& context, float view_
   if (attr(token, "fill-rule") == "evenodd") {
     node.style.fill_rule = FillRule::EvenOdd;
   }
+  // cap/join 的解析**只在这一处**（`apply_line_style`）：元素级与 `<g>` 继承级共用，
+  // 两处各写一份必然漂移（本文件已有 `fill-rule` 只在继承级解析、元素级漏掉的先例）。
+  apply_line_style(token, node.style);
   nodes.push_back(std::move(node));
 }
 
@@ -917,6 +935,9 @@ auto style_from_attributes(const XmlToken& token, const Style& inherited) -> Sty
     style.stroke_opacity *= static_cast<float>(number);
   }
   if (attr(token, "fill-rule") == "evenodd") style.fill_rule = FillRule::EvenOdd;
+  // `stroke-linecap` / `stroke-linejoin` 是**可继承属性**：`<g>` 上声明要传给子元素
+  // （Lucide 等图标库正是在根/组上写 `stroke-linecap="round"`）。
+  apply_line_style(token, style);
   return style;
 }
 
@@ -1372,7 +1393,8 @@ void draw(raster::Surface& canvas, const Document& doc, math::Rect box,
           static_cast<float>(color.a) * stroke_alpha, 0.0f, 255.0f));
       const float width_px = node.stroke_width_viewbox * stroke_scale;
       if (width_px > 0.05f) {
-        canvas.stroke_path(path, raster::Paint::solid(color), width_px);
+        canvas.stroke_path(path, raster::Paint::solid(color), width_px,
+                           raster::StrokeStyle{node.style.line_cap, node.style.line_join});
       }
     }
   }

@@ -120,4 +120,20 @@ struct DrawOptions {
   bool antialias{true};
 };
 
+/// 线帽（线段端点形态）。缺省 `Butt`——与 SVG/CSS 的默认一致
+/// （`stroke-linecap` 缺省 butt；圆头必须显式声明）。
+enum class LineCap { Butt, Round, Square };
+
+/// 线段连接（折线转角形态）。缺省 `Miter`——与 SVG/CSS 的默认一致。
+///
+/// ⚠ 与"圆头补角"的区别：补角是**几何必需**（否则转角外侧留缺口），任何连接形态都要补；
+/// `Round` 只是把补的形状定为圆弧。旧实现把它当成"要不要补"，于是无法表达 butt/miter。
+enum class LineJoin { Miter, Round, Bevel };
+
+/// 描边样式（`Canvas::stroke_path` 的可选参数）。
+struct StrokeStyle {
+  LineCap cap{LineCap::Butt};
+  LineJoin join{LineJoin::Miter};
+};
+
 }  // namespace st::raster

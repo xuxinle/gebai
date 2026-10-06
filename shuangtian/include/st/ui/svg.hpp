@@ -54,6 +54,12 @@ struct Style {
   FillRule fill_rule{FillRule::NonZero};
   bool fill_none{false};
   bool stroke_none{false};
+  /// 线帽 / 连接（`stroke-linecap` / `stroke-linejoin`）。
+  /// **缺省必须与 SVG 规范一致**：butt + miter——不是圆头。
+  /// 旧实现无条件补圆头，而当时补圆又与带四边形绕向相反（互相抵消），
+  /// 于是"圆形端帽"被抵消掩盖、一直没被发现；修好绕向后它立刻显形（直线胖 3.6%）。
+  raster::LineCap line_cap{raster::LineCap::Butt};
+  raster::LineJoin line_join{raster::LineJoin::Miter};
 };
 
 /// `transform` 属性的仿射矩阵（行主序 2×3：`[a c e; b d f]`，SVG 口径）。

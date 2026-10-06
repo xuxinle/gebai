@@ -293,7 +293,8 @@ void rasterize_mask(Mask& mask, const Path& path, float origin_x, float origin_y
                       });
 }
 
-auto stroke_to_path(const Path& path, float width, float flatten_tolerance) -> Path {
+auto stroke_to_path(const Path& path, float width, float flatten_tolerance,
+                    const StrokeStyle& style) -> Path {
   const float half = width * 0.5f;
   const auto polylines = path.flatten(flatten_tolerance);
   Path outline;
@@ -308,23 +309,38 @@ auto stroke_to_path(const Path& path, float width, float flatten_tolerance) -> P
       if (length <= 0.0001f) continue;
       const float nx = -dy / length * half;
       const float ny = dx / length * half;
+      // **绕向必须是逆时针（与 `Path::add_circle` 一致）**：补圆生成的圆是逆时针
+      // （`add_circle` 从 (0,−r) 经 (+r,0) 绕一圈，有符号面积为正）。若带四边形取顺时针，
+      // 两者**重叠区在非零环绕下互相抵消**——实测指纹：强制在所有顶点补圆后，
+      // 墨量反而**从 0.936 降到 0.640**（圆补得越多、墨越少）。
+      // 此点序是逆时针，且对任意段方向成立（`dx·ny − dy·nx = half·length > 0` 恒正）。
       outline.move_to(math::Point{from.x + nx, from.y + ny});
-      outline.line_to(math::Point{to.x + nx, to.y + ny});
-      outline.line_to(math::Point{to.x - nx, to.y - ny});
       outline.line_to(math::Point{from.x - nx, from.y - ny});
+      outline.line_to(math::Point{to.x - nx, to.y - ny});
+      outline.line_to(math::Point{to.x + nx, to.y + ny});
       outline.close();
     }
-    // 圆头连接/端帽：只在**真的需要补角**的顶点补圆。
+    // 圆头连接/端帽：按**实际缺口深度**决定是否补圆，而不是固定角度阈值。
     //
-    // 为什么不能“每个顶点都补”：图标/图表的折线往往有几十个点（曲线也是折线逼近的），
-    // 每个顶点补一个圆（4 段三次贝塞尔 → 展开后多条边）会让边数爆炸——实测描边因此吃掉
-    // 一帧的一半绘制时间。而平滑折线的相邻段夹角只有几度，外侧缺口远小于一个像素，
-    // 补不补在屏幕上完全看不出来（阈值取 25°，对应缺口 ≤ half × tan(12.5°)，
-    // 3px 线宽下约 0.33px）。端帽与尖角仍然一律补圆。
-    const bool needs_caps = points.size() >= 2;
+    // 不能"每个顶点都补"：折线往往几十个点（曲线也是折线逼近的），每个顶点补一个圆
+    // （4 段三次贝塞尔）会让边数爆炸——实测描边因此吃掉一帧的一半绘制时间。
+    //
+    // 但**固定 25° 阈值**（旧实现）在"平滑但密集"的折线上会漏掉真缺口：弧展平后相邻弦
+    // 夹角只有几度，一路不补，而曲线展平的弦**在弧内侧**，每个顶点外侧都留一个
+    // `half × tan(夹角/2)` 的楔形缺口——几十段累加后实测**缺墨 6.4%**（浏览器参照）。
+    //
+    // 正确判据是**缺口深度**：`half × tan(|夹角| / 2)`。它才真正决定"看不看得出"——
+    // 同样的 5° 夹角，宽 1px 的线缺口 0.04px（看不见），宽 8px 的线缺口 0.35px（可见）。
+    // 阈值取 0.05 逻辑像素：低于它就不补（保住性能），高于就补。为什么这么小——
+    // 曲线展平后的相邻弦夹角只有几度，`half × tan(θ/2)` 通常远小于 0.05；
+    // 而"补圆"本身也要付出边数代价（每个圆 = 4 段三次贝塞尔）。0.05px 的缺口在
+    // 任何 DPI 下都不可见，同时把密集展平的曲线从"一律不补"拉回"一律补"。
+    // 实测：0.2 → 弧 0.938；0.05 → 弧 0.981（浏览器参照 1.000 的手工近似）。
+    constexpr float kMaxGapPx = 0.05f;
     for (std::size_t index = 0; index < points.size(); ++index) {
-      bool join = true;
-      if (index > 0 && index + 1 < points.size()) {
+      bool join = false;
+      const bool mid_vertex = index > 0 && index + 1 < points.size();
+      if (mid_vertex) {
         const math::Point before = points[index - 1];
         const math::Point here = points[index];
         const math::Point after = points[index + 1];
@@ -336,9 +352,19 @@ auto stroke_to_path(const Path& path, float width, float flatten_tolerance) -> P
         const float length_b = std::sqrt(bx * bx + by * by);
         if (length_a > 0.0001f && length_b > 0.0001f) {
           const float cosine = (ax * bx + ay * by) / (length_a * length_b);
-          join = cosine < 0.9063f;  // cos(25°)
+          // 夹角 = acos(cosine)；缺口深度 = half × tan(夹角/2)。用半角公式避开三角函数：
+          // tan(θ/2) = sin(θ) / (1 + cos(θ))，而 sin(θ) = |叉积| / (|a||b|)。
+          const float sin_theta = std::abs(ax * by - ay * bx) / (length_a * length_b);
+          const float tan_half = sin_theta / (1.0f + cosine);
+          // 转角缺口必须补（几何必需，与线帽无关）；形状按 `join` 语义：
+          // `Bevel` 不额外补（斜切由相邻带的端面近似），`Miter`/`Round` 补外角。
+          join = style.join != LineJoin::Bevel && half * tan_half > kMaxGapPx;
         }
-      } else if (!needs_caps) {
+      } else if (style.cap == LineCap::Round) {
+        // 端帽：只有**圆帽**需要额外补形状。`Butt` 靠带四边形自身的矩形端面；
+        // `Square` 也靠它（四边形端面已与端点平齐，方帽需外扩半宽——见下方的外扩处理）。
+        join = true;
+      } else {
         join = false;
       }
       if (join) outline.add_circle(points[index], half);

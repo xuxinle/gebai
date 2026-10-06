@@ -12,15 +12,22 @@ objdir="$root/build/$profile/obj"
 outdir="$root/build/probe"
 mkdir -p "$outdir"
 
+# SVG 探针需要 `src/ui/svg.cpp` 的对象；`ui` 里其余组件依赖 shell/app，故只取 svg。
 mapfile -t objs < <(ls "$objdir"/*.o | grep -E '_shuangtian_src_(core|math|codec|raster|text)_' \
   | grep -v -E 'raster_platform_|shell_platform_|platform_gl|_test\.|test_runner|zz_probe')
+case "$name" in
+  svg_ab_probe)
+    mapfile -t svgobjs < <(ls "$objdir"/*.o | grep -E '_shuangtian_src_ui_svg\.cpp\.o$')
+    objs+=("${svgobjs[@]}")
+    ;;
+esac
 
 if [ "${#objs[@]}" -lt 10 ]; then
   echo "框架对象不足（${#objs[@]}）：先跑 build/bin/st build gallery --profile=$profile" >&2
   exit 1
 fi
 
-g++ -std=c++20 -O1 -I"$root/include" -I"$root/tools" -I"$root/third_party" \
+g++ -std=c++20 -O1 -DSVG_AB_CASES_DIR="\"$root/tools\"" -I"$root/include" -I"$root/tools" -I"$root/third_party" \
     -I"$root/third_party/sqlite" \
     "$root/tools/$name.cpp" "${objs[@]}" -o "$outdir/$name" -lpthread -ldl -lm
 echo "== OK: $outdir/$name"

@@ -15,6 +15,7 @@ void fill_path_aa(Canvas& canvas, const Path& path, const Paint& paint, const Dr
 void rasterize_mask(Mask& mask, const Path& path, float origin_x = 0.0f, float origin_y = 0.0f);
 
 /// 线段扩展为闭合四边形（描边用）。
-[[nodiscard]] auto stroke_to_path(const Path& path, float width, float flatten_tolerance) -> Path;
+[[nodiscard]] auto stroke_to_path(const Path& path, float width, float flatten_tolerance,
+                                 const StrokeStyle& style = {}) -> Path;
 
 }  // namespace st::raster::detail

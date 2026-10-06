@@ -811,12 +811,12 @@ class GpuCanvas final : public Surface {
     // 缓存键：直接用逻辑 path（与缩放后几何一一对应，不会误命中）。
     rasterize_path(path, physical, options.opacity, paint.color(), PaintOp::FillPath);
   }
-  void stroke_path(const Path& path, const Paint& paint, float width,
+  void stroke_path(const Path& path, const Paint& paint, float width, const StrokeStyle& style,
                    DrawOptions options = {}) override {
     if (path.is_empty() || width <= 0.0f) return;
     // 先按**物理像素**把路径描边成轮廓，再光栅化为遮罩（与软件同一套 stroke_to_path）
     const Path outline = detail::stroke_to_path(path.scaled(scale_), width * scale_,
-                                                options.antialias ? 0.25f : 0.5f);
+                                                options.antialias ? 0.25f : 0.5f, style);
     rasterize_path(path, outline, options.opacity, paint.color(), PaintOp::Stroke);
   }
   void draw_canvas(const Surface& source, math::Rect destination, DrawOptions options) override {

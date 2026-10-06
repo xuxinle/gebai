@@ -161,8 +161,9 @@ class Surface {
   virtual void fill_rect(math::Rect rect, const Paint& paint, float radius = 0.0f,
                          DrawOptions options = {}) = 0;
   virtual void fill_path(const Path& path, const Paint& paint, DrawOptions options = {}) = 0;
-  /// 描边（圆头圆角连接；宽度为总宽）。
+  /// 描边（宽度为总宽；线帽/连接由 `style` 决定，缺省 butt/miter = SVG 默认）。
   virtual void stroke_path(const Path& path, const Paint& paint, float width,
+                           const StrokeStyle& style = StrokeStyle{},
                            DrawOptions options = {}) = 0;
   virtual void fill_circle(math::Point center, float radius, const Paint& paint,
                            DrawOptions options = {}) = 0;
