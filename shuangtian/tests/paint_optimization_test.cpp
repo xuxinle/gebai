@@ -14,6 +14,8 @@
 // | 断言 | 口径 | 为什么是这个口径 |
 // |---|---|---|
 // | 覆盖范围 | 边框仍然完全落在 `rect` 之内、厚度等于 `width` | 走位的边框是最典型的退化 |
+// | 斜带面积守恒 | 同宽不同角度的带，墨量相等 | 覆盖率必须按像素累加；逐段混合在斜边上有系统性欠墨（圆角看“比直边细”的根因）|
+// | 环总墨量 | 实测 = 中心线周长 × 宽度 | 不依赖实现细节的几何事实，能同时抓住“弧变薄”与“厚度错” |
 // | 边缘等价 | 与旧实现比，**多数像素完全一致**，其余只差抗锯齿 | 0.1% 级差异是逼近差异，不是错位 |
 // | 阴影等价 | 与两次 `draw_shadow` 在**铺上不透明底色后**逐像素一致 | `src-over` 结合律保证：合并两层再贴 ≡ 依次贴两次 |
 //
@@ -163,6 +165,165 @@ ST_TEST(border_ring_covers_same_area_as_stroke) {
     }
   }
   ST_CHECK(outside_clean);
+}
+
+/// 内圈子路径必须**自成一条闭合子路径**，且它的起点落在内圈的角上。
+///
+/// 缺陷形态（2026-10-06 实测）：内圈反向重发时把 `MoveTo` 当 `line_to` 又漏了起点，
+/// 同时把原子的 `Close` 也重发了一遍——命令流成为 `…Z Z C(14,1)…`。后果不是「内圈偏一点」，
+/// 而是**内圈从外圈起点起步**：四个圆角弧上有成段像素完全没墨，
+/// 肉眼看到的就是「卡片的圆角是断的、发虚」。
+ST_TEST(border_ring_inner_contour_is_closed) {
+  const st::math::Rect box{0.0f, 0.0f, 100.0f, 60.0f};
+  constexpr float kRadius = 14.0f;
+  constexpr float kBorderWidth = 1.0f;
+  const Path ring = st::raster::make_rounded_border_ring(box, kRadius, kBorderWidth);
+
+  const auto polylines = ring.flatten(0.25f);
+  ST_CHECK(polylines.size() == 2);
+  ST_CHECK(polylines[0].closed);
+  ST_CHECK(polylines[1].closed);
+  // 内圈展平后必须回到自己的起点（闭合），且**不**从外圈起点 (14,0) 出发。
+  const auto& inner = polylines[1].points;
+  ST_CHECK(inner.size() >= 3);
+  const float dx = inner.front().x - inner.back().x;
+  const float dy = inner.front().y - inner.back().y;
+  ST_CHECK(std::sqrt(dx * dx + dy * dy) < 0.01f);
+  // 内圈首点应贴近内圈几何：x 在 [0, kRadius]，y 在 [kBorderWidth, kRadius]。
+  ST_CHECK(inner.front().x >= 0.0f && inner.front().x <= kRadius);
+  ST_CHECK(inner.front().y >= kBorderWidth - 0.01f && inner.front().y <= kRadius);
+}
+
+/// 四个圆角弧上的墨量必须与描边等价——**直段对不一定能暴露内圈错位**，
+/// 圆角才是判据。回退内圈重建后本条变红（四角墨量比降到 ~0.5）。
+ST_TEST(border_ring_arcs_carry_same_ink_as_stroke) {
+  const Color border = Color::rgb(0xD3, 0xDC, 0xE9);
+  const Color background = Color::rgb(0xF7, 0xF8, 0xFA);
+  const st::math::Rect box{60.0f, 40.0f, 140.0f, 48.0f};
+  constexpr float kRadius = 12.0f;
+  constexpr float kBorderWidth = 1.0f;
+
+  Canvas ring_canvas = make_canvas();
+  draw_border_by_ring(ring_canvas, box, kRadius, border, kBorderWidth);
+  Canvas stroke_canvas = make_canvas();
+  draw_border_by_stroke(stroke_canvas, box, kRadius, border, kBorderWidth);
+
+  // 四角各取半径见方的一块（含弧线本体）。
+  struct Quadrant {
+    float x;
+    float y;
+    const char* name;
+  };
+  const std::vector<Quadrant> quadrants{
+      {box.x, box.y, "TL"}, {box.right() - kRadius, box.y, "TR"},
+      {box.x, box.bottom() - kRadius, "BL"}, {box.right() - kRadius, box.bottom() - kRadius, "BR"}};
+  const auto region_ink = [&background](const Canvas& canvas, const Quadrant& quadrant) -> double {
+    double total = 0.0;
+    const int x0 = static_cast<int>(std::floor(quadrant.x)) - 1;
+    const int y0 = static_cast<int>(std::floor(quadrant.y)) - 1;
+    const int x1 = static_cast<int>(std::ceil(quadrant.x + kRadius)) + 1;
+    const int y1 = static_cast<int>(std::ceil(quadrant.y + kRadius)) + 1;
+    for (int y = std::max(y0, 0); y < std::min(y1, canvas.physical_height()); ++y) {
+      for (int x = std::max(x0, 0); x < std::min(x1, canvas.physical_width()); ++x) {
+        const Color pixel = canvas.pixel_at(x, y);
+        total += std::abs(static_cast<double>(pixel.r) - static_cast<double>(background.r));
+        total += std::abs(static_cast<double>(pixel.g) - static_cast<double>(background.g));
+        total += std::abs(static_cast<double>(pixel.b) - static_cast<double>(background.b));
+      }
+    }
+    return total;
+  };
+
+  for (const Quadrant& quadrant : quadrants) {
+    const double ring_value = region_ink(ring_canvas, quadrant);
+    const double stroke_value = region_ink(stroke_canvas, quadrant);
+    ST_CHECK(stroke_value > 0.0);
+    const double ratio = ring_value / stroke_value;
+    st::print("[border-arc] {} 角：环形 {:.0f} vs 描边 {:.0f} 比 {:.3f}\n", quadrant.name,
+              ring_value, stroke_value, ratio);
+    ST_CHECK(ratio > 0.95 && ratio < 1.05);
+  }
+}
+
+/// 斜向带的**面积必须守恒**：同一宽度、不同角度的带，墨量应当相等。
+///
+/// 缺陷形态（2026-10-06 实测）：扫描线覆盖率**逐 run 混合**时，斜边上同一像素被多段
+/// 各碰一点，每段的 8 位量化零头都差一点，累加后形成系统性欠墨；
+/// 而水平/垂直边每像素只被一段完整覆盖，恰好不差。实测（1 逻辑px 宽、60 逻辑px 长、scale=2）：
+/// 0°/90° 比 1.0000，15° 0.8817、30° 0.8713、**45° 0.8568**、75° 0.9462。
+/// 圆角边框的弧段就是斜向带 ⇒ 用户看到的“圆角比直边细”。
+///
+/// 判据用**斜向与水平两档的比较**（而非与解析面积比）：后者的容差会随实现细节漂，
+/// 而“同一宽度在不同角度下墨量相等”是不依赖实现的几何事实。
+ST_TEST(diagonal_band_ink_is_angle_independent) {
+  const Color background = Color::rgb(0xF7, 0xF8, 0xFA);
+  const Color ink = Color::rgb(0x10, 0x14, 0x1A);
+  constexpr float kLength = 60.0f;
+  constexpr float kBandWidth = 1.0f;
+  const auto band_ink = [&](float angle_deg) -> double {
+    const float radians = angle_deg * 3.14159265358979323846f / 180.0f;
+    const float dx = std::cos(radians) * kLength;
+    const float dy = std::sin(radians) * kLength;
+    const float nx = -std::sin(radians) * kBandWidth * 0.5f;
+    const float ny = std::cos(radians) * kBandWidth * 0.5f;
+    const float x0 = 60.0f;
+    const float y0 = 60.0f;
+    Path band;
+    band.move_to(st::math::Point{x0 + nx, y0 + ny});
+    band.line_to(st::math::Point{x0 + dx + nx, y0 + dy + ny});
+    band.line_to(st::math::Point{x0 + dx - nx, y0 + dy - ny});
+    band.line_to(st::math::Point{x0 - nx, y0 - ny});
+    band.close();
+    Canvas canvas = make_canvas();
+    canvas.fill_path(band, Paint::solid(ink));
+    return border_ink(canvas, background);
+  };
+  const double horizontal = band_ink(0.0f);
+  ST_CHECK(horizontal > 0.0);
+  for (const float angle : {15.0f, 30.0f, 45.0f, 60.0f, 75.0f}) {
+    const double value = band_ink(angle);
+    const double ratio = value / horizontal;
+    st::print("[band-ink] {:>4.0f}° 墨量 {:.1f}（水平 {:.1f}）比 {:.4f}\n",
+              static_cast<double>(angle), value, horizontal, ratio);
+    // 修复前 45° 只有 0.857；修复后六档全部在 1.0000±0.005。
+    ST_CHECK(ratio > 0.99 && ratio < 1.01);
+  }
+}
+
+/// 圆角边框环的总墨量 = **周长 × 宽度**（不依赖任何实现细节的几何事实）。
+///
+/// 为何不能用“四角方框墨量 / 四角框面积”这类归一化：角区 r×r 方框里大半是空的，
+/// 除出来的“每像素墨量”天生偏低（实测这个错误量法给出 0.9602，而逐像素真值是 1.00）。
+/// 量法必须跟着几何走：沿路径积分才有可比性。
+///
+/// 两处独立成因（2026-10-06 各修一处）：
+///   ① `Canvas::blend_coverage_runs` 逐 run 混合（8 位量化误差在斜边上累积）；
+///   ② `detail::rasterize_mask` 逐段**取最大值**而非累加（GPU 路径遮罩）。
+/// 两处未修时本条实测约 0.86（`tools/ring_raster_probe.cpp` 与端到端截图为证）。
+ST_TEST(border_ring_total_ink_matches_perimeter_times_width) {
+  const Color background = Color::rgb(0xF7, 0xF8, 0xFA);
+  const Color border = Color::rgb(0x10, 0x14, 0x1A);
+  const st::math::Rect box{40.0f, 30.0f, 100.0f, 60.0f};
+  constexpr float kRadius = 14.0f;
+  constexpr float kBorderWidth = 1.0f;
+  Canvas canvas = make_canvas();
+  canvas.fill_path(st::raster::make_rounded_border_ring(box, kRadius, kBorderWidth),
+                   Paint::solid(border));
+  const double measured = border_ink(canvas, background);
+  // 周长取**中心线**（半径 = r − 宽/2）：平行带的面积 = 宽 × 中心线周长。
+  // 用外圈周长会系统性高估（外角弧更长）。实测：用外圈算出 0.988，改用中心线为 0.999。
+  const double mid_radius = static_cast<double>(kRadius) - static_cast<double>(kBorderWidth) * 0.5;
+  const double straight = 2.0 * (static_cast<double>(box.width) - 2.0 * static_cast<double>(kRadius)) +
+                          2.0 * (static_cast<double>(box.height) - 2.0 * static_cast<double>(kRadius));
+  const double arcs = 2.0 * 3.14159265358979323846 * mid_radius;
+  const double full_ink = std::abs(static_cast<double>(border.r) - static_cast<double>(background.r)) +
+                          std::abs(static_cast<double>(border.g) - static_cast<double>(background.g)) +
+                          std::abs(static_cast<double>(border.b) - static_cast<double>(background.b));
+  const double expected = (straight + arcs) * static_cast<double>(kBorderWidth) * full_ink;
+  const double ratio = measured / expected;
+  st::print("[ring-ink] 实测 {:.1f} · 周长×宽 {:.1f} · 比 {:.4f}（直线段 {:.1f} + 弧 {:.1f}）\n",
+            measured, expected, ratio, straight, arcs);
+  ST_CHECK(ratio > 0.99 && ratio < 1.01);
 }
 
 /// 边缘等价：与描边比，**绝大多数像素完全一致**，其余差异只来自抗锯齿逼近。

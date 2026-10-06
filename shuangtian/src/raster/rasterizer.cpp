@@ -235,6 +235,14 @@ void fill_path_aa(Canvas& canvas, const Path& path, const Paint& paint,
                       });
 }
 
+/// 把路径覆盖率写入遮罩（路径坐标减去 `origin` 得到遮罩局部坐标）。用于裁剪、阴影与 GPU 路径遮罩。
+///
+/// ⚠ 同一像素上多个运行段的覆盖率必须**累加**，不能取最大值。
+/// 覆盖率是“带符号权重之和”，一个像素可能被多段各覆盖一部分（斜边、曲线弧最典型），
+/// 累加才能得到真实的合成覆盖率；取最大值在**水平/垂直**边上恰好正确（每像素只被一段完整覆盖），
+/// 但在**斜边/弧**上系统性偏低——实测（`rasterize_mask` 旧写法，1 逻辑px 宽的圆角环，scale=2）：
+/// 环的遮罩面积只有解析值的 **0.949**，而四条直边精确到 1.000；
+/// 表现就是“圆角比直边细”。（同一缺陷在 `Canvas::blend_coverage_runs` 里另有一份，已同时修。）
 void rasterize_mask(Mask& mask, const Path& path, float origin_x, float origin_y) {
   if (mask.empty() || path.is_empty()) return;
   Path shifted;
@@ -248,11 +256,26 @@ void rasterize_mask(Mask& mask, const Path& path, float origin_x, float origin_y
   const int last_y = std::min(mask.height(), static_cast<int>(std::ceil(bounds.bottom())) + 1);
   const int width = mask.width();
   auto values = mask.values();
+  // 累加缓冲（字节数组装不下“多次相加”，故用浮点再回写）。
+  std::vector<float> accumulated;
 
   rasterize_polylines(polylines, first_y, last_y,
-                      [&values, width](int y, const std::vector<CoverageRun>& runs) {
+                      [&values, &accumulated, width](int y, const std::vector<CoverageRun>& runs) {
                         auto* row = values.data() + static_cast<std::size_t>(y) *
                                                         static_cast<std::size_t>(width);
+                        int lo = width;
+                        int hi = 0;
+                        for (const auto& run : runs) {
+                          const float weight = std::abs(run.weight);
+                          if (weight <= 0.002f) continue;
+                          const float a = std::max(run.x0, 0.0f);
+                          const float b = std::min(run.x1, static_cast<float>(width));
+                          if (b <= a) continue;
+                          lo = std::min(lo, static_cast<int>(std::floor(a)));
+                          hi = std::max(hi, static_cast<int>(std::ceil(b)));
+                        }
+                        if (hi <= lo) return;
+                        accumulated.assign(static_cast<std::size_t>(hi - lo), 0.0f);
                         for (const auto& run : runs) {
                           const float weight = std::abs(run.weight);
                           if (weight <= 0.002f) continue;
@@ -261,34 +284,22 @@ void rasterize_mask(Mask& mask, const Path& path, float origin_x, float origin_y
                           if (b <= a) continue;
                           const int first_pixel = static_cast<int>(std::floor(a));
                           const int last_pixel = static_cast<int>(std::ceil(b));
-                          const int full_begin =
-                              first_pixel + (static_cast<float>(first_pixel) < a ? 1 : 0);
-                          const int full_end = last_pixel - (static_cast<float>(last_pixel) > b ? 1 : 0);
-                          const auto byte_of = [](float value) -> std::uint8_t {
-                            const float clamped = value > 1.0f ? 1.0f : value;
-                            return static_cast<std::uint8_t>(clamped * 255.0f + 0.5f);
-                          };
-                          const auto cover_at = [&](int x) -> float {
+                          for (int x = first_pixel; x < last_pixel; ++x) {
+                            if (x < 0 || x >= width) continue;
                             const float left = std::max(a, static_cast<float>(x));
                             const float right = std::min(b, static_cast<float>(x) + 1.0f);
-                            return right > left ? (right - left) * weight : 0.0f;
-                          };
-                          // 完全覆盖的整段：一个字节写整段（遮罩是字节数组，不必逐像素浮点）
-                          if (full_end > full_begin) {
-                            const std::uint8_t value = byte_of(weight);
-                            for (int x = full_begin > 0 ? full_begin : 0; x < full_end && x < width; ++x) {
-                              if (value > row[x]) row[x] = value;
+                            if (right > left) {
+                              accumulated[static_cast<std::size_t>(x - lo)] += (right - left) * weight;
                             }
                           }
-                          if (first_pixel < full_begin && first_pixel >= 0 && first_pixel < width) {
-                            const std::uint8_t value = byte_of(cover_at(first_pixel));
-                            if (value > row[first_pixel]) row[first_pixel] = value;
-                          }
-                          const int tail = last_pixel - 1;
-                          if (tail >= 0 && tail < width && tail >= full_begin) {
-                            const std::uint8_t value = byte_of(cover_at(tail));
-                            if (value > row[tail]) row[tail] = value;
-                          }
+                        }
+                        for (std::size_t index = 0; index < accumulated.size(); ++index) {
+                          const float value = accumulated[index];
+                          if (value <= 0.002f) continue;
+                          const float clamped = value > 1.0f ? 1.0f : value;
+                          const auto byte = static_cast<std::uint8_t>(clamped * 255.0f + 0.5f);
+                          const int x = static_cast<int>(index) + lo;
+                          if (x >= 0 && x < width && byte > row[x]) row[x] = byte;
                         }
                       });
 }

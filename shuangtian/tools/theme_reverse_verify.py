@@ -17,6 +17,9 @@ THEME_IO_CPP = "src/ui/theme_io.cpp"
 ELEMENT_CPP = "src/ui/element.cpp"
 TEXT_PORT_HPP = "include/st/ui/text_port.hpp"
 SERVER_CPP = "src/control/server.cpp"
+PATH_CPP = "src/raster/path.cpp"
+CANVAS_CPP = "src/raster/canvas.cpp"
+RASTERIZER_CPP = "src/raster/rasterizer.cpp"
 
 # (说明, 文件, 原文, 回退后的文本, 期望变红的用例名)
 CASES = [
@@ -157,20 +160,55 @@ CASES = [
   (void)actual_height;""",
         "capture_pixel_size_comes_from_the_export_not_the_request",
     ),
+    (
+        "圆角边框环：把内圈重建改回“丢起点 + 多发一个 Close”",
+        PATH_CPP,
+        """  Path inner_forward;\n  inner_forward.add_rounded_rect(inner_box, inner_radius);\n  path.add_path(reversed_closed_subpath(inner_forward));\n  return path;""",
+        """  Path forward;\n  forward.add_rounded_rect(inner_box, inner_radius);\n  const auto commands = forward.commands();\n  for (std::size_t index = commands.size(); index-- > 0;) {\n    const PathCommand& command = commands[index];\n    switch (command.kind) {\n      case PathCommand::Kind::MoveTo: path.line_to(command.p1); break;\n      case PathCommand::Kind::LineTo: path.line_to(command.p1); break;\n      case PathCommand::Kind::QuadTo: path.quad_to(command.p2, command.p1); break;\n      case PathCommand::Kind::CubicTo: path.cubic_to(command.p3, command.p2, command.p1); break;\n      case PathCommand::Kind::Close: path.close(); break;\n    }\n  }\n  (void)&reversed_closed_subpath;\n  return path;""",
+        "border_ring_arcs_carry_same_ink_as_stroke",
+    ),
+    (
+        "斜向带：把逐像素累加覆盖率改回“逐 run 直接混合”（斜边系统性欠墨）",
+        CANVAS_CPP,
+        "  if (solid && !masked && blend == BlendMode::SrcOver) {\n    int lo = physical_width_;",
+        "  if (false) {\n    int lo = physical_width_;",
+        "diagonal_band_ink_is_angle_independent",
+    ),
+    (
+        "遮罩光栅化：把覆盖率累加改回“逐段取最大值”（弧上偏淡）",
+        RASTERIZER_CPP,
+        "                              accumulated[static_cast<std::size_t>(x - lo)] += (right - left) * weight;",
+        "                              accumulated[static_cast<std::size_t>(x - lo)] = std::max(\n                                  accumulated[static_cast<std::size_t>(x - lo)], (right - left) * weight);",
+        "border_ring_total_ink_matches_perimeter_times_width",
+    ),
 ]
 
 
 def run_test(name: str) -> tuple[bool, str]:
+    # ⚠ `text=True` 会用**系统编码**解码：Windows 上是 GBK，而 `st` / 测试输出是 UTF-8
+    # （带方框字符、✓ 等）——实测直接 `UnicodeDecodeError` 在读取线程里崩，
+    # 而且因为那是后台线程，异常不会让 `subprocess.run` 失败，只会让 `stdout` 变 `None`。
+    # 因此显式按 UTF-8 解码、`errors="replace"`。
     proc = subprocess.run(
         ["./build/bin/st", "test", "--profile", "debug", name],
-        capture_output=True, text=True, timeout=900,
+        capture_output=True, timeout=900,
     )
-    out = proc.stdout + proc.stderr
+    out = (proc.stdout or b"").decode("utf-8", "replace") + (proc.stderr or b"").decode(
+        "utf-8", "replace")
     # ⚠ 编译失败时 `st test` 不一定给出非零退出码，而测试**没跑**——
     # 沿用上一份二进制的状态下，本应变红的用例会“意外”保持绿。
     # 本脚本自己踩过这个坑（回退文本引入 -Werror 错误），因此先查编译段落。
     if "编译失败" in out or "error:" in out:
         return True, out  # passed=True → 调用方报“仍然是绿的”并指出问题
+    # ⚠ **进程撞断言崩溃也算“没抓住”**：crash 时既没有 PASS 也没有 FAIL，
+    # 旧口径会把它当成“仍然绿”——实测就因此把一条**原版也崩**的用例
+    # （`capture_pixel_size_comes_from_the_export_not_the_request`）报成“回退后仍绿”，
+    # 白白指向错误的嫌疑人。
+    #
+    # ⚠ 判据只能用「输出里的崩溃字样」，**不能看退出码**：测试**正常变红**时
+    # `st test` 也返回非零（本仓实测），拿退出码当依据会把每一条都误报成“没抓住”。
+    if "Assertion failed" in out or "Aborted" in out or "段错误" in out:
+        return True, out
     failed = bool(re.search(r"FAIL", out)) or " 1 failed" in out
     return (not failed), out
 
@@ -205,9 +243,23 @@ def main() -> int:
             # "单跑绿、全量跑红"：全量用例编到了回退码，而单跑因缓存命中而骗过。
             # 删后重建会拿到当前时间，构建才会真的重编。
             content = open(backup, encoding="utf-8").read()
-            os.remove(path)
+            # ⚠ Windows 上刚写完的文件可能还被句柄占着（`os.remove` 报 WinError 32），
+            # 而这一步在 `finally` 里——一旦抩出去，**源码会永久停在回退状态**。
+            # 实测踩到：脚本崩在第 11 条，`src/control/server.cpp` 留在回退版，
+            # 后续所有构建都在用错误实现（而当时没有任何红灯）。
+            try:
+                os.remove(path)
+            except OSError:
+                pass
             open(path, "w", encoding="utf-8").write(content)
-            os.remove(backup)
+            try:
+                os.remove(backup)
+            except OSError:
+                pass
+            # 无论恢复是否顺利，都校验文件真的回到了原文——这是最后一道保险。
+            if original not in open(path, encoding="utf-8").read():
+                print(f"[致命] {path} 未能恢复原状！请手工从 git 恢复后再跑。")
+                return 1
     if not ok:
         print("\n存在未能抓住缺陷的用例，需要修测试或修实现。")
         return 1

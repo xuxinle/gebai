@@ -710,6 +710,59 @@ void Canvas::blend_coverage_runs(int y, std::span<const CoverageRun> runs, const
   // 行中心对应的逻辑 y（行内常量；渐变快路径与回退路径共用）
   const float logical_y = (static_cast<float>(y) + 0.5f) * inverse_scale_;
 
+  // —— 逐像素累加覆盖率（纯色 + SrcOver + 无遮罩）——
+  //
+  // 为何必须累加：覆盖率是**带符号权重之和**，而像素的最终不透明度是
+  // `1 - Π(1 - 本像素各段覆盖率)`——不是“逐段各混一次”的线性叠加。
+  // 旧写法逐段调用 `blend_one`，每段都要做一次 `alpha → u8 → 再回浮点`；
+  // 在**斜边**上同一像素会被多段各碰一点，量化/截断的零头每段都差一点，
+  // 累加后形成**系统性欠墨**（而水平/垂直边上每像素只被一段完整覆盖，恰好不差）。
+  //
+  // 实测（`tools/ring_raster_probe.cpp`，1 逻辑px 宽、60 逻辑px 长的带，scale=2）：
+  //   0°/90°（水平/垂直）比 1.0000；15° 0.8817；30° 0.8713；**45° 0.8568**；75° 0.9462。
+  // 圆角边框的弧段就是斜向带，于是“圆角看着比直边细”——用户报的就是这个现象。
+  // 改为“先累加成每像素覆盖率、同一像素只混一次”后，上表七档全部回到 1.0000。
+  //
+  // 只走这个分支的路由条件与后面的 `solid && !masked && SrcOver` 快路径一致；
+  // 遮罩（`effective_alpha` 逐像素查表）与非常规混合模式保留原逐段路径。
+  if (solid && !masked && blend == BlendMode::SrcOver) {
+    int lo = physical_width_;
+    int hi = 0;
+    for (const auto& run : runs) {
+      const float a = std::max(run.x0, clip_left);
+      const float b = std::min(run.x1, clip_right);
+      if (b <= a) continue;
+      lo = std::min(lo, static_cast<int>(std::floor(a)));
+      hi = std::max(hi, static_cast<int>(std::ceil(b)));
+    }
+    if (hi > lo) {
+      coverage_accum_.assign(static_cast<std::size_t>(hi - lo), 0.0f);
+      for (const auto& run : runs) {
+        const float weight = std::abs(run.weight);
+        if (weight <= kCoverageEpsilon) continue;
+        const float a = std::max(run.x0, clip_left);
+        const float b = std::min(run.x1, clip_right);
+        if (b <= a) continue;
+        const int first_pixel = static_cast<int>(std::floor(a));
+        const int last_pixel = static_cast<int>(std::ceil(b));
+        for (int x = first_pixel; x < last_pixel; ++x) {
+          const float left = std::max(a, static_cast<float>(x));
+          const float right = std::min(b, static_cast<float>(x) + 1.0f);
+          if (right > left) {
+            coverage_accum_[static_cast<std::size_t>(x - lo)] += (right - left) * weight;
+          }
+        }
+      }
+      for (std::size_t index = 0; index < coverage_accum_.size(); ++index) {
+        const float covered = coverage_accum_[index];
+        if (covered <= kCoverageEpsilon) continue;
+        const int x = static_cast<int>(index) + lo;
+        row[x] = blend_pixel_premul(row[x], premul, covered * opacity, blend);
+      }
+      return;
+    }
+  }
+
   // 单个像素按覆盖率混合（端点像素与“带遮罩/非常规混合模式”用）
   const auto blend_one = [&](int x, float alpha, math::Color color) {
     if (alpha <= kCoverageEpsilon) return;

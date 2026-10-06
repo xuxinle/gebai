@@ -70,7 +70,11 @@
     "caret_ink_probe": { "kind": "executable", "sources": ["tools/caret_ink_probe.cpp"],
                          "exclude_sources": ["src/pkg/*"] },
     "font_stack_probe": { "kind": "executable", "sources": ["tools/font_stack_probe.cpp"],
-                          "exclude_sources": ["src/pkg/*"] }
+                          "exclude_sources": ["src/pkg/*"] },
+    "ring_path_probe": { "kind": "executable", "sources": ["tools/ring_path_probe.cpp"],
+                         "exclude_sources": ["src/pkg/*"] },
+    "ring_raster_probe": { "kind": "executable", "sources": ["tools/ring_raster_probe.cpp"],
+                           "exclude_sources": ["src/pkg/*"] }
   },
   "dependencies": {
     "modules": [],

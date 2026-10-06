@@ -247,6 +247,11 @@ class Canvas final : public Surface {
   std::vector<std::pair<std::uint64_t, std::shared_ptr<const Mask>>> shadow_masks_{};
   /// 两层合一阴影贴图缓存（键 → 贴图）。上限同 `shadow_mask`，超限丢弃最早一项。
   std::vector<std::pair<std::uint64_t, LayeredShadow>> layered_shadows_{};
+  /// 扫描线覆盖率的**逐像素累加缓冲**（`blend_coverage_runs` 用）。
+  ///
+  /// 复用同一个 buffer 而非每行分配：一段路径会对本函数调用几百次（每行一次），
+  /// 每次 `resize` 一个几十元素的 vector 不是可忽略的开销。
+  std::vector<float> coverage_accum_{};
   PaintProfiler* profiler_{nullptr};  ///< 空 = 不剖析
 };
 

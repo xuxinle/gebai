@@ -476,6 +476,84 @@ auto make_line(math::Point from, math::Point to) -> Path {
   return path;
 }
 
+namespace {
+
+/// 反转一条**闭合子路径**的命令流（贝塞尔控制点保持完整）。
+///
+/// 为什么不能用 `Path::reverse()`：它逐段发独立 `MoveTo`、曲线控制点直接丢掉，
+/// 内圈会散架（`src/ui/svg.cpp` 已记着这条坑）。
+///
+/// 为什么不能「边倒序边发命令」：一段曲线的反转形式是「终点变起点、两个控制点交换」，
+/// 而那个**起点**是**前一条正向命令的终点**——它在倒序遍历时还没读到。
+/// 必须先扫一遍把各段起点算出来（这就是本节的关键）。
+///
+/// 字段语义按 `PathCommand`：`LineTo.p1` = 端点；`QuadTo.p1` = 控制点、`p2` = 端点；
+/// `CubicTo.p1` = 控制点1、`p2` = 控制点2、`p3` = 端点。
+[[nodiscard]] auto reversed_closed_subpath(const Path& forward) -> Path {
+  const auto commands = forward.commands();
+  std::vector<math::Point> starts;
+  math::Point cursor{};
+  math::Point last{};
+  bool has_last = false;
+  for (const PathCommand& command : commands) {
+    switch (command.kind) {
+      case PathCommand::Kind::MoveTo:
+        cursor = command.p1;
+        last = command.p1;
+        has_last = true;
+        break;
+      case PathCommand::Kind::LineTo:
+        starts.push_back(cursor);
+        cursor = command.p1;
+        last = command.p1;
+        has_last = true;
+        break;
+      case PathCommand::Kind::QuadTo:
+        starts.push_back(cursor);
+        cursor = command.p2;
+        last = command.p2;
+        has_last = true;
+        break;
+      case PathCommand::Kind::CubicTo:
+        starts.push_back(cursor);
+        cursor = command.p3;
+        last = command.p3;
+        has_last = true;
+        break;
+      case PathCommand::Kind::Close:
+        break;
+    }
+  }
+  Path reversed;
+  if (starts.empty() || !has_last) return reversed;
+  // 反转后的游标从原路径的**终点**起步。
+  reversed.move_to(last);
+  std::size_t segment = starts.size();
+  for (std::size_t index = commands.size(); index-- > 0;) {
+    const PathCommand& command = commands[index];
+    switch (command.kind) {
+      case PathCommand::Kind::MoveTo:
+      case PathCommand::Kind::Close: break;
+      case PathCommand::Kind::LineTo:
+        --segment;
+        reversed.line_to(starts[segment]);
+        break;
+      case PathCommand::Kind::QuadTo:
+        --segment;
+        reversed.quad_to(command.p1, starts[segment]);
+        break;
+      case PathCommand::Kind::CubicTo:
+        --segment;
+        reversed.cubic_to(command.p2, command.p1, starts[segment]);
+        break;
+    }
+  }
+  reversed.close();
+  return reversed;
+}
+
+}  // namespace
+
 auto make_rounded_border_ring(math::Rect rect, float radius, float width) -> Path {
   Path path;
   if (rect.is_empty()) return path;
@@ -494,21 +572,13 @@ auto make_rounded_border_ring(math::Rect rect, float radius, float width) -> Pat
                                  : (inner_radius_raw > inner_limit ? inner_limit
                                                                    : inner_radius_raw);
 
-  // 内圈**反向**：同一组圆角矩形的命令按逆序重发，并把每个三次贝塞尔的
-  // 两个控制点交换——这样控制点保持完整（`Path::reverse()` 会把控制点丢掉）。
-  Path forward;
-  forward.add_rounded_rect(inner_box, inner_radius);
-  const auto commands = forward.commands();
-  for (std::size_t index = commands.size(); index-- > 0;) {
-    const PathCommand& command = commands[index];
-    switch (command.kind) {
-      case PathCommand::Kind::MoveTo: path.line_to(command.p1); break;
-      case PathCommand::Kind::LineTo: path.line_to(command.p1); break;
-      case PathCommand::Kind::QuadTo: path.quad_to(command.p2, command.p1); break;
-      case PathCommand::Kind::CubicTo: path.cubic_to(command.p3, command.p2, command.p1); break;
-      case PathCommand::Kind::Close: path.close(); break;
-    }
-  }
+  // 内圈**反向**：按逆序重发，并把每条曲线段的两个控制点交换——
+  // 控制点因此保持完整，内圈仍是精确的圆角矩形（不做折线逼近）。
+  // 反转的正确形式连同「起点取自前一条正向命令的终点」一起写在
+  // `reversed_closed_subpath()` 里（那里记着错误形态的后果）。
+  Path inner_forward;
+  inner_forward.add_rounded_rect(inner_box, inner_radius);
+  path.add_path(reversed_closed_subpath(inner_forward));
   return path;
 }
 
