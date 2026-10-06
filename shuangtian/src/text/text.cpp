@@ -415,6 +415,13 @@ auto glyph_class_of(char32_t codepoint) noexcept -> GlyphClass {
   if ((codepoint >= U'A' && codepoint <= U'Z') || (codepoint >= U'a' && codepoint <= U'z')) {
     return GlyphClass::Letter;
   }
+  // CJK 汉字：基本区 + 扩展 A + 兼容表意 + 扩展 B 及以上（代理对已在解码时合成一个码点）。
+  if ((codepoint >= 0x4E00U && codepoint <= 0x9FFFU) ||
+      (codepoint >= 0x3400U && codepoint <= 0x4DBFU) ||
+      (codepoint >= 0xF900U && codepoint <= 0xFAFFU) ||
+      (codepoint >= 0x20000U && codepoint <= 0x3FFFFU)) {
+    return GlyphClass::Han;
+  }
   return GlyphClass::Default;
 }
 

@@ -3,14 +3,14 @@
 /// 与 `tools/text_ab_chars_page.html` 逐字、逐字号、逐颜色、逐位置相同地渲染，
 /// 输出物理像素 1:1 的 PNG，供 `tools/text_ab_diff.py` 与**真窗口**浏览器截图比较。
 ///
-/// 用法：text_ab_chars_probe <outdir> [scale] [gamma] [--gray] [--nofit] [--nofilter] [--nocomp]
+/// 用法：text_ab_han_probe <outdir> [scale] [gamma] [--gray] [--nofit] [--nofilter] [--nocomp]
 #include "text_ab_common.hpp"
 
 #include <array>
 #include <cmath>
 #include <string>
 
-#include "text_ab_chars_rows.inc"
+#include "text_ab_han_rows.inc"
 
 using ab::Color;
 using ab::Point;
@@ -56,7 +56,7 @@ auto main(int argc, char** argv) -> int {
     (void)renderer.draw(canvas, line.text, Point{4.0f, line.top}, line.size, line.color, line.role,
                         0.0f, line.bold);
   }
-  const std::string path = out_dir + "/ab-chars-st.png";
+  const std::string path = out_dir + "/ab-han-st.png";
   ab::save(canvas.to_rgba8(), width, height, path);
   st::print("  已写 {}（{}x{} 物理像素，coverage_gamma={}）\n", path, width, height,
             renderer.coverage_gamma());

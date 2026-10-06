@@ -32,17 +32,23 @@ namespace st::text {
 /// 而同批字母只从 0.939~0.961 抬到 0.999~1.016（过冲 2%）——
 /// 全局 γ 做不到"只抬数字、不动字母"，所以需要**按类**这一层。
 ///
-/// 判据用**字符类**而不是字号：实测字母的偏差不随字号变（四档 0.94~0.96 恒定），
-/// 而数字恒定偏轻——所以"按类"才是正确的分档维度（"按字号分档"那条已被
-/// DESIGN §4.3.7.17 的标定证明不成立）。
+/// 判据用**字符类**而不是字号：实测各字类的偏差**在各自字号范围内恒定**
+/// （数字、字母、汉字三条线各自成立），所以"按类"才是正确的分档维度
+/// （"按字号分档"那条已被 DESIGN §4.3.7.17 的标定证明不成立）。
+///
+/// 汉字单独成类（2026-10-06 加）：用**一行一字**的专项页测得它在 10~20px 上
+/// **稳定偏轻 5~7%**（总墨量比 0.929~0.949），且复杂字比简单字更轻
+/// （复杂 0.90~0.93、简单 0.93~1.02）。它此前被并进 `Default`（连同标点/符号），
+/// 而这两者的观感诉求不同，所以拆开各定一档。
 enum class GlyphClass : std::uint8_t {
-  Default,   ///< 其它一切字形（汉字、标点、符号…）
+  Default,   ///< 其它一切字形（标点、符号…）
   Digit,     ///< ASCII 数字 `0`~`9`
   Letter,    ///< ASCII 拉丁字母 `A`~`Z` / `a`~`z`
+  Han,       ///< CJK 汉字（含扩展 A/B 与兼容区）
 };
 
 /// 字形类的数量（用于按类保存覆盖参数的数组下标）。
-inline constexpr std::size_t kGlyphClassCount = 3;
+inline constexpr std::size_t kGlyphClassCount = 4;
 
 /// 类 → 数组下标。
 [[nodiscard]] constexpr auto glyph_class_index(GlyphClass glyph_class) noexcept -> std::size_t {
@@ -550,7 +556,7 @@ class TextRenderer {
   float fitted_gamma_size_{0.0f};
   float fitted_gamma_{0.0f};
   /// 按**字形类**覆盖 gamma（0 = 不覆盖），见 `set_class_gamma`。
-  std::array<float, kGlyphClassCount> class_gamma_{0.0f, 0.0f, 0.0f};
+  std::array<float, kGlyphClassCount> class_gamma_{0.0f, 0.0f, 0.0f, 0.0f};
   /// 覆盖率预校正模式（见 `set_coverage_correct`）。
   CoverageCorrect coverage_correct_{CoverageCorrect::Gamma};
   /// Skia 模式的对比度（只影响深字浅底）。

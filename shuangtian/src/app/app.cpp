@@ -538,29 +538,40 @@ auto Application::start() -> Status {
   // / normal+补偿 40% / **light+补偿 18%**——所以本项与 `resolve_text_fit` 的
   // 默认档位（light）是一对，单独改任一个都拿不到这个结果。
   impl_->renderer->set_ink_compensation(true);
-  // **数字类的覆盖率分档**（`TextRenderer::set_class_gamma`）。
+  // **按字形类的覆盖率分档**（`TextRenderer::set_class_gamma`）。
   //
-  // 为什么只给数字加这一档：全量逐字形（A~Z / a~z / 0~9 × 10~13px）与真窗口浏览器比对后——
-  // **字母与汉字已经对齐**（字母 0.94~0.96、汉字 0.95~0.96），而**数字稳定偏轻 8~10%**
-  // 且在四个字号上**符号一致**。按用户要求"已对好的不要动"，所以只在**数字类**上收紧一档，
-  // 其余字形逐位不变（实测确认）。
+  // 为什么要分档：各字类的偏差**方向与幅度不同**，全局 γ 只能整体压黑，
+  // 做不到"只补偏轻的那一类"。三档都由**逐字形总量比**扫描定
+  // （量具：`tools/text_ab_allglyphs_page.html` 数字/字母、`tools/text_ab_han_page.html` 汉字）：
   //
-  // 档位由扫描定（`tools/text_ab_allglyphs_page.html` + 逐字形墨量比）：
-  // | 数字类 γ | 数字（10/11/12/13px） | 字母 |
-  // |---|---|---|
-  // | 不覆盖（基准） | 0.880 / 0.917 / 0.908 / 0.921 | 0.94~0.96 |
-  // | **0.92（采用）** | **0.957 / 0.969 / 0.974 / 0.973** | **逐位不变** |
-  // | 0.90 | 0.963 / 0.975 / 0.979 / 0.988 | 逐位不变 |
-  // | 0.85 | 0.978 / 0.989 / 0.992 / 1.017（13px 过冲） | 逐位不变 |
+  // | 类 | 不覆盖（基准，逐字号） | 采用档 | 采用后 |
+  // |---|---|---|---|
+  // | 数字 | 0.880 / 0.917 / 0.908 / 0.921（10~13px） | **0.92** | 0.957~0.983 |
+  // | 字母 | 大写 0.975/0.950/0.943/0.952；小写 0.989/0.974/0.941/0.943 | **0.98** | 0.969~1.021 |
+  // | 汉字 | 0.929 / 0.933 / 0.944 / 0.940 / 0.949 / 0.938（10/11/12/13/15/20px） | **0.93** | 0.992~1.002（20px 0.974） |
   //
-  // 取 0.92 而不是更黑的档：它在四个字号上都落进 0.95~0.98，而 0.85 在 13px 会过冲到 1.017。
-  // 可用 `ST_TEXT_DIGIT_GAMMA` 覆盖（诊断/复标用）。
+  // 汉字档的取法说明：不覆盖时偏轻 5~7% 且**跨字号符号一致**；压到 0.93 后 10~15px
+  // 落在 0.992~1.002，20px 仍略低（0.974）——那是"字号越大越接近"的自然趋势，
+  // 不做过度补偿（再压一档会让小字号过冲）。
+  //
+  // 三档各自可用环境变量覆盖（诊断/复标用）：
+  // `ST_TEXT_DIGIT_GAMMA` / `ST_TEXT_LETTER_GAMMA` / `ST_TEXT_HAN_GAMMA`。
   {
-    float digit_gamma = 0.92f;
+    st::app::ClassGammas defaults{};
+    float digit_gamma = defaults.digit;
+    float letter_gamma = defaults.letter;
+    float han_gamma = defaults.han;
     if (const auto value = fs::read_env("ST_TEXT_DIGIT_GAMMA"); value.has_value()) {
       digit_gamma = std::stof(*value);
     }
-    impl_->renderer->set_class_gamma(st::text::GlyphClass::Digit, digit_gamma);
+    if (const auto value = fs::read_env("ST_TEXT_LETTER_GAMMA"); value.has_value()) {
+      letter_gamma = std::stof(*value);
+    }
+    if (const auto value = fs::read_env("ST_TEXT_HAN_GAMMA"); value.has_value()) {
+      han_gamma = std::stof(*value);
+    }
+    apply_class_gammas(*impl_->renderer,
+                       st::app::ClassGammas{digit_gamma, letter_gamma, han_gamma});
   }
   // **笔画加墨（stem darkening）**：与浏览器逐带对照后（`docs/TEXT_AB_REPORT.md`）确认，
   // 汉字的差距是"笔画没到满黑"（实心像素比 0.87~0.90）而非几何——FreeType 在这条路上

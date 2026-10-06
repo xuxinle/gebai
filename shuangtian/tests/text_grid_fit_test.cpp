@@ -32,6 +32,7 @@
 #include "st/raster/canvas.hpp"
 #include "st/raster/path.hpp"
 #include "st/text/grid_fit.hpp"
+#include "st/app/app.hpp"
 #include "st/text/text.hpp"
 
 namespace {
@@ -41,6 +42,7 @@ using st::math::Point;
 using st::raster::Canvas;
 using st::text::FontStack;
 using st::text::GlyphClass;
+using st::app::ClassGammas;
 using st::text::GridFitMode;
 using st::text::GridFitOptions;
 using st::text::TextRenderer;
@@ -762,4 +764,48 @@ ST_TEST(class_gamma_affects_only_its_class_and_survives_cache) {
   st::print("[class] 绘制路径：{} / {} 字节变化（数字像素应占少数，字母必须不动）\n", changed,
             plain.size());
   ST_CHECK(changed > 0);   // 变了 ⇒ 绘制路径确实走了类（这一条就是漏接线时的红点）
+}
+
+/// ⑥ **应用默认档下三档都真的接上了**（数字 0.92 / 字母 0.98 / 汉字 0.93）。
+///
+/// 为什么单独立一条：这三次分档**都只改了 `TextRenderer` 与探针**，而"应用默认档"在
+/// `src/app/app.cpp` 里——**字母那一档就漏接过一次**（提交时只改了 text.hpp/text.cpp，
+/// `app.cpp` 里当时只接了数字），于是"探针测得字母变好了、实际应用里没变"。
+/// 接口层测不出来这件事（它只测渲染器），所以本用例直接**核对应用层的档位取值**。
+///
+/// 判据：三个类各自的 `class_gamma()` 都必须等于应用里写定的值；
+/// 且**默认类（标点/符号）不设档**（`0`，落回全局 γ），否则标点会被连带压黑。
+ST_TEST(app_default_sets_all_three_class_gammas) {
+  FontFixture fixture;
+  if (!fixture.ok) return;
+  TextRenderer renderer(*fixture.stack, 1.5f);
+  // **直接读应用层常量**（`st::app::ClassGammas`）而不是在测试里复刻数值——
+  // 复刻的话，改了 `app.cpp` 而没改测试就会"测试照绿、应用照旧"，正是本用例要防的事。
+  const st::app::ClassGammas defaults{};
+  const float kDigitGamma = defaults.digit;
+  const float kLetterGamma = defaults.letter;
+  const float kHanGamma = defaults.han;
+  // **走应用同一个入口**（不是在测试里手写三行 set_*）——接线漏了这里就红
+  apply_class_gammas(renderer, defaults);
+
+  ST_CHECK_EQ(static_cast<int>(std::lround(renderer.class_gamma(GlyphClass::Digit) * 100.0f)),
+              static_cast<int>(std::lround(kDigitGamma * 100.0f)));
+  ST_CHECK_EQ(static_cast<int>(std::lround(renderer.class_gamma(GlyphClass::Letter) * 100.0f)),
+              static_cast<int>(std::lround(kLetterGamma * 100.0f)));
+  ST_CHECK_EQ(static_cast<int>(std::lround(renderer.class_gamma(GlyphClass::Han) * 100.0f)),
+              static_cast<int>(std::lround(kHanGamma * 100.0f)));
+  // 默认类不设档
+  ST_CHECK_EQ(static_cast<int>(std::lround(renderer.class_gamma(GlyphClass::Default) * 100.0f)), 0);
+  // 四个类互不串（数组下标必须按枚举值走）
+  ST_CHECK(renderer.class_gamma(GlyphClass::Digit) != renderer.class_gamma(GlyphClass::Han));
+  ST_CHECK(renderer.class_gamma(GlyphClass::Letter) != renderer.class_gamma(GlyphClass::Han));
+
+  // 码点 → 类：三条边界各自钉一个代表
+  ST_CHECK(GlyphClass::Digit == st::text::glyph_class_of(U'7'));
+  ST_CHECK(GlyphClass::Letter == st::text::glyph_class_of(U'a'));
+  ST_CHECK(GlyphClass::Han == st::text::glyph_class_of(U'测'));
+  ST_CHECK(GlyphClass::Han == st::text::glyph_class_of(U'龘'));       // 基本区
+  ST_CHECK(GlyphClass::Han == st::text::glyph_class_of(U'\u3400'));   // 扩展 A 起点
+  ST_CHECK(GlyphClass::Default == st::text::glyph_class_of(U'\u3002'));  // 句号：标点不该被当汉字
+  ST_CHECK(GlyphClass::Default == st::text::glyph_class_of(U' '));
 }

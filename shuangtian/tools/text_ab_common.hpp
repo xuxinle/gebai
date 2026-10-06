@@ -41,6 +41,7 @@ struct Options {
   bool darken{false};       ///< 笔画加墨（stem darkening，FreeType CFF 口径）
   float digit_gamma{0.0f};  ///< **只对数字类**覆盖 gamma（0 = 不覆盖）
   float letter_gamma{0.0f}; ///< **只对拉丁字母类**覆盖 gamma（0 = 不覆盖）
+  float han_gamma{0.0f};    ///< **只对汉字类**覆盖 gamma（0 = 不覆盖）
   bool strict_hints{false}; ///< hints 用几何法同款护栏（对照用）
   float gamma{0.0f};        ///< 0 = 用出厂默认（按主题）
 };
@@ -59,6 +60,9 @@ inline void apply(TextRenderer& renderer, const Options& options, float scale) {
   }
   if (options.letter_gamma > 0.0f) {
     renderer.set_class_gamma(GlyphClass::Letter, options.letter_gamma);
+  }
+  if (options.han_gamma > 0.0f) {
+    renderer.set_class_gamma(GlyphClass::Han, options.han_gamma);
   }
   if (options.strict_hints) {
     // 通过环境变量切换（进程内 setenv：探针是独立进程，不影响别处）。

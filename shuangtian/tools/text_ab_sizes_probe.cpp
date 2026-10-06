@@ -28,6 +28,7 @@ auto main(int argc, char** argv) -> int {
     if (a == "--gray") options.subpixel = false;
     else if (a.rfind("--digit-gamma=", 0) == 0) options.digit_gamma = std::stof(a.substr(std::string("--digit-gamma=").size()));
     else if (a.rfind("--letter-gamma=", 0) == 0) options.letter_gamma = std::stof(a.substr(std::string("--letter-gamma=").size()));
+    else if (a.rfind("--han-gamma=", 0) == 0) options.han_gamma = std::stof(a.substr(std::string("--han-gamma=").size()));
     else if (a == "--darken") options.darken = true;
     else if (a == "--fit-normal") options.fit_normal = true;
     else if (a == "--darken") options.darken = true;

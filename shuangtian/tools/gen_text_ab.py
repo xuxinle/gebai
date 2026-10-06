@@ -306,6 +306,45 @@ def string_rows():
     return rows
 
 
+# ── 页 7：汉字专项（**一行一个汉字** × 多个字号） ──────────────────────────
+# 为什么单独一页：汉字此前只在"混排行"里测过——一行里既有汉字又有拉丁，
+# 量出来的数无法归因到汉字本身（曾因此把整行的差异误算给某个字类）。
+# 一行一个汉字就没有切分与配对问题，而且能按**笔画复杂度**分组看趋势。
+HAN_CHARS = [
+    # 简单（1~4 画）
+    "一", "二", "三", "十", "口", "田",
+    # 中等（5~9 画）
+    "汉", "字", "渲", "染", "冰", "雪",
+    # 复杂（10 画以上）
+    "霜", "魏", "黍", "龘", "鬱", "麤", "齉",
+    # 常用正文
+    "的", "是", "国", "中", "文", "体",
+]
+HAN_SIZES = [10, 11, 12, 13, 15, 20, 32]
+
+
+def han_rows():
+    rows = []
+    for size in HAN_SIZES:
+        for ch in HAN_CHARS:
+            rows.append((ch, size, TEXT, SANS, 0, f"{size}px {ch}"))
+    return rows
+
+
+# ── 页 8：单字专项（同一个汉字 × 一串字号，一行一个） ────────────────────────
+# 用途：针对某个具体汉字的观感问题做逐字号核对——一行一个，量法没有切分/配对噪声。
+CE_CHARS = ["测", "试", "霜", "一"]
+CE_SIZES = [10, 11, 12, 13, 14, 15, 16, 18, 20, 24, 32, 48]
+
+
+def ce_rows():
+    rows = []
+    for size in CE_SIZES:
+        for ch in CE_CHARS:
+            rows.append((ch, size, TEXT, SANS, 0, f"{size}px {ch}"))
+    return rows
+
+
 def main() -> int:
     root = pathlib.Path(__file__).resolve().parent
     emit(root, "chars", CHARS_ROWS, "霜天文字 A/B — 字符集")
@@ -314,6 +353,8 @@ def main() -> int:
     emit(root, "glyphs", glyph_rows(), "霜天文字 A/B — 逐字形")
     emit(root, "allglyphs", all_glyph_rows(), "霜天文字 A/B — 全量字母数字（小字号）")
     emit(root, "string", string_rows(), "霜天文字 A/B — 拼串（口径对照）")
+    emit(root, "han", han_rows(), "霜天文字 A/B — 汉字专项")
+    emit(root, "ce", ce_rows(), "霜天文字 A/B — 单字 × 字号")
     return 0
 
 

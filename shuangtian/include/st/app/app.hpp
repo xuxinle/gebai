@@ -27,6 +27,31 @@ namespace st::app {
 /// 默认 `Normal`，与 `text_lcd` 同一理由（内置通道与桌面同源）。
 [[nodiscard]] auto resolve_text_fit(std::string_view mode) -> st::text::GridFitMode;
 
+/// **按字形类的覆盖率 gamma 档位**（数字 / 拉丁字母 / 汉字）。
+///
+/// 为什么要放在头文件里当常量：这三个值是"应用默认观感"的一部分，而它们**在
+/// `TextRenderer` 之外**（渲染器只提供机制）。曾经漏接过一次——字母档只写到渲染器与探针里、
+/// `app.cpp` 当时只接了数字，于是"探针测得好、实际应用没变"，接口层测试抓不到。
+/// 抽成常量后，回归用例可以直接断言它，改档位时测试与实现必须一起动。
+struct ClassGammas {
+  float digit{0.92f};   ///< ASCII 数字（扫描定：不覆盖时偏轻 8~10%）
+  float letter{0.98f};  ///< 拉丁字母（不覆盖时 12/13px 偏轻 5~6%）
+  float han{0.93f};     ///< 汉字（不覆盖时 10~20px 稳定偏轻 5~7%）
+};
+
+/// 把三档**真的**应用到渲染器上——`app.cpp` 与回归用例共用这一个函数。
+///
+/// 为什么不是"在 app.cpp 里各写一行 `set_class_gamma`"：那样测试只能核对本文件里的
+/// 常量，核对不到"应用是否真的接上了"（实测漏接过一次：字母档只写进渲染器与探针，
+/// `app.cpp` 当时只接了数字，"探针测得好、实际应用没变"）。
+/// 抽成函数后，测试调用它、再读渲染器的 `class_gamma()`——**同一个入口**，
+/// 接线漏了就必然红。
+inline void apply_class_gammas(st::text::TextRenderer& renderer, const ClassGammas& gammas) {
+  renderer.set_class_gamma(st::text::GlyphClass::Digit, gammas.digit);
+  renderer.set_class_gamma(st::text::GlyphClass::Letter, gammas.letter);
+  renderer.set_class_gamma(st::text::GlyphClass::Han, gammas.han);
+}
+
 /// 解析覆盖率 gamma 预校正指数（命令行 `--text-gamma` 取值）。
 ///
 /// 取值：`auto`（→ `ST_TEXT_GAMMA` → 默认 `0.6`）/ `off`（= 1.0）/ 数值字面量（`[0.3, 4]`）。
