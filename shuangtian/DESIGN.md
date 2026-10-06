@@ -454,8 +454,14 @@ CJK 多轮廓字形不糊块、Latin/CJK 带孔字形墨迹占比上限）。
   悬停行底纹、行号槽内的当前行高亮、竖向 + 横向**两条可拖拽滚动条**（悬停加宽）
 - **视口可驱动**：属性 `first_visible_line`/`last_visible_line`/`visible_lines`/`scroll`、
   动作 `scroll_to_line`/`reveal_line`——智能体可断言“视口停在哪一行”
-- **字号跟随主题**：实际字号 = `主题 font_base × font_scale`（档位，默认 1.0=与正文同级），
+- **字号跟随主题**：实际字号 = `主题 font_base × font_scale`（档位，默认 **1.0 = 与正文同级**），
   也可用 `font_size` 指定**绝对像素**（负值复位）。
+- **行距倍数**（`set_line_spacing`，默认 **1.15**）：行高 = 字体自然行高
+  （`ascender − descender + line_gap`）× 本倍数。代码行比正文更需要透气——注释、字符串、
+  嵌套结构在密排下容易糊成一片，适度加宽对**扫读**帮助很大（主流编辑器默认行距多在
+  1.1~1.5）。**取值只乘在 `line_height()` 这一处**：它是绘制/滚动/命中测试/内容高度的
+  公共入口，分散到各路径必然漏（同类缺陷实测踩过：字号只接了一半路径）。
+  非法值（0/负/NaN/∞）忽略——静默接受会让整屏文字叠成一行。
 
   为何是“跟随”而不是一个常量：主题是字号缩放的**唯一真值源**
   （`--ui-font-scale` → `Metrics::scale_fonts`）。曾经硬写绝对像素，后果是用户
@@ -3258,7 +3264,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
 | 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case
- 超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑） | `st test` | 全绿（**764 用例 / 18075 断言**，debug 档实测；`st test --san` 全绿 0 报告；另 12 个慢用例默认跳过） |
+ 超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑） | `st test` | 全绿（**769 用例 / 18093 断言**，debug 档实测；`st test --san` 全绿 0 报告；另 12 个慢用例默认跳过） |
 | 独立工程集成 | **真建一个引用 framework 的最小工程**、真构建真跑（`tests/pkg_integration_test.cpp`）
  | `st test pkg_integration` | 全绿（`ST_INTEGRATION_BUILD=0` 可关；关掉时明确跳过而非假绿） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告（需带 sanitizer 运行库的编译器；MinGW 发行版不带时构建前明确报错） |

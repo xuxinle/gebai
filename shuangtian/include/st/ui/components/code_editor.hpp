@@ -95,9 +95,17 @@ class CodeEditor : public Element {
   /// （实测：`--ui-font-scale 1.5` 时 UI 文字 15→22.5，而编辑器恒为 13.5）。
   /// 档位表达还能让「编辑器字体大小」设置面板直接列出 0.85/1.0/1.15…。
   ///
-  /// 默认 `0.85`（**比正文小一号**）：代码行密度大、且等宽字每字同宽，
-  /// 与正文同级时会显得偏大；同行能看到更多字符对编辑器更重要。
-  /// 想要与正文同级就显式 `set_font_scale(1.0F)`。
+  /// **行距倍数**（相对字体度量给出的自然行高）。默认 `1.15`——代码行比正文更需要
+  /// 透气：注释、字符串、嵌套结构在密排下容易糊成一片，适度加宽的行距对**扫读**帮助很大
+  /// （很多编辑器默认行距都在 1.1~1.5 之间）。`1.0` = 字体自然行高（最紧）。
+  ///
+  /// 传 <=0 或非有限值会被忽略（行距必须为正；`set_font_scale` 同姿态）。
+  void set_line_spacing(float spacing);
+  [[nodiscard]] auto line_spacing() const noexcept -> float { return line_spacing_; }
+
+  /// 默认 `1.0` = **与正文同级**（`theme.metrics().font_base`）。
+  /// 「比正文小一号」曾作为默认试过（0.85），实际观感偏小——代码区字号与界面文字
+  /// 不一致时，眼睛要在两种字号间来回适应。要更小/更大就显式 `set_font_scale`。
   void set_font_scale(float scale);
   [[nodiscard]] auto font_scale() const noexcept -> float { return font_scale_; }
 
@@ -168,6 +176,10 @@ class CodeEditor : public Element {
   auto replace_all(std::string_view replacement) -> std::size_t;
 
   static constexpr std::size_t kNoFindMatch = static_cast<std::size_t>(-1);
+
+  /// 默认行距倍数（见 `set_line_spacing`）。**必须声明在 `line_spacing_` 之前**：
+  /// 成员初始化器要用它，而成员默认值是按声明顺序求值的。
+  static constexpr float kDefaultLineSpacing = 1.15f;
 
   // —— 滚动 ——
 
@@ -326,7 +338,9 @@ class CodeEditor : public Element {
   std::size_t anchor_{0};
   float scroll_x_{0.0f};
   float scroll_y_{0.0f};
-  float font_scale_{0.85f};
+  float font_scale_{1.0f};
+  /// 行距倍数（见 `set_line_spacing`）。
+  float line_spacing_{kDefaultLineSpacing};
   /// 显式绝对字号（<=0 = 未设，按 `font_scale_` 跟主题）。
   float font_size_px_{-1.0f};
   /// 主题的基准字号（`apply_theme` 记下）。实际字号由它 **惰性算出**：

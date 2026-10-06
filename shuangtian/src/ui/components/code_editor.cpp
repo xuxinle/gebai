@@ -792,7 +792,18 @@ auto CodeEditor::toggle_comment() -> bool {
 // ————————————————————————————————————————————————————————————————————————————
 
 auto CodeEditor::line_height(const RenderContext& context) const -> float {
-  return text_port_of(context).line_height(font_size());
+  // **行距倍数的唯一入口**：绘制、滚动、命中测试、内容高度全走这里，
+  // 因此乘系数只在这一处——分散到各处必然会漏（实测同类缺陷：字号只接了一半路径）。
+  return text_port_of(context).line_height(font_size()) * line_spacing_;
+}
+
+void CodeEditor::set_line_spacing(float spacing) {
+  // 非法值忽略（与 `set_font_scale` 同姿态：静默接受 NaN/0 会让整个编辑器排版崩掉，
+  // 而调用方从返回值看不到任何线索）。
+  if (!std::isfinite(spacing) || spacing <= 0.0f) return;
+  if (std::abs(line_spacing_ - spacing) < 0.001f) return;   // 相等早退（每帧调用不重建几何）
+  line_spacing_ = spacing;
+  mark_layout_dirty();   // 行高/滚动极限/内容高度全部依赖它
 }
 
 auto CodeEditor::gutter_width(const RenderContext& context) const -> float {
@@ -805,7 +816,7 @@ auto CodeEditor::gutter_width(const RenderContext& context) const -> float {
 auto CodeEditor::rebuild_line_geometry(const RenderContext& context) const -> void {
   if (!geometry_dirty_) return;
   rebuild_tokens();
-  line_height_cache_ = text_port_of(context).line_height(font_size());
+  line_height_cache_ = text_port_of(context).line_height(font_size()) * line_spacing_;
   gutter_cache_ = gutter_width(context);
   max_line_width_cache_ = 0.0f;
   const TextPort& port = text_port_of(context);
@@ -1152,7 +1163,7 @@ void CodeEditor::arrange(const RenderContext& context, math::Rect rect) {
   // 行高缓存可能在本次 arrange 之前已由绘制填过；若还没有，这儿补上
   // （仅当上下文有可用文本端口时——属性面的视口推算依赖它，见 get_property）。
   if (line_height_cache_ <= 0.0f && context.text != nullptr) {
-    line_height_cache_ = context.text->line_height(font_size());
+    line_height_cache_ = context.text->line_height(font_size()) * line_spacing_;
   }
   (void)context;
 }

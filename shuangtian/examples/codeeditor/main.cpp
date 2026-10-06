@@ -71,16 +71,14 @@
 
 namespace {
 
-/// 编辑器字号档位（相对正文 `font_base` 的倍数）。
-///
-/// 为什么用档位而不是绝对像素：主题是字号缩放的唯一真值源——
-/// 绝对像素会与 `--ui-font-scale` 脱钩（实测踩到：UI 文字 15→22.5，
-/// 编辑器恒为 13.5）。档位还让“设置面板列几档字号”变成一件自然的事。
 /// 编辑器字号档位默认值（相对正文 `font_base` 的倍数）。
 ///
-/// `0.85` = **比正文小一号**：代码行密度大、等宽字每字同宽，与正文同级时偏大；
-/// 同行能看到更多字符对编辑器更重要。`--editor-font-scale` 可覆盖。
-constexpr float kEditorFontScale{0.85f};
+/// 为什么用档位而不是绝对像素：主题是字号缩放的唯一真值源——
+/// 绝对像素会与 `--ui-font-scale` 脱钩（实测踩到：UI 文字 15→22.5，编辑器恒为 13.5）。
+/// 档位还让“设置面板列几档字号”变成一件自然的事。
+///
+/// `1.0` = **与正文同级**（与组件默认一致）。`--editor-font-scale` 可覆盖。
+constexpr float kEditorFontScale{1.0f};
 
 using namespace st::ui;
 using namespace st::ui::dsl;
@@ -393,9 +391,10 @@ struct OpenBuffer {
 struct CodeEditorPage : Component {
  public:
   CodeEditorPage(std::vector<Sample> files, std::string workspace,
-                 float editor_font_scale = kEditorFontScale)
-      : editor_font_scale_(editor_font_scale), files_(std::move(files)),
-        workspace_(std::move(workspace)) {}
+                 float editor_font_scale = kEditorFontScale,
+                 float editor_line_spacing = CodeEditor::kDefaultLineSpacing)
+      : editor_font_scale_(editor_font_scale), editor_line_spacing_(editor_line_spacing),
+        files_(std::move(files)), workspace_(std::move(workspace)) {}
 
   /// 窗口动作出口（由 `run_app` 注入 `Application`；为空时窗框**如实拒绝**动作，
   /// 但画面照旧——这正是 `ui::WindowControl` 端口要分离的那两件事）。
@@ -977,6 +976,7 @@ struct CodeEditorPage : Component {
         // 与 `read_only` 同一类缺陷（实测：把档位改成 1.0，下一帧就变回 1.15）。
         if (!editor_configured_) {
           ed.set_font_scale(editor_font_scale_);
+          ed.set_line_spacing(editor_line_spacing_);
           ed.set_tab_width(4);
           editor_configured_ = true;
         }
@@ -1552,6 +1552,8 @@ struct CodeEditorPage : Component {
   /// 编辑器字号档位（构造时定，`--editor-font-scale` 可覆盖）。
   /// 声明在 `files_` 之前：初始化顺序按**声明序**，否则 -Werror=reorder 直接编译失败。
   float editor_font_scale_{kEditorFontScale};
+  /// 编辑器行距倍数（构造时定，`--editor-line-spacing` 可覆盖）。
+  float editor_line_spacing_{CodeEditor::kDefaultLineSpacing};
   std::vector<Sample> files_{};
   std::string workspace_{};
   std::vector<Problem> problems_{};
@@ -1598,6 +1600,8 @@ struct Options {
   /// 与 `--ui-font-scale` 的区别：后者按主题整体缩放（`Theme::scaled`，影响**所有**文字），
   /// 本项只动编辑器（代码区与行号）。两者可叠加。
   std::string editor_font_scale{"auto"};
+  /// 编辑器**行距倍数**（`--editor-line-spacing`）：auto = 组件默认。
+  std::string editor_line_spacing{"auto"};
   std::uint16_t control_port{0};
   std::string control_file{};
   std::string shots{};
@@ -1623,7 +1627,8 @@ auto print_usage(std::string_view program) -> void {
       "  --decorations         用系统标题栏（默认自绘）\n"
       "\n"
       "字体与字形（观感调参）\n"
-      "  --editor-font-scale N 编辑器字号**档位**（相对正文的倍数，默认 0.85 = 比正文小一号）\n"
+      "  --editor-font-scale N 编辑器字号**档位**（相对正文的倍数，默认 1.0 = 与正文同级）\n"
+      "  --editor-line-spacing N 编辑器行距倍数（相对字体自然行高，默认 1.15）\n"
       "  --ui-font-scale N     界面整体字号缩放（auto = 跟随系统/默认；影响所有文字）\n"
       "  --text-fit-max-size N 拟合的适用字号上限（物理 px，0 = 不限）\n"
       "  --text-digit-gamma V  数字类的覆盖率 gamma（auto = 内置默认）\n"
@@ -1672,6 +1677,7 @@ auto print_usage(std::string_view program) -> void {
     else if (raw == "--text-gamma-small") options.text_gamma_small = value("auto");
     else if (raw == "--ui-font-scale") options.ui_font_scale = value("auto");
     else if (raw == "--editor-font-scale") options.editor_font_scale = value("auto");
+    else if (raw == "--editor-line-spacing") options.editor_line_spacing = value("auto");
     else if (raw == "--control-port") options.control_port = static_cast<std::uint16_t>(std::stoi(value("0")));
     else if (raw == "--control-file") options.control_file = value({});
     else if (raw == "--shots") options.shots = value({});
@@ -1728,8 +1734,12 @@ auto run_app(int argc, char** argv) -> int {
   if (options.editor_font_scale != "auto") {
     editor_font_scale = static_cast<float>(std::stod(options.editor_font_scale));
   }
-  auto page =
-      std::make_shared<CodeEditorPage>(samples(), options.workspace, editor_font_scale);
+  float editor_line_spacing = CodeEditor::kDefaultLineSpacing;
+  if (options.editor_line_spacing != "auto") {
+    editor_line_spacing = static_cast<float>(std::stod(options.editor_line_spacing));
+  }
+  auto page = std::make_shared<CodeEditorPage>(samples(), options.workspace, editor_font_scale,
+                                               editor_line_spacing);
   // 窗框的窗口动作出口：`Application` 实现了 `ui::WindowControl`（转发给后端）。
   // 在这一处"装"进去，页面内的组件就不需要知道应用/后端的存在（依赖方向单向）。
   page->window_control_ = &app;

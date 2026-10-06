@@ -37,14 +37,13 @@ using st::ui::Theme;
 
 }  // namespace
 
-ST_TEST(code_editor_font_scale_defaults_one_step_below_body_text) {
+ST_TEST(code_editor_font_scale_defaults_to_theme_base) {
   CodeEditor editor;
   const Theme theme = Theme::light();
   editor.apply_theme(theme);
-  // 默认档位 0.85（**比正文小一号**——代码行密度大、等宽字每字同宽，
-  // 与正文同级时偏大；同行看到更多字符对编辑器更重要）。
-  ST_CHECK(std::abs(editor.font_scale() - 0.85F) < 0.001F);
-  ST_CHECK(std::abs(editor.font_size() - theme.metrics().font_base * 0.85F) < 0.001F);
+  // 默认档位 1.0 = **与正文同级**（代码区字号与界面文字一致，眼睛不必在两种字号间适应）。
+  ST_CHECK(std::abs(editor.font_scale() - 1.0F) < 0.001F);
+  ST_CHECK(std::abs(editor.font_size() - theme.metrics().font_base) < 0.001F);
 }
 
 ST_TEST(code_editor_font_follows_theme_scaling) {
