@@ -37,6 +37,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -69,7 +70,12 @@ struct TerminalSession {
   std::jthread reader{};
   /// **屏幕模型**：PTY 的字节流解释成的网格（含光标、样式、备用屏）。
   std::shared_ptr<st::text::AnsiScreen> screen{};
-  /// 子进程是否在跑。
+  /// 子进程/作业是否在跑。
+  ///
+  /// PTY 模式下它的含义是**shell 还活着**（不是“命令在跑”）——真终端里
+  /// “当前有没有命令在执行”由 shell 自己的状态决定，组件看不到（
+  /// 那要读 shell 的提示符/类型），因此 `busy()` 在这里回答的是
+  /// “这条会话能不能用”。`send_stop` 发 `Ctrl+C` 不会把它置假。
   bool running{false};
   /// 运行中的命令名（PTY 模式下是 shell 名；行模式下是命令）。
   std::string running_name{};
@@ -181,6 +187,9 @@ class Terminal : public Element {
   void clear();
 
   /// **当前会话**是否忙。⚠ 只回答"眼前这个标签"；问"还有没有活"用 `any_busy()`。
+  ///
+  /// PTY 模式下语义是“shell 还活着”（见 `TerminalSession::running`）；
+  /// 行模式下是“作业在跑”。
   [[nodiscard]] auto busy() const -> bool;
   /// **任意**会话是否有作业在跑。
   [[nodiscard]] auto any_busy() const -> bool;
@@ -208,6 +217,12 @@ class Terminal : public Element {
 
   std::function<void(std::size_t)> on_session_change{};
   std::function<void(std::size_t)> on_session_close{};
+  /// 关闭**是否关掉了最后一个**（宿主据此决定收不收面板）。
+  ///
+  /// 为何要单独一个回调：`on_session_close` 里判不出——`apply_pending_close`
+  /// 会立即补一个全新会话，于是 `session_count()` 恒为 1。
+  /// 两个标签关一个不该收面板，关到没标签了才收；这个布尔就是那个区别。
+  std::function<void(bool last)> on_close_last_session{};
   std::function<void(bool)> on_busy_change{};
   std::function<void(const std::string&)> on_error{};
   /// 行模式的回车（宿主自己分发命令时接）。PTY 模式下**不装**——
@@ -225,6 +240,11 @@ class Terminal : public Element {
   /// **必须每帧调**。不能放 `paint` 里：`paint` 可能被视口剔除跳过
   ///（元素滚出可视区就不画），那样"看不见时屏幕永远不刷新"。
   void pump();
+
+  /// 关闭会话**已受理**但还没执行（下一帧 `pump` 做）——测试与宿主可据此判断。
+  [[nodiscard]] auto close_pending() const noexcept -> bool {
+    return pending_close_.has_value();
+  }
 
   // ────────────────────────────────────────────────────────────────────────
   // 外观
@@ -271,6 +291,10 @@ class Terminal : public Element {
                  const std::string& display);
   /// 收尾某个会话（子进程退出 / 中止之后）。
   void finish_session(TerminalSession& session);
+  /// 真正执行关闭（延迟到 `pump`；见 `close_session` 的说明）。
+  void apply_pending_close();
+  /// 待关闭的会话（只记一个——连点多个关闭按钮时前者先被处理）。
+  std::optional<std::size_t> pending_close_{};
   /// 行模式：把滚回同步进 `Text` 子件（只在**值真变了**时写）。
   void sync_screen(TerminalSession& session);
 

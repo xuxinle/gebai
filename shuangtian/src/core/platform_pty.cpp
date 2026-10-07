@@ -383,12 +383,26 @@ auto PtySession::wait() -> int {
   if (impl_ == nullptr) return -1;
   if (impl_->done.load() && impl_->code != 0) return impl_->code;
 #if defined(_WIN32)
-  if (impl_->child.hProcess != nullptr) {
-    WaitForSingleObject(impl_->child.hProcess, INFINITE);
-    DWORD code = 0;
-    GetExitCodeProcess(impl_->child.hProcess, &code);
-    impl_->code = static_cast<int>(code);
+  // ⚠ **句柄可能已被 `terminate` 释放**（它杀完子进程就把 `hProcess` 关了）。
+  // 拿一个已关闭的句柄去 `WaitForSingleObject` 是未定义行为（实测会挂住 ——
+  // 那是“关会话把界面卡死”的另一条路径）。已释放时直接报“已终止”。
+  if (impl_->child.hProcess == nullptr) {
+    impl_->done.store(true);
+    if (impl_->code == 0) impl_->code = -1;
+    return impl_->code;
   }
+  // 等待封顶：UI 线程会调 `wait()`（收尾时），**不能无限等**——
+  // 万一子进程卡在不可中断的状态（或伪控制台内部分状况），
+  // 整个界面就冻住了。给 5 秒上限，超时就按“已终止”处理（进程由系统回收）。
+  const DWORD waited = WaitForSingleObject(impl_->child.hProcess, 5000);
+  if (waited == WAIT_TIMEOUT) {
+    impl_->done.store(true);
+    impl_->code = -1;
+    return impl_->code;
+  }
+  DWORD code = 0;
+  GetExitCodeProcess(impl_->child.hProcess, &code);
+  impl_->code = static_cast<int>(code);
   impl_->done.store(true);
   return impl_->code;
 #else
@@ -410,11 +424,26 @@ void PtySession::terminate() {
   if (impl_->child.hProcess != nullptr) {
     TerminateProcess(impl_->child.hProcess, 1);
   }
-  // 关掉伪控制台会让 `ReadFile` 立刻返回（读线程得以退出）。
+  // 顺序很重要：
+  //
+  // ① **先关伪控制台**。它一关，ConPTY 输出端的写者就没了，读端会收到 EOF
+  //    （`ReadFile` 返回 0）——**不需要**去 `CloseHandle` 一个正被读的句柄。
+  //    在 `ReadFile` 阻塞期间 `CloseHandle` 那个句柄是**未定义行为**
+  //（实测：会让读线程永远退不出 ⇒ UI 线程 `join()` 时主线程死锁）。
+  // ② `TerminateProcess` 保证子进程一定不在（`wait()` 不会永久阻塞）。
   const auto& api = conpty_api();
   if (impl_->console != nullptr && api.available) {
     api.close(impl_->console);
     impl_->console = nullptr;
+  }
+  // ③ 子进程早已杀，句柄可以安全释放（此时已无并发的读）。
+  if (impl_->child.hProcess != nullptr) {
+    CloseHandle(impl_->child.hProcess);
+    impl_->child.hProcess = nullptr;
+  }
+  if (impl_->child.hThread != nullptr) {
+    CloseHandle(impl_->child.hThread);
+    impl_->child.hThread = nullptr;
   }
 #else
   if (impl_->child > 0) {

@@ -451,6 +451,8 @@ struct CodeEditorPage : Component {
   State<std::string> selection_text_{""};
   // 终端：会话/滚回/作业全在**框架组件** `st::ui::Terminal` 里，
   // 应用侧只留一个指针与"忙闲"镜像（后者用于面板按钮的实时性）。
+  /// “关掉最后一个会话 ⇒ 收起面板”的待办（下一次 `pump` 在主循环栈上执行）。
+  bool bottom_close_pending_{false};
   Terminal* terminal_ptr{nullptr};
   bool terminal_busy_{false};
   State<std::size_t> menu_open_{kNoMenu};
@@ -631,8 +633,8 @@ struct CodeEditorPage : Component {
       status_.set("已保存 " + buffer.label + "（内存模拟，无磁盘写入）");
     }
     buffer.dirty = false;
-    terminal_append(std::format("[保存] {} · {} 字符", buffer.label,
-                                st::utf8_length(buffer.text)));
+        status_.set(std::format("已保存 {} · {} 字符", buffer.label,
+                            st::utf8_length(buffer.text)));
     buffers_.set(std::move(list));
   }
 
@@ -766,7 +768,24 @@ struct CodeEditorPage : Component {
   /// 而“刚追加了一行”与“几何已经更新”隔着一次布局——第二次只剩下重排（不重组），
   /// 写在 `build()` 里的“下帧再滚”永远等不到执行（实测：滚动条停在中间，尾部两行看不到）。
   /// 这里每帧都跑，正好在“上一帧布局已完成”的时刻调，`max_scroll()` 已是新值。
-  void update_terminal() { pump_terminal(); }
+  void update_terminal() {
+    // **先泵终端**（它可能受理“关闭会话”），**再**处理“收起面板”。
+    //
+    // 为何要分两步、而不在组件回调里直接 `set(false)`：那个回调是在
+    // `Terminal::pump()` 的**栈上**发的，而 `set` 会**同步重组**、把 `Terminal`
+    // 拆掉——回到组件内部时 `this` 已释放，直接段错误（实测 `0xC0000005`）。
+    // 本函数由**入口主循环**调（3325 行），已完全在组件栈之外。
+    pump_terminal();
+    if (bottom_close_pending_) {
+      bottom_close_pending_ = false;
+      bottom_visible_.set(false);
+      // ⚠ **必须同时清掉指针**：下一帧重组会把 `Terminal` 元素拆掉
+      //（面板不再声明它），而 `terminal_ptr` 会变成悬垂——之后每帧的
+      // `pump_terminal()` 都在解引用已释放内存（实测：界面整个卡死）。
+      // 重开面板时 `build_bottom` 会重新赋值。
+      terminal_ptr = nullptr;
+    }
+  }
 
   void build(Composer& c) override {
     const auto& buffers = buffers_.value();
@@ -1639,11 +1658,16 @@ struct CodeEditorPage : Component {
         view.on_title_change = [this](std::size_t index, const std::string& title) {
           if (terminal_ptr != nullptr) terminal_ptr->set_session_title(index, title);
         };
-        // 关掉最后一个会话 = 收起面板（布局决策在应用这一层）。
-        view.on_session_close = [this](std::size_t) {
-          if (terminal_ptr != nullptr && terminal_ptr->session_count() <= 1) {
-            bottom_visible_.set(false);
-          }
+        // 换标签 → 面板标题跟着变。
+        view.on_session_change = [this](std::size_t) { status_.set("终端：已切换会话"); };
+        // 关掉**最后一个**会话 = 收起面板（布局决策在应用这一层）。
+        //
+        // ⚠ **不能当场 `set(false)`**：本回调是在 `Terminal::pump()` 的栈上发的，
+        // 而重组会把 `Terminal` 拆掉——回到组件时 `this` 已释放，直接段错误
+        //（实测 `0xC0000005`）。改成记下一个“待办”，让**入口主循环下一帧**
+        //（完全在组件栈之外）再改状态。
+        view.on_close_last_session = [this](bool last) {
+          if (last) bottom_close_pending_ = true;
         };
         terminal_ptr = &view;
       }, {.grow = true, .key = "terminal"});
@@ -1700,16 +1724,7 @@ struct CodeEditorPage : Component {
     return count;
   }
 
-  /// 终端的工作目录（跟着 `cd` 走；未显式切换过就用工作区根）。
-  [[nodiscard]] auto terminal_cwd() const -> std::string {
-    if (terminal_ptr != nullptr) {
-      const std::string cwd = terminal_ptr->get_property("working_directory").value_or("");
-      if (!cwd.empty()) return cwd;
-    }
-    return workspace_.empty() ? std::string("(内置样例)") : workspace_;
-  }
-
-  /// 终端实际执行时用的目录（`(内置样例)` 不是真目录，回退当前目录）。
+  /// 终端的工作目录（相对路径按它解析；未显式设置过就用工作区根）。
   [[nodiscard]] auto terminal_exec_dir() const -> std::string {
     if (terminal_ptr != nullptr) {
       const std::string cwd = terminal_ptr->get_property("working_directory").value_or("");
@@ -2287,10 +2302,24 @@ struct CodeEditorPage : Component {
   }
 
   public:
- /// 启动横幅进终端（入口在 `app.start()` 之后才能拿到后端/端口信息）。
- auto note_startup(const std::string& text) -> void { terminal_append(text); }
+ /// 启动信息进**状态栏**（入口在 `app.start()` 之后才能拿到后端/端口信息）。
+ ///
+ /// 为什么不写进终端：真终端里那条流**归 shell**——应用不是写者。
+ /// 往别人的流里插一行会打乱屏幕（shell 下次重绘就把它抹掉，
+ /// 或更糟：把提示符位置弄乱）。应用自己的通知属于状态栏。
+ auto note_startup(const std::string& text) -> void { status_.set(text); }
    /// 每帧推动终端作业（入口主循环调；见 `update_terminal` 的说明）。
-  auto pump() -> void { pump_terminal(); }
+  auto pump() -> void {
+    // ⚠ **顺序**：先让终端泵（它可能受理“关闭会话”），**再**处理“收起面板”。
+    // 不能在组件回调里当场收起面板——那会在组件栈上重组，把组件拆掉后
+    // 回到它内部就是 use-after-free（实测 `0xC0000005`）。这里在**主循环**的
+    // 栈上改状态，完全在组件之外。
+    pump_terminal();
+    if (bottom_close_pending_) {
+      bottom_close_pending_ = false;
+      bottom_visible_.set(false);
+    }
+  }
   /// 退出前收尾：停掉在跑的作业并 join 读线程（`jthread` 把它露在对象生命周期
   /// 之外会很危险：它可能正阻塞在 `read_line` 上，而对象已经在析构）。
   auto shutdown() -> void { shutdown_terminal(); }
@@ -2596,7 +2625,10 @@ struct CodeEditorPage : Component {
   /// 有两处就会产生“同一个 `git diff` 一会儿在这里、一会在那里”的困惑。
   void show_git_diff(const GitChange& change) {
     bottom_visible_.set(true);
-    run_terminal(std::format("git diff --no-color -- {}", change.path));
+    // 真终端里应用只能**代敲**（自己不是那条流的写者）：把命令当输入送给 shell。
+    if (terminal_ptr != nullptr) {
+      terminal_ptr->run(std::format("git diff --no-color -- {}", change.path));
+    }
     status_.set("差异已打开：" + change.path);
   }
 
@@ -2607,12 +2639,12 @@ struct CodeEditorPage : Component {
   // “把命令交给终端”——输出逐行出现，中止按钮真的能杀进程。
   void run_task(const std::string& id) {
     if (id == "build") {
-      run_terminal(workspace_.empty() ? "st build gallery --profile dev"
-                                      : "st build gallery --profile dev");
+      // 真终端里应用只能**代敲**（自己不是那条流的写者）：把命令当输入送给 shell。
+      if (terminal_ptr != nullptr) terminal_ptr->run("st build gallery --profile dev");
     } else if (id == "test") {
-      run_terminal("st test");
+      if (terminal_ptr != nullptr) terminal_ptr->run("st test");
     } else {
-      run_terminal("st lint");
+      if (terminal_ptr != nullptr) terminal_ptr->run("st lint");
     }
   }
 
@@ -2713,390 +2745,28 @@ struct CodeEditorPage : Component {
   // 终端：内置命令 + 白名单外部命令（长命令在工作线程上跑，输出逐块回流）
   // ════════════════════════════════════════════════════════════════════════
 
-  /// 追加一块输出。**转发给组件**——应用侧不再自己持有滚回缓冲
-  ///（缓冲属于会话，会话在 `st::ui::Terminal` 里）。
-  void terminal_append(std::string text) {
-    if (terminal_ptr != nullptr) terminal_ptr->append(std::move(text));
-  }
-
-  /// 终端全文（任务视图等处要读它；组件提供同一份真值）。
-  [[nodiscard]] auto terminal_text() const -> std::string {
-    if (terminal_ptr == nullptr) return {};
-    return terminal_ptr->session_text(terminal_ptr->active_session());
-  }
-
-  /// 在终端里回显一条命令（带提示符）。
-  ///
-  /// 历史与输入行归组件管（`Terminal::run` 内部做）；这里只做“写一行回显”，
-  /// 因为应用的内置命令路径需要“先回显、再由应用自己输出”。
-  void terminal_echo(const std::string& display, const std::string&) {
-    terminal_append("❯ " + display);
-  }
-
-  /// 终端入口：解析 → 内置命令 / 白名单外部命令。
-  ///
-  /// 为何要真执行而不是回显字符串：一个只回“未知命令”的终端面板，演示价值为零
-  /// ——它不能回答任何关于工作区的实际问题。而完整 shell 既不需要（场景想要的是
-  /// “查一眼、跑一下”）也不安全（任意命令执行）。白名单 + `st::process::run` 是中间点：
-  /// 命令与参数**分开传**（不经 shell，无注入风面），输出与退出码全部真实回填。
-  void run_terminal(const std::string& command) {
-    const std::string trimmed = std::string(st::trim(command));
-    // 输入行的清空由组件在 `run`/`submit_input` 里做（`Terminal` 持有它）；
-    // 这里只处理命令文本本身。
-    if (trimmed.empty()) return;
-    terminal_echo(trimmed, trimmed);
-    const auto parts = st::split_whitespace(trimmed);
-    const std::string head(parts.empty() ? std::string_view{} : parts[0]);
-    // 命令替换：`$name` → 历史/变量值（给 `run $last` / `cd $root` 用）
-    const std::vector<std::string> args = expand_terminal_args(parts);
-
-    // —— 内置命令（作用于界面本身）——
-    if (head == "help") {
-      terminal_append(R"(内置命令
-  help                本帮助
-  clear               清屏（也可 Ctrl+L）
-  langs               已注册语言列表
-  ls [目录]           列目录
-  cd <目录|..|~>      切换工作目录（提示行会跟着变）
-  pwd                 当前工作目录
-  find <词>           搜索工作区（切到搜索面板）
-  goto <行> [:列]     当前编辑器跳到该位置
-  stats               当前编辑器统计
-  save / theme / open <名字>
-  run <命令>          重跑一条历史命令
-  history             命令历史
-外部命令（白名单，无 shell）
-  git status|log|diff|show|branch   （只读；写操作在解析前就拒）
-  st <子命令>         真跑霜天工具链
-  cat <文件> · wc -l <文件> · ls -la
-按键
-  ↑ / ↓               翻历史        Tab    补全路径/命令
-  Ctrl+L              清屏          Ctrl+C 中止正在运行的命令)");
-      return;
-    }
-    if (head == "clear") {
-      if (terminal_ptr != nullptr) terminal_ptr->clear();
-      return;
-    }
-    if (head == "history") {
-      // 历史问组件（它才是历史的持有者）。
-      const auto* session = terminal_ptr != nullptr
-                                ? terminal_ptr->session(terminal_ptr->active_session())
-                                : nullptr;
-      if (session == nullptr || session->history.empty()) {
-        terminal_append("（还没有历史）");
-        return;
-      }
-      for (std::size_t index = 0; index < session->history.size(); ++index) {
-        terminal_append(std::format("{:3}  {}", index + 1, session->history[index]));
-      }
-      return;
-    }
-    if (head == "run") {
-      const std::string rest(st::trim(std::string_view(trimmed).substr(3)));
-      if (rest.empty()) {
-        terminal_append("用法：run <命令>（或 ↑ 翻出上一条）");
-        return;
-      }
-      run_terminal(rest);
-      return;
-    }
-    if (head == "pwd") {
-      terminal_append(terminal_cwd());
-      return;
-    }
-    if (head == "cd") {
-      terminal_change_dir(args.size() > 1 ? args[1] : std::string{});
-      return;
-    }
-    if (head == "langs") {
-      const auto& list = languages_.empty() ? CodeEditor::available_languages() : languages_;
-      std::string joined;
-      for (const auto& name : list) joined += name + " ";
-      terminal_append("已注册语言：" + joined);
-      return;
-    }
-    if (head == "ls") {
-      // `ls -la` 与 `ls <目录>` 都收：走与外部 `ls` 同样的枚举（这里用 fs 直读，
-      // 因为要的是一份稳定、与平台无关的输出）。
-      std::string target = terminal_exec_dir();
-      bool long_form = false;
-      for (std::size_t index = 1; index < args.size(); ++index) {
-        if (args[index].starts_with("-")) long_form = true;
-        else target = args[index];
-      }
-      if (target.empty()) {
-        terminal_append("（没有工作区：启动时加 --workspace 可枚举真实文件）");
-        return;
-      }
-      if (auto listing = st::fs::list_dir(target); listing.has_value()) {
-        std::string out = target + "/";
-        std::size_t dirs = 0;
-        for (const auto& item : *listing) {
-          if (item.is_dir) ++dirs;
-          out += long_form
-                     ? std::format("\n  {:<4} {:>10}  {}{}", item.is_dir ? "d" : "-", item.size,
-                                   item.name, item.is_dir ? "/" : "")
-                     : std::format("\n  {}{}", item.name, item.is_dir ? "/" : "");
-        }
-        terminal_append(out);
-        terminal_append(std::format("共 {} 项（{} 目录 / {} 文件）", listing->size(), dirs,
-                                    listing->size() - dirs));
-      } else {
-        terminal_append("目录读不了：" + target);
-      }
-      return;
-    }
-    if (head == "find") {
-      const std::string needle(
-          st::trim(std::string_view(trimmed).substr(std::min<std::size_t>(4, trimmed.size()))));
-      if (needle.empty()) {
-        terminal_append("用法：find <词>");
-        return;
-      }
-      activity_.set(1);
-      sidebar_visible_.set(true);
-      apply_search(needle);
-      terminal_append(std::format("已搜索「{}」，结果见搜索面板（{}）", needle,
-                                  search_summary_.value()));
-      return;
-    }
-    if (head == "goto") {
-      // `goto 120` / `goto 120:8`
-      std::string spec(st::trim(std::string_view(trimmed).substr(4)));
-      std::size_t line = 0;
-      std::size_t column = 0;
-      if (const std::size_t colon = spec.find(':'); colon != std::string::npos) {
-        line = st::parse_u64(spec.substr(0, colon)).value_or(0);
-        column = st::parse_u64(spec.substr(colon + 1)).value_or(0);
-      } else {
-        line = st::parse_u64(spec).value_or(0);
-      }
-      if (line == 0 || editor == nullptr) {
-        terminal_append(editor == nullptr ? "没有打开的编辑器" : "用法：goto <行> [:列]");
-        return;
-      }
-      editor->goto_line(line);
-      if (column > 0) {
-        const std::size_t start = editor->cursor_index() + column - 1;
-        editor->set_selection(start, start + 1);
-      }
-      editor->scroll_to_line(line);
-      terminal_append(std::format("已跳到第 {} 行{}", line,
-                                  column > 0 ? std::format(" 第 {} 列", column) : std::string{}));
-      return;
-    }
-    if (head == "stats") {
-      const auto list = buffers_.value();
-      if (editor != nullptr && active_.value() < list.size()) {
-        terminal_append(std::format("{} · {} 行 · {} 字符 · 语言 {}", list[active_.value()].label,
-                                    editor->line_count(), st::utf8_length(editor->text()),
-                                    list[active_.value()].language));
-      } else {
-        terminal_append("没有打开的编辑器");
-      }
-      return;
-    }
-    if (head == "save") {
-      save();
-      terminal_append("已保存：" + status_.value());
-      return;
-    }
-    if (head == "theme") {
-      toggle_theme();
-      terminal_append("主题：" + status_.value());
-      return;
-    }
-    if (head == "open") {
-      const std::string want(st::trim(std::string_view(trimmed).substr(4)));
-      if (want.empty()) {
-        terminal_append("用法：open <文件名>");
-        return;
-      }
-      open_by_name(want);
-      terminal_append("已尝试打开 " + want);
-      return;
-    }
-
-    // —— 外部命令（白名单）——
-    if (head == "git") {
-      const std::string verdict = git_whitelist_verdict(args);
-      if (!verdict.empty()) {
-        terminal_append(verdict);
-        return;
-      }
-      std::vector<std::string> git_args{"--no-pager"};
-      for (std::size_t index = 1; index < args.size(); ++index) {
-        git_args.push_back(args[index]);
-        // `git log` 没有参数时会分页/拉到底；给个务实的默认值。
-        if (index == 1 && args[1] == "log") {
-          git_args.push_back("-n");
-          git_args.push_back("20");
-        }
-      }
-      if (terminal_ptr != nullptr) {
-        terminal_ptr->run_program("git", git_args, display_of("git", args));
-      }
-      return;
-    }
-    if (head == "st") {
-      std::string program = st::process::which("st").value_or(std::string{});
-      if (program.empty() && !tool_root_.empty()) {
-        // 可执行文件名带平台后缀：Windows 上是 `st.exe`——只试 `st` 会让
-        // “跑任务”按钮在 Windows 上永远报“找不到 st 工具链”（本仓的 `st`
-        // 一直是带 `.exe` 构建的）。两个名字都试，取存在的那个。
-        for (const char* leaf : {"build/bin/st", "build/bin/st.exe"}) {
-          const std::string candidate = st::fs::join(tool_root_, leaf);
-          if (!st::fs::exists(candidate)) continue;
-          program = candidate;
-          break;
-        }
-      }
-      if (program.empty()) {
-        terminal_append("找不到 st 工具链（PATH 里没有；启动时加 --tool-root <霜天仓根>）");
-        return;
-      }
-      std::vector<std::string> st_args;
-      for (std::size_t index = 1; index < args.size(); ++index) st_args.push_back(args[index]);
-      if (terminal_ptr != nullptr) {
-        terminal_ptr->run_program(program, st_args, display_of("st", args));
-      }
-      return;
-    }
-    if (head == "cat" || (head == "wc" && args.size() >= 2)) {
-      const bool wc = head == "wc";
-      std::string path_raw = wc ? args[1] : std::string(st::trim(std::string_view(trimmed).substr(4)));
-      path_raw = std::string(st::trim(path_raw));
-      if (path_raw.empty()) {
-        terminal_append(wc ? "用法：wc -l <文件>" : "用法：cat <文件>");
-        return;
-      }
-      const std::string path = resolve_path(path_raw);
-      auto content = st::fs::read_text(path);
-      if (!content.has_value()) {
-        terminal_append("读不了（不存在或非 UTF-8）：“" + path + "”");
-        return;
-      }
-      if (wc) {
-        terminal_append(std::format("{} 行  {}", line_count_of(*content), path));
-        return;
-      }
-      // 大文件截断：终端不是分页器，一次吐出 10 万行会把面板变成幻灯片。
-      constexpr std::size_t kCatLimit = 64U * 1024U;
-      if (content->size() > kCatLimit) {
-        terminal_append(std::format("[截断] {} 共 {} 字节（只显示前 {} 字节）", path,
-                                    content->size(), kCatLimit));
-        terminal_append(content->substr(0, kCatLimit));
-      } else {
-        terminal_append(*content);
-      }
-      return;
-    }
-
-    terminal_append(std::format(
-        "未知命令：“{}”。\n本终端只跑内置命令与白名单外部命令（输入 help 看清单）——\n"
-        "完整 shell 不是本示例的意图（任意命令执行不在演示范围内）。",
-        trimmed));
-  }
-
-  /// `git` 只读白名单校验：返回空串 = 放行，否则返回拒绝说明。
-  [[nodiscard]] static auto git_whitelist_verdict(const std::vector<std::string>& args)
-      -> std::string {
-    if (args.size() < 2) return "用法：git status | git log | git diff | git show | git branch";
-    static constexpr std::string_view kReadOnly[] = {"status", "log", "diff", "show", "branch"};
-    const std::string& sub = args[1];
-    if (std::find(std::begin(kReadOnly), std::end(kReadOnly), sub) == std::end(kReadOnly)) {
-      return std::format("拒绝：“git {}”不在只读白名单（status/log/diff/show/branch）内"
-                         "——本终端不执行写操作",
-                         sub);
-    }
-    return {};
-  }
-
-
-  // 作业执行（起线程、逐行回流、中止、退出码）全在**框架组件** `st::ui::Terminal`
-  // 里——应用侧不再持有管道/线程/缓冲。下面几条是转发与显示工具。
-
-  /// 每帧泵一次终端作业（应用主循环调；见 `CodeEditorPage::pump()`）。
+  /// 每帧泵一次终端（应用主循环调；见 `pump()`）。
   void pump_terminal() {
     if (terminal_ptr != nullptr) terminal_ptr->pump();
   }
 
-  /// 退出前收尾：中止还在跑的作业（否则子进程会变成孤儿）。
+  /// 退出前收尾：中止还在跑的会话（否则子进程会变成孤儿）。
   void shutdown_terminal() {
     if (terminal_ptr != nullptr && terminal_ptr->any_busy()) terminal_ptr->send_stop();
   }
 
-  /// 请求中止当前作业（面板按钮 / 任务视图）。
+  /// 请求中止当前会话（面板按钮）。
   void request_terminal_stop() {
     if (terminal_ptr != nullptr) terminal_ptr->send_stop();
   }
 
-  /// 重跑上一条命令（面板按钮）：翻到最新一条历史再提交它。
-  void rerun_terminal() {
-    if (terminal_ptr == nullptr) return;
-    terminal_ptr->invoke_action("history_down", "");
-    terminal_ptr->invoke_action("submit", "");
-  }
-
-  /// 切换终端工作目录（`cd` 内置命令也走这条）。
-  void terminal_change_dir(const std::string& target) {
-    if (terminal_ptr != nullptr) terminal_ptr->run("cd " + target);
-  }
-
-  /// 外部命令的显示形式：`program` 与 `args` 里的**第一个词重复**（args[0] 就是
-  /// 命令名本身），所以要跳过它——不然回显会变成 `st st help`（实测踩到）。
-  [[nodiscard]] static auto display_of(const std::string& program,
-                                       const std::vector<std::string>& args) -> std::string {
-    std::string out = program;
-    for (std::size_t index = 1; index < args.size(); ++index) out += " " + args[index];
-    return out;
-  }
-
-
-  /// `git` 只读子命令白名单。
-  static constexpr std::string_view kReadOnly[] = {"status", "log", "diff", "show", "branch"};
-
-  /// 参数展开：`$last` → 上一条历史，`$root` → 工作区根，`$cwd` → 当前目录。
-  [[nodiscard]] auto expand_terminal_args(const std::vector<std::string_view>& parts) const
-      -> std::vector<std::string> {
-    std::vector<std::string> out;
-    out.reserve(parts.size());
-    const auto* session = terminal_ptr != nullptr
-                              ? terminal_ptr->session(terminal_ptr->active_session())
-                              : nullptr;
-    for (const auto& part : parts) {
-      std::string value(part);
-      if (value == "$last") {
-        value = session != nullptr && !session->history.empty() ? session->history.back()
-                                                                : std::string{};
-      } else if (value == "$root") {
-        value = workspace_;
-      } else if (value == "$cwd") {
-        value = terminal_cwd();
-      }
-      out.push_back(std::move(value));
-    }
-    return out;
-  }
-
-
-  /// **命令策略判定**（供组件的 `before_run` 钩子）：返回非空 = 拒绝并显示该理由。
-  ///
-  /// 为什么策略在应用侧：本应用的终端只放开**只读**的 git 子命令。
-  /// “哪些命令该被允许”取决于应用的安全模型——`Terminal` 组件不该知道它。
-  ///
-  /// 这里做**能独立判定**的那部分（`git` 写操作在解析参数前就拒）；
-  /// 其余分流（内置命令 / 白名单）留在 `run_terminal`——它本来就要解析一遍。
-  [[nodiscard]] auto terminal_policy_verdict(const std::string& command) const -> std::string {
-    const auto parts = st::split_whitespace(command);
-    if (parts.empty()) return {};
-    if (std::string(parts[0]) != "git") return {};
-    std::vector<std::string> args;
-    args.reserve(parts.size());
-    for (const auto& part : parts) args.emplace_back(part);
-    return git_whitelist_verdict(args);
-  }
+  // **应用不再解释命令**：真终端里输入的一切都送给 shell，由它执行
+  //（`cd`、`ls`、`git` 都是 shell 自己的命令）。原先那套"内置命令 + 白名单"
+  // 是假终端时代的产物——那时没有 shell 可托付，只能自己解析一遍。
+  //
+  // 于是随之移除的还有：命令替换（`$last`/`$root`/`$cwd`）、只读 git 白名单、
+  // 语法高亮式的 `cat`/`wc` 内建、以及"未知命令"提示——它们全都建立在
+  // "应用是命令的解释者"这个前提上，而那个前提已经不成立了。
 
   /// 命令面板执行一条命令（id 是稳定的业务身份）。
   void run_command(const std::string& id) {
@@ -3219,7 +2889,14 @@ struct CodeEditorPage : Component {
   /// **刻意不是 `State`**：分栏组件自己持有比例并据此重排，拖动时它逐像素回调本值——
   /// 若这是个 State，每拖一像素就会标脏整页重组一次（拖拽中重建子元素，手感与开销都差）。
   /// 这里只做“跨重组记住用户拖到哪了”的存档。
-  float bottom_ratio_{0.72f};
+  ///
+  /// ⚠ 这是 **`SplitView::ratio` 的口径 = 第一面板（编辑器）的占比**，不是终端的份额。
+  /// 实测踩到过反直觉的错误：把“想让终端占多”写成把比值改大（0.72 → 0.60），
+  /// 结果编辑器反而吃掉了六成高度。
+  ///
+  /// 把 0.72 → **0.55**：原先终端只拿到 28%（约 6 行）——真终端 6 行不可用
+  ///（`dir`/`git log` 一屏就满，连提示符都要滚）。现在终端约 295px ≈ 14 行。
+  float bottom_ratio_{0.55f};
 };
 
 // ════════════════════════════════════════════════════════════════════════════

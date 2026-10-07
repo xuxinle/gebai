@@ -25,6 +25,7 @@
 #include "st/core/fs.hpp"
 #include "st/core/process.hpp"
 #include "st/core/string.hpp"
+#include "st/text/text.hpp"   // `text::FontRole`（终端必须用等宽角色）
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/scroll.hpp"
 #include "st/ui/components/tabs.hpp"
@@ -96,6 +97,25 @@ namespace {
   return math::Color{grey, grey, grey, 255};
 }
 
+/// 把 UTF-8 码点编回字节。
+auto utf8_append(char32_t ch, std::string& out) -> void {
+  if (ch < 0x80U) {
+    out.push_back(static_cast<char>(ch));
+  } else if (ch < 0x800U) {
+    out.push_back(static_cast<char>(0xC0U | (ch >> 6U)));
+    out.push_back(static_cast<char>(0x80U | (ch & 0x3FU)));
+  } else if (ch < 0x10000U) {
+    out.push_back(static_cast<char>(0xE0U | (ch >> 12U)));
+    out.push_back(static_cast<char>(0x80U | ((ch >> 6U) & 0x3FU)));
+    out.push_back(static_cast<char>(0x80U | (ch & 0x3FU)));
+  } else {
+    out.push_back(static_cast<char>(0xF0U | (ch >> 18U)));
+    out.push_back(static_cast<char>(0x80U | ((ch >> 12U) & 0x3FU)));
+    out.push_back(static_cast<char>(0x80U | ((ch >> 6U) & 0x3FU)));
+    out.push_back(static_cast<char>(0x80U | (ch & 0x3FU)));
+  }
+}
+
 /// 解析颜色到 RGB（默认色走调用方给的兜底色）。
 [[nodiscard]] auto resolve(const st::text::AnsiColor& color, const math::Color& fallback,
                            bool bright) -> math::Color {
@@ -125,11 +145,14 @@ Terminal::~Terminal() {
   // 析构顺序敏感：先让 PTY 与读线程都停下，再放会话容器。
   // 读线程捕了 `shared_ptr<PtySession>`，会话对象被析构后线程还在跑也不悬垂
   //（这正是用 shared_ptr 的原因），但**仍要 join**——否则进程退出时线程还在读。
+  //
+  // ⚠ 这里**不调 `wait()`**：它要等子进程退出，而析构可能发生在 UI 线程
+  //（宿主重组把本元素拆掉时）；等一下就冻界面。子进程由 `terminate` 杀。
   for (auto& session : sessions_) {
     if (session == nullptr) continue;
+    if (session->reader.joinable()) session->reader.request_stop();
     if (session->pty != nullptr && session->pty->valid()) session->pty->terminate();
     if (session->reader.joinable()) session->reader.join();
-    if (session->pty != nullptr) (void)session->pty->wait();
   }
   if (reader_.joinable()) {
     stop_requested_.store(true);
@@ -181,6 +204,9 @@ auto Terminal::screen(std::size_t index) const -> const st::text::AnsiScreen* {
 }
 
 auto Terminal::add_session(std::string title) -> std::size_t {
+  // 新会话继承当前会话的工作目录与**模式**：用户点“+ 新标签”的意图就是
+  // “再开一个终端”——新标签空空如也、还得再点一次才能用，那是没把意图接住。
+  const bool spawn_pty = pty_active();
   // 新会话继承当前会话的工作目录（用户在某个目录里开新 shell，
   // 期待是在同一个地方接着干）。
   auto fresh = std::make_unique<TerminalSession>();
@@ -192,24 +218,57 @@ auto Terminal::add_session(std::string title) -> std::size_t {
   mark_layout_dirty();
   mark_dirty();
   if (on_session_change) on_session_change(index);
+  if (spawn_pty) open_shell();
   return index;
 }
 
 auto Terminal::close_session(std::size_t index) -> bool {
   if (index >= sessions_.size()) return false;
   TerminalSession& target = *sessions_[index];
-  if (target.running) {
+  // **只有行模式的作业才拦**：那种情况下关会话会把通道的读线程悬在外面。
+  // PTY 模式下 `running` 的含义是“shell 活着”——那**不是**关不掉的理因
+  //（关标签本来就该结束它的 shell）。旧写法把两者混为一谈，
+  // 结果是真终端里每个标签都关不掉（实测踩到）。
+  if (target.running && target.pty == nullptr) {
     if (on_error) on_error("该会话有命令在运行，先中止再关闭");
     return false;
   }
-  // 读线程要先停干净再放对象（`jthread` 的析构会 join，这里显式做以便先杀进程）。
+  // **延迟到下一帧真做**：本函数可能是从 `Tabs` 的 `on_close` 回调里进来的，
+  // 而关闭会让宿主把本元素拆掉（最后一个标签 → 面板收起）——
+  // 那就等于“在子组件的回调里强拆自己”，回到调用方时 `this` 已失效。
+  // 记下待办，让 `pump`（顶层调用）去执行；调用方只需知道“受理了”。
+  pending_close_ = index;
+  return true;
+}
+
+/// 真正执行关闭（由 `pump` 在安全的时机调；见 `close_session` 的说明）。
+void Terminal::apply_pending_close() {
+  if (!pending_close_.has_value()) return;
+  const std::size_t index = *pending_close_;
+  pending_close_.reset();
+  if (index >= sessions_.size()) return;
+  // **先算清“用户是不是关掉了最后一个”**：erase 之后就判不出了
+  //（自动补的那个会让 `session_count()` 恒为 1）。宿主据此决定收不收面板：
+  // 两个标签关一个 —— 不该收；关到没标签了 —— 才收。
+  const bool was_last = sessions_.size() <= 1;
+  TerminalSession& target = *sessions_[index];
+  // 读线程要先停干净再放对象：
+  // ① `request_stop()` 让循环跳出（即使 `read` 因故没返回）——
+  // ② `terminate()` 关伪控制台 ⇒ `read` 返回 0（两个保险都要）。
+  // 缺①时读线程只能靠 EOF 退出，而 EOF 依赖平台细节；缺②时子进程留在后台。
+  if (target.reader.joinable()) target.reader.request_stop();
   if (target.pty != nullptr && target.pty->valid()) target.pty->terminate();
   if (target.reader.joinable()) target.reader.join();
-  if (target.pty != nullptr) (void)target.pty->wait();
+  // ⚠ **`wait()` 不在这里调**。它要等子进程退出，而这是 **UI 线程**；
+  // 对方卡一下就冻界面（实测：关最后一个会话时整个应用无响应）。
+  // 子进程已由 `terminate` 杀死 + 系统回收；退出码对“已关闭的会话”无意义。
+  // 真正退出码的读取在 `pump` 里（读线程自己调 `wait`）。
 
   sessions_.erase(sessions_.begin() + static_cast<std::ptrdiff_t>(index));
   if (sessions_.empty()) {
-    // 不留空面板：补一个全新的。是否收起整个面板由宿主在 `on_session_close` 定。
+    // 不留空面板：补一个全新的。是否收起整个面板由宿主在 `on_session_close` 定
+    //（它拿 `last` 参数判断）。**补的这个不自动起 shell**——面板马上要收起，
+    // 白起一个进程；用户再打开时 `open_shell` 会补上。
     sessions_.push_back(std::make_unique<TerminalSession>(
         TerminalSession{.title = std::format("终端 {}", title_seq_++)}));
     active_ = 0;
@@ -220,9 +279,22 @@ auto Terminal::close_session(std::size_t index) -> bool {
   }
   mark_dirty();
   mark_layout_dirty();
-  if (on_session_close) on_session_close(index);
-  if (on_session_change) on_session_change(active_);
-  return true;
+  // ⚠⚠ **这一块之后绝对不能再碰 `this`**。
+  //
+  // 回调可能引发宿主重组，而重组会把**本元素整个拆掉**（关最后一个标签
+  // ⇒ 面板收起 ⇒ 容器不再声明 `Terminal`）。实测的两种后果都踩到过：
+  // 直接段错误 `0xC0000005`、以及 UI 线程死锁。
+  //
+  // 因此这里**最多发一个回调**，并且它必须是最后一步：
+  // 若不变量（关掉的是最后一个）成立，就只发 `on_close_last_session`
+  //（宿主据此收面板，不需要再知道"换成哪个标签"）。
+  // 早先写成"先 `on_session_change` 再 `on_close_last_session`"——
+  // 前者就会把 `this` 拆掉，后者成了纯 UAF。
+  if (was_last && on_close_last_session) {
+    on_close_last_session(true);
+  } else if (on_session_close) {
+    on_session_close(index);
+  }
 }
 
 void Terminal::set_active_session(std::size_t index) {
@@ -264,15 +336,18 @@ void Terminal::start_pty(const std::shared_ptr<st::process::PtySession>& pty,
     for (;;) {
       if (stop.stop_requested()) break;
       const std::size_t got = pty->read(buffer.data(), buffer.size());
-      if (got == 0) break;
+      if (got == 0) break;   // 读到 EOF／被 `terminate` 关掉（见 `PtySession::terminate`）
       {
         const std::scoped_lock guard(pending_mutex_);
         // 缓冲按会话分：PTY 与行模式可能同时有活（宿主两种模式混用时）。
         pty_pending_.emplace_back(std::string(buffer.data(), got));
       }
     }
-    const int code = pty->wait();
-    {
+    // ⚠ `wait()` **只在读到 EOF 时**叫：如果是因为 `stop_requested` 跳出，
+    // 子进程可能还在（那是“丢掉这个会话”的路径，会话对象已要销毁）——
+    // 那时不应再阻塞等进程（子进程由 `terminate` 负责杀）。
+    if (!stop.stop_requested()) {
+      const int code = pty->wait();
       const std::scoped_lock guard(pending_mutex_);
       pty_exit_code_ = code;
       pty_exited_ = true;
@@ -537,9 +612,16 @@ void Terminal::run(std::string command) {
 void Terminal::send_stop() {
   TerminalSession& target = current();
   if (target.pty != nullptr && target.pty->valid()) {
-    target.pty->terminate();
-    append_to(active_, "[已中止] 终端会话");
-    (void)finish_session(target);
+    // **PTY 模式：发 `Ctrl+C`（0x03），而不是杀 shell**。
+    //
+    // 这是真终端里“中止”的语义：把中断字符送进终端输入流，
+    // 内核行规程向**前台进程组**发 SIGINT——当前命令被打断，
+    // 而 shell 自己活着（接着给你提示符）。
+    //
+    // 杀 shell（`terminate`）会把整个会话弄没：用户想着“停一下这条”，
+    // 结果终端直接死了、得重新开一个（实测踩到）。
+    // 真要把整条会话关掉，那是 `close_session` 的事。
+    send_bytes("\x03");
     return;
   }
   if (!target.running) {
@@ -564,6 +646,17 @@ void Terminal::finish_session(TerminalSession& session) {
 // ════════════════════════════════════════════════════════════════════════════
 
 void Terminal::pump() {
+  // ⓪ 先处理“上一帧受理的关闭”。
+  //
+  // ⚠ **必须立即返回**：`apply_pending_close` 会发 `on_close_last_session`，
+  // 宿主可能据此**把本元素整个拆掉**（关最后一个标签 ⇒ 面板收起）。
+  // 那之后再碰 `this` 就是 use-after-free——实测表现为直接段错误
+  //（`0xC0000005`，进程当场退出）。所以这里用了“处理完就走”。
+  if (pending_close_.has_value()) {
+    apply_pending_close();
+    return;
+  }
+
   // ① PTY 字节 → 屏幕（每个会话各自喂）。
   std::vector<std::string> pty_ready;
   {
@@ -682,8 +775,13 @@ void Terminal::ensure_children() {
   tabs_->set_id("terminal-tabs");
   tabs_->on_change = [this](std::size_t index) { set_active_session(index); };
   tabs_->on_close = [this](std::size_t index) { (void)close_session(index); };
-  // 输出区**自绘**（PTY 模式要逐格画样式与光标；那不是 `Text` 能力范围内的事）。
-  // 行模式只需要"能滚 + 跟随"，用 ScrollView 包一个 Text。
+  // 输出区：
+  //
+  // * **PTY 模式不用子件**——屏幕必须由本元素**逐格自绘**（颜色、反显、光标
+  //   都是逐格的事实）。套一个 `Text` 子件会出真 bug：子件在父的自绘**之后**
+  //   重绘，把单色的纯文本盖在上面，于是"颜色全丢了"（实测：整片输出只剩
+  //   主题文字色，ANSI 白解析了）。
+  // * **行模式**才要子件：那是纯文本滚回，交给 `ScrollView` + `Text` 最省事。
   view_ = dynamic_cast<ScrollView*>(add_child(std::make_unique<ScrollView>()));
   view_->set_id("terminal-scroll");
   view_->set_follow_end(true);
@@ -724,9 +822,15 @@ void Terminal::arrange(const RenderContext& context, math::Rect rect) {
     tabs_->measure(context, Constraints{});
     tabs_->arrange(context, tabs_rect_);
   }
-  if (view_ != nullptr && !output_rect_.is_empty()) {
-    view_->measure(context, Constraints{});
-    view_->arrange(context, output_rect_.inset(math::Insets{4.0f, 4.0f, 4.0f, 4.0f}));
+  // **PTY 模式下把行模式的子件藏起来**：它们是单色的纯文本，会在本元素的
+  // 逐格自绘之后重绘，把颜色/反显/光标全盖掉（见 `ensure_children` 的说明）。
+  const bool pty = session(active_) != nullptr && session(active_)->screen != nullptr;
+  if (view_ != nullptr) {
+    view_->set_visible(!pty);
+    if (!pty && !output_rect_.is_empty()) {
+      view_->measure(context, Constraints{});
+      view_->arrange(context, output_rect_.inset(math::Insets{4.0f, 4.0f, 4.0f, 4.0f}));
+    }
   }
   // 把可用**列数/行数**换算出来上报给 PTY（TUI 程序据此排版）。
   const float usable_w = std::max(0.0f, output_rect_.width - 8.0f);
@@ -749,6 +853,7 @@ void Terminal::arrange(const RenderContext& context, math::Rect rect) {
 void Terminal::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   const auto& colors = context.theme.colors();
+
   // 上一步记下的尺寸在这里上报（每帧一次，且此时布局已稳定）。
   auto* self = const_cast<Terminal*>(this);
   if (pending_size_set_) {
@@ -765,31 +870,34 @@ void Terminal::paint_content(const RenderContext& context, raster::Surface& canv
     return;
   }
 
+
+
   // ── PTY 模式：**逐格渲染屏幕** ──
   const st::text::AnsiScreen& screen = *session.screen;
   const TextPort& port = components_internal::text_port_of(context);
   const float font = base_font_size_ * font_scale_;
-  const float cell_w = cell_width_ * font_scale_;
-  const float line_h = line_height_ * font_scale_;
+  // 单元格尺寸从**字体端口实际量出来**，不用猜的系数：
+  // 猜出来的宽度会让"列 → 像素"换算与真实字形错位（表格列对不齐、光标飘）。
+  const float cell_w = port.measure_width("M", font, text::FontRole::Monospace);
+  const float line_h = port.line_height(font);
+  // 基线：字形原点是**基线**，而我们是按行顶排的——所以要加上 ascent。
+  const float ascent = port.ascent(font);
   const float origin_x = output_rect_.x + 4.0f;
   const float origin_y = output_rect_.y + 4.0f;
 
   const math::Color default_fg = colors.text;
   const math::Color default_bg = colors.surface_sunken;
-
+  // 屏幕上第 0 行就画在输出区**顶部**——滚动已经由屏幕模型自己做了
+  //（输出越过底部时它把整体上移）。这里再做一次“贴底”会把内容推到面板中间，
+  // 看起来像“提示符跑到中间去了”（实测踩到）。
   for (int row = 0; row < screen.rows(); ++row) {
     const float y = origin_y + static_cast<float>(row) * line_h;
     if (y + line_h < output_rect_.y || y > output_rect_.bottom()) continue;   // 视口剔除
-    // 逐格画：同一行的相邻同风格格子合成一段（减少绘制调用）。
+    // 逐格画：同一行的**相邻同风格**格子合成一段（减少绘制调用）。
+    // 分段键是"样式 + 是否粗体"——粗体走单独的字形外扩参数，混在一段里会丢。
     int col = 0;
     while (col < screen.cols()) {
-      const st::text::AnsiCell& cell = screen.cell(row, col);
-      if (cell.continuation) {
-        ++col;
-        continue;
-      }
-      const st::text::AnsiStyle style = cell.style;
-      // 收集同风格的一段
+      const st::text::AnsiStyle style = screen.cell(row, col).style;
       int end = col;
       std::string run;
       while (end < screen.cols()) {
@@ -799,44 +907,26 @@ void Terminal::paint_content(const RenderContext& context, raster::Surface& canv
           continue;
         }
         if (!(next.style == style)) break;
-        const int width = next.ch >= 0x1100U ? 2 : 1;   // 与屏幕模型的宽字符判据一致
-        run += [&] {
-          std::string encoded;
-          const char32_t ch = next.ch;
-          if (ch < 0x80U) {
-            encoded.push_back(static_cast<char>(ch));
-          } else if (ch < 0x800U) {
-            encoded.push_back(static_cast<char>(0xC0U | (ch >> 6U)));
-            encoded.push_back(static_cast<char>(0x80U | (ch & 0x3FU)));
-          } else if (ch < 0x10000U) {
-            encoded.push_back(static_cast<char>(0xE0U | (ch >> 12U)));
-            encoded.push_back(static_cast<char>(0x80U | ((ch >> 6U) & 0x3FU)));
-            encoded.push_back(static_cast<char>(0x80U | (ch & 0x3FU)));
-          } else {
-            encoded.push_back(static_cast<char>(0xF0U | (ch >> 18U)));
-            encoded.push_back(static_cast<char>(0x80U | ((ch >> 12U) & 0x3FU)));
-            encoded.push_back(static_cast<char>(0x80U | ((ch >> 6U) & 0x3FU)));
-            encoded.push_back(static_cast<char>(0x80U | (ch & 0x3FU)));
-          }
-          return encoded;
-        }();
-        end += width;
+        utf8_append(next.ch, run);
+        end += (next.ch >= 0x1100U && next.ch <= 0x3FFFDUL) ? 2 : 1;   // 宽字符占两列
+      }
+      if (run.empty()) {
+        col = end > col ? end : col + 1;
+        continue;
       }
       const float x = origin_x + static_cast<float>(col) * cell_w;
       const float width = static_cast<float>(end - col) * cell_w;
-      // 背景（反显时前景背景对调）
       math::Color fg = resolve(style.fg, default_fg, style.bold);
       math::Color bg = resolve(style.bg, default_bg, false);
       if (style.reverse) std::swap(fg, bg);
-      if (style.dim) {
-        fg = math::Color{fg.r, fg.g, fg.b, 160};
-      }
-      if (bg.r != default_bg.r || bg.g != default_bg.g || bg.b != default_bg.b) {
+      if (style.dim) fg = math::Color{fg.r, fg.g, fg.b, 150};
+      if (!(bg == default_bg)) {
         canvas.fill_rect(math::Rect{x, y, width, line_h}, raster::Paint::solid(bg));
       }
-      if (!run.empty() && run != std::string(end - col > 0 ? 0 : 0, '\0')) {
-        port.draw(canvas, run, math::Point{x, y}, font, fg);
-      }
+      // `FontRole::Monospace` 是**必须**的：终端的一切对齐（表格列、进度条、
+      // 光标位置）都建立在"每列等宽"上；用比例字体渲染会整体散架。
+      port.draw(canvas, run, math::Point{x, y + ascent}, font, fg, text::FontRole::Monospace,
+                0.0f, style.bold);
       col = end;
     }
   }

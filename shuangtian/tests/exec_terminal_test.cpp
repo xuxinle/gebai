@@ -241,13 +241,31 @@ ST_TEST(terminal_closing_last_session_leaves_a_fresh_one) {
 }
 
 ST_TEST(terminal_session_close_notifies_host) {
-  // 宿主靠这条回调决定"是不是该收起面板了"。
+  // 宿主靠 `on_session_close` 知道“哪个会话关了”、靠 `on_close_last_session`
+  // 知道“是不是该收起面板”。
+  //
+  // ⚠ **关闭是延迟的**：它不在 `close_session` 里当场做——那个调用可能来自
+  // `Tabs` 的回调（子组件的栈），而关闭会让宿主拆掉本元素（回到组件内部时
+  // `this` 已失效）。所以受理后由 `pump()` 在安全时机执行；测试里相应地
+  // 要推一帧。
   Harness harness;
   harness.terminal->add_session();
   std::size_t closed = 999;
+  bool last = false;
   harness.terminal->on_session_close = [&](std::size_t index) { closed = index; };
+  harness.terminal->on_close_last_session = [&](bool value) { last = value; };
   ST_CHECK(harness.terminal->close_session(1));
+  // 受理但**未执行**（回调还没发）。
+  ST_CHECK(harness.terminal->close_pending());
+  ST_CHECK_EQ(closed, std::size_t{999});
+  harness.terminal->pump();   // 下一帧才真关
   ST_CHECK_EQ(closed, std::size_t{1});
+  // 两个标签关一个 —— 不是“关掉最后一个”。
+  ST_CHECK(!last);
+  // 关到只剩一个（自动补的那个）→ 宿主应收到“该收面板了”。
+  ST_CHECK(harness.terminal->close_session(0));
+  harness.terminal->pump();
+  ST_CHECK(last);
 }
 
 // ════════════════════════════════════════════════════════════════════════════

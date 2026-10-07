@@ -129,8 +129,6 @@ ST_TEST(terminal_pty_output_feeds_the_ansi_screen_not_a_string) {
   ST_CHECK(screen->cursor_row() < screen->rows());
   ST_CHECK(screen->cursor_col() >= 0);
   ST_CHECK(screen->cursor_col() < screen->cols());
-  // 光标可见性由程序控制（shell 会开它）——这里只要求"是个确定状态"。
-  ST_CHECK(screen->cursor_visible() || !screen->cursor_visible());
   harness.terminal->send_stop();
 }
 
@@ -151,20 +149,28 @@ ST_TEST(terminal_pty_clear_wipes_the_screen) {
   harness.terminal->send_stop();
 }
 
-ST_TEST(terminal_pty_stop_terminates_the_child) {
-  // **"中止"必须是真中止**：`send_stop` 之后子进程要死、组件要回到不忙。
+ST_TEST(terminal_pty_stop_interrupts_without_killing_the_shell) {
+  // **中止的语义**：发 `Ctrl+C` 打断**当前命令**，而 **shell 自己活着**——
+  // 这是真终端里 `Ctrl+C` 的行为（内核行规程向前台进程组发 SIGINT）。
+  //
+  // 为何不杀 shell：那会把整个会话弄没——用户想着“停一下这条”，
+  // 结果终端直接死了、得重新开一个（实测踩到）。真要关会话用 `close_session`。
   if (!st::process::PtySession::supported()) return;
   Harness harness;
   harness.terminal->open_shell();
   ST_REQUIRE(harness.wait_for(">"));
   ST_CHECK(harness.terminal->busy());
+  // 起一条长命令，然后中止。
+  harness.terminal->send_bytes("Start-Sleep -Seconds 60\r");
+  harness.pump(40, 20);
   harness.terminal->send_stop();
-  // 给收尾一点时间（杀进程 + join 读线程）。
-  for (int i = 0; i < 100 && harness.terminal->pty_active(); ++i) {
-    harness.terminal->pump();
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
-  ST_CHECK(!harness.terminal->pty_active());
+  harness.pump(60, 20);
+  // shell 仍在（能接着用），这是与“杀进程”最直接的分界。
+  ST_CHECK(harness.terminal->pty_active());
+  // 再送一条命令，应该能执行（把中断后的输入流验证一下）。
+  harness.terminal->send_bytes("Write-Output after-stop-9271\r");
+  ST_CHECK(harness.wait_for("after-stop-9271"));
+  harness.terminal->send_stop();
 }
 
 ST_TEST(terminal_pty_resize_reaches_the_screen_model) {
