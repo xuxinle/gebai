@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <format>
 #include <memory>
@@ -137,6 +138,27 @@ std::string ui_font_scale{"auto"};
   button->style().justify = Justify::Start;
   button->style().text_align = TextAlign::Start;
   return button;
+}
+
+// —— DPI 档位（**唯一真源**：标签、切档序列、状态栏都从这里取）——
+//
+// 先前三处各写一份换算：标签把 1.5/2.0 映射成 “2x/3x”（与状态栏的 “1.5x/2.0x”
+// 自相矛盾），档位序列又是另一套阈值。显式比例才是**可核对的事实**——
+// 标签就该是后端实际生效的那一个数。
+
+/// 按钮/状态栏用的 DPI 文案：直接报**实际比例**（1.0 → “1x”，1.5 → “1.5x”）。
+[[nodiscard]] auto dpi_label(float scale) -> std::string {
+  return std::format("DPI {}x", scale == std::floor(scale)
+                                     ? std::format("{:.0f}", static_cast<double>(scale))
+                                     : std::format("{:.1f}", static_cast<double>(scale)));
+}
+
+/// 下一档缩放。非整比例（如系统默认的 1.25x）先收报到 1.0，再走 1.5 / 2.0 三档循环。
+[[nodiscard]] auto next_scale(float current) -> float {
+  if (!(current > 0.0f)) return 1.0f;
+  if (current < 1.25f) return 1.5f;
+  if (current < 1.75f) return 2.0f;
+  return 1.0f;
 }
 
 }  // namespace
@@ -268,7 +290,11 @@ auto run_app(int argc, char** argv) -> int {
   theme_button->set_id("theme-toggle");
   theme_button->set_icon("moon");
   auto* theme_button_ptr = theme_button.get();
-  auto scale_button = std::make_unique<Button>("DPI 1x", Button::Variant::Secondary, Button::Size::Small);
+  // 按钮标签与**实际缩放**必须同一份事实：`dpi_label()` 是唯一入口，
+  // 初值也由它给出（写死 "DPI 1x" 与后端解析出的 scale 无关，启动即错）。
+  auto scale_button =
+      std::make_unique<Button>(dpi_label(app.device_scale()), Button::Variant::Secondary,
+                               Button::Size::Small);
   scale_button->set_id("dpi-toggle");
   scale_button->set_icon("cpu");
   auto* scale_button_ptr = scale_button.get();
@@ -468,15 +494,23 @@ auto run_app(int argc, char** argv) -> int {
     status_right_ptr->set_content(dark ? "主题 dark · 视觉令牌已切换" : "主题 light · 视觉令牌已切换");
     root_ptr->mark_dirty_all();
   };
-  scale_button_ptr->on_click = [app_ptr, scale_button_ptr, status_right_ptr, root_ptr]() {
+  scale_button_ptr->on_click = [app_ptr, scale_button_ptr, status_ptr, status_right_ptr,
+                                refresh_runtime, root_ptr]() {
     const float current = app_ptr->device_scale();
-    const float next = current < 1.25f ? 1.5f : (current < 1.75f ? 2.0f : 1.0f);
+    const float next = next_scale(current);
     if (auto status = app_ptr->set_device_scale(next); status.has_value()) {
-      scale_button_ptr->set_label(std::format("DPI {}x", next == 1.0f ? 1 : (next == 1.5f ? 2 : 3)));
+      // 标签取**切换后回读**的实际值，而不是把 `next` 再格式化一遍：
+      // 两者一旦分叉（改档位却忘了改标签），界面就会自相矛盾。
+      scale_button_ptr->set_label(dpi_label(app_ptr->device_scale()));
+      status_ptr->set_content(std::format("DPI {:.1f}x · 字形已按物理分辨率重栅格化",
+                                          static_cast<double>(app_ptr->device_scale())));
+      // 概览页的「DPI 缩放」统计卡与底部右侧字段都是**运行时事实**，
+      // 切档后必须刷新——否则界面显示 1.5x 而实际已是 2.0x（实测复发过）。
+      refresh_runtime();
       status_right_ptr->set_content(std::format("DPI {:.1f}x · 字形已按物理分辨率重栅格化",
-                                                static_cast<double>(next)));
+                                                static_cast<double>(app_ptr->device_scale())));
     } else {
-      status_right_ptr->set_content("DPI 切换失败: " + status.error().message);
+      status_ptr->set_content("DPI 切换失败: " + status.error().message);
     }
     root_ptr->mark_dirty_all();
   };
@@ -519,6 +553,9 @@ auto run_app(int argc, char** argv) -> int {
                                             app.backend_name(), app.headless(),
                                             static_cast<double>(app.device_scale()),
                                             app.control_port()));
+  // **启动后回读实际 DPI 再写标签**：`scale` 在构造时还是 0（“自动”由后端解析，
+  // 无头模式下按系统缩放得到 1.0/1.25/1.5），拿它算出来的标签会与画面不符。
+  if (scale_button_ptr != nullptr) scale_button_ptr->set_label(dpi_label(app.device_scale()));
   refresh_runtime();
   app.root().mark_dirty_all();
   app.render_frame();
