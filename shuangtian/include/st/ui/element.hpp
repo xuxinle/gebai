@@ -563,6 +563,19 @@ class Element {
   /// 默认 `true`；「逻辑上在场但不应拦截输入」的形态（隐藏浮层、透明遮罩）覆写为
   /// `false` 或返回 `visible()`——不可见的浮层不再截住下层内容。
   [[nodiscard]] virtual auto intercepts_input() const noexcept -> bool { return true; }
+  /// **指针移动**时是否参与命中：默认与 `hit_test` 同义。
+  ///
+  /// 存在的理由：有些元素按整块矩形吃掉**点击**是**对的**（模态屏障——面板外点击
+  /// 不该落到下层），但同一块矩形不该连**移动**也吃掉：那会让宿主收不到 hover。
+  ///
+  /// 实测（2026-10-07，菜单栏下拉）：屏障把 `MouseMove` 一并吞了，于是
+  /// 「面板开着时移到另一个标题」不再切换菜单——用户报的「点击其他按钮直接切换列表」
+  /// 与「面板不跟随按钮的位置」两条都由此而来（面板开着时 `menubar.hovered` 恒 false）。
+  ///
+  /// 需要“只拦点击、放行移动”的元素覆写本函数（屏障形态返回 `hit_test_children`）。
+  [[nodiscard]] virtual auto hit_test_pointer_move(math::Point point) const noexcept -> bool {
+    return hit_test(point);
+  }
   /// 行为注入：在组件自身实现**之后**、冒泡**之前**追加一次回调（免子类化的小交互，
   /// 如「拖拽把手改宽度」）。返回 true = 已消费（冒泡停止）。仅对直接派发到本元素的
   /// 事件调用（祖先/后代的不经过本 handler）。

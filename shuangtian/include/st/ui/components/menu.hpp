@@ -62,6 +62,18 @@ class MenuPanel : public Element {
   /// 面板定位（锚定在菜单标题正下方；由 `ContextMenu`/`MenuBar` 计算后调用）。
   void set_anchor(math::Rect anchor_rect);
   [[nodiscard]] auto anchor_rect() const noexcept -> math::Rect { return anchor_; }
+  /// **惰性锚点**：每次布局时调用它取锚点矩形（而不是在 `set_anchor` 时拍死）。
+  ///
+  /// 为什么需要：声明式重建发生在**测量之前**，那时 `MenuBar::title_widths_` 还是空，
+  /// 直接 `set_anchor(title_rect(i))` 会得到 `x=栏左, width=0`——面板永远停在最左边
+  ///（实测用户报「菜单激活列表要跟随菜单按钮的位置」）。回调在布局时求值，
+  /// 拿到的必然是本轮的真实标题矩形。
+  void set_anchor_source(std::function<math::Rect()> source);
+  /// 属性面：`anchor`（`x,y,w,h`）——自动化核“面板跟不跟随按钮”用。
+  /// 不读它就只能从视觉树反推，而视觉树里浮层宿主的矩形会干扰判断。
+  [[nodiscard]] auto get_property(std::string_view name) const
+      -> std::optional<std::string> override;
+  [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
 
   [[nodiscard]] auto item_count() const noexcept -> std::size_t;
   [[nodiscard]] auto item_id(std::size_t index) const -> std::string_view;
@@ -101,6 +113,8 @@ class MenuPanel : public Element {
 
   std::vector<MenuItem> items_{};
   math::Rect anchor_{};
+  /// 惰性锚点来源（见 `set_anchor_source`）：非空时每次布局都重新求值。
+  std::function<math::Rect()> anchor_source_{};
   std::size_t highlighted_{kNoIndex};
   float item_height_{kItemHeight};
 };
@@ -114,6 +128,9 @@ class MenuBar : public Element {
  public:
   static constexpr float kBarHeight{32.0f};
   static constexpr float kTitlePaddingX{12.0f};
+  /// 悬浮/展开**高亮块**相对标题矩形的上下内缩（见 `highlight_rect`）。
+  /// 非 0 才能与容器底边的分隔线共存——撑满会把线盖掉（实测断口 46 逻辑 px）。
+  static constexpr float kHighlightInsetY{4.0f};
 
   MenuBar();
 
@@ -127,6 +144,11 @@ class MenuBar : public Element {
   [[nodiscard]] auto menu_id(std::size_t index) const -> std::string_view;
   /// 顶级标题矩形（命中/锚定；arrange 后有效）。
   [[nodiscard]] auto title_rect(std::size_t index) const -> math::Rect;
+  /// 当前悬停的标题序号（`kNoIndex` = 无）。自动化核“移动是否到达菜单栏”用——
+  /// 面板开着时它能被更新，才说明屏障没有把 `MouseMove` 吞掉。
+  [[nodiscard]] auto hover_index() const noexcept -> int { return hover_index_; }
+  /// 高亮块（悬浮/展开的底色）——比 `title_rect` 上下内缩，不碰容器边框。
+  [[nodiscard]] auto highlight_rect(const math::Rect& title) const -> math::Rect;
   /// 当前打开的菜单序号（无打开为 `kNoIndex`；由 `set_open_index` 维护）。
   [[nodiscard]] auto open_index() const noexcept -> std::size_t { return open_index_; }
   void set_open_index(std::size_t index);
@@ -135,6 +157,11 @@ class MenuBar : public Element {
   /// 激活转发到 `on_action(menu_id, item_id)`；面板打开期间 `open_index_` 由本类维护
   /// （面板 on_close 时自动清 `open_index_`，摘除 overlay 仍由调用方完成）。
   [[nodiscard]] auto make_panel(std::size_t index) -> std::unique_ptr<MenuPanel>;
+ /// 把面板重新绑定到第 `index` 项（**条目 + 回调 + 锚点同进同出**）。
+ ///
+ /// 菜单栏只有**一个**下拉面板，切换菜单时调它。三样必须一起刷——实测各漏过一遍：
+ /// 漏锚点 ⇒ 面板不跟随按钮；漏回调 ⇒ 执行上一个菜单的动作；漏条目 ⇒ 显示旧内容。
+ void bind_panel(MenuPanel& panel, std::size_t index);
 
   void apply_theme(const Theme& theme) override;
   void measure(const RenderContext& context, const Constraints& constraints) override;

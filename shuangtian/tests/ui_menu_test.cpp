@@ -27,6 +27,21 @@ using st::ui::MenuItem;
 using st::ui::MenuPanel;
 using st::ui::UiRoot;
 
+/// 测试专用“障碍浮层”：整视口命中点击（模拟模态屏障），但按契约**放行指针移动**。
+///
+/// 为何需要（2026-10-07）：真缺陷是 dsl 的 `OverlayHost` 屏障把 `MouseMove`
+/// 也一起吞了，导致面板开着时菜单栏收不到 hover。那个类是 dsl.cpp 的私有实现，
+/// 测试拿不到它，所以在这里复刻它的**契约**（两个命中函数分开）——
+/// 一旦框架把移动也按普通命中走，本用例即变红。
+class BarrierProbe : public st::ui::Element {
+ public:
+  [[nodiscard]] auto type() const noexcept -> std::string_view override { return "BarrierProbe"; }
+  [[nodiscard]] auto hit_test(st::math::Point) const noexcept -> bool override { return true; }
+  [[nodiscard]] auto hit_test_pointer_move(st::math::Point point) const noexcept -> bool override {
+    return hit_test_children(point);   // 移动只看自己的子元素，不占整屏
+  }
+};
+
 [[nodiscard]] auto sample_menus() -> std::vector<Menu> {
   return {
       Menu{"file", "文件",
@@ -94,6 +109,40 @@ ST_TEST(menu_bar_layout_and_titles) {
   ST_CHECK_EQ(first.height, 32.0f);
   ST_CHECK(second.x >= first.right() - 0.5f);
   ST_CHECK_EQ(second.height, 32.0f);
+}
+
+ST_TEST(menu_bar_highlight_does_not_touch_the_container_border) {
+  // 用户报「菜单悬浮时，下边框线断开」（2026-10-07）。
+  //
+  // 根因：悬浮/展开的高亮块**撑满了标题矩形的全高**，而 `title_rect` 的高度等于
+  // 容器高——于是高亮的下沿正好压在容器底边那条分隔线上，**圆角的抗锯齿**把线
+  // 啃出一个弧形缺口（实测断口 46 逻辑 px，正好是被悬浮那一项的宽度）。
+  //
+  // 不变量：**高亮块必须内缩在容器内**（不与容器上下边框同位置）。
+  // 回退 `highlight_rect` 成“返回 title 原样”即变红。
+  UiRoot root;
+  auto bar = std::make_unique<MenuBar>();
+  bar->set_menus(sample_menus());
+  MenuBar* bar_ptr = bar.get();
+  auto page = std::make_unique<st::ui::Panel>(st::ui::FlexDirection::Column);
+  page->add_child(std::move(bar));
+  root.set_content(std::move(page));
+  root.layout(true);
+
+  for (std::size_t index = 0; index < bar_ptr->menu_count(); ++index) {
+    const st::math::Rect title = bar_ptr->title_rect(index);
+    const st::math::Rect highlight = bar_ptr->highlight_rect(title);
+    // ① 上沿在标题内（下移）——不与容器顶边重合
+    ST_CHECK(highlight.y > title.y);
+    // ② 下沿在标题内（上收）——**不与容器底边重合**，这是“线不断”的充分条件
+    ST_CHECK(highlight.bottom() < title.bottom());
+    // ③ 宽度不变（只上下内缩，不改变命中/排版）
+    ST_CHECK_EQ(highlight.width, title.width);
+    ST_CHECK_EQ(highlight.x, title.x);
+    // ④ 内缩对称且为正
+    ST_CHECK(highlight.y - title.y > 0.0f);
+    ST_CHECK(std::abs((highlight.y - title.y) - (title.bottom() - highlight.bottom())) < 0.01f);
+  }
 }
 
 ST_TEST(menu_bar_click_opens_panel_overlay) {
@@ -463,4 +512,87 @@ ST_TEST(menu_bar_hover_switches_open_menu) {
   ST_CHECK_EQ(opened.size(), static_cast<std::size_t>(1));
   ST_CHECK_EQ(opened[0], static_cast<std::size_t>(1));
   ST_CHECK_EQ(bar_ptr->open_index(), static_cast<std::size_t>(1));
+}
+
+ST_TEST(menu_bar_hover_reaches_the_bar_through_the_open_panel_barrier) {
+  // 用户报「点击其他按钮直接切换列表」（2026-10-07）。
+  //
+  // 根因不在菜单栏，而在 **overlay 屏障把 `MouseMove` 一并吞了**：
+  // 面板开着时 `menubar.hovered` 恒为 false，菜单栏根本收不到移动，
+  // 于是“移到别的标题就切换”形同不存在（真机实测）。
+  //
+  // 不变量：**屏障只拦“点”，放行“移动”**（否则任何“浮层开着仍需 hover 的宿主”都会坏）。
+  // 回退 `OverlayHost::on_event` 的 MouseMove 分支为 `return true`、
+  // 或回退 `UiRoot` 的移动命中为 `hit_test`，本用例即变红。
+  UiRoot root;
+  root.set_viewport(st::math::Size{800.0f, 600.0f});
+  auto bar = std::make_unique<MenuBar>();
+  bar->set_menus(sample_menus());
+  MenuBar* bar_ptr = bar.get();
+  root.set_content(std::move(bar));
+  root.layout(true);
+
+  std::vector<std::size_t> opened;
+  bar_ptr->on_open_menu = [&opened](std::size_t index) { opened.push_back(index); };
+  // **前提：先打开第 0 项**——切换只在“已有菜单开着”时才发生（否则移动只是普通 hover）。
+  // `make_panel` 会置 `open_index_`；这里不要那个面板，接住返回值后丢弃。
+  (void)bar_ptr->make_panel(0);
+  ST_CHECK_EQ(bar_ptr->open_index(), static_cast<std::size_t>(0));
+  // 挂一个**屏障形态**的浮层：整个视口命中（模拟 `menu_panel_overlay` 的 barrier），
+  // 但按契约它只该拦“点”、放行“移动”。
+  root.add_overlay(std::make_unique<BarrierProbe>(), UiRoot::OverlayLayout::FillViewport);
+  root.layout(true);
+
+  const st::math::Rect second = bar_ptr->title_rect(1);
+  const st::math::Point over_second{second.x + second.width * 0.5f,
+                                    second.y + second.height * 0.5f};
+  Event move;
+  move.kind = EventKind::MouseMove;
+  move.position = over_second;
+  (void)root.dispatch(move);
+
+  // ① 菜单栏确实收到了 hover（屏障没把它挡在外面）
+  ST_CHECK_EQ(bar_ptr->hover_index(), static_cast<std::size_t>(1));
+  // ② 并因此发起了切换
+  ST_CHECK_EQ(opened.size(), static_cast<std::size_t>(1));
+  ST_CHECK_EQ(bar_ptr->open_index(), static_cast<std::size_t>(1));
+}
+
+ST_TEST(menu_panel_anchor_follows_the_switched_title) {
+  // 用户报「菜单激活列表要跟随菜单按钮的位置，不再都是在最左边弹出」（2026-10-07）。
+  //
+  // 根因：锚点在**声明式重建时**就拍死了，而那时 `MenuBar::title_widths_` 还是空的
+  //（测量在重建之后）——`title_rect()` 返回 `x=栏左, width=0`，面板永远停在最左边。
+  //（真机实测锚点就是 `36,0,0,40`。）
+  //
+  // 修法：锚点改为**惰性求值**（`set_anchor_source`），布局时才算。
+  // 本用例钉住：切换后锚点等于**目标标题**的矩形，且锚点宽度非零。
+  UiRoot root;
+  root.set_viewport(st::math::Size{800.0f, 600.0f});
+  auto bar = std::make_unique<MenuBar>();
+  bar->set_menus(sample_menus());
+  MenuBar* bar_ptr = bar.get();
+  root.set_content(std::move(bar));
+  root.layout(true);
+
+  auto panel = bar_ptr->make_panel(0);
+  MenuPanel* panel_ptr = panel.get();
+  // 与真实用法一致（`dsl::menu_panel_overlay` 也走 FillViewport）：面板自己按锚点定位，
+  // 不靠调用方分给它的矩形。
+  root.add_overlay(std::move(panel), UiRoot::OverlayLayout::FillViewport);
+  root.layout(true);
+
+  for (std::size_t index = 0; index < bar_ptr->menu_count(); ++index) {
+    const st::math::Rect title = bar_ptr->title_rect(index);
+    ST_CHECK(title.width > 0.0f);   // 测量已跑：标题矩形是真实几何
+    bar_ptr->bind_panel(*panel_ptr, index);
+    root.layout(true);
+    const st::math::Rect anchor = panel_ptr->anchor_rect();
+    ST_CHECK_EQ(anchor.x, title.x);
+    ST_CHECK_EQ(anchor.width, title.width);
+    ST_CHECK(anchor.width > 0.0f);            // 非零 = 不是“拍死时的空矩形”
+    // 面板的 `bounds_` 必须落在标题下方（`arrange` 走锚点分支的产物）。
+    // 注：用 FillViewport 挂才与真实用法一致（`menu_panel_overlay` 就是那样挂）。
+    ST_CHECK_EQ(panel_ptr->bounds().x, title.x);
+  }
 }

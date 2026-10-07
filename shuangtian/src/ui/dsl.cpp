@@ -98,6 +98,13 @@ class OverlayHost : public Panel {
     return barrier_ ? Element::hit_test(point) : hit_test_children(point);
   }
 
+  // **屏障只吃“点”，不吃“移动”**：宿主（菜单栏/工具栏）需要移动做悬停反馈。
+  // 实测：不分事件类型地拿整块矩形吃命中，会让面板开着时菜单栏收不到 hover，
+  // “移到别的标题切菜单”失效（用户报的两条即此）。
+  [[nodiscard]] auto hit_test_pointer_move(math::Point point) const noexcept -> bool override {
+    return hit_test_children(point);
+  }
+
   auto on_event(const RenderContext& context, Event& event) -> bool override {
     if (!barrier_) return Panel::on_event(context, event);
     switch (event.kind) {
@@ -109,8 +116,18 @@ class OverlayHost : public Panel {
         outside_press_ = false;
         return true;
       case EventKind::MouseUp:
+        return true;   // 上抬与 Click 同属“点”这条链，不给下层
       case EventKind::MouseMove:
-        return true;   // 屏障内不把移动派给下层（避免 hover 闪烁）
+        // **鼠标移动必须放行**——屏障只拦“点”，不拦“移动”。
+        //
+        // 曾经把 MouseMove 也吞掉（注释写的理由是“避免 hover 闪烁”），代价是
+        // **宿主收不到 hover**：菜单栏开着下拉面板时，移到另一个标题不再切换
+        //（用户报「点击其他按钮直接切换列表」「面板不跟随按钮的位置」两条由此而来，
+        // 实测面板开着时 `menubar.hovered` 恒为 false）。
+        //
+        // “面板外不动下层”的诉求只该作用在**点击**上（那才是误操作来源）；
+        // 移动是无害的持续性输入，宿主（菜单栏/工具栏）本就靠它做悬停反馈。
+        return Panel::on_event(context, event);
       default:
         return Panel::on_event(context, event);
     }
@@ -1675,11 +1692,31 @@ auto context_menu(Composer& c, math::Point anchor, std::vector<MenuItem> items,
 
 void menu_panel_overlay(Composer& c, MenuBar& bar, std::size_t index) {
   if (index >= bar.menu_count()) return;
-  const std::string key = "menu-panel-" + std::string(bar.menu_id(index));
+  // **整个菜单栏只有一个下拉面板**，切换菜单 = 换内容 + 换锚点。
+  //
+  // key 曾经是 `"menu-panel-" + menu_id(index)`（每个菜单一个 overlay），于是
+  // 「切换菜单」被建模成“卸掉旧 overlay + 装一个新 overlay”，而 overlay 是
+  // **声明式重建**：旧 key 不再被声明 ⇒ 下一帧 sweep 把它摘掉。
+  //
+  // 用户报的两件事都出在这里（实测）：
+  // ① 「点击其他按钮不能直接切换列表」——点“编辑”时旧面板先被摘掉，
+  //    新面板下一帧才认领，中间有一帧“什么都没有”，观感就是面板闪没/没切过去；
+  // ② 面板不跟随按钮——`make_panel` 里的 `set_anchor(title_rect(index))` 只在
+  //    **首次构造**时执行（同 key 复用分支跳过了它），而 key 变了就换了新对象……
+  //    但同一 key 复用时光标移开又回来并不会重设 anchor，锚点会停在**首次打开**那一项。
+  //
+  // 用**固定 key** 后：同一宿主、同一面板对象，切换只更新
+  // “条目 + 锚点”，不再有摘装过程，面板位置也就必然跟着按钮走。
+  const std::string key = "menu-panel";
   Element* host = c.overlay_slot(key);
-  // 只在首次认领时构造面板（同 key 复用——面板内状态保持）
+  // 首次认领时构造面板；之后**每次**都把内容与锚点刷成当前菜单
+  //（`set_items` 带 0 值早退、`set_anchor` 是纯赋值，逐帧调用无代价）。
   if (host->child_count() == 0) {
     host->add_child(bar.make_panel(index));
+  } else if (auto* panel = dynamic_cast<MenuPanel*>(host->children()[0].get())) {
+    // 条目 / 回调 / 锚点三样一起换——收在 `bind_panel` 里，避免切换路径漏掉某一样
+    //（这三种漏法各自都对应过一个缺陷，见那里的说明）。
+    bar.bind_panel(*panel, index);
   }
   // 点面板外 = 关闭请求：下拉菜单的通行手势（菜单栏自己没有全屏命中，
   // 只有宿主知道“点在面板外”）。事件仍**穿透**给下层，

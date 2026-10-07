@@ -2300,6 +2300,31 @@ if (palette_open_.value()) {          // 条件声明
 
 `overlay_slot` 归 `OverlayHost`（`dsl.cpp`）；`menu_panel_overlay` 切屏障并接关闭回调。
 
+**屏障只拦“点”，不拦“移动”**（2026-10-07 实测修正）
+
+同一块矩形吃掉点击是对的，但**不该连指针移动也吃掉**——宿主（菜单栏、工具栏）
+靠移动做悬停反馈。原先屏障把 `MouseMove` 也吞了（注释写的理由是“避免 hover 闪烁”），
+后果是**面板开着时菜单栏收不到 hover**：`menubar.hovered` 恒为 `false`，
+“移到另一个标题就切换菜单”形同不存在。
+
+修法是**命中分型**：`Element::hit_test`（点）与 `Element::hit_test_pointer_move`（移动）
+两个入口，`UiRoot` 对 `MouseMove` 走后者；屏障只覆写前者为整块命中，
+后者返回 `hit_test_children`。判据是“写吞输入的兜底分支前，先问这类输入下游有没有消费者”。
+
+**菜单栏只有一个下拉面板**（key 固定为 `menu-panel`）
+
+`menu_panel_overlay` 曾按 `menu-panel-<menu_id>` 给每个菜单一个 overlay 槽，
+于是“切换菜单”被建模成“卸旧 overlay + 装新 overlay”，而 overlay 是**声明式重建**——
+旧 key 不再声明 ⇒ 下一帧 sweep 摘掉，中间有一帧什么都没有。
+现改为固定 key、同槽复用：切换只**更新绑定**（条目 + 回调 + 锚点，收在
+`MenuBar::bind_panel` 里同进同出——漏任何一样都是一个缺陷）。
+
+**锚点必须惰性求值**（`MenuPanel::set_anchor_source`）
+
+声明式重建发生在**测量之前**，那时 `MenuBar::title_widths_` 还是空的，
+直接取 `title_rect(index)` 得到 `x=栏左, width=0` ⇒ **面板永远停在最左边**。
+因此锚点存的是“求值回调”，在 `arrange`（本轮布局已完成后）才求值。
+
 **浮层键盘派发（`UiRoot::dispatch_key_into`）**
 
 模态分支对 overlay 不能只调一次宿主的 `on_event`：宿主自己不认键（它只是坐标系），
@@ -3717,7 +3742,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
 | 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case
-  超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑） | `st test` | **865 用例 / 21041 断言**（dev 档实测，四片自报值累加：3545+3479+9379+4638；另 12 个慢用例默认跳过） |
+  超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑） | `st test` | **868 用例 / 21067 断言**（dev 档实测，四片自报值累加：3661+3965+9231+4210；另 12 个慢用例默认跳过） |
 | 跨编译器检查 | **`st check --toolchain=<名>`**：同一个工程用另一个编译器做**语义分析**，不产出、不链接。与 `build` 共用单元枚举/标志组装/按族收敛（`options.check_only`），所以两者**不可能分叉**。实测全量 77 单元 clang 15.0 s / gcc 21.3 s（gcc 全量构建 36 s），**可查出 GCC 不报的自家缺陷**（未使用私有字段 / 未使用 lambda 捕获 / 隐式变号 / 死代码），**查不出链接期问题**（ODR 违反、符号缺失、ABI 不匹配） | `st check --toolchain=clang` | 已接入（本轮实测拓出一处：`build.cpp` 里 `dep_warning` 是移除 MSVC 时留下的死变量） |
 | 并行测试的资源推导 | **`--test-jobs N` 分片**：同一份 `st_tests` 被拉起 N 次（每次 `--shard i/N`），片内顺序不变、片间不共享内存；每片写各自的 JUnit，父进程合并成一份（用例名排序，逐字节可复现）。**片数按机器实际资源推导**（`plan_test_shards`，与编译并发同一套探测）：内核测试进程 CPU/墙钟 ≈ 0.98（占满一个核）而峰值工作集仅 112 MB，所以上界依次是**核数（含 cgroup CPU 配额）→ 内存预算 → 策略上限**，三者取小；**不做“核数 / 2”**——那个除数是给内存敏感的编译并发用的，对测试进程没有依据 | `st test --test-jobs 16` | **纯执行 22.9 s → 3.8 s（6.0×）**；机时代价 2.13×。与串行逐用例比对 `missing=0 extra=0 failDiff=0 dupes=0`（见 `docs/BUILD_TEST_PERF.md`） |
 | 独立工程集成 | **真建一个引用 framework 的最小工程**、真构建真跑（`tests/pkg_integration_test.cpp`）

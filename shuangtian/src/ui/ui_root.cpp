@@ -255,6 +255,20 @@ auto UiRoot::hit_test(math::Point point) -> Element* {
   return hit_test_subtree(*content_, point);
 }
 
+auto UiRoot::hit_test_pointer_move(math::Point point) -> Element* {
+  // 与 `hit_test` 同构，只在**浮层那一层**换成 `hit_test_pointer_move`：
+  // 浮层内容自身的命中不变（子树递归仍用普通命中），只有“宿主矩形算不算命中”
+  // 这一条判据按事件类型区分。见 `Element::hit_test_pointer_move` 的说明。
+  for (auto iterator = overlays_.rbegin(); iterator != overlays_.rend(); ++iterator) {
+    Element& overlay = **iterator;
+    if (!overlay.visible() || !overlay.intercepts_input()) continue;
+    if (!overlay.hit_test_pointer_move(point)) continue;
+    if (Element* hit = hit_test_subtree(overlay, point); hit != nullptr) return hit;
+  }
+  if (content_ == nullptr) return nullptr;
+  return hit_test_subtree(*content_, point);
+}
+
 auto UiRoot::hit_test_subtree(Element& element, math::Point point) -> Element* {
   if (!element.visible() || !element.intercepts_input()) return nullptr;
   // **裁剪器件的命中也要裁**：`clip_children` 为真的元素（`ScrollView` 的内层、
@@ -428,7 +442,9 @@ auto UiRoot::dispatch(Event& event) -> bool {
         handled = dispatch_to(*pressed_, event);
         break;
       }
-      Element* target = hit_test(event.position);
+      // 指针移动走**移动专用命中**：屏障类元素只拦点击、放行移动，
+      // 否则宿主（菜单栏/工具栏）收不到 hover（实测：面板开着时菜单栏无法悬停切换）。
+      Element* target = hit_test_pointer_move(event.position);
       update_hover(target);
       handled = dispatch_to(target != nullptr ? *target : *content_, event);
       break;

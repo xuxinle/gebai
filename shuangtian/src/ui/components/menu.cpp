@@ -75,6 +75,24 @@ void MenuPanel::set_anchor(math::Rect anchor_rect) {
   mark_layout_dirty();
 }
 
+// 锚点属于“当前打开的是哪一个菜单”——自动化需要能核“面板跟不跟随按钮”，
+// 所以把锚点放到属性面（否则只能从视觉树反推，而视觉树里有浮层宿主的干扰）。
+// 见 `menu_bar_highlight_does_not_touch_the_container_border` 同批的锚点回归。
+//
+auto MenuPanel::get_property(std::string_view name) const -> std::optional<std::string> {
+  if (name == "anchor") {
+    return std::format("{:.2f},{:.2f},{:.2f},{:.2f}", anchor_.x, anchor_.y, anchor_.width,
+                       anchor_.height);
+  }
+  return Element::get_property(name);
+}
+
+auto MenuPanel::property_names() const -> std::vector<std::string_view> {
+  auto names = Element::property_names();
+  names.push_back("anchor");
+  return names;
+}
+
 void MenuPanel::set_highlighted(std::size_t index) {
   if (index >= items_.size()) index = kNoIndex;
   if (index != kNoIndex && items_[index].separator) index = kNoIndex;
@@ -126,13 +144,29 @@ void MenuPanel::measure(const RenderContext& context, const Constraints& constra
 void MenuPanel::arrange(const RenderContext& context, math::Rect rect) {
   (void)context;
   // 锚定优先：挂 Stack overlay 时 UiRoot 分到的是「顶部左对齐 + 自身尺寸」矩形，
-  // 不是标题下方——面板必须自己落到 anchor_（标题正下方、左对齐；锚为空时用分到的矩形）。
+  // 不是标题下方——面板必须自己落到 anchor（标题正下方、左对齐；无锚时用分到的矩形）。
+  //
+  // **锚点在布局时才求值**（`anchor_source_` 回调），而不是 `set_anchor` 时拍死：
+  // 声明式重建（`build()`）发生在**测量之前**，那时 `MenuBar::title_widths_` 还是空的，
+  // 直接取 `title_rect()` 会得到 `x = 栏左、width = 0`——实测面板永远停在最左边
+  // （用户报「菜单激活列表要跟随菜单按钮的位置，不再都是在最左边弹出」）。
+  // 惰性求值让它拿到的必然是**本轮布局后**的真实标题矩形。
+  if (anchor_source_) anchor_ = anchor_source_();
   if (anchor_.width > 0.0f || anchor_.height > 0.0f) {
     bounds_ = math::Rect{anchor_.x, anchor_.bottom(), measured_.width, measured_.height};
+    // **越界内收**：面板贴右缘时（“帮助”这类靠右的标题）不能探出视口。
+    if (rect.width > 0.0f && bounds_.x + bounds_.width > rect.right()) {
+      bounds_.x = std::max(rect.x, rect.right() - bounds_.width);
+    }
   } else {
     bounds_ = rect;
   }
   layout_dirty_ = false;
+}
+
+void MenuPanel::set_anchor_source(std::function<math::Rect()> source) {
+  anchor_source_ = std::move(source);
+  mark_layout_dirty();
 }
 
 void MenuPanel::paint_content(const RenderContext& context, raster::Surface& canvas) const {
@@ -295,6 +329,18 @@ auto MenuBar::title_rect(std::size_t index) const -> math::Rect {
   return math::Rect{x, bounds_.y, title_widths_[index], bounds_.height};
 }
 
+auto MenuBar::highlight_rect(const math::Rect& title) const -> math::Rect {
+  // **悬浮/展开高亮不能撑满容器高**：那会盖住底部那条分隔线，圆角的抗锯齿
+  // 把线“啃”出一个弧形缺口（用户报：「菜单悬浮时，下边框线断开」。
+  // 实测断口 46 逻辑 px，正好是被悬浮那一项的宽度）。
+  //
+  // 上下各留 `kHighlightInsetY`，高亮就是一块“安静的块”，不碰容器边框。
+  // 同时它也修了“高亮块看着比文字大一圈”的观感。
+  const float inset = std::min(kHighlightInsetY, title.height * 0.5f);
+  return math::Rect{title.x, title.y + inset, title.width,
+                    std::max(0.0f, title.height - inset * 2.0f)};
+}
+
 void MenuBar::set_open_index(std::size_t index) {
   if (index >= menus_.size()) index = kNoIndex;
   if (open_index_ == index) return;
@@ -305,9 +351,28 @@ void MenuBar::set_open_index(std::size_t index) {
 auto MenuBar::make_panel(std::size_t index) -> std::unique_ptr<MenuPanel> {
   if (index >= menus_.size()) return nullptr;
   auto panel = std::make_unique<MenuPanel>(menus_[index].items);
+  bind_panel(*panel, index);
+  open_index_ = index;
+  return panel;
+}
+
+void MenuBar::bind_panel(MenuPanel& panel, std::size_t index) {
+  // 面板**每次切菜单都要重新绑定**：条目、回调、锚点三样都属于“当前那一项”。
+  //
+  // 为什么收进这里（而不是让 dsl 层的切换路径自己拼）：这三样必须**同进同出**——
+  // 一次切换里漏掉任何一样就是一个缺陷（实测各踩过一遍）：
+  //   * 漏 `set_anchor` ⇒ 面板停在**上一次**的位置（用户报「要跟随菜单按钮的位置」）；
+  //   * 漏回调重绑 ⇒ 执行的是**上一个菜单**的动作；
+  //   * 漏 `set_items` ⇒ 显示上一个菜单的条目（用户报「不能直接切换列表」）。
+  if (index >= menus_.size()) return;
+  panel.set_items(menus_[index].items);
   const std::string menu_id = menus_[index].id;
   const std::size_t menu_index = index;
-  panel->on_activate = [this, menu_id, menu_index](std::size_t item_index) {
+  // 锚定：标题正下方、与标题左对齐。**惰性**——`bind_panel` 在声明式重建里调用，
+  // 那时 `title_widths_` 还没算（测量在重建之后），直接取会拿到 `width=0` 的标题矩形，
+  // 面板就永远停在最左边。回调在布局时求值，拿到的是本轮真实几何。
+  panel.set_anchor_source([this, menu_index]() { return title_rect(menu_index); });
+  panel.on_activate = [this, menu_id, menu_index](std::size_t item_index) {
     if (item_index >= menus_[menu_index].items.size()) return;
     if (on_action) on_action(menu_id, menus_[menu_index].items[item_index].id);
   };
@@ -317,14 +382,13 @@ auto MenuBar::make_panel(std::size_t index) -> std::unique_ptr<MenuPanel> {
   // 这里踩过一个**真缺陷**：早期把 `panel->on_close` 直接接到 `set_open_index`，
   // 于是“关闭”只更新了菜单栏自己的状态，调用方**永远收不到通知** →
   // overlay 留在屏上（再加一次 `on_open_menu` 叠成两张，实测菜单选完不消失）。
-  panel->on_close = [this, menu_index]() {
+  //
+  // ⚠ 回调里比对的是**本面板绑定的那个 index** 而不是 `open_index_` 的当前值：
+  // 切换后旧面板的闭包若不比对，会把新菜单也一并关掉（切换瞬间“面板消失”）。
+  panel.on_close = [this, menu_index]() {
     if (open_index_ == menu_index) set_open_index(kNoIndex);
     if (on_menu_close) on_menu_close();
   };
-  // 锚定：标题正下方、与标题左对齐。
-  panel->set_anchor(title_rect(index));
-  open_index_ = index;
-  return panel;
 }
 
 void MenuBar::apply_theme(const Theme& theme) {
@@ -359,10 +423,11 @@ void MenuBar::paint_content(const RenderContext& context, raster::Surface& canva
     const bool open = index == open_index_;
     const bool hovered = static_cast<int>(index) == hover_index_;
     if (open) {
-      fill_round_rect(canvas, title, metrics.radius_sm,
+      fill_round_rect(canvas, highlight_rect(title), metrics.radius_sm,
                       raster::Paint::solid(colors.primary_soft));
     } else if (hovered) {
-      fill_round_rect(canvas, title, metrics.radius_sm, raster::Paint::solid(colors.surface_alt));
+      fill_round_rect(canvas, highlight_rect(title), metrics.radius_sm,
+                      raster::Paint::solid(colors.surface_alt));
     }
     draw_line(context, canvas, menus_[index].label, title, metrics.font_base,
               open ? colors.primary : colors.text);

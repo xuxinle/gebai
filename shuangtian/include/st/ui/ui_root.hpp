@@ -76,6 +76,10 @@ class UiRoot : public Element::HostFocus {
   [[nodiscard]] auto find(std::string_view id) -> Element*;
   [[nodiscard]] auto query(const Selector& selector, std::size_t limit = 0) -> std::vector<Element*>;
   [[nodiscard]] auto hit_test(math::Point point) -> Element*;
+  /// 指针移动专用命中：与 `hit_test` 同构，只在浮层那一层改用
+  /// `Element::hit_test_pointer_move`（屏障只拦点击、放行移动）。
+  /// 见 `Element::hit_test_pointer_move` 的说明与实测。
+  [[nodiscard]] auto hit_test_pointer_move(math::Point point) -> Element*;
 
   // —— 全局快捷键 ——
   //
