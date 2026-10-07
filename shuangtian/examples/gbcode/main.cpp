@@ -715,9 +715,18 @@ struct CodeEditorPage : Component {
   /// 标题栏文案：脏时加一个圆点前缀（VSCode 同族的"未保存"提示）。
   [[nodiscard]] auto window_title() const -> std::string {
     const auto list = buffers_.value();
-    if (active_.value() >= list.size()) return "歌白代码";
+    // 有工作区时把它的名放进标题——「打开文件夹」之后这是“我现在在哪个项目里”的
+    // 第一指示（VSCode 同此：标题栏显示文件夹名）。
+    std::string suffix = "歌白代码";
+    if (!workspace_.empty()) {
+      const std::size_t slash = workspace_.find_last_of("/\\");
+      const std::string name =
+          slash == std::string::npos ? workspace_ : workspace_.substr(slash + 1);
+      if (!name.empty()) suffix = name + " - 歌白代码";
+    }
+    if (active_.value() >= list.size()) return suffix;
     const OpenBuffer& buffer = list[active_.value()];
-    return (buffer.dirty ? "● " : "") + buffer.label + " - 歌白代码";
+    return (buffer.dirty ? "● " : "") + buffer.label + " - " + suffix;
   }
 
   /// 打开命令面板（`files_table=true` 走 Ctrl+P 的快速打开文件表）。
@@ -855,6 +864,7 @@ struct CodeEditorPage : Component {
           {"file", "文件",
            {{.id = "new", .label = "新建文件"},
             {.id = "open", .label = "打开文件…"},
+            {.id = "open-folder", .label = "打开文件夹…（Ctrl+Shift+O）"},
             {.id = "save-as", .label = "另存为…"},
             {.separator = true},
             {.id = "save", .label = "保存（Ctrl+S）"},
@@ -919,6 +929,8 @@ struct CodeEditorPage : Component {
     } else if (menu == "file" && (item == "new" || item == "open")) {
       if (item == "new") new_file_prompt();
       else open_file_dialog();
+      } else if (menu == "file" && item == "open-folder") {
+        open_folder_dialog();
     } else if (menu == "view" && item == "command-palette") {
       open_palette(false);
     } else if (menu == "view" && item == "toggle-sidebar") {
@@ -1072,11 +1084,15 @@ struct CodeEditorPage : Component {
   void build_main(Composer& c, const std::vector<OpenBuffer>& buffers, std::size_t active,
                   bool has_editor) {
     row(c, {.grow = true, .id = "main-row"}, [&] {
+      // **活动栏常驻，侧栏不常驻**——两者是两个独立的东西：
+      // 活动栏是“能去哪儿”的入口（切视图的唯一途径），侧栏是“当前视图的内容”。
+      // 曾经把两者绑在一个 `sidebar_visible_` 上，于是关掉侧栏连入口一起没了，
+      // 用户再想换视图只能靠快捷键（实测：Ctrl+B 之后活动栏消失、无从点回去）。
+      build_activity_bar(c);
       if (!sidebar_visible_.value()) {
         build_editor_area(c, buffers, active, has_editor);
         return;
       }
-      build_activity_bar(c);
       // 侧栏与编辑区之间用 SplitView（宽度可拖）——**两个子面板就是它的两个子位**，
       // 声明式里用 `custom_container<SplitView>` 让两次子声明分别落到 first/second。
       (void)custom_container<SplitView>(
@@ -1111,7 +1127,10 @@ struct CodeEditorPage : Component {
       for (std::size_t index = 0; index < std::size(kActivities); ++index) {
         // 图标按钮：`custom<Button>`（Button 的 icon 是一等接口，属性面没有）
         const std::string id = std::string("activity-") + kActivities[index].id;
-        const bool on = index == current && sidebar_visible_.value();
+        // **选中态只取决于“当前是哪个视图”，与侧栏展开与否无关**。
+        // 活动栏常驻之后，它就是“当前视图在哪”的唯一指示——收起侧栏时也必须有，
+        // 否则用户看不出收起来的是哪一栏（VSCode 同此：收起侧栏后该项仍高亮）。
+        const bool on = index == current;
         (void)custom<Button>(c, [&, index, on](Button& b) {
           b.set_id(id);
           b.set_icon(kActivities[index].icon);
@@ -2040,6 +2059,11 @@ struct CodeEditorPage : Component {
     pending_open_mode_ = 1;
     new_file_open_.set(true);
   }
+  /// 打开**文件夹**（换工作区）：同一条对话框链路，用 `FileDialog` 的目录模式。
+  void open_folder_dialog() {
+    pending_open_mode_ = 3;
+    new_file_open_.set(true);
+  }
 
   /// 文件对话框（打开 / 另存为 / 新建共用；`pending_open_mode_` 区分）。
   ///
@@ -2048,9 +2072,12 @@ struct CodeEditorPage : Component {
   void build_open_dialog(Composer& c) {
     if (!new_file_open_.value()) return;
     const bool saving = pending_open_mode_ == 1;
+    const bool picking_folder = pending_open_mode_ == 3;
     (void)overlay(c, "file-dialog", {}, [&] {
-      (void)custom<FileDialog>(c, [this, saving](FileDialog& dialog) {
+      (void)custom<FileDialog>(c, [this, saving, picking_folder](FileDialog& dialog) {
         dialog.set_id("file-dialog");
+        // 目录模式：没有文件名行、按钮是「选择此文件夹」、确认返回**当前目录**。
+        if (picking_folder) dialog.set_mode(FileDialog::Mode::Directory);
         dialog.set_directory(workspace_.empty() ? std::string(".") : workspace_);
         if (saving && editor != nullptr) {
           const auto list = buffers_.value();
@@ -2058,6 +2085,10 @@ struct CodeEditorPage : Component {
         }
         dialog.on_confirm = [this, saving](const std::string& path) {
           new_file_open_.set(false);
+          if (pending_open_mode_ == 3) {
+            switch_workspace(path);
+            return;
+          }
           if (pending_open_mode_ == 2) {
             // 新建：写一个空文件并打开它
             if (st::fs::write_text(path, "")) {
@@ -2630,6 +2661,32 @@ struct CodeEditorPage : Component {
     dir_expanded_.set(dir_expanded_.value());   // 触发一次重组，树数据本就每帧重扫
     status_.set(workspace_.empty() ? "内置样例模式" : "已刷新工作区树");
   }
+
+  /// **换工作区**（「打开文件夹…」的落地动作）。
+  ///
+  /// 语义（与 VSCode 一致的三条）：
+  /// * **已打开的文件标签保留**——换工作区是换“资源树的根”，不是关项目；
+  ///   用户常要“在新目录里继续看刚编辑的那个文件”，标签全关掉是丢工作。
+  /// * 资源树换成新目录并**重置展开状态**（旧展开路径对新根无意义）。
+  /// * 标题栏/状态栏跟着换，让用户确认换成功了。
+  ///
+  /// 校验：目标必须是**存在的目录**（写到状态栏而不是弹窗——与 `close_all` 的姿态一致，
+  /// 不打断手头的事）。
+  void switch_workspace(const std::string& path) {
+    if (path.empty()) return;
+    if (!st::fs::exists(path) || !st::fs::is_directory(path)) {
+      status_.set("不是目录：" + path);
+      return;
+    }
+    workspace_ = path;
+    dir_expanded_.set(std::vector<std::string>{});   // 新根：展开状态重来
+    refresh_tree();
+    const std::size_t slash = path.find_last_of("/\\");
+    const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+    status_.set("工作区：" + (name.empty() ? path : name));
+    push_title();   // 标题栏跟着换（窗口标题是“当前在哪”的第一指示）
+  }
+
 
   /// 新建文件：有工作区时开文件对话框选路径；无工作区时开一份内存缓冲（`untitled-N`）。
   ///
@@ -3234,7 +3291,14 @@ struct CodeEditorPage : Component {
 
   /// 命令面板执行一条命令（id 是稳定的业务身份）。
   void run_command(const std::string& id) {
-    if (id.rfind("file.open.", 0) == 0) {
+    // ⚠ 顺序敏感：`"file.open"` 必须排在 `"file.open."` 前缀判断**之前**。
+    // 两个 id 共享前缀，`rfind("file.open.", 0)` 对 `"file.open"` 为假（少了那个点），
+    // 但把精确匹配放前面才不会在将来加 `file.open-xxx` 时踩到同类前缀问题。
+    if (id == "file.open") {
+      open_file_dialog();
+    } else if (id == "file.open-folder") {
+      open_folder_dialog();
+    } else if (id.rfind("file.open.", 0) == 0) {
       open_by_name(id.substr(10));
     } else if (id.rfind("lang.", 0) == 0) {
       open_stlog();
@@ -3269,7 +3333,11 @@ struct CodeEditorPage : Component {
     };
     add("file.save", "文件: 保存", "把当前编辑器标记为已保存");
     add("file.close-tab", "文件: 关闭当前编辑器", "Ctrl+W");
-    add("view.toggle-sidebar", "查看: 切换侧栏可见性", "显示/隐藏活动栏与侧栏（Ctrl+B）");
+    // 打开的两个入口（文件 / 文件夹）都进命令表——菜单里能点，命令面板里能搜，
+    // 否则“打开文件夹”只有记住快捷键的人找得到。
+    add("file.open", "文件: 打开文件…", "Ctrl+O");
+    add("file.open-folder", "文件: 打开文件夹…", "换工作区（Ctrl+Shift+O）");
+    add("view.toggle-sidebar", "查看: 切换侧栏可见性", "显示/隐藏侧栏（活动栏常驻，Ctrl+B）");
     add("view.toggle-theme", "查看: 切换亮/暗主题", "主题令牌整体切换");
     add("view.toggle-indent-guides", "查看: 切换缩进参考线", "每级缩进一条竖线");
     add("help.about", "帮助: 关于", "歌白代码 · 霜天示例");
@@ -3330,6 +3398,7 @@ struct CodeEditorPage : Component {
   /// 缩进宽度（状态栏可点切换；配到编辑器上一次）。
   int tab_width_{4};
   /// 0 = 打开，1 = 另存为，2 = 新建。
+  /// 3 = **打开文件夹**（换工作区）：同一条对话框链路，只是用 `Mode::Directory`。
   int pending_open_mode_{0};
   /// 内存缓冲的递增序号（`untitled-N`）。
   std::size_t untitled_count_{1};
@@ -3624,6 +3693,9 @@ auto run_app(int argc, char** argv) -> int {
     bind("s", true, [page] { page->save_as(); });
     bind("w", false, [page] { page->close_active(); });
     bind("o", false, [page] { page->open_file_dialog(); });
+  // Ctrl+Shift+O：打开文件夹（换工作区）。与 VSCode 的 Ctrl+K Ctrl+O 同义，
+  // 用单键是因为本框架没有和弦键位机制——单键的可发现性反而更好。
+  bind("o", true, [page] { page->open_folder_dialog(); });
     bind("n", false, [page] { page->new_file_request(); });
     bind("b", false, [page] { page->sidebar_visible_.set(!page->sidebar_visible_.value()); });
     bind("j", false, [page] {                                     // Ctrl+J：切换底部面板

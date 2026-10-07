@@ -119,6 +119,14 @@ void FileDialog::activate_entry(std::size_t index) {
     set_directory(entry.path);
     return;
   }
+  // `Directory` 模式：**点文件不等于确认**——要选的目录是“当前所在”的那个。
+  // 若沿用 Open 的“点文件即确认”，用户在浏览时误点一个文件就会把**该文件所在目录**
+  // 当成选择结果确认掉（与“我想选文件夹”的意图不符，且无声）。
+  if (mode_ == Mode::Directory) {
+    selected_ = index;   // 仍然高亮（用户要知道自己点到了哪个），只是不确认
+    mark_dirty();
+    return;
+  }
   filename_ = entry.name;
   selected_ = index;
   confirm();
@@ -142,7 +150,21 @@ void FileDialog::move_selection(int delta) {
 }
 
 void FileDialog::confirm() {
-  if (filename_.empty() || on_confirm == nullptr) {
+  if (on_confirm == nullptr) {
+    mark_dirty();
+    return;
+  }
+  if (mode_ == Mode::Directory) {
+    // 选目录：返回**当前目录本身**（不是「目录/文件名」拼接），且前置条件是
+    // “目录非空”——文件名行在这个模式下不参与语义（界面上隐藏）。
+    if (directory_.empty()) {
+      mark_dirty();
+      return;
+    }
+    on_confirm(directory_);
+    return;
+  }
+  if (filename_.empty()) {
     mark_dirty();
     return;
   }
@@ -214,15 +236,21 @@ void FileDialog::arrange(const RenderContext& context, math::Rect rect) {
   // 输入行 + 按钮行先预留（列表占余下空间）。
   const float input_height = metrics.control_height;
   const float buttons_height = metrics.control_height;
-  const float bottom_reserved = input_height + metrics.space_sm + buttons_height + kPadding;
+  // `Directory` 模式**没有文件名行**（文件名在该模式下不参与语义）：
+  // 预留高度里不含它，列表因此多占一条输入行的空间。
+  const bool has_input_row = mode_ != Mode::Directory;
+  const float bottom_reserved = (has_input_row ? input_height + metrics.space_sm : 0.0f) +
+                                buttons_height + kPadding;
 
   const float list_top = y;
   const float list_bottom = card_.bottom() - bottom_reserved;
   list_ = math::Rect{card_.x + kPadding, list_top, content_width,
                      std::max(0.0f, list_bottom - list_top)};
 
-  input_ = math::Rect{card_.x + kPadding, list_.bottom() + metrics.space_sm, content_width,
-                      input_height};
+  input_ = has_input_row
+               ? math::Rect{card_.x + kPadding, list_.bottom() + metrics.space_sm, content_width,
+                            input_height}
+               : math::Rect{};
 
   // —— 按钮行（子 Button；右对齐：取消在左、确认在右） ——
   if (confirm_button_ == nullptr) {
@@ -231,7 +259,8 @@ void FileDialog::arrange(const RenderContext& context, math::Rect rect) {
       if (on_cancel) on_cancel();
     };
     auto ok = std::make_unique<Button>(
-        mode_ == Mode::Save ? "保存" : "打开", Button::Variant::Primary, Button::Size::Medium);
+          mode_ == Mode::Save ? "保存" : (mode_ == Mode::Directory ? "选择此文件夹" : "打开"),
+          Button::Variant::Primary, Button::Size::Medium);
     ok->on_click = [this]() { FileDialog::confirm(); };
     cancel_button_ = add_child(std::move(cancel));
     confirm_button_ = add_child(std::move(ok));
@@ -350,16 +379,19 @@ void FileDialog::paint_content(const RenderContext& context, raster::Surface& ca
   }
 
   // —— 文件名输入行（自绘：底 + 文本 + 光标） ——
-  fill_round_rect(canvas, input_, metrics.radius_md, colors.surface_alt);
-  const math::Insets inset{metrics.space_sm, 4.0f, metrics.space_sm, 4.0f};
-  const math::Rect input_text{input_.x + inset.left, input_.y,
-                              std::max(0.0f, input_.width - inset.horizontal()), input_.height};
-  draw_line(context, canvas, filename_, input_text, metrics.font_base, colors.text);
-  if (input_focused_) {
-    const float text_width = port.measure_width(filename_, metrics.font_base);
-    const float caret_x = input_text.x + std::min(text_width, input_text.width - 1.0f);
-    canvas.fill_rect(math::Rect{caret_x, input_.y + 5.0f, 1.0f, input_.height - 10.0f},
-                     raster::Paint::solid(colors.primary));
+  // `Directory` 模式没有这一行（`input_` 为空，`is_empty()` 即判据）。
+  if (!input_.is_empty()) {
+    fill_round_rect(canvas, input_, metrics.radius_md, colors.surface_alt);
+    const math::Insets inset{metrics.space_sm, 4.0f, metrics.space_sm, 4.0f};
+    const math::Rect input_text{input_.x + inset.left, input_.y,
+                                std::max(0.0f, input_.width - inset.horizontal()), input_.height};
+    draw_line(context, canvas, filename_, input_text, metrics.font_base, colors.text);
+    if (input_focused_) {
+      const float text_width = port.measure_width(filename_, metrics.font_base);
+      const float caret_x = input_text.x + std::min(text_width, input_text.width - 1.0f);
+      canvas.fill_rect(math::Rect{caret_x, input_.y + 5.0f, 1.0f, input_.height - 10.0f},
+                       raster::Paint::solid(colors.primary));
+    }
   }
 }
 
@@ -395,6 +427,9 @@ auto FileDialog::on_event(const RenderContext& context, Event& event) -> bool {
     }
     case EventKind::TextInput:
       // 输入行聚焦时字符进入文件名（未聚焦也接受——单输入位的对话框惯例）
+      // `Directory` 模式**没有文件名行**：不接受字符，免得用户对着一个不存在的
+      // 输入位打字而界面上毫无反馈。
+      if (mode_ == Mode::Directory) return true;
       input_insert(event.text);
       return true;
     case EventKind::Wheel: {
@@ -457,7 +492,11 @@ auto FileDialog::on_event(const RenderContext& context, Event& event) -> bool {
 auto FileDialog::get_property(std::string_view name) const -> std::optional<std::string> {
   if (name == "directory") return directory_;
   if (name == "filename") return filename_;
-  if (name == "mode") return mode_ == Mode::Save ? std::string("save") : std::string("open");
+  if (name == "mode") {
+    return std::string(mode_ == Mode::Save   ? "save"
+                       : mode_ == Mode::Directory ? "directory"
+                                                  : "open");
+  }
   if (name == "error") return error_;
   if (name == "selected") {
     const st::fs::DirEntry* entry = selected_entry();

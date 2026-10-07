@@ -34,7 +34,16 @@ namespace st::ui {
 
 class FileDialog : public Element {
  public:
-  enum class Mode : std::uint8_t { Open, Save };
+  /// 三种模式：打开文件 / 保存文件 / **选择目录**。
+  ///
+  /// `Directory` 与另两种的差别不只在文案：
+  /// * 确认返回的是**当前目录**（不是「目录/文件名」拼接）——文件名行在该模式下
+  ///   不参与语义（界面上也隐藏）；
+  /// * `confirm()` 的"文件名非空"前置条件换成"目录非空"。
+  ///
+  /// 为何要有它（2026-10-07）：应用需要"打开文件夹"（换工作区），而原先只有
+  /// Open/Save，选目录只能靠外部 `--workspace` 参数定死，运行期换不了。
+  enum class Mode : std::uint8_t { Open, Save, Directory };
 
   static constexpr float kMinWidth{560.0f};
   static constexpr float kMaxWidth{640.0f};
@@ -47,6 +56,18 @@ class FileDialog : public Element {
 
   /// 工厂：`FileDialog::make(Mode::Open, "打开文件")`。
   [[nodiscard]] static auto make(Mode mode, std::string title) -> std::unique_ptr<FileDialog>;
+  /// 切换模式（声明式路径用：组件由 `create_element` 无参构造，模式得构造后设）。
+  ///
+  /// 切到 `Directory` 会清掉文件名——那个名字属于上一个模式，留着会让
+  /// 确认按钮与语义对不上（该模式确认的是目录，不是「目录/文件名」）。
+  void set_mode(Mode mode) {
+    if (mode_ == mode) return;
+    mode_ = mode;
+    if (mode_ == Mode::Directory) filename_.clear();
+    mark_layout_dirty();
+  }
+  [[nodiscard]] auto mode() const noexcept -> Mode { return mode_; }
+
 
   [[nodiscard]] auto type() const noexcept -> std::string_view override { return "FileDialog"; }
   [[nodiscard]] auto role() const noexcept -> Role override { return Role::Dialog; }

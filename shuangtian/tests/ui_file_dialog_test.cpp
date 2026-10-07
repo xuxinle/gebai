@@ -383,3 +383,56 @@ ST_TEST(file_dialog_select_action_matches_mouse_click) {
   ST_CHECK_EQ(hosted.dialog->directory(), st::fs::join(sandbox.dir, "sub"));
   ST_CHECK_EQ(confirmed, std::string{});
 }
+
+ST_TEST(file_dialog_directory_mode_confirms_the_current_directory) {
+  // `Mode::Directory`（2026-10-07 新增，为「打开文件夹／换工作区」）：
+  // 确认返回的是**当前目录本身**，不是「目录/文件名」拼接，也不要求文件名非空。
+  // 回退 `confirm()` 的目录分支（让它走原来那条 `filename_.empty()` 早退）即变红。
+  Sandbox sandbox;
+  Hosted hosted;
+  hosted.dialog->set_mode(FileDialog::Mode::Directory);
+  hosted.dialog->set_directory(sandbox.dir);
+  hosted.layout();
+  ST_CHECK_EQ(std::string("directory"), std::string("directory"));
+  ST_CHECK(hosted.dialog->filename().empty());
+
+  std::string confirmed;
+  hosted.dialog->on_confirm = [&](const std::string& path) { confirmed = path; };
+  ST_CHECK(hosted.dialog->invoke_action("confirm", ""));
+  ST_CHECK_EQ(confirmed, sandbox.dir);   // **目录本身**，不是 join(dir, "")
+}
+
+ST_TEST(file_dialog_directory_mode_ignores_files_and_text_input) {
+  // 目录模式的两条边界（都是“用户会误触”的路径）：
+  // ① 点一个**文件**不该确认——否则浏览时误点就会把“该文件所在目录”当结果交出去；
+  // ② 不该接受文本输入——界面上没有文件名行，收下字符等于“打字无声无息地丢了”。
+  Sandbox sandbox;
+  Hosted hosted;
+  hosted.dialog->set_mode(FileDialog::Mode::Directory);
+  hosted.dialog->set_directory(sandbox.dir);
+  hosted.layout();
+
+  std::string confirmed;
+  hosted.dialog->on_confirm = [&](const std::string& path) { confirmed = path; };
+  // 排序后：0=sub/ 1=zdir/ 2=a.txt …（目录在前）；挑一个**文件**项
+  bool found_file = false;
+  for (std::size_t index = 0; index < hosted.dialog->entry_count(); ++index) {
+    const st::fs::DirEntry* entry = hosted.dialog->entry(index);
+    if (entry == nullptr || entry->is_dir) continue;
+    found_file = true;
+    ST_CHECK(hosted.dialog->invoke_action("select", std::to_string(index + 1)));
+    break;
+  }
+  ST_CHECK(found_file);              // 夹具里确实有文件，否则本用例没测到东西
+  ST_CHECK_EQ(confirmed, std::string{});
+  ST_CHECK(hosted.dialog->filename().empty());   // 也不回填文件名
+
+  // 文本输入被忽略
+  // ⚠ 走 `root.dispatch`（与其余用例同一条路径）：`RenderContext` 含引用成员，
+  // 不能默认构造，直接调 `on_event` 需要一份上下文。
+  st::ui::Event typed;
+  typed.kind = st::ui::EventKind::TextInput;
+  typed.text = "typed";
+  (void)hosted.root.dispatch(typed);
+  ST_CHECK(hosted.dialog->filename().empty());
+}
