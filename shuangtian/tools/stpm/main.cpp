@@ -163,6 +163,12 @@ void print_usage() {
                         且在共享机器上会偶发红灯；显式写用例名仍会跑它
                         --list 只列用例不跑；--format junit [--junit-out 路径] 写逐用例报告（CI）
   lint [--explain RULE] 禁令扫描（CONVENTIONS §8；无参数即扫描工程，--rules 列出规则）
+  check                  **只检查不产出**（-fsyntax-only）：不写 .o/.d、不读 PCH、不链接
+                        与 build 走**同一套**单元枚举与标志组装，所以"检查过了"就是"编得过"
+                        主要是**跨编译器门禁**：`st check --toolchain=clang`
+                        实测全量 77 单元 ~15s（gcc 全量构建 36s），且无副作用、可重复跑
+                        可查：未使用私有字段/未使用 lambda 捕获/隐式变号/死代码……
+                        **不查链接期问题**（ODR 违反、符号缺失、ABI 不匹配）——那些得真链接
   deps                  解析依赖并打印依赖树（--locked 只读 st.lock）
   fetch                 解析 + 拉取依赖到缓存/工作区，并写 st.lock
   vendor                把依赖源码固化进 vendor/（离线可构建）
@@ -385,6 +391,41 @@ auto command_stats(const Arguments& arguments) -> int {
   for (const auto& h : stats->hot_headers) st::print("  {:4d}   {}\n", h.includers, h.header);
   st::print("\n爆炸半径（改它要重编多少 .cpp，含传递）\n");
   for (const auto& h : stats->blast_radius) st::print("  {:4d}   {}\n", h.includers, h.header);
+  return 0;
+}
+
+auto command_check(const Arguments& arguments) -> int {
+  auto manifest = load_manifest(arguments);
+  if (!manifest) {
+    std::fprintf(stderr, "错误: %s\n", manifest.error().to_string().c_str());
+    return 1;
+  }
+  st::pkg::BuildOptions options;
+  options.profile = arguments.get("profile", "dev");
+  options.target = arguments.get("target", "");
+  options.toolchain = arguments.get("toolchain", "");
+  options.verbose = arguments.has("verbose");
+  options.check_only = true;               // ← 关键：同一段决策，不产出
+  // 并发：检查是**纯 CPU**（无对象写盘、无链接），不需按编译的内存预算保守推导，
+  // 所以不用 `plan_concurrency` 的内存口径；但也不超订硬件核数（超了只会互相抢）。
+  const auto jobs = arguments.number("jobs", 0.0);
+  options.jobs = jobs > 0.0 ? static_cast<std::size_t>(jobs) : st::hardware_concurrency();
+
+  st::print("检查 [{}]{}{}", options.profile,
+            options.toolchain.empty() ? "" : std::format(" 工具链: {}", options.toolchain),
+            options.target.empty() ? "" : std::format(" 目标: {}", options.target));
+  st::print("{}\n", options.verbose ? "（详细）" : "");
+
+  const auto started = st::time::now_ns();
+  auto stats = st::pkg::build(*manifest, options);
+  if (!stats) {
+    st::print("\n检查未通过\n{}", stats.error().to_string());
+    return 1;
+  }
+  const auto elapsed = (st::time::now_ns() - started) / 1'000'000;
+  st::print("检查通过 [{}] 单元 {}（{:.2f}s）并行 {} 路 · {}\n", options.profile,
+            stats->units_total, static_cast<double>(elapsed) / 1000.0, stats->workers,
+            stats->concurrency_reason);
   return 0;
 }
 
@@ -816,6 +857,7 @@ auto run_app(int argc, char** argv) -> int {
   if (arguments.command == "run") return command_run(arguments);
   if (arguments.command == "test") return command_test(arguments);
   if (arguments.command == "lint") return command_lint(arguments);
+  if (arguments.command == "check") return command_check(arguments);
   if (arguments.command == "stats") return command_stats(arguments);
   if (arguments.command == "doctor") return command_doctor(arguments);
   if (arguments.command == "tree") return command_tree(arguments);

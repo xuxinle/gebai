@@ -792,7 +792,11 @@ struct LanguageFlags {
       }
       return std::string{};
     }();
-    if (!pch_header.empty()) {
+    // 检查模式不建 PCH：**另一个编译器吃不了这个编译器的 .gch**
+    // （`prefix.hpp.gch` 是 gcc 的格式，clang 会直接报 “is not a valid precompiled header”），
+    // 而“用 clang 检查”正是 `st check` 的主要用法。代价是每单元重解析标准库头——
+    // 实测 77 单元 16.5 s（见 `docs/BUILD_CHECK.md`），可接受。
+    if (!pch_header.empty() && !options.check_only) {
       pch = ensure_pch(compiler_path, flags, include_dirs, build_dir, pch_header);
     }
   }
@@ -860,13 +864,19 @@ struct LanguageFlags {
   std::vector<const CompileUnit*> pending;
   pending.reserve(units.size());
   for (const auto& unit : units) {
-    if (!options.force &&
+    // 检查模式：**全部单元都查**——不做增量判定，也不查共享对象缓存。
+    // 理由：这里的两个跳过机制判的都是“`.o` 是不是还要重编”，而检查模式根本不产出 `.o`。
+    // 若沿用它们，一个“已构建过、源码未变”的仓库会**一个单元都不查**，
+    // 于是 `st check` 直接报成功——一个恒绿的检查比没有检查更糟。
+    const bool must_check = options.check_only;
+    if (!must_check && !options.force &&
         !needs_rebuild(unit, unit_flags_for(unit), profile_flags_list, toolchain.kind,
                        pch_token_for(unit))) {
       continue;
     }
     // 工程内已过期 → 先问共享缓存：命中就不必真编译（跨工程复用框架对象的主要路径）
-    if (!options.force && object_cache_restore(object_cache, cache_key_for(unit), unit)) {
+    if (!must_check && !options.force &&
+        object_cache_restore(object_cache, cache_key_for(unit), unit)) {
       ++cache_hits;
       // 从共享缓存恢复的对象也要补写标志指纹：否则下次构建因"缺指纹"再重编一遍，
       // 缓存就白命中了（指纹与是否重新编译无关，它是"这个对象是用什么标志编的"的说明）。
@@ -896,7 +906,6 @@ struct LanguageFlags {
   std::mutex error_mutex;
   std::string first_error;
   std::atomic<std::size_t> done{0};
-  std::atomic<bool> dep_warning{false};  ///< 依赖清单降级的告警只打一次（不是每个单元各打一次）
 
   // 超大单元排到最后提交：小单元先跑满并发，大块头收尾时独占闸门
   std::stable_partition(pending.begin(), pending.end(),
@@ -947,17 +956,25 @@ struct LanguageFlags {
       // **先写临时文件，成功再改名到位**：编译被中断（OOM 杀掉编译器、磁盘写满）时
       // 产物位置不会留下半截 `.o`——它比源文件新，增量判新会当成最新，
       // 于是下一次构建报出一堆莫名其妙的链接错误（实测碰到两次）。
+      //
+      // 检查模式：只做到**语义分析**为止——不生成代码、不写对象、不写依赖清单。
+      // 实测这是全量构建耗时的 44%（77 单元 16.5 s vs 全量 37 s），且不产生任何副作用。
       const std::string temporary_object = unit->object + ".tmp";
       const std::string temporary_depfile = unit->depfile + ".tmp";
-      // 依赖产出：`-MMD -MF` 直接写 GCC 风格 `.d`——增量判新与共享对象缓存因此只有一套逻辑。
-      args.push_back("-pipe");
-      args.push_back("-MMD");
-      args.push_back("-MF");
-      args.push_back(temporary_depfile);
-      args.push_back("-c");
-      args.push_back(unit->source);
-      args.push_back("-o");
-      args.push_back(temporary_object);
+      if (options.check_only) {
+        args.push_back("-fsyntax-only");
+        args.push_back(unit->source);
+      } else {
+        // 依赖产出：`-MMD -MF` 直接写 GCC 风格 `.d`——增量判新与共享对象缓存因此只有一套逻辑。
+        args.push_back("-pipe");
+        args.push_back("-MMD");
+        args.push_back("-MF");
+        args.push_back(temporary_depfile);
+        args.push_back("-c");
+        args.push_back(unit->source);
+        args.push_back("-o");
+        args.push_back(temporary_object);
+      }
       if (options.verbose) {
         // dump **完整参数**（而不仅是标志集）：命令行是构建问题的第一现场，
         // 排查“为什么这个单元的行为与另一个不同”时，需要的正是实际传了什么。
@@ -985,6 +1002,11 @@ struct LanguageFlags {
           first_error = std::format("编译失败: {}\n{}{}", unit->source, result->stdout_text,
                                     result->stderr_text);
         }
+        return;
+      }
+      // 检查模式到此结束：没有产物要改名，也不写指纹/缓存（什么都没产出）。
+      if (options.check_only) {
+        ++done;
         return;
       }
       // 成功：临时文件改名到位（产物位置要么是完整的，要么不存在）
@@ -1367,6 +1389,31 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
                                 framework_flags.has_value() ? &*framework_flags : nullptr, rebuilt);
   if (!compiled) return forward_error(compiled.error());
   const std::int64_t compile_ms = (time::now_ns() - compile_start) / 1'000'000;
+
+  // `st check` 的出口：用到 `build()` 为止的全套决策（单元枚举 / 框架引用 / 嵌入生成物 /
+  // 第三方放宽 / 按族收敛标志 / 目标三元组 / 并发推导），只把最后一步换成“不产出”。
+  //
+  // **原地返回而不是再写一个 check()**：上面那几件事里有几件很容易只改到一半
+  // （嵌入生成物与框架单元的标记尤其隐形），两套枚举一旦分叉，症状是
+  // “检查过了但编不过”——那时人会先去怀疑别的东西。共用同一段除了省代码，
+  // 更重要的是让两者**不可能**分叉。
+  if (options.check_only) {
+    BuildStats check_stats;
+    check_stats.units_total = units.size();
+    check_stats.units_rebuilt = rebuilt;              // 检查模式：这个值就是“实际检查的单元数”
+    check_stats.units_cached = 0;
+    check_stats.compile_ms = compile_ms;
+    check_stats.elapsed_ms = (time::now_ns() - start_ns) / 1'000'000;
+    const ConcurrencyPlan plan = plan_concurrency(options.jobs, options.jobs_large,
+                                                  options.max_memory_mb, options.profile,
+                                                  hardware_concurrency());
+    check_stats.workers = plan.jobs;
+    check_stats.workers_large = plan.jobs_large;
+    check_stats.memory_budget_mb = plan.budget_mb;
+    check_stats.concurrency_reason = plan.reason;
+    check_stats.pch_used = false;                     // 检查模式不建也不消费 PCH
+    return check_stats;
+  }
 
   BuildStats stats;
   stats.units_total = units.size();

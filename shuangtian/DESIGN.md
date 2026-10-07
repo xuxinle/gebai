@@ -2998,6 +2998,7 @@ stpm 另提供依赖获取能力（版本求解 + SHA-256 校验 + 缓存 + vend
 | `st run <target> [args…]` | 构建并运行 |
 | `st test [filter] [--san] [--slow] [--test-jobs N]` | 构建并运行单测（含 sanitizer 档）；`--list` 只列用例不跑；`--format junit [--junit-out 路径]` 写逐用例 XML 报告（CI 消费）；**`--slow` 额外跑慢/环境敏感用例**（默认跳过，见 §8.5）；**`--test-jobs N` 把用例分给 N 个测试进程并行跑**（默认 = 硬件并发/2、上限 16；JUnit 报告由父进程合并） |
 | `st lint [--explain <rule>]` | 禁令静态扫描（`CONVENTIONS.md` §8） |
+| `st check [--toolchain <名>]` | **只检查不产出**（`-fsyntax-only`）：不写 `.o`/`.d`、不读 PCH、不用共享对象缓存、不链接。与 `build` 走**同一段**单元枚举与标志组装（`options.check_only`），所以"检查过了"就是"编得过"。主要用途是**跨编译器门禁**（`--toolchain=clang`），见 `docs/BUILD_CHECK.md` |
 | `st add <spec>` / `st remove <name>` | 依赖增删（改清单 + 重求解 + 写 lock；**规划中**，CLI 尚未接线） |
 | `st fetch` / `st sync` | 获取依赖 / 同步 lock（**规划中**；当前 HTTP 仅明文 + 解包未实现，实际可用源为 path） |
 | `st tree` / `st audit` / `st outdated` | 依赖树 / 校验和与许可证字段复核 / 版本检查（**规划中**，CLI 尚未接线，见 `docs/BACKLOG.md`） |
@@ -3500,8 +3501,9 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
 | 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case
- 超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑） | `st test` | **829 用例 / 20719 断言**（dev 档实测；`st test --san` 全绿 0 报告；另 12 个慢用例默认跳过） |
-| 并行测试的资源推导 | **`--test-jobs N` 分片**：同一份 `st_tests` 被拉起 N 次（每次 `--shard i/N`），片内顺序不变、片间不共享内存；每片写各自的 JUnit，父进程合并成一份（用例名排序，逐字节可复现）。**片数按机器实际资源推导**（`plan_test_shards`，与编译并发同一套探测）：内核测试进程 CPU/墙钟 ≈ 0.98（占满一个核）而峰值工作集仅 112 MB，所以上界依次是**核数（含 cgroup CPU 配额）→ 内存预算 → 策略上限**，三者取小；**不做“核数 / 2”**——那个除数是给内存敏感的编译并发用的，对测试进程没有依据 | `st test` | 见 §8.5 右栏 |tra=0 failDiff=0 dupes=0`（见 `docs/BUILD_TEST_PERF.md`） |
+ 超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑） | `st test` | **832 用例 / 20749 断言**（dev 档实测；`st test --san` 全绿 0 报告；另 12 个慢用例默认跳过） |
+| 跨编译器检查 | **`st check --toolchain=<名>`**：同一个工程用另一个编译器做**语义分析**，不产出、不链接。与 `build` 共用单元枚举/标志组装/按族收敛（`options.check_only`），所以两者**不可能分叉**。实测全量 77 单元 clang 15.0 s / gcc 21.3 s（gcc 全量构建 36 s），**可查出 GCC 不报的自家缺陷**（未使用私有字段 / 未使用 lambda 捕获 / 隐式变号 / 死代码），**查不出链接期问题**（ODR 违反、符号缺失、ABI 不匹配） | `st check --toolchain=clang` | 已接入（本轮实测拓出一处：`build.cpp` 里 `dep_warning` 是移除 MSVC 时留下的死变量） |
+| 并行测试的资源推导 | **`--test-jobs N` 分片**：同一份 `st_tests` 被拉起 N 次（每次 `--shard i/N`），片内顺序不变、片间不共享内存；每片写各自的 JUnit，父进程合并成一份（用例名排序，逐字节可复现）。**片数按机器实际资源推导**（`plan_test_shards`，与编译并发同一套探测）：内核测试进程 CPU/墙钟 ≈ 0.98（占满一个核）而峰值工作集仅 112 MB，所以上界依次是**核数（含 cgroup CPU 配额）→ 内存预算 → 策略上限**，三者取小；**不做“核数 / 2”**——那个除数是给内存敏感的编译并发用的，对测试进程没有依据 | `st test --test-jobs 16` | **纯执行 22.9 s → 3.8 s（6.0×）**；机时代价 2.13×。与串行逐用例比对 `missing=0 extra=0 failDiff=0 dupes=0`（见 `docs/BUILD_TEST_PERF.md`） |
 | 独立工程集成 | **真建一个引用 framework 的最小工程**、真构建真跑（`tests/pkg_integration_test.cpp`）
  | `st test pkg_integration` | 全绿（`ST_INTEGRATION_BUILD=0` 可关；关掉时明确跳过而非假绿） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告（需带 sanitizer 运行库的编译器；MinGW 发行版不带时构建前明确报错） |

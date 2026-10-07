@@ -32,6 +32,13 @@ struct BuildOptions {
   std::size_t test_jobs{1};
   bool verbose{false};                ///< 打印每条编译命令
   bool force{false};                  ///< 忽略增量判定，全量重编
+  /// **只检查不产出**（`st check`）：编译单元全部换成 `-fsyntax-only`。
+  ///
+  /// 为何要在同一条路径上做：单元枚举、标志组装、框架引用、嵌入生成物、第三方放宽
+  /// 这几件事在这里是**共用**的——另写一份“检查用的枚举”迟早会与构建分叉，
+  /// 而“检查过了但编不过”会被归咎于编译器差异，不是两套枚举不一致（最难查的那种偏）。
+  /// 检查模式下：不写 `.o`/`.d`、不查共享对象缓存、不读 PCH、不链接。
+  bool check_only{false};
   bool use_pch{true};                 ///< 使用预编译头（`include/st/pch.hpp`）加速
   std::vector<std::string> extra_include_dirs{};
   std::vector<std::string> extra_flags{};

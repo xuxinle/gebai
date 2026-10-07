@@ -518,6 +518,13 @@ LLVM 官方 Windows 包编译成 MSVC 目标（会去要 Visual Studio 的头与
 两族都认）：否则产物要求 `libgcc_s_seh-1.dll`/`libstdc++-6.dll` 在 PATH 上。
 san 档需要 sanitizer 运行库，MinGW 发行版多数不带——构建前会探测并给出可行动的报错。
 
+**跨编译器检查是常规手段**：`st check --toolchain=clang` 只做语义分析（`-fsyntax-only`），
+不产出、不链接，全量 77 单元约 15 s。它与 `build` 走同一段单元枚举与标志组装
+（`BuildOptions::check_only`），所以"检查过了"就是"编得过"——
+而**它查不出的东西要另外补**：链接期问题（ODR 违反、符号缺失、ABI 不匹配）只有真链接才暴露，
+所以 `st check` 不能替代 `st build --toolchain=clang`，两者是"高频便宜"与"低频完整"的分工。
+详见 `docs/BUILD_CHECK.md`。
+
 **clang 是第二编译器（不替默认档）**。实测对比见 `docs/BUILD_TEST_PERF.md`：
 不用 PCH 时 clang 快 7%，而**日常构建（带 PCH）gcc 快 15%**——所以默认仍是 g++。
 但 clang 必须保留为**可选门禁**：它拓出过多处 GCC 看不到的自家代码缺陷
