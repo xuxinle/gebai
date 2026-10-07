@@ -521,9 +521,9 @@ CJK 多轮廓字形不糊块、Latin/CJK 带孔字形墨迹占比上限）。
   中文行 46% 处，相差 4.2px——一个位移不可能同时让两侧居中。贴墨迹后
   “带 = 文字”，这个问题就不存在了；光标与带同源（各多伸 1px）。
 
-  量尺与回归：`tools/line_box_probe.cpp`（量）+ `tools/ink_sampling_probe.cpp`（参考样本口径）
-  + `tools/line_geometry_shot.py`（**屏上像素**量“带/墨迹/光标”三者关系，会自动避让
-  光标的半透明边缘）+ `tools/line_box_balance.py` / `line_box_compare.py`（判据）；
+  量尺与回归：`tools/line_box_probe.cpp`（量行盒几何）+ `tools/ink_sampling_probe.cpp`
+  （参考样本口径）+ `tools/row_ink_probe.py`（**屏上像素**，四个子命令
+  bands/center/parts/scan） + `tools/line_box_balance.py` / `line_box_compare.py`（判据）；
   行盒几何的回归统一在 `tests/line_layout_test.cpp` 四条（见 §4.5.0），
   另 `tests/text_baseline_test.cpp` 一条盯“基线不随内容漂移”。
 
@@ -1969,9 +1969,10 @@ layout_text_line(port, size, line_spacing, sample)      -> LineGeometry   // 多
 组件里**不得**再写 `+1 / −2` 那类手调偏移——那是本层缺位时的补丁。
 
 量尺与回归：`tools/line_box_probe.cpp`（行盒几何）+ `tools/ink_sampling_probe.cpp`
-（参考样本口径）+ `tools/line_geometry_shot.py`（**屏上像素**：带/墨迹/光标三者关系，
-会自动避让光标的半透明边缘）+ `tools/line_box_balance.py` / `line_box_compare.py`（判据）；
-`tests/line_layout_test.cpp` 四条（回退即变红）。
+（参考样本口径）+ `tools/row_ink_probe.py`（**屏上像素**：带/墨迹/光标三者关系，
+四个子命令 bands/center/parts/scan，会自动避让光标的半透明边缘）
++ `tools/line_box_balance.py` / `line_box_compare.py`（判据）；
+`tests/line_layout_test.cpp` 六条 + `tests/text_baseline_test.cpp` 两条（回退即变红）。
 
 > **脚本驱动的组件控制**见 §6.7（`ui::ScriptHost`）：JS 读写组件、事件桥、定时器，
 > 与协议/C++ 共用同一套读写语义；跨语言边界采用「快照批量 + 变更集提交」。
@@ -3716,7 +3717,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
 | 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case
-  超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑） | `st test` | **864 用例 / 21041 断言**（dev 档实测，四片自报值累加：3139+4138+3952+9812；另 12 个慢用例默认跳过） |
+  超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑） | `st test` | **865 用例 / 21041 断言**（dev 档实测，四片自报值累加：3545+3479+9379+4638；另 12 个慢用例默认跳过） |
 | 跨编译器检查 | **`st check --toolchain=<名>`**：同一个工程用另一个编译器做**语义分析**，不产出、不链接。与 `build` 共用单元枚举/标志组装/按族收敛（`options.check_only`），所以两者**不可能分叉**。实测全量 77 单元 clang 15.0 s / gcc 21.3 s（gcc 全量构建 36 s），**可查出 GCC 不报的自家缺陷**（未使用私有字段 / 未使用 lambda 捕获 / 隐式变号 / 死代码），**查不出链接期问题**（ODR 违反、符号缺失、ABI 不匹配） | `st check --toolchain=clang` | 已接入（本轮实测拓出一处：`build.cpp` 里 `dep_warning` 是移除 MSVC 时留下的死变量） |
 | 并行测试的资源推导 | **`--test-jobs N` 分片**：同一份 `st_tests` 被拉起 N 次（每次 `--shard i/N`），片内顺序不变、片间不共享内存；每片写各自的 JUnit，父进程合并成一份（用例名排序，逐字节可复现）。**片数按机器实际资源推导**（`plan_test_shards`，与编译并发同一套探测）：内核测试进程 CPU/墙钟 ≈ 0.98（占满一个核）而峰值工作集仅 112 MB，所以上界依次是**核数（含 cgroup CPU 配额）→ 内存预算 → 策略上限**，三者取小；**不做“核数 / 2”**——那个除数是给内存敏感的编译并发用的，对测试进程没有依据 | `st test --test-jobs 16` | **纯执行 22.9 s → 3.8 s（6.0×）**；机时代价 2.13×。与串行逐用例比对 `missing=0 extra=0 failDiff=0 dupes=0`（见 `docs/BUILD_TEST_PERF.md`） |
 | 独立工程集成 | **真建一个引用 framework 的最小工程**、真构建真跑（`tests/pkg_integration_test.cpp`）
