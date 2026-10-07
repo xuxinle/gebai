@@ -196,4 +196,50 @@ auto plan_concurrency(std::size_t requested_jobs, std::size_t requested_jobs_lar
   return plan;
 }
 
+auto plan_test_shards(std::size_t requested_shards, std::size_t hardware,
+                      std::size_t cpu_quota, std::uint64_t budget_mb,
+                      std::size_t cpu_cap) -> ShardPlan {
+  ShardPlan plan;
+  const std::size_t hardware_jobs = std::max<std::size_t>(1, hardware);
+  const std::size_t quota = cpu_quota != 0 ? cpu_quota : detect_cpu_quota();
+  // 测试进程占满一个核（实测 CPU/墙钟 ≈ 0.98），所以"能并行的核数"就是上界之一。
+  // 配额可知且小于硬件时以配额为准：超订只会让每片都被 CFS 限流。
+  plan.test_cores = quota != 0 ? std::min(hardware_jobs, quota) : hardware_jobs;
+  const std::string quota_note =
+      quota != 0 && quota < hardware_jobs ? std::format("，CPU 配额 {} 核", quota) : std::string{};
+
+  if (requested_shards != 0) {
+    plan.shards = requested_shards;
+    plan.reason = std::format("--test-jobs {} 显式指定", requested_shards);
+    return plan;
+  }
+
+  // 上限的**唯一**计算处：依次用三个上界取小，最后夹下限。
+  //
+  // 为何刻意写成"逐级取小"而不是几个 clamp 叠着：叠着的保护**无法被验证**——
+  // 去掉外层仍被内层拦住，逆向验证时逐条回退**全都不变红**，看上去有护栏实际没有。
+  // 每道约束只在一处生效，去掉它就一定看得到。
+  //
+  // 内存上界：预算未知则不约束（探测失败时退回到核数上界，而不是报错）。
+  std::size_t limit = plan.test_cores;   // 上界 ①：核数（测试进程占满一个核）
+  std::string memory_note = "内存上限不可知（按测试核数）";
+  const std::uint64_t budget = budget_mb != 0 ? budget_mb : detect_memory_limit().limit_mb;
+  if (budget != 0) {
+    // 预留 1/8（与编译并发同口径）：留给报告合并、系统与其它负载
+    const std::uint64_t usable_mb = budget - budget / 8;
+    const std::size_t by_memory = static_cast<std::size_t>(usable_mb / kTestProcessMemoryMb);
+    memory_note = std::format("内存预算 {}MiB / 单进程 {}MiB → {}", budget,
+                              kTestProcessMemoryMb, by_memory);
+    if (by_memory < limit) limit = by_memory;   // 上界 ②：内存
+  }
+  // 上界 ③：策略上限（实测：18 片并行度 11.0、19 片降到 9，即超过某点墙钟不再改善）。
+  if (cpu_cap != 0 && cpu_cap < limit) limit = cpu_cap;
+
+  plan.shards = std::max<std::size_t>(1, limit);   // 下限的**唯一**处
+  plan.reason = std::format("{} → {} 片（测试核数 {}{}{}）", memory_note, plan.shards,
+                            plan.test_cores, quota_note,
+                            cpu_cap != 0 ? std::format("，策略上限 {}", cpu_cap) : std::string{});
+  return plan;
+}
+
 }  // namespace st::pkg

@@ -123,3 +123,57 @@ ST_TEST(concurrency_never_exceeds_hardware) {
   const auto plan = st::pkg::plan_concurrency(0, 0, 1024ULL * 1024ULL, "dev", 8, 8);
   ST_CHECK_EQ(plan.jobs, 8U);
 }
+
+// ── 测试分片：与编译并发**同一套资源探测**，但约束不同（内存轻、吃满一个核）──
+
+ST_TEST(test_shards_derived_from_cores_not_halved) {
+  // 核算上界：内核测试进程 CPU/墙钟 ≈ 0.98（占满一个核），能并行的片数就是能并行的核数。
+  // **不能做"核数 / 2"**——那个除数是针对编译并发的经验值（编译单元内存敏感），
+  // 对测试进程没有依据。测试只验"推导确实用了核数"，不写死 28/2=14。
+  const auto plan = st::pkg::plan_test_shards(0, 28, 28, 1024ULL * 1024ULL, 0);
+  ST_CHECK_EQ(plan.test_cores, 28U);
+  ST_CHECK_EQ(plan.shards, 28U);
+  ST_CHECK(plan.reason.find("测试核数 28") != std::string::npos);
+}
+
+ST_TEST(test_shards_respect_cpu_quota) {
+  // 容器只给 4 核：分片必须收到 4，而不是照搛硬件 28——超订会让每片被 CFS 限流，
+  // 墙钟反而变差（与编译并发同一条道理）。
+  const auto plan = st::pkg::plan_test_shards(0, 28, 4, 1024ULL * 1024ULL, 0);
+  ST_CHECK_EQ(plan.test_cores, 4U);
+  ST_CHECK_EQ(plan.shards, 4U);
+  ST_CHECK(plan.reason.find("CPU 配额 4") != std::string::npos);
+  // 配额宽于硬件（不一致的环境）时以硬件为准，不放大
+  const auto wider = st::pkg::plan_test_shards(0, 8, 64, 1024ULL * 1024ULL, 0);
+  ST_CHECK_EQ(wider.shards, 8U);
+}
+
+ST_TEST(test_shards_respect_memory_budget) {
+  // 测试进程峰值工作集实测 112 MB，估算取 128 MiB；预算 1024 MiB 的机器上
+  // 内存在**核数之前**先卡住：usable = 1024 - 128 = 896 → 896/128 = 7 片（而不是 28）。
+  // 这是"按机器实际资源"的关键一半：小内存容器上让它先于核数生效（否则整片被 OOM 杀）。
+  const auto plan = st::pkg::plan_test_shards(0, 28, 28, 1024, 0);
+  ST_CHECK_EQ(plan.shards, 7U);
+  ST_CHECK(plan.reason.find("1024MiB") != std::string::npos);
+  // 内存充裕时不再约束（本机 19 GiB 的情况）
+  const auto roomy = st::pkg::plan_test_shards(0, 28, 28, 19000, 0);
+  ST_CHECK_EQ(roomy.shards, 28U);
+}
+
+ST_TEST(test_shards_explicit_and_cap_and_floor) {
+  // 显式 `--test-jobs` 完全接管（CI 固定行为），不被配额/内存压低
+  const auto explicit_plan = st::pkg::plan_test_shards(5, 28, 2, 256, 0);
+  ST_CHECK_EQ(explicit_plan.shards, 5U);
+  ST_CHECK(explicit_plan.reason.find("--test-jobs 5") != std::string::npos);
+  // 策略上限（实测：18 片并行度 11.0、19 片降到 9，即超过某点墙钟不再改善）
+  const auto capped = st::pkg::plan_test_shards(0, 28, 28, 1024ULL * 1024ULL, 16);
+  ST_CHECK_EQ(capped.shards, 16U);
+  ST_CHECK(capped.reason.find("上限 16") != std::string::npos);
+  // 极小机器：预算 1 MiB 时不能给 0 片（退化为"不跑"是最坏结果）
+  const auto tiny = st::pkg::plan_test_shards(0, 8, 8, 1, 0);
+  ST_CHECK(tiny.shards >= 1U);
+  // 探测不到资源（硬件也报 0）时仍至少 1 片
+  const auto none = st::pkg::plan_test_shards(0, 0, 0, 0, 0);
+  ST_CHECK(none.shards >= 1U);
+  ST_CHECK(none.test_cores >= 1U);
+}

@@ -306,17 +306,20 @@ auto command_test(const Arguments& arguments) -> int {
   const auto test_max_memory = arguments.number("max-memory", 0.0);
   options.max_memory_mb = test_max_memory > 0.0 ? static_cast<std::uint64_t>(test_max_memory) : 0;
   options.toolchain = arguments.get("toolchain", "");
-  // 测试并行度：**默认 = 硬件并发的一半**（上限 16）——测试执行是迭代的最大单项成本
-  // （全套件 25s，编译只占零头），而它是**单核**的：不并行就等于把 27 个核空转。
-  // 为何不是开满：套件里有一批重型用例（真光栅化文本、真连 TCP 的等待类），
-  // 它们的耗时对 CPU 竞争敏感——开满 28 片的机时是 16 片的 1.5 倍
-  // （`text_*` 用例中位膨胀 3.2× vs 2.3×），而墙钟反而慢 12%；
-  // 实测最优点就是这里算出的 16 片（见 `docs/BUILD_TEST_PERF.md`）。
-  // `--test-jobs 1` 回到与分片前逐位等价的单进程。
-  const std::size_t default_test_jobs =
-      std::min<std::size_t>(16, std::max<std::size_t>(1, st::hardware_concurrency() / 2));
+  // 测试并行度：**按机器实际资源推导**（与编译并发同一套探测：硬件核数 / CPU 配额 /
+  // 内存上限），见 `plan_test_shards`。为何不能用"核数/2"：测试进程实测只占
+  // 112 MB 工作集（内存很宽松）却占满一个核，所以它的上界是**核数**而非内存——
+  // 与编译并发（内存敏感）不是同一个约束，不能共用一条公式。
+  // **`--test-jobs 1` 回到与分片前逐位等价的单进程。
+  //
+  // `kTestShardsCap` 是策略上限而非资源上界：实测 18 片时并行度 11.0、19 片降到 9
+  // （CPU 密集型用例超订后互相抢核），即超过某点墙钟不再改善；上限只挡这一头，
+  // 真实的机器资源（少核/小配额容器）仍会先把片数压下来。
+  constexpr std::size_t kTestShardsCap = 16;
+  const st::pkg::ShardPlan shard_plan = st::pkg::plan_test_shards(0, st::hardware_concurrency(),
+                                                                  0, 0, kTestShardsCap);
   const auto test_jobs = arguments.number_any({"test-jobs", "test_jobs"},
-                                              static_cast<double>(default_test_jobs));
+                                              static_cast<double>(shard_plan.shards));
   options.test_jobs = test_jobs > 0.0 ? static_cast<std::size_t>(test_jobs) : 1;
   const std::string filter = arguments.positional.empty() ? std::string{} : arguments.positional.front();
   // `--list`：只列用例不跑（交测试框架入口）；`--format junit`：经 ST_JUNIT_XML 写逐用例报告
@@ -462,6 +465,11 @@ auto command_doctor(const Arguments& arguments) -> int {
       st::print("  默认并发 [{}]    : {} 路（超大单元 {}）· {}\n", profile, plan.jobs,
                   plan.jobs_large, plan.reason);
     }
+    // 测试分片：与编译并发**同一套资源探测**，但约束不同（测试进程内存轻、吃满一个核），
+    // 所以它有自己的推导（见 `plan_test_shards`）。两行并列显示才能看出"为何两类并行不一样"。
+    const auto shard_plan = st::pkg::plan_test_shards(0, st::hardware_concurrency(), 0, 0,
+                                                      16);
+    st::print("  默认测试分片    : {} 片 · {}\n", shard_plan.shards, shard_plan.reason);
   }
   // 交叉编译工具链探测：清单里声明了什么、本机是否真的装了
   if (auto manifest = load_manifest(arguments); manifest) {
