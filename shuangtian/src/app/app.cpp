@@ -494,6 +494,14 @@ auto Application::set_device_scale(float scale) -> Status {
     return forward_error(status.error());
   }
   impl_->device_scale = scale;
+  // **字形超采样必须跟着 DPI 走**（与构造时同一个入口）。
+  //
+  // `TextRenderer` 的超采样在构造时由解析出的 DPI 决定（`make_unique<TextRenderer>(fonts,
+  // resolved_scale)`），而运行期切换 DPI 只改了缓冲尺寸——于是“启动即 2.0”
+  // （超采样 2）与“启动 1.0 再切到 2.0”（超采样停在 1）**渲染结果不同**：
+  // 后者每像素只有一个采样点，大字号的斜向/弧形边缘出现可见阶梯（实测同一区域
+  // 1524 个像素差 >32）。`set_supersample` 会同时清字形缓存，所以不会混用旧密度的位图。
+  if (impl_->renderer != nullptr) impl_->renderer->set_supersample(scale);
   root_.mark_dirty_all();
   log::info("DPI 缩放已切换为 {}（物理 {}×{}）", scale,
             impl_->backend->framebuffer().physical_width(),

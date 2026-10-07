@@ -6,10 +6,13 @@
 #include "st/core/string.hpp"
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
+#include "components_internal.hpp"
 #include "st/ui/text_port.hpp"
 
 namespace st::ui {
 namespace {
+
+using components_internal::paint_focus_ring;
 
 [[nodiscard]] auto port_of(const RenderContext& context) -> const TextPort& {
   static const NullTextPort fallback;
@@ -417,11 +420,12 @@ void Button::paint_content(const RenderContext& context, raster::Surface& canvas
                style_.color);
   }
   if (focused_) {
-    raster::Path ring;
-    const float inset = 2.0f;
-    ring.add_rounded_rect(bounds_.inflate(-inset), style_.radius > inset ? style_.radius - inset : 0.0f);
-    canvas.stroke_path(ring, raster::Paint::solid(context.theme.colors().focus_ring),
-                       metrics.focus_width);
+    // **与其它组件走同一条焦点环**（`paint_focus_ring`），不再自己画一份。
+    //
+    // 旧实现在按钮**内部**缩进 2px 画一圈：不透明底（`Primary`/`Soft`/`Danger`）
+    // 上环落在底色里，看着像“按钮里面又有个小框”；`Secondary` 则同时看到外框、
+    // 2px 空白、内环三层。统一到“盖住自己描边的一道环”后，各变体都只是一道。
+    paint_focus_ring(context, canvas, bounds_, style_.radius);
   }
 }
 

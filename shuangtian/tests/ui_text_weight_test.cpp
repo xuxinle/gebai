@@ -10,8 +10,9 @@
 /// 1. **同一元素、只改 `font_weight`，像素必须变**（走 `Element::paint` 真实路径）；
 /// 2. **三个非 Regular 档都比 Regular 更重、峰值覆盖率不变**（是「变粗」而不是「变糊」）。
 ///
-/// 注意 Bold 与 Medium/SemiBold 走**两条不同的路**（真粗体面 vs 合成加粗），
-/// 两者的加墨幅度不可比——见下面对「不再断言 bold > semibold」的说明。
+/// 注意 Bold 与 SemiBold 走**同一条路**（真粗体面，与浏览器同口径），
+/// Medium 走另一条（合成加粗）——两者的加墨幅度不可比，
+/// 见下面对「不再断言 bold > semibold」的说明。
 ///
 /// 为什么必须走 `Element::paint` 而不是直接调 `TextRenderer::draw`：
 /// 缺陷恰好在 UI 层（谁把 `font_weight` 翻成绘制参数），
@@ -120,11 +121,10 @@ ST_TEST(ui_text_weight_reaches_pixels) {
   ST_CHECK(regular.ink > 1.0);
   // ① 三个非 Regular 档都比 Regular 更重（字重真的落像素）。
   //
-  //    **不再断言 bold > semibold**（本用例原先这么写）：Bold 走**真粗体字体面**、
-  //    Medium/SemiBold 走**合成加粗**（系统里没有这两个字重的字体面），两条路的
-  //    “加墨幅度”不可比——实测 bold ≈ Regular 的墨量而 semibold 更重
-  //    （真 Bold 面的笔画比 Regular 略细，但**结构不同、边缘更实**）。
-  //    这里要钉的是“Bold 确实是粗体”，而不是“Bold 是墨量最大的那个”。
+  //    **不再断言 bold > semibold**：2026-10-07 起 **SemiBold 与 Bold 同走真粗体面**
+  //    （以真窗口浏览器为参照——它的 `font-weight:600` 与 `700` 逐像素相同，
+  //    与 400/500 明显不同），所以两者本就是同一条路，比“谁更黑”无意义。
+  //    Medium 仍走**合成加粗**（系统里没有对应字重面）。
   //    真粗体面的收益在**锐度与一致性**（同一口径实测，tools/ui_text_probe.cpp）：
   //    中文过渡带 0.246→0.155（锐 37%）、英文字间离散 14.1%→**0.0%**、
   //    英文过渡带 0.204→0.131（锐 36%）。
@@ -136,4 +136,62 @@ ST_TEST(ui_text_weight_reaches_pixels) {
   // 而混排样本上两者接近。用“走了哪条路”当契约，比用“谁更黑”稳定。
   // ② 峰值覆盖率不变（±3%）：变粗而不是变糊
   ST_CHECK(std::abs(bold.peak - regular.peak) <= 0.03f);
+}
+
+/// **SemiBold 必须与 Bold 走同一条路（真粗体面）**，否则与浏览器不一致。
+///
+/// 依据（2026-10-07，真窗口浏览器为参照，26px「GPU (D3D11)」物理 39px）：
+/// 浏览器的 `font-weight:600` 与 `700` **逐像素相同**（它把 600 吸到 Bold 面），
+/// 而 400/500 是常规面（字面宽 244 vs 258）。而合成加粗只加墨、**不改字面宽**
+/// （247），所以走合成加粗的 SemiBold 字面比参照窄 11px、看着“胖而糊”。
+///
+/// 判据用**字面宽**而不是墨量：合成加粗与真粗体面的区别**首先在字面宽**
+/// （两面字干位置不同），墨量只是次级表现。
+ST_TEST(ui_semibold_uses_the_real_bold_face) {
+  auto loaded = st::text::FontStack::system_default();
+  if (!loaded.has_value()) return;
+  st::text::FontStack stack = std::move(*loaded);
+  // 系统探不到真粗体面时，`find_face` 会回退常规面，本用例的语义不成立。
+  if (!stack.has_bold()) return;
+  st::text::TextRenderer renderer(stack, 1.5f);
+  renderer.set_subpixel(true);
+  renderer.set_grid_fit(st::text::GridFitMode::Normal);
+  st::app::RendererTextPort port(renderer);
+
+  // 直接问端口：SemiBold 会不会走真粗体面。
+  ST_CHECK(st::ui::prefers_real_bold(st::ui::FontWeight::SemiBold));
+  ST_CHECK(st::ui::prefers_real_bold(st::ui::FontWeight::Bold));
+  // 对偶：Medium 走合成加粗（系统里没有对应字重面），不能被一并归入。
+  ST_CHECK(!st::ui::prefers_real_bold(st::ui::FontWeight::Medium));
+  ST_CHECK(!st::ui::prefers_real_bold(st::ui::FontWeight::Regular));
+
+  // 墨量：SemiBold 必须**真的比 Regular 重**（不能因走真粗体面而变轻）。
+  Theme theme = Theme::light();
+  const auto paint = [&](st::ui::FontWeight weight) {
+    RenderContext context{theme, &port, 0.0};
+    st::ui::Text text{"GPU (D3D11)"};
+    text.set_weight(weight);
+    text.set_font_size(26.0f);
+    text.apply_theme(theme);
+    text.measure(context, st::ui::Constraints{400.0f, 60.0f});
+    text.arrange(context, st::math::Rect{0.0f, 0.0f, 400.0f, 60.0f});
+    Canvas canvas{700, 90, 1.5f};
+    canvas.clear(Color::rgb(0xFF, 0xFF, 0xFF));
+    text.paint(context, canvas);
+    return canvas;
+  };
+  const Canvas regular = paint(st::ui::FontWeight::Regular);
+  const Canvas semibold = paint(st::ui::FontWeight::SemiBold);
+  const auto ink = [](const Canvas& canvas) {
+    double total = 0.0;
+    for (int y = 0; y < canvas.physical_height(); ++y) {
+      for (int x = 0; x < canvas.physical_width(); ++x) {
+        total += std::clamp((255.0 - canvas.pixel_at(x, y).r) / 255.0, 0.0, 1.0);
+      }
+    }
+    return total;
+  };
+  st::print("[ui-weight] SemiBold 真粗体面：regular Σ墨={:.1f} · semibold Σ墨={:.1f}\n", ink(regular),
+            ink(semibold));
+  ST_CHECK(ink(semibold) > ink(regular) * 1.05);
 }

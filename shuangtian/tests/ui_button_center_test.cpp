@@ -360,3 +360,105 @@ ST_TEST(button_hover_still_has_visual_feedback) {
             static_cast<unsigned>(hovered.g), static_cast<unsigned>(hovered.b));
   ST_CHECK(!(rest == hovered));
 }
+
+/// 焦点环与控件自己的描边是**同一道边框**，不是“框外套框”。
+///
+/// 用户报「按钮聚焦不要再嵌套一层边框」。旧实现在按钮**内部**缩进 2px 画环，
+/// 于是 `Secondary`（自带 1px 描边）上能看到**三层**：外描边 / 2px 空底 / 内环；
+/// 而共用助手的其它控件（`Input`/`Select`/`Checkbox`）是环从外沿 **往外** 画：
+/// 它们的描边占 `[R-bw, R]`、环从 `R` 开始，两道**相邻不同色**的带子并排。
+/// 统一后的契约：**环完整盖住控件自己的描边**（环从 `R-bw` 起画），
+/// 不管是哪一种，最终都只有**一道环**的宽度。
+///
+/// 判据（必须用像素，不能用“有没有变化”）：
+/// 1. 未聚焦时控件边框已占满 `[R-bw, R]`（原本就是实色）；
+/// 2. 聚焦后**边框带外**（`x < R - bw`）的像素不得改变——环没往外长；
+/// 3. 聚焦后**整个边框带**必须变成环色——环完整盖住了描边；
+/// 4. 环覆盖总宽度（沿水平中线的改变像素数）不超过 `focus_width` 向上取整——
+///    超过就是“描边 + 环”两道并排，正是用户看到的那种。
+ST_TEST(button_focus_ring_covers_its_own_border) {
+  DrawingStubPort port{};
+  st::ui::Theme theme{st::ui::Theme::light()};
+  UiRoot root;
+  make_root(root, theme);
+
+  const auto& metrics = theme.metrics();
+  const float focus = std::max(metrics.focus_width, metrics.border_width);
+  const Color ring = theme.colors().focus_ring;
+
+  // 只取**紧贴显示器顶边**的按钮：它的四条边都不会被视口裁掉。
+  const Rect box{20.0f, 0.0f, 120.0f, 40.0f};
+  const int mid_y = static_cast<int>(box.center().y);
+
+  auto render = [&](bool focused) {  // NOLINT(readability-identifier-length)
+    Canvas canvas{kWidth, kHeight, 1.0f};
+    canvas.clear(theme.colors().bg);
+    root.set_content(nullptr);
+    auto owned = std::make_unique<Button>("确定", Button::Variant::Secondary);
+    Button* button = owned.get();
+    root.set_content(std::move(owned));
+    const RenderContext context{theme, &port, 0.0};
+    button->measure(context, st::ui::Constraints{});
+    button->arrange(context, box);
+    if (focused) root.set_focus(button);
+    button->paint(context, canvas);
+    return canvas;
+  };
+
+  const Canvas plain = render(false);
+  const Canvas focused = render(true);
+  const auto composite = [&ring](Color under) -> Color {
+    const float alpha = static_cast<float>(ring.a) / 255.0f;
+    const auto mix = [alpha](std::uint8_t top, std::uint8_t bottom) -> std::uint8_t {
+      return static_cast<std::uint8_t>(std::lround(
+          static_cast<float>(top) * alpha + static_cast<float>(bottom) * (1.0f - alpha)));
+    };
+    return Color{mix(ring.r, under.r), mix(ring.g, under.g), mix(ring.b, under.b), 255U};
+  };
+  const auto near = [](Color lhs, Color rhs) -> bool {
+    const int dr = static_cast<int>(lhs.r) - static_cast<int>(rhs.r);
+    const int dg = static_cast<int>(lhs.g) - static_cast<int>(rhs.g);
+    const int db = static_cast<int>(lhs.b) - static_cast<int>(rhs.b);
+    return dr * dr + dg * dg + db * db <= 144;  // 12/通道（抗锯齿）
+  };
+
+  // **实测环带**（不假设）：沿水平中线扫一遍，把“相对于未聚焦帧发生变化的像素”
+  // 按连通段切开，取包含控件左边的那一段。
+  const auto bands_along_midline = [&](int mid) {
+    std::vector<std::pair<int, int>> bands;
+    int start = -1;
+    for (int x = 0; x < kWidth; ++x) {
+      const bool changed = !(focused.pixel_at(x, mid) == plain.pixel_at(x, mid));
+      if (changed && start < 0) start = x;
+      if (!changed && start >= 0) {
+        bands.emplace_back(start, x - 1);
+        start = -1;
+      }
+    }
+    if (start >= 0) bands.emplace_back(start, kWidth - 1);
+    return bands;
+  };
+  const std::vector<std::pair<int, int>> bands = bands_along_midline(mid_y);
+  ST_REQUIRE(!bands.empty());
+  const std::pair<int, int> left_band = bands.front();
+  const int left_x = static_cast<int>(std::floor(box.x));
+  const int band_width = left_band.second - left_band.first + 1;
+  st::print("[btn-focus] 左环带 x[{},{}] 宽 {}px（控件左边 {}，上限 ceil(max(focus,border))={}）\n",
+            left_band.first, left_band.second, band_width, left_x,
+            static_cast<int>(std::ceil(focus)));
+  // ① 环带**不得向外多长**：最左像素不早于 `R - ceil(width)`（环从 `R-bw` 起画，
+  //    描边居中后可能被像素吸附到左一像素，但不会再多）。
+  const int allowed_first = left_x - static_cast<int>(std::ceil(focus));
+  ST_CHECK(left_band.first >= allowed_first);
+  // ② 环带**不得比一道环更宽**（宽了就是“描边 + 环”两道并排）。
+  ST_CHECK(band_width <= static_cast<int>(std::ceil(focus)) + 1);
+  // ③ 环带必须盖到控件外沿 `R`（而不是停在 `R-bw` 处、又另起一道）。
+  ST_CHECK(left_band.second >= left_x);
+  // ④ 环带**更外侧**逐像素不变。
+  for (int x = 0; x < allowed_first; ++x) {
+    ST_CHECK(plain.pixel_at(x, mid_y) == focused.pixel_at(x, mid_y));
+  }
+  // ⑤ 对偶：环真的画出来了，且颜色是环色合成（不是把边框擦掉）。
+  ST_CHECK(near(focused.pixel_at(left_x, mid_y), composite(plain.pixel_at(left_x, mid_y))));
+  ST_CHECK(!(focused.pixel_at(left_x, mid_y) == plain.pixel_at(left_x, mid_y)));
+}

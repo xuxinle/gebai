@@ -558,9 +558,22 @@ auto TextRenderer::shape(std::string_view utf8, float size, FontRole role,
 auto TextRenderer::shape_cached(std::string_view utf8, float size, FontRole role,
                                 bool bold) const
     -> std::shared_ptr<const ShapedText> {
+  // **`bold` 必须进键**（与 `role`、`size` 同等）。
+  //
+  // `bold` 决定的是用哪个字体面（`shape_uncached` 里 `find_face(..., bold)`），
+  // 而 `ShapedText::runs` 里存的是 **(face 指针, glyph id)** 对。两张面返回的
+  // glyph id 是两个不同命名空间里的数：不进键的话，布局阶段先跑的
+  // `measure_width()`（`bold` 默认 `false`）会把**常规面**的整形结果写成缓存条目，
+  // 绘制阶段再用 `bold=true` 去取时命中同一条——于是 Bold 档拿到常规面的字形，
+  // 「真粗体字体面」这条路径从未生效（实测 `tests/ui_text_weight_test.cpp` 的
+  // Bold 墨量与 Regular 逐位相等，而它当时被当成“字体设计”解释掉了）。
+  // 后果不只是“不变粗”：`(face, glyph)` 跨面混搭时取到的是另一张表的位图，
+  // 即**字被换成另一个**（宽度不变、版面无差异，是那种最难查的“合法但错误的字”）。
   const std::uint64_t key = st::hash::fnv1a64(utf8) ^
                             (static_cast<std::uint64_t>(size_key(size)) << 32U) ^
-                            (static_cast<std::uint64_t>(role) << 56U) ^ stack_->fingerprint();
+                            (static_cast<std::uint64_t>(role) << 56U) ^
+                            (bold ? std::uint64_t{1} << 60U : std::uint64_t{0}) ^
+                            stack_->fingerprint();
   {
     const std::scoped_lock lock(cache_->mutex);
     if (const auto iterator = cache_->shaped.find(key); iterator != cache_->shaped.end()) {

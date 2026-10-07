@@ -158,21 +158,35 @@ inline void draw_triangle(raster::Surface& canvas, math::Point center, float rad
   canvas.fill_path(path, raster::Paint::solid(color));
 }
 
-/// 焦点环：控件矩形外扩 `metrics.focus_width / 2`，圆角跟随控件。
+/// 焦点环：贴住控件外沿的**一道**环，并盖住控件自己的描边。
+///
+/// 用户报的“嵌套一层边框”是怎么来的：控件自己的 border 占 `[R-bw, R]`（环填充向内），
+/// 而环从 `R` 往外画 —— 两条**相邻但不同色**的带子并排：一道灰框 + 外面再一圈蓝框，
+/// 读起来就是“边框外面又套了一层”。
+///
+/// 修法不是把环收进去（那会让无描边的控件丢掉外环，`Checkbox`/`Radio`/`Switch`
+/// 的环会缩到指示器内部），而是把环的**起点从 `R` 移到 `R-bw`**：环完整盖住
+/// 控件自己的描边。于是：
+/// - 有描边的控件（`Secondary` 按钮 / 输入框 / 复选框）：看到**一道加粗的环**；
+/// - 无描边的控件：看到**一道完整的外环**（与以前外层位置一致）。
+///
+/// 环宽取 `max(focus_width, border_width)`：比 border 细的环会把 border 的外半个像素
+/// 露在环外，又变回两道线。
 ///
 /// 圆角夹取到「短边一半 - 2」：半径等于半边的圆角路径描边会退化（无极值直线段时描边
 /// 塌成发丝线，圆形指示器 / 圆形滑块尤其明显），故圆形控件用近似圆的圆角矩形画环。
-/// 此前 input / select / slider / toggle / split_view 各抄一份（其中三者逐字相同、
-/// input 与 split_view 是缺夹取的早期版本）——统一到夹取版，两版在既有调用点**结果逐值相同**。
 inline void paint_focus_ring(const RenderContext& context, raster::Surface& canvas, math::Rect rect,
                              float radius) {
-  const float width = context.theme.metrics().focus_width;
+  const Metrics& metrics = context.theme.metrics();
+  const float width = std::max(metrics.focus_width, metrics.border_width);
   if (width <= 0.0f || rect.is_empty()) return;
-  const float offset = width * 0.5f;
+  // 环中心线相对控件外沿的偏移：`width/2`（环自己撑到外沿）- `border_width`（内移以盖住描边）。
+  const float offset = width * 0.5f - metrics.border_width;
   const math::Rect outer = rect.inflate(offset);
+  if (outer.width <= 0.0f || outer.height <= 0.0f) return;
   const float limit = std::max(std::min(outer.width, outer.height) * 0.5f - 2.0f, 0.0f);
   raster::Path ring;
-  ring.add_rounded_rect(outer, std::min(radius + offset, limit));
+  ring.add_rounded_rect(outer, std::min(std::max(radius + offset, 0.0f), limit));
   canvas.stroke_path(ring, raster::Paint::solid(context.theme.colors().focus_ring), width);
 }
 
