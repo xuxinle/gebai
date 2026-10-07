@@ -10,8 +10,8 @@
 
 | 项 | 规定 |
 |---|---|
-| 标准 | `-std=c++20`（**GCC 13.3 / 16.2** / Clang 18 / MSVC 14.5x 实测基线；`<format>`/`<expected>`/concepts/ranges/span 均须可用） |
-| 编译器 | 由 `stpm` 直驱（不经 CMake/Make）：**Windows 上默认 g++（MinGW-w64）**——同一套 GCC 口径横跨 Linux/macOS/Windows，跟进最新 C++ 标准不受 VS 版本牵制；`g++` 缺席或主版本 < 13 时自动回退 MSVC（`vswhere` 定位 + `vcvars64` 注入环境）或 clang++。Windows 自举用 `bootstrap.ps1`（g++ 优先，MSVC 回退；对应 `bootstrap.sh`） |
+| 标准 | `-std=c++20`（**GCC 13.3 / 16.2** 与 **Clang 23** 实测基线；`<format>`/`<expected>`/concepts/ranges/span 均须可用） |
+| 编译器 | 由 `stpm` 直驱（不经 CMake/Make）：**g++ 优先，clang++ 次之**——两者是**同一条口径**（GCC 风格标志 + `-MMD` 依赖 + `-l` 链接 + libstdc++ 运行库），所以构建系统只有一套命令，不按编译器族分叉。Windows 自举用 `bootstrap.ps1`（g++ 优先，MSVC 回退；对应 `bootstrap.sh`） |
 | 第三方依赖 | 框架本体**零第三方依赖**；后续引入的第三方源码一律由 `stpm` 统一管理（见 `DESIGN.md`「包管理」），不得绕过 |
 | 系统能力 | 一律**运行时 `dlopen` 可选加载**（X11/Wayland/GL/Vulkan/TLS），缺失即回退或明确报错 |
 | 平台分支 | 用 `#if defined(_WIN32)` 等**条件编译指令**（允许），禁止用**函数式宏**做分支 |
@@ -499,27 +499,39 @@ Windows 上 `std::filesystem::path` 的两个方向都会抛（UTF-8→宽在字
    自行 `#if defined(_WIN32)` 写一套（回到第 1 条）。x11/wayland 补后端时只需实现那几个
    接口（含 `ui::resize_edge_at` 的边缘命中），**组件与应用一行不用改**。
 
-### 10.1 编译器口径（Windows 宿主：g++ 默认，MSVC 回退）
+### 10.1 编译器口径（两族：GCC 与 Clang，**同一条口径**）
 
-**默认 g++（MinGW-w64）**：探测优先序 `ST_CXX/CXX 显式指定 → g++（主版本 ≥ 13）→ clang++/c++ → MSVC`。
-选择理由：同一套 GCC 口径横跨三平台（标志、行为、依赖产出不分裂）；跟进最新 C++ 标准不必等
-VS 更新；只有 MinGW 的机器无需先装 VS。低于 13 的 g++ 缺 C++20 关键项，会被跳过并告警。
-Windows 目标的 GCC 链接**默认静态 libgcc/libstdc++**（产物不要求 dll 在 PATH 上）；
+**探测优先序**：`ST_CXX/CXX 显式指定 → g++（主版本 ≥ 13）→ clang++/c++`。
+低于 13 的 g++ 缺 C++20 关键项（`<format>` 等），会被跳过并告警。
+
+**为什么两族能共用一套构建命令**：清单恒写 GCC 风格（`-std=c++20`/`-Ifoo`/`-DNAME`/`-Wall`），
+依赖产出恒用 `-MMD -MF`（写 GCC 风格 `.d`），链接恒用 `-lfoo`，运行库恒取 libstdc++。
+因此本框架**没有"标志翻译层"**：清单写什么，命令行就是什么。这消掉了一整类问题
+（"哪个平台漏了哪个开关"、"翻译后的标志与缓存键不一致"）。
+
+**唯一需要显式声明的是目标三元组**：`clang++` 的默认目标跟着**它自己的构建方式**走——
+LLVM 官方 Windows 包编译成 MSVC 目标（会去要 Visual Studio 的头与库）。要让 clang 走
+"GCC 风格驱动 + libstdc++"这条口径，清单里给它 `"target_triple": "x86_64-w64-windows-gnu"`。
+`g++` 不需要（默认目标就是本机）。该字段同时服务交叉编译（`i686-w64-mingw32` 等）。
+
+**Windows 目标的链接默认静态 libgcc/libstdc++**（`-static-libgcc -static-libstdc++`，
+两族都认）：否则产物要求 `libgcc_s_seh-1.dll`/`libstdc++-6.dll` 在 PATH 上。
 san 档需要 sanitizer 运行库，MinGW 发行版多数不带——构建前会探测并给出可行动的报错。
 
-MSVC 作为回退路径完整可用；两族标志分两套，**翻译集中在 `src/pkg/compiler.cpp`**，
-业务代码与服务清单始终写 GCC 风格：
+**clang 是第二编译器（不替默认档）**。实测对比见 `docs/BUILD_TEST_PERF.md`：
+不用 PCH 时 clang 快 7%，而**日常构建（带 PCH）gcc 快 15%**——所以默认仍是 g++。
+但 clang 必须保留为**可选门禁**：它拓出过多处 GCC 看不到的自家代码缺陷
+（死函数、未使用的 lambda 捕获、未使用的私有字段、`size_type→difference_type` 隐式变号、
+系统头里的变号转换），这类差异在 GCC 上永远不会报。工具链专属的告警收敛写在清单的
+`toolchains.<名>.suppressions`（**只用于 vendored 第三方头**，不往工程级 `flags` 里写——
+否则等于给所有编译器统一放宽，把真检查一起丢掉）。
 
 | 事项 | 规定 |
 |---|---|
-| 字符集 | 恒加 `/utf-8`（不加就按本地代码页读源文件，中文文案静默乱码——编得过、跑出错） |
-| 标准/语言 | `-std=c++20`→`/std:c++20`；C++ 单元加 `/EHsc /permissive- /Zc:__cplusplus /bigobj` |
-| 告警 | `-Wall -Wextra`→`/W4`；`-Werror`→`/WX` |
-| 调试信息 | `-g`→`/Z7`（调试信息留在 `.obj`，不共享 PDB——并行编译下 `cl` 的共享 PDB 是串行瓶颈） |
-| 依赖输出 | `/sourceDependencies <文件>`，**文件名必须以 `.json` 结尾**（否则按本地化文本格式输出，解析必碎） |
-| 链接 | `/link` 之后的才是链接器选项（`/DEBUG` 放前面会被 `cl` 当编译选项丢弃 → “带 `-g` 却没有 PDB”） |
-| 无等价物的标志 | 由 `translate_flags` **登记丢弃并打印**，不得静默消失（否则“以为开了 `-Wconversion`”这种事会骗过所有人） |
-| 系统库 | `pthread/dl/m` 在 `windows` 目标上自动剔除，改用 `ws2_32/user32/gdi32/shell32` |
+| 字符集 | 两族都按 UTF-8 读源文件，无需开关（源码一律 UTF-8，见 §1） |
+| 依赖输出 | 恒 `-MMD -MF <文件>`（不解析任何"编译器专属的依赖格式"） |
+| 系统库 | `pthread/dl/m` 在 `windows` 目标上自动剔除，`ws2_32/user32/gdi32/shell32` 反之；名单是**显式的**（`starts_with("win")` 那种前缀猜法会漏掉 `ws2_32` 这类主力库） |
+| 目标不一致 | 编译与链接必须用**同一份** `--target`（`ResolvedToolchain::target_args()` 单点提供，两侧各写一遍是最难查的一类错） |
 
 ### 10.2 语言层面的行为差异（比平台 API 更阴魂）
 
@@ -528,7 +540,7 @@ MSVC 作为回退路径完整可用；两族标志分两套，**翻译集中在 
 
 | 事项 | 规定 |
 |---|---|
-| **函数实参求值顺序** | **不得在同一表达式里多次调用有状态函数**，如 `f(读游标(), 读游标())`。C++ 不规定实参求值顺序：MSVC 从右往左，GCC/Clang 通常从左往右。实测：图标路径解析因此把 x/y 交换，**所有 72 个图标都画错方向**，而 Linux 上完全正常；而它又不报错（“对钩交换后仍像对钩”）。回归：`tests/ui_icon_path_test.cpp` |
+| **函数实参求值顺序** | **不得在同一表达式里多次调用有状态函数**，如 `f(读游标(), 读游标())`。C++ **不规定**实参求值顺序——不同编译器、不同优化档都可能不一样。实测：图标路径解析因此把 x/y 交换，**所有 72 个图标都画错方向**，而在另一个编译器上完全正常；而它又不报错（"对钩交换后仍像对钩"）。回归：`tests/ui_icon_path_test.cpp` |
 | 表达式内的副作用 | 同类问题：`a[i++] = i`、`f(x, ++x)`。拆成独立语句——多一行比一个只在奇偶编译器上出现的 bug 便宜得多 |
 | 位域/结构体布局 | 跨协议序列化的结构体不用位域；字段顺序即布局约定（§6.5） |
 | 字符与大小写 | `std::string::npos`、UTF-8 处理一律走 `st::str_*`；不用 `tolower`（与地区相关） |

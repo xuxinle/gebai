@@ -899,7 +899,13 @@ void UiRoot::remove_overlay(Element* overlay) {
       }
       const auto index = static_cast<std::size_t>(std::distance(overlays_.begin(), iterator));
       overlays_.erase(iterator);
-      if (index < overlay_layouts_.size()) overlay_layouts_.erase(overlay_layouts_.begin() + index);
+      if (index < overlay_layouts_.size()) {
+        // `begin() + index` 要求 `difference_type`（ptrdiff_t），而 `index` 是 size_t——
+        // GCC 静默接受（同一宽度下的重解释），**clang 的 `-Wsign-conversion` 直接报错**。
+        // 这里显式转换，把“确实是有符号偏移”写在代码里而不是依赖编译器宽容。
+        overlay_layouts_.erase(overlay_layouts_.begin() +
+                               static_cast<std::ptrdiff_t>(index));
+      }
       mark_dirty_all();
       return;
     }

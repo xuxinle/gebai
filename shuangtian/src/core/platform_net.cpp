@@ -101,7 +101,11 @@ void close_handle(NativeHandle handle) {
 void set_blocking(NativeHandle handle, bool enabled) {
 #if defined(_WIN32)
   u_long mode = enabled ? 0UL : 1UL;
-  ioctlsocket(handle, FIONBIO, &mode);
+  // `FIONBIO` 展开为 `_IOW(...)`（winsock2.h），后者在系统头里做 size_t→long 转换——
+  // clang 的 `-Wsign-conversion` 会为此报错（GCC 不报）。显式先取到 long，
+  // 让转换发生在我们的代码里而不是系统头内部。
+  const long request = static_cast<long>(FIONBIO);
+  ioctlsocket(handle, request, &mode);
 #else
   const int flags = fcntl(handle, F_GETFL, 0);
   if (flags < 0) return;

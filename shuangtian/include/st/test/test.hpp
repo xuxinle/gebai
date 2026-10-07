@@ -12,11 +12,13 @@
 /// ```
 /// 约定：本文件是 `CONVENTIONS.md` §3.6 登记的唯一函数式宏例外——断言必须捕获 `__FILE__`/`__LINE__`。
 
+#include <cstddef>
 #include <cstdint>
 #include <format>
 #include <functional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace st::test {
@@ -69,6 +71,36 @@ class Registry {
 /// 是否包含慢用例（`--slow` / `ST_TEST_SLOW=1`）。默认 false。
 void set_include_slow(bool value);
 [[nodiscard]] auto include_slow() -> bool;
+
+/// —— 用例分片（多进程并行执行，见 `--shard`）——
+///
+/// 全套件单进程跑时**只吃一个核**：819 例串行，CPU 27.5 s / 墙钟 33.6 s，其余核空转。
+/// 分片把用例按注册顺序发到 `count` 个进程上，各自跑各自的那一份。
+///
+/// 为何是**分进程**而不是进程内并行：用例注册在静态初始化期完成、且共用大量进程级状态
+/// （控制通道监听端口、字形与排版缓存、主题单例、`Registry` 的失败栈）。同进程并发会让
+/// “哪个用例动了共享状态”变成不可诊断的偶发失败；分进程则与串行跑**语义等价**
+/// （每片内用例顺序不变，片间不共享任何内存）。
+///
+/// 分片只解决**内存状态**的隔离；**文件系统**上的共享路径（测试产物）由用例自己按
+/// `shard()` 区分目录——否则两片会同时写同一个文件。
+
+/// 解析 `--shard i/n` 的值（`"3/8"` → `{3, 8}`）；非法写法返回 `{0, 0}`。
+[[nodiscard]] auto parse_shard(std::string_view text) -> std::pair<std::size_t, std::size_t>;
+
+/// 设置本进程的分片（`index` 从 **1** 起；`index == 0` 或 `count <= 1` = 不分片、跑全部）。
+void set_shard(std::size_t index, std::size_t count);
+
+/// 本进程的分片参数；未设置时为 `{0, 0}`。
+[[nodiscard]] auto shard() -> std::pair<std::size_t, std::size_t>;
+
+/// 分片后缀（如 `"-shard2of8"`；不分片时为空）。
+/// 用途：用例写测试产物时拼进目录名，避免多片争同一个文件。
+[[nodiscard]] auto shard_suffix() -> std::string;
+
+/// 按当前分片过滤后的用例名清单（保持注册顺序，含 `slow` 用例——是否跑由 `run_all` 决定）。
+/// `st test --jobs N` 用它**先算好分片大小**再启动子进程。
+[[nodiscard]] auto case_names(std::string_view filter) -> std::vector<std::string>;
 
 /// 运行全部用例（`filter` 非空时按名称子串过滤）；返回失败用例数。
 /// 单用例软超时（默认 10s，`ST_TEST_TIMEOUT_MS` 覆盖）：超时标记 FAIL 但**不硬杀**——

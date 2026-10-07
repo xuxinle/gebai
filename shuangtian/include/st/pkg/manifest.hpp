@@ -86,6 +86,27 @@ struct ToolchainSpec {
   std::vector<std::string> defines{};       ///< 目标专属宏（如 `_WIN32_WINNT=0x0601`）
   std::string executable_suffix{};          ///< 产物后缀（Windows 为 `.exe`）
   std::vector<std::string> extra_flags{};   ///< 目标专属编译/链接标志
+  /// 目标专属**告警收敛**（追加在工程严格集之后）。
+  ///
+  /// 用途：同一份源码在**所有**编译器上与 GCC 同等严格是目标，但在做到之前，
+  /// 某族编译器会对第三方头发出工程无法修复的告警（实测：clang 的 `-Wpedantic`
+  /// 从 `sqlite3.h` 的 `__int64`、`quickjs.h` 的旧式转换里报错，而那是 vendored
+  /// 上游代码、不是我们要改的东西）。这类差异写在这里，**不写进工程级 flags**——
+  /// 否则等于给所有编译器统一放宽，把真检查一起丢掉。
+  ///
+  /// 与 `extra_flags` 分开的理由：`extra_flags` 参与链接，这里只影响编译；
+  /// 语义上它是"对某族编译器的例外"，不是目标平台属性。
+  std::vector<std::string> suppressions{};
+  /// 目标三元组（传给编译器与链接器的 `--target=`；空 = 用编译器自己的默认目标）。
+  ///
+  /// 为何需要在清单里显式声明：`clang++` 的默认目标跟着**它自己的构建方式**走——
+  /// LLVM 官方 Windows 包编译成 MSVC 目标（吃 Visual Studio 的头与库）。想让 clang 走
+  /// “GCC 风格驱动 + libstdc++”那条口径（不依赖 VS），就写
+  /// `"target_triple": "x86_64-w64-windows-gnu"`。g++ 不需要它（默认目标就是本机）。
+  ///
+  /// 同一字段也服务交叉编译：`i686-w64-mingw32`、`aarch64-linux-gnu` 都写在这里
+  /// （交叉编译器的名字本身已带前缀时留空即可）。
+  std::string target_triple{};
 };
 
 /// 独立工程对**骨天框架**的引用（`st.pkg` 的 `framework` 段）。

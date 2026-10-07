@@ -8,6 +8,7 @@
 #include <thread>
 
 #include "st/core/fs.hpp"
+#include "st/core/string.hpp"
 #include "st/core/time.hpp"
 
 // lint-allow: L8 测试注册表与当前用例失败栈是测试基础设施的进程级状态（CONVENTIONS §3.6 例外登记）
@@ -37,6 +38,24 @@ std::uint64_t total_checks{0};
 /// 所以判定放在 `run_all` 的循环里（那时开关已经设好了）。
 bool g_include_slow{false};
 
+/// 本进程的分片（`index` 从 1 起；`count <= 1` 或 `index == 0` = 不分片）。
+std::size_t g_shard_index{0};
+std::size_t g_shard_count{0};
+
+/// 本用例是否属于当前分片（按**注册顺序的下标**取模，与 `run_all` 的遍历口径一致）。
+/// `count <= 1` 时恒真。
+[[nodiscard]] auto in_shard(std::size_t ordinal) -> bool {
+  if (g_shard_count <= 1 || g_shard_index == 0) return true;
+  return ordinal % g_shard_count == g_shard_index - 1;
+}
+
+/// 名下的用例是否属于当前分片（供 `case_names` 与 `run_all` 共用同一口径）。
+[[nodiscard]] auto selected_ordinal(const Case& item, std::size_t ordinal,
+                                    std::string_view filter) -> bool {
+  if (!filter.empty() && item.name.find(filter) == std::string::npos) return false;
+  return in_shard(ordinal);
+}
+
 }  // namespace
 
 auto Registry::instance() -> Registry& {
@@ -65,6 +84,57 @@ void set_include_slow(bool value) { g_include_slow = value; }
 
 auto include_slow() -> bool { return g_include_slow; }
 
+auto parse_shard(std::string_view text) -> std::pair<std::size_t, std::size_t> {
+  // 两个数字分别取出再转换：不能直接 `return {expr, expr}`——`std::optional<uint64_t>`
+  // 到 `size_t` 的窄化转换在**花括号初始化列表**里是非法的（列表初始化禁窄化），
+  // 而 `static_cast` 写在列表里也仍被判为窄化（GCC 实测：`could not convert`）。
+  const std::size_t slash = text.find('/');
+  if (slash == std::string_view::npos) return std::make_pair<std::size_t, std::size_t>(0, 0);
+  const auto index = st::parse_u64(text.substr(0, slash));
+  const auto count = st::parse_u64(text.substr(slash + 1));
+  if (!index.has_value() || !count.has_value()) return std::make_pair<std::size_t, std::size_t>(0, 0);
+  // 单片/越界的写法都当"不分片"处理（调用方对 0 报错——只有 `--shard i/n` 里
+  // **显式给错**才算错误，`n == 1` 是合法的"单片"表达）。
+  if (*count <= 1 || *index == 0 || *index > *count) {
+    return std::make_pair<std::size_t, std::size_t>(0, 0);
+  }
+  const std::size_t index_out = static_cast<std::size_t>(*index);
+  const std::size_t count_out = static_cast<std::size_t>(*count);
+  return std::make_pair(index_out, count_out);
+}
+
+void set_shard(std::size_t index, std::size_t count) {
+  if (count <= 1 || index == 0 || index > count) {
+    g_shard_index = 0;
+    g_shard_count = 0;
+    return;
+  }
+  g_shard_index = index;
+  g_shard_count = count;
+}
+
+auto shard() -> std::pair<std::size_t, std::size_t> { return {g_shard_index, g_shard_count}; }
+
+auto shard_suffix() -> std::string {
+  if (g_shard_count <= 1 || g_shard_index == 0) return {};
+  return std::format("-shard{}of{}", g_shard_index, g_shard_count);
+}
+
+
+auto case_names(std::string_view filter) -> std::vector<std::string> {
+  std::vector<std::string> names;
+  std::size_t ordinal = 0;
+  for (const auto& item : Registry::instance().cases()) {
+    if (!selected_ordinal(item, ordinal, filter)) {
+      ++ordinal;
+      continue;
+    }
+    names.push_back(item.name);
+    ++ordinal;
+  }
+  return names;
+}
+
 void Registry::record_failure(std::string_view file, int line, std::string message) {
   const std::scoped_lock lock(registry_mutex());
   current_failures.push_back(std::format("{}:{}: {}", file, line, message));
@@ -86,7 +156,9 @@ auto run_all(std::string_view filter) -> int {
   int failed_cases = 0;
   int passed_cases = 0;
   int skipped_slow = 0;
+  std::size_t ordinal = 0;   ///< 注册顺序下标（分片取模的口径，与 filter 无关）
   std::uint64_t checks_before = registry.check_count();
+  // 每次运行都清空：这份结果只描述**本次**跑过的用例（见 `write_junit`）
   last_case_results.clear();
 
   // 软超时上限：默认 10s。挑得宽（最慢的合法用例 ui_* 动画类 ~100ms 量级），
@@ -97,7 +169,11 @@ auto run_all(std::string_view filter) -> int {
     if (parsed > 0) timeout_ms = parsed;
   }
 
+  // `ordinal_now` 是**注册顺序下标**（分片的取模口径），与 filter 无关——
+  // `st test --jobs 8 foo` 与串行跑的候选集因此完全一致。
   for (auto& item : registry.cases()) {
+    const std::size_t ordinal_now = ordinal++;
+    if (!in_shard(ordinal_now)) continue;
     if (!filter.empty() && item.name.find(filter) == std::string::npos) continue;
     // 慢/环境敏感用例：默认跳过（见 `Case::slow` 的注释）。
     // **显式指名时仍然跑**——`st test frame_cost` 这种用法意图明确，不该被门挡掉。
@@ -188,7 +264,11 @@ auto run_all(std::string_view filter) -> int {
 }
 
 auto list_cases(std::string_view filter) -> int {
+  // 分片环境下只列本片（否则 `--shard 2/8 --list` 会把全部名字列八遍）
+  std::size_t ordinal = 0;
   for (const auto& item : Registry::instance().cases()) {
+    const std::size_t ordinal_now = ordinal++;
+    if (!in_shard(ordinal_now)) continue;
     if (!filter.empty() && item.name.find(filter) == std::string::npos) continue;
     std::fprintf(stdout, "%s\n", item.name.c_str());
   }

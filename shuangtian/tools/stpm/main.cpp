@@ -306,6 +306,17 @@ auto command_test(const Arguments& arguments) -> int {
   const auto test_max_memory = arguments.number("max-memory", 0.0);
   options.max_memory_mb = test_max_memory > 0.0 ? static_cast<std::uint64_t>(test_max_memory) : 0;
   options.toolchain = arguments.get("toolchain", "");
+  // 测试并行度：**默认 = 硬件并发的一半**（上限 16）——测试执行是迭代的最大单项成本
+  // （全套件 25s，编译只占零头），而它是**单核**的：不并行就等于把 27 个核空转。
+  // 为何不是开满：套件里有一批重型用例（真光栅化文本、真连 TCP 的等待类），
+  // 它们的耗时对 CPU 竞争敏感——开满会把单片耗时抬高到把收益吃掉（28 片实测
+  // 反而与 16 片持平，且单例膨胀到 3.4×）；实测拐点在 12~16 片（见 `docs/BUILD_TEST_PERF.md`）。
+  // `--test-jobs 1` 回到与分片前逐位等价的单进程。
+  const std::size_t default_test_jobs =
+      std::min<std::size_t>(16, std::max<std::size_t>(1, st::hardware_concurrency() / 2));
+  const auto test_jobs = arguments.number_any({"test-jobs", "test_jobs"},
+                                              static_cast<double>(default_test_jobs));
+  options.test_jobs = test_jobs > 0.0 ? static_cast<std::size_t>(test_jobs) : 1;
   const std::string filter = arguments.positional.empty() ? std::string{} : arguments.positional.front();
   // `--list`：只列用例不跑（交测试框架入口）；`--format junit`：经 ST_JUNIT_XML 写逐用例报告
   const bool list_only = arguments.has("list");
@@ -314,8 +325,9 @@ auto command_test(const Arguments& arguments) -> int {
     junit_path = arguments.get("junit-out", "");
     if (junit_path.empty()) junit_path = st::fs::join(manifest->directory, "build/test-results.xml");
   }
-  st::print("{}测试 [{}]{}{}", list_only ? "列出" : "运行", options.profile,
+  st::print("{}测试 [{}]{}{}{}", list_only ? "列出" : "运行", options.profile,
               filter.empty() ? "" : std::format(" 过滤: {}", filter),
+              options.test_jobs > 1 ? std::format(" {} 片并行", options.test_jobs) : "",
               junit_path.empty() ? "" : std::format(" → {}", junit_path));
   st::print("{}\n", arguments.has("slow") ? "（含慢/环境敏感用例）" : "");
   auto code = st::pkg::run_tests(*manifest, options, filter, list_only, junit_path,
@@ -459,6 +471,14 @@ auto command_doctor(const Arguments& arguments) -> int {
       const auto found = st::process::which(toolchain.compiler);
       st::print("  交叉工具链 [{}]  : {} → {}\n", toolchain.name, toolchain.compiler,
                   found ? *found : std::string("未安装"));
+      // 工具链声明的**目标三元组**必须与编译器自报的默认目标并列可见：
+      // 两者不同不是错（`--target` 覆盖默认），但不显示会让人在错的方向上找原因——
+      // 实测：`clang++` 自报 `Target: x86_64-pc-windows-msvc`，而本工程实际按
+      // `x86_64-w64-windows-gnu` 编译，只看 `--version` 的输出会得出相反结论。
+      if (!toolchain.target_triple.empty()) {
+        st::print("                    --target={}（覆盖上面这行自报的默认目标）\n",
+                  toolchain.target_triple);
+      }
       if (found) {
         auto version = st::process::run(toolchain.compiler, {"--version"});
         if (version && version->exit_code == 0) {
@@ -760,7 +780,7 @@ ST_MAIN(run_app)
         std::fprintf(stderr, "缓存删除失败: %s\n", status.error().message.c_str());
         return 1;
       }
-      st::print("已清理共享缓存 {}（对象缓存与 MSVC 环境缓存；下次构建全量重编）\n", cache_dir);
+      st::print("已清理共享缓存 {}（对象缓存；下次构建全量重编）\n", cache_dir);
     }
   }
   return 0;

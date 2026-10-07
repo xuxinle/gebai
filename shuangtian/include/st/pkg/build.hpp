@@ -25,6 +25,11 @@ struct BuildOptions {
   /// 交叉编译工具链名（空 = 本机）。命中 `Manifest::toolchains` 中的一项：
   /// 决定编译器、目标系统库、产物后缀与平台宏，并把产物/中间目录与本地档**隔离**。
   std::string toolchain{};
+  /// 测试分片数（`st test --test-jobs N`；**1 = 单进程**，与分片前逐位等价）。
+  ///
+  /// N > 1 时测试可执行被启动 N 次、每次带 `--shard i/N` 各跑一段用例（见 `st/test/test.hpp`）。
+  /// 只对 `run_tests` 生效（`build` 忽略它）。
+  std::size_t test_jobs{1};
   bool verbose{false};                ///< 打印每条编译命令
   bool force{false};                  ///< 忽略增量判定，全量重编
   bool use_pch{true};                 ///< 使用预编译头（`include/st/pch.hpp`）加速
@@ -73,13 +78,14 @@ struct BuildStats {
 
 /// 构建测试可执行文件（库源 + tests + 测试框架入口）并运行；返回退出码。
 /// `list_only` = 只列出用例名（`st test --list`，仍可带 filter）；
-/// `junit_path` 非空时给测试进程设 `ST_JUNIT_XML`，逐用例结果写成 JUnit XML（CI 消费）。
+/// `junit_path` 非空时给测试进程设 `ST_JUNIT_XML`，逐用例结果写成 JUnit XML（CI 消费）；
+/// `options.test_jobs > 1` 时按分片并行跑（每片一个测试进程，JUnit 报告由父进程合并）。
 /// `include_slow` = 额外跑“慢/环境敏感”用例（见 `test.hpp` 的 `ST_TEST_SLOW`）：
 /// 默认 false——它们量机器性能或需真编译，占测试壁钟近三分之一，
 /// 且在共享机器上会**偶发红灯**；迭代内循环默认不附这个不确定性。
 [[nodiscard]] auto run_tests(const Manifest& manifest, const BuildOptions& options,
                              std::string_view filter, bool list_only = false,
-                             std::string_view junit_path = {},
-                             bool include_slow = false) -> Result<int>;
+                             std::string_view junit_path = {}, bool include_slow = false)
+    -> Result<int>;
 
 }  // namespace st::pkg

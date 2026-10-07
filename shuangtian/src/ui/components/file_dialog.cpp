@@ -33,9 +33,6 @@ namespace {
   return std::to_string(bytes) + " B";
 }
 
-/// 双击判定窗口（ms）。
-constexpr double kDoubleClickMs = 450.0;
-
 }  // namespace
 
 FileDialog::FileDialog(Mode mode, std::string title)

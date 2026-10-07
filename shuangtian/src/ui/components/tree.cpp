@@ -19,9 +19,6 @@ namespace {
 
 constexpr float kTextInset{14.0f};  ///< 行文本左边距（与 List 同口径）
 
-/// 无选中哨兵（与 `List` 同值；本组件不依赖 list.hpp）。
-constexpr std::size_t kNoSelection = static_cast<std::size_t>(-1);
-
 }  // namespace
 
 Tree::Tree() {

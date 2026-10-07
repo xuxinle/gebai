@@ -166,7 +166,7 @@ std::string ui_font_scale{"auto"};
     paint.push_back(metrics.paint_ms);
     present.push_back(metrics.present_ms);
   }
-  const auto summarize = [&frames](const char* name, std::vector<double>& samples) {
+  const auto summarize = [](const char* name, std::vector<double>& samples) {
     std::ranges::sort(samples);
     const auto at = [&samples](double ratio) -> double {
       const auto index = static_cast<std::size_t>(ratio * static_cast<double>(samples.size() - 1));

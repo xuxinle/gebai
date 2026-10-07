@@ -838,7 +838,6 @@ class DeclarativeHost {
  private:
   std::unique_ptr<Composer> composer_;
   ReconcileStats last_{};
-  UiRoot* root_{nullptr};              ///< 宿主（用于请求重绘；不持有）
   std::shared_ptr<std::atomic<bool>> alive_{};   ///< 登记回调的存活旗标
 };
 

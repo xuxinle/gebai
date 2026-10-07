@@ -213,7 +213,11 @@ struct Url {
 [[nodiscard]] auto set_nonblocking(socket_type handle, bool enabled) -> Status {
 #if defined(_WIN32)
   u_long mode = enabled ? 1UL : 0UL;
-  if (::ioctlsocket(handle, FIONBIO, &mode) != 0) {
+  // `FIONBIO` 展开为 `_IOW(...)`（winsock2.h），后者在**系统头内部**做 size_t→long 转换——
+  // clang 的 `-Wsign-conversion` 会为此报错，而那是工程无法修复的（GCC 不报）。
+  // 显式先取到 long，让转换发生在我们的代码里、有据可查。
+  const long request = static_cast<long>(FIONBIO);
+  if (::ioctlsocket(handle, request, &mode) != 0) {
     return unexpected(ErrorCode::Io, "无法切换非阻塞模式（ioctlsocket）");
   }
 #else

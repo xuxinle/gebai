@@ -142,8 +142,6 @@ class FileDialog : public Element {
   std::string error_{};
   float scroll_y_{0.0f};             ///< 列表纵向滚动（自绘行滚轮）
   bool input_focused_{false};        ///< 文件名行聚焦态（自绘光标依据）
-  double last_click_ms_{-1.0e9};     ///< 上次点击时刻（双击判定；墙钟 ms）
-  std::size_t last_click_index_{static_cast<std::size_t>(-1)};
   math::Rect card_{};
   math::Rect list_{};
   math::Rect input_{};

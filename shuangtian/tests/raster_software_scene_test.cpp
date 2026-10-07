@@ -63,6 +63,15 @@ inline constexpr int kHeight = 192;
 /// `gl/*.png` 就是这类噪声，随 GL 测试一起删掉了。
 constexpr const char* kArtifactDir = "build/test-artifacts";
 
+/// 产物目录（**按分片隔离**）：目录名拼上分片后缀。
+///
+/// `st test --test-jobs N` 把用例分到 N 个进程上并行跑。内存状态天然隔离（各是独立进程），
+/// 但**文件系统不是**——本用例写 PNG，两片同时写同一个文件会写坏。
+/// 单进程跑时后缀为空，路径与以前完全一致。
+[[nodiscard]] auto artifact_dir() -> std::string {
+  return std::string(kArtifactDir) + st::test::shard_suffix();
+}
+
 void write_png_at(const Canvas& canvas, const char* path) {
   st::codec::PngImage image;
   image.width = static_cast<std::uint32_t>(canvas.physical_width());
@@ -84,7 +93,7 @@ void write_png_at(const Canvas& canvas, const char* path) {
 /// 那是 GCC 13 把短串拼接的 SSO 缓冲区当成了 memcpy 边界。统一在**档位**上处理，
 /// 见 `src/pkg/build.cpp` 的 `profile_flags`，不在每个调用点打补丁。）
 void write_png(const Canvas& canvas, const char* leaf) {
-  const std::string directory = std::string(kArtifactDir) + "/scene";
+  const std::string directory = artifact_dir() + "/scene";
   (void)st::fs::create_directories(directory);
   const std::string path = directory + "/" + leaf;
   write_png_at(canvas, path.c_str());

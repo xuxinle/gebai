@@ -13,10 +13,6 @@ namespace {
   return value == ' ' || value == '\t' || value == '\n' || value == '\r' || value == '\f' || value == '\v';
 }
 
-[[nodiscard]] constexpr auto is_ascii_digit(char value) noexcept -> bool {
-  return value >= '0' && value <= '9';
-}
-
 }  // namespace
 
 auto is_ascii(std::string_view text) noexcept -> bool {

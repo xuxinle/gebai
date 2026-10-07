@@ -1387,6 +1387,44 @@ SVG 图元 17 例 16/17→**17/17**。
 
 ## P0（当前无——上轮的四项渲染地基已全部落地，见「已完成」）
 
+### 跨编译器严格模式的真实缺口（2026-10-06 编译器对比轮）
+
+**现象**：同一份源码在 **GCC 16.2 下全绿**，而在 **Clang 23 下 92 个源文件里有 19 个编不过**
+（`-Werror` 全开）。这不是"clang 太严"，而是**两族对同一处未定义/未指定行为的判断不同**——
+这些差异在 GCC 上完全看不到，属于本框架一直在防的那类问题。
+
+**本轮已修完（全部是自家代码的真缺陷，逐个改代码而非加抑制）**：
+
+| 位置 | 问题 | 为何 GCC 不报 |
+|---|---|---|
+| `src/core/string.cpp` | `is_ascii_digit` 是**死函数**（同文件另有活的那个） | GCC 的未用静态函数告警仅在部分场景触发 |
+| `src/text/text.cpp` | lambda `[this, ...]` 捕了 `this` **却从未用** | clang 有 `-Wunused-lambda-capture`，GCC 无对应检查 |
+| `src/ui/ui_root.cpp` | `overlays_.begin() + index`（`size_t` → `difference_type` 隐式变号） | GCC 的 `-Wconversion` 不覆盖 `vector::iterator + n` 这条路径 |
+| `src/raster/platform_d3d11.cpp` | `point_sample_` 是**从未使用的私有字段** | clang 有 `-Wunused-private-field`，GCC 无 |
+| `include/st/ui/components/file_dialog.hpp` + `.cpp` | 双击判定三件套（`kDoubleClickMs`/`last_click_ms_`/`last_click_index_`）**从未接线** | 同上 |
+| `src/shell/platform_win32.cpp` | `kResizeBorder`/`kMinClientWidth`/`kMinClientHeight` 是**后来那组同名常量的死副本**（值与用途都重复） | GCC 无 `-Wunused-const-variable` 的等价覆盖 |
+| `src/ui/components/tree.cpp` | 文件作用域 `kNoSelection` 被**类内同名成员遮蔽**、从未被使用 | 同上 |
+| `include/st/ui/dsl.hpp` | `DeclarativeHost::root_` 存了却从不读（composer 自己持有引用） | clang 有 `-Wunused-private-field` |
+| `src/core/platform_net.cpp` / `src/pkg/platform_http.cpp` | `ioctlsocket(handle, FIONBIO, ...)`：`FIONBIO` 展开为 `_IOW(...)`，后者在**系统头内部**把 `sizeof(t)`（size_t）转成 `long` | 转换发生在系统头里，GCC 不报（已改为先取到局部 `long`，让转换有据可查） |
+
+**已落地的机制**：清单 `toolchains.<名>.suppressions`——目标专属**告警收敛**，
+追加在工程严格集与档位标志之后，**只用于 vendored 第三方头**（`sqlite3.h` 的 `__int64`、
+`quickjs.h` 的旧式转换与 `NAN`）。工程自己的代码与 GCC 同等严格。
+
+**未做（下一步）**：
+
+- [ ] **第三方头应走 `-isystem` 而不是逐类抑制**。现状是 `-Wno-old-style-cast` 等会**全局**生效，
+      连我们自己代码里的同类问题也一并放过（本轮之所以还能抓到 9 处自家缺陷，是因为那些
+      `-Wno-*` 恰好没盖住它们——这不牢靠）。正道：`third_party` 那条 `-I` 改成 `-isystem`
+      （GCC/clang 都支持，屏蔽来自该目录的告警而保留自家代码的检查）。
+      这不是"顺手改一行"：`gather_include_dirs` 要区分"自家"与"第三方"两类包含目录，
+      且缓存键与 PCH 消费端都要跟着变——需要单独立项并量一次收益。
+- [ ] **把"双编译器构建"变成常规门禁**：本轮已证明它能拓出 GCC 看不到的真缺陷（上表九处）。
+      但 **clang 工具链是可选的**（指向一份本地 LLVM 安装），所以门禁只能做成
+      "有 clang 时跑"，而 GCC 扫过的仍是默认路径。
+- [ ] **`build/dev` 的 PCH 是 114 MB / 磁盘 298 MB**（clang 侧同为 PCH 只有 30 MB，而全量构建
+      两族持平——见 `docs/BUILD_TEST_PERF.md` §5）。压缩方向不在 PCH 体积而在**模块分层**（待验证）。
+
 ### 子像素定位（字形落点相位）——**已量化待实施 **
 
 - [ ] **字形笔位被 `lround` 取整 → 字距随相位跳**（指导书 §1.1）。

@@ -289,6 +289,8 @@ auto Manifest::parse_json(const st::Json& json, std::string_view directory) -> R
       spec.defines = json_get_string_array(value, "defines");
       spec.executable_suffix = json_get_string(value, "executable_suffix");
       spec.extra_flags = json_get_string_array(value, "extra_flags");
+  spec.suppressions = json_get_string_array(value, "suppressions");
+  spec.target_triple = json_get_string(value, "target_triple");
       if (spec.compiler.empty()) {
         return unexpected(ErrorCode::Parse,
                           std::format("工具链 {} 缺少 compiler（交叉编译必须显式指定编译器）", name));

@@ -1777,7 +1777,6 @@ class GpuCanvas final : public Surface {
   std::vector<ClipFrame> clip_stack_{};
   std::vector<MaskCacheEntry> mask_cache_{};
   std::vector<RampCacheEntry> ramp_cache_{};
-  bool point_sample_{false};
   bool readback_dirty_{true};
   int physical_width_{0};
   int physical_height_{0};

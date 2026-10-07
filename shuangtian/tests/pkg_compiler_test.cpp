@@ -1,9 +1,8 @@
-// 编译器族差异层测试：标志翻译、链接参数、**依赖清单转换**。
+// 编译器族差异层测试：族判定、PCH 消费标志、链接参数。
 //
-// 为什么依赖清单转换必须有测试：它错了不会让构建失败，只会让"改了头文件不重编"——
-// 而后果是结构体改了、依赖它的 `.o` 还是旧的，进程在运行期以 ABI 不匹配的方式崩溃
-// （实测踩过：Canvas 加一个成员，界面起来就 access violation）。
-// 这类静默降级只能靠断言钉住。
+// 为什么这些必须有测试：它们错了不会让构建失败，而是让构建**静默用错口径**——
+// 例如把 GCC 的 `-include` 漏给另一族、或把 `-ldl` 发给 Windows 目标。
+// 这类错误在编译/链接期才现形，且报错位置离真正原因很远。
 
 #include "st/pkg/compiler.hpp"
 #include "st/test/test.hpp"
@@ -13,166 +12,93 @@ namespace {
 using st::pkg::CompilerKind;
 using st::pkg::SourceLanguage;
 
+[[nodiscard]] auto has(const std::vector<std::string>& args, std::string_view flag) -> bool {
+  return std::ranges::find(args, flag) != args.end();
+}
+
 }  // namespace
 
 ST_TEST(compiler_kind_detection) {
-  ST_CHECK(st::pkg::compiler_kind_of("g++") == CompilerKind::Gcc);
-  ST_CHECK(st::pkg::compiler_kind_of("x86_64-w64-mingw32-g++") == CompilerKind::Gcc);
-  ST_CHECK(st::pkg::compiler_kind_of("clang++") == CompilerKind::Clang);
-  ST_CHECK(st::pkg::compiler_kind_of("clang-cl") == CompilerKind::Msvc);
-  ST_CHECK(st::pkg::compiler_kind_of("C:/Program Files/Microsoft Visual Studio/18/Community/"
-                                     "VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe") ==
-           CompilerKind::Msvc);
+  ST_CHECK(st::pkg::compiler_kind_of("g++").value() == CompilerKind::Gcc);
+  ST_CHECK(st::pkg::compiler_kind_of("x86_64-w64-mingw32-g++").value() == CompilerKind::Gcc);
+  ST_CHECK(st::pkg::compiler_kind_of("clang++").value() == CompilerKind::Clang);
+  ST_CHECK(st::pkg::compiler_kind_of("C:/program/clang+llvm-23.1.2/bin/clang++.exe").value() ==
+           CompilerKind::Clang);
 }
 
-ST_TEST(compiler_flag_translation_gcc_passthrough) {
-  // 非 MSVC 族：原样返回（清单本来就是 GCC 风格）
-  const std::vector<std::string> flags{"-O2", "-Wall", "-Iinclude", "-DFOO=1", "-std=c++20"};
-  const auto same = st::pkg::translate_flags(CompilerKind::Gcc, flags);
-  ST_CHECK(same == flags);
+ST_TEST(compiler_kind_rejects_clang_cl) {
+  // `clang-cl` 是 MSVC 口径（`/std:c++20`、`/I`、`/WX`）：本层不支持，**必须明确拒绝**。
+  // 为什么不能"当成 Clang 凑合"：会拿 `-std=c++20` 去喂它，报一堆与真正原因
+  // （用错了家族）相隔很远的错——这正是本框架反复踩过的那类"报错位置骗人"。
+  ST_CHECK(!st::pkg::compiler_kind_of("clang-cl").has_value());
+  ST_CHECK(!st::pkg::compiler_kind_of("C:/LLVM/bin/clang-cl.exe").has_value());
 }
 
-ST_TEST(compiler_flag_translation_msvc) {
-  std::vector<std::string> dropped;
-  const auto translated = st::pkg::translate_flags(
-      CompilerKind::Msvc,
-      {"-std=c++20", "-O2", "-DNDEBUG", "-Iinclude", "-Wall", "-Wextra", "-Werror", "-Wshadow",
-       "-fno-omit-frame-pointer", "-fno-strict-aliasing", "-w"},
-      &dropped);
-  const auto contains = [&translated](std::string_view flag) {
-    return std::ranges::find(translated, flag) != translated.end();
-  };
-  ST_CHECK(contains("/std:c++20"));
-  ST_CHECK(contains("/O2"));
-  ST_CHECK(contains("/DNDEBUG"));
-  ST_CHECK(contains("/Iinclude"));
-  ST_CHECK(contains("/W4"));
-  ST_CHECK(contains("/WX"));
-  // 旧 Windows SDK 系统头 C5105 误报降级：/WX 仍在，但该条不升错
-  ST_CHECK(contains("/w35105"));
-  ST_CHECK(contains("/Oy-"));
-  ST_CHECK(contains("/w"));
-  // 无等价物者必须被记录（调用方会打印），不能悄悄消失
-  ST_CHECK(std::ranges::find(dropped, "-Wshadow") != dropped.end());
-  ST_CHECK(std::ranges::find(dropped, "-fno-strict-aliasing") != dropped.end());
-  // 未启用 -Werror 时不应出现 /w35105（降级只随 /WX 生效）
-  const auto no_werror =
-      st::pkg::translate_flags(CompilerKind::Msvc, {"-std=c++20", "-Wall"}, &dropped);
-  ST_CHECK(std::ranges::find(no_werror, "/w35105") == no_werror.end());
+ST_TEST(compiler_kind_name_covers_every_family) {
+  // 名字进缓存键与日志：漏一族会让两个不同的族共享同一个键（对象不兼容）
+  ST_CHECK_EQ(std::string(st::pkg::compiler_kind_name(CompilerKind::Gcc)), std::string("gcc"));
+  ST_CHECK_EQ(std::string(st::pkg::compiler_kind_name(CompilerKind::Clang)), std::string("clang"));
 }
 
-// PCH 消费端标志拼装：两族各自正确，且绝不能把 GCC 语法漏给 MSVC
-ST_TEST(pch_consume_args_per_compiler_kind) {
-  const auto msvc = st::pkg::pch_consume_args(CompilerKind::Msvc, "build/dev/pch",
-                                              "prefix.hpp", "build/dev/pch/prefix.pch");
-  const auto contains = [](const std::vector<std::string>& args, std::string_view flag) {
-    return std::ranges::find(args, flag) != args.end();
-  };
-  ST_CHECK(contains(msvc, "/Ibuild/dev/pch/"));
-  ST_CHECK(contains(msvc, "/Yuprefix.hpp"));
-  ST_CHECK(contains(msvc, "/FIprefix.hpp"));
-  ST_CHECK(contains(msvc, "/Fpbuild/dev/pch/prefix.pch"));
-  // GCC 语法（D9002/D9024/D9027 三重错误）绝不能出现在 MSVC 命令里
-  ST_CHECK(!contains(msvc, "-include"));
+// PCH 消费端标志：GCC 与 Clang 同一拼法（`-I` 指向 .gch 所在目录 + `-include` 代理头）
+ST_TEST(pch_consume_args_uses_gcc_style) {
+  const auto gcc = st::pkg::pch_consume_args("build/dev/pch", "prefix.hpp");
+  ST_CHECK(has(gcc, "-Ibuild/dev/pch/"));
+  ST_CHECK(has(gcc, "-include"));
+  ST_CHECK(has(gcc, "prefix.hpp"));
+  // `-include` 与头名必须是**相邻两项**：拆开就成了两个参数，`prefix.hpp` 会被当成源文件
+  const auto include_at = std::ranges::find(gcc, "-include");
+  ST_REQUIRE(include_at != gcc.end());
+  ST_REQUIRE(std::next(include_at) != gcc.end());
+  ST_CHECK_EQ(*std::next(include_at), std::string("prefix.hpp"));
 
-  const auto gcc = st::pkg::pch_consume_args(CompilerKind::Gcc, "build/dev/pch",
-                                             "prefix.hpp", "");
-  ST_CHECK(contains(gcc, "-Ibuild/dev/pch/"));
-  ST_CHECK(contains(gcc, "-include"));
-  ST_CHECK(contains(gcc, "prefix.hpp"));
-  // GCC 系不吃 /Yu /FI /Fp
-  ST_CHECK(!contains(gcc, "/Yuprefix.hpp"));
-  ST_CHECK(!contains(gcc, "/FIprefix.hpp"));
+  // 目录已带尾分隔符时不双写（`-Ibuild/dev/pch//` 是合法但难看、且会让缓存键与日志发散）
+  const auto trailing = st::pkg::pch_consume_args("build/dev/pch/", "prefix.hpp");
+  ST_CHECK(has(trailing, "-Ibuild/dev/pch/"));
+  ST_CHECK(!has(trailing, "-Ibuild/dev/pch//"));
 
-  // 目录已带尾分隔符时不双写
-  const auto trailing = st::pkg::pch_consume_args(CompilerKind::Msvc, "build/dev/pch/",
-                                                  "prefix.hpp", "");
-  ST_CHECK(contains(trailing, "/Ibuild/dev/pch/"));
-  ST_CHECK(!contains(trailing, "/Ibuild/dev/pch//"));
+  // 反斜杠分隔也认（Windows 上清单/拼接可能给出反斜杠）
+  const auto backslash = st::pkg::pch_consume_args("build\\dev\\pch\\", "prefix.hpp");
+  ST_CHECK(has(backslash, "-Ibuild\\dev\\pch\\"));
 }
 
-ST_TEST(compiler_link_libraries_msvc_drops_posix) {
-  const auto args = st::pkg::link_library_arguments(
-      CompilerKind::Msvc, "windows", {"pthread", "dl", "m", "ws2_32", "user32"});
-  const auto contains = [&args](std::string_view name) {
-    return std::ranges::find(args, name) != args.end();
-  };
-  ST_CHECK(!contains("pthread.lib"));
-  ST_CHECK(!contains("dl.lib"));
-  ST_CHECK(!contains("m.lib"));
-  ST_CHECK(contains("ws2_32.lib"));
-  ST_CHECK(contains("user32.lib"));
-  // GCC 族照旧 `-l` 形式
-  const auto gcc = st::pkg::link_library_arguments(CompilerKind::Gcc, "linux", {"pthread"});
-  ST_CHECK(std::ranges::find(gcc, "-lpthread") != gcc.end());
+ST_TEST(compiler_link_libraries_drops_posix_on_windows) {
+  // Windows 目标：mingw 没有 libdl/libm/libpthread，照传就是 `cannot find -ldl`
+  const auto windows =
+      st::pkg::link_library_arguments("windows", {"pthread", "dl", "m", "ws2_32", "user32"});
+  ST_CHECK(!has(windows, "-lpthread"));
+  ST_CHECK(!has(windows, "-ldl"));
+  ST_CHECK(!has(windows, "-lm"));
+  ST_CHECK(has(windows, "-lws2_32"));
+  ST_CHECK(has(windows, "-luser32"));
+
+  // 反向：Windows 专属库不能发给非 Windows 目标
+  const auto linux = st::pkg::link_library_arguments("linux", {"ws2_32", "pthread", "dl", "m"});
+  ST_CHECK(!has(linux, "-lws2_32"));
+  ST_CHECK(has(linux, "-lpthread"));
+  ST_CHECK(has(linux, "-ldl"));
+  ST_CHECK(has(linux, "-lm"));
 }
 
-// —— 依赖清单：v1.2（`Includes` 为字符串数组）——
-ST_TEST(depfile_conversion_source_dependencies_v12) {
-  const std::string json = R"({
-    "Version": "1.2",
-    "Data": {
-      "Source": "c:\\proj\\src\\a.cpp",
-      "Includes": [
-        "c:\\proj\\include\\a.hpp",
-        "c:\\proj\\include\\b.hpp"
-      ]
-    }
-  })";
-  const auto depfile = st::pkg::depfile_from_source_dependencies(json, "obj/a.cpp.o");
-  ST_CHECK(depfile.has_value());
-  // 依赖必须**全部**进入清单（漏掉任何一个都会造成"改了不重编"）
-  ST_CHECK(depfile->find("c:\\proj\\include\\a.hpp") != std::string::npos);
-  ST_CHECK(depfile->find("c:\\proj\\include\\b.hpp") != std::string::npos);
-  ST_CHECK(depfile->find("c:\\proj\\src\\a.cpp") != std::string::npos);
-  // 顶层的 Version 不是依赖
-  ST_CHECK(depfile->find("1.2") == std::string::npos);
-  ST_CHECK(depfile->starts_with("obj/a.cpp.o: "));
-}
-
-// —— 依赖清单：早期嵌套形态（对象数组 + 内层 Includes）——
-ST_TEST(depfile_conversion_source_dependencies_nested) {
-  const std::string json = R"({
-    "Version": "1.1",
-    "Data": {
-      "Source": "c:\\proj\\src\\a.cpp",
-      "Includes": [
-        { "Source": "c:\\proj\\include\\a.hpp",
-          "Includes": [ { "Source": "c:\\proj\\include\\deep.hpp" } ] }
-      ]
-    }
-  })";
-  const auto depfile = st::pkg::depfile_from_source_dependencies(json, "obj/a.cpp.o");
-  ST_CHECK(depfile.has_value());
-  ST_CHECK(depfile->find("c:\\proj\\include\\deep.hpp") != std::string::npos);
-}
-
-// —— 带空格的路径必须转义（否则会被切成两个不存在的依赖 → 每次都判"需要重建"）——
-ST_TEST(depfile_conversion_escapes_spaces) {
-  const std::string json = R"({
-    "Version": "1.2",
-    "Data": { "Source": "c:\\my proj\\src\\a.cpp", "Includes": ["c:\\my proj\\inc\\x.hpp"] }
-  })";
-  const auto depfile = st::pkg::depfile_from_source_dependencies(json, "obj/a.cpp.o");
-  ST_CHECK(depfile.has_value());
-  ST_CHECK(depfile->find("c:\\my\\ proj\\inc\\x.hpp") != std::string::npos);
-}
-
-ST_TEST(depfile_conversion_rejects_broken_json) {
-  ST_CHECK(!st::pkg::depfile_from_source_dependencies("{ not json", "obj/a.cpp.o").has_value());
-}
-
-ST_TEST(dialect_flags_msvc_pins_utf8_and_language) {
-  const auto cxx = st::pkg::dialect_flags(CompilerKind::Msvc, SourceLanguage::Cxx);
-  const auto has = [&cxx](std::string_view flag) {
-    return std::ranges::find(cxx, flag) != cxx.end();
-  };
-  // `/utf-8` 不能省：没有它 MSVC 按本地代码页读源码，中文文案静默乱码
-  ST_CHECK(has("/utf-8"));
-  ST_CHECK(has("/EHsc"));
-  // C 源不能吃 C++ 专属开关
-  const auto c = st::pkg::dialect_flags(CompilerKind::Msvc, SourceLanguage::C);
-  ST_CHECK(std::ranges::find(c, "/EHsc") == c.end());
-  // GCC 族没有"恒定追加"的标志
+ST_TEST(dialect_flags_empty_for_gcc_and_clang) {
+  // 两族都不需要恒定追加标志：`-std=c++20` 由清单给，编码按 UTF-8 读源码。
+  // 若将来某族需要（如 `/utf-8`），这里必须有测试跟着改——"空"是一个**结论**，不是缺省。
   ST_CHECK(st::pkg::dialect_flags(CompilerKind::Gcc, SourceLanguage::Cxx).empty());
+  ST_CHECK(st::pkg::dialect_flags(CompilerKind::Clang, SourceLanguage::Cxx).empty());
+  ST_CHECK(st::pkg::dialect_flags(CompilerKind::Gcc, SourceLanguage::C).empty());
+  ST_CHECK(st::pkg::dialect_flags(CompilerKind::Clang, SourceLanguage::C).empty());
+}
+
+ST_TEST(strip_sanitizers_removes_instrumentation_flags) {
+  const std::vector<std::string> flags{"-O1", "-g1", "-fsanitize=address,undefined",
+                                       "-fno-sanitize-recover=all", "-Wall", "-fsanitize-recover"};
+  const auto stripped = st::pkg::strip_sanitizers(flags);
+  ST_CHECK(!has(stripped, "-fsanitize=address,undefined"));
+  ST_CHECK(!has(stripped, "-fno-sanitize-recover=all"));
+  ST_CHECK(!has(stripped, "-fsanitize-recover"));
+  // 其余一个不能丢（丢了就改变了那个单元的语言/告警口径）
+  ST_CHECK(has(stripped, "-O1"));
+  ST_CHECK(has(stripped, "-g1"));
+  ST_CHECK(has(stripped, "-Wall"));
+  ST_CHECK_EQ(stripped.size(), std::size_t{3});
 }

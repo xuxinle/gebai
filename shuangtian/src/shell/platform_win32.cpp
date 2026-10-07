@@ -39,15 +39,6 @@ namespace {
 
 constexpr wchar_t kWindowClass[] = L"ShuangtianWindow";
 
-/// 自绘窗框的缩放命中带宽与最小客户区尺寸（**逻辑**像素；物理尺寸 = × scale）。
-///
-/// 最小尺寸取值的依据：标题栏要放得下"图标 + 标题 + 三个控制按钮"（约 140px），
-/// 再留出一点正文宽度。低于它时自绘窗框会被裁掉一截，而**窗口一旦比内容还小就再也"
-/// 拖不回来"**（边缘落在已画区域之外），必须靠最小尺寸护栏堵住。
-constexpr float kResizeBorder = 6.0f;
-constexpr float kMinClientWidth = 240.0f;
-constexpr float kMinClientHeight = 120.0f;
-
 [[nodiscard]] auto to_wide(std::string_view utf8) -> std::wstring {
   if (utf8.empty()) return {};
   const int needed =

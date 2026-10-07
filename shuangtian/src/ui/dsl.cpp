@@ -1841,7 +1841,7 @@ auto tabs(Composer& c, const std::vector<TabData>& items, std::size_t active,
 }
 
 DeclarativeHost::DeclarativeHost(UiRoot& root, Guardrails guardrails)
-    : composer_(std::make_unique<Composer>(root, guardrails)), root_(&root) {
+    : composer_(std::make_unique<Composer>(root, guardrails)) {
   // **自登记**：本树每帧由 `UiRoot::tick_declarative_hosts()` 统一推进。
   // 为何不让调用方自己记得：一个页面可以占多处树位（`mount_into` 挂进标题栏的
   // 附属槽），进程里于是有多棵树；漏推第二棵时“点击命中了、状态也变了、

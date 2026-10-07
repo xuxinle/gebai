@@ -912,7 +912,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   // 顺序刻意如此：类分档是"只动这一类"的窄口径修正，理应有最高优先级。
   const float class_gamma = class_gamma_[glyph_class_index(glyph_class)];
   const float glyph_gamma = class_gamma > 0.0f ? class_gamma : effective_gamma(effective_size);
-  const auto correct = [this, &skia_lut, use_skia_lut, glyph_gamma](float value) noexcept -> float {
+  const auto correct = [&skia_lut, use_skia_lut, glyph_gamma](float value) noexcept -> float {
     if (value <= 0.0f || value >= 1.0f) return value;
     if (use_skia_lut) {
       const float scaled = value * 255.0f;
