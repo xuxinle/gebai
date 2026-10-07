@@ -309,8 +309,9 @@ auto command_test(const Arguments& arguments) -> int {
   // 测试并行度：**默认 = 硬件并发的一半**（上限 16）——测试执行是迭代的最大单项成本
   // （全套件 25s，编译只占零头），而它是**单核**的：不并行就等于把 27 个核空转。
   // 为何不是开满：套件里有一批重型用例（真光栅化文本、真连 TCP 的等待类），
-  // 它们的耗时对 CPU 竞争敏感——开满会把单片耗时抬高到把收益吃掉（28 片实测
-  // 反而与 16 片持平，且单例膨胀到 3.4×）；实测拐点在 12~16 片（见 `docs/BUILD_TEST_PERF.md`）。
+  // 它们的耗时对 CPU 竞争敏感——开满 28 片的机时是 16 片的 1.5 倍
+  // （`text_*` 用例中位膨胀 3.2× vs 2.3×），而墙钟反而慢 12%；
+  // 实测最优点就是这里算出的 16 片（见 `docs/BUILD_TEST_PERF.md`）。
   // `--test-jobs 1` 回到与分片前逐位等价的单进程。
   const std::size_t default_test_jobs =
       std::min<std::size_t>(16, std::max<std::size_t>(1, st::hardware_concurrency() / 2));

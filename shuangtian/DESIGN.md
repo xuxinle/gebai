@@ -3501,7 +3501,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 |---|---|---|---|
 | 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case
  超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑） | `st test` | **825 用例 / 20702 断言**（dev 档实测；`st test --san` 全绿 0 报告；另 12 个慢用例默认跳过） |
-| 并行测试 | **`--test-jobs N` 分片**：同一份 `st_tests` 被拉起 N 次（每次 `--shard i/N`），片内顺序不变、片间不共享内存；每片写各自的 JUnit，父进程合并成一份（用例名排序，逐字节可复现） | `st test --test-jobs 16` | **24.5 s → 4.7 s（5.2×）**，与串行逐用例比对 `missing=0 extra=0 failDiff=0 dupes=0`（见 `docs/BUILD_TEST_PERF.md`） |
+| 并行测试 | **`--test-jobs N` 分片**：同一份 `st_tests` 被拉起 N 次（每次 `--shard i/N`），片内顺序不变、片间不共享内存；每片写各自的 JUnit，父进程合并成一份（用例名排序，逐字节可复现） | `st test --test-jobs 16` | **纯执行 22.9 s → 3.8 s（6.0×）**；代价是机时 2.13×（`text_*` 用例中位膨胀 2.3×）。与串行逐用例比对 `missing=0 extra=0 failDiff=0 dupes=0`（见 `docs/BUILD_TEST_PERF.md`） |
 | 独立工程集成 | **真建一个引用 framework 的最小工程**、真构建真跑（`tests/pkg_integration_test.cpp`）
  | `st test pkg_integration` | 全绿（`ST_INTEGRATION_BUILD=0` 可关；关掉时明确跳过而非假绿） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告（需带 sanitizer 运行库的编译器；MinGW 发行版不带时构建前明确报错） |
