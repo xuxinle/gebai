@@ -605,7 +605,7 @@ ST_TEST(declarative_for_each_result_flattens_inside_array) {
 //
 // 回调闭包每帧重建（`() => { n.value++ }` 是 build 里的新函数对象）。若实现按
 // 「回调变了就重绑」，等价于每帧把整棵树的事件全部注销重绑——实测三帧的绑定
-// id 是 b1..b3 → b4..b6 → b7..b9（codeeditor 整页声明式每帧都在付这笔钱）。
+// id 是 b1..b3 → b4..b6 → b7..b9（gbcode 整页声明式每帧都在付这笔钱）。
 //
 // 现在绑定按**元素 id** 持有、只在首次出现回调时登记：跨帧的绑定 id 必须不变
 // （反向验证：把 `ensureEventBinding` 改回无条件 release+on，本用例立即红）。

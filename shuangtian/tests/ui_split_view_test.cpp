@@ -294,7 +294,7 @@ ST_TEST(ui_split_view_single_pane_and_dsl_factory) {
 // 回归：`paint_content` 里 `handle_rect()` 返回的已经是**绝对坐标**，
 // 旧代码又加了一次 `bounds_.x` —— 分隔线整整偏出一个 `bounds_.x`，
 // 跑到第二个面板**内部**去（实测：分栏落在 x=44 时线被画到 361.66，
-// 而两面板交界只在 314..322；在 codeeditor 里就表现为“标签下方一条
+// 而两面板交界只在 314..322；在 gbcode 里就表现为“标签下方一条
 // 穿过代码行号栏的竖线”，用户报的正是这个）。
 //
 // 这里用离屏画布扫像素——几何断言（`handle_rect`）单独看是**发现不了**
@@ -302,7 +302,7 @@ ST_TEST(ui_split_view_single_pane_and_dsl_factory) {
 ST_TEST(ui_split_view_divider_paints_between_panes) {
   // ⚠ 分栏必须**不落在原点**：`bounds_.x == 0` 时「多加一次 bounds_.x」与不加等价，
   // 缺陷根本不会显形（第一版测试就是这么写的，回退修复后依然是绿的——假绿）。
-  // 真实场景里分栏几乎总在某层容器内部（codeeditor 里 x=44），这里用一个
+  // 真实场景里分栏几乎总在某层容器内部（gbcode 里 x=44），这里用一个
   // 带左内边距的宿主把它推到非零位置。
   st::ui::UiRoot root{};
   root.set_viewport(st::math::Size{800.0f, 400.0f});

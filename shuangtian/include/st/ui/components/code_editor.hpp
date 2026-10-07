@@ -32,6 +32,7 @@
 
 #include "st/text/highlight.hpp"
 #include "st/ui/element.hpp"
+#include "st/ui/line_layout.hpp"
 
 namespace st::ui {
 
@@ -95,9 +96,17 @@ class CodeEditor : public Element {
   /// （实测：`--ui-font-scale 1.5` 时 UI 文字 15→22.5，而编辑器恒为 13.5）。
   /// 档位表达还能让「编辑器字体大小」设置面板直接列出 0.85/1.0/1.15…。
   ///
-  /// **行距倍数**（相对字体度量给出的自然行高）。默认 `1.15`——代码行比正文更需要
-  /// 透气：注释、字符串、嵌套结构在密排下容易糊成一片，适度加宽的行距对**扫读**帮助很大
-  /// （很多编辑器默认行距都在 1.1~1.5 之间）。`1.0` = 字体自然行高（最紧）。
+  /// **行距倍数**（相对字体度量给出的自然行高）。默认 `1.05`——代码行比正文稍需一点
+  /// 行间气（注释/嵌套结构在密排下容易糊成一片），但**不宜过大**：行带之间会出现
+  /// 明显缝隙，看着像“背景被切成了条”。`1.0` = 字体自然行高（最紧）。
+  ///
+  /// 实测（字号 15 / Monospace，自然行高 19.80）：
+  ///
+  /// | 倍数 | 行盒 | 相邻行带间的缝隙 |
+  /// |---|---|---|
+  /// | 1.00 | 19.80 | 0（仅笔画间隙） |
+  /// | **1.05（默认）** | **20.79** | **≈1.0** |
+  /// | 1.15（旧默认） | 22.77 | ≈3.0 |
   ///
   /// 传 <=0 或非有限值会被忽略（行距必须为正；`set_font_scale` 同姿态）。
   void set_line_spacing(float spacing);
@@ -158,10 +167,50 @@ class CodeEditor : public Element {
   /// 注释/取消注释选中行（用语言的第一个行注释标记；无行注释的语言返回 false）。
   auto toggle_comment() -> bool;
 
-  // —— 查找与替换（VSCode 同族语义；`case_sensitive=false` 大小写不敏感）——
+  /// **选中下一处同词**（Ctrl+D 语义）：
+  ///
+  /// - 当前无选中：取光标所在的词（`word_bounds`）选中它，光标落在词尾；
+  /// - 已有选中：从**选区末端**起向后找同一段文本（**字面比较**，大小写敏感），
+  ///   找到就把选区挪到那一处；已到文末则**环绕**到第一处。
+  ///
+  /// 单光标模型：选区只保留最后一处（多光标另议）。返回是否找到；
+  /// 找不到（词为空 / 文档里只此一处且已在它上面）时返回 false 且**不改动**选区。
+  auto select_next_occurrence() -> bool;
+
+  /// 上/下移当前行（或选中行块）：`delta < 0` 向上、`delta > 0` 向下。
+  ///
+  /// 语义与主流编辑器一致：移行带上自己的缩进一起搬，光标/选区跟着行走；
+  /// 已在文档首/末则不越界，返回 false。空文档、只读态同样返回 false。
+  auto move_lines(int delta) -> bool;
+
+  // —— 查找与替换（VSCode 同族语义；默认大小写不敏感）——
+
+  /// 查找选项。
+  ///
+  /// 为何要有 `whole_word` 而不是让调用方把词改写成 `\b词\b`：本编辑器**不做正则**，
+  /// 那种改写会**静默给出错结果**（`\b` 被当字面量 → 一处也匹配不到，而调用方
+  /// 以为“全词查找生效了”）。词边界必须在命中那一刻判，并与“什么算词字符”同源。
+  struct FindOptions {
+    bool case_sensitive{false};
+    bool whole_word{false};
+  };
 
   /// 设置查找词：重建命中表并绘制高亮（不移动光标）。返回命中数。
-  auto set_find(std::string needle, bool case_sensitive = false) -> std::size_t;
+  ///
+  /// 三个重载而非一个默认参数：默认实参写 `FindOptions{}` 要求嵌套类型的默认成员
+  /// 初始化器在类完整体之前可用（GCC 明确拒绝），拆成重载在语义上等价、且更直白。
+  auto set_find(std::string needle, FindOptions options) -> std::size_t;
+  auto set_find(std::string needle) -> std::size_t {
+    return set_find(std::move(needle), FindOptions{});
+  }
+  /// 便利重载：只给大小写开关。
+  auto set_find(std::string needle, bool case_sensitive) -> std::size_t {
+    return set_find(std::move(needle), FindOptions{.case_sensitive = case_sensitive});
+  }
+  /// 当前查找选项。
+  [[nodiscard]] auto find_options() const noexcept -> FindOptions {
+    return FindOptions{.case_sensitive = find_case_, .whole_word = find_word_};
+  }
   /// 清除查找态（高亮/命中表/当前命中）。
   void clear_find();
   [[nodiscard]] auto find_needle() const -> const std::string& { return find_needle_; }
@@ -179,7 +228,7 @@ class CodeEditor : public Element {
 
   /// 默认行距倍数（见 `set_line_spacing`）。**必须声明在 `line_spacing_` 之前**：
   /// 成员初始化器要用它，而成员默认值是按声明顺序求值的。
-  static constexpr float kDefaultLineSpacing = 1.15f;
+  static constexpr float kDefaultLineSpacing = 1.05F;
 
   // —— 滚动 ——
 
@@ -217,7 +266,7 @@ class CodeEditor : public Element {
   std::function<void(std::string_view)> on_submit{};       ///< Ctrl+Enter 提交
   /// 右键按下（参数为事件坐标，逻辑像素）。
   ///
-  /// 为何必须有（2026-10-06，来自 codeeditor 右键菜单实战）：`on_event` 对
+  /// 为何必须有（2026-10-06，来自 gbcode 右键菜单实战）：`on_event` 对
   /// **任何按钮**的 `MouseDown` 都走同一个“把光标搬到点的位置”的分支并返回 `true`，
   /// 于是宿主既拿不到右键（被组件吃掉）、也无法阻止“右键改了光标位置”。
   /// 结果是一个**能做到却不能做对**的局面：宿主只有两条路——接管整个命中路径，
@@ -350,6 +399,10 @@ class CodeEditor : public Element {
   float font_scale_{1.0f};
   /// 行距倍数（见 `set_line_spacing`）。
   float line_spacing_{kDefaultLineSpacing};
+  /// **本行盒的几何**（文字落位 / 墨迹带范围）——从框架的 `ui::layout_text_line` 取，
+  /// 组件不再自己算偏移（见 `line_layout.hpp`）。`mutable`：与旁边的几何缓存一样，
+  /// 在 `const` 的 `rebuild_line_geometry` 里惰性填充。
+  mutable ui::LineGeometry line_geometry_cache_{};
   /// 显式绝对字号（<=0 = 未设，按 `font_scale_` 跟主题）。
   float font_size_px_{-1.0f};
   /// 主题的基准字号（`apply_theme` 记下）。实际字号由它 **惰性算出**：
@@ -400,6 +453,7 @@ class CodeEditor : public Element {
   // —— 查找态（命中表为字符区间，绘制与跳转共用；文本变化即失效重建）——
   std::string find_needle_{};
   bool find_case_{false};
+  bool find_word_{false};                       ///< 全词匹配（见 `FindOptions`）
   bool find_active_set_{false};                 ///< find_active_ 是否有效（空命中表也有"无选中"态）
   std::vector<std::pair<std::size_t, std::size_t>> find_matches_{};  ///< 升序 [begin,end)
   std::size_t find_active_{kNoFindMatch};

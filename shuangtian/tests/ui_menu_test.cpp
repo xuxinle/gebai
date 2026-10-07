@@ -51,6 +51,24 @@ using st::ui::UiRoot;
   return root.dispatch(event);
 }
 
+/// **真实鼠标点击的完整事件序列**（`Down → Up → Click`）。
+///
+/// 为何不能只发一个 `Click`：真实后端在松开时补发 Click，而“按下”本身也是一个事件。
+/// 只发 Click 的测试**看不见“同一手势被处理两次”**这类缺陷——菜单项正是这么漏的：
+/// `MouseDown` 与 `Click` 合在一个 case 里，于是按下就执行了动作，
+/// 真正的 Click 早已落在别的元素上（用户感受：“点下去菜单就没了，还透到下面”）。
+/// 与协议 `input.mouse{kind:"click"}` 同序。
+void dispatch_click_sequence(UiRoot& root, float x, float y) {
+  const st::math::Point point{x, y};
+  for (const EventKind kind : {EventKind::MouseDown, EventKind::MouseUp, EventKind::Click}) {
+    Event event;
+    event.kind = kind;
+    event.position = point;
+    event.button = 1;
+    (void)root.dispatch(event);
+  }
+}
+
 }  // namespace
 
 // ————————————————————————————————————————————————————————————————————————————
@@ -291,8 +309,114 @@ ST_TEST(menu_bar_panel_close_notifies_caller) {
   ST_CHECK_EQ(bar_ptr->open_index(), MenuBar::kNoIndex);
 }
 
-ST_TEST(menu_bar_escape_notifies_close_but_does_not_swallow) {
-  // Esc 的两条约定：① 通知调用方（走 on_close → on_menu_close）；
+/// 一次物理点击只能**激活一次**，且面板在**松开前**不能没。
+///
+/// 回归（真实鼠标实测，2026-10-07）：`MenuPanel::on_event` 把 `Click` 与 `MouseDown`
+/// 合在一个 case 里，于是**按下那一刻**就执行了动作并关闭面板——等真正的 `Click`
+/// 到达时面板早已不在了，那个 Click 与 `MouseUp` 就落到**下面那个元素**上。
+/// 用户看到的就是“点菜单秒退，还透到下层”。
+///
+/// 同一个文件里 `MenuBar` 的注释早就记过这个坑（“曾经把 Click 与 MouseDown 合在
+/// 一个 case 里——一次物理点击会触发两次回调”）——当时只修了 MenuBar，同族的
+/// `MenuPanel` 漏了。所以这条用例两件事一起钉：
+/// ① 按下**不激活**；② 完整序列下来只激活**一次**。
+ST_TEST(menu_panel_item_activates_once_per_physical_click) {
+  UiRoot root;
+  root.set_viewport(st::math::Size{800.0f, 600.0f});
+  auto bar = std::make_unique<MenuBar>();
+  bar->set_menus(sample_menus());
+  MenuBar* bar_ptr = bar.get();
+  root.set_content(std::move(bar));
+  root.layout(true);
+
+  int activated = 0;
+  int closed = 0;
+  std::string action;
+  bar_ptr->on_action = [&action, &activated](const std::string&, const std::string& item) {
+    ++activated;
+    action = item;
+  };
+  bar_ptr->on_menu_close = [&closed]() { ++closed; };
+
+  auto panel = bar_ptr->make_panel(0);
+  MenuPanel* panel_ptr = panel.get();
+  root.add_overlay(std::move(panel), UiRoot::OverlayLayout::FillViewport);
+  root.layout(true);
+
+  const st::math::Rect row = panel_ptr->item_rect(0);
+  const float x = row.x + 20.0f;
+  const float y = row.y + row.height * 0.5f;
+
+  // ① 按下：**不得**激活（否则面板会在松开前就关掉，点击随即透到下层）
+  {
+    Event down;
+    down.kind = EventKind::MouseDown;
+    down.position = st::math::Point{x, y};
+    down.button = 1;
+    (void)root.dispatch(down);
+  }
+  ST_CHECK_EQ(activated, 0);
+  ST_CHECK_EQ(closed, 0);
+  ST_CHECK(panel_ptr->bounds().contains(st::math::Point{x, y}));   // 面板还在原位
+
+  // ② 松开 + Click：这一次才激活，而且**只有一次**
+  dispatch_click_sequence(root, x, y);
+  ST_CHECK_EQ(activated, 1);
+  ST_CHECK_EQ(action, std::string("new"));
+  ST_CHECK_EQ(closed, 1);
+}
+
+ST_TEST(menu_bar_click_on_open_title_toggles_closed_and_never_leaks_double_click) {
+  // 两条契约（都来自真实窗口实测的“点菜单秒退”）：
+  //
+  // ① **再点已打开的标题 = 关闭**（toggle 手感，与浏览器/VSCode 菜单栏一致）。
+  // ② 双击序列不得把窗口动作带出来：菜单栏长在标题栏附属槽里，
+  //    `DoubleClick` 漏出去就会被当成“双击标题区”而最大化窗口。
+  //    此前 `MenuBar` 根本没有 `DoubleClick` 分支——漏出去的正是它。
+  UiRoot root;
+  root.set_viewport(st::math::Size{800.0f, 600.0f});
+  auto bar = std::make_unique<MenuBar>();
+  bar->set_menus(sample_menus());
+  MenuBar* bar_ptr = bar.get();
+  root.set_content(std::move(bar));
+  root.layout(true);
+
+  int opened = 0;
+  int closed = 0;
+  bar_ptr->on_open_menu = [&opened](std::size_t) { ++opened; };
+  bar_ptr->on_menu_close = [&closed]() { ++closed; };
+  bar_ptr->on_action = [](const std::string&, const std::string&) {};
+
+  const st::math::Rect title = bar_ptr->title_rect(0);
+  const float x = title.x + title.width * 0.5f;
+  const float y = title.y + title.height * 0.5f;
+  const auto click = [&]() {
+    Event event;
+    event.kind = EventKind::Click;
+    event.position = st::math::Point{x, y};
+    event.button = 1;
+    return root.dispatch(event);
+  };
+
+  ST_CHECK(click());                       // 开
+  ST_CHECK_EQ(opened, 1);
+  ST_CHECK_EQ(bar_ptr->open_index(), std::size_t{0});
+  ST_CHECK(click());                       // 同一个标题再点：关
+  ST_CHECK_EQ(closed, 1);
+  ST_CHECK_EQ(bar_ptr->open_index(), MenuBar::kNoIndex);
+  ST_CHECK(click());                       // 又开
+  ST_CHECK_EQ(opened, 2);
+
+  // 双击：必须被菜单栏**收下**（返回 true），否则会冒泡到标题栏变成最大化。
+  Event dbl;
+  dbl.kind = EventKind::DoubleClick;
+  dbl.position = st::math::Point{x, y};
+  dbl.button = 1;
+  dbl.click_count = 2;
+  ST_CHECK(root.dispatch(dbl));
+}
+
+ST_TEST(menu_bar_escape_notifies_close_but_does_not_swallow) {  // Esc 的两条约定：① 通知调用方（走 on_close → on_menu_close）；
   // ② **不吞键**（返回 false）——调用方可能还有自己的 Esc 语义要处理。
   UiRoot root;
   root.set_viewport(st::math::Size{800.0f, 600.0f});

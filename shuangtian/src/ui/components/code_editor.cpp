@@ -12,6 +12,7 @@
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
 #include "st/raster/paint.hpp"
+#include "st/ui/line_layout.hpp"
 #include "st/ui/text_port.hpp"
 #include "st/ui/theme.hpp"
 
@@ -787,6 +788,111 @@ auto CodeEditor::toggle_comment() -> bool {
   return true;
 }
 
+auto CodeEditor::select_next_occurrence() -> bool {
+  rebuild_spans();
+  if (text_.empty()) return false;
+
+  // ① 无选中：先把光标处的词选中（这是 Ctrl+D 的第一次按下）。
+  if (!has_selection()) {
+    const auto [begin, end] = word_bounds(cursor_);
+    if (begin == end) return false;  // 光标不在词上（空白/标点）——不冒充已处理
+    // 光标回退一格时也能取到左边的词（与双击选词的观感一致）。
+    const auto [left_begin, left_end] = word_bounds(cursor_ > 0 ? cursor_ - 1 : 0);
+    if (left_begin < left_end && (begin == end || cursor_ == begin)) {
+      anchor_ = left_begin;
+      cursor_ = left_end;
+    } else {
+      anchor_ = begin;
+      cursor_ = end;
+    }
+    mark_dirty();
+    if (on_cursor_change) on_cursor_change();
+    return true;
+  }
+
+  // ② 已有选中：从**选区末端**起向后找同一段文本，找到就挪过去；到文末则环绕。
+  //
+  // 字面比较（区分大小写）：Ctrl+D 的语义是“下一处**一模一样**的那段字”，
+  // 大小写不同是另一处词，不该被吞进来。
+  //
+  // 比较起点用 `cursor_`（选区末端）而不是 `max(anchor,cursor)`：向后选时二者相同，
+  // 向前选时也符合“继续往下找”的直觉（与主流编辑器一致）。
+  const auto [sel_begin, sel_end] = selection();
+  const std::string_view needle(text_.data() + sel_begin, sel_end - sel_begin);
+  if (needle.empty()) return false;
+  const std::size_t from = std::min(sel_end, text_.size());
+  std::size_t hit = text_.find(needle, from);
+  if (hit == std::string::npos) hit = text_.find(needle, 0);
+  if (hit == std::string::npos) return false;
+  // 环绕后可能又回到“就是当前这一处”（全文只此一处）：维持原选区返回 false，
+  // 让调用方（状态栏/宿主）能如实报告“没有下一处”，而不是看着像执行成功。
+  if (hit == sel_begin) return false;
+  anchor_ = hit;
+  cursor_ = hit + needle.size();
+  mark_dirty();
+  if (on_cursor_change) on_cursor_change();
+  return true;
+}
+
+auto CodeEditor::move_lines(int delta) -> bool {
+  if (read_only_ || delta == 0) return false;
+  rebuild_spans();
+  if (line_spans_.empty()) return false;
+  const auto [sel_begin, sel_end] = selection();
+  const std::size_t first = line_of_index(sel_begin);
+  const std::size_t last = line_of_index(sel_end);
+  const std::size_t total = line_spans_.size();
+  // 越界不搬：到文档首还往上、到文档末还往下都如实返回 false
+  // （静默“看似成功但没动”会让宿主的状态栏报出与实际相反的结论）。
+  if (delta < 0 && first == 0) return false;
+  if (delta > 0 && last + 1 >= total) return false;
+  const std::size_t target = delta < 0 ? first - 1 : last + 1;
+
+  // 搬的是**整行**（含行尾换行），这样中间那一段可以原样平移；
+  // 两端的孤儿描述必须一起算清楚，否则会多/少一个空行（最容易错的一步）。
+  const std::size_t block_begin = line_spans_[first].first;
+  const std::size_t block_end = line_spans_[last].second;
+  const std::size_t target_begin = line_spans_[target].first;
+  const std::size_t target_end = line_spans_[target].second;
+
+  std::string moved(text_, block_begin, block_end - block_begin);
+  std::string neighbour(text_, target_begin, target_end - target_begin);
+  // 光标/选区的新行号**在改动文本之前算定**：`rebuilt` 一赋回 `text_`，
+  // 原来的行/列查询就落到新文本上了（最容易错的一步——会在改完后再"定位"到错的列）。
+  const std::size_t cursor_line = line_of_index(cursor_);
+  const std::size_t cursor_column = column_of(cursor_);
+  const std::size_t anchor_line = line_of_index(anchor_);
+  const std::size_t anchor_column = column_of(anchor_);
+
+  std::string rebuilt;
+  rebuilt.reserve(text_.size() + 1);
+  if (delta < 0) {
+    // [target][moved] 互换：把 moved 放到 target 前面
+    rebuilt.append(text_, 0, target_begin);
+    rebuilt.append(moved).push_back('\n');
+    rebuilt.append(neighbour);
+    rebuilt.append(text_, block_end, text_.size() - block_end);
+  } else {
+    rebuilt.append(text_, 0, block_begin);
+    rebuilt.append(neighbour).push_back('\n');
+    rebuilt.append(moved);
+    rebuilt.append(text_, target_end, text_.size() - target_end);
+  }
+  push_undo(false);
+  text_ = std::move(rebuilt);
+
+  // 光标/选区跟着行走：**行号 ±1、列不变**（选中多行时整个块一起走）。
+  const auto shift = [&](std::size_t line, std::size_t column) -> std::size_t {
+    if (line < first || line > last) return index_at_column(std::min(line, line_count() - 1), column);
+    return index_at_column(delta < 0 ? line - 1 : line + 1, column);
+  };
+  cursor_ = shift(cursor_line, cursor_column);
+  anchor_ = shift(anchor_line, anchor_column);
+  clamp_cursor();
+  notify_change();
+  return true;
+}
+
 // ————————————————————————————————————————————————————————————————————————————
 // 几何
 // ————————————————————————————————————————————————————————————————————————————
@@ -817,6 +923,14 @@ auto CodeEditor::rebuild_line_geometry(const RenderContext& context) const -> vo
   if (!geometry_dirty_) return;
   rebuild_tokens();
   line_height_cache_ = text_port_of(context).line_height(font_size()) * line_spacing_;
+  // **一行的几何从框架拿**（`ui::layout_text_line`）：墨迹落位、墨迹带范围
+  // 全部由它给出，组件不再自己算偏移。
+  //
+  // 这里曾有一份组件自己的行盒推导（`line_block_offset` / `caret_top_cache_`）——
+  // 那是**把框架该给的东西写在应用层**：同一件事在框架里被违反了三条路
+  // （`Element::paint_text` 一条、按钮直接调 `centered_line_top` 一条、
+  // 编辑器自己一条），结果修一处不动另一处。现统一到 `line_layout.hpp`。
+  line_geometry_cache_ = ui::layout_text_line(text_port_of(context), font_size(), line_spacing_);
   gutter_cache_ = gutter_width(context);
   max_line_width_cache_ = 0.0f;
   const TextPort& port = text_port_of(context);
@@ -1188,6 +1302,23 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
   }
 
   const auto [first_line, last_line] = visible_line_range(context);
+  // **一行的几何全部从框架拿**（`ui::LineGeometry`，见 `line_layout.hpp`）。
+  //
+  // 三个量都相对**行盒顶**，所以每行只需 `row_top + 它`：
+  //   `origin_y`   → 文字绘制的落位（`TextPort::draw` 收的就是这个）
+  //   `ink_top`    → 高亮带/光标/缩进参考线的顶
+  //   `ink_height` → 上述元素的高度
+  //
+  // 本组件**不再自己算任何偏移**。这里曾有一组组件自己的推导，逐项被用户报出来的：
+  // ① “行间距全在行下方”→ 行距增量只加在盒底；
+  // ② “背景和光标还是偏下”→ 高亮带撑满行盒（22.77）而一行代码的墨迹只有 ~15px，
+  //    文字上方必然空一截；
+  // ③ 两者都是为了补框架缺位而在应用层打的补丁（违反“框架问题不在应用层修”）。
+  // 现统一为：带**贴合墨迹**（`ink_top`/`ink_height`），文字按 `origin_y` 落位。
+  const ui::LineGeometry line_geometry = line_geometry_cache_;
+  const float text_offset = line_geometry.origin_y;   // 向后兼容的名字（本函数内部）
+  const float band_top = line_geometry.ink_top;
+  const float band_height = line_geometry.ink_height;
   const std::size_t current = line_of_index(cursor_);
   const auto [sel_begin, sel_end] = selection();
   const auto brackets = focused_ ? matching_bracket() : std::nullopt;
@@ -1209,16 +1340,18 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
 
     // 悬停行底纹（最淡的一层；当前行与选择压在它上面）
     if (static_cast<int>(line) == hover_line_ && line != current) {
-      canvas.fill_rect(math::Rect{bounds_.x, row_top, bounds_.width, height},
+      canvas.fill_rect(math::Rect{bounds_.x, row_top + band_top, bounds_.width, band_height},
                        raster::Paint::solid(colors.surface_alt), 0.0f);
     }
 
     // 当前行底色 + 行号槽内的当前行指示（行号槽高亮 = VSCode 的“我在哪一行”锚点）
     if (line == current) {
-      canvas.fill_rect(math::Rect{bounds_.x, row_top, bounds_.width, height},
+      // **贴合墨迹**（`band_top`/`band_height`）：撑满行盒会让文字上方空一截，
+      // 看着就是“背景偏下”（见 `band_top` 处的说明）。
+      canvas.fill_rect(math::Rect{bounds_.x, row_top + band_top, bounds_.width, band_height},
                        raster::Paint::solid(syntax.current_line), 0.0f);
       if (show_line_numbers_ && gutter_cache_ > 0.0f) {
-        canvas.fill_rect(math::Rect{bounds_.x, row_top, gutter_cache_, height},
+        canvas.fill_rect(math::Rect{bounds_.x, row_top + band_top, gutter_cache_, band_height},
                          raster::Paint::solid(syntax.current_line), 0.0f);
       }
     }
@@ -1306,7 +1439,7 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
       if (mapped_to <= mapped_from) return;
       const std::string_view slice =
           std::string_view(expanded.text).substr(mapped_from, mapped_to - mapped_from);
-      port.draw(canvas, slice, math::Point{pen, row_top}, font_size(), color,
+      port.draw(canvas, slice, math::Point{pen, row_top + text_offset}, font_size(), color,
                 text::FontRole::Monospace);
       pen += port.measure_width(slice, font_size(), text::FontRole::Monospace);
     };
@@ -1329,10 +1462,11 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
     if (show_line_numbers_ && gutter_cache_ > 0.0f) {
       const std::string number = std::to_string(line + 1);
       const float number_width = port.measure_width(number, font_size(), text::FontRole::Monospace);
-      port.draw(canvas, number,
-                math::Point{bounds_.x + gutter_cache_ - kGutterPadding - number_width, row_top},
-                font_size(), line == current ? syntax.plain : syntax.line_number,
-                text::FontRole::Monospace);
+              port.draw(canvas, number,
+                  math::Point{bounds_.x + gutter_cache_ - kGutterPadding - number_width,
+                              row_top + text_offset},
+                  font_size(), line == current ? syntax.plain : syntax.line_number,
+                  text::FontRole::Monospace);
     }
   }
 
@@ -1342,7 +1476,10 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
     if (line >= first_line && line < last_line) {
       const float row_top = origin_y + static_cast<float>(line) * height;
       const float x = x_for_index(context, cursor_);
-      canvas.fill_rect(math::Rect{x, row_top + 1.0f, kCursorWidth, height - 2.0f},
+      // 光标**严格等于行带**（同顶同高）——它标记当前行，不该超出背景。
+      // 原先写作 `band_top - 1` / `band_height + 2`（想让它“看起来到底”），
+      // 那是**应用层乱调**：光标上下各伸出带外 1px，一眼就看出“超出背景”。
+      canvas.fill_rect(math::Rect{x, row_top + band_top, kCursorWidth, band_height},
                        raster::Paint::solid(syntax.cursor), 0.0f);
     }
   }
@@ -1393,7 +1530,7 @@ void CodeEditor::mark_layout_dirty() {
   // 为什么必须这么做：基类实现会把 `layout_dirty` 一路冒泡到根元素，而
   // `UiRoot::layout()` 的进入条件是 `dirty_ || tree_layout_dirty()`、尾部又无条件
   // `pending_full_ = true`——于是在编辑器里改一个字就会导致**整帧重绘**。
-  // 实测代价（codeeditor，1280×800）：整帧 paint **11.5 ms** vs 局部帧子毫秒；
+  // 实测代价（gbcode，1280×800）：整帧 paint **11.5 ms** vs 局部帧子毫秒；
   // 控制通道上表现为 `invoke` p50 **15.9 ms** 而读操作只有 4.1 ms——
   // 差值就是“写操作触发的那一帧”。增量重绘（损坏区）机制因此形同虚设。
   layout_dirty_ = true;
@@ -1516,6 +1653,15 @@ auto CodeEditor::handle_key(const RenderContext& context, const Event& event) ->
   const std::string& key = event.key;
   const bool extend = event.shift;
 
+  // Alt+↑ / Alt+↓：上/下移当前行（或选中行块）。**必须排在 Ctrl 分支之前**：
+  // 这组键带 `alt` 而不带 `ctrl`，落到下面的无修饰分支会被当成普通方向键——
+  // “文本一字未动、光标移了一行”看起来像“移行没生效”，最难从现象反推原因。
+  if (event.alt && !event.ctrl && (key == "ArrowUp" || key == "ArrowDown")) {
+    if (read_only_) return false;
+    (void)move_lines(key == "ArrowUp" ? -1 : 1);
+    return true;
+  }
+
   if (event.ctrl || event.meta) {
     if (key == "a" || key == "A") {
       select_all();
@@ -1547,6 +1693,12 @@ auto CodeEditor::handle_key(const RenderContext& context, const Event& event) ->
     }
     if (key == "y" || key == "Y") {
       redo();
+      return true;
+    }
+    // Ctrl+D：选中下一处同词（帮助卡列着它，而实现里此前一个字都没有）。
+    // 不在这里写 Alt+↑/↓——它们不带 ctrl，已在上面的 Alt 分支拦下。
+    if (key == "d" || key == "D") {
+      (void)select_next_occurrence();
       return true;
     }
     if (key == "/") {
@@ -1778,7 +1930,16 @@ auto CodeEditor::get_property(std::string_view name) const -> std::optional<std:
   // 字体档位（倍数）：读回的是**输入値**而非解析后的像素——两个属性各自有存在的理由
   //（`font_size` 回答“多大”，`font_scale` 回答“相对正文多少倍”）。
   if (name == "font_scale") return std::format("{}", font_scale_);
+  // 行盒几何（自动化核“文字/光标在行里坐得对不对”用）：直接从**框架的** LineGeometry 报出，
+  // 与绘制同一份数据——量尺不必自己再算一遍。
+  if (name == "line_height") return std::format("{:.2f}", line_height_cache_);
+  if (name == "text_offset") return std::format("{:.2f}", line_geometry_cache_.origin_y);
+  if (name == "caret_top") return std::format("{:.2f}", line_geometry_cache_.ink_top);
+  if (name == "ink_height") return std::format("{:.2f}", line_geometry_cache_.ink_height);
+  if (name == "baseline") return std::format("{:.2f}", line_geometry_cache_.baseline);
   if (name == "find_needle") return find_needle_;
+  if (name == "find_word") return find_word_ ? "true" : "false";
+  if (name == "find_case") return find_case_ ? "true" : "false";
   if (name == "find_matches") return std::to_string(find_matches_.size());
   if (name == "find_active") {
     return find_active_ == kNoFindMatch ? std::string("-1") : std::to_string(find_active_);
@@ -1844,6 +2005,24 @@ auto CodeEditor::set_property(std::string_view name, std::string_view value) -> 
     set_read_only(truthy(value));
     return true;
   }
+  // 两个查找选项改完都要**重建命中表**：不重建就会出现“勾了全词、命中数还是旧的”，
+  // 而高亮画的是旧命中——选项与界面静默分岔。
+  if (name == "find_word") {
+    find_word_ = truthy(value);
+    find_active_set_ = false;
+    find_active_ = kNoFindMatch;
+    rebuild_find_matches();
+    mark_dirty();
+    return true;
+  }
+  if (name == "find_case") {
+    find_case_ = truthy(value);
+    find_active_set_ = false;
+    find_active_ = kNoFindMatch;
+    rebuild_find_matches();
+    mark_dirty();
+    return true;
+  }
   if (name == "highlight") {
     set_highlight_enabled(truthy(value));
     return true;
@@ -1896,14 +2075,16 @@ auto CodeEditor::property_names() const -> std::vector<std::string_view> {
           "selection", "selected_text", "read_only", "highlight", "show_line_numbers",
           "tab_width", "indent_guides", "auto_pairs", "font_size", "font_scale", "scroll",
           "first_visible_line", "visible_lines", "goto_line", "find_needle", "find_matches",
-          "find_active"};
+          "find_active", "find_case", "find_word", "line_height", "text_offset", "caret_top",
+          "ink_height", "baseline"};
 }
 
 // —— 查找与替换 ——
 
-auto CodeEditor::set_find(std::string needle, bool case_sensitive) -> std::size_t {
+auto CodeEditor::set_find(std::string needle, FindOptions options) -> std::size_t {
   find_needle_ = std::move(needle);
-  find_case_ = case_sensitive;
+  find_case_ = options.case_sensitive;
+  find_word_ = options.whole_word;
   find_enabled_ = !find_needle_.empty();
   find_active_set_ = false;
   find_active_ = kNoFindMatch;
@@ -1941,8 +2122,15 @@ void CodeEditor::rebuild_find_matches() {
   while (at + needle.size() <= haystack.size()) {
     const std::size_t hit = haystack.find(needle, at);
     if (hit == std::string::npos) break;
-    find_matches_.emplace_back(hit, hit + needle.size());
     at = hit + needle.size();  // 不重叠
+    // 全词：两侧都不得是词字符（与 `word_bounds` 同一套 `is_word_char` 判据——
+    // 两处各写一份的话，“双击选中什么”与“全词匹配什么”会静默错位）。
+    if (find_word_) {
+      const bool left_ok = hit == 0 || !is_word_char(haystack[hit - 1]);
+      const bool right_ok = at >= haystack.size() || !is_word_char(haystack[at]);
+      if (!left_ok || !right_ok) continue;
+    }
+    find_matches_.emplace_back(hit, at);
   }
 }
 
@@ -2099,6 +2287,18 @@ auto CodeEditor::invoke_action(std::string_view action, std::string_view argumen
     return true;
   }
   if (action == "comment") return toggle_comment();
+  // 控制通道 / 宿主可驱动的三项编辑动作（与键盘走**同一入口**，
+  // 避免“快捷键能用、动作面不能用”这种两条腿不一样长的局面）。
+  if (action == "select_next_occurrence") return select_next_occurrence();
+  if (action == "move_line_up") return move_lines(-1);
+  if (action == "move_line_down") return move_lines(1);
+  if (action == "move_lines") {
+    try {
+      return move_lines(std::stoi(std::string(argument)));
+    } catch (...) {
+      return false;
+    }
+  }
   if (action == "indent") {
     indent_selection(false);
     return true;
@@ -2140,13 +2340,19 @@ auto CodeEditor::invoke_action(std::string_view action, std::string_view argumen
     return true;
   }
   if (action == "find") {
-    // argument: "needle" 或 "needle|case"（case: 0/1）
+    // argument: "needle" / "needle|case" / "needle|case|word"（case/word：0/1）
     const std::size_t bar = argument.find('|');
     if (bar == std::string_view::npos) {
-      set_find(std::string(argument), false);
-    } else {
-      set_find(std::string(argument.substr(0, bar)), argument.substr(bar + 1) == "1");
+      set_find(std::string(argument), FindOptions{});
+      return true;
     }
+    const std::string_view needle = argument.substr(0, bar);
+    const std::string_view rest = argument.substr(bar + 1);
+    const std::size_t bar2 = rest.find('|');
+    const FindOptions options{.case_sensitive = rest.substr(0, bar2) == "1",
+                              .whole_word = bar2 != std::string_view::npos &&
+                                            rest.substr(bar2 + 1) == "1"};
+    set_find(std::string(needle), options);
     return true;
   }
   if (action == "clear_find") {

@@ -11,7 +11,7 @@
 | 单元测试 | 700 passed / 0 failed | **717 passed / 0 failed / 17480 assertions** |
 | ASan/UBSan 档 | 0 报告 | **717 passed / 0 报告** |
 | 禁令扫描 | 290 文件 / 0 违反 | **295 文件 / 0 违反**（豁免 31 = 行内 28 + 清单 3） |
-| 无头运行 | gallery / codeeditor | 均通过（含控制通道启动） |
+| 无头运行 | gallery / gbcode | 均通过（含控制通道启动） |
 | Windows 交叉编译 | 未验 | **产出真实 PE32+ gallery.exe**（mingw） |
 
 新增 **21 个回归用例**，全部按 `CONVENTIONS §7.1` 验证过"真能抓住那个缺陷"。

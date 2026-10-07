@@ -32,7 +32,7 @@ import sys
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-DEFAULT_EXE = ROOT / "build/debug/bin/codeeditor.exe"
+DEFAULT_EXE = ROOT / "build/debug/bin/gbcode.exe"
 OUT_DIR = ROOT / "build/win-titlebar"
 sys.path.insert(0, str(ROOT / "tools"))
 from st_client_lib import call_with_token, load_control  # noqa: E402
@@ -231,7 +231,7 @@ def main() -> int:
     args = parser.parse_args()
     exe = pathlib.Path(args.exe)
     if not exe.exists():
-        print(f"可执行文件不存在：{exe}（先 st build codeeditor）")
+        print(f"可执行文件不存在：{exe}（先 st build gbcode）")
         return 2
     if os.name != "nt":
         print("本脚本用 Win32 API 读窗口矩形/样式，只在 Windows 宿主上跑")

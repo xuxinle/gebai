@@ -603,6 +603,154 @@ ST_TEST(code_editor_read_only_blocks_replace) {
   ST_CHECK_EQ(fx.editor.text(), "data data");
 }
 
+/// 全词匹配是**真选项**，不是把词改写成 `\b词\b` 的把戏。
+///
+/// 为何要这条用例：gbcode 的查找条里曾用“改写查找词”来假装支持全词，
+/// 而 `set_find` 只做字面量匹配——`\b` 被当成两个真字符，于是**一处也匹配不到**，
+/// 而调用方（与用户）看到的是“勾了全词、命中数变成 0”。
+ST_TEST(code_editor_find_whole_word_is_a_real_option) {
+  Fixture fx;
+  fx.type("cat category cat concat cat");
+  // 不带全词：5 处都含 "cat"
+  ST_CHECK_EQ(fx.editor.set_find("cat"), static_cast<std::size_t>(5));
+  // 全词：只剩两处独立单词 cat
+  const CodeEditor::FindOptions whole{.whole_word = true};
+  ST_CHECK_EQ(fx.editor.set_find("cat", whole), static_cast<std::size_t>(3));
+  ST_CHECK(fx.editor.find_options().whole_word);
+  // 字面量里的 `\b` 不当边界（口径不能靠改字符串实现）
+  ST_CHECK_EQ(fx.editor.set_find("\\bcat\\b"), static_cast<std::size_t>(0));
+  // 选项回到默认后命中数也要回去（两个选项都要能关）
+  ST_CHECK_EQ(fx.editor.set_find("cat", CodeEditor::FindOptions{}), static_cast<std::size_t>(5));
+  ST_CHECK(!fx.editor.find_options().whole_word);
+  // 大小写 + 全词可共存
+  fx.editor.set_text("Foo foo fooBar");
+  ST_CHECK_EQ(fx.editor.set_find("foo", CodeEditor::FindOptions{.case_sensitive = true,
+                                                                .whole_word = true}),
+              static_cast<std::size_t>(1));
+}
+
+/// 属性面改查找选项必须**当场重建命中表**：
+/// 否则“勾了全词、命中数还是旧的”，而高亮画的是旧命中——选项与界面静默分岔。
+ST_TEST(code_editor_find_option_properties_rebuild_matches) {
+  Fixture fx;
+  fx.type("cat category cat");
+  fx.editor.set_find("cat");
+  ST_CHECK_EQ(fx.editor.find_match_count(), static_cast<std::size_t>(3));
+  ST_CHECK(fx.editor.set_property("find_word", "true"));
+  ST_CHECK_EQ(fx.editor.find_match_count(), static_cast<std::size_t>(2));
+  ST_CHECK_EQ(fx.editor.get_property("find_word").value(), "true");
+  ST_CHECK(fx.editor.set_property("find_word", "false"));
+  ST_CHECK_EQ(fx.editor.find_match_count(), static_cast<std::size_t>(3));
+}
+
+// ————————————————————————————————————————————————————————————————————————————
+// Ctrl+D（选中下一处同词）与 Alt+↑/↓（上下移行）
+// ————————————————————————————————————————————————————————————————————————————
+//
+// 这两条的背景：gbcode 的帮助卡列着 “Ctrl+D 选中下一处同词”与
+// “Alt+↑/↓ 上/下移当前行”，而**实现里一个字都没写**——键按下去毫无反应，
+// 用户看到一个恒真的“功能列表”。这里把它们钉在组件层。
+
+ST_TEST(code_editor_select_next_occurrence_takes_word_then_walks) {
+  Fixture fx;
+  fx.editor.set_text("alpha beta alpha gamma alpha");
+  fx.editor.set_cursor_index(2);  // 落在第一个 alpha 里
+  // ① 首次调用：把光标处的词选上
+  ST_CHECK(fx.editor.select_next_occurrence());
+  ST_CHECK_EQ(fx.editor.selected_text(), "alpha");
+  const auto [b1, e1] = fx.editor.selection();
+  ST_CHECK_EQ(b1, static_cast<std::size_t>(0));
+  ST_CHECK_EQ(e1, static_cast<std::size_t>(5));
+  // ② 再次调用：走到第二处
+  ST_CHECK(fx.editor.select_next_occurrence());
+  const auto [b2, e2] = fx.editor.selection();
+  ST_CHECK_EQ(b2, static_cast<std::size_t>(11));
+  ST_CHECK_EQ(fx.editor.selected_text(), "alpha");
+  // ③ 第三处
+  ST_CHECK(fx.editor.select_next_occurrence());
+  ST_CHECK_EQ(fx.editor.selection().first, static_cast<std::size_t>(23));
+  // ④ 已到最后一处：环绕回第一处（而不是“无反应”）
+  ST_CHECK(fx.editor.select_next_occurrence());
+  ST_CHECK_EQ(fx.editor.selection().first, static_cast<std::size_t>(0));
+  // ⑤ 全文只此一处：返回 false 且**不改动**选区
+  fx.editor.set_text("only one token");
+  fx.editor.set_cursor_index(1);
+  ST_CHECK(fx.editor.select_next_occurrence());
+  ST_CHECK_EQ(fx.editor.selected_text(), "only");
+  ST_CHECK(!fx.editor.select_next_occurrence());
+  ST_CHECK_EQ(fx.editor.selected_text(), "only");
+}
+
+ST_TEST(code_editor_ctrl_d_is_wired_to_handle_key) {
+  Fixture fx;
+  if (!fx.has_font()) return;
+  fx.editor.set_text("value value value");
+  fx.editor.set_cursor_index(1);
+  fx.press("d", /*ctrl=*/true);
+  ST_CHECK_EQ(fx.editor.selected_text(), "value");
+  fx.press("d", /*ctrl=*/true);
+  ST_CHECK_EQ(fx.editor.selection().first, static_cast<std::size_t>(6));
+  // 动作面与键盘同一条路（避免“快捷键能用、控制通道不能用”）
+  ST_CHECK(fx.editor.invoke_action("select_next_occurrence", ""));
+  ST_CHECK_EQ(fx.editor.selection().first, static_cast<std::size_t>(12));
+}
+
+ST_TEST(code_editor_move_lines_up_and_down) {
+  Fixture fx;
+  fx.editor.set_text("one\ntwo\nthree");
+  fx.editor.set_cursor_index(0);
+  // 首行还往上：不越界，如实返回 false
+  ST_CHECK(!fx.editor.move_lines(-1));
+  ST_CHECK_EQ(fx.editor.text(), "one\ntwo\nthree");
+  // 下移一行（光标随行）
+  ST_CHECK(fx.editor.move_lines(1));
+  ST_CHECK_EQ(fx.editor.text(), "two\none\nthree");
+  ST_CHECK_EQ(fx.editor.cursor_line(), 1U);
+  // 再上移回到原位
+  ST_CHECK(fx.editor.move_lines(-1));
+  ST_CHECK_EQ(fx.editor.text(), "one\ntwo\nthree");
+  ST_CHECK_EQ(fx.editor.cursor_line(), 0U);
+  // 末行还往下：不越界
+  fx.editor.set_cursor_index(fx.editor.text().size());
+  ST_CHECK(!fx.editor.move_lines(1));
+  // 可撤销（与其它编辑动作同一个撤销栈）
+  ST_CHECK(fx.editor.move_lines(-1));
+  ST_CHECK_EQ(fx.editor.text(), "one\nthree\ntwo");
+  ST_CHECK(fx.editor.undo());
+  ST_CHECK_EQ(fx.editor.text(), "one\ntwo\nthree");
+  // 只读下不动
+  fx.editor.set_read_only(true);
+  ST_CHECK(!fx.editor.move_lines(1));
+}
+
+ST_TEST(code_editor_alt_arrows_move_lines_via_handle_key) {
+  Fixture fx;
+  if (!fx.has_font()) return;
+  fx.editor.set_text("aaa\nbbb\nccc");
+  fx.editor.set_cursor_index(0);
+  Event down;
+  down.kind = EventKind::KeyDown;
+  down.key = "ArrowDown";
+  down.alt = true;
+  ST_CHECK(fx.editor.on_event(fx.context, down));
+  ST_CHECK_EQ(fx.editor.text(), "bbb\naaa\nccc");
+  Event up = down;
+  up.key = "ArrowUp";
+  ST_CHECK(fx.editor.on_event(fx.context, up));
+  ST_CHECK_EQ(fx.editor.text(), "aaa\nbbb\nccc");
+}
+
+/// 选中多行时整块搬家（列不变、块内顺序不变）。
+ST_TEST(code_editor_move_lines_moves_a_selected_block) {
+  Fixture fx;
+  fx.editor.set_text("a1\nb1\nb2\nc1");
+  fx.editor.set_selection(3, 8);  // 选中 b1/b2 两行
+  ST_CHECK(fx.editor.move_lines(1));
+  ST_CHECK_EQ(fx.editor.text(), "a1\nc1\nb1\nb2");
+  ST_CHECK(fx.editor.move_lines(-1));
+  ST_CHECK_EQ(fx.editor.text(), "a1\nb1\nb2\nc1");
+}
+
 // ————————————————————————————————————————————————————————————————————————————
 // 光标位置不变式（防止量宽/绘制口径再度分家）
 // ————————————————————————————————————————————————————————————————————————————

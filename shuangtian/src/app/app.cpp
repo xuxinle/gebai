@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <format>
 
 #include "st/codec/png.hpp"
@@ -61,7 +62,7 @@ auto resolve_text_fit(std::string_view mode) -> st::text::GridFitMode {
   // 即拟合偏锐；覆盖离散上拟合也更大。三个正交轴都指向 `off`，详见 `docs/BACKLOG.md` P1。
   //
   // 用户线索（同一菜单栏）：同一字号字重下「运行」0.684 而「文件」0.511，**差 34%**。
-  // 实测（codeeditor 菜单栏，同一构建）：
+  // 实测（gbcode 菜单栏，同一构建）：
   //
   // | 配置 | 墨量极差 |
   // |---|---|
@@ -82,7 +83,7 @@ auto resolve_text_fit(std::string_view mode) -> st::text::GridFitMode {
 /// （实测 normal 下逐字变化率极差 14.0%、light 11.4%），拟合关掉时逐字墨量
 /// 恒为 1.000（无扰乱），补偿无事可做。
 ///
-/// 为何要抽成函数：应用层实测（codeeditor 菜单栏逐项墨量极差，同一构建）
+/// 为何要抽成函数：应用层实测（gbcode 菜单栏逐项墨量极差，同一构建）
 /// `fit=off 18% / normal 34% / normal+补偿 40%（更差） / light+补偿 18%（追平不拟合）`
 /// ——“light+补偿”那行是**成对**的结论（吸附幅度小的拟合配补偿才划算）。
 /// 默认档后来改为 `Off`（浏览器基准），补偿也随之无事可做；
@@ -208,6 +209,8 @@ struct Application::Impl {
   /// 绘制剖析器（`ST_PAINT_PROFILE=1` 时才挂到帧缓冲画布上）。
   raster::PaintProfiler profiler{};
   bool profiling{false};
+  /// 日志订阅 id（构造时注册、析构时注销）——见 `Application::Application` 的说明。
+  std::uint64_t log_listener_id{0};
 };
 
 Application::Application(std::string name, std::string version, AppOptions options)
@@ -224,7 +227,13 @@ Application::Application(std::string name, std::string version, AppOptions optio
   if (!options_.screenshot_dir.empty()) {
     (void)fs::create_directories(options_.screenshot_dir);
   }
-  log::add_listener([this](log::Level level, std::string_view message) {
+  // 订阅日志：控制通道的 `logs` 读的就是这里。
+  //
+  // **返回的 id 必须存下来、析构时注销**：监听器列表是进程级全局的，而
+  // `Application` 可能是临时对象（测试里逐个构造销毁、工具里一个进程可建多个）。
+  // 不注销就是悬垂监听器——对象死后只要**任何线程**打一条日志
+  // （典型：`st::pkg::build` 的编译 worker）就会踩已释放的 `this`。
+  impl_->log_listener_id = log::add_listener([this](log::Level level, std::string_view message) {
     impl_->log_lines.push_back(std::format("[{}] {}", to_string(level), message));
     if (impl_->log_lines.size() > 512) impl_->log_lines.erase(impl_->log_lines.begin());
   });
@@ -968,6 +977,11 @@ void Application::tick() {
 }
 
 Application::~Application() {
+  // 先退订日志（再动 `impl_`）：回调抓的是 `this`，注销后便不再有人调用它。
+  if (impl_ != nullptr && impl_->log_listener_id != 0) {
+    log::remove_listener(impl_->log_listener_id);
+    impl_->log_listener_id = 0;
+  }
   // 脚本宿主（若启用）在其析构里摘掉事件观察者；此处只需保证它先于 `root_` 销毁
   impl_->script.reset();
 }

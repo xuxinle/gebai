@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Input 单行动作面端到端验证（codeeditor 终端输入框，真实控制通道）。
+"""Input 单行动作面端到端验证（gbcode 终端输入框，真实控制通道）。
 
 验证（DESIGN §8.1.1「API 存在但动作面未实现」同族缺口的修复）：
   1. `invoke submit` 触发 on_submit（终端输出更新——不经键盘回车）

@@ -92,12 +92,17 @@ class TitleBar : public Element {
   [[nodiscard]] auto controls_rect() const -> math::Rect;
   /// 标题条带矩形（`leading` 槽之后 → `trailing` 槽之前；标题**文字**画在这里）。
   [[nodiscard]] auto caption_rect() const -> math::Rect;
-  /// 拖动/双击的**命中**区：从窗口左缘到尾部槽之前。
+  /// 拖动/双击的**区间**：从窗口左缘到尾部槽之前（连续带，**不含**挖除）。
   ///
-  /// 比 `caption_rect()` 多出"左边那条空当（图标/内边距/前部槽）"——与系统标题栏的
+  /// 比 `caption_rect()` 多出"左边那条空当（图标/内边距）"——与系统标题栏的
   /// `HTCAPTION` 同样"整条都算"：用户不会精确地点到文字上，只认文字区会让拖动难用。
+  /// 某个点到底能不能拖/能不能双击，用 `hits_caption()` 判（它还要挖掉附属槽）。
   [[nodiscard]] auto drag_rect() const -> math::Rect;
-  /// 点是否落在标题栏可拖动区（拖动/双击的命中判据）。
+  /// 点是否落在标题栏可拖动/可双击区（**拖动与双击的唯一判据**）。
+  ///
+  /// = `drag_rect()` 减去 `leading`/`trailing` 附属槽占住的矩形。附属槽里是宿主控件
+  /// （菜单栏、主题按钮…），它们的地盘归它们自己——挂在 `leading` 里的菜单栏被双击
+  /// 不得把窗口最大化（实测：gbcode 的「文件」菜单曾一被双击就最大化）。
   [[nodiscard]] auto hits_caption(math::Point point) const -> bool;
   /// 标题文字区（`leading` 槽之后 → `trailing` 槽之前；`arrange` 时算定）。
   [[nodiscard]] auto title_rect() const noexcept -> math::Rect { return caption_rect(); }

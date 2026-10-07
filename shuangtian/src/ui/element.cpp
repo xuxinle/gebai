@@ -7,6 +7,7 @@
 #include "st/core/log.hpp"
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
+#include "st/ui/line_layout.hpp"
 
 namespace st::ui {
 namespace {
@@ -752,9 +753,15 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
       // 按下时把透明度抬满：`Soft` 这类带 alpha 的底在叠加后仍要看得出变化。
       if (pressed_ && background.a != 0U) background.a = 255U;
     }
-  } else if (pressed_ && hover_effect_.background && style_.background.a != 0U) {
+  } else if (pressed_ && hover_effect_.enabled && hover_effect_.background &&
+             style_.background.a != 0U) {
     // 极窄的一条缝：按下了但 hover_t 尚未起来（如程序化 `set_pressed`）。
     // 给一个固定压暗，保证"按下"本身在任何情况下都可见。
+    //
+    // ⚠ 这一支**必须一并看 `enabled`**：它不经过 `hover_t`（`advance_hover` 只在
+    // `enabled` 时才被调用），所以只查 `background` 就会在关掉特效的组件上
+    // 仍然压暗——实测：标题栏显式 `set_hover_effect({.enabled=false})` 后，
+    // 按住标题栏拖动时整条栏依旧从 #EDEDF2 变 #DADADF。
     background = background.darken(0.08f);
   }
   if (hovering && hover_effect_.border && colors.border_hover.a != 0U) {

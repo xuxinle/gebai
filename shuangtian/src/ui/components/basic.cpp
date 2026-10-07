@@ -7,6 +7,7 @@
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
 #include "components_internal.hpp"
+#include "st/ui/line_layout.hpp"
 #include "st/ui/text_port.hpp"
 
 namespace st::ui {

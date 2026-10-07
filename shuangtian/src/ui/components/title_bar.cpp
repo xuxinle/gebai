@@ -55,6 +55,51 @@ constexpr float k_close_hover_alpha = 0.16f;
 constexpr float k_button_hover_alpha = 0.10f;
 constexpr float k_button_press_alpha = 0.18f;
 
+/// 悬停块的**纵向**内缩（逻辑 px）：横向贴满按钮，纵向各缩 4。
+///
+/// 为什么必须缩：按钮高 = 栏高（40），悬停块若同高就与栏的上下分界线贴死，
+/// 看着像"栏被切了一刀"；缩 4 后块高 **32**——正好是 Windows 11 标题栏
+/// 控制按钮的高度，块与栏边之间留出同一口气。
+constexpr float k_control_hover_inset_y = 4.0f;
+/// 悬停块圆角（逻辑 px）：块高 32 + 半径 4，是系统标题栏的观感。
+constexpr float k_control_hover_radius = 4.0f;
+
+/// 悬停中性底：在主题给的三档中性面里，挑**与标题栏底色反差最大、且方向正确**的一档。
+///
+/// 为何要"选"而不是写死一个 token——这里踩过一个坑，值得记下：
+/// 原先用 `surface_pressed.with_alpha_f(0.10)` 叠层，而标题栏底色 `surface_alt`
+/// 本身就是**不透明**的。alpha 不透明底上不产生任何差异：叠上去实测只差 **1/255**
+/// （对比度 1.0055），等于**悬停完全没有反馈**；关闭按钮之所以看得见，
+/// 纯粹因为它用的是危险色相（色相变化不吃明度）。
+///
+/// 修法两条：① **不透明铺**（直接给合成结果），不用罩层；
+/// ② 取与底色反差最大的那一档。第二点是关键：`surface_hover`（"名义上的悬停档"）
+/// 与亮色主题的 `surface_alt` 只差 3/255，本来就指望不上；而在深色主题下
+/// `surface_sunken` 比栏更暗（看着像"挖了个洞"）——所以按底色亮度选方向：
+/// 栏偏亮就取更暗的一档，栏偏暗就取更亮的一档。
+[[nodiscard]] auto neutral_hover_tint(const Palette& colors) -> math::Color {
+  const auto luma = [](math::Color color) -> float {
+    return static_cast<float>(color.r) * 0.299f + static_cast<float>(color.g) * 0.587f +
+           static_cast<float>(color.b) * 0.114f;
+  };
+  const float bar = luma(colors.surface_alt);
+  const bool bar_is_light = bar >= 128.0f;
+  const std::array<math::Color, 3> candidates{colors.surface_hover, colors.surface_pressed,
+                                             colors.surface_sunken};
+  math::Color best = colors.surface_pressed;
+  float best_delta = 0.0f;
+  for (const math::Color& candidate : candidates) {
+    const float delta = luma(candidate) - bar;
+    // 方向必须正确（与 `Element::paint_box` 的"同向提亮/压暗"同一口径）。
+    if (bar_is_light ? delta >= 0.0f : delta <= 0.0f) continue;
+    if (std::abs(delta) > best_delta) {
+      best_delta = std::abs(delta);
+      best = candidate;
+    }
+  }
+  return best;
+}
+
 /// 圆角填充（按钮底色的统一画法；半径取 `min(radius_sm, 矩形短边一半)`）。
 void fill_rounded(raster::Surface& canvas, math::Rect rect, float radius, math::Color color) {
   if (rect.is_empty() || color.a == 0U) return;
@@ -70,6 +115,12 @@ TitleBar::TitleBar(std::string title) : title_(std::move(title)) {
   // 标题栏本身不参与 Tab 焦点环：它是窗框，键盘可达性由宿主（快捷键/菜单）负责。
   // （与系统标题栏一致：Alt+Space 打开系统菜单，而不是 Tab 到"最小化"上。）
   set_focusable(false);
+  // **关掉基类的悬浮/按下回放**：本组件整条都是“可交互”的（拖动、双击、三个按钮），
+  // 而 `pressed_` 会在**鼠标按在栏上任何位置**时置位（拖动窗口的第一步就是按在栏上）。
+  // 基类的按下样式会压暗 `style_.background`，而那是**整条标题栏的底色**——
+  // 实测：按住标题栏拖动时整条栏从 #EDEDF2 变成 #DADADF（x=400/1200 同时变），
+  // 看着像“整个窗框闪了一下”。按钮自己的悬停/按下由 `paint_content` 逐按钮画。
+  set_hover_effect(HoverEffect{.enabled = false});
 }
 
 void TitleBar::set_title(std::string title) {
@@ -112,14 +163,30 @@ auto TitleBar::caption_rect() const -> math::Rect {
 }
 
 auto TitleBar::drag_rect() const -> math::Rect {
-  // 拖动区从窗口**左缘**起（与系统标题栏的 `HTCAPTION` 一致：图标/内边距/前部槽
-  // 那一段也算，用户不会精确点到文字上），右界到尾部槽之前。
+  // 拖动带从窗口**左缘**起（与系统标题栏的 `HTCAPTION` 一致：图标/内边距那一段也算，
+  // 用户不会精确点到文字上），右界到尾部槽之前。
+  //
+  // ⚠ 这只是**粗略**的拖动带：附属槽占住的那几块要从里面挖掉（`hits_caption` 负责），
+  // 本函数保留“从左缘到尾部槽的连续带”语义（几何单调，供断言与视觉核对复用）。
   const float right = slots_left_ == 0.0f ? controls_left() : slots_left_;
   return math::Rect{bounds_.x, bounds_.y, std::max(0.0f, right - bounds_.x), bounds_.height};
 }
 
 auto TitleBar::hits_caption(math::Point point) const -> bool {
-  return drag_rect().contains(point);
+  if (!drag_rect().contains(point)) return false;
+  // **附属槽不是拖动区**（头文件的契约；`leading` 与 `trailing` 同样适用）。
+  //
+  // 为什么必须逐块挖掉、而不是“只排除尾部槽”：`leading` 槽排在标题文字之前，
+  // 正好落在“从左缘起”的拖动带里，于是挂在上面的宿主控件**双击**会冒泡到本组件，
+  // 而双击的语义是“最大化/还原”。实测（gbcode 把菜单栏挂进 `leading` 槽）：
+  // 双击「文件」菜单会把窗口最大化——单击/按下被控件自己消费，唯独双击漏出来。
+  for (const Element* slot : leading_) {
+    if (slot != nullptr && slot->bounds().contains(point)) return false;
+  }
+  for (const Element* slot : trailing_) {
+    if (slot != nullptr && slot->bounds().contains(point)) return false;
+  }
+  return true;
 }
 
 auto TitleBar::add_trailing(std::unique_ptr<Element> child) -> Element* {
@@ -285,22 +352,37 @@ void TitleBar::paint_content(const RenderContext& context, raster::Surface& canv
     const math::Rect rect = control_button_rect(index);
     const bool hovered = hovered_button_ == static_cast<int>(index);
     const bool pressed = pressed_button_ == static_cast<int>(index);
-    if (pressed || hovered) {
-      // 关闭按钮单独一个语气（danger）：它是唯一不可逆的动作，用主色以外的色相提示，
-      // 与系统标题栏的惯例一致（Windows 上关闭按钮悬浮即变红）。
-      const bool is_close = index == k_button_close;
-      const math::Color base = is_close ? colors.danger : colors.surface_pressed;
-      const float alpha = is_close ? k_close_hover_alpha
-                                   : (pressed ? k_button_press_alpha : k_button_hover_alpha);
-      // 底色带 alpha（画布按预乘混合）：hover 是“罩一层半透明色”，不是替换底色。
-      fill_rounded(canvas, rect, metrics.radius_sm, base.with_alpha_f(alpha));
-    }
-    const math::Rect icon_box = rect;
-    const math::Rect glyph{
-        icon_box.x + (icon_box.width - k_icon_size) * 0.5f,
-        icon_box.y + (icon_box.height - k_icon_size) * 0.5f, k_icon_size, k_icon_size};
+    const bool is_close = index == k_button_close;
+    // 悬停块：横向贴满、纵向各缩 `k_control_hover_inset_y`（块高 32 = 系统按钮高）。
+    const math::Rect block{rect.x, rect.y + k_control_hover_inset_y, rect.width,
+                           std::max(0.0f, rect.height - k_control_hover_inset_y * 2.0f)};
     math::Color tone = style_.color;
-    if (index == k_button_close && hovered) tone = colors.danger;
+    if (!block.is_empty() && (hovered || pressed)) {
+      if (is_close) {
+        // —— 关闭：**实心 danger 底 + 白叉**（Windows 11 的形态）——
+        //
+        // 为何不用半透明 danger 罩层：那是本组件此前的写法，实测对比度
+        // 1.0564、视觉上就是"一抹淡红"；而实心 danger 与标题栏底反差 **2.11**，
+        // 是全窗唯一不可逆动作应有的提示强度（色相与明度**两个正交量同时动**）。
+        // 它也因此不依赖底色亮度——深色主题下同样成立。
+        fill_rounded(canvas, block, k_control_hover_radius, colors.danger);
+        tone = colors.on_primary;
+        if (pressed) tone = tone.darken(0.08f);
+      } else {
+        // —— 普通按钮：不透明铺一档中性色（见 `neutral_hover_tint` 的说明）——
+        const math::Color tint = neutral_hover_tint(colors);
+        math::Color fill = tint;
+        if (pressed) {
+          // 按下比悬停再深一档，且不透明度抬满：否则"按下去了"看不出来。
+          fill = tint.darken(0.08f);
+          fill.a = 255U;
+        }
+        fill_rounded(canvas, block, k_control_hover_radius, fill);
+      }
+    }
+    const math::Rect glyph{
+        rect.x + (rect.width - k_icon_size) * 0.5f,
+        rect.y + (rect.height - k_icon_size) * 0.5f, k_icon_size, k_icon_size};
     Icon::draw(canvas, button_icon(index), glyph, tone, 0.0f);
   }
 }

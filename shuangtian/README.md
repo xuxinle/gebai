@@ -49,14 +49,14 @@ shuangtian/
 ├── CONVENTIONS.md   # 编码契约：全现代 C++20 + 禁用易错特性（编译器强制 + st lint 扫描）
 ├── DESIGN.md        # 权威设计（分层、接口、协议、DPI、包管理、里程碑）
 ├── README.md        # 本文件
-├── st.pkg           # 工程清单（由 stpm 读取；目标：gallery / codeeditor / st 自身）
+├── st.pkg           # 工程清单（由 stpm 读取；目标：gallery / gbcode / st 自身）
 ├── bootstrap.sh     # 自举（Linux/macOS）：用编译器直接编出 st（唯一非 st 构建入口，8 路并行）
 ├── bootstrap.ps1    # 自举（Windows）：同上，g++（MinGW-w64）优先、MSVC 回退（vswhere + vcvars64）
 ├── include/st/{core,math,codec,raster,text,md,ui,shell,gpu,control,app,pkg,ext}/
 ├── third_party/        # 第三方源码内联（nlohmann/json + quickjs-ng + battery/embed + sqlite，见 third_party/SOURCES.md 与 CHECKSUMS.sha256）
 ├── src/<层>/…       # 实现（与头同名；platform_*.cpp 为系统 API 单点封装）
 ├── examples/gallery/    # 示例一：组件集 / 设计系统巡检（含「声明式」页）
-├── examples/codeeditor/ # 示例二：代码编辑器（声明式组装的 VSCode 式布局）
+├── examples/gbcode/ # 示例二：代码编辑器（声明式组装的 VSCode 式布局）
 ├── tests/               # 自研测试框架（ST_TEST/ST_CHECK…），st test 运行
 └── tools/               # stpm 源码 + 联调脚本（Python）
 ```
@@ -193,13 +193,13 @@ macOS 上 GL 已废弃）。它既不是"保证腿"也不是"加分腿"，因此
 ③ 异步 `resource`（工作线程算，结果回主线程写状态）；④ 条件内容（关掉即从树中裁剪，不是 hidden）；
 ⑤ **状态系统高层原语**（`memo` 依赖未变不重算 / `effect` 依赖变化跑一次 / `ref` 跨重组稳定且不触发重组）。
 
-### `codeeditor` — 代码编辑器（应用面；**整个界面由声明式描述**）
+### `gbcode` — 代码编辑器（应用面；**整个界面由声明式描述**）
 
 按 VSCode 的信息架构组装：标题栏（含**脏点**）/ 菜单栏 / 活动栏 + 侧栏（资源管理器·搜索·源代码管理·运行·扩展）/ 标签页编辑区（修改点、可关闭）/ 底部面板（问题·输出·终端）/ 状态栏（分支、错误警告计数、光标位置、选区计数、语言、主题）。
 
 这份界面是一份 `Component::build()` 描述出来的（对标 Compose / ArkTS）：改状态 → 下一帧重组 →
 真值树按 diff 更新，「改完要点哪里」的手工同步全部消失（对比同功能的命令式写法：同目录
-曾经的 `codeeditor-dsl` 分身已在示例整合中并入本文档——两份合计 2758 行 → 1605 行）。
+曾经的 `gbcode-dsl` 分身已在示例整合中并入本文档——两份合计 2758 行 → 1605 行）。
 
 **内容都是真的，不是占位数据**：
 
@@ -232,7 +232,7 @@ shuangtian_run(action=build) → action=start（无头，返回端口/PID）
 |---|---|
 | 无头后端（headless）+ 软件光栅器 | ✅ 完整（本仓库全部示例与验证都在无头下完成） |
 | 窗口后端 | ✅ **win32 完整**（真窗口 + 鼠标键盘 + 剪贴板 + DXGI swapchain 呈现 + DPI 感知与切换 + **首帧画完才显窗**，无启动黑框/白底）；⏳ x11 / wayland 未做（运行时探测缺失即回退 headless，不阻断流程） |
-| **窗框（自绘标题栏 + 窗框容器）** | ✅ **Win32 已落地**：去系统标题栏建窗（`WS_POPUP\|WS_THICKFRAME`）+ `WM_NCCALCSIZE` 客户区覆盖整窗 + `WM_NCHITTEST` 接管八向缩放与拖动（**保留 Aero Snap**）+ 最大化按工作区校正（不盖任务栏）+ `WM_GETMINMAXINFO` 最小尺寸护栏；组件 `ui::WindowFrame`（标题栏 + 内容槽 + **八向缩放边缘**）与 `ui::TitleBar`（标题/图标/三按钮/附属槽/双击最大化）+ `ui::WindowControl` 端口 + `Backend` 窗口控制接口；**两个示例已换壳**（gallery 标题栏含品牌名/当前页名/主题·DPI·截图；codeeditor 含文件名与脏点，旧的装饰图标与自建顶栏退役）。真窗口验证：客户区 == 窗口矩形、最大化 == 工作区、三动作生效（`tools/title_bar_win_check.py`）。⏳ x11/wayland 按同一契约待补（当下 `supports_window_control()=false`、动作如实拒绝，**组件与应用无需改动**） |
+| **窗框（自绘标题栏 + 窗框容器）** | ✅ **Win32 已落地**：去系统标题栏建窗（`WS_POPUP\|WS_THICKFRAME`）+ `WM_NCCALCSIZE` 客户区覆盖整窗 + `WM_NCHITTEST` 接管八向缩放与拖动（**保留 Aero Snap**）+ 最大化按工作区校正（不盖任务栏）+ `WM_GETMINMAXINFO` 最小尺寸护栏；组件 `ui::WindowFrame`（标题栏 + 内容槽 + **八向缩放边缘**）与 `ui::TitleBar`（标题/图标/三按钮/附属槽/双击最大化）+ `ui::WindowControl` 端口 + `Backend` 窗口控制接口；**两个示例已换壳**（gallery 标题栏含品牌名/当前页名/主题·DPI·截图；gbcode 含文件名与脏点，旧的装饰图标与自建顶栏退役）。真窗口验证：客户区 == 窗口矩形、最大化 == 工作区、三动作生效（`tools/title_bar_win_check.py`）。⏳ x11/wayland 按同一契约待补（当下 `supports_window_control()=false`、动作如实拒绝，**组件与应用无需改动**） |
 | 硬件合成 | ✅ **D3D11 全链路**（设备层→着色器原语→路径→DXGI 呈现，`--renderer=auto\|gpu\|software`）；三维为软件腿保底（系统高阶腿按测量触发，见 `DESIGN.md` §8.4）；⏳ Vulkan / Metal 待做 |
 | DPI（含非整数 1.5x、运行时切换） | ✅ |
 | 字体（TTF/OTF/OTC-CFF/CID、CJK 回退、SC face 优选） | ✅ |
@@ -242,7 +242,7 @@ shuangtian_run(action=build) → action=start（无头，返回端口/PID）
 | **Windows 宿主 + g++（MinGW-w64）默认编译器** | ✅ g++ 优先（版本护栏 ≥ 13）、MSVC 可回退（`vswhere`+`vcvars64` 自动定位、标志翻译、`/sourceDependencies` 依赖追踪、`bootstrap.ps1`）；Windows 目标默认静态 libgcc/libstdc++（产物不要求 mingw dll）；实测 g++ 自举 27s / 全量构建 ~31s / 测试全绿 |
 | **GPU 渲染（D3D11：硬件 → WARP）** | ✅ **M1–M6 全部落地**：设备层 / 着色器原语（文字与渐变与软件 **Δ0**）/ 投影（**Δ≤1**）/ 路径填充描边 / **DXGI swapchain 呈现** / `auto` 按实测选优。实测总帧 24.66→**1.53 ms**、送显 6.55→**0.03 ms**（详见 `DESIGN.md` §8.3） |
 | 动画与过渡 | ✅ 悬浮事件与特效（背景/描边/上浮/发光，`HoverEffect` 声明式）、帧驱动过渡（`UiRoot` 时间轴 + 续帧协议）、3D 旋转 |
-| **声明式 UI（`st::ui::dsl` + `ui::DeclarativeHost`）** | ✅ **双宿主**：C++ struct 组件 + `State<T>` + `build()`，与 JS `compose()`/`useState`（复用 ScriptHost）——≈ Jetpack Compose / 鸿蒙 ArkTS；**状态系统高层原语 `memo`/`effect`/`ref`/`persisted`（JS 侧同名的 `useMemo`/`useEffect`/`useRef`/`usePersisted`）**、ArkTS 链式修饰、**`resource`/`useResource` 异步**（线程池 + 取消牌 + 代次丢弃）、**按 key 对齐复用**（`for_each`/`ForEach`：增删重排后同一 key 仍是同一个元素，id `Type@key` 稳定）、**嵌套作用域树**（每层独立失效）、`custom<T>` 逃生舱、`overlay` 生命周期、`menu_bar`、`select`/`table`/`tree` 数据驱动、全局快捷键、条件裁剪、**异常冻结 + 递归 build 深度拦截 + 单帧预算顺延**、**子树挂载 `mount_into`**（宿主界面里的一页用声明式）、**场景卸载**（`compose` 换页不叠树 + `unmount_declarative()` 发 effect 清理）；JS 事件绑定按元素身份持有（复用帧零重绑成本）；双宿主一致性 fixture 四组；示例见上方两个（codeeditor 整页 + gallery 声明式页）；协议 `ui.create`/`ui.remove` 在线建删 |
+| **声明式 UI（`st::ui::dsl` + `ui::DeclarativeHost`）** | ✅ **双宿主**：C++ struct 组件 + `State<T>` + `build()`，与 JS `compose()`/`useState`（复用 ScriptHost）——≈ Jetpack Compose / 鸿蒙 ArkTS；**状态系统高层原语 `memo`/`effect`/`ref`/`persisted`（JS 侧同名的 `useMemo`/`useEffect`/`useRef`/`usePersisted`）**、ArkTS 链式修饰、**`resource`/`useResource` 异步**（线程池 + 取消牌 + 代次丢弃）、**按 key 对齐复用**（`for_each`/`ForEach`：增删重排后同一 key 仍是同一个元素，id `Type@key` 稳定）、**嵌套作用域树**（每层独立失效）、`custom<T>` 逃生舱、`overlay` 生命周期、`menu_bar`、`select`/`table`/`tree` 数据驱动、全局快捷键、条件裁剪、**异常冻结 + 递归 build 深度拦截 + 单帧预算顺延**、**子树挂载 `mount_into`**（宿主界面里的一页用声明式）、**场景卸载**（`compose` 换页不叠树 + `unmount_declarative()` 发 effect 清理）；JS 事件绑定按元素身份持有（复用帧零重绑成本）；双宿主一致性 fixture 四组；示例见上方两个（gbcode 整页 + gallery 声明式页）；协议 `ui.create`/`ui.remove` 在线建删 |
 
 ## 相关文档
 

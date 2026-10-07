@@ -525,18 +525,18 @@ auto TextRenderer::ink_metrics(std::string_view utf8, float size, FontRole role)
 
 auto TextRenderer::shaped_ascent(std::string_view utf8, float size, FontRole role) const -> float {
   if (stack_->empty() || utf8.empty()) return ascent(size);
-  float max_ascent = 0.0f;
-  std::size_t index = 0;
-  while (index < utf8.size()) {
-    const Codepoint codepoint = decode_utf8(utf8, index);
-    if (codepoint.bytes == 0) break;
-    const FontFace* face = stack_->find_face(codepoint.value, role, false);
-    if (face == nullptr) continue;
-    const FontMetrics& metrics = face->metrics();
-    const float units = metrics.units_per_em > 0.0f ? metrics.units_per_em : 1000.0f;
-    max_ascent = std::max(max_ascent, metrics.ascender / units * size);
-  }
-  return max_ascent > 0.0f ? max_ascent : ascent(size);
+  // **基线是“行的属性”，不是“token 的属性”**：取主字体量尺，与 `draw` 同源。
+  //
+  // `ShapedText::ascent` 就不能用：它是“这段文字用到的字体面里最大的 ascender”，
+  // 中文字体比拉丁字体大得多（实测 15.87 vs 11.14）。编辑器**逐 token** 调 `draw`，
+  // 若基线跟着 token 变，同一行里中文会比 `//` 画低 4.7px——用户报的
+  // 「注释没有在行背景垂直居中」正是这个（截图里中文明显低于 `//`）。
+  //
+  // `draw` 那边也已统一到 `ascent(size)`（见那里的长注释）；两处必须**同一个量**，
+  // 否则“几何按 A 算居中、绘制按 B 落笔”。
+  (void)utf8;
+  (void)role;
+  return ascent(size);
 }
 
 auto TextRenderer::line_height(float size) const -> float {
@@ -1400,7 +1400,20 @@ auto TextRenderer::draw(raster::Surface& surface, std::string_view utf8, math::P
   const std::shared_ptr<const ShapedText> shaped_ptr = shape_cached(utf8, size, role, bold);
   const ShapedText& shaped = *shaped_ptr;
   const float device_scale = surface.device_scale();
-  const float baseline = (origin.y + shaped.ascent) * device_scale;
+  // **基线取主字体量尺（与内容无关），不能取本段文字的 `shaped.ascent`。**
+  //
+  // `ShapedText::ascent` 是“这段文字用到的字体面里最大的 ascender”：中文字体
+  // （SimSun/微软雅黑）的 ascender 比拉丁字体大得多（实测 15.87 vs 11.14，差 4.7px）。
+  // 编辑器是**逐 token** 调 `draw` 的，于是同一行里**中文比 `//` 矮一号地画低 4.7px**——
+  // 用户报的「注释没有在行背景垂直居中」就是这个（截图里中文比 `//` 低）。
+  //
+  // 基线的本职是“这一行的字都坐在哪儿”，它必须是**行的属性**，不是 token 的属性。
+  // 字体回退（fallback）的通行语义也是“**字形**换字体、**基线不动**”。
+  // 用主字体 ascender 后，混排行里所有 token 同底。
+  //
+  // 与 `TextRenderer::shaped_ascent` 必须返回**同一个量**（那里已统一到 `ascent(size)`，
+  // 回归见 `tests/text_baseline_test.cpp`）——否则“几何按 A 算居中、绘制按 B 落笔”。
+  const float baseline = (origin.y + ascent(size)) * device_scale;
   const raster::Paint paint = raster::Paint::solid(color);
   const float opacity = static_cast<float>(color.a) / 255.0f;
   // 半径 → **采样格步数**：换算依赖当前渲染模式（亚像素/灰度）与超采样倍率，

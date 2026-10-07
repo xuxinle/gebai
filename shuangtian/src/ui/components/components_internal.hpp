@@ -22,6 +22,7 @@
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
 #include "st/ui/element.hpp"
+#include "st/ui/line_layout.hpp"
 #include "st/ui/text_port.hpp"
 #include "st/ui/theme.hpp"
 

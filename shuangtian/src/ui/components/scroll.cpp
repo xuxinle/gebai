@@ -145,6 +145,13 @@ auto ScrollBar::semantics_value() const -> std::string {
 
 ScrollView::ScrollView() {
   style_.direction = FlexDirection::Column;
+  // 滚动视口**裁子元素**（含越出视口的那部分）。
+  //
+  // 这个开关同时决定绘制与**命中**：`ScrollView::paint` 一直在自己压裁剪矩形，
+  // 但命中侧的裁剪读的是 `style_.clip_children`（声明式与手搭元素同一处口径）。
+  // 不声明它，滚动后的长内容（如终端滚回）就会“看不见却抢点击”——
+  // 实测该文本 bounds 为 y=−119 / 高 851，把**标题栏与菜单栏**的点击全吃掉了。
+  style_.clip_children = true;
   set_focusable(true);
   auto bar = std::make_unique<ScrollBar>();
   bar_ = bar.get();

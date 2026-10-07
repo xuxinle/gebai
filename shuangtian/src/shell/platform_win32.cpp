@@ -1153,9 +1153,18 @@ class Win32Backend final : public Backend {
         push_mouse(ui::EventKind::Click, lparam, 1, 1);
         return 0;
       case WM_LBUTTONDBLCLK:
-        // 双击由系统识别（窗口类带 `CS_DBLCLKS`）：语义上第二次按下的 Click 计数为 2
+        // 双击由系统识别（窗口类带 `CS_DBLCLKS`）。
+        //
+        // **不再补发 `Click`**：一次物理双击的真实消息序列是
+        // `LBUTTONDOWN, LBUTTONUP, **LBUTTONDBLCLK**, LBUTTONUP`——
+        // 系统用 `DBLCLK` **代替**了第二次的 `DOWN`（不是额外多一条）。
+        // 原先在 `DBLCLK` 与第二个 `UP` 两处**各补一个 `Click`**，于是一次双击
+        // 产生 **3 个 Click**（第一个 UP 一个 + DBLCLK 一个 + 第二个 UP 一个）。
+        // 对按钮无妨（重复激活只是多跑一次），但对**toggle 语义**的控件是致命的：
+        // 菜单栏“点一下开、再点一下关”，连点两下＝开了又关——用户看到的就是
+        // “点菜单秒退”。这类“一次手势多次计数”的账必须记在后端，
+        // 不能让每个组件各自用标志位去猜（那样每新一个组件就再踩一次）。
         push_mouse(ui::EventKind::DoubleClick, lparam, 1, 2);
-        push_mouse(ui::EventKind::Click, lparam, 1, 2);
         return 0;
       case WM_RBUTTONDOWN:
         push_mouse(ui::EventKind::MouseDown, lparam, 2, 1);

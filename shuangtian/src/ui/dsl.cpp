@@ -1845,7 +1845,7 @@ DeclarativeHost::DeclarativeHost(UiRoot& root, Guardrails guardrails)
   // **自登记**：本树每帧由 `UiRoot::tick_declarative_hosts()` 统一推进。
   // 为何不让调用方自己记得：一个页面可以占多处树位（`mount_into` 挂进标题栏的
   // 附属槽），进程里于是有多棵树；漏推第二棵时“点击命中了、状态也变了、
-  // 面板就是不出现”（codeeditor 菜单与标题栏合并时实测）。
+  // 面板就是不出现”（gbcode 菜单与标题栏合并时实测）。
   //
   // 以**弱引用**持有宿主回调（`weak_from_this` 风格）：`DeclarativeHost` 常由
   // `unique_ptr` 持有，析构时不保证还有机会清表——所以回调里先确认

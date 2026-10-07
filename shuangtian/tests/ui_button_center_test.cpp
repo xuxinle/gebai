@@ -36,6 +36,7 @@
 #include "st/ui/components/basic.hpp"
 #include "st/ui/text_port.hpp"
 #include "st/ui/ui_root.hpp"
+#include "st/ui/line_layout.hpp"
 
 namespace {
 

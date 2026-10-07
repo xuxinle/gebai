@@ -113,7 +113,7 @@ using Json = nlohmann::ordered_json;
 /// 而返回引用不要求（绑定引用不需要完整类型）。实测（GCC 13/14 对照）：
 /// `dsl.hpp` 的 `custom<T>` 里传 `empty_json_object()`，
 /// 按值返回时**实例化即报 incomplete type**，改返回引用后**零错误**。
-/// 后果就是 `custom<T>` 的使用方（如 `examples/codeeditor/main.cpp`）
+/// 后果就是 `custom<T>` 的使用方（如 `examples/gbcode/main.cpp`）
 /// 被迫额外包含 `st/ext/json.hpp`——而 `dsl.hpp` 切前向头的收益正是为了免掉这个代价，
 /// `88ba665` 就是因此漏补了 examples/ 而编不过。返回引用从根上消除该需求。
 ///

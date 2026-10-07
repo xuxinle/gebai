@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""codeeditor 的端到端验证（控制通道驱动）。
+"""gbcode 的端到端验证（控制通道驱动）。
 
 覆盖五层骨架、多标签、底部面板互切、编辑器编辑/撤销、查找替换、
 搜索、菜单下拉、命令面板、分栏、主题——**声明式重写后这些链路必须等价**。
 
-用法: python3 tools/codeeditor_e2e.py [binary] [ctl] [shots]
+用法: python3 tools/gbcode_e2e.py [binary] [ctl] [shots]
 """
 import json
 import os
@@ -12,11 +12,12 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_BIN = os.path.join(ROOT, "build", "dev", "bin", "codeeditor.exe")
+DEFAULT_BIN = os.path.join(ROOT, "build", "dev", "bin", "gbcode.exe")
 
 
 class Client:
@@ -68,13 +69,13 @@ class Client:
 
 
 def start(binary, shots):
-    ctl = os.path.join(shots, "codeeditor-ctl.json")
+    ctl = os.path.join(shots, "gbcode-ctl.json")
     for path in (ctl,):
         try:
             os.remove(path)
         except FileNotFoundError:
             pass
-    log = open(os.path.join(shots, "codeeditor-e2e.log"), "wb")
+    log = open(os.path.join(shots, "gbcode-e2e.log"), "wb")
     # `--tool-root` 指向框架仓根：终端测例要真跑 `st test`，
     # 而 PATH 里通常没有 `st`（工具链就在仓库的 build/bin 下）。
     framework_root = str(Path(__file__).resolve().parent.parent)
@@ -101,7 +102,7 @@ def check(condition, message):
 
 def main():
     binary = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_BIN
-    shots = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, "build", "e2e-codeeditor")
+    shots = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, "build", "e2e-gbcode")
     os.makedirs(shots, exist_ok=True)
     process, client, info = start(binary, shots)
     try:
@@ -277,7 +278,7 @@ def main():
 
         # —— 9. 截图（视觉核验素材）——
         shot = client.ok("capture", {"encode": "file",
-                                     "path": os.path.join(shots, "codeeditor-declarative.png")})
+                                     "path": os.path.join(shots, "gbcode-declarative.png")})
         check(shot.get("path"), "截图未落盘")
         print(f"[9] 截图已落盘: {shot['path']}")
 
@@ -493,16 +494,25 @@ def main():
         # 先 cd 到真仓根：后续测例（`st test` 需要一个带 `st.pkg` 的目录）都靠它。
         # 放在最前面还有一个工艺理由：示例模式的 `pwd` 回的是占位串「(内置样例)」，
         # 先切目录才能对绝对路径做断言。
+        #
+        # ⚠ 路径比较必须**跨平台归一**：应用侧（`st::fs`）一律输出正斜杠，而 Windows 上
+        #   `pathlib` 给的是反斜杠——直接 `==` 会在 Windows 上恒红（本用例此前就只在
+        #   Linux 上跑过）。这里统一折成正斜杠再比。
+        def normalize_path(value):
+            return str(value).replace("\\", "/").rstrip("/")
+
         text = terminal("cd " + str(root))
-        check(client.text("terminal-prompt-cwd") == str(root),
+        check(normalize_path(client.text("terminal-prompt-cwd")) == normalize_path(root),
               f"cd 后提示行未跟随: {client.text('terminal-prompt-cwd')}")
         text = terminal("pwd")
-        check(str(root) in text, f"pwd 无输出工作目录: {text[-120:]}")
+        check(normalize_path(root) in normalize_path(text), f"pwd 无输出工作目录: {text[-120:]}")
         text = terminal("cd /不存在的目录")
         check("目录不存在" in text, "cd 到不存在的目录未被拒")
-        text = terminal("cd /tmp")
-        check(client.text("terminal-prompt-cwd") == "/tmp",
-              f"cd /tmp 后提示行未跟随: {client.text('terminal-prompt-cwd')}")
+        # 切到系统临时目录（Windows 上没有 `/tmp`：写死它会让这条用例只在 Linux 上成立）
+        temp_dir = tempfile.gettempdir()
+        text = terminal("cd " + temp_dir)
+        check(normalize_path(client.text("terminal-prompt-cwd")) == normalize_path(temp_dir),
+              f"cd 临时目录后提示行未跟随: {client.text('terminal-prompt-cwd')}")
         # 白名单外的 git 写操作必须在**解析阶段**就被拒
         text = terminal("git commit -m x")
         check("拒绝" in text and "白名单" in text, f"git 写操作未被拒: {text[-160:]}")
@@ -583,7 +593,148 @@ def main():
         check(offset >= max_scroll - 2.0, f"未自动贴底: offset={offset} max={max_scroll}")
         print(f"[22] 终端滚回：多行 + 自动贴底（{rendered.count(chr(10)) + 1} 行，offset {offset:.0f}/{max_scroll:.0f}）")
 
-        print("\n[OK] codeeditor 端到端全部通过")
+        # —— 23. 菜单栏挂在标题栏里：**双击不得改窗口状态** ——
+        #
+        # 回归（本轮修，框架层）：菜单栏挂进标题栏的 `leading` 附属槽，而
+        # `TitleBar::hits_caption` 那时只排除了尾部槽——于是双击「文件」菜单会
+        # 冒泡到标题栏、落进“双击标题区 = 最大化/还原”。菜单自己消费了按下与单击，
+        # 唯独双击漏出来（这就是“菜单栏按钮挂钩控制窗口事件”的现象）。
+        # 判据用**属性面**（`maximized`）而不是像素：无头后端不支持窗口控制，
+        # 属性会如实报 false；真正要钉住的是“动作有没有被触发”。
+        before_title = client.title("titlebar")
+        menu_box = client.ok("find", {"selector": "#menubar"})["matches"][0]["bounds"]
+        # 前置：确保此刻没有已打开的下拉面板（否则下面那次单击会变成“关掉它”）
+        client.ok("input.key", {"key": "Escape", "kind": "press"})
+        time.sleep(0.5)
+        check(client.count("MenuPanel") == 0, "前置失败：按下 Esc 后仍有下拉面板")
+        client.ok("input.mouse", {"kind": "dblclick",
+                                  "x": menu_box["x"] + 24, "y": menu_box["y"] + menu_box["height"] / 2,
+                                  "button": 1})
+        time.sleep(0.5)
+        after_title = client.title("titlebar")
+        check(before_title == after_title,
+              f"双击菜单栏改动了标题/窗口状态: {before_title!r} -> {after_title!r}")
+        check(client.count("MenuPanel") == 0, "双击不应把下拉面板打开/关掉")
+        # 菜单本身仍要能点开（修的是“别触发窗口动作”，不是“别响应点击”）
+        click_reply = client.ok("input.mouse", {"kind": "click", "x": menu_box["x"] + 24,
+                                                "y": menu_box["y"] + menu_box["height"] / 2,
+                                                "button": 1})
+        time.sleep(0.5)
+        check(client.count("MenuPanel") >= 1,
+              f"单击菜单栏未打开下拉面板（命中 {click_reply.get('hit', {}).get('id')!r}）")
+        # 再点**同一个标题** = 关闭（浏览器/VSCode 菜单栏的 toggle 手感）。
+        # 这条同时钉住“点击不会漏到下层、也不会一次手势算两次”。
+        client.ok("input.mouse", {"kind": "click", "x": menu_box["x"] + 24,
+                                  "y": menu_box["y"] + menu_box["height"] / 2, "button": 1})
+        time.sleep(0.45)
+        check(client.count("MenuPanel") == 0, "再点已打开的菜单标题未关闭面板")
+        print("[23b] 再点已打开的菜单标题 → 面板关闭（toggle 手感）")
+
+        # —— 23c. 双击标题：面板**不能一闪就没**（真实双击序列）——
+        # `LBUTTONDOWN, LBUTTONUP(+Click), LBUTTONDBLCLK, LBUTTONUP(+Click)`：
+        # 后端曾在这里各补一个 Click，一次双击产生三个 Click，toggle 语义就“开了又关”。
+        at = {"x": menu_box["x"] + 24, "y": menu_box["y"] + menu_box["height"] / 2}
+        for kind in ("down", "up", "click"):
+            client.ok("input.mouse", {"kind": kind, **at, "button": 1})
+        time.sleep(0.35)
+        check(client.count("MenuPanel") == 1, "第一次点击后面板未打开")
+        for kind in ("down", "dblclick", "up"):
+            client.ok("input.mouse", {"kind": kind, **at, "button": 1})
+        time.sleep(0.45)
+        check(client.count("MenuPanel") == 1, "双击菜单标题后面板消失了（一次手势被算成多次）")
+        check(client.title("titlebar") == before_title, "双击菜单标题改动了窗口状态")
+        print("[23c] 双击菜单标题 → 面板保持打开、窗口状态不变")
+        client.ok("input.key", {"key": "Escape", "kind": "press"})
+        time.sleep(0.4)
+        print("[23] 菜单栏在标题栏内：双击不触发窗口动作、单击仍能开面板")
+
+        # —— 24. Alt+↑/↓ 真移行（帮助卡声称的能力）——
+        client.ok("invoke", {"id": "editor", "action": "focus"})
+        client.ok("input.key", {"key": "a", "ctrl": True, "kind": "press"})
+        client.ok("input.key", {"key": "Delete", "kind": "press"})   # 清空 → 三行确定性内容
+        client.ok("input.text", {"id": "editor", "text": "aaa\nbbb\nccc"})
+        time.sleep(0.4)
+        client.ok("input.key", {"key": "Home", "ctrl": True, "kind": "press"})
+        time.sleep(0.3)
+        client.ok("input.key", {"key": "ArrowDown", "alt": True, "kind": "press"})
+        time.sleep(0.5)
+        moved = client.text("editor")
+        check(moved.startswith("bbb") and "aaa" in moved.split("\n")[:2],
+              f"Alt+↓ 未把首行下移: {moved.split(chr(10))[:3]}")
+        client.ok("input.key", {"key": "ArrowUp", "alt": True, "kind": "press"})
+        time.sleep(0.5)
+        check(client.text("editor").startswith("aaa"), "Alt+↑ 未把行移回")
+        print("[24] Alt+↑/↓ 真移行")
+
+        # —— 25. Ctrl+D 选中下一处同词 ——
+        client.ok("input.key", {"key": "Home", "ctrl": True, "kind": "press"})
+        for _ in range(2):
+            client.ok("input.key", {"key": "ArrowRight", "kind": "press"})
+        time.sleep(0.3)
+        client.ok("input.key", {"key": "d", "ctrl": True, "kind": "press"})
+        time.sleep(0.5)
+        selection = client.ok("get", {"id": "editor"})["props"].get("selection", "")
+        picked = client.ok("get", {"id": "editor"})["props"].get("selected_text", "")
+        check(picked == "aaa" and selection != "0:0",
+              f"Ctrl+D 未选中同词: selection={selection} picked={picked!r}")
+        print(f"[25] Ctrl+D 选中下一处同词（{picked!r}）")
+
+        # —— 26. Ctrl+G 转到行：真浮层 + 真跳转 + 越界如实报错 ——
+        client.ok("input.key", {"key": "g", "ctrl": True, "kind": "press"})
+        time.sleep(0.6)
+        check(client.count("#goto-input") == 1, "Ctrl+G 未打开转到行浮层")
+        client.ok("input.text", {"id": "goto-input", "text": "2"})
+        time.sleep(0.2)
+        client.ok("input.key", {"key": "Enter", "kind": "press"})
+        time.sleep(0.6)
+        check(client.count("#goto-input") == 0, "提交后浮层未关闭")
+        check(client.ok("get", {"id": "editor"})["props"].get("line") == "2",
+              f"未跳到第 2 行: {client.ok('get', {'id': 'editor'})['props'].get('line')}")
+        # 越界必须**留在浮层里报错**，而不是静默夹到末行
+        client.ok("input.key", {"key": "g", "ctrl": True, "kind": "press"})
+        time.sleep(0.5)
+        client.ok("input.text", {"id": "goto-input", "text": "99999"})
+        time.sleep(0.2)
+        client.ok("input.key", {"key": "Enter", "kind": "press"})
+        time.sleep(0.5)
+        check(client.count("#goto-input") == 1 and client.count("#goto-error") == 1,
+              "越界行号未在浮层内如实报错")
+        check("超出范围" in client.text("goto-error"),
+              f"越界提示文案不含“超出范围”: {client.text('goto-error')!r}")
+        client.ok("input.key", {"key": "Escape", "kind": "press"})
+        time.sleep(0.4)
+        print("[26] Ctrl+G 转到行：真跳转 + 越界如实报错")
+
+        # —— 27. 浮层里的 Enter 归输入框（回归：曾被子元素抢走）——
+        #
+        # 回归（本轮修，框架层）：`UiRoot::dispatch_key_into` 只逆序问所有子元素，
+        # 于是浮层尾部的「×」按钮（`Button` 对 Enter 会 `activate()`）把输入框的
+        # Enter 吃掉了——按回车等于把查找条关掉。现在浮层的按键先交给焦点元素。
+        client.ok("input.key", {"key": "f", "ctrl": True, "kind": "press"})
+        time.sleep(0.6)
+        check(client.count("#find-bar") == 1, "Ctrl+F 未打开查找条")
+        client.ok("input.text", {"id": "find-needle", "text": "aaa"})
+        time.sleep(0.4)
+        client.ok("input.key", {"key": "Enter", "kind": "press"})
+        time.sleep(0.5)
+        check(client.count("#find-bar") == 1, "查找条里的 Enter 被尾部按钮吃掉了（浮层被关）")
+        check(client.text("find-counter") != "0/0", "查找未生效")
+        client.ok("input.key", {"key": "Escape", "kind": "press"})
+        time.sleep(0.4)
+        check(client.count("#find-bar") == 0, "Esc 未关闭查找条")
+        print("[27] 浮层内 Enter 归焦点输入框（不再被尾部按钮抢走）")
+
+        # —— 27b. Ctrl+G 的浮层也要能被 Esc 关掉 ——
+        # （只给查找条接 Esc 会让转到行变成“关不掉的浮层”，而它开着时快捷键又为它让路）
+        client.ok("input.key", {"key": "g", "ctrl": True, "kind": "press"})
+        time.sleep(0.5)
+        check(client.count("#goto-input") == 1, "Ctrl+G 未打开转到行浮层")
+        client.ok("input.key", {"key": "Escape", "kind": "press"})
+        time.sleep(0.4)
+        check(client.count("#goto-input") == 0, "Esc 未关闭转到行浮层")
+        print("[27b] 转到行浮层可被 Esc 关闭")
+
+        print("\n[OK] gbcode 端到端全部通过")
         return 0
     finally:
         try:

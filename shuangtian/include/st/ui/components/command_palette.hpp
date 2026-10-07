@@ -14,7 +14,7 @@
 /// 属性面：`query`（读写）、`command_count`（全部命令数）、`match_count`（当前过滤命中数）、
 /// `active`（高亮序号）。动作面：`activate`（执行当前高亮）、`select`（argument=序号或命令 id）。
 ///
-/// 由 codeeditor 示例的示例级实现升为框架组件（DESIGN §8.1.1 反推的框架缺口）。
+/// 由 gbcode 示例的示例级实现升为框架组件（DESIGN §8.1.1 反推的框架缺口）。
 
 #include <cstddef>
 #include <functional>

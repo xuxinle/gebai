@@ -16,8 +16,8 @@ import time
 sys.path.insert(0, "tools")
 from st_client_lib import call_with_token, load_control
 
-BUILD = "build/debug/bin/codeeditor.exe"
-CTL = os.path.join("build", "e2e-codeeditor", "ctl-titlebar.json")
+BUILD = "build/debug/bin/gbcode.exe"
+CTL = os.path.join("build", "e2e-gbcode", "ctl-titlebar.json")
 os.makedirs(os.path.dirname(CTL), exist_ok=True)
 if os.path.exists(CTL):
     os.remove(CTL)
@@ -49,7 +49,7 @@ try:
         reply = call_with_token(port, "invoke", {"id": "titlebar", "action": action}, token)
         print(f"invoke {action} ->", json.dumps(reply, ensure_ascii=False))
     print("旧 id #title-text 命中数:", call("find", {"selector": "#title-text"})["count"])
-    shot = call("capture", {"encode": "file", "path": os.path.join("build", "e2e-codeeditor", "titlebar-headless.png")})
+    shot = call("capture", {"encode": "file", "path": os.path.join("build", "e2e-gbcode", "titlebar-headless.png")})
     print("截图:", shot.get("path") if isinstance(shot, dict) else shot)
 finally:
     try:

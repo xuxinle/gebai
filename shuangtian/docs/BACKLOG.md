@@ -3,6 +3,463 @@
 > 本文件是唯一权威清单，完成后移入「已完成」并在 DESIGN.md 更新里程碑。
 > **诚实原则**：写着「待做」却已完成的条目会误导读者；写着「已完成」却没落地的条目更糟。
 
+## 已完成（2026-10-07 分层重构：行排版抽为框架低级组件 `LineLayout`）
+
+用户对前两轮返工的判语：「有这么难吗，是不是框架或组件设计不合理」+
+「组件的设计原则是复用和定制，高级组件尽量使用低级组件组合」+
+铁律「**框架层的问题不要应用层修**」。三条都成立——本轮按此重构。
+
+### 诊断（已核实）
+
+| 事实 | 证据 |
+|---|---|
+| **13 个组件各自调 `port.draw` 并各自算垂直定位** | `basic` / `input` / `list` / `table` / `tabs` / `select` / `slider` / `toggle` / `overlay` / `title_bar` / `markdown_view` / `element` / `code_editor` |
+| 同一件事有**三条实现** | `Element::paint_text`（墨迹居中）/ 组件直接调 `centered_line_top` / 编辑器自己一套 |
+| 前两轮返工就是在这三条路上的第三条打补丁 | 组件里长出 `line_block_offset` / `caret_top_cache_` / `text_offset_cache_` / `band_top` ——**全是框架该给的几何** |
+| 又造出 **6 个散落 helper** | `line_block_offset` / `line_leading_split` / `line_ink_top` / `line_ink_metrics` / `line_ink_height` / `centered_line_top` |
+
+### 改了什么
+
+1. **新增 `include/st/ui/line_layout.hpp`**（低级组件）：
+   `LineGeometry{origin_y, ink_top, ink_height, baseline}` + `layout_line()` /
+   `layout_text_line()`。几何量**全部相对盒子顶**（多行控件可缓存复用）。
+2. **删掉全部 6 个 helper**（连同 `code_editor` 的私有 `line_block_offset`）——
+   它们的推导并入 `layout_line`；`centered_line_top` 保留为薄封装（迁完 13 个组件后可删）。
+3. **`CodeEditor` 改为纯复用**：组件内**不再有任何手调偏移**，三个量全从
+   `LineGeometry` 取（文字 `origin_y` / 带与光标 `ink_top`+`ink_height`）。
+4. 属性面报 `line_height` / `text_offset` / `caret_top` / `ink_height` / `baseline`
+   ——**自动化能直接核行盒几何**，不必自己再推一遍。
+
+### 顺带堵住一个真回归（框架层）
+
+空端口（无字体）下 `ink_metrics` 报不出墨迹，我第一版让 `ink_height = 0`
+⇒ **光标条高度塌成 0、直接不可见**，`ui_focus_semantics_test` 的像素断言当场变红。
+修在框架层：`layout_line` 给兜底几何（行盒居中 + `line_height × 0.8` 的墨迹高），
+并写明这是**本层要守的不变量：调用方拿到的几何永远可用**——
+不该让每个组件各判一次“报不出墨迹怎么办”。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| 新增 `tests/line_layout_test.cpp` | 4 条（墨迹居中 / 不多减 below / 两侧分摊 / 几何自洽）——回退均变红 |
+| **像素等价**（重构前后同一场景） | **编辑器代码区逐像素零差异**（0 / 911200 px） |
+| 全量 `st test --test-jobs 4` | **exit=0**（862 用例 / 21014 断言） |
+| `st lint` / mingw 交叉编译 | 0 违规 / 通过 |
+
+### 还没做（第5步，可分批）
+
+13 个组件里还有 5 处在直接调 `centered_line_top`（`basic.cpp` ×2、
+`components_internal.hpp`、`element.cpp`、`markdown_view.cpp`）。它们**行为已经是正确的**
+（走的就是同一口径），迁移是**结构收窄**而非修缺陷：把最终那层薄封装也去掉，
+让所有组件都直接读 `LineGeometry`。按“一次一件事 + 每步验证像素”的原则分批做。
+
+## 已完成（2026-10-07 行盒垂直定位收尾：高亮带贴墨迹 + 基线不随内容漂移）
+
+用户第二轮反馈：「背景和光标还是偏下」。上一轮的“增量两侧分摊 + 墨迹在行盒里居中”
+只解决了一部分——本轮把它拆到底。
+
+### 步骤 1：先承认“墨迹居中”的思路是错的（质心实测）
+
+| 行类型 | 修复前质心（行盒 22.77，中心 11.39） | 改后质心 |
+|---|---|---|
+| 拉丁代码行 | 8.41（在行盒 **28%** 处） | 6.41 |
+| 中文注释行 | 11.90 / 11.10（**46~52%**） | 10.56 / 9.77 |
+
+拉丁行与中文行在行盒里的位置相差 **4.2px**——**一个位移不可能同时让两侧居中**。
+根因：参考墨迹带被**括号**（细高笔画）撑高，居中它的**包围盒** ≠ 居中**视觉重量**。
+
+### 步骤 2：真正治病的改法——高亮带贴合墨迹
+
+不再调“文字在带里的位置”，而是让**带贴合文字**（`band_top` / `band_height` 取参考墨迹带）。
+好处：带高从 22.77 降到 **15.07**（与一行代码的墨迹同高），“带里的空当朝哪边偏”
+这个问题直接不存在；光标与带同源（上下各多伸 1px）。
+实测：高亮带从 `y 375..408`（34px）变为 `y 381..402`（22px），底纹上下沿紧贴文字。
+
+### 步骤 3：順手掘出的真缺陷——基线随内容漂移
+
+`TextRenderer::shaped_ascent` 原先扫每个码点取 `max(face->metrics().ascender)`：
+中文字体的 ascender 比拉丁大得多，于是“这行有没有中文”改变了基线。
+
+实测（字号 15、Monospace）：拉丁 `11.14` / 中文 `15.87`，差 **4.7px**——屏上表现为
+**中文注释行比代码行低 3.3px**，而且几乎贴到行盒底（下留白 0.0~0.4px）。
+
+为何是缺陷：① 行高/命中/内容高度都用**主字体量尺**，只有基线扫内容；
+② 绘制里“行盒顶”由同一段文字的 `shaped_ascent` 反推，漂移会反馈进行盒几何；
+③ 字体回退的通行语义是“**字形**换字体、**基线不动**”。
+改为直接返回 `ascent(size)`（主字体量尺）后，中/拉丁行质心差从 3.5px 降到 1.2~1.5px
+（剩下的 1.2px 是 CJK 方块字与拉丁 x-height 的**字形分布**差异，不是定位错位）。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| 新增 `tests/text_baseline_test.cpp` | 1 条（基线不随内容变）——回退即变红 |
+| `tests/code_editor_line_box_test.cpp` | 3 条（居中/不溢出/线性）——回退即两条变红 |
+| 属性面 | 新增 `line_height` / `text_offset` / `caret_top`，让自动化能直接核行盒几何 |
+| `st test --test-jobs 4` | **exit=0**（861 用例） |
+| `st lint` / mingw 交叉编译 | 0 违规 / 通过 |
+
+### 第三次迭代（用户：「上部的背景和光标怎么没了」）—— 带 = 行盒，文字居中
+
+我上一版把**带缩短成墨迹带**去治「偏下」，制造了第三报。实测（编辑器代码区，物理 px）：
+
+| 对象 | 上一版 | 本版 |
+|---|---|---|
+| 底纹带/行盒 | **381..402**（15.07 逻辑） | **375..408**（22.77 逻辑） |
+| 文字墨迹 | 375..395 | 375..395（未变） |
+| 光标 | 略 | 375..408 |
+
+带短了 7.7px ⇒ **行距变成带与带之间的空白缝隙**，“背景被切短了”。
+
+**两报的唯一合理解**：
+
+| 现象 | 真因 | 修法 |
+|---|---|---|
+| 「背景和光标偏下」 | **文字没在盒里居中**（`centered_line_top` 多减一个 `below`） | 修 `origin_y` |
+| 「上部的背景没了」 | 带被缩成墨迹带 | 带**回到行盒** |
+
+两报**不矛盾**：该修的是**文字居中**，不是带的长短。我当时把“带太长 + 文字偏下”
+误读成了“带太长”，于是缩带——正是这个误读造成了第三报。
+
+新增回归 `line_layout_band_spans_the_whole_box` 与 `line_layout_band_never_cuts_off_the_text`
+（后者用**真字体量真实文本的墨迹**，把带的尺寸与“字体实际字形”绑在一起，
+不再依赖固定样本的巧合）。
+
+### 工艺记录（本轮又踩的两类假信号）
+
+1. **量尺把光标的半透明边缘当成了墨迹**：光标边缘是淡紫（`(212,196,224)`），
+   “饱和蓝”判据排不掉；靠窄排除窗也排不到（边缘在光标列外 10px）。
+   改为“向两侧扩到离开蓝色边界再留12px”，并新增 `tools/line_geometry_shot.py` 固化。
+2. **探针与组件可能不共享同一份 inline 实现**：`line_block_offset` 是头文件 inline，
+   而 `st build` 的增量判定会因 mtime/缓存把旧版本留在某个 `.o` 里——
+   `line_box_probe`（单独重建）拿到 `4.13`、而 `gbcode`（复用缓存）拿到旧值 `-0.03`。
+   **屏幕上看到的是应用的值**，所以核验必须读**组件属性面**（故新增那三个属性）。
+   清除 `build/dev` 全量重建后两边一致。
+
+## 已完成（2026-10-07 代码编辑器“行间距全在行下方”：行距增量两侧分摊）
+
+用户反馈：「代码编辑器的行间距怎么全在行下方」。**观感类改动**，按
+`docs/perceptual_changes.md` 的八步循环做（先量化、再改、再逆向验证）。
+
+### 现象→正交量
+
+先建**两个正交量**（手册 §2：“至少两个同向才可宣布更好”）：
+
+- ① 上留白 = 行盒顶 → 墨迹顶；下留白 = 墨迹底 → 行盒底；取**下−上**
+- ② 墨迹中心 − 行盒中心（字形在行内是否居中）
+
+量尺：`tools/line_box_probe.cpp`（与绘制同一套 `RendererTextPort`，不靠截图目测）。
+
+### 实测数据（字号 15 / Monospace / 浅色）
+
+| spacing | 上留白 | 下留白 | 下−上 | 墨迹中心−行盒中心 |
+|---|---|---|---|---|
+| 1.00 | 3.34 | 2.01 | −1.33 | +0.665 |
+| 1.15 | 3.34 | 4.98 | **+1.64** | +0.34 |
+| 1.30 | 3.34 | 7.95 | **+4.61** | −0.51 |
+| 1.50 | 3.34 | 11.91 | **+8.57** | −1.66 |
+
+**上留白恒 3.34（一个像素不动），增量 100% 堆在下方**；拉丁体同样（上恒 1.57，
+下 5.58→15.48）。“下−上”极差 **9.90px**。
+
+### 根因
+
+`TextPort::draw` 的契约是「`origin.y` = 行盒顶，`baseline = origin.y + shaped_ascent`」——
+字形**死贴在行盒顶**；而 `CodeEditor::line_height()` 直接把
+`port.line_height(size) × line_spacing_` 当行高用，多出来的空白便全落在字形下方
+（与 CSS `line-height` 同病）。
+
+### 修法
+
+新增 `st::ui::line_block_offset(port, size, spacing)`：把
+`(自然行高×倍数 − 自然行高)` 平分为上下两半，返回**上侧那半**；绘制侧把它加到
+行墨迹的 `origin.y`（行号与光标同样跟随）。**行盒仍是原点**——底纹/选择/命中/滚动条
+几何全部不动，因此只是局部改动。
+
+为何抽成公共函数而不写在组件里：**量尺必须与实现走同一个入口**。本轮实测踩到了
+这个坑——探针里自写一份公式副本时，回退实现后探针**依旧报绿**（典型的假护栏）；
+抽成公共函数后逆向验证才真正变红。
+
+### 修后数据
+
+| spacing | 上留白 | 下留白 | 下−上 |
+|---|---|---|---|
+| 1.00 | 3.34 | 2.01 | −1.33 |
+| 1.15 | 4.82 | 3.50 | −1.32 |
+| 1.30 | 6.31 | 4.98 | −1.33 |
+| 1.50 | 8.29 | 6.96 | −1.33 |
+
+「下−上」极差 **0.01px**、墨迹中心极差 **0.005px**（纯浮点舍入）——
+行距只改变**行间**空隙，字形在自己行盒里没挪位。对照表：
+`tools/line_box_compare.py tmp_before.txt tmp_after.txt`。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| 新增 `tests/code_editor_line_box_test.cpp` | 2 条（线性/半量；跨档字形位置恒定） |
+| 逆向验证 | 回退分摊 → 两条**都变红**；恢复 → 全绿 |
+| `st test --test-jobs 4` | **exit=0**（859 用例 / 20995 断言） |
+| `st lint` | 0 违规 |
+| 真窗口截图 | 逐行上下留白目视均有气（不再贴着行顶） |
+
+### 工艺记录（两处差点交付假护栏）
+
+1. **探针自带公式副本** ⇒ 回退实现后量尺仍报绿。修法：公式抽成 `line_block_offset`，
+   探针与组件同调它。
+2. **回退代码编译不过**（`-Werror=unused-variable`）⇒ 跑的还是上一份二进制。
+   修法：回退写法保留 `(void)var;`（手册 §7.3）。
+
+## 已完成（2026-10-07 测试套随机 SIGSEGV：日志监听器悬垂）
+
+**现象**：`st test --test-jobs N` 每次都会有一个分片以 `-1073741819`（0xC0000005）
+异常退出，**崩的是哪片会漂**；`--shard 1/4` 单独跑更是 **100% 复现**（6/6）。
+
+**定位**：mingw 自带 gdb（`gdb -batch -x <脚本>`；注意 `-ex "run --shard 1/4"` 会把参数
+当成 gdb 自己的选项，`--shard` 要经 `set args` 传）拿到栈：
+
+```
+#5 st::log::write                      src/core/log.cpp:61
+#6 st::log::info<...>                  include/st/core/log.hpp:51
+#7 compile_units                       src/pkg/build.cpp:900      ← 编译 worker 线程
+#8 st::pkg::build                      src/pkg/build.cpp:1389
+#9 check_only_writes_no_artifacts      tests/pkg_check_test.cpp:104
+#0 Application 的 lambda → impl_->log_lines.push_back   src/app/app.cpp:228
+```
+
+**根因**：`log::add_listener` **没有注销入口**，而监听器列表是**进程级全局**的。
+`Application` 构造时注册了一个抓 `this` 的回调，**析构却从不摘**。于是：
+任何临时 `Application` 都留下一个悬垂监听器；某条用例在测试进程内真调
+`st::pkg::build`（`check_only_writes_no_artifacts`）→ 编译 worker 打一条 info →
+踩到已经析构的 `Application`。**“崩的是哪片会漂”由此得到解释**：
+哪一片先构造过 `Application`，哪一片的后续日志就会踩到野指针。
+
+**为何之前查不出来**：① 崩点看起来在 `check_only_writes_no_artifacts`，单跑却永远绿
+（那条用例本身没问题，是**进程里累积的脏状态**）；② 测试跑手只认**第一个位置参数**作为
+过滤器，早期“成对/分组跑全过”的结论**全部无效**（实际只跑了组里第一条）。
+
+**修法**（两层）：
+- `log`：`add_listener` 返回**订阅 id**（`[[nodiscard]]`）、新增 `remove_listener(id)`；
+  `write` 遍历前对订阅表**做快照**（回调里自行退订是常见用法，边遍历边 `erase` 就是 UB）。
+- `Application`：把 id 存在 `Impl` 里，**析构首步注销**。
+
+**验证**：
+
+| 项 | 结果 |
+|---|---|
+| 新增回归 `tests/core_log_test.cpp` | **3 条**（注销后不再收、**另一线程**发日志也收不到、重复注销/回调内自退订不崩） |
+| 逆向验证 | 回退 `Application` 的注销 → `--shard 1/4` **3/3 全崩**；恢复后 **4/4 全过** |
+| 四个分片 | **首次全部 exit=0**（213/215/215/214 条用例，0 失败） |
+| `st test --test-jobs 4` | **exit=0**（此前必有一片丢） |
+| `st lint` / mingw 交叉编译 | 0 违规 / 通过 |
+
+**顺带确认**：同类同题只剩 `Application` 一处（`ScriptHost` 的事件观察者已在析构里摘除）；
+`dsl::State` 的订阅由 `Composer` 按帧回收，不走这条全局列表。
+
+## 已完成（2026-10-07 菜单“秒退”与点击透传：后端双击多发 Click + 菜单项按下即激活）
+
+用户反馈两句：「菜单按钮点击秒退」「感觉是点击事件透到下方了」。两句都是**真实现象**，
+且各自对应一个独立缺陷——在真窗口（`--control-port`，backend=win32）上逐事件复现后定位。
+
+### ① 一次物理双击产生 3 个 `Click`（后端账算错）
+
+**现象**：连点两下菜单标题（或双击），刚打开的面板一闪就没；
+单击打开后再点同一个标题也会关掉（toggle 手感本身是对的，错的是“一下”被算成了“两下”）。
+
+**根因**：`platform_win32.cpp` 在 `WM_LBUTTONDBLCLK` 与随后的 `WM_LBUTTONUP` 两处
+**各补了一个 `Click`**。而真实的 Win32 双击消息序列是
+`LBUTTONDOWN, LBUTTONUP, LBUTTONDBLCLK, LBUTTONUP`——系统用 `DBLCLK` **代替**了
+第二次的 `DOWN`（不是额外多一条）。于是：
+
+| 消息 | 旧实现发出 | 应有的 |
+|---|---|---|
+| 第一个 `UP` | MouseUp + **Click** | 同 |
+| `DBLCLK` | DoubleClick + **Click**（多余） | 只 `DoubleClick` |
+| 第二个 `UP` | MouseUp + **Click** | 同 |
+
+→ 一次双击 **3 个 `Click`**。对 `Button` 无妨（重复激活只是多跑一次），对 **toggle 语义**
+的控件是致命的：菜单栏“点一下开、再点一下关”，连点两下＝开了又关。
+
+**实测数据（真窗口，逐事件采样）**：
+`down1=0  up1=0  click1=1  down2=1  dblclk=1  click2=0`——
+面板确实是被**第二个 `Click`** 切掉的，而 `DBLCLK` 本身没让它消失。
+
+**修法**：`DBLCLK` 只发 `DoubleClick`（`click_count=2`），**不再补发 `Click`**。
+这类“一次手势几次计数”的账必须在后端算谁，不能让每个组件各自用标志位去猜。
+
+### ② 菜单项在 `MouseDown` 就激活（一次点击执行三次、且透到下层）
+
+**根因**：`MenuPanel::on_event` 把 `Click` 与 `MouseDown` 合在同一个 `case` 里。
+
+**实测数据**（新增回归用例先跑，未修时）：一次物理点击（`Down→Up→Click`）
+激活 **3 次**（`期望 activated == 1，实际 3`）、关闭通知 **3 次**。
+
+**为何会“透到下方”**：在 `MouseDown` 那一刻就执行了动作**并把面板关掉**，而鼠标还没松开——
+随后的 `MouseUp`/`Click` 已经落在**下面那个元素**上，于是“点菜单”会顺手触发下层控件。
+用户感受正是“点菜单秒退，还透着点到了下方”。
+
+**修法**：`MouseDown` 只更新高亮/按下态（与 `Button`/`MenuBar` 同一约定），`Click` 才激活。
+同一缺陷在 `ContextMenu` 的 dismiss barrier 上也存在，一並修正（面板外也改成“松手后的
+`Click` 才关闭”，避免“按住拖一下再松开”被当成关闭）。
+
+### ③ 顺带补齐的两条菜单行为
+
+- **再点已打开的那个标题 = 关闭**（浏览器/VSCode 菜单栏手感）；旧实现在同一个标题上
+  重复点击只会一次次 `set_open_index`，“再点一下关掉”做不到。
+- **`DoubleClick` 由菜单栏收下、不再冒泡到标题栏**：菜单栏长在标题栏的附属槽里，
+  漏出去就是“双击菜单把窗口最大化”（与上一轮修的那条相偿相成）。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| `tests/ui_menu_test.cpp` | **13 条全绿**（新增 2 条；其中 `menu_panel_item_activates_once_per_physical_click` 做过逆向验证：回退即 `activated 3 != 1`） |
+| `tools/gbcode_e2e.py` | **29 组全过**（新增 [23b] 再点标题关闭、[23c] 双击不得关面板） |
+| 真窗口（backend=win32） | 真实鼠标：单击开面板 ✓、双击面板仍在 ✓、`titlebar.maximized=false` ✓、点「新建文件」→ 面板关 + 文件对话框开 ✓ |
+| `st lint` | 0 违规（扫 352 文件） |
+| `st test --profile dev menu --test-jobs 1` | **13 passed / 0 failed / 74 assertions** |
+| `st test --profile dev --test-jobs 2`（全量四片） | 分片 2/4 **214 passed / 0 failed / 10340 assertions**；分片 1/4 在 `check_only_writes_no_artifacts` 处 **0xC0000005** 退出（库存问题，见 P1） |
+| 四片单跑 | 2/4 = 214 passed / 10340 assertions、3/4 = 214 / 3073、4/4 = 213 / 3427（**全绿**）；1/4 仍崩（**217 条用例逐条累加 = 4137 断言**） |
+| mingw 交叉编译 | 通过（本轮改了 `platform_win32.cpp`，87 单元重编 4：`platform_win32.cpp` / `menu.cpp` / `dsl.cpp` / 示例；18.70s） |
+
+**还剩什么**：① `check_only_writes_no_artifacts` 的 0xC0000005 崩溃仍在（P1，改动前就存在，
+与本轮无关；**崩的是哪片会漂**——本轮多次观测到分片 1/4，也见过分片 3/4）；
+② 后端“`DBLCLK` 不再多补 `Click`”这条**没有自动化替身**：协议 `input.mouse{kind:"dblclick"}`
+走的是 `EventKind::DoubleClick` 合成路径（`src/control/server.cpp`），不经过 `WM_LBUTTONDBLCLK`——
+该改动靠真窗口实测 + mingw 交叉编译过关。
+
+## 已完成（2026-10-07 gbcode 真可用化：菜单栏不再挂钩窗口 + 五项宣称能力落实）
+
+用户要求：「完善 gbcode 的能力，要真实可用；**菜单栏按钮不要挂钩控制窗口事件
+（如双击切换最大化）**」。两句话各自指向一类问题：前者是**功能声称与实际不符**，
+后者是**框架的命中契约与文档自相矛盾**。
+
+### ① 菜单栏挂进标题栏＝挂在窗口拖动区上（框架缺陷）
+
+**现象**：双击「文件」菜单，窗口被最大化/还原。
+
+**根因两层，都在框架侧**：
+- `TitleBar::hits_caption()` 只排除了**尾部槽**（`trailing`），而菜单栏挂在
+  `leading` 槽里——正好落在“从窗口左缘起”的拖动带内。头文件却写着
+  “附属槽**不参与**拖动（它们是控件，不是拖动区）”：**注释与实现自相矛盾**。
+- 菜单自己消费了按下与单击，唯独**双击**无人认领，于是冒泡到标题栏的
+  `DoubleClick` 分支 → `window_toggle_maximize()`。
+
+**修法**：`hits_caption()` = `drag_rect()` **减去** `leading`/`trailing` 各槽的矩形
+（逐块挖掉，而不是“只排除尾部”）。
+
+**回归**：`tests/ui_title_bar_test.cpp` 两条（前置/尾部槽各一，均逆向验证：
+去掉挖除即 `maximize_calls 1 != 0`）；`tools/gbcode_e2e.py` 第 23 组用**真进程**
+钉住“双击菜单栏不改窗口状态、单击仍能开面板”。
+
+### ② 五项「帮助卡写着、代码里没有」的能力
+
+| 声称 | 实际（改前） | 现在 |
+|---|---|---|
+| Ctrl+D 选中下一处同词 | 按下去**毫无反应** | `CodeEditor::select_next_occurrence()`（单光标模型，环绕；动作面同名） |
+| Alt+↑/↓ 上/下移当前行 | 文本一字未动（落进普通方向键分支） | `CodeEditor::move_lines(delta)`（整行搬家，光标随行） |
+| Ctrl+G 转到行… | 菜单项其实跳“第一个问题行”；Ctrl+G 无绑定 | 真浮层（行号 / `行:列`）+ 越界**如实报错**（`#goto-input` / `#goto-error` / `#goto-go`） |
+| 查找条「全词 / 正则」 | 把词改写成 `\b词\b` 传给**不做正则**的组件 → **一处也搜不到，且不报错** | 全词成为组件一等选项（`FindOptions{.whole_word}`，命中那一刻判边界）；正则**如实置灰**并说明不支持 |
+| 帮助卡 F8 / Ctrl+K 等条目 | 与实现逐条核对 | 帮助卡按实际键位重写（含 Ctrl+G） |
+
+**教训（值得单独记）**：“帮助里列着、按下去没反应”属于**可信度**问题——
+用户试一次就不再相信界面上任何一条说明。声称的能力要么真做，要么从文案里删掉。
+
+### ③ 顺带挖出并修掉的三个框架缺陷（都是“同一件事两个口径”）
+
+- **浮层的按键先给谁**（`UiRoot::dispatch_key_into`）：原实现**逆序问所有子元素**，
+  于是“谁最后声明谁抢键”——浮层形如 `[文本][输入框][跳转][×]` 时，尾部 `Button`
+  把本该属于输入框的 Enter 吃掉（`Button` 对 Enter 是 `activate()`）。实测症状：
+  在“转到行”输入框里按回车，**浮层被关掉、`on_submit` 根本没跑**；查找条（尾部也有「×」）同理。
+  修法：顺序改为 **容器自身 → 焦点所在链 → 其余子元素**。
+  回归：`tests/ui_overlay_key_test.cpp`（回退焦点链即红）。
+- **裁剪器件的命中没裁**（`UiRoot::hit_test_subtree`）：`clip_children` 只作用在绘制上，
+  于是滚动后的长内容“看不见却抢点击”。实测：终端滚回 `Text` 的 bounds 为
+  `y=-119 / 高 851`，**点标题栏/菜单栏命中的是它**。修法：命中侧照同一个开关裁，
+  `ScrollView` 在构造里声明 `clip_children`（与它 `paint` 里压的裁剪同源）。
+  回归：`tests/ui_scroll_clip_hit_test.cpp`（**夹具必须让内容横跨视口边界**——
+  初版把它排到完全在视口之外，回退修复后依然绿，是一次假护栏）。
+- **浮层内输入框的指针跨帧悬垂**：页面在 `build()` 开头把 `editor` 置空，
+  却没置空浮层里的 `Input*`；而“聚焦输入框”的待办排在浮层构建**之前**，
+  于是拿上一帧已销毁的指针调 `host()->set_keyboard_focus(...)` ——
+  无头下随机 SIGSEGV（0xC0000005）。修法：两个 `Input*` 一并置空 + 待办移到构建之后。
+
+### ④ 示例侧的两处跨平台缺陷（Windows 上原本“跑不通”）
+
+- `--tool-root` 回退只找 `build/bin/st`，而 Windows 上是 `st.exe` → 终端里的 `st test`
+  永远报“找不到工具链”。改为两个名字都试。
+- `tools/gbcode_e2e.py` 把 `pathlib` 的反斜杠路径与应用的**正斜杠**输出直接 `==`，
+  且 `cd /tmp` 写死 POSIX 路径 → 在 Windows 上必红。改为归一化比较 + `tempfile.gettempdir()`。
+
+### 验证
+
+- `tests/ui_title_bar_test.cpp` 25 条、`tests/ui_code_editor_test.cpp` 84 条、
+  `tests/ui_overlay_key_test.cpp` 2 条、`tests/ui_scroll_clip_hit_test.cpp` 1 条 —— 全绿；
+  新增的 6 条**逐条做过逆向验证**（回退实现即变红，含一次假护栏的修正）；
+- `tools/gbcode_e2e.py` **27 组全过**（新增 23~27b 六组，跑真进程）；
+- `st lint` 0 违规；`st build --toolchain mingw` 交叉编译通过；
+- 截图核验：转到行浮层（含越界报错态）像素级确认。
+
+## 已完成（2026-10-07 标题栏窗口按钮：悬停反馈修复 + 形态对齐系统）
+
+用户要求「标题栏窗口操作按钮再全面优化、美化下」——**观感类任务**，按
+`docs/perceptual_changes.md` 走：先把感受拆成正交量、再量、再给候选让用户拍板。
+
+### 量出来的当前态（全部正交量）
+
+| 量 | 实测 | 判定 |
+|---|---|---|
+| 按钮几何 | 46×40（纵横比 1.15） | 与系统规格一致（按钮 46 宽） |
+| 字形墨迹 | 11×11 逻辑，居中偏移 **+0.00/+0.00** | 好，与系统同量级（10px） |
+| 笔画粗细 | 2 物理 px | 好 |
+| **普通按钮悬停对比度** | **1.0055**（只差 1/255） | **真缺陷**：悬停完全没有反馈 |
+| 关闭按钮悬停对比度 | 1.0564 | 弱（“一抹淡红”） |
+
+### ① 普通按钮的悬停反馈结构上不可能达标
+
+根因：旧实现是 `surface_pressed.with_alpha_f(0.10)` **半透明罩层**，而标题栏底色
+`surface_alt` 本身就是**不透明**的——alpha 在已不透明的底上不产生任何差异。
+关闭按钮之所以看得见，纯粹是因为它用的是 danger 色相（色相变化不吃明度）。
+
+顺带量清了上限：栏底 `#EDEDF2` 已在灰阶浅端，中性色叠上去**最多只能到 1.067**
+（主题自己对“看得见”的门槛是 1.35）。即：普通按钮不可能靠中性色达到高对比度——
+系统自己也靠**大块面积**而不是高对比度传达 hover。
+
+### ② 按住标题栏会把**整条栏**压暗（顺带挖出来的缺陷）
+
+量按钮按下态时发现 x=400/1200（远离任何按钮处）也从 `#EDEDF2` 变 `#DADADF`——
+即按住标题栏拖窗口时整条栏会变暗，看着像窗框闪了一下。两层根因：
+
+1. `TitleBar` 自己没关基类的悬浮/按下回放，而 `pressed_` 会在鼠标按在栏上
+   **任何位置**时置位（拖动窗口的第一步就是按在栏上）；
+2. 更隐蔽的是——`Element::paint_box` 里那条“按下了但 `hover_t` 尚未起来”的
+   回退分支**只查了 `hover_effect_.background`、没查 `enabled`**，
+   于是即使组件显式 `set_hover_effect({.enabled=false})`，它**依旧**会把底色压暗。
+   逆向验证：只做第 1 条时该用例仍然变红（48542 px 差异），补上第 2 条才真生效。
+
+### 候选与用户决策
+
+出了 9 档各只改一个正交量的对照图（`tools/title_bar_buttons_probe.cpp`），
+用户选 **F（纵向内缩块）+ G（关闭实心红）**。
+
+### 落地
+
+| 项 | 改前 | 改后 |
+|---|---|---|
+| 普通按钮悬停对比度 | 1.0055 | **1.0672**（复现路径：像素 1.1583） |
+| 普通按钮按下对比度 | — | 1.3831 |
+| 关闭按钮悬停对比度 | 1.0564 | **2.1066**（像素 4.0803） |
+| 悬停块形状 | 全出血（与栏同高） | **92×64 物理 = 46×32 逻辑**（纵向缩 4） |
+| 按住标题栏 | 整条栏变暗 | **0 px 差异** |
+
+### 验证汇总
+
+- `st test` **788 全绿**（+3 新用例）/ `st lint` 0 违规 / mingw 交叉编译通过；
+- 三条新回归均做过**逆向验证**（回退修复必须变红）；
+- 新增工具 `tools/title_bar_buttons_probe.cpp`（候选对照图 + 逐步度量），
+  以后改窗口按钮只需重跑它，不必再手搓对照。
+
 ## 已完成（2026-10-07 焦点环 / 运行期 DPI / 粗体整形缓存 / SemiBold 真粗体面）
 
 用户报三件事：「按钮聚焦不要再嵌套一层边框」、「画廊示例的 DPI 缩放有问题」、
@@ -527,7 +984,7 @@ mixed_bar = &row(c, {.id = "mixed"}, [...]);   // ← 第二个会 set_content()
 - 新增两条回归：`dsl_multi_root_declaration_is_diagnosed`（**逆向验证：回退诊断后当场变红**）、
   `dsl_keyless_siblings_are_not_recycled_as_stale`（已观测行为护栏，注释里说明它**没**钉住缺陷）；
 - `st test` **755 全绿** / `st lint` 0 违规 / `check_docs.py` OK / mingw 交叉编译通过 /
-  codeeditor E2E 与 gallery E2E 全通过。
+  gbcode E2E 与 gallery E2E 全通过。
 
 ### 待查（已记 BACKLOG）
 
@@ -686,7 +1143,7 @@ mixed_bar = &row(c, {.id = "mixed"}, [...]);   // ← 第二个会 set_content()
 
 ### 默认值
 
-`font_scale` 默认 **1.0**（与正文同级）；codeeditor 示例用 **1.15**（比正文大一号）。
+`font_scale` 默认 **1.0**（与正文同级）；gbcode 示例用 **1.15**（比正文大一号）。
 
 ### 顺带修的两个同类问题
 
@@ -704,12 +1161,12 @@ mixed_bar = &row(c, {.id = "mixed"}, [...]);   // ← 第二个会 set_content()
 - **逆向验证**：把 `theme_base_font_` 改回硬编码 13.0 → **4 条变红**，
   失败信息直指“未跟随主题缩放”；
 - `st test` **762 全绿**（+6）/ `st lint` 0 违规 / mingw 交叉编译通过 /
-  codeeditor E2E 18 组与 gallery E2E、editor smoke 全通过；
+  gbcode E2E 18 组与 gallery E2E、editor smoke 全通过；
 - 实测：`--ui-font-scale 1.5` 时编辑器 13.5→**25.875**（与 UI 文字同步）；
   控制通道改 `font_scale=1.0` 后实际字号 17.25→15，**重组后仍保持**；
   截图核验字号已明显变大。
 
-## 已完成（2026-10-05 codeeditor 标题栏与菜单栏合并成一行）
+## 已完成（2026-10-05 gbcode 标题栏与菜单栏合并成一行）
 
 用户要求：**标题栏和菜单栏合并**；选定形态为**菜单在左、标题跟在其后**
 （与 VS Code / Win11 记事本同构）。
@@ -742,14 +1199,14 @@ mixed_bar = &row(c, {.id = "mixed"}, [...]);   // ← 第二个会 set_content()
 
 - `st test` 756 全绿 / `st lint` 0 违规 / mingw 交叉编译通过 /
   gallery E2E 与 editor smoke 全通过；
-- `codeeditor_e2e.py` **18 组**全通过：新增 **[2b] 合并形态断言**（菜单栏完整落在
+- `gbcode_e2e.py` **18 组**全通过：新增 **[2b] 合并形态断言**（菜单栏完整落在
   标题栏内 + 在左部 + 占满行高 + 内容区紧跟这一行，即**没有留下空心**）；
 - 菜单交互全部仍正常：点击开面板（面板锤在标题栏正下方）、悬停切菜单、
   Esc 关闭、点面板外关闭（坐标由 y=52 更新为 y=20）；
 - 截图核验：**省下一整行**（内容区 y 从 72 → 40，即 32px 回到编辑器），
   一行内 `菜单 36→360 ｜ 标题 ｜ 窗口按钮` 层次清楚。
 
-## 已完成（2026-10-05 codeeditor 亮暗主题不可用）
+## 已完成（2026-10-05 gbcode 亮暗主题不可用）
 
 用户报告「亮暗切换不可用」。**根因在示例层，框架无问题**。
 
@@ -763,7 +1220,7 @@ mixed_bar = &row(c, {.id = "mixed"}, [...]);   // ← 第二个会 set_content()
 - 而 `theme.mode` 实测全程 `dark` 不变，像素也不变（**画面一点没动**）。
 
 正确做法早就在同一仓库里：`examples/gallery` 从真值源
-`app.root().theme().mode()` 读、调 `app.set_theme_mode()` 写。codeeditor 改为同构：
+`app.root().theme().mode()` 读、调 `app.set_theme_mode()` 写。gbcode 改为同构：
 新增 `theme_mode`（读）/`theme_setter`（写）两个注入点，**删掉影子状态 `dark_`**。
 
 ### 2. 状态栏子元素被内边距压扁（顺带查出）
@@ -788,7 +1245,7 @@ mixed_bar = &row(c, {.id = "mixed"}, [...]);   // ← 第二个会 set_content()
 逆向验证（回退修复必须让断言变红）：回退主题写入 → E2E 精确报出
 `主题按钮未切换主题真值: light → light`；回退轴向内边距 → 单元用例变红。
 `st test` 756 用例全绿（+1）/ `st lint` 0 违规 / mingw 交叉编译通过 /
-codeeditor E2E **17 组**全通过（+2）/ gallery E2E 与 editor smoke 全通过 /
+gbcode E2E **17 组**全通过（+2）/ gallery E2E 与 editor smoke 全通过 /
 截图核验亮暗两态均已真正换肤。
 
 ### 附带发现：`st test <filter>` 不重编
@@ -818,20 +1275,20 @@ codeeditor E2E **17 组**全通过（+2）/ gallery E2E 与 editor smoke 全通�
 `-Wconversion` 报错。逆向验证：把雅黑挪回拉丁之后 ✗3 条（中英文同族/
 首选归属/粗体归属），把 Consola 挪到通用等宽之后 ✗1 条（等宽首选）——均真能抓住。
 `st test` 755 用例全绿 / `st lint` 0 违规 / mingw 交叉编译通过 /
-codeeditor + gallery E2E 全通过 / 截图核验已换体（暗色与亮色两侧）。
+gbcode + gallery E2E 全通过 / 截图核验已换体（暗色与亮色两侧）。
 
-## 已完成（2026-10-05 codeeditor 可用性打磨轮）
+## 已完成（2026-10-05 gbcode 可用性打磨轮）
 
 背景：报告「很多特性实际都不能用」——改为**控制通道实测驱动**：逐条跑真实交互、
 截图/像素测量取证，再按根因深浅分流到框架层与示例层。以下条目全部带回归测试，
 并对关键修复做了**逆向验证**（临时回退修复 → 测试变红 → 恢复）。
 
-### 框架层（`ui` 通用，不只 codeeditor 受益）
+### 框架层（`ui` 通用，不只 gbcode 受益）
 
 - [x] **声明式 overlay 宿主吞掉全屏输入**：宿主是铺满视口的 `Panel`，而 `Element::hit_test`
   按整块矩形算 → 浮层一挂上，编辑器/侧栏/状态栏**全部点不动**（实测：菜单打开后
   连“点面板外关掉它”都做不到）。改为 `OverlayHost`：命中默认收窄到子元素（非模态浮层穿透），
-  可按需切**屏障形态**（瞬态浮层：面板外点击=关闭且不穿透）。回归：`codeeditor_e2e.py [10]/[11b]`。
+  可按需切**屏障形态**（瞬态浮层：面板外点击=关闭且不穿透）。回归：`gbcode_e2e.py [10]/[11b]`。
 - [x] **浮层键盘分派只问最外层宿主**：`UiRoot::dispatch` 的模态分支对 overlay 只调一次
   `on_event`；宿主自己不认 Esc → 真正认键的 `MenuPanel`/`CommandPalette` 在子树里收不到，
   “Esc 关面板”永远失效。新增 `dispatch_key_into`（深度优先下钻，容器自身优先），
@@ -862,7 +1319,7 @@ codeeditor + gallery E2E 全通过 / 截图核验已换体（暗色与亮色两�
   设完只读后一按 `select_all`——它写状态触发重组——立刻被改回 `false`）。改为只写“持久配置”，
   语言/只读态归“当前标签”与属性面所有。
 
-### 示例层（`examples/codeeditor`）
+### 示例层（`examples/gbcode`）
 
 - [x] 菜单「编辑/选择」里的 `copy`/`paste`/`goto-line` 是**假的**（copy 只读不写剪贴板、
   paste 插死字符串「（剪贴板内容）」、goto-line 恒跳第 1 行）→ 接真实 API。
@@ -871,7 +1328,7 @@ codeeditor + gallery E2E 全通过 / 截图核验已换体（暗色与亮色两�
 ### 验证
 
 - `st test` **748 用例全绿**（+9 新用例，`tests/ui_code_editor_paging_test.cpp`）/ `st lint` 0 违规 /
-  `codeeditor_e2e.py` **15 组全通过**（+6 组）/ mingw 交叉编译通过。
+  `gbcode_e2e.py` **15 组全通过**（+6 组）/ mingw 交叉编译通过。
 - **逆向验证**（回退修复必须让测试变红）：PageDown、垂直滚动条拖拽、Tab 命中、
   浮层键盘下钻、overlay 命中收窄、示例属性面——共 6 处逐条验证。
 
@@ -1629,7 +2086,7 @@ SVG 图元 17 例 16/17→**17/17**。
   `st_visual_check.py` dev+san × 两应用 × 亮/暗 × DPI2.0 **0 失败步、无 sanitizer 报告** /
   mingw 交叉编译通过（顺带修了 `winsock2.h` 必须在 `windows.h` 之前——Linux 本机看不见）。
 
-- [x] **codeeditor「平替 VSCode」第三批：编辑手感 + 视口可驱动 + 三个真缺陷** —— 2026-10-03
+- [x] **gbcode「平替 VSCode」第三批：编辑手感 + 视口可驱动 + 三个真缺陷** —— 2026-10-03
 
   **先说缺陷（都是实测出来的，不是推演）**：
   - **光标漂移（用户报的）**：`CodeEditor::x_for_index()` 漏传 `text::FontRole::Monospace`
@@ -1674,7 +2131,7 @@ SVG 图元 17 例 16/17→**17/17**。
   > 缓存它的指针会悬垂（实测：控制通道 `get` 当场 SIGSEGV，崩在字体度量里）。
   > 改用行高缓存（绘制过一次就有值）推算，拿不到就如实退化。
 
-  **示例侧（codeeditor）UX**：私有 `CommandPalette` 退役改用框架组件（−130 行）；
+  **示例侧（gbcode）UX**：私有 `CommandPalette` 退役改用框架组件（−130 行）；
   **Ctrl+P 真实快速打开**（把面板表换成文件表，88 个文件里打字过滤）；
   搜索面板改**真实递归搜工作区**（跳隐藏目录/二进制/大文件，命中给「文件:行 + 片段」，
   点一下**跳到该行并选中命中**）；问题面板接**真实轻量检查**（行尾空白 / Tab 缩进 /
@@ -1683,10 +2140,10 @@ SVG 图元 17 例 16/17→**17/17**。
   终端补 `ls`/`find <词>`/`goto <行>`/`stats` 真实命令；查找条 Esc 可关（此前关不掉）。
 
   **验证**：`st test` **583 用例全绿**（+26）/ `st lint` 0 违规 /
-  `tools/st_visual_check.py` **dev+san × gallery+codeeditor × 亮/暗 × DPI 2.0 全部 0 失败步、
+  `tools/st_visual_check.py` **dev+san × gallery+gbcode × 亮/暗 × DPI 2.0 全部 0 失败步、
   无 sanitizer 报告** / mingw 交叉编译通过 / `tools/caret_ink_probe.cpp` 作为量尺入库。
 
-- [x] **codeeditor「平替 VSCode」第二批：查找替换 + 真实文件工作区 + 命令面板内置** —— 2026-10-03
+- [x] **gbcode「平替 VSCode」第二批：查找替换 + 真实文件工作区 + 命令面板内置** —— 2026-10-03
   - `CodeEditor` find/replace 组件能力：`set_find`（全部命中高亮，主题新增 find_highlight/
     find_active 两枚 token）/`find_next`（环绕、就近起步）/`replace_current`（替换后跳下一
     命中）/`replace_all`（走撤销栈可回滚）；编辑后命中表保持重建；动作面
@@ -1694,8 +2151,8 @@ SVG 图元 17 例 16/17→**17/17**。
     find_needle/find_matches/find_active。7 用例。
   - `CommandPalette` 内置为框架组件（此前 backlog 挂账）：数据驱动（Command 表）+
     大小写不敏感过滤（title/detail）+ 键盘环绕导航 + Esc/遮罩关闭 + 属性面/动作面
-    （select 支持序号与命令 id）；7 用例。codeeditor 示例的私有实现退役（下批迁移调用点）。
-  - codeeditor `--workspace <dir>`：真实文件模式——资源树 `fs::list_dir` 扫描（目录增量
+    （select 支持序号与命令 id）；7 用例。gbcode 示例的私有实现退役（下批迁移调用点）。
+  - gbcode `--workspace <dir>`：真实文件模式——资源树 `fs::list_dir` 扫描（目录增量
     展开）、点文件 `fs::read_text` 打开（语言按扩展名推断）、Ctrl+S `fs::write_text`
     真实写盘（脏标记/标题栏/状态栏全联动）；缺省回退内置样例工作区（行为不变）。
   - 查找替换浮条（Ctrl+F/Ctrl+H）：输入即查（预填选中文本）、计数 n/m、↑↓ 环绕、
@@ -1716,7 +2173,7 @@ SVG 图元 17 例 16/17→**17/17**。
   `IconSetPainter` 按 (id,物理尺寸,颜色) LRU 缓存——尺寸变化即矢量重栅（任意缩放
   清晰的技术根源），同尺寸零重栅。
   接入：`Icon::draw`「内置表优先、SVG 补位」+ `svg:` 前缀强制源；画廊新增 SVG 图标集卡
-  （17 图标 ×16/32/64px 三档对照）；codeeditor 活动栏/标题栏/状态栏图标切 SVG。
+  （17 图标 ×16/32/64px 三档对照）；gbcode 活动栏/标题栏/状态栏图标切 SVG。
   测试：`tests/ui_svg_test.cpp` 19 用例 80 断言全绿——含「缩放清晰度」量化断言
   （16px vs 96px 墨量占比守恒 <35%，位图放大做不到）。开发中被测试/视觉断言抓出的
   真缺陷 10 处（transform 组合顺序反、根样式继承断链、defs 引用缺失、symbol 双绘、
@@ -1808,7 +2265,7 @@ SVG 图元 17 例 16/17→**17/17**。
   大字号自己就有满黑像素，量化只剩墨量代价）。
   实测（ss=2）：CJK 13.5px 半覆盖像素 310 → **171**（−45%）、中间调占比 1.04 → **0.549**；
   拉丁 12px 半覆盖 243 → **114**（−52%）；22px 中文墨量回到 **+0.37%**（不关量化是 +3.5%）。
-  端到端（真实 codeeditor 截图逐区域量）：侧栏 12px 半覆盖 **−9%**、实心 **+10%**、墨量 +1.7%。
+  端到端（真实 gbcode 截图逐区域量）：侧栏 12px 半覆盖 **−9%**、实心 **+10%**、墨量 +1.7%。
   测试 `tests/text_fit_guard_test.cpp`（三条断言均经**回退验证**）。
   新增量尺：`fit_shift_probe.cpp`（扫 `max_shift` 取值）、`text_ink_conserve.cpp`
   （与超采样 8 档的真值比墨量）、`text_fit_by_size.cpp`（拟合逐字号收益）、
@@ -1874,12 +2331,12 @@ SVG 图元 17 例 16/17→**17/17**。
     异步状态（引擎 `pump_jobs` 泵微任务）、`ForEach` 按 key 复用（`__d_move` 重排）。
   - [x] **`custom<T>` 逃生舱**：任意组件 + 一等接口的通用入口（`type_name<T>` 特化表，
     工厂补齐全部 32 类型）；`icon`/`overlay`/`dsl::tabs` 数据驱动。
-  - [x] **IDE 形态界面声明式重写**（2026-10-03 示例整合）：`examples/codeeditor` 整份界面
+  - [x] **IDE 形态界面声明式重写**（2026-10-03 示例整合）：`examples/gbcode` 整份界面
     改为声明式组装（五层布局 + 多标签 + 真实文件工作区 + 查找替换 + 菜单栏下拉 +
-    命令面板 + 全局快捷键 + 终端 + 主题），与原本的 `examples/codeeditor-dsl` 分身**合并为一份**
-    （两份合计 2758 行 → 1605 行，−42%）；端到端 `tools/codeeditor_e2e.py` 九项。
+    命令面板 + 全局快捷键 + 终端 + 主题），与原本的 `examples/gbcode-dsl` 分身**合并为一份**
+    （两份合计 2758 行 → 1605 行，−42%）；端到端 `tools/gbcode_e2e.py` 九项。
     同一批整合把 `counter` / `counter-js` / `todo-js` 三个小示例删除（语义已由单测完整覆盖）、
-    gallery 新增「声明式」页（`mount_into` 子树挂载）；示例收敛为 gallery + codeeditor 两个。
+    gallery 新增「声明式」页（`mount_into` 子树挂载）；示例收敛为 gallery + gbcode 两个。
   - [x] **子树挂载 `dsl::mount_into(host, component)`**：声明式树挂到既有元素的子位
     （`mount` 是单根语义，会替掉 `UiRoot::content()`）——宿主界面里的一页用声明式描述。
     整合中顺带修三个真缺陷：① 根作用域脏标记未清 → 根构建被跑两次、第二次**销毁重建根元素**
@@ -1896,15 +2353,15 @@ SVG 图元 17 例 16/17→**17/17**。
     输入指纹节流 + 代次计数丢旧结果。
   - [x] **构造期属性组件包装**：`dsl::select`/`dsl::table`/`dsl::tree`。
   - [x] **协议 `ui.create`/`ui.remove`**：在线建删元素（与声明式共用工厂）。
-  - [x] 旧版 `examples/codeeditor` 编译修复（三处 `-Werror=shadow`）。
+  - [x] 旧版 `examples/gbcode` 编译修复（三处 `-Werror=shadow`）。
   - [x] **`SplitView` 分隔线偏移修正**（用户报修）：`paint_content` 里 `handle_rect()`
     返回的已是**绝对坐标**，旧代码又加了一次 `bounds_.x`——线整整偏出一个 `bounds_.x`，
-    在 codeeditor 里表现为“标签下方一条穿过代码行号栏的竖线”（分栏 x=44 时线落到
+    在 gbcode 里表现为“标签下方一条穿过代码行号栏的竖线”（分栏 x=44 时线落到
     361.66，而两面板交界只在 314..322）。纵向分支、`grip_rect` 同错。
     回归测试 `ui_split_view_divider_paints_between_panes`：**宿主必须把分栏推到
     非原点**——`bounds_.x == 0` 时“多加一次”与不加等价，缺陷不会显形
     （第一版测试就落在原点，回退修复后仍然绿，是个假绿）。
-  - [x] **codeeditor 标题栏的窗口控制未右对齐**：重写时把原实现的
+  - [x] **gbcode 标题栏的窗口控制未右对齐**：重写时把原实现的
     「`grow=true` 的空 Panel」误用成了 `dsl::spacer(c, 0.0f)`（固定 `width=0`，
     不参与弹性伸缩）——`— □ ×` 紧跟在标题文字后面（x=209）而非最右（x=1268）。
   - [x] **启动黑框消除**（真窗口）：`create_window` 原先 `CreateWindowExW` 后立即
@@ -1929,7 +2386,7 @@ SVG 图元 17 例 16/17→**17/17**。
       而 `normalizeAll` 只摊平 `__fragment` 节点，数组被当成 VNode（`type === undefined`）。
       修法：数组也摊平（递归，兼容嵌套数组）。
     - **JS 事件每帧全树注销重绑**：实测三帧的绑定 id 为 `b1..b3 → b4..b6 → b7..b9`
-      （codeeditor 整页声明式每帧在付这笔钱）。根因：复用分支无条件
+      （gbcode 整页声明式每帧在付这笔钱）。根因：复用分支无条件
       `releaseEvents(old)` + `ensureEventBinding(new)`，而回调闭包每帧重建。
       修法：绑定按**元素 id** 持有（`eventHolders`），宿主处理器只把事件转给「本帧的 VNode」
       ——绑定只在首次出现回调时登记、卸载时反注册。断言：跨帧绑定 id 逐项不变。
@@ -1963,9 +2420,9 @@ SVG 图元 17 例 16/17→**17/17**。
     `remove_child` + `insert_child`）；大量重排（如整表排序）是 O(n × 子元素数)。
     量级真成为瓶颈时再换「先算目标序、再一次遍历重排」。
 
-## P1（2026-10-06 codeeditor 全面优化轮：框架层缺口）
+## P1（2026-10-06 gbcode 全面优化轮：框架层缺口）
 
-背景：把 `examples/codeeditor` 做到“真正可用”（对标歌白文件工作台）时挖出的框架问题。
+背景：把 `examples/gbcode` 做到“真正可用”（对标歌白文件工作台）时挖出的框架问题。
 **已当场修的三项**（见各自段落），**仍未做的在下面**。
 
 ### ✅ 已修：`set_event_handler` 对覆写了 `on_event` 的组件静默失效
@@ -2340,16 +2797,16 @@ SVG 图元 17 例 16/17→**17/17**。
 - [x] **CodeEditor 代码正文未用等宽字体**：`port.draw/measure_width` 全部走默认 Proportional
   角色（比例字体），代码编辑器字形宽度不齐且小字号发糊。修复：全部调用点传
   `FontRole::Monospace`（等宽栈 Cascadia/Consolas 本就存在，只是没接上）。
-- [x] **示例精简与 VSCode 式重写**（2026-10）：删除 mdeditor 示例；codeeditor 按 VSCode 信息架构
+- [x] **示例精简与 VSCode 式重写**（2026-10）：删除 mdeditor 示例；gbcode 按 VSCode 信息架构
   重写（标题栏/菜单栏/活动栏+侧栏/多标签编辑区/底部面板/状态栏，全内置组件零自绘）。
   重写中反推出的框架缺口（详见 DESIGN.md §8.1.1）：
   - [x] **SplitView 内置化**（2026-10-02 落地）：框架组件 `SplitView`（拖拽分栏，
-  见 DESIGN §4.5 v0.1.5 组件能力）；codeeditor 侧栏/编辑区已迁移；测试 7 用例
+  见 DESIGN §4.5 v0.1.5 组件能力）；gbcode 侧栏/编辑区已迁移；测试 7 用例
   （`ui_split_view_test.cpp`）+ `tools/split_view_e2e.py`（拖拽/夹取/动作面/截图）。
   迁移中发现并修复框架交互缺口：`MouseUp` 未按拖拽归属投递（拖出手柄后释放丢失）。
 - [x] **命令面板通用组件**（2026-10-03 落地）：`ui::CommandPalette`（FillViewport 遮罩 +
   顶部居中卡片 + 过滤列表 + 键盘环绕导航 + Esc/点遮罩关闭 + `query`/`command_count`/
-  `match_count`/`active` 属性面与 `activate`/`select` 动作面）。codeeditor 示例已迁移
+  `match_count`/`active` 属性面与 `activate`/`select` 动作面）。gbcode 示例已迁移
   （退役 130 行私有实现），并新增 `grab_focus()`——**打开面板后必须调它**，否则全局
   快捷键只把面板显示出来、焦点仍在底层编辑器上（敲的字跑进代码里）。
   迁移中把鼠标链路也提上来了：点条目走数据层 `List::Entry::on_activate`
@@ -2397,7 +2854,7 @@ SVG 图元 17 例 16/17→**17/17**。
     + `ui::WindowFrame`（**组件化的窗口**：标题栏置顶 + 内容槽 + 八向缩放边缘条；
     它解决的是通用缺陷——无边框窗口**只能**靠界面提供拖动/缩放区域，只有 TitleBar 时
     窗口拖不动）+ `ui::WindowControl` 端口（依赖倒置，与 `TextPort` 同一手法）+ 应用装配
-    （`Application` 实现端口并转发后端）；**两个示例都已换壳**：codeeditor 的 `#titlebar`
+    （`Application` 实现端口并转发后端）；**两个示例都已换壳**：gbcode 的 `#titlebar`
     换成窗框内置标题栏（旧三个装饰图标退役），gallery 的“60px 顶部栏 + 无标题栏外壳”
     换成 `WindowFrame`（品牌名挂前部槽、当前页名作标题、主题/DPI/截图挂尾部槽）；
     gallery 组件页保留「窗框」巡检卡；
@@ -2453,20 +2910,20 @@ SVG 图元 17 例 16/17→**17/17**。
   `st/pch.hpp`（里面含 `<map>`）——于是**日常构建全绿、只有全新环境自举（无 PCH）才失败**
   （`error: 'map' is not a member of 'std'`，行号指向使用处 372 行）。已补 `<map>`（并归位 `<set>` 字母序），
   并在 CONVENTIONS §6 新增第 6 条「每个 `.cpp` 自包含、不得依赖 PCH/传递包含」、§10.3 扩为三个静默失效点。
-- [x] **修 `build codeeditor` 编不过（Json 前向头漏补 `examples/`）**：
+- [x] **修 `build gbcode` 编不过（Json 前向头漏补 `examples/`）**：
   `88ba665`（Json 前向头解耦）把 `dsl.hpp` 的 `#include "st/ext/json.hpp"` 换成前向声明，
   给 `src/*`+`tests/*` 的 18 个 .cpp 补了 `json.hpp`——**却漏了整个 `examples/`**。
   而 `dsl::custom<T>` 是**模板**，实例化时需要 `Json` 完整类型（模板体调
-  `create_element(…, empty_json_object(), …)`），于是 `examples/codeeditor/main.cpp` 报
+  `create_element(…, empty_json_object(), …)`），于是 `examples/gbcode/main.cpp` 报
   「invalid use of incomplete type … basic_json」——报错落在标准库 `variant`/`type_traits`
   内部（300 行模板栈），完全看不出与 `dsl.hpp` 的关系。
 
   **为什么一路没被发现**：该提交自己的验证声明只跑 `st test` + `lint`，而 `st test` 只编
-  `tests/*_test.cpp`、**不编 `examples/`** 也不编 `tools/`——两个环节都覆盖不到 codeeditor。
+  `tests/*_test.cpp`、**不编 `examples/`** 也不编 `tools/`——两个环节都覆盖不到 gbcode。
   它自己的提交信息写着「需要完整类型的 .cpp（**含测试/示例**）自行包含 json.hpp」：
   **说明了但没做到**，且无任何机械检查会因“examples 编不过”而变红。
 
-    修复（**最终形态**）：① `examples/codeeditor/main.cpp` 补显式 `st/ext/json.hpp`；
+    修复（**最终形态**）：① `examples/gbcode/main.cpp` 补显式 `st/ext/json.hpp`；
   ② 把 `dsl.hpp` 那句**错误的**注释「`Json` 只出现在签名里」改成事实；
   ③ **根治：把 `empty_json_object()` 从「按值返回 `Json`」改为「返回 `const Json&`」**——
   这是需求本身的来源：`custom<T>` 只因要按值传 `empty_json_object()` 的返回值才需要完整类型，

@@ -192,7 +192,7 @@ ST_TEST(damage_idle_frame_is_quiet) {
 ST_TEST(damage_steady_state_settles_into_partial_frames) {
   // 回归用例（开发循环实测发现）：**静止的界面每帧都在整帧重绘**。
   //
-  // 现象：codeeditor 里 `invoke` 的 p50 是 **15.9 ms**，而 `get` 只有 4.1 ms——
+  // 现象：gbcode 里 `invoke` 的 p50 是 **15.9 ms**，而 `get` 只有 4.1 ms——
   // 差值恰好等于整帧绘制（paint 11.5 ms）+ 控制通道节拍（4.1 ms）。
   // 根因：`UiRoot::layout()` 跑完会 `pending_full_ = true`，而 `layout()` 的进入条件是
   // `dirty_ || tree_layout_dirty()`，其中 `tree_layout_dirty()` 读的是**根元素上的

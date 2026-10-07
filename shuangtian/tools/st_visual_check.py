@@ -2,7 +2,7 @@
 """霜天视觉与稳定性验证：
 ① dev 档跑完整交互序列（查询/操作/输入/DPI 切换/主题切换）；
 ② san 档（ASan+UBSan）跑同一序列，确认零 sanitizer 报告；
-③ 产出多张截图供人眼核验（DPI 1x/2x、亮/暗主题、gallery 与 codeeditor）。
+③ 产出多张截图供人眼核验（DPI 1x/2x、亮/暗主题、gallery 与 gbcode）。
 """
 import glob
 import json
@@ -35,8 +35,8 @@ def launch(profile: str, app: str) -> tuple[int, subprocess.Popen]:
     renderer = os.environ.get("ST_VISUAL_RENDERER", "")
     if renderer:
         command.extend(["--renderer", renderer])
-    if app == "codeeditor":
-        # 脚本能力默认关闭；codeeditor 支持 `--enable-script`，这里显式开启以便覆盖该路径
+    if app == "gbcode":
+        # 脚本能力默认关闭；gbcode 支持 `--enable-script`，这里显式开启以便覆盖该路径
         command.append("--enable-script")
     process = subprocess.Popen(command, stdout=log, stderr=log, stdin=subprocess.DEVNULL,
                                start_new_session=True)
@@ -77,22 +77,22 @@ def sequence(profile: str, app: str, shots: list[str]) -> int:
             ("find", {"selector": "Button", "limit": 50}),
             ("visual", {}),
             ("capture", {"encode": "file", "path": f"{SHOTS}/{app}-{profile}-light.png"}),
-            ("invoke", {"id": {"gallery": "btn-submit", "codeeditor": "btn-theme"}[app],
+            ("invoke", {"id": {"gallery": "btn-submit", "gbcode": "btn-theme"}[app],
                         "action": "click"}),
             ("input.mouse", {"kind": "click", "x": 420, "y": 720}),
             ("input.text", {"text": "霜天 · DPI 与流式",
-                            "id": {"gallery": "input-search", "codeeditor": "editor"}[app]}),
+                            "id": {"gallery": "input-search", "gbcode": "editor"}[app]}),
             ("wait", {"for": "stable", "timeout_ms": 2000}),
-            # 脚本路径（仅 codeeditor 开启）：读界面 → 改界面 → 绑定事件 → 触发 → 读回状态。
+            # 脚本路径（仅 gbcode 开启）：读界面 → 改界面 → 绑定事件 → 触发 → 读回状态。
             # 放在"主题切换"之前：改完文本紧接着截图，人眼能立刻确认脚本真的生效了。
             *([("script", {"code": "$('#status').set({text: '脚本已驱动界面 ✓'}); "
-                                   "$('#editor').props.language"})] if app == "codeeditor" else []),
+                                   "$('#editor').props.language"})] if app == "gbcode" else []),
             *([("script", {"selector": "#btn-theme", "event": "click",
                            "on": "() => $('#status').set({text:'JS 捕获了点击 ✓'})"})]
-              if app == "codeeditor" else []),
-            *([("invoke", {"id": "btn-theme", "action": "click"})] if app == "codeeditor" else []),
-            *([("get", {"id": "status"})] if app == "codeeditor" else []),
-            *([("script", {"state": True})] if app == "codeeditor" else []),
+              if app == "gbcode" else []),
+            *([("invoke", {"id": "btn-theme", "action": "click"})] if app == "gbcode" else []),
+            *([("get", {"id": "status"})] if app == "gbcode" else []),
+            *([("script", {"state": True})] if app == "gbcode" else []),
             ("theme", {"mode": "dark"}),
             ("capture", {"encode": "file", "path": f"{SHOTS}/{app}-{profile}-dark.png"}),
             ("app", {"action": "set_scale", "scale": 2.0}),
@@ -126,7 +126,7 @@ def sequence(profile: str, app: str, shots: list[str]) -> int:
 total = 0
 shots: list[str] = []
 for profile, note in [("dev", "常规档"), ("san", "ASan+UBSan")]:
-    for app in ("gallery", "codeeditor"):
+    for app in ("gallery", "gbcode"):
         print(f"[{profile}/{app}] {note}")
         total += sequence(profile, app, shots)
 

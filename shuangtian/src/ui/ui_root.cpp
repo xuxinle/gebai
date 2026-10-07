@@ -126,7 +126,7 @@ void UiRoot::layout(bool force) {
   // 而现实应用里这个标记**处处会亮**——文本内容变、列表项刷新、标签条同步修改点……
   // 每一次都会让整棵树重排一遍，哪怕所有元素最后都落在**完全相同的矩形**上。
   // 无条件 `pending_full_ = true` 的代价是：任何一次内容变更都退化成整帧重绘
-  // （实测 codeeditor 1280×800：整帧 paint **11.5 ms**，增量重绘形同虚设；
+  // （实测 gbcode 1280×800：整帧 paint **11.5 ms**，增量重绘形同虚设；
   //   控制通道上表现为写操作 p50 **15.8 ms** vs 读操作 **4.1 ms**）。
   //
   // 判据用**几何签名**：重排前后各走一遍树，把所有元素的矩形摊平比较——90 个节点两次
@@ -257,8 +257,22 @@ auto UiRoot::hit_test(math::Point point) -> Element* {
 
 auto UiRoot::hit_test_subtree(Element& element, math::Point point) -> Element* {
   if (!element.visible() || !element.intercepts_input()) return nullptr;
+  // **裁剪器件的命中也要裁**：`clip_children` 为真的元素（`ScrollView` 的内层、
+  // `CodeEditor` 等）把子元素画到自己的矩形外——那些像素根本不存在，自然不可点。
+  //
+  // 反例（实测，gbcode 的终端滚回）：滚动后滚回 `Text` 的 bounds 是
+  // `y=-119.3 / height=851.3`（内容远高于视口、被排到负坐标），而它的祖先链上
+  // 只有绘制裁剪——于是**点标题栏/菜单栏**时命中的是这个看不见的 `#terminal-output`。
+  // 用户感受：“顶部那条点不动了、菜单打不开”。
+  //
+  // 这里逐层收紧：子元素先要落在当前元素的矩形内（`clip_children` 时），递归下钻时
+  // 矩形自然逐层收窄——与绘制时逐层 `push_clip_rounded_rect` 同口径（只差圆角：
+  // 命中用包围矩形，比像素级圆角宽松一点点，与系统控件的命中语义一致）。
+  const bool clip = element.style().clip_children;
+  if (clip && !element.bounds().contains(point)) return nullptr;
   const auto children = element.children();
   for (auto iterator = children.rbegin(); iterator != children.rend(); ++iterator) {
+    if (*iterator == nullptr || !(*iterator)->visible()) continue;
     if (Element* hit = hit_test_subtree(**iterator, point); hit != nullptr) return hit;
   }
   return element.hit_test(point) ? &element : nullptr;
@@ -354,14 +368,34 @@ void UiRoot::update_hover(Element* target) {
 }
 
 auto UiRoot::dispatch_key_into(Element* root, Event& event) -> bool {
-  // 顺序：**先问本元素自身，再下钻子元素**。
+  // 顺序：**先问本元素自身 → 焦点所在的子元素链 → 其余子元素**。
   //
-  // 为何不能先子后父：方向键/Enter/Esc 在浮层里是**容器级语义**
-  //（命令面板的 ↑↓ 移高亮、菜单面板的 ↑↓ 选项），而焦点子元素（过滤输入框）
-  // 会先把 ArrowDown 当“光标移动”吞掉——「面板的方向键导航永远不生效」就这么来的。
-  // 容器先拿：它不认就（返回 false）继续下沉给子元素。
+  // ① 先问本元素：方向键/Enter/Esc 在浮层里是**容器级语义**（命令面板的 ↑↓ 移高亮、
+  //    菜单面板的 ↑↓ 选项），而焦点子元素（过滤输入框）会先把 ArrowDown 当
+  //    “光标移动”吞掉——“面板的方向键导航永远不生效”就是这么来的。容器先拿，
+  //    它不认（返回 false）才继续下沉。
+  //
+  // ② 焦点链必须排在其他子元素**之前**：早期实现只是**逆序问所有子元素**，
+  //    于是“谁被最后声明”谁先抢键——浮层里带输入框时，尾部的「×」按钮
+  //    （`Button` 对 Enter 会 `activate()`）把本该属于输入框的 Enter 吃掉了。
+  //    实测（gbcode 的“转到行”浮层）：在行号输入框里敲 Enter，结果是**浮层被关掉**、
+  //    `on_submit` 根本没跑；查找条（尾部也有「×」）同理。
+  //    这不是某个组件的问题：浮层的按键必须先交给**焦点元素**。
   if (root == nullptr) return false;
-  if (root->on_event(render_context(), event)) return true;
+  const RenderContext context = render_context();
+  if (root->on_event(context, event)) return true;
+  if (focused_ != nullptr) {
+    // 只在“焦点确实在这棵子树里”时才走链，否则会把键送给不相干的元素。
+    for (Element* walk = focused_; walk != nullptr; walk = walk->parent()) {
+      if (walk != root) continue;
+      Event focused_event = event;   // 副本：消费后把 `handled` 回写给调用方
+      if (dispatch_to(*focused_, focused_event)) {
+        if (focused_event.handled) event.handled = true;
+        return true;
+      }
+      break;
+    }
+  }
   for (std::size_t index = root->child_count(); index > 0; --index) {
     Element* child = root->child_at(index - 1);
     if (child == nullptr || !child->visible()) continue;

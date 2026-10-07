@@ -11,7 +11,7 @@
 /// **为什么用声明式**：整份界面由 `CodeEditorPage::build()` 描述「状态对应的形态」，
 /// 「改完要点哪里」的手工同步全部消失——改状态 → 下一帧重组 → 真值树按 diff 更新。
 /// 旧的命令式实现（1966 行：逐层 `std::make_unique` + 手工持指针、七处重复同步标题栏）
-/// 已在本次整合中被它替换；`examples/codeeditor-dsl`（声明式重写版）同时并入，不再有分身。
+/// 已在本次整合中被它替换；`examples/gbcode-dsl`（声明式重写版）同时并入，不再有分身。
 ///
 /// **真值树唯一**：声明式不绕过 `apply_properties` —— `tree`/`get`/`set`/`invoke`
 /// 对这里的元素照常可用（协议自动化与手搭界面完全一致）。少数属性面覆盖不到的一等接口
@@ -458,6 +458,9 @@ struct CodeEditorPage : Component {
   State<bool> palette_shows_files_{false};   ///< Ctrl+P（文件表）vs Ctrl+Shift+P（命令表）
   State<bool> find_open_{false};
   State<std::string> find_counter_{"0/0"};
+  /// 转到行浮层（Ctrl+G / 选择菜单）。
+  State<bool> goto_line_open_{false};
+  State<std::string> goto_line_error_{""};
   /// 查找条选项（大小写 / 全词 / 正则）。
   State<bool> find_case_{false};
   State<bool> find_word_{false};
@@ -481,6 +484,8 @@ struct CodeEditorPage : Component {
   Input* find_replace_input{nullptr};   ///< 替换文本不进状态（不参与重组）
   Input* find_needle_input{nullptr};    ///< 查找输入框（打开后把焦点交给它）
   bool focus_find_pending_{false};      ///< 「查找条开→下一帧聚焦输入框」的待办标记
+  Input* goto_line_input{nullptr};      ///< 转到行的行号输入框
+  bool goto_line_pending_focus_{false}; ///< 同上（转到行浮层）
   Input* terminal_input{nullptr};
 
   // —— 侧栏各视图的非状态数据（不进重组依赖：这些是“算一次用一帧”的快照）——
@@ -710,9 +715,9 @@ struct CodeEditorPage : Component {
   /// 标题栏文案：脏时加一个圆点前缀（VSCode 同族的"未保存"提示）。
   [[nodiscard]] auto window_title() const -> std::string {
     const auto list = buffers_.value();
-    if (active_.value() >= list.size()) return "codeeditor";
+    if (active_.value() >= list.size()) return "歌白代码";
     const OpenBuffer& buffer = list[active_.value()];
-    return (buffer.dirty ? "● " : "") + buffer.label + " - codeeditor";
+    return (buffer.dirty ? "● " : "") + buffer.label + " - 歌白代码";
   }
 
   /// 打开命令面板（`files_table=true` 走 Ctrl+P 的快速打开文件表）。
@@ -784,6 +789,14 @@ struct CodeEditorPage : Component {
     // 编辑器实例可能在本次重组中新建/换绑：先置空，由 build_editor_area 重新取得
     editor = nullptr;
     terminal_scroll_view_ = nullptr;   // 每次重组重新取得（旧指针可能已被销毁）
+    // **浮层里的输入框同理**：它们在上一次重组里被销毁，本帧还没重建。
+    //
+    // 不置空就会踩到已释放的 Input——实测（无头 E2E，转到行浮层）：
+    // “聚焦输入框”的待办曾排在 `build_goto_line` **之前**，拿着上一帧的
+    // `goto_line_input` 调 `host()->set_keyboard_focus(...)`，无头下随机
+    // SIGSEGV（0xC0000005），带窗口时只表现为“焦点偶尔不对”。
+    find_needle_input = nullptr;
+    goto_line_input = nullptr;
     // `grow = true` 不可省：本页住在窗框的**内容槽**（列容器）里，不 grow 就只按内容的
     // 自然高度占位——实测 800px 窗口里页面只有 525px 高，底部剩 195px 空白，
     // 编辑器被压到 295px。留白与「代码区太矮」是同一个根因。
@@ -793,8 +806,6 @@ struct CodeEditorPage : Component {
       build_find_bar(c);
     });
     push_title();   // 标题栏（外壳）的文案仍由本页推——见 `push_title` 的注释
-    // 帧首处理“查找条已出现→聚焦查找输入框”（构建期拿不到输入框实例）。
-    apply_pending_focus();
     // 命令面板：**条件声明**（关掉 = 本帧不声明 → 框架 sweep 摘除）
     if (palette_open_.value()) build_palette(c);
     // 编辑器右键菜单 / 关闭确认对话框 / 快捷键一览：同一套条件声明。
@@ -802,6 +813,12 @@ struct CodeEditorPage : Component {
     build_close_confirm(c);
     build_shortcuts_card(c);
     build_open_dialog(c);
+    build_goto_line(c);
+    // 浮层内的“聚焦输入框”待办：**必须排在对应的构建之后**——
+    // 排在前面拿到的是上一帧已销毁的指针（本函数开头已把两个指针置空，
+    // 所以即使顺序被人改回去，也只是“这一次没聚焦”，不会再踩已释放对象）。
+    apply_pending_focus();
+    apply_pending_goto_focus();
     // 文本灌入：只在本帧的编辑器实例与「已装载的标签」不一致时写
     // （`set_text` 会清撤销栈并把光标归零；每次重组都写会让打字被重置——实测踩到）
     if (editor != nullptr && active < buffers.size() && buffers[active].key != loaded_key_) {
@@ -869,7 +886,7 @@ struct CodeEditorPage : Component {
             {.separator = true},
             {.id = "toggle-terminal", .label = "切换终端（底部面板）"}}},
           {"help", "帮助",
-           {{.id = "about", .label = "关于 codeeditor"},
+           {{.id = "about", .label = "关于 歌白代码"},
             {.id = "shortcuts", .label = "键盘快捷键…"}}}};
       bar = dsl::menu_bar(
           c, kMenus,
@@ -913,7 +930,7 @@ struct CodeEditorPage : Component {
     } else if (menu == "run" && (item == "run-task" || item == "run-test" || item == "run-lint")) {
       run_task(item == "run-task" ? "build" : (item == "run-test" ? "test" : "lint"));
     } else if (menu == "help" && item == "about") {
-      status_.set("codeeditor 0.1.0 · 霜天框架示例 · 声明式组装");
+      status_.set("歌白代码 0.1.0 · 霜天框架示例 · 声明式组装");
     } else if (menu == "help" && item == "shortcuts") {
       shortcuts_open_.set(true);
     } else {
@@ -940,14 +957,115 @@ struct CodeEditorPage : Component {
     } else if (item == "cut") {
       (void)editor->invoke_action("cut", {});
     } else if (item == "goto-line") {
-      // 真实“转到行”：弹输入条太迂回，这里用命令面板的文件表代替跳转语义不够直观，
-      // 故改为“跳到当前问题的第一行”（真能在状态栏看到效果），无问题时如实报告。
-      if (problems_.empty()) {
-        status_.set("转到行：当前没有可跳转的问题行");
-      } else {
-        jump_to_problem(0);
-      }
+      open_goto_line();
     }
+  }
+
+  // —— 转到行（Ctrl+G / 选择菜单）：一个小浮层 + 输入框，不靠“猜” ——
+  //
+  // 此前这个菜单项被实现成“跳到第一个问题行”，并与用户按下的 Ctrl+G 毫无关系——
+  // 菜单项叫“转到行…”而行为是别的，属于可信度问题（用户试一次就不再信任何菜单项）。
+  // 现在它是一条真链路：输入行号 → 回车 → 光标与视图都到那一行。
+  void open_goto_line() {
+    if (editor == nullptr) {
+      status_.set("转到行：没有打开的编辑器");
+      return;
+    }
+    goto_line_open_.set(true);
+    goto_line_error_.set("");
+    goto_line_pending_focus_ = true;
+  }
+
+  /// 提交行号（“3” 或 “3:8” 行:列）。
+  ///
+  /// 输入以**纯文本**传进来：浮层里输入框的 Enter 可能来自键盘、也可能来自
+  /// 控制通道的 `invoke submit`——两条路都是 `Input::on_submit`，语义相同。
+  void submit_goto_line(std::string_view text) {
+    if (editor == nullptr) return;
+    const std::string spec(st::trim(std::string(text)));
+    if (spec.empty()) {
+      goto_line_error_.set("请输入行号");
+      return;
+    }
+    std::size_t line = 0;
+    std::size_t column = 0;
+    if (const std::size_t colon = spec.find(':'); colon != std::string::npos) {
+      line = st::parse_u64(spec.substr(0, colon)).value_or(0);
+      column = st::parse_u64(spec.substr(colon + 1)).value_or(0);
+    } else {
+      line = st::parse_u64(spec).value_or(0);
+    }
+    // 越界如实拒绝并报出**真实行数**：静默夹取会让用户以为“跳到末尾了”，
+    // 而他打的是一串无效字符。
+    if (line == 0) {
+      goto_line_error_.set("行号必须是正整数");
+      return;
+    }
+    const std::size_t total = editor->line_count();
+    if (line > total) {
+      goto_line_error_.set(std::format("超出范围（共 {} 行）", total));
+      return;
+    }
+    goto_line_open_.set(false);
+    goto_line_error_.set("");
+    editor->goto_line(line);
+    editor->scroll_to_line(line);
+    if (column > 0) {
+      const std::size_t start = editor->cursor_index() + column - 1;
+      editor->set_selection(start, start);
+    }
+    on_cursor_moved();   // 状态栏的 Ln/Col 跟着走（不只依赖编辑器的回调）
+    // 状态栏报**实际落点**（而不是用户输入的那串数字）：填了行:列时，列号会被
+    // 行尾/换行夹取（空行上尤其明显），报“用户输入的”会与画面上的光标对不上。
+    status_.set(std::format("已跳到第 {} 行 第 {} 列", editor->cursor_line() + 1,
+                            editor->cursor_column() + 1));
+  }
+
+  /// 帧首处理“转到行浮层已出现→把焦点交给输入框”（构建期拿不到输入框实例）。
+  /// 与查找条同一机制（见 `apply_pending_focus`）。
+  void apply_pending_goto_focus() {
+    if (!goto_line_pending_focus_) return;
+    if (goto_line_input == nullptr) return;
+    goto_line_pending_focus_ = false;
+    if (!goto_line_open_.value()) return;
+    if (auto* host = goto_line_input->host(); host != nullptr) {
+      (void)host->set_keyboard_focus(goto_line_input);
+    }
+  }
+
+  /// 转到行浮层（Ctrl+G / 选择菜单 → “转到行…”。）
+  void build_goto_line(Composer& c) {
+    if (!goto_line_open_.value()) return;
+    (void)overlay(c, "goto-line", {}, [&] {
+      (void)card(c, {.gap = 6.0f, .padding = 8.0f, .id = "goto-bar"}, [&] {
+        (void)row(c, {.gap = 6.0f}, [&] {
+          (void)text(c, [] { return std::string("转到行"); });
+          (void)custom<Input>(c, [this](Input& field) {
+            field.set_id("goto-input");
+            field.set_placeholder("行号（或 行:列）");
+            field.style().width = 160.0f;
+            goto_line_input = &field;
+            field.on_submit = [this](std::string_view value) {
+              // **按值**拷贝：提交会关掉浮层，下一次重组就销毁这个输入框，
+              // 再靠引用/指针读它的缓冲就是悬垂访问（跨帧存裸指针的同一类坑）。
+              submit_goto_line(std::string(value));
+            };
+          }, {.key = "goto-input"});
+          (void)button(c, "跳转", [this] {
+            submit_goto_line(goto_line_input != nullptr ? goto_line_input->value() : std::string{});
+          }, {.id = "goto-go"});
+          (void)button(c, "×", [this] {
+            goto_line_open_.set(false);
+            goto_line_error_.set("");
+          }, {.id = "goto-close"});
+        });
+        // 出错信息就住在同一个浮层里（而不是把浮层关掉、把话丢到状态栏——
+        // 那样用户得往窗口底部去找，还找不到是“哪一次输入”的错）。
+        if (!goto_line_error_.value().empty()) {
+          (void)text(c, [this] { return goto_line_error_.value(); }, {.id = "goto-error"});
+        }
+      });
+    });
   }
 
   // —— 3. 主体三栏 ——
@@ -1736,7 +1854,10 @@ struct CodeEditorPage : Component {
             find_needle_input = &field;
             field.on_change = [this](std::string_view value) {
               if (editor == nullptr) return;
-              editor->set_find(std::string(value));
+              // 选项（大小写/全词）由组件自己管——**不再改写查找词**：
+              // 旧写法给全词塞 `\b词\b`，而组件做的是字面量匹配，于是“勾了全词
+              // 就一处也搜不到”，却什么错也不报（用户只能看到“搜不到”）。
+              editor->set_find(std::string(value), find_options());
               editor->find_next(false);
               update_find_counter();
             };
@@ -1767,9 +1888,10 @@ struct CodeEditorPage : Component {
             find_word_.set(!find_word_.value());
             refind();
           });
+          // 正则胶囊：**如实置灰**。编辑器不做正则，而“按了没反应”与“不支持”
+          // 是两件事——按钮文案直接写出为什么（与组件"动作面如实报能力"同一姿态）。
           toggle_chip(c, "find-regex", ".*", find_regex_.value(), [this] {
-            find_regex_.set(!find_regex_.value());
-            refind();
+            status_.set("本编辑器的查找不做正则（只支持大小写与全词）");
           });
           (void)button(c, "×", [this] { close_find(); }, {.id = "find-close"});
         });
@@ -1779,17 +1901,23 @@ struct CodeEditorPage : Component {
 
   /// 用当前选项重跑查找（选项变化时调）。
   ///
-  /// 全词与正则本应在编辑器侧实现，而 `CodeEditor::set_find` 只有大小写开关——
-  /// 所以这两项在**命中后逐条过滤**的方式里做不到精确；这里如实采用“受限的子集”：
-  /// 大小写交给组件，正则/全词通过**改写查找词**近似表达（`\b词\b`、原字符串），
-  /// 并在状态栏明说当前口径（不假装完全支持）。
+  /// 大小写与全词都是**组件的一等选项**（`CodeEditor::FindOptions`）：直接交给
+  /// 查找器、在“命中那一刻”判——而不是把查找词改写成 `\b词\b` 这种
+  /// “看着支持、实际给出错结果”的做法（本编辑器不做正则，`\b` 只会被当成
+  /// 两个字面字符，一处也匹配不到，而且什么错也不报）。
   void refind() {
     if (editor == nullptr) return;
     const std::string needle = find_needle_input != nullptr ? find_needle_input->value()
                                                             : std::string{};
-    editor->set_find(needle, find_case_.value());
+    editor->set_find(needle, find_options());
     editor->find_next(false);
     update_find_counter();
+  }
+
+  /// 把页面的两个查找开关翻译成组件的查找选项（**唯一转换点**）。
+  [[nodiscard]] auto find_options() const -> CodeEditor::FindOptions {
+    return CodeEditor::FindOptions{.case_sensitive = find_case_.value(),
+                                   .whole_word = find_word_.value()};
   }
 
   // —— 编辑器右键菜单（`ContextMenu` overlay；锚点 = 最后一次鼠标位置）——
@@ -1888,7 +2016,8 @@ struct CodeEditorPage : Component {
             "  Alt+↑ / Alt+↓   上/下移当前行\n"
             "\n"
             "导航\n"
-            "  Ctrl+F/Ctrl+H   查找 / 替换     F8       下一处问题\n"
+            "  Ctrl+F/Ctrl+H   查找 / 替换     Ctrl+G   转到行…\n"
+            "  F8              下一处问题\n"
             "  Ctrl+P          快速打开文件    Ctrl+Shift+P  命令面板\n"
             "  Ctrl+Shift+E/F/G 资源管理器 / 搜索 / 源代码管理\n"
             "  Ctrl+Tab        循环切换标签    Ctrl+B   切换侧栏\n"
@@ -2799,8 +2928,15 @@ struct CodeEditorPage : Component {
     if (head == "st") {
       std::string program = st::process::which("st").value_or(std::string{});
       if (program.empty() && !tool_root_.empty()) {
-        const std::string local = st::fs::join(tool_root_, "build/bin/st");
-        if (st::fs::exists(local)) program = local;
+        // 可执行文件名带平台后缀：Windows 上是 `st.exe`——只试 `st` 会让
+        // “跑任务”按钮在 Windows 上永远报“找不到 st 工具链”（本仓的 `st`
+        // 一直是带 `.exe` 构建的）。两个名字都试，取存在的那个。
+        for (const char* leaf : {"build/bin/st", "build/bin/st.exe"}) {
+          const std::string candidate = st::fs::join(tool_root_, leaf);
+          if (!st::fs::exists(candidate)) continue;
+          program = candidate;
+          break;
+        }
       }
       if (program.empty()) {
         terminal_append("找不到 st 工具链（PATH 里没有；启动时加 --tool-root <霜天仓根>）");
@@ -3116,7 +3252,7 @@ struct CodeEditorPage : Component {
         status_.set(editor->indent_guides() ? "缩进参考线：开" : "缩进参考线：关");
       }
     } else if (id == "help.about") {
-      status_.set("codeeditor 0.1.0 · 霜天框架示例 · 声明式组装");
+      status_.set("歌白代码 0.1.0 · 霜天框架示例 · 声明式组装");
     } else if (!id.empty()) {
       const std::size_t slash = id.find_last_of("/\\");
       const std::string leaf(slash == std::string::npos ? id : id.substr(slash + 1));
@@ -3136,7 +3272,7 @@ struct CodeEditorPage : Component {
     add("view.toggle-sidebar", "查看: 切换侧栏可见性", "显示/隐藏活动栏与侧栏（Ctrl+B）");
     add("view.toggle-theme", "查看: 切换亮/暗主题", "主题令牌整体切换");
     add("view.toggle-indent-guides", "查看: 切换缩进参考线", "每级缩进一条竖线");
-    add("help.about", "帮助: 关于", "codeeditor · 霜天示例");
+    add("help.about", "帮助: 关于", "歌白代码 · 霜天示例");
     for (const auto& sample : files_) {
       add("file.open." + sample.name, "文件: 打开 " + sample.name, "语言 " + sample.language);
     }
@@ -3183,7 +3319,7 @@ struct CodeEditorPage : Component {
   float editor_font_scale_{kEditorFontScale};
   /// 编辑器行距倍数（构造时定，`--editor-line-spacing` 可覆盖）。
   float editor_line_spacing_{CodeEditor::kDefaultLineSpacing};
-  /// 霜天仓库根（`--tool-root`）：PATH 上没有 `st` 时到它下面 `build/bin/st` 找。
+  /// 霜天仓库根（`--tool-root`）：PATH 上没有 `st` 时到它下面 `build/bin/st[.exe]` 找。
   std::string tool_root_{};
   std::vector<Sample> files_{};
   std::string workspace_{};
@@ -3350,7 +3486,7 @@ auto run_app(int argc, char** argv) -> int {
   app_options.width = 1280;
   app_options.height = 800;
   app_options.scale = options.scale;
-  app_options.title = "codeeditor · 霜天";
+  app_options.title = "歌白代码 · 霜天";
   app_options.headless = options.headless;
   // 窗框一律自绘：窗口不带系统标题栏（`CONVENTIONS.md` §10 第 7 条）。
   // 装饰开关仍留给宿主——`--decorations` 是给"就想看系统窗框"的排查场景用的。
@@ -3372,7 +3508,7 @@ auto run_app(int argc, char** argv) -> int {
   app_options.screenshot_dir = options.shots;
   app_options.theme = options.theme == "dark" ? ThemeMode::Dark : ThemeMode::Light;
 
-  st::app::Application app("codeeditor", "0.1.0", app_options);
+  st::app::Application app("gbcode", "0.1.0", app_options);
 
   // 声明式页面（整个 IDE 是一个 Component：内容槽里的一切由 `build()` 描述）。
   float editor_font_scale = kEditorFontScale;
@@ -3397,7 +3533,7 @@ auto run_app(int argc, char** argv) -> int {
   // 外壳：`WindowFrame`（与 gallery 同一形态：标题栏 + 内容槽 + 八向缩放边缘）。
   // 为什么由应用装配而不是写进 `build()`：窗框是**外壳**（也是窗口唯一的拖动/缩放区），
   // 应当先于声明式内容存在、且不随页面重组而重建；页面只把标题推给它。
-  auto frame = std::make_unique<WindowFrame>("codeeditor · 霜天");
+  auto frame = std::make_unique<WindowFrame>("歌白代码 · 霜天");
   frame->set_id("window-frame");
   frame->set_window_control(&app);       // 三控制按钮 + 边缘条接真实后端
   if (frame->title_bar() != nullptr) {
@@ -3453,24 +3589,33 @@ auto run_app(int argc, char** argv) -> int {
   // 把 `ReconcileStats` 的结论打到 stderr（日志文件里有），排障就不需要再猜。
   {
     const dsl::ReconcileStats& stats = host->stats();
-    if (!stats.error.empty()) std::fprintf(stderr, "[codeeditor] 声明式重组错误：%s\n", stats.error.c_str());
-    if (stats.budget_exceeded) std::fprintf(stderr, "[codeeditor] 重组超帧预算（%.1fms），剩余作用域顺延\n", 4.0);
+    if (!stats.error.empty()) std::fprintf(stderr, "[gbcode] 声明式重组错误：%s\n", stats.error.c_str());
+    if (stats.budget_exceeded) std::fprintf(stderr, "[gbcode] 重组超帧预算（%.1fms），剩余作用域顺延\n", 4.0);
     for (const auto& collision : stats.key_collisions) {
-      std::fprintf(stderr, "[codeeditor] 重名 key：%s\n", collision.c_str());
+      std::fprintf(stderr, "[gbcode] 重名 key：%s\n", collision.c_str());
     }
   }
   app.root().set_focus(page->editor);
   app.root().mark_dirty_all();
 
   // —— 全局快捷键（注册到 UiRoot：先于焦点链派发，文本组件吞键也拦得住）——
+  //
+  // **除 Esc 外的一律先让路给浮层**：浮层是当前交互的“前台”（对话框、查找条、
+  // 命令面板、转到行、菜单面板），用户在浮层里的按键不应被编辑区快捷键抢走。
+  // 具体的坑：浮层带输入框时，Ctrl+S/Ctrl+D 这类“编辑器动作”会在输入框收到
+  // 字符之前就被根级处理器吃掉——用户以为自己只是在浮层里打字。
   {
     UiRoot* root = &app.root();
-    const auto bind = [root](const char* key, bool shift, std::function<void()> action) {
+    const auto overlay_open = [root]() -> bool { return root->overlay_count() > 0; };
+    const auto bind = [root, overlay_open](const char* key, bool shift,
+                                          std::function<void()> action) {
       UiRoot::Shortcut mods{};
       mods.key = key;
       mods.ctrl = true;
       mods.shift = shift;
-      (void)root->register_shortcut(key, mods, [action = std::move(action)]() {
+      (void)root->register_shortcut(key, mods, [action = std::move(action), overlay_open]() {
+        // 浮层开着 = 这次按键属于浮层：**不消费**，让它继续下沉到浮层里的输入框。
+        if (overlay_open()) return false;
         action();
         return true;   // 全局命令：总是消费，不再下沉
       });
@@ -3485,6 +3630,40 @@ auto run_app(int argc, char** argv) -> int {
       page->bottom_visible_.set(!page->bottom_visible_.value());
     });
     bind("k", false, [page] { page->shortcuts_open_.set(!page->shortcuts_open_.value()); });
+    // Ctrl+G：真的“转到行…”浮层（与选择菜单那一条同一条链路）。
+    bind("g", false, [page] { page->open_goto_line(); });
+    // Ctrl+D：选中下一处同词；Alt+↑/↓：上/下移当前行。
+    //
+    // 为何要**重复**注册（组件 `handle_key` 里已经处理过一遍）：这两组键在
+    // 编辑器未聚焦时（刚点过侧栏/终端）也应当生效，而全局表先于焦点链派发——
+    // 焦点在编辑器时先被根吃下，不会出现“一次按键搬两行”。
+    bind("d", false, [page] {
+      if (page->editor == nullptr) return;
+      // 状态栏如实报“选了哪个词 / 找不到下一处”——两者都不是错误，但必须能区分。
+      if (page->editor->select_next_occurrence()) {
+        page->status_.set("已选中「" + page->editor->selected_text() + "」");
+      } else {
+        page->status_.set("没有下一处同词");
+      }
+    });
+    {
+      UiRoot::Shortcut alt_up{};
+      alt_up.key = "ArrowUp";
+      alt_up.alt = true;
+      (void)root->register_shortcut("alt-up", alt_up, [page, overlay_open]() {
+        if (overlay_open()) return false;
+        if (page->editor != nullptr && page->editor->move_lines(-1)) page->status_.set("已上移当前行");
+        return true;
+      });
+      UiRoot::Shortcut alt_down{};
+      alt_down.key = "ArrowDown";
+      alt_down.alt = true;
+      (void)root->register_shortcut("alt-down", alt_down, [page, overlay_open]() {
+        if (overlay_open()) return false;
+        if (page->editor != nullptr && page->editor->move_lines(1)) page->status_.set("已下移当前行");
+        return true;
+      });
+    }
     // Ctrl+Shift+E / F / G：切到三个主视图（与歌白文件工作台同一套键位）
     bind("e", true, [page] {
       page->activity_.set(0);
@@ -3519,11 +3698,20 @@ auto run_app(int argc, char** argv) -> int {
       page->jump_to_problem_request(0);
       return true;
     });
-    // Esc 关闭查找条（Input 不认 Esc，用根级快捷键；只在自己可见时接管，
-    // 免得吃掉别的场景的 Esc——比如命令面板自己要用的那个）
+    // Esc 关闭查找条与转到行浮层（`Input` 不认 Esc，用根级快捷键；**只在自己可见时
+    // 接管**，免得吃掉别的场景的 Esc——比如命令面板自己要用的那个）。
+    //
+    // 为何两条要排在一起：它们是同一类“小浮层”，Esc 是它们共同的出口。
+    // 只给查找条接 Esc 会让另一个变成“关不掉的浮层”（实测：转到行浮层开着时
+    // 连 Ctrl+F 都打不开——快捷键被“浮层优先”让路，而它自己又不认 Esc）。
     UiRoot::Shortcut plain{};
     plain.key = "escape";
     (void)root->register_shortcut("escape", plain, [page]() {
+      if (page->goto_line_open_.value()) {
+        page->goto_line_open_.set(false);
+        page->goto_line_error_.set("");
+        return true;
+      }
       if (!page->find_open_.value()) return false;
       page->dismiss_find();
       return true;
@@ -3547,7 +3735,7 @@ auto run_app(int argc, char** argv) -> int {
     std::fprintf(stderr, "启动失败: %s\n", started.error().to_string().c_str());
     return 1;
   }
-  page->note_startup(std::format("codeeditor 0.1.0 · 后端 {} · headless={} · DPI {:.1f} · 控制通道 127.0.0.1:{}",
+  page->note_startup(std::format("歌白代码 0.1.0 · 后端 {} · headless={} · DPI {:.1f} · 控制通道 127.0.0.1:{}",
                                     app.backend_name(), app.headless(),
                                     static_cast<double>(app.device_scale()), app.control_port()));
   (void)host->tick();
@@ -3557,7 +3745,7 @@ auto run_app(int argc, char** argv) -> int {
   // 这份 JS 是编译期嵌入的真实资源（`assets/logic.js`）——与 C++ 里那堆 raw string 不同，
   // 它在编辑器里有高亮、不需要转义，改完重新构建即生效。
   if (auto* script = app.script(); script != nullptr) {
-    const auto logic = b::embed<"examples/codeeditor/assets/logic.js">();
+    const auto logic = b::embed<"examples/gbcode/assets/logic.js">();
     const std::string_view source(logic.data(), logic.length());
     if (auto loaded = script->eval(source, "assets/logic.js"); !loaded) {
       st::print("示例 JS 逻辑载入失败: {}\n", loaded.error().message);
@@ -3589,7 +3777,7 @@ auto run_app(int argc, char** argv) -> int {
   // 退出前先收终端：可能在跑的作业得停掉并 join 读线程，
   // 否则 `jthread` 在析构时发现 `joinable` 会直接 `std::terminate`。
   page->shutdown();
-  st::print("codeeditor 退出：{} 帧，标签 {} 个，可用语言 {} 种\n", frames,
+  st::print("歌白代码 退出：{} 帧，标签 {} 个，可用语言 {} 种\n", frames,
             page->buffers_.value().size(), CodeEditor::available_languages().size());
   return 0;
 }

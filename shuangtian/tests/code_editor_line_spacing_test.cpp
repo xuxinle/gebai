@@ -7,20 +7,24 @@
 /// 透气：注释/字符串/嵌套在密排下容易糊成一片）。
 ///
 /// 本组用例只走**公开面**（`line_spacing()` / `layout_dirty()` / 滚动极限），
-/// 钉住三件事：
+/// 钉住四件事：
 /// ① 默认档位**确实大于 1.0**——"加大行距"是需求本身，把它钉住，
 ///    否则后人把默认改回 1.0 不会有任何测试变红；
 /// ② 改行距**必须标布局脏**：行高是滚动极限/命中测试/内容高度的共同输入，
 ///    不标脏就会画出错位的行、或滚不到底（同 `set_font_scale` 的既有约束）；
-/// ③ 非法值（0/负/NaN）被忽略而非静默接受——静默接受会让整屏文字叠成一行。
+/// ③ 非法值（0/负/NaN）被忽略而非静默接受——静默接受会让整屏文字叠成一行；
+/// ④ **行距增量两侧分摊**（见 `line_block_offset`）：行距只该改变**行间**空隙，
+///    不该把字形在自己的行盒里往下推——用户报的"行间距怎么全在行下方"就是这条。
 #include "st/test/test.hpp"
 
 #include <cmath>
 #include <limits>
 #include <string>
 
+#include "st/app/text_port.hpp"
 #include "st/text/text.hpp"
 #include "st/ui/components/code_editor.hpp"
+#include "st/ui/text_port.hpp"
 #include "st/ui/theme.hpp"
 
 namespace {

@@ -39,7 +39,7 @@
 **ArkTS 风格（struct + State 成员 + build()）——C++ 的自然映射**：
 
 ```cpp
-// 形态示意（完整实例见 examples/codeeditor —— 整个 IDE 就是一份 Component）
+// 形态示意（完整实例见 examples/gbcode —— 整个 IDE 就是一份 Component）
 #include "st/ui/dsl.hpp"
 
 struct CounterPage : st::ui::dsl::Component {
@@ -356,7 +356,7 @@ app.tick();
 - `build()` 里 `custom<T>` 拿到的 `T*` 只在**本帧**有效；存到成员里下一帧可能悬垂。
   - 用法：每帧 `build` 开头置空、在 `build` 里重新取得，且**只在本帧后续代码里用**。
 - 需要“跨帧生效”的效果（如“打开文件后跳到某行”）不能当场调，要**排队到下一帧**：
-  记下待办 → 本帧末尾/下一帧 `build` 之后再执行（codeeditor 的 `pending_jump_` 就是这个模式）。
+  记下待办 → 本帧末尾/下一帧 `build` 之后再执行（gbcode 的 `pending_jump_` 就是这个模式）。
 - **`set_text` 类接口会重置状态**（光标归零、撤销栈清空）：只能“值真变了”时写，
   不能每次重组都无脑写——否则用户打字会被每帧重置（实测踩到）。
   做法：记一个“当前已装载的 key”，与目标不一致时才写。
@@ -398,12 +398,12 @@ C++ 侧 struct 风格是**原生形态**（无需转译）；JS 侧 struct 风�
   C++ 声明式在 `ST_FEATURE_SCRIPT` 关闭时完整可用）；
 - JS 腿整体打在 `ST_FEATURE_SCRIPT` 条件编译内；C++ 重组器不 mount 声明式根时，
   帧循环无额外成本（无注册即无回调）；
-- 示例（2026-10-03 示例整合后的现状）：**`examples/codeeditor/`（整个 IDE 由一份
+- 示例（2026-10-03 示例整合后的现状）：**`examples/gbcode/`（整个 IDE 由一份
   `Component::build()` 描述）+ `examples/gallery/` 的「声明式」页**（用 `mount_into`
   把声明式子树挂进手搭页壳——演示状态驱动表单 / key 对齐列表 / 异步 `resource` / 条件内容）。
   两者覆盖「整页声明式」与「页内一块声明式」两种形态。
 
-> **早先的四个小示例（`counter` / `counter-js` / `todo-js` / `codeeditor-dsl`）已删除**：
+> **早先的四个小示例（`counter` / `counter-js` / `todo-js` / `gbcode-dsl`）已删除**：
 > 它们的验证价值已被 `tests/ui_dsl_test.cpp`（C++ 十六用例，含 overlay 生命周期 /
 > 异步 resource 与取消 / 嵌套作用域树 / 构造期属性组件 / 多作用域细粒度 / 子树挂载 /
 > 载体内部件不被裁剪）、`tests/ui_declarative_host_test.cpp`（JS 十一用例）、
@@ -418,8 +418,8 @@ C++ 侧 struct 风格是**原生形态**（无需转译）；JS 侧 struct 风�
 | C++ 重组器 | `st test` 单测：作用域对齐/props diff/`for_each` key 复用（头插·重排·删除后身份不变）/调度护栏（预算顺延/深度拦截/连锁/冻结） |
 | JS 重组器 | QuickJS 宿主内单测：同上场景 + 片段摊平（`forEach` 结果塞进 kids 数组）+ 事件绑定跨帧不重绑 / 卸载反注册 + 换页不叠树 + 「跨界次数」断言（N 次状态写 → 每帧 ≤1 次批量提交） |
 | **双宿主一致性** | 同一组场景 fixture（JSON 描述：状态序列 → 期望 tree 快照），C++/JS 各跑，结果必须逐字节一致（不变式 4 的可验证形态）；现含列表/条件裁剪/key 身份跨插入四组 |
-| 集成（无头） | 声明式应用照常可被协议驱动：`tree` 断言结构、`invoke click` 后 `get text` 断言传播、连续 100 次点击 → 恰 100 次变化（见 `tools/codeeditor_e2e.py` 与 `tools/framework_gaps_e2e.py`） |
-| 回归 | gallery/codeeditor 全场景截图对比（不挂声明式时零差异） |
+| 集成（无头） | 声明式应用照常可被协议驱动：`tree` 断言结构、`invoke click` 后 `get text` 断言传播、连续 100 次点击 → 恰 100 次变化（见 `tools/gbcode_e2e.py` 与 `tools/framework_gaps_e2e.py`） |
+| 回归 | gallery/gbcode 全场景截图对比（不挂声明式时零差异） |
 | 谬误注入 | build 抛异常 → 冻结 + 事件；递归 build → 深度拦截（**用例已落地**：去掉判断即栈溢出）；悬垂捕获 → lint 报警 |
 
 **验收标准**（2026-10-03 全部达成，记录如下）：① ~~counter 三形态无头+窗口跑通~~
@@ -443,9 +443,9 @@ C++ 侧 struct 风格是**原生形态**（无需转译）；JS 侧 struct 风�
 
 测试计数随之：637 用例全绿（声明式三件合计 52 用例，其中本轮 +26）；lint 0 违规；
 mingw 交叉编译通过；`tools/st_visual_check.py` dev+san × 两应用 × 亮/暗 × DPI2.0
-**0 失败步、无 sanitizer 报告**；`tools/codeeditor_e2e.py` 九项全过。
+**0 失败步、无 sanitizer 报告**；`tools/gbcode_e2e.py` 九项全过。
 
-> 超出原计划的部分：**`examples/codeeditor` 整份界面也改成了声明式**（与 `codeeditor-dsl`
+> 超出原计划的部分：**`examples/gbcode` 整份界面也改成了声明式**（与 `gbcode-dsl`
 > 合并为一份，两份合计 2758 行 → 1605 行）；`counter` / `counter-js` / `todo-js`
 > 三个小示例随整合删除。
 
@@ -456,7 +456,7 @@ mingw 交叉编译通过；`tools/st_visual_check.py` dev+san × 两应用 × �
 | **M1 元素工厂**（地基） | `element_factory` + 32 组件注册 + 构造参数差距表 | 工厂单测全绿 | create/apply 往返一致 |
 | **M2 C++ 声明式核心** | `dsl.hpp/cpp`（Composer/State/Component/Props）+ C++ 重组器 | C++ 单测全绿 | 点击/状态传播/护栏生效 |
 | **M3 JS 宿主** | `declarative.js` + ScriptHost 集成 + compose 风格 | JS 单测 + 跨界次数断言 | 双宿主一致性 fixture 全绿 |
-| **M4 补全与示例** | resource/persisted + 调度护栏全量 + `arkts_compat.js` + gallery 声明式页 + 文档 | gallery 声明式页 + codeeditor 整页声明式 | ArkTS 风格跑通；端到端全绿 |
+| **M4 补全与示例** | resource/persisted + 调度护栏全量 + `arkts_compat.js` + gallery 声明式页 + 文档 | gallery 声明式页 + gbcode 整页声明式 | ArkTS 风格跑通；端到端全绿 |
 
 依赖链：M1 → M2 → M3 → M4（M2 完成时 C++ 应用已可全量使用声明式；M3/M4 服务 JS 与
 迁移体验）。

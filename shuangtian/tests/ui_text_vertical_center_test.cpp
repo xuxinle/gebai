@@ -28,6 +28,7 @@
 #include "st/ui/components/basic.hpp"
 #include "st/ui/text_port.hpp"
 #include "tests/support/text_port_fixtures.hpp"
+#include "st/ui/line_layout.hpp"
 
 namespace {
 

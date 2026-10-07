@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SplitView 端到端验证（codeeditor 真实应用）：拖拽分栏 + 截图留证。
+"""SplitView 端到端验证（gbcode 真实应用）：拖拽分栏 + 截图留证。
 
 验证：
   1. 侧栏宽度符合初始比例

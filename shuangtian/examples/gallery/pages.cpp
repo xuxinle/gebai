@@ -780,7 +780,7 @@ namespace {
   demo_bar->style().width = 640.0f;
   titlebar_card->add_child(std::move(demo_bar));
   titlebar_card->add_child(make_caption(
-      "注：真实窗口的窗框在应用最顶层（`codeeditor` 示例）；此处是同一个组件在卡片里的一面"));
+      "注：真实窗口的窗框在应用最顶层（`gbcode` 示例）；此处是同一个组件在卡片里的一面"));
   page->add_child(std::move(titlebar_card));
 
   // —— 图标全集（逐个核对描边完整性）——

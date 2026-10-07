@@ -6,9 +6,9 @@
   2. `ui.remove` 回收
   3. `ui.create` 未知类型 → 明确报错
   4. hello 能力清单含 `ui.create` / `ui.remove`
-  5. 声明式应用（codeeditor）在插入自建元素后仍正常工作（菜单栏/编辑器仍在）
+  5. 声明式应用（gbcode）在插入自建元素后仍正常工作（菜单栏/编辑器仍在）
 
-用法: python3 tools/framework_gaps_e2e.py <codeeditor 二进制> <ctl.json> <port>
+用法: python3 tools/framework_gaps_e2e.py <gbcode 二进制> <ctl.json> <port>
 """
 import json
 import os

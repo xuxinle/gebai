@@ -36,7 +36,18 @@ void set_sink(std::function<void(Level, std::string_view)> sink);
 void write(Level level, std::string_view message);
 
 /// 事件回调式订阅（控制通道 `events` 用）：每个 sink 收到原始消息（不含时间戳）。
-void add_listener(std::function<void(Level, std::string_view)> listener);
+/// 返回值是**订阅 id**，用 `remove_listener` 注销。
+///
+/// 为何要有注销：列表是**进程级全局**的，而订阅者常是**临时对象**（如 `Application`：
+/// 测试里逐个构造销毁、示例里一个进程可能有多个）。不注销就是**悬垂监听器**——
+/// 对象死了回调还在，之后**任何线程**（包括 `pkg::build` 的编译 worker）打一条日志
+/// 就会踩到已释放的 `this`（实测：`st test` 随机分片 SIGSEGV 在
+/// `app.cpp` 的 `impl_->log_lines.push_back`）。
+[[nodiscard]] auto add_listener(std::function<void(Level, std::string_view)> listener)
+    -> std::uint64_t;
+
+/// 注销 `add_listener` 返回的订阅（已注销的 id 再传一次是无害的空操作）。
+void remove_listener(std::uint64_t id) noexcept;
 
 template <class... Args>
 void trace(std::format_string<Args...> fmt, Args&&... args) {

@@ -15,7 +15,13 @@ namespace {
 std::atomic<Level> level_state{Level::Info};
 std::mutex sink_mutex{};
 std::function<void(Level, std::string_view)> sink_state{};
-std::vector<std::function<void(Level, std::string_view)>> listeners{};
+/// 订阅项 = 回调 + 稳定 id（id 用于注销，见 `add_listener` 的说明）。
+struct Listener {
+  std::uint64_t id{0};
+  std::function<void(Level, std::string_view)> callback{};
+};
+std::vector<Listener> listeners{};
+std::uint64_t next_listener_id{1};
 
 }  // namespace
 
@@ -37,9 +43,16 @@ void set_sink(std::function<void(Level, std::string_view)> sink) {
   sink_state = std::move(sink);
 }
 
-void add_listener(std::function<void(Level, std::string_view)> listener) {
+auto add_listener(std::function<void(Level, std::string_view)> listener) -> std::uint64_t {
   const std::scoped_lock lock(sink_mutex);
-  listeners.push_back(std::move(listener));
+  const std::uint64_t id = next_listener_id++;
+  listeners.push_back(Listener{id, std::move(listener)});
+  return id;
+}
+
+void remove_listener(std::uint64_t id) noexcept {
+  const std::scoped_lock lock(sink_mutex);
+  std::erase_if(listeners, [id](const Listener& item) { return item.id == id; });
 }
 
 void write(Level msg_level, std::string_view message) {
@@ -48,7 +61,11 @@ void write(Level msg_level, std::string_view message) {
   {
     const std::scoped_lock lock(sink_mutex);
     sink = sink_state;
-    current_listeners = listeners;
+    // 拷一份**回调**（不是订阅项）：`write` 之后不再碰 `listeners`——
+    // 回调里若又调 `remove_listener`（很常见：收到某条日志后自行退订），
+    // 拿着引用遍历就会踩到被擦除的元素。
+    current_listeners.reserve(listeners.size());
+    for (const auto& item : listeners) current_listeners.push_back(item.callback);
   }
   if (sink) {
     sink(msg_level, message);

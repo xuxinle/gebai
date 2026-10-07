@@ -25,6 +25,7 @@
 #include "st/test/test.hpp"
 #include "st/ui/icon.hpp"
 #include "st/ui/components/basic.hpp"
+#include "st/ui/components/menu.hpp"
 #include "st/ui/components/title_bar.hpp"
 #include "st/ui/components/window_frame.hpp"
 #include "st/ui/element.hpp"
@@ -35,6 +36,7 @@
 
 namespace {
 
+using st::math::Color;
 using st::math::Point;
 using st::math::Rect;
 using st::ui::Event;
@@ -101,7 +103,7 @@ struct BarFixture {
     root.set_viewport(st::math::Size{1280.0f, 720.0f});
     auto column = std::make_unique<st::ui::Panel>(st::ui::FlexDirection::Column);
     column->set_id("page");
-    auto title_bar = std::make_unique<TitleBar>("renderer.cpp - codeeditor");
+    auto title_bar = std::make_unique<TitleBar>("renderer.cpp - gbcode");
     title_bar->set_id("titlebar");
     title_bar->set_icon("code");
     if (with_control) title_bar->set_window_control(&control);
@@ -321,13 +323,13 @@ ST_TEST(title_bar_unavailable_host_refuses_actions) {
 
 ST_TEST(title_bar_property_surface_round_trip) {
   BarFixture fixture;
-  ST_CHECK_EQ(*fixture.bar->get_property("title"), std::string("renderer.cpp - codeeditor"));
-  ST_CHECK_EQ(*fixture.bar->get_property("text"), std::string("renderer.cpp - codeeditor"));
+  ST_CHECK_EQ(*fixture.bar->get_property("title"), std::string("renderer.cpp - gbcode"));
+  ST_CHECK_EQ(*fixture.bar->get_property("text"), std::string("renderer.cpp - gbcode"));
   ST_CHECK_EQ(*fixture.bar->get_property("icon"), std::string("code"));
   ST_CHECK_EQ(*fixture.bar->get_property("show_controls"), std::string("true"));
 
-  ST_CHECK(fixture.bar->set_property("title", "deploy.py - codeeditor"));
-  ST_CHECK_EQ(fixture.bar->title(), std::string("deploy.py - codeeditor"));
+  ST_CHECK(fixture.bar->set_property("title", "deploy.py - gbcode"));
+  ST_CHECK_EQ(fixture.bar->title(), std::string("deploy.py - gbcode"));
   ST_CHECK(fixture.bar->set_property("show_controls", "false"));
   ST_CHECK(!fixture.bar->show_controls());
   // 关掉按钮后：标题带铺到最右，且**不再**有按钮命中区。
@@ -370,6 +372,69 @@ ST_TEST(title_bar_leading_slot_makes_room_for_title_text) {
   // 但**拖动区**仍从窗口左缘起（与系统标题栏的 `HTCAPTION` 一致）。
   ST_CHECK_EQ(fixture.bar->drag_rect().x, fixture.bar->bounds().x);
   ST_CHECK(fixture.bar->hits_caption(Point{4.0f, 20.0f}));   // 左侧空当也算拖动区
+}
+
+/// 挂在 `leading`/`trailing` 槽里的控件**不得**改到窗口状态。
+///
+/// 这不是理论问题：gbcode 把菜单栏挂进标题栏的 `leading` 槽之后，在
+/// **文件**菜单上双击本应只是“点两下菜单”，实际会把窗口最大化——
+/// 因为菜单自己消费了按下与单击，唯独双击无人认领，于是冒泡到标题栏，
+/// 落进“双击标题区 = 最大化/还原”。
+///
+/// 根因是 `drag_rect()` 只排除了**尾部槽**：`leading` 槽与它左侧的空当一起
+/// 被算成拖动区（`hits_caption` 因此为真），而头文件写着“附属槽不参与拖动
+/// （它们是控件，不是拖动区）”——注释与实现自相矛盾。
+///
+/// 判据用**窗口动作调用次数**而不是像素：像素只说明“重画了”，而这里要的是
+/// “系统动作有没有被触发”（无头下它会静默变成一次无害调用）。
+ST_TEST(title_bar_accessory_slots_do_not_trigger_window_actions) {
+  BarFixture fixture;
+  // 菜单栏形态的宿主控件（MenuBar 自己会消费按下/单击，正是“只有双击漏出来”的场景）。
+  auto menu = std::make_unique<st::ui::MenuBar>();
+  menu->set_id("menubar");
+  menu->set_menus({st::ui::Menu{"file", "文件", {st::ui::MenuItem{"new", "新建文件"}}}});
+  auto* leading = fixture.bar->add_leading(std::move(menu));
+  fixture.root.layout(true);
+  const Rect slot = leading->bounds();
+  ST_REQUIRE(slot.width > 0.0f);
+  ST_REQUIRE(slot.width > 8.0f);   // 探针点必须落在控件上（贴边那一两像素不算）
+
+  // ① 双击槽位：**不得**触发最大化。
+  (void)fixture.send(EventKind::DoubleClick, Point{slot.x + slot.width * 0.5f, slot.center().y}, 2);
+  ST_CHECK_EQ(fixture.control.maximize_calls, 0);
+  ST_CHECK(!fixture.control.maximized_state);
+  ST_CHECK(!fixture.bar->hits_caption(Point{slot.x + slot.width * 0.5f, slot.center().y}));
+
+  // ② 按住槽位：**不得**开始拖动窗口（否则点菜单会把窗口拖走）。
+  (void)fixture.send(EventKind::MouseDown, Point{slot.x + slot.width * 0.5f, slot.center().y});
+  ST_CHECK_EQ(fixture.control.move_calls, 0);
+  (void)fixture.send(EventKind::MouseUp, Point{slot.x + slot.width * 0.5f, slot.center().y});
+
+  // ③ 槽位之后的标题带仍照旧可拖/可双击（改的是槽位，不是整条栏）。
+  const Rect caption = fixture.bar->caption_rect();
+  ST_REQUIRE(caption.width > 16.0f);
+  ST_CHECK(fixture.bar->hits_caption(caption.center()));
+  const std::size_t moves_before = static_cast<std::size_t>(fixture.control.move_calls);
+  (void)fixture.send(EventKind::MouseDown, caption.center());
+  ST_CHECK_EQ(static_cast<std::size_t>(fixture.control.move_calls), moves_before + 1U);
+  (void)fixture.send(EventKind::DoubleClick, caption.center(), 2);
+  ST_CHECK_EQ(fixture.control.maximize_calls, 1);
+}
+
+/// 尾部槽同样不得触发窗口动作（与上一条同一契约的另一侧）。
+ST_TEST(title_bar_trailing_slot_does_not_trigger_window_actions) {
+  BarFixture fixture;
+  auto button = std::make_unique<st::ui::Button>("主题");
+  button->set_id("slot-theme");
+  auto* slot = fixture.bar->add_trailing(std::move(button));
+  fixture.root.layout(true);
+  const Point center = slot->bounds().center();
+  (void)fixture.send(EventKind::DoubleClick, center, 2);
+  ST_CHECK_EQ(fixture.control.maximize_calls, 0);
+  (void)fixture.send(EventKind::MouseDown, center);
+  ST_CHECK_EQ(fixture.control.move_calls, 0);
+  // 槽位的**左侧空当**仍属拖动区（尾部槽只切掉自己那一块）。
+  ST_CHECK(fixture.bar->hits_caption(Point{slot->bounds().x - 4.0f, slot->bounds().center().y}));
 }
 
 // ───────────────────────── WindowFrame：组件化的窗口 ─────────────────────────
@@ -547,6 +612,175 @@ ST_TEST(title_bar_maximized_state_drives_button_icon) {
   ST_CHECK_EQ(*fixture.bar->get_property("maximized"), std::string("true"));
   (void)fixture.bar->invoke_action("maximize", "");
   ST_CHECK_EQ(*fixture.bar->get_property("maximized"), std::string("false"));
+}
+
+// ───────────────────── 窗口按钮的悬停/按下反馈（像素级） ─────────────────────
+
+/// 渲染一帧标题栏（`hovered`/`pressed` 指定哪个按钮处于那个态，-1 = 都没有）。
+///
+/// ⚠ `-1` 是"无"的哨兵，**不能图省事传 0**——0 是"最小化"的合法按钮号，
+/// 传 0 会静默变成"按下最小化"（实测："悬停"那一路因此测得与"按下"逐位相同）。
+struct ControlButtonShot {
+  st::raster::Canvas canvas;
+  Rect button{};
+};
+
+[[nodiscard]] auto render_control_button(BarFixture& fixture, int hovered, int pressed,
+                                         std::size_t probe_index) -> ControlButtonShot {
+  // 走**真实事件路径**（`root.dispatch` + `root.paint`）：按钮的悬停/按压态由
+  // `TitleBar::on_event` 维护在组件内部（不是 `Element` 的通用悬停），
+  // 直接调 `paint` 不会有任何高亮——那会让本用例恒红，而不是测出缺陷。
+  if (pressed >= 0) {
+    (void)fixture.send(EventKind::MouseDown, fixture.button_center(
+                                                 static_cast<std::size_t>(pressed)));
+  } else if (hovered >= 0) {
+    (void)fixture.send(EventKind::MouseMove, fixture.button_center(
+                                                  static_cast<std::size_t>(hovered)));
+  }
+  st::raster::Canvas canvas{1280, 120, 1.0f};
+  canvas.clear(fixture.root.theme().colors().bg);
+  fixture.root.paint(canvas);
+  // 用完**清掉**状态，否则后面的调用会带着上一个按钮的高亮拼图。
+  if (pressed >= 0) {
+    (void)fixture.send(EventKind::MouseUp, Point{-10.0f, -10.0f});
+  }
+  Event out;
+  out.kind = EventKind::HoverOut;
+  out.position = Point{-10.0f, -10.0f};
+  (void)fixture.root.dispatch(out);
+  return ControlButtonShot{std::move(canvas), fixture.bar->control_button_rect(probe_index)};
+}
+
+/// 采样点：按钮内的**空白处**。
+///
+/// ⚠ 纵向取 `center().y` 会落到字形上——`minus` 就是一条压在竖直中线的横线，
+/// 于是"悬停底色"被量成了墨迹（实测：按钮 0 报 1.3831，而按钮 1/2 报 1.0000）。
+/// 取靠近块上沿的位置：块纵向内缩 4、字形只在中心 14px 内，`y+6` 两边都避开。
+[[nodiscard]] auto probe_pixel(const ControlButtonShot& shot) -> Color {
+  return shot.canvas.pixel_at(static_cast<int>(shot.button.x) + 5,
+                              static_cast<int>(shot.button.y) + 6);
+}
+
+/// 按钮的悬停/按下**必须看得见**：这是本轮修的真缺陷。
+///
+/// 旧实现用 `surface_pressed.with_alpha_f(0.10)` **叠层**，而标题栏底色
+/// `surface_alt` 本身就是不透明的——alpha 罩层在上面不产生任何差异，
+/// 实测只差 **1/255**（对比度 1.0055），等于悬停完全没有反馈。
+/// 关闭按钮之所以看得见（1.0564），纯粹因为它用的是危险色相。
+///
+/// 判据用**对比度**（与主题自己的可断言契约同一套口径）：
+/// 普通按钮不低于主题给的悬浮档实际能拉开的量级，关闭按钮必须明显更强
+/// （它是全窗唯一不可逆动作，用实心 danger 底 + 白字）。
+ST_TEST(title_bar_control_button_states_are_visible) {
+  BarFixture fixture;
+  const Color bar_bg = fixture.root.theme().colors().surface_alt;
+  const Color danger = fixture.root.theme().colors().danger;
+
+  const auto probe = [](const ControlButtonShot& shot) -> Color { return probe_pixel(shot); };
+  const auto contrast = [](Color a, Color b) -> float {
+    return st::math::contrast_ratio(a, b);
+  };
+
+  // 静止帧：没有任何按钮处于悬停/按下（probe_index 只用来取几何）。
+  const ControlButtonShot rest = render_control_button(fixture, -1, -1, 0);
+  for (int index = 0; index < 3; ++index) {
+    const auto slot = static_cast<std::size_t>(index);
+    const ControlButtonShot hovered = render_control_button(fixture, index, -1, slot);
+    const ControlButtonShot pressed = render_control_button(fixture, -1, index, slot);
+    const float hover_ratio = contrast(probe(hovered), bar_bg);
+    const float press_ratio = contrast(probe(pressed), bar_bg);
+    st::print("[wbtn] 按钮 {} 悬停对比度 {:.4f} · 按下 {:.4f}（底色 #{:02X}{:02X}{:02X}）\n", index,
+              static_cast<double>(hover_ratio), static_cast<double>(press_ratio),
+              static_cast<unsigned>(bar_bg.r), static_cast<unsigned>(bar_bg.g),
+              static_cast<unsigned>(bar_bg.b));
+    // ① 悬停真的落像素（不能等于底色）。
+    ST_CHECK(!(probe(hovered) == bar_bg));
+    if (index == 2) {
+      // ② 关闭：**实心 danger 底**（与底色反差 2.11），不是一抹淡红。
+      ST_CHECK(probe(hovered) == danger);
+      ST_CHECK(hover_ratio >= 1.8f);
+    } else {
+      // ③ 普通按钮：中性档（与底色同向、可辨）；不写死具体色值——
+      //    取哪一档由 `neutral_hover_tint` 按底色亮度选，深色主题下方向相反。
+      ST_CHECK(hover_ratio >= 1.03f);
+    }
+    // ④ 按下必须比静止更重（否则"按下去了"看不出来）。
+    //    关闭按钮按下与悬停同色（都是实心 danger），所以只要求"不比悬停更轻"。
+    ST_CHECK(press_ratio >= hover_ratio);
+    ST_CHECK(!(probe(pressed) == probe(rest)));
+  }
+}
+
+/// 悬停块的**形状**：横向贴满按钮，纵向各缩一档（块高 = 32 = 系统按钮高）。
+///
+/// 不缩的话块与栏的上下分界线贴死，看着像"栏被切了一刀"；
+/// 而块与**命中区**（整个按钮）不重合是**有意为之**——这正是桌面外壳的常规做法，
+/// 系统的悬停块同样不等于命中区。
+ST_TEST(title_bar_control_hover_block_is_inset_vertically) {
+  BarFixture fixture;
+  // ⚠ 不能拿"与栏底色不同"当"块存在"的判据：标题栏自己有一条 1px 分界线
+  //   （`style_.border_width`），它同样不是底色——扫描会把上下两条线算进去，
+  //   于是任何块都被量成"内缩 0/0、块高 40"（实测踩到）。
+  //   正确口径是**与静止帧比对**：只有块会让像素变。
+  const ControlButtonShot rest = render_control_button(fixture, -1, -1, 2);
+  const ControlButtonShot shot = render_control_button(fixture, 2, -1, 2);
+  const Rect button = shot.button;
+  // 沿按钮**竖直中线**扫：块的上下边界（相对按钮框）。
+  const int x = static_cast<int>(button.center().x);
+  int first = -1;
+  int last = -1;
+  for (int y = static_cast<int>(button.y); y < static_cast<int>(button.bottom()); ++y) {
+    if (!(shot.canvas.pixel_at(x, y) == rest.canvas.pixel_at(x, y))) {
+      if (first < 0) first = y;
+      last = y;
+    }
+  }
+  ST_REQUIRE(first >= 0);
+  const int inset_top = first - static_cast<int>(button.y);
+  const int inset_bottom = static_cast<int>(button.bottom()) - 1 - last;
+  st::print("[wbtn] 悬停块纵向内缩 {}/{} · 块高 {}\n", inset_top, inset_bottom, last - first + 1);
+  ST_CHECK(inset_top > 0);
+  ST_CHECK(inset_bottom > 0);
+  ST_CHECK_EQ(inset_top, inset_bottom);
+  // 横向贴满：块在按钮左缘内 1px 就应已存在（块只纵向内缩，横向不缩）。
+  const int probe_y = first + 2;
+  ST_CHECK(!(shot.canvas.pixel_at(static_cast<int>(button.x) + 1, probe_y) ==
+             rest.canvas.pixel_at(static_cast<int>(button.x) + 1, probe_y)));
+}
+
+/// **按住标题栏空白处不得把整条栏压暗**（拖动窗口的第一步就是按在栏上）。
+///
+/// 症状：按住拖动时整条标题栏从 `#EDEDF2` 变 `#DADADF`，看着像窗框闪了一下。
+/// 根因两层：① 标题栏自己没关基类的悬浮/按下回放；
+/// ② 更隐蔽的是——`Element::paint_box` 里那条"按下了但 hover_t 尚未起来"的
+/// 回退分支**只查了 `hover_effect_.background`、没查 `enabled`**，
+/// 于是即使组件显式 `set_hover_effect({.enabled=false})`，它依旧会把
+/// 整条栏的底色压暗（实测：关掉特效后仍然变暗，修掉这一支才真正生效）。
+ST_TEST(title_bar_press_does_not_darken_the_whole_bar) {
+  BarFixture fixture;
+
+  const auto render_frame = [&]() {
+    st::raster::Canvas canvas{1280, 120, 1.0f};
+    canvas.clear(fixture.root.theme().colors().bg);
+    fixture.root.paint(canvas);
+    return canvas;
+  };
+  const st::raster::Canvas before_frame = render_frame();
+  // 按在**空白拖动区**（caption 中段，远离任何按钮）。
+  ST_CHECK(fixture.send(EventKind::MouseDown, Point{400.0f, 20.0f}));
+  const st::raster::Canvas after_frame = render_frame();
+  fixture.send(EventKind::MouseUp, Point{400.0f, 20.0f});
+
+  std::size_t differing = 0;
+  // 只比标题栏那 40 行（避免把下方正文的差异算进来）。
+  for (int y = 0; y < 40; ++y) {
+    for (int x = 0; x < 1280; ++x) {
+      if (!(before_frame.pixel_at(x, y) == after_frame.pixel_at(x, y))) ++differing;
+    }
+  }
+  st::print("[wbtn] 按住标题栏空白处：整栏差异 {} px\n", differing);
+  ST_CHECK_EQ(static_cast<int>(differing), 0);
+  ST_CHECK(fixture.bar->bounds().height == TitleBar::bar_height());
 }
 
 }  // namespace

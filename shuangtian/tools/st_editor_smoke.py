@@ -11,7 +11,7 @@
   - **模态浮层铺满视口**：`OverlayLayout::FillViewport` 之前，应用只能每帧注入视口
     尺寸（workaround）；本脚本断的是"应用没注入也能铺满"。
 
-用法: python3 tools/st_editor_smoke.py [codeeditor|gallery|all] [--shots DIR]
+用法: python3 tools/st_editor_smoke.py [gbcode|gallery|all] [--shots DIR]
 退出码 0 = 全部通过。
 """
 
@@ -113,9 +113,9 @@ def stop(process: subprocess.Popen) -> None:
         process.kill()
 
 
-def smoke_codeeditor(shots: pathlib.Path) -> None:
-    print("[codeeditor] 焦点链路 + 文本送达", flush=True)
-    process, client = start("codeeditor", shots)
+def smoke_gbcode(shots: pathlib.Path) -> None:
+    print("[gbcode] 焦点链路 + 文本送达", flush=True)
+    process, client = start("gbcode", shots)
     try:
         state = client.ok("get", {"id": "editor"})
         props = state.get("props", {})
@@ -184,17 +184,17 @@ def smoke_gallery(shots: pathlib.Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="编辑器形态冒烟（控制通道，无头）")
     parser.add_argument("target", nargs="?", default="all",
-                        choices=["codeeditor", "gallery", "all"])
+                        choices=["gbcode", "gallery", "all"])
     parser.add_argument("--shots", default=None, help="截图与日志目录（默认 build/editor-smoke）")
     args = parser.parse_args()
     shots = pathlib.Path(args.shots) if args.shots else ROOT / "build" / "editor-smoke"
     shots.mkdir(parents=True, exist_ok=True)
 
-    targets = ["codeeditor", "gallery"] if args.target == "all" else [args.target]
+    targets = ["gbcode", "gallery"] if args.target == "all" else [args.target]
     try:
         for target in targets:
-            if target == "codeeditor":
-                smoke_codeeditor(shots)
+            if target == "gbcode":
+                smoke_gbcode(shots)
             else:
                 smoke_gallery(shots)
     except RuntimeError as error:

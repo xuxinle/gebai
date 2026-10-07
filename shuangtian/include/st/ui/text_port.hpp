@@ -189,43 +189,4 @@ class NullTextPort final : public TextPort {
   return weight == FontWeight::Bold || weight == FontWeight::SemiBold;
 }
 
-/// 一行文本的**行盒顶**（= 传给 `TextPort::draw` 的 origin.y），使它在一段高度里居中。
-///
-/// 对齐的是**墨迹**（`ink_metrics`）而不是行盒：行盒含字体预留的头尾空间。
-/// 实测 DejaVu Sans 的 `hhea.ascender = 0.928em`，而大写字母的墨迹只有
-/// `0.729em`（小写 `x-height` 更低，`0.547em`）——按行盒居中会把文字
-/// **系统性推下约 2.5px**（用户报的"按钮文字没有居中"）。
-///
-/// 端口报不出墨迹时（无字体环境）退回行盒居中。
-///
-/// **全仓所有"把一行字放进一个盒子"的绘制都应走这里**（`Element::paint_text`、
-/// 按钮标签、菜单项、表格单元格、键值行……）：各自算一份的结果是
-/// "某些组件的字偏一两像素"——单看都正常，并排就能看出。
-[[nodiscard]] inline auto centered_line_top(const TextPort& port, std::string_view text, float size,
-                                            float box_y, float box_height) -> float {
-  const float line = port.line_height(size);
-  const float box_centered = box_y + (box_height - line) * 0.5f;
-  const auto ink = port.ink_metrics(text, size);
-  if (!ink) return box_centered;
-  // 墨迹中心相对行盒顶的位置：
-  //   行盒顶 → 基线   = `shaped_ascent`（与 `draw` 同源；**不要**用 `ascent(size)`）
-  //   基线   → 墨迹中心 = `(below - above) / 2`
-  //
-  // ⚠ 这里曾写作 `shaped_ascent - (above + below) / 2`——**多减了一个 `below`**。
-  // `InkMetrics` 的语义是「基线上方 `above`、下方 `below`」，墨迹跨 `[基线-above, 基线+below]`，
-  // 中心在基线**下方** `(below - above)/2`（不是上方 `(above + below)/2`）。
-  // 两者差一个 `below`，于是文字被系统性**压下 `below`**。
-  // 实测（真字体，`tools/button_center_probe.cpp`，字号 14）：
-  //   汉字 `below=1.91` → 墨迹中心偏 **+2.00px**；拉丁 `below=0.18` → +0.50px。
-  // 这正是用户报的「按钮文本没有居中」。
-  //
-  // **为何整套测试都没拓住它**：旧桩的 `ink_metrics` 把 `below` 恒报 0，
-  // 而 `below == 0` 时两个公式**恰好相等**——桩把差异抹平了
-  // （`CONVENTIONS` §7.2 记的正是这类“桩替身复现不全”的假绿）。
-  // 现已在桩里给 `below` 一个真实量级，这条推导才真的被盯住。
-  const float ink_center_from_top =
-      port.shaped_ascent(text, size) + (ink->below - ink->above) * 0.5f;
-  return box_centered + (line * 0.5f - ink_center_from_top);
-}
-
 }  // namespace st::ui

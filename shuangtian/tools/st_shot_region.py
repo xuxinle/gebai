@@ -2,7 +2,7 @@
 """按区域抓高清截图（DPI 2x）供细节核验：预览区 / 工具栏 / 源码视图 / 大纲。
 
 用法: python3 st_shot_region.py <app> '<JSON 区域表>' [--profile dev] [--theme dark] [--language cpp]
-      python3 st_shot_region.py codeeditor '{"full":null,"editor":{"x":0,"y":60,"width":700,"height":500}}'
+      python3 st_shot_region.py gbcode '{"full":null,"editor":{"x":0,"y":60,"width":700,"height":500}}'
 """
 import json
 import os

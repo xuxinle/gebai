@@ -215,7 +215,7 @@ ST_TEST(palette_grab_focus_routes_typing_into_the_filter_box) {
 ST_TEST(palette_click_and_enter_have_identical_effects) {
   // 回归用例：执行链曾**分成两份**——Enter 走 `activate_highlighted()`（调 handler），
   // 鼠标点走列表项回调（只发 `on_command`）。症状取决于宿主怎么用：
-  // codeeditor 把 `on_command` 当“已执行”去刷状态栏，于是**状态说执行了、文件没打开**。
+  // gbcode 把 `on_command` 当“已执行”去刷状态栏，于是**状态说执行了、文件没打开**。
   // 本用例逐字段比对两条路径的效果：命令 id、handler 调用次数、回调次数必须全等。
   PaletteFixture fx;
   int handler_calls = 0;

@@ -756,7 +756,7 @@ ST_TEST(dsl_scrollview_internal_scrollbar_survives_branch_switch) {
 // 回归：`spacer()` 是右对齐的惯用写法（`… 左侧内容 … spacer() … 右侧内容 …`），
 // 而早先它把 `size` 直接写进 `width/height`——默认 `size = 0` 就得到一个
 // **固定 0 宽的块**，在布局里等同于“不存在”，右对齐静默失效。
-// 实测：codeeditor 标题栏的 — □ × 紧跟在标题文字后面（x=209），而非贴右缘（1268）。
+// 实测：gbcode 标题栏的 — □ × 紧跟在标题文字后面（x=209），而非贴右缘（1268）。
 // 现在 `size <= 0` ⇒ `grow = true`（真弹性）；`size > 0` 仍为固定块。
 ST_TEST(dsl_spacer_default_is_elastic_and_pushes_to_edges) {
   struct SpacerPage : Component {
@@ -1197,7 +1197,7 @@ ST_TEST(dsl_markdown_wrapper_reevaluates_source) {
 // ————————————————————————————————————————————————————————————————————————
 //
 // 起因（真实故障）：只有四边统一的 `padding` 时，「固定高度的行 + 只要左右留白」
-// 这个组合写不出来。codeeditor 的状态栏写了 `height = 26, padding = 10`，
+// 这个组合写不出来。gbcode 的状态栏写了 `height = 26, padding = 10`，
 // 于是**每个子元素只剩 6px 高**（26 − 10×2）——图标与文字被压扁成一条，
 // 而**容器本身的尺寸完全正确**，单看容器 bounds 看不出问题。
 //

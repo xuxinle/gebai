@@ -191,6 +191,15 @@ auto MenuPanel::on_event(const RenderContext& context, Event& event) -> bool {
       if (index == kNoIndex) return true;  // 面板空白：吞掉（模态）
       if (items_[index].separator) return true;
       set_highlighted(index);
+      // **只有 `Click` 才激活**：一次物理点击会依次到达 `MouseDown` / `MouseUp` /
+      // `Click`（真实后端在松开时补发 Click，见 `input.mouse` 的同序序列），
+      // 三者都激活就是“一次点击执行三次”。
+      //
+      // 更难得的是**时机**：在 `MouseDown` 就执行会连面板一起关掉，而鼠标还没松开——
+      // 随后的 `MouseUp`/`Click` 就落到下面那个元素上，用户感受是“点菜单秒退，
+      // 而且透着点到了下层”。与 `MenuBar`/`Button` 同一套约定：
+      // MouseDown 只做悬停/按下视觉，Click 才 activate。
+      if (event.kind == EventKind::MouseDown) return true;
       event.handled = true;
       if (on_activate) on_activate(index);
       if (on_close) on_close();
@@ -400,18 +409,38 @@ auto MenuBar::on_event(const RenderContext& context, Event& event) -> bool {
       for (std::size_t index = 0; index < menus_.size(); ++index) {
         if (!title_rect(index).contains(event.position)) continue;
         event.handled = true;
-        set_open_index(index);
-        if (on_open_menu) on_open_menu(index);
+        // **点已打开的那个标题 = 关闭**（与浏览器/VSCode 菜单栏同一套 toggle 手感），
+        // 其余情况都打开目标菜单。
+        //
+        // 为何要单独区分“同一个标题”：直接无条件 `set_open_index(index)` 会让
+        // “再点一下关掉”永远做不到（点多少次都只是又打开）。
+        if (open_index_ == index) {
+          set_open_index(kNoIndex);
+          if (on_menu_close) on_menu_close();
+        } else {
+          set_open_index(index);
+          if (on_open_menu) on_open_menu(index);
+        }
         return true;
       }
       // 点菜单栏空白：视为关闭请求（否则面板留在屏上没人摘）
       if (open_index_ != kNoIndex) {
         set_open_index(kNoIndex);
         event.handled = true;
+        if (on_menu_close) on_menu_close();
         return true;
       }
       return false;
     }
+    // 双击标题：**收下，不冒泡**。
+    //
+    // `DoubleClick` 是**我们认识的手势**，不该继续冒泡到标题栏（那里双击是
+    // “最大化/还原”）——菜单栏长在标题栏的附属槽里，漏出去就会“双击菜单把窗口最大化”。
+    // 菜单语义上不区分单击/双击（与系统菜单栏一致：双击菜单项＝点两下），
+    // 所以这里不做事，只把事件收掉，避免它变成第二个手势。
+    case EventKind::DoubleClick:
+      event.handled = true;
+      return true;
     case EventKind::KeyDown: {
       if (menus_.empty()) return false;
       if (event.key == "ArrowRight" || event.key == "ArrowLeft") {
@@ -539,12 +568,26 @@ auto ContextMenu::on_event(const RenderContext& context, Event& event) -> bool {
     case EventKind::MouseDown: {
       // dismiss barrier：面板内走条目；面板外触发关闭。两者都消费（见类注释）。
       if (panel_->bounds().contains(event.position)) {
+        // **面板内：鼠标按下不激活**（同 `MenuPanel` 的约定）——
+        // 否则按下就关菜单，右键菜单会“一点就消失”，而且漏出的 `MouseUp`/`Click`
+        // 会落到下面那个元素上。
+        if (event.kind == EventKind::MouseDown) {
+          (void)panel_->on_event(context, event);   // 只做高亮
+          return true;
+        }
         return panel_->on_event(context, event);
       }
+      // 面板外：点击屏障。`MouseDown` 时**不关**——要等真正的 `Click`，
+      // 否则“右键按住拖一下再松开”会被当成关闭，而下一次点击又穿透到下层。
+      if (event.kind == EventKind::MouseDown) return true;
       event.handled = true;
       if (on_close) on_close();
       return true;
     }
+    // 双击是我们认识的手势（不是“两次独立的单击”）：收下，不冒泡。
+    case EventKind::DoubleClick:
+      event.handled = true;
+      return true;
     default:
       return false;
   }
