@@ -20,6 +20,7 @@
 #include <thread>
 #include <vector>
 
+#include "st/core/process.hpp"
 #include "st/core/pty.hpp"
 
 namespace {
@@ -35,7 +36,15 @@ struct Shell {
 
 [[nodiscard]] auto shell() -> Shell {
 #ifdef _WIN32
-  return Shell{"cmd.exe", {}};
+  // 用 **PowerShell**（与组件的默认一致：`pwsh` 优先、回落 `powershell`）——
+  // 用 `cmd` 会让测试验的不是产品实际跑的 shell。
+  if (const char* configured = std::getenv("GEBAI_TERMINAL_SHELL");
+      configured != nullptr && configured[0] != '\0') {
+    return Shell{configured, {}};
+  }
+  if (auto found = st::process::which("pwsh"); found.has_value()) return Shell{*found, {}};
+  if (auto found = st::process::which("powershell"); found.has_value()) return Shell{*found, {}};
+  return Shell{"powershell.exe", {}};
 #else
   return Shell{"/bin/sh", {"-i"}};
 #endif

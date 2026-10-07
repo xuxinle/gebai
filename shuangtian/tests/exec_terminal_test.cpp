@@ -194,10 +194,12 @@ ST_TEST(terminal_new_session_follows_current_directory_and_activates) {
   // 期待在同一个地方接着干），并自动成为活动会话。
   Harness harness;
   harness.terminal->set_working_directory("/tmp");
-  // 让当前会话切到别处（经由内建 `cd`，它会写会话自己的 cwd）。
+  // ⚠ `cd` 已**不再**是组件的内建命令：真终端里目录切换归 shell
+  //（组件只负责把字节送过去）。这里直接设会话 cwd —— 组件的行为是
+  //“新会话继承当前会话的 cwd”，与谁改的 cwd 无关。
   auto real = st::fs::make_temp_dir("st-terminal-tab");
   ST_REQUIRE(real.has_value());
-  harness.terminal->run("cd " + *real);
+  harness.terminal->session(0)->cwd = st::fs::absolute(*real).value_or(*real);
 
   const std::size_t index = harness.terminal->add_session();
   ST_CHECK_EQ(index, std::size_t{1});
@@ -343,59 +345,66 @@ ST_TEST(terminal_unknown_channel_kind_reports_instead_of_falling_back) {
 // 终端：内建命令与历史
 // ════════════════════════════════════════════════════════════════════════════
 
-ST_TEST(terminal_builtin_commands_do_not_start_a_channel) {
-  // `help` / `history` / `clear` 是内建的，**不该**去起进程（否则每敲一次
-  // `clear` 都白起一个 shell）。
+ST_TEST(terminal_line_mode_runs_every_command_through_the_channel) {
+  // **真终端之后，组件不再有"内建命令"**：输入的一切都送给 shell 解释
+  //（行内编辑、补全、历史、`cd` 全归 shell）。组件只保留一个例外：
+  // `clear()` 这个**方法**（宿主按钮调的，不是用户敲的命令）。
+  //
+  // 这条守着"组件不替 shell 做解释"这条边界。
   Harness harness;
-  bool channel_touched = false;
+  int launched = 0;
   harness.terminal->set_channel_factory(
-      [&channel_touched](const ChannelSpec&) -> std::unique_ptr<Channel> {
-        channel_touched = true;
+      [&launched](const ChannelSpec&) -> std::unique_ptr<Channel> {
+        ++launched;
         return std::make_unique<FakeChannel>();
       });
   harness.terminal->run("help");
-  harness.terminal->run("history");
-  ST_CHECK(!channel_touched);
-  ST_CHECK(harness.terminal->session_text(0).find("内建") != std::string::npos);
-  harness.terminal->run("clear");
+  pump_until_idle(*harness.terminal);
+  // 任何命令都真的起了通道（没有"内建"这条旁路）。
+  ST_CHECK_EQ(launched, 1);
+  // `clear()` 是方法调用，**不**起通道。
+  harness.terminal->clear();
+  ST_CHECK_EQ(launched, 1);
   ST_CHECK_EQ(harness.terminal->line_count(0), std::size_t{0});
 }
 
-ST_TEST(terminal_cd_changes_only_the_current_session) {
-  // `cd` 只影响**当前会话**——这是多会话的意义所在（另一个会话的目录不该被改）。
+ST_TEST(terminal_session_cwd_is_isolated_per_session) {
+  // 多会话的意义在于**上下文并行**：每条 shell 有自己的工作目录。
+  // `cd` 本身已归 shell（组件不解释命令），但"每会话一份 cwd"这条仍归组件——
+  // 它决定了新会话从哪儿起来、以及 PTY 起 shell 时用哪个目录。
   auto first = st::fs::make_temp_dir("st-terminal-cd-a");
   auto second = st::fs::make_temp_dir("st-terminal-cd-b");
   ST_REQUIRE(first.has_value());
   ST_REQUIRE(second.has_value());
   Harness harness;
   harness.terminal->set_working_directory(*first);
-  harness.terminal->run("cd " + *second);
-  const auto* s0 = harness.terminal->session(0);
-  ST_REQUIRE(s0 != nullptr);
-  ST_CHECK_EQ(s0->cwd, st::fs::absolute(*second).value_or(*second));
+  harness.terminal->session(0)->cwd = st::fs::absolute(*second).value_or(*second);
+  ST_CHECK_EQ(harness.terminal->session(0)->cwd,
+              st::fs::absolute(*second).value_or(*second));
 
   harness.terminal->add_session();
-  const auto* s1 = harness.terminal->session(1);
-  ST_REQUIRE(s1 != nullptr);
-  // 新会话继承的是**当时**的目录（= second），但它有自己的 cwd 槽位。
-  ST_CHECK_EQ(s1->cwd, st::fs::absolute(*second).value_or(*second));
-  // 把新会话 `cd` 走，第一个会话不受影响。
-  harness.terminal->run("cd " + *first);
-  ST_CHECK_EQ(harness.terminal->session(0)->cwd, st::fs::absolute(*second).value_or(*second));
-  ST_CHECK_EQ(harness.terminal->session(1)->cwd, st::fs::absolute(*first).value_or(*first));
+  // 新会话继承的是**当时**的目录。
+  ST_CHECK_EQ(harness.terminal->session(1)->cwd,
+              st::fs::absolute(*second).value_or(*second));
+  // 把新会话改走，第一个会话不受影响（各一份，不共享）。
+  harness.terminal->session(1)->cwd = st::fs::absolute(*first).value_or(*first);
+  ST_CHECK_EQ(harness.terminal->session(0)->cwd,
+              st::fs::absolute(*second).value_or(*second));
+  ST_CHECK_EQ(harness.terminal->session(1)->cwd,
+              st::fs::absolute(*first).value_or(*first));
   (void)st::fs::remove_all(*first);
   (void)st::fs::remove_all(*second);
 }
 
-ST_TEST(terminal_history_step_walks_back_and_forth) {
-  // ↑↓ 翻历史：游标语义 `count` = "不在翻历史"，`0` = 最早一条。
-  // 这里通过输入框的可观察效果断言（组件把历史写进输入框）。
+ST_TEST(terminal_has_no_history_actions_shell_owns_that) {
+  // **边界断言**：历史（↑↓ 翻）在真终端里归 **shell**（`PSReadLine`/`readline`），
+  // 组件不该也记一份——两份历史必然不同步，用户按 ↑ 拿到的会是"组件以为的"上一条。
+  // 所以 `history_up` / `history_down` 这两个动作**刻意不存在**。
   Harness harness;
   harness.terminal->run("first-cmd");
-  harness.terminal->run("second-cmd");
-  // 通过动作面走一遍（避免测试依赖输入框子件的私有接口）。
-  ST_CHECK(harness.terminal->invoke_action("history_up", ""));
-  ST_CHECK(harness.terminal->invoke_action("history_down", ""));
+  pump_until_idle(*harness.terminal);
+  ST_CHECK(!harness.terminal->invoke_action("history_up", ""));
+  ST_CHECK(!harness.terminal->invoke_action("history_down", ""));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -412,19 +421,18 @@ ST_TEST(terminal_property_surface_reflects_sessions_and_busy) {
   ST_CHECK_EQ(harness.terminal->get_property("active_session").value_or(""), std::string("1"));
 }
 
-ST_TEST(terminal_geometry_splits_into_three_bands) {
-  // 三个带（标签 / 输出 / 输入）必须**互不重叠且拼满**容器——
-  // 重叠会让输入行盖住最后几行输出，缺口则是布局算错的直接证据。
+ST_TEST(terminal_geometry_splits_into_two_bands) {
+  // 两个带（标签 / 输出）必须**互不重叠且拼满**容器——缺口就是布局算错的直接证据。
+  //
+  // 注：真终端**没有输入行**（输入就是往 PTY 写字节，光标是屏幕状态），
+  // 所以这里从“三带”缩成“两带”——旧形态的输入带已经不存在了。
   Harness harness;
   harness.terminal->set_working_directory("/tmp");
   harness.root.layout(true);
   const st::math::Rect tabs = harness.terminal->tabs_rect();
   const st::math::Rect out = harness.terminal->output_rect();
-  const st::math::Rect input = harness.terminal->input_rect();
   ST_CHECK(tabs.height > 0.0f);
   ST_CHECK(out.height > 0.0f);
-  ST_CHECK(input.height > 0.0f);
   ST_CHECK_EQ(out.y, tabs.bottom());
-  ST_CHECK_EQ(input.y, out.bottom());
-  ST_CHECK_EQ(input.bottom(), harness.terminal->bounds().bottom());
+  ST_CHECK_EQ(out.bottom(), harness.terminal->bounds().bottom());
 }
