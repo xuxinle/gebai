@@ -21,6 +21,7 @@
 #include "st/ui/components/input.hpp"
 #include "st/ui/components/list.hpp"
 #include "st/ui/components/markdown_view.hpp"
+#include "st/ui/components/terminal.hpp"
 #include "st/ui/components/menu.hpp"
 #include "st/ui/components/overlay.hpp"
 #include "st/ui/components/scroll.hpp"
@@ -1285,6 +1286,7 @@ auto Composer::root() noexcept -> UiRoot& { return impl_->root; }
   X(MenuPanel, "MenuPanel", std::make_unique<MenuPanel>(std::vector<MenuItem>{})) \
   X(ContextMenu, "ContextMenu", std::make_unique<ContextMenu>(math::Point{}, std::vector<MenuItem>{})) \
   X(FileDialog, "FileDialog", std::make_unique<FileDialog>())             \
+  X(Terminal, "Terminal", std::make_unique<Terminal>())                   \
   X(CodeEditor, "CodeEditor", std::make_unique<CodeEditor>())             \
   X(CommandPalette, "CommandPalette", std::make_unique<CommandPalette>()) \
   X(MarkdownView, "MarkdownView", std::make_unique<MarkdownView>())       \
