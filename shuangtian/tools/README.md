@@ -76,6 +76,7 @@
 | `terminal_tui_probe.py` | **独占模式端到端**：驱动 `tui_test_double.py` 走完整生命周期（进备用屏 → 逐帧重绘 → 按键 → 反显样式 → 滚轮 → 退出 → 主屏恢复与 shell 可用） |
 | `terminal_scroll_probe.py` | **回看滚动端到端（双向）**：造 80 行历史后量「上滚偏移增大 / 下滚偏移减小 / 两端停住 / 一格=3 行」。⚠ 判据必须用**属性面 `scroll`**（`偏移:总行数`）——`screen` 属性是**屏幕模型**、看不到回看叠加层；像素又会被**光标闪烁**污染（采样间隔成周期整数倍时还会被混叠骗过） |
 | `terminal_scroll_reverse_verify.py` | **逆向验证（滚动方向）**：3 条回退（旧 `max(1, …)` / 方向取反）→ 期望红 → 恢复。内含一条实测教训：`delta=1` 时“向上”用例对某些错写法**天然无判别力**（`max(1,1*3)` 与正确值同为 3），故必须选**双向**判据 |
+| `terminal_cursor_reverse_verify.py` | **逆向验证（光标）**：去掉 `request_animation`（闪烁冻住）/ 默认形状回退 `Block` / 宿主无条覆盖 —— 逐条回退期望红后恢复。**开跑前会先验基线全绿**（脏二进制会让结论反过来）。⚠ 与任何构建**不能并行**（见 CONVENTIONS §9.0③） |
 | `st_shot_region.py` | 指定区域截图 |
 | `check_docs.py` | **文档引用一致性检查**：扫全部文档/源码里的 `DESIGN.md §X` / `CONVENTIONS.md §X` 引用，确认目标章节真的存在；并核对若干“旧值已清零”与“新内容已到位”。改了章节号或文档结构后跑一下 |
 | `check_selfcontained.py` | **自包含体检（不消费 PCH）**：逐个编译头文件（§6.1）与翻译单元（§6.6）。`st build`/`st check`/`st test` 都自动 `-include st/pch.hpp`，PCH 里含整套常用标准库头——**这两条约定在日常构建里根本不被检查**，只在首次自举才炸（实测：`channel.hpp` 缺 `<functional>`/`<cstdint>`，三个命令全绿，`bootstrap.ps1` 报错）。包含根按组补齐（头/框架/stpm/测试/每个示例），避免假失败 |

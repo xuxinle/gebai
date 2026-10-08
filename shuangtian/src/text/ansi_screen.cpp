@@ -600,6 +600,9 @@ void AnsiScreen::handle_csi(char final_byte) {
       if (code == 3 || code == 4) cursor_shape_ = AnsiCursorShape::Underline;
       else if (code == 5 || code == 6) cursor_shape_ = AnsiCursorShape::Bar;
       else cursor_shape_ = AnsiCursorShape::Block;
+      // 程序**明确指定**了形状 ⇒ 以后不再用宿主默认（否则 `vim` 设了竖线，
+      // 宿主一改设置就把它覆盖回去）。
+      shape_explicit_ = true;
       break;
     }
     case 'h':
@@ -671,6 +674,13 @@ void AnsiScreen::handle_osc(std::string_view payload) {
 }
 
 void AnsiScreen::feed(std::string_view bytes) {
+  // 宿主默认光标形状：**只在屏幕内容没说话时**生效。
+  //
+  // 为什么放在这里：用户可以在运行期改内置设置（默认形状），而 PTY 是常驻的
+  //——属性改动没有“重建屏幕”的机会。本层是唯一知道“程序是否已用 `DECSCUSR`
+  // 表过态”的地方，所以在每次喂字节前把它保守地覆盖一遍：
+  // 已经 explicit 的会话**不受影响**（`set_default_cursor_shape` 里的守卫）。
+  if (default_cursor_shape_.has_value()) set_default_cursor_shape(*default_cursor_shape_);
   // UTF-8 残片先接上（PTY 分片边界与码点边界无关，这一步不能省）。
   std::string input;
   if (!utf8_pending_.empty()) {

@@ -386,6 +386,7 @@ void Terminal::open_shell(st::process::PtySize size) {
   }
   // 屏幕模型与 PTY 同尺寸（TUI 程序的排版按这个来）。
   auto screen = std::make_shared<st::text::AnsiScreen>(size.cols, size.rows);
+  screen->set_cursor_shape(cursor_shape_);   // 宿主默认形状（程序可用 DECSCUSR 覆盖）
   start_pty(pty, screen, tail_name(shell_));
   if (on_busy_change) on_busy_change(true);
   mark_dirty();
@@ -395,6 +396,7 @@ void Terminal::open_shell(st::process::PtySize size) {
 void Terminal::attach_pty(std::shared_ptr<st::process::PtySession> pty) {
   if (pty == nullptr || !pty->valid()) return;
   auto screen = std::make_shared<st::text::AnsiScreen>(pty_size_.cols, pty_size_.rows);
+  screen->set_cursor_shape(cursor_shape_);
   start_pty(pty, screen, tail_name(shell_));
   mark_dirty();
 }
@@ -1022,7 +1024,13 @@ void Terminal::paint_content(const RenderContext& context, raster::Surface& canv
   // ⚠ 备用屏里也要画：vim/htop 的**插入光标**正是屏幕状态的一部分——
   // 旧实现 `!in_alt_screen()` 把它禁了，vim 里看不到光标在哪（实测踩到）。
   // 回看滚动时（`sb_offset > 0`）不画——那是在看历史，不在编辑。
-  if (screen.cursor_visible() && sb_offset == 0) {
+  //
+  // ⚠ 闪烁**不要求下一帧**：不调 `request_animation()` 的话，重绘平静后
+  // 就没有新帧，光标会冻在它碰巧停住的相位上——用户看到的就是
+  // "闪一下就定住了"（实测：静置 6 秒像素零变化）。
+  const bool blinking = screen.cursor_visible() && sb_offset == 0 && focused();
+  if (blinking) request_animation();   // 续帧：一秒周期，本组件自己管
+  if (blinking) {
     // 挂起态（写满一行还没换行）：光标停在**最后一个字符上**，不是下一列——
     // 多画一格会出现"光标永远多跳一列"的错位感。
     const int cursor_col = screen.pending_wrap() && screen.cursor_col() > 0
@@ -1035,15 +1043,15 @@ void Terminal::paint_content(const RenderContext& context, raster::Surface& canv
       switch (screen.cursor_shape()) {
         case st::text::AnsiCursorShape::Block:
           canvas.fill_rect(math::Rect{cx, cy, cell_w, line_h},
-                           raster::Paint::solid(math::Color{palette.cursor.r, palette.cursor.g,
-                                                             palette.cursor.b, 110}));
+                           raster::Paint::solid(palette.cursor));
           break;
         case st::text::AnsiCursorShape::Underline:
           canvas.fill_rect(math::Rect{cx, cy + line_h - 2.0f, cell_w, 2.0f},
                            raster::Paint::solid(palette.cursor));
           break;
         case st::text::AnsiCursorShape::Bar:
-          canvas.fill_rect(math::Rect{cx, cy, 2.0f, line_h}, raster::Paint::solid(palette.cursor));
+          // 竖线：一格宽、右缘内缩一点，看着是"插入点"而不是"一块填充"。
+          canvas.fill_rect(math::Rect{cx, cy, 1.5f, line_h}, raster::Paint::solid(palette.cursor));
           break;
       }
     }
@@ -1059,6 +1067,15 @@ auto Terminal::wheel_scroll_lines(float wheel_delta) -> int {
   // 用 `trunc` 而非 `round`：半格（`|delta| < 1/3`）应当**不动**，
   // 而不是被四舍五入成 1 行（那种手感是“轻轻滚一下跳一大格”）。
   return static_cast<int>(wheel_delta * 3.0f);
+}
+
+auto Terminal::cursor_shape_name(st::text::AnsiCursorShape shape) -> std::string_view {
+  switch (shape) {
+    case st::text::AnsiCursorShape::Block: return "block";
+    case st::text::AnsiCursorShape::Underline: return "underline";
+    case st::text::AnsiCursorShape::Bar: return "bar";
+  }
+  return "bar";
 }
 
 auto Terminal::key_bytes(const Event& event) -> std::string {
@@ -1176,7 +1193,8 @@ auto Terminal::property_names() const -> std::vector<std::string_view> {
   names.insert(names.end(),
                {"sessions", "active_session", "session_title", "working_directory", "busy",
                 "output", "screen", "cursor", "cursor_rect", "pty", "alt_screen", "scroll",
-                "user_scrolled", "monospace", "tabs_visible", "font_scale"});
+                "user_scrolled", "cursor_shape", "screen_cursor_shape", "monospace",
+                "tabs_visible", "font_scale"});
   return names;
 }
 
@@ -1235,6 +1253,16 @@ auto Terminal::get_property(std::string_view name) const -> std::optional<std::s
     if (target == nullptr || target->screen == nullptr) return std::string{};
     return std::format("{}:{}", target->scrollback_offset,
                        target->screen->scrollback_count());
+  }
+  if (name == "cursor_shape") {
+    // 宿主**默认**形状（程序可用 `DECSCUSR` 覆盖；它们不冲突，两个都报）。
+    // 为何要两个：`cursor_shape` 是宿主设置，`screen_cursor_shape` 是实际生效的——
+    // 自动化要断言"vim 把光标切成竖线"时必须看后者。
+    return std::string(cursor_shape_name(cursor_shape_));
+  }
+  if (name == "screen_cursor_shape") {
+    if (target == nullptr || target->screen == nullptr) return std::string{};
+    return std::string(cursor_shape_name(target->screen->cursor_shape()));
   }
   if (name == "monospace") return monospace_ ? "true" : "false";
   if (name == "tabs_visible") return tabs_visible_ ? "true" : "false";

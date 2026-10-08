@@ -43,6 +43,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -132,6 +133,30 @@ class AnsiScreen {
   [[nodiscard]] auto cursor_col() const noexcept -> int { return cursor_col_; }
   [[nodiscard]] auto cursor_visible() const noexcept -> bool { return cursor_visible_; }
   [[nodiscard]] auto cursor_shape() const noexcept -> AnsiCursorShape { return cursor_shape_; }
+
+  /// 设置**宿主默认**光标形状（仅当屏幕内容没指定过时生效）。
+  ///
+  /// 为何需要「没指定过」这个条件：`vim`/`htop` 会用 `DECSCUSR` 明确要求
+  /// 竖线（插入模式）。终端只是**代宿主表态**，一旦程序自己说了话，
+  /// 就得听程序的——否则用户改内置设置会把 `vim` 的插入光标覆盖掉。
+  void set_default_cursor_shape(AnsiCursorShape shape) noexcept {
+    if (!shape_explicit_) cursor_shape_ = shape;
+  }
+  [[nodiscard]] auto cursor_shape_is_explicit() const noexcept -> bool { return shape_explicit_; }
+
+  /// 常驻**宿主默认形状**（`set_cursor_shape`）。
+  ///
+  /// 与上面那个一次性函数的区别：这是“用户偏好”，会在每次 `feed` 开头重新施加
+  /// （见 `feed` 的说明）；`nullopt` = 不干预，完全由程序决定。
+  void set_cursor_shape(AnsiCursorShape shape) noexcept {
+    default_cursor_shape_ = shape;
+    set_default_cursor_shape(shape);
+  }
+
+  /// 当前是否配置了宿主默认形状。
+  [[nodiscard]] auto has_cursor_shape_default() const noexcept -> bool {
+    return default_cursor_shape_.has_value();
+  }
   /// 光标是否停在"待换行"状态（写满一行后未换行的挂起态）。
   ///
   /// 渲染时要知道它：挂起状态下光标**停在最后一个字符上**而不是下一行首，
@@ -208,7 +233,11 @@ class AnsiScreen {
   int cursor_row_{0};
   int cursor_col_{0};
   bool cursor_visible_{true};
-  AnsiCursorShape cursor_shape_{AnsiCursorShape::Block};
+  AnsiCursorShape cursor_shape_{AnsiCursorShape::Bar};
+  /// 屏幕内容是否用 `DECSCUSR` 明确指定过形状（见 `set_default_cursor_shape`）。
+  bool shape_explicit_{false};
+  /// 宿主默认形状（`set_cursor_shape`）；`nullopt` = 不干预。
+  std::optional<AnsiCursorShape> default_cursor_shape_{};
   /// 写满一行后的挂起态（等下一个字符才真换行——`DECAWM` 的语义）。
   bool wrap_pending_{false};
   bool auto_wrap_{true};

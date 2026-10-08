@@ -276,6 +276,15 @@ class Terminal : public Element {
   void set_font_scale(float scale);
   [[nodiscard]] auto font_scale() const noexcept -> float { return font_scale_; }
 
+  /// **光标默认形状**（宿主偏好）。
+  ///
+  /// 只对**接下来新建**的屏幕模型生效，且会被程序的 `DECSCUSR` 覆盖：
+  /// `vim`/`htop` 会明确要求竖线（插入模式），用户的偏好不该把程序的话撞掉。
+  void set_cursor_shape(st::text::AnsiCursorShape shape) noexcept { cursor_shape_ = shape; }
+  [[nodiscard]] auto cursor_shape() const noexcept -> st::text::AnsiCursorShape {
+    return cursor_shape_;
+  }
+
   // Element 接口
   void apply_theme(const Theme& theme) override;
   void measure(const RenderContext& context, const Constraints& constraints) override;
@@ -306,6 +315,9 @@ class Terminal : public Element {
   /// 不信则：返回值与 `wheel_delta` **同号**（系统口径：向上为正）；
   /// `|delta| < 1/3` 时返回 0（不足一行就不动，不做四舍五入）。
   [[nodiscard]] static auto wheel_scroll_lines(float wheel_delta) -> int;
+
+  /// 光标形状的**可读名**（属性面用；`block`/`underline`/`bar`）。
+  [[nodiscard]] static auto cursor_shape_name(st::text::AnsiCursorShape shape) -> std::string_view;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
   [[nodiscard]] auto get_property(std::string_view name) const
       -> std::optional<std::string> override;
@@ -323,6 +335,11 @@ class Terminal : public Element {
   std::vector<std::unique_ptr<TerminalSession>> sessions_{};
   std::size_t active_{0};
   std::size_t title_seq_{1};
+
+  /// 光标默认形状（宿主偏好；程序可用 `DECSCUSR` 覆盖）。默认**竖线**：
+  /// 终端里最常用的是插入点（提示符处、`vim` 插入模式），
+  /// 竖线不遮挡字符，而且不会与“反显/背景色”混淆。
+  st::text::AnsiCursorShape cursor_shape_{st::text::AnsiCursorShape::Bar};
 
   /// 当前会话的 PTY 读线程体：读字节 → 喂屏幕模型。
   void start_pty(const std::shared_ptr<st::process::PtySession>& pty,
