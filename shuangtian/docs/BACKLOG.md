@@ -10,6 +10,34 @@
 > 根因与修复见下方「已完成」段（含 `tests/ui_terminal_input_test.cpp` 与
 > `tools/terminal_input_reverse_verify.py`）。
 
+## 已完成（2026-10-08 开发/测试过程沉淀：真窗口验证工具链）
+
+### 动机
+
+本轮修终端时，「真窗口实测」环节反复返工（临时脚本一个按键起一个 PowerShell），
+时间花在**工具而不是问题上**：(1) PowerShell 启动抢走前台焦点 ⇒ 按键送不到窗口；
+(2) `PostMessage` 不更新按键状态 ⇒ `Ctrl+←` 永远不生效；
+(3) 拿「屏幕文本」判读被 PSReadLine 预测文本与 IME 组合窗污染。
+
+### 产物
+
+| 产物 | 内容 |
+|---|---|
+| `tools/st_win_input.py`（新） | 真窗口按键注入库：三条通道（`PostMessage` / `keybd_event` / `SendInput`）按"要不要修饰键、要不要前台"选型；`ctypes` 进程内调 user32（**不启子进程**，避抢焦点）；带 `ensure_foreground`（失败如实报，不无限重试） |
+| `CONVENTIONS.md` §7.7.1（新） | 三条注入通道的选择表 + 三个已踩的坑（含“验一次按键只需发一条 `WM_KEYDOWN`”那条——补 `WM_CHAR` 会把缺陷原形写进夹具） |
+| `CONVENTIONS.md` §7.7.2（新） | 量尺选择：别用屏幕文本判读；要选“与被测机制同构且不受重绘影响”的量（光标列/属性面/像素哈希） |
+| `CONVENTIONS.md` §7.8 | 判据自己也会错（同一轮两处错都在判据）——先在已知合格/不合格样本上各跑一次 |
+| `CONVENTIONS.md` §9.0（新） | 迭代循环两个卡点：应用在跑 ⇒ 链接 `permission denied`（**不是代码错**）；要真窗口就别用无头默认值起动 |
+| `docs/README.md` | 按意图索引补两行（真按键验证、判据可信性） |
+
+### 验证
+
+- `tools/st_win_input.py` 本体自测：真窗口上 `type_text('abc')` ⇒ 终端光标列 **+3**；
+  `press_key('left', ctrl=True)` ⇒ 位移 **−3**（按词跳）——两条通道均通；
+- CLI `--help` / 探针可跑；`py_compile` 通过；`check_docs.py` 引用全部解析。
+
+> 本轮沉淀的是"怎么验"；「第一次输入要回车两次」那个缺陷本身仍未定位（另起一轮）。
+
 ## 已完成（2026-10-08 终端亮暗主题配色 + 真彩声明）
 
 ### 现象（用户报）

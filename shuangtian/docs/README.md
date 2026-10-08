@@ -40,6 +40,8 @@
 | 写视觉相关代码（颜色、阴影、尺度） | `CONVENTIONS.md` §9.1 + `DESIGN.md` §4.2.4~4.2.6、§5 |
 | 写跨平台代码 | `CONVENTIONS.md` §10（红线摘要）→ `docs/cross_platform.md`（详细版与自查清单） |
 | 写测试 | `CONVENTIONS.md` §7；"假绿测试"的教训在 `DESIGN.md` §8.3.2 |
+| **用真按键验界面交互**（输入/快捷键/回显） | `CONVENTIONS.md` §7.7.1（三条注入通道怎么选）+ §7.7.2（量尺选择）；工具有 `tools/st_win_input.py` |
+| 判断一条结论可不可信（判据自己会不会错） | `CONVENTIONS.md` §7.8（判据先在已知样本上自验） |
 | 知道 DPI 缩放怎么保证不错 | `DESIGN.md` §4.2.1（DPI 是一等公民）与 §8.2 的第 11~13 条（三个真缺陷） |
 | 看 lint 拦什么 | `CONVENTIONS.md` §8；规则实现 `src/pkg/lint.cpp` |
 | 搞懂包管理器 / 构建系统 | `DESIGN.md` §7；"改头文件不重编"那个坑在 §8.2 第 30 条 |
