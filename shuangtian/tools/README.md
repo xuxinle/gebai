@@ -71,6 +71,9 @@
 | `gallery_frame_shot.py` | **示例换壳取证**：gallery 的 `WindowFrame` 几何自检（标题栏/品牌/三控件/内容槽）+ 整窗截图（应用自行退出，不依赖 quit 路径） |
 | `st_gdb_probe.py` | 崩溃现场信息提取 |
 | `st_win_input.py` | **真窗口按键注入库**（Windows）：三条注入通道（`PostMessage` / `keybd_event` / `SendInput`）按"要不要修饰键、要不要前台"选型，带 `ensure_foreground`。**为何不用 PowerShell 拼脚本**：每个按键起一个 PowerShell 会**抢走前台焦点**，按键送不到目标窗口（现象是"完全没反应"，极易误判）；本库用 `ctypes` 在进程内调 user32。配套纪律见 `CONVENTIONS.md` §7.7.1（通道选型）与 §7.7.2（量尺：别拿屏幕文本判读——PSReadLine 预测文本/IME 组合窗会污染读数） |
+| `tui_test_double.py` | **TUI 测试替身**：发真 ESC 序列（`ESC[?1049h` 进备用屏 → 逐帧整屏重绘 → 读按键 → `ESC[?1049l` 退出），行为与 vim/htop 同款。**为何不直接用 vim**：CI/开发机不一定装了；而“独占模式”必须用真程序验（它才是备用屏的真实用法） |
+| `terminal_render_probe.py` | **终端渲染场景探针**：基本输出 / 长输出滚动 / 滚轮回看 / 备用屏进出 / 光标 / 吞吐，逐项断言 + 截图留证。⚠ 跑前先确认**没有自己留下的前台程序**（如上一轮没退的 TUI）——否则读数全是错的 |
+| `terminal_tui_probe.py` | **独占模式端到端**：驱动 `tui_test_double.py` 走完整生命周期（进备用屏 → 逐帧重绘 → 按键 → 反显样式 → 滚轮 → 退出 → 主屏恢复与 shell 可用） |
 | `st_shot_region.py` | 指定区域截图 |
 | `check_docs.py` | **文档引用一致性检查**：扫全部文档/源码里的 `DESIGN.md §X` / `CONVENTIONS.md §X` 引用，确认目标章节真的存在；并核对若干“旧值已清零”与“新内容已到位”。改了章节号或文档结构后跑一下 |
 | `check_selfcontained.py` | **自包含体检（不消费 PCH）**：逐个编译头文件（§6.1）与翻译单元（§6.6）。`st build`/`st check`/`st test` 都自动 `-include st/pch.hpp`，PCH 里含整套常用标准库头——**这两条约定在日常构建里根本不被检查**，只在首次自举才炸（实测：`channel.hpp` 缺 `<functional>`/`<cstdint>`，三个命令全绿，`bootstrap.ps1` 报错）。包含根按组补齐（头/框架/stpm/测试/每个示例），避免假失败 |

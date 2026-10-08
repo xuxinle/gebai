@@ -66,13 +66,31 @@ WM_SYSKEYDOWN = 0x0104
 # —— 虚拟键码（只列常用的；其余直接传数字）——
 VK = {
     "backspace": 0x08, "tab": 0x09, "enter": 0x0D, "shift": 0x10, "ctrl": 0x11,
-    "alt": 0x12, "pause": 0x13, "capslock": 0x14, "esc": 0x1B, "space": 0x20,
+    "alt": 0x12, "pause": 0x13, "capslock": 0x14, "esc": 0x1B,
+    # 空格：注意 `" ".lower()` 仍是 `" "`，所以键名与字符两种写法都要收
+    "space": 0x20, " ": 0x20,
     "pageup": 0x21, "pagedown": 0x22, "end": 0x23, "home": 0x24,
     "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28,
     "insert": 0x2D, "delete": 0x2E,
 }
 VK.update({chr(c): c - 32 for c in range(ord("a"), ord("z") + 1)})   # 'a' -> 0x41
 VK.update({str(d): 0x30 + d for d in range(10)})
+# OEM 标点（美式布局的虚拟键码；这些键的 VK 与字符不同源，必须显式列）
+VK.update({
+    "`": 0xC0, "-": 0xBD, "=": 0xBB, "[": 0xDB, "]": 0xDD, "\\": 0xDC,
+    ";": 0xBA, "'": 0xDE, ",": 0xBC, ".": 0xBE, "/": 0xBF,
+})
+
+# 需要 Shift 才能打出的字符 → (基础虚拟键, 用 Shift)。
+# 为何需要：`PostMessage` 发的是**虚拟键**，而 `:` `?` `"` 这些字符与基础键
+# 不是一一对应（`2`/`/`/`'`）——少了 Shift 状态就打不出来。
+# 真键盘上这些字符本来也是「Shift + 基础键」，所以这里只是把物理事实写出来。
+SHIFTED_CHARS = {
+    "~": "`", "!": "1", "@": "2", "#": "3", "$": "4", "%": "5",
+    "^": "6", "&": "7", "*": "8", "(": "9", ")": "0",
+    "_": "-", "+": "=", "{": "[", "}": "]", "|": "\\",
+    ":": ";", '"': "'", "<": ",", ">": ".", "?": "/",
+}
 
 KEYEVENTF_KEYUP = 0x0002
 
@@ -218,23 +236,47 @@ def press_key(key, ctrl: bool = False, shift: bool = False, alt: bool = False,
 
 
 def type_text(hwnd: int, text: str, per_key_ms: int = 40, *, foreground: bool = False) -> int:
-    """逐字符发真按键，返回发出的字符数。
+    """逐字符发真按键，返回成功发出的字符数。
 
-    `foreground=False`（默认）走 `post_key`（不抢前台）；
-    需要修饰键或精确的物理仿真时传 `foreground=True` 走 `press_key`。
+    `foreground=False`（默认）走 `post_key`（**不抢前台**）；
+    `foreground=True` 全部走 `press_key`。
 
-    注意：这里**不能**用剪贴板粘贴代替——粘贴走 `WM_PASTE`，
+    ⚠ **`PostMessage` 打不出需要 Shift 的字符**（大写字母、`:` `?` `"` `_` …）：
+    `TranslateMessage` 派生 `WM_CHAR` 时读的是**全局按键状态**
+    （`GetKeyState`），而 `PostMessage` 不更新它——把 Shift 位写进 lparam
+    也没用（实测：发 `;` + Shift 位仍得到 `;`，不是 `:`）。
+    这类字符**自动**改走 `press_key`（真按键，**需要前台**）。
+
+    因此：纯小写/数字的输入用默认参数即可；**含大写或标点时窗口须在前台**，
+    抢不到前台时停止并返回已发出的数量（调用方可据此判断少发了）。
+
+    注意：这里**不能用剪贴板粘贴代替**——粘贴走 `WM_PASTE`，
     绕过了按键路径，验不到"按键 → 字符"这条契约。
     """
     sent = 0
     for ch in text:
-        if foreground:
-            press_key(ch, hwnd=hwnd)
+        needs_shift = ch.isupper() or ch in SHIFTED_CHARS
+        base = SHIFTED_CHARS.get(ch, ch.lower() if ch.isupper() else ch)
+        if foreground or needs_shift:
+            if not press_key(base, shift=needs_shift, hwnd=hwnd):
+                break   # 抢不到前台：停下并如实报已发数量
         else:
-            post_key(hwnd, ch)
+            post_key(hwnd, base)
         sent += 1
         time.sleep(per_key_ms / 1000.0)
     return sent
+
+
+def _post_with_shift(hwnd: int, base_key) -> None:
+    """`PostMessage` 通道下发「Shift + 基础键」。
+
+    `PostMessage` **不更新按键状态**，所以不能像 `keybd_event` 那样真按 Shift。
+    能做的是**把 Shift 状态写进 lparam 的第 24 位**（扫描码高位）——那是
+    `TranslateMessage` 用来派生正确 `WM_CHAR` 的依据。实测：不发这一位时
+    `:` 会变成 `;`（Shift 丢失）。
+    """
+    shift_bit = 1 << 24
+    _user32.PostMessageW(hwnd, WM_KEYDOWN, vk_of(base_key), (1 << 16) | 1 | shift_bit)
 
 
 # ════════════════════════════════════════════════════════════════════════════
