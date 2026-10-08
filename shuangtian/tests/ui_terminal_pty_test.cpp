@@ -217,13 +217,31 @@ ST_TEST(terminal_pty_stop_interrupts_without_killing_the_shell) {
   // 长命令与“打印一行”按平台选（旧写法写死了 PowerShell 的 `Start-Sleep`/
   // `Write-Output`，配上 POSIX 测试 shell 时两者都“命令不存在”——报错信息里
   // 恰好包含那串标记，`wait_for` 因此**假通过**：断言看着绿，语义根本没验到）。
+  //
+  // 长命令**先打一个“已开始执行”的标记，再睡**——这是本用例的前置条件，2026-10-08 补齐。
+  //
+  // 为什么要标记：原来只等“命令行回显到屏幕上”就发 `Ctrl+C`，但**回显 ≠ 开始执行**。
+  // shell 收到整行就回显，而真正 spawn 那个命令还要一小会儿；在那个窗口里发的中断
+  // 取决于行规程把它送给谁——前台进程组还没换成 `Start-Sleep`/`sleep` 时，这一次被**吞掉**。
+  // 实测（`tools/pty_stop_probe.cpp`）：不等前置时 12 轮红 6 轮，且红的那几轮屏幕
+  // **一个字节都不再增长**；而**再发一次 `Ctrl+C` 15 ms 就恢复**——即“第一次被吞了”，
+  // 不是会话僵住、更不是产品缺陷（向未运行的命令发 `Ctrl+C` 本就该无效）。
+  //
+  // ⚠ 标记**必须在命令文本里拼不出来**：第一版直接写 `running-9271`，而它就是命令行的
+  // 子串——于是“等标记”退化成“等回显”，前置条件形同虚设（实测仍 25% 红）。
+  // 现在两平台都把标记拼起来，回显里只有 `'ru''nning-9271'` / `('ru'+'nning-9271')`。
+  //
+  // 为何靠标记而不是 `sleep(300)`：本用例刚把两处固定睡拆成条件等待
+  //（见 `Harness::wait_until` 的说明），把盲等加回去是开倒车。标记只能由
+  //“命令真的执行了”产生，等它既准又不慢（实测 15–47 ms）。
 #ifdef _WIN32
-  const std::string long_cmd = "Start-Sleep -Seconds 60";
+  const std::string long_cmd = "Write-Output ('ru'+'nning-9271'); Start-Sleep -Seconds 60";
   const std::string after_cmd = "Write-Output after-stop-9271";
 #else
-  const std::string long_cmd = "sleep 60";
+  const std::string long_cmd = "echo 'ru''nning-9271'; sleep 60";
   const std::string after_cmd = "echo after-stop-9271";
 #endif
+  constexpr const char* kRunningMarker = "running-9271";
 
   // 起长命令 → 中断。
   //
@@ -231,9 +249,11 @@ ST_TEST(terminal_pty_stop_interrupts_without_killing_the_shell) {
   // 共 **2.0s 固定耗时**，而条件实际几百毫秒内就满足（实测：这一个用例占整组
   // 4.19s 中的 2.14s）。改成**条件等待**：一到状态就返回，慢机器也不会睡不够。
   harness.terminal->send_bytes(long_cmd + "\r");
-  // 等命令确实发出（命令行回显到了屏幕上）——而不是盲等。
-  (void)harness.wait_until(
-      [&] { return harness.screen_text().find(long_cmd) != std::string::npos; }, 3000);
+  // **前置条件：命令真的开始执行了**（标记只可能由 shell 执行到那一行产生）。
+  // 先建立前提再量结果——见 §9 的推论：不建前提时测的是另一条路径。
+  const bool started = harness.wait_until(
+      [&] { return harness.screen_text().find(kRunningMarker) != std::string::npos; }, 3000);
+  ST_REQUIRE(started);
 
   // **关键断言的前置**：记下中断前的时刻。长命令是 60 秒，所以只要它在
   // 远短于 60 秒内回到提示符，就只可能是被 `Ctrl+C` 打断了——

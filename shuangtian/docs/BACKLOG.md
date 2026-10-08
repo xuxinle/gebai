@@ -2693,6 +2693,50 @@ SVG 图元 17 例 16/17→**17/17**。
 
 ## P2
 
+- [ ] **`check_selfcontained.py` 纳入发布前流程**（当前是手工跑；无 CI，见下文 CI 已删）。
+  本轮已发现它**首次运行就有真产出**（`channel.hpp` + `core_fs_test.cpp` 两处），
+  说明"约定 + 手工习惯"这条路已经证明不够——但先观察几轮再定接入方式。
+- [ ] **对象缓存对“头文件变化”的失效范围要查**（2026-10-08 调试时踩到，未定论）：
+  改完 `tests/ui_terminal_pty_test.cpp` 后反复跑 `st test`，输出一直显示**旧的断言数**（6 而非 7），
+  且 `build/dev/obj` 里根本没有该单元的对象文件 —— 说明对象是从
+  `~/.shuangtian/cache/objects` 恢复的。补 `ST_NO_CACHE=1` 后仍一次没生效，
+  删掉旧对象再跑就对了。**待查**：缓存键（`cache_key_for`）包含编译器/族/三元组/依赖格式版本/
+  标志，但**不包含源文件内容或 mtime** —— 那么“工程内对象被删了”这条路径上，
+  共享缓存凭什么知道自己的条目是哪个版本的源码编的？（可能靠 `.d` 里的 mtime，
+  也可能确实缺一环。）没量清不修。
+- [ ] **`st test` 的“链接失败被当成测试失败”很难看出**：`ld.lld: error: failed to write
+  output ... permission denied`（防病毒短暂占用，`CONVENTIONS` 末尾已记过）时，
+  整体输出与“一堆用例没跑”混在一起，本轮误判过一次。值得把链接失败与用例失败分开报。
+
+- [x] **`font_stack_load_is_cached_across_calls` 常态红灯 —— 已修**（2026-10-08）：
+  原断言 `hot_ms < 1.0`，实测 172 / 173 / 181 ms（单跑 3 次全红）。
+  **量出来的真因**（`tools/font_stack_cost_probe.cpp` + `font_face_index_cost_probe.cpp`）：
+  热调用 44 ms 里，绝大部分是「**失败不进缓存 × 盲试 face 下标**」——`load_face` 原本写
+  `index = 0..11` 试到失败为止，而 `FontFace::load` **先把整个文件读进内存**才开始校验，
+  越过界那一次一样要读完 `msyh.ttc`（20 MB，单次 9–12 ms）才报 `NotFound`；
+  那条失败不进缓存 ⇒ **每次调用重付**（每个 CJK 候选各一次）。
+  **产品侧修**：新增 `st::text::font_face_count()`（先问 face 数再按下标试，并加
+  `face_count_cached` 因为 `st::fs` 无局部读接口、问一次就要读全文件）。
+  实测 **44 ms → 0.87 ms**。
+  **测试侧修**：改数确定量——新增 `st::text::font_cache_stats()`（`face_loads` /
+  `face_hits` / `count_reads`，**thread_local**，与缓存本身同作用域），
+  断言“热调用零新增 load/count”+“命中数确实在涨（防假绿）”。与机器快慢无关。
+  逆向验证：把 `load_face` 改回猜下标 → 计数器每轮 `load` 增 5、探针退出码 1（抓到）。
+- [x] **`terminal_pty_stop_interrupts_without_killing_the_shell` 偶发红 —— 已修**（2026-10-08）：
+  实测 12 轮红 6 轮，且红的那几轮屏幕**一个字节都不再增长**。
+  **量出来的真因**（`tools/pty_stop_probe.cpp`）：只等“命令行回显到屏幕上”就发 `Ctrl+C`，
+  而**回显 ≠ 开始执行**——shell 收到整行就回显，真正 spawn 命令还要一小会儿；
+  在那个窗口里，`0x03` 取决于行规程把它发给谁，前台进程组还没换成 `Start-Sleep` 时
+  这一次被**吞掉**。关键判据：失败现场**再发一次 `Ctrl+C` 15 ms 就恢复**
+  ⇒ 不是会话僵住、更不是产品缺陷（向未运行的命令发 `Ctrl+C` 本就该无效）。
+  **修**：长命令改成先打一个“已开始执行”标记再睡，等标记出现才发 `Ctrl+C`（条件等待，非盲等）。
+  ⚠ 标记**必须在命令文本里拼不出来**：第一版直接写 `running-9271`，而它就是命令行的子串
+  ⇒ “等标记”退化成“等回显”，前置条件形同虚设（仍 25% 红）。现两平台都拼起来：
+  PowerShell `('ru'+'nning-9271')`、bash `'ru''nning-9271'`。
+  逆向验证：取 HEAD 原版 → **25 轮红 9 轮**；修复版 → **25 轮红 0 轮**。
+- [ ] `check_includes.py` 实际从未被跑过（528 处"缺失"全假阳，且输出在 GBK 控制台是乱码）——
+  已由 `check_selfcontained.py` 取代（它真编一遍，不问"包含集"）。前者可删。
+
 - [ ] 多窗口抽象（Window/WindowManager 进 shell，control::Host 带窗口维度）。
 - [ ] 统一动画系统（现每组件手工状态机：advance_hover/last_hover_time_）。
 - [ ] DisplayList（立即模式→保留模式）：解锁多线程分帧、录制回放测试、GPU 图层缓存。
@@ -2913,6 +2957,21 @@ SVG 图元 17 例 16/17→**17/17**。
   `st/pch.hpp`（里面含 `<map>`）——于是**日常构建全绿、只有全新环境自举（无 PCH）才失败**
   （`error: 'map' is not a member of 'std'`，行号指向使用处 372 行）。已补 `<map>`（并归位 `<set>` 字母序），
   并在 CONVENTIONS §6 新增第 6 条「每个 `.cpp` 自包含、不得依赖 PCH/传递包含」、§10.3 扩为三个静默失效点。
+- [x] **同期同类第二例：`channel.hpp` 缺 `<functional>`/`<cstdint>`**（2026-10-08，`bootstrap.ps1` 报错）：
+  `ChannelSpec::port` 用 `std::uint16_t`、`ChannelFactory` 用 `std::function`，而头里只含
+  `<memory>/<string>/<vector>`。`st build`、`st check`、`st test` **三个命令全绿**，
+  只有首次自举报 `'uint16_t' in namespace 'std' does not name a type`，
+  且行号指向 `channel.cpp:67` 而非缺头的那一行。
+  **与 `<map>` 那条是同一个根因，而"新增约定"没拦住它**——因为约定只是一句话，
+  日常命令里没有任何一条会去跑它（`check_includes.py` 只查 `.cpp`、包含根写死，且从未被跑）。
+  因此这轮把门禁做成可执行工具：**`tools/check_selfcontained.py`**
+  （头文件探针 + 按组补齐包含根的翻译单元编译；实测扫 302 个文件，失败 0）。
+  逆向验证：回退 `channel.hpp` 两行 include → 头文件组与框架单元组各报红，
+  共 2 处失败（退出码 1）；恢复 → 0 失败。CONVENTIONS §6.1 / §10.3 已加指向它的自查命令。
+  副产物：删掉手工草稿 `tools/tu_selfcontained.ps1`（同一逻辑的 PowerShell 版，已被取代）。
+- [x] **顺带修 `tests/core_fs_test.cpp` 缺 `<algorithm>`**（同根因）：用了 `std::ranges::is_sorted`
+  却没包含 `<algorithm>`；测试组在无 PCH 口径下报 `'is_sorted' is not a member of 'std::ranges'`。
+  它一直没暴露，是因为 `st test` 走 PCH 口径——**测试自己也该被这条门禁覆盖**。
 - [x] **修 `build gbcode` 编不过（Json 前向头漏补 `examples/`）**：
   `88ba665`（Json 前向头解耦）把 `dsl.hpp` 的 `#include "st/ext/json.hpp"` 换成前向声明，
   给 `src/*`+`tests/*` 的 18 个 .cpp 补了 `json.hpp`——**却漏了整个 `examples/`**。
