@@ -295,6 +295,17 @@ class Terminal : public Element {
   /// `WM_KEYDOWN` 与 `WM_CHAR`，两边都送就会双回显。
   /// ② 修饰 + 方向/Home/End 必须先于裸键判断（裸键按字符串比较，会全抢走）。
   [[nodiscard]] static auto key_bytes(const Event& event) -> std::string;
+
+  /// **滚轮增量 → 回看偏移的变化量**（行，向上为正、向下为负）。
+  ///
+  /// 提出来单列的理由与 `key_bytes` 同一回事：这是终端的**滚动方向合约**，
+  /// 而它此前埋在 `on_event` 里——只能靠“滚一下看画面变没变”间接验证，
+  /// 而**单向错**（只能往上或只能往下）恰好是那种很难从现象反推的缺陷。
+  /// 纯函数使"方向 + 一格步长 + 半格不动"都能直接断言。
+  ///
+  /// 不信则：返回值与 `wheel_delta` **同号**（系统口径：向上为正）；
+  /// `|delta| < 1/3` 时返回 0（不足一行就不动，不做四舍五入）。
+  [[nodiscard]] static auto wheel_scroll_lines(float wheel_delta) -> int;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
   [[nodiscard]] auto get_property(std::string_view name) const
       -> std::optional<std::string> override;

@@ -1054,6 +1054,13 @@ void Terminal::paint_content(const RenderContext& context, raster::Surface& canv
 // 事件
 // ════════════════════════════════════════════════════════════════════════════
 
+auto Terminal::wheel_scroll_lines(float wheel_delta) -> int {
+  // 一格滚轮 = 3 行（与 `ScrollView` 同一族的滚动手感）。
+  // 用 `trunc` 而非 `round`：半格（`|delta| < 1/3`）应当**不动**，
+  // 而不是被四舍五入成 1 行（那种手感是“轻轻滚一下跳一大格”）。
+  return static_cast<int>(wheel_delta * 3.0f);
+}
+
 auto Terminal::key_bytes(const Event& event) -> std::string {
   if (event.kind == EventKind::TextInput) return event.text;   // 文本的唯一来源
   if (event.kind != EventKind::KeyDown) return {};
@@ -1135,13 +1142,22 @@ auto Terminal::on_event(const RenderContext& context, Event& event) -> bool {
       TerminalSession& target = current();
       if (target.screen != nullptr) {
         const int total = static_cast<int>(target.screen->scrollback_count());
-        const int per = std::max(1, static_cast<int>(-event.wheel_delta * 3.0f));
-        int next = target.scrollback_offset + per;
-        next = std::clamp(next, 0, total);
-        if (next != target.scrollback_offset) {
-          target.scrollback_offset = next;
-          target.user_scrolled = next > 0;   // 与 ScrollView 路径同一状态语义
-          mark_dirty();
+        // **方向跟 `wheel_delta` 的符号走**：向上滚为正、向下为负（与系统一致，
+        // 同 `ScrollView` 的口径）。`scrollback_offset` 是"从底部往上翻了多少行"，
+        // 所以偏移变化与 `delta` **同号**——向上（正）让 offset 增大。
+        //
+        // ⚠ 绝不能再写成 `std::max(1, static_cast<int>(-delta * 3.0f))`：
+        // 那个 `max(1, …)` 把**符号抹掉了**，于是向下滚也变成 `offset += 正数`，
+        // 表现为"能往上滚、不能往下滚"（用户实测报的现象）。
+        const int per = wheel_scroll_lines(event.wheel_delta);
+        if (per != 0) {
+          const int next = std::clamp(target.scrollback_offset + per, 0, total);
+          if (next != target.scrollback_offset) {
+            target.scrollback_offset = next;
+            // 回到底部就恢复"贴底跟随"（与 `ScrollView` 路径同一状态语义）。
+            target.user_scrolled = next > 0;
+            mark_dirty();
+          }
         }
         event.handled = true;
         return true;
@@ -1159,8 +1175,8 @@ auto Terminal::property_names() const -> std::vector<std::string_view> {
   auto names = Element::property_names();
   names.insert(names.end(),
                {"sessions", "active_session", "session_title", "working_directory", "busy",
-                "output", "screen", "cursor", "cursor_rect", "pty", "alt_screen", "monospace",
-                "tabs_visible", "font_scale"});
+                "output", "screen", "cursor", "cursor_rect", "pty", "alt_screen", "scroll",
+                "user_scrolled", "monospace", "tabs_visible", "font_scale"});
   return names;
 }
 
@@ -1209,6 +1225,16 @@ auto Terminal::get_property(std::string_view name) const -> std::optional<std::s
       out += target->screen->row_text(row);
     }
     return out;
+  }
+  if (name == "scroll" || name == "user_scrolled") {
+    // **回看状态**（供自动化/测试断言）。为何必须暴露：回看是 `paint_content`
+    // 画在屏幕**上方**的叠加层——`screen` 属性读的是**屏幕模型**，它看不到回看；
+    // 而像素又会被**光标闪烁**污染（两次采样同相时看起来"没变"）。
+    // 这个读数与被测机制（偏移量）同构，不受重绘/闪烁影响。
+    // 格式 `偏移:总行数`（如 `9:80`）；无屏幕模型时为空。
+    if (target == nullptr || target->screen == nullptr) return std::string{};
+    return std::format("{}:{}", target->scrollback_offset,
+                       target->screen->scrollback_count());
   }
   if (name == "monospace") return monospace_ ? "true" : "false";
   if (name == "tabs_visible") return tabs_visible_ ? "true" : "false";
