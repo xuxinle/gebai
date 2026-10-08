@@ -1483,19 +1483,24 @@ struct CodeEditorPage : Component {
         tabs.push_back(TabData{.key = buffer.key, .label = buffer.label,
                                .modified = buffer.dirty, .closable = true});
       }
-      // 标签条与它的动作区**同一行**：左侧标签（溢出自滚）、右侧固定宽的动作组。
-      // 为什么不把动作挂进 Tabs 自己：它是自绘组件，不产生子元素，没有“尾部槽位”。
+      // 标签条。
+      //
+      // 右侧曾有一个「关闭全部编辑器」按钮（id `tab-close-all`，图标 `trash`）——
+      // 用户 2026-10-08 问“这个删除按钮干什么用的，删了行不”，已删。三条理由：
+      // ① 图标用 `trash`（垃圾桶）语义是“删除”，与“关闭”不同，容易被当成删文件；
+      // ② 每个标签自带 × 关闭，而“全部关闭”在**菜单「文件 → 关闭全部编辑器」**
+      //    已有入口（旧按钮是重复入口）；
+      // ③ 它占 30px 横向宽度，标签多了之后标签区更紧。
+      // `close_all()` 本体保留——菜单那条路径仍走它。
+      //
+      // ⚠ `tabbar` 这层 row **不能省**：外层 `editor-area` 是 column，`Tabs` 的
+      // `grow` 在 column 里是**纵向**撑满——不套一层横向 row 的话标签条会长到
+      // 整个编辑区那么高（实测：删掉 row 后 `#editor-tabs` 高 200px）。
+      // row 的高度固定 34，`Tabs` 的 `grow` 变成横向撑满（它本来的意图）。
       (void)row(c, {.gap = 0.0f, .height = 34.0f, .id = "tabbar"}, [&] {
         (void)dsl::tabs(c, tabs, active, [this](std::size_t index) { switch_tab(index); },
                         [this](const std::string& key) { request_close(key); },
                         {.grow = true, .id = "editor-tabs"});
-        (void)custom<Button>(c, [this](Button& b) {
-          b.set_id("tab-close-all");
-          b.set_icon("trash");
-          b.set_variant(Button::Variant::Ghost);
-          b.set_size(Button::Size::Small);
-          b.on_click = [this] { close_all(); };
-        }, {.width = 30.0f, .height = 34.0f, .key = "close-all"});
       });
       if (!has_editor) {
         column(c, {.padding = 24.0f, .grow = true, .id = "empty-hint"}, [&] {
