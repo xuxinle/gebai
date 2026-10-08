@@ -2042,6 +2042,15 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
   等于把键吃掉：只读编辑器曾因此把 Tab 吞下，焦点被永久扣住、Tab/Shift+Tab 均无响应）。
   「键自含」如编辑器的 Tab 缩进，也由这同一个返回值表达（可编辑 → true → 焦点不动）；
   不另立平行的声明式接口（那会与真值漂移，且无调用方）。
+- **文本来源契约（`KeyDown` vs `TextInput`）**：**可打印文本只由 `TextInput` 提供**，
+  `KeyDown` 只表达「按了哪个键」——组件不得从 `KeyDown::key` 里取单字符当文本。
+  理由不是风格，而是**平台事实**：Win32 上一次物理按键产生 `WM_KEYDOWN` **与** `WM_CHAR`
+  两个消息（后端消息泵调 `TranslateMessage`），分别转成 `KeyDown(key="a")` 与
+  `TextInput(text="a")`——两条都属于同一次按键，任何「两边都当文本」的实现都会把字符
+  写两遍。`Enter`/`Tab`/`Backspace`/方向键/`Ctrl+字母` 不产生 `TextInput`，仍只由 `KeyDown`
+  翻译；修饰 + 方向/Home/End 在 `KeyDown` 侧按 xterm 参数编码
+  （`CSI 1;<1+Shift+2*Alt+4*Ctrl><A|B|C|D|H|F>`；判定必须**先于**裸键分支，否则被裸键字符串比较整片吃掉）。
+  `Terminal::key_bytes` 是这条契约的**纯函数入口**（可逐条断言；见 `tests/ui_terminal_input_test.cpp`）。
 - **全局快捷键**：`UiRoot::register_shortcut(key, {ctrl,shift,alt,meta}, handler)`；
   KeyDown 派发顺序固定为**快捷键表 → 浮层 → 焦点元素 → Tab 焦点环**（后注册优先；
   handler 返回 false 放弃消费继续下沉）。

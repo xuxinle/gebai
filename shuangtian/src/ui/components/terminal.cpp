@@ -19,7 +19,6 @@
 #include <algorithm>
 #include <cstdlib>
 #include <format>
-#include <unordered_map>
 #include <utility>
 
 #include "st/core/channel.hpp"
@@ -1053,77 +1052,65 @@ void Terminal::paint_content(const RenderContext& context, raster::Surface& canv
 // 事件
 // ════════════════════════════════════════════════════════════════════════════
 
+auto Terminal::key_bytes(const Event& event) -> std::string {
+  if (event.kind == EventKind::TextInput) return event.text;   // 文本的唯一来源
+  if (event.kind != EventKind::KeyDown) return {};
+  const std::string& key = event.key;
+  // **修饰 + 方向/Home/End 必须先于裸键分支判断**：裸键分支是按 `key` 字符串
+  // 比较的（`key == "ArrowUp"`），会无条件抢先匹配，把修饰组合整片吃成死代码
+  //（实测：Ctrl+← 只左移一格，xterm 的 `CSI 1;5D` 从未送出）。
+  const bool is_nav = key == "ArrowUp" || key == "ArrowDown" || key == "ArrowRight" ||
+                      key == "ArrowLeft" || key == "Home" || key == "End";
+  if (is_nav && (event.ctrl || event.shift || event.alt)) {
+    // xterm 修饰参数 = 1 + Shift(1) + Alt(2) + Ctrl(4)（组合键各份相加：
+    // Shift+Ctrl = 6、Alt+Shift = 4…）；单份取值 Shift=2、Alt=3、Ctrl=5。
+    const int mod = 1 + (event.shift ? 1 : 0) + (event.alt ? 2 : 0) + (event.ctrl ? 4 : 0);
+    const char final_ch = key == "ArrowUp" ? 'A'
+                        : key == "ArrowDown" ? 'B'
+                        : key == "ArrowRight" ? 'C'
+                        : key == "ArrowLeft" ? 'D'
+                        : key == "Home" ? 'H' : 'F';
+    return std::format("\x1b[1;{}{}", mod, final_ch);
+  }
+  if (key == "Enter" || key == "NumpadEnter") return "\r";
+  if (key == "Backspace") return "\x7f";
+  if (key == "Tab") return "\t";
+  if (key == "Escape" || key == "Esc") return "\x1b";
+  if (key == "Insert") return "\x1b[2~";
+  if (key == "ArrowUp") return "\x1b[A";
+  if (key == "ArrowDown") return "\x1b[B";
+  if (key == "ArrowRight") return "\x1b[C";
+  if (key == "ArrowLeft") return "\x1b[D";
+  if (key == "Home") return "\x1b[H";
+  if (key == "End") return "\x1b[F";
+  if (key == "Delete") return "\x1b[3~";
+  if (key == "PageUp") return "\x1b[5~";
+  if (key == "PageDown") return "\x1b[6~";
+  if (event.alt && key.size() == 1) {
+    // **Alt+字母**：xterm 的标准编码是 `ESC` 前缀（bash 的 `Alt+b`/`Alt+f`
+    // 按单词跳、`Alt+.` 取上条参数全靠它）。这类组合不走 `TextInput`，
+    // 是这些字节的唯一来源。
+    return std::string(1, '\x1b') + key;
+  }
+  if (event.ctrl && key.size() == 1) {
+    // Ctrl+字母 → 0x01..0x1A（`Ctrl+C` = 0x03、`Ctrl+D` = 0x04…）。
+    const char lower = static_cast<char>(std::tolower(static_cast<unsigned char>(key[0])));
+    if (lower >= 'a' && lower <= 'z') {
+      return std::string(1, static_cast<char>(lower - 'a' + 1));
+    }
+    if (key == "[") return "\x1b";
+  }
+  // 其余（含**无修饰的可打印字符**）一律不送：文本归 `TextInput`——见头文件说明。
+  return {};
+}
+
 auto Terminal::on_event(const RenderContext& context, Event& event) -> bool {
   // **键盘 → 字节**（PTY 模式）：这是真终端的输入方式。
   // 补全（Tab）、历史（↑↓）、行内编辑（←→/Home/Backspace）全交给 shell，
-  // 组件只做"按键翻译成字节序列"这一件事。
+  // 组件只做"按键翻译成字节序列"这一件事（映射表在 `key_bytes`，那里有两条不信则）。
   if (event.kind == EventKind::KeyDown || event.kind == EventKind::TextInput) {
     if (!pty_active()) return Element::on_event(context, event);
-    std::string bytes;
-    if (event.kind == EventKind::TextInput) {
-      bytes = event.text;
-    } else {
-      const std::string& key = event.key;
-      if (key == "Enter" || key == "NumpadEnter") bytes = "\r";
-      else if (key == "Backspace") bytes = "\x7f";
-      else if (key == "Tab") bytes = "\t";
-      else if (key == "Escape" || key == "Esc") bytes = "\x1b";
-      else if (key == "Insert") bytes = "\x1b[2~";
-      else if (key == "ArrowUp") bytes = "\x1b[A";
-      else if (key == "ArrowDown") bytes = "\x1b[B";
-      else if (key == "ArrowRight") bytes = "\x1b[C";
-      else if (key == "ArrowLeft") bytes = "\x1b[D";
-      else if (key == "Home") bytes = "\x1b[H";
-      else if (key == "End") bytes = "\x1b[F";
-      else if (key == "Delete") bytes = "\x1b[3~";
-      else if (key == "PageUp") bytes = "\x1b[5~";
-      else if (key == "PageDown") bytes = "\x1b[6~";
-      else if (event.ctrl && (key == "ArrowUp" || key == "ArrowDown")) {
-        // Ctrl+↑/↓（xterm 修饰参数 5）：shell 历史/多行编辑用。
-        bytes = key == "ArrowUp" ? "\x1b[1;5A" : "\x1b[1;5B";
-      }
-      else if (event.ctrl && (key == "ArrowRight" || key == "ArrowLeft")) {
-        // Ctrl+←/→（按单词跳）：bash/zsh 的 readline 默认绑定。
-        bytes = key == "ArrowRight" ? "\x1b[1;5C" : "\x1b[1;5D";
-      }
-      else if (event.shift && (key == "ArrowUp" || key == "ArrowDown" ||
-                               key == "ArrowRight" || key == "ArrowLeft" ||
-                               key == "Home" || key == "End")) {
-        // Shift+方向/Home/End（xterm 修饰参数 2）：选择语义在终端里由 shell 处理，
-        // 老实现会掉进「无映射 → 丢弃」的分支——vim 选择模式/less 搜索全失灵。
-        static const std::unordered_map<std::string, std::string> kShiftMap{
-            {"ArrowUp", "\x1b[1;2A"},  {"ArrowDown", "\x1b[1;2B"},
-            {"ArrowRight", "\x1b[1;2C"}, {"ArrowLeft", "\x1b[1;2D"},
-            {"Home", "\x1b[1;2H"},   {"End", "\x1b[1;2F"}};
-        const auto found = kShiftMap.find(key);
-        if (found != kShiftMap.end()) bytes = found->second;
-      }
-      else if (event.alt && (key == "ArrowUp" || key == "ArrowDown" ||
-                             key == "ArrowRight" || key == "ArrowLeft")) {
-        // Alt+方向（修饰参数 3）。
-        bytes = key == "ArrowUp" ? "\x1b[1;3A"
-                  : key == "ArrowDown" ? "\x1b[1;3B"
-                  : key == "ArrowRight" ? "\x1b[1;3C" : "\x1b[1;3D";
-      }
-      else if (event.alt && key.size() == 1) {
-        // **Alt+字母**：xterm 的标准编码是 `ESC` 前缀（bash 的 `Alt+b`/`Alt+f`
-        // 按单词跳、`Alt+.` 取上条参数全靠它）。旧实现直接丢—— readline 用户
-        // 天天踩。（Shift 已在 `key` 里，不用额外处理。）
-        bytes = std::string(1, '\x1b') + key;
-      }
-      else if (event.ctrl && key.size() == 1) {
-        // Ctrl+字母 → 0x01..0x1A（`Ctrl+C` = 0x03、`Ctrl+D` = 0x04…）。
-        const char lower = static_cast<char>(std::tolower(static_cast<unsigned char>(key[0])));
-        if (lower >= 'a' && lower <= 'z') {
-          bytes = std::string(1, static_cast<char>(lower - 'a' + 1));
-        } else if (key == "[") {
-          bytes = "\x1b";
-        }
-      }
-      if (bytes.empty() && press_plain_bytes(key, event, bytes)) {
-        // 无修饰的可见字符：直接送那个字符（终端的常规路径）。
-      }
-    }
+    const std::string bytes = key_bytes(event);
     if (!bytes.empty()) {
       send_bytes(bytes);
       event.handled = true;
@@ -1160,18 +1147,6 @@ auto Terminal::on_event(const RenderContext& context, Event& event) -> bool {
     }
   }
   return Element::on_event(context, event);
-}
-
-/// 无修饰可见字符 → 原样送（终端要"敲什么就是什么"）。
-auto Terminal::press_plain_bytes(const std::string& key, const Event& event, std::string& out)
-    -> bool {
-  if (event.ctrl || event.meta) return false;
-  if (key == "Shift" || key == "Control" || key == "Alt" || key == "Meta") return false;
-  if (key.size() == 1) {
-    out = key;
-    return true;
-  }
-  return false;
 }
 
 // ════════════════════════════════════════════════════════════════════════════

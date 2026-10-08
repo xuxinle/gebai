@@ -6,6 +6,69 @@
 > 📋 2026-10-08 终端能力修复轮（光标错位/输入回显/多会话串台等 15 项）已完成，
 > 详见 `docs/TERMINAL_FIXES_20261008.md`（根因表 + 修复对照 + 测试策略）。
 
+> 📋 2026-10-08 续：上述修复轮**漏了真窗口的输入契约**——用户报「终端输入一个字符回显了 2 个」。
+> 根因与修复见下方「已完成」段（含 `tests/ui_terminal_input_test.cpp` 与
+> `tools/terminal_input_reverse_verify.py`）。
+
+## 已完成（2026-10-08 终端输入双回显：`KeyDown` 与 `TextInput` 双来源 + 修饰方向键死代码）
+
+### 现象（用户报）
+
+在 gbcode 的真窗口终端里**敲一个字符回显两个**（如按 `a` 出现 `aa`）。
+
+### 根因（实测确认，两层）
+
+1. **文本双来源**（用户可见症状的直接根因）：Win32 后端 `pump_messages` 调了
+   `TranslateMessage`，于是一次物理按键产生 **`WM_KEYDOWN` + `WM_CHAR` 两个消息**，
+   分别转成 `KeyDown(key="a")` 与 `TextInput(text="a")`。而 `Terminal::on_event`
+   **两条都当文本来源**：`KeyDown` 落进裸字符回落（旧 `press_plain_bytes`）送一遍，
+   `TextInput` 再送一遍 ⇒ PTY 收到两个字节、shell 回显两次。
+   **框架契约是「`TextInput` 是文本的唯一来源」**（`Input`/`CodeEditor`/`TextArea`
+   一致如此，`KeyDown` 里的裸字符一律不进字），终端违反了它。
+2. **修饰方向键映射是死代码**（顺带实测发现）：`Ctrl/Shift/Alt + 方向/Home/End` 的
+   `else if` 分支排在裸键分支（`key == "ArrowUp"`）**之后**，而裸键按字符串比较、无条件
+   抢先匹配 ⇒ 修饰组合永远走不到。实测：按一次 `Ctrl+←` 只左移 1 格（应送出 `ESC[1;5D`），
+   而 raw `ESC[1;5D` 在同一个 shell 里确实能按词跳 3 格。**即上一轮提交声称
+   「Alt组合、修饰方向键全失灵 → 已补齐」的能力从未生效。**
+
+### 实测数据
+
+| 输入 | 修前 | 修后 |
+|---|---|---|
+| 只发 `KeyDown('q')` | 屏上 `q` | 无（文本归 `TextInput`） |
+| 只发 `TextInput('w')` | 屏上 `w` | `w` |
+| **一次按键** = `KeyDown(ch)`+`TextInput(ch)` 成对 | `aabbcc`（每字两遍） | `abc`（每字一遍） |
+| 真窗口 PostMessage 3 次 `WM_KEYDOWN`（经 TranslateMessage 派生 WM_CHAR） | — | 光标列 **+3**（每按一次恰好 1 字符） |
+| 真窗口 按住 Ctrl + `←` | 位移 −1（一格） | 位移 −3（按词跳） |
+
+### 为什么既有测试全绿（可复用的教训）
+
+控制通道的 `input.key` **只发 `KeyDown`**、`input.text` **只发 `TextInput`**——
+**单发各自都正常**，只有真窗口才会成对出现。于是所有走控制通道的用例都看不见这个问题。
+回归用例必须**显式构造「成对」这一输入形态**（`terminal_keydown_then_textinput_sends_one_character`），
+而不能依赖某个驱动的既有调用序列。
+
+### 修法
+
+- 把输入翻译提为**纯函数 `Terminal::key_bytes(const Event&)`**（头文件声明）：
+  可打印字符只认 `TextInput`；控制键/`Alt+字母`/`Ctrl+字母` 仍由 `KeyDown` 翻译；
+  修饰 + 方向/Home/End **先于**裸键分支判定，按 xterm 参数编码（`1+Shift+2*Alt+4*Ctrl`）。
+  删掉因此退役的 `press_plain_bytes` 与其 `<unordered_map>` 依赖。
+- 回归：`tests/ui_terminal_input_test.cpp`（7 个用例，覆盖成对形态/裸键不发/修饰参数/
+  组合修饰/控制键与 Alt·Ctrl 不倒退）。
+- 逆向验证：`tools/terminal_input_reverse_verify.py`（3 条回退 → 期望红 → 恢复），
+  实测**全部确实变红**（不是恒绿测试）。
+- 契约写进 `DESIGN.md` §4「文本来源契约（`KeyDown` vs `TextInput`）」。
+
+### 顺带发现（未修，待后续）
+
+`tools/gbcode_e2e.py` **第一条断言就死**：它等 `#terminal-input`（旧「输出区 + 输入框」形态的
+钩子），而 gbcode 的终端已迁到真终端组件（PTY，**没有输入框**）——该 id 早已不存在。
+实测：**回退本轮改动（`git stash`）后失败完全相同** ⇒ 与本轮无关的存量漂移。
+即这份 e2e 脚本自终端换真终端起就整体跑不起来了（29 组全不可达）。
+方向：按真终端形态重写它（输入走 `terminal` 的 `send`/`send_line` 动作与
+`input.key`，断言读 `screen`/`cursor` 属性）。
+
 ## 已完成（2026-10-07 分层重构：行排版抽为框架低级组件 `LineLayout`）
 
 用户对前两轮返工的判语：「有这么难吗，是不是框架或组件设计不合理」+

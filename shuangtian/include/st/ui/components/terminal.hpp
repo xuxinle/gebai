@@ -282,6 +282,19 @@ class Terminal : public Element {
   void arrange(const RenderContext& context, math::Rect rect) override;
   void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
   auto on_event(const RenderContext& context, Event& event) -> bool override;
+
+  /// **键盘/文本事件 → 写回 PTY 的字节**（PTY 模式的输入翻译契约）。
+  ///
+  /// 提出来单列的理由：这是终端对外的**输入合约**（哪些事件对应哪些字节序列），
+  /// 而它此前埋在 `on_event` 里——只能靠“起真 shell 再看屏幕”间接验证，
+  /// 映射表本身没有可断言的入口。纯函数（不碰 PTY/屏幕/成员状态）使这张表
+  /// 可以被逐条钉死。
+  ///
+  /// 两条不信则：① **可打印字符只认 `TextInput`**（`KeyDown` 里的裸字符返回空串）——
+  /// 与 `Input`/`CodeEditor`/`TextArea` 同一份契约；Win32 上一次按键同时产生
+  /// `WM_KEYDOWN` 与 `WM_CHAR`，两边都送就会双回显。
+  /// ② 修饰 + 方向/Home/End 必须先于裸键判断（裸键按字符串比较，会全抢走）。
+  [[nodiscard]] static auto key_bytes(const Event& event) -> std::string;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
   [[nodiscard]] auto get_property(std::string_view name) const
       -> std::optional<std::string> override;
@@ -331,9 +344,6 @@ class Terminal : public Element {
   /// 布局阶段不直接改 PTY，免得测量多次导致尺寸抖动）。
   st::process::PtySize pending_size_{80, 24};
   bool pending_size_set_{false};
-  /// 无修饰可见字符 → 原样送（终端的常规输入路径）。
-  [[nodiscard]] static auto press_plain_bytes(const std::string& key, const Event& event,
-                                              std::string& out) -> bool;
   /// 生效的通道工厂（未注入时用缺省，惰性初始化）。
   [[nodiscard]] auto default_factory() const -> const st::exec::ChannelFactory&;
 
