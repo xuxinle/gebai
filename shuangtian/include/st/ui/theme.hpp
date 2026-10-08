@@ -3,6 +3,7 @@
 /// 设计系统（`DESIGN.md` §5）：token 表 + 亮/暗主题。
 /// 霜天意象——冷冽清晨：中性色偏冷，品牌色冰蓝，辅以青色点缀。
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -184,6 +185,26 @@ struct Metrics {
 
 enum class ThemeMode : std::uint8_t { Light, Dark };
 
+/// 终端色板（`st::ui::Terminal` 专用）。
+///
+/// 为什么独立于 `Palette`：终端要的是「一块屏幕」的观感——底色 / 前景 / 光标
+/// 自成一套，且 **16 个 ANSI 标准色必须成组上下标**。后者是硬需求：
+/// ANSI 色是**协议固定语义**（`31` 永远是红、`93` 永远是亮黄），
+/// 程序按它们选色，主题不能只换个底色就了事。
+///
+/// 为何不能一套色用到底：前 16 色在不同底色上**对比度方向相反**——
+/// 为深底调的亮黄（`#E5E510`）放到白底上对比度只有 **1.00**（字面看不见）、
+/// 亮白 `#E5E5E5` 是 **1.07**、亮绿 `#23D18B` 是 **1.47**。
+/// 所以亮暗两套各自成表，且**每色对底色 ≥4.5:1**（WCAG AA 正文口径，见回归断言）。
+struct TerminalPalette {
+  math::Color bg{};        ///< 屏幕底色（不借 `surface_sunken`：那是通用凹槽语义）
+  math::Color fg{};        ///< 默认前景（`SGR 39` 回到它）
+  math::Color cursor{};
+  math::Color selection{};
+  /// xterm 前 16 色：0-7 标准、8-15 亮色。加粗（`SGR 1`）会把 0-7 提升到 8-15。
+  std::array<math::Color, 16> ansi{};
+};
+
 /// 语义色调（组件用它表达意图，实际颜色由主题解析）。
 enum class Tone : std::uint8_t {
   Default,
@@ -210,6 +231,8 @@ class Theme {
   [[nodiscard]] auto metrics() noexcept -> Metrics& { return metrics_; }
   [[nodiscard]] auto syntax() const noexcept -> const SyntaxPalette& { return syntax_; }
   [[nodiscard]] auto syntax() noexcept -> SyntaxPalette& { return syntax_; }
+  [[nodiscard]] auto terminal() const noexcept -> const TerminalPalette& { return terminal_; }
+  [[nodiscard]] auto terminal() noexcept -> TerminalPalette& { return terminal_; }
 
   [[nodiscard]] auto font_family() const -> const std::string& { return font_family_; }
   void set_font_family(std::string family) { font_family_ = std::move(family); }
@@ -226,6 +249,7 @@ class Theme {
   ThemeMode mode_{ThemeMode::Light};
   Palette colors_{};
   SyntaxPalette syntax_{};
+  TerminalPalette terminal_{};
   Metrics metrics_{};
   std::string font_family_{"Noto Sans CJK SC"};
   std::string name_{"light"};

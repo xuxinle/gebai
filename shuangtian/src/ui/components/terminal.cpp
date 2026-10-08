@@ -70,18 +70,18 @@ namespace {
 
 /// 终端索引色 → RGB（xterm 的 256 色表）。
 ///
-/// 前 16 色与 16..231 的 6×6×6 立方、232..255 的灰阶都按 xterm 口径算。
-/// 为什么不用主题里的"强调色"映射：终端里 `31` 就是**红**，
-/// 与界面的品牌色无关（用户跑 `git diff` 时期待的是传统配色）。
-[[nodiscard]] auto index_to_rgb(std::uint8_t index, bool bright) -> math::Color {
-  static constexpr std::uint8_t kBase[16][3] = {
-      {0, 0, 0},       {205, 49, 49},   {13, 188, 121},  {229, 229, 16},
-      {36, 114, 200},  {188, 63, 188},  {17, 168, 205},  {229, 229, 229},
-      {102, 102, 102}, {241, 76, 76},   {35, 209, 139},  {245, 245, 67},
-      {59, 142, 234},  {214, 112, 214}, {41, 184, 219},  {255, 255, 255}};
+/// 前 16 色**来自主题**（`TerminalPalette::ansi`）——它们是协议固定语义
+///（`31` 永远是红），但**明度必须跟底色走**（深底的亮黄放白底上对比度只有 1.0，
+/// 字面看不见）；16..231 的 6×6×6 立方与 232..255 的灰阶是**设备无关标准值**，
+/// 不随主题变。
+[[nodiscard]] auto index_to_rgb(std::uint8_t index, bool bright, const TerminalPalette& palette)
+    -> math::Color {
   if (index < 16) {
-    const int slot = bright && index < 8 ? index + 8 : index;
-    return math::Color{kBase[slot][0], kBase[slot][1], kBase[slot][2], 255};
+    // 加粗（SGR 1）把 0-7 提升到对应的亮色（8-15）—— xterm 的老约定，
+    // 也是许多工具“粗体高亮”的实现方式。
+    const std::size_t slot = bright && index < 8 ? static_cast<std::size_t>(index) + 8
+                                                 : static_cast<std::size_t>(index);
+    return palette.ansi[slot];
   }
   if (index < 232) {
     const int value = index - 16;
@@ -117,11 +117,11 @@ auto utf8_append(char32_t ch, std::string& out) -> void {
 }
 
 /// 解析颜色到 RGB（默认色走调用方给的兜底色）。
-[[nodiscard]] auto resolve(const st::text::AnsiColor& color, const math::Color& fallback,
-                           bool bright) -> math::Color {
+[[nodiscard]] auto resolve(const st::text::AnsiColor& color, const math::Color& fallback, bool bright,
+                          const TerminalPalette& palette) -> math::Color {
   switch (color.kind) {
     case st::text::AnsiColor::Kind::Default: return fallback;
-    case st::text::AnsiColor::Kind::Indexed: return index_to_rgb(color.index, bright);
+    case st::text::AnsiColor::Kind::Indexed: return index_to_rgb(color.index, bright, palette);
     case st::text::AnsiColor::Kind::Rgb: return math::Color{color.r, color.g, color.b, 255};
   }
   return fallback;
@@ -897,16 +897,18 @@ void Terminal::arrange(const RenderContext& context, math::Rect rect) {
 
 void Terminal::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
-  const auto& colors = context.theme.colors();
-
-  // 上一步记下的尺寸在这里上报（每帧一次，且此时布局已稳定）。
+  // 终端有**自己的**色板（挂主题）：底色/前景/光标 + 16 个 ANSI 色。
+  // 不借 `colors.surface_sunken`——那是通用凹槽语义（输入框/代码底共用），
+  // 亮色下它发灰、暗色下它奇黑，都不像"一块屏幕"；且用它当底时
+  // 16 色的对比度无从上标（协议固定语义的色必须对着真正的屏幕底验）。
+  const TerminalPalette& palette = context.theme.terminal();
   auto* self = const_cast<Terminal*>(this);
   if (pending_size_set_) {
     const_cast<bool&>(pending_size_set_) = false;
     self->set_terminal_size(pending_size_);
   }
   // 屏幕底色（终端是"一屏文本"，底色把它与普通面板分开）。
-  canvas.fill_rect(output_rect_, raster::Paint::solid(colors.surface_sunken));
+  canvas.fill_rect(output_rect_, raster::Paint::solid(palette.bg));
 
   const TerminalSession& session = current();
   if (session.screen == nullptr) {
@@ -934,8 +936,8 @@ void Terminal::paint_content(const RenderContext& context, raster::Surface& canv
   const float origin_x = output_rect_.x + 4.0f;
   const float origin_y = output_rect_.y + 4.0f;
 
-  const math::Color default_fg = colors.text;
-  const math::Color default_bg = colors.surface_sunken;
+  const math::Color default_fg = palette.fg;
+  const math::Color default_bg = palette.bg;
 
   // —— 回看滚动 ——
   // 往上翻时把 scrollback 的末尾接在屏幕上方一起画：
@@ -1000,8 +1002,8 @@ void Terminal::paint_content(const RenderContext& context, raster::Surface& canv
       }
       const float x = origin_x + static_cast<float>(col) * cell_w;
       const float width = static_cast<float>(end - col) * cell_w;
-      math::Color fg = resolve(style.fg, default_fg, style.bold);
-      math::Color bg = resolve(style.bg, default_bg, false);
+      math::Color fg = resolve(style.fg, default_fg, style.bold, palette);
+      math::Color bg = resolve(style.bg, default_bg, false, palette);
       if (style.reverse) std::swap(fg, bg);
       if (style.dim) fg = math::Color{fg.r, fg.g, fg.b, 150};
       if (!(bg == default_bg)) {
@@ -1033,15 +1035,15 @@ void Terminal::paint_content(const RenderContext& context, raster::Surface& canv
       switch (screen.cursor_shape()) {
         case st::text::AnsiCursorShape::Block:
           canvas.fill_rect(math::Rect{cx, cy, cell_w, line_h},
-                           raster::Paint::solid(math::Color{colors.text.r, colors.text.g,
-                                                             colors.text.b, 110}));
+                           raster::Paint::solid(math::Color{palette.cursor.r, palette.cursor.g,
+                                                             palette.cursor.b, 110}));
           break;
         case st::text::AnsiCursorShape::Underline:
           canvas.fill_rect(math::Rect{cx, cy + line_h - 2.0f, cell_w, 2.0f},
-                           raster::Paint::solid(colors.text));
+                           raster::Paint::solid(palette.cursor));
           break;
         case st::text::AnsiCursorShape::Bar:
-          canvas.fill_rect(math::Rect{cx, cy, 2.0f, line_h}, raster::Paint::solid(colors.text));
+          canvas.fill_rect(math::Rect{cx, cy, 2.0f, line_h}, raster::Paint::solid(palette.cursor));
           break;
       }
     }

@@ -101,6 +101,21 @@ auto Theme::light() -> Theme {
   theme.syntax_.find_active = hex(0xF0A72EFFU);     // 当前命中更深
   theme.syntax_.cursor = hex(0x4655D8FFU);
   theme.syntax_.matching_bracket = hex(0xF59E0B55U);
+  // 终端色板（浅色）：**白底 + 暗色 16 色**。
+  //
+  // 为何不能沿用深底那套：ANSI 色是**协议固定语义**（`31` 永远是红），
+  // 但它的**明度必须跟底色走**——为深底调的亮黄 `#E5E510` 放到白底上
+  // 对比度只有 1.00（字面看不见）、亮白 `#E5E5E5` 是 1.07、亮绿 `#23D18B` 是 1.47。
+  // 这里每个色都对白底 ≥6.2:1（回归断言锁 ≥4.5，即 WCAG AA 正文口径）。
+  theme.terminal_.bg = hex(0xFFFFFFFFU);
+  theme.terminal_.fg = hex(0x1F2430FFU);
+  theme.terminal_.cursor = hex(0x4655D8FFU);
+  theme.terminal_.selection = hex(0x4655D833U);
+  theme.terminal_.ansi = {
+      hex(0x3A3A45FFU), hex(0xB32218FFU), hex(0x0A6234FFU), hex(0x7A5600FFU),
+      hex(0x1A46C4FFU), hex(0x861F9BFFU), hex(0x0B6477FFU), hex(0x57616FFFU),
+      hex(0x4E4E5CFFU), hex(0xBC1C12FFU), hex(0x0E6F3CFFU), hex(0x865700FFU),
+      hex(0x1D4ED8FFU), hex(0x9317A8FFU), hex(0x096B80FFU), hex(0x3A3A45FFU)};
   theme.metrics_ = Metrics{};
   return theme;
 }
@@ -182,6 +197,19 @@ auto Theme::dark() -> Theme {
   theme.syntax_.find_active = hex(0x9A7B1FFFU);
   theme.syntax_.cursor = hex(0xB8C4FFFFU);
   theme.syntax_.matching_bracket = hex(0xE6BD6D55U);
+  // 终端色板（深色）：经典终端黑 `#0C0C0C` + 亮 16 色。
+  // 底取经典黑而不是 `surface_sunken`（`#050507`）：后者是**通用凹槽语义**
+  //（输入框/代码底共用），奇黑偏沉；`#0C0C0C` 才是“一块屏幕”应当的观感。
+  // 每个色对底 ≥5.2:1（回归断言锁 ≥4.5；black/brBlack 为灰阶，不参与）。
+  theme.terminal_.bg = hex(0x0C0C0CU);
+  theme.terminal_.fg = hex(0xE6E6E6FFU);
+  theme.terminal_.cursor = hex(0x8B9AFFFFU);
+  theme.terminal_.selection = hex(0x8B9AFF44U);
+  theme.terminal_.ansi = {
+      hex(0x3A3A45FFU), hex(0xE05555FFU), hex(0x0DBC79FFU), hex(0xE5E510FFU),
+      hex(0x4A8FE0FFU), hex(0xCE63CEFFU), hex(0x11A8CDFFU), hex(0xE5E5E5FFU),
+      hex(0x8A8A8AFFU), hex(0xF14C4CFFU), hex(0x23D18BFFU), hex(0xF5F543FFU),
+      hex(0x3B8EEAFFU), hex(0xD670D6FFU), hex(0x29B8DBFFU), hex(0xFFFFFFFFU)};
   theme.metrics_ = Metrics{};
   return theme;
 }

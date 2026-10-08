@@ -26,6 +26,7 @@
 #include <atomic>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #if defined(_WIN32)
@@ -127,6 +128,50 @@ struct ConPtyApi {
   std::wstring out(static_cast<std::size_t>(needed), L'\0');
   MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), needed);
   return out;
+}
+
+/// UTF-8 → UTF-16 环境块（`CREATE_UNICODE_ENVIRONMENT` 要的是
+/// `NAME=VALUE\0...\0\0` 这样的双空结尾宽字符串）。
+///
+/// 为什么要手拼而不是改自身进程环境：`CreateProcessW` 只有在
+/// `lpEnvironment = nullptr` 时才**继承**父进程环境；一旦要注入变量，
+/// 就得交出**完整**环境块——所以这里先取当前环境，再把要改的键覆盖/追加。
+[[nodiscard]] auto build_environment_block(const std::vector<std::pair<std::string, std::string>>& overrides)
+    -> std::wstring {
+  std::wstring block;
+  const auto append = [&block](const std::wstring& entry) {
+    block.append(entry);
+    block.push_back(L'\0');
+  };
+  // ① 原环境（可变副本）：`GetEnvironmentStringsW` 给的是「读不到就继续」的双空结尾块。
+  if (LPWCH raw = ::GetEnvironmentStringsW(); raw != nullptr) {
+    for (const wchar_t* cursor = raw; *cursor != L'\0';) {
+      const std::wstring entry(cursor);
+      cursor += entry.size() + 1;
+      // 跳过已被覆盖的同名项（比较到 `=` 为止，名字不区分大小写）。
+      const std::size_t eq = entry.find(L'=');
+      const std::wstring name = eq == std::wstring::npos ? entry : entry.substr(0, eq);
+      bool shadowed = false;
+      for (const auto& [override_name, override_value] : overrides) {
+        (void)override_value;
+        const std::wstring wide_name = widen(override_name);
+        if (name.size() == wide_name.size() &&
+            ::_wcsnicmp(name.c_str(), wide_name.c_str(), name.size()) == 0) {
+          shadowed = true;
+          break;
+        }
+      }
+      // 以 `=` 开头的特殊项（`=C:` 这类驱动器当前目录）必须原样保留。
+      if (!shadowed || entry.starts_with(L"=")) append(entry);
+    }
+    ::FreeEnvironmentStringsW(raw);
+  }
+  // ② 覆盖项。
+  for (const auto& [name, value] : overrides) {
+    append(widen(name) + L"=" + widen(value));
+  }
+  block.push_back(L'\0');   // 整块收尾的第二空
+  return block;
 }
 
 /// 命令行拼装：Windows 的参数需要引号转义（空格、引号、结尾反斜杠）。
@@ -305,10 +350,22 @@ void PtySession::open(const std::string& program, const std::vector<std::string>
   std::vector<wchar_t> mutable_command(command.begin(), command.end());
   mutable_command.push_back(L'\0');
 
+  // —— 环境块：声明**终端身份**（`TERM` / `COLORTERM`）——
+  //
+  // 为何必须显式设：默认 `lpEnvironment = nullptr` 是**继承父进程环境**，
+  // 而父进程（桌面应用）不是终端——它没有 `TERM`/`COLORTERM`（实测均空），
+  // 于是子进程里 `git`/`ls`/`bat` 都判定“输出被重定向/不支持颜色”而**不上色**。
+  // `COLORTERM=truecolor` 是标准做法（与 Windows Terminal / VSCode 一致）：
+  // 声明支持 24 位色，程序才会发 `38;2;r;g;b`（屏幕模型已支持解码）。
+  std::wstring environment = build_environment_block({
+      {"TERM", "xterm-256color"},
+      {"COLORTERM", "truecolor"},
+  });
+
   const DWORD flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
   const BOOL ok = CreateProcessW(nullptr, mutable_command.data(), nullptr, nullptr,
                                  FALSE,   // bInheritHandles 必须 false（同上）
-                                 flags, nullptr, cwd.empty() ? nullptr : workdir.c_str(),
+                                 flags, environment.data(), cwd.empty() ? nullptr : workdir.c_str(),
                                  &startup.StartupInfo, &impl->child);
   DeleteProcThreadAttributeList(list);
   HeapFree(GetProcessHeap(), 0, list);
@@ -344,6 +401,13 @@ void PtySession::open(const std::string& program, const std::vector<std::string>
     if (!cwd.empty()) {
       if (chdir(cwd.c_str()) != 0) { /* 目录不存在时保持继承的 cwd，不阻断 */ }
     }
+    // —— 终端身份 ——
+    // 必须显式设：父进程（桌面应用）不是终端，不设的话子进程看到的 `TERM` 是空
+    //（实测），`git`/`ls`/`bat` 据此判定不支持颜色而**不上色**。
+    // `COLORTERM=truecolor` 声明 24 位色（屏幕模型已支持 `38;2;r;g;b` 解码）。
+    // 仅设**未定义**的项：用户显式指定的 `TERM` 优先（尊重用户环境）。
+    (void)setenv("TERM", "xterm-256color", 0);
+    (void)setenv("COLORTERM", "truecolor", 0);
     auto args = to_argv(program, argv);
     execvp(program.c_str(), args.data());
     _exit(127);   // exec 失败（PATH 里没有）
