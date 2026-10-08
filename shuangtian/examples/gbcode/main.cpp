@@ -1506,8 +1506,18 @@ struct CodeEditorPage : Component {
         });
         return;
       }
-      build_editor_toolbar(c, buffers, active);
-      build_breadcrumb(c, buffers, active);
+      // 编辑器头部**只保留标签栏**（用户 2026-10-08 要求“头部内容都去掉，只保留 tab 和内容”）。
+      //
+      // 去掉了两块（它们的定义保留在文件里，见 `build_editor_toolbar` /
+      // `build_breadcrumb`——应用如有需要可随时接回）：
+      // * `editor-toolbar`（保存/撤销/重做/注释/参考线/右键菜单入口，30px）；
+      // * `breadcrumb`（路径面包屑，26px）。
+      //
+      // 两条理由：① 共 56px 垂直空间还给代码（编辑器是主角）；
+      // ② 那些动作**本来就有**键键与菜单两条入口（Ctrl+S/Ctrl+Z/…、菜单栏、
+      // 右键菜单），零鼠标可达性不靠这条工具栏——与它当初存在的理由
+      //（“鼠标用户没有第三条腿”）相比，空间收益更实在。
+      //
       // 编辑器：custom<T> 逃生舱（CodeEditor 的一等接口属性面覆盖不到）。
       //
       // **只写“持久配置”**（字体/行宽），且每项都自带相等早退——它们在语义上是
