@@ -70,6 +70,15 @@ struct TerminalSession {
   std::jthread reader{};
   /// **屏幕模型**：PTY 的字节流解释成的网格（含光标、样式、备用屏）。
   std::shared_ptr<st::text::AnsiScreen> screen{};
+  /// **字节缓冲（按会话分）**：读线程 → 主线程。多会话各自的输出互不相混。
+  ///
+  /// 旧实现是组件级单缓冲，两个标签各自起 shell 后字节会互相串台
+  ///（实测：后台标签的输出喂进前台标签的屏幕——乱码）。锁是组件级的
+  /// `pending_mutex_`（锁粒度小、争用可忽略，不值得每会话一把）。
+  std::vector<std::string> pty_pending{};
+  /// PTY 是否已退出、退出码多少（读线程置位，`pump` 收尾）。
+  bool pty_exited{false};
+  int pty_exit_code{0};
   /// 子进程/作业是否在跑。
   ///
   /// PTY 模式下它的含义是**shell 还活着**（不是“命令在跑”）——真终端里
@@ -92,6 +101,12 @@ struct TerminalSession {
 
   /// 生效的工作目录（PTY 起 shell 时用；`cd` 在 PTY 模式下归 shell 管）。
   std::string cwd{};
+
+  /// 回看滚动偏移（**行数**，0 = 贴底看屏幕现在；>0 = 往上翻了多少行）。
+  ///
+  /// 与 `user_scrolled` 的关系：它记录精确位置（滚轮事件推进/回退；
+  /// `user_scrolled` 仍是"是否不贴底"的布尔，供行为模式判断——两个状态同步维护）。
+  int scrollback_offset{0};
 
   [[nodiscard]] auto in_pty_mode() const noexcept -> bool { return pty != nullptr; }
 };
@@ -304,11 +319,7 @@ class Terminal : public Element {
   st::exec::ChannelSpec spec_{};
   std::jthread reader_{};
   std::vector<std::string> pending_{};
-  /// PTY 字节缓冲（读线程 → 主线程；与行模式的 `pending_` 分开——
-  /// 两者可能同时有活，混在一个缓冲里会把行文本喂进屏幕模型）。
-  std::vector<std::string> pty_pending_{};
-  bool pty_exited_{false};
-  int pty_exit_code_{0};
+  /// （PTY 字节已改按会话存：`TerminalSession::pty_pending`——多会话不串台。）
   mutable std::mutex pending_mutex_{};
   std::atomic<bool> stop_requested_{false};
   bool job_finished_{false};
@@ -338,6 +349,15 @@ class Terminal : public Element {
   float base_font_size_{13.0f};
   float line_height_{17.0f};
   float cell_width_{8.0f};
+  /// **实测格宽缓存**（`measure_width("M")`，布局与渲染共用一个数）。
+  ///
+  /// 为什么必须缓存：旧实现 `arrange` 用「字号×系数」估列数上报 PTY、
+  /// `paint_content` 却用实测格宽渲染——两个数不相等时，shell 认为的换行列与
+  /// 实际渲染的换行列错开，光标逐行漂移（实测：输出几行后光标与字符错位）。
+  /// 现在 `arrange` 也用实测值（经 `RenderContext::text` 拿端口），缓存到成员、
+  /// 两处严格同源。无字体环境（端口为空）时退回系数估算。
+  float measured_cell_width_{-1.0f};
+  float measured_line_height_{-1.0f};
 
   // —— 子件（组合而非自绘：标签与滚动是既有组件）——
   Tabs* tabs_{nullptr};
@@ -352,6 +372,8 @@ class Terminal : public Element {
   mutable std::vector<std::string> last_labels_{};
   /// 屏幕文本的渲染缓存（逐行，避免每帧重建整屏字符串）。
   mutable std::vector<std::string> screen_lines_{};
+  /// 刷新实测格宽缓存（字体端口/字号/缩放变化时调用；`arrange` 里先于列数计算）。
+  void refresh_cell_metrics(const RenderContext& context);
 
   /// 取当前会话（容器为空时先补一个——不变式：**永远至少一个会话**）。
   auto current() -> TerminalSession&;

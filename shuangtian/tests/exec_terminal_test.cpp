@@ -174,6 +174,39 @@ ST_TEST(channel_local_runs_command_and_reports_exit_code) {
   ST_CHECK(all.find("channel-ok") != std::string::npos);
 }
 
+ST_TEST(channel_local_passes_args_without_repeating_the_program) {
+  // **`args` 不得重复 `program`**：`ChannelSpec::args` 的契约是"程序参数"，
+  // `StreamHandle::open` 会把 `program` 作为 `argv[0]` 插到最前——
+  // 适配层再插一次就会变成 `sh sh -c "…"` / `st st build …`。
+  //
+  // 实测现象：退出码 2、输出为空（sh 把第二个 `sh` 当**脚本文件**解析）。
+  // 这条路径不只测试在跑：IDE 的"构建/lint/测试"按钮走 `run_program`，
+  // 而 `run_program` 传的正是 `args`（`command` 为空）——多插一次会让**所有**
+  // 带参数的集成命令失败（不只是"命令输出不对"，而是根本跑不起来）。
+  auto channel = st::exec::make_local_channel();
+  ST_REQUIRE(channel != nullptr);
+  ChannelSpec spec{};
+  spec.kind = "local";
+  spec.args = {"-c", "echo args-probe-9271"};
+#ifdef _WIN32
+  spec.program = "cmd.exe";
+  spec.args = {"/c", "echo args-probe-9271"};
+#else
+  spec.program = "/bin/sh";
+#endif
+  channel->open(spec);
+  ST_REQUIRE(channel->valid());
+  std::string all;
+  std::string line;
+  while (channel->read_line(line)) {
+    all += line;
+    all += "\n";
+  }
+  const int code = channel->finish();
+  ST_CHECK_EQ(code, 0);
+  ST_CHECK(all.find("args-probe-9271") != std::string::npos);
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // 终端：会话
 // ════════════════════════════════════════════════════════════════════════════

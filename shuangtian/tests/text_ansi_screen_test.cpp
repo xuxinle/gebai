@@ -348,3 +348,55 @@ ST_TEST(ansi_screen_delete_and_insert_characters) {
   screen.feed("\x1b[1;3H\x1b[2@");   // 插两个空位
   ST_CHECK_EQ(row(screen, 0), std::string("ab  ef"));
 }
+
+ST_TEST(ansi_screen_rep_repeats_last_graphic) {
+  // `CSI b`（REP）：重复上个字符 n 次。PowerShell 表格线、字符图表常用；
+  // 旧实现直接忽略——一条横线 `\x1b[20b` 画不出来。
+  AnsiScreen screen(30, 2);
+  screen.feed("-\x1b[5b");   // `-` 后重复 5 次 → 共 6 个
+  ST_CHECK_EQ(row(screen, 0), std::string("------"));
+  ST_CHECK_EQ(screen.cursor_col(), 6);
+}
+
+ST_TEST(ansi_screen_osc_escape_only_terminates_on_st) {
+  // OSC 结束符 `ESC \`（ST）才是正式收尾；裸 `ESC` 后跟**其它字节**时不能把那个
+  // 字节无端吞掉（旧实现：`ESC[` 的 `[` 被吃、后续 CSI 整个错位）。
+  AnsiScreen screen(20, 2);
+  screen.feed("\x1b]0;title\x1b\\OK");   // ST 结束后正常接文本
+  ST_CHECK_EQ(screen.title(), std::string("title"));
+  ST_CHECK_EQ(row(screen, 0), std::string("OK"));
+  // 裸 ESC 后跟非 `\`：OSC 继续（不会吞字节）——这里用 BEL 结束验证。
+  AnsiScreen odd(20, 2);
+  odd.feed("\x1b]0;t2\x1bX!");
+  odd.feed(std::string(1, char(0x07)) + "after");
+  ST_CHECK_EQ(odd.title(), std::string("t2X!"));
+  ST_CHECK_EQ(row(odd, 0), std::string("after"));
+}
+
+ST_TEST(ansi_screen_delete_leaves_no_orphan_continuation) {
+  // DCH 的宽字符语义（xterm/kitty 同款）：删除点在宽字**主格**时，
+  // 整个宽字（两格）算**一个**删除单位——不会剩下半张脸；删除点落在
+  // **右半**（continuation）时回退到主格删。两部都验证：
+  AnsiScreen screen(10, 2);
+  screen.feed("ab中cd");
+  // ① 定位到 `中` 的主格（第 3 列，1 基）删 1 个「字符」= 整个宽字。
+  screen.feed("\x1b[1;3H\x1b[1P");
+  ST_CHECK_EQ(row(screen, 0), std::string("abcd"));
+  // ② 删除点落在宽字**右半**（continuation，第 2 列删完后 `中` 在 2-3、
+  //    右半是 3）：回退到主格删，不剩半张脸。
+  AnsiScreen half(10, 2);
+  half.feed("x中y");
+  half.feed("\x1b[1;3H\x1b[1P");   // 第 3 列 = `中` 的右半
+  ST_CHECK_EQ(row(half, 0), std::string("xy"));
+}
+
+ST_TEST(ansi_screen_resize_truncation_leaves_no_orphan) {
+  // 缩窄正好切开宽字符：留下的左半要补空，不能留半个汉字占一格。
+  AnsiScreen screen(8, 2);
+  screen.feed("abc中d");
+  screen.resize(4, 2);   // 截断点在第 4 列，切开 `中`（占 3-4 列）
+  ST_CHECK_EQ(screen.cols(), 4);
+  const std::string text = row(screen, 0);
+  // 要么 `abc` 要么 `ab`（补空后截尾），但不能有半个 `中` 的字符在末尾。
+  ST_CHECK(text.find("中") == std::string::npos || text == std::string("abc"));
+}

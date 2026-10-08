@@ -40,16 +40,45 @@
   (ProcThreadAttributeValue(22, FALSE, TRUE, FALSE))
 #endif
 #else
+// `login_tty` 是 glibc 2.28+ 的 GNU 扩展，只在 `_GNU_SOURCE` 下声明。
+// 霜天不全局定义 `_GNU_SOURCE`（见 `CONVENTIONS.md` §10：平台差异收敛在
+// platform_* 文件内），因此在**本翻译单元内**先定义它再包含系统头——与该文件
+// “平台代码局部化”的定位一致；老 glibc/musl 没有时退回手工三步
+// （`setsid` + `TIOCSCTTY` + `dup2`，即 `login_tty` 的教科书实现）。
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <pty.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
+#include <utmp.h>   // `login_tty`：glibc 里它在 utmp.h（非 utempter 的 pty.h）
+
+/// `login_tty` 的可移植退回：老 glibc（<2.28）与 musl 部分版本没有它。
+/// 实现就是 util-linux 里那三步——`setsid` 脱离原会话、`TIOCSCTTY` 把
+//  `slave` 挂成控制终端、`dup2` 接到三个标准描述符。失败时关掉描述符再报错。
+#if !defined(__GLIBC__) || (defined(__GLIBC_PREREQ) && !__GLIBC_PREREQ(2, 28))
+[[nodiscard]] inline auto pty_login_tty(int slave) -> int {
+  if (setsid() < 0) return -1;
+  if (ioctl(slave, TIOCSCTTY, nullptr) < 0) return -1;
+  if (dup2(slave, STDIN_FILENO) < 0 || dup2(slave, STDOUT_FILENO) < 0 ||
+      dup2(slave, STDERR_FILENO) < 0) {
+    return -1;
+  }
+  if (slave > STDERR_FILENO) close(slave);
+  return 0;
+}
+#else
+// glibc 2.28+：直接用库里的（声明在 <utmp.h>，需 _GNU_SOURCE——上面已定义）。
+[[nodiscard]] inline auto pty_login_tty(int slave) -> int { return login_tty(slave); }
+#endif
 #endif
 
 namespace st::process {
@@ -309,9 +338,9 @@ void PtySession::open(const std::string& program, const std::vector<std::string>
   if (child == 0) {
     // —— 子进程 ——
     close(master);
-    // `login_tty` = setsid + TIOCSCTTY + dup2 三个标准描述符。
+    // `login_tty` = setsid + TIOCSCTTY + dup2 三个标准调用。
     // **控制终端**靠它拿到：缺了 `SIGWINCH`/作业控制都不工作（本文件开头的高频错）。
-    if (login_tty(slave) != 0) _exit(127);
+    if (pty_login_tty(slave) != 0) _exit(127);
     if (!cwd.empty()) {
       if (chdir(cwd.c_str()) != 0) { /* 目录不存在时保持继承的 cwd，不阻断 */ }
     }
@@ -321,6 +350,11 @@ void PtySession::open(const std::string& program, const std::vector<std::string>
   }
   // —— 父进程 ——
   close(slave);
+  // 主端设非阻塞 + 读循环容 EAGAIN：头文件自己点名的两条高频错之一——
+  // 阻塞主端往满了的内核缓冲里写（大段粘贴、TUI 疯狂重绘）会卡住 UI 线程。
+  // （`read` 侧本来就是阻塞读线程，非阻塞不影响它——EAGAIN 时等 5ms 重试。）
+  const int flags_now = fcntl(master, F_GETFL, 0);
+  if (flags_now >= 0) (void)fcntl(master, F_SETFL, flags_now | O_NONBLOCK);
   impl->master = master;
   impl->child = child;
 #endif
@@ -339,12 +373,39 @@ auto PtySession::read(char* buffer, std::size_t capacity) -> std::size_t {
   if (got == 0) impl_->done.store(true);
   return got;
 #else
-  const ssize_t got = ::read(impl_->master, buffer, capacity);
-  if (got <= 0) {
+  // 非阻塞主端 + `poll` 等待可读：保持「阻塞读」的对外语义（读到数据或 EOF 才返回），
+  // 但不会在 EAGAIN 上瞎转（`terminate` 关掉 master 后 `poll` 报错/EOF，读线程能退出）。
+  // ⚠ 不能在 EAGAIN 时直接返回 0——那会被调用方当成 EOF（测试的 `read_until`、
+  // 组件的读线程都靠 0 退出）；也不能无限 nanosleep 重试（超时检查永远到不了）。
+  for (;;) {
+    struct pollfd pfd{};
+    pfd.fd = impl_->master;
+    pfd.events = POLLIN;
+    // 有限超时轮询：`terminate` 从另一线程 close(master) 时，已进入的 `poll`
+    // 对被关 fd 的行为不可靠（Linux 上不保证返回 POLLNVAL）。每 100ms 醒一次
+    // 检查 `done`（terminate 置位）——保证「关掉后 read 尽快返回」的契约。
+    const int ready = ::poll(&pfd, 1, 100);
+    if (impl_->done.load()) return 0;   // 被 terminate 关闭：按 EOF 报
+    if (ready < 0) {
+      if (errno == EINTR) continue;
+      impl_->done.store(true);
+      return 0;
+    }
+    if (ready == 0) continue;   // 超时一轮：回上去查 done
+    if (pfd.revents & (POLLNVAL | POLLERR)) {
+      impl_->done.store(true);
+      return 0;
+    }
+    const ssize_t got = ::read(impl_->master, buffer, capacity);
+    if (got > 0) return static_cast<std::size_t>(got);
+    if (got == 0) {
+      impl_->done.store(true);
+      return 0;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK) continue;   // 虚警：回去继续 poll
     impl_->done.store(true);
     return 0;
   }
-  return static_cast<std::size_t>(got);
 #endif
 }
 
@@ -355,8 +416,23 @@ auto PtySession::write(const char* data, std::size_t length) -> std::size_t {
   if (!WriteFile(impl_->in_write, data, static_cast<DWORD>(length), &written, nullptr)) return 0;
   return written;
 #else
-  const ssize_t written = ::write(impl_->master, data, length);
-  return written > 0 ? static_cast<std::size_t>(written) : 0;
+  // 非阻塞主端写满（EAGAIN）：等一档重试（有限次），仍满则返回已写量——
+  // 调用方（Terminal::send_bytes）的补齐循环会继续。彻底卡住不如部分写入。
+  std::size_t total = 0;
+  for (int attempt = 0; attempt < 40 && total < length; ++attempt) {
+    const ssize_t written = ::write(impl_->master, data + total, length - total);
+    if (written > 0) {
+      total += static_cast<std::size_t>(written);
+      continue;
+    }
+    if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+      struct timespec ts{0, 5 * 1000 * 1000};   // 5ms，最多 40 次 ≈ 200ms
+      nanosleep(&ts, nullptr);
+      continue;
+    }
+    break;   // 真错误（EBADF/EIO：子进程已死）：返回已写量
+  }
+  return total;
 #endif
 }
 
@@ -462,6 +538,9 @@ void PtySession::terminate() {
     (void)kill(impl_->child, SIGKILL);
   }
   // 主端关掉 → `read` 必然返回 0（"中止"不能是假的）。
+  // 先置 `done`：读线程的 `poll` 每 100ms 查一次它——close 与 poll 并发时
+  // 不依赖「关 fd 一定唤起 poll」这个不保证的行为。
+  impl_->done.store(true);
   if (impl_->master >= 0) {
     close(impl_->master);
     impl_->master = -1;

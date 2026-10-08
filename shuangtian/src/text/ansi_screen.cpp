@@ -252,11 +252,14 @@ void AnsiScreen::resize(int cols, int rows) {
       auto& destination = next[static_cast<std::size_t>(row)];
       const std::size_t copy = std::min(source.size(), static_cast<std::size_t>(cols));
       std::copy_n(source.begin(), copy, destination.begin());
-      // 截断处若正好切开一个宽字符，把留存的左半格补成空格（否则渲染错位）。
-      if (copy > 0 && copy < source.size() && destination[copy - 1].ch != U' ' &&
-          destination[copy - 1].continuation) {
+      // 切窄正好切开宽字符：界内留了左半、右半被截——左半补空（半字无法显示）。
+      // 判据：**被截掉的首格**（`source[copy]`）是 continuation，且界内末格是宽字主格。
+      if (copy > 0 && copy < source.size() && source[copy].continuation &&
+          !destination[copy - 1].continuation && cell_width(destination[copy - 1].ch) == 2) {
         destination[copy - 1] = AnsiCell{};
       }
+      // 防御：孤儿 continuation（主格不在界内）同样补空。
+      if (copy > 0 && destination[copy - 1].continuation) destination[copy - 1] = AnsiCell{};
     }
     target = std::move(next);
   };
@@ -300,6 +303,7 @@ void AnsiScreen::put(char32_t ch) {
 
   auto& cells = line(cursor_row_);
   cells[static_cast<std::size_t>(cursor_col_)] = AnsiCell{.ch = ch, .style = style_};
+  last_graphic_ = ch;   // REP（CSI b）重复的是「上个真正写入的字符」
   if (width == 2 && cursor_col_ + 1 < cols_) {
     cells[static_cast<std::size_t>(cursor_col_ + 1)] =
         AnsiCell{.ch = U' ', .style = style_, .continuation = true};
@@ -525,11 +529,29 @@ void AnsiScreen::handle_csi(char final_byte) {
       break;
     }
     case 'P': {   // 删 n 字符
-      const int count = std::max(1, param(0, 1));
       auto& cells = line(cursor_row_);
-      const int limit = std::min(cols_, cursor_col_ + count);
-      for (int col = cursor_col_; col < cols_; ++col) {
-        const int source = col + count;
+      const int count = std::max(1, param(0, 1));
+      // **宽字符感知的删除量**：xterm/kitty 的行为——删除点在宽字主格时，
+      // 那个宽字（两格）算**一个**删除单位；末尾若被跨到的宽字只剩半张脸，
+      // 也一并计入。纯格数删除会把宽字群成两半（实测：中文行删一格后整行错位）。
+      int from = cursor_col_;
+      if (from > 0 && from < cols_ && cells[static_cast<std::size_t>(from)].continuation) {
+        --from;   // 删除点落在右半：从主格开始删（半张脸删不干净）
+      }
+      int width = 0;
+      int steps = 0;
+      while (steps < count && from + width < cols_) {
+        const AnsiCell& cell_here = cells[static_cast<std::size_t>(from + width)];
+        width += cell_here.continuation ? 1 : cell_width(cell_here.ch);
+        ++steps;
+      }
+      // 末尾被跨到的半张宽字也计入（不留在行里成孤儿）。
+      if (from + width < cols_ && cells[static_cast<std::size_t>(from + width)].continuation) {
+        ++width;
+      }
+      const int limit = std::min(cols_, from + width);
+      for (int col = from; col < cols_; ++col) {
+        const int source = col + width;
         cells[static_cast<std::size_t>(col)] =
             source < cols_ ? cells[static_cast<std::size_t>(source)] : AnsiCell{};
       }
@@ -553,6 +575,13 @@ void AnsiScreen::handle_csi(char final_byte) {
     }
     case 'S': scroll_up(scroll_top_, scroll_bottom_, std::max(1, param(0, 1))); break;
     case 'T': scroll_down(scroll_top_, scroll_bottom_, std::max(1, param(0, 1))); break;
+    case 'b': {   // REP：重复上个字符 n 次（PowerShell 表格、图表艺术常用）
+      if (last_graphic_ != 0) {
+        const int count = std::max(1, param(0, 1));
+        for (int i = 0; i < count; ++i) put(last_graphic_);
+      }
+      break;
+    }
     case 'r':   // 设滚动区域（1 基）
       scroll_top_ = std::clamp(param(0, 1) - 1, 0, rows_ - 1);
       scroll_bottom_ = std::clamp(param(1, rows_) - 1, scroll_top_, rows_ - 1);
@@ -753,10 +782,20 @@ void AnsiScreen::feed(std::string_view bytes) {
         continue;
       }
       case State::OscEscape:
-        // `ESC \` = ST（字符串终止符）
-        state_ = State::Ground;
-        handle_osc(osc_buffer_);
-        osc_buffer_.clear();
+        // `ESC \` = ST（字符串终止符）；其它（如 `ESC [`）不是合法 OSC 结束——
+        // 别把后续字节无端吞掉（实测：vim 设光标色 `OSC 12 ; ...` 后跟 `CSI`
+        // 时会把 CSI 的首字节吃掉，后面整个序列错位）。裸 `ESC` 本身也**不是**
+        // payload 的一部分（否则标题里会多出 0x1B）——丢弃它、回到 OSC 继续。
+        if (byte == '\\') {
+          state_ = State::Ground;
+          handle_osc(osc_buffer_);
+          osc_buffer_.clear();
+        } else if (byte == 0x1BU) {
+          state_ = State::OscEscape;   // 又一个 ESC：继续等（罕见，不丢状态）
+        } else {
+          osc_buffer_.push_back(static_cast<char>(byte));
+          state_ = State::Osc;
+        }
         ++index;
         continue;
     }

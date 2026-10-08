@@ -28,9 +28,13 @@ class LocalProcessChannel final : public Channel {
 
  private:
   /// `ChannelSpec` → argv：`{cmd}` 占位替换；无占位按平台惯例追加（`-c` / `/c`）。
+  ///
+  /// ⚠ **不包含 program 自身**：`ChannelSpec::args` 的契约是"程序参数"，
+  /// `StreamHandle::open` 会把 `program` 作为 `argv[0]` 插到最前——
+  /// 这里再插一次会让实际执行变成 `/bin/sh /bin/sh -c "…"`
+  ///（sh 把第二个 `/bin/sh` 当**脚本文件**解析 → 报错退 2；实测踩到）。
   [[nodiscard]] static auto build_argv(const ChannelSpec& spec) -> std::vector<std::string> {
     std::vector<std::string> argv;
-    argv.push_back(spec.program);
     bool substituted = false;
     for (const auto& arg : spec.args) {
       if (arg == "{cmd}") {

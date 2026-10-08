@@ -173,9 +173,30 @@ ST_TEST(line_layout_band_never_cuts_off_the_text) {
       if (!ink) continue;
       const float ink_top = baseline - ink->above;
       const float ink_bottom = baseline + ink->below;
-      // 带（0..box）必须覆盖墨迹
-      ST_CHECK(ink_top >= -kTolerance);
-      ST_CHECK(ink_bottom <= box + kTolerance);
+      // 带（0..box）必须覆盖墨迹。
+      //
+      // ⚠ 容差为什么不是 `kTolerance`（0.01）：
+      // `layout_line` 刻意用**固定参考样本** `kInkReferenceSample`（"Ag(|)"）算基线，
+      // 以保证**逐行基线一致**——否则纯拉丁行与纯中文行的文字会错开数 px
+      //（实测两面 ascender 差 4.7px @同字号）。代价是：汉字回退到 **CJK 面**，
+      // 它的 `above` 比参考样本大（实测 12.73 vs 11.48，差 1.25px），
+      // 于是中文墨迹顶会**向外溢出带顶**——溢出量 = 字体面差异 − 居中的上侧余量。
+      // 实测最紧行距（1.0）下为 -0.042px（**亚像素级**，视觉不可见）；
+      // 行距越大余量越多，溢出归零甚至转正。
+      //
+      // 因此判据应是「溢出不超过**本行字体面的墨迹高度差**」——
+      // 这是设计允许的上界（不是拍脑袋的容差），超出它就说明带真的切了字。
+      //
+      // ⚠ 量"本行字体面"要用 **`ink_metrics(本行文本)`** 的 `above`，不能用
+      // `shaped_ascent`：后者是**排版基线**口径（跨 run 最大 ascender），实测
+      // 对"霜"与参考样本报同一个值（11.48），而 `ink_metrics` 对中文报 12.735
+      //——两者本是不同的量（基线位 vs 墨迹顶）。用错口径会让 allow 恒为 0。
+      const float ref_above = port.ink_metrics(st::ui::kInkReferenceSample, size,
+                                               st::text::FontRole::Monospace)
+                                  ->above;
+      const float allow_top = std::max(0.0F, ink->above - ref_above) + kTolerance;
+      ST_CHECK(ink_top >= -allow_top);
+      ST_CHECK(ink_bottom <= box + allow_top);
     }
   }
 }

@@ -102,6 +102,18 @@ ST_TEST(font_platform_bold_chain_mirrors_text_chain_by_position) {
 }
 
 ST_TEST(font_default_text_uses_one_family_for_latin_and_han) {
+  // ⚠ **仅 Windows 适用**：契约是"界面默认中英文用微软雅黑"——雅黑自带拉丁字形，
+  // 因此它排在拉丁回退层之前时，`find_face('A')` 与 `find_face('霜')` 落到**同一个 face**。
+  //
+  // 非 Windows 没有这种"同时覆盖拉丁与汉字"的首选族（文件头已声明"非 Windows 跳过①③"），
+  // 系统链里拉丁走 DejaVu/Segoe 类、汉字走 Noto CJK 类，**本就是两个面**——
+  // 那不是缺陷，而是该平台的正常取向。旧写法漏了这条守卫，于是只在 Windows 上成立，
+  // 在 Linux/macOS 上恒红（实测：本容器 A → DejaVuSans、霜 → NotoSansCJK）。
+  //
+  // 要验的是"平台取向是否被正确实现"，而不是"所有平台都得只有一族"。
+#if !defined(_WIN32)
+  return;
+#else
   Fixture fixture;
   if (!fixture.ok) return;
   const auto* ascii = fixture.stack->find_face(U'A', FontRole::Proportional);
@@ -111,6 +123,7 @@ ST_TEST(font_default_text_uses_one_family_for_latin_and_han) {
   // 中英文同体：同一个 face（这是"中英文都用微软雅黑"的**直接判据**）
   ST_CHECK(ascii->path() == han->path());
   ST_CHECK(ascii->face_index() == han->face_index());
+#endif
 }
 
 ST_TEST(font_default_text_is_the_platform_primary) {

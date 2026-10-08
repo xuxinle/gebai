@@ -223,6 +223,8 @@ class AnsiScreen {
   int scroll_bottom_{0};
 
   AnsiStyle style_{};
+  /// 上个写入的可见字符（`CSI b` REP 用；控制字符不算）。
+  char32_t last_graphic_{0};
   std::string title_;
   std::size_t bell_count_{0};
 

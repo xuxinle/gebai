@@ -28,25 +28,34 @@ namespace {
 using st::process::PtySession;
 using st::process::PtySize;
 
-/// 当前平台的 shell 与"打印一行"的写法。
+/// 当前平台的 shell 与提示符特征。
+///
+/// POSIX 用 **bash** `--noprofile --norc -i` + `PS1=st-test# `：提示符完全确定、
+/// 不受 dotfiles/发行版影响。之前用 `/bin/sh`（dash）：stdout 被重定向（CI/测试
+/// 框架把输出写文件）时 dash 判定「stdin 是 tty 但 stdout 不是」→ **不打印提示符**，
+/// 等 `>`/`#` 都空转到超时（实测踩到）。
 struct Shell {
   std::string program;
   std::vector<std::string> argv;
+  std::string prompt{};   ///< 提示符特征（等它出现=会话活着）
 };
 
 [[nodiscard]] auto shell() -> Shell {
+  if (const char* configured = std::getenv("GEBAI_TERMINAL_SHELL");
+      configured != nullptr && configured[0] != '\0') {
+    return Shell{configured, {}, ">"};   // 用户指定：只等 `>`（保守）
+  }
 #ifdef _WIN32
   // 用 **PowerShell**（与组件的默认一致：`pwsh` 优先、回落 `powershell`）——
   // 用 `cmd` 会让测试验的不是产品实际跑的 shell。
-  if (const char* configured = std::getenv("GEBAI_TERMINAL_SHELL");
-      configured != nullptr && configured[0] != '\0') {
-    return Shell{configured, {}};
+  if (auto found = st::process::which("pwsh"); found.has_value()) return Shell{*found, {}, ">"};
+  if (auto found = st::process::which("powershell"); found.has_value()) {
+    return Shell{*found, {}, ">"};
   }
-  if (auto found = st::process::which("pwsh"); found.has_value()) return Shell{*found, {}};
-  if (auto found = st::process::which("powershell"); found.has_value()) return Shell{*found, {}};
-  return Shell{"powershell.exe", {}};
+  return Shell{"powershell.exe", {}, ">"};
 #else
-  return Shell{"/bin/sh", {"-i"}};
+  (void)setenv("PS1", "st-test# ", 1);   // bash 交互式下 PS1 环境变量优先于内置
+  return Shell{"/bin/bash", {"--noprofile", "--norc", "-i"}, "st-test#"};
 #endif
 }
 
@@ -95,15 +104,15 @@ ST_TEST(pty_child_sees_a_real_terminal) {
   //
   // 断言方式选得刻意：让 **shell 自己**（不是我们拼的）输出 `tty` 的结果。
   // 管道下这里会打印 "not a tty"；PTY 下打印设备名。
+  // ⚠ 等 "pts"（命令的**输出**）而不是 "tty"（命令的**回显**）：回显先到、
+  // 输出后到，等回显就返回会在输出到达前断言——时序竞态（实测：偶发失败）。
   PtySession session = open_with("tty");
   ST_REQUIRE(session.valid());
-  const std::string out = read_until(session, "tty", 3000);
-  // `tty` 命令在 POSIX 上输出设备路径（`/dev/pts/N` 或 `/dev/ttysN`）；
-  // Windows 的 cmd 没有 `tty`，改判提示符存在（下一用例覆盖），这里只要求"有输出"。
-  ST_CHECK(!out.empty());
 #ifdef _WIN32
+  const std::string out = read_until(session, "tty", 3000);
   ST_CHECK(out.find(">") != std::string::npos);   // 提示符
 #else
+  const std::string out = read_until(session, "pts", 5000);
   ST_CHECK(out.find("/dev/") != std::string::npos || out.find("pts") != std::string::npos);
 #endif
   session.terminate();
@@ -113,9 +122,13 @@ ST_TEST(pty_prompt_arrives_without_a_newline) {
   // **这条区分 PTY 与管道最直接**：交互 shell 的提示符**不带换行**。
   // 管道按行读的话，提示符永远卡在缓冲里（read_line 不返回）——
   // 那正是"输出区 + 输入框"那种形态的技术根源。
-  PtySession session = open_with("");
+  //
+  // 环境注（实测踩到）：stdout 被重定向（CI / 测试框架把输出写文件）时，
+  // dash 判定「stdin 是 tty 但 stdout 不是同一终端」→ **不打印提示符**，
+  // 等 `>` 会空转到超时。POSIX 改用 bash + 固定 PS1（见 `shell()`），提示符确定。
+  PtySession session = open_with("\n");
   ST_REQUIRE(session.valid());
-  const std::string out = read_until(session, ">", 3000);
+  const std::string out = read_until(session, shell().prompt, 3000);
   ST_CHECK(!out.empty());
   session.terminate();
 }
@@ -165,12 +178,13 @@ ST_TEST(pty_resize_does_not_break_the_session) {
   const std::string probe = "stty size\n";
 #endif
   (void)session.write(probe.data(), probe.size());
+#ifdef _WIN32
   const std::string out = read_until(session, "resize-ok", 3000);
-#ifndef _WIN32
-  // `stty size` 输出 "<rows> <cols>"。
-  ST_CHECK(out.find("40 120") != std::string::npos);
-#else
   ST_CHECK(out.find("resize-ok") != std::string::npos);
+#else
+  // POSIX：等 `stty size` 的输出（"40 120"）——等 "resize-ok" 在这分支永远等不到。
+  const std::string out = read_until(session, "40 120", 3000);
+  ST_CHECK(out.find("40 120") != std::string::npos);
 #endif
   session.terminate();
 }
@@ -180,7 +194,7 @@ ST_TEST(pty_terminate_makes_read_return_promptly) {
   // 否则用户点了中止、界面还堵在读里（与 `Channel::terminate` 同一契约）。
   PtySession session = open_with("");
   ST_REQUIRE(session.valid());
-  (void)read_until(session, ">", 2000);   // 等到提示符，确保会话真的活着
+  (void)read_until(session, shell().prompt, 2000);   // 等到提示符，确保会话真的活着
 
   const auto start = std::chrono::steady_clock::now();
   session.terminate();

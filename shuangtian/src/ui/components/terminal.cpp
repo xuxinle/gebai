@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <format>
+#include <unordered_map>
 #include <utility>
 
 #include "st/core/channel.hpp"
@@ -279,6 +280,7 @@ void Terminal::apply_pending_close() {
   }
   mark_dirty();
   mark_layout_dirty();
+  last_output_.clear();   // 会话被关：行模式文本缓存作废，防止下个会话漏刷新
   // ⚠⚠ **这一块之后绝对不能再碰 `this`**。
   //
   // 回调可能引发宿主重组，而重组会把**本元素整个拆掉**（关最后一个标签
@@ -300,7 +302,11 @@ void Terminal::apply_pending_close() {
 void Terminal::set_active_session(std::size_t index) {
   if (index >= sessions_.size() || index == active_) return;
   active_ = index;
+  // 会话切换时清行模式的文本缓存：`last_output_` 是「上次写给 Text 的内容」，
+  // 新会话内容若恰好与旧会话相同（如都为空），不清会漏刷新。
+  last_output_.clear();
   mark_dirty();
+  mark_layout_dirty();   // PTY/行模式的子件可见性随活动会话变化
   if (on_session_change) on_session_change(index);
 }
 
@@ -331,7 +337,12 @@ void Terminal::start_pty(const std::shared_ptr<st::process::PtySession>& pty,
   target.running_name = display;
   // 读线程：读字节 → 喂屏幕。**在 `pump` 里喂**（线程只往缓冲塞，
   // 界面状态只能主线程改——与行模式同一套分工）。
-  target.reader = std::jthread([this, pty, screen](std::stop_token stop) {
+  //
+  // 缓冲是**会话自己的**（捕裸 `this` + 目标会话在容器里的序号不行——重排会失效，
+  // 所以直接捕 `TerminalSession*`：会话容器是 `unique_ptr` 持有，地址稳定
+  //（见 `sessions_` 的注释），会话销毁前读线程必先 join（析构/关闭路径都保证了）。
+  TerminalSession* sink = &target;
+  target.reader = std::jthread([this, pty, screen, sink](std::stop_token stop) {
     std::vector<char> buffer(8192);
     for (;;) {
       if (stop.stop_requested()) break;
@@ -339,8 +350,7 @@ void Terminal::start_pty(const std::shared_ptr<st::process::PtySession>& pty,
       if (got == 0) break;   // 读到 EOF／被 `terminate` 关掉（见 `PtySession::terminate`）
       {
         const std::scoped_lock guard(pending_mutex_);
-        // 缓冲按会话分：PTY 与行模式可能同时有活（宿主两种模式混用时）。
-        pty_pending_.emplace_back(std::string(buffer.data(), got));
+        sink->pty_pending.emplace_back(std::string(buffer.data(), got));
       }
     }
     // ⚠ `wait()` **只在读到 EOF 时**叫：如果是因为 `stop_requested` 跳出，
@@ -349,8 +359,8 @@ void Terminal::start_pty(const std::shared_ptr<st::process::PtySession>& pty,
     if (!stop.stop_requested()) {
       const int code = pty->wait();
       const std::scoped_lock guard(pending_mutex_);
-      pty_exit_code_ = code;
-      pty_exited_ = true;
+      sink->pty_exit_code = code;
+      sink->pty_exited = true;
     }
     (void)screen;
   });
@@ -657,48 +667,66 @@ void Terminal::pump() {
     return;
   }
 
-  // ① PTY 字节 → 屏幕（每个会话各自喂）。
-  std::vector<std::string> pty_ready;
+  // ① PTY 字节 → 屏幕（**逐会话各自喂**——缓冲按会话分，多标签不串台）。
+  bool any_pty_data = false;
   {
-    const std::scoped_lock guard(pending_mutex_);
-    pty_ready.swap(pty_pending_);
-  }
-  if (!pty_ready.empty()) {
-    for (auto& session : sessions_) {
-      if (session == nullptr || session->screen == nullptr) continue;
-      // 字节流是**全局**缓冲的（一条 PTY 一个读线程），所以要先判"这是哪个会话的"。
-      // 简化：只有活动会话的 PTY 在跑时才有字节（多 PTY 同时跑的场景留待后续，
-      // 那需要按会话分缓冲）。
-      if (session.get() != &current() && sessions_.size() > 1) continue;
-      for (const auto& chunk : pty_ready) session->screen->feed(chunk);
-      // 标题变化（`OSC 0/2`）：shell 会设成"当前命令/目录"，标签跟着变更好用。
-      const std::string title = session->screen->title();
-      if (!title.empty() && title != session->running_name && on_title_change) {
-        on_title_change(active_, title);
+    std::vector<std::pair<TerminalSession*, std::vector<std::string>>> ready;
+    {
+      const std::scoped_lock guard(pending_mutex_);
+      for (auto& session : sessions_) {
+        if (session == nullptr || session->pty_pending.empty()) continue;
+        ready.emplace_back(session.get(), std::move(session->pty_pending));
+        session->pty_pending.clear();
       }
     }
-    mark_dirty();
+    for (auto& [target, chunks] : ready) {
+      if (target->screen == nullptr) continue;
+      // 贴底跟随：没往上翻时新内容到达即回到底部。
+      if (!target->user_scrolled && target->scrollback_offset != 0) target->scrollback_offset = 0;
+      for (const auto& chunk : chunks) target->screen->feed(chunk);
+      // 标题变化（`OSC 0/2`）：shell 会设成"当前命令/目录"，标签跟着变更好用。
+      // ⚠ 归属修正：标题属于**这个会话**，用它在容器里的真实序号——
+      // 旧实现硬发 `active_`，后台会话改标题会把前台标签改掉（串台另一型）。
+      const std::string title = target->screen->title();
+      if (!title.empty() && title != target->title && on_title_change) {
+        std::size_t index = sessions_.size();
+        for (std::size_t at = 0; at < sessions_.size(); ++at) {
+          if (sessions_[at].get() == target) { index = at; break; }
+        }
+        if (index < sessions_.size()) on_title_change(index, title);
+      }
+      any_pty_data = true;
+    }
   }
-  // ② PTY 退出收尾。
-  bool exited = false;
-  int exit_code = 0;
+  if (any_pty_data) mark_dirty();
+  // ② PTY 退出收尾（逐会话；只收**已退出**的那些）。
+  std::vector<std::pair<TerminalSession*, int>> finished;
   {
     const std::scoped_lock guard(pending_mutex_);
-    exited = pty_exited_;
-    exit_code = pty_exit_code_;
-    if (exited) pty_exited_ = false;
+    for (auto& session : sessions_) {
+      if (session == nullptr || !session->pty_exited) continue;
+      finished.emplace_back(session.get(), session->pty_exit_code);
+      session->pty_exited = false;
+    }
   }
-  if (exited) {
-    TerminalSession& target = current();
-    if (target.reader.joinable()) target.reader.join();
-    target.exit_code = exit_code;
-    target.running = false;
-    append_to(active_, std::format("[退出码 {}] {}", exit_code,
-                                   target.running_name.empty() ? "shell" : target.running_name));
-    target.running_name.clear();
-    if (!any_busy() && on_busy_change) on_busy_change(false);
+  for (auto& [target, exit_code] : finished) {
+    if (target->reader.joinable()) target->reader.join();
+    target->exit_code = exit_code;
+    target->running = false;
+    // 找回它在容器里的序号（行模式滚回追加用）。
+    std::size_t index = sessions_.size();
+    for (std::size_t at = 0; at < sessions_.size(); ++at) {
+      if (sessions_[at].get() == target) { index = at; break; }
+    }
+    if (index < sessions_.size()) {
+      append_to(index, std::format("[退出码 {}] {}", exit_code,
+                                  target->running_name.empty() ? std::string("shell")
+                                                               : target->running_name));
+    }
+    target->running_name.clear();
     mark_dirty();
   }
+  if (!finished.empty() && !any_busy() && on_busy_change) on_busy_change(false);
 
   // ③ 行模式作业回流（与之前同一套：作业归属发起它的会话）。
   const std::size_t job = job_session_;
@@ -710,17 +738,17 @@ void Terminal::pump() {
     return;
   }
   std::vector<std::string> ready;
-  bool finished = false;
+  bool job_done = false;
   int code = 0;
   {
     const std::scoped_lock guard(pending_mutex_);
     ready.swap(pending_);
-    finished = job_finished_;
+    job_done = job_finished_;
     code = job_code_;
   }
-  if (finished && reader_.joinable()) reader_.join();
+  if (job_done && reader_.joinable()) reader_.join();
   for (auto& line : ready) append_to(job, std::move(line));
-  if (!finished) return;
+  if (!job_done) return;
   append_to(job, std::format("[退出码 {}] {}（中止={}）", code, job_name_, stop_requested_.load()));
   sessions_[job]->running = false;
   sessions_[job]->running_name.clear();
@@ -810,9 +838,21 @@ void Terminal::measure(const RenderContext& context, const Constraints& constrai
   (void)context;
 }
 
+void Terminal::refresh_cell_metrics(const RenderContext& context) {
+  // 实测格宽/行高（与 `paint_content` 同一个口径）：字号 × 缩放。
+  const float font = base_font_size_ * font_scale_;
+  if (context.text != nullptr) {
+    const float cell_w = context.text->measure_width("M", font, text::FontRole::Monospace);
+    const float line_h = context.text->line_height(font);
+    if (cell_w > 0.0f) measured_cell_width_ = cell_w;
+    if (line_h > 0.0f) measured_line_height_ = line_h;
+  }
+}
+
 void Terminal::arrange(const RenderContext& context, math::Rect rect) {
   ensure_children();
   bounds_ = rect;
+  refresh_cell_metrics(context);
   const Metrics& metrics = context.theme.metrics();
   const float tabs_h = tabs_visible_ ? metrics.control_height - 6.0f : 0.0f;
   tabs_rect_ = math::Rect{rect.x, rect.y, rect.width, tabs_h};
@@ -833,10 +873,16 @@ void Terminal::arrange(const RenderContext& context, math::Rect rect) {
     }
   }
   // 把可用**列数/行数**换算出来上报给 PTY（TUI 程序据此排版）。
+  //
+  // ⚠ 格宽必须与 `paint_content` **同源**：都用 `measure_width("M")` 实测值。
+  // 旧实现这里用「字号×系数」估算、渲染却用实测——两数不等时 shell 认为的
+  // 换行列与实际渲染错开，光标逐行漂移（实测：中文行长输出后错位明显）。
   const float usable_w = std::max(0.0f, output_rect_.width - 8.0f);
   const float usable_h = std::max(0.0f, output_rect_.height - 8.0f);
-  const float cell_w = cell_width_ * font_scale_;
-  const float cell_h = line_height_ * font_scale_;
+  const float cell_w = measured_cell_width_ > 0.0f ? measured_cell_width_
+                                                   : cell_width_ * font_scale_;
+  const float cell_h = measured_line_height_ > 0.0f ? measured_line_height_
+                                                    : line_height_ * font_scale_;
   if (cell_w > 0.0f && cell_h > 0.0f) {
     const int cols = std::max(20, static_cast<int>(usable_w / cell_w));
     const int rows = std::max(4, static_cast<int>(usable_h / cell_h));
@@ -878,30 +924,60 @@ void Terminal::paint_content(const RenderContext& context, raster::Surface& canv
   const float font = base_font_size_ * font_scale_;
   // 单元格尺寸从**字体端口实际量出来**，不用猜的系数：
   // 猜出来的宽度会让"列 → 像素"换算与真实字形错位（表格列对不齐、光标飘）。
-  const float cell_w = port.measure_width("M", font, text::FontRole::Monospace);
-  const float line_h = port.line_height(font);
-  // 基线：字形原点是**基线**，而我们是按行顶排的——所以要加上 ascent。
-  const float ascent = port.ascent(font);
+  // （与 `arrange` 报给 PTY 的列数同一口径——`refresh_cell_metrics` 已存了一份。）
+  const float cell_w = measured_cell_width_ > 0.0f ? measured_cell_width_
+                                                   : port.measure_width("M", font, text::FontRole::Monospace);
+  const float line_h = measured_line_height_ > 0.0f ? measured_line_height_ : port.line_height(font);
+  // ⚠ **不要加 ascent**：`TextPort::draw` 的 `origin` 是**行左上角**（契约写明，
+  // 实现里 `TextRenderer::draw` 自己算 `origin.y + ascent(size)` 作为基线）。
+  // 旧代码传的是 `y + ascent`——ascent 被**加了两次**，文字每行整体下移约半行
+  //（实测：光标块画在行顶、文字却低 8px，看起来"光标在上一行"）。
   const float origin_x = output_rect_.x + 4.0f;
   const float origin_y = output_rect_.y + 4.0f;
 
   const math::Color default_fg = colors.text;
   const math::Color default_bg = colors.surface_sunken;
+
+  // —— 回看滚动 ——
+  // 往上翻时把 scrollback 的末尾接在屏幕上方一起画：
+  // `offset > 0` 表示从底部往上翻了多少行。
+  const int sb_total = static_cast<int>(screen.scrollback_count());
+  const int sb_offset = std::clamp(session.scrollback_offset, 0, sb_total);
+  // 本次要画的 scrollback 行数 = 有偏移时从 `sb_total - sb_offset` 开始的全部。
+  const int sb_visible = sb_offset;
+  const int sb_first = sb_total - sb_offset;
+
   // 屏幕上第 0 行就画在输出区**顶部**——滚动已经由屏幕模型自己做了
   //（输出越过底部时它把整体上移）。这里再做一次“贴底”会把内容推到面板中间，
   // 看起来像“提示符跑到中间去了”（实测踩到）。
-  for (int row = 0; row < screen.rows(); ++row) {
+  for (int row = 0; row < screen.rows() + sb_visible; ++row) {
+    // 前 `sb_visible` 行是回看区，后面是屏幕。
+    const bool is_scrollback = row < sb_visible;
+    const int screen_row = is_scrollback ? -1 : row - sb_visible;
+    // 逐行取文本与样式：回看行只有文本（`AnsiScreen` 只存了单元格，样式已丢——
+    // 但历史输出主要是阅读用途，单色可接受；真要带样式需扩展 scrollback 存储）。
+    const std::size_t sb_index = is_scrollback
+        ? static_cast<std::size_t>(sb_first + row)
+        : static_cast<std::size_t>(-1);
+    (void)sb_index;
     const float y = origin_y + static_cast<float>(row) * line_h;
     if (y + line_h < output_rect_.y || y > output_rect_.bottom()) continue;   // 视口剔除
     // 逐格画：同一行的**相邻同风格**格子合成一段（减少绘制调用）。
     // 分段键是"样式 + 是否粗体"——粗体走单独的字形外扩参数，混在一段里会丢。
     int col = 0;
     while (col < screen.cols()) {
-      const st::text::AnsiStyle style = screen.cell(row, col).style;
+      const st::text::AnsiStyle style = is_scrollback ? st::text::AnsiStyle{}
+                                                     : screen.cell(screen_row, col).style;
       int end = col;
       std::string run;
       while (end < screen.cols()) {
-        const st::text::AnsiCell& next = screen.cell(row, end);
+        if (is_scrollback) {
+          // 回看行：`scrollback_line` 只出文本——逐字符扫列（宽字符按两列推。
+          // 文本不携带列信息，这里用与屏幕模型同源的宽度规则重建）。简化处理：
+          // 直接把整行文本作为一段画（背景/前景用默认色）。
+          break;
+        }
+        const st::text::AnsiCell& next = screen.cell(screen_row, end);
         if (next.continuation) {
           ++end;
           continue;
@@ -909,6 +985,15 @@ void Terminal::paint_content(const RenderContext& context, raster::Surface& canv
         if (!(next.style == style)) break;
         utf8_append(next.ch, run);
         end += (next.ch >= 0x1100U && next.ch <= 0x3FFFDUL) ? 2 : 1;   // 宽字符占两列
+      }
+      if (is_scrollback) {
+        // 整行一段（默认色）：历史输出是阅读用途，样式丢失可接受。
+        const std::string text_line = screen.scrollback_line(sb_index);
+        if (!text_line.empty()) {
+          port.draw(canvas, text_line, math::Point{origin_x, y}, font, default_fg,
+                    text::FontRole::Monospace);
+        }
+        break;   // 回看行整行已画，跳出列循环
       }
       if (run.empty()) {
         col = end > col ? end : col + 1;
@@ -925,15 +1010,24 @@ void Terminal::paint_content(const RenderContext& context, raster::Surface& canv
       }
       // `FontRole::Monospace` 是**必须**的：终端的一切对齐（表格列、进度条、
       // 光标位置）都建立在"每列等宽"上；用比例字体渲染会整体散架。
-      port.draw(canvas, run, math::Point{x, y + ascent}, font, fg, text::FontRole::Monospace,
+      port.draw(canvas, run, math::Point{x, y}, font, fg, text::FontRole::Monospace,
                 0.0f, style.bold);
       col = end;
     }
   }
 
   // **光标画出来**（这是"终端"与"输出区"在视觉上的分水岭）。
-  if (screen.cursor_visible() && !screen.in_alt_screen()) {
-    const float cx = origin_x + static_cast<float>(screen.cursor_col()) * cell_w;
+  //
+  // ⚠ 备用屏里也要画：vim/htop 的**插入光标**正是屏幕状态的一部分——
+  // 旧实现 `!in_alt_screen()` 把它禁了，vim 里看不到光标在哪（实测踩到）。
+  // 回看滚动时（`sb_offset > 0`）不画——那是在看历史，不在编辑。
+  if (screen.cursor_visible() && sb_offset == 0) {
+    // 挂起态（写满一行还没换行）：光标停在**最后一个字符上**，不是下一列——
+    // 多画一格会出现"光标永远多跳一列"的错位感。
+    const int cursor_col = screen.pending_wrap() && screen.cursor_col() > 0
+                               ? screen.cursor_col() - (screen.cols() > 0 ? 1 : 0)
+                               : screen.cursor_col();
+    const float cx = origin_x + static_cast<float>(cursor_col) * cell_w;
     const float cy = origin_y + static_cast<float>(screen.cursor_row()) * line_h;
     const float blink = std::fmod(static_cast<float>(context.time_seconds), 1.0f);
     if (blink < 0.5f) {
@@ -970,10 +1064,11 @@ auto Terminal::on_event(const RenderContext& context, Event& event) -> bool {
       bytes = event.text;
     } else {
       const std::string& key = event.key;
-      if (key == "Enter") bytes = "\r";
+      if (key == "Enter" || key == "NumpadEnter") bytes = "\r";
       else if (key == "Backspace") bytes = "\x7f";
       else if (key == "Tab") bytes = "\t";
       else if (key == "Escape" || key == "Esc") bytes = "\x1b";
+      else if (key == "Insert") bytes = "\x1b[2~";
       else if (key == "ArrowUp") bytes = "\x1b[A";
       else if (key == "ArrowDown") bytes = "\x1b[B";
       else if (key == "ArrowRight") bytes = "\x1b[C";
@@ -983,6 +1078,39 @@ auto Terminal::on_event(const RenderContext& context, Event& event) -> bool {
       else if (key == "Delete") bytes = "\x1b[3~";
       else if (key == "PageUp") bytes = "\x1b[5~";
       else if (key == "PageDown") bytes = "\x1b[6~";
+      else if (event.ctrl && (key == "ArrowUp" || key == "ArrowDown")) {
+        // Ctrl+↑/↓（xterm 修饰参数 5）：shell 历史/多行编辑用。
+        bytes = key == "ArrowUp" ? "\x1b[1;5A" : "\x1b[1;5B";
+      }
+      else if (event.ctrl && (key == "ArrowRight" || key == "ArrowLeft")) {
+        // Ctrl+←/→（按单词跳）：bash/zsh 的 readline 默认绑定。
+        bytes = key == "ArrowRight" ? "\x1b[1;5C" : "\x1b[1;5D";
+      }
+      else if (event.shift && (key == "ArrowUp" || key == "ArrowDown" ||
+                               key == "ArrowRight" || key == "ArrowLeft" ||
+                               key == "Home" || key == "End")) {
+        // Shift+方向/Home/End（xterm 修饰参数 2）：选择语义在终端里由 shell 处理，
+        // 老实现会掉进「无映射 → 丢弃」的分支——vim 选择模式/less 搜索全失灵。
+        static const std::unordered_map<std::string, std::string> kShiftMap{
+            {"ArrowUp", "\x1b[1;2A"},  {"ArrowDown", "\x1b[1;2B"},
+            {"ArrowRight", "\x1b[1;2C"}, {"ArrowLeft", "\x1b[1;2D"},
+            {"Home", "\x1b[1;2H"},   {"End", "\x1b[1;2F"}};
+        const auto found = kShiftMap.find(key);
+        if (found != kShiftMap.end()) bytes = found->second;
+      }
+      else if (event.alt && (key == "ArrowUp" || key == "ArrowDown" ||
+                             key == "ArrowRight" || key == "ArrowLeft")) {
+        // Alt+方向（修饰参数 3）。
+        bytes = key == "ArrowUp" ? "\x1b[1;3A"
+                  : key == "ArrowDown" ? "\x1b[1;3B"
+                  : key == "ArrowRight" ? "\x1b[1;3C" : "\x1b[1;3D";
+      }
+      else if (event.alt && key.size() == 1) {
+        // **Alt+字母**：xterm 的标准编码是 `ESC` 前缀（bash 的 `Alt+b`/`Alt+f`
+        // 按单词跳、`Alt+.` 取上条参数全靠它）。旧实现直接丢—— readline 用户
+        // 天天踩。（Shift 已在 `key` 里，不用额外处理。）
+        bytes = std::string(1, '\x1b') + key;
+      }
       else if (event.ctrl && key.size() == 1) {
         // Ctrl+字母 → 0x01..0x1A（`Ctrl+C` = 0x03、`Ctrl+D` = 0x04…）。
         const char lower = static_cast<char>(std::tolower(static_cast<unsigned char>(key[0])));
@@ -1010,13 +1138,34 @@ auto Terminal::on_event(const RenderContext& context, Event& event) -> bool {
       return true;
     }
   }
+  if (event.kind == EventKind::Wheel) {
+    // **回看滚动**（PTY 模式）：往上翻看历史、往下翻回底部。
+    // 回看缓冲由屏幕模型维护（`scrollback_`，上限 4000 行）——旧实现从未渲染它，
+    // 滚出屏幕的内容彻底看不见；这里接上：`paint_content` 里把回看行画在屏幕上方。
+    if (pty_active() && output_rect_.contains(event.position)) {
+      TerminalSession& target = current();
+      if (target.screen != nullptr) {
+        const int total = static_cast<int>(target.screen->scrollback_count());
+        const int per = std::max(1, static_cast<int>(-event.wheel_delta * 3.0f));
+        int next = target.scrollback_offset + per;
+        next = std::clamp(next, 0, total);
+        if (next != target.scrollback_offset) {
+          target.scrollback_offset = next;
+          target.user_scrolled = next > 0;   // 与 ScrollView 路径同一状态语义
+          mark_dirty();
+        }
+        event.handled = true;
+        return true;
+      }
+    }
+  }
   return Element::on_event(context, event);
 }
 
 /// 无修饰可见字符 → 原样送（终端要"敲什么就是什么"）。
 auto Terminal::press_plain_bytes(const std::string& key, const Event& event, std::string& out)
     -> bool {
-  if (event.ctrl || event.alt || event.meta) return false;
+  if (event.ctrl || event.meta) return false;
   if (key == "Shift" || key == "Control" || key == "Alt" || key == "Meta") return false;
   if (key.size() == 1) {
     out = key;
@@ -1033,7 +1182,7 @@ auto Terminal::property_names() const -> std::vector<std::string_view> {
   auto names = Element::property_names();
   names.insert(names.end(),
                {"sessions", "active_session", "session_title", "working_directory", "busy",
-                "output", "screen", "cursor", "pty", "alt_screen", "monospace",
+                "output", "screen", "cursor", "cursor_rect", "pty", "alt_screen", "monospace",
                 "tabs_visible", "font_scale"});
   return names;
 }
@@ -1051,6 +1200,19 @@ auto Terminal::get_property(std::string_view name) const -> std::optional<std::s
   if (name == "cursor") {
     if (target == nullptr || target->screen == nullptr) return std::string("0,0");
     return std::format("{},{}", target->screen->cursor_row(), target->screen->cursor_col());
+  }
+  if (name == "cursor_rect") {
+    // 光标块的**像素矩形**（`x,y,w,h`）——供自动化/测试验证光标与文字同口径。
+    // 「光标画在哪一行」是可断言的几何事实；没有它就只能在截图里肉眼判，
+    // 而半行级偏移（实测 8px）肉眼看不清、也不可回归。
+    if (target == nullptr || target->screen == nullptr) return std::string("0,0,0,0");
+    const float cell_w = measured_cell_width_ * font_scale_;
+    const float line_h = measured_line_height_ * font_scale_;
+    const float x = output_rect_.x + 4.0f +
+                    static_cast<float>(target->screen->cursor_col()) * cell_w;
+    const float y = output_rect_.y + 4.0f +
+                    static_cast<float>(target->screen->cursor_row()) * line_h;
+    return std::format("{:.1f},{:.1f},{:.1f},{:.1f}", x, y, cell_w, line_h);
   }
   if (name == "alt_screen") {
     if (target == nullptr || target->screen == nullptr) return std::string("false");

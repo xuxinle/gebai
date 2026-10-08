@@ -15,6 +15,7 @@
 #include "st/test/test.hpp"
 
 #include <chrono>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <thread>
@@ -30,6 +31,32 @@ namespace {
 
 using st::ui::Terminal;
 
+/// 测试专用 shell：**固定提示符**是这套测试可控性的地基。
+///
+/// * Windows：PowerShell（`>` 提示符，与产品默认一致）；
+/// * POSIX：**bash** `--noprofile --norc -i` + 环境变量 `PS1=st-test# `——
+///   提示符完全确定、不受 dotfiles/发行版影响。之前用系统默认 `$SHELL`
+///   （本机是 zsh，提示符是 `➜`）或 `/bin/sh`（dash，重定向下不出提示符），
+///   等 `>`/`#` 都在赌运气（实测全部超时）。产品代码不动——它按系统默认走。
+struct TestShell {
+  std::string program;
+  std::vector<std::string> argv;
+  const char* prompt_needle{};
+};
+
+[[nodiscard]] auto test_shell() -> TestShell {
+  if (const char* configured = std::getenv("GEBAI_TERMINAL_SHELL");
+      configured != nullptr && configured[0] != '\0') {
+    return TestShell{configured, {}, ">"};   // 用户指定：只等 `>`（保守）
+  }
+#ifdef _WIN32
+  return TestShell{"powershell.exe", {}, ">"};
+#else
+  (void)setenv("PS1", "st-test# ", 1);   // bash 交互式下 PS1 环境变量优先于内置
+  return TestShell{"/bin/bash", {"--noprofile", "--norc", "-i"}, "st-test#"};
+#endif
+}
+
 /// 已挂树、已完成布局的终端（`arrange` 后几何才有效）。
 struct Harness {
   st::ui::UiRoot root{};
@@ -39,6 +66,9 @@ struct Harness {
     root.set_viewport(st::math::Size{900.0f, 500.0f});
     auto owned = std::make_unique<Terminal>();
     terminal = owned.get();
+    // 测试不赌系统默认 shell：注入固定的 bash/PowerShell（见 test_shell 说明）。
+    const TestShell sh = test_shell();
+    terminal->set_shell(sh.program, sh.argv);
     root.set_content(std::move(owned));
     root.layout(true);
   }
@@ -79,7 +109,7 @@ ST_TEST(terminal_pty_mode_opens_a_real_shell) {
   const auto* screen = harness.terminal->screen(0);
   ST_REQUIRE(screen != nullptr);
   // shell 的 banner / 提示符会自己出现在屏幕上——**我们不拼任何文字**。
-  ST_CHECK(harness.wait_for(">"));
+  ST_CHECK(harness.wait_for(test_shell().prompt_needle));
   const std::string text = screen->plain_text();
   ST_CHECK(!text.empty());
   harness.terminal->send_stop();
@@ -91,7 +121,7 @@ ST_TEST(terminal_pty_input_is_sent_as_bytes_and_echoed) {
   if (!st::process::PtySession::supported()) return;
   Harness harness;
   harness.terminal->open_shell();
-  ST_REQUIRE(harness.wait_for(">"));
+  ST_REQUIRE(harness.wait_for(test_shell().prompt_needle));
   const std::string marker = "pty-echo-probe-9271";
   harness.terminal->send_bytes("echo " + marker);
   // 不回车的字节已经到 shell（回显出来）——**没有换行也能被读到**，
@@ -120,7 +150,7 @@ ST_TEST(terminal_pty_output_feeds_the_ansi_screen_not_a_string) {
   if (!st::process::PtySession::supported()) return;
   Harness harness;
   harness.terminal->open_shell();
-  ST_REQUIRE(harness.wait_for(">"));
+  ST_REQUIRE(harness.wait_for(test_shell().prompt_needle));
   const auto* screen = harness.terminal->screen(0);
   ST_REQUIRE(screen != nullptr);
   ST_CHECK(screen->cols() > 0);
@@ -137,7 +167,7 @@ ST_TEST(terminal_pty_clear_wipes_the_screen) {
   if (!st::process::PtySession::supported()) return;
   Harness harness;
   harness.terminal->open_shell();
-  ST_REQUIRE(harness.wait_for(">"));
+  ST_REQUIRE(harness.wait_for(test_shell().prompt_needle));
   harness.terminal->clear();
   harness.pump(15);
   const auto* screen = harness.terminal->screen(0);
@@ -158,7 +188,7 @@ ST_TEST(terminal_pty_stop_interrupts_without_killing_the_shell) {
   if (!st::process::PtySession::supported()) return;
   Harness harness;
   harness.terminal->open_shell();
-  ST_REQUIRE(harness.wait_for(">"));
+  ST_REQUIRE(harness.wait_for(test_shell().prompt_needle));
   ST_CHECK(harness.terminal->busy());
   // 起一条长命令，然后中止。
   harness.terminal->send_bytes("Start-Sleep -Seconds 60\r");
@@ -178,7 +208,7 @@ ST_TEST(terminal_pty_resize_reaches_the_screen_model) {
   if (!st::process::PtySession::supported()) return;
   Harness harness;
   harness.terminal->open_shell();
-  ST_REQUIRE(harness.wait_for(">"));
+  ST_REQUIRE(harness.wait_for(test_shell().prompt_needle));
   harness.terminal->set_terminal_size(st::process::PtySize{100, 30});
   harness.pump(10);
   const auto* screen = harness.terminal->screen(0);
@@ -193,7 +223,7 @@ ST_TEST(terminal_pty_sessions_are_independent) {
   if (!st::process::PtySession::supported()) return;
   Harness harness;
   harness.terminal->open_shell();
-  ST_REQUIRE(harness.wait_for(">"));
+  ST_REQUIRE(harness.wait_for(test_shell().prompt_needle));
   const std::size_t second = harness.terminal->add_session();
   ST_CHECK_EQ(second, std::size_t{1});
   harness.terminal->open_shell();
