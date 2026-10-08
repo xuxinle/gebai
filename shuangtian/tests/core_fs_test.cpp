@@ -10,6 +10,7 @@
 
 #include "st/test/test.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <string>
 

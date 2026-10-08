@@ -235,6 +235,7 @@ libstdc++ 内部代码（`vector::insert`、`<regex>` 的 `std::function` 控制
 ## 6. 头文件纪律
 
 1. 每个头文件自包含（单独 include 即可编译），`#pragma once`。
+   自查：`py -3 tools/check_selfcontained.py`（它连头文件一起查，见 §10.3 第 3 条）。
 2. 头文件**不引入实现细节**：不 include 系统重量级头（`<windows.h>` 等）——用前向声明 + PIMPL，实现里才 include。
 3. include 顺序：本模块头 → 霜天其他头（按层由下到上）→ 标准库（字母序）。
 4. 公共 API 必须有 `///` 文档注释（一句话说明 + 前置条件/错误语义）；内部实现注释从简。
@@ -672,7 +673,20 @@ san 档需要 sanitizer 运行库，MinGW 发行版多数不带——构建前�
 缺陷自 `st stats` 引入起就潜伏——**所有含该文件的 `st build` 都是绿的**，只有一个全新环境自举才暴露。
 防线是 §6 第 6 条（翻译单元自包含）：**PCH 是加速手段，不是契约**，编译器报错的前提是先能看见声明。
 新增标准库用法后自查一句：「把这个 `.cpp` 单独丢给 `g++ -fsyntax-only`（不带 `-include`）还编得过吗」。
-改完一批后跑全量自查（先 `st build` 一次，以生成 `build/dev/embed/lib/include` 下的 `battery/embed.hpp`）：
+**改完一批后跑 `py -3 tools/check_selfcontained.py`**——它把这条自查固化下来，且覆盖比下面那条
+shell 一行命令更全（头文件本身也一起查、按组补齐包含根）：
+
+```bash
+py -3 tools/check_selfcontained.py          # 全量：头文件 + 翻译单元（302 个文件 ~40 s）
+py -3 tools/check_selfcontained.py --tu-only  # 只查翻译单元
+```
+
+`channel.hpp` 那次的实际形态：头里用了 `std::uint16_t` / `std::function` 却没包含
+`<cstdint>` / `<functional>`——`st build`、`st check`、`st test` **三个命令全绿**，
+只有 `bootstrap.ps1` 报错（它跑的正是还没有 PCH 的那一次），且报错指向 `channel.cpp:67`
+而不是缺头的那一行。事件：2026-10-08。
+
+等价的 POSIX shell 版本（只覆盖 `src/**`，且包含根写死）：
 
 ```bash
 cd build/..   # 工程根
