@@ -95,6 +95,29 @@ struct Harness {
     }
     return false;
   }
+
+  /// 推进 `pump` 直到 `predicate` 成立（或超时）。返回是否成立。
+  ///
+  /// 用途：等待“某件事在屏幕上发生了”——比如命令已开始执行、`Ctrl+C` 已生效。
+  /// 比 `pump(N, 20)` （固定睡 N×20ms）快得多，也不会因机器慢而睡不够
+  ///（实测：`terminal_pty_stop_...` 里两处固定睡共 2.0s，而条件实际在 100ms 内就满足）。
+  template <typename Predicate>
+  auto wait_until(Predicate predicate, int timeout_ms = 4000) -> bool {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+      terminal->pump();
+      if (predicate()) return true;
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return false;
+  }
+
+  /// 当前屏幕文本（无屏幕模型时为空串）。
+  [[nodiscard]] auto screen_text() -> std::string {
+    const auto* screen = terminal->screen(0);
+    return screen != nullptr ? screen->plain_text() : std::string{};
+  }
 };
 
 }  // namespace
@@ -190,15 +213,56 @@ ST_TEST(terminal_pty_stop_interrupts_without_killing_the_shell) {
   harness.terminal->open_shell();
   ST_REQUIRE(harness.wait_for(test_shell().prompt_needle));
   ST_CHECK(harness.terminal->busy());
-  // 起一条长命令，然后中止。
-  harness.terminal->send_bytes("Start-Sleep -Seconds 60\r");
-  harness.pump(40, 20);
+
+  // 长命令与“打印一行”按平台选（旧写法写死了 PowerShell 的 `Start-Sleep`/
+  // `Write-Output`，配上 POSIX 测试 shell 时两者都“命令不存在”——报错信息里
+  // 恰好包含那串标记，`wait_for` 因此**假通过**：断言看着绿，语义根本没验到）。
+#ifdef _WIN32
+  const std::string long_cmd = "Start-Sleep -Seconds 60";
+  const std::string after_cmd = "Write-Output after-stop-9271";
+#else
+  const std::string long_cmd = "sleep 60";
+  const std::string after_cmd = "echo after-stop-9271";
+#endif
+
+  // 起长命令 → 中断。
+  //
+  // ⚠ 这里原来是 `pump(40, 20)`（无条件睡 0.8s）与 `pump(60, 20)`（1.2s）——
+  // 共 **2.0s 固定耗时**，而条件实际几百毫秒内就满足（实测：这一个用例占整组
+  // 4.19s 中的 2.14s）。改成**条件等待**：一到状态就返回，慢机器也不会睡不够。
+  harness.terminal->send_bytes(long_cmd + "\r");
+  // 等命令确实发出（命令行回显到了屏幕上）——而不是盲等。
+  (void)harness.wait_until(
+      [&] { return harness.screen_text().find(long_cmd) != std::string::npos; }, 3000);
+
+  // **关键断言的前置**：记下中断前的时刻。长命令是 60 秒，所以只要它在
+  // 远短于 60 秒内回到提示符，就只可能是被 `Ctrl+C` 打断了——
+  // 这正是本用例要验的语义（旧写法没有这条，于是 `send_stop` 不发 `Ctrl+C`
+  // 时它仍会 PASS：实测把 send_stop 的写字节改成空操作，用例只变慢到 3.1s 仍绿）。
+  const auto stop_sent_at = std::chrono::steady_clock::now();
   harness.terminal->send_stop();
-  harness.pump(60, 20);
+  // 等中断生效：`Ctrl+C` 后 shell 回到提示符（屏幕上出现第二次提示符）。
+  const bool back_to_prompt = harness.wait_until(
+      [&] {
+        const std::string text = harness.screen_text();
+        std::size_t count = 0;
+        for (std::size_t at = text.find(test_shell().prompt_needle); at != std::string::npos;
+             at = text.find(test_shell().prompt_needle, at + 1)) {
+          ++count;
+        }
+        return count >= 2;   // 首提示符 + 中断后回到的提示符
+      },
+      5000);
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now() - stop_sent_at)
+                           .count();
+  // 真的被中断了：提示符回来了，而且是在长命令（60s）到位之前。
+  ST_CHECK(back_to_prompt);
+  ST_CHECK(elapsed < 10000);   // 若是命令自己跑完，得 ≥ 60s
   // shell 仍在（能接着用），这是与“杀进程”最直接的分界。
   ST_CHECK(harness.terminal->pty_active());
   // 再送一条命令，应该能执行（把中断后的输入流验证一下）。
-  harness.terminal->send_bytes("Write-Output after-stop-9271\r");
+  harness.terminal->send_bytes(after_cmd + "\r");
   ST_CHECK(harness.wait_for("after-stop-9271"));
   harness.terminal->send_stop();
 }

@@ -18,6 +18,7 @@
 #include "st/core/font_platform.hpp"
 #include "st/test/test.hpp"
 
+#include <chrono>
 #include <memory>
 #include <string>
 
@@ -74,6 +75,24 @@ struct Fixture {
 }
 
 }  // namespace
+
+ST_TEST(font_stack_load_is_cached_across_calls) {
+  // **性能护栏**：`FontStack::system_default()` 解析整条字体链要读盘 + 解析 `cmap`/`glyf`
+  // 等表，实测首次 **63.5 ms**。测试里 167 个用例各建一次字体栈，那是整个测试套件
+  // 耗时的大头（改前 936 用例 21.6s 里约 9s）。
+  //
+  // 实现里给 `load_face` 加了进程级缓存（按「路径 + face_index」），第二次起不再读盘。
+  // 判据用**耗时阈值**而不是比值：一次真实解析（几十毫秒量级）不可能落在 1ms 内，
+  // 而命中缓存只有几次 `vector` 拷贝 + `shared_ptr` 引用计数（实测 ~0.01ms）。
+  if (!st::text::FontStack::system_default()) return;   // 无字体环境：本用例不适用
+
+  const auto t0 = std::chrono::steady_clock::now();
+  auto warm = st::text::FontStack::system_default();
+  const auto t1 = std::chrono::steady_clock::now();
+  ST_CHECK(warm.has_value());
+  const double hot_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  ST_CHECK(hot_ms < 1.0);
+}
 
 ST_TEST(font_platform_chain_is_non_empty_and_probeable) {
   // 平台层必须给出**可用的**候选链：探测不到的路径应被过滤掉，

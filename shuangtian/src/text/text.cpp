@@ -108,6 +108,27 @@ struct FontCandidate {
 
 
 /// 载入字体：CJK 集合字体挑出真正覆盖汉字的 face（NotoSansCJK OTC 的 SC face 常非 0 号）。
+///
+/// **带进程级缓存**（2026-10-08 加）：解析一个字体文件要读盘 + 解析 `cmap`/`head`/`glyf`
+/// 等表，实测单次 `FontStack::system_default()` 要 **63.5 ms**。测试里每个用例都建一次
+/// 字体栈（936 个用例中 167 个各造一次）——那 20 秒测试耗时里 94% 花在这里，
+/// 而每个用例的字体是**同一批文件**。
+///
+/// 缓存键是「路径 + face_index」（`FontFace` 内部是 `shared_ptr<Data>`，拷贝廉价，
+/// 共享的是不可变的解析结果）。失败**不缓存**：字体文件可能在运行期被装上/卸下，
+/// 而“重试一次失败”的代价只是读盘失败，比“把一次失败永久钉死”安全。
+[[nodiscard]] auto load_face_cached(std::string_view path, int face_index) -> Result<FontFace> {
+  // 键：路径 + '#' + index（路径里不会出现 `#`——它是文件系统允许的字符，
+  // 但用它将与 index 分隔比拼字符串 + 元组哈希更省事；真要撞也只影响缓存命中率）。
+  thread_local std::unordered_map<std::string, FontFace> cache;
+  std::string key = std::format("{}#{}", path, face_index);
+  if (const auto found = cache.find(key); found != cache.end()) return found->second;
+  auto face = FontFace::load(path, face_index);
+  if (!face) return face;   // 失败不进缓存（见上）
+  cache.emplace(std::move(key), *face);
+  return face;
+}
+
 [[nodiscard]] auto load_face(const FontCandidate& candidate) -> Result<FontFace> {
   constexpr char32_t kProbe = U'霜';
   constexpr int kMaxFaces = 12;
@@ -116,7 +137,7 @@ struct FontCandidate {
     // 优先选简体（SC）face，避免中文界面出现日文字形变体；无 SC 时取首个覆盖汉字的 face。
     std::optional<FontFace> first_covering;
     for (int index = 0; index < kMaxFaces; ++index) {
-      auto face = FontFace::load(candidate.path, index);
+      auto face = load_face_cached(candidate.path, index);
       if (!face) break;
       if (!face->has_glyph(kProbe)) continue;
       const std::string name = face->name();
@@ -127,7 +148,7 @@ struct FontCandidate {
     }
     if (first_covering.has_value()) return *first_covering;
   }
-  return FontFace::load(candidate.path, 0);
+  return load_face_cached(candidate.path, 0);
 }
 
 [[nodiscard]] auto size_key(float size) noexcept -> std::uint32_t {
