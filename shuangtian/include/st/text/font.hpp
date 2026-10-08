@@ -131,4 +131,41 @@ class FontFace {
   std::shared_ptr<Data> data_{};
 };
 
+/// 该字体文件包含的 face 数量（非集合字体为 1）。
+///
+/// **存在的理由：不要把「猜下标」当探测**（2026-10-08 量化）：`FontStack` 要在集合字体
+/// （`.ttc`/`.otc`）里挑简体 face，原本的做法是 `index = 0..11` 逐个 `load` 到失败为止。
+/// 而 `load` **先把整个文件读进内存**（`msyh.ttc` 20 MB），越过界那一次一样要读完才报
+/// `NotFound`——实测单次 9–12 ms，且「失败不进缓存」使它**每次调用都重付**。
+/// 先问 face 数就不会产生越界尝试。
+[[nodiscard]] auto font_face_count(std::string_view path) -> Result<std::uint32_t>;
+
+/// 字体侧缓存计数器（**仅用于测试与诊断**）。
+///
+/// 为什么要它（2026-10-08）：护「字体栈解析被缓存」只能用**耗时阈值**
+/// （`tests/text_font_default_test.cpp` 曾写 `hot_ms < 1.0`）——那在共享机器上两个方向
+/// 都会翻车，且不能区分「缓存命中」与「机器恰好很快」。耗时阈值也确实误了事：
+/// 同一个缺陷（`load_face` 猜 face 下标 → 越界尝试每次重读 20 MB 字体，实测 44 ms）
+/// 被当成“环境抖动”放过了。改成数**确定量**：缓存命中/落空的次数。
+struct FontCacheStats {
+  /// `FontFace::load`（含读盘）真正跑过的次数。
+  std::size_t face_loads{0};
+  /// 命中已解析 face 而直接返回的次数。
+  std::size_t face_hits{0};
+  /// `font_face_count`（读文件头）真正跑过的次数。
+  std::size_t count_reads{0};
+};
+
+/// 取当前计数。**线程局部**，与缓存本身同作用域（缓存是 `thread_local`，
+/// 计数器若做成进程级全局就与它语义不一致了）。
+[[nodiscard]] auto font_cache_stats() noexcept -> FontCacheStats;
+
+/// 计数器**可变引用**：供「确实发生了一次加载/命中/读头」的内部路径自增。
+///
+/// 为什么不封成 `note_hit()` 这类单向接口：计数点分散在三处
+/// （`FontFace::load` / `font_face_count` / `load_face_cached`），而它们各自
+/// 只增自己那一项——直接给结构体引用比开三个函数短且少一层间接。
+/// **不是公开语义的一部分**：外部只读 `font_cache_stats()`。
+[[nodiscard]] auto font_cache_stats_mutable() noexcept -> FontCacheStats&;
+
 }  // namespace st::text

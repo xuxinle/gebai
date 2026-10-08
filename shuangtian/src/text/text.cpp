@@ -117,26 +117,58 @@ struct FontCandidate {
 /// 缓存键是「路径 + face_index」（`FontFace` 内部是 `shared_ptr<Data>`，拷贝廉价，
 /// 共享的是不可变的解析结果）。失败**不缓存**：字体文件可能在运行期被装上/卸下，
 /// 而“重试一次失败”的代价只是读盘失败，比“把一次失败永久钉死”安全。
+///
+/// ⚠ 「失败不缓存」有一条前提容易破：**不要把“越界尝试”当作探测手段**。
+/// 它本身合理，但与「猜下标」一碰上就变成每调用重付一次读盘（见 `load_face`）。
 [[nodiscard]] auto load_face_cached(std::string_view path, int face_index) -> Result<FontFace> {
   // 键：路径 + '#' + index（路径里不会出现 `#`——它是文件系统允许的字符，
   // 但用它将与 index 分隔比拼字符串 + 元组哈希更省事；真要撞也只影响缓存命中率）。
   thread_local std::unordered_map<std::string, FontFace> cache;
   std::string key = std::format("{}#{}", path, face_index);
-  if (const auto found = cache.find(key); found != cache.end()) return found->second;
+  if (const auto found = cache.find(key); found != cache.end()) {
+    font_cache_stats_mutable().face_hits += 1;
+    return found->second;
+  }
   auto face = FontFace::load(path, face_index);
   if (!face) return face;   // 失败不进缓存（见上）
   cache.emplace(std::move(key), *face);
   return face;
 }
 
+/// 集合字体的 face 数（**带缓存**）。
+///
+/// 为什么必须缓存：`font_face_count` 要读文件头，而 `st::fs` 没有局部读接口，
+/// 它实际会把整个 `msyh.ttc`（20 MB）读一遍（实测 9 ms）。若不缓存，
+/// 「热调用只付缓存命中」这个目标就被它一个人否定了——每次 `system_default()`
+/// 都要为每个 CJK 候选重读一遍全文件。
+///
+/// 失败**不缓存**（同 `load_face_cached` 的理据：字体可能被装上/卸下）。
+[[nodiscard]] auto face_count_cached(std::string_view path) -> Result<std::uint32_t> {
+  thread_local std::unordered_map<std::string, std::uint32_t> cache;
+  const std::string key(path);
+  if (const auto found = cache.find(key); found != cache.end()) return found->second;
+  auto count = font_face_count(path);
+  if (!count) return count;
+  cache.emplace(key, *count);
+  return count;
+}
+
 [[nodiscard]] auto load_face(const FontCandidate& candidate) -> Result<FontFace> {
   constexpr char32_t kProbe = U'霜';
-  constexpr int kMaxFaces = 12;
   if (candidate.prefer_cjk_face) {
     // 集合字体（Noto Sans CJK OTC 等）内含 JP/KR/SC/TC 多个 face，字形码位相同但**字形形态不同**：
     // 优先选简体（SC）face，避免中文界面出现日文字形变体；无 SC 时取首个覆盖汉字的 face。
+    //
+    // **先把 face 数问出来，再按下标试**（2026-10-08 修）：原本写的是 `index = 0..11`
+    // 「试到失败为止」，而 `FontFace::load` **先读完整个文件**才开始校验——越过界那一次
+    // 一样要读 20 MB 才报 `NotFound`（实测 msyh.ttc 越界那次 9 ms），
+    // 且那条失败**不进缓存**，于是每次 `system_default()` 都重付一遍（实测量到 44 ms，
+    // 而缓存本该把它压到亚毫秒）。问出数量就不会产生越界尝试。
+    auto count = face_count_cached(candidate.path);
+    if (!count) return st::forward_error(count.error());
+    const int faces = static_cast<int>(*count);
     std::optional<FontFace> first_covering;
-    for (int index = 0; index < kMaxFaces; ++index) {
+    for (int index = 0; index < faces; ++index) {
       auto face = load_face_cached(candidate.path, index);
       if (!face) break;
       if (!face->has_glyph(kProbe)) continue;

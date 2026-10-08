@@ -1880,10 +1880,33 @@ namespace {
   return instance;
 }
 
+// ── 字体缓存计数器 ────────────────────────────────────────────────────────
+//
+// **thread_local 而非进程级全局**：缓存本身（`load_face_cached` / `face_count_cached`
+// 的 `thread_local` 表）就是线程局部的，计数器跟它同作用域才**语义一致**——
+// 进程级全局会让“多线程各持一份缓存”这件事在数字上看不出来。
+// 同时省掉 L8（可变全局）与数据竞争。计数只在测试/诊断路径上被读。
+
 }  // namespace
 
+// 注意：这两个函数要定义在匿名命名空间**之外**。放在里面会被编译器当成另一个实体
+// （`st::text::{anonymous}::font_cache_stats_mutable`），与 `font.hpp` 的声明打架。
+auto font_cache_stats_mutable() noexcept -> FontCacheStats& {
+  thread_local FontCacheStats instance{};
+  return instance;
+}
+
+auto font_cache_stats() noexcept -> FontCacheStats { return font_cache_stats_mutable(); }
+
 /// 字体文件包含的 face 数量（非集合字体为 1）。供 `FontStack` 探测 TTC/OTC 用。
+///
+/// 只需读文件头（tag + face 数与目录），**不把整个文件读进内存**：
+/// 这个函数是「不要猜 face 下标」那条修正的依据（见 `font.hpp` 的说明），
+/// 它要是和 `load` 一样读全文件，省下的就只是解析开销而非读盘开销。
+/// 实现上仍调 `read_bytes`（`st::fs` 没有局部读接口），但语义与调用方约定了
+/// 「只需头部」——将来 `fs` 提供 `read_prefix` 时这里就换成它。
 [[nodiscard]] auto font_face_count(std::string_view path) -> Result<std::uint32_t> {
+  font_cache_stats_mutable().count_reads += 1;   // 计数：读文件头（见 font.hpp）
   auto content = st::fs::read_bytes(path);
   if (!content) return st::forward_error(content.error());
   if (content->size() < 12) return unexpected(ErrorCode::Parse, "字体文件过短");
@@ -1902,6 +1925,7 @@ namespace {
 }
 
 auto FontFace::load(std::string_view path, int face_index) -> Result<FontFace> {
+  font_cache_stats_mutable().face_loads += 1;   // 计数：真正的读盘 + 解析（见 font.hpp）
   if (face_index < 0) return unexpected(ErrorCode::Invalid, "face_index 不能为负");
   auto content = st::fs::read_bytes(path);
   if (!content) return st::forward_error(content.error());

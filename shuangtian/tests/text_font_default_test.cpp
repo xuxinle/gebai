@@ -18,11 +18,11 @@
 #include "st/core/font_platform.hpp"
 #include "st/test/test.hpp"
 
-#include <chrono>
 #include <memory>
 #include <string>
 
 #include "st/core/font_platform.hpp"
+#include "st/text/font.hpp"
 #include "st/text/text.hpp"
 
 namespace {
@@ -77,21 +77,39 @@ struct Fixture {
 }  // namespace
 
 ST_TEST(font_stack_load_is_cached_across_calls) {
-  // **性能护栏**：`FontStack::system_default()` 解析整条字体链要读盘 + 解析 `cmap`/`glyf`
-  // 等表，实测首次 **63.5 ms**。测试里 167 个用例各建一次字体栈，那是整个测试套件
-  // 耗时的大头（改前 936 用例 21.6s 里约 9s）。
+  // **缓存生效**的回归护栏（2026-10-08 重写）。
   //
-  // 实现里给 `load_face` 加了进程级缓存（按「路径 + face_index」），第二次起不再读盘。
-  // 判据用**耗时阈值**而不是比值：一次真实解析（几十毫秒量级）不可能落在 1ms 内，
-  // 而命中缓存只有几次 `vector` 拷贝 + `shared_ptr` 引用计数（实测 ~0.01ms）。
+  // 第一版写的是耗时阈值：`ST_CHECK(hot_ms < 1.0)`——它有两个毛病，而且都真的发作了：
+  //
+  // ① **不可靠**：命中缓存仍要重拼候选链（内含 `is_regular_file`）再装 `FontStack`，
+  //    实测量到 0.87 ms，卡在 1.0 门槛边上。共享机器上两边都会翻车——
+  //    §7 说的「机器慢/快两个方向都会失败」就是这个形态。
+  // ② **没抓住真缺陷**：`load_face` 当时是「猜 face 下标 0..11 试到失败为止」，
+  //    而 `FontFace::load` 先读完整文件（`msyh.ttc` 20 MB）才校验越界，那条失败又不进缓存
+  //    ⇒ 每次调用重付 ~44 ms。它把这个用例逼红了好几个月，却被读成“环境抖动”——
+  //    因为**耗时这个量分不清“缓存没命中”与“机器很忙”**。
+  //
+  // 改成数**确定量**：热调用必须零新增读盘/解析。与机器快慢无关，且直接量的是契约本身。
   if (!st::text::FontStack::system_default()) return;   // 无字体环境：本用例不适用
 
-  const auto t0 = std::chrono::steady_clock::now();
+  // 第一次（预热）：把系统字体链装进缓存
   auto warm = st::text::FontStack::system_default();
-  const auto t1 = std::chrono::steady_clock::now();
   ST_CHECK(warm.has_value());
-  const double hot_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-  ST_CHECK(hot_ms < 1.0);
+  const auto warm_stats = st::text::font_cache_stats();
+  ST_CHECK(warm_stats.face_loads > 0);   // 预热确实读了盘（否则下面的“零新增”毫无意义）
+
+  // 之后每次都必须**纯命中**：不重读盘、不重读 face 目录。
+  for (int round = 0; round < 3; ++round) {
+    auto again = st::text::FontStack::system_default();
+    ST_CHECK(again.has_value());
+    const auto now = st::text::font_cache_stats();
+    ST_CHECK_EQ(now.face_loads, warm_stats.face_loads);
+    ST_CHECK_EQ(now.count_reads, warm_stats.count_reads);
+  }
+
+  // 命中数必须**真的在涨**——否则上面两条会被“什么都不做”满足（假绿）。
+  const auto final_stats = st::text::font_cache_stats();
+  ST_CHECK(final_stats.face_hits > warm_stats.face_hits);
 }
 
 ST_TEST(font_platform_chain_is_non_empty_and_probeable) {
