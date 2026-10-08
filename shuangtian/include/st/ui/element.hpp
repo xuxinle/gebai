@@ -463,7 +463,52 @@ class Element {
   /// `apply_theme` 是每帧从主题重算颜色/字号/字重的地方，而 DSL 的
   /// `BoxProps::color/hex_color/size/weight` 是“盖过主题”的显式意图——
   /// 不调本函数就是一个“设了颜色，首帧对、下一帧被主题盖回”的隐形 bug。
-  virtual void apply_theme(const Theme& theme) { (void)theme; apply_text_overrides(); }
+  ///
+  /// 基类实现统一处理**语义表面档位**（`set_surface`）：容器（`Panel`）不覆写
+  /// `apply_theme`，所以“背景色跟着主题走”这件事只能在这里做——否则应用侧
+  /// 要么硬编码颜色（主题一切换就错）、要么自己读色板（依赖方向反了）。
+  virtual void apply_theme(const Theme& theme) {
+    apply_surface(theme);
+    apply_text_overrides();
+  }
+
+  /// 容器的**语义表面档位**（背景色跟着主题走，而不是硬编码）。
+  ///
+  /// 存在理由：工作台的横向条带（标题栏 / 活动栏 / 状态栏）必须同色——它们
+  /// 合起来是一圈“外壳”，色不一致会在拐角处露馅。标题栏的颜色由 `TitleBar`
+  /// 自己取 `surface_alt`；而活动栏/状态栏是通用 `Panel`，没有地方表达
+  /// “我要跟标题栏同色”。加了这个档位，应用侧只需声明语义，主题切换自动跟随。
+  enum class Surface : std::uint8_t {
+    None,    ///< 不画底色（构造默认；`Panel` 的透明态）
+    Base,    ///< `colors.surface`（普通面板底）
+    Alt,     ///< `colors.surface_alt`（外壳条带：标题栏/活动栏/状态栏）
+    Sunken,  ///< `colors.surface_sunken`（凹槽、输入底、代码底）
+  };
+
+  /// 设语义表面档位（`Surface::None` = 不画底色）。
+  ///
+  /// 需在下一次 `apply_theme` 前调用（UiRoot 每帧按需调）——若在首帧之后改变，
+  /// 本次改变在下一帧的主题刷新时生效（`Panel` 的透明默认值与 `None` 一致，
+  /// 所以“先构造后设置”的正常用法没有可见延迟）。
+  void set_surface(Surface surface) noexcept { extras().surface = surface; }
+  [[nodiscard]] auto surface() const noexcept -> Surface {
+    return extras_ != nullptr ? extras_->surface : Surface::None;
+  }
+
+ protected:
+  /// 把表面档位落到 `style_.background`（基类 `apply_theme` 调；组件覆写时请转调）。
+  void apply_surface(const Theme& theme) {
+    if (extras_ == nullptr || extras_->surface == Surface::None) return;
+    const Palette& colors = theme.colors();
+    switch (extras_->surface) {
+      case Surface::None: return;
+      case Surface::Base: style_.background = colors.surface; return;
+      case Surface::Alt: style_.background = colors.surface_alt; return;
+      case Surface::Sunken: style_.background = colors.surface_sunken; return;
+    }
+  }
+
+ public:
 
   // —— 排版覆盖（DSL `BoxProps` 的落点）——
   //
@@ -727,6 +772,8 @@ class Element {
     std::optional<Tone> text_tone_override{};
     float text_size_override{-1.0f};
     std::optional<FontWeight> text_weight_override{};
+    /// 语义表面档位（`Element::Surface`；`None` = 不画底色，与构造默认一致）。
+    Surface surface{Surface::None};
   };
 
   /// 取（必要时创建）渲染附属状态。**非 const** 的入口（`advance_hover` 用 `mutable` 成员调）。

@@ -523,6 +523,15 @@ struct BoxProps {
   std::string hex_color{};             ///< 字面色值（`#rrggbb`/`#rgb`/带 alpha 的 `#rrggbbaa`）
   float size{-1.0f};                   ///< 字号（-1 = 不设置，沿用主题）
   std::optional<FontWeight> weight{};  ///< 字重（缺省 = 不设置）
+  /// 容器**背景表面档位**（背景色跟着主题走，而不是硬编码色值）。
+  ///
+  /// 为什么需要：工作台的横向条带（标题栏/活动栏/状态栏）必须同色——它们
+  /// 合起来是一圈“外壳”，色不一致在拐角处就露馅。标题栏由 `TitleBar` 自己取
+  /// `surface_alt`，而活动栏/状态栏是通用 `Panel`，没地方表达“跟标题栏同色”。
+  /// 有了这个字段，应用侧只声明语义，主题切换自动跟随。
+  ///
+  /// 与 `color`/`hex_color` 的分工：那两个是**文字**色，这个是**背景**。
+  Element::Surface surface{Element::Surface::None};
   std::string id{};                       ///< 显式 id（空 = 自动）
   std::string key{};                      ///< 业务身份（自动 id 用 Type@key）
 };

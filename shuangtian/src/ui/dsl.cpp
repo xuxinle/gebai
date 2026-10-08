@@ -1370,6 +1370,10 @@ void apply_box(Element& element, const BoxProps& props) {
   }
   if (props.size >= 0.0f) element.set_text_size(props.size);
   if (props.weight.has_value()) element.set_text_weight(*props.weight);
+  // 背景表面档位（与上面的文字色是两条互不干涉的通道）：
+  // 它不做“显式覆盖”，而是**声明语义**——`apply_theme` 按主题取色，
+  // 所以主题切换后颜色自动跟随（这正是它与 `hex_color` 的分工）。
+  if (props.surface != Element::Surface::None) element.set_surface(props.surface);
 }
 
 // ── 组件包装 ──────────────────────────────────────────────────────────────

@@ -1081,11 +1081,13 @@ struct CodeEditorPage : Component {
   void build_main(Composer& c, const std::vector<OpenBuffer>& buffers, std::size_t active,
                   bool has_editor) {
     row(c, {.grow = true, .id = "main-row"}, [&] {
-      // **活动栏常驻，侧栏不常驻**——两者是两个独立的东西：
-      // 活动栏是“能去哪儿”的入口（切视图的唯一途径），侧栏是“当前视图的内容”。
-      // 曾经把两者绑在一个 `sidebar_visible_` 上，于是关掉侧栏连入口一起没了，
-      // 用户再想换视图只能靠快捷键（实测：Ctrl+B 之后活动栏消失、无从点回去）。
-      build_activity_bar(c);
+      // ⚠ **活动栏不在这里**：它在 `build_workbench` 那一层（与底部面板并列、
+      // 满高）。本函数只管“侧栏与编辑区”这一对横向分栏。
+      //
+      // **侧栏不常驻**（活动栏常驻，两者是独立的东西）：活动栏是“能去哪儿”的入口
+      //（切视图的唯一途径），侧栏是“当前视图的内容”。曾经把两者绑在一个
+      // `sidebar_visible_` 上，于是关掉侧栏连入口一起没了（实测：Ctrl+B 之后
+      // 活动栏消失、无从点回去）。
       if (!sidebar_visible_.value()) {
         build_editor_area(c, buffers, active, has_editor);
         return;
@@ -1120,7 +1122,10 @@ struct CodeEditorPage : Component {
                                                {"git-branch", "scm"}, {"play", "run"},
                                                {"package", "extensions"}};
     const std::size_t current = activity_.value();
-    column(c, {.gap = 2.0f, .padding_y = 4.0f, .width = 44.0f, .id = "activity-bar"}, [&] {
+    // `surface = Alt`：与标题栏/状态栏**同色**——三者合起来是一圈“外壳”，
+    // 色不一致会在拐角处露馅（见 `Element::Surface` 的说明）。
+    column(c, {.gap = 2.0f, .padding_y = 4.0f, .width = 44.0f,
+               .surface = Element::Surface::Alt, .id = "activity-bar"}, [&] {
       for (std::size_t index = 0; index < std::size(kActivities); ++index) {
         // 图标按钮：`custom<Button>`（Button 的 icon 是一等接口，属性面没有）
         const std::string id = std::string("activity-") + kActivities[index].id;
@@ -1734,29 +1739,43 @@ struct CodeEditorPage : Component {
   }
 
   /// 上半（资源管理器/编辑区）与下半（问题/输出/终端）的**分栏宿主**。
+  ///
+  /// 结构：`[活动栏] [上/下分栏]`——活动栏提到这一层，**与底部面板并列**。
+  ///
+  /// 为什么把活动栏从 `main-row` 里提出来：它是工作台的**全局导航**，不是
+  /// “上半区的一部分”。放在 `main-row` 里时，它只到上分区底（y=40..439），
+  /// 底部终端面板一展开，活动栏就在终端左边变成一根矮条——与标题栏/状态栏
+  /// 这两根**通栏**在视觉上对不齐（用户要求“占满标题栏到状态栏之间的全部高度”）。
+  ///
+  /// 与 VSCode 同构：`[activity][sidebar|editor]` 上、`[panel]` 下，两者共享
+  /// 同一条水平分栏线；活动栏横跨**整个**下半区左侧。
   void build_workbench(Composer& c, const std::vector<OpenBuffer>& buffers, std::size_t active,
                        bool has_editor) {
-    (void)custom_container<SplitView>(
-        c,
-        [&] {
-          (void)custom_container<Panel>(
-              c, [&] { build_main(c, buffers, active, has_editor); },
-              [](Panel& panel) { panel.set_id("editor-upper"); }, {.grow = true, .key = "upper"});
-          if (!bottom_visible_.value()) return;   // 收起时下半不声明 → 分栏退化为单栏
-          (void)custom_container<Panel>(
-              c, [&] { build_bottom(c); },
-              [](Panel& panel) { panel.set_id("editor-lower"); }, {.grow = true, .key = "lower"});
-        },
-        [this](SplitView& split) {
-          split.set_id("bottom-split");
-          split.set_orientation(SplitView::Orientation::Vertical);
-          split.set_min_ratio(0.05f);
-          split.set_ratio(bottom_ratio_, false);
-          // 拖拽回调只写一个**非响应式**成员：比例由组件自己持有并重排，
-          // 写 State 会每拖动一像素触发一次整页重组（浪费且在拖拽中重建子元素）。
-          split.on_change = [this](float ratio) { bottom_ratio_ = ratio; };
-        },
-        {.grow = true, .id = "bottom-split"});
+    row(c, {.gap = 0.0f, .grow = true, .id = "workbench-row"}, [&] {
+      // 活动栏：**常驻**且**满高**（见上）。侧栏依旧不常驻（两者是独立的东西）。
+      build_activity_bar(c);
+      (void)custom_container<SplitView>(
+          c,
+          [&] {
+            (void)custom_container<Panel>(
+                c, [&] { build_main(c, buffers, active, has_editor); },
+                [](Panel& panel) { panel.set_id("editor-upper"); }, {.grow = true, .key = "upper"});
+            if (!bottom_visible_.value()) return;   // 收起时下半不声明 → 分栏退化为单栏
+            (void)custom_container<Panel>(
+                c, [&] { build_bottom(c); },
+                [](Panel& panel) { panel.set_id("editor-lower"); }, {.grow = true, .key = "lower"});
+          },
+          [this](SplitView& split) {
+            split.set_id("bottom-split");
+            split.set_orientation(SplitView::Orientation::Vertical);
+            split.set_min_ratio(0.05f);
+            split.set_ratio(bottom_ratio_, false);
+            // 拖拽回调只写一个**非响应式**成员：比例由组件自己持有并重排，
+            // 写 State 会每拖动一像素触发一次整页重组（浪费且在拖拽中重建子元素）。
+            split.on_change = [this](float ratio) { bottom_ratio_ = ratio; };
+          },
+          {.grow = true, .id = "bottom-split"});
+    });
   }
 
   // 终端面板的组装归**框架组件** `st::ui::Terminal`——应用侧那份自绘的
@@ -1767,7 +1786,8 @@ struct CodeEditorPage : Component {
   // 每一项尽量做成**可点**的：状态栏是 IDE 里“看一眼”的地方，而看一眼之后往往
   // 想知道更多（分支 → 源代码管理面板、问题数 → 问题面板、语言 → 语言列表……）。
   void build_status_bar(Composer& c) {
-    row(c, {.gap = 10.0f, .padding_x = 10.0f, .height = 26.0f, .id = "statusbar"}, [&] {
+    row(c, {.gap = 10.0f, .padding_x = 10.0f, .height = 26.0f,
+            .surface = Element::Surface::Alt, .id = "statusbar"}, [&] {
       status_item(c, "status-branch", "git-branch", [this] {
         return git_branch_.empty() ? std::string("main") : git_branch_;
       }, [this] {

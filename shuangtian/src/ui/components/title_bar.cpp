@@ -287,9 +287,18 @@ void TitleBar::apply_theme(const Theme& theme) {
   const Palette& colors = theme.colors();
   const Metrics& metrics = theme.metrics();
   style_.background = colors.surface_alt;
-  // 窗框与内容之间给一条 1px 分界：没有系统边框之后，这是"窗口到哪里为止"的视觉依据。
-  style_.border_width = metrics.border_width;
-  style_.border_color = colors.border;
+  // **不画边框**（用户 2026-10-08 要求“标题栏的边框线去掉”）。
+  //
+  // 原设计在这里给了一条 1px 分界线（“窗框与内容之间的视觉依据”）。实测下它
+  // 是**四周环**（`Element::paint_box` 画的是 rounded_border_ring）——左右两条竖线
+  // 在窗口边缘根本看不到，看得见的只有**下边**那一条；而它与活动栏/状态栏
+  // 同色之后，这条线反而把本应连成一圈的“外壳”切成两段。
+  //
+  // 层次改由**底色本身**区分：`surface_alt`（外壳条带）与内容区的 `bg`/`surface`
+  // 本来就不同档（见 `Palette` 的“表面阶梯逐级可辨”约束，`ui_theme_test` 有断言），
+  // 不需要额外描边。
+  style_.border_width = 0.0f;
+  style_.border_color = math::Color{0, 0, 0, 0};
   style_.radius = 0.0f;
   style_.padding = math::Insets{0.0f, k_padding_x, 0.0f, k_padding_x};
   style_.font_size = metrics.font_sm;
