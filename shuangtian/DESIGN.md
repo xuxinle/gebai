@@ -2171,6 +2171,33 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
   - `set_mode()` / `mode()`：声明式路径用（组件由 `create_element` 无参构造，
     模式得构造后设）。切到 `Directory` 会**清空文件名**——那个名字属于上一个模式。
   - 属性面 `mode` 回报 `"open"` / `"save"` / `"directory"`。
+  - **跨平台选择器增强（2026-10-09）**——从"能选"到"好用"：
+    - **面包屑路径**：当前目录按分隔符拆段、**每段可点跳转**（替代只能逐级 `..`）；
+      末段（当前位置）主色、其余弱色。根段显示 `/`（POSIX）/ `C:`（Win）。
+      几何经 `crumb_rect(i)` 暴露（测试与自动化定位用）。
+    - **位置侧栏**：主目录（`fs::home_dir`，跨平台）+ Windows 盘符（枚举不到就不显示）
+      + 宿主自定义项（`set_places`，不存在的路径自动跳过）。激活判定是
+      "**当前目录等于或位于其下**"（只比相等会让用户进了子目录就丢掉导航上下文）。
+    - **后缀过滤**（`set_name_filters`）：白名单（`.cpp|.md` 口径，自动补点/转小写）；
+      **目录永不过滤**（导航必需）。可见集合经 `visible_` 下标映射，`entry(i)`/
+      `entry_count()`/命中/键盘导航全走同一口径。
+    - **隐藏文件切换**（`set_show_hidden`，`.` 开头；默认关）+ **新建文件夹**
+      （`create_folder`，重名自动 `-1`/`-2` 后缀、建完就进入）——两者在面包屑行右端
+      有常驻钮（图标用内置 `eye`/`eye-off`/`folder`）；`Ctrl+Shift+N` / `Ctrl+H`。
+    - **列表滚动条 + 选中行自动滚入可视区**；`Home`/`End` 跳首/末；
+      列表高**对齐到整行**（不留半行硬切）。
+    - 属性面补 `show_hidden` / `filters` / `places`；动作面补 `new_folder` /
+      `toggle_hidden` / `goto_crumb` / `goto_place`。
+    - **两个框架级缺陷（同轮修）**：
+      ① `FileDialog` 在 `arrange` 里建按钮子件，而 `UiRoot::layout` 的主题下发
+      （`apply_theme_tree`）**在这之前已跑完**——按钮 `style_` 停在默认值，
+      主按钮无主色底、次按钮无描边，两个都成了"裸文字"（用户看不出该点哪个）。
+      修法：组件存下上次主题，新建子件后立即补一次下发；`apply_theme` 也转发给已有子件。
+      ② `UiRoot` 对 `FillViewport` 浮层只 `arrange` 宿主到整个视口、**不重跑 measure**，
+      而 `OverlayHost`（Panel）按子元素的 `measured_size` 分 flex 空间——子元素
+      测量值停在旧帧（实测 `FileDialog` 1280×420）：**遮罩只盖上半屏、卡片贴顶**。
+      修法：`OverlayHost::arrange` 先用真实矩形重测子元素再走 `Panel::arrange`
+      （`grow`/`Stretch` 的 flex 语义原样保留——查找条那类自然尺寸浮层仍是自然高）。
 - **工具链（stpm）**：**g++ 优先（主版本 ≥ 13），clang++ 次之**——两族是**同一条口径**
   （GCC 风格标志 + `-MMD` 依赖 + `-l` 链接 + libstdc++），因此构建系统只有一套命令，
   没有"标志翻译层"。唯一需要清单显式声明的是 `target_triple`（`clang++` 的默认目标跟着

@@ -436,3 +436,160 @@ ST_TEST(file_dialog_directory_mode_ignores_files_and_text_input) {
   (void)hosted.root.dispatch(typed);
   ST_CHECK(hosted.dialog->filename().empty());
 }
+
+// ————————————————— 跨平台选择器增强（面包屑/侧栏/过滤/隐藏/新建/滚动）—————————————————
+
+ST_TEST(file_dialog_name_filters_hide_non_matching_files) {
+  Sandbox sandbox;
+  Hosted hosted;
+  hosted.dialog->set_directory(sandbox.dir);
+  hosted.layout();
+  // 全部可见（未设过滤）：a.txt b.md（+两个目录）。
+  ST_CHECK(hosted.dialog->entry_count() >= std::size_t{4});
+  // 过滤到 .md：只剩 b.md（目录永不过滤）。
+  hosted.dialog->set_name_filters({".MD"});   // 大小写归一
+  hosted.layout();
+  std::size_t files = 0, dirs = 0;
+  for (std::size_t index = 0; index < hosted.dialog->entry_count(); ++index) {
+    const auto* entry = hosted.dialog->entry(index);
+    if (entry == nullptr) continue;
+    if (entry->is_dir) ++dirs; else ++files;
+  }
+  ST_CHECK_EQ(files, std::size_t{1});
+  ST_CHECK_EQ(dirs, std::size_t{2});
+  // 过滤后 pending_path 指向被过滤的文件：仍能选中（文件名回填，只是列表高亮不到）。
+  ST_CHECK(hosted.dialog->set_pending_path(st::fs::join(sandbox.dir, "a.txt")));
+  ST_CHECK_EQ(hosted.dialog->filename(), std::string("a.txt"));
+  // 清空过滤：恢复全部。
+  hosted.dialog->set_name_filters({});
+  hosted.layout();
+  ST_CHECK(hosted.dialog->entry_count() >= std::size_t{4});
+}
+
+ST_TEST(file_dialog_hidden_toggle_shows_dot_files) {
+  Sandbox sandbox;
+  (void)st::fs::write_text(st::fs::join(sandbox.dir, ".secret"), "x");
+  Hosted hosted;
+  hosted.dialog->set_directory(sandbox.dir);
+  hosted.layout();
+  const std::size_t before = hosted.dialog->entry_count();
+  // 开隐藏：多出 .secret。
+  hosted.dialog->set_show_hidden(true);
+  hosted.layout();
+  ST_CHECK_EQ(hosted.dialog->entry_count(), before + 1);
+  bool found = false;
+  for (std::size_t index = 0; index < hosted.dialog->entry_count(); ++index) {
+    if (hosted.dialog->entry(index) != nullptr &&
+        hosted.dialog->entry(index)->name == ".secret") {
+      found = true;
+      break;
+    }
+  }
+  ST_CHECK(found);
+  // 属性面同口径。
+  ST_CHECK_EQ(hosted.dialog->get_property("show_hidden").value_or(""), std::string("true"));
+}
+
+ST_TEST(file_dialog_breadcrumbs_navigate_across_levels) {
+  Sandbox sandbox;
+  Hosted hosted;
+  hosted.dialog->set_directory(st::fs::join(sandbox.dir, "sub"));
+  hosted.layout();
+  // 面包屑几何：至少三段（临时目录链里的最后几段）；首段命中区存在。
+  bool any = false;
+  for (std::size_t index = 0; index < 12; ++index) {
+    if (!hosted.dialog->crumb_rect(index).is_empty()) any = true;
+  }
+  ST_CHECK(any);
+  // 动作面跳转到末段前一段 = 回到 sandbox 根。
+  // 数可见段数（末段之后的命中区为空）。
+  std::size_t crumb_total = 0;
+  while (!hosted.dialog->crumb_rect(crumb_total).is_empty()) ++crumb_total;
+  ST_CHECK(crumb_total >= 2);
+  ST_CHECK(hosted.dialog->invoke_action("goto_crumb", std::to_string(crumb_total - 2)));
+  hosted.layout();
+  ST_CHECK_EQ(st::fs::normalize(hosted.dialog->directory()), st::fs::normalize(sandbox.dir));
+}
+
+ST_TEST(file_dialog_create_folder_enters_it) {
+  Sandbox sandbox;
+  Hosted hosted;
+  hosted.dialog->set_directory(sandbox.dir);
+  hosted.layout();
+  const std::string created = hosted.dialog->create_folder("mydir");
+  ST_CHECK(!created.empty());
+  ST_CHECK(hosted.dialog->directory().find("mydir") != std::string::npos);
+  ST_CHECK(st::fs::is_directory(created));
+  // 冲突自动后缀：先回到父目录（create_folder 建完就进入了 mydir），
+  // 再在同目录建同名——第二次应得 mydir-1。
+  hosted.dialog->set_directory(sandbox.dir);
+  const std::string second = hosted.dialog->create_folder("mydir");
+  ST_CHECK(second.find("mydir-1") != std::string::npos);
+}
+
+ST_TEST(file_dialog_places_include_home_and_custom) {
+  Hosted hosted;
+  const auto list = hosted.dialog->places();
+  // 至少有主目录（跨平台都有）；自定义项追加在后。
+  ST_CHECK(!list.empty());
+  bool has_home = false;
+  for (const auto& place : list) {
+    if (place.label == "主目录") has_home = true;
+  }
+  ST_CHECK(has_home);
+  hosted.dialog->set_places({{"沙箱标记", "/绝对/不存在的路径"}, {"根", "/"}});
+  const auto list2 = hosted.dialog->places();
+  bool has_root = false, has_missing = false;
+  for (const auto& place : list2) {
+    if (place.label == "根") has_root = true;
+    if (place.label == "沙箱标记") has_missing = true;   // 不存在的被过滤掉
+  }
+  ST_CHECK(has_root);
+  ST_CHECK(!has_missing);
+}
+
+ST_TEST(file_dialog_keyboard_selection_scrolls_into_view) {
+  Sandbox sandbox;
+  // 造 60 个文件（远超一屏）。
+  for (int i = 0; i < 60; ++i) {
+    (void)st::fs::write_text(st::fs::join(sandbox.dir, std::format("f{:02}.txt", i)), "x");
+  }
+  Hosted hosted;
+  hosted.dialog->set_directory(sandbox.dir);
+  hosted.layout();
+  // End：选中末项且行在可视区内。
+  st::ui::Event end = key("End");
+  (void)hosted.root.dispatch(end);
+  hosted.layout();
+  const auto* picked = hosted.dialog->selected_entry();
+  ST_REQUIRE(picked != nullptr);
+  ST_CHECK_EQ(picked->name, std::string("f59.txt"));   // 目录在前、文件按名序：末项是最后的文件
+  // Home：回到首项（目录排最前，sub 字典序最靠前的目录）。
+  st::ui::Event home = key("Home");
+  (void)hosted.root.dispatch(home);
+  const auto* top = hosted.dialog->selected_entry();
+  ST_REQUIRE(top != nullptr);
+  ST_CHECK_EQ(top->name, std::string("sub"));
+}
+
+ST_TEST(file_dialog_fills_viewport_rect_for_mask) {
+  // 回归：作为 overlay 内容时，FileDialog 必须拿到**整个视口矩形**——
+  // 遮罩要盖满屏、卡片才会居中。旧缺陷：宿主 Panel 里无 grow → 高度塌成
+  // 自然尺寸（实测卡片贴顶、遮罩只盖上半屏）。
+  st::ui::UiRoot root;
+  root.set_viewport(st::math::Size{1000.0f, 700.0f});
+  root.set_content(std::make_unique<st::ui::Panel>(st::ui::FlexDirection::Column));
+  auto owned = FileDialog::make(FileDialog::Mode::Open, "打开");
+  FileDialog* dialog = owned.get();
+  root.add_overlay(std::move(owned), UiRoot::OverlayLayout::FillViewport);
+  root.layout(true);
+  ST_CHECK_EQ(dialog->bounds().width, 1000.0f);
+  ST_CHECK_EQ(dialog->bounds().height, 700.0f);
+  // 卡片居中：上下留白大致相等，且高度是设计值（420）。
+  const auto card = dialog->card_rect();
+  ST_CHECK(card.width > 500.0f);
+  ST_CHECK(card.height > 300.0f);
+  const float above = card.y;
+  const float below = 700.0f - card.bottom();
+  ST_CHECK(std::fabs(above - below) < 2.0f);
+}

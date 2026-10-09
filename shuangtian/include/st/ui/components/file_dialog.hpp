@@ -18,6 +18,7 @@
 /// 取 `theme` token；不 include text 层与 Tree/List 组件。
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -45,12 +46,14 @@ class FileDialog : public Element {
   /// Open/Save，选目录只能靠外部 `--workspace` 参数定死，运行期换不了。
   enum class Mode : std::uint8_t { Open, Save, Directory };
 
-  static constexpr float kMinWidth{560.0f};
-  static constexpr float kMaxWidth{640.0f};
-  static constexpr float kMinHeight{380.0f};
-  static constexpr float kMaxHeight{420.0f};
+  static constexpr float kMinWidth{620.0f};
+  static constexpr float kMaxWidth{760.0f};
+  static constexpr float kMinHeight{420.0f};
+  static constexpr float kMaxHeight{480.0f};
   static constexpr float kPadding{20.0f};
   static constexpr float kRowHeight{32.0f};
+  /// 位置侧栏宽（左列；窄了位置名被截、宽了列表被压——132 是"主目录/工作区"的舒适宽）。
+  static constexpr float kPlacesWidth{132.0f};
 
   explicit FileDialog(Mode mode = Mode::Open, std::string title = {});
 
@@ -78,6 +81,37 @@ class FileDialog : public Element {
   void set_directory(const std::string& path);
   [[nodiscard]] auto directory() const noexcept -> const std::string& { return directory_; }
 
+  // —— 文件类型过滤（打开场景的"只看代码"）——
+  /// 后缀白名单（含点小写，如 `.cpp`/`.md`；空 = 不过滤显示全部）。
+  /// 目录永不过滤——过滤的本意是"找可打开的文件"，目录是导航必需。
+  /// 匹配大小写不敏感（Windows 文件系统如此）。
+  void set_name_filters(std::vector<std::string> extensions);
+  [[nodiscard]] auto name_filters() const noexcept -> const std::vector<std::string>& {
+    return name_filters_;
+  }
+
+  // —— 隐藏文件显隐 ——
+  /// 是否显示 `.` 开头的条目（POSIX 隐藏文件；默认 false——跨平台安全侧）。
+  /// Windows 的隐藏属性不在此列（`list_dir` 未暴露该位；且 DOS/系统文件误伤面大）。
+  void set_show_hidden(bool show);
+  [[nodiscard]] auto show_hidden() const noexcept -> bool { return show_hidden_; }
+
+  // —— 位置侧栏（跨平台的"常用位置"）——
+  /// 自定义位置项（追加在内置项之后；`path` 不存在时自动跳过显示）。
+  /// 内置项：主目录（`fs::home_dir`，跨平台）+ Windows 盘符（`C:`、`D:`…，
+  /// 按 `GetLogicalDrives`/`/proc/mounts` 口径枚举，枚举不到就不显示）。
+  struct Place {
+    std::string label{};
+    std::string path{};
+  };
+  void set_places(std::vector<Place> places);
+  [[nodiscard]] auto places() const -> std::vector<Place>;   // 内置 + 自定义（存在性已过滤）
+
+  // —— 新建文件夹 ——
+  /// 在当前目录下新建子目录（名字冲突时自动加 `-1`/`-2` 后缀）。
+  /// 成功返回新目录名（并进入它——与用户"建完就用"的意图一致）。
+  [[nodiscard]] auto create_folder(std::string name = "新建文件夹") -> std::string;
+
   /// 文件名（输入行内容；`Mode::Save` 下构造时预填）。
   void set_filename(std::string name);
   [[nodiscard]] auto filename() const noexcept -> const std::string& { return filename_; }
@@ -86,7 +120,8 @@ class FileDialog : public Element {
   [[nodiscard]] auto selected_entry() const noexcept -> const st::fs::DirEntry* {
     return selected_ < entries_.size() ? &entries_[selected_] : nullptr;
   }
-  [[nodiscard]] auto entry_count() const noexcept -> std::size_t { return entries_.size(); }
+  /// 可见条目数（过滤/隐藏后；`entry(index)` 同口径）。
+  [[nodiscard]] auto entry_count() const noexcept -> std::size_t { return visible_.size(); }
   [[nodiscard]] auto entry(std::size_t index) const noexcept -> const st::fs::DirEntry*;
 
   /// 错误行文本（`fs` 失败时呈现；空 = 无错误）。
@@ -133,6 +168,25 @@ class FileDialog : public Element {
 
   // —— 布局几何（测试与命中共用；arrange 后有效） ——
   [[nodiscard]] auto card_rect() const noexcept -> math::Rect { return card_; }
+  /// 对话框标题（空 = 不画标题行，省掉那段竖向空白）。
+  void set_title(std::string title) {
+    title_ = std::move(title);
+    mark_layout_dirty();
+    mark_dirty();
+  }
+  [[nodiscard]] auto title() const noexcept -> const std::string& { return title_; }
+  /// 位置侧栏区（卡片内左列；无侧栏时为空矩形）。
+  [[nodiscard]] auto places_rect() const noexcept -> math::Rect { return places_; }
+  /// 面包屑行区（卡片内，目录行上方）。
+  [[nodiscard]] auto breadcrumb_rect() const noexcept -> math::Rect { return breadcrumb_; }
+  /// 第 index 个面包屑段命中区（越界为空矩形；末段是当前位置，不可点）。
+  [[nodiscard]] auto crumb_rect(std::size_t index) const noexcept -> math::Rect;
+  /// 位置侧栏第 index 项命中区（越界为空矩形）。
+  [[nodiscard]] auto place_rect(std::size_t index) const noexcept -> math::Rect;
+  /// 工具行（隐藏切换/新建文件夹）各钮命中区：`toolbar_toggle_hidden_rect()` /
+  /// `toolbar_new_folder_rect()`。
+  [[nodiscard]] auto toolbar_toggle_hidden_rect() const noexcept -> math::Rect;
+  [[nodiscard]] auto toolbar_new_folder_rect() const noexcept -> math::Rect;
   /// 文件列表区（卡片内）。
   [[nodiscard]] auto list_rect() const noexcept -> math::Rect { return list_; }
   /// 文件名输入行区。
@@ -143,8 +197,16 @@ class FileDialog : public Element {
   [[nodiscard]] auto entry_rect(std::size_t index) const noexcept -> math::Rect;
 
  private:
-  /// 重读当前目录（`list_dir` 失败置 `error_` 并清空条目）。
+  /// 重读当前目录（`list_dir` 失败置 `error_` 并清空条目；应用过滤与隐藏开关）。
   void reload();
+  /// 条目是否该显示（后缀过滤 + 隐藏开关；目录永不过滤）。
+  [[nodiscard]] auto entry_visible(const st::fs::DirEntry& entry) const -> bool;
+  /// 面包屑段表（当前目录按分隔符拆；缓存于 reload 后，布局期重建）。
+  [[nodiscard]] auto crumbs() const -> std::vector<std::pair<std::string, std::string>>;
+  /// 列表内容总高（`..` + 条目）——滚动夹取用。
+  [[nodiscard]] auto list_content_height() const -> float;
+  /// 选中行滚入可视区（键盘导航后调）。
+  void ensure_selected_visible();
   /// 进入条目（目录）或选中（文件）。
   void activate_entry(std::size_t index);
   void move_selection(int delta);
@@ -157,15 +219,26 @@ class FileDialog : public Element {
   Mode mode_{Mode::Open};
   std::string title_{};
   std::string directory_{};
-  std::vector<st::fs::DirEntry> entries_{};
-  std::size_t selected_{static_cast<std::size_t>(-1)};
+  std::vector<st::fs::DirEntry> entries_{};   ///< reload 后的全量条目
+  std::vector<std::size_t> visible_{};        ///< 可见索引（过滤/隐藏后）→ entries_ 下标
+  std::size_t selected_{static_cast<std::size_t>(-1)};   ///< 可见序号
   std::string filename_{};
   std::string error_{};
+  std::vector<std::string> name_filters_{};   ///< 后缀白名单（空 = 全部）
+  bool show_hidden_{false};                   ///< `.` 开头条目的显隐
+  std::vector<Place> custom_places_{};        ///< 宿主自定义位置项
   float scroll_y_{0.0f};             ///< 列表纵向滚动（自绘行滚轮）
   bool input_focused_{false};        ///< 文件名行聚焦态（自绘光标依据）
   math::Rect card_{};
+  math::Rect breadcrumb_{};          ///< 面包屑行
+  math::Rect places_{};              ///< 位置侧栏列
   math::Rect list_{};
   math::Rect input_{};
+  math::Rect toggle_hidden_button_{};   ///< 工具钮：隐藏文件切换
+  math::Rect new_folder_button_{};      ///< 工具钮：新建文件夹
+  Theme last_theme_{};                  ///< 上次下发的主题（新子元素补下发用）
+  bool theme_valid_{false};             ///< `last_theme_` 是否有效（apply_theme 跑过）
+  mutable std::vector<float> crumb_widths_{};   ///< 面包屑段宽缓存（布局期）
   Element* confirm_button_{nullptr};  ///< 非拥有（生命周期随子节点）
   Element* cancel_button_{nullptr};
 };

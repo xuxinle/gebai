@@ -511,6 +511,10 @@ struct CodeEditorPage : Component {
   std::size_t problem_cycle_{0};
   /// 已注册的语言清单（扩展视图用；懒加载一次）。
   std::vector<std::string> languages_{};
+  /// 文件对话框起始目录（上次确认时所在；空 = 从工作区/当前目录起）。
+  std::string dialog_start_dir_{};
+  /// 本次打开是否已初始化目录（setup 每帧跑，只在首次设目录——见 build_open_dialog）。
+  bool dialog_initialized_{false};
   /// 关闭脏标签的待确认动作（非空 = 弹了确认对话框）。
   std::function<void()> pending_close_{};
   /// 待确认关闭的标签名（对话框正文用）。
@@ -2026,15 +2030,49 @@ struct CodeEditorPage : Component {
     (void)overlay(c, "file-dialog", {}, [&] {
       (void)custom<FileDialog>(c, [this, saving, picking_folder](FileDialog& dialog) {
         dialog.set_id("file-dialog");
+        // 标题（声明式 `custom<T>` 是无参构造，标题得构造后设）：
+        // 没有标题时顶部会空一块（旧版就是这样，像"内容没加载出来"）。
+        dialog.set_title(picking_folder ? "打开文件夹"
+                                       : (saving ? "另存为" : "打开文件"));
         // 目录模式：没有文件名行、按钮是「选择此文件夹」、确认返回**当前目录**。
         if (picking_folder) dialog.set_mode(FileDialog::Mode::Directory);
-        dialog.set_directory(workspace_.empty() ? std::string(".") : workspace_);
+        // ⚠ **只在首次设置目录**：本 setup 每帧重组都跑，而对话框自己的导航
+        //（双击进目录/点面包屑/点侧栏）会改当前目录——无条件 `set_directory`
+        // 每帧把用户导航打回起点（实测：面包屑只有一个 `.` 点、进不去任何目录）。
+        if (!dialog_initialized_) {
+          dialog_initialized_ = true;
+          // 起始目录：记住上次（同一会话连开几个文件不用每次从工作区爬）；
+          // 首次用**绝对路径**（相对路径 `.` 在面包屑里只有一段，看不出层级）。
+          std::string start = dialog_start_dir_;
+          if (start.empty()) start = workspace_.empty() ? std::string(".") : workspace_;
+          if (const auto absolute = st::fs::absolute(start); absolute.has_value()) {
+            dialog.set_directory(*absolute);
+          } else {
+            dialog.set_directory(start);
+          }
+        }
+        // 打开模式：过滤到**可编辑的代码/文本文件**（框架组件的后缀白名单；
+        // 目录不过滤——导航不受影响）。另存为/新建不过滤（目标名字任意）。
+        if (!saving && pending_open_mode_ == 0) {
+          dialog.set_name_filters({".cpp", ".hpp", ".c", ".h", ".cc", ".cxx",
+                                   ".py", ".js", ".ts", ".rs", ".go", ".java",
+                                   ".md", ".txt", ".json", ".yaml", ".yml",
+                                   ".toml", ".sh", ".stlog"});
+        }
+        // 位置侧栏：工作区永远在（跨盘跳转的高频目标）。
+        if (!workspace_.empty()) {
+          dialog.set_places({{"工作区", workspace_}});
+        }
         if (saving && editor != nullptr) {
           const auto list = buffers_.value();
           if (active_.value() < list.size()) dialog.set_filename(list[active_.value()].label);
         }
+        // 确认时记下当前目录（下次打开从这起）。
         dialog.on_confirm = [this, saving](const std::string& path) {
           new_file_open_.set(false);
+          // 记住这次所在的目录（下次打开从这起）。
+          dialog_start_dir_ = st::fs::parent(path).empty() ? std::string(".")
+                                                           : std::string(st::fs::parent(path));
           if (pending_open_mode_ == 3) {
             switch_workspace(path);
             return;
@@ -2636,6 +2674,7 @@ struct CodeEditorPage : Component {
       return;
     }
     workspace_ = path;
+    dialog_start_dir_.clear();   // 换工作区：文件对话框的"上次目录"跟着重置
     dir_expanded_.set(std::vector<std::string>{});   // 新根：展开状态重来
     refresh_tree();
     const std::size_t slash = path.find_last_of("/\\");

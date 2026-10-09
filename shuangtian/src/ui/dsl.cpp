@@ -92,6 +92,31 @@ class OverlayHost : public Panel {
   /// 面板外点击回调（仅在屏障形态下触发）。
   std::function<void()> on_outside_click{};
 
+  /// **用真实矩形重新测量子元素再布局**（而不是用它们的“自然尺寸”）。
+  ///
+  /// 为何必须：`UiRoot::layout` 对 FillViewport 浮层只 `arrange` 宿主到整个视口，
+  /// **不再重跑 measure**——子元素（`FileDialog` 这类遮罩+卡片形态）的
+  /// `measured_size` 停在上一轮的测量值（实测 1280×420），于是 `grow` 算出的
+  /// 剩余空间为 0，组件拿不到满幅：**遮罩只盖上半屏、卡片贴顶**
+  /// （用户报“布局不合理、遮蔽的父元素不合理”）。
+  ///
+  /// 用满约束重测一次即可——`grow`/`Stretch` 的 flex 语义原样保留（查找条那类
+  /// 自然尺寸的浮层也照旧，因为它们在满约束下仍报自己的自然高）。
+  void arrange(const RenderContext& context, math::Rect rect) override {
+    bounds_ = rect;
+    for (std::size_t index = 0; index < child_count(); ++index) {
+      if (Element* child = child_at(index); child != nullptr) {
+        Constraints available;
+        available.max_width = rect.width;
+        available.max_height = rect.height;
+        available.available_width = rect.width;
+        available.available_height = rect.height;
+        child->measure(context, available);
+      }
+    }
+    Panel::arrange(context, rect);
+  }
+
   /// 屏障形态：面板外也命中本宿主（输入不再穿透下层）。
   void set_outside_barrier(bool value) noexcept { barrier_ = value; }
 
