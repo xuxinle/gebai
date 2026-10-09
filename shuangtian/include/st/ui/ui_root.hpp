@@ -114,6 +114,15 @@ class UiRoot : public Element::HostFocus {
   auto set_focus(Element* element) -> bool;
   /// `Element::HostFocus` 的实现（子组件隔着 `element.hpp` 请求焦点时用）。
   auto set_keyboard_focus(Element* element) -> bool override { return set_focus(element); }
+  /// `Element::HostFocus` 的剪贴板实现：转发给 provider（`Application` 装的）。
+  /// 没装 provider 时如实返回空串（headless 测试里粘贴路径自然降级，不会抢错）。
+  [[nodiscard]] auto host_clipboard_text() -> std::string override {
+    return clipboard_provider_ ? clipboard_provider_() : std::string{};
+  }
+  /// 装剪贴板 provider（`Application` 在拿到 backend 后接上；无头后端可不装）。
+  void set_clipboard_provider(std::function<std::string()> provider) {
+    clipboard_provider_ = std::move(provider);
+  }
   /// 当前焦点元素（**调用前会清理悬垂指针**，树里已不在则返回 `nullptr`）。
   [[nodiscard]] auto focused() -> Element*;
   void focus_next(bool backwards = false);
@@ -269,6 +278,8 @@ class UiRoot : public Element::HostFocus {
     std::function<bool()> handler{};
   };
   std::vector<std::pair<std::string, ShortcutEntry>> shortcuts_{};
+  /// 剪贴板 provider（`set_clipboard_provider` 装入；空 = 无剪贴板能力）。
+  std::function<std::string()> clipboard_provider_{};
   /// 已登记的声明式树推进回调（见 `register_declarative_host`）。
   /// 回调返回 true 表示“本帧真的重组了”（用于统计重组次数）。
   std::vector<std::function<bool()>> declarative_hosts_{};

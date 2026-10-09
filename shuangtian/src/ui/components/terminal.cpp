@@ -136,9 +136,12 @@ auto utf8_append(char32_t ch, std::string& out) -> void {
 Terminal::Terminal() {
   shell_ = default_shell();
   set_focusable(true);
-  // 不变式：**永远至少一个会话**。
+  // 不变式：**永远至少一个会话**。默认标题用 shell 短名（`bash`/`pwsh`）——
+  // 真实身份比序号有用；shell 的 OSC 标题到达后覆盖它。
   sessions_.push_back(std::make_unique<TerminalSession>(
-      TerminalSession{.title = std::format("终端 {}", title_seq_++)}));
+      TerminalSession{.title = tail_name(shell_)}));
+  // 面板头动作钮（标签栏尾部）在 `ensure_children` 里装：清屏常驻，
+  // "中止"与"收起"按忙闲/回调有无动态出现（见那儿的说明）。
 }
 
 Terminal::~Terminal() {
@@ -173,7 +176,7 @@ auto Terminal::default_factory() const -> const st::exec::ChannelFactory& {
 auto Terminal::current() -> TerminalSession& {
   if (sessions_.empty()) {
     sessions_.push_back(std::make_unique<TerminalSession>(
-        TerminalSession{.title = std::format("终端 {}", title_seq_++)}));
+        TerminalSession{.title = tail_name(shell_)}));
   }
   if (active_ >= sessions_.size()) active_ = sessions_.size() - 1;
   return *sessions_[active_];
@@ -210,11 +213,13 @@ auto Terminal::add_session(std::string title) -> std::size_t {
   // 新会话继承当前会话的工作目录（用户在某个目录里开新 shell，
   // 期待是在同一个地方接着干）。
   auto fresh = std::make_unique<TerminalSession>();
-  fresh->title = title.empty() ? std::format("终端 {}", title_seq_++) : std::move(title);
+  // 默认标题 = shell 短名（与首个会话同口径；多会话下由 OSC 标题自然区分）。
+  fresh->title = title.empty() ? tail_name(shell_) : std::move(title);
   fresh->cwd = sessions_.empty() ? std::string{} : current().cwd;
   sessions_.push_back(std::move(fresh));
   const std::size_t index = sessions_.size() - 1;
   active_ = index;
+  last_active_key_.clear();   // 标签同步缓存失效（新会话立即上标签栏）
   mark_layout_dirty();
   mark_dirty();
   if (on_session_change) on_session_change(index);
@@ -270,7 +275,7 @@ void Terminal::apply_pending_close() {
     //（它拿 `last` 参数判断）。**补的这个不自动起 shell**——面板马上要收起，
     // 白起一个进程；用户再打开时 `open_shell` 会补上。
     sessions_.push_back(std::make_unique<TerminalSession>(
-        TerminalSession{.title = std::format("终端 {}", title_seq_++)}));
+        TerminalSession{.title = tail_name(shell_)}));
     active_ = 0;
   } else if (active_ >= sessions_.size()) {
     active_ = sessions_.size() - 1;
@@ -280,6 +285,7 @@ void Terminal::apply_pending_close() {
   mark_dirty();
   mark_layout_dirty();
   last_output_.clear();   // 会话被关：行模式文本缓存作废，防止下个会话漏刷新
+  last_active_key_.clear();   // 标签同步缓存失效（关掉的那个要从标签栏消失）
   // ⚠⚠ **这一块之后绝对不能再碰 `this`**。
   //
   // 回调可能引发宿主重组，而重组会把**本元素整个拆掉**（关最后一个标签
@@ -304,15 +310,26 @@ void Terminal::set_active_session(std::size_t index) {
   // 会话切换时清行模式的文本缓存：`last_output_` 是「上次写给 Text 的内容」，
   // 新会话内容若恰好与旧会话相同（如都为空），不清会漏刷新。
   last_output_.clear();
+  last_active_key_.clear();   // 标签同步缓存失效（活动指示要跟到新标签）
   mark_dirty();
   mark_layout_dirty();   // PTY/行模式的子件可见性随活动会话变化
   if (on_session_change) on_session_change(index);
+}
+
+void Terminal::cycle_session(bool forward) {
+  if (sessions_.size() <= 1) return;
+  const std::size_t next = forward ? (active_ + 1) % sessions_.size()
+                                   : (active_ + sessions_.size() - 1) % sessions_.size();
+  set_active_session(next);
 }
 
 void Terminal::set_session_title(std::size_t index, std::string title) {
   TerminalSession* found = session(index);
   if (found == nullptr) return;
   found->title = std::move(title);
+  // 标题变了要重画标签：直接作废 `last_labels_` 缓存，下一帧 `sync_tabs` 重建
+  //（标签同步的变更检测靠它比对；这里只清一个下标会在增删后错位）。
+  last_labels_.clear();
   mark_dirty();
 }
 
@@ -620,6 +637,37 @@ void Terminal::run(std::string command) {
   });
 }
 
+void Terminal::paste_clipboard() {
+  // 剪贴板是**平台**能力：经 `HostFocus` 窄接口取（实现在 UiRoot→backend）。
+  // 没宿主/没内容时静默——粘贴是锦上添花，不该在这里报错抓注意力。
+  if (host() == nullptr) return;
+  std::string text = host()->host_clipboard_text();
+  if (text.empty()) return;
+  // CRLF/LF 归一为 CR：shell 的行 delimiter 是 `\r`（回车键发的就是它）。
+  std::string normalized;
+  normalized.reserve(text.size());
+  for (std::size_t at = 0; at < text.size(); ++at) {
+    if (text[at] == '\r') {
+      if (at + 1 < text.size() && text[at + 1] == '\n') ++at;   // CRLF → CR
+      normalized.push_back('\r');
+      continue;
+    }
+    if (text[at] == '\n') {
+      normalized.push_back('\r');
+      continue;
+    }
+    normalized.push_back(text[at]);
+  }
+  send_bytes(normalized);
+}
+
+auto Terminal::selected_text() const -> std::string {
+  // 选择能力尚在建设中（无鼠标选区）；当前回整屏纯文本，
+  // 供宿主做"复制屏幕"类动作。有选区后改为只回选区。
+  const TerminalSession& target = current();
+  return target.screen != nullptr ? target.screen->plain_text() : std::string{};
+}
+
 void Terminal::send_stop() {
   TerminalSession& target = current();
   if (target.pty != nullptr && target.pty->valid()) {
@@ -779,6 +827,62 @@ void Terminal::set_font_scale(float scale) {
   mark_layout_dirty();
 }
 
+void Terminal::set_add_button_visible(bool value) noexcept {
+  add_button_visible_ = value;
+  if (tabs_ != nullptr) tabs_->set_show_add_button(value);
+}
+
+[[nodiscard]] auto Terminal::add_button_visible() const noexcept -> bool {
+  return add_button_visible_;
+}
+
+auto Terminal::add_header_action(std::string icon, std::string tooltip,
+                                 std::function<void()> on_click, bool enabled) -> std::size_t {
+  ensure_children();
+  const std::size_t slot = tabs_->add_trailing_button(std::move(icon), std::move(tooltip),
+                                                       std::move(on_click), enabled);
+  // 宿主自挂的钮排在内置钮之后（更靠左）——内置的清屏/中止/收起是面板身份的一部分。
+  return slot;
+}
+
+void Terminal::set_header_action_enabled(std::size_t slot, bool enabled) {
+  if (tabs_ != nullptr) tabs_->set_trailing_enabled(slot, enabled);
+}
+
+[[nodiscard]] auto Terminal::header_action_rect(std::size_t slot) const -> math::Rect {
+  return tabs_ != nullptr ? tabs_->trailing_rect(slot) : math::Rect{};
+}
+
+void Terminal::sync_header_actions() {
+  // 内置三钮的动态集合（每帧幂等比对，不靠标记）：清屏常驻；"中止"在
+  // 当前会话忙时（PTY 模式下 busy = shell 活着，是常态——中止发送 Ctrl+C
+  // 中断当前命令，不杀 shell）；"收起"在宿主装了 `on_request_collapse` 时。
+  // 期望态与实际不一致才重建（钮少，比较成本可忽）。
+  if (tabs_ == nullptr) return;
+  const bool want_stop = busy();
+  const bool want_collapse = static_cast<bool>(on_request_collapse);
+  const bool have_stop = stop_slot_ >= 0;
+  const bool have_collapse = collapse_slot_ >= 0;
+  if (want_stop == have_stop && want_collapse == have_collapse) return;
+  tabs_->clear_trailing_buttons();
+  stop_slot_ = -1;
+  collapse_slot_ = -1;
+  // 清屏（常驻）。
+  (void)tabs_->add_trailing_button("trash", "清屏", [this] { clear(); });
+  // 中止（忙时）。
+  if (want_stop) {
+    stop_slot_ = static_cast<int>(tabs_->add_trailing_button(
+        "square", "中止（Ctrl+C）", [this] { send_stop(); }));
+  }
+  // 收起（宿主装了回调才有）。
+  if (want_collapse) {
+    collapse_slot_ = static_cast<int>(tabs_->add_trailing_button(
+        "close", "收起面板", [this] {
+          if (on_request_collapse) on_request_collapse();
+        }));
+  }
+}
+
 void Terminal::apply_theme(const Theme& theme) {
   const Metrics& metrics = theme.metrics();
   style_.background = math::Color{0, 0, 0, 0};
@@ -804,6 +908,15 @@ void Terminal::ensure_children() {
   tabs_->set_id("terminal-tabs");
   tabs_->on_change = [this](std::size_t index) { set_active_session(index); };
   tabs_->on_close = [this](std::size_t index) { (void)close_session(index); };
+  // 「+」新建（`Tabs` 的通用能力）：默认直接建会话，宿主可用 `on_session_add` 换掉。
+  tabs_->set_show_add_button(true);
+  tabs_->on_add = [this] {
+    if (on_session_add) {
+      on_session_add();
+    } else {
+      add_session();
+    }
+  };
   // 输出区：
   //
   // * **PTY 模式不用子件**——屏幕必须由本元素**逐格自绘**（颜色、反显、光标
@@ -820,6 +933,68 @@ void Terminal::ensure_children() {
   text_out_ = dynamic_cast<Text*>(view_->add_child(std::make_unique<Text>()));
   text_out_->set_id("terminal-output");
   text_out_->set_multiline(true);
+  // 回看滚动条（PTY 模式）：复用 `ScrollBar`——拖拽/点击轨道/滑块几何都是
+  // 既有组件的事，这里只做「回看偏移 ↔ 滚动偏移」的换算（同一状态，两个视图）。
+  scroll_bar_ = dynamic_cast<ScrollBar*>(add_child(std::make_unique<ScrollBar>()));
+  scroll_bar_->set_id("terminal-scrollbar");
+  scroll_bar_->set_on_scroll([this](float offset) {
+    // 滚动条的偏移语义：从**内容顶**往下量；回看偏移是**从底部往上翻**。
+    // 换算：scrollback_offset = max_offset - offset（两者都在各自的最大值内）。
+    TerminalSession& target = current();
+    if (target.screen == nullptr) return;
+    const float line_h = measured_line_height_ > 0.0f ? measured_line_height_
+                                                     : line_height_ * font_scale_;
+    if (line_h <= 0.0f) return;
+    const int total = static_cast<int>(target.screen->scrollback_count());
+    const int max_off = scroll_bar_ != nullptr
+        ? static_cast<int>(scroll_bar_->max_offset() / line_h + 0.5f) : 0;
+    int next = total - static_cast<int>(offset / line_h + 0.5f);
+    next = std::clamp(next, 0, total);
+    if (next != target.scrollback_offset) {
+      target.scrollback_offset = next;
+      target.user_scrolled = next > 0;
+      mark_dirty();
+    }
+    (void)max_off;
+  });
+}
+
+void Terminal::sync_tabs() {
+  if (tabs_ == nullptr) return;
+  sync_header_actions();   // 内置钮的忙闲/回调同步（幂等，见其说明）
+  // 会话表 → `Tabs`（稳定 key = 会话序号；标题变化只更新 label，不重建活动态）。
+  // 只在「标签集合或活动项」真变了时才写——每帧全量 `sync_tabs` 会把指示条
+  // 动画重置成 pending（视觉：切换标签时指示条永远从旧位重走一次）。
+  if (tabs_ == nullptr) return;
+  bool changed = last_labels_.size() != sessions_.size() || last_active_key_ != std::to_string(active_);
+  if (!changed) {
+    for (std::size_t index = 0; index < sessions_.size(); ++index) {
+      if (sessions_[index] == nullptr || sessions_[index]->title != last_labels_[index]) {
+        changed = true;
+        break;
+      }
+    }
+  }
+  if (!changed) return;
+  std::vector<Tabs::Tab> tabs;
+  tabs.reserve(sessions_.size());
+  for (std::size_t index = 0; index < sessions_.size(); ++index) {
+    tabs.push_back(Tabs::Tab{
+        .key = std::to_string(index),
+        .label = sessions_[index] != nullptr ? sessions_[index]->title : std::string{},
+        .modified = false,
+        // 关闭键：PTY 会话永远可关（关 = 结束它的 shell，那是用户的意图）；
+        // 会话唯一时也保留（关最后一个 ⇒ 面板收起，由宿主定）。
+        .closable = true,
+    });
+  }
+  tabs_->sync_tabs(tabs);
+  tabs_->set_active(active_);
+  last_labels_.clear();
+  for (const auto& session : sessions_) {
+    last_labels_.push_back(session != nullptr ? session->title : std::string{});
+  }
+  last_active_key_ = std::to_string(active_);
 }
 
 void Terminal::sync_screen(TerminalSession& session) {
@@ -850,10 +1025,47 @@ void Terminal::refresh_cell_metrics(const RenderContext& context) {
   }
 }
 
+auto Terminal::content_child_count() const noexcept -> std::size_t {
+  // 内部件（tabs/view/scrollbar）全部在 `children_` 末尾且不归声明式管。
+  // 当前没有调用方子元素（终端是叶子组件），恒 0；写成减法是为了未来加
+  // 前置子件时不用改这里。
+  return children_.empty() ? 0 : 0;
+}
+
+void Terminal::sync_scrollbar(const TerminalSession& session, float line_h) {
+  // 回看滚动条几何（PTY 模式）：内容高 =（屏幕 + 可回看行数）×行高。
+  // 备用屏（vim/htop）里主屏滚回不属于当前视图——隐藏整个滚动条。
+  if (scroll_bar_ == nullptr) return;
+  const bool usable = session.screen != nullptr && !session.screen->in_alt_screen();
+  scroll_bar_->set_visible(usable && session.screen != nullptr &&
+                           session.screen->scrollback_count() > 0);
+  if (!scroll_bar_->visible()) return;
+  const float content = static_cast<float>(
+      session.screen->rows() + session.screen->scrollback_count()) * line_h;
+  const float viewport = static_cast<float>(session.screen->rows()) * line_h;
+  // 滚动条偏移语义（从内容顶量）：底部 = content - viewport，
+  // 回看偏移是从底往上翻的行数——贴底时 offset = max，翻到底时 = 0。
+  const float offset = content - viewport -
+                       static_cast<float>(session.scrollback_offset) * line_h;
+  scroll_bar_->set_scroll_geometry(content, viewport, std::max(0.0f, offset));
+}
+
+auto Terminal::scroll_to_end_rect() const -> math::Rect {
+  // 「回到底部」浮钮（PTY 模式且翻离底部时出现；贴右下角，让开滚动条）。
+  if (scroll_bar_ == nullptr || !scroll_bar_->visible()) return math::Rect{};
+  const TerminalSession& session = current();
+  if (session.screen == nullptr || session.scrollback_offset <= 0) return math::Rect{};
+  constexpr float kSize = 26.0f;
+  constexpr float kGap = 8.0f;
+  const float right = output_rect_.right() - ScrollBar::kBarWidthHover - kGap;
+  return math::Rect{right - kSize, output_rect_.bottom() - kSize - kGap, kSize, kSize};
+}
+
 void Terminal::arrange(const RenderContext& context, math::Rect rect) {
   ensure_children();
   bounds_ = rect;
   refresh_cell_metrics(context);
+  sync_tabs();
   const Metrics& metrics = context.theme.metrics();
   const float tabs_h = tabs_visible_ ? metrics.control_height - 6.0f : 0.0f;
   tabs_rect_ = math::Rect{rect.x, rect.y, rect.width, tabs_h};
@@ -872,6 +1084,21 @@ void Terminal::arrange(const RenderContext& context, math::Rect rect) {
       view_->measure(context, Constraints{});
       view_->arrange(context, output_rect_.inset(math::Insets{4.0f, 4.0f, 4.0f, 4.0f}));
     }
+  }
+  // 回看滚动条：贴输出区右缘满高（PTY 模式；几何与可见性在 `sync_scrollbar`）。
+  const float line_h = measured_line_height_ > 0.0f ? measured_line_height_
+                                                   : line_height_ * font_scale_;
+  if (scroll_bar_ != nullptr && pty && !output_rect_.is_empty()) {
+    const float bar_w = ScrollBar::kBarWidthHover;
+    const math::Rect bar_rect{output_rect_.right() - bar_w, output_rect_.y + 2.0f, bar_w,
+                              std::max(0.0f, output_rect_.height - 4.0f)};
+    // ⚠ `set_scroll_geometry` 会夹取 offset 并可能触发 `on_scroll_` 回调（回调里
+    // 只改回看状态，不碰布局），安全。每帧同步——回看行数随输出增长。
+    scroll_bar_->measure(context, Constraints{});
+    scroll_bar_->arrange(context, bar_rect);
+    if (session(active_) != nullptr) sync_scrollbar(*session(active_), line_h);
+  } else if (scroll_bar_ != nullptr) {
+    scroll_bar_->set_visible(false);
   }
   // 把可用**列数/行数**换算出来上报给 PTY（TUI 程序据此排版）。
   //
@@ -1056,6 +1283,27 @@ void Terminal::paint_content(const RenderContext& context, raster::Surface& canv
       }
     }
   }
+
+  // 「回到底部」浮钮：翻离底部时出现（贴右下、让开滚动条）。
+  // 图形语言与主题的浮层一致（surface 底 + border 描边 + 向下箭头），
+  // 悬停提亮（hover_to_end_）——它是一个可点的按钮，不是装饰。
+  if (const math::Rect zone = scroll_to_end_rect(); !zone.is_empty()) {
+    const Palette& colors = context.theme.colors();
+    const math::Color bg = hover_to_end_ ? colors.surface_alt : colors.surface;
+    canvas.fill_rect(zone, raster::Paint::solid(bg),
+                      context.theme.metrics().radius_pill);
+    raster::Path ring;
+    ring.add_rounded_rect(zone, context.theme.metrics().radius_pill);
+    canvas.stroke_path(ring, raster::Paint::solid(colors.border), 1.0f);
+    // 向下箭头（两笔折线，与 `Tabs` 溢出箭头同一笔法）。
+    raster::Path arrow;
+    const math::Point center = zone.center();
+    const float size = 4.0f;
+    arrow.move_to(math::Point{center.x - size, center.y - size * 0.4f});
+    arrow.line_to(math::Point{center.x, center.y + size * 0.6f});
+    arrow.line_to(math::Point{center.x + size, center.y - size * 0.4f});
+    canvas.stroke_path(arrow, raster::Paint::solid(colors.text_muted), 1.5f);
+  }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1135,10 +1383,98 @@ auto Terminal::on_event(const RenderContext& context, Event& event) -> bool {
   // 补全（Tab）、历史（↑↓）、行内编辑（←→/Home/Backspace）全交给 shell，
   // 组件只做"按键翻译成字节序列"这一件事（映射表在 `key_bytes`，那里有两条不信则）。
   if (event.kind == EventKind::KeyDown || event.kind == EventKind::TextInput) {
+    // **组件级快捷键先行**（粘贴/字号/会话循环）：这些是宿主 UI 的能力，
+    // 不该变成字节流送给 shell（shell 收到 `^V` 会当"字面量下一字符"用）。
+    if (event.kind == EventKind::KeyDown && (event.ctrl || event.meta)) {
+      const bool shift = event.shift;
+      const std::string& key = event.key;
+      // Ctrl+Shift+V：粘贴（Windows Terminal 同款；`Ctrl+V` 留给 shell 的字面量模式）。
+      if (event.ctrl && shift && (key == "v" || key == "V")) {
+        paste_clipboard();
+        event.handled = true;
+        return true;
+      }
+      // Ctrl+= / Ctrl+- / Ctrl+0：字号档位（浏览器惯例；`=` 与 `+` 同键位）。
+      if (event.ctrl && !shift && (key == "=" || key == "+")) {
+        set_font_scale(font_scale_ + 0.1f);
+        event.handled = true;
+        return true;
+      }
+      if (event.ctrl && !shift && key == "-") {
+        set_font_scale(font_scale_ - 0.1f);
+        event.handled = true;
+        return true;
+      }
+      if (event.ctrl && !shift && key == "0") {
+        set_font_scale(1.0f);
+        event.handled = true;
+        return true;
+      }
+      // Ctrl+PageDown/PageUp / Ctrl+Tab：会话循环（多标签导航，不进字节流）。
+      if (event.ctrl && (key == "PageDown" || key == "Tab")) {
+        cycle_session(true);
+        event.handled = true;
+        return true;
+      }
+      if (event.ctrl && key == "PageUp") {
+        cycle_session(false);
+        event.handled = true;
+        return true;
+      }
+    }
     if (!pty_active()) return Element::on_event(context, event);
     const std::string bytes = key_bytes(event);
     if (!bytes.empty()) {
       send_bytes(bytes);
+      event.handled = true;
+      return true;
+    }
+  }
+  // 回看滚动条与「回到底部」浮钮：优先于屏幕点击/滚轮（它们是右缘小控件，
+  // 坐标上本就与屏幕区重叠，不先接会永远点不到）。
+  if ((event.kind == EventKind::MouseDown || event.kind == EventKind::MouseMove ||
+       event.kind == EventKind::MouseUp || event.kind == EventKind::Click) &&
+      scroll_bar_ != nullptr && scroll_bar_->visible()) {
+    if (const math::Rect to_end = scroll_to_end_rect(); !to_end.is_empty()) {
+      if (to_end.contains(event.position)) {
+        if (event.kind == EventKind::MouseMove) {
+          if (!hover_to_end_) {
+            hover_to_end_ = true;
+            mark_dirty();
+          }
+          return false;   // 移动不吞（悬停反馈之余不阻断屏幕的 hover）
+        }
+        if (event.kind == EventKind::Click) {
+          TerminalSession& target = current();
+          if (target.screen != nullptr) {
+            target.scrollback_offset = 0;
+            target.user_scrolled = false;
+            mark_dirty();
+          }
+        }
+        event.handled = true;
+        return true;
+      }
+      if (event.kind == EventKind::MouseMove && hover_to_end_) {
+        hover_to_end_ = false;
+        mark_dirty();
+      }
+    }
+    // 拖拽中把移动事件续给滚动条（抓取状态跨事件，命中判断只在按下时做）。
+    if (scroll_bar_->dragging() && event.kind == EventKind::MouseMove) {
+      (void)scroll_bar_->on_event(context, event);
+      event.handled = true;
+      return true;
+    }
+    if (event.kind == EventKind::MouseDown &&
+        scroll_bar_->bounds().inflate(2.0f).contains(event.position)) {
+      (void)scroll_bar_->on_event(context, event);
+      event.handled = true;
+      return true;
+    }
+    if ((event.kind == EventKind::MouseUp || event.kind == EventKind::Click) &&
+        scroll_bar_->dragging()) {
+      (void)scroll_bar_->on_event(context, event);
       event.handled = true;
       return true;
     }
@@ -1173,7 +1509,11 @@ auto Terminal::on_event(const RenderContext& context, Event& event) -> bool {
             target.scrollback_offset = next;
             // 回到底部就恢复"贴底跟随"（与 `ScrollView` 路径同一状态语义）。
             target.user_scrolled = next > 0;
+            // 回看偏移变了 → 滚动条几何（thumb 位置）要重算：标脏布局，
+            // 下一帧 `sync_scrollbar` 拿到新偏移（只 mark_dirty 重绘不重排，
+            // 滚动条会停在旧位置——e2e 实测抓到）。
             mark_dirty();
+            mark_layout_dirty();
           }
         }
         event.handled = true;
@@ -1194,7 +1534,7 @@ auto Terminal::property_names() const -> std::vector<std::string_view> {
                {"sessions", "active_session", "session_title", "working_directory", "busy",
                 "output", "screen", "cursor", "cursor_rect", "pty", "alt_screen", "scroll",
                 "user_scrolled", "cursor_shape", "screen_cursor_shape", "monospace",
-                "tabs_visible", "font_scale"});
+                "tabs_visible", "add_button", "font_scale", "scrollbar"});
   return names;
 }
 
@@ -1266,6 +1606,15 @@ auto Terminal::get_property(std::string_view name) const -> std::optional<std::s
   }
   if (name == "monospace") return monospace_ ? "true" : "false";
   if (name == "tabs_visible") return tabs_visible_ ? "true" : "false";
+  if (name == "add_button") return add_button_visible_ ? "true" : "false";
+  if (name == "scrollbar") {
+    // 回看滚动条几何（`内容高:视口高:偏移`；不可见时为空）——供自动化断言
+    // 「有滚回时滚动条在/拖拽后偏移跟随」这类事实（与 `scroll` 同一动机）。
+    if (scroll_bar_ == nullptr || !scroll_bar_->visible()) return std::string{};
+    const float content = scroll_bar_->max_offset() + scroll_bar_->bounds().height;
+    return std::format("{:.0f}:{:.0f}:{:.0f}", content, scroll_bar_->bounds().height,
+                       scroll_bar_->offset());
+  }
   if (name == "font_scale") return std::format("{:.2f}", font_scale_);
   return Element::get_property(name);
 }
@@ -1282,6 +1631,10 @@ auto Terminal::set_property(std::string_view name, std::string_view value) -> bo
   if (name == "tabs_visible") {
     set_tabs_visible(value == "true" || value == "1");
     mark_layout_dirty();
+    return true;
+  }
+  if (name == "add_button") {
+    set_add_button_visible(value == "true" || value == "1");
     return true;
   }
   if (name == "font_scale") {
@@ -1316,8 +1669,44 @@ auto Terminal::invoke_action(std::string_view action, std::string_view argument)
     clear();
     return true;
   }
+  if (action == "collapse") {
+    // 面板收起（内置"收起"钮同一条链路；自动化/e2e 用）。
+    if (on_request_collapse) {
+      on_request_collapse();
+      return true;
+    }
+    return false;
+  }
   if (action == "new_session") {
     add_session(std::string(argument));
+    return true;
+  }
+  if (action == "next_session") {
+    cycle_session(true);
+    return true;
+  }
+  if (action == "prev_session" || action == "previous_session") {
+    cycle_session(false);
+    return true;
+  }
+  if (action == "paste") {
+    paste_clipboard();
+    return true;
+  }
+  if (action == "copy") {
+    // 复制能力的基础面：当前回整屏纯文本（选区建设中）。
+    if (host() == nullptr) return false;
+    // 写侧暂无窄接口（读侧先行）；动作面先接住，写侧待 backend 通路补齐。
+    return false;
+  }
+  if (action == "scroll_to_end" || action == "scroll_bottom") {
+    TerminalSession& target = current();
+    if (target.screen != nullptr && target.scrollback_offset != 0) {
+      target.scrollback_offset = 0;
+      target.user_scrolled = false;
+      mark_dirty();
+      mark_layout_dirty();   // 滚动条几何同步重算（同滚轮路径的理由）
+    }
     return true;
   }
   if (action == "close_session") {

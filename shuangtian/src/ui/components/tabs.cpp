@@ -11,6 +11,7 @@
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
+#include "st/ui/icon.hpp"
 #include "st/ui/text_port.hpp"
 
 #include "components_internal.hpp"
@@ -24,12 +25,17 @@ namespace {
 // —— 几何常量（颜色/间距/字号一律取自 `context.theme` 的 token）——
 constexpr float k_indicator_height = 2.0f;  // 选中指示条厚度
 constexpr float k_min_tab_width = 36.0f;    // 标签项最小宽度（避免空标签塌陷）
+constexpr float k_default_max_tab_width = 200.0f;  // 标签项默认最大宽度（长标题省略号）
 constexpr float k_close_zone = 20.0f;       // × 命中区边长（大于视觉 × 本体，好点）
 constexpr float k_close_glyph = 8.0f;       // × 视觉尺寸
 constexpr float k_modified_dot = 6.0f;      // 修改点直径
 constexpr float k_arrow_zone = 18.0f;       // 溢出箭头命中区宽
 constexpr float k_arrow_glyph = 6.0f;       // 箭头视觉尺寸
 constexpr float k_wheel_step = 48.0f;       // 滚轮一格的滚动步长（与编辑器行滚一致）
+constexpr float k_add_zone = 24.0f;         // 「+」命中区宽（终端/编辑器标签栏惯例）
+constexpr float k_add_glyph = 9.0f;         // 「+」视觉尺寸
+constexpr float k_trailing_zone = 26.0f;    // 尾部动作钮命中区宽（与工具栏小钮同尺寸）
+constexpr float k_trailing_glyph = 13.0f;   // 动作钮图标视觉尺寸
 
 // 指示条动画状态机：`idle` 无动画；`pending` 已切换但尚未读到推进的时间轴。
 constexpr double k_anim_idle = -1.0;
@@ -88,7 +94,8 @@ void Tabs::set_tabs(std::vector<std::string> labels) {
   hover_index_ = -1;
   scroll_offset_ = 0.0f;
   if (active_ >= labels_.size()) active_ = labels_.empty() ? 0 : labels_.size() - 1;
-  indicator_start_ = k_anim_pending;
+  // 整表替换同 `sync_tabs`：同步不动画，直接吸附（指示条随后由首帧布局定位）。
+  indicator_start_ = k_anim_idle;
   mark_layout_dirty();
 }
 
@@ -157,11 +164,26 @@ void Tabs::sync_tabs(const std::vector<Tab>& tabs) {
       }
     }
   }
+  const std::size_t active_before_index = active_;
   active_ = next_active;
   widths_.clear();
   total_width_ = 0.0f;
   hover_index_ = -1;
-  indicator_start_ = k_anim_pending;
+  // **数据同步不能把指示条动画吸没，也不能把它重置在半程**——两种情形分开：
+  // · 活动项**没变**（只是标题/集合变了）：吸附到当前位置（idle），
+  //   上一轮切换动画（若在进行中）继续不受影响；
+  // · 活动项**变了**（数据说活动 key 挪了位）：这是布局事实的变化，从当前位置
+  //   滑过去（pending + 快照 from）。
+  // 旧写法一律置 pending：上游周期性改标题（zsh 空闲时在 'zsh' ↔ 完整路径间
+  // 振荡）每帧触发同步，动画永远被重置在半程（实测钉在 t≈0.7，看着"没对齐"）。
+  if (next_active != active_before_index) {
+    indicator_from_x_ = indicator_x_;
+    indicator_from_width_ = indicator_width_;
+    indicator_start_ = k_anim_pending;
+  }
+  // 活动未变时**不动动画状态**：进行中的切换动画（用户刚点完标签、
+  // on_change 改了上游状态、本帧同步回来）继续播完——置 idle 会把它吸没，
+  // 置 pending 会从半程重新起步（高频同步下永远走不完，即本次缺陷）。
   set_scroll_offset(scroll_offset_);
   mark_layout_dirty();
 }
@@ -182,8 +204,12 @@ auto Tabs::tab_closable(std::size_t index) const -> bool {
 }
 
 auto Tabs::active_key() const -> std::string_view {
-  if (active_ >= labels_.size()) return std::string_view{};
-  return keys_[active_].empty() ? std::string_view(labels_[active_]) : std::string_view(keys_[active_]);
+  return tab_key(active_);
+}
+
+auto Tabs::tab_key(std::size_t index) const -> std::string_view {
+  if (index >= labels_.size()) return std::string_view{};
+  return keys_[index].empty() ? std::string_view(labels_[index]) : std::string_view(keys_[index]);
 }
 
 auto Tabs::index_of_key(std::string_view key) const -> std::optional<std::size_t> {
@@ -204,6 +230,17 @@ auto Tabs::index_of_label(std::string_view label) const -> std::optional<std::si
     if (labels_[index] == label) return index;
   }
   return std::nullopt;
+}
+
+void Tabs::set_max_tab_width(float width) noexcept {
+  // ≤ 0 = 不限制；上限也不必小于最小宽度（否则夹无可夹）。
+  const float next = width > 0.0f ? std::max(width, k_min_tab_width) : 0.0f;
+  if (next == max_tab_width_) return;
+  max_tab_width_ = next;
+  widths_.clear();   // 宽度缓存作废，布局期重建
+  total_width_ = 0.0f;
+  mark_layout_dirty();
+  mark_dirty();
 }
 
 void Tabs::set_active(std::size_t index, bool notify) {
@@ -235,7 +272,9 @@ auto Tabs::tab_rect(std::size_t index) const -> math::Rect {
 }
 
 auto Tabs::max_scroll() const noexcept -> float {
-  const float overflow = total_width_ - bounds_.width;
+  // 可滚动的是**标签区**：尾部动作区（「+」/动作钮/自定义内容）固定不滚，
+  // 占用的宽度不算进可视宽——否则最后几个标签被尾部钮盖住还以为能滚到。
+  const float overflow = total_width_ - std::max(0.0f, bounds_.width - trailing_width());
   return overflow > 0.0f ? overflow : 0.0f;
 }
 
@@ -262,12 +301,89 @@ auto Tabs::arrow_left_rect() const -> math::Rect {
 }
 
 auto Tabs::arrow_right_rect() const -> math::Rect {
+  // 右缘被「+」/动作钮占据时，箭头退到它们内侧（尾部元素共用右缘，贴边的是常驻语义）。
+  const float reserved = add_rect().is_empty() ? 0.0f : k_add_zone;
   if (max_scroll() <= 0.0f) return math::Rect{};
-  return math::Rect{bounds_.right() - k_arrow_zone, bounds_.y, k_arrow_zone, bounds_.height};
+  return math::Rect{bounds_.right() - k_arrow_zone - reserved, bounds_.y, k_arrow_zone,
+                    bounds_.height};
 }
 
 auto Tabs::overflow_arrow_rect(bool right) const -> math::Rect {
   return right ? arrow_right_rect() : arrow_left_rect();
+}
+
+auto Tabs::add_rect() const -> math::Rect {
+  // 「+」贴右缘（箭头占位时在其内侧）——与溢出箭头共享尾部。
+  if (!show_add_ || !on_add || bounds_.is_empty()) return math::Rect{};
+  return math::Rect{bounds_.right() - k_add_zone, bounds_.y, k_add_zone, bounds_.height};
+}
+
+// —— 尾部动作区 ——
+// 几何（从右往左）：[溢出箭头贴边] [「+」] [动作钮…] [自定义内容] [标签滚动区]。
+// 动作钮排在「+」左侧——「+」与箭头是"结构性"尾部，动作钮是"内容性"尾部。
+
+auto Tabs::trailing_width() const -> float {
+  float width = add_rect().is_empty() ? 0.0f : k_add_zone;
+  width += static_cast<float>(trailing_.size()) * k_trailing_zone;
+  if (trailing_content_ != nullptr && !trailing_content_->bounds().is_empty()) {
+    width += trailing_content_->bounds().width;
+  }
+  return width;
+}
+
+auto Tabs::trailing_rect(std::size_t slot) const -> math::Rect {
+  if (slot >= trailing_.size() || bounds_.is_empty()) return math::Rect{};
+  // 「+」左缘起，逐槽向左排（slot 大的在更左侧）。
+  float right = bounds_.right();
+  const math::Rect plus = add_rect();
+  if (!plus.is_empty()) right = plus.x;
+  right -= static_cast<float>(trailing_.size() - 1 - slot) * k_trailing_zone;
+  return math::Rect{right - k_trailing_zone, bounds_.y + 2.0f, k_trailing_zone,
+                    std::max(0.0f, bounds_.height - 4.0f)};
+}
+
+auto Tabs::add_trailing_button(std::string icon, std::string tooltip,
+                               std::function<void()> on_click, bool enabled) -> std::size_t {
+  trailing_.push_back(TrailingButton{std::move(icon), std::move(tooltip), std::move(on_click),
+                                     enabled, false});
+  mark_layout_dirty();
+  mark_dirty();
+  return trailing_.size() - 1;
+}
+
+void Tabs::set_trailing_enabled(std::size_t slot, bool enabled) {
+  if (slot >= trailing_.size() || trailing_[slot].enabled == enabled) return;
+  trailing_[slot].enabled = enabled;
+  mark_dirty();
+}
+
+void Tabs::remove_trailing(std::size_t slot) {
+  if (slot >= trailing_.size()) return;
+  trailing_.erase(trailing_.begin() + static_cast<std::ptrdiff_t>(slot));
+  hover_trailing_ = -1;
+  mark_layout_dirty();
+  mark_dirty();
+}
+
+void Tabs::clear_trailing_buttons() {
+  if (trailing_.empty()) return;
+  trailing_.clear();
+  hover_trailing_ = -1;
+  mark_layout_dirty();
+  mark_dirty();
+}
+
+void Tabs::set_trailing_content(std::unique_ptr<Element> content) {
+  if (trailing_content_ != nullptr) {
+    // 摘除：从 children_ 里取回，离开作用域即析构。
+    (void)remove_child(trailing_content_);
+    trailing_content_ = nullptr;
+  }
+  if (content != nullptr) {
+    trailing_content_ = add_child(std::move(content));
+  }
+  mark_layout_dirty();
+  mark_dirty();
 }
 
 void Tabs::scroll_to_visible(std::size_t index) {
@@ -299,7 +415,13 @@ void Tabs::rebuild_widths(const RenderContext& context) const {
   widths_.reserve(labels_.size());
   float total = 0.0f;
   for (std::size_t index = 0; index < labels_.size(); ++index) {
-    const float text = port.measure_width(labels_[index], style_.font_size);
+    // 文本宽度**封顶**在 `max_tab_width_`：超长标题（shell OSC 带完整路径）
+    // 省略号显示——绘制端 `ellipsize` 按 text_room 截断，这里先把标签自身
+    // 宽度限住，否则一个长标签就把同栏其他标签挤出可视区。
+    float text = port.measure_width(labels_[index], style_.font_size);
+    if (max_tab_width_ > 0.0f) {
+      text = std::min(text, max_tab_width_);
+    }
     // 可关闭项与修改点占用的额外横向空间（× 与圆点都在标签内部右侧/文本旁）。
     float extra = 0.0f;
     if (index < closable_.size() && closable_[index] != char{0}) extra += k_close_zone;
@@ -344,6 +466,15 @@ void Tabs::measure(const RenderContext& context, const Constraints& constraints)
 
 void Tabs::arrange(const RenderContext& context, math::Rect rect) {
   Element::arrange(context, rect);
+  // 尾部自定义内容：排在动作钮左侧、高取内容行高（自然尺寸测量）。
+  if (trailing_content_ != nullptr) {
+    const float content_h = std::max(0.0f, rect.height - 8.0f);
+    trailing_content_->measure(context, Constraints{});
+    const float w = trailing_content_->measured_size().width;
+    const float left = rect.right() - trailing_width();
+    trailing_content_->arrange(context,
+                               math::Rect{left, rect.y + 4.0f, w, content_h});
+  }
   // 容器变窄/标签减少后旧偏移可能越界：夹回合法范围。
   const float clamped = std::clamp(scroll_offset_, 0.0f, max_scroll());
   if (clamped != scroll_offset_) scroll_offset_ = clamped;
@@ -388,7 +519,9 @@ auto Tabs::resolve_indicator(const RenderContext& context, math::Rect target) co
 }
 
 void Tabs::paint_content(const RenderContext& context, raster::Surface& canvas) const {
-  if (bounds_.is_empty() || labels_.empty()) return;
+  // 空表仍要画「+」（新建入口不能随最后一个标签消失——终端/编辑器的常态
+  // 就是“关到零再点 + 重开”）；标签本体为空则跳过主体循环。
+  if (bounds_.is_empty()) return;
   if (widths_.size() != labels_.size()) rebuild_widths(context);
 
   const Palette& colors = context.theme.colors();
@@ -465,7 +598,52 @@ void Tabs::paint_content(const RenderContext& context, raster::Surface& canvas) 
   if (!indicator.is_empty()) {
     canvas.fill_rect(indicator, raster::Paint::solid(bar), k_indicator_height * 0.5f);
   }
+  // **动画中要续帧**：不 request_animation 的话，静置场景没有新帧，
+  // 指示条冻在起步帧（与光标闪烁同一个坑——那边实测过"闪一下就定住"）。
+  if (indicator_start_ != k_anim_idle && enabled_) request_animation();
   if (clipped) canvas.pop_clip();
+
+  // 尾部「+」（画在裁剪区外，常驻可见；与溢出箭头同一层）。
+  if (const math::Rect zone = add_rect(); !zone.is_empty()) {
+    const Palette& colors2 = context.theme.colors();
+    if (hover_add_ && enabled_) {
+      const math::Rect backdrop = zone.inset(
+          math::Insets{2.0f, metrics.space_xs, 2.0f, metrics.space_xs + k_indicator_height});
+      if (!backdrop.is_empty()) {
+        canvas.fill_rect(backdrop, raster::Paint::solid(colors2.surface_alt), radius);
+      }
+    }
+    // 「+」字形：两笔直线，与 × 同一笔法。
+    raster::Path plus;
+    const math::Point center = zone.center();
+    const float half = k_add_glyph * 0.5f;
+    plus.move_to(math::Point{center.x - half, center.y});
+    plus.line_to(math::Point{center.x + half, center.y});
+    plus.move_to(math::Point{center.x, center.y - half});
+    plus.line_to(math::Point{center.x, center.y + half});
+    canvas.stroke_path(plus, raster::Paint::solid(colors2.text_muted), 1.5f);
+  }
+
+  // 尾部动作钮（「+」左侧逐个排；自绘图标 + hover 提亮，禁用置灰）。
+  for (std::size_t slot = 0; slot < trailing_.size(); ++slot) {
+    const math::Rect zone = trailing_rect(slot);
+    if (zone.is_empty()) continue;
+    const TrailingButton& button = trailing_[slot];
+    if (button.hovered && button.enabled) {
+      const math::Rect backdrop = zone.inset(
+          math::Insets{1.0f, metrics.space_xs, 1.0f, metrics.space_xs + k_indicator_height});
+      if (!backdrop.is_empty()) {
+        canvas.fill_rect(backdrop, raster::Paint::solid(colors.surface_alt), radius);
+      }
+    }
+    const math::Color tint = !button.enabled ? colors.text_faint
+                              : button.hovered ? colors.text
+                                               : colors.text_muted;
+    const math::Rect glyph_box{zone.center().x - k_trailing_glyph * 0.5f,
+                               zone.center().y - k_trailing_glyph * 0.5f,
+                               k_trailing_glyph, k_trailing_glyph};
+    (void)Icon::draw(canvas, button.icon, glyph_box, tint);
+  }
 
   // 溢出箭头（画在裁剪区外，常驻可见）。
   if (clipped) {
@@ -504,15 +682,34 @@ auto Tabs::on_event(const RenderContext& context, Event& event) -> bool {
     case EventKind::MouseMove: {
       const auto hit = tab_index_at(event.position);
       const int index = hit.has_value() ? static_cast<int>(*hit) : -1;
-      if (index != hover_index_) {
+      const bool over_add = add_rect().contains(event.position);
+      int over_trailing = -1;
+      for (std::size_t slot = 0; slot < trailing_.size(); ++slot) {
+        if (trailing_[slot].enabled && trailing_rect(slot).contains(event.position)) {
+          over_trailing = static_cast<int>(slot);
+          break;
+        }
+      }
+      bool dirty = index != hover_index_ || over_add != hover_add_;
+      if (over_trailing != hover_trailing_) {
+        dirty = true;
+        for (auto& button : trailing_) button.hovered = false;
+        if (over_trailing >= 0) trailing_[static_cast<std::size_t>(over_trailing)].hovered = true;
+      }
+      if (dirty) {
         hover_index_ = index;
+        hover_add_ = over_add;
+        hover_trailing_ = over_trailing;
         mark_dirty();
       }
       return false;
     }
     case EventKind::HoverOut:
-      if (hover_index_ != -1) {
+      if (hover_index_ != -1 || hover_add_ || hover_trailing_ != -1) {
         hover_index_ = -1;
+        hover_add_ = false;
+        hover_trailing_ = -1;
+        for (auto& button : trailing_) button.hovered = false;
         mark_dirty();
       }
       return false;
@@ -530,7 +727,20 @@ auto Tabs::on_event(const RenderContext& context, Event& event) -> bool {
     case EventKind::Click:
     case EventKind::DoubleClick: {
       if (!enabled_) return false;
-      // 溢出箭头优先于标签。
+      // 尾部动作钮、「+」与溢出箭头优先于标签（都在右缘固定区，不随滚动动）。
+      if (event.kind == EventKind::Click) {
+        for (std::size_t slot = 0; slot < trailing_.size(); ++slot) {
+          const math::Rect zone = trailing_rect(slot);
+          if (trailing_[slot].enabled && !zone.is_empty() && zone.contains(event.position)) {
+            if (trailing_[slot].on_click) trailing_[slot].on_click();
+            return true;
+          }
+        }
+        if (add_rect().contains(event.position)) {
+          if (on_add) on_add();
+          return true;
+        }
+      }
       if (max_scroll() > 0.0f) {
         if (arrow_left_rect().contains(event.position)) {
           set_scroll_offset(scroll_offset_ - k_arrow_zone * 2.0f);
@@ -603,6 +813,8 @@ auto Tabs::get_property(std::string_view name) const -> std::optional<std::strin
   if (name == "active") return std::format("{}", active_);
   if (name == "label" || name == "text") return std::string(active_label());
   if (name == "scroll") return std::format("{}", scroll_offset_);
+  if (name == "show_add") return show_add_ ? std::string("true") : std::string("false");
+  if (name == "max_tab_width") return std::format("{:.0f}", max_tab_width_);
   if (name == "options") {
     std::string joined;
     for (const auto& label : labels_) {
@@ -615,6 +827,18 @@ auto Tabs::get_property(std::string_view name) const -> std::optional<std::strin
 }
 
 auto Tabs::set_property(std::string_view name, std::string_view value) -> bool {
+  if (name == "show_add") {
+    set_show_add_button(value == "true" || value == "1");
+    mark_dirty();
+    return true;
+  }
+  if (name == "max_tab_width") {
+    if (const auto parsed = parse_f64(value); parsed.has_value()) {
+      set_max_tab_width(static_cast<float>(*parsed));
+      return true;
+    }
+    return false;
+  }
   if (name == "active") {
     if (const auto index = parse_u64(value); index.has_value()) {
       set_active(static_cast<std::size_t>(*index), false);
@@ -651,10 +875,32 @@ auto Tabs::set_property(std::string_view name, std::string_view value) -> bool {
 }
 
 auto Tabs::property_names() const -> std::vector<std::string_view> {
-  return {"active", "label", "options", "scroll"};
+  return {"active", "label", "options", "scroll", "show_add", "max_tab_width"};
 }
 
 auto Tabs::invoke_action(std::string_view action, std::string_view argument) -> bool {
+  if (action == "add") {
+    // 「+」的键盘/自动化入口（不新造标签——只把意图交回调用方）。
+    // 与命中区同规则：按钮隐藏/未装回调时不受理（动作面与可见性一致）。
+    if (show_add_ && on_add) {
+      on_add();
+      return true;
+    }
+    return false;
+  }
+  if (action == "close") {
+    // 点 × 的自动化入口（参数 = 序号，缺省活动项；与 `on_close` 同一条链）。
+    std::size_t index = active_;
+    if (const auto parsed = parse_u64(argument); parsed.has_value()) {
+      index = static_cast<std::size_t>(*parsed);
+    }
+    if (!tab_closable(index)) return false;
+    if (on_close) {
+      on_close(index);
+      return true;
+    }
+    return false;
+  }
   if (labels_.empty()) return false;
   if (action == "next") {
     set_active((active_ + 1) % labels_.size(), true);

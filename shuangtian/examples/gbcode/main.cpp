@@ -445,14 +445,13 @@ struct CodeEditorPage : Component {
   State<std::size_t> active_{0};
   State<bool> sidebar_visible_{true};
   State<std::size_t> activity_{0};        ///< 活动栏选中项（0=资源管理器 … 4=扩展）
-  State<bool> bottom_visible_{true};      ///< 终端面板开合（收起 = 分栏退化为单栏）
+  State<bool> bottom_visible_{true};      ///< 终端面板开合（收起 = 隐藏下半，子树与状态保留）
   State<std::string> status_{"就绪"};
   State<std::string> cursor_text_{"Ln 1, Col 1"};
   State<std::string> selection_text_{""};
   // 终端：会话/滚回/作业全在**框架组件** `st::ui::Terminal` 里，
   // 应用侧只留一个指针与"忙闲"镜像（后者用于面板按钮的实时性）。
-  /// “关掉最后一个会话 ⇒ 收起面板”的待办（下一次 `pump` 在主循环栈上执行）。
-  bool bottom_close_pending_{false};
+  // （面板收起已改隐藏方案：`Terminal` 常驻子树，指针不再有悬垂窗口。）
   Terminal* terminal_ptr{nullptr};
   bool terminal_busy_{false};
   State<std::size_t> menu_open_{kNoMenu};
@@ -512,8 +511,6 @@ struct CodeEditorPage : Component {
   std::size_t problem_cycle_{0};
   /// 已注册的语言清单（扩展视图用；懒加载一次）。
   std::vector<std::string> languages_{};
-  /// 滚回视图（`on_scroll` 回调里要问它“到没到底”；每次重组重新取得）。
-  ScrollView* terminal_scroll_view_{nullptr};
   /// 关闭脏标签的待确认动作（非空 = 弹了确认对话框）。
   std::function<void()> pending_close_{};
   /// 待确认关闭的标签名（对话框正文用）。
@@ -762,30 +759,12 @@ struct CodeEditorPage : Component {
   /// 每帧推进的**构建前动作**（由入口在 `tick` 之前调）。
   ///
   /// 两件事：① 把工作线程攒下的终端输出搬进 `State`（本帧重组才能排进布局）；
-  /// ② 执行待办的“贴底”。
+  /// ② 泵终端。
   ///
-  /// 为何贴底必须在这里而不是 `build()` 里：`build()` **只在状态变脏时才跑**，
-  /// 而“刚追加了一行”与“几何已经更新”隔着一次布局——第二次只剩下重排（不重组），
-  /// 写在 `build()` 里的“下帧再滚”永远等不到执行（实测：滚动条停在中间，尾部两行看不到）。
-  /// 这里每帧都跑，正好在“上一帧布局已完成”的时刻调，`max_scroll()` 已是新值。
-  void update_terminal() {
-    // **先泵终端**（它可能受理“关闭会话”），**再**处理“收起面板”。
-    //
-    // 为何要分两步、而不在组件回调里直接 `set(false)`：那个回调是在
-    // `Terminal::pump()` 的**栈上**发的，而 `set` 会**同步重组**、把 `Terminal`
-    // 拆掉——回到组件内部时 `this` 已释放，直接段错误（实测 `0xC0000005`）。
-    // 本函数由**入口主循环**调（3325 行），已完全在组件栈之外。
-    pump_terminal();
-    if (bottom_close_pending_) {
-      bottom_close_pending_ = false;
-      bottom_visible_.set(false);
-      // ⚠ **必须同时清掉指针**：下一帧重组会把 `Terminal` 元素拆掉
-      //（面板不再声明它），而 `terminal_ptr` 会变成悬垂——之后每帧的
-      // `pump_terminal()` 都在解引用已释放内存（实测：界面整个卡死）。
-      // 重开面板时 `build_bottom` 会重新赋值。
-      terminal_ptr = nullptr;
-    }
-  }
+  /// 收起面板已改走 `SplitView::set_second_hidden`（终端常驻子树、只隐藏），
+  /// `terminal_ptr` 不再有悬垂窗口——旧的"关最后一个会话 → 收面板"延迟路径
+  ///（`bottom_close_pending_` + 拆树时清指针）随拆树方案一起删除。
+  void update_terminal() { pump_terminal(); }
 
   void build(Composer& c) override {
     const auto& buffers = buffers_.value();
@@ -794,8 +773,7 @@ struct CodeEditorPage : Component {
 
     // 编辑器实例可能在本次重组中新建/换绑：先置空，由 build_editor_area 重新取得
     editor = nullptr;
-    terminal_scroll_view_ = nullptr;   // 每次重组重新取得（旧指针可能已被销毁）
-    // **浮层里的输入框同理**：它们在上一次重组里被销毁，本帧还没重建。
+    // **浮层里的输入框**：它们在上一次重组里被销毁，本帧还没重建。
     //
     // 不置空就会踩到已释放的 Input——实测（无头 E2E，转到行浮层）：
     // “聚焦输入框”的待办曾排在 `build_goto_line` **之前**，拿着上一帧的
@@ -1639,87 +1617,39 @@ struct CodeEditorPage : Component {
   // 底部面板**只有终端一个视图**（问题/输出已删，见 `Problem` 处的说明）——
   // 于是这里不再需要标签栏，只留一行“终端标题 + 状态 + 动作”。
   void build_bottom(Composer& c) {
-    column(c, {.gap = 0.0f, .grow = true, .id = "bottom-panel"}, [&] {
-      // 面板头：身份 + 动作 + 收起。**会话标签在组件内部**（它才有会话状态），
-      // 所以这一行只留应用自己的东西。
-      (void)row(c, {.gap = 6.0f, .padding_x = 8.0f, .height = 32.0f, .id = "bottom-head"}, [&] {
-        (void)icon(c, "terminal", 14.0f);
-        (void)text(c, [this] {
-          const std::string title =
-              terminal_ptr != nullptr
-                  ? terminal_ptr->get_property("session_title").value_or("终端")
-                  : std::string("终端");
-          return "终端 · " + title;
-        }, {.id = "bottom-title"});
-        (void)spacer(c);
-        build_terminal_actions(c);
-        (void)custom<Button>(c, [this](Button& b) {
-          b.set_id("bottom-close");
-          b.set_icon("close");
-          b.set_variant(Button::Variant::Ghost);
-          b.set_size(Button::Size::Small);
-          b.on_click = [this] { bottom_visible_.set(false); };
-        }, {.width = 26.0f, .height = 26.0f, .key = "bottom-close"});
-      });
-      (void)custom<Terminal>(c, [this](Terminal& view) {
-        view.set_id("terminal");
-        // 默认目录跟着工作区（`switch_workspace` 会同步它）。
-        view.set_working_directory(workspace_);
-        // **真终端**：起一条真 shell（伪终端 + ANSI 屏幕 + 字节级输入）。
-        // 组件自己去重：已有一条就不重复开。
-        view.open_shell();
-        // 忙闲变化 → 状态栏与中止按钮的可用性。
-        view.on_busy_change = [this](bool busy) {
-          terminal_busy_ = busy;
-          status_.set(busy ? "终端：运行中" : "终端：已退出");
-        };
-        view.on_error = [this](const std::string& text) { status_.set("终端：" + text); };
-        // shell 自己设的标题（`OSC 0/2`）→ 标签跟着变（比固定“终端 1”有用）。
-        view.on_title_change = [this](std::size_t index, const std::string& title) {
-          if (terminal_ptr != nullptr) terminal_ptr->set_session_title(index, title);
-        };
-        // 换标签 → 面板标题跟着变。
-        view.on_session_change = [this](std::size_t) { status_.set("终端：已切换会话"); };
-        // 关掉**最后一个**会话 = 收起面板（布局决策在应用这一层）。
-        //
-        // ⚠ **不能当场 `set(false)`**：本回调是在 `Terminal::pump()` 的栈上发的，
-        // 而重组会把 `Terminal` 拆掉——回到组件时 `this` 已释放，直接段错误
-        //（实测 `0xC0000005`）。改成记下一个“待办”，让**入口主循环下一帧**
-        //（完全在组件栈之外）再改状态。
-        view.on_close_last_session = [this](bool last) {
-          if (last) bottom_close_pending_ = true;
-        };
-        terminal_ptr = &view;
-      }, {.grow = true, .key = "terminal"});
-    });
-  }
-
-  /// 终端动作区（清屏 / 中止 / 重跑 / 新建会话）。
-  ///
-  /// 为何“中止”必须要有（2026-10-06）：命令跑在**工作线程**上，界面上没有停止入口的话，
-  /// 一条 `st test`（几十秒）就把终端锁死了；只能等它跑完或重启应用。
-  void build_terminal_actions(Composer& c) {
-    const auto action = [&](const char* id, const char* icon, std::function<void()> on_click) {
-      (void)custom<Button>(c, [id, icon, on_click = std::move(on_click)](Button& b) {
-        b.set_id(id);
-        b.set_icon(icon);
-        b.set_variant(Button::Variant::Ghost);
-        b.set_size(Button::Size::Small);
-        b.on_click = on_click;
-      }, {.width = 26.0f, .height = 26.0f, .key = id});
-    };
-    // “有没有活在干”问 **busy()**（当前会话）；中止也只中止当前会话。
-    if (terminal_ptr != nullptr && terminal_ptr->busy()) {
-      action("terminal-stop", "square", [this] { request_terminal_stop(); });
-    }
-    // “重跑上一条”不再需要：真终端里 `↑` + Enter 就是它（shell 自己的历史）。
-    action("terminal-clear", "trash", [this] {
-      if (terminal_ptr != nullptr) terminal_ptr->clear();
-      status_.set("终端已清屏");
-    });
-    action("terminal-new", "plus", [this] {
-      if (terminal_ptr != nullptr) terminal_ptr->add_session();
-    });
+    // 面板头已删（2026-10-09 合并进组件标签栏）：会话标签 + 「+」新建 +
+    // 清屏/中止/收起动作钮都在 `Terminal` 的标签栏尾部（`Tabs` 的 trailing 机制），
+    // 那 32px 还给屏幕。这里只剩终端本体。
+    (void)custom<Terminal>(c, [this](Terminal& view) {
+      view.set_id("terminal");
+      // 默认目录跟着工作区（`switch_workspace` 会同步它）。
+      view.set_working_directory(workspace_);
+      // **真终端**：起一条真 shell（伪终端 + ANSI 屏幕 + 字节级输入）。
+      // 组件自己去重：已有一条就不重复开。
+      view.open_shell();
+      // 忙闲变化 → 状态栏（"中止"钮的忙闲同步在组件内自动做）。
+      view.on_busy_change = [this](bool busy) {
+        terminal_busy_ = busy;
+        status_.set(busy ? "终端：运行中" : "终端：已退出");
+      };
+      view.on_error = [this](const std::string& text) { status_.set("终端：" + text); };
+      // shell 自己设的标题（`OSC 0/2`）→ 标签跟着变（初始标签是 shell 名）。
+      view.on_title_change = [this](std::size_t index, const std::string& title) {
+        if (terminal_ptr != nullptr) terminal_ptr->set_session_title(index, title);
+      };
+      // 换标签 → 状态栏报一声。
+      view.on_session_change = [this](std::size_t) { status_.set("终端：已切换会话"); };
+      // 组件内"收起"钮 → 应用侧翻隐藏位（面板收起是布局决策，归这里）。
+      view.on_request_collapse = [this] { bottom_visible_.set(false); };
+      // 关掉**最后一个**会话 = 收起面板（同一条链路）。
+      //
+      // 面板已是"常驻隐藏"方案（`set_second_hidden`）：`bottom_visible_.set`
+      // 只翻隐藏位、不再拆 `Terminal` 子树，因此**可以在 pump 栈上直接调**。
+      view.on_close_last_session = [this](bool last) {
+        if (last) bottom_visible_.set(false);
+      };
+      terminal_ptr = &view;
+    }, {.grow = true, .key = "terminal"});
   }
 
   // 两个共用小工具（终端/搜索/面包屑都用）：直接在这里定义——
@@ -1775,7 +1705,9 @@ struct CodeEditorPage : Component {
             (void)custom_container<Panel>(
                 c, [&] { build_main(c, buffers, active, has_editor); },
                 [](Panel& panel) { panel.set_id("editor-upper"); }, {.grow = true, .key = "upper"});
-            if (!bottom_visible_.value()) return;   // 收起时下半不声明 → 分栏退化为单栏
+            // 终端面板**常驻声明、收起只隐藏**（`set_second_hidden`）：
+            // `Terminal` 及其全部会话/回看留在树上——重开即恢复，不再重起 shell。
+            // 代价是收起时多一棵隐藏子树，换来的是状态保留（VSCode 同款行为）。
             (void)custom_container<Panel>(
                 c, [&] { build_bottom(c); },
                 [](Panel& panel) { panel.set_id("editor-lower"); }, {.grow = true, .key = "lower"});
@@ -1785,6 +1717,8 @@ struct CodeEditorPage : Component {
             split.set_orientation(SplitView::Orientation::Vertical);
             split.set_min_ratio(0.05f);
             split.set_ratio(bottom_ratio_, false);
+            // 收起/展开：只翻隐藏位（子元素与比例都保留）。
+            split.set_second_hidden(!bottom_visible_.value());
             // 拖拽回调只写一个**非响应式**成员：比例由组件自己持有并重排，
             // 写 State 会每拖动一像素触发一次整页重组（浪费且在拖拽中重建子元素）。
             split.on_change = [this](float ratio) { bottom_ratio_ = ratio; };
@@ -2344,17 +2278,7 @@ struct CodeEditorPage : Component {
  /// 或更糟：把提示符位置弄乱）。应用自己的通知属于状态栏。
  auto note_startup(const std::string& text) -> void { status_.set(text); }
    /// 每帧推动终端作业（入口主循环调；见 `update_terminal` 的说明）。
-  auto pump() -> void {
-    // ⚠ **顺序**：先让终端泵（它可能受理“关闭会话”），**再**处理“收起面板”。
-    // 不能在组件回调里当场收起面板——那会在组件栈上重组，把组件拆掉后
-    // 回到它内部就是 use-after-free（实测 `0xC0000005`）。这里在**主循环**的
-    // 栈上改状态，完全在组件之外。
-    pump_terminal();
-    if (bottom_close_pending_) {
-      bottom_close_pending_ = false;
-      bottom_visible_.set(false);
-    }
-  }
+  auto pump() -> void { pump_terminal(); }
   /// 退出前收尾：停掉在跑的作业并 join 读线程（`jthread` 把它露在对象生命周期
   /// 之外会很危险：它可能正阻塞在 `read_line` 上，而对象已经在析构）。
   auto shutdown() -> void { shutdown_terminal(); }

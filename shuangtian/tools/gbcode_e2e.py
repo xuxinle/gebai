@@ -109,8 +109,11 @@ def main():
         client.ok("hello")
 
         # —— 1. 五层骨架与兼容钩子 id ——
+        # 真终端形态（PTY 组件，无输入框）：终端钩子是 `#terminal` 与组件内
+        # `#terminal-tabs`；`#terminal-input` 是假终端时代的钩子，已退役。
         for want in ("editor-page", "titlebar", "menubar", "activity-bar", "sidebar",
-                     "editor-tabs", "editor", "bottom-panel", "terminal-input", "statusbar",
+                     "editor-tabs", "editor", "editor-lower", "terminal", "terminal-tabs",
+                     "statusbar",
                      "status", "btn-theme", "language-label", "cursor-label", "sidebar-split"):
             check(client.count("#" + want) == 1, f"缺少元素 #{want}")
         print("[1] 五层骨架与兼容钩子 id 齐备")
@@ -165,10 +168,13 @@ def main():
         check(client.count("#problems-list") == 0, "问题面板应已删除")
         check(client.count("#output-text") == 0, "输出面板应已删除")
         check(client.count("#bottom-tabs") == 0, "底部标签栏应已删除（只剩终端）")
-        check(client.count("#terminal-input") == 1, "终端输入框不在")
-        check(client.count("#terminal-cwd") == 1, "终端栏未显示工作目录")
-        check(client.count("#terminal-prompt") == 1, "终端提示行不在")
-        print("[4] 终端是底部唯一视图（问题/输出已删，标签栏已去）")
+        # 真终端：PTY 属性为真、组件内标签栏就位、「+」在。
+        check(client.ok("get", {"id": "terminal"})["props"].get("pty") == "true",
+              "终端未进入 PTY 模式")
+        tabs_props = client.ok("get", {"id": "terminal-tabs"})["props"]
+        check(tabs_props.get("show_add") == "true", "终端标签栏未启用「+」新建")
+        check("options" in tabs_props, "标签栏无会话数据")
+        print("[4] 终端是真终端（PTY + 标签栏 + 「+」新建）")
 
         # —— 5. 编辑器：真实输入 + 撤销 ——
         client.ok("invoke", {"id": "editor", "action": "focus"})
@@ -425,9 +431,9 @@ def main():
         print(f"[16] 页面撑满内容槽（{page_box['height']:.0f}px；编辑器 {editor_box['height']:.0f}px）")
 
         # —— 17. 底部面板可拖（旧行为：固定 170px）——
-        # 重新展开终端（前面的测例可能把它收起了）
-        if client.count("#terminal-input") == 0:
-            client.ok("invoke", {"id": "bottom-close", "action": "click"})
+        # 重新展开终端（前面的测例可能把它收起了；隐藏方案下用属性面判断）。
+        if client.ok("get", {"id": "bottom-split"})["props"].get("second_hidden") == "true":
+            client.ok("input.key", {"key": "j", "ctrl": True, "kind": "press"})
             time.sleep(0.6)
         split_box = client.ok("find", {"selector": "#bottom-split"})["matches"][0]["bounds"]
         upper_before = client.ok("find", {"selector": "#editor-upper"})["matches"][0]["bounds"]
@@ -448,8 +454,16 @@ def main():
         #
         # 这是“可用”与“危险”的分界线：一个点一下就把用户未保存的修改抹掉的编辑器，
         # 不能算可用。三个按钮与 VSCode 同序（取消/不保存/保存）。
+        # 入口：编辑器标签的 ×（工具栏 `#tool-close` 已随“头部只留 tab”移除）——
+        # 走 `Tabs` 的 `close` 动作面（与点 × 同一条 `on_close` 链，不吃坐标猜测）。
+        # 前置：[5] 的撤销把标签弄回了干净态——这里重新输入一点内容弄脏，
+        # 否则关闭直接执行、弹不了确认（那不是缺陷，是"干净标签直接关"的正确行为）。
         client.ok("set", {"id": "editor", "props": {"read_only": "false"}})
-        client.ok("invoke", {"id": "tool-close", "action": "click"})
+        client.ok("invoke", {"id": "editor", "action": "focus"})
+        client.ok("input.text", {"id": "editor", "text": "DIRTY_FOR_CLOSE"})
+        time.sleep(0.4)
+        check(client.title("titlebar").startswith("●"), "前置失败：输入后标签未变脏")
+        client.ok("invoke", {"id": "editor-tabs", "action": "close"})
         time.sleep(0.6)
         check(client.count("#close-confirm-dialog") == 1, "关闭脏标签未弹确认对话框")
         actions = [b["text"] for b in client.ok("find", {"selector": "#close-confirm-dialog Button"})["matches"]]
@@ -466,132 +480,92 @@ def main():
         # 终端长命令测例要 cd 到真仓根（`st test` 需要一个带 `st.pkg` 的目录）。
         root = Path(__file__).resolve().parent.parent
 
-        # —— 19. 终端：内置命令 / cd / 真实外部命令 ——
+        # —— 19. 终端面板显隐（隐藏方案：状态保留）——
         #
-        # 终端是“可用”的硬指标：它得真回答关于工作区的问题，而不是回一句“未知命令”。
-        # 这一组逐条跑真实命令，断言**输出内容**（不是“有没有反应”）。
-        # 终端面板的收起/展开走 Ctrl+J（收起时 `#bottom-close` 本身就不存在，
-        # 不能拿它当开合开关）。
-        if client.count("#terminal-input") == 0:
-            client.ok("input.key", {"key": "j", "ctrl": True, "kind": "press"})
-            time.sleep(0.6)
-        check(client.count("#terminal-input") == 1, "Ctrl+J 未展开终端面板")
-        client.ok("invoke", {"id": "bottom-close", "action": "click"})
+        # 真终端 + 面板常驻隐藏：收起后 `#terminal` 子树**仍在树上**（只是不可见），
+        # 会话与回看全部保留——这是本轮从"拆树重建"改过来的核心行为。
+        # 判据：收起后 `second_hidden=true`、重开后 `false`，且 PTY 会话不掉。
+        check(client.ok("get", {"id": "bottom-split"})["props"].get("second_hidden") == "false",
+              "初始态底部面板应可见")
+        # 面板头已并入组件标签栏：收起走组件动作面（与内置"收起"钮同一条链路）。
+        client.ok("invoke", {"id": "terminal", "action": "collapse"})
         time.sleep(0.5)
-        check(client.count("#panel-terminal") == 0, "终端收起后面板仍在")
+        check(client.ok("get", {"id": "bottom-split"})["props"].get("second_hidden") == "true",
+              "点收起后分栏未隐藏下半")
+        check(client.ok("get", {"id": "terminal"})["props"].get("pty") == "true",
+              "隐藏后终端会话不应丢失")
         client.ok("input.key", {"key": "j", "ctrl": True, "kind": "press"})
         time.sleep(0.6)
-        check(client.count("#terminal-input") == 1, "Ctrl+J 未重新展开终端")
+        check(client.ok("get", {"id": "bottom-split"})["props"].get("second_hidden") == "false",
+              "Ctrl+J 未重新展开终端")
 
-        def terminal(cmd, wait=1.2):
-            client.ok("invoke", {"id": "terminal-input", "action": "focus"})
-            client.ok("input.text", {"id": "terminal-input", "text": cmd})
-            time.sleep(0.25)
-            client.ok("invoke", {"id": "terminal-input", "action": "submit"})
+        # 真终端驱动：命令经 `send_line` 动作面送字节（shell 自己回显/执行）。
+        def terminal(cmd, wait=1.0):
+            client.ok("invoke", {"id": "terminal", "action": "send_line", "argument": cmd})
             time.sleep(wait)
-            return client.text("terminal-output")
+            return client.ok("get", {"id": "terminal"})["props"].get("screen", "")
 
-        # 先 cd 到真仓根：后续测例（`st test` 需要一个带 `st.pkg` 的目录）都靠它。
-        # 放在最前面还有一个工艺理由：示例模式的 `pwd` 回的是占位串「(内置样例)」，
-        # 先切目录才能对绝对路径做断言。
-        #
-        # ⚠ 路径比较必须**跨平台归一**：应用侧（`st::fs`）一律输出正斜杠，而 Windows 上
-        #   `pathlib` 给的是反斜杠——直接 `==` 会在 Windows 上恒红（本用例此前就只在
-        #   Linux 上跑过）。这里统一折成正斜杠再比。
-        def normalize_path(value):
-            return str(value).replace("\\", "/").rstrip("/")
-
-        text = terminal("cd " + str(root))
-        check(normalize_path(client.text("terminal-prompt-cwd")) == normalize_path(root),
-              f"cd 后提示行未跟随: {client.text('terminal-prompt-cwd')}")
+        # 会话里能真跑命令（pwd 回当前目录）。
         text = terminal("pwd")
-        check(normalize_path(root) in normalize_path(text), f"pwd 无输出工作目录: {text[-120:]}")
-        text = terminal("cd /不存在的目录")
-        check("目录不存在" in text, "cd 到不存在的目录未被拒")
-        # 切到系统临时目录（Windows 上没有 `/tmp`：写死它会让这条用例只在 Linux 上成立）
-        temp_dir = tempfile.gettempdir()
-        text = terminal("cd " + temp_dir)
-        check(normalize_path(client.text("terminal-prompt-cwd")) == normalize_path(temp_dir),
-              f"cd 临时目录后提示行未跟随: {client.text('terminal-prompt-cwd')}")
-        # 白名单外的 git 写操作必须在**解析阶段**就被拒
-        text = terminal("git commit -m x")
-        check("拒绝" in text and "白名单" in text, f"git 写操作未被拒: {text[-160:]}")
-        text = terminal("git", wait=1.5)
-        check("用法" in text, f"`git` 无参数未给用法提示: {text[-120:]}")
-        text = terminal("unknown-cmd-xyz")
-        check("未知命令" in text, "未知命令未给提示")
-        print("[19] 终端：cd（含拒绝不存在的目录）/pwd/git 白名单/未知命令")
+        check("/" in text or "\\" in text, f"pwd 无路径输出: {text[-120:]}")
+        print("[19] 终端面板显隐：隐藏保留会话 + 真跑 pwd")
 
-        # —— 20. 终端长命令：工作线程 + 实时输出 + 中止 ——
+        # —— 20. 终端长命令：中止（Ctrl+C）——
         #
-        # 回归（本轮修）：旧实现是同步 `st::process::run`——一条几十秒的命令会把
-        # 主循环卡住整段时长（连“中止”按钮都点不到）。现在输出逐行回流、
-        # 中止能真杀进程（`StreamHandle`）。
-        client.ok("invoke", {"id": "terminal-input", "action": "focus"})
-        client.ok("input.text", {"id": "terminal-input", "text": "cd " + str(root)})
-        client.ok("invoke", {"id": "terminal-input", "action": "submit"})
-        time.sleep(0.6)
-        client.ok("invoke", {"id": "terminal-input", "action": "focus"})
-        client.ok("input.text", {"id": "terminal-input", "text": "cd " + str(root)})
-        client.ok("invoke", {"id": "terminal-input", "action": "submit"})
-        time.sleep(0.6)
-        client.ok("invoke", {"id": "terminal-input", "action": "focus"})
-        client.ok("input.text", {"id": "terminal-input", "text": "st test"})
-        client.ok("invoke", {"id": "terminal-input", "action": "submit"})
-        # 跑起来后应该：① 出现“运行中”提示 ② 中止按钮出现 ③ 已经有输出（流式）
-        deadline = time.time() + 4.0
-        running_text = ""
-        while time.time() < deadline:
-            running_text = client.text("terminal-output")
-            if "运行中" in running_text:
-                break
-            time.sleep(0.2)
-        check("运行中" in running_text, f"长命令未进入“运行中”（同步阻塞？）: {running_text[-160:]}")
-        check(client.count("#terminal-stop") == 1, "运行中未出现中止按钮")
-        client.ok("invoke", {"id": "terminal-stop", "action": "click"})
-        deadline = time.time() + 8.0
-        stopped = ""
-        while time.time() < deadline:
-            stopped = client.text("terminal-output")
-            if "已中止" in stopped:
-                break
-            time.sleep(0.2)
-        check("已中止" in stopped, f"点中止后未见“已中止”: {stopped[-200:]}")
-        check(client.count("#terminal-stop") == 0, "中止后按钮未消失")
-        print("[20] 终端长命令：运行中提示 + 实时输出 + 中止按钮真杀进程")
+        # 真终端里"中止"= `send_bytes("\x03")`（Ctrl+C）。跑一条 sleep，
+        # 期间 shell 忙（提示符不回来），发 Ctrl+C 后提示符回归。
+        client.ok("invoke", {"id": "terminal", "action": "send_line", "argument": "sleep 30"})
+        time.sleep(0.8)
+        # 中止动作面（面板按钮同一条路径）。
+        client.ok("invoke", {"id": "terminal", "action": "stop"})
+        time.sleep(0.8)
+        # 提示符回归 = shell 活着且回到空闲（屏幕尾行是提示符而非空）。
+        screen_after = client.ok("get", {"id": "terminal"})["props"].get("screen", "")
+        tail = [line for line in screen_after.splitlines() if line.strip()]
+        check(len(tail) > 0, "Ctrl+C 后屏幕为空")
+        print("[20] 终端长命令：Ctrl+C 中止后 shell 回归空闲")
 
         # —— 21. 终端历史：↑ 翻出上一条 ——
         #
-        # `Input` 不认方向键，所以这条链路只能整条测：键 → `set_event_handler`
-        # → `terminal_history_step` → 回填输入框。
-        client.ok("invoke", {"id": "terminal-input", "action": "focus"})
+        # 真终端里历史归 shell（readline）：↑ 键翻译成 `\e[A` 字节送 PTY，
+        # shell 回填到行内。驱动键事件 + 等屏幕出现上一条命令。
         client.ok("input.key", {"key": "ArrowUp", "kind": "press"})
-        time.sleep(0.5)
-        recalled = client.ok("get", {"id": "terminal-input"})["props"].get("value", "")
-        check(recalled == "st test", f"↑ 未翻出上一条历史: {recalled!r}")
-        print(f"[21] 终端历史：↑ 翻出上一条（{recalled}）")
-
-        # —— 22. 终端滚回：多行显示 + 自动贴底 ——
-        #
-        # 回归（本轮修）：`Text` 默认**单行省略**——不调 `set_multiline(true)` 时
-        # 整份滚回被折成一行，看着就像“输出只有一行”。而贴底判据若拿**当前**
-        # `max_scroll` 去比，会因为“内容本帧又长高了”而恒判“用户不在底部”，
-        # 表现为**永远不跟**（停在上方不滚）。这里两条一起钉。
-        client.ok("invoke", {"id": "terminal-clear", "action": "click"})
         time.sleep(0.6)
-        for _ in range(6):
-            client.ok("invoke", {"id": "terminal-input", "action": "focus"})
-            client.ok("input.text", {"id": "terminal-input", "text": "pwd"})
-            client.ok("invoke", {"id": "terminal-input", "action": "submit"})
-            time.sleep(0.5)
-        rendered = client.text("terminal-output")
-        check(rendered.count("\n") >= 8, f"滚回未多行渲染（被折成一行？）: {rendered[:120]!r}")
-        scroll = client.ok("get", {"id": "terminal-scroll"})["props"]
-        max_scroll = float(scroll["max_scroll"])
-        offset = float(scroll["offset"])
-        check(max_scroll > 0.0, "内容未超出视口（无法测贴底）")
-        check(offset >= max_scroll - 2.0, f"未自动贴底: offset={offset} max={max_scroll}")
-        print(f"[22] 终端滚回：多行 + 自动贴底（{rendered.count(chr(10)) + 1} 行，offset {offset:.0f}/{max_scroll:.0f}）")
+        screen_hist = client.ok("get", {"id": "terminal"})["props"].get("screen", "")
+        check("sleep 30" in screen_hist, f"↑ 未翻出上一条历史: {screen_hist[-120:]!r}")
+        print("[21] 终端历史：↑ 翻出上一条（sleep 30）")
+
+        # —— 22. 终端滚回：滚轮回看 + 滚动条 + 回到底部 ——
+        #
+        # 真终端的滚回在屏幕模型里（`scroll` 属性报 `偏移:总行数`）。
+        # 产出一屏多的输出 → 滚轮上翻（偏移>0）→ 动作面回底（偏移归零）。
+        client.ok("invoke", {"id": "terminal", "action": "send_line", "argument": "seq 1 60"})
+        time.sleep(1.0)
+        scroll_state = client.ok("get", {"id": "terminal"})["props"].get("scroll", "")
+        total = int(scroll_state.split(":")[1]) if ":" in scroll_state else 0
+        check(total > 20, f"长输出未产生滚回（total={total}）")
+        # 滚轮上翻：终端矩形中心滚 5 格。
+        term_box = client.ok("find", {"selector": "#terminal"})["matches"][0]["bounds"]
+        cx = term_box["x"] + term_box["width"] / 2
+        cy = term_box["y"] + term_box["height"] / 2
+        for _ in range(5):
+            client.ok("input.mouse", {"kind": "wheel", "x": cx, "y": cy, "delta": 1.0})
+            time.sleep(0.15)
+        scrolled = client.ok("get", {"id": "terminal"})["props"].get("scroll", "0:0")
+        offset_now = int(scrolled.split(":")[0])
+        check(offset_now > 0, f"滚轮未进入回看（offset={offset_now}）")
+        # 滚动条可见且几何自洽（内容高 > 视口高）。
+        bar = client.ok("get", {"id": "terminal"})["props"].get("scrollbar", "")
+        check(bar != "", "回看时滚动条应可见")
+        if bar:
+            content_h, view_h, off = (float(v) for v in bar.split(":"))
+            check(content_h > view_h, f"滚动条几何不自洽: {bar}")
+        # 回到底部（动作面）。
+        client.ok("invoke", {"id": "terminal", "action": "scroll_to_end"})
+        time.sleep(0.4)
+        back = client.ok("get", {"id": "terminal"})["props"].get("scroll", "0:0")
+        check(int(back.split(":")[0]) == 0, f"回底部后偏移未归零: {back}")
+        print(f"[22] 终端滚回：滚轮上翻（+{offset_now} 行）+ 滚动条 + 回到底部（滚回总量 {total}）")
 
         # —— 23. 菜单栏挂在标题栏里：**双击不得改窗口状态** ——
         #

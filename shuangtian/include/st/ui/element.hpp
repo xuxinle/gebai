@@ -318,6 +318,10 @@ class Element {
     virtual ~HostFocus() = default;
     /// 把键盘焦点转到 `element`（等价 `UiRoot::set_focus`）；不可聚焦/不在树上时为 `false`。
     virtual auto set_keyboard_focus(Element* element) -> bool = 0;
+    /// 读宿主剪贴板（无剪贴板能力/读失败时为空串，不抢错）。
+    /// 终端粘贴（`Ctrl+Shift+V`）等组件能力从这取——剪贴板是**平台**能力，
+    /// 组件不该也不必知道后端长什么样（实现在 `UiRoot`→`Application`→backend）。
+    [[nodiscard]] virtual auto host_clipboard_text() -> std::string { return {}; }
   };
 
   [[nodiscard]] auto host() const noexcept -> HostFocus* { return host_; }

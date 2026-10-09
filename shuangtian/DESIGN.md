@@ -2080,6 +2080,7 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
   `Terminal::key_bytes` 是这条契约的**纯函数入口**（可逐条断言；见 `tests/ui_terminal_input_test.cpp`）。
 - **全局快捷键**：`UiRoot::register_shortcut(key, {ctrl,shift,alt,meta}, handler)`；
   KeyDown 派发顺序固定为**快捷键表 → 浮层 → 焦点元素 → Tab 焦点环**（后注册优先；
+  派发前不可见子树整体不接键——隐藏面板里的组件不该继续吃键盘，2026-10-09；
   handler 返回 false 放弃消费继续下沉）。
 - **命中拦截**：`Element::intercepts_input()`（默认 true）——不可见/不拦截的浮层不再
   截住下层内容（`Dialog` 覆写为 `visible()`）。
@@ -2091,6 +2092,44 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
 - **Tabs 编辑器化**：`Tab{key,label,modified,closable}` + `sync_tabs`（key 复用、活动态跟
   key 走）+ `on_close`（点 × 触发，不删标签）+ 溢出滚动（箭头/滚轮/夹取，
   `scroll_offset()` 可读写，active 项自动滚回可见）。
+- **终端面板化（2026-10-09）**——`Terminal` 从"单屏组件"升级为"面板级组件"，配套四件框架能力：
+  - **标签栏活了**：会话表 → `Tabs` 的 `sync_tabs`（稳定 key = 会话序号；标题变化只更新
+    label 不重建活动态），`arrange` 里同步；`on_close_last_session` 语义不变。配套
+    `cycle_session(forward)`（Ctrl+PageDown/PageUp/Ctrl+Tab 的键盘导航归组件）。
+    **默认标签标题 = shell 短名**（`bash`/`pwsh`——真实身份比序号有用；shell 的
+    `OSC 0/2` 标题到达后覆盖它，也可显式传 title）。
+  - **面板头并入标签栏（同日二轮）**：独立面板头那 32px 删掉，动作全部住进标签栏
+    尾部（Windows Terminal / VSCode 同款形态）。内置三钮：清屏（常驻）、中止
+    （busy 时；PTY 模式下 busy = shell 活着，是常态——中止发 Ctrl+C 中断当前命令）、
+    收起（宿主装了 `on_request_collapse` 才出现——面板收起是布局决策，归宿主）。
+    动作面 `collapse` 与内置钮同链路；`add_header_action` 供宿主自挂钮。
+  - **回看滚动条**：复用 `ScrollBar` 子件（拖拽/点击轨道/hover 加宽全是既有组件的事），
+    组件只做「回看偏移 ↔ 滚动偏移」换算（同一状态两个视图）；备用屏（vim/htop）里隐藏。
+    翻离底部时右下角「回到底部」浮钮（点击归零偏移，与滚轮路径同一状态）。
+    ⚠ 回看偏移变化要标 `layout_dirty`（只 mark_dirty 重绘不重排，滚动条 thumb 会停在
+    旧位置——e2e 实测抓到）。
+  - **`content_child_count` 覆写**：内部件（tabs/view/scrollbar）不归声明式管（与
+    `ScrollView` 的滚动条同一条不变式，防末尾裁剪误删后裸指针悬垂）。
+- **`Tabs` 尾部动作区（2026-10-09）**：右缘固定一排宿主动作钮（不随标签滚动）——
+  内置「+」新建（`on_add` + `show_add_button`，空表也画，关到零能重开；溢出箭头与
+  「+」共用右缘时箭头贴边）+ 轻量图标钮 `add_trailing_button(icon, tooltip, on_click,
+  enabled)`（自绘图标 + hover 提亮 + 禁用置灰；后挂的贴「+」侧）+ 重活入口
+  `set_trailing_content`（自定义元素，arrange 自动布局在动作钮左侧）。
+  几何从右往左：`[箭头贴边][+][动作钮…][自定义内容][标签滚动区]`；`max_scroll`
+  让出尾部宽（否则末几个标签被钮盖住还以为能滚到）。动作面 `add`/`close`；
+  `tab_key(index)` 公开 key 取值——`dsl::tabs` 的 `on_close` 改传 key（旧写法传
+  `tab_label`，「标签名 ≠ key」时（如 `untitled-1.txt` vs `untitled-1`）调用方按 key
+  对账对不上，关闭静默落空——e2e 实测抓到的存量缺陷）。
+- **`SplitView` 面板显隐（2026-10-09）**：`set_first_hidden`/`set_second_hidden` ——
+  隐藏侧退出布局与交互（另一侧单面板退化占满、手柄消失），**子元素留在树上**
+  （状态保留，重新显示原样回来）。与"从条件分支里抽掉一侧"的区别：抽掉会销毁子元素
+  （声明式末尾裁剪）。属性面 `first_hidden`/`second_hidden` 可读写，动作面
+  `toggle_first`/`toggle_second`（无参 = 切换）。
+- **剪贴板窄接口（2026-10-09）**：`Element::HostFocus` 加虚函数 `host_clipboard_text()`
+  （缺省空串）——剪贴板是**平台**能力，组件不该知道 backend。`UiRoot` 装 provider
+  （`Application` 在 start 时接 backend 的既有实现），`Terminal` 的 `Ctrl+Shift+V`
+  经它取文本送字节（LF/CRLF 归一为 CR；无宿主时静默降级）。字号档位
+  `Ctrl+=`/`Ctrl+-`/`Ctrl+0` 同批接入（`set_font_scale` 夹取 [0.5, 3.0]）。
 - **文本编辑类默认可聚焦**：`Input`/`TextArea`/`CodeEditor` 构造即 `set_focusable(true)`——
   点击聚焦只认 `focusable()`，而键盘激活（`activate()`）又要求先有焦点，默认 `false` 是
   死循环（点击永远聚焦不了编辑器）；宿主不再需要 `set_focusable(true)` 的集成 workaround。
@@ -3451,7 +3490,7 @@ mingw 交叉编译在**发布前手工执行**（`st build gallery --toolchain=m
 | 示例 | 定位 | 检验点 |
 |---|---|---|
 | `gallery` | **组件集 / 设计系统巡检**：导航、统计卡、按钮矩阵、图标墙、表单、列表、进度条、主题与 DPI 切换、截图 | 组件库完整度、设计令牌一致性、DPI 正确性、控制通道可达性 |
-| `gbcode` | **VSCode 式代码编辑器**：标题栏/菜单栏/**常驻**活动栏+可收起侧栏（资源管理器·搜索·源代码管理·运行·扩展）/多标签编辑区（修改点、可关闭）/底部面板（问题·输出·终端）/状态栏；命令面板（Ctrl+Shift+P）、**打开文件夹换工作区**（Ctrl+Shift+O）、全局快捷键、8 种内置语言 + 自定义语言 `stlog` | **易用性**（一个 IDE 形态界面 ≈ 数百行声明式组装，全部用内置组件，零自绘）、**组件库覆盖度**（MenuBar/Tabs/Tree/List/Overlay/快捷键在同一真实形态下的协同）、**控制通道全链路**（多编辑器实例的属性面与动作） |
+| `gbcode` | **VSCode 式代码编辑器**：标题栏/菜单栏/**常驻**活动栏+可收起侧栏（资源管理器·搜索·源代码管理·运行·扩展）/多标签编辑区（修改点、可关闭）/底部面板（**真终端**：多会话标签栏——标签默认 shell 名、`OSC` 标题实时覆盖、尾部动作钮（清屏/中止/收起）+ 回看滚动条 + 隐藏保留会话的面板显隐）/状态栏；命令面板（Ctrl+Shift+P）、**打开文件夹换工作区**（Ctrl+Shift+O）、全局快捷键、8 种内置语言 + 自定义语言 `stlog` | **易用性**（一个 IDE 形态界面 ≈ 数百行声明式组装，全部用内置组件，零自绘）、**组件库覆盖度**（MenuBar/Tabs/Tree/List/Overlay/快捷键在同一真实形态下的协同）、**控制通道全链路**（多编辑器实例的属性面与动作） |
 
 `gbcode` 的**活动栏与侧栏是两个独立的东西**（2026-10-07 分开）：活动栏是“能去哪儿”的入口，
 **常驻**（切视图的唯一途径）；侧栏是“当前视图的内容”，受 `Ctrl+B` / 点当前项控制开合。

@@ -100,6 +100,22 @@ void SplitView::set_handle_size(float size) {
   mark_layout_dirty();
 }
 
+void SplitView::set_second_hidden(bool hidden) {
+  if (hidden == second_hidden_) return;
+  second_hidden_ = hidden;
+  // 隐藏侧子元素的 `visible` 同步：退出绘制与命中（只不 arrange 不够——
+  // 它上一帧的 bounds 还在，命中测试照样能点中它）。
+  if (Element* second = this->second(); second != nullptr) second->set_visible(!hidden);
+  mark_layout_dirty();
+}
+
+void SplitView::set_first_hidden(bool hidden) {
+  if (hidden == first_hidden_) return;
+  first_hidden_ = hidden;
+  if (Element* first = this->first(); first != nullptr) first->set_visible(!hidden);
+  mark_layout_dirty();
+}
+
 void SplitView::apply_theme(const Theme& theme) {
   const Palette& colors = theme.colors();
   style_.background = math::Color{0, 0, 0, 0};
@@ -167,6 +183,9 @@ auto SplitView::main_extent() const noexcept -> float {
 
 auto SplitView::handle_rect() const -> math::Rect {
   if (bounds_.is_empty()) return math::Rect{};
+  // 任一侧隐藏 ⇒ 无手柄（单面板退化，与 `layout_children` 的几何一致；
+  // 空矩形同时让绘制与命中自然失效）。
+  if (first_hidden_ || second_hidden_) return math::Rect{};
   const bool horizontal = orientation_ == Orientation::Horizontal;
   // 手柄中心 = 首面板宽 + 手柄一半（与 layout_children 同一份几何：两处必须逐像素一致，
   // 否则「拖到零界」与「画在零界」错位）。首面板宽 = 可用空间 × ratio。
@@ -184,7 +203,10 @@ void SplitView::layout_children(const RenderContext& context) {
   const bool horizontal = orientation_ == Orientation::Horizontal;
   Element* first = child_count() > 0 ? child_at(0) : nullptr;
   Element* second = child_count() > 1 ? child_at(1) : nullptr;
-  // **单面板退化**：只有一侧时它占**全部**主轴空间（不保留手柄、不再按比例分半）——
+  // 隐藏侧等同"不存在"（但子元素留在树上）：可见侧单面板退化占满。
+  if (first != nullptr && first_hidden_) first = nullptr;
+  if (second != nullptr && second_hidden_) second = nullptr;
+  // **单面板退化**：只有一侧时它占**全部"主轴空间（不保留手柄、不再按比例分半）——
   // 条件分支里抽掉一侧面板后分栏自然变成单栏，而不是留半屏空白。
   if (first == nullptr || second == nullptr) {
     Element* only = first != nullptr ? first : second;
@@ -221,8 +243,9 @@ auto SplitView::ratio_at(float pointer_main) const noexcept -> float {
 void SplitView::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   // 单面板：无分界线也无手柄（与 `layout_children` 的退化路径一致——
-  // 画一条悬空分隔线会让用户以为还能拖）。
-  if (child_count() < 2) return;
+  // 画一条悬空分隔线会让用户以为还能拖）。`handle_rect` 在隐藏侧时空矩形，
+  // 下面的几何自然退化，但先退出省一笔。
+  if (child_count() < 2 || first_hidden_ || second_hidden_) return;
   const auto& colors = context.theme.colors();
   const float width = context.theme.metrics().border_width;
   const bool horizontal = orientation_ == Orientation::Horizontal;
@@ -269,6 +292,7 @@ void SplitView::paint_content(const RenderContext& context, raster::Surface& can
 
 auto SplitView::on_event(const RenderContext& context, Event& event) -> bool {
   if (!enabled_) return false;
+  // 任一侧隐藏时无手柄：不做拖拽（`handle_rect` 空矩形，命中判断自然不过）。
   const bool horizontal = orientation_ == Orientation::Horizontal;
   const auto pointer_main = [&](math::Point point) {
     return horizontal ? point.x : point.y;
@@ -360,6 +384,8 @@ auto SplitView::get_property(std::string_view name) const -> std::optional<std::
   if (name == "ratio") return std::format("{}", ratio_);
   if (name == "min_ratio") return std::format("{}", min_ratio_);
   if (name == "step") return std::format("{}", step_);
+  if (name == "first_hidden") return first_hidden_ ? std::string("true") : std::string("false");
+  if (name == "second_hidden") return second_hidden_ ? std::string("true") : std::string("false");
   if (name == "orientation") {
     return orientation_ == Orientation::Horizontal ? std::string("horizontal")
                                                    : std::string("vertical");
@@ -368,6 +394,15 @@ auto SplitView::get_property(std::string_view name) const -> std::optional<std::
 }
 
 auto SplitView::set_property(std::string_view name, std::string_view value) -> bool {
+  if (name == "first_hidden" || name == "second_hidden") {
+    const bool hidden = value == "true" || value == "1";
+    if (name == "first_hidden") {
+      set_first_hidden(hidden);
+    } else {
+      set_second_hidden(hidden);
+    }
+    return true;
+  }
   if (name == "ratio") {
     const auto parsed = parse_f64(value);
     if (!parsed.has_value()) return false;
@@ -394,10 +429,23 @@ auto SplitView::set_property(std::string_view name, std::string_view value) -> b
 }
 
 auto SplitView::property_names() const -> std::vector<std::string_view> {
-  return {"ratio", "min_ratio", "step", "orientation"};
+  return {"ratio", "min_ratio", "step", "orientation", "first_hidden", "second_hidden"};
 }
 
 auto SplitView::invoke_action(std::string_view action, std::string_view argument) -> bool {
+  // 面板显隐的快捷动作（无参数 = 切换；"true"/"false" = 显式设置）。
+  if (action == "toggle_first") {
+    const bool explicit_value = argument == "true" || argument == "1";
+    const bool hidden = argument.empty() ? !first_hidden_ : !explicit_value;
+    set_first_hidden(hidden);
+    return true;
+  }
+  if (action == "toggle_second" || action == "toggle_panel") {
+    const bool explicit_value = argument == "true" || argument == "1";
+    const bool hidden = argument.empty() ? !second_hidden_ : !explicit_value;
+    set_second_hidden(hidden);
+    return true;
+  }
   if (action == "step_forward" || action == "increase" || action == "next") {
     set_ratio(ratio_ + step_, true);
     return true;

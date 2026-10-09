@@ -849,6 +849,17 @@ auto Application::start() -> Status {
   root_.set_viewport(math::Size{static_cast<float>(options_.width),
                                 static_cast<float>(options_.height)});
 
+  // 剪贴板：backend 已有平台实现（win32 真剪贴板、headless 进程内模拟），
+  // 经 `UiRoot` 的 provider 接到组件层（终端 `Ctrl+Shift+V` 等）。读失败降级为
+  // 空串——粘贴是“锦上添花”，不该因平台差异启动失败。
+  if (impl_->backend != nullptr) {
+    shell::Backend* backend_ptr = impl_->backend;
+    root_.set_clipboard_provider([backend_ptr]() -> std::string {
+      const auto text = backend_ptr->clipboard_text();
+      return text.has_value() ? *text : std::string{};
+    });
+  }
+
   if (options_.enable_script) {
     impl_->script = std::make_unique<ui::ScriptHost>(root_, options_.script_limits);
     if (!impl_->script->valid()) {

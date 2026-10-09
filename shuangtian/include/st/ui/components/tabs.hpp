@@ -10,6 +10,11 @@
 /// 未选中 `text_muted`，hover 背景 `surface_alt`，disabled 统一降到 `text_faint`。
 /// 可关闭项 hover 时在右侧绘制 ×（canvas 线条自绘），修改项标签旁绘制小圆点（`text_muted`）。
 ///
+/// **尾部动作区（trailing）**：右缘固定一排宿主动作钮（不随标签滚动）——内置「+」
+/// 新建（`on_add`）+ 宿主轻量按钮（`add_trailing_button`，图标 + 回调，如终端面板的
+/// 中止/清屏/收起）。重活勿入：自绘控件（下拉/输入）请用 `set_trailing_content`
+/// 挂自定义元素（布局与命中自动在箭头内侧）。
+///
 /// 交互：点击标签切换；点击 × 触发 `on_close(index)`（不直接删除——由调用方决定）；
 /// `ArrowLeft`/`ArrowRight` 循环切换、`Home`/`End` 到首/末；`Enter`/`Space` 重新确认当前项；
 /// 切换经 `on_change(active_index)` 通知。标签总宽超出组件宽度时显示左右箭头（点击滚动）
@@ -24,6 +29,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -70,6 +76,10 @@ class Tabs : public Element {
   [[nodiscard]] auto tab_closable(std::size_t index) const -> bool;
   /// 活动项的业务 key（无标签为空串）。
   [[nodiscard]] auto active_key() const -> std::string_view;
+  /// 第 index 项的业务 key（无 key 的项回退 label 值——与 `active_key` 同口径；
+  /// 越界为空串）。回调层拿业务身份用它，而不是 `tab_label`（两者在
+  /// 「标签名 ≠ key」时会分叉，如 `untitled-1.txt` vs `untitled-1`）。
+  [[nodiscard]] auto tab_key(std::size_t index) const -> std::string_view;
   /// 按业务 key 定位（不存在返回 `std::nullopt`）。
   [[nodiscard]] auto index_of_key(std::string_view key) const -> std::optional<std::size_t>;
 
@@ -81,6 +91,12 @@ class Tabs : public Element {
   void set_active(std::size_t index, bool notify = false);
   [[nodiscard]] auto active_index() const noexcept -> std::size_t { return active_; }
   [[nodiscard]] auto active_label() const -> std::string_view;
+
+  /// 标签项最大宽度（px；超长文本省略号，绘制自动截断）。默认 200——
+  /// 长标题（shell 的 OSC 标题带完整路径、长文件名）不该把别的标签挤出屏。
+  /// ≤ 0 = 不限制。小于最小宽度时按最小宽度生效。
+  void set_max_tab_width(float width) noexcept;
+  [[nodiscard]] auto max_tab_width() const noexcept -> float { return max_tab_width_; }
 
   /// 标签项矩形（命中/指示条锚定/测试用；未布局或越界时为空矩形）。
   [[nodiscard]] auto tab_rect(std::size_t index) const -> math::Rect;
@@ -98,6 +114,39 @@ class Tabs : public Element {
   [[nodiscard]] auto close_rect(std::size_t index) const -> math::Rect;
   /// 溢出箭头命中区（不溢出为空矩形；测试与自动化定位用）。
   [[nodiscard]] auto overflow_arrow_rect(bool right) const -> math::Rect;
+
+  // —— 「+」新建按钮 ——
+  /// 是否显示尾部「+」（默认 false；终端/编辑器标签栏的惯例）。装了 `on_add`
+  /// 才有意义——按钮只是把意图交回调用方。
+  void set_show_add_button(bool show) noexcept { show_add_ = show; }
+  [[nodiscard]] auto show_add_button() const noexcept -> bool { return show_add_; }
+  /// 「+」命中区（不显示或无回调为空矩形；测试与自动化定位用）。
+  /// 溢出箭头与「+」同时占右侧时，「+」排在箭头**内侧**（箭头贴边、常驻语义）。
+  [[nodiscard]] auto add_rect() const -> math::Rect;
+
+  // —— 尾部动作钮（trailing buttons，通用轻量机制）——
+  /// 挂一个图标按钮到尾部动作区（「+」左侧，不随标签滚动）。
+  /// 返回槽位 id（`trailing_rect(slot)` 定位用）。适合一击动作（中止/清屏/收起…）；
+  /// 需要复杂控件的场景用 `set_trailing_content`。
+  /// 按钮由本组件自绘（图标 + hover 提亮），`enabled = false` 时置灰不接命中。
+  auto add_trailing_button(std::string icon, std::string tooltip,
+                           std::function<void()> on_click, bool enabled = true) -> std::size_t;
+  /// 改某个槽的可用态（如"中止"只在忙时可用）。
+  void set_trailing_enabled(std::size_t slot, bool enabled);
+  /// 摘除某个槽（越界忽略；后续槽位前移）。
+  void remove_trailing(std::size_t slot);
+  /// 尾部动作钮命中区（越界为空矩形）。
+  [[nodiscard]] auto trailing_rect(std::size_t slot) const -> math::Rect;
+  /// 尾部动作区总宽（含「+」与自定义内容；0 = 无任何尾部内容）——布局与命中共用。
+  [[nodiscard]] auto trailing_width() const -> float;
+  /// 摘除全部尾部动作钮（不动「+」与自定义内容）。
+  void clear_trailing_buttons();
+
+  // —— 尾部自定义内容（重活入口）——
+  /// 把一个自定义元素挂到尾部动作区最左侧（在动作钮与「+」之前；不随标签滚动）。
+  /// 归本组件布局：高取标签条内容高、宽取元素自然尺寸。传 nullptr 摘除。
+  void set_trailing_content(std::unique_ptr<Element> content);
+  [[nodiscard]] auto trailing_content() const -> Element* { return trailing_content_; }
 
   void apply_theme(const Theme& theme) override;
   void measure(const RenderContext& context, const Constraints& constraints) override;
@@ -119,6 +168,8 @@ class Tabs : public Element {
   std::function<void(std::size_t)> on_change{};
   /// 关闭请求回调（点击 ×；组件不删除标签，由调用方决定）。
   std::function<void(std::size_t)> on_close{};
+  /// 新建请求回调（点击「+」；`show_add_` 只在装了它时才显示按钮）。
+  std::function<void()> on_add{};
 
  private:
   /// 重算标签项宽度缓存（布局期调用；文本度量依赖 `context.text`）。
@@ -144,7 +195,23 @@ class Tabs : public Element {
   std::size_t active_{0};
   float gap_{0.0f};         ///< 标签项间距（`metrics.space_xs`）
   int hover_index_{-1};     ///< 指针悬停项（-1 无）
+  bool hover_add_{false};   ///< 「+」悬停（高亮它）
+  int hover_trailing_{-1};  ///< 尾部动作钮悬停（-1 无）
   float scroll_offset_{0.0f};  ///< 横向滚动偏移（溢出时 > 0）
+  bool show_add_{false};    ///< 尾部「+」是否显示
+  float max_tab_width_{200.0f};  ///< 标签项最大宽度（≤0 = 不限；缺省 200，与 cpp 的 k_default_max_tab_width 同值）
+
+  /// 尾部动作钮（自绘轻量按钮：图标 + 回调 + hover 提亮）。
+  struct TrailingButton {
+    std::string icon{};
+    std::string tooltip{};
+    std::function<void()> on_click{};
+    bool enabled{true};
+    mutable bool hovered{false};
+  };
+  std::vector<TrailingButton> trailing_{};
+  /// 尾部自定义内容（重活入口；归 `children_` 所有，这里只持指针）。
+  Element* trailing_content_{nullptr};
 
   // 指示条动画状态（绘制期推进）
   mutable float indicator_x_{0.0f};

@@ -78,6 +78,17 @@ class SplitView : public Element {
   void set_handle_size(float size);
   [[nodiscard]] auto handle_size() const noexcept -> float { return handle_size_; }
 
+  // —— 面板显隐（保留子元素，只退出布局与交互）——
+  //
+  // 与"从条件分支里抽掉一侧"的区别：抽掉会**销毁**子元素（声明式末尾裁剪），
+  // 而这里只是**藏**——子元素带着全部状态留在树上，重新显示时原样回来。
+  // 典型场景：底部终端面板收起（会话/回看保留）、侧栏折叠。
+  // 隐藏侧退出布局：另一侧单面板退化占满（同"只有一侧"的几何），手柄随之消失。
+  void set_second_hidden(bool hidden);
+  [[nodiscard]] auto second_hidden() const noexcept -> bool { return second_hidden_; }
+  void set_first_hidden(bool hidden);
+  [[nodiscard]] auto first_hidden() const noexcept -> bool { return first_hidden_; }
+
   /// 比例变化回调（拖拽过程中逐次触发，与 Slider 同口径）。
   std::function<void(float)> on_change{};
 
@@ -117,6 +128,8 @@ class SplitView : public Element {
   float step_{0.05f};
   float handle_size_{8.0f};
   bool dragging_{false};
+  bool first_hidden_{false};
+  bool second_hidden_{false};
   /// 拖拽起点的「指针主轴坐标 - 手柄中心」：拖拽时保持抓取点相对位置（不跳变）。
   float grab_offset_{0.0f};
 };

@@ -90,10 +90,15 @@ class BandPort final : public st::ui::TextPort {
   }
 };
 
-/// 第一行文字的绘制起点 y（取 y 最小的那条 draw 记录）。
-[[nodiscard]] auto first_text_origin_y(const BandPort& port) -> float {
+/// 第一行文字的绘制起点 y（取 **输出区内** y 最小的那条 draw 记录）。
+/// 下限过滤：标签栏也用同一个端口画标题（y 在输出区上方），
+/// 不滤会把标签文本当成"终端第一行"（面板化后引入，差值 -28px 的来源）。
+[[nodiscard]] auto first_text_origin_y(const BandPort& port, float y_min) -> float {
   float best = 1.0e9f;
-  for (const auto& d : port.draws) best = std::min(best, d.y);
+  for (const auto& d : port.draws) {
+    if (d.y < y_min) continue;
+    best = std::min(best, d.y);
+  }
   return best;
 }
 
@@ -132,7 +137,7 @@ ST_TEST(terminal_text_origin_y_equals_line_top) {
   }
   ST_REQUIRE(!port.draws.empty());
 
-  const float text_y = first_text_origin_y(port);
+  const float text_y = first_text_origin_y(port, terminal->output_rect().y);
   // 行顶（组件内 `origin_y = output_rect_.y + 4`）。
   const float line_top = terminal->output_rect().y + 4.0f;
   ST_CHECK_NEAR(text_y, line_top, 0.5f);
@@ -182,7 +187,7 @@ ST_TEST(terminal_cursor_block_starts_at_same_y_as_text) {
 
   // 光标行 = 屏幕光标行；该行文字的 draw.y（同一行顶口径）
   const float cell_h = std::stof(rect.substr(rect.rfind(',') + 1));
-  const float text_y = first_text_origin_y(port);
+  const float text_y = first_text_origin_y(port, terminal->output_rect().y);
   // 文字第一行（row 0）与光标若不同行，按行高换算到同一行再比。
   const auto* screen = terminal->screen(0);
   ST_REQUIRE(screen != nullptr);

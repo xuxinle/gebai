@@ -396,6 +396,10 @@ auto UiRoot::dispatch_key_into(Element* root, Event& event) -> bool {
   //    `on_submit` 根本没跑；查找条（尾部也有「×」）同理。
   //    这不是某个组件的问题：浮层的按键必须先交给**焦点元素**。
   if (root == nullptr) return false;
+  // **不可见子树不接键**：焦点元素随面板隐藏后（如收起的终端），它的 bounds
+  // 还停在上一帧的位置——不拦的话，隐藏面板里的组件会继续吃键盘
+  //（实测风险：收起终端后按快捷键，先被隐藏的 Terminal 翻成字节流）。
+  if (!root->visible()) return false;
   const RenderContext context = render_context();
   if (root->on_event(context, event)) return true;
   if (focused_ != nullptr) {

@@ -52,6 +52,7 @@
 namespace st::ui {
 
 class ScrollView;
+class ScrollBar;
 class Tabs;
 class Text;
 
@@ -126,6 +127,11 @@ class Terminal : public Element {
   [[nodiscard]] auto type() const noexcept -> std::string_view override { return "Terminal"; }
   [[nodiscard]] auto role() const noexcept -> Role override { return Role::Code; }
 
+  /// 内部件（标签条/滚动容器/回看滚动条）不归声明式管：它们排在调用方
+  /// 子元素之后，末尾裁剪只看 `content_child_count()`（与 `ScrollView` 同一条
+  /// 不变式，见 `Element::content_child_count` 的教训注释）。
+  [[nodiscard]] auto content_child_count() const noexcept -> std::size_t override;
+
   // ────────────────────────────────────────────────────────────────────────
   // 会话（标签）
   // ────────────────────────────────────────────────────────────────────────
@@ -133,11 +139,16 @@ class Terminal : public Element {
   /// 会话数（构造时自动建第一个，**至少为 1**）。
   [[nodiscard]] auto session_count() const noexcept -> std::size_t { return sessions_.size(); }
   /// 新建会话；返回序号。新会话继承当前会话的工作目录。
+  /// 默认标题用 **shell 短名**（如 `bash`/`pwsh`）——真实身份比序号有用；
+  /// shell 的 `OSC 0/2` 标题到达后经 `on_title_change` 覆盖它（也可显式传 title）。
   auto add_session(std::string title = {}) -> std::size_t;
   /// 关闭会话。**拒绝关闭有作业在跑的**（返回 false，理由经 `on_error`）。
   /// 关掉最后一个不留空面板（补一个全新的）；是否收起面板由宿主定。
   auto close_session(std::size_t index) -> bool;
   void set_active_session(std::size_t index);
+  /// 切到下一/上一会话（循环；只有一个会话时不动）。
+  /// 多标签的键盘导航（Ctrl+PageDown/PageUp、Ctrl+Tab）归这里，宿主只管绑键。
+  void cycle_session(bool forward);
   [[nodiscard]] auto active_session() const noexcept -> std::size_t { return active_; }
   [[nodiscard]] auto session(std::size_t index) -> TerminalSession*;
   [[nodiscard]] auto session(std::size_t index) const -> const TerminalSession*;
@@ -200,6 +211,14 @@ class Terminal : public Element {
   void send_stop();
   /// 清屏（PTY 模式清屏幕模型；行模式清滚回）。
   void clear();
+
+  /// **粘贴**：把宿主剪贴板的文本写进当前会话（PTY 模式 = 字节流；
+  /// 多行文本逐行送，`\n` 归一为 `\r`——shell 只认 CR）。无剪贴板/空内容时静默。
+  /// 键盘入口在 `on_event`（`Ctrl+Shift+V`，Windows Terminal 同款键位）。
+  void paste_clipboard();
+
+  /// 当前会话选中内容（PTY 模式回整屏纯文本；无屏幕为空串）。复制能力的基础。
+  [[nodiscard]] auto selected_text() const -> std::string;
 
   /// **当前会话**是否忙。⚠ 只回答"眼前这个标签"；问"还有没有活"用 `any_busy()`。
   ///
@@ -272,6 +291,31 @@ class Terminal : public Element {
   /// 标签栏可见（单会话场景可关；默认 true）。
   void set_tabs_visible(bool value) noexcept { tabs_visible_ = value; }
   [[nodiscard]] auto tabs_visible() const noexcept -> bool { return tabs_visible_; }
+  /// 标签栏「+」（复用 `Tabs` 的能力；默认 true）。装了 `on_session_add`
+  /// 才有点击效果。
+  void set_add_button_visible(bool value) noexcept;
+  [[nodiscard]] auto add_button_visible() const noexcept -> bool;
+  /// 「+」的回调（新建会话；不装则按钮不响应）。默认内部接 `add_session`，
+  /// 宿主可换成自己的逻辑（如先确认）。
+  std::function<void()> on_session_add{};
+
+  // —— 面板头动作钮（并入标签栏尾部；`Tabs` 的通用 trailing 机制）——
+  //
+  // 面板头（"终端 · 标题 + 动作 + 收起"独立一行）已删——那 32px 还给屏幕，
+  // 动作全部住进标签栏尾部（Windows Terminal / VSCode 同款形态）。
+  /// 挂一个动作钮（图标 + 回调；返回槽位）。默认内置三个（见构造）：
+  /// 中止（busy 时启用）/ 清屏 / 收起面板（后者接 `on_request_collapse`）。
+  auto add_header_action(std::string icon, std::string tooltip,
+                         std::function<void()> on_click, bool enabled = true) -> std::size_t;
+  /// 改动作钮可用态（槽位来自 `add_header_action`）。
+  void set_header_action_enabled(std::size_t slot, bool enabled);
+  /// 「+」的命中区/动作钮命中区（测试与自动化用；转发自 `Tabs`）。
+  [[nodiscard]] auto header_action_rect(std::size_t slot) const -> math::Rect;
+
+  /// 收起面板请求（内置"收起"钮触发）。不装则不建收起钮——面板收起是
+  /// **宿主的布局决策**（有没有 SplitView、收起后哪块长高，组件不知道）。
+  std::function<void()> on_request_collapse{};
+
   /// 字号**档位倍数**（实际字号 = 主题基准 × 本值）。
   void set_font_scale(float scale);
   [[nodiscard]] auto font_scale() const noexcept -> float { return font_scale_; }
@@ -382,6 +426,7 @@ class Terminal : public Element {
   std::string cwd_default_{};
   bool monospace_{true};
   bool tabs_visible_{true};
+  bool add_button_visible_{true};
   float font_scale_{1.0f};
   /// 主题基准字号（`apply_theme` 存下，渲染时 × `font_scale_`）。
   float base_font_size_{13.0f};
@@ -401,6 +446,24 @@ class Terminal : public Element {
   Tabs* tabs_{nullptr};
   ScrollView* view_{nullptr};
   Text* text_out_{nullptr};   ///< 行模式的输出（PTY 模式不建）
+  ScrollBar* scroll_bar_{nullptr};   ///< 回看滚动条（PTY 模式；复用框架组件）
+
+  // —— 面板头动作钮（标签栏尾部）——
+  /// "中止"钮槽位（-1 = 未装；忙时装、闲时拆——动作对当前会话才有意义）。
+  int stop_slot_{-1};
+  /// "收起"钮槽位（-1 = 未装；装了 `on_request_collapse` 才出现）。
+  int collapse_slot_{-1};
+  /// 同步动作钮集合（每帧布局前经 `sync_tabs` 调；幂等比对期望态）。
+  void sync_header_actions();
+
+  /// 回看滚动条的几何/交互：与滚轮路径同一状态（`scrollback_offset`/`user_scrolled`）。
+  /// 布局期把「屏幕+滚回」总行数×行高、视口高、偏移喂给 `scroll_bar_`；
+  /// 拖拽回调里反向映射回 `scrollback_offset`。
+  void sync_scrollbar(const TerminalSession& session, float line_h);
+  /// 「回到底部」浮钮矩形（贴右下角；贴底/备用屏/无滚回时不出现）。
+  [[nodiscard]] auto scroll_to_end_rect() const -> math::Rect;
+  /// 标签同步：会话表 → `Tabs`（稳定 key = 会话序号字符串；只在真变了时写）。
+  void sync_tabs();
 
   math::Rect tabs_rect_{};
   math::Rect output_rect_{};
@@ -408,6 +471,10 @@ class Terminal : public Element {
   /// 上次写给 `Text` 的文本（避免每帧无条件 `set_content`）。
   mutable std::string last_output_{};
   mutable std::vector<std::string> last_labels_{};
+  /// 标签同步的活跃 key 缓存（空 = 未同步过；避免每帧重建 tab 表）。
+  mutable std::string last_active_key_{};
+  /// 「回到底部」按钮的悬停态（高亮反馈）。
+  mutable bool hover_to_end_{false};
   /// 屏幕文本的渲染缓存（逐行，避免每帧重建整屏字符串）。
   mutable std::vector<std::string> screen_lines_{};
   /// 刷新实测格宽缓存（字体端口/字号/缩放变化时调用；`arrange` 里先于列数计算）。

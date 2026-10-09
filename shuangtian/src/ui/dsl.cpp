@@ -1871,11 +1871,14 @@ auto tabs(Composer& c, const std::vector<TabData>& items, std::size_t active,
     if (on_change) {
       tabs_element->on_change = [on_change](std::size_t index) { on_change(index); };
     }
-    if (on_close) {
+        if (on_close) {
       tabs_element->on_close = [tabs_element, on_close](std::size_t index) {
-        // 回调给「key」而不是索引：索引会随标签增删漂移，key 才是业务身份
+        // 回调给「key」而不是索引：索引会随标签增删漂移，key 才是业务身份。
+        // ⚠ 用 `tab_key` 而非 `tab_label`：「标签名 ≠ key」时两者分叉
+        //（如 `untitled-1.txt` vs `untitled-1`）——旧写法拿 label 回去，
+        // 调用方按 key 对账对不上，关闭静默落空。
         if (index < tabs_element->tab_count()) {
-          on_close(std::string(tabs_element->tab_label(index)));
+          on_close(std::string(tabs_element->tab_key(index)));
         }
       };
     }
