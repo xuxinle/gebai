@@ -1360,7 +1360,15 @@ void Canvas::draw_canvas(const Surface& source, math::Rect destination, DrawOpti
       }
       const float coverage = static_cast<float>(channel(blended, 0)) / 255.0f;
       if (coverage <= kCoverageEpsilon) continue;
-      row[x] = over_premul(row[x], blended);
+      // ⚠ **必须传 `options.blend`**（不能硬编码 `over_premul`）：这是图层合成的
+      // 唯一入口，而“每个图层带自己的混合模式”正是图像编辑器的核心能力。
+      // 实测（鈥月示例的第一版）：本行原先写死 SrcOver，于是九种混合模式里
+      // **八种退化成普通叠加**——界面上看不出异常（层不透明度生效、层顺序也对），
+      // 只有把合成结果导出后逐像素比对，才能发现“乘算结果等于直接覆盖”。
+      //
+      // `coverage` 取的是**源 alpha**（预乘缓冲的第 0 通道）：双线性插值后
+      // 它就是逐像素覆盖率，与 `draw_mask` 同一口径（那里也是这么传的）。
+      row[x] = blend_pixel_premul(row[x], blended, coverage, options.blend);
     }
   }
 }
