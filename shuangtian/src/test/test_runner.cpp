@@ -155,6 +155,7 @@ auto run_all(std::string_view filter) -> int {
   auto& registry = Registry::instance();
   int failed_cases = 0;
   int passed_cases = 0;
+  std::vector<std::string> failed_names;   // 失败用例名（结尾汇总 + 复现提示）
   int skipped_slow = 0;
   std::size_t ordinal = 0;   ///< 注册顺序下标（分片取模的口径，与 filter 无关）
   std::uint64_t checks_before = registry.check_count();
@@ -243,6 +244,12 @@ auto run_all(std::string_view filter) -> int {
       for (const auto& failure : registry.failures()) {
         std::fprintf(stdout, "        %s\n", failure.c_str());
       }
+      // **复现提示**：把"怎么单跑这一条"直接给出。
+      // 为什么值得（AI 迭代的核心动作就是"跑失败的那条"）：用例名长且带下划线，
+      // 手敲容易错；而且本工程默认 4 片并行，直接 `st test <名>` 的分片过滤
+      // 有过不命中的情况——给出准确形式省一次试错。
+      failed_names.push_back(item.name);
+      std::fprintf(stdout, "        \x1b[33m复现\x1b[0m st test %s\n", item.name.c_str());
     }
     {
       const std::scoped_lock lock(registry_mutex());
@@ -252,6 +259,15 @@ auto run_all(std::string_view filter) -> int {
   }
 
   const std::uint64_t checks = registry.check_count() - checks_before;
+  // **失败汇总**：跑了几百条时，失败散布在输出里（尤其分片并行时各片交错），
+  // 结尾集中列一遍，省得往上翻。
+  if (!failed_names.empty()) {
+    std::fprintf(stdout, "\n  \x1b[31m失败用例（%zu）\x1b[0m：\n", failed_names.size());
+    for (const auto& name : failed_names) {
+      std::fprintf(stdout, "    - %s\n", name.c_str());
+    }
+    std::fprintf(stdout, "  单条复现：st test <用例名>\n");
+  }
   std::fprintf(stdout, "\n  %d passed, %d failed, %llu assertions", passed_cases, failed_cases,
                static_cast<unsigned long long>(checks));
   if (skipped_slow > 0) {
