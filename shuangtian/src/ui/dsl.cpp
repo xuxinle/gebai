@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -235,6 +236,12 @@ struct Composer::Impl {
   // 多作用域（子组件作用域）在 M2 后续版本引入；先把依赖收集管道打通）。
   std::unordered_set<StateBase*> subscribed_states{};
   bool scope_dirty{true};         // 根作用域是否需要重跑
+  /// **正在跑 build 声明**（含作用域重跑）。构建期写 State 靠它判别（见 mark_state_dirty）。
+  bool building{false};
+  /// 构建期写过、待帧末统一标脏的 State（延迟落地，避免递归重组）。
+  std::vector<StateBase*> deferred_dirty_states{};
+  /// 已报过的构建期写入（同一条只报一次——否则每帧都写的组件会刷满日志）。
+  std::set<std::string> reported_build_writes{};
   std::vector<Element*> parent_stack{};   // 构建期父元素栈
   ReconcileStats last_stats{};
   // 已建元素追踪：v1 简化——根 Panel 持久，build 只更新既有元素（位置对齐）。
@@ -674,6 +681,11 @@ auto Composer::reconcile() -> ReconcileStats {
   if (!any_dirty) return impl_->last_stats;
   const auto start = std::chrono::steady_clock::now();
 
+  // **构建窗口开启**：这期间写 State 一律延迟（见 mark_state_dirty）——
+  // 立即标脏会在本函数的调用栈上递归重组。
+  impl_->building = true;
+  impl_->deferred_dirty_states.clear();
+
   // —— ① 根作用域（仅在根脏时跑）——
   if (impl_->scope_dirty) {
     tls_composer = this;
@@ -764,6 +776,28 @@ auto Composer::reconcile() -> ReconcileStats {
   // 界面永远停在旧值（这类假死最难查：代码看着对、日志也没错）。
   // 副作用体在 build 之外执行 ⇒ 它的 `State::value()` 读不会误登记依赖。
   impl_->last_stats.effects_run = static_cast<int>(run_pending_effects());
+
+  // **构建窗口关闭 + 延迟脏落地**：构建期写过的 State 在这里才标脏——
+  // 它们是"这一帧的写入"，下一帧生效（声明式本来就承诺"下一帧可见"），
+  // 但不再在 reconcile 栈上重入。
+  impl_->building = false;
+  if (!impl_->deferred_dirty_states.empty()) {
+    const auto pending = std::move(impl_->deferred_dirty_states);
+    impl_->deferred_dirty_states.clear();
+    for (StateBase* state : pending) {
+      if (state != nullptr) mark_state_dirty(state);
+    }
+    // **诊断输出**：这类写法应当被看见，但**同一条只报一次**——
+    // 每帧都写的组件会让日志被同一行刷满（实测 5 帧刷 5 行），
+    // 反而把"还有没有别的问题"淹掉。去重键是描述本身（含 State 地址）。
+    for (const auto& write : impl_->last_stats.build_time_state_writes) {
+      if (impl_->reported_build_writes.count(write) > 0) continue;
+      impl_->reported_build_writes.insert(write);
+      st::eprint("[dsl] 构建期写入 State：{}（已延迟到帧末落地；"
+                 "建议移到事件回调/effect——构建中改状态会触发递归重组）",
+                 write);
+    }
+  }
   return impl_->last_stats;
 }
 
@@ -964,6 +998,39 @@ void Composer::notify_state_written(StateBase* state) {
 
 void Composer::mark_state_dirty(StateBase* state) {
   if (!impl_->mounted) return;
+  // ⓪ **构建期写入**：不能立即标脏——那会在 reconcile 栈上触发递归重组
+  //（`notify_state_written` 判 `tls_composer == this` 时走到这里）。
+  //
+  // 为什么不崩而是延迟：递归重组的后果是"树被拆到一半又被重跑"——画面错乱、
+  // 状态丢失、乃至悬垂指针崩溃（本会话实测：切标签 SIGSEGV）。延迟到帧末
+  // **语义上等价**（下一帧可见，本来就是声明式的承诺），但不再重入。
+  // 同时记进诊断：这类写法应当被看见、被改掉，而不是靠"碰巧没崩"。
+  if (impl_->building) {
+    // 描述：当前正在声明的元素（最接近"这行代码在构建谁"）+ State 地址。
+    // 拿不到 C++ 变量名（无反射），但这个组合足以把范围缩到"某个组件的某个状态"。
+    // ⚠ **不要解引用 `current_parent()`**：mount/首帧时父栈里可能还是旧树的指针
+    //（或即将被替换的节点）——实测崩溃在这里。诊断输出**自己不能成为崩溃源**，
+    // 所以只用"一定安全"的信息：作用域深度 + State 地址 + 重组序号。
+    // 深度足以把范围缩到"哪一层的哪个 State"（配合 ST_TRACE_STATE 的写入栈更准）。
+    const std::size_t depth = impl_->parent_stack.size();
+    char description[192];
+    const int written = std::snprintf(
+        description, sizeof(description), "深度 %zu 的声明处、State@%p（第 %d 次重组）",
+        depth, static_cast<const void*>(state), impl_->last_stats.scopes_rerun + 1);
+    const std::string text = written > 0 ? std::string(description) : std::string("State");
+    if (std::find(impl_->last_stats.build_time_state_writes.begin(),
+                  impl_->last_stats.build_time_state_writes.end(),
+                  text) != impl_->last_stats.build_time_state_writes.end()) {
+      return;   // 同一处重复写只记一次（每帧都写会很吵）
+    }
+    impl_->last_stats.build_time_state_writes.push_back(text);
+    if (impl_->deferred_dirty_states.end() ==
+        std::find(impl_->deferred_dirty_states.begin(), impl_->deferred_dirty_states.end(),
+                  state)) {
+      impl_->deferred_dirty_states.push_back(state);
+    }
+    return;
+  }
   // ① 根作用域订阅了它：整根重跑
   if (impl_->subscribed_states.count(state) > 0) {
     impl_->scope_dirty = true;

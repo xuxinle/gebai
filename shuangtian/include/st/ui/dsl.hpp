@@ -259,6 +259,18 @@ struct ReconcileStats {
   /// **看不出来**（行数、文案都对），只有操作性判断（“点第三条却改了第一条”）能暴露。
   /// 有了这个计数，至少能在测试与诊断里一眼看到“你的 key 重了”。
   std::vector<std::string> key_collisions{};
+  /// **构建期写入的 State**（去重后的可读描述，诊断用）。
+  ///
+  /// 为什么值得单独统计：在 build/声明函数里写 State 会**在重组栈上再触发重组**
+  /// （`notify_state_written` 判 `tls_composer == this` → 立即 `mark_state_dirty`
+  /// → 递归 reconcile）。它的表现极难猜：可能是"某次点击后 SIGSEGV"、
+  /// "状态偶尔丢失"、"同一次重组跑两遍把树拆了"——而**栈上看不到调用者是自己**。
+  /// 本会话实测过一次：在 `custom<Tabs>` 的构建 lambda 里 `state.set(...)`
+  /// 导致切标签崩溃，排查绕了三轮（根因是"注释里写不要这么做、代码里做了"）。
+  ///
+  /// 现在：构建期写入不再立即标脏（帧末统一落地），并把写入点记在这里 + 打一条
+  /// 结构化诊断——从"神秘崩溃"变成"一行说清哪次重组、写了什么"。
+  std::vector<std::string> build_time_state_writes{};
   int properties_applied{0};  ///< 经 apply_properties 落地的属性数
   int effects_run{0};         ///< 本次执行的 effect 数（依赖变化的）
   bool budget_exceeded{false};///< 预算耗尽（剩余作用域顺延）
