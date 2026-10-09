@@ -519,8 +519,10 @@ struct StreamHandle::Impl {
 #if defined(_WIN32)
   Handle process{};
   Handle pipe{};        // 读端（stdout+stderr 合并）
+  Handle stdin_pipe{};  // 写端（子进程的 stdin；双向通信用）
 #else
   int read_fd{-1};
+  int write_fd{-1};     // 写端（子进程的 stdin；双向通信用）
   int child{-1};
 #endif
   std::string pending{};   // 已读未成行的字节
@@ -555,13 +557,22 @@ void StreamHandle::open(std::string_view program, const std::vector<std::string>
   impl_->pipe.reset(raw_read);
   Handle write_handle(raw_write);
   (void)::SetHandleInformation(impl_->pipe.get(), HANDLE_FLAG_INHERIT, 0);
+  // stdin 管道（双向通信：LSP 写请求进去）。读端给子进程、写端留在父进程。
+  HANDLE in_read = nullptr;
+  HANDLE in_write = nullptr;
+  if (::CreatePipe(&in_read, &in_write, &attributes, 0) != 0) {
+    (void)::SetHandleInformation(in_write, HANDLE_FLAG_INHERIT, 0);
+    impl_->stdin_pipe.reset(in_write);
+  } else {
+    in_read = nullptr;   // 建失败：退回继承父进程 stdin（与 POSIX 同一降级）
+  }
   std::wstring command_line = build_command_line(program_text, args);
   STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
   startup.dwFlags = STARTF_USESTDHANDLES;
   startup.hStdOutput = write_handle.get();
   startup.hStdError = write_handle.get();
-  startup.hStdInput = ::GetStdHandle(STD_INPUT_HANDLE);
+  startup.hStdInput = in_read != nullptr ? in_read : ::GetStdHandle(STD_INPUT_HANDLE);
   PROCESS_INFORMATION child{};
   const std::wstring working_directory = to_wide(std::string(cwd));
   const BOOL created = ::CreateProcessW(
@@ -569,6 +580,7 @@ void StreamHandle::open(std::string_view program, const std::vector<std::string>
       working_directory.empty() ? nullptr : working_directory.c_str(), &startup, &child);
   const DWORD create_error = ::GetLastError();
   write_handle.reset(nullptr);   // 父进程立刻关写端：子进程退出后读端才 EOF
+  if (in_read != nullptr) (void)::CloseHandle(in_read);   // 子进程已持有副本
   if (created == 0) {
     error_ = std::format("无法启动 '{}': {}", program_text, system_message(create_error));
     impl_.reset();
@@ -585,10 +597,20 @@ void StreamHandle::open(std::string_view program, const std::vector<std::string>
   }
   impl_->read_fd = fds[0];
   const int write_fd = fds[1];
+  // stdin 管道（双向通信：LSP 写请求进去）——不建时子进程继承父进程 stdin
+  // （终端场景的行为，保持向后兼容）。
+  int in_fds[2] = {-1, -1};
+  const bool has_stdin_pipe = ::pipe(in_fds) == 0;
+  if (has_stdin_pipe) impl_->write_fd = in_fds[1];
   posix_spawn_file_actions_t actions;
   posix_spawn_file_actions_init(&actions);
   posix_spawn_file_actions_adddup2(&actions, write_fd, STDOUT_FILENO);
   posix_spawn_file_actions_adddup2(&actions, write_fd, STDERR_FILENO);
+  if (has_stdin_pipe) {
+    posix_spawn_file_actions_adddup2(&actions, in_fds[0], STDIN_FILENO);
+    posix_spawn_file_actions_addclose(&actions, in_fds[0]);
+    posix_spawn_file_actions_addclose(&actions, in_fds[1]);
+  }
   posix_spawn_file_actions_addclose(&actions, fds[0]);
   posix_spawn_file_actions_addclose(&actions, fds[1]);
   if (!cwd.empty()) posix_spawn_file_actions_addchdir_np(&actions, std::string(cwd).c_str());
@@ -605,8 +627,11 @@ void StreamHandle::open(std::string_view program, const std::vector<std::string>
       posix_spawnp(&child, program_text.c_str(), &actions, nullptr, argv.data(), environ);
   posix_spawn_file_actions_destroy(&actions);
   (void)::close(write_fd);
+  if (has_stdin_pipe) (void)::close(in_fds[0]);   // 父进程不读自己的 stdin 写端
   if (spawn_result != 0) {
     (void)::close(impl_->read_fd);
+    if (impl_->write_fd >= 0) (void)::close(impl_->write_fd);
+    impl_->write_fd = -1;
     error_ = std::format("无法启动 '{}': {}", program_text, std::strerror(spawn_result));
     impl_.reset();
     return;
@@ -655,6 +680,66 @@ auto StreamHandle::read_line(std::string& out) -> bool {
     return true;
   }
   return false;
+}
+
+auto StreamHandle::write(std::string_view data) -> bool {
+  if (!impl_ || data.empty()) return impl_ != nullptr;
+#if defined(_WIN32)
+  if (impl_->stdin_pipe.get() == nullptr) return false;
+  std::size_t offset = 0;
+  while (offset < data.size()) {
+    DWORD written = 0;
+    const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(data.size() - offset, 64U * 1024U));
+    if (::WriteFile(impl_->stdin_pipe.get(), data.data() + offset, chunk, &written, nullptr) == 0 ||
+        written == 0) {
+      return false;   // 管道断开（子进程死了）——调用方应如实上报
+    }
+    offset += written;
+  }
+  return true;
+#else
+  if (impl_->write_fd < 0) return false;
+  std::size_t offset = 0;
+  while (offset < data.size()) {
+    // ⚠ **写管道必须屏蔽 SIGPIPE**：子进程已退出时向无读者的管道写会**直接杀进程**
+    //（默认动作）。这不是理论风险：LSP server 崩溃后 IDE 继续发请求 = 整个编辑器
+    // 突然消失（实测：测试进程 exit=141 = 128+SIGPIPE，汇总行都没来得及打）。
+    // 做法：写前把 SIGPIPE 置 IGN，写后恢复原处置（只在**非默认**时恢复，避免
+    // 频繁 syscall；`MSG_NOSIGNAL` 只能用于 socket，普通管道不适用）。
+    const auto previous = ::signal(SIGPIPE, SIG_IGN);
+    const auto count = ::write(impl_->write_fd, data.data() + offset, data.size() - offset);
+    const int saved_errno = errno;
+    if (previous != SIG_IGN) (void)::signal(SIGPIPE, previous);
+    if (count < 0) {
+      if (saved_errno == EINTR) continue;
+      return false;   // 管道断开（EPIPE）或其它写错：如实返回，不静默
+    }
+    if (count == 0) return false;
+    offset += static_cast<std::size_t>(count);
+  }
+  return true;
+#endif
+}
+
+void StreamHandle::close_write() {
+  if (!impl_) return;
+#if defined(_WIN32)
+  impl_->stdin_pipe.reset(nullptr);
+#else
+  if (impl_->write_fd >= 0) {
+    (void)::close(impl_->write_fd);
+    impl_->write_fd = -1;
+  }
+#endif
+}
+
+auto StreamHandle::can_write() const noexcept -> bool {
+  if (!impl_) return false;
+#if defined(_WIN32)
+  return impl_->stdin_pipe.get() != nullptr;
+#else
+  return impl_->write_fd >= 0;
+#endif
 }
 
 auto StreamHandle::finish() -> int {

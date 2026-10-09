@@ -72,6 +72,23 @@ struct RunResult {
     /// **会阻塞**——这是给工作线程用的，不要在 GUI 主线里调。
     [[nodiscard]] auto read_line(std::string& out) -> bool;
 
+    /// 向子进程 stdin 写入（**双向通信**：LSP 的语言服务器靠它接收请求）。
+    ///
+    /// 为何与 `read_line` 分在两个方向：终端场景只用读（输入经 PTY），而 LSP
+    /// 是**同一对管道上双向跑**（请求写进去、响应读出来）。写端在 `open` 时建好、
+    /// 持有到 `close_write()`（发完消息不要关——关了 server 会以为客户端跑了）。
+    /// 返回 false = 写失败（子进程已死/管道断开），调用方应如实上报，不静默。
+    ///
+    /// 本函数**不附加锁**：调用方自己保证“同一时刻只有一个写者”（LSP 客户端
+    /// 用一个发送队列串行化，见 `st/lsp/client`）。
+    [[nodiscard]] auto write(std::string_view data) -> bool;
+
+    /// 关闭 stdin（只在“不再发任何消息”时调）。
+    void close_write();
+
+    /// stdin 是否可用（未 open / 已关 → false）。
+    [[nodiscard]] auto can_write() const noexcept -> bool;
+
     /// 等待退出并回收资源；返回退出码（异常终止返回 128+signal）。
     [[nodiscard]] auto finish() -> int;
 
