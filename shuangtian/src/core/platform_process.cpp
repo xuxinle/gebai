@@ -28,6 +28,7 @@
 #include <csignal>
 #include <fcntl.h>
 #include <poll.h>
+#include <sys/socket.h>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -623,8 +624,18 @@ void StreamHandle::open(std::string_view program, const std::vector<std::string>
   for (auto& item : storage) argv.push_back(item.data());
   argv.push_back(nullptr);
   pid_t child = -1;
+  // **让子进程自成进程组**（`SETPGROUP` + pgid 0）：这样 `terminate()` 的
+  // `kill(-pid)` 能一次带走整组（含它 spawn 的孙进程）。
+  // 为什么需要：语言服务器/终端命令常会再起子进程（索引器、`sh -c "cmd"`），
+  // 只杀直接子进程时孙进程活着并**持有管道写端**——读线程永远等不到 EOF，
+  // 表现是"点了停止没反应"（实测：`sh -c "read; sleep 30"` 拖满 30 秒）。
+  posix_spawnattr_t attributes;
+  posix_spawnattr_init(&attributes);
+  (void)posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP);
+  (void)posix_spawnattr_setpgroup(&attributes, 0);   // 0 = 以子进程 pid 建新组
   const int spawn_result =
-      posix_spawnp(&child, program_text.c_str(), &actions, nullptr, argv.data(), environ);
+      posix_spawnp(&child, program_text.c_str(), &actions, &attributes, argv.data(), environ);
+  posix_spawnattr_destroy(&attributes);
   posix_spawn_file_actions_destroy(&actions);
   (void)::close(write_fd);
   if (has_stdin_pipe) (void)::close(in_fds[0]);   // 父进程不读自己的 stdin 写端
@@ -680,6 +691,33 @@ auto StreamHandle::read_line(std::string& out) -> bool {
     return true;
   }
   return false;
+}
+
+auto StreamHandle::read_some(char* buffer, std::size_t capacity) -> std::size_t {
+  if (!impl_ || buffer == nullptr || capacity == 0) return 0;
+  // 已有缓冲字节先交出去（与 `read_line` 共用 `pending`：两者混用也正确）。
+  if (!impl_->pending.empty()) {
+    const std::size_t take = std::min(capacity, impl_->pending.size());
+    std::copy_n(impl_->pending.data(), take, buffer);
+    impl_->pending.erase(0, take);
+    return take;
+  }
+  while (true) {
+#if defined(_WIN32)
+    DWORD read = 0;
+    if (::ReadFile(impl_->pipe.get(), buffer, static_cast<DWORD>(capacity), &read, nullptr) == 0) {
+      return 0;
+    }
+    return static_cast<std::size_t>(read);
+#else
+    const auto count = ::read(impl_->read_fd, buffer, capacity);
+    if (count < 0) {
+      if (errno == EINTR) continue;
+      return 0;
+    }
+    return static_cast<std::size_t>(count);
+#endif
+  }
 }
 
 auto StreamHandle::write(std::string_view data) -> bool {
@@ -744,6 +782,8 @@ auto StreamHandle::can_write() const noexcept -> bool {
 
 auto StreamHandle::finish() -> int {
   if (!impl_) return -1;
+  // `terminate()` 可能已经回收过（`finished` 置位）——那时 `child` 已是 -1，
+  // 再 `waitpid` 会拿到 ECHILD 并写坏 exit_code（实测：停止路径拿到错误的退出码）。
   if (!impl_->finished) {
 #if defined(_WIN32)
     (void)::WaitForSingleObject(impl_->process.get(), INFINITE);
@@ -751,6 +791,10 @@ auto StreamHandle::finish() -> int {
     (void)::GetExitCodeProcess(impl_->process.get(), &code);
     impl_->exit_code = static_cast<int>(code);
 #else
+    if (impl_->child <= 0) {   // 已被 terminate 回收
+      impl_->finished = true;
+      return impl_->exit_code;
+    }
     int status = 0;
     while (::waitpid(impl_->child, &status, 0) < 0 && errno == EINTR) {
     }
@@ -765,8 +809,37 @@ void StreamHandle::terminate() {
   if (!impl_) return;
 #if defined(_WIN32)
   (void)::TerminateProcess(impl_->process.get(), 1);
+  // 唤醒阻塞中的读：关读端（Windows 上 `CancelIoEx` 亦可，关句柄更简单且够用）。
+  impl_->pipe.reset(nullptr);
 #else
-  if (impl_->child > 0) (void)::kill(impl_->child, SIGTERM);
+  // ⚠ **先断流，再杀进程**（顺序不能反）：
+  //
+  // 1) `shutdown(SHUT_RD)` 让阻塞在 `read()` 的线程立刻返回 0。不用 `close`——
+  //    close 会释放 fd 号，另一线程正读同一 fd 时可能读到刚被复用的新 fd
+  //    （经典 use-after-close）。shutdown 只断流、不回收 fd，安全。
+  // 2) 杀**进程组**而不是单进程：`sh -c "sleep 30"` 这类会把命令交给孙进程，
+  //    只 SIGTERM 直接子进程时孙进程仍活着——实测"点了停止，界面卡 30 秒"。
+  //    用 `kill(-pid)`（负号 = 进程组）把整组带走。
+  // 3) SIGTERM → 有界等 200ms → SIGKILL：给 server 一点收尾时间（写日志、删临时文件），
+  //    但不为它无限等——"停止"按钮必须真的停。
+  if (impl_->read_fd >= 0) (void)::shutdown(impl_->read_fd, SHUT_RD);
+  if (impl_->child > 0) {
+    (void)::kill(-impl_->child, SIGTERM);
+    (void)::kill(impl_->child, SIGTERM);
+    for (int attempt = 0; attempt < 20; ++attempt) {
+      int status = 0;
+      const pid_t done = ::waitpid(impl_->child, &status, WNOHANG);
+      if (done == impl_->child) {
+        impl_->child = -1;   // 已回收：finish() 不再等
+        impl_->finished = true;
+        impl_->exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+        return;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    (void)::kill(-impl_->child, SIGKILL);
+    (void)::kill(impl_->child, SIGKILL);
+  }
 #endif
 }
 

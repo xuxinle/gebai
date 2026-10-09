@@ -72,6 +72,13 @@ struct RunResult {
     /// **会阻塞**——这是给工作线程用的，不要在 GUI 主线里调。
     [[nodiscard]] auto read_line(std::string& out) -> bool;
 
+    /// 读一块原始字节（返回实读数；0 = EOF）。**会阻塞**（同 `read_line`）。
+    ///
+    /// 为何 `read_line` 不够：LSP 消息**不是按行的**（JSON 体内可能有换行），
+    /// 而且帧头已明确给出字节数——按行读会把一条消息切碎再拼。需要"按已知长度
+    /// 精确读取"的协议（LSP、HTTP chunk、任何带长度前缀的帧）都得用这个。
+    [[nodiscard]] auto read_some(char* buffer, std::size_t capacity) -> std::size_t;
+
     /// 向子进程 stdin 写入（**双向通信**：LSP 的语言服务器靠它接收请求）。
     ///
     /// 为何与 `read_line` 分在两个方向：终端场景只用读（输入经 PTY），而 LSP

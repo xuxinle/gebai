@@ -5,6 +5,7 @@
 /// 而非 mock：mock 能证明“我以为对”，真进程能证明“确实对”。
 
 #include <chrono>
+#include <iostream>
 #include <cstddef>
 #include <string>
 #include <thread>
@@ -266,4 +267,36 @@ ST_TEST(stream_handle_write_works_without_stdin_pipe_regression) {
   ST_REQUIRE(echo.read_line(line));
   ST_CHECK_EQ(line, std::string("terminal-path"));
   ST_CHECK_EQ(echo.finish(), 0);
+}
+
+ST_TEST(lsp_result_null_is_not_an_error) {
+  // `result: null` 是**合法响应**（clangd 对无 hover 信息的位置就这么回），
+  // 不能当错误——否则调用方会一直等一个"成功"（实测：hover 测试等满 30s）。
+  st::lsp::FrameReader reader;
+  const std::string body = R"({"jsonrpc":"2.0","id":2,"result":null})";
+  reader.feed("Content-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body);
+  const auto message = reader.next();
+  ST_REQUIRE(message.has_value());
+  ST_CHECK(message->is_response());
+  ST_CHECK(!message->is_error);
+  ST_CHECK(message->body.is_null());
+}
+
+ST_TEST(lsp_encode_hover_request_shape) {
+  // 抓一个具体请求的字节形态（起 hover 的字段拼装是否与协议一致）。
+  st::Json params = st::Json::object();
+  st::Json item = st::Json::object();
+  item["uri"] = "file:///tmp/main.cpp";
+  st::Json position = st::Json::object();
+  position["line"] = 2;
+  position["character"] = 3;
+  item["position"] = std::move(position);
+  params["textDocument"] = std::move(item);
+  const auto message = st::lsp::make_request(2, "textDocument/hover", std::move(params));
+  const std::string encoded = st::lsp::encode_message(message);
+  const std::string body = encoded.substr(encoded.find("\r\n\r\n") + 4);
+  std::cout << "[wire] " << body << '\n';
+  // 键序按插入序（ordered_json）：uri 先插 → position 后插。
+  ST_CHECK(body.find("\"uri\":\"file:///tmp/main.cpp\",\"position\":{\"line\":2,\"character\":3}") != std::string::npos);
+  ST_CHECK(body.find("\"method\":\"textDocument/hover\"") != std::string::npos);
 }
