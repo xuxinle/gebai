@@ -138,7 +138,14 @@ auto Input::get_property(std::string_view name) const -> std::optional<std::stri
 
 auto Input::set_property(std::string_view name, std::string_view value) -> bool {
   if (name == "value" || name == "text") {
+    // 属性面写入（多来自控制通道/自动化）**通知** `on_change`：宿主把它当
+    // "文本变了"的唯一钩子——静默改会出现"get 读回来是新文本、宿主状态里还是
+    // 旧的"（实测：gbcode 提交框 `set text` 成功、提交时报"提交信息为空"）。
+    // C++ API `set_text`（应用内部逻辑，如 clear 动作）仍不通知——
+    // "程序化写入不冒充用户编辑"的旧语义保留（见 ui_input_invoke_clear 测试）。
+    const std::string before = text_;
     set_text(std::string(value));
+    if (text_ != before && on_change) on_change(text_);
     return true;
   }
   if (name == "placeholder") {
