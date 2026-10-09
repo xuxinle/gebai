@@ -168,6 +168,18 @@ class CodeEditor : public Element {
       -> const DiagnosticMark*;
   /// 当前悬浮提示的诊断（宿主在鼠标停留时设；nullptr = 不显示提示）。
   void set_hover_diagnostic(const DiagnosticMark* mark);
+
+  // —— 悬停信息（LSP 的 hover；与诊断提示共用同一套定位/绘制）——
+  //
+  // 为什么让编辑器画而不是宿主另起浮层：**定位要贴光标行**，而那需要 gutter 宽、
+  // 滚动偏移、行高——只有编辑器知道（与 `caret_screen_rect` 同一理由）。
+  // 内容与来源归宿主（它才认识 LSP），编辑器只负责"把这段文本显示在光标下方"。
+  /// 设置悬停信息（空文本 = 清除）。
+  void set_hover_info(std::string text, std::size_t line);
+  void clear_hover_info() { set_hover_info(std::string{}, 0); }
+  [[nodiscard]] auto hover_info() const noexcept -> const std::string& { return hover_info_; }
+  /// 悬停信息所在行（0 基；信息非空时有效）。
+  [[nodiscard]] auto hover_info_line() const noexcept -> std::size_t { return hover_info_line_; }
   [[nodiscard]] auto hover_diagnostic() const noexcept -> const DiagnosticMark* {
     return hover_diagnostic_index_.has_value() ? &diagnostics_[*hover_diagnostic_index_] : nullptr;
   }
@@ -322,6 +334,18 @@ class CodeEditor : public Element {
   /// 或者放弃组件自带的鼠标行为。这个回调把“右键点了这里”作为一件事告诉宿主，
   /// 同时**不动光标**（右键不改选择，与主流编辑器一致）。
   std::function<void(math::Point)> on_context_menu{};
+
+  /// **悬停词变化**（LSP hover 用）：鼠标停在某个标识符上时回调
+  /// `(字节偏移 begin, end)`；移开/离开编辑器回调 `(0, 0)`。
+  ///
+  /// 为什么是"词级"而不是"行级"：悬停信息是**符号语义**（"这个类型是什么"、
+  /// "这个函数的签名"），server 需要的是词的位置——行级回调会让宿主自己再做
+  /// 一次取词（口径可能不一致：编辑器按 UTF-8 字节，宿主若按字符数就会错位）。
+  /// 组件已有 `index_at_point`/`word_bounds`，取词在这里做是**同一把尺子**。
+  ///
+  /// 防抖归宿主（悬停提示不该跟随每一次像素移动闪跳；组件只报"词变了"，
+  /// 同一个词上移动不重复回调）。
+  std::function<void(std::size_t, std::size_t)> on_hover_word{};
 
   // —— Element 覆写 ——
 
@@ -488,8 +512,14 @@ class CodeEditor : public Element {
   std::vector<DiagnosticMark> diagnostics_{};
   /// 当前悬浮提示指向的诊断下标（用下标而非指针：`set_diagnostics` 后指针会悬垂）。
   std::optional<std::size_t> hover_diagnostic_index_{};
+  /// 悬停信息文本（LSP hover；空 = 不显示）与它所属的行。
+  std::string hover_info_{};
+  std::size_t hover_info_line_{0};
   /// 悬停行（鼠标所在行；-1 = 无）——行底纹用，不参与内容缓存。
   int hover_line_{-1};
+  /// 上次报给 `on_hover_word` 的词区间（0,0 = 无；同词不重复回调）。
+  std::size_t hover_word_begin_{0};
+  std::size_t hover_word_end_{0};
   /// 水平滚动条拖拽中（左键在滑块/轨道上按下后跟 move）。
   bool h_dragging_{false};
   /// 垂直滚动条拖拽中（同上，垂直方向）。

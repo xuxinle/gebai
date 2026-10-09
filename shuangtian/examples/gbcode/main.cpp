@@ -852,6 +852,7 @@ struct CodeEditorPage : Component {
     //（实测：请求 id 正常发出、clangd 也回了 100 项候选，弹层就是不出现）。
     // 正确写法：泵**总是执行**（它内部搬消息、派发回调），返回值只决定
     // 要不要刷新编辑器诊断。
+    pump_hover_word();
     const bool diagnostics_changed = lsp_.pump();
     // 待落地的跳转（跨文件）：编辑器实例在新文件装载后才就位，所以在这里补做。
     apply_pending_navigation_jump();
@@ -1769,6 +1770,12 @@ struct CodeEditorPage : Component {
         ed.on_cursor_change = [this] {
           on_cursor_moved();
           if (completion_open_.value()) update_completion_anchor();
+        };
+        // 悬停词变化 → 防抖后发 LSP hover（不做防抖的话每次像素移动都发请求，
+        // server 没那么快，旧响应未到新请求又出——提示会闪跳）。
+        ed.on_hover_word = [this](std::size_t begin, std::size_t end) {
+          hover_word_pending_ = {begin, end};
+          hover_word_changed_at_ = st::time::now_ms();
         };
         // 右键菜单走组件的一等回调（不是 `set_event_handler`——那个永远轮不到：
         // `CodeEditor::on_event` 对任何按钮的按下都返回 true）。
@@ -3264,10 +3271,17 @@ struct CodeEditorPage : Component {
     status_.set(std::format("找到 {} 处，已跳到第 1 处", locations.size()));
   }
 
-  /// 悬停响应：把文本存起来（编辑器右上角的提示框由 `hover_text_` 驱动）。
+  /// 悬停响应：显示到编辑器的信息层（贴光标行下方）。
   void on_hover_response(std::int64_t id, const std::optional<st::lsp::HoverInfo>& info) {
-    if (id != hover_request_) return;   // 旧响应丢弃
-    hover_text_ = info.has_value() ? info->text : std::string{};
+    if (id != hover_request_ && !hover_dropped_) return;   // 旧响应丢弃
+    if (editor == nullptr) return;
+    if (!info.has_value() || info->text.empty()) {
+      editor->clear_hover_info();
+      return;
+    }
+    // 位置换行号：优先用 server 给的 range，退回请求时记的行。
+    const std::size_t line = info->range.has_value() ? info->range->start.line : hover_word_line_;
+    editor->set_hover_info(info->text, line);
   }
 
   /// 大纲响应。
@@ -3507,6 +3521,29 @@ struct CodeEditorPage : Component {
     // 浮层内的输入框在下一帧才建好：置标记，让 `build_rename_dialog` 落地时聚焦。
   }
 
+
+  // —— 悬停信息（LSP hover）——
+
+  /// 防抖后的悬停处理（每帧调；停够 400ms 才发请求——移动中不闪跳）。
+  void pump_hover_word() {
+    if (hover_word_pending_.first == 0 && hover_word_pending_.second == 0) {
+      // 移开了：清提示（之前显示着的话）。
+      if (editor != nullptr && !editor->hover_info().empty()) editor->clear_hover_info();
+      hover_word_pending_ = {0, 0};
+      return;
+    }
+    if (st::time::now_ms() - hover_word_changed_at_ < 400) return;   // 还在移动
+    if (hover_word_pending_ == hover_word_sent_) return;             // 已请求过
+    hover_word_sent_ = hover_word_pending_;
+    hover_dropped_ = true;   // 请求期间词又变了 → 响应作废
+    std::string path;
+    st::lsp::Position position{};
+    if (!current_document(&path, &position)) return;
+    hover_word_line_ = static_cast<std::uint32_t>(position.line);
+    (void)lsp_.request_hover(path, static_cast<std::uint32_t>(position.line),
+                             static_cast<std::uint32_t>(position.character));
+  }
+
   /// 编辑区按键：补全交互（Enter 接受 / Esc 关闭 / 上下选择）优先于编辑器默认。
   /// 返回 true = 已消费。
   auto handle_completion_key(std::string_view key) -> bool {
@@ -3671,8 +3708,14 @@ struct CodeEditorPage : Component {
   // —— 导航（阶段 5）的运行时状态 ——
   /// 悬停请求 id（丢弃旧响应；鼠标移动会连发好几个）。
   std::int64_t hover_request_{0};
-  /// 悬停文本（空 = 不显示提示）。
-  std::string hover_text_{};
+  /// 悬停防抖：词区间（0,0 = 无）与变化时间戳。
+  std::pair<std::size_t, std::size_t> hover_word_pending_{0, 0};
+  std::pair<std::size_t, std::size_t> hover_word_sent_{0, 0};
+  std::int64_t hover_word_changed_at_{0};
+  /// 悬停请求时的行号（响应没给 range 时的兜底）。
+  std::uint32_t hover_word_line_{0};
+  /// 本次响应是否可显示（词已变时丢弃）。
+  bool hover_dropped_{false};
   /// 最近一次"跳到定义/引用"的多处结果（结果面板用）。
   std::vector<st::lsp::Location> locations_{};
   /// 当前文件的符号大纲。

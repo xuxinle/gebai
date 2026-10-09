@@ -1384,6 +1384,13 @@ auto CodeEditor::diagnostic_at_point(const RenderContext& context, math::Point p
   return diagnostic_at(index_at_point(context, point));
 }
 
+void CodeEditor::set_hover_info(std::string text, std::size_t line) {
+  if (text == hover_info_ && line == hover_info_line_) return;
+  hover_info_ = std::move(text);
+  hover_info_line_ = line;
+  mark_dirty();
+}
+
 void CodeEditor::set_hover_diagnostic(const DiagnosticMark* mark) {
   if (mark == nullptr) {
     if (hover_diagnostic_index_.has_value()) {
@@ -1658,23 +1665,34 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
   // 位置策略：贴着诊断所在行的**下方**（VSCode 同款）；下方空间不够就翻到上方。
   // 宽度按最长行排（上限视口 90%），高度按行数算——不做自动换行，
   // 因为诊断消息里的路径/符号名换行后会难读（宁可横向长一点）。
-  if (const DiagnosticMark* hovered = hover_diagnostic(); hovered != nullptr) {
+  // 两条来源共用一套画法与定位：诊断提示（鼠标停在波浪线上）优先，
+  // 否则显示 LSP 悬停信息（鼠标停在符号上）。**同时存在时诊断优先**——
+  // 它是"当前行有错"的强提示，而悬停信息是"这个符号是什么"的补充。
+  const DiagnosticMark* hovered_diagnostic = hover_diagnostic();
+  const bool show_info = hovered_diagnostic == nullptr && !hover_info_.empty();
+  if (hovered_diagnostic != nullptr || show_info) {
     const Metrics& metrics = context.theme.metrics();
-    const std::size_t line = line_of_index(hovered->begin);
+    const std::size_t line = hovered_diagnostic != nullptr
+                                 ? line_of_index(hovered_diagnostic->begin)
+                                 : hover_info_line_;
     const float row_top = origin_y + static_cast<float>(line) * height;
     const float box_pad = 8.0f;
     const float line_h = port.line_height(metrics.font_sm);
-    // 消息按 `\n` 拆行（server 有时给多行），外加来源前缀行。
+    // 消息按 `\n` 拆行（server 常给多行），外加来源前缀行。
     std::vector<std::string> lines;
-    if (!hovered->source.empty()) lines.push_back(hovered->source);
+    std::string source;
+    const std::string body =
+        hovered_diagnostic != nullptr ? hovered_diagnostic->message : hover_info_;
+    if (hovered_diagnostic != nullptr) source = hovered_diagnostic->source;
     std::size_t at = 0;
-    while (at <= hovered->message.size()) {
-      const std::size_t next = hovered->message.find('\n', at);
-      lines.push_back(hovered->message.substr(at, next == std::string::npos
-                                                      ? std::string::npos : next - at));
+    while (at <= body.size()) {
+      const std::size_t next = body.find('\n', at);
+      lines.push_back(
+          body.substr(at, next == std::string::npos ? std::string::npos : next - at));
       if (next == std::string::npos) break;
       at = next + 1;
     }
+    if (!source.empty()) lines.insert(lines.begin(), source);
     float box_width = 0.0f;
     for (const auto& text : lines) {
       box_width = std::max(box_width, port.measure_width(text, metrics.font_sm));
@@ -1689,8 +1707,11 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
       box_y = row_top - box_height - 2.0f;   // 下方不够：翻到上方
     }
     box_y = std::max(box_y, bounds_.y + 4.0f);
-    const math::Color ink = diagnostic_color(context.theme, hovered->severity, colors);
-    // 底 + 描边（描边用诊断色：一眼看出是错误还是警告）。
+    // 左侧色条：诊断用严重级别色；悬停信息用中性色（它不是"问题"）。
+    const math::Color ink =
+        hovered_diagnostic != nullptr
+            ? diagnostic_color(context.theme, hovered_diagnostic->severity, colors)
+            : colors.border_strong;
     canvas.fill_rect(math::Rect{box_x, box_y, box_width, box_height},
                      raster::Paint::solid(colors.surface_alt), metrics.radius_md);
     canvas.fill_rect(math::Rect{box_x, box_y, 3.0f, box_height}, raster::Paint::solid(ink),
@@ -1698,7 +1719,9 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
     float text_y = box_y + box_pad;
     for (const auto& text : lines) {
       port.draw(canvas, text, math::Point{box_x + box_pad, text_y}, metrics.font_sm,
-                text == hovered->source ? ink : colors.text, text::FontRole::Monospace);
+                (!source.empty() && text == source && hovered_diagnostic != nullptr) ? ink
+                                                                                   : colors.text,
+                text::FontRole::Monospace);
       text_y += line_h;
     }
   }
@@ -1831,6 +1854,24 @@ auto CodeEditor::on_event(const RenderContext& context, Event& event) -> bool {
       if (line != hover_line_) {
         hover_line_ = line;
         mark_dirty();
+      }
+      // 悬停词变化（LSP hover 的触发源）：同一个词内移动不重复回调
+      //（宿主据此做防抖/去抖，而不是自己再算一遍词边界——那会用另一把尺子）。
+      if (on_hover_word) {
+        if (line < 0) {
+          if (hover_word_begin_ != 0 || hover_word_end_ != 0) {
+            hover_word_begin_ = hover_word_end_ = 0;
+            on_hover_word(0, 0);
+          }
+        } else {
+          const std::size_t index = index_at_point(context, event.position);
+          const auto [begin, end] = word_bounds(index);
+          if (begin != hover_word_begin_ || end != hover_word_end_) {
+            hover_word_begin_ = begin;
+            hover_word_end_ = end;
+            on_hover_word(begin, end);
+          }
+        }
       }
       return false;
     }
@@ -2114,6 +2155,7 @@ auto CodeEditor::get_property(std::string_view name) const -> std::optional<std:
     }
     return std::to_string(errors);
   }
+  if (name == "hover_info") return hover_info_;
   if (name == "hover_diagnostic") {
     const DiagnosticMark* hovered = hover_diagnostic();
     return hovered != nullptr ? hovered->message : std::string{};
@@ -2309,7 +2351,8 @@ auto CodeEditor::property_names() const -> std::vector<std::string_view> {
           "tab_width", "indent_guides", "auto_pairs", "font_size", "font_scale", "scroll",
           "first_visible_line", "visible_lines", "goto_line", "find_needle", "find_matches",
           "find_active", "find_case", "find_word", "line_height", "text_offset", "caret_top",
-          "ink_height", "baseline", "diagnostics", "diagnostic_errors", "hover_diagnostic"};
+          "ink_height", "baseline", "diagnostics", "diagnostic_errors", "hover_diagnostic",
+          "hover_info"};
 }
 
 // —— 查找与替换 ——
