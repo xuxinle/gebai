@@ -905,6 +905,8 @@ struct LanguageFlags {
   ThreadPool pool(workers);
   std::mutex error_mutex;
   std::string first_error;
+  /// 本轮失败的全部源文件（去重后进失败汇总）。
+  std::vector<std::string> failed_sources;
   std::atomic<std::size_t> done{0};
 
   // 超大单元排到最后提交：小单元先跑满并发，大块头收尾时独占闸门
@@ -990,6 +992,7 @@ struct LanguageFlags {
                                  process_options);
       if (!result) {
         const std::scoped_lock lock(error_mutex);
+        failed_sources.push_back(unit->source);
         if (first_error.empty()) first_error = result.error().to_string();
         return;
       }
@@ -998,6 +1001,11 @@ struct LanguageFlags {
         (void)fs::remove_file(temporary_object);
         (void)fs::remove_file(temporary_depfile);
         const std::scoped_lock lock(error_mutex);
+        // **全部失败都收**（不只首个）：多单元并发编译时，一次错误常连带
+        // 污染若干文件（同一个头文件出错 → 所有引用者都失败）。只报首个会让
+        // 人以为"就一个文件有问题"，改完再跑一轮才发现还有别的——AI 迭代里
+        // 这一轮就是几分钟。这里收全，失败汇总时一次说清。
+        failed_sources.push_back(unit->source);
         if (first_error.empty()) {
           first_error = std::format("编译失败: {}\n{}{}", unit->source, result->stdout_text,
                                     result->stderr_text);
@@ -1033,7 +1041,42 @@ struct LanguageFlags {
   }
   pool.wait_idle();
 
-  if (!first_error.empty()) return unexpected(ErrorCode::Invalid, first_error);
+  if (!first_error.empty()) {
+    // —— 失败报告：首错（截断） + 失败清单 + 复现命令 ——
+    //
+    // 三段各自的理由：
+    // ① **首错截断**：并行编译时首个错误后面常跟几十行级联错误（同一个头文件
+    //    出错 → 所有引用者连锁），刷屏后真正要看的那几行被顶出视野。
+    //    取前 40 行足够看清"错在哪"，完整内容仍可由编辑器打开文件看。
+    // ② **失败清单**：只报首个会让人以为"就一个文件有问题"——改完再跑一轮
+    //    才发现还有别的。一次说清，省一轮往返（AI 迭代里一轮就是几分钟）。
+    // ③ **复现命令**：把"我该跑什么"直接给出，不用回忆参数（`--profile dev`
+    //    这类细节靠记忆最容易错）。
+    constexpr std::size_t kErrorHeadLines = 40;
+    std::string report = first_error;
+    std::size_t newline_count = 0;
+    for (std::size_t index = 0; index < report.size(); ++index) {
+      if (report[index] == '\n' && ++newline_count > kErrorHeadLines) {
+        report.resize(index);
+        report += std::format("\n  …（首错已截断至 {} 行；完整内容请看上面的文件）\n",
+                              kErrorHeadLines);
+        break;
+      }
+    }
+    std::vector<std::string> unique_failed = failed_sources;
+    std::ranges::sort(unique_failed);
+    unique_failed.erase(std::unique(unique_failed.begin(), unique_failed.end()),
+                        unique_failed.end());
+    if (unique_failed.size() > 1) {
+      report += std::format("\n本轮共 {} 个单元编译失败：\n", unique_failed.size());
+      for (const auto& source : unique_failed) {
+        report += std::format("  - {}\n", source);
+      }
+    }
+    // `manifest.name` 就是目标名（`st.pkg` 的 name；一份清单一个目标）。
+    report += std::format("\n复现：st build {} --profile {}\n", manifest.name, options.profile);
+    return unexpected(ErrorCode::Invalid, report);
+  }
   if (cache_hits > 0 || cache_stores.load() > 0) {
     log::info("对象缓存：命中 {} · 新写入 {}", cache_hits, cache_stores.load());
   }

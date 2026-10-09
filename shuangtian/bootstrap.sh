@@ -82,11 +82,47 @@ compile_one() {
   esac
 }
 export -f compile_one
-printf '%s\n' "${SOURCES[@]}" "${C_SOURCES[@]}" | xargs -P "$JOBS" -I% bash -c 'compile_one "$@"' _ %
+# ⚠ **xargs 会吞掉编译失败**（它只在"命令找不到/不可执行"时返回非零，编译错误不算）——
+# 于是 `set -e` 形同虚设：源码编不过时脚本照样往下走、链接旧的 .o、
+# 最后打印"完成"，留下一份**看起来成功但其实是旧版**的二进制。
+# 实测代价：改 lint 规则后 bootstrap 报"完成"，实际新规则根本没进去，排查绕了几轮
+#（与"崩溃只有信号名"是同一类问题：失败必须显式可见）。
+# **先清掉本轮的 .o**：否则"文件存在"里混着上一次成功编译的残留，
+# 下面的"缺哪些 .o"检查就永远通过（实测：故意造语法错误，bootstrap 仍报完成，
+# 因为旧的 lint.cpp.o 还在）。
+rm -f "$OBJDIR"/*.o
+# `|| true`：让 xargs 的退出码**不**直接终止脚本（`set -e`），
+# 好让下面那段"缺哪些 .o"的诊断跑完——它给出的信息比 xargs 的裸退出码有用得多
+#（哪些文件失败、旧产物已删、下一步怎么办）。
+printf '%s\n' "${SOURCES[@]}" "${C_SOURCES[@]}" | xargs -P "$JOBS" -I% bash -c 'compile_one "$@"' _ % || true
 
 OBJECTS=()
-for src in "${SOURCES[@]}"; do OBJECTS+=("$OBJDIR/$(echo "$src" | tr '/' '_').o"); done
-for src in "${C_SOURCES[@]}"; do OBJECTS+=("$OBJDIR/$(echo "$src" | tr '/' '_').o"); done
+MISSING=()
+for src in "${SOURCES[@]}"; do
+  obj="$OBJDIR/$(echo "$src" | tr '/' '_').o"
+  OBJECTS+=("$obj")
+  [ -f "$obj" ] || MISSING+=("$src")
+done
+for src in "${C_SOURCES[@]}"; do
+  obj="$OBJDIR/$(echo "$src" | tr '/' '_').o"
+  OBJECTS+=("$obj")
+  [ -f "$obj" ] || MISSING+=("$src")
+done
+# 产物的存在性就是编译成功的判据（失败的文件没有 .o）。
+if [ "${#MISSING[@]}" -gt 0 ]; then
+  {
+    echo ""
+    echo "[bootstrap] 失败：${#MISSING[@]} 个源文件没有产出目标文件（上面应已打印编译错误）"
+    printf '  - %s\n' "${MISSING[@]:0:10}"
+    [ "${#MISSING[@]}" -gt 10 ] && echo "  …（共 ${#MISSING[@]} 个）"
+    echo "[bootstrap] 提示：删除旧产物以免被误当新版本——"
+    echo "  rm -f build/bin/st"
+  } >&2
+  # 删掉旧产物：留着它会让后续 `st build` 用到旧版工具链，问题以别的方式再现
+  #（实测：旧 st 里的 lint 规则是上一版，改完看不到效果）。宁可没有，也不要错的。
+  rm -f build/bin/st
+  exit 1
+fi
 
 echo "[bootstrap] 链接 st ..."
 "$CXX" "${FLAGS[@]}" "${OBJECTS[@]}" -o build/bin/st -lpthread -ldl -lm
