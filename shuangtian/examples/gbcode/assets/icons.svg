@@ -16,15 +16,12 @@
     <circle cx="6" cy="18" r="3"/>
     <path d="M18 9 a9 9 0 0 1 -9 9"/>
   </symbol>
-  <!-- 「变更」视图图标：git-compare 形态（两个节点 + 上下连线）——
-       语义是"比对两处状态"（工作区 vs 暂存区 vs HEAD），与该视图做的事一致。
-       曾用 id="diff"，但 icons.svg 里没有这个符号 → 按钮渲染成空白
-       （实测：图标位置空着，看不出按钮存在）。图标名必须与 symbol id 对齐。 -->
+  <!-- 「变更」视图图标：横线 + 中间空心圆（IDEA 的 Commit 形态）。
+       与 src/ui/icon.cpp 内置表保持同一形状——**两套图标表，别只改一处**
+       （实测踩过：只改这里不生效，gbcode 用的是 C++ 内置表）。 -->
   <symbol id="diff" viewBox="0 0 24 24">
-    <circle cx="18" cy="18" r="3"/>
-    <circle cx="6" cy="6" r="3"/>
-    <path d="M13 6 h3 a2 2 0 0 1 2 2 v7"/>
-    <path d="M11 18 H8 a2 2 0 0 1 -2 -2 V9"/>
+    <rect x="4" y="10.8" width="16" height="2.4"/>
+    <circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="2.4"/>
   </symbol>
   <symbol id="play" viewBox="0 0 24 24">
     <polygon points="6 3 20 12 6 21 6 3"/>
