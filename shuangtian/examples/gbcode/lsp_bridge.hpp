@@ -29,6 +29,8 @@
 
 #include "st/lsp/client.hpp"
 #include "st/lsp/completion.hpp"
+#include "st/lsp/actions.hpp"
+#include "st/lsp/edit.hpp"
 #include "st/lsp/navigation.hpp"
 #include "st/ui/components/code_editor.hpp"
 
@@ -157,6 +159,31 @@ class LanguageService {
   /// 工作区符号回调。
   std::function<void(std::int64_t, const std::vector<st::lsp::WorkspaceSymbol>&)>
       on_workspace_symbols{};
+
+  // —— 编辑类动作（阶段 7）：格式化 / 重命名 ——
+
+  /// 整篇格式化（`textDocument/formatting`）。
+  auto request_format(std::string_view path, const st::lsp::FormattingOptions& options)
+      -> std::int64_t;
+  /// 选中区格式化（`textDocument/rangeFormatting`；`end_line`/`end_character` 是选区终点）。
+  auto request_range_format(std::string_view path, std::uint32_t start_line,
+                            std::uint32_t start_character, std::uint32_t end_line,
+                            std::uint32_t end_character,
+                            const st::lsp::FormattingOptions& options) -> std::int64_t;
+  /// 重命名预备（拿当前名字用于预填输入框）。
+  auto request_prepare_rename(std::string_view path, std::uint32_t line,
+                              std::uint32_t character) -> std::int64_t;
+  /// 重命名（返回的是 **`WorkspaceEdit`**——可能跨文件）。
+  auto request_rename(std::string_view path, std::uint32_t line, std::uint32_t character,
+                      std::string_view new_name) -> std::int64_t;
+
+  /// 格式化结果回调。
+  std::function<void(std::int64_t, const std::vector<st::lsp::TextEdit>&)> on_format_edits{};
+  /// 重命名预备结果回调（`nullopt` = 该位置不可重命名）。
+  std::function<void(std::int64_t, const std::optional<st::lsp::PrepareRenameResult>&)>
+      on_prepare_rename{};
+  /// 重命名结果回调（`WorkspaceEdit`；无编辑的空编辑表示"名字没变"）。
+  std::function<void(std::int64_t, const st::lsp::WorkspaceEdit&)> on_rename{};
 
   /// 当前活动文件路径（诊断归属它；由 `ensure_started` 更新）。
   [[nodiscard]] auto active_path() const -> const std::string&;

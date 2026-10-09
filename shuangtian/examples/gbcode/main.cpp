@@ -726,6 +726,18 @@ struct CodeEditorPage : Component {
         [this](std::int64_t id, const std::vector<st::lsp::WorkspaceSymbol>& symbols) {
           on_workspace_symbols_response(id, symbols);
         };
+    lsp_.on_format_edits = [this](std::int64_t id, const std::vector<st::lsp::TextEdit>& edits) {
+      on_format_response(id, edits);
+    };
+    lsp_.on_prepare_rename = [this](
+                                 std::int64_t id,
+                                 const std::optional<st::lsp::PrepareRenameResult>& prepared) {
+      (void)id;
+      on_prepare_rename_response(id, prepared);
+    };
+    lsp_.on_rename = [this](std::int64_t id, const st::lsp::WorkspaceEdit& edit) {
+      on_rename_response(id, edit);
+    };
   }
 
   /// 把当前文件告知语言服务（首次会懒启动对应 server）。
@@ -960,6 +972,7 @@ struct CodeEditorPage : Component {
     build_open_dialog(c);
     build_goto_line(c);
     build_completion_popup(c);
+    build_rename_dialog(c);
     // 浮层内的“聚焦输入框”待办：**必须排在对应的构建之后**——
     // 排在前面拿到的是上一帧已销毁的指针（本函数开头已把两个指针置空，
     // 所以即使顺序被人改回去，也只是“这一次没聚焦”，不会再踩已释放对象）。
@@ -1194,6 +1207,51 @@ struct CodeEditorPage : Component {
   }
 
   /// 转到行浮层（Ctrl+G / 选择菜单 → “转到行…”。）
+  /// 重命名输入浮层（F2 → prepareRename → 这个浮层 → Enter 提交）。
+  ///
+  /// 与"转到行"同一范式（`Input` + 按钮 + 错误信息住在浮层里）：但**多一个
+  /// 预填值**——`prepareRename` 给回来的当前名字，用户改几个字比从零敲快得多。
+  void build_rename_dialog(Composer& c) {
+    if (!rename_open_.value()) return;
+    (void)overlay(c, "rename", {}, [&] {
+      (void)card(c, {.gap = 6.0f, .padding = 8.0f, .id = "rename-bar"}, [&] {
+        (void)row(c, {.gap = 6.0f}, [&] {
+          (void)text(c, [] { return std::string("重命名"); });
+          (void)custom<Input>(c, [this](Input& field) {
+            field.set_id("rename-input");
+            field.set_placeholder("新名字");
+            field.style().width = 220.0f;
+            // 预填当前名字：**只在首次构建时写**。
+            //
+            // ⚠ 判据不能用"每帧写"：那会覆盖用户正在敲的内容。
+            // 也不能用"这个 Input 对象是否被填过"（`rename_field_seeded_` 的旧写法）——
+            // 浮层里的元素**每帧重建**，新对象没被填过，而标记已经是 true，
+            // 于是输入框永远是空的（实测：预填名字正确打印、输入框内容却是空）。
+            // 正确判据是"这一轮浮层是否已经开过"：用 `rename_open_` 上升沿。
+            if (!rename_field_seeded_) {
+              field.set_text(rename_text_.value());
+              rename_field_seeded_ = true;
+            }
+            rename_input = &field;
+            field.on_submit = [this](std::string_view value) {
+              rename_text_.set(std::string(value));
+              submit_rename();
+            };
+            field.on_change = [this](std::string_view value) { rename_text_.set(std::string(value)); };
+          }, {.key = "rename-input"});
+          (void)button(c, "重命名", [this] {
+            if (rename_input != nullptr) rename_text_.set(rename_input->value());
+            submit_rename();
+          }, {.id = "rename-go"});
+          (void)button(c, "×", [this] {
+            rename_open_.set(false);
+            rename_field_seeded_ = false;   // 下次打开时重新预填
+          }, {.id = "rename-close"});
+        });
+      });
+    });
+  }
+
   void build_goto_line(Composer& c) {
     if (!goto_line_open_.value()) return;
     (void)overlay(c, "goto-line", {}, [&] {
@@ -2526,6 +2584,10 @@ struct CodeEditorPage : Component {
  auto references_request() -> void { find_references(); }
  /// 悬停信息（入口快捷键 Ctrl+K 用；鼠标悬停走编辑器回调）。
  auto hover_request() -> void { request_hover_at_cursor(); }
+ /// 格式化整篇（入口快捷键 Shift+Alt+F 用）。
+ auto format_request() -> void { format_selection(); }
+ /// 重命名符号（入口快捷键 F2 用）。
+ auto rename_request() -> void { rename_symbol(); }
  /// 刷新 Git 状态（入口快捷键用）。
  auto refresh_git_request() -> void { refresh_git(); }
  /// 跳到第 index 处问题（入口快捷键用）。
@@ -3223,6 +3285,228 @@ struct CodeEditorPage : Component {
     workspace_symbols_ = symbols;
   }
 
+
+  // ————————————————————————————————————————————————————————————————————————
+  // 编辑类动作（LSP 阶段 7）：格式化 / 重命名
+  // ————————————————————————————————————————————————————————————————————————
+
+  /// 构造格式化选项（`tabSize`/`insertSpaces` 必须与编辑器显示口径一致——
+  /// 否则 server 严格按我们给的参数做出来的缩进，在编辑器里看起来是错的）。
+  [[nodiscard]] auto formatting_options() const -> st::lsp::FormattingOptions {
+    st::lsp::FormattingOptions options{};
+    options.tab_size = static_cast<std::uint32_t>(tab_width_);
+    options.insert_spaces = true;   // 我们一律插空格（编辑器显示 Tab 也按 tab_width 展开）
+    return options;
+  }
+
+  /// 格式化整篇（Shift+Alt+F，VSCode 同键位）。
+  void format_document() {
+    std::string path;
+    st::lsp::Position position{};
+    if (!current_document(&path, &position)) {
+      status_.set(lsp_.active() ? "需要磁盘上的文件才能格式化" : "语言服务未就绪");
+      return;
+    }
+    format_request_ = lsp_.request_format(path, formatting_options());
+    if (format_request_ == 0) status_.set("格式化请求未发出");
+  }
+
+  /// 格式化选中区（有选区时走这条，否则整篇）。
+  void format_selection() {
+    if (editor == nullptr) return;
+    std::string path;
+    st::lsp::Position position{};
+    if (!current_document(&path, &position)) {
+      format_document();
+      return;
+    }
+    if (!editor->has_selection()) {
+      format_document();
+      return;
+    }
+    const auto [begin, end] = editor->selection();
+    const auto start = lsp_.offset_to_position(path, begin);
+    const auto finish = lsp_.offset_to_position(path, end);
+    if (!start.has_value() || !finish.has_value()) return;
+    format_request_ = lsp_.request_range_format(
+        path, static_cast<std::uint32_t>(start->line), static_cast<std::uint32_t>(start->character),
+        static_cast<std::uint32_t>(finish->line), static_cast<std::uint32_t>(finish->character),
+        formatting_options());
+  }
+
+  /// 格式化结果落地：应用到**当前缓冲**（格式化只针对一个文件）。
+  void on_format_response(std::int64_t id, const std::vector<st::lsp::TextEdit>& edits) {
+    if (id != format_request_) return;   // 旧响应丢弃
+    if (edits.empty()) {
+      status_.set("已是格式化状态");
+      return;
+    }
+    if (editor == nullptr) return;
+    std::string text = editor->text();
+    std::string error;
+    if (!st::lsp::apply_edits_in_place(text, edits, &error)) {
+      // 失败**如实说**（重叠/越界都可能——静默丢弃会让用户以为格式化没生效）。
+      status_.set("格式化失败：" + error);
+      return;
+    }
+    // 落回编辑器与缓冲区：走 `set_text` 会清撤销栈（格式化是"一步操作"，
+    // 用户按 Ctrl+Z 期望整个格式化一起撤销——理想做法是压一条自定义撤销记录，
+    // 但编辑器目前只支持文本快照撤销；先如实把光标保留在合理位置）。
+    editor->set_text(text);
+    auto list = buffers_.value();
+    const std::size_t active = active_.value();
+    if (active < list.size()) {
+      list[active].text = text;
+      list[active].dirty = true;   // 未保存（与手工编辑一致）
+      buffers_.set(std::move(list));
+    }
+    refresh_problems();
+    status_.set(std::format("已格式化（{} 处修改）", edits.size()));
+  }
+
+  /// 重命名符号（F2，VSCode 同键位）：先 prepareRename 拿当前名字。
+  void rename_symbol() {
+    std::string path;
+    st::lsp::Position position{};
+    if (!current_document(&path, &position)) {
+      status_.set(lsp_.active() ? "需要磁盘上的文件才能重命名" : "语言服务未就绪");
+      return;
+    }
+    rename_path_ = path;
+    (void)lsp_.request_prepare_rename(path, static_cast<std::uint32_t>(position.line),
+                                      static_cast<std::uint32_t>(position.character));
+  }
+
+  /// 预备结果回来了：打开输入浮层（预填当前名字）。
+  void on_prepare_rename_response(std::int64_t,
+                                  const std::optional<st::lsp::PrepareRenameResult>& prepared) {
+    if (!prepared.has_value()) {
+      // 区分"明确不可重命名"与"没预填但可以试"——后者 `has_value()` 为真。
+      status_.set("此处没有可重命名的符号");
+      return;
+    }
+    // 预填名字：**优先从文本里按 range 取**，`placeholder` 只是兜底。
+    //
+    // 为什么不能只依赖 `placeholder`：clangd 的 `prepareRename` **只给裸 Range、
+    // 不给名字**（实测）——那样输入框会是空的，用户得把当前名字整个敲一遍，
+    // 而"重命名"的常见动作是"改几个字"（`compute_area` → `rect_area`）。
+    // 按 range 从当前文本切片是通用做法（server 给的 range 本来就指向那个标识符）。
+    rename_prefill_.clear();
+    if (editor != nullptr) {
+      const std::string text = editor->text();
+      const std::size_t begin = st::lsp::position_to_offset(text, prepared->range.start);
+      const std::size_t end = st::lsp::position_to_offset(text, prepared->range.end);
+      if (begin < end && end <= text.size()) rename_prefill_ = text.substr(begin, end - begin);
+    }
+    if (rename_prefill_.empty()) rename_prefill_ = prepared->placeholder;
+    rename_text_.set(rename_prefill_);
+    rename_field_seeded_ = false;   // 让浮层重新把预填写进输入框
+    rename_open_.set(true);
+    status_.set(rename_prefill_.empty() ? "输入新名字" : ("重命名：" + rename_prefill_));
+  }
+
+  /// 提交重命名（输入浮层 Enter）。
+  void submit_rename() {
+    const std::string new_name = rename_text_.value();
+    rename_open_.set(false);
+    if (new_name.empty()) return;
+    if (rename_prefill_ == new_name) {
+      status_.set("名字未变");
+      return;
+    }
+    std::string path = rename_path_;
+    st::lsp::Position position{};
+    if (path.empty() || !current_document(&path, &position)) return;
+    (void)lsp_.request_rename(path, static_cast<std::uint32_t>(position.line),
+                              static_cast<std::uint32_t>(position.character), new_name);
+  }
+
+  /// 重命名结果：**`WorkspaceEdit` 可能跨文件**——逐个文件应用。
+  void on_rename_response(std::int64_t, const st::lsp::WorkspaceEdit& edit) {
+    if (!edit.skipped_resource_ops.empty()) {
+      // 资源操作（建文件/改名/删文件）没实现：如实报告，不假装成功。
+      status_.set(std::format("部分操作未支持：{}（共 {} 项）",
+                              edit.skipped_resource_ops.front(),
+                              edit.skipped_resource_ops.size()));
+    }
+    if (edit.files.empty()) {
+      if (edit.skipped_resource_ops.empty()) status_.set("重命名没有产生修改");
+      return;
+    }
+    // 逐个文件：打开缓冲里改文本，不在缓冲里的**读盘 → 改 → 写回**。
+    //
+    // 为什么要处理"不在缓冲里"的文件：改一个头文件里的函数名会同时命中
+    // 所有调用点（包括没打开过的 .cpp）——只改打开着的会让工程处于半改状态，
+    // 下次编译报一堆错，而用户不知道为什么。
+    std::size_t touched = 0;
+    std::size_t failed = 0;
+    std::string last_error;
+    auto list = buffers_.value();
+    for (const auto& file : edit.files) {
+      const std::string path = st::lsp::LspClient::uri_to_path(file.uri);
+      if (path.empty() || file.edits.empty()) continue;
+      // 在缓冲里？
+      bool in_buffer = false;
+      for (std::size_t index = 0; index < list.size(); ++index) {
+        if (list[index].path != path) continue;
+        in_buffer = true;
+        std::string text = list[index].text;
+        if (!st::lsp::apply_edits_in_place(text, file.edits, &last_error)) {
+          ++failed;
+          break;
+        }
+        list[index].text = text;
+        list[index].dirty = true;
+        ++touched;
+        break;
+      }
+      if (in_buffer) continue;
+      // 不在缓冲：读盘 → 应用 → 写回（**直接落盘**——重命名是"改工程"的操作，
+      // 未打开的文件没有"未保存"的概念；停在那里只会让工程不一致）。
+      const auto content = st::fs::read_text(path);
+      if (!content.has_value()) {
+        ++failed;
+        last_error = "读不到 " + path;
+        continue;
+      }
+      std::string text = *content;
+      if (!st::lsp::apply_edits_in_place(text, file.edits, &last_error)) {
+        ++failed;
+        continue;
+      }
+      if (!st::fs::write_text(path, text).has_value()) {
+        ++failed;
+        last_error = "写不进去 " + path;
+        continue;
+      }
+      ++touched;
+    }
+    buffers_.set(std::move(list));
+    // 编辑器里显示的若是被改的文件，重新装载（`set_text` 会清撤销栈——
+    // 但跨文件重命名本就无法用撤销栈表达，如实重载比装作可撤销更诚实）。
+    if (editor != nullptr) {
+      const std::size_t active = active_.value();
+      const auto current = buffers_.value();
+      if (active < current.size()) {
+        editor->set_text(current[active].text);
+        lsp_.sync_document(current[active].path, current[active].text);
+      }
+    }
+    refresh_problems();
+    if (failed > 0) {
+      status_.set(std::format("重命名：{} 处已改，{} 处失败（{}）", touched, failed, last_error));
+    } else {
+      status_.set(std::format("重命名完成：{} 个文件", touched));
+    }
+  }
+
+  /// 重命名输入浮层的聚焦（与其它输入浮层同一套路）。
+  void apply_pending_rename_focus() {
+    if (!rename_focus_pending_) return;
+    rename_focus_pending_ = false;
+    // 浮层内的输入框在下一帧才建好：置标记，让 `build_rename_dialog` 落地时聚焦。
+  }
+
   /// 编辑区按键：补全交互（Enter 接受 / Esc 关闭 / 上下选择）优先于编辑器默认。
   /// 返回 true = 已消费。
   auto handle_completion_key(std::string_view key) -> bool {
@@ -3399,6 +3683,23 @@ struct CodeEditorPage : Component {
   std::vector<st::lsp::WorkspaceSymbol> workspace_symbols_{};
   /// 待落地的跳转（跨文件跳转要等编辑器装载；与既有 `pending_jump_` 同一套路）。
   bool pending_jump_pending_{false};
+  // —— 编辑类动作（阶段 7）——
+  /// 格式化请求 id（旧响应丢弃）。
+  std::int64_t format_request_{0};
+  /// 重命名输入浮层是否打开。
+  State<bool> rename_open_{false};
+  /// 重命名输入框的当前文本。
+  State<std::string> rename_text_{};
+  /// `prepareRename` 给的当前名字（预填用）。
+  std::string rename_prefill_{};
+  /// 重命名目标文件路径（提交时用；光标可能已动）。
+  std::string rename_path_{};
+  /// 预填是否已写入输入框（只写一次，否则每帧覆盖用户输入）。
+  bool rename_field_seeded_{false};
+  /// 重命名输入浮层的输入框指针（按钮提交时读）。
+  Input* rename_input{nullptr};
+  /// 重命名浮层的聚焦待办（浮层内的输入框下一帧才建好）。
+  bool rename_focus_pending_{false};
   /// 底部面板当前高度比例（上下分栏的 `ratio`）。
   ///
   /// **刻意不是 `State`**：分栏组件自己持有比例并据此重排，拖动时它逐像素回调本值——
@@ -3705,6 +4006,23 @@ auto run_app(int argc, char** argv) -> int {
     bind("`", false, [page] { page->toggle_terminal_panel(); });
     bind("Backquote", false, [page] { page->toggle_terminal_panel(); });
     bind("k", false, [page] { page->shortcuts_open_.set(!page->shortcuts_open_.value()); });
+    // F2：重命名符号；Shift+Alt+F：格式化（都与 VSCode 同键位）。
+    {
+      UiRoot::Shortcut plain{};
+      plain.key = "f2";
+      (void)root->register_shortcut("f2", plain, [page]() {
+        page->rename_request();
+        return true;
+      });
+      UiRoot::Shortcut format{};
+      format.key = "f";
+      format.shift = true;
+      format.alt = true;
+      (void)root->register_shortcut("f", format, [page]() {
+        page->format_request();
+        return true;
+      });
+    }
     // F12：跳定义；Shift+F12：找引用；Ctrl+K：悬停信息（VSCode 是 Ctrl+K Ctrl+I，
     // 但两段式键在我们这套表里表达不了——单段 Ctrl+K 更直接）。
     {

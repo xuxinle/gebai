@@ -189,6 +189,26 @@ LanguageService::LanguageService() : impl_(std::make_unique<Impl>()) {
       }
       return;
     }
+    // —— 编辑类（阶段 7）——
+    if (method == "textDocument/formatting" || method == "textDocument/rangeFormatting") {
+      if (on_format_edits) {
+        on_format_edits(id, is_error ? std::vector<st::lsp::TextEdit>{}
+                                     : st::lsp::parse_formatting_edits(result));
+      }
+      return;
+    }
+    if (method == "textDocument/prepareRename") {
+      if (on_prepare_rename) {
+        on_prepare_rename(id, is_error ? std::nullopt : st::lsp::parse_prepare_rename(result));
+      }
+      return;
+    }
+    if (method == "textDocument/rename") {
+      if (on_rename) {
+        on_rename(id, is_error ? st::lsp::WorkspaceEdit{} : st::lsp::parse_workspace_edit(result));
+      }
+      return;
+    }
     if (on_response) on_response(id, method, result, is_error);
   };
 }
@@ -431,6 +451,54 @@ auto LanguageService::request_workspace_symbols(std::string_view query) -> std::
   st::Json params = st::Json::object();
   params["query"] = std::string(query);
   return impl_->client.request("workspace/symbol", std::move(params));
+}
+
+auto LanguageService::request_format(std::string_view path,
+                                     const st::lsp::FormattingOptions& options) -> std::int64_t {
+  if (!impl_->started) return 0;
+  st::Json params = st::Json::object();
+  st::Json item = st::Json::object();
+  item["uri"] = to_uri(path);
+  params["textDocument"] = std::move(item);
+  params["options"] = st::lsp::formatting_options_json(options);
+  return impl_->client.request("textDocument/formatting", std::move(params));
+}
+
+auto LanguageService::request_range_format(std::string_view path, std::uint32_t start_line,
+                                           std::uint32_t start_character, std::uint32_t end_line,
+                                           std::uint32_t end_character,
+                                           const st::lsp::FormattingOptions& options)
+    -> std::int64_t {
+  if (!impl_->started) return 0;
+  st::Json params = st::lsp::text_position_params(to_uri(path), start_line, start_character);
+  st::Json range = st::Json::object();
+  st::Json start = st::Json::object();
+  start["line"] = start_line;
+  start["character"] = start_character;
+  st::Json end = st::Json::object();
+  end["line"] = end_line;
+  end["character"] = end_character;
+  range["start"] = std::move(start);
+  range["end"] = std::move(end);
+  params["range"] = std::move(range);
+  params["options"] = st::lsp::formatting_options_json(options);
+  return impl_->client.request("textDocument/rangeFormatting", std::move(params));
+}
+
+auto LanguageService::request_prepare_rename(std::string_view path, std::uint32_t line,
+                                             std::uint32_t character) -> std::int64_t {
+  if (!impl_->started) return 0;
+  return impl_->client.request("textDocument/prepareRename",
+                              st::lsp::text_position_params(to_uri(path), line, character));
+}
+
+auto LanguageService::request_rename(std::string_view path, std::uint32_t line,
+                                     std::uint32_t character, std::string_view new_name)
+    -> std::int64_t {
+  if (!impl_->started) return 0;
+  st::Json params = st::lsp::text_position_params(to_uri(path), line, character);
+  params["newName"] = std::string(new_name);
+  return impl_->client.request("textDocument/rename", std::move(params));
 }
 
 void LanguageService::shutdown(std::int64_t timeout_ms) {
