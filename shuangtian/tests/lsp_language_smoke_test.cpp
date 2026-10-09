@@ -32,7 +32,7 @@ struct Sandbox {
   std::filesystem::path dir{};
   explicit Sandbox(const std::string& tag) {
     dir = std::filesystem::temp_directory_path() /
-          std::format("st_lsp_lang_{}_{}", tag, static_cast<int>(::getpid()));
+          std::format("st_lsp_lang_{}_{}", tag, static_cast<int>(st::process::current_id()));
     std::filesystem::create_directories(dir);
   }
   ~Sandbox() {

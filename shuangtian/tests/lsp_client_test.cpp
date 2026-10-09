@@ -31,7 +31,7 @@ struct FakeServer {
 
   explicit FakeServer(const std::string& body) {
     dir = std::filesystem::temp_directory_path() /
-          std::format("st_lsp_fake_{}", static_cast<int>(::getpid()));
+          std::format("st_lsp_fake_{}", static_cast<int>(st::process::current_id()));
     std::filesystem::create_directories(dir);
     script = dir / "server.sh";
     std::ofstream out(script);
@@ -85,7 +85,7 @@ struct CppSandbox {
   std::filesystem::path dir{};
   CppSandbox() {
     dir = std::filesystem::temp_directory_path() /
-          std::format("st_lsp_cpp_{}", static_cast<int>(::getpid()));
+          std::format("st_lsp_cpp_{}", static_cast<int>(st::process::current_id()));
     std::filesystem::create_directories(dir);
     std::ofstream header(dir / "widget.hpp");
     header << "#pragma once\n"

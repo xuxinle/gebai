@@ -29,7 +29,7 @@ struct Repo {
 
   explicit Repo() {
     dir = std::filesystem::temp_directory_path() /
-          std::format("st_git_svc_{}", static_cast<int>(::getpid()));
+          std::format("st_git_svc_{}", static_cast<int>(st::process::current_id()));
     std::filesystem::create_directories(dir);
     if (!run({"init", "--initial-branch=main"})) return;
     run({"config", "user.email", "test@local"});
@@ -153,7 +153,7 @@ ST_TEST(git_service_not_a_repo_is_state_not_error) {
   // 面板要显示「不是仓库」的空态而不是可重试的故障态，两者语义不同
   //（工作台设计 §4.7.H 的约定）。
   const auto dir = std::filesystem::temp_directory_path() /
-                   std::format("st_git_plain_{}", static_cast<int>(::getpid()));
+                   std::format("st_git_plain_{}", static_cast<int>(st::process::current_id()));
   std::filesystem::create_directories(dir);
   const auto snapshot = gbcode::read_snapshot(dir.string());
   std::error_code error;
