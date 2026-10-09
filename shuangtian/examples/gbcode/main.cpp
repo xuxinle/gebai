@@ -62,6 +62,7 @@
 #include "st/ui/components/code_editor.hpp"
 #include "st/ui/components/completion_popup.hpp"
 
+#include "git_service.hpp"   // Git 集成（版本管理重构）
 #include "lsp_bridge.hpp"   // 语言服务集成（LSP 阶段 3）
 #include "st/ui/components/command_palette.hpp"
 #include "st/ui/components/feedback.hpp"
@@ -502,14 +503,28 @@ struct CodeEditorPage : Component {
   State<bool> search_word_{false};
   State<bool> search_regex_{false};
   /// Git 状态快照（`refresh_git` 填充；渲染期读的是它而不是每次重查）。
-  struct GitChange {
-    std::string status{};   ///< 两字符状态码（`M `、`??`…，已去尾空格）
-    std::string path{};
-  };
-  std::string git_branch_{};
-  std::vector<GitChange> git_changes_{};
-  std::string git_error_{};
+  ///
+  /// 版本管理重构（2026-10-09）：从"平铺列表"升级为**分组快照**——冲突/已暂存/
+  /// 未暂存/未跟踪四组（XY 矩阵语义见 git_service.hpp 文件头），既暂存又改的
+  /// 文件在两组各出现一次（IDEA 同款）。
+  gbcode::RepoSnapshot git_{};
   bool git_probed_{false};
+  /// 已折叠的分组（跨刷新保留——刷新一下就把分组合回去等于没记住用户的操作）。
+  ///
+  /// ⚠ 必须 `State`：普通 vector 改了不触发重组，组头点下去**没反应**
+  ///（这是 LSP 阶段 4 的 `completion_open_` 同一个坑——bool 版实测过）。
+  State<std::vector<std::string>> git_collapsed_groups_{{}};
+  /// git 危险操作确认浮层（放弃更改/删除未跟踪）。
+  State<bool> git_confirm_open_{false};
+  std::string git_confirm_title_{};
+  std::string git_confirm_body_{};
+  std::function<void()> pending_git_confirm_{};
+  /// 提交框文本。
+  State<std::string> commit_message_{};
+  /// 提交框输入框指针（按钮提交时读——浮层每帧重建，指针只在构建帧有效）。
+  Input* commit_input_ptr{nullptr};
+  /// 终端里的 git 命令跑完后要刷新状态（pump 里落地——命令完成时机不可知）。
+  bool git_refresh_pending_{false};
   /// 状态栏问题计数“轮跳”到第几处（反复点同一个计数就依次往下跳）。
   std::size_t problem_cycle_{0};
   /// 已注册的语言清单（扩展视图用；懒加载一次）。
@@ -853,6 +868,12 @@ struct CodeEditorPage : Component {
     // 正确写法：泵**总是执行**（它内部搬消息、派发回调），返回值只决定
     // 要不要刷新编辑器诊断。
     pump_hover_word();
+    // 终端里的 git 命令完成后的状态刷新（延迟落地：命令完成时机不可知，
+    // 挂起标志在下一帧泵时触发一次重读——脏一点但简单，且不会刷爆 git）。
+    if (git_refresh_pending_ && terminal_ptr != nullptr && !terminal_ptr->any_busy()) {
+      git_refresh_pending_ = false;
+      refresh_git();
+    }
     const bool diagnostics_changed = lsp_.pump();
     // 待落地的跳转（跨文件）：编辑器实例在新文件装载后才就位，所以在这里补做。
     apply_pending_navigation_jump();
@@ -974,6 +995,7 @@ struct CodeEditorPage : Component {
     build_goto_line(c);
     build_completion_popup(c);
     build_rename_dialog(c);
+    build_git_confirm(c);
     // 浮层内的“聚焦输入框”待办：**必须排在对应的构建之后**——
     // 排在前面拿到的是上一帧已销毁的指针（本函数开头已把两个指针置空，
     // 所以即使顺序被人改回去，也只是“这一次没聚焦”，不会再踩已释放对象）。
@@ -1212,6 +1234,26 @@ struct CodeEditorPage : Component {
   ///
   /// 与"转到行"同一范式（`Input` + 按钮 + 错误信息住在浮层里）：但**多一个
   /// 预填值**——`prepareRename` 给回来的当前名字，用户改几个字比从零敲快得多。
+  /// git 危险操作确认（放弃更改 / 删除未跟踪文件）。
+  ///
+  /// 与「关闭确认」同一 Dialog 形态，但语义是**不可恢复**——按钮文案明确说后果，
+  /// 不用"确定/取消"这种不带信息的词。
+  void build_git_confirm(Composer& c) {
+    if (!git_confirm_open_.value()) return;
+    (void)overlay(c, "git-confirm", {}, [&] {
+      (void)custom<Dialog>(c, [this](Dialog& dialog) {
+        dialog.set_id("git-confirm-dialog");
+        dialog.set_title(git_confirm_title_);
+        dialog.set_body(git_confirm_body_);
+        dialog.set_actions({"取消", "放弃更改"});
+        dialog.on_action = [this](std::size_t index) {
+          git_confirm_open_.set(false);
+          if (index == 1 && pending_git_confirm_) pending_git_confirm_();
+        };
+      }, {.key = "git-confirm-dialog"});
+    });
+  }
+
   void build_rename_dialog(Composer& c) {
     if (!rename_open_.value()) return;
     (void)overlay(c, "rename", {}, [&] {
@@ -1574,49 +1616,179 @@ struct CodeEditorPage : Component {
     }, {.width = 30.0f, .height = 24.0f, .key = id});
   }
 
-  // —— 视图 2：源代码管理（真 `git status`）——
+  /// 小图标钮（侧栏各视图共用；`on_click` 为空 = 纯展示）。
+  void scm_icon_button(Composer& c, const std::string& id, const char* icon_name,
+                       const char* tip, std::function<void()> on_click) {
+    (void)custom<Button>(c, [id = id, icon_name = std::string(icon_name), tip = std::string(tip),
+                             on_click = std::move(on_click)](Button& b) mutable {
+      b.set_id(id);
+      b.set_icon(icon_name);
+      b.set_variant(Button::Variant::Ghost);
+      b.set_size(Button::Size::Small);
+      if (on_click) b.on_click = [on_click]() { on_click(); };
+    }, {.width = 26.0f, .height = 22.0f, .key = id});
+  }
+
+  // —— 视图 2：源代码管理（变更面板：分组 + 行内动作 + 底部提交框）——
+  //
+  // 参照歌白文件工作台的设计（IDEA 的 Commit 工具窗就在左侧）：
+  // "改了什么 / 要提交什么"是编码时最频繁看的，放左侧随时可见；
+  // 底部留给"分支 | 日志"（那是回顾历史时才看的，节奏不同——见 build_git_view）。
   void build_scm_view(Composer& c) {
     build_sidebar_head(c, "源代码管理");
-    if (!workspace_.empty() && git_branch_.empty() && !git_probed_) {
-      refresh_git();
-    }
+    if (!workspace_.empty() && !git_probed_) refresh_git();
     if (workspace_.empty()) {
       (void)text(c, [] { return std::string("内置样例模式：没有工作区可查 Git 状态"); });
       return;
     }
+
+    // —— 头部：分支 + ahead/behind + 刷新 ——
     (void)row(c, {.gap = 6.0f}, [&] {
       (void)icon(c, "git-branch", 14.0f);
       (void)text(c, [this] {
-        return git_branch_.empty() ? std::string("（未探测）") : git_branch_;
+        std::string label = git_.branch.empty() ? std::string("（未探测）") : git_.branch;
+        if (git_.ahead > 0 || git_.behind > 0) {
+          label += std::format("  ↑{} ↓{}", git_.ahead, git_.behind);
+        }
+        return label;
       }, {.grow = true, .id = "git-branch-label"});
-      (void)text(c, [this] { return std::format("{} 项变更", git_changes_.size()); },
-                 {.id = "git-change-count"});
+      scm_icon_button(c, "scm-refresh", "refresh", "刷新状态", [this] { refresh_git(); });
     });
-    if (!git_error_.empty()) {
-      (void)text(c, [this] { return git_error_; }, {.color = Tone::Danger, .id = "git-error"});
+    if (!git_.error.empty()) {
+      (void)text(c, [this] { return git_.error; }, {.color = Tone::Danger, .id = "git-error"});
+      return;
     }
-    // 变更列表必须住在**滚动容器**里（与资源管理器/搜索同一个 `ScrollView` 契约）：
-    // 侧栏是固定宽度的窄列，而 `Button` 的测量不理会父宽（按标签文本算），
-    // 直接当列子元素会在长路径上**横向溢出到编辑区**（实测：变更条目叠在代码上方），
-    // 而 `ScrollView` 会给子元素一个被夹到视口宽的约束。
+    if (!git_.is_repo) {
+      (void)text(c, [] { return std::string("当前工作区不是 Git 仓库"); },
+                 {.id = "git-not-repo"});
+      return;
+    }
+
+    // —— 分组列表（滚动容器契约：与资源管理器同一个理由——Button 按标签测量，
+    // 长路径会横向溢出到编辑区）——
     (void)custom_container<ScrollView>(
         c,
         [&] {
-          for (const auto& change : git_changes_) {
-            (void)custom<Button>(c, [this, change](Button& b) {
-              b.set_label(std::format("{}  {}", change.status, change.path));
+          if (git_.changes.empty()) {
+            (void)text(c, [] { return std::string("工作区干净，没有未提交的变更"); });
+            return;
+          }
+          static constexpr gbcode::ChangeGroup kGroups[] = {
+              gbcode::ChangeGroup::Conflicted, gbcode::ChangeGroup::Staged,
+              gbcode::ChangeGroup::Unstaged, gbcode::ChangeGroup::Untracked};
+          for (const auto group : kGroups) {
+            const auto items = git_.changes_in(group);
+            if (items.empty()) continue;
+            const std::string group_name(gbcode::change_group_name(group));
+            const auto collapsed_list = git_collapsed_groups_.value();
+            const bool collapsed =
+                std::find(collapsed_list.begin(), collapsed_list.end(), group_name) !=
+                collapsed_list.end();
+            // 组头（可折叠、计数徽标）。
+            (void)custom<Button>(c, [this, group_name, collapsed, count = items.size()](Button& b) {
+              b.set_id("git-group-" + group_name);
+              b.set_label(std::format("{} {}（{}）", collapsed ? "▸" : "▾", group_name, count));
               b.set_variant(Button::Variant::Ghost);
               b.set_size(Button::Size::Small);
-              b.set_icon("edit");
-              b.on_click = [this, change] { show_git_diff(change); };
-            }, {.key = "git:" + change.path});
-          }
-          if (git_changes_.empty() && git_error_.empty() && !git_branch_.empty()) {
-            (void)text(c, [] { return std::string("工作区干净，没有未提交的变更"); });
+              b.on_click = [this, group_name] {
+                auto groups = git_collapsed_groups_.value();   // 拷贝改再 set（State 的写法）
+                const auto found = std::find(groups.begin(), groups.end(), group_name);
+                if (found != groups.end()) {
+                  groups.erase(found);
+                } else {
+                  groups.push_back(group_name);
+                }
+                git_collapsed_groups_.set(std::move(groups));
+              };
+            }, {.height = 24.0f, .key = "git-group:" + group_name});
+            if (collapsed) continue;
+            // 组内条目：行 = 状态字母 + 路径 + 行内动作钮。
+            for (const auto& change : items) {
+              (void)row(c, {.gap = 4.0f, .key = "git:" + change.path}, [&] {
+                (void)custom<Button>(c, [this, change](Button& b) {
+                  b.set_id("git-file-" + change.path);
+                  // 状态字母 + 文件名（路径太长时显示名——title 有全路径）。
+                  const std::string name = st::fs::file_name(change.path);
+                  b.set_label(std::format("{} {}", change.display_code(), name));
+                  b.set_variant(Button::Variant::Ghost);
+                  b.set_size(Button::Size::Small);
+                  b.on_click = [this, change] { open_git_diff(change); };
+                }, {.height = 26.0f, .grow = true});
+                // 行内动作（悬停意图：VSCode 同款三键）。
+                if (change.has_unstaged_side() && !change.is_conflicted()) {
+                  scm_icon_button(c, "stage-" + change.path, "plus", "暂存更改",
+                                  [this, path = change.path] { git_stage(path, true); });
+                }
+                if (change.has_staged_side()) {
+                  scm_icon_button(c, "unstage-" + change.path, "minus", "取消暂存",
+                                  [this, path = change.path] { git_stage(path, false); });
+                }
+                if (!change.has_staged_side() || change.has_unstaged_side()) {
+                  scm_icon_button(c, "discard-" + change.path, "undo", "放弃更改",
+                                  [this, change] { git_discard(change); });
+                }
+              });
+            }
           }
         },
         [](ScrollView& scroll) { scroll.set_id("scm-scroll"); },
         {.grow = true, .id = "scm-host"});
+
+    // —— 底部常驻提交框（动作全在一行：消息输入 + 提交钮）——
+    //
+    // 为什么常驻（而不是"点提交按钮弹对话框"）：提交流是"看一眼变更 → 写消息 →
+    // 提交"，消息输入与变更列表同屏才能边看边写；弹对话框会把列表遮住。
+    if (git_.is_repo && !git_.changes.empty()) {
+      (void)row(c, {.gap = 4.0f, .id = "commit-bar"}, [&] {
+        (void)custom<Input>(c, [this](Input& field) {
+          field.set_id("commit-message");
+          field.set_placeholder("提交信息（Ctrl+Enter 提交）");
+          field.style().grow = true;
+          commit_input_ptr = &field;
+          field.on_change = [this](std::string_view value) { commit_message_.set(std::string(value)); };
+          field.on_submit = [this](std::string_view) { git_commit(); };
+        }, {.height = 26.0f, .grow = true, .key = "commit-message"});
+        (void)custom<Button>(c, [this](Button& b) {
+          b.set_id("commit-go");
+          b.set_label("提交");
+          b.set_variant(Button::Variant::Primary);
+          b.set_size(Button::Size::Small);
+          b.on_click = [this] { git_commit(); };
+        }, {.height = 26.0f});
+      });
+    }
+  }
+
+  /// 打开一个变更文件的 diff（只读标签，替代旧版"敲进终端"）。
+  ///
+  /// 为何从终端改为标签：diff 是**内容**（要对照看、要能滚动），终端是**流的回放**
+  ///（滚走就没了、没有结构）。旧版把 diff 敲进终端，用户一跑别的命令就冲掉了。
+  void open_git_diff(const gbcode::GitChange& change) {
+    const std::string diff = gbcode::read_worktree_diff(workspace_, change.path,
+                                                        change.has_staged_side() &&
+                                                            !change.has_unstaged_side());
+    auto list = buffers_.value();
+    stash_active_text(list);
+    OpenBuffer buffer;
+    buffer.key = "diff:" + change.path;
+    buffer.label = "Δ " + st::fs::file_name(change.path);
+    buffer.language = "diff";
+    buffer.text = diff.empty() ? std::string("（无差异：可能只暂存了元数据）") : diff;
+    buffer.path = change.path;   // 保留归属（切回来还能刷新）；dirty 语义不适用
+    buffer.dirty = false;
+    // 同名 diff 标签已存在就复用（刷新内容而不是再开一个）。
+    for (std::size_t index = 0; index < list.size(); ++index) {
+      if (list[index].key == buffer.key) {
+        list[index].text = buffer.text;
+        buffers_.set(std::move(list));
+        activate(list, index);
+        return;
+      }
+    }
+    list.push_back(std::move(buffer));
+    buffers_.set(std::move(list));
+    active_.set(buffers_.value().size() - 1);
+    status_.set("差异：" + change.path);
   }
 
   // —— 视图 3：运行与调试（真跑 st 子命令）——
@@ -1992,7 +2164,7 @@ struct CodeEditorPage : Component {
     row(c, {.gap = 10.0f, .padding_x = 10.0f, .height = 26.0f,
             .surface = Element::Surface::Alt, .id = "statusbar"}, [&] {
       status_item(c, "status-branch", "git-branch", [this] {
-        return git_branch_.empty() ? std::string("main") : git_branch_;
+        return git_.branch.empty() ? std::string("main") : git_.branch;
       }, [this] {
         activity_.set(2);
         sidebar_visible_.set(true);
@@ -2844,62 +3016,92 @@ struct CodeEditorPage : Component {
   // 而是装饰。真读 `git status --porcelain=v1 -b` 之后，改一个文件、刷新，面板会跟着变。
   void refresh_git() {
     git_probed_ = true;
-    git_error_.clear();
-    git_changes_.clear();
-    git_branch_.clear();
-    if (workspace_.empty()) {
-      git_error_ = "没有工作区";
+    git_ = gbcode::read_snapshot(workspace_);
+    if (!git_.error.empty()) {
+      status_.set("Git：" + git_.error);
       return;
     }
-    st::process::Options options;
-    options.cwd = workspace_;
-    const auto result = st::process::run("git", {"status", "--porcelain=v1", "-b"}, options);
-    if (!result) {
-      git_error_ = "git 不可用：" + result.error().to_string();
+    if (!git_.is_repo) {
+      status_.set("当前工作区不是 Git 仓库");
       return;
     }
-    if (result->exit_code != 0) {
-      git_error_ = st::trim(result->stderr_text.empty() ? result->stdout_text
-                                                        : result->stderr_text);
-      if (git_error_.empty()) git_error_ = "不是 Git 仓库（或 git 拒绝执行）";
+    std::string flow;
+    if (git_.ahead > 0 || git_.behind > 0) {
+      flow = std::format("（↑{} ↓{}）", git_.ahead, git_.behind);
+    }
+    status_.set(std::format("Git：{}{} · {} 项变更", git_.branch, flow, git_.changes.size()));
+  }
+
+  /// 暂存/取消暂存一个文件（写操作：交终端作业通道——输出实时回流、可中止）。
+  void git_stage(const std::string& path, bool stage) {
+    if (terminal_ptr == nullptr || workspace_.empty()) return;
+    bottom_visible_.set(true);
+    terminal_ptr->run(stage ? std::format("git add -- {}", path)
+                            : std::format("git restore --staged -- {}", path));
+    // 命令完成后状态变了：下一轮 pump 刷新（不在这里同步刷——命令还没跑完）。
+    git_refresh_pending_ = true;
+  }
+
+  /// 放弃一个文件的更改（危险操作：先确认——`git restore`/`checkout` 不可恢复）。
+  void git_discard(const gbcode::GitChange& change) {
+    if (change.is_untracked()) {
+      git_confirm_title_ = std::format("删除未跟踪文件 {}", change.path);
+      git_confirm_body_ = "文件没有进过版本库，删除后无法恢复。确定删除？";
+      pending_git_confirm_ = [this, path = change.path] {
+        if (terminal_ptr != nullptr) {
+          bottom_visible_.set(true);
+          terminal_ptr->run(std::format("rm -- {}", path));
+          git_refresh_pending_ = true;
+        }
+      };
+      git_confirm_open_.set(true);
       return;
     }
-    std::size_t begin = 0;
-    const std::string& out = result->stdout_text;
-    while (begin <= out.size()) {
-      const std::size_t eol = out.find('\n', begin);
-      const std::size_t end = eol == std::string::npos ? out.size() : eol;
-      std::string_view line(out.data() + begin, end - begin);
-      if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
-      if (line.starts_with("## ")) {
-        // `## main...origin/main [ahead 1]` → 取第一段
-        line.remove_prefix(3);
-        const std::size_t stop = line.find_first_of(" .");
-        git_branch_ = std::string(stop == std::string_view::npos ? line : line.substr(0, stop));
-      } else if (line.size() > 3) {
-        git_changes_.push_back(GitChange{.status = std::string(st::trim(line.substr(0, 2))),
-                                         .path = std::string(st::trim(line.substr(3)))});
+    const std::string scope = change.has_staged_side() && !change.has_unstaged_side()
+                                  ? "暂存的修改"
+                                  : "未暂存的修改";
+    git_confirm_title_ = std::format("放弃 {}（{}）", scope, change.path);
+    git_confirm_body_ = "改动将不可恢复地丢失（git restore）。确定放弃？";
+    pending_git_confirm_ = [this, path = change.path,
+                            staged_side = change.has_staged_side()] {
+      if (terminal_ptr == nullptr) return;
+      bottom_visible_.set(true);
+      // 两侧都有时先退暂存再还原工作区（一步做完，省得用户分两次）。
+      if (staged_side) {
+        terminal_ptr->run(std::format("git restore --staged -- {} && git checkout -- {}",
+                                      path, path));
+      } else {
+        terminal_ptr->run(std::format("git checkout -- {}", path));
       }
-      if (eol == std::string::npos) break;
-      begin = eol + 1;
+      git_refresh_pending_ = true;
+    };
+    git_confirm_open_.set(true);
+  }
+
+  /// 提交（提交框 Enter）：暂存全部 → 提交 → 刷新。
+  ///
+  /// 走终端而非同步 `process::run` 的理由与 `run_task` 相同：同步阻塞会把
+  /// 界面卡住（提交大仓库能到秒级），而终端通道输出实时回流、可中止。
+  void git_commit() {
+    const std::string message = commit_message_.value();
+    if (st::trim(message).empty()) {
+      status_.set("提交信息为空");
+      return;
     }
-    if (git_branch_.empty()) git_branch_ = "（游离 HEAD）";
-    status_.set(std::format("Git：{} · {} 项变更", git_branch_, git_changes_.size()));
+    if (terminal_ptr == nullptr || workspace_.empty()) return;
+    bottom_visible_.set(true);
+    // 消息作为单引号参数转义（用户文本不能直接拼进 shell——单引号内再替换单引号）。
+    const std::string escaped = "'" + st::replace_all(message, "'", "'\''") + "'";
+    terminal_ptr->run("git add -A && git commit -m " + escaped);
+    commit_message_.set("");
+    git_refresh_pending_ = true;
+    status_.set("已提交：" + std::string(st::trim(message)).substr(0, 40));
   }
 
   /// 展开一个变更文件：与 HEAD 的差异**跑进终端**（只读 `git diff`）。
   ///
   /// 为何不再开一个“输出面板”：差异是**命令的输出**，而命令的输出去处只有一个。
   /// 有两处就会产生“同一个 `git diff` 一会儿在这里、一会在那里”的困惑。
-  void show_git_diff(const GitChange& change) {
-    bottom_visible_.set(true);
-    // 真终端里应用只能**代敲**（自己不是那条流的写者）：把命令当输入送给 shell。
-    if (terminal_ptr != nullptr) {
-      terminal_ptr->run(std::format("git diff --no-color -- {}", change.path));
-    }
-    status_.set("差异已打开：" + change.path);
-  }
-
   // —— 运行任务：真跑 `st`（走终端的作业通道，输出实时回流）——
   //
   // 为何搬到终端后面：以前这里是同步 `st::process::run` + 写 `output_`，
