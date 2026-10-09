@@ -103,6 +103,21 @@ class Button : public Element {
   void set_tone(Tone tone);
   [[nodiscard]] auto variant() const noexcept -> Variant { return variant_; }
 
+  /// **图标盒径**（逻辑 px）——与 `apply_theme` 同一入口写入，供测试/宿主读取。
+  ///
+  /// 为何是一等读取面：图标尺寸是观感量，需要一个**被测对象自报的值**
+  /// （`perceptual_changes.md` §14：不要信旁路探针）。测试直接读它，
+  /// 就不必在测试里复刻一遍公式（复刻的公式一旦与实现脱钩就成假护栏）。
+  [[nodiscard]] auto icon_box() const noexcept -> float { return icon_size_; }
+
+  /// 当前图标在 `icon_box()` 盒里的**实际墨迹尺寸**（逻辑 px）。
+  ///
+  /// 排版（`measure`）与绘制（`paint_content`）都必须用它而不是盒宽：盒里
+  /// 有透明留白，按盒宽排版会让内容重心偏向文字一侧（见 `measure` 里的推导）。
+  [[nodiscard]] auto icon_ink_size() const -> math::Size {
+    return Icon::ink_size(icon_, math::Size{icon_size_, icon_size_});
+  }
+
   void apply_theme(const Theme& theme) override;
   void measure(const RenderContext& context, const Constraints& constraints) override;
   void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
@@ -126,6 +141,8 @@ class Button : public Element {
   Variant variant_{Variant::Primary};
   Size size_{Size::Medium};
   Tone tone_{Tone::Default};
+  /// 图标盒径（由 `apply_theme` 按 Size 档从 `Metrics::icon_size*` 取）。
+  float icon_size_{22.0f};
 };
 
 /// 卡片容器：`surface` 底 + 描边 + 圆角 + 阴影 + 内边距。

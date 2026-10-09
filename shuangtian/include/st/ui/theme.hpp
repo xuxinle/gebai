@@ -144,6 +144,20 @@ struct Metrics {
   float border_width{1.0f};
   float focus_width{2.0f};
 
+  /// **图标盒径**（逻辑 px，三档，随控件尺寸走）。
+  ///
+  /// 为何是独立令牌而不是「按字号推」：图标是**图形**，它的大小由控件的视觉重量
+  /// 决定，与文字度量不是一回事。从字号推（旧实现 `font_size + 2`）会把纯图标
+  /// 按钮的图标锁在字号阶梯上——而那类按钮的盒子（如活动栏 44×36）比字号阶梯
+  /// 宽得多，图标于是缩在中间一小块。实测：旧口径下活动栏图标墨迹仅占按钮宽
+  /// 40%、高 20%，而同类产品的图标占宽 60% 量级。
+  ///
+  /// 与 `font_*` 同样**不随 `scale_fonts` 缩放**：图标是控件级尺寸，跟着字号
+  /// 放大会与控件高度脱节（`control_height*` 也不缩放，同一道理）。
+  float icon_size_sm{20.0f};
+  float icon_size{22.0f};
+  float icon_size_lg{26.0f};
+
   float motion_fast{120.0f};
   float motion_normal{180.0f};
   float motion_slow{260.0f};
@@ -180,6 +194,7 @@ struct Metrics {
     font_2xl *= ratio;
     font_3xl *= ratio;
     font_scale = factor;
+    // `icon_size*` 刻意**不缩放**：见其定义处的说明。
   }
 };
 

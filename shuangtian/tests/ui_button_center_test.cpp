@@ -211,6 +211,12 @@ ST_TEST(button_content_is_centered_without_icon) {
 ///
 /// 这条正是 `btn-refresh` 那个缺陷的护栏：图标占位参与了居中计算，
 /// 若图标该画却没画，内容重心就会偏向文字一侧（实测右偏 12px）。
+///
+/// ⚠ **还镖一条 `measured_size` 断言**：本用例 `arrange` 给了**显式盒**，
+/// 居中是拿盒算的——于是 `measure` 里“图标算多宽”**不影响 dx**。
+/// 逆向验证实测：把 `measure` 从“按墨迹宽”回退成“按盒宽”，这条依旧绿。
+/// 要让那条修复可观测，得直接读**组件自报的宽度**（`perceptual_changes` §14：
+/// 读被测对象自报的值，不靠旁路探针）。
 ST_TEST(button_icon_and_text_together_are_centered) {
   DrawingStubPort port{};
   st::ui::Theme theme{st::ui::Theme::light()};
@@ -237,6 +243,21 @@ ST_TEST(button_icon_and_text_together_are_centered) {
   ST_CHECK(ink.x1 - ink.x0 > 40.0f);
   ST_CHECK_NEAR(dx, 0.0f, 0.5f);
   ST_CHECK_NEAR(dy, 0.0f, 0.5f);
+
+  // —— 宽度口径：图标按**墨迹宽**参与排版（不是盒宽）——
+  //
+  // 为何要单独镖：盒里有透明留白（描边式图标约 30%），按盒宽排版会让那些
+  // 留白也占位置。本用例的显式盒把 dx 掩盖了，所以另镖宽度本身。
+  const float font = button->style().font_size;
+  const float expect = port.measure_width("确定", font, st::text::FontRole::Proportional) +
+                       theme.metrics().space_sm + button->icon_ink_size().width +
+                       theme.metrics().space_lg * 2.0f;
+  const float measured = button->measured_size().width;
+  st::print("[btn-center] 宽 {}（期望 {}：文字 + 间距 + 墨迹宽 + 2×内边距）\n",
+            static_cast<double>(measured), static_cast<double>(expect));
+  ST_CHECK_NEAR(measured, expect, 0.01f);
+  // 若误用盒宽，宽度会比这个多出“盒 − 墨迹”（描边式图标约 4~5px）——分得开。
+  ST_CHECK(button->icon_box() - button->icon_ink_size().width > 2.0f);
 }
 
 /// **反向护栏**：图标名不在资源表里时，内容仍必须居中。

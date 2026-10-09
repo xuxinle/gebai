@@ -16,13 +16,15 @@
     <circle cx="6" cy="18" r="3"/>
     <path d="M18 9 a9 9 0 0 1 -9 9"/>
   </symbol>
-  <!-- 「变更」视图图标：横线 + 中间空心圆（IDEA 的 Commit 形态）。
-       与 src/ui/icon.cpp 内置表保持同一形状——**两套图标表，别只改一处**
-       （实测踩过：只改这里不生效，gbcode 用的是 C++ 内置表）。 -->
-  <symbol id="diff" viewBox="0 0 24 24">
-    <rect x="4" y="10.8" width="16" height="2.4"/>
-    <circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="2.4"/>
-  </symbol>
+  <!-- 「变更」视图图标：两侧横线 + 中间空心圆环（提交节点的通用形态）。
+ 与 src/ui/icon.cpp 内置表保持同一形状——**两套图标表，别只改一处**
+ （实测踩过：只改这里不生效，gbcode 用的是 C++ 内置表）。
+ 线**不穿过圆内部**（左右各停在圆的边缘），描边后是干净的“线—环—线”，圆内无墨。 -->
+ <symbol id="diff" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+         stroke-linecap="round">
+ <path d="M4 12 L8.4 12 M15.6 12 L20 12"/>
+ <circle cx="12" cy="12" r="3.4"/>
+ </symbol>
   <symbol id="play" viewBox="0 0 24 24">
     <polygon points="6 3 20 12 6 21 6 3"/>
   </symbol>

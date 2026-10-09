@@ -321,3 +321,122 @@ ST_TEST(ui_icon_unknown_name_is_empty_not_crash) {
   // 空盒子也不应崩
   ST_CHECK(Icon::path("check", Rect{0.0f, 0.0f, 0.0f, 0.0f}, 2.0f).is_empty());
 }
+
+/// **描边式与实心式图标渲染后要一样大**。
+///
+/// 为何必须钉：`view_bounds` 是**几何**包围盒，而描边式图标用 `stroke_path` 画，
+/// 线宽**跨在路径上**（两侧各外扩半个线宽），涂出的墨迹比几何包围盒多一个线宽；
+/// 实心图标用 `fill_path`，没有这层外扩。若归一化按几何算，实心图标就会
+/// **系统性小一个线宽**（实测：16px 盒里描边图标墨迹均 14.0px，而实心的 `diff`
+/// 当时只有 12.0px，小 14%——那是用户报「变更图标太小」的成因之一）。
+///
+/// ⚠ 样本选 `dot`（内置表里**当前唯一**的 filled 图标）。不要想当然地拿
+/// 语义相近的名字当实心样本——第一版用 `diff`，而它已改成描边式，
+/// 于是“回退修复后测试仍绿”（逆向验证拓到，`CONVENTIONS` §7.2 的同类坑）。
+/// 因此下面先**断言样本确实无描边外扩**，样本性质变了这条会先报错。
+///
+/// ⚠ 判据量**渲染后的像素**而不是 `view_bounds`：后者是纯几何量，
+/// 看不到描边外扩——用它做判据的话，回退修复后测试依旧是绿的（假护栏）。
+ST_TEST(ui_icon_stroked_and_filled_render_at_the_same_size) {
+  constexpr int kSize = 64;
+  // 墨迹最长边（逻辑 px）：与底色差异 > 8% 的像素都算墨。
+  const auto ink_extent = [](std::string_view name) -> float {
+    st::raster::Canvas canvas{kSize, kSize, 1.0f};
+    canvas.clear(st::math::Color::rgb(0xFF, 0xFF, 0xFF));
+    Icon::draw(canvas, name, Rect{0.0f, 0.0f, static_cast<float>(kSize), static_cast<float>(kSize)},
+               st::math::Color::rgb(0x00, 0x00, 0x00), 0.0f);
+    int min_x = kSize;
+    int max_x = -1;
+    int min_y = kSize;
+    int max_y = -1;
+    for (int y = 0; y < kSize; ++y) {
+      for (int x = 0; x < kSize; ++x) {
+        if (static_cast<int>(canvas.pixel_at(x, y).r) < 235) {
+          min_x = std::min(min_x, x);
+          max_x = std::max(max_x, x);
+          min_y = std::min(min_y, y);
+          max_y = std::max(max_y, y);
+        }
+      }
+    }
+    if (max_x < 0) return 0.0f;
+    return static_cast<float>(std::max(max_x - min_x + 1, max_y - min_y + 1));
+  };
+  // 描边式（`folder`/`search`/`terminal`…）与实心式（`dot`）各取样本。
+  const float stroked = (ink_extent("folder") + ink_extent("search") + ink_extent("terminal")) / 3.0f;
+  const float filled = ink_extent("dot");
+  st::print("[icon-ink] 描边式均 {:.1f}px · 实心式(dot) {:.1f}px · 差 {:.1f}%\n",
+            static_cast<double>(stroked), static_cast<double>(filled),
+            static_cast<double>((stroked - filled) / stroked) * 100.0);
+  ST_CHECK(stroked > 0.0f);
+  ST_CHECK(filled > 0.0f);
+  // 先钉“样本确实是实心式”：实心图标无描边外扩，声明值应当等于实际绘制
+  //（误差只来自抗锯齿边）。若 `dot` 被改成描边式，这里会先报错——
+  // 避免本该对照的样本静默退化，让下面的断言变成空转。
+  const st::math::Size dot_ink = Icon::ink_size("dot", st::math::Size{static_cast<float>(kSize),
+                                                                    static_cast<float>(kSize)});
+  const float dot_declared = std::max(dot_ink.width, dot_ink.height);
+  ST_CHECK_NEAR(dot_declared, filled, 2.0f);
+  // 归一化后两者应当收敛到一像素量级（64px 盒里一像素 ≈ 1.6%）。
+  // 回退修复（按几何归一）时实测差 ~4.8px，这条会变红。
+  ST_CHECK(std::abs(stroked - filled) <= 2.0f);
+}
+
+/// `Icon::ink_size` 与实际绘制的墨迹**一致**（“占多宽”= “画多宽”）。
+///
+/// 为何是硬护栏：`Button` 按 `ink_size` 排版内容，而 `Icon::draw` 按光学
+/// 归一化绘制。两者一旦脱钩，内容重心就会偏向一侧——实测（修前）偏移恰为
+/// `(盒宽 − 墨迹宽) / 4`，且**随盒变大而线性变大**（盒 16→20 时 0.5→1.5px，
+/// 直接把 `button_icon_and_text_together_are_centered` 撞红）。
+ST_TEST(ui_icon_ink_size_matches_what_is_drawn) {
+  // ⚠ 盒径必须够大，让**被测的差**超过抗锯齿噪声：描边外扩漏乘 fit 带来的
+  // 误差随盒径线性增长（64px 时 ~0.8px），而抗锯齿边缘本身就有 ~0.7px 的
+  // 像素栅格抖动——两者同量级时判据分辨不出来（逆向验证实测：64px 下
+  // 回退该修复**测试仍绿**）。取 256px：误差 ~3px 对噪声 0.7px，判据分得开。
+  constexpr int kSize = 256;
+  const auto drawn_extent = [](std::string_view name) -> float {
+    st::raster::Canvas canvas{kSize, kSize, 1.0f};
+    canvas.clear(st::math::Color::rgb(0xFF, 0xFF, 0xFF));
+    Icon::draw(canvas, name, Rect{0.0f, 0.0f, static_cast<float>(kSize), static_cast<float>(kSize)},
+               st::math::Color::rgb(0x00, 0x00, 0x00), 0.0f);
+    int min_x = kSize;
+    int max_x = -1;
+    int min_y = kSize;
+    int max_y = -1;
+    for (int y = 0; y < kSize; ++y) {
+      for (int x = 0; x < kSize; ++x) {
+        if (static_cast<int>(canvas.pixel_at(x, y).r) < 235) {
+          min_x = std::min(min_x, x);
+          max_x = std::max(max_x, x);
+          min_y = std::min(min_y, y);
+          max_y = std::max(max_y, y);
+        }
+      }
+    }
+    if (max_x < 0) return 0.0f;
+    return static_cast<float>(std::max(max_x - min_x + 1, max_y - min_y + 1));
+  };
+  const float box = static_cast<float>(kSize);
+  std::size_t checked = 0;
+  float worst = 0.0f;
+  for (const auto& name : {"folder", "search", "diff", "play", "package", "terminal", "check", "dot"}) {
+    const st::math::Size ink = Icon::ink_size(name, st::math::Size{box, box});
+    const float declared = std::max(ink.width, ink.height);
+    const float drawn = drawn_extent(name);
+    ST_CHECK(declared > 0.0f);
+    const float error = std::abs(declared - drawn);
+    worst = std::max(worst, error);
+    ++checked;
+    st::print("  {:<10} 声明 {:.1f} · 实际 {:.1f} · 差 {:.2f}px\n", name,
+              static_cast<double>(declared), static_cast<double>(drawn),
+              static_cast<double>(error));
+    // 容差 2px（**与盒径无关**的绝对量）：抗锯齿边缘——判据取覆盖率 > 8%，
+    // 边缘那圈半透明像素被算进来，比几何边多出不到一像素，与 256px 盒无关。
+    // 实测（修好）：描边式 2.62px / 实心 2.19px，误差 0.43px。
+    // 回退修复（描边项漏乘 fit）时描边式掉到 2.00px，误差 3.05px —— 分得开。
+    ST_CHECK(error <= 2.0f);
+  }
+  st::print("[icon-ink] ink_size vs 实际绘制：{} 个图标，最大误差 {:.2f}px\n", checked,
+            static_cast<double>(worst));
+  ST_CHECK(checked >= 8U);
+}

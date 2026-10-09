@@ -330,6 +330,9 @@ void Button::apply_theme(const Theme& theme) {
   style_.radius = metrics.radius_md;
   style_.font_size = size_ == Size::Small ? metrics.font_sm
                                           : (size_ == Size::Large ? metrics.font_lg : metrics.font_base);
+  // 图标盒径：三档取自 `Metrics::icon_size*`（独立令牌，不从字号推——见其定义处）。
+  icon_size_ = size_ == Size::Small ? metrics.icon_size_sm
+                                    : (size_ == Size::Large ? metrics.icon_size_lg : metrics.icon_size);
   style_.font_weight = FontWeight::Medium;
   style_.border_width = 0.0f;
   style_.align_items = Align::Center;
@@ -399,8 +402,14 @@ void Button::measure(const RenderContext& context, const Constraints& constraint
   // （名字无效时那里不画、这里若算了宽度，按钮就会宽出一截且内容偏移）。
   // 间距只在**图标与文字同时存在**时计入（与 `paint_content` 的 `gap` 同规则）；
   // 纯图标按钮只有图标本身。
+  //
+  // ⚠ **按图标实际墨迹宽计，不是盒宽**：`Icon::path` 会把墨迹等比缩放并
+  // **居中**到盒里，于是盒两侧有透明留白（描边式图标约 30%）。按盒宽排版
+  // 会让那些留白也占位置——而绘制时墨迹居中，重心因此偏向文字一侧。
+  // 实测（图标+文字按钮）：偏移恰为 `(盒宽 − 墨迹宽) / 4`，且**随盒变大而线性变大**
+  // （图标盒 16→20 时偏差从 0.5 涨到 1.5px）。按墨迹排版后两个量同一个事实。
   if (!icon_.empty() && Icon::has(icon_)) {
-    width += style_.font_size;
+    width += icon_ink_size().width;
     if (!label_.empty()) width += metrics.space_sm;
   }
   width = std::max(width, height);
@@ -420,7 +429,9 @@ void Button::paint_content(const RenderContext& context, raster::Surface& canvas
   const Metrics& metrics = context.theme.metrics();
   const TextPort& port = port_of(context);
   const float font_size = style_.font_size;
-  const float icon_size = font_size + 2.0f;
+  // 图标盒径：`apply_theme` 写入的档位值（与 `measure` 里**同一个量**，
+  // 否则「量出来的宽度」与「画出来的图标」会对不上）。
+  const float icon_size = icon_size_;
   // **图标名必须真的画得出来，才给它预留空间**。
   //
   // `icon_` 非空 ≠ 画得出来：名字不在内置表（也不是已装载的 SVG id）时，
@@ -433,7 +444,11 @@ void Button::paint_content(const RenderContext& context, raster::Surface& canvas
   warn_unknown_icon_once(icon_);
   const bool draws_icon = !icon_.empty() && Icon::has(icon_);
   const float gap = (draws_icon && !label_.empty()) ? metrics.space_sm : 0.0f;
-  const float icon_extent = draws_icon ? icon_size + gap : 0.0f;
+  // **按墨迹宽的排版占位**：盒里有透明留白（描边式图标约 30%），而绘制时
+  // 墨迹是**居中**在盒里的——占位与墨迹同宽，内容才真的居中。
+  // （与 `measure` 用的是同一个量；见那里的推导与实测数据。）
+  const float icon_ink = draws_icon ? icon_ink_size().width : 0.0f;
+  const float icon_extent = draws_icon ? icon_ink + gap : 0.0f;
   // **文本先按可用宽度截断再加省略号**：不截断时超长标签会画到按钮之外
   // （按钮被父容器夹窄了，但文本宽度还是它自己的量法），于是相邻面板上会多出
   // 一截看不清源头的字——实测就是侧栏 Git 变更项的路径叠到了代码上。
@@ -445,8 +460,15 @@ void Button::paint_content(const RenderContext& context, raster::Surface& canvas
   const float center_y = bounds_.center().y;
 
   if (draws_icon && icon_leading) {
-    Icon::draw(canvas, icon_, math::Rect{cursor, center_y - icon_size * 0.5f, icon_size, icon_size},
-               style_.color);
+    // 盒的左缘 = 当前光标 **减去墨迹在盒内的左边距**（`(盒 − 墨迹) / 2`，
+    // 与 `Icon::path` 的居中同一口径）——墨迹才会落在 `cursor` 处。
+    const float icon_left = cursor - (icon_size - icon_ink) * 0.5f;
+    // 线宽传 0：`Icon::draw` 会按 `stroke/24 × 盒径` 随盒缩放（与 `IconView`、
+    // 标题栏同口径）。固定 2px 会让大盒里笔画偏细、小盒里偏粗——同一个图标在
+    // 不同档按钮里“看着不一样重”，而笔画粗细是另一个正交量。
+    Icon::draw(canvas, icon_,
+               math::Rect{icon_left, center_y - icon_size * 0.5f, icon_size, icon_size},
+               style_.color, 0.0f);
     cursor += icon_extent;
   }
   if (!clipped.empty()) {
@@ -457,8 +479,10 @@ void Button::paint_content(const RenderContext& context, raster::Surface& canvas
     port.draw(canvas, clipped, math::Point{cursor, y}, font_size, style_.color);
   }
   if (draws_icon && !icon_leading) {
-    Icon::draw(canvas, icon_, math::Rect{cursor, center_y - icon_size * 0.5f, icon_size, icon_size},
-               style_.color);
+    const float icon_left = cursor - (icon_size - icon_ink) * 0.5f;
+    Icon::draw(canvas, icon_,
+               math::Rect{icon_left, center_y - icon_size * 0.5f, icon_size, icon_size},
+               style_.color, 0.0f);
   }
   if (focused_) {
     // **与其它组件走同一条焦点环**（`paint_focus_ring`），不再自己画一份。

@@ -42,6 +42,17 @@ class Icon {
   /// 图标在 24×24 视图框内的实际包围盒（布局对齐用）。
   [[nodiscard]] static auto view_bounds(std::string_view name) -> math::Rect;
 
+  /// 图标画在 `box` 里时的**实际墨迹尺寸**（逻辑 px）。
+  ///
+  /// 为何需要：`path` 会把墨迹等比缩放**居中**到 `box`，于是墨迹通常**小于 box**
+  /// （归一化后的留白）。宿主若按 box 尺寸排版，那些透明留白也占位置——
+  /// 实测（`Button` 图标+文字）：内容重心偏移恰为 `(box − 墨迹) / 4`，
+  /// 且随 box 变大而线性变大。要“看着居中”就得按墨迹排版。
+  ///
+  /// 与 `path` **同一算式**：几何 × fit 再补上描边外扩（描边式两侧各半个线宽，
+  /// 实心式无外扩）。两者必须是同一个事实，否则“占多宽”与“画多宽”会再次脱钩。
+  [[nodiscard]] static auto ink_size(std::string_view name, math::Size box) -> math::Size;
+
  private:
   [[nodiscard]] static auto find(std::string_view name) noexcept -> const IconGlyph*;
 };
