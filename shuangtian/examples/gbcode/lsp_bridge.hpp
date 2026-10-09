@@ -29,6 +29,7 @@
 
 #include "st/lsp/client.hpp"
 #include "st/lsp/completion.hpp"
+#include "st/lsp/navigation.hpp"
 #include "st/ui/components/code_editor.hpp"
 
 namespace gbcode {
@@ -130,6 +131,32 @@ class LanguageService {
   auto resolve_completion(std::string_view path, std::size_t index) -> std::int64_t;
   /// 详情回调：`(请求 id, 文本)`。
   std::function<void(std::int64_t, const std::string&)> on_completion_detail{};
+
+  // —— 导航（阶段 5）——
+
+  /// 跳到定义（`textDocument/definition`）。
+  auto request_definition(std::string_view path, std::uint32_t line, std::uint32_t character)
+      -> std::int64_t;
+  /// 找引用（`textDocument/references`；`include_declaration` 决定是否含声明本身）。
+  auto request_references(std::string_view path, std::uint32_t line, std::uint32_t character,
+                          bool include_declaration) -> std::int64_t;
+  /// 悬停信息（`textDocument/hover`）。
+  auto request_hover(std::string_view path, std::uint32_t line, std::uint32_t character)
+      -> std::int64_t;
+  /// 文档大纲（`textDocument/documentSymbol`）。
+  auto request_document_symbols(std::string_view path) -> std::int64_t;
+  /// 工作区符号搜索（`workspace/symbol`）。
+  auto request_workspace_symbols(std::string_view query) -> std::int64_t;
+
+  /// 定义/引用跳转结果回调（同一个回调：应用侧按 id 区分）。
+  std::function<void(std::int64_t, const std::vector<st::lsp::Location>&)> on_locations{};
+  /// 悬停结果回调（`nullopt` = 该处无信息）。
+  std::function<void(std::int64_t, const std::optional<st::lsp::HoverInfo>&)> on_hover{};
+  /// 文档大纲回调。
+  std::function<void(std::int64_t, const std::vector<st::lsp::DocumentSymbol>&)> on_symbols{};
+  /// 工作区符号回调。
+  std::function<void(std::int64_t, const std::vector<st::lsp::WorkspaceSymbol>&)>
+      on_workspace_symbols{};
 
   /// 当前活动文件路径（诊断归属它；由 `ensure_started` 更新）。
   [[nodiscard]] auto active_path() const -> const std::string&;

@@ -712,6 +712,20 @@ struct CodeEditorPage : Component {
     lsp_.on_completion_detail = [this](std::int64_t id, const std::string& detail) {
       on_completion_detail_response(id, detail);
     };
+    lsp_.on_locations = [this](std::int64_t id, const std::vector<st::lsp::Location>& locations) {
+      on_locations_response(id, locations);
+    };
+    lsp_.on_hover = [this](std::int64_t id, const std::optional<st::lsp::HoverInfo>& info) {
+      on_hover_response(id, info);
+    };
+    lsp_.on_symbols = [this](std::int64_t id,
+                             const std::vector<st::lsp::DocumentSymbol>& symbols) {
+      on_symbols_response(id, symbols);
+    };
+    lsp_.on_workspace_symbols =
+        [this](std::int64_t id, const std::vector<st::lsp::WorkspaceSymbol>& symbols) {
+          on_workspace_symbols_response(id, symbols);
+        };
   }
 
   /// 把当前文件告知语言服务（首次会懒启动对应 server）。
@@ -722,6 +736,7 @@ struct CodeEditorPage : Component {
     if (!lsp_.ensure_started(buffer.path, buffer.language)) return;
     wire_language_callbacks();
     lsp_.sync_document(buffer.path, buffer.text);
+    refresh_document_symbols();   // 切文件：大纲跟着换
   }
 
   [[nodiscard]] auto error_count() const -> std::size_t {
@@ -826,9 +841,32 @@ struct CodeEditorPage : Component {
     // 正确写法：泵**总是执行**（它内部搬消息、派发回调），返回值只决定
     // 要不要刷新编辑器诊断。
     const bool diagnostics_changed = lsp_.pump();
+    // 待落地的跳转（跨文件）：编辑器实例在新文件装载后才就位，所以在这里补做。
+    apply_pending_navigation_jump();
     if (!diagnostics_changed) return;
     refresh_problems();
     push_diagnostics_to_editor();
+  }
+
+  /// 落地"上一帧记下的跨文件跳转"（定义/引用结果）。
+  ///
+  /// 为什么要等一帧：`jump_to_location` 里 `open_path` 只是改了状态，
+  /// 编辑器实例要到**下一次重组**才拿到新文本（`set_text` 在那里发生）——
+  /// 立刻 `goto_line` 会跳在旧文件上（实测：跳定义时行号对了但内容还是上一个文件）。
+  void apply_pending_navigation_jump() {
+    if (!pending_jump_pending_ || editor == nullptr) return;
+    // 编辑器装的还是旧文件时不落地（等它换过来）。
+    if (loaded_key_ != current_buffer_path()) return;
+    pending_jump_pending_ = false;
+    const std::size_t line = pending_jump_.first;
+    const std::size_t column = pending_jump_.second;
+    editor->goto_line(line);
+    if (column > 0) {
+      // 跳到列：`goto_line` 落在行首，再按偏移把光标移到标识符起点。
+      const std::size_t start = editor->cursor_index() + (column - 1);
+      editor->set_selection(start, start);
+    }
+    editor->scroll_to_line(line);
   }
 
   /// 把 LSP 诊断推给编辑器（只在**内容变了**时写，见 `lsp_diagnostics_stamp_`）。
@@ -2482,6 +2520,12 @@ struct CodeEditorPage : Component {
  auto new_file_request() -> void { new_file_prompt(); }
  /// 手动触发补全（入口快捷键 Ctrl+Space 用）。
  auto completion_request() -> void { trigger_completion(); }
+ /// 跳到定义（入口快捷键 F12 用）。
+ auto definition_request() -> void { goto_definition(); }
+ /// 找引用（入口快捷键 Shift+F12 用）。
+ auto references_request() -> void { find_references(); }
+ /// 悬停信息（入口快捷键 Ctrl+K 用；鼠标悬停走编辑器回调）。
+ auto hover_request() -> void { request_hover_at_cursor(); }
  /// 刷新 Git 状态（入口快捷键用）。
  auto refresh_git_request() -> void { refresh_git(); }
  /// 跳到第 index 处问题（入口快捷键用）。
@@ -3037,6 +3081,148 @@ struct CodeEditorPage : Component {
     }
   }
 
+
+  // ————————————————————————————————————————————————————————————————————————
+  // 导航（LSP 阶段 5）：定义 / 引用 / 悬停 / 大纲
+  // ————————————————————————————————————————————————————————————————————————
+
+  /// 当前活动文件的可读信息（路径 + 光标位置）。无则返回 false。
+  auto current_document(std::string* path, st::lsp::Position* position) -> bool {
+    if (editor == nullptr) return false;
+    const auto list = buffers_.value();
+    const std::size_t active = active_.value();
+    if (active >= list.size() || list[active].path.empty()) return false;
+    if (!lsp_.active()) return false;
+    const auto found = lsp_.offset_to_position(list[active].path, editor->cursor_index());
+    if (!found.has_value()) return false;
+    *path = list[active].path;
+    *position = *found;
+    return true;
+  }
+
+  /// 是否处于"可跳转"状态（供状态栏/命令面板判断可用性）。
+  [[nodiscard]] auto navigation_ready() const -> bool {
+    if (editor == nullptr || !lsp_.active()) return false;
+    const auto list = buffers_.value();
+    return active_.value() < list.size() && !list[active_.value()].path.empty();
+  }
+
+  /// F12：跳到定义。
+  void goto_definition() {
+    std::string path;
+    st::lsp::Position position{};
+    if (!current_document(&path, &position)) {
+      status_.set(lsp_.active() ? "需要磁盘上的文件才能跳转定义" : "语言服务未就绪");
+      return;
+    }
+    if (lsp_.request_definition(path, static_cast<std::uint32_t>(position.line),
+                                static_cast<std::uint32_t>(position.character)) == 0) {
+      status_.set("定义请求未发出");
+    }
+  }
+
+  /// Shift+F12：找引用。
+  void find_references() {
+    std::string path;
+    st::lsp::Position position{};
+    if (!current_document(&path, &position)) {
+      status_.set(lsp_.active() ? "需要磁盘上的文件才能查引用" : "语言服务未就绪");
+      return;
+    }
+    // `include_declaration = false`：找"谁用了它"。含声明的话第一项永远是定义处，
+    // 每次都要跳过它——那是"引用列表"该有的形态吗？VSCode 默认含，但它把定义
+    // 单独标注；我们没有那个标注能力，所以不含更干净。
+    (void)lsp_.request_references(path, static_cast<std::uint32_t>(position.line),
+                                  static_cast<std::uint32_t>(position.character), false);
+  }
+
+  /// 悬停（鼠标停留）：请求当前位置的信息。
+  void request_hover_at_cursor() {
+    std::string path;
+    st::lsp::Position position{};
+    if (!current_document(&path, &position)) return;
+    hover_request_ = lsp_.request_hover(path, static_cast<std::uint32_t>(position.line),
+                                        static_cast<std::uint32_t>(position.character));
+  }
+
+  /// 文档大纲：把符号列表放进 `symbols_`（供面板/命令面板显示）。
+  void refresh_document_symbols() {
+    const auto list = buffers_.value();
+    if (active_.value() >= list.size() || list[active_.value()].path.empty() || !lsp_.active()) {
+      symbols_.clear();
+      symbols_path_.clear();
+      return;
+    }
+    (void)lsp_.request_document_symbols(list[active_.value()].path);
+  }
+
+  /// 工作区符号搜索（命令面板输入时调）。
+  void search_workspace_symbols(const std::string& query) {
+    if (!lsp_.active()) return;
+    (void)lsp_.request_workspace_symbols(query);
+  }
+
+  /// 跳到某个位置（定义/引用结果共用）：必要时先打开文件。
+  void jump_to_location(const st::lsp::Location& location) {
+    const std::string path = st::lsp::LspClient::uri_to_path(location.uri);
+    if (path.empty()) return;
+    // 优先 `selection`（`LocationLink` 的标识符本身），退回 `range`。
+    const st::lsp::Range range =
+        location.selection.has_value() ? *location.selection : location.range;
+    if (path != current_buffer_path()) {
+      open_path(path);   // 换文件（`open_path` 会切标签并装载）
+    }
+    // 跳转要**等编辑器装载完**（`set_text` 在重组时发生）——所以用 pending 队列，
+    // 与既有的 `pending_jump_` 同一套路（帧首落地）。
+    pending_jump_ = {range.start.line + 1, range.start.character + 1};
+    pending_jump_pending_ = true;
+  }
+
+  /// 当前活动缓冲的路径（无则空）。
+  [[nodiscard]] auto current_buffer_path() const -> std::string {
+    const auto list = buffers_.value();
+    return active_.value() < list.size() ? list[active_.value()].path : std::string{};
+  }
+
+  /// 位置结果 → 状态栏摘要（带计数，让用户知道"找到几处"）。
+  void on_locations_response(std::int64_t id, const std::vector<st::lsp::Location>& locations) {
+    (void)id;
+    if (locations.empty()) {
+      status_.set("没有找到结果");
+      return;
+    }
+    if (locations.size() == 1) {
+      jump_to_location(locations.front());
+      status_.set("已跳转：" + st::lsp::LspClient::uri_to_path(locations.front().uri));
+      return;
+    }
+    // 多处：列进 `locations_` 供"结果面板"用，先跳到第一处。
+    locations_ = locations;
+    jump_to_location(locations.front());
+    status_.set(std::format("找到 {} 处，已跳到第 1 处", locations.size()));
+  }
+
+  /// 悬停响应：把文本存起来（编辑器右上角的提示框由 `hover_text_` 驱动）。
+  void on_hover_response(std::int64_t id, const std::optional<st::lsp::HoverInfo>& info) {
+    if (id != hover_request_) return;   // 旧响应丢弃
+    hover_text_ = info.has_value() ? info->text : std::string{};
+  }
+
+  /// 大纲响应。
+  void on_symbols_response(std::int64_t, const std::vector<st::lsp::DocumentSymbol>& symbols) {
+    symbols_ = symbols;
+    const auto list = buffers_.value();
+    symbols_path_ = active_.value() < list.size() ? list[active_.value()].path : std::string{};
+    // 大纲已加载：若面板开着，重组会把它画出来（`symbols_` 是普通成员，
+    // 但面板由 `State<bool>` 驱动可见性，所以这里不再需要额外标脏）。
+  }
+
+  /// 工作区符号响应：接进命令面板的文件表（复用既有 UI）。
+  void on_workspace_symbols_response(std::int64_t,
+                                     const std::vector<st::lsp::WorkspaceSymbol>& symbols) {
+    workspace_symbols_ = symbols;
+  }
+
   /// 编辑区按键：补全交互（Enter 接受 / Esc 关闭 / 上下选择）优先于编辑器默认。
   /// 返回 true = 已消费。
   auto handle_completion_key(std::string_view key) -> bool {
@@ -3198,6 +3384,21 @@ struct CodeEditorPage : Component {
   st::math::Rect completion_anchor_{};
   /// 语言服务回调是否已接线（只挂一次——重复挂会让回调互相覆盖）。
   bool language_callbacks_wired_{false};
+  // —— 导航（阶段 5）的运行时状态 ——
+  /// 悬停请求 id（丢弃旧响应；鼠标移动会连发好几个）。
+  std::int64_t hover_request_{0};
+  /// 悬停文本（空 = 不显示提示）。
+  std::string hover_text_{};
+  /// 最近一次"跳到定义/引用"的多处结果（结果面板用）。
+  std::vector<st::lsp::Location> locations_{};
+  /// 当前文件的符号大纲。
+  std::vector<st::lsp::DocumentSymbol> symbols_{};
+  /// 大纲对应的文件路径（切文件后作废）。
+  std::string symbols_path_{};
+  /// 工作区符号搜索结果。
+  std::vector<st::lsp::WorkspaceSymbol> workspace_symbols_{};
+  /// 待落地的跳转（跨文件跳转要等编辑器装载；与既有 `pending_jump_` 同一套路）。
+  bool pending_jump_pending_{false};
   /// 底部面板当前高度比例（上下分栏的 `ratio`）。
   ///
   /// **刻意不是 `State`**：分栏组件自己持有比例并据此重排，拖动时它逐像素回调本值——
@@ -3504,6 +3705,23 @@ auto run_app(int argc, char** argv) -> int {
     bind("`", false, [page] { page->toggle_terminal_panel(); });
     bind("Backquote", false, [page] { page->toggle_terminal_panel(); });
     bind("k", false, [page] { page->shortcuts_open_.set(!page->shortcuts_open_.value()); });
+    // F12：跳定义；Shift+F12：找引用；Ctrl+K：悬停信息（VSCode 是 Ctrl+K Ctrl+I，
+    // 但两段式键在我们这套表里表达不了——单段 Ctrl+K 更直接）。
+    {
+      UiRoot::Shortcut plain{};
+      plain.key = "f12";
+      (void)root->register_shortcut("f12", plain, [page]() {
+        page->definition_request();
+        return true;
+      });
+      UiRoot::Shortcut with_shift{};
+      with_shift.key = "f12";
+      with_shift.shift = true;
+      (void)root->register_shortcut("f12", with_shift, [page]() {
+        page->references_request();
+        return true;
+      });
+    }
     // Ctrl+Space：手动触发补全（VSCode/IDEA 的通用键位）。
     //
     // ⚠ 这里**不能走 `bind`**（它的 `overlay_open` 守卫会挡住补全弹层自己）——

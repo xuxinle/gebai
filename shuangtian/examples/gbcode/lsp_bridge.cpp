@@ -157,6 +157,35 @@ LanguageService::LanguageService() : impl_(std::make_unique<Impl>()) {
       }
       return;
     }
+    // —— 导航类（阶段 5）：在桥内消化，应用层拿的是解析结果 ——
+    if (method == "textDocument/definition" || method == "textDocument/references" ||
+        method == "textDocument/implementation" || method == "textDocument/declaration") {
+      if (on_locations) {
+        on_locations(id, is_error ? std::vector<st::lsp::Location>{}
+                                  : st::lsp::parse_locations(result));
+      }
+      return;
+    }
+    if (method == "textDocument/hover") {
+      if (on_hover) {
+        on_hover(id, is_error ? std::nullopt : st::lsp::parse_hover(result));
+      }
+      return;
+    }
+    if (method == "textDocument/documentSymbol") {
+      if (on_symbols) {
+        on_symbols(id, is_error ? std::vector<st::lsp::DocumentSymbol>{}
+                                : st::lsp::parse_document_symbols(result));
+      }
+      return;
+    }
+    if (method == "workspace/symbol") {
+      if (on_workspace_symbols) {
+        on_workspace_symbols(id, is_error ? std::vector<st::lsp::WorkspaceSymbol>{}
+                                          : st::lsp::parse_workspace_symbols(result));
+      }
+      return;
+    }
     if (on_response) on_response(id, method, result, is_error);
   };
 }
@@ -339,6 +368,66 @@ auto LanguageService::resolve_completion(std::string_view path, std::size_t inde
   if (!impl_->started || index >= impl_->last_completion.size()) return 0;
   // `completionItem/resolve` 要求把**候选原始 JSON 原样回传**（server 靠它认项）。
   return impl_->client.request("completionItem/resolve", impl_->last_completion[index].raw);
+}
+
+namespace {
+
+/// 组一个"文本位置"参数（`{textDocument:{uri}, position:{line, character}}`）。
+[[nodiscard]] auto position_params(std::string_view path, std::uint32_t line,
+                                   std::uint32_t character) -> st::Json {
+  st::Json params = st::Json::object();
+  st::Json item = st::Json::object();
+  item["uri"] = st::lsp::LspClient::path_to_uri(path);
+  params["textDocument"] = std::move(item);
+  st::Json position = st::Json::object();
+  position["line"] = line;
+  position["character"] = character;
+  params["position"] = std::move(position);
+  return params;
+}
+
+}  // namespace
+
+auto LanguageService::request_definition(std::string_view path, std::uint32_t line,
+                                        std::uint32_t character) -> std::int64_t {
+  if (!impl_->started) return 0;
+  return impl_->client.request("textDocument/definition",
+                              position_params(path, line, character));
+}
+
+auto LanguageService::request_references(std::string_view path, std::uint32_t line,
+                                        std::uint32_t character, bool include_declaration)
+    -> std::int64_t {
+  if (!impl_->started) return 0;
+  st::Json params = position_params(path, line, character);
+  // `context.includeDeclaration`：是否把"声明本身"也算一处引用。
+  // 找"谁用了它"时应当 false（否则第一项永远是定义处，用户每次都要跳过它）。
+  st::Json context = st::Json::object();
+  context["includeDeclaration"] = include_declaration;
+  params["context"] = std::move(context);
+  return impl_->client.request("textDocument/references", std::move(params));
+}
+
+auto LanguageService::request_hover(std::string_view path, std::uint32_t line,
+                                    std::uint32_t character) -> std::int64_t {
+  if (!impl_->started) return 0;
+  return impl_->client.request("textDocument/hover", position_params(path, line, character));
+}
+
+auto LanguageService::request_document_symbols(std::string_view path) -> std::int64_t {
+  if (!impl_->started) return 0;
+  st::Json params = st::Json::object();
+  st::Json item = st::Json::object();
+  item["uri"] = st::lsp::LspClient::path_to_uri(path);
+  params["textDocument"] = std::move(item);
+  return impl_->client.request("textDocument/documentSymbol", std::move(params));
+}
+
+auto LanguageService::request_workspace_symbols(std::string_view query) -> std::int64_t {
+  if (!impl_->started) return 0;
+  st::Json params = st::Json::object();
+  params["query"] = std::string(query);
+  return impl_->client.request("workspace/symbol", std::move(params));
 }
 
 void LanguageService::shutdown(std::int64_t timeout_ms) {
