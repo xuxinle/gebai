@@ -525,6 +525,18 @@ struct CodeEditorPage : Component {
   Input* commit_input_ptr{nullptr};
   /// 终端里的 git 命令跑完后要刷新状态（pump 里落地——命令完成时机不可知）。
   bool git_refresh_pending_{false};
+  // —— Git 工具窗（阶段 B）——
+  /// 底部面板当前标签（0=终端 1=Git）。
+  State<std::size_t> bottom_tab_{0};
+  /// 日志/分支已读（帧首泵读；git 操作后置 false 重读）。
+  bool git_log_loaded_{false};
+  /// 需要读日志（Git 标签可见或状态栏入口点过；泵里消费）。
+  bool git_log_wanted_{false};
+  std::vector<gbcode::LogEntry> git_log_{};
+  std::vector<gbcode::BranchInfo> git_branches_{};
+  /// 选中的提交（详情摘要与高亮用）。
+  std::string git_selected_hash_{};
+  State<std::string> git_commit_summary_{};
   /// 状态栏问题计数“轮跳”到第几处（反复点同一个计数就依次往下跳）。
   std::size_t problem_cycle_{0};
   /// 已注册的语言清单（扩展视图用；懒加载一次）。
@@ -873,7 +885,9 @@ struct CodeEditorPage : Component {
     if (git_refresh_pending_ && terminal_ptr != nullptr && !terminal_ptr->any_busy()) {
       git_refresh_pending_ = false;
       refresh_git();
+      git_log_loaded_ = false;   // git 操作后日志也旧了（提交/切分支都改历史）
     }
+    ensure_git_log();
     const bool diagnostics_changed = lsp_.pump();
     // 待落地的跳转（跨文件）：编辑器实例在新文件装载后才就位，所以在这里补做。
     apply_pending_navigation_jump();
@@ -2043,9 +2057,43 @@ struct CodeEditorPage : Component {
   // 底部面板**只有终端一个视图**（问题/输出已删，见 `Problem` 处的说明）——
   // 于是这里不再需要标签栏，只留一行“终端标题 + 状态 + 动作”。
   void build_bottom(Composer& c) {
-    // 面板头已删（2026-10-09 合并进组件标签栏）：会话标签 + 「+」新建 +
-    // 清屏/中止/收起动作钮都在 `Terminal` 的标签栏尾部（`Tabs` 的 trailing 机制），
-    // 那 32px 还给屏幕。这里只剩终端本体。
+    // —— 底部双标签：终端 | Git（版本管理重构 B）——
+    //
+    // 参照歌白文件工作台（IDEA 风格）：底部留给"回顾历史"——分支 | 日志 | 提交内容，
+    // 与左侧「变更」（改了什么/要提交什么）**节奏不同**。终端与 Git 同槽互斥
+    // （同一停靠位/高度），切换只切内容，两个实例都保留（终端的会话不能因为
+    // 看一眼日志就被销毁）。
+    column(c, {.gap = 0.0f, .grow = true, .id = "bottom-tabs"}, [&] {
+      (void)custom<Tabs>(c, [this](Tabs& tabs) {
+        tabs.set_id("bottom-panel-tabs");
+        tabs.set_tabs({"终端", "Git"});
+        tabs.set_active(bottom_tab_.value());
+        tabs.on_change = [this](std::size_t index) { bottom_tab_.set(index); };
+      }, {.height = 30.0f, .key = "bottom-tabs-bar"});
+      // **两个都声明**（不是条件声明）：终端实例必须常驻——切到 Git 标签时
+      // 摘掉它会让 `terminal_ptr` 悬垂，下一帧 `pump_terminal()` 对着尸体调
+      // `pump()` 就是 SIGSEGV（实测：点状态栏分支切 Git → 必崩，栈在
+      // `AnsiScreen::feed`——读的是已释放的行缓冲）。
+      // 隐藏用 `visible`（子树保留、只不布局不绘制），与侧栏同一个范式。
+      if (bottom_tab_.value() == 0) {
+        build_terminal_body(c);
+      } else {
+        build_terminal_body_hidden(c);
+        build_git_view(c);
+      }
+    });
+  }
+
+  /// 终端的**隐藏声明**（Git 标签激活时保持实例存活——只藏不拆）。
+  void build_terminal_body_hidden(Composer& c) {
+    (void)custom_container<Panel>(
+        c, [&] { build_terminal_body(c); },
+        [](Panel& panel) { panel.set_visible(false); },
+        {.height = 0.0f, .key = "terminal-hidden"});
+  }
+
+  /// 终端本体（`build_bottom` 的终端标签内容）。
+  void build_terminal_body(Composer& c) {
     (void)custom<Terminal>(c, [this](Terminal& view) {
       view.set_id("terminal");
       // 默认目录跟着工作区（`switch_workspace` 会同步它）。
@@ -2076,6 +2124,148 @@ struct CodeEditorPage : Component {
       };
       terminal_ptr = &view;
     }, {.grow = true, .key = "terminal"});
+  }
+
+  // —— Git 工具窗（底部标签 2）：分支 | 日志 ——
+  //
+  // 与左侧「变更」的分工（歌白工作台同一分法）：这里看**历史**——分支列表
+  // （本地/远程、当前标记）与日志泳道（refs 胶囊 + 提交信息）；点提交看它
+  // 改了什么（文件 + 增删统计 + diff 只读标签）。
+  void build_git_view(Composer& c) {
+    if (workspace_.empty()) {
+      column(c, {.padding = 12.0f, .grow = true}, [&] {
+        (void)text(c, [] { return std::string("内置样例模式：没有工作区"); });
+      });
+      return;
+    }
+    // 惰性读在**帧首泵**做（`ensure_git_log`）——渲染期起子进程会在重组栈上
+    // fork + 管道等待，任何一处重入（状态 set 触发同步重组）都会踩坏声明式树
+    //（实测：点状态栏分支打开 Git 标签 → SIGSEGV，崩点就在渲染期的同步 git 读）。
+    // 渲染期只消费 `git_log_`/`git_branches_`。
+    git_log_wanted_ = true;   // 本帧在渲染 Git 视图：下一帧泵读数据（首帧空属正常）
+    row(c, {.gap = 0.0f, .grow = true, .id = "git-view"}, [&] {
+      // 左：分支栏。
+      (void)custom_container<ScrollView>(
+          c,
+          [&] {
+            (void)text(c, [] { return std::string("分支"); },
+                       {.color = Tone::Muted, .id = "git-branches-title"});
+            for (const auto& branch : git_branches_) {
+              (void)custom<Button>(c, [this, branch](Button& b) {
+                b.set_id("git-branch-" + branch.name);
+                b.set_label(std::format("{}{}{}", branch.is_current ? "● " : "  ",
+                                        branch.name,
+                                        branch.is_remote ? "（远程）" : ""));
+                b.set_variant(branch.is_current ? Button::Variant::Soft : Button::Variant::Ghost);
+                b.set_size(Button::Size::Small);
+                b.on_click = [this, branch] { checkout_branch(branch); };
+              }, {.height = 24.0f, .key = "branch:" + branch.name});
+            }
+          },
+          [](ScrollView& scroll) { scroll.set_id("git-branches-scroll"); },
+          {.width = 220.0f, .grow = true, .id = "git-branches-host"});
+      // 右：日志泳道。
+      (void)custom_container<ScrollView>(
+          c,
+          [&] {
+            if (git_log_.empty()) {
+              (void)text(c, [] { return std::string("（没有提交，或读取失败）"); });
+              return;
+            }
+            for (auto& entry : git_log_) {
+              (void)custom<Button>(c, [this, entry](Button& b) {
+                b.set_id("git-log-" + entry.short_hash);
+                // refs 胶囊（HEAD/分支/标签）拼进 label——一行放下：
+                // `* hash  subject  (HEAD -> main)`。
+                std::string refs;
+                for (const auto& ref : entry.refs) {
+                  refs += ref + " ";
+                }
+                b.set_label(std::format("{} {}  {}  {}", entry.lane == 0 ? "●" : "○",
+                                        entry.short_hash, entry.subject, refs));
+
+                b.set_variant(entry.short_hash == git_selected_hash_ ? Button::Variant::Soft
+                                                                    : Button::Variant::Ghost);
+                b.set_size(Button::Size::Small);
+                b.on_click = [this, entry] { show_commit(entry); };
+              }, {.height = 26.0f, .key = "log:" + entry.short_hash});
+            }
+          },
+          [](ScrollView& scroll) { scroll.set_id("git-log-scroll"); },
+          {.grow = true, .id = "git-log-host"});
+    });
+    // 底部一行：选中提交的详情摘要（文件数 + 增删行数）。
+    if (!git_selected_hash_.empty()) {
+      (void)text(c, [this] { return git_commit_summary_.value(); },
+                 {.color = Tone::Muted, .id = "git-commit-summary"});
+    }
+  }
+
+  /// 切换分支（终端代敲——checkout 会改工作区，输出必须让用户看见）。
+  void checkout_branch(const gbcode::BranchInfo& branch) {
+    if (branch.is_current || branch.is_remote) {
+      // 远程分支：检出它的本地跟踪分支（`git checkout <短名>` 自动建）。
+      if (branch.is_remote) {
+        const std::size_t slash = branch.name.find('/');
+        const std::string short_name =
+            slash == std::string::npos ? branch.name : branch.name.substr(slash + 1);
+        if (terminal_ptr != nullptr) {
+          bottom_visible_.set(true);
+          terminal_ptr->run("git checkout " + short_name);
+          git_refresh_pending_ = true;
+          git_log_loaded_ = false;
+        }
+      }
+      return;
+    }
+    pending_git_confirm_ = [this, name = branch.name] {
+      if (terminal_ptr != nullptr) {
+        bottom_visible_.set(true);
+        terminal_ptr->run("git checkout " + name);
+        git_refresh_pending_ = true;
+        git_log_loaded_ = false;
+      }
+    };
+    git_confirm_title_ = std::format("切换到分支 {}", branch.name);
+    git_confirm_body_ = "未提交的改动会跟着走（冲突时 git 会拒绝）。切换？";
+    git_confirm_open_.set(true);
+  }
+
+  /// 查看一个提交：详情摘要 + diff 只读标签。
+  void show_commit(const gbcode::LogEntry& entry) {
+    git_selected_hash_ = entry.short_hash;
+    auto copy = entry;
+    const std::string diff = gbcode::read_commit_detail(workspace_, copy);
+    std::size_t added = 0;
+    std::size_t removed = 0;
+    for (const auto& [path, plus, minus] : copy.files) {
+      (void)path;
+      added += plus;
+      removed += minus;
+    }
+    git_commit_summary_.set(std::format("{} · {} 个文件 · +{} −{} · {}", entry.short_hash,
+                                        copy.files.size(), added, removed, entry.author));
+    // diff 开只读标签（与变更面板的 diff 同一条链路）。
+    auto list = buffers_.value();
+    stash_active_text(list);
+    OpenBuffer buffer;
+    buffer.key = "commit:" + entry.short_hash;
+    buffer.label = std::format("@{}", entry.short_hash);
+    buffer.language = "diff";
+    buffer.text = diff;
+    buffer.dirty = false;
+    for (std::size_t index = 0; index < list.size(); ++index) {
+      if (list[index].key == buffer.key) {
+        list[index].text = buffer.text;
+        buffers_.set(std::move(list));
+        activate(list, index);
+        return;
+      }
+    }
+    list.push_back(std::move(buffer));
+    buffers_.set(std::move(list));
+    active_.set(buffers_.value().size() - 1);
+    status_.set("提交 " + entry.short_hash + "：" + entry.subject.substr(0, 40));
   }
 
   // 两个共用小工具（终端/搜索/面包屑都用）：直接在这里定义——
@@ -2166,9 +2356,12 @@ struct CodeEditorPage : Component {
       status_item(c, "status-branch", "git-branch", [this] {
         return git_.branch.empty() ? std::string("main") : git_.branch;
       }, [this] {
-        activity_.set(2);
-        sidebar_visible_.set(true);
-        refresh_git();
+        // 点分支 → 底部 Git 工具窗（分支/日志在那里；左侧「变更」看的是改动，
+        // 两者分工见 build_git_view 的注释）。**只设状态**——日志读取在帧首泵
+        //（`ensure_git_log`）做，不在事件回调里起子进程。
+        bottom_visible_.set(true);
+        bottom_tab_.set(1);
+        git_log_wanted_ = true;
       });
       status_item(c, "status-errors", "error",
                   [this] { return std::to_string(error_count()); }, [this] { show_problems(false); });
@@ -3030,6 +3223,21 @@ struct CodeEditorPage : Component {
       flow = std::format("（↑{} ↓{}）", git_.ahead, git_.behind);
     }
     status_.set(std::format("Git：{}{} · {} 项变更", git_.branch, flow, git_.changes.size()));
+  }
+
+  /// Git 工具窗的数据读取（帧首泵做——渲染期起子进程会崩，见 build_git_view 注释）。
+  void ensure_git_log() {
+    if (!git_log_wanted_ || git_log_loaded_) return;
+    if (workspace_.empty()) return;
+    git_log_wanted_ = false;
+    git_log_ = gbcode::read_log(workspace_, 200);
+    git_branches_ = gbcode::read_branches(workspace_);
+    git_log_loaded_ = true;
+    // **读到了要标脏**：`git_log_` 是普通 vector，数据进来了界面不会自己重画
+    //（实测：日志/分支读到了、列表却是空的——缺这一行，面板永远停在首帧的空态）。
+    // `status_` 本身是 State——借它触发重组（顺带把"读到了几条"说给用户）。
+    status_.set(std::format("Git 日志：{} 条提交，{} 个分支", git_log_.size(),
+                            git_branches_.size()));
   }
 
   /// 暂存/取消暂存一个文件（写操作：交终端作业通道——输出实时回流、可中止）。
