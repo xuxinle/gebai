@@ -2064,10 +2064,20 @@ struct CodeEditorPage : Component {
     // （同一停靠位/高度），切换只切内容，两个实例都保留（终端的会话不能因为
     // 看一眼日志就被销毁）。
     column(c, {.gap = 0.0f, .grow = true, .id = "bottom-tabs"}, [&] {
+      // **单一真值源 = Tabs 自己的 active**（按 key 复用，跨帧保持）。
+      //
+      // 为什么不用平行的 `State bottom_tab_`：控制通道/属性面写 `set active=Git`
+      // 时只改 Tabs、不经过 `on_change`（程序化写入不通知是合理默认）——
+      // 平行 State 永远不知道，视图显隐就停在上一个标签（实测：`set` 成功、
+      // `active=1` 读回也对，`git-view` 就是不出现）。
+      // 每帧从 Tabs **读回**：真值只有一个，写入路径（点击/控制通道/程序）
+      // 全都汇聚到它。
+      // Tabs 的三个写入路径（点击 / 控制通道属性面 / 程序）都会经 `on_change`
+      // 回流到 `bottom_tab_`（属性面写入的通知是框架行为，见 Tabs::set_property
+      // 对 "active" 的处理注释）——单一真值是 State，子树显隐由它驱动。
       (void)custom<Tabs>(c, [this](Tabs& tabs) {
         tabs.set_id("bottom-panel-tabs");
         tabs.set_tabs({"终端", "Git"});
-        tabs.set_active(bottom_tab_.value());
         tabs.on_change = [this](std::size_t index) { bottom_tab_.set(index); };
       }, {.height = 30.0f, .key = "bottom-tabs-bar"});
       // **两个都声明**（不是条件声明）：终端实例必须常驻——切到 Git 标签时
@@ -2132,8 +2142,10 @@ struct CodeEditorPage : Component {
   // （本地/远程、当前标记）与日志泳道（refs 胶囊 + 提交信息）；点提交看它
   // 改了什么（文件 + 增删统计 + diff 只读标签）。
   void build_git_view(Composer& c) {
+    // 空态也要挂 `#git-view`（自动化判"视图出现"靠它——空态不是"没有视图"，
+    // 是"视图里没有内容"，两码事）。
     if (workspace_.empty()) {
-      column(c, {.padding = 12.0f, .grow = true}, [&] {
+      column(c, {.padding = 12.0f, .grow = true, .id = "git-view"}, [&] {
         (void)text(c, [] { return std::string("内置样例模式：没有工作区"); });
       });
       return;

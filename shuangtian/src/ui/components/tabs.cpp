@@ -841,11 +841,15 @@ auto Tabs::set_property(std::string_view name, std::string_view value) -> bool {
   }
   if (name == "active") {
     if (const auto index = parse_u64(value); index.has_value()) {
-      set_active(static_cast<std::size_t>(*index), false);
+      // **通知**（不是静默改）：属性面写入多来自控制通道/自动化，宿主的
+      // `on_change` 是它感知切换的唯一钩子——静默改会出现"active 读回来变了、
+      // 宿主驱动的视图却不动"（实测：gbcode 的底部「终端|Git」标签 `set` 成功、
+      // git-view 就是不出现，因为页面重组由 on_change 驱动）。
+      set_active(static_cast<std::size_t>(*index), true);
       return true;
     }
     if (const auto index = index_of_label(value); index.has_value()) {
-      set_active(*index, false);
+      set_active(*index, true);
       return true;
     }
     return false;

@@ -100,6 +100,15 @@ def check(condition, message):
         raise AssertionError(message)
 
 
+def wait_until(predicate, budget_s: float = 5.0):
+    """轮询等条件成立（声明式 UI 的状态落地要一到两帧）。"""
+    deadline = time.monotonic() + budget_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.15)
+
+
 def main():
     binary = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_BIN
     shots = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, "build", "e2e-gbcode")
@@ -166,10 +175,18 @@ def main():
               "语言未跟随标签")
         print("[3] 点资源管理器树行 → 标签 + 语言 + 编辑器内容联动")
 
-        # —— 4. 终端面板（底部只有一个视图；问题/输出已删）——
+        # —— 4. 终端面板（问题/输出面板已删；2026-10-09 起新增「终端 | Git」双标签）——
         check(client.count("#problems-list") == 0, "问题面板应已删除")
         check(client.count("#output-text") == 0, "输出面板应已删除")
-        check(client.count("#bottom-tabs") == 0, "底部标签栏应已删除（只剩终端）")
+        # 双标签（版本管理重构 B）：标签栏在、默认停在终端；切到 Git 出工具窗。
+        check(client.count("#bottom-panel-tabs") == 1, "底部应有「终端 | Git」标签栏")
+        check(client.count("#git-view") == 0, "默认应停在终端标签（Git 视图不可见）")
+        client.ok("set", {"id": "bottom-panel-tabs", "props": {"active": "Git"}})
+        wait_until(lambda: client.count("#git-view") == 1)
+        check(client.count("#git-view") == 1, "切到 Git 标签应出现工具窗")
+        client.ok("set", {"id": "bottom-panel-tabs", "props": {"active": "终端"}})
+        wait_until(lambda: client.count("#git-view") == 0)
+        check(client.count("#terminal") == 1, "切回终端标签终端应在")
         # 真终端：PTY 属性为真、组件内标签栏就位、「+」在。
         check(client.ok("get", {"id": "terminal"})["props"].get("pty") == "true",
               "终端未进入 PTY 模式")
