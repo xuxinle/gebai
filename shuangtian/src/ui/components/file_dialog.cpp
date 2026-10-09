@@ -198,10 +198,28 @@ auto FileDialog::set_pending_path(const std::string& path) -> bool {
 
 auto FileDialog::select_entry(std::size_t index) -> bool {
   if (index >= visible_.size()) return false;
-  // 与鼠标点击**同一个** `activate_entry`：回填文件名等副作用完全一致。
-  // 目录项会「进入目录」而不触发 `on_confirm`（与双击目录同语义）——
-  // 这正是"模拟选了一个目录"该有的行为。
-  activate_entry(index);
+  const st::fs::DirEntry* found = entry(index);
+  if (found == nullptr) return false;
+  // 语义对齐**鼠标单击**（不是双击）：
+  //
+  // * 文件 → 只选中 + 回填文件名（**不确认**）——旧实现直接 `activate_entry`，
+  //   而那是"双击"的语义：自动化调 `select` 想“点一下那一行”，结果对话框
+  //   当场确认关闭、把文件打开了（实测踩到）。
+  // * 目录 → 仍走 `activate_entry`（进入目录 = 单击目录行的既定行为）。
+  if (found->is_dir) {
+    activate_entry(index);
+  } else if (mode_ == Mode::Directory) {
+    // 目录模式：文件名**不参与语义**（确认返回的是当前目录本身）——
+    // 只高亮，不回填（回了也没人用，还会让语义分裂）。
+    selected_ = index;
+    ensure_selected_visible();
+    mark_dirty();
+  } else {
+    selected_ = index;
+    filename_ = found->name;
+    ensure_selected_visible();
+    mark_dirty();
+  }
   mark_dirty();
   return true;
 }
@@ -977,6 +995,15 @@ auto FileDialog::invoke_action(std::string_view action, std::string_view argumen
     const auto parsed = st::parse_u64(argument);
     if (!parsed.has_value()) return false;
     return select_entry(static_cast<std::size_t>(*parsed));
+  }
+  if (action == "activate") {
+    // 双击语义（目录 → 进入；文件 → 确认打开）。与 `select`（单击）区分开：
+    // 自动化里"选中看看"与"就这样打开"是两件事（前者误触发后者是实测缺陷）。
+    const auto parsed = st::parse_u64(argument);
+    if (!parsed.has_value()) return false;
+    if (*parsed >= visible_.size()) return false;
+    activate_entry(static_cast<std::size_t>(*parsed));
+    return true;
   }
   if (action == "reload") {
     reload();

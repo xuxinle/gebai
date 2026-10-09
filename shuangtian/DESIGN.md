@@ -2187,7 +2187,10 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
     - **列表滚动条 + 选中行自动滚入可视区**；`Home`/`End` 跳首/末；
       列表高**对齐到整行**（不留半行硬切）。
     - 属性面补 `show_hidden` / `filters` / `places`；动作面补 `new_folder` /
-      `toggle_hidden` / `goto_crumb` / `goto_place`。
+      `toggle_hidden` / `goto_crumb` / `goto_place`，并把 `select`（**单击**：选中+回填、
+      **不确认**）与 `activate`（**双击**：目录进入/文件确认）分开——
+      旧版 `select` 走的是双击语义，自动化想“点一下那一行”却当场把文件打开了
+      （**打开真实项目实测踩到**）。
     - **两个框架级缺陷（同轮修）**：
       ① `FileDialog` 在 `arrange` 里建按钮子件，而 `UiRoot::layout` 的主题下发
       （`apply_theme_tree`）**在这之前已跑完**——按钮 `style_` 停在默认值，

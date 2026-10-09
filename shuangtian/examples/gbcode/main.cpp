@@ -511,10 +511,13 @@ struct CodeEditorPage : Component {
   std::size_t problem_cycle_{0};
   /// 已注册的语言清单（扩展视图用；懒加载一次）。
   std::vector<std::string> languages_{};
+  /// 打开对话框的状态跟踪：`dialog_seen_` 记“上一帧对话框已在树上”——
+  /// 它从无到有（本帧才被声明）时才初始化目录，之后用户导航不再被覆盖。
+  /// 不能用“进程级一次”的标记：对话框关掉再开是**同一个元素复用**
+  /// （声明式同 key 复用），那个标记不会重置，第二次打开目录就是空的（实测踩到）。
+  bool dialog_seen_{false};
   /// 文件对话框起始目录（上次确认时所在；空 = 从工作区/当前目录起）。
   std::string dialog_start_dir_{};
-  /// 本次打开是否已初始化目录（setup 每帧跑，只在首次设目录——见 build_open_dialog）。
-  bool dialog_initialized_{false};
   /// 关闭脏标签的待确认动作（非空 = 弹了确认对话框）。
   std::function<void()> pending_close_{};
   /// 待确认关闭的标签名（对话框正文用）。
@@ -2024,11 +2027,17 @@ struct CodeEditorPage : Component {
   /// 为什么用真 `FileDialog` 而不是自绘输入框：目录浏览/上级/双击进入这些行为
   /// 组件已经写好且**在无头下可程序化选路**（`set_pending_path`），自绘会全部重写一遍。
   void build_open_dialog(Composer& c) {
-    if (!new_file_open_.value()) return;
+    if (!new_file_open_.value()) {
+      dialog_seen_ = false;   // 对话框不在树上：下次重新打开要重新初始化目录
+      return;
+    }
     const bool saving = pending_open_mode_ == 1;
     const bool picking_folder = pending_open_mode_ == 3;
+    // 本帧才被声明（从无到有）= 一次新的“打开”动作。
+    const bool fresh_open = !dialog_seen_;
+    dialog_seen_ = true;
     (void)overlay(c, "file-dialog", {}, [&] {
-      (void)custom<FileDialog>(c, [this, saving, picking_folder](FileDialog& dialog) {
+      (void)custom<FileDialog>(c, [this, saving, picking_folder, fresh_open](FileDialog& dialog) {
         dialog.set_id("file-dialog");
         // 标题（声明式 `custom<T>` 是无参构造，标题得构造后设）：
         // 没有标题时顶部会空一块（旧版就是这样，像"内容没加载出来"）。
@@ -2036,11 +2045,11 @@ struct CodeEditorPage : Component {
                                        : (saving ? "另存为" : "打开文件"));
         // 目录模式：没有文件名行、按钮是「选择此文件夹」、确认返回**当前目录**。
         if (picking_folder) dialog.set_mode(FileDialog::Mode::Directory);
-        // ⚠ **只在首次设置目录**：本 setup 每帧重组都跑，而对话框自己的导航
-        //（双击进目录/点面包屑/点侧栏）会改当前目录——无条件 `set_directory`
-        // 每帧把用户导航打回起点（实测：面包屑只有一个 `.` 点、进不去任何目录）。
-        if (!dialog_initialized_) {
-          dialog_initialized_ = true;
+        // ⚠ **只在一次新的“打开”动作里设置目录**：本 setup 每帧重组都跑，
+        // 而对话框自己的导航（双击进目录/点面包屑/点侧栏）会改当前目录——
+        // 每帧无条件 `set_directory` 会把用户导航打回起点（实测：面包屑只有
+        // 一个 `.` 点、进不去任何目录）。
+        if (fresh_open) {
           // 起始目录：记住上次（同一会话连开几个文件不用每次从工作区爬）；
           // 首次用**绝对路径**（相对路径 `.` 在面包屑里只有一段，看不出层级）。
           std::string start = dialog_start_dir_;

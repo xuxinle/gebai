@@ -366,22 +366,39 @@ ST_TEST(file_dialog_select_action_matches_mouse_click) {
   hosted.dialog->set_directory(sandbox.dir);
   hosted.layout();
 
-  // `select 2` = 第 2 项（排序后是 a.txt）；与鼠标点它**同一条** `activate_entry`，
-  // 因此文件名回填、选中态、`on_confirm` 全部一致。
+  // `select 2` = 第 2 项（排序后是 a.txt）：语义 = **鼠标单击**（选中 + 回填文件名），
+  // **不确认**。旧实现直接走 `activate_entry`（双击语义）：自动化调 `select`
+  // 想"点一下那一行"，结果对话框当场确认关闭并把文件打开了——实测（打开真实项目）踩到。
   std::string confirmed;
   hosted.dialog->on_confirm = [&](const std::string& path) { confirmed = path; };
   ST_CHECK(hosted.dialog->invoke_action("select", "2"));
   ST_CHECK_EQ(hosted.dialog->filename(), std::string("a.txt"));
-  ST_CHECK_EQ(confirmed, st::fs::join(sandbox.dir, "a.txt"));
+  ST_CHECK_EQ(confirmed, std::string{});          // 单击：不确认
+  ST_REQUIRE(hosted.dialog->selected_entry() != nullptr);
+  ST_CHECK_EQ(hosted.dialog->selected_entry()->name, std::string("a.txt"));
 
   // 越界如实返回 false（不假装成功）
   ST_CHECK(!hosted.dialog->invoke_action("select", "99"));
   ST_CHECK(!hosted.dialog->invoke_action("select", "not-a-number"));
-  // 选目录项 = 进入目录（不触发 on_confirm），与双击目录同语义
+  // 选目录项 = 进入目录（不触发 on_confirm），与单击目录行同语义
   confirmed.clear();
   ST_CHECK(hosted.dialog->invoke_action("select", "0"));   // 排序后第 0 项是 sub/
   ST_CHECK_EQ(hosted.dialog->directory(), st::fs::join(sandbox.dir, "sub"));
   ST_CHECK_EQ(confirmed, std::string{});
+}
+
+ST_TEST(file_dialog_activate_action_is_double_click) {
+  // `activate` = 双击语义（目录 → 进入；文件 → 确认）。它与 `select`（单击）分开：
+  // 自动化里"选中看看"与"就这样打开"是两件事。
+  Sandbox sandbox;
+  Hosted hosted;
+  hosted.dialog->set_directory(sandbox.dir);
+  hosted.layout();
+  std::string confirmed;
+  hosted.dialog->on_confirm = [&](const std::string& path) { confirmed = path; };
+  ST_CHECK(hosted.dialog->invoke_action("activate", "2"));   // a.txt
+  ST_CHECK_EQ(confirmed, st::fs::join(sandbox.dir, "a.txt"));
+  ST_CHECK(!hosted.dialog->invoke_action("activate", "99"));
 }
 
 ST_TEST(file_dialog_directory_mode_confirms_the_current_directory) {
