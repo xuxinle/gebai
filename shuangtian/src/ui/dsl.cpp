@@ -1,5 +1,7 @@
 #include "st/ui/dsl.hpp"
 
+#include "st/ui/state_trace.hpp"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -189,6 +191,11 @@ void on_state_read(StateBase* state) {
 
 void on_state_write(StateBase* state) {
   if (state == nullptr) return;
+  // 写入追踪（`ST_TRACE_STATE=1` 时开）：崩溃时随栈输出，专治"数据进了界面不动"
+  // ——那类问题的第一问是"写入到底有没有发生、从哪来"。
+  if (trace::is_enabled()) {
+    trace::record_write(state, "dsl::on_state_write", tls_composer != nullptr);
+  }
   // ① 正在重组（thread-local 有值）：直接通知它，别的 Composer 与本状态无关。
   if (tls_composer != nullptr) {
     tls_composer->notify_state_written(state);

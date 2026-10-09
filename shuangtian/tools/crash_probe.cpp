@@ -9,6 +9,8 @@
 
 #include "st/core/entry.hpp"
 #include "st/core/print.hpp"
+#include "st/ui/dsl.hpp"
+#include "st/ui/state_trace.hpp"
 #include "st/core/string.hpp"
 
 /// 崩溃链（`noinline` 保证栈上真有这几帧；`volatile` 防优化器删掉整条链）。
@@ -25,6 +27,12 @@ __attribute__((noinline)) void probe_depth_one() { probe_depth_two(nullptr); }
 auto run_app(int argc, char** argv) -> int {
   (void)argc;
   (void)argv;
+  // 顺带验证 ③（State 写入追踪）：`ST_TRACE_STATE=1` 时，崩溃输出应附最近写入。
+  // 放在崩溃之前，好让追踪有内容可打。
+  st::ui::trace::install_crash_hook();   // 与真实应用同一路径（core 的钩子 + ui 的提供者）
+  st::ui::dsl::State<int> probe_state{0};
+  probe_state.set(1);
+  probe_state.set(2);
   st::print("crash_probe: 即将触发空指针解引用（验证崩溃栈输出）\n");
   std::fflush(stdout);
   probe_depth_one();

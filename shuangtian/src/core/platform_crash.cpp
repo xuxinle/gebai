@@ -10,6 +10,8 @@
 
 #include "st/core/entry.hpp"
 
+#include "st/ui/state_trace.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -38,6 +40,8 @@
 #endif
 
 namespace {
+/// 崩溃时追加输出的提供者（宿主注册；见 `set_crash_extra_provider`）。
+std::string (*crash_extra_provider)() = nullptr;
 
 #if defined(_WIN32)
 
@@ -210,7 +214,19 @@ void crash_signal(int signal_number) {
     safe_write("  （调用栈不可用：backtrace 未采集到帧）\n");
   }
 
-  // ③ 恢复默认处置并重发：保持退出码语义（外部工具靠它判断崩溃）
+  // ③ 附加诊断钩子（可选）：宿主可注册一个"崩溃时输出额外信息"的回调——
+  // State 写入追踪（`ST_TRACE_STATE=1`）走这里。
+  //
+  // **为什么用钩子而不是直接调用 `st::ui::trace`**：`platform_crash.cpp` 在
+  // `core` 层，`state_trace` 在 `ui` 层，而 `st` 构建器（工具链自身）只链 core
+  // 不链 ui——直接调用会让 `st` 链接失败（实测：undefined reference to
+  // `st::ui::trace::has_records()`）。**依赖方向必须是 core ← ui**，
+  // 让它反过来是层次污染，不是"加个 ifdef 就完事"的问题。
+  if (crash_extra_provider != nullptr) {
+    if (const std::string extra = crash_extra_provider(); !extra.empty()) safe_write(extra);
+  }
+
+  // ④ 恢复默认处置并重发：保持退出码语义（外部工具靠它判断崩溃）
   ::signal(signal_number, SIG_DFL);
   ::raise(signal_number);
 }
@@ -218,6 +234,8 @@ void crash_signal(int signal_number) {
 #endif
 
 }  // namespace
+
+void st::set_crash_extra_provider(std::string (*provider)()) { crash_extra_provider = provider; }
 
 void st::install_crash_handler() {
 #if defined(_WIN32)

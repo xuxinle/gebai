@@ -44,6 +44,14 @@ void startup_configure_console();
 /// 智能体/开发者事后定位的唯一线索（审视报告 P1-3）。入 ST_MAIN 时自动调用。
 void install_crash_handler();
 
+/// 注册"崩溃时追加输出"的提供者（可选；核心层不依赖上层诊断设施）。
+///
+/// 用途：`ST_TRACE_STATE=1` 的 State 写入追踪在 `ui` 层（`st/ui/state_trace.hpp`），
+/// 而本文件在 `core` 层——**依赖方向是 core ← ui**，所以由上层在启动时注册
+/// （见 `st::ui::trace::install_crash_hook()`），核心层只留一个函数指针。
+/// 这样 `st` 构建器（只链 core）不会因 UI 层符号缺失而链接失败。
+void set_crash_extra_provider(std::string (*provider)());
+
 }  // namespace st
 
 /// 跨平台入口宏：把 `main` 的参数正规化成 UTF-8 后交给 `fn(argc, argv)`。

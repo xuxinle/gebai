@@ -151,6 +151,13 @@ constexpr std::array<RuleSpec, 15> kRules{{
   if (rule == "L14") {
     return file_name.find("platform_") != std::string_view::npos || file_name == "backend.cpp";
   }
+  if (rule == "L8") {
+    // 诊断开关是**进程级**的：`ST_TRACE_STATE` 由环境变量控制，追踪缓冲必须在
+    // 任意写入点可见——注入式方案会把"诊断"变成"每个 State 都要带一个引用"。
+    // 这是单点例外（一个文件、一组相关变量），与 L8 的意图（禁"随手写的全局状态"）
+    // 不冲突：这些变量的生命周期与整个进程一致，且**只被本文件读写**。
+    return file_name == "state_trace.cpp";
+  }
   return false;
 }
 
