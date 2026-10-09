@@ -2138,6 +2138,10 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
   直接报错（不再默默把文本送给旧焦点元素）。
 - **Tree**：扁平可见行数组 + `sync_nodes`（key 复用、选中态跟 key）+ `on_toggle(key,
   expanded)` 懒加载（目录展开时才 list_dir）+ ↑↓/Enter/←→ 键盘导航。
+  **行高可配**（`set_row_height` / 属性面 `row_height`，默认 26）：密度是**宿主场景
+  的属性**——资源管理器要密（资源管理器/导航栏那种贴近桌面文件管理器的量级，
+  gbcode 用 24），设置面板里的可点清单可以松（触屏/大屏），两边不该互相绑死。
+  （旧值是写死的 40，用户反馈“资源管理器的条目间距太大”。）
 - **MenuBar / ContextMenu**：声明式 `Menu{id,label,items[]}`；`make_panel(i)` 锚定标题
   正下方（Stack overlay 不锚定，面板自己落到 anchor）；ContextMenu 挂 FillViewport、
   dismiss barrier（面板外点击关闭并消费，MouseMove 照常穿透）、越界翻转/夹入视口。

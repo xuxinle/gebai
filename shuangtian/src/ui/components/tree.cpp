@@ -4,6 +4,7 @@
 #include <format>
 #include <utility>
 
+#include "st/core/string.hpp"
 #include "st/raster/paint.hpp"
 #include "st/ui/icon.hpp"
 #include "st/ui/text_port.hpp"
@@ -20,6 +21,14 @@ namespace {
 constexpr float kTextInset{14.0f};  ///< 行文本左边距（与 List 同口径）
 
 }  // namespace
+
+void Tree::set_row_height(float height) noexcept {
+  if (height <= 0.0f) return;   // 非正值忽略：行高 0 会让命中/视口计算全失效
+  if (height == row_height_) return;
+  row_height_ = height;
+  mark_layout_dirty();
+  mark_dirty();
+}
 
 Tree::Tree() {
   style_.radius = 0.0f;
@@ -78,7 +87,7 @@ void Tree::select_key(std::string_view key, bool notify) {
 auto Tree::row_rect(std::size_t index) const -> math::Rect {
   if (index >= rows_.size() || bounds_.is_empty()) return {};
   const auto row = static_cast<float>(index);
-  return math::Rect{bounds_.x, bounds_.y + row * kRowHeight, bounds_.width, kRowHeight};
+  return math::Rect{bounds_.x, bounds_.y + row * row_height_, bounds_.width, row_height_};
 }
 
 auto Tree::node_rect(std::string_view key) const -> math::Rect {
@@ -96,10 +105,10 @@ auto Tree::node_indent(std::string_view key) const -> float {
 auto Tree::row_index_at(math::Point point) const -> std::optional<std::size_t> {
   if (bounds_.is_empty() || !bounds_.contains(point)) return std::nullopt;
   const float local_y = point.y - bounds_.y;
-  if (local_y < 0.0f || local_y >= static_cast<float>(rows_.size()) * kRowHeight) {
+  if (local_y < 0.0f || local_y >= static_cast<float>(rows_.size()) * row_height_) {
     return std::nullopt;
   }
-  const auto index = static_cast<std::size_t>(local_y / kRowHeight);
+  const auto index = static_cast<std::size_t>(local_y / row_height_);
   if (index >= rows_.size()) return std::nullopt;
   return index;
 }
@@ -144,7 +153,7 @@ void Tree::measure(const RenderContext& context, const Constraints& constraints)
   width = std::clamp(width, style_.min_width, style_.max_width);
   if (constraints.max_width < kUnbounded) width = std::min(width, constraints.max_width);
 
-  float height = static_cast<float>(rows_.size()) * kRowHeight + style_.padding.vertical();
+  float height = static_cast<float>(rows_.size()) * row_height_ + style_.padding.vertical();
   height = std::clamp(height, style_.min_height, style_.max_height);
   if (constraints.max_height < kUnbounded) height = std::min(height, constraints.max_height);
   measured_ = math::Size{width, height};
@@ -290,8 +299,19 @@ auto Tree::semantics_flags() const -> SemanticsFlags {
 
 auto Tree::visible_row_count() const noexcept -> std::size_t {
   if (bounds_.is_empty()) return rows_.empty() ? 1 : rows_.size();
-  const auto count = static_cast<std::size_t>(std::max(1.0f, bounds_.height / kRowHeight));
+  const auto count = static_cast<std::size_t>(std::max(1.0f, bounds_.height / row_height_));
   return std::max<std::size_t>(1, count);
+}
+
+auto Tree::set_property(std::string_view name, std::string_view value) -> bool {
+  if (name == "row_height") {
+    // 行高可写：密度是场景属性，自动化也该能调（视觉验收用）。
+    const auto parsed = st::parse_f64(value);
+    if (!parsed.has_value() || *parsed <= 0.0) return false;
+    set_row_height(static_cast<float>(*parsed));
+    return true;
+  }
+  return Element::set_property(name, value);
 }
 
 auto Tree::get_property(std::string_view name) const -> std::optional<std::string> {
@@ -301,6 +321,7 @@ auto Tree::get_property(std::string_view name) const -> std::optional<std::strin
   if (name == "first_visible") return std::string("0");
   if (name == "visible_rows") return std::to_string(visible_row_count());
   if (name == "scroll") return std::string("0.0");
+  if (name == "row_height") return std::format("{:.0f}", row_height_);
   if (name == "selected_key") return std::string(selected_key_);
   if (name == "selected") {
     const auto index = selected_index();
@@ -313,6 +334,7 @@ auto Tree::property_names() const -> std::vector<std::string_view> {
   auto names = Element::property_names();
   names.push_back("rows");
   names.push_back("count");
+  names.push_back("row_height");
   names.push_back("first_visible");
   names.push_back("visible_rows");
   names.push_back("scroll");

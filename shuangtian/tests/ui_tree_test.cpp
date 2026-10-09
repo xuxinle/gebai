@@ -138,8 +138,11 @@ ST_TEST(tree_file_click_selects_and_notifies) {
   tree.on_select = [&](std::string_view key) { picked = std::string(key); };
 
   const st::ui::RenderContext context = make_context();
-  // src/main.cpp 是第 1 行
-  st::ui::Event event = click(st::ui::EventKind::Click, 60.0f, 60.0f);
+  // src/main.cpp 是第 1 行——用 `row_rect` 取行中心（不硬编码像素，
+  // 否则行高一变这个用例就误报，实测踩到）。
+  const auto row = tree.row_rect(1);
+  st::ui::Event event =
+      click(st::ui::EventKind::Click, row.x + 60.0f, row.y + row.height * 0.5f);
   ST_CHECK(tree.on_event(context, event));
   ST_CHECK_EQ(std::string(tree.selected_key()), std::string("src/main.cpp"));
   ST_CHECK_EQ(picked, std::string("src/main.cpp"));
@@ -259,4 +262,43 @@ ST_TEST(tree_measure_grows_with_rows_and_indent) {
   tree.measure(context, constraints);
   ST_CHECK_EQ(tree.measured_size().height, Tree::kRowHeight);
   ST_CHECK(tree.measured_size().width >= 80.0f);
+}
+
+ST_TEST(tree_row_height_is_configurable) {
+  // 密度是**宿主场景的属性**：资源管理器要密、设置清单可松。默认 26（旧 40 太松）。
+  st::ui::Tree tree;
+  ST_CHECK_EQ(tree.row_height(), Tree::kDefaultRowHeight);
+  ST_CHECK_EQ(Tree::kDefaultRowHeight, 26.0F);
+
+  st::ui::Tree dense;
+  dense.set_row_height(24.0F);
+  ST_CHECK_EQ(dense.row_height(), 24.0F);
+  // 属性面可读写（自动化调密度做视觉验收）。
+  ST_CHECK_EQ(dense.get_property("row_height").value_or(""), std::string("24"));
+  ST_CHECK(dense.set_property("row_height", "32"));
+  ST_CHECK_EQ(dense.row_height(), 32.0F);
+  // 非法值如实拒绝且不改状态。
+  ST_CHECK(!dense.set_property("row_height", "0"));
+  ST_CHECK(!dense.set_property("row_height", "-5"));
+  ST_CHECK(!dense.set_property("row_height", "abc"));
+  ST_CHECK_EQ(dense.row_height(), 32.0F);
+
+  // 行高影响行几何与测量高。
+  st::ui::Tree sized;
+  sized.sync_nodes({{.key = "a", .label = "a"}, {.key = "b", .label = "b"},
+                    {.key = "c", .label = "c"}});
+  st::ui::UiRoot root;
+  root.set_viewport(st::math::Size{300.0F, 400.0F});
+  auto host = std::make_unique<st::ui::Panel>(st::ui::FlexDirection::Column);
+  auto* raw = static_cast<st::ui::Tree*>(host->add_child(std::make_unique<st::ui::Tree>()));
+  raw->sync_nodes({{.key = "a", .label = "a"}, {.key = "b", .label = "b"},
+                   {.key = "c", .label = "c"}});
+  root.set_content(std::move(host));
+  root.layout(true);
+  ST_CHECK_EQ(raw->measured_size().height, 3.0F * Tree::kDefaultRowHeight);
+  raw->set_row_height(20.0F);
+  root.layout(true);
+  ST_CHECK_EQ(raw->measured_size().height, 3.0F * 20.0F);
+  ST_CHECK_EQ(raw->row_rect(2).height, 20.0F);
+  ST_CHECK_EQ(raw->row_rect(2).y - raw->row_rect(0).y, 40.0F);   // 2 行 × 20px
 }

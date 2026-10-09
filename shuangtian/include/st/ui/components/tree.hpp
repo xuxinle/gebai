@@ -41,14 +41,22 @@ struct TreeNode {
 
 class Tree : public Element {
  public:
-  static constexpr float kRowHeight{40.0f};
-  static constexpr float kIndentStep{16.0f};
+  /// 默认行高（桌面文件管理器的密度量级；旧值 40 太松——用户报“条目间距太大”）。
+  static constexpr float kRowHeight{26.0f};
+  static constexpr float kDefaultRowHeight{kRowHeight};
+  static constexpr float kIndentStep{14.0f};
   static constexpr float kIndicatorWidth{2.0f};
-  static constexpr float kChevronSize{14.0f};
+  static constexpr float kChevronSize{12.0f};
   /// 无选中哨兵（与 `List::kNoSelection` 同值；本组件不依赖 list.hpp）。
   static constexpr std::size_t kNoSelection = static_cast<std::size_t>(-1);
 
   Tree();
+
+  /// 行高（px）。密度是**宿主场景的属性**，不是组件的：资源管理器要密（贴近
+  /// 桌面文件管理器），设置面板的可点清单可以松（触屏/大屏），两边不该互相绑死。
+  /// 非正值忽略（行高 0 会让命中与视口计算全失效）。
+  void set_row_height(float height) noexcept;
+  [[nodiscard]] auto row_height() const noexcept -> float { return row_height_; }
 
   [[nodiscard]] auto type() const noexcept -> std::string_view override { return "Tree"; }
   [[nodiscard]] auto role() const noexcept -> Role override { return Role::Tree; }
@@ -96,6 +104,7 @@ class Tree : public Element {
   // “还要不要再滚”），而之前**列表类组件完全没有属性面**（`get_property` 计数为 0），
   // 只能靠截图猜——“不可断言的效果 = 不可复用”。
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
+  auto set_property(std::string_view name, std::string_view value) -> bool override;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
   /// 视口能整行容纳的行数（至少 1；未布局时退化为总行数）。
   [[nodiscard]] auto visible_row_count() const noexcept -> std::size_t;
@@ -118,6 +127,7 @@ class Tree : public Element {
     TreeNode data{};
   };
   std::vector<Row> rows_{};
+  float row_height_{kDefaultRowHeight};   ///< 行高（宿主可调，见 set_row_height）
   std::string selected_key_{};
   int hover_index_{-1};
 };

@@ -154,8 +154,10 @@ def main():
         # 条目是**树行**而不是 Button——故改用树的行命中区点击，与“用户真去点那一行”一致。
         tree_sel = "#workspace-tree" if client.count("#workspace-tree") == 1 else "#sample-tree"
         tree_box = client.ok("find", {"selector": tree_sel})["matches"][0]["bounds"]
-        # 第二行 = 第二个条目（无工作区时是 deploy.py）
-        row_y = tree_box["y"] + 40 * 1.5
+        # 行高**从组件读**（不硬编码）：资源管理器的密度是可调参数，
+        # 写死 40 会在调密度时静默失效（实测：改成 24 后本步点到了错误的行）。
+        row_h = float(client.ok("get", {"id": tree_sel[1:]})["props"].get("row_height") or 26)
+        row_y = tree_box["y"] + row_h * 1.5   # 第二行 = 第二个条目（无工作区时是 deploy.py）
         client.click_at(tree_box["x"] + 60, row_y)
         time.sleep(0.6)
         props = client.ok("get", {"id": "editor-tabs"})["props"]

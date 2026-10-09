@@ -1163,6 +1163,9 @@ struct CodeEditorPage : Component {
   }
 
   /// 工作台各视图的标题（侧栏顶部一行：标题 + 该视图的动作按钮）。
+  /// 资源管理器行高（紧凑：贴近桌面文件管理器；组件默认值面向可点清单场景）。
+  static constexpr float kExplorerRowHeight{24.0f};
+
   void build_sidebar_head(Composer& c, std::string_view title) {
     (void)row(c, {.gap = 4.0f, .height = 30.0f, .id = "sidebar-head"}, [&] {
       (void)text(c, [title] { return std::string(title); },
@@ -1252,14 +1255,19 @@ struct CodeEditorPage : Component {
     (void)custom_container<ScrollView>(
         c,
         [&] {
-          (void)tree(c, workspace_nodes(),
-                     [this](const std::string& key, bool expanded) {
-                       on_tree_toggle(key, expanded);
-                     },
-                     [this](const std::string& key) {
-                       if (key.rfind("dir:", 0) != 0) open_path(key);
-                     },
-                     {.id = "workspace-tree"});
+          // 资源管理器用**紧凑行高**（桌面文件管理器的密度量级）——默认行高
+          // 面向"可点清单"场景（触屏/大屏），放在侧栏里条目间距显得过松。
+          Element& node = tree(c, workspace_nodes(),
+                               [this](const std::string& key, bool expanded) {
+                                 on_tree_toggle(key, expanded);
+                               },
+                               [this](const std::string& key) {
+                                 if (key.rfind("dir:", 0) != 0) open_path(key);
+                               },
+                               {.id = "workspace-tree"});
+          if (auto* widget = dynamic_cast<Tree*>(&node); widget != nullptr) {
+            widget->set_row_height(kExplorerRowHeight);
+          }
         },
         [](ScrollView& scroll) { scroll.set_id("explorer-scroll"); },
         {.grow = true, .id = "explorer-host"});
