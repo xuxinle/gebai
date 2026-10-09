@@ -207,6 +207,47 @@ if bl_path.exists():
                         f"{len(strays)} 处）：" + "; ".join(strays[:6]))
     print(f"BACKLOG 结构核对：待做项均在 P0/P1/P2 章内")
 
+# ── ⑤c PITFALLS.md 条目格式：每条必须带「表头」与「出处」（防退化成流水账）──
+#
+# 为何要查：这份表是**按场景检索的索引**，价值全在“每条能定位到详情”。
+# 若允许无出处的条目混进来，它会变成又一个“讲了但没法查”的大文件——
+# 而“堆在大文件里按时间归档”正是它要解决的问题（见 DOC_USABILITY_FINDINGS.md）。
+# 格式约定：每个条目是一行表格行，最后两列必须分别有「一句话」与「出处」且出处非空。
+pf = root / 'docs' / 'PITFALLS.md'
+if pf.exists():
+    pf_bad = []
+    for ln, line in enumerate(pf.read_text(encoding='utf-8').splitlines(), 1):
+        if not line.startswith('|'):
+            continue
+        # ⚠ 表格行的列解析有两个坑（都踩过，均由植入验证暴露）：
+        #   ① `line.strip('|')` 会把**空的出处格也剥掉**：`| a | b | |` → 只剩 2 格；
+        #   ② 先 `split('|')` 再 `[1:-1]` 同样会切掉尾部空串。
+        # 正确：**先 rstrip/lstrip 掉行首行尾的边界管**，再切分——空列得以保留。
+        body = line.rstrip('|').lstrip('|')
+        cells = [c.strip() for c in body.split('|')]
+        if all(set(c) <= set('-: ') for c in cells):
+            continue  # 表头分隔行（`|---|---|---|`）
+        if len(cells) < 3:
+            pf_bad.append(f"L{ln} 列数不足（应为三列：坑 / 一句话 / 出处）")
+            continue
+        if cells[0] in ('坑', '现象'):
+            continue  # 表头行（只认第一列的字面标题）
+        # ⚠ 不要去判 `cells[1] == '一句话'`：植入验证时用“一句话”作正文内容，
+        # 结果该违规行被当成表头**静默跳过**（假护栏）。表头只靠首列识别。
+        if not cells[-1]:
+            pf_bad.append(f"L{ln} 条目缺「出处」")
+    if pf_bad:
+        problems.append(f"docs/PITFALLS.md 条目格式不合规（共 {len(pf_bad)} 处）："
+                        + "; ".join(pf_bad[:6]))
+    # 每条出处里写的文档必须真实存在（防写一个幻想出来的出处）
+    pf_text = pf.read_text(encoding='utf-8')
+    for m in re.finditer(r'`(CONVENTIONS\.md|DESIGN\.md|BACKLOG\.md|perceptual_changes\.md|'
+                         r'PAINT_DIAGNOSIS\.md|declarative\.md|DOC_USABILITY_FINDINGS\.md)`', pf_text):
+        name = m.group(1)
+        if not (root / name).exists() and not (root / 'docs' / name).exists():
+            problems.append(f"docs/PITFALLS.md 出处指向不存在的文件: {name}")
+    print(f"PITFALLS 格式核对：条目均带出处")
+
 # ── ⑥ 新内容就位 ──
 expect = {
     'DESIGN.md': ['## 目录', '### 8.2.1 这批缺陷说明了什么', '13 条**禁用特性规则'],
@@ -230,4 +271,5 @@ if problems:
     for p in problems:
         print('  [X]', p)
     sys.exit(1)
-print("[OK] § 引用有效 · 旧值清零 · 路径实存 · 组件/用例数与代码一致 · BACKLOG 结构合规 · 新内容就位")
+print("[OK] § 引用有效 · 旧值清零 · 路径实存 · 组件/用例数与代码一致 · BACKLOG 结构合规 · "
+      "PITFALLS 格式合规 · 新内容就位")

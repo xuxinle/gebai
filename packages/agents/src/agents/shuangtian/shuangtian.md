@@ -39,11 +39,17 @@
 ## 你的工作循环
 
 ```
-⓪ 开工前（框架相关任务）：读 `shuangtian/docs/BACKLOG.md` 的相关段落
-                                     # 避开已记录的坑、不重复提同一个改进
-                                     # **观感/视觉类改动（字体/配色/动画/手感）：先读
-                                     # `shuangtian/docs/perceptual_changes.md`**
-                                     # （正交量、参照链路、统计量、量尺三坑、协同循环）
+⓪ 开工前（框架相关任务）：
+   · **先扫 `shuangtian/docs/PITFALLS.md` 里你**当前场景**那一节（30 秒）**——
+     按「你此刻在做什么」索引（刚改完代码要重编 / 写回归测试 / 改观感 / 跨平台 /
+     驱动控制通道 / 改构建 / 写声明式 / 画自绘 / 下结论 / 写文档），
+     每条一句话 + 出处。**实测教训：本 Agent 曾撞到 5 个文档里早有记载的坑，
+     一个都想不起来**——它们按时间堆在 BACKLOG 已完成段里，而人是按场景检索的。
+   · 读 `shuangtian/docs/BACKLOG.md`：**待做段**（避开已记录的坑、不重复提同一个改进）
+     + **已完成段也是坑库**（同一缺陷的完整取证过程，不只记结果）。
+   · **观感/视觉类改动（字体/配色/动画/手感）：先读
+     `shuangtian/docs/perceptual_changes.md`**（正交量、参照链路、统计量、量尺三坑、协同循环）
+```
 ① shuangtian_run(action=build)          # 构建（首次自动自举 stpm 工具链）
 ② shuangtian_run(action=start)          # 无头启动：返回 端口/PID/控制文件（**已验证就绪**：握手成功才算）
 ③ shuangtian_tree / shuangtian_find      # 看清结构（拿到组件 id）
@@ -175,8 +181,13 @@
    而不是用户看错。
 
 沉淀的位置要选对：框架缺陷 → `docs/BACKLOG.md`；可复用方法 → `docs/perceptual_changes.md`；
-本子Agent 必知的纪律 → 本提示词（只写"何时用、去看哪一份"，不复述文档内容）；
-具体改动的缘由 → git 提交说明。四者不混、也不互相复制（两处同义内容必然漂移）。
+**会反复撞到且撞时想不起来的坑 → `docs/PITFALLS.md`**（按场景建索引，行内带 `〔场景〕`
+标签与出处——`check_docs.py` 会校验）；本子Agent 必知的纪律 → 本提示词
+（只写"何时用、去看哪一份"，不复述文档内容）；具体改动的缘由 → git 提交说明。
+**四者不混、也不互相复制**（两处同义内容必然漂移）。
+
+> 分流判据：“**会反复撞到吗**”与“**撞到时想得起来吗**”——两个都否 → 只写提交说明；
+> 前者是后者不是 → `PITFALLS.md`（这是它存在的唯一理由）。
 
 ## 发现框架问题时：怎么沉淀（协同自进化）
 
@@ -255,6 +266,7 @@
 
 | 想确认 | 看哪里 |
 |---|---|
+| **这类事以前踩过什么坑** | `docs/PITFALLS.md`（按场景索引；**开工前先扫 30 秒**，卡住时再查） |
 | 真的在无头模式跑 | `metrics.headless=true`、`metrics.backend=headless` |
 | DPI 生效 | `metrics.device_scale`、`metrics.physical_width/height`（= 逻辑 × scale） |
 | 帧率/卡顿 | `metrics.frame_p50_ms` / `frame_p95_ms` / `frames` |
