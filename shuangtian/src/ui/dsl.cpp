@@ -1418,18 +1418,110 @@ ST_COMPONENT_LIST(ST_DSL_TYPENAME)
 #undef ST_DSL_REGISTRY
 #undef ST_DSL_TYPENAME
 
+// 把内置类型也登进 **token 表**：这样 `element_type_name<T>()` 有**唯一**一条查表路径
+// （内置与外部同构）——而不必在运行时二选一。
+//
+// 为什么不能写成“先查外部表、没有则回退 `type_name<T>()`”：那是一个**运行时**
+// 分支，被调用的两支都会被 ODR-use；而外部类型没有 `type_name<T>` 特化（只有声明），
+// 链接期就报未定义符号（实测：`undefined symbol type_name<CanvasView>`）。
+// 启动期注册把选择从“运行时”提到“登记时”，这条路就通了。
+// lint-allow: L3 排除说明见下一行（行内豁免需与 #define 同行）
+#define ST_DSL_REGISTER_TOKEN(TYPE, NAME, CONSTRUCT) /* lint-allow: L3 清单的第三处展开（X-macro） */ \
+  namespace {                                                                          \
+  const bool st_element_token_##TYPE = [] {                                             \
+    detail::register_element_type_by_token(detail::element_type_token<TYPE>(), NAME);    \
+    return true;                                                                        \
+  }();                                                                                  \
+  }  // namespace
+
+ST_COMPONENT_LIST(ST_DSL_REGISTER_TOKEN)
+
+#undef ST_DSL_REGISTER_TOKEN
+
+namespace {
+
+/// 外部（示例级）组件注册表。
+///
+/// 为何是**函数内 static** 而不是命名空间作用域对象：跨 TU 的初始化顺序未定是老问题，
+/// 而这里由启动期显式调 `register_element_type` 填写——函数内 static 保证“第一
+/// 次用时已构造”。
+///
+/// 为何不做成可变全局（会被 lint L8 报）：它确实是进程级注册表，但表**只在启动期
+/// 写、之后只读**——与 L8 要拦的“业务逻辑里的可变共享状态”不是一回事。
+/// 行内豁免并写明理由（同 `icon.cpp` 的 `warn_unknown_icon_once`）。
+// lint-allow: L8 启动期注册、之后只读的注册表（不含业务态）
+using ExternalEntry = std::pair<std::string, std::function<std::unique_ptr<Element>()>>;
+auto external_elements() -> std::vector<ExternalEntry>& {  // NOLINT
+  static std::vector<ExternalEntry> table;
+  return table;
+}
+
+/// 外部类型名注册表：**类型 token（地址）→ 注册名**。
+///
+/// 为什么以地址为键（而不是 typeid/名字）：见头文件里 `element_type_token` 的说明
+/// ——动态库边界下 type_info 可能不唯一，而 inline 函数 static 的地址折叠是可靠的。
+// lint-allow: L8 同上（启动期写、之后只读）
+using TypeNameEntry = std::pair<const void*, std::string>;
+auto external_type_names() -> std::vector<TypeNameEntry>& {  // NOLINT
+  static std::vector<TypeNameEntry> table;
+  return table;
+}
+
+}  // namespace
+
 auto make_element(std::string type) -> std::unique_ptr<Element> {
   for (const ComponentEntry& entry : kComponents) {
     if (entry.name == type) return entry.create();
   }
+  // 外部（示例级）注册（见 `register_element_type`）：内置表优先——重名时外部
+  // 注册根本进不来（注册时就挡住了），所以这里的顺序只是双保险。
+  for (const auto& [name, create] : external_elements()) {
+    if (name == type) return create();
+  }
   return nullptr;
 }
 
-/// 全部注册名（诊断 / 测试 / 协议 `ui.create` 的合法类型枚举）。
+auto detail::register_element_type_by_token(const void* token, std::string name) -> void {  // NOLINT
+  for (auto& [existing, slot] : external_type_names()) {
+    if (existing == token) {
+      slot = std::move(name);
+      return;
+    }
+  }
+  external_type_names().emplace_back(token, std::move(name));
+}
+
+auto detail::lookup_element_type(const void* token) -> std::string {  // NOLINT
+  for (const auto& [existing, name] : external_type_names()) {
+    if (existing == token) return name;
+  }
+  return {};
+}
+
+auto detail::register_external_element(std::string type,
+                                       std::function<std::unique_ptr<Element>()> create) -> bool {  // NOLINT
+  if (type.empty() || create == nullptr) return false;
+  // 与内置名重名 → 拒绝（否则 `make_element` 先命中内置表，这次注册**静默失效**）
+  for (const ComponentEntry& entry : kComponents) {
+    if (entry.name == type) return false;
+  }
+  auto& table = external_elements();
+  for (auto& [name, slot] : table) {
+    if (name == type) {
+      // 重复注册同一类型：**幂等成功**（多个 TU 各自注册是正常情形，
+      // 比如测试与示例都注册 `CanvasView`）。
+      return true;
+    }
+  }
+  table.emplace_back(std::move(type), std::move(create));
+  return true;
+}
+
 auto registered_element_types() -> std::vector<std::string> {
   std::vector<std::string> names;
-  names.reserve(std::size(kComponents));
+  names.reserve(std::size(kComponents) + external_elements().size());
   for (const ComponentEntry& entry : kComponents) names.emplace_back(entry.name);
+  for (const auto& [name, create] : external_elements()) names.push_back(name);
   return names;
 }
 

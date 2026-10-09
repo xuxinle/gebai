@@ -650,6 +650,33 @@ auto heading(Composer& c, std::string content, std::uint32_t level = 1,
 template <class T>
 [[nodiscard]] auto type_name() -> std::string;
 
+template <class T>
+[[nodiscard]] auto element_type_name() -> std::string;   // 见下方定义（分派：内置特化 / 外部注册槽）
+
+namespace detail {
+/// 每个类型一个**进程唯一**的 token（inline 函数内 static：COMDAT 折叠保证跨 TU 同址）。
+///
+/// 为何不用 `typeid`/`type_index` 做键：动态库各自持一份 type_info 时同一类型会有
+/// 多个键，那会让“注册了却查不到”以最难查的形式出现。地址折叠不受此影响。
+template <class T>
+auto element_type_token() -> const void* {
+  static const char tag = 0;
+  return &tag;
+}
+
+/// 按 token 登记类型名（实现在 `dsl.cpp`）。
+void register_element_type_by_token(const void* token, std::string name);
+/// 按 token 查类型名；未登记时返回空串。
+[[nodiscard]] auto lookup_element_type(const void* token) -> std::string;
+
+/// `register_element_type<T>` 的非模板落点（实现在 `dsl.cpp`）。
+///
+/// 单独一个函数而不写成 `inline` 模板体：注册表是**进程级状态**，定义散在头里
+/// 会变成每个 TU 各一份——那正是“注册了却查不到”的经典成因。
+[[nodiscard]] auto register_external_element(
+    std::string type, std::function<std::unique_ptr<Element>()> create) -> bool;
+}  // namespace detail
+
 /// 逃生舱：声明式创建任意组件 + 容器语义，构造后经配置回调接一等接口。
 ///
 /// 为什么需要它：32 个内置组件各有**构造参数与一等接口**（`Tabs::sync_tabs`、
@@ -664,13 +691,14 @@ template <class T>
 template <class T>
 [[nodiscard]] auto custom(Composer& c, std::function<void(T&)> configure = {},
                           const BoxProps& props = {}, std::string_view key = {}) -> T& {
-  Element* element = c.create_element(type_name<T>(), st::empty_json_object(), key);
+  Element* element = c.create_element(element_type_name<T>(), st::empty_json_object(), key);
   // 未知类型：**必须是显式错误**——静默返回假元素会让界面缺块而不报，最难查。
   // 这里不做异常（禁令 L5：业务错误走 Result/致命断言）：编译期类型 + 注册表
   // 应当一致，不一致就是程序缺陷——直接终止并打印出缺的类型名。
   if (element == nullptr) {
-    std::fprintf(stderr, "[dsl] custom<T> 未注册的组件类型: %s（补 type_name 特化）\n",
-                 type_name<T>().c_str());
+    std::fprintf(stderr, "[dsl] custom<T> 未注册的组件类型: %s（内置类型需补 type_name 特化；\n",
+                 element_type_name<T>().c_str());
+    std::fprintf(stderr, "      外部类型需先 dsl::register_element_type<T>(\"名字\")）\n");
     std::abort();
   }
   apply_box(*element, props);
@@ -1054,7 +1082,70 @@ template <class T, class Fetcher, class Input>
 /// 元素工厂：类型名 → 构造（dsl 内部与后续协议/脚本建元素共用；未知类型返回 nullptr）。
 [[nodiscard]] auto make_element(std::string type) -> std::unique_ptr<Element>;
 
-/// 全部可声明组件的注册名（升序不保证，按清单顺序）。
+/// **外部（示例级）组件注册**：把一个自定义 `Element` 子类接入声明式。
+///
+/// ## 为何需要这个口子
+///
+/// `make_element` 只查**内置**组件表（`ST_COMPONENT_LIST`，框架自己的 32 个）——
+/// 而 `custom<T>` 的全部实现都建立在“能从名字造出元素”上。于是**示例级的自绘
+/// 组件**（鏤月的 `CanvasView`、裁云的时间轴）无法用 `custom<T>`：
+/// 它们不该为了能被声明式创建而挤进框架的组件清单（那会让框架的公开组件面
+/// 被具体示例的需求撑大，而单测 `dsl_registry_*` 也在守那张表的唯一性）。
+///
+/// 实测（鈥月落地时）：没有这个口子时，唯一的替代写法是“先 `custom<Panel>`
+/// 造个容器、再手工 `add_child` 把自绘元素塞进去”——那条路有两个坑：
+/// ① 自绘元素处于声明式树里但不被重组器认领（帧间会被当“多余子元素”摘掉）；
+/// ② 声明式重组重建容器时，自绘元素与它的帧间状态一起没了。
+///
+/// ## 契约
+///
+/// - `type` 是**稳定性契约**（同 `ST_COMPONENT_LIST` 的注册名）：它与
+///   `T::type()` 返回值一致，也是 `custom<T>` 向重组器报的名字；
+/// - **不得与内置名重名**（重名时 `make_element` 先命中内置表，外部注册**静默失效**）；
+///   重名会在注册时就返回 false；
+/// - 在**启动期**注册（建界面之前）——不提供注销：声明式元素的生命周期
+///   跨越若干帧，中途抽走工厂会让它们变成悬垂指针。
+///
+/// 用法（示例的 `main()` 开头）：
+/// ```cpp
+/// (void)st::ui::dsl::register_element_type<louyue::CanvasView>("CanvasView");
+/// ```
+namespace detail {
+/// `register_element_type<T>` 的非模板落点（实现在 `dsl.cpp`）。
+///
+/// 单独一个函数而不写成 `inline` 模板体：注册表是**进程级状态**，定义散在头里
+/// 会变成每个 TU 各一份——那正是“注册了却查不到”的经典成因。
+[[nodiscard]] auto register_external_element(
+    std::string type, std::function<std::unique_ptr<Element>()> create) -> bool;
+}  // namespace detail
+
+template <class T>
+auto register_element_type(std::string type) -> bool {
+  static_assert(std::is_base_of_v<Element, T>,
+                "register_element_type<T> 的 T 必须是 Element 的子类");
+  // 同时登记**类型名**：`element_type_name<T>()` 靠 token 查它
+  //（不再需要为每个外部类型手写 `type_name` 特化）。
+  detail::register_element_type_by_token(detail::element_type_token<T>(), type);
+  return detail::register_external_element(
+      std::move(type), [] { return std::unique_ptr<Element>(std::make_unique<T>()); });
+}
+
+/// 取类型的注册名。
+///
+/// **唯一**一条查表路径：内置类型在 `dsl.cpp` 启动期由 `ST_COMPONENT_LIST` 的
+/// token 展开登记，外部类型由 `register_element_type<T>` 登记。
+///
+/// 为何不写成“先查外部表、没有则回退 `type_name<T>()`”：那是一个**运行时**分支，
+/// 两支都会被 ODR-use——而外部类型只有 `type_name` 的声明、没有定义，链接期就报
+/// 未定义符号（实测 `undefined symbol type_name<CanvasView>`）。
+/// 启动期登记把选择从“运行时”提到“登记时”，`type_name<T>` 因此**只在
+/// `dsl.cpp` 内部使用**，头文件路径不再碰它。
+template <class T>
+[[nodiscard]] auto element_type_name() -> std::string {
+  return detail::lookup_element_type(detail::element_type_token<T>());
+}
+
+/// 全部可声明组件的注册名（内置 + 已注册的外部类型，按清单顺序）。
 ///
 /// 用途：诊断、控制协议 `ui.create` 的合法类型枚举，以及**一致性单测**——
 /// 钉住「`make_element(名)` 构造出的元素，其 `type()` 就是该名；且 `custom<T>` 取的
