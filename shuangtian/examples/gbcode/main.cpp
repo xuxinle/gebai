@@ -526,7 +526,7 @@ struct CodeEditorPage : Component {
   /// 终端里的 git 命令跑完后要刷新状态（pump 里落地——命令完成时机不可知）。
   bool git_refresh_pending_{false};
   // —— Git 工具窗（阶段 B）——
-  /// 底部面板当前标签（0=终端 1=Git）。
+  /// 底部单槽当前显示的面板（0=终端 1=Git）。
   State<std::size_t> bottom_tab_{0};
   /// 日志/分支已读（帧首泵读；git 操作后置 false 重读）。
   bool git_log_loaded_{false};
@@ -1385,7 +1385,7 @@ struct CodeEditorPage : Component {
       const char* id;
     };
     static constexpr Activity kActivities[] = {{"folder", "explorer"}, {"search", "search"},
-                                               {"git-branch", "scm"}, {"play", "run"},
+                                               {"diff", "scm"}, {"play", "run"},
                                                {"package", "extensions"}};
     const std::size_t current = activity_.value();
     // `surface = Alt`：与标题栏/状态栏**同色**——三者合起来是一圈“外壳”，
@@ -1422,15 +1422,51 @@ struct CodeEditorPage : Component {
       // 注意空格子必须带 `grow`：裸 `spacer` 在列里只是固定高的小段，
       // 不会把后面的项顶到底部（实测：终端按钮被挤在资源树下面，看不见）。
       (void)column(c, {.grow = true, .id = "activity-spacer"}, [&] {});
+      // —— Git（历史：分支 | 日志）——
+      //
+      // 激活态与终端**同一推法**：面板开着 && 停在这个标签。点击三态：
+      // 隐藏中 → 打开并切到 Git；停在别的标签 → 切过来；已激活 → 收起面板
+      //（与上组“点当前视图 = 收起”同一交互词形）。
+      (void)custom<Button>(c, [this](Button& b) {
+        b.set_id("activity-git");
+        b.set_icon("git-branch");
+        // 激活 = 下半可见 && 当前槽是 Git（与终端按钮同一推法）。
+        const bool on = bottom_visible_.value() && bottom_tab_.value() == 1;
+        b.set_variant(on ? Button::Variant::Soft : Button::Variant::Ghost);
+        b.set_size(Button::Size::Small);
+        b.on_click = [this] { toggle_git_panel(); };
+      }, {.width = 40.0f, .height = 36.0f, .key = "activity-git"});
       (void)custom<Button>(c, [this](Button& b) {
         b.set_id("activity-terminal");
         b.set_icon("terminal");
-        // 面板开着 = 激活态（与上组一致：状态从真实可见性推，不是另存的标记）。
-        b.set_variant(bottom_visible_.value() ? Button::Variant::Soft : Button::Variant::Ghost);
+        // 激活 = 下半可见 && 当前槽是终端（状态从真实可见性推，不是另存标记）。
+        const bool on = bottom_visible_.value() && bottom_tab_.value() == 0;
+        b.set_variant(on ? Button::Variant::Soft : Button::Variant::Ghost);
         b.set_size(Button::Size::Small);
         b.on_click = [this] { toggle_terminal_panel(); };
       }, {.width = 40.0f, .height = 36.0f, .key = "terminal"});
     });
+  }
+
+  /// 底部单槽的三态切换（两按钮同一词形）：
+  /// 隐藏中 → 打开并显示我；显示的是别人 → 切到我；显示的是我 → 收起下半。
+  ///（与上组活动栏“点当前视图 = 收起侧栏”同一交互词形。）
+  void toggle_bottom_panel(std::size_t mine) {
+    if (!bottom_visible_.value()) {
+      bottom_tab_.set(mine);
+      bottom_visible_.set(true);
+    } else if (bottom_tab_.value() != mine) {
+      bottom_tab_.set(mine);
+    } else {
+      bottom_visible_.set(false);
+    }
+  }
+
+  /// Git 按钮：切到 Git 工具窗（打开顺带要日志）。
+  void toggle_git_panel() {
+    const bool opening = !bottom_visible_.value() || bottom_tab_.value() != 1;
+    toggle_bottom_panel(1);
+    if (opening) git_log_wanted_ = true;
   }
 
   /// 开关底部终端面板（活动栏按钮 / `` Ctrl+` `` 同一条路径）。
@@ -1438,9 +1474,18 @@ struct CodeEditorPage : Component {
   /// 打开时把键盘焦点交给终端输入行（`Terminal` 自己会在下一次事件里接住），
   /// 这是“点了终端按钮就能直接敲命令”的那一步。
   void toggle_terminal_panel() {
-    const bool next = !bottom_visible_.value();
-    bottom_visible_.set(next);
-    status_.set(next ? "终端：已展开" : "终端：已收起");
+    const bool opening = !bottom_visible_.value() || bottom_tab_.value() != 0;
+    toggle_bottom_panel(0);
+    if (opening) status_.set("终端：已展开");
+  }
+
+  /// “命令要在终端里跑给用户看”的统一入口：确保下半开着且停在终端
+  ///（Git 操作、运行任务、diff 进终端等都走这里）。
+  void ensure_terminal_visible() {
+    if (!bottom_visible_.value() || bottom_tab_.value() != 0) {
+      bottom_tab_.set(0);
+      bottom_visible_.set(true);
+    }
   }
 
   /// 工作台各视图的标题（侧栏顶部一行：标题 + 该视图的动作按钮）。
@@ -2057,44 +2102,22 @@ struct CodeEditorPage : Component {
   // 底部面板**只有终端一个视图**（问题/输出已删，见 `Problem` 处的说明）——
   // 于是这里不再需要标签栏，只留一行“终端标题 + 状态 + 动作”。
   void build_bottom(Composer& c) {
-    // —— 底部双标签：终端 | Git（版本管理重构 B）——
+    // —— 底部单槽切换：终端 ↔ Git（同一停靠位，互斥显示）——
     //
-    // 参照歌白文件工作台（IDEA 风格）：底部留给"回顾历史"——分支 | 日志 | 提交内容，
-    // 与左侧「变更」（改了什么/要提交什么）**节奏不同**。终端与 Git 同槽互斥
-    // （同一停靠位/高度），切换只切内容，两个实例都保留（终端的会话不能因为
-    // 看一眼日志就被销毁）。
-    column(c, {.gap = 0.0f, .grow = true, .id = "bottom-tabs"}, [&] {
-      // **单一真值源 = Tabs 自己的 active**（按 key 复用，跨帧保持）。
-      //
-      // 为什么不用平行的 `State bottom_tab_`：控制通道/属性面写 `set active=Git`
-      // 时只改 Tabs、不经过 `on_change`（程序化写入不通知是合理默认）——
-      // 平行 State 永远不知道，视图显隐就停在上一个标签（实测：`set` 成功、
-      // `active=1` 读回也对，`git-view` 就是不出现）。
-      // 每帧从 Tabs **读回**：真值只有一个，写入路径（点击/控制通道/程序）
-      // 全都汇聚到它。
-      // Tabs 的三个写入路径（点击 / 控制通道属性面 / 程序）都会经 `on_change`
-      // 回流到 `bottom_tab_`（属性面写入的通知是框架行为，见 Tabs::set_property
-      // 对 "active" 的处理注释）——单一真值是 State，子树显隐由它驱动。
-      (void)custom<Tabs>(c, [this](Tabs& tabs) {
-        tabs.set_id("bottom-panel-tabs");
-        tabs.set_tabs({"终端", "Git"});
-        tabs.on_change = [this](std::size_t index) { bottom_tab_.set(index); };
-      }, {.height = 30.0f, .key = "bottom-tabs-bar"});
-      // **两个都声明**（不是条件声明）：终端实例必须常驻——切到 Git 标签时
-      // 摘掉它会让 `terminal_ptr` 悬垂，下一帧 `pump_terminal()` 对着尸体调
-      // `pump()` 就是 SIGSEGV（实测：点状态栏分支切 Git → 必崩，栈在
-      // `AnsiScreen::feed`——读的是已释放的行缓冲）。
-      // 隐藏用 `visible`（子树保留、只不布局不绘制），与侧栏同一个范式。
-      if (bottom_tab_.value() == 0) {
-        build_terminal_body(c);
-      } else {
-        build_terminal_body_hidden(c);
-        build_git_view(c);
-      }
-    });
+    // 不是标签页也不是并排：一个槽，两个活动栏按钮各自控制——
+    // 点终端 = 切到终端（Git 按钮熄灭）、点 Git = 切到 Git（终端按钮熄灭）；
+    // 再点当前那个 = 收起整个下半。两个子树**都常驻声明**（不显示的用
+    // 隐藏声明保实例）——`Terminal` 的会话与 `terminal_ptr` 不能因为切走被销毁
+    //（实测 SIGSEGV：栈在 AnsiScreen::feed，悬垂指针）。
+    if (bottom_tab_.value() == 0) {
+      build_terminal_body(c);
+    } else {
+      build_terminal_body_hidden(c);   // 终端实例保活（只藏不拆）
+      build_git_view(c);
+    }
   }
 
-  /// 终端的**隐藏声明**（Git 标签激活时保持实例存活——只藏不拆）。
+  /// 终端的**隐藏声明**（面板关着时保持实例存活——只藏不拆）。
   void build_terminal_body_hidden(Composer& c) {
     (void)custom_container<Panel>(
         c, [&] { build_terminal_body(c); },
@@ -2222,7 +2245,7 @@ struct CodeEditorPage : Component {
         const std::string short_name =
             slash == std::string::npos ? branch.name : branch.name.substr(slash + 1);
         if (terminal_ptr != nullptr) {
-          bottom_visible_.set(true);
+          ensure_terminal_visible();
           terminal_ptr->run("git checkout " + short_name);
           git_refresh_pending_ = true;
           git_log_loaded_ = false;
@@ -2232,7 +2255,7 @@ struct CodeEditorPage : Component {
     }
     pending_git_confirm_ = [this, name = branch.name] {
       if (terminal_ptr != nullptr) {
-        bottom_visible_.set(true);
+        ensure_terminal_visible();
         terminal_ptr->run("git checkout " + name);
         git_refresh_pending_ = true;
         git_log_loaded_ = false;
@@ -2368,11 +2391,11 @@ struct CodeEditorPage : Component {
       status_item(c, "status-branch", "git-branch", [this] {
         return git_.branch.empty() ? std::string("main") : git_.branch;
       }, [this] {
-        // 点分支 → 底部 Git 工具窗（分支/日志在那里；左侧「变更」看的是改动，
+        // 点分支 → 切到 Git 工具窗（分支/日志在那里；左侧「变更」看的是改动，
         // 两者分工见 build_git_view 的注释）。**只设状态**——日志读取在帧首泵
         //（`ensure_git_log`）做，不在事件回调里起子进程。
-        bottom_visible_.set(true);
         bottom_tab_.set(1);
+        bottom_visible_.set(true);
         git_log_wanted_ = true;
       });
       status_item(c, "status-errors", "error",
@@ -3255,7 +3278,7 @@ struct CodeEditorPage : Component {
   /// 暂存/取消暂存一个文件（写操作：交终端作业通道——输出实时回流、可中止）。
   void git_stage(const std::string& path, bool stage) {
     if (terminal_ptr == nullptr || workspace_.empty()) return;
-    bottom_visible_.set(true);
+    ensure_terminal_visible();
     terminal_ptr->run(stage ? std::format("git add -- {}", path)
                             : std::format("git restore --staged -- {}", path));
     // 命令完成后状态变了：下一轮 pump 刷新（不在这里同步刷——命令还没跑完）。
@@ -3269,7 +3292,7 @@ struct CodeEditorPage : Component {
       git_confirm_body_ = "文件没有进过版本库，删除后无法恢复。确定删除？";
       pending_git_confirm_ = [this, path = change.path] {
         if (terminal_ptr != nullptr) {
-          bottom_visible_.set(true);
+          ensure_terminal_visible();
           terminal_ptr->run(std::format("rm -- {}", path));
           git_refresh_pending_ = true;
         }
@@ -3285,7 +3308,7 @@ struct CodeEditorPage : Component {
     pending_git_confirm_ = [this, path = change.path,
                             staged_side = change.has_staged_side()] {
       if (terminal_ptr == nullptr) return;
-      bottom_visible_.set(true);
+      ensure_terminal_visible();
       // 两侧都有时先退暂存再还原工作区（一步做完，省得用户分两次）。
       if (staged_side) {
         terminal_ptr->run(std::format("git restore --staged -- {} && git checkout -- {}",
@@ -3309,7 +3332,7 @@ struct CodeEditorPage : Component {
       return;
     }
     if (terminal_ptr == nullptr || workspace_.empty()) return;
-    bottom_visible_.set(true);
+    ensure_terminal_visible();
     // 消息作为单引号参数转义（用户文本不能直接拼进 shell——单引号内再替换单引号）。
     const std::string escaped = "'" + st::replace_all(message, "'", "'\''") + "'";
     terminal_ptr->run("git add -A && git commit -m " + escaped);

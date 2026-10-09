@@ -100,13 +100,27 @@ def check(condition, message):
         raise AssertionError(message)
 
 
+def center_of(client, selector):
+    """元素中心坐标（点击用）。"""
+    bounds = client.ok("find", {"selector": selector})["matches"][0]["bounds"]
+    return bounds["x"] + bounds["width"] / 2, bounds["y"] + bounds["height"] / 2
+
+
 def wait_until(predicate, budget_s: float = 5.0):
-    """轮询等条件成立（声明式 UI 的状态落地要一到两帧）。"""
+    """轮询等条件成立（声明式 UI 的状态落地要一到两帧）。
+
+    谓词异常**吞掉按未成立处理**（过渡态里元素可能短暂不可读——例如宿主
+    隐藏期间 `get` 报 not_found，那不是失败，是"还没到"）。返回是否等到。
+    """
     deadline = time.monotonic() + budget_s
     while time.monotonic() < deadline:
-        if predicate():
-            return
+        try:
+            if predicate():
+                return True
+        except Exception:
+            pass
         time.sleep(0.15)
+    return False
 
 
 def main():
@@ -178,15 +192,6 @@ def main():
         # —— 4. 终端面板（问题/输出面板已删；2026-10-09 起新增「终端 | Git」双标签）——
         check(client.count("#problems-list") == 0, "问题面板应已删除")
         check(client.count("#output-text") == 0, "输出面板应已删除")
-        # 双标签（版本管理重构 B）：标签栏在、默认停在终端；切到 Git 出工具窗。
-        check(client.count("#bottom-panel-tabs") == 1, "底部应有「终端 | Git」标签栏")
-        check(client.count("#git-view") == 0, "默认应停在终端标签（Git 视图不可见）")
-        client.ok("set", {"id": "bottom-panel-tabs", "props": {"active": "Git"}})
-        wait_until(lambda: client.count("#git-view") == 1)
-        check(client.count("#git-view") == 1, "切到 Git 标签应出现工具窗")
-        client.ok("set", {"id": "bottom-panel-tabs", "props": {"active": "终端"}})
-        wait_until(lambda: client.count("#git-view") == 0)
-        check(client.count("#terminal") == 1, "切回终端标签终端应在")
         # 真终端：PTY 属性为真、组件内标签栏就位、「+」在。
         check(client.ok("get", {"id": "terminal"})["props"].get("pty") == "true",
               "终端未进入 PTY 模式")
@@ -726,6 +731,38 @@ def main():
         time.sleep(0.4)
         check(client.count("#goto-input") == 0, "Esc 未关闭转到行浮层")
         print("[27b] 转到行浮层可被 Esc 关闭")
+
+        # —— 28. 底部单槽切换（终端 ↔ Git；独立小节：避免前序步骤的面板状态副作用）——
+        print("[28] 底部单槽切换：终端 ↔ Git")
+        # 环境归一：确保下半展开且停在终端（前面各节动过面板/焦点，
+        # 状态不归零的话点击次数会对不上——归一到已知态再断言）。
+        if client.ok("get", {"id": "bottom-split"})["props"].get("second_hidden") == "true":
+            client.click_at(*center_of(client, "#activity-terminal"))
+            wait_until(lambda: client.ok("get", {"id": "bottom-split"})["props"].get("second_hidden") == "false")
+            time.sleep(0.4)
+        # 若停在 Git（前节遗留），点终端切回来。
+        if client.count("#git-view") == 1:
+            client.click_at(*center_of(client, "#activity-terminal"))
+            wait_until(lambda: client.count("#git-view") == 0)
+            time.sleep(0.4)
+        check(client.count("#bottom-panel-tabs") == 0, "不应有标签栏（单槽切换）")
+        check(client.count("#terminal") == 1, "默认应显示终端")
+        # 切 Git → 切回终端 → 收起：每步用**状态断言**（读可见性）而不是数点击次数
+        #——前面各节对面板状态的副作用会让“第 N 击”的预期对不上。
+        client.click_at(*center_of(client, "#activity-git"))
+        wait_until(lambda: client.count("#git-view") == 1)
+        check(client.count("#git-view") == 1, "点 Git 按钮应切到 Git 工具窗")
+        check(client.count("[id=terminal]") == 1, "终端实例应保活（隐藏不拆）")
+        client.click_at(*center_of(client, "#activity-terminal"))
+        wait_until(lambda: client.count("#git-view") == 0 and
+                   client.ok("get", {"id": "bottom-split"})["props"].get("second_hidden") == "false")
+        check(client.count("#terminal") == 1, "点终端按钮应切回终端")
+        client.click_at(*center_of(client, "#activity-terminal"))
+        check(wait_until(lambda: client.ok("get", {"id": "bottom-split"})["props"].get("second_hidden") == "true"),
+              "再点终端按钮应收起下半（显示中点当前面板 = 收起）")
+        client.click_at(*center_of(client, "#activity-terminal"))
+        check(wait_until(lambda: client.ok("get", {"id": "bottom-split"})["props"].get("second_hidden") == "false"),
+              "收起后再点应重新展开")
 
         print("\n[OK] gbcode 端到端全部通过")
         return 0
