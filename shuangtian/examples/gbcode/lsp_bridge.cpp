@@ -65,7 +65,10 @@ auto builtin_recipes() -> const std::vector<LanguageServerRecipe>& {
           .language = "rust",
           .extensions = {".rs"},
           .program = "rust-analyzer",
-          .args = {"--log-file", "/dev/null"},
+          // ⚠ 参数名必须是 `--no-log-buffering`：写成 `--no-log-buffer` 时
+          // rust-analyzer **直接退出**（未知参数），而症状是"进程已退出"这种
+          // 与参数无关的报错——实测踩到（真机四语言冒烟的价值就在这）。
+          .args = {"--no-log-buffering"},
       },
   };
   return recipes;
