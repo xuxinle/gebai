@@ -69,7 +69,14 @@ constexpr std::array<RuleSpec, 15> kRules{{
     // 调用点正规化 Windows 的 ANSI `argv`，而它的职责不属于任何 `platform_*` 横切层）。
     // 两条通道都各自计数，不允许静默。
     {"L14", "系统头/平台 API 只能出现在 platform_* 单点封装（见 §10 第 1 条）",
-     R"(#\s*include\s*<(windows|unistd|dlfcn|shellapi|winsock2|arpa/inet|netinet/in|sys/socket|poll|fcntl)\.h?>|\bdlopen\s*\(|\bdlsym\s*\()"},
+     // ③ **POSIX 函数直调**（补于本轮）：上面两类只盖「系统头 include」与
+     // `dlopen` 家族，于是 `tests/` 里三处 `static_cast<int>(::getpid())`
+     // 长期无人发现——Linux 上靠头文件传递恰好编得过，**交叉编译直接报
+     // `'::getpid' has not been declared`**。同一类错还有一批同样常见的：
+     // 睡眠/进程/时间 的 POSIX 入口。判据用 `::name(` 的**限定调用形式**：
+     // 不经 `::` 的裸调用与同名单成员调用（如 `clock.…`）不会误报；
+     // 误伤面限于“自己定义了同名全局函数并限定调用”——本仓没有。
+     R"(#\s*include\s*<(windows|unistd|dlfcn|shellapi|winsock2|arpa/inet|netinet/in|sys/socket|poll|fcntl)\.h?>|\bdlopen\s*\(|\bdlsym\s*\(|::(?:getpid|getppid|getuid|geteuid|fork|execv|execve|execl|execlp|waitpid|kill|usleep|sleep|nanosleep|clock_gettime|gettimeofday|opendir|readdir|closedir)\s*\()"},
     // L15：raw string 用**带定界符**的形式。
     //
     // 为什么需要它（本会话实测踩过**两次**）：`R"(...)"` 里出现 `)"` 序列时，

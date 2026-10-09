@@ -15,6 +15,8 @@
 
 #include "st/test/test.hpp"
 
+#include <algorithm>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -195,6 +197,41 @@ ST_TEST(ui_icon_view_bounds_wraps_the_drawn_geometry) {
     ST_CHECK(bounds.right() <= 24.5f);
     ST_CHECK(bounds.bottom() <= 24.5f);
   }
+}
+
+/// **图标表不得有重名条目**（`Icon::names()` 的长度 == 去重后的长度）。
+///
+/// 为何必须镖：`kIcons` 是 `inline constexpr` 的**有序数组**，`Icon::find` 返回
+/// **第一个**匹配项——同名条目里后面的那些永远不生效，但 `names()` 会把它们
+/// 一并报出去（画廊图标全集的计数因此偏高）。
+///
+/// 实测（本轮拓到）：表面有 **166 条、唯一名只有 74 个**—— 46 个名字各有 3 份副本，
+/// **92 条死条目**。引入方式是几轮改动都把新版本**追在表尾**而不是原地替换，
+/// 于是“新版图标”从来没有生效过（活动栗 `diff` 一直用的是第一版形状，
+/// 而改动者以为已经换掉了）。
+///
+/// 这条很便宜，但能当场拦住下次“追在表尾”——那种写法从 diff 上看不出异常。
+ST_TEST(ui_icon_names_have_no_duplicates) {
+  const auto names = Icon::names();
+  ST_CHECK(names.size() >= 70U);
+  std::vector<std::string_view> sorted(names.begin(), names.end());
+  std::sort(sorted.begin(), sorted.end());
+  // ⚠ **不借 `std::unique` 算重复**：它把重复项移走、尾部内容**未指定**，
+  // 无论是拿它的返回值当“重复个数”还是读尾部列举重复名都是坑
+  //（本轮两个都踩了：前者报“74 条 74 个重复”，后者植入 `triangle` 却报成 `warning`）。
+  // 直接扫**相邻相等对**最直白，且报告与判据同一个来源。
+  std::vector<std::string_view> duplicated;
+  for (std::size_t i = 1; i < sorted.size(); ++i) {
+    if (sorted[i] == sorted[i - 1]) duplicated.push_back(sorted[i]);
+  }
+  if (!duplicated.empty()) {
+    st::print("[icon-dup] {} 条里只有 {} 个唯一名，重复：", names.size(),
+              names.size() - duplicated.size());
+    for (const auto& name : duplicated) st::print(" {}", name);
+    st::print("\n");
+  }
+  // 条目数 == 唯一名数；不允许“追在表尾”式的重复。
+  ST_CHECK(duplicated.empty());
 }
 
 /// **光学尺寸一致**：各图标墨迹的最长边归一化后应当彼此接近。

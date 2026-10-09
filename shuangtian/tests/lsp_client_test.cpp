@@ -119,15 +119,25 @@ struct CppSandbox {
 }  // namespace
 
 ST_TEST(lsp_client_uri_round_trip) {
-  // POSIX 绝对路径。
-  const std::string uri = st::lsp::LspClient::path_to_uri("/tmp/a b/c.cpp");
-  // 空格要转义（URI 里裸空格非法）。
-  ST_CHECK_EQ(uri, std::string("file:///tmp/a%20b/c.cpp"));
-  ST_CHECK_EQ(st::lsp::LspClient::uri_to_path(uri), std::string("/tmp/a b/c.cpp"));
-  // 中文路径也往返保真（LSP 里的非 ASCII 靠百分号转义）。
+  // ⚠ **路径形态是平台相关的**：`path_to_uri` 在 Windows 上会给盘符补一个前导
+  // 斜杠（`C:\a` → `file:///C:/a`），`uri_to_path` 反向把 `/` 转回 `\`。
+  // 所以下面分平台给期望值——写死 POSIX 形态会让这条在 Windows 上**必然变红**
+  //（实测就是这样：这三个单元修好编译后第一次跑，它当场失败）。
+#ifdef _WIN32
+  const std::string path = "C:\\tmp\\a b\\c.cpp";
+  const std::string uri = st::lsp::LspClient::path_to_uri(path);
+  ST_CHECK_EQ(uri, std::string("file:///C:/tmp/a%20b/c.cpp"));   // 空格要转义
+  ST_CHECK_EQ(st::lsp::LspClient::uri_to_path(uri), path);        // 往返回到 `\`
+  const std::string chinese = "C:\\tmp\\文档\\测试.cpp";
+  ST_CHECK_EQ(st::lsp::LspClient::uri_to_path(st::lsp::LspClient::path_to_uri(chinese)), chinese);
+#else
+  const std::string path = "/tmp/a b/c.cpp";
+  const std::string uri = st::lsp::LspClient::path_to_uri(path);
+  ST_CHECK_EQ(uri, std::string("file:///tmp/a%20b/c.cpp"));      // 空格要转义
+  ST_CHECK_EQ(st::lsp::LspClient::uri_to_path(uri), path);
   const std::string chinese = "/tmp/文档/测试.cpp";
-  const std::string chinese_uri = st::lsp::LspClient::path_to_uri(chinese);
-  ST_CHECK_EQ(st::lsp::LspClient::uri_to_path(chinese_uri), chinese);
+  ST_CHECK_EQ(st::lsp::LspClient::uri_to_path(st::lsp::LspClient::path_to_uri(chinese)), chinese);
+#endif
   // 非 file:// 前缀如实返回空（不猜）。
   ST_CHECK_EQ(st::lsp::LspClient::uri_to_path("http://x/y"), std::string{});
 }
@@ -267,7 +277,13 @@ done
   ST_CHECK(client.state() == st::lsp::SessionState::Stopped);
 }
 
-ST_TEST(lsp_client_reports_handshake_timeout) {
+/// 假 server：收下 `initialize` 但**永不回应**（模拟卡死的 server）。
+///
+/// ⚠ 列 `ST_TEST_SLOW` 的理由：它需要一个**可执行的 shell 脚本**当假 server
+/// （Windows 上得换 PowerShell 逐条 `-Command` 启动，且 `read` 循环
+/// 没现成等价物），耗时与成败都取决于环境。放在默认路径上会让
+/// 「代码对不对」与「这台机器有没有那个 shell」混在一起报（`test.hpp` 的原话）。
+ST_TEST_SLOW(lsp_client_reports_handshake_timeout) {
   // 假 server：收下 initialize 但**永不回应**（模拟卡死的 server）。
   FakeServer server(R"(
 read len=""
@@ -291,7 +307,10 @@ sleep 30
   client.stop(300);
 }
 
-ST_TEST(lsp_client_reports_unexpected_exit) {
+/// 假 server：接受启动后立刻退出（模拟崩溃）。
+///
+/// ⚠ 同 `lsp_client_reports_handshake_timeout`：依赖可执行的 shell 脚本。
+ST_TEST_SLOW(lsp_client_reports_unexpected_exit) {
   // 假 server：接受启动后立刻退出（模拟崩溃）。
   FakeServer server("exit 7\n");
   st::lsp::LspClient client;

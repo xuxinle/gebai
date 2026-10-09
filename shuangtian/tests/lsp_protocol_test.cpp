@@ -1,8 +1,11 @@
 /// LSP 地基测试（阶段 1）：协议分帧/JSON-RPC 编解码 + 子进程双向通信。
 ///
 /// 为什么这两件事测在一起：它们是**同一条链路的上下半**——分帧层的结果要经
-/// 双向管道送进送出，任何一侧坏了整条链都不通。用真子进程（`cat` 回显）
+/// 双向管道送进送出，任何一侧坏了整条链都不通。用真子进程（回显 stdin）
 /// 而非 mock：mock 能证明“我以为对”，真进程能证明“确实对”。
+///
+/// 壳命令经 `shell_fixture.hpp` 按平台取（POSIX `/bin/sh -c`，Windows PowerShell
+/// `$input | ForEach-Object`）——原先写死 `/bin/sh` + `cat`，在 Windows 上必然失败。
 
 #include <chrono>
 #include <iostream>
@@ -14,6 +17,7 @@
 #include "st/core/process.hpp"
 #include "st/lsp/protocol.hpp"
 #include "st/test/test.hpp"
+#include "shell_fixture.hpp"
 
 namespace {
 
@@ -206,10 +210,15 @@ ST_TEST(lsp_position_maps_utf16_columns) {
 }
 
 ST_TEST(stream_handle_supports_bidirectional_pipes) {
-  // 真子进程双向通信：`/bin/sh -c 'cat'` 把 stdin 原样回显到 stdout。
+  // 真子进程双向通信：壳把 stdin 原样回显到 stdout。
   // 这验证的正是 LSP 需要的形态（同一对管道上写请求、读响应）。
+  if (!st_test_shell::available()) {
+    std::cout << "[shell] 本平台无可用 shell，跳过" << '\n';
+    return;
+  }
+  const auto spec = st_test_shell::echo_spec();
   st::process::StreamHandle handle;
-  handle.open("/bin/sh", {"-c", "cat"}, "");
+  handle.open(spec.program, spec.argv, "");
   ST_REQUIRE(handle.valid());
   ST_CHECK(handle.can_write());
 
@@ -227,7 +236,7 @@ ST_TEST(stream_handle_supports_bidirectional_pipes) {
   ST_REQUIRE(handle.read_line(line));
   ST_CHECK_EQ(line, std::string("second-round"));
 
-  // 发完关 stdin → 子进程 EOF 退出（`cat` 的正常收尾路径）。
+  // 发完关 stdin → 子进程 EOF 退出（回显壳的正常收尾路径）。
   handle.close_write();
   ST_CHECK(!handle.can_write());
   const int code = handle.finish();
@@ -236,8 +245,13 @@ ST_TEST(stream_handle_supports_bidirectional_pipes) {
 
 ST_TEST(stream_handle_reports_write_failure_after_process_exit) {
   // 子进程立刻退出：之后再写必须**如实返回 false**（不静默丢弃）。
+  if (!st_test_shell::available()) {
+    std::cout << "[shell] 本平台无可用 shell，跳过" << '\n';
+    return;
+  }
+  const auto spec = st_test_shell::exit_spec(3);
   st::process::StreamHandle handle;
-  handle.open("/bin/sh", {"-c", "exit 3"}, "");
+  handle.open(spec.program, spec.argv, "");
   ST_REQUIRE(handle.valid());
   const int code = handle.finish();
   ST_CHECK_EQ(code, 3);
@@ -260,9 +274,14 @@ ST_TEST(stream_handle_write_works_without_stdin_pipe_regression) {
   ST_CHECK(!handle.read_line(line));
   handle.close_write();   // 幂等，不崩
 
-  // 终端场景（只读、不写 stdin）仍要正常工作：`echo` 输出照读。
+  // 终端场景（只读、不写 stdin）仍要正常工作：shell 输出照读。
+  if (!st_test_shell::available()) {
+    std::cout << "[shell] 本平台无可用 shell，跳过（未 open 的那段断言已完成）" << '\n';
+    return;
+  }
+  const auto spec = st_test_shell::echo_text_spec("terminal-path");
   st::process::StreamHandle echo;
-  echo.open("/bin/sh", {"-c", "echo terminal-path"}, "");
+  echo.open(spec.program, spec.argv, "");
   ST_REQUIRE(echo.valid());
   ST_REQUIRE(echo.read_line(line));
   ST_CHECK_EQ(line, std::string("terminal-path"));
