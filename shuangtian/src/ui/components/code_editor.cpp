@@ -1270,6 +1270,21 @@ auto CodeEditor::caret_offset_x(const RenderContext& context) const -> float {
   return x_for_index(context, cursor_) - bounds_.x;
 }
 
+auto CodeEditor::caret_screen_rect() const noexcept -> math::Rect {
+  if (bounds_.is_empty() || line_height_cache_ <= 0.0f) return math::Rect{};
+  const std::size_t line = line_of_index(cursor_);
+  const float row_top = bounds_.y + kTopPadding - scroll_y_ + static_cast<float>(line) * line_height_cache_;
+  const std::size_t line_begin = line < line_spans_.size() ? line_spans_[line].first : 0;
+  const std::size_t column = cursor_ >= line_begin ? cursor_ - line_begin : 0;
+  // 列 → 像素：按**平均字宽**估（`max_line_width_cache_` 是整篇最长行的宽度，
+  // 拿它算单列会偏差很大）。等宽字体下"一个字符约 0.6 个字号"是稳定近似——
+  // 弹层定位差几像素无妨（它本来就贴在光标下方，不是精确锚定到字符）。
+  const float char_width = std::max(4.0f, font_size() * 0.6f);
+  const float x = bounds_.x + gutter_cache_ + kGutterPadding - scroll_x_ +
+                  static_cast<float>(column) * char_width;
+  return math::Rect{x, row_top, std::max(1.0f, char_width), line_height_cache_};
+}
+
 auto CodeEditor::last_visible_line(const RenderContext& context) const -> std::size_t {
   const std::size_t first = first_visible_line(context);
   const std::size_t count = visible_line_count(context);

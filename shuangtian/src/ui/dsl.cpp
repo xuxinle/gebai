@@ -15,6 +15,7 @@
 #include "st/ui/actions.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/code_editor.hpp"
+#include "st/ui/components/completion_popup.hpp"
 #include "st/ui/components/command_palette.hpp"
 #include "st/ui/components/feedback.hpp"
 #include "st/ui/components/file_dialog.hpp"
@@ -1314,6 +1315,7 @@ auto Composer::root() noexcept -> UiRoot& { return impl_->root; }
   X(Terminal, "Terminal", std::make_unique<Terminal>())                   \
   X(CodeEditor, "CodeEditor", std::make_unique<CodeEditor>())             \
   X(CommandPalette, "CommandPalette", std::make_unique<CommandPalette>()) \
+  X(CompletionPopup, "CompletionPopup", std::make_unique<CompletionPopup>()) \
   X(MarkdownView, "MarkdownView", std::make_unique<MarkdownView>())       \
   X(TitleBar, "TitleBar", std::make_unique<TitleBar>())                   \
   X(WindowFrame, "WindowFrame", std::make_unique<WindowFrame>())

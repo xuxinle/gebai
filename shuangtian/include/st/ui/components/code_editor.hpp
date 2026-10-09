@@ -288,6 +288,17 @@ class CodeEditor : public Element {
   /// 「光标画在 x」与「按 x 反查落点」必须回环到同一个字符索引。
   [[nodiscard]] auto caret_offset_x(const RenderContext& context) const -> float;
 
+  /// **光标屏幕矩形**（用于"贴着光标弹东西"：补全弹层、悬浮提示、右键菜单定位）。
+  ///
+  /// 为什么放在组件里：只有它知道 gutter 宽、滚动偏移、行高与文本宽度口径——
+  /// 让宿主自己拼这些（`bounds_.x + gutter + …`）必然与绘制分叉
+  ///（历史教训：`caret_top` 那次就是量尺不同源，光标比字低 1px）。
+  ///
+  /// 用**缓存几何**（`arrange`/`paint` 已填）：不需要 `RenderContext`，
+  /// 因此能在事件回调里直接调（那里拿不到 context）。缓存未填时返回空矩形
+  ///（调用方按"没有光标位置"处理，不要拿它去定位）。
+  [[nodiscard]] auto caret_screen_rect() const noexcept -> math::Rect;
+
   // —— 滚动条几何（与绘制/命中同一份；暴露出来是为了可断言）——
 
   /// 垂直滚动条轨道矩形（内容未溢出时为空）。

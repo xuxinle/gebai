@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "st/lsp/client.hpp"
+#include "st/lsp/completion.hpp"
 #include "st/ui/components/code_editor.hpp"
 
 namespace gbcode {
@@ -111,6 +112,24 @@ class LanguageService {
   auto request(std::string method, st::Json params) -> std::int64_t;
   /// 响应回调（`(id, method, result, is_error)`）。
   std::function<void(std::int64_t, const std::string&, const st::Json&, bool)> on_response{};
+
+  // —— 补全（阶段 4）——
+
+  /// 请求补全（`path` 的 `line`/`character` 处；行列为 **0 基**、列按 UTF-16 码元）。
+  /// 返回请求 id（0 = 未发出）。响应经 `on_completion`。
+  auto request_completion(std::string_view path, std::uint32_t line, std::uint32_t character)
+      -> std::int64_t;
+
+  /// 补全响应回调：`(请求 id, 候选, 是否不完整列表)`。
+  std::function<void(std::int64_t, const std::vector<st::lsp::CompletionEntry>&, bool)>
+      on_completion{};
+
+  /// 触发字符集（来自 server 的 `initialize` 能力；空 = server 没声明）。
+  [[nodiscard]] auto trigger_characters() const -> const std::vector<std::string>&;
+  /// 取候选详情（`completionItem/resolve`；结果经 `on_completion_detail`）。
+  auto resolve_completion(std::string_view path, std::size_t index) -> std::int64_t;
+  /// 详情回调：`(请求 id, 文本)`。
+  std::function<void(std::int64_t, const std::string&)> on_completion_detail{};
 
   /// 当前活动文件路径（诊断归属它；由 `ensure_started` 更新）。
   [[nodiscard]] auto active_path() const -> const std::string&;

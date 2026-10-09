@@ -1,5 +1,7 @@
 #include "lsp_bridge.hpp"
 
+#include "st/lsp/completion.hpp"
+
 #include <algorithm>
 #include <format>
 #include <utility>
@@ -103,6 +105,10 @@ struct LanguageService::Impl {
   std::map<std::string, std::vector<LspProblem>, std::less<>> diagnostics{};
   /// 最近一次诊断更新的 uri（pump 返回 true 时用）。
   std::string last_updated{};
+  /// 最近一次补全候选（`completionItem/resolve` 要用原始 JSON 回传）。
+  std::vector<st::lsp::CompletionEntry> last_completion{};
+  /// 触发字符缓存（`capabilities()` 返回副本，不能返回其成员引用）。
+  mutable std::vector<std::string> trigger_cache{};
 };
 
 LanguageService::LanguageService() : impl_(std::make_unique<Impl>()) {
@@ -137,6 +143,20 @@ LanguageService::LanguageService() : impl_(std::make_unique<Impl>()) {
   };
   impl_->client.on_response = [this](std::int64_t id, const std::string& method,
                                      const st::Json& result, bool is_error) {
+    // 补全相关响应在这里**消化掉**（应用层不必自己解析协议字段）。
+    if (method == "textDocument/completion") {
+      if (is_error) return;
+      impl_->last_completion = st::lsp::parse_completion(result);
+      if (on_completion) on_completion(id, impl_->last_completion,
+                                       st::lsp::completion_is_incomplete(result));
+      return;
+    }
+    if (method == "completionItem/resolve") {
+      if (!is_error && on_completion_detail) {
+        on_completion_detail(id, st::lsp::parse_completion_detail(result));
+      }
+      return;
+    }
     if (on_response) on_response(id, method, result, is_error);
   };
 }
@@ -288,6 +308,37 @@ auto LanguageService::active_path() const -> const std::string& { return impl_->
 
 void LanguageService::set_active_path(std::string path) {
   impl_->active_path = std::move(path);
+}
+
+auto LanguageService::request_completion(std::string_view path, std::uint32_t line,
+                                        std::uint32_t character) -> std::int64_t {
+  if (!impl_->started) return 0;
+  st::Json params = st::Json::object();
+  st::Json item = st::Json::object();
+  item["uri"] = to_uri(path);
+  params["textDocument"] = std::move(item);
+  st::Json position = st::Json::object();
+  position["line"] = line;
+  position["character"] = character;
+  params["position"] = std::move(position);
+  // `context` 可选；给了能让 server 知道"是手动触发还是字符触发"（影响候选范围）。
+  return impl_->client.request("textDocument/completion", std::move(params));
+}
+
+auto LanguageService::trigger_characters() const -> const std::vector<std::string>& {
+  // `capabilities()` 返回**副本**——直接返回它的成员是返回临时对象的引用（实测编译报
+  // "returning reference to temporary"）。缓存在 Impl 里。
+  const auto& capabilities = impl_->client.capabilities();
+  impl_->trigger_cache = capabilities.completion_trigger_characters;
+  return impl_->trigger_cache;
+}
+
+auto LanguageService::resolve_completion(std::string_view path, std::size_t index)
+    -> std::int64_t {
+  (void)path;
+  if (!impl_->started || index >= impl_->last_completion.size()) return 0;
+  // `completionItem/resolve` 要求把**候选原始 JSON 原样回传**（server 靠它认项）。
+  return impl_->client.request("completionItem/resolve", impl_->last_completion[index].raw);
 }
 
 void LanguageService::shutdown(std::int64_t timeout_ms) {

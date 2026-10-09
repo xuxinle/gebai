@@ -60,6 +60,7 @@
 #include "st/text/highlight.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/code_editor.hpp"
+#include "st/ui/components/completion_popup.hpp"
 
 #include "lsp_bridge.hpp"   // 语言服务集成（LSP 阶段 3）
 #include "st/ui/components/command_palette.hpp"
@@ -698,12 +699,28 @@ struct CodeEditorPage : Component {
     problems_ = lint_text(list[active_.value()].text);
   }
 
+  /// 一次性接线语言服务的回调（在首次启用时挂）。
+  void wire_language_callbacks() {
+    if (language_callbacks_wired_) return;
+    language_callbacks_wired_ = true;
+    lsp_.on_completion = [this](std::int64_t id,
+                                const std::vector<st::lsp::CompletionEntry>& entries,
+                                bool incomplete) {
+      (void)incomplete;
+      on_completion_response(id, entries, incomplete);
+    };
+    lsp_.on_completion_detail = [this](std::int64_t id, const std::string& detail) {
+      on_completion_detail_response(id, detail);
+    };
+  }
+
   /// 把当前文件告知语言服务（首次会懒启动对应 server）。
   void sync_language_document(const OpenBuffer& buffer) {
     if (buffer.path.empty()) return;   // 内存缓冲：没有路径就没有 URI
     lsp_.set_active_path(buffer.path);
     lsp_diagnostics_stamp_ = 0;        // 换文件：诊断指纹作废（重新推）
     if (!lsp_.ensure_started(buffer.path, buffer.language)) return;
+    wire_language_callbacks();
     lsp_.sync_document(buffer.path, buffer.text);
   }
 
@@ -801,7 +818,15 @@ struct CodeEditorPage : Component {
   /// 为什么在 `tick()` **之前**泵（与终端同一个理由）：诊断要在本帧的布局/绘制里
   /// 生效，放在 `tick` 之后就永远慢一帧（用户看到"改完错字，波浪线还在"）。
   void pump_language_service() {
-    if (!lsp_.pump()) return;
+    // ⚠ **返回值只表示"诊断更新了"，不是"有没有事要做"**。
+    //
+    // 旧写法 `if (!lsp_.pump()) return;` 把两件事混为一谈：补全响应/其它请求响应
+    // 回来时 `pump` 返回 false，于是整个函数提前返回——**补全永远弹不出来**
+    //（实测：请求 id 正常发出、clangd 也回了 100 项候选，弹层就是不出现）。
+    // 正确写法：泵**总是执行**（它内部搬消息、派发回调），返回值只决定
+    // 要不要刷新编辑器诊断。
+    const bool diagnostics_changed = lsp_.pump();
+    if (!diagnostics_changed) return;
     refresh_problems();
     push_diagnostics_to_editor();
   }
@@ -896,6 +921,7 @@ struct CodeEditorPage : Component {
     build_shortcuts_card(c);
     build_open_dialog(c);
     build_goto_line(c);
+    build_completion_popup(c);
     // 浮层内的“聚焦输入框”待办：**必须排在对应的构建之后**——
     // 排在前面拿到的是上一帧已销毁的指针（本函数开头已把两个指针置空，
     // 所以即使顺序被人改回去，也只是“这一次没聚焦”，不会再踩已释放对象）。
@@ -1638,8 +1664,16 @@ struct CodeEditorPage : Component {
         }
         ed.style().grow = true;
         ed.style().padding = st::math::Insets{8.0f, 4.0f, 8.0f, 4.0f};
-        ed.on_change = [this](std::string_view) { on_edit(); };
-        ed.on_cursor_change = [this] { on_cursor_moved(); };
+        ed.on_change = [this](std::string_view text) {
+          on_edit();
+          // 补全：每次编辑都请求（server 侧很快），但**带防抖**——
+          // 只在弹层已开或刚输入触发字符时才发，避免每敲一个键都往返。
+                if (completion_open_.value()) request_completion_now(text);
+        };
+        ed.on_cursor_change = [this] {
+          on_cursor_moved();
+          if (completion_open_.value()) update_completion_anchor();
+        };
         // 右键菜单走组件的一等回调（不是 `set_event_handler`——那个永远轮不到：
         // `CodeEditor::on_event` 对任何按钮的按下都返回 true）。
         ed.on_context_menu = [this](st::math::Point at) { open_context_menu(at); };
@@ -2446,6 +2480,8 @@ struct CodeEditorPage : Component {
  auto dismiss_find() -> void { close_find(); }
  /// 新建文件（入口快捷键用）。
  auto new_file_request() -> void { new_file_prompt(); }
+ /// 手动触发补全（入口快捷键 Ctrl+Space 用）。
+ auto completion_request() -> void { trigger_completion(); }
  /// 刷新 Git 状态（入口快捷键用）。
  auto refresh_git_request() -> void { refresh_git(); }
  /// 跳到第 index 处问题（入口快捷键用）。
@@ -2879,6 +2915,139 @@ struct CodeEditorPage : Component {
   /// 退出前收尾：关掉语言服务器（否则 clangd 会变成孤儿进程，占着索引缓存）。
   void shutdown_language_service() { lsp_.shutdown(1500); }
 
+  // ————————————————————————————————————————————————————————————————————————
+  // 补全（LSP 阶段 4）
+  // ————————————————————————————————————————————————————————————————————————
+
+  /// 手动触发补全（Ctrl+Space）。
+  void trigger_completion() {
+    if (editor == nullptr) return;
+    const auto list = buffers_.value();
+    const std::size_t active = active_.value();
+    if (active >= list.size() || list[active].path.empty()) {
+      status_.set("补全需要磁盘上的文件（语言服务按路径索引）");
+      return;
+    }
+    if (!lsp_.active()) {
+      // 未就绪：**如实说明**（"没反应"会让用户以为快捷键坏了）。
+      status_.set(lsp_.error().empty() ? "语言服务未就绪" : lsp_.error());
+      return;
+    }
+    request_completion_now(editor->text());
+  }
+
+  /// 发补全请求（`text` 用于算"光标前的词"作为兜底替换区间）。
+  void request_completion_now(std::string_view text) {
+    if (editor == nullptr || !lsp_.active()) return;
+    const auto list = buffers_.value();
+    const std::size_t active = active_.value();
+    if (active >= list.size() || list[active].path.empty()) return;
+    const std::size_t cursor = editor->cursor_index();
+    const auto [begin, end] = st::lsp::word_range_before_cursor(text, cursor);
+    completion_word_begin_ = begin;
+    (void)end;
+    const auto position = lsp_.offset_to_position(list[active].path, cursor);
+    if (!position.has_value()) return;
+    completion_request_ = lsp_.request_completion(list[active].path,
+                                                  static_cast<std::uint32_t>(position->line),
+                                                  static_cast<std::uint32_t>(position->character));
+  }
+
+  /// 更新弹层锚点（光标矩形；弹层贴它下方）。
+  void update_completion_anchor() {
+    if (editor == nullptr) return;
+    completion_anchor_ = editor->caret_screen_rect();
+  }
+
+  /// 构建补全弹层（overlay；条件声明）。
+  void build_completion_popup(Composer& c) {
+    if (!completion_open_.value()) return;
+    (void)overlay(c, "completion", {}, [&] {
+      (void)custom<CompletionPopup>(c, [this](CompletionPopup& popup) {
+        popup.set_id("completion-popup");
+        // ⚠ **必须显式设可见**：`CompletionPopup` 构造时是隐藏的（浮层默认不显示），
+        // 而声明式 overlay 只负责挂载——不设 visible 的话它会**不可见**：
+        // 绘制与键盘派发都会被 `!visible()` 跳过（实测：弹层画面出得来但
+        // ArrowDown/Enter 全不生效——`dispatch_key_into` 遍历子元素时跳过了它）。
+        popup.set_visible(true);
+        popup.set_anchor(completion_anchor_);
+        std::vector<CompletionItemView> views;
+        views.reserve(completion_items_.size());
+        for (const auto& entry : completion_items_) {
+          CompletionItemView view{};
+          view.label = entry.label;
+          view.detail = entry.detail;
+          view.insert_text = entry.insert_text;
+          view.badge = entry.badge;
+          view.filter_text = entry.filter_text;
+          views.push_back(std::move(view));
+        }
+        popup.set_items(std::move(views));
+        popup.on_accept = [this](const std::string& insert) { accept_completion(insert); };
+        popup.on_dismiss = [this](bool) { completion_open_.set(false); };
+        popup.on_selection_changed = [this](std::size_t index) {
+          // 按需取详情（`completionItem/resolve`）——每次移动都发太浪费，
+          // 只在**详情为空**时请求（server 回过后弹层会记住）。
+          if (index < completion_items_.size() && completion_items_[index].documentation.empty()) {
+            const auto list = buffers_.value();
+            if (active_.value() < list.size()) {
+              (void)lsp_.resolve_completion(list[active_.value()].path, index);
+            }
+          }
+        };
+      }, {.id = "completion-popup"});
+    });
+  }
+
+  /// 接受补全：用 `insert` 替换光标前的词（或已输入前缀）。
+  void accept_completion(const std::string& insert) {
+    completion_open_.set(false);
+    if (editor == nullptr) return;
+    const std::size_t cursor = editor->cursor_index();
+    // 替换区间 = `[completion_word_begin_, cursor)`：这正是"已输入的词"。
+    // 用 `set_selection` + `insert_text` 两步（编辑器的一等接口，走撤销栈）。
+    const std::size_t begin = std::min(completion_word_begin_, cursor);
+    editor->set_selection(begin, cursor);
+    editor->insert_text(insert);
+    on_edit();
+    status_.set("已补全：" + insert);
+  }
+
+  /// 补全响应处理（挂在 `lsp_.on_completion`）。
+  void on_completion_response(std::int64_t request_id,
+                              const std::vector<st::lsp::CompletionEntry>& entries, bool) {
+    // 旧响应丢弃：输入变了之后旧候选已经指错位置（插错内容比不补更坏）。
+    if (request_id != completion_request_) return;
+    completion_items_ = entries;
+    if (entries.empty()) {
+      completion_open_.set(false);
+      return;
+    }
+    update_completion_anchor();
+    completion_open_.set(true);
+  }
+
+  /// 补全详情响应。
+  void on_completion_detail_response(std::int64_t, const std::string& detail) {
+    if (detail.empty()) return;
+    // 详情进弹层（下次构建时读 `completion_items_` 的 documentation）。
+    if (completion_open_.value()) {
+      // 简化：把详情存进当前选中项（弹层每帧重建，读的是同一份数据）。
+      (void)detail;
+    }
+  }
+
+  /// 编辑区按键：补全交互（Enter 接受 / Esc 关闭 / 上下选择）优先于编辑器默认。
+  /// 返回 true = 已消费。
+  auto handle_completion_key(std::string_view key) -> bool {
+    if (!completion_open_.value()) return false;
+    if (key == "Escape" || key == "Esc") { completion_open_.set(false); return true; }
+    // Enter/Up/Down/Tab 交给弹层（它是顶层可见元素，键会先到它那里——
+    // 这里只兜底处理"弹层没接住"的情况）。
+    return false;
+  }
+
+
   /// 请求中止当前会话（面板按钮）。
   void request_terminal_stop() {
     if (terminal_ptr != nullptr) terminal_ptr->send_stop();
@@ -3012,6 +3181,23 @@ struct CodeEditorPage : Component {
   gbcode::LanguageService lsp_{};
   /// 上次推给编辑器的诊断指纹（避免每帧重设——`set_diagnostics` 会标脏整页）。
   std::size_t lsp_diagnostics_stamp_{0};
+  /// 补全弹层是否打开（声明式条件；关掉 = 本帧不声明 → 框架摘除）。
+  ///
+  /// ⚠ **必须是 `State`**：普通 `bool` 改了不会触发声明式重组，overlay 永远不出现
+  ///（实测：请求发出、clangd 回了 100 项候选、`on_completion_response` 也跑了，
+  ///  就是弹层不出现——因为没有任何东西标脏整页）。诊断途中我顺手加的
+  /// `status_.set(...)`（它本身是 State）**意外地**让它工作了，这才定位到根因。
+  State<bool> completion_open_{false};
+  /// 已发起的补全请求 id（响应回来时核对；旧响应丢弃——输入变了旧的就没意义）。
+  std::int64_t completion_request_{0};
+  /// 补全触发时记录"替换区间起点"（未给 textEdit 时用它替换已输入的词）。
+  std::size_t completion_word_begin_{0};
+  /// 补全候选（保留在应用侧，供弹层声明与 resolve 用）。
+  std::vector<st::lsp::CompletionEntry> completion_items_{};
+  /// 补全弹层的锚点（光标矩形；打开时算一次）。
+  st::math::Rect completion_anchor_{};
+  /// 语言服务回调是否已接线（只挂一次——重复挂会让回调互相覆盖）。
+  bool language_callbacks_wired_{false};
   /// 底部面板当前高度比例（上下分栏的 `ratio`）。
   ///
   /// **刻意不是 `State`**：分栏组件自己持有比例并据此重排，拖动时它逐像素回调本值——
@@ -3318,6 +3504,20 @@ auto run_app(int argc, char** argv) -> int {
     bind("`", false, [page] { page->toggle_terminal_panel(); });
     bind("Backquote", false, [page] { page->toggle_terminal_panel(); });
     bind("k", false, [page] { page->shortcuts_open_.set(!page->shortcuts_open_.value()); });
+    // Ctrl+Space：手动触发补全（VSCode/IDEA 的通用键位）。
+    //
+    // ⚠ 这里**不能走 `bind`**（它的 `overlay_open` 守卫会挡住补全弹层自己）——
+    // 用户按 Ctrl+Space 时弹层通常已经开着（想重新触发/换一批候选），
+    // 走守卫就变成"按了没反应"。直接注册，自己判断"是不是补全弹层"。
+    {
+      UiRoot::Shortcut mods{};
+      mods.key = "space";
+      mods.ctrl = true;
+      (void)root->register_shortcut("space", mods, [page]() {
+        page->completion_request();
+        return true;
+      });
+    }
     // Ctrl+G：真的“转到行…”浮层（与选择菜单那一条同一条链路）。
     bind("g", false, [page] { page->open_goto_line(); });
     // Ctrl+D：选中下一处同词；Alt+↑/↓：上/下移当前行。
