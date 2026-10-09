@@ -95,12 +95,18 @@ void safe_write(const char* text, std::size_t length) {
 
 void safe_write(std::string_view text) { safe_write(text.data(), text.size()); }
 
-/// `free` 的 deleter（L1：禁裸 free；`decltype(&free)` 也算违规引用，故用 lambda）。
+/// `free` 的 deleter。
+///
 /// 模板化是为了同时服务 `char*`（demangle 结果）与 `char**`（backtrace_symbols 数组）。
+///
+/// L1 例外说明：`abi::__cxa_demangle` 与 `backtrace_symbols` 回的是 **malloc 缓冲区**
+/// （C ABI，不是 `new`），只能配 `free`——这不是"懒得用 RAII"，而是唯一正确的释放方式。
+/// 调用点只有本结构体（`unique_ptr` 的 deleter），即"裸 free 集中在单点"，
+/// 与 L1 的意图（把裸资源管理收口）一致。
 struct FreeDeleter {
   template <class T>
   void operator()(T* pointer) const {
-    if (pointer != nullptr) std::free(pointer);
+    if (pointer != nullptr) std::free(pointer);  // lint-allow: L1 C ABI 缓冲区（demangle/backtrace）
   }
 };
 

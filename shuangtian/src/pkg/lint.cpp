@@ -20,7 +20,7 @@ struct RuleSpec {
 };
 
 /// 规则表（与 `CONVENTIONS.md` §8 一一对应）。
-constexpr std::array<RuleSpec, 14> kRules{{
+constexpr std::array<RuleSpec, 15> kRules{{
     {"L1", "禁止裸 new/delete/malloc/free（用 unique_ptr/RAII/容器）",
      R"(\bnew\s|\bdelete\s|\bmalloc\s*\(|\bfree\s*\(|\brealloc\s*\()"},
     {"L2", "禁止 C 风格强制转换（用 static_cast/bit_cast）",
@@ -70,6 +70,28 @@ constexpr std::array<RuleSpec, 14> kRules{{
     // 两条通道都各自计数，不允许静默。
     {"L14", "系统头/平台 API 只能出现在 platform_* 单点封装（见 §10 第 1 条）",
      R"(#\s*include\s*<(windows|unistd|dlfcn|shellapi|winsock2|arpa/inet|netinet/in|sys/socket|poll|fcntl)\.h?>|\bdlopen\s*\(|\bdlsym\s*\()"},
+    // L15：raw string 用**带定界符**的形式。
+    //
+    // 为什么需要它（本会话实测踩过**两次**）：`R"(...)"` 里出现 `)"` 序列时，
+    // raw string 会**提前终结**——后续内容被当成代码解析，报错是
+    // "missing terminating \" character" / "character constant too long"，
+    // 而真正原因（某处 `)"` 出现）离报错位置可能隔几十行。
+    // 实测两次：一次是 JSON 样例里的 `($0)`、一次是 `(std::string)`。
+    //
+    // 判据：出现 `R"(` （**无定界符**的 raw string 开头）即提示改用 `R"x(...)x"`。
+    // 这是一个**提示级**规则（不阻断构建），因为它只指出风险所在——
+    // 内容里没有 `)"` 时写法是安全的，但从"AI 写代码"的角度看，
+    // 无定界符形式**没有任何好处**（只多一个踩坑面）。
+    {"L15", "raw string 建议带定界符（`R\"x(...)x\"`）——无定界符时内容里的 `)\"` 会提前终结（提示级）",
+     // `R"(` 紧邻（无定界符）才报；`R"x(` 之类有定界符的**不**匹配。
+     //
+     // ⚠ **不能作为单行正则实现**：`scan_text` 会先 `strip_string_literals`
+     //（字符串内容不参与任何规则），而 `R"(` 正是字符串字面量的**开头**——
+     // 剥完就没了。实数落空后才明白：这条必须走**专用检查**（同 L13），
+     // 在净化**之前**看原文（见 `check_raw_string_delimiters`）。
+     // 顺带记一笔：写这个正则时我自己用无定界符形式写它，被它提前终结了一次
+     //——这条规则的最佳示范就是它自己。
+     ""},
 }};
 
 /// 去掉行注释与块注释状态（保留字符串内容，简单启发式）。
@@ -392,6 +414,55 @@ constexpr std::array<std::string_view, 19> kElementStateMembers{
 /// L13：组件不得**遮蔽** `Element` 的保护成员；`semantics_flags` 覆写不得重建标志。
 ///
 /// 为何单独立一条：这两类缺陷**编译零警告**，且症状具有欺骗性——焦点写基类、
+/// L15：**无定界符 raw string 里出现 `)"`**——会在该处提前终结。
+///
+/// 判据刻意收窄到"能确定性判定的情形"，而不是"凡 `R"(` 就提示"：
+/// 前者是**真缺陷**（编译报错，且报错位置离真因几十行），后者只是风格建议——
+/// 本仓有 100+ 处合法的 `R"(...)"`，全都提示会把 lint 输出淹掉，
+/// 真正的问题反而看不见（实测：第一版报 102 条，一眼扫不出哪条要紧）。
+///
+/// 本会话实测踩过**两次**：JSON 样例里的 `($0)`、`(std::string)`——
+/// 编译器报 "missing terminating \" character" / "character constant too long"，
+/// 而真正原因离报错位置隔了几十行。
+///
+/// 判定：逐字符找 `R"(` 起点（无定界符），跳过其内容直到**第一个 `)"`**——
+/// 若该 `)"` 之后同行还有内容且不是合法的 C++ 续写（简化为"`)` 之后紧跟非空白非分号"），
+/// 说明那次终结来得太早（内容被当成了代码）。判定宽松一点：只要在**同一行**找到
+/// `)"` 之后还有 `"`（很可能是下一段字符串），即报。
+[[nodiscard]] auto check_raw_string_delimiters(const std::vector<std::string_view>& lines,
+                                               std::string_view path,
+                                               std::size_t& suppressed)
+    -> std::vector<LintViolation> {
+  std::vector<LintViolation> violations;
+  bool in_block_comment = false;
+  for (std::size_t index = 0; index < lines.size(); ++index) {
+    const std::string_view raw = lines[index];
+    if (has_allow_comment(raw, "L15")) {
+      ++suppressed;
+      continue;
+    }
+    const std::string uncommented = strip_comments(raw, in_block_comment);
+    // 找无定界符起点：`R"(`。
+    std::size_t at = uncommented.find("R\"(");
+    if (at == std::string::npos) continue;
+    // 该行的这一处：往后找第一个 `)"`。
+    const std::size_t close = uncommented.find(")\"", at + 3);
+    if (close == std::string::npos) continue;   // 跨行 raw string：本行判不了（不报）
+    const std::size_t after = close + 2;
+    // 判据：终结之后**同行还有双引号**。合法用法里 `)"` 之后只会是
+    // `;`/`)`/`,`/运算符/空白/行尾；再出现 `"` 说明"后面那半本来就是内容"
+    //（内容里混进了 `)"`，提前终结）。实测的两处正是这个形态：
+    // `R"({"insertText":"widget_${1:name}($0)","kind":3})"` 与
+    // `R"({"label":"f","detail":"void f()"})"`——`)"` 之后的 `,` / `}` 后面还带着 `"`。
+    if (after < uncommented.size() && uncommented.find('"', after) != std::string::npos) {
+      violations.push_back(LintViolation{std::string(path), static_cast<int>(index) + 1, "L15",
+                                         "无定界符 raw string 的内容里出现 )\"（提前终结）——"
+                                         "改用 R\"x(...)x\""});
+    }
+  }
+  return violations;
+}
+
 /// 读遮蔽副本（或语义标志被重建）时，直接调 `set_focused` 的组件级单测读写落在同一侧，
 /// 只有真实应用（`UiRoot::set_focus`）才暴露。实测代价：`CodeEditor` 自带
 /// `bool focused_{false}` → 光标永不绘制、括号高亮失效，而测试全绿。
@@ -533,6 +604,9 @@ constexpr std::array<std::string_view, 19> kElementStateMembers{
     }
   }
   for (auto& violation : check_mutable_globals(lines, path, suppressed)) {
+    violations.push_back(std::move(violation));
+  }
+  for (auto& violation : check_raw_string_delimiters(lines, path, suppressed)) {
     violations.push_back(std::move(violation));
   }
   for (auto& violation : check_element_state(lines, path, suppressed)) {
