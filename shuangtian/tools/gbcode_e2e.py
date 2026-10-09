@@ -13,6 +13,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import subprocess
 import time
 from pathlib import Path
 
@@ -763,6 +764,21 @@ def main():
         client.click_at(*center_of(client, "#activity-terminal"))
         check(wait_until(lambda: client.ok("get", {"id": "bottom-split"})["props"].get("second_hidden") == "false"),
               "收起后再点应重新展开")
+
+        # —— 29. 崩溃栈可符号化（诊断基建回归）——
+        #
+        # 崩溃时能否显示**函数名**取决于链接期 `-rdynamic`：丢了它栈里只有裸地址，
+        # AI 排查得手工包 gdb 再来一遍（实测过一次这样的往返）。用 crash_probe
+        # 真崩一次、断言 stderr 含调用链上的函数名。
+        probe = Path(binary).parent / "crash_probe"
+        if probe.exists():
+            crashed = subprocess.run([str(probe)], capture_output=True, text=True, timeout=30)
+            probe_out = crashed.stdout + crashed.stderr
+            check("SIGSEGV" in probe_out, "崩溃未输出信号名")
+            check("probe_depth_three" in probe_out, "崩溃栈未解析出函数名（-rdynamic 丢了吗？）")
+            print("[29] 崩溃栈带函数名（-rdynamic 生效）")
+        else:
+            print("[29] 跳过：未构建 crash_probe")
 
         print("\n[OK] gbcode 端到端全部通过")
         return 0

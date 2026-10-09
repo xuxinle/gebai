@@ -76,6 +76,8 @@
   },
   "targets": {
     "st": { "kind": "executable", "sources": ["tools/stpm/*.cpp"], "system_libs": ["dl"] },
+    "crash_probe": { "kind": "executable", "sources": ["tools/crash_probe.cpp"],
+                     "exclude_sources": ["src/pkg/*"] },
     "gallery": { "kind": "executable", "sources": ["examples/gallery/*.cpp"],
                  "exclude_sources": ["src/pkg/*"],
                  "embed": ["examples/gallery/assets/*"] },

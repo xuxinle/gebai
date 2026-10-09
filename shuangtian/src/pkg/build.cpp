@@ -1095,6 +1095,16 @@ struct LanguageFlags {
       args.push_back("-fuse-ld=mold");
     }
   }
+  // `-rdynamic`：把可执行文件的符号表导出到动态符号表——**崩溃栈能否显示函数名
+  // 全靠它**（`backtrace_symbols` 只认动态符号表里的名字，否则只有裸地址）。
+  //
+  // 为什么值得付这个代价（产物略大、链接略慢）：无头应用崩溃时"能看见栈"与
+  // "只有地址"是"能自己定位"与"得手工包 gdb 再来一遍"的区别——AI 开发闭环里
+  // 后者意味着多一轮往返。实测代价：gbcode 产物 2.99MB → 3.1MB（+3.7%）。
+  // 交叉编译/Windows 跳过（GNU 扩展，且 Windows 栈走 CaptureStackBackTrace+PDB）。
+  if (!toolchain.cross() && toolchain.platform != "windows") {
+    args.emplace_back("-rdynamic");
+  }
   // 目标三元组：链接侧必须与编译侧**同一个**（否则拿 A 目标的运行库链 B 目标的对象）
   for (const auto& item : toolchain.target_args()) args.push_back(item);
   for (const auto& unit : units) args.push_back(unit.object);
