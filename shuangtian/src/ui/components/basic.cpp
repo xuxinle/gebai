@@ -1,12 +1,18 @@
 #include "st/ui/components/basic.hpp"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <format>
+#include <functional>
+#include <string>
 
+#include "st/core/print.hpp"
 #include "st/core/string.hpp"
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
 #include "components_internal.hpp"
+#include "st/ui/icon.hpp"
 #include "st/ui/line_layout.hpp"
 #include "st/ui/text_port.hpp"
 
@@ -18,6 +24,38 @@ using components_internal::paint_focus_ring;
 [[nodiscard]] auto port_of(const RenderContext& context) -> const TextPort& {
   static const NullTextPort fallback;
   return context.text != nullptr ? *context.text : fallback;
+}
+
+/// 未知图标名**提示一次**（同一名字只报一次）。
+///
+/// 为什么需要（实测踩到）：图标名写错时 `Icon::has` 为假 → **静默不画**，
+/// 按钮看着就是"空白/少一块"，没有任何线索指向"名字错了"。
+/// 实测那次：活动栏用了 `diff`，而图标表里没有它——按钮位置空着，
+/// 排查先怀疑渲染、再怀疑布局，最后才发现是"名字不存在"。
+///
+/// 报一次而不是每帧报：绘制每帧都跑，不去的化会把日志刷满。
+/// 用 `set` 记已报过的名字（诊断基建，量级很小）。
+void warn_unknown_icon_once(const std::string& name) {
+  if (name.empty() || Icon::has(name)) return;
+  // 去重状态用**函数内 atomic 位图**（图标名数量有限：`Icon` 表几十个）——
+  // 避免可变全局状态（L8），也避免 `set` 的动态分配进入绘制热路径。
+  //
+  // 为什么不去重就用 `static bool`：绘制每帧都跑，不去重会把日志刷满
+  //（实测：一帧一次，2 秒跑出几百行）。
+  // lint-allow: L8 诊断去重（进程级且只看自己：128 位标志，无业务状态）。
+  // 为什么不做成注入式：`paint_content` 是绘制热路径，为一条"名字写错"的提示
+  // 给 `RenderContext` 加一个诊断槽位、再让每处调用点透传，代价远大于收益——
+  // 而这段状态**不参与任何业务逻辑**，只影响"同一名字报几次"。
+  constexpr std::size_t kMaxTracked = 128;
+  static std::array<std::atomic<bool>, kMaxTracked> reported{};
+  // 名字 → 槽位：用名字哈希（同一名字稳定落同一槽；碰撞只会"少报一次"，
+  // 对诊断来说可接受——真正要紧的是"这个名字有问题"被说出来）。
+  const std::size_t slot = std::hash<std::string>{}(name) % kMaxTracked;
+  bool expected = false;
+  if (!reported[slot].compare_exchange_strong(expected, true)) return;
+  st::eprint("[ui] 未知图标名 `{}`（该按钮的图标不会绘制）——图标需登记在 `Icon` 表"
+             "（src/ui/icon.cpp）里，`examples/*/assets/icons.svg` 那份是另一套",
+             name);
 }
 
 
@@ -356,6 +394,7 @@ void Button::measure(const RenderContext& context, const Constraints& constraint
   const float horizontal_padding = size_ == Size::Small ? metrics.space_md : metrics.space_lg;
   const TextPort& port = port_of(context);
   float width = port.measure_width(label_, style_.font_size) + horizontal_padding * 2.0f;
+  warn_unknown_icon_once(icon_);
   // 图标宽度只在图标**真画得出来**时计入——与 `paint_content` 同一判据
   // （名字无效时那里不画、这里若算了宽度，按钮就会宽出一截且内容偏移）。
   // 间距只在**图标与文字同时存在**时计入（与 `paint_content` 的 `gap` 同规则）；
@@ -391,6 +430,7 @@ void Button::paint_content(const RenderContext& context, raster::Surface& canvas
   //
   // 判据用 `Icon::has`（与 `Icon::draw` 内部同一个查找）——
   // “算不算宽度”与“画不画得出”必须是同一个事实，否则这类静默偏移会反复出现。
+  warn_unknown_icon_once(icon_);
   const bool draws_icon = !icon_.empty() && Icon::has(icon_);
   const float gap = (draws_icon && !label_.empty()) ? metrics.space_sm : 0.0f;
   const float icon_extent = draws_icon ? icon_size + gap : 0.0f;

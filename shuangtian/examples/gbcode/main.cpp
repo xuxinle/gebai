@@ -3,7 +3,7 @@
 /// 布局五层（自上而下）：
 /// - 标题栏：文件名（脏标记）+ 应用名 + 装饰性窗口控制（— □ ×）
 /// - 菜单栏：文件 / 编辑 / 选择 / 查看 / 运行 / 帮助（`MenuBar` + 下拉面板 overlay）
-/// - 主体三栏：活动栏（资源管理器·搜索·源代码管理·运行·扩展）+ 侧栏（`SplitView` 可拖）
+/// - 主体三栏：活动栏（资源管理器·搜索·变更·运行·扩展）+ 侧栏（`SplitView` 可拖）
 ///   + 编辑区（`Tabs` 多标签 + `CodeEditor`）
 /// - 底部面板：问题 / 输出 / 终端（`Tabs` 切换）
 /// - 状态栏：分支 · 错误/警告计数 · 光标 Ln,Col · 选区 · 缩进 · 编码 · 语言 · 主题
@@ -1688,13 +1688,13 @@ struct CodeEditorPage : Component {
     }, {.width = 26.0f, .height = 22.0f, .key = id});
   }
 
-  // —— 视图 2：源代码管理（变更面板：分组 + 行内动作 + 底部提交框）——
+  // —— 视图 2：变更（面板：分组 + 行内动作 + 底部提交框）——
   //
   // 参照歌白文件工作台的设计（IDEA 的 Commit 工具窗就在左侧）：
   // "改了什么 / 要提交什么"是编码时最频繁看的，放左侧随时可见；
   // 底部留给"分支 | 日志"（那是回顾历史时才看的，节奏不同——见 build_git_view）。
   void build_scm_view(Composer& c) {
-    build_sidebar_head(c, "源代码管理");
+    build_sidebar_head(c, "变更");
     if (!workspace_.empty() && !git_probed_) refresh_git();
     if (workspace_.empty()) {
       (void)text(c, [] { return std::string("内置样例模式：没有工作区可查 Git 状态"); });
@@ -2384,7 +2384,7 @@ struct CodeEditorPage : Component {
     // —— 5. 状态栏（兼容钩子 id 全保留：`status` / `btn-theme` / 计数 / 光标 / 语言）——
   //
   // 每一项尽量做成**可点**的：状态栏是 IDE 里“看一眼”的地方，而看一眼之后往往
-  // 想知道更多（分支 → 源代码管理面板、问题数 → 问题面板、语言 → 语言列表……）。
+  // 想知道更多（分支 → 变更面板、问题数 → 问题面板、语言 → 语言列表……）。
   void build_status_bar(Composer& c) {
     row(c, {.gap = 10.0f, .padding_x = 10.0f, .height = 26.0f,
             .surface = Element::Surface::Alt, .id = "statusbar"}, [&] {
@@ -2642,7 +2642,7 @@ struct CodeEditorPage : Component {
             "  Ctrl+F/Ctrl+H   查找 / 替换     Ctrl+G   转到行…\n"
             "  F8              下一处问题\n"
             "  Ctrl+P          快速打开文件    Ctrl+Shift+P  命令面板\n"
-            "  Ctrl+Shift+E/F/G 资源管理器 / 搜索 / 源代码管理\n"
+            "  Ctrl+Shift+E/F/G 资源管理器 / 搜索 / 变更\n"
             "  Ctrl+Tab        循环切换标签    Ctrl+B   切换侧栏\n"
             "  Ctrl+J          切换底部面板    Ctrl+K   本帮助\n"
             "  Esc             关闭浮层\n");
