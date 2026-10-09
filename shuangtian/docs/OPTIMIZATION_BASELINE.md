@@ -54,4 +54,4 @@
 
 ## 5. 复现探针
 
-对象尺寸探针保留在 `tools/structure_probe.cpp`（`sizeof` 实测），改动后重跑同一探针对比。
+对象尺寸探针保留在 `tools/structure_probe.cpp`（`sizeof` 实测；该文件已删——本轮结论已固化为下述数字，后需复测请重建同名探针），改动后重跑同一探针对比。

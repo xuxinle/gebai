@@ -11,6 +11,9 @@
 
 ## 一、最关键发现：Skia 的覆盖率校正是**两个机制叠加**，而且**逐颜色算**
 
+> 注：本节及以下引用的 `src/...`、`third_party/freetype2` 等路径属于 **Skia / FreeType 上游仓库**，
+> 不是本仓库的文件（本仓按 `docs/check_docs.py` 只核本仓路径；此处保留上游坐标以便复查原实现）。
+
 `src/core/SkMaskGamma.cpp` 的 `SkTMaskGamma_build_correcting_lut()`（全文 128 行）做三件事：
 
 ```cpp
