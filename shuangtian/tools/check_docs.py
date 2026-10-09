@@ -88,33 +88,56 @@ for path, needles in stale.items():
 # ── ③ 目录引用实存性：文档中出现的仓库相对路径必须存在 ──
 # 例外：行内含「移除/已删/历史/曾」（如 §8.4.1 的 GL 移除清单）是故意保留的历史记录。
 REMOVAL_CTX = ('移除', '已删', '删除', '历史', '曾用', '旧实现')
+# **外部仓库语境**：有些文档在讲**别人**的源码（如 `docs/SKIA_TEXT_RENDERING_STUDY.md` 引
+# Skia/FreeType 的 `src/...`）。那些 `src/ports/...` 当然不在本仓——但它们**必须**保留
+# 上游坐标，否则读者无法回去复查原实现（删了坐标 = 知识断了根）。
+# 判据：行内/近邻出现这些词，就说明该路径属于外部仓库而不是本仓。
+EXTERNAL_REPO_CTX = ('Skia', 'skia', 'FreeType', 'freetype', 'Chromium', '浏览器',
+                     '上游', '外部仓库', 'HarfBuzz', 'Blink')
+# 构建产物：文档指向的是“构建后才存在”的可执行目标名（源码是 `tools/<名>.cpp`）。
+# 实测踩到：`tools/crash_probe` 被报“路径不存在”——而它**本就是产物名**，
+# 写成源码路径反而错（读者要的是“跑这个去复现崩溃”）。所以按源码存在性放行。
+BUILD_ARTIFACT_ROOTS = ('tools', 'build')
 path_ref = re.compile(r'`(third_party|vendor|docs|tools|include|src|tests|examples|resources)/[A-Za-z0-9_\-./]*`')
-for df in ['README.md', 'DESIGN.md', 'CONVENTIONS.md', 'docs/README.md',
-           'docs/independent_project.md', 'docs/cross_platform.md']:
-    p = root / df
-    if not p.exists():
-        continue
+# ⚠ **主仓根必须用绝对路径算**：`Path('.').parent` 就是 `Path('.')`——
+# 原先写的 `(root.parent / ref).exists()` 与 `(root / ref).exists()` **完全等价**，
+# 所谓“主仓库根回退”是死代码（实测：`docs/file-workbench-design.md` 真实存在于
+# 主仓 `gebai/docs/` 下，却年年被报缺失）。用 `resolve()` 才能拿到真正的上一级。
+MONOREPO_ROOT = Path('.').resolve().parent
+# 检查面：原先只 6 份主文档——而**漂移最常出在专题文档里**（实测：地图本身
+# 自称“六份文档”而 docs/ 已有 16 份；LOUYUE_CAIYUN.md 在实现后仍标“代码未动”）。
+# 改为扫全部 .md（根级 + docs/ + tools/），口径统一。
+DOC_FILES = sorted(
+    [p for p in root.glob('*.md')]
+    + [p for p in (root / 'docs').glob('*.md')]
+    + [p for p in (root / 'tools').glob('*.md')]
+)
+for p in DOC_FILES:
     text = p.read_text(encoding='utf-8')
     for m in path_ref.finditer(text):
         ref = m.group(0).strip('`')
-        if '*' in ref or '<' in ref or '{' in ref or '..' in ref:
-            continue  # glob/占位符/相对上级（相对路径由 ⑦ 主仓回退处理）
+        if '*' in ref or '<' in ref or '{' in ref:
+            continue  # glob/占位符
+        if '..' in ref:
+            continue  # 显式相对上级（写法本身已表明“不在本工程内”）
         line_no = text[:m.start()].count('\n') + 1
         lines = text.splitlines()
         ctx = ' '.join(lines[max(0, line_no - 3):min(len(lines), line_no + 2)])
         if any(k in ctx for k in REMOVAL_CTX):
             continue  # 移除记录语境（前后 2 行）：故意引用已不存在的历史路径
+        if any(k in ctx for k in EXTERNAL_REPO_CTX):
+            continue  # 外部仓库语境：保留上游坐标（不是本仓路径）
         if (root / ref).exists():
             continue
-        if (root.parent / ref).exists():
-            continue  # 主仓库根（shuangtian/ 的上一级）也能命中：resources/ 等主仓资源
-        # 显式相对主仓的写法（如 ../../resources/）
-        norm = ref
-        while norm.startswith('../'):
-            norm = norm[3:]
-        if norm and (root.parent / norm).exists():
-            continue
-        problems.append(f"{df}:{line_no} 引用的路径不存在: {ref}")
+        if (MONOREPO_ROOT / ref).exists():
+            continue  # 主仓库根（shuangtian/ 的上一级）：docs/、resources/ 等主仓文件
+        # 构建产物：`tools/<名>` 这类指“编出来的可执行目标”，源码存在即算成立。
+        if ref.startswith(BUILD_ARTIFACT_ROOTS):
+            leaf = ref.rsplit('/', 1)[-1]
+            if any((root / d / f'{leaf}.cpp').exists()
+                   for d in ('tools',)):
+                continue
+        problems.append(f"{p}:{line_no} 引用的路径不存在: {ref}")
 
 # ── ④ 组件清单核对：DESIGN.md §4.5 列出的组件必须真实存在 ──
 comp_dir = root / 'include' / 'st' / 'ui' / 'components'
@@ -157,6 +180,33 @@ src_files = list((root / 'src').rglob('*.*')) + list((root / 'include').rglob('*
             list((root / 'tools').rglob('*.cpp'))
 print(f"用例数核对: 实际 ST_TEST {st_test_count} 个；源文件约 {len(src_files)} 个")
 
+# ── ⑤b BACKLOG 结构：待做项必须全在 P0/P1/P2 章内（2026-10-09 整理后加的防复发）──
+#
+# 为何要查：待做项散在历史章里"肉眼扫不到等于不存在"。实测（2026-10-09）：
+# **39 条**未完成项散落在 5 个章下，其中 4 条落在标着「已完成」的章里、4 条落在
+# 「P0（当前无）」章里——而文件头部却声称"本文件是唯一权威清单"。
+# 另一类静默丢失：用 `### [ ]` 标题形式写待做（不走 `- [ ]` 列表），既不进统计也
+# 不被工具看见（实测 2 条）。
+BACKLOG_PRIORITY_SECTIONS = ('## P0', '## P1', '## P2')
+bl_path = root / 'docs' / 'BACKLOG.md'
+if bl_path.exists():
+    bl_lines = bl_path.read_text(encoding='utf-8').splitlines()
+    section = ''
+    strays = []
+    for ln, line in enumerate(bl_lines, 1):
+        if re.match(r'^## ', line):
+            section = line.strip()
+        if re.match(r'^\s*-\s*\[ \]', line):
+            if not section.startswith(BACKLOG_PRIORITY_SECTIONS):
+                strays.append(f"L{ln} 在「{section[:40]}」下")
+        # `### [ ]` 形式的待做：同样要报（格式不一致 = 不进统计）
+        if re.match(r'^###\s*\[ \]', line):
+            strays.append(f"L{ln} 用了 `### [ ]` 标题形式（请改为 `- [ ]` 列表项）")
+    if strays:
+        problems.append("docs/BACKLOG.md 待做项不在 P0/P1/P2 章内（共 "
+                        f"{len(strays)} 处）：" + "; ".join(strays[:6]))
+    print(f"BACKLOG 结构核对：待做项均在 P0/P1/P2 章内")
+
 # ── ⑥ 新内容就位 ──
 expect = {
     'DESIGN.md': ['## 目录', '### 8.2.1 这批缺陷说明了什么', '13 条**禁用特性规则'],
@@ -180,4 +230,4 @@ if problems:
     for p in problems:
         print('  [X]', p)
     sys.exit(1)
-print("[OK] § 引用有效 · 旧值清零 · 路径实存 · 组件/用例数与代码一致 · 新内容就位")
+print("[OK] § 引用有效 · 旧值清零 · 路径实存 · 组件/用例数与代码一致 · BACKLOG 结构合规 · 新内容就位")
