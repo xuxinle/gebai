@@ -87,6 +87,8 @@
     "louyue": { "kind": "executable", "sources": ["examples/louyue/*.cpp"],
                   "exclude_sources": ["src/pkg/*"],
                   "embed": ["examples/louyue/assets/*"] },
+    "caiyun": { "kind": "executable", "sources": ["examples/caiyun/*.cpp"],
+                  "exclude_sources": ["src/pkg/*"] },
     "caret_ink_probe": { "kind": "executable", "sources": ["tools/caret_ink_probe.cpp"],
                          "exclude_sources": ["src/pkg/*"] },
     "pty_stop_probe": { "kind": "executable", "sources": ["tools/pty_stop_probe.cpp"],
