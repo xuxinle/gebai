@@ -60,6 +60,8 @@
 #include "st/text/highlight.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/code_editor.hpp"
+
+#include "lsp_bridge.hpp"   // 语言服务集成（LSP 阶段 3）
 #include "st/ui/components/command_palette.hpp"
 #include "st/ui/components/feedback.hpp"
 #include "st/ui/components/file_dialog.hpp"
@@ -681,7 +683,28 @@ struct CodeEditorPage : Component {
   auto refresh_problems() -> void {
     problems_.clear();
     const auto list = buffers_.value();
-    if (active_.value() < list.size()) problems_ = lint_text(list[active_.value()].text);
+    if (active_.value() >= list.size()) return;
+    // **LSP 优先**：真语义诊断比启发式检查有价值得多（"未声明的标识符"这种事
+    // lint 永远看不出来）。有 LSP 诊断时就用它，没有再退回内置 lint——
+    // 不是为了省事，而是**没有 server 的语言（如 gbcode 自己的 stlog）仍要有问题提示**。
+    if (!lsp_.problems().empty()) {
+      problems_.reserve(lsp_.problems().size());
+      for (const auto& problem : lsp_.problems()) {
+        problems_.push_back(Problem{.line = problem.line, .warning = problem.warning,
+                                    .message = problem.message});
+      }
+      return;
+    }
+    problems_ = lint_text(list[active_.value()].text);
+  }
+
+  /// 把当前文件告知语言服务（首次会懒启动对应 server）。
+  void sync_language_document(const OpenBuffer& buffer) {
+    if (buffer.path.empty()) return;   // 内存缓冲：没有路径就没有 URI
+    lsp_.set_active_path(buffer.path);
+    lsp_diagnostics_stamp_ = 0;        // 换文件：诊断指纹作废（重新推）
+    if (!lsp_.ensure_started(buffer.path, buffer.language)) return;
+    lsp_.sync_document(buffer.path, buffer.text);
   }
 
   [[nodiscard]] auto error_count() const -> std::size_t {
@@ -771,7 +794,75 @@ struct CodeEditorPage : Component {
   /// 收起面板已改走 `SplitView::set_second_hidden`（终端常驻子树、只隐藏），
   /// `terminal_ptr` 不再有悬垂窗口——旧的"关最后一个会话 → 收面板"延迟路径
   ///（`bottom_close_pending_` + 拆树时清指针）随拆树方案一起删除。
-  void update_terminal() { pump_terminal(); }
+  void update_terminal() { pump_terminal(); pump_language_service(); }
+
+  /// 每帧泵语言服务：搬消息、把诊断推给编辑器与问题列表。
+  ///
+  /// 为什么在 `tick()` **之前**泵（与终端同一个理由）：诊断要在本帧的布局/绘制里
+  /// 生效，放在 `tick` 之后就永远慢一帧（用户看到"改完错字，波浪线还在"）。
+  void pump_language_service() {
+    if (!lsp_.pump()) return;
+    refresh_problems();
+    push_diagnostics_to_editor();
+  }
+
+  /// 把 LSP 诊断推给编辑器（只在**内容变了**时写，见 `lsp_diagnostics_stamp_`）。
+  void push_diagnostics_to_editor() {
+    if (editor == nullptr) return;
+    const auto& problems = lsp_.problems();
+    // 指纹：条数 + 首条位置/消息长度（便宜且够用——诊断集合变了基本都会变它）。
+    std::size_t stamp = problems.size() * 131U;
+    if (!problems.empty()) {
+      stamp += problems.front().line * 7U + problems.front().column + problems.front().message.size();
+    }
+    if (stamp == lsp_diagnostics_stamp_) return;
+    lsp_diagnostics_stamp_ = stamp;
+
+    std::vector<CodeEditor::DiagnosticMark> marks;
+    marks.reserve(problems.size());
+    const std::string text = editor->text();
+    for (const auto& problem : problems) {
+      CodeEditor::DiagnosticMark mark{};
+      // LSP 给的是 行/列（1 起）——转成**组件口径的字节偏移**。
+      // 用组件的行索引：第 `line-1` 行的起始字节 + 列偏移（按 UTF-16 码元数）。
+      mark.begin = offset_for_line_column(text, problem.line - 1, problem.column - 1);
+      // 范围结束未知（我们只存了起点）：标到"该行末尾"——视觉上就是这一行的这段。
+      mark.end = line_end_offset(text, problem.line - 1);
+      if (mark.end < mark.begin) mark.end = mark.begin;
+      mark.severity = problem.warning ? CodeEditor::DiagnosticSeverity::Warning
+                                      : CodeEditor::DiagnosticSeverity::Error;
+      mark.message = problem.message;
+      mark.source = problem.source;
+      marks.push_back(std::move(mark));
+    }
+    editor->set_diagnostics(std::move(marks));
+  }
+
+  /// 第 `line`（0 基）行第 `column`（0 基，UTF-16 码元）列在全文里的字节偏移。
+  [[nodiscard]] static auto offset_for_line_column(const std::string& text, std::size_t line,
+                                                   std::size_t column) -> std::size_t {
+    std::size_t offset = 0;
+    for (std::size_t current = 0; current < line; ++current) {
+      const std::size_t newline = text.find('\n', offset);
+      if (newline == std::string::npos) return text.size();
+      offset = newline + 1;
+    }
+    const auto position = st::lsp::Position{.line = line, .character = column};
+    return st::lsp::position_to_offset(text, position);
+  }
+
+  /// 第 `line`（0 基）行的结束偏移（不含换行符）。
+  [[nodiscard]] static auto line_end_offset(const std::string& text, std::size_t line)
+      -> std::size_t {
+    std::size_t offset = 0;
+    for (std::size_t current = 0; current < line; ++current) {
+      const std::size_t newline = text.find('\n', offset);
+      if (newline == std::string::npos) return text.size();
+      offset = newline + 1;
+    }
+    const std::size_t newline = text.find('\n', offset);
+    return newline == std::string::npos ? text.size() : newline;
+  }
 
   void build(Composer& c) override {
     const auto& buffers = buffers_.value();
@@ -816,6 +907,17 @@ struct CodeEditorPage : Component {
       editor->set_language(buffers[active].language);
       editor->set_text(buffers[active].text);
       loaded_key_ = buffers[active].key;
+      // 切到新文件：把语言服务指向它（懒启动 server）——只对**磁盘上的真文件**做，
+      // 内存缓冲（untitled-N）没有 URI 可同步。
+      sync_language_document(buffers[active]);
+    }
+    // 当前文件内容变了就同步给 server（`sync_document` 内部按"文本是否变化"早退，
+    // 所以每帧调用是安全的——这是**增量同步的唯一入口**）。
+    if (active < buffers.size()) {
+      const auto& buffer = buffers[active];
+      if (!buffer.path.empty() && lsp_.active_path() == buffer.path) {
+        lsp_.sync_document(buffer.path, buffer.text);
+      }
     }
   }
 
@@ -2336,7 +2438,10 @@ struct CodeEditorPage : Component {
   auto pump() -> void { pump_terminal(); }
   /// 退出前收尾：停掉在跑的作业并 join 读线程（`jthread` 把它露在对象生命周期
   /// 之外会很危险：它可能正阻塞在 `read_line` 上，而对象已经在析构）。
-  auto shutdown() -> void { shutdown_terminal(); }
+  auto shutdown() -> void {
+    shutdown_language_service();   // 先停 LSP（它会 join 自己的读线程）
+    shutdown_terminal();
+  }
   /// 关闭查找条（入口的 Esc 快捷键用；与面板上的「×」同一条路径）。
  auto dismiss_find() -> void { close_find(); }
  /// 新建文件（入口快捷键用）。
@@ -2692,6 +2797,7 @@ struct CodeEditorPage : Component {
     }
     workspace_ = path;
     dialog_start_dir_.clear();   // 换工作区：文件对话框的"上次目录"跟着重置
+    lsp_.set_workspace(path);    // 语言服务的根跟着换（旧索引属于旧项目）
     dir_expanded_.set(std::vector<std::string>{});   // 新根：展开状态重来
     refresh_tree();
     const std::size_t slash = path.find_last_of("/\\");
@@ -2769,6 +2875,9 @@ struct CodeEditorPage : Component {
   void shutdown_terminal() {
     if (terminal_ptr != nullptr && terminal_ptr->any_busy()) terminal_ptr->send_stop();
   }
+
+  /// 退出前收尾：关掉语言服务器（否则 clangd 会变成孤儿进程，占着索引缓存）。
+  void shutdown_language_service() { lsp_.shutdown(1500); }
 
   /// 请求中止当前会话（面板按钮）。
   void request_terminal_stop() {
@@ -2899,6 +3008,10 @@ struct CodeEditorPage : Component {
 
  private:
   std::string loaded_key_{};   ///< 编辑器实例当前装载的是哪个标签（防重复 set_text）
+  /// 语言服务（LSP）：懒启动、按扩展名挑 server；无 server 的语言**如实不启用**。
+  gbcode::LanguageService lsp_{};
+  /// 上次推给编辑器的诊断指纹（避免每帧重设——`set_diagnostics` 会标脏整页）。
+  std::size_t lsp_diagnostics_stamp_{0};
   /// 底部面板当前高度比例（上下分栏的 `ratio`）。
   ///
   /// **刻意不是 `State`**：分栏组件自己持有比例并据此重排，拖动时它逐像素回调本值——

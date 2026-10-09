@@ -134,6 +134,44 @@ class CodeEditor : public Element {
   /// 而本值只在调用方真的写过 `set_font_size` 时才非负。
   [[nodiscard]] auto font_size_override() const noexcept -> float { return font_size_px_; }
 
+  // —— 诊断装饰（LSP 阶段 3）——
+  //
+  // 编辑器只做"**显示**诊断"这件事，不关心它从哪来（LSP、lint、拼写检查都行）。
+  // 因此输入是**基于本编辑器文本的字节范围**（不是 LSP 的 line/character）——
+  // 换算责任在调用方，组件不该知道 LSP 的存在。
+  //
+  // ⚠ 范围按**字节偏移**给：组件内部的位置体系就是字节（与 `selection()` 同口径）。
+  enum class DiagnosticSeverity : std::uint8_t { Error, Warning, Information, Hint };
+
+  struct DiagnosticMark {
+    std::size_t begin{0};   ///< 字节偏移（含）
+    std::size_t end{0};     ///< 字节偏移（不含；等于 begin 时按整行画）
+    DiagnosticSeverity severity{DiagnosticSeverity::Error};
+    std::string message{};  ///< 悬浮提示文本（多行自动逐行显示）
+    std::string source{};   ///< 来源（如 "clang"）——显示在消息前
+  };
+
+  /// 设诊断标记（**整体替换**：每次 LSP 推送是一份完整快照，合并策略由调用方决定）。
+  void set_diagnostics(std::vector<DiagnosticMark> marks);
+  [[nodiscard]] auto diagnostics() const noexcept -> const std::vector<DiagnosticMark>& {
+    return diagnostics_;
+  }
+  /// 清空诊断（关闭文件 / server 撤回时）。
+  void clear_diagnostics();
+  /// 第 `line`（0 基）行上的最高严重级别（行号槽标记用；无诊断返回 nullopt）。
+  [[nodiscard]] auto severity_on_line(std::size_t line) const
+      -> std::optional<DiagnosticSeverity>;
+  /// 指定字节偏移处的诊断（取**范围最小**的那条——嵌套时最具体的优先）。
+  [[nodiscard]] auto diagnostic_at(std::size_t offset) const -> const DiagnosticMark*;
+  /// 屏幕坐标处的诊断（鼠标悬停用）。需要 `RenderContext`（要量文本宽）。
+  [[nodiscard]] auto diagnostic_at_point(const RenderContext& context, math::Point point) const
+      -> const DiagnosticMark*;
+  /// 当前悬浮提示的诊断（宿主在鼠标停留时设；nullptr = 不显示提示）。
+  void set_hover_diagnostic(const DiagnosticMark* mark);
+  [[nodiscard]] auto hover_diagnostic() const noexcept -> const DiagnosticMark* {
+    return hover_diagnostic_index_.has_value() ? &diagnostics_[*hover_diagnostic_index_] : nullptr;
+  }
+
   // —— 光标与选择 ——
 
   [[nodiscard]] auto cursor_index() const noexcept -> std::size_t { return cursor_; }
@@ -435,6 +473,10 @@ class CodeEditor : public Element {
   mutable float line_height_cache_{0.0f};
   mutable float gutter_cache_{0.0f};
   mutable float max_line_width_cache_{0.0f};
+  /// 诊断标记（按 begin 排序；绘制与命中都靠这一点做二分/提前退出）。
+  std::vector<DiagnosticMark> diagnostics_{};
+  /// 当前悬浮提示指向的诊断下标（用下标而非指针：`set_diagnostics` 后指针会悬垂）。
+  std::optional<std::size_t> hover_diagnostic_index_{};
   /// 悬停行（鼠标所在行；-1 = 无）——行底纹用，不参与内容缓存。
   int hover_line_{-1};
   /// 水平滚动条拖拽中（左键在滑块/轨道上按下后跟 move）。

@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstdint>
 #include <format>
+#include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -76,6 +78,21 @@ inline constexpr float kCursorWidth{1.6f};
 inline constexpr float kScrollBarWidth{9.0f};
 inline constexpr std::int64_t kCoalesceWindowMs{600};
 inline constexpr std::size_t kMaxUndoDepth{256};
+
+/// 诊断严重级别 → 颜色。
+///
+/// 取主题的 `danger` / `warning` / `primary` / `text_muted`：
+/// 诊断色必须与主题同源（写死红黄蓝在浅色主题上会刺眼、在暗色上会发灰）。
+[[nodiscard]] auto diagnostic_color(const Theme& theme, CodeEditor::DiagnosticSeverity severity,
+                                    const Palette& colors) noexcept -> math::Color {
+  switch (severity) {
+    case CodeEditor::DiagnosticSeverity::Error: return theme.colors().danger;
+    case CodeEditor::DiagnosticSeverity::Warning: return theme.colors().warning;
+    case CodeEditor::DiagnosticSeverity::Information: return colors.primary;
+    case CodeEditor::DiagnosticSeverity::Hint: return colors.text_muted;
+  }
+  return theme.colors().danger;
+}
 
 /// 令牌类别 → 语法色板取色。
 [[nodiscard]] auto token_color(const SyntaxPalette& palette, text::TokenKind kind) noexcept
@@ -1282,6 +1299,95 @@ void CodeEditor::arrange(const RenderContext& context, math::Rect rect) {
   (void)context;
 }
 
+// ————————————————————————————————————————————————————————————————————————————
+// 诊断装饰（LSP 阶段 3）
+// ————————————————————————————————————————————————————————————————————————————
+
+void CodeEditor::set_diagnostics(std::vector<DiagnosticMark> marks) {
+  // 排序（按起点）：绘制与命中都依赖有序——乱序输入不该让下面每条查询自己排。
+  std::sort(marks.begin(), marks.end(),
+            [](const DiagnosticMark& a, const DiagnosticMark& b) {
+              if (a.begin != b.begin) return a.begin < b.begin;
+              return a.end < b.end;
+            });
+  diagnostics_ = std::move(marks);
+  hover_diagnostic_index_.reset();   // 内容换了：旧的悬浮指向可能已越界
+  mark_layout_dirty();
+  mark_dirty();
+}
+
+void CodeEditor::clear_diagnostics() {
+  diagnostics_.clear();
+  hover_diagnostic_index_.reset();
+  mark_layout_dirty();
+  mark_dirty();
+}
+
+auto CodeEditor::severity_on_line(std::size_t line) const -> std::optional<DiagnosticSeverity> {
+  if (diagnostics_.empty() || line >= line_spans_.size()) return std::nullopt;
+  const auto [line_begin, line_end] = line_spans_[line];
+  std::optional<DiagnosticSeverity> worst{};
+  for (const auto& mark : diagnostics_) {
+    if (mark.begin >= line_end && line_end > line_begin) break;   // 已过本行（有序）
+    // 与本行区间相交（空范围诊断按它所在行算）。
+    const bool inside = mark.begin >= line_begin && mark.begin < line_end;
+    const bool covers = mark.begin <= line_begin && mark.end >= line_end;
+    if (!inside && !covers) continue;
+    if (!worst.has_value() || static_cast<int>(mark.severity) < static_cast<int>(*worst)) {
+      worst = mark.severity;
+    }
+  }
+  return worst;
+}
+
+auto CodeEditor::diagnostic_at(std::size_t offset) const -> const DiagnosticMark* {
+  // 取**最具体**的一条：诊断常嵌套（外层语法错、内层语义错），鼠标停在内层时
+  // 用户想看到的是内层那条（与 VSCode 一致）。
+  //
+  // "更具体"的定义有坑：**空范围（整行）诊断不算具体**——它覆盖整行却没有明确的
+  // 字符区间，若按"范围长度最小"排序，一个 0 长度的整行警告会**盖掉**同行的
+  // 具体错误（实测：`missing` 上的错误被整行警告顶掉，因为 0 < 7）。
+  // 规则：有区间的优先于空区间的；都有区间时取更短的。
+  const DiagnosticMark* best = nullptr;
+  const auto specificity = [](const DiagnosticMark& mark) -> std::size_t {
+    if (mark.end == mark.begin) return std::numeric_limits<std::size_t>::max();   // 最不具体
+    return mark.end - mark.begin;
+  };
+  for (const auto& mark : diagnostics_) {
+    if (mark.begin > offset) break;   // 有序：后续都更靠后
+    const bool hit = offset >= mark.begin && (offset < mark.end || mark.end == mark.begin);
+    if (!hit) continue;
+    // 注意：`specificity` 大 = 不具体，所以这里取小的。
+    if (best == nullptr || specificity(mark) < specificity(*best)) best = &mark;
+  }
+  return best;
+}
+
+auto CodeEditor::diagnostic_at_point(const RenderContext& context, math::Point point) const
+    -> const DiagnosticMark* {
+  if (bounds_.is_empty() || !bounds_.contains(point)) return nullptr;
+  return diagnostic_at(index_at_point(context, point));
+}
+
+void CodeEditor::set_hover_diagnostic(const DiagnosticMark* mark) {
+  if (mark == nullptr) {
+    if (hover_diagnostic_index_.has_value()) {
+      hover_diagnostic_index_.reset();
+      mark_dirty();
+    }
+    return;
+  }
+  for (std::size_t index = 0; index < diagnostics_.size(); ++index) {
+    if (&diagnostics_[index] == mark) {
+      if (!hover_diagnostic_index_.has_value() || *hover_diagnostic_index_ != index) {
+        hover_diagnostic_index_ = index;
+        mark_dirty();
+      }
+      return;
+    }
+  }
+}
+
 void CodeEditor::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   const SyntaxPalette& syntax = context.theme.syntax();
@@ -1458,15 +1564,63 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
       if (consumed < row.size()) draw_span(consumed, row.size(), syntax.plain);
     }
 
+    // 诊断波浪线：画在**字形之上**（先画就被字符盖住了）。
+    //
+    // 形态：沿基线的锯齿（VSCode 同款）。用 1px 竖线逐列拼而不是画一条曲线——
+    // 框架的路径描边在小尺寸上会有半像素模糊，而锯齿需要"锋利的方波"观感。
+    // 行内只有 1px 高，宽度换得的是"远看是一条彩色下划线、近看是波浪"的效果。
+    if (!diagnostics_.empty()) {
+      for (const auto& mark : diagnostics_) {
+        if (mark.begin > end) break;                       // 有序：后续都更靠后
+        if (mark.end < begin && mark.end != mark.begin) continue;
+        // 与本行的交集（空范围诊断 = 整行）。
+        std::size_t from = std::max(mark.begin, begin);
+        std::size_t to = mark.end == mark.begin ? end : std::min(mark.end, end);
+        if (to < from) to = from;
+        // 端点在本行之外时夹到行首/行尾，避免波浪线越出行宽。
+        if (mark.begin < begin) from = begin;
+        const float x0 = from == begin ? origin_x : x_at(from - begin);
+        float x1 = to == end ? origin_x + static_cast<float>(end - begin) * 0.0f : x_at(to - begin);
+        if (to == end) {
+          // 行末：按整行文本宽度算（`x_at` 需要行内下标，用展开串长度）。
+          x1 = origin_x + port.measure_width(std::string_view(expanded.text), font_size(),
+                                             text::FontRole::Monospace);
+        }
+        const float width = std::max(2.0f, x1 - x0);
+        const math::Color ink = diagnostic_color(context.theme, mark.severity, colors);
+        const float wave_y = row_top + height - 2.0f;
+        // 锯齿：2px 周期的方波（4px 一个完整波长，与 VSCode 一致）。
+        constexpr float kPeriod = 4.0f;
+        std::size_t step = 0;
+        for (float pen_x = x0; pen_x < x0 + width; pen_x += 2.0f, ++step) {
+          const bool up = (step % 2) == 1;
+          const float y = up ? wave_y - 1.0f : wave_y;
+          const float segment = std::min(2.0f, x0 + width - pen_x);
+          canvas.fill_rect(math::Rect{pen_x, y, segment, 1.0f}, raster::Paint::solid(ink), 0.0f);
+        }
+        (void)kPeriod;
+      }
+    }
+
     // 行号
     if (show_line_numbers_ && gutter_cache_ > 0.0f) {
       const std::string number = std::to_string(line + 1);
       const float number_width = port.measure_width(number, font_size(), text::FontRole::Monospace);
-              port.draw(canvas, number,
-                  math::Point{bounds_.x + gutter_cache_ - kGutterPadding - number_width,
-                              row_top + text_offset},
-                  font_size(), line == current ? syntax.plain : syntax.line_number,
-                  text::FontRole::Monospace);
+              const math::Color number_color =
+          line == current ? syntax.plain : syntax.line_number;
+      port.draw(canvas, number,
+                math::Point{bounds_.x + gutter_cache_ - kGutterPadding - number_width,
+                            row_top + text_offset},
+                font_size(), number_color, text::FontRole::Monospace);
+      // 行号槽诊断标记：该行有诊断时在槽**最左侧**画一个圆点（VSCode 同款位置）。
+      // 为什么不用波浪线替代：波浪线在长行上只覆盖出错的那一段，而"文件里哪几行有问题"
+      // 需要一眼看全——槽标记是给"扫一眼"的，波浪线是给"看具体哪里"的。
+      if (const auto severity = severity_on_line(line); severity.has_value()) {
+        const math::Color ink = diagnostic_color(context.theme, *severity, colors);
+        const float dot_y = row_top + height * 0.5f;
+        canvas.fill_circle(math::Point{bounds_.x + 6.0f, dot_y}, 3.0f,
+                           raster::Paint::solid(ink));
+      }
     }
   }
 
@@ -1481,6 +1635,56 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
       // 那是**应用层乱调**：光标上下各伸出带外 1px，一眼就看出“超出背景”。
       canvas.fill_rect(math::Rect{x, row_top + band_top, kCursorWidth, band_height},
                        raster::Paint::solid(syntax.cursor), 0.0f);
+    }
+  }
+
+  // —— 诊断悬浮提示（在内容之上；不做独立 Element——它是纯提示，不参与布局）——
+  //
+  // 位置策略：贴着诊断所在行的**下方**（VSCode 同款）；下方空间不够就翻到上方。
+  // 宽度按最长行排（上限视口 90%），高度按行数算——不做自动换行，
+  // 因为诊断消息里的路径/符号名换行后会难读（宁可横向长一点）。
+  if (const DiagnosticMark* hovered = hover_diagnostic(); hovered != nullptr) {
+    const Metrics& metrics = context.theme.metrics();
+    const std::size_t line = line_of_index(hovered->begin);
+    const float row_top = origin_y + static_cast<float>(line) * height;
+    const float box_pad = 8.0f;
+    const float line_h = port.line_height(metrics.font_sm);
+    // 消息按 `\n` 拆行（server 有时给多行），外加来源前缀行。
+    std::vector<std::string> lines;
+    if (!hovered->source.empty()) lines.push_back(hovered->source);
+    std::size_t at = 0;
+    while (at <= hovered->message.size()) {
+      const std::size_t next = hovered->message.find('\n', at);
+      lines.push_back(hovered->message.substr(at, next == std::string::npos
+                                                      ? std::string::npos : next - at));
+      if (next == std::string::npos) break;
+      at = next + 1;
+    }
+    float box_width = 0.0f;
+    for (const auto& text : lines) {
+      box_width = std::max(box_width, port.measure_width(text, metrics.font_sm));
+    }
+    const float max_width = std::max(80.0f, bounds_.width * 0.9f);
+    box_width = std::min(box_width + box_pad * 2.0f, max_width);
+    const float box_height = static_cast<float>(lines.size()) * line_h + box_pad * 2.0f;
+    float box_x = std::min(origin_x, bounds_.right() - box_width - 4.0f);
+    box_x = std::max(box_x, bounds_.x + 4.0f);
+    float box_y = row_top + height + 2.0f;
+    if (box_y + box_height > bounds_.bottom() - 4.0f) {
+      box_y = row_top - box_height - 2.0f;   // 下方不够：翻到上方
+    }
+    box_y = std::max(box_y, bounds_.y + 4.0f);
+    const math::Color ink = diagnostic_color(context.theme, hovered->severity, colors);
+    // 底 + 描边（描边用诊断色：一眼看出是错误还是警告）。
+    canvas.fill_rect(math::Rect{box_x, box_y, box_width, box_height},
+                     raster::Paint::solid(colors.surface_alt), metrics.radius_md);
+    canvas.fill_rect(math::Rect{box_x, box_y, 3.0f, box_height}, raster::Paint::solid(ink),
+                     metrics.radius_sm);
+    float text_y = box_y + box_pad;
+    for (const auto& text : lines) {
+      port.draw(canvas, text, math::Point{box_x + box_pad, text_y}, metrics.font_sm,
+                text == hovered->source ? ink : colors.text, text::FontRole::Monospace);
+      text_y += line_h;
     }
   }
 
@@ -1885,6 +2089,20 @@ auto CodeEditor::semantics_flags() const -> SemanticsFlags {
 auto CodeEditor::get_property(std::string_view name) const -> std::optional<std::string> {
   if (name == "text") return text_;
   if (name == "language") return language_;
+  // 诊断计数（自动化/状态栏用）：总条数 + 错误条数——两者分开是因为
+  // "有没有错"与"有多少提示"是两个问题（错误数决定能不能提交，提示数只影响观感）。
+  if (name == "diagnostics") return std::to_string(diagnostics_.size());
+  if (name == "diagnostic_errors") {
+    std::size_t errors = 0;
+    for (const auto& mark : diagnostics_) {
+      if (mark.severity == DiagnosticSeverity::Error) ++errors;
+    }
+    return std::to_string(errors);
+  }
+  if (name == "hover_diagnostic") {
+    const DiagnosticMark* hovered = hover_diagnostic();
+    return hovered != nullptr ? hovered->message : std::string{};
+  }
   if (name == "cursor") return std::to_string(cursor_);
   if (name == "line") return std::to_string(cursor_line() + 1);
   if (name == "column") return std::to_string(cursor_column() + 1);
@@ -2076,7 +2294,7 @@ auto CodeEditor::property_names() const -> std::vector<std::string_view> {
           "tab_width", "indent_guides", "auto_pairs", "font_size", "font_scale", "scroll",
           "first_visible_line", "visible_lines", "goto_line", "find_needle", "find_matches",
           "find_active", "find_case", "find_word", "line_height", "text_offset", "caret_top",
-          "ink_height", "baseline"};
+          "ink_height", "baseline", "diagnostics", "diagnostic_errors", "hover_diagnostic"};
 }
 
 // —— 查找与替换 ——
