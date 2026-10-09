@@ -12,10 +12,11 @@
 | [`cross_platform.md`](cross_platform.md) | 跨平台会怎么错、提交前逐条自查什么 | 碰系统 API / 路径 / 入口 / 构建时 |
 | [`independent_project.md`](independent_project.md) | 怎么用本框架建**自己的**应用工程 | 要写自己的应用而不是改框架时 |
 
-另外四份在各自目录里：
+另外五份在各自目录里：
 
 | 文档 | 回答的问题 |
 |---|---|
+| [`LOUYUE_CAIYUN.md`](LOUYUE_CAIYUN.md) | 「镂月裁云」两个新示例——louyue 镂月（图像编辑器）/ caiyun 裁云（视频剪辑器）——的设计规约、落地顺序与验收标准（**设计定稿、代码未动**；实现轮以它为规约，落地后状态同步进 README/DESIGN/BACKLOG） |
 | [`tools/README.md`](../tools/README.md) | 依赖放哪（代码进仓库 / 二进制走资源管理）、构建工具有哪些 |
 | [`../resources/README.md`](../../resources/README.md)（主仓库） | 模型与运行时资源怎么获取（**二进制资源**的集中地） |
 | [`../third_party/SOURCES.md`](../third_party/SOURCES.md) | 随仓库分发的第三方源码有哪些、版本/来源/许可、哪些上游代码被动了 |
