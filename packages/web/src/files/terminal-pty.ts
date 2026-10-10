@@ -64,6 +64,25 @@ function nextFrame(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => resolve()))
 }
 
+/**
+ * 等布局与**字体**都就绪：FitAddon 量列数依赖当前字体的字符宽度，而字体请求是终端视图首次
+ * 插入 DOM 时才发起的——此前的 fit 用的是回退字体度量（列数偏多，实测 177 vs 正确 172），
+ * 字体就绪后容器宽度不变、ResizeObserver 不会再触发，误差会一直保留到用户下次改窗口尺寸。
+ *
+ * 注意不能用 document.fonts.ready：它在终端插入 DOM 之前就已 resolve（当时无 pending 请求），
+ * 等不到后续才发起的加载。故用 document.fonts.load() **显式请求**终端字体并等它完成；
+ * 最多等 maxWaitMs，防个别环境字体请求长期 pending 把终端卡在“正在打开”。
+ */
+async function nextFrameAndFonts(fontSpec: string, maxWaitMs = 1500): Promise<void> {
+  const fonts = typeof document !== "undefined" ? document.fonts : undefined
+  if (fonts?.load) {
+    // load() 接受 CSS font 简写（如 `12.5px "JetBrains Mono"`）；失败/超时都不阻断量算
+    const load = Promise.allSettled([fonts.load(fontSpec, "测试打样")]).then(() => undefined)
+    await Promise.race([load, new Promise<void>((r) => setTimeout(r, maxWaitMs))])
+  }
+  await nextFrame()
+}
+
 /** 光标样式的菜单文案（xterm 的取值是英文术语，菜单里给中文）。 */
 const CURSOR_LABEL: Record<TermPrefs["cursorStyle"], string> = { bar: "竖线", block: "方块", underline: "下划线" }
 
@@ -542,8 +561,9 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     for (const x of tabs) x.view.hidden = x.id !== id
     paintTabs()
     persist()
-    // 切到可见后再 fit（hidden 元素量不出尺寸）
-    requestAnimationFrame(() => {
+    // 切到可见后再 fit（hidden 元素量不出尺寸）；同时等字体就绪——首次可见时字体才开始加载，
+    // 不等的话首量会按回退字体算列数（见 nextFrameAndFonts）
+    void nextFrameAndFonts(`${prefs.fontSize}px ${terminalFontFamily()}`).then(() => {
       fitTab(t)
       t.term.focus()
     })
@@ -672,7 +692,9 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     body.appendChild(t.view)
     dropNotice()
     selectTab(t.id)
-    await nextFrame()
+    // 等布局 + 字体就绪再量尺寸：字体未就绪时 FitAddon 按回退字体算列数（偏差会一直保留到下次窗口 resize，
+    // 因为容器宽度不变、ResizeObserver 不再触发）——详见 nextFrameAndFonts
+    await nextFrameAndFonts(`${prefs.fontSize}px ${terminalFontFamily()}`)
     fitTab(t)
     const reply = await socket.request("term.open", {
       root: hooks.root(),
