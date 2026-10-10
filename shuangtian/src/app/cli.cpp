@@ -54,12 +54,15 @@ auto common_options_usage(std::string_view program) -> std::string {
         "  --text-digit-gamma V  数字类的覆盖率 gamma（auto = 内置默认）\n"
         "  --text-letter-gamma V 字母类的覆盖率 gamma（auto = 内置默认）\n"
         "  --text-han-gamma V    汉字类的覆盖率 gamma（auto = 内置默认）\n"
-      "  --control-port N      控制通道端口（0 = 自动选空闲端口）\n"
+        "  --control-port N      控制通道端口（0 = 自动选空闲端口）\n"
       "  --control-file PATH   把端口等写入该文件（自动化流程据此连接）\n"
       "  --shots DIR           无头截图的落盘目录（控制通道 `encode=file` 且未给 path 时用）\n"
       "  --enable-script       开启进程内脚本能力（默认关闭）\n"
-      "  --frames N            跑够 N 帧后退出\n"
-      "  --ms N                跑够 N 毫秒后退出\n",
+        "  --frames N            跑够 N 帧后退出\n"
+        "  --ms N                跑够 N 毫秒后退出\n"
+        "  --log-file PATH       日志落盘（父目录自动建；也看 ST_LOG_FILE）\n"
+        "  --log-level NAME      trace / debug / info / warn / error / off\n"
+        "  --crash-dir DIR       崩溃报告落盘目录（也看 ST_CRASH_DIR）\n",
       program, 1280, 720);
 }
 
@@ -251,9 +254,14 @@ auto parse_common_options(int argc, char** argv, CommonOptions& options) -> Stat
       auto number = parse_int(*parsed, argument);
       if (!number) return forward_error(number.error());
       options.max_ms = static_cast<std::uint32_t>(*number < 0 ? 0 : *number);
-    } else {
-      return unexpected(ErrorCode::Invalid,
-                        std::format("未知参数: {}（--help 查看用法）", argument));
+      } else if (argument == "--log-file" || argument == "--log-level" || argument == "--crash-dir") {
+    // 诊断开关：**已在 `startup_configure_diagnostics` 里生效**（它比这里跑得更早，
+    // 才能盖住启动早期的日志）。这里只做“认识它”——否则会被下面那句
+    // “未知参数”报错退出，而应用里写死的解析器也可能因为不认识它而拒掉整个命令行。
+    if (auto parsed = value(argument); !parsed) return forward_error(parsed.error());
+  } else {
+    return unexpected(ErrorCode::Invalid,
+                      std::format("未知参数: {}（--help 查看用法）", argument));
     }
   }
   return ok();

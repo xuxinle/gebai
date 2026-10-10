@@ -2,8 +2,15 @@
 
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
+
+#include "st/core/fs.hpp"
+#include "st/core/log.hpp"
+#include "st/core/log_file.hpp"
+#include "st/core/process.hpp"
+#include "st/core/time.hpp"
 
 #if defined(_WIN32)
 // `windows.h` 默认把 `min`/`max` 定义成宏，会静默破坏 `std::min`/`std::max`/`std::numeric_limits<T>::max()`
@@ -82,6 +89,84 @@ auto startup_arguments() -> std::vector<std::string> {
   }
 #endif
   return arguments;
+}
+
+namespace {
+
+/// 从 `name=value` 形态的命令行项里取值（`--log-file X` 与 `--log-file=X` 两种都认）。
+///
+/// 为何在这里粗解析一遍而不是等 `parse_common_options`：诊断必须在**尽可能早**的
+/// 时刻就绪（越早开，早期日志越不容易丢），而通用选项解析要等应用把 `AppOptions`
+/// 建起来。两处都认同一组开关，优先级以命令行显式值最高。
+[[nodiscard]] auto scan_option(int argc, char** argv, std::string_view name) -> std::string {
+  const std::string prefix = std::string(name) + "=";
+  for (int index = 1; index < argc; ++index) {
+    if (argv[index] == nullptr) break;
+    const std::string_view item(argv[index]);
+    if (item == name) {
+      if (index + 1 < argc && argv[index + 1] != nullptr) return argv[index + 1];
+      return {};
+    }
+    if (item.rfind(prefix, 0) == 0) return std::string(item.substr(prefix.size()));
+  }
+  return {};
+}
+
+/// 环境变量（未设置时返回 `fallback`）。
+[[nodiscard]] auto env_or(const char* name, std::string fallback) -> std::string {
+  const char* value = std::getenv(name);   // NOLINT：跨平台（Windows 上 CRT 已兼容）
+  return (value == nullptr || *value == '\0') ? std::move(fallback) : std::string(value);
+}
+
+}  // namespace
+
+auto crash_report_file_name(std::int64_t unix_millis, unsigned long pid) -> std::string {
+  // 时间戳里的 `:` 换成 `-`（见头文件里那条契约）。
+  std::string stamp = st::time::iso8601_utc(unix_millis);
+  for (char& ch : stamp) {
+    if (ch == ':') ch = '-';
+  }
+  return std::format("crash-{}-{}.log", stamp, pid);
+}
+
+void startup_configure_diagnostics(int argc, char** argv) {
+  using namespace st::log;
+  // 日志文件：命令行 > 环境变量 > 不落盘（保持旧行为，不静默改变已有应用的输出）。
+  std::string log_path = scan_option(argc, argv, "--log-file");
+  if (log_path.empty()) log_path = env_or("ST_LOG_FILE", {});
+  if (!log_path.empty()) {
+    FileOptions options{};
+    options.path = log_path;
+    if (const std::string from_argv = scan_option(argc, argv, "--log-level"); !from_argv.empty()) {
+      set_level(level_from_name(from_argv));
+    } else if (const std::string from_env = env_or("ST_LOG_LEVEL", {}); !from_env.empty()) {
+      set_level(level_from_name(from_env));
+    }
+    // 失败不中止：日志系统自身不能成为故障源（`open_file` 已打一条 stderr 告警）。
+    (void)open_file(options);
+    st::log::info("日志落盘：{}", options.path);
+  }
+
+  // 崩溃报告：目录 + 时间戳 + pid 组文件名。
+  // 为何带 pid 与时间戳：同一台机器可能同时跑多个实例（智能体并行驱动），
+  // 固定文件名会互相覆盖，而崩溃报告是“不能丢”的东西。
+  std::string crash_dir = scan_option(argc, argv, "--crash-dir");
+  if (crash_dir.empty()) crash_dir = env_or("ST_CRASH_DIR", {});
+  if (!crash_dir.empty()) {
+    // 文件名交给 `crash_report_file_name`——那里有一条只能靠回归测试钉住的契约
+    // （文件名不得含 `:`，否则 Windows 上 open 失败、报告静默不生成）。
+    const std::string name =
+        crash_report_file_name(st::time::unix_ms(), static_cast<unsigned long>(st::process::current_id()));
+    if (!set_crash_report_path(st::fs::join(crash_dir, name))) {
+      st::log::warn("崩溃报告路径设置失败（崩溃时将只有 stderr）");
+    }
+  }
+}
+
+void finalize_diagnostics() {
+  (void)st::log::file_active();   // 保序：先关日志再删崩溃报告
+  st::log::close_file();
+  (void)st::finalize_crash_report();
 }
 
 }  // namespace st

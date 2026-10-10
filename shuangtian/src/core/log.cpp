@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -22,6 +23,41 @@ struct Listener {
 };
 std::vector<Listener> listeners{};
 std::uint64_t next_listener_id{1};
+
+/// 日志尾部环形缓冲（见 `st::log::tail` 的说明）。
+std::mutex tail_mutex{};
+std::deque<std::string> tail_lines{};
+std::size_t tail_capacity{512};
+
+/// 把一行推进环形缓冲（超容量丢最老的）。调用方不得持 `sink_mutex`。
+void push_tail(std::string line) {
+  const std::scoped_lock lock(tail_mutex);
+  tail_lines.push_back(std::move(line));
+  while (tail_lines.size() > tail_capacity) tail_lines.pop_front();
+}
+
+/// 共用的“取最近 N 行”实现；`millis` = 0 表示无限等锁（普通路径）。
+[[nodiscard]] auto collect_tail(std::size_t max_lines, bool try_only) -> std::string {
+  // 两种取锁形态共用一个实现：`std::scoped_lock` 不能“尝试取”，
+  // 而 `unique_lock(try_to_lock)` 又多一处构造分支——用 defer + 显式取锁最直白。
+  // lint-allow: L9 崩溃尾部采样需要在“普通锁”与“try_lock”两种形态间切换（见上方说明）
+  std::unique_lock<std::mutex> lock(tail_mutex, std::defer_lock);
+  if (try_only) {
+    // `try_lock` 带 `[[nodiscard]]`：拿不到锁就是“采样失败”，而不是可忽略的返回值。
+    if (!lock.try_lock()) return {};
+  } else {
+    lock.lock();  // lint-allow: L9 见上方说明
+  }
+  if (tail_lines.empty()) return {};
+  const std::size_t count =
+      (max_lines == 0 || max_lines >= tail_lines.size()) ? tail_lines.size() : max_lines;
+  std::string out;
+  out.reserve(count * 96U);
+  for (std::size_t index = tail_lines.size() - count; index < tail_lines.size(); ++index) {
+    out += tail_lines[index];
+  }
+  return out;
+}
 
 }  // namespace
 
@@ -67,6 +103,8 @@ void write(Level msg_level, std::string_view message) {
     current_listeners.reserve(listeners.size());
     for (const auto& item : listeners) current_listeners.push_back(item.callback);
   }
+  // 尾部缓冲**先于** sink：不依赖排版形态、不依赖是否开了文件落盘（见 `tail` 说明）。
+  push_tail(std::format("[{}] {:<5} {}\n", time::iso8601_now(), to_string(msg_level), message));
   if (sink) {
     sink(msg_level, message);
   } else {
@@ -78,8 +116,21 @@ void write(Level msg_level, std::string_view message) {
   for (const auto& listener : current_listeners) listener(msg_level, message);
 }
 
-ScopedTimer::ScopedTimer(Level level, std::string label)
-    : level_(level), label_(std::move(label)), start_ns_(time::now_ns()) {}
+namespace tail {
+
+void set_capacity(std::size_t lines) {
+  const std::scoped_lock lock(tail_mutex);
+  tail_capacity = lines == 0 ? 1 : lines;
+  while (tail_lines.size() > tail_capacity) tail_lines.pop_front();
+}
+
+auto recent(std::size_t max_lines) -> std::string { return collect_tail(max_lines, false); }
+
+auto try_recent(std::size_t max_lines) -> std::string { return collect_tail(max_lines, true); }
+
+}  // namespace tail
+
+ScopedTimer::ScopedTimer(Level level, std::string label)    : level_(level), label_(std::move(label)), start_ns_(time::now_ns()) {}
 
 ScopedTimer::~ScopedTimer() {
   if (level() > level_) return;

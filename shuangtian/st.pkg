@@ -48,13 +48,14 @@
       "L14": ["src/core/entry.cpp"]
     }
   },
-  "system_libs": ["pthread", "dl", "m"],
+  "//system_libs": "本机（非交叉）链接用的库。注意与 `toolchains.<名>.system_libs` 的分工：后者在**交叉编译**时**整体接管**（见 `resolve_system_libraries`），本机构建根本不看它。所以 Win32 相关的系统库（dbghelp 供崩溃调用栈符号化）两处都要写。",
+  "system_libs": ["pthread", "dl", "m", "dbghelp", "psapi"],
   "toolchains": {
     "mingw": {
       "compiler": "x86_64-w64-mingw32-g++",
       "c_compiler": "x86_64-w64-mingw32-gcc",
       "platform": "windows",
-      "system_libs": ["ws2_32", "winpthread", "gdi32", "user32"],
+      "system_libs": ["ws2_32", "winpthread", "gdi32", "user32", "dbghelp"],
       "defines": ["_WIN32_WINNT=0x0A00", "WINVER=0x0A00", "NTDDI_VERSION=0x0A000000"],
       "executable_suffix": ".exe",
       "extra_flags": ["-static-libgcc", "-static-libstdc++"]
@@ -67,7 +68,7 @@
       "c_compiler": "C:/Users/Administrator/program/clang+llvm-23.1.2/bin/clang.exe",
       "target_triple": "x86_64-w64-windows-gnu",
       "platform": "windows",
-      "system_libs": ["ws2_32", "user32", "gdi32", "shell32"],
+      "system_libs": ["ws2_32", "user32", "gdi32", "shell32", "dbghelp"],
       "defines": ["_WIN32_WINNT=0x0A00", "WINVER=0x0A00", "NTDDI_VERSION=0x0A000000"],
       "//suppressions": "对 clang 的告警收敛，全部来自 **vendored 第三方头**（sqlite3.h 用 MSVC 扩展类型 __int64、quickjs.h 用旧式转换与 NAN）——那是上游代码，不是我们要改的东西。工程自己的代码仍与 gcc 同等严格。",
       "suppressions": ["-Wno-language-extension-token", "-Wno-old-style-cast", "-Wno-double-promotion"],

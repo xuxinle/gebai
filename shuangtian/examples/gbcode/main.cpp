@@ -5190,6 +5190,13 @@ auto print_usage(std::string_view program) -> void {
     else if (raw == "--workspace") options.workspace = value(".");
     else if (raw == "--tool-root") options.tool_root = value("");
     else if (raw == "--decorations") options.decorations = true;
+    // 诊断开关（--log-file/--log-level/--crash-dir）：由 `startup_configure_diagnostics`
+    // 在 `main` 更早处生效（才能盖住启动早期日志）。这里只“认识它”并把值吃掉，
+    // 否则下面那句“未知参数”会把整个命令行拒掉——实测踩到：
+    // 加了这些开关后 `--log-file X` 直接 exit 2。
+    else if (raw == "--log-file" || raw == "--log-level" || raw == "--crash-dir") {
+      (void)value("");
+    }
     // **未知参数报错，不静默忽略**：本应用曾经自带一份参数解析器（不走
     // `parse_common_options`），于是新加的开关被静默吃掉——
     // 表现是"三档渲染出来的图几乎一样"（实测 B vs C 只差 20 像素），

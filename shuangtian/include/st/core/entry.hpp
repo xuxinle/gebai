@@ -39,6 +39,29 @@ namespace st {
 /// 仅做控制台编码设置（供自行解析参数的场景）。
 void startup_configure_console();
 
+/// **诊断落盘的两条自动接线**（由 `ST_MAIN` 调用；自行写 main 的应用可手动调）。
+///
+/// 为何放在这里而不是要求应用自己写：
+/// “日志落盘 + 崩溃报告”是**出事之后才有价值**的能力，而 `main` 是应用**第一个**
+/// 拿到命令行的地方——放在这儿，任何应用（包括以后新写的）默认就有，
+/// 不必逐工程重复一遍。
+///
+/// 两条环境变量（命令行参数由 `parse_common_options` 处理，优先级更高）：
+///
+/// | 变量 | 含义 |
+/// |---|---|
+/// | `ST_LOG_FILE` | 日志文件路径（父目录自动建） |
+/// | `ST_LOG_LEVEL` | `trace`/`debug`/`info`/`warn`/`error`/`off` |
+/// | `ST_CRASH_DIR` | 崩溃报告落盘目录（文件名 `crash-<时间戳>-<pid>.log`） |
+///
+/// 为何也认命令行：智能体驱动无头应用时，**命令行是唯一稳定的注入点**
+///（环境变量可能被上一层 shell 改掉）。而这份函数在参数解析之前跑，
+/// 只做一次粗扫——真正的命令行解析仍归 `parse_common_options`。
+void startup_configure_diagnostics(int argc, char** argv);
+
+/// 正常退出时的收尾：flush 日志文件、删掉从未写过的崩溃报告。
+void finalize_diagnostics();
+
 /// 安装崩溃处理器（进程内一次性，幂等）：崩溃时把异常码/信号/地址+模块打到 stderr，
 /// 不吞异常（交给系统默认处置）。无头应用崩溃没有控制台可看——这份记录是
 /// 智能体/开发者事后定位的唯一线索（审视报告 P1-3）。入 ST_MAIN 时自动调用。
@@ -52,6 +75,35 @@ void install_crash_handler();
 /// 这样 `st` 构建器（只链 core）不会因 UI 层符号缺失而链接失败。
 void set_crash_extra_provider(std::string (*provider)());
 
+/// 设置崩溃报告文件路径（UTF-8）。**必须在 `install_crash_handler()` 之前调**——
+/// 报告文件是启动时就打开的（见 `platform_crash.cpp` 里的理由：信号处理器只能调
+/// 异步信号安全的函数，`fopen` 不在其中）。
+///
+/// 若已经开始崩溃采样，后续调用返回 false 且不生效（避免丢掉已写内容）。
+[[nodiscard]] auto set_crash_report_path(std::string path) -> bool;
+
+/// 当前崩溃报告文件路径（未开启时为空）。
+[[nodiscard]] auto crash_report_path() -> std::string;
+
+/// 崩溃报告**文件名**（`crash-<时间戳>-<pid>.log`）。
+///
+/// 单独抽出来是因为它有一条**只能在真机上看出来的契约**：文件名里不能有 `:`。
+/// 时间戳用 `iso8601_now()`（形如 `2026-10-10T14:18:33.362Z`）时含 `:`，
+/// 而 `:` 在 Windows 文件名里非法 ⇒ `open` 失败 ⇒ **崩溃报告永不生成**，
+/// 且失败发生在启动时、用户看不到。抽成函数才能被回归测试直接钉住
+/// （测“替换后能用”是假测试：那样测的是测试自己）。
+///
+/// 参数 `pid` 显式传入（而非内部取）——让测试能固定它。
+[[nodiscard]] auto crash_report_file_name(std::int64_t unix_millis, unsigned long pid)
+    -> std::string;
+
+/// 正常退出时调用：删除从未被写过的崩溃报告文件。
+///
+/// 为何要删：报告文件是启动就建的（这样才能在崩溃瞬间写入）。若程序**正常**退出，
+/// 这个文件里只有启动时的表头，留着会让事后看到它的人以为“曾经崩过”。
+/// 返回是否确实删掉了一个文件。
+[[nodiscard]] auto finalize_crash_report() -> bool;
+
 }  // namespace st
 
 /// 跨平台入口宏：把 `main` 的参数正规化成 UTF-8 后交给 `fn(argc, argv)`。
@@ -62,6 +114,7 @@ void set_crash_extra_provider(std::string (*provider)());
 #define ST_MAIN(fn)  /* lint-allow: L3 入口宏：唯一能在调用点生成 main 的手段 */ \
   auto main(int argc, char** argv) -> int {             \
     st::startup_configure_console();                    \
+    st::startup_configure_diagnostics(argc, argv);      \
     st::install_crash_handler();                        \
     const std::vector<std::string> st_arguments = st::startup_arguments(); \
     (void)argc;                                         \
@@ -72,5 +125,7 @@ void set_crash_extra_provider(std::string (*provider)());
       st_argv.push_back(const_cast<char*>(item.c_str())); \
     }                                                   \
     st_argv.push_back(nullptr);                         \
-    return fn(static_cast<int>(st_arguments.size()), st_argv.data()); \
+    const int st_exit = fn(static_cast<int>(st_arguments.size()), st_argv.data()); \
+    st::finalize_diagnostics();                         \
+    return st_exit;                                     \
   }

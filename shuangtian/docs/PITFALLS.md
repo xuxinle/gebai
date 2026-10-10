@@ -34,6 +34,7 @@
 | **`ST_CHECK` 之后跟着索引 = 分片静默失联** | 前置条件没满足时，后面那句 `v[0]` 会让 `_GLIBCXX_ASSERTIONS` 直接 `abort()`，**整个分片连同其余上千条用例一起消失**，只报“分片未能启动”而**一条失败记录都没有**。前置条件用 `ST_REQUIRE`，诊断打印要在断言**之前** | `tests/lsp_client_test.cpp` 的 `fake_ready` 处注释 |
 | **假 server 用 `sh` 脚本 = 只在 POSIX 成立** | Windows 的 `CreateProcessW` **不认 shebang**（报“%1 不是有效的 Win32 应用程序”），而用例里还跟着索引空 vector——两者叠加就是上一条。跑脚本的用例要么标 `ST_TEST_SLOW` + 平台跳过，要么换成真程序 | `tests/lsp_client_test.cpp` 的 `FakeServer` 注释 |
 | **“0 命中”与“读不到”必须是两个数** | “替换了 0 处”至少三种成因：目标不是磁盘文件 / 文件读失败 / 真没命中。只报一个总数时，排障要重跑一遍搜索才能区分。把**次因**（目标数/读失败数/无命中数）一并报出 | `examples/gbcode/main.cpp` 的 `replace_in_workspace` 注释 |
+| **回归测试要调生产函数** | 测试里“自己做一遍正确逻辑再断言”= 测的是测试自己；回退生产实现后依然全绿（实测：崩溃报告文件名那条，回退后仍 PASS；改成调 `crash_report_file_name` 后回退立刻变红） | `tests/core_log_file_test.cpp` 的 `log_crash_report_filename_has_no_colon` 注释 |
 
 ## 场景 3：改观感（字体/配色/动画/手感）
 
@@ -55,6 +56,10 @@
 | **同一份路径两种分隔符 = 静默丢数据** | `LspClient::uri_to_path` 在 `_WIN32` 下把 `/` 换 `\`，而应用侧 `active_path` 是 `st::fs` 的 `/` 形态——`map` 查不到 key 就返回空表，**不报错**。两侧的 key 必须过同一个归一化函数 | `examples/gbcode/lsp_bridge.cpp` 的 `normalize_path` 注释 |
 | **Win32 的鼠标消息不带修饰键** | `WM_LBUTTONDOWN` 的 `wParam` 只有 `MK_SHIFT`/`MK_CONTROL`（无 Alt），只读它会得到“Ctrl 有、Alt 恒无”的半吊子事实。鼠标事件一律走 `GetKeyState`（与键盘同一口径） | `src/shell/platform_win32.cpp` 的 `push_mouse` 注释 |
 | **`CreateIconFromResourceEx` 的错误码会骗人** | 手拼 `RT_ICON` 字节失败时它只回 `ERROR_FILE_NOT_FOUND(2)`——与“文件”毫无关系。改用 `CreateDIBSection` + `CreateIconIndirect`：输入是两个真位图句柄，不存在“字节布局对不对”这类无法定位的问题 | `src/shell/platform_win32.cpp` 的 `make_icon` 注释 |
+| **文件名不能直接用 ISO 8601 时间戳** | `2026-10-10T14:18:33.362Z` 含 `:`，而 `:` 在 Windows 文件名里非法 ⇒ `open` 失败 ⇒ **崩溃报告永不生成且无提示**（失败发生在启动时，用户看不到）。文件名里把 `:` 换成 `-` | `include/st/core/entry.hpp` 的 `crash_report_file_name` 注释 |
+| **`SYMBOL_INFO` 不能当普通数组用** | 它的 `Name` 是**柔性数组**：必须整块分配并设 `SizeOfStruct`/`MaxNameLen`。直接 `reinterpret_cast` 一个 `char[N]` 会让 `SymFromAddr` 恒失败，看起来像“二进制没符号” | `src/core/platform_crash.cpp` 的 `walk_stack` 注释 |
+| **`addr2line` 要 link-time 地址** | 传模块内偏移恒得 `??:0`；要加上 PE 首选基址 `0x140000000`。且 DbgHelp 只读 PDB（读不了 MinGW 的 DWARF）——MinGW 构建下自己的帧必然要它兜底 | `src/core/platform_crash.cpp` 的 `walk_stack` 注释 |
+| **本机链接的库看顶层 `system_libs`** | `toolchains.<名>.system_libs` 只在**交叉编译**时**整体接管**；本机构建根本不看它。加 Windows 系统库（`dbghelp`/`psapi`）时两处都要写 | `st.pkg` 的 `//system_libs` 注释 |
 
 ## 场景 5：用脚本驱动控制通道 / 写 e2e
 

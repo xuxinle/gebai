@@ -250,6 +250,17 @@ struct Error { ErrorCode code; std::string message; };
 ```
 - `st::json::Value`：自研 JSON（顺序保序对象、UTF-8、解析/序列化、`std::format` 集成）。用于**协议、清单、lock、事件**——一切结构化数据。
 - `st::Log`：级别 + 分类 + 结构化字段，默认输出 stderr。
+- **诊断落盘（日志 + 崩溃报告）**：无头应用的 stderr 随进程一起消失，事后只剩“退出码非 0”——
+  所以日志与崩溃现场都要能落到文件里，交给 AI/开发者即可，**不需复述问题、不需复现**。
+  - `st::log::open_file`：文件 sink（级别过滤、按大小滚动 `app.log`→`app.1.log`、退出 flush）。
+    与 sink 是**旁路关系**：stderr 照常写，文件同时写。写盘失败只 warn 一次并降级，不让日志系统自己成为故障源。
+  - `st::log::tail`：**进程内环形缓冲**（默认 512 行）。它属于日志系统本身而**不依赖是否开落盘**——
+    否则崩溃报告的“死之前发生了什么”那一栏会恒为空（而那恰恰是最需要日志的场景）。
+  - `st::set_crash_report_path` + `crash_report_file_name`：崩溃报告文件（**启动时预先打开**，
+    因为信号处理器只能调异步信号安全的函数，`fopen` 不在其中）。内容 = 信号/异常码 + 调用栈 +
+    崩溃前日志尾部 + State 写入追踪；正常退出时自动删除（否则事后会误以为“曾经崩过”）。
+  - 接入：`ST_MAIN` → `startup_configure_diagnostics`（命令行 `--log-file/--log-level/--crash-dir`
+    与环境变量 `ST_LOG_FILE/ST_LOG_LEVEL/ST_CRASH_DIR`）；`parse_common_options` 认得这三个开关。
 - `st::fs`：`read_file`/`write_file`/`list_dir`/`temp_dir`/`path_join` 等（`std::filesystem` 之上的薄封装）。
   **`read_text` 读到 EOF，不用 `seekg/tellg` 定长读**：`/proc`、`/sys`、cgroup 的虚拟文件报出的
   size 是 0（内容却非空），按大小读会静默得到空串——而"读系统状态"恰好是这些文件的唯一用途

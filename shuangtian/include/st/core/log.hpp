@@ -35,6 +35,28 @@ void set_sink(std::function<void(Level, std::string_view)> sink);
 /// 底层写入（已格式化文本，含级别过滤与时间戳前缀）。
 void write(Level level, std::string_view message);
 
+/// **进程内日志尾部**（最近 N 条，固定容量环形缓冲）。
+///
+/// 为何在 `log` 层而不是 `log_file`：崩溃现场的“死之前发生了什么”**不应依赖于
+/// 是否开了文件落盘**——实测踩到：缓冲曾经挂在文件 sink 的监听器上，于是
+/// 没开 `--log-file` 时尾部恒为空，崩溃报告里那一栏永远是空的
+/// （而那恰恰是最需要看到日志的场景）。由 `log_file_test` 报红才现形。
+///
+/// 开销：每条日志额外一次 string 拷贝 + 入队；容量有界（默认 512 行），
+/// 相对于日志本身的格式化开销可忽略。
+namespace tail {
+
+/// 设环形缓冲容量（行）。0 视为 1。
+void set_capacity(std::size_t lines);
+
+/// 取最近 `max_lines` 行（0 = 全部）。普通锁——**不要在信号处理器里调**。
+[[nodiscard]] auto recent(std::size_t max_lines) -> std::string;
+
+/// **信号安全**版：`try_lock`，拿不到锁立即返回空。崩溃处理器专用。
+[[nodiscard]] auto try_recent(std::size_t max_lines) -> std::string;
+
+}  // namespace tail
+
 /// 事件回调式订阅（控制通道 `events` 用）：每个 sink 收到原始消息（不含时间戳）。
 /// 返回值是**订阅 id**，用 `remove_listener` 注销。
 ///
