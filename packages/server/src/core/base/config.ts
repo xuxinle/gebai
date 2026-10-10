@@ -77,6 +77,9 @@ export interface ServerConfig {
   adminPasswordHash?: string
   /** 注册审批模式（GEBAI_SIGNUP_MODE）：open=注册即用（默认）/ approval=注册待 admin 审批（disabled+pending，批准后启用）。 */
   signupMode: "open" | "approval"
+  /** 注册来源限制（GEBAI_SIGNUP_SOURCE）：any=默认（内置登录页与二开前端均可注册）/ custom=仅二开前端代码可注册
+ * （注册请求须携带 X-GEBAI-Signup-Source: custom 头；内置登录页注册入口据探测端点自动隐藏，不隐藏则服务端 403 兜底）。 */
+  signupSource: "any" | "custom"
   /** 关闭数据生命周期 GC 清理任务（默认开启）。 */
   gcDisabled: boolean
   /** 是否启用统一任务能力（GEBAI_TASKS_ENABLED，默认 true：注册 task 子Agent（task_* 工具）并启动
@@ -326,6 +329,7 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     webDist: defaultWebDist,
     adminPasswordHash: env("GEBAI_ADMIN_PASSWORD_HASH") || undefined,
     signupMode: env("GEBAI_SIGNUP_MODE") === "approval" ? "approval" : "open",
+    signupSource: env("GEBAI_SIGNUP_SOURCE") === "custom" ? "custom" : "any",
     gcDisabled: bool("GEBAI_GC_DISABLED", false),
     tasksEnabled: bool("GEBAI_TASKS_ENABLED", true),
     taskMaxConcurrent: (() => {

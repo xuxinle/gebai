@@ -18,6 +18,9 @@
  *      应用初始化期读同一批键，因此这里写入的值先于应用生效（用户此后的设置面板改动照常覆盖）。
  *   ② 用户注册与登录：调歌白 REST 接口（`/api/v1/auth/login`、`/api/v1/auth/register`、
  *      `/api/v1/auth/exchange`），拿到令牌写入 `localStorage["gebai.auth.token"]` 即完成登录
+ *      （歌白启动时从该键恢复登录态）……（后同）。服务端 GEBAI_SIGNUP_SOURCE=custom 时注册须带
+ *      `X-GEBAI-Signup-Source: custom` 头（见例 3）——内置登录页不带、被 403 拒，仅本脚本可注册；
+ *      配套 gebai.config.js 的 `allowSignup: false` 可同时隐藏内置登录页的注册入口。
  *      （歌白启动时从该键恢复登录态），**同时写一份同名 cookie**：页面里的图片/视频/iframe/下载是
  *      浏览器原生请求（`<img src>` 等），前端脚本无法为其插入请求头，只存 localStorage 的令牌
  *      带不上去、服务模式下取图 401；`gebaiSyncToken` 就是干这件事的（歌白内置的登录/恢复/登出
@@ -102,11 +105,13 @@ function gebaiSyncToken(token) {
 
 /**
  * 例 3：注册账号（仅服务模式开放；signupMode=approval 时返回 pending: true，须管理员审批后方可登录）。
+ * 服务端 GEBAI_SIGNUP_SOURCE=custom（仅二开可注册）时**必须携带 X-GEBAI-Signup-Source: custom 头**，
+ * 否则 403——内置登录页的注册请求不带此头（它正是被限制方），本脚本是二开形态、带头即放行。
  */
 // async function gebaiRegister(username, password) {
 //   const res = await fetch("/api/v1/auth/register", {
 //     method: "POST",
-//     headers: { "Content-Type": "application/json" },
+//     headers: { "Content-Type": "application/json", "X-GEBAI-Signup-Source": "custom" },
 //     body: JSON.stringify({ username, password }),
 //   })
 //   const data = await res.json()

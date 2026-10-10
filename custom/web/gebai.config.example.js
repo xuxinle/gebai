@@ -62,6 +62,13 @@ window.__GEBAI_WEB_CONFIG__ = {
   // allowUrlPrompt: false,
 
   /**
+   * ⑥ 隐藏内置登录页「注册账号」入口（默认开启）：置 false 后内置登录页不再展示注册切换，
+   *    用户注册只能由本目录二开脚本（init.js 的 gebaiRegister 之类）或宿主系统引导完成。
+   *    服务端配套 GEBAI_SIGNUP_SOURCE=custom 时，未带头的直调注册请求也会被 403 拒绝（双保险）。
+   */
+  // allowSignup: false,
+
+  /**
    * ⑤ 二开初始化脚本（`init.js`）异步引导的等待上限（毫秒，默认 3000，0 = 不等待）：
    *    脚本可把 `window.__GEBAI_WEB_BOOT__`（Promise / 返回 Promise 的函数 / 数组）交给歌白，
    *    应用初始化最早期等待其完成；超时或异常只记控制台警告、不阻塞页面。需要更长的登录/拉取

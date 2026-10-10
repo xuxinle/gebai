@@ -3,6 +3,7 @@ import { client, loginErr, loginForm, loginOverlay, loginPass, loginPass2, login
 import { loadMessages, refreshSessions, enterDraftView, resetMsgWindow } from "./sessions"
 import { toast } from "./ui"
 import { parseExternalCredential } from "./external-auth"
+import { signupUiAllowed } from "./boot-config"
 
 /* ---------- 认证（服务模式） ---------- */
 
@@ -136,7 +137,10 @@ export async function doLogout() {
 export function bindAuth() {
   logoutBtn.onclick = () => void doLogout()
 
-  // 登录 / 注册模式切换（注册仅服务模式开放；注册用户恒为普通角色，admin 只能由部署方配置哈希启用）
+  // 登录 / 注册模式切换（注册仅服务模式开放；注册用户恒为普通角色，admin 只能由部署方配置哈希启用）。
+  // 注册入口可被两层禁用（任一生效即隐藏，注册只能由二开前端代码发起）：
+  //   ① 二开配置 allowSignup:false（gebai.config.js / __GEBAI_WEB_CONFIG__，纯前端决策）
+  //   ② 服务端 GEBAI_SIGNUP_SOURCE=custom（探测端点 builtinAllowed=false，且服务端对无来源头注册 403 兜底）
   let regMode = false
   const setMode = (reg: boolean) => {
     regMode = reg
@@ -149,6 +153,29 @@ export function bindAuth() {
     loginUser.focus()
   }
   loginToggle.onclick = () => setMode(!regMode)
+
+  // 两层禁用闸门（先声明后使用，异步探测回调与本地配置同步调用共用）：任一生效即隐藏切换按钮并
+  // 回到登录模式；loginOverlay 已展示时在错误栏提示原因（未展示则只隐藏，不主动弹登录页）
+  let signupAllowed = signupUiAllowed()
+  const disableSignup = (reason: string) => {
+    if (!signupAllowed) return
+    signupAllowed = false
+    loginToggle.hidden = true
+    setMode(false)
+    if (!loginOverlay.hidden) {
+      loginErr.textContent = reason
+      loginErr.hidden = false
+    }
+  }
+  if (!signupAllowed) disableSignup("本部署未开放页面注册")
+  client
+    .getSignupConfig()
+    .then((cfg) => {
+      if (cfg.builtinAllowed === false) disableSignup("本部署未开放页面注册，请联系管理员或宿主系统")
+    })
+    .catch(() => {
+      /* 探测失败（本地模式/网络异常）：保持本地配置决策，不阻塞登录页 */
+    })
 
   loginForm.addEventListener("submit", async (e) => {
     e.preventDefault()

@@ -48,7 +48,9 @@ Web UI 浏览器端的二开入口，**页面加载即执行、先于歌白应�
 脚本为 deferred）——承担本地存储初始化、用户注册与登录这类必须先于应用初始化的动作：
 
 - `gebai.config.js`（配置）：经 `window.__GEBAI_WEB_CONFIG__` 预置浏览器环境变量、把宿主 localStorage
-  映射为歌白设置、关闭 URL 携带提示词自动运行、调整二开引导的等待上限（`bootTimeout`）。
+  映射为歌白设置、关闭 URL 携带提示词自动运行（`allowUrlPrompt`）、隐藏内置登录页注册入口
+  （`allowSignup: false`，须配套服务端 `GEBAI_SIGNUP_SOURCE=custom` 才有服务端强制力）、调整二开引导的
+  等待上限（`bootTimeout`）。
 - `init.js`（初始化脚本，产物根名 `gebai.custom.js`）：可执行任意初始化逻辑——直接读写 localStorage、
   调 `/api/v1/auth/*` 完成注册/登录（令牌写 `gebai.auth.token`，**同时写同名 cookie**——图片/视频/下载等
   原生资源请求只能靠 cookie 带凭证，示例里的 `gebaiSyncToken` 即此）、或写入宿主登录态供「外部身份兑换」
@@ -56,6 +58,10 @@ Web UI 浏览器端的二开入口，**页面加载即执行、先于歌白应�
   二者组成的数组），歌白会在应用初始化最早期等待其完成（超时与异常只记控制台警告、不阻塞页面）。
   另可给 `window.__GEBAI_AUTH__` 赋值整体接管「令牌读/写/清 + 请求头构造」（见示例例 4），
   典型场景：同一个 IP 上并排多套歌白——cookie 按 host 共享会互相覆盖，改 sessionStorage/自定义头即完全隔离。
+
+  **仅二开可注册**（内置登录页隐藏注册入口）：`gebai.config.js` 置 `allowSignup: false`（隐藏入口）+
+  服务端 `GEBAI_SIGNUP_SOURCE=custom`（无 `X-GEBAI-Signup-Source: custom` 头的注册请求 403 兜底）；
+  二开脚本调注册接口时带头即放行（`init.example.js` 例 3）。
 
 **启用方式：复制示例改名**——目录内的 `gebai.config.example.js` 与 `init.example.js` 是带注释的模板，
 **不参与接入**；把它们复制为 `gebai.config.js` / `init.js` 即生效。之所以用示例名：本目录属二开域，

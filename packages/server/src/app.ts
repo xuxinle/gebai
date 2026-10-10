@@ -149,6 +149,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
         c.req.path === "/api/v1/auth/logout" ||
         c.req.path === "/api/v1/auth/exchange" ||
         c.req.path === "/api/v1/auth/external-config" ||
+        c.req.path === "/api/v1/auth/signup-config" ||
         c.req.path === "/api/v1/oauth/feishu/callback" ||
         c.req.path === "/api/health" ||
         c.req.path === "/api/docs" // OpenAPI 文档：公开（无敏感信息），便于集成方调试

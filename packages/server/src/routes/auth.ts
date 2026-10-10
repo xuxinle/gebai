@@ -76,9 +76,15 @@ export function registerAuthRoutes(rc: RouteCtx): void {
     return c.json({ token })
   })
   // 开放注册（仅服务模式）：注册用户恒为普通角色（admin 唯一入口是 GEBAI_ADMIN_PASSWORD_HASH，不可注册创建）。
-  // open（默认）=注册即登录；approval=待 admin 审批（disabled+pending，不签发令牌）
+  // open（默认）=注册即登录；approval=待 admin 审批（disabled+pending，不签发令牌）。
+  // 来源限制（GEBAI_SIGNUP_SOURCE=custom）：仅二开前端代码可发起注册——请求须携带 X-GEBAI-Signup-Source: custom
+  // 头（内置登录页的 SDK 调用不带此头，被 403 拒绝；前端据 /api/v1/auth/signup-config 探测已隐藏入口，
+  // 403 兑底的是隐藏失败/直调接口的情形）。
   app.post("/api/v1/auth/register", async (c) => {
     if (d.config.auth !== "server") return c.json({ error: "not found" }, 404)
+    if (d.config.signupSource === "custom" && c.req.header("x-gebai-signup-source") !== "custom") {
+      return c.json({ error: "signup restricted to custom frontend" }, 403)
+    }
     // 注册同样走 scrypt（CPU DoS 同动机）且可无限制造用户条目：独立限流桶
     if (!registerGlobalLimit.allow("global") || !registerSourceLimit.allow(loginSourceKey(c))) {
       return c.json({ error: "rate limited: too many requests" }, 429)
@@ -112,6 +118,12 @@ export function registerAuthRoutes(rc: RouteCtx): void {
     const token = await d.auth.exchangeExternal(username, d.externalAuth, credential, d.config.externalAuthAutocreate)
     if (!token) return c.json({ error: "invalid credentials" }, 401)
     return c.json({ token, user: d.auth.strip((await d.auth.authorize(token))!) })
+  })
+
+  // 注册策略探测（公开端点，Web UI 启动时读取）：mode=审批策略（open/approval）、builtinAllowed=内置登录页
+  // 是否可注册（signupSource=any 时 true；custom 时 false，前端据此隐藏「注册账号」入口）
+  app.get("/api/v1/auth/signup-config", (c) => {
+    return c.json({ mode: d.config.auth === "server" ? d.config.signupMode : null, builtinAllowed: d.config.auth === "server" && d.config.signupSource !== "custom" })
   })
 
   // 外部身份扩展点探测（Web UI 启动时读取；不泄露密钥，仅暴露启用状态与前端需要的信息）

@@ -11,6 +11,7 @@ import {
   configEnv,
   normalizeWebConfig,
   readWebConfig,
+  signupUiAllowed,
   urlPromptAllowed,
 } from "./boot-config"
 
@@ -25,8 +26,8 @@ function store(init: Record<string, string> = {}) {
 }
 
 describe("normalizeWebConfig（容错归一化）", () => {
-  test("非对象/数组/undefined 回落默认（URL 提示词默认开启）", () => {
-    const empty = { env: {}, envFromStorage: {}, storage: {}, allowUrlPrompt: true, bootTimeout: DEFAULT_BOOT_TIMEOUT }
+  test("非对象/数组/undefined 回落默认（URL 提示词与注册入口默认开启）", () => {
+    const empty = { env: {}, envFromStorage: {}, storage: {}, allowUrlPrompt: true, bootTimeout: DEFAULT_BOOT_TIMEOUT, allowSignup: true }
     expect(normalizeWebConfig(undefined)).toEqual(empty)
     expect(normalizeWebConfig("x")).toEqual(empty)
     expect(normalizeWebConfig([1, 2])).toEqual(empty)
@@ -58,6 +59,13 @@ describe("normalizeWebConfig（容错归一化）", () => {
     expect(normalizeWebConfig({ allowUrlPrompt: false }).allowUrlPrompt).toBe(false)
     expect(normalizeWebConfig({ allowUrlPrompt: 0 }).allowUrlPrompt).toBe(true)
     expect(normalizeWebConfig({}).allowUrlPrompt).toBe(true)
+  })
+
+  test("allowSignup 只有显式 false 才关闭", () => {
+    expect(normalizeWebConfig({ allowSignup: false }).allowSignup).toBe(false)
+    expect(normalizeWebConfig({ allowSignup: 0 }).allowSignup).toBe(true)
+    expect(normalizeWebConfig({}).allowSignup).toBe(true)
+    expect(normalizeWebConfig(undefined).allowSignup).toBe(true)
   })
 
   test("bootTimeout 归一：0 保留、正数取整且封顶、其余回落默认", () => {
@@ -143,6 +151,23 @@ describe("applyWebConfig + urlPromptAllowed（URL 提示词开关）", () => {
     const s = store()
     expect(applyWebConfig({ host: {}, store: s })).toEqual({ written: [], allowUrlPrompt: true })
     expect(s.dump()).toEqual({})
+  })
+})
+
+describe("applyWebConfig + signupUiAllowed（内置登录页注册入口开关）", () => {
+  test("allowSignup:false 隐藏内置注册入口；重新应用默认配置后恢复", () => {
+    applyWebConfig({ host: { [CONFIG_KEY]: { allowSignup: false } }, store: store() })
+    expect(signupUiAllowed()).toBe(false)
+    // 与 allowUrlPrompt 同款：无配置/配置未关时保持开启
+    applyWebConfig({ host: {}, store: store() })
+    expect(signupUiAllowed()).toBe(true)
+  })
+
+  test("未知/非法值不隐藏入口（与 allowUrlPrompt 容错同口径）", () => {
+    applyWebConfig({ host: { [CONFIG_KEY]: { allowSignup: "false" } }, store: store() })
+    expect(signupUiAllowed()).toBe(true)
+    applyWebConfig({ host: { [CONFIG_KEY]: { allowSignup: 0 } }, store: store() })
+    expect(signupUiAllowed()).toBe(true)
   })
 })
 

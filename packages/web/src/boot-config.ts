@@ -30,6 +30,8 @@
  *   },
  *   // ④ 关闭外部链接携带提示词自动运行（URL 参数 gb_prompt，默认开启）
  *   allowUrlPrompt: false,
+ *   // ⑤ 隐藏内置登录页「注册账号」入口（默认开启；需配 GEBAI_SIGNUP_SOURCE=custom，服务端拒非二开注册）
+ *   allowSignup: false,
  *   // ⑤ 二开初始化脚本异步引导的等待上限（毫秒，默认 3000，0 = 不等待）
  *   bootTimeout: 3000,
  * }
@@ -64,6 +66,8 @@ export interface WebConfig {
   allowUrlPrompt: boolean
   /** 二开初始化脚本异步引导的等待上限（毫秒；0 = 不等待）。 */
   bootTimeout: number
+  /** 内置登录页是否展示「注册账号」入口（false=隐藏，注册只能由二开前端代码发起；缺省 true）。 */
+  allowSignup: boolean
 }
 
 type ConfigHost = Record<string, unknown>
@@ -74,7 +78,7 @@ interface StoreLike {
 }
 
 function emptyConfig(): WebConfig {
-  return { env: {}, envFromStorage: {}, storage: {}, allowUrlPrompt: true, bootTimeout: DEFAULT_BOOT_TIMEOUT }
+  return { env: {}, envFromStorage: {}, storage: {}, allowUrlPrompt: true, bootTimeout: DEFAULT_BOOT_TIMEOUT, allowSignup: true }
 }
 
 /** 引导等待上限归一：0 保留（显式不等待）、正数取整并封顶、其余（缺省/非法/负数）回落默认。 */
@@ -128,6 +132,7 @@ export function normalizeWebConfig(raw: unknown): WebConfig {
     // 只有显式 false 关闭（缺省/其它值均视为开启）
     allowUrlPrompt: o.allowUrlPrompt !== false,
     bootTimeout: bootTimeoutOf(o.bootTimeout),
+    allowSignup: o.allowSignup !== false,
   }
 }
 
@@ -186,6 +191,10 @@ export function applyWebConfigStorage(cfg: WebConfig, store: StoreLike): string[
 /** 当前配置是否允许 URL 携带提示词自动运行（关闭时外部链接只打开页面，不自动建会话执行）。 */
 let allowUrlPromptEnabled = true
 
+/** 内置登录页是否展示「注册账号」入口（二开配置 allowSignup:false 隐藏；服务端 GEBAI_SIGNUP_SOURCE=custom
+ *  时探测端点也会禁用，见 auth.ts bindAuth。缺省展示）。 */
+let allowSignupEnabled = true
+
 /**
  * 页面启动最早期调用（幂等，两个页面入口各调一次）。
  * 返回实际写入的设置键与 URL 提示词开关状态，供调用方按需展示。
@@ -195,6 +204,7 @@ export function applyWebConfig(opts: { host?: ConfigHost; store?: StoreLike } = 
     const store = opts.store ?? localStorage
     const cfg = readWebConfig(opts.host ?? (window as unknown as ConfigHost))
     allowUrlPromptEnabled = cfg.allowUrlPrompt
+    allowSignupEnabled = cfg.allowSignup
     return { written: applyWebConfigStorage(cfg, store), allowUrlPrompt: cfg.allowUrlPrompt }
   } catch {
     return { written: [], allowUrlPrompt: true }
@@ -203,6 +213,11 @@ export function applyWebConfig(opts: { host?: ConfigHost; store?: StoreLike } = 
 
 export function urlPromptAllowed(): boolean {
   return allowUrlPromptEnabled
+}
+
+/** 当前配置是否允许内置登录页展示注册入口（与 urlPromptAllowed 同款模块级状态，applyWebConfig 启动期写入）。 */
+export function signupUiAllowed(): boolean {
+  return allowSignupEnabled
 }
 
 /* ---------- 二开初始化脚本（gebai.custom.js）的异步引导 ---------- */

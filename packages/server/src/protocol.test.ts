@@ -26,9 +26,11 @@ class ProtocolFake implements LLMProvider {
 
 const homeSingle = mkdtempSync(join(tmpdir(), "gebai-proto-"))
 const homeMulti = mkdtempSync(join(tmpdir(), "gebai-proto-multi-"))
+const homeCustom = mkdtempSync(join(tmpdir(), "gebai-proto-custom-"))
 let single: ServerHandle
 let multi: ServerHandle
 let approval: ServerHandle
+let customSignup: ServerHandle
 
 beforeAll(async () => {
   single = await startServer({ gebaiHome: homeSingle, auth: "local", sandbox: "off", binaryMode: false, preloadSubAgents: [], port: 0 })
@@ -37,6 +39,9 @@ beforeAll(async () => {
   ;(multi.engine as unknown as { opts: { provider: LLMProvider } }).opts.provider = new ProtocolFake()
   approval = await startServer({ gebaiHome: mkdtempSync(join(tmpdir(), "gebai-proto-approval-")), auth: "server", sandbox: "on", binaryMode: false, preloadSubAgents: [], port: 0, signupMode: "approval" })
   ;(approval.engine as unknown as { opts: { provider: LLMProvider } }).opts.provider = new ProtocolFake()
+  // signupSource=custom：仅二开前端可注册（须带 X-GEBAI-Signup-Source: custom 头；内置登录页入口隐藏）
+  customSignup = await startServer({ gebaiHome: homeCustom, auth: "server", sandbox: "on", binaryMode: false, preloadSubAgents: [], port: 0, signupSource: "custom" })
+  ;(customSignup.engine as unknown as { opts: { provider: LLMProvider } }).opts.provider = new ProtocolFake()
   // 预置管理员（admin 引导走 GEBAI_ADMIN_PASSWORD_HASH，测试直接建用户）
   await multi.auth.createUser("admin", "admin123", "admin")
   await approval.auth.createUser("admin", "admin123", "admin")
@@ -46,11 +51,14 @@ afterAll(() => {
   single.gc?.stop()
   multi.gc?.stop()
   approval?.gc?.stop()
+  customSignup?.gc?.stop()
   single.server.stop(true)
   multi.server.stop(true)
   approval?.server.stop(true)
+  customSignup?.server.stop(true)
   rmSync(homeSingle, { recursive: true, force: true })
   rmSync(homeMulti, { recursive: true, force: true })
+  rmSync(homeCustom, { recursive: true, force: true })
 })
 
 function base(h: ServerHandle) {
@@ -887,6 +895,46 @@ describe("multi-user REST authorization", () => {
       body: JSON.stringify({ disabled: false, pending: false }),
     })
     expect((await fetch(`${approvalBase}/api/v1/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "applicant", password: "pw1" }) })).status).toBe(200)
+  })
+
+  test("REST register signupSource=custom：无来源头 403（内置页被拒）；带来源头注册即登录；探测端点暴露 builtinAllowed=false；登录不受影响", async () => {
+    const customBase = `http://127.0.0.1:${customSignup.server.port}`
+    const reg = (headers: Record<string, string>) =>
+      fetch(`${customBase}/api/v1/auth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify({ username: "guest", password: "pw1" }),
+      })
+    // 探测端点（公开）：内置登录页据此隐藏注册入口
+    const probe = await fetch(`${customBase}/api/v1/auth/signup-config`)
+    expect(probe.status).toBe(200)
+    expect(await probe.json()).toEqual({ mode: "open", builtinAllowed: false })
+    // 无来源头（内置 SDK 调用形态）→ 403
+    expect((await reg({})).status).toBe(403)
+    // 伪造其他值 → 同样 403
+    expect((await reg({ "X-GEBAI-Signup-Source": "web" })).status).toBe(403)
+    // 二开形态（带来源头）→ 201 注册即登录，令牌可用
+    const ok = await reg({ "X-GEBAI-Signup-Source": "custom" })
+    expect(ok.status).toBe(201)
+    const body = (await ok.json()) as { token: string; user: { username: string; role: string } }
+    expect(body.user.role).toBe("user")
+    const me = await fetch(`${customBase}/api/v1/auth/me`, { headers: { Authorization: `Bearer ${body.token}` } })
+    expect(((await me.json()) as { username: string }).username).toBe("guest")
+    // 登录不受来源限制影响（限制只管注册发起方）
+    expect(
+      (
+        await fetch(`${customBase}/api/v1/auth/login`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "guest", password: "pw1" }),
+        })
+      ).status,
+    ).toBe(200)
+  })
+
+  test("REST register 探测端点默认形态：signupSource=any 时 builtinAllowed=true；本地模式 mode=null", async () => {
+    const probe = (await fetch(`${base(multi)}/api/v1/auth/signup-config`)).json() as Promise<{ mode: string; builtinAllowed: boolean }>
+    expect(await probe).toEqual({ mode: "open", builtinAllowed: true })
+    const local = (await fetch(`${base(single)}/api/v1/auth/signup-config`)).json() as Promise<{ mode: string | null; builtinAllowed: boolean }>
+    expect(await local).toEqual({ mode: null, builtinAllowed: false })
   })
 
   test("global tool enable/disable restricted to admin in multi-user mode", async () => {
