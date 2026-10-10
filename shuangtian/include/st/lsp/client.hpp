@@ -189,6 +189,14 @@ class LspClient {
   /// 关闭文档（发 `textDocument/didClose`）。之后 server 不再为它诊断。
   void did_close(std::string_view uri);
 
+  /// 保存通知（发 `textDocument/didSave`，可选带全文）。
+  ///
+  /// 能力声明里 `synchronization.didSave = true`——声明了就必须真发，
+  /// 否则 server（clangd）保存后不重读磁盘，外部工具改过的文件诊断永远陈旧
+  ///（这正是本类注释里“声明了却不实现比不声明更糟”的那个坑，曾经犯过）。
+  /// `text` 给了就随通知发全文（协议允许；server 可拿它校验一致性），不给则不发。
+  void did_save(std::string_view uri, std::optional<std::string_view> text = std::nullopt);
+
   [[nodiscard]] auto document_version(std::string_view uri) const -> std::int64_t;
   [[nodiscard]] auto is_open(std::string_view uri) const -> bool;
   [[nodiscard]] auto document_text(std::string_view uri) const -> std::string;
@@ -230,10 +238,14 @@ class LspClient {
   /// 把 `file://` URI 转回路径（失败返回空）。
   [[nodiscard]] static auto uri_to_path(std::string_view uri) -> std::string;
 
-  /// 我们上报给 server 的客户端能力（`initialize` 的 `capabilities` 字段）。
+    /// 我们上报给 server 的客户端能力（`initialize` 的 `capabilities` 字段）。
   /// 公开只为可测：单测断言"声明的能力与实现一致"，防止声明了却没实现
-  /// （声明了 `synchronization.didSave` 却不接 `didSave`，server 会等消息）。
+  ///（声明了 `synchronization.didSave` 却不接 `didSave`，server 会等消息）。
   [[nodiscard]] static auto client_capabilities() -> Json;
+
+  /// 仅供测试：直接注入一条 `publishDiagnostics` 消息（走与真消息同一条
+  /// `handle` 链路）——单测验证上层去重/排序逻辑时不需要真 server。
+  void inject_diagnostics_for_test(std::string uri, std::vector<Diagnostic> list);
 
  private:
   struct Impl;

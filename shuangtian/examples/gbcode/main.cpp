@@ -41,6 +41,8 @@
 #include <atomic>
 #include <cstdio>
 #include <format>
+#include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <stop_token>
@@ -367,24 +369,31 @@ struct OpenBuffer {
   return buffers.size() - 1;
 }
 
-/// 目录树节点：`fs::list_dir` 一层（目录可再展开——懒加载）。
-[[nodiscard]] auto scan_tree_nodes(const std::string& root) -> std::vector<TreeNodeData> {
-  std::vector<TreeNodeData> nodes;
+/// 树目录扫描的最小条目（比 `st::fs::DirEntry` 轻：不带 path/size）。
+struct DirEntryLite {
+  std::string name{};
+  bool is_dir{false};
+};
+
+/// 扫描一层目录并归一为「目录在前、各自字典序、忽略点开头」的稳定序。
+/// 与旧实现同口径，但面向工作区树的缓存扫描（每帧重扫的系统调用不再能承受）。
+[[nodiscard]] auto list_dir_sorted(const std::string& root) -> std::vector<DirEntryLite> {
+  std::vector<DirEntryLite> out;
   auto entries = st::fs::list_dir(root);
-  if (!entries) return nodes;
+  if (!entries) return out;
   std::vector<const st::fs::DirEntry*> dirs;
   std::vector<const st::fs::DirEntry*> files;
-  for (const auto& entry : *entries) (entry.is_dir ? dirs : files).push_back(&entry);
+  for (const auto& entry : *entries) {
+    if (!entry.name.empty() && entry.name.front() == '.') continue;   // 隐藏项不入树
+    (entry.is_dir ? dirs : files).push_back(&entry);
+  }
   const auto by_name = [](const auto* a, const auto* b) { return a->name < b->name; };
   std::sort(dirs.begin(), dirs.end(), by_name);
   std::sort(files.begin(), files.end(), by_name);
-  for (const auto* dir : dirs) {
-    nodes.push_back(TreeNodeData{.key = "dir:" + dir->name, .label = dir->name, .is_dir = true});
-  }
-  for (const auto* file : files) {
-    nodes.push_back(TreeNodeData{.key = root + "/" + file->name, .label = file->name});
-  }
-  return nodes;
+  out.reserve(dirs.size() + files.size());
+  for (const auto* dir : dirs) out.push_back(DirEntryLite{.name = dir->name, .is_dir = true});
+  for (const auto* file : files) out.push_back(DirEntryLite{.name = file->name});
+  return out;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -660,9 +669,13 @@ struct CodeEditorPage : Component {
     stash_active_text(list);
     OpenBuffer& buffer = list[active_.value()];
     if (!buffer.path.empty()) {
-      status_.set(st::fs::write_text(buffer.path, buffer.text)
-                      ? "已保存 " + buffer.path
-                      : "保存失败（写盘被拒）：" + buffer.path);
+      const bool saved = st::fs::write_text(buffer.path, buffer.text).has_value();
+      status_.set(saved ? "已保存 " + buffer.path
+                        : "保存失败（写盘被拒）：" + buffer.path);
+      if (saved) {
+        dir_cache_.clear();   // 新文件可能刚建（另存为/新建），树要重扫
+        lsp_.document_saved(buffer.path);   // 告诉 server 磁盘真相变了（didSave）
+      }
     } else {
       status_.set("已保存 " + buffer.label + "（内存模拟，无磁盘写入）");
     }
@@ -1386,7 +1399,8 @@ struct CodeEditorPage : Component {
     };
     static constexpr Activity kActivities[] = {{"folder", "explorer"}, {"search", "search"},
                                                {"diff", "scm"}, {"play", "run"},
-                                               {"package", "extensions"}};
+                                               {"package", "extensions"},
+                                               {"symbol", "nav"}};
     const std::size_t current = activity_.value();
     // `surface = Alt`：与标题栏/状态栏**同色**——三者合起来是一圈“外壳”，
     // 色不一致会在拐角处露馅（见 `Element::Surface` 的说明）。
@@ -1534,6 +1548,12 @@ struct CodeEditorPage : Component {
         icon_button("run-build", "play", "构建", [this] { run_task("build"); });
         icon_button("run-test", "check", "测试", [this] { run_task("test"); });
         break;
+      case 5:
+        icon_button("nav-clear", "close", "清空导航结果", [this] {
+          nav_results_.clear();
+          nav_results_open_.set(false);
+        });
+        break;
       default:
         icon_button("ext-refresh", "refresh", "重新枚举", [this] { refresh_languages(); });
         break;
@@ -1553,6 +1573,7 @@ struct CodeEditorPage : Component {
         case 1: build_search_view(c); break;
         case 2: build_scm_view(c); break;
         case 3: build_run_view(c); break;
+        case 5: build_nav_results_view(c); break;
         default: build_extensions_view(c); break;
       }
     });
@@ -1658,6 +1679,54 @@ struct CodeEditorPage : Component {
         },
         [](ScrollView& scroll) { scroll.set_id("search-scroll"); },
         {.grow = true, .id = "search-host"});
+  }
+
+  // —— 视图 5：导航结果（多处定义/引用/实现的清单）——
+  //
+  // 与搜索视图同一套「文件分组 + 可点行」形态。单独一个视图而不是弹层：
+  // 引用列表的用法是「来回看几处」，弹层每点一处就关；侧栏可以一直开着。
+  void build_nav_results_view(Composer& c) {
+    build_sidebar_head(c, "导航结果");
+    if (nav_results_.empty()) {
+      (void)text(c, [] {
+        return std::string("F12 跳定义 / Shift+F12 找引用；\n多处结果会列在这里");
+      }, {.id = "nav-empty"});
+      return;
+    }
+    // 按文件分组：前缀行是文件名，其后是该文件的命中行（与搜索结果同形态）。
+    // `nav_row_to_result_`：面板行 → 结果下标的映射（分组行占位 -1）。
+    std::vector<ListItemData> items;
+    nav_row_to_result_.clear();
+    std::string last_file;
+    for (std::size_t index = 0; index < nav_results_.size(); ++index) {
+      const NavResult& result = nav_results_[index];
+      const std::size_t slash = result.path.find_last_of("/\\");
+      const std::string file_name =
+          slash == std::string::npos ? result.path : result.path.substr(slash + 1);
+      if (result.path != last_file) {
+        last_file = result.path;
+        items.push_back(ListItemData{.key = std::format("navfile:{}", index),
+                                     .label = file_name});
+        nav_row_to_result_.push_back(static_cast<std::size_t>(-1));
+      }
+      items.push_back(ListItemData{.key = std::format("nav:{}:{}", index, result.line),
+                                   .label = std::format("  {}:{}  {}", result.line,
+                                                        result.column, result.preview)});
+      nav_row_to_result_.push_back(index);
+    }
+    (void)custom_container<ScrollView>(
+        c,
+        [&] {
+          (void)list(c, items, [this](std::size_t index) {
+            // 点击行 → 反查它属于哪个结果（前缀行不可点——由 key 前缀区分）。
+            // `list` 的回调给的是**扁平序号**，与 `nav_results_` 下标差着分组行，
+            // 所以构建时同步记录「行 → 结果下标」的映射。
+            if (index < nav_row_to_result_.size()) open_nav_result(nav_row_to_result_[index]);
+          },
+                     {.id = "nav-results"});
+        },
+        [](ScrollView& scroll) { scroll.set_id("nav-scroll"); },
+        {.grow = true, .id = "nav-host"});
   }
 
   /// 开关胶囊（「Aa / ab / .*」这类选项）：按下态由 `active` 决定。
@@ -2989,6 +3058,12 @@ struct CodeEditorPage : Component {
  auto definition_request() -> void { goto_definition(); }
  /// 找引用（入口快捷键 Shift+F12 用）。
  auto references_request() -> void { find_references(); }
+ /// 跳到声明（入口快捷键 Alt+F12 用）。
+ auto declaration_request() -> void { goto_declaration(); }
+ /// 跳到实现（入口快捷键 Ctrl+F12 用）。
+ auto implementation_request() -> void { goto_implementation(); }
+ /// 返回上一处跳转（入口快捷键 Alt+Left 用）。
+ auto navigate_back_request() -> void { navigate_back(); }
  /// 悬停信息（入口快捷键 Ctrl+K 用；鼠标悬停走编辑器回调）。
  auto hover_request() -> void { request_hover_at_cursor(); }
  /// 格式化整篇（入口快捷键 Shift+Alt+F 用）。
@@ -3002,21 +3077,57 @@ struct CodeEditorPage : Component {
 
  private:
 
+  /// 目录扫描缓存：相对路径 → 该层条目（`list_workspace_dir` 的背书）。
+  ///
+  /// 为什么需要它：`workspace_nodes()` 每帧被调（声明式重组），旧实现每帧对
+  /// 每个可见目录打一次 `list_dir` 系统调用——树稍大一点，帧预算就被 IO 吃掉
+  ///（实测 60fps 下点开几个目录后 CPU 明显上扬）。目录内容在以下时机失效：
+  /// 刷新按钮（`refresh_tree`）、收起目录（重展开时重扫）、换工作区、
+  /// 新建/删除/重命名文件。变更不频繁，缓存命中率极高。
+  mutable std::map<std::string, std::vector<DirEntryLite>, std::less<>> dir_cache_{};
+
+  /// 扫描工作区内某层目录（`rel` 为相对根的路径；空 = 根），带缓存。
+  [[nodiscard]] auto list_workspace_dir(const std::string& rel) const
+      -> const std::vector<DirEntryLite>& {
+    const auto found = dir_cache_.find(rel);
+    if (found != dir_cache_.end()) return found->second;
+    const std::string full = rel.empty() ? workspace_ : workspace_ + "/" + rel;
+    // insert 返回 {迭代器, 是否新插入}；用 [] 不行（先默认构造再赋值，多一次拷贝）。
+    auto [slot, inserted] = dir_cache_.emplace(rel, list_dir_sorted(full));
+    (void)inserted;
+    return slot->second;
+  }
+
   /// 工作区树：根 + 已展开目录的子项（展开状态由 `dir_expanded_` 表达）。
-  [[nodiscard]] auto workspace_nodes() const -> std::vector<TreeNodeData> {
-    std::vector<TreeNodeData> nodes = scan_tree_nodes(workspace_);
+  ///
+  /// key 口径统一为**相对工作区根的路径**（`dir:src/util/deep`）——目录行与
+  /// 文件行同一套派生规则，任何层级的展开/收起都只与这个相对路径打交道。
+  /// 旧实现只在插入 depth==1 时重写一次 key，第三层的目录名拼出错误 key、
+  /// 与 `dir_expanded_` 永不匹配——「只能展开两级」的根因（实测：点 src 能展开、
+  /// 点 util 毫无反应）。改为递归展开 + 同源派生后任意层级都成立。
+  ///
+  /// 扫描结果按相对路径进 `dir_cache_` 缓存（详见其注释）——本函数每帧被调，
+  /// 不能每次都打真文件系统。
+  [[nodiscard]] auto workspace_nodes() -> std::vector<TreeNodeData> {
+    std::vector<TreeNodeData> nodes;
     const auto expanded = dir_expanded_.value();
-    for (std::size_t index = 0; index < nodes.size(); ++index) {
-      if (nodes[index].key.rfind("dir:", 0) != 0) continue;
-      const std::string name = nodes[index].key.substr(4);
-      if (std::find(expanded.begin(), expanded.end(), name) == expanded.end()) continue;
-      nodes[index].expanded = true;
-      for (auto& child : scan_tree_nodes(workspace_ + "/" + name)) {
-        child.depth += 1;
-        if (child.key.rfind("dir:", 0) == 0) child.key = "dir:" + name + "/" + child.key.substr(4);
-        nodes.insert(nodes.begin() + static_cast<std::ptrdiff_t>(++index), std::move(child));
-      }
-    }
+    // 递归铺开：`rel` 是相对工作区根的目录路径（空 = 根）。
+    const std::function<void(const std::string&, int)> flatten =
+        [&](const std::string& rel, int depth) {
+          for (const DirEntryLite& entry : list_workspace_dir(rel)) {
+            const std::string child_rel = rel.empty() ? entry.name : rel + "/" + entry.name;
+            if (entry.is_dir) {
+              const bool open = std::find(expanded.begin(), expanded.end(), child_rel) != expanded.end();
+              nodes.push_back(TreeNodeData{.key = "dir:" + child_rel, .label = entry.name,
+                                           .expanded = open, .is_dir = true, .depth = depth});
+              if (open) flatten(child_rel, depth + 1);   // 同源递归：key 与路径同一规则
+            } else {
+              nodes.push_back(TreeNodeData{.key = workspace_ + "/" + child_rel, .label = entry.name,
+                                           .depth = depth});
+            }
+          }
+        };
+    flatten(std::string{}, 0);
     return nodes;
   }
 
@@ -3028,6 +3139,13 @@ struct CodeEditorPage : Component {
       if (std::find(list.begin(), list.end(), name) == list.end()) list.push_back(name);
     } else {
       std::erase(list, name);
+      // 收起时把子孙目录的展开状态一并遇忘——否则下次展开父目录时
+      // 孙目录跳出来（用户当时收起的是整棵子树）。子路径以 `name + "/"` 开头。
+      const std::string prefix = name + "/";
+      std::erase_if(list, [&](const std::string& item) {
+        return item.rfind(prefix, 0) == 0;
+      });
+      dir_cache_.clear();   // 收起后重新扫描：目录可能已变化，旧缓存不可信
     }
     dir_expanded_.set(std::move(list));
   }
@@ -3369,6 +3487,7 @@ struct CodeEditorPage : Component {
 
   /// 重新扫描工作区树（资源管理器的刷新按钮）。
   void refresh_tree() {
+    dir_cache_.clear();   // 显式刷新：目录缓存全部作废（磁盘可能已变化）
     dir_expanded_.set(dir_expanded_.value());   // 触发一次重组，树数据本就每帧重扫
     status_.set(workspace_.empty() ? "内置样例模式" : "已刷新工作区树");
   }
@@ -3393,6 +3512,7 @@ struct CodeEditorPage : Component {
     dialog_start_dir_.clear();   // 换工作区：文件对话框的"上次目录"跟着重置
     lsp_.set_workspace(path);    // 语言服务的根跟着换（旧索引属于旧项目）
     dir_expanded_.set(std::vector<std::string>{});   // 新根：展开状态重来
+    dir_cache_.clear();          // 缢存属于旧根，一并作废
     refresh_tree();
     const std::size_t slash = path.find_last_of("/\\");
     const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
@@ -3635,6 +3755,34 @@ struct CodeEditorPage : Component {
     }
   }
 
+  /// 导航族通用发射器：声明 / 类型定义 / 实现（与 F12 同一套前置校验）。
+  ///
+  /// 单独一个函数而不是三份拷贝：前置校验与状态栏文案的口径必须一致，
+  /// 复制三份迟早会漂（改一处忘两处）。
+  void goto_navigation_family(const char* family, const char* label) {
+    std::string path;
+    st::lsp::Position position{};
+    if (!current_document(&path, &position)) {
+      status_.set(lsp_.active() ? std::format("需要磁盘上的文件才能{}", label)
+                                : "语言服务未就绪");
+      return;
+    }
+    const auto line = static_cast<std::uint32_t>(position.line);
+    const auto character = static_cast<std::uint32_t>(position.character);
+    std::int64_t sent = 0;
+    if (std::string_view(family) == "declaration") sent = lsp_.request_declaration(path, line, character);
+    else if (std::string_view(family) == "typeDefinition") sent = lsp_.request_type_definition(path, line, character);
+    else if (std::string_view(family) == "implementation") sent = lsp_.request_implementation(path, line, character);
+    if (sent == 0) status_.set(std::format("{}请求未发出", label));
+  }
+
+  /// 跳到声明（C/C++：.cpp 用 F12 常落头文件声明；这里显式请求声明族）。
+  void goto_declaration() { goto_navigation_family("declaration", "跳到声明"); }
+  /// 跳到类型定义（光标在变量上时跳它的类型声明处）。
+  void goto_type_definition() { goto_navigation_family("typeDefinition", "跳到类型定义"); }
+  /// 跳到实现（Ctrl+F12；接口→实现）。
+  void goto_implementation() { goto_navigation_family("implementation", "跳到实现"); }
+
   /// Shift+F12：找引用。
   void find_references() {
     std::string path;
@@ -3677,12 +3825,25 @@ struct CodeEditorPage : Component {
   }
 
   /// 跳到某个位置（定义/引用结果共用）：必要时先打开文件。
+  ///
+  /// 跳转前把「当前位置」压入历史栈（Alt+Left 回退用）——只在真发生文件/行
+  /// 变化时压栈，重复跳同一处不堆积。
   void jump_to_location(const st::lsp::Location& location) {
     const std::string path = st::lsp::LspClient::uri_to_path(location.uri);
     if (path.empty()) return;
     // 优先 `selection`（`LocationLink` 的标识符本身），退回 `range`。
     const st::lsp::Range range =
         location.selection.has_value() ? *location.selection : location.range;
+    // 跳转历史：记录「从哪里跳」——光标位置 + 当时文件。
+    if (editor != nullptr) {
+      const NavPoint from{current_buffer_path(), editor->cursor_index(), editor->cursor_line()};
+      // 去重：与栈顶相同才跳过（栈空时必须压——首跳没有历史，但「回到首跳前」
+      // 恰恰是用户按 Alt+← 时想要的）。
+      const bool same = !nav_history_.empty() && nav_history_.back().path == from.path &&
+                        nav_history_.back().cursor == from.cursor;
+      if (!same) nav_history_.push_back(from);
+      if (nav_history_.size() > 64) nav_history_.erase(nav_history_.begin());   // 有界
+    }
     if (path != current_buffer_path()) {
       open_path(path);   // 换文件（`open_path` 会切标签并装载）
     }
@@ -3692,6 +3853,28 @@ struct CodeEditorPage : Component {
     pending_jump_pending_ = true;
   }
 
+  /// 跳转历史回退（Alt+Left）：回到上一处跳转起点。
+  void navigate_back() {
+    while (!nav_history_.empty()) {
+      NavPoint point = nav_history_.back();
+      nav_history_.pop_back();
+      if (point.path.empty()) continue;
+      if (point.path != current_buffer_path()) open_path(point.path);
+      pending_jump_ = {point.line + 1, 0};
+      pending_jump_pending_ = true;
+      status_.set(std::format("已返回：{} 第 {} 行", point.path, point.line + 1));
+      return;
+    }
+    status_.set("没有可返回的跳转");
+  }
+
+  /// 导航结果面板里点某一条：跳过去（同一套 `jump_to_location`，历史同样入栈）。
+  void open_nav_result(std::size_t index) {
+    if (index >= nav_results_.size()) return;
+    jump_to_location(nav_results_[index].location);
+    status_.set(std::format("第 {}/{} 处", index + 1, nav_results_.size()));
+  }
+
   /// 当前活动缓冲的路径（无则空）。
   [[nodiscard]] auto current_buffer_path() const -> std::string {
     const auto list = buffers_.value();
@@ -3699,21 +3882,61 @@ struct CodeEditorPage : Component {
   }
 
   /// 位置结果 → 状态栏摘要（带计数，让用户知道"找到几处"）。
+  ///
+  /// 多处结果：除跳到第一处外，还把「位置列表」写进侧栏搜索视图可复用的
+  /// 结果面板状态（`nav_results_`），切到活动栏「导航结果」可逐个点。
   void on_locations_response(std::int64_t id, const std::vector<st::lsp::Location>& locations) {
     (void)id;
+    const std::string family = lsp_.last_navigation_method();
     if (locations.empty()) {
-      status_.set("没有找到结果");
+      status_.set(family == "references" ? "没有找到引用" : "没有找到结果");
+      nav_results_.clear();
+      nav_results_open_.set(false);
       return;
     }
     if (locations.size() == 1) {
       jump_to_location(locations.front());
       status_.set("已跳转：" + st::lsp::LspClient::uri_to_path(locations.front().uri));
+      nav_results_.clear();
+      nav_results_open_.set(false);
       return;
     }
-    // 多处：列进 `locations_` 供"结果面板"用，先跳到第一处。
+    // 多处：列进 `nav_results_` 供结果面板用，先跳到第一处。
     locations_ = locations;
+    nav_results_.clear();
+    nav_results_.reserve(locations.size());
+    for (std::size_t index = 0; index < locations.size() && index < 200; ++index) {
+      const auto& item = locations[index];
+      const std::string path = st::lsp::LspClient::uri_to_path(item.uri);
+      const st::lsp::Range range = item.selection.has_value() ? *item.selection : item.range;
+      // 预览行文本：拉一次文件内容读目标行（有 IO 但只在结果落地时做一次）。
+      std::string preview;
+      if (const auto content = st::fs::read_text(path)) {
+        std::size_t at = 0;
+        std::size_t line = 0;
+        while (at < content->size() && line < range.start.line) {
+          const std::size_t nl = content->find('\n', at);
+          if (nl == std::string::npos) break;
+          at = nl + 1;
+          ++line;
+        }
+        const std::size_t nl = content->find('\n', at);
+        preview = std::string(st::trim(std::string_view(*content).substr(
+            at, (nl == std::string::npos ? content->size() : nl) - at)));
+        if (preview.size() > 120) preview = preview.substr(0, 120) + "…";
+      }
+      nav_results_.push_back(NavResult{.path = path,
+                                       .line = range.start.line + 1,
+                                       .column = range.start.character + 1,
+                                       .preview = std::move(preview),
+                                       .location = item});
+    }
+    nav_results_open_.set(true);
+    // 多处结果自动切到导航视图（面板开着才有意义；用户可随时切走）。
+    if (activity_.value() != 5) activity_.set(5);
     jump_to_location(locations.front());
-    status_.set(std::format("找到 {} 处，已跳到第 1 处", locations.size()));
+    status_.set(std::format("找到 {} 处{}，已跳到第 1 处（Alt+← 返回）", locations.size(),
+                            family == "references" ? "引用" : ""));
   }
 
   /// 悬停响应：显示到编辑器的信息层（贴光标行下方）。
@@ -3940,6 +4163,7 @@ struct CodeEditorPage : Component {
       }
       ++touched;
     }
+    dir_cache_.clear();   // 跨文件重命名可能新建/改名文件：树缓存作废
     buffers_.set(std::move(list));
     // 编辑器里显示的若是被改的文件，重新装载（`set_text` 会清撤销栈——
     // 但跨文件重命名本就无法用撤销栈表达，如实重载比装作可撤销更诚实）。
@@ -4028,6 +4252,16 @@ struct CodeEditorPage : Component {
       open_stlog();
     } else if (id == "file.save") {
       save();
+    } else if (id == "nav.declaration") {
+      goto_declaration();
+    } else if (id == "nav.type-definition") {
+      goto_type_definition();
+    } else if (id == "nav.implementation") {
+      goto_implementation();
+    } else if (id == "nav.back") {
+      navigate_back();
+    } else if (id == "nav.results") {
+      nav_results_open_.set(!nav_results_open_.value());
     } else if (id == "file.close-tab") {
       close_active();
     } else if (id == "view.toggle-sidebar") {
@@ -4064,6 +4298,12 @@ struct CodeEditorPage : Component {
     add("view.toggle-sidebar", "查看: 切换侧栏可见性", "显示/隐藏侧栏（活动栏常驻，Ctrl+B）");
     add("view.toggle-theme", "查看: 切换亮/暗主题", "主题令牌整体切换");
     add("view.toggle-indent-guides", "查看: 切换缩进参考线", "每级缩进一条竖线");
+    // 导航族：F12 只覆盖定义，声明/类型定义/实现进面板（快捷键也在，但面板可搜）。
+    add("nav.declaration", "转到: 声明", "Alt+F12");
+    add("nav.type-definition", "转到: 类型定义", "光标在变量上时跳它的类型");
+    add("nav.implementation", "转到: 实现", "Ctrl+F12");
+    add("nav.back", "转到: 返回上一处", "Alt+Left（跳转历史）");
+    add("nav.results", "转到: 切换导航结果面板", "多处定义/引用的清单（多处时自动开）");
     add("help.about", "帮助: 关于", "歌白代码 · 霜天示例");
     for (const auto& sample : files_) {
       add("file.open." + sample.name, "文件: 打开 " + sample.name, "语言 " + sample.language);
@@ -4163,6 +4403,30 @@ struct CodeEditorPage : Component {
   bool hover_dropped_{false};
   /// 最近一次"跳到定义/引用"的多处结果（结果面板用）。
   std::vector<st::lsp::Location> locations_{};
+
+  // —— 导航结果面板 + 跳转历史（本次完善）——
+  /// 导航结果的一条（多处定义/引用的可点行）。
+  struct NavResult {
+    std::string path{};        ///< 磁盘路径
+    std::size_t line{1};       ///< 1 起
+    std::size_t column{1};     ///< 1 起
+    std::string preview{};     ///< 目标行文本预览（120 字截断）
+    st::lsp::Location location{};  ///< 原始位置（点击跳转用）
+  };
+  /// 多处导航结果（定义/引用/实现共用；空 = 面板关）。
+  std::vector<NavResult> nav_results_{};
+  /// 导航结果面板开合（State：变更要触发重组）。
+  State<bool> nav_results_open_{false};
+  /// 结果面板行 → `nav_results_` 下标（分组行占位 -1；`build_nav_results_view` 维护）。
+  std::vector<std::size_t> nav_row_to_result_{};
+  /// 跳转历史的一个点（Alt+← 返回）。
+  struct NavPoint {
+    std::string path{};
+    std::size_t cursor{0};
+    std::size_t line{0};     ///< 0 起（与编辑器 cursor_line 同口径）
+  };
+  /// 跳转历史栈（有界 64；重复跳同一处不压栈）。
+  std::vector<NavPoint> nav_history_{};
   /// 当前文件的符号大纲。
   std::vector<st::lsp::DocumentSymbol> symbols_{};
   /// 大纲对应的文件路径（切文件后作废）。
@@ -4525,6 +4789,30 @@ auto run_app(int argc, char** argv) -> int {
       with_shift.shift = true;
       (void)root->register_shortcut("f12", with_shift, [page]() {
         page->references_request();
+        return true;
+      });
+      // 导航族补齐：声明（Alt+F12）/实现（Ctrl+F12）/返回（Alt+Left）。
+      // 键位对齐 VSCode 的 F12 家族直觉；Alt+Left 是浏览器同源的"返回"。
+      UiRoot::Shortcut alt_f12{};
+      alt_f12.key = "f12";
+      alt_f12.alt = true;
+      (void)root->register_shortcut("f12", alt_f12, [page]() {   // 登记名=事件键；修饰键区分同键位
+        page->declaration_request();
+        return true;
+      });
+      UiRoot::Shortcut ctrl_f12{};
+      ctrl_f12.key = "f12";
+      ctrl_f12.ctrl = true;
+      (void)root->register_shortcut("f12", ctrl_f12, [page]() {   // 同上：修饰键区分
+        page->implementation_request();
+        return true;
+      });
+      UiRoot::Shortcut alt_left{};
+      alt_left.key = "ArrowLeft";
+      alt_left.alt = true;
+      // 登记名必须就是事件键名（匹配用它，见 `UiRoot::register_shortcut`）。
+      (void)root->register_shortcut("ArrowLeft", alt_left, [page]() {
+        page->navigate_back_request();
         return true;
       });
     }

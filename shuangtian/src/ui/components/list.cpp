@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <format>
+#include <string_view>
+#include <unordered_map>
 #include <utility>
 
 #include "st/raster/paint.hpp"
@@ -190,14 +192,22 @@ void List::sync_items(const std::vector<Entry>& entries) {
 
   std::vector<std::unique_ptr<Element>> next;
   next.reserve(entries.size());
+  // 复用查找用哈希索引（key → 池中下标）：旧实现每条 entry 在池里线性扫，
+  // n 项列表一次同步是 O(n²) 字符串比较——几百项的搜索结果每帧同步一次
+  //（声明式重组每帧调 sync_items）时在帧剖里排得进前几名。
+  // 池只在本地存活，索引建一次用一次；key 理论上可重复（重复时后一个拿不到索引，
+  // 走新建路径——与旧实现「先命中先拿」的语义一致）。
+  std::unordered_map<std::string_view, std::size_t> pool_index;
+  pool_index.reserve(pool.size() * 2);
+  for (std::size_t at = 0; at < pool.size(); ++at) {
+    if (pool[at] != nullptr) pool_index.emplace(pool[at]->key(), at);
+  }
   for (const auto& entry : entries) {
     // 同 key 复用已有元素：**id、选中态、焦点都保持**（这正是 sync 与 clear+add 的区别）
     std::unique_ptr<ListItem> node;
-    for (auto& candidate : pool) {
-      if (candidate != nullptr && candidate->key() == entry.key) {
-        node = std::move(candidate);
-        break;
-      }
+    if (const auto found = pool_index.find(entry.key); found != pool_index.end()) {
+      node = std::move(pool[found->second]);
+      pool_index.erase(found);   // 每个元素只能被拿一次
     }
     if (node == nullptr) {
       node = std::make_unique<ListItem>(entry.label, std::string{});

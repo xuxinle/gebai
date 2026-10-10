@@ -149,6 +149,68 @@ rust-analyzer 均能完成握手并推出诊断（见 `tests/lsp_language_smoke_
 这不是仪式：**两个只有真连才会暴露的坑**就出在这里——服务端请求不回复会让 clangd
 阻塞（诊断能收但补全永远没响应），rust-analyzer 的参数名少个 `ing` 会直接拒绝启动。
 
+**2026-10-10 完善：导航族补齐 + 性能**（实测驱动，见 `tests/gbcode_lsp_bridge_test.cpp`）：
+
+- **导航族**：`declaration`（Alt+F12）/ `typeDefinition` / `implementation`（Ctrl+F12）
+  补进 `LanguageService`（族名随请求记录，`on_locations` 响应统一解析）。
+  多处结果不再只跳第一处：`NavResult` 列表进**导航结果侧栏视图**（活动栏第 6 项，
+  与搜索视图同形态：按文件分组、行预览、点击跳转）；`Alt+Left` 返回跳转起点
+  （历史栈有界 64，去重压栈）。
+- **性能**（三处热点，均在帧路径上）：
+  1. `offset_to_position` 从全文线性扫描改为**行起始偏移缓存 + 二分定位**
+     （文本变更时失效重建；热路径：光标移动 → hover/补全/跳转的换算）；
+  2. 诊断推送加**指纹去重**（FNV-1a 折叠位置/级别/消息，内容不变不重存不通知——
+     server 每 didChange 后都推一整批，无关行打字时全是白拷贝）；
+  3. `LspClient::pump` 每帧的 5 个回调 `std::function` 拷贝：空转帧（绝大多数）
+     在锁内判定后直接返回跳过（见 §3.1.2 第 3 条）。
+
+### 3.1.1 gbcode 资源管理器：多级目录展开与扫描缓存（2026-10-10 修复）
+
+「只能展开两级」的根因：`workspace_nodes()` 插入子节点时只重写一层 key
+（`dir:src/util`），第三层目录拼出的 key 与 `dir_expanded_` 永不匹配。修复：
+
+- **递归铺开 + 同源派生**：目录行 key 与相对路径同一规则（`dir:src/util/deep`），
+  任意层级的展开/收起都只与相对路径打交道；收起时把子孙展开状态一并遗忘
+  （否则重新展开父目录时孙目录跳出来）。
+- **扫描缓存**（`dir_cache_`）：本函数每帧被调，旧实现每帧对每个可见目录打
+  `list_dir` 系统调用。缓存按相对路径存一层条目，在刷新/收起/换工作区/写盘时失效。
+  隐藏目录（点开头）不入树。
+
+### 3.1.2 LSP 客户端协议诚信与健壮性（2026-10-10 框架轮）
+
+三项修复/优化（均在真机 clangd 上验证）：
+
+1. **`didSave` 契约补齐**：能力声明里 `synchronization.didSave = true`，但全库
+   从未发过 `textDocument/didSave`——正是类注释自己警告的"声明了却不实现"。
+   补 `LspClient::did_save(uri, text?)`，gbcode 保存后经 `LanguageService::
+   document_saved` 接上（外部工具改盘后诊断不再陈旧）。
+2. **`request()` 二次 move 回归**：method 先 move 进 `pending_requests` 又 move
+   给编码器，发出的请求 method 是空串——server 静默丢弃，症状是"请求发出但
+   永远无响应"。修法：记录表拿拷贝，编码器拿 move。新增
+   `lsp_client_request_encodes_real_method_name`（假 server 只回带真实 method
+   的请求）防重犯。
+3. **请求滞留清理 + pump 空转早退**：`pending_requests` 记录发出时刻，超时
+  （15s，可配）未答的以协议错误回调作废——server 崩溃时不泄漏、旧响应迟到
+   不顶掉新状态。`pump()` 在无消息且非握手态时锁内判定后直接返回，跳过每帧
+   5 个回调 `std::function` 拷贝（空转帧是绝大多数）。
+
+### 3.1.3 `List::sync_items` 的复用索引（2026-10-10）
+
+旧实现每条 entry 在候选池里线性找同 key 元素——n 项列表一次同步 O(n²)
+字符串比较；声明式重组每帧都调它，几百项的搜索结果在帧剖里排得进前几名。
+改为 `unordered_map<key_view, 池下标>` 哈希索引，复用查找降为均摊 O(1)
+（key 重复时后一个拿不到索引走新建，与旧实现"先命中先拿"语义一致）。
+
+「只能展开两级」的根因：`workspace_nodes()` 插入子节点时只重写一层 key
+（`dir:src/util`），第三层目录拼出的 key 与 `dir_expanded_` 永不匹配。修复：
+
+- **递归铺开 + 同源派生**：目录行 key 与相对路径同一规则（`dir:src/util/deep`），
+  任意层级的展开/收起都只与相对路径打交道；收起时把子孙展开状态一并遗忘
+  （否则重新展开父目录时孙目录跳出来）。
+- **扫描缓存**（`dir_cache_`）：本函数每帧被调，旧实现每帧对每个可见目录打
+  `list_dir` 系统调用。缓存按相对路径存一层条目，在刷新/收起/换工作区/写盘时失效。
+  隐藏目录（点开头）不入树。
+
 ### 3.2 gbcode 的版本管理（2026-10-09，参照歌白文件工作台设计）
 
 双面板分工（对齐 `docs/file-workbench-design.md` §4.7 的 IDEA 风格）：

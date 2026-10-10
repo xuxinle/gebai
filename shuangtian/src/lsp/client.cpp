@@ -147,8 +147,17 @@ struct LspClient::Impl {
   bool shutdown_sent{false};
   bool exit_sent{false};
 
-  /// 已发出的请求：id → method（响应回来时要知道是哪个方法）。
-  std::unordered_map<std::int64_t, std::string> pending_requests{};
+  /// 已发出的请求：id → {method, 发出时刻}。响应回来时要知道是哪个方法；
+  /// 超时滞留的条目由 `pump` 清理（server 崩溃/卡死时不至于永久泄漏，
+  /// 也不至于旧响应回来时顶掉新状态——补全这种连发场景的旧响应必须作废）。
+  struct PendingRequest {
+    std::string method{};
+    std::int64_t sent_at_ms{0};
+  };
+  std::unordered_map<std::int64_t, PendingRequest> pending_requests{};
+  /// 请求超时（毫秒；0 = 不启用清理）。补全/hover 这类高频请求靠宿主自行作废
+  ///（换请求 id），这里兑底的是「server 不回」的滞留。
+  std::int64_t request_timeout_ms{15000};
   /// 已打开文档：uri → {version, text}。
   struct Document {
     std::int64_t version{0};
@@ -252,7 +261,7 @@ struct LspClient::Impl {
       const auto id = json_as_i64(message.id, 0);
       std::string method;
       if (const auto found = pending_requests.find(id); found != pending_requests.end()) {
-        method = found->second;
+        method = std::move(found->second.method);
         pending_requests.erase(found);
       }
       // 握手响应：转 Ready 或 Failed。
@@ -538,29 +547,39 @@ void LspClient::start(ClientConfig config) {
   }
 
   const std::int64_t id = next_request_id(impl_->request_counter);
-  impl_->pending_requests.emplace(id, "initialize");
+  impl_->pending_requests.emplace(id, Impl::PendingRequest{"initialize", st::time::now_ms()});
   impl_->init_deadline_ms = st::time::now_ms() + impl_->config.init_timeout_ms;
   impl_->enqueue(make_request(id, "initialize", std::move(params)));
 }
 
 auto LspClient::pump() -> std::size_t {
-  // 回调先拷进 Impl：`pump` 里用户回调可能重设 `client.on_*`（如切换页面），
-  // 直接读 `this->on_xxx` 会在回调链中途换掉正在用的那个。
+  // 先看有没有活干（无消息且不在握手/收尾的瞬时态 → 空转返回，不做任何拷贝）。
+  // 这是本函数的**主性能路径**：宿主每帧都调它，而 server 绝大多数帧没话说——
+  // 旧实现无条件拷 5 个回调 `std::function`（含堆分配），空转帧全在做无用功。
+  std::vector<IncomingMessage> batch;
+  bool reader_finished = false;
+  std::string reader_error;
+  {
+    const std::scoped_lock guard(impl_->queue_mutex);
+    const bool transient = impl_->state == SessionState::Starting ||
+                           impl_->state == SessionState::ShuttingDown;
+    if (impl_->incoming.empty() && !impl_->reader_done && !transient) {
+      return 0;   // 空转：跳过回调拷贝与状态检查（锁外零成本返回）
+    }
+    batch.swap(impl_->incoming);
+    reader_finished = impl_->reader_done;
+    reader_error = impl_->reader_error;
+  }
+
+  // 回调拷进 Impl（只在真有消息要处理时）：`pump` 里用户回调可能重设
+  // `client.on_*`（如切换页面），直接读 `this->on_xxx` 会在回调链中途换掉
+  // 正在用的那个。
   impl_->response_handler = on_response;
   impl_->server_request_handler = on_server_request;
   impl_->diagnostics_handler = on_diagnostics;
   impl_->log_handler = on_log;
   impl_->unhandled_handler = on_unhandled;
 
-  std::vector<IncomingMessage> batch;
-  bool reader_finished = false;
-  std::string reader_error;
-  {
-    const std::scoped_lock guard(impl_->queue_mutex);
-    batch.swap(impl_->incoming);
-    reader_finished = impl_->reader_done;
-    reader_error = impl_->reader_error;
-  }
   for (auto& item : batch) {
     impl_->handle(item.message);
   }
@@ -572,6 +591,31 @@ auto LspClient::pump() -> std::size_t {
     impl_->error = std::format("语言服务器初始化超时（{} ms，无响应）",
                                impl_->config.init_timeout_ms);
     impl_->set_state(SessionState::Failed);
+  }
+
+  // 滞留请求清理：超时未答的请求作废并以错误回调（免得永久泄漏，也免得
+  // 旧响应迟到时顶掉新状态）。只对 Ready 态清——Starting 的 initialize 由上面的
+  // 握手超时管，ShuttingDown 的 shutdown 由 `stop` 的有界等待管，不双重判定。
+  if (impl_->request_timeout_ms > 0 && !impl_->pending_requests.empty() &&
+      impl_->state == SessionState::Ready) {
+    std::vector<std::int64_t> expired;
+    for (const auto& [id, request] : impl_->pending_requests) {
+      if (now - request.sent_at_ms > impl_->request_timeout_ms) expired.push_back(id);
+    }
+    for (const std::int64_t id : expired) {
+      const auto found = impl_->pending_requests.find(id);
+      if (found == impl_->pending_requests.end()) continue;
+      const std::string method = found->second.method;
+      impl_->pending_requests.erase(found);
+      // 按协议错误回调（is_error=true）：宿主已有「旧响应丢弃」逻辑，
+      // 错误回调不会误当成功处理；不四则宿主永远收不到这笔的终态。
+      Json error_body = Json::object();
+      error_body["code"] = -32603;
+      error_body["message"] = std::format("请求超时未响应（{} ms）", impl_->request_timeout_ms);
+      if (impl_->response_handler) {
+        impl_->response_handler(id, method, error_body, true);
+      }
+    }
   }
 
   // 退出检测：读线程结束（EOF）= 进程退出。未主动 shutdown 就是异常退出。
@@ -599,7 +643,7 @@ auto LspClient::stop(std::int64_t timeout_ms) -> void {
   // 优雅收尾：`shutdown`（请求）→ 等响应 → `exit`（通知）。
   if (impl_->state == SessionState::Ready || impl_->state == SessionState::Starting) {
     const std::int64_t id = next_request_id(impl_->request_counter);
-    impl_->pending_requests.emplace(id, "shutdown");
+    impl_->pending_requests.emplace(id, Impl::PendingRequest{"shutdown", st::time::now_ms()});
     impl_->shutdown_deadline_ms = st::time::now_ms() + timeout_ms;
     impl_->set_state(SessionState::ShuttingDown);
     impl_->enqueue(make_request(id, "shutdown"));
@@ -708,6 +752,17 @@ void LspClient::did_close(std::string_view uri) {
   impl_->enqueue(make_notification("textDocument/didClose", std::move(params)));
 }
 
+void LspClient::did_save(std::string_view uri, std::optional<std::string_view> text) {
+  // 未打开的文档不发（与 did_close 同口径：用途错不是错误，但也没事可做）。
+  if (!impl_->documents.contains(std::string(uri))) return;
+  Json params = Json::object();
+  Json item = Json::object();
+  item["uri"] = std::string(uri);
+  params["textDocument"] = std::move(item);
+  if (text.has_value()) params["text"] = std::string(*text);
+  impl_->enqueue(make_notification("textDocument/didSave", std::move(params)));
+}
+
 auto LspClient::document_version(std::string_view uri) const -> std::int64_t {
   const auto found = impl_->documents.find(std::string(uri));
   return found == impl_->documents.end() ? 0 : found->second.version;
@@ -725,7 +780,10 @@ auto LspClient::document_text(std::string_view uri) const -> std::string {
 auto LspClient::request(std::string method, Json params) -> std::int64_t {
   if (impl_->state != SessionState::Ready) return 0;   // 未就绪：如实返回 0，不假装发出去
   const std::int64_t id = next_request_id(impl_->request_counter);
-  impl_->pending_requests.emplace(id, method);
+  // ⚠ 记录表与编码各要一份 method：emplace 先拷（move 进表后变量已空，
+  // 再 move 给 make_request 会发出 method="" 的请求——server 静默丢弃，
+  // 症状是「请求发出但永远无响应」，实测抓到）。
+  impl_->pending_requests.emplace(id, Impl::PendingRequest{method, st::time::now_ms()});
   impl_->enqueue(make_request(id, std::move(method), std::move(params)));
   return id;
 }
@@ -747,6 +805,25 @@ void LspClient::reply(const Message& request_message, Json result) {
 
 void LspClient::reply_error(const Message& request_message, int code, std::string message) {
   impl_->enqueue(make_error_response(request_message.id, code, std::move(message)));
+}
+
+void LspClient::inject_diagnostics_for_test(std::string uri, std::vector<Diagnostic> list) {
+  // 组一条与 server 推送同构的通知，走同一条 handle 链路（不是绕过它直接写
+  // 状态——那测的就不再是真实路径了）。
+  Json params = Json::object();
+  params["uri"] = std::move(uri);
+  Json items = Json::array();
+  for (const auto& diagnostic : list) {
+    Json item = Json::object();
+    Json range = range_to_json(diagnostic.range);
+    item["range"] = std::move(range);
+    item["severity"] = diagnostic.severity;
+    item["message"] = diagnostic.message;
+    items.push_back(std::move(item));
+  }
+  params["diagnostics"] = std::move(items);
+  Message notification = make_notification("textDocument/publishDiagnostics", std::move(params));
+  impl_->handle(notification);
 }
 
 }  // namespace st::lsp

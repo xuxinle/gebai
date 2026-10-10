@@ -84,6 +84,10 @@ class LanguageService {
   /// 同步文档内容（文本没变则什么都不做——会被每帧调用）。
   void sync_document(std::string_view file_path, std::string_view text);
 
+  /// 保存通知（宿主写盘后调：发 `didSave` 让 server 重读磁盘——声明过
+  /// `didSave` 能力就必须真发，否则外部工具改过的文件诊断永远陈旧）。
+  void document_saved(std::string_view file_path);
+
   /// 关闭某文件的文档（标签关掉时）。
   void close_document(std::string_view file_path);
 
@@ -134,11 +138,20 @@ class LanguageService {
   /// 详情回调：`(请求 id, 文本)`。
   std::function<void(std::int64_t, const std::string&)> on_completion_detail{};
 
-  // —— 导航（阶段 5）——
+  // —— 导航（阶段 5 + 本次完善）——
 
   /// 跳到定义（`textDocument/definition`）。
   auto request_definition(std::string_view path, std::uint32_t line, std::uint32_t character)
       -> std::int64_t;
+  /// 跳到声明（`textDocument/declaration`；C/C++ 的头文件声明性定义在此）。
+  auto request_declaration(std::string_view path, std::uint32_t line, std::uint32_t character)
+      -> std::int64_t;
+  /// 跳到类型定义（`textDocument/typeDefinition`；光标在变量上时跳它的类型）。
+  auto request_type_definition(std::string_view path, std::uint32_t line,
+                               std::uint32_t character) -> std::int64_t;
+  /// 跳到实现（`textDocument/implementation`；接口→实现类，Ctrl+F12）。
+  auto request_implementation(std::string_view path, std::uint32_t line,
+                              std::uint32_t character) -> std::int64_t;
   /// 找引用（`textDocument/references`；`include_declaration` 决定是否含声明本身）。
   auto request_references(std::string_view path, std::uint32_t line, std::uint32_t character,
                           bool include_declaration) -> std::int64_t;
@@ -152,6 +165,10 @@ class LanguageService {
 
   /// 定义/引用跳转结果回调（同一个回调：应用侧按 id 区分）。
   std::function<void(std::int64_t, const std::vector<st::lsp::Location>&)> on_locations{};
+  /// 请求时告知应用侧「这是哪一族请求」（definition/references/…），
+  /// 与 `on_locations` 同一批回调参数里的 method 对齐——应用层不必自己记 id↔族映射。
+  /// 请求未发出（server 未就绪）时回调不被调。
+  [[nodiscard]] auto last_navigation_method() const -> const std::string&;
   /// 悬停结果回调（`nullopt` = 该处无信息）。
   std::function<void(std::int64_t, const std::optional<st::lsp::HoverInfo>&)> on_hover{};
   /// 文档大纲回调。
@@ -192,6 +209,12 @@ class LanguageService {
 
   /// 收尾（退出时调；阻塞至多 `timeout_ms`）。
   void shutdown(std::int64_t timeout_ms = 1500);
+
+  // —— 仅供测试的注入口（生产代码勿用）——
+  /// 直接注入已同步文本（绕过 server 就绪检查；单测验证位置换算/诊断去重用）。
+  void sync_document_if_ready_for_test(std::string path, std::string text);
+  /// 直接注入一条诊断推送（模拟 server 的 publishDiagnostics）。
+  void push_diagnostics_for_test(std::string uri, std::string message);
 
  private:
   struct Impl;

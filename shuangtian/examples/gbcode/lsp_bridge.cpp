@@ -104,14 +104,30 @@ struct LanguageService::Impl {
   bool started{false};
   /// 已同步给 server 的文本（按路径）——变了才发 `didChange`。
   std::map<std::string, std::string, std::less<>> synced{};
+  /// 行起始字节偏移缓存（按路径）：`offset_to_position` 的加速结构。
+  ///
+  /// 为什么需要：光标每次移动（hover 防抖、补全、跳转）都要调一次位置换算，
+  /// 旧实现线性扫描全文 O(n)——几千行的文件每帧扫一遍，CPU 剖面里它排在
+  /// LSP 相关热点第一。改为「行偏移表 + 二分定位」后 O(log lines + line bytes)。
+  /// 文本变化时增量重建（只在对应路径上重建，别的文件不受影响）。
+  mutable std::map<std::string, std::vector<std::size_t>, std::less<>> line_index{};
   /// 全部诊断（按 URI 存；只有活动文件的给 UI）。
   std::map<std::string, std::vector<LspProblem>, std::less<>> diagnostics{};
+  /// 诊断指纹（按 URI）：位置+级别+消息的哈希——server 每 didChange 后都推一整批，
+  /// 内容没变时（常见：在无关行打字）旧实现全量拷贝+排序再触发 UI 刷新。
+  /// 指纹相同则跳过存储与通知（pump 不会因此返回 true，UI 不重组）。
+  std::map<std::string, std::size_t, std::less<>> diagnostic_fingerprint{};
   /// 最近一次诊断更新的 uri（pump 返回 true 时用）。
   std::string last_updated{};
   /// 最近一次补全候选（`completionItem/resolve` 要用原始 JSON 回传）。
   std::vector<st::lsp::CompletionEntry> last_completion{};
   /// 触发字符缓存（`capabilities()` 返回副本，不能返回其成员引用）。
   mutable std::vector<std::string> trigger_cache{};
+  /// 最近一次导航请求族名（definition/declaration/typeDefinition/implementation/
+  /// references）——应用层拿它与 `on_locations` 的结果配对呈现（「找到 3 处引用」
+  /// vs「跳到定义」）。存这里而不是让应用层自己记 id：请求未发出时（返回 0）
+  /// 应用层无从知道族名，这个口径由桥统一维护。
+  std::string last_navigation_method{};
 };
 
 LanguageService::LanguageService() : impl_(std::make_unique<Impl>()) {
@@ -136,6 +152,23 @@ LanguageService::LanguageService() : impl_(std::make_unique<Impl>()) {
       if (a.line != b.line) return a.line < b.line;
       return a.column < b.column;
     });
+    // 指纹去重：内容没变的推送直接跳过（省一次全量拷贝 + 一次 UI 刷新）。
+    // 指纹用 FNV-1a 折叠位置/级别/消息——碰撞概率低到可忽略（诊断是短文本）。
+    std::size_t hash = 1469598103934665603ULL;
+    for (const auto& p : problems) {
+      const auto mix = [&hash](std::size_t value) {
+        hash ^= value;
+        hash *= 1099511628211ULL;
+      };
+      mix(p.line);
+      mix(p.column);
+      mix(p.warning ? 1 : 0);
+      for (const char c : p.message) mix(static_cast<unsigned char>(c));
+      mix(0x7F);   // 消息间分隔，防拼接歧义
+    }
+    const auto known = impl_->diagnostic_fingerprint.find(path);
+    if (known != impl_->diagnostic_fingerprint.end() && known->second == hash) return;
+    impl_->diagnostic_fingerprint.insert_or_assign(path, hash);
     impl_->diagnostics[path] = std::move(problems);
     impl_->last_updated = path;
   };
@@ -223,7 +256,9 @@ void LanguageService::set_workspace(std::string path) {
     impl_->client.stop(800);
     impl_->started = false;
     impl_->synced.clear();
+    impl_->line_index.clear();
     impl_->diagnostics.clear();
+    impl_->diagnostic_fingerprint.clear();
     impl_->server_name.clear();
   }
 }
@@ -276,13 +311,25 @@ void LanguageService::sync_document(std::string_view file_path, std::string_view
     impl_->client.did_open(uri, language_id_for(path), std::string(text));
   }
   found->second = std::string(text);
+  // 文本变了：行偏移缓存作废（下次 offset_to_position 重建）。
+  impl_->line_index.erase(path);
+}
+
+void LanguageService::document_saved(std::string_view file_path) {
+  if (!impl_->started) return;
+  const auto found = impl_->synced.find(std::string(file_path));
+  if (found == impl_->synced.end()) return;
+  // 带全文：宿主刚写盘，这份就是磁盘真相；server 可据此校验一致性。
+  impl_->client.did_save(to_uri(file_path), found->second);
 }
 
 void LanguageService::close_document(std::string_view file_path) {
   if (!impl_->started) return;
   const std::string path(file_path);
   impl_->synced.erase(path);
+  impl_->line_index.erase(path);
   impl_->diagnostics.erase(path);
+  impl_->diagnostic_fingerprint.erase(path);
   impl_->client.did_close(to_uri(path));
   if (impl_->active_path == path) impl_->active_path.clear();
 }
@@ -344,7 +391,35 @@ auto LanguageService::offset_to_position(std::string_view path, std::size_t offs
     -> std::optional<st::lsp::Position> {
   const auto found = impl_->synced.find(std::string(path));
   if (found == impl_->synced.end()) return std::nullopt;
-  return st::lsp::offset_to_position(found->second, offset);
+  // 行偏移表懒建（首次访问或文本变更后）：记录每行起始字节，之后二分定位。
+  // 与直接调 `st::lsp::offset_to_position`（全文线性扫描）相比，热路径
+  //（光标移动 → hover/补全/跳转的位置换算）从 O(file) 降到 O(log lines + 行内字节)。
+  const auto index_found = impl_->line_index.find(std::string(path));
+  if (index_found == impl_->line_index.end()) {
+    std::vector<std::size_t> offsets;
+    offsets.reserve(64);
+    offsets.push_back(0);
+    for (std::size_t at = 0; at < found->second.size(); ++at) {
+      if (found->second[at] == '\n') offsets.push_back(at + 1);
+    }
+    impl_->line_index.emplace(std::string(path), std::move(offsets));
+  }
+  const std::vector<std::size_t>& offsets = impl_->line_index.find(std::string(path))->second;
+  const std::size_t clamped = std::min(offset, found->second.size());
+  // 二分找「起始偏移 ≤ clamped 的最后一行」，行内前缀交给协议层换算
+  //（单行很短，线性无妨；UTF-16 语义必须复用它，不能自己重写）。
+  const auto upper = std::upper_bound(offsets.begin(), offsets.end(), clamped);
+  const std::size_t line = static_cast<std::size_t>(upper - offsets.begin()) - 1;
+  const std::size_t line_begin = offsets[line];
+  const std::size_t line_end = line + 1 < offsets.size() ? offsets[line + 1] - 1
+                                                        : found->second.size();
+  const std::string_view line_text =
+      std::string_view(found->second).substr(line_begin, line_end - line_begin);
+  const st::lsp::Position in_line = st::lsp::offset_to_position(line_text, clamped - line_begin);
+  st::lsp::Position position{};
+  position.line = line;
+  position.character = in_line.character;
+  return position;
 }
 
 auto LanguageService::request(std::string method, st::Json params) -> std::int64_t {
@@ -353,6 +428,10 @@ auto LanguageService::request(std::string method, st::Json params) -> std::int64
 }
 
 auto LanguageService::server_name() const -> std::string { return impl_->server_name; }
+
+auto LanguageService::last_navigation_method() const -> const std::string& {
+  return impl_->last_navigation_method;
+}
 
 auto LanguageService::error() const -> std::string { return impl_->error; }
 
@@ -414,7 +493,32 @@ namespace {
 auto LanguageService::request_definition(std::string_view path, std::uint32_t line,
                                         std::uint32_t character) -> std::int64_t {
   if (!impl_->started) return 0;
+  impl_->last_navigation_method = "definition";
   return impl_->client.request("textDocument/definition",
+                              position_params(path, line, character));
+}
+
+auto LanguageService::request_declaration(std::string_view path, std::uint32_t line,
+                                          std::uint32_t character) -> std::int64_t {
+  if (!impl_->started) return 0;
+  impl_->last_navigation_method = "declaration";
+  return impl_->client.request("textDocument/declaration",
+                              position_params(path, line, character));
+}
+
+auto LanguageService::request_type_definition(std::string_view path, std::uint32_t line,
+                                              std::uint32_t character) -> std::int64_t {
+  if (!impl_->started) return 0;
+  impl_->last_navigation_method = "typeDefinition";
+  return impl_->client.request("textDocument/typeDefinition",
+                              position_params(path, line, character));
+}
+
+auto LanguageService::request_implementation(std::string_view path, std::uint32_t line,
+                                             std::uint32_t character) -> std::int64_t {
+  if (!impl_->started) return 0;
+  impl_->last_navigation_method = "implementation";
+  return impl_->client.request("textDocument/implementation",
                               position_params(path, line, character));
 }
 
@@ -422,6 +526,7 @@ auto LanguageService::request_references(std::string_view path, std::uint32_t li
                                         std::uint32_t character, bool include_declaration)
     -> std::int64_t {
   if (!impl_->started) return 0;
+  impl_->last_navigation_method = "references";
   st::Json params = position_params(path, line, character);
   // `context.includeDeclaration`：是否把"声明本身"也算一处引用。
   // 找"谁用了它"时应当 false（否则第一项永远是定义处，用户每次都要跳过它）。
@@ -506,6 +611,30 @@ void LanguageService::shutdown(std::int64_t timeout_ms) {
   impl_->client.stop(timeout_ms);
   impl_->started = false;
   impl_->synced.clear();
+  impl_->line_index.clear();
+  impl_->diagnostic_fingerprint.clear();
+}
+
+// —— 仅供测试的注入口 ——
+
+void LanguageService::sync_document_if_ready_for_test(std::string path, std::string text) {
+  impl_->synced.insert_or_assign(path, std::move(text));
+  impl_->line_index.erase(path);
+}
+
+void LanguageService::push_diagnostics_for_test(std::string uri, std::string message) {
+  // 复用真实回调链（诊断→指纹→存储）——注入点在 `client.on_diagnostics` 上游，
+  // 模拟的就是 server 推送这一层。先泵一次 client 让回调副本就位（handle 读的是
+  // Impl 里的副本，它在 client.pump 里刷新——生产路径每帧都泵，测试路径要手动）。
+  (void)impl_->client.pump();
+  std::vector<st::lsp::Diagnostic> list;
+  st::lsp::Diagnostic diagnostic{};
+  diagnostic.message = std::move(message);
+  diagnostic.severity = 1;
+  diagnostic.range.start.line = 0;
+  diagnostic.range.start.character = 0;
+  list.push_back(std::move(diagnostic));
+  impl_->client.inject_diagnostics_for_test(std::move(uri), std::move(list));
 }
 
 }  // namespace gbcode

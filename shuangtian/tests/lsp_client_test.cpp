@@ -331,6 +331,58 @@ ST_TEST(lsp_client_request_before_ready_is_honest) {
   ST_CHECK(client.status().pending_requests == 0);
 }
 
+ST_TEST(lsp_client_request_encodes_real_method_name) {
+  // 回归：`request()` 内部把 method move 进记录表后又 move 给编码器，发出的
+  // 请求 method 字段成了**空串**——真 server 静默丢弃，症状是"请求发出但
+  // 永远无响应"（clangd 真机实测抓到）。用假 server 验证线上字节：只有收到
+  // 带真实 method 的请求它才回——method 空串时这里会超时变红。
+  FakeServer server(R"(
+read_message() {
+  len=""
+  while IFS= read -r line; do
+    line=$(printf '%s' "$line" | tr -d '\r')
+    [ -z "$line" ] && break
+    case "$line" in
+      Content-Length:*) len=$(printf '%s' "$line" | cut -d' ' -f2) ;;
+    esac
+  done
+  [ -z "$len" ] && return 1
+  dd bs=1 count="$len" 2>/dev/null
+}
+send() {
+  body="$1"
+  length=$(printf '%s' "$body" | wc -c | tr -d ' ')
+  printf 'Content-Length: %s\r\n\r\n%s' "$length" "$body"
+}
+first=1
+while msg=$(read_message); do
+  case "$msg" in
+    *'"initialize"'*)
+      send '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"hoverProvider":true},"serverInfo":{"name":"fake-lsp"}}}'
+      ;;
+    *'"textDocument/hover"'*)
+      send '{"jsonrpc":"2.0","id":2,"result":{"contents":"ok"}}'
+      ;;
+  esac
+done
+)");
+  st::lsp::LspClient client;
+  st::lsp::ClientConfig config{};
+  config.program = server.path();
+  config.init_timeout_ms = 5000;
+  client.start(config);
+  ST_REQUIRE(pump_until(client, st::lsp::SessionState::Ready));
+  const std::int64_t id = client.request("textDocument/hover", st::Json::object());
+  ST_CHECK(id > 0);
+  bool answered = false;
+  client.on_response = [&](std::int64_t got_id, const std::string& method,
+                           const st::Json&, bool is_error) {
+    if (got_id == id && method == "textDocument/hover") answered = !is_error;
+  };
+  ST_CHECK(pump_until_true(client, [&] { return answered; }, 5000));
+  client.stop(1000);
+}
+
 ST_TEST(lsp_client_real_clangd_smoke) {
   const std::string server = clangd_path();
   if (server.empty()) {
