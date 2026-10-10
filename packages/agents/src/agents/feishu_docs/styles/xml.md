@@ -52,11 +52,16 @@
 
 ## 与 Markdown 的分工
 
+**读出即写入（round-trip）**：`fetch_doc` 读出的 XML 与 `import_xml`/`update_doc` 写入的 XML 是同一套语法——读出什么改什么写回什么，不跨格式转换。两个转换约定：
+- **列表**：一个 `<ul>`/`<ol>` 可含多个 `<li>`；写入时展开为多个飞书列表块（飞书模型一块一项），读出时**连续同类列表项自动聚合成一个列表标签**（容器 id 取首项，其余条目 id 落在各自 `<li>` 上可单独定位）——多条目列表 round-trip 不膨胀也不变形。
+- **资源块**：图片/画板/附件以 token 占位（`<img src="boxcn…">` 等），**改动时原样保留不要改成纯文本**；要看图用 `download_file`（传 extra={document_id, block_id}）。
+
 | 场景 | 用什么 |
 |---|---|
 | 整篇创作、需要自动编号/分栏/高亮块配色/表格列宽/题注 | `import_xml` |
 | 快速追加、内容简单、已有 Markdown 草稿 | `import_markdown`（表达能力是 XML 的子集） |
-| 局部改块 | `update_block`（整块文本）/ `replace_text`（跨块查找替换，先用 dry_run 预览）/ `add_blocks` / `delete_blocks`（块级写法见 add_blocks 工具描述） |
-| 看完就改（拿 block_id） | `get_doc_blocks detail=compact`：一行一块 `{缩进}{类型} [block_id] {摘要}`，表格只给行列数不展开单元格——轻量读完且每行可直接拿去改；需样式/原始字段时用 `detail=full` |
-| 定位命中处上下文 | `find_blocks` 传 `context_before`/`context_after`（`▶` 命中行、`·` 上下文行） |
+| 局部改块 | `update_doc`：str_replace（同一措辞多处）/ block_replace（整块或同父区间重写）/ block_insert_after / block_delete / block_move_after / block_copy_after |
+| 看完就改（拿 block_id） | `fetch_doc detail=with-ids`：XML 带 block_id，读出即可改、改后可写回；需样式/配色/列宽时用 `detail=full` |
+| 定位命中处上下文 | `fetch_doc scope=keyword`（多词 `|` OR + context_before/after） |
+| 浏览/总结（不改） | `fetch_doc detail=simple` 或 `get_doc_text` |
 | 写入前预检 | `import_xml` 传 `dry_run=true`：只解析并出画像（块数/字数/类型分布）+ 图片与图表预检，**零写入** |

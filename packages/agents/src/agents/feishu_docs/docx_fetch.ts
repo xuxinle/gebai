@@ -168,7 +168,7 @@ export function blockToXml(blockId: string, opts: FetchXmlOptions, depth = 0): s
   }
   const field = fieldOf(b)
   const children = childIds(b)
-  const kidsXml = (): string => children.map((id) => blockToXml(id, opts, depth + 1)).filter(Boolean).join("\n")
+  const kidsXml = (): string => seqToXml(children, opts, depth + 1)
 
   // 文本类
   if (TEXTUAL.has(t)) {
@@ -194,12 +194,13 @@ export function blockToXml(blockId: string, opts: FetchXmlOptions, depth = 0): s
       return `<h${t - 2}${idAttr(b, opts)}${alignAttr(field, opts)}>${inner}</h${t - 2}>`
     }
     if (t === 13) {
+      // 单个有序列表项（聚合由 seqToXml 负责；直接调用本函数时保持单块语义）
       const seq = opts.styles ? numberSeq((field?.style as Record<string, unknown> | undefined)?.sequence) : ""
-      const nested = nestedListXml(children, opts, depth)
+      const nested = seqToXml(children, opts, depth + 1)
       return `<ol${seq}${idAttr(b, opts)}><li>${inner}${nested}</li></ol>`
     }
     if (t === 12) {
-      const nested = nestedListXml(children, opts, depth)
+      const nested = seqToXml(children, opts, depth + 1)
       return `<ul${idAttr(b, opts)}><li>${inner}${nested}</li></ul>`
     }
     return `<p${idAttr(b, opts)}${alignAttr(field, opts)}>${inner}</p>`
@@ -230,7 +231,7 @@ export function blockToXml(blockId: string, opts: FetchXmlOptions, depth = 0): s
     }
     case 25: {
       const ratio = Number(field?.width_ratio ?? 1)
-      const inner = kidsXml()
+      const inner = seqToXml(children, opts, depth + 1)
       return `<column width-ratio="${Number.isFinite(ratio) && ratio > 0 ? ratio : 1}"${idAttr(b, opts)}>${inner}</column>`
     }
     case 31:
@@ -269,12 +270,65 @@ function numberSeq(seq: unknown): string {
   return Number.isFinite(v) && v !== 1 && v > 0 ? ` seq="${v}"` : ""
 }
 
-/** 列表项的嵌套子列表（bullet/ordered 子块）。 */
-function nestedListXml(children: string[], opts: FetchXmlOptions, depth: number): string {
-  return children
-    .map((id) => blockToXml(id, opts, depth + 1))
+/** 列表项子列表（顺序相邻的同类列表块，聚合由 seqToXml 完成）。 */
+
+/**
+ * 兄弟块序列 → XML：**连续同类列表项聚合成一个 `<ul>`/`<ol>`**。
+ * 飞书块模型是一块一项（不聚合则多条目列表读出为 `<ol>a</ol><ol>b</ol>`，与写入端 `<ol><li>a</li><li>b</li></ol>` 不对称）。
+ * 容器 id 取首项 id（可作该列表的定位锚点），其余条目 id 落在各自 `<li>` 上（可单独定位编辑）。
+ */
+export function seqToXml(ids: string[], opts: FetchXmlOptions, depth: number): string {
+  return seqSegments(ids, opts, depth)
+    .map((s) => s.xml)
     .filter(Boolean)
-    .join("")
+    .join("\n")
+}
+
+/** 序列分段（列表聚合单位）：keyword 作用域按段决定是否包 `<excerpt>`。 */
+export function seqSegments(ids: string[], opts: FetchXmlOptions, depth: number): Array<{ xml: string; ids: string[] }> {
+  const out: Array<{ xml: string; ids: string[] }> = []
+  // 有类型过滤时不聚合（逐块过滤语义优先）
+  const aggregate = !opts.typeFilter
+  let i = 0
+  while (i < ids.length) {
+    const t = Number(opts.byId.get(ids[i])?.block_type ?? 0)
+    if (aggregate && (t === 12 || t === 13)) {
+      const run: string[] = []
+      while (i < ids.length && Number(opts.byId.get(ids[i])?.block_type ?? 0) === t) {
+        run.push(ids[i])
+        i++
+      }
+      const xml = listRunXml(t, run, opts, depth)
+      if (xml) out.push({ xml, ids: run })
+      continue
+    }
+    const xml = blockToXml(ids[i], opts, depth)
+    if (xml !== undefined) out.push({ xml, ids: [ids[i]] })
+    i++
+  }
+  return out
+}
+
+/** 连续同类列表项 → 单个 `<ul>`/`<ol>`（条目子列表递归聚合）。 */
+function listRunXml(t: number, ids: string[], opts: FetchXmlOptions, depth: number): string | undefined {
+  const tag = t === 13 ? "ol" : "ul"
+  const first = opts.byId.get(ids[0])
+  if (!first) return undefined
+  const seq = t === 13 && opts.styles ? numberSeq((fieldOf(first)?.style as Record<string, unknown> | undefined)?.sequence) : ""
+  const items: string[] = []
+  ids.forEach((id, idx) => {
+    const b = opts.byId.get(id)
+    if (!b) return
+    const field = fieldOf(b)
+    const elements = (field?.elements as unknown[] | undefined) ?? []
+    const inner = opts.styles ? inlineToXml(elements) : inlinePlain(elements)
+    const nested = seqToXml(childIds(b), opts, depth + 1)
+    // 首项 id 已落在容器上，其余条目 id 落在 li（可单独定位编辑）
+    const liId = opts.ids && idx > 0 ? ` id="${escapeAttr(id)}"` : ""
+    items.push(`<li${liId}>${inner}${nested}</li>`)
+  })
+  if (!items.length) return undefined
+  return `<${tag}${seq}${idAttr(first, opts)}>${items.join("")}</${tag}>`
 }
 
 /** 表格 → XML：colgroup 列宽 + thead（header_row）+ tbody；tableRows 白名单为行下标（瘦身用）。
@@ -460,21 +514,17 @@ export function sectionScope(common: ScopeCommon, anchorId: string, opts: FetchX
   const anchor = byId.get(anchorId)
   const anchorLevel = Number(anchor?.block_type ?? 0)
   const isHeading = anchorLevel >= 3 && anchorLevel <= 11
-  const out: string[] = []
-  const tops: string[] = []
+  const range: string[] = []
   for (let i = idx; i < topIds.length; i++) {
     const id = topIds[i]
     const b = byId.get(id)
     const level = Number(b?.block_type ?? 0)
     if (i > idx && level >= 3 && level <= 11 && level <= anchorLevel) break
     if (!isHeading && i > idx) break
-    const xml = blockToXml(id, opts)
-    if (xml !== undefined) {
-      out.push(xml)
-      tops.push(id)
-    }
+    range.push(id)
   }
-  return { xml: out.join("\n"), topBlockIds: tops, notes }
+  const segs = seqSegments(range, opts, 0)
+  return { xml: segs.map((s) => s.xml).join("\n"), topBlockIds: segs.flatMap((s) => s.ids), notes: [...opts.notes] }
 }
 
 /** range：顶层区间 [startIdx, endIdx]（闭区间；端点给完整块）。start/end 缺省取文档首/末。 */
@@ -497,16 +547,8 @@ export function rangeScope(common: ScopeCommon, startId: string | undefined, end
     notes.push(`区间端点顺序已自动纠正（${start} > ${end}）`)
     ;[start, end] = [end, start]
   }
-  const out: string[] = []
-  const tops: string[] = []
-  for (let i = start; i <= end && i < topIds.length; i++) {
-    const xml = blockToXml(topIds[i], opts)
-    if (xml !== undefined) {
-      out.push(xml)
-      tops.push(topIds[i])
-    }
-  }
-  return { xml: out.join("\n"), topBlockIds: tops, notes }
+  const segs = seqSegments(topIds.slice(start, end + 1), opts, 0)
+  return { xml: segs.map((s) => s.xml).join("\n"), topBlockIds: segs.flatMap((s) => s.ids), notes }
 }
 
 /** keyword：按关键词（| 分隔 OR）命中顶层块；命中输出完整块（容器整块返回，结构完整可改）。 */
@@ -524,23 +566,27 @@ export function keywordScope(common: ScopeCommon, keyword: string, contextBefore
   for (const h of hits) {
     for (let i = Math.max(0, h - contextBefore); i <= Math.min(topIds.length - 1, h + contextAfter); i++) include.add(i)
   }
+  // 按选中序列分段（连续同类列表聚合为一个 ul/ol）；命中在段内则整段输出，否则包 excerpt
+  const hitSet = new Set(hits)
+  const sel = [...include].sort((a, b) => a - b)
+  const segs = seqSegments(
+    sel.map((i) => topIds[i]),
+    opts,
+    0,
+  )
   const out: string[] = []
   const tops: string[] = []
-  const hitSet = new Set(hits)
-  for (const i of [...include].sort((a, b) => a - b)) {
-    const id = topIds[i]
-    const b = byId.get(id)
-    const isHit = hitSet.has(i)
-    const direct = b ? directTextHit(b, terms) : false
-    const xml = blockToXml(id, opts)
-    if (xml === undefined) continue
-    if (isHit && direct) {
-      out.push(xml)
+  for (const seg of segs) {
+    const segIdx = seg.ids.map((id) => topIds.indexOf(id)).filter((i) => i >= 0)
+    const segHit = segIdx.some((i) => hitSet.has(i) && directTextHit(byId.get(topIds[i]) ?? {}, terms))
+    if (segHit) {
+      out.push(seg.xml)
     } else {
-      // 命中在容器内或上下文行：excerpt 标注（top-block-id 可作回读锚点）
-      out.push(`<excerpt top-block-id="${id}"${isHit ? "" : ' role="context"'}>${xml}</excerpt>`)
+      // 命中在容器内或上下文行：excerpt 标注（top-block-id 可作回读锚点），列表段取首项 id
+      const anchor = seg.ids[0]
+      out.push(`<excerpt top-block-id="${anchor}" role="context">${seg.xml}</excerpt>`)
     }
-    tops.push(id)
+    tops.push(...seg.ids)
   }
   notes.push(`命中 ${hits.length} 个顶层块`)
   return { xml: out.join("\n"), topBlockIds: tops, notes }

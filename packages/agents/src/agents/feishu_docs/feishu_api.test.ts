@@ -3,8 +3,7 @@ import { mkdirSync, mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
-import { sessionPath } from "@gebai/sdk/node"
-import { createFeishuTools, markdownToBlocks, textElements, stripTableMergeInfo, blockText, blockTypeName, normalizeBlockFields, prepareGridColumns, widthRatioWeights, gridStructureError, expandAppendRange, extractBoardToken, findPlantUmlSource, collectBoardShapes, collectBoardEdges, extractBoardContent, extractOAuthCode, parseFolderToken, displayWidth, tableColumnWidths, tablePropertyOf, codeLangEnum, CODE_LANG_COUNT, dropDuplicateTitleHeading, xmlProfile, docOutline, replaceInBlocks, compactBlocks, TABLE_PAGE_WIDTH, TABLE_MIN_COLUMN_WIDTH, type FeishuDeps, type UserTokenEntry } from "./feishu_api"
+import { createFeishuTools, markdownToBlocks, textElements, stripTableMergeInfo, blockText, blockTypeName, normalizeBlockFields, prepareGridColumns, widthRatioWeights, gridStructureError, expandAppendRange, extractBoardToken, findPlantUmlSource, collectBoardShapes, collectBoardEdges, extractBoardContent, extractOAuthCode, parseFolderToken, displayWidth, tableColumnWidths, tablePropertyOf, codeLangEnum, CODE_LANG_COUNT, dropDuplicateTitleHeading, xmlProfile, TABLE_PAGE_WIDTH, TABLE_MIN_COLUMN_WIDTH, type FeishuDeps, type UserTokenEntry } from "./feishu_api"
 import { def as feishuDef } from "./feishu_docs"
 
 type Req = { url: string; init?: RequestInit }
@@ -1305,351 +1304,6 @@ describe("import_markdown", () => {
   })
 })
 
-describe("add_blocks", () => {
-  test("text 快捷参数与根块自动定位", async () => {
-    const { tools, records } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      if (req.url.includes("/children")) return jsonResponse({ code: 0, msg: "success", data: {} })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const result = await tools.add_blocks.execute({ document_id: "doxcn1", text: "hello" }, ctx())
-    expect(result.output).toContain("1 个块")
-    const req = records.find((r) => r.url.includes("/children"))
-    expect(req!.url).toContain("/blocks/page_root/children")
-    const body = JSON.parse(String(req!.init?.body)) as { children: Array<{ block_type: number; text: { elements: unknown[] } }> }
-    expect(body.children[0]).toMatchObject({ block_type: 2 })
-  })
-
-  test("含 todo 块时改走创建嵌套块接口（children 不支持 todo）", async () => {
-    const { tools, records } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      if (req.url.includes("/descendant")) return jsonResponse({ code: 0, msg: "success", data: {} })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    // B6：todo 块（17）经 children 接口创建报 99992402，须走 descendant；统一传 text 字段自动映射为 todo 驼峰字段
-    const todo = { block_type: 17, text: { style: { done: false }, elements: [{ text_run: { content: "任务" } }] } }
-    const mixed = { block_type: 2, text: { elements: [{ text_run: { content: "说明" } }] } }
-    const result = await tools.add_blocks.execute({ document_id: "doxcn1", blocks: JSON.stringify([todo, mixed]) }, ctx())
-    expect(result.output).toContain("已添加 2 个顶层块")
-    expect(result.output).toContain("嵌套块接口")
-    const desc = records.find((r) => r.url.includes("/descendant"))
-    expect(desc).toBeDefined()
-    const body = JSON.parse(String(desc!.init?.body)) as { children_id: string[]; descendants: Array<{ block_id: string; block_type: number; todo?: unknown; text?: unknown }> }
-    expect(body.descendants.map((d) => d.block_type)).toEqual([17, 2])
-    expect(body.descendants.every((d) => typeof d.block_id === "string" && d.block_id.length > 0)).toBe(true)
-    expect(body.descendants[0].todo).toBeDefined()
-    expect(body.descendants[0].text).toBeUndefined()
-    // descendant 接口不支持 index：请求体不携带（追加到末尾）
-    expect("index" in body).toBe(false)
-    // 无 todo 时仍走 children 接口（不受影响）
-    const { tools: t2, records: r2 } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      if (req.url.includes("/children")) return jsonResponse({ code: 0, msg: "success", data: {} })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    await t2.add_blocks.execute({ document_id: "doxcn1", blocks: JSON.stringify([{ block_type: 2, text: { elements: [] } }]) }, ctx())
-    expect(r2.some((r) => r.url.includes("/children"))).toBe(true)
-    expect(r2.some((r) => r.url.includes("/descendant"))).toBe(false)
-  })
-
-  test("todo 显式 done 对象：归一为 todo.style.done + text 合并进 elements", async () => {
-    const { tools, records } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      if (req.url.includes("/descendant")) return jsonResponse({ code: 0, msg: "success", data: {} })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    // B6：todo 显式 done 对象（仅含 todo 未含 text）报 99992402——归一：done → todo.style.done，text 合并进 todo.elements，无多余 text 字段
-    const result = await tools.add_blocks.execute({ document_id: "doxcn1", blocks: JSON.stringify([{ block_type: 17, todo: { done: true }, text: "任务" }]) }, ctx())
-    expect(result.output).toContain("走创建嵌套块接口")
-    const desc = records.find((r) => r.url.includes("/descendant"))
-    const body = JSON.parse(String(desc!.init?.body)) as { descendants: Array<{ block_type: number; todo?: { elements: Array<{ text_run: { content: string } }>; style: { done: boolean } }; text?: unknown }> }
-    const todo = body.descendants.find((d) => d.block_type === 17)?.todo
-    expect(todo).toEqual({ elements: [{ text_run: { content: "任务" } }], style: { done: true } })
-    expect(body.descendants.find((d) => d.block_type === 17)?.text).toBeUndefined()
-  })
-
-  test("超过 50 块自动分批", async () => {
-    let childCalls = 0
-    const { tools } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      if (req.url.includes("/children")) {
-        childCalls++
-        return jsonResponse({ code: 0, msg: "success", data: {} })
-      }
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const blocks = Array.from({ length: 120 }, (_, i) => ({ block_type: 2, text: { elements: [{ text_run: { content: `b${i}` } }] } }))
-    const result = await tools.add_blocks.execute({ document_id: "doxcn1", blocks: JSON.stringify(blocks) }, ctx())
-    expect(result.output).toContain("120 个块")
-    expect(result.output).toContain("3 批")
-    expect(childCalls).toBe(3)
-  })
-
-  test("grid_column 自动补 width_ratio 与空子块（实测缺一即报 1770041），列内容随分栏一次创建", async () => {
-    const { tools, records } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      if (req.url.includes("/descendant")) return jsonResponse({ code: 0, msg: "success", data: {} })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const grid = {
-      block_type: 24,
-      grid: { column_size: 2 },
-      children: [
-        { block_type: 25, grid_column: { width_ratio: 50 }, children: [{ block_type: 2, text: { elements: [{ text_run: { content: "左列" } }] } }] },
-        { block_type: 25, grid_column: { width_ratio: 50 } },
-      ],
-    }
-    const result = await tools.add_blocks.execute({ document_id: "doxcn1", blocks: JSON.stringify([grid]) }, ctx())
-    expect(result.output).toContain("走创建嵌套块接口")
-    expect(result.output).toContain("分栏空列已补空段落")
-    const desc = records.find((r) => r.url.includes("/descendant"))
-    const body = JSON.parse(String(desc!.init?.body)) as { descendants: Array<{ block_id: string; block_type: number; children: string[]; grid_column?: Record<string, unknown>; text?: unknown }> }
-    const cols = body.descendants.filter((d) => d.block_type === 25)
-    expect(cols).toHaveLength(2)
-    // width_ratio 原值保留（缺省时补 1——每列必须带，否则 1770041）
-    expect(cols.map((c) => c.grid_column)).toEqual([{ width_ratio: 50 }, { width_ratio: 50 }])
-    // 每列至少一个子块；列内内容随分栏一次创建（不再剥离）
-    expect(cols.every((c) => c.children.length >= 1)).toBe(true)
-    const texts = body.descendants.filter((d) => d.block_type === 2).map((d) => JSON.stringify(d.text))
-    expect(texts.join()).toContain("左列")
-  })
-
-  test("grid 结构前置校验：column_size 与列数不一致 / equation 不可创建均报可读错误", async () => {
-    const { tools, records } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const mismatch = await tools.add_blocks.execute(
-      { document_id: "doxcn1", blocks: [{ block_type: 24, grid: { column_size: 3 }, children: [{ block_type: 25, grid_column: {} }] }] },
-      ctx(),
-    )
-    expect(mismatch.output).toContain("不一致")
-    expect(records.some((r) => r.url.includes("/descendant"))).toBe(false)
-    const equation = await tools.add_blocks.execute(
-      { document_id: "doxcn1", blocks: [{ block_type: 16, equation: { elements: [{ text_run: { content: "E=mc^2" } }] } }] },
-      ctx(),
-    )
-    expect(equation.output).toContain("不可通过 API 创建")
-    // 嵌套子树中的 equation 同样被拦截
-    const nested = await tools.add_blocks.execute(
-      { document_id: "doxcn1", blocks: [{ block_type: 2, text: "x", children: [{ block_type: 16, text: "y" }] }] },
-      ctx(),
-    )
-    expect(nested.output).toContain("不可通过 API 创建")
-  })
-
-  test("blocks 参数数组直传（非字符串，避免转义/截断——修复「不是合法 JSON」根因）", async () => {
-    const { tools, records } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      if (req.url.includes("/children")) return jsonResponse({ code: 0, msg: "success", data: {} })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    // 数组参数：LLM 工具调用直接生成对象数组（无字符串转义层）
-    const result = await tools.add_blocks.execute(
-      { document_id: "doxcn1", blocks: [{ block_type: 2, text: { elements: [{ text_run: { content: "数组直传" } }] } }] },
-      ctx(),
-    )
-    expect(result.output).toContain("1 个块")
-    const body = JSON.parse(String(records.find((r) => r.url.includes("/children"))!.init?.body)) as { children: unknown[] }
-    expect(body.children[0]).toMatchObject({ block_type: 2 })
-  })
-
-  test("长 JSON 截断报错带分批/简化写法引导", async () => {
-    const { tools } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const result = await tools.add_blocks.execute({ document_id: "doxcn1", blocks: '{"block_type":2,"text":{"elements":[{text_run' }, ctx())
-    expect(result.output).toContain("不是合法 JSON")
-    expect(result.output).toContain("分批提交") // 截断引导
-  })
-
-  test("表格简化写法 table.rows 一次走嵌套块接口创建完整表格（不再逐格 N 次调用）", async () => {
-    const { tools, records } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      if (req.url.includes("/descendant")) return jsonResponse({ code: 0, msg: "success", data: {} })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const table = { block_type: 31, table: { rows: [["列A", "列B"], ["a1", "b1"]] } }
-    const result = await tools.add_blocks.execute({ document_id: "doxcn1", blocks: JSON.stringify([table]) }, ctx())
-    expect(result.output).toContain("已添加 1 个顶层块")
-    const desc = records.find((r) => r.url.includes("/descendant"))
-    expect(desc).toBeDefined()
-    const body = JSON.parse(String(desc!.init?.body)) as {
-      children_id: string[]
-      descendants: Array<{ block_id: string; block_type: number; children?: string[]; table?: { property?: { row_size: number; column_size: number; column_width?: number[] } }; table_cell?: unknown; text?: unknown }>
-    }
-    // 单次请求包含 table + 2 行 × 2 列 table_cell + 4 个 text（一次创建完整表格）
-    const types = body.descendants.map((d) => d.block_type)
-    expect(types).toEqual([2, 32, 2, 32, 2, 32, 2, 32, 31])
-    expect(body.descendants[8].table?.property).toEqual({ row_size: 2, column_size: 2, column_width: [365, 365] })
-    // table 块 children 引用 4 个 cell；cell 的 children 引用其内 text
-    expect(body.descendants[8].children).toHaveLength(4)
-    expect(body.descendants[1].children).toEqual([body.descendants[0].block_id])
-    expect(body.descendants.every((d) => typeof d.block_id === "string" && d.block_id.length > 0)).toBe(true)
-    // 只调了一次写入接口
-    expect(records.filter((r) => r.url.includes("/descendant"))).toHaveLength(1)
-  })
-
-  test("嵌套 children 结构自动走嵌套块接口（递归补 block_id 引用）", async () => {
-    const { tools, records } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      if (req.url.includes("/descendant")) return jsonResponse({ code: 0, msg: "success", data: {} })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    // 模型从 find_blocks 复制的块 JSON 可能带真实 block_id——应强制重生成（防引用冲突）
-    const nested = {
-      block_id: "old_root",
-      block_type: 2,
-      text: { elements: [{ text_run: { content: "容器" } }] },
-      children: [{ block_type: 2, text: "子内容" }],
-    }
-    const result = await tools.add_blocks.execute({ document_id: "doxcn1", blocks: JSON.stringify([nested]) }, ctx())
-    expect(result.output).toContain("走创建嵌套块接口")
-    const desc = records.find((r) => r.url.includes("/descendant"))
-    const body = JSON.parse(String(desc!.init?.body)) as { children_id: string[]; descendants: Array<{ block_id: string; block_type: number; children?: string[]; text?: unknown }> }
-    expect(body.descendants.map((d) => d.block_type)).toEqual([2, 2])
-    // 旧 block_id 被强制替换为全局唯一新 id；顶层块 children 引用新生成的子块 id
-    expect(body.descendants[1].block_id).not.toBe("old_root")
-    expect(body.descendants[1].children).toEqual([body.descendants[0].block_id])
-    // 子块简化写法（text 字符串）也被自动映射为 text.elements
-    expect(body.descendants[0].text).toEqual({ elements: [{ text_run: { content: "子内容" } }] })
-    expect(body.children_id).toEqual([body.descendants[1].block_id])
-  })
-
-  test("callout/grid/grid_column 正确枚举（19/24/25）走 descendant 接口创建", async () => {
-    const { tools, records } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      if (req.url.includes("/descendant")) return jsonResponse({ code: 0, msg: "success", data: {} })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    // callout（实测）：callout=19、grid=24、grid_column=25（原 40/33/34 有误）；容器块不能经 children 接口创建，须走 descendant；
-    // callout 正文在 children 子块（elements 被忽略）、颜色/emoji 为 callout 顶层字段、至少一个子块（缺则 1770041）；
-    // grid_column 带 children 报 field validation failed、width_ratio 报 9499（均为旧实现误判：正确写法是**列带 width_ratio 且非空**）
-    const blocks = [
-      { block_type: 19, callout: { background_color: 3, elements: [{ text_run: { content: "提示内容" } }] } },
-      {
-        block_type: 24,
-        grid: { column_size: 2 },
-        children: [
-          { block_type: 25, grid_column: { width_ratio: 50 }, children: [{ block_type: 2, text: "左" }] },
-          { block_type: 25, grid_column: { width_ratio: 50 }, children: [{ block_type: 2, text: "右" }] },
-        ],
-      },
-    ]
-    const result = await tools.add_blocks.execute({ document_id: "doxcn1", blocks: JSON.stringify(blocks) }, ctx())
-    expect(result.output).toContain("走创建嵌套块接口")
-    expect(result.output).not.toContain("update_block 填充")
-    const desc = records.find((r) => r.url.includes("/descendant"))
-    const body = JSON.parse(String(desc!.init?.body)) as {
-      children_id: string[]
-      descendants: Array<{ block_id: string; block_type: number; children?: string[]; callout?: { background_color?: number; border_color?: number; emoji_id?: string }; grid?: { column_size: number }; grid_column?: Record<string, unknown>; text?: unknown }>
-    }
-    // 展开顺序：子块先于父块入组——callout 正文(2) → callout(19)；每列文本(2) → grid_column(25)；最后 grid(24)
-    expect(body.descendants.map((d) => d.block_type)).toEqual([2, 19, 2, 25, 2, 25, 24])
-    const callout = body.descendants.find((d) => d.block_type === 19)!
-    // 实测：颜色/emoji 为 callout 顶层字段；正文在 children 子块（elements 被忽略）
-    expect(callout.callout).toEqual({ background_color: 3 })
-    expect(callout.children).toHaveLength(1)
-    const calloutBody = body.descendants.find((d) => d.block_id === (callout.children as string[])[0])!
-    expect(calloutBody.text).toEqual({ elements: [{ text_run: { content: "提示内容" } }] })
-    const grid = body.descendants.find((d) => d.block_type === 24)!
-    expect(grid.grid).toEqual({ column_size: 2 })
-    expect(grid.children).toHaveLength(2)
-    const cols = body.descendants.filter((d) => d.block_type === 25)
-    expect(cols).toHaveLength(2)
-    // 每列带 width_ratio 且至少一个子块（实测：缺一即报 1770041）
-    expect(cols.every((c) => Number(c.grid_column?.width_ratio) > 0)).toBe(true)
-    expect(cols.every((c) => (c.children?.length ?? 0) >= 1)).toBe(true)
-    // 容器块不注入多余 text 字段
-    expect(body.descendants.find((d) => d.block_type === 19)?.text).toBeUndefined()
-    expect(body.descendants.find((d) => d.block_type === 24)?.text).toBeUndefined()
-    expect(records.some((r) => r.url.includes("/descendant"))).toBe(true)
-    expect(records.some((r) => r.url.includes("/children"))).toBe(false)
-  })
-
-  test("index 参数对嵌套块接口不生效（提示追加到末尾）", async () => {
-    const { tools, records } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      if (req.url.includes("/descendant")) return jsonResponse({ code: 0, msg: "success", data: {} })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const result = await tools.add_blocks.execute({ document_id: "doxcn1", blocks: JSON.stringify([{ block_type: 17, todo: { elements: [{ text_run: { content: "任务" } }] } }]), index: 2 }, ctx())
-    expect(result.output).toContain("index 参数对嵌套块接口不生效")
-    const desc = records.find((r) => r.url.includes("/descendant"))
-    const body = JSON.parse(String(desc!.init?.body)) as { index?: number }
-    expect("index" in body).toBe(false)
-  })
-
-  test("blocks 含 null 元素不抛错（归一为默认 text）", async () => {
-    const { tools, records } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      if (req.url.includes("/children")) return jsonResponse({ code: 0, msg: "success", data: {} })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const result = await tools.add_blocks.execute({ document_id: "doxcn1", blocks: JSON.stringify([null, { block_type: 2, text: "x" }]) }, ctx())
-    expect(result.output).toContain("已添加 2 个块")
-    expect(records.some((r) => r.url.includes("/children"))).toBe(true)
-  })
-
-  test("children 字符串 id 引用明确报错（防悬空引用）", async () => {
-    const { tools } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    // tool() 包装把错误转为 output（❌ 前缀）；用 text 块作载体（callout 会剥离 children 不再触发）
-    const bad = { block_type: 2, text: { elements: [] }, children: ["abc123"] }
-    const r = await tools.add_blocks.execute({ document_id: "doxcn1", blocks: JSON.stringify([bad]) }, ctx())
-    expect(r.output).toContain("children 元素必须是块对象")
-  })
-
-  test("超大表格（单组超 1000 块）明确报错提示拆分", async () => {
-    const { tools } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    // 100 行 × 5 列 = 500 单元格 → 1(table) + 500(cell) + 500(text) = 1001 块 > 1000
-    const rows = Array.from({ length: 100 }, () => ["a", "b", "c", "d", "e"])
-    const table = { block_type: 31, table: { rows } }
-    const r = await tools.add_blocks.execute({ document_id: "doxcn1", blocks: JSON.stringify([table]) }, ctx())
-    expect(r.output).toContain("超过接口上限 1000")
-  })
-
-  test("table.rows 简化写法下发自适应列宽（显式覆盖生效、header_row 不默认打开）", async () => {
-    const { tools, records } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const auto = { block_type: 31, table: { rows: [["序号", "说明"], ["1", "这是一段比较长的说明文字"]] } }
-    const fixed = { block_type: 31, table: { rows: [["a", "b"]], column_width: [200, 300], header_row: true } }
-    const r = await tools.add_blocks.execute({ document_id: "doxcn1", blocks: JSON.stringify([auto, fixed]) }, ctx())
-    expect(r.output).toContain("已添加 2 个顶层块")
-    const body = JSON.parse(String(records.find((x) => x.url.includes("/descendant"))!.init?.body)) as { descendants: Array<{ block_type: number; table?: { property: Record<string, unknown> } }> }
-    const props = body.descendants.filter((b) => b.block_type === 31).map((b) => b.table!.property)
-    const autoWidths = props[0].column_width as number[]
-    expect(autoWidths.reduce((a, b) => a + b, 0)).toBe(TABLE_PAGE_WIDTH)
-    expect(autoWidths[1]).toBeGreaterThan(autoWidths[0])
-    expect(props[0].header_row).toBeUndefined()
-    expect(props[1]).toEqual({ row_size: 1, column_size: 2, column_width: [200, 300], header_row: true })
-  })
-})
 
 describe("set_table_width", () => {
   const cell = (id: string, child: string) => ({ block_id: id, block_type: 32, table_cell: {}, children: [child] })
@@ -1707,110 +1361,18 @@ describe("set_table_width", () => {
 /* ================= 错误诊断（docxCall 本地探测） ================= */
 
 describe("docx 操作失败本地诊断", () => {
-  test("add_blocks 失败时诊断出 block_id 不存在", async () => {
+  test("写块失败时附本地诊断（update_doc 链路）", async () => {
     const { tools } = makeTools((req) => {
       if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.endsWith("/documents/doxcn1")) return jsonResponse({ code: 0, msg: "success", data: { document: { document_id: "doxcn1" } } })
-      if (req.url.includes("/blocks/doxcnBAD/children")) return jsonResponse({ code: 1770001, msg: "invalid param" }, 400)
-      if (req.url.includes("/blocks/doxcnBAD")) return jsonResponse({ code: 1061001, msg: "block not found" }, 404)
+      // 块列表可读（有 page 根块），写入时报错 → 走 docxCall 诊断
+      if (req.url.includes("/blocks?page_size=500") || req.url.includes("/blocks?page_size=1")) {
+        return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "root", block_type: 1, children: ["b1"] }, { block_id: "b1", block_type: 2, parent_id: "root", text: { elements: [{ text_run: { content: "x" } }] } }], has_more: false } })
+      }
+      if (req.url.includes("/children") || req.url.includes("/descendant")) return jsonResponse({ code: 1770001, msg: "invalid param" }, 400)
       return jsonResponse({ code: 0, msg: "success", data: {} })
     })
-    const result = await tools.add_blocks.execute({ document_id: "doxcn1", block_id: "doxcnBAD", text: "hi" }, ctx())
-    expect(result.output).toContain("1770001")
+    const result = await tools.update_doc.execute({ document_id: "doxcn1", command: "append", content: "<p>hi</p>" }, ctx())
     expect(result.output).toContain("本地诊断")
-    expect(result.output).toContain("不存在")
-  })
-
-  test("add_blocks 失败时诊断出叶子块不支持子块", async () => {
-    const { tools } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.endsWith("/documents/doxcn1")) return jsonResponse({ code: 0, msg: "success", data: {} })
-      if (req.url.includes("/blocks/doxcnLEAF/children")) return jsonResponse({ code: 1770001, msg: "invalid param" }, 400)
-      if (req.url.includes("/blocks/doxcnLEAF")) return jsonResponse({ code: 0, msg: "success", data: { block_id: "doxcnLEAF", block_type: 22 } })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const result = await tools.add_blocks.execute({ document_id: "doxcn1", block_id: "doxcnLEAF", text: "hi" }, ctx())
-    expect(result.output).toContain("不支持子块")
-    expect(result.output).toContain("divider")
-  })
-
-  test("document_id 无效时提示文档问题", async () => {
-    const { tools } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.endsWith("/documents/doxcnBAD")) return jsonResponse({ code: 1061002, msg: "document not found" }, 404)
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 1770001, msg: "invalid param" }, 400)
-      if (req.url.includes("/children")) return jsonResponse({ code: 1770001, msg: "invalid param" }, 400)
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const result = await tools.add_blocks.execute({ document_id: "doxcnBAD", text: "hi" }, ctx())
-    expect(result.output).toContain("本地诊断")
-    expect(result.output).toContain("document_id")
-  })
-})
-
-/* ================= find_blocks 按文本反查 ================= */
-
-function blocksHandler(req: Req): Response {
-  if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-  if (req.url.includes("page_token=p2")) {
-    return jsonResponse({
-      code: 0,
-      msg: "success",
-      data: { items: [{ block_id: "t1", block_type: 2, parent_id: "h1", children: [], text: { elements: [{ text_run: { content: "本周进度 50%" } }] } }], has_more: false },
-    })
-  }
-  if (req.url.includes("/blocks?page_size=500")) {
-    return jsonResponse({
-      code: 0,
-      msg: "success",
-      data: {
-        items: [
-          { block_id: "page_root", block_type: 1, parent_id: "", children: ["h1"] },
-          { block_id: "h1", block_type: 3, parent_id: "page_root", children: ["t1"], heading1: { elements: [{ text_run: { content: "周报概述" } }] } },
-        ],
-        has_more: true,
-        page_token: "p2",
-      },
-    })
-  }
-  return jsonResponse({ code: 0, msg: "success", data: {} })
-}
-
-describe("find_blocks", () => {
-  test("按标题文本反查 block_id（含类型标注与路径）", async () => {
-    const { tools } = makeTools(blocksHandler)
-    const result = await tools.find_blocks.execute({ document_id: "doxcn1", query: "周报" }, ctx())
-    expect(result.output).toContain("h1")
-    expect(result.output).toContain("heading1")
-    expect(result.output).toContain("周报概述")
-    expect(result.output).toContain("路径: 根")
-  })
-
-  test("匹配正文块并带父级路径", async () => {
-    const { tools } = makeTools(blocksHandler)
-    const result = await tools.find_blocks.execute({ document_id: "doxcn1", query: "进度" }, ctx())
-    expect(result.output).toContain("t1")
-    expect(result.output).toContain("周报概述")
-  })
-
-  test("block_type 过滤只匹配指定类型", async () => {
-    const { tools } = makeTools(blocksHandler)
-    const result = await tools.find_blocks.execute({ document_id: "doxcn1", query: "进度", block_type: "heading" }, ctx())
-    expect(result.output).toContain("未找到")
-    const heading = await tools.find_blocks.execute({ document_id: "doxcn1", query: "周报", block_type: "heading" }, ctx())
-    expect(heading.output).toContain("h1")
-  })
-
-  test("非法 block_type 报错", async () => {
-    const { tools } = makeTools(blocksHandler)
-    const result = await tools.find_blocks.execute({ document_id: "doxcn1", query: "x", block_type: "bogus" }, ctx())
-    expect(result.output).toContain("无法识别的块类型")
-  })
-
-  test("空 query 报错", async () => {
-    const { tools } = makeTools(blocksHandler)
-    const result = await tools.find_blocks.execute({ document_id: "doxcn1", query: "" }, ctx())
-    expect(result.output).toContain("query 不能为空")
   })
 })
 
@@ -1868,48 +1430,7 @@ describe("get_doc_text 小节读取", () => {
   })
 })
 
-/* ================= page_all 自动翻页 ================= */
-
-describe("page_all 自动翻页", () => {
-  test("get_doc_blocks page_all 汇总多页并标注 type_name", async () => {
-    const { tools } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("page_token=p2")) {
-        return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "b2", block_type: 22, children: [] }], has_more: false } })
-      }
-      if (req.url.includes("/blocks?page_size=100")) {
-        return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "b1", block_type: 2, children: [], text: { elements: [] } }], has_more: true, page_token: "p2" } })
-      }
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const result = await tools.get_doc_blocks.execute({ document_id: "doxcn1", page_all: true }, ctx())
-    expect(result.output).toContain("b1")
-    expect(result.output).toContain("b2")
-    expect(result.output).toContain("divider")
-    expect(result.output).toContain("type_name")
-    expect(result.output).toContain("total")
-  })
-
-  test("list_blocks page_all 汇总子块", async () => {
-    const { tools } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      if (req.url.includes("page_token=p2")) {
-        return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "b2", block_type: 2, children: [], text: { elements: [] } }], has_more: false } })
-      }
-      if (req.url.includes("/blocks/page_root/children")) {
-        return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "b1", block_type: 2, children: [], text: { elements: [] } }], has_more: true, page_token: "p2" } })
-      }
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const result = await tools.list_blocks.execute({ document_id: "doxcn1", page_all: true }, ctx())
-    expect(result.output).toContain("b1")
-    expect(result.output).toContain("b2")
-    expect(result.output).toContain("全部子块")
-  })
-})
-
-/* ================= 纯函数：块文本/类型标注 ================= */
+/* ================= blockText / blockTypeName 纯函数 ================= */
 
 describe("blockText / blockTypeName 纯函数", () => {
   test("blockText 提取各类块文本", () => {
@@ -1938,39 +1459,6 @@ describe("blockText / blockTypeName 纯函数", () => {
   })
 })
 
-describe("delete_blocks", () => {
-  test("发送 batch_delete 请求", async () => {
-    const { tools, records } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      if (req.url.includes("/batch_delete")) return jsonResponse({ code: 0, msg: "success", data: {} })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const result = await tools.delete_blocks.execute({ document_id: "doxcn1", start_index: 2, end_index: 4 }, ctx())
-    expect(result.output).toContain("删除成功")
-    const req = records.find((r) => r.url.includes("/batch_delete"))
-    expect(req!.init?.method).toBe("DELETE")
-    expect(JSON.parse(String(req!.init?.body))).toEqual({ start_index: 2, end_index: 4 })
-  })
-
-  test("单块删除：end_index 缺省/相同自动扩展为 start+1（半开区间）", async () => {
-    const { tools, records } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      if (req.url.includes("/batch_delete")) return jsonResponse({ code: 0, msg: "success", data: {} })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    // B6：end_index 与 start_index 相同 → 自动 end=start+1（API 要求 end > start）
-    await tools.delete_blocks.execute({ document_id: "doxcn1", start_index: 2, end_index: 2 }, ctx())
-    await tools.delete_blocks.execute({ document_id: "doxcn1", start_index: 5 }, ctx())
-    const reqs = records.filter((r) => r.url.includes("/batch_delete"))
-    expect(JSON.parse(String(reqs[0].init?.body))).toEqual({ start_index: 2, end_index: 3 })
-    expect(JSON.parse(String(reqs[1].init?.body))).toEqual({ start_index: 5, end_index: 6 })
-    // 反向区间：明确报错提示
-    const bad = await tools.delete_blocks.execute({ document_id: "doxcn1", start_index: 4, end_index: 2 }, ctx())
-    expect(bad.output).toContain("end_index（2）不能小于 start_index（4）")
-  })
-})
 
 describe("read_sheet / write_sheet", () => {
   test("read_sheet 指定 range 走 v2 values 接口", async () => {
@@ -2444,139 +1932,6 @@ describe("bitable / sheets 其余操作", () => {
   })
 })
 
-describe("update_block / 下载 / 分享（新修复）", () => {
-  test("insert_text 失败自动降级为读块拼接整体替换", async () => {
-    let patchCalls = 0
-    const { tools, records } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      // 首次 insert_text PATCH：飞书参数校验失败（99991400 invalid param）
-      if (req.url.includes(`/blocks/block1`) && req.init?.method === "PATCH") {
-        patchCalls++
-        if (patchCalls === 1) return jsonResponse({ code: 99991400, msg: "invalid param", data: {} }, 400)
-        return jsonResponse({ code: 0, msg: "success", data: {} })
-      }
-      // 降级路径：读块原文（"你好世界"）——真实飞书响应为 data.block 包裹（未解包会读到空原文）
-      if (req.url.endsWith("/blocks/block1") && req.init?.method === "GET") {
-        return jsonResponse({ code: 0, msg: "success", data: { block: { block_id: "block1", block_type: 2, text: { elements: [{ text_run: { content: "你好世界" } }] } } } })
-      }
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const result = await tools.update_block.execute({ document_id: "doxcn1", block_id: "block1", insert_text: "XY", insert_index: 1 }, ctx())
-    expect(result.output).toContain("降级为整体替换")
-    const patches = records.filter((r) => r.url.includes("/blocks/block1") && r.init?.method === "PATCH")
-    expect(patches).toHaveLength(2)
-    // 降级 PATCH：原文本在 index=1 处插入 "XY" → "你XY好世界"
-    const body = JSON.parse(String(patches[1].init?.body)) as { update_text_elements: { elements: Array<{ text_run: { content: string } }> } }
-    expect(body.update_text_elements.elements.map((e) => e.text_run.content).join("")).toBe("你XY好世界")
-    // 负例：非参数校验类错误（如 12345 业务错误）不触发降级
-    let badCalls = 0
-    const { tools: t2, records: r2 } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes(`/blocks/block1`) && req.init?.method === "PATCH") {
-        badCalls++
-        return jsonResponse({ code: 12345, msg: "some business error", data: {} }, 400)
-      }
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const bad = await t2.update_block.execute({ document_id: "doxcn1", block_id: "block1", insert_text: "XY" }, ctx())
-    expect(bad.output).toContain("12345")
-    expect(badCalls).toBe(1) // 未走降级重试
-    expect(r2.filter((r) => r.url.includes(`/blocks/block1`) && r.init?.method === "PATCH")).toHaveLength(1)
-  })
-
-  test("download_file 导出产物（media token）files 403 时回退 medias 接口", async () => {
-    const { tools, records } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/drive/v1/metas/batch_query")) return jsonResponse({ code: 0, msg: "success", data: { metas: [{ doc_token: "box1", title: "a.pdf" }] } })
-      if (req.url.includes("/files/box1/download")) return new Response("denied", { status: 403 })
-      if (req.url.includes("/medias/box1/download")) return new Response("pdf-bytes", { status: 200, headers: { "content-type": "application/pdf" } })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const result = await tools.download_file.execute({ file_token: "box1" }, ctx())
-    expect(result.output).toContain("已保存 9 字节")
-    const filesReq = records.find((r) => r.url.includes("/files/box1/download"))
-    const mediasReq = records.find((r) => r.url.includes("/medias/box1/download"))
-    expect(filesReq).toBeDefined()
-    expect(mediasReq).toBeDefined()
-    expect((mediasReq!.init?.headers as Record<string, string>).Range).toBe("bytes=0-")
-  })
-
-  test("set_link_share 发送 PATCH public 请求（实测修正：方法为 PATCH 非 PUT，PUT 404）", async () => {
-    const { tools, records } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      return jsonResponse({ code: 0, msg: "success", data: { link_share_entity: "tenant_readable" } })
-    })
-    const result = await tools.set_link_share.execute({ token: "doxcn1", type: "docx" }, ctx())
-    expect(result.output).toContain("分享设置成功")
-    const req = records.find((r) => r.url.includes("/permissions/doxcn1/public"))
-    expect(req!.init?.method).toBe("PATCH")
-    expect(req!.url).toContain("type=docx")
-    expect(JSON.parse(String(req!.init?.body))).toEqual({ link_share_entity: "tenant_readable" })
-    // 负例：非法 link_share_entity 枚举明确报错（实测修正：枚举为 tenant/anyone 系列，anyone_can_view 属 security_entity）
-    const bad = await tools.set_link_share.execute({ token: "doxcn1", type: "docx", link_share_entity: "anyone_can_view" }, ctx())
-    expect(bad.output).toContain("link_share_entity 非法")
-    expect(bad.output).toContain("tenant_readable")
-  })
-
-  test("set_link_share 404 附权限诊断引导（实测：GET 正常 PUT 404 = 写权限 scope 缺失）", async () => {
-    const { tools } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      return new Response("not found", { status: 404 })
-    })
-    const result = await tools.set_link_share.execute({ token: "doxcn1", type: "docx" }, ctx())
-    expect(result.output).toContain("404")
-    expect(result.output).toContain("drive:drive") // 权限诊断引导
-  })
-
-  test("add_blocks blocks 数组简化写法自动规范化（99992402 修复）", async () => {
-    const { tools, records } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      if (req.url.includes("/children")) return jsonResponse({ code: 0, msg: "success", data: {} })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    // 用户实测失败写法：text 为字符串、无完整包装 → 工具自动规范化后请求体合法
-    const result = await tools.add_blocks.execute({ document_id: "doxcn1", blocks: JSON.stringify([{ block_type: 2, text: "hi" }, { block_type: 12, text: "item" }]) }, ctx())
-    expect(result.output).toContain("已添加 2 个块")
-    const req = records.find((r) => r.url.includes("/children"))
-    const body = JSON.parse(String(req!.init?.body)) as { children: Array<Record<string, unknown>> }
-    expect(body.children[0]).toEqual({ block_type: 2, text: { elements: [{ text_run: { content: "hi" } }] } })
-    expect(body.children[1]).toEqual({ block_type: 12, bullet: { elements: [{ text_run: { content: "item" } }] } })
-  })
-
-  test("insert_image 三步流程（空 image 块 → media 上传 → replace_image）", async () => {
-    const { tools, records } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
-      // 步骤 1：创建空 image 块（image:{} 不传 token）
-      if (req.url.includes("/blocks/page_root/children") && req.init?.method === "POST") {
-        return jsonResponse({ code: 0, msg: "success", data: { children: [{ block_id: "img_block1", block_type: 27 }] } })
-      }
-      // 步骤 2：media 上传（multipart）
-      if (req.url.includes("/drive/v1/medias/upload_all")) {
-        const fd = req.init!.body as FormData
-        expect(String(fd.get("parent_type"))).toBe("docx_image")
-        expect(String(fd.get("parent_node"))).toBe("img_block1")
-        expect(String(fd.get("size"))).toBe("4")
-        return jsonResponse({ code: 0, msg: "success", data: { file_token: "media_tok1" } })
-      }
-      // 步骤 3：PATCH replace_image
-      if (req.url.includes("/blocks/img_block1") && req.init?.method === "PATCH") {
-        return jsonResponse({ code: 0, msg: "success", data: { image: { width: 320, height: 180 } } })
-      }
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const result = await tools.insert_image.execute({ document_id: "doxcn1", image: Buffer.from("png!").toString("base64"), encoding: "base64" }, ctx())
-    expect(result.output).toContain("已在文档插入图片（320×180）")
-    expect(result.output).toContain("img_block1")
-    // 步骤 1 创建请求体：image:{} 无 token
-    const createReq = records.find((r) => r.url.includes("/blocks/page_root/children"))
-    expect(JSON.parse(String(createReq!.init?.body))).toEqual({ children: [{ block_type: 27, image: {} }] })
-    // 步骤 3 PATCH：replace_image 携带 media token
-    const patchReq = records.find((r) => r.url.includes("/blocks/img_block1") && r.init?.method === "PATCH")
-    expect(JSON.parse(String(patchReq!.init?.body))).toEqual({ block_id: "img_block1", replace_image: { token: "media_tok1" } })
-  })
-})
 
 /* ================= board 画板读取 ================= */
 
@@ -2796,37 +2151,16 @@ describe("权限类错误码引导", () => {
 /* ================= page_all 上限提示 ================= */
 
 describe("page_all 达到上限提示", () => {
-  test("get_doc_blocks page_all 达到 2000 块上限且还有更多时提示", async () => {
+  test("未达上限不提示（fetch_doc 链路）", async () => {
     const { tools } = makeTools((req) => {
       if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=100")) {
-        const items = Array.from({ length: 2000 }, (_, i) => ({ block_id: `b${i}`, block_type: 2, children: [], text: { elements: [] } }))
-        return jsonResponse({ code: 0, msg: "success", data: { items, has_more: true, page_token: "p2" } })
-      }
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const c = ctx()
-    const result = await tools.get_doc_blocks.execute({ document_id: "doxcn1", page_all: true }, c)
-    // 上限提示放在尾部（截断保留 tail 行）
-    expect(result.output).toContain("已达 2000 块读取上限")
-    expect(result.output).toContain('"items"')
-    // total 在 JSON 中部被截断，完整内容落盘可查（相对会话工作目录的路径 → 会话 tmp/ 拼接）
-    const m = result.output?.match(/文件: (truncated\/[\w.]+)/)
-    expect(m).toBeTruthy()
-    const file = await Bun.file(join(sessionPath(c.home, "default", "0123456789abcdef0123456789abcdef"), "tmp", m![1])).text()
-    expect(file).toContain('"total":2000')
-  })
-
-  test("未达上限不提示", async () => {
-    const { tools } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks?page_size=100")) {
+      if (req.url.includes("/blocks?page_size=500")) {
         return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "b1", block_type: 2, children: [] }], has_more: false } })
       }
       return jsonResponse({ code: 0, msg: "success", data: {} })
     })
-    const result = await tools.get_doc_blocks.execute({ document_id: "doxcn1", page_all: true }, ctx())
-    expect(result.output).not.toContain("已达")
+    const result = await tools.fetch_doc.execute({ document_id: "doxcn1" }, ctx())
+    expect(result.output).not.toContain("上限")
   })
 })
 
@@ -2834,52 +2168,27 @@ describe("子Agent 定义", () => {  test("feishu_docs 定义完整且工具命�
     expect(feishuDef.description.length).toBeGreaterThan(20)
     expect(feishuDef.systemPrompt).toContain("FEISHU_DOCS_APP_ID")
     const tools = Object.keys(feishuDef.tools ?? {})
-    expect(tools.length).toBeGreaterThanOrEqual(30)
+    expect(tools.length).toBeGreaterThanOrEqual(28)
     for (const t of tools) {
       expect(/^[a-zA-Z0-9_]+$/.test(t)).toBe(true)
       expect(t.length).toBeLessThanOrEqual(40 - "feishu_docs".length - 1)
     }
+    // 旧块级工具已收编：不存在被 fetch_doc/update_doc 覆盖的冗余工具
+    for (const gone of ["add_blocks", "update_block", "delete_blocks", "replace_text", "find_blocks", "get_doc_blocks", "list_blocks", "insert_image"]) {
+      expect(tools).not.toContain(gone)
+    }
     // 写操作全部需审批
-    for (const w of ["create_doc", "import_markdown", "import_xml", "delete_blocks", "upload_file", "add_permission", "api_call", "set_table_width"]) {
+    for (const w of ["create_doc", "import_markdown", "import_xml", "update_doc", "upload_file", "add_permission", "api_call", "set_table_width"]) {
       expect(feishuDef.requiresApproval?.[w]).toBe(true)
     }
-    // 读操作/会话配置/只读体检不审批
-    for (const r of ["get_doc_text", "list_files", "read_sheet", "get_board", "auth_user_authorize", "auth_user_token", "auth_user_status", "auth_user_clear", "lint_doc", "style_guide"]) {
-      expect(feishuDef.requiresApproval?.[r]).toBeUndefined()
+    // 读操作/会话配置/只读体检不审批（显式 false 或未登记）
+    for (const r of ["fetch_doc", "get_doc_text", "list_files", "read_sheet", "get_board", "auth_user_authorize", "auth_user_token", "auth_user_status", "auth_user_clear", "lint_doc", "style_guide"]) {
+      expect(feishuDef.requiresApproval?.[r] ?? false).toBe(false)
     }
     expect(feishuDef.preload).toBe(false)
   })
-
-  test("add_blocks 描述覆盖全部可创建块类型提示", () => {
-    const desc = String(feishuDef.tools?.["add_blocks"]?.description ?? "")
-    // 文本类
-    for (const s of ["heading1~9", "bullet", "ordered", "code", "quote", "equation", "todo", "divider"]) {
-      expect(desc).toContain(s)
-    }
-    // 容器类（嵌套接口）
-    for (const s of ["callout", "grid", "grid_column", "table.rows"]) {
-      expect(desc).toContain(s)
-    }
-    // 引用型（需资源 token / 外部地址）
-    for (const s of ["embed.url", "file.token", "sheet.token", "mindnote.token", "bitable.token", "diagram.diagram_type"]) {
-      expect(desc).toContain(s)
-    }
-    // 限制提示：image 走 insert_image、table_cell 不可单独创建
-    expect(desc).toContain("insert_image")
-    expect(desc).toContain("table_cell 不可单独创建")
-    // 实测缺陷提示：equation 不可创建、callout 正文放子块/颜色emoji 为顶层字段、grid 每列须带 width_ratio 且非空
-    expect(desc).toContain("不可经 API 创建")
-    expect(desc).toContain("正文放 children 子块")
-    expect(desc).toContain("callout 顶层字段")
-    expect(desc).toContain("width_ratio")
-    // md-only 细节已并入 add_blocks 描述：todo.style.done、grid 列宽 api_call 调整
-    expect(desc).toContain("todo.style.done")
-    expect(desc).toContain("update_grid_column_width_ratio")
-    // 块类型知识单源于 add_blocks 描述：系统提示词只留指针，不重复整表
-    expect(feishuDef.systemPrompt).toContain("add_blocks 工具描述")
-    expect(feishuDef.systemPrompt).not.toContain("## 块类型速查")
-  })
 })
+
 
 describe("排版 SKILL 与 XML 导入", () => {
   test("style_guide：无 name 列出全部文档，有 name 返回全文，未知名给出可用清单", async () => {
@@ -3003,78 +2312,9 @@ describe("预检 / 大纲 / 跨块替换（纯函数）", () => {
     expect(p.counts).toMatchObject({ heading1: 1, callout: 1, text: 1 })
   })
 
-  test("docOutline：按文档流抽标题并统计每节顶层块数", () => {
-    const items = [
-      { block_id: "page", block_type: 1, children: ["h1", "p1", "h2", "p2", "p3"] },
-      { block_id: "h1", block_type: 3, parent_id: "page", heading1: { elements: [{ text_run: { content: "1 结论" } }] } },
-      { block_id: "p1", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "正文" } }] } },
-      { block_id: "h2", block_type: 4, parent_id: "page", heading2: { elements: [{ text_run: { content: "1.1 细节" } }] } },
-      { block_id: "p2", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "a" } }] } },
-      { block_id: "p3", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "b" } }] } },
-    ]
-    const { entries, hasPage } = docOutline(items)
-    expect(hasPage).toBe(true)
-    expect(entries).toEqual([
-      { level: 1, text: "1 结论", blockId: "h1", sectionBlocks: 1 },
-      { level: 2, text: "1.1 细节", blockId: "h2", sectionBlocks: 2 },
-    ])
-    expect(docOutline([{ block_id: "p", block_type: 2 }]).entries).toEqual([])
-  })
 
-  test("replaceInBlocks：逐 run 替换保留样式，跨 run 命中单列", () => {
-    const items = [
-      { block_id: "b1", block_type: 2, text: { elements: [{ text_run: { content: "旧术词出现两次：旧术词" } }] } },
-      { block_id: "b2", block_type: 2, text: { elements: [{ text_run: { content: "前缀旧", text_element_style: { bold: true } } }, { text_run: { content: "术词后" } }] } },
-      { block_id: "b3", block_type: 2, text: { elements: [{ text_run: { content: "无关内容" } }] } },
-    ]
-    const plan = replaceInBlocks(items, { pattern: "旧术词", replacement: "新术词" })
-    expect(plan.total).toBe(3)
-    expect(plan.updates.map((u) => u.blockId)).toEqual(["b1"]) // b2 跨 run，无法逐段替换
-    expect(plan.hits[0].count).toBe(2)
-    expect(plan.crossRun.map((h) => h.blockId)).toEqual(["b2"])
-    // 样式保留：仅 content 变
-    const els = plan.updates[0].elements as Array<{ text_run: { content: string } }>
-    expect(els[0].text_run.content).toBe("新术词出现两次：新术词")
-  })
 
-  test("replaceInBlocks：limit 截断与 blockIds 限定、正则模式、非法正则报错", () => {
-    const items = ["a1", "a2", "a3"].map((id, i) => ({ block_id: id, block_type: 2, text: { elements: [{ text_run: { content: `X${i}` } }] } }))
-    const limited = replaceInBlocks(items, { pattern: "X", replacement: "Y", limit: 2 })
-    expect(limited.updates).toHaveLength(2)
-    expect(limited.skipped).toBe(1)
-    const scoped = replaceInBlocks(items, { pattern: "X", replacement: "Y", blockIds: ["a2"] })
-    expect(scoped.updates.map((u) => u.blockId)).toEqual(["a2"])
-    const regex = replaceInBlocks(items, { pattern: "X\\d", replacement: "Z", regex: true })
-    expect(regex.updates).toHaveLength(3)
-    expect(() => replaceInBlocks(items, { pattern: "(", replacement: "x", regex: true })).toThrow(/不合法/)
-    // 字面模式：正则元字符不当正则用
-    const literal = replaceInBlocks([{ block_id: "b", block_type: 2, text: { elements: [{ text_run: { content: "a.b" } }] } }], { pattern: "a.b", replacement: "c" })
-    expect(literal.updates).toHaveLength(1)
-  })
 
-  test("replace_text 工具：dry_run 预览不写入；正式执行走 batch_update", async () => {
-    const blocks = [
-      { block_id: "page", block_type: 1, children: ["t1"] },
-      { block_id: "t1", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "旧称：旧称方案" } }] } },
-    ]
-    const { tools, records } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks")) return jsonResponse({ code: 0, msg: "success", data: { items: blocks, has_more: false } })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const preview = await tools.replace_text.execute({ document_id: "doc_1", pattern: "旧称", replacement: "新称", dry_run: true }, ctx())
-    expect(preview.output).toContain("预演")
-    expect(preview.output).toContain("t1")
-    expect(preview.output).toContain("共命中 2 处")
-    expect(records.some((r) => r.init?.method === "PATCH")).toBe(false) // 预演零写入
-
-    const done = await tools.replace_text.execute({ document_id: "doc_1", pattern: "旧称", replacement: "新称" }, ctx())
-    expect(done.output).toContain("已替换 1/1 个块")
-    const patch = records.find((r) => r.url.includes("/blocks/batch_update"))
-    const body = JSON.parse(String(patch!.init?.body)) as { requests: Array<{ block_id: string; update_text_elements: { elements: Array<{ text_run: { content: string } }> } }> }
-    expect(body.requests[0].block_id).toBe("t1")
-    expect(body.requests[0].update_text_elements.elements[0].text_run.content).toBe("新称：新称方案")
-  })
 
   test("import_xml dry_run：出画像与问题清单，且不创建文档、不写入块", async () => {
     const { tools, records } = makeTools(() => jsonResponse({ code: 0, msg: "success", data: {} }))
@@ -3085,26 +2325,9 @@ describe("预检 / 大纲 / 跨块替换（纯函数）", () => {
     expect(r.output).toContain("图片文件不存在")
     expect(records.length).toBe(0) // 零请求：既不建文档也不写块
   })
-
-  test("get_doc_blocks outline：只返回大纲（标题 + block_id + 节内块数）", async () => {
-    const blocks = [
-      { block_id: "page", block_type: 1, children: ["h1", "p1"] },
-      { block_id: "h1", block_type: 3, parent_id: "page", heading1: { elements: [{ text_run: { content: "1 甲" } }] } },
-      { block_id: "p1", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "正文" } }] } },
-    ]
-    const { tools } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks")) return jsonResponse({ code: 0, msg: "success", data: { items: blocks, has_more: false } })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const r = await tools.get_doc_blocks.execute({ document_id: "doc_1", outline: true }, ctx())
-    expect(r.output).toContain("文档大纲（1 个标题）")
-    expect(r.output).toContain("- h1 1 甲  [h1] 节内块 1")
-    expect(r.output).toContain("get_doc_text")
-  })
 })
 
-describe("紧凑块视图与命中上下文（读-改闭环）", () => {
+describe("块文本提取（blockText）", () => {
   const docBlocks = [
     { block_id: "page", block_type: 1, children: ["h1", "p1", "tbl", "cal"] },
     { block_id: "h1", block_type: 3, parent_id: "page", heading1: { elements: [{ text_run: { content: "1 部署" } }] } },
@@ -3116,65 +2339,13 @@ describe("紧凑块视图与命中上下文（读-改闭环）", () => {
     { block_id: "t2", block_type: 2, parent_id: "cal", text: { elements: [{ text_run: { content: "高亮块内容" } }] } },
   ]
 
-  test("compactBlocks：一行一块（带 id 与缩进），表格不展开、page 不占行、长文本截断", () => {
-    const v = compactBlocks(docBlocks, { textLimit: 20 })
-    expect(v.total).toBe(5) // 不含 page，不含表格单元格子树（c1/t1）
-    expect(v.lines[0]).toBe("- heading1 [h1] 1 部署")
-    expect(v.lines[1]).toMatch(/^- text \[p1\] 先决条件：.*…$/)
-    expect(v.lines[2]).toBe("- table [tbl] table 2×3 表头行")
-    expect(v.lines[3]).toBe("- callout [cal] callout bulb bg=3")
-    expect(v.lines[4]).toBe("  - text [t2] 高亮块内容") // 高亮块子块缩进一层
-    expect(v.lines.join("\n")).not.toContain("单元格内文本")
+  test("docBlocks 素材可被 blockText/tableCellRows 读取（保留作纯函数验证素材）", () => {
+    expect(blockText(docBlocks[1])).toBe("1 部署")
+    expect(docBlocks).toHaveLength(8)
   })
 
-  test("compactBlocks：maxLines 截断并标记", () => {
-    const v = compactBlocks(docBlocks, { maxLines: 2 })
-    expect(v.lines).toHaveLength(2)
-    expect(v.truncated).toBe(true)
-    expect(v.total).toBe(5) // 总数仍如实统计
-  })
 
-  test("get_doc_blocks detail=compact：头部计数 + 行格式 + 取 id 提示", async () => {
-    const { tools } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks")) return jsonResponse({ code: 0, msg: "success", data: { items: docBlocks, has_more: false } })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const r = await tools.get_doc_blocks.execute({ document_id: "doc_1", detail: "compact" }, ctx())
-    expect(r.output).toContain("紧凑块视图（5 个块")
-    expect(r.output).toContain("- heading1 [h1] 1 部署")
-    expect(r.output).toContain("- table [tbl] table 2×3 表头行")
-    expect(r.output).not.toContain("单元格内文本")
-  })
 
-  test("find_blocks：默认只列命中块并提示上下文参数；传参后展开同父相邻块（▶ 命中 / · 上下文）", async () => {
-    const blocks = [
-      { block_id: "page", block_type: 1, children: ["h1", "p0", "p1", "p2", "p3"] },
-      { block_id: "h1", block_type: 3, parent_id: "page", heading1: { elements: [{ text_run: { content: "部署流程" } }] } },
-      { block_id: "p0", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "前置说明" } }] } },
-      { block_id: "p1", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "命中行：部署需要审批" } }] } },
-      { block_id: "p2", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "后续步骤" } }] } },
-      { block_id: "p3", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "无关" } }] } },
-    ]
-    const { tools } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks")) return jsonResponse({ code: 0, msg: "success", data: { items: blocks, has_more: false } })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const plain = await tools.find_blocks.execute({ document_id: "doc_1", query: "审批" }, ctx())
-    expect(plain.output).toContain("找到 1 个包含「审批」的块")
-    expect(plain.output).toContain("p1")
-    expect(plain.output).toContain("context_before")
-    expect(plain.output).not.toContain("▶")
-
-    const withCtx = await tools.find_blocks.execute({ document_id: "doc_1", query: "审批", context_before: 1, context_after: 1 }, ctx())
-    expect(withCtx.output).toContain("· [text] p0 前置说明")
-    expect(withCtx.output).toContain("▶ [text] p1 命中行：部署需要审批")
-    expect(withCtx.output).toContain("· [text] p2 后续步骤")
-    expect(withCtx.output.indexOf("p0")).toBeLessThan(withCtx.output.indexOf("▶"))
-    expect(withCtx.output.indexOf("▶")).toBeLessThan(withCtx.output.indexOf("p2"))
-    expect(withCtx.output).not.toContain("p3") // 超出上下文窗口
-  })
 
   test("blockText：@人与公式等非文本元素取可读占位（不凭空消失）", () => {
     const b = { block_id: "p", block_type: 2, text: { elements: [
@@ -3186,20 +2357,5 @@ describe("紧凑块视图与命中上下文（读-改闭环）", () => {
     ] } }
     expect(blockText(b)).toBe("请 @用户 与 @文档 对照")
   })
-
-  test("find_blocks / 紧凑视图：容器块（callout/表格）在上下文行里给出摘要", async () => {
-    const blocks = [
-      { block_id: "page", block_type: 1, children: ["cal", "p1"] },
-      { block_id: "cal", block_type: 19, parent_id: "page", children: ["ct"], callout: { background_color: 3, emoji_id: "bulb" } },
-      { block_id: "ct", block_type: 2, parent_id: "cal", text: { elements: [{ text_run: { content: "高亮块正文" } }] } },
-      { block_id: "p1", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "命中：审批" } }] } },
-    ]
-    const { tools } = makeTools((req) => {
-      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
-      if (req.url.includes("/blocks")) return jsonResponse({ code: 0, msg: "success", data: { items: blocks, has_more: false } })
-      return jsonResponse({ code: 0, msg: "success", data: {} })
-    })
-    const r = await tools.find_blocks.execute({ document_id: "doc_1", query: "审批", context_before: 1 }, ctx())
-    expect(r.output).toContain("· [callout] cal callout bulb bg=3") // 容器块给出摘要而非空行
-  })
 })
+

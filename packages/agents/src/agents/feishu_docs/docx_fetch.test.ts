@@ -10,6 +10,7 @@ import {
   outlineScope,
   rangeScope,
   sectionScope,
+  seqToXml,
   type FetchXmlOptions,
 } from "./docx_fetch"
 import { xmlToBlocks } from "./docx_xml"
@@ -149,6 +150,27 @@ describe("blockToXml", () => {
     ])
     const opts: FetchXmlOptions = { byId, ids: true, styles: true, notes: new Set() }
     expect(blockToXml("l1", opts)).toBe('<ul id="l1"><li>项一<ul id="l1a"><li>子项</li></ul></li></ul>')
+  })
+  test("seqToXml：连续同类列表项聚合成一个 ul/ol（round-trip 对称）", () => {
+    const byId = new Map<string, Record<string, unknown>>([
+      ["o1", { block_id: "o1", block_type: 13, parent_id: "root", ordered: { elements: [el("第一步")], style: { sequence: 3 } } }],
+      ["o2", { block_id: "o2", block_type: 13, parent_id: "root", ordered: { elements: [el("第二步")] } }],
+      ["b1", { block_id: "b1", block_type: 12, parent_id: "root", bullet: { elements: [el("项一")] } }],
+      ["b2", { block_id: "b2", block_type: 12, parent_id: "root", bullet: { elements: [el("项二")] } }],
+      ["p1", { block_id: "p1", block_type: 2, parent_id: "root", text: { elements: [el("段落")] } }],
+    ])
+    const opts: FetchXmlOptions = { byId, ids: true, styles: true, notes: new Set() }
+    const xml = seqToXml(["o1", "o2", "p1", "b1", "b2"], opts, 0)
+    expect(xml).toBe('<ol seq="3" id="o1"><li>第一步</li><li id="o2">第二步</li></ol>\n<p id="p1">段落</p>\n<ul id="b1"><li>项一</li><li id="b2">项二</li></ul>')
+    // 再导入：两个列表段分别得到 2 项，不膨胀
+    const again = xmlToBlocks(xml.replace(/ id="[^"]*"/g, "").replace(/ seq="3"/g, ""))
+    expect(again.blocks.filter((b) => Number(b.block_type) === 13)).toHaveLength(2)
+    expect(again.blocks.filter((b) => Number(b.block_type) === 12)).toHaveLength(2)
+  })
+  test("seqToXml：单块调用不聚合（blockToXml 直调仍为单块语义）", () => {
+    const byId = new Map([["o1", { block_id: "o1", block_type: 13, parent_id: "root", ordered: { elements: [el("唯一步骤")] } }]])
+    const opts: FetchXmlOptions = { byId, ids: true, styles: true, notes: new Set() }
+    expect(blockToXml("o1", opts)).toBe('<ol id="o1"><li>唯一步骤</li></ol>')
   })
 })
 

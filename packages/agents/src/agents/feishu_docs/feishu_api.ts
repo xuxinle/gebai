@@ -10,6 +10,7 @@ import {
   outlineScope,
   rangeScope,
   sectionScope,
+  seqToXml,
   type FetchXmlOptions,
 } from "./docx_fetch"
 import { readStyleDoc, styleDocList } from "./styles"
@@ -526,10 +527,10 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
             const bt = Number(b?.block_type ?? 0)
             diag =
               opts.checkParent && LEAF_BLOCK_TYPES.has(bt)
-                ? `本地诊断：block_id 有效，但块类型「${blockTypeName(bt)}」(${bt}) 不支持子块，请改用其父块（find_blocks 可定位）`
+                ? `本地诊断：block_id 有效，但块类型「${blockTypeName(bt)}」(${bt}) 不支持子块，请改用其父块（fetch_doc 可定位）`
                 : `本地诊断：block_id 有效（块类型「${blockTypeName(bt)}」${bt}）`
           } catch {
-            diag = `本地诊断：block_id 在该文档中不存在或无访问权限——请用 find_blocks/get_doc_blocks/list_blocks 获取真实 block_id`
+            diag = `本地诊断：block_id 在该文档中不存在或无访问权限——请用 fetch_doc（scope=keyword 定位）重新获取真实 block_id`
           }
         } else {
           diag = "本地诊断：document_id 有效"
@@ -739,154 +740,6 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     },
   )
 
-  const getDocBlocks = tool(
-    "get_doc_blocks",
-    "获取文档块结构。三种形态任选：**`outline=true` 只返回大纲**（标题层级/文本/block_id/每节顶层块数，大文档先看目录）；**`detail=compact` 返回紧凑块视图**（一行一块 `{缩进}{类型} [block_id] {摘要}`，表格不展开单元格——轻量读全文且每行直接带 id 可去改，适合「看完就改」）；缺省 `detail=full` 返回完整块 JSON（含样式/子块/原始字段，每块附 type_name 与块类型 43 画板占位）。块类型 43（mindnote 思维导图/画板）只返回 board.token 占位，其图形内容（UML 图等）用 get_board 工具读取。",
-    {
-      document_id: { type: "string" },
-      outline: { type: "boolean", description: "只返回文档大纲（标题清单 + block_id + 每节顶层块数），用于先定位再按节读取（默认 false 返回全部块）" },
-      detail: { type: "string", description: "full（默认，完整块 JSON）或 compact（一行一块 + block_id + 缩进层级，表格不展开；也可用 max_lines/text_limit 调整）" },
-      max_lines: { type: "number", description: "detail=compact 时最多输出行数（默认 600，超出截断并提示）" },
-      text_limit: { type: "number", description: "detail=compact 时每块文本摘要长度上限（默认 80 字符）" },
-      page_token: { type: "string", description: "分页标记（可选）" },
-      page_size: { type: "number", description: "每页块数，默认 100" },
-      page_all: { type: "boolean", description: "自动翻页取全部块（默认 false，上限 2000）" },
-    },
-    ["document_id"],
-    async (args, ctx) => {
-      const docId = String(args.document_id)
-      if (args.detail === "compact") {
-        const { items, truncated } = await collectPages(ctx, `/open-apis/docx/v1/documents/${docId}/blocks`, 500, 2000)
-        if (!items.length) return { output: "文档为空（没有任何块）" }
-        const view = compactBlocks(items, { textLimit: args.text_limit !== undefined ? num(args.text_limit, 80) : undefined, maxLines: args.max_lines !== undefined ? num(args.max_lines, 600) : undefined })
-        const head = `紧凑块视图（${view.total} 个块${truncated ? "，⚠️ 已达 2000 块读取上限" : ""}，格式：类型 [block_id] 摘要）：`
-        const tail = view.truncated ? `\n⚠️ 输出已达 max_lines 上限；用 max_lines 调大，或先 outline=true 定位再用 get_doc_text 读某节` : ""
-        return truncate(`${head}\n${view.lines.join("\n")}${tail}`, "feishu_blocks_compact", ctx)
-      }
-      if (args.outline === true) {
-        const { items, truncated } = await collectPages(ctx, `/open-apis/docx/v1/documents/${docId}/blocks`, 500, 2000)
-        const { entries } = docOutline(items)
-        if (!entries.length) return { output: `文档没有标题（共 ${items.length} 个块）——建议先按读者任务分节加标题，再用本模式定位` }
-        const lines = entries.map((e) => `${"  ".repeat(Math.max(0, e.level - 1))}- h${e.level} ${e.text || "(无标题文本)"}  [${e.blockId}] 节内块 ${e.sectionBlocks}`)
-        const capNote = truncated ? "；⚠️ 已达 2000 块读取上限，大纲可能不完整" : ""
-        return { output: `文档大纲（${entries.length} 个标题${capNote}）：\n${lines.join("\n")}\n\n下一步：用 get_doc_text 传某个标题的 block_id 读整节，或用 find_blocks 找关键词定位。` }
-      }
-      if (args.page_all === true) {
-        const { items, truncated } = await collectPages(ctx, `/open-apis/docx/v1/documents/${docId}/blocks`, num(args.page_size, 100), 2000)
-        // 上限提示放在 JSON 之后另起一行（大 JSON 会被截断，尾部行保留提示）
-        const payload = { items: items.map(decorateBlockType), total: items.length }
-        const capNote = truncated ? "\n⚠️ 已达 2000 块读取上限，文档更长——建议按小节用 get_doc_text 传 block_id 读取，或 get_doc_blocks 传 page_token 继续翻页" : ""
-        return truncate(`文档全部块: ${JSON.stringify(payload)}${capNote}`, "feishu_api", ctx)
-      }
-      const data = await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks`, {
-        query: { page_token: args.page_token, page_size: args.page_size ? num(args.page_size, 100) : undefined },
-      })
-      return jsonResult(ctx, decorateBlocksPayload(data), "文档块")
-    },
-  )
-
-  const listBlocks = tool(
-    "list_blocks",
-    "获取指定块下的子块列表（每块附 type_name 类型标注）。失败时自动附带本地诊断（块不存在/叶子块不支持子块等）。",
-    {
-      document_id: { type: "string" },
-      block_id: { type: "string", description: "父块 id（缺省文档根块）" },
-      page_token: { type: "string" },
-      page_size: { type: "number" },
-      page_all: { type: "boolean", description: "自动翻页取全部子块（默认 false）" },
-    },
-    ["document_id"],
-    async (args, ctx) => {
-      const docId = String(args.document_id)
-      const blockId = args.block_id ? String(args.block_id) : await rootBlockId(ctx, docId)
-      const path = `/open-apis/docx/v1/documents/${docId}/blocks/${blockId}/children`
-      if (args.page_all === true) {
-        const { items, truncated } = (await docxCall(ctx, docId, blockId, { checkParent: true }, () => collectPages(ctx, path, num(args.page_size, 100), 2000))) as {
-          items: Array<Record<string, unknown>>
-          truncated: boolean
-        }
-        // 上限提示放在 JSON 之后另起一行（大 JSON 会被截断，尾部行保留提示）
-        const payload = { items: items.map(decorateBlockType), total: items.length }
-        const capNote = truncated ? "\n⚠️ 已达 2000 块读取上限，子块更多——建议按小节用 get_doc_text 传 block_id 读取，或传 page_token 继续翻页" : ""
-        return truncate(`块 ${blockId} 的全部子块: ${JSON.stringify(payload)}${capNote}`, "feishu_api", ctx)
-      }
-      const data = await docxCall(ctx, docId, blockId, { checkParent: true }, () =>
-        api(ctx, path, { query: { page_token: args.page_token, page_size: args.page_size ? num(args.page_size, 100) : undefined } }),
-      )
-      return jsonResult(ctx, decorateBlocksPayload(data), `块 ${blockId} 的子块`)
-    },
-  )
-
-  const findBlocks = tool(
-    "find_blocks",
-    "按文本关键词在文档中查找块，返回匹配块的 block_id/块类型(type_name)/文本/所在路径——按标题文本反查 block_id 的首选方式。传 `context_before`/`context_after` 时在命中块下展开同父相邻块（`▶` 标命中行、`·` 标上下文行），看清上下文再决定怎么改。",
-    {
-      document_id: { type: "string" },
-      query: { type: "string", description: "搜索关键词（子串匹配，忽略大小写）" },
-      block_type: { type: "string", description: "块类型过滤：数字或名称（heading/text/bullet/ordered/code/quote/todo/table 等）" },
-      max_results: { type: "number", description: "最多返回条数（默认 20）" },
-      context_before: { type: "number", description: "命中块前显示几个相邻块（同父兄弟，默认 0 = 只列命中块）" },
-      context_after: { type: "number", description: "命中块后显示几个相邻块（同父兄弟，默认 0）" },
-    },
-    ["document_id", "query"],
-    async (args, ctx) => {
-      const docId = String(args.document_id)
-      const q = String(args.query ?? "").toLowerCase()
-      if (!q) throw new Error("query 不能为空")
-      const maxResults = Math.max(1, num(args.max_results, 20))
-      const ctxBefore = Math.max(0, Math.min(20, num(args.context_before, 0)))
-      const ctxAfter = Math.max(0, Math.min(20, num(args.context_after, 0)))
-      let typeFilter: Set<number> | undefined
-      if (args.block_type !== undefined) typeFilter = parseBlockTypeFilter(String(args.block_type))
-      const items = (await collectPages(ctx, `/open-apis/docx/v1/documents/${docId}/blocks`, 500, 20_000)).items
-      const byId = new Map(items.map((b) => [String(b.block_id), b]))
-      // 同父兄弟序列（上下文展开用）：有父块用父的 children 顺序，顶层块用接口返回顺序
-      const siblingsOf = (b: Record<string, unknown>): string[] => {
-        const parent = b.parent_id ? byId.get(String(b.parent_id)) : undefined
-        if (parent && Array.isArray(parent.children)) return (parent.children as unknown[]).map((c) => String(c))
-        return items.map((x) => String(x.block_id ?? ""))
-      }
-      /** 单块一行（带类型/文本/可选 id）；mark 为行首标记（▶ 命中 / · 上下文）。
-       *  容器块（无自身文本）用紧凑摘要补充（如 callout 的配色、表格的行列数）。 */
-      const row = (b: Record<string, unknown>, mark?: string): string => {
-        const type = Number(b.block_type ?? 0)
-        const own = blockText(b).replace(/\s+/g, " ").trim().slice(0, 60)
-        const isTextual = type === 2 || type === 14 || (type >= 3 && type <= 11)
-        const summary = own || (isTextual ? "" : compactSummary(b, 60))
-        return `${mark ? `${mark} ` : ""}[${blockTypeName(type)}] ${String(b.block_id ?? "")}${summary ? ` ${summary}` : ""}`
-      }
-      let count = 0
-      const chunks: string[] = []
-      for (const b of items) {
-        if (typeFilter && !typeFilter.has(Number(b.block_type ?? 0))) continue
-        const t = blockText(b)
-        if (!t.toLowerCase().includes(q)) continue
-        count++
-        if (chunks.length >= maxResults) continue
-        const head = `${chunks.length + 1}. ${b.block_id} | ${blockTypeName(Number(b.block_type ?? 0))}(${b.block_type}) | ${t.slice(0, 60)} | 路径: ${blockPath(b, byId)}`
-        if (!ctxBefore && !ctxAfter) {
-          chunks.push(head)
-          continue
-        }
-        const ids = siblingsOf(b)
-        const idx = ids.indexOf(String(b.block_id ?? ""))
-        const before = idx > 0 ? ids.slice(Math.max(0, idx - ctxBefore), idx) : []
-        const after = idx >= 0 ? ids.slice(idx + 1, idx + 1 + ctxAfter) : []
-        const body = [
-          ...before.map((id) => byId.get(id)).filter(Boolean).map((x) => `   ${row(x as Record<string, unknown>, "·")}`),
-          `   ${row(b, "▶")}`,
-          ...after.map((id) => byId.get(id)).filter(Boolean).map((x) => `   ${row(x as Record<string, unknown>, "·")}`),
-        ]
-        chunks.push(`${head}\n${body.join("\n")}`)
-      }
-      if (!count) return { output: `未找到包含「${args.query}」的块。可尝试：换关键词；get_doc_text 查看全文；get_doc_blocks detail=compact 查看紧凑结构。` }
-      const tail = count > chunks.length ? `\n（共 ${count} 个匹配，仅显示前 ${chunks.length} 个）` : ""
-      const hint = ctxBefore || ctxAfter ? "" : "\n提示：加 context_before/context_after 可在命中处展开相邻块看上下文。"
-      return truncate(`找到 ${count} 个包含「${args.query}」的块：\n${chunks.join("\n")}${tail}${hint}`, "feishu_find", ctx)
-    },
-  )
-
-  /* ================= fetch_doc / update_doc（官方 lark-doc skill 的 +fetch/+update 对标） ================= */
 
   /** 取全部块并建索引（fetch_doc / update_doc 共用）。 */
   async function loadBlockIndex(ctx: ToolContext, docId: string): Promise<{ items: Array<Record<string, unknown>>; byId: Map<string, Record<string, unknown>>; rootId: string; truncated: boolean }> {
@@ -941,9 +794,9 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
         if (!args.keyword) throw new Error("keyword 模式必须传 keyword")
         result = keywordScope(common, String(args.keyword), Math.max(0, Math.min(10, num(args.context_before, 0))), Math.max(0, Math.min(10, num(args.context_after, 0))), opts)
       } else {
-        // 整篇：顶层块全部序列化
-        const xmls = common.topIds.map((id) => blockToXml(id, opts)).filter(Boolean)
-        result = { xml: xmls.join("\n"), topBlockIds: common.topIds, notes: [] }
+        // 整篇：顶层块全部序列化（连续同类列表聚合为一个 ul/ol）
+        const xml = seqToXml(common.topIds, opts, 0)
+        result = { xml, topBlockIds: common.topIds, notes: [] }
       }
       if (!result.xml) {
         const hint = scope === "keyword" ? "；换关键词或去掉 block_type 过滤再试" : scope === "section" ? "；先 outline 确认标题 id" : ""
@@ -1210,255 +1063,16 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     },
   )
 
-  const addBlocks = tool(
-    "add_blocks",
-    "在文档指定块下添加子块，单次最多 50 块（超出自动分批）。\n支持的块类型：\n- 文本类：**普通文本用 2 text（1 是 page 根块，不接受 text 内容）**；3~11 heading1~9、12 bullet、13 ordered、14 code、15 quote、17 todo（todo.style.done 标记完成）、22 divider（**divider 直接 divider:{}，不要传空 text**）。字段用类型对应驼峰名（text/heading1/bullet/ordered/code/quote/todo/divider），统一传 text 字段会自动映射；code 块 language 支持语言名（**按飞书官方枚举表转数字**，未知回退 PlainText）、默认 `wrap=true` 自动换行（可传 `code.style.wrap=false` 关闭）。**16 equation 公式块不可经 API 创建（官方创建接口枚举不含 16，实测 99992402）——请改用普通文本块表示公式，或提示用户手动插入公式块**。\n- 表格 31：嵌套写法（table 带 children=[table_cell 块]）或简化写法 table.rows 二维数组（如 {\"block_type\":31,\"table\":{\"rows\":[[\"列A\",\"列B\"],[\"a1\",\"b1\"]]}}）。\n- 容器类（自动走创建嵌套块接口一次创建，追加到末尾、index 不生效）：19 callout 高亮块（**正文放 children 子块**——`callout.elements` 会被服务端忽略；**颜色/emoji 为 callout 顶层字段**（background_color/border_color/text_color 数字枚举、emoji_id）——`callout.style` 包裹会被忽略并回落默认配色；**必须至少一个子块**（空内容补空 text 子块，否则报 1770041）；text 快捷写法自动生成子块）；24 grid 分栏（grid.column_size 2~5 必填且等于 grid_column 子块数；**每个 grid_column 必须带** `grid_column:{width_ratio:<整数>}` **且至少一个子块**——实测 width_ratio 只接受整数（传 0.5 报 9499）、缺该字段或空列报 1770041；工具会自动把小数权重按比例换算为整数并补空列；列内可直接放段落/列表/待办等块，随分栏一次创建；列宽可再经 api_call 调 PATCH `.../blocks/{grid_id}` 传 `update_grid_column_width_ratio: {width_ratios: [整数权重数组]}` 调整）。\n- **表格列宽自动按内容自适应**（汉字计双宽、总宽 730px、单列下限 100px）：可用 table.column_width 显式指定每列 px（长度须等于列数）或 table.total_width 改目标总宽，table.header_row 设首行标题行；改**已有表格**的列宽/标题行用 set_table_width。\n- **复杂嵌套 JSON 请分批提交（每批少量块）或优先简化写法（text 快捷参数 / table.rows）**——长 JSON 易被模型输出截断导致解析失败。\n- 引用型（需先有云空间资源 token 或外部地址）：35 embed（embed.url 必填）、37 file（file.token）、39 sheet（sheet.token）、43 mindnote（mindnote.token，思维导图/画板）、44 bitable（bitable.token，多维表格）、46 diagram（diagram.diagram_type）。\n- 图片 27 请用 insert_image 工具（三步流程，add_blocks 不支持）；32 table_cell 不可单独创建（须随 table）。",
-    {
-      document_id: { type: "string" },
-      block_id: { type: "string", description: "父块 id（缺省文档根块，追加到末尾）" },
-      blocks: { type: "array", items: { type: "object" }, description: "块数组（直接传 JSON 数组；兼容字符串形式。用数组直传可避免长 JSON 字符串被转义/截断）" },
-      text: { type: "string", description: "要追加的纯文本（与 blocks 二选一）" },
-      index: { type: "number", description: "插入位置（缺省末尾；含表格/嵌套/todo 时不生效）" },
-    },
-    ["document_id"],
-    async (args, ctx) => {
-      const docId = String(args.document_id)
-      const blockId = args.block_id ? String(args.block_id) : await rootBlockId(ctx, docId)
-      let children: unknown
-      if (args.blocks !== undefined) {
-        children = jsonArg(args.blocks, "blocks")
-        if (!Array.isArray(children) || children.length === 0) throw new Error("blocks 必须是至少一个块的 JSON 数组")
-        // 字段自动映射：text → heading1/bullet/todo 等驼峰字段（实测统一 text 报 invalid param）
-        children = (children as unknown[]).map((b) => normalizeBlockFields(b as Record<string, unknown>))
-      } else if (args.text !== undefined) {
-        children = [{ block_type: 2, text: { elements: textElements(String(args.text)) } }]
-      } else {
-        throw new Error("请提供 blocks 或 text 之一")
-      }
-      const index = args.index !== undefined ? num(args.index, 0) : undefined
-      const childrenArr = children as unknown[]
-      // 不可创建块类型前置拦截（实测：16 equation 不在 children/descendant 创建接口枚举内，报 99992402）
-      for (const b of childrenArr) {
-        const err = uncreatableBlockType(b)
-        if (err) throw new Error(err)
-      }
-      // 嵌套结构（children 引用/table 块/自带 block_id）、todo 或容器块（callout/grid）：children 接口不支持，
-      // 统一走创建嵌套块（descendant）接口——一次请求创建完整表格/嵌套结构
-      // （实测修复：带内容表格逐格填充 N 次调用 + 限频 429 风险；B6：todo 经 children 接口报 99992402）
-      const needsNested = childrenArr.some((b) => {
-        if (!b || typeof b !== "object") return false
-        const bo = b as Record<string, unknown>
-        const t = Number(bo.block_type ?? 0)
-        return t === BLOCK_TYPE.TABLE || t === BLOCK_TYPE.TODO || t === BLOCK_TYPE.CALLOUT || t === BLOCK_TYPE.GRID || t === BLOCK_TYPE.GRID_COLUMN || (Array.isArray(bo.children) && bo.children.length > 0) || bo.block_id !== undefined
-      })
-      if (needsNested) {
-        const bb = new BlockBuilder(0)
-        const groups: BlockGroup[] = []
-        let fillNote = ""
-        for (const b of childrenArr) {
-          const bo = b as Record<string, unknown>
-          // grid 结构前置校验（实测 1770041 open schema mismatch / 9499 invalid parameter）
-          const gridErr = gridStructureError(bo)
-          if (gridErr) throw new Error(gridErr)
-          const before = bb.counter
-          let rootId: string
-          // 表格简化写法（table.rows 二维数组）→ 展开为 table+table_cell+text 嵌套块，一次创建
-          if (Number(bo.block_type ?? 0) === BLOCK_TYPE.TABLE && (bo.table as Record<string, unknown> | undefined)?.rows !== undefined) {
-            rootId = expandTableRows(bo, bb)
-          } else {
-            // grid 归一（实测）：每列补 width_ratio 与空子块——缺一即报 1770041
-            const prepared = prepareGridColumns(bo)
-            if (prepared.filledColumns > 0) {
-              fillNote = `；分栏空列已补空段落（平台要求每列至少一个子块）`
-            }
-            rootId = buildGroup(prepared.block, bb)
-          }
-          groups.push({ rootId, blocks: bb.blocks.slice(before) })
-        }
-        // descendant 接口不支持 index（实测：index 语义对该接口不明确）：固定追加到末尾
-        await insertGroups(ctx, docId, blockId, groups)
-        const indexNote = index !== undefined ? "（index 参数对嵌套块接口不生效，已追加到末尾）" : ""
-        return { output: `✓ 已添加 ${childrenArr.length} 个顶层块（含嵌套/表格/todo，走创建嵌套块接口，追加到末尾）${indexNote}${fillNote}` }
-      }
-      const results: string[] = []
-      // children 接口单次最多 50 块，自动分批
-      for (let i = 0; i < childrenArr.length; i += 50) {
-        const body: Record<string, unknown> = { children: childrenArr.slice(i, i + 50) }
-        if (i === 0 && index !== undefined) body.index = index
-        const data = await docxCall(ctx, docId, blockId, { checkParent: true }, () =>
-          api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${blockId}/children`, { method: "POST", body }),
-        )
-        results.push(JSON.stringify(data))
-      }
-      return { output: `✓ 已添加 ${childrenArr.length} 个块${results.length > 1 ? `（分 ${results.length} 批）` : ""}` }
-    },
-  )
 
-  const updateBlock = tool(
-    "update_block",
-    "更新文档块内容：文本（text 整体替换 / insert_text 插入）或表格属性（table_property 直通 update_table_property，如 {column_index, column_width} 逐列改宽、{header_row} / {header_column}、{insert_table_row} / {insert_table_column} / {delete_table_rows} 增删行列；批量改宽用 set_table_width）。",
-    {
-      document_id: { type: "string" },
-      block_id: { type: "string" },
-      text: { type: "string", description: "替换后的文本（支持行内 Markdown 语法）" },
-      insert_text: { type: "string", description: "要插入的文本" },
-      insert_index: { type: "number", description: "插入位置（缺省 0=开头）" },
-      style: { type: "object", description: "文本样式 {bold,italic,underline,strikethrough,inline_code}，需配合 text/insert_text" },
-      table_property: { type: "object", description: "表格属性（仅表格块 31）——原样作为 update_table_property 提交，如 {column_index:0,column_width:320} 改第 0 列宽、{header_row:true} 首行标题行、{insert_table_row:{row_index:-1}} 末尾插行" },
-    },
-    ["document_id", "block_id"],
-    async (args, ctx) => {
-      const docId = String(args.document_id)
-      const blockId = String(args.block_id)
-      const style = args.style !== undefined ? (jsonArg(args.style, "style") as Record<string, unknown>) : undefined
-      let patch: Record<string, unknown> = { block_id: blockId }
-      let insertIndex = 0
-      if (args.table_property !== undefined) {
-        patch.update_table_property = jsonArg(args.table_property, "table_property") as Record<string, unknown>
-      } else if (args.insert_text !== undefined) {
-        insertIndex = args.insert_index !== undefined ? num(args.insert_index, 0) : 0
-        patch.insert_text = { index: insertIndex, elements: textElements(String(args.insert_text), style) }
-      } else if (args.text !== undefined) {
-        patch.update_text_elements = { elements: textElements(String(args.text), style) }
-      } else {
-        throw new Error("请提供 text / insert_text / table_property 之一")
-      }
-      try {
-        const data = await docxCall(ctx, docId, blockId, {}, () =>
-          api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${blockId}`, { method: "PATCH", body: patch }),
-        )
-        return jsonResult(ctx, data, "更新成功")
-      } catch (err) {
-        // insert_text 降级：飞书 insert_text 参数校验严格（实测 invalid param），
-        // 读块原文 → 在 index 处拼接 → 整体替换（update_text_elements 已验证可用）；
-        // 仅精确匹配参数校验类错误才降级（防误吞其他错误掩盖原始原因）
-        const msg = (err as Error).message
-        if (args.insert_text === undefined || !/(code=(99991400|10001)\b|invalid param)/i.test(msg)) throw err
-        try {
-          const block = unwrapBlockResponse(await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${blockId}`))
-          if (!block) throw new Error("读取块原文失败：响应无 block 数据")
-          const original = blockText(block)
-          const chars = Array.from(original)
-          const pos = Math.min(Math.max(insertIndex, 0), chars.length)
-          const merged = chars.slice(0, pos).join("") + String(args.insert_text) + chars.slice(pos).join("")
-          const data = await docxCall(ctx, docId, blockId, {}, () =>
-            api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${blockId}`, {
-              method: "PATCH",
-              body: { block_id: blockId, update_text_elements: { elements: textElements(merged, style) } },
-            }),
-          )
-          return jsonResult(ctx, data, "更新成功（insert_text 降级为整体替换）")
-        } catch (err2) {
-          throw new Error(`insert_text 失败（降级整体替换也失败）: ${(err2 as Error).message}\n原始错误: ${msg}`)
-        }
-      }
-    },
-  )
 
-  const deleteBlocks = tool(
-    "delete_blocks",
-    "批量删除文档块（按子块下标区间 [start_index, end_index)，不含 end_index；只删一个时省略 end_index 或与 start_index 相同）。**注意：删除不可恢复**。",
-    {
-      document_id: { type: "string" },
-      block_id: { type: "string", description: "父块 id（缺省文档根块）" },
-      start_index: { type: "number" },
-      end_index: { type: "number", description: "缺省或与 start_index 相同 = 只删一个" },
-    },
-    ["document_id", "start_index"],
-    async (args, ctx) => {
-      const docId = String(args.document_id)
-      const blockId = args.block_id ? String(args.block_id) : await rootBlockId(ctx, docId)
-      const start = num(args.start_index, 0)
-      // 半开区间 [start, end)：end 必须 > start；缺省/相同视为删单个；反向区间明确报错
-      let end = args.end_index !== undefined ? num(args.end_index, start) : start
-      if (args.end_index !== undefined && end < start) throw new Error(`end_index（${end}）不能小于 start_index（${start}）`)
-      if (end <= start) end = start + 1
-      const data = await docxCall(ctx, docId, blockId, {}, () =>
-        api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${blockId}/children/batch_delete`, {
-          method: "DELETE",
-          body: { start_index: start, end_index: end },
-        }),
-      )
-      return jsonResult(ctx, data, "删除成功")
-    },
-  )
 
-  const replaceText = tool(
-    "replace_text",
-    "跨块查找替换文本（不改变块结构与行内样式）：先 `dry_run=true` 看命中清单（块 id/类型/次数/预览），确认后正式替换（一次 ``batch_update`` 批量提交，比逐块 update_block 快）。适用场景：同一个术语/名称/口径在全文多处要统一改。**跨样式片段**（命中跨越加粗/链接等样式边界）无法逐段替换，会在报告里单列并给出块 id（改用 update_block 整块重写）。",
-    {
-      document_id: { type: "string" },
-      pattern: { type: "string", description: "要查找的文本（默认按字面匹配；regex=true 时按正则）" },
-      replacement: { type: "string", description: "替换为的文本（空字符串 = 删除命中内容）" },
-      regex: { type: "boolean", description: "pattern 按正则解释（默认 false 字面匹配）" },
-      block_ids: { type: "array", items: { type: "string" }, description: "只在这些块内替换（缺省全文）" },
-      limit: { type: "number", description: "最多更新多少个块（防止一次改太多，缺省不限）" },
-      dry_run: { type: "boolean", description: "只预览命中不写入（默认 false）" },
-    },
-    ["document_id", "pattern", "replacement"],
-    async (args, ctx) => {
-      const docId = String(args.document_id)
-      const { items } = await collectPages(ctx, `/open-apis/docx/v1/documents/${docId}/blocks`, 500, 2000)
-      const plan = replaceInBlocks(items, {
-        pattern: String(args.pattern),
-        replacement: String(args.replacement),
-        regex: args.regex === true,
-        blockIds: Array.isArray(args.block_ids) ? (args.block_ids as unknown[]).map((x) => String(x)) : undefined,
-        limit: args.limit !== undefined ? num(args.limit, 0) : undefined,
-      })
-      const hitLines = plan.hits.map((h) => `- [${h.typeName}] ${h.blockId}：${h.count} 处 → ${h.preview}`)
-      const crossLines = plan.crossRun.map((h) => `- [${h.typeName}] ${h.blockId}：命中跨样式片段（${h.count} 处），逐段替换无法完成 → 用 update_block 整块重写；片段：${h.preview}`)
-      if (args.dry_run === true) {
-        if (!plan.total) return { output: `未命中：全文没有与「${String(args.pattern)}」匹配的文本（统计 ${items.length} 个块；可检查大小写/全角半角，或改用 regex=true）` }
-        const parts = [`预演（dry_run，未写入）：共命中 ${plan.total} 处，涉及 ${plan.hits.length + plan.crossRun.length} 个块`]
-        if (hitLines.length) parts.push(`可替换 ${plan.hits.length} 个块：\n${hitLines.join("\n")}`)
-        if (crossLines.length) parts.push(`需手工处理 ${plan.crossRun.length} 个块：\n${crossLines.join("\n")}`)
-        if (plan.skipped) parts.push(`因 limit 跳过 ${plan.skipped} 个块`)
-        parts.push("确认无误后用 dry_run=false 正式替换。")
-        return { output: parts.join("\n") }
-      }
-      if (!plan.updates.length) return { output: `未执行替换：可替换命中 0 处${plan.crossRun.length ? `（有 ${plan.crossRun.length} 个块命中跨样式片段，需用 update_block 手工改）` : ""}` }
-      let ok = 0
-      const failures: string[] = []
-      for (let i = 0; i < plan.updates.length; i += 20) {
-        const batch = plan.updates.slice(i, i + 20)
-        try {
-          await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/batch_update`, {
-            method: "PATCH",
-            body: { requests: batch.map((u) => ({ block_id: u.blockId, update_text_elements: { elements: u.elements } })) },
-          })
-          ok += batch.length
-        } catch (err) {
-          // 整批失败时逐个重试（定位到具体块，并把失败块如实报出，不整批丢弃）
-          for (const u of batch) {
-            try {
-              await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${u.blockId}`, {
-                method: "PATCH",
-                body: { block_id: u.blockId, update_text_elements: { elements: u.elements } },
-              })
-              ok++
-            } catch (err2) {
-              failures.push(`${u.blockId}（${(err2 as Error).message.slice(0, 120)}）`)
-            }
-          }
-        }
-        if (i + 20 < plan.updates.length) await new Promise((r) => setTimeout(r, 350))
-      }
-      const parts = [`✓ 已替换 ${ok}/${plan.updates.length} 个块（共 ${plan.total} 处命中）`]
-      if (failures.length) parts.push(`未成功 ${failures.length} 个：${failures.join("；")}`)
-      if (plan.crossRun.length) parts.push(`跨样式片段未处理 ${plan.crossRun.length} 个块：${plan.crossRun.map((h) => h.blockId).join("、")}（用 update_block 整块重写）`)
-      if (plan.skipped) parts.push(`因 limit 跳过 ${plan.skipped} 个块`)
-      parts.push("建议：重新跑 lint_doc 确认无回归。")
-      return { output: parts.join("\n") }
-    },
-  )
 
   const setTableWidth = tool(
     "set_table_width",
     "重设文档中表格的列宽——修复接口默认列宽（每列 100px）导致的窄列长条。columns 缺省时按单元格内容自适应分配（汉字计双宽、总宽 730px、单列下限 100px，与 Markdown 导入表格同一算法）；total_width 指定自适应目标总宽；columns 显式指定每列宽度（px，长度须等于列数）。接口一次只能改一列，工具内部逐列串行提交（遵守文档编辑 3 次/秒限频）。",
     {
       document_id: { type: "string" },
-      block_id: { type: "string", description: "表格块的 block_id（可用 find_blocks 按 type=table 反查，或从 get_doc_blocks 的 type_name=table 块取）" },
+      block_id: { type: "string", description: "表格块的 block_id（fetch_doc detail=with-ids 输出的 table 块 id）" },
       columns: { type: "array", items: { type: "number" }, description: "显式列宽数组（px，每列不低于 50），长度须等于列数；缺省按内容自适应" },
       total_width: { type: "number", description: "自适应时的目标总宽 px（缺省 730 = 文档正文宽度）" },
       header_row: { type: "boolean", description: "首行设为标题行（加粗 + 底色）" },
@@ -1471,7 +1085,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       const { items } = await collectPages(ctx, `/open-apis/docx/v1/documents/${docId}/blocks`, 500, 2000)
       const byId = new Map(items.map((b) => [String(b.block_id), b]))
       const table = byId.get(blockId)
-      if (!table) throw new Error(`文档 ${docId} 中不存在块 ${blockId}（先用 get_doc_blocks / find_blocks 确认表格块的 block_id）`)
+      if (!table) throw new Error(`文档 ${docId} 中不存在块 ${blockId}（先用 fetch_doc detail=with-ids 确认表格块的 block_id）`)
       const type = Number(table.block_type ?? 0)
       if (type !== BLOCK_TYPE.TABLE) throw new Error(`块 ${blockId} 不是表格块（实际类型 ${blockTypeName(type)}）——set_table_width 只作用于 block_type=31 的表格`)
       const prop = ((table.table ?? {}) as Record<string, unknown>).property as Record<string, unknown> | undefined
@@ -1537,7 +1151,10 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
         descendants: batches[i].flatMap((g) => stripLocalMeta(g.blocks)),
       }
       if (i === 0 && index !== undefined) body.index = index
-      const res = (await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${parent}/descendant`, { method: "POST", body })) as
+      // 写入失败走 docxCall 同源诊断（区分文档不存在/无权限/参数不合法）
+      const res = (await docxCall(ctx, docId, parent, {}, () =>
+        api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${parent}/descendant`, { method: "POST", body }),
+      )) as
         | { block_id_relations?: Array<{ block_id?: string; temporary_block_id?: string }> }
         | undefined
       for (const rel of res?.block_id_relations ?? []) {
@@ -2065,49 +1682,6 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     },
   )
 
-  const insertImage = tool(
-    "insert_image",
-    "在文档中插入图片（飞书官方三步流程，实测验证）：1) 创建空 image 块（block_type=27，image:{}，创建时**不传 token**——传 token 报 1770001）；2) 上传图片素材到该块（POST drive/v1/medias/upload_all，multipart：parent_type=docx_image、parent_node=新建块 id；**云空间的 file_token 不能直接用于文档 image 块**，必须走 media 上传）；3) PATCH replace_image 设置素材 token（返回 width/height 自动识别）。",
-    {
-      document_id: { type: "string" },
-      block_id: { type: "string", description: "父块 id（缺省文档根块，追加到末尾）" },
-      image: { type: "string", description: "base64 文本（encoding=base64）、本地图片文件路径（**须传绝对路径**，相对路径相对会话目录会 ENOENT）或 http(s) 图片地址" },
-      file_name: { type: "string", description: "文件名（缺省 image.png）" },
-      encoding: { type: "string", description: "base64 或 path（默认 path）" },
-    },
-    ["document_id", "image"],
-    async (args, ctx) => {
-      const docId = String(args.document_id)
-      const blockId = args.block_id ? String(args.block_id) : await rootBlockId(ctx, docId)
-      const fileName = String(args.file_name ?? "image.png")
-      // 先读文件/校验，后创建块：原顺序（先建空块）在路径错误/base64 非法/超限时会在文档中
-      // 残留一个空 image 块（三步流程无回滚，脏数据需模型额外感知清理）
-      let bytes: Uint8Array
-      if (args.encoding === "base64") {
-        try {
-          bytes = Uint8Array.from(atob(String(args.image)), (c) => c.charCodeAt(0))
-        } catch {
-          throw new Error("base64 解码失败：image 不是合法 base64 文本")
-        }
-        if (!bytes.length) throw new Error("图片内容为空（base64 无效？）")
-        // 大小上限（飞书 media 上传限制 20MB）：显式校验做纵深防御（base64 双份拷贝内存峰值约 2.7×）
-        if (bytes.length > 20 * 1024 * 1024) throw new Error(`图片超过 20MB 上限: ${(bytes.length / 1024 / 1024).toFixed(1)}MB`)
-      } else {
-        bytes = (await readImageBytes(ctx, String(args.image))).bytes
-      }
-      // 步骤 1：创建空 image 块（image:{} 不传 token，否则 1770001 invalid param）
-      const created = (await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${blockId}/children`, {
-        method: "POST",
-        body: { children: [{ block_type: BLOCK_TYPE.IMAGE, image: {} }] },
-      })) as { children?: Array<{ block_id?: string }> }
-      const imageBlockId = created.children?.[0]?.block_id
-      if (!imageBlockId) throw new Error("创建 image 块失败：响应缺少 block_id")
-      // 步骤 2/3：上传素材并 replace_image（与 Markdown 导入图片共用实现）
-      const filled = await fillImageBlock(ctx, docId, imageBlockId, bytes, fileName)
-      const size = filled.width ? `（${filled.width}×${filled.height}）` : ""
-      return { output: `✓ 已在文档插入图片${size}\nimage block_id: ${imageBlockId}\nmedia file_token: ${filled.token}` }
-    },
-  )
 
   const downloadFile = tool(
     "download_file",
@@ -2542,7 +2116,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const getBoard = tool(
     "get_board",
-    "读取思维导图/画板（board，含文档中 UML 等图形内容）。参数二选一：board_token 画板 token；或 document_id+block_id——mindnote 思维导图块（块类型 43，get_doc_blocks 输出 type_name=mindnote、含 board.token）自动提取画板 token。内部调用 /open-apis/board/v1/whiteboards/{token}/nodes 并结构化提取：优先返回 PlantUML 源码（syntax.code，语义完整可读），否则重建「形状文本 + 连接线关系」为流程描述（如 <步骤A> ->(是) <步骤B>），避免原始大 JSON 截断。",
+    "读取思维导图/画板（board，含文档中 UML 等图形内容）。参数二选一：board_token 画板 token；或 document_id+block_id——mindnote 思维导图块（块类型 43，fetch_doc 输出 type_name=mindnote、含 board.token）自动提取画板 token。内部调用 /open-apis/board/v1/whiteboards/{token}/nodes 并结构化提取：优先返回 PlantUML 源码（syntax.code，语义完整可读），否则重建「形状文本 + 连接线关系」为流程描述（如 <步骤A> ->(是) <步骤B>），避免原始大 JSON 截断。",
     {
       board_token: { type: "string", description: "画板/思维导图 token（必填，或与 document_id+block_id 二选一）" },
       document_id: { type: "string", description: "含思维导图块的文档 id（与 block_id 配合，自动提取画板 token）" },
@@ -2564,7 +2138,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
         boardToken = extractBoardToken(block)
         if (!boardToken) {
           throw new Error(
-            `块 ${blockId} 不含画板 token（块类型「${blockTypeName(Number(block.block_type ?? 0))}」${block.block_type ?? 0}）——请用 get_doc_blocks/find_blocks 查找 type_name=mindnote 的块`,
+            `块 ${blockId} 不含画板 token（块类型「${blockTypeName(Number(block.block_type ?? 0))}」${block.block_type ?? 0}）——请用 fetch_doc 查找 mindnote 块`,
           )
         }
       }
@@ -2697,16 +2271,9 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     create_doc: createDoc,
     get_doc_meta: getDocMeta,
     get_doc_text: getDocText,
-    get_doc_blocks: getDocBlocks,
     fetch_doc: fetchDoc,
     update_doc: updateDoc,
-    list_blocks: listBlocks,
-    find_blocks: findBlocks,
-    add_blocks: addBlocks,
-    update_block: updateBlock,
-    replace_text: replaceText,
     set_table_width: setTableWidth,
-    delete_blocks: deleteBlocks,
     import_markdown: importMarkdown,
     import_xml: importXml,
     lint_doc: lintDoc,
@@ -2716,7 +2283,6 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     create_folder: createFolder,
     get_file_meta: getFileMeta,
     upload_file: uploadFile,
-    insert_image: insertImage,
     download_file: downloadFile,
     delete_file: deleteFile,
     search: search,
@@ -3058,21 +2624,6 @@ function cellText(id: string, byId: Map<string, Record<string, unknown>>, seen: 
   return parts.filter((p) => p !== "").join("\n")
 }
 
-/** 块所在路径（根 → 自身，取每级文本前 30 字符）。 */
-function blockPath(block: Record<string, unknown>, byId: Map<string, Record<string, unknown>>): string {
-  const chain: string[] = []
-  const seen = new Set<string>()
-  let cur: Record<string, unknown> | undefined = block
-  while (cur && !seen.has(String(cur.block_id))) {
-    seen.add(String(cur.block_id))
-    const bt = Number(cur.block_type ?? 0)
-    const t = blockText(cur).slice(0, 30)
-    chain.unshift(t || (bt === 1 ? "根" : blockTypeName(bt)))
-    cur = byId.get(String(cur.parent_id ?? ""))
-  }
-  return chain.join(" / ") || "/"
-}
-
 /** 块类型过滤解析：数字或名称（heading 覆盖 heading1~9）。 */
 function parseBlockTypeFilter(spec: string): Set<number> {
   const named: Record<string, number[]> = {
@@ -3116,18 +2667,6 @@ function parseBlockTypeFilter(spec: string): Set<number> {
   const numeric = Number(s)
   if (Number.isFinite(numeric)) return new Set([numeric])
   throw new Error(`无法识别的块类型: ${spec}（支持数字或名称，如 heading/text/bullet/ordered/code/quote/todo/table）`)
-}
-
-/** 块列表项标注 type_name（不可变返回新对象）。 */
-function decorateBlockType(item: Record<string, unknown>): Record<string, unknown> {
-  return { ...item, type_name: blockTypeName(Number(item.block_type ?? 0)) }
-}
-
-/** 对列表响应整体标注 type_name。 */
-function decorateBlocksPayload(data: unknown): unknown {
-  const d = data as { items?: Array<Record<string, unknown>> } | null
-  if (!d || !Array.isArray(d.items)) return data
-  return { ...d, items: d.items.map(decorateBlockType) }
 }
 
 /** 块组：一个顶层块及其全部子树块（descendant 接口插入单位，块内已含 block_id 与 children 引用）。 */
@@ -3824,23 +3363,6 @@ export function gridStructureError(block: Record<string, unknown>): string | nul
   return null
 }
 
-/** 创建接口不支持的块类型检查（含嵌套子树；实测：16 equation 不在创建枚举内，报 99992402 field validation failed）。 */
-function uncreatableBlockType(block: unknown): string | null {
-  if (!block || typeof block !== "object") return null
-  const o = block as Record<string, unknown>
-  if (Number(o.block_type ?? 0) === BLOCK_TYPE.EQUATION) {
-    return "equation（公式块 16）不可通过 API 创建（官方创建接口枚举不含 16，实测 99992402 field validation failed）——请改用普通文本块表示公式，或提示用户手动插入公式块"
-  }
-  const kids = o.children
-  if (Array.isArray(kids)) {
-    for (const k of kids) {
-      const err = uncreatableBlockType(k)
-      if (err) return err
-    }
-  }
-  return null
-}
-
 function buildGroup(block: Record<string, unknown>, bb: BlockBuilder): string {
   const b = { ...block }
   delete b.block_id
@@ -3848,7 +3370,7 @@ function buildGroup(block: Record<string, unknown>, bb: BlockBuilder): string {
   if (Array.isArray(kids) && kids.length > 0) {
     const childIds: string[] = []
     for (const k of kids) {
-      // 仅接受块对象：字符串 id 引用（如 find_blocks 复制的旧 id）在本批中必然悬空，明确报错提示
+      // 仅接受块对象：字符串 id 引用（如 fetch_doc 复制的旧 id）在本批中必然悬空，明确报错提示
       if (k && typeof k === "object") childIds.push(buildGroup(normalizeBlockFields(k as Record<string, unknown>), bb))
       else throw new Error("children 元素必须是块对象（嵌套结构请直接写块 JSON，不支持字符串 id 引用）")
     }
