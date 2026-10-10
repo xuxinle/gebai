@@ -110,6 +110,68 @@ describe("Web UI 入口 HTML 缓存（按 index.html 的 mtime 失效）", () =>
   })
 })
 
+describe("页面标题注入（GEBAI_TITLE）", () => {
+  /** 写入指定 <title> 的入口 HTML。 */
+  function writeIndexWithTitle(dir: string, titleTag: string): void {
+    writeFileSync(join(dir, "index.html"), `<html><head>${titleTag}</head><body>page</body></html>`, "utf8")
+  }
+
+  test("设置后替换 <title>（含 files 页前缀保留）并注入 window.__GEBAI_TITLE__", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-static-title-"))
+    try {
+      writeIndexWithTitle(dir, "<title>歌白</title>")
+      writeFileSync(join(dir, "files.html"), `<html><head><title>文件工作台 · 歌白</title></head><body>f</body></html>`, "utf8")
+      const app = createApp(makeDeps({ webDist: dir, devReload: false, title: "我的工作台" }))
+
+      const html = await (await app.request("/")).text()
+      expect(html).toContain("<title>我的工作台</title>")
+      expect(html).toContain('window.__GEBAI_TITLE__="我的工作台"')
+      expect(html).not.toContain("歌白")
+
+      // files 页：前缀「文件工作台」保留，分隔符不重复，名字替换为定制值
+      const files = await (await app.request("/files")).text()
+      expect(files).toContain("<title>文件工作台 · 我的工作台</title>")
+      expect(files).toContain('window.__GEBAI_TITLE__="我的工作台"')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("含 HTML 敏感字符的标题正确转义（<title> 实体 / <script> JSON 转义）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-static-title-esc-"))
+    try {
+      writeIndexWithTitle(dir, "<title>歌白</title>")
+      const app = createApp(makeDeps({ webDist: dir, devReload: false, title: `a<b>&"c</script>` }))
+
+      const html = await (await app.request("/")).text()
+      // <title> 上下文：实体转义
+      expect(html).toContain("<title>a&lt;b&gt;&amp;&quot;c&lt;/script&gt;</title>")
+      // <script> 上下文：JSON 序列化 + `<` 转义为 \u003c，不产生真实的 </script> 截断点
+      expect(html).toContain('window.__GEBAI_TITLE__="a\\u003cb>&\\"c\\u003c/script>"')
+      expect(html).not.toContain("c</script>")
+      // 注入脚本可完整解析回原字符串（转义往返无损，脚本元素不会被截断）
+      const m = /<script>window\.__GEBAI_TITLE__=(.*?)<\/script>/.exec(html)
+      expect(m && JSON.parse(m[1]!)).toBe(`a<b>&"c</script>`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("未设置时不注入（前端内置默认「歌白」保持不动）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-static-title-off-"))
+    try {
+      writeIndexWithTitle(dir, "<title>歌白</title>")
+      const app = createApp(makeDeps({ webDist: dir, devReload: false }))
+
+      const html = await (await app.request("/")).text()
+      expect(html).toContain("<title>歌白</title>")
+      expect(html).not.toContain("__GEBAI_TITLE__")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
 describe("语法 wasm 静态回源（/vendor/tree-sitter/lang）", () => {
   /** 空 webDist（这些字节不来自 web 产物，而是服务端内嵌语法集）。 */
   const app = () => {

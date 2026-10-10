@@ -203,13 +203,36 @@ export function registerStaticRoutes(rc: RouteCtx): void {
     // 否则该主题经环境变量设置会被静默回落为 acrylic（前端面板手动切换不经此白名单）。
     const UI_STYLES = ["acrylic", "aether", "cyberpunk", "aurora", "synthwave", "matrix", "tokyo-night", "ink", "cny", "qinhan"]
     const style = UI_STYLES.includes(d.config.uiStyle) ? d.config.uiStyle : "acrylic"
+    // 浏览器页面标题（GEBAI_TITLE）：未设置则不注入任何东西（前端内置默认「歌白」保持不动）
+    const title = d.config.title || ""
+    /** 标题入 HTML 属性上下文（<title> 标签内）的实体转义。 */
+    const escapeHtml = (s: string): string =>
+      s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
     let cachedHtml: string | null = null
     // HTML 缓存的 mtime 伴随值（-1 = 尚未缓存；二进制内嵌模式下恒 0）
     let cachedHtmlMtime = -1
 
-    /** 注入 UI 风格 + dev-reload 热刷新脚本 + 重启自动刷新脚本（`/` 与 `/files` 共用）。 */
+    /** 注入 UI 风格 + 页面标题 + dev-reload 热刷新脚本 + 重启自动刷新脚本（`/` 与 `/files` 共用）。 */
     const inject = (raw: string): string => {
+      let html = raw
+      if (title) {
+        // ① 静态 <title>：files 页为「文件工作台 · 歌白」形态，前缀保留、名字替换；其余整条替换。
+        //    未匹配到 <title>（异常 HTML）不动，运行时脚本（②）仍保底生效。
+        html = html.replace(
+          /<title>\s*([^<]*?)\s*歌白\s*<\/title>/,
+          (_m, prefixRaw: string) => {
+            // 前缀形如「文件工作台 · 」：剥离尾部分隔符（· / | / - / — 后随空白）后重组，避免双分隔符
+            const prefix = prefixRaw.replace(/[\s·|\-—]+$/, "")
+            return `<title>${prefix ? `${escapeHtml(prefix)} · ` : ""}${escapeHtml(title)}</title>`
+          },
+        )
+      }
       let injected = `<script>window.__GEBAI_UI_STYLE__=${JSON.stringify(style)}</script>`
+      if (title) {
+        // ② 运行时标题（前端 updateTitle 读取）：JSON 入 <script>，`<` 转义为 \u003c 防
+        //    标题含 </script> 时截断页面（JSON.stringify 不转义 <，需手动补）
+        injected += `<script>window.__GEBAI_TITLE__=${JSON.stringify(title).replace(/</g, "\\u003c")}</script>`
+      }
       // 开发模式热刷新（--reload）：监听 /__gebai_hot，收到 reload 或连接断开（服务端重启）即刷新页面
       if (d.config.devReload) {
         const client = `(()=>{let ws;const go=()=>{const u=new URL("__gebai_hot",location.href);u.protocol=u.protocol==="https:"?"wss:":"ws:";ws=new WebSocket(u);ws.onmessage=e=>{try{if(JSON.parse(e.data).type==="reload")location.reload()}catch{}};ws.onclose=()=>setTimeout(()=>location.reload(),400)};go()})()`
@@ -223,7 +246,7 @@ export function registerStaticRoutes(rc: RouteCtx): void {
         const client = `(()=>{let boot=null;const check=()=>{fetch(new URL("api/health",location.href),{cache:"no-store"}).then(r=>r.ok?r.json():null).then(j=>{if(!j||!j.boot)return;if(boot===null){boot=j.boot;return}if(j.boot!==boot)location.reload()}).catch(()=>{})};check();setInterval(check,3000)})()`
         injected += `<script>${client}</script>`
       }
-      return raw.replace("</head>", `${injected}</head>`)
+      return html.replace("</head>", `${injected}</head>`)
     }
 
     /** 读取 webDist（或内嵌资源）中的某个 HTML 页面；缺失返回 null。 */

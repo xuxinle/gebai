@@ -81,7 +81,8 @@ afterAll(() => {
 
 // headerCtxEl 经导入断言（bun test 全仓单进程共享模块缓存：state.ts 可能已被更早的测试文件以其
 // mock 的 document 先加载，模块级 DOM 引用固定为那份数据集——断言必须落在模块实际持有的元素上）
-const { pendingTools, pendingToolsKey, clearPendingTools, setCurrentSession, getCurrentSession, isDraftView, lastSessionId, setConn, setMaxCtxTokens, headerCtxEl, runs, syncConnThinking, filesPreview } = await import("./state")
+// updateTitle 回归组在此导入（标志空 = 未定制）；定制组见文件末尾的二次动态 import。
+const { pendingTools, pendingToolsKey, clearPendingTools, setCurrentSession, getCurrentSession, isDraftView, lastSessionId, setConn, setMaxCtxTokens, headerCtxEl, runs, syncConnThinking, filesPreview, updateTitle } = await import("./state")
 
 function entry(sessionId: string, _toolCallId: string) {
   return { wrapper: base as unknown as HTMLElement, body: base as unknown as HTMLElement, session: sessionId, kind: "tool" as const, name: "sh" }
@@ -182,6 +183,38 @@ describe("pendingTools（会话隔离工具调用配对）", () => {
     clearPendingTools("bbb")
     expect(pendingTools.size).toBe(0)
     pendingTools.clear()
+  })
+})
+
+describe("浏览器 tab 标题（GEBAI_TITLE → window.__GEBAI_TITLE__，模块加载期固化）", () => {
+  test("未注入时回归默认「歌白」（无论切换会话与否）", () => {
+    const doc = (globalThis as Record<string, unknown>).document as { title: string }
+    updateTitle()
+    expect(doc.title).toBe("歌白")
+    setCurrentSession({ id: "t1", name: "会话A", userId: "admin", createdAt: 0, updatedAt: 0 })
+    updateTitle()
+    expect(doc.title).toBe("歌白")
+    setCurrentSession(null)
+  })
+
+  test("注入自定义标题时 updateTitle 用定制值（空白注入回落默认）", async () => {
+    // 与上面的回归组同进程同模块缓存：换标志须 query-bust 重新动态 import 才能重建模块级 BRAND_TITLE；
+    // 说明符经变量拼出（非字面量）——TS 不静态解析带 query 的路径，避免 TS2307
+    const bust = (q: string) => import(/* @vite-ignore */ "./state?" + q) as Promise<typeof import("./state")>
+    ;(window as unknown as { __GEBAI_TITLE__?: string }).__GEBAI_TITLE__ = "  我的工作台  "
+    try {
+      const mod = await bust("title")
+      const doc = (globalThis as Record<string, unknown>).document as { title: string }
+      mod.updateTitle()
+      expect(doc.title).toBe("我的工作台")
+      // 空白值视为未定制：回落「歌白」（与 config 侧 trim-空-undefined 同口径）
+      ;(window as unknown as { __GEBAI_TITLE__?: string }).__GEBAI_TITLE__ = "   "
+      const mod2 = await bust("title-blank")
+      mod2.updateTitle()
+      expect(doc.title).toBe("歌白")
+    } finally {
+      delete (window as unknown as { __GEBAI_TITLE__?: string }).__GEBAI_TITLE__
+    }
   })
 })
 

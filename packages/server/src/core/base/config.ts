@@ -65,6 +65,9 @@ export interface ServerConfig {
   /** 领域专用模式档案（`GEBAI_PROFILE`）：档案名（`{GEBAI_HOME}/profiles/{名}.json`）或档案文件路径。 */
   profile?: string
   uiStyle: string
+  /** 浏览器页面标题（GEBAI_TITLE）：设置则注入前端（window.__GEBAI_TITLE__ + 替换入口 HTML 的 <title>，
+   *  见 routes/static.ts）；未设置走前端内置默认「歌白」。运行时 updateTitle 同源读取，两者一致。 */
+  title?: string
   logLevel: "debug" | "info" | "warn" | "error"
   toolEnable?: string[]
   toolDisable?: string[]
@@ -316,6 +319,7 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     subAgentsEnable: trim.subAgents.enable,
     subAgentsDisable: trim.subAgents.disable,
     uiStyle: env("GEBAI_UI_STYLE", "acrylic"),
+    title: env("GEBAI_TITLE").trim() || undefined,
     logLevel: env("GEBAI_LOG_LEVEL", "info") as ServerConfig["logLevel"],
     toolEnable: trim.tools.enable,
     toolDisable: trim.tools.disable,

@@ -312,9 +312,12 @@ const headerTitleEl = document.getElementById("header-title")
 /** 上下文占比容器：信号灯闪烁分级（data-dur → --conn-blink）的变量挂载点（SVG 圆点继承）。 */
 export const headerCtxEl = document.getElementById("header-ctx")
 
-/** 浏览器 tab 标题固定为「歌白」（不拼接会话名）；标题栏居中会话标题跟随当前会话。 */
+/** 浏览器 tab 标题：服务端注入的全局定制（GEBAI_TITLE → window.__GEBAI_TITLE__），缺省「歌白」；
+ *  不拼接会话名；标题栏居中会话标题跟随当前会话。 */
+const BRAND_TITLE = ((window as { __GEBAI_TITLE__?: string }).__GEBAI_TITLE__ || "歌白").trim() || "歌白"
+
 export function updateTitle() {
-  document.title = "歌白"
+  document.title = BRAND_TITLE
   if (headerTitleEl) headerTitleEl.textContent = currentSession ? currentSession.name : ""
   renderHeaderCtx()
 }
