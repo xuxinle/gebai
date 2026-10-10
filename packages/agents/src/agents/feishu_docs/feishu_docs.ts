@@ -10,6 +10,8 @@ export const systemPrompt = systemPromptBase
 export const tools = createFeishuTools()
 export const requiresApproval = {
   create_doc: true,
+  fetch_doc: false,
+  update_doc: true,
   add_blocks: true,
   update_block: true,
   replace_text: true,

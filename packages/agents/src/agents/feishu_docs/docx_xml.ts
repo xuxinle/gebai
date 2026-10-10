@@ -455,7 +455,12 @@ function walkBlocks(nodes: XmlNode[], out: BlockDesc[], state: WalkState): void 
         if (border !== undefined) callout.border_color = border
         if (text !== undefined) callout.text_color = text
         const emoji = node.attrs.emoji?.trim()
-        if (emoji) callout.emoji_id = emoji
+        if (emoji) {
+          // emoji_id 需飞书 emoji 架名（如 bulb/pushpin/warning——见 https://open.feishu.cn/api_misc/emoji-list）；
+          // 原生 emoji 字符（❗💡 等）不被接受（实测 1770006 schema mismatch），忽略并提示
+          if (/^[A-Za-z0-9_+-]+$/.test(emoji)) callout.emoji_id = emoji
+          else notes.add(`emoji "${emoji}" 不是合法的 emoji 架名（需 bulb/pushpin/warning 等 ASCII 架名，原生 emoji 字符不被接受），已忽略`)
+        }
         const kids: BlockDesc[] = []
         walkBlocks(node.children, kids, state)
         const allowed = kids.filter((k) => [2, 12, 13, 17, 3, 4, 5, 6, 7, 8, 9, 10, 11].includes(Number(k.block_type)))

@@ -3,6 +3,15 @@ import { statSync, readFileSync } from "node:fs"
 import { truncate } from "@gebai/sdk/node"
 import type { ToolSchema } from "@gebai/sdk"
 import { xmlToBlocks } from "./docx_xml"
+import {
+  blockToXml,
+  buildScopeCommon,
+  keywordScope,
+  outlineScope,
+  rangeScope,
+  sectionScope,
+  type FetchXmlOptions,
+} from "./docx_fetch"
 import { readStyleDoc, styleDocList } from "./styles"
 import { feishuFetch } from "../../core/shared/tls"
 import {
@@ -874,6 +883,330 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       const tail = count > chunks.length ? `\n（共 ${count} 个匹配，仅显示前 ${chunks.length} 个）` : ""
       const hint = ctxBefore || ctxAfter ? "" : "\n提示：加 context_before/context_after 可在命中处展开相邻块看上下文。"
       return truncate(`找到 ${count} 个包含「${args.query}」的块：\n${chunks.join("\n")}${tail}${hint}`, "feishu_find", ctx)
+    },
+  )
+
+  /* ================= fetch_doc / update_doc（官方 lark-doc skill 的 +fetch/+update 对标） ================= */
+
+  /** 取全部块并建索引（fetch_doc / update_doc 共用）。 */
+  async function loadBlockIndex(ctx: ToolContext, docId: string): Promise<{ items: Array<Record<string, unknown>>; byId: Map<string, Record<string, unknown>>; rootId: string; truncated: boolean }> {
+    const { items, truncated } = await collectPages(ctx, `/open-apis/docx/v1/documents/${docId}/blocks`, 500, 4000)
+    const byId = new Map(items.map((b) => [String(b.block_id), b]))
+    const rootId = items.length ? String(items[0].block_id) : ""
+    return { items, byId, rootId, truncated }
+  }
+
+  const fetchDoc = tool(
+    "fetch_doc",
+    "按 XML 排版语法读取文档内容（与 import_xml/update_doc 同一套语法，读出即可改、改后可写回）。五种范围任选（`scope`）：**outline**（结构未知先看目录——标题层级/文本/block_id/每节块数）、**section**（传 `start_block_id` 读某标题整节）、**range**（传 start/end 端点读区间）、**keyword**（只知关键词时定位，多词用 `|` 分隔 OR，可带 `context_before`/`context_after` 顶层兄弟上下文）、缺省读整篇。三种详细度（`detail`）：**simple**（浏览/总结，纯结构文本无 id 无样式）、**with-ids**（带 block_id，可直接交给 update_doc 编辑或拼 `文档URL#block_id` 直达链接）、**full**（含 block_id + 行内样式/配色/列宽，编辑前看清现状用）。\n读改工作流：outline → section/keyword(with-ids) → 改 → 重 fetch 验证；每轮写操作后 block_id 已变，不要沿用旧 id。资源块以 token 占位（img src=token 等），改动时原样保留不要改成纯文本。",
+    {
+      document_id: { type: "string" },
+      scope: { type: "string", description: "outline | section | range | keyword（缺省读整篇）" },
+      start_block_id: { type: "string", description: "section 锚点（必填）或 range 起点" },
+      end_block_id: { type: "string", description: "range 终点（含）" },
+      keyword: { type: "string", description: "keyword 模式的关键词，`|` 分隔多词 OR（如 部署|发布|上线）" },
+      context_before: { type: "number", description: "keyword：命中顶层块前附几个兄弟块（默认 0）" },
+      context_after: { type: "number", description: "keyword：命中顶层块后附几个兄弟块（默认 0）" },
+      max_depth: { type: "number", description: "outline：标题层级上限（默认 3）" },
+      detail: { type: "string", description: "simple（默认）| with-ids | full" },
+      block_type: { type: "string", description: "块类型过滤（数字或名称，如 heading/table/callout）——只看某类块时用" },
+    },
+    ["document_id"],
+    async (args, ctx) => {
+      const docId = String(args.document_id)
+      const scope = String(args.scope ?? "all")
+      const detail = String(args.detail ?? "simple")
+      const { byId, rootId, truncated } = await loadBlockIndex(ctx, docId)
+      if (!byId.size) return { output: "文档为空（没有任何块）" }
+      const common = buildScopeCommon(byId, rootId)
+      const typeFilter = args.block_type !== undefined ? parseBlockTypeFilter(String(args.block_type)) : undefined
+      const notes = new Set<string>()
+      const opts: FetchXmlOptions = {
+        byId,
+        ids: detail === "with-ids" || detail === "full",
+        styles: detail === "full",
+        typeFilter,
+        notes,
+      }
+      let result: { xml: string; topBlockIds: string[]; notes: string[] }
+      if (scope === "outline") {
+        result = outlineScope(common, Math.max(1, Math.min(9, num(args.max_depth, 3))))
+      } else if (scope === "section") {
+        if (!args.start_block_id) throw new Error("section 模式必须传 start_block_id（先 outline 拿标题 id）")
+        result = sectionScope(common, String(args.start_block_id), opts)
+      } else if (scope === "range") {
+        if (!args.start_block_id && !args.end_block_id) throw new Error("range 模式至少传 start_block_id / end_block_id 之一")
+        result = rangeScope(common, args.start_block_id ? String(args.start_block_id) : undefined, args.end_block_id ? String(args.end_block_id) : undefined, opts)
+      } else if (scope === "keyword") {
+        if (!args.keyword) throw new Error("keyword 模式必须传 keyword")
+        result = keywordScope(common, String(args.keyword), Math.max(0, Math.min(10, num(args.context_before, 0))), Math.max(0, Math.min(10, num(args.context_after, 0))), opts)
+      } else {
+        // 整篇：顶层块全部序列化
+        const xmls = common.topIds.map((id) => blockToXml(id, opts)).filter(Boolean)
+        result = { xml: xmls.join("\n"), topBlockIds: common.topIds, notes: [] }
+      }
+      if (!result.xml) {
+        const hint = scope === "keyword" ? "；换关键词或去掉 block_type 过滤再试" : scope === "section" ? "；先 outline 确认标题 id" : ""
+        const filterNote = typeFilter ? "，含块类型过滤" : ""
+        return { output: `未读到内容（scope=${scope}${filterNote}${hint}。` }
+      }
+      const head =
+        `文档内容（scope=${scope}${scope === "all" ? "整篇" : ""}，detail=${detail}，共 ${result.topBlockIds.length} 个顶层块${truncated ? "；⚠️ 文档超过 4000 块读取上限，内容可能不完整" : ""}）：`
+      const tailNotes = notes.size ? `\n说明：\n- ${[...notes].join("\n- ")}` : ""
+      const nextHint =
+        detail === "simple"
+          ? "\n下一步：要编辑时改用 detail=with-ids（拿 block_id 交 update_doc）；要总结可直接基于本内容。"
+          : scope === "outline"
+            ? "\n下一步：用 section + start_block_id（标题 id）读整节，或 keyword 定位关键词。"
+            : "\n下一步：改内容用 update_doc（block_replace/insert_after 等）；改完重新 fetch 验证（block_id 已变）。"
+      return truncate(`${head}\n${result.xml}${tailNotes}${nextHint}`, "feishu_fetch_doc", ctx)
+    },
+  )
+
+  /** block_id → 同父 children 中的下标（batch_delete / index 插入用）；找不到返回 -1。 */
+  function childIndexOf(byId: Map<string, Record<string, unknown>>, blockId: string): number {
+    const b = byId.get(blockId)
+    if (!b) return -1
+    const pid = String(b.parent_id ?? "")
+    const parent = pid ? byId.get(pid) : undefined
+    const siblings = parent && Array.isArray(parent.children) ? (parent.children as unknown[]).map(String) : []
+    const idx = siblings.indexOf(blockId)
+    return idx
+  }
+
+  /** 同父连续闭区间 [startId, endId] → batch_delete 半开区间；跨父返回 null。 */
+  function siblingRange(byId: Map<string, Record<string, unknown>>, startId: string, endId: string): { parent: string; start: number; end: number } | null {
+    const s = byId.get(startId)
+    const e = byId.get(endId)
+    if (!s || !e) return null
+    if (String(s.parent_id ?? "") !== String(e.parent_id ?? "")) return null
+    const start = childIndexOf(byId, startId)
+    const end = childIndexOf(byId, endId)
+    if (start < 0 || end < 0 || start > end) return null
+    return { parent: String(s.parent_id ?? ""), start, end: end + 1 }
+  }
+
+  /** XML 内容 → 块描述（update_doc 写入用；复用 import_xml 同一套归一）。 */
+  function parseContentXml(content: string): { blocks: Array<Record<string, unknown>>; notes: string[] } {
+    const parsed = xmlToBlocks(content)
+    return { blocks: parsed.blocks, notes: parsed.notes }
+  }
+
+  const updateDoc = tool(
+    "update_doc",
+    "用 XML 排版语法精确更新文档（与 fetch_doc/import_xml 同一套语法，官方 lark-doc +update 对标）。指令（`command`）：\n- **str_replace**：全文查找替换文本（不破坏块结构；`replacement` 空串=删除命中文本；不支持的跨样式片段会列出块 id 改用 block_replace）\n- **block_insert_after**：在锚块后插入 `content`（`block_id=-1` 文末、`0` 文首）\n- **block_replace**：替换单块（`block_id`）或同父连续区间（`start_block_id`+`end_block_id`，如某段连续段落/列表项/表格行）\n- **block_delete**：删除单块或同父连续区间\n- **block_move_after**：把 `src_block_ids`（逗号分隔）移动到锚块后\n- **block_copy_after**：复制源块到锚块后（重建同构块；图片/画板等资源块以 token 复制）\n- **append**：文末追加（= block_insert_after -1）\n\n写入前流程：fetch_doc(with-ids/full) 看现状 → 本工具最小范围修改 → 重新 fetch 验证。安全规则：每轮写后 block_id 已变（新插入的用返回的新 id）；同一块多处修改合并一次 block_replace；`<img src=...>`/`<whiteboard token=...>` 等资源占位原样保留不要改纯文本。",
+    {
+      document_id: { type: "string" },
+      command: { type: "string", description: "str_replace | block_insert_after | block_replace | block_delete | block_move_after | block_copy_after | append" },
+      content: { type: "string", description: "XML 排版内容（插入/替换用；块级标签如 <p>/<h2>/<ul>/<table>/<callout>，语法同 import_xml）" },
+      pattern: { type: "string", description: "str_replace：要查找的文本（字面匹配）" },
+      replacement: { type: "string", description: "str_replace：替换为（空串=删除命中）" },
+      block_id: { type: "string", description: "锚块/目标块 id；-1 文末、0 文首（insert 适用）" },
+      start_block_id: { type: "string", description: "区间起点（replace/delete，与 block_id 二选一）" },
+      end_block_id: { type: "string", description: "区间终点（含；与 start 配对）" },
+      src_block_ids: { type: "string", description: "move/copy：源块 id，多个用逗号分隔" },
+    },
+    ["document_id", "command"],
+    async (args, ctx) => {
+      const docId = String(args.document_id)
+      const cmd = String(args.command)
+      const { byId, rootId } = await loadBlockIndex(ctx, docId)
+      if (!byId.size) throw new Error("文档为空或不可读")
+      // 锚点解析：-1 文末 → 根块；0 文首 → 根块（插入时 index=0）
+      const resolveAnchor = (): { parent: string; index?: number; anchorId?: string } => {
+        const raw = args.block_id !== undefined ? String(args.block_id) : ""
+        if (raw === "-1") return { parent: rootId }
+        if (raw === "0") return { parent: rootId, index: 0 }
+        const b = byId.get(raw)
+        if (!b) throw new Error(`block_id ${raw} 不存在（每轮写入后 id 会变，重新 fetch_doc 取最新 id）`)
+        return { parent: String(b.parent_id ?? rootId), anchorId: raw }
+      }
+      // 锚块后插入位置 = 锚块在父 children 中的下标 + 1
+      const anchorInsertIndex = (anchorId: string, parent: string): number | undefined => {
+        const p = byId.get(parent)
+        const siblings = p && Array.isArray(p.children) ? (p.children as unknown[]).map(String) : []
+        const idx = siblings.indexOf(anchorId)
+        return idx >= 0 ? idx + 1 : undefined
+      }
+
+      if (cmd === "str_replace") {
+        if (args.pattern === undefined || args.replacement === undefined) throw new Error("str_replace 需要 pattern + replacement（空 replacement = 删除命中文本）")
+        // 复用 replace_text 管线（含跨样式片段检测与批量提交）
+        const { items } = await collectPages(ctx, `/open-apis/docx/v1/documents/${docId}/blocks`, 500, 4000)
+        const plan = replaceInBlocks(items, { pattern: String(args.pattern), replacement: String(args.replacement), regex: false })
+        if (!plan.updates.length && !plan.crossRun.length) return { output: `未命中：全文没有「${String(args.pattern)}」` }
+        let ok = 0
+        const failures: string[] = []
+        for (let i = 0; i < plan.updates.length; i += 20) {
+          const batch = plan.updates.slice(i, i + 20)
+          try {
+            await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/batch_update`, {
+              method: "PATCH",
+              body: { requests: batch.map((u) => ({ block_id: u.blockId, update_text_elements: { elements: u.elements } })) },
+            })
+            ok += batch.length
+          } catch (err) {
+            failures.push(`${(err as Error).message.slice(0, 120)}`)
+          }
+        }
+        const cross = plan.crossRun.length ? `\n跨样式片段未处理 ${plan.crossRun.length} 个块（用 block_replace 整块重写）：${plan.crossRun.map((h) => h.blockId).join("、")}` : ""
+        return { output: `✓ 替换完成：${ok} 个块${failures.length ? `；失败 ${failures.length} 批（${failures.join("；")}）` : ""}${cross}\n建议：重新 fetch_doc 验证。` }
+      }
+
+      if (cmd === "block_delete") {
+        if (args.start_block_id && args.end_block_id) {
+          const r = siblingRange(byId, String(args.start_block_id), String(args.end_block_id))
+          if (!r) throw new Error("区间无效：两端点须为同一父块下的连续子块（fetch_doc full 看结构）")
+          await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${r.parent}/children/batch_delete`, {
+            method: "DELETE",
+            body: { start_index: r.start, end_index: r.end },
+          })
+          return { output: `✓ 已删除区间 ${r.start}..${r.end - 1}（父块 ${r.parent} 下 ${r.end - r.start} 个块）\n注意：区间内块的 id 已全部失效，后续操作重新 fetch_doc。` }
+        }
+        const target = String(args.block_id ?? "")
+        if (!target || !byId.has(target)) throw new Error("block_delete 需要 block_id 或 start_block_id+end_block_id")
+        const idx = childIndexOf(byId, target)
+        if (idx < 0) throw new Error(`块 ${target} 无法定位下标（父块不存在？）`)
+        const parent = String(byId.get(target)!.parent_id ?? rootId)
+        await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${parent}/children/batch_delete`, {
+          method: "DELETE",
+          body: { start_index: idx, end_index: idx + 1 },
+        })
+        return { output: `✓ 已删除块 ${target}（父块 ${parent} 下标 ${idx}，含其全部子块）` }
+      }
+
+      // 以下指令全部需要 content
+      if (args.content === undefined) throw new Error(`${cmd} 需要 content（XML 排版内容）`)
+      const content = String(args.content)
+      const { blocks: newDescs, notes: parseNotes } = parseContentXml(content)
+      if (!newDescs.length) throw new Error("content 中没有可写入的块")
+
+      // 块描述 → 块组（与 import_xml 同一套归一）
+      const buildGroups = (): BlockGroup[] => {
+        const bb = new BlockBuilder(0)
+        const groups: BlockGroup[] = []
+        for (const desc of newDescs) {
+          const gridErr = gridStructureError(desc)
+          if (gridErr) throw new Error(gridErr)
+          const before = bb.counter
+          const normalized = prepareGridColumns(normalizeBlockFields(desc)).block
+          const rootIdLocal =
+            Number(normalized.block_type ?? 0) === BLOCK_TYPE.TABLE && (normalized.table as Record<string, unknown> | undefined)?.rows !== undefined
+              ? expandTableRows(normalized, bb)
+              : buildGroup(normalized, bb)
+          groups.push({ rootId: rootIdLocal, blocks: bb.blocks.slice(before) })
+        }
+        return groups
+      }
+
+      if (cmd === "block_insert_after" || cmd === "append") {
+        const anchor = cmd === "append" ? { parent: rootId, index: undefined as number | undefined, anchorId: undefined as string | undefined } : resolveAnchor()
+        let index: number | undefined
+        if (cmd === "append") index = undefined
+        else if (args.block_id !== undefined && String(args.block_id) === "0") index = 0
+        else if (anchor.anchorId) index = anchorInsertIndex(anchor.anchorId, anchor.parent)
+        const groups = buildGroups()
+        const res = await insertWithMedia(ctx, docId, anchor.parent, groups)
+        const note = res.images.length || res.diagrams.length ? `；图片 ${res.images.filter((x) => x.ok).length}/${res.images.length}、图表 ${res.diagrams.filter((x) => x.ok).length}/${res.diagrams.length}` : ""
+        return { output: `✓ 已插入 ${res.count} 个顶层块${cmd === "append" ? "（文末追加）" : index !== undefined ? `（父块 ${anchor.parent} 下标 ${index} 起）` : "（父块末尾）"}${note}\n新块的 id 需重新 fetch_doc 获取；后续编辑不要沿用旧 id。${parseNotes.length ? `\n排版说明：\n- ${parseNotes.join("\n- ")}` : ""}` }
+      }
+
+      if (cmd === "block_replace") {
+        // 区间替换：先删后插（保持原位置）；单块替换同理
+        let parent: string
+        let insertAt: number | undefined
+        let deleteRange: { start: number; end: number } | undefined
+        let desc: string
+        if (args.start_block_id && args.end_block_id) {
+          const r = siblingRange(byId, String(args.start_block_id), String(args.end_block_id))
+          if (!r) throw new Error("区间无效：两端点须为同一父块下的连续子块")
+          parent = r.parent
+          deleteRange = { start: r.start, end: r.end }
+          insertAt = r.start
+          desc = `区间 [${args.start_block_id}..${args.end_block_id}]（${r.end - r.start} 个块）`
+        } else {
+          const target = String(args.block_id ?? "")
+          const b = byId.get(target)
+          if (!b) throw new Error(`block_replace 需要 block_id 或 start_block_id+end_block_id（${target} 不存在）`)
+          parent = String(b.parent_id ?? rootId)
+          const idx = childIndexOf(byId, target)
+          deleteRange = { start: idx, end: idx + 1 }
+          insertAt = idx
+          desc = `块 ${target}`
+        }
+        // 替换内容为空（清空）时不插入
+        const groups = buildGroups()
+        if (deleteRange) {
+          await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${parent}/children/batch_delete`, {
+            method: "DELETE",
+            body: { start_index: deleteRange.start, end_index: deleteRange.end },
+          })
+        }
+        if (groups.length) {
+          const res = await insertWithMedia(ctx, docId, parent, groups)
+          return { output: `✓ 已替换 ${desc} → ${res.count} 个新顶层块（位置：父块 ${parent} 下标 ${insertAt}）\n注意：被替换块的 id 已失效，新块 id 重新 fetch_doc 获取。${parseNotes.length ? `\n排版说明：\n- ${parseNotes.join("\n- ")}` : ""}` }
+        }
+        return { output: `✓ 已删除 ${desc}（替换内容为空）` }
+      }
+
+      if (cmd === "block_move_after") {
+        const rawSrc = String(args.src_block_ids ?? "")
+        if (!rawSrc) throw new Error("block_move_after 需要 src_block_ids（逗号分隔）")
+        const srcIds = rawSrc.split(",").map((s) => s.trim()).filter(Boolean)
+        for (const id of srcIds) {
+          if (!byId.has(id)) throw new Error(`源块 ${id} 不存在（id 可能已变，重新 fetch_doc）`)
+        }
+        const anchor = resolveAnchor()
+        if (anchor.anchorId && srcIds.includes(anchor.anchorId)) throw new Error("不能把块移动到它自己后面")
+        // 取源块序列化 XML（含子树）→ 重建到锚点后 → 删原块（顺序保持）
+        const notes = new Set<string>()
+        const xmls = srcIds.map((id) => blockToXml(id, { byId, ids: true, styles: true, notes })).filter(Boolean)
+        if (!xmls.length) throw new Error("源块无法序列化（不支持移动的块类型）")
+        const mergedXml = xmls.join("\n")
+        const { blocks: moveDescs } = parseContentXml(mergedXml.replace(/ id="[^"]*"/g, ""))
+        newDescs.length = 0
+        newDescs.push(...moveDescs)
+        const groups = buildGroups()
+        const insertParent = anchor.parent
+        const index = anchor.anchorId ? anchorInsertIndex(anchor.anchorId, insertParent) : undefined
+        await insertGroups(ctx, docId, insertParent, groups, index)
+        // 删除原块（同父连续的合并为区间；跨父的逐个删）
+        const del: string[] = []
+        for (const id of srcIds) {
+          const idx = childIndexOf(byId, id)
+          const parent = String(byId.get(id)!.parent_id ?? rootId)
+          if (idx < 0) continue
+          await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${parent}/children/batch_delete`, {
+            method: "DELETE",
+            body: { start_index: idx, end_index: idx + 1 },
+          })
+          del.push(id)
+        }
+        return { output: `✓ 已移动 ${del.length} 个块到锚点后（重建新块，原块删除）\n新块 id 重新 fetch_doc 获取。` }
+      }
+
+      if (cmd === "block_copy_after") {
+        const rawSrc = String(args.src_block_ids ?? "")
+        if (!rawSrc) throw new Error("block_copy_after 需要 src_block_ids（逗号分隔）")
+        const srcIds = rawSrc.split(",").map((s) => s.trim()).filter(Boolean)
+        for (const id of srcIds) {
+          if (!byId.has(id)) throw new Error(`源块 ${id} 不存在（id 可能已变，重新 fetch_doc）`)
+        }
+        const anchor = resolveAnchor()
+        const notes = new Set<string>()
+        const xmls = srcIds.map((id) => blockToXml(id, { byId, ids: true, styles: true, notes })).filter(Boolean)
+        if (!xmls.length) throw new Error("源块无法序列化（不支持复制的块类型）")
+        const mergedXml = xmls.join("\n")
+        const { blocks: copyDescs } = parseContentXml(mergedXml.replace(/ id="[^"]*"/g, ""))
+        newDescs.length = 0
+        newDescs.push(...copyDescs)
+        const groups = buildGroups()
+        const index = anchor.anchorId ? anchorInsertIndex(anchor.anchorId, anchor.parent) : undefined
+        await insertGroups(ctx, docId, anchor.parent, groups, index)
+        return { output: `✓ 已复制 ${srcIds.length} 个块到锚点后（源块不变）\n新块 id 重新 fetch_doc 获取。` }
+      }
+
+      throw new Error(`未知 command：${cmd}（可用 str_replace / block_insert_after / block_replace / block_delete / block_move_after / block_copy_after / append）`)
     },
   )
 
@@ -1778,11 +2111,16 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const downloadFile = tool(
     "download_file",
-    "下载云空间文件到会话 tmp/ 目录。返回保存路径与大小（文本内容会附上前 300 字符预览）。",
-    { file_token: { type: "string" }, save_path: { type: "string", description: "保存路径（可选，缺省为工作目录下的原文件名）" } },
+    "下载云空间文件到会话 tmp/ 目录：云文档导出产物、云盘文件，也支持**文档内嵌资源 token**（fetch_doc 输出的 img src=token 图片、source token=… 附件——内部走 medias 接口）。返回保存路径与大小（文本内容会附上前 300 字符预览）。",
+    {
+      file_token: { type: "string", description: "文件 token：云盘文件/导出产物，或 fetch_doc 输出的图片/附件 token（img src / source token 的值）" },
+      save_path: { type: "string", description: "保存路径（可选，缺省为工作目录下的原文件名；图片建议 .png/.jpg 按实际类型命名）" },
+      extra: { type: "object", description: "文档内嵌资源必传：{ document_id, block_id }（img 块 id；medias 接口要求 parent 隶属关系）" },
+    },
     ["file_token"],
     async (args, ctx) => {
       const fileToken = String(args.file_token)
+      const extra = args.extra !== undefined ? (jsonArg(args.extra, "extra") as Record<string, unknown>) : undefined
       // 先取元信息获得文件名（与 get_file_meta 一致走 batch_query；失败回退 token 不阻塞下载）
       let fileName = fileToken
       try {
@@ -1798,14 +2136,22 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
         // 导出文件（export_tasks 产物）下载必须携带 Range 头，否则返回 403
         headers: { Range: "bytes=0-" },
       })) as Response
-      // 导出产物是 media 类型 token：files 接口返回 403/404，回退 medias 下载接口（实测）
+      // 导出产物/文档内嵌资源是 media 类型 token：files 接口返回 403/404，回退 medias 下载接口（实测）。
+      // 文档内嵌图片（docx_image）需带 extra 指向所属文档与块，否则 403。
       if (!res.ok) {
+        const query: Record<string, string> = {}
+        if (extra?.document_id) query.document_id = String(extra.document_id)
+        if (extra?.block_id) query.block_id = String(extra.block_id)
         res = (await api(ctx, `/open-apis/drive/v1/medias/${fileToken}/download`, {
           raw: true,
           headers: { Range: "bytes=0-" },
+          query: Object.keys(query).length ? query : undefined,
         })) as Response
       }
-      if (!res.ok) throw new Error(`下载失败: HTTP ${res.status} ${res.statusText}`)
+      if (!res.ok) {
+        const hint = extra?.document_id ? "" : "\n提示：文档内嵌图片需传 extra={document_id, block_id}（fetch_doc full 可拿到 img 块 id）。"
+        throw new Error(`下载失败: HTTP ${res.status} ${res.statusText}${hint}`)
+      }
       const buf = new Uint8Array(await res.arrayBuffer())
       const absPath = ctx.resolvePath(args.save_path ? String(args.save_path) : fileName)
       const { mkdir, writeFile } = await import("node:fs/promises")
@@ -2352,6 +2698,8 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     get_doc_meta: getDocMeta,
     get_doc_text: getDocText,
     get_doc_blocks: getDocBlocks,
+    fetch_doc: fetchDoc,
+    update_doc: updateDoc,
     list_blocks: listBlocks,
     find_blocks: findBlocks,
     add_blocks: addBlocks,

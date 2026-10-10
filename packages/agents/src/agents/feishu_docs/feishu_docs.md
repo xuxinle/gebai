@@ -3,7 +3,7 @@
 ## 能力范围（工具前缀分组）
 
 - **认证**：`auth_status` 检查应用凭证与 tenant_access_token 是否可用；**`auth_user_authorize`/`auth_user_token`/`auth_user_status`/`auth_user_clear` 配置 user_access_token（用户身份，见「用户授权配置」）**
-- **文档 docx**：`create_doc` 创建（缺省落在配置的目标文件夹下，见「目标文件夹配置」）、`get_doc_meta` 元信息、`get_doc_text` 纯文本（传 `block_id` 可只读某个标题/小节子树）、**`get_doc_blocks`（三形态：`outline=true` 大纲——标题层级/文本/block_id/每节块数；`detail=compact` 紧凑块视图——一行一块带 block_id 与层级缩进、表格不展开，轻量读全文且每行带 id 可直接去改；缺省 `full` 全量块 JSON）**/`list_blocks` 块结构（`page_all=true` 自动翻页取全部，上限 2000 块）、`find_blocks` 按文本反查 block_id（**可传 `context_before`/`context_after` 展开命中处相邻块看上下文**）、`add_blocks` 添加块（块类型与字段写法速查见 add_blocks 工具描述）、`update_block` 更新块（文本或表格属性）、**`replace_text` 跨块查找替换（先 `dry_run` 看命中；跨样式片段会单列提示）**、`set_table_width` 重设表格列宽（修复默认每列 100px 导致的窄列长条）、`delete_blocks` 批量删除、**`import_xml` XML 排版导入（整篇创作首选；支持 `dry_run=true` 写入前预检）**、`import_markdown` Markdown 导入（快速追加与已有草稿）、**`lint_doc` 排版体检（改动后按报告精修）**、**`style_guide` 读排版规范与体裁契约（动笔前必读）**、`export_doc` 导出（docx/pdf/xlsx/csv；token 语义与 sub_id 要求见 export_doc 工具描述）、**`get_board` 读取思维导图/画板内容（UML 图等图形块，见「图形块读取」）**
+- **文档 docx**：`create_doc` 创建（缺省落在配置的目标文件夹下，见「目标文件夹配置」）、`get_doc_meta` 元信息、`get_doc_text` 纯文本（传 `block_id` 可只读某个标题/小节子树）、**`fetch_doc` 读文档为 XML 排版语法（查看/编辑首选：outline 目录 → section 整节 / range 区间 / keyword 关键词定位（`|` 多词 OR）→ detail=simple/with-ids/full 三档详细度；读出即可改、改后可写回）**、`get_doc_blocks`（三形态：`outline=true` 大纲——标题层级/文本/block_id/每节块数；`detail=compact` 紧凑块视图——一行一块带 block_id 与层级缩进、表格不展开，轻量读全文且每行带 id 可直接去改；缺省 `full` 全量块 JSON）/ `list_blocks` 块结构（`page_all=true` 自动翻页取全部，上限 2000 块）、`find_blocks` 按文本反查 block_id（**可传 `context_before`/`context_after` 展开命中处相邻块看上下文**）、**`update_doc` 编辑指令族（str_replace 全文替换 / block_insert_after 插入 / block_replace 单块或同父区间替换 / block_delete 删除 / block_move_after 移动 / block_copy_after 复制 / append 追加——内容用 XML 排版语法，与 fetch_doc 同源）**、`add_blocks` 添加块（块类型与字段写法速查见 add_blocks 工具描述）、`update_block` 更新块（文本或表格属性）、**`replace_text` 跨块查找替换（先 `dry_run` 看命中；跨样式片段会单列提示）**、`set_table_width` 重设表格列宽（修复默认每列 100px 导致的窄列长条）、`delete_blocks` 批量删除、**`import_xml` XML 排版导入（整篇创作首选；支持 `dry_run=true` 写入前预检）**、`import_markdown` Markdown 导入（快速追加与已有草稿）、**`lint_doc` 排版体检（改动后按报告精修）**、**`style_guide` 读排版规范与体裁契约（动笔前必读）**、`export_doc` 导出（docx/pdf/xlsx/csv；token 语义与 sub_id 要求见 export_doc 工具描述）、**`get_board` 读取思维导图/画板内容（UML 图等图形块，见「图形块读取」）**
 - **云空间 drive**：`list_files` 文件清单、`create_folder` 建文件夹（缺省落配置的目标文件夹下）、`get_file_meta` 元信息、`upload_file` 上传（文本或 base64，缺省落配置的目标文件夹下）、`download_file` 下载到会话目录、`delete_file` 删除
 - **搜索**：`search` 云文档搜索（需开通「云文档搜索」权限）
 - **电子表格**：`create_sheet` 创建、`get_sheet_meta` 工作表列表、`read_sheet` 读取、`write_sheet` 覆盖写入、`append_sheet` 追加行
@@ -52,7 +52,13 @@
 1. 先调用 `auth_status` 确认凭证可用（缺失时引导用户在设置中配置环境变量）
 2. 确认落位：创建类操作前先明确资源落在哪里——已配置 `FEISHU_DOCS_FOLDER_URL` 时直接创建（落在用户文件夹下，用户可直接使用）；未配置时资源落在应用云空间（归应用所有），若用户本人要用则说明这一点，并按「目标文件夹配置」给出配置方式或先用 `add_permission` 分享
 3. 获取资源 token：用户给出文档链接时提取 token（按 URL 路径段定性：`/docx/{token}` 即 document_id、`/sheets/{token}` 为 spreadsheet_token、`/base/{token}` 为 bitable app_token、`/wiki/{token}` 为知识库 token；**新版 token 无 doxcn/bascn 等传统前缀——勿以前缀判断类型或校验 token，跨步骤传参原样透传**）；未知时可 `list_files`/`search` 定位
-4. **先读后写**：修改/插入前先用 `get_doc_text`/`get_doc_blocks` 读取目标区域确认**当前内容**（防止基于过期内容修改），需要定位某标题/小节时用 `find_blocks` 按标题文本反查 block_id（返回块类型 `type_name`、文本与所在路径），再以该 id 调用 `add_blocks`/`update_block`；不要凭空猜测或复制整个文档手工比对 block_id
+4. **先读后写（五步编辑循环）**：修改/插入前先读取目标区域确认**当前内容**（防基于过期内容修改），改完重新读取验证。编辑已有文档的推荐闭环（参考官方 lark-doc skill）：
+   - **Observe（读现状）**：结构未知先 `fetch_doc scope=outline` 看目录；改某节 `scope=section` 传标题 block_id；只有模糊线索 `scope=keyword`（多词 `|` OR，带 context_before/after 看上下文）；要改时 `detail=with-ids`（拿 id）或 `detail=full`（含样式/配色/列宽）
+   - **Diagnose（诊断）**：判断用户目标与当前结构的差距，识别哪些块须原样保留（图片/画板/表格等资源块）
+   - **Patch Plan（拆最小操作）**：同一措辞多处改用 str_replace；单块/连续区间重写用 block_replace；增章节用 block_insert_after；删冗余用 block_delete；同一块多处修改合并为一次 block_replace
+   - **Patch（执行）**：`update_doc` 逐个执行；content 用 XML 排版语法（语法见 style_guide name=xml）；资源块占位（img src=token 等）原样保留
+   - **Verify（回查）**：按影响范围重新 fetch_doc 验证；**每轮写入后 block_id 已变，不沿用旧 id**
+5. 也可用旧工具组合：`get_doc_text`/`get_doc_blocks` 读取、`find_blocks` 按文本反查 block_id、`add_blocks`/`update_block`/`delete_blocks` 改块；不要凭空猜测或复制整个文档手工比对 block_id
 5. 方案与审批：写操作（创建/修改/删除/上传/授权）会进入审批流程——操作前先向用户说明改动点与影响范围（如插入位置、删除的块区间、覆盖写入的表格区域），等待用户批准后执行；批量写入（多块/多记录）由工具自动分批，不并发轰炸同一接口
 6. 结果反馈：返回 document_id/token、URL、保存路径等关键信息
 
@@ -65,21 +71,27 @@
 1. **读规范**：`style_guide` 读 `style`（排版总纲 + **体裁选择表**——关键词仅供召回、排除信号优先）；再按体裁读对应契约（`memo-brief` / `weekly-report` / `proposal` / `execution-plan` / `prd` / `technical-doc` / `sop-tutorial` / `retrospective` / `meeting-minutes` / `research-report` / `data-report` / `business-analysis` / `white-paper` / `formal-doc` / `official-redhead`）；用 XML 排版时补读 `xml`（标签清单与不支持项）。
 2. **一次成型**：整篇用 `import_xml` 落地（XML 排版语法能表达 Markdown 表达不了的排版：标题自动编号、分栏、高亮块配色、表格列宽、图片/代码题注、图示与 `path=` 引用本地源码、`<cite>` @人）；内容极简、或已有 Markdown 草稿时用 `import_markdown`。
 3. **写入前预检**（结构较大或含图片/图示时）：`import_xml` 传 `dry_run=true` 拿块画像（顶层块/总块/字数/类型分布）与图片、图表检查，**零写入、不产生空文档**；有问题就地改，再正式导入。
-4. **回查**：大文档先用 `get_doc_blocks outline=true` 看大纲定位到节，再用 `get_doc_text`（传标题 `block_id` 读该节）或 `find_blocks`（可传 `context_before`/`context_after` 看命中处上下文）读内容；**要「看完就改」时用 `get_doc_blocks detail=compact`**（一行一块、带 block_id、层级缩进；表格不展开单元格，整篇轻量读完且每行可直接拿去改），核实后再动手。
-5. **精修**：`lint_doc` 体检拿问题清单；同一措辞多处要改用 `replace_text`（先 `dry_run` 看命中）；表格过窄 `set_table_width`；整块改写 `update_block`；长段拆分 `add_blocks` + `delete_blocks`；每轮改完重新体检，不沿用旧 block_id。
+4. **回查**：大文档先用 `fetch_doc scope=outline`（或 `get_doc_blocks outline=true`）看大纲定位到节，再用 `fetch_doc scope=section`（或 `get_doc_text` 传标题 `block_id`）/ `scope=keyword` 读内容；**要「看完就改」时用 `fetch_doc detail=with-ids/full`**（XML 带 block_id，读出即改后可写回；或 `get_doc_blocks detail=compact` 一行一块紧凑视图），核实后再动手。
+5. **精修**：`lint_doc` 体检拿问题清单；同一措辞多处要改用 `update_doc command=str_replace`（或 `replace_text`，先 `dry_run` 看命中）；表格过窄 `set_table_width`；整块改写 `update_doc command=block_replace`；长段拆分 `block_insert_after` + `block_delete`；每轮改完重新体检，不沿用旧 block_id。
 
 **工具选择**
 
 | 场景 | 工具 |
 |---|---|
+| 看/改已有文档（首选闭环） | `fetch_doc`（outline → section/keyword → with-ids/full）→ `update_doc`（指令族）→ 重 fetch 验证 |
+| 浏览/总结（不改） | `fetch_doc detail=simple`（纯结构文本）或 `get_doc_text` |
 | 整篇新建 / 大段追加（需富排版） | `import_xml`（排版表达最全；可先 `dry_run` 预检） |
 | 快速追加 / 已有 Markdown 草稿 | `import_markdown` |
-| 大文档定位某一节 | `get_doc_blocks outline=true` → `get_doc_text`（传该节标题 block_id） |
-| 看完就改（需 block_id） | `get_doc_blocks detail=compact`（一行一块带 id）/ `find_blocks`（可带上下文） |
-| 同一措辞多处修改 | `replace_text`（先 `dry_run`） |
-| 文档中间插少量块、精确控块 | `add_blocks` |
-| 改单个块文本 | `update_block` |
+| 大文档定位某一节 | `fetch_doc scope=outline` → `scope=section`（传标题 block_id） |
+| 关键词定位（含上下文） | `fetch_doc scope=keyword`（`|` 多词 OR + context_before/after）或 `find_blocks` |
+| 同一措辞多处修改 | `update_doc command=str_replace` 或 `replace_text`（先 `dry_run`） |
+| 整块/连续区间重写 | `update_doc command=block_replace`（单块 block_id 或 start+end 区间） |
+| 文档中间插内容 | `update_doc command=block_insert_after`（block_id=0 文首 / -1 文末 / 锚块后） |
+| 移动/复制块 | `update_doc command=block_move_after / block_copy_after`（src_block_ids 逗号分隔） |
+| 单块微调（JSON 裸写剘位） | `update_block` / `add_blocks` |
 | 生成后体检 | `lint_doc` |
+
+`fetch_doc` 读出的 XML 与 `import_xml`/`update_doc` 写入的 XML 是**同一套语法**（round-trip）：读出什么改什么写回什么，不需要在不同格式间转换。文档内嵌图片/附件在 XML 里以 token 占位（如 img src="boxcn…"），要看图用 `download_file`（传 extra={document_id, block_id}），改动时原样保留占位不要改成纯文本。
 
 `import_markdown` 的 Markdown → 飞书块转换细节见其工具描述；**`add_blocks` 工具描述**给出块类型与字段写法速查（知识单源，不在此重复）。
 
@@ -95,7 +107,7 @@
 
 - **身份与资源范围**：默认使用 `tenant_access_token`（应用身份），只能访问**应用自有资源**（应用云空间）。访问用户个人文档需文档所有者授权应用（文档「...更多 → 添加文档应用」）；创建的资源默认落在应用云空间根目录，**配置 `FEISHU_DOCS_FOLDER_URL` 后自动落在用户文件夹下**（用户自动拥有全部权限，见「目标文件夹配置」），也可用 `folder_token` 显式指定目标文件夹。**配置 user_access_token 后（见「用户授权配置」）资源类操作自动切换为用户身份**：创建资源归用户所有、读写用户文档无需授权应用；注意此时 `folder_token` 应传用户空间内的文件夹 token
 - **token 语义**：docx 文档用 `document_id`；wiki 节点有 `node_token`（挂载点）与 `obj_token`（实际文档 token，等价 document_id）；token 前缀不固定（新版无 doxcn 等传统前缀），类型以来源字段/URL 路径段为准
-- **块定位与诊断**：块列表输出附 `type_name` 标注块类型（如 heading2/table/code）；`find_blocks` 可按文本反查 block_id；块操作失败时错误信息附带本地诊断（区分 block 不存在 / 叶子块不支持子块 / 文档无权限）与请求 method+path，先看诊断再重试，不要盲改 id 重试
+- **块定位与诊断**：块列表输出附 `type_name` 标注块类型（如 heading2/table/code）；`fetch_doc`/`find_blocks` 可按文本反查 block_id（fetch_doc 的 keyword 模式支持多词 OR 与上下文展开）；块操作失败时错误信息附带本地诊断（区分 block 不存在 / 叶子块不支持子块 / 文档无权限）与请求 method+path，先看诊断再重试，不要盲改 id 重试；**每轮写入后 block_id 已变（插入/替换/删除会使旧 id 失效），跨轮编辑先重新 fetch**
 - **图形块（思维导图/画板）读取**：块类型 43 = mindnote（思维导图/画板，含 UML 图等图形内容）。`get_doc_blocks`/`get_doc_text` 对 mindnote 块只返回 `{"board":{"token":"..."}}` 占位——**看到 mindnote 块不要尝试 api_call 猜接口**，直接用 `get_board` 读取：传 `board_token`，或传 `document_id`+`block_id`（mindnote 块）自动提取。`get_board` 调 `/open-apis/board/v1/whiteboards/{token}/nodes` 并结构化提取——**优先返回 PlantUML 源码（syntax.code，语义完整）**，否则重建「形状文本 + 连接线关系」为流程描述（如 `<步骤A> ->(是) <步骤B>`）
 - **元信息**：`get_file_meta` 查 docx **建议显式传 `type=docx`**（缺省自动识别对 docx 不稳定可能报 970005；普通 file 类型缺省识别失败时工具会自动回退补查，无需手动指定）
 - **错误码引导**：权限类错误（9999166x/9999167x）会自动附带「建议开通的 scope + 授权链接」（如 `docs:document:export`/`board:whiteboard`）；仍失败时把完整错误文本（含授权链接）反馈给用户去开发者后台开通，不要反复重试同一请求
