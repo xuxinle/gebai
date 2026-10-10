@@ -21,7 +21,7 @@ namespace {
   // 我们按 UTF-8 原样收（本框架全链路 UTF-8）。
   st::process::Options options;
   options.cwd = cwd;
-    std::vector<std::string> full_args{"-c", "core.quotepath=false"};
+  std::vector<std::string> full_args{"-c", "core.quotepath=false"};
   full_args.insert(full_args.end(), args.begin(), args.end());
   const auto result = st::process::run("git", full_args, options);
   if (!result) {

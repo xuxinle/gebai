@@ -1216,6 +1216,7 @@ void strip_foreign_flags(std::vector<std::string>& flags, CompilerKind kind) {
       "-Wno-array-bounds",          // GCC 用它静默 SB 分析误报；clang 无此警告名
       "-Wno-stringop-overflow",     // 同上，clang 完全没有
       "-Wno-null-dereference",      // clang 叫 -Wnull-dereference 但只在特定检查下触发
+      "-Wno-free-nonheap-object",   // clang 无此警告名
   };
   std::erase_if(flags, [](const std::string& flag) {
     return std::ranges::find(kGccOnly, flag) != std::end(kGccOnly);
@@ -1254,14 +1255,25 @@ auto profile_flags(std::string_view profile) -> Result<std::vector<std::string>>
   // 优化档关掉，真越界交给 `san` 档的 ASan 在运行期抓。
   constexpr const char* kOptimizerFalsePositives[] = {"-Wno-null-dereference",
                                                       "-Wno-array-bounds",
-                                                      "-Wno-stringop-overflow"};
+                                                      "-Wno-stringop-overflow",
+                                                      "-Wno-free-nonheap-object"};
+  // 上列四条全是**GCC 专有**的档标（按族参数化见 `strip_foreign_flags`）。
+  // 共同性质：**只在优化档 + libstdc++ 内联时触发，`-O0` 下不触发**——
+  // 也就是说它们描述的是“优化器的推理路径”，不是源码里的真实缺陷。
+  //
+  // 最新一条（`-Wno-free-nonheap-object`）的取证：
+  // `examples/gbcode/git_service.cpp` 在 `-O2` 下报
+  // “释放了偏移 32 的指针”（`offset 32` 恰好是 libstdc++ 下 `std::string` 的大小），
+  // 而该处只有一个 `std::vector<std::string>` 临时量的析构，返回值是 `optional<string>`
+  // 值拷贝——没有任何路径会释放偏移指针。**同一文件同一告警集，`-O1` 干净、`-O2` 报错**。
+  // 真越界由 `san` 档的 ASan 在运行期抓（那是判据，不是这里的静态推理）。
+  // 它只出现在 release：`dev`/`san` 用 `-O1`，`quick`/`debug` 用 `-O0`。
   if (profile == "dev") {
     // 快速迭代档（默认）：-O1 兼顾编译速度与运行帧率（日常开发/无头验证用）
     return std::vector<std::string>{"-O1", "-g1", "-fno-omit-frame-pointer",
                                     kOptimizerFalsePositives[0], kOptimizerFalsePositives[1],
                                     kOptimizerFalsePositives[2]};
   }
-  // 上面这四个 `-Wno-*` 是**GCC 专有**的档标（按族参数化见 `strip_foreign_flags`）。
   if (profile == "quick") {
     // 最速迭代档：-O0（单文件编译最快，适合"改一行看一眼"的内循环）
     return std::vector<std::string>{"-O0", "-g1"};
@@ -1272,7 +1284,8 @@ auto profile_flags(std::string_view profile) -> Result<std::vector<std::string>>
   }
   if (profile == "release") {
     return std::vector<std::string>{"-O2", "-DNDEBUG", kOptimizerFalsePositives[0],
-                                    kOptimizerFalsePositives[1], kOptimizerFalsePositives[2]};
+                                    kOptimizerFalsePositives[1], kOptimizerFalsePositives[2],
+                                    kOptimizerFalsePositives[3]};
   }
   if (profile == "san") {
     // sanitizer 档同样关掉两个"优化 + 系统头"下的 GCC 误报：
