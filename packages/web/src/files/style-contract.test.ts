@@ -277,3 +277,46 @@ describe("样式契约：亚克力主题接管工作台浮层（否则透出背�
     }
   })
 })
+
+/**
+ * 样式契约：差异视图导航按钮的位置——在差异视图自己的头部（`fw-viewer-bar` 内的 `.fw-diff-nav`），
+ * 不在标签栏动作区。
+ *
+ * 存在的理由：按钮描述的是「这块差异视图」的内容（第几个变更文件、当前/总差异块数），
+ * 放标签栏上会随激活标签变化而意义漂移（预览标签被顶掉时按钮消失、切回来又重建，
+ * 计数订阅跟着标签栏重建退订重订）；丟失订阅/按钮退回标签栏都不会报错——只是「按钮又跑到
+ * 标签栏上去了」或「计数不更新了」，只有契约能拦住。头部栏里的固定项不可压缩
+ * （窄窗口下被牺牲的只能是 A/B 标签文本，不是导航按钮）。
+ */
+describe("样式契约：差异视图导航在头部不在标签栏", () => {
+  test("导航容器与按钮组样式存在（缺失时按钮裸排成一行、看不出是一组导航）", () => {
+    expect(ruleBody(".fw-diff-nav")).toMatch(/display:\s*flex/)
+    expect(ruleBody(".fw-viewer-bar .fw-nav-group")).toMatch(/display:\s*flex/)
+    expect(ruleBody(".fw-viewer-bar .fw-nav-group")).toMatch(/flex:\s*none/)
+  })
+
+  test("导航按钮挂在差异视图头部（navHost），不在标签栏动作区", () => {
+    const main = readFileSync(join(SRC, "files", "main.ts"), "utf8")
+    // 两组按钮由 mountDiffHeaderNav 装进视图头部容器（挂载点：openDiff / loadDiffInto 两处都在）
+    expect(main).toContain("mountDiffHeaderNav(view.navHost, tab)")
+    expect((main.match(/mountDiffHeaderNav\(view\.navHost, tab\)/g) ?? []).length).toBe(2)
+    // 标签栏渲染里不得再有差异导航（回迁会双重渲染：两套按钮各自计数、各自订阅）
+    const fnStart = main.indexOf("function renderTabActions(")
+    const fnEnd = main.indexOf("\nfunction ", fnStart + 1)
+    const fnBody = main.slice(fnStart, fnEnd)
+    for (const token of ["chevronUp", "chevronDown", "fw-nav-count", "diffNav", "navigateReview"]) {
+      expect(fnBody, `renderTabActions 不应再含差异导航（${token}）`).not.toContain(token)
+    }
+    // 订阅随视图生命周期（dispose），不再挂标签栏重建节奏的全局退订变量
+    expect(main).not.toContain("diffNavUnsub")
+  })
+
+  test("差异视图（含降级渲染）都提供头部导航容器 navHost", () => {
+    const git = readFileSync(join(SRC, "files", "git.ts"), "utf8")
+    // Monaco 主路径与降级 hunks 路径都暴露 navHost（漏一路 = 那个形态下跨文件导航凭空消失）
+    expect(git).toContain("nav: null, navHost")
+    expect(git).toContain("nav: handle.nav ?? null, navHost")
+    // 头部容器进的是 viewer-bar（不是任意位置：布局由该栏承担）
+    expect((git.match(/class: "fw-diff-nav"/g) ?? []).length).toBe(2)
+  })
+})

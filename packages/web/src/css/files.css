@@ -690,8 +690,10 @@
 
 /* 工具条行与面包屑已移除：按钮全部收进标签栏右侧（仅图标，见 main.ts 的 tabActions） */
 
-/* 导航组（跨文件 ← → / 文件内 ↑ ↓）：贴成一个控件组，与普通动作按钮有视觉分隔 */
-.fw-tabbar-actions .fw-nav-group {
+/* 导航组（跨文件 ← → / 文件内 ↑ ↓）：贴成一个控件组，与普通动作按钮有视觉分隔。
+   两处使用：标签栏动作区（编辑位置历史 ← →）与差异视图头部（换文件 / 换差异块）。 */
+.fw-tabbar-actions .fw-nav-group,
+.fw-viewer-bar .fw-nav-group {
   display: flex;
   align-items: center;
   gap: 2px;
@@ -704,9 +706,25 @@
   flex: none;
 }
 
-.fw-tabbar-actions .fw-nav-group .fw-icon-btn {
+.fw-tabbar-actions .fw-nav-group .fw-icon-btn,
+.fw-viewer-bar .fw-nav-group .fw-icon-btn {
   width: 22px;
   height: 20px;
+}
+
+/* 差异视图头部的导航容器：两组（换文件 / 换差异块）排在一起。按钮组直接挂在
+   .fw-diff-nav-groups（由 main.ts 装入 git.ts 提供的 .fw-diff-nav 容器），与右侧动作留缝。 */
+.fw-diff-nav,
+.fw-diff-nav-groups {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.fw-diff-nav-groups .fw-nav-group:last-child {
+  /* 换文件与换差异两组之间紧挨（同一件事的两层），末组与右侧动作留缝 */
+  margin-right: 0;
 }
 
 .fw-nav-count {

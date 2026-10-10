@@ -217,11 +217,12 @@ export interface DiffNav {
   next(): void
   prev(): void
   state(): { index: number; total: number }
-  /**
-   * 订阅计数变化（滚动、跳转、差异重算都会触发）。
-   * 返回退订函数——订阅方是**标签栏**，每次重建标签栏都要退订旧的，
-   * 否则重渲染几次就有几个野订阅在更新早已移除的 DOM。
-   */
+  	/**
+	 * 订阅计数变化（滚动、跳转、差异重算都会触发）。
+	 * 返回退订函数——订阅方是**差异视图头部**的导航按钮（mountDiffHeaderNav），
+	 * 视图卸载/换文件重建时 dispose 退订，
+	 * 否则重挂几次就有几个野订阅在更新早已移除的 DOM。
+	 */
   onChange(cb: (s: { index: number; total: number }) => void): () => void
 }
 

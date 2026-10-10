@@ -1887,6 +1887,8 @@ export function diffEndpointsFor(spec: DiffSpec): DiffEndpoints {
 export interface DiffViewHandle {
   dispose: () => void
   nav: DiffNav | null
+  /** 头部导航容器（`.fw-viewer-bar` 内右侧）：由调用方挂两组导航按钮（换文件 / 换差异块），随视图同生命周期 */
+  navHost: HTMLElement
 }
 
 export async function mountDiffView(
@@ -1913,7 +1915,15 @@ export async function mountDiffView(
    * **不说一声的降级**才可怕（用户会以为文件就是这样/没改动）。
    */
   const renderHunks = (fallback: GitFileDiff | null | undefined, headNote?: string): DiffViewHandle => {
-    const wrap = h("div", { class: "fw-hunks" })
+    // 降级渲染同样有头部：跨文件导航按钮（换变更文件）不依赖 Monaco，清单可用就该能点
+    const navHost = h("span", { class: "fw-diff-nav" })
+    const wrap = h("div", { class: "fw-hunks" }, [
+      h("div", { class: "fw-viewer-bar" }, [
+        h("span", { class: "fw-viewer-info", text: headNote ?? "逐行差异" }),
+        h("span", { class: "fw-viewer-spacer" }),
+        navHost,
+      ]),
+    ])
     if (headNote) wrap.appendChild(h("div", { class: "fw-hint-bar" }, [icon("info", 13), h("span", { text: headNote })]))
     if (fallback?.truncated && !fallback.hunks.length) {
       wrap.appendChild(h("div", { class: "fw-empty", text: `逐行差异已省略：+${fallback.additions} / -${fallback.deletions} 行（超出体量上限）` }))
@@ -1957,7 +1967,7 @@ export async function mountDiffView(
       wrap.appendChild(h("div", { class: "fw-empty", text: headNote ? "无逐行差异可显示" : "该端点对下此文件无内容差异（可能只是重命名或权限变更）" }))
     }
     host.appendChild(wrap)
-    return { dispose: () => wrap.remove(), nav: null }
+    return { dispose: () => wrap.remove(), nav: null, navHost }
   }
 
   /**
@@ -2005,12 +2015,13 @@ export async function mountDiffView(
       ? h("button", { class: "fw-btn ghost sm", "aria-pressed": "false", title: "逐块／逐行选择要暂存（index）或放弃的更改" }, [icon("check", 12), h("span", { text: "逐块操作" })])
       : null
 
+    const navHost = h("span", { class: "fw-diff-nav" })
     const wrap = h("div", { class: "fw-diff-wrap" }, [
       h("div", { class: "fw-viewer-bar" }, [
         h("span", { class: "fw-viewer-info", text: `${ep.note}` }),
         h("span", { class: "fw-viewer-spacer" }),
+        navHost,
         partialBtn,
-        // 只留信息不放按钮：导航按钮统一在标签栏（跨文件一组 + 文件内一组，见 main.ts）
         h("span", { class: "fw-hint", text: `A：${ep.labelA} ｜ B：${ep.labelB}` }),
       ]),
       diffHost,
@@ -2046,12 +2057,12 @@ export async function mountDiffView(
     }
 
     const handle = await createDiffEditor(diffHost, { original: a.text, modified: b.text, language: ctx.language })
-    // 导航按钮由标签栏渲染（handle.nav 交给调用方）
+    // 导航按钮由调用方挂进 navHost（handle.nav 一起交给调用方）
     return { dispose: () => {
       partial?.dispose()
       handle.dispose()
       wrap.remove()
-    }, nav: handle.nav ?? null }
+    }, nav: handle.nav ?? null, navHost }
   } catch (err) {
     // 回退：结构化 hunks（服务端已解析；没带就现取）
     return renderHunks(await fetchFallback(), `并列视图不可用（${(err as Error).message}），已降级为逐行差异`)

@@ -153,8 +153,10 @@ interface Tab {
   /** 差异态 */
   diffSpec?: DiffSpec
   diffDispose?: () => void
-  /** 差异块导航（F7/Shift+F7 与标签栏按钮共用；降级渲染为 null） */
+  /** 差异块导航（F7/Shift+F7 与差异视图头部按钮共用；降级渲染为 null） */
   diffNav?: DiffNav | null
+  /** 差异视图头部的导航按钮组（换文件 ←→ / 换差异 ↑↓）：随差异视图重建，与视图同生命周期 */
+  diffNavCtl?: DiffHeaderNav
   /** 加载令牌（loadTab 每次自增；`await` 回来后据此判断自己是否已被取代 / 标签已关闭） */
   loadGen?: number
   /**
@@ -1106,9 +1108,6 @@ function findTab(id: string): Tab | undefined {
 
 const viewHosts = new Map<string, HTMLElement>()
 
-/** 标签栏对「差异块计数」的订阅退订函数（标签栏每次重建都换一个）。 */
-let diffNavUnsub: (() => void) | null = null
-
 /**
  * 标签栏右侧的**动作轮盘**（容器挂 body，不随 clear(tabActionsHost) 消失）。
  * 标签栏每次重建都会换一个，所以重建前必须把上一个 destroy 掉——否则每重建一次就多留一份
@@ -1402,6 +1401,64 @@ function viewerCtx(tab: Tab): ViewerCtx {
   }
 }
 
+/** 差异视图头部导航的控制句柄：变更文件清单就绪/变更时重设，差异视图卸载时 dispose（退计数订阅）。 */
+interface DiffHeaderNav {
+  /** 变更文件清单（跨文件导航）就绪/变化时重设文件组；清单缺失时按钮置灰 */
+  setReview(review: ReviewCtx | undefined): void
+  /** 退订差异块计数订阅并移除容器（差异视图卸载/换文件重建时调） */
+  dispose(): void
+}
+
+/**
+ * 差异视图头部的两组导航按钮：← → 换变更文件（跨文件）、↑ ↓ 换差异块（文件内）。
+ *
+ * 放在差异视图自己的头部而不是标签栏：按钮描述的是「这块差异视图」的内容（当前差异块/总块数、
+ * 第几个变更文件），跟着被导航的内容走；标签栏只承担标签生命周期（关/切/预览），不随差异内容变化。
+ * 订阅与退订也在同一处（挂载时订、dispose 时退），不再依赖标签栏的重建节奏。
+ */
+function mountDiffHeaderNav(host: HTMLElement, tab: Tab): DiffHeaderNav {
+  /* host 是差异视图头部的导航容器（git.ts 里的 `.fw-diff-nav`），这里直接往里装两组按钮，
+     不再自建同名容器——否则两层嵌套，外层的 flex/gap 作用在错误的层级上。 */
+  const container = h("span", { class: "fw-diff-nav-groups" })
+  host.appendChild(container)
+
+  /* ---------- 文件组（← → 换变更文件，清单异步就绪后由 setReview 填充） ---------- */
+  const prevFile = btn("chevronLeft", "上一个变更文件（Shift+F8）", () => void navigateReview(tab, -1))
+  const nextFile = btn("chevronRight", "下一个变更文件（F8）", () => void navigateReview(tab, 1))
+  const fileCount = h("span", { class: "fw-nav-count", text: "…", title: "正在获取变更文件清单…" })
+  container.appendChild(h("span", { class: "fw-nav-group" }, [prevFile, fileCount, nextFile]))
+
+  /* ---------- 差异块组（↑ ↓；降级渲染没有 nav，整组不给——置灰会让人以为坏了） ---------- */
+  let unsub: (() => void) | null = null
+  if (tab.diffNav) {
+    const nav = tab.diffNav
+    const prevDiff = btn("chevronUp", "上一处差异（Shift+F7）", () => nav.prev())
+    const nextDiff = btn("chevronDown", "下一处差异（F7）", () => nav.next())
+    const diffCount = h("span", { class: "fw-nav-count", text: "—", title: "当前差异块 / 总差异块" })
+    unsub = nav.onChange((s) => {
+      diffCount.textContent = s.total ? `${s.index || 1} / ${s.total}` : "无差异"
+      prevDiff.disabled = !s.total
+      nextDiff.disabled = !s.total
+    })
+    container.appendChild(h("span", { class: "fw-nav-group" }, [prevDiff, diffCount, nextDiff]))
+  }
+
+  return {
+    setReview(review) {
+      const hasList = !!review && review.files.length > 1
+      prevFile.disabled = !hasList
+      nextFile.disabled = !hasList
+      fileCount.textContent = review ? `${review.index < 0 ? "–" : review.index + 1} / ${review.files.length}` : "–"
+      fileCount.title = review ? `变更文件：第 ${review.index < 0 ? "?" : review.index + 1} 个，共 ${review.files.length} 个` : "变更文件清单不可用"
+    },
+    dispose() {
+      unsub?.()
+      unsub = null
+      container.remove()
+    },
+  }
+}
+
 async function openDiff(spec: DiffSpec): Promise<void> {
   const id = tabId("diff", spec.root, spec.path, `:${JSON.stringify(spec.source)}`)
   const exist = findTab(id)
@@ -1440,8 +1497,10 @@ async function openDiff(spec: DiffSpec): Promise<void> {
   })
   tab.diffDispose = view.dispose
   tab.diffNav = view.nav
+  tab.diffNavCtl = mountDiffHeaderNav(view.navHost, tab)
+  tab.diffNavCtl.setReview(tab.review)
   renderTabbar()
-  // 变更文件清单异步取（不挡首屏）：拿到后标签栏的跨文件导航才可用
+  // 变更文件清单异步取（不挡首屏）：拿到后头部导航的跨文件组才可用
   void prepareReview(tab, spec)
 }
 
@@ -1473,7 +1532,8 @@ async function prepareReview(tab: Tab, spec: DiffSpec): Promise<void> {
     // 已销毁的标签不再回填（异步期间用户可能已关掉）
     if (!findTab(tab.id)) return
     tab.review = { files, index: files.indexOf(spec.path) }
-    if (state.activeId === tab.id) renderTabbar()
+    // 清单就绪：直达差异视图头部的导航组（不经标签栏重绘——按钮不在那里了）
+    if (state.activeId === tab.id || findTab(tab.id)) tab.diffNavCtl?.setReview(tab.review)
   } catch (err) {
     toast(`无法获取变更文件清单（${(err as Error).message}）：跨文件导航不可用`, "warn", 5000)
   }
@@ -1529,8 +1589,8 @@ async function loadDiffInto(tab: Tab, spec: DiffSpec, reviewIndex: number): Prom
   tab.diffDispose?.()
   tab.diffDispose = undefined
   tab.diffNav = null
-  diffNavUnsub?.()
-  diffNavUnsub = null
+  tab.diffNavCtl?.dispose()
+  tab.diffNavCtl = undefined
   rekeyTab(tab, diffTabId(spec, spec.path))
   tab.path = spec.path
   tab.title = `◧ ${spec.title}`
@@ -1547,6 +1607,8 @@ async function loadDiffInto(tab: Tab, spec: DiffSpec, reviewIndex: number): Prom
   })
   tab.diffDispose = view.dispose
   tab.diffNav = view.nav
+  tab.diffNavCtl = mountDiffHeaderNav(view.navHost, tab)
+  tab.diffNavCtl.setReview(tab.review)
   renderTabbar()
   urlSync.replace()
 }
@@ -1657,6 +1719,8 @@ function forceClose(id: string): void {
   }
   tab.viewDispose?.()
   tab.diffDispose?.()
+  tab.diffNavCtl?.dispose()
+  tab.diffNavCtl = undefined
   viewHosts.get(id)?.remove()
   viewHosts.delete(id)
   state.tabs.splice(idx, 1)
@@ -1676,9 +1740,6 @@ function forceClose(id: string): void {
 /* ------------------------------ 渲染：标签栏 / 工具条 / 状态栏 ------------------------------ */
 
 function renderTabbar(): void {
-  // 退掉上一轮对差异计数的订阅（DOM 马上被清空，留着就是野订阅）
-  diffNavUnsub?.()
-  diffNavUnsub = null
   // 同理：动作轮盘的容器挂在 body 上（不随 clear(tabstrip) 消失），必须显式销毁
   tabWheel?.destroy()
   tabWheel = null
@@ -1779,37 +1840,7 @@ function renderTabActions(box: HTMLElement): void {
   const t = activeTab()
   if (!t) return
 
-  if (t.kind === "diff") {
-    // 两组导航，箭头方向区分语义：左右 = 换文件（跨文件），上下 = 换差异（文件内）
-    const review = t.review
-    const hasList = !!review && review.files.length > 1
-    const prevFile = btn("chevronLeft", "上一个变更文件（Ctrl+Alt+←）", () => void navigateReview(t, -1))
-    const nextFile = btn("chevronRight", "下一个变更文件（Ctrl+Alt+→）", () => void navigateReview(t, 1))
-    prevFile.disabled = !hasList
-    nextFile.disabled = !hasList
-    const fileCount = h("span", {
-      class: "fw-nav-count",
-      text: review ? `${review.index < 0 ? "–" : review.index + 1} / ${review.files.length}` : "…",
-      title: review ? `变更文件：第 ${review.index < 0 ? "?" : review.index + 1} 个，共 ${review.files.length} 个` : "正在获取变更文件清单…",
-    })
-    box.appendChild(h("span", { class: "fw-nav-group" }, [prevFile, fileCount, nextFile]))
-
-    if (t.diffNav) {
-      const nav = t.diffNav
-      const prevDiff = btn("chevronUp", "上一处差异（Shift+F7）", () => nav.prev())
-      const nextDiff = btn("chevronDown", "下一处差异（F7）", () => nav.next())
-      const diffCount = h("span", { class: "fw-nav-count", text: "—", title: "当前差异块 / 总差异块" })
-      // 计数由差异视图驱动（滚动也会变）；标签栏每次重建都要退订，故留着退订函数
-      diffNavUnsub?.()
-      diffNavUnsub = nav.onChange((s) => {
-        diffCount.textContent = s.total ? `${s.index || 1} / ${s.total}` : "无差异"
-        prevDiff.disabled = !s.total
-        nextDiff.disabled = !s.total
-      })
-      box.appendChild(h("span", { class: "fw-nav-group" }, [prevDiff, diffCount, nextDiff]))
-    }
-    return
-  }
+  if (t.kind === "diff") return // 差异标签的动作在差异视图自己的头部（见 mountDiffHeaderNav），标签栏不再放
 
   // 合并视图自带工具条（且没有 stat）——不重复给按钮
   if (t.kind !== "file" || !t.stat) return
