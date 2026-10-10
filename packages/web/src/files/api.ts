@@ -488,7 +488,7 @@ export class FsApi {
     return this.req<GitFileDiff>("GET", "/api/v1/git/file-diff", { params: { root, path, ...opts } })
   }
 
-  gitLog(root: string, opts: { limit?: number; skip?: number; path?: string; ref?: string; all?: boolean; grep?: string; author?: string; since?: string; until?: string; grepRegex?: boolean; grepIgnoreCase?: boolean } = {}): Promise<{ commits: GitCommitInfo[]; hasMore: boolean }> {
+  gitLog(root: string, opts: { limit?: number; skip?: number; path?: string; ref?: string; all?: boolean; grep?: string; author?: string; since?: string; until?: string; grepRegex?: boolean; grepIgnoreCase?: boolean; rev?: string } = {}): Promise<{ commits: GitCommitInfo[]; hasMore: boolean }> {
     return this.req("GET", "/api/v1/git/log", { params: { root, ...opts } })
   }
 

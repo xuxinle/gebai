@@ -7,7 +7,7 @@
  *
  * 交互原则（对齐 IDEA 的 VCS 工具窗习惯）：
  * - 三栏边界可拖（宽度记忆在 localStorage，双击分界复位）；
- * - 日志分页加载、支持提交信息过滤与单文件历史（Git log --follow），点条目在右栏看内容；
+ * - 日志分页加载、支持提交信息过滤与单文件历史（Git log --follow），点条目在右栏看内容；输入哈希串（4~40 位十六进制）即按提交 ID 精确定位，日志行右键也有「按此提交 ID 过滤」；
  * - 破坏性操作（重置 / 强制推送 / 分支删除）统一二次确认，并在有备份能力时提示
  *   （hard reset 自动建备份分支——见服务端 GitService）；
  * - 多步操作（merge/rebase/cherry-pick）的「继续 / 跳过 / 中止」在变更面板顶部（冲突属于工作区状态）。
@@ -173,10 +173,12 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
   let logLoading = false
   /** 上一次日志加载的失败信息（失败时列表区给出可重试的错误条，而不是伪装成「没有提交」）。 */
   let logError = ""
-  /** 日志过滤：路径（单文件历史）/ 作者 / 提交信息关键字；各自独立清除。 */
-  let logFilterPath = ""
-  let logFilterAuthor = ""
-  let logFilterText = ""
+  /** 日志过滤：路径（单文件历史）/ 作者 / 提交信息关键字 / 提交 ID；各自独立清除。 */
+let logFilterPath = ""
+let logFilterAuthor = ""
+let logFilterText = ""
+/** 提交 ID 过滤（完整/短哈希）：服务端 `git log <rev> --max-count=1` 精确定位那一条；与提交信息过滤同框互斥。 */
+let logFilterRev = ""
 /** 时间范围：`since` 为 git 可识别的日期串（如 `7 days ago`），`sinceLabel` 只用于芯片展示。 */
 let logSince = ""
 let logSinceLabel = ""
@@ -598,9 +600,17 @@ logDateBtn.onclick = (e) => {
   const syncSearchClear = (): void => {
     logSearchClear.hidden = !logSearch.value
   }
-  /** 回车即执行过滤（不生成芯片：输入框本身就是这个条件的载体，再摆一个标签只占宽度）。 */
+  /** 哈希判定：4~40 位十六进制串（git 哈希长度 40 / SHA-256 仓44 64，取安全子集）——回车即切换为提交 ID 过滤。 */
+  const HASH_RE = /^[0-9a-f]{4,40}$/i
+  /**
+   * 回车即执行过滤。同一个输入框承载两类互斥条件：
+   *  · 哈希串 → **提交 ID 过滤**（精确到那一条，芯片展示并可单独清除——40 位哈希在输入框里看不全）；
+   *  · 其余 → 提交信息关键字（不生成芯片：输入框本身就是这个条件的载体，再摆一个标签只占宽度）。
+   */
   const applySearchFilter = (): void => {
-    logFilterText = logSearch.value.trim()
+    const v = logSearch.value.trim()
+    logFilterRev = HASH_RE.test(v) ? v.toLowerCase() : ""
+    logFilterText = logFilterRev ? "" : v
     void loadLog(true)
   }
   logSearch.onkeydown = (e) => {
@@ -800,10 +810,10 @@ logDateBtn.onclick = (e) => {
   colLog.replaceChildren(logList)
 
   /**
-   * 生效中的过滤条件芯片：文件路径 / 作者 / 时间范围。
+   * 生效中的过滤条件芯片：文件路径 / 作者 / 时间范围 / 提交 ID。
    *
-   * 这三个的当前值在头部别处看不见（路径来自资源管理器右键、作者来自日志行右键、时间来自日期菜单），
-   * 所以必须摆出来并自带清除。**提交信息过滤不在这里**——它的载体就是那个输入框
+   * 这几项的当前值在头部别处看不见（路径来自资源管理器右键、作者来自日志行右键、时间来自日期菜单、
+   * 提交 ID 来自日志行右键或输入框），所以必须摆出来并自带清除。**提交信息过滤不在这里**——它的载体就是那个输入框
    * （写着什么就是在过滤什么），再摆一个标签只占宽度；清空输入框回车即取消。
    * 范围（分支 / 标签）同理不入芯片：头部选择器已经显示它并自带清除。
    */
@@ -812,12 +822,12 @@ logDateBtn.onclick = (e) => {
      * 无变化不重建：它挂在日志头部，每次自动刷新都会走到——重建会把芯片的 hover 与输入框的
      * 清除按钮抹一遍（输入框本体不重建，但芯片区一空一满仍是一次可见的抖动）。
      */
-    const key = fingerprint([logFilterPath, logFilterAuthor, logSince, logSinceLabel, logFilterText])
+    const key = fingerprint([logFilterPath, logFilterAuthor, logSince, logSinceLabel, logFilterText, logFilterRev])
     if (key === logChipsKey) return
     logChipsKey = key
     clear(logChips)
     // 输入框的过滤态：生效中亮边框（去掉标签后，靠它表达「这个条件是生效的」）
-    logSearch.classList.toggle("filtering", !!logFilterText)
+    logSearch.classList.toggle("filtering", !!(logFilterText || logFilterRev))
     syncSearchClear()
     const chip = (iconName: string, label: string, title: string, onClear: () => void): HTMLElement => {
       const b = h("button", { class: "fw-chip", title }, [icon(iconName, 12), h("span", { text: label }), icon("close", 12)])
@@ -833,6 +843,14 @@ logDateBtn.onclick = (e) => {
     if (logFilterAuthor) {
       logChips.appendChild(chip("search", `作者 ${logFilterAuthor}`, "清除作者过滤", () => {
         logFilterAuthor = ""
+        void loadLog(true)
+      }))
+    }
+    if (logFilterRev) {
+      logChips.appendChild(chip("git", `提交 ${logFilterRev.slice(0, 8)}`, `清除提交 ID 过滤（${logFilterRev}）`, () => {
+        logFilterRev = ""
+        logSearch.value = ""
+        syncSearchClear()
         void loadLog(true)
       }))
     }
@@ -861,7 +879,7 @@ logDateBtn.onclick = (e) => {
     const root = hooks.root()
     const prev = logItems
     // 本次查询的过滤/范围条件：unchanged 短路的前提是「同一查询」（仅刷新），条件变了必须重建
-    const queryKey = [logFilterPath, logFilterAuthor, logFilterText, logBranch, logSince, String(logRegex), String(logICase)].join("\u0000")
+    const queryKey = [logFilterPath, logFilterAuthor, logFilterText, logFilterRev, logBranch, logSince, String(logRegex), String(logICase)].join("\u0000")
     logLoading = true
     logError = ""
     if (reset) {
@@ -872,12 +890,13 @@ logDateBtn.onclick = (e) => {
       const res = await hooks.api.gitLog(root, {
         limit: 60,
         skip: reset ? 0 : logItems.length,
-            path: logFilterPath || undefined,
-    grep: logFilterText || undefined,
-    author: logFilterAuthor || undefined,
-    since: logSince || undefined,
-    grepRegex: logRegex || undefined,
-    grepIgnoreCase: logICase || undefined,
+        path: logFilterPath || undefined,
+        grep: logFilterText || undefined,
+        author: logFilterAuthor || undefined,
+        since: logSince || undefined,
+        grepRegex: logRegex || undefined,
+        grepIgnoreCase: logICase || undefined,
+        rev: logFilterRev || undefined,
         // 点了分支就只看该分支的日志；否则看全部分支（--all）
         ref: logBranch || undefined,
         all: !logBranch,
@@ -965,7 +984,7 @@ logDateBtn.onclick = (e) => {
       logList.appendChild(bar)
     }
     if (!logItems.length && !logLoading) {
-      const filtered = !!(logFilterPath || logFilterAuthor || logFilterText || logSince)
+      const filtered = !!(logFilterPath || logFilterAuthor || logFilterText || logSince || logFilterRev)
       logList.appendChild(h("div", { class: "fw-empty", text: filtered ? "没有匹配的提交记录" : "暂无提交记录" }))
     }
     for (let i = 0; i < logItems.length; i++) {
@@ -1012,6 +1031,7 @@ logDateBtn.onclick = (e) => {
           { separator: true },
           { label: "检出此提交（分离 HEAD）", icon: "check", disabled: !hooks.writable(), onClick: () => void confirmer("检出提交", `检出 ${c.short}？将进入分离 HEAD 状态。`, () => op("checkout", { ref: c.hash, detach: true }, "已检出提交")) },
           { label: `只看 ${c.author} 的提交`, icon: "search", onClick: () => { logFilterAuthor = c.author; void loadLog(true) } },
+          { label: "按此提交 ID 过滤", icon: "git", onClick: () => { logFilterRev = c.hash; logFilterText = ""; logSearch.value = c.hash; syncSearchClear(); void loadLog(true) } },
           { separator: true },
           { label: "复制提交哈希", icon: "copy", onClick: () => void navigator.clipboard.writeText(c.hash).then(() => toast("已复制哈希", "success")) },
           { label: "复制提交信息", icon: "copy", onClick: () => void navigator.clipboard.writeText(c.subject).then(() => toast("已复制", "success")) },

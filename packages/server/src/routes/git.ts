@@ -235,6 +235,7 @@ export function registerGitRoutes(rc: RouteCtx): void {
         grepRegex: pickBool(c, "grepRegex"),
         grepIgnoreCase: pickBool(c, "grepIgnoreCase"),
         firstParent: pickBool(c, "firstParent"),
+        rev: c.req.query("rev") || undefined,
       })
       return c.json(result)
     } catch (err) {

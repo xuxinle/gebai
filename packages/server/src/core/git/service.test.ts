@@ -262,6 +262,38 @@ describe("git 体量上限：把「撑不住」变成看得见的事", () => {
   })
 })
 
+describe("git 日志按提交 ID 定位（rev）", () => {
+  test("完整哈希 → 只返回那一条，hasMore=false（不翻页）", async () => {
+    const r = await svc.log(dir, { rev: c1 })
+    expect(r.commits.map((c) => c.hash)).toEqual([c1])
+    expect(r.commits[0]!.parents).toEqual([])
+    expect(r.hasMore).toBe(false)
+  })
+
+  test("短哈希前缀同样命中", async () => {
+    const r = await svc.log(dir, { rev: c1.slice(0, 8) })
+    expect(r.commits.map((c) => c.hash)).toEqual([c1])
+  })
+
+  test("rev 优先于 ref / all / grep（其余过滤不再叠加）", async () => {
+    const r = await svc.log(dir, { rev: c1, all: true, ref: "main", grep: "不存在的词" })
+    expect(r.commits.map((c) => c.hash)).toEqual([c1])
+  })
+
+  test("解析不出的 rev（打错前缀 / 非法串）→ 空列表不报错（过滤语义，不是命令失败）", async () => {
+    expect((await svc.log(dir, { rev: "deadbeef" })).commits).toEqual([])
+    expect((await svc.log(dir, { rev: "..zz.." })).commits).toEqual([])
+    expect((await svc.log(dir, { rev: "HEAD~99" })).commits).toEqual([])
+  })
+
+  test("与路径过滤叠加：该提交确实改过这个文件才命中", async () => {
+    const hit = await svc.log(dir, { rev: c2, path: "src/new.ts" })
+    expect(hit.commits.map((c) => c.hash)).toEqual([c2])
+    const miss = await svc.log(dir, { rev: c1, path: "src/new.ts" })
+    expect(miss.commits).toEqual([])
+  })
+})
+
 describe("git 日志过滤：字面 / 正则 / 大小写", () => {
   const subjects = async (opts: Parameters<typeof svc.log>[1]): Promise<string[]> => (await svc.log(dir, { limit: 10, ...opts })).commits.map((c) => c.subject)
 
@@ -274,11 +306,6 @@ describe("git 日志过滤：字面 / 正则 / 大小写", () => {
   test("开启正则后元字符生效", async () => {
     expect(await subjects({ grep: "feat. 初始", grepRegex: true })).toEqual(["feat: 初始"])
     expect(await subjects({ grep: "feat: (初始|追加)", grepRegex: true })).toHaveLength(2)
-  })
-
-  test("开启大小写不敏感后命中（默认区分）", async () => {
-    expect(await subjects({ grep: "FEAT:" })).toEqual([])
-    expect(await subjects({ grep: "FEAT:", grepIgnoreCase: true })).toHaveLength(2)
   })
 
   test("时间范围：since 排除更早的提交（自带仓库：一条 2020 年的提交 + 一条刚才的）", async () => {

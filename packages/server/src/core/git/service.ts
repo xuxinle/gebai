@@ -883,6 +883,9 @@ export class GitService {
       /** `grep` / `author` 大小写不敏感（-i） */
       grepIgnoreCase?: boolean
       firstParent?: boolean
+      /** 精确到某个提交（完整/短哈希或可解析 rev）：只返回那一条，优先于 ref/all（不做分页续页）；
+       *  解析不出（打错前缀 / 不存在 / HEAD~越界）按「没匹配到」处理——返空列表，不执错误条。 */
+      rev?: string
     } = {},
   ): Promise<{ commits: GitCommit[]; hasMore: boolean }> {
     const root = await this.requireRepo(dir)
@@ -893,24 +896,34 @@ export class GitService {
       `--max-count=${limit}`,
       "--pretty=format:" + ["%H", "%P", "%an", "%ae", "%at", "%cn", "%ce", "%ct", "%D", "%s", "%b"].join(F) + R,
     ]
-    if (opts.skip) args.push(`--skip=${opts.skip}`)
-    if (opts.all) args.push("--all")
-    if (opts.firstParent) args.push("--first-parent")
-    if (opts.since) args.push(`--since=${opts.since}`)
-    if (opts.until) args.push(`--until=${opts.until}`)
-    if (opts.author) args.push(`--author=${opts.author}`)
-    // 过滤开关：关正则 = 按**字面文本**搜（--fixed-strings），开正则 = 扩展正则（--extended-regexp）。
-    // 不能只加 --extended-regexp 而不加 --fixed-strings：git 默认是 BRE（仍是正则，`初.提` 会命中「初始提交」），
-    // 那样「关掉正则」对用户就是尞设。大小写不敏感（-i）对 --grep/--author 都生效。
-    if (opts.grep) {
-      args.push(opts.grepRegex ? "--extended-regexp" : "--fixed-strings")
-      if (opts.grepIgnoreCase) args.push("-i")
-      args.push(`--grep=${opts.grep}`)
+    // 提交 ID 过滤：精确到某个提交（git log <rev> --max-count=1）。有 rev 就不做翻页——结果最多一条。
+    if (opts.rev) {
+      args.push(`--max-count=1`, opts.rev)
+    } else {
+      if (opts.skip) args.push(`--skip=${opts.skip}`)
+      if (opts.all) args.push("--all")
+      if (opts.firstParent) args.push("--first-parent")
+      if (opts.since) args.push(`--since=${opts.since}`)
+      if (opts.until) args.push(`--until=${opts.until}`)
+      if (opts.author) args.push(`--author=${opts.author}`)
+      // 过滤开关：关正则 = 按**字面文本**搜（--fixed-strings），开正则 = 扩展正则（--extended-regexp）。
+      // 不能只加 --extended-regexp 而不加 --fixed-strings：git 默认是 BRE（仍是正则，`初.提` 会命中「初始提交」），
+      // 那样「关掉正则」对用户就是尞设。大小写不敏感（-i）对 --grep/--author 都生效。
+      if (opts.grep) {
+        args.push(opts.grepRegex ? "--extended-regexp" : "--fixed-strings")
+        if (opts.grepIgnoreCase) args.push("-i")
+        args.push(`--grep=${opts.grep}`)
+      }
+      if (opts.ref) args.push(opts.ref)
     }
-    if (opts.ref) args.push(opts.ref)
     if (opts.path) args.push("--", opts.path)
     const res = await this.run(args, root, { allowFail: true })
-    if (res.code !== 0) throw new GitError(422, (res.stderr || "git log 失败").trim())
+    if (res.code !== 0) {
+      // 提交 ID 过滤的容错：解析不出（打错前缀 / 已不存在的哈希 / HEAD~越界）等价于「没匹配到」——
+      // 这是过滤语义而非命令失败，返空列表让前端给「没有匹配的提交记录」，而不是错误条 + 重试（重试不会有结果）。
+      if (opts.rev) return { commits: [], hasMore: false }
+      throw new GitError(422, (res.stderr || "git log 失败").trim())
+    }
     const commits = res.stdout
       .split(R)
       .map((rec) => rec.replace(/^\n/, ""))
@@ -935,7 +948,7 @@ export class GitService {
           body: (f[10] ?? "").trim() || undefined,
         } satisfies GitCommit
       })
-    return { commits, hasMore: commits.length >= limit }
+    return { commits, hasMore: opts.rev ? false : commits.length >= limit }
   }
 
   /** 单提交详情（元信息 + 变更文件 + 统计）。 */
