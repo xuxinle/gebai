@@ -220,7 +220,7 @@ ScriptHost::ScriptHost(UiRoot& root, ext::ScriptLimits limits)
           line.push_back(' ');
           line.append(argument.is_string() ? st::json_as_string(argument) : st::json_dump(argument));
         }
-        log::info("{}", line);
+        ST_LOG_INFO("{}", line);
         return st::Json();
       });
   if (!status) return;
@@ -232,7 +232,7 @@ ScriptHost::ScriptHost(UiRoot& root, ext::ScriptLimits limits)
   // 注入前置
   auto evaluated = impl_->engine->eval(prelude_source(), "<script_api>");
   if (!evaluated) {
-    log::error("脚本运行时前置加载失败: {}", evaluated.error().message);
+    ST_LOG_ERROR("脚本运行时前置加载失败: {}", evaluated.error().message);
     return;
   }
   impl_->prelude_ready = true;
@@ -347,7 +347,7 @@ auto ScriptHost::dispatch_handlers(const std::vector<std::string>& binding_ids, 
       return impl_->engine->call("__dispatch", {st::Json(id), payload});
     });
     if (!outcome) {
-      log::warn("脚本事件处理器失败（绑定 {}）: {}", id, outcome.error().message);
+      ST_LOG_WARN("脚本事件处理器失败（绑定 {}）: {}", id, outcome.error().message);
       continue;
     }
     invoked = invoked || st::json_as_bool(*outcome);

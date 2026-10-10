@@ -498,6 +498,7 @@ PowerShell 的 PSReadLine 会画一段**只有显示、不是输入**的内联�
 | L6 | `platform_*.cpp`、`simd*.cpp/.hpp` | 系统 API 与 SIMD intrinsics 的位级重解释只能在这里发生（单点封装） | 内置 |
 | L3 | `include/st/test/test.hpp` | 断言宏需要在调用点取得文件/行号与表达式原文，是函数式宏唯一被认可的用途 | 内置 |
 | L3 | `include/st/core/entry.hpp`（`ST_MAIN`）| 需在调用点生成 `main` 并正规化 `argv` 编码（Windows 的 `argv` 是 ANSI）。宏而非函数是语言限制：`main` 的签名与返回语义只能在调用点展开 | 内置 |
+| L3 | `include/st/core/log.hpp`（`ST_LOG_*`）| 日志开关需在**调用点把参数一起丢掉**：空函数模板里参数仍被求值，字符串字面量照样编进产物（实测裁不掉体积）。与 `test.hpp` 断言宏同一类——只能在调用点展开 | 内置 |
 | L10 | 逐行 `// lint-allow: L10 …` | `Result`/`Value` 的隐式值构造是刻意设计（与 `std::expected` 一致） | 行内 |
 | L8 | `src/core/log.cpp`（日志级别/sink/listener）、`src/test/test_runner.cpp`（测试注册表） | 二者是**进程级基础设施**：日志 sink 与测试注册表按设计全局唯一，注入 Context 无处可注（调用方是整个进程）。已在命名空间开括号前用前置作用域豁免整块登记 | 行内（前置） |
 | L8 | `src/raster/platform_d3d11.cpp` 的 `g_live_canvases` | 进程级诊断计数器（跨设备/跨线程的 GPU 画布存活数），已用 `atomic` | 行内 |

@@ -58,7 +58,7 @@ auto DeclarativeHost::operator=(DeclarativeHost&&) noexcept -> DeclarativeHost& 
 auto DeclarativeHost::attach(ScriptHost& script, UiRoot& root, Element* host_element)
     -> std::unique_ptr<DeclarativeHost> {
   if (!script.valid()) {
-    log::error("DeclarativeHost：脚本宿主未就绪（enable_script 打开了吗？）");
+    ST_LOG_ERROR("DeclarativeHost：脚本宿主未就绪（enable_script 打开了吗？）");
     return nullptr;
   }
   // 私有构造 + make_unique：需要显式把构造开放给本函数（成员函数内可见，故直接 make_unique）
@@ -96,7 +96,7 @@ auto DeclarativeHost::attach(ScriptHost& script, UiRoot& root, Element* host_ele
             return st::Json(temp_id);
           });
       !status) {
-    log::error("DeclarativeHost：__d_create 注册失败: {}", status.error().message);
+    ST_LOG_ERROR("DeclarativeHost：__d_create 注册失败: {}", status.error().message);
     return nullptr;
   }
 
@@ -296,7 +296,7 @@ auto DeclarativeHost::attach(ScriptHost& script, UiRoot& root, Element* host_ele
   // 注入 declarative.js 前置（在 script_api 之后：它依赖 on/off/$ 等基础 API）。
   auto evaluated = script.eval_prelude(declarative_source(), "<declarative>");
   if (!evaluated) {
-    log::error("DeclarativeHost：declarative.js 加载失败: {}", evaluated.error().message);
+    ST_LOG_ERROR("DeclarativeHost：declarative.js 加载失败: {}", evaluated.error().message);
     return nullptr;
   }
   impl->ready = true;

@@ -253,7 +253,7 @@ void Application::apply_theme_file() {
   // **先只读出配置本身**（不构造成品主题）：切模式时要拿它重新叠。
   const auto file_json = ui::load_theme_json_file(path);
   if (!file_json) {
-    log::warn("自定义主题加载失败，已退回内置主题：{}", file_json.error().message);
+    ST_LOG_WARN("自定义主题加载失败，已退回内置主题：{}", file_json.error().message);
     return;
   }
   // ⚠ `base` 是**基准选择器**，不是覆盖项：它决定用哪个内置主题做底。
@@ -266,7 +266,7 @@ void Application::apply_theme_file() {
     const std::string base = json_as_string(*base_value, "");
     const auto parsed = ui::theme_mode_from_name(base);
     if (!parsed) {
-      log::warn("自定义主题加载失败，已退回内置主题：未知基准主题 base=\"{}\"", base);
+      ST_LOG_WARN("自定义主题加载失败，已退回内置主题：未知基准主题 base=\"{}\"", base);
       impl_->theme_spec = Json::object();
       return;
     }
@@ -275,7 +275,7 @@ void Application::apply_theme_file() {
   // **先校验后落地**：在拷贝上走一遍完整合成，失败则回退内置且不改任何状态。
   const auto composed = compose_theme_with(base_mode, impl_->runtime_overlay);
   if (!composed) {
-    log::warn("自定义主题加载失败，已退回内置主题：{}", composed.error().message);
+    ST_LOG_WARN("自定义主题加载失败，已退回内置主题：{}", composed.error().message);
     impl_->theme_spec = Json::object();
     return;
   }
@@ -339,21 +339,21 @@ auto Application::script() -> ui::ScriptHost* { return impl_->script.get(); }
 [[nodiscard]] auto Application::window_minimize() -> bool {
   if (impl_->backend == nullptr) return false;
   const auto status = impl_->backend->minimize();
-  if (!status) log::warn("最小化窗口失败：{}", status.error().message);
+  if (!status) ST_LOG_WARN("最小化窗口失败：{}", status.error().message);
   return status.has_value();
 }
 
 [[nodiscard]] auto Application::window_toggle_maximize() -> bool {
   if (impl_->backend == nullptr) return false;
   const auto status = impl_->backend->toggle_maximize();
-  if (!status) log::warn("最大化/还原窗口失败：{}", status.error().message);
+  if (!status) ST_LOG_WARN("最大化/还原窗口失败：{}", status.error().message);
   return status.has_value();
 }
 
 [[nodiscard]] auto Application::window_request_close() -> bool {
   if (impl_->backend == nullptr) return false;
   const auto status = impl_->backend->request_close();
-  if (!status) log::warn("请求关闭窗口失败：{}", status.error().message);
+  if (!status) ST_LOG_WARN("请求关闭窗口失败：{}", status.error().message);
   return status.has_value();
 }
 
@@ -402,7 +402,7 @@ void Application::set_theme_mode(ui::ThemeMode mode) {
   // 会在切一次亮暗后被**静默抹掉**（用户看到"我设的颜色过一会儿就没了"）。
   const auto composed = compose_theme(mode);
   if (!composed) {
-    log::warn("切换主题失败，保持当前主题：{}", composed.error().message);
+    ST_LOG_WARN("切换主题失败，保持当前主题：{}", composed.error().message);
     return;
   }
   custom_theme_ = *composed;
@@ -512,7 +512,7 @@ auto Application::set_device_scale(float scale) -> Status {
   // 1524 个像素差 >32）。`set_supersample` 会同时清字形缓存，所以不会混用旧密度的位图。
   if (impl_->renderer != nullptr) impl_->renderer->set_supersample(scale);
   root_.mark_dirty_all();
-  log::info("DPI 缩放已切换为 {}（物理 {}×{}）", scale,
+  ST_LOG_INFO("DPI 缩放已切换为 {}（物理 {}×{}）", scale,
             impl_->backend->framebuffer().physical_width(),
             impl_->backend->framebuffer().physical_height());
   return ok();
@@ -589,7 +589,7 @@ auto Application::capture_to_file(std::string_view path, math::IntRect region)
   if (auto status = fs::write_bytes(target, std::span<const std::uint8_t>(png->png)); !status) {
     return forward_error(status.error());
   }
-  log::info("截图已保存 {}", target);
+  ST_LOG_INFO("截图已保存 {}", target);
   return control::Host::SavedShot{std::move(target), width, height};
 }
 
@@ -608,7 +608,7 @@ auto Application::start() -> Status {
   if (!backend) {
     const std::string hint = backend.error().message;
     if (!requested.empty()) return forward_error(backend.error());
-    log::warn("平台后端不可用（{}），回退 headless", hint);
+    ST_LOG_WARN("平台后端不可用（{}），回退 headless", hint);
     auto fallback = shell::create_backend("headless");
     if (!fallback) return forward_error(fallback.error());
     impl_->backend_holder = std::move(*fallback);
@@ -648,7 +648,7 @@ auto Application::start() -> Status {
     // 自动选择的后端开不出窗口（例如探测到 libX11 但没有可用显示服务）→ 按约定回退 headless，
     // 而不是直接失败：无头模式下控制通道能完成全部开发与验证，比"起不来"有用得多。
     if (requested.empty()) {
-      log::warn("窗口创建失败（{}），回退 headless", status.error().message);
+      ST_LOG_WARN("窗口创建失败（{}），回退 headless", status.error().message);
       auto fallback = shell::create_backend("headless");
       if (!fallback) return forward_error(fallback.error());
       impl_->backend_holder = std::move(*fallback);
@@ -668,7 +668,7 @@ auto Application::start() -> Status {
   // 只写一条告警日志——与 `--theme-file` 加载失败同一姿态（配置/资源写错不该让进程起不来）。
   if (!options_.window_icon_png.empty()) {
     if (auto status = impl_->backend->set_window_icon(options_.window_icon_png); !status) {
-      log::warn("窗口图标未设置：{}", status.error().message);
+      ST_LOG_WARN("窗口图标未设置：{}", status.error().message);
     }
   }
 
@@ -820,39 +820,47 @@ auto Application::start() -> Status {
   // 扁平化成折线后近似位置会随字形漂移。开关在 `rasterizer.cpp` 里直接读
   // `ST_TEXT_FLATTEN`（诊断项不进公共 API）。实测结论：**容差不是瓶颈**（见该处注释）。
     // 如实说清这一帧的字是怎么画的：“字看着糊”的第一个分歧点就在这里。
-    const char* fit_name = impl_->renderer->grid_fit() == st::text::GridFitMode::Normal
-                               ? "normal"
-                               : (impl_->renderer->grid_fit() == st::text::GridFitMode::Light
-                                      ? "light"
-                                      : "关");
-    log::info("文字渲染：{} · 网格拟合 {} · 覆盖率 gamma {}（中文字形为 CFF：只做几何拟合，不依赖字体自带指令）",
-              impl_->renderer->subpixel() ? "LCD 亚像素（每像素 R/G/B 三重覆盖率）" : "灰度抗锯齿",
-              fit_name,
-              impl_->renderer->coverage_gamma() == 1.0f
-                  ? std::string("关（1.0，不校正）")
-                  : std::format("{}", impl_->renderer->coverage_gamma()));
+    // `fit_name` 只服务这条日志，所以**不单独声明**（裁日志时会变成未使用变量，
+    // 而 `-Werror` 直接断构建）——直接把三元表达式写进实参里。
+    ST_LOG_INFO(
+        "文字渲染：{} · 网格拟合 {} · 覆盖率 gamma {}（中文字形为 CFF：只做几何拟合，不依赖字体自带指令）",
+        impl_->renderer->subpixel() ? "LCD 亚像素（每像素 R/G/B 三重覆盖率）" : "灰度抗锯齿",
+        impl_->renderer->grid_fit() == st::text::GridFitMode::Normal
+            ? "normal"
+            : (impl_->renderer->grid_fit() == st::text::GridFitMode::Light ? "light" : "关"),
+        impl_->renderer->coverage_gamma() == 1.0f
+            ? std::string("关（1.0，不校正）")
+            : std::format("{}", impl_->renderer->coverage_gamma()));
     impl_->text_port = std::make_unique<RendererTextPort>(*impl_->renderer);
     root_.set_text_port(impl_->text_port.get());
     // 逐 face 记录**路径 / 序号 / 名称**。
     // 只记数量在排查"字变了"这类问题时毫无用处：字形由哪个 face 提供，
     // 决定了该怀疑哪份字体数据（TTC 的多 face、CID-keyed CFF 的 FDSelect 都在这一层）。
-    const auto& loaded_faces = impl_->fonts->faces();
-    log::info("字体已加载：{} 个 face + {} 个等宽 face", loaded_faces.size(),
-              impl_->fonts->monospace_faces().size());
+        const auto& loaded_faces = impl_->fonts->faces();
+    ST_LOG_INFO("字体已加载：{} 个 face + {} 个等宽 face", loaded_faces.size(),
+                impl_->fonts->monospace_faces().size());
+    (void)loaded_faces;   // 日志被裁时上面那行不展开（见下段 `#if`）
+    (void)loaded_faces;   // 日志被裁时上面那行不展开（见下段 `#if`）
     // 正文档**按优先级顺序**列出：栈里靠前的先被 `find_face` 选中，
     // 所以这一行顺序本身就是"某个字最终由谁画"的答案。
+    //
+    // 整段只在“日志编进来”时存在：这两个循环**只为日志而写**，
+    // 裁掉日志时留着它们会变成“未使用的循环变量”（`-Werror` 直接断构建），
+    // 而写 `(void)face;` 去哄编译器只是掩住了“这段本就不该在”这个事实。
+#if !defined(ST_LOG_DISABLED)
     for (std::size_t index = 0; index < loaded_faces.size(); ++index) {
       const auto& face = loaded_faces[index];
-      log::info("  [{}] index={} name={} path={}", index, face.face_index(), face.name(),
-                face.path());
+      ST_LOG_INFO("  [{}] index={} name={} path={}", index, face.face_index(), face.name(),
+                  face.path());
     }
     for (std::size_t index = 0; index < impl_->fonts->monospace_faces().size(); ++index) {
       const auto& face = impl_->fonts->monospace_faces()[index];
-      log::info("  mono[{}] index={} name={} path={}", index, face.face_index(), face.name(),
-                face.path());
+      ST_LOG_INFO("  mono[{}] index={} name={} path={}", index, face.face_index(), face.name(),
+                  face.path());
     }
+#endif
   } else {
-    log::warn("未找到可用字体（{}），文本将不渲染", stack.error().message);
+    ST_LOG_WARN("未找到可用字体（{}），文本将不渲染", stack.error().message);
   }
 
   root_.set_viewport(math::Size{static_cast<float>(options_.width),
@@ -877,7 +885,7 @@ auto Application::start() -> Status {
                         "脚本宿主初始化失败（QuickJS 运行时或 JS 前置加载异常）");
     }
     // 事件桥由 `ScriptHost` 自己在构造时接上（见其构造函数注释）
-    log::info("脚本能力已开启（内存上限 {} MiB / 超时 {} ms）",
+    ST_LOG_INFO("脚本能力已开启（内存上限 {} MiB / 超时 {} ms）",
               options_.script_limits.memory_bytes / (1024U * 1024U),
               options_.script_limits.timeout.count());
   }
@@ -891,7 +899,7 @@ auto Application::start() -> Status {
   impl_->server = std::make_unique<control::Server>(*this);
   auto port = impl_->server->start(server_options);
   if (!port) return forward_error(port.error());
-  log::info("[gebai] shuangtian app '{}' listening control on {}:{} (backend={}, headless={})",
+  ST_LOG_INFO("[gebai] shuangtian app '{}' listening control on {}:{} (backend={}, headless={})",
             name_, options_.control_bind, *port, backend_name(), headless());
 
   impl_->device_scale = impl_->backend->device_scale();
@@ -1037,7 +1045,7 @@ auto Application::run_loop() -> Result<int> {
     if (options_.max_frames > 0 && impl_->frames >= options_.max_frames) break;
     pace_loop(frame_start / 1'000'000);
   }
-  log::info("应用退出：共 {} 帧，最后一帧 {:.2f}ms（排版 {:.2f} / 绘制 {:.2f} / 送显 {:.2f}）",
+  ST_LOG_INFO("应用退出：共 {} 帧，最后一帧 {:.2f}ms（排版 {:.2f} / 绘制 {:.2f} / 送显 {:.2f}）",
             impl_->frames, impl_->last_frame_ms, impl_->layout_ms, impl_->paint_ms,
             impl_->present_ms);
   return 0;

@@ -250,7 +250,7 @@ auto generate_embeds(const EmbedRequest& request) -> Result<EmbedOutput> {
   output.include_dir = include_dir;
   output.file_count = entries.size();
   if (output.regenerated > 0) {
-    log::info("嵌入资源 [{}]: {} 个文件（本次重生成 {}）", request.scope, output.file_count,
+    ST_LOG_INFO("嵌入资源 [{}]: {} 个文件（本次重生成 {}）", request.scope, output.file_count,
               output.regenerated);
   }
   return output;

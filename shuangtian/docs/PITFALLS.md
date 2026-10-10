@@ -60,6 +60,10 @@
 | **`SYMBOL_INFO` 不能当普通数组用** | 它的 `Name` 是**柔性数组**：必须整块分配并设 `SizeOfStruct`/`MaxNameLen`。直接 `reinterpret_cast` 一个 `char[N]` 会让 `SymFromAddr` 恒失败，看起来像“二进制没符号” | `src/core/platform_crash.cpp` 的 `walk_stack` 注释 |
 | **`addr2line` 要 link-time 地址** | 传模块内偏移恒得 `??:0`；要加上 PE 首选基址 `0x140000000`。且 DbgHelp 只读 PDB（读不了 MinGW 的 DWARF）——MinGW 构建下自己的帧必然要它兜底 | `src/core/platform_crash.cpp` 的 `walk_stack` 注释 |
 | **本机链接的库看顶层 `system_libs`** | `toolchains.<名>.system_libs` 只在**交叉编译**时**整体接管**；本机构建根本不看它。加 Windows 系统库（`dbghelp`/`psapi`）时两处都要写 | `st.pkg` 的 `//system_libs` 注释 |
+| **改构建系统的开关必须看真实命令行** | `st.pkg` 的开关要先变成编译器**看得见的东西**才算数。实测三个静默失效：加进 `flags` 而非 `defines`（不进命令行）/ 往还不存在的 `effective` 里 push（被后面整体覆盖）/ `defines` 要**裸名**却写了 `-D` 前缀（变成 `-D-DST_…`）。三者都不报错，只能靠 `--verbose` 逐字读命令行发现 | `src/pkg/build.cpp` 的 `ST_LOG_DISABLED` 段注释 |
+| **“代码明明改了却没生效”先查工具自身二进制** | `st.exe` 自己也是被构建出来的。改了 `src/pkg/*` 后 `st build X` **不会**重建 `st.exe`——它拿旧版本跑，于是开关全部静默失效。实测：`st.exe` 是 10/9 的、`build.cpp` 是 10/10 的，白查三轮。先 `st build st --profile dev`（且 `st.exe` 在运行时无法覆盖，要用 `build/bin/st.exe` 那个自举副本） | `CONVENTIONS.md` §7.4 的延伸 |
+| **`log::info(` 批量替换会咬到 `st::log::info(`** | 正则 `\blog::info\(` 在 `st::log::info(` 上也匹配，替换后得到 `st::ST_LOG_INFO(`（不存在的宏）。替换后必须全局复查 `::ST_LOG_` 这类残留 | `src/core/entry.cpp` 等 |
+| **宏名与函数名同名会自引用** | `#define ST_LOG_INFO(...) st::log::info(__VA_ARGS__)` 里 `info` 再次被同名宏替换，展开成 `st::log::ST_LOG_INFO(...)`——报 `expected unqualified-id`。要加一层 `ST_LOG_DETAIL_*` 间接 | `include/st/core/log.hpp` 的宏段注释 |
 
 ## 场景 5：用脚本驱动控制通道 / 写 e2e
 

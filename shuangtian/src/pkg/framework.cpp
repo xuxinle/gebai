@@ -82,7 +82,7 @@ auto load_framework(const FrameworkSpec& spec) -> Result<Framework> {
   }
 
   framework.embed_support_directory = fs::join(framework.directory, "third_party/battery");
-  log::info("已引用框架 {} v{}（{} 源文件 / {} 第三方源 / {} 包含目录）", framework.name,
+  ST_LOG_INFO("已引用框架 {} v{}（{} 源文件 / {} 第三方源 / {} 包含目录）", framework.name,
             framework.version, framework.sources.size(), framework.third_party_sources.size(),
             framework.include_dirs.size());
   return framework;

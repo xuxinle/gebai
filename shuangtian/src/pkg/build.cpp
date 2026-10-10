@@ -453,11 +453,11 @@ struct PchContext {
     if (!result || result->exit_code != 0) {
       const std::string detail =
           result ? std::string(result->stderr_text).substr(0, 400) : result.error().message;
-      log::warn("预编译头构建失败（忽略，按常规编译进行）: {}", detail);
+      ST_LOG_WARN("预编译头构建失败（忽略，按常规编译进行）: {}", detail);
       (void)fs::remove_file(gch);
       return std::nullopt;
     }
-    log::info("预编译头已生成: {}", gch);
+    ST_LOG_INFO("预编译头已生成: {}", gch);
   }
   const auto gch_time = fs::modified_ns(gch).value_or(0);
   const auto gch_size = fs::file_size(gch).value_or(0);
@@ -897,7 +897,7 @@ struct LanguageFlags {
                                                 options.max_memory_mb, options.profile,
                                                 hardware_concurrency());
   const std::size_t workers = plan.jobs;
-  log::info("并行编译 {} 路（{}），超大单元上限 {}", plan.jobs, plan.reason, plan.jobs_large);
+  ST_LOG_INFO("并行编译 {} 路（{}），超大单元上限 {}", plan.jobs, plan.reason, plan.jobs_large);
   // 超大单元闸门：超阈值源文件同时最多 `jobs_large` 个在编（默认 1），
   // 避免"几个大块头叠在一起"这种最坏情形（即便它们的峰值与体积不成正比，串行化也钉住上界）
   const auto large_gate_limit = static_cast<std::ptrdiff_t>(plan.jobs_large);
@@ -982,7 +982,7 @@ struct LanguageFlags {
         // 排查“为什么这个单元的行为与另一个不同”时，需要的正是实际传了什么。
         std::string flag_dump;
         for (std::size_t i = 1; i < args.size(); ++i) flag_dump.append(" ").append(args[i]);
-        log::info("compile: {}{} -> {}", fs::file_name(unit->source), flag_dump,
+        ST_LOG_INFO("compile: {}{} -> {}", fs::file_name(unit->source), flag_dump,
                   fs::file_name(unit->object));
       }
       // 编译子进程要带上工具链环境（当前两族都为空；保留这个字段是为了将来加族时
@@ -1078,7 +1078,7 @@ struct LanguageFlags {
     return unexpected(ErrorCode::Invalid, report);
   }
   if (cache_hits > 0 || cache_stores.load() > 0) {
-    log::info("对象缓存：命中 {} · 新写入 {}", cache_hits, cache_stores.load());
+    ST_LOG_INFO("对象缓存：命中 {} · 新写入 {}", cache_hits, cache_stores.load());
   }
   return done.load();
 }
@@ -1322,6 +1322,21 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
     framework = std::move(*loaded);
   }
   Manifest effective = manifest;
+  // 日志开关 → **编译期**裁掉（`ST_LOG_DISABLED`）。
+  //
+  // ⚠ 三个坑都踩过（都表现为"报构建完成、开关静默失效"）：
+  //
+  // ① **必须写在 `effective` 构造之后**。原先写在前面（往还不存在的对象里 push），
+  //    随后被 `Manifest effective = manifest;` **整体覆盖**。
+  // ② **走 `defines` 而不是 `flags`**：`compile_units` 取的是传进去的 `flags`
+  //    （只汇总 `st.pkg` 的 `flags` 字段），往 `flags` 里塞的 `-D` 不进编译命令。
+  // ③ **`defines` 是裸名**（`build_language_flags` 统一加 `-D` 前缀），
+  //    所以只能写 `ST_LOG_DISABLED=1`——写成 `-DST_LOG_DISABLED=1` 会变成
+  //    `-D-DST_LOG_DISABLED=1`（非法宏名，编译器不报错）。
+  //
+  // 三个坑都是**静默**的（不报错、只少一个宏），用 `--verbose` 逐字读命令行才看得出来——
+  // 那次排查正是在命令行里发现"一条 `-DST_LOG_DISABLED` 都没有"。
+  if (!manifest.log_enabled) effective.defines.push_back("ST_LOG_DISABLED=1");
   if (framework.has_value()) {
     const auto append = [](std::vector<std::string>& target, const std::vector<std::string>& extra) {
       target.insert(target.end(), extra.begin(), extra.end());
@@ -1358,6 +1373,12 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   std::vector<std::string> library_sources = *sources;
   if (!options.target.empty()) {
     if (const TargetSpec* spec = manifest.find_target(options.target); spec != nullptr) {
+      // 目标级 `log` 覆盖工程级（`std::optional`：只有显式写了才覆盖）。
+      if (spec->log_enabled.has_value() && *spec->log_enabled != manifest.log_enabled) {
+        // 先摘掉工程级那条，避免同时出现相反的两个定义（裸名，见上方说明）。
+        std::erase(effective.defines, std::string("ST_LOG_DISABLED=1"));
+        if (!*spec->log_enabled) effective.defines.push_back("ST_LOG_DISABLED=1");
+      }
       for (const auto& pattern : spec->exclude_sources) {
         const auto before = library_sources.size();
         std::erase_if(library_sources, [&pattern, &manifest](const std::string& path) {
@@ -1365,7 +1386,7 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
           return fs::match_glob(pattern, fs::relative_to(path, manifest.directory));
         });
         if (before == library_sources.size()) {
-          log::warn("排除模式未命中任何源文件: {}", pattern);
+          ST_LOG_WARN("排除模式未命中任何源文件: {}", pattern);
         }
       }
     }
@@ -1678,7 +1699,7 @@ namespace {
     shard_reports[index] = fs::join(shard_dir, std::format("shard-{}.xml", index + 1));
   }
 
-  log::info("测试分片：{} 片并行（每片一个测试进程；片内顺序不变）", shards);
+  ST_LOG_INFO("测试分片：{} 片并行（每片一个测试进程；片内顺序不变）", shards);
   // 用线程池而不是裸 std::thread：与编译侧同一套并发原语（RAII 回收、可诊断）。
   // 子进程输出**不捕获**（直接继承终端）：分片不是为了给人看整齐的报告，
   // 捕获到内存再回显会让长跑期间看不到任何进展。
@@ -1720,7 +1741,7 @@ namespace {
       (void)fs::remove_all(shard_dir);
       return forward_error(status.error());
     }
-    log::info("JUnit 报告已合并（{} 片，失败用例 {}）", shards, merged_failed);
+    ST_LOG_INFO("JUnit 报告已合并（{} 片，失败用例 {}）", shards, merged_failed);
   }
   (void)fs::remove_all(shard_dir);
   return failed_total;
@@ -1853,7 +1874,7 @@ auto run_tests(const Manifest& manifest, const BuildOptions& options, std::strin
   auto compiled = compile_units(effective, options, units, *flags, *toolchain,
                                 framework_flags.has_value() ? &*framework_flags : nullptr, rebuilt);
   if (!compiled) return forward_error(compiled.error());
-  log::info("测试构建：{} 单元（重编 {}）", units.size(), rebuilt);
+  ST_LOG_INFO("测试构建：{} 单元（重编 {}）", units.size(), rebuilt);
 
   const std::string output = fs::join(bin_dir, "st_tests" + toolchain->executable_suffix);
   auto linked = link(manifest, options, units, output, *flags, *toolchain, {});

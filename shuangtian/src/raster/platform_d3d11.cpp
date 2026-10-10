@@ -1668,7 +1668,7 @@ class GpuCanvas final : public Surface {
       if (std::string_view(item) == what) return;
     }
     reported.push_back(what);
-    st::log::warn("GPU 渲染：{} 尚未实现（当前里程碑只落地设备层与清屏）", what);
+    ST_LOG_WARN("GPU 渲染：{} 尚未实现（当前里程碑只落地设备层与清屏）", what);
   }
 
   void create_target() {
@@ -1682,11 +1682,11 @@ class GpuCanvas final : public Surface {
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     if (FAILED(device_->CreateTexture2D(&desc, nullptr, &target_))) {
-      st::log::error("GPU 渲染：创建离屏渲染目标失败");
+      ST_LOG_ERROR("GPU 渲染：创建离屏渲染目标失败");
       return;
     }
     if (FAILED(device_->CreateRenderTargetView(target_, nullptr, &rtv_))) {
-      st::log::error("GPU 渲染：创建渲染目标视图失败");
+      ST_LOG_ERROR("GPU 渲染：创建渲染目标视图失败");
     }
   }
 
@@ -1729,14 +1729,14 @@ class GpuCanvas final : public Surface {
       desc.Usage = D3D11_USAGE_STAGING;
       desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
       if (FAILED(device_->CreateTexture2D(&desc, nullptr, &staging_))) {
-        st::log::error("GPU 渲染：创建回读用暂存纹理失败");
+        ST_LOG_ERROR("GPU 渲染：创建回读用暂存纹理失败");
         return false;
       }
     }
     context_->CopyResource(staging_, target_);
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (FAILED(context_->Map(staging_, 0, D3D11_MAP_READ, 0, &mapped))) {
-      st::log::error("GPU 渲染：回读映射失败");
+      ST_LOG_ERROR("GPU 渲染：回读映射失败");
       return false;
     }
     readback_.assign(static_cast<std::size_t>(physical_width_) *

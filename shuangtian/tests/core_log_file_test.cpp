@@ -125,6 +125,18 @@ ST_TEST(log_tail_capacity_is_bounded_and_returns_latest) {
   st::log::set_tail_capacity(512);   // 复原（全局状态，影响后续用例）
 }
 
+ST_TEST(diag_default_log_follows_build_mode) {
+  // 契约：**非 release 默认落盘，release 默认不落盘**（见 `entry.hpp` 的
+  // `default_log_to_file`）。判据是编译器自己带的 `NDEBUG`（release 档带 `-DNDEBUG`）。
+  //
+  // 为何用 `#if defined(NDEBUG)` 双向断言而不是只断言一个值：这个契约**两边都要成立**，
+  // 而测试可能在任何档位下被构建——写成单向就会在另一半档位里变成假绿。
+#if defined(NDEBUG)
+  ST_CHECK(!st::default_log_to_file());
+#else
+  ST_CHECK(st::default_log_to_file());
+#endif
+}
 ST_TEST(log_crash_report_filename_has_no_colon) {
   // 回归：崩溃报告文件名曾直接用 `iso8601_now()`（形如 `2026-10-10T14:18:33.362Z`），
   // 其中的 `:` 在 Windows 文件名里不合法 ⇒ `open` 失败 ⇒ **崩溃报告永不生成**

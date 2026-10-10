@@ -141,19 +141,17 @@ constexpr std::array<RuleSpec, 15> kRules{{
 /// 文件级豁免（均需在 `CONVENTIONS.md` §8 登记）：
 /// - **L6**：平台/指令集边界（`platform_*`、`simd*`）——系统 API 与 SIMD intrinsics 的
 ///   位级重解释只能在这里发生，且必须单点封装。
-/// - **L3**：测试框架 `test.hpp` 的断言宏——这是"函数式宏"唯一被认可的用途
-///   （需要在断言里拿到调用点文件/行号与表达式原文）。
-/// - **L14**：同样以 `platform_*` 为边界（系统头的唯一合法落脚点）；`backend.cpp`
-///   额外获准——它需要 `dlopen` 做**运行时后端探测**，而这正是 §10 第 1 条
-///   「平台后端一律运行时探测（不产生链接期依赖）」的实现处：探测这一层本身就是
-///   平台差异的**唯一**判定点，放进 `platform_*` 只会让"有没有这个后端"这件事被拆散。
+/// - **L3**：两处。测试框架 `test.hpp` 的断言宏——需要在断言里拿到调用点
+///   文件/行号与表达式原文；码日志入口 `log.hpp` 的 `ST_LOG_*`——需要在调用点把参数
+///   **一起丢掉**（空函数模板里参数仍被求值，字符串字面量照样编进产物）。
+///   两者的共同点：**只能在调用点展开**，没有函数形式能等价实现。
 [[nodiscard]] auto rule_exempt(std::string_view file_name, std::string_view rule) -> bool {
   if (rule == "L6") {
     return file_name.find("platform_") != std::string_view::npos ||
            file_name.find("simd") != std::string_view::npos;
   }
   if (rule == "L3") {
-    return file_name == "test.hpp";
+    return file_name == "test.hpp" || file_name == "log.hpp";
   }
   if (rule == "L14") {
     return file_name.find("platform_") != std::string_view::npos || file_name == "backend.cpp";

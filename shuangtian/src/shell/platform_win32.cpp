@@ -290,12 +290,12 @@ class Win32Backend final : public Backend {
     if (!explicit_scale) scale_ = query_window_scale(window_, requested_scale);
     if (auto status = resize_window_to_scale(); !status) return status;
     if (!explicit_scale && scale_ != requested_scale) {
-      log::info("win32 窗口 DPI 与请求不同：请求 {:.2f} → 实际 {:.2f}（窗口已按实际缩放调整）",
+      ST_LOG_INFO("win32 窗口 DPI 与请求不同：请求 {:.2f} → 实际 {:.2f}（窗口已按实际缩放调整）",
                 static_cast<double>(requested_scale), static_cast<double>(scale_));
     }
     // 以**客户区为准**分配：窗口尺寸可能被系统调整过，逻辑尺寸反过来迁就它
     if (auto status = sync_buffers_to_client(scale_); !status) return status;
-    log::info("win32 窗口已创建（逻辑 {}x{} · 缩放 {:.2f} · 物理 {}x{}）", logical_width_,
+    ST_LOG_INFO("win32 窗口已创建（逻辑 {}x{} · 缩放 {:.2f} · 物理 {}x{}）", logical_width_,
               logical_height_, static_cast<double>(scale_), surface_->physical_width(),
               surface_->physical_height());
     // 画布物理尺寸必须**等于**客户区，否则 DXGI 会缩放整块纹理（整屏发糊）。
@@ -304,7 +304,7 @@ class Win32Backend final : public Backend {
       RECT client{};
       if (::GetClientRect(window_, &client) != 0 &&
           (client.right != surface_->physical_width() || client.bottom != surface_->physical_height())) {
-        log::warn("画布与客户区不一致：画布 {}x{}，客户区 {}x{}（GPU 呈现会被 DXGI 缩放）",
+        ST_LOG_WARN("画布与客户区不一致：画布 {}x{}，客户区 {}x{}（GPU 呈现会被 DXGI 缩放）",
                   surface_->physical_width(), surface_->physical_height(), client.right,
                   client.bottom);
       }
@@ -445,7 +445,7 @@ class Win32Backend final : public Backend {
         return;
       } else if (!present_fallback_logged_) {
         // 只报一次：每帧刷屏会把日志淹掉，而"回退了"这个事实报一次就够
-        log::warn("swapchain 呈现失败（{}），回退 GDI blit", presented.error().message);
+        ST_LOG_WARN("swapchain 呈现失败（{}），回退 GDI blit", presented.error().message);
         present_fallback_logged_ = true;
       }
     }
@@ -806,7 +806,7 @@ class Win32Backend final : public Backend {
     // 而不是让一个尺寸错的后备缓冲继续呈现（那正是"拉伸发糊"的老病根）。
     if (presenter_ != nullptr) {
       if (auto resized = presenter_->resize(physical_width, physical_height); !resized) {
-        log::warn("swapchain 改尺寸失败（{}），本轮呈现回退 GDI blit",
+        ST_LOG_WARN("swapchain 改尺寸失败（{}），本轮呈现回退 GDI blit",
                   resized.error().message);
         presenter_.reset();
       }

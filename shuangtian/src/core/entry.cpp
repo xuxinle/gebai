@@ -131,9 +131,33 @@ auto crash_report_file_name(std::int64_t unix_millis, unsigned long pid) -> std:
 
 void startup_configure_diagnostics(int argc, char** argv) {
   using namespace st::log;
-  // 日志文件：命令行 > 环境变量 > 不落盘（保持旧行为，不静默改变已有应用的输出）。
+  // 日志文件：命令行 > 环境变量 > **按构建模式取默认**。
+  //
+  // 默认值就是产品决策，这里的取舍是：
+  // - **非 release（dev/debug/san/quick）**：默认**开**——开发期出事时“日志已经在那里了”
+  //   比“先加参数重启一次”值钱得多，而且用户不需要知道有这个开关。
+  // - **release**：默认**关**。发布版是常驻进程，默认落盘等于无止境地写文件（磁盘/隐私），
+  //   且发布版出事靠**崩溃报告**（它不依赖落盘，见 `st::log::tail`）。
+  //   要开就显式给 `--log-file` / `ST_LOG_FILE`——开关继续存在，只是不默认开。
   std::string log_path = scan_option(argc, argv, "--log-file");
+  const bool explicit_log = !log_path.empty();
   if (log_path.empty()) log_path = env_or("ST_LOG_FILE", {});
+  if (log_path.empty() && default_log_to_file()) {
+    // 默认路径：与可执行文件同级的 `logs/<名>.log`（应用不必先 mkdir，`open_file` 会建）。
+    if (const auto exe = st::process::executable_path(); exe.has_value()) {
+      // 取可执行文件所在目录再拼 `logs/`——不能直接拼到文件名上。
+      const std::string file = *exe;
+      const std::size_t slash = file.find_last_of("/\\");
+      const std::string dir = slash == std::string::npos ? std::string{} : file.substr(0, slash);
+      const std::string stem = slash == std::string::npos ? file : file.substr(slash + 1);
+      const std::size_t dot = stem.find_last_of('.');
+      const std::string name = dot == std::string::npos ? stem : stem.substr(0, dot);
+      // 本档默认不写**当前工作目录**：应用可能被从任意 cwd 启动，
+      // 而“日志去哪了”应当是确定的（可执行文件旁边）。
+      log_path = st::fs::join(dir.empty() ? std::string("logs") : st::fs::join(dir, "logs"),
+                              name + ".log");
+    }
+  }
   if (!log_path.empty()) {
     FileOptions options{};
     options.path = log_path;
@@ -141,10 +165,11 @@ void startup_configure_diagnostics(int argc, char** argv) {
       set_level(level_from_name(from_argv));
     } else if (const std::string from_env = env_or("ST_LOG_LEVEL", {}); !from_env.empty()) {
       set_level(level_from_name(from_env));
+    } else if (!explicit_log && !default_log_to_file()) {
+      // 没显式要求、且本档默认不开：保持 stderr-only 的旧行为。
     }
     // 失败不中止：日志系统自身不能成为故障源（`open_file` 已打一条 stderr 告警）。
-    (void)open_file(options);
-    st::log::info("日志落盘：{}", options.path);
+    if (open_file(options)) ST_LOG_INFO("日志落盘：{}", options.path);
   }
 
   // 崩溃报告：目录 + 时间戳 + pid 组文件名。
@@ -158,7 +183,7 @@ void startup_configure_diagnostics(int argc, char** argv) {
     const std::string name =
         crash_report_file_name(st::time::unix_ms(), static_cast<unsigned long>(st::process::current_id()));
     if (!set_crash_report_path(st::fs::join(crash_dir, name))) {
-      st::log::warn("崩溃报告路径设置失败（崩溃时将只有 stderr）");
+      ST_LOG_WARN("崩溃报告路径设置失败（崩溃时将只有 stderr）");
     }
   }
 }

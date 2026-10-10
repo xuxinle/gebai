@@ -71,7 +71,7 @@ void SceneView::paint_content(const RenderContext& context, raster::Surface& can
   if (scene_ == nullptr || scene_->width() != width || scene_->height() != height) {
     auto created = raster::Scene3D::create(width, height);
     if (!created.has_value()) {
-      log::warn("SceneView：创建 3D 场景失败（{}）", created.error().message);
+      ST_LOG_WARN("SceneView：创建 3D 场景失败（{}）", created.error().message);
       scene_.reset();
       canvas.fill_rect(box, raster::Paint::solid(context.theme.colors().surface_sunken),
                        style_.radius);

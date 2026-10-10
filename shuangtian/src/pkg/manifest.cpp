@@ -19,12 +19,12 @@ namespace st::pkg {
 namespace {
 
 /// 本层已识别的顶层字段（其余进 `extra_fields`，回写时保留）。
-inline constexpr std::array<std::string_view, 20> known_keys{
+inline constexpr std::array<std::string_view, 21> known_keys{
     "name",       "version",     "kind",        "modules",        "include_dirs",
     "sources",    "tests",       "flags",       "defines",        "system_libs",
     "targets",    "dependencies", "dependency_modules", "dependency_system",
     "third_party_sources", "c_flags", "embed", "toolchains", "framework",
-    "shuangtian_pkg_format"};
+    "shuangtian_pkg_format", "log"};
 
 [[nodiscard]] auto known_key(std::string_view key) -> bool {
   for (const auto candidate : known_keys) {
@@ -50,6 +50,11 @@ inline constexpr std::array<std::string_view, 20> known_keys{
   target.flags = json_get_string_array(json, "flags");
   target.exclude_sources = json_get_string_array(json, "exclude_sources");
   target.embed = json_get_string_array(json, "embed");
+  // `log`：目标级覆盖（缺省吃工程级）。
+  // 用 `st::json_find` 判“键在不在”——否则无法区分“未指定”与“显式 false”。
+  if (const st::Json* log_value = st::json_find(json, "log"); log_value != nullptr && log_value->is_boolean()) {
+    target.log_enabled = log_value->get<bool>();
+  }
   return target;
 }
 
@@ -229,6 +234,11 @@ auto Manifest::parse_json(const st::Json& json, std::string_view directory) -> R
   manifest.embed = json_get_string_array(json, "embed");
   manifest.defines = json_get_string_array(json, "defines");
   manifest.system_libs = json_get_string_array(json, "system_libs");
+  // `log`：日志代码是否编进产物（缺省 `true` = 编进）。目标级同名键可覆盖单个目标。
+  // 与构建档的关系：非 release 档默认**日志打开且落盘**（见 `entry.cpp` 的
+  // `startup_configure_diagnostics`）；release 档默认不落盘（常驻进程写日志无止境），
+  // 而要不要**编进**由这个开关定。
+  manifest.log_enabled = json_get_bool(json, "log", true);
 
   // `lint.exempt`：`{ "L5": ["src/app/*.cpp"], … }` —— 规则 id → 路径 glob 列表。
   // 用于"这一层与框架的约定不同"这类**成片边界**（如业务层 worker 线程用异常传错）。

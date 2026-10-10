@@ -193,7 +193,7 @@ struct Server::Impl {
   [[nodiscard]] auto send(Client& client, const Json& message) -> bool {
     const std::string body = json_dump(message);
     if (body.size() > options.max_frame) {
-      log::warn("控制通道响应超过帧上限（{} 字节）", body.size());
+      ST_LOG_WARN("控制通道响应超过帧上限（{} 字节）", body.size());
       return false;
     }
     const auto length = static_cast<std::uint32_t>(body.size());
@@ -208,7 +208,7 @@ struct Server::Impl {
     frame.insert(frame.end(), header.begin(), header.end());
     frame.insert(frame.end(), body.begin(), body.end());
     if (auto status = client.stream.write_all(frame); !status) {
-      log::warn("控制通道发送失败（{}）：{}", client.peer, status.error().message);
+      ST_LOG_WARN("控制通道发送失败（{}）：{}", client.peer, status.error().message);
       return false;
     }
     return true;
@@ -543,7 +543,7 @@ struct Server::Impl {
     if (options.log_calls) {
       const std::string line = std::format("{} [{}] {} {}us", time::iso8601_now(), client.peer,
                                            method, (time::now_ns() - start_ns) / 1000);
-      log::info("control {}", line);
+      ST_LOG_INFO("control {}", line);
       log_ring.push_back(line);
       if (log_ring.size() > kKeepAliveLogLines) log_ring.erase(log_ring.begin());
     }
@@ -561,7 +561,7 @@ struct Server::Impl {
       client->stream = std::move(*stream);
       client->stream.set_nonblocking(true);
       client->stream.set_no_delay(true);   // 响应是小帧：Nagle 会让后续小包等确认，白添延迟
-      log::info("控制通道：客户端接入 {} (#{})", client->peer, client->id);
+      ST_LOG_INFO("控制通道：客户端接入 {} (#{})", client->peer, client->id);
       clients.push_back(std::move(client));
     }
   }
@@ -612,7 +612,7 @@ struct Server::Impl {
                                      (static_cast<std::uint32_t>(third) << 8U) |
                                      static_cast<std::uint32_t>(fourth);
         if (length == 0 || length > options.max_frame) {
-          log::warn("控制通道：帧长度非法（{} 字节，上限 {}）来自 {}", length, options.max_frame,
+          ST_LOG_WARN("控制通道：帧长度非法（{} 字节，上限 {}）来自 {}", length, options.max_frame,
                     client.peer);
           closed = true;
           break;
@@ -638,7 +638,7 @@ struct Server::Impl {
       }
       client.consumed = 0;
       if (closed) {
-        log::info("控制通道：客户端断开 {}", client.peer);
+        ST_LOG_INFO("控制通道：客户端断开 {}", client.peer);
         drop_client(client);
         continue;
       }
@@ -1748,9 +1748,12 @@ auto Server::start(const ServerOptions& options) -> Result<std::uint16_t> {
       return forward_error(status.error());
     }
   }
-  const bool auth_on = impl_->options.token.has_value() && !impl_->options.token->empty();
-  log::info("控制通道已启动 tcp://{}:{}{}", options.bind, impl_->listener.port(),
-            auth_on ? "（需 token）" : "（鉴权关闭）");
+  // `auth_on` 只服务下面那条日志：日志被裁（`ST_LOG_DISABLED`）时它会成“未使用变量”，
+  // 而 `-Werror` 直接断构建。把计算搬进日志语句——裁掉时整行（含计算）一起消失。
+  ST_LOG_INFO("控制通道已启动 tcp://{}:{}{}", options.bind, impl_->listener.port(),
+              (impl_->options.token.has_value() && !impl_->options.token->empty())
+                  ? "（需 token）"
+                  : "（鉴权关闭）");
   return impl_->listener.port();
 }
 

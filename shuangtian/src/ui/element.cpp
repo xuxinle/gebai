@@ -81,7 +81,7 @@ void warn_on_duplicate_key(const Element& parent, const Element& child) {
   for (const auto& sibling : parent.children()) {
     if (sibling.get() == &child || sibling->type() != child.type()) continue;
     if (sanitize_key(sibling->key()) != sanitized) continue;
-    log::warn("同一父节点下 {} 的 key 重复（'{}'）：自动 id 会撞车，按 id 查找可能命中另一个元素",
+    ST_LOG_WARN("同一父节点下 {} 的 key 重复（'{}'）：自动 id 会撞车，按 id 查找可能命中另一个元素",
               child.type(), child.key());
     return;
   }

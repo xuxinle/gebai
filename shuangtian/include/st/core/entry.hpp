@@ -25,6 +25,7 @@
 /// ST_MAIN(run_app)                               // 跨平台入口
 /// ```
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,23 @@ namespace st {
 
 /// 仅做控制台编码设置（供自行解析参数的场景）。
 void startup_configure_console();
+
+/// **本档是否默认把日志落盘**（非 release 为真；release 为假）。
+///
+/// 判据是编译期的 `NDEBUG`（`release` 档带 `-DNDEBUG`，见 `pkg::build` 的
+/// `profile_flags`）——**不用构建系统传宏**，因为框架的 core 也编进 `st` 工具自身，
+/// 那儿没有 `st.pkg` 的档位概念；而 `NDEBUG` 是编译器自己会带的。
+///
+/// 与 `ST_LOG_DISABLED` 的关系：后者决定“**编不编**”（用户显式要求），
+/// 前者决定“本档**默认行不行**”（产品决策）；**两者独立**——
+/// release 里日志仍编着（所以 `--log-file` 随时可用），只是不默认写。
+[[nodiscard]] constexpr auto default_log_to_file() noexcept -> bool {
+#if defined(NDEBUG)
+  return false;   // release：避免常驻进程无止境写文件；要开显式给 --log-file
+#else
+  return true;    // 开发档：出事时日志已经在那里了
+#endif
+}
 
 /// **诊断落盘的两条自动接线**（由 `ST_MAIN` 调用；自行写 main 的应用可手动调）。
 ///

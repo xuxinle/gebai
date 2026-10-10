@@ -71,6 +71,8 @@ struct TargetSpec {
   /// 写在**目标**上而不是工程级：嵌入集合决定生成的声明头内容，而声明头是按目标隔离的
   /// （不同目标嵌入不同资源，且同名资源在不同目标里标识符不同）。
   std::vector<std::string> embed{};
+  /// 日志代码是否编进本目标（覆盖工程级；`std::optional` 才能区分“未指定”与“显式 false”）。
+  std::optional<bool> log_enabled{};
 };
 
 /// 交叉编译工具链描述（`st.pkg` 的 `toolchains` 段）。
@@ -149,6 +151,11 @@ struct Manifest {
   std::vector<std::string> c_flags{};
   std::vector<std::string> defines{};
   std::vector<std::string> system_libs{};
+  /// 日志代码是否编进产物（`"log": false` 裁掉；缺省真）。目标级同名键可覆盖单个目标。
+  ///
+  /// 构建侧据此加 `-DST_LOG_DISABLED=1`（见 `st/core/log.hpp`）——**编译期**裁掉，
+  /// 不是“运行时判断一次再跳过”（后者代码与字符串仍在产物里）。
+  bool log_enabled{true};
   std::vector<TargetSpec> targets{};
   /// 交叉编译工具链（按名选取：`st build <target> --toolchain mingw`）。
   std::vector<ToolchainSpec> toolchains{};
