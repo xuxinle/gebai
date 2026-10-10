@@ -3,6 +3,7 @@ import { statSync, readFileSync } from "node:fs"
 import { truncate } from "@gebai/sdk/node"
 import type { ToolSchema } from "@gebai/sdk"
 import { xmlToBlocks } from "./docx_xml"
+import { blocksToMarkdown } from "./docx_markdown"
 import {
   blockToXml,
   buildScopeCommon,
@@ -725,20 +726,53 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const getDocText = tool(
     "get_doc_text",
-    "获取文档纯文本内容。",
-    { document_id: { type: "string" }, block_id: { type: "string", description: "可选：起始块（如某标题块），只读取其子树（含标题层级与表格行，长文档按小节读取用）；缺省读整篇纯文本" } },
+    "获取文档内容（纯文本快速通道）。`format=markdown` 时返回 **Markdown**（标题/列表/表格/代码块/引用/高亮块等结构保留，与 import_markdown 同一套语法，可直接改后写回）；缺省 `format=text` 返回纯文本（丢结构，仅阅读/摘要用）。传 `block_id` 可只读某个标题/小节子树。需保留分栏/高亮块配色/表格列宽等富排版时用 `fetch_doc`（XML 通道）。",
+    {
+      document_id: { type: "string" },
+      block_id: { type: "string", description: "可选：起始块（如某标题块），只读取其子树；缺省读整篇" },
+      format: { type: "string", description: "markdown（结构与样式保留，与 import_markdown 对称）或 text（默认，纯文本）" },
+    },
     ["document_id"],
     async (args, ctx) => {
       const docId = String(args.document_id)
+      const wantMd = String(args.format ?? "text").toLowerCase() === "markdown"
       if (args.block_id !== undefined) {
         const blockId = String(args.block_id)
-        const text = (await docxCall(ctx, docId, blockId, {}, () => readSubtreeText(ctx, docId, blockId))) as string
-        return truncate(text || "（该块无文本内容）", "feishu_doc_text", ctx)
+        if (!wantMd) {
+          const text = (await docxCall(ctx, docId, blockId, {}, () => readSubtreeText(ctx, docId, blockId))) as string
+          return truncate(text || "（该块无文本内容）", "feishu_doc_text", ctx)
+        }
+        // Markdown：取该子树块并序列化
+        const target = unwrapBlockResponse(await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${blockId}`)) ?? {}
+        const desc = (await collectPages(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${blockId}/descendant`, 500, 10_000)).items
+        const byId = new Map<string, Record<string, unknown>>([[String(target.block_id ?? blockId), target]])
+        for (const b of desc) byId.set(String(b.block_id), b)
+        const notes = new Set<string>()
+        // 子树根块自身（非 page）也参与输出，保持「传什么块读什么内容」
+        const t = Number(target.block_type ?? 0)
+        const ids = t === 1 ? (Array.isArray(target.children) ? (target.children as unknown[]).map(String) : []) : [String(target.block_id ?? blockId)]
+        const { markdown, notes: ns } = blocksToMarkdown(ids, { byId, notes })
+        return truncate(withNotes(markdown || "（该块无文本内容）", ns), "feishu_doc_text", ctx)
       }
-      const data = (await api(ctx, `/open-apis/docx/v1/documents/${docId}/raw_content`)) as { content?: string }
-      return truncate(data.content ?? "", "feishu_doc_text", ctx)
+      if (!wantMd) {
+        const data = (await api(ctx, `/open-apis/docx/v1/documents/${docId}/raw_content`)) as { content?: string }
+        return truncate(data.content ?? "", "feishu_doc_text", ctx)
+      }
+      const { byId, rootId } = await loadBlockIndex(ctx, docId)
+      if (!byId.size) return { output: "文档为空（没有任何块）" }
+      const root = byId.get(rootId)
+      const topIds = root && Array.isArray(root.children) ? (root.children as unknown[]).map(String) : []
+      const notes = new Set<string>()
+      const { markdown, notes: ns } = blocksToMarkdown(topIds, { byId, notes })
+      return truncate(withNotes(markdown || "（文档无内容）", ns), "feishu_doc_text", ctx)
     },
   )
+
+  /** Markdown 输出附带的表达力说明（超出 Markdown 子集的块已降级——不静默丢信息）。 */
+  function withNotes(md: string, notes: string[]): string {
+    if (!notes.length) return md
+    return `${md}\n\n<!-- 说明：${notes.join("；")} -->`
+  }
 
 
   /** 取全部块并建索引（fetch_doc / update_doc 共用）。 */
@@ -2448,16 +2482,23 @@ export function extractBoardContent(nodes: unknown[]): string {
 /** 行内 Markdown → text_run 元素数组（**加粗**、`代码`、[链接](url)、*斜体*、***粗斜体***、~~删除线~~）。 */
 export function textElements(md: string, style?: Record<string, unknown>): Record<string, unknown>[] {
   const els: Record<string, unknown>[] = []
+  // 转义序列（`\X`）先行保护：占位为私有区字符，避免被行内语法正则消费；末尾还原为字面字符
+  const escaped: string[] = []
+  const src = md.replace(/\\([\\`*_{}\[\]()#+\-.!~>|$])/g, (_m, ch: string) => {
+    escaped.push(ch)
+    return `\uE000${String.fromCharCode(0xe000 + escaped.length - 1)}`
+  })
+  const restore = (s: string): string => s.replace(/\uE000([\s\S])/g, (_m, c: string) => escaped[c.charCodeAt(0) - 0xe000] ?? "")
   const re = /(\*\*\*[^*\n]+\*\*\*|\*\*[^*\n]+\*\*|~~[^~\n]+~~|`[^`\n]+`|\[[^\]\n]+\]\([^)\s]+\)|\*[^*\n]+\*)/g
   let last = 0
   let m: RegExpExecArray | null
   const push = (content: string, st: Record<string, unknown> | undefined) => {
     if (!content) return
-    const run: Record<string, unknown> = { content, ...(st && Object.keys(st).length ? { text_element_style: st } : {}) }
+    const run: Record<string, unknown> = { content: restore(content), ...(st && Object.keys(st).length ? { text_element_style: st } : {}) }
     els.push({ text_run: run })
   }
-  while ((m = re.exec(md))) {
-    push(md.slice(last, m.index), style)
+  while ((m = re.exec(src))) {
+    push(src.slice(last, m.index), style)
     const tok = m[0]
     if (tok.startsWith("***") && tok.endsWith("***")) push(tok.slice(3, -3), { bold: true, italic: true, ...style })
     else if (tok.startsWith("**") && tok.endsWith("**")) push(tok.slice(2, -2), { bold: true, ...style })
@@ -2471,7 +2512,7 @@ export function textElements(md: string, style?: Record<string, unknown>): Recor
     else push(tok, style)
     last = re.lastIndex
   }
-  push(md.slice(last), style)
+  push(src.slice(last), style)
   return els.length ? els : [{ text_run: { content: "" } }]
 }
 

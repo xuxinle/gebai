@@ -60,8 +60,9 @@
 |---|---|
 | 整篇创作、需要自动编号/分栏/高亮块配色/表格列宽/题注 | `import_xml` |
 | 快速追加、内容简单、已有 Markdown 草稿 | `import_markdown`（表达能力是 XML 的子集） |
+| 读成 Markdown（快速/给用户/可复制） | `get_doc_text format=markdown`（结构保留，与 import_markdown 对称） |
 | 局部改块 | `update_doc`：str_replace（同一措辞多处）/ block_replace（整块或同父区间重写）/ block_insert_after / block_delete / block_move_after / block_copy_after |
 | 看完就改（拿 block_id） | `fetch_doc detail=with-ids`：XML 带 block_id，读出即可改、改后可写回；需样式/配色/列宽时用 `detail=full` |
 | 定位命中处上下文 | `fetch_doc scope=keyword`（多词 `|` OR + context_before/after） |
-| 浏览/总结（不改） | `fetch_doc detail=simple` 或 `get_doc_text` |
+| 浏览/总结（只要字） | `fetch_doc detail=simple` 或 `get_doc_text`（缺省 text） |
 | 写入前预检 | `import_xml` 传 `dry_run=true`：只解析并出画像（块数/字数/类型分布）+ 图片与图表预检，**零写入** |

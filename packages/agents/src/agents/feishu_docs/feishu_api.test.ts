@@ -1376,9 +1376,51 @@ describe("docx 操作失败本地诊断", () => {
   })
 })
 
-/* ================= get_doc_text 小节读取 ================= */
+/* ================= get_doc_text（纯文本 / Markdown 双形态） ================= */
 
 describe("get_doc_text 小节读取", () => {
+  test("format=markdown：结构与样式保留（与 import_markdown 对称）", async () => {
+    const { tools } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      if (req.url.includes("/blocks?page_size=500")) {
+        return jsonResponse({
+          code: 0,
+          msg: "success",
+          data: {
+            items: [
+              { block_id: "page", block_type: 1, parent_id: "", children: ["h1", "p1", "b1", "b2", "c1"] },
+              { block_id: "h1", block_type: 3, parent_id: "page", heading1: { elements: [{ text_run: { content: "结论" } }] } },
+              { block_id: "p1", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "含" } }, { text_run: { content: "加粗", text_element_style: { bold: true } } }, { text_run: { content: "的段落" } }] } },
+              { block_id: "b1", block_type: 12, parent_id: "page", bullet: { elements: [{ text_run: { content: "项一" } }] } },
+              { block_id: "b2", block_type: 12, parent_id: "page", bullet: { elements: [{ text_run: { content: "项二" } }] } },
+              { block_id: "c1", block_type: 14, parent_id: "page", code: { style: { language: 63 }, elements: [{ text_run: { content: "const a = 1" } }] } },
+            ],
+            has_more: false,
+          },
+        })
+      }
+      return jsonResponse({ code: 0, msg: "success", data: {} })
+    })
+    const r = await tools.get_doc_text.execute({ document_id: "doc1", format: "markdown" }, ctx())
+    expect(r.output).toContain("# 结论")
+    expect(r.output).toContain("含**加粗**的段落")
+    expect(r.output).toContain("- 项一\n- 项二")
+    expect(r.output).toContain("```typescript")
+    // 同内容再次导入：块数一致（round-trip）
+    const mdOnly = String(r.output).split("\n\n<!-- 说明")[0]
+    expect(markdownToBlocks(mdOnly).length).toBe(5)
+  })
+
+  test("缺省 format=text：走 raw_content 纯文本", async () => {
+    const { tools } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      if (req.url.includes("/raw_content")) return jsonResponse({ code: 0, msg: "success", data: { content: "纯文本内容" } })
+      return jsonResponse({ code: 0, msg: "success", data: {} })
+    })
+    const r = await tools.get_doc_text.execute({ document_id: "doc1" }, ctx())
+    expect(r.output).toBe("纯文本内容")
+  })
+
   test("block_id 指定时组合子树文本（标题层级）", async () => {
     const { tools } = makeTools((req) => {
       if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })

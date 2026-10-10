@@ -3,11 +3,11 @@
 ## 能力范围（工具前缀分组）
 
 - **认证**：`auth_status` 检查应用凭证与 tenant_access_token 是否可用；**`auth_user_authorize`/`auth_user_token`/`auth_user_status`/`auth_user_clear` 配置 user_access_token（用户身份，见「用户授权配置」）**
-- **文档 docx（XML 读写主通道 + Markdown 快速通道）**：
-  - **读**：**`fetch_doc` 读文档为 XML 排版语法（查看/编辑首选：scope=outline 目录 → section 整节 / range 区间 / keyword 关键词定位（`|` 多词 OR）→ detail=simple/with-ids/full 三档详细度；读出即可改、改后可写回）**；`get_doc_text` 纯文本快速浏览（传 `block_id` 可只读某节子树）；`get_doc_meta` 元信息
-  - **改**：**`update_doc` 编辑指令族（str_replace 全文替换 / block_insert_after 插入（0=文首、-1=文末）/ block_replace 单块或同父区间替换 / block_delete 删除 / block_move_after 移动 / block_copy_after 复制 / append 追加——内容用 XML 排版语法，与 fetch_doc 同源）**；`set_table_width` 改已有表格列宽
-  - **建**：`create_doc` 空文档、**`import_xml` 整篇 XML 导入（整篇创作首选，支持 dry_run 预检）**、`import_markdown` Markdown 快速导入（简单内容/已有草稿）
-  - **辅助**：**`lint_doc` 排版体检（改动后按报告精修）**、**`style_guide` 读排版规范与体裁契约（动笔前必读）**、`export_doc` 导出（docx/pdf/xlsx/csv）、**`get_board` 读思维导图/画板（见「图形块读取」）**
+- **文档 docx（XML 主通道 + Markdown 快速通道，两者各自读/写对称）**：
+  - **XML 通道（保真度最高）**：读 **`fetch_doc`**（scope=outline 目录 → section 整节 / range 区间 / keyword 关键词定位（`|` 多词 OR）；detail=simple/with-ids/full 三档）；写 **`import_xml`**（整篇新建，支持 dry_run 预检）/ **`update_doc`**（指令族：str_replace 替换 / block_insert_after 插入（0=文首、-1=文末）/ block_replace 单块或同父区间 / block_delete / block_move_after / block_copy_after / append）；两者同一套语法、round-trip
+  - **Markdown 通道（快速、可直接给用户）**：读 **`get_doc_text format=markdown`**（标题/列表/表格/代码/引用/高亮块结构与行内样式保留，与 import_markdown 对称；缺省 `format=text` 纯文本仅阅读）；写 **`import_markdown`**（简单内容/已有草稿）
+  - **选型**：需富排版（自动编号/分栏/高亮块配色/表格列宽/题注/画板 token）或改已有文档 → **XML 通道**；纯文字/简单结构、或要一段可直接复制的 Markdown → **Markdown 通道**（Markdown 是 XML 子集：分栏/配色/列宽/画板会降级并在输出尾部附说明）
+  - **辅助**：`create_doc`/`get_doc_meta`/`set_table_width`/**`lint_doc` 排版体检**/**`style_guide` 排版规范与体裁契约（动笔前必读）**/`export_doc`/**`get_board` 读画板**
 - **云空间 drive**：`list_files` 文件清单、`create_folder` 建文件夹（缺省落配置的目标文件夹下）、`get_file_meta` 元信息、`upload_file` 上传（文本或 base64，缺省落配置的目标文件夹下）、`download_file` 下载到会话目录、`delete_file` 删除
 - **搜索**：`search` 云文档搜索（需开通「云文档搜索」权限）
 - **电子表格**：`create_sheet` 创建、`get_sheet_meta` 工作表列表、`read_sheet` 读取、`write_sheet` 覆盖写入、`append_sheet` 追加行
@@ -81,10 +81,11 @@
 
 | 场景 | 工具 |
 |---|---|
-| 看/改已有文档（首选闭环） | `fetch_doc`（outline → section/keyword → with-ids/full）→ `update_doc`（指令族）→ 重 fetch 验证 |
+| 看/改已有文档（富排版，首选闭环） | `fetch_doc`（outline → section/keyword → with-ids/full）→ `update_doc`（指令族）→ 重 fetch 验证 |
+| 读成 Markdown（快速/给用户/可复制） | `get_doc_text format=markdown`（结构保留，与 import_markdown 对称） |
 | 整篇新建 / 大段追加（需富排版） | `import_xml`（排版表达最全；可先 `dry_run` 预检） |
 | 简单追加 / 已有 Markdown 草稿 | `import_markdown`（快速通道；表达力是 XML 子集） |
-| 纯文本浏览/总结（不改） | `get_doc_text` 或 `fetch_doc detail=simple` |
+| 纯文本浏览/总结（只要字） | `get_doc_text`（缺省 text）或 `fetch_doc detail=simple` |
 | 大文档定位某一节 | `fetch_doc scope=outline` → `scope=section`（传标题 block_id） |
 | 关键词定位（含上下文） | `fetch_doc scope=keyword`（`|` 多词 OR + context_before/after） |
 | 同一措辞多处修改 | `update_doc command=str_replace` |
@@ -93,7 +94,7 @@
 | 移动/复制块 | `update_doc command=block_move_after / block_copy_after`（src_block_ids 逗号分隔） |
 | 生成后体检 | `lint_doc` |
 
-**选型原则**：需要富排版（自动编号/分栏/高亮块配色/列宽/题注/@人）或需要改已有文档 → XML；纯文字快速追加或已有 Markdown 草稿 → Markdown。
+**选型原则**：需富排版（自动编号/分栏/高亮块配色/列宽/题注/@人）或改已有文档 → **XML 通道**（`fetch_doc`/`update_doc`/`import_xml`）；纯文字/简单结构、或要一段可直接复制给用户的 Markdown → **Markdown 通道**（`get_doc_text format=markdown`/`import_markdown`）——两条通道各自读写对称（读出的格式改后可原样写回）。
 
 `fetch_doc` 读出的 XML 与 `import_xml`/`update_doc` 写入的 XML 是**同一套语法**（round-trip）：读出什么改什么写回什么，不跨格式转换。文档内嵌图片/附件在 XML 里以 token 占位（如 img src="boxcn…"），要看图用 `download_file`（传 extra={document_id, block_id}），改动时原样保留占位不要改成纯文本。语法标签清单见 `style_guide name="xml"`；`import_markdown` 的转换细节见其工具描述。
 
