@@ -94,6 +94,8 @@ const ICONS: Record<string, string> = {
   diff: '<path d="M4 2v12M12 2v12M2 5h4M10 11h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
   settings: '<circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 1.5l1 1.8 2-.4.4 2 1.8 1-1 1.8 1 1.8-1.8 1-.4 2-2-.4L8 14.5l-1-1.8-2 .4-.4-2-1.8-1 1-1.8-1-1.8 1.8-1 .4-2 2 .4L8 1.5z" fill="none" stroke="currentColor" stroke-width="1.2"/>',
   back: '<path d="M10 3L5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
+  // 前进（编辑位置历史的右箭头）：back 的镜像——两颗按钮同在标签栏动作区左侧，同族同形
+  forward: '<path d="M6 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
   // 同窗切换的一对图标（嵌入态活动栏最下方）：**左箭头 = 关闭文件工作台**（把窗口还给会话工作台），
   // 与宿主入口那颗「全屏文件工作台」的右箭头互为反向——箭头指向「我要去哪一侧」。
   arrowLeft: '<path d="M13 8H3M7 4L3 8l4 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>',

@@ -33,6 +33,7 @@ import { installWorkbenchKeys, workbenchKeymap } from "./keymap-wb"
 import { FOCUS_ALL_FIELDS, validateKeymap, helpGroups, popKeyScope, pushEscScope } from "../keymap"
 import type { KeyBinding } from "../keymap"
 import { loadSession, saveSession, tabKey, type FwSessionState, type FwTabState } from "./session-state"
+import { createNavHistory, type NavEntry } from "./nav-history"
 import { fingerprint } from "./refresh-guard"
 import { absOfRepo, normPath, relWithin, repoPrefixOfAbs, resolveAbsPath, resolveRepoPath as resolveRepoPathPure, rootAbsFromId, toRepoRel, type ResolvedRepoPath } from "./repo-paths"
 import { createExplorer } from "./explorer"
@@ -997,31 +998,96 @@ function flushSession(): void {
 
 window.addEventListener("pagehide", flushSession)
 
+/* ------------------------------ 编辑位置历史（后退 / 前进） ------------------------------ */
+
+/**
+ * 位置栈（见 files/nav-history.ts）：一条线性回溯线 + 指针，VSCode navigateBack/Forward 同款。
+ *
+ * `navGuard` 的两个用途：
+ * ① **历史回放不回写**——后退/前进本身调的是 openFile/activate，不抑制的话每次回放又把自己
+ *    push 进栈，指针永远追着尾巴跑，连退几步退不动；
+ * ② **启动恢复静默**——restoreSession/restoreFromUrl 把上次的标签逐个重开，那是「回到原处」
+ *    而不是「一次导航」，灌进栈的话第一件事就是后退回启动页。
+ */
+const nav = createNavHistory()
+let navGuard = 0
+
+/** 记一次导航（openFile 的出口处调，见 nav-history 的「记录点」注释）。恢复/回放期间静默。 */
+function navRecord(e: NavEntry): void {
+  if (navGuard) return
+  nav.jump(e)
+}
+
+/** 光标移动修正栈顶（onCursor 出口）：后退/前进回到的是「离开时最后看的位置」。 */
+function navTrack(): void {
+  const t = activeTab()
+  if (!t || t.kind !== "file" || navGuard) return
+  const pos = t.editor?.getCursorPos()
+  if (pos) nav.updateTop({ root: t.root, path: t.path, line: pos.line, column: pos.column })
+}
+
+/** 历史回放期间的包裹器（同步段与异步段都在内）：期间 navRecord/navTrack 静默。 */
+async function withNavGuard(fn: () => Promise<void> | void): Promise<void> {
+  navGuard++
+  try {
+    await fn()
+  } finally {
+    navGuard--
+  }
+}
+
+/** 后退（dir=-1）/ 前进（dir=1）：落地目标位置；标签已关则重新打开。 */
+async function navGo(dir: 1 | -1): Promise<void> {
+  const target = dir === -1 ? nav.back() : nav.forward()
+  if (!target) return
+  await withNavGuard(async () => {
+    const id = tabId("file", target.root, target.path)
+    const exist = findTab(id)
+    if (exist) {
+      activate(id)
+      exist.editor?.revealLine(target.line - 1, target.column)
+    } else {
+      // 标签已关：重新打开（预览槽不占用——这是回溯，不该顺手顶掉用户正在看的预览）
+      await openFile(target.root, target.path, { preview: false, line: target.line, column: target.column })
+    }
+  })
+  renderTabActionsOnly()
+}
+
+/** 只重绘动作区（后退/前进后按钮可用态变了，不必重建整条标签栏）。 */
+function renderTabActionsOnly(): void {
+  clear(tabActionsHost)
+  renderTabActions(tabActionsHost)
+}
+
 /**
  * 刷新后恢复：按记忆逐个打开上次的标签（回到刷新前的位置与编辑态），最后落回记忆里的活动标签。
  * 根不在清单里的标签跳过（项目被移除 / 换了会话）——照常打开只会得到一串打不开的错误页。
  */
 async function restoreSession(s: FwSessionState): Promise<void> {
-  const known = new Set(state.roots.map((r) => r.id))
-  if (s.root && known.has(s.root) && s.root !== explorer.getRoot()) await explorer.setRoot(s.root)
-  let dirty = 0
-  for (const ref of s.tabs) {
-    if (!known.has(ref.root)) continue
-    if (ref.dirty) dirty++
-    await openFile(ref.root, ref.path, { preview: false, line: ref.line, mode: ref.mode })
-  }
-  if (s.active) {
-    const t = state.tabs.find((x) => x.id.startsWith("file:") && tabKey(x.root, x.path) === s.active)
-    if (t) activate(t.id)
-  }
-  // 左栏：视图 + 显隐（阶段一建的是资源管理器且保持隐藏，这里按记忆落位）
-  const lv = s.leftView ?? "explorer"
-  if (lv === "explorer") showLeftView("explorer", { keepHidden: s.leftVisible === false })
-  else {
-    showLeftView(lv)
-    if (s.leftVisible === false) setLeftVisible(false)
-  }
-  if (dirty) toast(`有 ${dirty} 个文件未保存的修改未能保留（已按磁盘内容打开）`, "warn", 6000)
+  // 恢复不是导航：重开上次的标签不该进位置历史（否则首动作就是「后退回启动页」）
+  await withNavGuard(async () => {
+    const known = new Set(state.roots.map((r) => r.id))
+    if (s.root && known.has(s.root) && s.root !== explorer.getRoot()) await explorer.setRoot(s.root)
+    let dirty = 0
+    for (const ref of s.tabs) {
+      if (!known.has(ref.root)) continue
+      if (ref.dirty) dirty++
+      await openFile(ref.root, ref.path, { preview: false, line: ref.line, mode: ref.mode })
+    }
+    if (s.active) {
+      const t = state.tabs.find((x) => x.id.startsWith("file:") && tabKey(x.root, x.path) === s.active)
+      if (t) activate(t.id)
+    }
+    // 左栏：视图 + 显隐（阶段一建的是资源管理器且保持隐藏，这里按记忆落位）
+    const lv = s.leftView ?? "explorer"
+    if (lv === "explorer") showLeftView("explorer", { keepHidden: s.leftVisible === false })
+    else {
+      showLeftView(lv)
+      if (s.leftVisible === false) setLeftVisible(false)
+    }
+    if (dirty) toast(`有 ${dirty} 个文件未保存的修改未能保留（已按磁盘内容打开）`, "warn", 6000)
+  })
 }
 
 /* ------------------------------ 标签页 ------------------------------ */
@@ -1075,7 +1141,11 @@ async function openFile(root: string, path: string, opts: { preview?: boolean; l
     // ondblclick 与右键菜单）。
     if (opts.preview === false) exist.preview = false
     activate(id)
-    if (opts.line && exist.editor) exist.editor.revealLine(opts.line - 1, opts.column ?? 1)
+    if (opts.line && exist.editor) {
+      exist.editor.revealLine(opts.line - 1, opts.column ?? 1)
+      // 同文件显式跳行（转定义落在已开标签、符号面板）也是一次导航；无 line 的命中已有标签不算
+      navRecord({ root, path, line: opts.line, column: opts.column ?? 1 })
+    }
     return
   }
   // 预览标签：单击树里的文件时复用同一个预览标签（VSCode 行为），双击/固定时转为常驻
@@ -1119,6 +1189,9 @@ async function openFile(root: string, path: string, opts: { preview?: boolean; l
   views.appendChild(host)
   viewHosts.set(id, host)
   activate(id)
+  // 位置历史：打开/切换文件 = 一次导航（启动恢复与历史回放被 navGuard 静默）。
+  // 新开标签的 line 可能后到（loadTab 完成后 reveal），栈里先记目标行，没有则记 1
+  navRecord({ root, path, line: opts.line ?? 1, column: opts.column ?? 1 })
   await loadTab(tab, { line: opts.line, column: opts.column, forceText: opts.forceText, languageHint: opts.languageHint, lspReuseFrom: opts.lspReuseFrom })
   renderTabbar()
   persistSession()
@@ -1260,6 +1333,8 @@ async function loadTab(tab: Tab, opts: { line?: number; column?: number; forceTe
         scheduleStatus()
         // 光标行进状态记忆（内部节流）：刷新后回到同一行
         persistSession()
+        // 位置历史：普通光标移动修正栈顶（不产生新记录）——后退/前进回到「离开时最后看的位置」
+        navTrack()
       })
       if (opts.line) {
         setTimeout(() => {
@@ -1690,6 +1765,17 @@ function scrollActiveTabIntoView(): void {
  * 自成一组（见 gitMenuGroup）——人看着代码时右键就在手边，比扇形更贴手，轮盘也不必为剩项撑第二圈。
  */
 function renderTabActions(box: HTMLElement): void {
+  // 后退/前进（编辑位置历史，VSCode Alt+←/→）：全局能力，不随标签类型变——
+  // 位置栈属于工作台会话而非某个标签，放在动作区最左（与后续动作隔一个组的宽度）。
+  // 无历史时整组隐藏（不是置灰：启动后一次没跳过时，两颗灰按钮只是噪声）
+  if (nav.peek().stack.length) {
+    const backBtn = btn("back", "后退（Alt+←）", () => void navGo(-1))
+    const fwdBtn = btn("forward", "前进（Alt+→）", () => void navGo(1))
+    backBtn.disabled = !nav.canBack()
+    fwdBtn.disabled = !nav.canForward()
+    box.appendChild(h("span", { class: "fw-nav-group" }, [backBtn, fwdBtn]))
+  }
+
   const t = activeTab()
   if (!t) return
 
@@ -3310,6 +3396,30 @@ const bindings: KeyBinding[] = [
     when: mergeViewable,
     run: () => void mergeViewOf()?.markResolved(),
   },
+  {
+    id: "wb.navBack",
+    keys: ["Alt+←", "Ctrl+-"],
+    label: "后退（编辑位置历史，VSCode 同款）",
+    group: "wb.file",
+    browser: "override",
+    phase: "capture",
+    // 终端焦点不在内：Ctrl+- 在终端里是「缩小字号」（term-keys 后注册、按声明序命中会被这里抢走）；
+    // Alt+← 也留给终端（工作台全局键在终端内一律让位的既有约定）
+    focus: ["other", "editor", "input"],
+    note: "VSCode：Windows/Linux 是 Alt+←，macOS 是 Ctrl+-；两个都接。Ctrl+- 接管浏览器「缩小页面」；终端内让位给字号键",
+    run: () => void navGo(-1),
+  },
+  {
+    id: "wb.navForward",
+    keys: ["Alt+→", "Ctrl+Shift+-"],
+    label: "前进（编辑位置历史，VSCode 同款）",
+    group: "wb.file",
+    browser: "override",
+    phase: "capture",
+    focus: ["other", "editor", "input"],
+    note: "VSCode：Windows/Linux 是 Alt+→，macOS 是 Ctrl+Shift+-。Ctrl+Shift+- 接管浏览器「恢复页面缩放」",
+    run: () => void navGo(1),
+  },
   { id: "wb.menuClose", keys: "Esc", label: "关闭菜单", group: "wb.ui", focus: ["other", "editor", "input"], run: () => closeMenu() },
 ]
 
@@ -3768,8 +3878,9 @@ async function boot(): Promise<void> {
     const savedSession = loadSession()
     if (savedSession) await restoreSession(savedSession)
     // URL 恢复：进过哪个目录/打开过哪个文件，刷新或前进后退都回到原处（见 restoreFromUrl）；
-    // 该文件已在记忆里时 openFile 命中已有标签、只把它激活并跳行，不会重复打开
-    await restoreFromUrl()
+    // 该文件已在记忆里时 openFile 命中已有标签、只把它激活并跳行，不会重复打开。
+    // 与记忆恢复同因：这是「回到原处」不是导航，不进位置历史
+    await withNavGuard(() => restoreFromUrl())
     // git 状态先就绪（未就绪就建面板会把「状态未知」画成「当前根不是 Git 仓库」）；
     // 与 onRootChanged 的触发合并，不会多跑一轮往返
     await refreshGit()

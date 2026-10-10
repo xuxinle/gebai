@@ -77,8 +77,11 @@ const KEY_ALIASES: Record<string, string> = {
   down: "↓",
   left: "←",
   right: "→",
-  // Shift+= 出的是 "+"，与 "=" 同一物理键（终端字号这类场景两种按法都要认）
+  // Shift+= 出的是 "+"，与 "=" 同一物理键（终端字号这类场景两种按法都要认）；
+  // 同理 Shift+- 出的是 "_"：macOS 的 Option 死键产出它，编辑位置历史的 Ctrl+Shift+-（前进）
+  // 若只按字面写就永远匹配不到（与上条同一道理）
   "+": "=",
+  "_": "-",
 }
 
 export function normalizeKeyName(raw: string): string {
