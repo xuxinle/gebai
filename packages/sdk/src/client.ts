@@ -732,7 +732,7 @@ export class GebaiClient {
   }
 
   listUsers(): Promise<UserInfo[]> {
-    return this.request<UserInfo[]>("user.list")
+    return this.request<{ users: UserInfo[] }>("user.list").then((r) => r.users)
   }
   createUser(username: string, password: string, role?: "user" | "admin"): Promise<UserInfo> {
     return this.request<UserInfo>("user.create", { username, password, role })

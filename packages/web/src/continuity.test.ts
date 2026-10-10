@@ -98,3 +98,20 @@ describe("断线/失效期间的用户动作不静默丢", () => {
     expect(s).toContain("userMsgEl?.remove()")
   })
 })
+
+describe("会话列表刷新不得回退数据", () => {
+  test("任务开始/结束的列表刷新拉新数据，不用 lastSessions 陈旧数组重流（否则自动命名的新标题被 seq 守卫丢弃）", () => {
+    const s = src("sessions.ts")
+    const fn = s.slice(s.indexOf("export function markSessionRunning"), s.indexOf("export function markSessionRunning") + 800)
+    // 刷新必须是不带 preloaded 的拉新调用；带 lastSessions 的旧写法会把在途自动命名刷新挤掉
+    expect(fn).toContain("void refreshSessions()")
+    expect(fn).not.toContain("refreshSessions(lastSessions)")
+  })
+
+  test("自动命名 rename 后必发一次全量刷新（与任务结束刷新并发时 seq 守卫保最后完成者赢）", () => {
+    const s = src("sessions.ts")
+    const fn = s.slice(s.indexOf("export async function maybeAutoTitle"), s.indexOf("export async function maybeAutoTitle") + 1600)
+    expect(fn).toContain("await client.renameSession(sessionId, title)")
+    expect(fn.indexOf("await client.renameSession(sessionId, title)")).toBeLessThan(fn.indexOf("await refreshSessions()"))
+  })
+})

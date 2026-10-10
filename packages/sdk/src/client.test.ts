@@ -40,6 +40,34 @@ describe("GebaiClient connect", () => {
     await expect(c.connect()).rejects.toThrow(/WS connect/)
   })
 
+  test("listUsers 解包 user.list 应答的 users 包裹（直接返回数组：前端 for...of 包裹对象会抛错）", async () => {
+    // user.list 应答形态：{ users: UserInfo[] }（服务端 ws-handlers/admin.ts）——SDK 必须解包，
+    // 否则消费者拿到包裹对象：Array.isArray 假、for...of 抛 TypeError（审批列表静默空白的根因）
+    const users = [{ id: "u1", username: "applicant", role: "user", disabled: true, pending: true, createdAt: 1 }]
+    const srv = Bun.serve({
+      port: 0,
+      fetch(req, server) {
+        if (server.upgrade(req)) return
+        return new Response("upgrade failed", { status: 500 })
+      },
+      websocket: {
+        open() {},
+        message(ws, raw) {
+          const msg = JSON.parse(String(raw)) as { type: string; id?: string }
+          ws.send(JSON.stringify({ type: msg.type, id: msg.id, ok: true, payload: { users } }))
+        },
+      },
+    })
+    try {
+      const c = new GebaiClient({ baseUrl: `http://127.0.0.1:${srv.port}` })
+      const list = await c.listUsers()
+      expect(Array.isArray(list)).toBe(true)
+      expect(list).toEqual(users as never)
+    } finally {
+      srv.stop(true)
+    }
+  })
+
   test("times out when server accepts but never responds (proxy hang)", async () => {
     // 原始 TCP 服务器接受连接但不响应 HTTP 升级：WS 握手永久挂起，只能靠超时兜底
     // 已接受连接须显式持有并 destroy：建连中的 ws.close() 只终结客户端句柄，服务端已接受的

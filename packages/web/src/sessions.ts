@@ -569,7 +569,10 @@ export function markSessionRunning(sessionId: string, running: boolean): void {
     delete runtimeInfo[sessionId]
     if (!had) return
   }
-  void refreshSessions(lastSessions ?? undefined)
+  // 刷新必须拉新数据，不得用 lastSessions 陈旧数组重流：任务结束刷新与自动命名刷新
+  // （maybeAutoTitle rename 后的 refreshSessions）并发时，preloaded 路径不发请求、seq 更大，
+  // 会把在途的新名列表用 seq 守卫丢弃——列表停留旧名（如「新会话」）直到手动刷新才恢复。
+  void refreshSessions()
 }
 
 /** 会话行运行态（无运行态返回 null）：运行中/等待用户输入/在途工具/后台任务数，列表角标与悬浮说明用。 */
