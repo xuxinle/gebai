@@ -110,6 +110,9 @@ class CommandPalette : public Element {
   std::vector<Command> commands_{};
   std::vector<std::size_t> matched_{};  // 命中命令在 commands_ 的下标（按表序）
   std::string query_{};
+  /// 列表里只有那一行“没有匹配项”占位（不代表任何命令）——
+  /// 此时不得高亮/激活任何条目，否则 Enter 会去取 `matched_[0]` 而越界。
+  bool empty_only_{false};
   std::size_t highlight_{kNoSelection};
   Input* input_{nullptr};   // 非拥有（子元素）
   List* list_{nullptr};     // 非拥有（子元素）

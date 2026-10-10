@@ -784,3 +784,51 @@ ST_TEST(title_bar_press_does_not_darken_the_whole_bar) {
 }
 
 }  // namespace
+
+/// **前置图标与 `leading` 槽并存**：图标画在槽之前，且两者都不重叠。
+///
+/// 旧契约是"有 `leading` 槽就不画图标"（注释写的是"图标让位给槽"），
+/// 而 `arrange` 里图标宽度始终占着——于是挂了菜单栏的宿主（gbcode）看到的是
+/// "左边距 + 两倍图标宽的空白，图标根本没画"：**图形与布局互相矛盾**。
+/// 判据分两半：几何（图标盒与槽盒不重叠）+ 像素（槽左侧真的出现了非底色墨迹）。
+ST_TEST(title_bar_icon_and_leading_slot_coexist) {
+  BarFixture fixture;
+  auto menu = std::make_unique<st::ui::MenuBar>();
+  menu->set_id("menubar");
+  menu->set_menus({st::ui::Menu{"file", "文件", {st::ui::MenuItem{"new", "新建"}}}});
+  auto* slot = fixture.bar->add_leading(std::move(menu));
+  fixture.root.layout(true);
+  const Rect slot_rect = slot->bounds();
+  ST_REQUIRE(slot_rect.width > 0.0f);
+
+  // ① 几何：图标占据左边距之后的那一格（16px），槽必须在它右侧。
+  constexpr float kPadding = 12.0f;
+  constexpr float kIcon = 16.0f;
+  // 图标盒**纵向居中**（与 `paint_content` 同一算式）：只取盒的上沿会把探针
+  // 采样区落到图形之外——而图形本身又只占盒的中间一部分（光学归一化留白），
+  // 于是“几何对了”但“数不到墨”。
+  const float icon_y = (fixture.bar->bounds().height - kIcon) * 0.5f;
+  const Rect icon_box{kPadding, icon_y, kIcon, kIcon};
+  ST_CHECK(slot_rect.x >= icon_box.right() - 0.01f);
+
+  // ② 像素：图标盒那一格必须出现**非底色**墨迹（否则"几何留了位、图形没画"，
+  //    正是旧实现的表现）。
+  st::raster::Canvas canvas{1280, 120, 1.0f};
+  const Color background = fixture.root.theme().colors().surface_alt;
+  canvas.clear(background);
+  fixture.root.paint(canvas);
+  std::size_t ink = 0;
+  for (int y = static_cast<int>(icon_box.y) + 1;
+       y < static_cast<int>(icon_box.bottom()) - 1; ++y) {
+    for (int x = static_cast<int>(icon_box.x) + 1;
+         x < static_cast<int>(icon_box.right()) - 1; ++x) {
+      const Color pixel = canvas.pixel_at(x, y);
+      const int delta = std::abs(static_cast<int>(pixel.r) - static_cast<int>(background.r)) +
+                        std::abs(static_cast<int>(pixel.g) - static_cast<int>(background.g)) +
+                        std::abs(static_cast<int>(pixel.b) - static_cast<int>(background.b));
+      if (delta > 30) ++ink;
+    }
+  }
+  st::print("[brand] 前置图标盒内墨迹 {} px（槽左缘 x={:.1f}）\n", ink, slot_rect.x);
+  ST_CHECK(ink > 20U);
+}

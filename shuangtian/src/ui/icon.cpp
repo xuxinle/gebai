@@ -133,6 +133,13 @@ inline constexpr auto kIcons = std::to_array<IconGlyph>({
     {"list", "M4 6.5 L4.02 6.5 M8 6.5 L20 6.5 M4 12 L4.02 12 M8 12 L20 12 M4 17.5 L4.02 17.5 M8 "
              "17.5 L20 17.5",
      2.0f, false},
+    // 文档大纲：**父项一条长横线 + 子项两条缩进短横线**（层级由"缩进 + 数量"两个特征
+    // 同时表达）。
+    //
+    // 为何不用"树形拐角"（`├─` 那种折线）：20px 盒里折线的转角与横线会连成一团，
+    // 上一版的 ASCII 取样只看到一团墨（见 `kIcons` 上方关于小尺寸特征数的那条）。
+    // 三个矩形的布局：横线全是水平线段，抗锯齿后边缘干净，特征互不粘连。
+    {"symbol", "M3.5 5.5 L20.5 5.5 M8.5 12 L20.5 12 M8.5 18.5 L20.5 18.5", 1.9f, false},
     {"filter", "M3.5 5 L20.5 5 L14 12.5 L14 19 L10 21 L10 12.5 Z", 1.7f, false},
     {"external", "M14 4 L20 4 L20 10 M20 4 L12.5 11.5 M17.5 14.5 L17.5 19.5 C17.5 19.8 17.3 20 "
                  "17 20 L4.5 20 C4.2 20 4 19.8 4 19.5 L4 7 C4 6.7 4.2 6.5 4.5 6.5 L9.5 6.5",
@@ -625,7 +632,15 @@ auto SvgIconRegistry::ids() const -> std::vector<std::string> {
 
 auto SvgIconRegistry::draw(raster::Surface& canvas, std::string_view id, math::Rect box,
                            math::Color color) const -> bool {
-  return painter_.draw(canvas, id, box, color), true;
+  // **先查存在性再画**：`IconSetPainter::draw` 的返回面是 `void`（它不关心命中与否），
+  // 而本函数的契约是"返回 false = id 不存在"。旧实现把两者当成一回事
+  //（`return painter_.draw(...), true`）——**恒真**，于是 `Icon::draw` 的回退逻辑
+  //（"内置表没有且 SVG 也没有 → 兜底"）永远不会触发，一个没注册的图标名
+  // 就是一块静默的空白（既无告警也无兜底）。查表代价是一次 `ids()` 线扫，
+  // 只在真正要走 SVG 回退时才发生（内置表命中不经过这里）。
+  if (!set_->has(id)) return false;
+  painter_.draw(canvas, id, box, color);
+  return true;
 }
 
 void SvgIconRegistry::clear_cache() const { painter_.clear_cache(); }

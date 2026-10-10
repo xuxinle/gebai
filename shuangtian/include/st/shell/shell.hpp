@@ -12,6 +12,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -70,6 +71,23 @@ class Backend {
   /// 取回输入事件（无则空）。headless 恒为空——输入由控制通道直接投递。
   [[nodiscard]] virtual auto poll_event() -> std::optional<ui::Event> = 0;
   virtual void set_title(std::string_view title) = 0;
+  /// 设置**窗口/任务栏图标**（PNG 字节；失败时如实返回错误，不静默）。
+  ///
+  /// 为何是 PNG 字节而不是文件路径：图标必须随可执行文件走（应用是单文件交付的，
+  /// 旁边不一定有资源目录），而“编译期嵌入”后的形态就是一段内存字节。
+  /// 传路径会把“资源在哪”这个部署问题推给后端。
+  ///
+  /// 为何是 PNG 而不是预乘 RGBA：框架自带 PNG 解码器（`st::codec`），
+  /// 而 PNG 保留了"多尺寸候选"的可能（各后端需要不同尺寸时自己扣）。
+  ///
+  /// 默认实现返回 `Unsupported`——**无头后端与未实现窗口图标的平台如实拒绝**，
+  /// 而不是假装成功（与 `supports_window_control` 同一姿态）。
+  [[nodiscard]] virtual auto set_window_icon(std::span<const std::uint8_t> png) -> Status {
+    (void)png;
+    return unexpected(ErrorCode::Unsupported, "该后端不支持设置窗口图标");
+  }
+  /// 后端是否真能设置窗口图标（供宿主决定是否上报/提示）。
+  [[nodiscard]] virtual auto supports_window_icon() const noexcept -> bool { return false; }
   [[nodiscard]] virtual auto clipboard_text() -> Result<std::string> = 0;
   [[nodiscard]] virtual auto set_clipboard_text(std::string_view text) -> Status = 0;
   /// 目标帧缓冲（应用直接绘制到这里）。

@@ -25,6 +25,13 @@ namespace {
 using namespace std::chrono_literals;
 
 /// 在临时目录里造一个假 LSP server 脚本（`sh` 写）。
+///
+/// ⚠ **本夹具只在 POSIX 上有意义**：脚本用的是 `sh` 的 `read`/`dd`/`printf`，
+/// 而且靠 shebang 让系统把它当可执行程序跑。Windows 的 `CreateProcessW`
+/// **不认 shebang**（实测：报 “%1 不是有效的 Win32 应用程序”）。
+/// 所以用它写的四个用例在 Windows 上属于**环境不适配**，不是代码缺陷——
+/// 它们自己用 `fake_server_unsupported()` 如实跳过（与 `lsp_language_smoke_test`
+/// 对“server 起不来”的处置同一姿态：代码对不对与这台机器跑不跑得起来分开报）。
 struct FakeServer {
   std::filesystem::path dir{};
   std::filesystem::path script{};
@@ -48,6 +55,15 @@ struct FakeServer {
   }
   [[nodiscard]] auto path() const -> std::string { return script.string(); }
 };
+
+/// 本平台的进程创建能不能直接跑 shell 脚本（见 `FakeServer` 的说明）。
+[[nodiscard]] inline auto fake_server_unsupported() -> bool {
+#ifdef _WIN32
+  return true;
+#else
+  return false;
+#endif
+}
 
 /// 把客户端泵到某个状态（带超时；返回是否到达）。
 auto pump_until(st::lsp::LspClient& client, st::lsp::SessionState want,
@@ -198,7 +214,11 @@ ST_TEST(lsp_client_reports_missing_program) {
   ST_CHECK(notified);
 }
 
-ST_TEST(lsp_client_completes_handshake_with_fake_server) {
+ST_TEST_SLOW(lsp_client_completes_handshake_with_fake_server) {
+  if (fake_server_unsupported()) {
+    std::cout << "[lsp] 本平台无法直接执行 shell 脚本（假 server 用不了），跳过" << '\n';
+    return;
+  }
   // 假 server：读完 initialize 请求后回一个标准响应，然后回显后续通知。
   FakeServer server(R"(
 read_message() {
@@ -241,12 +261,19 @@ done
   ST_CHECK(client.state() == st::lsp::SessionState::Starting);
 
   const bool fake_ready = pump_until(client, st::lsp::SessionState::Ready);
-  // 用假 server 的具体路径兜底诊断（失败时给出原因，而不是只说"没到 Ready"）。
-  ST_CHECK(fake_ready);
+  // **先打印诊断、再 fail-fast**，且用 `ST_REQUIRE` 而不是 `ST_CHECK`。
+  //
+  // 为何不能是 `ST_CHECK`：握手失败时下面的 `capabilities()` 是**空**的，
+  // 而紧接着就是 `completion_trigger_characters[0]`——`libstdc++` 的
+  // `_GLIBCXX_ASSERTIONS` 会直接 `abort()`，**把整个测试进程连同本片其余用例一起带走**
+  //（实测：分片 1/4 的 265 条用例跑完全绿，然后整个分片报“未能启动”，一条失败记录都没有）。
+  // 而旧写法里那句诊断打印排在 `ST_CHECK` **之后**，abort 在它之前发生，
+  // 结果连“为什么没到 Ready”都看不到。
   if (!fake_ready) {
     std::cout << "[lsp] 未到 Ready：state=" << static_cast<int>(client.state())
               << " error=" << client.error() << '\n';
   }
+  ST_REQUIRE(fake_ready);
   const auto fake_status = client.status();
   ST_CHECK_EQ(fake_status.server_name, std::string("fake-lsp"));
   ST_CHECK_EQ(fake_status.server_version, std::string("9.9"));
@@ -254,7 +281,7 @@ done
   ST_CHECK(fake_status.supports_definition);
   ST_CHECK(fake_status.supports_completion);
   ST_CHECK(!fake_status.supports_references);   // 假 server 没声明 → 不该假装支持
-  ST_CHECK_EQ(client.capabilities().completion_trigger_characters.size(), std::size_t{1});
+  ST_REQUIRE(client.capabilities().completion_trigger_characters.size() == std::size_t{1});
   ST_CHECK_EQ(client.capabilities().completion_trigger_characters[0], std::string("."));
 
   // 文档同步：打开 → 版本 1；变更 → 版本 2（即使 server 不响应也不该崩）。
@@ -284,6 +311,10 @@ done
 /// 没现成等价物），耗时与成败都取决于环境。放在默认路径上会让
 /// 「代码对不对」与「这台机器有没有那个 shell」混在一起报（`test.hpp` 的原话）。
 ST_TEST_SLOW(lsp_client_reports_handshake_timeout) {
+  if (fake_server_unsupported()) {
+    std::cout << "[lsp] 本平台无法直接执行 shell 脚本（假 server 用不了），跳过" << '\n';
+    return;
+  }
   // 假 server：收下 initialize 但**永不回应**（模拟卡死的 server）。
   FakeServer server(R"(
 read len=""
@@ -311,6 +342,10 @@ sleep 30
 ///
 /// ⚠ 同 `lsp_client_reports_handshake_timeout`：依赖可执行的 shell 脚本。
 ST_TEST_SLOW(lsp_client_reports_unexpected_exit) {
+  if (fake_server_unsupported()) {
+    std::cout << "[lsp] 本平台无法直接执行 shell 脚本（假 server 用不了），跳过" << '\n';
+    return;
+  }
   // 假 server：接受启动后立刻退出（模拟崩溃）。
   FakeServer server("exit 7\n");
   st::lsp::LspClient client;
@@ -331,7 +366,11 @@ ST_TEST(lsp_client_request_before_ready_is_honest) {
   ST_CHECK(client.status().pending_requests == 0);
 }
 
-ST_TEST(lsp_client_request_encodes_real_method_name) {
+ST_TEST_SLOW(lsp_client_request_encodes_real_method_name) {
+  if (fake_server_unsupported()) {
+    std::cout << "[lsp] 本平台无法直接执行 shell 脚本（假 server 用不了），跳过" << '\n';
+    return;
+  }
   // 回归：`request()` 内部把 method move 进记录表后又 move 给编码器，发出的
   // 请求 method 字段成了**空串**——真 server 静默丢弃，症状是"请求发出但
   // 永远无响应"（clangd 真机实测抓到）。用假 server 验证线上字节：只有收到

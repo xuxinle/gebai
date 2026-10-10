@@ -112,6 +112,37 @@
 但记得同步 `DESIGN.md` §5.0.4 ④与本节的数字（那是决策依据）。
 
 
+### P1：`TitleBar` 的品牌区与 `leading` 槽共用一格（已修，遗留一条待办）
+
+**现象（已修）**：宿主把菜单栏挂进标题栏 `leading` 槽后，`TitleBar::set_icon("code")` 属性面读得到
+但**画不出来**，而 `arrange` 里图标宽度始终占着——`[左边距][一大块空白][菜单栏]`。
+已改为：图标画在槽**之前**，`arrange` 与 `paint_content` 取同一几何。
+
+**待办**：`leading` 槽是宿主的控件（菜单栏/面包屑/搜索框），图标占走的 24px 在窄窗口下
+会把菜单栏往右挤。若要允许挂载方与图标**并排自定义**（如“图标 + 应用名”），
+需给 `TitleBar` 加一个真正的品牌区接口（而不是继续复用 `leading`）。
+
+### P2：`st test --shard N/4` 在 Windows 上的“分片未能启动”已定位并修（备查）
+
+**现象**：分片报“未能启动”而**一条失败记录都没有**，前面那一千多条用例明明全 PASS。
+
+**根因两层**：
+1. 假 LSP server 是 POSIX `sh` 脚本，Windows 不认 shebang → 握手必失败；
+   而用例用 `ST_CHECK(fake_ready)`（不中断）后紧跟 `completion_trigger_characters[0]`，
+   空 vector 取下标 → `_GLIBCXX_ASSERTIONS` `abort()`，**整个分片进程被带走**。
+2. `gbcode` 桥的 `diagnostics` map key 两侧不同源：写入走 `uri_to_path`（Windows 下 `/`→`\`），
+   查询走 `active_path`（`/` 形态）→ 查不到就返回空表（**不报错**），
+   测试里 `.front()` 空 vector 又一次 abort。
+
+**已修**：① 前置条件改 `ST_REQUIRE` 且诊断打印移到断言**之前**；
+② 四条跑脚本的用例标 `ST_TEST_SLOW` + 平台跳过（环境不适配≠代码缺陷，
+与 `lsp_language_smoke_test` 同一姿态）；③ 桥内新增 `normalize_path` 收束读写 key 口径。
+
+**待办**：这两处是**存量**缺陷（`git stash` 验证过改动前同样崩），但它们只是把
+“崩”变成“可见”——真正的缺口是**没有再回归测试**钉住“诊断在 Windows 上不会全丢”。
+补一条：`service.sync_document_if_ready_for_test("C:\\x\\b.cpp", ...)` + `set_active_path("/x/b.cpp")`
+后 `problems()` 必须非空（逆向验证：拆掉 `normalize_path` 应立刻变红）。
+
 ## 已完成（2026-10-09 清空本文件「待做」：三项框架收尾 + 镂月裁云实现）
 
 四项待做全部落地并推送（`b0cca9ea` / `681cd728` / `373ce10f` / `3c066250`）：

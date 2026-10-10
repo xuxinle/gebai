@@ -662,7 +662,16 @@ auto Application::start() -> Status {
     }
   }
 
-  // 字体：系统回退链（缺失时退化为 NullTextPort，UI 仍可运行）
+  // 窗口/任务栏图标（PNG 字节，编译期嵌入）：**建窗之后**才能设（要 `HWND`）。
+  //
+  // 为何不失败就退出：图标是外观资源，不是运行前提。后端不支持（无头）或数据不合法时
+  // 只写一条告警日志——与 `--theme-file` 加载失败同一姿态（配置/资源写错不该让进程起不来）。
+  if (!options_.window_icon_png.empty()) {
+    if (auto status = impl_->backend->set_window_icon(options_.window_icon_png); !status) {
+      log::warn("窗口图标未设置：{}", status.error().message);
+    }
+  }
+
   auto stack = st::text::FontStack::system_default();
   if (stack) {
     impl_->fonts = std::make_unique<st::text::FontStack>(std::move(*stack));

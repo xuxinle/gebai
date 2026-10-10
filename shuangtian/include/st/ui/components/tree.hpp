@@ -115,6 +115,17 @@ class Tree : public Element {
   /// 文件行激活（点击/Enter/`invoke(click)`）：参数为行 key。
   std::function<void(std::string_view key)> on_select{};
 
+  /// **右键行**（参数为该行 key；未点在行上则为空串）：宿主据此弹上下文菜单。
+  ///
+  /// 为何需要：`Tree` 把左键归给“选中/展开”（那是文件管理器的左键语义），
+  /// 而「在此处新建 / 重命名 / 删除」这类**针对具体行**的动作没有落点。
+  /// 没有这个回调时，宿主只能让侧栏头部按钮作用于“当前选中项”——
+  /// 而“右键哪一行就操作哪一行”是文件树的基本手感。
+  ///
+  /// 右键**不改选中**（与 `CodeEditor::on_context_menu` 同一条约定）：
+  /// 改选中会让“右键一个文件、菜单却作用在另一个上”，那是文件管理器里最恼人的那类错。
+  std::function<void(std::string_view key)> on_context_menu{};
+
  private:
   /// 行命中（含展开指示区的整行判定）；返回行号。
   [[nodiscard]] auto row_index_at(math::Point point) const -> std::optional<std::size_t>;

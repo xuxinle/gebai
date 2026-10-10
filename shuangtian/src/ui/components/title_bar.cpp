@@ -241,8 +241,13 @@ void TitleBar::arrange(const RenderContext& context, math::Rect rect) {
     slots_left = tail_cursor;
     tail_cursor -= k_icon_gap;   // 槽之间的间隙
   }
-  // 前部槽：从标题之后往右排。
-  float head_cursor = head_left;
+  // 前部槽：从**前置图标之后**往右排。
+  //
+  // 为何不从 `head_left` 起：`head_left` 已经把图标宽度算进去了（见其定义），
+  // 从它起排就是“图标宽度被当作空白吐掉”——`leading` 非空时图标又恰好不画，
+  // 结果是标题左侧留着一块看不见的空白（gbcode 的菜单栏正是这个形态）。
+  const float slots_start = head_left + (icon_.empty() ? 0.0f : k_title_icon_size + k_icon_gap);
+  float head_cursor = slots_start;
   for (Element* slot : leading_) {
     if (slot == nullptr) continue;
     const float wanted = std::min(std::max(0.0f, slot->measured_size().width),
@@ -253,8 +258,7 @@ void TitleBar::arrange(const RenderContext& context, math::Rect rect) {
   // 标题**文字**区：从 `leading` 槽之后起（不盖住品牌名），到尾部槽为止。
   // 只记两个标量（标题起点与尾部槽左缘），矩形由 `caption_rect()`/`drag_rect()` 按需算。
   // ⚠ 右界不能取"前部槽的右缘"：那样有前部槽时标题会被算成零宽（实测：标题直接不显示）。
-  // 有 `leading` 槽时图标让位给槽（图标只在"无前部槽"时作为标题的左前缀）。
-  title_left_ = leading_.empty() ? head_left : head_cursor;
+  title_left_ = leading_.empty() ? slots_start : head_cursor;
   // `slots_left_` 用 **0 作"无尾部槽"哨兵**：有尾部槽时它是真实边界（通常 > 0），
   // 无尾部槽时靠 `controls_left()` 现算——否则关掉控制按钮后它仍是旧值（实测撞到）。
   slots_left_ = trailing_.empty() ? 0.0f : slots_left;
@@ -336,12 +340,11 @@ void TitleBar::paint_content(const RenderContext& context, raster::Surface& canv
   // 图标画在文字区**左侧**（有 `leading` 槽时图标让位给槽，两者都画会叠在一起）。
   const math::Rect caption = caption_rect();
   float text_left = caption.x;
-  if (!icon_.empty() && leading_.empty()) {
+  if (!icon_.empty()) {
     const math::Rect icon_box{bounds_.x + k_padding_x,
                               bounds_.y + (bounds_.height - k_title_icon_size) * 0.5f,
                               k_title_icon_size, k_title_icon_size};
     Icon::draw(canvas, icon_, icon_box, style_.color, 0.0f);
-    text_left = std::max(text_left, icon_box.right() + k_icon_gap);
   }
   const float text_width = std::max(0.0f, caption.right() - text_left - metrics.space_sm);
   if (text_width > 1.0f) {

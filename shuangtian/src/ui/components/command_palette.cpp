@@ -158,8 +158,22 @@ void CommandPalette::rebuild() {
     entry.on_activate = [this, command_index = index]() { (void)run_command(command_index); };
     entries.push_back(std::move(entry));
   }
+  // **空态要如实说**：一条匹配也没有时，空列表与“组件没渲染”看上去一模一样。
+  // 加一条不可执行的占位行，把“搜了，但没结果”与“没搜”分开——
+  // 这在符号面板上尤其重要：索引未就绪时结果就是空的，而用户会以为功能坏了。
+  if (entries.empty() && !commands_.empty()) {
+    List::Entry placeholder;
+    placeholder.key = "__empty__";
+    placeholder.label = "没有匹配项";
+    entries.push_back(std::move(placeholder));
+    empty_only_ = true;
+  } else {
+    empty_only_ = false;
+  }
   list_->sync_items(entries);
-  highlight_ = entries.empty() ? kNoSelection : 0;
+  // 占位行**不可选中**：它不代表任何命令（`matched_` 为空）——
+  // 高亮它会让 Enter 拿 `matched_[0]` 越界。
+  highlight_ = (entries.empty() || empty_only_) ? kNoSelection : 0;
   if (highlight_ != kNoSelection) list_->select(highlight_, false);
   mark_layout_dirty();
 }

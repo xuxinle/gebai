@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -182,6 +183,12 @@ struct AppOptions {
   /// 加载失败（文件不在 / 语法错 / 未知 token）**不阻止启动**，也不静默——
   /// 退回内置主题并写一条告警日志：主题是外观配置，不是运行前提
   /// （与“配置写错不该让进程崩”的失败安全姿态一致）。
+  /// **窗口/任务栏图标**（PNG 字节，通常是编译期嵌入的资源）。
+  ///
+  /// 为何交给应用而不是框架自己找文件：图标是产品资产（各应用各不相同），
+  /// 而应用已经是单文件交付——它用 `b::embed<>` 把 PNG 嵌进来，这里只收字节。
+  /// 空 = 不设（保持系统默认图标）。后端不支持时只记告警，不阻止启动。
+  std::vector<std::uint8_t> window_icon_png{};
   std::string theme_file{};
   std::string log_level{"info"};
   std::uint32_t max_frames{0};        ///< >0 时跑满即退出（无头冒烟/CI 用）

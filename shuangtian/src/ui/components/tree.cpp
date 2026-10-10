@@ -201,6 +201,18 @@ void Tree::paint_content(const RenderContext& context, raster::Surface& canvas) 
 auto Tree::on_event(const RenderContext& context, Event& event) -> bool {
   (void)context;
   switch (event.kind) {
+    case EventKind::MouseDown:
+      // **右键**：只报“点了哪一行”，**不改选中**（见 `on_context_menu` 的说明）。
+      // 必须在 `MouseDown` 上接而不是 `Click`：右键是否产生 `Click` 取决于后端，
+      // 而“按下”在所有后端上都是确定的。
+      if (event.button == 2) {
+        if (!on_context_menu) return false;
+        const auto index = row_index_at(event.position);
+        on_context_menu(index.has_value() ? rows_[*index].data.key : std::string_view{});
+        event.handled = true;
+        return true;
+      }
+      return false;
     case EventKind::Click:
     case EventKind::DoubleClick: {
       const auto index = row_index_at(event.position);

@@ -1809,6 +1809,15 @@ auto CodeEditor::on_event(const RenderContext& context, Event& event) -> bool {
         apply_h_scroll_drag(context, event.position.x);
         return true;
       }
+      // **`Ctrl+点击`**：交给宿主做“跳到定义”这类跳转，**本组件不动光标/不开拖选**。
+      //
+      // 为何吞掉这次点击（返回 true）而不是“先移光标再回调”：移光标会写一次选择，
+      // 而跳转成功后宿主换文件、编辑器重装文本——那一次选择既无意义，
+      // 又会在“跳转失败”（无定义）时白留下一个光标位移。
+      if (event.ctrl && on_ctrl_click && (event.button == 0 || event.button == 1)) {
+        on_ctrl_click(index_at_point(context, event.position));
+        return true;
+      }
       cursor_ = index_at_point(context, event.position);
       anchor_ = cursor_;
       if (event.button == 0 || event.button == 1) selecting_ = true;  // 左键开拖

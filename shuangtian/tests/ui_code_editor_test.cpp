@@ -45,6 +45,19 @@ struct Fixture {
 
   [[nodiscard]] auto has_font() const noexcept -> bool { return port != nullptr; }
 
+  /// 目标字符的点击探针点（**字符左缘 + 本行垂直中心**）。
+  ///
+  /// 为何不用 `caret_screen_rect().center()`：那个函数是**贴弹层定位**用的，
+  /// 列→像素按“平均字宽 ≈ 0.6em”估（它自己的注释写明了），与命中用的
+  /// `x_for_index` 不是同一把尺子——拿它算的探针点会左右偏半个字（实测偏了 2 列）。
+  /// 命中类测试必须走**绘制/命中同源**的那一条：`caret_offset_x`。
+  [[nodiscard]] auto probe_at(std::size_t index) -> st::math::Point {
+    editor.set_cursor_index(index);
+    const float x = editor.bounds().x + editor.caret_offset_x(context);
+    editor.set_cursor_index(0);
+    return st::math::Point{x, editor.bounds().y + 4.0f};
+  }
+
   void type(std::string_view text) { editor.insert_text(text); }
 
   void press(std::string key, bool ctrl = false, bool shift = false) {
@@ -1185,4 +1198,75 @@ ST_TEST(code_editor_horizontal_scrollbar_tracks_long_lines) {
     }
   }
   ST_CHECK(text_diff > 0);
+}
+
+// ————————————————————————————————————————————————————————————————————————————
+// `Ctrl+点击`（宿主据此做“跳到定义”）
+// ————————————————————————————————————————————————————————————————————————————
+
+/// `Ctrl+点击`必须**走 `on_ctrl_click` 并且不动光标**。
+///
+/// 两半都要断言，因为两半都是这个手势的语义：
+/// ① 装了回调时按位命中处触发一次、带回**字符索引**（不是坐标——坐标会让宿主
+///    再造一套字宽换算）；
+/// ② **不得**顺带把光标搬过去：跳转成功后宿主会换文件、编辑器重装文本，
+///    那一次光标位移既无意义，又会在“跳转失败”时白留下一个位移。
+ST_TEST(code_editor_ctrl_click_reports_index_without_moving_cursor) {
+  Fixture fx;
+  if (!fx.has_font()) return;   // 无字体时命中几何不可用（宽度为 0）
+  fx.editor.set_text("alpha beta gamma");
+  fx.editor.set_cursor_index(0);
+
+  int calls = 0;
+  std::size_t reported = static_cast<std::size_t>(-1);
+  fx.editor.on_ctrl_click = [&](std::size_t index) {
+    ++calls;
+    reported = index;
+  };
+
+  // 探针点取**文本末尾**（`probe_at` 走绘制/命中同源的 `caret_offset_x`；
+  // 末尾处的落点唯一，行尾之后的字符列不可能有歧义）。
+  const std::size_t target = fx.editor.text().size();
+  const auto probe = fx.probe_at(target);   // 内部会重置光标
+  fx.editor.set_cursor_index(0);   // 光标归零，才能验证 ctrl+点击真的没动它
+  Event event;
+  event.kind = EventKind::MouseDown;
+  event.position = probe;
+  event.button = 1;
+  event.ctrl = true;
+  ST_CHECK(fx.editor.on_event(fx.context, event));
+
+  ST_CHECK_EQ(calls, 1);
+  ST_CHECK_EQ(reported, target);
+  ST_CHECK_EQ(fx.editor.cursor_index(), 0U);          // ← 光标原封不动
+  ST_CHECK_EQ(fx.editor.selected_text(), std::string());
+
+  // 同一位置**不带 Ctrl** 时回到原语义：移光标、开拖选、不触发回调。
+  Event plain;
+  plain.kind = EventKind::MouseDown;
+  plain.position = probe;
+  plain.button = 1;
+  (void)fx.editor.on_event(fx.context, plain);
+  ST_CHECK_EQ(calls, 1);
+  ST_CHECK_EQ(fx.editor.cursor_index(), target);
+}
+
+/// 未装 `on_ctrl_click` 时，`Ctrl+点击`回落为普通点击（组件单独使用时行为不变）。
+///
+/// 为什么要有这条：`Ctrl+点击`是**可选的宿主增强**，不是组件的新默认语义。
+/// 回落行为要是丢了，任何没接这个回调的宿主都会遇到“按住 Ctrl 点一下、编辑器毫无反应”。
+ST_TEST(code_editor_ctrl_click_without_callback_falls_back_to_plain_click) {
+  Fixture fx;
+  if (!fx.has_font()) return;
+  fx.editor.set_text("alpha beta");
+  const std::size_t target = fx.editor.text().size();
+  const auto probe = fx.probe_at(target);
+  fx.editor.set_cursor_index(0);
+  Event event;
+  event.kind = EventKind::MouseDown;
+  event.position = probe;
+  event.button = 1;
+  event.ctrl = true;
+  (void)fx.editor.on_event(fx.context, event);
+  ST_CHECK_EQ(fx.editor.cursor_index(), target);
 }

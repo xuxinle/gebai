@@ -56,7 +56,19 @@ class TitleBar : public Element {
   /// 这是高频路径：代码编辑器的脏点每敲一个字就变一次）。
   void set_title(std::string title);
   [[nodiscard]] auto title() const noexcept -> const std::string& { return title_; }
-  /// 前置图标名（内置图标集或 `svg:` 前缀的 SVG 源；空 = 不画）。
+  /// 前置图标名（内置图标集或 SVG 源；空 = 不画）。
+  ///
+  /// 与 `leading` 槽的关系（**本组件的硬契约**）：图标画在**槽之前**——
+  /// 即 `[左边距][图标][槽…][标题文字]`。原先的实现是“有槽就不画图标”
+  /// （注释写的是“图标让位给槽”，两者都画会叠在一起），而 `arrange` 里图标始终
+  /// 占着它的宽度不吐出来：于是**挂了菜单栏的宿主（gbcode）看到的是一条左边距
+  /// 加两倍图标宽的空白**，而图标根本没画——图形与布局互相矛盾。
+  /// 现在两件事取齐：
+  /// ① `arrange` 里图标宽度作为标题带起点的一部分，槽从左标右侧排；
+  /// ② `paint_content` 里图标画在左边距处，与 ① 同一几何。
+  ///
+  /// 为什么不让 `leading` 槽插到图标之前：槽是宿主的控件（菜单栏），而菜单栏排在最前
+  /// 会让“品牌图标”这个位置被应用占走——多应用共用一套窗框时，那一格属于框架。
   void set_icon(std::string icon);
   [[nodiscard]] auto icon() const noexcept -> const std::string& { return icon_; }
   /// 是否显示窗口控制按钮（默认显示；**与宿主能力无关**——画面跨平台一致，

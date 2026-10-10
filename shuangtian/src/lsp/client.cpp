@@ -255,6 +255,24 @@ struct LspClient::Impl {
   /// 反向指针（构造时设；生命周期由 `LspClient` 保证长于 `Impl`）。
   LspClient* owner{nullptr};
 
+  /// 把 `owner` 上当前生效的公开回调刷进 Impl 副本。
+  ///
+  /// ⚠ 必须是**可单独调用**的方法，不能把它只写在 `pump()` 里：`handle()` 走的是
+  /// 这里的副本，而 `pump()` 为省空转成本加了「无消息且非握手态直接 return」的早退
+  ///（见 `pump` 的注释），刷新因此只在「真有消息要处理」时发生。随后新增的
+  /// `inject_diagnostics_for_test()` 是**另一条入口**，它不能指望调用方先泵过一次：
+  /// 实测（本机 Windows）未 start 的 client 上「先 pump 再注入」，早退把刷新跳过了，
+  /// 注入的消息在 `handle` 里因 `diagnostics_handler` 为空被**静默丢弃**，上层读到空
+  /// 诊断列表（gbcode 侧 `problems().front()` 于是在空 vector 上取首元素，当场越界）。
+  void sync_handlers() {
+    if (owner == nullptr) return;
+    response_handler = owner->on_response;
+    server_request_handler = owner->on_server_request;
+    diagnostics_handler = owner->on_diagnostics;
+    log_handler = owner->on_log;
+    unhandled_handler = owner->on_unhandled;
+  }
+
   /// 处理一条消息（主线程）。返回是否已识别处理。
   void handle(Message& message) {
     if (message.is_response()) {
@@ -574,11 +592,7 @@ auto LspClient::pump() -> std::size_t {
   // 回调拷进 Impl（只在真有消息要处理时）：`pump` 里用户回调可能重设
   // `client.on_*`（如切换页面），直接读 `this->on_xxx` 会在回调链中途换掉
   // 正在用的那个。
-  impl_->response_handler = on_response;
-  impl_->server_request_handler = on_server_request;
-  impl_->diagnostics_handler = on_diagnostics;
-  impl_->log_handler = on_log;
-  impl_->unhandled_handler = on_unhandled;
+  impl_->sync_handlers();
 
   for (auto& item : batch) {
     impl_->handle(item.message);
@@ -810,6 +824,13 @@ void LspClient::reply_error(const Message& request_message, int code, std::strin
 void LspClient::inject_diagnostics_for_test(std::string uri, std::vector<Diagnostic> list) {
   // 组一条与 server 推送同构的通知，走同一条 handle 链路（不是绕过它直接写
   // 状态——那测的就不再是真实路径了）。
+  //
+  // ⚠ **本入口自己刷回调副本**：`handle` 读的是 Impl 里的副本，而它平时只由 `pump`
+  // 刷新——`pump` 有空转早退（无消息且非握手态直接 return），未 start 的 client
+  // 上面根本没有进程，第一次 `pump` 必然早退。若不在注入前自己刷，这条注入会被
+  // `handle` 按「没人接诊断」静默丢掉，调用方读到空列表（实测症状：上层拿空vector，
+  // 在 `.front()` 上越界崩溃）。
+  impl_->sync_handlers();
   Json params = Json::object();
   params["uri"] = std::move(uri);
   Json items = Json::array();

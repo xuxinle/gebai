@@ -29,6 +29,7 @@
 
 #include "st/core/error.hpp"
 #include "st/core/log.hpp"
+#include "st/codec/png.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/gpu.hpp"
 #include "st/shell/shell.hpp"
@@ -150,6 +151,8 @@ class Win32Backend final : public Backend {
     if (dib_ != nullptr) ::DeleteObject(dib_);
     if (memory_dc_ != nullptr) ::DeleteDC(memory_dc_);
     if (window_ != nullptr) ::DestroyWindow(window_);
+    if (icon_large_ != nullptr) ::DestroyIcon(icon_large_);
+    if (icon_small_ != nullptr) ::DestroyIcon(icon_small_);
     if (class_registered_) ::UnregisterClassW(kWindowClass, ::GetModuleHandleW(nullptr));
   }
 
@@ -462,6 +465,153 @@ class Win32Backend final : public Backend {
   void set_title(std::string_view title) override {
     if (window_ != nullptr) ::SetWindowTextW(window_, to_wide(title).c_str());
     title_ = std::string(title);
+  }
+
+  [[nodiscard]] auto supports_window_icon() const noexcept -> bool override {
+    return window_ != nullptr;
+  }
+
+  /// 窗口/任务栏图标：PNG → 两种尺寸的 `HICON` → `WM_SETICON`。
+  ///
+  /// 两个尺寸都必须设：`ICON_BIG` 是 Alt+Tab / 任务栏大图标，`ICON_SMALL` 是
+  /// **标题栏与任务栏小图标**。只设大图标时 Windows 会把大图缩成一团糊掉的小图
+  ///（自绘窗框下看不到系统标题栏，但任务栏与 Alt+Tab 仍在用）。
+  ///
+  /// 为何自己建 `HICON` 而不加载 `.ico` 资源：应用是**单文件交付**的，
+  /// 旁边没有资源目录；图标随可执行文件走，就只能拿**内存里的字节**去建图标。
+  /// `CreateIconFromResourceEx` 只认 `RT_ICON` 格式（PNG 压缩过的不行），
+  /// 所以这里解码后自己拼 `BITMAPV5HEADER + 预乘 BGRA + 掩码位`——
+  /// 这是 Windows 从 Vista 起就支持的 **32 位带 alpha 图标**的标准形态。
+  [[nodiscard]] auto set_window_icon(std::span<const std::uint8_t> png) -> Status override {
+    if (window_ == nullptr) return unexpected(ErrorCode::Io, "窗口未创建");
+    const auto decoded = codec::png_decode(png);
+    if (!decoded) {
+      return unexpected(ErrorCode::Parse, "窗口图标不是有效 PNG：" + decoded.error().message);
+    }
+    HICON large = nullptr;
+    HICON small = nullptr;
+    if (auto status = make_icon(decoded->rgba, static_cast<int>(decoded->width),
+                                static_cast<int>(decoded->height), 32, &large);
+        !status) {
+      return status;
+    }
+    if (auto status = make_icon(decoded->rgba, static_cast<int>(decoded->width),
+                                static_cast<int>(decoded->height), 16, &small);
+        !status) {
+      ::DestroyIcon(large);
+      return status;
+    }
+    // 先设新的，再销毁旧的：反了会出现一瞬“无图标”的空白任务栏格。
+    // 返回值是旧图标句柄（`LRESULT` 整数），必须经 `reinterpret_cast` 回到指针——
+    // 它是内核对象句柄，不是 C++ 对象指针，`static_cast` 在这里不合法。
+    auto* previous_large = reinterpret_cast<HICON>(::SendMessageW(
+        window_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(large)));
+    auto* previous_small = reinterpret_cast<HICON>(::SendMessageW(
+        window_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small)));
+    if (previous_large != nullptr && previous_large != large) ::DestroyIcon(previous_large);
+    if (previous_small != nullptr && previous_small != small) ::DestroyIcon(previous_small);
+    if (icon_large_ != large && icon_large_ != nullptr) ::DestroyIcon(icon_large_);
+    if (icon_small_ != small && icon_small_ != nullptr) ::DestroyIcon(icon_small_);
+    icon_large_ = large;
+    icon_small_ = small;
+    return ok();
+  }
+
+  /// 把 RGBA8 图像缩放到 `size×size` 并建成 `HICON`（32 位带 alpha）。
+  ///
+  /// ## 为何走 `CreateDIBSection` + `CreateIconIndirect`（而不是 `CreateIconFromResourceEx`）
+  ///
+  /// 后者要的是 `RT_ICON` 的**资源位**布局（height = 2×size：下半颜色、上半掩码），
+  /// 手拼字节很容易在某个细节上错位，而它**只回一个 `ERROR_FILE_NOT_FOUND`（2）**——
+  /// 与“文件”毫无关系的错误码（实测：按 MSDN 拼字节仍得到 2）。
+  /// 前者的输入是两个**真实位图句柄**，格式由 GDI 自己持有，不存在“字节布局对不对”
+  /// 这一类无法从错误码定位的问题。
+  ///
+  /// ## 三项 Windows 硬约定（错任一项都不报错，只是图标看着不对）
+  ///
+  /// ① 32 位 DIB 的颜色通道序是 **BGRA**；
+  /// ② 32 位带 alpha 的图标里颜色**必须预乘**（否则半透明边缘会泛白）；
+  /// ③ 需要一张**掩码位图**（与 alpha 并存）：全零 = “不透明”，
+  ///    实际透明度由 alpha 通道决定——这是 32 位图标的标准做法。
+  [[nodiscard]] auto make_icon(std::span<const std::uint8_t> rgba, int width, int height,
+                               int size, HICON* out) const -> Status {
+    if (out == nullptr || width <= 0 || height <= 0 || size <= 0) {
+      return unexpected(ErrorCode::Invalid, "窗口图标尺寸非法");
+    }
+    HDC dc = ::CreateCompatibleDC(nullptr);
+    if (dc == nullptr) return unexpected(ErrorCode::Io, "CreateCompatibleDC 失败");
+
+    // 颜色位图：32 位自上而下（负高）——行序与我们的 RGBA 源一致，不用翻转。
+    BITMAPV5HEADER header{};
+    header.bV5Size = sizeof(BITMAPV5HEADER);
+    header.bV5Width = size;
+    header.bV5Height = -size;
+    header.bV5Planes = 1;
+    header.bV5BitCount = 32;
+    header.bV5Compression = BI_BITFIELDS;
+    header.bV5RedMask = 0x00FF0000U;
+    header.bV5GreenMask = 0x0000FF00U;
+    header.bV5BlueMask = 0x000000FFU;
+    header.bV5AlphaMask = 0xFF000000U;
+    header.bV5CSType = 0x42475273U;   // 'sRGB'（多字符常量在 -Wmultichar 下编不过）
+    void* bits = nullptr;
+    HBITMAP color = ::CreateDIBSection(dc, reinterpret_cast<BITMAPINFO*>(&header),
+                                       DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (color == nullptr || bits == nullptr) {
+      ::DeleteDC(dc);
+      return unexpected(ErrorCode::Io, "CreateDIBSection 失败");
+    }
+    auto* pixels = static_cast<std::uint8_t*>(bits);
+    for (int y = 0; y < size; ++y) {
+      const int source_y = (y * height) / size;   // 最近邻：缩幅很小，不值得引入重采样
+      for (int x = 0; x < size; ++x) {
+        const int source_x = (x * width) / size;
+        const std::size_t source =
+            (static_cast<std::size_t>(source_y) * static_cast<std::size_t>(width) +
+             static_cast<std::size_t>(source_x)) * 4U;
+        const std::uint8_t r = rgba[source];
+        const std::uint8_t g = rgba[source + 1U];
+        const std::uint8_t b = rgba[source + 2U];
+        const std::uint8_t a = rgba[source + 3U];
+        const auto premul = [a](std::uint8_t channel) -> std::uint8_t {
+          return static_cast<std::uint8_t>((static_cast<unsigned>(channel) *
+                                            static_cast<unsigned>(a) + 127U) / 255U);
+        };
+        const std::size_t target =
+            (static_cast<std::size_t>(y) * static_cast<std::size_t>(size) +
+             static_cast<std::size_t>(x)) * 4U;
+        pixels[target] = premul(b);
+        pixels[target + 1U] = premul(g);
+        pixels[target + 2U] = premul(r);
+        pixels[target + 3U] = a;
+      }
+    }
+
+    // 掩码位图：1 位/像素，全零（= 掩码不透明，透明度交给 alpha）。
+    // 行按 4 字节对齐（32 像素 → 4 字节），行数 = size。
+    const std::size_t mask_row = ((static_cast<std::size_t>(size) + 31U) / 32U) * 4U;
+    std::vector<std::uint8_t> mask_bits(mask_row * static_cast<std::size_t>(size), 0U);
+    HBITMAP mask = ::CreateBitmap(size, size, 1, 1, mask_bits.data());
+    if (mask == nullptr) {
+      ::DeleteObject(color);
+      ::DeleteDC(dc);
+      return unexpected(ErrorCode::Io, "CreateBitmap（掩码）失败");
+    }
+
+    ICONINFO info{};
+    info.fIcon = TRUE;
+    info.hbmColor = color;
+    info.hbmMask = mask;
+    const HICON icon = ::CreateIconIndirect(&info);
+    // `CreateIconIndirect` 会**拷贝**两张位图，所以这里可以把它们释放。
+    ::DeleteObject(color);
+    ::DeleteObject(mask);
+    ::DeleteDC(dc);
+    if (icon == nullptr) {
+      return unexpected(ErrorCode::Io, "CreateIconIndirect 失败");
+    }
+    *out = icon;
+    return ok();
   }
 
   [[nodiscard]] auto clipboard_text() -> Result<std::string> override {
@@ -880,12 +1030,23 @@ class Win32Backend final : public Backend {
                        static_cast<float>(static_cast<double>(physical_y) / static_cast<double>(scale_))};
   }
 
+  /// 鼠标事件同样带修饰键状态。
+  ///
+  /// 为什么必须问系统而不是不填：`Ctrl+点击`这类手势（编辑器跳定义、列表多选）只能靠
+  /// `Event::ctrl` 表达，而**按键状态在鼠标消息里没有**——`WM_LBUTTONDOWN` 的 `wParam`
+  /// 只有键位与（自 Vista 起的）`MK_SHIFT`/`MK_CONTROL`，`Alt` 与 `Meta` 一律不带。
+  /// 只读 `wParam` 会得到"Ctrl 有、Alt 恒无"的半吊子事实，于是同一份组件逻辑在
+  /// 两个平台表现不同。统一走 `GetKeyState`：**与 `push_key` 同一口径**，
+  /// 修饰键的判定只有一份。
   void push_mouse(ui::EventKind kind, LPARAM lparam, int button, int clicks) {
     ui::Event event;
     event.kind = kind;
     event.position = to_logical(lparam);
     event.button = button;
     event.click_count = clicks;
+    event.ctrl = (::GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    event.shift = (::GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    event.alt = (::GetKeyState(VK_MENU) & 0x8000) != 0;
     events_.push_back(std::move(event));
   }
 
@@ -1271,6 +1432,10 @@ class Win32Backend final : public Backend {
   std::uint64_t frames_{0};
   bool class_registered_{false};
   bool close_requested_{false};
+  /// 自建的窗口图标（`set_window_icon`）：必须自己 `DestroyIcon`——
+  /// 它们是本进程创建的内核对象，不随窗口销毁释放。
+  HICON icon_large_{nullptr};
+  HICON icon_small_{nullptr};
   /// 拖动/缩放期间"尺寸已变、需要重画"时由后端调用的钩子（见接口声明）。
   std::function<void()> repaint_{};
   /// 拖放重绘的重入保护（见 `repaint_for_resize`）。
