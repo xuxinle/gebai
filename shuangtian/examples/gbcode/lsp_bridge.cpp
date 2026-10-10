@@ -27,6 +27,26 @@ namespace {
   return st::lsp::LspClient::path_to_uri(path);
 }
 
+/// 路径**归一化**：诊断的存与取必须用同一个 key。
+///
+/// 为什么必须有它（Windows 上的真缺陷）：写入侧走
+/// `LspClient::uri_to_path`（它把 URI 里的 `/` 换成平台分隔符——`_WIN32` 下是 `\`），
+/// 而查询侧的 `active_path` 是调用方给的**原样字符串**（`st::fs::normalize` 产出的是 `/`）。
+/// 两者在 POSIX 上恰好一致（都是 `/`），到 Windows 就分家了 ——
+/// 后果是**诊断全部静默丢失**：`problems()` 找不到 key，返回静态空表，
+/// 状态栏永远报 0 个问题，而且**不报错**。
+///
+/// 归一化收在这一个函数里：新增的读写点只要用它，就不会再出现两边各自
+/// 拼字符串而分家的局面。
+[[nodiscard]] auto normalize_path(std::string_view path) -> std::string {
+  std::string out(path);
+  // 只统一分隔符，不动其它（盘符大小写/相对路径这类差异留给 `st::fs` 的调用方）。
+  for (char& ch : out) {
+    if (ch == '\\') ch = '/';
+  }
+  return out;
+}
+
 /// LSP 的 `languageId`（server 按它选解析器；clangd 只认 `cpp`/`c`，不认 `c++`）。
 [[nodiscard]] auto language_id_for(std::string_view path) -> std::string {
   if (const LanguageServerRecipe* recipe = recipe_for_path(path); recipe != nullptr) {
@@ -133,7 +153,7 @@ struct LanguageService::Impl {
 LanguageService::LanguageService() : impl_(std::make_unique<Impl>()) {
   impl_->client.on_diagnostics = [this](const std::string& uri,
                                        const std::vector<st::lsp::Diagnostic>& list) {
-    const std::string path = st::lsp::LspClient::uri_to_path(uri);
+    const std::string path = normalize_path(st::lsp::LspClient::uri_to_path(uri));
     std::vector<LspProblem> problems;
     problems.reserve(list.size());
     for (const auto& diagnostic : list) {
@@ -346,7 +366,7 @@ auto LanguageService::pump() -> bool {
 
 auto LanguageService::problems() const -> const std::vector<LspProblem>& {
   static const std::vector<LspProblem> empty{};
-  const auto found = impl_->diagnostics.find(impl_->active_path);
+  const auto found = impl_->diagnostics.find(normalize_path(impl_->active_path));
   return found == impl_->diagnostics.end() ? empty : found->second;
 }
 

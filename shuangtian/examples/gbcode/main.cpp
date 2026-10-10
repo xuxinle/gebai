@@ -82,6 +82,7 @@
 #include "st/ui/components/tree.hpp"
 #include "st/ui/dsl.hpp"
 #include "st/ui/icon.hpp"
+#include "st/ui/svg.hpp"   // 品牌标记：`svg_registry()` 注册（图标表只收录单色描边字形）
 
 namespace {
 
@@ -424,9 +425,6 @@ struct CodeEditorPage : Component {
       : editor_font_scale_(editor_font_scale), editor_line_spacing_(editor_line_spacing),
         files_(std::move(files)), workspace_(std::move(workspace)) {}
 
-  /// 窗口动作出口（由 `run_app` 注入 `Application`；为空时窗框**如实拒绝**动作，
-  /// 但画面照旧——这正是 `ui::WindowControl` 端口要分离的那两件事）。
-  WindowControl* window_control_{nullptr};
   /// 真值源读取口（`run_app` 注入为 `UiRoot::theme().mode()`）。
   ///
   /// **主题不在页面里存影子状态**：真值源是 `UiRoot::theme()`（由 App 持有）。
@@ -504,6 +502,8 @@ struct CodeEditorPage : Component {
 
   // —— 侧栏各视图的非状态数据（不进重组依赖：这些是“算一次用一帧”的快照）——
   std::vector<std::string> search_hit_paths_{};   ///< 与 `search_hits_` 同序的绝对路径
+  /// 搜索面板行 → 命中下标（分组行占位 `-1`；与 `nav_row_to_result_` 同一套路）。
+  std::vector<std::size_t> search_row_to_hit_{};
   std::vector<std::size_t> search_hit_lines_{};   ///< 同序的 1 起行号
   std::vector<std::size_t> search_hit_columns_{}; ///< 同序的列号（字节偏移）
   std::string last_query_{};                      ///< 上次搜索词（重跑用）
@@ -562,6 +562,30 @@ struct CodeEditorPage : Component {
   /// 待确认关闭的标签名（对话框正文用）。
   std::string pending_close_label_{};
   /// 编辑器右键菜单开关 + 锚点（锚点跟随鼠标最后位置）。
+  /// 资源管理器文件操作（右键菜单）的待执行动作。
+  ///
+  /// 为何用枚举而不是几个 bool：新建文件/新建文件夹/重命名/删除**互斥**，
+  /// 用四个 bool 会出现“同时为真”的非法状态（而浮层只能显示一种）。
+  enum class FsAction : std::uint8_t { None, NewFile, NewFolder, Rename, Delete };
+  State<FsAction> fs_action_kind_{FsAction::None};
+  State<bool> fs_action_open_{false};
+  /// 浮层里显示的目标路径（删除/重命名时用户要看的）。
+  State<std::string> fs_action_target_{};
+  /// 浮层里那个名字输入框（每次重组重新赋值；**不得跟帧**引用它）。
+  Input* fs_input{nullptr};
+  /// 浮层刚打开时要聚焦名字输入框（与 `goto_line_pending_focus_` 同一套路）。
+  bool fs_focus_pending_{false};
+  /// 资源管理器右键菜单：开关 + 锚点 + 目标行 key（**右键不改选中**，
+  /// 所以目标必须单独记——否则“右键一个文件、菜单作用在另一个上”）。
+  State<bool> explorer_menu_open_{false};
+  st::math::Point explorer_menu_anchor_{};
+  State<std::string> context_key_{};
+
+  /// 「转到符号」面板的数据源：当前文件大纲 vs 工作区符号。
+  enum class SymbolKind : std::uint8_t { Document, Workspace };
+  State<SymbolKind> symbols_kind_{SymbolKind::Document};
+  State<bool> palette_shows_symbols_{false};
+
   State<bool> context_open_{false};
   st::math::Point context_anchor_{};
   /// 快捷键一览浮层开关。
@@ -685,8 +709,46 @@ struct CodeEditorPage : Component {
     buffers_.set(std::move(list));
   }
 
-  /// 切换亮/暗主题。
+  /// **保存全部**（Ctrl+K S / 文件菜单）：把所有脏标签写盘。
   ///
+  /// 为何不只是循环调 `save()`：`save()` 既有状态栏文案、又会 `buffers_.set()`，
+  /// 循环调它会把中间每一次的文案盖掉（用户只看得到最后一次），
+  /// 而且每次都推一遍状态 → N 次重组。这里一次性写盘、一遍落地。
+  /// 无路径的内存缓冲（untitled-N）**跳过**并在文案里说清楚——
+  /// 静默跳过会让用户以为“保存了但没落盘”。
+  auto save_all() -> void {
+    auto list = buffers_.value();
+    if (list.empty()) {
+      status_.set("没有可保存的编辑器");
+      return;
+    }
+    stash_active_text(list);
+    std::size_t saved = 0;
+    std::size_t skipped = 0;
+    std::size_t failed = 0;
+    for (auto& buffer : list) {
+      if (!buffer.dirty) continue;
+      if (buffer.path.empty()) {
+        ++skipped;
+        continue;
+      }
+      if (st::fs::write_text(buffer.path, buffer.text).has_value()) {
+        buffer.dirty = false;
+        lsp_.document_saved(buffer.path);
+        ++saved;
+      } else {
+        ++failed;
+      }
+    }
+    dir_cache_.clear();
+    buffers_.set(std::move(list));
+    std::string message = std::format("已保存 {} 个文件", saved);
+    if (skipped > 0) message += std::format("；{} 个未命名缓冲需「另存为」", skipped);
+    if (failed > 0) message += std::format("；{} 个写入失败", failed);
+    status_.set(message);
+  }
+
+  /// 切换亮/暗主题。  ///
   /// 唯一的真值源是 `UiRoot::theme()`（App 持有）：这里**读**它算下一档、
   /// **写回**它（经 `theme_setter` → `Application::set_theme_mode`，后者会连带
   /// 处理好字号缩放与文本 gamma），然后只更新本页的文案。
@@ -823,6 +885,7 @@ struct CodeEditorPage : Component {
   /// 打开命令面板（`files_table=true` 走 Ctrl+P 的快速打开文件表）。
   auto open_palette(bool files_table, std::string query = {}) -> void {
     palette_shows_files_.set(files_table);
+    palette_shows_symbols_.set(false);   // 命令/文件面板与符号面板互斥
     palette_query_.set(std::move(query));
     palette_open_.set(true);
   }
@@ -1003,6 +1066,7 @@ struct CodeEditorPage : Component {
     // SIGSEGV（0xC0000005），带窗口时只表现为“焦点偶尔不对”。
     find_needle_input = nullptr;
     goto_line_input = nullptr;
+    fs_input = nullptr;
     // `grow = true` 不可省：本页住在窗框的**内容槽**（列容器）里，不 grow 就只按内容的
     // 自然高度占位——实测 800px 窗口里页面只有 525px 高，底部剩 195px 空白，
     // 编辑器被压到 295px。留白与「代码区太矮」是同一个根因。
@@ -1016,10 +1080,12 @@ struct CodeEditorPage : Component {
     if (palette_open_.value()) build_palette(c);
     // 编辑器右键菜单 / 关闭确认对话框 / 快捷键一览：同一套条件声明。
     build_editor_context(c);
+    build_explorer_context(c);
     build_close_confirm(c);
     build_shortcuts_card(c);
     build_open_dialog(c);
     build_goto_line(c);
+    build_fs_action(c);
     build_completion_popup(c);
     build_rename_dialog(c);
     build_git_confirm(c);
@@ -1028,6 +1094,7 @@ struct CodeEditorPage : Component {
     // 所以即使顺序被人改回去，也只是“这一次没聚焦”，不会再踩已释放对象）。
     apply_pending_focus();
     apply_pending_goto_focus();
+    apply_pending_fs_focus();
     // 文本灌入：只在本帧的编辑器实例与「已装载的标签」不一致时写
     // （`set_text` 会清撤销栈并把光标归零；每次重组都写会让打字被重置——实测踩到）
     if (editor != nullptr && active < buffers.size() && buffers[active].key != loaded_key_) {
@@ -1079,6 +1146,7 @@ struct CodeEditorPage : Component {
             {.id = "save-as", .label = "另存为…"},
             {.separator = true},
             {.id = "save", .label = "保存（Ctrl+S）"},
+            {.id = "save-all", .label = "全部保存（Ctrl+K S）"},
             {.separator = true},
             {.id = "close-tab", .label = "关闭编辑器（Ctrl+W）"},
             {.id = "close-all", .label = "关闭全部编辑器"}}},
@@ -1091,6 +1159,8 @@ struct CodeEditorPage : Component {
           {"selection", "选择",
            {{.id = "select-all", .label = "全选（Ctrl+A）"},
             {.id = "goto-line", .label = "转到行…"},
+            {.id = "goto-symbol", .label = "转到当前文件符号…"},
+            {.id = "goto-workspace-symbol", .label = "转到工作区符号…（Ctrl+T）"},
             {.id = "copy", .label = "复制"},
             {.id = "paste", .label = "粘贴"}}},
           {"view", "查看",
@@ -1137,6 +1207,8 @@ struct CodeEditorPage : Component {
       close_all();
     } else if (menu == "file" && item == "save-as") {
       save_as();
+    } else if (menu == "file" && item == "save-all") {
+      save_all();
     } else if (menu == "file" && (item == "new" || item == "open")) {
       if (item == "new") new_file_prompt();
       else open_file_dialog();
@@ -1181,6 +1253,10 @@ struct CodeEditorPage : Component {
       (void)editor->invoke_action("cut", {});
     } else if (item == "goto-line") {
       open_goto_line();
+    } else if (item == "goto-symbol") {
+      open_symbols(true);
+    } else if (item == "goto-workspace-symbol") {
+      open_symbols(false);
     }
   }
 
@@ -1320,6 +1396,67 @@ struct CodeEditorPage : Component {
         });
       });
     });
+  }
+
+  /// 文件操作浮层（右键菜单的落点）：新建 / 重命名 用输入框，删除用确认。  ///
+  /// 形态与 `build_goto_line` / `build_rename_dialog` **完全一致**（同一条浮层套路）：
+  /// `overlay` + `card` + `custom<Input>` + 一个“干”按钮。
+  /// 名字的读音只从 `fs_input` 指针取（它在每次重组时被重新赋值）——
+  /// 不要跨帧存元素指针（浮层里的元素每帧重建，那是悬垂访问）。
+  void build_fs_action(Composer& c) {
+    if (!fs_action_open_.value()) return;
+    const FsAction action = fs_action_kind_.value();
+    const bool confirming = action == FsAction::Delete;
+    (void)overlay(c, "fs-action", {}, [&] {
+      (void)card(c, {.gap = 6.0f, .padding = 8.0f, .id = "fs-action-bar"}, [&] {
+        (void)row(c, {.gap = 6.0f}, [&] {
+          (void)text(c, [confirming, this] {
+            if (confirming) return std::string("删除（不可恢复）");
+            return fs_action_kind_.value() == FsAction::Rename
+                       ? std::string("重命名")
+                       : (fs_action_kind_.value() == FsAction::NewFolder
+                              ? std::string("新建文件夹")
+                              : std::string("新建文件"));
+          }, {.id = "fs-action-title"});
+          if (!confirming) {
+            (void)custom<Input>(c, [this](Input& field) {
+              field.set_id("fs-action-input");
+              field.set_placeholder("名字");
+              field.style().width = 240.0f;
+              fs_input = &field;
+              field.on_submit = [this](std::string_view value) { submit_fs_action(value); };
+            }, {.key = "fs-action-input"});
+          }
+          (void)button(c, confirming ? "删除" : "确定", [this, confirming] {
+            const std::string value = fs_input != nullptr ? fs_input->value() : std::string{};
+            submit_fs_action(confirming ? std::string_view{} : std::string_view{value});
+          }, {.id = "fs-action-go"});
+          (void)button(c, "×", [this] {
+            fs_action_open_.set(false);
+            fs_action_kind_.set(FsAction::None);
+          }, {.id = "fs-action-close"});
+        });
+  /// 目标目录就住在浮层里：用户要能看见“我要建/改/删的是什么”。
+  ///
+  /// 它同时是**用户敲出来的名字的实时提示**：导航后两者拼起来就是最终落盘位置。
+  /// 值为空字符串时（理论上不会发生）不声明这一行——空白行看着像渲染坏了。
+  const std::string target = fs_action_target_.value();
+  if (!target.empty()) {
+    (void)text(c, [this] { return fs_action_target_.value(); }, {.id = "fs-action-target"});
+  }
+      });
+    });
+  }
+
+  /// 新建/重命名浮层里的输入框聚焦待办（与 `apply_pending_goto_focus` 同一套路）。
+  void apply_pending_fs_focus() {
+    if (!fs_focus_pending_) return;
+    if (fs_input == nullptr) return;
+    fs_focus_pending_ = false;
+    if (!fs_action_open_.value()) return;
+    if (auto* host = fs_input->host(); host != nullptr) {
+      (void)host->set_keyboard_focus(fs_input);
+    }
   }
 
   void build_goto_line(Composer& c) {
@@ -1530,7 +1667,9 @@ struct CodeEditorPage : Component {
     switch (activity_.value()) {
       case 0:
         icon_button("explorer-refresh", "refresh", "刷新", [this] { refresh_tree(); });
-        icon_button("explorer-new-file", "plus", "新建文件", [this] { new_file_prompt(); });
+        icon_button("explorer-new-file", "plus", "新建文件", [this] { explorer_create(false); });
+        icon_button("explorer-new-folder", "folder", "新建文件夹",
+                    [this] { explorer_create(true); });
         icon_button("explorer-save", "download", "保存当前", [this] { save(); });
         break;
       case 1:
@@ -1614,6 +1753,22 @@ struct CodeEditorPage : Component {
                                {.id = "workspace-tree"});
           if (auto* widget = dynamic_cast<Tree*>(&node); widget != nullptr) {
             widget->set_row_height(kExplorerRowHeight);
+            // 右键 → 文件操作菜单（新建/重命名/删除）。
+            //
+            // 为何不走 `set_event_handler`：`Tree::on_event` 对左键单击返回 true（已处理），
+            // 而右键是我们**接在 MouseDown 上的专用语义**——把它放在 `on_event` 里
+            // 与“选中/展开”并列，才是同一把尺子（与 `CodeEditor::on_context_menu` 同构）。
+            widget->on_context_menu = [this, &node](std::string_view key) {
+              context_key_.set(std::string(key));
+              // 锚点用**行在屏幕上的位置**：右键不改选中，菜单就要贴着那一行出现。
+              // ⚠ 这里只能拿“窗口”级坐标——树控件的行矩形要经它的 `row_rect` 换算，
+              // 而那个接口不对外。退而用“鼠标位置”不准（回调不带坐标），
+              // 所以锚点取树控件自身的左上角向右下偏移一点：菜单稳定出现在树旁边，
+              // 不会因为滚动位置不同而飘到屏幕外。
+              explorer_menu_anchor_ = st::math::Point{node.bounds().x + 24.0f,
+                                                      node.bounds().y + 24.0f};
+              explorer_menu_open_.set(true);
+            };
           }
         },
         [](ScrollView& scroll) { scroll.set_id("explorer-scroll"); },
@@ -1657,6 +1812,15 @@ struct CodeEditorPage : Component {
       (void)spacer(c);
       (void)text(c, [this] { return search_summary_.value(); }, {.id = "search-summary"});
     });
+    // 替换输入行：搜索非空时才出现（“先搜再替”是安全的默认——
+    // 先看到命中范围再决定改什么，比先输入两条再回车稳得多）。
+    if (!last_query_.empty()) {
+      (void)custom<Input>(c, [this](Input& field) {
+        field.set_id("search-replace-input");
+        field.set_placeholder("替换为…（回车 = 全部替换）");
+        field.on_submit = [this](std::string_view value) { replace_in_workspace(value); };
+      }, {.key = "search-replace-input"});
+    }
     if (search_hits_.value().empty()) {
       (void)text(c, [this] {
         return search_summary_.value().empty()
@@ -1665,20 +1829,169 @@ struct CodeEditorPage : Component {
       }, {.id = "search-empty"});
       return;
     }
-    // 结果按**文件分组**：条目 key 用 `路径:行号`（业务身份），前缀行不可点。
+    // 搜索结果：按**文件分组**（与「导航结果」视图同一形态）。
+    //
+    // ⚠ 原有注释写着“已按文件分组”而实现是平铺——注释与实现不符比缺功能更坏：
+    // 后来者会以为已经有了。分组行的判据与实际与导航结果视图**共用一套写法**，
+    // `search_row_to_hit_` 记「面板行 → 命中下标」（分组行占位 -1，不可点）。
     std::vector<ListItemData> items;
+    search_row_to_hit_.clear();
+    std::string last_file;
     for (std::size_t index = 0; index < search_hits_.value().size(); ++index) {
+      // 路径取自 `search_hit_paths_`（与 `search_hits_` 同序的平行数组——
+      // 这是本页既有的数据形态，分组需要它，不另建一份）。
+      const std::string& path = index < search_hit_paths_.size() ? search_hit_paths_[index]
+                                                                 : std::string{};
+      if (path != last_file) {
+        last_file = path;
+        const std::size_t slash = path.find_last_of("/\\");
+        const std::string file_name =
+            slash == std::string::npos ? path : path.substr(slash + 1);
+        items.push_back(ListItemData{.key = std::format("hitfile:{}", index),
+                                     .label = file_name});
+        search_row_to_hit_.push_back(static_cast<std::size_t>(-1));
+      }
       items.push_back(ListItemData{.key = std::format("hit:{}", index),
                                    .label = search_hits_.value()[index]});
+      search_row_to_hit_.push_back(index);
     }
     (void)custom_container<ScrollView>(
         c,
         [&] {
-          (void)list(c, items, [this](std::size_t index) { activate_search_hit(index); },
-                     {.id = "search-results"});
+          (void)list(c, items, [this](std::size_t index) {
+            // 点击行 → 反查它属于哪条命中（分组行不可点——由映射里的哨兵值区分）。
+            if (index < search_row_to_hit_.size() &&
+                search_row_to_hit_[index] != static_cast<std::size_t>(-1)) {
+              activate_search_hit(search_row_to_hit_[index]);
+            }
+          }, {.id = "search-results"});
         },
         [](ScrollView& scroll) { scroll.set_id("search-scroll"); },
         {.grow = true, .id = "search-host"});
+  }
+
+  /// **在工作区里全部替换**（搜索视图的「全部替换」）。
+  ///
+  /// 为何要在多文件层做而不是循环调编辑器：搜索命中的是**磁盘上的文件**
+  ///（跟当前打开的标签无关，甚至没打开过）。走 `st::fs` 读写，
+  /// 改完再刷新搜索与已打开的缓冲。
+  ///
+  /// `st::replace_all_plain` 不做正则——与搜索视图自己的“迷你正则”**能力对齐**：
+/// 正则开启时**如实拒绝**（宁可不做，不可做错）。
+///
+/// ⚠ **只在“真工作区搜索”的结果上可用**：搜索结果对磁盘文件存绝对路径，
+/// 而“内置样例回退”（无 `--workspace`）存的是样例名——后者走不了替换，
+/// 所以先判每个路径是不是绝对路径，**如实拒掉**而不是“目标 5；无命中 5”。
+/// （那串数字看着像“没搜到”，实际上一个都没读。）
+void replace_in_workspace(std::string_view replacement) {
+    const std::string needle = last_query_;
+    if (needle.empty()) {
+      status_.set("先搜索再替换");
+      return;
+    }
+    if (search_regex_.value()) {
+      status_.set("工作区替换不支持正则（请关掉 .* 开关）——不拿不准的规则去改磁盘");
+      return;
+    }
+    if (workspace_.empty()) {
+      status_.set("需要打开一个文件夹才能做工作区替换");
+      return;
+    }
+    // 去重：同一个文件可能在结果里出现多行。
+    // 同时排除非绝对路径（内置样例名）——见函数头说明。
+    std::vector<std::string> files;
+    bool skipped_non_file = false;
+    for (const auto& path : search_hit_paths_) {
+      if (path.empty()) continue;
+      if (!st::fs::is_absolute(path)) {
+        skipped_non_file = true;
+        continue;
+      }
+      if (std::find(files.begin(), files.end(), path) == files.end()) files.push_back(path);
+    }
+    if (files.empty()) {
+      status_.set(skipped_non_file ? "当前结果来自内置样例（非磁盘文件），无法替换"
+                                   : "没有可替换的文件");
+      return;
+    }
+    // 诊断：把首个目标路径报出来。 “0 处 / 0 个文件”有两种截然不同的成因——
+    // 命中已不存在（正常）与**路径口径不对、根本没读到文件**（缺陷）。
+    // 不把这两者分开，用户与开发者都只能看到同一个“0”。
+    status_.set(std::format("替换中：{} 个文件，首项 {}", files.size(), files.front()));
+    std::size_t touched = 0;
+    std::size_t replaced = 0;
+    std::size_t unreadable = 0;
+    std::size_t unchanged = 0;
+    std::string probe_note{};
+    for (const std::string& path : files) {
+      const auto text = st::fs::read_text(path);
+      if (!text.has_value()) {
+        ++unreadable;
+        continue;
+      }
+      if (touched == 0 && unchanged == 0 && unreadable == 0) {
+        // 首件诊断：把“读到了什么”与“找不找得到”一并报出。
+        //（“读到空文件”与“命中为零”是完全不同的两件事，不分开就没法定位。）
+        probe_note = std::format("首件 {} 字节 {}；含词 {}", text->size(), path,
+                                  text->find(needle) != std::string::npos ? "是" : "否");
+      }
+      // 大小写不敏感时**不改写原串的大小写**：只按同一口径找命中再逐处替掉。
+      std::string updated;
+      std::size_t count = 0;
+      if (search_case_.value()) {
+        updated = st::replace_all(*text, needle, replacement);
+        // 不计次数：只关心“动过没有”（状态栏报的是文件数，不是精确命中数）——
+        // 真要精确计数得再扫一遍，而这儿多扫一遍的价值几乎为零。
+        count = updated == *text ? 0U : 1U;
+      } else {
+        // 不区分大小写：在**小写副本**上找位置，改的是原文——
+        // 这样“不改写原串大小写”与“位置一致”同时成立。
+        //
+        // `updated` 必须先有内容：初版写成 `std::string lowered = updated;`
+        // 而那一刻 `updated` 还是**空串**（它要到下面才被赋值），
+        // 于是循环一次也不进、`count` 永远是 0——症状是“目标 5、无命中 5”，
+        // 而文件里明明含那串（诊断行把这一点直接打了出来）。
+        updated = *text;
+        std::string lowered = to_lower(*text);
+        const std::string lowered_needle = to_lower(needle);
+        std::size_t at = lowered_needle.empty() ? std::string::npos
+                                                : lowered.find(lowered_needle);
+        while (at != std::string::npos) {
+          updated.replace(at, needle.size(), replacement);
+          ++count;
+          lowered.replace(at, needle.size(), replacement);
+          at = lowered.find(lowered_needle, at + replacement.size());
+        }
+      }
+      if (count == 0) {
+        ++unchanged;
+        continue;
+      }
+      if (!st::fs::write_text(path, updated).has_value()) {
+        status_.set(std::format("写入失败：{}", path));
+        return;
+      }
+      ++touched;
+      replaced += count;    }
+    // 已打开的标签跟着重读（磁盘真相变了；不重读会“替换了但编辑器里还是旧的”）。
+    auto list = buffers_.value();
+    for (auto& buffer : list) {
+      if (buffer.path.empty()) continue;
+      if (std::find(files.begin(), files.end(), buffer.path) == files.end()) continue;
+      if (const auto text = st::fs::read_text(buffer.path); text.has_value()) {
+        buffer.text = *text;
+        buffer.dirty = false;
+      }
+    }
+    buffers_.set(std::move(list));
+    load_active_text();
+    dir_cache_.clear();
+    apply_search(needle);   // 重跑搜索：命中数应回落
+    // 状态栏把**次因**一并报出：“0 处”有两种截然不同的成因——
+    // 命中已不存在（正常）与路径读不到（缺陷）。不分开的后果是排障要重跑一次搜索
+    // 才能看出区别（实测：首版只报总数，查“0”花了好几轮）。
+    status_.set(std::format("工作区替换：{} 处 / {} 文件（目标 {}；读失败 {}；无命中 {}；{}）",
+                            replaced, touched, files.size(), unreadable, unchanged, probe_note));
   }
 
   // —— 视图 5：导航结果（多处定义/引用/实现的清单）——
@@ -2029,19 +2342,11 @@ struct CodeEditorPage : Component {
         });
         return;
       }
-      // 编辑器头部**只保留标签栏**（用户 2026-10-08 要求“头部内容都去掉，只保留 tab 和内容”）。
-      //
-      // 去掉了两块（它们的定义保留在文件里，见 `build_editor_toolbar` /
-      // `build_breadcrumb`——应用如有需要可随时接回）：
-      // * `editor-toolbar`（保存/撤销/重做/注释/参考线/右键菜单入口，30px）；
-      // * `breadcrumb`（路径面包屑，26px）。
-      //
-      // 两条理由：① 共 56px 垂直空间还给代码（编辑器是主角）；
-      // ② 那些动作**本来就有**键键与菜单两条入口（Ctrl+S/Ctrl+Z/…、菜单栏、
-      // 右键菜单），零鼠标可达性不靠这条工具栏——与它当初存在的理由
-      //（“鼠标用户没有第三条腿”）相比，空间收益更实在。
-      //
       // 编辑器：custom<T> 逃生舱（CodeEditor 的一等接口属性面覆盖不到）。
+      //
+      // 头部**只保留标签栏**（用户 2026-10-08 要求“头部内容都去掉，只保留 tab 和内容”）——
+      // 工具栏（`build_editor_toolbar`）与面包屑（`build_breadcrumb`）不在此装配，
+      // 它们各自的函数保留在文件里（应用如需可随时接回）。
       //
       // **只写“持久配置”**（字体/行宽），且每项都自带相等早退——它们在语义上是
       // 宿主配置、不归属性面管。**语言与只读态不在这里写**：它们由“当前标签”决定
@@ -2080,6 +2385,20 @@ struct CodeEditorPage : Component {
         // 右键菜单走组件的一等回调（不是 `set_event_handler`——那个永远轮不到：
         // `CodeEditor::on_event` 对任何按钮的按下都返回 true）。
         ed.on_context_menu = [this](st::math::Point at) { open_context_menu(at); };
+        // **`Ctrl+点击` → 跳到定义**（VSCode 的编辑器基本手势）。
+        //
+        // 两个前置条件缺一不可，且都不在应用层：
+        // ① 组件把这次点击**当作另一种语义**接住（不先移光标，见 `on_ctrl_click` 的说明）；
+        // ② 后端把修饰键**真的填进事件**（Win32 的鼠标消息不带修饰键，
+        //    旧实现下 `event.ctrl` 恒为 false——这功能只会在无头模式下可用的假象）。
+        // 先把光标移到被点的位置再去跳：`goto_definition` 是“按**当前光标**处取词”，
+        // 而 Ctrl+点击的语义是“跳我点到的那个符号”。
+        ed.on_ctrl_click = [this](std::size_t index) {
+          if (editor == nullptr) return;
+          editor->set_cursor_index(index);
+          on_cursor_moved();
+          goto_definition();
+        };
         editor = &ed;
       }, {.grow = true, .id = "editor-host"});
     });
@@ -2839,11 +3158,21 @@ struct CodeEditorPage : Component {
     (void)overlay(c, "palette", {}, [&] {
       (void)custom<CommandPalette>(c, [this](CommandPalette& palette) {
         palette.set_id("command-palette");
-        palette.set_commands(palette_shows_files_.value() ? file_commands() : command_table());
-        if (palette.query() != palette_query_.value()) palette.set_query(palette_query_.value());
+        palette.set_commands(palette_shows_files_.value()
+                                 ? file_commands()
+                                 : (palette_shows_symbols_.value() ? symbol_commands()
+                                                                   : command_table()));
+        // 面板每次重新挂上时把过滤词同步过去。`set_query` 自带相等早退，
+        // 所以“每帧调”是安全的；但不能无条件 `set_text`：那会把用户正在敲的字
+        // 每帧覆写回去（组件已把这条写进它自己的注释）。
+        if (palette.query() != palette_query_.value()) {
+          palette.set_query(palette_query_.value());
+        }
         palette.set_visible(true);
         palette.on_command = [this](std::string_view id) {
-          palette_open_.set(false);
+          // 符号面板不关面板（与“文件表”同族）：跳转是导航，
+          // 用户很可能接着看下一个符号。
+          if (id.rfind("symbol:", 0) != 0) palette_open_.set(false);
           run_command(std::string(id));
         };
         palette.on_close = [this] { palette_open_.set(false); };
@@ -3052,6 +3381,10 @@ struct CodeEditorPage : Component {
  auto dismiss_find() -> void { close_find(); }
  /// 新建文件（入口快捷键用）。
  auto new_file_request() -> void { new_file_prompt(); }
+ /// 转到符号（入口快捷键/菜单用）：`document=true` 当前文件，`false` 工作区。
+ auto symbols_request(bool document) -> void { open_symbols(document); }
+ /// 全部保存（入口快捷键 Ctrl+Alt+S 用）。
+ auto save_all_request() -> void { save_all(); }
  /// 手动触发补全（入口快捷键 Ctrl+Space 用）。
  auto completion_request() -> void { trigger_completion(); }
  /// 跳到定义（入口快捷键 F12 用）。
@@ -3122,6 +3455,10 @@ struct CodeEditorPage : Component {
                                            .expanded = open, .is_dir = true, .depth = depth});
               if (open) flatten(child_rel, depth + 1);   // 同源递归：key 与路径同一规则
             } else {
+              // 文件行的 key 就是**绝对路径**（与目录行的 `dir:<相对路径>` 不同）。
+              // 这不是优雅设计，而是已有的公开契约：`open_path(key)` 直接拿它当路径用，
+              // 且控制通道/自动化也在按这个口径断言。要改成相对路径必须两处同时改，
+              // 所以此处不改，只在应用侧做归一化（见 `tree_key_to_path`）。
               nodes.push_back(TreeNodeData{.key = workspace_ + "/" + child_rel, .label = entry.name,
                                            .depth = depth});
             }
@@ -3546,8 +3883,172 @@ struct CodeEditorPage : Component {
     new_file_open_.set(true);
   }
 
-  // —— 搜索命中的跳转（打开文件 + 选中命中）——
+  // —— 资源管理器的文件操作（右键菜单）：新建文件 / 新建文件夹 / 重命名 / 删除 ——
+  //
+  // 全部走 `st::fs`（UTF-8 路径统一入口），**全部要确认**（删除）或**全部可撤销**
+  //（新建/重命名是即时动作，靠状态栏与树刷新反馈）。
+  //
+  // 右键菜单的目标行由 `Tree::on_context_menu` 给出（**不改选中**）；
+  // 空 key = 点在空白处，作用域回退到工作区根 / 当前选中项。
 
+  /// 把树里的 key 换成磁盘绝对路径。
+  ///
+  /// 两种 key 口径（见 `workspace_nodes`）：
+  /// - 目录行 `dir:<相对路径>`（相对于工作区根）；
+  /// - 文件行**已经是绝对路径**（历史契约：`open_path(key)` 直接当路径用）。
+  ///
+  /// 初版把两种都当相对路径拼，于是文件行的目标变成 `工作区/工作区/.../file`
+  /// （实测：菜单显示的删除目标路径重复了两遍）。归一化就在这里做**一处**——
+  /// 所有需要绝对路径的地方都调它，不再各自拼。
+  [[nodiscard]] auto tree_key_to_path(std::string_view key) const -> std::string {
+    if (workspace_.empty() || key.empty()) return {};
+    std::string rel(key);
+    if (rel.rfind("dir:", 0) == 0) rel.erase(0, 4);
+    if (st::fs::is_absolute(rel)) return rel;   // 文件行：已是绝对路径
+    return st::fs::join(workspace_, rel);
+  }
+
+  /// 新建条目的目标目录：目录行取它自己，文件行取它的父目录，空 key 取工作区根。
+  [[nodiscard]] auto context_directory() const -> std::string {
+    const std::string key = context_key_.value();
+    if (workspace_.empty()) return {};
+    if (key.empty()) return workspace_;
+    const std::string path = tree_key_to_path(key);
+    if (key.rfind("dir:", 0) == 0) return path;
+    return st::fs::parent(path);
+  }
+
+  /// 在“右键处的目录”下新建一个条目（文件或目录），命名用浮层输入。
+  void explorer_create(bool directory) {
+    const std::string base = context_directory();
+    if (base.empty()) {
+      status_.set("需要打开一个文件夹才能新建");
+      return;
+    }
+    fs_action_kind_.set(directory ? FsAction::NewFolder : FsAction::NewFile);
+    fs_action_target_.set(base);
+    fs_action_open_.set(true);
+    fs_focus_pending_ = true;
+  }
+
+  /// 重命名右键那一行（文件或目录）。
+  void explorer_rename() {
+    const std::string path = tree_key_to_path(context_key_.value());
+    if (path.empty()) {
+      status_.set("请右键一个文件或文件夹");
+      return;
+    }
+    fs_action_kind_.set(FsAction::Rename);
+    fs_action_target_.set(path);
+    fs_action_open_.set(true);
+    fs_focus_pending_ = true;
+  }
+
+  /// 删除右键那一行（**不可恢复**，先确认）。
+  void explorer_delete() {
+    const std::string path = tree_key_to_path(context_key_.value());
+    if (path.empty()) {
+      status_.set("请右键一个文件或文件夹");
+      return;
+    }
+    fs_action_kind_.set(FsAction::Delete);
+    fs_action_target_.set(path);
+    fs_action_open_.set(true);
+  }
+
+  /// 执行已确认的文件系统动作（浮层提交/确认后调用）。
+  ///
+  /// `name` 只在新建/重命名时用（删除走确认，不看名字）。
+  void submit_fs_action(std::string_view name) {
+    const FsAction action = fs_action_kind_.value();
+    const std::string target = fs_action_target_.value();
+    fs_action_open_.set(false);
+    fs_action_kind_.set(FsAction::None);
+    if (action == FsAction::None) return;
+    if (action == FsAction::Delete) {
+      const auto removed = st::fs::remove_all(target);
+      status_.set(removed.has_value() ? std::format("已删除：{}", target)
+                                      : std::format("删除失败：{}", removed.error().message));
+      refresh_tree();
+      return;
+    }
+    const std::string wanted(name);
+    if (wanted.empty()) {
+      status_.set("名字为空，已取消");
+      return;
+    }
+    std::string path;
+    if (action == FsAction::Rename) {
+      path = st::fs::join(st::fs::parent(target), wanted);
+    } else {
+      path = st::fs::join(target, wanted);
+    }
+    st::Status result = st::ok();
+    if (action == FsAction::NewFolder) {
+      result = st::fs::create_directories(path);
+    } else if (action == FsAction::NewFile) {
+      result = st::fs::write_text(path, "");
+    } else if (action == FsAction::Rename) {
+      result = st::fs::rename(target, path);
+    }
+    if (!result) {
+      status_.set(std::format("操作失败：{}", result.error().message));
+      return;
+    }
+    status_.set(std::format("已{}：{}", action == FsAction::Rename ? "重命名" : "新建", path));
+    // 新建后把上级目录展开（否则用户看不到刚建的东西）；重命名只刷新。
+    if (action == FsAction::NewFolder || action == FsAction::NewFile) {
+      auto expanded = dir_expanded_.value();
+      const std::string rel = st::fs::relative_to(target, workspace_);
+      if (!rel.empty() && rel != "." &&
+          std::find(expanded.begin(), expanded.end(), rel) == expanded.end()) {
+        expanded.push_back(rel);
+      }
+      dir_expanded_.set(std::move(expanded));
+    }
+    refresh_tree();
+    // 新建的是文件就顺手打开（“建完就能写”比“建完还要再点一下”省一步）。
+    if (action == FsAction::NewFile) open_path(path);
+  }
+
+  /// 资源管理器右键菜单（与编辑器的右键菜单**同一形态**）。
+  ///
+  /// 为何不复用 `context_open_`：两个菜单的锚点与条目完全不同，共享一个开关会让
+  /// “在编辑器里右键”与“在树里右键”互相触发对方的菜单。
+  void build_explorer_context(Composer& c) {
+    if (!explorer_menu_open_.value()) return;
+    (void)overlay(c, "explorer-context", {}, [&] {
+      (void)custom<ContextMenu>(c, [this](ContextMenu& menu) {
+        menu.anchor_ = explorer_menu_anchor_;
+        if (menu.panel() != nullptr) {
+          menu.panel()->set_items({{.id = "new-file", .label = "新建文件"},
+                                   {.id = "new-folder", .label = "新建文件夹"},
+                                   {.separator = true},
+                                   {.id = "rename", .label = "重命名"},
+                                   {.id = "delete", .label = "删除"},
+                                   {.separator = true},
+                                   {.id = "reveal", .label = "复制路径"}});
+          menu.panel()->on_activate = [this](std::size_t index) {
+            explorer_menu_open_.set(false);
+            switch (index) {
+              case 0: explorer_create(false); break;
+              case 1: explorer_create(true); break;
+              case 2: explorer_rename(); break;
+              case 3: explorer_delete(); break;
+              case 4:
+                status_.set(std::format("路径：{}", tree_key_to_path(context_key_.value())));
+                break;
+              default: break;
+            }
+          };
+          menu.panel()->on_close = [this] { explorer_menu_open_.set(false); };
+        }
+        menu.on_close = [this] { explorer_menu_open_.set(false); };
+      }, {.id = "explorer-context-menu"});
+    });
+  }
+
+  // —— 搜索命中的跳转（打开文件 + 选中命中）——
   /// 点搜索命中 → 打开文件并跳到那一行 + 选中命中词。
   void activate_search_hit(std::size_t index) {
     if (index >= search_hit_paths_.size() || search_hit_paths_[index].empty()) return;
@@ -3961,10 +4462,97 @@ struct CodeEditorPage : Component {
     // 但面板由 `State<bool>` 驱动可见性，所以这里不再需要额外标脏）。
   }
 
-  /// 工作区符号响应：接进命令面板的文件表（复用既有 UI）。
+  /// 工作区符号响应：填进 `workspace_symbols_`，供「转到工作区符号」面板用。
+  ///
+  /// 为何要开面板才能看：LSP 的响应是**异步**的（server 扫完整个工作区才回），
+  /// 所以固定是“先开面板（空列表）→ 响应回来 → 重组把结果填进去”。
   void on_workspace_symbols_response(std::int64_t,
                                      const std::vector<st::lsp::WorkspaceSymbol>& symbols) {
     workspace_symbols_ = symbols;
+    symbols_kind_.set(SymbolKind::Workspace);
+  }
+
+  /// 「转到符号」面板的列表项：定义（当前文件大纲）/ 工作区符号看 `symbols_kind_`。
+  ///
+  /// 两类符号的形状不同（`DocumentSymbol` 带 range/selection_range、可能嵌套；
+  /// `WorkspaceSymbol` 自带 location），但**面板只要“名字 + 去哪”**：
+  /// 在这里归一化成同一种条目，面板侧就只有一条代码路径。
+  [[nodiscard]] auto symbol_commands() const -> std::vector<CommandPalette::Command> {
+    std::vector<CommandPalette::Command> table;
+    const auto flatten = [&](const auto& list, auto&& self, int depth) -> void {
+      for (const auto& symbol : list) {
+        const std::string indent(static_cast<std::size_t>(depth) * 2U, ' ');
+        table.push_back(CommandPalette::Command{.id = std::format("symbol:{}", table.size()),
+                                                .title = indent + symbol.name,
+                                                .detail = symbol.detail});
+        if constexpr (requires { symbol.children; }) {
+          self(symbol.children, self, depth + 1);
+        }
+      }
+    };
+    if (symbols_kind_.value() == SymbolKind::Document) flatten(symbols_, flatten, 0);
+    else {
+      for (const auto& symbol : workspace_symbols_) {
+        table.push_back(CommandPalette::Command{
+            .id = std::format("symbol:{}", table.size()),
+            .title = symbol.name,
+            .detail = st::lsp::LspClient::uri_to_path(symbol.uri)});
+      }
+    }
+    return table;
+  }
+
+  /// 打开「转到符号」面板（公开面：入口在快捷键/菜单，与本页其它入口一致）。
+  void open_symbols(bool document) {
+    if (document) {
+      if (symbols_.empty()) {
+        status_.set("当前文件没有可用的符号（语言服务未就绪？）");
+      }
+      symbols_kind_.set(SymbolKind::Document);
+    } else {
+      if (!lsp_.active()) {
+        status_.set("语言服务未就绪，无法搜工作区符号");
+        return;
+      }
+      workspace_symbols_.clear();
+      symbols_kind_.set(SymbolKind::Workspace);
+      // 空查询 = 让 server 返回它认为最相关的（大多数 server 需要非空查询才回结果，
+      // 所以这里先给一个能匹配全部的通配——具体能搜到什么由 server 决定，**如实呈现**）。
+      (void)lsp_.request_workspace_symbols("");
+    }
+    palette_shows_symbols_.set(true);
+    palette_query_.set({});
+    palette_open_.set(true);
+  }
+
+  /// 跳到第 `index` 个符号（面板列表下标，与 `symbol_commands` 同一顺序）。
+  void jump_to_symbol(std::size_t index) {
+    if (symbols_kind_.value() == SymbolKind::Document) {
+      std::size_t cursor = 0;
+      const auto walk = [&](const auto& list, auto&& self) -> bool {
+        for (const auto& symbol : list) {
+          if (cursor == index) {
+            jump_to_location(st::lsp::Location{
+                .uri = st::lsp::LspClient::path_to_uri(current_buffer_path()),
+                .range = symbol.range,
+                .selection = std::nullopt});
+            return true;
+          }
+          ++cursor;
+          if constexpr (requires { symbol.children; }) {
+            if (self(symbol.children, self)) return true;
+          }
+        }
+        return false;
+      };
+      (void)walk(symbols_, walk);
+      return;
+    }
+    if (index < workspace_symbols_.size()) {
+      const st::lsp::WorkspaceSymbol& symbol = workspace_symbols_[index];
+      jump_to_location(st::lsp::Location{
+          .uri = symbol.uri, .range = symbol.range, .selection = std::nullopt});
+    }
   }
 
 
@@ -4244,6 +4832,9 @@ struct CodeEditorPage : Component {
     // 但把精确匹配放前面才不会在将来加 `file.open-xxx` 时踩到同类前缀问题。
     if (id == "file.open") {
       open_file_dialog();
+    } else if (id.rfind("symbol:", 0) == 0) {
+      // 「转到符号」面板的条目：id 里的数字就是 `symbol_commands()` 的下标。
+      jump_to_symbol(static_cast<std::size_t>(std::stoul(id.substr(7))));
     } else if (id == "file.open-folder") {
       open_folder_dialog();
     } else if (id.rfind("file.open.", 0) == 0) {
@@ -4252,6 +4843,12 @@ struct CodeEditorPage : Component {
       open_stlog();
     } else if (id == "file.save") {
       save();
+    } else if (id == "file.save-all") {
+      save_all();
+    } else if (id == "go.symbol") {
+      open_symbols(true);
+    } else if (id == "go.workspace-symbol") {
+      open_symbols(false);
     } else if (id == "nav.declaration") {
       goto_declaration();
     } else if (id == "nav.type-definition") {
@@ -4290,6 +4887,10 @@ struct CodeEditorPage : Component {
                                               .detail = std::move(detail), .handler = {}});
     };
     add("file.save", "文件: 保存", "把当前编辑器标记为已保存");
+  add("file.save-all", "文件: 全部保存", "把所有脏标签写盘（Ctrl+Alt+S）");
+  // 符号导航：两个入口（当前文件大纲 / 工作区符号）——都复用命令面板的过滤框。
+  add("go.symbol", "转到: 当前文件符号…", "语言服务提供的符号大纲");
+  add("go.workspace-symbol", "转到: 工作区符号…", "Ctrl+T（跨文件搜符号）");
     add("file.close-tab", "文件: 关闭当前编辑器", "Ctrl+W");
     // 打开的两个入口（文件 / 文件夹）都进命令表——菜单里能点，命令面板里能搜，
     // 否则“打开文件夹”只有记住快捷键的人找得到。
@@ -4631,7 +5232,41 @@ auto run_app(int argc, char** argv) -> int {
   app_options.screenshot_dir = options.shots;
   app_options.theme = options.theme == "dark" ? ThemeMode::Dark : ThemeMode::Light;
 
+  // —— 品牌资产（编译期嵌入，两处各取所需）——
+  //
+  // ① 窗口/任务栏图标：PNG 字节交给 `AppOptions`，由 `Application` 在建窗后
+  //    调 `Backend::set_window_icon`（后端不支持时只记告警）。
+  // ② 标题栏左上角的品牌标记：SVG 注册进 `svg_registry()`（下面再做，
+  //    但**必须在首帧渲染之前**）。
+  //
+  // 两份不是重复：一个是给**窗口系统**的位图（要 PNG，系统 API 只吃位图），
+  // 一个是给**自绘标题栏**的矢量（要清晰，任意 DPI 下重新光栅化）。
+  // 它们由 `tools/gebai_logo_probe.cpp` 从同一份 `assets/gbcode-logo.svg` 导出。
+  {
+    const auto icon = b::embed<"examples/gbcode/assets/gbcode-icon.png">();
+    app_options.window_icon_png.assign(icon.data(), icon.data() + icon.length());
+  }
+
   st::app::Application app("gbcode", "0.1.0", app_options);
+
+  // —— 品牌标记（标题栏左上角）——
+  //
+  // **必须在首帧渲染之前注册**：SVG 图标注册表是显式装载的（没有静态初始化器），
+  // 而 `TitleBar` 只在重绘时才向它取图形；晚一步注册不会报任何错，
+  // 只表现为“图标就是不出来”（实测：写在 `app.render_frame()` 之后，
+  // 界面已画完且不再标脏，等再久也看不见）。
+  //
+  // 来源是**框架仓级**的 `examples/assets/gebai-logo.svg`（与 Web 端 favicon 同一记号）：
+  // 品牌资产跳应用共享，不在 gbcode 自己的 `assets/` 里再存一份。
+  {
+    const auto logo = b::embed<"examples/gbcode/assets/gbcode-logo.svg">();
+    const std::string_view source(logo.data(), logo.length());
+    if (!st::ui::svg_registry().add_single("gbcode-logo", source)) {
+      st::print("品牌标记注册失败（{} 字节）\n", logo.length());
+    }
+  }
+  // 窗口/任务栏图标：同一记号的 PNG 版本（由 `gebai_logo_probe` 从上面的 SVG 导出），
+  // 交给后端 `set_window_icon`。
 
   // 声明式页面（整个 IDE 是一个 Component：内容槽里的一切由 `build()` 描述）。
   float editor_font_scale = kEditorFontScale;
@@ -4644,9 +5279,6 @@ auto run_app(int argc, char** argv) -> int {
   }
   auto page = std::make_shared<CodeEditorPage>(samples(), options.workspace, options.tool_root,
                                                editor_font_scale, editor_line_spacing);
-  // 窗框的窗口动作出口：`Application` 实现了 `ui::WindowControl`（转发给后端）。
-  // 在这一处"装"进去，页面内的组件就不需要知道应用/后端的存在（依赖方向单向）。
-  page->window_control_ = &app;
   // 主题的两个口子（**同一处装配**、依赖方向依然是单向的）：
   // 读 = `UiRoot::theme()`（真值源）；写 = `Application::set_theme_mode`
   // （它会连带处理字号缩放与文本 gamma——直接改 `root().theme()` 会把
@@ -4661,7 +5293,8 @@ auto run_app(int argc, char** argv) -> int {
   frame->set_window_control(&app);       // 三控制按钮 + 边缘条接真实后端
   if (frame->title_bar() != nullptr) {
     frame->title_bar()->set_id("titlebar");
-    frame->title_bar()->set_icon("code");
+    // 品牌标记：歌白 logo（SVG 源，上面已注册为 `gebai-logo`），画在标题栏最左。
+    frame->title_bar()->set_icon("svg:gbcode-logo");
   }
   // 内容挂进**窗框内容槽**（`mount_into` 的子树语义正好：声明式只占内容槽）。
   // 指针在 `set_content` 搬移前取好——之后从根部按 id 取回（与容器无关、更稳）。
@@ -4745,12 +5378,30 @@ auto run_app(int argc, char** argv) -> int {
     };
     bind("s", false, [page] { page->save(); });
     bind("s", true, [page] { page->save_as(); });
+    // 全部保存：Ctrl+Alt+S。
+    //
+    // 为何不是 VSCode 的 Ctrl+K S（和弦）：本框架没有和弦键位机制（与
+    // Ctrl+Shift+O 处记的原因相同）—— 单键的可发现性反而更好，
+    // 且 Ctrl+S / Ctrl+Shift+S 已占，附上 Alt 是唯一不冲突的档位。
+    {
+      UiRoot::Shortcut all{};
+      all.key = "s";
+      all.ctrl = true;
+      all.alt = true;
+      (void)root->register_shortcut("s", all, [page, overlay_open]() {
+        if (overlay_open()) return false;
+        page->save_all();
+        return true;
+      });
+    }
     bind("w", false, [page] { page->close_active(); });
     bind("o", false, [page] { page->open_file_dialog(); });
   // Ctrl+Shift+O：打开文件夹（换工作区）。与 VSCode 的 Ctrl+K Ctrl+O 同义，
   // 用单键是因为本框架没有和弦键位机制——单键的可发现性反而更好。
   bind("o", true, [page] { page->open_folder_dialog(); });
     bind("n", false, [page] { page->new_file_request(); });
+    // Ctrl+T：工作区符号（跨文件搜符号）。VSCode 同键位。
+    bind("t", false, [page] { page->symbols_request(false); });
     bind("b", false, [page] { page->sidebar_visible_.set(!page->sidebar_visible_.value()); });
     bind("j", false, [page] { page->toggle_terminal_panel(); });   // Ctrl+J：切换终端面板
     // Ctrl+`（VSCode 的终端默认键位）：与活动栏那个按钮同一条路径。

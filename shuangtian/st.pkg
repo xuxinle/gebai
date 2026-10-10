@@ -125,7 +125,9 @@
                             "exclude_sources": ["src/pkg/*"] },
     "line_geometry_probe": { "kind": "executable",
                              "sources": ["tools/line_geometry_probe.cpp"],
-                             "exclude_sources": ["src/pkg/*"] }
+                             "exclude_sources": ["src/pkg/*"] },
+    "gebai_logo_probe": { "kind": "executable", "sources": ["tools/gebai_logo_probe.cpp"],
+                          "exclude_sources": ["src/pkg/*"] }
   },
   "dependencies": {
     "modules": [],
