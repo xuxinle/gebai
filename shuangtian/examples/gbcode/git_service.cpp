@@ -825,6 +825,40 @@ auto read_content_at(const std::string& cwd, const DiffEndpoint& end, const std:
   return result;
 }
 
+auto read_conflict_sides(const std::string& cwd, const std::string& path) -> ConflictSides {
+  ConflictSides sides;
+  if (path.empty()) {
+    sides.base.error = "路径为空";
+    sides.ours.error = sides.base.error;
+    sides.theirs.error = sides.base.error;
+    return sides;
+  }
+  // 三份各自取（不复用 `read_content_at`：它的端点模型里没有“第 N 号暂存条目”
+  // 这个概念——硬塞一个伪端点会让那个接口多一个只有此处用的分支）。
+  const auto read_stage = [&cwd, &path](int stage) -> ContentAt {
+    ContentAt side;
+    const std::string spec = std::format(":{}:{}", stage, path);
+    const auto out = git(cwd, {"show", "--no-color", spec}, &side.error);
+    if (!out.has_value()) {
+      // “这一号不存在”不是错误：非冲突文件只有 `:0:`，而删除/新增冲突会缺某一号。
+      // 与 `read_content_at` 同口径（`missing = true` 且清空 error），
+      // 否则调用方无法把“本来就没有”与“取数失败”分开。
+      side.missing = true;
+      side.error.clear();
+      return side;
+    }
+    side.text = *out;
+    side.size = side.text.size();
+    side.binary = side.text.find('\0') != std::string::npos;
+    side.ok = true;
+    return side;
+  };
+  sides.base = read_stage(1);
+  sides.ours = read_stage(2);
+  sides.theirs = read_stage(3);
+  return sides;
+}
+
 // ————————————————————————————————————————————————————————————————————————————
 // 写面：命令构造 / 危险度 / 备份 / 多步控制 / 审计
 // ————————————————————————————————————————————————————————————————————————————

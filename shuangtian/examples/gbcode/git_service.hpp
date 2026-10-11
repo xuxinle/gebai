@@ -286,6 +286,32 @@ struct ContentAt {
 [[nodiscard]] auto read_content_at(const std::string& cwd, const DiffEndpoint& end,
                                    const std::string& path) -> ContentAt;
 
+/// **冲突文件的三份内容**（`merge`/`rebase` 撞冲突后的“我方 / 共同祖先 / 他方”）。
+///
+/// 三份都在**暂存区**里，靠序号区分（这也是 `git show :N:path` 里 `N` 的含义）：
+///
+/// | N | 内容 | 字段 |
+/// |---|---|---|
+/// | `:1:` | **共同祖先**（base） | `base` |
+/// | `:2:` | **我方**（ours，当前分支） | `ours` |
+/// | `:3:` | **他方**（theirs，被合入的分支） | `theirs` |
+///
+/// ⚠ 三个序号**只在冲突时同时存在**。非冲突文件只有 `:0:`；而“删除/新增冲突”
+/// 会**缺某一号**（如 `modify/delete` 冲突缺 `:2:` 或 `:3:`）。所以本接口
+/// **逐个取、各自报存在与否**，而不是“要么三份都有、要么失败”——
+/// 后者会把“删除/新增冲突”整类情况误报成取数失败。
+struct ConflictSides {
+  ContentAt base{};     ///< `:1:` 共同祖先（**可能是空的**：两侧都在同一位置新增）
+  ContentAt ours{};     ///< `:2:` 我方
+  ContentAt theirs{};   ///< `:3:` 他方
+  /// 至少取到一份内容（否则多半不是冲突文件、或路径写错）。
+  [[nodiscard]] auto any() const noexcept -> bool {
+    return base.ok || ours.ok || theirs.ok;
+  }
+};
+[[nodiscard]] auto read_conflict_sides(const std::string& cwd, const std::string& path)
+    -> ConflictSides;
+
 /// 该提交是不是**根提交**（无父）。`rev` 不可解析时返回 false。
 [[nodiscard]] auto is_root_commit(const std::string& cwd, const std::string& rev) -> bool;
 

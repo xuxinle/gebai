@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "st/core/process.hpp"
+#include "st/text/merge.hpp"
 #include "st/test/test.hpp"
 #include "st/text/diff.hpp"
 // git_service 是 gbcode 的应用层源（不在框架 sources 清单里）——测试目标
@@ -705,6 +706,60 @@ ST_TEST(git_service_write_args_builds_commands) {
   ST_CHECK(!gbcode::write_args({.op = WriteOp::Checkout, .ref = ""}).has_value());
   ST_CHECK(!gbcode::write_args({.op = WriteOp::Stage, .path = ""}).has_value());
   ST_CHECK(!gbcode::write_args({.op = WriteOp::DeleteBranch, .name = ""}).has_value());
+}
+
+ST_TEST(git_service_reads_conflict_sides_from_index) {
+  // 三方合并视图的前置取数：`git show :1:/:2:/:3:` 三份。
+  // 造一个**真冲突**：同一文件在两个分支上改了同一行。
+  if (!git_available()) {
+    std::cout << "[git] git 未安装，跳过" << '\n';
+    return;
+  }
+  Repo repo;
+  ST_REQUIRE(repo.ok);
+
+  repo.write("f.txt", "base\n");
+  repo.run({"add", "f.txt"});
+  repo.run({"commit", "-m", "add f"});
+  // 从当前提交拉一个分支并在上面改。
+  repo.run({"checkout", "-b", "feature"});
+  repo.write("f.txt", "theirs\n");
+  repo.run({"commit", "-am", "feature change"});
+  // 回 main 改同一行（制造冲突）。
+  repo.run({"checkout", "main"});
+  repo.write("f.txt", "ours\n");
+  repo.run({"commit", "-am", "main change"});
+  // 合并：必然冲突。
+  const bool merged = repo.run({"merge", "feature"});
+  ST_CHECK(!merged);   // 冲突时 `git merge` 返回非 0（本用例要的就是这个状态）
+
+  const auto sides = gbcode::read_conflict_sides(repo.path(), "f.txt");
+  ST_CHECK(sides.any());
+  ST_REQUIRE(sides.base.ok);
+  ST_REQUIRE(sides.ours.ok);
+  ST_REQUIRE(sides.theirs.ok);
+  // 三份内容各自正确（这是本接口的全部意义所在——序号对应关系不能反）。
+  ST_CHECK(sides.base.text.starts_with("base"));
+  ST_CHECK(sides.ours.text.starts_with("ours"));
+  ST_CHECK(sides.theirs.text.starts_with("theirs"));
+
+  // 取到的东西确实能喂给三方合并。
+  const auto plan = st::text::merge_three_way(sides.base.text, sides.ours.text, sides.theirs.text);
+  ST_CHECK_EQ(plan.conflicts, std::size_t{1});
+  ST_CHECK_EQ(st::text::merge_apply(plan), std::string("ours\n"));   // 缺省取我方
+
+  // 非冲突文件（`a.txt` 只有 `:0:`）：三号全缺，但**不是错误**——
+  // 这正是"逐个取、各自报存在"的理由（都当失败的话，调用方分不清"本来没有"与"取数坏了"）。
+  const auto clean = gbcode::read_conflict_sides(repo.path(), "a.txt");
+  ST_CHECK(!clean.any());
+  ST_CHECK(!clean.base.ok && !clean.ours.ok && !clean.theirs.ok);
+  ST_CHECK(clean.base.missing && clean.ours.missing && clean.theirs.missing);
+  ST_CHECK(clean.base.error.empty());   // missing 与 error 必须分开
+
+  // 路径为空：如实报错（不静默返回空）。
+  const auto empty_path = gbcode::read_conflict_sides(repo.path(), "");
+  ST_CHECK(!empty_path.any());
+  ST_CHECK(!empty_path.base.error.empty());
 }
 
 ST_TEST(git_service_partial_stage_intents) {
