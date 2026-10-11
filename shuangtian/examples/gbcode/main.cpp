@@ -778,6 +778,17 @@ struct CodeEditorPage : Component {
     }
     buffers_.set(std::move(list));
     active_.set(index);
+    // 打开文件 = 当前要看的内容换成编辑器：关掉差异/合并标签（若有）。
+    // 不清的话内容区还在差异视图，而标签栏的活动项却指向新文件——“看着切了、内容没切”。
+    if (!diff_key_.value().empty()) {
+      diff_key_.set({});
+      diff_title_.set({});
+      diff_file_.set(st::text::FileDiff{});
+    }
+    if (!merge_key_.value().empty()) {
+      merge_key_.set({});
+      merge_view_ptr = nullptr;
+    }
     // ⚠ **不在这里碰 `editor`**。
     //
     // 为何：本函数会被**帧首泵**调到（`flush_pending_open`），而那时 `editor`
@@ -836,12 +847,13 @@ struct CodeEditorPage : Component {
   /// 只有标签的 × 天然走 `request_close`——其余三处若直接调 `close()`，
   /// 就会出现“同一个动作，换个入口就静默丢修改”的不一致（实测踩到）。
   auto close_active() -> void {
-    // 差异标签（不是 `OpenBuffer`，它住在 `diff_key_` 里）先关：
-    // 不先判会让 Ctrl+W 在差异视图下静默什么都关不掉（用户看到的是“快捷键失效”）。
+    // 特殊标签（差异/合并）当前正在看时优先关它（与内容区互斥顺序一致：
+    // 看的是什么就关什么）——不先判会让 Ctrl+W 在差异视图下静默关掉背后的文件标签。
     if (!merge_key_.value().empty()) {
-      // 合并标签先关（见差异标签的说明：关标签要按**栈序**，后开的先关）。
       merge_key_.set({});
       merge_view_ptr = nullptr;
+      status_.set("已关闭合并标签");
+      return;
     }
     if (!diff_key_.value().empty()) {
       diff_key_.set({});
@@ -1883,10 +1895,14 @@ struct CodeEditorPage : Component {
                 c, [&] { build_editor_area(c, buffers, active, has_editor); },
                 [](Panel& panel) { panel.set_id("editor-column"); }, {.grow = true, .key = "editor"});
           },
-          [](SplitView& split) {
+          [this](SplitView& split) {
             split.set_id("sidebar-split");
             split.set_min_ratio(0.12f);
-            split.set_ratio(0.22f, false);
+            // 比例存档在 `sidebar_ratio_`（非响应式）：拖动回调写它，重组时读它。
+            // ⚠ 不能每帧写死 0.22：声明式每帧都会跳这个 configure，写死等于
+            // 把用户拖到的位置抹回默认（实测：拖到 0.5，一点任何按钮就弹回 0.22）。
+            split.set_ratio(sidebar_ratio_, false);
+            split.on_change = [this](float ratio) { sidebar_ratio_ = ratio; };
           },
           {.grow = true, .id = "sidebar-split"});
     });
@@ -3046,14 +3062,35 @@ b.set_label(std::format("{} {}", change.display_code(), change.display_path()));
   void build_editor_area(Composer& c, const std::vector<OpenBuffer>& buffers, std::size_t active,
                          bool has_editor) {
     column(c, {.gap = 0.0f, .grow = true, .id = "editor-area"}, [&] {
+      // 标签列表 = 文件标签 + 差异/合并标签（它们也是**一个标签**，不是顶掉标签栏的独占视图）。
+      // key 约定：差异/合并用 `diff_key_`/`merge_key_` 的原值（`diff:…` / `merge:…`），
+      // 与文件标签的 key（样例名/绝对路径）天然不撞。
       std::vector<TabData> tabs;
-      // 比较视图不是一个标签（它是活动栏的一个视图）：把它当标签会让标签栏指向
-      // 一个“不在编辑区里”的东西。
-      if (diff_key_.value().empty() && activity_.value() != 6) {
-        for (const auto& buffer : buffers) {
-          tabs.push_back(TabData{.key = buffer.key, .label = buffer.label,
-                                 .modified = buffer.dirty, .closable = true});
-        }
+      for (const auto& buffer : buffers) {
+        tabs.push_back(TabData{.key = buffer.key, .label = buffer.label,
+                               .modified = buffer.dirty, .closable = true});
+      }
+      const bool diff_open = !diff_key_.value().empty();
+      const bool merge_open = !merge_key_.value().empty();
+      if (merge_open) {
+        // 合并标签排在差异前面（与内容区互斥顺序一致：合并优先级最高）。
+        tabs.push_back(TabData{.key = merge_key_.value(),
+                               .label = std::format("◨ {}", st::fs::file_name(merge_path_.value())),
+                               .modified = false, .closable = true});
+      }
+      if (diff_open) {
+        tabs.push_back(TabData{.key = diff_key_.value(),
+                               .label = diff_title_.value().empty()
+                                            ? std::string("Δ 差异")
+                                            : diff_title_.value(),
+                               .modified = false, .closable = true});
+      }
+      // 活动索引：差异/合并任一打开 → 它就是当前内容（文件标签仍保留、可点回）。
+      std::size_t active_index = active;
+      if (merge_open) {
+        active_index = buffers.size();
+      } else if (diff_open) {
+        active_index = buffers.size() + (merge_open ? 1 : 0);
       }
       // 标签条。
       //
@@ -3070,11 +3107,11 @@ b.set_label(std::format("{} {}", change.display_code(), change.display_path()));
       // 整个编辑区那么高（实测：删掉 row 后 `#editor-tabs` 高 200px）。
       // row 的高度固定 34，`Tabs` 的 `grow` 变成横向撑满（它本来的意图）。
       (void)row(c, {.gap = 0.0f, .height = 34.0f, .id = "tabbar"}, [&] {
-        (void)dsl::tabs(c, tabs, active, [this](std::size_t index) { switch_tab(index); },
+        (void)dsl::tabs(c, tabs, active_index, [this](std::size_t index) { switch_tab(index); },
                         [this](const std::string& key) { request_close(key); },
                         {.grow = true, .id = "editor-tabs"});
       });
-      if (!has_editor) {
+      if (!has_editor && tabs.empty()) {
         column(c, {.padding = 24.0f, .grow = true, .id = "empty-hint"}, [&] {
           (void)icon(c, "code", 40.0f);
           (void)text(c, [] {
@@ -3083,12 +3120,10 @@ b.set_label(std::format("{} {}", change.display_code(), change.display_path()));
         });
         return;
       }
-      // —— 差异视图 / 普通编辑器 ——
-      //
-      // 差异标签也住在**同一个编辑区**里（而不是另起一个面板）：它是“一个内容标签”，
-      // 与文件标签共享标签栏/关闭/切换语义——另开面板会让“关掉差异”多出一条路径。
       // —— 差异视图 / 比较视图 / 普通编辑器 ——（三者互斥地共享编辑区：
-      // 它们都是“现在要看的内容”，而分屏会让每一块都变窄）
+      // 它们都是“现在要看的内容”，而分屏会让每一块都变窄）。
+      // 标签栏已经能看到全部标签（文件 + 差异 + 合并），点文件标签即可切回编辑器
+      //（`switch_tab` 清空 diff/merge key），点差异标签重新打开。
       //
       // 顺序**不能反**：合并/差异优先级最高——它们是在比较视图（或变更面板）里
       // **点开的一件东西**，若比较视图先占位，点文件后屏幕上什么都不会变（实测：
@@ -4606,6 +4641,14 @@ b.set_label(std::format("{}  +{} −{}", path, plus, minus));
   /// 切到某个标签（先存回旧文本，再灌新文本）。
   void activate(std::vector<OpenBuffer>& list, std::size_t index) {
     stash_active_text(list);
+    // 切到文件标签 = 当前要看的是编辑器：清掉差异/合并标签（与 `open_path` 同理由）。
+    if (!diff_key_.value().empty() || !merge_key_.value().empty()) {
+      diff_key_.set({});
+      diff_title_.set({});
+      diff_file_.set(st::text::FileDiff{});
+      merge_key_.set({});
+      merge_view_ptr = nullptr;
+    }
     buffers_.set(std::move(list));
     active_.set(index);
     load_active_text();
@@ -4645,7 +4688,16 @@ void load_active_text() {
 
   void switch_tab(std::size_t index) {
     const auto list = buffers_.value();
-    if (index >= list.size()) return;
+    // 差异/合并标签：它们不在 `buffers_` 里，索引落在文件标签之后（见
+    // `build_editor_area` 的组装顺序：文件标签在前，差异/合并在后）。
+    if (index >= list.size()) {
+      // 落在尾部但差异/合并都没开 = 索引越界（如刚关闭时短暂不一致），忽略。
+      if (diff_key_.value().empty() && merge_key_.value().empty()) return;
+      // 点的就是已打开的差异/合并标签本身：无需改状态（它已是当前内容）。
+      status_.set("当前已是差异/合并标签");
+      return;
+    }
+    // 切回文件标签：`activate` 内会清掉差异/合并 key（内容区让位给编辑器）。
     auto copy = list;
     activate(copy, index);
     status_.set("已切到 " + list[index].label);
@@ -4662,6 +4714,22 @@ void load_active_text() {
 
   /// 关闭入口（快捷键/×/菜单都走这里）：脏标签弹确认，干净标签直接关。
   void request_close(std::string_view key) {
+    // 差异/合并标签（key 是 `diff:…` / `merge:…`，与文件 key 天然不撞）：直接关，
+    // 它们没有未保存状态。关掉后若还有文件标签，留在原地（active_ 不变）；
+    // 没有文件标签则显示空提示。
+    if (!merge_key_.value().empty() && key == merge_key_.value()) {
+      merge_key_.set({});
+      merge_view_ptr = nullptr;
+      status_.set("已关闭合并标签");
+      return;
+    }
+    if (!diff_key_.value().empty() && key == diff_key_.value()) {
+      diff_key_.set({});
+      diff_title_.set({});
+      diff_file_.set(st::text::FileDiff{});
+      status_.set("已关闭差异视图");
+      return;
+    }
     const auto list = buffers_.value();
     for (const auto& buffer : list) {
       if (buffer.key != key) continue;
@@ -5454,6 +5522,12 @@ void load_active_text() {
   }
 
   void open_diff(std::string title, const gbcode::CompareOptions& options, std::string path) {
+    // 特殊标签（差异/合并）互斥：同一时刻最多一个。开差异时关掉合并标签
+    //（合并是处置动作，看完差异可从变更面板重新点开）。
+    if (!merge_key_.value().empty()) {
+      merge_key_.set({});
+      merge_view_ptr = nullptr;
+    }
     diff_pending_title_ = std::move(title);
     diff_pending_options_ = options;
     diff_pending_path_ = std::move(path);
@@ -5465,7 +5539,14 @@ void load_active_text() {
   ///
   /// 与差异视图并列、同样住在编辑区（见 `build` 里的互斥顺序）。
   void open_merge(std::string path) {
+    // 与 `open_diff` 对称：开合并时关掉差异标签（特殊标签互斥）。
+    if (!diff_key_.value().empty()) {
+      diff_key_.set({});
+      diff_title_.set({});
+      diff_file_.set(st::text::FileDiff{});
+    }
     merge_pending_path_ = std::move(path);
+    merge_path_.set(merge_pending_path_);
     merge_key_.set("merge:" + merge_pending_path_);
     merge_loaded_ = false;
     merge_wanted_ = true;
@@ -6942,6 +7023,10 @@ void load_active_text() {
   Input* rename_input{nullptr};
   /// 重命名浮层的聚焦待办（浮层内的输入框下一帧才建好）。
   bool rename_focus_pending_{false};
+  /// 侧栏分栏当前宽度比例（与 `bottom_ratio_` 同一套模式，见其注释）：
+  /// 拖动回调只写这个非响应式成员，跨重组记住用户拖到哪了。
+  /// 口径：`SplitView::ratio` = 首面板（侧栏）的占比。
+  float sidebar_ratio_{0.22f};
   /// 底部面板当前高度比例（上下分栏的 `ratio`）。
   ///
   /// **刻意不是 `State`**：分栏组件自己持有比例并据此重排，拖动时它逐像素回调本值——
