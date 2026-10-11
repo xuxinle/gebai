@@ -333,4 +333,125 @@ auto to_unified(const FileDiff& file) -> std::string {
   return out;
 }
 
+auto build_partial_patch(const DiffHunk& hunk, const std::vector<std::size_t>& selected,
+                         std::string_view header) -> std::string {
+  if (selected.empty()) return {};
+  std::vector<bool> chosen(hunk.lines.size(), false);
+  for (const std::size_t index : selected) {
+    if (index < chosen.size()) chosen[index] = true;
+  }
+
+  // 选中的行 → 保留原类型；未选中的 → **降级为上下文**（只对删除行；新增行直接丢）。
+  //
+  // 为何删除行要降级而不是丢掉：它在**旧侧**仍然存在（这次不删而已），
+  // 丢掉它会让新旧两侧的行数对不上，git apply 会以「补丁不一致」为由拒绝。
+  std::vector<DiffLine> kept;
+  kept.reserve(hunk.lines.size());
+  std::size_t kept_added = 0;
+  std::size_t kept_removed = 0;
+  for (std::size_t index = 0; index < hunk.lines.size(); ++index) {
+    const DiffLine& line = hunk.lines[index];
+    if (line.kind == DiffLineKind::Context) {
+      kept.push_back(line);
+    } else if (line.kind == DiffLineKind::Removed) {
+      if (chosen[index]) {
+        kept.push_back(line);
+        ++kept_removed;
+      } else {
+        DiffLine context = line;
+        context.kind = DiffLineKind::Context;
+        kept.push_back(std::move(context));
+      }
+    } else {   // Added
+      if (chosen[index]) {
+        kept.push_back(line);
+        ++kept_added;
+      }
+      // 未选中的新增行：丢掉（它本来就不存在于旧侧，无所谓“降级”）。
+    }
+  }
+
+  // 一行改动都没选中：不硬造空 hunk（`git apply` 会报一个与用户意图无关的错）。
+  if (kept_added == 0 && kept_removed == 0) return {};
+
+  // 选中改动所在的行区间：头里的行号与计数必须**只覆盖这一段**，
+  // 否则 git 会把它往错的位置贴（那是最难查的一类缺陷：补丁应用成功但内容错位）。
+  std::size_t first_old = 0;
+  std::size_t first_new = 0;
+  bool have_first = false;
+  for (const DiffLine& line : kept) {
+    if (line.kind == DiffLineKind::Added) {
+      if (!have_first) {
+        // 纯新增起始：旧侧没有行号，锚在**当前旧行数之后**（即 `+N,0` 的语义）。
+        have_first = true;
+      }
+      continue;
+    }
+    if (!have_first) {
+      first_old = line.old_line;
+      first_new = line.new_line;
+      have_first = true;
+      break;
+    }
+  }
+  if (!have_first) {
+    first_old = hunk.old_start;
+    first_new = hunk.new_start;
+  } else if (first_old == 0) {
+    first_old = hunk.old_start;
+  }
+  if (first_new == 0) first_new = hunk.new_start;
+
+  DiffHunk partial;
+  partial.old_start = first_old;
+  partial.new_start = first_new;
+  partial.old_count = 0;
+  partial.new_count = 0;
+  for (const DiffLine& line : kept) {
+    if (line.kind != DiffLineKind::Added) ++partial.old_count;
+    if (line.kind != DiffLineKind::Removed) ++partial.new_count;
+  }
+  partial.section = hunk.section;
+  partial.lines = std::move(kept);
+
+  std::string out;
+  if (!header.empty()) {
+    out += header;
+    if (!out.ends_with('\n')) out += '\n';
+  }
+  out += header_text(partial);
+  out += '\n';
+  append_hunk_lines(out, partial);
+  return out;
+}
+
+auto build_partial_patch(
+    const FileDiff& file,
+    const std::vector<std::pair<std::size_t, std::vector<std::size_t>>>& selected)
+    -> std::string {
+  const std::string new_path = file.new_path.empty() ? file.old_path : file.new_path;
+  if (file.binary) return {};   // 二进制没有“逐行选择”这回事
+  const std::string header = std::format(
+      "diff --git a/{} b/{}\n--- {}\n+++ {}\n", file.old_path, new_path,
+      file.added ? "/dev/null" : "a/" + file.old_path,
+      file.deleted ? "/dev/null" : "b/" + new_path);
+  std::string out;
+  // 按 hunk 下标升序输出（补丁里 hunk 的顺序必须与文件一致，否则 git 会拒）。
+  std::vector<std::size_t> order;
+  order.reserve(selected.size());
+  for (const auto& [index, _] : selected) {
+    if (index < file.hunks.size()) order.push_back(index);
+  }
+  std::ranges::sort(order);
+  order.erase(std::unique(order.begin(), order.end()), order.end());
+  for (const std::size_t index : order) {
+    const auto found = std::ranges::find_if(
+        selected, [index](const auto& item) { return item.first == index; });
+    if (found == selected.end()) continue;
+    // 只有第一个 hunk 带文件头（多个头会让 git 以为这是多个文件）。
+    out += build_partial_patch(file.hunks[index], found->second, out.empty() ? header : "");
+  }
+  return out;
+}
+
 }  // namespace st::text

@@ -233,4 +233,31 @@ void refine_inline_diffs(std::vector<DiffHunk>& hunks);
 /// 要交给 `git apply` 时需自带文件头（用 `to_unified(FileDiff)`，或自行补两条）。
 [[nodiscard]] auto to_unified(const DiffHunk& hunk) -> std::string;
 
+/// **部分暂存**：从一段差异里挑出指定的行，构造一份能交给 `git apply --cached` 的补丁。
+///
+/// `selected` 的语义是「hunk.lines 的下标」（**不是**行号、也不是 hunk 下标）——
+/// 那是调用方手里唯一稳定的身份（行号在改侧会为 0，见 `DiffLine` 的说明）。
+/// 未选中的**新增行**被丢开，未选中的**删除行**要变成上下文（它仍存在，只是这次不删）；
+/// 未选中的**上下文行**本身就不动。
+///
+/// 为何需要它：IDEA/VSCode 的核心肌肉记忆就是「只把这几行提交了」——而实现路径就是
+/// 「构造只含选中改动的补丁 → `git apply --cached`」，所以本函数是那条路的地基。
+///
+/// 返回空串 = **选中的内容不足以形成有效补丁**（一行都没选，或只选了若干上下文行）：
+/// 那种情况下硬造一个空 hunk 会让 `git apply` 报一个与用户意图无关的错。
+///
+/// `header` 非空时原样放在开头（用 `FileDiff` 拼 `--- a/x` `+++ b/x` 两条）；
+/// 空 = 只返回 hunk 片段。
+[[nodiscard]] auto build_partial_patch(const DiffHunk& hunk,
+                                       const std::vector<std::size_t>& selected,
+                                       std::string_view header = {}) -> std::string;
+
+/// 与 `build_partial_patch` 同义，但直接对一份 `FileDiff` 工作（自己拼文件头）。
+/// `selected` 是「文件内 hunk 下标 → 该 hunk 内选中的行下标」的映射；
+/// 不存在的 hunk 下标被忽略（调用方不必先过滤）。
+[[nodiscard]] auto build_partial_patch(const FileDiff& file,
+                                       const std::vector<std::pair<std::size_t,
+                                                                   std::vector<std::size_t>>>&
+                                           selected) -> std::string;
+
 }  // namespace st::text

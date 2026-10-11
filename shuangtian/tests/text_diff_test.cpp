@@ -413,3 +413,75 @@ ST_TEST(refine_inline_diffs_skips_unequal_run_sizes) {
   }
   ST_CHECK(!any_inline);
 }
+
+// ————————————————————————————————————————————————————————————————————————————
+// 部分暂存（`build_partial_patch`）——「只把这几个改动提交了」的地基
+// ————————————————————————————————————————————————————————————————————————————
+
+ST_TEST(partial_patch_keeps_only_selected_added_lines) {
+  // 一行改三处：只选中间那处新增行 → 拼出来的补丁里只该有它。
+  const FileDiff file = st::text::make_file_diff("a\nX\nc\n", "a\nX\nc\nNEW\n");
+  ST_REQUIRE(!file.hunks.empty());
+  const auto& hunk = file.hunks.front();
+  // 找到那条新增行的下标（不硬编码位置：hunk 的行序由 LCS 决定）。
+  std::optional<std::size_t> added_index;
+  for (std::size_t i = 0; i < hunk.lines.size(); ++i) {
+    if (hunk.lines[i].kind == st::text::DiffLineKind::Added && hunk.lines[i].text == "NEW") {
+      added_index = i;
+    }
+  }
+  ST_REQUIRE(added_index.has_value());
+  const std::string patch = st::text::build_partial_patch(hunk, {*added_index});
+  ST_CHECK(patch.find("+NEW") != std::string::npos);
+  // 没选中的上下文行仍在（补丁要能贴到正确位置，上下文不能丢）。
+  ST_CHECK(patch.find(" a") != std::string::npos);
+  // 不得出现文件头之外的 `diff --git`（只给 hunk 片段时不应自己造头）。
+  ST_CHECK(patch.find("diff --git") == std::string::npos);
+}
+
+ST_TEST(partial_patch_downgrades_unselected_removal_to_context) {
+  // 关键语义：未选中的**删除行**必须降级成上下文，不能丢掉——
+  // 否则新旧两侧行数对不上，`git apply` 会以「补丁不一致」拒绝。
+  const FileDiff file = st::text::make_file_diff("keep\nDROP\ntail\n", "keep\ntail\nADD\n");
+  ST_REQUIRE(!file.hunks.empty());
+  const auto& hunk = file.hunks.front();
+  std::optional<std::size_t> added_index;
+  for (std::size_t i = 0; i < hunk.lines.size(); ++i) {
+    if (hunk.lines[i].kind == st::text::DiffLineKind::Added) added_index = i;
+  }
+  ST_REQUIRE(added_index.has_value());
+  const std::string patch = st::text::build_partial_patch(hunk, {*added_index});
+  // `DROP` 必须作为**上下文**（前缀是空格）出现，而不是 `-DROP`。
+  ST_CHECK(patch.find("\n DROP\n") != std::string::npos);
+  ST_CHECK(patch.find("\n-DROP\n") == std::string::npos);
+}
+
+ST_TEST(partial_patch_empty_selection_produces_nothing) {
+  const FileDiff file = st::text::make_file_diff("a\n", "b\n");
+  ST_REQUIRE(!file.hunks.empty());
+  ST_CHECK(st::text::build_partial_patch(file.hunks.front(), {}).empty());
+  // 只选上下文行也拼不出有效补丁（没有任何改动可应用）。
+  const FileDiff same = st::text::make_file_diff("a\nb\n", "a\nB\n");
+  ST_REQUIRE(!same.hunks.empty());
+  std::vector<std::size_t> context_only;
+  for (std::size_t i = 0; i < same.hunks.front().lines.size(); ++i) {
+    if (same.hunks.front().lines[i].kind == st::text::DiffLineKind::Context) {
+      context_only.push_back(i);
+    }
+  }
+  ST_CHECK(!context_only.empty());
+  ST_CHECK(st::text::build_partial_patch(same.hunks.front(), context_only).empty());
+}
+
+ST_TEST(partial_patch_whole_file_equals_full_patch) {
+  // 全选时应当与 `to_unified` 的 hunk 片段**等价**（同样的头与正文）——
+  // 这条判据挡住“部分补丁的头上行号算错了”这类错（全选时两者必须一致）。
+  const FileDiff file = st::text::make_file_diff("a\nb\nc\n", "a\nB\nc\n");
+  ST_REQUIRE(!file.hunks.empty());
+  const auto& hunk = file.hunks.front();
+  std::vector<std::size_t> all;
+  for (std::size_t i = 0; i < hunk.lines.size(); ++i) all.push_back(i);
+  const std::string partial = st::text::build_partial_patch(hunk, all);
+  const std::string full = st::text::to_unified(hunk);
+  ST_CHECK_EQ(partial, full);
+}
