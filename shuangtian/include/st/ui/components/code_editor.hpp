@@ -301,6 +301,19 @@ class CodeEditor : public Element {
   struct LineDecoration {
     std::size_t line{0};
     LineMark mark{LineMark::None};
+
+    /// 行号槽左侧的**勾选框**（勾选列）。
+    ///
+    /// 为何做成装饰而不是让宿主在编辑器外面画一列：勾选框必须**逐行对齐**
+    /// （每一行一个、且随滚动跑），而“哪一行在屏幕上的 y”只有编辑器知道——
+    /// 宿主自己算必然与真实行高/滚动分叉（那是差异视图早就踩过的同一类坑）。
+    enum class Check : std::uint8_t {
+      None,      ///< 不画（默认；非逐行暂存模式下零开销）
+      Unchecked, ///< 画一个空方框
+      Checked,   ///< 画一个勾上的方框
+      Disabled,  ///< 画一个灰方框（这一行不可选：上下文行）
+    };
+    Check check{Check::None};
   /// 行号槽里显示的号；`0` = 用本行真实行号，`kNoNumber` = **不显示行号**。
     ///
     /// 三态而不是两态，是因为“拿不到另一侧的行号”与“这一行不属于任何一侧”
@@ -412,6 +425,12 @@ class CodeEditor : public Element {
   /// 或者放弃组件自带的鼠标行为。这个回调把“右键点了这里”作为一件事告诉宿主，
   /// 同时**不动光标**（右键不改选择，与主流编辑器一致）。
   std::function<void(math::Point)> on_context_menu{};
+  /// 勾选框被点（行号 0 起）。宿主在这里切换选择状态。
+  ///
+  /// 为何不改 `on_line_click` 之类的通用行事件：勾选框是**按钮式**语义
+  ///（点一下切换），与"点进这一行开始编辑"是两件事——混在一起会让
+  /// "点勾选框顺便把光标挪过去"（用户没要求）。
+  std::function<void(std::size_t)> on_checkbox_toggle{};
 
   /// **`Ctrl+点击`**（参数为命中的**字符索引**，UTF-8 字节偏移）：宿主通常据此实现“跳到定义”。
   ///
@@ -529,6 +548,18 @@ class CodeEditor : public Element {
   [[nodiscard]] auto matching_bracket() const -> std::optional<std::pair<std::size_t, std::size_t>>;
   /// 鼠标位置落在第几行（不在文本区则 -1）。
   [[nodiscard]] auto hover_line_at(const RenderContext& context, math::Point point) const -> int;
+
+  /// 点是否落在**勾选列**上（那种情况下返回该行的 0 起行号；否则 -1）。
+  ///
+  /// 为何不把这段塞进 `on_event` 里直接调宿主：勾选框的语义归属**宿主**
+  ///（编辑器不知道"勾上表示要暂存"），所以这里只回答"点到哪个框了"。
+  [[nodiscard]] auto checkbox_line_at(const RenderContext& context, math::Point point) const
+      -> int;
+  /// 勾选框被点的回调（行号 0 起）。宿主在这里切换选择状态。
+  ///
+  /// 为何不改 `on_line_click` 之类的通用行事件：勾选框是**按钮式**语义
+  ///（点一下就切换），与"点进这一行开始编辑"是两件事——混在一起会让
+  /// "点勾选框顺便把光标挪过去"（用户没要求）。
   /// 可达最大水平偏移。
   [[nodiscard]] auto max_scroll_x(const RenderContext& context) const -> float;
   void apply_h_scroll_drag(const RenderContext& context, float pointer_x);
@@ -611,6 +642,9 @@ class CodeEditor : public Element {
   /// 而现算需要 `RenderContext`（绘制期才有）。一帧滞后在这里不可见。
   mutable std::size_t last_visible_first_{1};
   mutable std::size_t last_visible_last_{0};
+  /// 装饰里是否有勾选框（决定 gutter 是否加宽 + 点击是否命勾选列）。
+  bool any_checkbox_{false};
+  /// 勾选框被点（行号 0 起）。
   /// 行装饰（整体替换语义，见 `set_line_decorations`）。
   std::vector<LineDecoration> line_marks_{};
   /// 按行号索引的装饰表（绘制热路径用；`set_*` 时重建）。

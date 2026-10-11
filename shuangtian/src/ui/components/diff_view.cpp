@@ -38,6 +38,13 @@ DiffView::~DiffView() = default;
 void DiffView::set_diff(const text::FileDiff& diff) {
   diff_ = diff;
   current_hunk_ = diff_.hunks.empty() ? kNoHunk : 0;
+  // ⚠ **换了 diff 必须清空选择**：`selected_` 存的是 `(hunk, line)` **下标**，
+  // 而新 diff 的同一下标指向的是**另一行**。不清的话用户会看到"我明明选的是
+  // 第 3 行的新增，怎么补丁里删的是别处"——这是下标当身份用的经典陷阱。
+  if (!selected_.empty()) {
+    selected_.clear();
+    if (on_selection_changed) on_selection_changed();
+  }
   rebuild();
   push_to_editors();
   mark_layout_dirty();
@@ -143,6 +150,16 @@ void DiffView::begin_row(Side& side, std::size_t number, CodeEditor::LineMark ma
   CodeEditor::LineDecoration decoration;
   decoration.line = side.lines + 1;   // 装饰按**1 起**行号指定
   decoration.mark = mark;
+  if (side.staging && !side.checks.empty()) {
+    // ⚠ 取的是**最后一项**（调用方在调 `begin_row` 之前刚 push 的、属于这一行的那个），
+    // 而不是 `checks[side.lines]`。
+    //
+    // 第一版就是 `check_for(side.lines)`——那是 **off-by-one**：`side.lines` 在
+    // `begin_row` 里才自增，所以读取时下标指向"下一行"、而表里还没那一项，
+    // 于是**永远返回 None**（现象：开了逐行暂存模式却一个勾选框都看不到，
+    // 而 `staging` 状态、选择状态、补丁构造全都正常——最难查的那种）。
+    decoration.check = side.checks.back();
+  }
   decoration.number = number;
   decoration.gutter_bar = gutter_bar;
   // 行内改动区间（“这个字改了”）：数据来自 `DiffLine::inline_old`/`inline_new`。
@@ -160,6 +177,12 @@ void DiffView::begin_row(Side& side, std::size_t number, CodeEditor::LineMark ma
 }
 
 void DiffView::rebuild_side_by_side() {
+  // 勾选列只在左栏、且只在逐行暂存模式下出现（见 `begin_row`）。
+  old_side_.staging = staging_mode_;
+  old_side_.checks.clear();
+  checkbox_targets_.clear();
+  new_side_.staging = false;
+  new_side_.checks.clear();
   for (std::size_t h = 0; h < diff_.hunks.size(); ++h) {
     const text::DiffHunk& hunk = diff_.hunks[h];
     const std::string header =
@@ -200,6 +223,37 @@ void DiffView::rebuild_side_by_side() {
                                                            : CodeEditor::LineMark::None;
         } else if (hidden) {
           mark = CodeEditor::LineMark::None;   // 藏起来的行：不留填充底（它是“被去掉的”）
+        }
+        // 勾选态：**在推行时同步建立"显示行 → 勾选态"这一一对应表**。
+        // 放在这里而不是另起一遍遍历：显示行数由 `begin_row` 决定（含填充行），
+        // 另起一遍必然要对齐两套循环（而它们只要差一行，勾选框就会整体错位一格）。
+        if (old_side_.staging) {
+          CodeEditor::LineDecoration::Check check =
+              CodeEditor::LineDecoration::Check::None;
+          if (show) {
+            const std::size_t hunk_index = h;
+            const auto line_index = static_cast<std::size_t>(row.left);
+            if (line->kind == text::DiffLineKind::Context) {
+              // 上下文行**不可选**：选了不产生任何改动（`build_partial_patch` 会丢掉），
+              // 画成灰框让"为什么点不动"一眼可见——比"点了没反应"强得多。
+              check = CodeEditor::LineDecoration::Check::Disabled;
+            } else {
+              check = is_line_selected(hunk_index, line_index)
+                          ? CodeEditor::LineDecoration::Check::Checked
+                          : CodeEditor::LineDecoration::Check::Unchecked;
+            }
+          }
+          old_side_.checks.push_back(check);
+          // 身份表与勾选态表**同批追加**（见字段说明：分家就会错位）。
+          if (show) {
+            const auto line_index = static_cast<std::size_t>(row.left);
+            checkbox_targets_.push_back(
+                line->kind == text::DiffLineKind::Context
+                    ? std::make_pair(kNoHunk, std::size_t{0})
+                    : std::make_pair(h, line_index));
+          } else {
+            checkbox_targets_.push_back(std::make_pair(kNoHunk, std::size_t{0}));
+          }
         }
         begin_row(old_side_, show ? line->old_line : 0, mark,
                   show ? line->text : std::string_view{}, hidden,
@@ -262,6 +316,22 @@ void DiffView::push_to_editors() {
     left_->set_read_only(read_only_ || !allow_left_edit_);
     left_->set_text(old_side_.text);
     left_->set_line_decorations(old_side_.marks);
+    // 勾选框被点 → 反查 `(hunk, line)` 并切换。
+    //
+    // 反查靠 `old_side_.checks`：它的第 i 项对应第 i 个显示行，而"第 i 个显示行属于
+    // 哪个 hunk 的哪一行"需要**另建一张表**——`checks` 只记了勾选态，没记身份。
+    // 这张 `checkbox_targets_` 与 `checks` 在同一次遍历里同步建立（见 `rebuild`），
+    // 所以两者的下标空间天然一致——不会出现"勾选框与身份错位一格"。
+    if (staging_mode_) {
+      left_->on_checkbox_toggle = [this](std::size_t row) {
+        if (row >= checkbox_targets_.size()) return;
+        const auto [hunk, line] = checkbox_targets_[row];
+        if (hunk == kNoHunk) return;   // 上下文行/填充行：不可选（画的就是灰框）
+        (void)toggle_line(hunk, line);
+      };
+    } else {
+      left_->on_checkbox_toggle = nullptr;
+    }
   }
   if (right_ != nullptr) {
     // 内联模式右栏不参与：给它空文本（它此时也 `set_visible(false)`）。
@@ -609,6 +679,122 @@ auto DiffView::invoke_action(std::string_view action, std::string_view argument)
     return true;
   }
   return false;
+}
+
+/// 选择变化后的统一收尾：**重建装饰并推给编辑器**。
+///
+/// 为何必须重建（而不只是标脏）：勾选态是 `LineDecoration::check` 的一部分，
+/// 而装饰由 `rebuild()` 生成——只标脏的话屏幕上什么都不会变（实测：点了勾选框，
+/// 状态变了、画面没变）。
+void DiffView::refresh_checkboxes() {
+
+  if (!staging_mode_) return;
+  rebuild();
+  push_to_editors();
+  mark_dirty();
+}
+
+void DiffView::set_staging_mode(bool value) {
+  if (staging_mode_ == value) return;
+  staging_mode_ = value;
+  // ⚠ **必须重建**（不只是标脏）：勾选框是**装饰**的一部分，而装饰由 `rebuild()`
+  // 生成 —— 只标脏的话 `checks` 表还是旧的（全是 `None`），于是"开了模式却看不到
+  // 勾选框"。实测踩到：像素断言显示开/关模式的画面完全一样。
+  rebuild();
+  push_to_editors();
+  // 关掉模式时**保留选择**：用户可能只是切回去看一眼差异，回来接着挑。
+  // 清空选择是"取消操作"，那该由显式的动作承担（宿主可 `set_all_selected(false)`）。
+  mark_layout_dirty();
+}
+
+auto DiffView::is_line_selected(std::size_t hunk, std::size_t line) const -> bool {
+  for (const auto& item : selected_) {
+    if (item.first == hunk && item.second == line) return true;
+  }
+  return false;
+}
+
+auto DiffView::toggle_line(std::size_t hunk, std::size_t line) -> bool {
+  // 下面的状态变更都要**重建装饰**（勾选态画在装饰里，不重建就看不到变化）。
+  if (hunk >= diff_.hunks.size()) return false;
+  if (line >= diff_.hunks[hunk].lines.size()) return false;
+  // **只允许选中"可暂存"的行**：上下文行与删除行在"暂存"这个动作里语义不同——
+  // 上下文行没改（选了不产生任何改动，`build_partial_patch` 会丢掉它）；
+  // 而删除行选中是"这次要删掉它"（合法）。所以上下文行**如实拒绝**，
+  // 而不是"选上但不生效"（那会让按钮状态与实际结果对不上）。
+  if (diff_.hunks[hunk].lines[line].kind == text::DiffLineKind::Context) return false;
+  for (auto iterator = selected_.begin(); iterator != selected_.end(); ++iterator) {
+    if (iterator->first == hunk && iterator->second == line) {
+      selected_.erase(iterator);
+      refresh_checkboxes();
+      if (on_selection_changed) on_selection_changed();
+      return false;
+    }
+  }
+  // 插入到**保持 (hunk, line) 升序**的位置：补丁里的行序必须按文件顺序，
+  // 而用户点选的顺序是任意的（先点第 5 行再点第 2 行很常见）。
+  const std::pair<std::size_t, std::size_t> key{hunk, line};
+  auto position = selected_.begin();
+  while (position != selected_.end() && *position < key) ++position;
+  selected_.insert(position, key);
+  refresh_checkboxes();
+  if (on_selection_changed) on_selection_changed();
+  return true;
+}
+
+void DiffView::set_hunk_selected(std::size_t hunk, bool selected) {
+  if (hunk >= diff_.hunks.size()) return;
+  // 先从选择里摘掉该 hunk 的现有项（保持其它 hunk 的选择不动）。
+  std::vector<std::pair<std::size_t, std::size_t>> kept;
+  for (const auto& item : selected_) {
+    if (item.first != hunk) kept.push_back(item);
+  }
+  selected_ = std::move(kept);
+  if (selected) {
+    for (std::size_t line = 0; line < diff_.hunks[hunk].lines.size(); ++line) {
+      if (diff_.hunks[hunk].lines[line].kind == text::DiffLineKind::Context) continue;
+      selected_.emplace_back(hunk, line);
+    }
+    // 整块选中后要重排（上面的追加是按行序的，但插入点在同一 hunk 尾部，
+    // 而其它 hunk 的项可能排在它之后）。
+    std::sort(selected_.begin(), selected_.end());
+  }
+  refresh_checkboxes();
+  if (on_selection_changed) on_selection_changed();
+}
+
+void DiffView::set_all_selected(bool selected) {
+  selected_.clear();
+  if (selected) {
+    for (std::size_t hunk = 0; hunk < diff_.hunks.size(); ++hunk) {
+      for (std::size_t line = 0; line < diff_.hunks[hunk].lines.size(); ++line) {
+        if (diff_.hunks[hunk].lines[line].kind == text::DiffLineKind::Context) continue;
+        selected_.emplace_back(hunk, line);
+      }
+    }
+  }
+  refresh_checkboxes();
+  if (on_selection_changed) on_selection_changed();
+}
+
+auto DiffView::build_stage_patch() const -> std::string {
+  if (selected_.empty()) return {};
+  // 把 `(hunk, line)` 对按 hunk 归组——`build_partial_patch` 收的正是那个形状。
+  // ⚠ **必须重建**而不是缓存：diff 可能在选择之后被替换（`set_diff`），
+  // 那时的选择下标指向新 diff 的其它行（看着"选错了"）——`set_diff` 会清空选择
+  //（见那里的说明），所以这里只处理"当前 diff 上的选择"。
+  std::vector<std::pair<std::size_t, std::vector<std::size_t>>> grouped;
+  std::size_t cursor = 0;
+  while (cursor < selected_.size()) {
+    const std::size_t hunk = selected_[cursor].first;
+    std::vector<std::size_t> lines;
+    while (cursor < selected_.size() && selected_[cursor].first == hunk) {
+      lines.push_back(selected_[cursor].second);
+      ++cursor;
+    }
+    grouped.emplace_back(hunk, std::move(lines));
+  }
+  return text::build_partial_patch(diff_, grouped);
 }
 
 }  // namespace st::ui

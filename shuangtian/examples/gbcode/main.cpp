@@ -651,6 +651,11 @@ struct CodeEditorPage : Component {
   std::string diff_pending_path_{};
   /// 差异视图实例（当前帧有效）——`hunk` 导航靠它。
   DiffView* diff_view_ptr{nullptr};
+  /// 逐行暂存模式（差异视图上方多一条工具条）。
+  ///
+  /// 为何是模式而不是"永远显示勾选列"：勾选列会占掉左侧栏宽度（本来就窄），
+  /// 而"挑着提交几行"是阶段性动作（做完就回到"看差异"）。
+  State<bool> diff_staging_{false};
 
   // —— 三方合并视图（冲突处置）——
   ///
@@ -3115,13 +3120,51 @@ b.set_label(std::format("{} {}", change.display_code(), change.display_path()));
       }
       merge_view_ptr = nullptr;
       if (!diff_key_.value().empty()) {
-        (void)custom<DiffView>(c, [this](DiffView& view) {
-          view.set_id("diff-view");
-          view.set_read_only(true);
-          view.set_font_size(0.0f);
-          view.set_diff(diff_file_.value());
-          diff_view_ptr = &view;   // F7（下一个差异）靠它
-        }, {.grow = true, .id = "diff-view-host"});
+        // 差异视图外面包一层列：上面是逐行暂存工具条（仅在需要时出现），下面才是视图。
+        //
+        // 为何工具条放在**外面**而不是让 `DiffView` 自己画头部：那条工具条上的按钮要
+        // 触发的是**应用层的写操作**（`run_write` + 审计），而组件不该知道 git 是什么。
+        (void)column(c, {.grow = true, .id = "diff-column"}, [&] {
+          if (diff_staging_.value()) {
+            (void)row(c, {.gap = 6.0f, .height = 30.0f, .id = "diff-staging-bar"}, [&] {
+              const std::size_t count =
+                  diff_view_ptr == nullptr ? 0U : diff_view_ptr->selected_count();
+              (void)text(c, [count] {
+                return count == 0U ? std::string("逐行暂存：勾选行后点右侧按钮")
+                                   : std::format("已选 {} 行", count);
+              }, {.grow = true, .id = "diff-staging-count"});
+              (void)custom<Button>(c, [this](Button& b) {
+                b.set_id("diff-stage-selected");
+                b.set_label("暂存选中行");
+                b.set_size(Button::Size::Small);
+                // 未选任何行时就**如实禁用**（按了没反应比看得见的禁用更差）。
+                b.set_enabled(diff_view_ptr != nullptr && diff_view_ptr->selected_count() > 0U);
+                b.on_click = [this] { stage_selected_diff_lines(); };
+              }, {.height = 24.0f, .id = "diff-stage-selected-btn"});
+              (void)custom<Button>(c, [this](Button& b) {
+                b.set_id("diff-unstage-selected");
+                b.set_label("取消暂存选中");
+                b.set_size(Button::Size::Small);
+                b.set_enabled(diff_view_ptr != nullptr && diff_view_ptr->selected_count() > 0U);
+                b.on_click = [this] { unstage_selected_diff_lines(); };
+              }, {.height = 24.0f, .id = "diff-unstage-selected-btn"});
+              (void)custom<Button>(c, [this](Button& b) {
+                b.set_id("diff-staging-close");
+                b.set_label("退出逐行暂存");
+                b.set_size(Button::Size::Small);
+                b.on_click = [this] { diff_staging_.set(false); };
+              }, {.height = 24.0f, .id = "diff-staging-close-btn"});
+            });
+          }
+          (void)custom<DiffView>(c, [this](DiffView& view) {
+            view.set_id("diff-view");
+            view.set_read_only(true);
+            view.set_font_size(0.0f);
+            view.set_staging_mode(diff_staging_.value());
+            view.set_diff(diff_file_.value());
+            diff_view_ptr = &view;   // F7（下一个差异）靠它
+          }, {.grow = true, .id = "diff-view-host"});
+        });
         return;
       }
       if (activity_.value() == 6) {
@@ -5446,6 +5489,35 @@ void load_active_text() {
     git_refresh_pending_ = true;
     merge_loaded_ = false;
   }
+
+  /// 逐行暂存：把差异视图里勾选的行构造成补丁并提交到暂存区。
+  ///
+  /// ⚠ 两个容易错的地方，都在这里处理：
+  /// ① **补丁从视图现取**（`diff_view_ptr->build_stage_patch()`）——它在选择变化后
+  ///    才准，缓存会拿到过期的选择；
+  /// ② 补丁为空时**如实报状态**（`build_partial_patch` 在"只选了上下文行"时返回空，
+  ///    而那正是"选了但不产生改动"的情形，硬发一条命令会让 git 报无关的错）。
+  void stage_selected_diff_lines(bool unstage = false) {
+    if (diff_view_ptr == nullptr) {
+      status_.set("逐行暂存：差异视图不在（先打开一个文件差异）");
+      return;
+    }
+    const std::string patch = diff_view_ptr->build_stage_patch();
+    if (patch.empty()) {
+      status_.set("逐行暂存：选中的行不足以形成改动（只选上下文行不产生变化）");
+      return;
+    }
+    gbcode::WriteIntent intent;
+    intent.op = unstage ? gbcode::WriteOp::UnstagePatch : gbcode::WriteOp::StagePatch;
+    intent.patch = patch;
+    if (run_write(intent, unstage ? "unstage-partial" : "stage-partial")) {
+      status_.set(std::format("{} {} 行（{}）", unstage ? "已取消暂存" : "已暂存",
+                              diff_view_ptr->selected_count(), diff_pending_path_));
+      // 暂存后选择**保留**：用户可以继续挑下一批（清空会让人以为"操作没生效"）。
+    }
+  }
+
+  void unstage_selected_diff_lines() { stage_selected_diff_lines(true); }
 
   /// —— 写操作的**唯一入口** ——
   ///

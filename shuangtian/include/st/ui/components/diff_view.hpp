@@ -107,6 +107,39 @@ class DiffView : public Element {
   [[nodiscard]] auto hunk_count() const noexcept -> std::size_t { return diff_.hunks.size(); }
   /// 当前所在差异块下标（无差异为 `kNoHunk`）。
   [[nodiscard]] auto current_hunk() const noexcept -> std::size_t { return current_hunk_; }
+
+  // —— 逐行暂存（B11/C3）——
+  //
+  // 为什么选择状态住在 `DiffView` 而不是 `CodeEditor`：**身份是 `hunk.lines` 下标**
+  //（见 `build_partial_patch` 的说明），而编辑器只知道“屏幕上的第几行”——
+  // 那个行号是 `DiffView` 拼出来的显示行（含占位/分隔行），两者不是一回事。
+  // 把选择放在知道映射关系的那一层，就不需要反向查表。
+  ///
+  /// 打开/关闭“逐行暂存”模式。开启后左侧栏出现勾选列，点行切换选中。
+  ///
+  /// 为何是模式而不是常驻：勾选列会占掉左侧栏的宽度（本来就窄），
+  /// 而“逐行挑着提交”是个阶段性动作（做完就回到“看差异”）。
+  void set_staging_mode(bool value);
+  [[nodiscard]] auto staging_mode() const noexcept -> bool { return staging_mode_; }
+  /// 某行是否被选中（`hunk`/`line` 都是下标）。
+  [[nodiscard]] auto is_line_selected(std::size_t hunk, std::size_t line) const -> bool;
+  /// 切换某行的选中态（返回新状态）。
+  auto toggle_line(std::size_t hunk, std::size_t line) -> bool;
+  /// 选中/取消整个 hunk。
+  void set_hunk_selected(std::size_t hunk, bool selected);
+  /// 全选/全不选。
+  void set_all_selected(bool selected);
+  /// 已选中的 `(hunk, line)` 对（顺序稳定——补丁里的顺序靠它）。
+  [[nodiscard]] auto selected_lines() const
+      -> const std::vector<std::pair<std::size_t, std::size_t>>& {
+    return selected_;
+  }
+  /// 已选行数。
+  [[nodiscard]] auto selected_count() const noexcept -> std::size_t { return selected_.size(); }
+  /// **构造可提交的补丁**（选中的行；空串 = 选得不够形成有效补丁）。
+  [[nodiscard]] auto build_stage_patch() const -> std::string;
+  /// 选择变化回调（宿主据此启用/禁用“暂存选中行”按钮）。
+  std::function<void()> on_selection_changed{};
   /// 跳到第 `index` 个差异块（夹取；把它滚到视野顶部并高亮分隔条）。返回是否成功。
   auto goto_hunk(std::size_t index) -> bool;
   /// 下一个 / 上一个差异块（环绕）。返回落点下标，无差异返回 `kNoHunk`。
@@ -152,6 +185,16 @@ class DiffView : public Element {
   struct Side {
     std::string text{};
     std::size_t lines{0};
+    /// 是否画勾选列（逐行暂存模式；只有左栏会开，见 `begin_row`）。
+    bool staging{false};
+    /// 本侧第 `row`（0 起显示行）对应的勾选态。
+    ///
+    /// 为何按**显示行**而不按 `(hunk, line)`：`begin_row` 只知道显示行——
+    /// 它是“往一侧追加一行”的唯一入口。身份映射另建 `checkbox_targets_`（同批追加）。
+    std::vector<CodeEditor::LineDecoration::Check> checks{};
+    // 故意**不提供** `check_for(row)` 这类按显示行下标的访问器：
+    // 它的下标空间与"已 push 的项数"差一位（`begin_row` 内部才自增 `lines`），
+    // 提供它就等于给后人留一个必然越界的口子（第一版正是这样丢掉了整个勾选列）。
     std::vector<CodeEditor::LineDecoration> marks{};
     /// 每个显示行 → 该侧的真实行号（占位/分隔行 = 0，即「不给号」）。
     std::vector<std::size_t> numbers{};
@@ -159,6 +202,8 @@ class DiffView : public Element {
     std::vector<std::size_t> hunk_rows{};
   };
 
+  /// 选择变化后重建装饰并推给编辑器（见实现里的说明）。
+  void refresh_checkboxes();
   /// 重建两侧文本（差异 → 显示行 + 装饰 + 行号）。
   void rebuild();
   void rebuild_side_by_side();
@@ -193,6 +238,20 @@ class DiffView : public Element {
   Side old_side_{};
   Side new_side_{};
   std::size_t current_hunk_{kNoHunk};
+
+  /// 逐行暂存模式开关（见 `set_staging_mode` 的说明）。
+  bool staging_mode_{false};
+  /// 「第 i 个显示行属于 (hunk, line)」（`kNoHunk` = 该行不可选）。
+  ///
+  /// 与 `Side::checks` 在同一次遍历里同步建立（见 `rebuild`），所以下标空间一致——
+  /// 这两张表一旦分家，勾选框就会与它作用的行错位（而画面上完全看不出）。
+  std::vector<std::pair<std::size_t, std::size_t>> checkbox_targets_{};
+  /// 已选中的 `(hunk, line)` 对，**保持插入顺序**（补丁里的行序靠它稳定）。
+  ///
+  /// 为何用有序 vector 而不是 `set`：`build_partial_patch` 按给定顺序拼补丁，
+  /// 而无序容器的遍历序在不同实现/不同容量下会变——那会让同一份选择生成两份
+  /// 文本不同的补丁（"看着一样、实际不一样"，最难查的那类）。
+  std::vector<std::pair<std::size_t, std::size_t>> selected_{};
 
   CodeEditor* left_{nullptr};
   CodeEditor* right_{nullptr};

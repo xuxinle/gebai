@@ -72,6 +72,9 @@ std::string& editor_clipboard() {
 }
 
 inline constexpr float kGutterPadding{12.0f};
+/// 勾选列宽（逐行暂存）。独立成常量是因为 `gutter_width` 与点击命中
+/// **两处都要用它**——各写一个数早晚会分叉（那表现为"点框没反应"）。
+inline constexpr float kCheckboxColumnWidth{18.0f};
 /// 行尾注解与正文之间的间隔（见 `LineDecoration::end_text`）。
 inline constexpr float kEndAnnotationGap{16.0f};
 /// 行尾注解与视口右缘的保留（它不该贴死在边上）。
@@ -169,6 +172,17 @@ auto CodeEditor::available_languages() -> std::vector<std::string> {
 }
 
 void CodeEditor::set_line_decorations(std::vector<LineDecoration> marks) {
+  // 勾选列是否启用：决定 gutter 宽度（见 `gutter_width`）与点击命中。
+  // 在这里算一次而不是每帧扫装饰表：装饰表在滚动/打字时不变。
+  const bool had_checkbox = any_checkbox_;
+  any_checkbox_ = false;
+  for (const auto& mark : marks) {
+    if (mark.check != LineDecoration::Check::None) {
+      any_checkbox_ = true;
+      break;
+    }
+  }
+  if (had_checkbox != any_checkbox_) geometry_dirty_ = true;   // gutter 宽度变了要重算几何
   line_marks_ = std::move(marks);
   rebuild_line_mark_index();
   mark_dirty();
@@ -981,7 +995,12 @@ auto CodeEditor::gutter_width(const RenderContext& context) const -> float {
   if (!show_line_numbers_) return 0.0f;
   const TextPort& port = text_port_of(context);
   const std::size_t digits = std::to_string(std::max<std::size_t>(line_count(), 1)).size();
-  return port.measure_width(std::string(digits, '0'), font_size(), text::FontRole::Monospace) + kGutterPadding * 2.0f;
+  float width = port.measure_width(std::string(digits, '0'), font_size(),
+                                   text::FontRole::Monospace) + kGutterPadding * 2.0f;
+  // 勾选列（逐行暂存）：**加宽 gutter** 而不是把框叠在行号上——
+  // 叠上去会让行号在勾选时变得不可读（而"看着几号行"与"选哪一行"要同时可用）。
+  if (any_checkbox_) width += kCheckboxColumnWidth;
+  return width;
 }
 
 auto CodeEditor::rebuild_line_geometry(const RenderContext& context) const -> void {
@@ -1156,6 +1175,15 @@ auto CodeEditor::hover_line_at(const RenderContext& context, math::Point point) 
   const auto total = static_cast<std::ptrdiff_t>(line_count());
   if (line >= total) return -1;
   return static_cast<int>(line);
+}
+
+auto CodeEditor::checkbox_line_at(const RenderContext& context, math::Point point) const -> int {
+  if (!any_checkbox_ || gutter_cache_ <= 0.0f) return -1;
+  // 勾选列占 gutter 的**最左** `kCheckboxColumnWidth`（见绘制处）。
+  if (point.x < bounds_.x || point.x > bounds_.x + kCheckboxColumnWidth) return -1;
+  // 纵向复用 `hover_line_at`：**行高的权威来源只有一处**，
+  // 自己再算一遍必然与绘制分叉（"点框没反应"最常见的成因）。
+  return hover_line_at(context, point);
 }
 
 /// 水平滚动条矩形（内容溢出时贴在文本区底部；否则为空）。
@@ -1567,14 +1595,62 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
           canvas.fill_rect(math::Rect{bounds_.x, row_top, gutter_cache_, height},
                            raster::Paint::solid(ink.with_alpha_f(0.16F)), 0.0f);
           if (decoration->gutter_bar) {
-            // 槽内竖条：贴 gutter 左缘的 3px 实心条（IDEA/VSCode 同款位置）——
-            // 这是“这一侧有改动”的唯一醒目标志，也是并列视图两栏各自的“颜色钉”。
-            canvas.fill_rect(math::Rect{bounds_.x + 1.0f, row_top, 3.0f, height},
+            // 槽内竖条：贴 gutter 右缘的 3px 实心条（IDEA/VSCode 同款位置；左侧让给勾选框）。
+            canvas.fill_rect(math::Rect{bounds_.x + gutter_cache_ - 3.0f, row_top, 3.0f, height},
                              raster::Paint::solid(ink), 0.0f);
           }
         }
       }
     }
+      // 勾选框：**与时序（`LineMark`）无关地画**。
+      //
+      // 它原本嵌在 `if (use_ink)` 里，于是 `LineMark::None` 的行（正是「没改动的行」）
+      // 永远不画框——而用户要选的恰好是改动行，看起来就像「勾选框根本不会画」
+      //（实测踩到：像素断言显示开/关模式画面完全一样，探针也一条都没打）。
+          // 勾选框：画在 gutter **最左**（竖条已让到右缘，两者不叠）。
+          if (decoration->check != LineDecoration::Check::None) {
+            const float box = std::max(9.0f, std::min(13.0f, height * 0.62f));
+            const math::Rect box_rect{bounds_.x + kGutterPadding * 0.5f,
+                                      row_top + (height - box) * 0.5f, box, box};
+            const bool checked = decoration->check == LineDecoration::Check::Checked;
+            const bool disabled = decoration->check == LineDecoration::Check::Disabled;
+            const math::Color edge = disabled ? colors.text_muted.with_alpha_f(0.5F)
+                                              : (checked ? colors.primary : colors.text_muted);
+            canvas.fill_rect(box_rect,
+                             raster::Paint::solid(checked && !disabled
+                                                      ? colors.primary.with_alpha_f(0.9F)
+                                                      : colors.surface),
+                             2.0f);
+            // 边框用四道 1px 实心条画（框架的描边只有 `stroke_path`，为一个方框
+            // 引 Path 不划算；而 1px 的四条与真描边在视觉上不可分辨）。
+            const raster::Paint edge_paint = raster::Paint::solid(edge);
+            canvas.fill_rect(math::Rect{box_rect.x, box_rect.y, box_rect.width, 1.0f}, edge_paint,
+                             0.0f);
+            canvas.fill_rect(math::Rect{box_rect.x, box_rect.bottom() - 1.0f, box_rect.width, 1.0f},
+                             edge_paint, 0.0f);
+            canvas.fill_rect(math::Rect{box_rect.x, box_rect.y, 1.0f, box_rect.height}, edge_paint,
+                             0.0f);
+            canvas.fill_rect(math::Rect{box_rect.right() - 1.0f, box_rect.y, 1.0f, box_rect.height},
+                             edge_paint, 0.0f);
+            if (checked && !disabled) {
+              // 勾：用一串小方块沿两段斜线铺（不依赖图标资源——无图标后端也要能看）。
+              const raster::Paint tick = raster::Paint::solid(colors.on_primary);
+              const math::Point start{box_rect.x + box * 0.24f, box_rect.y + box * 0.50f};
+              const math::Point corner{box_rect.x + box * 0.44f, box_rect.y + box * 0.72f};
+              const math::Point finish{box_rect.x + box * 0.78f, box_rect.y + box * 0.26f};
+              const auto draw_tick = [&canvas, tick](math::Point from, math::Point to) {
+                const int steps = 8;
+                for (int step = 0; step <= steps; ++step) {
+                  const float t = static_cast<float>(step) / static_cast<float>(steps);
+                  const float x = from.x + (to.x - from.x) * t;
+                  const float y = from.y + (to.y - from.y) * t;
+                  canvas.fill_rect(math::Rect{x - 0.9f, y - 0.9f, 1.8f, 1.8f}, tick, 0.0f);
+                }
+              };
+              draw_tick(start, corner);
+              draw_tick(corner, finish);
+            }
+          }
 
     // 当前行底色 + 行号槽内的当前行指示（行号槽高亮 = VSCode 的“我在哪一行”锚点）
     if (line == current) {
@@ -1946,6 +2022,16 @@ auto CodeEditor::on_event(const RenderContext& context, Event& event) -> bool {
       if (event.button == 2) {
         if (on_context_menu) on_context_menu(event.position);
         return true;
+      }
+      // 勾选框优先于一切：它是**按钮式**语义（点一下切换，光标不动）。
+      // 排在滚动条之前是因为它在 gutter 里、与滚动条不重叠；排在这里只是为了让
+      // "点框"这件事在代码里一眼可见（否则它会被夹在滚动条与光标两段之间）。
+      if (event.button == 1 && on_checkbox_toggle) {
+        if (const int box_line = checkbox_line_at(context, event.position); box_line >= 0) {
+          on_checkbox_toggle(static_cast<std::size_t>(box_line));
+          event.handled = true;
+          return true;   // 吞掉：不让它同时移光标
+        }
       }
       // 滚动条优先：两条滚动条都**不能落到“移光标”分支**上——
       // 拖滚动条是“看另一个地方”，把光标一起挪走是错的（实测：拖垂直条后光标从第 1 行跳到第 30 行）。
