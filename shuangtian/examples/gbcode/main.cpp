@@ -3143,28 +3143,34 @@ b.set_label(std::format("{} {}", change.display_code(), change.display_path()));
   void build_bottom(Composer& c) {
     // —— 底部单槽切换：终端 ↔ Git（同一停靠位，互斥显示）——
     //
-    // 不是标签页也不是并排：一个槽，两个活动栏按钮各自控制——
-    // 点终端 = 切到终端（Git 按钮熄灭）、点 Git = 切到 Git（终端按钮熄灭）；
-    // 再点当前那个 = 收起整个下半。两个子树**都常驻声明**（不显示的用
-    // 隐藏声明保实例）——`Terminal` 的会话与 `terminal_ptr` 不能因为切走被销毁
-    //（实测 SIGSEGV：栈在 AnsiScreen::feed，悬垂指针）。
-    if (bottom_tab_.value() == 0) {
-      build_terminal_body(c);
-    } else {
-      build_terminal_body_hidden(c);   // 终端实例保活（只藏不拆）
-      build_git_view(c);
-    }
-  }
-
-  /// 终端的**隐藏声明**（面板关着时保持实例存活——只藏不拆）。
-  void build_terminal_body_hidden(Composer& c) {
+    // 结构约定：**两个面板都直接声明在同一层**，非当前的那个用 `Panel::set_visible(false)`
+    // 隐藏。两个要点：
+    //
+    // ① 不能“当前声明一个、隐藏时用另一层容器包起来”——那会让**结构随状态变**，
+    //    框架按位置/结构对账时会把子树销毁重建（`Terminal` 一重建，会话与
+    //    `terminal_ptr` 就全丢，实测栈在 `AnsiScreen::feed` 的悬垂指针）。
+    // ② 两个面板都要包一层**带 key 的容器**：同级分支声明子元素会按位置回收，
+    //    切槽时新分支里没显式设的属性会沿用旧分支的值（上一轮在 Git 五视图上
+    //    实测过：按钮带着别的面板的 icon/宽度）。
     (void)custom_container<Panel>(
-        c, [&] { build_terminal_body(c); },
-        [](Panel& panel) { panel.set_visible(false); },
-        {.height = 0.0f, .key = "terminal-hidden"});
+        c,
+        [&] { build_terminal_body(c); },
+        [this](Panel& panel) {
+          panel.set_id("terminal-panel");
+          panel.set_visible(bottom_tab_.value() == 0);
+        },
+        {.grow = true, .key = "pane:terminal"});
+    (void)custom_container<Panel>(
+        c,
+        [&] { build_git_view(c); },
+        [this](Panel& panel) {
+          panel.set_id("git-panel");
+          panel.set_visible(bottom_tab_.value() != 0);
+        },
+        {.grow = true, .key = "pane:git"});
   }
 
-  /// 终端本体（`build_bottom` 的终端标签内容）。
+  /// 终端本体（`build_bottom` 的终端面板内容）。
   void build_terminal_body(Composer& c) {
     (void)custom<Terminal>(c, [this](Terminal& view) {
       view.set_id("terminal");

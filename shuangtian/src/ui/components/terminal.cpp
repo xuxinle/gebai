@@ -1112,13 +1112,45 @@ void Terminal::arrange(const RenderContext& context, math::Rect rect) {
   const float cell_h = measured_line_height_ > 0.0f ? measured_line_height_
                                                     : line_height_ * font_scale_;
   if (cell_w > 0.0f && cell_h > 0.0f) {
-    const int cols = std::max(20, static_cast<int>(usable_w / cell_w));
-    const int rows = std::max(4, static_cast<int>(usable_h / cell_h));
-    if (cols != pty_size_.cols || rows != pty_size_.rows) {
-      // 布局里不直接改 PTY（`arrange` 可能在测量阶段被调多次）；
-      // 记下来，下一帧 `pump` 上报——尺寸抖动也顺带被吸收。
-      pending_size_ = st::process::PtySize{cols, rows};
-      pending_size_set_ = true;
+    // ⚠ **被隐藏/被压成零高度时不要把尺寸报给 PTY**。
+    //
+    // 旧行为：照算、被下限夹到 `rows = max(4, …)`，于是 PTY 真的被 resize 成 4 行
+    //——屏幕缓冲随之上移/被截，用户看到的是“把终端收起来再打开，里面的内容被清理了”
+    //（实测：收起→展开后 `output` 从 9 行变 12 行，而 shell 本身还在）。
+    //
+    // 判据用“算出来的行列是否退化到不可用”而不是 `visible()`：宿主可能只是把面板
+    // 压得很矮（分栏比例、动画中间帧），那同样不该报一个假尺寸给程序。
+    // 尺寸真正变回来时本函数会再次走到这里，自然同步。
+    constexpr int kMinUsableRows = 2;
+    constexpr int kMinUsableCols = 8;
+    const int rows_raw = static_cast<int>(usable_h / cell_h);
+    const int cols_raw = static_cast<int>(usable_w / cell_w);
+    if (rows_raw >= kMinUsableRows && cols_raw >= kMinUsableCols) {
+      const int cols = std::max(kMinUsableCols, cols_raw);
+      const int rows = std::max(kMinUsableRows, rows_raw);
+      if (cols != pty_size_.cols || rows != pty_size_.rows) {
+        // **防抖**：同一个新尺寸要连续几帧都算出来才上报。
+        // “收起再展开”那一瞬间会出现过渡尺寸（先按旧的/零高度量一次），
+        // 只比一次就上报会让 PTY 真被 resize、屏幕被截（实测 14 行 → 11 行）。
+        // 连续稳定 = 布局真定了；期间的抖动被这里吸收。
+        constexpr int kStableFrames = 3;
+        if (pending_candidate_.cols == cols && pending_candidate_.rows == rows) {
+          ++pending_stable_frames_;
+        } else {
+          pending_candidate_ = st::process::PtySize{cols, rows};
+          pending_stable_frames_ = 1;
+        }
+        if (pending_stable_frames_ >= kStableFrames) {
+          // 布局里不直接改 PTY（`arrange` 可能在测量阶段被调多次）；
+          // 记下来，下一帧 `paint_content` 上报。
+          pending_size_ = pending_candidate_;
+          pending_size_set_ = true;
+          pending_stable_frames_ = 0;
+        }
+      } else {
+        // 又回到当前尺寸了：清掉候选（下一次变化重新计数）。
+        pending_stable_frames_ = 0;
+      }
     }
   }
   layout_dirty_ = false;

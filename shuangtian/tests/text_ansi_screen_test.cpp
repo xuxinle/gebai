@@ -142,6 +142,21 @@ ST_TEST(ansi_screen_scrolling_pushes_lines_to_scrollback) {
   ST_CHECK_EQ(screen.scrollback_line(0), std::string("one"));
 }
 
+ST_TEST(ansi_screen_resize_keeps_top_left_content) {
+  // `resize` 的重排约定：**保留左上角**（变矮丢掉下方的行、变窄截掉右侧），
+  // 且不把内容搬进回看——回看只装“真正滚动出去”的行（`scroll_up` 的产物）。
+  //
+  // 为何要钉住这一点：终端面板收起/展开会触发 resize。若把“被截掉的行”
+  // 当成历史推进回看，用户就会看到“内容少了”（而它们只是被面板遮住了）；
+  // 正确的做法是**收起时根本不去动 PTY/Screen 尺寸**（见 `Terminal::arrange` 的注释）。
+  AnsiScreen screen(10, 4);
+  screen.feed("l1\r\nl2\r\nl3\r\nl4");
+  screen.resize(10, 2);
+  ST_CHECK_EQ(row(screen, 0), std::string("l1"));
+  ST_CHECK_EQ(row(screen, 1), std::string("l2"));
+  ST_CHECK_EQ(screen.scrollback_count(), std::size_t{0});   // 不是历史，不进回看
+}
+
 ST_TEST(ansi_screen_scroll_region_restricts_scrolling) {
   // `DECSTBM` 设滚动区域：区域外的行**不动**（`vim`/`less` 用它在顶部留状态栏）。
   AnsiScreen screen(10, 4);
