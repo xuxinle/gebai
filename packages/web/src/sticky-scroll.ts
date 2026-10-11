@@ -23,6 +23,8 @@ export interface StickyScrollHandle {
   shouldShowJump(): boolean
   /** 内容变化后调用：跟随中（按钮隐藏）滚动到底，否则不动。 */
   scrollIfSticky(): void
+  /** 程序回正的落点（距底 = 用户留下的位移）；不在追最新时为 null。 */
+  pinTarget(): number | null
   /** 发送新消息 / 会话加载完成时调用：滚动到底并锁定（此前用户滚走阅读历史后，操作即恢复跟随）。 */
   lockToBottom(): void
   /** 程序恢复历史滚动位置（会话切回的阅读位置记忆）：落位后按几何同步跟随状态。 */
@@ -71,6 +73,7 @@ export function createStickyScroll(el: HTMLElement, btn: HTMLElement): StickyScr
   return {
     isAtBottom: core.isAtBottom,
     isFollowing: core.isFollowing,
+    pinTarget: core.pinTarget,
     state: core.state,
     shouldShowJump: core.shouldShowJump,
     scrollIfSticky: core.contentChanged,

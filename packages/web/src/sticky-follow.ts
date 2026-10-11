@@ -53,6 +53,10 @@ export interface StickyFollowHandle {
   isAtBottom(): boolean
   /** 追最新（窗口化据此判定 DOM 变更后是否保持贴底）。 */
   isFollowing(): boolean
+  /** 程序回正的落点（距底 = 用户在跟随态内留下的位移）：窗口化直接用它写 scrollTop，
+   *  不得各自写绝对底部——那会把用户的小步微调抹掉（滚不出去的回归）。
+   *  不在追最新时返回 null（调用方不得回正）。 */
+  pinTarget(): number | null
   /** 三态（follow / hold / reading）。 */
   state(): FollowState
   /** 是否显示「回到最新」按钮：不在追最新，或用户已把视口拉开（上翻位移）但尚未确认。 */
@@ -76,6 +80,8 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
   let lastInternalAt = 0
   /** 最近一次「用户上翻」输入的时刻（滚轮上滑 / 触摸上滑）：宽限期内不把视口拽回底部。 */
   let upIntentAt = -Infinity
+  /** 跟随态内用户留下的距底位移（px）：内容增长按它保留偏移，不写死到底部。 */
+  let followOffset = 0
   /** 滚动条拖动进行中：期间位移不参与「向下滚到底恢复」（也不回正）。 */
   let gestureHold = false
 
@@ -92,16 +98,27 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
     opts.onStateChange?.(next)
   }
 
-  /** 程序落底：记录时间戳（其后的迟到滚动事件在静默窗口内归因为内部动作）+ 重设基准。 */
+  /** 跟随时同步用户的距底位移（进入跟随态的位置就是他要待的地方）：内容增长按它保留偏移。 */
+  function syncFollowOffset() {
+    followOffset = Math.max(0, el.scrollHeight - el.clientHeight - el.scrollTop)
+  }
+
+  /** 程序落底：记录时间戳（其后的迟到滚动事件在静默窗口内归因为内部动作）+ 重设基准。
+   *  落点 = 底部**减去用户在跟随态内留下的距底位移**（`followOffset`）：用户的微调上翻是意图，
+   *  内容增长（图表/图片异步长高）不得把它抹掉——否则每次长高都把视口弹回绝对底部，
+   *  小步上翻永远累计不到容忍区之外（体感：来回卡几下才滚得出去）。
+   *  未上翻时 `followOffset` 为 0，落点即绝对底部（与内容增长一起走）。 */
   function pin() {
-    el.scrollTop = el.scrollHeight
+    const max = el.scrollHeight - el.clientHeight
+    el.scrollTop = Math.max(0, max - followOffset)
     lastInternalAt = now()
     intent.rebase(el.scrollTop)
   }
 
   /** 是否允许程序回正（把视口拉到底）：追最新中、且用户没有刚把视口拉开。
-   *  - 已在底部：一律允许（回正无害）；
-   *  - 刚发生向上位移（用户刚上翻）：不抢位置（尊重用户动作，尊重短暂）；
+   *  - 已在底部：一律允许（回正无害）——容忍区内上翻也在此列，此时靠 `followOffset` 保住
+   *    用户的距底位移（硬拉到底会把每一次微调都抹掉，小步上翻永远滚不出去）；
+   *  - 刚发生上翻输入：不抢位置（内容增长的 rAF 可能先于用户的 scroll 事件）；
    *  - 其余：允许回正。
    *  注意：内容增长会让位置相对底部变远，故不能只看「是否还在阈值内」——用户的
    *  向上位移才是「已把视口拉开」的凭据；且该抑制必须随手势窗结束而失效，否则
@@ -143,7 +160,8 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
     // 几何不可用（NaN：未布局元素/测试替身）无从对齐，停转防死循环
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight
     if (!Number.isFinite(distance)) return
-    if (distance > threshold) {
+    // 距底超过容忍区且超出用户自己留下的位移 → 异步高度修正把它推远了，按偏移续滚回位
+    if (distance > threshold && distance > followOffset + 1) {
       pin()
       keepFrames = 0
     }
@@ -157,6 +175,7 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
   function follow() {
     gestureHold = false
     upIntentAt = -Infinity // 明确要求到最新：清掉上翻宽限，后续内容增长照常回正
+    followOffset = 0 // 明确要到最新：清掉距底位移
     setState("follow")
     intent.follow()
     pin()
@@ -166,7 +185,9 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
   function restore(top: number) {
     el.scrollTop = top
     lastInternalAt = now() // 恢复赋值的迟到事件归因为内部动作
-    setState(intent.sync(el.scrollTop, el.scrollHeight, el.clientHeight))
+    const next = intent.sync(el.scrollTop, el.scrollHeight, el.clientHeight)
+    if (next === "follow") syncFollowOffset()
+    setState(next)
   }
 
   /* ---------- 输入预判（只用于短期抑制程序回正，状态由位移判定） ---------- */
@@ -211,7 +232,9 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
   /** 拖动 / 自动滚动结束：此时不再有 scroll 事件，显式按几何归位（拖到底 = 明确要到最新）。 */
   function settleGesture() {
     gestureHold = false
-    setState(intent.sync(el.scrollTop, el.scrollHeight, el.clientHeight))
+    const next = intent.sync(el.scrollTop, el.scrollHeight, el.clientHeight)
+    if (next === "follow") syncFollowOffset()
+    setState(next)
   }
 
   el.addEventListener("pointerdown", (e) => {
@@ -251,7 +274,8 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
     "scroll",
     () => {
       opts.onScroll?.()
-      // quiet：程序落底/内容变化的迟到事件
+      // quiet：程序落底/内容变化的迟到事件（用户在场时由 wheel/touch 监听清掉时间戳，
+      // 故用户自己的滚动始终参与判定，不会被归因为内部动作而反复拽回）
       const quiet = now() - lastInternalAt <= INTERNAL_QUIET_MS
       if (quiet) {
         // 追最新期间的过期位置（内容已增长、事件与引发它的变化同帧/下一帧送达）→ 回正到底：
@@ -267,6 +291,9 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
       const next = intent.observe(el.scrollTop, el.scrollHeight, el.clientHeight, { quiet: false, allowResume: !gestureHold })
       // 用户已往最新方向滚（向下位移）：上翻宽限失效，后续内容增长照常回正
       if (intent.movingDown()) upIntentAt = -Infinity
+      // 跟随态内的位置就是用户的意图：记下他的距底位移，内容增长按它保留偏移
+      // （向下滚到真正到底时 offset 自然归 0）
+      if (next === "follow") syncFollowOffset()
       setState(next)
     },
     { passive: true },
@@ -283,6 +310,7 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
   return {
     isAtBottom,
     isFollowing: () => intent.state() === "follow",
+    pinTarget: () => (canPin() ? el.scrollHeight - el.clientHeight - followOffset : null),
     state: () => intent.state(),
     shouldShowJump: () =>
       intent.state() !== "follow" ||

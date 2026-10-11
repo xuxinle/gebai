@@ -21,9 +21,10 @@ export function setBlockRenderer(fn: (index: number, host: HTMLElement) => void)
   blockRenderer = fn
 }
 
-/** 装配粘底跟随（jump-bottom）：`isFollowing` 决定 DOM 变更后是否保持贴底，`contentChanged` 在其后接手对齐。 */
-export function bindWindowFollow(isFollowing: () => boolean, contentChanged: () => void): void {
-  msgWindow.setFollowSource(isFollowing)
+/** 装配粘底跟随（jump-bottom）：`pinTarget` 给出程序回正落点（含用户留下的距底位移），
+ *  `contentChanged` 在其后接手对齐。两者均由跟随核心提供。 */
+export function bindWindowFollow(pinTarget: () => number | null, contentChanged: () => void): void {
+  msgWindow.setFollowSource(pinTarget)
   msgWindow.setContentChangedHook(contentChanged)
 }
 

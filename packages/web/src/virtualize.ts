@@ -52,8 +52,10 @@ export interface Virtualizer {
   posOfKey(key: string): number | null
   /** 块 key → 当前采用高度。 */
   heightOfKey(key: string): number | null
-  /** 注入「是否处于粘底跟随」判定（意图驱动；省略时用几何贴底判定）。 */
-  setFollowSource(fn: (() => boolean) | null): void
+  /** 注入「程序回正落点」判定（意图驱动；返回 null = 不回正）。省略时用几何贴底判定：
+   *  落点为绝对底部。落点由跟随核心给（含用户在容忍区内的距底位移）——
+   *  窗口化不得自己写绝对底部，否则用户的小步微调会被每次内容增长抹掉（滚不出去）。 */
+  setFollowSource(fn: (() => number | null) | null): void
   /** 注入「内容已变更」通知（贴底赋值后交跟随核心接手后续对齐）。 */
   setContentChangedHook(fn: (() => void) | null): void
   /** 容器内容原点（padding-top）：块坐标 → 屏幕坐标的换算偏移（导航高亮用）。 */
@@ -75,7 +77,7 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
   let rafId = 0
   let syncing = false
   let resetting = false
-  let followSource: (() => boolean) | null = null
+  let followSource: (() => number | null) | null = null
   let contentChangedHook: (() => void) | null = null
 
   const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame.bind(globalThis) : (cb: () => void) => { cb(); return 0 }
@@ -221,7 +223,7 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
     applyPad(padTop, pad.top)
     applyPad(padBottom, pad.bottom)
     if (keepBottom) {
-      const target = container.scrollHeight
+      const target = pinTarget()
       if (Math.abs(target - container.scrollTop) > 0.5) {
         container.scrollTop = target
         contentChangedHook?.()
@@ -232,11 +234,25 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
     noteAnchor()
   }
 
-  /** 是否应保持贴底：跟随意图优先（粘底跟随核心注入），未注入时退回几何判定（测试环境）。 */
+  /** 程序回正落点：跟随意图优先（落点含用户在容忍区内的距底位移）；未注入时退回绝对底部
+   *  （测试环境）。容器自身滚动几何决定上限，故始终住在可滚范围内。 */
+  function pinTarget(): number {
+    if (followSource) {
+      try {
+        const t = followSource()
+        if (t !== null && Number.isFinite(t)) return t
+      } catch {
+        /* 注入方异常：退回几何判定 */
+      }
+    }
+    return container.scrollHeight
+  }
+
+  /** 是否应保持贴底（程序回正落点可用性）。 */
   function wantKeepBottom(): boolean {
     if (followSource) {
       try {
-        return followSource()
+        return followSource() !== null
       } catch {
         /* 注入方异常：退回几何判定 */
       }
@@ -326,7 +342,7 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
       // 布局确有变更才补偿并重建基线（纯滚动帧不走这里）
       if (!mutated) return
       if (keepBottom) {
-        const target = container.scrollHeight
+        const target = pinTarget()
         if (Math.abs(target - container.scrollTop) > 0.5) {
           container.scrollTop = target
           contentChangedHook?.() // 交跟随核心接手后续对齐（尾部继续增长时咬住底部）

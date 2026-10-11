@@ -726,10 +726,10 @@ describe("subSessionBox / finishSubSession / sealSessionSegment（子会话运�
       },
     }
     bindSessionScroll(body as unknown as HTMLElement)
-    // 初始跟随：内容增长 → 滚到底部
+    // 初始跟随：内容增长 → 滚到底部（真实底部 = scrollHeight − clientHeight）
     body.scrollHeight = 200
     scrollSessionSticky(body as unknown as HTMLElement)
-    expect(body.scrollTop).toBe(200)
+    expect(body.scrollTop).toBe(150)
     // 用户上翻（滚轮输入先于滚动效果）：停止跟随
     body.emit("wheel", { deltaY: -1 })
     body.scrollTop = 40
@@ -737,12 +737,13 @@ describe("subSessionBox / finishSubSession / sealSessionSegment（子会话运�
     body.scrollHeight = 300
     scrollSessionSticky(body as unknown as HTMLElement)
     expect(body.scrollTop).toBe(40) // 不再跟随
-    // 用户滚回底部：恢复跟随
+    // 用户滚回底部：恢复跟随（滚轮输入表明是用户动作，否则会被归因为程序滚动）
+    body.emit("wheel", { deltaY: 1 })
     body.scrollTop = 250
     body.scrollHeight = 300
     body.emit("scroll")
     scrollSessionSticky(body as unknown as HTMLElement)
-    expect(body.scrollTop).toBe(300)
+    expect(body.scrollTop).toBe(250) // 距底 0：不再被拉到底部之外
   })
 
   test("scrollSessionSticky delayed program scroll event after content growth keeps following (工具卡片追加场景)", () => {

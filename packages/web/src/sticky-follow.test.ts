@@ -141,7 +141,7 @@ describe("sticky-follow 粘底跟随（意图识别）", () => {
     expect(el.scrollTop).toBe(1800)
   })
 
-  test("微调（容忍区内上翻）后内容增长：手势窗内不抢位置，窗后恢复自动贴底", () => {
+  test("微调（容忍区内上翻）后内容增长：手势窗内不抢位置，窗后仍保留用户的距底位移", () => {
     const { el, h, advance, scrollTo } = setup()
     h.follow()
     advance(500)
@@ -150,10 +150,44 @@ describe("sticky-follow 粘底跟随（意图识别）", () => {
     el.scrollHeight = 1400 // 内容增长（+400）：手势窗内 → 不抢位置（尊重刚发生的动作）
     h.contentChanged()
     expect(el.scrollTop).toBe(760)
-    advance(400) // 手势窗（180ms）过去
+    advance(400) // 手势窗过去：内容变化照常钉底，但钉的是「底部 − 用户的距底位移」
     el.scrollHeight = 1800
     h.contentChanged()
-    expect(el.scrollTop).toBe(1600) // 恢复自动贴底（状态一直是追最新，不该名不副实）
+    expect(el.scrollTop).toBe(1560)
+  })
+
+  test("容忍区内上翻后内容增长：保留用户的距底位移，不被弹回底部（滚不出去的回归）", () => {
+    const { el, h, advance, scrollTo } = setup()
+    h.follow()
+    advance(500)
+    scrollTo(760) // 上翻 40px（距底 40 ≤ 阈值 64：仍在容忍区内，不解除跟随）
+    expect(h.isFollowing()).toBe(true)
+    advance(400) // 手势窗过去：此后内容变化照常钉底
+    el.scrollHeight = 1400 // 图表/图片异步长高
+    h.contentChanged()
+    expect(el.scrollTop).toBe(1160) // 保留用户的 40px（钉底钉距离，不写死到底）
+    el.scrollHeight = 1800
+    h.contentChanged()
+    expect(el.scrollTop).toBe(1560)
+    el.emit("wheel", { deltaY: 1 }) // 用户向下滚回（清掉静默窗口，与真实输入一致）
+    scrollTo(1600) // 滚回真正到底（高度 1800 − 视口 200，距底 0）
+    el.scrollHeight = 2000
+    h.contentChanged()
+    expect(el.scrollTop).toBe(1800) // 到底后恢复绝对钉底（offset 归 0）
+  })
+
+  test("窗口化回正落点的判据（pinTarget）：跟随态给落点（含距底位移），非跟随态为 null", () => {
+    const { h, advance, scrollTo, fireTimers } = setup()
+    h.follow()
+    expect(h.pinTarget()).toBe(800) // 已在底部：落点即绝对底部
+    advance(500)
+    scrollTo(760) // 容忍区内上翻 40px（不解除跟随）
+    expect(h.pinTarget()).toBe(760) // 落点保留用户的 40px（窗口化写它就不抹掉微调）
+    scrollTo(500) // 明确上翻 → 阅读态
+    fireTimers()
+    expect(h.pinTarget()).toBeNull() // 不在追最新：窗口化不得回正
+    scrollTo(800) // 滚回底部恢复跟随
+    expect(h.pinTarget()).toBe(800)
   })
 
   test("明确上翻解除跟随（位移判定）；滚回底部恢复跟随", () => {
