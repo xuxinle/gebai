@@ -69,6 +69,7 @@
 #include "lsp_bridge.hpp"   // 语言服务集成（LSP 阶段 3）
 #include "st/ui/components/command_palette.hpp"
 #include "st/ui/components/diff_view.hpp"
+#include "st/ui/components/merge_view.hpp"
 #include "st/ui/components/feedback.hpp"
 #include "st/ui/components/file_dialog.hpp"
 #include "st/ui/components/terminal.hpp"
@@ -650,6 +651,33 @@ struct CodeEditorPage : Component {
   std::string diff_pending_path_{};
   /// 差异视图实例（当前帧有效）——`hunk` 导航靠它。
   DiffView* diff_view_ptr{nullptr};
+
+  // —— 三方合并视图（冲突处置）——
+  ///
+  /// 它是与差异视图**并列的第三种“编辑区内容”**（见下面 `build` 里的互斥顺序），
+  /// 而不是一个浮层：合并要对照着看三栏、还可能来回滚很久，浮层会让人没法一边看
+  /// 冲突一边看别的。
+  State<std::string> merge_key_{};    ///< 空 = 不是合并标签
+  State<std::string> merge_path_{};   ///< 被处理的冲突文件（相对仓库根）
+  /// 划分结果（普通成员而不是 `State<>`：声明式 diff 要求 `operator==`，
+  /// 而 `MergePlan` 没有；它也不参与界面 diff——视图从三份文本自己算）。
+  st::text::MergePlan merge_plan_{};
+  State<std::string> merge_base_text_{};
+  State<std::string> merge_ours_text_{};
+  State<std::string> merge_theirs_text_{};
+  /// 需求打开合并视图（帧首泵取三仝内容——渲染期起子进程会崩，与差异同理）。
+  bool merge_wanted_{false};
+  std::string merge_pending_path_{};
+  /// 合并视图实例（当前帧有效）——F7 冲突导航靠它。
+  MergeView* merge_view_ptr{nullptr};
+  /// 三仝内容是否已装载（避免每帧重算划分）。
+  bool merge_loaded_{false};
+  /// 「选择变了、等帧首落盘」的标记。
+  ///
+  /// 为何不在选择回调里直接写：那会在事件派发**过程中**同步写文件（可能失败/变慢），
+  /// 而此刻 UI 正处在“半完成的事件处理”里。改为置标记、帧首泵统一落盘——
+  /// 那里也是唯一改文件的位置（与 `ensure_*` 同一节奏）。
+  bool merge_write_pending_{false};
   /// 状态栏问题计数“轮跳”到第几处（反复点同一个计数就依次往下跳）。
   std::size_t problem_cycle_{0};
   /// 已注册的语言清单（扩展视图用；懒加载一次）。
@@ -805,6 +833,11 @@ struct CodeEditorPage : Component {
   auto close_active() -> void {
     // 差异标签（不是 `OpenBuffer`，它住在 `diff_key_` 里）先关：
     // 不先判会让 Ctrl+W 在差异视图下静默什么都关不掉（用户看到的是“快捷键失效”）。
+    if (!merge_key_.value().empty()) {
+      // 合并标签先关（见差异标签的说明：关标签要按**栈序**，后开的先关）。
+      merge_key_.set({});
+      merge_view_ptr = nullptr;
+    }
     if (!diff_key_.value().empty()) {
       diff_key_.set({});
       diff_title_.set({});
@@ -1109,6 +1142,9 @@ struct CodeEditorPage : Component {
     flush_pending_open();
     ensure_compare();
     ensure_diff();
+    // 三方合并：同上（`git show :1:/:2:/:3:` 是子进程）。
+    ensure_merge();
+    flush_merge_write();
     // 行尾 blame：帧首泵（起子进程不能在渲染期）。
     ensure_blame();
     // 单文件历史：同上（`git log --follow` 也是子进程）。
@@ -2804,6 +2840,13 @@ b.set_label(std::format("{} {}", change.display_code(), change.display_path()));
   /// 为何是并列而不是一段 patch 文本：diff 要**对照看**（“原来是什么 / 现在是什么”），
   /// 而并列视图靠双行号把两栏逐行对齐；patch 文本做不到（它是一维流）。
   void open_git_diff(const gbcode::GitChange& change) {
+    // ⚠ **冲突文件走合并视图**（而不是差异视图）：冲突的真实需求是“决定这一段要谁”，
+    // 而不是“看哪里变了”。两个视图的入口同一个文件，靠**状态**分流——
+    // 用户不需要记住“冲突要用另一个菜单项”。
+    if (change.is_conflicted()) {
+      open_merge(change.path);
+      return;
+    }
     gbcode::CompareOptions options;
     // 只暂存过（未再改工作区）→ 与 HEAD 比已暂存内容；否则看工作区。
     const bool staged_only = change.has_staged_side() && !change.has_unstaged_side();
@@ -3042,9 +3085,35 @@ b.set_label(std::format("{} {}", change.display_code(), change.display_path()));
       // —— 差异视图 / 比较视图 / 普通编辑器 ——（三者互斥地共享编辑区：
       // 它们都是“现在要看的内容”，而分屏会让每一块都变窄）
       //
-      // 顺序**不能反**：差异优先级最高——它是在比较视图（或变更面板）里**点开的一件东西**，
-      // 若比较视图先占位，点文件后屏幕上什么都不会变（实测：点清单无反应，
-      // 而状态栏已经报“差异：…”——看着像“点不动”）。
+      // 顺序**不能反**：合并/差异优先级最高——它们是在比较视图（或变更面板）里
+      // **点开的一件东西**，若比较视图先占位，点文件后屏幕上什么都不会变（实测：
+      // 点清单无反应，而状态栏已经报“差异：…”——看着像“点不动”）。
+      //
+      // 合并排在差异前面：它是从变更面板/横幅里点开的**处置动作**，
+      // 优先级高于“看差异”这个阅读动作。
+      if (!merge_key_.value().empty()) {
+        (void)custom<MergeView>(c, [this](MergeView& view) {
+          view.set_id("merge-view");
+          // ⚠ **只在内容真的变了时才 `set_sides`**：它会把选择状态全部重置，
+          // 而声明式每帧都重建这个回调——每帧重置的话用户刚点的“取他方”会被
+          // 下一秒的帧抹掉（表现：“点了没反应”或“选一下就弹回去”）。
+          if (view.ours_text() != merge_ours_text_.value() ||
+              view.theirs_text() != merge_theirs_text_.value() ||
+              view.base_text() != merge_base_text_.value()) {
+            view.set_sides(merge_base_text_.value(), merge_ours_text_.value(),
+                           merge_theirs_text_.value());
+          }
+          merge_view_ptr = &view;   // F7 冲突导航靠它
+          view.on_choice_changed = [this] {
+            // ⚠ **不在回调里写盘**：它会在事件派发过程中同步写文件，而写盘
+            // 可能失败/变慢，而此刻 UI 正处于“半完成”的事件处理里。
+            // 只置一个标记，帧首泵里统一落盘（那里也是唯一改文件的位置）。
+            merge_write_pending_ = true;
+          };
+        }, {.grow = true, .id = "merge-view-host"});
+        return;
+      }
+      merge_view_ptr = nullptr;
       if (!diff_key_.value().empty()) {
         (void)custom<DiffView>(c, [this](DiffView& view) {
           view.set_id("diff-view");
@@ -5300,12 +5369,82 @@ void load_active_text() {
   ///
   /// 与旧版“把 `git diff` 敲进只读标签”的区别：这里是**结构**（两栏对齐、双行号、
   /// 可一个差异一个差异地跳），而旧的只是一块带颜色的文本。
+  /// 三方合并的数据读取（帧首泵）：取 `:1:/:2:/:3:` 三仝内容并划分区段。
+  ///
+  /// 为何在帧首泵而不是渲染期：要起 `git` 子进程（`read_conflict_sides`），
+  /// 而声明式重组过程中起子进程会把 UI 卡住（与差异同理）。
+  void ensure_merge() {
+    if (!merge_wanted_) return;
+    merge_wanted_ = false;
+    if (workspace_.empty() || merge_pending_path_.empty()) return;
+    const auto sides = gbcode::read_conflict_sides(workspace_, merge_pending_path_);
+    if (!sides.any()) {
+      // 不是冲突文件（或路径写错）：**如实报状态**，不要开一个空的三栏视图。
+      status_.set("该文件没有冲突三仝内容：" + merge_pending_path_);
+      merge_key_.set({});
+      return;
+    }
+    // 缺某一号时用空串——`merge_three_way` 对空 base 的语义就是「无共同祖先」，
+    // 而缺失的整侧（删除/新增冲突）则表现为“那一侧全空”。两者都是正确的表达。
+    const std::string base_text = sides.base.ok ? sides.base.text : std::string{};
+    const std::string ours_text = sides.ours.ok ? sides.ours.text : std::string{};
+    const std::string theirs_text = sides.theirs.ok ? sides.theirs.text : std::string{};
+    merge_base_text_.set(base_text);
+    merge_ours_text_.set(ours_text);
+    merge_theirs_text_.set(theirs_text);
+    merge_plan_ = st::text::merge_three_way(base_text, ours_text, theirs_text);
+    merge_loaded_ = true;
+    const auto& plan = merge_plan_;
+    status_.set(std::format("合并：{} · {} 段 · {} 处冲突", merge_pending_path_,
+                            plan.segments.size(), plan.conflicts));
+  }
+
+  /// 帧首落盘：合并选择变了就把结果写回文件（见 `merge_write_pending_` 的说明）。
+  ///
+  /// ⚠ 必须从**当前帧的视图实例**取结果（`merge_view_ptr`）——它带着用户刚做的选择；
+  /// 而 `merge_plan_` 只是三份内容。视图不在树上时（刚关掉标签）什么都不做。
+  void flush_merge_write() {
+    if (!merge_write_pending_) return;
+    merge_write_pending_ = false;
+    if (merge_view_ptr == nullptr) return;
+    apply_merge_result(merge_view_ptr->result());
+  }
+
   void open_diff(std::string title, const gbcode::CompareOptions& options, std::string path) {
     diff_pending_title_ = std::move(title);
     diff_pending_options_ = options;
     diff_pending_path_ = std::move(path);
     diff_key_.set("diff:" + diff_pending_path_ + "|" + diff_pending_title_);
     diff_wanted_ = true;
+  }
+
+  /// 打开一个**三方合并**标签（`base/ours/theirs` 三栏 + 逐段取舍）。
+  ///
+  /// 与差异视图并列、同样住在编辑区（见 `build` 里的互斥顺序）。
+  void open_merge(std::string path) {
+    merge_pending_path_ = std::move(path);
+    merge_key_.set("merge:" + merge_pending_path_);
+    merge_loaded_ = false;
+    merge_wanted_ = true;
+  }
+
+  /// 把冲突文件的合结果写回磁盘（经撤销栈与行尾保持——见 `CodeEditor` 的写盘路径）。
+  ///
+  /// **必须经 `run_write` 之外的路径**：这不是 git 写操作，是普通的文件保存
+  ///（内容写完后由用户自己 `git add`，那一步再走 git 通道——两件事分开，
+  /// 出问题时能看出是哪一步错）。
+  void apply_merge_result(const std::string& text) {
+    if (merge_pending_path_.empty() || workspace_.empty()) return;
+    const std::string full = st::fs::join(workspace_, merge_pending_path_);
+    if (auto written = st::fs::write_text(full, text); !written) {
+      status_.set("写入合并结果失败：" + merge_pending_path_);
+      return;
+    }
+    status_.set(std::format("已写入合并结果：{}（{} 字符，下一步 git add）", merge_pending_path_,
+                            text.size()));
+    // 写盘后重新取快照：变更面板要多出「已解决待暂存」那一条。
+    git_refresh_pending_ = true;
+    merge_loaded_ = false;
   }
 
   /// —— 写操作的**唯一入口** ——
