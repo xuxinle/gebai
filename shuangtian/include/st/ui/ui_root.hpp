@@ -114,6 +114,29 @@ class UiRoot : public Element::HostFocus {
   auto set_focus(Element* element) -> bool;
   /// `Element::HostFocus` 的实现（子组件隔着 `element.hpp` 请求焦点时用）。
   auto set_keyboard_focus(Element* element) -> bool override { return set_focus(element); }
+  /// 当前**焦点环是否应该画出来**（键盘导航语义；组件画环前问它）。
+  ///
+  /// 为何要区分“有焦点”与“该画环”：鼠标按下可聚焦元素**也会给焦点**
+  /// （`MouseDown` 分支），而点一下就在按钮上留一圈边框是不对的 ——
+  /// Windows / VSCode 的惯例都是「**焦点环只在键盘导航时出现**」。
+  /// 实测：活动栏按钮点一下就带一圈边框（用户报“不要点击时显示边框”）。
+  ///
+  /// 规则：键盘事件（KeyDown/TextInput，含 Tab 焦点环）置真；鼠标按下置假。
+  /// **不改变焦点本身**（键盘派发仍归焦点元素）——只影响“要不要画出来”。
+  [[nodiscard]] auto focus_ring_visible() const -> bool override {
+    return focus_ring_visible_;
+  }
+  /// 焦点环可见性变了：把**焦点元素**标脏重绘（环是它画的）。
+  void on_focus_ring_changed() override {
+    if (focused_ != nullptr) focused_->mark_dirty();
+  }
+  /// 焦点环可见性（**只在键盘导航时为真**；见 `focus_ring_visible()` 的说明）。
+  /// 写入方只有 `UiRoot` 的事件分支——写的时候顺带把焦点元素标脏。
+  void set_focus_ring_visible(bool value) {
+    if (focus_ring_visible_ == value) return;
+    focus_ring_visible_ = value;
+    on_focus_ring_changed();
+  }
   /// `Element::HostFocus` 的剪贴板实现：转发给 provider（`Application` 装的）。
   /// 没装 provider 时如实返回空串（headless 测试里粘贴路径自然降级，不会抢错）。
   [[nodiscard]] auto host_clipboard_text() -> std::string override {
@@ -126,6 +149,17 @@ class UiRoot : public Element::HostFocus {
   /// 当前焦点元素（**调用前会清理悬垂指针**，树里已不在则返回 `nullptr`）。
   [[nodiscard]] auto focused() -> Element*;
   void focus_next(bool backwards = false);
+
+  /// 当前**焦点环是否应该画出来**（键盘导航语义）。
+  ///
+  /// 为何要区分“有焦点”与“该画环”：鼠标按下可聚焦元素**也会给焦点**
+  /// （`MouseDown` 分支），而点一下就在按钮上留一圈边框是不对的 ——
+  /// Windows / VSCode 的惯例都是「**焦点环只在键盘导航时出现**」。
+  /// 实测：活动栏按钮点一下就带一圈边框（用户报“不要点击时显示边框”）。
+  ///
+  /// 规则：键盘事件（KeyDown/TextInput，含 Tab 焦点环）置真；鼠标按下置假。
+  /// **不改变焦点本身**（键盘派发仍归焦点元素）——只影响“要不要画出来”。
+  /// 写入方只有 `UiRoot` 的事件分支（定义在 `HostFocus` 实现那一段里）。
 
   /// 登记一棵**声明式树的推进回调**（由 `dsl::DeclarativeHost` 构造时自登记、
   /// 析构时落旗标失活）：帧首由 UI 统一推进。
@@ -269,6 +303,13 @@ class UiRoot : public Element::HostFocus {
   const TextPort* text_port_{nullptr};
   math::Size viewport_{1280.0f, 720.0f};
   Element* focused_{nullptr};
+  /// 焦点环是否可见（**默认真**：没有过任何鼠标交互时按“该画”算）。
+  ///
+  /// 为何默认真：这与浏览器 `:focus-visible` 的启发式一致——**程序化聚焦**
+  /// （代码 `set_focus`、初始聚焦）按“最近一次输入是键盘（或还没输过）”处理；
+  /// 只有**鼠标按下**才把它按下去。默认假会让所有“程序化聚焦后断言环在”的
+  /// 既有回归（滑块/开关/下拉/标签…）全部变红，也会让离屏/测试渲染的观感改变。
+  bool focus_ring_visible_{true};
   Element* hovered_{nullptr};
   Element* pressed_{nullptr};
   EventObserver event_observer_{};

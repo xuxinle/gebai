@@ -12,6 +12,7 @@
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
 #include "components_internal.hpp"
+#include "st/ui/element.hpp"
 #include "st/ui/icon.hpp"
 #include "st/ui/line_layout.hpp"
 #include "st/ui/text_port.hpp"
@@ -20,6 +21,20 @@ namespace st::ui {
 namespace {
 
 using components_internal::paint_focus_ring;
+
+/// 焦点环是否该画（**只在键盘导航时**）。
+///
+/// 为何需要：鼠标按下可聚焦元素也会给焦点，而点一下就在按钮上留一圈边框不对
+///——Windows / VSCode 的惯例是“焦点环只在键盘导航时出现”（用户实测报过
+/// “活动栏按钮不要点击时显示边框”）。
+///
+/// 判据问宿主（`HostFocus::focus_ring_visible`）而不是各自推断：
+/// “上一次输入是键盘还是鼠标”是**全局**状态，组件无从知道；分散实现必然
+/// 漂移成“有的按钮带框有的不带”。
+[[nodiscard]] auto focus_ring_wanted(const Element& element) -> bool {
+  const auto* host = element.host();
+  return host == nullptr || host->focus_ring_visible();
+}
 
 [[nodiscard]] auto port_of(const RenderContext& context) -> const TextPort& {
   static const NullTextPort fallback;
@@ -494,7 +509,13 @@ void Button::paint_content(const RenderContext& context, raster::Surface& canvas
     // 旧实现在按钮**内部**缩进 2px 画一圈：不透明底（`Primary`/`Soft`/`Danger`）
     // 上环落在底色里，看着像“按钮里面又有个小框”；`Secondary` 则同时看到外框、
     // 2px 空白、内环三层。统一到“盖住自己描边的一道环”后，各变体都只是一道。
-    paint_focus_ring(context, canvas, bounds_, style_.radius);
+    //
+    // ⚠ 条件里还有 `focus_ring_wanted(*this)`：**鼠标点出来的焦点不画环**
+    //（用户报过“活动栏按钮不要点击时显示边框”）；键盘一按就恢复。
+    // 与 CSS `:focus-visible` 同一套启发式（程序化聚焦默认算“该画”）。
+    if (focus_ring_wanted(*this)) {
+      paint_focus_ring(context, canvas, bounds_, style_.radius);
+    }
   }
 }
 

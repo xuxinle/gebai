@@ -455,13 +455,28 @@ auto UiRoot::dispatch(Event& event) -> bool {
     }
     case EventKind::MouseDown: {
       Element* target = hit_test(event.position);
-      pressed_ = target;
-      if (target != nullptr) {
-        if (target->focusable() && focused_ != target) set_focus(target);
-        target->set_pressed(true);
-        target->mark_dirty();
+      if (target == nullptr) {
+        // ⚠ **命中不到任何元素时不要动 `pressed_`**（把上一次的所有权留给 MouseUp）。
+        //
+        // 为何：指针按下在控件外、再移入后释放（或本帧布局还没完成导致命中
+        // 未命中）时，若在这里清空 `pressed_`，**后续的 MouseMove 会丢掉拖拽
+        // 归属**——旧实现只在这一支里赋值，而按下命中不到就不该改变已有状态。
+        // 实测：滑块拖拽用例在一次 `MouseDown`（命中不到）之后，
+        // 后续 `MouseMove` 全部失效（值停在 0.5 不动），看着像“滑块坏了”。
+        break;
       }
-      handled = target != nullptr && dispatch_to(*target, event);
+      pressed_ = target;
+      if (target->focusable() && focused_ != target) set_focus(target);
+      // 鼠标按下**不给焦点环**（见 `focus_ring_visible()`）：点一下就在按钮上
+      // 留一圈边框不是任何人要的，而且它会一直留着。键盘一按就回来
+      //（Tab/任何 KeyDown），需要时仍能看到焦点在哪。
+      set_focus_ring_visible(false);
+      target->mark_dirty();
+      // ⚠ `set_pressed(true)` 不能漏：组件的“按住拖动中”靠它判（滑块/滚动条/
+      // 拖选都要），子元素自己的 `pressed_` 与 UiRoot 的 `pressed_`（指针归属）
+      // 是**两个**东西。
+      target->set_pressed(true);
+      handled = dispatch_to(*target, event);
       break;
     }
     case EventKind::MouseUp: {
@@ -508,6 +523,9 @@ auto UiRoot::dispatch(Event& event) -> bool {
       break;
     }
     case EventKind::KeyDown: {
+      // 键盘一到就恢复焦点环（见 `focus_ring_visible()`）：用键盘的人需要看到
+      // 焦点在哪；用鼠标的人不该被一圈边框打扰。
+      set_focus_ring_visible(true);
       // ① 全局快捷键**最先**：编辑器形态的 Ctrl+S/Ctrl+W 需要先于一切组件的落点
       //    （文本组件合法吞键时，快捷键仍是全局语义；handler 返回 false 则放弃下沉继续）。
       if (!shortcuts_.empty()) {
@@ -561,6 +579,7 @@ auto UiRoot::dispatch(Event& event) -> bool {
     }
     case EventKind::KeyUp:
     case EventKind::TextInput: {
+      set_focus_ring_visible(true);
       handled = focused_ != nullptr && dispatch_to(*focused_, event);
       break;
     }

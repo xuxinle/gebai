@@ -322,6 +322,17 @@ class Element {
     /// 终端粘贴（`Ctrl+Shift+V`）等组件能力从这取——剪贴板是**平台**能力，
     /// 组件不该也不必知道后端长什么样（实现在 `UiRoot`→`Application`→backend）。
     [[nodiscard]] virtual auto host_clipboard_text() -> std::string { return {}; }
+    /// **焦点环是否该画**（只在键盘导航时为真）。
+    ///
+    /// 为何放在宿主契约里而不是各组件自己推断：鼠标按下可聚焦元素**也会给焦点**
+    /// （`UiRoot` 的 `MouseDown` 分支），而点一下就在按钮上留一圈边框不对
+    ///——Windows / VSCode 的惯例都是「焦点环只在键盘导航时出现」。
+    /// 而“上一次输入是键盘还是鼠标”是**全局**状态，组件无从知道；
+    /// 分散实现必然漂移（看上去就是“有的按钮带框有的不带”）。
+    /// 默认真：**没有宿主**时按“该画”处理（离屏/测试渲染保持旧观感）。
+    [[nodiscard]] virtual auto focus_ring_visible() const -> bool { return true; }
+    /// 焦点环可见性变了——组件据此重绘（`UiRoot` 在切换时调）。
+    virtual void on_focus_ring_changed() {}
   };
 
   [[nodiscard]] auto host() const noexcept -> HostFocus* { return host_; }
