@@ -188,6 +188,9 @@ void Text::paint_content(const RenderContext& context, raster::Surface& canvas) 
 auto Text::get_property(std::string_view name) const -> std::optional<std::string> {
   if (name == "text" || name == "content") return content_;
   if (name == "multiline") return multiline_ ? "true" : "false";
+  // 字号：与 `set_property` 对称（不报出去就改不了——`apply_properties` 的判据
+  // 是“名字在元素自己声明的清单里”）。
+  if (name == "size") return std::format("{}", style_.font_size);
   return std::nullopt;
 }
 
@@ -200,11 +203,22 @@ auto Text::set_property(std::string_view name, std::string_view value) -> bool {
     set_multiline(value == "true" || value == "1");
     return true;
   }
+  if (name == "size") {
+    // 字号：接受 `18` / `18px`（属性面是文本，单位由调用方决定）。
+    const std::string text(value);
+    char* end = nullptr;
+    const double parsed = std::strtod(text.c_str(), &end);
+    if (end == text.c_str()) return false;
+    set_font_size(static_cast<float>(parsed));
+    return true;
+  }
   return false;
 }
 
 auto Text::property_names() const -> std::vector<std::string_view> {
-  return {"text", "content", "multiline"};
+  // `size` 是字号（与 `Button` 的尺寸档位**同名不同义**——各自解释，见 `xml_ui.cpp`
+  // 里 `normalize_property` 的说明）。
+  return {"text", "content", "multiline", "size"};
 }
 
 Heading::Heading(std::string content, std::uint32_t level) : Text(std::move(content)) {
@@ -276,6 +290,11 @@ auto IconView::get_property(std::string_view name) const -> std::optional<std::s
   if (name == "icon") return icon_;
   if (name == "size") return std::format("{}", size_);
   return std::nullopt;
+}
+
+// 与 `get/set_property` 对称（见头文件里的说明）：不报名字 = 这条路命不中。
+auto IconView::property_names() const -> std::vector<std::string_view> {
+  return {"icon", "size"};
 }
 
 auto IconView::set_property(std::string_view name, std::string_view value) -> bool {
@@ -562,6 +581,27 @@ auto Button::semantics_flags() const -> SemanticsFlags {
 auto Button::get_property(std::string_view name) const -> std::optional<std::string> {
   if (name == "label" || name == "text") return label_;
   if (name == "icon") return icon_;
+  // 档位：`variant`（外观）/ `size`（档位）/ `hint`（悬停提示）。
+  // 三者都是一等接口（`set_variant`/`set_size`/`set_hint`），没道理只让 C++ 用。
+  if (name == "variant") {
+    switch (variant_) {
+      case Variant::Primary: return "primary";
+      case Variant::Secondary: return "secondary";
+      case Variant::Ghost: return "ghost";
+      case Variant::Soft: return "soft";
+      case Variant::Danger: return "danger";
+    }
+    return "primary";
+  }
+  if (name == "size") {
+    switch (size_) {
+      case Size::Small: return "small";
+      case Size::Medium: return "medium";
+      case Size::Large: return "large";
+    }
+    return "medium";
+  }
+  if (name == "hint") return hint();
   return std::nullopt;
 }
 
@@ -574,11 +614,45 @@ auto Button::set_property(std::string_view name, std::string_view value) -> bool
     set_icon(std::string(value));
     return true;
   }
+  if (name == "variant") {
+    const std::string text(value);
+    if (text == "primary") {
+      set_variant(Variant::Primary);
+    } else if (text == "secondary") {
+      set_variant(Variant::Secondary);
+    } else if (text == "ghost") {
+      set_variant(Variant::Ghost);
+    } else if (text == "soft") {
+      set_variant(Variant::Soft);
+    } else if (text == "danger") {
+      set_variant(Variant::Danger);
+    } else {
+      return false;
+    }
+    return true;
+  }
+  if (name == "size") {
+    const std::string text(value);
+    if (text == "small") {
+      set_size(Size::Small);
+    } else if (text == "medium") {
+      set_size(Size::Medium);
+    } else if (text == "large") {
+      set_size(Size::Large);
+    } else {
+      return false;
+    }
+    return true;
+  }
+  if (name == "hint") {
+    set_hint(std::string(value));
+    return true;
+  }
   return false;
 }
 
 auto Button::property_names() const -> std::vector<std::string_view> {
-  return {"label", "text", "icon"};
+  return {"label", "text", "icon", "variant", "size", "hint"};
 }
 
 auto Button::invoke_action(std::string_view action, std::string_view argument) -> bool {

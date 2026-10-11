@@ -30,6 +30,11 @@ WindowFrame::WindowFrame(std::string title) {
   Element::add_child(std::move(bar));
   auto body = std::make_unique<Panel>(FlexDirection::Column);
   body->set_id("content");
+  // ⚠ 内容槽必须 **`grow`**：`WindowFrame` 本身是列布局（标题栏 + 内容槽），
+  // 不 grow 的话内容槽只占“内容高”，窗口底下一大片是空的——而调用方
+  // 看自己的子树是“满”的（它的 grow 在槽内生效），于是极难定位。
+  // 实测：`<Column grow="true">` 作为内容时，底部行跑到窗口中间而不是下沿。
+  body->style().grow = true;
   content_ = body.get();
   Element::add_child(std::move(body));
 }

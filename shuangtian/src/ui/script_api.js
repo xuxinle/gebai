@@ -42,6 +42,8 @@
     return found.length > 0 ? found[0] : null;
   }
 
+  const boundKeys = {};   // `元素 id|事件` → 绑定 id（同一元次重复绑定去重用）
+
   function wrap(id, node) {
     const handle = {
       __id: id,
@@ -77,6 +79,57 @@
       return handle;
     };
     handle.find = function (selector) { return query(selector, 0, id); };
+    // 事件绑定：与全局 `on(selector, event, handler)` **同一实现**（同一份 `handlers`
+    // 与注册管线）——句柄上的写法更自然（脚本里 `$('#ok').on('click', fn)` 比
+    // `on('#ok', 'click', fn)` 更接近直觉），而两条路名不能各写一份逻辑。
+    handle.on = function (event, handler) {
+      // ⚠ **同一元素同一事件重复绑定时，先解掉旧绑定**。
+      //
+      // 为何必要：重建式渲染（`clear()` + 重建行）下，第二次 `render()` 拿到的 has
+      // **新元素但用了同一个 id**，而旧绑定还挂在宿主里（按选择器匹配）——
+      // 于是一次点击会调两次处理器。
+      // 实测症状极隐蔽：勾选框的 `toggle` 被调两次 = 改回原值，看起来“点了没反应”。
+      const key = id + '|' + event;
+      if (boundKeys[key] !== undefined) {
+        try { globalThis.off(boundKeys[key]); } catch (error) { /* 已失效：忽略 */ }
+      }
+      const bound = globalThis.on('#' + id, event, handler);
+      boundKeys[key] = bound;
+      return bound;
+    };
+    handle.off = function (binding) { return globalThis.off(binding); };
+    // —— 动态结构：与宿主桥 `ui.build`/`ui.append`/`ui.clear` 同源 ——
+    //
+    // 为何走宿主桥而不是纯 JS 维护一份影子树：元素是**真的 C++ 元素**
+    //（有 id、能被选择器寻址、能吃控制通道）——影子树在第一次被外部查询时就露馅。
+    //
+    // 这三个都是**立即生效**（不走 pending 队列）：结构变化会移位置，
+    // 而属性写入是批量的；两者的“什么时候看得见”不同，混在一个队列里会让
+    // 后续属性写到已消失的元素上（实测：先 append 再 set 属性会静默丢）。
+    handle.append = function (type, properties) {
+      // 建 + 挂都走宿主桥（元素是真的 C++ 元素，见上方说明）。
+      //
+      // ⚠ 失败**必须抛**（而不是返回 `null`）：返回 `null` 时调用方的
+      // `row.append(...)` 会报 “not a function”——那是**症状的第二层**，
+      // 而真正的失败原因（“没有这个组件类型”/“父元素不存在”）已经丢了。
+      // 实测踩过：排查从“点不动”一路猜到宿主桥才看到真正原因。
+      const created = globalThis.__bridgeBuild(type, properties || {});
+      globalThis.__bridgeAppend(id, created.id);
+      snapshot = null;   // 结构变了：下次查询重建快照
+      // ⚠ **不返回 `$(created.id)`**：那会走快照查询，而快照是**上一帧**的树；
+      // 刚建的元素还没进去，于是拿到“空句柄”（`exists:false`）——现象就是
+      // `row.append(...)` 报 `not a function`（空句柄没有 append），
+      // 而根因只是“查得太早”（实测踩到，绕了几轮才定位）。
+      // 这里用 `created` 自己描述的元素信息直接造句柄：调用方拿到的是**当下这个元素**，
+      // 与快照新旧无关。
+      return wrap(created.id, { id: created.id, type: created.type, role: undefined,
+                                bounds: undefined, props: properties || {} });
+    };
+    handle.clear = function () {
+      globalThis.__bridgeClear(id);
+      snapshot = null;
+      return handle;
+    };
     return handle;
   }
 

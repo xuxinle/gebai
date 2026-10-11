@@ -77,6 +77,13 @@ class IconView : public Element {
   [[nodiscard]] auto semantics_text() const -> std::string override { return icon_; }
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
   auto set_property(std::string_view name, std::string_view value) -> bool override;
+  // ⚠ `property_names()` 必须与 `get/set_property` **对称**：
+  //
+  // `ui::apply_properties` 的判据是“属性名在元素自己声明的清单里”（那是为了
+  // 消除“读得到、改不了”的分裂）。只实现 get/set 而不报名字，就意味着
+  // **这条路永远命不中它**——`set {icon: …}` 会静默什么都不做。
+  // 实测：`<Icon name="search"/>` 走 XML 建树时报“值没被接受”，根因就在这里。
+  [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
 
  private:
   std::string icon_{};

@@ -56,6 +56,19 @@ namespace {
   return name == "mousemove" || name == "hover" || name == "unhover" || name == "wheel";
 }
 
+/// 事件名是不是框架真的会分发的（与 `event_name` 一一对应）。
+///
+/// 为何要校验：绑一个**不存在**的事件名（`'change'`、拼错的 `'keydown'`）现在会
+/// **静默永不触发**——`on` 只是把“选择器 + 事件名”存起来，宿主按事件名匹配。
+/// 于是现象是“点了没反应”，而排查得一路查到事件表（实测踩过：
+/// 勾选框绑 `'change'`，而框架只有 `click`，表现为计数永远不动）。
+[[nodiscard]] auto is_known_event(std::string_view name) noexcept -> bool {
+  return name == "click" || name == "dblclick" || name == "tripleclick" ||
+         name == "mousedown" || name == "mouseup" || name == "mousemove" ||
+         name == "wheel" || name == "keydown" || name == "keyup" || name == "input" ||
+         name == "focus" || name == "blur" || name == "hover" || name == "unhover";
+}
+
 /// 事件 → JSON（脚本处理器拿到的 `event` 参数）。
 [[nodiscard]] auto event_to_json(const Event& event, Element& target) -> st::Json {
   st::Json value = st::Json::object();
@@ -195,6 +208,15 @@ ScriptHost::ScriptHost(UiRoot& root, ext::ScriptLimits limits)
         const std::string selector = to_string_view(args[0]);
         const std::string event = to_string_view(args[1]);
         const std::string handler = to_string_view(args[2]);
+        // 未知事件名**直接报错**（而不是默默绑上）：否则现象是“点了没反应”，
+        // 而根因（事件名不存在）要一路查到事件表才能确认。
+        if (!is_known_event(event)) {
+          return st::unexpected(
+              st::ErrorCode::Invalid,
+              std::format("未知事件名 '{}'（可用：click/dblclick/mousedown/mouseup/mousemove/"
+                          "wheel/keydown/keyup/input/focus/blur/hover/unhover）",
+                          event));
+        }
         ScriptBinding binding;
         binding.id = std::format("b{}", impl_->next_binding_id++);
         binding.selector = selector;

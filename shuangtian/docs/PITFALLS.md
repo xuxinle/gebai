@@ -106,6 +106,11 @@
 | **`hide_*()` 的早期返回会吞掉状态重置** | “本来就没显示就早返回”是合理优化，但调用方若依赖它顺带重置的字段（时间基准），就会静默失效——重置与早返回要分开写 | `src/ui/ui_root.cpp` 的 `set_hint_target` |
 | **扫标签时 `>` 要先跳引号** | `<A label="a > b"/>` 里的 `>` 不是标签结束。直接 `find('>')` 会把标签截成 `<A label="a >`，属性值变成 `a >`、后续全乱（本仓 `st/xml` 第一版就错在这里） | `src/xml/xml.cpp` 的 `find_tag_end` |
 | **容错解析器也要留诊断** | 自动收口未闭合标签是好事，但**默默**收口会让“少写一个 `</Row>`”永远看不到（树形看着正常，只是内容跑到了另一层）。容错 + 报行号，两者不矛盾 | `DESIGN.md` §4.2.19 |
+| **`on(sel, 未知事件名, fn)` 会静默永不触发** | 绑定时不校验事件名，现象是“点了没反应”，而根因要一路查到事件表。**现在注册时直接报错**（可用名：click/dblclick/mousedown/…） | `src/ui/script_host.cpp` 的 `is_known_event` |
+| **重建式渲染下事件会重复绑定** | `clear()` + 重建行时，新元素用**同一个 id**，而旧绑定还在宿主里——一次点击调两次处理器（`toggle` 两次 = 改回原值，看起来“没反应”）。句柄 `.on()` 现已内置“同 id 同事件先解旧” | `src/ui/script_api.js` 的 `boundKeys` |
+| **`id` 不在属性面里** | `id`/`key` 是元素元数据（不在 `property_names()`），而 `apply_properties` 只认声明的名字——传给 `ui.build` 的 `id` 被静默忽略，然后被自动 id 覆盖（`auto-Panel`）。现在框架级可写（`id`/`key`） | `src/ui/actions.cpp` 的 `apply_properties` |
+| **`WindowFrame::content()` 必须 grow** | 它是窗框（列布局）的第二个孩子，不 grow 就只占“内容高”——窗口底下一大片空白，而调用方看自己的子树是满的，极难定位 | `src/ui/components/window_frame.cpp` |
+| **建树后立刻按 id 查会落空（快照是上一帧的）** | `handle.append` 返回 `$(新 id)`时，快照还没包含新元素 → 拿到“空句柄”（`exists:false`），调用方报 `not a function`。直接用桥返回的信息造句柄，不查快照 | `src/ui/script_api.js` 的 `handle.append` |
 | **隐藏分支的“结构”必须与显示分支一致** | 显示时直接声明子元素、隐藏时又包一层带别的 key 的容器 = 结构随状态变 ⇒ 子树被销毁重建（终端一重建就丢会话）。两个面板都直接声明、用 `set_visible(false)` | `DESIGN.md` §4.2.15 |
 | **自绘组件报尺寸前要防抖、退化尺寸不报** | 面板收起那一帧可用高度归零，若被 `max(N, …)` 夹一下真报给 PTY，屏幕就被截（实测 14 行 → 11 行）。退化尺寸跳过；**防抖的“确认”必须放在每帧都跑的地方**（`paint_content`），放 `arrange` 里会因布局不脏而永远不确认 | `DESIGN.md` §4.2.16 |
 | **“点活动栏 = 打开”是错的** | 面板默认就是开的，点一下是**收起**。判断可见性要看状态（`#bottom-split` 的 `second_hidden`），否则探针会自己制造“功能坏了”的假象 | `tools/gbcode_terminal_scroll_e2e.py` 文件头 |

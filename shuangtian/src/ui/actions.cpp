@@ -10,10 +10,31 @@
 #include <vector>
 
 #include "st/ui/selector.hpp"
+#include "st/ui/svg.hpp"   // parse_color（色值解析：与 DSL 的 hex_color 同一份）
 
 #include "st/ext/json.hpp"
 
 namespace st::ui {
+namespace {
+
+/// 对齐枚举的名字 → 值（与 XML 属性面**同一份口径**：都用名字，不靠数字）。
+[[nodiscard]] auto parse_align(const std::string& text, Align& out) -> bool {
+  if (text == "start") {
+    out = Align::Start;
+  } else if (text == "center") {
+    out = Align::Center;
+  } else if (text == "end") {
+    out = Align::End;
+  } else if (text == "stretch") {
+    out = Align::Stretch;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+}  // namespace
+
 
 auto rect_to_json(math::Rect rect) -> st::Json {
   st::Json value = st::Json::object();
@@ -129,6 +150,99 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props)
     } else if (name == "direction") {
       style.direction =
           st::json_as_string(value, "") == "row" ? FlexDirection::Row : FlexDirection::Column;
+    } else if (name == "min_width") {
+      style.min_width = as_float();
+    } else if (name == "min_height") {
+      style.min_height = as_float();
+    } else if (name == "max_width") {
+      style.max_width = as_float();
+    } else if (name == "max_height") {
+      style.max_height = as_float();
+    } else if (name == "shrink") {
+      style.shrink = st::json_as_bool(value, style.shrink);
+    } else if (name == "wrap") {
+      style.wrap = st::json_as_bool(value, style.wrap);
+    } else if (name == "align_items") {
+      // 枚举统一走**名字**（与 XML 属性面同一口径，不靠数字）。
+      if (!parse_align(st::json_as_string(value, ""), style.align_items)) return false;
+    } else if (name == "align_self") {
+      if (!parse_align(st::json_as_string(value, ""), style.align_self)) return false;
+    } else if (name == "justify") {
+      const std::string text = st::json_as_string(value, "");
+      if (text == "start") {
+        style.justify = Justify::Start;
+      } else if (text == "center") {
+        style.justify = Justify::Center;
+      } else if (text == "end") {
+        style.justify = Justify::End;
+      } else if (text == "space_between") {
+        style.justify = Justify::SpaceBetween;
+      } else if (text == "space_around") {
+        style.justify = Justify::SpaceAround;
+      } else {
+        return false;
+      }
+    } else if (name == "surface") {
+      // 语义表面档位在 **Element** 上（不在 Style），且是“下一帧 apply_theme 生效”。
+      const std::string text = st::json_as_string(value, "");
+      if (text == "none") {
+        element.set_surface(Element::Surface::None);
+      } else if (text == "base") {
+        element.set_surface(Element::Surface::Base);
+      } else if (text == "alt") {
+        element.set_surface(Element::Surface::Alt);
+      } else if (text == "sunken") {
+        element.set_surface(Element::Surface::Sunken);
+      } else {
+        return false;
+      }
+    } else if (name == "background") {
+      // 允许 `#rgb`/`#rrggbb`/`#rrggbbaa` 与 CSS 基本色名（与 DSL 的 `hex_color` 同一解析）。
+      const auto parsed = svg::parse_color(st::json_as_string(value, ""));
+      if (!parsed.has_value()) return false;
+      style.background = *parsed;
+    } else if (name == "text_color") {
+      // 文字色走**显式覆盖**（`set_text_color`）：直接写 `style.color` 会被
+      // 下一帧的主题刷新盖回（与 DSL 里 `hex_color` 同一机制）。
+      const auto parsed = svg::parse_color(st::json_as_string(value, ""));
+      if (!parsed.has_value()) return false;
+      element.set_text_color(*parsed);
+    } else if (name == "text_size") {
+      element.set_text_size(as_float());
+    } else if (name == "text_align") {
+      switch (static_cast<int>(as_float())) {
+        case 0: style.text_align = TextAlign::Start; break;
+        case 1: style.text_align = TextAlign::Center; break;
+        case 2: style.text_align = TextAlign::End; break;
+        default: return false;
+      }
+    } else if (name == "font_size") {
+      style.font_size = as_float();
+    } else if (name == "font_weight") {
+      const std::string text = st::json_as_string(value, "");
+      if (text == "regular") {
+        style.font_weight = FontWeight::Regular;
+      } else if (text == "medium") {
+        style.font_weight = FontWeight::Medium;
+      } else if (text == "semibold" || text == "semi_bold") {
+        style.font_weight = FontWeight::SemiBold;
+      } else if (text == "bold") {
+        style.font_weight = FontWeight::Bold;
+      } else {
+        return false;
+      }
+    } else if (name == "monospace") {
+      style.monospace = st::json_as_bool(value, style.monospace);
+    } else if (name == "border_width") {
+      style.border_width = as_float();
+    } else if (name == "border_color") {
+      const auto parsed = svg::parse_color(st::json_as_string(value, ""));
+      if (!parsed.has_value()) return false;
+      style.border_color = *parsed;
+    } else if (name == "opacity") {
+      style.opacity = as_float();
+    } else if (name == "clip_children") {
+      style.clip_children = st::json_as_bool(value, style.clip_children);
     } else {
       return false;
     }
@@ -139,6 +253,15 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props)
     bool applied = false;
     if (name == "enabled") {
       element.set_enabled(st::json_as_bool(value, true));
+      applied = true;
+    } else if (name == "id") {
+      // `id` / `key` 是**元素元数据**（不在 `property_names()` 里，因为它们是身份
+      // 而非内容），但“外部按 id 寻址”正是协议/脚本/XML 共用的前提——
+      // 不能设 id 就意味着“建完就找不回来”。所以它们属框架级可写属性。
+      element.set_id(st::json_as_string(value));
+      applied = true;
+    } else if (name == "key") {
+      element.set_key(st::json_as_string(value));
       applied = true;
     } else if (name == "visible") {
       element.set_visible(st::json_as_bool(value, true));

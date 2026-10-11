@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  纯 XML + JS 应用的界面描述（零 C++ UI 代码）。
+
+  这个文件与同目录的 app.js 一起构成一个**完整应用**：
+  - 本文件：界面长什么样（标签 → 组件、属性 → 样式）；
+  - app.js：界面怎么动（事件、状态、业务逻辑），并能调用 C++ 提供的能力（`app.tasks.*`）。
+
+  可用标签见 docs/xml-ui.md；组件注册名之外的短名（Row/Column/Icon/Progress）也认。
+  属性分两层：布局/外观（gap/padding/grow/surface/…）与组件自己的属性面
+  （label/value/checked/…），两层的名字与协议 `set` 完全一致。
+
+  根元素要 `grow="true"`：它挂在 `WindowFrame::content()` 下，不 grow 的话
+  只占“内容高”（窗口底下一大片空白，而底部那条会跑到中间）。
+-->
+<Column id="root" gap="0" grow="true" surface="base">
+  <!-- 标题栏 -->
+  <Row id="header" gap="10" padding="14" surface="alt" align="center">
+    <Icon id="header-icon" icon="list" size="20" text_color="#2563eb"/>
+    <Text id="header-title" size="18">任务清单</Text>
+    <Spacer grow="true"/>
+    <Text id="counter" size="13" text_color="#6b7280">共 0 项</Text>
+  </Row>
+  <Divider/>
+
+  <!-- 输入行 -->
+  <Row id="composer" gap="8" padding="14">
+    <Input id="draft" placeholder="输入任务，回车添加" grow="true"/>
+    <Button id="add" label="添加" icon="plus" variant="primary" size="small"/>
+  </Row>
+
+  <!-- 清单 -->
+  <Column id="list" gap="6" padding_x="14" padding_y="6" grow="true"/>
+
+  <!-- 底部：过滤 + 进度 -->
+  <Row id="footer" gap="8" padding="12" surface="alt" align="center">
+    <Button id="filter-all" label="全部" variant="soft" size="small"/>
+    <Button id="filter-open" label="未完成" variant="ghost" size="small"/>
+    <Button id="filter-done" label="已完成" variant="ghost" size="small"/>
+    <Spacer grow="true"/>
+    <Progress id="progress" value="0" size="120"/>
+    <Button id="clear-done" label="清除已完成" variant="ghost" size="small"
+            hint="移除所有已完成的任务"/>
+  </Row>
+</Column>
