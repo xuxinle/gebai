@@ -30,6 +30,7 @@
 #include "st/ui/components/menu.hpp"
 #include "st/ui/components/overlay.hpp"
 #include "st/ui/components/scroll.hpp"
+#include "st/ui/components/viewport.hpp"
 #include "st/ui/components/select.hpp"
 #include "st/ui/components/slider.hpp"
 #include "st/ui/components/split_view.hpp"
@@ -1374,6 +1375,7 @@ auto Composer::root() noexcept -> UiRoot& { return impl_->root; }
   X(ScrollView, "ScrollView", std::make_unique<ScrollView>())             \
   X(ScrollBar, "ScrollBar", std::make_unique<ScrollBar>())                \
   X(SplitView, "SplitView", std::make_unique<SplitView>())                \
+  X(Viewport, "Viewport", std::make_unique<Viewport>())                  \
   X(Tabs, "Tabs", std::make_unique<Tabs>())                               \
   X(ProgressBar, "ProgressBar", std::make_unique<ProgressBar>())          \
   X(Spinner, "Spinner", std::make_unique<Spinner>())                      \
