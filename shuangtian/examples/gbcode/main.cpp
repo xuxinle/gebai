@@ -354,6 +354,10 @@ auto run_app(int argc, char** argv) -> int {
     std::fprintf(stderr, "声明式挂载失败\n");
     return 1;
   }
+  // 异步统一走 app::Tasks（主线程只渲染契约）：resource 的 fetcher 不再养私池。
+  host->composer().set_executor([tasks = &app.tasks()](std::function<void()> job) {
+    tasks->submit(std::move(job));
+  });
   // 菜单头部：单独一个 `Component`（标题栏那一行归它描述），挂进 `leading` 槽。
   // 先 `add_leading` 一个占位容器，再 `mount_into` 它——`mount_into` 需要
   // 一个**既有元素**作宿主，而 `leading` 槽按语义是「标题前的一块」。

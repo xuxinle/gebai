@@ -415,6 +415,14 @@ void rebuild_all();
     });
   }
 
+  /// 注入外部任务执行器（`resource` 的 fetcher 改走它；`nullptr` = 恢复内置池）。
+  ///
+  /// 为什么留注入缝：应用层有 `app::Tasks`（统一线程池/观测/收尾）时，声明式
+  /// 不该再养一套私池——两个池 = 双倍线程、两处收尾顺序要各自小心。注入后
+  /// `resource` 与应用其它异步共用同一池与同一 UI 回调通道（`post_to_main` 仍走
+  /// 本 Composer 的 inbox——resource 的结果投递路径不变）。
+  void set_executor(std::function<void(std::function<void()>)> submit);
+
   /// 在主线程执行的任务入队（`pump_async` 取走）；线程安全。
   void post_to_main(std::function<void()> task);
   /// 在**工作线程**执行任务（起短命线程；完成后经 `post_to_main` 回主线程）。
@@ -883,6 +891,8 @@ class DeclarativeHost {
   auto pump_async() -> std::size_t;
   [[nodiscard]] auto dirty() const noexcept -> bool;
   [[nodiscard]] auto stats() const noexcept -> const ReconcileStats&;
+  /// 底层 `Composer`（注入外部任务执行器等宿主级接线用；见 `set_executor`）。
+  [[nodiscard]] auto composer() -> Composer& { return *composer_; }
 
  private:
   std::unique_ptr<Composer> composer_;

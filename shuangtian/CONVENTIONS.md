@@ -71,6 +71,19 @@ inline constexpr Result<Unit> ok();          // 无值成功
 - 互斥：`std::mutex` + `std::scoped_lock`/`lock_guard`（RAII）；禁手动 `lock()`/`unlock()`。
 - 共享数据封装在自带锁的类型里（`class Counter { std::mutex m_; int v_; ... }`），不裸露共享变量。
 
+**线程契约（主线程只渲染；`st/app/async.hpp` 是实现）**：
+
+| 线程 | 允许 | 禁止 |
+|---|---|---|
+| 主（UI）线程 | layout / paint / 声明式重组 / 事件派发 / `post_ui` 回调 | 业务计算、阻塞 IO、长循环 |
+| 工作线程 | 计算、IO、解析——任何不碰 UI 树的东西 | 写 `State`、碰元素、调组件接口 |
+
+- 工作线程把结果交回 UI：**只能** `Tasks::post_ui(fn)`（下一帧有序执行）。
+  直接从工作线程写 `State` 是数据竞争（重组单线程，正在遍历的树与并发写互斥不了）。
+- 提交方式：长任务/IO 密集 → `run_async`（独立线程，可协作取消）；短任务/并行分解 → `submit`（共享池）。
+  应用侧统一经 `Application::tasks()`；声明式 `resource` 由宿主注入同一池（`set_executor`）。
+- 帧首泵顺序：`Tasks::pump()`（UI 回调落地）在 `render_frame` **之前**——回调写的状态本帧生效。
+
 ### 3.6 例外：数据表与 SIMD
 - **数据表**（字体表、Unicode 表、图标路径数据、关键字表）允许 `inline constexpr std::array<T, N>`，禁止裸 C 数组，除非是 `std::bit_cast` 目标。
 - **SIMD**：仅 `src/raster/simd_*.cpp` 与 `src/core/hash.cpp` 可含 intrinsic 与受控指针运算；文件顶部标注 `// SIMD 边界：本文件是 §2 禁令的受控例外（范围：<说明>）`，且所有访存取 `std::span` + 显式边界。

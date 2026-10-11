@@ -514,6 +514,9 @@ struct Composer::Impl {
   std::vector<std::thread> pool{};
   bool pool_stopping{false};
 
+  /// 外部执行器（`set_executor` 注入；空 = 内置池）。
+  std::function<void(std::function<void()>)> executor{};
+
   /// 启动线程池（首次 `run_on_worker` 时懒建——不跑异步的应用不为它付代价）。
   void ensure_pool() {
     if (!pool.empty()) return;
@@ -968,6 +971,11 @@ void Composer::post_to_main(std::function<void()> task) {
 }
 
 void Composer::run_on_worker(std::function<void()> task) {
+  // 注入了外部执行器（如 app::Tasks）则优先走它：线程数、收尾、观测都在一处。
+  if (impl_->executor) {
+    impl_->executor(std::move(task));
+    return;
+  }
   impl_->ensure_pool();
   {
     std::lock_guard<std::mutex> lock(impl_->queue_mutex);
@@ -975,6 +983,11 @@ void Composer::run_on_worker(std::function<void()> task) {
     impl_->work_queue.push_back(std::move(task));
   }
   impl_->queue_cv.notify_one();
+}
+
+void Composer::set_executor(std::function<void(std::function<void()>)> submit) {
+  std::lock_guard<std::mutex> lock(impl_->queue_mutex);   // 与内置池的启停互斥
+  impl_->executor = std::move(submit);
 }
 
 auto Composer::pump_async() -> std::size_t {

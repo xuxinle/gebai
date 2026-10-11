@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "st/app/async.hpp"
 #include "st/control/control.hpp"
 #include "st/ext/script.hpp"
 #include "st/core/error.hpp"
@@ -279,6 +280,15 @@ class Application final : public control::Host, public ui::WindowControl {
   [[nodiscard]] auto started() const noexcept -> bool { return started_; }
   /// 主循环单步（自检用）。
   void tick();
+  /// 应用级异步任务系统（`st/app/async.hpp`）：
+  ///
+  /// - `tasks().run_async(fn)`：独立线程（长任务/IO；返回 future + 可取消句柄）
+  /// - `tasks().submit(fn)`：共享线程池（短任务/`parallel_for`）
+  /// - `tasks().post_ui(fn)`：任意线程回主线程（下一帧 `tick()` 内有序执行）
+  ///
+  /// 生命周期随 `Application`：析构时停池、join 全部线程、清空 UI 队列。
+  /// 这是「主线程只渲染」契约的一等支撑（CONVENTIONS §11）。
+  [[nodiscard]] auto tasks() -> app::Tasks&;
   /// 是否收到退出请求（控制通道 `app.quit` / 自检终止条件）。
   [[nodiscard]] auto quit_requested() const noexcept -> bool;
 

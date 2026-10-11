@@ -214,6 +214,10 @@ struct Application::Impl {
   bool profiling{false};
   /// 日志订阅 id（构造时注册、析构时注销）——见 `Application::Application` 的说明。
   std::uint64_t log_listener_id{0};
+  /// 应用异步任务系统（`tasks()` 的落点）。住 `Impl`：
+  /// `Tasks` 不可移动且持有线程——必须比 `root_` 后析构（任务可能还在投递 UI 回调，
+  /// 而 UI 队列的 pump 依赖 root 活着——析构顺序 `impl_` 先于 `root_` 声明序即可）。
+  app::Tasks tasks{};
 };
 
 Application::Application(std::string name, std::string version, AppOptions options)
@@ -1001,6 +1005,8 @@ void Application::render_frame() {
   root_.clear_dirty();
 }
 
+auto Application::tasks() -> app::Tasks& { return impl_->tasks; }
+
 void Application::tick() {
   if (impl_->backend == nullptr) return;
   // 窗口系统请求关闭（用户点 X）：走与应用内 request_quit 相同的收尾路径
@@ -1016,6 +1022,9 @@ void Application::tick() {
   // 拖放重绘走过的尺寸同步：`WM_SIZE` 里已经立即重画过一帧（因为模态循环期间主循环
   // 不转），这里只负责把**布局视口**改到同一条线上——两边不一致的话，下一帧仍会
   // 按旧视口排布（表现为"松手后内容才重新排列"）。
+  // UI 回调落地（`Tasks::post_ui` 的积压）：放在 render 之前——回调写 `State`
+  // 标脏后**本帧**重组/绘制即生效（放 render 后则永远慢一帧，与泵的时序教训同源）。
+  (void)impl_->tasks.pump();
   if (impl_->repaint || root_.dirty()) render_frame();
   // 脚本定时器：按帧推进，不额外起线程
   if (impl_->script != nullptr) (void)impl_->script->tick(0.0);
