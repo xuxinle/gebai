@@ -86,6 +86,105 @@ auto PixelPatchCommand::changed() const -> bool {
   return !before_.empty() && before_ != after_;
 }
 
+auto PixelPatchCommand::try_merge(const Document& document, const PixelPatchCommand& next)
+    -> bool {
+  if (layer_ != next.layer_) return false;
+  if (label_ != next.label_) return false;
+  if (layer_ >= document.layers().size()) return false;
+  // 相邻判定：矩形**扩张 1px** 后再问是否相交。
+  //
+  // 为何要扩张：相邻两次移动的可见像素可能正好接壤但不重叠（0 间隙），
+  // 只判相交会把一整笔断成两段；扩张 1px 把"接壤"也认作连续。
+  const Rect grown{area_.x - 1.0f, area_.y - 1.0f, area_.width + 2.0f, area_.height + 2.0f};
+  // `Rect::intersect` 返回**交集矩形**（不是 bool）；空交集 = 不相邻。
+  if (grown.intersect(next.area_).is_empty()) return false;
+
+  // 并集矩形（`Rect` 的字段是 float，几何计算一律走 float，
+  // 只在最后落到整数像素时才取整——混用 int/float 会产生一堆窄化告警，
+  // 而它们掩盖真正的问题）。
+  const Rect merged = Rect::from_ltrb(
+      std::min(area_.x, next.area_.x), std::min(area_.y, next.area_.y),
+      std::max(area_.right(), next.area_.right()),
+      std::max(area_.bottom(), next.area_.bottom()));
+
+  // `before_` 的拼法（**逐像素**，不是整块重取）：
+  //
+  // 并集内每个像素的"本笔开始前的值"来自三处之一：
+  //   ① 在旧 `area_` 内 → 旧 `before_`（那是权威的"这笔开始前"）；
+  //   ② 只在 `next.area_` 内 → `next.before_`（next 落笔前该处的样子）；
+  //   ③ 两块都不覆盖（接壤时的缝）→ **当前画布值**（本笔没碰过，当前 == 开始前）。
+  //
+  // ②用 `next.before_` 而不是当前画布值：next 刚把那里改了，用当前值会把
+  // "改动后"当成"原样"——撤销时留下一截笔迹（这类合并最典型的静默错）。
+  const auto& canvas = document.layers()[layer_].pixels;
+  std::vector<std::uint8_t> merged_before = read_region(canvas, merged);
+  if (merged_before.empty()) return false;   // 并集完全在画布外：不并
+
+  // 并集的**整数像素矩形**（与 `read_region` 同一套钳制；宽高显式算出来，
+  // 不从字节数反推——反推出来的宽高在边界情况下会错，而错了就是整体错位）。
+  const int mx0 = std::max(0, static_cast<int>(std::floor(merged.x)));
+  const int my0 = std::max(0, static_cast<int>(std::floor(merged.y)));
+  const int mx1 = std::min(canvas.physical_width(),
+                           static_cast<int>(std::ceil(merged.right())));
+  const int my1 = std::min(canvas.physical_height(),
+                           static_cast<int>(std::ceil(merged.bottom())));
+  if (mx1 <= mx0 || my1 <= my0) return false;
+  const std::size_t merged_width = static_cast<std::size_t>(mx1 - mx0);
+  const std::size_t merged_height = static_cast<std::size_t>(my1 - my0);
+
+  const auto stamp = [&](const Rect& source_rect, const std::vector<std::uint8_t>& source) {
+    if (source.empty()) return;
+    const int sx0 = std::max(0, static_cast<int>(std::floor(source_rect.x)));
+    const int sy0 = std::max(0, static_cast<int>(std::floor(source_rect.y)));
+    const int sx1 = std::min(canvas.physical_width(),
+                             static_cast<int>(std::ceil(source_rect.right())));
+    const int sy1 = std::min(canvas.physical_height(),
+                             static_cast<int>(std::ceil(source_rect.bottom())));
+    if (sx1 <= sx0 || sy1 <= sy0) return;
+    const int source_width = sx1 - sx0;
+    const int source_height = sy1 - sy0;
+    if (source.size() != static_cast<std::size_t>(source_width) * source_height * 4U) return;
+    for (int y = 0; y < source_height; ++y) {
+      for (int x = 0; x < source_width; ++x) {
+        const int target_x = sx0 + x - mx0;
+        const int target_y = sy0 + y - my0;
+        if (target_x < 0 || target_y < 0 || target_x >= static_cast<int>(merged_width) ||
+            target_y >= static_cast<int>(merged_height)) {
+          continue;
+        }
+        const std::size_t from = (static_cast<std::size_t>(y) * source_width + x) * 4U;
+        const std::size_t to =
+            (static_cast<std::size_t>(target_y) * merged_width +
+             static_cast<std::size_t>(target_x)) *
+            4U;
+        for (std::size_t channel = 0; channel < 4U; ++channel) {
+          merged_before[to + channel] = source[from + channel];
+        }
+      }
+    }
+  };
+  // ⚠ 顺序：先贴 next 的 before，再贴旧的 before。旧 before 更"早"
+  //（它记录整笔开始前的样子），重叠处必须以它为准——反过来会让撤销停在中途。
+  stamp(next.area_, next.before_);
+  stamp(area_, before_);
+
+  // `after_` 同样要**逐像素拼**，不能直接取 `next.after_`。
+  //
+  // 原因对称于 `before_`：并集矩形比 `next.area_` 大，而更大的那部分像素的
+  // "这一笔之后的样子"只存在于**当前画布**上（旧 after 的那部分已被 last 覆盖）。
+  // 直接取 `next.after_` 会让重做时只画出最后一小段——表现是"撤销再重做，笔迹变短了"。
+  //
+  // 填当前画布值是对的：并集内此刻的状态就是"这一笔进行到此为止"的样子，
+  // 而重做要恢复的正是这个状态。
+  std::vector<std::uint8_t> merged_after = read_region(canvas, merged);
+  if (merged_after.empty()) return false;
+
+  area_ = merged;
+  before_ = std::move(merged_before);
+  after_ = std::move(merged_after);
+  return true;
+}
+
 void PixelPatchCommand::blit(Document& document, const std::vector<std::uint8_t>& source) const {
   if (layer_ >= document.layers().size()) return;
   write_region(document.layers()[layer_].pixels, area_, source);
@@ -184,12 +283,40 @@ auto Document::composite_pixel(int x, int y) const -> Color {
 
 void Document::push(std::unique_ptr<Command> command) {
   if (command == nullptr) return;
+  // **一笔 = 一条历史**：尝试把新补丁并进栈顶那一条。
+  //
+  // 为何在这一层做而不是让 `CanvasView` 自己攒：攒的逻辑要判断"两次移动是不是
+  // 同一笔"，而那需要知道"图层/标签/位置是否连续"——那些只有补丁自己清楚。
+  // 放在 `push` 里还有个好处：**所有**推入路径都自动获得合并
+  //（画笔、橡皮、将来别的连续绘制），不必每处记得调。
+  //
+  // ⚠ 只在**栈顶是同类补丁**时并：光标不在末尾（用户撤销过）时说明新命令属于
+  // 新的一段，与栈顶无关——那种情况下并进去会让"撤销一次退到别的地方"。
+  if (!stroke_sealed_ && cursor_ == commands_.size() && cursor_ > 0U && !commands_.empty()) {
+    if (auto* top = dynamic_cast<PixelPatchCommand*>(commands_[cursor_ - 1].get());
+        top != nullptr) {
+      if (auto* incoming = dynamic_cast<PixelPatchCommand*>(command.get());
+          incoming != nullptr) {
+        if (top->try_merge(*this, *incoming)) {
+          // 已吸收：**不再新增条目**（历史条数不增 = 一笔一条）。
+          dirty_ = true;
+          return;
+        }
+        // 并**不进去**（不相邻/不同工具）也要**封笔**：新补丁成为新的一条，
+        // 而"这一笔"就此断开——否则后面来的补丁会试图并进这条全新的命令，
+        // 把两条无关的笔画连起来。
+        stroke_sealed_ = true;
+      }
+    }
+  }
   // 在历史中间落新命令 → 丢弃"未来"（与所有编辑器的语义一致）。
   if (cursor_ < commands_.size()) {
     commands_.resize(cursor_);
   }
   commands_.push_back(std::move(command));
   ++cursor_;
+  // 落了一条新命令 = 本笔开始（后续同笔补丁可并进它），直到 `seal_stroke`。
+  stroke_sealed_ = false;
   dirty_ = true;
 }
 

@@ -1,5 +1,7 @@
 #include "st/ui/ui_root.hpp"
 
+#include "st/ui/input_coalescer.hpp"
+
 #include <algorithm>
 #include <bit>
 #include <cctype>
@@ -549,6 +551,34 @@ auto UiRoot::dispatch_key_into(Element* root, Event& event) -> bool {
   return false;
 }
 
+auto UiRoot::coalesced_move_count() const noexcept -> std::size_t {
+  return moves_.merged_count();
+}
+
+auto UiRoot::flush_coalesced_moves() -> std::size_t {
+  const auto move = moves_.take();
+  if (!move.has_value()) return 0;
+  // 指针离开：只发 leave（本帧没有真实移动时 `latest` 是旧值，不该当成"移动了"）。
+  if (move->left && !move->moved() && move->merged == 0) {
+    Event leave;
+    leave.kind = EventKind::HoverOut;
+    leave.position = move->latest;
+    (void)dispatch(leave);
+    return 0;
+  }
+  Event event;
+  event.kind = EventKind::MouseMove;
+  // 位置取**最新**（指针现在在哪），但 `earliest` 已经记在本帧的历史里——
+  // 而"本帧最早的位置"由 `latest_move` 暴露给需要画线段的调用方（见头文件）。
+  event.position = move->latest;
+  event.ctrl = move->ctrl;
+  event.shift = move->shift;
+  event.alt = move->alt;
+  event.meta = move->meta;
+  (void)dispatch(event);
+  return 1 + move->merged;
+}
+
 auto UiRoot::dispatch(Event& event) -> bool {
   // 分发前先清悬垂指针：界面每帧都可能重建子树（列表刷新、页面替换），
   // 而焦点/悬停/按压指针可能正指着已被销毁的元素
@@ -567,6 +597,27 @@ auto UiRoot::dispatch(Event& event) -> bool {
   // 若这个事件又是“悬停在带提示的元素上”，下一帧的推进会把计时重新拉起。
   hide_hint();
   bool handled = false;
+
+  // **高频移动的帧内合并**（见 `input_coalescer.hpp`）。
+  //
+  // 为何在派发入口就拦住而不是在 `Application` 的循环里：`dispatch` 是**所有**
+  // 输入的唯一入口（测试、脚本、真窗口都走它），在这里合并意味着"经过框架的事件"
+  // 已经合并过——应用不必各自判断，测试也能直接验证合并语义。
+  if (event.kind == EventKind::MouseMove) {
+    // ⚠ **按下期间不合并**：拖拽（画线、拖滑块、拖选区）要的是"每一次移动"，
+    // 因为那是连续几何（`stroke(from, to)` 靠相邻位置画线段）。
+    // 合并掉中间的会让笔迹变成"跳跃的大线段"——那是可见的错。
+    //
+    // 也就是说：合并只用于**悬停类**移动（改变光标、hover 高亮、提示计时），
+    // 那些语义本来就是"当前在哪"，与路径无关。
+    if (pressed_ != nullptr) {
+      // 直接派发（下面的 switch 会处理），不经过合并器。
+      moves_.reset();
+    } else {
+      moves_.feed(event.position, event.ctrl, event.shift, event.alt, event.meta);
+      return false;   // 本帧不再往下派发；帧末由 `flush_coalesced_moves` 统一发
+    }
+  }
 
   switch (event.kind) {
     case EventKind::MouseMove: {

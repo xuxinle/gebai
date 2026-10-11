@@ -284,6 +284,12 @@ auto CanvasView::on_event(const st::ui::RenderContext& context, Event& event) ->
     }
     case EventKind::MouseUp:
       dragging_ = false;
+      // **抬起 = 一笔结束**：封笔后，后面推入的补丁不再并进这一笔的历史条目。
+      //
+      // 不封会怎样：用户在抬起后又落同处一笔，`try_merge` 的三条判据
+      //（同图层 / 同工具 / 位置相邻）**全部满足**，两笔会并成一条——
+      // 撤销一次退回两笔之前，用户判定"撤销退多了"。
+      if (document_ != nullptr) document_->seal_stroke();
       return false;
     case EventKind::Wheel: {
       // Ctrl+滚轮 = 缩放（设计文档 §3.3）；不按 Ctrl 的滚轮留给外层滚动。

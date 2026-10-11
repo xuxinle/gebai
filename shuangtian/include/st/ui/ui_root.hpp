@@ -12,6 +12,7 @@
 
 #include "st/raster/canvas.hpp"
 #include "st/ui/element.hpp"
+#include "st/ui/input_coalescer.hpp"
 #include "st/ui/selector.hpp"
 #include "st/ui/text_port.hpp"
 #include "st/ui/theme.hpp"
@@ -57,6 +58,14 @@ class UiRoot : public Element::HostFocus {
 
   /// 事件分发（命中测试 → 捕获链 → 冒泡；焦点/悬停状态随之更新）。
   [[nodiscard]] auto dispatch(Event& event) -> bool;
+
+  /// 帧末把本帧合并的指针移动派发出去（见 `input_coalescer.hpp`）。
+  ///
+  /// 返回本帧实际派发的移动次数（`1 + 被合并掉的次数`；无移动返回 0）。
+  /// 宿主在**画完一帧之后**调它——顺序反了就等于"没合并"。
+  auto flush_coalesced_moves() -> std::size_t;
+  /// 本帧被合并掉的移动次数（诊断/测试用；不含首次）。
+  [[nodiscard]] auto coalesced_move_count() const noexcept -> std::size_t;
 
   /// 事件观察者：每次事件分发到具体元素后回调（事件引用 + 命中元素）。
   ///
@@ -354,6 +363,10 @@ class UiRoot : public Element::HostFocus {
   bool focus_ring_visible_{true};
   Element* hovered_{nullptr};
   Element* pressed_{nullptr};
+  /// 帧内指针移动的合并器（见 `input_coalescer.hpp`）。
+  ///
+  /// 只在**未按下**时使用（拖拽期间每次移动都要派发——那是连续几何，合并会断笔）。
+  InputCoalescer moves_{};
   EventObserver event_observer_{};
   /// 全局快捷键表（后注册优先）。
   struct ShortcutEntry {
