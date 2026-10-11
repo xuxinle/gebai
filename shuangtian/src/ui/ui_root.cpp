@@ -3,6 +3,7 @@
 #include "st/ui/input_coalescer.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <bit>
 #include <cctype>
 #include <cstdint>
@@ -642,6 +643,7 @@ auto UiRoot::dispatch(Event& event) -> bool {
         break;
       }
       pressed_ = target;
+      pressed_at_ = event.position;   // 拖动判定基准（见 Click 分支的兑底拦截）
       if (target->focusable() && focused_ != target) set_focus(target);
       // 鼠标按下**不给焦点环**（见 `focus_ring_visible()`）：点一下就在按钮上
       // 留一圈边框不是任何人要的，而且它会一直留着。键盘一按就回来
@@ -660,6 +662,14 @@ auto UiRoot::dispatch(Event& event) -> bool {
       // 拖出手柄/滑块后释放不再丢失（SplitView 拖分栏、ScrollBar 拖滑块同属此类；
       // 与上方 MouseMove 的 `pressed_` 分支同一契约：拖拽语义属于「按下的那个元素」）。
       // 它不处理时回落命中元素（普通点击的释放路径完全不变）。
+      //
+      // 释放时结算「本次按放是否拖动过」（见 Click 分支的兜底拦截）——
+      // 放在这里而不是 Click 里读 `pressed_at_`：后端补发的 Click 到达时 `pressed_`
+      // 已清空，而**只有 Click、没有 down/up**的派发（控制通道/测试常态）里
+      // `pressed_at_` 是无效默认值，用它判会把普通点击也误判成拖动（实测踩到）。
+      last_release_dragged_ =
+          std::abs(event.position.x - pressed_at_.x) > kDragThreshold ||
+          std::abs(event.position.y - pressed_at_.y) > kDragThreshold;
       Element* target = hit_test(event.position);
       Element* pressed = pressed_;
       if (pressed_ != nullptr) {
@@ -687,7 +697,20 @@ auto UiRoot::dispatch(Event& event) -> bool {
       }
       pressed_ = nullptr;
       handled = target != nullptr && dispatch_to(*target, event);
-      if (!handled && target != nullptr && event.kind == EventKind::Click) {
+      // ⚠ 拖动过的松手**不是点击**：后端在 `LBUTTONUP` 后无条件补发 `Click`
+      //（`platform_win32.cpp`），而本分支的兑底 `activate()` 不加区分的话，
+      // 「拖 SplitView 手柄松手」会被当成激活——`SplitView::activate()` 是双击归位
+      // （0.5），于是面板拖完就回弹到一半（实测正是用户报的缺陷）。
+      //
+      // 判据：按下→本次事件的位移超过阈值 = 拖动过，不再兑底激活。
+      // 这是**手势语义**的账，只能记在 UiRoot：拖拽归属已在本类（`pressed_`），
+      // 每个组件自己猜会重复踩坑（ScrollBar 拖完、未来任何可拖组件）。
+      // 组件显式消费 `Click` 的不受影响（那条路在上面 `dispatch_to` 已返回）。
+      // 「刚结束的这次按放拖动过」才拦（`last_release_dragged_` 由 MouseUp 结算；
+      // 纯 Click 派发没有先导 down/up，`pressed_at_` 无效——那种情况不拦，兜底照常）。
+      const bool dragged = event.kind == EventKind::Click && last_release_dragged_;
+      last_release_dragged_ = false;   // 一次性：下一次按放重新结算
+      if (!handled && !dragged && target != nullptr && event.kind == EventKind::Click) {
         target->activate();
         handled = true;
       }

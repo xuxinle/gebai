@@ -218,6 +218,39 @@ ST_TEST(ui_split_view_keyboard_and_actions) {
   ST_CHECK_NEAR(split->ratio(), 0.5f, 0.0001f);
 }
 
+ST_TEST(ui_split_view_drag_release_click_does_not_reset_ratio) {
+  // 回归：拖动后的松手**不是点击**（Win32 后端在 LBUTTONUP 后无条件补发 Click，
+  // 见 platform_win32.cpp 的 WM_LBUTTONUP）。UiRoot 的 Click 兑底 activate() 若不
+  // 区分拖动，拖 SplitView 手柄松手就会触发「双击归位」语义 → 比例弹回 0.5
+  //（实测：用户拖侧栏/底部面板松手就回弹到一半宽度）。
+  SplitFixture fixture(SplitView::Orientation::Horizontal, 0.3f, st::math::Size{800.0f, 400.0f});
+  auto& root = fixture.root;
+  auto* split = fixture.split;
+  ST_REQUIRE(split != nullptr);
+
+  const Rect whole = split->bounds();
+  const Rect handle = fixture.handle();
+  const float mid_y = whole.center().y;
+  // 拖到 0.55：down → move（位移远超阈值）→ up → **补发 Click**（复刻 Win32 序列）
+  ST_CHECK(dispatch_kind(root, st::ui::EventKind::MouseDown,
+                         Point{handle.center().x, mid_y}));
+  const float target_x = whole.x + (whole.width - split->handle_size()) * 0.55f +
+                         split->handle_size() * 0.5f;
+  ST_CHECK(dispatch_kind(root, st::ui::EventKind::MouseMove, Point{target_x, mid_y}));
+  ST_CHECK_NEAR(split->ratio(), 0.55f, 0.01f);
+  (void)dispatch_kind(root, st::ui::EventKind::MouseUp, Point{target_x, mid_y});
+  (void)dispatch_kind(root, st::ui::EventKind::Click, Point{target_x, mid_y});   // ← 修复前这里触发 activate
+  ST_CHECK_NEAR(split->ratio(), 0.55f, 0.01f);   // 不能弹回 0.5
+
+  // 对照：原地微动（位移 < 阈值 4px）的 Click 仍是点击 → 兑底 activate 照常工作
+  //（SplitView::activate = 归位 0.5；这证明修复没有误伤按钮类点击路径）。
+  ST_CHECK(dispatch_kind(root, st::ui::EventKind::MouseDown, Point{target_x, mid_y}));
+  (void)dispatch_kind(root, st::ui::EventKind::MouseMove, Point{target_x + 2.0f, mid_y});
+  (void)dispatch_kind(root, st::ui::EventKind::MouseUp, Point{target_x + 2.0f, mid_y});
+  (void)dispatch_kind(root, st::ui::EventKind::Click, Point{target_x + 2.0f, mid_y});
+  ST_CHECK_NEAR(split->ratio(), 0.5f, 0.01f);   // 微动点击 → activate 归位仍生效
+}
+
 ST_TEST(ui_split_view_property_and_semantics) {
   SplitFixture fixture(SplitView::Orientation::Horizontal, 0.35f, st::math::Size{800.0f, 400.0f});
   auto* split = fixture.split;

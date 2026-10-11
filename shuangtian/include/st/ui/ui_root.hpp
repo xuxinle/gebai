@@ -373,6 +373,24 @@ class UiRoot : public Element::HostFocus {
   bool focus_ring_visible_{true};
   Element* hovered_{nullptr};
   Element* pressed_{nullptr};
+  /// 本次按下时的指针位置（与 `pressed_` 同生命周期）。
+  ///
+  /// 用途：区分「点击」与「拖动后的释放」——后端在 `LBUTTONUP` 后无条件补发 `Click`
+  ///（见 `platform_win32.cpp`），而 `Click` 分支的兜底 `activate()` 会把拖动过的松手
+  /// 误当成激活（实测：拖 SplitView 手柄松手 → `activate()` → 比例归位 0.5，
+  /// 表现为“面板拖动后回弹到一半”）。阈值判定见 `dispatch` 的 `Click` 分支。
+  math::Point pressed_at_{};
+  /// 「最近一次按放」是否拖动过（`MouseUp` 时结算，`Click` 分支消费后复位）。
+  ///
+  /// 为什么不直接在 Click 里比对 `pressed_at_`：后端补发的 Click 到达时 `pressed_`
+  /// 已清空；而**只有 Click、没有 down/up**的派发（控制通道 `input.mouse{kind:"click"}`、
+  /// 单测夹具）里 `pressed_at_` 是无效默认值——直接比对会把普通点击误判成拖动（实测踩到）。
+  bool last_release_dragged_{false};
+  /// 「拖动过」的位移阈值（逻辑 px）：超过它就不再把这次松手当点击。
+  ///
+  /// 取手柄命中区的同一量级（SplitView 手柄 8px）：太小会把手抖误判成拖动
+  ///（拖选/拖拽都会中招），太大则小幅拖动仍触发激活。命中区的一半是实测最佳平衡。
+  static constexpr float kDragThreshold{4.0f};
   /// 帧内指针移动的合并器（见 `input_coalescer.hpp`）。
   ///
   /// 只在**未按下**时使用（拖拽期间每次移动都要派发——那是连续几何，合并会断笔）。
