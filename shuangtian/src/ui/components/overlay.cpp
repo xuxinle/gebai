@@ -58,6 +58,16 @@ void Dialog::set_actions(std::vector<std::string> actions) {
     auto button = std::make_unique<Button>(
         actions_[index], primary ? Button::Variant::Primary : Button::Variant::Secondary,
         Button::Size::Medium);
+    // 可预测 id：控制通道/自动化要能**点到**确认按钮。
+    // 没有 id 时“确认对话框”只能靠坐标戳——“危险操作先确认”这条安全路径
+    // 就成了唯一无法回归验证的路径（而它最该被验证）。
+    // 对话框自己没设 id 时用基名 `dialog`。
+    const std::string base = id().empty() ? std::string("dialog") : std::string(id());
+    if (primary) {
+      button->set_id(base + "-action-primary");
+    } else {
+      button->set_id(std::format("{}-action-{}", base, index));
+    }
     button->on_click = [this, index]() {
       if (on_action) on_action(index);
     };

@@ -46,6 +46,11 @@ class Dialog : public Element {
   void set_body(std::string body);
   [[nodiscard]] auto body() const noexcept -> const std::string& { return body_; }
   /// 设定底部按钮行（顺序即 `on_action` 的序号；末项为主按钮）。
+  ///
+  /// 每个按钮会拿到**可预测的 id**：`<dialog-id>-action-<序号>`（末项另有
+  /// `<dialog-id>-action-primary`）。没有 id 时，控制通道**定位不到这些按钮**，
+  /// 于是“危险操作必须确认”这条安全路径就无法被自动化验证——而它恰恰是最该被
+  /// 验证的一条（实测：确认浮层出现得了、点不到，e2e 只能卡在那里）。
   void set_actions(std::vector<std::string> actions);
   [[nodiscard]] auto actions() const noexcept -> const std::vector<std::string>& { return actions_; }
 
