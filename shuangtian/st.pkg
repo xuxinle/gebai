@@ -50,7 +50,7 @@
     }
   },
   "//system_libs": "本机（非交叉）链接用的库。注意与 `toolchains.<名>.system_libs` 的分工：后者在**交叉编译**时**整体接管**（见 `resolve_system_libraries`），本机构建根本不看它。所以 Win32 相关的系统库（dbghelp 供崩溃调用栈符号化）两处都要写。",
-  "system_libs": ["pthread", "dl", "m", "dbghelp", "psapi"],
+  "system_libs": ["pthread", "dl", "m", "dbghelp", "nanosrv", "psapi"],
   "toolchains": {
     "mingw": {
       "compiler": "x86_64-w64-mingw32-g++",

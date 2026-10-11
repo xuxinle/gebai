@@ -147,8 +147,15 @@ $objects = @($sources + $thirdPartySources | ForEach-Object {
     Join-Path $objDir (($_ -replace '[:\\/]', '_') + '.o')
 })
 $exe = Join-Path $binDir 'st.exe'
+# `-ldbghelp`：`src/core/platform_crash.cpp` 用 DbgHelp 把崩溃栈解析成函数名
+# （`SymInitialize`/`SymFromAddr`/`SymFunctionTableAccess64`…）。
+#
+# ⚠ 这条曾经漏过：自举链接报一串
+#   `undefined reference to __imp_SymFunctionTableAccess64`
+# ——**报错指向源码，而真因是链接库列表漏了一项**（符号是 Windows 系统库里的）。
+# 与 `st.pkg` 的 `system_libs` 必须保持一致（那边已含 dbghelp，两边同口径）。
 $linkOutput = & $CXX $objects '-o' $exe '-lws2_32' '-lgdi32' '-luser32' '-lshell32' '-lwinpthread' `
-                             '-static-libgcc' '-static-libstdc++' 2>&1
+                             '-ldbghelp' '-static-libgcc' '-static-libstdc++' 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host ($linkOutput | Out-String); Write-Error "链接失败" }
 
 $elapsed = ((Get-Date) - $started).TotalMilliseconds

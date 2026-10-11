@@ -471,9 +471,22 @@ struct PchContext {
 /// `-lpthread -ldl -lm`——mingw 根本没有这些库，链接必然失败。
 [[nodiscard]] auto default_system_libs(std::string_view platform) -> std::vector<std::string> {
   // Windows 目标的默认库：`ws2_32`（winsock）+ `user32`/`gdi32`（Win32 窗口后端）
-  // + `shell32`（`CommandLineToArgvW`：`ST_MAIN` 拿命令行参数用它）。
+  // + `shell32`（`CommandLineToArgvW`：`ST_MAIN` 拿命令行参数用它）
+  // + `dbghelp`/`nanosrv`/`psapi`（`src/core/platform_crash.cpp` 用 DbgHelp 把崩溃栈
+  //   解析成函数名：`SymInitialize`/`SymFromAddr`/`StackWalk64` 系）。
   // 少一个就是链接期"无法解析的外部符号"，而报错位置离真正原因（少了哪个库）很远。
-  if (platform == "windows") return {"ws2_32", "user32", "gdi32", "shell32"};
+  //
+  // ⚠ `dbghelp` 曾以两种形式各漏一次（记下来以免再漏）：
+  //   * `bootstrap.ps1` 的链接库列表漏它——自举直接失败；
+  //   * 本函数漏它——**独立工程**的测试二进制链接失败，而框架自身能链过
+  //     （因为框架清单的 `system_libs` 里有它，两条路不同口径）。
+  //
+  // `nanosrv` 为何也要：MinGW 里 `libdbghelp.a` 只是壳，真正的 API 存根在
+  // `libnanosrv.a`。GNU `ld` 有时会替你拉上，而 `ld.lld` 如实报未定义符号——
+  // 两者行为不一致，所以显式写全（本机现在是 lld）。
+  if (platform == "windows") {
+    return {"ws2_32", "user32", "gdi32", "shell32", "dbghelp", "nanosrv", "psapi"};
+  }
   return {"pthread", "dl", "m"};
 }
 
@@ -1112,6 +1125,66 @@ struct LanguageFlags {
   return libraries;
 }
 
+/// Windows `CreateProcessW` 的命令行上限（字符，含结尾 NUL）。
+/// POSIX 的 `execve` 按**单个参数**计（`ARG_MAX`，通常 2MB），量级完全不同。
+inline constexpr std::size_t kWindowsCommandLineLimit = 32767;
+/// 保守余量：命令行里还要放程序路径、`-o` 目标、旗标与引号。
+/// 估算超过「上限 - 余量」就用响应文件——宁早不晚（晚一次就是一次构建失败）。
+inline constexpr std::size_t kCommandLineHeadroom = 2048;
+
+/// 估算「把这些参数拼成命令行」要多少字符（逐个加引号 + 分隔空格，同 Windows 口径）。
+///
+/// 为何不真的拼出来再量：拼一次是 O(参数数) 的字符串拷贝，而链接参数上千个；
+/// 而这里只需要量级判断（差几个字符不影响结论）。
+[[nodiscard]] auto estimate_command_line(const std::string& program,
+                                         const std::vector<std::string>& args) -> std::size_t {
+  std::size_t total = program.size() + 2;   // 程序路径 + 空格 + 结尾 NUL
+  for (const auto& arg : args) {
+    total += arg.size() + 3;   // 引号 + 空格
+  }
+  return total;
+}
+
+/// 用**响应文件**重试一次链接（`g++ @file`——GCC/Clang 的通用机制）。
+///
+/// 写到哪里：产物同目录的同名 `.rsp`（放在 `build/` 下，与产物同生命周期）。
+/// 不写临时目录：路径更短、且出问题时能直接打开看（临时目录里的会先被清）。
+///
+/// `long_args` 是要进文件的那些（**对象文件与额外源**这类“一参数一项”的路径列表），
+/// `head`/`tail` 留在命令行（旗标、`-o 产物`、库）——这样即使响应文件的换行处理
+/// 有差异，链接行为的语义也不会变（旗标顺序与位置敏感）。
+///
+/// ⚠ 这里**必须由调用方显式给出哪些参数进文件**，不能靠“长得像路径”去猜：
+/// 第一版就是猜的（“含 `.o` 或 `build/` 就当对象文件”），而 `-o` 的产物路径
+/// 恰好也含 `build/`——于是它被挪进了响应文件，命令行里 `-o` 没了目标，
+/// 链接器报 `could not open .../st_tests.exe: no such file or directory`。
+/// 那个报错看着像“产物不存在”，而真因是**搞错了哪个参数属于哪一边**。
+[[nodiscard]] auto link_with_response_file(const ResolvedToolchain& toolchain,
+                                           const std::vector<std::string>& head,
+                                           const std::vector<std::string>& long_args,
+                                           const std::vector<std::string>& tail,
+                                           const std::string& output,
+                                           const std::string& cwd)
+    -> Result<process::RunResult> {
+  const std::string response_path = output + ".rsp";
+  // 响应文件的换行规则：GCC 把**空白**当分隔（不是 shell 的引号规则），
+  // 所以一参数一行最稳（含空格的路径不需要引号，GCC 会原样吃整行）。
+  std::string body;
+  for (const auto& arg : long_args) {
+    body += arg;
+    body += '\n';
+  }
+  if (body.empty()) return unexpected(ErrorCode::Invalid, "响应文件无可写内容（调用方参数错）");
+  if (auto written = fs::write_text(response_path, body); !written) {
+    return forward_error(written.error());
+  }
+  std::vector<std::string> command_line_args = head;
+  command_line_args.push_back("@" + response_path);
+  command_line_args.insert(command_line_args.end(), tail.begin(), tail.end());
+  return process::run(toolchain.compiler_path, command_line_args,
+                      process::Options{.cwd = cwd, .env = toolchain.env});
+}
+
 [[nodiscard]] auto link(const Manifest& manifest, const BuildOptions& options,
                         const std::vector<CompileUnit>& units, const std::string& output,
                         const std::vector<std::string>& profile_flags_list,
@@ -1125,6 +1198,14 @@ struct LanguageFlags {
   const std::vector<std::string> libraries = resolve_system_libraries(manifest, toolchain);
 
   std::vector<std::string> args;
+  // `args`（head）= 旗标与链接器开关；`long_args` = **对象文件与额外源**（"一参数一项"
+  // 的长列表）；`tail` = `-o 产物` + 库 + 工具链附加旗标。
+  //
+  // 为何从一开始就分三段（而不是到响应文件那里再分）：响应文件只该装 `long_args`，
+  // 而"哪些参数是长列表"**只有这里知道**——让下游去猜就是第一版那个缺陷
+  //（按"长得像路径"挑，把 `-o` 的产物路径也挑进了响应文件）。
+  std::vector<std::string> long_args;
+  std::vector<std::string> tail;
   for (const auto& flag : profile_flags_list) args.push_back(flag);
   // 链接器：存在 mold/lld 时优先（链接是纯 I/O + 符号解析，lld 通常快 2~4 倍）。
   //
@@ -1150,13 +1231,17 @@ struct LanguageFlags {
   }
   // 目标三元组：链接侧必须与编译侧**同一个**（否则拿 A 目标的运行库链 B 目标的对象）
   for (const auto& item : toolchain.target_args()) args.push_back(item);
-  for (const auto& unit : units) args.push_back(unit.object);
-  for (const auto& extra : extra_sources) args.push_back(extra);
-  args.push_back("-o");
-  args.push_back(output);
+  for (const auto& unit : units) long_args.push_back(unit.object);
+  for (const auto& extra : extra_sources) long_args.push_back(extra);
+  tail.push_back("-o");
+  tail.push_back(output);
   const auto link_arguments = link_library_arguments(toolchain.platform, libraries);
-  for (const auto& item : link_arguments) args.push_back(item);
-  for (const auto& flag : toolchain.extra_flags) args.push_back(flag);
+  for (const auto& item : link_arguments) tail.push_back(item);
+  for (const auto& flag : toolchain.extra_flags) tail.push_back(flag);
+  // 完整命令行（未启用响应文件时用它；长度估算也基于它）。
+  std::vector<std::string> full_args = args;
+  full_args.insert(full_args.end(), long_args.begin(), long_args.end());
+  full_args.insert(full_args.end(), tail.begin(), tail.end());
   // Windows 目标的**静态链接 C++ 运行库**（`-static-libgcc -static-libstdc++`）。
   // 不静态时产物要求 `libgcc_s_seh-1.dll`/`libstdc++-6.dll` 在 PATH 上——用户双击 exe
   // 或从别的目录启动时就报"找不到 dll"（与 mingw 交叉档同口径，见 st.pkg 的 extra_flags）。
@@ -1169,9 +1254,43 @@ struct LanguageFlags {
     }
   }
 
-  auto result = process::run(toolchain.compiler_path, args,
-                             process::Options{.cwd = manifest.directory, .env = toolchain.env});
-  if (!result) return forward_error(result.error());
+  // 主动判长度：超阈值就直接用响应文件，不等失败。
+  //
+  // 为何不依赖“失败后重试”那个退路：超长时 `CreateProcessW` 的报错是
+  // “文件名或扩展名太长”——**不指向命令行长度**，而“先失败一次”本身也是
+  // 一次白跑的链接（测试链接要几十秒）。所以两条都留：主动判 + 失败重试兜底。
+  const std::size_t estimated = estimate_command_line(toolchain.compiler_path, full_args);
+  const bool command_line_too_long =
+      toolchain.platform == "windows" &&
+      estimated > kWindowsCommandLineLimit - kCommandLineHeadroom;
+  auto result =
+      command_line_too_long
+          ? link_with_response_file(toolchain, args, long_args, tail, output, manifest.directory)
+          : process::run(toolchain.compiler_path, full_args,
+                         process::Options{.cwd = manifest.directory, .env = toolchain.env});
+  if (command_line_too_long && result.has_value()) {
+    // 如实报一声：响应文件是**退路**，而"链接参数多到需要退路"本身是值得知道的事
+    //（下一轮该考虑拆测试二进制了）。
+    ST_LOG_INFO("链接参数超长，已改用响应文件：{}（预计命令行 {} 字符，上限 {}）", output,
+                estimated, kWindowsCommandLineLimit);
+  }
+  if (!result) {
+    // 命令行超长（Windows `CreateProcessW` 上限 32767 字符）——**用响应文件重试**。
+    //
+    // 为何必须有这条退路：测试二进制会把**所有测试单元**链在一起，单元数随仓成长，
+    // 迟早撞上限。实测：244 个单元时命令行估算已 32974 字符（超 207）。
+    // 而报错信息是 `无法启动 'g++.exe': 文件名或扩展名太长`——**完全指不到命令行长度**
+    //（看着像文件名有问题），这是那种"查半天才发现是构建器的问题"的缺陷。
+    if (!command_line_too_long) {
+      if (auto retried = link_with_response_file(toolchain, args, long_args, tail, output,
+                                                 manifest.directory);
+          retried.has_value()) {
+        ST_LOG_INFO("链接失败且疑似命令行过长，已用响应文件重试成功：{}", output);
+        result = std::move(retried);
+      }
+    }
+    if (!result) return forward_error(result.error());
+  }
   if (result->exit_code != 0) {
     const std::string diagnostics = result->stdout_text + result->stderr_text;
     // 产物被正在运行的实例占着（Windows 上必现：exe 被占用时链接器写不进去）。
