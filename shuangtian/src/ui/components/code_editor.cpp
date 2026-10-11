@@ -164,6 +164,45 @@ auto CodeEditor::available_languages() -> std::vector<std::string> {
   return text::global_languages().names();
 }
 
+void CodeEditor::set_line_decorations(std::vector<LineDecoration> marks) {
+  line_marks_ = std::move(marks);
+  rebuild_line_mark_index();
+  mark_dirty();
+}
+
+void CodeEditor::rebuild_line_mark_index() {
+  // 按行号建索引（绘制每帧都要查「这一行是什么装饰」，线性查找会在长文档上放大）。
+  // 槽里存「装饰下标 + 1」（0 = 无）；同一行多条时**后者胜**（与整体替换的顺序语义一致）。
+  const std::size_t rows = line_count() + 2;
+  line_mark_index_.assign(rows, 0);
+  for (std::size_t index = 0; index < line_marks_.size(); ++index) {
+    const std::size_t line = line_marks_[index].line;
+    if (line > 0 && line < rows) line_mark_index_[line] = index + 1;
+  }
+}
+
+void CodeEditor::clear_line_decorations() {
+  if (line_marks_.empty() && line_mark_index_.empty()) return;
+  line_marks_.clear();
+  line_mark_index_.clear();
+  mark_dirty();
+}
+
+namespace {
+
+/// 滚动位置是否变化（浮点比较按**像素千分之一**夹取：绘制是亚像素的，
+/// 严格相等会让「完全相同的两次滚」也触发回调，破坏并列两栏的同步循环）。
+[[nodiscard]] auto scroll_changed(float before, float after) noexcept -> bool {
+  return std::abs(before - after) > 0.001f;
+}
+
+}  // namespace
+
+auto CodeEditor::notify_scroll(float before_x, float before_y) -> void {
+  if (!scroll_changed(before_x, scroll_x_) && !scroll_changed(before_y, scroll_y_)) return;
+  if (on_scroll) on_scroll(scroll_x_, scroll_y_);
+}
+
 void CodeEditor::apply_theme(const Theme& theme) {
   // 语法配色在绘制时按 `theme.syntax()` 取（无需缓存到样式），但**基准字号必须在这里落**：
   // 主题是字号缩放（`--ui-font-scale` → `Metrics::scale_fonts`）的唯一真值源，
@@ -450,6 +489,11 @@ void CodeEditor::push_undo(bool coalesce) {
 
 void CodeEditor::notify_change() {
   if (find_enabled_) refresh_find_after_edit();
+  // 文本变了 → 行数变了 → 行装饰的按行索引必须重建。
+  //
+  // 不重建的后果是**静默错行**：索引表还按旧行数算，插/删一行之后
+  // 所有装饰都偏了一行（差异视图里就是「颜色标在错的行上」，而它看起来仍然"有颜色"）。
+  if (!line_marks_.empty()) rebuild_line_mark_index();
   mark_highlight_dirty();
   clamp_cursor();
   if (on_change) on_change(text_);
@@ -1044,8 +1088,10 @@ void CodeEditor::apply_v_scroll_drag(const RenderContext& context, float pointer
   const float local = std::clamp((pointer_y - track.y - v_drag_offset_) / travel, 0.0f, 1.0f);
   const float max_scroll = std::max(0.0f, total - bounds_.height);
   // **不碰光标**：滚动条的语义是“看另一个地方”，不是“把光标挪过去”。
+  const float before_y = scroll_y_;
   scroll_y_ = local * max_scroll;
   mark_dirty();
+  notify_scroll(scroll_x_, before_y);
 }
 
 auto CodeEditor::x_for_index(const RenderContext& context, std::size_t index) const -> float {
@@ -1236,15 +1282,20 @@ void CodeEditor::clamp_scroll(const RenderContext& context) {
 }
 
 void CodeEditor::scroll_by(float dx, float dy) {
+  const float before_x = scroll_x_;
+  const float before_y = scroll_y_;
   scroll_x_ = std::max(0.0f, scroll_x_ + dx);
   scroll_y_ = std::max(0.0f, scroll_y_ + dy);
   mark_dirty();
+  notify_scroll(before_x, before_y);
 }
 
 void CodeEditor::scroll_to_line(std::size_t line) {
   const std::size_t clamped = std::min(line == 0 ? 0 : line - 1, line_count() - 1);
+  const float before_y = scroll_y_;
   scroll_y_ = static_cast<float>(clamped) * line_height_cache_;
   mark_dirty();
+  notify_scroll(scroll_x_, before_y);
 }
 
 auto CodeEditor::first_visible_line(const RenderContext& context) const -> std::size_t {
@@ -1472,6 +1523,52 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
                        raster::Paint::solid(colors.surface_alt), 0.0f);
     }
 
+    // —— 行装饰（差异视图 / Git gutter）——
+    //
+    // 顺序刻意如此：装饰带在**悬停底纹之上**、当前行底色**之下**——
+    // 三层同时存在时，“光标在哪一行”仍应是一眼可见的那一层（当前行带是主题
+    // 专门为此选的强色），而增/删色只作底；反过来会被行带盖成一片，
+    // 用户在差异视图里就分不清“我正在看哪一行”。
+    const LineDecoration* decoration = nullptr;
+    // ⚠ 索引差一：循环里的 `line` 是 **0 基**，而装饰按**人读的 1 起行号**指定
+    //（与 `goto_line`/`diagnostic` 的属性面同一套坐标系）。
+    const std::size_t line_number = line + 1;
+    if (line_number < line_mark_index_.size() && line_mark_index_[line_number] != 0) {
+      decoration = &line_marks_[line_mark_index_[line_number] - 1];
+    }
+    if (decoration != nullptr && decoration->mark != LineMark::None) {
+      math::Color ink{};
+      bool use_ink = true;
+      switch (decoration->mark) {
+        case LineMark::Added:
+        case LineMark::Modified: ink = syntax.inserted; break;
+        case LineMark::Removed: ink = syntax.deleted; break;
+        case LineMark::Filler: {
+          // 对齐填充行：用**远弱一档**的底（它是“这里没有内容”，不是“这里有改动”）——
+          // 与真实行同强度会让人以为对方多了一段内容。
+          ink = colors.surface_alt.with_alpha_f(0.45F);
+          break;
+        }
+        case LineMark::None: use_ink = false; break;
+      }
+      if (use_ink) {
+        // 带**撑满行盒**（`0 .. height`），与选择底色同一口径：
+        // 差异带是一条连续的条带，用行带（`ink_top/ink_height`）会在行间留缝，看着像“条纹”。
+        canvas.fill_rect(math::Rect{bounds_.x, row_top, bounds_.width, height},
+                         raster::Paint::solid(ink.with_alpha_f(0.16F)), 0.0f);
+        if (show_line_numbers_ && gutter_cache_ > 0.0f) {
+          canvas.fill_rect(math::Rect{bounds_.x, row_top, gutter_cache_, height},
+                           raster::Paint::solid(ink.with_alpha_f(0.16F)), 0.0f);
+          if (decoration->gutter_bar) {
+            // 槽内竖条：贴 gutter 左缘的 3px 实心条（IDEA/VSCode 同款位置）——
+            // 这是“这一侧有改动”的唯一醒目标志，也是并列视图两栏各自的“颜色钉”。
+            canvas.fill_rect(math::Rect{bounds_.x + 1.0f, row_top, 3.0f, height},
+                             raster::Paint::solid(ink), 0.0f);
+          }
+        }
+      }
+    }
+
     // 当前行底色 + 行号槽内的当前行指示（行号槽高亮 = VSCode 的“我在哪一行”锚点）
     if (line == current) {
       // **贴合墨迹**（`band_top`/`band_height`）：撑满行盒会让文字上方空一截，
@@ -1624,9 +1721,16 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
       }
     }
 
-    // 行号
+    // 行号（`decoration->number` 非 0 时用它——并列差异的两栏是同一份文本的两次呈现，
+    // 右栏要显示新侧行号、左栏显示旧侧行号；那两串号只有宿主知道）
     if (show_line_numbers_ && gutter_cache_ > 0.0f) {
-      const std::string number = std::to_string(line + 1);
+      // 行号三态：`kNoNumber` = 不显示（分隔条/对齐填充行）、`0` = 用真实行号、
+      // 其余 = 宿主指定的号（并列差异的两侧行号）。
+      const std::size_t declared = decoration != nullptr ? decoration->number : 0;
+      const bool hide_number =
+          declared == kNoNumber || (decoration != nullptr && decoration->mark == LineMark::Filler);
+      const std::size_t shown = declared != 0 && declared != kNoNumber ? declared : line + 1;
+      const std::string number = hide_number ? std::string{} : std::to_string(shown);
       const float number_width = port.measure_width(number, font_size(), text::FontRole::Monospace);
               const math::Color number_color =
           line == current ? syntax.plain : syntax.line_number;
@@ -1896,6 +2000,8 @@ auto CodeEditor::on_event(const RenderContext& context, Event& event) -> bool {
       return false;  // 不吞：Click 的激活语义照常走
     case EventKind::Wheel: {
       // Shift+滚轮 = 水平滚动（主流编辑器惯例；也是长行唯一不靠拖拽的入口）
+      const float before_x = scroll_x_;
+      const float before_y = scroll_y_;
       if (event.shift) {
         scroll_x_ = std::max(0.0f, scroll_x_ - event.wheel_delta * 48.0f);
       } else {
@@ -1903,6 +2009,7 @@ auto CodeEditor::on_event(const RenderContext& context, Event& event) -> bool {
       }
       clamp_scroll(context);
       mark_dirty();
+      notify_scroll(before_x, before_y);
       return true;
     }
     case EventKind::TextInput:
@@ -2332,6 +2439,8 @@ auto CodeEditor::set_property(std::string_view name, std::string_view value) -> 
   }
   if (name == "scroll") {
     const std::size_t comma = value.find(',');
+    const float before_x = scroll_x_;
+    const float before_y = scroll_y_;
     try {
       if (comma == std::string_view::npos) {
         set_scroll_offset(0.0f, static_cast<float>(std::stod(std::string(value))));
@@ -2339,6 +2448,9 @@ auto CodeEditor::set_property(std::string_view name, std::string_view value) -> 
         set_scroll_offset(static_cast<float>(std::stod(std::string(value.substr(0, comma)))),
                           static_cast<float>(std::stod(std::string(value.substr(comma + 1)))));
       }
+      // 属性面写入也是一次滚动（并列视图的同步会互写属性）——
+      // 不通知会让「拖左栅滚、右栅不动」。
+      notify_scroll(before_x, before_y);
       return true;
     } catch (...) {
       return false;
@@ -2604,6 +2716,15 @@ auto CodeEditor::invoke_action(std::string_view action, std::string_view argumen
   if (action == "scroll_to_line") {
     try {
       scroll_to_line(static_cast<std::size_t>(std::stoull(std::string(argument))));
+      return true;
+    } catch (...) {
+      return false;
+    }
+  }
+  if (action == "scroll_by") {
+    // 参数是 `dy`（正 = 向下），与 `scroll_by(dx, dy)` 的纵向分量同向。
+    try {
+      scroll_by(0.0f, static_cast<float>(std::stod(std::string(argument))));
       return true;
     } catch (...) {
       return false;

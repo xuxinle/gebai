@@ -1,0 +1,325 @@
+/// 结构化差异（`st::text::diff`）测试：两段文本生成 hunk / unified patch 解析 / 两栏行 /
+/// 往返一致性。
+///
+/// 本层是「对比能力」的地基（并列视图、hunk 导航、将来的逐块暂存与 gutter 都读它），
+/// 因此用例覆盖的是**语义**而不是实现：行号三种坐标、末尾换行、二进制、重命名、
+/// `\ No newline`、上下文分组边界——这些做错的表现都是"看着正常但差了几行"。
+
+#include <string>
+#include <vector>
+
+#include "st/test/test.hpp"
+#include "st/text/diff.hpp"
+
+namespace {
+
+using st::text::DiffDocument;
+using st::text::DiffHunk;
+using st::text::DiffLineKind;
+using st::text::FileDiff;
+
+/// 取 hunk 正文的「前缀 + 文本」形态（与 patch 文本同形，断言更贴近人读的东西）。
+[[nodiscard]] auto shape(const DiffHunk& hunk) -> std::vector<std::string> {
+  std::vector<std::string> out;
+  for (const auto& line : hunk.lines) {
+    switch (line.kind) {
+      case DiffLineKind::Context: out.push_back(" " + line.text); break;
+      case DiffLineKind::Removed: out.push_back("-" + line.text); break;
+      case DiffLineKind::Added: out.push_back("+" + line.text); break;
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
+ST_TEST(diff_single_line_change_middle) {
+  const std::vector<DiffHunk> hunks = st::text::diff_hunks("a\nb\nc\n", "a\nB\nc\n");
+  ST_REQUIRE(hunks.size() == 1);
+  const DiffHunk& hunk = hunks.front();
+  // 行号：两侧都是第 2 行；上下文各 1 行（文档只有 3 行）。
+  ST_CHECK_EQ(hunk.old_start, std::size_t{1});
+  ST_CHECK_EQ(hunk.old_count, std::size_t{3});
+  ST_CHECK_EQ(hunk.new_start, std::size_t{1});
+  ST_CHECK_EQ(hunk.new_count, std::size_t{3});
+  const auto lines = shape(hunk);
+  ST_REQUIRE(lines.size() == 4);
+  ST_CHECK_EQ(lines[0], std::string(" a"));
+  ST_CHECK_EQ(lines[1], std::string("-b"));
+  ST_CHECK_EQ(lines[2], std::string("+B"));
+  ST_CHECK_EQ(lines[3], std::string(" c"));
+  // 行号映射：删除行只在旧侧、新增行只在新侧。
+  ST_CHECK_EQ(hunk.lines[1].old_line, std::size_t{2});
+  ST_CHECK_EQ(hunk.lines[1].new_line, std::size_t{0});
+  ST_CHECK_EQ(hunk.lines[2].old_line, std::size_t{0});
+  ST_CHECK_EQ(hunk.lines[2].new_line, std::size_t{2});
+  ST_CHECK_EQ(hunk.lines[3].old_line, std::size_t{3});
+  ST_CHECK_EQ(hunk.lines[3].new_line, std::size_t{3});
+}
+
+ST_TEST(diff_insertion_only_touches_new_side) {
+  const std::vector<DiffHunk> hunks = st::text::diff_hunks("a\nc\n", "a\nb\nc\n");
+  ST_REQUIRE(hunks.size() == 1);
+  const auto lines = shape(hunks.front());
+  ST_REQUIRE(lines.size() == 3);
+  ST_CHECK_EQ(lines[0], std::string(" a"));
+  ST_CHECK_EQ(lines[1], std::string("+b"));
+  ST_CHECK_EQ(lines[2], std::string(" c"));
+  // 新增行只在新侧有行号，旧侧为 0（"本行在那一侧不存在"）。
+  ST_CHECK_EQ(hunks.front().lines[1].old_line, std::size_t{0});
+  ST_CHECK_EQ(hunks.front().lines[1].new_line, std::size_t{2});
+  ST_CHECK_EQ(hunks.front().lines[0].old_line, hunks.front().lines[0].new_line);
+}
+
+ST_TEST(diff_lcs_not_naive_replace) {
+  // 中间插一行：只应产出 1 个新增行，而不是"后面全改"。
+  const std::vector<DiffHunk> hunks = st::text::diff_hunks("a\nc\n", "a\nb\nc\n");
+  const auto [additions, deletions] = st::text::count_changes(hunks);
+  ST_CHECK_EQ(additions, std::size_t{1});
+  ST_CHECK_EQ(deletions, std::size_t{0});
+}
+
+ST_TEST(diff_multiple_hunks_split_by_context) {
+  std::string old_text;
+  std::string new_text;
+  for (int i = 0; i < 40; ++i) {
+    const std::string line = "line" + std::to_string(i) + "\n";
+    old_text += line;
+    new_text += (i == 2 || i == 30) ? "line" + std::to_string(i) + "x\n" : line;
+  }
+  const std::vector<DiffHunk> hunks = st::text::diff_hunks(old_text, new_text);
+  // 两处改动相隔 28 行 > 2×3，必须是两个 hunk。
+  ST_REQUIRE(hunks.size() == 2);
+  ST_CHECK_EQ(hunks[0].old_start, std::size_t{1});    // 0..2 行 + 前后文
+  ST_CHECK_EQ(hunks[1].old_start, std::size_t{28});   // 30 行前后各 3 行
+  // 两个 hunk 的上下文不重叠。
+  ST_CHECK(hunks[0].old_start + hunks[0].old_count <= hunks[1].old_start);
+}
+
+ST_TEST(diff_nearby_changes_merge_into_one_hunk) {
+  std::string old_text;
+  std::string new_text;
+  for (int i = 0; i < 12; ++i) {
+    const std::string line = "l" + std::to_string(i) + "\n";
+    old_text += line;
+    new_text += (i == 3 || i == 6) ? "l" + std::to_string(i) + "z\n" : line;
+  }
+  const std::vector<DiffHunk> hunks = st::text::diff_hunks(old_text, new_text);
+  // 相隔 3 行 ≤ 2×3，合成一个 hunk（git 同口径）。
+  ST_CHECK_EQ(hunks.size(), std::size_t{1});
+}
+
+ST_TEST(diff_empty_sides_start_at_zero) {
+  // 新文件：旧侧 0 行 → `@@ -0,0 +1,N @@`。
+  const std::vector<DiffHunk> added = st::text::diff_hunks("", "a\nb\n");
+  ST_REQUIRE(added.size() == 1);
+  ST_CHECK_EQ(added.front().old_start, std::size_t{0});
+  ST_CHECK_EQ(added.front().old_count, std::size_t{0});
+  ST_CHECK_EQ(added.front().new_start, std::size_t{1});
+  ST_CHECK_EQ(added.front().new_count, std::size_t{2});
+  // 删空文件：新侧 0 行 → `@@ -1,N +0,0 @@`。
+  const std::vector<DiffHunk> removed = st::text::diff_hunks("a\nb\n", "");
+  ST_REQUIRE(removed.size() == 1);
+  ST_CHECK_EQ(removed.front().old_start, std::size_t{1});
+  ST_CHECK_EQ(removed.front().new_start, std::size_t{0});
+  ST_CHECK_EQ(removed.front().new_count, std::size_t{0});
+}
+
+ST_TEST(diff_trailing_newline_only_change_is_visible) {
+  // 行内容完全相同、只有一个缺末行换行：这**是**一个真实的改动（不同的 blob），
+  // 必须能被看见——只比行内容的实现会在这里给出"没有差异"。
+  const std::vector<DiffHunk> hunks = st::text::diff_hunks("a\nb\n", "a\nb");
+  ST_REQUIRE(hunks.size() == 1);
+  const auto lines = shape(hunks.front());
+  ST_REQUIRE(lines.size() == 2);
+  ST_CHECK_EQ(lines[0], std::string("-b"));
+  ST_CHECK_EQ(lines[1], std::string("+b"));
+  ST_CHECK(!hunks.front().lines[0].no_newline);  // 旧侧有换行
+  ST_CHECK(hunks.front().lines[1].no_newline);   // 新侧末行无换行（标记只在缺换行的那一侧）
+  // 反方向同理。
+  const std::vector<DiffHunk> back = st::text::diff_hunks("a\nb", "a\nb\n");
+  ST_REQUIRE(back.size() == 1);
+  // 反方向同理：back 的**旧**侧末行无换行（`a\nb`）。
+  ST_CHECK(back.front().lines[0].no_newline);
+  ST_CHECK(!back.front().lines[1].no_newline);
+}
+
+ST_TEST(diff_identical_text_has_no_hunks) {
+  ST_CHECK(st::text::diff_hunks("a\nb\n", "a\nb\n").empty());
+  ST_CHECK(st::text::diff_hunks("", "").empty());
+}
+
+ST_TEST(diff_crlf_is_not_a_content_change) {
+  // Windows 工作区读到的 CRLF 与仓库里的 LF 不该被报成"整篇都改了"。
+  ST_CHECK(st::text::diff_hunks("a\r\nb\r\n", "a\nb\n").empty());
+}
+
+ST_TEST(diff_parse_unified_basic) {
+  const std::string patch =
+      "diff --git a/src/a.cpp b/src/a.cpp\n"
+      "index 1111111..2222222 100644\n"
+      "--- a/src/a.cpp\n"
+      "+++ b/src/a.cpp\n"
+      "@@ -1,3 +1,4 @@ void f() {\n"
+      " int main() {\n"
+      "-  return 1;\n"
+      "+  return 2;\n"
+      "+  (void)0;\n"
+      " }\n";
+  const DiffDocument document = st::text::parse_unified(patch);
+  ST_REQUIRE(document.files.size() == 1);
+  const FileDiff& file = document.files.front();
+  ST_CHECK_EQ(file.old_path, std::string("src/a.cpp"));
+  ST_CHECK_EQ(file.new_path, std::string("src/a.cpp"));
+  ST_REQUIRE(file.hunks.size() == 1);
+  const DiffHunk& hunk = file.hunks.front();
+  ST_CHECK_EQ(hunk.old_start, std::size_t{1});
+  ST_CHECK_EQ(hunk.old_count, std::size_t{3});
+  ST_CHECK_EQ(hunk.new_start, std::size_t{1});
+  ST_CHECK_EQ(hunk.new_count, std::size_t{4});
+  ST_CHECK_EQ(hunk.section, std::string("void f() {"));
+  const auto lines = shape(hunk);
+  ST_REQUIRE(lines.size() == 5);
+  ST_CHECK_EQ(lines[1], std::string("-  return 1;"));
+  ST_CHECK_EQ(lines[2], std::string("+  return 2;"));
+  ST_CHECK_EQ(lines[3], std::string("+  (void)0;"));
+  ST_CHECK_EQ(file.additions, std::size_t{2});
+  ST_CHECK_EQ(file.deletions, std::size_t{1});
+  ST_CHECK(document.warnings.empty());
+}
+
+ST_TEST(diff_parse_unified_keeps_content_that_looks_like_a_header) {
+  // hunk 内容里的一行 `-- 注释` 在 patch 文本里就是 `--- 注释`：
+  // 按行首前缀无条件判头部会把正文吃掉（这是最容易做错的一条）。
+  const std::string patch =
+      "--- a/x.txt\n"
+      "+++ b/x.txt\n"
+      "@@ -1,2 +1,1 @@\n"
+      "--- 这是内容，不是文件头\n"
+      "-old\n"
+      "+new\n";
+  const DiffDocument document = st::text::parse_unified(patch);
+  ST_REQUIRE(document.files.size() == 1);
+  const FileDiff& file = document.files.front();
+  ST_CHECK_EQ(file.old_path, std::string("x.txt"));
+  ST_REQUIRE(file.hunks.size() == 1);
+  const auto lines = shape(file.hunks.front());
+  ST_REQUIRE(lines.size() == 3);
+  // 删除行的内容是 `-- 这是内容…`，在 patch 文本里就是 `--- 这是内容…`——
+  // 按行首前缀无条件判头部会把这一行吃掉。
+  ST_CHECK_EQ(lines[0], std::string("--- 这是内容，不是文件头"));
+}
+
+ST_TEST(diff_parse_unified_binary_and_rename) {
+  const std::string patch =
+      "diff --git a/old.png b/new.png\n"
+      "similarity index 100%\n"
+      "rename from old.png\n"
+      "rename to new.png\n"
+      "Binary files a/old.png and b/new.png differ\n"
+      "diff --git a/gone.txt b/gone.txt\n"
+      "deleted file mode 100644\n"
+      "--- a/gone.txt\n"
+      "+++ /dev/null\n"
+      "@@ -1,1 +0,0 @@\n"
+      "-bye\n";
+  const DiffDocument document = st::text::parse_unified(patch);
+  ST_REQUIRE(document.files.size() == 2);
+  ST_CHECK(document.files[0].renamed);
+  ST_CHECK(document.files[0].binary);
+  ST_CHECK_EQ(document.files[0].old_path, std::string("old.png"));
+  ST_CHECK_EQ(document.files[0].new_path, std::string("new.png"));
+  ST_CHECK(document.files[1].deleted);
+  ST_CHECK(document.files[1].new_path.empty());
+  ST_REQUIRE(document.files[1].hunks.size() == 1);
+  ST_CHECK_EQ(document.files[1].hunks.front().new_start, std::size_t{0});
+}
+
+ST_TEST(diff_parse_unified_no_newline_marker) {
+  const std::string patch =
+      "--- a/x\n"
+      "+++ b/x\n"
+      "@@ -1,1 +1,1 @@\n"
+      "-old\n"
+      "\\ No newline at end of file\n"
+      "+new\n"
+      "\\ No newline at end of file\n";
+  const DiffDocument document = st::text::parse_unified(patch);
+  ST_REQUIRE(document.files.size() == 1);
+  ST_REQUIRE(document.files[0].hunks.size() == 1);
+  const DiffHunk& hunk = document.files[0].hunks.front();
+  ST_REQUIRE(hunk.lines.size() == 2);
+  ST_CHECK(hunk.lines[0].no_newline);
+  ST_CHECK(hunk.lines[1].no_newline);
+}
+
+ST_TEST(diff_parse_unified_warns_on_mismatched_counts) {
+  // hunk 头声明 4 行，实际只给 2 行（模拟被截断的 patch）：**如实告警**，
+  // 并且按实际行收录——静默忽略会显示出一个"看着正常但少几行"的差异。
+  const std::string patch =
+      "--- a/x\n"
+      "+++ b/x\n"
+      "@@ -1,4 +1,4 @@\n"
+      " one\n"
+      " two\n";
+  const DiffDocument document = st::text::parse_unified(patch);
+  ST_REQUIRE(document.files.size() == 1);
+  ST_CHECK_EQ(document.warnings.size(), std::size_t{1});
+  ST_REQUIRE(document.files[0].hunks.size() == 1);
+  ST_CHECK_EQ(document.files[0].hunks[0].lines.size(), std::size_t{2});
+}
+
+ST_TEST(diff_unified_round_trip) {
+  // 结构 → patch → 结构：行号、类型、内容、末尾换行标记都必须一致。
+  const FileDiff original =
+      st::text::make_file_diff("a\nb\nc\nd\ne\nf\ng\nh\n", "a\nB\nc\nd\ne\nf\ng\nH\n",
+                               "src/a.txt", "src/a.txt");
+  const std::string patch = st::text::to_unified(original);
+  ST_CHECK(patch.starts_with("diff --git a/src/a.txt b/src/a.txt\n"));
+  const DiffDocument parsed = st::text::parse_unified(patch);
+  ST_REQUIRE(parsed.files.size() == 1);
+  const FileDiff& file = parsed.files.front();
+  ST_REQUIRE(file.hunks.size() == original.hunks.size());
+  ST_CHECK_EQ(file.additions, original.additions);
+  ST_CHECK_EQ(file.deletions, original.deletions);
+  for (std::size_t h = 0; h < file.hunks.size(); ++h) {
+    ST_CHECK_EQ(file.hunks[h].old_start, original.hunks[h].old_start);
+    ST_CHECK_EQ(file.hunks[h].old_count, original.hunks[h].old_count);
+    ST_CHECK_EQ(file.hunks[h].new_start, original.hunks[h].new_start);
+    ST_CHECK_EQ(file.hunks[h].new_count, original.hunks[h].new_count);
+    const auto left = shape(file.hunks[h]);
+    const auto right = shape(original.hunks[h]);
+    ST_CHECK_EQ(left.size(), right.size());
+    for (std::size_t i = 0; i < left.size() && i < right.size(); ++i) {
+      ST_CHECK_EQ(left[i], right[i]);
+    }
+  }
+  ST_CHECK(parsed.warnings.empty());
+}
+
+ST_TEST(diff_build_rows_pads_the_shorter_side) {
+  // 删 2 行、加 1 行：两栏必须是 2 行高（右侧补一行填充），否则两栏会错位。
+  const std::vector<DiffHunk> hunks = st::text::diff_hunks("a\nb\nc\nz\n", "a\nc!z\n");
+  ST_REQUIRE(!hunks.empty());
+  const auto rows = st::text::build_rows(hunks.front(), 0);
+  std::size_t left_count = 0;
+  std::size_t right_count = 0;
+  bool saw_pad = false;
+  for (const auto& row : rows) {
+    if (row.left >= 0) ++left_count;
+    if (row.right >= 0) ++right_count;
+    if (row.left < 0 || row.right < 0) saw_pad = true;
+    ST_CHECK_EQ(row.hunk, std::size_t{0});
+  }
+  ST_CHECK_EQ(left_count, hunks.front().lines.size() - 1);   // 除新增行外
+  ST_CHECK(left_count != right_count || saw_pad);
+  ST_CHECK(saw_pad);
+}
+
+ST_TEST(diff_split_lines_semantics) {
+  const auto lines = st::text::split_lines("a\n\nb\n");
+  ST_REQUIRE(lines.size() == 3);
+  ST_CHECK_EQ(std::string(lines[1]), std::string(""));   // 空行保留
+  ST_CHECK(st::text::split_lines("").empty());
+  ST_CHECK_EQ(st::text::split_lines("\n").size(), std::size_t{1});
+}

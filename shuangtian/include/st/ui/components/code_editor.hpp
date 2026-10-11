@@ -276,6 +276,56 @@ class CodeEditor : public Element {
 
   static constexpr std::size_t kNoFindMatch = static_cast<std::size_t>(-1);
 
+  // —— 行装饰（差异视图 / Git gutter 的框架量）——
+  //
+  // 为什么在编辑器里而不是宿主另起浮层：行带与行号槽标记**只能按行画**，
+  // 而「第 7 行画在哪」取决于行高、滚偏移、gutter 宽——只有编辑器知道
+  //（与 `caret_screen_rect` 同一条理由：宿主自己拼必然与绘制分叉）。
+  //
+  // 两个刻意的设计：
+  // 1. **按行号（1 起）指定**，而不是按字节偏移——差异视图拿着的是行号，
+  //    而按偏移写会让宿主自己去算「第 N 行的首字节」，算法与编辑器内部又不一致；
+  // 2. **行号可以覆盖**（`number`）：并列差异的两栏是**同一段文本的两次呈现**
+  //   （`set_text` 只能给一份），右栏要显示新侧行号、左栏显示旧侧行号，
+  //    就靠这个字段。这也是「一栏一次编辑、两栏同源」能成立的前提。
+  enum class LineMark : std::uint8_t {
+    None,     ///< 无装饰（不画带、不画标记）
+    Added,    ///< 新增行（绿：`syntax.inserted`）
+    Removed,  ///< 删除行（红：`syntax.deleted`）
+    Modified, ///< 修改行（同绿，靠行号槽的竖条区分）
+    Filler,   ///< 对齐填充行（对方那一侧多出来的行；**不占行号**）
+  };
+
+  /// 一条行装饰。`line` 是**本编辑器文本的 1 起行号**；`Filler` 的 `line` 是**插入点**
+  /// （填在这两行之间：`line = k` 表示在第 `k` 行之前；`k = line_count() + 1` 表示末尾）。
+  struct LineDecoration {
+    std::size_t line{0};
+    LineMark mark{LineMark::None};
+    /// 行号槽里显示的号；`0` = 用本行真实行号，`kNoNumber` = **不显示行号**。
+    ///
+    /// 三态而不是两态，是因为“拿不到另一侧的行号”与“这一行不属于任何一侧”
+    /// 是两件事：差异视图的分隔条（`@@ … @@`）属于后者。旧写法只有 `0` 一种缺省，
+    /// 分隔条那一行会显式地报出**本编辑器自己的行号**（实测截图：差异视图第一行
+    /// 行号错写成 1，而它根本不是任何一侧的代码行）。
+    std::size_t number{0};
+    /// 画在行号右侧的**槽内竖条**（差异视图的「这一侧有改动」条）。
+    bool gutter_bar{false};
+  };
+
+  /// 「不显示行号」的哨兵值（见 `LineDecoration::number`）。
+  static constexpr std::size_t kNoNumber = static_cast<std::size_t>(-1);
+
+  /// 设行装饰（**整体替换**：与 `set_diagnostics` 同口径，合并策略归调用方）。
+  void set_line_decorations(std::vector<LineDecoration> marks);
+  void clear_line_decorations();
+  [[nodiscard]] auto line_decorations() const noexcept -> const std::vector<LineDecoration>& {
+    return line_marks_;
+  }
+
+  /// 滚动位置变化的回调（滚轮 / 拖滚动条 / 键盘滚动 / `scroll_to_line` 都会触发）。
+  /// 并列差异视图用它做**两侧同步**——同步归宿主（哪两栏要一起滚是宿主的语义）。
+  std::function<void(float, float)> on_scroll{};
+
   /// 默认行距倍数（见 `set_line_spacing`）。**必须声明在 `line_spacing_` 之前**：
   /// 成员初始化器要用它，而成员默认值是按声明顺序求值的。
   static constexpr float kDefaultLineSpacing = 1.05F;
@@ -408,6 +458,10 @@ class CodeEditor : public Element {
   void rebuild_spans() const;
   /// 重建**高亮 token 缓存**（依赖文本与语言规则，较贵；只在绘制/需要时做）。
   void rebuild_tokens() const;
+  /// 滚动位置变化时往外报（并列视图同步用）；无变化不调。
+  void notify_scroll(float before_x, float before_y);
+  /// 重建行装饰的按行索引（`set_line_decorations` 与**文本变化**后都要调，见 `notify_change`）。
+  void rebuild_line_mark_index();
   /// 逐行变换 `[first_line, last_line]` 行区间并写回文本（缩进/注释等批量操作共用）。
   void transform_lines(std::size_t first_line, std::size_t last_line,
                        const std::function<std::string(std::string_view)>& transform);
@@ -523,6 +577,11 @@ class CodeEditor : public Element {
   mutable float line_height_cache_{0.0f};
   mutable float gutter_cache_{0.0f};
   mutable float max_line_width_cache_{0.0f};
+  /// 行装饰（整体替换语义，见 `set_line_decorations`）。
+  std::vector<LineDecoration> line_marks_{};
+  /// 按行号索引的装饰表（绘制热路径用；`set_*` 时重建）。
+  /// 每个槽存「该行的装饰下标 +1」（0 = 无），避免绘制里线性查找。
+  mutable std::vector<std::size_t> line_mark_index_{};
   /// 诊断标记（按 begin 排序；绘制与命中都靠这一点做二分/提前退出）。
   std::vector<DiagnosticMark> diagnostics_{};
   /// 当前悬浮提示指向的诊断下标（用下标而非指针：`set_diagnostics` 后指针会悬垂）。
