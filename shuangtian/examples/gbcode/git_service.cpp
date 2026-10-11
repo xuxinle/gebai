@@ -6,6 +6,7 @@
 #include <format>
 #include <map>
 
+#include "st/core/fs.hpp"
 #include "st/core/process.hpp"
 #include "st/core/string.hpp"
 
@@ -278,6 +279,305 @@ auto read_worktree_diff(const std::string& cwd, const std::string& path, bool st
   const auto out = staged ? git(cwd, {"diff", "--no-color", "--cached", "--", path})
                           : git(cwd, {"diff", "--no-color", "--", path});
   return out.has_value() ? *out : std::string();
+}
+
+// ————————————————————————————————————————————————————————————————————————————
+// 任意两端对比
+// ————————————————————————————————————————————————————————————————————————————
+
+auto DiffEndpoint::parse(std::string_view text) -> DiffEndpoint {
+  std::string folded = st::ascii_lower(st::trim(text));
+  if (folded.empty() || folded == ".") return DiffEndpoint{};   // 空 = 未指定
+  if (folded == "worktree" || folded == "working" || folded == "working_tree") {
+    return DiffEndpoint{.kind = DiffEnd::Worktree};
+  }
+  if (folded == "index" || folded == "staged" || folded == "--cached") {
+    return DiffEndpoint{.kind = DiffEnd::Index};
+  }
+  // 其余一律当 rev 透传：**不做第二套 rev 语法**（两套判据必然漂移，
+  // 而 git 自己的报错比我们猜的准确）。
+  return DiffEndpoint{.kind = DiffEnd::Revision, .revision = std::string(st::trim(text))};
+}
+
+auto DiffEndpoint::to_text() const -> std::string {
+  switch (kind) {
+    case DiffEnd::Worktree: return "WORKTREE";
+    case DiffEnd::Index: return "INDEX";
+    case DiffEnd::Empty: return {};
+    case DiffEnd::Revision: return revision;
+  }
+  return {};
+}
+
+auto diff_args(const DiffEndpoint& from, const DiffEndpoint& to, bool merge_base)
+    -> std::optional<std::vector<std::string>> {
+  const auto is_empty = [](const DiffEndpoint& end) { return end.empty(); };
+  // 表格（与头文件里的语义表一一对应）：先归一空端点的含义，再拼参数。
+  // 空 + 空 = 工作区 ↔ 暂存区（`git diff` 的裸语义）。
+  if (is_empty(from) && is_empty(to)) return std::vector<std::string>{};
+  if (from.is_worktree() && (is_empty(to) || to.is_worktree())) return std::vector<std::string>{};
+  // 空 → WORKTREE：也是「工作区 ↔ 暂存区」（两个端点是同一件事的两种写法）。
+  if (is_empty(from) && to.is_worktree()) return std::vector<std::string>{};
+  // 已暂存：HEAD ↔ 暂存区（`--cached`）。
+  if (to.is_index() && (is_empty(from) || from.is_worktree())) return {{"--cached"}};
+  if (from.is_index() && is_empty(to)) return {{"--cached"}};
+  // 空 → rev：`git diff REF`（「工作区 ↔ 那个 rev」）。
+  if (is_empty(from) && to.kind == DiffEnd::Revision) return {{to.revision}};
+  // rev ↔ 工作区：`git diff REF`。
+  if (from.kind == DiffEnd::Revision && (is_empty(to) || to.is_worktree())) {
+    return {{from.revision}};
+  }
+  // rev ↔ 暂存区：`git diff --cached REF`。
+  if (from.kind == DiffEnd::Revision && to.is_index()) return {{"--cached", from.revision}};
+  if (from.is_index() && to.kind == DiffEnd::Revision) return {{"--cached", to.revision}};
+  // rev ↔ rev。三点用**一个**参数 `A...B`（再跟一个 `B` 会被当成路径过滤器，
+  // git 会报 “ambiguous argument”——实测）。
+  if (from.kind == DiffEnd::Revision && to.kind == DiffEnd::Revision) {
+    if (merge_base) return {{from.revision + "..." + to.revision}};
+    return {{from.revision, to.revision}};
+  }
+  return std::nullopt;   // 不支持的组合（如 INDEX → INDEX）
+}
+
+auto is_root_commit(const std::string& cwd, const std::string& rev) -> bool {
+  if (rev.empty()) return false;
+  // `rev^` 不存在但 rev 本身是合法 commit ⇒ 根提交。
+  // （直接 `rev-list --max-parents=0` 也行，但它对非法 rev 不报错，区分不出两类失败。）
+  if (const auto parent = git(cwd, {"rev-parse", "--verify", "--quiet", rev + "^"});
+      parent.has_value()) {
+    return false;
+  }
+  return git(cwd, {"rev-parse", "--verify", "--quiet", rev + "^{commit}"}).has_value();
+}
+
+auto read_compare(const std::string& cwd, const CompareOptions& options) -> CompareResult {
+  CompareResult result;
+  result.from_text = options.from.to_text();
+  result.to_text = options.to.to_text();
+  const auto args = diff_args(options.from, options.to, options.merge_base);
+  if (!args.has_value()) {
+    // 不支持的组合要**如实报错**，不能当成“无差异”（那会把配置错误伪装成干净状态）。
+    result.error = "不支持的差异端点组合：" + result.from_text + " → " + result.to_text;
+    return result;
+  }
+  std::vector<std::string> base = *args;
+  // `diff_args` 给的是**子参数**，子命令要自己带上（漏掉会变成 `git <rev> …`，
+  // 报 “'HEAD~1' is not a git command”——看着像 rev 不合法，实际是命令拼错了）。
+  base.insert(base.begin(), "diff");
+  // 参数拼装：入参名不叫 `args`（那是上面 `diff_args` 结果的同名变量，
+  // `-Wshadow` 会当场报错——而它拦的正是“以为在用外层的那个”这类误会）。
+  const auto common = [&](std::vector<std::string>& out_args) {
+    out_args.push_back("--no-color");
+    out_args.push_back("--no-ext-diff");
+    out_args.push_back("--find-renames");
+    if (options.ignore_whitespace) out_args.push_back("-w");
+    // ⚠ **不要在这里加 `-U<n>`**：它隐含 `-p`（patch 输出）——实测
+    // `-U3 --numstat -z` 会在 numstat 记录后面再吐一整篇 patch 文本
+    //（按名字解析时那些碎片会被当成“路径”收进来）。上下文行数只对
+    //「取 patch 文本」那一条路有意义（`read_diff_text`）。
+    if (!options.path.empty()) {
+      out_args.push_back("--");
+      out_args.push_back(options.path);
+    }
+  };
+
+  // ⚠ `--name-status` 与 `--numstat` **不能写在同一条命令里**：两者同时给时 git
+  // 只输出前者（实测：一条命令下 numstat 行整段消失，而“文件没变化”与“计数丢失”
+  // 在结果里长得一模一样）。因此跑**两条**命令，靠 `-z` 的 NUL 分隔各自解好再按下标合并
+  // ——两条命令的列表顺序一致，合并是确定的。
+  std::vector<std::string> status_args = base;
+  common(status_args);
+  status_args.push_back("--name-status");
+  status_args.push_back("-z");
+  std::string status_error;
+  const auto status_out = git(cwd, status_args, &status_error);
+  if (!status_out.has_value()) {
+    result.error = status_error;
+    return result;
+  }
+  std::vector<std::string> stat_args = base;
+  common(stat_args);
+  stat_args.push_back("--numstat");
+  stat_args.push_back("-z");
+  std::string stat_error;
+  const auto stat_out = git(cwd, stat_args, &stat_error);
+  if (!stat_out.has_value()) {
+    result.error = stat_error;
+    return result;
+  }
+
+  const auto tokens = [](const std::string& text) {
+    std::vector<std::string> out;
+    std::string current;
+    for (const char ch : text) {
+      if (ch == '\0' || ch == '\n') {
+        if (!current.empty()) {
+          out.push_back(std::move(current));
+          current.clear();
+        }
+      } else {
+        current += ch;
+      }
+    }
+    if (!current.empty()) out.push_back(std::move(current));
+    return out;
+  };
+
+  // `--name-status -z`：`M\0path\0`；重命名/复制是 `R057\0old\0new\0`（**两个名字**）。
+  const std::vector<std::string> status_tokens = tokens(*status_out);
+  for (std::size_t index = 0; index < status_tokens.size();) {
+    const std::string& code = status_tokens[index];
+    if (code.empty()) {
+      ++index;
+      continue;
+    }
+    ComparedFile file;
+    file.status = code.front();
+    const bool two_names = (file.status == 'R' || file.status == 'C');
+    if (two_names) {
+      if (index + 2 >= status_tokens.size()) break;
+      file.old_path = status_tokens[index + 1];
+      file.path = status_tokens[index + 2];
+      index += 3;
+    } else {
+      if (index + 1 >= status_tokens.size()) break;
+      file.path = status_tokens[index + 1];
+      index += 2;
+    }
+    result.files.push_back(std::move(file));
+  }
+
+  // `--numstat -z`：`加\t删\t路径\0`；重命名是 `加\t删\t\0old\0new\0`（名字在后面）。
+  struct Stat {
+    std::size_t additions{0};
+    std::size_t deletions{0};
+    bool binary{false};
+  };
+  std::vector<Stat> stats;
+  std::vector<std::string> stat_paths;
+  const std::vector<std::string> stat_tokens = tokens(*stat_out);
+  for (std::size_t index = 0; index < stat_tokens.size();) {
+    const std::string& token = stat_tokens[index];
+    const std::size_t tab1 = token.find('\t');
+    if (tab1 == std::string::npos) {   // 不是 numstat 记录：跳过一个 token 继续找
+      ++index;
+      continue;
+    }
+    const std::size_t tab2 = token.find('\t', tab1 + 1);
+    if (tab2 == std::string::npos) {   // 名字在后面的形式：`加\t删\t` + 两个名字
+      ++index;
+      continue;
+    }
+    Stat stat;
+    const std::string add = token.substr(0, tab1);
+    const std::string del = token.substr(tab1 + 1, tab2 - tab1 - 1);
+    stat.binary = add == "-" || del == "-";
+    stat.additions = stat.binary ? 0 : static_cast<std::size_t>(std::strtoull(add.c_str(), nullptr, 10));
+    stat.deletions = stat.binary ? 0 : static_cast<std::size_t>(std::strtoull(del.c_str(), nullptr, 10));
+    std::string path = token.substr(tab2 + 1);
+    if (path.empty()) {
+      // 重命名：名字在后两个 token（以新名字为准，与 status 行对齐）。
+      if (index + 2 >= stat_tokens.size()) break;
+      path = stat_tokens[index + 2];
+      index += 3;
+    } else {
+      ++index;
+    }
+    stats.push_back(stat);
+    stat_paths.push_back(std::move(path));
+  }
+
+  // 按下标合并（两条命令的列表顺序一致）；数量不一致时以 status 那侧为准，
+  // 但对不上就往好处“降级而不能编造计数”：只给能对上的，其余保持 0。
+  for (std::size_t index = 0; index < result.files.size(); ++index) {
+    if (index >= stats.size()) break;
+    ComparedFile& file = result.files[index];
+    if (!stat_paths[index].empty() && stat_paths[index] != file.path) {
+      // 两侧列表没有对齐（外部改动了仓库？）——不猜，按路径重新找一次。
+      const auto hit = std::find(stat_paths.begin(), stat_paths.end(), file.path);
+      if (hit == stat_paths.end()) continue;
+      const std::size_t at = static_cast<std::size_t>(hit - stat_paths.begin());
+      file.additions = stats[at].additions;
+      file.deletions = stats[at].deletions;
+      file.binary = stats[at].binary;
+    } else {
+      file.additions = stats[index].additions;
+      file.deletions = stats[index].deletions;
+      file.binary = stats[index].binary;
+    }
+  }
+  for (const auto& file : result.files) {
+    result.additions += file.additions;
+    result.deletions += file.deletions;
+  }
+  // 文件数上限：超出时**只保留前 N 个并把事实写进 error**（不静默截断）——
+  // “看不到后面那些文件”必须与“那些文件不存在”区分开。
+  if (options.max_files != 0 && result.files.size() > options.max_files) {
+    result.files.resize(options.max_files);
+    result.error = std::format("变更文件过多，只列出前 {} 个（可用路径过滤收窄）", options.max_files);
+  }
+  result.ok = true;
+  return result;
+}
+
+auto read_diff_text(const std::string& cwd, const CompareOptions& options) -> std::string {
+  const auto mapped = diff_args(options.from, options.to, options.merge_base);
+  if (!mapped.has_value()) return {};
+  std::vector<std::string> args = *mapped;
+  args.insert(args.begin(), "diff");
+  args.push_back("--no-color");
+  args.push_back("--no-ext-diff");
+  args.push_back("--find-renames");
+  if (options.ignore_whitespace) args.push_back("-w");
+  args.push_back(std::format("-U{}", std::min<std::size_t>(options.context, 20)));
+  if (!options.path.empty()) {
+    args.push_back("--");
+    args.push_back(options.path);
+  }
+  const auto out = git(cwd, args);
+  return out.has_value() ? *out : std::string();
+}
+
+auto read_content_at(const std::string& cwd, const DiffEndpoint& end, const std::string& path)
+    -> ContentAt {
+  ContentAt result;
+  if (path.empty()) {
+    result.error = "路径为空";
+    return result;
+  }
+  if (end.is_worktree()) {
+    // 工作区：直接读磁盘（不经过 git：未跟踪文件也该能当“另一侧”看）。
+    auto text = st::fs::read_text(st::fs::join(cwd, path));
+    if (!text.has_value()) {
+      result.missing = true;
+      result.error = "文件不存在或读不到";
+      return result;
+    }
+    result.text = std::move(*text);
+    result.size = result.text.size();
+    result.ok = true;
+    return result;
+  }
+  // 暂存区 / 某个提交：`git show :0:<path>` / `git show <rev>:<path>`。
+  const std::string spec = end.is_index() ? ":0:" + path
+                                         : (end.kind == DiffEnd::Revision ? end.revision + ":" + path
+                                                                          : std::string{});
+  if (spec.empty()) {
+    result.error = "不支持的端点（无法取内容）";
+    return result;
+  }
+  const auto out = git(cwd, {"show", "--no-color", spec}, &result.error);
+  if (!out.has_value()) {
+    // “那一侧没有这个文件”不是错误（新增/删除就是这种情况）——**与真正的失败分开**。
+    result.missing = true;
+    result.error.clear();
+    return result;
+  }
+  result.text = *out;
+  result.size = result.text.size();
+  result.binary = result.text.find('\0') != std::string::npos;
+  result.ok = true;
+  return result;
 }
 
 }  // namespace gbcode

@@ -59,6 +59,7 @@
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
 #include "st/ext/json.hpp"   // dsl::custom<T> 实例化需要 Json 完整类型（模板体里按值传 Json）
+#include "st/text/diff.hpp"
 #include "st/text/highlight.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/code_editor.hpp"
@@ -67,6 +68,7 @@
 #include "git_service.hpp"   // Git 集成（版本管理重构）
 #include "lsp_bridge.hpp"   // 语言服务集成（LSP 阶段 3）
 #include "st/ui/components/command_palette.hpp"
+#include "st/ui/components/diff_view.hpp"
 #include "st/ui/components/feedback.hpp"
 #include "st/ui/components/file_dialog.hpp"
 #include "st/ui/components/terminal.hpp"
@@ -546,6 +548,33 @@ struct CodeEditorPage : Component {
   /// 选中的提交（详情摘要与高亮用）。
   std::string git_selected_hash_{};
   State<std::string> git_commit_summary_{};
+  /// 选中提交的文件清单（`path, +N, −N`）——渲染期只消费（读在 `show_commit` 里）。
+  std::vector<std::tuple<std::string, std::size_t, std::size_t>> git_commit_files_{};
+  // —— 任意两端比较（参照歌白工作台的「比较视图」）——
+  /// 比较视图是否开启（开启时编辑区换成比较面板）。
+  State<bool> compare_open_{false};
+  /// 两端端点文本（保留字 `WORKTREE`/`INDEX` 或任意 rev）。
+  State<std::string> compare_from_{};
+  State<std::string> compare_to_{"WORKTREE"};
+  /// 三点对比（按共同祖先起算——分支对比的正确默认语义）。
+  State<bool> compare_merge_base_{false};
+  /// 结果（泵里读；渲染期只消费）。
+  gbcode::CompareResult compare_result_{};
+  bool compare_loaded_{false};
+  bool compare_wanted_{false};
+  /// 端点选择浮层：正在选哪一端（0 = A / 1 = B；2 = 未开）。
+  State<std::size_t> compare_pick_{2};
+  /// 当前打开的**并列差异**（空 key = 不是差异标签）。
+  State<std::string> diff_key_{};
+  State<std::string> diff_title_{};
+  State<st::text::FileDiff> diff_file_{};
+  /// 需求打开差异（帧首泵读文本——渲染期起子进程会崩，与 `ensure_git_log` 同理）。
+  bool diff_wanted_{false};
+  std::string diff_pending_title_{};
+  gbcode::CompareOptions diff_pending_options_{};
+  std::string diff_pending_path_{};
+  /// 差异视图实例（当前帧有效）——`hunk` 导航靠它。
+  DiffView* diff_view_ptr{nullptr};
   /// 状态栏问题计数“轮跳”到第几处（反复点同一个计数就依次往下跳）。
   std::size_t problem_cycle_{0};
   /// 已注册的语言清单（扩展视图用；懒加载一次）。
@@ -678,6 +707,15 @@ struct CodeEditorPage : Component {
   /// 只有标签的 × 天然走 `request_close`——其余三处若直接调 `close()`，
   /// 就会出现“同一个动作，换个入口就静默丢修改”的不一致（实测踩到）。
   auto close_active() -> void {
+    // 差异标签（不是 `OpenBuffer`，它住在 `diff_key_` 里）先关：
+    // 不先判会让 Ctrl+W 在差异视图下静默什么都关不掉（用户看到的是“快捷键失效”）。
+    if (!diff_key_.value().empty()) {
+      diff_key_.set({});
+      diff_title_.set({});
+      diff_file_.set(st::text::FileDiff{});
+      status_.set("已关闭差异视图");
+      return;
+    }
     const auto list = buffers_.value();
     if (list.empty()) return;
     request_close(list[active_.value()].key);
@@ -964,6 +1002,8 @@ struct CodeEditorPage : Component {
       git_log_loaded_ = false;   // git 操作后日志也旧了（提交/切分支都改历史）
     }
     ensure_git_log();
+    ensure_compare();
+    ensure_diff();
     const bool diagnostics_changed = lsp_.pump();
     // 待落地的跳转（跨文件）：编辑器实例在新文件装载后才就位，所以在这里补做。
     apply_pending_navigation_jump();
@@ -1056,8 +1096,9 @@ struct CodeEditorPage : Component {
     const std::size_t active = active_.value();
     const bool has_editor = !buffers.empty();
 
-    // 编辑器实例可能在本次重组中新建/换绑：先置空，由 build_editor_area 重新取得
+    // 编辑器实例可能在本次重组中新建/换绑：先置空，由 `build_editor_area` 重新取得
     editor = nullptr;
+    diff_view_ptr = nullptr;   // 同上：差异视图实例每帧重建
     // **浮层里的输入框**：它们在上一次重组里被销毁，本帧还没重建。
     //
     // 不置空就会踩到已释放的 Input——实测（无头 E2E，转到行浮层）：
@@ -1089,6 +1130,7 @@ struct CodeEditorPage : Component {
     build_completion_popup(c);
     build_rename_dialog(c);
     build_git_confirm(c);
+    build_compare_picker(c);
     // 浮层内的“聚焦输入框”待办：**必须排在对应的构建之后**——
     // 排在前面拿到的是上一帧已销毁的指针（本函数开头已把两个指针置空，
     // 所以即使顺序被人改回去，也只是“这一次没聚焦”，不会再踩已释放对象）。
@@ -1341,6 +1383,97 @@ struct CodeEditorPage : Component {
   ///
   /// 与「关闭确认」同一 Dialog 形态，但语义是**不可恢复**——按钮文案明确说后果，
   /// 不用"确定/取消"这种不带信息的词。
+  /// 端点选择浮层：A/B 两端可以从**分支 / 最近提交**里选（也可直接粘 rev）。
+  ///
+  /// 为何要有它：比较视图的价值就是“任意两端”，而只给几个常用端点的按钮
+  /// 等于把“任意”锁在那几个选项上（歌白工作台的端点选择器就是为此存在）。
+  void build_compare_picker(Composer& c) {
+    const std::size_t which = compare_pick_.value();
+    if (which > 1) return;
+    (void)dsl::overlay(c, "compare-picker", {}, [&] {
+      (void)column(c, {.gap = 6.0f, .padding = 14.0f, .width = 520.0f,
+                       .id = "compare-picker"}, [&] {
+        (void)text(c, [which] {
+          return which == 0 ? std::string("选择 A 端点（左 / 旧侧）")
+                            : std::string("选择 B 端点（右 / 新侧）");
+        }, {.weight = FontWeight::Medium, .id = "compare-picker-title"});
+        // 保留端点（工作区 / 暂存区）。
+        (void)row(c, {.gap = 6.0f}, [&] {
+          struct Reserved {
+            const char* label;
+            const char* value;
+          };
+          static constexpr Reserved kReserved[] = {{"工作区", "WORKTREE"}, {"暂存区", "INDEX"}};
+          for (const auto& item : kReserved) {
+            (void)custom<Button>(c, [this, which, item](Button& b) {
+              b.set_id(std::format("pick-end-{}", item.value));
+              b.set_label(item.label);
+              b.set_variant(Button::Variant::Secondary);
+              b.set_size(Button::Size::Small);
+              b.on_click = [this, which, value = std::string(item.value)] {
+                pick_endpoint(which, value);
+              };
+            }, {.height = 28.0f, .grow = true, .key = std::string("pick:") + item.value});
+          }
+        });
+        // 分支 + 最近提交（两者都是可解析的 rev）。
+        (void)custom_container<ScrollView>(
+            c,
+            [&] {
+              const auto group =
+                  [&](const char* title,
+                      const std::vector<std::pair<std::string, std::string>>& items) {
+                    if (items.empty()) return;
+                    (void)text(c, [title] { return std::string(title); }, {.color = Tone::Muted});
+                    for (const auto& [label, value] : items) {
+                      (void)custom<Button>(c, [this, which, label, value](Button& b) {
+                        b.set_id("pick-ref-" + value);
+                        b.set_label(label);
+                        b.set_variant(Button::Variant::Ghost);
+                        b.set_size(Button::Size::Small);
+                        b.on_click = [this, which, value] { pick_endpoint(which, value); };
+                      }, {.key = "pickref:" + value});
+                    }
+                  };
+              std::vector<std::pair<std::string, std::string>> branches;
+              for (const auto& branch : git_branches_) {
+                branches.emplace_back(branch.name, branch.name);
+              }
+              std::vector<std::pair<std::string, std::string>> commits;
+              for (const auto& entry : git_log_) {
+                if (commits.size() >= 20) break;
+                commits.emplace_back(std::format("{}  {}", entry.short_hash,
+                                                 entry.subject.substr(0, 48)),
+                                     entry.hash);
+              }
+              group("分支", branches);
+              group("最近提交", commits);
+            },
+            [](ScrollView& scroll) { scroll.set_id("compare-picker-scroll"); },
+            {.grow = true, .id = "compare-picker-list"});
+        (void)custom<Button>(c, [this](Button& b) {
+          b.set_id("compare-picker-cancel");
+          b.set_label("取消");
+          b.set_variant(Button::Variant::Ghost);
+          b.set_size(Button::Size::Small);
+          b.on_click = [this] { compare_pick_.set(2); };
+        }, {.height = 28.0f, .key = "compare-picker-cancel"});
+      });
+    });
+  }
+
+  /// 选好一个端点（写入 A 或 B、关浮层、触发重读）。
+  void pick_endpoint(std::size_t which, const std::string& value) {
+    if (which == 0) {
+      compare_from_.set(value);
+    } else {
+      compare_to_.set(value);
+    }
+    compare_pick_.set(2);
+    compare_loaded_ = false;
+    compare_wanted_ = true;
+  }
+
   void build_git_confirm(Composer& c) {
     if (!git_confirm_open_.value()) return;
     (void)overlay(c, "git-confirm", {}, [&] {
@@ -1537,7 +1670,10 @@ struct CodeEditorPage : Component {
     static constexpr Activity kActivities[] = {{"folder", "explorer"}, {"search", "search"},
                                                {"diff", "scm"}, {"play", "run"},
                                                {"package", "extensions"},
-                                               {"symbol", "nav"}};
+                                               {"symbol", "nav"},
+                                               // 「比较」是**面向两端**的视图（与「变更」不同：
+                                               // 后者只看当前工作区），故单独一个入口。
+                                               {"arrow-left", "compare"}};
     const std::size_t current = activity_.value();
     // `surface = Alt`：与标题栏/状态栏**同色**——三者合起来是一圈“外壳”，
     // 色不一致会在拐角处露馅（见 `Element::Surface` 的说明）。
@@ -1643,6 +1779,63 @@ struct CodeEditorPage : Component {
   /// 资源管理器行高（紧凑：贴近桌面文件管理器；组件默认值面向可点清单场景）。
   static constexpr float kExplorerRowHeight{24.0f};
 
+  // —— 视图 6：比较（任意两端 → 文件清单 → 单文件并列差异）——
+  //
+  // 为何要有它（而不只有左侧「变更」）：变更面板回答“我**现在**改了什么”，
+  // 比较回答“**任意两个状态**差什么”——「这个提交之后又改了什么」「两个分支差在哪」
+  // 只能靠它（歌白工作台的同名视图）。清单本体在**编辑区**：它是内容，不是导航。
+  void build_compare_sidebar(Composer& c) {
+    build_sidebar_head(c, "比较");
+    if (workspace_.empty()) {
+      (void)text(c, [] { return std::string("内置样例模式：没有仓库可比较"); });
+      return;
+    }
+    (void)text(c, [this] {
+      return std::format("A：{}",
+                         compare_from_.value().empty() ? "工作区" : compare_from_.value());
+    }, {.id = "compare-a-label"});
+    (void)text(c, [this] {
+      return std::format("B：{}",
+                         compare_to_.value().empty() ? "工作区" : compare_to_.value());
+    }, {.id = "compare-b-label"});
+    // 常用端点各配「设 A / 设 B」两个按钮（任意 rev 在编辑区那条端点按钮上改）。
+    struct End {
+      const char* label;
+      const char* value;
+    };
+    static constexpr End kEnds[] = {{"工作区", "WORKTREE"},
+                                    {"暂存区", "INDEX"},
+                                    {"HEAD", "HEAD"},
+                                    {"HEAD~1", "HEAD~1"}};
+    for (const auto& item : kEnds) {
+      (void)row(c, {.gap = 4.0f, .key = std::string("cmp:") + item.value}, [&] {
+        for (const bool as_from : {true, false}) {
+          (void)custom<Button>(c, [this, item, as_from](Button& b) {
+            b.set_id(std::format("compare-{}-{}", as_from ? "from" : "to", item.value));
+            b.set_label(std::format("{} {}", as_from ? "设 A" : "设 B", item.label));
+            b.set_variant(Button::Variant::Ghost);
+            b.set_size(Button::Size::Small);
+            b.on_click = [this, value = std::string(item.value), as_from] {
+              if (as_from) {
+                compare_from_.set(value);
+              } else {
+                compare_to_.set(value);
+              }
+              compare_wanted_ = true;
+            };
+          }, {.height = 24.0f, .grow = true,
+              .key = std::format("{}-{}", as_from ? "from" : "to", item.value)});
+        }
+      });
+    }
+    if (compare_loaded_ && compare_result_.ok) {
+      (void)text(c, [this] {
+        return std::format("{} 个文件 · +{} −{}", compare_result_.files.size(),
+                           compare_result_.additions, compare_result_.deletions);
+      }, {.id = "compare-summary"});
+    }
+  }
+
   void build_sidebar_head(Composer& c, std::string_view title) {
     (void)row(c, {.gap = 4.0f, .height = 30.0f, .id = "sidebar-head"}, [&] {
       (void)text(c, [title] { return std::string(title); },
@@ -1713,6 +1906,7 @@ struct CodeEditorPage : Component {
         case 2: build_scm_view(c); break;
         case 3: build_run_view(c); break;
         case 5: build_nav_results_view(c); break;
+        case 6: build_compare_sidebar(c); break;
         default: build_extensions_view(c); break;
       }
     });
@@ -2200,36 +2394,126 @@ void replace_in_workspace(std::string_view replacement) {
     }
   }
 
-  /// 打开一个变更文件的 diff（只读标签，替代旧版"敲进终端"）。
+  /// 打开一个变更文件的 diff（**并列差异**，替代旧版“把 patch 敲进只读标签”）。
   ///
-  /// 为何从终端改为标签：diff 是**内容**（要对照看、要能滚动），终端是**流的回放**
-  ///（滚走就没了、没有结构）。旧版把 diff 敲进终端，用户一跑别的命令就冲掉了。
+  /// 为何是并列而不是一段 patch 文本：diff 要**对照看**（“原来是什么 / 现在是什么”），
+  /// 而并列视图靠双行号把两栏逐行对齐；patch 文本做不到（它是一维流）。
   void open_git_diff(const gbcode::GitChange& change) {
-    const std::string diff = gbcode::read_worktree_diff(workspace_, change.path,
-                                                        change.has_staged_side() &&
-                                                            !change.has_unstaged_side());
-    auto list = buffers_.value();
-    stash_active_text(list);
-    OpenBuffer buffer;
-    buffer.key = "diff:" + change.path;
-    buffer.label = "Δ " + st::fs::file_name(change.path);
-    buffer.language = "diff";
-    buffer.text = diff.empty() ? std::string("（无差异：可能只暂存了元数据）") : diff;
-    buffer.path = change.path;   // 保留归属（切回来还能刷新）；dirty 语义不适用
-    buffer.dirty = false;
-    // 同名 diff 标签已存在就复用（刷新内容而不是再开一个）。
-    for (std::size_t index = 0; index < list.size(); ++index) {
-      if (list[index].key == buffer.key) {
-        list[index].text = buffer.text;
-        buffers_.set(std::move(list));
-        activate(list, index);
-        return;
-      }
+    gbcode::CompareOptions options;
+    // 只暂存过（未再改工作区）→ 与 HEAD 比已暂存内容；否则看工作区。
+    const bool staged_only = change.has_staged_side() && !change.has_unstaged_side();
+    if (staged_only) {
+      options.from = gbcode::DiffEndpoint::parse("HEAD");
+      options.to = gbcode::DiffEndpoint::parse("INDEX");
+    } else {
+      options.from = gbcode::DiffEndpoint::parse("INDEX");
+      options.to = gbcode::DiffEndpoint::parse("WORKTREE");
     }
-    list.push_back(std::move(buffer));
-    buffers_.set(std::move(list));
-    active_.set(buffers_.value().size() - 1);
-    status_.set("差异：" + change.path);
+    open_diff(std::format("Δ {}（{}）", st::fs::file_name(change.path),
+                          staged_only ? "已暂存" : "工作区"),
+              options, change.path);
+  }
+
+  /// 比较视图（参照歌白工作台的「比较」）：**任意两端** → 文件清单 → 单文件并列差异。
+  ///
+  /// 为何要有它（而不只有左侧「变更」）：变更面板回答“我现在改了什么”，
+  /// 比较回答“**任意两个状态**之间差什么”——「这个提交之后我又改了什么」
+  /// 「两个分支差在哪」只能靠它。
+  void build_compare_view(Composer& c) {
+    (void)custom_container<Panel>(
+        c,
+        [&] {
+          // —— 头部：A/B 两个端点按钮 + 交换 + 三点开关 ——
+          (void)row(c, {.gap = 4.0f, .height = 30.0f, .id = "compare-bar"}, [&] {
+            const auto endpoint_button = [&](const char* id, const std::string& text,
+                                             std::size_t which) {
+              (void)custom<Button>(c, [this, id, text, which](Button& b) {
+                b.set_id(id);
+                b.set_label(text.empty() ? "（未指定）" : text);
+                b.set_variant(Button::Variant::Secondary);
+                b.set_size(Button::Size::Small);
+                b.on_click = [this, which] { compare_pick_.set(which); };
+              }, {.height = 26.0f, .grow = true, .key = id});
+            };
+            endpoint_button("compare-from",
+                            compare_from_.value().empty() ? "工作区" : compare_from_.value(), 0);
+            (void)custom<Button>(c, [this](Button& b) {
+              b.set_id("compare-swap");
+              b.set_icon("arrow-left");
+              b.set_variant(Button::Variant::Ghost);
+              b.set_size(Button::Size::Small);
+              b.on_click = [this] {
+                const std::string from = compare_from_.value();
+                compare_from_.set(compare_to_.value());
+                compare_to_.set(from);
+                compare_wanted_ = true;
+              };
+            }, {.width = 30.0f, .height = 26.0f, .key = "compare-swap"});
+            endpoint_button("compare-to",
+                            compare_to_.value().empty() ? "工作区" : compare_to_.value(), 1);
+            // 三点：按**共同祖先**起算（分支对比的正确默认语义）。
+            (void)custom<Button>(c, [this](Button& b) {
+              b.set_id("compare-merge-base");
+              b.set_label(compare_merge_base_.value() ? "三点 ✓" : "两点");
+              b.set_variant(compare_merge_base_.value() ? Button::Variant::Soft
+                                                        : Button::Variant::Ghost);
+              b.set_size(Button::Size::Small);
+              b.on_click = [this] {
+                compare_merge_base_.set(!compare_merge_base_.value());
+                compare_wanted_ = true;
+              };
+            }, {.height = 26.0f, .key = "compare-merge-base"});
+            (void)custom<Button>(c, [this](Button& b) {
+              b.set_id("compare-refresh");
+              b.set_icon("refresh");
+              b.set_variant(Button::Variant::Ghost);
+              b.set_size(Button::Size::Small);
+              b.on_click = [this] { compare_wanted_ = true; };
+            }, {.width = 30.0f, .height = 26.0f, .key = "compare-refresh"});
+          });
+          // —— 文件清单 ——
+          if (!compare_loaded_) {
+            (void)text(c, [] { return std::string("读取中…"); }, {.id = "compare-loading"});
+            return;
+          }
+          if (!compare_result_.ok) {
+            (void)text(c, [this] { return "比较失败：" + compare_result_.error; },
+                       {.color = Tone::Danger, .id = "compare-error"});
+            return;
+          }
+          if (compare_result_.files.empty()) {
+            (void)text(c, [] { return std::string("两端没有差异。"); },
+                       {.id = "compare-empty"});
+            return;
+          }
+          (void)custom_container<ScrollView>(
+              c,
+              [&] {
+                for (std::size_t index = 0; index < compare_result_.files.size(); ++index) {
+                  const auto& file = compare_result_.files[index];
+                  (void)custom<Button>(c, [this, index, file](Button& b) {
+                    b.set_id(std::format("compare-file-{}", index));
+                    b.set_label(std::format("{}{}  +{} −{}", file.status,
+                                            file.path.empty() ? file.old_path : file.path,
+                                            file.additions, file.deletions));
+                    b.set_variant(Button::Variant::Ghost);
+                    b.set_size(Button::Size::Small);
+                    b.on_click = [this, file] {
+                      gbcode::CompareOptions options;
+                      options.from = gbcode::DiffEndpoint::parse(compare_from_.value());
+                      options.to = gbcode::DiffEndpoint::parse(compare_to_.value());
+                      options.merge_base = compare_merge_base_.value();
+                      open_diff(std::format("◧ {}", st::fs::file_name(file.path)), options,
+                                file.path);
+                    };
+                  }, {.height = 26.0f, .key = std::format("compare:{}:{}", file.status, file.path)});
+                }
+              },
+              [](ScrollView& scroll) { scroll.set_id("compare-scroll"); },
+              {.grow = true, .id = "compare-host"});
+        },
+        [](Panel& panel) { panel.set_id("compare-view"); },
+        {.grow = true, .id = "compare-view"});
   }
 
   // —— 视图 3：运行与调试（真跑 st 子命令）——
@@ -2310,9 +2594,13 @@ void replace_in_workspace(std::string_view replacement) {
                          bool has_editor) {
     column(c, {.gap = 0.0f, .grow = true, .id = "editor-area"}, [&] {
       std::vector<TabData> tabs;
-      for (const auto& buffer : buffers) {
-        tabs.push_back(TabData{.key = buffer.key, .label = buffer.label,
-                               .modified = buffer.dirty, .closable = true});
+      // 比较视图不是一个标签（它是活动栏的一个视图）：把它当标签会让标签栏指向
+      // 一个“不在编辑区里”的东西。
+      if (diff_key_.value().empty() && activity_.value() != 6) {
+        for (const auto& buffer : buffers) {
+          tabs.push_back(TabData{.key = buffer.key, .label = buffer.label,
+                                 .modified = buffer.dirty, .closable = true});
+        }
       }
       // 标签条。
       //
@@ -2340,6 +2628,31 @@ void replace_in_workspace(std::string_view replacement) {
             return std::string("从左侧资源管理器打开一个文件，或 Ctrl+Shift+P 打开命令面板");
           });
         });
+        return;
+      }
+      // —— 差异视图 / 普通编辑器 ——
+      //
+      // 差异标签也住在**同一个编辑区**里（而不是另起一个面板）：它是“一个内容标签”，
+      // 与文件标签共享标签栏/关闭/切换语义——另开面板会让“关掉差异”多出一条路径。
+      // —— 差异视图 / 比较视图 / 普通编辑器 ——（三者互斥地共享编辑区：
+      // 它们都是“现在要看的内容”，而分屏会让每一块都变窄）
+      //
+      // 顺序**不能反**：差异优先级最高——它是在比较视图（或变更面板）里**点开的一件东西**，
+      // 若比较视图先占位，点文件后屏幕上什么都不会变（实测：点清单无反应，
+      // 而状态栏已经报“差异：…”——看着像“点不动”）。
+      if (!diff_key_.value().empty()) {
+        (void)custom<DiffView>(c, [this](DiffView& view) {
+          view.set_id("diff-view");
+          view.set_read_only(true);
+          view.set_font_size(0.0f);
+          view.set_diff(diff_file_.value());
+          diff_view_ptr = &view;   // F7（下一个差异）靠它
+        }, {.grow = true, .id = "diff-view-host"});
+        return;
+      }
+      if (activity_.value() == 6) {
+        build_compare_view(c);
+        diff_view_ptr = nullptr;
         return;
       }
       // 编辑器：custom<T> 逃生舱（CodeEditor 的一等接口属性面覆盖不到）。
@@ -2621,6 +2934,27 @@ void replace_in_workspace(std::string_view replacement) {
     if (!git_selected_hash_.empty()) {
       (void)text(c, [this] { return git_commit_summary_.value(); },
                  {.color = Tone::Muted, .id = "git-commit-summary"});
+      // 该提交改动的**文件清单**：点一下开它的并列差异（父提交 ↔ 本提交）。
+      //
+      // 为何列在这里（而不只是摘要）：摘要回答“改了多少”，而“改了哪些文件”
+      // 是下一步动作的入口——两者同屏才让“看历史 → 看具体改动”成为一步。
+      if (!git_commit_files_.empty()) {
+        (void)custom_container<ScrollView>(
+            c,
+            [&] {
+              for (const auto& [path, plus, minus] : git_commit_files_) {
+                (void)custom<Button>(c, [this, path, plus, minus](Button& b) {
+                  b.set_id("commit-file-" + path);
+                  b.set_label(std::format("{}  +{} −{}", path, plus, minus));
+                  b.set_variant(Button::Variant::Ghost);
+                  b.set_size(Button::Size::Small);
+                  b.on_click = [this, path] { open_commit_file(git_selected_hash_, path); };
+                }, {.height = 24.0f, .key = "cfile:" + path});
+              }
+            },
+            [](ScrollView& scroll) { scroll.set_id("git-commit-files-scroll"); },
+            {.id = "git-commit-files"});
+      }
     }
   }
 
@@ -2654,7 +2988,7 @@ void replace_in_workspace(std::string_view replacement) {
     git_confirm_open_.set(true);
   }
 
-  /// 查看一个提交：详情摘要 + diff 只读标签。
+  /// 查看一个提交：与它的**父提交**逐文件并列对比（首个提交则与空树比）。
   void show_commit(const gbcode::LogEntry& entry) {
     git_selected_hash_ = entry.short_hash;
     auto copy = entry;
@@ -2668,27 +3002,22 @@ void replace_in_workspace(std::string_view replacement) {
     }
     git_commit_summary_.set(std::format("{} · {} 个文件 · +{} −{} · {}", entry.short_hash,
                                         copy.files.size(), added, removed, entry.author));
-    // diff 开只读标签（与变更面板的 diff 同一条链路）。
-    auto list = buffers_.value();
-    stash_active_text(list);
-    OpenBuffer buffer;
-    buffer.key = "commit:" + entry.short_hash;
-    buffer.label = std::format("@{}", entry.short_hash);
-    buffer.language = "diff";
-    buffer.text = diff;
-    buffer.dirty = false;
-    for (std::size_t index = 0; index < list.size(); ++index) {
-      if (list[index].key == buffer.key) {
-        list[index].text = buffer.text;
-        buffers_.set(std::move(list));
-        activate(list, index);
-        return;
-      }
-    }
-    list.push_back(std::move(buffer));
-    buffers_.set(std::move(list));
-    active_.set(buffers_.value().size() - 1);
+    // 文件清单存下来（渲染期只消费）：它是“看具体改动”的入口。
+    git_commit_files_ = copy.files;
     status_.set("提交 " + entry.short_hash + "：" + entry.subject.substr(0, 40));
+  }
+
+  /// 打开某个提交里一个文件的并列差异（父提交 ↔ 该提交）。
+  ///
+  /// 根提交没有父：`HEAD^` 会报错，而“与不存在的父对比”在语义上就是“与空树对比”
+  /// ——歌白那边实测过“不归一时被当成了无差异”。
+  void open_commit_file(const std::string& hash, const std::string& path) {
+    gbcode::CompareOptions options;
+    const bool root = gbcode::is_root_commit(workspace_, hash);
+    options.from = gbcode::DiffEndpoint::parse(root ? std::string(gbcode::kEmptyTree)
+                                                    : hash + "^");
+    options.to = gbcode::DiffEndpoint::parse(hash);
+    open_diff(std::format("@{} {}", hash.substr(0, 7), st::fs::file_name(path)), options, path);
   }
 
   // 两个共用小工具（终端/搜索/面包屑都用）：直接在这里定义——
@@ -3728,6 +4057,86 @@ void replace_in_workspace(std::string_view replacement) {
     // `status_` 本身是 State——借它触发重组（顺带把"读到了几条"说给用户）。
     status_.set(std::format("Git 日志：{} 条提交，{} 个分支", git_log_.size(),
                             git_branches_.size()));
+  }
+
+  /// 比较视图的数据读取（帧首泵；与 `ensure_git_log` 同一理由：渲染期起子进程会崩）。
+  void ensure_compare() {
+    if (!compare_wanted_) return;
+    if (workspace_.empty()) return;
+    compare_wanted_ = false;
+    gbcode::CompareOptions options;
+    options.from = gbcode::DiffEndpoint::parse(compare_from_.value());
+    options.to = gbcode::DiffEndpoint::parse(compare_to_.value());
+    options.merge_base = compare_merge_base_.value();
+    compare_result_ = gbcode::read_compare(workspace_, options);
+    compare_loaded_ = true;
+    // 读到东西要**标脏**：普通成员改了不会触发重组（与 `ensure_git_log` 同一个坑）。
+    if (!compare_result_.ok) {
+      status_.set("比较失败：" + compare_result_.error);
+    } else {
+      status_.set(std::format("比较 {} → {}：{} 个文件 · +{} −{}",
+                              compare_result_.from_text.empty() ? "工作区"
+                                                                : compare_result_.from_text,
+                              compare_result_.to_text, compare_result_.files.size(),
+                              compare_result_.additions, compare_result_.deletions));
+    }
+  }
+
+  /// 并列差异的数据读取（帧首泵）：读**两侧文本**后用 `text::diff` 在本地算结构。
+  ///
+  /// 为何不直接吃 `git diff` 的 patch 文本：结构化差异要的是**行号映射与两栏对齐**，
+  /// 两者都靠 `DiffLine.old_line/new_line`。统一到“取文本 + 本地比”只剩一条路，
+  /// 而且将来做“与 HEAD 比当前未保存内容”时不用再换实现。
+  void ensure_diff() {
+    if (!diff_wanted_) return;
+    diff_wanted_ = false;
+    if (workspace_.empty() || diff_pending_path_.empty()) return;
+    const gbcode::CompareOptions& options = diff_pending_options_;
+    gbcode::DiffEndpoint from = options.from;
+    gbcode::DiffEndpoint to = options.to;
+    // 纯未暂存改动：左 = 暂存区，右 = 工作区——这是「改了什么」的默认口径
+    //（与 `git diff` 的裸语义一致；两个端点都是“空”时走这一支）。
+    if (from.empty() && (to.empty() || to.is_worktree())) {
+      from = gbcode::DiffEndpoint::parse("INDEX");
+      to = gbcode::DiffEndpoint::parse("WORKTREE");
+    }
+    const auto old_side = gbcode::read_content_at(workspace_, from, diff_pending_path_);
+    const auto new_side = gbcode::read_content_at(workspace_, to, diff_pending_path_);
+    st::text::FileDiff file;
+    file.old_path = diff_pending_path_;
+    file.new_path = diff_pending_path_;
+    file.binary = old_side.binary || new_side.binary;
+    file.added = old_side.missing && new_side.ok;
+    file.deleted = new_side.missing && old_side.ok;
+    if (file.binary) {
+      file.message = "二进制文件：不逐行展示";
+    } else if (file.added) {
+      file.message = "新增文件";
+    } else if (file.deleted) {
+      file.message = "删除文件";
+    }
+    if (!file.binary) {
+      file.hunks = st::text::diff_hunks(old_side.text, new_side.text, options.context);
+      const auto [additions, deletions] = st::text::count_changes(file.hunks);
+      file.additions = additions;
+      file.deletions = deletions;
+    }
+    diff_file_.set(file);
+    diff_title_.set(diff_pending_title_);
+    status_.set(std::format("差异：{} · {} 处改动 · +{} −{}", diff_pending_path_,
+                            file.hunks.size(), file.additions, file.deletions));
+  }
+
+  /// 打开一个**并列差异**标签（`options` 描述两端；`path` 是文件）。
+  ///
+  /// 与旧版“把 `git diff` 敲进只读标签”的区别：这里是**结构**（两栏对齐、双行号、
+  /// 可一个差异一个差异地跳），而旧的只是一块带颜色的文本。
+  void open_diff(std::string title, const gbcode::CompareOptions& options, std::string path) {
+    diff_pending_title_ = std::move(title);
+    diff_pending_options_ = options;
+    diff_pending_path_ = std::move(path);
+    diff_key_.set("diff:" + diff_pending_path_ + "|" + diff_pending_title_);
+    diff_wanted_ = true;
   }
 
   /// 暂存/取消暂存一个文件（写操作：交终端作业通道——输出实时回流、可中止）。
@@ -5430,6 +5839,26 @@ auto run_app(int argc, char** argv) -> int {
       format.alt = true;
       (void)root->register_shortcut("f", format, [page]() {
         page->format_request();
+        return true;
+      });
+    }
+    // —— 差异视图导航（F7 / Shift+F7，与主流 IDE 同键位）——
+    // “下一个差异 / 上一个差异”是差异视图最常用的两个动作，必须有键盘入口：
+    // 否则就只能靠鼠标滚——而“一个差异一个差异地看”本来就是顺序行为。
+    {
+      UiRoot::Shortcut next_hunk{};
+      next_hunk.key = "f7";
+      (void)root->register_shortcut("f7", next_hunk, [page]() {
+        if (page->diff_view_ptr == nullptr) return false;
+        page->diff_view_ptr->next_hunk();
+        return true;
+      });
+      UiRoot::Shortcut prev_hunk{};
+      prev_hunk.key = "f7";
+      prev_hunk.shift = true;
+      (void)root->register_shortcut("f7", prev_hunk, [page]() {
+        if (page->diff_view_ptr == nullptr) return false;
+        page->diff_view_ptr->previous_hunk();
         return true;
       });
     }

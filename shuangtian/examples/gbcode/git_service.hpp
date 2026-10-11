@@ -136,4 +136,132 @@ struct BranchInfo {
 [[nodiscard]] auto read_worktree_diff(const std::string& cwd, const std::string& path,
                                       bool staged) -> std::string;
 
+// ————————————————————————————————————————————————————————————————————————————
+// 任意两端对比（参照歌白文件工作台的端点模型）
+// ————————————————————————————————————————————————————————————————————————————
+//
+// ## 端点语义表（**唯一权威**：任何取内容/取清单的路径都必须经 `diff_args` 推导）
+//
+// | from | to | 命令 | 含义 |
+// |---|---|---|---|
+// | 空/WORKTREE | 空/WORKTREE | `git diff` | 暂存区 ↔ 工作区（未暂存改动） |
+// | 空/WORKTREE | INDEX | `git diff --cached` | HEAD ↔ 暂存区（已暂存） |
+// | 空 | REF | `git diff REF` | REF ↔ 工作区 |
+// | INDEX | REF | `git diff --cached REF` | REF ↔ 暂存区 |
+// | REF1 | REF2 | `git diff REF1 REF2` | 任意两端（反向对比即交换参数） |
+// | REF1 | REF2 + merge_base | `git diff REF1...REF2` | 三点：共同祖先起算（分支对比的正确语义） |
+//
+// **为什么必须只有这一个推导函数**（歌白实测过的坑，代价是一批静默错的结果）：
+// “取文件清单”与“取文件内容”两条路若各写一套端点解释，把 `from=INDEX&to=WORKTREE`
+// 喂给比较接口会被解释成 `--cached`（即 HEAD↔暂存区）——**不报错、只是返回另一批文件**。
+// 本文件里两者共用 `diff_args()`，因此不可能分叉。
+
+/// 端点保留字。
+enum class DiffEnd : std::uint8_t {
+  Worktree,   ///< 工作区（磁盘上的当前内容）
+  Index,      ///< 暂存区（已 `git add` 的内容）
+  Empty,      ///< 未指定（按上表与另一端组合决定）
+  Revision,   ///< 任意 rev（分支名 / 标签 / 短 hash / `HEAD~3` / `main@{1}` / `A^`）
+};
+
+/// 解析后的一个端点。
+struct DiffEndpoint {
+  DiffEnd kind{DiffEnd::Empty};
+  std::string revision{};   ///< `kind == Revision` 时的原文（透传给 git，不做规范化）
+
+  /// 解析：大小写不敏感地识别保留字，其余均为 rev（**不校验合法性**：
+  /// git 会拒，而我们不做第二套语法——两套判据必然漂移）。
+  [[nodiscard]] static auto parse(std::string_view text) -> DiffEndpoint;
+  /// 回写文本（保留字原名，rev 原样）。
+  [[nodiscard]] auto to_text() const -> std::string;
+  [[nodiscard]] auto is_worktree() const noexcept -> bool { return kind == DiffEnd::Worktree; }
+  [[nodiscard]] auto is_index() const noexcept -> bool { return kind == DiffEnd::Index; }
+  [[nodiscard]] auto empty() const noexcept -> bool { return kind == DiffEnd::Empty; }
+};
+
+/// 空树（git 的固定对象 id）——**根提交的 `<rev>^` 归一目标**。
+///
+/// 根提交没有父提交，照惯例写 `HEAD^` 会让 git 报错；而“跟一个不存在的父比较”
+/// 在语义上就是“跟空树比较”。歌白那边的实测代价：不归一时上层把 422 当“无差异”
+/// 吞掉，于是跨文件的导航按钮凭空消失。
+inline constexpr std::string_view kEmptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// 比较选项。
+struct CompareOptions {
+  DiffEndpoint from{};
+  DiffEndpoint to{};
+  /// 三点对比：`from...to`（按**共同祖先**起算）。分支对比的正确默认语义。
+  bool merge_base{false};
+  /// 路径过滤器（git pathspec；空 = 整仓）。
+  std::string path{};
+  /// 空白忽略（`-w`）。
+  bool ignore_whitespace{false};
+  /// 上下文行数（夹取到 0..20；默认 3，与 git 一致）。
+  std::size_t context{3};
+  /// 只取名称与状态（`--name-status` 的开关位；清单内部用得上）。
+  bool name_only{false};
+  /// `--numstat` 允许的最大行数（超出则**只给路径不给计数**，并在结果里如实标记；
+  /// `0` = 不限）。歌白那边的口径：截掉的文件仍要有真实的 +N/−N（否则 UI 显示 `+0/−0`
+  /// 比不显示更糟），因此默认给一个较宽的上限而不是截断正文。
+  std::size_t max_files{400};
+};
+
+/// 一个变更文件（比较结果的条目）。
+struct ComparedFile {
+  std::string path{};
+  std::string old_path{};      ///< 重命名/复制的原路径（非重命名时为空）
+  char status{'M'};            ///< `M`/`A`/`D`/`R`/`C`/`T`（`--name-status` 的首字母）
+  std::size_t additions{0};    ///< `+N`；二进制为 0（**不等于“没有变化”**）
+  std::size_t deletions{0};
+  bool binary{false};          ///< 二进制（无逐行内容）
+};
+
+/// 一次比较的结果。
+struct CompareResult {
+  std::vector<ComparedFile> files{};
+  std::size_t additions{0};
+  std::size_t deletions{0};
+  std::string from_text{};     ///< 回写用（规范化后的端点文本）
+  std::string to_text{};
+  std::string merge_base_hash{};   ///< 三点对比时的共同祖先（短 hash；否则空）
+  std::string error{};             ///< 非空 = 本次比较失败
+  bool ok{false};
+};
+
+/// 一侧的文件内容（并列差异的两侧文本）。
+struct ContentAt {
+  std::string text{};
+  bool ok{false};
+  bool missing{false};    ///< 该端点下没有这个文件（新增/删除的另一侧）
+  bool binary{false};
+  std::size_t size{0};
+  std::string error{};
+};
+
+/// 把端点组合翻译成 `git diff` 的**子参数**（**不含** `diff` 子命令本身与全局选项）。
+/// 不支持的组合（如 `INDEX → INDEX`）返回 `nullopt`——调用方据此**如实报错**，
+/// 而不是自己编一个命令或当成“无差异”。
+[[nodiscard]] auto diff_args(const DiffEndpoint& from, const DiffEndpoint& to, bool merge_base)
+    -> std::optional<std::vector<std::string>>;
+
+/// 一次比较（文件清单 + 增删统计 + 重命名识别）。
+[[nodiscard]] auto read_compare(const std::string& cwd, const CompareOptions& options)
+    -> CompareResult;
+
+/// 读一次比较的**原始 patch 文本**（`context` 在这里才起作用）。
+/// 与 `read_compare` 共用 `diff_args()`，因此两侧的端点解释不可能分叉。
+[[nodiscard]] auto read_diff_text(const std::string& cwd, const CompareOptions& options)
+    -> std::string;
+
+/// 读一个端点在历史里的**文件内容**（并列差异的“另一侧”）。
+///
+/// `end` 为 `Worktree` 时读磁盘；`Index` 读暂存区（`git show :0:<path>`）；
+/// `Revision` 读该提交（`git show <rev>:<path>`）。
+/// **文件在那一侧不存在不是错误**（新增/删除就是这种情况）：`ok=false` + `missing=true`。
+[[nodiscard]] auto read_content_at(const std::string& cwd, const DiffEndpoint& end,
+                                   const std::string& path) -> ContentAt;
+
+/// 该提交是不是**根提交**（无父）。`rev` 不可解析时返回 false。
+[[nodiscard]] auto is_root_commit(const std::string& cwd, const std::string& rev) -> bool;
+
 }  // namespace gbcode
