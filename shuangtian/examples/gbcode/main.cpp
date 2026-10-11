@@ -505,6 +505,16 @@ struct CodeEditorPage : Component {
   // 为何按视口取而不是一次性拉整文件：`git blame` 是子进程，一个万行文件的整次 blame
   // 要几百毫秒——而用户每滚动一次都想要新的行。取视口那几十行的增量成本是可接受的。
   bool blame_on_{false};
+
+  // —— 单文件历史弹窗（B6）——
+  //
+  // 取数结果放进 **`State`**（而不是普通成员 + 手标脏）：State 变化会自动触发重组，
+  // 而普通成员改了重组不会发生（弹窗会永远显示“无历史”）。
+  State<bool> history_open_{false};
+  State<std::vector<gbcode::LogEntry>> history_entries_{};
+  /// 弹窗标题用的文件路径（只在打开时定一次，不进重组依赖）。
+  std::string history_path_{};
+  bool history_wanted_{false};              ///< 「下一帧取历史」待办
   /// `--open` 的待办路径（帧首泵消费；空 = 无）。
   std::string pending_open_path_{};
   /// 已经拿到 blame 的文件（与 `blame_path_` 不同时空 = 需要重新取）。
@@ -1101,6 +1111,8 @@ struct CodeEditorPage : Component {
     ensure_diff();
     // 行尾 blame：帧首泵（起子进程不能在渲染期）。
     ensure_blame();
+    // 单文件历史：同上（`git log --follow` 也是子进程）。
+    ensure_file_history();
     flush_terminal_commands();
     const bool diagnostics_changed = lsp_.pump();
     // 待落地的跳转（跨文件）：编辑器实例在新文件装载后才就位，所以在这里补做。
@@ -1228,6 +1240,7 @@ struct CodeEditorPage : Component {
     build_completion_popup(c);
     build_rename_dialog(c);
     build_git_confirm(c);
+    build_file_history(c);
     build_compare_picker(c);
     build_branch_new_dialog(c);
     build_tag_new_dialog(c);
@@ -2311,7 +2324,7 @@ struct CodeEditorPage : Component {
     (void)custom_container<ScrollView>(
         c,
         [&] {
-          (void)list(c, items, [this](std::size_t index) {
+        (void)list(c, items, [this](std::size_t index) {
             // 点击行 → 反查它属于哪条命中（分组行不可点——由映射里的哨兵值区分）。
             if (index < search_row_to_hit_.size() &&
                 search_row_to_hit_[index] != static_cast<std::size_t>(-1)) {
@@ -2483,7 +2496,7 @@ void replace_in_workspace(std::string_view replacement) {
     (void)custom_container<ScrollView>(
         c,
         [&] {
-          (void)list(c, items, [this](std::size_t index) {
+        (void)list(c, items, [this](std::size_t index) {
             // 点击行 → 反查它属于哪个结果（前缀行不可点——由 key 前缀区分）。
             // `list` 的回调给的是**扁平序号**，与 `nav_results_` 下标差着分组行，
             // 所以构建时同步记录「行 → 结果下标」的映射。
@@ -4230,7 +4243,8 @@ b.set_label(std::format("{}  +{} −{}", path, plus, minus));
                                                                    : "本语言无行注释标记");
         break;
       case 7: open_find(); break;
-      case 8: open_palette(false); break;
+      case 8: open_file_history(); break;
+      case 9: open_palette(false); break;
       default: break;
     }
   }
@@ -4245,6 +4259,8 @@ b.set_label(std::format("{}  +{} −{}", path, plus, minus));
             {.id = "select_all", .label = "全选"},
             {.separator = true},
             {.id = "comment", .label = "切换行注释"},
+            {.separator = true},
+            {.id = "history", .label = "文件历史…"},
             {.separator = true},
             {.id = "find", .label = "查找…"},
             {.id = "palette", .label = "命令面板…"}};
@@ -5019,6 +5035,104 @@ void load_active_text() {
     } else {
       status_.set("已开启 blame 注解（显示当前视口的行）");
     }
+  }
+
+  // —— 单文件历史（B6）——
+
+  /// 打开“当前文件的历史”弹窗（`read_file_history` = `git log --follow`，跨重命名）。
+  ///
+  /// 为何入口放在**编辑器右键菜单**：它对标的动作是“这个文件改过什么”，而光标就在
+  /// 这个文件里；放在日志视图上会变成“选中那个提交的历史”，语义不同。
+  void open_file_history() {
+    const auto list = buffers_.value();
+    if (list.empty() || active_.value() >= list.size()) return;
+    const OpenBuffer& buffer = list[active_.value()];
+    if (buffer.path.empty()) {
+      status_.set("内存缓冲没有历史（先保存成文件）");
+      return;
+    }
+    history_path_ = buffer.path;
+    history_entries_.set({});
+    history_wanted_ = true;   // 取数在帧首泵（起子进程不能在渲染期）
+    history_open_.set(true);
+  }
+
+  /// 帧首泵：取历史（与 `ensure_diff` 同一理由：渲染期起子进程会崩）。
+  void ensure_file_history() {
+    if (!history_wanted_) return;
+    history_wanted_ = false;
+    if (workspace_.empty() || history_path_.empty()) return;
+    std::error_code ec;
+    const auto path = std::filesystem::path(history_path_);
+    std::string relative = history_path_;
+    if (const auto rel = std::filesystem::relative(path, workspace_, ec); !ec) {
+      relative = rel.generic_string();
+    }
+    history_entries_.set(gbcode::read_file_history(workspace_, relative, 100));
+    const std::size_t count = history_entries_.value().size();
+    status_.set(count == 0 ? "该文件没有历史（未跟踪 / 不在仓库里）"
+                           : std::format("文件历史：{} 条", count));
+  }
+
+  /// 文件历史弹窗（`Dialog` overlay；条目点一下 → 打开该提交对本文件的差异）。
+  void build_file_history(Composer& c) {
+    if (!history_open_.value()) return;
+    (void)overlay(c, "file-history", {}, [&] {
+      (void)card(c, {.gap = 6.0f, .padding = 10.0f, .id = "file-history-card"}, [&] {
+        (void)row(c, {.gap = 8.0f}, [&] {
+          (void)text(c, [this] {
+            return std::format("文件历史 · {}",
+                               std::filesystem::path(history_path_).filename().string());
+          }, {.id = "file-history-title"});
+          (void)spacer(c);
+          auto& close = button(c, "关闭", [this] { history_open_.set(false); },
+                               {.id = "file-history-close"});
+          close.style().width = 72.0f;
+        });
+        const auto& entries = history_entries_.value();
+        if (entries.empty()) {
+          (void)text(c, [] { return std::string("（没有历史）"); }, {.id = "file-history-empty"});
+          return;
+        }
+        // 条目列表：短 hash + 日期 + 作者 + 标题。
+        // 用现成的 DSL `list`（数据驱动、按 key 复用）+ `on_click`——手搓 `custom<List>`
+        // 要自己管条目与回调，而这两件事 DSL 已经做完了。
+        std::vector<dsl::ListItemData> items;
+        items.reserve(entries.size());
+        for (const auto& entry : entries) {
+          // 用**短** hash（长 hash 40 位会把这行撑满，标题反而看不见——
+          // 实测踩到：截图里只剩一串十六进制）。作者/日期放副行。
+          items.push_back(dsl::ListItemData{
+              .key = "fh-" + entry.hash,
+              .label = std::format("{}  {}",
+                                   entry.short_hash.empty() ? entry.hash : entry.short_hash,
+                                   entry.subject),
+              .subtitle = std::format("{} · {}", entry.author, entry.date)});
+        }
+        // 回调按**下标**取（`list` 给的是扁平序号）；副本捕获避免生命周期问题
+        // （`entries` 是 `State` 里那份的引用，而回调可能在状态变更后触发）。
+        Element& history_list = list(c, items, [this, snapshot = entries](std::size_t index) {
+                    if (index < snapshot.size()) open_history_entry(snapshot[index]);
+                  },
+                  {.id = "file-history-list"});
+        history_list.style().width = 560.0f;
+        history_list.style().height = 260.0f;
+      });
+    });
+  }
+
+  /// 打开“该提交对本文件”的差异（`<hash>^` ↔ `<hash>`）。
+  void open_history_entry(const gbcode::LogEntry& entry) {
+    history_open_.set(false);
+    diff_pending_path_ = history_path_;
+    gbcode::CompareOptions options;
+    // 根提交没有父：`read_content_at` 会把 `<hash>^` 归一成空树（与服务端同一套规则），
+    // 所以这里不必特判（否则跨文件导航按钮会凭空消失——那正是那个坑的形态）。
+    options.from = gbcode::DiffEndpoint::parse(entry.hash + "^");
+    options.to = gbcode::DiffEndpoint::parse(entry.hash);
+    diff_pending_options_ = options;
+    diff_wanted_ = true;
+    status_.set("文件历史：打开 " + entry.hash);
   }
 
   /// 拉取视口行的 blame（帧首泵做：`git blame` 是子进程，渲染期起会崩）。
@@ -6417,6 +6531,8 @@ void load_active_text() {
       }
     } else if (id == "view.toggle-blame") {
       toggle_blame();
+    } else if (id == "file.history") {
+      open_file_history();
     } else if (id == "help.about") {
       status_.set("歌白代码 0.1.0 · 霜天框架示例 · 声明式组装");
     } else if (!id.empty()) {
@@ -6448,6 +6564,8 @@ void load_active_text() {
     add("view.toggle-indent-guides", "查看: 切换缩进参考线", "每级缩进一条竖线");
     // blame 行尾注解：开关 + 当前视口取数（B5）。
     add("view.toggle-blame", "查看: 切换行尾 blame 注解", "显示当前视口行的作者与日期");
+    // 单文件历史弹窗（B6）——入口同时挂在编辑器右键菜单（与 IDEA 一致）。
+    add("file.history", "文件: 当前文件的历史…", "git log --follow（跨重命名）");
     // 导航族：F12 只覆盖定义，声明/类型定义/实现进面板（快捷键也在，但面板可搜）。
     add("nav.declaration", "转到: 声明", "Alt+F12");
     add("nav.type-definition", "转到: 类型定义", "光标在变量上时跳它的类型");

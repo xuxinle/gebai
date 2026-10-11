@@ -42,7 +42,7 @@ def main():
     # ⚠ 别用 `%TEMP%`：Windows 会把它短名化成 `ADMINI~1`，而短名路径在
     # `git blame <path>` 里算不出仓库相对路径——表现为"注解一行都不出现"
     #（实测踩到：open_path 收到的是 `C:\Users\ADMINI~1\...`）。
-    base = ROOT / "tmp"
+    base = ROOT / "build" / "artifacts"
     base.mkdir(parents=True, exist_ok=True)
     work = pathlib.Path(tempfile.mkdtemp(prefix="gbcode_blame_", dir=base))
     repo = work / "repo"
@@ -56,7 +56,7 @@ def main():
         log("建仓提交失败")
         return 2
 
-    shots = ROOT / "tmp" / "gbcode-blame"
+    shots = ROOT / "build" / "artifacts" / "gbcode-blame-shots"   # 独立于 work：work 会被删
     shutil.rmtree(shots, ignore_errors=True)
     shots.mkdir(parents=True, exist_ok=True)
     ctl = shots / "ctl.json"

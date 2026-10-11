@@ -183,3 +183,43 @@ ST_TEST(element_key_survives_container_rebuild) {
   (void)page.insert_child(0, std::move(inserted));
   ST_CHECK_EQ(first_ptr->derived_id(), std::string("page/Button@alpha"));
 }
+
+
+namespace {
+
+/// 取第 index 个子项（`List` 的 children 就是 ListItem）。
+[[nodiscard]] auto subtitle_item_at(const st::ui::List& list, std::size_t index)
+    -> const st::ui::ListItem* {
+  const auto& children = list.children();
+  if (index >= children.size()) return nullptr;
+  return dynamic_cast<const st::ui::ListItem*>(children[index].get());
+}
+
+}  // namespace
+
+ST_TEST(list_sync_items_carries_subtitle) {
+  st::ui::List list;
+  list.set_id("probe");
+  // ① 新建路径：首次同步就带副行。
+  list.sync_items(std::vector<st::ui::List::Entry>{
+      st::ui::List::Entry{.key = "a", .label = "第一条", .subtitle = "作者 · 日期"},
+      st::ui::List::Entry{.key = "b", .label = "第二条"}});
+  const st::ui::ListItem* first = subtitle_item_at(list, 0);
+  ST_REQUIRE(first != nullptr);
+  ST_CHECK_EQ(first->label(), std::string("第一条"));
+  ST_CHECK_EQ(first->subtitle(), std::string("作者 · 日期"));
+  // 没给副行的那条不该被填上别的东西。
+  const st::ui::ListItem* second = subtitle_item_at(list, 1);
+  ST_REQUIRE(second != nullptr);
+  ST_CHECK(second->subtitle().empty());
+
+  // ② 复用路径：同 key 改副行，元素被复用（id 不变）但文案要跟上。
+  const std::string id_before = first->id();
+  list.sync_items(std::vector<st::ui::List::Entry>{
+      st::ui::List::Entry{.key = "a", .label = "第一条", .subtitle = "另一个人 · 另一个日期"},
+      st::ui::List::Entry{.key = "b", .label = "第二条"}});
+  const st::ui::ListItem* reused = subtitle_item_at(list, 0);
+  ST_REQUIRE(reused != nullptr);
+  ST_CHECK_EQ(reused->id(), id_before);   // 复用（这正是 sync 与 clear+add 的区别）
+  ST_CHECK_EQ(reused->subtitle(), std::string("另一个人 · 另一个日期"));
+}

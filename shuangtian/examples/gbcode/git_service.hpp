@@ -128,6 +128,17 @@ struct LogEntry {
   std::size_t lane{0};
   /// 该提交的增删统计（`--numstat` 段；读详情时才填，列表不填）。
   std::vector<std::tuple<std::string, std::size_t, std::size_t>> files{};
+
+  /// 相等比较：`State<std::vector<LogEntry>>` 需要它（`State` 用相等性做变更检测，
+  /// 否则每次 `set` 都会当成“变了”而触发重组）。
+  ///
+  /// 只比**身份与展示字段**（hash/subject/author/date）：`files` 是“读详情时才填”的
+  /// 重量级字段，把它拉进来会让比较退化成逐条统计表对账。
+  auto operator==(const LogEntry& other) const noexcept -> bool {
+    return hash == other.hash && short_hash == other.short_hash && subject == other.subject &&
+           author == other.author && date == other.date && lane == other.lane &&
+           refs == other.refs;
+  }
 };
 
 /// 读日志（`limit` 条；从 `ref` 起，空 = HEAD）。

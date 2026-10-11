@@ -210,10 +210,11 @@ void List::sync_items(const std::vector<Entry>& entries) {
       pool_index.erase(found);   // 每个元素只能被拿一次
     }
     if (node == nullptr) {
-      node = std::make_unique<ListItem>(entry.label, std::string{});
+      node = std::make_unique<ListItem>(entry.label, entry.subtitle);
       node->set_key(entry.key);
     } else {
       node->set_label(entry.label);  // 文案可能变了，元素不变
+      node->set_subtitle(entry.subtitle);
     }
     // 无论是新建还是复用，都要接上激活链路（漏了就是"点了没反应"）；
     // 数据层给了 `on_activate` 就用它（否则用 `set_on_select` 的默认行为）。

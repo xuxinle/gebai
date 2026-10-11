@@ -92,6 +92,13 @@ class List : public Element {
   struct Entry {
     std::string key{};
     std::string label{};
+    /// 副行文本（空 = 不画副行）。
+    ///
+    /// 为何要它：`ListItem` 本来就支持副行（`set_subtitle`），但 `Entry`（数据驱动同步
+    /// 用的那个结构）没带这个字段——于是 `dsl::list` 的 `ListItemData.subtitle`
+    /// **没有落点、静默丢掉**（实测：文件历史的「作者 · 日期」一行都画不出来，
+    /// 而数据面明明给了值）。
+    std::string subtitle{};
     std::function<void()> on_activate{};  ///< 空则用 `set_on_select` 的默认行为
   };
 
