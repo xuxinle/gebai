@@ -196,8 +196,24 @@ auto run_all(std::string_view filter) -> int {
     std::condition_variable done_signal;
     bool done_flag = false;
     std::atomic<bool> timed_out{false};
+    // ⚠ **用例体必须被异常边界包住**：用例里任何未捕获的异常（`Json::get<T>()` 对
+    // null 会抛 `type_error`、容器越界、stoi 失败…）都会一路逃到线程入口，
+    // 而线程函数抛出 = `std::terminate` ⇒ **整个测试进程消失**，
+    // 前面的 PASS 全部作废，且报告里只留一句 `terminate called after throwing …`
+    //（实测：`script_bridge_run_inline_source` 里的 `eval_ok` 返回 null 后
+    // `get<int>()` 抛出，把 1268 条用例的整套运行在第 800 条处带走）。
+    //
+    // 记成 FAIL（而不是吞掉）是关键：**异常是用例失败的另一种形态**，
+    // 它必须出现在结果里，否则就成了"静默消失的用例"。
+    std::string uncaught;
     std::thread worker([&]() {
-      item.body();
+      try {
+        item.body();
+      } catch (const std::exception& error) {
+        uncaught = std::string("未捕获异常: ") + error.what();
+      } catch (...) {
+        uncaught = "未捕获异常（非 std::exception）";
+      }
       {
         const std::scoped_lock lock(done_mutex);
         done_flag = true;
@@ -212,6 +228,12 @@ auto run_all(std::string_view filter) -> int {
       }
       if (done_flag) {
         worker.join();
+        if (!uncaught.empty()) {
+          // 报在**本文件本行**（框架侧）而不是用例的声明处：`Case` 不带 file/line
+          // （用例自己报错时才由宏提供），而异常已经带上 `what()`——信息够定位。
+          ::st::test::Registry::instance().record_failure(__FILE__, __LINE__,
+                                                          item.name + "：" + uncaught);
+        }
         joined = true;
         break;
       }

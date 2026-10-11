@@ -1,6 +1,7 @@
 #include "st/ui/script_bridge.hpp"
 
 #include <algorithm>
+#include <ranges>
 #include <format>
 #include <memory>
 #include <string>
@@ -259,7 +260,30 @@ auto ScriptBridge::expose(std::string name, ScriptBridgeFn function) -> bool {
     impl_->last_error = *problem;
     return false;
   }
-  return register_one(std::move(name), std::move(function));
+  // ⚠ **应用暴露的名字一律挂在 `app.` 之下**（含不带点号的）：
+  //
+  // 契约是「脚本侧看到的是命名空间化的全局对象 `app.…`」（见头文件的用法示例与
+  // `expose("fs.read")` → `app.fs.read`）。而实现原先只在名字**含点号**时才挂命名空间，
+  // 于是 `expose("add")` 变成裸全局 `add` —— 脚本里写 `app.add(1,2,3)` 报
+  // `TypeError: not a function`。
+  //
+  // 这个不一致原先**看不见**：那个用例随后 `eval_ok("total").get<int>()` 在 null 上
+  // 抛异常，而测试框架当时不接异常 ⇒ 整个测试进程 terminate，
+  // 报出来的是"跑到某处崩了"而不是"app.add 不是函数"（缺陷被崩溃掩盖）。
+  //
+  // 命名空间化的理由与头文件一致：不污染全局、不与内建 API 撞名、
+  // 且"这个函数是谁提供的"在脚本里一眼可读。
+  // 已在 `app.` 之下的就不再套（避免 `app.app.x`）；其余一律归到 `app.` 下。
+  const bool already_qualified = name.rfind("app.", 0) == 0;
+  const std::string qualified = already_qualified ? name : "app." + name;
+  if (!register_one(std::move(qualified), std::move(function))) return false;
+  // 清单记**原始名**（见头文件 `exposed()` 的说明）；`app.` 前缀是调用方自己写的
+  // 就按原样记（他写什么就报什么）。
+  if (const auto found = std::ranges::find(impl_->exposed, name);
+      found == impl_->exposed.end()) {
+    impl_->exposed.push_back(name);
+  }
+  return true;
 }
 
 auto ScriptBridge::expose_internal(std::string name, ScriptBridgeFn function) -> bool {
@@ -270,7 +294,14 @@ auto ScriptBridge::expose_internal(std::string name, ScriptBridgeFn function) ->
   //（那个开关迟早会被应用摸到）。
   if (impl_ == nullptr || impl_->script == nullptr) return false;
   if (name.empty() || function == nullptr) return false;
-  return register_one(std::move(name), std::move(function));
+  // 框架原语走**裸全局名**（`__bridgeBuild` 由 `script_api.js` 直接按名字调），
+  // 因此不加 `app.` 前缀；清单里也记它的原名。
+  if (!register_one(name, std::move(function))) return false;
+  if (const auto found = std::ranges::find(impl_->exposed, name);
+      found == impl_->exposed.end()) {
+    impl_->exposed.push_back(std::move(name));
+  }
+  return true;
 }
 
 auto ScriptBridge::register_one(std::string name, ScriptBridgeFn function) -> bool {
@@ -296,7 +327,8 @@ auto ScriptBridge::register_one(std::string name, ScriptBridgeFn function) -> bo
                     -> Result<st::Json> { return function(args); });
   if (!status) return false;
   if (!namespaced) {
-    impl_->exposed.push_back(std::move(name));
+    // 清单由 `expose` 负责记（它知道调用方传入的原始名）——这里不再插一份，
+    // 否则同一个函数会在清单里出现两次（限定名 + 原始名）。
     return true;
   }
 
@@ -308,9 +340,18 @@ auto ScriptBridge::register_one(std::string name, ScriptBridgeFn function) -> bo
   // ⚠ 每一步都要 **`|| {}` 兼容既有值**，而根对象要先建出来：
   // 漏建根的反面是 `undefined.fs = …` 直接抛 TypeError——而 `expose` 返回 `false`
   // 时调用方很容易以为“名字不合法”，实际是挂载炸了（实测踩到）。
-  std::string source = "globalThis.app = globalThis.app || {};";
-  std::size_t begin = 0;
-  std::string accessor = "globalThis.app";
+  // ⚠ 挂载起点取决于名字是否已带 `app.` 前缀：
+  //   · `app.add`（`expose` 加的前缀）→ 起点就是 `globalThis.app`，从 `add` 开始挂；
+  //   · 别的根名（如 `tools.x`，调用方自己写的）→ 也要能挂，起点是 `globalThis`。
+  //
+  // 第一版没区分，于是 `app.add` 被挂成 `globalThis.app.app.add`——
+  // 而脚本调 `app.add` 仍然 `not a function`（挂到了一个嵌套的同名对象上）。
+  const bool rooted_at_app = name.rfind("app.", 0) == 0;
+  std::string source = rooted_at_app
+                           ? "globalThis.app = globalThis.app || {};"
+                           : "globalThis.app = globalThis.app || {};";
+  std::size_t begin = rooted_at_app ? 4 : 0;   // 跳过 `app.`
+  std::string accessor = rooted_at_app ? "globalThis.app" : "globalThis";
   while (true) {
     const std::size_t dot = name.find('.', begin);
     const bool last = dot == std::string::npos;
@@ -335,9 +376,8 @@ auto ScriptBridge::register_one(std::string name, ScriptBridgeFn function) -> bo
   // 为何不把“结尾表达式不可表示”当成功：那会把真正的 eval 错误也放过去
   // （失败与成功不可分）。截坐在这里、让每次挂载都有一个哑值返回，更小也更精确。
   source += "0;";
-  if (!impl_->run_source(source, "<bridge>")) return false;
-  impl_->exposed.push_back(std::move(name));
-  return true;
+  // 清单由 `expose` 记（见上）。
+  return impl_->run_source(source, "<bridge>").has_value();
 }
 
 auto ScriptBridge::load(const std::string& path) -> Status {

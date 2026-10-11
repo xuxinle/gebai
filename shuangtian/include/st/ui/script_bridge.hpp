@@ -93,6 +93,11 @@ class ScriptBridge {
   auto run(std::string_view source, std::string_view filename = "<inline>") -> Status;
 
   /// 已暴露的名字（诊断/测试面：**能用什么**应当可查）。
+  ///
+  /// ⚠ 报的是**调用方传入的名字**（`"counter.bump"`），不是脚本侧的完整路径
+  ///（`"app.counter.bump"`）：这个清单回答的是"我 expose 过什么"，
+  /// 而"脚本里要写 `app.` 前缀"是**统一的约定**（见文件头），
+  /// 每条都带前缀只会让清单与调用点对不上、还得在脑子里做一次翻译。
   [[nodiscard]] auto exposed() const -> const std::vector<std::string>&;
   /// 已加载的文件路径（按加载顺序）。
   [[nodiscard]] auto loaded_files() const -> const std::vector<std::string>&;

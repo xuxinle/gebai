@@ -198,8 +198,31 @@ ST_TEST(script_bridge_run_inline_source) {
     for (const auto& item : args) sum += static_cast<int>(item.get<double>());
     return Json(sum);
   }));
-  ST_CHECK(bridge.run("globalThis.total = app.add(1, 2, 3);").has_value());
-  ST_CHECK_EQ(eval_ok(script, "total").get<int>(), 6);
+  // ⚠ 分两步断言（第一版在这里崩过整个测试进程，值得记下来）：
+  //
+  // 原来只有一行 `bridge.run("globalThis.total = app.add(1, 2, 3);")` 加一句
+  // `eval_ok(script, "total").get<int>()`。当 `app.add` 这一侧有任何问题（名字没对上、
+  // 调用抛错）时，JS 里 `total` **根本不会被赋值**，于是：
+  //   `eval_ok` 拿到 ReferenceError → 返回 `Json()`（null）→ `.get<int>()` **抛异常**。
+  // 而当时测试框架**不接用例里的异常**，异常逃到线程入口 = `std::terminate`
+  // ⇒ 整套 1268 条用例在第 800 条处整进程消失（只有一句 terminate，没有 FAIL 行）。
+  //
+  // 所以：**先断言"赋值这一步成功了"**（`run` 的返回值 + `total` 真的存在），
+  // 再断言它的值。中间那一步的失败才是"为什么后面的值为空"的直接答案。
+  const auto assigned = bridge.run("globalThis.total = app.add(1, 2, 3);");
+  ST_CHECK(assigned.has_value());
+  if (!assigned.has_value()) {
+    // 把 JS 侧的错误原样带出来（否则只能看到"值不对"，看不到"为什么"）。
+    ST_FAIL("app.add(1,2,3) 调用失败：" + assigned.error().message);
+    return;
+  }
+  const Json total = eval_ok(script, "total");
+  // `get<int>()` 对 null 会**抛**（不是断言失败）——所以先判类型再取。
+  if (!total.is_number()) {
+    ST_FAIL(std::format("globalThis.total 不是数字（实际 {}）", st::json_dump(total)));
+    return;
+  }
+  ST_CHECK_EQ(total.get<int>(), 6);
   // `run` 的失败也要说清是哪个文件名。
   const auto bad = bridge.run("not valid js ((", "inline-test.js");
   ST_CHECK(!bad.has_value());
