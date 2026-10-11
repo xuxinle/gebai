@@ -46,7 +46,18 @@ struct Repo {
     dir = std::filesystem::temp_directory_path() /
           std::format("st_git_svc_{}_{}", static_cast<int>(st::process::current_id()),
                       next_serial());
-    std::filesystem::remove_all(dir);
+    // ⚠ `remove_all` **必须传 `error_code`**：
+    // ① 目录不存在时它会抛（而“首次创建”恰恰是最常见的情形）；
+    // ② `.git/objects` 下的对象文件在 Windows 上是只读的，上一轮异常退出留下的目录
+    //    会删不掉——抛出去的 `filesystem_error` 直接让**整个测试二进制**中止
+    //    （实测：全量跑时报 “cannot remove all … .git\objects\76\f740…”，
+    //     而单跑那条用例反而绿）。
+    // 删不掉不是致命错：换个目录名继续（`next_serial()` 保证不撞名）。
+    std::error_code cleanup;
+    std::filesystem::remove_all(dir, cleanup);
+    if (cleanup) {
+      dir = dir.string() + "_" + std::to_string(next_serial());
+    }
     std::filesystem::create_directories(dir);
     if (!run({"init", "--initial-branch=main"})) return;
     run({"config", "user.email", "test@local"});
@@ -490,6 +501,333 @@ ST_TEST(git_service_content_at_endpoints) {
   // 并列差异的两侧文本组合起来必须能还原出差异（结构同源）。
   const auto hunks = st::text::diff_hunks(committed.text, working.text);
   ST_CHECK_EQ(st::text::count_changes(hunks).first, std::size_t{1});
+}
+
+ST_TEST(git_service_reads_tags_remotes_refs_and_stash) {
+  if (!git_available()) {
+    std::cout << "[git] git 未安装，跳过" << '\n';
+    return;
+  }
+  Repo repo;
+  ST_REQUIRE(repo.ok);
+  // 轻量标签 + 注解标签。
+  repo.run({"tag", "light"});
+  repo.run({"tag", "-a", "annotated", "-m", "注解标签消息"});
+  const auto tags = gbcode::read_tags(repo.path());
+  ST_CHECK_EQ(tags.size(), std::size_t{2});
+  bool saw_annotated = false;
+  for (const auto& tag : tags) {
+    if (tag.name == "annotated") {
+      saw_annotated = true;
+      ST_CHECK(tag.annotated);
+      ST_CHECK_EQ(tag.subject, std::string("注解标签消息"));
+    }
+    if (tag.name == "light") ST_CHECK(!tag.annotated);
+  }
+  ST_CHECK(saw_annotated);
+
+  // 远程（本地加一个即可，不联网）。
+  repo.run({"remote", "add", "origin", "https://example.com/repo.git"});
+  const auto remotes = gbcode::read_remotes(repo.path());
+  ST_REQUIRE(remotes.size() == 1);
+  ST_CHECK_EQ(remotes.front().name, std::string("origin"));
+  ST_CHECK_EQ(remotes.front().fetch_url, std::string("https://example.com/repo.git"));
+  // 未单独配置 push URL 时应回退到拉取 URL（而不是空）。
+  ST_CHECK_EQ(remotes.front().push_url, remotes.front().fetch_url);
+
+  // 引用清单：本地分支 + 标签（`origin/HEAD` 这类别名不算分支）。
+  const auto refs = gbcode::read_refs(repo.path());
+  bool saw_local = false;
+  bool saw_tag = false;
+  for (const auto& ref : refs) {
+    if (ref.kind == "local" && ref.name == "main") saw_local = true;
+    if (ref.kind == "tag" && ref.name == "light") saw_tag = true;
+    ST_CHECK(!ref.name.ends_with("/HEAD"));
+  }
+  ST_CHECK(saw_local);
+  ST_CHECK(saw_tag);
+
+  // stash：改一个文件后 stash，应能读出 `stash@{0}`。
+  repo.write("a.txt", "line1\nstashed\n");
+  repo.run({"stash", "push", "-m", "工作中的改动"});
+  const auto stashes = gbcode::read_stashes(repo.path());
+  ST_REQUIRE(stashes.size() == 1);
+  ST_CHECK_EQ(stashes.front().index, std::string("stash@{0}"));
+  ST_CHECK(stashes.front().message.find("工作中的改动") != std::string::npos);
+  ST_CHECK_EQ(stashes.front().branch, std::string("main"));
+}
+
+ST_TEST(git_service_file_history_follows_rename) {
+  if (!git_available()) {
+    std::cout << "[git] git 未安装，跳过" << '\n';
+    return;
+  }
+  Repo repo;
+  ST_REQUIRE(repo.ok);
+  repo.write("a.txt", "line1\nline2\n");
+  repo.run({"add", "."});
+  repo.run({"commit", "-m", "change a"});
+  repo.run({"mv", "a.txt", "renamed.txt"});
+  repo.run({"commit", "-m", "rename a"});
+  // `--follow`：重命名后的历史里能看到重命名之前的那一笔（否则历史“断了”）。
+  const auto history = gbcode::read_file_history(repo.path(), "renamed.txt", 20);
+  ST_CHECK(history.size() >= 3U);
+  bool saw_rename = false;
+  bool saw_original = false;
+  for (const auto& entry : history) {
+    if (entry.subject == "rename a") saw_rename = true;
+    if (entry.subject == "change a") saw_original = true;
+  }
+  ST_CHECK(saw_rename);
+  ST_CHECK(saw_original);
+}
+
+ST_TEST(git_service_blame_reports_line_ownership) {
+  if (!git_available()) {
+    std::cout << "[git] git 未安装，跳过" << '\n';
+    return;
+  }
+  Repo repo;
+  ST_REQUIRE(repo.ok);
+  repo.write("a.txt", "first\nsecond\nthird\n");
+  repo.run({"add", "a.txt"});
+  repo.run({"commit", "-m", "three lines"});
+  const auto all = gbcode::read_blame(repo.path(), "", "a.txt", 1, 0);
+  // 先 REQUIRE 再取下标：blame 读取失败时拿到的是空表，
+  // 而空表上直接 `all[0]` 会**崩而不是变红**（本项目已记过同类坑）。
+  ST_REQUIRE(all.size() == 3);
+  ST_CHECK_EQ(all[0].line, std::size_t{1});
+  ST_CHECK_EQ(all[0].content, std::string("first"));
+  ST_CHECK(!all[0].hash.empty());
+  ST_CHECK_EQ(all[0].author, std::string("Tester"));
+  // 限定行范围：只要第 2 行。
+  const auto slice = gbcode::read_blame(repo.path(), "", "a.txt", 2, 1);
+  ST_REQUIRE(slice.size() == 1);
+  ST_CHECK_EQ(slice.front().line, std::size_t{2});
+  ST_CHECK_EQ(slice.front().content, std::string("second"));
+}
+
+ST_TEST(git_service_operation_state_detects_merge_conflict) {
+  if (!git_available()) {
+    std::cout << "[git] git 未安装，跳过" << '\n';
+    return;
+  }
+  Repo repo;
+  ST_REQUIRE(repo.ok);
+  // 干净仓库：不在任何多步操作中。
+  ST_CHECK(!gbcode::read_operation_state(repo.path()).active());
+  ST_CHECK(gbcode::read_operation_state(repo.path()).conflicts.empty());
+
+  // 造一个 merge 冲突。
+  repo.run({"checkout", "-b", "side"});
+  repo.write("a.txt", "side version\n");
+  repo.run({"commit", "-am", "side change"});
+  repo.run({"checkout", "main"});
+  repo.write("a.txt", "main version\n");
+  repo.run({"commit", "-am", "main change"});
+  repo.run({"merge", "side"});   // 预期失败（冲突）
+
+  const auto state = gbcode::read_operation_state(repo.path());
+  ST_CHECK(state.active());
+  ST_CHECK_EQ(state.kind, std::string("merge"));
+  ST_REQUIRE(state.conflicts.size() == 1);
+  ST_CHECK_EQ(state.conflicts.front(), std::string("a.txt"));
+  // 中止后回到干净状态（“给出 abort 入口”的价值就在这里）。
+  repo.run({"merge", "--abort"});
+  ST_CHECK(!gbcode::read_operation_state(repo.path()).active());
+}
+
+ST_TEST(git_service_upstream_reports_tracking_branch) {
+  if (!git_available()) {
+    std::cout << "[git] git 未安装，跳过" << '\n';
+    return;
+  }
+  Repo repo;
+  ST_REQUIRE(repo.ok);
+  // 无上游：空。
+  ST_CHECK(gbcode::read_upstream(repo.path()).empty());
+  // 造一个手动配置的上游（不联网）。
+  // ⚠ 只写 `refs/remotes/origin/main` + 两条 config 还不够：`rev-parse @{upstream}` 会报
+  // “not stored as a remote-tracking branch”——还需要 `remote.origin.fetch` 的 refspec
+  //（`git remote add` 会一并写它，所以这里也走 remote add 而不是手改 config）。
+  repo.run({"remote", "add", "origin", "https://example.com/repo.git"});
+  repo.run({"update-ref", "refs/remotes/origin/main", "HEAD"});
+  repo.run({"config", "branch.main.remote", "origin"});
+  repo.run({"config", "branch.main.merge", "refs/heads/main"});
+  ST_CHECK_EQ(gbcode::read_upstream(repo.path()), std::string("origin/main"));
+}
+
+ST_TEST(git_service_write_args_builds_commands) {
+  using gbcode::WriteIntent;
+  using gbcode::WriteOp;
+  const auto line = [](const WriteIntent& intent) {
+    const auto args = gbcode::write_args(intent);
+    return args.has_value() ? gbcode::to_display_line(*args) : std::string("<nullopt>");
+  };
+  ST_CHECK_EQ(line({.op = WriteOp::Stage, .path = "a b.txt"}), std::string("git add -- a b.txt"));
+  ST_CHECK_EQ(line({.op = WriteOp::Unstage, .path = "a.txt"}),
+              std::string("git restore --staged -- a.txt"));
+  ST_CHECK_EQ(line({.op = WriteOp::DiscardAll}), std::string("git restore -- ."));
+  ST_CHECK_EQ(line({.op = WriteOp::Commit, .message = "msg"}), std::string("git commit -m msg"));
+  // amend + 作者 + 允许空。（指定顺序须按结构体字段声明序：`message` 在 `author` 之前。）
+  ST_CHECK_EQ(line({.op = WriteOp::Commit, .message = "m", .author = "A <a@b>",
+                    .amend = true, .allow_empty = true}),
+              std::string("git commit -m m --amend --allow-empty --author A <a@b>"));
+  ST_CHECK_EQ(line({.op = WriteOp::Checkout, .ref = "main"}), std::string("git checkout main"));
+  // 指定顺序须按结构体字段声明序（`ref` 在 `name` 之前）。
+  ST_CHECK_EQ(line({.op = WriteOp::CheckoutNew, .ref = "main", .name = "feat"}),
+              std::string("git checkout -b feat main"));
+  // 删分支默认用 `-d`（拒删未合并）——`hard` 才 `-D`。
+  ST_CHECK_EQ(line({.op = WriteOp::DeleteBranch, .name = "old"}),
+              std::string("git branch -d old"));
+  ST_CHECK_EQ(line({.op = WriteOp::DeleteBranch, .name = "old", .hard = true}),
+              std::string("git branch -D old"));
+  ST_CHECK_EQ(line({.op = WriteOp::ResetHard, .ref = "HEAD~1"}),
+              std::string("git reset --hard HEAD~1"));
+  // 推送：无分支名 = 普通 push；给了名字 = 建跟踪（`-u`）。
+  ST_CHECK_EQ(line({.op = WriteOp::Push}), std::string("git push"));
+  ST_CHECK_EQ(line({.op = WriteOp::Push, .name = "feat"}), std::string("git push -u feat"));
+  // 强推**必须**带 lease。
+  ST_CHECK_EQ(line({.op = WriteOp::PushForceWithLease}),
+              std::string("git push --force-with-lease"));
+  ST_CHECK_EQ(line({.op = WriteOp::Pull}), std::string("git pull --ff-only"));
+  ST_CHECK_EQ(line({.op = WriteOp::StashPush, .message = "wip"}),
+              std::string("git stash push -m wip"));
+  ST_CHECK_EQ(line({.op = WriteOp::StashPop}), std::string("git stash pop stash@{0}"));
+  ST_CHECK_EQ(line({.op = WriteOp::TagCreate, .name = "v1"}), std::string("git tag v1"));
+  ST_CHECK_EQ(line({.op = WriteOp::TagCreate, .name = "v1", .message = "版本一",
+                    .annotated = true}),
+              std::string("git tag -a v1 -m 版本一"));
+
+  // —— 必填参数缺失必须 **nullopt**（否则会构造出“删错东西”的命令）——
+  ST_CHECK(!gbcode::write_args({.op = WriteOp::ResetHard, .ref = ""}).has_value());
+  ST_CHECK(!gbcode::write_args({.op = WriteOp::Commit, .message = ""}).has_value());
+  ST_CHECK(!gbcode::write_args({.op = WriteOp::Checkout, .ref = ""}).has_value());
+  ST_CHECK(!gbcode::write_args({.op = WriteOp::Stage, .path = ""}).has_value());
+  ST_CHECK(!gbcode::write_args({.op = WriteOp::DeleteBranch, .name = ""}).has_value());
+}
+
+ST_TEST(git_service_write_danger_and_backup_names) {
+  using gbcode::Danger;
+  using gbcode::WriteIntent;
+  using gbcode::WriteOp;
+  // 不可逆的三类：重置、丢弃、变基。
+  ST_CHECK(gbcode::danger_of({.op = WriteOp::ResetHard, .ref = "HEAD"}) == Danger::Backup);
+  ST_CHECK(gbcode::danger_of({.op = WriteOp::DiscardAll}) == Danger::Backup);
+  ST_CHECK(gbcode::danger_of({.op = WriteOp::DiscardOne, .path = "a"}) == Danger::Backup);
+  ST_CHECK(gbcode::danger_of({.op = WriteOp::Rebase, .ref = "main"}) == Danger::Backup);
+  ST_CHECK(gbcode::needs_backup({.op = WriteOp::ResetHard, .ref = "HEAD"}));
+  // 需确认。
+  ST_CHECK(gbcode::danger_of({.op = WriteOp::Amend}) == Danger::Confirm);
+  ST_CHECK(gbcode::danger_of({.op = WriteOp::PushForceWithLease}) == Danger::Confirm);
+  ST_CHECK(gbcode::danger_of({.op = WriteOp::DeleteBranch, .name = "x"}) == Danger::Confirm);
+  // 安全。
+  ST_CHECK(gbcode::danger_of({.op = WriteOp::Stage, .path = "a"}) == Danger::None);
+  ST_CHECK(gbcode::danger_of({.op = WriteOp::Commit, .message = "m"}) == Danger::None);
+  ST_CHECK(gbcode::danger_of({.op = WriteOp::Push}) == Danger::None);
+  ST_CHECK(!gbcode::needs_backup({.op = WriteOp::Commit, .message = "m"}));
+
+  if (git_available()) {
+    Repo repo;
+    ST_REQUIRE(repo.ok);
+    // 备份名要能读、且**不重名**（同一分钟做两次危险操作）。
+    const std::string first = gbcode::backup_branch_name(repo.path());
+    ST_CHECK(first.starts_with("backup/"));
+    repo.run({"branch", first});
+    const std::string second = gbcode::backup_branch_name(repo.path());
+    ST_CHECK(second != first);
+  }
+}
+
+ST_TEST(git_service_shell_quote_handles_specials) {
+  // 安全字符集原样。
+  ST_CHECK_EQ(gbcode::shell_quote("a.txt"), std::string("a.txt"));
+  ST_CHECK_EQ(gbcode::shell_quote("src/main.cpp"), std::string("src/main.cpp"));
+  // 空格/中文/引号/分号都要被包起来——否则终端会把一条命令拆成两条。
+  ST_CHECK_EQ(gbcode::shell_quote("a b.txt"), std::string("'a b.txt'"));
+  ST_CHECK_EQ(gbcode::shell_quote("提交信息"), std::string("'提交信息'"));
+  ST_CHECK_EQ(gbcode::shell_quote("a;rm -rf /"), std::string("'a;rm -rf /'"));
+  // 内部的 `'` 要写成 `'\''`（POSIX 通行写法）。
+  ST_CHECK_EQ(gbcode::shell_quote("it's"), std::string("'it'\\''s'"));
+  // 拼行：安全的原样、危险的包起来。
+  ST_CHECK_EQ(gbcode::to_shell_line({"commit", "-m", "a b"}),
+              std::string("git commit -m 'a b'"));
+  // 展示形式不转义（给人看）。
+  ST_CHECK_EQ(gbcode::to_display_line({"commit", "-m", "a b"}),
+              std::string("git commit -m a b"));
+  // 多行提交信息在展示形式里拉平（否则状态栏/日志会被撑开）。
+  ST_CHECK_EQ(gbcode::to_display_line({"commit", "-m", "line1\nline2"}),
+              std::string("git commit -m line1 line2"));
+}
+
+ST_TEST(git_service_audit_appends_and_reads_back) {
+  if (!git_available()) {
+    std::cout << "[git] git 未安装，跳过" << '\n';
+    return;
+  }
+  Repo repo;
+  ST_REQUIRE(repo.ok);
+  ST_CHECK(gbcode::append_audit(repo.path(), "commit", {"commit", "-m", "hello"}, "ok"));
+  ST_CHECK(gbcode::append_audit(repo.path(), "reset --hard", {"reset", "--hard", "HEAD~1"},
+                                "failed: refused"));
+  const auto entries = gbcode::read_audit(repo.path(), 10);
+  ST_REQUIRE(entries.size() == 2);
+  ST_CHECK(entries[0].find("commit") != std::string::npos);
+  ST_CHECK(entries[0].find("\"result\":\"ok\"") != std::string::npos);
+  ST_CHECK(entries[1].find("refused") != std::string::npos);
+  // 上限只留**最后** N 条（界面“最近操作”看的就是尾部）。
+  const auto tail = gbcode::read_audit(repo.path(), 1);
+  ST_REQUIRE(tail.size() == 1);
+  ST_CHECK(tail.front().find("refused") != std::string::npos);
+  // 非仓库：不崩，返回 false。
+  const auto outside = std::filesystem::temp_directory_path() / "st_not_a_repo_audit";
+  std::error_code ec;
+  std::filesystem::create_directories(outside, ec);
+  ST_CHECK(!gbcode::append_audit(outside.string(), "x", {"x"}, "y"));
+}
+
+ST_TEST(git_service_control_args_maps_operations) {
+  const auto merge_abort = gbcode::control_args("merge", "--abort");
+  ST_REQUIRE(merge_abort.has_value());
+  ST_CHECK_EQ(gbcode::to_display_line(*merge_abort), std::string("git merge --abort"));
+  const auto rebase_continue = gbcode::control_args("rebase", "--continue");
+  ST_REQUIRE(rebase_continue.has_value());
+  ST_CHECK_EQ(gbcode::to_display_line(*rebase_continue),
+              std::string("git rebase --continue"));
+  // 未知操作如实拒绝（不能凭空造一条 `git <乱码> --abort`）。
+  ST_CHECK(!gbcode::control_args("unknown", "--abort").has_value());
+  ST_CHECK(!gbcode::control_args("", "--skip").has_value());
+  // `WriteOp::Abort` 的 ref 位传操作种类；为空则拒绝。
+  ST_CHECK(!gbcode::write_args({.op = gbcode::WriteOp::Abort, .ref = ""}).has_value());
+  ST_CHECK(gbcode::write_args({.op = gbcode::WriteOp::Abort, .ref = "merge"}).has_value());
+}
+
+ST_TEST(git_service_stage_and_commit_through_write_args) {
+  if (!git_available()) {
+    std::cout << "[git] git 未安装，跳过" << '\n';
+    return;
+  }
+  Repo repo;
+  ST_REQUIRE(repo.ok);
+  repo.write("a.txt", "line1\nchanged\n");
+  // 用构造出来的命令真跑一遍（“构造”与“git 真的接受”是两件事）。
+  const auto staged = gbcode::write_args({.op = gbcode::WriteOp::Stage, .path = "a.txt"});
+  ST_REQUIRE(staged.has_value());
+  repo.run(*staged);
+  {
+    const auto snapshot = gbcode::read_snapshot(repo.path());
+    bool saw_staged = false;
+    for (const auto& change : snapshot.changes) {
+      if (change.path == "a.txt" && change.has_staged_side()) saw_staged = true;
+    }
+    ST_CHECK(saw_staged);
+  }
+  const auto commit = gbcode::write_args({.op = gbcode::WriteOp::Commit, .message = "通过构造的命令提交"});
+  ST_REQUIRE(commit.has_value());
+  repo.run(*commit);
+  const auto log = gbcode::read_log(repo.path(), 5);
+  ST_REQUIRE(!log.empty());
+  ST_CHECK_EQ(log.front().subject, std::string("通过构造的命令提交"));
 }
 
 ST_TEST(git_service_root_commit_normalizes_to_empty_tree) {

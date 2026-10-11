@@ -66,6 +66,20 @@ struct GitChange {
   [[nodiscard]] auto has_unstaged_side() const noexcept -> bool {
     return work_status != ' ' && work_status != '?';
   }
+  /// 展示用的路径（含目录段，便于用户区分同名文件）。
+  /// 超长路径截断中段（保留尾部的文件名 + 前两级目录）——变更列表窄，
+  /// 完整路径放不下，而“最尾部”才是用户在对账的部分。
+  [[nodiscard]] auto display_path() const -> std::string {
+    constexpr std::size_t kMax = 46;
+    if (path.size() <= kMax) return path;
+    const std::size_t slash = path.find_last_of('/');
+    const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+    const std::string dir = slash == std::string::npos ? std::string{} : path.substr(0, slash + 1);
+    if (name.size() + 2 >= kMax) return "…/" + name;
+    const std::size_t keep = kMax - name.size() - 2;
+    return "…" + dir.substr(dir.size() > keep ? dir.size() - keep : 0) + name;
+  }
+
   /// 展示用的单字母（IDEA 的状态字母：M/A/D/R/U/?）。
   [[nodiscard]] auto display_code() const noexcept -> char {
     if (is_untracked()) return '?';
@@ -263,5 +277,198 @@ struct ContentAt {
 
 /// 该提交是不是**根提交**（无父）。`rev` 不可解析时返回 false。
 [[nodiscard]] auto is_root_commit(const std::string& cwd, const std::string& rev) -> bool;
+
+// ————————————————————————————————————————————————————————————————————————————
+// 读面：标签 / 远程 / 暂存（stash）/ 引用清单 / 单文件历史 / blame / 多步操作
+// （对标歌白工作台的五大视图：变更、日志、分支、标签、暂存、远程）
+// ————————————————————————————————————————————————————————————————————————————
+
+/// 一个标签。
+struct TagInfo {
+  std::string name{};
+  std::string target{};    ///< 指向的提交短 hash（注解标签已解引用到提交）
+  std::string subject{};   ///< 注解标签的消息首行 / 轻量标签的提交 subject
+  bool annotated{false};
+};
+[[nodiscard]] auto read_tags(const std::string& cwd) -> std::vector<TagInfo>;
+
+/// 一个远程（名字 + 拉/推 URL）。
+struct RemoteInfo {
+  std::string name{};
+  std::string fetch_url{};
+  std::string push_url{};
+};
+[[nodiscard]] auto read_remotes(const std::string& cwd) -> std::vector<RemoteInfo>;
+
+/// 一条 stash 记录。
+struct StashEntry {
+  std::string index{};      ///< `stash@{0}`
+  std::string branch{};     ///< 当时所在分支
+  std::string message{};
+};
+[[nodiscard]] auto read_stashes(const std::string& cwd) -> std::vector<StashEntry>;
+
+/// 引用清单（标签列表与「日志范围」选择器共用）。
+struct RefInfo {
+  std::string name{};       ///< 短名（`main` / `origin/main` / `v1.0`）
+  std::string hash{};
+  /// `head` / `local` / `remote` / `tag`。
+  std::string kind{};
+};
+[[nodiscard]] auto read_refs(const std::string& cwd) -> std::vector<RefInfo>;
+
+/// 单文件历史（`--follow`，跨重命名）。
+[[nodiscard]] auto read_file_history(const std::string& cwd, const std::string& path,
+                                     std::size_t limit = 100) -> std::vector<LogEntry>;
+
+/// 一段 blame（仅取指定行范围，供编辑器的行尾注解用）。
+struct BlameLine {
+  std::size_t line{0};        ///< 1 起（文件当前内容里的行号）
+  std::string hash{};         ///< 短 hash
+  std::string author{};
+  std::string date{};         ///< `YYYY-MM-DD`
+  std::string content{};      ///< 该行内容（不含换行）
+};
+/// `start` / `count` 都从 1 起；`count = 0` 表示到文件末。
+[[nodiscard]] auto read_blame(const std::string& cwd, const std::string& rev,
+                              const std::string& path, std::size_t start = 1,
+                              std::size_t count = 0) -> std::vector<BlameLine>;
+
+/// 仓库当前是否处于某个**多步操作**中（merge / rebase / cherry-pick / revert / bisect）。
+///
+/// 为什么要它：处于这种状态时，界面必须给出「继续 / 跳过 / 中止」入口——
+/// 不给的话用户只能去命令行擦屁股（而冲突恰恰是 merge/rebase 的常态）。
+struct OperationState {
+  std::string kind{};   ///< 空 = 不在多步操作中；否则 `merge`/`rebase`/`cherry-pick`/`revert`/`bisect`
+  /// 冲突文件（`git diff --name-only --diff-filter=U`）。
+  std::vector<std::string> conflicts{};
+  [[nodiscard]] auto active() const noexcept -> bool { return !kind.empty(); }
+};
+[[nodiscard]] auto read_operation_state(const std::string& cwd) -> OperationState;
+
+/// 当前分支的上游（`origin/main`；无上游返回空）——推送/拉取按钮据此决定参数。
+[[nodiscard]] auto read_upstream(const std::string& cwd) -> std::string;
+
+// ————————————————————————————————————————————————————————————————————————————
+// 写面：命令**构造** + 备份分支 + 多步控制
+// ————————————————————————————————————————————————————————————————————————————
+//
+// ## 为何这里只“构造命令”而不执行
+//
+// 写操作在 gbcode 里一律交给**终端作业通道**（`Terminal::run`）：输出实时回流、
+// 可中止、用户能看到 git 到底干什么（歌白服务端是同步跑完再返回——Web 形态没有终端）。
+// 因此本文件只负责「把一次操作翻译成**一条可读的命令**」，不亲自跑。
+// 好处是命令与界面所见**同一份事实**：用户在终端里看到的与我们在做的一致。
+//
+// ## 为什么不拼字符串
+//
+// 参数里可能出现空格、中文、引号（路径/提交信息）。拼字符串就得引号转义，
+// 而转义写错的表现是“命令看着对、实际拉错了文件”（或反过来注入了 `;`）。
+// 这里给出的是**参数数组**（`std::vector<std::string>`），由调用方逐参传递；
+// `shell_quote` 只在“必须交给 shell 的交互式终端”那一边用，且是显式的一步。
+
+/// 写操作种类（决定参数构造、危险度与是否需要备份）。
+enum class WriteOp : std::uint8_t {
+  Stage,          ///< `git add -- <path>`
+  Unstage,        ///< `git restore --staged -- <path>`
+  DiscardOne,     ///< `git restore -- <path>`（丢弃工作区改动）
+  DiscardAll,     ///< `git checkout -- .`（丢弃全部未暂存）
+  Commit,         ///< `git commit -m <msg>`（可 amend）
+  Amend,          ///< `git commit --amend`
+  Checkout,       ///< `git checkout <ref>`
+  CheckoutNew,    ///< `git checkout -b <name> [<start>]`
+  DeleteBranch,   ///< `git branch -d|-D <name>`
+  Merge,          ///< `git merge <ref>`
+  Rebase,         ///< `git rebase <upstream>`
+  CherryPick,     ///< `git cherry-pick <ref>`
+  Revert,         ///< `git revert --no-edit <ref>`
+  ResetSoft,      ///< `git reset --soft <ref>`
+  ResetMixed,     ///< `git reset <ref>`
+  ResetHard,      ///< `git reset --hard <ref>`（**不可逆**，必带备份）
+  TagCreate,      ///< `git tag [-a] <name> [-m <msg>]`
+  TagDelete,      ///< `git tag -d <name>`
+  StashPush,      ///< `git stash push [-m <msg>]`
+  StashPop,       ///< `git stash pop <index>`
+  StashApply,     ///< `git stash apply <index>`
+  StashDrop,      ///< `git stash drop <index>`
+  Fetch,          ///< `git fetch --all --prune`
+  Pull,           ///< `git pull --ff-only`（默认不制造意外 merge）
+  Push,           ///< `git push`（无上游则 `-u origin <branch>`）
+  PushForceWithLease,  ///< `git push --force-with-lease`（**不用 `--force`**：无 lease 的强推会覆盖别人的提交）
+  // —— 多步操作控制 ——
+  Continue,       ///< `git <op> --continue`
+  Skip,           ///< `git <op> --skip`
+  Abort,          ///< `git <op> --abort`
+};
+
+/// 一次写操作的意图（参数全在这里；空参数按各 op 的默认语义处理）。
+struct WriteIntent {
+  WriteOp op{WriteOp::Stage};
+  std::string path{};        ///< 单文件操作的目标（相对仓库根，`/` 分隔）
+  std::string ref{};         ///< 分支/标签/提交（checkout/merge/rebase/cherry-pick/reset/tag 起点）
+  std::string name{};        ///< 新分支名 / 新标签名
+  std::string message{};     ///< 提交信息 / 标签注解 / stash 消息
+  std::string author{};      ///< 覆盖提交作者（`Name <email>`；空 = 用仓库配置）
+  bool amend{false};         ///< 提交时改写 HEAD（危险：会改写已推送的历史）
+  bool allow_empty{false};   ///< 允许空提交
+  bool hard{false};          ///< `git branch -D` / `git tag -d` 之外的强制位
+  bool annotated{false};     ///< 建标签时用注解标签
+};
+
+/// 构造写操作的**命令行**（不含 `git` 本身，第一个元素是子命令）。
+///
+/// 返回 `nullopt` = 这个意图不合法（缺必填参数）——调用方**如实拒绝**，
+/// 而不是构造一条会删错东西的命令。
+[[nodiscard]] auto write_args(const WriteIntent& intent) -> std::optional<std::vector<std::string>>;
+
+/// 该操作是否需要**先建备份分支**（不可逆且会改工作区/历史）。
+[[nodiscard]] auto needs_backup(const WriteIntent& intent) -> bool;
+
+/// 该操作的危险度（界面据此决定“要不要弹确认”）。
+enum class Danger : std::uint8_t {
+  None,      ///< 安全（暂存/提交/推送等可重来或只前进）
+  Confirm,   ///< 需二次确认（amend/删除已合并分支/强制推送）
+  Backup,    ///< 不可逆：**必须先建备份分支**再执行（reset --hard / 丢弃改动 / rebase 改写历史）
+};
+[[nodiscard]] auto danger_of(const WriteIntent& intent) -> Danger;
+
+/// 生成备份分支名（`backup/<日期>-<短 hash>`）。
+///
+/// 为何用“日期 + hash”而不是时间戳：名字要能被人**读懂并手动回滚**
+/// （`git reset --hard backup/20261011-a1b2c3d`），而一长串秒数做不到。
+[[nodiscard]] auto backup_branch_name(const std::string& cwd) -> std::string;
+
+/// 把单个参数包成 shell 安全的形式（仅当必须交给 shell 时用）。
+/// 规则：安全的字符集内原样；否则用单引号包裹并把内部的 `'` 写成 `'\''`。
+[[nodiscard]] auto shell_quote(std::string_view argument) -> std::string;
+
+/// 把命令数组拼成一行可读命令（终端里执行用；每参经 `shell_quote`）。
+[[nodiscard]] auto to_shell_line(const std::vector<std::string>& args) -> std::string;
+
+/// 把命令数组拼成**人类可读的展示形式**（日志/审计/状态栏用；不保证可执行）。
+[[nodiscard]] auto to_display_line(const std::vector<std::string>& args) -> std::string;
+
+/// 多步操作的控制子命令（`--continue` / `--skip` / `--abort`）。
+///
+/// `kind` 取 `OperationState::kind` 的值（`merge`/`rebase`/`cherry-pick`/`revert`/`am`）。
+[[nodiscard]] auto control_args(std::string_view kind, std::string_view action)
+    -> std::optional<std::vector<std::string>>;
+
+// —— 审计 ——
+
+/// 记一条写操作审计（JSONL，落在 `<cwd>/.git/st-audit.jsonl`）。
+///
+/// 为何落在 `.git` 里：它是**仓库级**的事实，跟着仓库走（换机器、换工作副本都还在），
+/// 且默认不会进版本库（`.git` 不被跟踪）。不落盘的应用目录会在换设备时丢失。
+///
+/// 失败不抛也不报错（审计不能成为操作失败的原因）——但**返回是否写入成功**，
+/// 让调用方能在必要时如实告诉用户“审计没记上”。
+[[nodiscard]] auto append_audit(const std::string& cwd, std::string_view action,
+                                const std::vector<std::string>& args, std::string_view result)
+    -> bool;
+
+/// 读审计尾部（最多 `limit` 条，最旧在前）——界面「操作历史」用。
+[[nodiscard]] auto read_audit(const std::string& cwd, std::size_t limit = 100)
+    -> std::vector<std::string>;
 
 }  // namespace gbcode

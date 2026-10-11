@@ -9,6 +9,7 @@
 #include "st/core/fs.hpp"
 #include "st/core/process.hpp"
 #include "st/core/string.hpp"
+#include "st/core/time.hpp"
 
 namespace gbcode {
 
@@ -538,6 +539,250 @@ auto read_diff_text(const std::string& cwd, const CompareOptions& options) -> st
   return out.has_value() ? *out : std::string();
 }
 
+// ————————————————————————————————————————————————————————————————————————————
+// 读面：标签 / 远程 / 暂存 / 引用 / 单文件历史 / blame / 多步操作
+// ————————————————————————————————————————————————————————————————————————————
+
+namespace {
+
+/// 以 `\x1f` 分隔的字段行拆成列（字段内容里含任何可打印字符都不怕）。
+[[nodiscard]] auto split_fields(std::string_view line) -> std::vector<std::string> {
+  std::vector<std::string> fields;
+  std::size_t begin = 0;
+  while (begin <= line.size()) {
+    const std::size_t sep = line.find('\x1f', begin);
+    const std::size_t end = sep == std::string_view::npos ? line.size() : sep;
+    fields.emplace_back(line.substr(begin, end - begin));
+    if (sep == std::string_view::npos) break;
+    begin = sep + 1;
+  }
+  return fields;
+}
+
+}  // namespace
+
+auto read_tags(const std::string& cwd) -> std::vector<TagInfo> {
+  // `%(objecttype)` 区分注解标签与轻量标签；注释标签要 `^{}` 解引用到提交。
+  const auto out = git(cwd, {"for-each-ref", "--sort=-creatordate",
+                             "--format=%(refname:short)\x1f%(objecttype)\x1f%(objectname:short)"
+                             "\x1f%(contents:subject)",
+                             "refs/tags"});
+  std::vector<TagInfo> tags;
+  if (!out.has_value()) return tags;
+  for (const std::string_view line : lines_of(*out)) {
+    if (line.empty()) continue;
+    const auto fields = split_fields(line);
+    if (fields.size() < 4) continue;
+    TagInfo tag;
+    tag.name = fields[0];
+    tag.annotated = fields[1] == "tag";
+    tag.target = fields[2];
+    tag.subject = fields[3];
+    tags.push_back(std::move(tag));
+  }
+  return tags;
+}
+
+auto read_remotes(const std::string& cwd) -> std::vector<RemoteInfo> {
+  const auto names = git(cwd, {"remote"});
+  std::vector<RemoteInfo> remotes;
+  if (!names.has_value()) return remotes;
+  for (const std::string_view name : lines_of(*names)) {
+    if (name.empty()) continue;
+    RemoteInfo info;
+    info.name = std::string(name);
+    if (const auto url = git(cwd, {"remote", "get-url", info.name})) {
+      info.fetch_url = std::string(st::trim(*url));
+    }
+    // `--push` 未配时 git 会报错（而拉/推同 URL 是常态）——回退到拉取 URL。
+    if (const auto push = git(cwd, {"remote", "get-url", "--push", info.name})) {
+      info.push_url = std::string(st::trim(*push));
+    } else {
+      info.push_url = info.fetch_url;
+    }
+    remotes.push_back(std::move(info));
+  }
+  return remotes;
+}
+
+auto read_stashes(const std::string& cwd) -> std::vector<StashEntry> {
+  // `%gd` 给 `stash@{0}`（**界面直接拿它当参数**，不自己拼序号）。
+  const auto out = git(cwd, {"stash", "list", "--format=%gd\x1f%gs"});
+  std::vector<StashEntry> entries;
+  if (!out.has_value()) return entries;
+  for (const std::string_view line : lines_of(*out)) {
+    if (line.empty()) continue;
+    const auto fields = split_fields(line);
+    if (fields.size() < 2) continue;
+    StashEntry entry;
+    entry.index = fields[0];
+    entry.message = fields[1];
+    // 两种前缀：自动消息 `WIP on main: 1234abc 提交信息`、`-m` 自定义消息 `On main: 消息`。
+    // 只认前一种会让“自定义消息的 stash”读不出分支（实测）。
+    const std::size_t colon = entry.message.find(": ");
+    if (colon != std::string::npos) {
+      std::string_view head(entry.message.data(), colon);
+      if (head.starts_with("WIP on ")) head.remove_prefix(7);
+      if (head.starts_with("On ")) head.remove_prefix(3);
+      if (!head.empty() && head.find(' ') == std::string_view::npos) {
+        entry.branch = std::string(head);
+      }
+    }
+    entries.push_back(std::move(entry));
+  }
+  return entries;
+}
+
+auto read_refs(const std::string& cwd) -> std::vector<RefInfo> {
+  const auto out = git(cwd, {"for-each-ref", "--format=%(refname)\x1f%(refname:short)\x1f"
+                             "%(objectname:short)",
+                             "refs/heads", "refs/remotes", "refs/tags"});
+  std::vector<RefInfo> refs;
+  if (!out.has_value()) return refs;
+  for (const std::string_view line : lines_of(*out)) {
+    if (line.empty()) continue;
+    const auto fields = split_fields(line);
+    if (fields.size() < 3) continue;
+    RefInfo info;
+    info.name = fields[1];
+    info.hash = fields[2];
+    if (fields[0].starts_with("refs/heads/")) {
+      info.kind = "local";
+    } else if (fields[0].starts_with("refs/remotes/")) {
+      if (info.name.ends_with("/HEAD")) continue;   // `origin/HEAD` 是别名，不是分支
+      info.kind = "remote";
+    } else {
+      info.kind = "tag";
+    }
+    refs.push_back(std::move(info));
+  }
+  return refs;
+}
+
+auto read_file_history(const std::string& cwd, const std::string& path, std::size_t limit)
+    -> std::vector<LogEntry> {
+  std::vector<LogEntry> entries;
+  if (path.empty()) return entries;
+  // `--follow` 跟着重命名走（“这个文件的历史”在重命名后不断）。
+  const auto out = git(cwd, {"log", "--follow", "--no-color", std::format("-{}", limit),
+                             std::string("--pretty=format:%H\x1f%h\x1f%s\x1f%an\x1f%ad\x1f%D"),
+                             std::string("--date=format:%Y-%m-%d %H:%M"), "--", path});
+  if (!out.has_value()) return entries;
+  for (const std::string_view line : lines_of(*out)) {
+    if (line.empty()) continue;
+    const auto fields = split_fields(line);
+    if (fields.size() < 5) continue;
+    LogEntry entry;
+    entry.hash = fields[0];
+    entry.short_hash = fields[1];
+    entry.subject = fields[2];
+    entry.author = fields[3];
+    entry.date = fields[4];
+    if (fields.size() > 5 && !fields[5].empty()) {
+      std::size_t cursor = 0;
+      while (cursor <= fields[5].size()) {
+        const std::size_t comma = fields[5].find(", ", cursor);
+        const std::string one = fields[5].substr(
+            cursor, comma == std::string::npos ? std::string::npos : comma - cursor);
+        if (!one.empty()) entry.refs.push_back(one);
+        if (comma == std::string::npos) break;
+        cursor = comma + 2;
+      }
+    }
+    entries.push_back(std::move(entry));
+  }
+  return entries;
+}
+
+auto read_blame(const std::string& cwd, const std::string& rev, const std::string& path,
+                std::size_t start, std::size_t count) -> std::vector<BlameLine> {
+  std::vector<BlameLine> lines;
+  if (path.empty()) return lines;
+  // ⚠ **`git blame` 没有 `--no-color`**：它是 `git log` 组的选项，传给 blame 会被当成
+  // `--no-color-…` 的歧义缩写而**整条命令失败**（实测：git 报 ambiguous option，
+  // 输出全空，调用方拿到空表——看着像“这个文件没有 blame 信息”）。
+  // blame 输出本来就无颜色，不需要那个选项。
+  std::vector<std::string> args{"blame", "-w", "--line-porcelain"};
+  if (!rev.empty()) args.push_back(rev);
+  // `-L a,+b` 只算指定区间（大文件里给编辑器取当前视口就够——不必整篇 blame）。
+  if (start > 0 && count > 0) {
+    args.push_back(std::format("-L{},+{}", start, count));
+  } else if (start > 1) {
+    args.push_back(std::format("-L{},+999999", start));
+  }
+  args.push_back("--");
+  args.push_back(path);
+  const auto out = git(cwd, args);
+  if (!out.has_value()) return lines;
+  // `--line-porcelain`：每行一块；块首是 `<40位 hash> <原行> <最终行> [组行数]`，
+  // 元信息行其后，**以 `\t` 开头的那一行才是内容**。
+  // 日期由 `author-time`（unix 秒）自己格式化——不用 `--date=`：那个选项在这条路上
+  // 不生效（porcelain 固定给时间戳），而“日期串是空”会让 blame 注解只剩 hash。
+  BlameLine current;
+  std::size_t line_no = start > 0 ? start : 1;
+  for (const std::string_view raw : lines_of(*out)) {
+    if (raw.empty()) continue;
+    if (raw.front() == '\t') {
+      current.line = line_no++;
+      current.content = std::string(raw.substr(1));
+      lines.push_back(current);
+      continue;
+    }
+    if (raw.starts_with("author ")) {
+      current.author = std::string(raw.substr(7));
+    } else if (raw.starts_with("author-time ")) {
+      try {
+        const std::int64_t seconds = std::stoll(std::string(raw.substr(12)));
+        const std::string iso = st::time::iso8601_utc(seconds * 1000);
+        current.date = iso.substr(0, 10);   // `YYYY-MM-DD`
+      } catch (...) {
+        current.date.clear();
+      }
+    } else if (raw.size() > 40 && raw[40] == ' ') {
+      // 块首行：开一个新块（hash 取前 7 位给界面）。
+      current = BlameLine{};
+      current.hash = std::string(raw.substr(0, 7));
+    }
+  }
+  return lines;
+}
+
+auto read_operation_state(const std::string& cwd) -> OperationState {
+  OperationState state;
+  const auto exists = [&cwd](std::string_view relative) {
+    return st::fs::exists(st::fs::join(st::fs::join(cwd, ".git"), std::string(relative)));
+  };
+  // 判据落 **`.git` 下的状态文件**（不解析 git 的输出文案：文案会随版本变，
+  // 而状态文件的存在性是硬契约）。
+  if (exists("rebase-merge")) {
+    state.kind = "rebase";
+  } else if (exists("rebase-apply")) {
+    state.kind = exists("rebase-apply/rebasing") ? "rebase" : "am";
+  } else if (exists("MERGE_HEAD")) {
+    state.kind = "merge";
+  } else if (exists("CHERRY_PICK_HEAD")) {
+    state.kind = "cherry-pick";
+  } else if (exists("REVERT_HEAD")) {
+    state.kind = "revert";
+  } else if (exists("BISECT_LOG")) {
+    state.kind = "bisect";
+  }
+  if (!state.kind.empty()) {
+    if (const auto conflicts = git(cwd, {"diff", "--name-only", "--diff-filter=U"})) {
+      for (const std::string_view line : lines_of(*conflicts)) {
+        if (!line.empty()) state.conflicts.emplace_back(line);
+      }
+    }
+  }
+  return state;
+}
+
+auto read_upstream(const std::string& cwd) -> std::string {
+  const auto out = git(cwd, {"rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"});
+  if (!out.has_value()) return {};
+  return std::string(st::trim(*out));
+}
+
 auto read_content_at(const std::string& cwd, const DiffEndpoint& end, const std::string& path)
     -> ContentAt {
   ContentAt result;
@@ -578,6 +823,273 @@ auto read_content_at(const std::string& cwd, const DiffEndpoint& end, const std:
   result.binary = result.text.find('\0') != std::string::npos;
   result.ok = true;
   return result;
+}
+
+// ————————————————————————————————————————————————————————————————————————————
+// 写面：命令构造 / 危险度 / 备份 / 多步控制 / 审计
+// ————————————————————————————————————————————————————————————————————————————
+
+auto write_args(const WriteIntent& intent) -> std::optional<std::vector<std::string>> {
+  // 必填参数缺失就如实返回 nullopt：构造一条“看起来对但删错东西”的命令
+  // 比直接拒绝危险得多（例如 reset --hard 的 ref 为空会变成 `git reset --hard`
+  // ＝丢掉全部工作区改动）。
+  const auto need = [](const std::string& value) { return !value.empty(); };
+  switch (intent.op) {
+    case WriteOp::Stage:
+      if (!need(intent.path)) return std::nullopt;
+      return std::vector<std::string>{"add", "--", intent.path};
+    case WriteOp::Unstage:
+      if (!need(intent.path)) return std::nullopt;
+      return std::vector<std::string>{"restore", "--staged", "--", intent.path};
+    case WriteOp::DiscardOne:
+      if (!need(intent.path)) return std::nullopt;
+      return std::vector<std::string>{"restore", "--", intent.path};
+    case WriteOp::DiscardAll:
+      return std::vector<std::string>{"restore", "--", "."};
+    case WriteOp::Commit: {
+      if (!need(intent.message)) return std::nullopt;
+      std::vector<std::string> args{"commit", "-m", intent.message};
+      if (intent.amend) args.push_back("--amend");
+      if (intent.allow_empty) args.push_back("--allow-empty");
+      if (need(intent.author)) {
+        args.push_back("--author");
+        args.push_back(intent.author);
+      }
+      return args;
+    }
+    case WriteOp::Amend:
+      return std::vector<std::string>{"commit", "--amend", "--no-edit"};
+    case WriteOp::Checkout:
+      if (!need(intent.ref)) return std::nullopt;
+      return std::vector<std::string>{"checkout", intent.ref};
+    case WriteOp::CheckoutNew: {
+      if (!need(intent.name)) return std::nullopt;
+      std::vector<std::string> args{"checkout", "-b", intent.name};
+      if (need(intent.ref)) args.push_back(intent.ref);
+      return args;
+    }
+    case WriteOp::DeleteBranch: {
+      if (!need(intent.name)) return std::nullopt;
+      // `-d` vs `-D`：前者拒删未合并分支（安全的默认），后者强制。
+      return std::vector<std::string>{"branch", intent.hard ? "-D" : "-d", intent.name};
+    }
+    case WriteOp::Merge:
+      if (!need(intent.ref)) return std::nullopt;
+      return std::vector<std::string>{"merge", "--no-edit", intent.ref};
+    case WriteOp::Rebase:
+      if (!need(intent.ref)) return std::nullopt;
+      return std::vector<std::string>{"rebase", intent.ref};
+    case WriteOp::CherryPick:
+      if (!need(intent.ref)) return std::nullopt;
+      return std::vector<std::string>{"cherry-pick", intent.ref};
+    case WriteOp::Revert:
+      if (!need(intent.ref)) return std::nullopt;
+      return std::vector<std::string>{"revert", "--no-edit", intent.ref};
+    case WriteOp::ResetSoft:
+      if (!need(intent.ref)) return std::nullopt;
+      return std::vector<std::string>{"reset", "--soft", intent.ref};
+    case WriteOp::ResetMixed:
+      if (!need(intent.ref)) return std::nullopt;
+      return std::vector<std::string>{"reset", intent.ref};
+    case WriteOp::ResetHard:
+      if (!need(intent.ref)) return std::nullopt;
+      return std::vector<std::string>{"reset", "--hard", intent.ref};
+    case WriteOp::TagCreate: {
+      if (!need(intent.name)) return std::nullopt;
+      std::vector<std::string> args{"tag"};
+      if (intent.annotated) {
+        args.push_back("-a");
+        args.push_back(intent.name);
+        args.push_back("-m");
+        args.push_back(need(intent.message) ? intent.message : intent.name);
+      } else {
+        args.push_back(intent.name);
+      }
+      if (need(intent.ref)) args.push_back(intent.ref);
+      return args;
+    }
+    case WriteOp::TagDelete:
+      if (!need(intent.name)) return std::nullopt;
+      return std::vector<std::string>{"tag", "-d", intent.name};
+    case WriteOp::StashPush: {
+      std::vector<std::string> args{"stash", "push"};
+      if (need(intent.message)) {
+        args.push_back("-m");
+        args.push_back(intent.message);
+      }
+      return args;
+    }
+    case WriteOp::StashPop:
+      return std::vector<std::string>{"stash", "pop",
+                                      need(intent.ref) ? intent.ref : "stash@{0}"};
+    case WriteOp::StashApply:
+      return std::vector<std::string>{"stash", "apply",
+                                      need(intent.ref) ? intent.ref : "stash@{0}"};
+    case WriteOp::StashDrop:
+      return std::vector<std::string>{"stash", "drop",
+                                      need(intent.ref) ? intent.ref : "stash@{0}"};
+    case WriteOp::Fetch:
+      return std::vector<std::string>{"fetch", "--all", "--prune"};
+    case WriteOp::Pull:
+      // `--ff-only`：不制造意外 merge（IDEA 的 Update Project 默认也是 fast-forward 优先）。
+      return std::vector<std::string>{"pull", "--ff-only"};
+    case WriteOp::Push: {
+      std::vector<std::string> args{"push"};
+      if (need(intent.name)) {
+        args.push_back("-u");
+        args.push_back(intent.name);
+      }
+      return args;
+    }
+    case WriteOp::PushForceWithLease:
+      // **不用 `--force`**：无 lease 的强推会盖掉别人的提交，而 lease 会在远端
+      // 已经前进时**拒推**（这才是想要的安全网）。
+      return std::vector<std::string>{"push", "--force-with-lease"};
+    case WriteOp::Continue:
+    case WriteOp::Skip:
+    case WriteOp::Abort: {
+      if (!need(intent.ref)) return std::nullopt;   // `ref` 位传操作种类（merge/rebase/…）
+      const std::string action = intent.op == WriteOp::Continue ? "--continue"
+                                : intent.op == WriteOp::Skip   ? "--skip"
+                                                               : "--abort";
+      return control_args(intent.ref, action);
+    }
+  }
+  return std::nullopt;
+}
+
+auto danger_of(const WriteIntent& intent) -> Danger {
+  switch (intent.op) {
+    // 不可逆：改工作区/历史且没有内置回退。
+    case WriteOp::DiscardOne:
+    case WriteOp::DiscardAll:
+    case WriteOp::ResetHard:
+    case WriteOp::Rebase:
+      return Danger::Backup;
+    // 需确认：可吸收/可重来，但会造成不小的影响。
+    case WriteOp::Amend:
+    case WriteOp::DeleteBranch:
+    case WriteOp::PushForceWithLease:
+    case WriteOp::StashDrop:
+    case WriteOp::TagDelete:
+    case WriteOp::CherryPick:
+    case WriteOp::Revert:
+    case WriteOp::Merge:
+    case WriteOp::ResetMixed:
+    case WriteOp::ResetSoft:
+      return Danger::Confirm;
+    default:
+      return Danger::None;
+  }
+}
+
+auto needs_backup(const WriteIntent& intent) -> bool {
+  return danger_of(intent) == Danger::Backup;
+}
+
+auto backup_branch_name(const std::string& cwd) -> std::string {
+  const std::string iso = st::time::iso8601_utc(st::time::now_ms());
+  std::string date = iso.substr(0, 10);
+  date.erase(std::remove(date.begin(), date.end(), '-'), date.end());
+  const auto head = git(cwd, {"rev-parse", "--short=7", "HEAD"});
+  const std::string hash = head.has_value() ? std::string(st::trim(*head)) : "unknown";
+  // 重名时加序号（同一分钟内做两次危险操作是常见的）。
+  std::string name = std::format("backup/{}-{}", date, hash);
+  int suffix = 2;
+  while (git(cwd, {"rev-parse", "--verify", "--quiet", "refs/heads/" + name}).has_value()) {
+    name = std::format("backup/{}-{}-{}", date, hash, suffix++);
+  }
+  return name;
+}
+
+auto shell_quote(std::string_view argument) -> std::string {
+  // 安全字符集之外一律用单引号包裹；`'` 写成 `'\''`（POSIX sh 的通行写法）。
+  const bool safe = !argument.empty() &&
+                    std::ranges::all_of(argument, [](char ch) {
+                      return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                             (ch >= '0' && ch <= '9') || ch == '/' || ch == '.' || ch == '_' ||
+                             ch == '-' || ch == '=' || ch == ':' || ch == '@' || ch == ',' ||
+                             ch == '+' || ch == '%' || ch == '^' || ch == '~';
+                    });
+  if (safe) return std::string(argument);
+  std::string out;
+  out.reserve(argument.size() + 2);
+  out += '\'';
+  for (const char ch : argument) {
+    if (ch == '\'') {
+      out += "'\\''";
+    } else {
+      out += ch;
+    }
+  }
+  out += '\'';
+  return out;
+}
+
+auto to_shell_line(const std::vector<std::string>& args) -> std::string {
+  std::string out = "git";
+  for (const std::string& arg : args) {
+    out += ' ';
+    out += shell_quote(arg);
+  }
+  return out;
+}
+
+auto to_display_line(const std::vector<std::string>& args) -> std::string {
+  // 展示形式不转义（人要读），但把换行拉平——提交信息是多行的。
+  std::string out = "git";
+  for (const std::string& arg : args) {
+    out += ' ';
+    std::string flat = arg;
+    std::ranges::replace(flat, '\n', ' ');
+    out += flat;
+  }
+  return out;
+}
+
+auto control_args(std::string_view kind, std::string_view action)
+    -> std::optional<std::vector<std::string>> {
+  std::string command(kind);
+  if (command == "cherry-pick" || command == "revert" || command == "merge" ||
+      command == "rebase" || command == "am" || command == "bisect") {
+    return std::vector<std::string>{command, std::string(action)};
+  }
+  return std::nullopt;
+}
+
+auto append_audit(const std::string& cwd, std::string_view action,
+                  const std::vector<std::string>& args, std::string_view result) -> bool {
+  // ⚠ 不能直接写 `<cwd>/.git/…`：`fs::append_text` 会**自动建父目录**，
+  // 于是一个非仓库目录会被我们凭空造出 `.git/`——而 `.git` 的存在会让 git
+  // 之后把该目录**当成一个仓库**（实测：在临时目录上写审计后 `git status` 变了脸）。
+  // 正确做法是先问 git 真实的 git 目录（`--absolute-git-dir` 顺带支持
+  // worktree/submodule 那种 `.git` 是**文件**的形态）。
+  const auto git_dir = git(cwd, {"rev-parse", "--absolute-git-dir"});
+  if (!git_dir.has_value()) return false;
+  const std::string dir = std::string(st::trim(*git_dir));
+  if (dir.empty()) return false;
+  const std::string path = st::fs::join(dir, "st-audit.jsonl");
+  const std::string line =
+      std::format("{{\"time\":\"{}\",\"action\":\"{}\",\"command\":\"{}\","
+                  "\"result\":\"{}\"}}\n",
+                  st::time::iso8601_now(), action, to_display_line(args), result);
+  // 写失败不是错误（审计不能成为操作失败的原因）——只如实返回结果。
+  return st::fs::append_text(path, line).has_value();
+}
+
+auto read_audit(const std::string& cwd, std::size_t limit) -> std::vector<std::string> {
+  const auto git_dir = git(cwd, {"rev-parse", "--absolute-git-dir"});
+  if (!git_dir.has_value()) return {};
+  const std::string path =
+      st::fs::join(std::string(st::trim(*git_dir)), "st-audit.jsonl");
+  const auto text = st::fs::read_text(path);
+  if (!text.has_value()) return {};
+  std::vector<std::string> all;
+  for (const std::string_view line : lines_of(*text)) {
+    if (!line.empty()) all.emplace_back(line);
+  }
+  if (all.size() <= limit) return all;
+  return {all.end() - static_cast<std::ptrdiff_t>(limit), all.end()};
 }
 
 }  // namespace gbcode
