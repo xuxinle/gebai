@@ -516,20 +516,20 @@ auto run_app(int argc, char** argv) -> int {
   }
   if (options.bench_seconds > 0) {
     // ⚠ 报告**两个口径**，别混：
-    //   * 墙钟帧间隔含 `pace_loop` 的帧预算睡眠（默认 16ms）——它反映“实际
+    //   * **墙钟帧间隔**含 `pace_loop` 的帧预算睡眠（默认 16ms）——它反映“实际
     //     帧率”，不反映“渲染成本”；
-    //   * `metrics` 的 `frame_p50/p95` 是**真实帧耗时**，它才是“能不能抱住
-    //     60fps”的依据。
+    //   * **帧内耗时**（`frame_p50/p95`）才是“能不能抱住 60fps”的依据。
     // 实测（1680×1170 @1.5、两层合成）：墙钟 ~20ms 而真实 p50 = 10.4ms
     //——只看前者会误以为“重合成很慢”，实际是节流在起作用。
+    //
+    // 墙钟值改由 `metrics.wall_p50_ms` 给出（框架统一口径）：以前这里用
+    // “总秒数 / 总帧数” 自算，那是**平均**而 p50/p95 是**分位**——两种统计量
+    // 摆在一行里会被当成同类（平均会被一次长卡顿拉高，分位不会）。
     const auto metrics = app.metrics();
-    const double wall_ms =
-        static_cast<double>(options.bench_seconds) * 1000.0 /
-        static_cast<double>(std::max<std::uint64_t>(1, frames));
-    st::print("压测：{} 秒 / {} 帧；墙钟 {:.2f}ms/帧（含帧预算睡眠），"
-              "真实帧耗时 p50={:.2f}ms p95={:.2f}ms（绘制 {:.2f}ms）\n",
-              options.bench_seconds, frames, wall_ms, metrics.frame_p50_ms, metrics.frame_p95_ms,
-              metrics.paint_ms);
+    st::print("压测：{} 秒 / {} 帧；墙钟间隔 p50={:.2f}ms p95={:.2f}ms（含帧预算睡眠），"
+              "帧内耗时 p50={:.2f}ms p95={:.2f}ms（绘制 {:.2f}ms）\n",
+              options.bench_seconds, frames, metrics.wall_p50_ms, metrics.wall_p95_ms,
+              metrics.frame_p50_ms, metrics.frame_p95_ms, metrics.paint_ms);
   }
   st::print("裁云退出：{} 帧，后端 {}\n", frames, std::string(app.backend_name()));
   return 0;

@@ -370,6 +370,17 @@ class Element {
   void set_enabled(bool enabled) noexcept { enabled_ = enabled; }
   [[nodiscard]] auto focusable() const noexcept -> bool { return focusable_; }
   void set_focusable(bool value) noexcept { focusable_ = value; }
+  /// 这个点是否命中本元素（用于事件派发；覆写即改变“能不能被点到”的语义）。
+  ///
+  /// ⚠ **自绘子元素做“命中到了什么”的判定时，请另起名字**。
+  ///
+  /// 这是本仓一个反复被踩的命名坑（caiyun 的时间轴只好叫 `grab_at`）：
+  /// - 同名不同返回类型 → 直接编译报 conflicting return type；
+  /// - 即便返回类型相同（都想返“命中的子件”），覆写的也是**基类的命中语义**——
+  ///   于是 `UiRoot` 的点派发会跟着变，表现为“某个自绘组件一出现，整块区域就点不动了”。
+  ///
+  /// 建议命名：`grab_at` / `part_at` / `handle_at`（语义是“本控件内部的细分命中”，
+  /// 而不是“这个点属不属于我”）。
   [[nodiscard]] virtual auto hit_test(math::Point) const noexcept -> bool;
 
   /// 仅命中**子树内可交互的孙元素**（不含自身矩形）：默认实现为「任一子元素 `hit_test`」。

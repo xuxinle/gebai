@@ -113,3 +113,24 @@ ST_TEST(gbcode_line_index_rebuilt_after_change) {
   ST_CHECK_EQ(position->line, std::size_t{2});
   ST_CHECK_EQ(position->character, std::uint32_t{0});
 }
+
+// 诊断的**路径口径**必须归一：写入走 `uri_to_path`（Windows 下 `/`→`\`）、
+// 查询走 `active_path`（`/` 形态）——两边不归一就查不到，而**不报错**：
+// 返回静态空表，状态栏永远报 0 个问题。
+//
+// 这是存量缺陷（曾经让整个测试分片进程被后续的 `.front()` 带走）。
+// 本用例把它钉住：**逆向验证**——拆掉 `normalize_path` 应立刻变红。
+ST_TEST(gbcode_diagnostics_survive_path_separator_mismatch) {
+  gbcode::LanguageService service{};
+  // 模拟 server 推来的 URI：Windows 盘符形态（`uri_to_path` 会给出反斜杠）。
+  service.push_diagnostics_for_test("file:///C:/x/b.cpp", "unused variable 'x'");
+  // 而编辑器报告的活动路径是正斜杠形态。
+  service.sync_document_if_ready_for_test("C:/x/b.cpp", "int main() {}\n");
+  service.set_active_path("C:/x/b.cpp");
+  // 两种写法都要拿得到同一批诊断（同一文件的两种写法在本仓都是合法输入）。
+  ST_CHECK(!service.problems().empty());
+  ST_CHECK_EQ(service.problems().front().message, std::string("unused variable 'x'"));
+  // 反斜杠写法也是同一个文件（Windows 上必然出现）。
+  service.set_active_path("C:\\x\\b.cpp");
+  ST_CHECK(!service.problems().empty());
+}

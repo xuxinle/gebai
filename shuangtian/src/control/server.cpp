@@ -1493,6 +1493,10 @@ result["layout_ms"] = metrics.layout_ms;
 result["paint_ms"] = metrics.paint_ms;
 result["present_ms"] = metrics.present_ms;
 result["frame_p50_ms"] = metrics.frame_p50_ms;
+  // 墙钟帧间隔（与帧内耗时对照见 `Metrics::wall_p50_ms` 的说明）：
+  // “帧内小、墙钟大”是被限帧，“两个都大”才是真的重。
+  result["wall_p50_ms"] = metrics.wall_p50_ms;
+  result["wall_p95_ms"] = metrics.wall_p95_ms;
 result["frame_p95_ms"] = metrics.frame_p95_ms;
 result["nodes"] = static_cast<std::uint64_t>(metrics.nodes);
   // 上一帧实际绘制的元素数：视口剔除的效果**只能**这样观测——

@@ -179,6 +179,9 @@ struct Application::Impl {
   /// 脚本宿主（仅 `AppOptions::enable_script` 时创建；协议层通过 `Application::script()` 取用）
   std::unique_ptr<ui::ScriptHost> script{};
   std::vector<double> frame_times{};
+  /// 相邻帧开始时刻之差（墙钟间隔；与 `frame_times` 的帧内耗时对照看）。
+  std::vector<double> wall_times{};
+  std::int64_t last_frame_start_ns{0};
   std::vector<std::string> log_lines{};
   std::uint64_t frames{0};
   float device_scale{1.0f};
@@ -459,6 +462,17 @@ auto Application::metrics() const -> control::Metrics {
     };
     metrics.frame_p50_ms = percentile(0.5);
     metrics.frame_p95_ms = percentile(0.95);
+  }
+  if (!impl_->wall_times.empty()) {
+    std::vector<double> sorted = impl_->wall_times;
+    std::ranges::sort(sorted);
+    const auto percentile = [&sorted](double ratio) -> double {
+      const auto index = static_cast<std::size_t>(
+          std::min(static_cast<double>(sorted.size() - 1), ratio * static_cast<double>(sorted.size() - 1)));
+      return sorted[index];
+    };
+    metrics.wall_p50_ms = percentile(0.5);
+    metrics.wall_p95_ms = percentile(0.95);
   }
   metrics.uptime_ms = time::now_ms() - impl_->started_ms;
   metrics.backend = std::string(backend_name());
@@ -933,6 +947,17 @@ auto Application::start() -> Status {
 void Application::render_frame() {
   if (impl_->backend == nullptr) return;
   const std::int64_t start_ns = time::now_ns();
+  // **墙钟帧间隔**：相邻两次进本函数之差（与帧内耗时是两件事）。
+  //
+  // 帧内耗时（layout+paint+present）小、而墙钟间隔大 ⇒ 被限帧（`pace_loop` 睡满
+  // 帧预算），不是性能问题；反过来才是真的重。两者对照才有完整图景，
+  // 而只看一个必然误读（实测：首版压测只报墙钟，把 20ms 读成“重合成很慢”）。
+  if (impl_->last_frame_start_ns > 0 && start_ns > impl_->last_frame_start_ns) {
+    impl_->wall_times.push_back(
+        static_cast<double>(start_ns - impl_->last_frame_start_ns) / 1'000'000.0);
+    if (impl_->wall_times.size() > 240) impl_->wall_times.erase(impl_->wall_times.begin());
+  }
+  impl_->last_frame_start_ns = start_ns;
   raster::Surface& canvas = impl_->backend->framebuffer();
   // 分阶段计时：没有分段数据就无法判断"帧慢"该改哪里（排版/光栅化/送显三条路完全不同）。
   const std::int64_t layout_start = time::now_ns();
