@@ -183,17 +183,13 @@ describe("diagram-render（后端四语言图表渲染）", () => {
   })
 
   test("parseEchartsInput: 严格/宽松 JSON、信封尺寸钳制、非对象拒绝、SSR 默认注入", () => {
-    // 整体 JSON 即 option；注入 animation:false 与 darkMode 缺省值；默认画布 960×600
+    // 整体 JSON 即 option；注入 animation:false；默认画布 960×600
     const opt = parseEchartsInput('{"series":[{"type":"pie","data":[1,2]}]}')
     expect((opt.option.series as unknown[]).length).toBe(1)
     expect(opt.option.animation).toBe(false)
-    expect(opt.option.darkMode).toBe(false)
+    expect(opt.option.darkMode).toBeUndefined()
     expect(opt.width).toBe(960)
     expect(opt.height).toBe(600)
-    // dark 参数注入（前端暗色主题）
-    expect(parseEchartsInput('{"xAxis":{}}', true).option.darkMode).toBe(true)
-    // 用户显式 darkMode 保留
-    expect(parseEchartsInput('{"darkMode":true}').option.darkMode).toBe(true)
     // 宽松解析：注释 + 尾逗号
     expect(parseEchartsInput('{\n  // 注释\n  "series": [1],\n}').option.series).toEqual([1])
     // 信封：option + width/height

@@ -389,27 +389,15 @@ let vizReady: Promise<void> | null = null
 let plantumlMod: Promise<{ renderToString: (lines: string[], ok: (svg: string) => void, err: (m: string) => void) => void }> | null = null
 let d2Queue: Promise<unknown> = Promise.resolve()
 
-function isDarkTheme(): boolean {
-  const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim()
-  const probe = document.createElement("span")
-  probe.style.color = bg
-  document.body.appendChild(probe)
-  const computed = getComputedStyle(probe).color
-  probe.remove()
-  const m = /rgba?\(([^)]+)\)/.exec(computed)
-  if (!m) return true
-  const [r, g, b] = m[1].split(",").map(Number)
-  return (r * 0.299 + g * 0.587 + b * 0.114) / 255 < 0.5
-}
-
-/** 渲染图表源码为 SVG 字符串（懒加载本地引擎；与主界面图表共用同一套 vendor 资源）。 */
+/** 渲染图表源码为 SVG 字符串（懒加载本地引擎；与主界面图表共用同一套 vendor 资源，
+ *  同为固定引擎默认亮色配色，不随 UI 主题变化）。 */
 export async function renderDiagramSvg(kind: DiagramKind, code: string): Promise<string> {
   const vendor = wbUrl("/vendor")
   if (kind === "mermaid") {
     if (!mermaidReady) {
       mermaidReady = loadScript(`${vendor}/mermaid.js`).then(() => {
         const m = (window as unknown as { mermaid?: { initialize: (o: unknown) => void } }).mermaid
-        m?.initialize({ startOnLoad: false, theme: isDarkTheme() ? "dark" : "default", securityLevel: "strict" })
+        m?.initialize({ startOnLoad: false, theme: "default", securityLevel: "strict" })
       })
     }
     await mermaidReady
@@ -451,7 +439,7 @@ export async function renderDiagramSvg(kind: DiagramKind, code: string): Promise
   const run = d2Queue.then(async () => {
     const mod = (await import(/* @vite-ignore */ wbAbsUrl("/vendor/d2js/index.js"))) as { D2: new () => { compile: (c: string, o: unknown) => Promise<{ diagram: unknown }>; render: (d: unknown, o: unknown) => Promise<string> } }
     const d2 = new mod.D2()
-    const opts = { themeID: isDarkTheme() ? 200 : 0, noXMLTag: true }
+    const opts = { themeID: 0, noXMLTag: true }
     const compiled = await d2.compile(code, opts)
     return await d2.render(compiled.diagram, { ...opts, ...(compiled as { renderOptions?: object }).renderOptions })
   })

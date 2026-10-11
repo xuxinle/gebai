@@ -494,10 +494,10 @@ export function fixEchartsLegendOverlap(option: Record<string, unknown>, width: 
 
 /**
  * 解析 echarts 源码为渲染输入：整个 JSON 对象即 option，或 `{"option": {...}, "width": 960, "height": 600}` 信封指定画布尺寸
- * （尺寸钳制 200-4000）。注入 `animation: false`（SSR 静态输出必须）；`darkMode` 缺省取参数（后端固定浅色，前端按主题传入）；
- * 标题/图例防重叠修正（见 fixEchartsLegendOverlap）。
+ * （尺寸钳制 200-4000）。注入 `animation: false`（SSR 静态输出必须）；标题/图例防重叠修正（见 fixEchartsLegendOverlap）。
+ * 配色一律由 echarts 引擎默认亮色决定（不注入 darkMode——该字段在 ECharts 6 SSR 链路不生效）。
  */
-export function parseEchartsInput(code: string, dark = false): EchartsInput {
+export function parseEchartsInput(code: string): EchartsInput {
   let obj: unknown
   try {
     obj = lenientJsonParse(code)
@@ -520,12 +520,12 @@ export function parseEchartsInput(code: string, dark = false): EchartsInput {
     width = clampSize(record.width) ?? width
     height = clampSize(record.height) ?? height
   }
-  const merged: Record<string, unknown> = { ...option, animation: false, darkMode: (option.darkMode as boolean | undefined) ?? dark }
+  const merged: Record<string, unknown> = { ...option, animation: false }
   fixEchartsLegendOverlap(merged, width, height)
   return { option: merged, width, height }
 }
 
-/** 渲染 ECharts JSON option 为 SVG（SSR 模式，浅色；白底由栅格化兜底）；option 非法抛错（供回传模型修正）。 */
+/** 渲染 ECharts JSON option 为 SVG（SSR 模式，引擎默认亮色；白底由栅格化兜底）；option 非法抛错（供回传模型修正）。 */
 async function renderEchartsSvg(code: string): Promise<string> {
   const { option, width, height } = parseEchartsInput(code)
   const chart = echarts.init(null, null, { renderer: "svg", ssr: true, width, height })
