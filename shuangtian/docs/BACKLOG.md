@@ -26,6 +26,25 @@
 
 ## 待做（2026-10-09 起）
 
+> 📋 2026-10-11 **自举修复轮**（Windows 首次自举链接失败）：现象是一串
+> `undefined reference to st::codec::png_read_file / st::raster::Canvas::*`，**报错指向源码**，
+> 而真因是 `bootstrap.ps1` 的单元集按目录写死（`src/core src/ext src/pkg tools/stpm`），
+> 与 `st.pkg` 脱节——C6 新增的 `src/ext/video.cpp` 引 `codec/raster`，而这两块不在目录里。
+>
+> **修法（已落地）**：把"工具链需要哪些单元"变成清单的权威声明
+> （`targets.st.sources` / `targets.st.exclude_sources`），两个自举脚本都改为
+> `sources − exclude + target.sources` 推导。实测：64 单元 / 41.9s（Win）/ 48.6s（WSL），
+> `st build st|gallery`、`st check`、`st lint`、测试全绿、交叉编译双目标通过。
+>
+> 📋 **同轮拓出的两个真缺陷**（都已修）：
+> ① **工具链被迫吞下整条渲染链**：`st` 一行渲染不跑，却因两条**头文件级**反向依赖
+>    （`core/platform_crash.cpp → ui/state_trace.hpp`、`shell → ui/window_control.hpp`）
+>    拖进了 codec/raster/text/md/xml/shell。下面 P1 是治它的路。
+> ② **`%lld` 配 `int64_t*` 在 LP64 上是构建失败**（`src/ext/video.cpp`）：
+>    Linux 的 `int64_t` 是 `long`、Windows 是 `long long`——Windows 只警告，
+>    WSL 上同一份代码 `-Wformat` 刷屏（配 `-Werror` 即失败）。**本机看不出跨平台问题**
+>    这条再次应验：能在 WSL 实跑一次自举，才算真的验过。
+
 > ✅ 2026-10-11 **第二次清账（C 轮）**：上一轮留下的 4 条「数据层已完成、视图层待做」
 > 已全部补完（C1 冲突三份取数 / C2 合并视图 / C3 逐行暂存界面 / C4 TimelineView），
 > 另完成 C5（画笔输入：量化后定案为"帧内事件合并"）与 C6（视频解码：评估后定案为
@@ -62,7 +81,34 @@
 > 计数被压成“已…”、确认框按钮无稳定 id、标签名里的点在 CSS 选择器里被当类分隔符）。
 > 下面三条是接下去的路。
 
-### P1：真视频**编码**（导出容器）
+### P1：打破 `core → ui` 的传递依赖（工具链别再吞渲染链）
+
+**现象**：`st`（构建/测试/lint/依赖管理，**一行渲染都不跑**）的单元集里有一半是渲染层
+（`codec`/`raster`/`text`/`md`/`xml`/`shell`）。当前靠 `targets.st.exclude_sources`
+把 `ui/*` 排掉、再单独把 `ui/window_control.cpp` 加回来——**能编过，但依赖方向是错的**。
+
+**两条根因（都是头文件级的，所以 lint 看不见）**：
+
+1. `src/core/platform_crash.cpp`（core）`include "st/ui/state_trace.hpp"`：
+   `state_trace.hpp` 自己干净，但同模块的 `ui_root.hpp` → `raster/canvas.hpp` 把渲染链拖进来；
+2. `src/shell/{backend,platform_win32}.cpp` `include "st/ui/window_control.hpp"`：
+   「窗口边缘命中契约」定义在 `ui`（而 shell 必须用它），又把 `ui` 拉回工具链。
+
+**方向**：`ui::window_control`（窗口边缘判定 + `WindowControl` 抽象端口）**上移 `core`**
+（它本就"不含系统头、不认识窗口系统"），`shell` 与 `ui` 都从 `core` 取；
+`state_trace` 的崩溃钩子已经有函数指针（`set_crash_extra_provider`）解耦，
+剩下的是把头文件里的 `UiRoot*` 前向声明掉。做完则 `targets.st` 不再需要 `window_control` 补丁项。
+**属设计层面变更**（层间契约），要先定 `DESIGN.md` 的分层表再动。
+
+### P2：构建期嵌入（`battery/embed.hpp`）与层闭包解耦
+
+`src/ui/script_host.cpp` / `declarative_host.cpp` 直接 `include "battery/embed.hpp"`
+（**构建期生成**），所以任何"还没有嵌入头"的阶段（自举、`check_selfcontained` 的 TU 组）
+都不能编它们。当前靠"它们属于被排除的 ui 层"绕开——**耦合是隐性的**：
+将来某个**工具自己**需要的单元一旦用上 `b::embed`，自举会以
+`battery/embed.hpp: No such file or directory` 失败，而那看上去像路径问题。
+**方向**：嵌入资源改走「运行期读文件 + 可执行文件旁查找」或「显式的生成步骤前置」，
+让"能不能编"不再取决于"构建轮到哪一步"。
 
 **已完成**：解码侧（`st::ext::VideoDecoder`，经 `ffmpeg` 子进程：抽帧 + 元信息 +
 探测不到如实不支持，见 `docs/../include/st/ext/video.hpp`）。

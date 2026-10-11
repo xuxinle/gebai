@@ -86,6 +86,11 @@
 | **构建系统的三个静默失效点** | 改头文件不重编 / 标志与缓存键不一致 / 平台漏开关——**什么也不报，只是不重编** | `CONVENTIONS.md` §10.3 |
 | **两个构建不能并行** | 后者会以 `io: rename ... Resource device` 失败 | `CONVENTIONS.md` §6 附近 |
 | **判据落在产物存在性上** | 不要用退出码/日志当代理信号（实测：PCH 创建"报成功"其实静默空转） | `DESIGN.md` §8.2 第 49 条 |
+| **自举单元集必须从清单推导，不能按目录写死** | bootstrap 写死了 `src/core src/ext src/pkg`，与 `st.pkg` 脱节——新增 `src/ext/video.cpp` 引 `codec/raster` 后，报的是链接期一串 `undefined reference to st::...`（**报错指向源码，真因是"该编的单元没编"**）。现在按清单推：`sources − targets.st.exclude_sources + targets.st.sources` | `bootstrap.sh` / `bootstrap.ps1` 的相邻注释 |
+| **排除模式 `src/ui/*` 不跨子目录** | `*` 不跨 `/`（与 `fs::match_glob` 同口径），要跨得写 `src/ui/**`。写错的症状是**排除静默不生效**（只警告"未命中"），于是 `EXCLUDE` 形同虚设 | `src/core/fs.cpp` `match_segments` |
+| **工具链只该编它真需要的单元** | `st` 一行渲染都不跑，却被 `core/platform_crash.cpp → ui/state_trace.hpp` 与 `shell → ui/window_control.hpp` 两条**头文件级**反向依赖拖进整条渲染链（codec/raster/text/md/xml/shell）。见 `BACKLOG.md` P1 | `include/st/ui/window_control.hpp` 注释 |
+| **自举把"应用向"单元也编进来会撞构建期生成头** | `src/ui/script_host.cpp` / `declarative_host.cpp` include **构建期生成**的 `battery/embed.hpp`（由 `st build` 产出）——自举阶段它还不存在，编它们必然 `fatal error`。这两条又正好是"工具不需要的应用层" | `src/pkg/embed.cpp` 的 `generate_embeds` |
+| **`%lld` 与 `int64_t` 在 LP64 上不是同一类型** | Linux/macOS `int64_t` 是 `long`、Windows 是 `long long`。`sscanf("%lld", &int64_var)` 只在 Windows 合法，Linux 上 `-Wformat` + `-Werror` = **构建失败**（实测：WSL 跑 bootstrap 时刷屏）。用 `long long` 承接后显式转换 | `src/ext/video.cpp` 的 `parse_probe_output` 注释 |
 
 ## 场景 7：写声明式界面（`dsl`）
 
