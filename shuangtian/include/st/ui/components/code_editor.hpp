@@ -301,7 +301,7 @@ class CodeEditor : public Element {
   struct LineDecoration {
     std::size_t line{0};
     LineMark mark{LineMark::None};
-    /// 行号槽里显示的号；`0` = 用本行真实行号，`kNoNumber` = **不显示行号**。
+  /// 行号槽里显示的号；`0` = 用本行真实行号，`kNoNumber` = **不显示行号**。
     ///
     /// 三态而不是两态，是因为“拿不到另一侧的行号”与“这一行不属于任何一侧”
     /// 是两件事：差异视图的分隔条（`@@ … @@`）属于后者。旧写法只有 `0` 一种缺省，
@@ -310,6 +310,15 @@ class CodeEditor : public Element {
     std::size_t number{0};
     /// 画在行号右侧的**槽内竖条**（差异视图的「这一侧有改动」条）。
     bool gutter_bar{false};
+    /// 行尾附加文本（宿主编排的**灰字注解**：blame 的作者/日期、内联提示等）。
+    ///
+    /// 为何做成框架能力而不是宿主另起浮层：行尾注解要**贴着那一行**、且不能盖住
+    /// 右侧的代码——两个位置都取决于「这行的文本多宽」，只有编辑器知道
+    ///（与 `caret_screen_rect` / 行带同一条理由：宿主自己拼必然与绘制分叉）。
+    ///
+    /// 与文本表无关：它不参与光标/选区/换行计算，只在本行文本之后画一段灰字。
+    /// 宽度不够时不画（而不是截断成半句话）——“`张三 2024-…`”截一半比不画更难看。
+    std::string end_text{};
   };
 
   /// 「不显示行号」的哨兵值（见 `LineDecoration::number`）。
@@ -320,6 +329,18 @@ class CodeEditor : public Element {
   void clear_line_decorations();
   [[nodiscard]] auto line_decorations() const noexcept -> const std::vector<LineDecoration>& {
     return line_marks_;
+  }
+
+  /// **上一帧绘制的可见行范围**（1 起，闭区间）——不需 `context`。
+  ///
+  /// 为何要它：宿主想在**帧首**做“只取看得见那些行的数据”（blame 就是典型）时
+  /// 拿不到 `RenderContext`（那是绘制期的东西），而 `visible_line_range(context)`
+  /// 要它。缓存上一帧的值就够：一帧的滞后在“滚动时补注解”这个场景里不可见。
+  ///
+  /// 从未绘制过时返回 `{1, 0}`（空区间；调用方可据此跳过）。
+  [[nodiscard]] auto visible_line_range_now() const noexcept
+      -> std::pair<std::size_t, std::size_t> {
+    return {last_visible_first_, last_visible_last_};
   }
 
   /// 滚动位置变化的回调（滚轮 / 拖滚动条 / 键盘滚动 / `scroll_to_line` 都会触发）。
@@ -577,6 +598,12 @@ class CodeEditor : public Element {
   mutable float line_height_cache_{0.0f};
   mutable float gutter_cache_{0.0f};
   mutable float max_line_width_cache_{0.0f};
+  /// 上一帧绘制的可见行范围（1 起闭区间；`{1,0}` = 还没画过）。
+  ///
+  /// 为何缓存而不是每次现算：宿主在**帧首**要它（`visible_line_range_now()`），
+  /// 而现算需要 `RenderContext`（绘制期才有）。一帧滞后在这里不可见。
+  mutable std::size_t last_visible_first_{1};
+  mutable std::size_t last_visible_last_{0};
   /// 行装饰（整体替换语义，见 `set_line_decorations`）。
   std::vector<LineDecoration> line_marks_{};
   /// 按行号索引的装饰表（绘制热路径用；`set_*` 时重建）。

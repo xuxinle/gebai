@@ -72,6 +72,10 @@ std::string& editor_clipboard() {
 }
 
 inline constexpr float kGutterPadding{12.0f};
+/// 行尾注解与正文之间的间隔（见 `LineDecoration::end_text`）。
+inline constexpr float kEndAnnotationGap{16.0f};
+/// 行尾注解与视口右缘的保留（它不该贴死在边上）。
+inline constexpr float kEndAnnotationRightPad{12.0f};
 inline constexpr float kTopPadding{6.0f};
 inline constexpr float kBottomPadding{6.0f};
 inline constexpr float kCursorWidth{1.6f};
@@ -1481,6 +1485,9 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
   }
 
   const auto [first_line, last_line] = visible_line_range(context);
+  // 记下本帧的可见行范围（1 起）供宿主在帧首取用（`visible_line_range_now()`）。
+  last_visible_first_ = first_line + 1;
+  last_visible_last_ = last_line + 1;
   // **一行的几何全部从框架拿**（`ui::LineGeometry`，见 `line_layout.hpp`）。
   //
   // 三个量都相对**行盒顶**，所以每行只需 `row_top + 它`：
@@ -1681,6 +1688,25 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
         consumed = token_begin + length;
       }
       if (consumed < row.size()) draw_span(consumed, row.size(), syntax.plain);
+    }
+
+    // —— 行尾注解（`LineDecoration::end_text`：blame 作者/日期这类灰字）——
+    //
+    // 位置 = **本行文本之后**（不是窗口右端）：它是“这一行的元信息”，跟行一起滚动
+    // 才不会让人看错行。空间不够就不画（截一半比不画更难认）。
+    if (decoration != nullptr && !decoration->end_text.empty()) {
+      const float annotation_left = pen + kEndAnnotationGap;
+      const float available = bounds_.right() - kEndAnnotationRightPad - annotation_left;
+      if (available > 8.0f) {
+        const std::string clipped =
+            port.ellipsize(decoration->end_text, context.theme.metrics().font_sm, available);
+        // 只在能装下**完整**注解时画：截断的半句（`张三 2024-…`）比不画更让人困惑。
+        if (!clipped.empty() && clipped.size() == decoration->end_text.size()) {
+          port.draw(canvas, clipped,
+                    math::Point{annotation_left, row_top + text_offset},
+                    context.theme.metrics().font_sm, colors.text_faint);
+        }
+      }
     }
 
     // 诊断波浪线：画在**字形之上**（先画就被字符盖住了）。

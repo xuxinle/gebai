@@ -495,6 +495,24 @@ struct CodeEditorPage : Component {
   /// 这些值可以随后由属性面改（设置面板/控制通道），每帧重写就把它抹了。
   bool editor_configured_{false};
   MenuBar* menu_bar_ptr{nullptr};
+
+  // —— 行尾 blame 注解（B5）——
+  //
+  // 数据面（`git_service::read_blame`）早已就绪，缺的是界面。做法：
+  // ① **开关**（`blame_on_`）；② **按视口取数**（只问看得见那几十行，不整文件）；
+  // ③ 结果做**行号 → 注解文本**的缓存，拼进 `LineDecoration::end_text`。
+  //
+  // 为何按视口取而不是一次性拉整文件：`git blame` 是子进程，一个万行文件的整次 blame
+  // 要几百毫秒——而用户每滚动一次都想要新的行。取视口那几十行的增量成本是可接受的。
+  bool blame_on_{false};
+  /// `--open` 的待办路径（帧首泵消费；空 = 无）。
+  std::string pending_open_path_{};
+  /// 已经拿到 blame 的文件（与 `blame_path_` 不同时空 = 需要重新取）。
+  std::string blame_path_{};
+  /// 行号（1 起）→ 注解文本（`张三 2024-01-01`）。取数按视口分块，缺的行按需补。
+  std::map<std::size_t, std::string> blame_lines_{};
+  /// 已经**问过**的行区间（避免同一段反复起子进程；记 1 起闭区间）。
+  std::vector<std::pair<std::size_t, std::size_t>> blame_fetched_{};
   CommandPalette* palette_ptr{nullptr};
   Input* find_replace_input{nullptr};   ///< 替换文本不进状态（不参与重组）
   Input* find_needle_input{nullptr};    ///< 查找输入框（打开后把焦点交给它）
@@ -694,6 +712,18 @@ struct CodeEditorPage : Component {
                 " 字符 · 已打开");
   }
 
+  /// `--open <path>` 的待办：**不在构造期打开**（那会在构建期写 State，见 `main` 的注释），
+  /// 而由帧首泵在首帧之后就打开一次。
+  void set_pending_open_path(std::string path) { pending_open_path_ = std::move(path); }
+
+  /// 帧首泵：把待打开的路径真的打开（一次）。
+  void flush_pending_open() {
+    if (pending_open_path_.empty()) return;
+    const std::string path = std::move(pending_open_path_);
+    pending_open_path_.clear();
+    open_path(path);
+  }
+
   /// 打开真实文件（资源树 / 搜索命中 / 快速打开共用）。
   auto open_path(const std::string& path) -> void {
     auto list = buffers_.value();
@@ -705,6 +735,15 @@ struct CodeEditorPage : Component {
     }
     buffers_.set(std::move(list));
     active_.set(index);
+    // ⚠ **不在这里碰 `editor`**。
+    //
+    // 为何：本函数会被**帧首泵**调到（`flush_pending_open`），而那时 `editor`
+    // 是**上一次 `build()` 留下的指针**——gbcode 每帧重建编辑器，那个指针已经悬垂，
+    // 写它就是空指针写（实测：`--open` 让进程在首帧后直接崩，异常码 0xC0000005）。
+    //
+    // 正确做法：只把状态改好 + **标记“需要重灌”**（`loaded_key_` 清空），
+    // 实际灌入由 `build()` 末尾统一做——那时 `editor` 是本帧刚取得的，一定有效。
+    loaded_key_.clear();
     status_.set("已打开 " + path);
   }
 
@@ -1056,8 +1095,12 @@ struct CodeEditorPage : Component {
       if (!workspace_.empty() && !git_probed_) refresh_git();
     }
     ensure_git_log();
+    // `--open`：首帧之后打开（见 `set_pending_open_path` 的说明）。
+    flush_pending_open();
     ensure_compare();
     ensure_diff();
+    // 行尾 blame：帧首泵（起子进程不能在渲染期）。
+    ensure_blame();
     flush_terminal_commands();
     const bool diagnostics_changed = lsp_.pump();
     // 待落地的跳转（跨文件）：编辑器实例在新文件装载后才就位，所以在这里补做。
@@ -4009,6 +4052,13 @@ b.set_label(std::format("{}  +{} −{}", path, plus, minus));
         sidebar_visible_.set(true);
         mark_sidebar_visited(4);
       }, "当前语言 — 点一下打开语言列表");
+      // blame 行尾注解开关：放在状态栏（它影响“现在看到的正文”，而状态栏正是“当前显示什么”的位置）。
+      // 做成可点元素还有一个实际好处：**它能被控制通道 `invoke` 触发**
+      //（命令面板那条路要模拟键盘，e2e 里脆而慢）。
+      status_item(c, "status-blame", "git-branch",
+                  [this] { return blame_on_ ? std::string("blame 开") : std::string("blame"); },
+                  [this] { toggle_blame(); },
+                  "行尾 blame 注解 — 点一下开/关（显示当前视口行的作者与日期）");
       (void)text(c, [this] { return status_.value(); }, {.id = "status"});
       (void)button(c, theme_is_dark() ? "亮色" : "暗色", [this] { toggle_theme(); },
                    {.id = "btn-theme"});
@@ -4434,16 +4484,26 @@ b.set_label(std::format("{}  +{} −{}", path, plus, minus));
   }
 
   /// 把当前标签的文本灌进编辑器（切标签/打开文件的唯一入口）。
-  void load_active_text() {
-    const auto list = buffers_.value();
-    if (active_.value() >= list.size()) return;
-    loaded_key_ = list[active_.value()].key;   // 标记「已装载」——build() 末尾据此跳过
-    if (editor != nullptr) {
-      editor->set_language(list[active_.value()].language);
-      editor->set_text(list[active_.value()].text);
-    }
-    refresh_problems();
+void load_active_text() {
+  const auto list = buffers_.value();
+  if (active_.value() >= list.size()) return;
+  if (editor == nullptr) {
+    // ⚠ **编辑器还没装上时不能标记「已装载」**。
+    //
+    // `loaded_key_` 是“编辑器里现在装着哪个缓冲”的唯一判据，而 `build()` 末尾的
+    // 灌入逻辑只在它与当前标签不一致时才写。构造期（首帧之前，编辑器还没创建）
+    // 调到这里时，旧实现无条件写 `loaded_key_` —— 于是那一帧之后
+    // “已装载”与实际内容不符，**编辑器永远停在默认样例上**。
+    // 实测：`--open <file>` 只在构造期调一次（打开路径就是本函数），
+    // 表现为“标签从 renderer.cpp 切到了 sample.cpp、内容却还是 renderer.cpp”。
+    loaded_key_.clear();
+    return;
   }
+  loaded_key_ = list[active_.value()].key;   // 标记「已装载」——build() 末尾据此跳过
+  editor->set_language(list[active_.value()].language);
+  editor->set_text(list[active_.value()].text);
+  refresh_problems();
+}
 
   void open_by_name(const std::string& name) {
     for (const auto& sample : files_) {
@@ -4943,6 +5003,89 @@ b.set_label(std::format("{}  +{} −{}", path, plus, minus));
       flow = std::format("（↑{} ↓{}）", git_.ahead, git_.behind);
     }
     status_.set(std::format("Git：{}{} · {} 项变更", git_.branch, flow, git_.changes.size()));
+  }
+
+  // —— 行尾 blame 注解（B5）——
+
+  /// 开关切一下：开→下一帧取数；关→清掉装饰（界面立刻回到干净态）。
+  void toggle_blame() {
+    blame_on_ = !blame_on_;
+    if (!blame_on_) {
+      blame_lines_.clear();
+      blame_fetched_.clear();
+      blame_path_.clear();
+      if (editor != nullptr) editor->clear_line_decorations();
+      status_.set("已关闭 blame 注解");
+    } else {
+      status_.set("已开启 blame 注解（显示当前视口的行）");
+    }
+  }
+
+  /// 拉取视口行的 blame（帧首泵做：`git blame` 是子进程，渲染期起会崩）。
+  ///
+  /// **只问没问过的行段**：用户滚动时每帧都会想要新行，而 `git blame` 一次几百毫秒；
+  /// 已取过的段记在 `blame_fetched_` 里，避免同一段反复起进程。
+  void ensure_blame() {
+    if (!blame_on_ || editor == nullptr) return;
+    const auto list = buffers_.value();
+    if (list.empty()) return;
+    const std::string path = list[active_.value()].path;
+    if (path.empty()) return;
+    if (path != blame_path_) {
+      // 换了文件：旧注解全部作废（行号属于另一个文件，留着就是错的行）。
+      blame_lines_.clear();
+      blame_fetched_.clear();
+      blame_path_ = path;
+    }
+    const auto [first, last] = editor->visible_line_range_now();
+    if (last < first) return;
+    for (const auto& [begin, end] : blame_fetched_) {
+      if (begin <= first && last <= end) return;   // 这一段已经取过
+    }
+    std::error_code ec;
+    const std::filesystem::path fs_path = std::filesystem::path(path);
+    if (!std::filesystem::exists(fs_path, ec) || ec) return;
+    // 相对仓根的路径（`git blame` 收相对路径更稳）。
+    std::string relative = path;
+    if (const auto rel = std::filesystem::relative(fs_path, workspace_, ec); !ec) {
+      relative = rel.generic_string();
+    }
+    const std::size_t count = last - first + 1;
+    const auto lines = gbcode::read_blame(workspace_, {}, relative, first, count);
+    if (lines.empty()) {
+      // 取不到（未跟踪文件 / 不在仓库里）：记一下，别每帧重试。
+      blame_fetched_.emplace_back(first, last);
+      return;
+    }
+    for (const auto& line : lines) {
+      // 注解文本：作者 + 日期（IDEA 的行尾形态；不看 hash——那是点开详情才要的）。
+      blame_lines_[line.line] = line.author.empty()
+                                    ? std::format("{} {}", line.hash, line.date)
+                                    : std::format("{} {}", line.author, line.date);
+    }
+    blame_fetched_.emplace_back(first, last);
+    apply_blame_decorations();
+  }
+
+  /// 把已拿到的 blame 拼进编辑器装饰。
+  ///
+  /// 装饰是**整体替换**语义，所以这里只回答“当前该长什么样”。
+  /// 与诊断/差异共存时由调用方决定优先级——blame 只在开关打开时写，
+  /// 而那个开关默认关，所以不会把别的装饰意外抹掉。
+  void apply_blame_decorations() {
+    if (editor == nullptr) return;
+    if (!blame_on_) {
+      editor->clear_line_decorations();
+      return;
+    }
+    std::vector<CodeEditor::LineDecoration> marks;
+    marks.reserve(blame_lines_.size());
+    for (const auto& [line, text] : blame_lines_) {
+      marks.push_back(CodeEditor::LineDecoration{
+          .line = line, .mark = CodeEditor::LineMark::None, .end_text = text});
+    }
+    editor->set_line_decorations(std::move(marks));
+    editor->mark_dirty();
   }
 
   /// Git 工具窗的数据读取（帧首泵做——渲染期起子进程会崩，见 build_git_view 注释）。
@@ -6272,6 +6415,8 @@ b.set_label(std::format("{}  +{} −{}", path, plus, minus));
         editor->set_indent_guides(!editor->indent_guides());
         status_.set(editor->indent_guides() ? "缩进参考线：开" : "缩进参考线：关");
       }
+    } else if (id == "view.toggle-blame") {
+      toggle_blame();
     } else if (id == "help.about") {
       status_.set("歌白代码 0.1.0 · 霜天框架示例 · 声明式组装");
     } else if (!id.empty()) {
@@ -6301,6 +6446,8 @@ b.set_label(std::format("{}  +{} −{}", path, plus, minus));
     add("view.toggle-sidebar", "查看: 切换侧栏可见性", "显示/隐藏侧栏（活动栏常驻，Ctrl+B）");
     add("view.toggle-theme", "查看: 切换亮/暗主题", "主题令牌整体切换");
     add("view.toggle-indent-guides", "查看: 切换缩进参考线", "每级缩进一条竖线");
+    // blame 行尾注解：开关 + 当前视口取数（B5）。
+    add("view.toggle-blame", "查看: 切换行尾 blame 注解", "显示当前视口行的作者与日期");
     // 导航族：F12 只覆盖定义，声明/类型定义/实现进面板（快捷键也在，但面板可搜）。
     add("nav.declaration", "转到: 声明", "Alt+F12");
     add("nav.type-definition", "转到: 类型定义", "光标在变量上时跳它的类型");
@@ -6516,6 +6663,8 @@ struct Options {
   /// 工作区目录（真实文件模式）：资源管理器/打开/保存全部走 `st::fs` 真实读写；
   /// 缺省回退内置样例工作区（内存模拟）。
   std::string workspace{};
+  /// `--open <path>`：启动即打开的文件（空 = 用内置样例）。
+  std::string open_path{};
   /// 霜天仓库根（`--tool-root`）：跑任务/构建时找 `st` 工具链用。
   std::string tool_root{};
 };
@@ -6590,6 +6739,9 @@ auto print_usage(std::string_view program) -> void {
     else if (raw == "--frames") options.frames = static_cast<std::uint32_t>(std::stoi(value("0")));
     else if (raw == "--ms") options.max_ms = std::stoi(value("0"));
     else if (raw == "--workspace") options.workspace = value(".");
+    // `--open <path>`：启动即打开一个文件（编辑器历来都有这条——`code file.cpp`）。
+    // 缺它时“打开某个文件”只能靠 UI 点，自动化与命令行使用都不方便。
+    else if (raw == "--open") options.open_path = value({});
     else if (raw == "--tool-root") options.tool_root = value("");
     else if (raw == "--decorations") options.decorations = true;
     // 诊断开关（--log-file/--log-level/--crash-dir）：由 `startup_configure_diagnostics`
@@ -6688,6 +6840,13 @@ auto run_app(int argc, char** argv) -> int {
   }
   auto page = std::make_shared<CodeEditorPage>(samples(), options.workspace, options.tool_root,
                                                editor_font_scale, editor_line_spacing);
+  // `--open <path>`：**不在构造期改状态**。
+  //
+  // 为何：在声明式构建期写 `State` 会触发递归重组（日志实测：`[dsl] 构建期写入
+  // State…已延迟到帧末落地`），而那一延迟让“当前标签”与“缓冲区表”错开一帧——
+  // 编辑器最终装回了**另一个文件的内容**（标签高亮 sample.cpp、正文是 renderer.cpp）。
+  // 改成把路径记下来、**第一帧之后**再打开（那时宿主已就绪，时序干净）。
+  if (!options.open_path.empty()) page->set_pending_open_path(options.open_path);
   // 主题的两个口子（**同一处装配**、依赖方向依然是单向的）：
   // 读 = `UiRoot::theme()`（真值源）；写 = `Application::set_theme_mode`
   // （它会连带处理字号缩放与文本 gamma——直接改 `root().theme()` 会把

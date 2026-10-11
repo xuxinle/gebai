@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "st/app/text_port.hpp"
+#include "st/core/print.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/test/test.hpp"
 #include "st/text/text.hpp"
@@ -359,4 +360,83 @@ ST_TEST(code_editor_clear_decorations_restores_plain) {
   canvas.clear(st::math::Color::rgb(255, 255, 255));
   fx.editor.paint(fx.context, canvas);
   ST_CHECK_EQ(fx.row_color(canvas, 0, row_height), plain);
+}
+
+namespace {
+
+/// 行尾注解用例的排版助手（既有夹具只 `arrange` 了 600x300，注解用例要换视口）。
+void end_text_layout(Fixture& fx, float width, float height) {
+  fx.editor.measure(fx.context, st::ui::Constraints{width, height});
+  fx.editor.arrange(fx.context, st::math::Rect{0.0f, 0.0f, width, height});
+}
+
+/// 某片区域的像素指纹（与背景无关：**只问"两帧是否不同"**）。
+///
+/// 为何不判"有没有墨"：编辑器会把整块底填成主题色（不是透明），
+/// 于是"与白色不同"恒真——基准断言必然假失败（实测踩到）。
+/// 而"加注解前后这块变了没有"才是本节真正要问的（既有装饰测试同此手法）。
+[[nodiscard]] auto region_hash(const st::raster::Canvas& canvas, float top, float bottom,
+                               float from_x, float to_x) -> std::size_t {
+  std::size_t hash = 1469598103934665603ULL;   // FNV-1a 偏移基准
+  for (int y = static_cast<int>(top); y < static_cast<int>(bottom); ++y) {
+    for (int x = static_cast<int>(from_x); x < static_cast<int>(to_x); ++x) {
+      hash = (hash ^ canvas.pixel_at(x, y).to_hex()) * 1099511628211ULL;
+    }
+  }
+  return hash;
+}
+
+}  // namespace
+
+ST_TEST(code_editor_end_text_annotation_is_painted_after_line_text) {
+  Fixture fx;
+  if (!fx.has_font()) return;
+  fx.editor.set_font_size(14.0f);
+  fx.editor.set_text("alpha\nbeta\n");
+  end_text_layout(fx, 600.0f, 300.0f);
+
+  st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(600, 300, 1.0f);
+  canvas.clear(st::math::Color::rgb(255, 255, 255));
+  fx.editor.paint(fx.context, canvas);
+  // 基准：**无注解**时第 1 行注解带（x ∈ [90,560)）——注解画在**正文之后**
+  //（实测 `pen≈82`，即注解紧跟 `alpha` 右缘），所以取样从正文右侧起。
+  const std::size_t clean = region_hash(canvas, 2.0f, 22.0f, 90.0f, 560.0f);
+
+  // 带上行尾注解：**同一片区域**必须变。
+  fx.editor.set_line_decorations({CodeEditor::LineDecoration{
+      .line = 1, .mark = CodeEditor::LineMark::None, .end_text = "张三 2024-01-01"}});
+  canvas.clear(st::math::Color::rgb(255, 255, 255));
+  fx.editor.paint(fx.context, canvas);
+  const std::size_t with_annotation = region_hash(canvas, 2.0f, 22.0f, 90.0f, 560.0f);
+  ST_CHECK(clean != with_annotation);
+
+  // 清掉：回到与基准**完全一致**（装饰是整体替换语义，不留残留）。
+  fx.editor.clear_line_decorations();
+  canvas.clear(st::math::Color::rgb(255, 255, 255));
+  fx.editor.paint(fx.context, canvas);
+  ST_CHECK_EQ(region_hash(canvas, 2.0f, 22.0f, 90.0f, 560.0f), clean);
+}
+
+ST_TEST(code_editor_end_text_too_wide_is_not_painted_at_all) {
+  // 「装不下就不画」：截断的半句（`张三 2024-…`）比不画更让人困惑。
+  Fixture fx;
+  if (!fx.has_font()) return;
+  fx.editor.set_font_size(14.0f);
+  fx.editor.set_text("alpha\n");
+  // 视口窄到注解必然放不下。
+  end_text_layout(fx, 140.0f, 120.0f);
+  st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(140, 120, 1.0f);
+  const st::math::Color white = st::math::Color::rgb(255, 255, 255);
+
+  canvas.clear(white);
+  fx.editor.paint(fx.context, canvas);
+  const std::size_t plain = region_hash(canvas, 2.0f, 22.0f, 60.0f, 138.0f);
+
+  fx.editor.set_line_decorations({CodeEditor::LineDecoration{
+      .line = 1, .mark = CodeEditor::LineMark::None,
+      .end_text = "一段非常长的注解，长到在这个窄视口里完全放不下"}});
+  canvas.clear(white);
+  fx.editor.paint(fx.context, canvas);
+  // 放不下 ⇒ 那一带**与不放注解时一致**（什么都没画）。
+  ST_CHECK_EQ(region_hash(canvas, 2.0f, 22.0f, 60.0f, 138.0f), plain);
 }
