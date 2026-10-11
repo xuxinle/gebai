@@ -410,6 +410,18 @@ enum class WriteOp : std::uint8_t {
   Continue,       ///< `git <op> --continue`
   Skip,           ///< `git <op> --skip`
   Abort,          ///< `git <op> --abort`
+  /// **部分暂存**：`git apply --cached -`（补丁走 **stdin**）。
+  ///
+  /// 为何单独一个 op 而不是复用 Stage：补丁不能走 argv——
+  /// ① 它可能有几十 KB（超出命令行长度限制）；
+  /// ② 路径以 `-` 开头时会被当成选项。
+  /// 所以这一项构造的是「到 `--` 为止的命令」，补丁本体由 `run_write` 从 stdin 喂。
+  StagePatch,
+  /// **部分取消暂存**：`git apply --cached --reverse -`（同样走 stdin）。
+  ///
+  /// 它删的是**暂存区**的改动（不碰工作区），所以危险度是 `None`——
+  /// 取消暂存随时可以再暂存回去。
+  UnstagePatch,
 };
 
 /// 一次写操作的意图（参数全在这里；空参数按各 op 的默认语义处理）。
@@ -424,6 +436,11 @@ struct WriteIntent {
   bool allow_empty{false};   ///< 允许空提交
   bool hard{false};          ///< `git branch -D` / `git tag -d` 之外的强制位
   bool annotated{false};     ///< 建标签时用注解标签
+  /// `StagePatch`/`UnstagePatch` 的**补丁本体**（走 stdin，见那两个 op 的说明）。
+  ///
+  /// 为何不放在 `path` 里或另加一个路径字段：它是**内容**而不是路径，
+  /// 且可能几十 KB——混进路径字段会让“这是文件还是补丁”在调用处看不出来。
+  std::string patch{};
 };
 
 /// 构造写操作的**命令行**（不含 `git` 本身，第一个元素是子命令）。

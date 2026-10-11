@@ -5326,7 +5326,18 @@ void load_active_text() {
                               label.empty() ? std::string("缺少必填项") : std::string(label)));
       return false;
     }
-        const std::string display = gbcode::to_display_line(*args);
+    // 部分暂存：补丁要先**落盘**再交给 `git apply`（写操作统一经终端命令通道，
+    // 那是一条命令字符串、喂不了 stdin）。落盘失败就**不执行**——
+    // 宁可不做，也不要让 git 去读一个不存在的补丁。
+    if (intent.op == gbcode::WriteOp::StagePatch ||
+        intent.op == gbcode::WriteOp::UnstagePatch) {
+      const std::string patch_path = st::fs::join(workspace_, ".git/st-stage.patch");
+      if (auto written = st::fs::write_text(patch_path, intent.patch); !written) {
+        status_.set("部分暂存失败：补丁写盘被拒（" + patch_path + "）");
+        return false;
+      }
+    }
+    const std::string display = gbcode::to_display_line(*args);
     (void)display;
     // 不可逆操作：**先把备份分支建好再动手**。备份失败就不执行
     //（宁可不做，也不要“做了但没退路”——备份的成本是一次 `branch`）。

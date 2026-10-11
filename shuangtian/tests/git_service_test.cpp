@@ -707,6 +707,43 @@ ST_TEST(git_service_write_args_builds_commands) {
   ST_CHECK(!gbcode::write_args({.op = WriteOp::DeleteBranch, .name = ""}).has_value());
 }
 
+ST_TEST(git_service_partial_stage_intents) {
+  // 部分暂存（B11）：补丁走 `.git/st-stage.patch` 文件，命令里只出现**固定路径**
+  // ——不能把补丁本体拼进命令行（它可能几十 KB，且 `-` 开头的路径会被当选项）。
+  using gbcode::Danger;
+  using gbcode::WriteIntent;
+  using gbcode::WriteOp;
+  const auto line = [](const WriteIntent& intent) {
+    const auto args = gbcode::write_args(intent);
+    return args.has_value() ? gbcode::to_display_line(*args) : std::string("<nullopt>");
+  };
+
+  const std::string patch = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n";
+  ST_CHECK_EQ(line({.op = WriteOp::StagePatch, .patch = patch}),
+              std::string("git apply --cached --whitespace=nowarn .git/st-stage.patch"));
+  // 取消暂存 = 同一个补丁反过来用（`--reverse`）。
+  ST_CHECK_EQ(line({.op = WriteOp::UnstagePatch, .patch = patch}),
+              std::string("git apply --cached --reverse --whitespace=nowarn .git/st-stage.patch"));
+
+  // 补丁本体**不得**出现在命令行里（它是内容不是路径；混进来会撞命令行长度上限）。
+  const auto args = gbcode::write_args({.op = WriteOp::StagePatch, .patch = patch});
+  ST_REQUIRE(args.has_value());
+  for (const auto& argument : *args) {
+    ST_CHECK(argument.find("diff --git") == std::string::npos);
+  }
+
+  // 空补丁必须 **nullopt**：空补丁会让 git 报一个与用户意图无关的错。
+  ST_CHECK(!gbcode::write_args({.op = WriteOp::StagePatch, .patch = ""}).has_value());
+  ST_CHECK(!gbcode::write_args({.op = WriteOp::UnstagePatch, .patch = ""}).has_value());
+
+  // 危险度：部分暂存**只动暂存区**，随时可以反向操作回去 ⇒ `None`（不弹确认、不建备份）。
+  // 而「逐块放弃」是对**工作区**的不可逆操作 ⇒ `Backup`。这条区分是刻意的：
+  // 把安全操作也弹确认会让人对确认框麻木，从而在真正危险的那次也随手点过。
+  ST_CHECK(gbcode::danger_of({.op = WriteOp::StagePatch, .patch = patch}) == Danger::None);
+  ST_CHECK(gbcode::danger_of({.op = WriteOp::UnstagePatch, .patch = patch}) == Danger::None);
+  ST_CHECK(!gbcode::needs_backup({.op = WriteOp::StagePatch, .patch = patch}));
+}
+
 ST_TEST(git_service_write_danger_and_backup_names) {
   using gbcode::Danger;
   using gbcode::WriteIntent;
