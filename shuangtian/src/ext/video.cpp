@@ -66,11 +66,17 @@ struct ProbeCache {
       // `Duration: 00:00:05.28, start: …` → 毫秒。
       const std::size_t comma = value.find(',');
       const std::string time = value.substr(0, comma);
-      std::int64_t hours = 0;
-      std::int64_t minutes = 0;
+      // `std::sscanf` 的整数转换说明符与**平台上的类型名**绑定，不认 `std::int64_t`：
+      // LP64（Linux/macOS）下 `int64_t` 是 `long`、LLP64（Windows）下是 `long long`，
+      // 而 `%lld` 只接受后者——差一个字就是 `-Wformat` 警告，配 `-Werror` 直接构建失败
+      // （实测：Windows 自举只警告，WSL 上同一份代码刷屏）。故用 `long long` 承接后显式转换。
+      long long hours = 0;
+      long long minutes = 0;
       double seconds = 0.0;
       if (std::sscanf(time.c_str(), "%lld:%lld:%lf", &hours, &minutes, &seconds) == 3) {
-        info.duration_ms = (hours * 3600 + minutes * 60) * 1000 +
+        info.duration_ms = (static_cast<std::int64_t>(hours) * 3600 +
+                            static_cast<std::int64_t>(minutes) * 60) *
+                               1000 +
                            static_cast<std::int64_t>(seconds * 1000.0);
       }
     } else if (key.find("Stream #") != std::string::npos) {
