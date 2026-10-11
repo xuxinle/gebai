@@ -1,5 +1,7 @@
 #include "st/text/diff.hpp"
 
+#include "diff_internal.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <format>
@@ -39,58 +41,14 @@ struct TextLines {
   return out;
 }
 
-/// 差异操作（LCS 回溯的产物）。
-enum class Op : std::uint8_t { Equal, Delete, Insert };
-
-struct OpItem {
-  Op op{Op::Equal};
-  std::size_t old_index{0};
-  std::size_t new_index{0};
-};
-
-/// LCS 回溯：把两段行序列变成「相等 / 删除 / 插入」的操作序列。
-///
-/// 贪心策略（相等则取、否则取 LCS 值大的那一侧）保证结果**稳定且确定**：
-/// 同一对输入永远给同一份差异，不随容器实现或遍历顺序变化——
-/// 这是「并列视图与导出的补丁必须一致」的前提。
-[[nodiscard]] auto backtrack(const std::vector<std::string_view>& old_lines,
-                             const std::vector<std::string_view>& new_lines) -> std::vector<OpItem> {
-  const std::size_t n = old_lines.size();
-  const std::size_t m = new_lines.size();
-  std::vector<OpItem> ops;
-  ops.reserve(n + m);
-  const std::size_t cols = m + 1;
-  std::vector<std::uint32_t> dp((n + 1) * cols, 0);
-  const auto cell = [&dp, cols](std::size_t i, std::size_t j) -> std::uint32_t& {
-    return dp[i * cols + j];
-  };
-  for (std::size_t i = n; i-- > 0;) {
-    for (std::size_t j = m; j-- > 0;) {
-      if (old_lines[i] == new_lines[j]) {
-        cell(i, j) = cell(i + 1, j + 1) + 1;
-      } else {
-        cell(i, j) = std::max(cell(i + 1, j), cell(i, j + 1));
-      }
-    }
-  }
-  std::size_t i = 0;
-  std::size_t j = 0;
-  while (i < n && j < m) {
-    if (old_lines[i] == new_lines[j]) {
-      ops.push_back(OpItem{.op = Op::Equal, .old_index = i, .new_index = j});
-      ++i;
-      ++j;
-    } else if (cell(i + 1, j) >= cell(i, j + 1)) {
-      ops.push_back(OpItem{.op = Op::Delete, .old_index = i, .new_index = j});
-      ++i;
-    } else {
-      ops.push_back(OpItem{.op = Op::Insert, .old_index = i, .new_index = j});
-      ++j;
-    }
-  }
-  while (i < n) ops.push_back(OpItem{.op = Op::Delete, .old_index = i++, .new_index = j});
-  while (j < m) ops.push_back(OpItem{.op = Op::Insert, .old_index = i, .new_index = j++});
-  return ops;
+// LCS 的 `LcsOp`/`lcs_backtrack` 已提到 `diff_internal.hpp`（`merge.cpp` 要用同一套）。
+// 本文件里继续用短名字：改动最小，且"同一套比较"这件事由那个头保证。
+using Op = detail::LcsOp;
+using OpItem = detail::LcsOpItem;
+[[nodiscard]] auto backtrack(const std::vector<std::string_view>& old_side,
+                             const std::vector<std::string_view>& new_side)
+    -> std::vector<OpItem> {
+  return detail::lcs_backtrack(old_side, new_side);
 }
 
 /// 给「本侧最后一行且本侧无末尾换行」的行打上标记。
