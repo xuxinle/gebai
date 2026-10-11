@@ -1500,6 +1500,13 @@ result["nodes"] = static_cast<std::uint64_t>(metrics.nodes);
   result["painted_elements"] = static_cast<std::uint64_t>(host.root().painted_elements());
   // 增量重绘的可观测性：上一帧是否走局部路径、重绘区域多大（AI/性能回归都用得上）。
   result["partial_frame"] = host.root().last_frame_partial();
+  // 悬停提示的**计时诊断**：延时到底有没有生效只能看这两个数——
+  // “推进了几次、每次多少 ms”直接回答“等够没有”，而“气泡何时出现”是间接观测量
+  //（会被帧率、鼠标事件间隔混在一起）。排查提示不弹/弹太快时先看这里。
+  result["hint_update_calls"] =
+      static_cast<std::uint64_t>(host.root().hint_update_calls());
+  result["hint_last_delta_ms"] = host.root().hint_last_delta_ms();
+  result["hint_elapsed_ms"] = host.root().hint_elapsed_ms();
   {
 const math::IntRect painted = host.root().dirty_rect();
 Json rect = Json::object();

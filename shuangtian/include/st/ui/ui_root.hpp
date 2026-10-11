@@ -150,6 +150,22 @@ class UiRoot : public Element::HostFocus {
   [[nodiscard]] auto focused() -> Element*;
   void focus_next(bool backwards = false);
 
+  /// 悬停提示（气泡）的当前状态——自动化/测试的**可断言面**。
+  [[nodiscard]] auto hint_text() const -> std::string { return hint_text_cache_; }
+  [[nodiscard]] auto hint_visible() const noexcept -> bool { return hint_visible_; }
+  /// 悬停延时（毫秒；0 = 立刻弹）。默认 450ms——与系统惯例同量级：
+  /// 太短会在“鼠标扫过一排按钮”时闪出一堆气泡，太长又让人以为没提示。
+  /// 实例级覆盖（测试用小延时；应用可以按平台习惯调）。
+  void set_hint_delay_ms(int delay_ms) { hint_delay_ms_ = std::max(0, delay_ms); }
+  /// 提示计时的推进次数与最后一次 delta（**诊断面**：
+  /// “延时到底有没有生效”只能看这两个数——它们直接回答
+  /// “推进了几次、每次多少毫秒”，而“气泡什么时候出现”是间接观测量）。
+  [[nodiscard]] auto hint_update_calls() const noexcept -> std::uint64_t;
+  [[nodiscard]] auto hint_last_delta_ms() const noexcept -> double;
+  /// 当前已累计的悬停毫秒数（诊断面：与延时对比即知“等够没有”）。
+  [[nodiscard]] auto hint_elapsed_ms() const noexcept -> double { return hint_elapsed_ms_; }
+  [[nodiscard]] auto hint_delay_ms() const noexcept -> int { return hint_delay_ms_; }
+
   /// 当前**焦点环是否应该画出来**（键盘导航语义）。
   ///
   /// 为何要区分“有焦点”与“该画环”：鼠标按下可聚焦元素**也会给焦点**
@@ -303,6 +319,32 @@ class UiRoot : public Element::HostFocus {
   const TextPort* text_port_{nullptr};
   math::Size viewport_{1280.0f, 720.0f};
   Element* focused_{nullptr};
+  /// 共享悬停提示气泡（**只有一个**：悬停的对象每次至多一个，
+  /// 每个元素自建气泡会让几百个图标按钮带几百个隐藏子元素）。
+  /// 所有权在 `overlays_`（经 `add_overlay`）；这里只留**裸指针**观察。
+  ///
+  /// 为何不留 `unique_ptr` 成员：“插进叠加层就交出了所有权”，留一个
+  /// `unique_ptr` 就会变成**双重持有**（析构两次）。裸指针 + `prune` 校验
+  /// 与 `focused_`/`hovered_` 同一套契约（都是“树上的观察者”）。
+  /// 类型用基类指针：本头文件不必知道 `Tooltip` 是谁（少一个包含依赖），
+  /// 而它只承担“显示/隐藏、给文本与目标矩形”这几个动作。
+  Element* hint_bubble_raw_{nullptr};
+  Element* hint_target_{nullptr};       ///< 当前悬停的、带提示的元素
+  std::string hint_text_cache_{};       ///< 当前气泡文本（可断言面）
+  double hint_elapsed_ms_{0.0};         ///< 悬停已持续多久（与延时比）
+  bool hint_visible_{false};
+  int hint_delay_ms_{450};
+  /// 上一次推进提示时看到的 `time_seconds_`（算帧间隔；不引入新时钟）。
+  double hint_time_seconds_{0.0};
+  /// 悬停刚发生、下一帧**先立基准再计时**（见 `set_hint_target`）。
+  bool hint_base_pending_{false};
+
+  /// 悬停对象变了：重开计时（没延时就直接弹）。
+  void set_hint_target(Element* target);
+  /// 推进提示计时（每帧/每次事件调用）；到点就插气泡并摆位。
+  void update_hint(double delta_ms);
+  /// 收起提示（移开/点击/按键/切页都调）。
+  void hide_hint();
   /// 焦点环是否可见（**默认真**：没有过任何鼠标交互时按“该画”算）。
   ///
   /// 为何默认真：这与浏览器 `:focus-visible` 的启发式一致——**程序化聚焦**

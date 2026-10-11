@@ -9,8 +9,17 @@
 
 #include "st/core/log.hpp"
 #include "st/core/print.hpp"
+#include "st/ui/components/feedback.hpp"   // Tooltip（共享悬停提示气泡）
 
 namespace st::ui {
+
+// 提示计时的**诊断计数**（文件作用域：只为“延时有没有生效”提供可读证据，
+// 不参与任何业务逻辑；量级是进程内两个标量）。
+static std::uint64_t g_hint_update_calls = 0;
+static double g_hint_last_delta = -1.0;
+
+auto UiRoot::hint_update_calls() const noexcept -> std::uint64_t { return g_hint_update_calls; }
+auto UiRoot::hint_last_delta_ms() const noexcept -> double { return g_hint_last_delta; }
 
 UiRoot::UiRoot() : theme_(Theme::light()) {}
 
@@ -169,6 +178,12 @@ void UiRoot::layout_subtree(Element& element, math::Rect rect) {
 /// 换来的是"淡入真的是淡入"而不是卡在第一格。
 void UiRoot::collect_animation_requests() {
   animation_pending_ = false;
+  // **悬停提示在计时中 → 必须要下一帧**。
+  //
+  // 为何必须在这里：提示是“悬停满 N 毫秒才弹”，而主循环在静止时不开帧
+  //（`animation_pending_` 为假就等事件）。不在这里报“还要一帧”，计时就永远
+  // 停在第一帧——现象是“鼠标停半天，提示怎么都不出现”（实测）。
+  if (hint_target_ != nullptr && !hint_visible_) animation_pending_ = true;
   const auto walk = [this](auto&& self, Element& element) -> void {
     if (element.animation_requested()) {
       animation_pending_ = true;
@@ -349,6 +364,8 @@ auto UiRoot::dispatch_to(Element& element, Event& event) -> bool {
 void UiRoot::update_hover(Element* target) {
   if (hovered_ == target) return;
   prune_stale_pointers();  // `hovered_` 可能已悬垂（子树被重建）
+  // 悬停对象变了 → 提示重新计时（见 `update_hint`）。
+  set_hint_target(target);
   const RenderContext context = render_context();
   Element* const previous = hovered_;   // 旧目标：尾部要给它标脏（见那里的说明）
   if (hovered_ != nullptr) {
@@ -379,6 +396,112 @@ void UiRoot::update_hover(Element* target) {
   if (target != nullptr) target->mark_dirty();
   ++version_;
   (void)context;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 悬停提示（共享气泡）
+// ════════════════════════════════════════════════════════════════════════════
+//
+// 设计要点（为何这样做）：
+//
+// · **一个共享气泡**，而不是每个元素一个：悬停的对象每次至多一个，而界面里有
+//   几百个图标按钮。每个元素自建一个 `Tooltip` 子元素 = 几百个隐藏元素参与
+//   测量/遍历/对账（内存与帧时间都白付）。共享气泡只多一个元素，且只在需要时
+//   插进叠加层。
+// · **延时是必需的**（默认 450ms）：“鼠标扫过一排按钮”时立刻弹会闪出一串气泡——
+//   那是干扰而不是提示。
+// · **提示挂在叠加层**：它是“浮在最上”的东西，挂进内容树会被父容器的裁剪/滚动
+//   切掉（实测：侧栏里的气泡被裁到只剩半行）。
+// · **属于哪个元素**：从悬停元素沿父链向上找第一个 `hint()` 非空的——这样
+//   点侧栏一行、点行里的图标、点行里的文本，三者得到同一个提示（与 Web 的
+//   `title` 冒泡语义一致）；否则调用方得在每一层都写一遍。
+
+void UiRoot::set_hint_target(Element* target) {
+  Element* owner = nullptr;
+  for (Element* node = target; node != nullptr; node = node->parent()) {
+    if (!node->hint().empty()) {
+      owner = node;
+      break;
+    }
+  }
+  if (owner == hint_target_) return;
+  hide_hint();   // 新目标先收掉上一个的气泡（否则会挂在错误的位置上）
+  hint_target_ = owner;
+  hint_elapsed_ms_ = 0.0;
+  // 基准**不在这里立**，而是交给第一次 `update_hint`（`hint_base_pending_`）。
+  //
+  // 本函数跑在**事件分发**期，而 `time_seconds_` 是上一帧帧首写入的
+  //——此刻读到的是**旧值**。拿它当基准的话，下一帧的 delta 就是“从上一个帧首到现在”，
+  // 鼠标在空白处停了一会儿再移上按钮时这个值可以很大（实测 **816ms**），
+  // 450ms 的延时被整帧跳过（现象：“一悬停就弹”）。
+  hint_base_pending_ = true;
+}
+
+void UiRoot::update_hint(double delta_ms) {
+  if (hint_target_ == nullptr) {
+    return;
+  }
+  ++g_hint_update_calls;
+  g_hint_last_delta = delta_ms;
+  // **第一次推进只立基准**（见 `set_hint_target` 的说明）：
+  // 悬停刚发生的那一帧不知道“已经停了多久”，从这一帧起才算计时。
+  if (hint_base_pending_) {
+    hint_base_pending_ = false;
+    hint_time_seconds_ = time_seconds_;
+    return;
+  }
+  prune_stale_pointers();
+  if (hint_target_ == nullptr) {
+    hint_target_ = nullptr;
+    hide_hint();
+    return;
+  }
+  if (!hint_visible_) {
+    hint_elapsed_ms_ += delta_ms;
+    if (hint_elapsed_ms_ < static_cast<double>(hint_delay_ms_)) return;
+  }
+  const std::string& text = hint_target_->hint();
+  if (text.empty()) {
+    hide_hint();
+    return;
+  }
+  if (hint_bubble_raw_ == nullptr) {
+    auto bubble = std::make_unique<Tooltip>();
+    bubble->set_id("hint-bubble");
+    bubble->set_focusable(false);   // 只看的：不参与 Tab 焦点环
+    hint_bubble_raw_ = bubble.get();
+    add_overlay(std::move(bubble), OverlayLayout::Stack);
+  }
+  // ⚠ **显示时要让元素真的可见**（与 `hide_hint` 里的 `set_visible(false)` 对）：
+  // `Tooltip` 自己的命中测试看 `active_`，而控制通道 `find`/语义树看 `visible()`
+  //——两者必须一起翻转，否则“弹着”与“收着”在自动化眼里没区别。
+  hint_bubble_raw_->set_visible(true);
+  Tooltip* bubble = dynamic_cast<Tooltip*>(hint_bubble_raw_);
+  if (bubble == nullptr) return;
+  bubble->set_text(text);
+  bubble->set_target_rect(hint_target_->bounds());
+  bubble->set_active(true);
+  hint_text_cache_ = text;
+  if (!hint_visible_) {
+    hint_visible_ = true;
+    mark_dirty_all();
+  }
+}
+
+void UiRoot::hide_hint() {
+  hint_elapsed_ms_ = 0.0;
+  if (!hint_visible_) return;
+  hint_visible_ = false;
+  hint_text_cache_.clear();
+  if (hint_bubble_raw_ != nullptr) {
+    if (auto* bubble = dynamic_cast<Tooltip*>(hint_bubble_raw_); bubble != nullptr) {
+      bubble->set_active(false);
+    }
+    // **也置不可见**：只清 `active_` 的话，气泡在树上依旧 `visible`，
+    // `find #hint-bubble` 永远命中——“收没收起”变得不可断言。
+    hint_bubble_raw_->set_visible(false);
+  }
+  mark_dirty_all();
 }
 
 auto UiRoot::dispatch_key_into(Element* root, Event& event) -> bool {
@@ -435,6 +558,10 @@ auto UiRoot::dispatch(Event& event) -> bool {
     ~DispatchGuard() { flag = false; }
   } guard{dispatching_};
   layout();
+  // 任何输入都先把提示收起来（见 `update_hint`）：
+  // 鼠标动/点击/按键之后还挂着上次的提示，是“黏在屏幕上”的感觉。
+  // 若这个事件又是“悬停在带提示的元素上”，下一帧的推进会把计时重新拉起。
+  hide_hint();
   bool handled = false;
 
   switch (event.kind) {
@@ -640,7 +767,11 @@ auto UiRoot::query(const Selector& selector, std::size_t limit) -> std::vector<E
   return matches;
 }
 
-void UiRoot::prune_stale_pointers() {  if (focused_ == nullptr && hovered_ == nullptr && pressed_ == nullptr) return;
+void UiRoot::prune_stale_pointers() {
+  if (focused_ == nullptr && hovered_ == nullptr && pressed_ == nullptr &&
+      hint_target_ == nullptr && hint_bubble_raw_ == nullptr) {
+    return;
+  }
   // 只做指针相等比较：候选指针可能已指向销毁的元素，**绝不能解引用**
   const auto on_tree = [this](const Element* candidate) -> bool {
     if (candidate == nullptr) return false;
@@ -660,6 +791,15 @@ void UiRoot::prune_stale_pointers() {  if (focused_ == nullptr && hovered_ == nu
   if (!on_tree(focused_)) focused_ = nullptr;
   if (!on_tree(hovered_)) hovered_ = nullptr;
   if (!on_tree(pressed_)) pressed_ = nullptr;
+  // 提示的两个观察者：目标（在内容树）与气泡（在叠加层——上面的 `on_tree`
+  // 也遍历 `overlays_`，所以同一条判据能用）。气泡被外部摘掉（`clear_overlays`）
+  // 之后不能继续用，否则下一帧 `set_active` 就是 use-after-free。
+  if (!on_tree(hint_target_)) {
+    hint_target_ = nullptr;
+    hint_elapsed_ms_ = 0.0;
+    hint_visible_ = false;
+  }
+  if (!on_tree(hint_bubble_raw_)) hint_bubble_raw_ = nullptr;
 }
 
 auto UiRoot::focused() -> Element* {
@@ -861,6 +1001,16 @@ void UiRoot::collect_tree_damage() {
 }
 
 auto UiRoot::paint_frame(raster::Surface& canvas) -> bool {
+  // 0) 推进悬停提示的计时（提示是“延后出现”的，跟 `context.time_seconds` 同源；
+  //    没有提示在计时时这件事是空操作）。放在损坏区收集**之前**：
+  //    提示刚弹出/刚收起都要进本帧的损坏区，否则要等下一帧才看得见。
+  {
+    const double previous = hint_time_seconds_;
+    hint_time_seconds_ = time_seconds_;
+    if (hint_target_ != nullptr) {
+      update_hint(std::max(0.0, (time_seconds_ - previous) * 1000.0));
+    }
+  }
   // 1) 收集元素上报的损坏区（上一帧之后到现在的所有变更）。
   collect_tree_damage();
   // 2) 必要时重排；真跑了重排 → 保守整帧（见 `layout` 尾部说明）。

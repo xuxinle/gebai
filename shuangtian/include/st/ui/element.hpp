@@ -354,6 +354,18 @@ class Element {
   void set_style(Style style) { style_ = std::move(style); }
   [[nodiscard]] auto visible() const noexcept -> bool { return visible_; }
   void set_visible(bool visible) noexcept { visible_ = visible; }
+
+  /// **悬停提示**（提示气泡文本；空串 = 不提示）。
+  ///
+  /// 为何做成一等属性而不是“自己 new 个 Tooltip”：提示是**交互平台能力**
+  ///——什么时候弹（悬停多久）、弹在哪（上方/下方翻转）、什么时候收（移开/按下）
+  /// 全是共性，与具体控件无关。做成一等属性后调用方只写一句 `set_hint("刷新")`。
+  ///
+  /// 实现上**不是**每个元素一个气泡：`UiRoot` 只有**一个共享气泡**，悬停时把它
+  /// 按目标矩形摆好、逐帧推进延时。若每个元素自建气泡，几百个图标按钮就是几百个
+  /// 隐藏子元素（内存/遍历/对账都会疼）。
+  void set_hint(std::string hint) { hint_ = std::move(hint); }
+  [[nodiscard]] auto hint() const noexcept -> const std::string& { return hint_; }
   [[nodiscard]] auto enabled() const noexcept -> bool { return enabled_; }
   void set_enabled(bool enabled) noexcept { enabled_ = enabled; }
   [[nodiscard]] auto focusable() const noexcept -> bool { return focusable_; }
@@ -748,6 +760,8 @@ class Element {
   math::Size measured_{};
   ElementId id_{};
   std::string key_{};
+  /// 悬停提示文本（空 = 不提示；见 `set_hint`）。
+  std::string hint_{};
   Element* parent_{nullptr};
   std::vector<std::unique_ptr<Element>> children_{};
   bool visible_{true};

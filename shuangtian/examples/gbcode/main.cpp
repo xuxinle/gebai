@@ -1799,14 +1799,19 @@ struct CodeEditorPage : Component {
     struct Activity {
       const char* icon;
       const char* id;
+      const char* hint;
     };
-    static constexpr Activity kActivities[] = {{"folder", "explorer"}, {"search", "search"},
-                                               {"diff", "scm"}, {"play", "run"},
-                                               {"package", "extensions"},
-                                               {"symbol", "nav"},
+    // 活动栏的按钮**只**有图标：没有提示就是一个凭记忆图的图标墙（用户报过
+    // “按钮要有悬浮提示”）。`hint` 顺带把键位写进去——提示是“发现功能”的地方。
+    static constexpr Activity kActivities[] = {{"folder", "explorer", "资源管理器（Ctrl+Shift+E）"},
+                                               {"search", "search", "搜索（Ctrl+Shift+F）"},
+                                               {"diff", "scm", "变更（Ctrl+Shift+G）"},
+                                               {"play", "run", "运行"},
+                                               {"package", "extensions", "语言与扩展"},
+                                               {"symbol", "nav", "导航结果"},
                                                // 「比较」是**面向两端**的视图（与「变更」不同：
                                                // 后者只看当前工作区），故单独一个入口。
-                                               {"arrow-left", "compare"}};
+                                               {"arrow-left", "compare", "与…比较（任意两端）"}};
     const std::size_t current = activity_.value();
     // `surface = Alt`：与标题栏/状态栏**同色**——三者合起来是一圈“外壳”，
     // 色不一致会在拐角处露馅（见 `Element::Surface` 的说明）。
@@ -1824,6 +1829,7 @@ struct CodeEditorPage : Component {
           b.set_icon(kActivities[index].icon);
           b.set_variant(on ? Button::Variant::Soft : Button::Variant::Ghost);
           b.set_size(Button::Size::Small);
+          b.set_hint(kActivities[index].hint);
           b.on_click = [this, index] {
             // 点当前视图 = 收起侧栏（IDEA/VSCode 通行行为）；点别处 = 切视图并展开。
             if (activity_.value() == index && sidebar_visible_.value()) {
@@ -1851,6 +1857,7 @@ struct CodeEditorPage : Component {
       (void)custom<Button>(c, [this](Button& b) {
         b.set_id("activity-git");
         b.set_icon("git-branch");
+        b.set_hint("Git 工具窗（分支 / 日志 / 提交内容）");
         // 激活 = 下半可见 && 当前槽是 Git（与终端按钮同一推法）。
         const bool on = bottom_visible_.value() && bottom_tab_.value() == 1;
         b.set_variant(on ? Button::Variant::Soft : Button::Variant::Ghost);
@@ -1860,6 +1867,7 @@ struct CodeEditorPage : Component {
       (void)custom<Button>(c, [this](Button& b) {
         b.set_id("activity-terminal");
         b.set_icon("terminal");
+        b.set_hint("终端（Ctrl+`）");
         // 激活 = 下半可见 && 当前槽是终端（状态从真实可见性推，不是另存标记）。
         const bool on = bottom_visible_.value() && bottom_tab_.value() == 0;
         b.set_variant(on ? Button::Variant::Soft : Button::Variant::Ghost);
@@ -1999,9 +2007,10 @@ struct CodeEditorPage : Component {
         b.set_icon(icon);
         b.set_variant(Button::Variant::Ghost);
         b.set_size(Button::Size::Small);
+        // 图标钮必须带提示：图标不自解释，而 `tip` 本来就在这里（以前被 `(void)tip`扔掉）。
+        b.set_hint(tip);
         b.on_click = on_click;
       }, {.width = 24.0f, .height = 24.0f, .key = id});
-      (void)tip;
     };
     switch (activity_.value()) {
       case 0:
@@ -2467,6 +2476,9 @@ void replace_in_workspace(std::string_view replacement) {
       b.set_icon(icon_name);
       b.set_variant(Button::Variant::Ghost);
       b.set_size(Button::Size::Small);
+      // 图标按钮的**提示**：图标本身不自解释，而 `tip` 参数本来就写着目的
+      //（以前它被丢弃，于是图标按钮只有视觉没有任何文字线索）。
+      b.set_hint(tip);
       if (on_click) b.on_click = [on_click]() { on_click(); };
     }, {.width = 26.0f, .height = 22.0f, .key = id});
   }
@@ -3977,25 +3989,26 @@ b.set_label(std::format("{}  +{} −{}", path, plus, minus));
         bottom_tab_.set(1);
         bottom_visible_.set(true);
         git_log_wanted_ = true;
-      });
+      }, "当前分支 — 点一下打开 Git 工具窗");
       status_item(c, "status-errors", "error",
-                  [this] { return std::to_string(error_count()); }, [this] { show_problems(false); });
+                  [this] { return std::to_string(error_count()); }, [this] { show_problems(false); },
+                  "错误数 — 点一下跳到第一处");
       status_item(c, "status-warnings", "warning",
                   [this] { return std::to_string(warning_count()); },
-                  [this] { show_problems(true); });
+                  [this] { show_problems(true); }, "警告数 — 点一下跳到第一处");
       (void)spacer(c);   // 弹性空隙：右侧信息组贴右缘（同标题栏）
       (void)text(c, [this] { return cursor_text_.value(); }, {.id = "cursor-label"});
       (void)text(c, [this] { return selection_text_.value(); }, {.id = "selection-label"});
       // 缩进 / 编码：点一下就地切换（缩进 2↔4↔8；编码在演示里是只读事实）。
       status_item(c, "status-indent", "", [this] { return std::format("空格: {}", tab_width_); },
-                  [this] { cycle_tab_width(); });
+                  [this] { cycle_tab_width(); }, "缩进宽度 — 点一下切换（2 / 4 / 8）");
       (void)text(c, [] { return std::string("UTF-8"); }, {.id = "status-encoding"});
       // 语言：点一下切到「扩展」视图（那里列出全部可选语言）
       status_item(c, "language-label", "", [this] { return active_language(); }, [this] {
         activity_.set(4);
         sidebar_visible_.set(true);
         mark_sidebar_visited(4);
-      });
+      }, "当前语言 — 点一下打开语言列表");
       (void)text(c, [this] { return status_.value(); }, {.id = "status"});
       (void)button(c, theme_is_dark() ? "亮色" : "暗色", [this] { toggle_theme(); },
                    {.id = "btn-theme"});
@@ -4003,15 +4016,20 @@ b.set_label(std::format("{}  +{} −{}", path, plus, minus));
   }
 
   /// 一个可点的状态栏项（图标 + 文本，点击即触发动作）。
+  ///
+  /// `hint` 说明“点一下会发生什么”——状态栏是“看一眼”的地方，那些计数/语言/缩进
+  /// 格子点下去之后去哪里并不显然（提示是走这一步前的唯一预告）。
   void status_item(Composer& c, const char* id, const char* icon,
-                   std::function<std::string()> content, std::function<void()> on_click) {
+                   std::function<std::string()> content, std::function<void()> on_click,
+                   std::string hint = {}) {
     (void)custom<Button>(c, [id, icon, content = std::move(content),
-                             on_click = std::move(on_click)](Button& b) {
+                             on_click = std::move(on_click), hint = std::move(hint)](Button& b) {
       b.set_id(id);
       b.set_icon(icon);
       b.set_label(content());
       b.set_variant(Button::Variant::Ghost);
       b.set_size(Button::Size::Small);
+      b.set_hint(hint);
       b.on_click = on_click;
     }, {.height = 22.0f, .key = id});
   }
