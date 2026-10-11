@@ -323,3 +323,93 @@ ST_TEST(diff_split_lines_semantics) {
   ST_CHECK(st::text::split_lines("").empty());
   ST_CHECK_EQ(st::text::split_lines("\n").size(), std::size_t{1});
 }
+
+// ————————————————————————————————————————————————————————————————————————————
+// 行内字符级差异（`diff_inline` / `refine_inline_diffs`）
+// ————————————————————————————————————————————————————————————————————————————
+
+ST_TEST(diff_inline_marks_only_the_changed_word) {
+  // 「改一个词」：改动区间必须**落在那个词里**，而不是盖满整行。
+  // 这是行内差异存在的全部理由——盖整行的话视图上跟纯行级没区别。
+  const auto [old_ranges, new_ranges] =
+      st::text::diff_inline("int count = 1;", "int total = 1;");
+  ST_REQUIRE(!old_ranges.empty());
+  ST_REQUIRE(!new_ranges.empty());
+  // ⚠ 区间**可能不止一段**（这里是两段）：`count` → `total` 之间有共同的 `t`/`o`，
+  // 字符级 LCS 会把它们认成「没变」，于是改动被切成几段。这是正确行为
+  //（VSCode / IDEA 同样如此）——硬要求“一段”会掩盖真实语义，
+  // 所以判据改成「所有区间都落在被改的那个词内（不碰 `int ` 与 ` = 1;`）」。
+  for (const auto& range : old_ranges) {
+    ST_CHECK(range.first >= 4 && range.second <= 9);
+  }
+  for (const auto& range : new_ranges) {
+    ST_CHECK(range.first >= 4 && range.second <= 9);
+  }
+  // 且改动确实覆盖了那个词的关键部分（不是空手而归）。
+  ST_CHECK_EQ(old_ranges.front().first, std::size_t{4});
+}
+
+ST_TEST(diff_inline_ranges_are_byte_offsets_for_cjk) {
+  // 中文：区间必须是**字节偏移**且**不切碎汉字**。
+  // 字节级 LCS 会把一个汉字切成 2+1，高亮看起来就“偏了”——本用例正是钉这个。
+  const auto [old_ranges, new_ranges] = st::text::diff_inline("你好世界", "你好霜天");
+  ST_REQUIRE(old_ranges.size() == 1);
+  ST_REQUIRE(new_ranges.size() == 1);
+  // 「世界」在 UTF-8 里各 3 字节：从第 6 字节开始、到第 12 字节结束。
+  ST_CHECK_EQ(old_ranges[0].first, std::size_t{6});
+  ST_CHECK_EQ(old_ranges[0].second, std::size_t{12});
+  ST_CHECK_EQ(new_ranges[0].first, std::size_t{6});
+  ST_CHECK_EQ(new_ranges[0].second, std::size_t{12});
+  // 区间边界必须落在字符边界上（不与任何码位相交）：
+  // 判据是“按这个偏移切片，切出来的仍是合法 UTF-8 的开头”。
+  const std::string_view text = "你好世界";
+  for (const auto& range : old_ranges) {
+    const auto lead = static_cast<unsigned char>(text[range.first]);
+    ST_CHECK((lead & 0xC0U) != 0x80U);   // 不是续字节 = 落在码位开头
+    const auto tail = static_cast<unsigned char>(text[range.second]);
+    ST_CHECK((tail & 0xC0U) != 0x80U);
+  }
+}
+
+ST_TEST(diff_inline_equal_lines_have_no_ranges) {
+  const auto [old_ranges, new_ranges] = st::text::diff_inline("same();", "same();");
+  ST_CHECK(old_ranges.empty());
+  ST_CHECK(new_ranges.empty());
+}
+
+ST_TEST(diff_inline_merges_adjacent_edits) {
+  // 连续改动应归并成**一段**而不是每字符一段：逐字符填色不但慢，
+  // 还会因四舍五入出现「缝」（实测观感就是“断成一截一截”）。
+  const auto [old_ranges, new_ranges] = st::text::diff_inline("abcdef", "abXYef");
+  ST_REQUIRE(old_ranges.size() == 1);
+  ST_REQUIRE(new_ranges.size() == 1);
+  ST_CHECK_EQ(old_ranges[0].first, std::size_t{2});
+  ST_CHECK_EQ(old_ranges[0].second, std::size_t{4});
+  ST_CHECK_EQ(new_ranges[0].first, std::size_t{2});
+  ST_CHECK_EQ(new_ranges[0].second, std::size_t{4});
+}
+
+ST_TEST(make_file_diff_fills_inline_ranges) {
+  // `make_file_diff` 默认就把行内区间算好（不用调用方额外记一次“精化”）。
+  const FileDiff file = st::text::make_file_diff("int count = 1;\n", "int total = 1;\n");
+  ST_REQUIRE(!file.hunks.empty());
+  bool saw_inline = false;
+  for (const auto& line : file.hunks.front().lines) {
+    if (!line.inline_old.empty() || !line.inline_new.empty()) saw_inline = true;
+  }
+  ST_CHECK(saw_inline);
+}
+
+ST_TEST(refine_inline_diffs_skips_unequal_run_sizes) {
+  // 两侧行数不等（这里是「纯新增一行」）时**不配对**：按顺序硬配会把
+  // 「新增了 1 行」误读成「某一行被改了」。
+  auto hunks = st::text::diff_hunks("a\nb\n", "a\nb\nc\n");
+  st::text::refine_inline_diffs(hunks);
+  bool any_inline = false;
+  for (const auto& hunk : hunks) {
+    for (const auto& line : hunk.lines) {
+      if (!line.inline_old.empty() || !line.inline_new.empty()) any_inline = true;
+    }
+  }
+  ST_CHECK(!any_inline);
+}

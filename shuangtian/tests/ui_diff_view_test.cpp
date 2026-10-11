@@ -315,3 +315,44 @@ ST_TEST(diff_view_summary_covers_rename_and_added) {
   ST_CHECK(summary.find("+3") != std::string::npos);
   ST_CHECK(summary.find("−1") != std::string::npos);
 }
+
+ST_TEST(diff_view_passes_inline_ranges_to_editors) {
+  // 行内字符级差异要**从数据走到视图**：`make_file_diff` 算出的 `inline_old`/`inline_new`
+  // 必须出现在两侧编辑器的行装饰上，否则「改一个词」在界面上仍是整行高亮
+  //（数据层算对了、界面层没接上，是这类功能最常见的“做完了却看不见”）。
+  Fixture fx;
+  // 只改一个词：`two` → `TWO`。
+  fx.view.set_texts(kOldText, kNewText);
+  fx.layout();
+  st::ui::CodeEditor* left = fx.view.left_editor();
+  st::ui::CodeEditor* right = fx.view.right_editor();
+  ST_REQUIRE(left != nullptr);
+  ST_REQUIRE(right != nullptr);
+
+  std::size_t old_inline = 0;
+  for (const auto& mark : left->line_decorations()) {
+    if (!mark.inline_ranges.empty()) ++old_inline;
+  }
+  std::size_t new_inline = 0;
+  for (const auto& mark : right->line_decorations()) {
+    if (!mark.inline_ranges.empty()) ++new_inline;
+  }
+  ST_CHECK(old_inline >= 1U);
+  ST_CHECK(new_inline >= 1U);
+
+  // 区间必须**在那一行的文本范围内**（越界说明坐标系错了——字节 vs 字符列混用
+  // 会算出超过行长度的偏移，而绘制时会被静默跳过，看不见但也不报错）。
+  const std::string left_text = left->text();
+  for (const auto& mark : left->line_decorations()) {
+    for (const auto& [from, to] : mark.inline_ranges) {
+      ST_CHECK(from < to);
+      ST_CHECK(to <= left_text.size() + 1U);
+    }
+  }
+  // 上下文行不该带行内区间（`two`/`TWO` 那一行才是改行）。
+  for (const auto& mark : left->line_decorations()) {
+    if (mark.mark == st::ui::CodeEditor::LineMark::None && mark.number <= 5U) {
+      ST_CHECK(mark.inline_ranges.empty());
+    }
+  }
+}

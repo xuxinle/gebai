@@ -138,13 +138,16 @@ void DiffView::rebuild() {
 }
 
 void DiffView::begin_row(Side& side, std::size_t number, CodeEditor::LineMark mark,
-                         std::string_view text, bool gutter_bar) {
+                         std::string_view text, bool gutter_bar,
+                         std::vector<std::pair<std::size_t, std::size_t>> inline_ranges) {
   CodeEditor::LineDecoration decoration;
   decoration.line = side.lines + 1;   // 装饰按**1 起**行号指定
   decoration.mark = mark;
   decoration.number = number;
   decoration.gutter_bar = gutter_bar;
-  side.marks.push_back(decoration);
+  // 行内改动区间（“这个字改了”）：数据来自 `DiffLine::inline_old`/`inline_new`。
+  decoration.inline_ranges = std::move(inline_ranges);
+  side.marks.push_back(std::move(decoration));
   // 行分隔符**按“已写过几行”补**，不是看 `text` 是否为空：
   // 第一行就是空行（右栏的分隔行就是这种）时，看 `text.empty()` 会把这一行整个吃掉
   //——右栏从此比左栏少一行，整体上移一行（实测截图）。
@@ -199,7 +202,8 @@ void DiffView::rebuild_side_by_side() {
           mark = CodeEditor::LineMark::None;   // 藏起来的行：不留填充底（它是“被去掉的”）
         }
         begin_row(old_side_, show ? line->old_line : 0, mark,
-                  show ? line->text : std::string_view{}, hidden);
+                  show ? line->text : std::string_view{}, hidden,
+                  show ? line->inline_old : std::vector<std::pair<std::size_t, std::size_t>>{});
       }
       // —— 右栏（新侧）——
       {
@@ -216,7 +220,8 @@ void DiffView::rebuild_side_by_side() {
           mark = CodeEditor::LineMark::None;
         }
         begin_row(new_side_, show ? line->new_line : 0, mark,
-                  show ? line->text : std::string_view{}, hidden);
+                  show ? line->text : std::string_view{}, hidden,
+                  show ? line->inline_new : std::vector<std::pair<std::size_t, std::size_t>>{});
       }
     }
   }
@@ -243,7 +248,8 @@ void DiffView::rebuild_unified() {
                                                  : (line.kind == text::DiffLineKind::Removed
                                                         ? CodeEditor::LineMark::Removed
                                                         : CodeEditor::LineMark::None);
-      begin_row(old_side_, number, mark, line.text, mark != CodeEditor::LineMark::None);
+      begin_row(old_side_, number, mark, line.text, mark != CodeEditor::LineMark::None,
+                is_added ? line.inline_new : line.inline_old);
     }
   }
 }

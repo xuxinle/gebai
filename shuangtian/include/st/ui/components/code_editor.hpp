@@ -319,6 +319,13 @@ class CodeEditor : public Element {
     /// 与文本表无关：它不参与光标/选区/换行计算，只在本行文本之后画一段灰字。
     /// 宽度不够时不画（而不是截断成半句话）——“`张三 2024-…`”截一半比不画更难看。
     std::string end_text{};
+
+    /// **行内高亮区间**（字节偏移 `[begin, end)`；与 `st::text::DiffLine::inline_old`
+    /// 同一套口径）。行内差异的“这个字改了”就靠它画。
+    ///
+    /// ⚠ 字节偏移而不是字符列：霜天的 `DiagnosticMark` 与 `selection()` 都是字节口径，
+    /// 混用两套坐标系是这类功能最容易错的地方（错一个字节，高亮就从字中间开始）。
+    std::vector<std::pair<std::size_t, std::size_t>> inline_ranges{};
   };
 
   /// 「不显示行号」的哨兵值（见 `LineDecoration::number`）。

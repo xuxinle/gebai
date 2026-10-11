@@ -1605,6 +1605,32 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
       }
     }
 
+    // **行内改动区间**（“这个字改了”）：画在字符**之下**、选择与查找之上。
+    //
+    // 为何在字符之下：底色要先铺好、再把字压上去（反过来会把字盖住）。
+    // 为何在选择之下：选择是“用户当前选了什么”，优先级高于“这行哪里改了”——
+    // 两层同时存在时用户要先看清自己的选区（与 VSCode 一致）。
+    if (decoration != nullptr && !decoration->inline_ranges.empty()) {
+      // 行内差异只存在于**改行**上：用该行的带色（增/删）而不是另开一个色，
+      // 这样“行改”与“字改”是同一色的两层强度，观感是一个整体。
+      math::Color ink{};
+      if (decoration->mark == LineMark::Added || decoration->mark == LineMark::Modified) {
+        ink = syntax.inserted;
+      } else if (decoration->mark == LineMark::Removed) {
+        ink = syntax.deleted;
+      } else {
+        ink = syntax.inserted;   // 无行级标记时（如宿主直接给行内区间）按“改动”色
+      }
+      for (const auto& [from, to] : decoration->inline_ranges) {
+        if (to <= from || to > (end - begin)) continue;   // 越界区间直接跳过（不画半截）
+        const float x0 = x_at(from);
+        const float x1 = x_at(to);
+        // 行盒高（不是墨迹高）：让底色连成一条，不然多段区间看着是“几个小方块”。
+        canvas.fill_rect(math::Rect{x0, row_top, std::max(x1 - x0, 1.0f), height},
+                         raster::Paint::solid(ink.with_alpha_f(0.32F)), 0.0f);
+      }
+    }
+
     // 选择底色（该行与选择区间的交集）
     if (sel_begin != sel_end) {
       const std::size_t slice_begin = std::max(sel_begin, begin);

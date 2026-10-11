@@ -85,3 +85,4 @@ ST_TEST(color_relative_luminance_is_ordered) {
   ST_CHECK(mid > black);
   ST_CHECK(mid < white);
 }
+

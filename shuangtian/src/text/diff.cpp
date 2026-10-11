@@ -108,6 +108,55 @@ void mark_no_newline(DiffHunk& hunk, std::size_t old_total, bool old_trailing,
   }
 }
 
+/// 把一行文本切成**码位级**的 `string_view` 序列（每个元素是一个 UTF-8 码位）。
+///
+/// 为何按码位而不是字节：字节级 LCS 会把一个汉字切碎，区间落到半个字符上，
+/// 编辑器的高亮就会错位（三字节的汉字被切成 2+1，看着就是“高亮偏了”）。
+/// 切出来的 `string_view` 仍然指向原串，所以后续能用首尾指针算出**字节偏移**
+/// （编辑器要的是字节偏移，不是码位下标）。
+[[nodiscard]] auto split_codepoints(std::string_view text)
+    -> std::vector<std::string_view> {
+  std::vector<std::string_view> out;
+  out.reserve(text.size());
+  std::size_t index = 0;
+  while (index < text.size()) {
+    const auto lead = static_cast<unsigned char>(text[index]);
+    std::size_t length = 1;
+    if ((lead & 0x80U) == 0) {
+      length = 1;
+    } else if ((lead & 0xE0U) == 0xC0U) {
+      length = 2;
+    } else if ((lead & 0xF0U) == 0xE0U) {
+      length = 3;
+    } else if ((lead & 0xF8U) == 0xF0U) {
+      length = 4;
+    }
+    // 畸形/截断的尾巴按单字节吃掉（不能让 `length` 越界把后面一起吞了）。
+    if (index + length > text.size()) length = 1;
+    out.push_back(text.substr(index, length));
+    index += length;
+  }
+  return out;
+}
+
+/// 把「连续的不相等」归并成区间（相邻/重叠的合一，零长的丢掉）。
+///
+/// 为何要归并：`backtrack` 给出的是一条条独立的 Delete/Insert 操作，而编辑器要的是
+/// 「哪几段被改了」——每个字符一个区间会让绘制时逐字符填色（慢且会出现缝隙）。
+[[nodiscard]] auto merge_ranges(std::vector<std::pair<std::size_t, std::size_t>> ranges)
+    -> std::vector<std::pair<std::size_t, std::size_t>> {
+  std::vector<std::pair<std::size_t, std::size_t>> out;
+  for (const auto& range : ranges) {
+    if (range.second <= range.first) continue;
+    if (!out.empty() && range.first <= out.back().second) {
+      out.back().second = std::max(out.back().second, range.second);
+    } else {
+      out.push_back(range);
+    }
+  }
+  return out;
+}
+
 }  // namespace
 
 auto split_lines(std::string_view text) -> std::vector<std::string_view> {
@@ -329,7 +378,81 @@ auto make_file_diff(std::string_view old_text, std::string_view new_text, std::s
   const auto [additions, deletions] = count_changes(out.hunks);
   out.additions = additions;
   out.deletions = deletions;
+  // 行内区间一并算好（默认就给）：它是“改了什么”的一部分，而不是可选项——
+  // 让调用方记得单独调一次「精化」迟早会漏（而漏了只能从“视图看着粗”看出来）。
+  refine_inline_diffs(out.hunks);
   return out;
+}
+
+auto diff_inline(std::string_view old_line, std::string_view new_line)
+    -> std::pair<std::vector<std::pair<std::size_t, std::size_t>>,
+                 std::vector<std::pair<std::size_t, std::size_t>>> {
+  // 规模上限：字符级是 O(n·m) 的 DP，两行各上千字符（长行 JSON/CSS）时会很贵，
+  // 而那种情况下字符级高亮本来也没什么信息量。超限就**返回空区间**（调用方退化为
+  // 整行高亮）——而不是静默给一个看着对、实际错的区间。
+  constexpr std::size_t kMaxInlineCells = 200'000;
+  const auto old_points = split_codepoints(old_line);
+  const auto new_points = split_codepoints(new_line);
+  if ((old_points.size() + 1) * (new_points.size() + 1) > kMaxInlineCells) return {};
+  if (old_points == new_points) return {};
+
+  const std::vector<OpItem> ops = backtrack(old_points, new_points);
+  // 区间用**字节偏移**表达（编辑器与霜天 DiagnosticMark 都是字节口径，
+  // 字符列 ↔ 字节的换算责任在调用方——保持同一套口径比在这里换一次更少出错）。
+  const auto base = old_line.data();
+  const auto new_base = new_line.data();
+  std::vector<std::pair<std::size_t, std::size_t>> old_ranges;
+  std::vector<std::pair<std::size_t, std::size_t>> new_ranges;
+  for (const OpItem& op : ops) {
+    if (op.op == Op::Equal) continue;
+    if (op.op == Op::Delete && op.old_index < old_points.size()) {
+      const std::size_t begin = static_cast<std::size_t>(old_points[op.old_index].data() - base);
+      old_ranges.emplace_back(begin, begin + old_points[op.old_index].size());
+    } else if (op.op == Op::Insert && op.new_index < new_points.size()) {
+      const std::size_t begin =
+          static_cast<std::size_t>(new_points[op.new_index].data() - new_base);
+      new_ranges.emplace_back(begin, begin + new_points[op.new_index].size());
+    }
+  }
+  return {merge_ranges(std::move(old_ranges)), merge_ranges(std::move(new_ranges))};
+}
+
+void refine_inline_diffs(std::vector<DiffHunk>& hunks) {
+  for (DiffHunk& hunk : hunks) {
+    // 在**同一个连续改动段**内配对：段 = 一段连续的非 Context 行
+    //（与 `build_rows` 的“改动段”同一口径，否则并列视图的两栏与行内区间会对不上）。
+    std::size_t index = 0;
+    while (index < hunk.lines.size()) {
+      if (hunk.lines[index].kind == DiffLineKind::Context) {
+        ++index;
+        continue;
+      }
+      const std::size_t run_begin = index;
+      while (index < hunk.lines.size() && hunk.lines[index].kind != DiffLineKind::Context) {
+        ++index;
+      }
+      std::vector<std::size_t> removed;
+      std::vector<std::size_t> added;
+      for (std::size_t k = run_begin; k < index; ++k) {
+        if (hunk.lines[k].kind == DiffLineKind::Removed) {
+          removed.push_back(k);
+        } else {
+          added.push_back(k);
+        }
+      }
+      // ⚠ 只在**等量**时逐对精化：两侧数量不等说明是“多了/少了若干行”，
+      // 按顺序硬配会把「新增 3 行」误读成「这 3 行都是别行的改动」。
+      if (removed.size() != added.size()) continue;
+      for (std::size_t k = 0; k < removed.size(); ++k) {
+        auto [old_ranges, new_ranges] =
+            diff_inline(hunk.lines[removed[k]].text, hunk.lines[added[k]].text);
+        hunk.lines[removed[k]].inline_old = std::move(old_ranges);
+        hunk.lines[removed[k]].inline_new = {};
+        hunk.lines[added[k]].inline_new = std::move(new_ranges);
+        hunk.lines[added[k]].inline_old = {};
+      }
+    }
+  }
 }
 
 }  // namespace st::text

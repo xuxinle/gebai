@@ -64,6 +64,17 @@ struct DiffLine {
   /// 这是「两个文件末尾换行不同」唯一能被表达出来的地方——纯行内容比较看不见它。
   bool no_newline{false};
 
+  /// **行内字符区间**（`[begin, end)`，字节偏移；空 = 无行内差异）。
+  ///
+  /// 为何要它：纯行级差异下「改一个词」表现为「整行删 + 整行加」，视图里看不出到
+  /// 底改了什么。有了它，编辑器能在行内再叠一层底色（VSCode/IDEA 的“字级高亮”）。
+  ///
+  /// 只对**配对后的**改行有意义（见 `pair_and_refine`）；`Context` 行恒为空。
+  /// 两侧各自算各自的区间：旧侧是“被改掉的那段”，新侧是“新写成的那段”，
+  /// 两者的长度与位置都不一致（这正是它需要两个字段而不是一个的原因）。
+  std::vector<std::pair<std::size_t, std::size_t>> inline_old{};
+  std::vector<std::pair<std::size_t, std::size_t>> inline_new{};
+
   /// 相等比较：`dsl::State<T>` 靠它判“要不要重组”（差异数据变没变）。
   auto operator==(const DiffLine& other) const -> bool = default;
 };
@@ -164,6 +175,30 @@ inline constexpr std::size_t kDefaultContext = 3;
 /// `hunk_index` 原样写进每行的 `hunk` 字段（调用方在整篇文档里串联多 hunk 时用）。
 [[nodiscard]] auto build_rows(const DiffHunk& hunk, std::size_t hunk_index)
     -> std::vector<DiffRow>;
+
+/// **行内字符级差异**：给定一对「旧行 / 新行」，算出各自被改动的区间。
+///
+/// 返回 `{old_ranges, new_ranges}`（字节偏移 `[begin, end)`，已排序、已合并相邻）。
+///
+/// 算法与行级差异**同一套 LCS**（只是元素从行变成了 UTF-16 码位）——不一致的算法会让
+/// “行级说没改、字符级说改了”这类矛盾出现。按码位而不是字节切：UTF-8 的字节级 LCS
+/// 会把一个汉字切碎，区间落到半个字符上，编辑器的高亮就会错位。
+///
+/// 规模上限与行级同姿态：超过 `kMaxInlineCells` 就**不做字符级**（返回空区间 = 退化为
+/// 整行高亮），而不是静默给一个看着对、实际错的区间。
+[[nodiscard]] auto diff_inline(std::string_view old_line, std::string_view new_line)
+    -> std::pair<std::vector<std::pair<std::size_t, std::size_t>>,
+                 std::vector<std::pair<std::size_t, std::size_t>>>;
+
+/// 把一段差异里**相邻的删除行与新增行配对**，并为每对填上行内区间（`inline_old`/`inline_new`）。
+///
+/// 为何需要“配对”：字符级差异只在“这两行是同一行的两个版本”时才有意义。git 的
+/// 排法是一块里**先全删、再全加**，所以配对规则是「同一 hunk 内第 i 对删/加行」；
+/// 两侧数量不等时，多出来的那些**不配对**（保持纯行级高亮）——按顺序硬配会把
+/// “新增了 3 行”误读成“这 3 行都是别行的改动”。
+///
+/// 原地修改传入的各 hunk（`DiffLine` 的区间字段）。
+void refine_inline_diffs(std::vector<DiffHunk>& hunks);
 
 /// 便捷：两段文本 → 一份单文件差异（含增删统计与末尾换行标记）。
 [[nodiscard]] auto make_file_diff(std::string_view old_text, std::string_view new_text,

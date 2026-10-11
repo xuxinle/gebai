@@ -164,8 +164,10 @@ class DiffView : public Element {
   void rebuild_side_by_side();
   void rebuild_unified();
   /// 往一侧追加一个显示行（**唯一的写入口**：装饰行号与文本行必须同步递增）。
+  /// `inline_ranges` 是行内改动区间（字节偏移；见 `DiffLine::inline_old`）。
   static void begin_row(Side& side, std::size_t number, CodeEditor::LineMark mark,
-                        std::string_view text, bool gutter_bar = false);
+                        std::string_view text, bool gutter_bar = false,
+                        std::vector<std::pair<std::size_t, std::size_t>> inline_ranges = {});
   /// 把重建结果推给两侧编辑器（文本 + 装饰 + 只读位）。
   void push_to_editors();
   /// 该侧该行是否被「禁用」（不出现）。
