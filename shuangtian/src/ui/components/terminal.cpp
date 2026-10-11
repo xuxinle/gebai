@@ -1129,27 +1129,16 @@ void Terminal::arrange(const RenderContext& context, math::Rect rect) {
       const int cols = std::max(kMinUsableCols, cols_raw);
       const int rows = std::max(kMinUsableRows, rows_raw);
       if (cols != pty_size_.cols || rows != pty_size_.rows) {
-        // **防抖**：同一个新尺寸要连续几帧都算出来才上报。
-        // “收起再展开”那一瞬间会出现过渡尺寸（先按旧的/零高度量一次），
-        // 只比一次就上报会让 PTY 真被 resize、屏幕被截（实测 14 行 → 11 行）。
-        // 连续稳定 = 布局真定了；期间的抖动被这里吸收。
-        constexpr int kStableFrames = 3;
-        if (pending_candidate_.cols == cols && pending_candidate_.rows == rows) {
-          ++pending_stable_frames_;
-        } else {
-          pending_candidate_ = st::process::PtySize{cols, rows};
-          pending_stable_frames_ = 1;
-        }
-        if (pending_stable_frames_ >= kStableFrames) {
-          // 布局里不直接改 PTY（`arrange` 可能在测量阶段被调多次）；
-          // 记下来，下一帧 `paint_content` 上报。
-          pending_size_ = pending_candidate_;
-          pending_size_set_ = true;
-          pending_stable_frames_ = 0;
-        }
-      } else {
-        // 又回到当前尺寸了：清掉候选（下一次变化重新计数）。
-        pending_stable_frames_ = 0;
+        // 只**登记候选**，不上报；上报在 `paint_content`（每帧都跑）里做确认。
+        //
+        // ⚠ 确认必须是**按帧**的，不能“在这里连续几次才算数”：`arrange` 只在
+        // 布局脏时才跑（静态界面里可能只跑一次），那样尺寸就**永远报不出去**
+        //——PTY/屏幕尺寸跟不上面板高度，渲染行数与滚动条视口不一致，表现为
+        // “滚动不准、用不了”（实测：面板压矮到 177px 后滚动条视口 ≈8 行，
+        // 而屏幕仍是 24 行）。确认放在每帧都走的 `paint_content` 里既保住了
+        // “滤掉过渡尺寸”，也不会漏掉只跑一次的布局。
+        pending_size_ = st::process::PtySize{cols, rows};
+        pending_size_set_ = true;
       }
     }
   }
@@ -1165,8 +1154,21 @@ void Terminal::paint_content(const RenderContext& context, raster::Surface& canv
   const TerminalPalette& palette = context.theme.terminal();
   auto* self = const_cast<Terminal*>(this);
   if (pending_size_set_) {
-    const_cast<bool&>(pending_size_set_) = false;
-    self->set_terminal_size(pending_size_);
+    // **按帧确认**（见 `arrange` 里的说明）：
+    // 第一帧只记为“看过的候选”；下一帧如果还是同一个候选，才认为布局稳定、真上报。
+    // 过渡尺寸（展开那一帧先按零/旧高度量一次）在下一帧就会被换掉，因此永远
+    // 拿不到确认——这保住了“收起/展开不会把 PTY 缩错”。
+    const bool confirmed = seen_pending_set_ && seen_pending_.cols == pending_size_.cols &&
+                           seen_pending_.rows == pending_size_.rows;
+    if (confirmed) {
+      self->pending_size_set_ = false;
+      self->seen_pending_set_ = false;
+      const st::process::PtySize size = pending_size_;
+      self->set_terminal_size(size);
+    } else {
+      self->seen_pending_ = pending_size_;
+      self->seen_pending_set_ = true;
+    }
   }
   // 屏幕底色（终端是"一屏文本"，底色把它与普通面板分开）。
   canvas.fill_rect(output_rect_, raster::Paint::solid(palette.bg));

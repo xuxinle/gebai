@@ -416,14 +416,9 @@ class Terminal : public Element {
   /// 布局阶段不直接改 PTY，免得测量多次导致尺寸抖动）。
   st::process::PtySize pending_size_{80, 24};
   bool pending_size_set_{false};
-  /// **防抖**：连续几帧都是同一个新尺寸才真上报。
-  ///
-  /// 为何需要：“面板收起再展开”会在某一帧里给出**过渡尺寸**（展开那一帧先按
-  /// 旧的/零高度量一次），只比一次就上报会让 PTY 真被 resize——屏幕随即被截
-  ///（实测：收起/展开一次，屏上从 14 行变 11 行；内容虽在，但被挤没了）。
-  /// 连续多帧一致 = 布局稳定了，那才是用户真实的可用区域。
-  st::process::PtySize pending_candidate_{80, 24};
-  int pending_stable_frames_{0};
+  /// **按帧确认**用的“上一帧看到的候选尺寸”（见 `paint_content` 里的两帧确认）。
+  st::process::PtySize seen_pending_{80, 24};
+  bool seen_pending_set_{false};
   /// 生效的通道工厂（未注入时用缺省，惰性初始化）。
   [[nodiscard]] auto default_factory() const -> const st::exec::ChannelFactory&;
 
