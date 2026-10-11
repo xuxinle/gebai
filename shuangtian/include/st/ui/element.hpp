@@ -15,6 +15,7 @@
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/style.hpp"
+#include "st/ui/styling.hpp"
 #include "st/ui/text_port.hpp"
 #include "st/ui/theme.hpp"
 
@@ -333,6 +334,12 @@ class Element {
     [[nodiscard]] virtual auto focus_ring_visible() const -> bool { return true; }
     /// 焦点环可见性变了——组件据此重绘（`UiRoot` 在切换时调）。
     virtual void on_focus_ring_changed() {}
+    /// 宿主的当前主题（样式系统 `apply_appearance` 立即落位用）。
+    ///
+    /// 为什么进契约：外观规则要解析成具体值（颜色/圆角/阴影），而真值源在
+    /// UiRoot——元素自己不存主题（存了就是影子状态，换肤会分岔）。
+    /// 无宿主/未实现时返回空指针（调用方退回内置亮色主题）。
+    [[nodiscard]] virtual auto host_theme() const -> const Theme* { return nullptr; }
   };
 
   [[nodiscard]] auto host() const noexcept -> HostFocus* { return host_; }
@@ -508,6 +515,25 @@ class Element {
   virtual void apply_theme(const Theme& theme) {
     apply_surface(theme);
     apply_text_overrides();
+    // 外观规则回放（声明过 `apply_appearance` 的元素在此跟随主题：
+    // Tokens 从新主题现解析——换肤一致性只在 `apply_appearance` 一处发生）。
+    if (extras_ != nullptr && extras_->appearance.has_value()) {
+      const Tokens tokens(theme);
+      (void)ui::apply_appearance(*this, tokens, *extras_->appearance);
+      apply_text_overrides();   // 文本显式覆盖最后回放（盖过 variant 的 text）
+    }
+  }
+
+  /// 声明外观规则（CSS 级主题化的入口）：规则存档 + **立即**落位一次
+  ///（后续每次 `apply_theme` 自动回放——主题切换无需组件配合）。
+  ///
+  /// 语义字段见 `Appearance`；未设的字段不干预（与现有 style 共存）。
+  /// 返回是否改变了样式（调用方可据此决定是否请求重排）。
+  [[nodiscard]] auto apply_appearance(const Appearance& appearance) -> bool {
+    extras().appearance = appearance;
+    const Theme* theme = host() != nullptr ? host()->host_theme() : nullptr;
+    const Tokens tokens(theme != nullptr ? *theme : Theme::light());
+    return ui::apply_appearance(*this, tokens, appearance);
   }
 
   /// 容器的**语义表面档位**（背景色跟着主题走，而不是硬编码）。
@@ -814,6 +840,10 @@ class Element {
     std::optional<FontWeight> text_weight_override{};
     /// 语义表面档位（`Element::Surface`；`None` = 不画底色，与构造默认一致）。
     Surface surface{Surface::None};
+    /// 外观规则（`apply_appearance` 的意图存档；`apply_theme` 每帧回放——
+    /// 主题切换后所有联动自动跟随，这是「CSS 控制元素样式」的落点）。
+    /// `has_value()` 为假 = 未声明外观（组件自己的 apply_theme 说了算）。
+    std::optional<Appearance> appearance{};
   };
 
   /// 取（必要时创建）渲染附属状态。**非 const** 的入口（`advance_hover` 用 `mutable` 成员调）。

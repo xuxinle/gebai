@@ -47,6 +47,7 @@
 // 很难反推到本头。详见 `st/ext/json_fwd.hpp` 的里注释。
 #include "st/ext/json_fwd.hpp"
 #include "st/ui/element.hpp"
+#include "st/ui/styling.hpp"
 #include "st/ui/ui_root.hpp"
 
 namespace st::ui {
@@ -552,6 +553,12 @@ struct BoxProps {
   ///
   /// 与 `color`/`hex_color` 的分工：那两个是**文字**色，这个是**背景**。
   Element::Surface surface{Element::Surface::None};
+  // —— 样式系统（`st/ui/styling.hpp`；一行声明 = CSS class 的声明式写法）——
+  std::optional<Variant> variant{};        ///< 视觉语气（Primary/Ghost/Danger…）
+  std::optional<Elevation> elevation{};    ///< 抬升档（阴影+表面+高光联动）
+  std::optional<RadiusMode> radius_mode{}; ///< 圆角档（SM/MD/LG/Pill；缺省不动）
+  std::optional<ControlSize> control_size{}; ///< 尺寸档（高度+字号+图标联动）
+  std::optional<Density> density{};        ///< 密度（padding/gap 缩放）
   std::string id{};                       ///< 显式 id（空 = 自动）
   std::string key{};                      ///< 业务身份（自动 id 用 Type@key）
 };

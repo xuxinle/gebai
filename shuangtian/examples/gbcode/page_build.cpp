@@ -563,7 +563,11 @@ namespace gbcode_ui {
                         {.grow = true, .id = "editor-tabs"});
       });
       if (!has_editor && tabs.empty()) {
-        column(c, {.padding = 24.0f, .grow = true, .id = "empty-hint"}, [&] {
+        column(c, {.padding = 24.0f, .grow = true,
+                    // 样式系统示范（styling.hpp）：一行声明 = 抬升卡片 + 大圆角，
+                    // 阴影/表面/高光随主题联动（换肤自动跟随，无需在此取色）。
+                    .elevation = Elevation::Raised, .radius_mode = RadiusMode::LG,
+                    .id = "empty-hint"}, [&] {
           (void)icon(c, "code", 40.0f);
           (void)text(c, [] {
             return std::string("从左侧资源管理器打开一个文件，或 Ctrl+Shift+P 打开命令面板");

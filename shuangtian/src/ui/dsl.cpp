@@ -1590,6 +1590,18 @@ void apply_box(Element& element, const BoxProps& props) {
   // 它不做“显式覆盖”，而是**声明语义**——`apply_theme` 按主题取色，
   // 所以主题切换后颜色自动跟随（这正是它与 `hex_color` 的分工）。
   if (props.surface != Element::Surface::None) element.set_surface(props.surface);
+  // 样式系统（styling.hpp）：任一字段显式设过 → 组一条 Appearance 规则。
+  // 与 `radius`/`surface` 的分工：那两个是**单值**，这五个是**跨 token 联动**
+  //（elevation 同时动阴影+表面+高光；control_size 同时动高度+字号+图标）。
+  if (props.variant.has_value() || props.elevation.has_value() ||
+      props.radius_mode.has_value() || props.control_size.has_value() ||
+      props.density.has_value()) {
+    (void)element.apply_appearance(Appearance{.variant = props.variant,
+                                             .elevation = props.elevation,
+                                             .radius = props.radius_mode,
+                                             .size = props.control_size,
+                                             .density = props.density});
+  }
 }
 
 // ── 组件包装 ──────────────────────────────────────────────────────────────

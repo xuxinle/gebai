@@ -149,6 +149,8 @@ class UiRoot : public Element::HostFocus {
   void on_focus_ring_changed() override {
     if (focused_ != nullptr) focused_->mark_dirty();
   }
+  /// 样式系统的主题真值源（`Element::apply_appearance` 立即落位用）。
+  [[nodiscard]] auto host_theme() const -> const Theme* override { return &theme_; }
   /// 焦点环可见性（**只在键盘导航时为真**；见 `focus_ring_visible()` 的说明）。
   /// 写入方只有 `UiRoot` 的事件分支——写的时候顺带把焦点元素标脏。
   void set_focus_ring_visible(bool value) {
