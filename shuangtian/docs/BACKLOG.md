@@ -26,6 +26,31 @@
 
 ## 待做（2026-10-09 起）
 
+> 📋 2026-10-10 **对比能力已落地**（见 `DESIGN.md` §4.2.11）：
+> `st/text/diff`（结构化差异）、`CodeEditor` 行装饰（含**行号三态**）、
+> `ui::DiffView`（并列/内联 + hunk 导航）、gbcode 侧的端点语义表/比较视图/单文件并列差异。
+> **实测拓出 7 个真缺陷**（已全修）：两栏未配对→整体错位、分隔行行号错成 1、
+> 空的分隔行被吃掉、末尾多一个空行、`-U` 隐含 `-p` 把 numstat 变成 patch、
+> `--name-status` 吞掉 `--numstat`、差异视图被比较视图抢占（点文件无反应）。
+> 下面三条是它接下去的路。
+
+### P1：逐块 / 逐行暂存（依赖已落的差异结构）
+
+**方向**：从 `text::DiffDocument` 里取一个 hunk（或一条行）构造补丁、`git apply --cached`。
+数据结构已给出所需的一切（行号、类型、`to_unified`）；难点在行序契约与部分暂存失败的回退。
+歌白的 `partial.ts` 是现成交互参照。
+
+### P1：三方合并视图（base / ours / theirs）
+
+依赖 `DiffView` 与「逐块接受」；歌白的 `merge-view.ts` 是现成交互参照。
+当前冲突文件在变更面板里已单列一组（`ChangeGroup::Conflicted`），缺的是点开后的三栏。
+
+### P2：行内字符级差异（同一行内的字符改动）
+
+**现状**：`st/text/diff` 只做到**行级**，所以“改一个词”在视图里表现为“整行删 + 整行加”。
+**方向**：对配对后的 `Removed`/`Added` 行再做一层字符级 LCS，差异区间放进 `DiffLine`
+（新增字段）→ `CodeEditor` 再增加一种“行内区间底色”装饰。接口不变，加字段不破现有调用方。
+
 > 📋 2026-10-09 **「镂月裁云」两位示例已实现**（`examples/louyue` 图像编辑器 /
 > `examples/caiyun` 视频剪辑器），设计规约 `docs/LOUYUE_CAIYUN.md` 随之退役为历史
 > 记录。实现中当场修了两处框架缺陷（`Canvas::draw_canvas` 忽略 blend；`custom<T>`
