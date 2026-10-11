@@ -78,7 +78,11 @@
     }
   },
   "targets": {
-    "st": { "kind": "executable", "sources": ["tools/stpm/*.cpp"], "system_libs": ["dl"] },
+    "st": { "kind": "executable", "sources": ["tools/stpm/*.cpp", "src/ui/window_control.cpp"],
+            "exclude_sources": ["src/ui/**", "src/app/**", "src/control/**", "src/edit/**", "src/lsp/**"],
+            "//sources": "`tools/stpm` 是入口；`src/ui/window_control.cpp` 是 shell 后端的边缘命中契约（`platform_win32.cpp` 用它）。",
+            "//exclude_sources": "工具链只需要 core/math/codec/raster/text/md/xml/pkg/ext——应用层（ui 组件与 DSL、app、control、edit、lsp）不参与。**这一条同时是自举的权威依据**（bootstrap 按它裁掉应用层）。注意 `src/ui/window_control.cpp` 在排除之后由上面的 `sources` 加回（排除先于目标源合并），所以它必须写在这里。",
+            "system_libs": ["dl"] },
     "crash_probe": { "kind": "executable", "sources": ["tools/crash_probe.cpp"],
                      "exclude_sources": ["src/pkg/*"] },
     "gallery": { "kind": "executable", "sources": ["examples/gallery/*.cpp"],

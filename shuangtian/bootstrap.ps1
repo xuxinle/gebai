@@ -68,12 +68,53 @@ $binDir = Join-Path $Root 'build\bin'
 $objDir = Join-Path $Root 'build\obj\bootstrap'
 New-Item -ItemType Directory -Force -Path $binDir, $objDir | Out-Null
 
-# 源集合与框架清单一致：core + ext + pkg + stpm 自身（另加第三方 C 源：st 也要链接脚本引擎）
-$sources = @()
-foreach ($dir in 'src\core', 'src\ext', 'src\pkg', 'tools\stpm') {
-  $sources += Get-ChildItem -Path (Join-Path $Root $dir) -Recurse -Filter *.cpp |
-              Select-Object -ExpandProperty FullName
+# —— 单元集：**从 st.pkg 推导**，与 `st build st` 同一份声明 ——
+#
+# 口径（与 `src/pkg/build.cpp` 同序，改一处必须同步另一处）：
+#
+#   units = 展开(顶层 sources) − 匹配(targets.st.exclude_sources) + 展开(targets.st.sources)
+#
+# **排除先于并入目标源**：所以"落在被排除目录里、但工具确实需要"的单元
+# （如 `src/ui/window_control.cpp`——shell 后端的窗口边缘命中契约）写在 `targets.st.sources` 即可。
+#
+# 为什么必须推导：曾经按目录写死（`src\core`、`src\ext`、`src\pkg`、`tools\stpm`），
+# 与清单脱节后的症状是**链接期一串 `undefined reference to st::...`**——报错指向源码，
+# 而真因是"该编的单元没编"（新增 `src/ext/video.cpp` 引 `codec/raster` 那次）。
+# 清单是唯一权威：版本号、宏、包含路径、第三方 C 源、C 源专用标志与**单元集**全部从这里读。
+function Expand-Pattern([string]$Base, [string]$Pattern) {
+  # `*` 不跨 `/`（与 `fs::match_glob` 同口径：逐段匹配）
+  $items = Get-ChildItem -Path (Join-Path $Base $Pattern) -File -ErrorAction SilentlyContinue
+  foreach ($item in $items) {
+    $item.FullName.Substring($Base.Length).TrimStart('\', '/') -replace '\\', '/'
+  }
 }
+function Test-Segment([string]$Pat, [string]$Seg) {
+  $regex = '^' + ([regex]::Escape($Pat) -replace '\\\*', '[^/]*' -replace '\\\?', '[^/]') + '$'
+  return $Seg -match $regex
+}
+function Test-Segments($Pat, [int]$Pi, $Seg, [int]$Si) {
+  if ($Pi -eq $Pat.Count) { return $Si -eq $Seg.Count }
+  if ($Pat[$Pi] -eq '**') {
+    for ($skip = $Si; $skip -le $Seg.Count; $skip++) {
+      if (Test-Segments $Pat ($Pi + 1) $Seg $skip) { return $true }
+    }
+    return $false
+  }
+  if ($Si -eq $Seg.Count) { return $false }
+  if (-not (Test-Segment $Pat[$Pi] $Seg[$Si])) { return $false }
+  return Test-Segments $Pat ($Pi + 1) $Seg ($Si + 1)
+}
+function Test-GlobMatch([string]$Pattern, [string]$Path) {
+  $pat = @($Pattern -split '/' | Where-Object { $_ -ne '' })
+  $seg = @($Path -split '/' | Where-Object { $_ -ne '' -and $_ -ne '.' })
+  return Test-Segments $pat 0 $seg 0
+}
+
+$pkg = Get-Content (Join-Path $Root 'st.pkg') -Raw | ConvertFrom-Json
+$pkgVersion = if ($pkg.version) { $pkg.version } else { '0.1.0' }
+$pkgIncludes = if ($pkg.include_dirs) { @($pkg.include_dirs) } else { @('include', 'third_party') }
+$pkgDefines = if ($pkg.defines) { @($pkg.defines) } else { @('ST_VERSION="' + $pkgVersion + '"', 'ST_ENABLE_LINT=1') }
+$pkgCFlags = if ($pkg.c_flags) { @($pkg.c_flags) } else { @('-std=gnu11') }
 # 第三方 C 源见下方（清单驱动，需先读 st.pkg）——此处不再全量扫描 third_party。
 # 清单是**唯一权威**：版本号、宏、包含路径、第三方 C 源、C 源专用标志全部从 st.pkg 读。
 # 历史教训：这些值曾在本脚本里第二遍手写，于是「清单改了脚本没改」当场把自举打崩
@@ -82,26 +123,35 @@ foreach ($dir in 'src\core', 'src\ext', 'src\pkg', 'tools\stpm') {
 #  编译 `third_party/**/*.c`，sqlite3.c 找不到 sqlite3.h 直接 fatal error）。
 # 口径同 `src/pkg/build.cpp`：include_dirs + 清单宏 + c_flags 是 C 源的完整标志前缀，
 # `-x c` 由本脚本补（清单里不写，因为 st 那边是**按语言分派**而非拼在标志里）。
-$pkg = Get-Content (Join-Path $Root 'st.pkg') -Raw | ConvertFrom-Json
-$pkgVersion = if ($pkg.version) { $pkg.version } else { '0.1.0' }
-$pkgIncludes = if ($pkg.include_dirs) { @($pkg.include_dirs) } else { @('include', 'third_party') }
-$pkgDefines = if ($pkg.defines) { @($pkg.defines) } else { @('ST_VERSION="' + $pkgVersion + '"', 'ST_ENABLE_LINT=1') }
-$pkgCFlags = if ($pkg.c_flags) { @($pkg.c_flags) } else { @('-std=gnu11') }
 # `third_party_sources` 是 glob 清单（`third_party/sqlite/*.c`）：只编清单点名的第三方 C 源。
 # 旧脚本对所有 `third_party/**/*.c` 全编——third_party 一旦放进「有 C 源但不是编译单元」
 # 的东西（参考实现、上游自测），就会替它们挑错甚至编出重复符号。
 $thirdPartySources = @()
-if ($pkg.third_party_sources) {
-  foreach ($pattern in $pkg.third_party_sources) {
-    $dir = Split-Path -Parent $pattern
-    $filter = Split-Path -Leaf $pattern
-    $thirdPartySources += Get-ChildItem -Path (Join-Path $Root $dir) -Filter $filter -ErrorAction SilentlyContinue |
-                          Select-Object -ExpandProperty FullName
-  }
-} else {
-  $thirdPartySources = @(Get-ChildItem -Path (Join-Path $Root 'third_party') -Recurse -Filter *.c -ErrorAction SilentlyContinue |
-                         Select-Object -ExpandProperty FullName)
+foreach ($pattern in @($pkg.third_party_sources)) {
+  $thirdPartySources += @(Get-ChildItem -Path (Join-Path $Root $pattern) -File -ErrorAction SilentlyContinue |
+                          Select-Object -ExpandProperty FullName)
 }
+
+$targetSpec = if ($pkg.targets) { $pkg.targets.st } else { $null }
+if ($null -eq $targetSpec) {
+  Write-Error "st.pkg 里没有 targets.st（自举无法推导单元集）"
+}
+$excludePatterns = if ($targetSpec.exclude_sources) { @($targetSpec.exclude_sources) } else { @() }
+$extraPatterns = if ($targetSpec.sources) { @($targetSpec.sources) } else { @() }
+
+$units = @()
+foreach ($pattern in @($pkg.sources)) { $units += @(Expand-Pattern $Root $pattern) }
+foreach ($pattern in $excludePatterns) {
+  $before = $units.Count
+  $units = @($units | Where-Object { -not (Test-GlobMatch $pattern $_) })
+  if ($units.Count -eq $before) {
+    Write-Host "[bootstrap] 排除模式未命中任何源文件: $pattern" -ForegroundColor Yellow
+  }
+}
+foreach ($pattern in $extraPatterns) { $units += @(Expand-Pattern $Root $pattern) }
+$relUnits = @($units | Sort-Object -Unique)
+if ($relUnits.Count -eq 0) { Write-Error "单元集为空（st.pkg 的 sources/targets.st 解析异常）" }
+$sources = @($relUnits | ForEach-Object { Join-Path $Root $_ })
 
 # —— 编译：一套 GCC 风格命令（g++ 与 clang++ 同口径）——
 $platformDefines = @('-D_WIN32_WINNT=0x0A00', '-DWINVER=0x0A00', '-DNTDDI_VERSION=0x0A000000')
@@ -124,14 +174,15 @@ $cFlags = $cFlags + $profileFlags
 
 Write-Host "[bootstrap] 编译 $($sources.Count) 个 C++ 单元 + $($thirdPartySources.Count) 个 C 单元（并行 $Jobs，档位 $Profile）"
 $started = Get-Date
-$results = @($sources | ForEach-Object -ThrottleLimit $Jobs -Parallel {
-    $src = $_; $objDir = $using:objDir; $flags = $using:cxxFlags; $CXX = $using:CXX
-    $name = ($src -replace '[:\\/]', '_')
+$results = @($relUnits | ForEach-Object -ThrottleLimit $Jobs -Parallel {
+    $rel = $_; $Root = $using:Root; $objDir = $using:objDir; $flags = $using:cxxFlags; $CXX = $using:CXX
+    $src = Join-Path $Root $rel
+    $name = ($rel -replace '[:\\/]', '_')
     $output = & $CXX @flags '-MMD' '-MF' (Join-Path $objDir ($name + '.d')) '-c' $src ('-o' + (Join-Path $objDir ($name + '.o'))) 2>&1
     [pscustomobject]@{ source = $src; code = $LASTEXITCODE; output = ($output | Out-String) }
 }) + @($thirdPartySources | ForEach-Object -ThrottleLimit $Jobs -Parallel {
-    $src = $_; $objDir = $using:objDir; $flags = $using:cFlags; $CXX = $using:CXX
-    $name = ($src -replace '[:\\/]', '_')
+    $src = $_; $Root = $using:Root; $objDir = $using:objDir; $flags = $using:cFlags; $CXX = $using:CXX
+    $name = ($src.Substring($Root.Length).TrimStart('\', '/') -replace '[:\\/]', '_')
     $output = & $CXX @flags '-c' $src ('-o' + (Join-Path $objDir ($name + '.o'))) 2>&1
     [pscustomobject]@{ source = $src; code = $LASTEXITCODE; output = ($output | Out-String) }
 })
@@ -143,19 +194,22 @@ if ($failed.Count -gt 0) {
   }
   Write-Error "$($failed.Count) 个翻译单元编译失败"
 }
-$objects = @($sources + $thirdPartySources | ForEach-Object {
+$objects = @($relUnits | ForEach-Object {
     Join-Path $objDir (($_ -replace '[:\\/]', '_') + '.o')
+}) + @($thirdPartySources | ForEach-Object {
+    $name = ($_.Substring($Root.Length).TrimStart('\', '/') -replace '[:\\/]', '_')
+    Join-Path $objDir ($name + '.o')
 })
 $exe = Join-Path $binDir 'st.exe'
-# `-ldbghelp`：`src/core/platform_crash.cpp` 用 DbgHelp 把崩溃栈解析成函数名
-# （`SymInitialize`/`SymFromAddr`/`SymFunctionTableAccess64`…）。
+# 链接库与 `st.pkg` 的 `system_libs` / `src/pkg/build.cpp` 的 `default_system_libs` 同口径
+# （Windows 目标的系统库）：`ws2_32` 网络、`gdi32`/`user32`/`shell32` Win32 与命令行、
+# `dbghelp`+`nanosrv`+`psapi` 崩溃栈符号化（`src/core/platform_crash.cpp`）。
 #
-# ⚠ 这条曾经漏过：自举链接报一串
-#   `undefined reference to __imp_SymFunctionTableAccess64`
-# ——**报错指向源码，而真因是链接库列表漏了一项**（符号是 Windows 系统库里的）。
-# 与 `st.pkg` 的 `system_libs` 必须保持一致（那边已含 dbghelp，两边同口径）。
+# ⚠ 这里漏过两次、两次现象都是**报错指向源码**：
+#   `undefined reference to __imp_SymFunctionTableAccess64`（`dbghelp` 缺）与
+#   一条 `psapi` 系的未定义符号——真因都是"链接库列表少一项"。
 $linkOutput = & $CXX $objects '-o' $exe '-lws2_32' '-lgdi32' '-luser32' '-lshell32' '-lwinpthread' `
-                             '-ldbghelp' '-static-libgcc' '-static-libstdc++' 2>&1
+                             '-ldbghelp' '-lnanosrv' '-lpsapi' '-static-libgcc' '-static-libstdc++' 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host ($linkOutput | Out-String); Write-Error "链接失败" }
 
 $elapsed = ((Get-Date) - $started).TotalMilliseconds

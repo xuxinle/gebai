@@ -18,27 +18,103 @@ if ! command -v "$CXX" >/dev/null 2>&1; then
 fi
 
 JOBS="${ST_JOBS:-$( (command -v nproc >/dev/null && nproc) || echo 4 )}"
-# 清单是**唯一权威**：版本号以外的宏、包含路径、第三方 C 源、C 源专用标志全部从 st.pkg 读。
+
+# 清单是**唯一权威**：版本号以外的宏、包含路径、第三方 C 源、C 源专用标志、
+# 以及**单元集**（sources − targets.st.exclude_sources + targets.st.sources）全部从 st.pkg 读。
 # 历史教训：这些值曾在本脚本里第二遍手写，「清单改了脚本没改」当场把自举打崩
 # （SQLite 内置那次：`-include st_sqlite3_config.h` 与 `-Ithird_party/sqlite` 只进了清单，
 #  自举仍按硬编码的 `-Iinclude -Ithird_party` 全量编译 `third_party/**/*.c`，
-#  sqlite3.c 找不到 sqlite3.h 直接 fatal error）。口径同 `src/pkg/build.cpp`。
+#  sqlite3.c 找不到 sqlite3.h 直接 fatal error）。
+# 单元集也一样：曾按目录写死（core/ext/pkg/stpm），新增 `src/ext/video.cpp` 引
+# `codec/raster` 后链接期一串 `undefined reference to st::...`——报错指向源码，
+# 真因是"该编的单元没编"。口径同 `src/pkg/build.cpp`。
 PKG="$ROOT/st.pkg"
-json_list() {  # $1=字段名 → 每行一项（缺字段时输出空）
-  python3 - "$PKG" "$1" <<'PY' 2>/dev/null || true
+json_emit() {  # $1=python 表达式 → 逐行输出
+  python3 - "$PKG" "$1" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
-for item in data.get(sys.argv[2]) or []:
+value = eval(sys.argv[2], {"data": data})
+for item in value or []:
     print(item)
 PY
 }
-mapfile -t PKG_INCLUDES < <(json_list include_dirs)
+
+# 单元集：glob 展开（`*` 不跨 `/`，`**` 跨；与 `fs::match_glob` 同口径）
+mapfile -t UNITS < <(python3 - "$ROOT" <<'PY'
+import glob, json, os, sys
+root = sys.argv[1]
+with open(os.path.join(root, "st.pkg"), encoding="utf-8") as handle:
+    data = json.load(handle)
+target = (data.get("targets") or {}).get("st") or {}
+
+def expand(pattern):
+    return sorted(os.path.relpath(p, root).replace(os.sep, "/")
+                  for p in glob.glob(os.path.join(root, pattern), recursive=True)
+                  if os.path.isfile(p))
+
+def match(pattern, path):
+    """逐段匹配：`**` 跨段，`*`/`?` 不跨 `/`（与 fs::match_glob 同口径）。"""
+    pat = [s for s in pattern.split("/") if s]
+    seg = [s for s in path.split("/") if s and s != "."]
+    def seg_match(p, s):
+        if p == "*":
+            return True
+        out, i = "", 0
+        while i < len(p):
+            c = p[i]
+            if c == "*":
+                out += "[^/]*"
+                while i + 1 < len(p) and p[i + 1] == "*":
+                    i += 1
+            elif c == "?":
+                out += "[^/]"
+            else:
+                out += "\\" + c if c in ".^$+{}()|[]\\" else c
+            i += 1
+        import re
+        return re.fullmatch(out, s) is not None
+    def walk(pi, si):
+        if pi == len(pat):
+            return si == len(seg)
+        if pat[pi] == "**":
+            return any(walk(pi + 1, skip) for skip in range(si, len(seg) + 1))
+        if si == len(seg):
+            return False
+        return seg_match(pat[pi], seg[si]) and walk(pi + 1, si + 1)
+    return walk(0, 0)
+
+units = []
+for pattern in data.get("sources", []):
+    units += expand(pattern)
+# 目标段缺失就**显式失败**：静默退化成"编全库"会在编译期以
+# `battery/embed.hpp: No such file or directory` 爆掉——那看上去像路径问题，不是清单问题。
+if "st" not in (data.get("targets") or {}):
+    sys.exit("错误: st.pkg 里没有 targets.st（自举无法推导单元集）")
+# **排除先于并入目标源**：所以"在被排除目录里、但工具确实需要"的单元
+# （如 src/ui/window_control.cpp——shell 后端的窗口边缘命中契约）写在 targets.st.sources 即可。
+for pattern in target.get("exclude_sources", []):
+    before = len(units)
+    units = [u for u in units if not match(pattern, u)]
+    if len(units) == before:
+        print(f"[bootstrap] 排除模式未命中任何源文件: {pattern}", file=sys.stderr)
+for pattern in target.get("sources", []):
+    units += expand(pattern)
+for unit in sorted(set(units)):
+    print(unit)
+PY
+)
+if [ "${#UNITS[@]}" -eq 0 ]; then
+  echo "错误: 单元集为空（st.pkg 的 sources / targets.st 解析异常）" >&2
+  exit 1
+fi
+
+mapfile -t PKG_INCLUDES < <(json_emit 'data.get("include_dirs") or []')
 if [ "${#PKG_INCLUDES[@]}" -eq 0 ]; then PKG_INCLUDES=(include third_party); fi
-mapfile -t PKG_DEFINES < <(json_list defines)
-mapfile -t PKG_CFLAGS < <(json_list c_flags)
+mapfile -t PKG_DEFINES < <(json_emit 'data.get("defines") or []')
+mapfile -t PKG_CFLAGS < <(json_emit 'data.get("c_flags") or []')
 if [ "${#PKG_CFLAGS[@]}" -eq 0 ]; then PKG_CFLAGS=(-std=gnu11); fi
-mapfile -t PKG_THIRD_PARTY < <(json_list third_party_sources)
+mapfile -t PKG_THIRD_PARTY < <(json_emit 'data.get("third_party_sources") or []')
 
 INCLUDES=()
 for dir in "${PKG_INCLUDES[@]}"; do INCLUDES+=("-I$dir"); done
@@ -53,7 +129,7 @@ FLAGS=(-std=c++20 -O1 -g "${INCLUDES[@]}" "${DEFINES[@]}" -fno-strict-aliasing
 CFLAGS=("${PKG_CFLAGS[@]}" -O1 -g "${INCLUDES[@]}" "${DEFINES[@]}" -x c)
 
 mkdir -p build/bin build/obj/bootstrap
-mapfile -t SOURCES < <(find src/core src/ext src/pkg tools/stpm -name '*.cpp' | sort)
+
 # 第三方 C 源（third_party/）：st 自身也要链接脚本引擎，故自举必须一并编译；
 # 但只编 `third_party_sources` 点名的（不是全量扫描）。
 C_SOURCES=()
@@ -67,7 +143,7 @@ else
   mapfile -t C_SOURCES < <(find third_party -name '*.c' 2>/dev/null | sort)
 fi
 
-echo "[bootstrap] 编译器: $CXX · 并行 $JOBS · 源文件 ${#SOURCES[@]} 个（另 C 源 ${#C_SOURCES[@]} 个）"
+echo "[bootstrap] 编译器: $CXX · 并行 $JOBS · 源文件 ${#UNITS[@]} 个（另 C 源 ${#C_SOURCES[@]} 个）"
 START=$(date +%s%N)
 
 # 逐文件并行编译（首次自举无法使用 PCH：st 尚未生成）
@@ -94,11 +170,11 @@ rm -f "$OBJDIR"/*.o
 # `|| true`：让 xargs 的退出码**不**直接终止脚本（`set -e`），
 # 好让下面那段"缺哪些 .o"的诊断跑完——它给出的信息比 xargs 的裸退出码有用得多
 #（哪些文件失败、旧产物已删、下一步怎么办）。
-printf '%s\n' "${SOURCES[@]}" "${C_SOURCES[@]}" | xargs -P "$JOBS" -I% bash -c 'compile_one "$@"' _ % || true
+printf '%s\n' "${UNITS[@]}" "${C_SOURCES[@]}" | xargs -P "$JOBS" -I% bash -c 'compile_one "$@"' _ % || true
 
 OBJECTS=()
 MISSING=()
-for src in "${SOURCES[@]}"; do
+for src in "${UNITS[@]}"; do
   obj="$OBJDIR/$(echo "$src" | tr '/' '_').o"
   OBJECTS+=("$obj")
   [ -f "$obj" ] || MISSING+=("$src")
