@@ -277,14 +277,22 @@ auto run_app(int argc, char** argv) -> int {
     frame_ptr->title_bar()->set_icon("sparkles");
     frame_ptr->title_bar()->set_window_control(&app);
   }
-  // 品牌：挂标题栏**前部槽**（图标之后、标题之前）——与真实应用同一形态：
+  // 品牌：用 `TitleBar::set_brand`（**真正的品牌区**，不是占 `leading` 槽）——
   //   `[图标][霜天 · 组件画廊][……][主题 DPI 截图 | — □ ×]`
-  // 控制通道兼容钩子 `#app-title` 就落在这块品牌标题上。
-  // 而标题栏自身的标题文本留作"当前位置"（切页时更新，与 VSCode 显示当前文件名同构）。
-  auto brand = std::make_unique<Heading>("霜天 · 组件画廊", 3);
-  brand->set_id("app-title");
-  brand->style().font_size = 14.0f;
-  if (frame_ptr->title_bar() != nullptr) frame_ptr->title_bar()->add_leading(std::move(brand));
+  //
+  // 为何不再挂 `leading` 槽：槽是**宿主控件位**（菜单栏/面包屑/搜索框），
+  // 把品牌名塞进去会让两者在窄窗口下争同一段宽度，而且无法表达“品牌与宿主控件
+  // 之间有间隔”这类意图（见 `set_brand` 的说明）。
+  //
+  // 兼容：控制通道的 `#app-title` 钩子仍在（有一个隐藏的品牌文本元素承担它）——
+  // 自动化脚本按 id 寻址，不能因为内部换成品牌区就失联。
+  if (frame_ptr->title_bar() != nullptr) {
+    frame_ptr->title_bar()->set_brand("霜天 · 组件画廊");
+    auto badge = std::make_unique<Text>("霜天 · 组件画廊");
+    badge->set_id("app-title");
+    badge->set_visible(false);   // 只作寻址钩子：不给它占布局
+    frame_ptr->title_bar()->add_trailing(std::move(badge));
+  }
 
   auto theme_button = std::make_unique<Button>("暗色", Button::Variant::Ghost, Button::Size::Small);
   theme_button->set_id("theme-toggle");

@@ -71,6 +71,24 @@ class TitleBar : public Element {
   /// 会让“品牌图标”这个位置被应用占走——多应用共用一套窗框时，那一格属于框架。
   void set_icon(std::string icon);
   [[nodiscard]] auto icon() const noexcept -> const std::string& { return icon_; }
+
+  /// 品牌区的**文字**（`["图标"][品牌名][leading 槽…][标题文字]`；空 = 不画）。
+  ///
+  /// 为何要单独一个品牌区（而不是继续用 `leading` 槽或 `set_title`）：
+  /// - `leading` 槽是**宿主的控件位**（菜单栏/面包屑/搜索框）。宿主要摆“图标 + 应用名”
+  ///   时只能把品牌塞进 `leading`——而那样窄窗口下菜单栏会被往右挤，且品牌与
+  ///   宿主控件混在同一个平铺序列里，无法表达“品牌与宿主控件之间有间隔”这类意图。
+  /// - `title` 是**窗口标题**（通常随打开的文件变，也可以是空）。品牌名是**应用身份**，
+  ///   两者生命周期不同——“打开了无标题文档”不应把品牌名也抹掉。
+  ///
+  /// 几何：品牌区在 `[左边距][图标][品牌名]` 这一段（宽度由两者实测宽算定），
+  /// `leading` 槽从品牌区右侧起排；品牌名太长时按标题同样的规则尾随省略。
+  void set_brand(std::string text);
+  [[nodiscard]] auto brand() const noexcept -> const std::string& { return brand_; }
+
+  /// 品牌区的右缘（`leading` 槽的起点；也是没槽时标题文字的起点）。
+  /// 命中/绘制/单测共用同一份几何（避免“测试复刻布局公式”的假绿）。
+  [[nodiscard]] auto brand_rect() const -> math::Rect;
   /// 是否显示窗口控制按钮（默认显示；**与宿主能力无关**——画面跨平台一致，
   /// 能力差异只体现在动作返回值上）。
   void set_show_controls(bool show);
@@ -158,11 +176,15 @@ class TitleBar : public Element {
 
   std::string title_{};
   std::string icon_{};
+  std::string brand_{};
+  /// 品牌区右缘（`arrange` 时实测文字宽后算定；也是 `leading` 槽与标题文字的起点）。
+  float brand_right_{0.0f};
   bool show_controls_{true};
   WindowControl* control_{nullptr};
   std::function<void()> on_double_click_{};
   /// 附属槽（非拥有；同时作为 `Element::children()` 的一部分，见 `content_child_count`）。
   std::vector<Element*> leading_{};
+  /// 右侧尾部槽（`leading` 之后的宿主控件）
   std::vector<Element*> trailing_{};
   /// 槽位边界（`arrange` 时算定）：标题**文字**起始 x 与 `trailing` 槽区左缘。
   ///

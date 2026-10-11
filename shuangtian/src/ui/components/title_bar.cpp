@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <utility>
 
+
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
@@ -109,6 +110,37 @@ void fill_rounded(raster::Surface& canvas, math::Rect rect, float radius, math::
   canvas.fill_path(path, raster::Paint::solid(color));
 }
 
+/// 文本宽度的**保守估计**（不依赖 `TextPort`；见 `arrange` 里的用法）。
+///
+/// 为何要它而不是直接量：`arrange` 可能跑在**无文字端口**的环境里（单测、无头启动
+/// 早期），那时量尺给 0——品牌区会退化成“只有间隔宽”，槽直接压在品牌名上。
+/// 估宽**宁大勿小**：给少了会叠字，给多了只是多一段空白。
+[[nodiscard]] auto estimate_text_width(std::string_view text, float font_size) -> float {
+  float wide = 0.0f;    // CJK / 全角字符数
+  float narrow = 0.0f;  // 拉丁/数字/标点
+  for (std::size_t index = 0; index < text.size();) {
+    const auto lead = static_cast<unsigned char>(text[index]);
+    std::size_t length = 1;
+    if ((lead & 0x80U) == 0) {
+      length = 1;
+    } else if ((lead & 0xE0U) == 0xC0U) {
+      length = 2;
+    } else if ((lead & 0xF0U) == 0xE0U) {
+      length = 3;
+    } else if ((lead & 0xF8U) == 0xF0U) {
+      length = 4;
+    }
+    // 3/4 字节码位大多是全角（CJK、emoji）：按 1.0×字号算；其余按 0.55×字号。
+    if (length >= 3) {
+      wide += 1.0f;
+    } else {
+      narrow += 1.0f;
+    }
+    index += length;
+  }
+  return wide * font_size + narrow * font_size * 0.55f;
+}
+
 }  // namespace
 
 TitleBar::TitleBar(std::string title) : title_(std::move(title)) {
@@ -135,6 +167,13 @@ void TitleBar::set_icon(std::string icon) {
   mark_layout_dirty();
 }
 
+void TitleBar::set_brand(std::string text) {
+  if (brand_ == text) return;
+  brand_ = std::move(text);
+  // 品牌名变长变短会挪 `leading` 槽与标题文字，所以要**重排**（不只是重绘）。
+  mark_layout_dirty();
+}
+
 void TitleBar::set_show_controls(bool show) {
   if (show_controls_ == show) return;
   show_controls_ = show;
@@ -152,6 +191,16 @@ auto TitleBar::controls_rect() const -> math::Rect {
   if (!show_controls_) return {};
   const float width = control_button_size() * static_cast<float>(k_control_count);
   return math::Rect{bounds_.right() - width, bounds_.y, width, bounds_.height};
+}
+
+auto TitleBar::brand_rect() const -> math::Rect {
+  // 品牌区 = `[左边距][图标][间隔][品牌名]`，宽度由 `arrange` 实测后**缓存**（`brand_right_`）。
+  //
+  // 为何不在这里现算：量文字宽需要 `TextPort`（在 `context` 里），而本函数是 `const`
+  // 无 context 的——`caption_rect()`/`drag_rect()` 同属这一类，它们都只读 `arrange`
+  // 算定的标量。两边各算一份就会“槽排在一个位置、标题从另一个位置开始”。
+  const float left = bounds_.x + k_padding_x;
+  return math::Rect{left, bounds_.y, std::max(0.0f, brand_right_ - left), bounds_.height};
 }
 
 auto TitleBar::caption_rect() const -> math::Rect {
@@ -226,8 +275,21 @@ void TitleBar::arrange(const RenderContext& context, math::Rect rect) {
   const float controls_left =
       show_controls_ ? bounds_.right() - control_button_size() * static_cast<float>(k_control_count)
                      : bounds_.right();
-  const float head_left =
-      bounds_.x + k_padding_x + (icon_.empty() ? 0.0f : k_title_icon_size + k_icon_gap);
+  const float head_left = bounds_.x + k_padding_x;
+  // —— 品牌区：`[左边距][图标][间隔][品牌名]` ——
+  //
+  // 品牌名宽度**不能依赖 `TextPort`**：无头/未就绪时它是 `NullTextPort`，量什么都得 0
+  // ——实测踩到：单测里 `brand_span` 是 0，品牌区退化成“只有间隔宽”，`leading` 槽
+  // 直接压在品牌名上。改用**保守估宽**（不需要量尺、宁大勿小）：
+  // 给少了会叠字，给多了只是多一段空白。绘制时再按真实量尺 `ellipsize` 裁切，
+  // 所以估宽不准不会导致溢出，只影响预留间隙。
+  const float icon_span = icon_.empty() ? 0.0f : k_title_icon_size + k_icon_gap;
+  float brand_span = 0.0f;
+  if (!brand_.empty()) {
+    if (!icon_.empty()) brand_span += k_icon_gap;   // 图标与品牌名之间的间隔
+    brand_span += estimate_text_width(brand_, style_.font_size);
+  }
+  brand_right_ = head_left + icon_span + brand_span;
   // 尾部槽（菜单/主题等宿主控件）：从控制按钮左侧往左排。
   float tail_cursor = controls_left;
   float slots_left = controls_left;
@@ -241,12 +303,9 @@ void TitleBar::arrange(const RenderContext& context, math::Rect rect) {
     slots_left = tail_cursor;
     tail_cursor -= k_icon_gap;   // 槽之间的间隙
   }
-  // 前部槽：从**前置图标之后**往右排。
-  //
-  // 为何不从 `head_left` 起：`head_left` 已经把图标宽度算进去了（见其定义），
-  // 从它起排就是“图标宽度被当作空白吐掉”——`leading` 非空时图标又恰好不画，
-  // 结果是标题左侧留着一块看不见的空白（gbcode 的菜单栏正是这个形态）。
-  const float slots_start = head_left + (icon_.empty() ? 0.0f : k_title_icon_size + k_icon_gap);
+  // 前部槽：从**品牌区之后**往右排（不再复用图标占位——那是“图标宽度被当作空白吐掉”
+  // 的来源：`leading` 非空时图标不画，而宽度仍占着，于是标题左侧留着一块看不见的空白）。
+  const float slots_start = brand_right_;
   float head_cursor = slots_start;
   for (Element* slot : leading_) {
     if (slot == nullptr) continue;
@@ -258,7 +317,8 @@ void TitleBar::arrange(const RenderContext& context, math::Rect rect) {
   // 标题**文字**区：从 `leading` 槽之后起（不盖住品牌名），到尾部槽为止。
   // 只记两个标量（标题起点与尾部槽左缘），矩形由 `caption_rect()`/`drag_rect()` 按需算。
   // ⚠ 右界不能取"前部槽的右缘"：那样有前部槽时标题会被算成零宽（实测：标题直接不显示）。
-  title_left_ = leading_.empty() ? slots_start : head_cursor;
+  // 无前部槽时标题从**品牌区之后**起（而不是从 `brand_right_` 之前，那样会叠在品牌名上）。
+  title_left_ = leading_.empty() ? brand_right_ : head_cursor;
   // `slots_left_` 用 **0 作"无尾部槽"哨兵**：有尾部槽时它是真实边界（通常 > 0），
   // 无尾部槽时靠 `controls_left()` 现算——否则关掉控制按钮后它仍是旧值（实测撞到）。
   slots_left_ = trailing_.empty() ? 0.0f : slots_left;
@@ -337,7 +397,7 @@ void TitleBar::paint_content(const RenderContext& context, raster::Surface& canv
   //
   // 文字**只能画到标题带右界**（`caption_rect()`）：标题带在 `arrange` 里已经让开了
   // 附属槽与控制按钮，不按它裁的话长标题会直接叠在宿主控件/按钮上。
-  // 图标画在文字区**左侧**（有 `leading` 槽时图标让位给槽，两者都画会叠在一起）。
+  // 图标画在品牌区**左侧**（即 `[左边距][图标][品牌名][标题文字]`）。
   const math::Rect caption = caption_rect();
   float text_left = caption.x;
   if (!icon_.empty()) {
@@ -351,6 +411,25 @@ void TitleBar::paint_content(const RenderContext& context, raster::Surface& canv
     // 把贴图向右下推了（见该函数注释与 `tests/raster_canvas_at_scale_test.cpp`）。
     // 保留本条注释是因为“视觉偏了”最先会怀疑这里的算式。
     Icon::draw(canvas, icon_, icon_box, style_.color, 0.0f);
+  }
+  // —— 品牌名（在图标右侧、`leading` 槽左侧）——
+  //
+  // 宽度用 `arrange` 算定的 `brand_right_` 反推（**不在这里重量一次**：
+  // 量尺必须与排列同源，否则槽会盖到品牌名上或反之）。
+  if (!brand_.empty()) {
+    const TextPort& port = text_port_of(context);
+    float brand_left = bounds_.x + k_padding_x + (icon_.empty() ? 0.0f : k_title_icon_size + k_icon_gap);
+    const float brand_width = std::max(0.0f, brand_right_ - brand_left);
+    if (brand_width > 1.0f) {
+      const std::string clipped = port.ellipsize(brand_, style_.font_size, brand_width);
+      if (!clipped.empty()) {
+        const float line = port.line_height(style_.font_size);
+        // 品牌名用 **muted** 色（弱于窗口标题）：它是应用身份，不需要跟标题争视觉。
+        port.draw(canvas, clipped,
+                  math::Point{brand_left, bounds_.y + (bounds_.height - line) * 0.5f},
+                  style_.font_size, colors.text_muted);
+      }
+    }
   }
   const float text_width = std::max(0.0f, caption.right() - text_left - metrics.space_sm);
   if (text_width > 1.0f) {

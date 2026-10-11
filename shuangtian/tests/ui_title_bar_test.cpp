@@ -360,6 +360,37 @@ ST_TEST(title_bar_accessory_slots_arrange_inside_the_row) {
   ST_CHECK_EQ(fixture.bar->content_child_count(), 1U);
 }
 
+/// 品牌区（`set_brand`）：应用身份占一格，而槽从它右侧起。
+///
+/// 为何要有这一格（而不是继续把品牌名塞进 `leading` 槽）：槽是**宿主的控件位**
+///（菜单栏/面包屑/搜索框），窄窗口下品牌与宿主控件只能二选一——而品牌名（应用身份）
+/// 与窗口标题（可能要随文件变、可能为空）生命周期不同，混在同一个通道里会互相牵制。
+/// 下面的第一个断言就是那个现场：把品牌名挂进 `leading` 时，它会被当成普通控件。
+ST_TEST(title_bar_brand_area_precedes_slots_and_title) {
+  BarFixture fixture;
+  // 品牌名与图标同在：`[左边距][图标][品牌名][槽…][标题文字]`。
+  fixture.bar->set_brand("霜天 · 组件画廊");
+  auto menu = std::make_unique<st::ui::MenuBar>();
+  menu->set_id("menubar");
+  menu->set_menus({st::ui::Menu{"file", "文件", {st::ui::MenuItem{"new", "新建文件"}}}});
+  auto* leading = fixture.bar->add_leading(std::move(menu));
+  fixture.root.layout(true);
+
+  const Rect brand_rect = fixture.bar->brand_rect();
+  // ① 品牌区非空且**真的占位**（宽度足够画下那几个字）。
+  ST_CHECK(brand_rect.width > 40.0f);
+  // ② `leading` 槽从品牌区**右侧**起（否则菜单会盖在品牌名上）。
+  ST_CHECK(leading->bounds().x >= brand_rect.right() - 0.01f);
+  // ③ 标题文字区在槽之后（品牌名 → 槽 → 标题，三者不叠）。
+  ST_CHECK(fixture.bar->caption_rect().x >= leading->bounds().right() - 0.01f);
+  // ④ 品牌区属于**拖动带**（它是标题栏上的装饰，不是控件）。
+  ST_CHECK(fixture.bar->hits_caption(brand_rect.center()));
+  // ⑤ 品牌名可改空：空的时候不占位（`leading` 槽回落到左边距处置）。
+  fixture.bar->set_brand("");
+  fixture.root.layout(true);
+  ST_CHECK(leading->bounds().x <= brand_rect.right() + 0.01f);
+}
+
 ST_TEST(title_bar_leading_slot_makes_room_for_title_text) {
   BarFixture fixture;
   auto brand = std::make_unique<st::ui::Heading>("霜天 · 组件画廊", 3);
