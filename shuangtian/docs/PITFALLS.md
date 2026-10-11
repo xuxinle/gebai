@@ -95,6 +95,11 @@
 | **每帧无条件 `set_*` 会抹掉控制通道设的值** | 只在"值真变了"时写；持久配置只在首次装上时设一次 | `examples/gbcode/main.cpp` 的 `editor_configured_` 注释 |
 | **`apply_theme` 每次布局都跑** | 在 configure 里写 `style().background` 会**被主题覆盖**（实测：色块看着像没画） | `examples/louyue/canvas_view.hpp` 的 `Swatch` 注释 |
 | **自绘组件不必与 `Element` 成员同名** | `hit_test`（返回 `bool`）已被基类占用；自己的命中判定要另起名字（`grab_at`） | `examples/caiyun/views.hpp` 注释 |
+| **一个条件分支里声明多个视图 = 切走即销毁** | 切换会丢掉滚动位置/输入内容/展开态。要「切回来还是原样」就用**常驻声明 + `set_visible(false)`**（框架在绘制/命中/布局三处都跳过不可见元素），并配“首次访问才声明”避免启动首帧白建全部 | `examples/gbcode/main.cpp` 的 `build_sidebar` 注释 + `tools/gbcode_sidebar_keepalive_e2e.py` |
+| **视图“常驻”后，渲染期里那些只在“切过去那一帧”跑的代码会变成每帧跑** | 典型是渲染期同步起子进程（`process::run`）——它会踩坏声明式树。改为在构建函数里**置一个待办标记**、帧首泵消费 | `examples/gbcode/main.cpp` 的 `git_probe_wanted_` 注释 |
+| **同级分支声明子元素会按位置回收** | 切分支时，新分支里没显式设的属性（icon/width）会**沿用旧分支的值**（实测：远程页的按钮带着日志页刷新钮的 `icon=refresh`）。给每个分支包一层**带 key 的容器** | `DESIGN.md` §4.2.13 |
+| **`Input` 在列里 `grow` 会吃掉剩余高度** | 提交框被拉成三行高的大框、旁边的计数被压成“已…”。输入框要包在**行**里再 `grow` | `DESIGN.md` §4.2.13 |
+| **列表行用 `Button` 要显式左对齐** | 默认居中会让几十行左缘参差不齐（看着像一堆独立按钮），而列表是拿来“扫”左缘的 → `Button::Align::Start` | `include/st/ui/components/basic.hpp` 的 `Align` 注释 |
 
 ## 场景 8：画自绘组件 / 写光栅管线
 

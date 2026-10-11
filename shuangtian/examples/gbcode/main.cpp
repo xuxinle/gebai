@@ -520,6 +520,15 @@ struct CodeEditorPage : Component {
   /// 文件在两组各出现一次（IDEA 同款）。
   gbcode::RepoSnapshot git_{};
   bool git_probed_{false};
+  /// “变更视图请求读一次状态”的待办（渲染期置、帧首泵消费——渲染期不能起子进程）。
+  bool git_probe_wanted_{false};
+  /// 已“访问过”的侧栏视图下标（首次激活后纳入保活集合；见 `build_sidebar`）。
+  ///
+  /// 为何要它：光“全部常驻”会让**启动首帧**一次性构建五棵子树（首帧最贵），
+  /// 而用户真正要的是“**看过的**视图切回来还在”。两者合起来由这套集合表达。
+  /// 必须 `State`：它变了要触发重组（否则新访问的视图下一帧也不会被声明）。
+  State<std::vector<std::size_t>> sidebar_visited_{{0}};   // 0 = 资源管理器（初始视图）
+
   /// 已折叠的分组（跨刷新保留——刷新一下就把分组合回去等于没记住用户的操作）。
   ///
   /// ⚠ 必须 `State`：普通 vector 改了不触发重组，组头点下去**没反应**
@@ -1038,6 +1047,13 @@ struct CodeEditorPage : Component {
       git_refresh_pending_ = false;
       refresh_git();
       git_log_loaded_ = false;   // git 操作后日志也旧了（提交/切分支都改历史）
+    }
+    // 变更视图“首次要读一次 git 状态”的意图（渲染期只置标记，读在这里落地）。
+    // 为何需要：视图改为**常驻声明 + 隐藏保活**后，构建函数每帧都会跑到；
+    // 而“首帧读一次”不能在渲染期直调（见 `build_scm_view` 的注释）。
+    if (git_probe_wanted_) {
+      git_probe_wanted_ = false;
+      if (!workspace_.empty() && !git_probed_) refresh_git();
     }
     ensure_git_log();
     ensure_compare();
@@ -1816,6 +1832,7 @@ struct CodeEditorPage : Component {
             }
             activity_.set(index);
             sidebar_visible_.set(true);
+            mark_sidebar_visited(index);
           };
         }, {.width = 40.0f, .height = 36.0f, .key = kActivities[index].id});
       }
@@ -1890,6 +1907,18 @@ struct CodeEditorPage : Component {
       bottom_tab_.set(0);
       bottom_visible_.set(true);
     }
+  }
+
+  /// 把某个侧栏视图标记为“已访问”（此后它常驻树上、切回来还是原样）。
+  ///
+  /// 集中成一个函数（而不是散在各入口）：活动栏、状态栏分支格、命令面板、
+  /// “与…比较”按钮……都能切视图；漏一处的表现是“从那个入口切过去、切回来位置就丢了”
+  /// ——而这种“只有某条路径会丢”最难被发现。
+  void mark_sidebar_visited(std::size_t index) {
+    auto visited = sidebar_visited_.value();
+    if (std::find(visited.begin(), visited.end(), index) != visited.end()) return;
+    visited.push_back(index);
+    sidebar_visited_.set(std::move(visited));
   }
 
   /// 工作台各视图的标题（侧栏顶部一行：标题 + 该视图的动作按钮）。
@@ -2016,15 +2045,76 @@ struct CodeEditorPage : Component {
   void build_sidebar(Composer& c, const std::vector<OpenBuffer>& buffers, std::size_t active) {
     (void)buffers;
     (void)active;
+    // 各视图**全部常驻声明**，非当前的用 `set_visible(false)` 隐藏。
+    //
+    // 为何不按当前视图只声明一个（旧的 `switch` 写法）：切走时那棵子树会被
+    // **销毁**——滚动位置、输入框里的字、`Tree` 的展开态、`ScrollView` 的偏移
+    // 全部丢掉，再切回来是“刚打开的样子”。用户在这里丢过具体的东西：在资源
+    // 管理器里翻到某个目录、在搜索框里打了一半的关键词、在变更列表里滚到某一行——
+    // 切一下视图就没了。
+    //
+    // 代价：已访问的视图每帧多构建几棵子树。实测这层是纯声明开销（不碰 IO——
+    // 目录扫描有 `dir_cache_`、git 数据在泵里读，layout 只占 0.2~1.1ms），
+    // 比起“丢失用户位置”的代价可以接受。若某个视图将来变重（如带大数据集的
+    // 列表），再给它单独做虚拟化。
+    //
+    // ⚠ 隐藏用 `Panel::set_visible(false)`（不是 `height = 0`）：框架在
+    // 绘制/命中/布局三处都统一跳过不可见元素（`Element::paint` 开头 `!visible_` 直接返回、
+    // `element.cpp:264` 命中跳过），所以隐藏视图既不占位也不抢输入、还**不参与绘制**
+    //——这与底部终端面板“只藏不拆”是同一招。
     column(c, {.gap = 6.0f, .padding = 10.0f, .grow = true, .id = "sidebar-body"}, [&] {
-      switch (activity_.value()) {
-        case 0: build_explorer(c); break;
-        case 1: build_search_view(c); break;
-        case 2: build_scm_view(c); break;
-        case 3: build_run_view(c); break;
-        case 5: build_nav_results_view(c); break;
-        case 6: build_compare_sidebar(c); break;
-        default: build_extensions_view(c); break;
+      struct View {
+        std::size_t index;
+        const char* key;
+        const char* id;
+        void (CodeEditorPage::*build)(Composer&);
+      };
+      // ⚠ `static constexpr` 不能与成员函数指针类型一起推：`constexpr` 要求
+      // 字面类型，而成员指针不是——写成 `static const`（初始化仍是编译期常量）。
+      static const View kViews[] = {
+          {0, "sidebar-explorer", "sidebar-explorer", &CodeEditorPage::build_explorer},
+          {1, "sidebar-search", "sidebar-search", &CodeEditorPage::build_search_view},
+          {2, "sidebar-scm", "sidebar-scm", &CodeEditorPage::build_scm_view},
+          {3, "sidebar-run", "sidebar-run", &CodeEditorPage::build_run_view},
+          {6, "sidebar-compare", "sidebar-compare", &CodeEditorPage::build_compare_sidebar}};
+      const std::size_t current = activity_.value();
+      // **首次访问才声明，之后保活**：
+      // ① 没访问过的视图不参与构建——否则启动首帧要一次性把五棵子树全建出来
+      //    （首帧最贵：文本光栅化、图标解析都落在这一帧），启动会明显卡一下；
+      // ② 访问过的视图一直留在树上（只隐藏），切换才能“回来还是原样”。
+      // 两条合起来才是用户要的语义：**看过的都要能恢复**，没看过的本来无状态可恢复。
+      const auto visited = sidebar_visited_.value();
+      for (const View& view : kViews) {
+        const bool declared =
+            view.index == current ||
+            std::find(visited.begin(), visited.end(), view.index) != visited.end();
+        if (!declared) continue;
+        // `custom_container<Panel>` 的子声明回调**不带参数**（与 `custom<T>` 同），
+        // 所以构建函数在子声明里用当前 `Composer` 调用。
+        const auto build = view.build;
+        (void)custom_container<Panel>(
+            c,
+            [this, build, &c] { (this->*build)(c); },
+            [current, index = view.index, id = view.id](Panel& panel) {
+              panel.set_id(id);
+              panel.set_visible(current == index);
+              panel.style().gap = 6.0f;
+            },
+            {.grow = true, .key = view.key});
+      }
+      // 导航结果与扩展两个视图仍按当前声明（它们的内容本就按一次查询/一次扫描即
+      // 生成，没有“用户位置”可丢）；与上面那几个分开写，是为了不让“保活”这条
+      // 规则被无差别地扩到没必要的地方。
+      if (current == 5) {
+        (void)custom_container<Panel>(
+            c, [this, &c] { build_nav_results_view(c); },
+            [](Panel& panel) { panel.set_id("sidebar-nav"); },
+            {.grow = true, .key = "sidebar-nav"});
+      } else if (current != 0 && current != 1 && current != 2 && current != 3 && current != 6) {
+        (void)custom_container<Panel>(
+            c, [this, &c] { build_extensions_view(c); },
+            [](Panel& panel) { panel.set_id("sidebar-extensions"); },
+            {.grow = true, .key = "sidebar-extensions"});
       }
     });
   }
@@ -2388,7 +2478,15 @@ void replace_in_workspace(std::string_view replacement) {
   // 底部留给"分支 | 日志"（那是回顾历史时才看的，节奏不同——见 build_git_view）。
   void build_scm_view(Composer& c) {
     build_sidebar_head(c, "变更");
-    if (!workspace_.empty() && !git_probed_) refresh_git();
+    // ⚠ **渲染期不能同步跑 git**：声明式重组过程中起子进程（`process::run`）
+    // 会在重组栈上 fork + 管道等待，任何一处重入（`status_.set` 触发同步重组）
+    // 都会踩坏声明式树——这个崩点在 Git 日志那侧实测过（点状态栏分支就 SIGSEGV）。
+    //
+    // 旧写法在这里直调 `refresh_git()`，能“看起来没事”只是因为变更视图**只在
+    // 它是当前视图时才被声明**（切过去的那一帧跑一次）。改成“视图常驻 + 隐藏保活”
+    // 之后，本函数**每帧都会跑到**——必须把读取挪到帧首泵（那里已经在做
+    // `git_refresh_pending_` 与 `ensure_git_log`）。
+    git_probe_wanted_ = true;
     if (workspace_.empty()) {
       (void)text(c, [] { return std::string("内置样例模式：没有工作区可查 Git 状态"); });
       return;
@@ -2430,6 +2528,7 @@ void replace_in_workspace(std::string_view replacement) {
       scm_icon_button(c, "scm-compare", "diff", "与…比较（任意两端）", [this] {
         activity_.set(6);
         sidebar_visible_.set(true);
+        mark_sidebar_visited(6);
         compare_wanted_ = true;
       });
       scm_icon_button(c, "scm-discard-all", "undo", "放弃全部未暂存改动",
@@ -3019,6 +3118,7 @@ b.set_label(std::format("{} {}", change.display_code(), change.display_path()));
             // 点目录段：切到资源管理器（树里高亮/展开由树自身管理）；点文件名段=无动作。
             activity_.set(0);
             sidebar_visible_.set(true);
+            mark_sidebar_visited(0);
             status_.set(last ? "当前文件：" + segment : "已切到资源管理器：" + segment);
           };
         }, {.height = 22.0f, .key = "crumb:" + segment});
@@ -3888,6 +3988,7 @@ b.set_label(std::format("{}  +{} −{}", path, plus, minus));
       status_item(c, "language-label", "", [this] { return active_language(); }, [this] {
         activity_.set(4);
         sidebar_visible_.set(true);
+        mark_sidebar_visited(4);
       });
       (void)text(c, [this] { return status_.value(); }, {.id = "status"});
       (void)button(c, theme_is_dark() ? "亮色" : "暗色", [this] { toggle_theme(); },
@@ -5709,6 +5810,8 @@ b.set_label(std::format("{}  +{} −{}", path, plus, minus));
     }
     nav_results_open_.set(true);
     // 多处结果自动切到导航视图（面板开着才有意义；用户可随时切走）。
+    // 导航结果视图**不纳入保活**（它的内容一次查询即生成，没有“用户位置”可丢）——
+    // 这里只切下标，不进 `sidebar_visited_`。
     if (activity_.value() != 5) activity_.set(5);
     jump_to_location(locations.front());
     status_.set(std::format("找到 {} 处{}，已跳到第 1 处（Alt+← 返回）", locations.size(),
@@ -6821,14 +6924,17 @@ auto run_app(int argc, char** argv) -> int {
     bind("e", true, [page] {
       page->activity_.set(0);
       page->sidebar_visible_.set(true);
+      page->mark_sidebar_visited(0);
     });
     bind("f", true, [page] {
       page->activity_.set(1);
       page->sidebar_visible_.set(true);
+      page->mark_sidebar_visited(1);
     });
     bind("g", true, [page] {
       page->activity_.set(2);
       page->sidebar_visible_.set(true);
+      page->mark_sidebar_visited(2);
       page->refresh_git_request();
     });
     bind("p", true, [page] { page->open_palette(false); });          // Ctrl+Shift+P：命令表
