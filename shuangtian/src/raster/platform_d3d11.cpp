@@ -849,8 +849,16 @@ class GpuCanvas final : public Surface {
                static_cast<std::uint64_t>(std::lround(destination.height * scale_)));
   }
   void draw_canvas_at(const Surface& source, int x, int y, DrawOptions options = {}) override {
+    // ⚠ 与 `Canvas::draw_canvas_at` **必须同语义**：`x/y` 是**物理像素**，
+    // 而 `draw_canvas` 的 `destination` 是逻辑坐标——直接传会多乘一次 `device_scale`。
+    //
+    // 两处实现分开写是“同一语义多处实现”的典型贵处：曾经只修了软件 Canvas 那份，
+    // 真窗口（走本文件）毫无变化，而 headless 回归却全绿——
+    // 看上去“修好了”，实际用户看到的一模一样。
+    const float target_scale = scale_ > 0.0f ? scale_ : 1.0f;
     draw_canvas(source,
-                math::Rect{static_cast<float>(x), static_cast<float>(y),
+                math::Rect{static_cast<float>(x) / target_scale,
+                           static_cast<float>(y) / target_scale,
                            static_cast<float>(source.width()), static_cast<float>(source.height())},
                 options);
   }

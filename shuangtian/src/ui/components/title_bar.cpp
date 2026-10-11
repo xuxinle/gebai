@@ -344,6 +344,12 @@ void TitleBar::paint_content(const RenderContext& context, raster::Surface& canv
     const math::Rect icon_box{bounds_.x + k_padding_x,
                               bounds_.y + (bounds_.height - k_title_icon_size) * 0.5f,
                               k_title_icon_size, k_title_icon_size};
+    // 图标垂直居中在标题栏里：`(栏高 - 图标尺寸) / 2`。
+    //
+    // 注：曾出现“logo 看着偏下”，根因**不在这里**——几何一直是居中的，
+    // 而是 `Canvas::draw_canvas_at` 把物理坐标当逻辑坐标用，多乘了一次 `device_scale`，
+    // 把贴图向右下推了（见该函数注释与 `tests/raster_canvas_at_scale_test.cpp`）。
+    // 保留本条注释是因为“视觉偏了”最先会怀疑这里的算式。
     Icon::draw(canvas, icon_, icon_box, style_.color, 0.0f);
   }
   const float text_width = std::max(0.0f, caption.right() - text_left - metrics.space_sm);

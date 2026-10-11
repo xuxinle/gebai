@@ -1375,8 +1375,17 @@ void Canvas::draw_canvas(const Surface& source, math::Rect destination, DrawOpti
 
 void Canvas::draw_canvas_at(const Surface& source, int x, int y, DrawOptions options) {
   OpScope scope(*this, PaintOp::Image);
+  // ⚠ `x/y` 是**物理像素**（函数名与参数类型都是“像素级贴图”），而 `draw_canvas` 的
+  // `destination` 是**逻辑坐标**（内部还会 `to_physical`）——直接传会把 x/y 再乘一次
+  // `device_scale`，内容整体**向右下溢出**。
+  //
+  // 实测（用户报“标题栏 logo 位置偏下”的根因）：DPI 1.5 下贴到物理 (18,18) 的内容
+  // 落在 27..50——偏了 9 物理（= 18/2），看着像“图标没居中”，实际是坐标系混用。
+  // 回归：`tests/raster_canvas_at_scale_test.cpp`。
+  const float target_scale = scale_ > 0.0f ? scale_ : 1.0f;
   draw_canvas(source,
-              math::Rect{static_cast<float>(x), static_cast<float>(y),
+              math::Rect{static_cast<float>(x) / target_scale,
+                         static_cast<float>(y) / target_scale,
                          static_cast<float>(source.width()), static_cast<float>(source.height())},
               options);
 }

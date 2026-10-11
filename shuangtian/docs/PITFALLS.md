@@ -60,6 +60,9 @@
 | **`SYMBOL_INFO` 不能当普通数组用** | 它的 `Name` 是**柔性数组**：必须整块分配并设 `SizeOfStruct`/`MaxNameLen`。直接 `reinterpret_cast` 一个 `char[N]` 会让 `SymFromAddr` 恒失败，看起来像“二进制没符号” | `src/core/platform_crash.cpp` 的 `walk_stack` 注释 |
 | **`addr2line` 要 link-time 地址** | 传模块内偏移恒得 `??:0`；要加上 PE 首选基址 `0x140000000`。且 DbgHelp 只读 PDB（读不了 MinGW 的 DWARF）——MinGW 构建下自己的帧必然要它兜底 | `src/core/platform_crash.cpp` 的 `walk_stack` 注释 |
 | **本机链接的库看顶层 `system_libs`** | `toolchains.<名>.system_libs` 只在**交叉编译**时**整体接管**；本机构建根本不看它。加 Windows 系统库（`dbghelp`/`psapi`）时两处都要写 | `st.pkg` 的 `//system_libs` 注释 |
+| **改绘制原语前先确认有几份实现** | `Surface` 的绘图原语在 **`Canvas`（软件）与 `platform_d3d11.cpp`（GPU）各有一份**。只修一份时：headless 回归**全绿**，真窗口**一模一样**——看上去“修好了”。实测：`draw_canvas_at` 只修 Canvas 那侧，截图哈希**与修复前逐位相同**。判据：真窗口验证不要用 headless 截图，**比像素哈希** | `src/raster/canvas.cpp` / `platform_d3d11.cpp` 的 `draw_canvas_at` |
+| **`draw_canvas_at` 的 x/y 是物理像素，`draw_canvas` 的 rect 是逻辑** | 两者混用会**多乘一次 `device_scale`**，贴图向右下溢出（DPI 1.5 下 18→偏 9px）。症状看上去是“图标没居中”，去改布局算式会白跑 | `Canvas::draw_canvas_at` 注释 + `tests/raster_canvas_at_scale_test.cpp` |
+| **“看着修好了”必须用哈希对** | 两张人眼看着不同的截图可能**逐位相同**（我报过一次“修好了”，MD5 一模一样）——两次截的是同一个未重启的进程，或修复根本没进渲染路径 | `shuangtian_capture_hash` / `Get-FileHash` |
 | **改构建系统的开关必须看真实命令行** | `st.pkg` 的开关要先变成编译器**看得见的东西**才算数。实测三个静默失效：加进 `flags` 而非 `defines`（不进命令行）/ 往还不存在的 `effective` 里 push（被后面整体覆盖）/ `defines` 要**裸名**却写了 `-D` 前缀（变成 `-D-DST_…`）。三者都不报错，只能靠 `--verbose` 逐字读命令行发现 | `src/pkg/build.cpp` 的 `ST_LOG_DISABLED` 段注释 |
 | **“代码明明改了却没生效”先查工具自身二进制** | `st.exe` 自己也是被构建出来的。改了 `src/pkg/*` 后 `st build X` **不会**重建 `st.exe`——它拿旧版本跑，于是开关全部静默失效。实测：`st.exe` 是 10/9 的、`build.cpp` 是 10/10 的，白查三轮。先 `st build st --profile dev`（且 `st.exe` 在运行时无法覆盖，要用 `build/bin/st.exe` 那个自举副本） | `CONVENTIONS.md` §7.4 的延伸 |
 | **`log::info(` 批量替换会咬到 `st::log::info(`** | 正则 `\blog::info\(` 在 `st::log::info(` 上也匹配，替换后得到 `st::ST_LOG_INFO(`（不存在的宏）。替换后必须全局复查 `::ST_LOG_` 这类残留 | `src/core/entry.cpp` 等 |
