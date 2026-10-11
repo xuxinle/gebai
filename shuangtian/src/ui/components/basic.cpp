@@ -456,7 +456,11 @@ void Button::paint_content(const RenderContext& context, raster::Surface& canvas
   const std::string clipped = port.ellipsize(label_, font_size, available);
   const float text_width = port.measure_width(clipped, font_size);
   const float total = text_width + icon_extent;
-  float cursor = bounds_.x + (bounds_.width - total) * 0.5f;
+  // 横向对齐：默认居中（既有界面零变化）；**列表行**用 `Start` 贴左缘。
+  // 列表是拿来“扫”的，扫的是左缘——居中会让几十行参差不齐（实测截图）。
+  // 贴左时带上左内边距：否则文字紧贴描边（居中时看不出来——居中本就不靠边）。
+  float cursor = content_align_ == Align::Start ? bounds_.x + style_.padding.left
+                                               : bounds_.x + (bounds_.width - total) * 0.5f;
   const float center_y = bounds_.center().y;
 
   if (draws_icon && icon_leading) {

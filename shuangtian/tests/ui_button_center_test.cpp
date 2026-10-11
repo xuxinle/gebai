@@ -207,6 +207,42 @@ ST_TEST(button_content_is_centered_without_icon) {
   ST_CHECK_NEAR(dy, 0.0f, 0.5f);
 }
 
+/// 列表行按钮：`Align::Start` 时**整块内容贴左缘**（含内边距）。
+///
+/// 为何单独立一条：列表（日志/分支/标签/文件清单）用的就是 Button（`Ghost` +
+/// `grow`）。默认居中时行文字在窄栏里会被推到中间，几十行叠在一起左缘参差不齐
+///——实测截图里三行日志看着像三个独立按钮。贴左是**列表可用性**的前提，
+/// 而“居中 → 贴左”只差一个字段，很容易被后来的重构改回去。
+ST_TEST(button_align_start_puts_content_at_left_edge) {
+  DrawingStubPort port{};
+  st::ui::Theme theme{st::ui::Theme::light()};
+  UiRoot root;
+  make_root(root, theme);
+
+  auto owned = std::make_unique<Button>("日志行内容");
+  Button* button = owned.get();
+  button->set_id("row");
+  button->set_variant(Button::Variant::Ghost);
+  button->set_align(Button::Align::Start);
+  ST_CHECK(button->align() == Button::Align::Start);   // 一等读取面（供宿主/测试断言）
+  root.set_content(std::move(owned));
+
+  const Rect box{20.0f, 20.0f, 300.0f, 26.0f};   // 列表行的典型尺寸：宽而不高
+  const RenderContext context{theme, &port, 0.0};
+  button->measure(context, st::ui::Constraints{});
+  button->arrange(context, box);
+
+  const InkBox ink = render_content(*button, context, port);
+  ST_REQUIRE(ink.any);
+  // 墨迹左缘 = 盒左缘 + 左内边距（不能紧贴描边，也不能居中）。
+  const float expected = box.x + button->style().padding.left;
+  st::print("[btn-align] 贴左：墨迹左缘 {:.1f}，期望 {:.1f}（盒左 {:.1f}，中心 {:.1f}）\n",
+            ink.x0, expected, box.x, box.center().x);
+  ST_CHECK_NEAR(ink.x0, expected, 1.0f);
+  // 再镖一条“它确实不在居中位置”：居中时左缘会远离盒左缘（这条防实现退回居中）。
+  ST_CHECK(ink.x0 - box.x < box.width * 0.25f);
+}
+
 /// 图标 + 文字：**两者合成的整块**居中，而不是"文字居中、图标另算"。
 ///
 /// 这条正是 `btn-refresh` 那个缺陷的护栏：图标占位参与了居中计算，

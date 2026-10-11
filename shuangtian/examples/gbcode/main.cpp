@@ -583,6 +583,9 @@ struct CodeEditorPage : Component {
   /// 选中的提交（详情摘要与高亮用）。
   std::string git_selected_hash_{};
   State<std::string> git_commit_summary_{};
+  /// 选中提交的**元信息**（详情栏显示作者与时间——日志行窄，放不下）。
+  std::string git_selected_author_{};
+  std::string git_selected_date_{};
   /// 选中提交的文件清单（`path, +N, −N`）——渲染期只消费（读在 `show_commit` 里）。
   std::vector<std::tuple<std::string, std::size_t, std::size_t>> git_commit_files_{};
   // —— 任意两端比较（参照歌白工作台的「比较视图」）——
@@ -2498,7 +2501,8 @@ void replace_in_workspace(std::string_view replacement) {
               (void)row(c, {.gap = 4.0f, .key = "git:" + change.path}, [&] {
                 (void)custom<Button>(c, [this, change](Button& b) {
                   b.set_id("git-file-" + change.path);
-                  b.set_label(std::format("{} {}", change.display_code(), change.display_path()));
+                  b.set_align(Button::Align::Start);   // 列表行贴左缘（居中会参差不齐）
+b.set_label(std::format("{} {}", change.display_code(), change.display_path()));
                   b.set_variant(Button::Variant::Ghost);
                   b.set_size(Button::Size::Small);
                   b.on_click = [this, change] { open_git_diff(change); };
@@ -3099,6 +3103,20 @@ void replace_in_workspace(std::string_view replacement) {
   // 与左侧「变更」的分工（歌白工作台同一分法）：这里看**历史与引用**——
   // 分支/标签/远程（仓库的“坐标”）与日志（泳道 + refs 胶囊）；点提交看它改了什么。
   // 变更则在左侧（当下要提交的东西）。
+  /// 底部 Git 工具窗：**三栏**（参照 IDEA 的 Git 工具窗）。
+  ///
+  /// ```
+  /// ┌────────────┬─────────────────────────┬──────────────────┐
+  /// │ 引用：       │ 日志（选中的引用范围）      │ 提交内容：         │
+  /// │ 分支/标签/   │ 泳道 + 短 hash + refs    │ 元信息 + 文件清单   │
+  /// │ 暂存/远程    │                         │ （点开并列差异）    │
+  /// └────────────┴─────────────────────────┴──────────────────┘
+  /// ```
+  ///
+  /// 为何是这三栏（而不是平铺五个标签页）：三者是一条**动线**——「选一个引用
+  /// （我在看哪个分支）→ 看它的提交（发生了什么）→ 看某笔提交的内容（具体改了什么）」，
+  /// 每一步的结果都是下一步的输入。做成互斥标签会把这条动线拆成三次“切回去再切过来”。
+  /// 原来的五视图仍在，只是收进**左栏的分组**（它们本来就是“引用的种类”）。
   void build_git_view(Composer& c) {
     // 空态也要挂 `#git-view`（自动化判"视图出现"靠它——空态不是"没有视图"，
     // 是"视图里没有内容"，两码事）。
@@ -3111,17 +3129,61 @@ void replace_in_workspace(std::string_view replacement) {
     // 惰性读在**帧首泵**做（`ensure_git_log`）——渲染期起子进程会在重组栈上
     // fork + 管道等待，任何一处重入（状态 set 触发同步重组）都会踩坏声明式树
     //（实测：点状态栏分支打开 Git 标签 → SIGSEGV，崩点就在渲染期的同步 git 读）。
-    // 渲染期只消费 `git_log_`/`git_branches_`。
+    // 渲染期只消费 `git_log_`/`git_branches_`/`git_tags_`/…。
     git_log_wanted_ = true;   // 本帧在渲染 Git 视图：下一帧泵读数据（首帧空属正常）
     column(c, {.gap = 0.0f, .grow = true, .id = "git-view"}, [&] {
-      build_git_tabs(c);
       // 多步操作中：顶部横幅给“继续 / 跳过 / 中止”（冲突时没有它就只能去命令行）。
       build_operation_banner(c);
-      // ⚠ 每个子视图必须**包一层带 key 的容器**：五个分支直接声明进同一个父容器时，
-      // 切换标签会**按位置回收**子元素——新分支里没显式设的属性（icon/width）
-      // 会沿用旧分支的值。实测：远程页的「推送」按钮带着日志页那个刷新钮的
-      // `icon=refresh`、宽度 26px（而它的正确文本被挤没了）。
-      // 带 key = 告诉框架“这是**另一个**子树”，不跨分支复用。
+      // 三栏 = 嵌套两个 SplitView（`SplitView` 只有两面板：外层“左栏 | 右半”，
+      // 右半再分“中栏 | 右栏”）。每层都带 key：不同层的子声明不能按位置回收。
+      (void)custom_container<SplitView>(
+          c,
+          [&] {
+            (void)custom_container<Panel>(
+                c, [&] { build_ref_sidebar(c); },
+                [](Panel& panel) { panel.set_id("git-refs-panel"); },
+                {.key = "git-refs"});
+            (void)custom_container<Panel>(
+                c,
+                [&] {
+                  (void)custom_container<SplitView>(
+                      c,
+                      [&] {
+                        (void)custom_container<Panel>(
+                            c, [&] { build_log_pane(c); },
+                            [](Panel& panel) { panel.set_id("git-log-panel"); },
+                            {.grow = true, .key = "git-log"});
+                        (void)custom_container<Panel>(
+                            c, [&] { build_commit_detail(c); },
+                            [](Panel& panel) { panel.set_id("git-detail-panel"); },
+                            {.grow = true, .key = "git-detail"});
+                      },
+                      [](SplitView& split) {
+                        split.set_id("git-log-split");
+                        split.set_min_ratio(0.2f);
+                        split.set_ratio(0.62f, false);   // 中栏宽、右栏窄（IDEA 同）
+                      },
+                      {.grow = true, .key = "git-log-split"});
+                },
+                [](Panel& panel) { panel.set_id("git-log-column"); },
+                {.grow = true, .key = "git-log-column"});
+          },
+          [](SplitView& split) {
+            split.set_id("git-view-split");
+            split.set_min_ratio(0.12f);
+            split.set_ratio(0.2f, false);   // 左栏（引用）窄，其余给日志与内容
+          },
+          {.grow = true, .key = "git-view-split"});
+    });
+  }
+
+  /// 左栏：引用（分支 / 标签 / 暂存 / 远程 四个分组，一次只显一组）。
+  ///
+  /// 为何用“分组切换”而不是四个固定块：四个列表长度差异很大（分支可能几十条、
+  /// 远程通常一条），固定同时显示会被最短的那个浪费掉全部高度。
+  void build_ref_sidebar(Composer& c) {
+    build_git_tabs(c);
+    (void)column(c, {.gap = 4.0f, .grow = true, .id = "git-refs-body"}, [&] {
       switch (git_tab_.value()) {
         case 0:
           (void)column(c, {.gap = 4.0f, .grow = true, .id = "git-pane-branches",
@@ -3135,48 +3197,47 @@ void replace_in_workspace(std::string_view replacement) {
           (void)column(c, {.gap = 4.0f, .grow = true, .id = "git-pane-stashes",
                            .key = "pane:stashes"}, [&] { build_stashes_pane(c); });
           break;
-        case 4:
+        default:
           (void)column(c, {.gap = 4.0f, .grow = true, .id = "git-pane-remotes",
                            .key = "pane:remotes"}, [&] { build_remotes_pane(c); });
-          break;
-        default:
-          (void)column(c, {.gap = 4.0f, .grow = true, .id = "git-pane-log",
-                           .key = "pane:log"}, [&] { build_log_pane(c); });
           break;
       }
     });
   }
 
-  /// Git 工具窗的五个子视图标签。
+  /// Git 工具窗左栏的四个**引用分组**（分支 / 标签 / 暂存 / 远程）。
   void build_git_tabs(Composer& c) {
     struct TabDef {
       const char* id;
       const char* label;
     };
-    // 计数进标签（IDEA 同款）：空的分支/标签列表与“读失败”在界面上一眼可区分。
+    // 计数进标签（IDEA 同款）：空的列表与“读失败”在界面上一眼可区分。
+    // ⚠ 这里只有**四个引用类**分组：日志现在占**中栏**（三栏布局），不再是一个标签。
     const std::string branches =
         std::format("分支{}", git_branches_.empty() ? "" : std::format(" {}", git_branches_.size()));
-    const std::string log =
-        std::format("日志{}", git_log_.empty() ? "" : std::format(" {}", git_log_.size()));
     const std::string tags =
         std::format("标签{}", git_tags_.empty() ? "" : std::format(" {}", git_tags_.size()));
     const std::string stashes =
         std::format("暂存{}", git_stashes_.empty() ? "" : std::format(" {}", git_stashes_.size()));
     const std::string remotes =
         std::format("远程{}", git_remotes_.empty() ? "" : std::format(" {}", git_remotes_.size()));
-    const std::array<std::string, 5> labels{branches, log, tags, stashes, remotes};
-    const std::array<const char*, 5> ids{"git-tab-branches", "git-tab-log", "git-tab-tags",
-                                         "git-tab-stashes", "git-tab-remotes"};
+    const std::array<std::string, 4> labels{branches, tags, stashes, remotes};
+    // 内部索引仍沿用旧编号（0=分支 2=标签 3=暂存 4=远程）：它只是“当前分组”的键，
+    // 与数组下标无关，不重排能少一次无意义的坐标变换。
+    const std::array<std::size_t, 4> numbers{0, 2, 3, 4};
+    const std::array<const char*, 4> ids{"git-tab-branches", "git-tab-tags", "git-tab-stashes",
+                                         "git-tab-remotes"};
     (void)row(c, {.gap = 2.0f, .height = 30.0f, .id = "git-tabs"}, [&] {
       for (std::size_t index = 0; index < labels.size(); ++index) {
-        (void)custom<Button>(c, [this, index, label = labels[index], id = ids[index]](Button& b) {
+        (void)custom<Button>(c, [this, number = numbers[index], label = labels[index],
+                                 id = ids[index]](Button& b) {
           b.set_id(id);
           b.set_label(label);
-          b.set_variant(git_tab_.value() == index ? Button::Variant::Soft
-                                                   : Button::Variant::Ghost);
+          b.set_variant(git_tab_.value() == number ? Button::Variant::Soft
+                                                    : Button::Variant::Ghost);
           b.set_size(Button::Size::Small);
-          b.on_click = [this, index] { git_tab_.set(index); };
-        }, {.height = 24.0f, .key = std::format("gittab:{}", index)});
+          b.on_click = [this, number] { git_tab_.set(number); };
+        }, {.height = 24.0f, .key = std::format("gittab:{}", numbers[index])});
       }
     });
   }
@@ -3240,7 +3301,8 @@ void replace_in_workspace(std::string_view replacement) {
             (void)row(c, {.gap = 4.0f, .key = "branch:" + branch.name}, [&] {
               (void)custom<Button>(c, [this, branch](Button& b) {
                 b.set_id("git-branch-" + branch.name);
-                b.set_label(std::format("{}{}{}", branch.is_current ? "● " : "  ", branch.name,
+                b.set_align(Button::Align::Start);   // 列表行贴左缘（居中会参差不齐）
+b.set_label(std::format("{}{}{}", branch.is_current ? "● " : "  ", branch.name,
                                         branch.is_remote ? "（远程）" : ""));
                 b.set_variant(branch.is_current ? Button::Variant::Soft : Button::Variant::Ghost);
                 b.set_size(Button::Size::Small);
@@ -3276,7 +3338,8 @@ void replace_in_workspace(std::string_view replacement) {
             (void)row(c, {.gap = 4.0f, .key = "tag:" + tag.name}, [&] {
               (void)custom<Button>(c, [this, tag](Button& b) {
                 b.set_id("git-tag-" + tag.name);
-                b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
+                b.set_align(Button::Align::Start);   // 列表行贴左缘（居中会参差不齐）
+b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
                                         tag.target, tag.subject));
                 b.set_variant(Button::Variant::Ghost);
                 b.set_size(Button::Size::Small);
@@ -3404,32 +3467,50 @@ void replace_in_workspace(std::string_view replacement) {
     }
   }
 
-  /// 子视图 1：日志（过滤 + 泳道 + 选中提交的文件清单）。
+  /// 中栏：日志（过滤 + 泳道图 + 范围提示）。
+  ///
+  /// 与右栏的分工：中栏回答“**发生了什么**”（一笔笔提交），右栏回答
+  /// “**这一笔改了什么**”（文件与具体差异）。两者同屏才能“选中即看内容”，
+  /// 而互斥标签页会把这条动线打断。
   void build_log_pane(Composer& c) {
-    (void)build_log_filters(c);
-    (void)row(c, {.gap = 0.0f, .grow = true, .id = "git-log-row"}, [&] {
-      (void)custom_container<ScrollView>(
-          c,
-          [&] {
-            const auto entries = filtered_log();
-            if (entries.empty()) {
-              (void)text(c, [] { return std::string("（没有提交，或读取失败）"); });
-              return;
-            }
-            for (const auto& entry : entries) {
-              (void)custom<Button>(c, [this, entry](Button& b) {
-                b.set_id("git-log-" + entry.short_hash);
-                b.set_label(log_line_label(entry));
-                b.set_variant(entry.short_hash == git_selected_hash_ ? Button::Variant::Soft
-                                                                    : Button::Variant::Ghost);
-                b.set_size(Button::Size::Small);
-                b.on_click = [this, entry] { show_commit(entry); };
-              }, {.height = 26.0f, .key = "log:" + entry.short_hash});
-            }
-          },
-          [](ScrollView& scroll) { scroll.set_id("git-log-scroll"); },
-          {.grow = true, .id = "git-log-host"});
-      if (!git_selected_hash_.empty()) build_commit_detail(c);
+    build_pane_head(c, "git-log-head", [this] {
+      return std::format("日志{}  {}", git_log_.empty() ? "" : std::format(" {}", git_log_.size()),
+                         git_.branch.empty() ? std::string{} : "· " + git_.branch);
+    }, "log-refresh");
+    build_log_filters(c);
+    (void)custom_container<ScrollView>(
+        c,
+        [&] {
+          const auto entries = filtered_log();
+          if (entries.empty()) {
+            (void)text(c, [] { return std::string("（没有提交，或读取失败）"); });
+            return;
+          }
+          for (const auto& entry : entries) {
+            (void)custom<Button>(c, [this, entry](Button& b) {
+              b.set_id("git-log-" + entry.short_hash);
+              b.set_align(Button::Align::Start);   // 列表行贴左缘（居中会参差不齐）
+b.set_label(log_line_label(entry));
+              b.set_variant(entry.short_hash == git_selected_hash_ ? Button::Variant::Soft
+                                                                  : Button::Variant::Ghost);
+              b.set_size(Button::Size::Small);
+              b.on_click = [this, entry] { show_commit(entry); };
+            }, {.height = 26.0f, .key = "log:" + entry.short_hash});
+          }
+        },
+        [](ScrollView& scroll) { scroll.set_id("git-log-scroll"); },
+        {.grow = true, .id = "git-log-host"});
+  }
+
+  /// 一栏的标题行（标题 + 右侧一个可选图标钮）——三栏各一份，职责一眼可辨。
+  void build_pane_head(Composer& c, const char* id, std::function<std::string()> title,
+                       const char* action_id) {
+    (void)row(c, {.gap = 4.0f, .height = 26.0f, .id = id}, [&] {
+      (void)text(c, [title = std::move(title)] { return title(); },
+                 {.grow = true, .weight = FontWeight::Medium, .id = std::string(id) + "-title"});
+      if (action_id != nullptr) {
+        scm_icon_button(c, action_id, "refresh", "重新读取", [this] { git_log_loaded_ = false; });
+      }
     });
   }
 
@@ -3484,28 +3565,49 @@ void replace_in_workspace(std::string_view replacement) {
     return out;
   }
 
-  /// 选中提交的详情（文件清单 + 点开并列差异）。
+  /// 右栏：**选中提交的内容**（元信息 + 汇总 + 文件清单；点文件开并列差异）。
+  ///
+  /// 为何独立成一栏（而不是塞在日志下方）：看历史是“扫很多笔 → 挑一笔 → 看它改了什么”，
+  /// 而“改了什么”是**当前唯一要看的东西**——把它压在日志下面会被迫滚动。
   void build_commit_detail(Composer& c) {
-    (void)column(c, {.gap = 2.0f, .id = "git-commit-detail"}, [&] {
-      (void)text(c, [this] { return git_commit_summary_.value(); },
-                 {.color = Tone::Muted, .id = "git-commit-summary"});
-      if (git_commit_files_.empty()) return;
-      (void)custom_container<ScrollView>(
-          c,
-          [&] {
-            for (const auto& [path, plus, minus] : git_commit_files_) {
-              (void)custom<Button>(c, [this, path, plus, minus](Button& b) {
-                b.set_id("commit-file-" + path);
-                b.set_label(std::format("{}  +{} −{}", path, plus, minus));
-                b.set_variant(Button::Variant::Ghost);
-                b.set_size(Button::Size::Small);
-                b.on_click = [this, path] { open_commit_file(git_selected_hash_, path); };
-              }, {.height = 24.0f, .key = "cfile:" + path});
-            }
-          },
-          [](ScrollView& scroll) { scroll.set_id("git-commit-files-scroll"); },
-          {.id = "git-commit-files"});
-    });
+    // 标题栏：未选中时也显示（告知“这里是什么、怎么用”），选中时带短 hash。
+    // 空态不是“没有这一栏”，而是“这一栏里还没有内容”——两码事（自动化也靠 id 判存在）。
+    build_pane_head(c, "git-detail-head", [this] {
+      return git_selected_hash_.empty() ? std::string("提交内容")
+                                        : "提交 " + git_selected_hash_;
+    }, nullptr);
+    if (git_selected_hash_.empty()) {
+      (void)text(c, [] { return std::string("在中栏选一笔提交，这里显示它改动的文件。"); },
+                 {.color = Tone::Muted, .id = "git-detail-empty"});
+      return;
+    }
+    (void)text(c, [this] { return git_commit_summary_.value(); },
+               {.color = Tone::Muted, .id = "git-commit-summary"});
+    // 元信息（作者 + 时间）——日志行窄，放不下这两项；详情栏宽一些，正好补上。
+    (void)text(c, [this] {
+      return std::format("{} · {}", git_selected_author_, git_selected_date_);
+    }, {.color = Tone::Muted, .id = "git-commit-meta"});
+    if (git_commit_files_.empty()) {
+      (void)text(c, [] { return std::string("（这笔提交没有改动文件）"); },
+                 {.id = "git-detail-no-files"});
+      return;
+    }
+    (void)custom_container<ScrollView>(
+        c,
+        [&] {
+          for (const auto& [path, plus, minus] : git_commit_files_) {
+            (void)custom<Button>(c, [this, path, plus, minus](Button& b) {
+              b.set_id("commit-file-" + path);
+              b.set_align(Button::Align::Start);   // 列表行贴左缘（居中会参差不齐）
+b.set_label(std::format("{}  +{} −{}", path, plus, minus));
+              b.set_variant(Button::Variant::Ghost);
+              b.set_size(Button::Size::Small);
+              b.on_click = [this, path] { open_commit_file(git_selected_hash_, path); };
+            }, {.height = 24.0f, .key = "cfile:" + path});
+          }
+        },
+        [](ScrollView& scroll) { scroll.set_id("git-commit-files-scroll"); },
+        {.grow = true, .id = "git-commit-files"});
   }
 
   /// 确认一个**不可逆/需确认**的写操作（统一入口：弹确认 → 批准后才执行）。
@@ -3653,8 +3755,10 @@ void replace_in_workspace(std::string_view replacement) {
       added += plus;
       removed += minus;
     }
-    git_commit_summary_.set(std::format("{} · {} 个文件 · +{} −{} · {}", entry.short_hash,
-                                        copy.files.size(), added, removed, entry.author));
+    git_commit_summary_.set(std::format("{} · {} 个文件 · +{} −{}", entry.short_hash,
+                                        copy.files.size(), added, removed));
+    git_selected_author_ = entry.author;
+    git_selected_date_ = entry.date;
     // 文件清单存下来（渲染期只消费）：它是“看具体改动”的入口。
     git_commit_files_ = copy.files;
     status_.set("提交 " + entry.short_hash + "：" + entry.subject.substr(0, 40));

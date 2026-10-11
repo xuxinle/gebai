@@ -182,32 +182,50 @@ def main():
         check(client.count("#scm-compare") == 1, "工具条有「与…比较」入口")
         check(client.count("#git-group-冲突") == 1, "冲突分组出现（merge 冲突中）")
 
-        # ② 底部 Git 工具窗：五个子视图标签。
+        # ② 底部 Git 工具窗：**三栏**（引用 | 日志 | 提交内容）。
+        #    三栏是三个**同时在场**的面板（是一条动线，不是互斥标签）。
         client.click("#activity-git")
-        wait_until(lambda: client.count("#git-tabs") == 1, what="Git 标签页出现")
-        for tab, label in [("branches", "分支"), ("log", "日志"), ("tags", "标签"),
+        wait_until(lambda: client.count("#git-view-split") == 1, what="Git 三栏出现")
+        check(client.count("#git-refs-panel") == 1, "左栏（引用）在场")
+        check(client.count("#git-log-panel") == 1, "中栏（日志）在场")
+        check(client.count("#git-detail-panel") == 1, "右栏（提交内容）在场")
+        check(client.count("#git-log-split") == 1, "中/右栏之间还有一层分栏（嵌套 SplitView）")
+        # 三栏的横向次序：引用 < 日志 < 提交内容（同一个 row 里从左到右）。
+        refs_box = client.ok("find", {"selector": "#git-refs-panel"})["matches"][0]["bounds"]
+        log_box = client.ok("find", {"selector": "#git-log-panel"})["matches"][0]["bounds"]
+        detail_box = client.ok("find", {"selector": "#git-detail-panel"})["matches"][0]["bounds"]
+        check(refs_box["x"] < log_box["x"] < detail_box["x"],
+              f"三栏从左到右是 引用({refs_box['x']:.0f}) < 日志({log_box['x']:.0f}) "
+              f"< 提交内容({detail_box['x']:.0f})")
+
+        # 左栏的四个引用分组（日志已占中栏，不再是标签）。
+        for tab, label in [("branches", "分支"), ("tags", "标签"),
                            ("stashes", "暂存"), ("remotes", "远程")]:
-            check(client.count(f"#git-tab-{tab}") == 1, f"工具窗有「{label}」标签")
+            check(client.count(f"#git-tab-{tab}") == 1, f"左栏有「{label}」分组")
+        check(client.count("#git-tab-log") == 0, "日志不再是左栏标签（已占中栏）")
+        check(client.count("#git-log-head") == 1, "中栏有标题行")
+        check(client.count("#git-detail-head") == 1, "右栏有标题行")
+        check(client.count("#git-detail-empty") == 1, "未选中提交时右栏给空态提示")
 
         # ③ 多步操作横幅：merge 中必须给「继续/跳过/中止」。
         wait_until(lambda: client.count("#git-operation-banner") == 1, what="多步操作横幅")
         for button in ["git-op-continue", "git-op-skip", "git-op-abort"]:
             check(client.count(f"#{button}") == 1, f"横幅有 #{button}")
 
-        # ④ 标签视图：读到 v0.1。
+        # ④ 标签分组：读到 v0.1（它现在在**左栏**的「标签」分组里）。
         #
         # ⚠ 选择器要写成 `[id="…"]` 而**不是** `#git-tag-v0.1`：标签名里的点号
         # 在 CSS 里是类分隔符，`#git-tag-v0.1` 会被解成 `#git-tag-v0` + `.1`，
         # 永远匹配不到（实测：等 25s 超时，而元素就在那儿）。
         client.click("#git-tab-tags")
         wait_until(lambda: client.count('[id="git-tag-v0.1"]') == 1, what="标签列表")
-        check(client.count('[id="git-tag-v0.1"]') == 1, "标签视图列出 v0.1")
+        check(client.count('[id="git-tag-v0.1"]') == 1, "左栏「标签」分组列出 v0.1")
 
-        # ⑤ 分支视图：当前分支标记 + 新建/删除入口。
+        # ⑤ 分支分组：当前分支标记 + 新建/删除入口。
         client.click("#git-tab-branches")
         wait_until(lambda: client.count("#git-branch-main") == 1, what="分支列表")
-        check(client.count("#git-branch-main") == 1, "分支视图列出 main")
-        check(client.count("#branch-new") == 1, "分支视图有「新建分支」")
+        check(client.count("#git-branch-main") == 1, "左栏「分支」分组列出 main")
+        check(client.count("#branch-new") == 1, "分支分组有「新建分支」")
 
         # ⑥ 新建分支浮层：取消可关（不真的动仓库）。
         client.click("#branch-new")
@@ -218,8 +236,6 @@ def main():
         check(client.count("#branch-new-name") == 0, "取消后浮层关闭")
 
         # ⑦ 危险操作**必须**先确认：强制推送点下去只弹确认，不执行。
-        #    确认框先关掉（它是**模态**的——不关就点不到下面的横幅按钮，
-        #    实测：直接点 `#git-op-abort` 会被遮罩吃掉，于是“中止无效”但实际是“根本没点到”）。
         client.click("#git-tab-remotes")
         wait_until(lambda: client.count("#remote-force-push") == 1, what="远程视图")
         client.click("#remote-force-push")

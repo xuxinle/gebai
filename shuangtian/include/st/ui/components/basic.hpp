@@ -88,6 +88,17 @@ class IconView : public Element {
 class Button : public Element {
  public:
   enum class Variant : std::uint8_t { Primary, Secondary, Ghost, Soft, Danger };
+  /// 内容横向对齐（与布局侧的 `st::ui::Align` 同名同义，但作为按钮自己的接口
+  /// 暴露：调用方写 `Button::Align::Start` 才读得出“这是按钮的内容对齐”）。
+  ///
+  /// 为何需要它（2026-10-11，实测）：默认**居中**对单个按钮是对的，但
+  /// **列表行**用的也是 Button（`Ghost` + `grow` 铺满一行）。居中的行文字在
+  /// 窄栏里会被推到中间，几十行叠在一起左缘参差不齐——列表是拿来“扫”的，
+  /// 扫的是左缘。实测截图：Git 日志三行各自居中，看着像三个独立按钮
+  /// 而不是一个列表。
+  ///
+  /// 默认 `Center` 保证既有界面零变化；列表行显式写 `Start`。
+  using Align = st::ui::Align;
   enum class Size : std::uint8_t { Small, Medium, Large };
 
   explicit Button(std::string label, Variant variant = Variant::Primary,
@@ -101,6 +112,9 @@ class Button : public Element {
   void set_variant(Variant variant);
   void set_size(Size size);
   void set_tone(Tone tone);
+  /// 内容横向对齐（默认居中；列表行传 `Start`）。
+  void set_align(Align align) noexcept { content_align_ = align; }
+  [[nodiscard]] auto align() const noexcept -> Align { return content_align_; }
   [[nodiscard]] auto variant() const noexcept -> Variant { return variant_; }
 
   /// **图标盒径**（逻辑 px）——与 `apply_theme` 同一入口写入，供测试/宿主读取。
@@ -143,6 +157,9 @@ class Button : public Element {
   Tone tone_{Tone::Default};
   /// 图标盒径（由 `apply_theme` 按 Size 档从 `Metrics::icon_size*` 取）。
   float icon_size_{22.0f};
+  /// 内容横向对齐（**与 `style_.align_items` 区分**：那个管的是“图标与文字在
+  /// 交叉轴上如何对齐”，本字段管的是“整块内容在按钮里靠哪边”）。
+  Align content_align_{Align::Center};
 };
 
 /// 卡片容器：`surface` 底 + 描边 + 圆角 + 阴影 + 内边距。
