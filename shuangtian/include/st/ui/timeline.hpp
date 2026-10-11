@@ -121,6 +121,9 @@ class Model {
   // —— 轨道与片段 ——
   void set_tracks(std::vector<Track> tracks);
   [[nodiscard]] auto tracks() const noexcept -> const std::vector<Track>& { return tracks_; }
+  /// 可变访问：宿主用它改轨道属性（名称/锁定/静音/高度）与片段集合。
+  /// 改完几何相关的字段（`height`）后，组件会在下一帧重排。
+  [[nodiscard]] auto tracks() noexcept -> std::vector<Track>& { return tracks_; }
   [[nodiscard]] auto track_count() const noexcept -> std::size_t { return tracks_.size(); }
   /// 找片段的可变引用（`nullptr` = 不存在）。
   [[nodiscard]] auto find_clip(std::size_t track, std::size_t clip) -> Clip*;

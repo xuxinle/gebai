@@ -1017,16 +1017,24 @@ void Application::tick() {
   // 不转），这里只负责把**布局视口**改到同一条线上——两边不一致的话，下一帧仍会
   // 按旧视口排布（表现为"松手后内容才重新排列"）。
   if (impl_->repaint || root_.dirty()) render_frame();
-  // 脚本定时器与"高频事件合并"的补发：按帧推进，不额外起线程
+  // 脚本定时器：按帧推进，不额外起线程
   if (impl_->script != nullptr) (void)impl_->script->tick(0.0);
   if (impl_->script != nullptr && impl_->script->take_repaint_request()) impl_->repaint = true;
   if (impl_->server != nullptr) impl_->server->poll();
+  // 排空后端事件。**指针移动走合并**（见 `input_coalescer.hpp`）：拖动时
+  // `WM_MOUSEMOVE` 可达 125~1000 次/秒，逐个派发会让绘制类应用在一帧里改几百次文档
+  //（并推几百条撤销记录）。合并在**这里**（帧循环）而不是 `UiRoot::dispatch`：
+  // 只有这里有"帧"的概念，而测试/控制通道期望"调一次派发一次"。
   while (true) {
     auto event = impl_->backend->poll_event();
     if (!event.has_value()) break;
-    (void)root_.dispatch(*event);
+    if (!root_.feed_pointer_move(*event)) {
+      (void)root_.dispatch(*event);
+    }
     impl_->repaint = true;
   }
+  // 帧末把合并的移动派发出去（位置取最新；本帧走过的整段由合并器的 `earliest` 记录）。
+  (void)root_.flush_coalesced_moves();
 }
 
 Application::~Application() {

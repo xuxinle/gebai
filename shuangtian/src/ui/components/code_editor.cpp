@@ -1602,55 +1602,58 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
         }
       }
     }
+
       // 勾选框：**与时序（`LineMark`）无关地画**。
       //
       // 它原本嵌在 `if (use_ink)` 里，于是 `LineMark::None` 的行（正是「没改动的行」）
       // 永远不画框——而用户要选的恰好是改动行，看起来就像「勾选框根本不会画」
       //（实测踩到：像素断言显示开/关模式画面完全一样，探针也一条都没打）。
-          // 勾选框：画在 gutter **最左**（竖条已让到右缘，两者不叠）。
-          if (decoration->check != LineDecoration::Check::None) {
-            const float box = std::max(9.0f, std::min(13.0f, height * 0.62f));
-            const math::Rect box_rect{bounds_.x + kGutterPadding * 0.5f,
-                                      row_top + (height - box) * 0.5f, box, box};
-            const bool checked = decoration->check == LineDecoration::Check::Checked;
-            const bool disabled = decoration->check == LineDecoration::Check::Disabled;
-            const math::Color edge = disabled ? colors.text_muted.with_alpha_f(0.5F)
-                                              : (checked ? colors.primary : colors.text_muted);
-            canvas.fill_rect(box_rect,
-                             raster::Paint::solid(checked && !disabled
-                                                      ? colors.primary.with_alpha_f(0.9F)
-                                                      : colors.surface),
-                             2.0f);
-            // 边框用四道 1px 实心条画（框架的描边只有 `stroke_path`，为一个方框
-            // 引 Path 不划算；而 1px 的四条与真描边在视觉上不可分辨）。
-            const raster::Paint edge_paint = raster::Paint::solid(edge);
-            canvas.fill_rect(math::Rect{box_rect.x, box_rect.y, box_rect.width, 1.0f}, edge_paint,
-                             0.0f);
-            canvas.fill_rect(math::Rect{box_rect.x, box_rect.bottom() - 1.0f, box_rect.width, 1.0f},
-                             edge_paint, 0.0f);
-            canvas.fill_rect(math::Rect{box_rect.x, box_rect.y, 1.0f, box_rect.height}, edge_paint,
-                             0.0f);
-            canvas.fill_rect(math::Rect{box_rect.right() - 1.0f, box_rect.y, 1.0f, box_rect.height},
-                             edge_paint, 0.0f);
-            if (checked && !disabled) {
-              // 勾：用一串小方块沿两段斜线铺（不依赖图标资源——无图标后端也要能看）。
-              const raster::Paint tick = raster::Paint::solid(colors.on_primary);
-              const math::Point start{box_rect.x + box * 0.24f, box_rect.y + box * 0.50f};
-              const math::Point corner{box_rect.x + box * 0.44f, box_rect.y + box * 0.72f};
-              const math::Point finish{box_rect.x + box * 0.78f, box_rect.y + box * 0.26f};
-              const auto draw_tick = [&canvas, tick](math::Point from, math::Point to) {
-                const int steps = 8;
-                for (int step = 0; step <= steps; ++step) {
-                  const float t = static_cast<float>(step) / static_cast<float>(steps);
-                  const float x = from.x + (to.x - from.x) * t;
-                  const float y = from.y + (to.y - from.y) * t;
-                  canvas.fill_rect(math::Rect{x - 0.9f, y - 0.9f, 1.8f, 1.8f}, tick, 0.0f);
-                }
-              };
-              draw_tick(start, corner);
-              draw_tick(corner, finish);
+      //
+      // 它在 gutter **最左**（槽内竖条已让到右缘，两者不叠）。
+      if (decoration != nullptr && decoration->check != LineDecoration::Check::None) {
+        const float box = std::max(9.0f, std::min(13.0f, height * 0.62f));
+        const math::Rect box_rect{bounds_.x + kGutterPadding * 0.5f,
+                                  row_top + (height - box) * 0.5f, box, box};
+        const bool checked = decoration->check == LineDecoration::Check::Checked;
+        const bool disabled = decoration->check == LineDecoration::Check::Disabled;
+        const math::Color edge = disabled ? colors.text_muted.with_alpha_f(0.5F)
+                                          : (checked ? colors.primary : colors.text_muted);
+        canvas.fill_rect(box_rect,
+                         raster::Paint::solid(checked && !disabled
+                                                  ? colors.primary.with_alpha_f(0.9F)
+                                                  : colors.surface),
+                         2.0f);
+        // 边框用四道 1px 实心条画（框架的描边只有 `stroke_path`，为一个方框引 Path
+        // 不划算；而 1px 的四条与真描边在视觉上不可分辨）。
+        const raster::Paint edge_paint = raster::Paint::solid(edge);
+        canvas.fill_rect(math::Rect{box_rect.x, box_rect.y, box_rect.width, 1.0f}, edge_paint, 0.0f);
+        canvas.fill_rect(
+            math::Rect{box_rect.x, box_rect.bottom() - 1.0f, box_rect.width, 1.0f}, edge_paint,
+            0.0f);
+        canvas.fill_rect(math::Rect{box_rect.x, box_rect.y, 1.0f, box_rect.height}, edge_paint,
+                         0.0f);
+        canvas.fill_rect(
+            math::Rect{box_rect.right() - 1.0f, box_rect.y, 1.0f, box_rect.height}, edge_paint,
+            0.0f);
+        if (checked && !disabled) {
+          // 勾：用一串小方块沿两段斜线铺（不依赖图标资源——无图标后端也要能看）。
+          const raster::Paint tick = raster::Paint::solid(colors.on_primary);
+          const math::Point tick_start{box_rect.x + box * 0.24f, box_rect.y + box * 0.50f};
+          const math::Point tick_corner{box_rect.x + box * 0.44f, box_rect.y + box * 0.72f};
+          const math::Point tick_finish{box_rect.x + box * 0.78f, box_rect.y + box * 0.26f};
+          const auto draw_tick = [&canvas, tick](math::Point from, math::Point to) {
+            constexpr int kSteps = 8;
+            for (int step = 0; step <= kSteps; ++step) {
+              const float t = static_cast<float>(step) / static_cast<float>(kSteps);
+              const float x = from.x + (to.x - from.x) * t;
+              const float y = from.y + (to.y - from.y) * t;
+              canvas.fill_rect(math::Rect{x - 0.9f, y - 0.9f, 1.8f, 1.8f}, tick, 0.0f);
             }
-          }
+          };
+          draw_tick(tick_start, tick_corner);
+          draw_tick(tick_corner, tick_finish);
+        }
+      }
 
     // 当前行底色 + 行号槽内的当前行指示（行号槽高亮 = VSCode 的“我在哪一行”锚点）
     if (line == current) {

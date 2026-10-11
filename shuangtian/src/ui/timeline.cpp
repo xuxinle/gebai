@@ -8,6 +8,11 @@ namespace st::ui::timeline {
 
 namespace {
 
+/// `hit_test` 的默认修剪边缘带宽（`edge_px` 缺省值用）。
+/// 定义在这里而不是函数签名默认值里：`Model::hit_test` 是公开接口，
+/// 而"默认多宽"是**实现口径**（调用方可覆盖）。
+constexpr float kDefaultEdgePx = 6.0f;
+
 /// 毫秒 → 秒（浮点）。换算里唯一的除法点。
 [[nodiscard]] auto to_seconds(Millis value) -> double {
   return static_cast<double>(value) / 1000.0;
@@ -113,22 +118,41 @@ auto Model::playhead_x() const -> std::optional<float> {
 
 auto Model::hit_test(float x, float y, float edge_px) const -> Hit {
   Hit result;
-  // ① 播放头优先：它是 1~2px 的线，若排在片段之后，一旦有片段盖住就再也抓不住
-  //（而用户拖播放头的频率远高于拖那个片段）。
-  if (const auto head = playhead_x(); head.has_value()) {
-    if (std::fabs(x - *head) <= std::max(1.5f, edge_px * 0.5f)) {
-      result.playhead = true;
-      return result;
-    }
-  }
-
   const std::size_t track = track_at_y(y);
   if (track == kNone) return result;
   result.track = track;
 
-  // ②③ 在**同一 x** 上从右往左找：视觉上"后画的"（数组靠后的）压在上面，
-  // 所以它应当先被抓住。用逆序遍历，命中即返回。
+  // ② **修剪边缘优先于播放头**（但播放头刚已判过）——这里先看有没有边缘命中：
+  // 若这一 x 落在某个片段的修剪边缘上，它比播放头更该被抓住（播放头随时可以
+  // 点标尺移走，而边缘是"只能在这里抓"的操作）。
+  //
+  // 顺序设计：**标尺带里播放头优先**（那里没有片段），**轨道区里边缘优先**。
+  // 两者共存的情形（播放头停在 0ms、第一个片段也从 0 开始）曾让左缘完全抓不住
+  //（实测：修剪左边缘没反应）。所以这里先扫一遍边缘，命中就返回；
+  // 没有再回头看播放头。
   const auto& clips = tracks_[track].clips;
+  for (std::size_t offset = clips.size(); offset > 0; --offset) {
+    const std::size_t index = offset - 1;
+    const Clip& clip = clips[index];
+    if (clip.duration <= 0) continue;
+    const auto [left, right] = clip_x_range(track, index);
+    const float edge = std::min(kDefaultEdgePx, std::max(0.5f, (right - left) / 3.0f));
+    const bool on_left = x >= left && x < left + edge;
+    const bool on_right = x > right - edge && x <= right;
+    if (!on_left && !on_right) continue;
+    result.track = track;
+    result.clip = index;
+    result.part = on_left ? ClipPart::LeftEdge : ClipPart::RightEdge;
+    return result;
+  }
+  // ③ 没有边缘命中：这时才让播放头抢（它可能压在片体上）。
+  if (const auto head = playhead_x(); head.has_value()) {
+    if (std::fabs(x - *head) <= 2.0f) {
+      result.playhead = true;
+      return result;
+    }
+  }
+  // ④ 片体（同一 x 上从右往左取"视觉上压在上面"的那条）。
   for (std::size_t offset = clips.size(); offset > 0; --offset) {
     const std::size_t index = offset - 1;
     const Clip& clip = clips[index];

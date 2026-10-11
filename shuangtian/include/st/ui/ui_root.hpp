@@ -59,7 +59,17 @@ class UiRoot : public Element::HostFocus {
   /// 事件分发（命中测试 → 捕获链 → 冒泡；焦点/悬停状态随之更新）。
   [[nodiscard]] auto dispatch(Event& event) -> bool;
 
-  /// 帧末把本帧合并的指针移动派发出去（见 `input_coalescer.hpp`）。
+  /// 帧内合并的**入口**：宿主在它的帧循环里收到 `MouseMove` 时先调它。
+  ///
+  /// 返回 `true` = 已被收下（宿主**不要**再 `dispatch` 这个事件）；
+  /// `false` = 不该合并（非移动事件，或正在拖拽）——宿主照常 `dispatch`。
+  ///
+  /// ⚠ 这是**宿主显式选择**，不是 `dispatch` 的自动行为：`dispatch` 的三类调用者里
+  /// 只有真窗口帧循环有"帧"的概念（测试与控制通道期望"调一次就派发一次"）。
+  /// 早期版本把合并塞进 `dispatch`，直接让整套单测在菜单用例处
+  /// 越界崩溃（`opened[0]` 在派发被推迟后为空）——那是**改动引入的真回归**。
+  auto feed_pointer_move(Event& event) -> bool;
+  /// 帧末把本帧合并的指针移动派发出去（配合 `feed_pointer_move`）。
   ///
   /// 返回本帧实际派发的移动次数（`1 + 被合并掉的次数`；无移动返回 0）。
   /// 宿主在**画完一帧之后**调它——顺序反了就等于"没合并"。
