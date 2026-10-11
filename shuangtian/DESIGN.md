@@ -1199,6 +1199,21 @@ append/clear` 六个便利函数（**薄包装** `apply_properties`/`invoke_elem
 | 8 | 底部那条跑到窗口中间 | `WindowFrame::content()` 没 `grow`——内容槽只占“内容高”，而调用方看自己的子树是满的，极难定位 |
 | 9 | `ui.append` 报“父或子元素不存在” | `remove_child`/`add_child` 是移动语义；`append` 前子元素必须先有宿主（已按此实现） |
 
+### 4.2.23 清账轮新增的框架能力（2026-10-11）
+
+| 能力 | 位置 | 一句话 |
+|---|---|---|
+| **行尾注解** | `CodeEditor::LineDecoration::end_text` | 行尾附加文本（blame 的作者/日期、内联提示）。**装不下就不画**——截断的半句比不画更让人困惑 |
+| **行内区间底色** | `LineDecoration::inline_ranges` | 字节偏移区间的行内高亮，画在**字符之下、选择之上**；色取该行带色（让“行改”与“字改”是同一色的两层强度） |
+| **行内字符级差异** | `st::text::diff_inline` / `refine_inline_diffs` | 按**码位**切（字节级 LCS 会把汉字切成 2+1，高亮错位）；相邻改动归并成区间（逐字符一段会出现缝） |
+| **撤销栈** | `st::edit::UndoStack` | 命令对象 + 游标 + 合并窗口；三条语义各自对应一个静默错（见 `BACKLOG.md` 已完成段） |
+| **二维视口** | `st::ui::Viewport` | 缩放/平移/棋盘格底。坐标换算 `view = (content - pan) * zoom` 是**唯一对外契约** |
+| **取色器** | `st::ui::ColorPicker` | HSV 面板 + 十六进制 + 吸管；灰阶时**保住色相**，解析失败**如实拒绝** |
+| **三方合并** | `st::text::merge_three_way` / `merge_apply` | 五态区段；`BothSame`（两侧同改）**不是冲突** |
+| **时间轴模型** | `st::ui::timeline::Model` | 多轨道 + 换算 + 命中优先级（播放头 → 修剪边缘 → 片体）+ 像素阈值吸附 |
+| **部分暂存** | `st::text::build_partial_patch` | 构造只含选中改动的补丁（未选中的删除行**降级为上下文**，不丢掉） |
+| **品牌区** | `TitleBar::set_brand` | 独立一格（不再复用 `leading` 槽）；宽度用**保守估宽**（不依赖量尺） |
+
 ### 4.3 text
 ```cpp
 namespace st::text {
@@ -4647,6 +4662,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | **v0.1** | core / codec / raster（含 **DPI 缩放**）/ text / md / ui（组件库）/ shell(headless) / control(TCP) / stpm / gallery + gbcode / 子代理 / 文档 | ✅ 已完成 |
 | **v0.1+（本期追加）** | ① **g++ 优先、clang++ 次之的同口径编译器层**（自举 / 依赖追踪；显式 `target_triple`）② **GPU 渲染全链路**（D3D11 设备层 → 着色器原语 → 路径 → **DXGI swapchain 呈现**，见 §8.3）③ **三维与网格**（平台中立的 `Scene3D` + **软件实现**：z-buffer / 逐像素光照 / 近面裁剪；`Mesh` 生成与 OBJ 加载；原 OpenGL 方案经评估后移除，见 §8.4）④ **动画与过渡**（悬浮特效、时间轴推进、续帧协议）⑤ 性能优化（整帧重绘 63.2→≈12 ms）⑥ **视口剔除**（屏幕外不再绘制）⑦ **内置通道与桌面一致性**（文本默认与 DPI 默认两侧同源，见 §4.3/§4.2.1）| ✅ 已完成 |
 | **v0.1.5（画廊全场景）** | ① 画廊补齐 Dialog/Toast/Tooltip/TextArea/禁用态/表格选中行/实时统计卡（28 组件全部有可视化场景）② `Toast` 自动消失（帧时间轴）③ `Table` 选中行（视觉+语义+属性）④ `TextArea` 属性面补齐 ⑤ **叠加层 z 序修正**（浮层在景上）+ `find/query` 覆盖叠加层 ⑥ `SceneView` 逐帧调试输出移除 | ✅ 已完成 |
+| **v0.1.6（2026-10-11 「待做」清账轮）** | ① **纯 XML + JS 应用通路**（`st::xml` 解析 / `build_from_xml` / `ScriptBridge` / `examples/xmlapp`，见 §4.2.19–22）② **编辑器行尾注解**（`LineDecoration::end_text`：blame 的作者与日期）③ **行内字符级差异**（`diff_inline` 按**码位**而非字节；编辑器行内区间底色）④ **`st::edit::UndoStack`** 撤销栈原语 ⑤ **`st::ui::Viewport`** 二维缩放/平移 + 棋盘格透明底 ⑥ **`st::ui::ColorPicker`** HSV 面板 + 十六进制 + 吸管 ⑦ **`st::text` 三方合并**（五态区段，含“两侧同改不算冲突”）⑧ **`st::ui::timeline::Model`** 时间轴数据模型 ⑨ **部分暂存**（`build_partial_patch` + `WriteOp::StagePatch`）⑩ **`TitleBar` 品牌区**（不再复用 `leading` 槽）⑪ **墙钟帧间隔**指标（`wall_p50_ms`）⑫ gbcode：`--open` / 单文件历史弹窗 / blame 开关 ⑬ **构建期根治**：测试链接命令行超限（响应文件退路，**解锁新增测试文件**）+ `dbghelp`/`nanosrv` 库口径统一（`independent_project` 长期失败转 PASS） | ✅ 已完成 |
 | v0.2 | 文本选择与复制、更多组件（日期选择、图表）、X11 / Wayland 窗口后端 | 待做 |
 | v0.3 | Vulkan 合成后端、**图层缓存与局部重绘**（当前 `dirty_rect_` 只有整视口口径）、多窗口 | 待做 |
 | v0.4 | 原生源码依赖生态（`st-packages` 索引）、`st publish` | 待做 |
