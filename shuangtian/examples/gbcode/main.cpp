@@ -525,18 +525,53 @@ struct CodeEditorPage : Component {
   /// ⚠ 必须 `State`：普通 vector 改了不触发重组，组头点下去**没反应**
   ///（这是 LSP 阶段 4 的 `completion_open_` 同一个坑——bool 版实测过）。
   State<std::vector<std::string>> git_collapsed_groups_{{}};
-  /// git 危险操作确认浮层（放弃更改/删除未跟踪）。
+  /// 多步操作状态（merge/rebase 中时给“继续/跳过/中止”入口）。
+  gbcode::OperationState git_operation_{};
+  /// 标签 / 远程 / 暂存（stash）/ 引用清单（底部各视图的数据面）。
+  std::vector<gbcode::TagInfo> git_tags_{};
+  std::vector<gbcode::RemoteInfo> git_remotes_{};
+  std::vector<gbcode::StashEntry> git_stashes_{};
+  std::vector<gbcode::RefInfo> git_refs_{};
+  std::string git_upstream_{};
+  /// 写操作审计尾部（最近 20 条；渲染期只消费）。
+  std::vector<std::string> git_audit_{};
+  /// 新建分支 / 建标签的小输入浮层。
+  State<bool> branch_new_open_{false};
+  State<std::string> branch_new_name_{};
+  State<bool> tag_new_open_{false};
+  State<std::string> tag_new_name_{};
+  State<bool> tag_new_annotated_{false};
+  /// 底部面板当前标签：0=终端 1=Git。
+  /// Git 内的子视图：分支 / 日志 / 标签 / 暂存 / 远程。
+  State<std::size_t> git_tab_{1};
+  /// 日志过滤（提交信息 / 作者 / 路径）与“只显示当前分支”。
+  State<std::string> log_filter_text_{};
+  State<std::string> log_filter_author_{};
+  State<std::string> log_filter_path_{};
+  State<bool> log_filter_current_branch_{false};
+  State<gbcode::ChangeGroup> git_selected_group_{gbcode::ChangeGroup::Staged};
+  /// 危险操作确认浮层（放弃更改/删除未跟踪/重置/强推）。
   State<bool> git_confirm_open_{false};
   std::string git_confirm_title_{};
   std::string git_confirm_body_{};
   std::function<void()> pending_git_confirm_{};
   /// 提交框文本。
   State<std::string> commit_message_{};
+  /// 最近提交信息（去重，最多 20 条）——IDEA 的“历史消息下拉”。
+  std::vector<std::string> commit_message_history_{};
+  /// 修正上一笔提交（`--amend`）。
+  State<bool> commit_amend_{false};
+  /// 覆盖作者（`Name <email>`；空 = 用仓库配置）。
+  State<std::string> commit_author_{};
+  /// 提交面板“更多选项”展开态。
+  State<bool> commit_options_open_{false};
   /// 提交框输入框指针（按钮提交时读——浮层每帧重建，指针只在构建帧有效）。
   Input* commit_input_ptr{nullptr};
   /// 终端里的 git 命令跑完后要刷新状态（pump 里落地——命令完成时机不可知）。
   bool git_refresh_pending_{false};
   // —— Git 工具窗（阶段 B）——
+  /// 排队的 shell 命令（终端实例就绪后投递——见 `flush_terminal_commands`）。
+  std::vector<std::string> pending_shell_commands_{};
   /// 底部单槽当前显示的面板（0=终端 1=Git）。
   State<std::size_t> bottom_tab_{0};
   /// 日志/分支已读（帧首泵读；git 操作后置 false 重读）。
@@ -1004,6 +1039,7 @@ struct CodeEditorPage : Component {
     ensure_git_log();
     ensure_compare();
     ensure_diff();
+    flush_terminal_commands();
     const bool diagnostics_changed = lsp_.pump();
     // 待落地的跳转（跨文件）：编辑器实例在新文件装载后才就位，所以在这里补做。
     apply_pending_navigation_jump();
@@ -1131,6 +1167,8 @@ struct CodeEditorPage : Component {
     build_rename_dialog(c);
     build_git_confirm(c);
     build_compare_picker(c);
+    build_branch_new_dialog(c);
+    build_tag_new_dialog(c);
     // 浮层内的“聚焦输入框”待办：**必须排在对应的构建之后**——
     // 排在前面拿到的是上一帧已销毁的指针（本函数开头已把两个指针置空，
     // 所以即使顺序被人改回去，也只是“这一次没聚焦”，不会再踩已释放对象）。
@@ -1383,6 +1421,81 @@ struct CodeEditorPage : Component {
   ///
   /// 与「关闭确认」同一 Dialog 形态，但语义是**不可恢复**——按钮文案明确说后果，
   /// 不用"确定/取消"这种不带信息的词。
+  /// 新建分支浮层（输入名字 → `git checkout -b <name>`）。
+  void build_branch_new_dialog(Composer& c) {
+    if (!branch_new_open_.value()) return;
+    (void)dsl::overlay(c, "branch-new", {}, [&] {
+      (void)column(c, {.gap = 8.0f, .padding = 14.0f, .width = 420.0f, .id = "branch-new"}, [&] {
+        (void)text(c, [] { return std::string("新建分支（从当前 HEAD）"); },
+                   {.weight = FontWeight::Medium, .id = "branch-new-title"});
+        (void)custom<Input>(c, [this](Input& field) {
+          field.set_id("branch-new-name");
+          field.set_placeholder("分支名，如 feat/diff-view");
+          field.style().grow = true;
+          field.on_change = [this](std::string_view value) { branch_new_name_.set(std::string(value)); };
+          field.on_submit = [this](std::string_view) { create_branch(); };
+        }, {.height = 26.0f, .grow = true, .id = "branch-new-name"});
+        (void)row(c, {.gap = 6.0f}, [&] {
+          (void)custom<Button>(c, [this](Button& b) {
+            b.set_id("branch-new-cancel");
+            b.set_label("取消");
+            b.set_variant(Button::Variant::Ghost);
+            b.set_size(Button::Size::Small);
+            b.on_click = [this] { branch_new_open_.set(false); };
+          }, {.height = 26.0f, .grow = true, .key = "branch-new-cancel"});
+          (void)custom<Button>(c, [this](Button& b) {
+            b.set_id("branch-new-go");
+            b.set_label("新建并切换");
+            b.set_variant(Button::Variant::Primary);
+            b.set_size(Button::Size::Small);
+            b.on_click = [this] { create_branch(); };
+          }, {.height = 26.0f, .grow = true, .key = "branch-new-go"});
+        });
+      });
+    });
+  }
+
+  /// 建标签浮层（名字 + 是否注解）。
+  void build_tag_new_dialog(Composer& c) {
+    if (!tag_new_open_.value()) return;
+    (void)dsl::overlay(c, "tag-new", {}, [&] {
+      (void)column(c, {.gap = 8.0f, .padding = 14.0f, .width = 420.0f, .id = "tag-new"}, [&] {
+        (void)text(c, [] { return std::string("在当前提交建标签"); },
+                   {.weight = FontWeight::Medium, .id = "tag-new-title"});
+        (void)custom<Input>(c, [this](Input& field) {
+          field.set_id("tag-new-name");
+          field.set_placeholder("标签名，如 v1.2.0");
+          field.style().grow = true;
+          field.on_change = [this](std::string_view value) { tag_new_name_.set(std::string(value)); };
+          field.on_submit = [this](std::string_view) { create_tag(); };
+        }, {.height = 26.0f, .grow = true, .id = "tag-new-name"});
+        (void)custom<Button>(c, [this](Button& b) {
+          b.set_id("tag-new-annotated");
+          b.set_label(tag_new_annotated_.value() ? "注解标签 ✓" : "轻量标签");
+          b.set_variant(tag_new_annotated_.value() ? Button::Variant::Soft : Button::Variant::Ghost);
+          b.set_size(Button::Size::Small);
+          b.on_click = [this] { tag_new_annotated_.set(!tag_new_annotated_.value()); };
+        }, {.height = 24.0f, .key = "tag-new-annotated"});
+        (void)row(c, {.gap = 6.0f}, [&] {
+          (void)custom<Button>(c, [this](Button& b) {
+            b.set_id("tag-new-cancel");
+            b.set_label("取消");
+            b.set_variant(Button::Variant::Ghost);
+            b.set_size(Button::Size::Small);
+            b.on_click = [this] { tag_new_open_.set(false); };
+          }, {.height = 26.0f, .grow = true, .key = "tag-new-cancel"});
+          (void)custom<Button>(c, [this](Button& b) {
+            b.set_id("tag-new-go");
+            b.set_label("创建");
+            b.set_variant(Button::Variant::Primary);
+            b.set_size(Button::Size::Small);
+            b.on_click = [this] { create_tag(); };
+          }, {.height = 26.0f, .grow = true, .key = "tag-new-go"});
+        });
+      });
+    });
+  }
+
   /// 端点选择浮层：A/B 两端可以从**分支 / 最近提交**里选（也可直接粘 rev）。
   ///
   /// 为何要有它：比较视图的价值就是“任意两端”，而只给几个常用端点的按钮
@@ -1474,19 +1587,20 @@ struct CodeEditorPage : Component {
     compare_wanted_ = true;
   }
 
+  /// 危险操作确认浮层（写入前先让用户看一眼**将要执行的命令**）。
   void build_git_confirm(Composer& c) {
     if (!git_confirm_open_.value()) return;
-    (void)overlay(c, "git-confirm", {}, [&] {
+    (void)dsl::overlay(c, "git-confirm", {}, [&] {
       (void)custom<Dialog>(c, [this](Dialog& dialog) {
-        dialog.set_id("git-confirm-dialog");
+        dialog.set_id("git-confirm");
         dialog.set_title(git_confirm_title_);
         dialog.set_body(git_confirm_body_);
-        dialog.set_actions({"取消", "放弃更改"});
+        dialog.set_actions({"取消", "确定"});
         dialog.on_action = [this](std::size_t index) {
           git_confirm_open_.set(false);
           if (index == 1 && pending_git_confirm_) pending_git_confirm_();
         };
-      }, {.key = "git-confirm-dialog"});
+      }, {.id = "git-confirm-dialog"});
     });
   }
 
@@ -2287,7 +2401,6 @@ void replace_in_workspace(std::string_view replacement) {
         }
         return label;
       }, {.grow = true, .id = "git-branch-label"});
-      scm_icon_button(c, "scm-refresh", "refresh", "刷新状态", [this] { refresh_git(); });
     });
     if (!git_.error.empty()) {
       (void)text(c, [this] { return git_.error; }, {.color = Tone::Danger, .id = "git-error"});
@@ -2298,6 +2411,27 @@ void replace_in_workspace(std::string_view replacement) {
                  {.id = "git-not-repo"});
       return;
     }
+
+    // —— 变更工具条（IDEA 同款：刷新 / 全部暂存 / 全部撤销 / 展开折叠 / 比较）——
+    (void)row(c, {.gap = 2.0f, .id = "scm-toolbar"}, [&] {
+      scm_icon_button(c, "scm-refresh", "refresh", "刷新状态", [this] { refresh_git(); });
+      scm_icon_button(c, "scm-stage-all", "plus", "全部暂存",
+                      [this] { stage_group(gbcode::ChangeGroup::Unstaged, true);
+                               stage_group(gbcode::ChangeGroup::Untracked, true); });
+      scm_icon_button(c, "scm-unstage-all", "minus", "全部取消暂存",
+                      [this] { stage_group(gbcode::ChangeGroup::Staged, false); });
+      scm_icon_button(c, "scm-collapse-all", "chevron-right", "折叠全部分组",
+                      [this] { git_collapsed_groups_.set({"冲突", "已暂存", "未暂存", "未跟踪"}); });
+      scm_icon_button(c, "scm-expand-all", "chevron-down", "展开全部分组",
+                      [this] { git_collapsed_groups_.set({}); });
+      scm_icon_button(c, "scm-compare", "diff", "与…比较（任意两端）", [this] {
+        activity_.set(6);
+        sidebar_visible_.set(true);
+        compare_wanted_ = true;
+      });
+      scm_icon_button(c, "scm-discard-all", "undo", "放弃全部未暂存改动",
+                      [this] { ask_discard_all(); });
+    });
 
     // —— 分组列表（滚动容器契约：与资源管理器同一个理由——Button 按标签测量，
     // 长路径会横向溢出到编辑区）——
@@ -2319,32 +2453,52 @@ void replace_in_workspace(std::string_view replacement) {
             const bool collapsed =
                 std::find(collapsed_list.begin(), collapsed_list.end(), group_name) !=
                 collapsed_list.end();
-            // 组头（可折叠、计数徽标）。
-            (void)custom<Button>(c, [this, group_name, collapsed, count = items.size()](Button& b) {
-              b.set_id("git-group-" + group_name);
-              b.set_label(std::format("{} {}（{}）", collapsed ? "▸" : "▾", group_name, count));
-              b.set_variant(Button::Variant::Ghost);
-              b.set_size(Button::Size::Small);
-              b.on_click = [this, group_name] {
-                auto groups = git_collapsed_groups_.value();   // 拷贝改再 set（State 的写法）
-                const auto found = std::find(groups.begin(), groups.end(), group_name);
-                if (found != groups.end()) {
-                  groups.erase(found);
-                } else {
-                  groups.push_back(group_name);
-                }
-                git_collapsed_groups_.set(std::move(groups));
-              };
-            }, {.height = 24.0f, .key = "git-group:" + group_name});
+            // 组头（可折叠 + 计数 + **整组暂存/取消暂存/丢弃**）。
+            //
+            // 分组级动作是高频口（“这一组我全要/全不要”）——歌白那边是
+            // `全部暂存`/`全部取消暂存`；这里也放在组头，与单文件动作同一位置语言。
+            (void)row(c, {.gap = 2.0f, .key = "git-grouprow:" + group_name}, [&] {
+              (void)custom<Button>(c, [this, group_name, collapsed, count = items.size()](Button& b) {
+                b.set_id("git-group-" + group_name);
+                b.set_label(std::format("{} {}（{}）", collapsed ? "▸" : "▾", group_name, count));
+                b.set_variant(Button::Variant::Ghost);
+                b.set_size(Button::Size::Small);
+                b.on_click = [this, group_name] {
+                  auto groups = git_collapsed_groups_.value();   // 拷贝改再 set（State 的写法）
+                  const auto found = std::find(groups.begin(), groups.end(), group_name);
+                  if (found != groups.end()) {
+                    groups.erase(found);
+                  } else {
+                    groups.push_back(group_name);
+                  }
+                  git_collapsed_groups_.set(std::move(groups));
+                };
+              }, {.height = 24.0f, .grow = true});
+              // 整组动作：按组的语义给（未暂存→暂存、已暂存→取消暂存、未跟踪→暂存、冲突→跳过）。
+              if (group == gbcode::ChangeGroup::Unstaged ||
+                  group == gbcode::ChangeGroup::Untracked) {
+                scm_icon_button(c, "stage-all-" + group_name, "plus", "全部暂存",
+                                [this, group] { stage_group(group, true); });
+              }
+              if (group == gbcode::ChangeGroup::Staged) {
+                scm_icon_button(c, "unstage-all-" + group_name, "minus", "全部取消暂存",
+                                [this, group] { stage_group(group, false); });
+              }
+              if (group == gbcode::ChangeGroup::Unstaged) {
+                scm_icon_button(c, "discard-all-" + group_name, "undo", "放弃本组全部更改",
+                                [this] { ask_discard_all(); });
+              }
+            });
             if (collapsed) continue;
             // 组内条目：行 = 状态字母 + 路径 + 行内动作钮。
+            //
+            // 路径显示：IDEA 同款“目录灰、文件名亮”——这里用 `dir/` 前缀 + 文件名两段文本
+            //（Button 只有一个 label，所以拼成 `状态 目录/ 名字`，目录部分已截断）。
             for (const auto& change : items) {
               (void)row(c, {.gap = 4.0f, .key = "git:" + change.path}, [&] {
                 (void)custom<Button>(c, [this, change](Button& b) {
                   b.set_id("git-file-" + change.path);
-                  // 状态字母 + 文件名（路径太长时显示名——title 有全路径）。
-                  const std::string name = st::fs::file_name(change.path);
-                  b.set_label(std::format("{} {}", change.display_code(), name));
+                  b.set_label(std::format("{} {}", change.display_code(), change.display_path()));
                   b.set_variant(Button::Variant::Ghost);
                   b.set_size(Button::Size::Small);
                   b.on_click = [this, change] { open_git_diff(change); };
@@ -2369,28 +2523,108 @@ void replace_in_workspace(std::string_view replacement) {
         [](ScrollView& scroll) { scroll.set_id("scm-scroll"); },
         {.grow = true, .id = "scm-host"});
 
-    // —— 底部常驻提交框（动作全在一行：消息输入 + 提交钮）——
+    // —— 底部常驻提交面板（IDEA 的 Commit 区）：消息 + 选项 + 提交 ——
     //
     // 为什么常驻（而不是"点提交按钮弹对话框"）：提交流是"看一眼变更 → 写消息 →
     // 提交"，消息输入与变更列表同屏才能边看边写；弹对话框会把列表遮住。
     if (git_.is_repo && !git_.changes.empty()) {
-      (void)row(c, {.gap = 4.0f, .id = "commit-bar"}, [&] {
-        (void)custom<Input>(c, [this](Input& field) {
-          field.set_id("commit-message");
-          field.set_placeholder("提交信息（Ctrl+Enter 提交）");
-          field.style().grow = true;
-          commit_input_ptr = &field;
-          field.on_change = [this](std::string_view value) { commit_message_.set(std::string(value)); };
-          field.on_submit = [this](std::string_view) { git_commit(); };
-        }, {.height = 26.0f, .grow = true, .key = "commit-message"});
+      build_commit_panel(c);
+    }
+  }
+
+  /// 提交面板（消息 + 最近消息下拉 + amend/作者 + 提交 / 提交并推送）。
+  void build_commit_panel(Composer& c) {
+    // ⚠ 输入框必须包在**行**里再 `grow`：直接放在外层**列**里 `grow = true`
+    // 会让它把剩余**高度**吃满——实测截图里它被拉成三行高的大框，
+    // 而下面那行的计数文本被挤成“已…”。
+    (void)row(c, {.gap = 4.0f, .id = "commit-message-row"}, [&] {
+      (void)custom<Input>(c, [this](Input& field) {
+        field.set_id("commit-message");
+        field.set_placeholder(commit_amend_.value() ? "修正上一笔提交的信息（--amend）"
+                                                    : "提交信息（Ctrl+Enter 提交）");
+        field.style().grow = true;
+        commit_input_ptr = &field;
+        field.on_change = [this](std::string_view value) {
+          commit_message_.set(std::string(value));
+        };
+        field.on_submit = [this](std::string_view) { git_commit(); };
+      }, {.height = 26.0f, .grow = true, .key = "commit-message"});
+    });
+    (void)row(c, {.gap = 4.0f, .id = "commit-options"}, [&] {
+      // 修正上一笔（改写 HEAD）：危险度是 `Confirm`——提交时会走确认。
+      (void)custom<Button>(c, [this](Button& b) {
+        b.set_id("commit-amend");
+        b.set_label("修正");
+        b.set_variant(commit_amend_.value() ? Button::Variant::Soft : Button::Variant::Ghost);
+        b.set_size(Button::Size::Small);
+        b.on_click = [this] { commit_amend_.set(!commit_amend_.value()); };
+      }, {.height = 24.0f, .key = "commit-amend"});
+      // 最近消息下拉（IDEA 同款）：点一下填回输入框（再编辑后提交）。
+      if (!commit_message_history_.empty()) {
         (void)custom<Button>(c, [this](Button& b) {
-          b.set_id("commit-go");
-          b.set_label("提交");
-          b.set_variant(Button::Variant::Primary);
+          b.set_id("commit-history");
+          b.set_label("最近");
+          b.set_variant(Button::Variant::Ghost);
           b.set_size(Button::Size::Small);
-          b.on_click = [this] { git_commit(); };
-        }, {.height = 26.0f});
-      });
+          b.on_click = [this] {
+            commit_message_.set(commit_message_history_.front());
+            if (commit_input_ptr != nullptr) {
+              commit_input_ptr->set_text(commit_message_history_.front());
+            }
+            status_.set("已填入最近一条提交信息");
+          };
+        }, {.height = 24.0f, .key = "commit-history"});
+      }
+      (void)custom<Button>(c, [this](Button& b) {
+        b.set_id("commit-go");
+        b.set_label(commit_amend_.value() ? "修正提交" : "提交");
+        b.set_variant(Button::Variant::Primary);
+        b.set_size(Button::Size::Small);
+        b.on_click = [this] { git_commit(); };
+      }, {.height = 24.0f, .grow = true, .key = "commit-go"});
+    });
+    (void)row(c, {.gap = 4.0f, .id = "commit-actions-row"}, [&] {
+      (void)custom<Button>(c, [this](Button& b) {
+        b.set_id("commit-and-push");
+        b.set_label("提交并推送");
+        b.set_variant(Button::Variant::Secondary);
+        b.set_size(Button::Size::Small);
+        b.on_click = [this] { commit_and_push(); };
+      }, {.height = 22.0f, .key = "commit-and-push"});
+      (void)custom<Button>(c, [this](Button& b) {
+        b.set_id("commit-more");
+        b.set_label(commit_options_open_.value() ? "收起选项" : "更多选项");
+        b.set_variant(Button::Variant::Ghost);
+        b.set_size(Button::Size::Small);
+        b.on_click = [this] { commit_options_open_.set(!commit_options_open_.value()); };
+      }, {.height = 22.0f, .key = "commit-more"});
+      (void)custom<Button>(c, [this](Button& b) {
+        b.set_id("stash-all");
+        b.set_label("暂存全部");
+        b.set_variant(Button::Variant::Ghost);
+        b.set_size(Button::Size::Small);
+        b.on_click = [this] {
+          (void)run_write({.op = gbcode::WriteOp::StashPush, .message = "st"}, "stash push");
+        };
+      }, {.height = 22.0f, .key = "stash-all"});
+    });
+    // 暂存计数单独一行：它与上面的按钮同高时会先被放气（实测：被压成“已…”）。
+    const std::size_t staged =
+        git_.count_in(gbcode::ChangeGroup::Staged) + git_.count_in(gbcode::ChangeGroup::Conflicted);
+    (void)text(c, [staged, total = git_.changes.size()] {
+      return std::format("已暂存 {}/{} 项{}", staged, total,
+                         staged == 0 ? "（将提交全部改动）" : "");
+    }, {.color = Tone::Muted, .id = "commit-staged-count"});
+    // 作者覆盖（可选；IDEA 的 Commit 对话框同此）。空 = 用仓库配置。
+    if (commit_options_open_.value()) {
+      (void)custom<Input>(c, [this](Input& field) {
+        field.set_id("commit-author");
+        field.set_placeholder("作者覆盖，形如 Name <mail>（留空用仓库配置）");
+        field.style().grow = true;
+        field.on_change = [this](std::string_view value) {
+          commit_author_.set(std::string(value));
+        };
+      }, {.height = 24.0f, .grow = true, .id = "commit-author"});
     }
   }
 
@@ -2860,11 +3094,11 @@ void replace_in_workspace(std::string_view replacement) {
     }, {.grow = true, .key = "terminal"});
   }
 
-  // —— Git 工具窗（底部标签 2）：分支 | 日志 ——
+  // —— Git 工具窗（底部标签）：分支 | 日志 | 标签 | 暂存 | 远程 ——
   //
-  // 与左侧「变更」的分工（歌白工作台同一分法）：这里看**历史**——分支列表
-  // （本地/远程、当前标记）与日志泳道（refs 胶囊 + 提交信息）；点提交看它
-  // 改了什么（文件 + 增删统计 + diff 只读标签）。
+  // 与左侧「变更」的分工（歌白工作台同一分法）：这里看**历史与引用**——
+  // 分支/标签/远程（仓库的“坐标”）与日志（泳道 + refs 胶囊）；点提交看它改了什么。
+  // 变更则在左侧（当下要提交的东西）。
   void build_git_view(Composer& c) {
     // 空态也要挂 `#git-view`（自动化判"视图出现"靠它——空态不是"没有视图"，
     // 是"视图里没有内容"，两码事）。
@@ -2879,47 +3113,313 @@ void replace_in_workspace(std::string_view replacement) {
     //（实测：点状态栏分支打开 Git 标签 → SIGSEGV，崩点就在渲染期的同步 git 读）。
     // 渲染期只消费 `git_log_`/`git_branches_`。
     git_log_wanted_ = true;   // 本帧在渲染 Git 视图：下一帧泵读数据（首帧空属正常）
-    row(c, {.gap = 0.0f, .grow = true, .id = "git-view"}, [&] {
-      // 左：分支栏。
-      (void)custom_container<ScrollView>(
-          c,
-          [&] {
-            (void)text(c, [] { return std::string("分支"); },
-                       {.color = Tone::Muted, .id = "git-branches-title"});
-            for (const auto& branch : git_branches_) {
+    column(c, {.gap = 0.0f, .grow = true, .id = "git-view"}, [&] {
+      build_git_tabs(c);
+      // 多步操作中：顶部横幅给“继续 / 跳过 / 中止”（冲突时没有它就只能去命令行）。
+      build_operation_banner(c);
+      // ⚠ 每个子视图必须**包一层带 key 的容器**：五个分支直接声明进同一个父容器时，
+      // 切换标签会**按位置回收**子元素——新分支里没显式设的属性（icon/width）
+      // 会沿用旧分支的值。实测：远程页的「推送」按钮带着日志页那个刷新钮的
+      // `icon=refresh`、宽度 26px（而它的正确文本被挤没了）。
+      // 带 key = 告诉框架“这是**另一个**子树”，不跨分支复用。
+      switch (git_tab_.value()) {
+        case 0:
+          (void)column(c, {.gap = 4.0f, .grow = true, .id = "git-pane-branches",
+                           .key = "pane:branches"}, [&] { build_branches_pane(c); });
+          break;
+        case 2:
+          (void)column(c, {.gap = 4.0f, .grow = true, .id = "git-pane-tags",
+                           .key = "pane:tags"}, [&] { build_tags_pane(c); });
+          break;
+        case 3:
+          (void)column(c, {.gap = 4.0f, .grow = true, .id = "git-pane-stashes",
+                           .key = "pane:stashes"}, [&] { build_stashes_pane(c); });
+          break;
+        case 4:
+          (void)column(c, {.gap = 4.0f, .grow = true, .id = "git-pane-remotes",
+                           .key = "pane:remotes"}, [&] { build_remotes_pane(c); });
+          break;
+        default:
+          (void)column(c, {.gap = 4.0f, .grow = true, .id = "git-pane-log",
+                           .key = "pane:log"}, [&] { build_log_pane(c); });
+          break;
+      }
+    });
+  }
+
+  /// Git 工具窗的五个子视图标签。
+  void build_git_tabs(Composer& c) {
+    struct TabDef {
+      const char* id;
+      const char* label;
+    };
+    // 计数进标签（IDEA 同款）：空的分支/标签列表与“读失败”在界面上一眼可区分。
+    const std::string branches =
+        std::format("分支{}", git_branches_.empty() ? "" : std::format(" {}", git_branches_.size()));
+    const std::string log =
+        std::format("日志{}", git_log_.empty() ? "" : std::format(" {}", git_log_.size()));
+    const std::string tags =
+        std::format("标签{}", git_tags_.empty() ? "" : std::format(" {}", git_tags_.size()));
+    const std::string stashes =
+        std::format("暂存{}", git_stashes_.empty() ? "" : std::format(" {}", git_stashes_.size()));
+    const std::string remotes =
+        std::format("远程{}", git_remotes_.empty() ? "" : std::format(" {}", git_remotes_.size()));
+    const std::array<std::string, 5> labels{branches, log, tags, stashes, remotes};
+    const std::array<const char*, 5> ids{"git-tab-branches", "git-tab-log", "git-tab-tags",
+                                         "git-tab-stashes", "git-tab-remotes"};
+    (void)row(c, {.gap = 2.0f, .height = 30.0f, .id = "git-tabs"}, [&] {
+      for (std::size_t index = 0; index < labels.size(); ++index) {
+        (void)custom<Button>(c, [this, index, label = labels[index], id = ids[index]](Button& b) {
+          b.set_id(id);
+          b.set_label(label);
+          b.set_variant(git_tab_.value() == index ? Button::Variant::Soft
+                                                   : Button::Variant::Ghost);
+          b.set_size(Button::Size::Small);
+          b.on_click = [this, index] { git_tab_.set(index); };
+        }, {.height = 24.0f, .key = std::format("gittab:{}", index)});
+      }
+    });
+  }
+
+  /// 多步操作横幅（merge/rebase/cherry-pick/revert 中）：继续 / 跳过 / 中止。
+  void build_operation_banner(Composer& c) {
+    if (!git_operation_.active()) return;
+    (void)row(c, {.gap = 6.0f, .id = "git-operation-banner"}, [&] {
+      (void)text(c, [this] {
+        const std::string tip =
+            git_operation_.conflicts.empty()
+                ? std::string{}
+                : std::format("，{} 个冲突待解决", git_operation_.conflicts.size());
+        return std::format("处置中的{} {}", git_operation_.kind, tip);
+      }, {.grow = true, .color = Tone::Warning, .id = "git-operation-label"});
+      struct Control {
+        const char* id;
+        const char* label;
+        gbcode::WriteOp op;
+      };
+      static constexpr Control kControls[] = {{"git-op-continue", "继续",
+                                               gbcode::WriteOp::Continue},
+                                              {"git-op-skip", "跳过", gbcode::WriteOp::Skip},
+                                              {"git-op-abort", "中止", gbcode::WriteOp::Abort}};
+      for (const auto& control : kControls) {
+        (void)custom<Button>(c, [this, control](Button& b) {
+          b.set_id(control.id);
+          b.set_label(control.label);
+          b.set_variant(control.op == gbcode::WriteOp::Abort ? Button::Variant::Danger
+                                                             : Button::Variant::Secondary);
+          b.set_size(Button::Size::Small);
+          b.on_click = [this, control] {
+            // `ref` 位传“操作种类”（`merge`/`rebase`/…）——`write_args` 据此映射子命令。
+            (void)run_write({.op = control.op, .ref = git_operation_.kind},
+                            std::string("control:") + control.label);
+          };
+        }, {.height = 24.0f, .key = std::string("gitop:") + control.label});
+      }
+    });
+  }
+
+  /// 子视图 0：分支（本地/远程、切换、新建、删除）。
+  void build_branches_pane(Composer& c) {
+    (void)row(c, {.gap = 4.0f, .id = "git-branches-actions"}, [&] {
+      scm_icon_button(c, "branch-new", "plus", "新建分支", [this] {
+        // 新建分支默认从 HEAD 起（IDEA 的 New Branch 同此）。
+        branch_new_name_.set(std::string{});
+        branch_new_open_.set(true);
+      });
+      (void)text(c, [this] { return git_.branch.empty() ? std::string{} : "当前：" + git_.branch; },
+                 {.grow = true, .color = Tone::Muted, .id = "git-current-branch"});
+    });
+    (void)custom_container<ScrollView>(
+        c,
+        [&] {
+          if (git_branches_.empty()) {
+            (void)text(c, [] { return std::string("（没有分支，或读取失败）"); });
+            return;
+          }
+          for (const auto& branch : git_branches_) {
+            (void)row(c, {.gap = 4.0f, .key = "branch:" + branch.name}, [&] {
               (void)custom<Button>(c, [this, branch](Button& b) {
                 b.set_id("git-branch-" + branch.name);
-                b.set_label(std::format("{}{}{}", branch.is_current ? "● " : "  ",
-                                        branch.name,
+                b.set_label(std::format("{}{}{}", branch.is_current ? "● " : "  ", branch.name,
                                         branch.is_remote ? "（远程）" : ""));
                 b.set_variant(branch.is_current ? Button::Variant::Soft : Button::Variant::Ghost);
                 b.set_size(Button::Size::Small);
                 b.on_click = [this, branch] { checkout_branch(branch); };
-              }, {.height = 24.0f, .key = "branch:" + branch.name});
-            }
-          },
-          [](ScrollView& scroll) { scroll.set_id("git-branches-scroll"); },
-          {.width = 220.0f, .grow = true, .id = "git-branches-host"});
-      // 右：日志泳道。
+              }, {.height = 24.0f, .grow = true});
+              if (!branch.is_current && !branch.is_remote) {
+                scm_icon_button(c, "delbranch-" + branch.name, "trash", "删除分支",
+                                [this, name = branch.name] { ask_delete_branch(name); });
+              }
+            });
+          }
+        },
+        [](ScrollView& scroll) { scroll.set_id("git-branches-scroll"); },
+        {.grow = true, .id = "git-branches-host"});
+  }
+
+  /// 子视图 2：标签（新建/删除）。
+  void build_tags_pane(Composer& c) {
+    (void)row(c, {.gap = 4.0f, .id = "git-tags-actions"}, [&] {
+      scm_icon_button(c, "tag-new", "plus", "在当前提交建标签", [this] {
+        tag_new_name_.set(std::string{});
+        tag_new_open_.set(true);
+      });
+    });
+    (void)custom_container<ScrollView>(
+        c,
+        [&] {
+          if (git_tags_.empty()) {
+            (void)text(c, [] { return std::string("（没有标签）"); });
+            return;
+          }
+          for (const auto& tag : git_tags_) {
+            (void)row(c, {.gap = 4.0f, .key = "tag:" + tag.name}, [&] {
+              (void)custom<Button>(c, [this, tag](Button& b) {
+                b.set_id("git-tag-" + tag.name);
+                b.set_label(std::format("{}{}  {}  {}", tag.annotated ? "⚑" : "  ", tag.name,
+                                        tag.target, tag.subject));
+                b.set_variant(Button::Variant::Ghost);
+                b.set_size(Button::Size::Small);
+                b.on_click = [this, tag] { open_commit_by_hash(tag.target, tag.name); };
+              }, {.height = 24.0f, .grow = true});
+              scm_icon_button(c, "deltag-" + tag.name, "trash", "删除标签", [this, name = tag.name] {
+                ask_delete_tag(name);
+              });
+            });
+          }
+        },
+        [](ScrollView& scroll) { scroll.set_id("git-tags-scroll"); },
+        {.grow = true, .id = "git-tags-host"});
+  }
+
+  /// 子视图 3：暂存（stash）——弹出/应用/删除。
+  void build_stashes_pane(Composer& c) {
+    (void)row(c, {.gap = 4.0f, .id = "git-stash-actions"}, [&] {
+      (void)custom<Button>(c, [this](Button& b) {
+        b.set_id("stash-push");
+        b.set_label("暂存当前改动");
+        b.set_variant(Button::Variant::Secondary);
+        b.set_size(Button::Size::Small);
+        b.on_click = [this] { (void)run_write({.op = gbcode::WriteOp::StashPush, .message = "st"},
+                                              "stash push"); };
+      }, {.height = 24.0f, .key = "stash-push"});
+      scm_icon_button(c, "stash-refresh", "refresh", "刷新", [this] { git_log_loaded_ = false; });
+    });
+    (void)custom_container<ScrollView>(
+        c,
+        [&] {
+          if (git_stashes_.empty()) {
+            (void)text(c, [] { return std::string("（没有暂存记录）"); });
+            return;
+          }
+          for (const auto& stash : git_stashes_) {
+            (void)row(c, {.gap = 4.0f, .key = "stash:" + stash.index}, [&] {
+              (void)text(c, [stash] {
+                return std::format("{}  {}", stash.index, stash.message);
+              }, {.grow = true, .id = "stash-label-" + stash.index});
+              scm_icon_button(c, "stash-pop-" + stash.index, "check", "弹出（应用并删除）",
+                              [this, index = stash.index] {
+                                (void)run_write({.op = gbcode::WriteOp::StashPop, .ref = index},
+                                                "stash pop");
+                              });
+              scm_icon_button(c, "stash-apply-" + stash.index, "plus", "应用（保留记录）",
+                              [this, index = stash.index] {
+                                (void)run_write({.op = gbcode::WriteOp::StashApply, .ref = index},
+                                                "stash apply");
+                              });
+              scm_icon_button(c, "stash-drop-" + stash.index, "trash", "删除暂存",
+                              [this, index = stash.index] {
+                                ask_drop_stash(index);
+                              });
+            });
+          }
+        },
+        [](ScrollView& scroll) { scroll.set_id("git-stashes-scroll"); },
+        {.grow = true, .id = "git-stashes-host"});
+  }
+
+  /// 子视图 4：远程（拉取/推送/强制推送（带 lease）/新建）。
+  void build_remotes_pane(Composer& c) {
+    (void)row(c, {.gap = 4.0f, .id = "git-remote-actions"}, [&] {
+      struct RemoteAction {
+        const char* id;
+        const char* label;
+        gbcode::WriteOp op;
+      };
+      static constexpr RemoteAction kActions[] = {{"remote-fetch", "取回", gbcode::WriteOp::Fetch},
+                                                  {"remote-pull", "拉取", gbcode::WriteOp::Pull},
+                                                  {"remote-push", "推送", gbcode::WriteOp::Push}};
+      for (const auto& action : kActions) {
+        (void)custom<Button>(c, [this, action, upstream = git_upstream_](Button& b) {
+          b.set_id(action.id);
+          b.set_label(action.label);
+          b.set_variant(Button::Variant::Secondary);
+          b.set_size(Button::Size::Small);
+          // 无上游时推送带上当前分支名（`git push -u <branch>`）：否则首推会失败，
+          // 而“失败”与“没有可推送的”在界面上长得一样。
+          const std::string branch =
+              action.op == gbcode::WriteOp::Push && upstream.empty() ? git_.branch : std::string{};
+          b.on_click = [this, op = action.op, branch] {
+            (void)run_write({.op = op, .name = branch}, "remote");
+          };
+        }, {.height = 24.0f, .key = std::string("remote:") + action.id});
+      }
+      (void)custom<Button>(c, [this](Button& b) {
+        b.set_id("remote-force-push");
+        b.set_label("强制推送");
+        b.set_variant(Button::Variant::Ghost);
+        b.set_size(Button::Size::Small);
+        b.on_click = [this] { ask_force_push(); };
+      }, {.height = 24.0f, .key = "remote-force-push"});
+    });
+    if (!git_upstream_.empty()) {
+      (void)text(c, [this] { return "上游：" + git_upstream_; },
+                 {.color = Tone::Muted, .id = "git-upstream-label"});
+    }
+    (void)custom_container<ScrollView>(
+        c,
+        [&] {
+          if (git_remotes_.empty()) {
+            (void)text(c, [] { return std::string("（没有远程仓库）"); });
+            return;
+          }
+          for (const auto& remote : git_remotes_) {
+            (void)text(c, [remote] {
+              return std::format("{}  {} → {}", remote.name, remote.fetch_url, remote.push_url);
+            }, {.id = "remote-label-" + remote.name});
+          }
+        },
+        [](ScrollView& scroll) { scroll.set_id("git-remotes-scroll"); },
+        {.id = "git-remotes-host"});
+    // 写操作审计（最近 20 条）——「谁在什么时候做了什么」的唯一可查证据。
+    (void)text(c, [] { return std::string("最近操作"); }, {.color = Tone::Muted,
+                                                          .id = "git-audit-title"});
+    if (git_audit_.empty()) {
+      (void)text(c, [] { return std::string("（还没有记录）"); }, {.id = "git-audit-empty"});
+    } else {
+      for (std::size_t index = 0; index < git_audit_.size(); ++index) {
+        (void)text(c, [this, index] { return git_audit_[git_audit_.size() - 1 - index]; },
+                   {.id = std::format("git-audit-{}", index)});
+      }
+    }
+  }
+
+  /// 子视图 1：日志（过滤 + 泳道 + 选中提交的文件清单）。
+  void build_log_pane(Composer& c) {
+    (void)build_log_filters(c);
+    (void)row(c, {.gap = 0.0f, .grow = true, .id = "git-log-row"}, [&] {
       (void)custom_container<ScrollView>(
           c,
           [&] {
-            if (git_log_.empty()) {
+            const auto entries = filtered_log();
+            if (entries.empty()) {
               (void)text(c, [] { return std::string("（没有提交，或读取失败）"); });
               return;
             }
-            for (auto& entry : git_log_) {
+            for (const auto& entry : entries) {
               (void)custom<Button>(c, [this, entry](Button& b) {
                 b.set_id("git-log-" + entry.short_hash);
-                // refs 胶囊（HEAD/分支/标签）拼进 label——一行放下：
-                // `* hash  subject  (HEAD -> main)`。
-                std::string refs;
-                for (const auto& ref : entry.refs) {
-                  refs += ref + " ";
-                }
-                b.set_label(std::format("{} {}  {}  {}", entry.lane == 0 ? "●" : "○",
-                                        entry.short_hash, entry.subject, refs));
-
+                b.set_label(log_line_label(entry));
                 b.set_variant(entry.short_hash == git_selected_hash_ ? Button::Variant::Soft
                                                                     : Button::Variant::Ghost);
                 b.set_size(Button::Size::Small);
@@ -2929,36 +3429,189 @@ void replace_in_workspace(std::string_view replacement) {
           },
           [](ScrollView& scroll) { scroll.set_id("git-log-scroll"); },
           {.grow = true, .id = "git-log-host"});
+      if (!git_selected_hash_.empty()) build_commit_detail(c);
     });
-    // 底部一行：选中提交的详情摘要（文件数 + 增删行数）。
-    if (!git_selected_hash_.empty()) {
-      (void)text(c, [this] { return git_commit_summary_.value(); },
-                 {.color = Tone::Muted, .id = "git-commit-summary"});
-      // 该提交改动的**文件清单**：点一下开它的并列差异（父提交 ↔ 本提交）。
-      //
-      // 为何列在这里（而不只是摘要）：摘要回答“改了多少”，而“改了哪些文件”
-      // 是下一步动作的入口——两者同屏才让“看历史 → 看具体改动”成为一步。
-      if (!git_commit_files_.empty()) {
-        (void)custom_container<ScrollView>(
-            c,
-            [&] {
-              for (const auto& [path, plus, minus] : git_commit_files_) {
-                (void)custom<Button>(c, [this, path, plus, minus](Button& b) {
-                  b.set_id("commit-file-" + path);
-                  b.set_label(std::format("{}  +{} −{}", path, plus, minus));
-                  b.set_variant(Button::Variant::Ghost);
-                  b.set_size(Button::Size::Small);
-                  b.on_click = [this, path] { open_commit_file(git_selected_hash_, path); };
-                }, {.height = 24.0f, .key = "cfile:" + path});
-              }
-            },
-            [](ScrollView& scroll) { scroll.set_id("git-commit-files-scroll"); },
-            {.id = "git-commit-files"});
-      }
-    }
   }
 
-  /// 切换分支（终端代敲——checkout 会改工作区，输出必须让用户看见）。
+  /// 日志工具栏：三个过滤输入 + “仅当前分支” + 刷新。
+  void build_log_filters(Composer& c) {
+    (void)row(c, {.gap = 4.0f, .height = 30.0f, .id = "git-log-filters"}, [&] {
+      (void)custom<Input>(c, [this](Input& field) {
+        field.set_id("log-filter-text");
+        field.set_placeholder("提交信息 / 作者 / 路径");
+        field.style().grow = true;
+        field.on_change = [this](std::string_view value) { log_filter_text_.set(std::string(value)); };
+      }, {.height = 24.0f, .grow = true, .key = "log-filter-text"});
+      (void)custom<Button>(c, [this](Button& b) {
+        b.set_id("log-filter-current");
+        b.set_label("仅当前分支");
+        b.set_variant(log_filter_current_branch_.value() ? Button::Variant::Soft
+                                                         : Button::Variant::Ghost);
+        b.set_size(Button::Size::Small);
+        b.on_click = [this] {
+          log_filter_current_branch_.set(!log_filter_current_branch_.value());
+        };
+      }, {.height = 24.0f, .key = "log-filter-current"});
+      scm_icon_button(c, "log-refresh", "refresh", "重新读取日志", [this] {
+        git_log_loaded_ = false;
+      });
+    });
+  }
+
+  /// 日志行的展示文本（泳道标记 + 短 hash + 主题 + refs 胶囊）。
+  auto log_line_label(const gbcode::LogEntry& entry) const -> std::string {
+    std::string refs;
+    for (const auto& ref : entry.refs) refs += "[" + ref + "] ";
+    return std::format("{} {}  {}  {}", entry.lane == 0 ? "●" : "○", entry.short_hash,
+                       entry.subject, refs);
+  }
+
+  /// 过滤后的日志（提交信息/作者/路径三个条件都作用在同一条上）。
+  auto filtered_log() const -> std::vector<gbcode::LogEntry> {
+    const std::string needle = std::string(st::trim(log_filter_text_.value()));
+    std::vector<gbcode::LogEntry> out;
+    out.reserve(git_log_.size());
+    for (const auto& entry : git_log_) {
+      if (log_filter_current_branch_.value() && entry.lane != 0) continue;
+      if (!needle.empty()) {
+        const bool hit = entry.subject.find(needle) != std::string::npos ||
+                         entry.author.find(needle) != std::string::npos ||
+                         entry.short_hash.find(needle) != std::string::npos;
+        if (!hit) continue;
+      }
+      out.push_back(entry);
+    }
+    return out;
+  }
+
+  /// 选中提交的详情（文件清单 + 点开并列差异）。
+  void build_commit_detail(Composer& c) {
+    (void)column(c, {.gap = 2.0f, .id = "git-commit-detail"}, [&] {
+      (void)text(c, [this] { return git_commit_summary_.value(); },
+                 {.color = Tone::Muted, .id = "git-commit-summary"});
+      if (git_commit_files_.empty()) return;
+      (void)custom_container<ScrollView>(
+          c,
+          [&] {
+            for (const auto& [path, plus, minus] : git_commit_files_) {
+              (void)custom<Button>(c, [this, path, plus, minus](Button& b) {
+                b.set_id("commit-file-" + path);
+                b.set_label(std::format("{}  +{} −{}", path, plus, minus));
+                b.set_variant(Button::Variant::Ghost);
+                b.set_size(Button::Size::Small);
+                b.on_click = [this, path] { open_commit_file(git_selected_hash_, path); };
+              }, {.height = 24.0f, .key = "cfile:" + path});
+            }
+          },
+          [](ScrollView& scroll) { scroll.set_id("git-commit-files-scroll"); },
+          {.id = "git-commit-files"});
+    });
+  }
+
+  /// 确认一个**不可逆/需确认**的写操作（统一入口：弹确认 → 批准后才执行）。
+  ///
+  /// 与直接执行的区别：`Danger::None` 的操作不弹（弹多了人会盲目点“确定”，
+  /// 那才是真危险）；这里只收 `Confirm`/`Backup` 两级。
+  void ask_write(const gbcode::WriteIntent& intent, std::string title, std::string body) {
+    const auto args = gbcode::write_args(intent);
+    if (!args.has_value()) {
+      status_.set("操作参数不合法——已拒绝执行");
+      return;
+    }
+    git_confirm_title_ = std::move(title);
+    git_confirm_body_ = std::format("{}\n\n将执行：{}", body, gbcode::to_display_line(*args));
+    if (gbcode::needs_backup(intent)) {
+      git_confirm_body_ += "\n（执行前会自动建备份分支：可手动回滚）";
+    }
+    pending_git_confirm_ = [this, intent] { (void)run_write(intent, "confirmed"); };
+    git_confirm_open_.set(true);
+  }
+
+  /// 删分支（`-d` 拒删未合并——想强删得再点一次）。
+  void ask_delete_branch(const std::string& name) {
+    ask_write({.op = gbcode::WriteOp::DeleteBranch, .name = name},
+              std::format("删除分支 {}", name),
+              "`-d` 只删已合并的分支（未合并会被 git 拒绝）。");
+  }
+
+  /// 强删分支（`-D`）——丢掉未合并的提交，必须说清楚。
+  void ask_force_delete_branch(const std::string& name) {
+    ask_write({.op = gbcode::WriteOp::DeleteBranch, .name = name, .hard = true},
+              std::format("强制删除分支 {}", name),
+              "`-D` 会丢掉**未合并的提交**（不可恢复）。");
+  }
+
+  /// 删标签。
+  void ask_delete_tag(const std::string& name) {
+    ask_write({.op = gbcode::WriteOp::TagDelete, .name = name},
+              std::format("删除标签 {}", name), "标签本身可重建，但引用会丢。");
+  }
+
+  /// 删一条 stash。
+  void ask_drop_stash(const std::string& index) {
+    ask_write({.op = gbcode::WriteOp::StashDrop, .ref = index},
+              std::format("删除暂存记录 {}", index), "暂存内容将不可恢复地丢失。");
+  }
+
+  /// 强制推送（**带 lease**）。
+  ///
+  /// 为何不无脑用 `--force`：无 lease 的强推会直接盖掉别人的提交；
+  /// `--force-with-lease` 在远端已经前进时**拒推**——这才是安全网。
+  void ask_force_push() {
+    ask_write({.op = gbcode::WriteOp::PushForceWithLease}, "强制推送",
+              "会改写远端历史（仅在与远端分歧且确认无人共享时使用）。");
+  }
+
+  /// 重置到某个提交（三种模式）。
+  void ask_reset(const std::string& ref, gbcode::WriteOp op) {
+    const bool hard = op == gbcode::WriteOp::ResetHard;
+    ask_write({.op = op, .ref = ref}, std::format("重置到 {}", ref),
+              hard ? "`--hard` 会丢弃当前工作区与暂存区的全部改动（不可恢复）。"
+                   : "`--soft/--mixed` 只移动 HEAD 与索引，工作区内容保留。");
+  }
+
+  /// 建分支（浮层提交）。
+  void create_branch() {
+    const std::string name = std::string(st::trim(branch_new_name_.value()));
+    if (name.empty()) {
+      status_.set("分支名不能为空");
+      return;
+    }
+    branch_new_open_.set(false);
+    (void)run_write({.op = gbcode::WriteOp::CheckoutNew, .name = name}, "branch -b");
+    status_.set("已新建并切换到分支 " + name);
+  }
+
+  /// 建标签（浮层提交）。
+  void create_tag() {
+    const std::string name = std::string(st::trim(tag_new_name_.value()));
+    if (name.empty()) {
+      status_.set("标签名不能为空");
+      return;
+    }
+    const bool annotated = tag_new_annotated_.value();
+    tag_new_open_.set(false);
+    (void)run_write({.op = gbcode::WriteOp::TagCreate, .name = name,
+                     .message = annotated ? "release " + name : std::string{},
+                     .annotated = annotated},
+                    "tag");
+    status_.set("已建标签 " + name + (annotated ? "（注解）" : "（轻量）"));
+  }
+
+  /// 按 hash 打开一个提交（标签行点开用）。
+  void open_commit_by_hash(const std::string& hash, const std::string& label) {
+    for (const auto& entry : git_log_) {
+      if (entry.hash.starts_with(hash) || entry.short_hash == hash) {
+        show_commit(entry);
+        return;
+      }
+    }
+    // 不在已读的 200 条里：只给状态提示（不额外起进程——列表里没有的提交
+    // 本来也不是当前上下文）。
+    status_.set("提交 " + label + "（" + hash + "）不在已读取的日志里");
+  }
+
+  /// 切换到分支（终端代敲——checkout 会改工作区，输出必须让用户看见）。
   void checkout_branch(const gbcode::BranchInfo& branch) {
     if (branch.is_current || branch.is_remote) {
       // 远程分支：检出它的本地跟踪分支（`git checkout <短名>` 自动建）。
@@ -3517,7 +4170,26 @@ void replace_in_workspace(std::string_view replacement) {
   private:
  // —— 内部工具 ——
 
- /// 把当前编辑器文本存回列表（切标签/关标签/保存前都要先做）。
+   /// 把排队的 shell 命令投递给终端（终端实例就绪后）。
+  ///
+  /// 为何要排队：写操作在设计上“交终端执行”，而 `terminal_ptr` 只在**终端面板
+  /// 被声明过**之后才有值。从未打开过终端时，事件回调里直接 `terminal_ptr->run(...)`
+  /// 会因空指针而**静默什么都不做**（实测：点「中止」毫无反应，状态栏也不说，
+  /// 看着像按钮坏了——而实际上是命令根本没发出去）。
+  /// 现在改为“先入队 + 确保终端可见”，下一帧终端实例就绪时在泵里投递。
+  void flush_terminal_commands() {
+    if (pending_shell_commands_.empty() || terminal_ptr == nullptr) return;
+    for (const std::string& command : pending_shell_commands_) {
+      terminal_ptr->run(command);
+    }
+    pending_shell_commands_.clear();
+  }
+
+  /// 让终端面板可见并排入一条命令（真正投递在 `flush_terminal_commands`）。
+  void queue_terminal_command(std::string command) {
+    pending_shell_commands_.push_back(std::move(command));
+    ensure_terminal_visible();
+  }
   void stash_active_text(std::vector<OpenBuffer>& list) {
     if (editor != nullptr && active_.value() < list.size()) {
       list[active_.value()].text = editor->text();
@@ -4051,12 +4723,23 @@ void replace_in_workspace(std::string_view replacement) {
     git_log_wanted_ = false;
     git_log_ = gbcode::read_log(workspace_, 200);
     git_branches_ = gbcode::read_branches(workspace_);
+    // 标签 / 远程 / 暂存 / 引用 / 上游 / 多步操作状态 / 审计：与日志同一批读完
+    //（都是“回顾面”，一次读完最省进程数；分开读只会在切标签时卡一下）。
+    git_tags_ = gbcode::read_tags(workspace_);
+    git_remotes_ = gbcode::read_remotes(workspace_);
+    git_stashes_ = gbcode::read_stashes(workspace_);
+    git_refs_ = gbcode::read_refs(workspace_);
+    git_upstream_ = gbcode::read_upstream(workspace_);
+    git_operation_ = gbcode::read_operation_state(workspace_);
+    git_audit_ = gbcode::read_audit(workspace_, 20);
     git_log_loaded_ = true;
     // **读到了要标脏**：`git_log_` 是普通 vector，数据进来了界面不会自己重画
     //（实测：日志/分支读到了、列表却是空的——缺这一行，面板永远停在首帧的空态）。
     // `status_` 本身是 State——借它触发重组（顺带把"读到了几条"说给用户）。
-    status_.set(std::format("Git 日志：{} 条提交，{} 个分支", git_log_.size(),
-                            git_branches_.size()));
+    std::string extra;
+    if (git_operation_.active()) extra = std::format(" · {} 进行中", git_operation_.kind);
+    status_.set(std::format("Git：{} 条提交 · {} 个分支 · {} 个标签{}", git_log_.size(),
+                            git_branches_.size(), git_tags_.size(), extra));
   }
 
   /// 比较视图的数据读取（帧首泵；与 `ensure_git_log` 同一理由：渲染期起子进程会崩）。
@@ -4139,14 +4822,86 @@ void replace_in_workspace(std::string_view replacement) {
     diff_wanted_ = true;
   }
 
+  /// —— 写操作的**唯一入口** ——
+  ///
+  /// 全部写操作都从这里走，原因有三：
+  /// ① 命令由 `git_service::write_args` **构造**（参数数组），不在这里拼字符串
+  ///    ——拼错了会“看着对、实际改了别的文件”；
+  /// ② 不可逆操作先建**备份分支**（`Danger::Backup`），出事能手动回滚；
+  /// ③ 无论成败都记**审计**（`.git/st-audit.jsonl`）——事后唯一的可查证据。
+  ///
+  /// 执行仍是终端作业通道（输出实时回流、可中止），与旧版一致。
+  /// 返回是否真的发出了命令（参数不合法时为 false，并如实报状态）。
+  bool run_write(const gbcode::WriteIntent& intent, std::string_view label = {}) {
+    if (workspace_.empty()) return false;
+    const auto args = gbcode::write_args(intent);
+    if (!args.has_value()) {
+      status_.set(std::format("操作参数不合法（{}）——已拒绝执行",
+                              label.empty() ? std::string("缺少必填项") : std::string(label)));
+      return false;
+    }
+        const std::string display = gbcode::to_display_line(*args);
+    (void)display;
+    // 不可逆操作：**先把备份分支建好再动手**。备份失败就不执行
+    //（宁可不做，也不要“做了但没退路”——备份的成本是一次 `branch`）。
+    if (gbcode::needs_backup(intent)) {
+      const std::string backup = gbcode::backup_branch_name(workspace_);
+      queue_terminal_command("git branch " + gbcode::shell_quote(backup));
+      (void)gbcode::append_audit(workspace_, "backup", {"branch", backup}, "issued");
+      status_.set(std::format("已建备份分支 {}（回滚：git reset --hard {}）", backup, backup));
+    }
+    queue_terminal_command(gbcode::to_shell_line(*args));
+    (void)gbcode::append_audit(workspace_, label.empty() ? "write" : std::string(label), *args,
+                               "issued");
+    git_refresh_pending_ = true;
+    return true;
+  }
+
+  /// 暂存/取消暂存**整个分组**（分组级批量：未暂存/未跟踪 → 暂存；已暂存 → 取消）。
+  ///
+  /// 为什么按分组而不管目录树：目录树要按“选中路径集”逐个发命令，
+  /// 而这一层的真实需求是“这一组我全要/全不要”——把它做成一次命令，
+  /// 用户在终端里看到的也是一条完整命令（而不是一串）。
+  void stage_group(gbcode::ChangeGroup group, bool stage) {
+    for (const auto& change : git_.changes_in(group)) {
+      git_stage(change.path, stage);
+    }
+  }
+
+  /// 放弃**全部**未暂存改动（危险：要确认，且会自动建备份分支）。
+  void ask_discard_all() {
+    ask_write({.op = gbcode::WriteOp::DiscardAll}, "放弃全部未暂存改动",
+              "工作区里所有未暂存修改会回到已暂存/已提交的状态。");
+  }
+
+  /// 提交并推送。
+  ///
+  /// 分成**两条命令**（提交、推送）而不拼成 `git commit && git push`：
+  /// 提交失败时不该推送（`&&` 天然保证），但拼成一行后审计里只剩一条
+  /// “commit && push”——出问题时看不出是哪一步失败。
+  void commit_and_push() {
+    const std::string message = commit_message_.value();
+    if (st::trim(message).empty()) {
+      status_.set("提交信息为空");
+      return;
+    }
+    if (terminal_ptr == nullptr || workspace_.empty()) return;
+    gbcode::WriteIntent commit{.op = gbcode::WriteOp::Commit, .message = message};
+    commit.amend = commit_amend_.value();
+    commit.author = commit_author_.value();
+    if (!run_write(commit, "commit")) return;
+    const std::string branch = git_upstream_.empty() ? git_.branch : std::string{};
+    (void)run_write({.op = gbcode::WriteOp::Push, .name = branch}, "push");
+    commit_message_.set("");
+    commit_amend_.set(false);
+    status_.set("已提交并推送");
+  }
+
   /// 暂存/取消暂存一个文件（写操作：交终端作业通道——输出实时回流、可中止）。
   void git_stage(const std::string& path, bool stage) {
-    if (terminal_ptr == nullptr || workspace_.empty()) return;
-    ensure_terminal_visible();
-    terminal_ptr->run(stage ? std::format("git add -- {}", path)
-                            : std::format("git restore --staged -- {}", path));
-    // 命令完成后状态变了：下一轮 pump 刷新（不在这里同步刷——命令还没跑完）。
-    git_refresh_pending_ = true;
+    (void)run_write({.op = stage ? gbcode::WriteOp::Stage : gbcode::WriteOp::Unstage,
+                     .path = path},
+                    stage ? "stage" : "unstage");
   }
 
   /// 放弃一个文件的更改（危险操作：先确认——`git restore`/`checkout` 不可恢复）。
@@ -4155,40 +4910,34 @@ void replace_in_workspace(std::string_view replacement) {
       git_confirm_title_ = std::format("删除未跟踪文件 {}", change.path);
       git_confirm_body_ = "文件没有进过版本库，删除后无法恢复。确定删除？";
       pending_git_confirm_ = [this, path = change.path] {
-        if (terminal_ptr != nullptr) {
-          ensure_terminal_visible();
-          terminal_ptr->run(std::format("rm -- {}", path));
-          git_refresh_pending_ = true;
-        }
+        // 未跟踪文件的删除不走 git（它不在索引里），但同样要审计。
+        queue_terminal_command("rm -- " + gbcode::shell_quote(path));
+        (void)gbcode::append_audit(workspace_, "rm-untracked", {"rm", path}, "issued");
+        git_refresh_pending_ = true;
       };
       git_confirm_open_.set(true);
       return;
     }
-    const std::string scope = change.has_staged_side() && !change.has_unstaged_side()
-                                  ? "暂存的修改"
-                                  : "未暂存的修改";
+    const std::string scope =
+        change.has_staged_side() && !change.has_unstaged_side() ? "暂存的修改" : "未暂存的修改";
     git_confirm_title_ = std::format("放弃 {}（{}）", scope, change.path);
     git_confirm_body_ = "改动将不可恢复地丢失（git restore）。确定放弃？";
     pending_git_confirm_ = [this, path = change.path,
                             staged_side = change.has_staged_side()] {
-      if (terminal_ptr == nullptr) return;
-      ensure_terminal_visible();
       // 两侧都有时先退暂存再还原工作区（一步做完，省得用户分两次）。
-      if (staged_side) {
-        terminal_ptr->run(std::format("git restore --staged -- {} && git checkout -- {}",
-                                      path, path));
-      } else {
-        terminal_ptr->run(std::format("git checkout -- {}", path));
-      }
-      git_refresh_pending_ = true;
+      if (staged_side) (void)run_write({.op = gbcode::WriteOp::Unstage, .path = path});
+      (void)run_write({.op = gbcode::WriteOp::DiscardOne, .path = path}, "discard");
     };
     git_confirm_open_.set(true);
   }
 
-  /// 提交（提交框 Enter）：暂存全部 → 提交 → 刷新。
+  /// 提交（提交框 Enter）。
   ///
   /// 走终端而非同步 `process::run` 的理由与 `run_task` 相同：同步阻塞会把
-  /// 界面卡住（提交大仓库能到秒级），而终端通道输出实时回流、可中止。
+  /// 界面卡住（大仓库提交能到秒级），而终端通道输出实时回流、可中止。
+  ///
+  /// **不再 `git add -A` 再提交**（旧版的行为）：那会把用户没勾选的文件一并提交。
+  /// 现在“暂存什么就提交什么”——没暂存任何东西时才回退到“全提交”并**在状态栏说清**。
   void git_commit() {
     const std::string message = commit_message_.value();
     if (st::trim(message).empty()) {
@@ -4196,13 +4945,26 @@ void replace_in_workspace(std::string_view replacement) {
       return;
     }
     if (terminal_ptr == nullptr || workspace_.empty()) return;
-    ensure_terminal_visible();
-    // 消息作为单引号参数转义（用户文本不能直接拼进 shell——单引号内再替换单引号）。
-    const std::string escaped = "'" + st::replace_all(message, "'", "'\''") + "'";
-    terminal_ptr->run("git add -A && git commit -m " + escaped);
+    if (!commit_message_history_.empty() &&
+        commit_message_history_.front() != message) {
+      commit_message_history_.insert(commit_message_history_.begin(), message);
+      if (commit_message_history_.size() > 20) commit_message_history_.pop_back();
+    }
+    gbcode::WriteIntent intent{.op = gbcode::WriteOp::Commit, .message = message};
+    intent.amend = commit_amend_.value();
+    intent.author = commit_author_.value();
+    const bool amending = commit_amend_.value();
+    if (amending) {
+      // 修正会**改写 HEAD**（已推送时是历史改写）——走确认口。
+      ask_write(intent, "修正上一笔提交（--amend）",
+                "会改写当前 HEAD 那笔提交（若已推送，需强推才能同步远端）。");
+    } else {
+      (void)run_write(intent, "commit");
+    }
     commit_message_.set("");
-    git_refresh_pending_ = true;
-    status_.set("已提交：" + std::string(st::trim(message)).substr(0, 40));
+    commit_amend_.set(false);
+    status_.set(std::format("已{}：{}", amending ? "发起修正" : "提交",
+                            std::string(st::trim(message)).substr(0, 40)));
   }
 
   /// 展开一个变更文件：与 HEAD 的差异**跑进终端**（只读 `git diff`）。
