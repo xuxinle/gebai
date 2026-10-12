@@ -6,7 +6,7 @@ import { renderTool } from "./render"
 import { setupTool } from "./setup"
 import { voiceTool } from "./voice"
 // 系统提示词独立 md 维护（目录形式约定：{dir}/{dir}.md）。
-import systemPromptBase from "./reel.md"
+import systemPromptBase from "./reel.md" with { type: "text" }
 
 export const name = "reel"
 export const description =

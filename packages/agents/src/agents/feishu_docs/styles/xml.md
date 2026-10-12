@@ -71,3 +71,14 @@
 | 跨块统一口径替换 | `replace_text`（先 `dry_run`） |
 | 插图片（三步流程） | `insert_image` |
 | 写入前预检 | `import_xml` 传 `dry_run=true`：只解析并出画像（块数/字数/类型分布）+ 图片与图表预检，**零写入** |
+
+## 文档之外的常用工具
+
+| 场景 | 用什么 |
+|---|---|
+| 另存副本 / 归档改名 | `copy_file` / `move_file`（异步任务用 `task_check` 查进度） |
+| 读/写评论（评审场景） | `list_comments` / `add_comment` / `resolve_comment` |
+| 看谁能访问 / 加协作者 / 链接分享 | `list_permission_members` / `add_permission` / `set_link_share` |
+| 上传下载文件（含内嵌图片/附件 token） | `upload_file` / `download_file` |
+
+资源落位与身份（应用身份 / 目标文件夹 / 用户令牌）见系统提示词「身份与落位」。

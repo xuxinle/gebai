@@ -3,7 +3,7 @@ import { createPlaywrightTools } from "./playwright_tools"
 import { createPlaywrightSessionTools } from "./playwright_session_tools"
 import { createPlaywrightCvTools } from "./playwright_cv_tools"
 // 系统提示词拆为独立 md 维护（目录形式约定：{dir}/{dir}.md）。
-import systemPromptBase from "./playwright.md"
+import systemPromptBase from "./playwright.md" with { type: "text" }
 
 export const name = "playwright"
 export const description =

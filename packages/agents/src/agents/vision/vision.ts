@@ -9,7 +9,7 @@
  */
 import type { SubAgentDef } from "@gebai/sdk"
 import { makeVisionTool, getVisionProvider } from "../../core/shared/vision"
-import systemPromptBase from "./vision.md"
+import systemPromptBase from "./vision.md" with { type: "text" }
 
 export const name = "vision"
 // 跨语言合并：描述留空 = 本侧不贡献，由 客卿 侧 manifest description 与合并层兜底

@@ -2219,6 +2219,141 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     },
   )
 
+  const copyFile = tool(
+    "copy_file",
+    "复制云文档/文件（另存为副本，得到独立 token 的副本）。**folder_token 必填**（官方接口要求；缺省用 `FEISHU_DOCS_FOLDER_URL` 配置的目标文件夹）。副本带独立 token，编辑副本不影响原文档。",
+    {
+      file_token: { type: "string", description: "源文件 token" },
+      type: { type: "string", description: "源文件类型（须与实际一致）：docx/sheet/bitable/file/mindnote/slides/doc" },
+      name: { type: "string", description: "副本名称（缺省「源名副本」；≤ 256 字节）" },
+      folder_token: { type: "string", description: "目标文件夹 token（缺省用 FEISHU_DOCS_FOLDER_URL 配置的文件夹）" },
+    },
+    ["file_token", "type"],
+    async (args, ctx) => {
+      const folder = targetFolder(ctx, args.folder_token)
+      if (!folder) {
+        throw new Error("copy_file 需要目标文件夹：显式传 folder_token，或配置 FEISHU_DOCS_FOLDER_URL（官方接口要求 folder_token 必填）")
+      }
+      const data = await api(ctx, `/open-apis/drive/v1/files/${String(args.file_token)}/copy`, {
+        method: "POST",
+        body: { name: args.name !== undefined ? String(args.name) : undefined, type: String(args.type), folder_token: folder },
+      })
+      return jsonResult(ctx, data, "复制成功（返回新文件 token）")
+    },
+  )
+
+  const moveFile = tool(
+    "move_file",
+    "移动云文档/文件到另一文件夹（可同时改名）。**权限注意**：目标文件夹必须对当前身份可写，否则报权限错误。",
+    {
+      file_token: { type: "string" },
+      type: { type: "string", description: "docx/sheet/bitable/file/folder" },
+      folder_token: { type: "string", description: "目标文件夹 token（必填）" },
+      name: { type: "string", description: "新名称（可选，不改名则省略）" },
+    },
+    ["file_token", "type", "folder_token"],
+    async (args, ctx) => {
+      const data = await api(ctx, `/open-apis/drive/v1/files/${String(args.file_token)}/move`, {
+        method: "POST",
+        body: { type: String(args.type), folder_token: String(args.folder_token), name: args.name !== undefined ? String(args.name) : undefined },
+      })
+      return jsonResult(ctx, data, "移动成功")
+    },
+  )
+
+  const taskCheck = tool(
+    "task_check",
+    "查询云空间异步任务的进度与结果（导入/导出等返回 ticket 的任务）。",
+    { ticket: { type: "string", description: "异步任务 ticket" } },
+    ["ticket"],
+    async (args, ctx) => {
+      const data = await api(ctx, "/open-apis/drive/v1/files/task_check", { query: { ticket: String(args.ticket) } })
+      return jsonResult(ctx, data, "任务状态")
+    },
+  )
+
+  const listComments = tool(
+    "list_comments",
+    "获取云文档的全部评论与回复（含评论人/回复人 ID、内容、位置、是否已解决）。用于评审场景：先读评论再决定改哪里。`is_solved` 可只看未解决。",
+    {
+      file_token: { type: "string", description: "文档 token" },
+      file_type: { type: "string", description: "docx（缺省）/doc/sheet/file/slides" },
+      is_solved: { type: "boolean", description: "只看已解决/未解决（缺省全部）" },
+      page_size: { type: "number" },
+      page_token: { type: "string" },
+    },
+    ["file_token"],
+    async (args, ctx) => {
+      const data = await api(ctx, `/open-apis/drive/v1/files/${String(args.file_token)}/comments`, {
+        query: {
+          file_type: String(args.file_type ?? "docx"),
+          is_solved: args.is_solved === undefined ? undefined : String(args.is_solved),
+          page_size: args.page_size ? num(args.page_size, 50) : undefined,
+          page_token: args.page_token,
+        },
+      })
+      return jsonResult(ctx, data, "评论列表")
+    },
+  )
+
+  const addComment = tool(
+    "add_comment",
+    "在云文档添加一条**全局评论**（飞书接口不支持经 API 添加局部评论）。评论内容为纯文本；可带 @人（传 open_id）。",
+    {
+      file_token: { type: "string" },
+      file_type: { type: "string", description: "docx（缺省）/doc/sheet/file/slides" },
+      content: { type: "string", description: "评论内容（纯文本）" },
+      user_ids: { type: "array", items: { type: "string" }, description: "@这些用户（open_id 列表，可选）" },
+    },
+    ["file_token", "content"],
+    async (args, ctx) => {
+      const elements: Array<Record<string, unknown>> = [{ type: "text_run", text_run: { text: String(args.content) } }]
+      for (const uid of (Array.isArray(args.user_ids) ? args.user_ids : []).map(String)) {
+        elements.push({ type: "person", person: { user_id: uid } })
+      }
+      const data = await api(ctx, `/open-apis/drive/v1/files/${String(args.file_token)}/comments`, {
+        method: "POST",
+        query: { file_type: String(args.file_type ?? "docx"), user_id_type: "open_id" },
+        body: { reply_list: { replies: [{ content: { elements } }] } },
+      })
+      return jsonResult(ctx, data, "评论已添加")
+    },
+  )
+
+  const resolveComment = tool(
+    "resolve_comment",
+    "解决或恢复一条评论（is_solved=true 标记已解决）。文档里对应的评论入口也存在时，两者同步。",
+    {
+      file_token: { type: "string" },
+      comment_id: { type: "string" },
+      is_solved: { type: "boolean", description: "true=标记已解决（缺省），false=恢复未解决" },
+      file_type: { type: "string", description: "docx（缺省）/doc/sheet/file/slides" },
+    },
+    ["file_token", "comment_id"],
+    async (args, ctx) => {
+      const data = await api(ctx, `/open-apis/drive/v1/files/${String(args.file_token)}/comments/${String(args.comment_id)}`, {
+        method: "PATCH",
+        query: { file_type: String(args.file_type ?? "docx") },
+        body: { is_solved: args.is_solved !== false },
+      })
+      return jsonResult(ctx, data, args.is_solved === false ? "评论已恢复未解决" : "评论已标记解决")
+    },
+  )
+
+  const listPermissionMembers = tool(
+    "list_permission_members",
+    "列出云文档的协作者（人/群/组织/用户组/知识库成员）及其权限，用于确认谁能访问（配合 add_permission 形成权限闭环）。",
+    {
+      token: { type: "string", description: "文档 token" },
+      type: { type: "string", description: "docx/sheet/bitable/file/folder/wiki" },
+    },
+    ["token", "type"],
+    async (args, ctx) => {
+      const data = await api(ctx, `/open-apis/drive/v1/permissions/${String(args.token)}/members`, { query: { type: String(args.type) } })
+      return jsonResult(ctx, data, "协作者列表")
+    },
+  )
+
   /* ================= 搜索 ================= */
 
   const search = tool(
@@ -2761,6 +2896,13 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     insert_image: insertImage,
     download_file: downloadFile,
     delete_file: deleteFile,
+    copy_file: copyFile,
+    move_file: moveFile,
+    task_check: taskCheck,
+    list_comments: listComments,
+    add_comment: addComment,
+    resolve_comment: resolveComment,
+    list_permission_members: listPermissionMembers,
     search: search,
     create_sheet: createSheet,
     get_sheet_meta: getSheetMeta,

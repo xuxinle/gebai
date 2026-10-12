@@ -2210,7 +2210,7 @@ describe("子Agent 定义", () => {  test("feishu_docs 定义完整且工具命�
     expect(feishuDef.description.length).toBeGreaterThan(20)
     expect(feishuDef.systemPrompt).toContain("FEISHU_DOCS_APP_ID")
     const tools = Object.keys(feishuDef.tools ?? {})
-    expect(tools.length).toBeGreaterThanOrEqual(45)
+    expect(tools.length).toBeGreaterThanOrEqual(52)
     for (const t of tools) {
       expect(/^[a-zA-Z0-9_]+$/.test(t)).toBe(true)
       expect(t.length).toBeLessThanOrEqual(40 - "feishu_docs".length - 1)
@@ -2219,12 +2219,22 @@ describe("子Agent 定义", () => {  test("feishu_docs 定义完整且工具命�
     for (const keep of ["get_doc_blocks", "list_blocks", "find_blocks", "add_blocks", "update_block", "delete_blocks", "replace_text", "insert_image"]) {
       expect(tools).toContain(keep)
     }
+    // 云空间与协作类（复制/移动/评论/协作者）
+    for (const extra of ["copy_file", "move_file", "task_check", "list_comments", "add_comment", "resolve_comment", "list_permission_members"]) {
+      expect(tools).toContain(extra)
+    }
+    // 系统提示词必须是原始 Markdown（不能带 HTML 标签——.md 需 with { type: "text" } 导入）
+    expect(/<\/?(p|li|ul|ol|h[1-6])>/.test(feishuDef.systemPrompt)).toBe(false)
+    // 提示词提及全部工具（工具地图完整、无遗漏）
+    for (const t of tools) {
+      expect(feishuDef.systemPrompt).toContain(t)
+    }
     // 写操作全部需审批
-    for (const w of ["create_doc", "import_markdown", "import_xml", "update_doc", "delete_blocks", "add_blocks", "update_block", "replace_text", "insert_image", "upload_file", "add_permission", "api_call", "set_table_width"]) {
+    for (const w of ["create_doc", "import_markdown", "import_xml", "update_doc", "delete_blocks", "add_blocks", "update_block", "replace_text", "insert_image", "upload_file", "add_permission", "api_call", "set_table_width", "copy_file", "move_file", "add_comment", "resolve_comment"]) {
       expect(feishuDef.requiresApproval?.[w]).toBe(true)
     }
     // 读操作/会话配置/只读体检不审批（显式 false 或未登记）
-    for (const r of ["fetch_doc", "get_doc_text", "get_doc_blocks", "list_blocks", "find_blocks", "list_files", "read_sheet", "get_board", "auth_user_authorize", "auth_user_token", "auth_user_status", "auth_user_clear", "lint_doc", "style_guide"]) {
+    for (const r of ["fetch_doc", "get_doc_text", "get_doc_blocks", "list_blocks", "find_blocks", "list_comments", "list_permission_members", "list_files", "read_sheet", "get_board", "auth_user_authorize", "auth_user_token", "auth_user_status", "auth_user_clear", "lint_doc", "style_guide"]) {
       expect(feishuDef.requiresApproval?.[r] ?? false).toBe(false)
     }
     expect(feishuDef.preload).toBe(false)

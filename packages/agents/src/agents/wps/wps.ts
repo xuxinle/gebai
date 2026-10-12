@@ -5,7 +5,7 @@ import { excelEditTool, excelReadTool, excelWriteTool } from "./excel"
 import { pptCreateTool, pptReadTool } from "./ppt"
 import { pdfCreateTool, pdfEditTool, pdfMergeTool, pdfReadTool, pdfSplitTool } from "./pdf"
 // 系统提示词拆为独立 md 维护（目录形式约定：{dir}/{dir}.md）。
-import systemPromptBase from "./wps.md"
+import systemPromptBase from "./wps.md" with { type: "text" }
 
 export const name = "wps"
 export const description =

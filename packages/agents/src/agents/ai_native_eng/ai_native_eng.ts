@@ -1,6 +1,6 @@
 import type { SubAgentDef } from "@gebai/sdk"
 // 系统提示词独立 md 维护（目录形式约定：{dir}/{dir}.md）。
-import systemPromptBase from "./ai_native_eng.md"
+import systemPromptBase from "./ai_native_eng.md" with { type: "text" }
 
 export const name = "ai_native_eng"
 export const description =

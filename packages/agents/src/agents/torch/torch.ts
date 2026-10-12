@@ -21,7 +21,7 @@
 import { isAbsolute, resolve } from "node:path"
 import type { SubAgentDef } from "@gebai/sdk"
 import { projectAware } from "@gebai/sdk/node"
-import systemPromptBase from "./torch.md"
+import systemPromptBase from "./torch.md" with { type: "text" }
 import { torchTools } from "./torch-tools"
 
 export const name = "torch"

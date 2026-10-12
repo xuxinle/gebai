@@ -12,7 +12,7 @@
 import { isAbsolute, resolve } from "node:path"
 import type { SubAgentDef } from "@gebai/sdk"
 import { projectAware } from "@gebai/sdk/node"
-import systemPromptBase from "./nsight.md"
+import systemPromptBase from "./nsight.md" with { type: "text" }
 import { analysisTools } from "./tools"
 import { kernelDetailTool } from "./ncu-tools"
 import { captureTool } from "./capture"

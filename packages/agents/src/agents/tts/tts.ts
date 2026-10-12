@@ -27,7 +27,7 @@ import {
   type TtsEngine,
 } from "../../core/tts/speech"
 // 系统提示词独立 md 维护（目录形式约定：{dir}/{dir}.md）。
-import systemPromptBase from "./tts.md"
+import systemPromptBase from "./tts.md" with { type: "text" }
 // 音效工具（合成/效果/混音）：纯本地计算，不依赖系统语音引擎。
 import { effectTool, mixTool, sfxTool } from "./sfx"
 

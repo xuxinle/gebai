@@ -1,6 +1,6 @@
 import type { SubAgentDef } from "@gebai/sdk"
 // 系统提示词独立 md 维护（目录形式约定：{dir}/{dir}.md）。
-import systemPromptBase from "./shuangtian.md"
+import systemPromptBase from "./shuangtian.md" with { type: "text" }
 import { requiresApproval as toolApprovals, tools as toolSet } from "./shuangtian_tools"
 
 export const name = "shuangtian"

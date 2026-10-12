@@ -2,7 +2,7 @@ import type { SubAgentDef } from "@gebai/sdk"
 import { createCaptureTools, createHttpRequestTool } from "./reverse_site_tools"
 import { createNetTools } from "./reverse_site_net_tools"
 // 系统提示词拆为独立 md 维护（目录形式约定：{dir}/{dir}.md）。
-import systemPromptBase from "./reverse_site.md"
+import systemPromptBase from "./reverse_site.md" with { type: "text" }
 
 export const name = "reverse_site"
 export const description =

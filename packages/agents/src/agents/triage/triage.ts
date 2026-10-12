@@ -16,7 +16,7 @@ import {
   TRIAGE_TEXT_RENDER_MAX,
 } from "../../core/triage"
 import type { TriageL2Runner, TriageResult, TriageSummary } from "../../core/triage"
-import systemPromptBase from "./triage.md"
+import systemPromptBase from "./triage.md" with { type: "text" }
 
 export const name = "triage"
 export const description =

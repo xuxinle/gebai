@@ -1,7 +1,9 @@
 import type { SubAgentDef } from "@gebai/sdk"
 import { createFeishuTools } from "./feishu_api"
 // 系统提示词拆为独立 md 维护（目录形式约定：{dir}/{dir}.md）。
-import systemPromptBase from "./feishu_docs.md"
+// **显式 `with { type: "text" }`**：Bun 默认对 .md 走 html loader（会包 `<p>` 标签），必须拿原始 Markdown
+// （与 styles/index.ts 同机制；否则提示词以 HTML 形态进入上下文，标签白占字符且割裂列表结构）。
+import systemPromptBase from "./feishu_docs.md" with { type: "text" }
 
 export const name = "feishu_docs"
 export const description =
@@ -24,6 +26,10 @@ export const requiresApproval = {
   insert_image: true,
   download_file: true,
   delete_file: true,
+  copy_file: true,
+  move_file: true,
+  add_comment: true,
+  resolve_comment: true,
   create_sheet: true,
   write_sheet: true,
   append_sheet: true,
