@@ -1,4 +1,4 @@
-# 霜天自举脚本（Windows）：用编译器直接编出 stpm 自身（`build/bin/st.exe`）。
+﻿# 霜天自举脚本（Windows）：用编译器直接编出 stpm 自身（`build/bin/st.exe`）。
 #
 # 与 `bootstrap.sh` 的关系：两者是**同一件事的两个平台入口**，都只做"编出 st"这一件事，
 # 之后一切构建/测试/依赖管理都走 `st`。
@@ -201,17 +201,24 @@ $objects = @($relUnits | ForEach-Object {
     Join-Path $objDir ($name + '.o')
 })
 $exe = Join-Path $binDir 'st.exe'
-# 链接库与 `st.pkg` 的 `system_libs` / `src/pkg/build.cpp` 的 `default_system_libs` 同口径
-# （Windows 目标的系统库）：`ws2_32` 网络、`gdi32`/`user32`/`shell32` Win32 与命令行、
-# `dbghelp`+`nanosrv`+`psapi` 崩溃栈符号化（`src/core/platform_crash.cpp`）、
-# `secur32` Schannel TLS（`src/net/platform_tls_schannel.cpp` 的 SSPI 系）。
-#
-# ⚠ 这里漏过两次、两次现象都是**报错指向源码**：
-#   `undefined reference to __imp_SymFunctionTableAccess64`（`dbghelp` 缺）与
-#   一条 `psapi` 系的未定义符号——真因都是"链接库列表少一项"。
-#   第三次是 `__imp_AcquireCredentialsHandleW`（`secur32` 缺，加 TLS 时）——同因。
-$linkOutput = & $CXX $objects '-o' $exe '-lws2_32' '-lgdi32' '-luser32' '-lshell32' '-lwinpthread' `
-                             '-ldbghelp' '-lnanosrv' '-lpsapi' '-lsecur32' '-static-libgcc' '-static-libstdc++' 2>&1
+# 链接库：读仓库根的 link-libs.txt（单一数据源；`st.pkg`/`build.cpp`/两个自举脚本共用）。
+# 历史教训（曾在本文件手写清单，漏过三次：dbghelp×2、secur32×1，每次都是
+# 「报错指向源码的 undefined reference」，排查方向被带偏）——现收敛到一份文件。
+function Read-LinkLibs {
+  param([string]$Section)
+  $path = Join-Path $Root 'link-libs.txt'
+  if (-not (Test-Path $path)) { Write-Error "缺 $path（链接库单一数据源）"; exit 1 }
+  $libs = @(); $inSection = $false
+  foreach ($line in Get-Content $path -Encoding UTF8) {
+    $trimmed = $line.Trim()
+    if ($trimmed -eq '' -or $trimmed.StartsWith('#')) { continue }
+    if ($trimmed -match '^(windows|posix):\s*$') { $inSection = ($Matches[1] -eq $Section); continue }
+    if ($inSection) { $libs += $trimmed }
+  }
+  return $libs
+}
+$linkLibArgs = @(Read-LinkLibs 'windows' | ForEach-Object { "-l$_" })
+$linkOutput = & $CXX $objects '-o' $exe @linkLibArgs '-static-libgcc' '-static-libstdc++' 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host ($linkOutput | Out-String); Write-Error "链接失败" }
 
 $elapsed = ((Get-Date) - $started).TotalMilliseconds

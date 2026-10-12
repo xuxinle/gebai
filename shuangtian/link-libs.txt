@@ -1,0 +1,42 @@
+# 霜天系统链接库清单（单一数据源 —— Single Source of Truth）
+#
+# 消费者（改这里 = 全部生效，改别处 = 口径分家的下一次事故）：
+#   ① bootstrap.ps1   —— Windows 自举（鸡生蛋入口，编 st 本身；解析见其 Read-LinkLibs 段）
+#   ② bootstrap.sh    —— POSIX 自举（同上）
+#   ③ src/pkg/build.cpp —— default_system_libs()（框架/独立工程构建；读不到本文件时
+#                          用同值内置兜底——独立工程打包不随带本文件也能构建）
+#
+# 语法：每行一项，`平台:` 起节（windows / posix），`#` 注释，空行忽略。
+# 链接顺序按出现序（-l 从上到下追加——有依赖方向的系统库保持先底层后上层）。
+#
+# 为何收成一份文件：这份清单曾散布在 5 处（自举×2 / 框架清单 / 交叉 toolchains×2 /
+# 独立工程默认表），历史上漏过三次（dbghelp×2、secur32×1），每次的现象都是
+# 「报错指向源码的 undefined reference」，排查方向被带偏。见 docs/PITFALLS.md。
+#
+# 各项的来源（为什么需要它）：
+#   ws2_32      winsock（src/core/platform_net.cpp、src/net/*）
+#   user32      Win32 窗口/消息（src/shell/platform_win32.cpp）
+#   gdi32       GDI 绘制辅助
+#   shell32     CommandLineToArgvW（st/core/entry.cpp 的 ST_MAIN）
+#   dbghelp     崩溃栈符号化（src/core/platform_crash.cpp：SymInitialize/SymFromAddr）
+#   nanosrv     MinGW 里 libdbghelp.a 只是壳，API 存根真身在 libnanosrv.a
+#   psapi       进程/模块枚举（崩溃报告与资源诊断）
+#   secur32     Schannel TLS 的 SSPI 系（src/net/platform_tls_schannel.cpp）
+#   winpthread  MinGW 的 std::thread 运行库（C++20 <thread> 在 winpthreads 上）
+#   pthread/dl/m POSIX 线程 / dlopen（TLS 的运行时 OpenSSL 加载）/ 数学库
+
+windows:
+ws2_32
+user32
+gdi32
+shell32
+dbghelp
+nanosrv
+psapi
+secur32
+winpthread
+
+posix:
+pthread
+dl
+m

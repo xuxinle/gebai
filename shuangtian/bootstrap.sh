@@ -200,8 +200,28 @@ if [ "${#MISSING[@]}" -gt 0 ]; then
   exit 1
 fi
 
-echo "[bootstrap] 链接 st ..."
-"$CXX" "${FLAGS[@]}" "${OBJECTS[@]}" -o build/bin/st -lpthread -ldl -lm
+# 链接库：读仓库根的 link-libs.txt（单一数据源；bootstrap.ps1/st.pkg/build.cpp 共用同一份）。
+# 历史教训：清单曾在多处各写一份，漏项的报错全部指向源码（undefined reference），
+# 排查方向被带偏——收敛到一份文件后改一处即全局生效。
+LINK_LIBS_FILE="$ROOT/link-libs.txt"
+if [ ! -f "$LINK_LIBS_FILE" ]; then
+  echo "[bootstrap] 缺 $LINK_LIBS_FILE（链接库单一数据源）" >&2
+  exit 1
+fi
+LINK_LIBS=()
+in_posix=0
+while IFS= read -r line || [ -n "$line" ]; do
+  trimmed="${line#"${line%%[![:space:]]*}"}"   # 去左空白
+  case "$trimmed" in
+    ''|'#'*) continue ;;
+    posix:*) in_posix=1 ;;
+    windows:*) in_posix=0 ;;
+    *) [ "$in_posix" -eq 1 ] && LINK_LIBS+=("-l$trimmed") ;;
+  esac
+done < "$LINK_LIBS_FILE"
+
+echo "[bootstrap] 链接 st ...（系统库：${LINK_LIBS[*]}）"
+"$CXX" "${FLAGS[@]}" "${OBJECTS[@]}" -o build/bin/st "${LINK_LIBS[@]}"
 END=$(date +%s%N)
 echo "[bootstrap] 完成 → build/bin/st（$(( (END-START)/1000000 )) ms）"
 "./build/bin/st" version || true

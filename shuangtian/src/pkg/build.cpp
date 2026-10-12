@@ -469,23 +469,46 @@ struct PchContext {
 /// **参数是目标平台名，不是宿主的 `_WIN32`**：交叉编译时宿主与目标不同，
 /// 用 `#if defined(_WIN32)` 判的是宿主（Linux 上恒为假），必然给 Windows 目标链上
 /// `-lpthread -ldl -lm`——mingw 根本没有这些库，链接必然失败。
+///
+/// **单一数据源：仓库根的 `link-libs.txt`**（bootstrap.ps1/sh 与本函数共用同一份）。
+/// 历史教训：清单曾在自举脚本×2 / 框架清单 / 交叉 toolchains / 本函数五处各写一份，
+/// 漏过三次（dbghelp×2、secur32×1），每次都是「报错指向源码的 undefined reference」
+/// ——排查方向被带偏。收敛后改一处即全局生效。
+///
+/// 读不到该文件时（独立工程把框架 vendor 出去，不带仓库根文件）退回内置同值
+/// 兑底——口径仍一致（下方的 `kFallbackLibs*` 与 link-libs.txt 内容同步维护）。
 [[nodiscard]] auto default_system_libs(std::string_view platform) -> std::vector<std::string> {
-  // Windows 目标的默认库：`ws2_32`（winsock）+ `user32`/`gdi32`（Win32 窗口后端）
-  // + `shell32`（`CommandLineToArgvW`：`ST_MAIN` 拿命令行参数用它）
-  // + `dbghelp`/`nanosrv`/`psapi`（`src/core/platform_crash.cpp` 用 DbgHelp 把崩溃栈
-  //   解析成函数名：`SymInitialize`/`SymFromAddr`/`StackWalk64` 系）。
-  // 少一个就是链接期"无法解析的外部符号"，而报错位置离真正原因（少了哪个库）很远。
-  //
-  // ⚠ `dbghelp` 曾以两种形式各漏一次（记下来以免再漏）：
-  //   * `bootstrap.ps1` 的链接库列表漏它——自举直接失败；
-  //   * 本函数漏它——**独立工程**的测试二进制链接失败，而框架自身能链过
-  //     （因为框架清单的 `system_libs` 里有它，两条路不同口径）。
-  //
-  // `nanosrv` 为何也要：MinGW 里 `libdbghelp.a` 只是壳，真正的 API 存根在
-  // `libnanosrv.a`。GNU `ld` 有时会替你拉上，而 `ld.lld` 如实报未定义符号——
-  // 两者行为不一致，所以显式写全（本机现在是 lld）。
+  // 查找 link-libs.txt：从当前目录向上最多三级（框架根 / 独立工程的 vendor 布局）。
+  const std::string wanted = platform == "windows" ? "windows" : "posix";
+  for (int depth = 0; depth < 3; ++depth) {
+    std::string prefix;
+    for (int up = 0; up < depth; ++up) prefix += "../";
+    const auto content = fs::read_text(prefix + "link-libs.txt");
+    if (!content.has_value()) continue;
+    std::vector<std::string> libs;
+    bool in_section = false;
+    for (const std::string_view line : split(*content, '\n')) {
+      std::string_view trimmed = line;
+      while (!trimmed.empty() && (trimmed.front() == ' ' || trimmed.front() == '\t')) {
+        trimmed.remove_prefix(1);
+      }
+      if (trimmed.empty() || trimmed.front() == '#') continue;
+      if (trimmed == "windows:") { in_section = wanted == "windows"; continue; }
+      if (trimmed == "posix:") { in_section = wanted == "posix"; continue; }
+      if (in_section) {
+        std::string lib(trimmed);
+        if (!lib.empty() && lib.back() == '\r') lib.pop_back();
+        libs.push_back(std::move(lib));
+      }
+    }
+    if (!libs.empty()) return libs;
+  }
+  // 兑底（与 link-libs.txt 同步维护；独立工程场景）。
+  // Windows：`nanosrv` 是 MinGW 里 dbghelp 的真身存根（壳库只转发）；
+  // POSIX：dl 供 TLS 的运行时 dlopen OpenSSL。
   if (platform == "windows") {
-    return {"ws2_32", "user32", "gdi32", "shell32", "dbghelp", "nanosrv", "psapi", "secur32"};
+    return {"ws2_32", "user32", "gdi32", "shell32", "dbghelp", "nanosrv", "psapi",
+            "secur32", "winpthread"};
   }
   return {"pthread", "dl", "m"};
 }
