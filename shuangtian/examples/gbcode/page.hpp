@@ -20,6 +20,7 @@
 #include "git_service.hpp"
 #include "lsp_bridge.hpp"
 #include "page_data.hpp"
+#include "session_store.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/code_editor.hpp"
 #include "st/ui/components/completion_popup.hpp"
@@ -372,8 +373,32 @@ struct CodeEditorPage : Component {
 
 
   /// `--open <path>` 的待办：**不在构造期打开**（那会在构建期写 State，见 `main` 的注释），
-  /// 而由帧首泵在首帧之后就打开一次。
-   void set_pending_open_path(std::string path);
+/// 而由帧首泵在首帧之后就打开一次。
+void set_pending_open_path(std::string path);
+
+
+// —— 会话（最近打开 + 关窗恢复）——
+
+/// 会话文件的路径（构造时由 `default_session_path()` 定；e2e 用 ST_HOME 重定向）。
+/// 抽成成员而不是每次现算：路径要稳定（保存与读取必须是同一个文件），
+/// 且测试里可能想换位置。
+std::string session_path_{};
+/// 最近打开的文件（MRU，去重上限 10；`open_path` 成功时头插）。
+std::vector<std::string> recent_files_{};
+/// 最近打开的文件夹（换工作区时头插；恢复入口与菜单共用）。
+std::vector<std::string> recent_folders_{};
+
+/// 会话恢复（启动时调一次，见 `main` 的说明）：工作区、标签、活动项、光标。
+/// **不在构造期调**——与 `set_pending_open_path` 同一条纪律（构建期写 State 会
+/// 触发递归重组）；这里把待恢复清单记下来，由帧首泵落地。
+/// 返回 true = 恢复了点什么（用于状态栏播报）。
+auto restore_session(const gbcode::SessionState& state) -> bool;
+
+/// 保存当前会话到 `session_path_`（退出前调；状态栏报告结果，不弹窗）。
+auto save_session() -> void;
+
+/// 打开会话文件里记录的某个文件（菜单/命令面板的「最近」入口）。
+auto open_recent(const std::string& path) -> void;
 
 
   /// 帧首泵：把待打开的路径真的打开（一次）。
@@ -1107,8 +1132,9 @@ struct CodeEditorPage : Component {
    auto pump() -> void;
 
   /// 退出前收尾：停掉在跑的作业并 join 读线程（`jthread` 把它露在对象生命周期
-  /// 之外会很危险：它可能正阻塞在 `read_line` 上，而对象已经在析构）。
-   auto shutdown() -> void;
+/// 之外会很危险：它可能正阻塞在 `read_line` 上，而对象已经在析构）。
+/// 同的还有一个收尾职责：保存会话（见 `save_session`）。
+auto shutdown() -> void;
 
   /// 关闭查找条（入口的 Esc 快捷键用；与面板上的「×」同一条路径）。
    auto dismiss_find() -> void;
@@ -1675,8 +1701,18 @@ struct CodeEditorPage : Component {
     CodeEditorPage* page{nullptr};
     MenuBar* bar{nullptr};
 
-    void build(Composer& c) override {
-      static const std::vector<MenuData> kMenus = {
+      void build(Composer& c) override {
+    // 菜单表：静态骨架 + **动态「最近打开」小节**（2026-10-12）。
+    //
+    // 旧实现是 `static const`——那对纯静态菜单没问题，但「最近打开的文件」
+    // 要跟着会话变。改为每次 build 重建并比对指纹：变了才 `set_menus`
+    //（它会 mark_layout_dirty 且重置 open_index_，每帧重设会把打开态抹掉）；
+    // 不变则什么都不做（菜单栏在标题栏那棵小树上，但也没必要白脏）。
+    //
+    // 「最近」为什么不用子菜单：`MenuPanel` 的 children 只画箭头、没有交互
+    // 实现（见 menu.cpp）——平铺在「文件」尾部与 VSCode 桌面版同形。
+    const auto build_menus = [this] {
+      std::vector<MenuData> menus = {
           {"file", "文件",
            {{.id = "new", .label = "新建文件"},
             {.id = "open", .label = "打开文件…"},
@@ -1717,17 +1753,70 @@ struct CodeEditorPage : Component {
           {"help", "帮助",
            {{.id = "about", .label = "关于 歌白代码"},
             {.id = "shortcuts", .label = "键盘快捷键…"}}}};
-      bar = dsl::menu_bar(
-          c, kMenus,
-          [this](const std::string& menu, const std::string& item) { page->on_menu(menu, item); },
-          [this](std::size_t index) {
-            page->menu_open_.set(page->menu_open_.value() == index ? kNoMenu : index);
-          },
-          {.id = "menubar"});
-      // 打开状态 → 下一帧声明面板 overlay（不声明 = 自动消失，框架 sweep）
-      const std::size_t open = page->menu_open_.value();
-      if (open != kNoMenu && bar != nullptr) dsl::menu_panel_overlay(c, *bar, open);
+      // 「文件」尾部：最近打开的文件夹 + 文件（各自 MRU 前 5——菜单不是清单页，
+      // 全放 10 条会把面板拉得老长；命令面板里才是完整 10 条）。
+      // label 用「文件名（父目录名）」：同名文件靠目录名区分，绝对路径太长。
+      auto& file_items = menus.front().items;
+      const auto leaf_of = [](const std::string& path) {
+        const std::size_t slash = path.find_last_of("/\\");
+        return slash == std::string::npos ? path : path.substr(slash + 1);
+      };
+      const auto parent_of = [&leaf_of](const std::string& path) {
+        const std::string parent = st::fs::parent(path);
+        return parent.empty() ? std::string("…") : leaf_of(parent);
+      };
+      if (page != nullptr && !page->recent_folders_.empty()) {
+        MenuItemData separator;
+        separator.separator = true;
+        file_items.push_back(separator);
+        std::size_t shown = 0;
+        for (const auto& folder : page->recent_folders_) {
+          if (shown++ >= 5) break;
+          MenuItemData entry;
+          entry.id = std::format("recent-folder:{}", folder);
+          entry.label = "打开文件夹：" + leaf_of(folder);
+          file_items.push_back(std::move(entry));
+        }
+      }
+      if (page != nullptr && !page->recent_files_.empty()) {
+        MenuItemData separator;
+        separator.separator = true;
+        file_items.push_back(separator);
+        std::size_t shown = 0;
+        for (const auto& file : page->recent_files_) {
+          if (shown++ >= 5) break;
+          MenuItemData entry;
+          entry.id = std::format("recent-file:{}", file);
+          entry.label = leaf_of(file) + "（" + parent_of(file) + "）";
+          file_items.push_back(std::move(entry));
+        }
+      }
+      return menus;
+    };
+    // 指纹 = 菜单 id 拼接（label 由 id 推导，id 稳定即整体稳定）。
+    std::string fingerprint;
+    for (const auto& menu : build_menus()) {
+      for (const auto& item : menu.items) fingerprint += item.id + "|";
     }
+    if (fingerprint != menus_fingerprint_) {
+      menus_ = build_menus();
+      menus_fingerprint_ = fingerprint;
+    }
+    bar = dsl::menu_bar(
+        c, menus_,
+        [this](const std::string& menu, const std::string& item) { page->on_menu(menu, item); },
+        [this](std::size_t index) {
+          page->menu_open_.set(page->menu_open_.value() == index ? kNoMenu : index);
+        },
+        {.id = "menubar"});
+    // 打开状态 → 下一帧声明面板 overlay（不声明 = 自动消失，框架 sweep）
+    const std::size_t open = page->menu_open_.value();
+    if (open != kNoMenu && bar != nullptr) dsl::menu_panel_overlay(c, *bar, open);
+  }
+
+  /// 上一次推给菜单栏的数据（指纹未变时不重设 `set_menus`，见 build 内说明）。
+  std::vector<MenuData> menus_{};
+  std::string menus_fingerprint_{};
   };
 
 

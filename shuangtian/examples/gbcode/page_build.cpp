@@ -250,6 +250,16 @@ namespace gbcode_ui {
 
   void CodeEditorPage::on_menu(const std::string& menu, const std::string& item) {
     menu_open_.set(kNoMenu);   // 选完即关
+    // 「最近打开」条目：id 直接携带路径（recent-file:<path> / recent-folder:<path>）
+    // ——菜单是动态构建的，下标会变，路径才是稳定身份。
+    if (item.rfind("recent-file:", 0) == 0) {
+      open_recent(item.substr(12));
+      return;
+    }
+    if (item.rfind("recent-folder:", 0) == 0) {
+      switch_workspace(item.substr(14));
+      return;
+    }
     if (item == "toggle-terminal") {
       // 两个菜单（查看/运行）都指向它：开合终端面板
       bottom_visible_.set(!bottom_visible_.value());

@@ -24,6 +24,99 @@ namespace gbcode_ui {
 
   std::function<void(ThemeMode)> theme_setter{};
 
+  // —— 会话（最近打开 + 关窗恢复）——
+
+  void CodeEditorPage::open_recent(const std::string& path) {
+    // 「最近」条目的入口：文件可能已被删/被移——如实报告，不静默。
+    if (!st::fs::exists(path)) {
+      status_.set("文件已不存在：" + path + "（从「最近」移除）");
+      std::erase(recent_files_, path);
+      return;
+    }
+    open_path(path);
+  }
+
+  auto CodeEditorPage::restore_session(const gbcode::SessionState& state) -> bool {
+    // 工作区：走既有链路（换树根/重置展开/LSP 根），与「打开文件夹」同一条路。
+    if (!state.workspace.empty() && st::fs::is_directory(state.workspace)) {
+      switch_workspace(state.workspace);
+    }
+    // 标签：逐个打开（`open_path` 自带去重与读盘失败处理）；只收**磁盘上还在**的。
+    std::size_t opened = 0;
+    for (const auto& file : state.files) {
+      if (!st::fs::is_regular_file(file.path)) continue;
+      open_path(file.path);
+      ++opened;
+    }
+    // 活动项：会话里存的是当时**会话文件数组**的下标；文件被删后重开会缺项，
+    // 按“路径对回下标”定位（而不是盲目套用旧下标——删一个文件后全部错位）。
+    // ⚠ 用 `state.active`（会话存的活动下标），不是 `active_.value()`——后者已被
+    // 上面逐个 open_path 改成最后一个（实测踩到：恢复后活动标签错成 b.py）。
+    if (opened > 0 && state.active < state.files.size()) {
+      const std::string& wanted = state.files[state.active].path;
+      const auto list = buffers_.value();
+      for (std::size_t index = 0; index < list.size(); ++index) {
+        if (list[index].path == wanted) {
+          active_.set(index);
+          break;
+        }
+      }
+    }
+    // 光标：等编辑器装载完再跳（装载在下一帧 `build()` 末尾，现在 `editor` 还旧）。
+    // 与导航跳转同一套 pending 机制（`apply_pending_navigation_jump` 消费，
+    // 其行号口径是 1 起，见 page_build.cpp）。同样按 `state.active` 取目标文件。
+    if (opened > 0 && state.active < state.files.size()) {
+      const gbcode::SessionFile& file = state.files[state.active];
+      pending_jump_ = {file.line, file.column};
+      pending_jump_pending_ = true;
+    }
+    recent_files_ = state.recent_files;
+    recent_folders_ = state.recent_folders;
+    return !state.workspace.empty() || opened > 0;
+  }
+
+  auto CodeEditorPage::save_session() -> void {
+    // 无工作区的内置样例模式不存会话：样例没有磁盘身份，存了也无法恢复到
+    // “用户当时看的东西”（下次启动反正都会加载样例）。
+    if (workspace_.empty()) return;
+    gbcode::SessionState state;
+    state.workspace = workspace_;
+    // 只存磁盘上的真文件标签；内存缓冲（untitled-N）没有路径，恢复不了。
+    // 脏文件只存路径不存内容：内容以磁盘为准——用户若想要那些修改，应该在关窗前
+    // 保存；静默替他落盘反而危险（可能写进不该写的版本）。
+    auto list = buffers_.value();
+    if (editor != nullptr && active_.value() < list.size()) {
+      stash_active_text(list);   // 关窗前最后一次把编辑器里的文本收进缓冲（口径与 save 一致）
+    }
+    std::size_t active_path_index = 0;
+    bool active_found = false;
+    for (std::size_t index = 0; index < list.size(); ++index) {
+      if (list[index].path.empty()) continue;
+      gbcode::SessionFile file;
+      file.path = list[index].path;
+      // 光标：只有当前活动标签能从编辑器读到；其余标签存 1:1（下次从头看）。
+      if (index == active_.value() && editor != nullptr) {
+        file.line = editor->cursor_line() + 1;
+        file.column = editor->cursor_column() + 1;
+      }
+      if (index == active_.value()) {
+        active_found = true;
+        active_path_index = state.files.size();   // 指向存进会话后的位置
+      }
+      state.files.push_back(std::move(file));
+    }
+    if (active_found) state.active = active_path_index;
+    state.recent_files = recent_files_;
+    state.recent_folders = recent_folders_;
+    const bool saved = gbcode::save_session(session_path_, state);
+    // 写状态栏（不是弹窗）：关窗瞬间没人看弹窗，日志里有这条即可。
+    if (saved) {
+      st::print("会话已保存（{} 个标签）: {}\n", state.files.size(), session_path_);
+    } else {
+      st::eprint("会话保存失败: {}\n", session_path_);
+    }
+  }
+
 
   /// 打开一份内置样例（已在标签里 = 激活；不在 = 新标签）。
   auto CodeEditorPage::open_sample(const Sample& sample) -> void {
@@ -72,6 +165,7 @@ namespace gbcode_ui {
       status_.set("打开失败：" + path);
       return;
     }
+    gbcode::push_recent(recent_files_, path);   // 最近打开（菜单/命令面板/下次恢复共用）
     buffers_.set(std::move(list));
     active_.set(index);
     // 打开文件 = 当前要看的内容换成编辑器：关掉差异/合并标签（若有）。
@@ -651,6 +745,7 @@ void CodeEditorPage::load_active_text() {
   /// 退出前收尾：停掉在跑的作业并 join 读线程（`jthread` 把它露在对象生命周期
   /// 之外会很危险：它可能正阻塞在 `read_line` 上，而对象已经在析构）。
   auto CodeEditorPage::shutdown() -> void {
+    save_session();   // 先存会话（要读编辑器光标，得在组件树还活着时做）
     shutdown_language_service();   // 先停 LSP（它会 join 自己的读线程）
     shutdown_terminal();
   }
@@ -1577,6 +1672,7 @@ void CodeEditorPage::load_active_text() {
       return;
     }
     workspace_ = path;
+    gbcode::push_recent(recent_folders_, path);   // 最近打开的文件夹（菜单/下次恢复共用）
     dialog_start_dir_.clear();   // 换工作区：文件对话框的"上次目录"跟着重置
     lsp_.set_workspace(path);    // 语言服务的根跟着换（旧索引属于旧项目）
     dir_expanded_.set(std::vector<std::string>{});   // 新根：展开状态重来
@@ -2542,6 +2638,12 @@ void CodeEditorPage::load_active_text() {
     // 但把精确匹配放前面才不会在将来加 `file.open-xxx` 时踩到同类前缀问题。
     if (id == "file.open") {
       open_file_dialog();
+    } else if (id.rfind("recent:", 0) == 0) {
+      // 命令面板的「最近」条目：id 前缀 + 完整路径（与菜单的 recent-file: 同源不同名
+      // ——面板里这个更短，且不会与 file.open.* 前缀判断碰撞）。
+      open_recent(id.substr(7));
+    } else if (id.rfind("recent-folder:", 0) == 0) {
+      switch_workspace(id.substr(14));
     } else if (id.rfind("symbol:", 0) == 0) {
       // 「转到符号」面板的条目：id 里的数字就是 `symbol_commands()` 的下标。
       jump_to_symbol(static_cast<std::size_t>(std::stoul(id.substr(7))));
@@ -2601,6 +2703,14 @@ void CodeEditorPage::load_active_text() {
       table.push_back(CommandPalette::Command{.id = std::move(id), .title = std::move(title),
                                               .detail = std::move(detail), .handler = {}});
     };
+    // 最近打开的文件/文件夹放头部（完整 MRU 10 条——菜单只放前 5，面板才是
+    // 清单页；「最近」是高频入口，过滤前也应该看得见）。id 携带完整路径。
+    for (const auto& file : recent_files_) {
+      add("recent:" + file, "最近: " + st::fs::file_name(file), file);
+    }
+    for (const auto& folder : recent_folders_) {
+      add("recent-folder:" + folder, "最近打开文件夹: " + st::fs::file_name(folder), folder);
+    }
     add("file.save", "文件: 保存", "把当前编辑器标记为已保存");
   add("file.save-all", "文件: 全部保存", "把所有脏标签写盘（Ctrl+Alt+S）");
   // 符号导航：两个入口（当前文件大纲 / 工作区符号）——都复用命令面板的过滤框。

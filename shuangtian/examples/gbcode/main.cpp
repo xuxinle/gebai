@@ -90,6 +90,7 @@
 
 #include "page.hpp"
 #include "page_data.hpp"
+#include "session_store.hpp"   // 会话恢复（restore_session 的入参类型）
 
 using namespace gbcode_ui;
 
@@ -316,6 +317,28 @@ auto run_app(int argc, char** argv) -> int {
   }
   auto page = std::make_shared<CodeEditorPage>(samples(), options.workspace, options.tool_root,
                                                editor_font_scale, editor_line_spacing);
+  // —— 会话（最近打开 + 关窗恢复）——
+  //
+  // 路径在构造后定（`session_path_` 是普通成员，不在构造列表里——两个构造重载
+  // 不值得为它各改一遍）。`ST_HOME` 可重定向（e2e 用它把会话文件关进临时目录）。
+  page->session_path_ = gbcode::default_session_path();
+  // 会话状态分两层，载入顺序很重要（后面的赋值会覆盖前面）：
+  // ① 先从会话文件拿「最近清单」——它是跨会话记忆，无论哪种启动方式都该在；
+  // ② 再把本次的 `--workspace` 头插进 recent_folders（命令行打开也算一次
+  //    「打开文件夹」，switch_workspace 的埋点只覆盖 UI 对话框路径）。
+  // 标签/工作区恢复只在**无 --workspace 且无 --open** 时做（命令行意图优先于
+  // 上次会话——VSCode 同语义；恢复不动 UI，pending 在首帧后落地）。
+  {
+    const gbcode::SessionState saved = gbcode::load_session(page->session_path_);
+    page->recent_files_ = saved.recent_files;
+    page->recent_folders_ = saved.recent_folders;
+    if (!options.workspace.empty()) {
+      gbcode::push_recent(page->recent_folders_, options.workspace);
+    } else if (options.open_path.empty() && page->restore_session(saved)) {
+      st::print("已恢复上次会话（工作区 {}，{} 个标签）\n", saved.workspace,
+                saved.files.size());
+    }
+  }
   // `--open <path>`：**不在构造期改状态**。
   //
   // 为何：在声明式构建期写 `State` 会触发递归重组（日志实测：`[dsl] 构建期写入
@@ -374,12 +397,29 @@ auto run_app(int argc, char** argv) -> int {
     }
     page->menu_host_ = page->menu_host_owned_.get();
   }
-  // 初始文件（--language 指定；都没有则第一个）
-  const Sample* initial = page->files_.empty() ? nullptr : &page->files_.front();
-  for (const auto& sample : page->files_) {
-    if (sample.language == options.language) {
-      initial = &sample;
-      break;
+  // 初始文件（--language 指定；都没有则第一个）。
+  // **会话恢复成功时跳过**：初始样例是“空启动”的填位内容，而恢复已经把
+  // 上次的真实文件装回了标签——再 open_sample 会把活动项夺走
+  //（实测：恢复后活动标签被 renderer.cpp 覆盖，标题栏显示错文件）。
+  bool session_restored = false;
+  {
+    // 恢复与否在前面已经决策过（restore_session 的返回值）；这里不复真读文件，
+    // 只看 buffers 里有没有**磁盘文件**标签（样例的 path 为空——恢复只收真文件）。
+    for (const auto& buffer : page->buffers_.value()) {
+      if (!buffer.path.empty()) {
+        session_restored = true;
+        break;
+      }
+    }
+  }
+  const Sample* initial = session_restored ? nullptr
+      : (page->files_.empty() ? nullptr : &page->files_.front());
+  if (!session_restored) {
+    for (const auto& sample : page->files_) {
+      if (sample.language == options.language) {
+        initial = &sample;
+        break;
+      }
     }
   }
   if (initial != nullptr) page->open_sample(*initial);
