@@ -34,6 +34,11 @@ class Text : public Element {
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
   auto set_property(std::string_view name, std::string_view value) -> bool override;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  /// `copy`：把文本内容写进宿主剪贴板（2026-10-12——文本标签此前完全无法复制：
+  /// 键盘、动作面、协议全无路径，右键菜单也无从谈起）。
+  /// 控制通道 `invoke <id> copy` 即可达；写失败（无宿主）返回 false 如实上报。
+  [[nodiscard]] auto invoke_action(std::string_view action, std::string_view argument)
+      -> bool override;
 
  private:
   std::string content_{};

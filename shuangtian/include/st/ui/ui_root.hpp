@@ -163,9 +163,18 @@ class UiRoot : public Element::HostFocus {
   [[nodiscard]] auto host_clipboard_text() -> std::string override {
     return clipboard_provider_ ? clipboard_provider_() : std::string{};
   }
+  /// 写侧（2026-10-12 补齐，与读侧对称）：转发给写 provider；没装时如实返回 false。
+  auto host_set_clipboard_text(std::string_view text) -> bool override {
+    return clipboard_write_provider_ ? clipboard_write_provider_(text) : false;
+  }
   /// 装剪贴板 provider（`Application` 在拿到 backend 后接上；无头后端可不装）。
   void set_clipboard_provider(std::function<std::string()> provider) {
     clipboard_provider_ = std::move(provider);
+  }
+  /// 装剪贴板**写** provider（同上；读/写分开装配——两者失败语义不同，
+  /// 读失败降级空串、写失败要如实上报 false）。
+  void set_clipboard_write_provider(std::function<bool(std::string_view)> provider) {
+    clipboard_write_provider_ = std::move(provider);
   }
   /// 当前焦点元素（**调用前会清理悬垂指针**，树里已不在则返回 `nullptr`）。
   [[nodiscard]] auto focused() -> Element*;
@@ -406,6 +415,8 @@ class UiRoot : public Element::HostFocus {
   std::vector<std::pair<std::string, ShortcutEntry>> shortcuts_{};
   /// 剪贴板 provider（`set_clipboard_provider` 装入；空 = 无剪贴板能力）。
   std::function<std::string()> clipboard_provider_{};
+  /// 剪贴板**写** provider（`set_clipboard_write_provider` 装入；空 = 无写能力）。
+  std::function<bool(std::string_view)> clipboard_write_provider_{};
   /// 已登记的声明式树推进回调（见 `register_declarative_host`）。
   /// 回调返回 true 表示“本帧真的重组了”（用于统计重组次数）。
   std::vector<std::function<bool()>> declarative_hosts_{};

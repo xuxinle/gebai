@@ -221,6 +221,16 @@ auto Text::property_names() const -> std::vector<std::string_view> {
   return {"text", "content", "multiline", "size"};
 }
 
+auto Text::invoke_action(std::string_view action, std::string_view argument) -> bool {
+  if (action == "copy") {
+    // 文本标签的复制语义：整个 content（标签没有选区概念）。
+    // 空内容/无宿主不算复制成功（与 CodeEditor 空选区跳过同姿态）。
+    if (content_.empty() || host() == nullptr) return false;
+    return host()->host_set_clipboard_text(content_);
+  }
+  return Element::invoke_action(action, argument);
+}
+
 Heading::Heading(std::string content, std::uint32_t level) : Text(std::move(content)) {
   set_level(level);
 }

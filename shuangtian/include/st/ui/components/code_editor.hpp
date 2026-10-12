@@ -49,6 +49,10 @@ class CodeEditor : public Element {
   // —— 内容与外观 ——
 
   /// 设定全文；光标与选择会夹取到合法位置，撤销栈清空。
+  ///
+  /// **不触发 `on_change`**：这是程序化装载（打开/切换文件），不是用户编辑
+  /// （与 Input/TextArea 的同一决议，见 DESIGN.md）；需要“外部写入也算变化”的
+  /// 场景走属性面 `set_property("text", ...)`（控制通道写入会通知）。
   void set_text(std::string text);
   [[nodiscard]] auto text() const noexcept -> const std::string& { return text_; }
   /// 按语言名（规范名/别名/扩展名）设定高亮语言；空串 = 关闭高亮。
@@ -196,6 +200,23 @@ class CodeEditor : public Element {
   void clear_selection() { anchor_ = cursor_; }
   /// 选中给定区间（自动按码点边界夹取）。
   void set_selection(std::size_t begin, std::size_t end);
+
+  // —— 剪贴板双轨（2026-10-12）：进程内 + 平台 ——
+
+  /// 复制选中文本到**两份**剪贴板：进程内 `editor_clipboard`（保留——跨实例共享
+  /// 语义有存量依赖，且无宿主时它是唯一可用的一轨）+ 平台剪贴板
+  ///（`host_set_clipboard_text`，win32 真剪贴板 / headless 进程内模拟）。
+  ///
+  /// 平台写失败**静默降级**：无宿主（离屏测试）或后端不支持时，进程内那轨
+  /// 仍然成立——“同一应用内复制粘贴”永远可用；只是文本出不了本进程
+  ///（与 Terminal 粘贴的降级姿态一致：锦上添花不拖主流程）。
+  /// 空选区是空操作（与旧路径一致）。
+  void copy_selection_to_clipboard();
+
+  /// 粘贴取文本：优先**平台**剪贴板（用户在别的应用里复制的文本应能粘进来——
+  /// 只读 `editor_clipboard` 会把外部内容挡在门外）；空时回退进程内那轨
+  ///（无宿主/平台剪贴板没内容时，本应用内复制的仍可用）。
+  [[nodiscard]] std::string paste_text_from_clipboard() const;
   [[nodiscard]] auto cursor_line() const -> std::size_t;
   [[nodiscard]] auto cursor_column() const -> std::size_t;
   [[nodiscard]] auto line_count() const -> std::size_t;
@@ -413,6 +434,10 @@ class CodeEditor : public Element {
 
   // —— 回调 ——
 
+  /// 内容变化（传最新全文）。**仅用户编辑触发**（键入/粘贴/删除/撤销/替换）——
+  /// C++ API `set_text` 程序化装载不触发（不冒充用户编辑）；属性面写入
+  /// （`set_property("text")`，多来自控制通道/自动化）触发。宿主把它接标脏逻辑
+  /// 时，两类语义天然分流。
   std::function<void(std::string_view)> on_change{};       ///< 内容变化（传最新全文）
   std::function<void()> on_cursor_change{};                ///< 光标/选择变化
   std::function<void(std::string_view)> on_submit{};       ///< Ctrl+Enter 提交

@@ -210,7 +210,10 @@ class HeadlessBackend final : public Backend {
   void set_title(std::string_view title) override { title_ = std::string(title); }
 
   [[nodiscard]] auto clipboard_text() -> Result<std::string> override {
-    return unexpected(ErrorCode::Unsupported, "headless 后端无系统剪贴板，请经控制通道 input.text 注入文本");
+    // 进程内剪贴板（2026-10-12 补齐读侧）：`set_clipboard_text` 一直在存 `clipboard_`，
+    // 但读侧报 Unsupported——于是 headless 下「复制→粘贴」永远不通（写进去的
+    // 东西读不出来）。与 CodeEditor 的进程内剪贴板同姿态：无头与有窗口行为一致。
+    return clipboard_;
   }
 
   [[nodiscard]] auto set_clipboard_text(std::string_view text) -> Status override {

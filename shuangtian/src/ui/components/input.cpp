@@ -187,6 +187,13 @@ auto Input::invoke_action(std::string_view action, std::string_view argument) ->
     activate();
     return true;
   }
+  if (action == "copy") {
+    // 单行框无选区概念（只有 cursor_，无 anchor_）：复制即全文。
+    // 密码框拒绝：把真实文本写进剪贴板等于把密码泄露到任何能读剪贴板的地方。
+    // 空文本/无宿主 → false（如实上报，不假装成功）。
+    if (password_ || text_.empty() || host() == nullptr) return false;
+    return host()->host_set_clipboard_text(text_);
+  }
   return Element::invoke_action(action, argument);
 }
 
@@ -332,6 +339,12 @@ void Input::paint_content(const RenderContext& context, raster::Surface& canvas)
 
 auto Input::handle_key(const Event& event) -> bool {
   const std::string& key = event.key;
+  // Ctrl+C：复制全文（2026-10-12——单行框此前连键盘复制都没有：选中只能看
+  // （它根本没有选区），想拿文本只能靠控制通道 get）。Ctrl+V 粘贴不做：
+  // 单行框无选区，粘贴语义（替换选中）无从谈起，且与宿主快捷键冲突面大。
+  if ((event.ctrl || event.meta) && (key == "c" || key == "C")) {
+    return invoke_action("copy", {});
+  }
   if (key == "Enter") {
     if (on_submit) on_submit(text_);
     return true;
@@ -734,6 +747,10 @@ auto TextArea::on_event(const RenderContext& context, Event& event) -> bool {
       return true;
     case EventKind::KeyDown: {
       const std::string& key = event.key;
+      // Ctrl+C：复制全文（只读展示也能复制——那正是只读展示的商频场景）。
+      if ((event.ctrl || event.meta) && (key == "c" || key == "C")) {
+        return invoke_action("copy", {});
+      }
       // 编辑类按键在只读下**消费但不落字**（消费=不让它冒泡出去触发页面级快捷键；
       // 不落字=真的没改内容）。导航类按键（方向/Home/End/PageUp/PageDown）则照常。
       if (read_only_) {
@@ -825,7 +842,13 @@ auto TextArea::get_property(std::string_view name) const -> std::optional<std::s
 
 auto TextArea::set_property(std::string_view name, std::string_view value) -> bool {
   if (name == "value" || name == "text") {
+    // 属性面写入**通知** `on_change`（与 Input/CodeEditor 同一决议）：宿主把
+    // `on_change` 当"文本变了"的唯一钩子，静默改会出现
+    // "`get` 读回新文本、宿主状态还是旧的"。C++ API `set_text` 仍静默
+    //（程序化写入不冒充用户编辑——2026-10-12 补齐，当年修 Input 时漏了本组件）。
+    const std::string before = text_;
     set_text(std::string(value));
+    if (text_ != before && on_change) on_change(text_);
     return true;
   }
   if (name == "placeholder") {
@@ -863,6 +886,12 @@ auto TextArea::invoke_action(std::string_view action, std::string_view argument)
   if (action == "submit" || action == "activate") {
     activate();
     return true;
+  }
+  if (action == "copy") {
+    // 多行域同样无选区概念（光标无 anchor）：复制即全文。
+    // 空文本/无宿主 → false。只读不拦：只读展示恰恰是复制的商频场景。
+    if (text_.empty() || host() == nullptr) return false;
+    return host()->host_set_clipboard_text(text_);
   }
   return Element::invoke_action(action, argument);
 }

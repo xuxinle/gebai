@@ -893,6 +893,12 @@ auto Application::start() -> Status {
       const auto text = backend_ptr->clipboard_text();
       return text.has_value() ? *text : std::string{};
     });
+    // 写侧（2026-10-12 补齐，与读侧对称）：copy 动作面（Text/Input/Terminal…）
+    // 从这里把文本写到平台剪贴板。写失败**不降级**——返回 false 让组件如实上报
+    //（“复制失败”是用户需要知道的，而不是静默丢掉）。
+    root_.set_clipboard_write_provider([backend_ptr](std::string_view text) -> bool {
+      return backend_ptr->set_clipboard_text(text).has_value();
+    });
   }
 
   if (options_.enable_script) {

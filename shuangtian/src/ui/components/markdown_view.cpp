@@ -452,6 +452,13 @@ auto MarkdownView::invoke_action(std::string_view action, std::string_view argum
     set_markdown(std::string{});
     return true;
   }
+  if (action == "copy") {
+    // 复制**原文**（markdown 源码，`markdown()` 全量累计），不是渲染后的纯文本——
+    // 用户从渲染视图里想要的正是那份可编辑的源。空/无宿主 → false。
+    const std::string source = markdown();
+    if (source.empty() || host() == nullptr) return false;
+    return host()->host_set_clipboard_text(source);
+  }
   if (action == "set_markdown") {
     set_markdown(std::string(argument));
     return true;

@@ -323,6 +323,14 @@ class Element {
     /// 终端粘贴（`Ctrl+Shift+V`）等组件能力从这取——剪贴板是**平台**能力，
     /// 组件不该也不必知道后端长什么样（实现在 `UiRoot`→`Application`→backend）。
     [[nodiscard]] virtual auto host_clipboard_text() -> std::string { return {}; }
+    /// **写**宿主剪贴板（2026-10-12 补齐写侧——此前只有读，组件的 copy 动作面
+    /// 接了也没路可走：终端的 `invoke copy` 一直空转返回 false）。
+    /// 返回 false = 无宿主/写入失败（调用方如实上报，不假装成功）。
+    /// 与读侧对称地走窄接口：实现在 `UiRoot`→`Application`→backend
+    ///（win32 真剪贴板 / headless 进程内模拟），headless 与有窗口行为一致。
+    virtual auto host_set_clipboard_text([[maybe_unused]] std::string_view text) -> bool {
+      return false;
+    }
     /// **焦点环是否该画**（只在键盘导航时为真）。
     ///
     /// 为何放在宿主契约里而不是各组件自己推断：鼠标按下可聚焦元素**也会给焦点**

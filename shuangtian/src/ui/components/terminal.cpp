@@ -1728,10 +1728,12 @@ auto Terminal::invoke_action(std::string_view action, std::string_view argument)
     return true;
   }
   if (action == "copy") {
-    // 复制能力的基础面：当前回整屏纯文本（选区建设中）。
-    if (host() == nullptr) return false;
-    // 写侧暂无窄接口（读侧先行）；动作面先接住，写侧待 backend 通路补齐。
-    return false;
+    // 兑现此前空转的 copy（写侧窄接口 2026-10-12 补齐）：
+    // 复制能力的基础面——当前回整屏纯文本（选区建设中）。
+    // 空屏/无宿主/写失败 → false 如实上报，不假装成功。
+    const std::string picked = selected_text();
+    if (picked.empty() || host() == nullptr) return false;
+    return host()->host_set_clipboard_text(picked);
   }
   if (action == "scroll_to_end" || action == "scroll_bottom") {
     TerminalSession& target = current();

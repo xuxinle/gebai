@@ -71,6 +71,9 @@ std::string& editor_clipboard() {
   return clipboard;
 }
 
+// 剪贴板双轨的成员辅助（copy_selection_to_clipboard / paste_text_from_clipboard）
+// 声明在 hpp（它们要用 selected_text()/host()，必须是成员）。
+
 inline constexpr float kGutterPadding{12.0f};
 /// 勾选列宽（逐行暂存）。独立成常量是因为 `gutter_width` 与点击命中
 /// **两处都要用它**——各写一个数早晚会分叉（那表现为"点框没反应"）。
@@ -263,7 +266,14 @@ void CodeEditor::set_text(std::string text) {
   hover_line_ = -1;
   h_dragging_ = false;
   mark_highlight_dirty();
-  if (on_change) on_change(text_);
+  // **不触发 `on_change`**（2026-10-12，来自 gbcode「打开文件没改却提示已修改」）。
+  //
+  // `set_text` 的调用方是宿主的**程序化装载**（打开/切换/重载文件），
+  // 语义是「换了一份文档」而不是「用户编辑了」——而 `on_change` 在宿主侧
+  // 几乎总是接标脏逻辑，冒充用户编辑会把刚打开的文件立刻标成未保存。
+  // 这与 Input/TextArea 的既定决议一致：C++ API 静默，属性面写入才通知
+  // （见 `set_property("text")` 与 DESIGN.md「程序化写入不冒充用户编辑」）。
+  // 用户编辑走 `notify_change()`（insert/delete/undo/replace_all 都经它）。
 }
 
 void CodeEditor::set_language(std::string language) {
@@ -465,6 +475,21 @@ auto CodeEditor::selection() const -> std::pair<std::size_t, std::size_t> {
 auto CodeEditor::selected_text() const -> std::string {
   const auto [begin, end] = selection();
   return text_.substr(begin, end - begin);
+}
+
+void CodeEditor::copy_selection_to_clipboard() {
+  const std::string picked = selected_text();
+  if (picked.empty()) return;
+  editor_clipboard() = picked;
+  if (host() != nullptr) (void)host()->host_set_clipboard_text(picked);
+}
+
+std::string CodeEditor::paste_text_from_clipboard() const {
+  if (host() != nullptr) {
+    const std::string from_platform = host()->host_clipboard_text();
+    if (!from_platform.empty()) return from_platform;
+  }
+  return editor_clipboard();
 }
 
 void CodeEditor::select_all() {
@@ -2185,15 +2210,14 @@ auto CodeEditor::handle_key(const RenderContext& context, const Event& event) ->
       return true;
     }
     if (key == "c" || key == "C") {
-      const std::string picked = selected_text();
-      if (!picked.empty()) editor_clipboard() = picked;
+      copy_selection_to_clipboard();
       return true;
     }
     if (key == "x" || key == "X") {
       if (read_only_) return true;
       const std::string picked = selected_text();
       if (picked.empty()) return true;
-      editor_clipboard() = picked;
+      copy_selection_to_clipboard();
       push_undo(false);
       delete_selection();
       notify_change();
@@ -2201,7 +2225,7 @@ auto CodeEditor::handle_key(const RenderContext& context, const Event& event) ->
     }
     if (key == "v" || key == "V") {
       if (read_only_) return true;
-      insert_text(editor_clipboard());
+      insert_text(paste_text_from_clipboard());
       return true;
     }
     if (key == "z" || key == "Z") {
@@ -2510,7 +2534,13 @@ auto CodeEditor::set_property(std::string_view name, std::string_view value) -> 
     }
   }
   if (name == "text") {
+    // 属性面写入（多来自控制通道/自动化）**通知** `on_change`，与 Input 同一决议：
+    // 宿主把 `on_change` 当“文本变了”的唯一钩子，静默改会出现
+    // “`get` 读回来是新文本、宿主状态里还是旧的”。C++ API `set_text` 仍静默
+    // （程序化装载不冒充用户编辑，见其实现处的注释）。
+    const std::string before = text_;
     set_text(std::string(value));
+    if (text_ != before && on_change) on_change(text_);
     return true;
   }
   if (name == "language") {
@@ -2807,21 +2837,21 @@ auto CodeEditor::invoke_action(std::string_view action, std::string_view argumen
     return true;
   }
   if (action == "copy") {
-    const std::string picked = selected_text();
-    if (!picked.empty()) editor_clipboard() = picked;
+    copy_selection_to_clipboard();
     return true;
   }
   if (action == "cut") {
     const std::string picked = selected_text();
     if (picked.empty() || read_only_) return false;
-    editor_clipboard() = picked;
+    copy_selection_to_clipboard();
     push_undo(false);
     delete_selection();
     notify_change();
     return true;
   }
   if (action == "paste") {
-    insert_text(editor_clipboard());
+    if (read_only_) return true;
+    insert_text(paste_text_from_clipboard());
     return true;
   }
   if (action == "comment") return toggle_comment();

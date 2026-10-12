@@ -117,3 +117,26 @@ ST_TEST(backend_reports_renderer_honestly) {
     ST_CHECK(!(*backend)->renderer_note().empty());
   }
 }
+
+ST_TEST(backend_headless_clipboard_roundtrip) {
+  // headless 后端的剪贴板**读写闭环**（2026-10-12 补齐读侧）：
+  // `set_clipboard_text` 一直在存 `clipboard_` 成员，但读侧报 Unsupported——
+  // 写进去的东西读不出来，「复制→粘贴」永远不通。闭环是无头与有窗口
+  // 行为一致的前提（e2e 的复制粘贴断言全靠它）。
+  auto backend = make_headless();
+  ST_CHECK(backend != nullptr);
+  if (backend == nullptr) return;
+
+  // 写 → 读：原样读回（含中文与换行——UTF-8 往返不损坏）。
+  ST_CHECK(backend->set_clipboard_text("你好 clipboard\n第二行").has_value());
+  const auto read = backend->clipboard_text();
+  ST_CHECK(read.has_value());
+  if (read.has_value()) {
+    ST_CHECK_EQ(*read, std::string("你好 clipboard\n第二行"));
+  }
+  // 覆写 → 读最新（不残留旧值）。
+  ST_CHECK(backend->set_clipboard_text("new").has_value());
+  const auto second = backend->clipboard_text();
+  ST_CHECK(second.has_value());
+  if (second.has_value()) ST_CHECK_EQ(*second, std::string("new"));
+}
