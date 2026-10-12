@@ -485,7 +485,7 @@ struct PchContext {
   // `libnanosrv.a`。GNU `ld` 有时会替你拉上，而 `ld.lld` 如实报未定义符号——
   // 两者行为不一致，所以显式写全（本机现在是 lld）。
   if (platform == "windows") {
-    return {"ws2_32", "user32", "gdi32", "shell32", "dbghelp", "nanosrv", "psapi"};
+    return {"ws2_32", "user32", "gdi32", "shell32", "dbghelp", "nanosrv", "psapi", "secur32"};
   }
   return {"pthread", "dl", "m"};
 }
