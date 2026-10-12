@@ -203,13 +203,15 @@ $objects = @($relUnits | ForEach-Object {
 $exe = Join-Path $binDir 'st.exe'
 # 链接库与 `st.pkg` 的 `system_libs` / `src/pkg/build.cpp` 的 `default_system_libs` 同口径
 # （Windows 目标的系统库）：`ws2_32` 网络、`gdi32`/`user32`/`shell32` Win32 与命令行、
-# `dbghelp`+`nanosrv`+`psapi` 崩溃栈符号化（`src/core/platform_crash.cpp`）。
+# `dbghelp`+`nanosrv`+`psapi` 崩溃栈符号化（`src/core/platform_crash.cpp`）、
+# `secur32` Schannel TLS（`src/net/platform_tls_schannel.cpp` 的 SSPI 系）。
 #
 # ⚠ 这里漏过两次、两次现象都是**报错指向源码**：
 #   `undefined reference to __imp_SymFunctionTableAccess64`（`dbghelp` 缺）与
 #   一条 `psapi` 系的未定义符号——真因都是"链接库列表少一项"。
+#   第三次是 `__imp_AcquireCredentialsHandleW`（`secur32` 缺，加 TLS 时）——同因。
 $linkOutput = & $CXX $objects '-o' $exe '-lws2_32' '-lgdi32' '-luser32' '-lshell32' '-lwinpthread' `
-                             '-ldbghelp' '-lnanosrv' '-lpsapi' '-static-libgcc' '-static-libstdc++' 2>&1
+                             '-ldbghelp' '-lnanosrv' '-lpsapi' '-lsecur32' '-static-libgcc' '-static-libstdc++' 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host ($linkOutput | Out-String); Write-Error "链接失败" }
 
 $elapsed = ((Get-Date) - $started).TotalMilliseconds
