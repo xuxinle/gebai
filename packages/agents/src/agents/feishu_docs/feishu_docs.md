@@ -8,6 +8,7 @@
   - **Markdown 通道（快速、可直接给用户）**：读 **`get_doc_text format=markdown`**（标题/列表/表格/代码/引用/高亮块结构与行内样式保留，与 import_markdown 对称；缺省 `format=text` 纯文本仅阅读）；写 **`import_markdown`**（简单内容/已有草稿）
   - **选型**：需富排版（自动编号/分栏/高亮块配色/表格列宽/题注/画板 token）或改已有文档 → **XML 通道**；纯文字/简单结构、或要一段可直接复制的 Markdown → **Markdown 通道**（Markdown 是 XML 子集：分栏/配色/列宽/画板会降级并在输出尾部附说明）
   - **辅助**：`create_doc`/`get_doc_meta`/`set_table_width`/**`lint_doc` 排版体检**/**`style_guide` 排版规范与体裁契约（动笔前必读）**/`export_doc`/**`get_board` 读画板**
+  - **块级底层工具（按 block_id / 下标直接操作，与上面两通道并存）**：读 **`get_doc_blocks`**（`outline=true` 大纲 / `detail=compact` 一行一块带 id / 缺省全量块 JSON）/ **`list_blocks`**（指定父块的子块列表，`page_all` 自动翻页）/ **`find_blocks`**（按文本反查 block_id，可带 `context_before`/`context_after` 看上下文）；写 **`add_blocks`**（块类型与字段写法速查见其工具描述）/ **`update_block`**（单块文本或表格属性）/ **`delete_blocks`**（按下标区间批删）/ **`replace_text`**（跨块查找替换，先 `dry_run`）/ **`insert_image`**（三步流程插图）；**何时用**：需要精确读取某类块的原始 JSON 字段（样式/颜色/合并单元格）时用 `get_doc_blocks`，拿到 block_id 后零敲碎打改时用 `update_block`/`delete_blocks`，按文本批量统一口径时用 `replace_text`；整体性创作与改写仍首选 XML 通道（一次成型、格式化表达最全）
 - **云空间 drive**：`list_files` 文件清单、`create_folder` 建文件夹（缺省落配置的目标文件夹下）、`get_file_meta` 元信息、`upload_file` 上传（文本或 base64，缺省落配置的目标文件夹下）、`download_file` 下载到会话目录、`delete_file` 删除
 - **搜索**：`search` 云文档搜索（需开通「云文档搜索」权限）
 - **电子表格**：`create_sheet` 创建、`get_sheet_meta` 工作表列表、`read_sheet` 读取、`write_sheet` 覆盖写入、`append_sheet` 追加行

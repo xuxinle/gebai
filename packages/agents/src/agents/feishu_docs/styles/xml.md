@@ -65,4 +65,9 @@
 | 看完就改（拿 block_id） | `fetch_doc detail=with-ids`：XML 带 block_id，读出即可改、改后可写回；需样式/配色/列宽时用 `detail=full` |
 | 定位命中处上下文 | `fetch_doc scope=keyword`（多词 `|` OR + context_before/after） |
 | 浏览/总结（只要字） | `fetch_doc detail=simple` 或 `get_doc_text`（缺省 text） |
+| 读原始块 JSON（样式/颜色/合并字段） | `get_doc_blocks`（三形态）/ `list_blocks`（子块列表） |
+| 按文本反查 block_id | `find_blocks`（可带 context_before/after） |
+| 零敲碎打改单块 / 按下标删块 | `update_block`（文本或表格属性）/ `delete_blocks`（下标区间） |
+| 跨块统一口径替换 | `replace_text`（先 `dry_run`） |
+| 插图片（三步流程） | `insert_image` |
 | 写入前预检 | `import_xml` 传 `dry_run=true`：只解析并出画像（块数/字数/类型分布）+ 图片与图表预检，**零写入** |
