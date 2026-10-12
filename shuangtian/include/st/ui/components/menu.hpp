@@ -37,6 +37,13 @@ struct MenuItem {
   bool separator{false};  ///< 分隔线（其余字段忽略）
   bool checked{false};    ///< 左侧画勾
   std::vector<MenuItem> children{};
+
+  /// 相等（`MenuPanel::set_items` 的早退判据——声明式每帧重设，内容没变就不动）。
+  /// 只比**可感知字段**（id/label/separator）：checked 由宿主随业务重算，
+  /// children 尚无交互实现（不参与——改它不影响当前可感知行为）。
+  friend bool operator==(const MenuItem& a, const MenuItem& b) {
+    return a.id == b.id && a.label == b.label && a.separator == b.separator;
+  }
 };
 
 /// 菜单栏的顶级菜单（标题 + 条目）。
@@ -44,6 +51,18 @@ struct Menu {
   std::string id{};
   std::string label{};
   std::vector<MenuItem> items{};
+
+  /// 相等（`MenuBar::set_menus` 的早退判据——声明式每帧重设，内容没变就不动）。
+  /// 只比可感知字段（id/label/separator），children 不参与：子菜单尚无交互实现。
+  friend bool operator==(const Menu& a, const Menu& b) {
+    if (a.id != b.id || a.label != b.label || a.items.size() != b.items.size()) return false;
+    for (std::size_t index = 0; index < a.items.size(); ++index) {
+      const MenuItem& x = a.items[index];
+      const MenuItem& y = b.items[index];
+      if (x.id != y.id || x.label != y.label || x.separator != y.separator) return false;
+    }
+    return true;
+  }
 };
 
 /// 下拉/弹出面板共享的条目绘制与键盘导航（自绘；高 32）。

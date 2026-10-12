@@ -60,6 +60,10 @@ MenuPanel::MenuPanel(std::vector<MenuItem> items) : items_(std::move(items)) {
 auto MenuPanel::item_count() const noexcept -> std::size_t { return items_.size(); }
 
 void MenuPanel::set_items(std::vector<MenuItem> items) {
+  // 相等早退（2026-10-12，兑现 dsl.cpp `menu_panel_overlay` 里的那条注释——
+  // 它一直声称本函数「带 0 值早退」，而实现没有；gbcode 动态菜单（最近打开）
+  // 让声明式每帧重设条目成了常态，无早退会每帧 mark_layout_dirty）。
+  if (items_ == items) return;
   items_ = std::move(items);
   if (highlighted_ != kNoIndex && highlighted_ >= items_.size()) highlighted_ = kNoIndex;
   mark_layout_dirty();
@@ -304,6 +308,11 @@ MenuBar::MenuBar() {
 }
 
 void MenuBar::set_menus(const std::vector<Menu>& menus) {
+  // 相等早退（2026-10-12，来自 gbcode「最近打开」动态菜单）：声明式宿主每帧
+  // 重设菜单表；无早退会（a）每帧 mark_layout_dirty，（b）把 open_index_ 重置——
+  // 菜单正开着的那一帧数据被重设，面板内容与回调还挂着旧菜单的，而标题高亮
+  // 已经没了（状态与视觉分岔）。内容没变就不动。
+  if (menus_ == menus) return;
   menus_ = menus;
   title_widths_.assign(menus_.size(), 0.0f);
   open_index_ = kNoIndex;

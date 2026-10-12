@@ -3103,6 +3103,26 @@ SVG 图元 17 例 16/17→**17/17**。
 
 ## P2
 
+- [ ] **`Tree` 缺程序化 select（写侧 `selected_key`）**（2026-10-12，gbcode 会话 e2e 亲历）：
+  树有 `selected_key` 属性**读**（tree.cpp），但没有写入口——e2e 想点树行只能
+  `bounds.y + row_h*1.5` 坐标猜行序，本轮首版就猜错（点成了默认样例）。
+  加 `set_property("selected_key", key)`（触发 `on_select`，与键盘/鼠标同链）
+  即可让自动化按键精确驱动。配套单测。
+- [ ] **`MenuPanel` 缺按 id 激活的动作面**（同上亲历）：e2e 只能
+  `bounds.y + 16 + i*32` 数行序点击；菜单动态化（最近打开）后行序会变，
+  坐标法脆。加 `invoke_action("activate_item", item_id)` 一劳永逸。
+  （注意与既有下标激活共存：id 找不到时如实 false。）
+- [ ] **`ST_REQUIRE` 在非 void 函数里编译失败**（2026-10-12，写单测亲历）：
+  宏体是裸 `return`，返回值函数里用直接 -fpermissive 报错，被迫改成
+  `if (!ok) return "<failed>"` 的丑写法。修法：宏里 `return;` 改为
+  `return static_cast<void>();`？不行（void 表达式不能 return 到非 void）——
+  可选方案是提供 `ST_REQUIRE_OR(expr, fallback)` 或文档化“仅限 void 用例体”。
+  定方案时注意：绝大多数用例体就是 void，别为小众场景复杂化主流宏。
+- [ ] **`ST_CHECK_EQ` 不支持 `std::vector<std::string>`**（同上亲历）：
+  `std::format` 没有它的 formatter，断言直接编译失败；被迫手写 `check_list`
+  辅助（gbcode_session_store_test.cpp 里有现成实现可上提）。可提供
+  `ST_CHECK_LIST(actual, expected)` 或给 vector<string> 特化 formatter。
+
 - [ ] **`check_selfcontained.py` 纳入发布前流程**（当前是手工跑；无 CI，见下文 CI 已删）。
   本轮已发现它**首次运行就有真产出**（`channel.hpp` + `core_fs_test.cpp` 两处），
   说明"约定 + 手工习惯"这条路已经证明不够——但先观察几轮再定接入方式。

@@ -151,7 +151,11 @@ def main():
         # `get_property` 认，但快照按 `property_names()` 逐个写）。
         # 旧写法查的是 `#title-text` 那个 Text 子元素——它已随窗框组件退役。
         check("renderer.cpp" in client.title("titlebar"), "标题栏未显示初始文件")
-        print("[2] 初始标签 renderer.cpp 已打开（语言 cpp）")
+        # 未修改不标脏（回归：打开文件 → set_text 程序化装载曾被当成用户编辑，
+        # 一个字没动就“● 未保存”、关闭还弹确认框；2026-10-12 修复）。
+        check(not client.title("titlebar").startswith("●"),
+              f"刚打开未编辑就被标脏: {client.title('titlebar')!r}")
+        print("[2] 初始标签 renderer.cpp 已打开（语言 cpp，未标脏）")
 
         # —— 2b. 标题栏与菜单栏**合并成一行** ——
         #
@@ -188,7 +192,11 @@ def main():
         check("deploy.py" in props.get("options", ""), f"标签栏未加 deploy.py: {props}")
         check(client.ok("get", {"id": "editor"})["props"].get("language") == "python",
               "语言未跟随标签")
-        print("[3] 点资源管理器树行 → 标签 + 语言 + 编辑器内容联动")
+        # 切换标签装载另一份文档同样不该标脏（同一根因的另一个入口：
+        # activate → set_text；标题栏此刻显示的是 deploy.py）。
+        check(not client.title("titlebar").startswith("●"),
+              f"切换标签未编辑就被标脏: {client.title('titlebar')!r}")
+        print("[3] 点资源管理器树行 → 标签 + 语言 + 编辑器内容联动（未标脏）")
 
         # —— 4. 终端面板（问题/输出面板已删；2026-10-09 起新增「终端 | Git」双标签）——
         check(client.count("#problems-list") == 0, "问题面板应已删除")
@@ -202,6 +210,10 @@ def main():
         print("[4] 终端是真终端（PTY + 标签栏 + 「+」新建）")
 
         # —— 5. 编辑器：真实输入 + 撤销 ——
+        # 前置：此刻标签必须是干净的（[2]/[3] 已断言）；若这里已带 ●，说明
+        # “输入后标脏”的断言会假通过（旧缺陷正是如此——装载即脏）。
+        check(not client.title("titlebar").startswith("●"),
+              f"输入前标签已带脏标记（[5] 的标脏断言会假通过）: {client.title('titlebar')!r}")
         client.ok("invoke", {"id": "editor", "action": "focus"})
         client.ok("input.text", {"id": "editor", "text": "ADDED_TOKEN"})
         check("ADDED_TOKEN" in client.text("editor"), "编辑器未收到输入")
@@ -210,6 +222,33 @@ def main():
         time.sleep(0.3)
         check("ADDED_TOKEN" not in client.text("editor"), "撤销未回退输入")
         print("[5] 编辑 → 脏标记 → 撤销 全链路正确")
+
+        # —— 5b. 剪贴板：编辑器复制 → 标签复制 → 读回同一文本 ——
+        #
+        # 写侧窄接口（host_set_clipboard_text）+ headless 进程内剪贴板的
+        # 端到端闭环：两个**不同组件**的 copy 都应写进同一份平台剪贴板，
+        # 且能从任一组件的粘贴路径读回（2026-10-12）。
+        client.ok("set", {"id": "editor", "props": {"selection": "0:12"}})
+        time.sleep(0.2)
+        copy_reply = client.ok("invoke", {"id": "editor", "action": "copy"})
+        check(copy_reply.get("handled"), "编辑器 copy 动作未被接住")
+        # 复制后清空选择（不影响后续用例），然后用状态栏那个 Text 标签复制。
+        # 状态栏有多处 Text；用 #status（状态栏文案）——它是 Text 且有内容。
+        status_text = client.text("status")
+        if status_text:
+            check(client.ok("invoke", {"id": "status", "action": "copy"}).get("handled"),
+                  "Text 标签 copy 动作未被接住")
+        # 编辑器粘贴（优先平台剪贴板）：应粘进刚才 Text 复制的内容（若执行了），
+        # 否则粘进编辑器自己复制的那段。两条路径都证明闭环。
+        client.ok("set", {"id": "editor", "props": {"cursor": "0:0", "selection": "0:0"}})
+        client.ok("invoke", {"id": "editor", "action": "paste"})
+        time.sleep(0.2)
+        editor_now = client.text("editor")
+        pasted_ok = (status_text and status_text in editor_now) or ("renderer" in editor_now[:60])
+        check(pasted_ok, f"粘贴未闭环（编辑器头部: {editor_now[:60]!r}）")
+        client.ok("invoke", {"id": "editor", "action": "undo"})
+        time.sleep(0.2)
+        print("[5b] 剪贴板闭环：编辑器/Text 复制 → 粘贴读回")
 
         # —— 6. 搜索（真实输入 → 回车 → 递归搜工作区/样例文本）——
         #

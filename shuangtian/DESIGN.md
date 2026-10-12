@@ -741,6 +741,16 @@ ANSI 色是**协议固定语义**（`31` 永远是红、`93` 永远是亮黄，�
   动作 `focus/select_all/undo/redo/clear_selection/insert/copy/cut/paste/comment/indent/dedent/goto_line/scroll_to_line/reveal_line/set_text/`
   `select_next_occurrence/move_line_up/move_line_down/move_lines`（与键盘走**同一入口**，
   避免“快捷键能用、动作面不能用”两条腿不一样长）
+- **`on_change` 的两类语义**（2026-10-12 对齐，与 Input/TextArea 同一决议；此前
+  `set_text` 也发通知，gbcode 打开文件一个字未动就被标“● 未保存”——程序化装载
+  冒充了用户编辑）：
+  - **用户编辑**（键入/粘贴/删除/撤销/替换，一律经 `notify_change()`）→ 通知；
+  - **C++ API `set_text`**（宿主程序化装载：打开/切换/重载标签）→ **静默**；
+  - **属性面 `set_property("text")`**（多来自控制通道/自动化）→ 通知（宿主把
+    `on_change` 当“文本变了”的唯一钩子，静默改会出现“`get` 读回新文本、宿主状态
+    还是旧的”）。
+  回归：`tests/ui_code_editor_test.cpp` 两条（set_text 静默 / 属性面通知）+
+  `tools/gbcode_e2e.py` 打开与切换标签不标脏断言。
 
 > **协议动作白名单已移除**。它曾把**组件自定义动作**整体挡在门外：`CodeEditor` 的
 > `undo`/`redo`/`set_text`/`goto_line`… 都实现了 `invoke_action`，却因不在协议名单里
@@ -753,9 +763,27 @@ ANSI 色是**协议固定语义**（`31` 永远是红、`93` 永远是亮黄，�
   宿主既接不到右键、也阻止不了“右键改了光标”（实测：右键本该弹菜单，结果反而挪了光标）。
   当前语义：右键触发本回调并**不改光标**（与主流编辑器一致）。
 
-**剪贴板**：使用进程内剪贴板而非系统剪贴板——无头模式没有系统剪贴板（服务器无 X/Wayland），
-而编辑器必须具备可用的复制/粘贴语义。进程内剪贴板在无头与有窗口下行为**完全一致**，
-也能被控制通道的 `invoke(copy/cut/paste)` 驱动（智能体可据此搬运文本）。
+**剪贴板：双轨制（进程内 + 平台，2026-10-12 统一）**。
+
+此前只有进程内 `editor_clipboard`（静态单例）：无头模式可用，但有真剪贴板时文本也出不了本进程；
+且与其他组件（终端经 backend）互不相通。统一后的架构：
+
+| 轨 | 入口 | 实现 | 失败语义 |
+|---|---|---|---|
+| **平台轨**（主） | `HostFocus::host_set_clipboard_text`（写）/ `host_clipboard_text`（读） | `UiRoot`（读写 provider）→ `Application` → backend（win32 真剪贴板 / headless 进程内模拟，**读写闭环**） | 写失败如实返回 false；读失败降级空串 |
+| **进程内轨**（保底） | `editor_clipboard`（静态单例，保留） | 进程级，跨 CodeEditor 实例共享 | 永不失败（无宿主/离屏测试时是唯一可用一轨） |
+
+CodeEditor 的 copy/cut **双写**（平台写失败静默降级，进程内永远成立）；paste **优先平台轨**（外部内容进得来），空则回退进程内。
+
+组件 copy 动作面（全部走 `invoke <id> copy`，写失败如实返回 false）：
+- `Text`/`Heading` = 全文（标签无选区概念）
+- `Input`/`TextArea` = 全文（无选区概念；**Input 密码态拒绝**——真实文本进剪贴板等于泄露）；只读不拦（只读展示正是复制高频场景）；Ctrl+C 键盘路径同步接通
+- `MarkdownView` = 原文源码（用户要的正是可编辑的那份）
+- `Terminal` = 整屏纯文本（选区建设中）——兑现了空转多年的 copy 动作面
+- `CodeEditor` = 选区
+
+回归：`tests/ui_clipboard_test.cpp` 七条（假 provider 断言写入内容/失败透传/密码拒绝/双写优先级）
++ `shell_backend_test` headless 读写闭环一条 + gbcode e2e [5b]（编辑器/Text 复制 → 粘贴读回）。
 
 **渲染缓存分两层**：行索引（`line_spans_`，随文本变，一趟扫描）与高亮 token（`line_tokens_`，
 还要看语言规则）。分开后"取行号/算列"这类高频操作不会触发高亮重算——否则批量编辑会退化成 O(n²)。
@@ -4289,6 +4317,20 @@ mingw 交叉编译在**发布前手工执行**（`st build gallery --toolchain=m
 **「打开文件夹…」= 换工作区**（`Ctrl+Shift+O` / 文件菜单 / 命令面板）：走 `FileDialog::Mode::Directory`，
 确认后语义与 VSCode 一致——**已打开的标签保留**（换的是资源树的根，不是关项目）、
 展开状态重置、标题栏与状态栏跟着换名字。目标必须是存在的目录（不满足时写状态栏，不弹窗打断）。
+
+**会话持久化：最近打开 + 关窗恢复**（2026-10-12，`session_store.hpp`）：
+- 落盘位置 `{ST_HOME:-~/.shuangtian}/gbcode/session.json`（`st::Json`，键序稳定可 diff；
+  e2e 用 `ST_HOME` 重定向，不碰真实用户数据）；
+- **最近打开**：`open_path` / `switch_workspace`（含 `--workspace` 启动）埋点 MRU（去重上限 10）；
+  入口三处——文件菜单尾部「最近打开」小节（各自前 5，不用子菜单：`MenuPanel` 的 children
+  只画箭头无交互）、命令面板头部（完整 10 条）、以及下次启动的会话恢复；
+- **关窗恢复**：`shutdown()` 里保存（工作区/真实文件标签/活动项/光标——脏文件只存路径不存内容，
+  内容以磁盘为准）；无 `--workspace` 且无 `--open` 启动时恢复（命令行意图优先，VSCode 同语义），
+  恢复成功则跳过初始样例（否则活动项被样例夺走）；缺失文件跳过、光标用 pending 跳转机制落地；
+- 内置样例模式（无工作区）不存会话（样例无磁盘身份）。
+配套框架修复：`MenuBar::set_menus` 加相等早退（动态菜单每帧重设不再重置 `open_index_`）；
+回归：`tests/gbcode_session_store_test.cpp` 四条 + `tools/gbcode_e2e_session.py` 全链路
+（两轮启动：开文件→退→重启断言恢复）+ 既有 e2e 全绿。
 
 `gbcode` 的重写史本身是框架演进的一个注脚（详见 §8.1.1）：早期版本靠**自绘定制组件**（Markdown 编辑器 `mdeditor` 的 SourceView/OutlinePanel/SplitHandle/StatsBar）验证扩展点闭环；重写后同样的 IDE 形态**全部由内置组件组装**——证明组件库覆盖度已从"能扩展出来"进化到"开箱即有"。
 

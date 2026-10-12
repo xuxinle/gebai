@@ -104,6 +104,48 @@ ST_TEST(code_editor_set_text_resets_cursor_and_history) {
   ST_CHECK(!editor.can_undo());  // 载入新文档 → 历史清空
 }
 
+ST_TEST(code_editor_set_text_does_not_fire_on_change) {
+  // 程序化装载不冒充用户编辑（2026-10-12，gbcode「打开文件没改却提示已修改」）：
+  // `set_text` 是宿主换文档（打开/切换标签）的一等入口，而 `on_change` 在宿主侧
+  // 几乎总接标脏逻辑——若装载也发通知，刚打开的文件就会被标成未保存。
+  CodeEditor editor;
+  int calls = 0;
+  editor.on_change = [&calls](std::string_view) { ++calls; };
+  editor.set_text("document one");
+  editor.set_text("document two");
+  ST_CHECK_EQ(calls, 0);
+  // 相同文本早退，同样不该发通知。
+  editor.set_text("document two");
+  ST_CHECK_EQ(calls, 0);
+  // 对照：真实用户编辑（键入）必须照常通知——这条语义一丁点不能变。
+  editor.insert_text("x");
+  ST_CHECK_EQ(calls, 1);
+}
+
+ST_TEST(code_editor_property_text_write_fires_on_change) {
+  // 属性面写入（`set_property("text")`，多来自控制通道/自动化）**要**通知：
+  // 宿主把 `on_change` 当“文本变了”的唯一钩子，静默改会出现
+  // “`get` 读回来是新文本、宿主状态里还是旧的”（与 Input 同一决议）。
+  CodeEditor editor;
+  int calls = 0;
+  std::string reported;
+  editor.on_change = [&calls, &reported](std::string_view text) {
+    ++calls;
+    reported = std::string(text);
+  };
+  ST_CHECK(editor.set_property("text", "from control channel"));
+  ST_CHECK_EQ(calls, 1);
+  ST_CHECK_EQ(reported, std::string("from control channel"));
+  // 值未变化的写入不该重复通知（早退，与 Input 的判定同口径）。
+  ST_CHECK(editor.set_property("text", "from control channel"));
+  ST_CHECK_EQ(calls, 1);
+  // 程序化装载后属性面写入仍能通知（两条路径互不干扰）。
+  editor.set_text("loaded");
+  ST_CHECK(editor.set_property("text", "updated"));
+  ST_CHECK_EQ(calls, 2);
+  ST_CHECK_EQ(reported, std::string("updated"));
+}
+
 ST_TEST(code_editor_insert_delete_and_cursor_movement) {
   Fixture fx;
   fx.type("abc");
