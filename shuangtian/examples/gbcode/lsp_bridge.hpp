@@ -105,6 +105,8 @@ class LanguageService {
 
   /// 是否已启用（有 server 在跑或已就绪）。
   [[nodiscard]] auto active() const -> bool;
+  /// 是否已发过启动尝试（无论成败）。宿主据此判断「这是首次尝试」以便只报一次。
+  [[nodiscard]] auto started() const -> bool;
   /// 当前 server 名（未启用时为空）。
   [[nodiscard]] auto server_name() const -> std::string;
   /// 最近一次失败原因（空 = 无）。

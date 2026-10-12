@@ -2408,6 +2408,183 @@ SVG 图元 17 例 16/17→**17/17**。
 
 ## P1
 
+### gbcode 功能实测（2026-10-12，全部有可复现探针）
+
+背景：用真控制通道（tree/get/set/invoke + 真鼠标键盘）＋真 git 仓库工作区＋
+clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 → 判据 → 方向」，
+数据来自会话内 `gbx/` 探针（客户端 `gbx/client.py`、造场 `gbx/make_ws.py`、
+逐条复现 `gbx/repro_all.py` / `gbx/repro_more.py`）。**现有 11 个 e2e 全绿**，
+下面 12 条都是它们**没覆盖到的入口**——这正是「e2e 全绿 ≠ 功能可用」的样本。
+
+- [ ] **Ctrl+P 快速打开：选中文件后不打开，状态栏却报「已打开」**（最严重）
+  **现象**：Ctrl+P → 过滤 `main.cpp` → 点条目（或 Enter、或 `invoke activate`）→
+  面板关闭、状态栏写「已打开 main.cpp」，而**编辑器内容/标签栏/标题栏三者全未变**。
+  对照：用资源管理器树点同一文件 → 三者全部正常变化（链路本身可用）。
+  **根因**：`run_command()`（page_actions.cpp:2652）里
+  `id.rfind("file.open.", 0) == 0` 走 `open_by_name()`，而该函数只在**内置样例表
+  `files_`** 里按名字查；Ctrl+P 文件表的 id 是两个都不是的**完整路径**
+  （`file_commands()` 里 `.id = full`）→ 两个分支都不命中 → 落到 `run_command`
+  末尾的兑底 `status_.set("已打开 " + leaf)`。**失败以「谎报成功」的形式出现**。
+  **方向**：文件表条目给独立的 id 前缀（如 `path:`），或 `run_command` 里
+  「路径存在 → `open_path`」优先于名字查表；并**禁止兑底分支写「已打开」**
+  （未识别 id 应如实报「未处理」）。回归：钉住「Ctrl+P 选中后标签栏新增该项」。
+
+- [ ] **逐行暂存没有入口（`diff_staging_` 从未被置真）**
+  **现象**：差异视图打开后，找不到任何「逐行暂存」开关；`#diff-staging-bar` /
+  `#diff-stage-selected` / `#diff-staging-close` 永不出现。
+  **实测**：`diff-view` 在树上、`hunks=1`，但把差异视图内所有 Button 的 id 列出来，
+  无任何 staging/stage-selected 相关项。
+  **根因**：`State<bool> diff_staging_` 全仓只有三处引用——`page_build.cpp:628`
+  读它、`:655` `set(false)`、`:663` `set_staging_mode`。**从来没有
+  `diff_staging_.set(true)`**，也没有菜单/命令面板/快捷键把它置真。
+  **代价**：C3 轮已完成的 `build_partial_patch` 数据层与整套 UI（含单测）
+  **在实际应用里不可达**，而 README/DESIGN 都写着「逐行暂存界面」已交付。
+  **方向**：差异视图工具条加一个开关按钮（或命令面板条目），并配一条 e2e
+  「点开关 → 勾选两行 → 暂存 → `git diff --cached` 只含那两行」。
+
+- [ ] **SCM 面板刷新不生效：git 数据更新了，但没触发重组**
+  **现象**：点行内「暂存」→ 外部 `git status` 立刻显示已暂存成功，但侧栏「变更」
+  面板的**分组/计数/文件行全部不变**（等 6s 也不变）；手工点工具条「刷新状态」
+  **也无效**。此时做一次**无关**状态变化（切主题）→ 面板立刻变成正确内容。
+  **实测（三步对照）**：基线 `已暂存2/7`；点暂存 + 手动刷新后**仍** `已暂存2/7`；
+  切主题后变成 `已暂存2/7 · 未暂存组消失`（正确）。
+  **根因**：`refresh_git()` 只写普通成员 `git_` 与 `status_.set(...)`；
+  当**变更条数/分支/标签数都没变**（只改了分区）时，`State::set` 的相等早退
+  让整个写入无失效 → 没有任何重组 → 面板继续显示上一帧快照。
+  （`git_refresh_pending_` 那条自动刷新路径还叠加了下面「终端 busy 恒真」的楼。）
+  **方向**：给 git 快照加一个单调递增的版本 `State<std::size_t>`（或直接在
+  刷新时写一个必然变化的 key，如 `git_stamp_`），让「数据换了」与「重组发生」
+  脱钩；不要在 `refresh_git` 里依赖状态栏文案是否变化。
+  回归：钉住「暂存后不切主题，面板也必须变」。
+
+- [ ] **终端 `busy` 恒为真：运行面板永远显示「终端忙」+ 自动刷新永不落地**
+  **现象**：终端已回到提示符（连跑两条 `echo` 已结束），`#terminal` 的 `busy`
+  仍是 `"true"`；侧栏「运行」面板的忙闲指示恒为 `终端忙` + 持续转圈。
+  **根因**：PTY 会话在 `start_pty()` 里 `target.running = true`，此后只在
+  **进程退出**时清；shell 活着期间 `running` 恒真 → `any_busy()` 恒真。
+  **连带**：`page_build.cpp:64` 的
+  `if (git_refresh_pending_ && !terminal_ptr->any_busy())` 因此**永不成立**，
+  git 写操作后的自动刷新一条都走不到（与上一条叠加时很难区分）。
+  **方向**：分开「shell 进程活着」与「shell 正在执行命令」两个语义
+  （如维护一个 `running_command` 计数，只在按下回车到提示符回归之间为真），
+  `busy()` 返回后者；或给组件加 `idle_hint()`（屏幕尾行是不是提示符）。
+
+- [ ] **`#fs-action` 浮层既关不掉、也拦不住**
+  **现象**：点资源管理器「新建文件/新建文件夹」→ `overlay-fs-action` 浮层打开后：
+  Esc（含连按）**关不掉**；鼠标交互**穿透到下层**（点编辑器 `hit=editor`、
+  点树 `hit=workspace-tree`）；同时全局快捷键被 `overlay_open()` 守卫挡掉
+  （Ctrl+Shift+P 打不开命令面板）→ 界面看上去「僵住」，只能点它自己的 ×。
+  **对照**：同工程的 `#find-bar` / `#goto-input` 都被 `main.cpp` 的 `escape`
+  全局处理器显式关闭——这条链路漏了 fs-action。
+  **方向**：Esc 分支补上 `fs_action_open_`；并决定它该是**模态**（遮罩屏障）
+  还是**非模态**（跟查找条一样允许穿透）——现在是两种语义各占一半
+  （遮罩画了但不拦、Esc 又不接）。
+
+- [ ] **资源管理器「新建文件」会静默清空同名既有文件**
+  **现象**：先用既有内容写好 `d6-victim.txt`（71 字节）→ 「新建文件」输入**同名**
+  → 确认后文件被截断为 **0 字节**，界面只报「已打开 …」，**无任何确认**。
+  实测（复现脚本 `repro_more.py` 的 D6 段）：71 字节 → 0 字节。
+  **根因**：`page_dialogs.cpp` 的新建分支无条件 `st::fs::write_text(path, "")`。
+  **方向**：目标已存在时报错或先确认（与关脏标签同一套确认浮层）。
+  另：该输入框把 `a/b`、`..`、`CON` 当合法路径/文件名**原样接受**
+  （实测会在工作区里造出 `a/` 目录与 `CON` 文件）——需要一份名字/路径校验。
+
+- [ ] **clangd 已装但语言服务从未启动（LSP 全链路不可用）**
+  **环境**：`where clangd` → `…\clang+llvm-23.1.2\bin\clangd.exe`（在 PATH 上）。
+  **现象**：打开工作区里的一个 `.cpp`（语言 cpp）、写入未定义符号、等 15s——
+  错误计数恒 0、`editor.diagnostics` 恒 `0`、**没有 clangd 进程**；
+  `F12` 报「语言服务未就绪」；补全弹层不出现。
+  **定位分工**：`st::process::which()` 在 Windows 上会补 `.exe` 并支持 PATH，
+  单测可证其正确 → 怀疑在应用侧接线：`sync_language_document()` 只在
+  `read_into_buffers` **新建标签的那一帧**被调（`page_build.cpp:232` 的
+  `buffers[active].key != loaded_key_` 分支）；而 LSP 泵路径上的
+  `sync_document` 还有 `lsp_.active_path() == buffer.path` 一道门。
+  **方向**：先在 `ensure_started` 里加临时诊断输出（命中哪个 recipe、which 结果）
+  把断点先钉在「哪一步返回 false」；然后补一条**不依赖外部 server** 的回归——
+  用仓库已有的 fake LSP server（`tests/lsp_client_test.cpp` 的那套，注意
+  坑位表里的 shebang/`ST_REQUIRE` 两条）验证「which 命中 ⇒ `ensure_started` 成功」。
+
+- [ ] **问题计数不在打开文件时刷新（内置轻量检查）**
+  **现象**：打开含 3 处真问题（超长行/Tab 缩进/行尾空白，已逐行核对过源文件）的
+  `docs/README.md` → 状态栏「错误/警告」计数**连续 5 次采样恒为 `0/0`**、
+  `editor.diagnostics` 恒 `0`；**点一下计数按钮才跳到 3**。
+  之后切到无问题的 `main.cpp` → 计数从 3 掉到 1（也不对）。
+  **根因**：`refresh_problems()` 只在「点计数 / F8」路径调用；
+  LSP 泵（`pump_language_service`）只在 `lsp_.pump()` 返回 true 时刷新，
+  而**内置轻量检查**（无 LSP 语言的回退）不在那条路径上。
+  **方向**：把「文本变化/LSP 诊断变化/切文件」三个时机收敛到一个
+  `refresh_problems_if_needed()`（带指纹早退），并在装载新文件后立即跑一次。
+
+- [ ] **「清空结果」后摘要仍显示旧命中数**
+  **现象**：搜 `demo` → 摘要 `7 处命中`、10 行结果；点「清空结果」→ 结果行 0、
+  输入框仍有词、**摘要仍是 `7 处命中`**（界面自相矛盾）。
+  **根因**：`search-clear` 只清 `search_hits_`/`search_hit_paths_`/`last_query_`，
+  没重置 `search_summary_`。**方向**：一并清（或改为从 `search_hits_.size()` 派生）。
+
+- [ ] **搜索 glob 提示与实际匹配口径不符**
+  **现象**：`#search-glob` 的占位提示写「文件过滤（如 *.cpp, src/**）」，但实测：
+  `glob=*.cpp` → **0 处命中**；`glob=src/**` → 7 处；`glob=` 空 → 7 处。
+  **根因**：`st::fs::match_glob` 的 `*` **不跨 `/`**（坑位表场景 6 有记），
+  而提示让人以为 `*.cpp` 能匹配任意深度的 `.cpp`。
+  **方向**：二选一——提示改成与语义一致的写法（`**.cpp` 或 `src/*.cpp`），
+  或在 glob 里补「无 `/` 的模式按文件名匹配任意层级」这条常用语义。
+
+- [ ] **两处「界面在说谎」的键位/入口文案**
+  - 「文件」菜单写 `全部保存（Ctrl+K S）`、`page_actions.cpp:291` 注释同；
+    而 `main.cpp:479` 实际注册的是 **Ctrl+Alt+S**（本框架无和弦键位）。
+  - `page.hpp:1170` 注释写「悬停信息（入口快捷键 Ctrl+K 用）」，但 `main.cpp:499`
+    把 Ctrl+K 绑给了「键盘快捷键」帮助浮层；`hover_request()` **全仓无调用方**
+    （死代码），鼠标悬停那条路在无头下无法验证。
+  **教训**：同一轮修过「帮助卡写着、代码里没有」那批（见下方「帮助卡 F8 / Ctrl+K」），
+  **同一类问题又在菜单文案与头文件注释里长回来了一次**。方向：把这些文案做成
+  可测的（菜单 label 里的键位从快捷键表生成），否则它们必然再漂。
+
+- [ ] **`invoke` 对未定义动作返回 `ok=true`（只靠 `handled=false` 区分）**
+  **现象**：`invoke terminal expand`（Terminal **没有** `expand` 动作）→
+  `ok=true`、`handled=false`；`invoke editor no_such_action_zzz` 同。
+  本会话实测因此被骗了一次：以为 `terminal expand` 生效，实际面板仍收着
+  （`bottom-split.second_hidden` 仍 true）。
+  **方向**：要么未定义动作返回 `ok=false` + 错误文案（与「元素不存在」同待遇），
+  要么在控制通道响应里把 `handled` 提升为顶层字段并在文档里写明
+  「调用方必须读它」。倾向后者（保兼容）＋ 文档显著化。
+
+- [ ] **`#explorer-*` / `#scm-refresh` 等 id 在「常驻 + 隐藏」后重复出现**
+  **现象**：`find "#explorer-new-file"` 返回 **2** 个（一个 bounds 正常、
+  一个 `0x0`）——侧栏视图常驻后，`build_sidebar_actions` 在同一帧里
+  按 `activity_` 只走一个分支，但**上一帧的分支子树仍在树上**（按 key 复用），
+  于是同一 id 有多份。`#scm-refresh` 更是同时存在「侧栏头 24x30」与
+  「工具条 26x28」两份**同 id 的可见按钮**（`find` 实测返回 **3** 份：
+  `(196,50) 24x30`、`(280,50) 24x30`、`(54,112) 26x28`；
+  另：按 y 坐标点 `(280,50)` 那份时 `hit` 报的是 `sidebar-title`——两者矩形重叠）。
+  三份的点击行为都接同一个 `refresh_git()`，但自动化命中哪一份不确定。
+  **代价**：e2e / 控制通道用 id 驱动时命中不确定的一份（本会话第一次点
+  `#explorer-new-file` 就点到了 0x0 的那份，表现为「点了没反应」）。
+  **方向**：给按视图切换的按钮 id 加视图前缀（`explorer-new-file` 已是），
+  真正的问题是**同一视图的两处刷新钮同 id**——把工具条那个改名为
+  `scm-refresh-toolbar`；另外把「骨架里 0x0 的隐藏残留」查清（是否该裁掉）。
+
+- [ ] **测试分片崩溃 = 静默丢测试通道（“分片未能启动 + 空原因”）**
+  **现象**：`st test --profile debug` 跑 16 个分片，每片都 `0 failed`，
+  但整体**退出码 1**，末尾只有一行 `测试分片 2 未能启动: `（原因字符串为空）。
+  逐条缩小后定位到 `tests/text_diff_test.cpp` 的 `text[range.second]`：
+  `diff_inline` 返回的是**半开区间** `[6,12)`，而 `"你好世界"` 正好 12 字节
+  ⇒ 下标 == `size()` ⇒ `operator[]` 越界；`_GLIBCXX_ASSERTIONS` 下直接 `abort`。
+  **代价（这条比缺陷本身重要）**：一个用例越界就让**整个分片进程消失**，
+  该分片后面 100+ 条用例一条未跑；而 16 个分片的汇总行统统是 `0 failed`——
+  只看汇总就会当它全绿（本会话第一次跑就被这么骗过去了）。
+  用例本身已修（右端到末尾即算合法边界）；全量重跑 1301 条 / 0 失败 / 无“未能启动”。
+  **方向（框架侧未做）**：`run_shards` 在 `exit_codes[index] < 0` 时把子进程的
+  **退出码**也打出来（现在只打了一个常为空的 `error().message`），
+  并把「分片启动失败/异常退出」计入总失败数（现在只打印，不影响退出码的语义说明）。
+
+- [ ] **`--scale` / `--frames` 传非数字时进程直接崩（未捕获异常）**
+  **现象**：`gbcode --headless --scale abc --frames 3` →
+  `terminate called after throwing an instance of 'std::invalid_argument' what(): stod`，
+  退出码 `0xC0000409`（`--frames abc` 同理，`what(): stoi`）。
+  而 `--bogus-flag` 走的是**正常路径**（退出 2 + 提示「未知参数…（用 --help 看可用项）」）。
+  **方向**：common options 解析里把 `stod`/`stoi` 包上校验，非法值走与未知参数
+  同一条路径（报错 + 退出 2）；顺带把 `--scale 0` / `--scale -2` 夹取到一个合法区间。
+
 - [ ] **粗体文本按常规面量宽（修 `bold` 缓存键后拓出来的）**
   **现象**：`TextPort::measure_width` 的接口面**没有 `bold`**，所以布局（`Text::measure`）
   按常规面量宽、绘制（`paint_text` 的 `port.draw(..., bold=true)`）按粗体面画。

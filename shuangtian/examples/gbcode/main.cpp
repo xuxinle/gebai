@@ -674,6 +674,14 @@ auto run_app(int argc, char** argv) -> int {
         page->goto_line_error_.set("");
         return true;
       }
+      // 新建/重命名/删除浮层：它是瞬态动作，Esc 必须能关。
+      // 曾经漏了这一条：它既不受全局 Esc 管、又没自己的 Esc 实现，
+      // 于是“关不掉的浮层”（只能点它自己的 ×）。
+      if (page->fs_action_open_.value()) {
+        page->fs_action_open_.set(false);
+        page->fs_action_kind_.set(CodeEditorPage::FsAction::None);
+        return true;
+      }
       if (!page->find_open_.value()) return false;
       page->dismiss_find();
       return true;

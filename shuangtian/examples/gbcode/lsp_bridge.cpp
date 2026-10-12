@@ -407,6 +407,8 @@ auto LanguageService::active() const -> bool {
   return impl_->started && impl_->client.state() == st::lsp::SessionState::Ready;
 }
 
+auto LanguageService::started() const -> bool { return impl_->started; }
+
 auto LanguageService::offset_to_position(std::string_view path, std::size_t offset) const
     -> std::optional<st::lsp::Position> {
   const auto found = impl_->synced.find(std::string(path));

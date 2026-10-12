@@ -428,11 +428,21 @@ namespace gbcode_ui {
 
 
   /// 把当前文件告知语言服务（首次会懒启动对应 server）。
+  ///
+  /// 启动失败（程序不在 PATH / 起进程失败 / 握手超时）要把原因说给用户——
+  /// 否则只看到「语言服务未就绪」，分不清是「没装 server」还是「装了但起不来」。
+  /// 这样也把“到底停在哪一步”变成可观测的（见 `LanguageService::error()`）。
   void CodeEditorPage::sync_language_document(const OpenBuffer& buffer) {
     if (buffer.path.empty()) return;   // 内存缓冲：没有路径就没有 URI
+    const bool was_started = lsp_.started();
     lsp_.set_active_path(buffer.path);
     lsp_diagnostics_stamp_ = 0;        // 换文件：诊断指纹作废（重新推）
-    if (!lsp_.ensure_started(buffer.path, buffer.language)) return;
+    if (!lsp_.ensure_started(buffer.path, buffer.language)) {
+      // 只在**首次尝试启动**的那一帧报（本函数每帧/每次切文件都会走到，
+      // 每帧都写会盖掉用户真正关心的别的状态）。
+      if (!was_started && !lsp_.error().empty()) status_.set(lsp_.error());
+      return;
+    }
     wire_language_callbacks();
     lsp_.sync_document(buffer.path, buffer.text);
     refresh_document_symbols();   // 切文件：大纲跟着换
@@ -474,7 +484,7 @@ namespace gbcode_ui {
  // —— 内部工具 ——
 
 
-   /// 把排队的 shell 命令投递给终端（终端实例就绪后）。
+  /// 把排队的 shell 命令投递给终端（终端实例就绪后）。
   ///
   /// 为何要排队：写操作在设计上“交终端执行”，而 `terminal_ptr` 只在**终端面板
   /// 被声明过**之后才有值。从未打开过终端时，事件回调里直接 `terminal_ptr->run(...)`
@@ -1085,6 +1095,17 @@ void CodeEditorPage::load_active_text() {
   void CodeEditorPage::refresh_git() {
     git_probed_ = true;
     git_ = gbcode::read_snapshot(workspace_);
+    // ⚠ **必须让“数据换了”一定能触发重组**。
+    //
+    // 变更面板从 `git_`（普通成员）取数，而普通成员不进声明式依赖表；
+    // 以前这条路径唯一的状态写入是 `status_.set(...)`，而它**带相等早退**——
+    // 当“变更条数/分支/标签数都没变”时（正是“暂存一个文件”这种最常见的情形）
+    // 整个写入无失效 → 没有任何重组 → 面板停在上一帧快照，
+    // 连手工点“刷新状态”也无效（同一条路径）。实测：暂存后等 6s + 手动刷新都不变，
+    // 而随便切一下主题（无关重组）立刻变对。
+    //
+    // 用一个单调递增的 State 当“快照版本”：面板把它读进依赖，写它就必然重组。
+    git_revision_.set(git_revision_.value() + 1);
     if (!git_.error.empty()) {
       status_.set("Git：" + git_.error);
       return;
@@ -1099,7 +1120,6 @@ void CodeEditorPage::load_active_text() {
     }
     status_.set(std::format("Git：{}{} · {} 项变更", git_.branch, flow, git_.changes.size()));
   }
-
 
   // —— 行尾 blame 注解（B5）——
 
@@ -1245,9 +1265,11 @@ void CodeEditorPage::load_active_text() {
     git_operation_ = gbcode::read_operation_state(workspace_);
     git_audit_ = gbcode::read_audit(workspace_, 20);
     git_log_loaded_ = true;
-    // **读到了要标脏**：`git_log_` 是普通 vector，数据进来了界面不会自己重画
-    //（实测：日志/分支读到了、列表却是空的——缺这一行，面板永远停在首帧的空态）。
-    // `status_` 本身是 State——借它触发重组（顺带把"读到了几条"说给用户）。
+    // 读完了**要标脏**：`git_*` 全是普通成员，数据进来了界面不会自己重画（旧写法
+    // 靠 `status_.set(...)` 的副作用触发重组——而当文案与上次**逐字相同时**
+    // `State::set` 相等早退，于是“别的地方变了、这批数据也变了、但界面不动”）。
+    // 用专门的版本号：它只在这里 + `refresh_git()` 里自增，语义就是“git 数据换过了”。
+    git_revision_.set(git_revision_.value() + 1);
     std::string extra;
     if (git_operation_.active()) extra = std::format(" · {} 进行中", git_operation_.kind);
     status_.set(std::format("Git：{} 条提交 · {} 个分支 · {} 个标签{}", git_log_.size(),
@@ -1499,6 +1521,10 @@ void CodeEditorPage::load_active_text() {
     (void)gbcode::append_audit(workspace_, label.empty() ? "write" : std::string(label), *args,
                                "issued");
     git_refresh_pending_ = true;
+    // 立即自增快照版本：`refresh_git()` 要到“终端安静”或上限到点才跑，
+    // 而界面上“点完没任何反应”是最差的反馈——先让依赖它的 scope 脏一次，
+    // 数据到了再脏一次（两次都只是重组，代价可忽）。
+    git_revision_.set(git_revision_.value() + 1);
     return true;
   }
 
@@ -1813,11 +1839,35 @@ void CodeEditorPage::load_active_text() {
       status_.set("名字为空，已取消");
       return;
     }
+    // 名字必须是**单个名字**：`a/b` / `..` / 绝对路径都是路径而非名字。
+    // 不拦的话会造出用户没预期的目录与文件（`a/b` 会隐式建 `a/`）。
+    if (wanted.find('/') != std::string::npos || wanted.find('\\') != std::string::npos) {
+      status_.set("名字不能包含路径分隔符：" + wanted);
+      return;
+    }
+    if (wanted == "." || wanted == "..") {
+      status_.set("非法名字：" + wanted);
+      return;
+    }
     std::string path;
     if (action == FsAction::Rename) {
       path = st::fs::join(st::fs::parent(target), wanted);
     } else {
       path = st::fs::join(target, wanted);
+    }
+    // 新建同名文件会**清空**已存在的文件（`write_text(path, "")`）——
+    // 这是不可逆的数据丢失，必须当场拒绝而不是默默执行。
+    if (action == FsAction::NewFile && st::fs::exists(path)) {
+      status_.set("已存在同名文件（新建会清空它，已拒绝）：" + path);
+      return;
+    }
+    if (action == FsAction::NewFolder && st::fs::exists(path)) {
+      status_.set("已存在同名目录：" + path);
+      return;
+    }
+    if (action == FsAction::Rename && st::fs::exists(path)) {
+      status_.set("目标名字已被占用：" + path);
+      return;
     }
     st::Status result = st::ok();
     if (action == FsAction::NewFolder) {
@@ -2638,6 +2688,10 @@ void CodeEditorPage::load_active_text() {
     // 但把精确匹配放前面才不会在将来加 `file.open-xxx` 时踩到同类前缀问题。
     if (id == "file.open") {
       open_file_dialog();
+    } else if (id.rfind("path:", 0) == 0) {
+      // Ctrl+P 文件表的条目（见 `file_commands`）：id 直接携带完整路径。
+      // 必须是**真开文件**，与「按名字查内置样例」的 `file.open.<名>` 分流。
+      open_path(id.substr(5));
     } else if (id.rfind("recent:", 0) == 0) {
       // 命令面板的「最近」条目：id 前缀 + 完整路径（与菜单的 recent-file: 同源不同名
       // ——面板里这个更短，且不会与 file.open.* 前缀判断碰撞）。
@@ -2689,9 +2743,11 @@ void CodeEditorPage::load_active_text() {
     } else if (id == "help.about") {
       status_.set("歌白代码 0.1.0 · 霜天框架示例 · 声明式组装");
     } else if (!id.empty()) {
+      // ⚠ **兜底分支不得声称「已打开」**：未识别的 id 意味着“没做任何事”——
+      // 把它写成“已打开”会让界面在失败时看起来成功了（Ctrl+P 那次的直接后果）。
       const std::size_t slash = id.find_last_of("/\\");
       const std::string leaf(slash == std::string::npos ? id : id.substr(slash + 1));
-      status_.set(id.find('/') != std::string::npos ? "已打开 " + leaf : "已执行：" + leaf);
+      status_.set("未识别的命令：" + leaf);
     }
   }
 
@@ -2744,6 +2800,11 @@ void CodeEditorPage::load_active_text() {
 
 
   /// 快速打开的文件表（Ctrl+P）：有工作区时列真实文件（递归、限量）。
+  ///
+  /// **id 带 `path:` 前缀**：条目身份是一整条磁盘路径，与「按名字查内置样例」
+  /// 的 `file.open.<名>` 是两回事——`run_command` 里对两种 id 各自分流。
+  /// 曾经直接把路径当 id，于是两条分支都不命中，只剩兜底的「已打开 …」状态栏
+  /// 文案（面板关了、文件没开）。
   [[nodiscard]] auto CodeEditorPage::file_commands() const -> std::vector<CommandPalette::Command> {
     std::vector<CommandPalette::Command> table;
     if (!workspace_.empty()) {
@@ -2762,7 +2823,7 @@ void CodeEditorPage::load_active_text() {
             continue;
           }
           table.push_back(CommandPalette::Command{
-              .id = full, .title = item.name,
+              .id = "path:" + full, .title = item.name,
               .detail = full.substr(workspace_.size() + 1), .handler = {}});
         }
       }

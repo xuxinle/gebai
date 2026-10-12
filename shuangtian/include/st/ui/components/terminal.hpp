@@ -86,7 +86,17 @@ struct TerminalSession {
   /// “当前有没有命令在执行”由 shell 自己的状态决定，组件看不到（
   /// 那要读 shell 的提示符/类型），因此 `busy()` 在这里回答的是
   /// “这条会话能不能用”。`send_stop` 发 `Ctrl+C` 不会把它置假。
+  ///
+  /// 另见 `Terminal::idle_ms()`：那条路径专门回答“命令是否已结束”（供
+  /// “git 写操作后刷新状态”这类“等命令跑完再动”的宿主逻辑用）。
   bool running{false};
+  /// 最近一次收到输出的时间（`st::time::now_ms()`；0 = 还没有过输出）。
+  ///
+  /// 为何需要它（实测踩到）：`running` 在 PTY 下只能是“shell 活着”，
+  /// 于是 `any_busy()` 恒真——宿主那些 `!any_busy()` 才落地的延迟动作
+  ///（如“git 写操作后刷新状态”）**永远不执行**。而“命令跑完了没有”
+  /// 的一个便宜且稳的代理量就是“屏幕安静了多久”（`Terminal::idle_ms()`）。
+  std::int64_t last_output_ms{0};
   /// 运行中的命令名（PTY 模式下是 shell 名；行模式下是命令）。
   std::string running_name{};
   /// 子进程退出码（退出后可读）。
@@ -240,6 +250,12 @@ class Terminal : public Element {
   void append_to(std::size_t index, std::string line);
   /// 会话的**纯文本**（PTY 模式取屏幕内容；行模式拼接滚回）。
   [[nodiscard]] auto session_text(std::size_t index) const -> std::string;
+  /// 距最近一次终端输出过了多少毫秒（0 = 刚刚还有输出；从未有过输出 = 一个很大的值，
+  /// 即“早已安静”，不会阻塞宿主的延迟动作）。
+  ///
+  /// 用途：判断“在终端里跑的命令大概跑完了没有”。`busy()` 在 PTY 下答不了
+  /// 这个问题（它只能是“shell 活着”）——见 `TerminalSession::last_output_ms`。
+  [[nodiscard]] auto idle_ms(std::int64_t now_ms) const -> std::int64_t;
   [[nodiscard]] auto line_count(std::size_t index) const -> std::size_t;
   /// 屏幕模型（PTY 模式下非空；渲染与断言用）。
   [[nodiscard]] auto screen(std::size_t index) const

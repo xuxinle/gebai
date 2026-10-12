@@ -59,12 +59,49 @@ namespace gbcode_ui {
     // 正确写法：泵**总是执行**（它内部搬消息、派发回调），返回值只决定
     // 要不要刷新编辑器诊断。
     pump_hover_word();
-    // 终端里的 git 命令完成后的状态刷新（延迟落地：命令完成时机不可知，
-    // 挂起标志在下一帧泵时触发一次重读——脏一点但简单，且不会刷爆 git）。
-    if (git_refresh_pending_ && terminal_ptr != nullptr && !terminal_ptr->any_busy()) {
-      git_refresh_pending_ = false;
-      refresh_git();
-      git_log_loaded_ = false;   // git 操作后日志也旧了（提交/切分支都改历史）
+    flush_terminal_commands();
+    // 终端里的 git 命令完成后的状态刷新（延迟落地：命令完成时机不可知）。
+    //
+    // ⚠ **位置必须在 `flush_terminal_commands()` 之后**：写操作只往队列里塞命令
+    // 并置 `git_refresh_pending_`，真正的投递在 `flush_terminal_commands()` 里。
+    // 刷新块排在它前面的话，会在“命令还没送出去”的那一帧就把挂起标志消费掉
+    // ——下一个条件（终端安静）此时天然成立，于是 `refresh_git()` 读到的是
+    // **命令执行之前**的快照，而标志已被清空、再也不会有第二次。
+    // 实测症状：点暂存后自动刷新“发生了但什么都没变”，而手点「刷新状态」立刻变。
+    //
+    // ⚠ 判据不能用 `!terminal_ptr->any_busy()`：PTY 模式下 `busy` 的含义是
+    // “shell 活着”（常量真）——用它当门控会让这条刷新**永远不会发生**。
+    //
+    // 改用“终端安静了多久”，但**必须配一个上限**：真终端会持续有输出
+    //（提示符重绘、PowerShell 周期性的空行），单靠“安静”可能永远等不到。
+    // 上限到点就刷（多读一次 git 无副作用；只是可能读到命令尚未生效的中间态，
+    // 而下一次刷新会把它纠正——比“永远不刷”好得多）。
+    constexpr std::int64_t kTerminalQuietMs = 300;
+    constexpr std::int64_t kGitRefreshDeadlineMs = 1500;
+    if (git_refresh_pending_) {
+      const std::int64_t now_ms = st::time::now_ms();
+      if (git_refresh_since_ms_ == 0) {
+        git_refresh_since_ms_ = now_ms;
+        // 入队那一帧先脏一次：界面上“点完没任何反应”是最差的反馈。
+        git_revision_.set(git_revision_.value() + 1);
+      }
+      const std::int64_t elapsed = now_ms - git_refresh_since_ms_;
+      // ⚠ 必须先等一个“结算期”：命令刚发出的那一瞬间终端还没有任何回显，
+      // `idle_ms` 天然就是一个大值——直接用“安静”作判据会在命令**执行之前**
+      // 就刷一次并把挂起标志消耗掉（实测：自动刷新“发生了但什么都没变”）。
+      const bool quiet =
+          elapsed >= kTerminalQuietMs &&
+          (terminal_ptr == nullptr || terminal_ptr->idle_ms(now_ms) >= kTerminalQuietMs);
+      const bool deadline = elapsed >= kGitRefreshDeadlineMs;
+      if (quiet || deadline) {
+        git_refresh_pending_ = false;
+        git_refresh_since_ms_ = 0;
+        refresh_git();
+        // 日志/分支/标签…与工作区快照是两批数据（`ensure_git_log` 管后者），
+        // 提交/切分支/暂存都会同时改变两边——一起标脏，否则会出现
+        // “变更面板对了、日志还停在上一次提交”。
+        git_revision_.set(git_revision_.value() + 1);
+      }
     }
     // 变更视图“首次要读一次 git 状态”的意图（渲染期只置标记，读在这里落地）。
     // 为何需要：视图改为**常驻声明 + 隐藏保活**后，构建函数每帧都会跑到；
@@ -85,7 +122,6 @@ namespace gbcode_ui {
     ensure_blame();
     // 单文件历史：同上（`git log --follow` 也是子进程）。
     ensure_file_history();
-    flush_terminal_commands();
     const bool diagnostics_changed = lsp_.pump();
     // 待落地的跳转（跨文件）：编辑器实例在新文件装载后才就位，所以在这里补做。
     apply_pending_navigation_jump();
@@ -625,6 +661,21 @@ namespace gbcode_ui {
         // 为何工具条放在**外面**而不是让 `DiffView` 自己画头部：那条工具条上的按钮要
         // 触发的是**应用层的写操作**（`run_write` + 审计），而组件不该知道 git 是什么。
         (void)column(c, {.grow = true, .id = "diff-column"}, [&] {
+          // 入口：**必须有**一个把 `diff_staging_` 置真的东西。
+          // 这里原本只有“退出逐行暂存”（`set(false)`），没有任何开关——
+          // 于是整套逐行暂存（数据层 + 工具条 + 单测）在当前应用里**不可达**。
+          (void)row(c, {.gap = 6.0f, .height = 30.0f, .id = "diff-staging-toggle-row"}, [&] {
+            (void)custom<Button>(c, [this](Button& b) {
+              b.set_id("diff-staging-toggle");
+              b.set_label(diff_staging_.value() ? "退出逐行暂存" : "逐行暂存…");
+              b.set_size(Button::Size::Small);
+              b.on_click = [this] { diff_staging_.set(!diff_staging_.value()); };
+            }, {.height = 24.0f, .id = "diff-staging-toggle-btn"});
+            if (!diff_staging_.value()) {
+              (void)text(c, [] { return std::string("挑着提交几行时用"); },
+                         {.grow = true, .id = "diff-staging-hint"});
+            }
+          });
           if (diff_staging_.value()) {
             (void)row(c, {.gap = 6.0f, .height = 30.0f, .id = "diff-staging-bar"}, [&] {
               const std::size_t count =

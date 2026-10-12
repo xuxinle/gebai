@@ -242,6 +242,8 @@ struct CodeEditorPage : Component {
   Input* commit_input_ptr{nullptr};
   /// 终端里的 git 命令跑完后要刷新状态（pump 里落地——命令完成时机不可知）。
   bool git_refresh_pending_{false};
+  /// 挂起刷新是从什么时候开始的（上限用；0 = 当前无挂起）。
+  std::int64_t git_refresh_since_ms_{0};
   // —— Git 工具窗（阶段 B）——
   /// 排队的 shell 命令（终端实例就绪后投递——见 `flush_terminal_commands`）。
   std::vector<std::string> pending_shell_commands_{};
@@ -318,6 +320,13 @@ struct CodeEditorPage : Component {
   /// 而此刻 UI 正处在“半完成的事件处理”里。改为置标记、帧首泵统一落盘——
   /// 那里也是唯一改文件的位置（与 `ensure_*` 同一节奏）。
   bool merge_write_pending_{false};
+  /// Git 快照的**版本号**：变更面板把它读进声明式依赖，`refresh_git()` 每轮自增。
+  ///
+  /// 为何需要它（实测踩到）：面板从 `git_`（普通成员）取数，而普通成员不进依赖表；
+  /// 刷新路径上唯一的状态写入是 `status_.set(...)`，它**带相等早退**——当“变更条数
+  /// 都不变”时（暂存一个文件正是这种情形）整个写入无失效 → 没有重组 → 面板显示旧快照。
+  /// 写这个数就是“数据变了、请重组”的**唯一可靠信号**。
+  State<std::size_t> git_revision_{0};
   /// 状态栏问题计数“轮跳”到第几处（反复点同一个计数就依次往下跳）。
   std::size_t problem_cycle_{0};
   /// 已注册的语言清单（扩展视图用；懒加载一次）。

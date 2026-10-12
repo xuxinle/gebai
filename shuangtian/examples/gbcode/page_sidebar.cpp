@@ -116,6 +116,9 @@ namespace gbcode_ui {
           search_hits_.set({});
           search_hit_paths_.clear();
           last_query_.clear();
+          // 摘要必须跟着清：它写的是“N 处命中”，不清就与空列表自相矛盾
+          //（清空了还显示 8 处命中）。
+          search_summary_.set("");
         });
         break;
       case 2:
@@ -597,6 +600,9 @@ void CodeEditorPage::replace_in_workspace(std::string_view replacement) {
     // 之后，本函数**每帧都会跑到**——必须把读取挪到帧首泵（那里已经在做
     // `git_refresh_pending_` 与 `ensure_git_log`）。
     git_probe_wanted_ = true;
+    // 把 Git 快照版本读成**声明式依赖**：`refresh_git()` 写它 → 本视图重组。
+    // 不读的话变更面板只在“别的状态恰好也变了”时才更新（见 `git_revision_` 的说明）。
+    (void)git_revision_.value();
     if (workspace_.empty()) {
       (void)text(c, [] { return std::string("内置样例模式：没有工作区可查 Git 状态"); });
       return;
@@ -650,6 +656,13 @@ void CodeEditorPage::replace_in_workspace(std::string_view replacement) {
     (void)custom_container<ScrollView>(
         c,
         [&] {
+          // ⚠ 快照版本必须**在本作用域**里读：分组/文件行是在 `ScrollView` 这个
+          // 子组件自己的作用域内声明的，只在 `build_scm_view` 顶层读的话脏的
+          // 只是外层作用域——子作用域不在它的子树里，于是“重组发生了，
+          // 但分组列表没重建”（实测：快照版本 r1→r2、文件数 14→15，
+          // 而屏幕上的分组与计数纹丝不动）。**每个真正显示 git 数据的
+          // scope 都得自己订阅这个版本号**。
+          (void)git_revision_.value();
           if (git_.changes.empty()) {
             (void)text(c, [] { return std::string("工作区干净，没有未提交的变更"); });
             return;

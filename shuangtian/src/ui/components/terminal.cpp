@@ -25,6 +25,7 @@
 #include "st/core/fs.hpp"
 #include "st/core/process.hpp"
 #include "st/core/string.hpp"
+#include "st/core/time.hpp"
 #include "st/text/text.hpp"   // `text::FontRole`（终端必须用等宽角色）
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/scroll.hpp"
@@ -528,6 +529,18 @@ void Terminal::clear() {
 
 auto Terminal::busy() const -> bool { return current().running; }
 
+auto Terminal::idle_ms(std::int64_t now_ms) const -> std::int64_t {
+  // 取所有会话里**最新**的一次输出：只要还有一条在刷，就不算安静。
+  // 没有任何输出过时返回一个很大的值（视为早已安静）。
+  std::int64_t newest = 0;
+  for (const auto& session : sessions_) {
+    if (session == nullptr) continue;
+    newest = std::max(newest, session->last_output_ms);
+  }
+  if (newest <= 0) return 60000;   // 从未有输出：当作已安静（不阻塞宿主）
+  return now_ms > newest ? now_ms - newest : 0;
+}
+
 auto Terminal::any_busy() const -> bool {
   return std::any_of(sessions_.begin(), sessions_.end(),
                      [](const std::unique_ptr<TerminalSession>& session) {
@@ -745,6 +758,8 @@ void Terminal::pump() {
         if (index < sessions_.size()) on_title_change(index, title);
       }
       any_pty_data = true;
+      // 最近一次输出时间（`idle_ms` 的输入）——每喂一次字节就刷新。
+      target->last_output_ms = st::time::now_ms();
     }
   }
   if (any_pty_data) mark_dirty();

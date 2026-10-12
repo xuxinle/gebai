@@ -364,8 +364,14 @@ ST_TEST(diff_inline_ranges_are_byte_offsets_for_cjk) {
   // 判据是“按这个偏移切片，切出来的仍是合法 UTF-8 的开头”。
   const std::string_view text = "你好世界";
   for (const auto& range : old_ranges) {
+    // ⚠ 区间是**半开区间** `[first, second)`：`second` 就是区间后第一个字节的位置，
+    // 它可以等于 `size()`（本用例里恰好就是：`[6,12)` 而文本正好 12 字节）。
+    // 那时它指向 `end()`——用 `operator[]` 读是越界（`_GLIBCXX_ASSERTIONS` 下当场
+    // `abort`：**整个分片进程消失**，后面所有用例都不跑，而汇总里只报“分片未能启动”；
+    // release 下则是静默 UB）。所以右端要单独判“到末尾也算合法”。
     const auto lead = static_cast<unsigned char>(text[range.first]);
     ST_CHECK((lead & 0xC0U) != 0x80U);   // 不是续字节 = 落在码位开头
+    if (range.second >= text.size()) continue;   // 末尾是合法边界，无可读字节
     const auto tail = static_cast<unsigned char>(text[range.second]);
     ST_CHECK((tail & 0xC0U) != 0x80U);
   }
