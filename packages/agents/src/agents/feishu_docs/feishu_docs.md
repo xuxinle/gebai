@@ -92,6 +92,7 @@
 - **token 语义**：docx 用 `document_id`；wiki 节点有 `node_token`（挂载点）与 `obj_token`（实际文档 token，等价 document_id）；token 前缀不固定，类型以来源字段/URL 路径段为准
 - **块定位与诊断**：块列表输出附 `type_name`；`fetch_doc`（keyword）/`find_blocks` 可按文本反查 block_id；块操作失败会附本地诊断（区分 block 不存在 / 叶子块不支持子块 / 无权限）与请求 method+path——先看诊断再重试，不盲改 id；**每轮写入后 block_id 已变，跨轮编辑先重新读**
 - **图形块（画板/思维导图）**：块类型 43 = mindnote，读取时只返回画板 token 占位——**不要用 api_call 猜接口**，直接用 `get_board`（传 `board_token`，或 `document_id`+`block_id` 自动提取）。`get_board` 优先返回 PlantUML 源码（语义完整），否则重建「形状文本 + 连接线关系」为流程描述
+- **分栏列宽（实测）**：`<grid>` 的 `width-ratio` 是**尺度无关的相对比例**（`1`、`0.5`、`50` 等价），写入时归一为总和 100 —— 因为接口 `width_ratio` 的绝对值就是「占页宽百分比」，合计 100 才铺满；写 `1:1` 不会窄（内部转 50:50）。改已有分栏用 `update_block` 的 `grid_property={widths:[2,1]}`
 - **元信息**：`get_file_meta` 查 docx **显式传 `type=docx`**（缺省自动识别对 docx 不稳定，可能报 970005）
 - **错误码引导**：权限类错误（9999166x/9999167x）自动附「建议开通的 scope + 授权链接」；仍失败时把完整错误文本反馈给用户去开发者后台开通，不要反复重试同一请求
 - **图表与素材**：` ```mermaid `/` ```plantuml `/` ```d2 `/` ```echarts ` 围栏自动渲染为 PNG 图片插入（飞书**不支持**导入为可编辑图形：diagram 块禁创建、画板连线无法锚定——不要用 shape 块拼图，拓扑会丢）；需改图时按 `diagram_source=keep` 保留的源码改后重导

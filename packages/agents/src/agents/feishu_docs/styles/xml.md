@@ -32,7 +32,7 @@
 | XML | 落地效果 |
 |---|---|
 | `<callout emoji="bulb" background-color="light-blue" border-color="blue" text-color="blue"><p>内容</p></callout>` | 高亮块；内部只支持段落/列表/待办（表格、图片、代码、分栏会被移出并提示）；**至少一个子块**，空内容自动补空段落 |
-| `<grid><column width-ratio="0.5"><p>左栏</p></column><column width-ratio="0.5"><p>右栏</p></column></grid>` | 分栏（2~5 列；`width-ratio` 为相对比例，缺省 1；每列至少一个子块，空列自动补空段落） |
+| `<grid><column width-ratio="1"><p>左栏</p></column><column width-ratio="1"><p>右栏</p></column></grid>` | 分栏（2~5 列）。**`width-ratio` 为相对比例（尺度无关）**：`1`/`0.5`/`50` 表达同一件事（等分）——写入时自动归一到总和 100（实测：接口 `width_ratio` 绝对值 = 占页宽百分比，合计 100 铺满；两列各传 1 会让列宽仅 82 twips、窄到不可读）。宽窄对比写 `"2"` 与 `"1"`（→ 67:33）。每列至少一个子块，空列自动补空段落 |
 | `<table><colgroup><col width="180"/><col width="550"/></colgroup><thead><tr><th>表头</th></tr></thead><tbody><tr><td>内容</td></tr></tbody></table>` | 表格；`<colgroup>` 定列宽（数量须等于列数，否则回落内容自适应）；`<thead>` 或 `<th>` 判表头行；单元格内可用 `<br>` 换行、行内加粗/代码/链接 |
 | `<img path="@./shot.png" caption="界面截图"/>` | 图片（`path` 本地路径、`href` 网络地址；`caption` 生成斜体题注段落；**宽高设置不支持**——实测 image.size 只读，写了会提示） |
 | `<whiteboard type="mermaid">graph TD; A-->B</whiteboard>` | 图示：`type` 支持 `mermaid`/`plantuml`/`d2`/`echarts`（服务端渲染为图片插入），或 `path="@./a.mmd"` 引用本地源码文件（按扩展名自判格式） |

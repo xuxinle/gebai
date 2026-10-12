@@ -1334,7 +1334,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const updateBlock = tool(
     "update_block",
-    "更新文档块内容：文本（text 整体替换 / insert_text 插入）或表格属性（table_property 直通 update_table_property，如 {column_index, column_width} 逐列改宽、{header_row} / {header_column}、{insert_table_row} / {insert_table_column} / {delete_table_rows} 增删行列；批量改宽用 set_table_width）。",
+    "更新文档块内容：文本（text 整体替换 / insert_text 插入）、表格属性（table_property 直通 update_table_property，如 {column_index, column_width} 逐列改宽、{header_row} / {header_column}、{insert_table_row} / {insert_table_column} / {delete_table_rows} 增删行列；批量改宽用 set_table_width）或分栏列宽（grid_property，如 {widths:[1,1]} 等分、{widths:[2,1]} 宽窄二比一）。",
     {
       document_id: { type: "string" },
       block_id: { type: "string" },
@@ -1343,6 +1343,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       insert_index: { type: "number", description: "插入位置（缺省 0=开头）" },
       style: { type: "object", description: "文本样式 {bold,italic,underline,strikethrough,inline_code}，需配合 text/insert_text" },
       table_property: { type: "object", description: "表格属性（仅表格块 31）——原样作为 update_table_property 提交，如 {column_index:0,column_width:320} 改第 0 列宽、{header_row:true} 首行标题行、{insert_table_row:{row_index:-1}} 末尾插行" },
+      grid_property: { type: "object", description: "分栏列宽（仅 grid 块 24）——`{widths:[1,1]}` 传相对比例（按总和 100 自动归一，1:1 与 50:50 等效，铺满页宽）；需传全部列的比例（官方要求）" },
     },
     ["document_id", "block_id"],
     async (args, ctx) => {
@@ -1353,13 +1354,21 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       let insertIndex = 0
       if (args.table_property !== undefined) {
         patch.update_table_property = jsonArg(args.table_property, "table_property") as Record<string, unknown>
+      } else if (args.grid_property !== undefined) {
+        // 分栏列宽（实测修复：width_ratio 绝对值 = 占页宽百分比，合计 100 铺满；用 widths 传相对比例自动归一）
+        const gp = jsonArg(args.grid_property, "grid_property") as Record<string, unknown>
+        if (Array.isArray(gp.widths)) {
+          patch.update_grid_column_width_ratio = { width_ratios: widthRatioWeights((gp.widths as unknown[]).map((v) => Number(v))) }
+        } else {
+          patch.update_grid_column_width_ratio = gp
+        }
       } else if (args.insert_text !== undefined) {
         insertIndex = args.insert_index !== undefined ? num(args.insert_index, 0) : 0
         patch.insert_text = { index: insertIndex, elements: textElements(String(args.insert_text), style) }
       } else if (args.text !== undefined) {
         patch.update_text_elements = { elements: textElements(String(args.text), style) }
       } else {
-        throw new Error("请提供 text / insert_text / table_property 之一")
+        throw new Error("请提供 text / insert_text / table_property / grid_property 之一")
       }
       try {
         const data = await docxCall(ctx, docId, blockId, {}, () =>
@@ -3955,17 +3964,29 @@ function expandTableRows(block: Record<string, unknown>, bb: BlockBuilder): stri
  * 返回该顶层块的 rootId（块本体已 push 进 bb.blocks）。
  */
 /**
- * 分栏列宽比例归一为**整数权重**（实测修复：接口 width_ratio 只接受整数，传 0.5 报
- * 9499 Invalid parameter value；XML 写法按官方样式用 0~1 小数，这里换算成同比例整数）。
- * 规则：全为整数则原样；含小数则整体 ×100 取整，再按最大公约数约分（0.5/0.5 → 1/1、0.6/0.4 → 3/2、0.25/0.75 → 1/3）。
+ * 分栏列宽比例 → 接口 `width_ratio` 整数权重。
+ *
+ * **实测结论（导出 docx 逆向验证）**：`width_ratio` 的**绝对值就是「占整页宽度的百分比」**——
+ * 2 列各传 1 时导出 `<w:gridCol w:w="82"/>`（82 twips，A4 可用宽 8280 twips，仅占 1%），
+ * 列窄到无法阅读；传 50/50 导出 4140+4140（铺满页宽）；传 100/100 导出 8280+8280（溢出）。
+ * 旧实现按「最大公约数约分」把 1:1 压成最小整数比，恰好把等分意图变成 1%，是本次缺陷根因。
+ *
+ * **故按比例归一为总和 100**（与传入尺度无关）：`1:1` / `50:50` / `0.5:0.5` 均 → `50:50`，
+ * `3:1` → `75:25`，`1:1:1` → 三列均分。取整误差补到最大一份，保证求和恰为 100（铺满且不溢出）。
  */
 export function widthRatioWeights(ratios: number[]): number[] {
-  const allInt = ratios.every((r) => Number.isInteger(r) && r > 0)
-  if (allInt) return ratios.map((r) => Math.round(r))
-  const scaled = ratios.map((r) => Math.max(1, Math.round((Number.isFinite(r) && r > 0 ? r : 1) * 100)))
-  const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b))
-  const g = scaled.reduce((a, b) => gcd(a, b))
-  return g > 1 ? scaled.map((v) => v / g) : scaled
+  if (!ratios.length) return []
+  const vals = ratios.map((r) => (Number.isFinite(r) && r > 0 ? r : 1))
+  const sum = vals.reduce((a, b) => a + b, 0)
+  const out = vals.map((v) => Math.max(1, Math.round((v / sum) * 100)))
+  // 取整误差补偿（补到最大的一份）：总和归 100，避免累积偏差导致列宽总和不足或溢出
+  const diff = 100 - out.reduce((a, b) => a + b, 0)
+  if (diff !== 0) {
+    let idx = 0
+    for (let i = 1; i < out.length; i++) if (out[i] > out[idx]) idx = i
+    out[idx] = Math.max(1, out[idx] + diff)
+  }
+  return out
 }
 
 /**

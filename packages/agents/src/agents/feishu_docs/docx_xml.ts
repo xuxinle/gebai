@@ -8,7 +8,7 @@
  * 为什么要有这一层：Markdown 只能表达飞书块模型的子集（自动编号、分栏、高亮块配色、表格列宽、
  * 题注都没有语法），文案「怎么修都排版不好看」的根因在此。XML 语法补齐这些表达：
  *   - `<h1 seq="auto">` 自动编号（1 / 1.1 / 1.1.1）
- *   - `<grid><column width-ratio="0.5">` 分栏（2~5 列）
+ *   - `<grid><column width-ratio="1">` 分栏（2~5 列；width-ratio 为尺度无关的相对比例，写入时归一为总和 100）
  *   - `<callout emoji="💡" background-color="light-blue">` 高亮块配色
  *   - `<table><colgroup><col width="180"/>` 表格列宽 + `<th>` 表头行
  *   - `<img caption="题注">` / `<pre lang="go" caption="示例">` 题注

@@ -565,13 +565,19 @@ describe("normalizeBlockFields 块字段自动映射", () => {
       code: { elements: [], style: { language: 49 } },
     })
   })
-  test("widthRatioWeights：小数权重按比例换算为整数（接口只接受整数 width_ratio）", () => {
-    expect(widthRatioWeights([1, 1])).toEqual([1, 1])
-    expect(widthRatioWeights([6, 4])).toEqual([6, 4])
-    expect(widthRatioWeights([0.5, 0.5])).toEqual([1, 1])
-    expect(widthRatioWeights([0.6, 0.4])).toEqual([3, 2])
-    expect(widthRatioWeights([0.7, 0.2, 0.1])).toEqual([7, 2, 1])
-    expect(widthRatioWeights([0.25, 0.75])).toEqual([1, 3])
+  test("widthRatioWeights：比例归一到总和 100（实测：width_ratio 绝对值=占页宽百分比，合计 100 铺满）", () => {
+    // 实测根因：2 列各传 1 导出 gridCol=82 twips（仅占页宽 1%，列窄到不可读）；传 50/50 才是铺满
+    expect(widthRatioWeights([1, 1])).toEqual([50, 50])
+    expect(widthRatioWeights([50, 50])).toEqual([50, 50])
+    expect(widthRatioWeights([0.5, 0.5])).toEqual([50, 50]) // 尺度无关：三种写法等效
+    expect(widthRatioWeights([6, 4])).toEqual([60, 40])
+    expect(widthRatioWeights([0.6, 0.4])).toEqual([60, 40])
+    expect(widthRatioWeights([3, 1])).toEqual([75, 25])
+    expect(widthRatioWeights([1, 1, 1])).toEqual([34, 33, 33]) // 取整误差补到最大份（并列时取第一个），合计恰 100
+    // 任何取值下总和都恰为 100（铺满且不溢出）
+    for (const rs of [[1, 2, 3], [7, 11, 13, 17], [0.1, 0.2, 0.7], [1, 1, 1, 1, 1]]) {
+      expect(widthRatioWeights(rs).reduce((a, b) => a + b, 0)).toBe(100)
+    }
     // 非正数兜底：仍返回正整数权重（保证请求合法）
     expect(widthRatioWeights([0, 1]).every((v) => Number.isInteger(v) && v > 0)).toBe(true)
   })
@@ -588,15 +594,28 @@ describe("normalizeBlockFields 块字段自动映射", () => {
     const r = prepareGridColumns(withContent)
     const cols = r.block.children as Array<Record<string, unknown>>
     expect(r.filledColumns).toBe(1)
-    // 有内容的列：小数权重换算为整数、子块原样保留
-    expect(cols[0].grid_column).toEqual({ width_ratio: 3 })
+    // 有内容的列：权重归一到总和 100、子块原样保留
+    expect(cols[0].grid_column).toEqual({ width_ratio: 37 }) // 0.6 : 1 → 37.5 : 62.5，取整误差补到最大份
     expect(cols[0].children as unknown[]).toHaveLength(1)
-    // 空列：补权重（与其他列保持相对比例：0.6 : 缺省 1 → 3 : 5）与一个空文本子块
-    expect(cols[1].grid_column).toEqual({ width_ratio: 5 })
+    // 空列：补权重（与有内容列保持相对比例）与一个空文本子块
+    expect(cols[1].grid_column).toEqual({ width_ratio: 63 })
+    expect((cols[0].grid_column as Record<string, number>).width_ratio + (cols[1].grid_column as Record<string, number>).width_ratio).toBe(100)
     expect((cols[1].children as Array<Record<string, unknown>>)[0]).toMatchObject({ block_type: 2 })
     // 不污染入参；非 grid 原样返回
     expect(withContent.children[1]).toEqual({ block_type: 25, grid_column: {} })
     expect(prepareGridColumns({ block_type: 2, text: "x" }).filledColumns).toBe(0)
+  })
+
+  test("update_block grid_property：分栏列宽按比例归一（实测 width_ratio 绝对值=占页宽百分比）", async () => {
+    const { tools, records } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      return jsonResponse({ code: 0, msg: "success", data: { block: { block_id: "g1", block_type: 24 } } })
+    })
+    await tools.update_block.execute({ document_id: "d1", block_id: "g1", grid_property: { widths: [2, 1] } }, ctx())
+    const body = JSON.parse(String(records.find((r) => r.url.includes("/blocks/g1"))?.init?.body ?? "{}"))
+    // 2:1 → 67:33（总和 100，铺满页宽）
+    expect(body.update_grid_column_width_ratio).toEqual({ width_ratios: [67, 33] })
+    expect(body.update_grid_column_width_ratio.width_ratios.reduce((a: number, b: number) => a + b, 0)).toBe(100)
   })
 
   test("gridStructureError：column_size 必须 2~5 且与 grid_column 子块数一致", () => {
@@ -2291,7 +2310,8 @@ describe("排版 SKILL 与 XML 导入", () => {
     expect(blocks.filter((b) => b.block_type === 32)).toHaveLength(4)
     // 分栏：每列带整数 width_ratio 且非空（0.5/0.5 → 1/1）
     const cols = blocks.filter((b) => b.block_type === 25) as Array<{ grid_column: { width_ratio: number }; children: string[] }>
-    expect(cols.map((c) => c.grid_column.width_ratio)).toEqual([1, 1])
+    // 实测修复：width_ratio 绝对值=占页宽百分比，1:1 等分须归一为 50:50（旧实现约分成 1:1 → 导出的 gridCol 仅 82 twips，列窄到不可读）
+    expect(cols.map((c) => c.grid_column.width_ratio)).toEqual([50, 50])
     expect(cols.every((c) => c.children.length >= 1)).toBe(true)
     // 本地元数据（_ 前缀）不随请求外发
     expect(JSON.stringify(body)).not.toContain("_image")
