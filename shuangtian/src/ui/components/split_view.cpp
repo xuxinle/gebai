@@ -129,7 +129,60 @@ void SplitView::measure(const RenderContext& context, const Constraints& constra
   // 没有显式尺寸且无上界时取两侧面板的自然尺寸之和（独立摆放时也有个合理值）。
   float width = style_.has_explicit_width() ? style_.width : constraints.max_width;
   float height = style_.has_explicit_height() ? style_.height : constraints.max_height;
-  if (width >= kUnbounded || height >= kUnbounded) {
+
+  // **有界时：给子面板**按比例算出的有限约束**（与 `layout_children` 同一几何）。
+  //
+  // 为何非做不可：旧实现在此处只有一个 `loose`（全 unbounded）分支——有界也拿它去
+  // measure 子面板，于是里面的**内容型组件**（MarkdownView / CodeEditor / Text）
+  // 拿不到可用宽，各自落回自己的兜底常量（MarkdownView 是 `kDefaultViewWidth`=640），
+  // 排版宽因此永遠是 608。而 `arrange` 阶段又给了正确 rect——
+  // 两者不一致的表现为「面板拉伸/拖分割条时文字不重排」（实测：侧栏 0.22→0.40，
+  // 控件宽 957.8→736.8 而 `layout_width` 恒为 608）。
+  //
+  // 注意：arrange 只给 rect、**不会重 measure**，所以这里给错就永远错。
+  const auto measure_tiled = [&]() {
+    if (first_hidden_ || second_hidden_) {
+      // 单面板退化：可见侧占满（与 `layout_children` 的退化路径一致）。
+      Constraints whole;
+      whole.max_width = width;
+      whole.max_height = height;
+      whole.available_width = width;
+      whole.available_height = height;
+      for (std::size_t index = 0; index < children_.size() && index < 2; ++index) {
+        Element* child = children_[index].get();
+        if (child == nullptr) continue;
+        const bool hidden = (index == 0 && first_hidden_) || (index == 1 && second_hidden_);
+        if (hidden) continue;
+        child->measure(context, whole);
+      }
+      return;
+    }
+    const float usable = std::max(0.0f, (horizontal ? width : height) - handle_size_);
+    const float first_main = usable * ratio_;
+    const float second_main = usable - first_main;
+    for (std::size_t index = 0; index < children_.size() && index < 2; ++index) {
+      Element* child = children_[index].get();
+      if (child == nullptr) continue;
+      Constraints part;
+      // 主轴按 ratio 分；交叉轴拿满（与 `layout_children` 的 rect 逐项对应）。
+      part.max_width = horizontal ? (index == 0 ? first_main : second_main) : width;
+      part.max_height = horizontal ? height : (index == 0 ? first_main : second_main);
+      part.available_width = part.max_width;
+      part.available_height = part.max_height;
+      child->measure(context, part);
+    }
+  };
+
+  if (width < kUnbounded && height < kUnbounded) {
+    // 两轴都有界：直接按比例给子面板有限约束（常规路径）。
+    measure_tiled();
+    measured_ = math::Size{width, height};
+    return;
+  }
+
+  // 至少一轴无界：先用 unbounded 探子面板的自然尺寸（拿它推自身尺寸），
+  // 再在**已知的那一轴**上按比例重测一遍——否则内容型组件会把兜底常量当可用宽。
+  {
     Constraints loose;
     loose.max_width = kUnbounded;
     loose.max_height = kUnbounded;
@@ -165,6 +218,9 @@ void SplitView::measure(const RenderContext& context, const Constraints& constra
         height = horizontal ? std::max(first_h, second_h) : first_h + handle_size_ + second_h;
       }
     }
+    // 尺寸已定：**用有限约束重测子面板**（主轴上按 ratio 分）。
+    // 少了这一步，无界那一轴上的子组件就永远停在探测期的兜底尺寸。
+    measure_tiled();
   }
   measured_ = math::Size{width, height};
 }

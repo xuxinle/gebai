@@ -19,6 +19,7 @@
 #include "st/raster/canvas.hpp"
 #include "st/test/test.hpp"
 #include "st/ui/components/split_view.hpp"
+#include "st/ui/style.hpp"
 #include "st/ui/dsl.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/theme.hpp"
@@ -77,6 +78,29 @@ struct SplitFixture {
   auto operator=(const SplitFixture&) -> SplitFixture& = delete;
 
   [[nodiscard]] auto handle() const -> Rect { return split->handle_rect(); }
+};
+
+/// 探针元素：记下 `measure` 收到的**约束宽**（不画画、不参与布局）。
+///
+/// 为何用探针而不是看结果尺寸：本用例要钉的是「SplitView 给子面板传了什么约束」——
+/// 内容型组件（如 MarkdownView）拿到 unbounded 时会落回自己的兑底常量
+/// （排版宽卡在 608），而**它的 measured 尺寸看上去仍然“合理”**——
+/// 只看尺寸会漏掉这个缺陷（实测确实漏了一轮）。
+struct ConstraintProbe : Element {
+  float seen_max_width{-1.0f};
+  float seen_available_width{-1.0f};
+  [[nodiscard]] auto type() const noexcept -> std::string_view override { return "ConstraintProbe"; }
+  void measure(const st::ui::RenderContext& context, const st::ui::Constraints& constraints) override {
+    (void)context;
+    seen_max_width = constraints.max_width;
+    seen_available_width = constraints.available_width;
+    // 报一个小的自然尺寸：让 SplitView 的无界探测路径不会把自身撑到无边。
+    measured_ = st::math::Size{40.0f, 20.0f};
+  }
+  void arrange(const st::ui::RenderContext& context, Rect rect) override {
+    (void)context;
+    bounds_ = rect;
+  }
 };
 
 }  // namespace
@@ -428,4 +452,80 @@ ST_TEST(ui_split_view_divider_paints_between_panes) {
   // ③ 首面板内部与次面板内部都不得出现分隔线
   ST_CHECK(!is_line(a.x + a.width * 0.5f));
   ST_CHECK(!is_line(b.x + b.width * 0.5f));
+}
+
+ST_TEST(ui_split_view_measures_children_with_bounded_width) {
+  // 子面板**必须**收到有限的宽约束（而不仅是有个看上去合理的尺寸）。
+  //
+  // 为何单独钉这一条：旧实现只有一条 `loose`（全 unbounded）分支——有界时
+  // 也拿它去 measure 子面板。内容型组件拿到 unbounded 时会落回**自己的兑底
+  // 常量**（MarkdownView = `kDefaultViewWidth` 640），于是：
+  //   · 面板拉伸/拖分割条时文字不重排（实测：侧栏 0.22→0.40，控件宽
+  //     957.8→736.8 而 MarkdownView 的排版宽恒为 608）；
+  //   · 而 `arrange` 阶段又给了正确 rect——arrange **不重 measure**，
+  //     所以错就永远错。
+  //
+  // 判据用探针记下的**约束值**而不是子元素尺寸：只看尺寸会漏
+  //（探针报的自然尺寸是固定的，尺寸看上去永远“合理”）。
+  constexpr st::math::Size kViewport{800.0f, 400.0f};
+  st::ui::UiRoot root;
+  root.set_viewport(kViewport);
+  auto split_view = std::make_unique<SplitView>(SplitView::Orientation::Horizontal);
+  split_view->set_id("split");
+  split_view->set_ratio(0.3f, false);
+  auto first = std::make_unique<ConstraintProbe>();
+  auto second = std::make_unique<ConstraintProbe>();
+  ConstraintProbe* probe_first = first.get();
+  ConstraintProbe* probe_second = second.get();
+  split_view->set_first(std::move(first));
+  split_view->set_second(std::move(second));
+  SplitView* split = split_view.get();
+  root.set_content(std::move(split_view));
+  root.layout(true);
+
+  ST_REQUIRE(split != nullptr);
+  const float full = split->bounds().width;
+  ST_REQUIRE(full > 0.0f);
+  const float handle = split->handle_rect().width;
+  const float usable = full - handle;
+
+  // ① 两侧都拿到**有限**约束（不再是 `kUnbounded`）。
+  ST_CHECK(probe_first->seen_max_width < st::ui::kUnbounded);
+  ST_CHECK(probe_second->seen_max_width < st::ui::kUnbounded);
+  // ② 且与 `handle_rect` 的几何一致：主轴按 ratio 分
+  //（与 `layout_children` 同一份几何——两处不一致会表现为“拖了不重排”）。
+  ST_CHECK_NEAR(probe_first->seen_max_width, usable * 0.3f, 1.0f);
+  ST_CHECK_NEAR(probe_second->seen_max_width, usable * 0.7f, 1.0f);
+  // ③ 交叉轴拿满（高度不受 ratio 影响）
+  ST_CHECK_NEAR(probe_first->seen_available_width, probe_first->seen_max_width, 0.5f);
+  root.set_content(nullptr);
+}
+
+ST_TEST(ui_split_view_child_constraints_follow_ratio) {
+  // 拖比例后，子面板收到的约束宽**跟着变**（这是“面板跟随”的根）。
+  //
+  // 与上一条互补：上一条钉“约束是有限的”，这一条钉“约束随几何变”
+  //（只钉前者时，写死一个常量也能过——那是另一种形态的假绿）。
+  st::ui::UiRoot root;
+  root.set_viewport(st::math::Size{800.0f, 400.0f});
+  auto split_view = std::make_unique<SplitView>(SplitView::Orientation::Horizontal);
+  split_view->set_ratio(0.3f, false);
+  auto first = std::make_unique<ConstraintProbe>();
+  auto second = std::make_unique<ConstraintProbe>();
+  ConstraintProbe* probe_second = second.get();
+  split_view->set_first(std::move(first));
+  split_view->set_second(std::move(second));
+  SplitView* split = split_view.get();
+  root.set_content(std::move(split_view));
+  root.layout(true);
+
+  const float before = probe_second->seen_max_width;
+  ST_REQUIRE(before > 0.0f);
+  split->set_ratio(0.6f, false);
+  root.layout(true);
+  const float after = probe_second->seen_max_width;
+  // 首面板占比变大 → 次面板收到的约束宽**变小**。
+  ST_CHECK(before > after);
+  ST_CHECK_NEAR(after, (split->bounds().width - split->handle_rect().width) * 0.4f, 1.0f);
+  root.set_content(nullptr);
 }

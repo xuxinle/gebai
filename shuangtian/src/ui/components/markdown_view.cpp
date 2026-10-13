@@ -393,6 +393,10 @@ auto MarkdownView::get_property(std::string_view name) const -> std::optional<st
   if (name == "base_font_size") return std::format("{:.2f}", metrics_.base);
   if (name == "code_font_size") return std::format("{:.2f}", metrics_.code);
   if (name == "max_width") return std::format("{:.2f}", max_width_);
+  // 只读诊断：**上次排版用的内容宽**（与 `content_height` 配对看）。
+  // 为什么值得暴露：宽变而内容不重排时，“控件宽变了/排版结果没变”必须能分开看——
+  // 实测这两者混在一起时排查会绕远（看 `measure` 的重排条件）。
+  if (name == "layout_width") return std::format("{:.2f}", layout_width_);
   if (name == "selectable") return selectable_ ? "true" : "false";
   if (name == "stick_to_bottom") return stick_to_bottom_ ? "true" : "false";
   if (name == "pending") return stream_.pending() ? "true" : "false";
@@ -450,7 +454,7 @@ auto MarkdownView::property_names() const -> std::vector<std::string_view> {
   return {"markdown",       "text",          "block_count",    "content_height",
           "scroll_offset",  "max_scroll",    "viewport_height", "base_font_size",
           "code_font_size", "max_width",     "selectable",     "stick_to_bottom",
-          "pending",        "selection"};
+          "pending",        "selection",     "layout_width"};
 }
 
 auto MarkdownView::invoke_action(std::string_view action, std::string_view argument) -> bool {
