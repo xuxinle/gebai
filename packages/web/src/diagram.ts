@@ -6,9 +6,23 @@ import { copyText, desktopDownloadHint, toast, tip } from "./ui"
 import { popKeyScope, pushEscScope } from "./keymap"
 import { isLowPower } from "./low-power"
 import { injectPlantUmlLayout } from "./plantuml-layout"
+import {
+  type DiagramPalette,
+  currentPalette,
+  injectEchartsDark,
+  mermaidThemeVariables,
+  plantumlSkinparams,
+  remapD2Svg,
+} from "./diagram-theme"
 
 /* ---------- 图表渲染：四种图表语言本地引擎（PlantUML @plantuml/core / Mermaid mermaid / D2 @terrastruct/d2 / ECharts echarts）
- *  四语言一律用**引擎自带的默认亮色配色**，渲染结果与 UI 主题无关（不跟随明暗、主题切换不重绘） ---------- */
+ *  配色跟随 UI 主题：亮色主题用引擎默认亮色（与历史行为一致）；暗色主题注入 diagram-theme 生成的
+ *  暗色色板（文字/连线/节点与 UI 主题变量对齐）。主题切换时已挂载的图表重绘（见 mountDiagramThemeSync）。 ---------- */
+
+/** 当前色板（null=亮色主题，引擎默认渲染）。 */
+function palette(): DiagramPalette | null {
+  return currentPalette()
+}
 
 /** 图表语言 → 产物文件扩展名（与 show 图表分支落盘约定一致）。 */
 export const DIAGRAM_EXT_FOR: Record<DiagramFormat, string> = { plantuml: "puml", mermaid: "mmd", d2: "d2", echarts: "echarts" }
@@ -55,16 +69,25 @@ const START_END: Record<string, string> = {
 const RAW_DATA_BLOCKS = ["json", "yaml"]
 
 /** 源码规范化（兜底）：无 @start 指令时自动补全 @startuml/@enduml，并注入布局默认参数（防图表杂乱）。
- *  配色一律由引擎自身的默认亮色主题决定，不注入任何 skinparam——用户 `!theme`/自定义 skinparam 原样生效。 */
-function normalizePlantUmlCode(code: string): string {
+ *  配色：亮色主题由引擎默认主题决定；暗色主题在首行后注入 skinparam 暗色集（用户自定义 skinparam 原样保留、
+ *  后写的优先级高可覆盖注入值）。 */
+function normalizePlantUmlCode(code: string, p: DiagramPalette | null): string {
   const m = code.match(/@start(\w*)/)
-  if (!m) return injectPlantUmlLayout(`@startuml\n${code.trimEnd()}\n@enduml`)
+  const injectDark = (src: string): string => {
+    if (!p) return src
+    // 注在 @start 行之后（首行即生效；不磁已有 skinparam/!theme——后写的胜出，用户显式配置优先）
+    const lines = src.split("\n")
+    lines.splice(1, 0, ...plantumlSkinparams(p))
+    return lines.join("\n")
+  }
+  if (!m) return injectDark(injectPlantUmlLayout(`@startuml\n${code.trimEnd()}\n@enduml`))
   const end = START_END[m[1]]
   const closed = end && !code.includes(end) ? `${code.trimEnd()}\n${end}` : code
-  return RAW_DATA_BLOCKS.includes(m[1]) ? closed : injectPlantUmlLayout(closed)
+  const base = RAW_DATA_BLOCKS.includes(m[1]) ? closed : injectPlantUmlLayout(closed)
+  return injectDark(base)
 }
 
-/** SVG 缓存（源码 → SVG，同图重复渲染零开销）。 */
+/** SVG 缓存（源码+色板 → SVG，同图同主题重复渲染零开销；主题切换自然分键）。 */
 const svgCache = new Map<string, Promise<string>>()
 
 /** @plantuml/core 渲染 API（TeaVM 编译的官方 PlantUML 引擎，本地渲染无网络请求）。 */
@@ -145,16 +168,18 @@ async function importVendor(url: string): Promise<Record<string, unknown>> {
 
 /** 渲染 PlantUML 源码为 SVG；失败时抛出带原因的错误（供回传给模型）。 */
 export async function renderPlantUmlSvg(code: string): Promise<string> {
-  const full = normalizePlantUmlCode(code)
-  let p = svgCache.get(full)
-  if (!p) {
-    p = renderLocal(full)
-    svgCache.set(full, p)
+  const p = palette()
+  const full = normalizePlantUmlCode(code, p)
+  const key = (p?.key ?? "light") + "\u0000" + full
+  let q = svgCache.get(key)
+  if (!q) {
+    q = renderLocal(full)
+    svgCache.set(key, q)
   }
   try {
-    return await p
+    return await q
   } catch (err) {
-    svgCache.delete(full) // 失败不缓存，允许重试
+    svgCache.delete(key) // 失败不缓存，允许重试
     throw err
   }
 }
@@ -229,16 +254,19 @@ function loadMermaid(): Promise<MermaidApi> {
   return mermaidLoadPromise
 }
 
-/** 已初始化标记（mermaid 主题为全局状态，初始化一次即持续生效）。 */
-let mermaidInited = false
+/** 已初始化的 mermaid 主题键（mermaid 主题为全局状态；主题切换时重新 initialize）。 */
+let mermaidInitedKey: string | null = null
 
-/** 初始化 mermaid 引擎（固定亮色默认主题；引擎默认主题即浅色，不随 UI 主题变化）。 */
-async function ensureMermaidTheme(): Promise<MermaidApi> {
+/** 初始化 mermaid 引擎：亮色主题用引擎默认亮色主题；暗色主题用 dark + themeVariables 注入
+ *  （源码内 classDef/init 等显式配置优先级高于 themeVariables，不被覆盖）。 */
+async function ensureMermaidTheme(p: DiagramPalette | null): Promise<MermaidApi> {
   const m = await loadMermaid()
-  if (!mermaidInited) {
+  const key = p?.key ?? "light"
+  if (mermaidInitedKey !== key) {
     m.initialize({
       startOnLoad: false,
-      theme: "default",
+      theme: p ? "dark" : "default",
+      ...(p ? { themeVariables: mermaidThemeVariables(p) } : {}),
       securityLevel: "strict",
       // 渲染失败默认在 document.body 遗留「错误图标」容器（Syntax error in text，无法关闭）：
       // 抑制内置错误渲染（渲染期临时元素一并清理），错误仅经 Promise 拒绝抛出，
@@ -248,7 +276,7 @@ async function ensureMermaidTheme(): Promise<MermaidApi> {
       // 会被注入 DOM 前的 DOMPurify SVG 净化剥离，导致「有框无文字」
       htmlLabels: false,
     })
-    mermaidInited = true
+    mermaidInitedKey = key
   }
   return m
 }
@@ -256,16 +284,17 @@ async function ensureMermaidTheme(): Promise<MermaidApi> {
 /** mermaid.render 需要唯一 id（DOM 内不重复）。 */
 let mermaidSeq = 0
 
-/** Mermaid 渲染缓存（源码 → SVG，与 UI 主题无关）。 */
+/** Mermaid 渲染缓存（源码+色板 → SVG；主题切换自然分键）。 */
 const mermaidCache = new Map<string, Promise<string>>()
 
 /** 渲染 Mermaid 源码为 SVG；语法错误抛错（供回传给模型）。 */
 async function renderMermaidSvg(code: string): Promise<string> {
-  const key = code
+  const pal = palette()
+  const key = (pal?.key ?? "light") + "\u0000" + code
   let p = mermaidCache.get(key)
   if (!p) {
     p = (async () => {
-      const m = await ensureMermaidTheme()
+      const m = await ensureMermaidTheme(pal)
       const id = `gebai-mmd-${++mermaidSeq}`
       const { svg } = await withTimeout(m.render(id, code), 20000, "Mermaid 渲染超时（图表过大或引擎繁忙）")
       // 渲染结果可能携带任意 HTML：注入 DOM 前净化（securityLevel=strict 之外的双重防线）
@@ -283,9 +312,9 @@ async function renderMermaidSvg(code: string): Promise<string> {
   }
 }
 
-/* ---------- D2 渲染：@terrastruct/d2 官方 WASM 本地引擎（自包含单文件，零网络），固定亮色主题 ---------- */
+/* ---------- D2 渲染：@terrastruct/d2 官方 WASM 本地引擎（自包含单文件，零网络）；亮色用默认主题，暗色渲染后重映射 ---------- */
 
-/** D2 主题 ID：0=Neutral Default（官方亮色默认主题）。 */
+/** D2 主题 ID：0=Neutral Default（官方亮色默认主题；浏览器版仅内置亮色装饰主题，实测无暗色可用）。 */
 const D2_THEME_LIGHT = 0
 
 type D2Api = {
@@ -311,7 +340,7 @@ function loadD2(): Promise<D2Api> {
   return d2LoadPromise
 }
 
-/** D2 渲染缓存（源码 → SVG，与 UI 主题无关）。 */
+/** D2 渲染缓存（源码+色板 → SVG；主题切换自然分键）。 */
 const d2Cache = new Map<string, Promise<string>>()
 
 /** @terrastruct/d2 编译错误为 JSON 数组字符串（[{range,errmsg}]）：提取可读 errmsg，避免把原始 JSON 暴露给主页面/回传模型。 */
@@ -337,9 +366,11 @@ function enqueueD2<T>(task: () => Promise<T>): Promise<T> {
   return run
 }
 
-/** 渲染 D2 源码为 SVG（固定亮色默认主题）；编译错误抛错（可读信息，供回传给模型）。 */
+/** 渲染 D2 源码为 SVG：亮色用默认亮色主题；暗色在净化前重映射色表（用户 style 指定的颜色不在映射表内、不受影响）；
+ *  编译错误抛错（可读信息，供回传给模型）。 */
 async function renderD2Svg(code: string): Promise<string> {
-  const key = code
+  const pal = palette()
+  const key = (pal?.key ?? "light") + "\u0000" + code
   let p = d2Cache.get(key)
   if (!p) {
     p = enqueueD2(async () => {
@@ -352,7 +383,8 @@ async function renderD2Svg(code: string): Promise<string> {
         throw new Error(formatD2Error((err as Error).message))
       }
       const svg = await withTimeout(d2.render(compiled.diagram, compiled.renderOptions ?? opts), 20000, "D2 渲染超时（图表过大或引擎繁忙）")
-      const clean = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true } })
+      const themed = pal ? remapD2Svg(svg, pal) : svg
+      const clean = DOMPurify.sanitize(themed, { USE_PROFILES: { svg: true, svgFilters: true } })
       if (!clean) throw new Error("D2 渲染结果安全校验失败")
       return explicitSvgSize(clean)
     })
@@ -517,8 +549,9 @@ function fixEchartsLegendOverlap(option: Record<string, unknown>, width: number,
   }
 }
 
-/** 解析 ECharts 源码（JSON option 或 {"option":…,"width":…,"height":…} 信封）：注入 animation:false；标题/图例防重叠修正。 */
-function parseEchartsOption(code: string): { option: Record<string, unknown>; width: number; height: number } {
+/** 解析 ECharts 源码（JSON option 或 {"option":…,"width":…,"height":…} 信封）：注入 animation:false；暗色主题
+ *  追加色板注入（backgroundColor/textStyle/色板/轴色，用户显式配置优先）；标题/图例防重叠修正。 */
+function parseEchartsOption(code: string, pal: DiagramPalette | null): { option: Record<string, unknown>; width: number; height: number } {
   let obj: unknown
   try {
     obj = lenientJsonParse(code)
@@ -539,22 +572,23 @@ function parseEchartsOption(code: string): { option: Record<string, unknown>; wi
     width = clampSize(record.width) ?? width
     height = clampSize(record.height) ?? height
   }
-  const merged: Record<string, unknown> = { ...option, animation: false }
+  const merged: Record<string, unknown> = { ...(pal ? injectEchartsDark(option, pal) : option), animation: false }
   fixEchartsLegendOverlap(merged, width, height)
   return { option: merged, width, height }
 }
 
-/** ECharts 渲染缓存（源码 → SVG）。 */
+/** ECharts 渲染缓存（源码+色板 → SVG；主题切换自然分键）。 */
 const echartsCache = new Map<string, Promise<string>>()
 
 /** 渲染 ECharts JSON option 为 SVG（SSR 模式，零 DOM 挂载）；option 非法抛错（供回传模型修正）。 */
 async function renderEchartsSvg(code: string): Promise<string> {
-  const key = code
+  const pal = palette()
+  const key = (pal?.key ?? "light") + "\u0000" + code
   let p = echartsCache.get(key)
   if (!p) {
     p = (async () => {
       const echarts = await loadEcharts()
-      const { option, width, height } = parseEchartsOption(code)
+      const { option, width, height } = parseEchartsOption(code, pal)
       const chart = echarts.init(null, null, { renderer: "svg", ssr: true, width, height })
       try {
         chart.setOption(option)
@@ -674,8 +708,10 @@ export function downloadDiagramSource(code: string, name: string, format: Diagra
   downloadBlob(new Blob([code], { type: "text/plain;charset=utf-8" }), `${safeName(name)}.${DIAGRAM_EXT_FOR[format]}`)
 }
 
-/** 将渲染出的 SVG 转为 PNG 并下载（本地绘制，无网络；3x 超采样输出高清图，低性能模式降为 1.5x 减少绘制开销）。 */
+/** 将渲染出的 SVG 转为 PNG 并下载（本地绘制，无网络；3x 超采样输出高清图，低性能模式降为 1.5x 减少绘制开销；
+ *  暗色主题先垫色板底色——SVG 透明区域落在白色画布上会呈现暗底鐢白，垫底后导出图与页面观感一致）。 */
 export async function downloadPumlPng(svg: string, name: string): Promise<void> {
+  const bg = currentPalette()?.bg
   const img = new Image()
   const svgUrl = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }))
   try {
@@ -695,6 +731,10 @@ export async function downloadPumlPng(svg: string, name: string): Promise<void> 
     canvas.height = Math.max(1, Math.round(h * scale))
     const ctx = canvas.getContext("2d")
     if (!ctx) throw new Error("canvas 不可用")
+    if (bg) {
+      ctx.fillStyle = bg
+      ctx.fillRect(0, 0, w, h)
+    }
     ctx.scale(scale, scale)
     ctx.drawImage(img, 0, 0, w, h)
     const png = canvas.toBlob ? await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png")) : null
@@ -705,9 +745,10 @@ export async function downloadPumlPng(svg: string, name: string): Promise<void> 
   }
 }
 
-/** 将渲染出的 SVG 转为 PNG 复制到剪贴板（2x 超采样，本地绘制；低性能模式降为 1x）。 */
+/** 将渲染出的 SVG 转为 PNG 复制到剪贴板（2x 超采样，本地绘制；低性能模式降为 1x；暗色主题垫色板底色，同 downloadPumlPng）。 */
 async function copyPngToClipboard(svg: string): Promise<void> {
   if (!navigator.clipboard?.write) throw new Error("当前环境不支持复制图片")
+  const bg = currentPalette()?.bg
   const img = new Image()
   const svgUrl = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }))
   try {
@@ -726,6 +767,10 @@ async function copyPngToClipboard(svg: string): Promise<void> {
     canvas.height = Math.max(1, Math.round(h * scale))
     const ctx = canvas.getContext("2d")
     if (!ctx) throw new Error("canvas 不可用")
+    if (bg) {
+      ctx.fillStyle = bg
+      ctx.fillRect(0, 0, w, h)
+    }
     ctx.scale(scale, scale)
     ctx.drawImage(img, 0, 0, w, h)
     const png = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"))
@@ -824,6 +869,22 @@ async function renderThumbnail(canvas: HTMLElement, code: string, format: Diagra
   }
 }
 
+/* ---------- 主题切换重绘：图表配色跟随 UI 主题，已挂载的卡片在 gebai:theme-change 时重绘 ---------- */
+
+/** 已挂载图表的重绘器集合（卡片卸载时自移除，见 redraw 的 else 分支）。 */
+const mountedRedraws = new Set<() => void>()
+
+/** 主题变化监听惰性安装（首张图表挂载时安装一次）。 */
+let themeSyncBound = false
+function bindThemeSyncOnce(): void {
+  if (themeSyncBound) return
+  themeSyncBound = true
+  // 含人民币面额/亚克力亮暗切换（均派发同一事件）；通知不携带 detail，重绘时自行读当前色板
+  document.addEventListener("gebai:theme-change", () => {
+    for (const fn of [...mountedRedraws]) fn()
+  })
+}
+
 /** 消息流内图表卡片：缩略图 + 文件名；悬浮时右下角显示复制/下载图标；点击缩略图/文件名进入全屏查看器。 */
 export async function renderDiagram(container: HTMLElement, b: Extract<ContentBlock, { type: "diagram" }>) {
   const format = (b.format ?? "plantuml") as DiagramFormat
@@ -844,7 +905,11 @@ export async function renderDiagram(container: HTMLElement, b: Extract<ContentBl
   box.appendChild(hoverBar)
   container.appendChild(box)
 
-  const render = async (code: string) => {
+  let lastKey: string | null = null
+  const render = async (code: string, themeAware = false) => {
+    const key = currentPalette()?.key ?? "light"
+    if (themeAware && key === lastKey) return // 同色板不重绘（缓存命中零成本，但 DOM 重写也省）
+    lastKey = key
     thumb.innerHTML = ""
     await renderThumbnail(thumb, code, format)
   }
@@ -854,6 +919,13 @@ export async function renderDiagram(container: HTMLElement, b: Extract<ContentBl
   thumb.onclick = open
   title.onclick = open
   await render(b.code)
+  // 主题切换重绘：卡片仍在消息流内才重绘（已移除的卡片自移除重绘器；虚拟列表外的卡片由重新挂载自然渲染）
+  bindThemeSyncOnce()
+  const redraw = () => {
+    if (thumb.isConnected) void render(b.code, true)
+    else mountedRedraws.delete(redraw)
+  }
+  mountedRedraws.add(redraw)
   copyBtn.onclick = (e) => {
     e.stopPropagation()
     void (async () => {
@@ -1088,6 +1160,13 @@ function openViewer(code: string, name: string, format: DiagramFormat) {
     shell.zoomCtl.fitView()
   }
   void renderCode(code)
+  // 查看器开着时主题切换重绘（关闭随 overlay 移除，重绘器自动退场）
+  bindThemeSyncOnce()
+  const redraw = () => {
+    if (shell.zoom.isConnected) void renderCode(code)
+    else mountedRedraws.delete(redraw)
+  }
+  mountedRedraws.add(redraw)
 }
 
 /** 从同源图片 URL 复制到剪贴板（fetch 为 Blob 后按实际 MIME 写入）。 */

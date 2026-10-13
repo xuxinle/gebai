@@ -13,6 +13,13 @@ import { h, icon, toast, formatSize, formatTime, extOf } from "./ui"
 import { wbUrl, wbAbsUrl } from "./url-base"
 // 扩展名 → 图表类型 的清单在 preview-kind.ts（与「可渲染形态」判定同一处，两边不会漂移）；此处转出保持既有引用路径
 import { diagramKindOf } from "./preview-kind"
+import {
+  currentPalette,
+  injectEchartsDark,
+  mermaidThemeVariables,
+  plantumlSkinparams,
+  remapD2Svg,
+} from "../diagram-theme"
 export { diagramKindOf } from "./preview-kind"
 
 export interface ViewerCtx {
@@ -389,15 +396,21 @@ let vizReady: Promise<void> | null = null
 let plantumlMod: Promise<{ renderToString: (lines: string[], ok: (svg: string) => void, err: (m: string) => void) => void }> | null = null
 let d2Queue: Promise<unknown> = Promise.resolve()
 
-/** 渲染图表源码为 SVG 字符串（懒加载本地引擎；与主界面图表共用同一套 vendor 资源，
- *  同为固定引擎默认亮色配色，不随 UI 主题变化）。 */
+/** 已初始化的 mermaid 主题键（主题切换时重新 initialize；与主界面 diagram.ts 各自独立但同规则）。 */
+let mermaidInitedKey: string | null = null
+
+/** 渲染图表源码为 SVG 字符串（懒加载本地引擎；与主界面图表共用同一套 vendor 资源与 diagram-theme
+ *  色板注入规则：亮色主题引擎默认亮色，暗色主题注入 UI 主题对齐的暗色配色——两页图表必须同色）。 */
 export async function renderDiagramSvg(kind: DiagramKind, code: string): Promise<string> {
+  const pal = currentPalette()
   const vendor = wbUrl("/vendor")
   if (kind === "mermaid") {
-    if (!mermaidReady) {
+    const key = pal?.key ?? "light"
+    if (!mermaidReady || mermaidInitedKey !== key) {
+      mermaidInitedKey = key
       mermaidReady = loadScript(`${vendor}/mermaid.js`).then(() => {
         const m = (window as unknown as { mermaid?: { initialize: (o: unknown) => void } }).mermaid
-        m?.initialize({ startOnLoad: false, theme: "default", securityLevel: "strict" })
+        m?.initialize({ startOnLoad: false, theme: pal ? "dark" : "default", ...(pal ? { themeVariables: mermaidThemeVariables(pal) } : {}), securityLevel: "strict" })
       })
     }
     await mermaidReady
@@ -417,7 +430,8 @@ export async function renderDiagramSvg(kind: DiagramKind, code: string): Promise
     box.style.left = "-10000px"
     document.body.appendChild(box)
     const chart = echarts.init(box, undefined, { renderer: "svg" })
-    chart.setOption(option.option ?? option)
+    const raw = (option.option ?? option) as Record<string, unknown>
+    chart.setOption(pal ? injectEchartsDark(raw, pal) : raw)
     const svg = box.querySelector("svg")?.outerHTML ?? ""
     chart.dispose()
     box.remove()
@@ -430,7 +444,9 @@ export async function renderDiagramSvg(kind: DiagramKind, code: string): Promise
       plantumlMod = import(/* @vite-ignore */ wbAbsUrl("/vendor/plantuml.js")) as unknown as Promise<{ renderToString: (lines: string[], ok: (svg: string) => void, err: (m: string) => void) => void }>
     }
     const mod = await plantumlMod
-    const src = /@start/.test(code) ? code : `@startuml\n${code}\n@enduml`
+    const base = /@start/.test(code) ? code : `@startuml\n${code}\n@enduml`
+    // 暗色：skinparam 注在 @start 行后（用户后写的 skinparam 优先级高，可覆盖注入值）
+    const src = pal ? base.replace(/@start(\w*)\n/, (m0) => m0 + plantumlSkinparams(pal).join("\n") + "\n") : base
     return await new Promise<string>((resolve, reject) => {
       mod.renderToString(src.split("\n"), (svg) => resolve(svg), (msg) => reject(new Error(msg)))
     })
@@ -441,7 +457,8 @@ export async function renderDiagramSvg(kind: DiagramKind, code: string): Promise
     const d2 = new mod.D2()
     const opts = { themeID: 0, noXMLTag: true }
     const compiled = await d2.compile(code, opts)
-    return await d2.render(compiled.diagram, { ...opts, ...(compiled as { renderOptions?: object }).renderOptions })
+    const svg = await d2.render(compiled.diagram, { ...opts, ...(compiled as { renderOptions?: object }).renderOptions })
+    return pal ? remapD2Svg(svg, pal) : svg
   })
   d2Queue = run.catch(() => {})
   return run
@@ -462,6 +479,11 @@ export function renderDiagramPreview(host: HTMLElement, ctx: ViewerCtx): () => v
   ])
   host.appendChild(wrap)
   let disposed = false
+  // 主题切换重跑（配色跟随主题；面板卸载/换文件时 disposed 生效，监听随返回的清理函数退场）
+  const onTheme = () => {
+    if (!disposed) void run()
+  }
+  document.addEventListener("gebai:theme-change", onTheme)
   const run = async () => {
     if (!kind) {
       box.replaceChildren(placeholder("未知图表类型", "支持 .mmd/.mermaid、.puml/.plantuml、.d2、.echarts"))
@@ -481,6 +503,7 @@ export function renderDiagramPreview(host: HTMLElement, ctx: ViewerCtx): () => v
   void run()
   return () => {
     disposed = true
+    document.removeEventListener("gebai:theme-change", onTheme)
   }
 }
 
