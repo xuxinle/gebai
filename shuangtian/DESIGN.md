@@ -1118,6 +1118,150 @@ hover 高亮会让区域差 1.37，而阈值是 1.0——那是悬停态不是�
 用例里值停在 0.5 不动）。另外那个分支里也不能漏 `target->set_pressed(true)`——
 组件的“按住拖动中”靠它判（子元素的 `pressed_` 与 UiRoot 的 `pressed_` 是两个东西）。
 
+### 4.2.17a 标签条与分割线聚焦不画环（2026-10-13）
+
+**问题**：`Tabs` 与 `SplitView` 聚焦时画整圈焦点环——但这两个组件的选中/交互
+状态另有视觉表达（标签：指示条 + 文本色；分割线：hover 手柄 + 拖拽高亮），
+环叠上去读起来是「多了一层容器边框」（用户报：标签头不要显示边框、分割线
+聚焦也不要）。
+
+**与 §4.2.17 的关系**：那一条解决的是「**什么时候**画」（键盘导航才画，鼠标
+点击不画）；本条是「**这两类组件根本不画**」——即使键盘 Tab 聚焦也不画。
+键盘导航本身不受影响（←/→ 切标签、方向键拖比例仍可用），只是无视觉环；
+标签条的焦点位置由指示条间接表达。
+
+**回归**：`tests/ui_tabs_test.cpp` 的 `ui_tabs_focus_and_visual_tree` 改为反向
+断言（聚焦帧的标签条外缘 3px 环带内焦点环合成色像素 == 0）；逆向验证过：
+临时恢复画环后实测 1604 像素命中、测试变红。
+
+### 4.2.17b Tabs 尾部钮在声明式里要「先清后加」（2026-10-13）
+
+**问题**：gbcode 的 Markdown 预览切换钮装在 `Tabs` 尾部区，用户报「md 渲染按钮
+越点越多」——切十几次预览后标签栏右侧堆了十几个眼睛/× 图标。
+
+**根因**：`add_trailing_button` 是**可变追加**（push 进 `trailing_`），而声明式重组
+**每帧都会跳到同一个 configure**，且 `Tabs` 元素按 key 复用（尾部槽是它身上的
+状态、不随重组重置）——每帧追加一个，与 `set_text` 每帧重写会把用户打字抹掉
+是同一类「声明式 vs 可变状态」的冲突，只是方向相反（那边丢状态、这边堆状态）。
+
+**修法（应用侧惯例）**：每帧把尾部区**重建到目标态**——`clear_trailing_buttons()`
+后按当前状态 `add_trailing_button`（清空幂等，与 `sync_tabs` 同一套「按目标态
+对齐」契约）。条件性隐藏（非 md 文件）也在同处理：残留时清空。
+
+**验据（像素）**：README.md 上循环切预览 12 次后，标签栏右缘仅一个按钮槽位有
+内容、其左侧均为纯背景（capture_hash 逐格比对）；切到 .cpp 再切回，按钮隐藏/
+恢复且仍只有一个。
+
+### 4.2.17c Markdown 预览三修复：滚轮口径 / 切回空白 / 单按钮（2026-10-13）
+
+**① 滚轮一格格太慢**：`MarkdownView::on_event` 的 Wheel 分支直接减
+`wheel_delta`（一格 = 1px），而 CodeEditor/completion 等组件都是 `wheel_delta * 48`。
+统一为 `- event.wheel_delta * kWheelStep`（48px/格，与全仓同口径）。
+
+**② 预览切回源码空白**：gbcode 的预览与编辑器是**互斥声明**（同位置
+不同类型元素）。dsl 的位置对齐在类型不符时会**新建**元素并销毁旧实例，
+于是「预览→源码」得到的是一个**全新空编辑器**；而 `build()` 末尾的装载
+逻辑按 `key == loaded_key_` 早退（key 没变），永远不会给它灌文本。
+修法：`toggle_md_preview()` 关预览时 `loaded_key_.clear()`——「已装载」的
+语义必须与「**当前树上那个**编辑器实例」绑定，而不是与缓冲 key 绑定；
+实例被重建过就要重灌。（与 `open_path` 里编辑器未装上时清 loaded_key_
+是同一条原则：灌入判据看的是「哪个实例装了什么」，不是「逻辑上装过」。）
+验证：开/关循环 6 轮（12 次切换），每轮编辑器文本完整（17233 字符）。
+
+**③ 单一预览按钮**：旧实现按开关状态换图标（eye ↔ close），两个语义挤在
+一个槽位上看着像两个功能。改为图标恒为 eye，激活态只用 tooltip 区分
+（「预览 Markdown」/「关闭 Markdown 预览」），点击同一个按钮开/关。
+
+### 4.2.17d 三项框架能力补齐（2026-10-13，源自 gbcode 实战）
+
+本轮 gbcode 集成暴露的三个问题已系统性前移到框架层：
+
+**① `Tabs` 尾部钮的目标态同步接口**：`begin_trailing_sync()` /
+`sync_trailing_button()` / `finish_trailing_sync()`——把「先清后加」的声明式
+惯例内化进组件（同槽复用、hover 态保留、目标变短时 finish 收尾）。
+`add_trailing_button` 仅限手搭代码一次性初始化；在声明式 configure 里用
+sync 对（§4.2.17b 的「越点越多」由此根治，而不是靠调用方自觉）。
+回归：`ui_tabs_trailing_sync_rebuilds_to_target`（逆向验证过：回退 finish
+截断后变红，52 != 0）。
+
+**② 滚轮步长进主题令牌**：`Metrics::wheel_step`（默认 48px/格）。
+MarkdownView/ScrollView/CodeEditor/补全弹层/文件对话框全部改从主题取
+（离屏兑底各自常量）——新组件不再可能写出「一格 1px」的漏乘版本
+（§4.2.17c-①的病根），主题一处调全仓生效。按行滚语义特殊的 merge_view
+（2 行/格）与 terminal（3 行/格）保持自有口径。
+
+**②b 链接「产物被占用」诊断补 MinGW 文案**（2026-10-13）：本仓 Windows+
+MinGW 宿主上，无头实例忘停就重编是常态路径，而 ld.lld 的占用文案
+（`failed to write output …: permission denied`）不在旧检测清单（只有
+MSVC 的 LNK1168/1104 与 POSIX 的 Text file busy）——裸报一句「链接失败」。
+判定抽成导出的纯函数 `st::pkg::artifact_locked`，回归
+`pkg_build_lock_test`（三套文案各命中 + 近似文案不误报 + MinGW 双关键词
+缺一不判）；逆向验证过：去掉 MinGW 分支后两用例变红。
+
+**②c `st test <filter>` 不重编的记载已核实修正**：现行 `run_tests` 无条件
+`compile_units`+`link`（mtime 增量）——实测改源后带 filter 也会重编重链
+（exe mtime > src mtime）。PITFALLS 场景 1 那条已更新为「历史记录 + 复核
+方法」；本会话逆向验证时遇到的「恢复后仍红」实为 mtime 陷阱（恢复脚本
+在 touch 之前落盘），与 filter 无关。
+
+**③ dsl 同位类型切换诊断**：`ReconcileStats::type_switches` 新字段 +
+结构化日志——位置对齐遇类型不符会销毁旧元素（换页合法，但元素级状态
+静默丢失，§4.2.17c-②的病根）。现在每次切换都记「#id: OldType -> NewType」，
+从"猜哪个状态丢了"变成"一眼看到哪次切换丢了哪棵子树"。
+
+**②d Markdown 渲染三补齐（2026-10-13）**：
+
+- **渲染文本可复制**：`MarkdownView` 行级拖选（MouseDown/Move/Up，选中行画半透明选区）
+  + Ctrl+C 拷选中文本（无选择时拷全文原文）+ Ctrl+A 全选；`selection` 属性可读
+  （自动化判据）、`select_all` 动作可 invoke；`selectable` 默认 true。字符级精确选择
+  留给源码模式（那就是 `CodeEditor`）——排版行没有「位置→字节」的逆映射，
+  行级已覆盖「把这段拷走」的主用例。回归：`md_view_selection_and_copy` /
+  `md_view_selection_highlight_pixels`（像素：同内容仅有无选择之别，差异 >500 px）/
+  `md_view_copy_action_prefers_selection`。
+- **小盒图标描边下限**：`Icon::effective_stroke(name, box_size, stroke_width)` 成为
+  **单一事实源**（`draw` 与测试共用）：声明值 × 盒径/24、且 ≥1.0 逻辑 px。13px 盒下
+  `eye` 只剩 0.92px，抗锯齿一摊就「细弱发灰」；凡小盒图标受用。回归：
+  `ui_icon_small_box_stroke_has_a_legible_floor`（直断言生产函数 + 像素墨量比
+  ≥ 面积比），逆向验证过。
+- **粗体走真粗体面**：`draw_text_weighted` 从「亚像素偏移二次绘制」改为
+  `prefers_real_bold` + `embolden_radius` 标准路径（与 `Element::paint_text` 同口径）。
+  旧法只加墨不改形，中英混排下「胖而糊」；现优选真粗体面（锐 36~37%、字面宽
+  对齐浏览器参照），探不到时回退合成加粗。
+
+### 4.2.17e 图标口径 + Markdown 渲染重设计（2026-10-13）
+
+**① Tabs 尾部钮图标对齐活动栏口径**（用户：“图标太丑，参考活动栏”）：
+
+根因是**描边宽度没接上随盒缩放**——`Icon::draw` 的 `stroke_width` 默认 2.0f
+（固定像素），而 `IconView`/`Button`/标题栏都传 `0.0f`（按 `stroke/24 × 盒径`
+随盒缩放）。尾部钮漏传，15px 盒里 2.0px 是声明值 1.7 的 **1.18 倍**，笔画糊成一团。
+
+修法：图标盒径改取主题 `Metrics::icon_size_sm`（与 `Button(Size::Small)`
+同一 token）、线宽传 `0.0f`、命中区 26→30px 给图标两侧留边距。
+
+**② 表格列宽与折行重构**（用户：“表格截断是灾难级的”）：
+
+- 旧实现把列宽**等比缩放**再 `ellipsize`，长短列一起被压 → 每格以 `...` 结尾；
+- 新口径三层：**列宽按权重分配**（保底取“最长不可断单元”，不是常数 48）、
+  **单元格内折行**（`Cell::lines` 多行，行高取本行最高格）、
+  **断行不在词内**（CJK 可逐字断，拉丁词完整）；
+- 顺带修 `TextRenderer::wrap` 两处：断行后 `pen` 重算与循环累加**同口径**
+  （旧实现混用整串测量与逐字累加，临界处偏一两个字符）、
+  **避头尾**（`is_no_line_start`，不让 `）`/`，` 落行首）。
+
+**③ 行内交互补齐**：链接命中/点击回调/悬停（`link_at`）+ 代码块命中
+（`code_block_at`）——两者都与 `paint` 共用 `rows_`（绘制与命中不会胖滑）；
+表格单元格 `span_x` 记 x 区间供命中。`selectable` 默认 true。
+
+**④ 新增框架能力 `st::platform::open_external`**：用系统默认程序打开
+URL（Linux `xdg-open` / Windows `ShellExecuteW` / macOS `open`，均经 fork+exec
+不经 shell）。没有它，每个应用都会自己写 `system("start ...")`——
+在 Windows 上闪黑框、且 URL 里的 `&`/引号会被 shell 解释。
+
+回归：`md_view_table_wrap_keeps_all_cells_content`、
+`md_view_table_keeps_long_words_intact`、`md_view_link_hit_and_click_callback`、
+`md_view_code_block_hit`（均已逆向验证：回退修复即变红）。
+
 ### 4.2.18 悬停提示（平台级 Hint）（2026-10-11）
 
 **问题**：图标按钮没有文字线索——活动栏七个图标、侧栏动作钮、状态栏计数格，

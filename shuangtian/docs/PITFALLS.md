@@ -18,7 +18,7 @@
 | 坑 | 一句话 | 出处 |
 |---|---|---|
 | **`--force` 才重编** | `st build` 增量按 **mtime** 判定；改了源码但结论没变时**先怀疑二进制是旧的**。强制重编用 `--force`，或在改动**新增文件**后删 `st_tests` 产物 | `CONVENTIONS.md` §7.4 |
-| **`st test <filter>` 不重编** | 带过滤器的 `test` 会重跑但**不重编**——"单跑绿、全量红"的经典成因 | `BACKLOG.md`「`st test <filter>` 不重编」 |
+| **`st test <filter>` 不重编** | 带过滤器的 `test` 会重跑但**不重编**——"单跑绿、全量红"的经典成因。**已核实并修正（2026-10-13）：现行 `run_tests` 无条件 `compile_units`+`link`（mtime 增量），实测改源后 `st test <filter>` 正确重编重链（exe mtime > src mtime）。本条保留作为历史记录与复核方法：结论与源码矛盾时先比对 exe/src mtime** | `CONVENTIONS.md` §7.4；实测 2026-10-13（build.cpp 的 `run_tests`） |
 | **产物路径有两套** | `build/bin/st`（自举产物）与 `build/dev/bin/st`（真产物）**不是同一个文件**；改了 linter 却看到旧行为时先确认跑的是哪个 | 本文件 · 实测 2026-10-09 |
 | **逆向验证用 `copy2` 恢复 = 假绿** | `copy2` 把**旧 mtime** 一起搬回来（比回退版编出的 `.o` 还旧）→ 跑的是上一份二进制。恢复要**删旧文件再写** | `CONVENTIONS.md` §7.3 表格 |
 | **测试结论与代码矛盾时** | 先查二进制是不是新的，**不要**先怀疑代码 | `CONVENTIONS.md` §7.4 |
@@ -105,9 +105,15 @@
 |---|---|---|
 | **三件必知** | `mount` 是单根替换 / `pump_async()` 必须先于 `dirty()` 判断 / 构建期存的元素指针不可跨帧用 | `declarative.md` §5.5 |
 | **每帧无条件 `set_*` 会抹掉控制通道设的值** | 只在"值真变了"时写；持久配置只在首次装上时设一次 | `examples/gbcode/main.cpp` 的 `editor_configured_` 注释 |
+| **`add_trailing_button` 在 configure 里会每帧追加一个** | 可变追加型接口（push 进组件状态）碰上按 key 复用的声明式重组 = 状态堆和（实测：md 预览钮越点越多）。**声明式里必须用 `begin/sync/finish_trailing_sync`**（目标态对齐，框架已内化该惯例） | `DESIGN.md` §4.2.17b/§4.2.17d；`include/st/ui/components/tabs.hpp` 尾部区说明 |
+| **滚轮步长从主题取，别自己写常量** | 各组件自定步长会漏乘（实测：MarkdownView 一格 1px，滚一屏百格）。`Metrics::wheel_step`（48px/格）是唯一口径；按行滚的组件（终端/合并视图）除外 | `include/st/ui/theme.hpp` 的 `wheel_step`；`DESIGN.md` §4.2.17d |
+| **同位类型切换会静默丢元素级状态** | 位置对齐遇类型不符 = 销毁旧元素新建（换页合法），但文本/滚动/展开态全丢，且应用侧「已装载」类判据不会自动失效（实测：md 预览切回源码空白）。看 `ReconcileStats::type_switches` + 日志定位；状态判据要绑定实例而非 key | `DESIGN.md` §4.2.17c/§4.2.17d |
 | **`apply_theme` 每次布局都跑** | 在 configure 里写 `style().background` 会**被主题覆盖**（实测：色块看着像没画） | `examples/louyue/canvas_view.hpp` 的 `Swatch` 注释 |
 | **自绘组件不必与 `Element` 成员同名** | `hit_test`（返回 `bool`）已被基类占用；自己的命中判定要另起名字（`grab_at`） | `examples/caiyun/views.hpp` 注释 |
 | **一个条件分支里声明多个视图 = 切走即销毁** | 切换会丢掉滚动位置/输入内容/展开态。要「切回来还是原样」就用**常驻声明 + `set_visible(false)`**（框架在绘制/命中/布局三处都跳过不可见元素），并配“首次访问才声明”避免启动首帧白建全部 | `examples/gbcode/main.cpp` 的 `build_sidebar` 注释 + `tools/gbcode_sidebar_keepalive_e2e.py` |
+| **`RenderContext` 持 `const Theme&`——别绑临时对象** | `RenderContext{Theme::light(), …}` 绑的是**临时对象**，语句/函数结束后引用悬垂；读到的是被复用的栈内存（实测：接上 `Metrics::wheel_step` 后读到 **0**，滚动一次性跳到底）。主题必须比 context 活得长（`static` 或外层变量） | `include/st/ui/element.hpp` 的 `RenderContext`；`tests/ui_scroll_test.cpp` 的 `make_tall_scroll` |
+| **量宽与折行必须同口径** | `measure_width(整串)` 含字距调整/连字，**比逐码点累加小**；用它定列宽而用逐字累加判溢出，临界处差一两个字符（实测 `batterycenter/embed` → `embe\|d`）。另：`wrap` 把**空格也计入 `pen`**，按词扫描会丢掉它——保底宽要留余量 | `src/text/text.cpp` 的 `TextRenderer::wrap`；`markdown_view.cpp` 的 `word_floor_of` |
+| **图标描边要传 `0.0f`（随盒缩放）** | `Icon::draw` 的 `stroke_width` 默认 **2.0f 固定像素**；小盒（≤15px）里比声明值粗一大截、笔画糊成一团（实测 Tabs 尾部钮“图标太丑”）。`IconView`/`Button` 都传 `0.0f` = 按 `stroke/24 × 盒径` 缩放 | `include/st/ui/icon.hpp` 的 `draw`；`src/ui/components/tabs.cpp` 尾部钮 |
 | **视图“常驻”后，渲染期里那些只在“切过去那一帧”跑的代码会变成每帧跑** | 典型是渲染期同步起子进程（`process::run`）——它会踩坏声明式树。改为在构建函数里**置一个待办标记**、帧首泵消费 | `examples/gbcode/main.cpp` 的 `git_probe_wanted_` 注释 |
 | **同级分支声明子元素会按位置回收** | 切分支时，新分支里没显式设的属性（icon/width）会**沿用旧分支的值**（实测：远程页的按钮带着日志页刷新钮的 `icon=refresh`）。给每个分支包一层**带 key 的容器** | `DESIGN.md` §4.2.13 |
 | **`Input` 在列里 `grow` 会吃掉剩余高度** | 提交框被拉成三行高的大框、旁边的计数被压成“已…”。输入框要包在**行**里再 `grow` | `DESIGN.md` §4.2.13 |
