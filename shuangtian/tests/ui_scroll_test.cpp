@@ -15,7 +15,14 @@ namespace {
 using st::math::Rect;
 
 /// 造一个「内容高 1000 / 视口高 200」的滚动容器。
+///
+/// ⚠ `RenderContext` 持有 `const Theme&`：**主题必须比它活得长**。
+/// 旧实现写的是 `RenderContext{Theme::light(), …}`——绑定的是**临时对象**，
+/// 函数返回后引用悬垂，读到的是被复用的栈内存。之前没暴露是因为被测路径
+/// 只读 `padding`/尺寸；接上 `Metrics::wheel_step` 后立刻现形（读到 0，滚动
+/// 一次性跳到底）。这是 UB，不是“值不对”——夹具必须给主题一个稳定生命周期。
 [[nodiscard]] auto make_tall_scroll(st::ui::ScrollView& view) -> st::ui::RenderContext {
+  static const st::ui::Theme theme = st::ui::Theme::light();
   view.style().padding = st::math::Insets{};
   for (int index = 0; index < 5; ++index) {
     auto block = std::make_unique<st::ui::Panel>(st::ui::FlexDirection::Column);
@@ -23,7 +30,7 @@ using st::math::Rect;
     block->style().width = 300.0f;
     view.add_child(std::move(block));
   }
-  st::ui::RenderContext context{st::ui::Theme::light(), nullptr, 0.0};
+  st::ui::RenderContext context{theme, nullptr, 0.0};
   view.measure(context, st::ui::Constraints{.max_width = 320.0f, .max_height = 200.0f});
   view.arrange(context, Rect{0.0f, 0.0f, 320.0f, 200.0f});
   return context;
@@ -57,7 +64,8 @@ ST_TEST(scroll_view_wheel_direction_is_natural) {
   ST_CHECK(down.handled);
   const float after_down = view.scroll_offset();
   ST_CHECK(after_down > 0.0f);  // 往下滚必须真的动（曾经这里恒为 0）
-  ST_CHECK_EQ(static_cast<int>(after_down), static_cast<int>(st::ui::ScrollView::kStep));
+  ST_CHECK_NEAR(context.theme.metrics().wheel_step, 48.0f, 0.01f);  // 口径源：主题令牌
+  ST_CHECK_EQ(static_cast<int>(after_down), 48);
 
   // 滚轮向上 = 正 delta → 回到顶部
   st::ui::Event up = wheel(1.0f);

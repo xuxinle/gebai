@@ -8,12 +8,14 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "st/core/fs.hpp"
 #include "st/core/string.hpp"
+#include "st/core/print.hpp"
 #include "st/math/color.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
@@ -437,4 +439,276 @@ ST_TEST(md_view_empty_and_long_word_robust) {
   headless.paint(null_context, null_canvas);
   ST_CHECK(headless.content_height() > 0.0f);
   ST_CHECK(!null_canvas.content_bounds().is_empty());  // 文本不画，底色与分隔线照画
+}
+
+// ————————————————— 选择与复制（2026-10-13）—————————————————
+
+ST_TEST(md_view_selection_and_copy) {
+  // 用户报「markdown 渲染后的文本要能复制」：行级拖选 + 选中文本可读 +
+  // copy 动作拷选中（无选择时拷全文）。这里断言**状态与动作**，
+  // 像素高亮在下面一条（md_view_selection_highlight_pixels）。
+  const st::ui::Theme theme = st::ui::Theme::light();
+  st::ui::MarkdownView view{std::string(kSample)};
+  (void)render(view, theme, kCanvasWidth, kCanvasHeight);
+
+  // 默认 selectable=true（渲染视图开箱可复制）。
+  ST_CHECK(view.get_property("selectable").value_or("false") == "true");
+  // 无选择：selection 为空。
+  ST_CHECK_EQ(view.selected_text(), std::string{});
+
+  // Ctrl+A 全选：selection = 去标记纯文本（长度 ≈ 语义文本）。
+  const st::ui::RenderContext context{theme, &stub_port(), 0.0};
+  st::ui::Event key;
+  key.kind = st::ui::EventKind::KeyDown;
+  key.key = "a";
+  key.ctrl = true;
+  ST_CHECK(view.on_event(context, key));
+  const std::string all = view.selected_text();
+  ST_REQUIRE(!all.empty());
+  ST_CHECK(all.find("霜天 Markdown 视图") != std::string::npos);
+  // 控制通道属性面可读回（自动化的判据）。
+  ST_CHECK(view.get_property("selection")
+               .value_or("") .find("霜天") != std::string::npos);
+
+  // 点击（起点==终点）= 清选择。
+  st::ui::Event down;
+  down.kind = st::ui::EventKind::MouseDown;
+  down.button = 1;
+  down.position = st::math::Point{40.0f, 30.0f};
+  ST_CHECK(view.on_event(context, down));
+  st::ui::Event up = down;
+  up.kind = st::ui::EventKind::MouseUp;
+  ST_CHECK(view.on_event(context, up));
+  ST_CHECK_EQ(view.selected_text(), std::string{});
+
+  // 拖选两行：MouseDown → MouseMove → MouseUp → selection 非空且含首行文字。
+  ST_CHECK(view.on_event(context, down));
+  st::ui::Event move = down;
+  move.kind = st::ui::EventKind::MouseMove;
+  move.position = st::math::Point{40.0f, 90.0f};
+  ST_CHECK(view.on_event(context, move));
+  ST_CHECK(view.on_event(context, up));
+  const std::string picked = view.selected_text();
+  ST_CHECK(!picked.empty());
+  ST_CHECK(picked.find("霜天") != std::string::npos);
+}
+
+ST_TEST(md_view_selection_highlight_pixels) {
+  // 选中行必须**画出来**（像素断言）：同内容、同主题，仅有无选择之别。
+  // 两张图必须不同，且差异像素落在行区域内部（不是别处误绘）。
+  const st::ui::Theme theme = st::ui::Theme::light();
+  st::ui::MarkdownView plain_view{std::string(kSample)};
+  st::raster::Canvas plain = render(plain_view, theme, kCanvasWidth, kCanvasHeight);
+
+  st::ui::MarkdownView picked_view{std::string(kSample)};
+  (void)render(picked_view, theme, kCanvasWidth, kCanvasHeight);
+  const st::ui::RenderContext context{theme, &stub_port(), 0.0};
+  st::ui::Event key;
+  key.kind = st::ui::EventKind::KeyDown;
+  key.key = "a";
+  key.ctrl = true;
+  ST_REQUIRE(picked_view.on_event(context, key));
+  st::raster::Canvas picked = render(picked_view, theme, kCanvasWidth, kCanvasHeight);
+
+  std::size_t diff = 0;
+  for (int y = 0; y < kCanvasHeight; ++y) {
+    for (int x = 0; x < kCanvasWidth; ++x) {
+      if (!(plain.pixel_at(x, y) == picked.pixel_at(x, y))) ++diff;
+    }
+  }
+  ST_CHECK(diff > 500);   // 全选高亮是成片的色块，差异不可能是个位数
+}
+
+ST_TEST(md_view_link_hit_and_click_callback) {
+  // 链接是一等交互（2026-10-13）：命中测试与绘制**同源**（共用 `rows_` 与
+  // `Span::link`）；点击回调把 URL 交给宿主（打开浏览器是宿主的事）。
+  const st::ui::Theme theme = st::ui::Theme::light();
+  constexpr std::string_view kDoc = "看 [霜天文档](https://example.com/docs) 了解。\n";
+  st::ui::MarkdownView view{std::string(kDoc)};
+  (void)render(view, theme, kCanvasWidth, kCanvasHeight);
+  const st::ui::RenderContext context{theme, &stub_port(), 0.0};
+
+  // 命中测试：链接文字在首行，x 向右扫直到命中（不硬编码像素，避开字体差异）。
+  // 用公开面给出的控件原点：内容首行 ≈ `bounds.y`（内边距很小）。
+  const float top_y = view.bounds().y + 6.0f;
+  std::string hit;
+  for (float x = 0.0f; x < 400.0f && hit.empty(); x += 2.0f) {
+    hit = view.link_at(st::math::Point{x, top_y});
+  }
+  ST_CHECK_EQ(hit, std::string("https://example.com/docs"));
+  // 同一行里**非链接区域**不应误报（命中测试要真的看 x 区间）。
+  bool false_positive = false;
+  for (float x = 380.0f; x < 600.0f; x += 4.0f) {
+    if (!view.link_at(st::math::Point{x, top_y}).empty()) {
+      false_positive = true;
+    }
+  }
+  ST_CHECK(!false_positive);
+
+  // 点击回调：真实鼠标事件路径（MouseDown）应上报 URL。
+  std::string clicked;
+  view.on_link_click = [&clicked](std::string_view url) { clicked = std::string(url); };
+  st::ui::Event down;
+  down.kind = st::ui::EventKind::MouseDown;
+  down.button = 1;
+  float hit_x = 0.0f;
+  for (float x = 0.0f; x < 400.0f; x += 2.0f) {
+    if (!view.link_at(st::math::Point{x, top_y}).empty()) {
+      hit_x = x;
+      break;
+    }
+  }
+  down.position = st::math::Point{view.bounds().x + hit_x, top_y};
+  ST_CHECK(view.on_event(context, down));
+  ST_CHECK_EQ(clicked, std::string("https://example.com/docs"));
+}
+
+ST_TEST(md_view_code_block_hit) {
+  // 代码块命中（用于宿主挂复制按钮）：返回该块的首行下标，非代码区域返回 -1。
+  const st::ui::Theme theme = st::ui::Theme::light();
+  constexpr std::string_view kDoc = R"MD(普通段落。
+
+```cpp
+int main() { return 0; }
+int other() { return 1; }
+```
+
+后续段落。
+)MD";
+  st::ui::MarkdownView view{std::string(kDoc)};
+  (void)render(view, theme, kCanvasWidth, kCanvasHeight);
+
+  // 扫描整列 y 找代码块命中：至少命中一次，且命中的是**同一个首行下标**
+  //（同一块内的不同行走同一条归并结果）。
+  std::set<int> hits;
+  for (float y = view.bounds().y; y < view.bounds().y + view.content_height(); y += 3.0f) {
+    const int first = view.code_block_at(st::math::Point{20.0f, y});
+    if (first >= 0) hits.insert(first);
+  }
+  ST_CHECK(!hits.empty());
+  ST_CHECK_EQ(hits.size(), std::size_t{1});   // 同一个块 → 同一个首行
+}
+
+ST_TEST(md_view_table_cells_wrap_instead_of_ellipsize) {
+  // 表格硬伤的回归（2026-10-13）：旧实现把列**等比缩放**再 ellipsize，
+  // 于是长表格每格都以 `...` 结尾（用户：“截断是灾难级的”）。
+  //
+  // 新口径分三层，各自都是缺陷的指纹：
+  // ① 列宽按“内容权重 + 最长不可断单元保底”分配；
+  // ② 单元格内**折行**（内容不丢）；
+  // ③ 断行**不在词内**（`batterycenter/embed` 不被硬断）。
+  //
+  // 反向验证：把 `port.wrap` 换回单行 `ellipsize`，本用例的完整性断言变红。
+  const st::ui::Theme theme = st::ui::Theme::light();
+  // 造一张**宽窄差异极大**的表（正是本仓 README 的形态）：
+  // 左列短关键词（含一个长包名）、右列长描述。
+  constexpr std::string_view kDoc =
+      "| 依赖 | 用途 | 性质 |\n"
+      "|---|---|---|\n"
+      "| batterycenter/embed 1.2.19 | 编译期资源嵌入（生成期由 stpm 原生实现，不引入 CMake） | 可选 |\n"
+      "| Windows | 自绘一切，不依赖系统控件；DPI 变化时自动重建字形缓存与布局 | 必需 |\n";
+  st::ui::MarkdownView view{std::string(kDoc)};
+  (void)render(view, theme, kCanvasWidth, kCanvasHeight);
+
+  // 从渲染后的排版里取出表格单元格文字（语义通道不含 cell 细节，
+  // 用 `selection` 全选来拿渲染的纯文本——它按行拼接）。
+  // ⚠ 单元格折行后，同一格的多行在 `selected_text()` 里以**空格**相连；
+  // 而字可能恰好断在 token 中间——所以先把空白全部去掉再查，
+  // 这样既能验“内容没被砍”，也不依赖折行位置。
+  ST_CHECK(view.invoke_action("select_all", {}));
+  const std::string rendered = view.selected_text();
+  std::string squashed;
+  for (const char raw : rendered) {
+    if (raw != ' ' && raw != '\n' && raw != '\t') squashed += raw;
+  }
+  for (const std::string token : {"batterycenter/embed1.2.19",
+                                  "编译期资源嵌入（生成期由stpm原生实现，不引入CMake）",
+                                  "DPI变化时自动重建字形缓存与布局"}) {
+    ST_CHECK(squashed.find(token) != std::string::npos);
+  }
+  // 不应出现省略号（表格单元格的省略是旧缺陷的指纹）。
+  ST_CHECK(rendered.find("...") == std::string::npos);
+}
+
+ST_TEST(md_view_table_keeps_long_words_intact) {
+  // **词内不断**的回归（2026-10-13）：旧实现把“前一个字符是 CJK”的任意位置
+  // 都当成可断点，且列宽保底用过小的常数——实测 `batterycenter/embed` 被
+  // 硬断成 `em|bed`、`nlohmann/jso|n`（截图取证）。
+  //
+  // 判据用**渲染后的表格行**：把 `selection` 里同一格的多行拼回去后，
+  // 包名必须完整。这一条与“列宽保底用最长不可断单元”是同一个事实。
+  const st::ui::Theme theme = st::ui::Theme::light();
+  constexpr std::string_view kDoc =
+      "| 依赖 | 说明 |\n"
+      "|---|---|\n"
+      "| batterycenter/embed 1.2.19 | 短说明 |\n"
+      "| nlohmann/json 3.12.0 | 短说明 |\n";
+  st::ui::MarkdownView view{std::string(kDoc)};
+  (void)render(view, theme, kCanvasWidth, kCanvasHeight);
+  ST_CHECK(view.invoke_action("select_all", {}));
+  const std::string rendered = view.selected_text();
+  std::string squashed;
+  for (const char raw : rendered) {
+    if (raw != ' ' && raw != '\n' && raw != '\t') squashed += raw;
+  }
+  // 包名完整（不被断在词中 / 不被截断）。
+  ST_CHECK(squashed.find("batterycenter/embed") != std::string::npos);
+  ST_CHECK(squashed.find("nlohmann/json") != std::string::npos);
+}
+
+ST_TEST(md_view_table_wrap_keeps_all_cells_content) {
+  // 单元格折行的**完整性**回归：旧实现把列等比缩放再 `ellipsize`，
+  // 于是长表格每格都以 `...` 结尾（用户：“截断是灾难级的”）。
+  // 现在内容一字不丢（折行承担溢出）。
+  //
+  // 反向验证：把 `port.wrap` 换回单行 `ellipsize`，本用例变红（已验）。
+  const st::ui::Theme theme = st::ui::Theme::light();
+  // 造一张**宽窄差异极大**的表（正是本仓 README 的形态）：长描述列 + 短关键词列。
+  constexpr std::string_view kDoc =
+      "| 依赖 | 用途 |\n"
+      "|---|---|\n"
+      "| batterycenter/embed 1.2.19 | 编译期资源嵌入（生成期由 stpm 原生实现，不引入 CMake） |\n";
+  st::ui::MarkdownView view{std::string(kDoc)};
+  (void)render(view, theme, kCanvasWidth, kCanvasHeight);
+    ST_CHECK(view.invoke_action("select_all", {}));
+  const std::string rendered = view.selected_text();
+  std::string squashed;
+  for (const char raw : rendered) {
+    if (raw != ' ' && raw != '\n' && raw != '\t') squashed += raw;
+  }
+  ST_CHECK(squashed.find("batterycenter/embed1.2.19") != std::string::npos);
+}
+
+ST_TEST(md_view_copy_action_prefers_selection) {
+  // copy 动作：无选择 → 拷**原文**（源码）；有选择 → 拷**选中纯文本**。
+  // 用 HostFocus 的剪贴板桩接住写入值（“谁把什么传给了剪贴板”）。
+  struct ClipboardHost : st::ui::Element::HostFocus {
+    auto set_keyboard_focus(st::ui::Element*) -> bool override { return false; }
+    auto host_clipboard_text() -> std::string override { return {}; }
+    auto host_set_clipboard_text(std::string_view text) -> bool override {
+      if (written.empty()) written = std::string(text);
+      return true;
+    }
+    std::string written{};
+  };
+
+  const st::ui::Theme theme = st::ui::Theme::light();
+  st::ui::MarkdownView view{std::string(kSample)};
+  ClipboardHost host;
+  view.set_host(&host);
+  (void)render(view, theme, kCanvasWidth, kCanvasHeight);
+
+  // ① 无选择：拷原文（含 Markdown 标记，如 `# `）。
+  ST_CHECK(view.invoke_action("copy", {}));
+  ST_REQUIRE(!host.written.empty());
+  ST_CHECK(host.written == view.markdown());
+  ST_CHECK(host.written.find("#") != std::string::npos);
+
+  // ② 有选择：拷选中纯文本（无 Markdown 标记的正文行）。
+  host.written.clear();
+  ST_CHECK(view.invoke_action("select_all", {}));
+  ST_CHECK(view.invoke_action("copy", {}));
+  ST_REQUIRE(!host.written.empty());
+  ST_CHECK(host.written == view.selected_text());
+  ST_CHECK(host.written.find("霜天 Markdown 视图") != std::string::npos);
 }

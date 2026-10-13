@@ -55,8 +55,23 @@ class MarkdownView : public Element {
   /// 当前块数（流式过程中**单调不减**）。
   [[nodiscard]] auto block_count() const noexcept -> std::size_t;
 
-  /// 预留：是否可选中文本（本期仅记录状态；控制通道可读写）。
+  /// 是否可选中/复制文本（默认 **true**，2026-10-13 起选择真实生效：拖选行级
+  /// 高亮 + Ctrl+C 复制选中文本；无选择时 Ctrl+C 复制全文）。
   void set_selectable(bool value);
+  /// 当前选中的纯文本（无选择返回空；控制通道属性 `selection` 可读）。
+  [[nodiscard]] auto selected_text() const -> std::string;
+
+  /// **链接点击回调**（链接渲染为一等交互）。
+  ///
+  /// 框架只上报「用户点了哪个 URL」——打开浏览器是**宿主**的事
+  ///（平台能力：Linux xdg-open / Windows ShellExecute / macOS open）。
+  /// 这与 `HostFocus` 的剪贴板同一取向：组件不该知道平台后端长什么样。
+  /// 未设回调时点击链接仍会高亮（可用性可见）但不做任何事。
+  std::function<void(std::string_view url)> on_link_click{};
+  /// 链接悬停态回调（进入/离开链接时各一次；参数为空 = 离开）。
+  std::function<void(std::string_view url)> on_link_hover{};
+  /// 当前悬停的链接 URL（空 = 无）。悬停时链接会加下划线强调。
+  [[nodiscard]] auto hovered_link() const -> const std::string& { return hovered_link_; }
   /// 排版宽度上限（`<= 0` 表示不限制，取容器给的最大宽度）。
   void set_max_width(float width);
   /// 正文基准字号（`<= 0` 表示用主题 `font_base`）。
@@ -90,6 +105,19 @@ class MarkdownView : public Element {
   void scroll_to(float offset);
   /// **全量**内容高度（px，含内边距；与视口无关，流式过程中单调增长）。
   [[nodiscard]] auto content_height() const noexcept -> float;
+
+  // —— 命中测试（公开面：宿主可以做悬停光标/右键菜单/挂复制按钮）——
+
+  /// 内容坐标处的**链接 URL**（无则空）。
+  ///
+  /// 与 `paint` 共用同一份排版结果（`rows_` 与 `Span::link`）——
+  /// “画在哪里”与“点中哪里”不会脉滑。
+  [[nodiscard]] auto link_at(math::Point content_point) const -> std::string;
+  /// 内容坐标处的**代码块首行下标**（-1 = 不在代码块上）。
+  /// 公开面：宿主可用它把“复制代码”按钮挂到对应块（组件不自己做工具栏）。
+  [[nodiscard]] auto code_block_at(math::Point content_point) const -> int;
+  /// 内容坐标处的**行盒**（空 = 越界）。
+  [[nodiscard]] auto row_box_at(float content_y) const -> math::Rect;
 
  private:
   /// 绘制颜色角色（布局期只记语义角色，`paint` 时按主题解析为具体色值）。
@@ -127,16 +155,34 @@ class MarkdownView : public Element {
     /// 与 `inline_code` 分开：后者带“芯片底色”，而代码块行只要求字体。
     /// 等宽是代码可读性的前提——比例字体下 `i` 与 `M` 宽不同，缩进与列对齐全失真。
     bool code{false};
+    /// 链接目标（非空 = 本片段是链接；点击回调与悬停下划线靠它）。
+    ///
+    /// 为何把它留在 Span 上：命中测试（“鼠标下的那个链接是哪个 URL”）
+    /// 必须与绘制同源——另建一份“链接区间表”就是两套事实，迟早脱钩。
+    std::string link{};
+    /// 输入点在这个片段内的字节区间（相对于本 Span 的 `text`）。
+    ///
+    /// 为何要它：折行会把一个 Span 切成多份，而宿主需要知道“点击落在链接的
+    /// 哪一段”（做 hover 高亮/同一行内多链接区分）；区间由排版期写入，
+    /// 绘制期不用重算。
+    std::size_t link_begin{0};
+    std::size_t link_end{0};
     /// 等宽角色（由 `code` 推导的便捷取值）。
     [[nodiscard]] auto font_role() const noexcept -> st::text::FontRole {
       return code ? st::text::FontRole::Monospace : st::text::FontRole::Proportional;
     }
   };
 
-  /// 表格单元格（文本已在布局期按列宽省略）。
+  /// 表格单元格：**支持多行**（折行后的行文本列表）。
+  ///
+  /// 为何是多行而不是单行：表格单元格的自然宽差异极大（实测本仓 README：
+  /// 一列 68 字符、另一列 8 字符），而可用宽有限——单行单元格只能二选一：
+  /// 要么缩列把内容砍成 `Wind...`（旧行为，用户：“截断是灾难级的”），
+  /// 要么横向溢出。浏器/主流 Markdown 渲染器的做法都是**单元格内折行**：
+  /// 行高随最高单元格长，内容一字不丢。
   struct Cell {
     math::Rect box{};
-    std::string text{};
+    std::vector<std::string> lines{};   ///< 折行后的行文本（至少一行）
   };
 
   enum class RowKind : std::uint8_t { Text, Heading, ListRow, CodeLine, Divider, TableRow };
@@ -149,6 +195,12 @@ class MarkdownView : public Element {
     float line_height{0.0f};   ///< 行高（文本垂直居中基准）
     float text_x{0.0f};        ///< 文本起点 x（项目符号列之后）
     std::vector<Span> spans{};
+  /// 每个 Span 的 x 区间（与 `spans` 一一对应，仅链接片段有意义）。
+  ///
+  /// 为何在**排版期**写：命中测试（`link_at`）需要“鼠标 x 落在哪个 Span 里”，
+  /// 而 `paint` 是 const、不能回写；且绘制期重算量宽会与排版期的折行结果脱钩
+  ///（字体测量有累加误差）。排版期本来就逐词累加 x，顺手记下零成本。
+  std::vector<std::pair<float, float>> span_x{};
     math::Rect clip{};         ///< 行级裁剪区（代码行/表格行；空表示不额外裁剪）
     GroupKind group{GroupKind::None};
     math::Rect group_rect{};   ///< 组矩形（代码块/引用块）
@@ -201,10 +253,26 @@ class MarkdownView : public Element {
   bool needs_layout_{true};
   bool want_bottom_{false};          ///< 追加时贴底，等排版完成后再落到实测高度
   bool stick_to_bottom_{true};
-  bool selectable_{false};
+  bool selectable_{true};
+  /// 当前悬停的链接（空 = 无）；悬停时链接额外加粗下划线强调。
+  std::string hovered_link_{};
+
+  // —— 文本选择（2026-10-13：渲染视图可复制）——
+  // 行级选择：起点行/终点行（内容坐标的行下标，-1 = 无选择）。拖选跨行时
+  // 中间行整行高亮；复制时按行拼接**纯文本**（spans 的文字，去样式）。
+  // 为什么是行级而不是字符级：排版行没有「位置→字节」的逆映射（字符级要
+  // 逐 span 命中测试），而行级已覆盖「把这段拷走」的主用例；字符级精确选择
+  // 留给源码模式（那就是 CodeEditor）。
+  int select_anchor_{-1};    ///< 拖选起点行
+  int select_focus_{-1};     ///< 拖选终点行（高亮 [min, max]）
+  bool selecting_{false};    ///< 拖选中（MouseMove 继续更新 focus）
 
   // —— 排版 ——
   void rebuild_rows(const RenderContext& context, float width);
+  /// 行下标 ↔ 内容 y 的互查（选择用；越界/空白区返回最近行）。
+  [[nodiscard]] auto row_at_y(float content_y) const -> int;
+  /// 高亮选中行（paint 里画在文本层之下）。
+  void paint_selection(raster::Surface& canvas, const struct Palette& colors) const;
   void append_blocks(const std::vector<st::md::Block>& blocks, const RenderContext& context,
                      const Frame& frame, float& y);
   void append_heading(const st::md::Block& block, const RenderContext& context, const Frame& frame,
