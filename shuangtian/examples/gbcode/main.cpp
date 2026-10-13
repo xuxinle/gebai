@@ -588,6 +588,8 @@ auto run_app(int argc, char** argv) -> int {
     bind("t", false, [page] { page->symbols_request(false); });
     bind("b", false, [page] { page->sidebar_visible_.set(!page->sidebar_visible_.value()); });
     bind("j", false, [page] { page->toggle_terminal_panel(); });   // Ctrl+J：切换终端面板
+    // Ctrl+Shift+V：Markdown 预览/源码切换（VSCode 同键位；非 md 文件上如实提示）。
+    bind("v", true, [page] { page->toggle_md_preview(); });
     // Ctrl+`（VSCode 的终端默认键位）：与活动栏那个按钮同一条路径。
     // 注：`` ` `` 在不同键盘布局上键名不一（`\`` / `Backquote`），两种都收。
     bind("`", false, [page] { page->toggle_terminal_panel(); });

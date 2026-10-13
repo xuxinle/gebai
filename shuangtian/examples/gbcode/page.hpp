@@ -31,6 +31,7 @@
 #include "st/ui/components/input.hpp"
 #include "st/ui/components/list.hpp"
 #include "st/ui/components/menu.hpp"
+#include "st/ui/components/markdown_view.hpp"
 #include "st/ui/components/merge_view.hpp"
 #include "st/ui/components/overlay.hpp"
 #include "st/ui/components/scroll.hpp"
@@ -121,6 +122,12 @@ struct CodeEditorPage : Component {
   State<std::string> search_summary_{""};
   /// 当前编辑器的高亮语言（状态栏/扩展面板与编辑器共用一处真值源）。
   State<std::string> language_{"cpp"};
+  /// Markdown 预览开关：当前活动缓冲是 .md 时，标签栏右缘出现「预览/源码」切换钮；
+  /// true = 渲染视图（MarkdownView），false = 源码编辑器。**只在 md 文件上生效**，
+  /// 切到非 md 缓冲时按钮隐藏，开关保留（切回来还记得）。
+  State<bool> md_preview_{false};
+  /// MarkdownView 实例（当前帧有效；渲染内容同步靠它，与 editor 指针同一套模式）。
+  MarkdownView* md_view_ptr{nullptr};
   /// 输出面板按来源分栏（`St build` / `St test` / `终端`…）。
 
   static constexpr std::size_t kNoMenu{static_cast<std::size_t>(-1)};
@@ -263,19 +270,19 @@ struct CodeEditorPage : Component {
   std::string git_selected_date_{};
   /// 选中提交的文件清单（`path, +N, −N`）——渲染期只消费（读在 `show_commit` 里）。
   std::vector<std::tuple<std::string, std::size_t, std::size_t>> git_commit_files_{};
-  // —— 任意两端比较（参照歌白工作台的「比较视图」）——
-  /// 比较视图是否开启（开启时编辑区换成比较面板）。
+  // —— 任意两端比较（已下线，2026-10-13；保留字段仅为 git_service 能力占位）——
+  /// 比较视图是否开启（已无入口，恒 false）。
   State<bool> compare_open_{false};
-  /// 两端端点文本（保留字 `WORKTREE`/`INDEX` 或任意 rev）。
+  /// 两端端点文本（已无 UI 写入）。
   State<std::string> compare_from_{};
   State<std::string> compare_to_{"WORKTREE"};
-  /// 三点对比（按共同祖先起算——分支对比的正确默认语义）。
+  /// 三点对比（已无 UI 写入）。
   State<bool> compare_merge_base_{false};
-  /// 结果（泵里读；渲染期只消费）。
+  /// 结果（已无泵写入）。
   gbcode::CompareResult compare_result_{};
   bool compare_loaded_{false};
   bool compare_wanted_{false};
-  /// 端点选择浮层：正在选哪一端（0 = A / 1 = B；2 = 未开）。
+  /// 端点选择浮层：已无 UI 写入（恒 2 = 未开）。
   State<std::size_t> compare_pick_{2};
   /// 当前打开的**并列差异**（空 key = 不是差异标签）。
   State<std::string> diff_key_{};
@@ -595,15 +602,12 @@ auto open_recent(const std::string& path) -> void;
    void build_tag_new_dialog(Composer& c);
 
 
-  /// 端点选择浮层：A/B 两端可以从**分支 / 最近提交**里选（也可直接粘 rev）。
-  ///
-  /// 为何要有它：比较视图的价值就是“任意两端”，而只给几个常用端点的按钮
-  /// 等于把“任意”锁在那几个选项上（歌白工作台的端点选择器就是为此存在）。
-   void build_compare_picker(Composer& c);
+  /// 端点选择浮层：已随比较视图下线；函数体保留在 page_dialogs.cpp，声明同步保留。
+  void build_compare_picker(Composer& c);
 
 
-  /// 选好一个端点（写入 A 或 B、关浮层、触发重读）。
-   void pick_endpoint(std::size_t which, const std::string& value);
+  /// 选好一个端点：已随比较视图下线；函数体保留在 page_dialogs.cpp，声明同步保留。
+  void pick_endpoint(std::size_t which, const std::string& value);
 
 
   /// 危险操作确认浮层（写入前先让用户看一眼**将要执行的命令**）。
@@ -665,12 +669,13 @@ auto open_recent(const std::string& path) -> void;
    void mark_sidebar_visited(std::size_t index);
 
 
-  // —— 视图 6：比较（任意两端 → 文件清单 → 单文件并列差异）——
+  // —— 视图 6：比较（已删除，2026-10-13）——
   //
-  // 为何要有它（而不只有左侧「变更」）：变更面板回答“我**现在**改了什么”，
-  // 比较回答“**任意两个状态**差什么”——「这个提交之后又改了什么」「两个分支差在哪」
-  // 只能靠它（歌白工作台的同名视图）。清单本体在**编辑区**：它是内容，不是导航。
-   void build_compare_sidebar(Composer& c);
+  // 旧版「任意两端比较」曾以侧栏视图（activity 6）+ 编辑区清单的形式存在；
+  // 用户要求删除比较侧栏后，这套入口已下线（活动栏不再有比较按钮）。
+  // 单文件差异仍完整保留：变更面板/提交详情/文件历史里的「看差异」走 `open_diff`
+  //（差异标签 + 并列 DiffView，与旧版同一套实现）。`git_service` 的 read_compare
+  // 能力保留（提交对比等后续需求可复用），只是不再有独立入口。
 
 
    void build_sidebar_head(Composer& c, std::string_view title);
@@ -711,11 +716,23 @@ auto open_recent(const std::string& path) -> void;
   void replace_in_workspace(std::string_view replacement);
 
 
-  // —— 视图 5：导航结果（多处定义/引用/实现的清单）——
+  // —— 视图 5：大纲（当前文件的符号树 + 多处导航结果）——
   //
-  // 与搜索视图同一套「文件分组 + 可点行」形态。单独一个视图而不是弹层：
-  // 引用列表的用法是「来回看几处」，弹层每点一处就关；侧栏可以一直开着。
-   void build_nav_results_view(Composer& c);
+  // 面板有两层内容：上层是**当前文件的符号大纲**（LSP DocumentSymbol，随文件切换
+  // 自动刷新），下层是**导航结果**（F12 多处定义/Shift+F12 引用清单）——用户要求
+  // 「导航结果侧栏改为大纲」后两者合在这一个视图里（大纲是主体，导航结果仅在
+  // 有多处命中时出现在下方，命中清空后自动退回纯大纲）。
+   void build_outline_view(Composer& c);
+
+
+  /// 大纲列表的扁平行模型（符号树拍平成带缩进的行；行 → 符号的映射在构建期维护）。
+  struct OutlineRow {
+    const st::lsp::DocumentSymbol* symbol{nullptr};   ///< 指向 symbols_ 里的节点
+    int depth{0};                                      ///< 嵌套深度（缩进用）
+  };
+  /// 本帧大纲行（`build_outline_view` 每次重组重建；行点击用它反查符号）。
+  /// ⚠ 仅在构建帧内有效——点击回调里用的是构建时捕获的下标，不跨帧存指针。
+  std::vector<OutlineRow> outline_rows_{};
 
 
   /// 开关胶囊（「Aa / ab / .*」这类选项）：按下态由 `active` 决定。
@@ -748,12 +765,7 @@ auto open_recent(const std::string& path) -> void;
    void open_git_diff(const gbcode::GitChange& change);
 
 
-  /// 比较视图（参照歌白工作台的「比较」）：**任意两端** → 文件清单 → 单文件并列差异。
-  ///
-  /// 为何要有它（而不只有左侧「变更」）：变更面板回答“我现在改了什么”，
-  /// 比较回答“**任意两个状态**之间差什么”——「这个提交之后我又改了什么」
-  /// 「两个分支差在哪」只能靠它。
-   void build_compare_view(Composer& c);
+  /// 比较视图（已随比较侧栏一起下线，2026-10-13；声明移除，见视图 6 处的说明）。
 
 
   // —— 视图 3：运行与调试（真跑 st 子命令）——
@@ -764,8 +776,17 @@ auto open_recent(const std::string& path) -> void;
    void build_extensions_view(Composer& c);
 
 
-  /// 切当前编辑器的高亮语言（也改写标签的语言字段，切回来时保持一致）。
-   void set_language(const std::string& name);
+    /// 切当前编辑器的高亮语言（也改写标签的语言字段，切回来时保持一致）。
+  void set_language(const std::string& name);
+
+
+  /// 当前活动缓冲是否处于 Markdown 预览形态（是 .md 且 `md_preview_` 开着）。
+  /// 标签栏的切换钮与编辑区的互斥声明都从这里推，避免两处各写一份判断。
+  [[nodiscard]] bool md_preview_active() const;
+
+
+  /// 切换 Markdown 预览/源码（标签栏按钮与 Ctrl+Shift+V 同一条路径）。
+  void toggle_md_preview();
 
 
    void build_editor_area(Composer& c, const std::vector<OpenBuffer>& buffers, std::size_t active, bool has_editor);
@@ -1295,8 +1316,8 @@ auto shutdown() -> void;
    void ensure_git_log();
 
 
-  /// 比较视图的数据读取（帧首泵；与 `ensure_git_log` 同一理由：渲染期起子进程会崩）。
-   void ensure_compare();
+  /// 比较视图的数据读取：已下线但函数体保留（见 page_actions.cpp；无泵调用）。
+  void ensure_compare();
 
 
   /// 并列差异的数据读取（帧首泵）：读**两侧文本**后用 `text::diff` 在本地算结构。
@@ -1922,11 +1943,11 @@ auto shutdown() -> void;
     std::string preview{};     ///< 目标行文本预览（120 字截断）
     st::lsp::Location location{};  ///< 原始位置（点击跳转用）
   };
-  /// 多处导航结果（定义/引用/实现共用；空 = 面板关）。
+  /// 多处导航结果（定义/引用/实现共用；空 = 下段不显示）。
   std::vector<NavResult> nav_results_{};
-  /// 导航结果面板开合（State：变更要触发重组）。
+  /// 导航结果段开合（State：变更要触发重组；大纲视图的下段由它驱动）。
   State<bool> nav_results_open_{false};
-  /// 结果面板行 → `nav_results_` 下标（分组行占位 -1；`build_nav_results_view` 维护）。
+  /// 结果面板行 → `nav_results_` 下标（分组行占位 -1；`build_outline_view` 维护）。
   std::vector<std::size_t> nav_row_to_result_{};
   /// 跳转历史的一个点（Alt+← 返回）。
   struct NavPoint {

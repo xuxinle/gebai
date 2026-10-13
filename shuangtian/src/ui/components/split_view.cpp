@@ -287,7 +287,8 @@ void SplitView::paint_content(const RenderContext& context, raster::Surface& can
                        thickness * 0.5f);
     }
   }
-  if (focused_) paint_focus_ring(context, canvas, handle_rect(), 0.0f);
+  // 聚焦不再画环：分割线聚焦时环画在手柄位置，视觉上就是分隔线上多出一圈边框
+  //（用户要求分割线聚焦不显示边框）。键盘拖动（方向键）仍可用，只是无视觉环。
 }
 
 auto SplitView::on_event(const RenderContext& context, Event& event) -> bool {

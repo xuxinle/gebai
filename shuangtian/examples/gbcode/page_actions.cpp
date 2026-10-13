@@ -1305,7 +1305,9 @@ void CodeEditorPage::load_active_text() {
   }
 
 
-  /// 比较视图的数据读取（帧首泵；与 `ensure_git_log` 同一理由：渲染期起子进程会崩）。
+  /// 比较视图的数据读取（已随比较视图下线，2026-10-13；无调用点，保留函数体
+  /// 以免散落在 git_service 里的 read_compare 能力被连坐删除——将来恢复比较入口
+  /// 时直接接回这里即可）。
   void CodeEditorPage::ensure_compare() {
     if (!compare_wanted_) return;
     if (workspace_.empty()) return;
@@ -2252,7 +2254,7 @@ void CodeEditorPage::load_active_text() {
   /// 位置结果 → 状态栏摘要（带计数，让用户知道"找到几处"）。
   ///
   /// 多处结果：除跳到第一处外，还把「位置列表」写进侧栏搜索视图可复用的
-  /// 结果面板状态（`nav_results_`），切到活动栏「导航结果」可逐个点。
+  /// 结果面板状态（`nav_results_`），切到活动栏「大纲」可逐个点。
   void CodeEditorPage::on_locations_response(std::int64_t id, const std::vector<st::lsp::Location>& locations) {
     (void)id;
     const std::string family = lsp_.last_navigation_method();
@@ -2299,14 +2301,14 @@ void CodeEditorPage::load_active_text() {
                                        .preview = std::move(preview),
                                        .location = item});
     }
-    nav_results_open_.set(true);
-    // 多处结果自动切到导航视图（面板开着才有意义；用户可随时切走）。
-    // 导航结果视图**不纳入保活**（它的内容一次查询即生成，没有“用户位置”可丢）——
-    // 这里只切下标，不进 `sidebar_visited_`。
-    if (activity_.value() != 5) activity_.set(5);
-    jump_to_location(locations.front());
-    status_.set(std::format("找到 {} 处{}，已跳到第 1 处（Alt+← 返回）", locations.size(),
-                            family == "references" ? "引用" : ""));
+      nav_results_open_.set(true);
+  // 多处结果自动切到大纲视图（面板开着才有意义；用户可随时切走）。
+  // 大纲视图**不纳入保活**（它的内容一次查询即生成，没有“用户位置”可丢）——
+  // 这里只切下标，不进 `sidebar_visited_`。
+  if (activity_.value() != 5) activity_.set(5);
+  jump_to_location(locations.front());
+  status_.set(std::format("找到 {} 处{}，已跳到第 1 处（Alt+← 返回；其余在「大纲」侧栏）",
+                         locations.size(), family == "references" ? "引用" : ""));
   }
 
 
@@ -2751,8 +2753,15 @@ void CodeEditorPage::load_active_text() {
       goto_implementation();
     } else if (id == "nav.back") {
       navigate_back();
-    } else if (id == "nav.results") {
-      nav_results_open_.set(!nav_results_open_.value());
+     } else if (id == "nav.results") {
+  // 多处导航结果列在大纲侧栏下段：切过去并展开（与 on_locations_response 同一套入口）。
+  if (!nav_results_.empty()) {
+   nav_results_open_.set(true);
+   activity_.set(5);
+   sidebar_visible_.set(true);
+  } else {
+   status_.set("当前没有导航结果（F12/Shift+F12 多处命中时生成）");
+  }
     } else if (id == "file.close-tab") {
       close_active();
     } else if (id == "view.toggle-sidebar") {

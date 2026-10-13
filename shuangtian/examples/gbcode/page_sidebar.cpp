@@ -1,4 +1,4 @@
-// 侧栏视图族：资源管理器/搜索/变更(scm)/比较/运行/扩展/导航结果 七个视图的组装。
+// 侧栏视图族：资源管理器/搜索/变更(scm)/运行/扩展/大纲 六个视图的组装。
 // 拆分自 main.cpp，零逻辑改动——只是 out-of-line 化。
 
 #include <algorithm>
@@ -21,62 +21,11 @@ namespace gbcode_ui {
   static constexpr float kExplorerRowHeight{24.0f};
 
 
-  // —— 视图 6：比较（任意两端 → 文件清单 → 单文件并列差异）——
+  // —— 视图 6：比较侧栏（已删除，2026-10-13）——
   //
-  // 为何要有它（而不只有左侧「变更」）：变更面板回答“我**现在**改了什么”，
-  // 比较回答“**任意两个状态**差什么”——「这个提交之后又改了什么」「两个分支差在哪」
-  // 只能靠它（歌白工作台的同名视图）。清单本体在**编辑区**：它是内容，不是导航。
-  void CodeEditorPage::build_compare_sidebar(Composer& c) {
-    build_sidebar_head(c, "比较");
-    if (workspace_.empty()) {
-      (void)text(c, [] { return std::string("内置样例模式：没有仓库可比较"); });
-      return;
-    }
-    (void)text(c, [this] {
-      return std::format("A：{}",
-                         compare_from_.value().empty() ? "工作区" : compare_from_.value());
-    }, {.id = "compare-a-label"});
-    (void)text(c, [this] {
-      return std::format("B：{}",
-                         compare_to_.value().empty() ? "工作区" : compare_to_.value());
-    }, {.id = "compare-b-label"});
-    // 常用端点各配「设 A / 设 B」两个按钮（任意 rev 在编辑区那条端点按钮上改）。
-    struct End {
-      const char* label;
-      const char* value;
-    };
-    static constexpr End kEnds[] = {{"工作区", "WORKTREE"},
-                                    {"暂存区", "INDEX"},
-                                    {"HEAD", "HEAD"},
-                                    {"HEAD~1", "HEAD~1"}};
-    for (const auto& item : kEnds) {
-      (void)row(c, {.gap = 4.0f, .key = std::string("cmp:") + item.value}, [&] {
-        for (const bool as_from : {true, false}) {
-          (void)custom<Button>(c, [this, item, as_from](Button& b) {
-            b.set_id(std::format("compare-{}-{}", as_from ? "from" : "to", item.value));
-            b.set_label(std::format("{} {}", as_from ? "设 A" : "设 B", item.label));
-            b.set_variant(Button::Variant::Ghost);
-            b.set_size(Button::Size::Small);
-            b.on_click = [this, value = std::string(item.value), as_from] {
-              if (as_from) {
-                compare_from_.set(value);
-              } else {
-                compare_to_.set(value);
-              }
-              compare_wanted_ = true;
-            };
-          }, {.height = 24.0f, .grow = true,
-              .key = std::format("{}-{}", as_from ? "from" : "to", item.value)});
-        }
-      });
-    }
-    if (compare_loaded_ && compare_result_.ok) {
-      (void)text(c, [this] {
-        return std::format("{} 个文件 · +{} −{}", compare_result_.files.size(),
-                           compare_result_.additions, compare_result_.deletions);
-      }, {.id = "compare-summary"});
-    }
-  }
+  // 旧版在此处放「设 A/设 B」端点按钮钮（任意两端比较的侧栏入口）；用户要求
+  // 删除比较侧栏后整套下线（活动栏入口也一并移除，见 build_activity_bar）。
+  // 单文件差异（open_diff）仍从变更面板/提交详情/文件历史可达。
 
 
   void CodeEditorPage::build_sidebar_head(Composer& c, std::string_view title) {
@@ -129,8 +78,13 @@ namespace gbcode_ui {
         icon_button("run-test", "check", "测试", [this] { run_task("test"); });
         break;
       case 5:
-        icon_button("nav-clear", "close", "清空导航结果", [this] {
-          nav_results_.clear();
+        icon_button("outline-refresh", "refresh", "刷新大纲", [this] {
+          refresh_document_symbols();
+        });
+        icon_button("nav-clear", "close", "收起导航结果", [this] {
+          // 清数据还是只收起：**只收起**（数据保留——用户可能马上还要看下一处，
+          // 清了就要重新 F12）。收起后再有多处命中会重新展开（on_navigation_results
+          // 会再次 set true）。
           nav_results_open_.set(false);
         });
         break;
@@ -178,8 +132,7 @@ namespace gbcode_ui {
           {0, "sidebar-explorer", "sidebar-explorer", &CodeEditorPage::build_explorer},
           {1, "sidebar-search", "sidebar-search", &CodeEditorPage::build_search_view},
           {2, "sidebar-scm", "sidebar-scm", &CodeEditorPage::build_scm_view},
-          {3, "sidebar-run", "sidebar-run", &CodeEditorPage::build_run_view},
-          {6, "sidebar-compare", "sidebar-compare", &CodeEditorPage::build_compare_sidebar}};
+          {3, "sidebar-run", "sidebar-run", &CodeEditorPage::build_run_view}};
       const std::size_t current = activity_.value();
       // **首次访问才声明，之后保活**：
       // ① 没访问过的视图不参与构建——否则启动首帧要一次性把五棵子树全建出来
@@ -205,15 +158,15 @@ namespace gbcode_ui {
             },
             {.grow = true, .key = view.key});
       }
-      // 导航结果与扩展两个视图仍按当前声明（它们的内容本就按一次查询/一次扫描即
+      // 大纲与扩展两个视图仍按当前声明（它们的内容本就按一次查询/一次扫描即
       // 生成，没有“用户位置”可丢）；与上面那几个分开写，是为了不让“保活”这条
       // 规则被无差别地扩到没必要的地方。
       if (current == 5) {
         (void)custom_container<Panel>(
-            c, [this, &c] { build_nav_results_view(c); },
-            [](Panel& panel) { panel.set_id("sidebar-nav"); },
-            {.grow = true, .key = "sidebar-nav"});
-      } else if (current != 0 && current != 1 && current != 2 && current != 3 && current != 6) {
+            c, [this, &c] { build_outline_view(c); },
+            [](Panel& panel) { panel.set_id("sidebar-outline"); },
+            {.grow = true, .key = "sidebar-outline"});
+      } else if (current != 0 && current != 1 && current != 2 && current != 3) {
         (void)custom_container<Panel>(
             c, [this, &c] { build_extensions_view(c); },
             [](Panel& panel) { panel.set_id("sidebar-extensions"); },
@@ -505,18 +458,78 @@ void CodeEditorPage::replace_in_workspace(std::string_view replacement) {
   }
 
 
-  // —— 视图 5：导航结果（多处定义/引用/实现的清单）——
+  // —— 视图 5：大纲（当前文件符号树 + 导航结果）——
   //
-  // 与搜索视图同一套「文件分组 + 可点行」形态。单独一个视图而不是弹层：
-  // 引用列表的用法是「来回看几处」，弹层每点一处就关；侧栏可以一直开着。
-  void CodeEditorPage::build_nav_results_view(Composer& c) {
-    build_sidebar_head(c, "导航结果");
-    if (nav_results_.empty()) {
+  // 主体是**当前文件的符号大纲**（LSP DocumentSymbol，嵌套缩进展示；切文件自动刷新，
+  // 点击跳到符号处）。多处导航结果（F12/Shift+F12 的命中清单）附在下方——
+  // 有命中才出现，与大纲主客分明（2026-10-13 由「导航结果」升级而来）。
+  void CodeEditorPage::build_outline_view(Composer& c) {
+    build_sidebar_head(c, "大纲");
+    // —— 上：符号大纲 ——
+    if (symbols_.empty()) {
       (void)text(c, [] {
-        return std::string("F12 跳定义 / Shift+F12 找引用；\n多处结果会列在这里");
-      }, {.id = "nav-empty"});
-      return;
+        return std::string("当前文件没有符号大纲\n（需要语言服务就绪，且文件在磁盘上）");
+      }, {.id = "outline-empty"});
+    } else {
+      // 符号树拍平成缩进行：行 → 符号的映射（`outline_rows_`）在构建期同步维护，
+      // 点击回调里按下标反查（与导航结果的 `nav_row_to_result_` 同一套模式）。
+      std::vector<ListItemData> items;
+      outline_rows_.clear();
+      const auto flatten = [&](const auto& list, auto&& self, int depth) -> void {
+        for (const auto& symbol : list) {
+          const std::string indent(static_cast<std::size_t>(depth) * 2U, ' ');
+          // 行文案：缩进 + 名字 + kind（kind 后置小字，点击看符号名不被淹没）。
+          // kind 是协议枚举值（1=File…12=Function…），只对常用的几个给名字，
+          // 其余不后缀（数字本身对用户没有信息量）。
+          const char* kind_name = nullptr;
+          switch (symbol.kind) {
+            case 5: kind_name = "class"; break;
+            case 6: kind_name = "method"; break;
+            case 9: kind_name = "ctor"; break;
+            case 10: kind_name = "enum"; break;
+            case 11: kind_name = "interface"; break;
+            case 12: kind_name = "func"; break;
+            case 13: kind_name = "var"; break;
+            case 14: kind_name = "const"; break;
+            case 23: kind_name = "struct"; break;
+            default: break;
+          }
+          const std::string kind_suffix =
+              kind_name == nullptr ? std::string{} : std::format("  [{}]", kind_name);
+          items.push_back(ListItemData{.key = std::format("sym:{}:{}", depth, items.size()),
+                                       .label = indent + symbol.name + kind_suffix});
+          outline_rows_.push_back(OutlineRow{.symbol = &symbol, .depth = depth});
+          if constexpr (requires { symbol.children; }) {
+            self(symbol.children, self, depth + 1);
+          }
+        }
+      };
+      flatten(symbols_, flatten, 0);
+      (void)custom_container<ScrollView>(
+          c,
+          [&] {
+            (void)list(c, items, [this](std::size_t index) {
+              if (index >= outline_rows_.size()) return;
+              const st::lsp::DocumentSymbol* symbol = outline_rows_[index].symbol;
+              if (symbol == nullptr) return;
+              // 跳到符号（同一条 jump_to_location 路径，历史入栈可 Alt+← 回）。
+              jump_to_location(st::lsp::Location{
+                  .uri = st::lsp::LspClient::path_to_uri(current_buffer_path()),
+                  .range = symbol->range,
+                  .selection = std::nullopt});
+            },
+                     {.id = "outline-symbols", .key = "outline-symbols"});
+          },
+          [](ScrollView& scroll) { scroll.set_id("outline-scroll"); },
+          {.grow = true, .id = "outline-host"});
     }
+    // —— 下：导航结果（有命中才出现）——
+    if (nav_results_.empty() || !nav_results_open_.value()) return;
+    (void)row(c, {.gap = 4.0f, .height = 26.0f, .id = "outline-nav-head"}, [&] {
+      (void)text(c, [this] {
+        return std::format("导航结果（{} 处）", nav_results_.size());
+      }, {.grow = true, .weight = FontWeight::Medium, .id = "outline-nav-title"});
+    });
     // 按文件分组：前缀行是文件名，其后是该文件的命中行（与搜索结果同形态）。
     // `nav_row_to_result_`：面板行 → 结果下标的映射（分组行占位 -1）。
     std::vector<ListItemData> items;
@@ -649,12 +662,6 @@ void CodeEditorPage::replace_in_workspace(std::string_view replacement) {
                       [this] { git_collapsed_groups_.set({"冲突", "已暂存", "未暂存", "未跟踪"}); });
       scm_icon_button(c, "scm-expand-all", "chevron-down", "展开全部分组",
                       [this] { git_collapsed_groups_.set({}); });
-      scm_icon_button(c, "scm-compare", "diff", "与…比较（任意两端）", [this] {
-        activity_.set(6);
-        sidebar_visible_.set(true);
-        mark_sidebar_visited(6);
-        compare_wanted_ = true;
-      });
       scm_icon_button(c, "scm-discard-all", "undo", "放弃全部未暂存改动",
                       [this] { ask_discard_all(); });
     });
@@ -892,109 +899,9 @@ b.set_label(std::format("{} {}", change.display_code(), change.display_path()));
   }
 
 
-  /// 比较视图（参照歌白工作台的「比较」）：**任意两端** → 文件清单 → 单文件并列差异。
-  ///
-  /// 为何要有它（而不只有左侧「变更」）：变更面板回答“我现在改了什么”，
-  /// 比较回答“**任意两个状态**之间差什么”——「这个提交之后我又改了什么」
-  /// 「两个分支差在哪」只能靠它。
-  void CodeEditorPage::build_compare_view(Composer& c) {
-    (void)custom_container<Panel>(
-        c,
-        [&] {
-          // —— 头部：A/B 两个端点按钮 + 交换 + 三点开关 ——
-          (void)row(c, {.gap = 4.0f, .height = 30.0f, .id = "compare-bar"}, [&] {
-            const auto endpoint_button = [&](const char* id, const std::string& text,
-                                             std::size_t which) {
-              (void)custom<Button>(c, [this, id, text, which](Button& b) {
-                b.set_id(id);
-                b.set_label(text.empty() ? "（未指定）" : text);
-                b.set_variant(Button::Variant::Secondary);
-                b.set_size(Button::Size::Small);
-                b.on_click = [this, which] { compare_pick_.set(which); };
-              }, {.height = 26.0f, .grow = true, .key = id});
-            };
-            endpoint_button("compare-from",
-                            compare_from_.value().empty() ? "工作区" : compare_from_.value(), 0);
-            (void)custom<Button>(c, [this](Button& b) {
-              b.set_id("compare-swap");
-              b.set_icon("arrow-left");
-              b.set_variant(Button::Variant::Ghost);
-              b.set_size(Button::Size::Small);
-              b.on_click = [this] {
-                const std::string from = compare_from_.value();
-                compare_from_.set(compare_to_.value());
-                compare_to_.set(from);
-                compare_wanted_ = true;
-              };
-            }, {.width = 30.0f, .height = 26.0f, .key = "compare-swap"});
-            endpoint_button("compare-to",
-                            compare_to_.value().empty() ? "工作区" : compare_to_.value(), 1);
-            // 三点：按**共同祖先**起算（分支对比的正确默认语义）。
-            (void)custom<Button>(c, [this](Button& b) {
-              b.set_id("compare-merge-base");
-              b.set_label(compare_merge_base_.value() ? "三点 ✓" : "两点");
-              b.set_variant(compare_merge_base_.value() ? Button::Variant::Soft
-                                                        : Button::Variant::Ghost);
-              b.set_size(Button::Size::Small);
-              b.on_click = [this] {
-                compare_merge_base_.set(!compare_merge_base_.value());
-                compare_wanted_ = true;
-              };
-            }, {.height = 26.0f, .key = "compare-merge-base"});
-            (void)custom<Button>(c, [this](Button& b) {
-              b.set_id("compare-refresh");
-              b.set_icon("refresh");
-              b.set_variant(Button::Variant::Ghost);
-              b.set_size(Button::Size::Small);
-              b.on_click = [this] { compare_wanted_ = true; };
-            }, {.width = 30.0f, .height = 26.0f, .key = "compare-refresh"});
-          });
-          // —— 文件清单 ——
-          if (!compare_loaded_) {
-            (void)text(c, [] { return std::string("读取中…"); }, {.id = "compare-loading"});
-            return;
-          }
-          if (!compare_result_.ok) {
-            (void)text(c, [this] { return "比较失败：" + compare_result_.error; },
-                       {.color = Tone::Danger, .id = "compare-error"});
-            return;
-          }
-          if (compare_result_.files.empty()) {
-            (void)text(c, [] { return std::string("两端没有差异。"); },
-                       {.id = "compare-empty"});
-            return;
-          }
-          (void)custom_container<ScrollView>(
-              c,
-              [&] {
-                for (std::size_t index = 0; index < compare_result_.files.size(); ++index) {
-                  const auto& file = compare_result_.files[index];
-                  (void)custom<Button>(c, [this, index, file](Button& b) {
-                    b.set_id(std::format("compare-file-{}", index));
-                    b.set_label(std::format("{}{}  +{} −{}", file.status,
-                                            file.path.empty() ? file.old_path : file.path,
-                                            file.additions, file.deletions));
-                    b.set_variant(Button::Variant::Ghost);
-                    b.set_size(Button::Size::Small);
-                    b.on_click = [this, file] {
-                      gbcode::CompareOptions options;
-                      options.from = gbcode::DiffEndpoint::parse(compare_from_.value());
-                      options.to = gbcode::DiffEndpoint::parse(compare_to_.value());
-                      options.merge_base = compare_merge_base_.value();
-                      open_diff(std::format("◧ {}", st::fs::file_name(file.path)), options,
-                                file.path);
-                    };
-                  }, {.height = 26.0f, .key = std::format("compare:{}:{}", file.status, file.path)});
-                }
-              },
-              [](ScrollView& scroll) { scroll.set_id("compare-scroll"); },
-              {.grow = true, .id = "compare-host"});
-        },
-        [](Panel& panel) { panel.set_id("compare-view"); },
-        {.grow = true, .id = "compare-view"});
-  }
-
-
+  // 比较视图（编辑区清单形态）已随比较侧栏一起删除（2026-10-13）——
+  // 旧版在编辑区渲染「A/B 端点栏 + 文件清单」，点文件开差异标签；活动栏入口
+  // 移除后不可达。单文件差异仍从变更面板/提交详情/文件历史直达（open_diff）。
   // —— 视图 3：运行与调试（真跑 st 子命令）——
   void CodeEditorPage::build_run_view(Composer& c) {
     build_sidebar_head(c, "运行");

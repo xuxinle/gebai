@@ -217,10 +217,8 @@ namespace gbcode_ui {
   }
 
 
-  /// 端点选择浮层：A/B 两端可以从**分支 / 最近提交**里选（也可直接粘 rev）。
-  ///
-  /// 为何要有它：比较视图的价值就是“任意两端”，而只给几个常用端点的按钮
-  /// 等于把“任意”锁在那几个选项上（歌白工作台的端点选择器就是为此存在）。
+  /// 端点选择浮层（已随比较视图下线，2026-10-13；compare_pick_ 恒为 2 → 本函数
+  /// 首行即返回，不再产生任何 UI。保留函数体供将来恢复比较入口时直接接回）。
   void CodeEditorPage::build_compare_picker(Composer& c) {
     const std::size_t which = compare_pick_.value();
     if (which > 1) return;
@@ -297,7 +295,7 @@ namespace gbcode_ui {
   }
 
 
-  /// 选好一个端点（写入 A 或 B、关浮层、触发重读）。
+  /// 选好一个端点（已随比较视图下线；无 UI 可达，保留函数体供将来恢复）。
   void CodeEditorPage::pick_endpoint(std::size_t which, const std::string& value) {
     if (which == 0) {
       compare_from_.set(value);
