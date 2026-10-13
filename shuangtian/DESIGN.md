@@ -1228,6 +1228,32 @@ MSVC 的 LNK1168/1104 与 POSIX 的 Text file busy）——裸报一句「链接
   旧法只加墨不改形，中英混排下「胖而糊」；现优选真粗体面（锐 36~37%、字面宽
   对齐浏览器参照），探不到时回退合成加粗。
 
+### 4.2.17f SplitView 给子面板的 measure 约束必须与 arrange 几何一致（2026-10-13）
+
+**现象**：gbcode 的 Markdown 预览在**面板拉伸/拖分割条时不重排**——
+控件宽从 957.8 变到 736.8（arrange 给了正确 rect），而内容高恒为 10602.30、
+排版宽恒为 **608**（= `kDefaultViewWidth` 640 − padding 32）。
+
+**根因**：`SplitView::measure` 只有一条 `loose`（全 unbounded）分支——**有界时也拿它
+去 measure 子面板**。内容型组件（MarkdownView / CodeEditor / Text）拿不到可用宽时，
+各自落回自己的兑底常量，排版宽因此永远是那个常量。
+而 `arrange` 阶段又给了正确 rect——**arrange 只给 rect、不重 measure**，所以错就永远错。
+
+**修法**：measure 分两条路径——
+1. **两轴有界**（常规）：按 ratio 给子面板**有限**约束（主轴按比例分、交叉轴拿满），
+   与 `layout_children` 同一份几何；
+2. **至少一轴无界**：先用 unbounded 探自然尺寸定自身尺寸，**再用有限约束重测一遍**
+  （少了这步，无界那一轴上的子组件就永远停在探测期的兑底尺寸）。
+
+同时 `MarkdownView` 新增只读属性 `layout_width`（上次排版用的内容宽）——
+「控件宽变了/排版结果没变」必须能分开看（混在一起时排查会绕远：
+实测靠它才定位到 608 这个常量本）。
+
+回归：`ui_split_view_measures_children_with_bounded_width`（探针元素记下 measure
+收到的**约束值**，而不是看结果尺寸——只看尺寸会漏，因为探针的自然尺寸看上去永远合理）、
+`ui_split_view_child_constraints_follow_ratio`（约束随几何变）。均逆向验证：
+回退后探针读到 `kUnbounded`（差值 999999762），测试变红。
+
 ### 4.2.17e 图标口径 + Markdown 渲染重设计（2026-10-13）
 
 **① Tabs 尾部钮图标对齐活动栏口径**（用户：“图标太丑，参考活动栏”）：

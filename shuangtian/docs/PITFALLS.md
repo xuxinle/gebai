@@ -115,6 +115,8 @@
 | **量宽与折行必须同口径** | `measure_width(整串)` 含字距调整/连字，**比逐码点累加小**；用它定列宽而用逐字累加判溢出，临界处差一两个字符（实测 `batterycenter/embed` → `embe\|d`）。另：`wrap` 把**空格也计入 `pen`**，按词扫描会丢掉它——保底宽要留余量 | `src/text/text.cpp` 的 `TextRenderer::wrap`；`markdown_view.cpp` 的 `word_floor_of` |
 | **图标描边要传 `0.0f`（随盒缩放）** | `Icon::draw` 的 `stroke_width` 默认 **2.0f 固定像素**；小盒（≤15px）里比声明值粗一大截、笔画糊成一团（实测 Tabs 尾部钮“图标太丑”）。`IconView`/`Button` 都传 `0.0f` = 按 `stroke/24 × 盒径` 缩放 | `include/st/ui/icon.hpp` 的 `draw`；`src/ui/components/tabs.cpp` 尾部钮 |
 | **视图“常驻”后，渲染期里那些只在“切过去那一帧”跑的代码会变成每帧跑** | 典型是渲染期同步起子进程（`process::run`）——它会踩坏声明式树。改为在构建函数里**置一个待办标记**、帧首泵消费 | `examples/gbcode/main.cpp` 的 `git_probe_wanted_` 注释 |
+| **容器 measure 给子元素的约束必须与 arrange 几何一致** | `arrange` 只给 rect、**不重 measure**；measure 阶段给错就永远错。实测：`SplitView` 在有界约束下仍用 unbounded 去测子面板 → 内容型组件（MarkdownView/CodeEditor）落回自己的兑底常量，表现为「面板拉伸/拖分割条时文字不重排」。写自定义容器时：按最终几何给**有限**约束 | `src/ui/components/split_view.cpp` 的 `measure`；`DESIGN.md` §4.2.17f |
+| **调试布局“宽变了但内容不变”时先分开看两个量** | 控件宽（`bounds`）与**排版用的内容宽**是两回事。`MarkdownView` 有只读 `layout_width` 专供此用——实测就是靠它发现“排版宽恒为 608”（= 兑底常量），一步定位到是约束没传下来 | `DESIGN.md` §4.2.17f；`markdown_view.cpp` 的 `layout_width` 属性 |
 | **同级分支声明子元素会按位置回收** | 切分支时，新分支里没显式设的属性（icon/width）会**沿用旧分支的值**（实测：远程页的按钮带着日志页刷新钮的 `icon=refresh`）。给每个分支包一层**带 key 的容器** | `DESIGN.md` §4.2.13 |
 | **`Input` 在列里 `grow` 会吃掉剩余高度** | 提交框被拉成三行高的大框、旁边的计数被压成“已…”。输入框要包在**行**里再 `grow` | `DESIGN.md` §4.2.13 |
 | **列表行用 `Button` 要显式左对齐** | 默认居中会让几十行左缘参差不齐（看着像一堆独立按钮），而列表是拿来“扫”左缘的 → `Button::Align::Start` | `include/st/ui/components/basic.hpp` 的 `Align` 注释 |
