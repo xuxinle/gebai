@@ -1020,6 +1020,29 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     return { parent: String(s.parent_id ?? ""), start, end: end + 1 }
   }
 
+  /** 飞书块模型没有列表容器：连续同类列表项是同级平铺的独立块。
+   *  fetch_doc 读出时聚合成单个 `<ol id=首项id>…</ol>`（容器 id 即首项块 id，其余项 id 落在各自 <li> 上），
+   *  故仅当目标 id 是段首时扩展为同父连续同类整段（替换/删除该聚合容器 = 整段语义）；
+   *  非首项 id 是单独定位的 <li>，按单项处理。 */
+  function listRunRange(byId: Map<string, Record<string, unknown>>, blockId: string): { parent: string; start: number; end: number; count: number } | null {
+    const b = byId.get(blockId)
+    if (!b) return null
+    const t = Number(b.block_type ?? 0)
+    if (t !== 12 && t !== 13) return null
+    const parent = String(b.parent_id ?? "")
+    const p = parent ? byId.get(parent) : undefined
+    const siblings = p && Array.isArray(p.children) ? (p.children as unknown[]).map(String) : []
+    const idx = siblings.indexOf(blockId)
+    if (idx < 0) return null
+    let start = idx
+    let end = idx
+    while (start > 0 && Number(byId.get(siblings[start - 1])?.block_type ?? 0) === t) start--
+    while (end < siblings.length - 1 && Number(byId.get(siblings[end + 1])?.block_type ?? 0) === t) end++
+    // 目标不是段首：不是聚合容器 id，按单项处理
+    if (idx !== start) return null
+    return { parent, start, end: end + 1, count: end - start + 1 }
+  }
+
   /** XML 内容 → 块描述（update_doc 写入用；复用 import_xml 同一套归一）。 */
   function parseContentXml(content: string): { blocks: Array<Record<string, unknown>>; notes: string[] } {
     const parsed = xmlToBlocks(content)
@@ -1028,7 +1051,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const updateDoc = tool(
     "update_doc",
-    "用 XML 排版语法精确更新文档（与 fetch_doc/import_xml 同一套语法，官方 lark-doc +update 对标）。指令（`command`）：\n- **str_replace**：全文查找替换文本（不破坏块结构；`replacement` 空串=删除命中文本；不支持的跨样式片段会列出块 id 改用 block_replace）\n- **block_insert_after**：在锚块后插入 `content`（`block_id=-1` 文末、`0` 文首）\n- **block_replace**：替换单块（`block_id`）或同父连续区间（`start_block_id`+`end_block_id`，如某段连续段落/列表项/表格行）\n- **block_delete**：删除单块或同父连续区间\n- **block_move_after**：把 `src_block_ids`（逗号分隔）移动到锚块后\n- **block_copy_after**：复制源块到锚块后（重建同构块；图片/画板等资源块以 token 复制）\n- **append**：文末追加（= block_insert_after -1）\n\n写入前流程：fetch_doc(with-ids/full) 看现状 → 本工具最小范围修改 → 重新 fetch 验证。安全规则：每轮写后 block_id 已变（新插入的用返回的新 id）；同一块多处修改合并一次 block_replace；`<img src=...>`/`<whiteboard token=...>` 等资源占位原样保留不要改纯文本。",
+    "用 XML 排版语法精确更新文档（与 fetch_doc/import_xml 同一套语法，官方 lark-doc +update 对标）。指令（`command`）：\n- **str_replace**：全文查找替换文本（不破坏块结构；`replacement` 空串=删除命中文本；不支持的跨样式片段会列出块 id 改用 block_replace）\n- **block_insert_after**：在锚块后插入 `content`（`block_id=-1` 文末、`0` 文首；嵌套子块锚 → 插到其真实父块内锚后位置，非文档末尾）\n- **block_replace**：替换单块（`block_id`）或同父连续区间（`start_block_id`+`end_block_id`）；列表容器 id（fetch_doc 聚合 `<ol>/<ul>` 的首项 id）按同父连续同类整段替换，含嵌套子孙\n- **block_delete**：删除单块或同父连续区间（列表容器 id 同样按整段删）\n- **block_move_after**：把 `src_block_ids`（逗号分隔）移动到锚块后\n- **block_copy_after**：复制源块到锚块后（重建同构块；图片/画板等资源块以 token 复制）\n- **append**：文末追加（= block_insert_after -1）\n\n写入前流程：fetch_doc(with-ids/full) 看现状 → 本工具最小范围修改 → 重新 fetch 验证。安全规则：每轮写后 block_id 已变（新插入的用返回的新 id）；同一块多处修改合并一次 block_replace；`<img src=...>`/`<whiteboard token=...>` 等资源占位原样保留不要改纯文本。",
     {
       document_id: { type: "string" },
       command: { type: "string", description: "str_replace | block_insert_after | block_replace | block_delete | block_move_after | block_copy_after | append" },
@@ -1053,14 +1076,17 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
         if (raw === "0") return { parent: rootId, index: 0 }
         const b = byId.get(raw)
         if (!b) throw new Error(`block_id ${raw} 不存在（每轮写入后 id 会变，重新 fetch_doc 取最新 id）`)
-        return { parent: String(b.parent_id ?? rootId), anchorId: raw }
+        const pid = String(b.parent_id ?? "")
+        const parent = pid && byId.has(pid) ? pid : ""
+        if (!parent) throw new Error(`块 ${raw} 的父块（${pid || "无 parent_id"}）不在文档索引中，无法定位插入位置——重新 fetch_doc 取最新结构`)
+        return { parent, anchorId: raw }
       }
-      // 锚块后插入位置 = 锚块在父 children 中的下标 + 1
-      const anchorInsertIndex = (anchorId: string, parent: string): number | undefined => {
+      // 锚块后插入位置 = 锚块在父 children 中的下标 + 1；下标定位失败返回 -1（由调用方报错）
+      const anchorInsertIndex = (anchorId: string, parent: string): number => {
         const p = byId.get(parent)
         const siblings = p && Array.isArray(p.children) ? (p.children as unknown[]).map(String) : []
         const idx = siblings.indexOf(anchorId)
-        return idx >= 0 ? idx + 1 : undefined
+        return idx >= 0 ? idx + 1 : -1
       }
 
       if (cmd === "str_replace") {
@@ -1099,14 +1125,18 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
         }
         const target = String(args.block_id ?? "")
         if (!target || !byId.has(target)) throw new Error("block_delete 需要 block_id 或 start_block_id+end_block_id")
-        const idx = childIndexOf(byId, target)
-        if (idx < 0) throw new Error(`块 ${target} 无法定位下标（父块不存在？）`)
-        const parent = String(byId.get(target)!.parent_id ?? rootId)
+        // 列表块：fetch_doc 聚合读出时容器 id 即首项块 id，删除语义须扩展到同父连续同类整段（含嵌套子孙）
+        const run = listRunRange(byId, target)
+        const idx = run ? run.start : childIndexOf(byId, target)
+        if (idx < 0) throw new Error(`块 ${target} 无法定位下标（父块不存在？重新 fetch_doc）`)
+        const parent = run ? run.parent : String(byId.get(target)!.parent_id ?? "")
         await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${parent}/children/batch_delete`, {
           method: "DELETE",
-          body: { start_index: idx, end_index: idx + 1 },
+          body: { start_index: idx, end_index: run ? run.end : idx + 1 },
         })
-        return { output: `✓ 已删除块 ${target}（父块 ${parent} 下标 ${idx}，含其全部子块）` }
+        return run
+          ? { output: `✓ 已删除列表段 ${run.count} 项（父块 ${parent} 下标 ${run.start}..${run.end - 1}，含各项嵌套子块）——block_id 是 fetch_doc 聚合列表的首项 id，按整段语义删除\n注意：段内所有块的 id 已失效，后续操作重新 fetch_doc。` }
+          : { output: `✓ 已删除块 ${target}（父块 ${parent} 下标 ${idx}，含其全部子块）` }
       }
 
       // 以下指令全部需要 content
@@ -1138,9 +1168,12 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
         let index: number | undefined
         if (cmd === "append") index = undefined
         else if (args.block_id !== undefined && String(args.block_id) === "0") index = 0
-        else if (anchor.anchorId) index = anchorInsertIndex(anchor.anchorId, anchor.parent)
+        else if (anchor.anchorId) {
+          index = anchorInsertIndex(anchor.anchorId, anchor.parent)
+          if (index < 0) throw new Error(`无法定位锚块 ${anchor.anchorId} 在父块 children 中的位置（父块 ${anchor.parent}），重新 fetch_doc 取最新结构`)
+        }
         const groups = buildGroups()
-        const res = await insertWithMedia(ctx, docId, anchor.parent, groups)
+        const res = await insertWithMedia(ctx, docId, anchor.parent, groups, { index })
         const note = res.images.length || res.diagrams.length ? `；图片 ${res.images.filter((x) => x.ok).length}/${res.images.length}、图表 ${res.diagrams.filter((x) => x.ok).length}/${res.diagrams.length}` : ""
         return { output: `✓ 已插入 ${res.count} 个顶层块${cmd === "append" ? "（文末追加）" : index !== undefined ? `（父块 ${anchor.parent} 下标 ${index} 起）` : "（父块末尾）"}${note}\n新块的 id 需重新 fetch_doc 获取；后续编辑不要沿用旧 id。${parseNotes.length ? `\n排版说明：\n- ${parseNotes.join("\n- ")}` : ""}` }
       }
@@ -1162,11 +1195,14 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
           const target = String(args.block_id ?? "")
           const b = byId.get(target)
           if (!b) throw new Error(`block_replace 需要 block_id 或 start_block_id+end_block_id（${target} 不存在）`)
-          parent = String(b.parent_id ?? rootId)
-          const idx = childIndexOf(byId, target)
-          deleteRange = { start: idx, end: idx + 1 }
+          // 列表块：fetch_doc 聚合读出时容器 id 即首项块 id，替换语义须扩展到同父连续同类整段（含嵌套子孙）
+          const run = listRunRange(byId, target)
+          parent = run ? run.parent : String(b.parent_id ?? "")
+          const idx = run ? run.start : childIndexOf(byId, target)
+          if (idx < 0) throw new Error(`块 ${target} 无法定位下标（父块不在索引中？重新 fetch_doc）`)
+          deleteRange = { start: idx, end: run ? run.end : idx + 1 }
           insertAt = idx
-          desc = `块 ${target}`
+          desc = run ? `列表段 ${run.count} 项（${target} 是聚合列表首项 id，按整段替换）` : `块 ${target}`
         }
         // 替换内容为空（清空）时不插入
         const groups = buildGroups()
@@ -1177,7 +1213,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
           })
         }
         if (groups.length) {
-          const res = await insertWithMedia(ctx, docId, parent, groups)
+          const res = await insertWithMedia(ctx, docId, parent, groups, { index: insertAt })
           return { output: `✓ 已替换 ${desc} → ${res.count} 个新顶层块（位置：父块 ${parent} 下标 ${insertAt}）\n注意：被替换块的 id 已失效，新块 id 重新 fetch_doc 获取。${parseNotes.length ? `\n排版说明：\n- ${parseNotes.join("\n- ")}` : ""}` }
         }
         return { output: `✓ 已删除 ${desc}（替换内容为空）` }
@@ -1204,13 +1240,14 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
         const insertParent = anchor.parent
         const index = anchor.anchorId ? anchorInsertIndex(anchor.anchorId, insertParent) : undefined
         await insertGroups(ctx, docId, insertParent, groups, index)
-        // 删除原块（同父连续的合并为区间；跨父的逐个删）
+        // 删除原块：同父从后往前删（前面的删除会使后面的块前移，降序保证下标不错位）
         const del: string[] = []
-        for (const id of srcIds) {
-          const idx = childIndexOf(byId, id)
-          const parent = String(byId.get(id)!.parent_id ?? rootId)
-          if (idx < 0) continue
-          await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${parent}/children/batch_delete`, {
+        const targets = srcIds
+          .map((id) => ({ id, idx: childIndexOf(byId, id), parent: String(byId.get(id)!.parent_id ?? "") }))
+          .filter((x) => x.idx >= 0)
+          .sort((a, b) => b.idx - a.idx)
+        for (const { id, idx, parent: delParent } of targets) {
+          await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${delParent}/children/batch_delete`, {
             method: "DELETE",
             body: { start_index: idx, end_index: idx + 1 },
           })
@@ -1236,6 +1273,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
         newDescs.push(...copyDescs)
         const groups = buildGroups()
         const index = anchor.anchorId ? anchorInsertIndex(anchor.anchorId, anchor.parent) : undefined
+        if (anchor.anchorId && index !== undefined && index < 0) throw new Error(`无法定位锚块 ${anchor.anchorId} 在父块 children 中的位置，重新 fetch_doc 取最新结构`)
         await insertGroups(ctx, docId, anchor.parent, groups, index)
         return { output: `✓ 已复制 ${srcIds.length} 个块到锚点后（源块不变）\n新块 id 重新 fetch_doc 获取。` }
       }
@@ -1404,17 +1442,38 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const deleteBlocks = tool(
     "delete_blocks",
-    "批量删除文档块（按子块下标区间 [start_index, end_index)，不含 end_index；只删一个时省略 end_index 或与 start_index 相同）。**注意：删除不可恢复**。",
+    "批量删除文档块（按子块下标区间 [start_index, end_index)，不含 end_index；**下标相对父块 block_id 的 children，不是文档根**——删嵌套块先传其父块 id，缺省才是文档根）。只删一个时省略 end_index 或与 start_index 相同；也可传 `block_id`（待删块自身的 id）按 id 精确删单块（含其子块，免算下标；列表块按同父连续同类整段删）。**注意：删除不可恢复**。",
     {
       document_id: { type: "string" },
-      block_id: { type: "string", description: "父块 id（缺省文档根块）" },
-      start_index: { type: "number" },
+      block_id: { type: "string", description: "待删块自身 id（按 id 精确删）；缺省时按父块 + start_index 删（此时若需指定父块用 parent_block_id）" },
+      parent_block_id: { type: "string", description: "父块 id（按 start_index 删时指定，缺省文档根块）" },
+      start_index: { type: "number", description: "父块 children 中的起始下标（与 block_id 二选一）" },
       end_index: { type: "number", description: "缺省或与 start_index 相同 = 只删一个" },
     },
-    ["document_id", "start_index"],
+    ["document_id"],
     async (args, ctx) => {
       const docId = String(args.document_id)
-      const blockId = args.block_id ? String(args.block_id) : await rootBlockId(ctx, docId)
+      // 形态一：按待删块自身 id 精确删单块（含子块；列表块扩展为同父连续同类整段）
+      if (args.block_id !== undefined) {
+        const target = String(args.block_id)
+        const { byId } = await loadBlockIndex(ctx, docId)
+        const b = byId.get(target)
+        if (!b) throw new Error(`块 ${target} 不存在（每轮写入后 id 会变，重新 fetch_doc 取最新 id）`)
+        const pid = String(b.parent_id ?? "")
+        const parent = pid && byId.has(pid) ? pid : await rootBlockId(ctx, docId)
+        const run = listRunRange(byId, target)
+        const idx = run ? run.start : childIndexOf(byId, target)
+        if (idx < 0) throw new Error(`块 ${target} 无法定位下标（父块 ${parent}），重新 fetch_doc 取最新结构`)
+        const data = await docxCall(ctx, docId, parent, {}, () =>
+          api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${parent}/children/batch_delete`, {
+            method: "DELETE",
+            body: { start_index: run ? run.start : idx, end_index: run ? run.end : idx + 1 },
+          }),
+        )
+        return jsonResult(ctx, data, run ? `删除成功：列表段 ${run.count} 项（含嵌套子块）` : "删除成功（含其子块）")
+      }
+      if (args.start_index === undefined) throw new Error("delete_blocks 需要 block_id（按 id 精确删）或 start_index（按下标删）之一")
+      const blockId = args.parent_block_id ? String(args.parent_block_id) : await rootBlockId(ctx, docId)
       const start = num(args.start_index, 0)
       // 半开区间 [start, end)：end 必须 > start；缺省/相同视为删单个；反向区间明确报错
       let end = args.end_index !== undefined ? num(args.end_index, start) : start
@@ -1584,7 +1643,8 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
         descendants: batches[i].flatMap((g) => stripLocalMeta(g.blocks)),
       }
       if (i === 0 && index !== undefined) body.index = index
-      // 写入失败走 docxCall 同源诊断（区分文档不存在/无权限/参数不合法）
+      // 多批时后续批紧跟前批末尾插入（前批块数累加），否则会落到父块末尾错位
+      else if (index !== undefined) body.index = index + i
       const res = (await docxCall(ctx, docId, parent, {}, () =>
         api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${parent}/descendant`, { method: "POST", body }),
       )) as
@@ -1605,7 +1665,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     docId: string,
     parent: string,
     groups: BlockGroup[],
-    opts: { keepDiagramSource?: boolean } = {},
+    opts: { keepDiagramSource?: boolean; index?: number } = {},
   ): Promise<{ count: number; images: Array<{ src: string; ok: boolean; note: string }>; diagrams: Array<{ format: string; ok: boolean; note: string }> }> {
     const images: Array<{ src: string; ok: boolean; note: string }> = []
     const diagrams: Array<{ format: string; ok: boolean; note: string }> = []
@@ -1655,7 +1715,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
         if (typeof block._image_name !== "string") block._image_name = "diagram.svg"
       }
     }
-    const res = await insertGroups(ctx, docId, parent, prepared)
+    const res = await insertGroups(ctx, docId, parent, prepared, opts.index)
     for (const block of prepared.flatMap((g) => g.blocks)) {
       const bytes = block._image_bytes instanceof Uint8Array ? block._image_bytes : undefined
       const src = typeof block._image_src === "string" ? block._image_src : undefined
@@ -2715,12 +2775,25 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const getWikiNode = tool(
     "get_wiki_node",
-    "根据 token 查询知识库节点信息（node_token/obj_token/space_id/标题等）。",
-    { token: { type: "string" }, obj_type: { type: "string", description: "docx/sheet/bitable/file/wiki（可选）" } },
+    "根据 token 查询知识库节点信息（node_token/obj_token/space_id/标题等）。token 须为知识库节点 token（wiki 链接 /wiki/{token} 段）或库内文档 obj_token——云空间链接的 doxcn 文档 id 不在本接口范围（用 get_doc_meta）。obj_type 缺省自动依次尝试 wiki/docx（节点 token 是 wiki 链接的第一段，无需手动指定）。",
+    { token: { type: "string" }, obj_type: { type: "string", description: "docx/sheet/bitable/file/wiki（可选；缺省自动 wiki→docx）" } },
     ["token"],
     async (args, ctx) => {
-      const data = await api(ctx, "/open-apis/wiki/v2/spaces/get_node", { query: { token: args.token, obj_type: args.obj_type ?? "docx" } })
-      return jsonResult(ctx, data, "节点信息")
+      // 缺省梯度重试：wiki 链接解析出的 token 是节点 token（obj_type=wiki），云文档 obj_token 是 docx——
+      // 两者无法从 token 本身判别（新版无前缀），首猜必赌一边；仅在 not found 类错误时换下一类型，其余错误（权限等）直接抛
+      const tryTypes = args.obj_type !== undefined && String(args.obj_type) ? [String(args.obj_type)] : ["wiki", "docx"]
+      let lastErr: Error | undefined
+      for (const t of tryTypes) {
+        try {
+          const data = await api(ctx, "/open-apis/wiki/v2/spaces/get_node", { query: { token: args.token, obj_type: t } })
+          return jsonResult(ctx, data, `节点信息（obj_type=${t}）`)
+        } catch (err) {
+          const msg = (err as Error).message
+          if (!/131005|not found/i.test(msg)) throw err
+          lastErr = err as Error
+        }
+      }
+      throw new Error(`未找到节点：token=${args.token}（已尝试 obj_type=${tryTypes.join("/")}，${lastErr?.message ?? ""}）。检查：token 是否来自 wiki 链接 /wiki/{token} 段；云空间链接（doxcn 文档）请改用 get_doc_meta`)
     },
   )
 

@@ -62,6 +62,7 @@
    - **Observe**：结构未知先 `fetch_doc scope=outline` 看目录；改某节 `scope=section`（传标题 block_id）；只有模糊线索 `scope=keyword`（多词 `|` OR，带 context_before/after）；要改时 `detail=with-ids`（拿 id）或 `full`（含样式/配色/列宽）
    - **Diagnose**：判断目标与现状的差距，识别须原样保留的块（图片/画板/表格等资源块）
    - **Patch Plan**：同一措辞多处改用 str_replace；单块/连续区间重写用 block_replace；增章节用 block_insert_after；删冗余用 block_delete；同一块多处修改合并为一次
+   - **嵌套块定位**：插入/替换/删除的锚 id 必须来自最新 fetch_doc（detail=with-ids/full）——位置按锚块真实父块计算（嵌套子块插到其父内锚后位置，不是文档根/末尾）；fetch_doc 聚合读出的有序/无序列表容器 id 即首项块 id，block_replace/block_delete 拿它操作时按同父连续同类整段处理（含嵌套子孙）；改单项用各列表项自身的 id
    - **Patch**：`update_doc` 执行；content 用 XML 排版语法（见 `style_guide name="xml"`）；资源块占位（`<img src=token>` 等）原样保留
    - **Verify**：重新 `fetch_doc` 验证；**每轮写入后 block_id 已变，不沿用旧 id**
 5. 审批：写操作（创建/修改/删除/上传/授权/评论/移动复制）需批准——操作前向用户说明改动点与影响范围（插入位置、删除区间、覆盖区域）；批量写入由工具自动分批，不并发轰炸同一接口

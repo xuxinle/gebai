@@ -1723,6 +1723,52 @@ describe("wiki / permission / 搜索", () => {
     expect(get.output).toContain("wikcn2")
   })
 
+  test("get_wiki_node 缺省 obj_type：wiki 未中自动降 docx，免手动重试；显式指定不重试；非 not-found 错误直接抛", async () => {
+    // wiki 链接解析出的 token 必然是节点 token——旧实现缺省 docx 首次必 131005，退模型重传 obj_type 才能中
+    let calls = 0
+    const { tools } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      if (req.url.includes("/wiki/v2/spaces/get_node")) {
+        calls++
+        const objType = new URL(req.url).searchParams.get("obj_type") ?? ""
+        if (objType === "docx") return jsonResponse({ code: 0, msg: "success", data: { node: { node_token: "objn1", obj_type: "docx" } } })
+        return jsonResponse({ code: 131005, msg: "not found: document not found by token" }, 400)
+      }
+      return jsonResponse({ code: 0, msg: "success", data: {} })
+    })
+    const r = await tools.get_wiki_node.execute({ token: "tokNoWiki" }, ctx())
+    expect(r.output).toContain("obj_type=docx")
+    expect(r.output).toContain("objn1")
+    // 显式传 obj_type：只调一次，不重试
+    calls = 0
+    await tools.get_wiki_node.execute({ token: "tokX", obj_type: "wiki" }, ctx())
+    expect(calls).toBe(1)
+    // 非 not-found（如权限）：不重试直接抛，保留原始错误
+    calls = 0
+    const mkNoPerm = () =>
+      makeTools((req) => {
+        if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+        if (req.url.includes("/wiki/v2/spaces/get_node")) return jsonResponse({ code: 1770002, msg: "no permission" }, 403)
+        return jsonResponse({ code: 0, msg: "success", data: {} })
+      })
+    const noPerm = mkNoPerm()
+    const noPermResult = await noPerm.tools.get_wiki_node.execute({ token: "tokP" }, ctx())
+    expect(noPermResult.output).toContain("1770002")
+    expect(noPerm.records.filter((r) => r.url.includes("get_node"))).toHaveLength(1)
+    // 两种都未中：给出可操作指引（检查 wiki 链接段 / 改用 get_doc_meta）
+    const mkAllMiss = () =>
+      makeTools((req) => {
+        if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+        if (req.url.includes("/wiki/v2/spaces/get_node")) return jsonResponse({ code: 131005, msg: "not found: document not found by token" }, 400)
+        return jsonResponse({ code: 0, msg: "success", data: {} })
+      })
+    const allMiss = mkAllMiss()
+    const missResult = await allMiss.tools.get_wiki_node.execute({ token: "doxcnNotWiki" }, ctx())
+    expect(missResult.output).toContain("已尝试 obj_type=wiki/docx")
+    expect(missResult.output).toContain("get_doc_meta")
+    expect(allMiss.records.filter((r) => r.url.includes("get_node"))).toHaveLength(2)
+  })
+
   test("add_permission 发送协作者请求", async () => {
     const { tools, records } = makeTools((req) => {
       if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
@@ -3234,5 +3280,163 @@ describe("docOutline / replaceInBlocks / get_doc_blocks 大纲", () => {
     expect(r.output).toContain("文档大纲（1 个标题）")
     expect(r.output).toContain("- h1 1 甲  [h1] 节内块 1")
     expect(r.output).toContain("get_doc_text")
+  })
+})
+
+/* ================= update_doc 嵌套块写操作（列表无容器：聚合 id / 精确 index / 级联） ================= */
+
+/** 测试用块树：文档根(page) → [h2 标题, p1, ol1..ol3 有序三项(首项带嵌套子列表 ol1a/ol1b), p2]，另根尾挂 ulA 无序两项（验证同类不互吃）。
+ *  形态与飞书块列表接口一致：扁列表 + parent_id + 直接子块 children（页块无 parent_id）。 */
+function nestedBlocksDoc(): Array<Record<string, unknown>> {
+  const t = (content: string): Record<string, unknown> => ({ elements: [{ text_run: { content } }] })
+  return [
+    { block_id: "page", block_type: 1, children: ["h2", "p1", "ol1", "ol2", "ol3", "p2", "ulA1", "ulA2"] },
+    { block_id: "h2", block_type: 4, parent_id: "page", heading2: t("标题") },
+    { block_id: "p1", block_type: 2, parent_id: "page", text: t("首段") },
+    { block_id: "ol1", block_type: 13, parent_id: "page", children: ["ol1a", "ol1b"], ordered: t("项一") },
+    { block_id: "ol1a", block_type: 13, parent_id: "ol1", ordered: t("嵌套子项甲") },
+    { block_id: "ol1b", block_type: 13, parent_id: "ol1", ordered: t("嵌套子项乙") },
+    { block_id: "ol2", block_type: 13, parent_id: "page", ordered: t("项二") },
+    { block_id: "ol3", block_type: 13, parent_id: "page", ordered: t("项三") },
+    { block_id: "p2", block_type: 2, parent_id: "page", text: t("尾段") },
+    { block_id: "ulA1", block_type: 12, parent_id: "page", bullet: t("无序一") },
+    { block_id: "ulA2", block_type: 12, parent_id: "page", bullet: t("无序二") },
+  ]
+}
+
+function nestedDocHandler(extra?: (req: Req) => Response | undefined): (req: Req) => Response {
+  return (req) => {
+    if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+    if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page", block_type: 1 }] } })
+    if (req.url.includes(`/documents/doc1/blocks`) && (req.init?.method ?? "GET") === "GET") {
+      return jsonResponse({ code: 0, msg: "success", data: { items: nestedBlocksDoc(), has_more: false } })
+    }
+    const hit = extra?.(req)
+    if (hit) return hit
+    return jsonResponse({ code: 0, msg: "success", data: {} })
+  }
+}
+
+describe("update_doc 嵌套块写操作", () => {
+  test("block_insert_after 锚嵌套子块：内容插到真实父的锚后（非文档根/末尾）", async () => {
+    const { tools, records } = makeTools(nestedDocHandler())
+    // 锚 ol1a（ol1 的嵌套子项，父 children=[ol1a,ol1b]，下标0 → 插入 index=1）
+    const r = await tools.update_doc.execute({ document_id: "doc1", command: "block_insert_after", block_id: "ol1a", content: "<p>嵌套插入</p>" }, ctx())
+    expect(r.output).toContain("父块 ol1")
+    expect(r.output).toContain("下标 1 起")
+    const insert = records.find((x) => x.url.includes("/descendant"))
+    expect(insert).toBeDefined()
+    expect(insert!.url).toContain("/blocks/ol1/descendant")
+    expect((JSON.parse(String(insert!.init?.body)) as Record<string, unknown>).index).toBe(1)
+  })
+
+  test("block_insert_after 锚根级块：精确下标 +1（不在末尾）", async () => {
+    const { tools, records } = makeTools(nestedDocHandler())
+    // 锚 h2（根 children 下标 0 → 插入 index=1）；修复前 index 根本不传、落到文档末尾
+    await tools.update_doc.execute({ document_id: "doc1", command: "block_insert_after", block_id: "h2", content: "<p>新段</p>" }, ctx())
+    const insert = records.find((x) => x.url.includes("/descendant"))
+    expect(insert!.url).toContain("/blocks/page/descendant")
+    expect((JSON.parse(String(insert!.init?.body)) as Record<string, unknown>).index).toBe(1)
+  })
+
+  test("block_replace 聚合列表 id（首项）：删同父连续同类整段 + 原位插入（无孤儿 li）", async () => {
+    const { tools, records } = makeTools(nestedDocHandler())
+    // ol1 是 fetch_doc 聚合 <ol id=ol1> 的容器 id（首项块 id）：应删 [2,5)（ol1..ol3，含 ol1 嵌套子孙）并在下标 2 原位插入
+    const r = await tools.update_doc.execute({ document_id: "doc1", command: "block_replace", block_id: "ol1", content: "<ol><li>新项</li></ol>" }, ctx())
+    expect(r.output).toContain("列表段 3 项")
+    expect(r.output).toContain("整段替换")
+    const del = records.find((x) => x.url.includes("/page/children/batch_delete"))
+    expect(JSON.parse(String(del!.init?.body))).toEqual({ start_index: 2, end_index: 5 })
+    const insert = records.find((x) => x.url.includes("/descendant"))
+    expect(insert!.url).toContain("/blocks/page/descendant")
+    expect((JSON.parse(String(insert!.init?.body)) as Record<string, unknown>).index).toBe(2)
+  })
+
+  test("block_replace 非首项 li id：仅删该单项（精确编辑）", async () => {
+    const { tools, records } = makeTools(nestedDocHandler())
+    // ol2（聚合 XML 中带自身 id 的 <li>）：单项替换，不动 ol1/ol3
+    await tools.update_doc.execute({ document_id: "doc1", command: "block_replace", block_id: "ol2", content: "<p>改成段落</p>" }, ctx())
+    const del = records.find((x) => x.url.includes("/page/children/batch_delete"))
+    expect(JSON.parse(String(del!.init!.body))).toEqual({ start_index: 3, end_index: 4 })
+    const insert = records.find((x) => x.url.includes("/descendant"))
+    expect((JSON.parse(String(insert!.init!.body)) as Record<string, unknown>).index).toBe(3)
+  })
+
+  test("block_delete 段中非首项 li：只删单项，不扩展整段也不吃后续异类型", async () => {
+    const { tools, records } = makeTools(nestedDocHandler())
+    // 锚 ol3（有序段末项，非首项，根 children=[h2,p1,ol1,ol2,ol3,p2,ulA1,ulA2] 下标 4）：只删自己 [4,5)，不扩展整段（仅首项才是聚合容器 id）、不吃 p2/ulA1
+    await tools.update_doc.execute({ document_id: "doc1", command: "block_delete", block_id: "ol3" }, ctx())
+    const del = records.find((x) => x.url.includes("/page/children/batch_delete"))
+    expect(JSON.parse(String(del!.init?.body))).toEqual({ start_index: 4, end_index: 5 })
+  })
+
+  test("block_delete 聚合列表 id：整段级联删（含嵌套子孙，无孤儿）", async () => {
+    const { tools, records } = makeTools(nestedDocHandler())
+    const r = await tools.update_doc.execute({ document_id: "doc1", command: "block_delete", block_id: "ol1" }, ctx())
+    expect(r.output).toContain("列表段 3 项")
+    expect(r.output).toContain("含各项嵌套子块")
+    const del = records.find((x) => x.url.includes("/page/children/batch_delete"))
+    expect(JSON.parse(String(del!.init?.body))).toEqual({ start_index: 2, end_index: 5 })
+  })
+
+  test("block_delete 非首项 li：只删单项", async () => {
+    const { tools, records } = makeTools(nestedDocHandler())
+    await tools.update_doc.execute({ document_id: "doc1", command: "block_delete", block_id: "ol2" }, ctx())
+    const del = records.find((x) => x.url.includes("/page/children/batch_delete"))
+    expect(JSON.parse(String(del!.init?.body))).toEqual({ start_index: 3, end_index: 4 })
+  })
+
+  test("block_move_after 同父多块：删除按下标降序（不移位错删）", async () => {
+    const { tools, records } = makeTools(nestedDocHandler())
+    // 移 p1（根下标1）与 ol2（根下标3）到 p2 后：先插后删，删除须先 3 后 1（修复前顺序删 → ol2 删到的是已前移的块）
+    await tools.update_doc.execute({ document_id: "doc1", command: "block_move_after", src_block_ids: "p1,ol2", block_id: "p2", content: "<p>占位</p>" }, ctx())
+    const dels = records.filter((x) => x.url.includes("/page/children/batch_delete"))
+    expect(dels).toHaveLength(2)
+    expect(JSON.parse(String(dels[0].init?.body))).toEqual({ start_index: 3, end_index: 4 })
+    expect(JSON.parse(String(dels[1].init?.body))).toEqual({ start_index: 1, end_index: 2 })
+  })
+
+  test("resolveAnchor 父块不在索引：明确报错而非默默插到根", async () => {
+    const orphan = (): Array<Record<string, unknown>> => {
+      const base = nestedBlocksDoc()
+      const li = base.find((b) => b.block_id === "ol1a") as Record<string, unknown>
+      li.parent_id = "ghost" // 指向不在索引中的父
+      return base
+    }
+    const { tools } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page", block_type: 1 }] } })
+      if (req.url.includes("/documents/doc1/blocks") && (req.init?.method ?? "GET") === "GET") return jsonResponse({ code: 0, msg: "success", data: { items: orphan(), has_more: false } })
+      return jsonResponse({ code: 0, msg: "success", data: {} })
+    })
+    const r = await tools.update_doc.execute({ document_id: "doc1", command: "block_insert_after", block_id: "ol1a", content: "<p>x</p>" }, ctx())
+    expect(r.output).toContain("不在文档索引中")
+  })
+})
+
+describe("delete_blocks 按 id 删除", () => {
+  test("block_id 形态：列表首项 id 按整段删、非首项按单项删", async () => {
+    const { tools, records } = makeTools(nestedDocHandler())
+    const r1 = await tools.delete_blocks.execute({ document_id: "doc1", block_id: "ol1" }, ctx())
+    expect(r1.output).toContain("列表段 3 项")
+    const del = records.find((x) => x.url.includes("/page/children/batch_delete"))
+    expect(JSON.parse(String(del!.init?.body))).toEqual({ start_index: 2, end_index: 5 })
+    const r2 = await tools.delete_blocks.execute({ document_id: "doc1", block_id: "ol2" }, ctx())
+    expect(r2.output).toContain("删除成功")
+    const del2 = records.filter((x) => x.url.includes("/page/children/batch_delete"))
+    expect(JSON.parse(String(del2[1].init?.body))).toEqual({ start_index: 3, end_index: 4 })
+  })
+
+  test("parent_block_id + start_index：下标相对指定父块（缺省根）", async () => {
+    const { tools, records } = makeTools(nestedDocHandler())
+    await tools.delete_blocks.execute({ document_id: "doc1", parent_block_id: "ol1", start_index: 0, end_index: 2 }, ctx())
+    const del = records.find((x) => x.url.includes("/ol1/children/batch_delete"))
+    expect(JSON.parse(String(del!.init?.body))).toEqual({ start_index: 0, end_index: 2 })
+  })
+
+  test("两个参数形态都不传时明确报错", async () => {
+    const { tools } = makeTools(nestedDocHandler())
+    const r = await tools.delete_blocks.execute({ document_id: "doc1" }, ctx())
+    expect(r.output).toContain("block_id（按 id 精确删）或 start_index")
   })
 })
