@@ -2,9 +2,10 @@ import { describe, expect, test } from "bun:test"
 import { def } from "./wps"
 
 describe("wps 子Agent（Office/PDF 文档处理）", () => {
-  test("十三工具齐备：word/excel/ppt/pdf 读写全覆盖，均经 projectAware 包装（project 参数）", () => {
+  test("十四工具齐备：word/excel/ppt/pdf 读写全覆盖（含 excel_batch 批量数据管道），均经 projectAware 包装（project 参数）", () => {
     const names = Object.keys(def.tools!)
     expect(names.sort()).toEqual([
+      "excel_batch",
       "excel_edit",
       "excel_read",
       "excel_write",
@@ -27,7 +28,7 @@ describe("wps 子Agent（Office/PDF 文档处理）", () => {
   })
 
   test("安全模式姿态：写工具显式不提供（safeMode:false），读工具免声明（默认注册，实现只读）", () => {
-    for (const n of ["word_create", "word_append", "excel_write", "excel_edit", "ppt_create", "pdf_create", "pdf_merge", "pdf_split", "pdf_edit"]) {
+    for (const n of ["word_create", "word_append", "excel_write", "excel_edit", "excel_batch", "ppt_create", "pdf_create", "pdf_merge", "pdf_split", "pdf_edit"]) {
       expect(def.tools![n].safeMode).toBe(false)
     }
     for (const n of ["word_read", "excel_read", "ppt_read", "pdf_read"]) {
@@ -41,6 +42,7 @@ describe("wps 子Agent（Office/PDF 文档处理）", () => {
     expect(def.preload).toBe(false)
     expect(def.systemPrompt).toContain("word_create")
     expect(def.systemPrompt).toContain("pdf_create")
+    expect(def.systemPrompt).toContain("excel_batch")
     expect(def.systemPrompt).toContain(".docx")
   })
 })
