@@ -21,7 +21,7 @@ import tempfile
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-BIN = ROOT / "build" / "dev" / "bin" / "gbcode.exe"
+BIN = ROOT / "build" / "dev" / "bin" / ("gbcode.exe" if __import__("os").name == "nt" else "gbcode")
 
 
 def log(msg):

@@ -70,7 +70,11 @@ auto load_ssl() -> const SslAbi* {
       abi.load_error = "未找到 libcrypto";
       return;
     }
-#define ST_SYM(var, handle, name)                                         \   // lint-allow: L3 dlopen 符号还原样板：11 个 ST_SYM 展开是同一形参表，函数化反而藏错
+// lint-allow: L3 dlopen 符号还原样板：11 个 ST_SYM 展开是同一形参表，函数化反而藏错。
+// ⚠ 注释必须在宏定义**之外**：续行 `\` 后面跟 `//` 会让 `\` 不在行尾
+// （GCC 判 stray '\'——Windows MinGW 上能过是因为它宽容尾随内容，
+// Linux g++ 直接拒编；本文件首次在 Linux 上编译时现形）。
+#define ST_SYM(var, handle, name)                                         \
   do {                                                                    \
     (var) = reinterpret_cast<decltype(var)>(dlsym((handle), (name)));     \
     if ((var) == nullptr) {                                               \
@@ -151,24 +155,26 @@ auto TlsStream::connect(std::string_view host, std::uint16_t port, int timeout_m
     -> Result<TlsStream> {
   const SslAbi* abi = load_ssl();
   if (abi == nullptr || !abi->ok) {
-    return Error{"TLS 不可用：" + (abi != nullptr ? abi->load_error : std::string("加载失败"))};
+    return Err{Error{ErrorCode::Unsupported,
+                 "TLS 不可用：" + (abi != nullptr ? abi->load_error : std::string("加载失败"))}};
   }
   auto tcp = connect_tcp(host, port, timeout_ms);
   if (!tcp.has_value()) {
-    return Error{std::format("TLS 连接：TCP 建立失败: {}", tcp.error().to_string())};
+    return Err{Error{ErrorCode::Io,
+                 std::format("TLS 连接：TCP 建立失败: {}", tcp.error().to_string())}};
   }
   auto impl = std::make_unique<Impl>();
   impl->abi = abi;
   impl->tcp = std::move(*tcp);
 
   const void* method = abi->tls_client_method();
-  if (method == nullptr) return Error{"TLS 连接：TLS_client_method 为空"};
+  if (method == nullptr) return Err{Error{ErrorCode::Io, "TLS 连接：TLS_client_method 为空"}};
   impl->ctx = abi->ctx_new(method);
-  if (impl->ctx == nullptr) return Error{"TLS 连接：SSL_CTX_new 失败"};
+  if (impl->ctx == nullptr) return Err{Error{ErrorCode::Io, "TLS 连接：SSL_CTX_new 失败"}};
   // 默认校验链 + 主机名（OpenSSL 1.1+ 默认开启；显式置位以对齐旧版）
   abi->ssl_set_verify(nullptr, kVerifyPeer, nullptr);   // ctx 级默认——ctx 参数在 set_verify 里
   impl->ssl = abi->ssl_new(impl->ctx);
-  if (impl->ssl == nullptr) return Error{"TLS 连接：SSL_new 失败"};
+  if (impl->ssl == nullptr) return Err{Error{ErrorCode::Io, "TLS 连接：SSL_new 失败"}};
   abi->ssl_set_fd(impl->ssl, static_cast<int>(impl->tcp.native_handle()));
   // SNI（多数服务器缺它就握手失败）
   (void)abi->ssl_ctrl(impl->ssl, kSetTlsExtHostname, 1,
@@ -180,7 +186,8 @@ auto TlsStream::connect(std::string_view host, std::uint16_t port, int timeout_m
   const int connected = abi->ssl_connect(impl->ssl);
   if (connected != 1) {
     const int ssl_error = static_cast<int>(abi->ssl_get_error(impl->ssl, connected));
-    return Error{"TLS 连接：握手失败（" + ssl_error_text(*abi, ssl_error) + "）"};
+    return Err{Error{ErrorCode::Io,
+                 "TLS 连接：握手失败（" + ssl_error_text(*abi, ssl_error) + "）"}};
   }
   return TlsStream(impl.release());
 }
@@ -201,7 +208,7 @@ void TlsStream::close() noexcept {
 }
 
 auto TlsStream::write_all(std::span<const std::uint8_t> data) -> Status {
-  if (impl_ == nullptr || impl_->abi == nullptr) return Error{"TLS 写：会话无效"};
+  if (impl_ == nullptr || impl_->abi == nullptr) return Err{Error{ErrorCode::Io, "TLS 写：会话无效"}};
   const SslAbi& abi = *impl_->abi;
   std::size_t offset = 0;
   while (offset < data.size()) {
@@ -210,22 +217,22 @@ auto TlsStream::write_all(std::span<const std::uint8_t> data) -> Status {
         abi.ssl_write(impl_->ssl, data.data() + offset, chunk);
     if (written <= 0) {
       const int ssl_error = static_cast<int>(abi.ssl_get_error(impl_->ssl, written));
-      return Error{"TLS 写失败（" + ssl_error_text(abi, ssl_error) + "）"};
+      return Err{Error{ErrorCode::Io, "TLS 写失败（" + ssl_error_text(abi, ssl_error) + "）"}};
     }
     offset += static_cast<std::size_t>(written);
   }
-  return Status::ok();
+  return ok();   // st::ok()（free function）——Status 无静态 ok()
 }
 
 auto TlsStream::read_some(std::span<std::uint8_t> buffer) -> Result<std::size_t> {
-  if (impl_ == nullptr || impl_->abi == nullptr) return Error{"TLS 读：会话无效"};
+  if (impl_ == nullptr || impl_->abi == nullptr) return Err{Error{ErrorCode::Io, "TLS 读：会话无效"}};
   const SslAbi& abi = *impl_->abi;
   const int got = abi.ssl_read(impl_->ssl, buffer.data(), static_cast<int>(buffer.size()));
   if (got > 0) return static_cast<std::size_t>(got);
   const int ssl_error = static_cast<int>(abi.ssl_get_error(impl_->ssl, got));
   if (ssl_error == kSslErrorZeroReturn) return std::size_t{0};
   if (ssl_error == kSslErrorWantRead) return std::size_t{0};   // 非阻塞下无数据
-  return Error{"TLS 读失败（" + ssl_error_text(abi, ssl_error) + "）"};
+  return Err{Error{ErrorCode::Io, "TLS 读失败（" + ssl_error_text(abi, ssl_error) + "）"}};
 }
 
 void TlsStream::set_nonblocking(bool enabled) {

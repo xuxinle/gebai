@@ -1132,8 +1132,27 @@ struct LanguageFlags {
   std::vector<std::string> libraries;
   const bool toolchain_takes_over = toolchain.cross() && !toolchain.system_libs.empty();
   if (!toolchain_takes_over) {
-    const auto keep = [&toolchain](const std::string& lib) {
-      return !(toolchain.platform == "windows" && (lib == "dl" || lib == "rt"));
+    // 清单顶层的 `system_libs` 可能是**跨平台并集**（本仓库的 st.pkg 就是：
+    // Windows 宿主上维护，Windows 节 + POSIX 节写在一起）——不能原样交给链接器。
+    // 规则：**按目标平台过滤**，而不是枚举例外（旧代码只对 windows 目标滤 dl/rt，
+    // POSIX 目标上把 dbghelp/nanosrv/secur32 全部传出——Linux 宿主上
+    // `st build gbcode` 链接时才现形：unable to find library -ldbghelp）。
+    // 权威清单就是 link-libs.txt（default_system_libs 读它）：只放行**两节交集
+    // 之外、清单里明确写了且当节认可**的库。实现：目标节的库集合 + 非节内库
+    // （工程自加的依赖库名，如 sqlite3）照放——判断依据是“名字是否出现在
+    // link-libs.txt 任一节”里：出现过的就是平台库，按目标节取舍；没出现过的
+    // 是工程自己声明的依赖，与平台无关，保留。
+    const auto defaults = default_system_libs(toolchain.platform);
+    const auto other_platform_libs = default_system_libs(
+        toolchain.platform == "windows" ? "posix" : "windows");
+    const auto keep = [&toolchain, &defaults, &other_platform_libs](const std::string& lib) {
+      // 工程自声明库：不在任何一个平台节里 → 与平台无关，保留。
+      const bool platform_lib =
+          std::ranges::find(defaults, lib) != defaults.end() ||
+          std::ranges::find(other_platform_libs, lib) != other_platform_libs.end();
+      if (!platform_lib) return true;
+      // 平台库：只留目标平台的（Windows 目标滤 POSIX 库，POSIX 目标滤 Windows 库）。
+      return std::ranges::find(defaults, lib) != defaults.end();
     };
     for (const auto& lib : manifest.system_libs) {
       if (keep(lib)) libraries.push_back(lib);
@@ -1141,7 +1160,6 @@ struct LanguageFlags {
     for (const auto& lib : manifest.dependency_system) {
       if (keep(lib)) libraries.push_back(lib);
     }
-    const auto defaults = default_system_libs(toolchain.platform);
     libraries.insert(libraries.end(), defaults.begin(), defaults.end());
   }
   libraries.insert(libraries.end(), toolchain.system_libs.begin(), toolchain.system_libs.end());
@@ -1884,8 +1902,31 @@ namespace {
   for (std::size_t index = 0; index < shards; ++index) {
     if (exit_codes[index] < 0) {
       (void)fs::remove_all(shard_dir);
+      // 报错必须带可定位的信息（曾实测「测试分片 2 未能启动: 」——原因栏空白，
+      // 而真相是分片进程越界 abort）：启动失败带上 errno 语义，已启动但异常
+      // 退出（被信号杀/非零码退出且没写 JUnit 报告——分片正常时退出码就是失败
+      // 用例数，但那时报告一定在；报告缺失的非零退出只可能是异常路径）另列一条。
+      const std::string reason = first_errors[index].empty()
+                                     ? std::string("未知原因（进程未返回结果）")
+                                     : first_errors[index];
+      return unexpected(
+          ErrorCode::Internal,
+          std::format("测试分片 {}/{} 未能启动: {}", index + 1, shards, reason));
+    }
+    // 异常退出 vs 正常失败：分片进程的退出码就是该片的失败用例数（0 = 全绿）。
+    // 但「报告文件没写出来」说明进程根本没跑到收尾——最常见的是用例里
+    // abort/SIGSEGV 把整片带走（曾实测：16 片汇总全是 0 failed、整体退出码 1，
+    // 中间夹一行空原因的「未能启动」——只看汇总行会当成全绿）。
+    // 这里把「非零退出 + 无报告」显式报出，并计入总失败数，不再只是静默打印。
+    if (exit_codes[index] != 0 && !junit_path.empty() &&
+        !fs::exists(shard_reports[index])) {
+      (void)fs::remove_all(shard_dir);
       return unexpected(ErrorCode::Internal,
-                        std::format("测试分片 {} 未能启动: {}", index + 1, first_errors[index]));
+                        std::format("测试分片 {}/{} 异常退出（码 {}）且未写出报告："
+                                    "片内用例可能直接 abort/崩溃，后续用例未运行——"
+                                    "请单跑该分片复现：{} --shard {}/{}",
+                                    index + 1, shards, exit_codes[index], output,
+                                    index + 1, shards));
     }
     failed_total += exit_codes[index];
   }

@@ -122,10 +122,18 @@ namespace gbcode_ui {
     ensure_blame();
     // 单文件历史：同上（`git log --follow` 也是子进程）。
     ensure_file_history();
-    const bool diagnostics_changed = lsp_.pump();
+    (void)lsp_.pump();   // 诊断到达与否只影响 push_diagnostics_to_editor 内部的指纹
     // 待落地的跳转（跨文件）：编辑器实例在新文件装载后才就位，所以在这里补做。
     apply_pending_navigation_jump();
-    if (!diagnostics_changed) return;
+    // 问题列表刷新：**无条件走到这里**（内部指纹早退）。
+    //
+    // 旧代码 `if (!diagnostics_changed) return;` 挡住了两个真时机：
+    // ① 「打开新文件后的第一帧」——装载发生在 build() 末尾，本轮泵早就过了，
+    //    下一帧又因 `pump()` 无新诊断而早退，于是**内置轻量检查永远不跑**
+    //    （实测：打开含 3 处问题的 README，计数恒在 0，点一下计数按钮才变 3）；
+    // ② 「切到无 LSP 诊断的文件」——旧计数残留（实测：从 3 掉到 1 而非 0）。
+    // 指纹把「该不该刷」变成数据比较，三个时机（装载后/编辑回调/本泵）
+    // 全部收敛到这里，代价是每个几条字符串哈希。
     refresh_problems();
     push_diagnostics_to_editor();
   }
@@ -272,6 +280,10 @@ namespace gbcode_ui {
       // 切到新文件：把语言服务指向它（懒启动 server）——只对**磁盘上的真文件**做，
       // 内存缓冲（untitled-N）没有 URI 可同步。
       sync_language_document(buffers[active]);
+      // 新文件装载完毕：立即刷一次问题列表（指纹早退，成本可忽略）。
+      // 只依赖帧首泵的话要等到下一帧，且那帧可能因「无新诊断」走不到刷新——
+      // 这就是「打开文件后计数恒为 0」的第二个成因（另一个在 pump_language_service）。
+      refresh_problems();
     }
     // 当前文件内容变了就同步给 server（`sync_document` 内部按"文本是否变化"早退，
     // 所以每帧调用是安全的——这是**增量同步的唯一入口**）。
@@ -926,6 +938,10 @@ namespace gbcode_ui {
         bottom_visible_.set(true);
         git_log_wanted_ = true;
       }, "当前分支 — 点一下打开 Git 工具窗");
+      // 问题计数必须读快照版本：error_count()/warning_count() 读的是普通成员
+      // problems_（不在依赖表里），不读版本的话文本 lambda 永不重跑——
+      // 「诊断到了编辑器、计数恒为 0、点一下才对」就是这么来的（实测）。
+      (void)problems_revision_.value();
       status_item(c, "status-errors", "error",
                   [this] { return std::to_string(error_count()); }, [this] { show_problems(false); },
                   "错误数 — 点一下跳到第一处");

@@ -58,9 +58,10 @@
       "compiler": "x86_64-w64-mingw32-g++",
       "c_compiler": "x86_64-w64-mingw32-gcc",
       "platform": "windows",
-      "//system_libs_note": "交叉接管用（resolve_system_libraries：声明即整体接管不追默认）。内容与仓库根 link-libs.txt 的 windows 节同步维护。",
-      "system_libs": ["ws2_32", "user32", "gdi32", "shell32", "dbghelp", "nanosrv", "psapi", "secur32", "winpthread"],
-      "defines": ["_WIN32_WINNT=0x0A00", "WINVER=0x0A00", "NTDDI_VERSION=0x0A000000"],
+      "//system_libs_note": "交叉接管用（resolve_system_libraries：声明即整体接管不追默认）。与 link-libs.txt 的 windows 节的**差异是有意的**：nanosrv 不在——它只在本机 MSYS2 MinGW 里需要（那里的 libdbghelp.a 只是转发壳）；mingw-w64 交叉包（Ubuntu 等）的 libdbghelp.a 自带真符号（实测 nm 可见 SymInitialize/SymFromAddr），再链 nanosrv 反而 cannot find -lnanosrv。",
+      "system_libs": ["ws2_32", "user32", "gdi32", "shell32", "dbghelp", "psapi", "secur32", "winpthread"],
+      "defines": ["_WIN32_WINNT=0x0A00", "WINVER=0x0A00", "NTDDI_VERSION=0x0A000006"],
+      "//defines_note": "NTDDI_VERSION 必须给到 RS5(0x0A000006)：ConPTY 的 HPCON/CreatePseudoConsole 在 mingw-w64 的 wincon.h 里由 #if (NTDDI_VERSION >= 0x0A000006) 门控。旧值 0x0A000000 会让 platform_pty.cpp 编不过（HPCON has not been declared）——本机 Windows MinGW 因更高默认 SDK 值而看不出来，Linux 交叉首次实编时现形。",
       "executable_suffix": ".exe",
       "extra_flags": ["-static-libgcc", "-static-libstdc++"]
     },
@@ -74,7 +75,8 @@
       "platform": "windows",
       "//system_libs_note": "同上：与 link-libs.txt 的 windows 节同步。",
       "system_libs": ["ws2_32", "user32", "gdi32", "shell32", "dbghelp", "nanosrv", "psapi", "secur32", "winpthread"],
-      "defines": ["_WIN32_WINNT=0x0A00", "WINVER=0x0A00", "NTDDI_VERSION=0x0A000000"],
+      "defines": ["_WIN32_WINNT=0x0A00", "WINVER=0x0A00", "NTDDI_VERSION=0x0A000006"],
+      "//defines_note": "NTDDI_VERSION 必须给到 RS5(0x0A000006)：ConPTY 的 HPCON/CreatePseudoConsole 在 mingw-w64 的 wincon.h 里由 #if (NTDDI_VERSION >= 0x0A000006) 门控。旧值 0x0A000000 会让 platform_pty.cpp 编不过（HPCON has not been declared）——本机 Windows MinGW 因更高默认 SDK 值而看不出来，Linux 交叉首次实编时现形。",
       "//suppressions": "对 clang 的告警收敛，全部来自 **vendored 第三方头**（sqlite3.h 用 MSVC 扩展类型 __int64、quickjs.h 用旧式转换与 NAN）——那是上游代码，不是我们要改的东西。工程自己的代码仍与 gcc 同等严格。",
       "suppressions": ["-Wno-language-extension-token", "-Wno-old-style-cast", "-Wno-double-promotion"],
       "executable_suffix": ".exe"

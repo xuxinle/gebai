@@ -16,7 +16,7 @@ import sys
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-BIN = ROOT / "build" / "dev" / "bin" / "gbcode.exe"
+BIN = ROOT / "build" / "dev" / "bin" / ("gbcode.exe" if __import__("os").name == "nt" else "gbcode")
 
 sys.path.insert(0, str(ROOT / "tools"))
 from gbcode_hint_e2e import Client, wait_until  # noqa: E402

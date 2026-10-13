@@ -26,7 +26,7 @@ import tempfile
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-BIN = ROOT / "build" / "dev" / "bin" / "gbcode.exe"
+BIN = ROOT / "build" / "dev" / "bin" / ("gbcode.exe" if __import__("os").name == "nt" else "gbcode")
 
 
 def log(msg):
@@ -185,8 +185,11 @@ def main():
         proc, client, shots = start(repo)
         check(panel_open(client), "前置：终端面板处于显示态")
         client.ok("invoke", {"id": "terminal", "action": "focus"})
-        client.ok("invoke", {"id": "terminal", "action": "send_line",
-                             "argument": "1..120 | % { \"Scroll_$_\" }"})
+        # 长输出命令按平台选（Windows PowerShell / POSIX shell 语法不同）：
+        import platform as _platform
+        flood = ("1..120 | % { \"Scroll_$_\" }" if _platform.system() == "Windows"
+                 else "for i in $(seq 1 120); do echo \"Scroll_$i\"; done")
+        client.ok("invoke", {"id": "terminal", "action": "send_line", "argument": flood})
         time.sleep(2.0)
 
         props = client.props("terminal")

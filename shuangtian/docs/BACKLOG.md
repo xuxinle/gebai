@@ -24,6 +24,32 @@
 > 根因与修复见下方「已完成」段（含 `tests/ui_terminal_input_test.cpp` 与
 > `tools/terminal_input_reverse_verify.py`）。
 
+> 📋 2026-10-13 **gbcode 实测缺陷清账轮（P1 九项全清 + 五项计划外）**：
+> 上一轮（f6857e7）实测出的 9 条「确认未修」全部修完（每条见下方 P1 章内的「修复」注记）：
+> 问题计数刷新（指纹收敛 + problems_revision_ 渲染信号）、glob 提示文案、菜单键位/hover
+> 死代码、scm-refresh 撞 id（工具条改名 + **框架层 UiRoot::find 可见优先**）、invoke 补
+> 顶层 error 字段（DESIGN 协议表同步）、run_shards 崩溃分片显式报错、--scale/--frames
+> 非法值 exit 2（不再 abort）、clangd 不就绪（真根因：`--workspace` 从未调
+> set_workspace——与条目推测的 ensure_started/which 无关，实测钉死）。
+>
+> **计划外修出五个真缺陷**（都在「Linux 首次实编/实跑」路径上现形——本仓此前只在
+> Windows 上验证，这正是 BACKLOG 自举轮「能在另一平台实跑才算验过」的再次应验）：
+> ① `platform_tls_openssl.cpp` 宏续行符后跟注释（stray '\' 编不过）+ Error 构造
+> 形状错（10 处）——**该文件自 2a64fd9 加入起从未在任何平台被编过**；
+> ② `resolve_system_libraries` 把跨平台并集原样交链接器（Linux 上链 -ldbghelp 失败），
+> 改为按目标平台过滤（link-libs.txt 两节为准，工程自声明库保留）；
+> ③ mingw 交叉档 NTDDI_VERSION 低于 ConPTY 门控值（HPCON 未声明）→ 0x0A000006；
+> nanosrv 只在本机 MSYS2 需要，交叉档去掉（cannot find -lnanosrv）；
+> ④ **e2e 会被会话恢复污染**：gbcode_e2e.py 裸启动恢复了上一轮手工验证的
+> /tmp 工作区（第 3 步落空）——start() 注入 ST_HOME（session e2e 早有先例）；
+> ⑤ 9 个 gbcode e2e 的二进制路径写死 `.exe` / PowerShell 语法 / 退役的
+> #terminal-input 钩子——全部跨平台化对齐（Linux 首跑即现形）。
+>
+> **验证**：`st test` 单进程 324+ 与 16 分片全绿（无「未能启动」）；gbcode 11 个 e2e +
+> events/input_action/visual_assert/partial_patch/gallery 全过；mingw 交叉 gbcode 通过；
+> `--scale abc` exit 2；真 clangd 全链路（打开→诊断→计数）探针通过；lint 无新增。
+> 另：本轮曾因容器 OOM 重跑 bootstrap.sh（ST_JOBS=8）重建了 build/bin/st。
+
 ## 待做（2026-10-09 起）
 
 > 📋 2026-10-11 **自举修复轮**（Windows 首次自举链接失败）：现象是一串
@@ -2416,7 +2442,7 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
 逐条复现 `gbx/repro_all.py` / `gbx/repro_more.py`）。**现有 11 个 e2e 全绿**，
 下面 12 条都是它们**没覆盖到的入口**——这正是「e2e 全绿 ≠ 功能可用」的样本。
 
-- [ ] **Ctrl+P 快速打开：选中文件后不打开，状态栏却报「已打开」**（最严重）
+- [x] **Ctrl+P 快速打开：选中文件后不打开，状态栏却报「已打开」**（最严重）（f6857e7 已修）
   **现象**：Ctrl+P → 过滤 `main.cpp` → 点条目（或 Enter、或 `invoke activate`）→
   面板关闭、状态栏写「已打开 main.cpp」，而**编辑器内容/标签栏/标题栏三者全未变**。
   对照：用资源管理器树点同一文件 → 三者全部正常变化（链路本身可用）。
@@ -2429,7 +2455,7 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
   「路径存在 → `open_path`」优先于名字查表；并**禁止兑底分支写「已打开」**
   （未识别 id 应如实报「未处理」）。回归：钉住「Ctrl+P 选中后标签栏新增该项」。
 
-- [ ] **逐行暂存没有入口（`diff_staging_` 从未被置真）**
+- [x] **逐行暂存没有入口（`diff_staging_` 从未被置真）**（f6857e7 已修）
   **现象**：差异视图打开后，找不到任何「逐行暂存」开关；`#diff-staging-bar` /
   `#diff-stage-selected` / `#diff-staging-close` 永不出现。
   **实测**：`diff-view` 在树上、`hunks=1`，但把差异视图内所有 Button 的 id 列出来，
@@ -2442,7 +2468,7 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
   **方向**：差异视图工具条加一个开关按钮（或命令面板条目），并配一条 e2e
   「点开关 → 勾选两行 → 暂存 → `git diff --cached` 只含那两行」。
 
-- [ ] **SCM 面板刷新不生效：git 数据更新了，但没触发重组**
+- [x] **SCM 面板刷新不生效：git 数据更新了，但没触发重组**（f6857e7 已修）
   **现象**：点行内「暂存」→ 外部 `git status` 立刻显示已暂存成功，但侧栏「变更」
   面板的**分组/计数/文件行全部不变**（等 6s 也不变）；手工点工具条「刷新状态」
   **也无效**。此时做一次**无关**状态变化（切主题）→ 面板立刻变成正确内容。
@@ -2457,7 +2483,7 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
   脱钩；不要在 `refresh_git` 里依赖状态栏文案是否变化。
   回归：钉住「暂存后不切主题，面板也必须变」。
 
-- [ ] **终端 `busy` 恒为真：运行面板永远显示「终端忙」+ 自动刷新永不落地**
+- [x] **终端 `busy` 恒为真：运行面板永远显示「终端忙」+ 自动刷新永不落地**（f6857e7 已修）
   **现象**：终端已回到提示符（连跑两条 `echo` 已结束），`#terminal` 的 `busy`
   仍是 `"true"`；侧栏「运行」面板的忙闲指示恒为 `终端忙` + 持续转圈。
   **根因**：PTY 会话在 `start_pty()` 里 `target.running = true`，此后只在
@@ -2469,7 +2495,7 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
   （如维护一个 `running_command` 计数，只在按下回车到提示符回归之间为真），
   `busy()` 返回后者；或给组件加 `idle_hint()`（屏幕尾行是不是提示符）。
 
-- [ ] **`#fs-action` 浮层既关不掉、也拦不住**
+- [x] **`#fs-action` 浮层既关不掉、也拦不住**（f6857e7 已修）
   **现象**：点资源管理器「新建文件/新建文件夹」→ `overlay-fs-action` 浮层打开后：
   Esc（含连按）**关不掉**；鼠标交互**穿透到下层**（点编辑器 `hit=editor`、
   点树 `hit=workspace-tree`）；同时全局快捷键被 `overlay_open()` 守卫挡掉
@@ -2480,7 +2506,7 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
   还是**非模态**（跟查找条一样允许穿透）——现在是两种语义各占一半
   （遮罩画了但不拦、Esc 又不接）。
 
-- [ ] **资源管理器「新建文件」会静默清空同名既有文件**
+- [x] **资源管理器「新建文件」会静默清空同名既有文件**（f6857e7 已修）
   **现象**：先用既有内容写好 `d6-victim.txt`（71 字节）→ 「新建文件」输入**同名**
   → 确认后文件被截断为 **0 字节**，界面只报「已打开 …」，**无任何确认**。
   实测（复现脚本 `repro_more.py` 的 D6 段）：71 字节 → 0 字节。
@@ -2489,7 +2515,14 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
   另：该输入框把 `a/b`、`..`、`CON` 当合法路径/文件名**原样接受**
   （实测会在工作区里造出 `a/` 目录与 `CON` 文件）——需要一份名字/路径校验。
 
-- [ ] **clangd 已装但语言服务从未启动（LSP 全链路不可用）**
+- [x] **clangd 已装但语言服务从未启动（LSP 全链路不可用）**（2026-10-13 修，真根因与条目推测不同）
+  **真根因**：不在 ensure_started/which（那条链路是对的）——`--workspace` 命令行启动
+  **从未调 `lsp_.set_workspace`**（只有 UI「打开文件夹」路径调），clangd 拿空 rootPath
+  起，诊断永不回（实测：clangd 进程活着、25s 零诊断；手动对 clangd 发同样消息 0.0s 回诊断）。
+  **修复**：main.cpp 构造 page 后 `set_language_workspace(options.workspace)`。
+  **验证**：真仓库 + clangd 18，打开含未定义符号的 .cpp → 编辑器 diagnostics=2、
+  状态栏错误计数 2（不需要点击）。
+
   **环境**：`where clangd` → `…\clang+llvm-23.1.2\bin\clangd.exe`（在 PATH 上）。
   **现象**：打开工作区里的一个 `.cpp`（语言 cpp）、写入未定义符号、等 15s——
   错误计数恒 0、`editor.diagnostics` 恒 `0`、**没有 clangd 进程**；
@@ -2504,7 +2537,13 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
   用仓库已有的 fake LSP server（`tests/lsp_client_test.cpp` 的那套，注意
   坑位表里的 shebang/`ST_REQUIRE` 两条）验证「which 命中 ⇒ `ensure_started` 成功」。
 
-- [ ] **问题计数不在打开文件时刷新（内置轻量检查）**
+- [x] **问题计数不在打开文件时刷新（内置轻量检查）**（2026-10-13 修）
+  **修复**：`refresh_problems()` 收敛为指纹早退（来源标记+缓冲 key+文本/诊断哈希），
+  三个时机（装载新文件后 / 编辑回调 / 帧首泵）全部接上且无条件调用；pump 里的
+  `if (!diagnostics_changed) return;` 挡板移除。**渲染侧同修**：`problems_` 是普通成员
+  不进依赖表，新增 `State problems_revision_`（与 git_revision_ 同款），状态栏计数
+  scope 读它——否则「诊断已到编辑器（diagnostics=2）、计数恒 0、点一下才对」（实测复现）。
+
   **现象**：打开含 3 处真问题（超长行/Tab 缩进/行尾空白，已逐行核对过源文件）的
   `docs/README.md` → 状态栏「错误/警告」计数**连续 5 次采样恒为 `0/0`**、
   `editor.diagnostics` 恒 `0`；**点一下计数按钮才跳到 3**。
@@ -2515,13 +2554,16 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
   **方向**：把「文本变化/LSP 诊断变化/切文件」三个时机收敛到一个
   `refresh_problems_if_needed()`（带指纹早退），并在装载新文件后立即跑一次。
 
-- [ ] **「清空结果」后摘要仍显示旧命中数**
+- [x] **「清空结果」后摘要仍显示旧命中数**（2026-10-13 修）
   **现象**：搜 `demo` → 摘要 `7 处命中`、10 行结果；点「清空结果」→ 结果行 0、
   输入框仍有词、**摘要仍是 `7 处命中`**（界面自相矛盾）。
   **根因**：`search-clear` 只清 `search_hits_`/`search_hit_paths_`/`last_query_`，
   没重置 `search_summary_`。**方向**：一并清（或改为从 `search_hits_.size()` 派生）。
 
-- [ ] **搜索 glob 提示与实际匹配口径不符**
+- [x] **搜索 glob 提示与实际匹配口径不符**（2026-10-13 修）
+  **修复**：placeholder 改「文件过滤（如 src/*.cpp、**.cpp、docs/**）」并就地注释
+  说明 `*` 不跨 `/`——旧文案举的 `*.cpp` 恰是语义陷阱。
+
   **现象**：`#search-glob` 的占位提示写「文件过滤（如 *.cpp, src/**）」，但实测：
   `glob=*.cpp` → **0 处命中**；`glob=src/**` → 7 处；`glob=` 空 → 7 处。
   **根因**：`st::fs::match_glob` 的 `*` **不跨 `/`**（坑位表场景 6 有记），
@@ -2529,7 +2571,10 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
   **方向**：二选一——提示改成与语义一致的写法（`**.cpp` 或 `src/*.cpp`），
   或在 glob 里补「无 `/` 的模式按文件名匹配任意层级」这条常用语义。
 
-- [ ] **两处「界面在说谎」的键位/入口文案**
+- [x] **两处「界面在说谎」的键位/入口文案**（2026-10-13 修）
+  **修复**：菜单 label/注释改 Ctrl+Alt+S；hover_request 从死代码变 live——命令面板
+  新增 nav.hover 条目（鼠标悬停本就有真链路）；page.hpp 注释如实化。
+
   - 「文件」菜单写 `全部保存（Ctrl+K S）`、`page_actions.cpp:291` 注释同；
     而 `main.cpp:479` 实际注册的是 **Ctrl+Alt+S**（本框架无和弦键位）。
   - `page.hpp:1170` 注释写「悬停信息（入口快捷键 Ctrl+K 用）」，但 `main.cpp:499`
@@ -2539,7 +2584,11 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
   **同一类问题又在菜单文案与头文件注释里长回来了一次**。方向：把这些文案做成
   可测的（菜单 label 里的键位从快捷键表生成），否则它们必然再漂。
 
-- [ ] **`invoke` 对未定义动作返回 `ok=true`（只靠 `handled=false` 区分）**
+- [x] **`invoke` 对未定义动作返回 `ok=true`（只靠 `handled=false` 区分）**（2026-10-13 修）
+  **修复**：按本条「方向②」落地——ok 语义不变（兼容），`handled=false` 时响应顶层带
+  `error` 说明；DESIGN.md 协议表 invoke 行更新为 `{ok, handled, state?, error?}` 并写明
+  「调用方必须读 handled」。
+
   **现象**：`invoke terminal expand`（Terminal **没有** `expand` 动作）→
   `ok=true`、`handled=false`；`invoke editor no_such_action_zzz` 同。
   本会话实测因此被骗了一次：以为 `terminal expand` 生效，实际面板仍收着
@@ -2548,7 +2597,12 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
   要么在控制通道响应里把 `handled` 提升为顶层字段并在文档里写明
   「调用方必须读它」。倾向后者（保兼容）＋ 文档显著化。
 
-- [ ] **`#explorer-*` / `#scm-refresh` 等 id 在「常驻 + 隐藏」后重复出现**
+- [x] **`#explorer-*` / `#scm-refresh` 等 id 在「常驻 + 隐藏」后重复出现**（2026-10-13 修）
+  **修复**：① 工具条刷新钮改 id `scm-refresh-toolbar`（同屏同 id=地址歧义）；
+  ② 框架层根治：`UiRoot::find` 改**可见优先**——同 id 多实例先取可见者，全不可见
+  才盲取第一个（保留「读隐藏元素属性」的兼容）。实测：访问过 SCM 再切回资源管理器后
+  `get #explorer-new-file` 返回 visible=true，按 id 点击真实打开浮层。
+
   **现象**：`find "#explorer-new-file"` 返回 **2** 个（一个 bounds 正常、
   一个 `0x0`）——侧栏视图常驻后，`build_sidebar_actions` 在同一帧里
   按 `activity_` 只走一个分支，但**上一帧的分支子树仍在树上**（按 key 复用），
@@ -2563,7 +2617,10 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
   真正的问题是**同一视图的两处刷新钮同 id**——把工具条那个改名为
   `scm-refresh-toolbar`；另外把「骨架里 0x0 的隐藏残留」查清（是否该裁掉）。
 
-- [ ] **测试分片崩溃 = 静默丢测试通道（“分片未能启动 + 空原因”）**
+- [x] **测试分片崩溃 = 静默丢测试通道（“分片未能启动 + 空原因”）**（2026-10-13 修）
+  **修复**：`run_shards` 两处——启动失败带片号/总数与非空原因兜底；「非零退出 +
+  未写出 JUnit 报告」（= 进程 abort/崩溃，片内后续用例未跑）显式报错并附单跑命令。
+
   **现象**：`st test --profile debug` 跑 16 个分片，每片都 `0 failed`，
   但整体**退出码 1**，末尾只有一行 `测试分片 2 未能启动: `（原因字符串为空）。
   逐条缩小后定位到 `tests/text_diff_test.cpp` 的 `text[range.second]`：
@@ -2577,7 +2634,11 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
   **退出码**也打出来（现在只打了一个常为空的 `error().message`），
   并把「分片启动失败/异常退出」计入总失败数（现在只打印，不影响退出码的语义说明）。
 
-- [ ] **`--scale` / `--frames` 传非数字时进程直接崩（未捕获异常）**
+- [x] **`--scale` / `--frames` 传非数字时进程直接崩（未捕获异常）**（2026-10-13 修）
+  **修复**：stod/stoi 全部换带校验解析（含尾部垃圾如 `1.5x`），非法值与未知参数同路径
+  （报错+exit 2）；`--scale` 夹 [0.1,10]；`--control-port` 范围校验；run_app 里两处
+  裸 stod（--editor-font-scale/--editor-line-spacing）同修。实测：`--scale abc` → exit 2。
+
   **现象**：`gbcode --headless --scale abc --frames 3` →
   `terminate called after throwing an instance of 'std::invalid_argument' what(): stod`，
   退出码 `0xC0000409`（`--frames abc` 同理，`what(): stoi`）。

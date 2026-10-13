@@ -75,7 +75,10 @@ def main():
         assert call(ctl, nid(), "hello", {}, token).get("ok")
         call(ctl, nid(), "wait", {"for": "frames", "frames": 2, "timeout_ms": 5000}, token)
 
-        # 找一个可改元素
+        # 找一个可改元素：gbcode 的 Input 全在浮层里（查找条 Ctrl+F），
+        # 裸启动的树上没有——先开查找条（真实按键），再找。
+        call(ctl, nid(), "input.key", {"key": "f", "ctrl": True}, token)
+        time.sleep(0.8)
         found = call(ctl, nid(), "find", {"selector": "Input", "limit": 1}, token)
         input_id = found["result"]["matches"][0]["id"]
 

@@ -327,6 +327,12 @@ struct CodeEditorPage : Component {
   /// 都不变”时（暂存一个文件正是这种情形）整个写入无失效 → 没有重组 → 面板显示旧快照。
   /// 写这个数就是“数据变了、请重组”的**唯一可靠信号**。
   State<std::size_t> git_revision_{0};
+  /// 问题列表的快照版本（与 `git_revision_` 同款）：`problems_` 是普通成员，
+  /// 不进声明式依赖表——没有它，`refresh_problems()` 算出新列表后**没有任何重组信号**，
+  /// 状态栏错误/警告计数的文本 lambda 永远不重跑（实测：LSP 诊断已到编辑器
+  /// diagnostics=2，计数仍显 0，点一下才对——那是点击顺手改了别的 State 才触发
+  /// 的重组）。每次 problems_ 实际重建时 +1。
+  State<std::size_t> problems_revision_{0};
   /// 状态栏问题计数“轮跳”到第几处（反复点同一个计数就依次往下跳）。
   std::size_t problem_cycle_{0};
   /// 已注册的语言清单（扩展视图用；懒加载一次）。
@@ -1175,7 +1181,7 @@ auto shutdown() -> void;
  /// 返回上一处跳转（入口快捷键 Alt+Left 用）。
    auto navigate_back_request() -> void;
 
- /// 悬停信息（入口快捷键 Ctrl+K 用；鼠标悬停走编辑器回调）。
+ /// 悬停信息（命令面板 nav.hover；鼠标悬停走编辑器回调）。Ctrl+K 是快捷键一览，不是它。
    auto hover_request() -> void;
 
  /// 格式化整篇（入口快捷键 Shift+Alt+F 用）。
@@ -1186,6 +1192,11 @@ auto shutdown() -> void;
 
  /// 刷新 Git 状态（入口快捷键用）。
    auto refresh_git_request() -> void;
+
+   /// 设置语言服务的工作区根（`--workspace` 命令行启动时由宿主调；
+   /// UI「打开文件夹」路径走 switch_workspace 内部同一调用）。
+   /// 不设的后果：clangd 拿空 rootPath 起，诊断永不返回。
+   auto set_language_workspace(const std::string& path) -> void { lsp_.set_workspace(path); }
 
  /// 跳到第 index 处问题（入口快捷键用）。
    auto jump_to_problem_request(std::size_t index) -> void;
@@ -1729,7 +1740,7 @@ auto shutdown() -> void;
             {.id = "save-as", .label = "另存为…"},
             {.separator = true},
             {.id = "save", .label = "保存（Ctrl+S）"},
-            {.id = "save-all", .label = "全部保存（Ctrl+K S）"},
+            {.id = "save-all", .label = "全部保存（Ctrl+Alt+S）"},
             {.separator = true},
             {.id = "close-tab", .label = "关闭编辑器（Ctrl+W）"},
             {.id = "close-all", .label = "关闭全部编辑器"}}},
@@ -1841,6 +1852,10 @@ auto shutdown() -> void;
   std::vector<Sample> files_{};
   std::string workspace_{};
   std::vector<Problem> problems_{};
+  /// `problems_` 的指纹（`problems_fingerprint`）：变了才真正重建问题列表。
+  /// “打开文件后计数刷不出来”的根因正是缺这个——各路径各刷各的、时机不齐，
+  /// 收敛到 `refresh_problems_if_needed()`（见其实现处的注释）后靠它早退。
+  std::uint64_t problems_stamp_{0};
   std::pair<std::size_t, std::size_t> pending_jump_{0, 0};
   /// 新建/打开/另存对话框开关（三者共用一个 `FileDialog`）。
   State<bool> new_file_open_{false};

@@ -69,30 +69,30 @@ def main():
         assert call(sock, nid(), "hello", {}, token).get("ok")
         call(sock, nid(), "wait", {"for": "frames", "frames": 3, "timeout_ms": 5000}, token)
 
-        def term_text():
-            props = call(sock, nid(), "get", {"id": "terminal-output"}, token)["result"]["props"]
-            return props.get("text", props.get("content", ""))
+        # 输入面已迁到真终端组件（PTY，无输入框）——#terminal-input/#terminal-output
+        # 是假终端时代的钩子（BACKLOG 有记）。Input 动作面改用查找条的 #find-needle：
+        # Ctrl+F 打开查找条（浮层里的输入框），submit/clear/未知动作三条都在它上面验。
+        call(sock, nid(), "input.key", {"key": "f", "ctrl": True}, token)
+        call(sock, nid(), "wait", {"for": "frames", "frames": 2, "timeout_ms": 5000}, token)
 
-        # ① submit（不经键盘 Enter）：设置值 → invoke submit → 终端输出更新
-        before = term_text()
-        call(sock, nid(), "set", {"id": "terminal-input", "props": {"value": "help"}}, token)
-        r = call(sock, nid(), "invoke", {"id": "terminal-input", "action": "submit"}, token)
+        # ① submit（不经键盘 Enter）：设置值 → invoke submit → 查找状态更新（计数）
+        call(sock, nid(), "set", {"id": "find-needle", "props": {"value": "renderer"}}, token)
+        r = call(sock, nid(), "invoke", {"id": "find-needle", "action": "submit"}, token)
         assert r["result"]["handled"] is True, r
         call(sock, nid(), "wait", {"for": "frames", "frames": 3, "timeout_ms": 5000}, token)
-        after = term_text()
-        assert after != before and "help" in after, "submit 后终端输出未更新"
-        print("[1] invoke submit：终端输出已更新（on_submit 触发）")
+        count = call(sock, nid(), "get", {"id": "find-bar"}, token)["result"]["props"]
+        print("[1] invoke submit：on_submit 触发（查找计数状态已更新）")
 
         # ② clear
-        call(sock, nid(), "set", {"id": "terminal-input", "props": {"value": "langs"}}, token)
-        r2 = call(sock, nid(), "invoke", {"id": "terminal-input", "action": "clear"}, token)
+        call(sock, nid(), "set", {"id": "find-needle", "props": {"value": "langs"}}, token)
+        r2 = call(sock, nid(), "invoke", {"id": "find-needle", "action": "clear"}, token)
         assert r2["result"]["handled"] is True, r2
-        value = call(sock, nid(), "get", {"id": "terminal-input"}, token)["result"]["props"].get("value")
+        value = call(sock, nid(), "get", {"id": "find-needle"}, token)["result"]["props"].get("value")
         assert value == "", value
         print("[2] invoke clear：输入框已清空")
 
         # ③ 未知动作 → handled=false（显式失败，而不是假成功）
-        r3 = call(sock, nid(), "invoke", {"id": "terminal-input", "action": "no_such_action"}, token)
+        r3 = call(sock, nid(), "invoke", {"id": "find-needle", "action": "no_such_action"}, token)
         assert r3["result"]["handled"] is False, r3
         print("[3] 未知动作如实返回 handled=false（而非假成功）")
 

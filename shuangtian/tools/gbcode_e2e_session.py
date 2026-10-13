@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_BIN = os.path.join(ROOT, "build", "dev", "bin", "gbcode.exe")
+DEFAULT_BIN = os.path.join(ROOT, "build", "dev", "bin", "gbcode" + (".exe" if os.name == "nt" else ""))
 PY = sys.executable
 
 

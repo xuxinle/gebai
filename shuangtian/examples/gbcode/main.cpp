@@ -190,13 +190,60 @@ auto print_usage(std::string_view program) -> void {
     const auto value = [&](std::string fallback) {
       return index + 1 < argc ? std::string(argv[++index]) : std::move(fallback);
     };
+    // —— 数值参数统一走带校验的解析 ——
+    //
+    // 为何不能裸调 `std::stod`/`stoi`：传非数字（如 `--scale abc`）时它们抛
+    // `std::invalid_argument`，无人捕获 → `terminate`（实测退出码 0xC0000409，
+    // 屏幕上一行 what(): stod）——用户看不懂、脚本拿不到码。而同一命令行里的
+    // `--bogus-flag` 走的是「报错 + exit 2」的干净路径。**非法值必须与未知参数
+    // 同一条路径**（报错可读、退出码稳定），不能一快一崩。
+    const auto parse_double = [&](const char* flag, double fallback) -> double {
+      const std::string text = value(std::format("{}", fallback));
+      double parsed = 0.0;
+      std::size_t consumed = 0;
+      const bool ok = !text.empty() && [&] {
+        try {
+          parsed = std::stod(text, &consumed);
+        } catch (const std::exception&) {
+          return false;
+        }
+        return consumed == text.size();   // 尾巴（如 `1.5x`）也是非法值
+      }();
+      if (!ok) {
+        st::eprint("参数 {} 需要一个数值，得到：{}（用 --help 看可用项）\n", flag, text);
+        std::exit(2);
+      }
+      return parsed;
+    };
+    const auto parse_int = [&](const char* flag, long long fallback) -> long long {
+      const std::string text = value(std::format("{}", fallback));
+      long long parsed = 0;
+      std::size_t consumed = 0;
+      const bool ok = !text.empty() && [&] {
+        try {
+          parsed = std::stoll(text, &consumed);
+        } catch (const std::exception&) {
+          return false;
+        }
+        return consumed == text.size();
+      }();
+      if (!ok) {
+        st::eprint("参数 {} 需要一个整数，得到：{}（用 --help 看可用项）\n", flag, text);
+        std::exit(2);
+      }
+      return parsed;
+    };
     if (raw == "--help" || raw == "-h") {
       print_usage(argv[0]);
       std::exit(0);
     }
     if (raw == "--headless") options.headless = true;
     else if (raw == "--enable-script") options.enable_script = true;
-    else if (raw == "--scale") options.scale = static_cast<float>(std::stod(value("1")));
+    // `--scale` 夹到 [0.1, 10]：0 会让一切尺寸归零（窗口/字号/命中区全灭），
+    // 负数在多数后端是非法 DPI。夹取而非报错——意图明确（想大想小），只是数值过头。
+    else if (raw == "--scale") {
+      options.scale = static_cast<float>(std::clamp(parse_double("--scale", 1.0), 0.1, 10.0));
+    }
     else if (raw == "--theme") options.theme = value("light");
     else if (raw == "--language") options.language = value("cpp");
     else if (raw == "--text-lcd") options.text_lcd = value("auto");
@@ -210,11 +257,32 @@ auto print_usage(std::string_view program) -> void {
     else if (raw == "--ui-font-scale") options.ui_font_scale = value("auto");
     else if (raw == "--editor-font-scale") options.editor_font_scale = value("auto");
     else if (raw == "--editor-line-spacing") options.editor_line_spacing = value("auto");
-    else if (raw == "--control-port") options.control_port = static_cast<std::uint16_t>(std::stoi(value("0")));
+    else if (raw == "--control-port") {
+      const long long port = parse_int("--control-port", 0);
+      if (port < 0 || port > 65535) {
+        st::eprint("参数 --control-port 超出端口范围：{}\n", port);
+        std::exit(2);
+      }
+      options.control_port = static_cast<std::uint16_t>(port);
+    }
     else if (raw == "--control-file") options.control_file = value({});
     else if (raw == "--shots") options.shots = value({});
-    else if (raw == "--frames") options.frames = static_cast<std::uint32_t>(std::stoi(value("0")));
-    else if (raw == "--ms") options.max_ms = std::stoi(value("0"));
+    else if (raw == "--frames") {
+      const long long frames = parse_int("--frames", 0);
+      if (frames < 0) {
+        st::eprint("参数 --frames 不能为负：{}\n", frames);
+        std::exit(2);
+      }
+      options.frames = static_cast<std::uint32_t>(frames);
+    }
+    else if (raw == "--ms") {
+      const long long ms = parse_int("--ms", 0);
+      if (ms < 0) {
+        st::eprint("参数 --ms 不能为负：{}\n", ms);
+        std::exit(2);
+      }
+      options.max_ms = static_cast<int>(ms);
+    }
     else if (raw == "--workspace") options.workspace = value(".");
     // `--open <path>`：启动即打开一个文件（编辑器历来都有这条——`code file.cpp`）。
     // 缺它时“打开某个文件”只能靠 UI 点，自动化与命令行使用都不方便。
@@ -307,16 +375,44 @@ auto run_app(int argc, char** argv) -> int {
   // 交给后端 `set_window_icon`。
 
   // 声明式页面（整个 IDE 是一个 Component：内容槽里的一切由 `build()` 描述）。
+  // 字号档位/行距倍数：非 auto 时必须也是「非法值报错 + exit 2」而不是
+  // `stod` 裸抛（与 parse_options 里的口径一致——两处都是用户可传入的数值）。
+  const auto parse_late_double = [](const char* flag, const std::string& text,
+                                   [[maybe_unused]] double fallback) -> double {
+    double parsed = 0.0;
+    std::size_t consumed = 0;
+    const bool valid = !text.empty() && [&] {
+      try {
+        parsed = std::stod(text, &consumed);
+      } catch (const std::exception&) {
+        return false;
+      }
+      return consumed == text.size();
+    }();
+    if (!valid) {
+      st::eprint("参数 {} 需要一个数值，得到：{}（用 --help 看可用项）\n", flag, text);
+      std::exit(2);
+    }
+    return parsed;
+  };
   float editor_font_scale = kEditorFontScale;
   if (options.editor_font_scale != "auto") {
-    editor_font_scale = static_cast<float>(std::stod(options.editor_font_scale));
+    editor_font_scale = static_cast<float>(
+        parse_late_double("--editor-font-scale", options.editor_font_scale, kEditorFontScale));
   }
   float editor_line_spacing = CodeEditor::kDefaultLineSpacing;
   if (options.editor_line_spacing != "auto") {
-    editor_line_spacing = static_cast<float>(std::stod(options.editor_line_spacing));
+    editor_line_spacing = static_cast<float>(parse_late_double(
+        "--editor-line-spacing", options.editor_line_spacing, CodeEditor::kDefaultLineSpacing));
   }
   auto page = std::make_shared<CodeEditorPage>(samples(), options.workspace, options.tool_root,
                                                editor_font_scale, editor_line_spacing);
+  // **命令行 --workspace 也要告知语言服务**：`switch_workspace()`（UI 对话框路径）
+  // 会调 `lsp_.set_workspace`，而命令行启动这条路从没调过——后果是 clangd 拿着
+  // 空 rootPath 起（无 compile_commands.json 可寻、相对 include 解不开），
+  // 诊断永远不回（实测：真仓库 + clangd 在 PATH，打开 .cpp 等 25s 仍 0 诊断，
+  // 而 clangd 进程活着——BACKLOG「clangd 已装但语言服务从未就绪」的真根因之一）。
+  if (!options.workspace.empty()) page->set_language_workspace(options.workspace);
   // —— 会话（最近打开 + 关窗恢复）——
   //
   // 路径在构造后定（`session_path_` 是普通成员，不在构造列表里——两个构造重载

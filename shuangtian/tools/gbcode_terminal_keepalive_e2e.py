@@ -20,7 +20,7 @@ import tempfile
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-BIN = ROOT / "build" / "dev" / "bin" / "gbcode.exe"
+BIN = ROOT / "build" / "dev" / "bin" / ("gbcode.exe" if __import__("os").name == "nt" else "gbcode")
 
 
 def log(msg):
@@ -159,8 +159,17 @@ def main():
         # ① 打开终端并跑一条命令（让屏上有“用户产出”的内容）。
         client.click("#activity-terminal")
         wait_until(lambda: client.count("#terminal") == 1, what="终端出现")
-        wait_until(lambda: "PowerShell" in client.props("terminal").get("screen", "") or
-                   "PS " in client.props("terminal").get("screen", ""), what="shell 就绪")
+        # shell 就绪的判据按平台：Windows 是 PowerShell 提示符，POSIX 是 $/# 提示符。
+        import platform as _platform
+        if _platform.system() == "Windows":
+            wait_until(lambda: "PowerShell" in client.props("terminal").get("screen", "") or
+                       "PS " in client.props("terminal").get("screen", ""), what="shell 就绪")
+        else:
+            # POSIX shell 提示符形态多样（bash 的 $、zsh 的 ➜/％、root 的 #），
+            # 统一判据改为「屏幕上有非空白内容」——shell 起来就会打第一行提示符。
+            wait_until(lambda: any(line.strip() for line in
+                                   client.props("terminal").get("screen", "").splitlines()),
+                       what="shell 就绪")
         baseline = client.props("terminal")
         check(baseline.get("sessions") == "1", "起了一条 shell 会话")
 

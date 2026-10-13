@@ -798,26 +798,38 @@ auto UiRoot::find(std::string_view id) -> Element* {
   // 叠加层（Dialog/Toast/Select 面板）与内容树同属语义面：按 id 定位必须两者都搜——
   // 只搜内容会让"打开的对话框/轻提示"从协议 `get/set/invoke` 里消失
   // （2026-09-30 审视发现：gallery 打开 Dialog 后 find/#demo-dialog 永远 not_found）。
-  Element* found = nullptr;
+  //
+  // ⚠ 同 id 多实例时**优先可见者**（2026-10-13，gbcode 亲历）：「常驻+隐藏」的侧栏
+  // 视图会让同一 id 有两份（一份可见、一份 0x0 的隐藏残留），盲取第一个意味着
+  // `get`/按 id 点击命中哪份取决于声明顺序——自动化会点到隐藏那份且表现为
+  // 「点了没反应」。两遍口径：可见实例优先；全部不可见时退回盲取第一个
+  // （兼容「真隐藏但就是要读它属性」的场景）。
+  Element* found_visible = nullptr;
+  Element* found_any = nullptr;
   const auto walk = [&](auto&& self, Element& element) -> void {
-    if (found != nullptr) return;
+    if (found_visible != nullptr) return;
     if (element.derived_id() == id) {
-      found = &element;
-      return;
+      if (element.visible()) {
+        found_visible = &element;
+        return;
+      }
+      if (found_any == nullptr) found_any = &element;
     }
     for (std::size_t index = 0; index < element.children().size(); ++index) {
       self(self, *element.child_at(index));
-      if (found != nullptr) return;
+      if (found_visible != nullptr) return;
+    }
+  };
+  const auto overlays_walk = [&] {
+    for (auto& overlay : overlays_) {
+      if (overlay == nullptr) continue;
+      walk(walk, *overlay);
+      if (found_visible != nullptr) return;
     }
   };
   if (content_ != nullptr) walk(walk, *content_);
-  if (found != nullptr) return found;
-  for (auto& overlay : overlays_) {
-    if (overlay == nullptr) continue;
-    walk(walk, *overlay);
-    if (found != nullptr) return found;
-  }
-  return found;
+  if (found_visible == nullptr) overlays_walk();
+  return found_visible != nullptr ? found_visible : found_any;
 }
 
 auto UiRoot::query(const Selector& selector, std::size_t limit) -> std::vector<Element*> {

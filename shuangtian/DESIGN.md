@@ -2789,6 +2789,9 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
   此前未实现，`set value` 被静默忽略（与 `Input` 踩过的坑同类）。
 - 叠加层 z 序修正：`paint`/`paint_frame` 中 overlay 改在内容**之后**绘制（浮层在景上）；
   `UiRoot::find/query` 同步覆盖叠加层（对话框/轻提示/下拉面板此前从选择器里消失）。
+- `UiRoot::find` 同 id 多实例时**可见优先**（2026-10-13，gbcode「常驻+隐藏」侧栏亲历）：
+  先取可见实例，全不可见才盲取第一个——否则按 id 的 `get`/点击命中哪份取决于声明
+  顺序，自动化会点到 0x0 隐藏残留且表现为「点了没反应」。
 
 **vsedit 反馈驱动的编辑器形态能力**（类编辑器应用反推）：
 - **事件派发契约**：`on_event` 返回 `true` = 消费（冒泡停止）、`false` = 放行（继续冒泡到
@@ -3817,7 +3820,7 @@ raster 层的缺省是 `butt/miter`（与 SVG/CSS 默认一致），但图标不
 | `set` | `{id, props}` | `{changed:[...]}` | 设置属性/文本/值（触发重绘与 `ui.changed`） |
 | `ui.create` | `{type, props?, parent?, index?, key?, id?}` | `{id, type}` | **在线建元素**（与声明式共用工厂注册表；缺省 parent 挂 root 内容，指定则挂为子元素） |
 | `ui.remove` | `{id}` | `{removed, id}` | **在线删元素**（根元素时清空内容） |
-| `invoke` | `{id, action, args?}` | `{ok, state?}` | 动作：`click` `dblclick` `focus` `blur` `toggle` `select` `scroll_to` `submit` `open` `close` |
+| `invoke` | `{id, action, args?}` | `{ok, handled, state?, error?}` | 动作：`click` `dblclick` `focus` `blur` `toggle` `select` `scroll_to` `submit` `open` `close`；**`handled` 是权威答复**（元素存在即 `ok=true`，但动作未被元素处理时 `handled=false` 且带顶层 `error` 说明——调用方必须读它，否则会把「没发生」当「发生了」） |
 | `input.mouse` | `{kind, x, y, button?, buttons?, modifiers?, delta?, to?}` | `{handled, hit}` | kind: `move` `down` `up` `click` `dblclick` `triple` `scroll` `drag` |
 | `input.key` | `{kind, key?, code?, text?, modifiers?, repeat?}` | `{handled, focused}` | kind: `press` `down` `up` `text` |
 | `input.text` | `{text, id?}` | `{handled, inserted}` | 便捷输入（聚焦或指定输入框追加文本） |

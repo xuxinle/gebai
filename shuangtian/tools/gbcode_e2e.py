@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_BIN = os.path.join(ROOT, "build", "dev", "bin", "gbcode.exe")
+DEFAULT_BIN = os.path.join(ROOT, "build", "dev", "bin", "gbcode" + (".exe" if os.name == "nt" else ""))
 
 
 class Client:
@@ -80,10 +80,18 @@ def start(binary, shots):
     # `--tool-root` 指向框架仓根：终端测例要真跑 `st test`，
     # 而 PATH 里通常没有 `st`（工具链就在仓库的 build/bin 下）。
     framework_root = str(Path(__file__).resolve().parent.parent)
+    # ST_HOME 重定向到本次产物目录：gbcode 的会话恢复（关窗写 ~/.shuangtian/gbcode/
+    # session.json、下次无 --workspace 启动时恢复工作区）会让 e2e **互相污染**——
+    # 上一轮手工验证（--workspace /tmp/xxx）留下的会话被本脚本的裸启动恢复，
+    # 资源管理器变成那个临时工作区，第 3 步「点第二个样例 deploy.py」直接落空
+    # （实测：AssertionError 标签栏未加 deploy.py，options 只有 renderer.cpp）。
+    # 会话 e2e（gbcode_e2e_session.py）早有同款注入，这里对齐。
+    env = dict(os.environ)
+    env["ST_HOME"] = shots
     process = subprocess.Popen([binary, "--headless", "--control-port", "0",
                                 "--control-file", ctl, "--shots", shots,
                                 "--tool-root", framework_root],
-                               stdout=log, stderr=subprocess.STDOUT)
+                               stdout=log, stderr=subprocess.STDOUT, env=env)
     for _ in range(100):
         if os.path.exists(ctl):
             try:

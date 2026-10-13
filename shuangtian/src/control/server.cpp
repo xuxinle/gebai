@@ -978,6 +978,17 @@ Json result = Json::object();
 result["handled"] = handled;
 result["action"] = action;
 result["id"] = element->derived_id();
+// **未处理 ≠ 成功**：`handled=false` 时响应顶层带 `error` 说明。
+//
+// 背景（BACKLOG P1「invoke 对未定义动作返回 ok=true」）：旧响应里 `handled=false`
+// 藏在正常返回中，调用方只看 `ok` 就被骗（实测：`invoke terminal expand` 后
+// 以为面板展开了，实际什么都没发生）。`ok` 语义保持不变（兼容既有客户端：
+// invoke 元素存在即 ok，动作是否被处理看 `handled`），但**必须**让不读 `handled`
+// 的人也能看见异常——顶层 `error` 字段就是给他们的红线。
+if (!handled) {
+  result["error"] = std::format("元素 {} 不支持动作 {}（handled=false）",
+                                element->derived_id(), action);
+}
 // **回带变更后的属性快照**：`invoke` 之后几乎总要看一眼“变成什么了”。
 // 不随身带就得再发一次 `get`——每个动作多一次往返（实测本地回环 0.1ms 可忽略，
 // 但跨主机/批处理场景是实打实的一倍开销；更重要的是调用方少一步就能自查）。

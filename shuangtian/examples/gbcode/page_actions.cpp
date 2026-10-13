@@ -16,11 +16,17 @@
 
 #include "page.hpp"
 #include "st/core/fs.hpp"
+#include "st/core/hash.hpp"
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
 
 namespace gbcode_ui {
+
+  namespace {
+    /// 问题指纹计算里「无活动缓冲」时的空缓冲占位（避免分支里到处判空）。
+    const OpenBuffer kNoBuffer{};
+  }
 
   std::function<void(ThemeMode)> theme_setter{};
 
@@ -288,7 +294,7 @@ namespace gbcode_ui {
   }
 
 
-  /// **保存全部**（Ctrl+K S / 文件菜单）：把所有脏标签写盘。
+  /// **保存全部**（Ctrl+Alt+S / 文件菜单）：把所有脏标签写盘。
   ///
   /// 为何不只是循环调 `save()`：`save()` 既有状态栏文案、又会 `buffers_.set()`，
   /// 循环调它会把中间每一次的文案盖掉（用户只看得到最后一次），
@@ -366,14 +372,34 @@ namespace gbcode_ui {
 
 
   /// 重跑当前编辑器的轻量检查（问题列表与状态栏计数**同一份数据**）。
+  ///
+  /// 带指纹早退（`refresh_problems_if_needed` 的实现体）：谁都能调，
+  /// 输入没变就是空操作——这才敢把三个刷新时机都接上（见函数尾的时机清单）。
   auto CodeEditorPage::refresh_problems() -> void {
-    problems_.clear();
+    // 指纹：来源（LSP/内置）+ 活动缓冲的 key + 文本哈希 + LSP 诊断条数。
+    // 「切到无问题的文件后计数从 3 掉到 1（也不对）」那类脏状态，根子都是
+    // 该刷的时机没刷——指纹把「该不该刷」从时序问题变成数据问题。
     const auto list = buffers_.value();
-    if (active_.value() >= list.size()) return;
+    const bool has_active = active_.value() < list.size();
+    const auto& buffer = has_active ? list[active_.value()] : kNoBuffer;
+    const bool from_lsp = !lsp_.problems().empty();
+    const std::uint64_t stamp =
+        (from_lsp ? 0x4C5350ULL << 40 : 0x4C494EULL << 40) +   // 'LSP' / 'LIN' 来源标记
+        st::hash::fnv1a64(buffer.key) * 31U +
+        (from_lsp ? lsp_.problems().size() * 1315421789ULL
+                  : static_cast<std::uint64_t>(st::hash::fnv1a64(buffer.text)));
+    if (stamp == problems_stamp_) return;
+    problems_stamp_ = stamp;
+    // 重建了问题列表：递增快照版本——这是状态栏计数（文本 lambda 读 problems_）
+    // 得知“该重跑了”的唯一信号（problems_ 不在依赖表里，见成员声明处的注释）。
+    problems_revision_.set(problems_revision_.value() + 1);
+
+    problems_.clear();
+    if (!has_active) return;
     // **LSP 优先**：真语义诊断比启发式检查有价值得多（"未声明的标识符"这种事
     // lint 永远看不出来）。有 LSP 诊断时就用它，没有再退回内置 lint——
     // 不是为了省事，而是**没有 server 的语言（如 gbcode 自己的 stlog）仍要有问题提示**。
-    if (!lsp_.problems().empty()) {
+    if (from_lsp) {
       problems_.reserve(lsp_.problems().size());
       for (const auto& problem : lsp_.problems()) {
         problems_.push_back(Problem{.line = problem.line, .warning = problem.warning,
@@ -381,8 +407,10 @@ namespace gbcode_ui {
       }
       return;
     }
-    problems_ = lint_text(list[active_.value()].text);
+    problems_ = lint_text(buffer.text);
   }
+
+
 
 
   /// 一次性接线语言服务的回调（在首次启用时挂）。
@@ -790,7 +818,7 @@ void CodeEditorPage::load_active_text() {
  /// 返回上一处跳转（入口快捷键 Alt+Left 用）。
  auto CodeEditorPage::navigate_back_request() -> void { navigate_back(); }
 
- /// 悬停信息（入口快捷键 Ctrl+K 用；鼠标悬停走编辑器回调）。
+ /// 悬停信息（命令面板 nav.hover；鼠标悬停走编辑器回调）。Ctrl+K 是快捷键一览，不是它。
  auto CodeEditorPage::hover_request() -> void { request_hover_at_cursor(); }
 
  /// 格式化整篇（入口快捷键 Shift+Alt+F 用）。
@@ -2790,6 +2818,10 @@ void CodeEditorPage::load_active_text() {
     add("nav.implementation", "转到: 实现", "Ctrl+F12");
     add("nav.back", "转到: 返回上一处", "Alt+Left（跳转历史）");
     add("nav.results", "转到: 切换导航结果面板", "多处定义/引用的清单（多处时自动开）");
+    // 悬停信息：鼠标悬停有真实链路（on_hover_word 防抖后发 LSP 请求），
+    // 键盘入口补在这里——曾经声称绑在 Ctrl+K 上，而 Ctrl+K 实际是快捷键一览，
+    // 无人调用导致它成了死代码（BACKLOG P1「界面在说谎」条目）。
+    add("nav.hover", "转到: 悬停信息", "光标处的 LSP 信息（鼠标悬停同链路）");
     add("help.about", "帮助: 关于", "歌白代码 · 霜天示例");
     for (const auto& sample : files_) {
       add("file.open." + sample.name, "文件: 打开 " + sample.name, "语言 " + sample.language);

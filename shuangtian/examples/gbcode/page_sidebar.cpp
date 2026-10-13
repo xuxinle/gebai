@@ -296,7 +296,10 @@ namespace gbcode_ui {
     // 选项行：glob 过滤 + 大小写 / 全词 / 正则（与 VSCode 的查找条同族）
     (void)custom<Input>(c, [this](Input& field) {
       field.set_id("search-glob");
-      field.set_placeholder("文件过滤（如 *.cpp, src/**）");
+      field.set_placeholder("文件过滤（如 src/*.cpp、**.cpp、docs/**）");
+      // 提示文案就是语义文档（`st::fs::match_glob`）：`*` **不跨 `/`**，
+      // 所以 `*.cpp` 只匹配顶层 .cpp（写 `**.cpp` 才是任意深度）。旧文案举的
+      // 例子 `*.cpp` 恰好是语义陷阱——用户照着写会得到 0 命中且无从得知原因。
       field.on_submit = [this](std::string_view glob) {
         search_glob_ = std::string(glob);
         apply_search(last_query_);
@@ -630,8 +633,13 @@ void CodeEditorPage::replace_in_workspace(std::string_view replacement) {
     }
 
     // —— 变更工具条（IDEA 同款：刷新 / 全部暂存 / 全部撤销 / 展开折叠 / 比较）——
+    //
+    // ⚠ 工具条按钮 id 一律带 `-toolbar` 后缀：侧栏头还有一个同功能的
+    // `scm-refresh`（视图头的主按钮），两处同 id 会让 `find`/按 id 点击
+    // 命中不确定的一份（实测：同一 id 三份实例，自动化点到了 0x0 那份，
+    // 表现为「点了没反应」）。id 是自动化的地址，**同屏同 id = 地址歧义**。
     (void)row(c, {.gap = 2.0f, .id = "scm-toolbar"}, [&] {
-      scm_icon_button(c, "scm-refresh", "refresh", "刷新状态", [this] { refresh_git(); });
+      scm_icon_button(c, "scm-refresh-toolbar", "refresh", "刷新状态", [this] { refresh_git(); });
       scm_icon_button(c, "scm-stage-all", "plus", "全部暂存",
                       [this] { stage_group(gbcode::ChangeGroup::Unstaged, true);
                                stage_group(gbcode::ChangeGroup::Untracked, true); });
