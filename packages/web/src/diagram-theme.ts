@@ -111,6 +111,30 @@ export function mix(a: string, b: string, ratio: number): string {
   return `#${out.map((v) => v.toString(16).padStart(2, "0")).join("")}`
 }
 
+/** 可读文字色门槛：正文级 WCAG AA（与各引擎后处理共用同一阈值）。 */
+export const MIN_TEXT_CONTRAST = 4.5
+
+/** 亮底阈值（相对亮度）：与 buildPalette 判定主题明暗同口径。 */
+export const BRIGHT_BG_LUMINANCE = 0.35
+
+/**
+ * 为指定底色求一个可读的文字色（从底色向目标端点插值，保色相且保证对比度）。
+ * `prefer` 指**文字色倾向**："dark" 要深字（亮底场景）、"light" 要浅字（暗底场景，缺省）。
+ * 用户源码显式指定的浅色底（classDef/style/节点 #Color）与主题文字色必然冲突，
+ * 一律经本函数重算文字色——只改文字不改用户的底色（配色是设计意图，可读性是硬约束）。
+ */
+export function readableTextOn(bg: string, prefer: "light" | "dark" = "light"): string {
+  const base = normalizeColor(bg)
+  const target = prefer === "dark" ? "#000000" : "#ffffff"
+  if (!base) return prefer === "dark" ? "#111111" : "#ffffff"
+  // 从底色向目标端点逐档推进，取首个达标色（保留底色色相，避免直接纯黑/纯白生硬）
+  for (const k of [1, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2]) {
+    const cand = mix(base, target, k)
+    if (contrastRatio(cand, base) >= MIN_TEXT_CONTRAST) return cand
+  }
+  return target
+}
+
 /** CSS 变量名集合：色板的所有来源变量（缺失时逐项降级，见 buildPalette）。 */
 const VAR = {
   bg: "--bg",
@@ -398,14 +422,42 @@ const PLANTUML_REMAP: Array<{ from: RegExp; to: (p: DiagramPalette) => string }>
   { from: /#000000/gi, to: (p) => p.text },
 ]
 
-/** PlantUML SVG 暗色后处理：fill/stroke 属性与 CSS 声明（若有）中的亮色残留统一重映射。 */
+/** PlantUML SVG 暗色后处理：fill/stroke 属性与 CSS 声明（若有）中的亮色残留统一重映射。
+ *  之后接 `fixPlantUmlBrightNodes` 处理用户显式浅色底节点的文字可读性。 */
 export function remapPlantUmlSvg(svg: string, p: DiagramPalette): string {
   let out = svg
   for (const { from, to } of PLANTUML_REMAP) {
     const value = to(p)
     out = out.replace(from, value)
   }
-  return out
+  return fixPlantUmlBrightNodes(out)
+}
+
+/** PlantUML 形状−文字配对：形状带 fill 属性、文字在同级 g 内（属性级 fill，非 class）。 */
+const PLANTUML_SHAPE_TEXT = /<g\b[^>]*>((?:(?!<g\b)[\s\S])*?)<\/g>/g
+
+/**
+ * PlantUML 亮底节点文字色修正：用户可对节点显式指定颜色（`rectangle "x" #LightYellow` / `usecase … #fff`
+ * / `class … #orange`），引擎先按用户色填底、再用 skinparam 的文字色写字——用户选的是**浅底**时
+ * 两者对比度可低至 1.0（实测 `#LightYellow` + `#F2F2F5` = 1.1，节点文字完全不可见）。
+ * 修法：按同级 g 配对形状与其文字，形状底色为亮色时把该组文字改为可读的深色（保色相）。
+ * 只改文字不改用户选的底色（配色是设计意图，可读性是硬约束）；幂等（已修正的不重复处理）。
+ */
+export function fixPlantUmlBrightNodes(svg: string): string {
+  return svg.replace(PLANTUML_SHAPE_TEXT, (whole, inner: string) => {
+    const shape = inner.match(/<(?:rect|ellipse|polygon|path|circle)\b[^>]*fill="(#[0-9A-Fa-f]{3,8})"/)
+    if (!shape) return whole
+    const fill = normalizeColor(shape[1])
+    if (!fill || luminance(fill) < BRIGHT_BG_LUMINANCE) return whole // 暗底/透明：保留主题文字色
+    const text = readableTextOn(fill, "dark")
+    // 只改已有 fill 的 <text>，不动其他属性
+    let changed = false
+    const out = inner.replace(/<text\b([^>]*?)fill="#[0-9A-Fa-f]{3,8}"/g, (_mm, pre: string) => {
+      changed = true
+      return `<text${pre}fill="${text}"`
+    })
+    return changed ? whole.replace(inner, out) : whole
+  })
 }
 
 /* ---------- D2 注入（SVG 后处理颜色重映射） ---------- */
@@ -477,14 +529,11 @@ export function fixMermaidBrightNodes(svg: string): string {
     if (svg.includes(`#${id} .label`)) continue // 已修正（幂等：同一 SVG 重复处理不重复注入）
     const { fill, stroke } = inlineNodeColors(m[2])
     if (!fill) continue
-    const [hex] = normalizeColor(fill) ? [normalizeColor(fill)!] : []
-    if (!hex || luminance(hex) < 0.35) continue // 暗底节点：保留主题文字色
-    // 文字色优先取用户选的 stroke（同系深色，与底色天然协调）；对比度不足时再压暗
-    let text = stroke ? normalizeColor(stroke) : null
-    if (!text || contrastRatio(text, hex) < 4.5) {
-      const n = parseInt(hex.slice(1), 16)
-      text = `#${[n >> 16 & 255, n >> 8 & 255, n & 255].map((v) => Math.round(v * 0.25).toString(16).padStart(2, "0")).join("")}`
-    }
+    const hex = normalizeColor(fill)
+    if (!hex || luminance(hex) < BRIGHT_BG_LUMINANCE) continue // 暗底节点：保留主题文字色
+    // 文字色优先取用户选的 stroke（同系深色，与底色天然协调）；对比度不足时按底色重算可读色
+    const strokeHex = stroke ? normalizeColor(stroke) : null
+    const text = strokeHex && contrastRatio(strokeHex, hex) >= MIN_TEXT_CONTRAST ? strokeHex : readableTextOn(hex, "dark")
     rules.push(`#${id} .label text,#${id} .label tspan,#${id} text{fill:${text} !important;}`)
   }
   if (!rules.length) return svg

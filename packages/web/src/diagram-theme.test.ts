@@ -4,6 +4,7 @@ import {
   contrastRatio,
   echartsPalette,
   fixMermaidBrightNodes,
+  fixPlantUmlBrightNodes,
   injectEchartsDark,
   luminance,
   mermaidThemeVariables,
@@ -11,6 +12,7 @@ import {
   normalizeColor,
   plantumlSkinparams,
   remapD2Svg,
+  readableTextOn,
   remapPlantUmlSvg,
   shade,
 } from "./diagram-theme"
@@ -176,6 +178,43 @@ describe("PlantUML SVG 后处理兜底", () => {
     expect(out).toContain(`fill="${p.bg}"`) // 纯白底 → 画布底
     // 已正确的主题色不被二次替换（幂等）
     expect(remapPlantUmlSvg(out, p)).toBe(out)
+  })
+})
+
+describe("可读文字色原语", () => {
+  test("亮底配深字、暗底配浅字，且一律 ≥ 4.5", () => {
+    expect(contrastRatio(readableTextOn("#ffffe0", "dark"), "#ffffe0")).toBeGreaterThanOrEqual(4.5)
+    expect(contrastRatio(readableTextOn("#e8f5e9", "dark"), "#e8f5e9")).toBeGreaterThanOrEqual(4.5)
+    expect(contrastRatio(readableTextOn("#1b5e20", "light"), "#1b5e20")).toBeGreaterThanOrEqual(4.5)
+    // 亮底给深字、暗底给浅字（不是纯黑纯白硬切，保色相）
+    expect(luminance(readableTextOn("#ffffe0", "dark"))).toBeLessThan(luminance("#ffffe0"))
+    expect(luminance(readableTextOn("#1b5e20", "light"))).toBeGreaterThan(luminance("#1b5e20"))
+  })
+
+  test("非法色值兜底为端点色", () => {
+    expect(readableTextOn("not-a-color", "light")).toBe("#ffffff")
+    expect(readableTextOn("not-a-color", "dark")).toBe("#111111")
+  })
+})
+
+describe("PlantUML 用户显式浅底的文字修正", () => {
+  const g = (fill: string, textFill: string) => `<svg><g><g class="entity"><rect fill="${fill}"/><text fill="${textFill}">浅底节点</text></g></g></svg>`
+
+  test("节点显式亮底（rectangle #LightYellow）→ 文字改可读深色", () => {
+    const out = fixPlantUmlBrightNodes(g("#FFFFE0", "#F2F2F5"))
+    const fg = out.match(/<text[^>]*fill="(#[0-9A-Fa-f]{6})"/)?.[1] ?? ""
+    expect(fg.toLowerCase()).not.toBe("#f2f2f5")
+    expect(contrastRatio(fg, "#ffffe0")).toBeGreaterThanOrEqual(4.5)
+  })
+
+  test("暗底节点不动（保留主题文字色）", () => {
+    const svg = g("#3C3C3E", "#F2F2F5")
+    expect(fixPlantUmlBrightNodes(svg)).toBe(svg)
+  })
+
+  test("透明/无 fill 的形状不动", () => {
+    const svg = '<svg><g><rect fill="#00000000"/><text fill="#F2F2F5">x</text></g></svg>'
+    expect(fixPlantUmlBrightNodes(svg)).toBe(svg)
   })
 })
 
