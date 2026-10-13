@@ -253,7 +253,8 @@ export function mermaidThemeVariables(p: DiagramPalette): Record<string, string>
 
 /* ---------- PlantUML 注入（skinparam 逐项；!theme 在 TeaVM 版被静默忽略，不可用） ---------- */
 
-/** PlantUML skinparam 行（暗色）：跨图型通用集 + 序列图/类图/状态图/活动图分项，全部实测生效。 */
+/** PlantUML skinparam 行（暗色）：跨图型通用集 + 分图型全覆盖（时序/类/状态/活动/用例/组件部署/
+ *  包围容器/思维导图/WBS），全部实测生效（逐一渲染断言用色，含用户示例用例图）。 */
 export function plantumlSkinparams(p: DiagramPalette): string[] {
   return [
     "skinparam backgroundColor " + p.bg,
@@ -293,7 +294,6 @@ export function plantumlSkinparams(p: DiagramPalette): string[] {
     "skinparam StateBorderColor " + p.accent,
     "skinparam StateFontColor " + p.text,
     "skinparam StateAttributeFontColor " + p.text,
-    "skinparam ArrowFontColor " + p.text,
     // 活动图
     "skinparam ActivityBackgroundColor " + p.node,
     "skinparam ActivityBorderColor " + p.accent,
@@ -303,6 +303,10 @@ export function plantumlSkinparams(p: DiagramPalette): string[] {
     "skinparam ActivityDiamondFontColor " + p.text,
     "skinparam ActivityStartColor " + p.accent,
     "skinparam ActivityEndColor " + p.accent,
+    // 用例图
+    "skinparam UsecaseBackgroundColor " + p.node,
+    "skinparam UsecaseBorderColor " + p.accent,
+    "skinparam UsecaseFontColor " + p.text,
     // 组件/部署
     "skinparam ComponentBackgroundColor " + p.node,
     "skinparam ComponentBorderColor " + p.accent,
@@ -315,9 +319,45 @@ export function plantumlSkinparams(p: DiagramPalette): string[] {
     "skinparam DatabaseBorderColor " + p.accent,
     "skinparam DatabaseFontColor " + p.text,
     "skinparam QueueBackgroundColor " + p.node,
-    "skinparam QueueBorderColor " +  p.accent,
+    "skinparam QueueBorderColor " + p.accent,
     "skinparam QueueFontColor " + p.text,
-    // 思维导图/甘特（skinparam 不覆盖 mindmap——实测注入无效且可能致错，保持引擎默认）
+    "skinparam ArtifactBackgroundColor " + p.node,
+    "skinparam ArtifactBorderColor " + p.accent,
+    "skinparam ArtifactFontColor " + p.text,
+    "skinparam StorageBackgroundColor " + p.node,
+    "skinparam StorageBorderColor " + p.accent,
+    "skinparam StorageFontColor " + p.text,
+    "skinparam CardBackgroundColor " + p.node,
+    "skinparam CardBorderColor " + p.accent,
+    "skinparam CardFontColor " + p.text,
+    "skinparam FileBackgroundColor " + p.node,
+    "skinparam FileBorderColor " + p.accent,
+    "skinparam FileFontColor " + p.text,
+    "skinparam InterfaceBackgroundColor " + p.node,
+    "skinparam InterfaceBorderColor " + p.accent,
+    "skinparam CollectionsBackgroundColor " + p.node,
+    "skinparam CollectionsBorderColor " + p.accent,
+    // 包围容器（rectangle/package/folder/frame/cloud——用例图的系统边界、组件图的分组框）
+    "skinparam RectangleBackgroundColor " + p.nodeAlt,
+    "skinparam RectangleBorderColor " + p.border,
+    "skinparam RectangleFontColor " + p.text,
+    "skinparam RectangleStereotypeFontColor " + p.textMuted,
+    "skinparam PackageBackgroundColor " + p.nodeAlt,
+    "skinparam PackageBorderColor " + p.border,
+    "skinparam PackageFontColor " + p.text,
+    "skinparam FolderBackgroundColor " + p.nodeAlt,
+    "skinparam FolderBorderColor " + p.border,
+    "skinparam FolderFontColor " + p.text,
+    "skinparam FrameBackgroundColor " + p.nodeAlt,
+    "skinparam FrameBorderColor " + p.border,
+    "skinparam FrameFontColor " + p.text,
+    "skinparam CloudBackgroundColor " + p.nodeAlt,
+    "skinparam CloudBorderColor " + p.border,
+    "skinparam CloudFontColor " + p.text,
+    // 思维导图/WBS（Node* 系实测对 mindmap/wbs 节点生效）
+    "skinparam NodeBackgroundColor " + p.node,
+    "skinparam NodeBorderColor " + p.accent,
+    "skinparam NodeFontColor " + p.text,
     // 通用兜底
     "skinparam TitleFontColor " + p.text,
     "skinparam CaptionFontColor " + p.textMuted,

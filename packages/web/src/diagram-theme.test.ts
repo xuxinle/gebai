@@ -131,6 +131,23 @@ describe("PlantUML 注入", () => {
     expect(all).toContain("skinparam ParticipantBackgroundColor " + p.node)
     expect(all).toContain("skinparam ActivityBackgroundColor " + p.node)
     expect(all).toContain("skinparam StateBackgroundColor " + p.node)
+    // 用例图 + 包围容器 + 部署件全家族（含用户示例用例图场景）
+    expect(all).toContain("skinparam UsecaseBackgroundColor " + p.node)
+    expect(all).toContain("skinparam UsecaseBorderColor " + p.accent)
+    expect(all).toContain("skinparam RectangleBackgroundColor " + p.nodeAlt)
+    expect(all).toContain("skinparam RectangleBorderColor " + p.border)
+    expect(all).toContain("skinparam PackageBackgroundColor " + p.nodeAlt)
+    expect(all).toContain("skinparam FolderBackgroundColor " + p.nodeAlt)
+    expect(all).toContain("skinparam FrameBackgroundColor " + p.nodeAlt)
+    expect(all).toContain("skinparam CloudBackgroundColor " + p.nodeAlt)
+    expect(all).toContain("skinparam StorageBackgroundColor " + p.node)
+    expect(all).toContain("skinparam CardBackgroundColor " + p.node)
+    expect(all).toContain("skinparam FileBackgroundColor " + p.node)
+    expect(all).toContain("skinparam ArtifactBackgroundColor " + p.node)
+    expect(all).toContain("skinparam InterfaceBackgroundColor " + p.node)
+    expect(all).toContain("skinparam CollectionsBackgroundColor " + p.node)
+    // 思维导图/WBS（Node* 系实测对 mindmap/wbs 生效）
+    expect(all).toContain("skinparam NodeBackgroundColor " + p.node)
     // 每行都是合法 skinparam 指令（无空色值）
     for (const line of lines) expect(line).toMatch(/^skinparam \S+ (#[0-9a-f]{6}|\S+)$/)
   })
