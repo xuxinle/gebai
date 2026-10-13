@@ -3,6 +3,7 @@ import {
   buildPalette,
   contrastRatio,
   echartsPalette,
+  fixMermaidBrightNodes,
   injectEchartsDark,
   luminance,
   mermaidThemeVariables,
@@ -175,6 +176,45 @@ describe("PlantUML SVG 后处理兜底", () => {
     expect(out).toContain(`fill="${p.bg}"`) // 纯白底 → 画布底
     // 已正确的主题色不被二次替换（幂等）
     expect(remapPlantUmlSvg(out, p)).toBe(out)
+  })
+})
+
+describe("Mermaid 亮底节点文字色修正", () => {
+  const wrap = (id: string, style: string) => `<svg id="g"><style>.x{fill:#f2f2f5;}</style><g class="node default done" id="${id}"><rect class="basic" style="${style}"/><g class="label"><text>Hello</text></g></g></svg>`
+
+  test("亮底 + 用户 stroke → 文字取 stroke 色（同系深色，对比度达标）", () => {
+    const svg = wrap("n1", "fill:#e8f5e9 !important;stroke:#1b5e20 !important")
+    const out = fixMermaidBrightNodes(svg)
+    expect(out).toContain("fill:#1b5e20 !important")
+    // 修正后文字与底色对比度 ≥ 4.5（可读）
+    expect(contrastRatio("#1b5e20", "#e8f5e9")).toBeGreaterThanOrEqual(4.5)
+  })
+
+  test("暗底节点不动（保留主题文字色）", () => {
+    const svg = wrap("n2", "fill:#1f2020 !important;stroke:#8b9aff !important")
+    expect(fixMermaidBrightNodes(svg)).toBe(svg)
+  })
+
+  test("无内联底色的节点不动（走主题变量，已对齐）", () => {
+    const svg = '<svg><style>.x{}</style><g class="node default" id="n3"><rect class="basic label-container"/><g class="label"><text>A</text></g></g></svg>'
+    expect(fixMermaidBrightNodes(svg)).toBe(svg)
+  })
+
+  test("亮底但无 stroke：按底色压暗生成文字色，且幂等（二次调用不再注入）", () => {
+    const svg = wrap("n4", "fill:#e1f5fe !important")
+    const once = fixMermaidBrightNodes(svg)
+    expect(once).toContain("#n4")
+    expect(once).toContain("!important")
+    // 幂等：修正结果里没有内联 fill（新规则注入的是 CSS 块），再跑不应产生新节点规则
+    const twice = fixMermaidBrightNodes(once)
+    expect((twice.match(/#n4 \.label/g) || []).length).toBe((once.match(/#n4 \.label/g) || []).length)
+  })
+
+  test("用户浅色底 + 对比度不足的 stroke → 回退压暗（保证 ≥ 4.5）", () => {
+    // 浅底 + 同样浅的 stroke（对比度不足）→ 不用 stroke，改压暗
+    const svg = wrap("n5", "fill:#e8f5e9 !important;stroke:#d0e8d0 !important")
+    const out = fixMermaidBrightNodes(svg)
+    expect(out).not.toContain("fill:#d0e8d0 !important")
   })
 })
 

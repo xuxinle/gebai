@@ -443,6 +443,56 @@ export function remapD2Svg(svg: string, p: DiagramPalette): string {
     .replace(/(fill|stroke)\s*:\s*(#[0-9A-Fa-f]{3,8})/gi, remapCss)
 }
 
+/* ---------- Mermaid 用户自定义配色的可读性修正 ---------- */
+
+/**
+ * 修正源码内显式配色的可读性：模型/用户常用 `classDef`/`style` 指定**亮色底**
+ * （如 `classDef done fill:#e8f5e9,stroke:#1b5e20`），而注入的文字色是暗色主题的浅色——
+ * 亮底浅字对比度低至 1.0（实测两色几乎同亮度），节点文字完全不可见。
+ *
+ * 修法：渲染后扫描每个节点形状的**实际底色**（含 `!important` 内联样式，优先于全局主题），
+ * 亮底节点（相对亮度 ≥ 0.35）逐个注入深字覆盖规则：文字色取该节点的 `stroke` 色（用户选定的同系深色，
+ * 对比度最佳且贴合原设计），无 stroke 时按底色压暗生成。暗底节点不受影响（保留主题文字色）。
+ * 覆盖作用于节点自身的 g（id 唯一），用 `!important` 压过 mermaid 的全局文字色规则。
+ */
+const MERMAID_BRIGHT_NODE_ID = /<g[^>]*class="node[^"]*"[^>]*id="([^"]+)"[^>]*>([\s\S]*?)(?=<g[^>]*class="node|$)/g
+
+/** 从节点片段里取形状的内联 fill/stroke（mermaid 把 classDef 写成 style="fill:… !important"）。 */
+function inlineNodeColors(fragment: string): { fill?: string; stroke?: string } {
+  const fill = fragment.match(/style="fill:(#[0-9a-fA-F]{3,8})/i)?.[1] ?? fragment.match(/<rect[^>]*fill="(#[0-9a-fA-F]{3,8})"/i)?.[1]
+  const stroke = fragment.match(/stroke:(#[0-9a-fA-F]{3,8})/i)?.[1]
+  return { fill, stroke }
+}
+
+/**
+ * Mermaid SVG 亮底节点文字色修正（幂等：已修正的节点不会重复注入）。
+ * 返回修正后的 SVG；无亮底节点时原样返回。
+ */
+export function fixMermaidBrightNodes(svg: string): string {
+  const rules: string[] = []
+  MERMAID_BRIGHT_NODE_ID.lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = MERMAID_BRIGHT_NODE_ID.exec(svg))) {
+    const id = m[1]
+    if (svg.includes(`#${id} .label`)) continue // 已修正（幂等：同一 SVG 重复处理不重复注入）
+    const { fill, stroke } = inlineNodeColors(m[2])
+    if (!fill) continue
+    const [hex] = normalizeColor(fill) ? [normalizeColor(fill)!] : []
+    if (!hex || luminance(hex) < 0.35) continue // 暗底节点：保留主题文字色
+    // 文字色优先取用户选的 stroke（同系深色，与底色天然协调）；对比度不足时再压暗
+    let text = stroke ? normalizeColor(stroke) : null
+    if (!text || contrastRatio(text, hex) < 4.5) {
+      const n = parseInt(hex.slice(1), 16)
+      text = `#${[n >> 16 & 255, n >> 8 & 255, n & 255].map((v) => Math.round(v * 0.25).toString(16).padStart(2, "0")).join("")}`
+    }
+    rules.push(`#${id} .label text,#${id} .label tspan,#${id} text{fill:${text} !important;}`)
+  }
+  if (!rules.length) return svg
+  const i = svg.indexOf("</style>")
+  const block = `\n/* 亮底节点的深字修正（用户 classDef/style 指定的浅色底与主题文字色冲突） */\n${rules.join("\n")}\n`
+  return i >= 0 ? svg.slice(0, i) + block + svg.slice(i) : svg.replace(/(<svg[^>]*>)/, `$1<style>${block}</style>`)
+}
+
 /* ---------- ECharts 注入 ---------- */
 
 /**

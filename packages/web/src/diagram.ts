@@ -9,6 +9,7 @@ import { injectPlantUmlLayout } from "./plantuml-layout"
 import {
   type DiagramPalette,
   currentPalette,
+  fixMermaidBrightNodes,
   injectEchartsDark,
   mermaidThemeVariables,
   plantumlSkinparams,
@@ -299,8 +300,10 @@ async function renderMermaidSvg(code: string): Promise<string> {
       const m = await ensureMermaidTheme(pal)
       const id = `gebai-mmd-${++mermaidSeq}`
       const { svg } = await withTimeout(m.render(id, code), 20000, "Mermaid 渲染超时（图表过大或引擎繁忙）")
+      // 亮底节点（用户 classDef/style 指定的浅色底）文字色修正（净化前，与主题文字色同一道防线）
+      const themed = pal ? fixMermaidBrightNodes(svg) : svg
       // 渲染结果可能携带任意 HTML：注入 DOM 前净化（securityLevel=strict 之外的双重防线）
-      const clean = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true } })
+      const clean = DOMPurify.sanitize(themed, { USE_PROFILES: { svg: true, svgFilters: true } })
       if (!clean) throw new Error("Mermaid 渲染结果安全校验失败")
       return explicitSvgSize(clean)
     })()

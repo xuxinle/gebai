@@ -15,6 +15,7 @@ import { wbUrl, wbAbsUrl } from "./url-base"
 import { diagramKindOf } from "./preview-kind"
 import {
   currentPalette,
+  fixMermaidBrightNodes,
   injectEchartsDark,
   mermaidThemeVariables,
   plantumlSkinparams,
@@ -417,7 +418,8 @@ export async function renderDiagramSvg(kind: DiagramKind, code: string): Promise
     await mermaidReady
     const m = (window as unknown as { mermaid: { render: (id: string, code: string) => Promise<{ svg: string }> } }).mermaid
     const out = await m.render(`fw-mmd-${Date.now()}`, code)
-    return out.svg
+    // 亮底节点（用户 classDef/style 指定的浅色底）文字色修正，与主界面同规则
+    return pal ? fixMermaidBrightNodes(out.svg) : out.svg
   }
   if (kind === "echarts") {
     if (!echartsReady) echartsReady = loadScript(`${vendor}/echarts.js`)
