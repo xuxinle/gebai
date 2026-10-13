@@ -817,12 +817,21 @@ auto Server::Impl::handle_find([[maybe_unused]] Client& client, [[maybe_unused]]
 auto selector = ui::Selector::parse(json_get_string(params, "selector"));
 if (!selector) return forward_error(selector.error());
 const auto limit = static_cast<std::size_t>(json_get_i64(params, "limit", 50));
+// `total` = **命中总数**（不受 `limit` 影响），`count` 保留为「本次返回条数」。
+//
+// 为何要加 `total`：旧结果里只有一个 `count`，而它其实等于 `matches.size()`——
+// 于是「命中几个」与「回了几个」是同一个数，调用方拿 `limit=20` 时会把
+// `count:20` 读成「命中 20 个」，明明多于 20 也看不出来。实测：小模型据此
+// 误解返回结构并写出错误的解析分支——这是「名字与语义不符」最贵的形态。
+// 命中总数按 `limit=0`（不限）另查一次，保证 `total` 是真数而不是被截断的值。
+const auto total = root.query(*selector, 0).size();
 auto matches = root.query(*selector, limit);
 Json list = Json::array();
 for (auto* element : matches) list.push_back(ui::element_to_json(*element));
 Json result = Json::object();
 result["selector"] = json_get_string(params, "selector");
 result["count"] = static_cast<std::uint64_t>(list.size());
+result["total"] = static_cast<std::uint64_t>(total);
 result["matches"] = std::move(list);
 return result;
   

@@ -3815,7 +3815,7 @@ raster 层的缺省是 `butt/miter`（与 SVG/CSS 默认一致），但图标不
 | `hello` | `{protocol, client, subscribe?}` | `{protocol, app:{name,version}, pid, backend, headless, screen:{w,h,scale}, theme, capabilities}` | 握手；版本不符即拒 |
 | `ping` | — | `{ts}` | 存活 |
 | `tree` | `{depth?}` | `{tree:{id,type,role,bounds,state,text,children:[...]}, version}` | **嵌套**语义树快照（`depth` 可限深；`version` 用于判断是否需要重新拉取） |
-| `find` | `{selector, limit?, visible_only?}` | `{matches:[{id,type,role,bounds,text,path}]}` | 选择器查询 |
+| `find` | `{selector, limit?, visible_only?}` | `{selector, count, total, matches:[{id,type,role,bounds,text,path}]}` | 选择器查询。**`count` = 本次返回条数（受 `limit` 限制）；`total` = 命中总数（不受 `limit` 影响）**——两个数分开才能判断“是不是被截断了”，只看 `count` 会把“命中 20+”读成“命中 20” |
 | `get` | `{id, props?}` | `{id, type, props:{...}}` | 读取属性（缺省返回全部） |
 | `set` | `{id, props}` | `{changed:[...]}` | 设置属性/文本/值（触发重绘与 `ui.changed`） |
 | `ui.create` | `{type, props?, parent?, index?, key?, id?}` | `{id, type}` | **在线建元素**（与声明式共用工厂注册表；缺省 parent 挂 root 内容，指定则挂为子元素） |

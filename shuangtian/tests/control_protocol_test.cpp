@@ -1184,6 +1184,47 @@ ST_TEST(wait_connection_is_reusable_after_satisfied) {
 ///
 /// 这条用例遍历 `capabilities` 里的每个名字**真的发一次请求**，并断言
 /// 「不是 `未知方法` 错误」——即声明的能力必须真的被实现。
+ST_TEST(find_reports_total_beyond_limit) {
+  // 契约（DESIGN §6.2 `find` 行）：`count` = 本次返回条数（受 `limit` 限制），
+  // `total` = 命中总数（不受 `limit` 影响）。
+  //
+  // 为何要单独守这条：旧结果里只有 `count`，而它等于 `matches.size()`——
+  // “命中几个”与“回了几个”是同一个数。调用方（智能体）拿 `limit=20` 时会把
+  // `count:20` 读成“命中 20 个”，明明多于 20 也看不出来（实测：小模型据此
+  // 误解返回结构并写出错误的解析分支）。
+  ServerFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_REQUIRE(probe.call("hello").value("ok", false));
+
+  // 再补几个 Button：夹具自带 1 个（#btn-ok），使总数达到 5 > limit=2
+  for (int index = 0; index < 4; ++index) {
+    Json create = Json::object();
+    create["type"] = "Button";
+    Json props = Json::object();
+    props["label"] = "额外";
+    create["props"] = props;
+    ST_REQUIRE(probe.call("ui.create", create).value("ok", false));
+  }
+
+  Json limited = Json::object();
+  limited["selector"] = "Button";
+  limited["limit"] = 2;
+  const Json result = probe.call("find", limited)["result"];
+  ST_CHECK_EQ(result["matches"].size(), 2U);
+  ST_CHECK_EQ(result["count"].get<std::uint64_t>(), 2U);  // 回了几条
+  // 命中几条（关键：不被 limit 截断）。用 value() 而不是 operator[]：缺字段时
+  // 拿 0 报断言失败，而不是抛异常（异常会掩盖真因，见 CONVENTIONS §7 异常边界条）。
+  ST_CHECK_EQ(result.value("total", std::uint64_t{0}), 5U);
+
+  // 反向：limit 超过命中数时两个数相等（否则 total 是个恒等于全树的假数）
+  Json all = Json::object();
+  all["selector"] = "Button";
+  all["limit"] = 50;
+  const Json all_result = probe.call("find", all)["result"];
+  ST_CHECK_EQ(all_result["count"].get<std::uint64_t>(), 5U);
+  ST_CHECK_EQ(all_result.value("total", std::uint64_t{0}), 5U);
+}
+
 ST_TEST(capabilities_list_matches_implemented_methods) {
   ServerFixture fx;
   Probe probe(fx.port, fx.token);

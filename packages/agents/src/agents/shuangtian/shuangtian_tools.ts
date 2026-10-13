@@ -789,7 +789,8 @@ const treeTool = readTool(
 const findTool = readTool(
   "find",
   "选择器查询组件（比 tree 更适合大界面）：支持 #id、Type、[text~=关键词]、:focused 等；返回匹配节点的 id/bounds/text。" +
-    "**返回结构是 `{selector, count, matches[]}`**（不是裸数组）——取 id 要读 `matches[i].id`。" +
+    "**返回结构是 `{selector, count, total, matches[]}`**（不是裸数组）——取 id 要读 `matches[i].id`；" +
+    "`count` = 本次返回条数（受 limit 限制），`total` = 命中总数（不受 limit 影响）——两者不等就是被截断了。" +
     "动态列表的 id 形如 `tasks/ListItem@task-42`（业务 key 在 `@` 后，与位置无关）：刷新后按 key 定位，别按索引。",
   schema(
     {
