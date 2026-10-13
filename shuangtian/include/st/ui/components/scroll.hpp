@@ -72,7 +72,9 @@ class ScrollBar : public Element {
 /// 滚动不改变子节点尺寸，只平移其 `bounds`（因此会触发重排）。
 class ScrollView : public Element {
  public:
-  static constexpr float kStep{48.0f};  ///< 滚轮每格滚动距离（px）
+  /// 滚轮每格滚动距离的**缺省值**（真实值优先取主题 `Metrics::wheel_step`，
+  /// `apply_theme` 同步；此常量仅作离屏/无主题兑底）。
+  static constexpr float kStep{48.0f};
   static constexpr float kPageRatio{0.9f};
   static constexpr float kBarGap{4.0f};  ///< 内容区与滚动条之间的间隙（px）
 

@@ -12,6 +12,8 @@
 #include "page.hpp"
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
+#include "st/core/platform.hpp"
+#include "st/core/log.hpp"
 #include "st/text/diff.hpp"
 #include "st/ui/components/menu.hpp"
 #include "st/ui/svg.hpp"
@@ -113,7 +115,6 @@ namespace gbcode_ui {
     ensure_git_log();
     // `--open`：首帧之后打开（见 `set_pending_open_path` 的说明）。
     flush_pending_open();
-    ensure_compare();
     ensure_diff();
     // 三方合并：同上（`git show :1:/:2:/:3:` 是子进程）。
     ensure_merge();
@@ -262,7 +263,6 @@ namespace gbcode_ui {
     build_rename_dialog(c);
     build_git_confirm(c);
     build_file_history(c);
-    build_compare_picker(c);
     build_branch_new_dialog(c);
     build_tag_new_dialog(c);
     // 浮层内的“聚焦输入框”待办：**必须排在对应的构建之后**——
@@ -430,10 +430,9 @@ namespace gbcode_ui {
                                                {"diff", "scm", "变更（Ctrl+Shift+G）"},
                                                {"play", "run", "运行"},
                                                {"package", "extensions", "语言与扩展"},
-                                               {"symbol", "nav", "导航结果"},
-                                               // 「比较」是**面向两端**的视图（与「变更」不同：
-                                               // 后者只看当前工作区），故单独一个入口。
-                                               {"arrow-left", "compare", "与…比较（任意两端）"}};
+                                               // 「导航结果」升级为「大纲」：当前文件符号树为主体，
+                                               // 多处导航命中附在下方（2026-10-13）。
+                                               {"symbol", "outline", "大纲"}};
     const std::size_t current = activity_.value();
     // `surface = Alt`：与标题栏/状态栏**同色**——三者合起来是一圈“外壳”，
     // 色不一致会在拐角处露馅（见 `Element::Surface` 的说明）。
@@ -568,6 +567,40 @@ namespace gbcode_ui {
   }
 
 
+  /// 当前活动缓冲是否处于 Markdown 预览形态（是 .md 且开关开着）。
+  bool CodeEditorPage::md_preview_active() const {
+    const auto& buffers = buffers_.value();
+    const std::size_t index = active_.value();
+    if (index >= buffers.size()) return false;
+    if (!md_preview_.value()) return false;
+    const std::string& path = buffers[index].path;
+    return path.ends_with(".md") || path.ends_with(".markdown") || path.ends_with(".mdx");
+  }
+
+
+  /// 切换 Markdown 预览/源码。非 md 缓冲上调用是**无操作**（按钮本来就只往 md 上装，
+  /// 这条防线保险快捷键路径直接切到非 md 文件后残留开关引发误渲染）。
+  void CodeEditorPage::toggle_md_preview() {
+    const auto& buffers = buffers_.value();
+    const std::size_t index = active_.value();
+    if (index >= buffers.size()) return;
+    const std::string& path = buffers[index].path;
+    const bool is_md = path.ends_with(".md") || path.ends_with(".markdown") ||
+                       path.ends_with(".mdx");
+    if (!is_md) {
+      status_.set("Markdown 预览只对 .md 文件可用");
+      return;
+    }
+    md_preview_.set(!md_preview_.value());
+    // ⚠ 关预览时必须清「已装载」标记：预览态下 CodeEditor 不在树上（互斥声明），
+    // 切回时 dsl 的位置对齐会**新建**一个空编辑器（旧实例已随分支切换销毁）；
+    // 不清的话 `build()` 末尾看到 `key == loaded_key_` 就跳过灌入，编辑器永远空白
+    //（实测：预览→源码后编辑区全空，用户报「渲染切回源码显示空白」）。
+    // 开预览不受影响（CodeEditor 被销毁，但 MarkdownView 自己按 buffers 同步内容）。
+    if (!md_preview_.value()) loaded_key_.clear();
+  }
+
+
   void CodeEditorPage::build_editor_area(Composer& c, const std::vector<OpenBuffer>& buffers, std::size_t active,
                          bool has_editor) {
     column(c, {.gap = 0.0f, .grow = true, .id = "editor-area"}, [&] {
@@ -615,10 +648,38 @@ namespace gbcode_ui {
       // `grow` 在 column 里是**纵向**撑满——不套一层横向 row 的话标签条会长到
       // 整个编辑区那么高（实测：删掉 row 后 `#editor-tabs` 高 200px）。
       // row 的高度固定 34，`Tabs` 的 `grow` 变成横向撑满（它本来的意图）。
+      //
+      // —— Markdown 预览切换（2026-10-13）——
+      // 当前活动缓冲是 .md 时，标签条右缘多一个「预览」开关（id `tab-md-preview`，
+      // 控制通道可 invoke）：开 = 编辑区换 MarkdownView（只读渲染），关 = 源码编辑。
+      // 为什么放标签栏而不是编辑器内：它是**文档级**开关（跟当前标签走），
+      // 放标签栏能一眼看到“这个文件现在处于哪种形态”；且非 md 文件时自动隐藏。
+      const bool is_md = active < buffers.size() &&
+                         (buffers[active].path.ends_with(".md") ||
+                          buffers[active].path.ends_with(".markdown") ||
+                          buffers[active].path.ends_with(".mdx"));
       (void)row(c, {.gap = 0.0f, .height = 34.0f, .id = "tabbar"}, [&] {
-        (void)dsl::tabs(c, tabs, active_index, [this](std::size_t index) { switch_tab(index); },
-                        [this](const std::string& key) { request_close(key); },
-                        {.grow = true, .id = "editor-tabs"});
+        Element& tabs_element = dsl::tabs(
+            c, tabs, active_index, [this](std::size_t index) { switch_tab(index); },
+            [this](const std::string& key) { request_close(key); },
+            {.grow = true, .id = "editor-tabs"});
+        // ⚠ 声明式重组**每帧都会跳到这个 configure**，而 `Tabs` 元素按 key 复用
+        //（尾部槽是它身上的可变状态）——直接 `add_trailing_button` 会每帧追加一个，
+        // 越点越多（实测：切十几次预览后尾部堆了十几个眼睛/× 图标）。
+        // 框架已提供目标态对齐接口（begin/sync/finish_trailing_sync，槽内复用不堆叠）。
+        // **单一预览按钮**：图标恒为 eye，激活态（预览中）用 tooltip 区分语义；
+        // 点击 = 开/关预览（同一个按钮，不按状态换图标——用户要求只有一个预览钮）。
+        if (auto* widget = dynamic_cast<Tabs*>(&tabs_element); widget != nullptr) {
+          widget->begin_trailing_sync();
+          if (is_md) {
+            (void)widget->sync_trailing_button(
+                "eye",
+                md_preview_.value() ? "关闭 Markdown 预览（Ctrl+Shift+V）"
+                                    : "预览 Markdown（Ctrl+Shift+V）",
+                [this] { toggle_md_preview(); });
+          }
+          widget->finish_trailing_sync();   // 非 md 时目标态为空 → 尾部清空（同一条路径）
+        }
       });
       if (!has_editor && tabs.empty()) {
         column(c, {.padding = 24.0f, .grow = true,
@@ -633,14 +694,14 @@ namespace gbcode_ui {
         });
         return;
       }
-      // —— 差异视图 / 比较视图 / 普通编辑器 ——（三者互斥地共享编辑区：
+      // —— 差异视图 / 合并视图 / 普通编辑器 ——（互斥地共享编辑区：
       // 它们都是“现在要看的内容”，而分屏会让每一块都变窄）。
       // 标签栏已经能看到全部标签（文件 + 差异 + 合并），点文件标签即可切回编辑器
       //（`switch_tab` 清空 diff/merge key），点差异标签重新打开。
       //
-      // 顺序**不能反**：合并/差异优先级最高——它们是在比较视图（或变更面板）里
-      // **点开的一件东西**，若比较视图先占位，点文件后屏幕上什么都不会变（实测：
-      // 点清单无反应，而状态栏已经报“差异：…”——看着像“点不动”）。
+      // 顺序**不能反**：合并/差异优先级最高——它们是在变更面板（或提交详情/文件历史）
+      // 里**点开的一件东西**，若它们后面还有独占内容且先占位，点文件后屏幕上
+      // 什么都不会变（实测：点清单无反应，而状态栏已经报“差异：…”——看着像“点不动”）。
       //
       // 合并排在差异前面：它是从变更面板/横幅里点开的**处置动作**，
       // 优先级高于“看差异”这个阅读动作。
@@ -667,6 +728,7 @@ namespace gbcode_ui {
         return;
       }
       merge_view_ptr = nullptr;
+      md_view_ptr = nullptr;
       if (!diff_key_.value().empty()) {
         // 差异视图外面包一层列：上面是逐行暂存工具条（仅在需要时出现），下面才是视图。
         //
@@ -730,11 +792,6 @@ namespace gbcode_ui {
         });
         return;
       }
-      if (activity_.value() == 6) {
-        build_compare_view(c);
-        diff_view_ptr = nullptr;
-        return;
-      }
       // 编辑器：custom<T> 逃生舱（CodeEditor 的一等接口属性面覆盖不到）。
       //
       // 头部**只保留标签栏**（用户 2026-10-08 要求“头部内容都去掉，只保留 tab 和内容”）——
@@ -746,9 +803,43 @@ namespace gbcode_ui {
       // （见 `build()` 末尾的装载逻辑与 `#editor` 的动作面），每次重组都重设会把
       // 控制通道 `set language=...` / `set read_only=true` 当场抹掉（实测：切一次
       // 底部面板就全回默认值）。
+      //
+      // —— Markdown 预览（2026-10-13）：当前缓冲是 .md 且 `md_preview_` 开着时，
+      // 编辑器位置换成一个只读 MarkdownView。与编辑器互斥声明（不是同帧两棵树）：
+      // 预览态下不声明 CodeEditor，`editor` 指针自然为空（所有编辑类动作都有空判，
+      // 状态栏光标文本停在最后一次编辑的位置——预览是阅读形态，这是预期行为）。
+      if (md_preview_active()) {
+        (void)custom<MarkdownView>(c, [this](MarkdownView& view) {
+          view.set_id("md-preview");   // 控制通道钩子（可 get/set/selectable）
+          // 内容只在真变了时写（set_markdown 会重置滚动；每帧重写会把用户滚到的
+          // 位置抹回顶部——与 MergeView set_sides 同一类坑）。
+          const auto& buffers_now = buffers_.value();
+          const std::size_t index = active_.value();
+          if (index < buffers_now.size()) {
+            if (view.markdown() != buffers_now[index].text) {
+              view.set_markdown(buffers_now[index].text);
+            }
+          }
+          view.style().grow = true;
+          view.style().padding = st::math::Insets{12.0f, 16.0f, 12.0f, 16.0f};
+          // 链接是一等交互（2026-10-13）：点击把 URL 交给宿主打开。
+          // 框架只上报「点了哪个 URL」，打开浏览器是平台能力——
+          // 与剪贴板同一取向（组件不该知道平台后端长什么样）。
+          view.on_link_click = [this](std::string_view url) {
+            st::log::info("[gbcode] 打开链接：{}", url);
+            status_.set(std::format("链接：{}", url));
+            (void)st::platform::open_external(url);
+          };
+          view.on_link_hover = [this](std::string_view url) {
+            // 悬停时状态栏给出 URL——与浏览器的底部提示同一体验。
+            if (!url.empty()) status_.set(std::format("链接：{}", url));
+          };
+          md_view_ptr = &view;
+        }, {.grow = true, .id = "md-preview-host"});
+        return;
+      }
       (void)custom<CodeEditor>(c, [this](CodeEditor& ed) {
         ed.set_id("editor");   // 控制通道钩子：tools/*.py 依赖
-    // 字号档位只在**首次**装上时设一次（见 `configure_editor`）。
         // 每帧无条件写会把控制通道 / 设置项的 `set font_scale=…` 当场抹掉——
         // 与 `read_only` 同一类缺陷（实测：把档位改成 1.0，下一帧就变回 1.15）。
         if (!editor_configured_) {

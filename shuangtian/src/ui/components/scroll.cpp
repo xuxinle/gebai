@@ -335,7 +335,11 @@ auto ScrollView::on_event(const RenderContext& context, Event& event) -> bool {
     // 向上给 +120，X11 的按钮 4 也是上）。偏移量随内容向下增大，所以要取反。
     // 取错符号的表现是“往下滚滚不动”，且**不报错**：事件仍被处理（handled=true），
     // 只是偏移一直被夹在 0——页面下半截因此永远看不到。
-    scroll_by(-event.wheel_delta * step_);
+    // 步长优先取主题 `Metrics::wheel_step`（全局滚动手感一致），无主题时兑底 `kStep`。
+    const float step = context.theme.metrics().wheel_step > 0.0f
+                           ? context.theme.metrics().wheel_step
+                           : kStep;
+    scroll_by(-event.wheel_delta * step);
     event.handled = true;
     return true;
   }

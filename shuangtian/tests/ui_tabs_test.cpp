@@ -335,7 +335,10 @@ ST_TEST(ui_tabs_properties_and_metrics) {
   ST_CHECK(tabs->tab_rect(tabs->tab_count()).is_empty());  // 越界为空
 }
 
-ST_TEST(ui_tabs_focus_ring_and_visual_tree) {
+ST_TEST(ui_tabs_focus_and_visual_tree) {
+  // 2026-10-13 起标签条**聚焦不再画环**（用户要求标签头不显示边框；选中态由
+  // 指示条 + 文本色表达）。本用例改为反向断言：聚焦帧与未聚焦帧在标签条外缘
+  // 环带上**逐像素一致**（原来那两条 ≥20 的断言就是被这里替代的护栏，见 §7.1）。
   TabsFixture fixture({"A", "B", "C"});
   auto& root = fixture.harness.root;
   auto* tabs = fixture.tabs;
@@ -354,12 +357,22 @@ ST_TEST(ui_tabs_focus_ring_and_visual_tree) {
   root.paint(focused);
 
   const Rect bounds = tabs->bounds();
-  ST_CHECK(focus_ring_pixels(focused, plain, bounds.inflate(4.0f), root.theme()) >= 20);
-  // 未聚焦时的反向断言只看环带（标签条上沿外侧）：指示条本体为 primary，
-  // 其抗锯齿过渡色与焦点环合成色落在同一色域，整框比对会误报。
-  const Rect top_band{bounds.x - 3.0f, bounds.y - 3.0f, bounds.width + 6.0f, 3.0f};
-  ST_CHECK_EQ(ring_pixels_in(plain, top_band, root.theme()), 0);
-  ST_CHECK(focus_ring_pixels(focused, plain, top_band, root.theme()) >= 20);
+  // 聚焦不应在外缘环带产生任何焦点环像素（环带 = 标签条四周 3px 外扩区）。
+  const Rect band = bounds.inflate(3.0f);
+  const int x0 = static_cast<int>(std::floor(band.x));
+  const int y0 = static_cast<int>(std::floor(band.y));
+  const int x1 = static_cast<int>(std::ceil(band.right()));
+  const int y1 = static_cast<int>(std::ceil(band.bottom()));
+  int ring_pixels = 0;
+  for (int y = y0; y < y1; ++y) {
+    for (int x = x0; x < x1; ++x) {
+      const Point point{static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f};
+      if (near_ring(focused.pixel_at_point(point), ring_composites(root.theme()))) {
+        ++ring_pixels;
+      }
+    }
+  }
+  ST_CHECK_EQ(ring_pixels, 0);
 
   const st::ui::VisualNode visual = root.visual_tree();
   ST_REQUIRE(visual.children.size() == 1U);
@@ -787,4 +800,50 @@ ST_TEST(ui_tabs_overflow_arrow_click_scrolls) {
   ST_CHECK(tabs->max_scroll() <= 0.0f);
   ST_CHECK(tabs->overflow_arrow_rect(true).is_empty());
   ST_CHECK(tabs->overflow_arrow_rect(false).is_empty());
+}
+
+// ————————————————— Tabs 尾部钮的声明式目标态同步 —————————————————
+
+ST_TEST(ui_tabs_trailing_sync_rebuilds_to_target) {
+  // 「md 预览钮越点越多」的回归（DESIGN.md §4.2.17b）：声明式每帧跳同一个
+  // configure，可变追加（add_trailing_button）会每帧堆一个；
+  // begin/sync/finish 必须把尾部区**重建到目标态**——同槽复用、目标短了收尾。
+  MetaTabsFixture fixture;
+  auto* tabs = fixture.tabs;
+  ST_REQUIRE(tabs != nullptr);
+
+  int clicks = 0;
+  // 帧 1：两个钮。
+  tabs->begin_trailing_sync();
+  (void)tabs->sync_trailing_button("eye", "预览", [&clicks] { ++clicks; });
+  (void)tabs->sync_trailing_button("refresh", "刷新", [] {});
+  tabs->finish_trailing_sync();
+  fixture.harness.root.layout(true);
+  // k_trailing_zone = 30（2026-10-13 从 26 加宽：图标盒径改用主题
+  // `icon_size_sm`(20) 后需给它两侧留出边距）→ 两个钮占 60。
+  ST_CHECK_EQ(tabs->trailing_width(), 2.0f * 30.0f);
+
+  // 帧 2…N：同一位置重复声明**同目标**——钮数不得增长（旧实现的缺陷就是这里堆叠）。
+  for (int frame = 0; frame < 20; ++frame) {
+    tabs->begin_trailing_sync();
+    (void)tabs->sync_trailing_button("eye", "预览", [&clicks] { ++clicks; });
+    (void)tabs->sync_trailing_button("refresh", "刷新", [] {});
+    tabs->finish_trailing_sync();
+  }
+  ST_CHECK_EQ(tabs->trailing_width(), 2.0f * 30.0f);
+
+  // 槽内更新：icon/tooltip 变化要落地（不重建实例）。
+  tabs->begin_trailing_sync();
+  (void)tabs->sync_trailing_button("close", "关闭预览", [] {});
+  tabs->finish_trailing_sync();
+  const Rect slot0 = tabs->trailing_rect(0);
+  ST_CHECK(!slot0.is_empty());
+
+  // 目标变短：只剩 0 个钮 → 尾部清空。
+  tabs->begin_trailing_sync();
+  tabs->finish_trailing_sync();
+  ST_CHECK_EQ(tabs->trailing_width(), 0.0f);
+
+  // 回调仍可用（复用槽的 callback 被更新过）。
+  (void)clicks;
 }

@@ -810,9 +810,12 @@ auto FileDialog::on_event(const RenderContext& context, Event& event) -> bool {
       input_insert(event.text);
       return true;
     case EventKind::Wheel: {
-      // 列表纵向滚动（自绘行）。
+      // 列表纵向滚动（自绘行）。步长取主题 `Metrics::wheel_step`（全局一致；兑底 48）。
+      const float wheel_step = context.theme.metrics().wheel_step > 0.0f
+                                  ? context.theme.metrics().wheel_step
+                                  : 48.0f;
       const float max_scroll = std::max(0.0f, list_content_height() - list_.height);
-      scroll_y_ = std::clamp(scroll_y_ + event.wheel_delta * 48.0f, 0.0f, max_scroll);
+      scroll_y_ = std::clamp(scroll_y_ + event.wheel_delta * wheel_step, 0.0f, max_scroll);
       mark_dirty();
       return true;
     }

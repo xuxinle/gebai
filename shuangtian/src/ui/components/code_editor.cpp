@@ -2165,13 +2165,18 @@ auto CodeEditor::on_event(const RenderContext& context, Event& event) -> bool {
       v_dragging_ = false;
       return false;  // 不吞：Click 的激活语义照常走
     case EventKind::Wheel: {
-      // Shift+滚轮 = 水平滚动（主流编辑器惯例；也是长行唯一不靠拖拽的入口）
+      // Shift+滚轮 = 水平滚动（主流编辑器惯例；也是长行唯一不靠拖拽的入口）。
+      // 步长取主题 `Metrics::wheel_step`（全局滚动手感一致，MarkdownView/ScrollView
+      // 等同源；无主题时兑底 48）。
+      const float wheel_step = context.theme.metrics().wheel_step > 0.0f
+                                  ? context.theme.metrics().wheel_step
+                                  : 48.0f;
       const float before_x = scroll_x_;
       const float before_y = scroll_y_;
       if (event.shift) {
-        scroll_x_ = std::max(0.0f, scroll_x_ - event.wheel_delta * 48.0f);
+        scroll_x_ = std::max(0.0f, scroll_x_ - event.wheel_delta * wheel_step);
       } else {
-        scroll_y_ = std::max(0.0f, scroll_y_ - event.wheel_delta * 48.0f);
+        scroll_y_ = std::max(0.0f, scroll_y_ - event.wheel_delta * wheel_step);
       }
       clamp_scroll(context);
       mark_dirty();

@@ -24,6 +24,11 @@
 /// 只改展示元数据时用 `set_tab_meta`。`set_tabs`/`add_tab` 是纯标签 API（无 key，
 /// key 自动取 label 值），行为与历史版本完全一致。
 ///
+/// 尾部动作钮在**声明式 configure**里必须用 `begin_trailing_sync`/
+/// `sync_trailing_button`/`finish_trailing_sync`（每帧重建到目标态、槽内复用）；
+/// `add_trailing_button` 只适用于手搭代码的**一次性**初始化——声明式里逐帧追加
+/// 会堆叠（详见那组接口的说明）。
+///
 /// 控制通道属性面：`active`（序号或标签名，可写）、`options`（`|` 分隔的标签清单，可写）、
 /// `label`（当前标签名，可写=按名选中）、`scroll`（横向滚动偏移，可读写）。
 
@@ -142,6 +147,23 @@ class Tabs : public Element {
   /// 摘除全部尾部动作钮（不动「+」与自定义内容）。
   void clear_trailing_buttons();
 
+  // —— 声明式每帧重建尾部区（与 `sync_tabs` 同一套「按目标态对齐」契约）——
+  //
+  // `add_trailing_button` 是**可变追加**：声明式重组每帧跳同一个 configure 时会
+  // 每帧追加一个（实测：gbcode 的 md 预览钮「越点越多」）。本对接口把「先清后加」
+  // 的惯例内化进组件——手搭代码一次性初始化仍可用 add/enable/remove；
+  // **声明式 configure 里必须用这一对**（槽内复用，hover 态保留，不堆叠）。
+  //
+  // 用法：`begin_trailing_sync(); sync_trailing_button(...); …; finish_trailing_sync();`
+  /// 开启一轮目标态对齐（重置槽位计数；上一轮未覆盖的旧槽在 finish 时收掉）。
+  void begin_trailing_sync();
+  /// 声明一个尾部钮：落在当前槽——已有则**复用并更新**（icon/tooltip/callback/enabled），
+  /// 没有则追加。在 begin/finish 之外调用会退化为追加并告警（手搭路径兼容）。
+  auto sync_trailing_button(std::string icon, std::string tooltip,
+                            std::function<void()> on_click, bool enabled = true) -> std::size_t;
+  /// 结束本轮：本轮未覆盖到的尾部槽移除（目标态比旧态短时收尾）。
+  void finish_trailing_sync();
+
   // —— 尾部自定义内容（重活入口）——
   /// 把一个自定义元素挂到尾部动作区最左侧（在动作钮与「+」之前；不随标签滚动）。
   /// 归本组件布局：高取标签条内容高、宽取元素自然尺寸。传 nullptr 摘除。
@@ -210,6 +232,9 @@ class Tabs : public Element {
     mutable bool hovered{false};
   };
   std::vector<TrailingButton> trailing_{};
+  /// `begin/sync/finish_trailing_sync` 的轮次状态（见那组接口的说明）。
+  bool trailing_sync_open_{false};
+  std::size_t trailing_sync_used_{0U};
   /// 尾部自定义内容（重活入口；归 `children_` 所有，这里只持指针）。
   Element* trailing_content_{nullptr};
 

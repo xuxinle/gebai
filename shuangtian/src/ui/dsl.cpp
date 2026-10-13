@@ -1224,6 +1224,26 @@ auto Composer::create_element(std::string_view type, const st::Json& props,
   } else {
     // 新建（或类型/key 对不上）：腾出游标位，把新元素插进那一格。
     //
+    // **同位类型切换诊断**（2026-10-13）：位置对齐遇类型不符会销毁旧元素——
+    // 换页场景合法，但元素级状态（文本/滚动/展开态）会**静默丢失**，且应用侧
+    // 的「已装载」类判据往往还没失效（实测：gbcode md 预览↔编辑器互切，切回
+    // 后编辑器空白）。记进 stats + 一条日志：从"猜哪个状态丢了"变成
+    // "一眼看到哪次切换丢了哪棵子树"。
+    if (existing != nullptr && !type_matches) {
+      const std::string from = std::string(existing->type());
+      const std::string to = std::string(type);
+      const std::string where = existing->id().empty()
+                                    ? std::string("#") + std::to_string(cursor)
+                                    : "#" + existing->id();
+      const std::string note = std::format("{}: {} -> {}", where, from, to);
+      if (std::find(impl_->last_stats.type_switches.begin(),
+                    impl_->last_stats.type_switches.end(),
+                    note) == impl_->last_stats.type_switches.end()) {
+        impl_->last_stats.type_switches.push_back(note);
+        st::log::info("[dsl] 同位类型切换（元素级状态随旧实例丢失）：{}", note);
+      }
+    }
+    //
     // **腾位只释放真正的残留**（`keyed_region` 里没有它的 key）：占着这一格的兄弟
     // 很可能只是「还没轮到」（它的 key 在本区段里，待会儿自己会被复用）——
     // 把它摘掉就毁掉了 key 复用。实测踩到：头插一项后其余项全部重建、id 漂移。

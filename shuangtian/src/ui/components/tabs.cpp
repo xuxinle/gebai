@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
@@ -34,8 +35,11 @@ constexpr float k_arrow_glyph = 6.0f;       // 箭头视觉尺寸
 constexpr float k_wheel_step = 48.0f;       // 滚轮一格的滚动步长（与编辑器行滚一致）
 constexpr float k_add_zone = 24.0f;         // 「+」命中区宽（终端/编辑器标签栏惯例）
 constexpr float k_add_glyph = 9.0f;         // 「+」视觉尺寸
-constexpr float k_trailing_zone = 26.0f;    // 尾部动作钮命中区宽（与工具栏小钮同尺寸）
-constexpr float k_trailing_glyph = 13.0f;   // 动作钮图标视觉尺寸
+constexpr float k_trailing_zone = 30.0f;    // 尾部动作钮命中区宽
+// 图标盒径**不用常量**：取主题 `Metrics::icon_size_sm`——与活动栏的
+// `Button(Size::Small)` 是**同一个 token**（用户要求「参考活动栏的图标」）。
+// 命中区 30 让 20px 图标两侧各留 5px（活动栏 40 盒/20 图标留下 10px——
+// 垂直向都是同一档尺度，水平更紧凑是因为标签栏不像活动栏那样独占一列）。
 
 // 指示条动画状态机：`idle` 无动画；`pending` 已切换但尚未读到推进的时间轴。
 constexpr double k_anim_idle = -1.0;
@@ -373,6 +377,58 @@ void Tabs::clear_trailing_buttons() {
   mark_dirty();
 }
 
+void Tabs::begin_trailing_sync() {
+  trailing_sync_open_ = true;
+  trailing_sync_used_ = 0U;
+}
+
+auto Tabs::sync_trailing_button(std::string icon, std::string tooltip,
+                                std::function<void()> on_click, bool enabled) -> std::size_t {
+  // 声明式每帧重建尾部区的**唯一正确入口**（begin…逐个 sync…finish）。
+  //
+  // 为什么需要它：`add_trailing_button` 是可变追加，声明式重组每帧跳同一个
+  // configure 时会堆叠（实测：gbcode 的 md 预览钮「越点越多」、堆了十几个图标）。
+  // 本对接口把「先清后加」的惯例内化进组件：begin 记录起点，第 N 次 sync 落在
+  // 第 N 槽——槽存在则**复用**（只更新 icon/tooltip/callback/enabled，hover 态保留），
+  // 不存在则追加；本轮 begin 之后未覆盖到的旧槽在 finish 时收掉。
+  // 重复 begin（同一帧多次重组）等价重开一轮，安全。
+  if (!trailing_sync_open_) {
+    // 不在 begin/end 之间调 = 调用方当普通追加用（手搭路径，如 terminal）——
+    // 照常工作，但值得留一条日志：声明式里这么用几乎必是又踩了堆叠坑。
+    st::log::warn("[ui] Tabs::sync_trailing_button 在 begin_trailing_sync 之外调用——"
+                  "若在声明式 configure 里，请改用 begin/sync 对（否则每帧追加会堆叠）");
+  }
+  const std::size_t slot = trailing_sync_used_++;
+  if (slot < trailing_.size()) {
+    TrailingButton& dst = trailing_[slot];
+    const bool changed = dst.icon != icon || dst.tooltip != tooltip ||
+                         dst.enabled != enabled;
+    dst.icon = std::move(icon);
+    dst.tooltip = std::move(tooltip);
+    dst.on_click = std::move(on_click);
+    dst.enabled = enabled;
+    if (changed) mark_dirty();
+    return slot;
+  }
+  trailing_.push_back(TrailingButton{std::move(icon), std::move(tooltip), std::move(on_click),
+                                     enabled, false});
+  mark_layout_dirty();
+  mark_dirty();
+  return trailing_.size() - 1;
+}
+
+void Tabs::finish_trailing_sync() {
+  // 收尾：本轮没被 sync 覆盖到的旧槽 = 调用方已不需要（目标态比旧态短）。
+  if (!trailing_sync_open_) return;
+  trailing_sync_open_ = false;
+  if (trailing_sync_used_ < trailing_.size()) {
+    trailing_.resize(trailing_sync_used_);
+    hover_trailing_ = -1;
+    mark_layout_dirty();
+    mark_dirty();
+  }
+}
+
 void Tabs::set_trailing_content(std::unique_ptr<Element> content) {
   if (trailing_content_ != nullptr) {
     // 摘除：从 children_ 里取回，离开作用域即析构。
@@ -639,10 +695,17 @@ void Tabs::paint_content(const RenderContext& context, raster::Surface& canvas) 
     const math::Color tint = !button.enabled ? colors.text_faint
                               : button.hovered ? colors.text
                                                : colors.text_muted;
-    const math::Rect glyph_box{zone.center().x - k_trailing_glyph * 0.5f,
-                               zone.center().y - k_trailing_glyph * 0.5f,
-                               k_trailing_glyph, k_trailing_glyph};
-    (void)Icon::draw(canvas, button.icon, glyph_box, tint);
+    // 图标盒径取主题令牌（与 `Button` 的 `Size::Small` **同一档**）：尾部钮
+    // 与活动栏按钮是同一类「图标动作钮」，图标占盒比例必须一致，否则一个看着
+    // 克制、一个顶着边缘。旧实现硬编码 15.0f（占盒 0.58）比活动栏（20/40=0.50）
+    // 更满，与旁边的 tab 文字挤在一起——用户报「图标太丑」。
+    const float glyph = metrics.icon_size_sm;
+    const math::Rect glyph_box{zone.center().x - glyph * 0.5f, zone.center().y - glyph * 0.5f,
+                               glyph, glyph};
+    // 线宽传 0：`Icon::draw` 按「stroke/24 × 盒径」随盒缩放（与 `IconView`/
+    // `Button`/标题栏**同口径**）。旧实现漏传（吃默认 2.0f 固定像素）——
+    // 15px 盒里 2.0px 是声明值 1.7 的 1.18 倍，笔画糊成一团，这是「丑」的真根因。
+    (void)Icon::draw(canvas, button.icon, glyph_box, tint, 0.0f);
   }
 
   // 溢出箭头（画在裁剪区外，常驻可见）。
@@ -662,18 +725,8 @@ void Tabs::paint_content(const RenderContext& context, raster::Surface& canvas) 
     }
   }
 
-  if (focused_) {
-    // 圆角夹取到「短边一半 - 2」：半径等于半边的圆角路径描边会退化成发丝线。
-    const float width = metrics.focus_width;
-    const math::Rect ring_box = bounds_.inflate(width * 0.5f);
-    const float limit =
-        std::max(std::min(ring_box.width, ring_box.height) * 0.5f - 2.0f, 0.0f);
-    if (!ring_box.is_empty()) {
-      raster::Path ring;
-      ring.add_rounded_rect(ring_box, std::min(radius + width * 0.5f, limit));
-      canvas.stroke_path(ring, raster::Paint::solid(colors.focus_ring), width);
-    }
-  }
+  // 聚焦不再画环：标签条的选中态由「指示条 + 文本色」表达，整圈描在外缘
+  // 观感像多了一层容器边框（用户要求标签头不显示边框）。键盘导航仍可用。
 }
 
 auto Tabs::on_event(const RenderContext& context, Event& event) -> bool {

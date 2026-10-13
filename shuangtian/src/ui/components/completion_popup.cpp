@@ -391,10 +391,14 @@ auto CompletionPopup::on_event(const RenderContext& context, Event& event) -> bo
       return true;
     }
     case EventKind::Wheel: {
+      // 步长取主题 `Metrics::wheel_step`（全局滚动手感一致；无主题兑底 48）。
+      const float wheel_step = context.theme.metrics().wheel_step > 0.0f
+                                  ? context.theme.metrics().wheel_step
+                                  : 48.0f;
       const float row_h = kRowHeight;
       const float max_scroll =
           std::max(0.0f, static_cast<float>(visible_items_.size()) * row_h - list_.height);
-      scroll_y_ = std::clamp(scroll_y_ + event.wheel_delta * 48.0f, 0.0f, max_scroll);
+      scroll_y_ = std::clamp(scroll_y_ + event.wheel_delta * wheel_step, 0.0f, max_scroll);
       mark_dirty();
       return true;
     }
