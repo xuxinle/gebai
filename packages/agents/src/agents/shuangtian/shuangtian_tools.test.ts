@@ -7,8 +7,8 @@
  */
 import { afterEach, describe, expect, test } from "bun:test"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { isAbsolute, join } from "node:path"
+import { tmpdir, homedir } from "node:os"
+import { isAbsolute, dirname, join } from "node:path"
 import { createServer, type Server, type Socket } from "node:net"
 import { mkdtempSync } from "node:fs"
 import type { ToolContext } from "@gebai/sdk"
@@ -228,6 +228,9 @@ describe("只读查询工具", () => {
   })
 
   test("apps：扫描运行期控制文件并校验连通性", async () => {
+    // 夹具走**真 ToolContext 的形状**：`scanControlFilesSync` 自己读目录，
+    // 与运行时（listDir 回 path 而非 name 的那个版本）口径一致——
+    // 旧实现的假 ctx 返回 `{name}`，恰好避开了“读 name 恒为空”的真缺陷（§7.2 假绿）。
     const server = await control()
     server.setHandler(() => ({ app: { name: "mdeditor" }, backend: "headless" }))
     const home = mkdtempSync(join(tmpdir(), "st-tools-"))
@@ -239,6 +242,116 @@ describe("只读查询工具", () => {
     const result = await tools.apps.execute({}, ctx)
     expect(result.output).toContain("mdeditor")
     expect(result.output).toContain("可控制")
+    expect(result.data).toMatchObject({ ok: true })
+    const apps = (result.data as { apps: Array<{ app: string }> }).apps
+    expect(apps).toHaveLength(1)
+    expect(apps[0].app).toBe("mdeditor")
+  })
+
+  // ————————————————————————————————————————————————————————————————
+  // 回归：目标发现（小模型“工具用不了”的真因）
+  // ————————————————————————————————————————————————————————————————
+  test("省略 target：自动选中本会话唯一存活实例（不再写死 mdeditor/gallery）", async () => {
+    const server = await control()
+    server.setHandler((method) => ({ method, tree: { id: "root" } }))
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    const { ctx } = makeCtx(home)
+    const dir = join(ctx.resolvePath(".shuangtian"))
+    mkdirSync(dir, { recursive: true })
+    // 名字故意不是 mdeditor/gallery：旧实现会因此找不到实例。
+    // pid=0 → 跳过“判活”（测试进程名与 app 名不匹配会被当成 PID 复用）。
+    writeFileSync(join(dir, "gbcode-control.json"), JSON.stringify({ port: server.port, pid: 0 }))
+
+    const result = await tools.tree.execute({ depth: 1 }, ctx)
+    expect(result.output).toContain("root")
+    expect(server.calls.map((call) => call.method)).toContain("tree")
+  })
+
+  test("多个存活实例：报 ambiguous 并要求指定，绝不静默猜一个", async () => {
+    const first = await control()
+    const second = await control()
+    first.setHandler(() => ({ tree: { id: "first" } }))
+    second.setHandler(() => ({ tree: { id: "second" } }))
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    const { ctx } = makeCtx(home)
+    const dir = join(ctx.resolvePath(".shuangtian"))
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, "alpha-control.json"), JSON.stringify({ port: first.port, pid: 0 }))
+    writeFileSync(join(dir, "beta-control.json"), JSON.stringify({ port: second.port, pid: 0 }))
+    const ambiguous = await tools.tree.execute({ depth: 1 }, ctx)
+    expect(ambiguous.output).toContain("ambiguous")
+    expect(ambiguous.output).toContain("alpha")
+    expect(ambiguous.output).toContain("beta")
+    // 指定之后才能落到具体实例
+    const chosen = await tools.tree.execute({ depth: 1, app: "beta" }, ctx)
+    expect(chosen.output).toContain("second")
+  })
+
+  test("指定 app：按名字选中对应控制文件（多实例下的确定性入口）", async () => {
+    const server = await control()
+    server.setHandler(() => ({ tree: { id: "gb" } }))
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    const { ctx } = makeCtx(home)
+    const dir = join(ctx.resolvePath(".shuangtian"))
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, "gbcode-control.json"), JSON.stringify({ port: server.port, pid: 0 }))
+
+    const result = await tools.tree.execute({ depth: 1, app: "gbcode" }, ctx)
+    expect(result.output).toContain("gb")
+  })
+
+  test("capture：服务端返回空 path 时回落到请求路径，且文件不存在就明说", async () => {
+    const server = await control()
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    const { ctx } = makeCtx(home)
+    const path = join(home, "shot.png")
+    // ① 服务端没回 path（如 encode=base64 分支）→ 用请求路径，并把**真实存在**的文件报出来
+    server.setHandler(() => ({ format: "png", bytes: 4 }))
+    writeFileSync(path, Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+    const ok = await tools.capture.execute({ path, target: `127.0.0.1:${server.port}` }, ctx)
+    expect(ok.output).toContain(path)
+    expect(ok.blocks?.[0]).toMatchObject({ type: "image", path })
+
+    // ③ 服务端回**空串 path**（不是 undefined）→ 不得把空串当路径报出去。
+    // 这条是区分“按类型取”与“String() 吞掉”的关键：旧写法 `String("" ?? path)`
+    // 得到空串，输出会变成“截图已保存: ”（下游拿到空路径）。
+    server.setHandler(() => ({ path: "", format: "png" }))
+    const blank = await tools.capture.execute({ path, target: `127.0.0.1:${server.port}` }, ctx)
+    expect(blank.output).toContain(path)
+    expect(blank.output).not.toMatch(/已保存:\s*$/)
+
+    // ② 声称成功但文件并不在磁盘上 → 不得照常报“截图已保存”
+    const ghost = join(home, "ghost.png")
+    server.setHandler(() => ({ path: ghost, format: "png" }))
+    const bad = await tools.capture.execute({ path: join(home, "wanted.png"), target: `127.0.0.1:${server.port}` }, ctx)
+    expect(bad.output).toContain("未落盘")
+    expect(bad.blocks).toBeUndefined()
+  })
+
+  test("capture：自然路径（会话下非 .shuangtian）自动落到白名单内的 shots/", async () => {
+    // 应用侧白名单是“temp / 可执行文件目录 / 控制文件目录且**不递归**”，
+    // 而控制文件在 <会话>/.shuangtian/ → 只有 .shuangtian 子树可写。
+    // 传 <会话>/qa/x.png 时服务端会直接拒；工具应先把它落到 shots/ 并明说。
+    const server = await control()
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    const { ctx } = makeCtx(home)
+    // 用**明确不在白名单里**的绝对路径（home 下）：会话目录本身在 /tmp 下，
+    // 而 /tmp 恰好在应用的 temp 白名单内——用例若用 <会话>/qa/x.png 就恰好
+    // 绕过改写分支（夹具环境比真实环境宽松，CONVENTIONS §7.2 那类）。
+    const wanted = join(homedir(), "gebai-shot-whitelist-probe.png")
+    server.setHandler((method, params) => {
+      // 只应答 capture：同一连接上还有合成的 hello 握手（也走这个 handler）
+      if (method !== "capture") return { ok: true }
+      const p = String(params.path ?? "")
+      mkdirSync(dirname(p), { recursive: true })
+      writeFileSync(p, Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+      return { path: p, format: "png" }
+    })
+    const result = await tools.capture.execute({ path: wanted, target: `127.0.0.1:${server.port}` }, ctx)
+    const called = String(server.calls.at(-1)?.params.path ?? "")
+    expect(called.replace(/\\/g, "/")).toContain("/.shuangtian/shots/gebai-shot-whitelist-probe.png")
+    expect(result.output).toContain("已改落")
+    expect(result.blocks?.[0]).toMatchObject({ type: "image" })
   })
 
   test("wait：超时返回 satisfied=false（不报错）", async () => {
@@ -587,6 +700,13 @@ describe("run 生命周期", () => {
     const result = await tools.run.execute({ action: "start", target: "mdeditor", framework: root }, ctx)
     expect(result.output).toContain("已启动 mdeditor")
     expect(result.output).toContain(String(server.port))
+    // 构建与启动耗时必须分开报（start 把两者捆在一起，冷缓存时构建才是大头）
+    expect(result.output).toContain("构建")
+    expect(result.output).toContain("启动")
+    expect(typeof (result.data as Record<string, unknown>).build_ms).toBe("number")
+    expect(typeof (result.data as Record<string, unknown>).startup_ms).toBe("number")
+    // 提示里的 target 写法必须**真能连上**：纯端口/host:port 不带 token
+    expect(result.output).toContain("-control.json")
     expect(result.data).toMatchObject({ ok: true, pid: 777, port: server.port })
     const launch = commands.find((item) => item.cmd.includes(LAUNCH_MARK))
     expect(launch?.cmd).toContain("--headless")

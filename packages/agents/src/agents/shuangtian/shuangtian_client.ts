@@ -50,16 +50,40 @@ export interface ControlResult {
 
 const MAX_FRAME = 64 * 1024 * 1024  // 与服务端 ServerOptions::max_frame 对齐（避免两端不一致）
 
-/** 解析目标：`host:port` 字符串、`{host,port}`、或控制文件路径（JSON `{port,host,token}`）。 */
+/**
+ * 控制文件主名：`<app>-control.json` → `<app>`。
+ * 非控制文件返回空串（调用方据此判断“这个文件算不算一个应用实例”）。
+ */
+export function control_app_name(path: string): string {
+  const leaf = (path.split(/[\\/]/).pop() ?? path).toLowerCase()
+  return leaf.endsWith("-control.json") ? leaf.slice(0, -"-control.json".length) : ""
+}
+
+/**
+ * 解析目标：`host:port` 字符串、`{host,port}`、或控制文件路径（JSON `{port,host,token}`）。
+ *
+ * **鉴权补全**：服务端自 2026-09-30 起默认要求 `hello` 携带控制文件里的 token，
+ * 而 `host:port` / 纯端口这两种写法**本身不携带 token**——按它们连过去必然被拒
+ * （实测：`invalid: 握手被拒：token 校验失败…`）。因此这里在缺 token 时回查
+ * **同端口的控制文件**（`control_files` 由调用方给出会话内的候选清单）补齐；
+ * 查不到就照旧连（服务端若显式关了鉴权仍可用），由服务端错误兜底。
+ *
+ * 为什么放在客户端而不是各工具里：寻址是**调用方最先接触到的接口**，
+ * 让“照着提示传参”必然失败是最贵的一类缺陷——小模型会因此判定“工具不可用”，
+ * 转而手写协议客户端，把 token/帧/结构三件事重新踩一遍。
+ */
 export async function resolve_target(
   spec: string | { host?: string; port: number; token?: string },
+  control_files: string[] = [],
 ): Promise<ControlTarget> {
-  if (typeof spec !== "string") return { host: spec.host ?? "127.0.0.1", port: spec.port, token: spec.token }
+  if (typeof spec !== "string") {
+    return { host: spec.host ?? "127.0.0.1", port: spec.port, token: spec.token }
+  }
   const text = spec.trim()
-  if (/^\d+$/.test(text)) return { host: "127.0.0.1", port: Number(text) }
+  if (/^\d+$/.test(text)) return adopt_target("127.0.0.1", Number(text), control_files)
   const match = text.match(/^(?<host>[^:]+):(?<port>\d+)$/)
   if (match?.groups) {
-    return { host: match.groups.host, port: Number(match.groups.port) }
+    return adopt_target(match.groups.host, Number(match.groups.port), control_files)
   }
   // 视作控制文件路径
   const file = Bun.file(text)
@@ -71,6 +95,23 @@ export async function resolve_target(
     throw new ControlError("parse", `控制文件缺少 port 字段: ${text}`)
   }
   return { host: payload.host ?? "127.0.0.1", port: payload.port, token: payload.token }
+}
+
+/** 从候选控制文件里找**同一个端口**的那一份，借用它的 token（找不到就只给 host/port）。 */
+async function adopt_target(host: string, port: number, control_files: string[]): Promise<ControlTarget> {
+  for (const file of control_files) {
+    try {
+      const payload = (await Bun.file(file).json()) as { port?: unknown; token?: unknown }
+      const filePort = typeof payload.port === "number" ? payload.port : 0
+      const fileHost = "127.0.0.1"
+      if (filePort !== port) continue
+      const token = typeof payload.token === "string" && payload.token !== "" ? payload.token : undefined
+      return { host: host === "localhost" ? fileHost : host, port, token }
+    } catch {
+      // 控制文件读不了/写了一半：跳过（它是候选，不是断言）
+    }
+  }
+  return { host, port }
 }
 
 function encode_frame(payload: unknown): Buffer {

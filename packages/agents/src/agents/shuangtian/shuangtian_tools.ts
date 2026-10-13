@@ -5,13 +5,15 @@
  * 所有工具经 TCP 控制通道（`st-control/1`）与进程管理落地，不依赖宿主机桌面环境——
  * 无头模式（`--headless`）下 Linux 服务器无显示服务也能完整开发与验证界面。
  */
-import { existsSync, statSync } from "node:fs"
+import { existsSync, readdirSync, statSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import type { SubAgentDef, Tool, ToolContext, ToolResult } from "@gebai/sdk"
 import { artifactBlocks, schema } from "@gebai/sdk/node"
 import {
   ControlError,
   call_control,
+  control_app_name,
   request,
   resolve_target,
   wait_for_event,
@@ -159,6 +161,31 @@ async function readControlFile(path: string): Promise<ControlInfo | null> {
   }
 }
 
+/**
+ * 解析截图落盘路径。
+ *
+ * 两道约束都要满足：
+ * ① 工具契约是“返回的路径文件系统里可直接读”，所以**相对路径必须按会话目录解析**；
+ * ② 服务端有**落盘白名单**（temp / 可执行文件目录 / 控制文件所在目录），
+ *    且是**前缀比较不递归**——控制文件在 `<会话>/.shuangtian/`，所以“会话目录下”
+ *    这个概念只有 `.shuangtian` 子树真的可写。
+ *
+ * 自然写法（如 `qa/shot.png`）按 ① 解析出来、却过不了 ②。与其让调用方在一条
+ * “路径不在白名单”的报错里自己拼出可行的绝对路径，不如在工具层就把它落到
+ * **控制文件目录里的 shots/**（也是 start 内定并已通过 `--shots` 告知应用的位置）。
+ */
+function resolveShotPath(ctx: ToolContext, requested: string): string {
+  const shots = join(runtimeDir(ctx), "shots")
+  if (requested === "") return join(shots, `shot-${Date.now()}.png`)
+  const resolved = ctx.resolvePath(requested)
+  const runtime = runtimeDir(ctx)
+  const folded = (value: string): string => value.replace(/\\/g, "/")
+  const inRuntime = folded(resolved).startsWith(`${folded(runtime)}/`)
+  const inTemp = folded(resolved).startsWith(`${folded(tmpdir()).replace(/\/$/, "")}/`)
+  if (inRuntime || inTemp || !resolved.includes("/")) return resolved
+  return join(shots, basename(resolved))
+}
+
 /** 文件修改时间（毫秒）；取不到返回 0。 */
 function mtimeMs(path: string): number {
   try {
@@ -214,33 +241,87 @@ async function processName(ctx: ToolContext, pid: number): Promise<string> {
  * 解析控制目标：显式 `target`（`host:port` / 控制文件路径 / 纯端口）> 环境变量 >
  * 会话运行期控制文件（由 `run` 的 start 动作写入）。
  */
+/** 在运行期目录里找目标对应的控制文件（精确名优先，其次扫描唯一的控制文件）。 */
+function resolveControlFileSync(ctx: ToolContext, target: string): string {
+  const dir = runtimeDir(ctx)
+  const exact = join(dir, `${target}-control.json`)
+  if (existsSync(exact)) return exact
+  return scanControlFilesSync(ctx).find((file) => control_app_name(file) === target.toLowerCase()) ?? ""
+}
+
+/**
+ * 扫描运行期目录里的全部控制文件（同步；只读目录，无副作用）。
+ *
+ * 为何不用 `ctx.listDir`：它是异步的，而 `controlTarget` 的角色是多处要拿
+ * “当前目标是哪个”的地方同步调用。同步实现也让 `apps` 与寻址走同一份真源。
+ */
+function scanControlFilesSync(ctx: ToolContext): string[] {
+  try {
+    return readdirSync(runtimeDir(ctx))
+      .filter((name) => name.endsWith("-control.json"))
+      .map((name) => join(runtimeDir(ctx), name))
+      .sort()
+  } catch {
+    return []  // 目录不存在 → 无实例
+  }
+}
+
 async function controlTarget(ctx: ToolContext, args: Json, target?: string): Promise<ControlTarget> {
   const explicit = target ?? asString(args, "target")
-  if (explicit) return resolve_target(explicit)
+  if (explicit) return resolve_target(explicit, scanControlFilesSync(ctx))
   const fromEnv = String(ctx.env.SHUANGTIAN_TARGET ?? "").trim()
-  if (fromEnv) return resolve_target(fromEnv)
-  const requested = controlFileFor(ctx, asString(args, "app", "mdeditor"))
-  const gallery = controlFileFor(ctx, "gallery")
-  const file = existsSync(requested) ? requested : existsSync(gallery) ? gallery : ""
-  if (file) {
+  if (fromEnv) return resolve_target(fromEnv, scanControlFilesSync(ctx))
+
+  // 发现顺序：① 调用方显式给了 app 名 → 就用它；② 否则 **扫描全部控制文件**。
+  //
+  // 为何要扫描：本工具曾只试 `mdeditor` / `gallery` 两个名字，于是
+  // `run(target="gbcode")` 启动的实例**永远发现不了**——省略 target 时直接报
+  // “未找到运行中的应用”，而唯一的实例就在那儿。配合下方提示词推荐的
+  // `target="host:port"` 写法也不带 token（被握手拒），工具于是“看起来完全不可用”：
+  // 调用方只能改为手写 TCP 客户端，把 token/帧/结构重新踩一遍。
+  //
+  // 有实例时的选择规则：**唯一存活的那个直接用**（最常见情形，省钱省往返）；
+  // 多个存活则列出来要求指定——静默猜错落到另一个应用上比报错危险得多。
+  const candidates: Array<{ file: string; info: ControlInfo; app: string }> = []
+  for (const file of scanControlFilesSync(ctx)) {
+    const info = await readControlFile(file)
+    if (info && info.port > 0) candidates.push({ file, info, app: control_app_name(file) })
+  }
+  const requestedApp = asString(args, "app").trim()
+  const requestedFile = requestedApp ? resolveControlFileSync(ctx, requestedApp) : ""
+  const ordered = requestedFile
+    ? [...candidates.filter((item) => item.file === requestedFile), ...candidates.filter((item) => item.file !== requestedFile)]
+    : candidates
+
+  const alive: typeof candidates = []
+  const stale: string[] = []
+  for (const item of ordered) {
     // **先判活再连**：应用退出/崩溃后控制文件会滞留，连上去只能得到一条
     // “连接被关闭”的传输错误。而这条错误里真正该说清的是
     // “这个实例已经不在了，去重新 start”——处理成一句可行动的话。
-    const info = await readControlFile(file)
-    const app = basename(file).replace(/-control\.json$/, "")
-    if (info && info.pid > 0 && !processMatchesTarget(await processName(ctx, info.pid), app)) {
-      throw new ControlError(
-        "not_found",
-        `${app} 的实例已不在运行（控制文件滞留，对应 PID ${info.pid}）：` +
-          `run(action=stop) 清理后重新 start；或手动传 target="<host:port>"。控制文件：${file}`,
-      )
+    if (item.info.pid > 0 && !processMatchesTarget(await processName(ctx, item.info.pid), item.app)) {
+      stale.push(item.app)
+      continue
     }
-    return resolve_target(file)
+    alive.push(item)
+  }
+  if (alive.length === 1 || (alive.length > 1 && requestedFile && alive[0]?.file === requestedFile)) {
+    return resolve_target(alive[0].file)
+  }
+  if (alive.length === 0) {
+    throw new ControlError(
+      "not_found",
+      stale.length > 0
+        ? `${stale.join("、")} 的实例已不在运行（控制文件滞留）：run(action=stop) 清理后重新 start；` +
+          `或显式传 target="<控制文件路径>"。运行期目录：${runtimeDir(ctx)}`
+        : `未找到运行中的应用：请先 shuangtian_run（action=start）启动，或用 target 参数指定 ` +
+          `控制文件路径 / "host:port"；也可设置环境变量 SHUANGTIAN_TARGET（当前会话目录：${runtimeDir(ctx)}）`,
+    )
   }
   throw new ControlError(
-    "not_found",
-    `未找到运行中的应用：请先 shuangtian_run（action=start）启动，或用 target 参数指定 "host:port"/控制文件路径；` +
-      `也可设置环境变量 SHUANGTIAN_TARGET（当前会话目录：${runtimeDir(ctx)}）`,
+    "ambiguous",
+    `有 ${alive.length} 个运行中的应用（${alive.map((item) => item.app).join("、")}）：` +
+      `请用 target="<控制文件路径>" 或 app="<名字>" 指定要看哪一个`,
   )
 }
 
@@ -381,12 +462,18 @@ const runTool: Tool = {
       const bootstrap = await ensureToolchain()
       if (!bootstrap.ok) return { output: `引导工具链失败：\n${bootstrap.text}` }
       // 被构建的是**工程**（可能与框架不同目录）；`st` 始终用框架自己的那份
+      const build_started_at = Date.now()
           const st = stBinary(root)
     const app = projectDir(ctx, args as Json)
     const build = await ctx.runCommand(
       invoke(st, `build ${target} --profile ${profile}${toolchainFlag}`),
       { workdir: app, timeoutMs },
     )
+      // 构建耗时**单独量**：`start` 把「构建 + 启动」捆在一起跑，而首次（冷缓存）
+      // 要编整个框架静态库，是本仓库最耗时的一步。不分开报告时，调用方只能看到
+      // `start` 很慢，无从判断"是不是构建在吃时间"（实测：Windows 冷构建 30s 级，
+      // 而缓存命中态的启动只要 0.2s）。
+      const build_ms = Date.now() - build_started_at
       const tail = `${build.stdout}${build.stderr}`.trim().split("\n").slice(-12).join("\n")
       if (build.code !== 0) return { output: `构建失败（exit ${build.code}）：\n${tail}` }
       if (action === "build") {
@@ -394,8 +481,8 @@ const runTool: Tool = {
           output: toolchain
             ? `交叉编译完成 · ${target} [${profile}] 工具链 ${toolchain}\n` +
               `产物: build/${buildSubdir}/bin/${target}.exe（Windows 目标，需在目标平台运行）\n${tail}`
-            : `构建完成 · ${target} [${profile}]\n${tail}`,
-          data: { ok: true, action, target, output: tail },
+            : `构建完成 · ${target} [${profile}]（耗时 ${build_ms}ms）\n${tail}`,
+          data: { ok: true, action, target, output: tail, build_ms },
         }
       }
 
@@ -433,13 +520,14 @@ const runTool: Tool = {
       const existing = await readControlFile(control_file)
       if (existing) {
         if (await controlResponsive(existing.port)) {
-          return {
-            output:
-              `已有一个存活的 ${target} 实例：PID ${existing.pid || "未知"} · 控制通道 127.0.0.1:${existing.port}\n` +
-              `  想重开：先 run(action=stop, target="${target}")；\n` +
-              `  想用它：tree/capture/set 等工具省略 target 即走会话控制文件（也可显式传 target="${existing.port}"）`,
-            data: { ok: false, action, target, pid: existing.pid, port: existing.port, already_running: true },
-          }
+      return {
+        output:
+          `已有一个存活的 ${target} 实例：PID ${existing.pid || "未知"} · 控制通道 127.0.0.1:${existing.port}\n` +
+          `  想重开：先 run(action=stop, target="${target}")；\n` +
+          `  想用它：tree/capture/set 等工具省略 target 即可（自动选中本会话唯一存活实例），` +
+          `也可显式传 target="${control_file}"（注意：纯端口/host:port 写法不带 token，会被拒）`,
+        data: { ok: false, action, target, pid: existing.pid, port: existing.port, already_running: true },
+      }
         }
         // 通道不应答（进程已退出/崩溃）→ 文件陈旧：清掉，否则下面会拿到它的端口
         await ctx.deleteFile(control_file).catch(() => {})
@@ -525,12 +613,17 @@ const runTool: Tool = {
           data: { ok: false, action, target, pid },
         }
       }
+      // 启动（从拉起进程到握手成功）的耗时：与 build_ms 分开报告，便于区分
+      // “这次花在编译上”还是“花在启动上”。
+      const startup_ms = Date.now() - launched_at
       return {
         output:
-          `已启动 ${target}（headless）\n  PID      : ${pid}\n  控制通道 : 127.0.0.1:${port}\n` +
+          `已启动 ${target}（headless）\n  PID      : ${pid} · 端口 ${port} · 构建 ${build_ms}ms · 启动 ${startup_ms}ms\n` +
           `  控制文件 : ${control_file}\n  日志     : ${log_file}\n  ${handshake}\n` +
-          `下一步：shuangtian_tree / shuangtian_capture / shuangtian_input_* 皆可指定 target="${port}"`,
-        data: { ok: true, action, target, pid, port, control_file, log_file },
+          `后续调用 target 二选一：① 省略 target（自动选中本会话唯一存活实例）；` +
+          `② 传控制文件路径 target="${control_file}"` +
+          `（注意：纯端口 / host:port 写法不带 token，会在握手阶段被拒）`,
+        data: { ok: true, action, target, pid, port, control_file, log_file, build_ms, startup_ms },
       }
     }
 
@@ -639,41 +732,35 @@ const appsTool = readTool(
   async (_args, ctx) => {
     const entries: Array<Record<string, unknown>> = []
     const dir = runtimeDir(ctx)
-    if (ctx.listDir) {
-      try {
-        const files = await ctx.listDir(dir)
-        for (const file of files) {
-          const name = (file as { name?: string }).name ?? ""
-          if (!name.endsWith("-control.json")) continue
-          const path = join(dir, name)
-          try {
-            const info = (await Bun.file(path).json()) as Record<string, unknown>
-            const port = typeof info.port === "number" ? info.port : 0
-            const token = typeof info.token === "string" ? info.token : ""
-            let responsive = false
-            let screen: unknown = null
-            if (port > 0) {
-              try {
-                const hello = await request<Json>(
-                  { host: "127.0.0.1", port, token: token || undefined },
-                  "hello",
-                  {},
-                  2000,
-                )
-                responsive = true
-                screen = hello.screen ?? null
-              } catch {
-                responsive = false
-              }
-            }
-            entries.push({ app: name.replace("-control.json", ""), port, responsive, screen, info })
-          } catch {
-            entries.push({ app: name.replace("-control.json", ""), error: "控制文件不可读" })
-          }
-        }
-      } catch {
-        // 目录不存在 → 无实例
+    // 用同步扫描而不是 `ctx.listDir`：真运行时的 listDir 返回的字段是 `path`
+    // （不是 `name`），旧实现读 `name` 拿到恒为空的字符串 → **每个实例都被跳过**，
+    // 明明在跑也应答“当前没有运行中的霜天应用”。而既有测试用的是返回 `name` 的
+    // 假 ctx，两侧口径不同 ⇒ 缺陷被测试完全盖住（CONVENTIONS §7.2 那类假绿）。
+    // 现在 `apps` 与寻址（controlTarget）走同一个真源。
+    for (const file of scanControlFilesSync(ctx)) {
+      const name = (file.split(/[\\/]/).pop() ?? file).replace(/-control\.json$/, "")
+      const info = await readControlFile(file)
+      if (info === null) {
+        entries.push({ app: name, error: "控制文件不可读" })
+        continue
       }
+      let responsive = false
+      let screen: unknown = null
+      if (info.port > 0) {
+        try {
+          const hello = await request<Json>(
+            { host: "127.0.0.1", port: info.port, token: info.token || undefined },
+            "hello",
+            {},
+            2000,
+          )
+          responsive = true
+          screen = hello.screen ?? null
+        } catch {
+          responsive = false
+        }
+      }
+      entries.push({ app: name, port: info.port, pid: info.pid, responsive, screen, control_file: file })
     }
     if (entries.length === 0) {
       return {
@@ -701,12 +788,14 @@ const treeTool = readTool(
 
 const findTool = readTool(
   "find",
-  "选择器查询组件（比 tree 更适合大界面）：支持 #id、Type、[text~=关键词]、:focused 等；返回匹配节点的 id/bounds/text。",
+  "选择器查询组件（比 tree 更适合大界面）：支持 #id、Type、[text~=关键词]、:focused 等；返回匹配节点的 id/bounds/text。" +
+    "**返回结构是 `{selector, count, matches[]}`**（不是裸数组）——取 id 要读 `matches[i].id`。" +
+    "动态列表的 id 形如 `tasks/ListItem@task-42`（业务 key 在 `@` 后，与位置无关）：刷新后按 key 定位，别按索引。",
   schema(
     {
       selector: { type: "string", description: "选择器，如 'Button[text~=保存]'、'#btn-save'、'Input:focused'" },
       limit: { type: "number", description: "最多返回条数（默认 20）" },
-      target: { type: "string", description: "host:port 或控制文件路径" },
+      target: { type: "string", description: "host:port 或控制文件路径（缺 token 的写法会自动从控制文件补齐）" },
     },
     ["selector"],
   ),
@@ -915,16 +1004,21 @@ const captureTool = readTool(
       y: { type: "number", description: "region 左上 Y" },
       width: { type: "number", description: "region 宽" },
       height: { type: "number", description: "region 高" },
-      path: { type: "string", description: "保存路径（默认落会话 .shuangtian/shots/）" },
-      target: { type: "string", description: "host:port 或控制文件路径" },
+      path: {
+        type: "string",
+        description:
+          "保存路径（默认落会话 .shuangtian/shots/）。应用有落盘白名单（temp / 可执行文件目录 / 控制文件目录，不递归），" +
+          "所以给 <会话>/qa/x.png 这类路径会被自动落到 .shuangtian/shots/x.png",
+      },
+      target: { type: "string", description: "host:port 或控制文件路径（缺 token 的写法会自动从控制文件补齐）" },
     },
     [],
   ),
   async (args, ctx) => {
-    const requested = asString(args, "path")
-    const fallback = join(runtimeDir(ctx), "shots", `shot-${Date.now()}.png`)
-    const path = requested ? ctx.resolvePath(requested) : fallback
+    const path = resolveShotPath(ctx, asString(args, "path"))
     const params: Json = { encode: "file", path }
+    // 路径被改写过就明说（否则调用方会去自己传的路径找文件，找不到还不知道为什么）
+    const rewritten = asString(args, "path") !== "" && ctx.resolvePath(asString(args, "path")) !== path
     if (asString(args, "id")) params.id = asString(args, "id")
     if (typeof args.width === "number" && typeof args.height === "number") {
       params.region = {
@@ -936,12 +1030,24 @@ const captureTool = readTool(
     }
     const result = await controlCall(ctx, args, "capture", params, 60_000)
     if (!result.ok) return { output: result.text }
-    const saved = String((result.data as Json | undefined)?.path ?? path)
+    // `path` 只在它**确实是字符串**时用：服务端非 `file` 分支（回 base64）不返回 path，
+    // 而旧写法 `?? path` 遇到 `path: null/数字` 会把请求路径当成结果报出去。
+    const raw = (result.data as Json | undefined)?.path
+    const saved = typeof raw === "string" && raw !== "" ? raw : path
+    // 服务端回的是它**实际写入**的路径；连它都不在磁盘上就只能明说，
+    // 而不是照常报“截图已保存”——下游会拿着一个不存在的路径去读图。
+    if (!existsSync(saved)) {
+      return {
+        output: `截图疑似未落盘：服务端返回路径 ${saved}，但该文件不存在。原始响应：\n${result.text.slice(0, 800)}`,
+        data: result.data,
+      }
+    }
     const meta = (result.data as Json | undefined)?.region
       ? `（区域 ${JSON.stringify((result.data as Json).region)}）`
       : ""
+    const note = rewritten ? "（请求路径不在应用的落盘白名单内，已改落 .shuangtian/shots/）" : ""
     return {
-      output: `截图已保存: ${saved}${meta}`,
+      output: `截图已保存: ${saved}${meta}${note}`,
       blocks: artifactBlocks(saved),
       data: result.data,
     }
@@ -1136,6 +1242,6 @@ export const requiresApproval = {
   call: true,
 }
 
-export { call_control, request, resolve_target, ControlError }
+export { call_control, request, resolve_target, control_app_name, ControlError }
 export type { ControlResult, ControlTarget, SubAgentDef, ToolContext }
 export { basename }

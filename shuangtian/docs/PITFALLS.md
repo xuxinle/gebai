@@ -28,6 +28,7 @@
 | 坑 | 一句话 | 出处 |
 |---|---|---|
 | **假绿：桩把差异抹平** | 被测的是"谁把值传给谁"，而桩直接回了个恒等值 ⇒ 错误实现也判绿。**桩必须复现被测的那一段真实行为** | `CONVENTIONS.md` §7.2 |
+| **假 ctx 的字段名与真 ctx 不同** | 测试夹具自己编了 `{name}`，而运行时 `listDir` 回的是 `{path}` ⇒ 读 `name` 恒为空却「测试全绿」，缺陷（`apps` 永远报“没有运行中的应用”）直到真实会话才暴露。夹具要用**真实现返回的形状**，不是看上去合理的形状 | `packages/agents/src/agents/shuangtian/shuangtian_tools.ts` 的 `apps` 注释 |
 | **假绿：回退文本编译不过** | `-Werror` 打断编译 ⇒ 测试跑的是上一份二进制 ⇒ 假绿。回退写法要能编译过（保留 `(void)var;`） | `CONVENTIONS.md` §7.3 |
 | **判据自己也会错** | 先把"什么算合格"在**一个已知样本**上验一遍，再拿去判被测对象 | `CONVENTIONS.md` §7.8 |
 | **像素断言的三个坑** | 聚簇 / 步长 / 判据——不做逆向验证很容易交付"恒绿的护栏" | `CONVENTIONS.md` §7.1 |
@@ -73,7 +74,12 @@
 | 坑 | 一句话 | 出处 |
 |---|---|---|
 | **先 `hello` 携带 token** | 控制通道拒绝任何未带 token 的请求；漏了这一步第一条 `find` 就挂 | `tools/gbcode_e2e.py` 的 `client.ok("hello")` |
+| **驱动控制通道：别自己写 TCP 客户端** | 现成的是 `tools/st_client_lib.py`（`load_control` + `call_with_token`，已处理握手/帧累积/分片）。手搓会重新踩 token、四字节长度前缀、`header += chunk`（写成 `header += header` 会卡在 recv）三件事 | `tools/st_client_lib.py` 头注释 |
+| **`host:port` / 纯端口两种 target 不带 token** | 只能传**控制文件路径**（或省略 target）；带鉴权的实例上按 `host:port` 传必然在握手阶段被拒，而报错看着像“token 不对”、不像“寻址方式不对” | `packages/agents/src/agents/shuangtian/shuangtian_client.ts` 的 `resolve_target` |
+| **智能体工具寻址与 e2e 脚本是两套入口** | 工具侧现在会从同端口的控制文件自动补齐 token、并扫描 `.shuangtian/*-control.json` 发现实例；写 e2e 脚本时这些**不会**自动发生 | 同上 |
 | **Windows `subprocess` 默认 GBK** | 仓库输出是 UTF-8；不显式 `encoding="utf-8"` 会抛解码错，异常被吞后一律报 unknown（**差点把工具问题当成代码问题**） | 本文件 · 实测 2026-10-09 |
+| **截图落盘白名单不递归** | `capture` 只允许写到 temp / 可执行文件目录 / **控制文件所在目录**（= `<会话>/.shuangtian/`，前缀比较、不下钻）。传 `<会话>/qa/x.png` 会被服务端拒；智能体工具会自动改落到 `.shuangtian/shots/` 并在输出里注明“已改落” | `src/control/server.cpp` 的 `default_capture_dirs` |
+| **“报成功”不等于文件在** | 自己写探针时，正则对中文尾注（如 `（区域 {…}`）会贪婪地吞进路径，于是“文件不存在”是探针的错、不是工具的错（已实测踩到）。判落盘用 `ls`/`find` 复核 | 实测 2026-10-13 |
 | **验证 UI 读组件自报的值** | 不要信旁路探针（截图/像素统计）——两者口径不同 | `CONVENTIONS.md` §7.5 |
 | **合成输入不一定触发交互态** | 下结论前先确认**前提状态成立**（悬浮/按下/焦点） | `CONVENTIONS.md` §7.6 |
 | **真窗口实测用 `tools/st_win_input.py`** | 别自己拼 PowerShell（三条注入通道各有适用范围） | `CONVENTIONS.md` §7.7.1 |

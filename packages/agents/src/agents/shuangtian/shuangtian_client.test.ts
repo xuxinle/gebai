@@ -93,6 +93,22 @@ describe("resolve_target", () => {
     expect(await resolve_target(file)).toEqual({ host: "127.0.0.1", port: 4321 })
   })
 
+  // 回归：`host:port` / 纯端口本身不带 token，而服务端默认要求 hello 携带 token——
+  // 于是“按工具提示传参”必然被握手拒。这里断言缺 token 时会**自动从同端口的
+  // 控制文件补齐**；少了这一步，整个工具集在带鉴权的实例上等于不可用。
+  test("host:port / 纯端口：从同端口的控制文件补齐 token", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "st-ctl-"))
+    const own = join(dir, "gbcode-control.json")
+    const other = join(dir, "gallery-control.json")
+    writeFileSync(own, JSON.stringify({ port: 4321, token: "tk-own" }))
+    writeFileSync(other, JSON.stringify({ port: 9999, token: "tk-other" }))
+
+    expect(await resolve_target("127.0.0.1:4321", [own, other])).toEqual({ host: "127.0.0.1", port: 4321, token: "tk-own" })
+    expect(await resolve_target("4321", [own, other])).toEqual({ host: "127.0.0.1", port: 4321, token: "tk-own" })
+    // 端口对不上就不该乱塞 token（宁可由服务端拒绝，也不能把别的实例的 token 带过去）
+    expect(await resolve_target("127.0.0.1:5555", [own, other])).toEqual({ host: "127.0.0.1", port: 5555 })
+  })
+
   test("控制文件缺失时报 not_found 而非静默失败", async () => {
     const missing = join(tmpdir(), "st-ctl-definitely-missing.json")
     await expect(resolve_target(missing)).rejects.toBeInstanceOf(ControlError)
