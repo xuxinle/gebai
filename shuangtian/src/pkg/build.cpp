@@ -1226,6 +1226,8 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
                       process::Options{.cwd = cwd, .env = toolchain.env});
 }
 
+// 匿名 namespace 内的 link() 用下方的占用判定（定义在 st::pkg 层供测试直连）。
+
 [[nodiscard]] auto link(const Manifest& manifest, const BuildOptions& options,
                         const std::vector<CompileUnit>& units, const std::string& output,
                         const std::vector<std::string>& profile_flags_list,
@@ -1337,9 +1339,7 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
     // 产物被正在运行的实例占着（Windows 上必现：exe 被占用时链接器写不进去）。
     // 原始报错只有一句 `LNK1168 无法打开 …exe 进行写入`，排错的人第一反总不是“那个窗口还开着”——
     // 直接给出下一步。
-    if (diagnostics.find("LNK1168") != std::string::npos ||
-        diagnostics.find("LNK1104") != std::string::npos ||
-        diagnostics.find("Text file busy") != std::string::npos) {
+    if (artifact_locked(diagnostics)) {
       return unexpected(
           ErrorCode::Io,
           std::format("链接失败：产物被占用（{}）\n"
@@ -1354,6 +1354,24 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
 }
 
 }  // namespace
+
+/// 链接诊断里「产物被占用」的判定（导出：`st::pkg::artifact_locked`，
+/// 声明在 build.hpp——测试 `pkg_build_lock_test.cpp` 直接断言三套工具链文案）。
+///
+/// 三套工具链三套文案，漏一套就退回裸报「链接失败」——排错的人想不到是
+/// 残留进程占着产物（本仓 Windows+MinGW 宿主上这是常态路径：无头实例忘停就重编）。
+bool artifact_locked(std::string_view diagnostics) {
+  // MSVC：LNK1168（无法写入）/ LNK1104（无法打开）
+  if (diagnostics.find("LNK1168") != std::string_view::npos) return true;
+  if (diagnostics.find("LNK1104") != std::string_view::npos) return true;
+  // POSIX：Text file busy
+  if (diagnostics.find("Text file busy") != std::string_view::npos) return true;
+  // MinGW（ld/lld，实测）：`failed to write output '…exe': permission denied`。
+  // 两个关键词同时出现才判占用：单独的 permission denied 可能是目录权限问题
+  //（那的下一步不足「结束实例」，误导）。
+  return diagnostics.find("failed to write output") != std::string_view::npos &&
+         diagnostics.find("permission denied") != std::string_view::npos;
+}
 
 /// 按**编译器族**收敛档位标志：去掉目标编译器不认识的选项。
 ///

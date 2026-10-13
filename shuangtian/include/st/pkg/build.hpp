@@ -95,4 +95,9 @@ struct BuildStats {
                              std::string_view junit_path = {}, bool include_slow = false)
     -> Result<int>;
 
+/// 链接诊断文本是否表示「产物被运行中的实例占用」（跨三套工具链的文案判定；
+/// 命中时 `st build` 的报错会直接给出「结束实例再重编」的下一步）。
+/// 纯函数，供 `pkg_build_lock_test` 断言三套文案各命中/不误报。
+[[nodiscard]] bool artifact_locked(std::string_view diagnostics);
+
 }  // namespace st::pkg
