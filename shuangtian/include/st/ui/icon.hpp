@@ -39,6 +39,16 @@ class Icon {
   static void draw_filled(raster::Surface& canvas, std::string_view name, math::Rect box,
                           math::Color color);
 
+  /// 图标在 `box` 里实际使用的**描边宽度**（逻辑 px）。
+  ///
+  /// 为何要公开：`draw` 实际用的线宽是「声明值 × 盒径/24，且 **≥ 1.0 下限**」——
+  /// 下限专为小盒图标设（13px 盒下 eye 只剩 0.92px，抗锯齿一摊就「细弱发灰」，
+  /// 用户报「预览图标不清晰」，Tabs 尾部钮）。把这一算式变成可查询的生产函数：
+  /// 测试直断言语义量，不靠从像素反推（1.0 vs 0.92 的墨量差不到 10%，
+  /// 松阈值就是假绿护栏——实测踩到）。`stroke_width > 0` = 调用方显式覆盖，返回原值。
+  [[nodiscard]] static auto effective_stroke(std::string_view name, float box_size,
+                                            float stroke_width = 0.0f) -> float;
+
   /// 图标在 24×24 视图框内的实际包围盒（布局对齐用）。
   [[nodiscard]] static auto view_bounds(std::string_view name) -> math::Rect;
 

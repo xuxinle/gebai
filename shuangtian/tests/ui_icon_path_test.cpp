@@ -351,6 +351,52 @@ ST_TEST(ui_icon_dot_style_glyphs_actually_render) {
   ST_CHECK_EQ(dot_runs("more-vertical", false), 3U);
 }
 
+ST_TEST(ui_icon_small_box_stroke_has_a_legible_floor) {
+  // 小盒描边下限（2026-10-13）：描边随盒径等比缩小，13px 盒下 `eye` 只剩 0.92 逻辑 px，
+  // 抗锯齿一摊就「细弱发灰看不清」（用户报「预览图标不清晰」，Tabs 尾部钮）。
+  //
+  // 判据用**生产函数** `Icon::effective_stroke`（不靠从像素反推）：
+  // 1.0 与 0.92 的墨量差不到 10%，从像素反推需要很紧的阈值，松一点就假绿
+  //（第一版就这么写的，回退后仍绿——实测踩到）。
+  ST_CHECK_NEAR(Icon::effective_stroke("eye", 24.0f), 1.7f, 0.001f);
+  // 13px 盒：声明值 × 13/24 = 0.92 → 被下限抬到 1.0。
+  ST_CHECK(Icon::effective_stroke("eye", 13.0f) > 0.9f);
+  ST_CHECK_NEAR(Icon::effective_stroke("eye", 13.0f), 1.0f, 0.001f);
+  // 15px（Tabs 尾部钮现行尺寸）：1.7 × 15/24 = 1.0625，**本来就高于下限**——
+  // 即下限只救更小的盒（≤14px 的 1.7 系图标）。把这一事实钉住：
+  // 改窄下限、或改 eye 声明值都会在这条上现形。
+  ST_CHECK_NEAR(Icon::effective_stroke("eye", 15.0f), 1.0625f, 0.001f);
+  // 大盒不受影响：几何缩放主导（1.7×24/24 = 1.7）。
+  ST_CHECK_NEAR(Icon::effective_stroke("foo", 24.0f), 0.0f, 0.001f);  // 未知名
+  ST_CHECK(Icon::effective_stroke("folder", 48.0f) > 1.0f);
+  // 显式传值 = 调用方覆盖，原值返回（不偷改）。
+  ST_CHECK_NEAR(Icon::effective_stroke("eye", 13.0f, 2.5f), 2.5f, 0.001f);
+
+  // 像素面再钉一道：小盒画出来**确实有足够墨量**（回归到“看不见”会红）。
+  const auto ink_pixels = [](float box_size) -> std::size_t {
+    const int side = static_cast<int>(box_size) + 8;
+    st::raster::Canvas canvas{side, side, 1.0f};
+    canvas.clear(st::math::Color::rgb(0xFF, 0xFF, 0xFF));
+    Icon::draw(canvas, "eye", Rect{4.0f, 4.0f, box_size, box_size},
+               st::math::Color::rgb(0x00, 0x00, 0x00), 0.0f);
+    std::size_t count = 0;
+    for (int y = 0; y < side; ++y) {
+      for (int x = 0; x < side; ++x) {
+        if (static_cast<int>(canvas.pixel_at(x, y).r) < 235) ++count;
+      }
+    }
+    return count;
+  };
+  const std::size_t at_24 = ink_pixels(24.0f);
+  const std::size_t at_13 = ink_pixels(13.0f);
+  st::print("[icon-small-box] eye 墨像素：24px 盒 {} · 13px 盒 {}\n", at_24, at_13);
+  ST_REQUIRE(at_24 > 0U);
+  // 13px 盒面积是 24px 盒的 29.3%；描边有下限时墨量比应**不低于面积比**
+  //（描边不跟着缩到底）。无下限时实测值正好落差一档。
+  const double area_ratio = (13.0 / 24.0) * (13.0 / 24.0);
+  ST_CHECK(static_cast<double>(at_13) / static_cast<double>(at_24) >= area_ratio);
+}
+
 ST_TEST(ui_icon_unknown_name_is_empty_not_crash) {
   ST_CHECK(!Icon::has("definitely-not-an-icon"));
   const Path path = Icon::path("definitely-not-an-icon", Rect{0.0f, 0.0f, 24.0f, 24.0f}, 2.0f);

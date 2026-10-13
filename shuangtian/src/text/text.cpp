@@ -23,7 +23,8 @@ namespace {
 /// 无限宽哨兵（与 `ui::kUnbounded` 同值；text 层不依赖 ui 层）。
 inline constexpr float kUnbounded = 1.0e9f;
 
-/// CJK 断行机会（可在任意汉字之间断行；避头尾暂未实现）。
+/// CJK 断行机会（可在任意汉字之间断行）。避头尾规则由调用处（`TextRenderer::wrap`）
+/// 的 `is_no_line_start` 处理。
 [[nodiscard]] auto is_cjk(char32_t codepoint) noexcept -> bool {
   return (codepoint >= 0x2E80U && codepoint <= 0x9FFFU) ||
          (codepoint >= 0xF900U && codepoint <= 0xFAFFU) ||
@@ -1530,6 +1531,35 @@ auto TextRenderer::wrap(std::string_view utf8, float size, float max_width) cons
   std::size_t last_break = std::string_view::npos;  // 码点索引（可断处之后）
   float pen = 0.0f;
 
+  // **词内不断**（2026-10-13 修）：旧实现对“前一个是 CJK”的任意位置都记成
+  // 可断点，于是**英文长词被拦腰断开**（实测表格里 `batterycenter/embed`
+  // 断成 `batterycenter/em` + `bed 1.2.19`）。
+  // 口径：只在「空白之后」与「CJK 字符相邻处」断行——
+  // 英文词（含路径、包名这类带 `/`/`-` 的标识符）因此保持完整，CJK 仍可逐字断。
+  //
+  // 为何不在 `/`/`-` 后断：实测那样会把 `batterycenter/embed` 拆成两行，
+  // 读者得自己拼回去——标识符的可读性比“行尾齐整”重要。
+  const auto is_break_after = [](char32_t previous, char32_t current) {
+    if (is_break_space(previous)) return true;   // 空白之后必可断
+    // CJK 之间可断（中文本来就可以逐字断）；**不在 CJK 与拉丁字母之间**断。
+    return is_cjk(previous) && is_cjk(current);
+  };
+
+  // **避头尾**：这些标点不能出现在行首（中日韩排版惯例）。
+  // 旧实现无此规则，实测 `…（单头）` 的右括号被挤到下一行行首。
+  const auto is_no_line_start = [](char32_t codepoint) {
+    switch (codepoint) {
+      case U')': case U']': case U'}':
+      case U'，': case U'。': case U'、': case U'；': case U'：':
+      case U'？': case U'！': case U'）': case U'】': case U'》': case U'」': case U'』':
+      case U'…': case U'·': case U'%': case U'‰':
+        return true;
+      default:
+        return false;
+    }
+  };
+
+  char32_t previous = U'\0';
   for (std::size_t index = 0; index < total; ++index) {
     const std::string_view slice = utf8_slice(utf8, index, 1);
     const char32_t codepoint = utf8_decode(slice).front();
@@ -1538,24 +1568,43 @@ auto TextRenderer::wrap(std::string_view utf8, float size, float max_width) cons
       line_start = index + 1;
       last_break = std::string_view::npos;
       pen = 0.0f;
+      previous = U'\0';
       continue;
     }
     const float advance = measure_width(slice, size);
-    if (is_break_space(codepoint)) {
-      last_break = index + 1;
-    } else if (is_cjk(codepoint) || (index > 0 && is_cjk(utf8_decode(utf8_slice(utf8, index - 1, 1)).front()))) {
-      if (last_break == std::string_view::npos) last_break = index;
-    }
+    // 可断点 = 当前位置之前（`previous` 与当前字符之间）是个合法断点。
+    // 记成 `index`（= 本字符开始处）：溢出时从本字符另起一行。
+    if (is_break_after(previous, codepoint)) last_break = index;
     if (pen + advance > max_width && index > line_start) {
-      const std::size_t break_at =
+      // 无可用断点（整行就是一个超长词，如长 URL）时退化为 `index` —— **硬断**：
+      // 宁可把标识符拆开，也不能让它溢出容器（溢出会盖到邻列上，比换行难看得多）。
+      std::size_t break_at =
           last_break != std::string_view::npos && last_break > line_start ? last_break : index;
+      // 避头尾：断点后若紧跟一个“不能行首”的字符，把断点前移一码点
+      //（宁可本行多一个字，也不让标点落行首）。只在断点就落在该标点前时处理。
+      if (break_at == index && is_no_line_start(codepoint) && break_at > line_start) {
+        --break_at;
+      }
+      if (break_at <= line_start) {
+        // 断点前移到了行首（本行只有一个字符）——原文硬约束，只能让它落行首。
+        break_at = index;
+      }
       lines.push_back(utf8_slice(utf8, line_start, break_at - line_start));
       line_start = break_at;
-      pen = measure_width(utf8_slice(utf8, line_start, index + 1 - line_start), size);
+      // 断行后重算 `pen`：**必须与循环里的累加口径一致**（逐码点）。
+      // 旧实现用 `measure_width(整段)`——那是带字距调整/连字的整串测量，
+      // **比逐字累加小**。两种口径混用会让后续的溢出判断偏一两个字符：
+      // 实测 `batterycenter/embed` 因此被硬断成 `embe|d`（列宽明明够）。
+      pen = 0.0f;
+      for (std::size_t rewind = line_start; rewind <= index; ++rewind) {
+        pen += measure_width(utf8_slice(utf8, rewind, 1), size);
+      }
       last_break = std::string_view::npos;
+      previous = codepoint;
       continue;
     }
     pen += advance;
+    previous = codepoint;
   }
   if (line_start <= total) lines.push_back(utf8_slice(utf8, line_start, total - line_start));
   return lines;

@@ -577,6 +577,16 @@ auto Icon::path(std::string_view name, math::Rect box, float stroke_width) -> ra
   return path;
 }
 
+auto Icon::effective_stroke(std::string_view name, float box_size, float stroke_width) -> float {
+  const IconGlyph* glyph = find(name);
+  if (glyph == nullptr || !(box_size > 0.0f)) return 0.0f;
+  if (stroke_width > 0.0f) return stroke_width;   // 调用方显式覆盖
+  // 下限 1.0 逻辑 px：小盒图标（Tabs 尾部钮 15px / 行内图标 12~14px）描边随盒径
+  // 等比缩小，13px 盒下 eye 只剩 0.92px——抗锯齿一摊就「细弱发灰看不清」
+  //（用户报「预览图标不清晰」）。`draw` 与本函数共用这一算式（单一事实源）。
+  return std::max(glyph->stroke * (box_size / 24.0f), 1.0f);
+}
+
 void Icon::draw_filled(raster::Surface& canvas, std::string_view name, math::Rect box,
                        math::Color color) {
   if (box.is_empty() || color.a == 0U) return;
@@ -661,9 +671,9 @@ void Icon::draw(raster::Surface& canvas, std::string_view name, math::Rect box, 
     }
   }
   if (glyph == nullptr || box.is_empty() || color.a == 0U) return;
-  const float scale = std::min(box.width, box.height) / 24.0f;
-  const float effective_stroke = glyph->stroke * scale;
-  const float width = stroke_width > 0.0f ? stroke_width : effective_stroke;
+  // 线宽走 `effective_stroke`（**单一事实源**）：声明值 × 盒径/24，且 ≥ 1.0 逻辑 px
+  // 下限（小盒图标不「细弱发灰」，见该函数的说明）；显式传值的调用方不受影响。
+  const float width = Icon::effective_stroke(name, std::min(box.width, box.height), stroke_width);
   raster::Path path = Icon::path(name, box, width);
   if (path.is_empty()) return;
   if (glyph->filled) {
