@@ -3,8 +3,10 @@ import {
   buildPalette,
   contrastRatio,
   echartsPalette,
+  enforceReadableText,
   fixMermaidBrightNodes,
   fixPlantUmlBrightNodes,
+  hasExplicitColors,
   injectEchartsDark,
   luminance,
   mermaidThemeVariables,
@@ -326,5 +328,74 @@ describe("ECharts 注入", () => {
     expect(c).toHaveLength(8)
     expect(new Set(c).size).toBe(8)
     expect(c[0]).toBe(p.accent)
+  })
+})
+
+describe("显式颜色回退判定（含显式色则不注入主题，走引擎默认 + 白底）", () => {
+  test("Mermaid：classDef/style/内嵌 color/init themeVariables 命中；纯源码不命中", () => {
+    expect(hasExplicitColors("mermaid", "flowchart LR\n A-->B\n classDef d fill:#fff")).toBe(true)
+    expect(hasExplicitColors("mermaid", "flowchart LR\n A-->B\n style A fill:#fff")).toBe(true)
+    expect(hasExplicitColors("mermaid", "flowchart LR\n A[<span style='color:#f00'>x</span>]")).toBe(true)
+    expect(hasExplicitColors("mermaid", "%%{init: {'theme':'base','themeVariables':{'primaryColor':'#fff'}}}%%\nflowchart LR\n A-->B")).toBe(true)
+    expect(hasExplicitColors("mermaid", "flowchart LR\n A-->B\n linkStyle 0 stroke:#fff")).toBe(false) // 只改线不改文字
+    expect(hasExplicitColors("mermaid", "flowchart LR\n A[甲] --> B{乙}")).toBe(false)
+  })
+
+  test("PlantUML：节点 #Color/skinparam 颜色项/!theme 命中；纯源码不命中", () => {
+    expect(hasExplicitColors("plantuml", '@startuml\nrectangle "x" #LightYellow\n@enduml')).toBe(true)
+    expect(hasExplicitColors("plantuml", '@startuml\nrectangle "x" #FFE4B5\n@enduml')).toBe(true)
+    expect(hasExplicitColors("plantuml", "@startuml\nskinparam backgroundColor #FFFFFF\nA->B\n@enduml")).toBe(true)
+    expect(hasExplicitColors("plantuml", "@startuml\n!theme cyborg\nA->B\n@enduml")).toBe(true)
+    expect(hasExplicitColors("plantuml", "@startuml\nA -> B: 请求\n@enduml")).toBe(false)
+  })
+
+  test("ECharts：backgroundColor/textStyle/color 命中；仅轴配置不命中（我们注入不冲突的字段）", () => {
+    expect(hasExplicitColors("echarts", '{"backgroundColor":"#fff","series":[]}')).toBe(true)
+    expect(hasExplicitColors("echarts", '{"textStyle":{"color":"#333"},"series":[]}')).toBe(true)
+    expect(hasExplicitColors("echarts", '{"color":["#f00"],"series":[]}')).toBe(true)
+    expect(hasExplicitColors("echarts", '{"xAxis":{"type":"category","data":["甲"]},"series":[]}')).toBe(false)
+    expect(hasExplicitColors("echarts", '{"series":[{"type":"bar","data":[1]}]}')).toBe(false)
+  })
+
+  test("D2：style 指令命中；普通源码不命中", () => {
+    expect(hasExplicitColors("d2", "a -> b\nstyle: {fill: red}")).toBe(true)
+    expect(hasExplicitColors("d2", "a -> b")).toBe(false)
+  })
+
+  test("未知语言不误判（返回 false，由调用方按原路径处理）", () => {
+    expect(hasExplicitColors("unknown-lang", "classDef x fill:#fff")).toBe(false)
+  })
+})
+
+describe("可读性最终校验（渲染后兜底：仍不可读则覆盖，可读性优先）", () => {
+  const wrap = (shape: string, textTag: string) => `<svg><g><g class="entity">${shape}${textTag}</g></g></svg>`
+
+  test("用户自写的浅底浅字（白底 + 内联 important 浅字）→ 覆盖为可读色", () => {
+    const svg = wrap('<rect fill="#ffffff"/>', '<text style="fill:#eeeeee !important">白底浅字</text>')
+    const out = enforceReadableText(svg)
+    const fg = out.match(/<text[^>]*style="([^"]*)"/)?.[1] ?? ""
+    const m = fg.match(/fill:(#[0-9a-f]{6})/i)
+    expect(m).toBeTruthy()
+    expect(contrastRatio(m![1], "#ffffff")).toBeGreaterThanOrEqual(4.5)
+  })
+
+  test("属性形式（ECharts 风格 fill=\"#...\"）同样覆盖", () => {
+    const svg = wrap('<rect fill="#ffffff"/>', '<text fill="#eeeeee">x</text>')
+    const out = enforceReadableText(svg)
+    const fg = out.match(/<text[^>]*fill="(#[0-9a-f]{6})"/)?.[1]
+    expect(fg).toBeTruthy()
+    expect(contrastRatio(fg!, "#ffffff")).toBeGreaterThanOrEqual(4.5)
+  })
+
+  test("已可读的（白底深字 / 暗底浅字）不动", () => {
+    const ok1 = wrap('<rect fill="#ffffff"/>', '<text fill="#333333">x</text>')
+    expect(enforceReadableText(ok1)).toBe(ok1)
+    const ok2 = wrap('<rect fill="#28282b"/>', '<text fill="#f2f2f5">x</text>')
+    expect(enforceReadableText(ok2)).toBe(ok2)
+  })
+
+  test("无底形状（透明/黑）不处理（按画布底，交由主题层负责）", () => {
+    const svg = wrap('<rect fill="none"/>', '<text fill="#f2f2f5">x</text>')
+    expect(enforceReadableText(svg)).toBe(svg)
   })
 })

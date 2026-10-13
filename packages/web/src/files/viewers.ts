@@ -15,7 +15,10 @@ import { wbUrl, wbAbsUrl } from "./url-base"
 import { diagramKindOf } from "./preview-kind"
 import {
   currentPalette,
+  enforceReadableText,
+  fallbackBackgroundCss,
   fixMermaidBrightNodes,
+  hasExplicitColors,
   injectEchartsDark,
   mermaidThemeVariables,
   plantumlSkinparams,
@@ -404,7 +407,8 @@ let mermaidInitedKey: string | null = null
 /** 渲染图表源码为 SVG 字符串（懒加载本地引擎；与主界面图表共用同一套 vendor 资源与 diagram-theme
  *  色板注入规则：亮色主题引擎默认亮色，暗色主题注入 UI 主题对齐的暗色配色——两页图表必须同色）。 */
 export async function renderDiagramSvg(kind: DiagramKind, code: string): Promise<string> {
-  const pal = currentPalette()
+  // 与主界面同规则：源码含显式颜色则不注入主题（回退引擎默认 + 白底，由调用方垫底）
+  const pal = hasExplicitColors(kind, code) ? null : currentPalette()
   const vendor = wbUrl("/vendor")
   if (kind === "mermaid") {
     const key = pal?.key ?? "light"
@@ -419,7 +423,7 @@ export async function renderDiagramSvg(kind: DiagramKind, code: string): Promise
     const m = (window as unknown as { mermaid: { render: (id: string, code: string) => Promise<{ svg: string }> } }).mermaid
     const out = await m.render(`fw-mmd-${Date.now()}`, code)
     // 亮底节点（用户 classDef/style 指定的浅色底）文字色修正，与主界面同规则
-    return pal ? fixMermaidBrightNodes(out.svg) : out.svg
+    return enforceReadableText(pal ? fixMermaidBrightNodes(out.svg) : out.svg)
   }
   if (kind === "echarts") {
     if (!echartsReady) echartsReady = loadScript(`${vendor}/echarts.js`)
@@ -435,7 +439,7 @@ export async function renderDiagramSvg(kind: DiagramKind, code: string): Promise
     const chart = echarts.init(box, undefined, { renderer: "svg" })
     const raw = (option.option ?? option) as Record<string, unknown>
     chart.setOption(pal ? injectEchartsDark(raw, pal) : raw)
-    const svg = box.querySelector("svg")?.outerHTML ?? ""
+    const svg = enforceReadableText(box.querySelector("svg")?.outerHTML ?? "")
     chart.dispose()
     box.remove()
     return svg
@@ -454,7 +458,7 @@ export async function renderDiagramSvg(kind: DiagramKind, code: string): Promise
       mod.renderToString(src.split("\n"), (s) => resolve(s), (msg) => reject(new Error(msg)))
     })
     // 暗色：skinparam 覆盖不到的残留（生命线/图标/JSON-YAML 独立渲染器）后处理兑底
-    return pal ? remapPlantUmlSvg(svg, pal) : svg
+    return enforceReadableText(pal ? remapPlantUmlSvg(svg, pal) : svg)
   }
   // d2：浏览器构建为单 Worker，必须串行（并发会互相覆盖回调）
   const run = d2Queue.then(async () => {
@@ -463,7 +467,7 @@ export async function renderDiagramSvg(kind: DiagramKind, code: string): Promise
     const opts = { themeID: 0, noXMLTag: true }
     const compiled = await d2.compile(code, opts)
     const svg = await d2.render(compiled.diagram, { ...opts, ...(compiled as { renderOptions?: object }).renderOptions })
-    return pal ? remapD2Svg(svg, pal) : svg
+    return enforceReadableText(pal ? remapD2Svg(svg, pal) : svg)
   })
   d2Queue = run.catch(() => {})
   return run
@@ -499,6 +503,8 @@ export function renderDiagramPreview(host: HTMLElement, ctx: ViewerCtx): () => v
       const read = await ctx.api.read(ctx.root, ctx.path)
       const svg = await renderDiagramSvg(kind, read.content)
       if (disposed) return
+      // 显式颜色回退时垫白底（引擎默认配色假定浅底；与主界面同规则）
+      box.style.cssText = hasExplicitColors(kind, read.content) ? fallbackBackgroundCss() : ""
       box.replaceChildren(h("div", { class: "fw-diagram-svg", html: svg }))
     } catch (err) {
       if (disposed) return

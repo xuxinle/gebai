@@ -9,7 +9,11 @@ import { injectPlantUmlLayout } from "./plantuml-layout"
 import {
   type DiagramPalette,
   currentPalette,
+  FALLBACK_BG,
+  fallbackBackgroundCss,
+  enforceReadableText,
   fixMermaidBrightNodes,
+  hasExplicitColors,
   injectEchartsDark,
   mermaidThemeVariables,
   plantumlSkinparams,
@@ -18,12 +22,20 @@ import {
 } from "./diagram-theme"
 
 /* ---------- 图表渲染：四种图表语言本地引擎（PlantUML @plantuml/core / Mermaid mermaid / D2 @terrastruct/d2 / ECharts echarts）
- *  配色跟随 UI 主题：亮色主题用引擎默认亮色（与历史行为一致）；暗色主题注入 diagram-theme 生成的
- *  暗色色板（文字/连线/节点与 UI 主题变量对齐）。主题切换时已挂载的图表重绘（见 mountDiagramThemeSync）。 ---------- */
+ *  配色策略：① 亮色主题或**源码含显式颜色**（classDef/style/节点 #Color/backgroundColor 等，我们协调不了）
+ *  → 引擎默认渲染 + 白底（引擎默认色本身是浅底深字，必然可读）；② 其余暗色主题注入 UI 主题色板。
+ *  判定见 shouldUseTheme；主题切换时已挂载的图表重绘（见 mountDiagramThemeSync）。 ---------- */
 
 /** 当前色板（null=亮色主题，引擎默认渲染）。 */
 function palette(): DiagramPalette | null {
   return currentPalette()
+}
+
+/** 是否对该源码注入主题色：仅当主题为暗色**且**源码无显式颜色时才注入。
+ *  有显式颜色时回退引擎默认 + 白底——用户/模型自己配了色就不抢控，避免「注入的浅字 + 用户浅底」打架。 */
+function shouldUseTheme(format: DiagramFormat, code: string): DiagramPalette | null {
+  if (hasExplicitColors(format, code)) return null
+  return palette()
 }
 
 /** 图表语言 → 产物文件扩展名（与 show 图表分支落盘约定一致）。 */
@@ -170,7 +182,7 @@ async function importVendor(url: string): Promise<Record<string, unknown>> {
 
 /** 渲染 PlantUML 源码为 SVG；失败时抛出带原因的错误（供回传给模型）。 */
 export async function renderPlantUmlSvg(code: string): Promise<string> {
-  const p = palette()
+  const p = shouldUseTheme("plantuml", code)
   const full = normalizePlantUmlCode(code, p)
   const key = (p?.key ?? "light") + "\u0000" + full
   let q = svgCache.get(key)
@@ -216,7 +228,7 @@ async function renderLocal(full: string, pal: DiagramPalette | null): Promise<st
   const clean = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true } })
   if (!clean) throw new Error("PlantUML 渲染结果安全校验失败")
   // 暗色：skinparam 注入覆盖不到的残留（生命线虚线/圆点图标/JSON-YAML 独立渲染器/默认黑字）在此兜底重映射
-  return pal ? remapPlantUmlSvg(clean, pal) : clean
+  return enforceReadableText(pal ? remapPlantUmlSvg(clean, pal) : clean)
 }
 
 /* ---------- Mermaid 渲染：mermaid npm 包本地引擎（SVG 输出），主题按当前 UI 明暗初始化 ---------- */
@@ -290,27 +302,39 @@ let mermaidSeq = 0
 /** Mermaid 渲染缓存（源码+色板 → SVG；主题切换自然分键）。 */
 const mermaidCache = new Map<string, Promise<string>>()
 
+/** Mermaid 渲染串行队列：mermaid 主题是**引擎全局状态**（initialize 一次持续生效），
+ *  并发渲染时后发起的图会改变前一张的主题（实测：回退图被邻图的 dark 主题覆盖成浅字白底不可读）。
+ *  必须把「设置主题 + 渲染」作为原子段串行执行。 */
+let mermaidQueue: Promise<unknown> = Promise.resolve()
+function enqueueMermaid<T>(task: () => Promise<T>): Promise<T> {
+  const run = mermaidQueue.then(task, task)
+  mermaidQueue = run.catch(() => {}) // 单个失败不阻塞后续
+  return run as Promise<T>
+}
+
 /** 渲染 Mermaid 源码为 SVG；语法错误抛错（供回传给模型）。 */
 async function renderMermaidSvg(code: string): Promise<string> {
-  const pal = palette()
+  const pal = shouldUseTheme("mermaid", code)
   const key = (pal?.key ?? "light") + "\u0000" + code
-  let p = mermaidCache.get(key)
-  if (!p) {
-    p = (async () => {
+  let pending: Promise<string> | undefined = mermaidCache.get(key)
+  if (!pending) {
+    // 主题设置与 render 必须在同一串行段内（否则并发图互相覆盖主题）
+    pending = enqueueMermaid<string>(async (): Promise<string> => {
       const m = await ensureMermaidTheme(pal)
       const id = `gebai-mmd-${++mermaidSeq}`
       const { svg } = await withTimeout(m.render(id, code), 20000, "Mermaid 渲染超时（图表过大或引擎繁忙）")
       // 亮底节点（用户 classDef/style 指定的浅色底）文字色修正（净化前，与主题文字色同一道防线）
-      const themed = pal ? fixMermaidBrightNodes(svg) : svg
+      // 主题注入路径先按亮底节点修字色；回退路径直接进最终校验（两者都兜底残余不可读）
+      const themed = pal ? enforceReadableText(fixMermaidBrightNodes(svg)) : enforceReadableText(svg)
       // 渲染结果可能携带任意 HTML：注入 DOM 前净化（securityLevel=strict 之外的双重防线）
       const clean = DOMPurify.sanitize(themed, { USE_PROFILES: { svg: true, svgFilters: true } })
       if (!clean) throw new Error("Mermaid 渲染结果安全校验失败")
       return explicitSvgSize(clean)
-    })()
-    mermaidCache.set(key, p)
+    })
+    mermaidCache.set(key, pending)
   }
   try {
-    return await p
+    return await pending
   } catch (err) {
     mermaidCache.delete(key) // 失败不缓存，允许重试
     throw err
@@ -374,7 +398,7 @@ function enqueueD2<T>(task: () => Promise<T>): Promise<T> {
 /** 渲染 D2 源码为 SVG：亮色用默认亮色主题；暗色在净化前重映射色表（用户 style 指定的颜色不在映射表内、不受影响）；
  *  编译错误抛错（可读信息，供回传给模型）。 */
 async function renderD2Svg(code: string): Promise<string> {
-  const pal = palette()
+  const pal = shouldUseTheme("d2", code)
   const key = (pal?.key ?? "light") + "\u0000" + code
   let p = d2Cache.get(key)
   if (!p) {
@@ -388,7 +412,7 @@ async function renderD2Svg(code: string): Promise<string> {
         throw new Error(formatD2Error((err as Error).message))
       }
       const svg = await withTimeout(d2.render(compiled.diagram, compiled.renderOptions ?? opts), 20000, "D2 渲染超时（图表过大或引擎繁忙）")
-      const themed = pal ? remapD2Svg(svg, pal) : svg
+      const themed = pal ? remapD2Svg(svg, pal) : enforceReadableText(svg)
       const clean = DOMPurify.sanitize(themed, { USE_PROFILES: { svg: true, svgFilters: true } })
       if (!clean) throw new Error("D2 渲染结果安全校验失败")
       return explicitSvgSize(clean)
@@ -587,7 +611,7 @@ const echartsCache = new Map<string, Promise<string>>()
 
 /** 渲染 ECharts JSON option 为 SVG（SSR 模式，零 DOM 挂载）；option 非法抛错（供回传模型修正）。 */
 async function renderEchartsSvg(code: string): Promise<string> {
-  const pal = palette()
+  const pal = shouldUseTheme("echarts", code)
   const key = (pal?.key ?? "light") + "\u0000" + code
   let p = echartsCache.get(key)
   if (!p) {
@@ -599,7 +623,7 @@ async function renderEchartsSvg(code: string): Promise<string> {
         chart.setOption(option)
         const svg = chart.renderToSVGString()
         // 输出含文本/图形等用户数据：注入 DOM 前净化（与其余图表引擎同一防线）
-        const clean = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true } })
+        const clean = DOMPurify.sanitize(enforceReadableText(svg), { USE_PROFILES: { svg: true, svgFilters: true } })
         if (!clean) throw new Error("ECharts 渲染结果安全校验失败")
         return clean
       } finally {
@@ -715,8 +739,9 @@ export function downloadDiagramSource(code: string, name: string, format: Diagra
 
 /** 将渲染出的 SVG 转为 PNG 并下载（本地绘制，无网络；3x 超采样输出高清图，低性能模式降为 1.5x 减少绘制开销；
  *  暗色主题先垫色板底色——SVG 透明区域落在白色画布上会呈现暗底鐢白，垫底后导出图与页面观感一致）。 */
-export async function downloadPumlPng(svg: string, name: string): Promise<void> {
-  const bg = currentPalette()?.bg
+export async function downloadPumlPng(svg: string, name: string, code = "", format: DiagramFormat = "plantuml"): Promise<void> {
+  // 垫底与渲染一致：显式颜色回退时垫白（引擎默认浅底配色），否则垫暗色色板底（透明区不镂白）
+  const bg = hasExplicitColors(format, code) ? FALLBACK_BG : currentPalette()?.bg
   const img = new Image()
   const svgUrl = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }))
   try {
@@ -751,9 +776,9 @@ export async function downloadPumlPng(svg: string, name: string): Promise<void> 
 }
 
 /** 将渲染出的 SVG 转为 PNG 复制到剪贴板（2x 超采样，本地绘制；低性能模式降为 1x；暗色主题垫色板底色，同 downloadPumlPng）。 */
-async function copyPngToClipboard(svg: string): Promise<void> {
+async function copyPngToClipboard(svg: string, code = "", format: DiagramFormat = "plantuml"): Promise<void> {
   if (!navigator.clipboard?.write) throw new Error("当前环境不支持复制图片")
-  const bg = currentPalette()?.bg
+  const bg = hasExplicitColors(format, code) ? FALLBACK_BG : currentPalette()?.bg
   const img = new Image()
   const svgUrl = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }))
   try {
@@ -833,7 +858,7 @@ function openSourceView(code: string, name: string, format: DiagramFormat): void
 async function downloadCurrentPng(code: string, name: string, format: DiagramFormat): Promise<void> {
   try {
     const svg = await renderDiagramSvg(format, code)
-    await downloadPumlPng(svg, name)
+    await downloadPumlPng(svg, name, code, format)
   } catch (err) {
     toast(`下载图片失败：${(err as Error).message}`)
   }
@@ -896,6 +921,8 @@ export async function renderDiagram(container: HTMLElement, b: Extract<ContentBl
   const box = el("div", "diagram diagram-card")
 
   const thumb = el("div", "diagram-thumb")
+  // 显式颜色回退时垫白底（引擎默认配色假定浅底；叠在暗色卡片上需白底才可读）
+  if (hasExplicitColors(format, b.code)) thumb.style.cssText = fallbackBackgroundCss()
   tip(thumb, "点击查看大图")
   box.appendChild(thumb)
 
@@ -912,9 +939,10 @@ export async function renderDiagram(container: HTMLElement, b: Extract<ContentBl
 
   let lastKey: string | null = null
   const render = async (code: string, themeAware = false) => {
-    const key = currentPalette()?.key ?? "light"
+    const key = (hasExplicitColors(format, code) ? "fallback" : currentPalette()?.key) ?? "light"
     if (themeAware && key === lastKey) return // 同色板不重绘（缓存命中零成本，但 DOM 重写也省）
     lastKey = key
+    thumb.style.cssText = hasExplicitColors(format, code) ? fallbackBackgroundCss() : ""
     thumb.innerHTML = ""
     await renderThumbnail(thumb, code, format)
   }
@@ -936,7 +964,7 @@ export async function renderDiagram(container: HTMLElement, b: Extract<ContentBl
     void (async () => {
       try {
         const svg = await renderDiagramSvg(format, b.code)
-        await copyPngToClipboard(svg)
+        await copyPngToClipboard(svg, b.code, format)
         flashButton(copyBtn, "已复制到剪贴板")
       } catch (err) {
         toast(`复制图片失败：${(err as Error).message}`)
@@ -1132,7 +1160,7 @@ function openViewer(code: string, name: string, format: DiagramFormat) {
       void (async () => {
         try {
           const svg = await renderDiagramSvg(format, code)
-          await copyPngToClipboard(svg)
+          await copyPngToClipboard(svg, code, format)
           flashButton(shell.copyBtn, "已复制到剪贴板")
         } catch (err) {
           toast(`复制图片失败：${(err as Error).message}`)
@@ -1144,6 +1172,8 @@ function openViewer(code: string, name: string, format: DiagramFormat) {
   })
   /** 渲染代码到大图并初始化缩放。 */
   const renderCode = async (c: string) => {
+    // 显式颜色回退：垫白底（引擎默认配色假定浅底；查看器背景是暗色卡片）
+    shell.zoom.style.cssText = hasExplicitColors(format, c) ? fallbackBackgroundCss() : ""
     shell.zoom.innerHTML = ""
     shell.zoom.appendChild(el("div", "diagram-error", "渲染中…"))
     try {

@@ -542,6 +542,91 @@ export function fixMermaidBrightNodes(svg: string): string {
   return i >= 0 ? svg.slice(0, i) + block + svg.slice(i) : svg.replace(/(<svg[^>]*>)/, `$1<style>${block}</style>`)
 }
 
+/* ---------- 可读性最终校验（渲染后兜底：仍不可读则覆盖，可读性优先） ---------- */
+
+/**
+ * 最终可读性校验：扫描 SVG 中「文字色 vs 其所属形状底色」实际对比度，
+ * 低于 `MIN_TEXT_CONTRAST` 的在 SVG 内注入内联覆盖（`style="fill:...!important"`，
+ * 优先级高于任何 class 规则与属性——用户显式 `color` 也是内联 important 时按**后者胜**，
+ * 因此追加到 style 末尾即可取代）。
+ *
+ * 为什么需要它：回退机制（不注入主题色）已消除「我们的色与用户色冲突」，
+ * 但用户源码自身可能就写了浅底浅字（`style A fill:#fff,color:#eee`）——
+ * 这是最后一个盲区，统一在渲染后实测兜底（可读性优先于用户显式配置）。
+ * 纯函数 + 形状/文字配对启发式（同组 g 内、或就近兄弟），不依赖浏览器渲染。
+ */
+export function enforceReadableText(svg: string): string {
+  // 按「形状 → 同容器文字」配对（形状与文字通常同父 g；无 g 包装时退化为全局最近 shape）
+  const containers = [...svg.matchAll(/<g\b[^>]*>([\s\S]*?)<\/g>/g)].map((m) => m[1])
+  const patches: Array<{ anchor: string; text: string }> = []
+  const seen = new Set<string>()
+  for (const inner of containers) {
+    const shape = inner.match(/<(?:rect|ellipse|polygon|path|circle)\b[^>]*?(?:fill|style)="(?:[^"]*?fill:)?(#[0-9A-Fa-f]{6})/)
+    if (!shape) continue
+    const bg = normalizeColor(shape[1])
+    if (!bg || bg === "#000000") continue // 透明/无底：按画布处理，不在此处理
+    for (const tm of inner.matchAll(/<text\b[^>]*?>/g)) {
+      const tag = tm[0]
+      const style = tag.match(/style="([^"]*)"/)?.[1] ?? ""
+      const attrFill = tag.match(/fill="(#[0-9A-Fa-f]{6})"/)?.[1]
+      const fg = normalizeColor(style.match(/fill\s*:\s*(#[0-9A-Fa-f]{6})/)?.[1] ?? attrFill ?? "")
+      if (!fg || contrastRatio(fg, bg) >= MIN_TEXT_CONTRAST) continue
+      if (seen.has(tag)) continue
+      seen.add(tag)
+      const readable = readableTextOn(bg, luminance(bg) >= BRIGHT_BG_LUMINANCE ? "dark" : "light")
+      // 两条优先级都能压过：属性直接换 fill；已有内联 style 时追加到末尾（同为 !important 时后者胜）
+      let next = /fill="#[0-9A-Fa-f]{6}"/.test(tag) ? tag.replace(/fill="#[0-9A-Fa-f]{6}"/, `fill="${readable}"`) : tag
+      next = /style="/.test(next)
+        ? next.replace(/style="([^"]*)"/, (_m, s: string) => `style="${/fill\s*:/.test(s) ? s.replace(/fill\s*:\s*#[0-9A-Fa-f]{6}\s*(!important)?;?/i, "") : s}fill:${readable} !important;"`)
+        : next.replace(/<text\b/, `<text fill="${readable}"`)
+      patches.push({ anchor: tag, text: next })
+    }
+  }
+  let out = svg
+  for (const { anchor, text } of patches) out = out.replace(anchor, text)
+  return out
+}
+
+/* ---------- 显式颜色检测（决定是否回退默认渲染） ---------- */
+/**
+ * 源码是否含我们协调不了的**显式颜色**——命中则整图回退「引擎默认渲染 + 白底」：
+ * 引擎默认配色本身是浅底深字（引擎作者调过的），只要不注入主题色，任何用户写法都必然可读。
+ *
+ * 为什么用回退而不是继续逐个修：（用户显式色 × 主题注入色）的冲突面是笛卡尔积——
+ * 三个引擎的层叠规则各不相同（Mermaid 是 CSS 层叠、用户内联 !important 可压过我们的 <style>；
+ * PlantUML 是后写覆盖；ECharts 是对象浅合并且内部推断色不可追踪），逆向修正必然有漏。
+ * 回退把「冲突根源」整个移除（不再注入主题色），因此原理上闭合：漏检只退化为主题注入（
+ * 即改造前的行为），不会比现状更差；误检也只是白底亮字，永远可读。
+ */
+const EXPLICIT_COLOR_PATTERNS: Record<string, RegExp[]> = {
+  // classDef/style/内嵌 color 属性/init themeVariables 指定颜色；linkStyle 只改线不改文字，不算
+  mermaid: [/\bclassDef\b[^\n]*\b(?:fill|stroke|color)\s*:/i, /\bstyle\s+[\w,\s]+\s+(?:fill|stroke|color)\s*:/i, /<span[^>]*style=["'][^"']*color\s*:/i, /%%\{[\s\S]*?themeVariables[\s\S]*?\}%%/i],
+  // 节点/组件显式 #Color（在行尾的颜色标记）、skinparam 颜色项、!theme
+  plantuml: [/\s#[0-9a-f]{6}\b/i, /\s#(?:light|dark)?(?:yellow|green|blue|red|orange|pink|gray|grey|white|black|cyan|magenta|lime|brown|navy|teal|aqua|maroon|olive|purple|silver|fuchsia)\b/i, /^\s*skinparam\s+\S*(?:Color|Background)\s+/im, /^\s*!theme\b/im],
+  // 只检测**与我们注入字段冲突**的项（不命中则我们注入生效；命中则可能各管一半→回退整图）
+  echarts: [/"(?:backgroundColor|textStyle|color)"\s*:/i],
+  // D2 的 style 指令（默认主题由引擎决定，显式 style 才可能冲突）
+  d2: [/^\s*style\b/im, /\b(?:fill|stroke|font-color)\s*:/i],
+}
+
+/** 判断源码是否含显式颜色（含则该图回退默认渲染 + 白底）。 */
+export function hasExplicitColors(format: string, code: string): boolean {
+  const pats = EXPLICIT_COLOR_PATTERNS[format]
+  if (!pats) return false
+  return pats.some((re) => re.test(code))
+}
+
+/** 回退渲染的白底（引擎默认配色假定浅底；与各引擎默认主题一致的纯白）。 */
+export const FALLBACK_BG = "#ffffff"
+
+/**
+ * 回退用的白底衬底样式：在容器上垫白色底（图表卡片/查看器/工作台共用）。
+ * 引擎默认输出本身带白底（部分引擎不加背景），垫底保证透明区域也是白的。
+ */
+export function fallbackBackgroundCss(): string {
+  return `background:${FALLBACK_BG}`
+}
+
 /* ---------- ECharts 注入 ---------- */
 
 /**
