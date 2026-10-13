@@ -10,6 +10,7 @@ import {
   normalizeColor,
   plantumlSkinparams,
   remapD2Svg,
+  remapPlantUmlSvg,
   shade,
 } from "./diagram-theme"
 
@@ -150,6 +151,30 @@ describe("PlantUML 注入", () => {
     expect(all).toContain("skinparam NodeBackgroundColor " + p.node)
     // 每行都是合法 skinparam 指令（无空色值）
     for (const line of lines) expect(line).toMatch(/^skinparam \S+ (#[0-9a-f]{6}|\S+)$/)
+  })
+
+  test("时序图特殊参与者形态（boundary/control/entity/queue）各有独立 skinparam", () => {
+    const p = buildPalette(DARK_SRC)!
+    const all = plantumlSkinparams(p).join("\n")
+    for (const kind of ["Boundary", "Control", "Entity", "Queue"]) {
+      expect(all).toContain(`skinparam ${kind}BackgroundColor ${p.node}`)
+      expect(all).toContain(`skinparam ${kind}BorderColor ${p.accent}`)
+      expect(all).toContain(`skinparam ${kind}FontColor ${p.text}`)
+    }
+  })
+})
+
+describe("PlantUML SVG 后处理兜底", () => {
+  test("skinparam 覆盖不到的残留：生命线虚线/圆点图标底/JSON-YAML 浅底/默认黑字黑线", () => {
+    const p = buildPalette(DARK_SRC)!
+    const svg = '<svg><line stroke="#181818"/><circle fill="#E2E2F0"/><rect fill="#F1F1F1"/><text fill="#000000"/><rect fill="#FFFFFF"/><path stroke="#8b9aff"/></svg>'
+    const out = remapPlantUmlSvg(svg, p)
+    expect(out).toContain(`stroke="${p.border}"`) // 生命线黑边 → border
+    expect(out).toContain(`fill="${p.nodeAlt}"`) // 浅底图标/JSON 框 → nodeAlt
+    expect(out).toContain(`fill="${p.text}"`) // 黑字 → 正文色
+    expect(out).toContain(`fill="${p.bg}"`) // 纯白底 → 画布底
+    // 已正确的主题色不被二次替换（幂等）
+    expect(remapPlantUmlSvg(out, p)).toBe(out)
   })
 })
 

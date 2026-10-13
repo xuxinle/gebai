@@ -13,6 +13,7 @@ import {
   mermaidThemeVariables,
   plantumlSkinparams,
   remapD2Svg,
+  remapPlantUmlSvg,
 } from "./diagram-theme"
 
 /* ---------- 图表渲染：四种图表语言本地引擎（PlantUML @plantuml/core / Mermaid mermaid / D2 @terrastruct/d2 / ECharts echarts）
@@ -173,7 +174,7 @@ export async function renderPlantUmlSvg(code: string): Promise<string> {
   const key = (p?.key ?? "light") + "\u0000" + full
   let q = svgCache.get(key)
   if (!q) {
-    q = renderLocal(full)
+    q = renderLocal(full, p)
     svgCache.set(key, q)
   }
   try {
@@ -192,7 +193,7 @@ function enqueueRender<T>(task: () => Promise<T>): Promise<T> {
   return run
 }
 
-async function renderLocal(full: string): Promise<string> {
+async function renderLocal(full: string, pal: DiagramPalette | null): Promise<string> {
   const api = await loadPlantUml()
   const svg = await enqueueRender(() =>
     withTimeout(
@@ -213,7 +214,8 @@ async function renderLocal(full: string): Promise<string> {
   // PlantUML 支持 <html>/<img> 嵌入（creole），渲染结果可能携带任意 HTML：注入 DOM 前净化（移除 script/事件属性等）
   const clean = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true } })
   if (!clean) throw new Error("PlantUML 渲染结果安全校验失败")
-  return clean
+  // 暗色：skinparam 注入覆盖不到的残留（生命线虚线/圆点图标/JSON-YAML 独立渲染器/默认黑字）在此兜底重映射
+  return pal ? remapPlantUmlSvg(clean, pal) : clean
 }
 
 /* ---------- Mermaid 渲染：mermaid npm 包本地引擎（SVG 输出），主题按当前 UI 明暗初始化 ---------- */

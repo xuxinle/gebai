@@ -19,6 +19,7 @@ import {
   mermaidThemeVariables,
   plantumlSkinparams,
   remapD2Svg,
+  remapPlantUmlSvg,
 } from "../diagram-theme"
 export { diagramKindOf } from "./preview-kind"
 
@@ -445,11 +446,13 @@ export async function renderDiagramSvg(kind: DiagramKind, code: string): Promise
     }
     const mod = await plantumlMod
     const base = /@start/.test(code) ? code : `@startuml\n${code}\n@enduml`
-    // 暗色：skinparam 注在 @start 行后（用户后写的 skinparam 优先级高，可覆盖注入值）
-    const src = pal ? base.replace(/@start(\w*)\n/, (m0) => m0 + plantumlSkinparams(pal).join("\n") + "\n") : base
-    return await new Promise<string>((resolve, reject) => {
-      mod.renderToString(src.split("\n"), (svg) => resolve(svg), (msg) => reject(new Error(msg)))
+    // 暗色：skinparam 集注在 @start 行后（用户后写的 skinparam 优先），与主界面同规则
+    const src = pal ? base.replace(/@start(\w*)/, (m0) => m0 + "\n" + plantumlSkinparams(pal).join("\n")) : base
+    const svg = await new Promise<string>((resolve, reject) => {
+      mod.renderToString(src.split("\n"), (s) => resolve(s), (msg) => reject(new Error(msg)))
     })
+    // 暗色：skinparam 覆盖不到的残留（生命线/图标/JSON-YAML 独立渲染器）后处理兑底
+    return pal ? remapPlantUmlSvg(svg, pal) : svg
   }
   // d2：浏览器构建为单 Worker，必须串行（并发会互相覆盖回调）
   const run = d2Queue.then(async () => {

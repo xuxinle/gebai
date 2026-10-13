@@ -279,6 +279,16 @@ export function plantumlSkinparams(p: DiagramPalette): string[] {
     "skinparam NoteFontColor " + p.text,
     "skinparam DividerBackgroundColor " + p.nodeAlt,
     "skinparam DividerFontColor " + p.text,
+    // 时序图参与者特殊形态（boundary/control/entity/queue 各有独立 skinparam，与 participant 不同名）
+    "skinparam BoundaryBackgroundColor " + p.node,
+    "skinparam BoundaryBorderColor " + p.accent,
+    "skinparam BoundaryFontColor " + p.text,
+    "skinparam ControlBackgroundColor " + p.node,
+    "skinparam ControlBorderColor " + p.accent,
+    "skinparam ControlFontColor " + p.text,
+    "skinparam EntityBackgroundColor " + p.node,
+    "skinparam EntityBorderColor " + p.accent,
+    "skinparam EntityFontColor " + p.text,
     // 类图/对象
     "skinparam ClassBackgroundColor " + p.node,
     "skinparam ClassBorderColor " + p.accent,
@@ -366,6 +376,36 @@ export function plantumlSkinparams(p: DiagramPalette): string[] {
     "skinparam LegendFontColor " + p.text,
     "skinparam HeaderFooterFontColor " + p.textMuted,
   ]
+}
+
+/**
+ * PlantUML SVG 暗色后处理兜底：skinparam 注入覆盖不到的元素在此按实测色表重映射。
+ * 实测缺口（TeaVM 版无对应可用 skinparam）：
+ *   ① 生命线虚线 stroke #181818（LifeLineBorderColor 在 TeaVM 版无效）；
+ *   ② 类图/ER 图圆点图标（#ADD1B2 绿圆、#E2E2F0 浅底、#181818 黑边）；
+ *   ③ JSON/YAML 数据图为独立渲染器，**完全不吃 skinparam**（实测）；
+ *   ④ 各类元素的默认黑字/黑线残留 #000000。
+ * 映射规则：底色系（白/浅灰/浅蓝灰）→ 画布底/节点底；黑字黑线 → 正文色/border（保可读性）。
+ * 不在表内的色原样保留（用户源码里的显式颜色／功能性色彩不受影响）。
+ */
+const PLANTUML_REMAP: Array<{ from: RegExp; to: (p: DiagramPalette) => string }> = [
+  { from: /#FFFFFF/gi, to: (p) => p.bg },
+  { from: /#F1F1F1/gi, to: (p) => p.nodeAlt },
+  { from: /#E2E2F0/gi, to: (p) => p.nodeAlt },
+  { from: /#FFF2CC/gi, to: (p) => p.nodeAlt },
+  { from: /#EAE8D9/gi, to: (p) => p.nodeAlt },
+  { from: /#181818/gi, to: (p) => p.border },
+  { from: /#000000/gi, to: (p) => p.text },
+]
+
+/** PlantUML SVG 暗色后处理：fill/stroke 属性与 CSS 声明（若有）中的亮色残留统一重映射。 */
+export function remapPlantUmlSvg(svg: string, p: DiagramPalette): string {
+  let out = svg
+  for (const { from, to } of PLANTUML_REMAP) {
+    const value = to(p)
+    out = out.replace(from, value)
+  }
+  return out
 }
 
 /* ---------- D2 注入（SVG 后处理颜色重映射） ---------- */
