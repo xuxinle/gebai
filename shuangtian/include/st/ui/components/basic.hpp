@@ -115,10 +115,20 @@ class Text : public Element {
   /// 为何缓存的三元组是这几个：折行宽度只取决于可用宽度与字号
   /// （`wrap(content, size, max_width)`），内容变了才需重折；对齐只影响行首 x
   /// （不参与缓存，每帧现算）。
+  ///
+  /// ⚠ **第四维：`TextPort`**（2026-10-14 合并前复核补）。折行结果**也取决于字宽**，
+  /// 而字宽来自当时的端口/字体。漏掉这一维的话，任何“只换端口、其余全不变”的
+  /// 路径（热重载字体、无头/窗口双端口切换、多窗口共享组件）都会**静默复用
+  /// 旧字体折的行**（换行位置/行数错，且不报错）。
+  ///
+  /// 当前生产代码只有启动时 `set_text_port` 一次，所以是**潜伏脆弱点而非活缺陷**
+  /// ——但 `CodeEditor` 早就把端口纳入自己的缓存判据（`layout_port_`），
+  /// 这里是**对齐遗漏**；补上后两者口径一致。
   mutable std::vector<float> display_line_widths_{};
   mutable std::string layout_cache_content_{};
   mutable float layout_cache_width_{-1.0F};
   mutable float layout_cache_font_size_{-1.0F};
+  mutable const st::ui::TextPort* layout_cache_port_{nullptr};
   /// 选区两端（已归一）；`line == npos` = 无选区。
   std::size_t select_begin_line_{std::string::npos};
   std::size_t select_begin_offset_{0};

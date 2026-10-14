@@ -146,7 +146,7 @@ void Text::measure(const RenderContext& context, const Constraints& constraints)
     // 把整份日志交给多行 `Text` 时，单是这一步就吃满了帧预算
     // （实测见 hpp 里 `display_line_widths_` 的说明）。
     if (layout_cache_content_ != content_ || layout_cache_width_ != available ||
-        layout_cache_font_size_ != size) {
+        layout_cache_font_size_ != size || layout_cache_port_ != context.text) {
       std::vector<std::string> lines =
           max_lines_ > 0
               ? port.wrap_limited(content_, size, available, max_lines_)
@@ -161,6 +161,7 @@ void Text::measure(const RenderContext& context, const Constraints& constraints)
       layout_cache_content_ = content_;
       layout_cache_width_ = available;
       layout_cache_font_size_ = size;
+      layout_cache_port_ = context.text;
     }
     // 行宽逐行缓存：只在对应的行还没量过时量（字符串可能因折行缓存复用而保留）。
     if (display_line_widths_.size() != display_lines_.size()) {
@@ -208,7 +209,8 @@ void Text::paint_content(const RenderContext& context, raster::Surface& canvas) 
   // **复用排版缓存**（`measure` 已经算过——同一帧里它先跑），不再每帧重折行。
   // 仅当缓存与当前 (内容, 宽度, 字号) 不符时才现场重算（如从未走过 layout 的直绘路径）。
   if (layout_cache_content_ != content_ || layout_cache_width_ != available ||
-      layout_cache_font_size_ != size || display_line_widths_.size() != display_lines_.size()) {
+      layout_cache_font_size_ != size || layout_cache_port_ != context.text ||
+      display_line_widths_.size() != display_lines_.size()) {
     std::vector<std::string> lines;
     if (max_lines_ > 0) {
       lines = port.wrap_limited(content_, size, available, max_lines_);
@@ -220,6 +222,7 @@ void Text::paint_content(const RenderContext& context, raster::Surface& canvas) 
     layout_cache_content_ = content_;
     layout_cache_width_ = available;
     layout_cache_font_size_ = size;
+    layout_cache_port_ = context.text;
   }
   const std::vector<std::string>& lines = display_lines_;
   const float line_height = port.line_height(size);
