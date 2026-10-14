@@ -66,6 +66,26 @@ class ListItem : public Element {
   std::size_t index_{0};
   bool selected_{false};
   std::function<void(std::size_t)> on_activate_{};
+
+  /// 标签/副行的**文本宽度缓存**（`mutable`：与 `Tree::row_label_widths_` 同一套做法）。
+  ///
+  /// 为何需要（2026-10-14，实测）：`List` 不覆写 `measure`，走 `Element` 基类逐子元素
+  /// 递归——于是 N 项列表每轮 measure 要调 `TextPort::measure_width` **2N 次**
+  ///（label + subtitle）。而文本层的宽度缓存只有 4096 条且满了**整表清空**：
+  /// 2048 项时正好 4096 次调用"自己把自己的缓存冲掉"，命中率≈0 → **断崖**
+  ///（实测：2000 项 0.187 ms → 2100 项 10.923 ms；5000 项 25.927 ms）。
+  ///
+  /// 修法是把宽度缓存在**项自己身上**：文案没变就不重量（`set_label`/`set_subtitle`
+  /// 会失效）。于是 `List::measure` 的 O(N) 遍历退化成纯内存扫描。
+  ///
+  /// 为何不缓存"最终宽度"（含 `kTextInset` 与上下限夹取那一堆）：那些依赖 `constraints`
+  /// 与 `style_`，逐轮都可能变；缓存的应是**纯文本度量**这一层——它只取决于
+  /// `(文案, 字号)`，语义上就是"这段字占多宽"。
+  mutable float label_width_{-1.0F};
+  mutable float subtitle_width_{-1.0F};
+  /// 缓存对应的字号（`Metrics::font_base` / `font_xs`）；主题换档时重算。
+  mutable float label_width_font_size_{-1.0F};
+  mutable float subtitle_width_font_size_{-1.0F};
 };
 
 /// 垂直列表容器：`add_item` 追加列表项，选中态与键盘导航由容器统一管理。

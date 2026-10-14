@@ -54,12 +54,14 @@ ListItem::ListItem(std::string label, std::string subtitle)
 void ListItem::set_label(std::string label) {
   if (label_ == label) return;
   label_ = std::move(label);
+  label_width_ = -1.0F;  // 文案变了：宽度缓存作废（见 hpp 里 label_width_ 的说明）
   mark_layout_dirty();
 }
 
 void ListItem::set_subtitle(std::string subtitle) {
   if (subtitle_ == subtitle) return;
   subtitle_ = std::move(subtitle);
+  subtitle_width_ = -1.0F;
   mark_layout_dirty();
 }
 
@@ -72,9 +74,22 @@ void ListItem::set_selected(bool value) {
 void ListItem::measure(const RenderContext& context, const Constraints& constraints) {
   const TextPort& port = text_port_of(context);
   const Metrics& metrics = context.theme.metrics();
-  float width = port.measure_width(label_, metrics.font_base);
+  // **文本宽度缓存**（见 hpp）：只量文案本身（不含内边距与夹取），
+  // 它只取决于 `(文案, 字号)`。文案变由 `set_label`/`set_subtitle` 失效；
+  // 字号变（主题换档 / `scale_fonts`）由这里比对字号失效。
+  const float label_font = metrics.font_base;
+  const float subtitle_font = metrics.font_xs;
+  if (label_width_ < 0.0F || label_width_font_size_ != label_font) {
+    label_width_ = port.measure_width(label_, label_font);
+    label_width_font_size_ = label_font;
+  }
+  float width = label_width_;
   if (!subtitle_.empty()) {
-    width = std::max(width, port.measure_width(subtitle_, metrics.font_xs));
+    if (subtitle_width_ < 0.0F || subtitle_width_font_size_ != subtitle_font) {
+      subtitle_width_ = port.measure_width(subtitle_, subtitle_font);
+      subtitle_width_font_size_ = subtitle_font;
+    }
+    width = std::max(width, subtitle_width_);
   }
   width += kTextInset * 2.0f;
   width = std::max(width, 80.0f);
