@@ -34,6 +34,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -227,8 +228,15 @@ class Terminal : public Element {
   /// 键盘入口在 `on_event`（`Ctrl+Shift+V`，Windows Terminal 同款键位）。
   void paste_clipboard();
 
-  /// 当前会话选中内容（PTY 模式回整屏纯文本；无屏幕为空串）。复制能力的基础。
+  /// 当前会话选中内容（**有选区时只回选区**；无选区时回整屏纯文本以兼容旧语义）。
   [[nodiscard]] auto selected_text() const -> std::string;
+
+  /// 是否有非空选区（供宿主决定「复制」菜单项是否可用）。
+  [[nodiscard]] auto has_selection() const noexcept -> bool { return selection_.has_value(); }
+  /// 清空选区（宿主在切换会话/清屏时可调）。
+  void clear_selection() noexcept { selection_.reset(); }
+  /// 全选（Ctrl+A / 宿主动作）。无屏幕时无操作。
+  void select_all();
 
   /// **当前会话**是否忙。⚠ 只回答"眼前这个标签"；问"还有没有活"用 `any_busy()`。
   ///
@@ -461,6 +469,37 @@ class Terminal : public Element {
   float measured_cell_width_{-1.0f};
   float measured_line_height_{-1.0f};
 
+  // —————————————— 文本选择（2026-10-14）——————————————
+  //
+  // 终端是**等宽网格**，选择用 `{绝对行号, 列}` 而不是字节偏移：
+  // 网格里“列”就是天然坐标系（字符宽度不一——CJK 占 2 列——但列数恒定）。
+  //
+  // **统一行号空间**（关键）：回看缓冲与当前屏是两个数组，但用户眼里是一根
+  // 连续的滚动条，所以选择必须建在一个行号上：
+  //   `[0, sb_total)`                   → 回看行（`AnsiScreen::scrollback_line`）
+  //   `[sb_total, sb_total + rows)`     → 当前屏幕行（`AnsiScreen::cell`）
+  // 视口里的绘制行 = `绝对行号 - sb_first`（`sb_first = sb_total - sb_offset`，
+  // 与 `paint_content` 同一份几何）。
+  struct GridCaret {
+    int line{-1};   ///< 绝对行号（见上）
+    int column{0};  ///< 列（0 起）
+    [[nodiscard]] auto operator==(const GridCaret& other) const noexcept -> bool {
+      return line == other.line && column == other.column;
+    }
+  };
+  /// 选区两端（anchor = 按下那一端；focus = 跟随鼠标那一端）。
+  GridCaret select_anchor_{};
+  GridCaret select_focus_{};
+  bool selecting_{false};
+  /// 归一化后的选区（为空 = 无选择）。用 `optional` 而不是“两端相等”判定：
+  /// 单击（两端相等）不应当成“有选择”。
+  std::optional<std::pair<GridCaret, GridCaret>> selection_{};
+  /// 双击选词：记录上一次按下的时刻/位置（用事件时间戳判定双击）。
+  std::int64_t last_click_ms_{-1};
+  math::Point last_click_pos_{};
+  /// 拖选时的自动滚动累积（超出视口边缘时按行滚）。
+  std::int64_t last_drag_ms_{-1};
+
   // —— 子件（组合而非自绘：标签与滚动是既有组件）——
   Tabs* tabs_{nullptr};
   ScrollView* view_{nullptr};
@@ -498,6 +537,20 @@ class Terminal : public Element {
   mutable std::vector<std::string> screen_lines_{};
   /// 刷新实测格宽缓存（字体端口/字号/缩放变化时调用；`arrange` 里先于列数计算）。
   void refresh_cell_metrics(const RenderContext& context);
+
+  // —— 选择辅助（实现见 terminal.cpp 的「文本选择」段）——
+  /// 选中区间归一化（拖选方向任意）；返回 `{begin, end}`。
+  [[nodiscard]] auto selection_ordered() const -> std::pair<GridCaret, GridCaret>;
+  /// 控件坐标 → 网格车符位（超出网格时夹到边界；用于拖选与「Shift+点击」）。
+  [[nodiscard]] auto caret_at(const RenderContext& context, math::Point point) const -> GridCaret;
+  /// 取某一**绝对行**的纯文本（回看行走 scrollback，屏幕行走逐格拼接，行尾空白裁掉）。
+  [[nodiscard]] auto grid_line_text(int line) const -> std::string;
+  /// 当前绝对行总数（回看 + 屏幕）。
+  [[nodiscard]] auto grid_line_count() const -> int;
+  /// 画选区高亮（逐行算选中列区间，画在文本层之下）。
+  void paint_selection_layer(const RenderContext& context, raster::Surface& canvas,
+                             math::Point origin, float cell_w, float line_h, int sb_first,
+                             int sb_total) const;
 
   /// 取当前会话（容器为空时先补一个——不变式：**永远至少一个会话**）。
   auto current() -> TerminalSession&;

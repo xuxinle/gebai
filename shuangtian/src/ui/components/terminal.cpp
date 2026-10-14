@@ -674,11 +674,170 @@ void Terminal::paste_clipboard() {
   send_bytes(normalized);
 }
 
-auto Terminal::selected_text() const -> std::string {
-  // 选择能力尚在建设中（无鼠标选区）；当前回整屏纯文本，
-  // 供宿主做"复制屏幕"类动作。有选区后改为只回选区。
+auto Terminal::grid_line_count() const -> int {
   const TerminalSession& target = current();
-  return target.screen != nullptr ? target.screen->plain_text() : std::string{};
+  if (target.screen == nullptr) return 0;
+  return static_cast<int>(target.screen->scrollback_count()) + target.screen->rows();
+}
+
+auto Terminal::grid_line_text(int line) const -> std::string {
+  const TerminalSession& target = current();
+  if (target.screen == nullptr) return {};
+  const st::text::AnsiScreen& screen = *target.screen;
+  const int sb_total = static_cast<int>(screen.scrollback_count());
+  if (line < 0 || line >= sb_total + screen.rows()) return {};
+  std::string text;
+  if (line < sb_total) {
+    text = screen.scrollback_line(static_cast<std::size_t>(line));
+  } else {
+    // 屏幕行：逐格拼接（宽字符占两列——`continuation` 格跳过，避免重复）。
+    const int row = line - sb_total;
+    for (int col = 0; col < screen.cols();) {
+      const st::text::AnsiCell& cell = screen.cell(row, col);
+      if (cell.continuation) {   // 宽字符的右半格：内容已在左半格写入
+        ++col;
+        continue;
+      }
+      if (cell.ch != 0) utf8_append(cell.ch, text);
+      col += st::text::cell_width(cell.ch);
+    }
+  }
+  // 行尾空白裁掉（终端行用空格填满，不裁会把大量空格拷进剪贴板——
+  // 这是终端复制的通行行为）。
+  while (!text.empty() && (text.back() == ' ' || text.back() == '\t')) text.pop_back();
+  return text;
+}
+
+auto Terminal::selection_ordered() const -> std::pair<GridCaret, GridCaret> {
+  if (!selection_.has_value()) return {GridCaret{}, GridCaret{}};
+  return *selection_;
+}
+
+auto Terminal::caret_at(const RenderContext& context, math::Point point) const -> GridCaret {
+  const TerminalSession& target = current();
+  if (target.screen == nullptr) return GridCaret{};
+  const st::text::AnsiScreen& screen = *target.screen;
+  const TextPort& port = components_internal::text_port_of(context);
+  const float font = base_font_size_ * font_scale_;
+  const float cell_w = measured_cell_width_ > 0.0f
+      ? measured_cell_width_
+      : port.measure_width("M", font, text::FontRole::Monospace);
+  const float line_h = measured_line_height_ > 0.0f ? measured_line_height_ : port.line_height(font);
+  const float origin_x = output_rect_.x + 4.0f;
+  const float origin_y = output_rect_.y + 4.0f;
+  // 与 `paint_content` 同一份几何（`sb_first` 是回看区起点）。
+  const int sb_total = static_cast<int>(screen.scrollback_count());
+  const int sb_offset = std::clamp(target.scrollback_offset, 0, sb_total);
+  const int sb_first = sb_total - sb_offset;
+
+  // 行：视口行 → 绝对行号。
+  const float local_y = point.y - origin_y;
+  const int view_row = cell_w > 0.0f ? static_cast<int>(std::floor(local_y / std::max(line_h, 1.0f))) : 0;
+  int line = view_row + sb_first;
+  const int last = grid_line_count() - 1;
+  line = std::clamp(line, 0, std::max(last, 0));
+
+  // 列：按格宽取最近的格边界（等宽网格下就是四舍五入）。
+  const float local_x = point.x - origin_x;
+  int column = cell_w > 0.0f ? static_cast<int>(std::lround(local_x / cell_w)) : 0;
+  column = std::clamp(column, 0, std::max(screen.cols(), 0));
+  return GridCaret{line, column};
+}
+
+void Terminal::select_all() {
+  const int count = grid_line_count();
+  if (count <= 0) {
+    selection_.reset();
+    return;
+  }
+  const TerminalSession& target = current();
+  const int last_column = target.screen != nullptr ? target.screen->cols() : 0;
+  selection_ = std::make_pair(GridCaret{0, 0}, GridCaret{count - 1, last_column});
+}
+
+void Terminal::paint_selection_layer(const RenderContext& context, raster::Surface& canvas,
+                                     math::Point origin, float cell_w, float line_h, int sb_first,
+                                     int sb_total) const {
+  (void)context;
+  (void)sb_total;
+  if (!selection_.has_value() || cell_w <= 0.0f) return;
+  const auto [begin, end] = *selection_;
+  const TerminalSession& target = current();
+  if (target.screen == nullptr) return;
+  const int columns = target.screen->cols();
+  // ⚠ `origin` 传入的已是 `{output_rect_.x + 4, output_rect_.y + 4}`（与 `paint_content`
+  //  里画文本用的同一个 `origin_x/origin_y`）。**不能再加一次 4**——那是
+  //  “padding 加两次”，表现为高亮整体右移下移几像素、与字形错开（实测：
+  //  vision 复核报“高亮位于文字下半部分”）。
+  const float base_x = origin.x;
+  const float base_y = origin.y;
+  const math::Color color = context.theme.colors().selection;
+  for (int line = begin.line; line <= end.line; ++line) {
+    // 视口行 = 绝对行号 - sb_first；不在可见区就跳过。
+    const int view_row = line - sb_first;
+    if (view_row < 0) continue;
+    const float y = base_y + static_cast<float>(view_row) * line_h;
+    if (y + line_h < output_rect_.y || y > output_rect_.bottom()) continue;
+    const int from = line == begin.line ? begin.column : 0;
+    const int to = line == end.line ? end.column : columns;
+    const int lo = std::clamp(std::min(from, to), 0, columns);
+    const int hi = std::clamp(std::max(from, to), 0, columns);
+    // 高亮块的**垂直范围**：与文本**同行同高**（`y` 是 `paint_content` 里画文本用的
+    // origin.y，字形就从它起——见那里的注释“不要加 ascent”）。
+    //
+    // 两条错路（都实测走过）：
+    //   ① `y + (line_h - font)/2`（行框居中）：字形靠行框上方，高亮偏下；
+    //   ② `y + ascent`（把 ascent 当“字形上缘偏移”）：origin 本就是行顶，
+    //      再位移一个 ascent 直接把高亮推到行底（像素测量：文字在 y≈18~33，
+    //      高亮在 y≈36~44）。
+    // 正解是**不位移**：高亮与字形共用同一个起点，高度取行高。
+    const float band_y = y;
+    const float band_h = line_h;
+    if (hi <= lo) {
+      // 整行选中时若未到行尾，仍画到列 0 处的一点（让“空行也被选中”可见）。
+      if (from == to) continue;
+      const math::Rect mark{base_x + static_cast<float>(lo) * cell_w, band_y, cell_w * 0.5f, band_h};
+      canvas.fill_rect(mark, raster::Paint::solid(color));
+      continue;
+    }
+    const math::Rect band{base_x + static_cast<float>(lo) * cell_w, band_y,
+                          static_cast<float>(hi - lo) * cell_w, band_h};
+    canvas.fill_rect(band, raster::Paint::solid(color));
+  }
+}
+
+auto Terminal::selected_text() const -> std::string {
+  const TerminalSession& target = current();
+  // 无选区：保持**旧语义**（回整屏纯文本）——宿主可能依赖它做「复制屏幕」，
+  // 并且这条路径也是「Ctrl+C 无选择时拷全屏」的兑底。
+  if (!selection_.has_value()) {
+    return target.screen != nullptr ? target.screen->plain_text() : std::string{};
+  }
+  const auto [begin, end] = *selection_;
+  std::string out;
+  for (int line = begin.line; line <= end.line; ++line) {
+    const std::string text = grid_line_text(line);
+    const int from = line == begin.line ? begin.column : 0;
+    const int to = line == end.line ? end.column : std::numeric_limits<int>::max();
+    if (line > begin.line) out += '\n';
+    if (to <= 0 && line == end.line) continue;   // 末行选到行首之前：该行不贡献内容
+    // 列 → 字节偏移：逐码点累加显示列宽（CJK 占 2 列）。
+    std::size_t byte_begin = text.size();
+    std::size_t byte_end = text.size();
+    int column = 0;
+    const std::size_t count = st::utf8_length(text);
+    for (std::size_t i = 0; i <= count; ++i) {
+      if (column <= from) byte_begin = st::utf8_offset(text, i);
+      if (column <= to) byte_end = st::utf8_offset(text, i);
+      if (i == count) break;
+      const char32_t ch = st::utf8_decode(st::utf8_slice(text, i, 1)).front();
+      column += st::text::cell_width(ch);
+    }
+    if (byte_end > byte_begin) {
+      out += text.substr(byte_begin, byte_end - byte_begin);
+    }
+  }
+  return out;
 }
 
 void Terminal::send_stop() {
@@ -1222,6 +1381,15 @@ void Terminal::paint_content(const RenderContext& context, raster::Surface& canv
   // `offset > 0` 表示从底部往上翻了多少行。
   const int sb_total = static_cast<int>(screen.scrollback_count());
   const int sb_offset = std::clamp(session.scrollback_offset, 0, sb_total);
+
+  // —— 选区高亮（2026-10-14）——
+  // 画在**文本层之下**（后画的字形盖在上面，着色不受影响），且用与文本
+  // 完全同源的 `origin/cell_w/line_h` 与 `sb_first`——否则高亮会与字符错位。
+  if (has_selection()) {
+    const int sb_first = sb_total - sb_offset;
+    self->paint_selection_layer(context, canvas, math::Point{origin_x, origin_y}, cell_w, line_h,
+                                sb_first, sb_total);
+  }
   // 本次要画的 scrollback 行数 = 有偏移时从 `sb_total - sb_offset` 开始的全部。
   const int sb_visible = sb_offset;
   const int sb_first = sb_total - sb_offset;
@@ -1459,7 +1627,7 @@ auto Terminal::on_event(const RenderContext& context, Event& event) -> bool {
         event.handled = true;
         return true;
       }
-      // Ctrl+PageDown/PageUp / Ctrl+Tab：会话循环（多标签导航，不进字节流）。
+      // Ctrl+PageUp/PageDown / Ctrl+Tab：会话循环（多标签导航，不进字节流）。
       if (event.ctrl && (key == "PageDown" || key == "Tab")) {
         cycle_session(true);
         event.handled = true;
@@ -1467,6 +1635,32 @@ auto Terminal::on_event(const RenderContext& context, Event& event) -> bool {
       }
       if (event.ctrl && key == "PageUp") {
         cycle_session(false);
+        event.handled = true;
+        return true;
+      }
+      // —— 文本选择（2026-10-14）：与 Windows Terminal / GNOME Terminal 同属一组键位——
+      // `Ctrl+Shift+C` 复制选中（`Ctrl+C` **必须**留给 shell 发中断）、
+      // `Ctrl+Shift+A` 全选（`Ctrl+A` 留给 readline 的「行首」）。
+      // 这不是“不敢用标准键位”，而是终端里那两组键位已被 shell 占了语义。
+      if (event.ctrl && shift && (key == "c" || key == "C")) {
+        const std::string picked = has_selection() ? selected_text() : std::string{};
+        if (!picked.empty() && host() != nullptr) {
+          (void)host()->host_set_clipboard_text(picked);
+          event.handled = true;
+          return true;
+        }
+        return false;   // 无选区：不吞（让宿主/系统处理）
+      }
+      if (event.ctrl && shift && (key == "a" || key == "A")) {
+        select_all();
+        mark_dirty();
+        event.handled = true;
+        return true;
+      }
+      // Esc：清选区（不与 shell 争——仅在真有选区时吞）
+      if (!event.ctrl && key == "Escape" && has_selection()) {
+        clear_selection();
+        mark_dirty();
         event.handled = true;
         return true;
       }
@@ -1528,6 +1722,126 @@ auto Terminal::on_event(const RenderContext& context, Event& event) -> bool {
       return true;
     }
   }
+  // —————————— 文本选择：拖选 / 双击选词 / Shift+点击扩选（2026-10-14）——————————
+  //
+  // 放在滚动条之后（右缘小控件优先，否则永远点不到）；仅当当前会话有屏幕
+  //（行模式没有网格，选择无意义）。
+  if (pty_active() && current().screen != nullptr && output_rect_.contains(event.position)) {
+    const bool down = event.kind == EventKind::MouseDown && event.button == 1;
+    if (down) {
+      // **双击选词**：与上一次按下很近（<500ms、<6px）则取词。
+      // 时间取自 `RenderContext::time_seconds`（事件本身不带时间戳）——
+      // 它在同一帧内一致，而双击判定只需“两次按下相隔多久”。
+      const std::int64_t now_ms = static_cast<std::int64_t>(context.time_seconds * 1000.0);
+      const bool near = std::abs(event.position.x - last_click_pos_.x) < 6.0f &&
+                        std::abs(event.position.y - last_click_pos_.y) < 6.0f;
+      const bool double_click = last_click_ms_ >= 0 && (now_ms - last_click_ms_) < 500 && near;
+      last_click_ms_ = now_ms;
+      last_click_pos_ = event.position;
+
+      const GridCaret caret = caret_at(context, event.position);
+      if (double_click) {
+        // 双击：选中该位置所在的**词**（词界由公共算法给）。
+        const std::string text = grid_line_text(caret.line);
+        const auto column_of = [&](std::size_t byte) -> int {
+          int col = 0;
+          const std::size_t upto =
+              st::utf8_length(text.substr(0, std::min(byte, text.size())));
+          for (std::size_t i = 0; i < upto; ++i) {
+            col += st::text::cell_width(
+                st::utf8_decode(st::utf8_slice(text, i, 1)).front());
+          }
+          return col;
+        };
+        // 列 → 字节偏移（与复制同一换算）。
+        const auto byte_of = [&](int wanted) -> std::size_t {
+          int col = 0;
+          const std::size_t count = st::utf8_length(text);
+          for (std::size_t i = 0; i <= count; ++i) {
+            if (col >= wanted) return st::utf8_offset(text, i);
+            if (i == count) break;
+            col += st::text::cell_width(
+                st::utf8_decode(st::utf8_slice(text, i, 1)).front());
+          }
+          return text.size();
+        };
+        const auto [word_begin, word_end] =
+            components_internal::word_range_at(text, byte_of(caret.column));
+        if (word_end > word_begin) {
+          select_anchor_ = GridCaret{caret.line, column_of(word_begin)};
+          select_focus_ = GridCaret{caret.line, column_of(word_end)};
+          selection_ = std::make_pair(select_anchor_, select_focus_);
+        } else {
+          clear_selection();
+        }
+        selecting_ = false;
+        mark_dirty();
+        event.handled = true;
+        return true;
+      }
+
+      // Shift+点击：扩展已有选区（保留 anchor，只移 focus）。
+      if (event.shift && has_selection()) {
+        select_focus_ = caret;
+        selection_ = select_anchor_.line < select_focus_.line ||
+                             (select_anchor_.line == select_focus_.line &&
+                              select_anchor_.column <= select_focus_.column)
+                         ? std::make_pair(select_anchor_, select_focus_)
+                         : std::make_pair(select_focus_, select_anchor_);
+      } else {
+        selecting_ = true;
+        select_anchor_ = caret;
+        select_focus_ = caret;
+        clear_selection();   // 点一下还没选中任何格（拖了才有）
+      }
+      event.handled = true;
+      return true;
+    }
+    const bool move = event.kind == EventKind::MouseMove;
+    const bool up = event.kind == EventKind::MouseUp && event.button == 1;
+    if (move && selecting_) {
+      select_focus_ = caret_at(context, event.position);
+      if (select_anchor_.line != select_focus_.line ||
+          select_anchor_.column != select_focus_.column) {
+        selection_ = select_anchor_.line < select_focus_.line ||
+                             (select_anchor_.line == select_focus_.line &&
+                              select_anchor_.column <= select_focus_.column)
+                         ? std::make_pair(select_anchor_, select_focus_)
+                         : std::make_pair(select_focus_, select_anchor_);
+      } else {
+        clear_selection();
+      }
+      // **拖出视口边缘 → 自动回看滚动**（与编辑器控件同一手感）：
+      // 每拖出 1px 按行高折算，最少滚一行（避免抖动）。
+      TerminalSession& target = current();
+      const int total = static_cast<int>(target.screen->scrollback_count());
+      const float line_h = measured_line_height_ > 0.0f ? measured_line_height_ : line_height_;
+      if (line_h > 0.0f) {
+        if (event.position.y < output_rect_.y) {
+          const int lines =
+              std::max(1, static_cast<int>((output_rect_.y - event.position.y) / line_h) + 1);
+          target.scrollback_offset = std::clamp(target.scrollback_offset + lines, 0, total);
+          target.user_scrolled = target.scrollback_offset > 0;
+          mark_layout_dirty();
+        } else if (event.position.y > output_rect_.bottom()) {
+          const int lines =
+              std::max(1, static_cast<int>((event.position.y - output_rect_.bottom()) / line_h) + 1);
+          target.scrollback_offset = std::clamp(target.scrollback_offset - lines, 0, total);
+          target.user_scrolled = target.scrollback_offset > 0;
+          mark_layout_dirty();
+        }
+      }
+      mark_dirty();
+      event.handled = true;
+      return true;
+    }
+    if (up && selecting_) {
+      selecting_ = false;
+      mark_dirty();
+      event.handled = true;
+      return true;
+    }
+  }
   if (event.kind == EventKind::MouseDown) {
     // 点哪里都算"聚焦终端"，但**不**在应用层做"点击定位光标"——
     // 那是 shell 的事（光标位置属于屏幕状态，不是我们可以随便挪的）。
@@ -1583,7 +1897,7 @@ auto Terminal::property_names() const -> std::vector<std::string_view> {
                {"sessions", "active_session", "session_title", "working_directory", "busy",
                 "output", "screen", "cursor", "cursor_rect", "pty", "alt_screen", "scroll",
                 "user_scrolled", "cursor_shape", "screen_cursor_shape", "monospace",
-                "tabs_visible", "add_button", "font_scale", "scrollbar"});
+                "tabs_visible", "add_button", "font_scale", "scrollbar", "selection"});
   return names;
 }
 
@@ -1665,6 +1979,13 @@ auto Terminal::get_property(std::string_view name) const -> std::optional<std::s
                        scroll_bar_->offset());
   }
   if (name == "font_scale") return std::format("{:.2f}", font_scale_);
+  if (name == "selection") {
+    // 选中文本（只读快照）——供自动化断言「拖选后拷出的是哪几个字」。
+    // 无选区时返回空串（不回整屏：那是 `selected_text()` 的兼容行为，
+    // 而本属性专门回答“选了什么”，混在一起会让断言写不出精确判据）。
+    if (!has_selection()) return std::string{};
+    return selected_text();
+  }
   return Element::get_property(name);
 }
 
@@ -1709,6 +2030,24 @@ auto Terminal::invoke_action(std::string_view action, std::string_view argument)
   if (action == "send_line") {   // 送一行并回车
     send_bytes(std::string(argument) + "\r");
     return true;
+  }
+  // —— 文本选择（2026-10-14，与 MarkdownView / CodeEditor 同一套动作名）——
+  if (action == "select_all") {
+    select_all();
+    mark_dirty();
+    return true;
+  }
+  if (action == "clear_selection") {
+    clear_selection();
+    mark_dirty();
+    return true;
+  }
+  if (action == "copy") {
+    // 与 `Ctrl+Shift+C` 同一路径（有选区拷选区，无选区拷整屏）。
+    if (host() == nullptr) return false;
+    const std::string text = selected_text();
+    if (text.empty()) return false;
+    return host()->host_set_clipboard_text(text);
   }
   if (action == "stop") {
     send_stop();

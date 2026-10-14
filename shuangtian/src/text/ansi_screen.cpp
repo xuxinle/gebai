@@ -48,11 +48,15 @@ constexpr AnsiColor kDefaultColor{};
          (byte(3) & 0x3FU);
 }
 
-/// 码点显示宽度：0（组合符/控制）、1（半角）、2（全角）。
+/// 码点显示宽度（实现）：0（组合符/控制）、1（半角）、2（全角）。
 ///
 /// 只覆盖终端里实际会出现的范围（CJK、全角标点、常见 emoji），不追求
 /// Unicode 全表——查表代价要摊在**每个字符**上，而 99% 的输出是 ASCII。
-[[nodiscard]] auto cell_width(char32_t ch) -> int {
+///
+/// 公开入口是同名的 `st::text::cell_width`（本函数的转调层，见命名空间外）——
+/// 为什么分成两层：内部调用点很多且都在本 TU，而**选择/网格换算需要跨 TU**
+/// 使用同一份规则（两处各写一份必然漂移，而“选中的字与高亮的格不对应”极难查）。
+[[nodiscard]] auto cell_width_impl(char32_t ch) -> int {
   if (ch == 0) return 0;
   if (ch < 0x20U) return 0;                  // 控制字符无宽度
   if (ch >= 0x7FU && ch < 0xA0U) return 0;   // DEL 与 C1
@@ -96,6 +100,11 @@ auto utf8_encode(char32_t ch, std::string& out) -> void {
 }
 
 }  // namespace
+
+// 公开入口（声明在 ansi_screen.hpp）：终端网格与**文本选择**的共用地基。
+// 选择/命中要按它把「列」与「字节偏移」互推，而网格推进也用它——
+// 两处各写一份宽度规则必然漂移。
+auto cell_width(char32_t ch) -> int { return cell_width_impl(ch); }
 
 AnsiScreen::AnsiScreen(int cols, int rows) {
   cols_ = std::max(1, cols);
@@ -255,7 +264,7 @@ void AnsiScreen::resize(int cols, int rows) {
       // 切窄正好切开宽字符：界内留了左半、右半被截——左半补空（半字无法显示）。
       // 判据：**被截掉的首格**（`source[copy]`）是 continuation，且界内末格是宽字主格。
       if (copy > 0 && copy < source.size() && source[copy].continuation &&
-          !destination[copy - 1].continuation && cell_width(destination[copy - 1].ch) == 2) {
+          !destination[copy - 1].continuation && cell_width_impl(destination[copy - 1].ch) == 2) {
         destination[copy - 1] = AnsiCell{};
       }
       // 防御：孤儿 continuation（主格不在界内）同样补空。
@@ -281,7 +290,7 @@ void AnsiScreen::resize(int cols, int rows) {
 // ════════════════════════════════════════════════════════════════════════════
 
 void AnsiScreen::put(char32_t ch) {
-  const int width = cell_width(ch);
+      const int width = cell_width_impl(ch);
   if (width == 0) return;   // 组合符等：本层不做叠加，直接忽略（不污染屏幕）
 
   // 挂起态：上一次写满了一行，这次才真换行（`DECAWM` 的语义）。
@@ -542,7 +551,7 @@ void AnsiScreen::handle_csi(char final_byte) {
       int steps = 0;
       while (steps < count && from + width < cols_) {
         const AnsiCell& cell_here = cells[static_cast<std::size_t>(from + width)];
-        width += cell_here.continuation ? 1 : cell_width(cell_here.ch);
+        width += cell_here.continuation ? 1 : cell_width_impl(cell_here.ch);
         ++steps;
       }
       // 末尾被跨到的半张宽字也计入（不留在行里成孤儿）。
