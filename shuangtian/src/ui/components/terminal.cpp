@@ -1897,8 +1897,13 @@ auto Terminal::property_names() const -> std::vector<std::string_view> {
                {"sessions", "active_session", "session_title", "working_directory", "busy",
                 "output", "screen", "cursor", "cursor_rect", "pty", "alt_screen", "scroll",
                 "user_scrolled", "cursor_shape", "screen_cursor_shape", "monospace",
-                "tabs_visible", "add_button", "font_scale", "scrollbar", "selection"});
+                "tabs_visible", "add_button", "font_scale", "scrollbar"});
   return names;
+}
+
+auto Terminal::readonly_property_names() const -> std::vector<std::string_view> {
+  // `selection` 只读（`get` 能读、`set` 不生效）。
+  return {"selection"};
 }
 
 auto Terminal::get_property(std::string_view name) const -> std::optional<std::string> {

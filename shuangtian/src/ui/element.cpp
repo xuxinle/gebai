@@ -366,6 +366,11 @@ auto Element::property_names() const -> std::vector<std::string_view> {
           "tone_override", "size", "weight"};
 }
 
+auto Element::readonly_property_names() const -> std::vector<std::string_view> {
+  // 默认空：哪些属性只读由组件自己声明。
+  return {};
+}
+
 auto Element::invoke_action(std::string_view action, std::string_view argument) -> bool {
   (void)argument;
   if (action == "click" || action == "activate") {

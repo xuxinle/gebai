@@ -724,8 +724,17 @@ class Element {
       -> std::optional<std::string>;
   /// 写入自定义属性；返回是否生效。
   virtual auto set_property(std::string_view name, std::string_view value) -> bool;
-  /// 组件暴露的可读写属性名。
+  /// 组件暴露的**可读写**属性名（`set` 只认这一份；`get` 也遍历它）。
   [[nodiscard]] virtual auto property_names() const -> std::vector<std::string_view>;
+  /// 组件暴露的**只读**属性名（`get` 能读、`set` 不应生效）。
+  ///
+  /// 为何要单开一份（2026-10-14）：契约上 `property_names()` 是「可读写」，但
+  /// 有些属性天然只读（`selection`、`line_height`、诊断信息…）。旧实现把它们
+  /// 混在 `property_names()` 里，“声明的名字必须可写”这条通用护欄就必然失败
+  /// （实测：给 Input 加只读 `selection` 后 `ui_actions_set_changes_all_declared_
+  /// string_properties` 变红）；而不入表又会让 `get` 读不到（快照只遍历
+  /// `property_names()`）。两份表把这两个需求拆开。
+  [[nodiscard]] virtual auto readonly_property_names() const -> std::vector<std::string_view>;
   /// 动作触发（`invoke`；返回是否已处理）。
   [[nodiscard]] virtual auto invoke_action(std::string_view action, std::string_view argument)
       -> bool;

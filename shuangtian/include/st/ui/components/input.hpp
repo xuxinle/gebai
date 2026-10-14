@@ -10,9 +10,12 @@
 ///   以便 `visual` 树如实上报外观；显式设置过 `style().radius`/`background` 的实例不被覆盖。
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <limits>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "st/math/geometry.hpp"
@@ -42,6 +45,19 @@ class Input : public Element {
   void set_icon_prefix(std::string_view icon_name);
   /// 设置光标字节位置（自动夹取到合法 UTF-8 码点边界）。
   void set_cursor_index(std::size_t index);
+  /// 选区（字节偏移，**已归一化**且已夹到码点边界）；无选择时 `begin == end`。
+  ///
+  /// 单行框的选区不需要“行号”——用**字节区间**表达就够。
+  /// 与 `CodeEditor` / `MarkdownView` / `Terminal` 的 `selection` 属性同一语义。
+  [[nodiscard]] auto selection() const -> std::pair<std::size_t, std::size_t>;
+  /// 设置选区（反向传参会自动归一；两端都夹到码点边界与文本长度内）。
+  void set_selection(std::size_t anchor, std::size_t focus);
+  /// 清空选区（不动光标）。
+  void clear_selection() noexcept { select_anchor_ = kNoSelection; }
+  /// 是否有非空选区。
+  [[nodiscard]] auto has_selection() const -> bool;
+  /// 选中文本（**密码框恒为空**——不给“绕过掩码取明文”的口子）。
+  [[nodiscard]] auto selected_text() const -> std::string;
 
   [[nodiscard]] auto value() const noexcept -> const std::string& { return text_; }
   [[nodiscard]] auto placeholder() const noexcept -> const std::string& { return placeholder_; }
@@ -63,6 +79,8 @@ class Input : public Element {
 -> std::optional<std::string> override;
 auto set_property(std::string_view name, std::string_view value) -> bool override;
 [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  /// 只读属性（`selection`）：`get` 能读、`set` 不生效。
+  [[nodiscard]] auto readonly_property_names() const -> std::vector<std::string_view> override;
 /// 动作面（与 `TextArea` 对齐；此前单行 Input 缺这一面——DESIGN §8.1.1 反推的
 /// 「API 存在但动作面未实现」同族缺口）：`submit`/`activate`（触发 `on_submit`）、
 /// `clear`（清空）。
@@ -78,6 +96,8 @@ auto set_property(std::string_view name, std::string_view value) -> bool overrid
   [[nodiscard]] auto inner_box(const RenderContext& context) const -> math::Rect;
   [[nodiscard]] auto display_text() const -> std::string;
   [[nodiscard]] auto cursor_x(const RenderContext& context) const -> float;
+  /// 给定**字节索引** → 屏幕 x（与 `cursor_x` 同算法；选区高亮两端用它）。
+  [[nodiscard]] auto index_to_x(const RenderContext& context, std::size_t text_index) const -> float;
   [[nodiscard]] auto index_at_x(const RenderContext& context, float x) const -> std::size_t;
   auto handle_key(const Event& event) -> bool;
   void insert_text(std::string_view inserted);
@@ -88,6 +108,28 @@ auto set_property(std::string_view name, std::string_view value) -> bool overrid
   std::string icon_prefix_{};
   std::size_t cursor_{0};
   bool password_{false};
+
+  // —— 选区（2026-10-14）——
+  //
+  // 单行框的选区只需**一个字节偏移**：锚点与光标（`cursor_`）就是两端。
+  // （不用 `Caret{line, offset}`：这里根本没有“行”这个维度，多一层反而易错。）
+  // `kNoSelection` = 无选区（与“锚点 == 光标”区分开：单击不应当成“有选择”）。
+  static constexpr std::size_t kNoSelection = std::numeric_limits<std::size_t>::max();
+  std::size_t select_anchor_{kNoSelection};   ///< 拖选起点（按下那一端）
+  bool selecting_{false};                     ///< 鼠标拖选中
+  bool double_click_{false};                  ///< 本次按下是双击（用于选词）
+  /// 双击/三击判定：上次按下的时间与位置（时间取自 `RenderContext`）。
+  std::int64_t last_click_ms_{-1};
+  float last_click_x_{0.0f};
+  int click_streak_{0};   ///< 连击次数（1=单击、2=双击选词、3=三击整行）
+
+  /// 选区两端（已归一 + 夹取）；无选区时 `{cursor_, cursor_}`。
+  [[nodiscard]] auto ordered_selection() const -> std::pair<std::size_t, std::size_t>;
+  /// 删除当前选区（用于替换输入）；返回是否有东西被删。
+  auto erase_selection() -> bool;
+  /// 在光标处插入并清空选区。**这是所有文本插入的唯一入口**——
+  /// 否则“有选区时插入”的行为会在多处各写一遍（必然漏一处）。
+  void replace_selection_with(std::string_view inserted);
 };
 
 /// 多行文本域：自动换行（经 `TextPort::wrap`）+ 内部竖向滚动（光标始终可见）。
@@ -107,6 +149,18 @@ class TextArea : public Element {
   void set_cursor_index(std::size_t index);
   /// 内部滚动偏移（像素），自动夹取到 `[0, 内容高 - 可视高]`。
   void set_scroll_offset(float offset);
+
+  /// 选区（字节偏移，**已归一化**且已夹到码点边界）；无选择时 `begin == end`。
+  ///
+  /// 与 `Input` / `CodeEditor` / `MarkdownView` / `Terminal` 同一套语义。
+  /// **多行也用字节偏移**（而不是 `{行, 列}`）：
+  /// `text_` 本身就是一个字符串，字节偏移天然跨行唯一，行/列反而是要多维护一层。
+  [[nodiscard]] auto selection() const -> std::pair<std::size_t, std::size_t>;
+  void set_selection(std::size_t anchor, std::size_t focus);
+  void clear_selection() noexcept { select_anchor_ = kNoSelection; }
+  [[nodiscard]] auto has_selection() const -> bool;
+  /// 选中文本（只读模式也可拷——只读是“不能改”，不是“不能选”）。
+  [[nodiscard]] auto selected_text() const -> std::string;
   /// **只读**：编辑禁入（文本插入/删除/换行一律忽略），但**光标仍可定位**、
   /// 仍可滚动、仍可获得焦点。
   ///
@@ -139,6 +193,8 @@ class TextArea : public Element {
       -> std::optional<std::string> override;
   auto set_property(std::string_view name, std::string_view value) -> bool override;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  /// 只读属性（`selection`）：`get` 能读、`set` 不生效。
+  [[nodiscard]] auto readonly_property_names() const -> std::vector<std::string_view> override;
   [[nodiscard]] auto invoke_action(std::string_view action, std::string_view argument)
       -> bool override;
 
@@ -158,6 +214,15 @@ class TextArea : public Element {
   [[nodiscard]] auto row_of(const std::vector<Line>& lines, std::size_t index) const -> std::size_t;
   [[nodiscard]] auto index_at_point(const RenderContext& context, math::Point point) const
       -> std::size_t;
+  /// 给定**字节索引** → 屏幕坐标（选区高亮两端用它）。
+  [[nodiscard]] auto index_to_point(const RenderContext& context, std::size_t index) const
+      -> math::Point;
+  /// 选区两端（已归一 + 夹取）；无选区时 `{cursor_, cursor_}`。
+  [[nodiscard]] auto ordered_selection() const -> std::pair<std::size_t, std::size_t>;
+  /// 删除当前选区（用于替换输入）。返回是否有东西被删。
+  auto erase_selection() -> bool;
+  /// 在光标处插入并清空选区。**所有文本插入的唯一入口**。
+  void replace_selection_with(std::string_view inserted);
   void sync_scroll(const RenderContext& context);
   void insert_text(std::string_view inserted);
   void erase_forward();
@@ -175,6 +240,14 @@ class TextArea : public Element {
   /// 只读（编辑禁入，但可聚焦/定位光标/滚动）。与 `enabled_` **无关**：
   /// 后者是“控件不可用”（变灰、不响应），两者语义不同，不要用一个代替另一个。
   bool read_only_{false};
+
+  // —— 选区（2026-10-14，与 `Input` 同一套字节偏移模型）——
+  static constexpr std::size_t kNoSelection = std::numeric_limits<std::size_t>::max();
+  std::size_t select_anchor_{kNoSelection};
+  bool selecting_{false};
+  std::int64_t last_click_ms_{-1};
+  float last_click_x_{0.0f};
+  int click_streak_{0};
 };
 
 }  // namespace st::ui

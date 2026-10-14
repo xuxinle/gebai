@@ -72,9 +72,15 @@ auto rect_to_json(math::Rect rect) -> st::Json {
 [[nodiscard]] auto element_snapshot(ui::Element& element) -> Json {
   Json snapshot = element_to_json(element);
   Json properties = Json::object();
+  // 可读写属性 + 只读属性都进快照（`get` 应能读到只读值，如 `selection`）。
   for (const auto name : element.property_names()) {
     if (auto value = element.get_property(name); value.has_value()) {
       // 属性值统一按字符串承载（组件属性面本就是文本协议），但布尔语义要保真
+      properties[std::string(name)] = *value;
+    }
+  }
+  for (const auto name : element.readonly_property_names()) {
+    if (auto value = element.get_property(name); value.has_value()) {
       properties[std::string(name)] = *value;
     }
   }

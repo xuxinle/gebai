@@ -133,6 +133,10 @@ auto Input::get_property(std::string_view name) const -> std::optional<std::stri
   if (name == "password") return password_ ? "true" : "false";
   if (name == "enabled") return enabled() ? "true" : "false";
   if (name == "visible") return visible() ? "true" : "false";
+  if (name == "selection") {
+    // 选中文本（只读快照）；无选区/密码框 → 空串。
+    return selected_text();
+  }
   return std::nullopt;
 }
 
@@ -168,7 +172,14 @@ auto Input::set_property(std::string_view name, std::string_view value) -> bool 
 }
 
 auto Input::property_names() const -> std::vector<std::string_view> {
+  // 只列**可读写**属性（契约见 `Element::property_names`）。
   return {"value", "placeholder", "password", "enabled", "visible"};
+}
+
+auto Input::readonly_property_names() const -> std::vector<std::string_view> {
+  // `selection` 只读（`get` 能读、`set` 不应生效）——与 TextArea / Terminal /
+  // CodeEditor 同一组名字，自动化可用同一个判据。
+  return {"selection"};
 }
 
 // —— 动作面（与 `TextArea` 对齐）——
@@ -187,12 +198,26 @@ auto Input::invoke_action(std::string_view action, std::string_view argument) ->
     activate();
     return true;
   }
+  if (action == "select_all") {
+    if (password_) return true;   // 密码框不做选区
+    select_anchor_ = 0U;
+    cursor_ = text_.size();
+    mark_dirty();
+    return true;
+  }
+  if (action == "clear_selection") {
+    clear_selection();
+    mark_dirty();
+    return true;
+  }
   if (action == "copy") {
-    // 单行框无选区概念（只有 cursor_，无 anchor_）：复制即全文。
+    // 有选区 → 拷选区；无选区 → 保持旧语义（拷全文，兼容既有调用方）。
     // 密码框拒绝：把真实文本写进剪贴板等于把密码泄露到任何能读剪贴板的地方。
     // 空文本/无宿主 → false（如实上报，不假装成功）。
-    if (password_ || text_.empty() || host() == nullptr) return false;
-    return host()->host_set_clipboard_text(text_);
+    if (password_ || host() == nullptr) return false;
+    const std::string text = has_selection() ? selected_text() : text_;
+    if (text.empty()) return false;
+    return host()->host_set_clipboard_text(text);
   }
   return Element::invoke_action(action, argument);
 }
@@ -218,14 +243,18 @@ auto Input::display_text() const -> std::string {
 }
 
 auto Input::cursor_x(const RenderContext& context) const -> float {
+  return index_to_x(context, cursor_);
+}
+
+auto Input::index_to_x(const RenderContext& context, std::size_t text_index) const -> float {
   const TextPort& port = text_port_of(context);
   const std::string shown = display_text();
-  // 掩码串与原文码点数一致，按码点推进即可定位光标显示位置。
+  // 掩码串与原文码点数一致，按码点推进即可定位显示位置。
   std::size_t shown_index = 0;
-  std::size_t text_index = 0;
-  while (text_index < cursor_ && shown_index < shown.size()) {
+  std::size_t walk = 0;
+  while (walk < text_index && shown_index < shown.size() && walk < text_.size()) {
     shown_index = utf8_next(shown, shown_index);
-    text_index = utf8_next(text_, text_index);
+    walk = utf8_next(text_, walk);
   }
   const float advance = port.measure_width(std::string_view(shown).substr(0, shown_index),
                                           style_.font_size);
@@ -319,6 +348,19 @@ void Input::paint_content(const RenderContext& context, raster::Surface& canvas)
   }
 
   canvas.push_clip_rect(box);
+  // —— 选区高亮（2026-10-14）——
+  // 画在文本**之下**，且用与光标同一套「字节索引 → x」映射（`index_to_x`）——
+  // 两处各算一份必然错位（掩码串与原文的索引对齐已经在那边处理过了）。
+  // 垂直方向与光标一致（行框内居中），保证“高亮包住字”而不是贴着行底。
+  if (usable && has_selection() && !password_) {
+    const auto [from, to] = ordered_selection();
+    const float x0 = index_to_x(context, from);
+    const float x1 = index_to_x(context, to);
+    const float band_h = std::min(line, box.height);
+    const math::Rect band{std::min(x0, x1), box.y + (box.height - band_h) * 0.5f, x1 - x0,
+                          band_h};
+    canvas.fill_rect(band, raster::Paint::solid(colors.selection), k_cursor_radius);
+  }
   if (shown.empty()) {
     if (!placeholder_.empty()) {
       port.draw(canvas, port.ellipsize(placeholder_, size, box.width),
@@ -339,17 +381,70 @@ void Input::paint_content(const RenderContext& context, raster::Surface& canvas)
 
 auto Input::handle_key(const Event& event) -> bool {
   const std::string& key = event.key;
-  // Ctrl+C：复制全文（2026-10-12——单行框此前连键盘复制都没有：选中只能看
-  // （它根本没有选区），想拿文本只能靠控制通道 get）。Ctrl+V 粘贴不做：
-  // 单行框无选区，粘贴语义（替换选中）无从谈起，且与宿主快捷键冲突面大。
-  if ((event.ctrl || event.meta) && (key == "c" || key == "C")) {
+  const bool ctrl = event.ctrl || event.meta;
+  const bool shift = event.shift;
+  // —— 剪贴板与全选（2026-10-14：从“整框复制”升级到**选区语义**）——
+  if (ctrl && (key == "c" || key == "C")) {
+    // 有选区 → 拷选区；无选区 → 保持旧语义（拷全文，兼容既有调用方）。
     return invoke_action("copy", {});
   }
-  if (key == "Enter") {
-    if (on_submit) on_submit(text_);
+  if (ctrl && (key == "x" || key == "X")) {
+    // 剪切：密码框拒绝（与 copy 同一安全边界）。
+    if (password_) return true;
+    if (!has_selection()) return true;   // 无选区：无事发生（不删全框）
+    if (host() != nullptr) {
+      const std::string picked = selected_text();
+      if (!picked.empty()) (void)host()->host_set_clipboard_text(picked);
+    }
+    (void)erase_selection();
     return true;
   }
+  if (ctrl && (key == "a" || key == "A")) {
+    if (password_) return true;   // 密码框不做选区
+    select_anchor_ = 0U;
+    cursor_ = text_.size();
+    mark_dirty();
+    return true;
+  }
+  // —— 移动（Shift = 扩选）——
+  // 扩选的核心：**不动锚点**，只移光标（`cursor_` 就是“焦点端”）。
+  // 首次按 Shift+方向键时若还没有锚点，就把当前光标当作锚点（从当前位置开始扩）。
+  const auto extend = [this, shift]() {
+    if (shift && select_anchor_ == kNoSelection) select_anchor_ = cursor_;
+    if (!shift) select_anchor_ = kNoSelection;   // 无 Shift 的移动 = 收起选区
+  };
+  if (key == "ArrowLeft") {
+    if (has_selection() && !shift) {
+      // 有选区且无 Shift → 光标跳到**选区左端**（浏览器行为），而不是左移一格。
+      cursor_ = ordered_selection().first;
+      select_anchor_ = kNoSelection;
+    } else {
+      extend();
+      cursor_ = cursor_ > 0 ? utf8_prev(text_, cursor_) : 0;
+    }
+    mark_dirty();
+    return true;
+  }
+  if (key == "ArrowRight") {
+    if (has_selection() && !shift) {
+      cursor_ = ordered_selection().second;
+      select_anchor_ = kNoSelection;
+    } else {
+      extend();
+      cursor_ = std::min(utf8_next(text_, cursor_), text_.size());
+    }
+    mark_dirty();
+    return true;
+  }
+  if (key == "Home" || key == "End") {
+    extend();
+    cursor_ = key == "Home" ? 0U : text_.size();
+    mark_dirty();
+    return true;
+  }
+  // —— 删除（有选区时先删选区，这是通行行为）——
   if (key == "Backspace") {
+    if (erase_selection()) return true;
     if (cursor_ > 0) {
       const std::size_t start = utf8_prev(text_, cursor_);
       text_.erase(start, cursor_ - start);
@@ -359,6 +454,7 @@ auto Input::handle_key(const Event& event) -> bool {
     return true;
   }
   if (key == "Delete") {
+    if (erase_selection()) return true;
     if (cursor_ < text_.size()) {
       const std::size_t end = utf8_next(text_, cursor_);
       text_.erase(cursor_, end - cursor_);
@@ -366,24 +462,8 @@ auto Input::handle_key(const Event& event) -> bool {
     }
     return true;
   }
-  if (key == "ArrowLeft") {
-    cursor_ = cursor_ > 0 ? utf8_prev(text_, cursor_) : 0;
-    mark_dirty();
-    return true;
-  }
-  if (key == "ArrowRight") {
-    cursor_ = std::min(utf8_next(text_, cursor_), text_.size());
-    mark_dirty();
-    return true;
-  }
-  if (key == "Home") {
-    cursor_ = 0;
-    mark_dirty();
-    return true;
-  }
-  if (key == "End") {
-    cursor_ = text_.size();
-    mark_dirty();
+  if (key == "Enter") {
+    if (on_submit) on_submit(text_);
     return true;
   }
   return false;
@@ -392,26 +472,145 @@ auto Input::handle_key(const Event& event) -> bool {
 auto Input::on_event(const RenderContext& context, Event& event) -> bool {
   if (!enabled()) return false;
   switch (event.kind) {
-    case EventKind::MouseDown:
-    case EventKind::MouseUp:
-    case EventKind::Click:
+    case EventKind::MouseDown: {
+      if (event.button != 1) return false;
+      const std::size_t hit = index_at_x(context, event.position.x);
+      // —— 连击判定（双击选词 / 三击整行）——
+      // 时间取自 `RenderContext::time_seconds`（事件不带时间戳）。
+      const std::int64_t now_ms = static_cast<std::int64_t>(context.time_seconds * 1000.0);
+      const bool near = std::abs(event.position.x - last_click_x_) < 6.0f;
+      const bool chained = last_click_ms_ >= 0 && (now_ms - last_click_ms_) < 500 && near;
+      click_streak_ = chained ? std::min(click_streak_ + 1, 3) : 1;
+      last_click_ms_ = now_ms;
+      last_click_x_ = event.position.x;
+
+      if (password_) {
+        // 密码框：只有光标，没有选区（连双击也不给）。
+        cursor_ = hit;
+        select_anchor_ = kNoSelection;
+        selecting_ = false;
+        mark_dirty();
+        return true;
+      }
+      if (click_streak_ == 2) {
+        // 双击：选中该位置的**词**（词界由公共算法给）。
+        const auto [begin, end] = components_internal::word_range_at(text_, hit);
+        select_anchor_ = begin;
+        cursor_ = end;
+        selecting_ = false;
+        mark_dirty();
+        return true;
+      }
+      if (click_streak_ == 3) {
+        // 三击：整行（编辑框通行行为）。
+        select_anchor_ = 0U;
+        cursor_ = text_.size();
+        selecting_ = false;
+        mark_dirty();
+        return true;
+      }
+      // 单击：Shift = 扩展已有选区（保留锚点），否则重新开始拖选。
+      if (event.shift && select_anchor_ != kNoSelection) {
+        cursor_ = hit;
+        selecting_ = false;
+      } else {
+        cursor_ = hit;
+        select_anchor_ = hit;   // 锚点 = 按下处（拖了才有非空选区）
+        selecting_ = true;
+      }
+      mark_dirty();
+      return true;
+    }
+    case EventKind::MouseMove: {
+      if (!selecting_) return false;
       cursor_ = index_at_x(context, event.position.x);
       mark_dirty();
       return true;
-    case EventKind::KeyDown:
-      return handle_key(event);
+    }
+    case EventKind::MouseUp:
+      selecting_ = false;
+      return true;
+    case EventKind::Click: {
+      // `Click` 与 `MouseDown` 可能同名事件重复送入：不重复做连击计数。
+      return true;
+    }
+    case EventKind::KeyDown: return handle_key(event);
     case EventKind::TextInput:
       if (event.text.empty()) return false;
-      insert_text(event.text);
+      insert_text(event.text);   // 走 `replace_selection_with`：有选区就替换
       return true;
     default: return false;
   }
 }
 
 void Input::insert_text(std::string_view inserted) {
+  // **所有文本插入的唯一入口**（包括输入法）：有选区时**替换**，否则插入。
+  // 为什么收敛到一个函数：旧实现直接 `text_.insert(cursor_, …)`，于是“有选区时
+  // 打字应该覆盖选中”这个通行行为会在好几处（`TextInput`、粘贴、补全）各写一遍，
+  // 漏一处就是一个难查的行为不一致。
+  replace_selection_with(inserted);
+}
+
+void Input::replace_selection_with(std::string_view inserted) {
+  if (has_selection()) {
+    const auto [from, to] = ordered_selection();
+    text_.erase(from, to - from);
+    cursor_ = from;
+    clear_selection();
+  }
   text_.insert(cursor_, inserted);
   cursor_ += inserted.size();
   notify_change();
+}
+
+auto Input::ordered_selection() const -> std::pair<std::size_t, std::size_t> {
+  if (select_anchor_ == kNoSelection) return {cursor_, cursor_};
+  const std::size_t a = std::min(select_anchor_, cursor_);
+  const std::size_t b = std::max(select_anchor_, cursor_);
+  return {std::min(a, text_.size()), std::min(b, text_.size())};
+}
+
+auto Input::has_selection() const -> bool {
+  // 密码框不做选区（连“看起来有选区”也不做：那会诱使用户以为能拷）。
+  if (password_) return false;
+  const auto [from, to] = ordered_selection();
+  return to > from;
+}
+
+auto Input::selection() const -> std::pair<std::size_t, std::size_t> {
+  if (!has_selection()) return {cursor_, cursor_};
+  return ordered_selection();
+}
+
+auto Input::selected_text() const -> std::string {
+  // 密码框：空（不给绕过掩码取明文的口子）。
+  if (password_ || !has_selection()) return {};
+  const auto [from, to] = ordered_selection();
+  return text_.substr(from, to - from);
+}
+
+void Input::set_selection(std::size_t anchor, std::size_t focus) {
+  // 两端都夹到**码点边界**与文本长度内（否则会切出半个 UTF-8 序列）。
+  const auto clamp_index = [this](std::size_t index) -> std::size_t {
+    const std::size_t bounded = std::min(index, text_.size());
+    std::size_t pos = bounded;
+    // 向后退到最近的码点边界（续字节 `10xxxxxx` 就继续退）。
+    while (pos > 0U && (static_cast<unsigned char>(text_[pos]) & 0xC0U) == 0x80U) --pos;
+    return pos;
+  };
+  select_anchor_ = clamp_index(anchor);
+  cursor_ = clamp_index(focus);
+  mark_dirty();
+}
+
+auto Input::erase_selection() -> bool {
+  if (!has_selection()) return false;
+  const auto [from, to] = ordered_selection();
+  text_.erase(from, to - from);
+  cursor_ = from;
+  clear_selection();
+  notify_change();
+  return true;
 }
 
 void Input::notify_change() {
@@ -543,6 +742,27 @@ auto TextArea::index_at_point(const RenderContext& context, math::Point point) c
   return target.begin + column;
 }
 
+/// 给定**字节索引** → 屏幕坐标（选区高亮每行两端用它）。
+///
+/// 与 `index_at_point` **同源**（同一份 `layout_lines` + 同一行高 + 同一 `scroll_`）：
+/// 两处口径不一致会出现“点得到、高亮不上”这类难查的偏差。
+auto TextArea::index_to_point(const RenderContext& context, std::size_t index) const
+    -> math::Point {
+  const math::Rect box = inner_box(context);
+  const TextPort& port = text_port_of(context);
+  const std::vector<Line> lines = layout_lines(context, box.width);
+  if (lines.empty()) return math::Point{box.x, box.y};
+  const std::size_t row = row_of(lines, index);
+  const Line& target = lines[row];
+  const std::size_t offset = index <= target.begin ? 0U
+                            : std::min(index, target.end) - target.begin;
+  const std::string_view content =
+      std::string_view(text_).substr(target.begin, target.end - target.begin);
+  const float x = box.x + port.measure_width(content.substr(0, offset), style_.font_size);
+  const float y = box.y + static_cast<float>(row) * line_height(context) - scroll_;
+  return math::Point{x, y};
+}
+
 void TextArea::sync_scroll(const RenderContext& context) {
   const math::Rect box = inner_box(context);
   if (box.is_empty()) {
@@ -655,6 +875,35 @@ void TextArea::paint_content(const RenderContext& context, raster::Surface& canv
   const std::string_view whole{text_};
 
   canvas.push_clip_rect(box);
+  // —— 选区高亮（2026-10-14）——
+  // **逐行分段**：每行取该行内的选中区间，换算成像素跳度（不是整行矩形——
+  // 跨行选区若整行高亮，会让人以为多选了）。水平/垂直都用与光标同一套
+  // `index_to_point`，避免“高亮与文字错开”。
+  if (usable && has_selection()) {
+    const auto [from, to] = ordered_selection();
+    const float band_h = std::min(line, box.height);
+    for (std::size_t row = 0; row < lines.size(); ++row) {
+      const Line& entry = lines[row];
+      // 该行与选区交集（行尾位置也算端点，故用 `<=` 比较左端）。
+      const std::size_t seg_from = std::max(from, entry.begin);
+      const std::size_t seg_to = std::min(to, entry.end);
+      if (seg_to < seg_from) continue;
+      if (seg_to == seg_from && from != to) {
+        // 空行/行尾的零宽区段：给一个窄标记，让“选到了换行”可见。
+        const math::Point at = index_to_point(context, seg_from);
+        if (at.y + band_h < box.y || at.y > box.bottom()) continue;
+        canvas.fill_rect(math::Rect{at.x, at.y, std::max(k_cursor_width, 2.0f), band_h},
+                         raster::Paint::solid(colors.selection));
+        continue;
+      }
+      if (seg_to == seg_from) continue;
+      const math::Point head = index_to_point(context, seg_from);
+      const math::Point tail = index_to_point(context, seg_to);
+      if (head.y + band_h < box.y || head.y > box.bottom()) continue;
+      const math::Rect band{head.x, head.y, std::max(tail.x - head.x, 1.0f), band_h};
+      canvas.fill_rect(band, raster::Paint::solid(colors.selection));
+    }
+  }
   if (text_.empty() && !placeholder_.empty()) {
     port.draw(canvas, port.ellipsize(placeholder_, size, box.width),
               math::Point{box.x, box.y}, size, colors.text_faint);
@@ -698,12 +947,66 @@ void TextArea::paint_content(const RenderContext& context, raster::Surface& canv
 }
 
 void TextArea::insert_text(std::string_view inserted) {
+  // **所有文本插入的唯一入口**：只读模式忽略，有选区则**替换**。
+  if (read_only_) return;
+  replace_selection_with(inserted);
+}
+
+void TextArea::replace_selection_with(std::string_view inserted) {
+  if (read_only_) return;
+  if (has_selection()) {
+    const auto [from, to] = ordered_selection();
+    text_.erase(from, to - from);
+    cursor_ = from;
+    clear_selection();
+  }
   text_.insert(cursor_, inserted);
   cursor_ += inserted.size();
   notify_change();
 }
 
+auto TextArea::ordered_selection() const -> std::pair<std::size_t, std::size_t> {
+  if (select_anchor_ == kNoSelection) return {cursor_, cursor_};
+  const std::size_t a = std::min(select_anchor_, cursor_);
+  const std::size_t b = std::max(select_anchor_, cursor_);
+  return {std::min(a, text_.size()), std::min(b, text_.size())};
+}
+
+auto TextArea::has_selection() const -> bool {
+  const auto [from, to] = ordered_selection();
+  return to > from;
+}
+
+auto TextArea::selection() const -> std::pair<std::size_t, std::size_t> {
+  if (!has_selection()) return {cursor_, cursor_};
+  return ordered_selection();
+}
+
+auto TextArea::selected_text() const -> std::string {
+  if (!has_selection()) return {};
+  const auto [from, to] = ordered_selection();
+  return text_.substr(from, to - from);
+}
+
+void TextArea::set_selection(std::size_t anchor, std::size_t focus) {
+  select_anchor_ = snap_index(text_, anchor);
+  cursor_ = snap_index(text_, focus);
+  mark_dirty();
+}
+
+auto TextArea::erase_selection() -> bool {
+  if (!has_selection()) return false;
+  const auto [from, to] = ordered_selection();
+  text_.erase(from, to - from);
+  cursor_ = from;
+  clear_selection();
+  notify_change();
+  return true;
+}
+
 void TextArea::erase_backward() {
+  // 有选区时 Backspace 删选区（通行行为），而不是再向前删一个字符。
+  if (erase_selection()) return;
   if (cursor_ == 0) return;
   const std::size_t start = utf8_prev(text_, cursor_);
   text_.erase(start, cursor_ - start);
@@ -712,6 +1015,7 @@ void TextArea::erase_backward() {
 }
 
 void TextArea::erase_forward() {
+  if (erase_selection()) return;
   if (cursor_ >= text_.size()) return;
   const std::size_t end = utf8_next(text_, cursor_);
   text_.erase(cursor_, end - cursor_);
@@ -726,13 +1030,64 @@ void TextArea::notify_change() {
 auto TextArea::on_event(const RenderContext& context, Event& event) -> bool {
   if (!enabled()) return false;
   switch (event.kind) {
-    case EventKind::MouseDown:
-    case EventKind::MouseUp:
-    case EventKind::Click:
-      cursor_ = index_at_point(context, event.position);
+    case EventKind::MouseDown: {
+      if (event.button != 1) return false;
+      const std::size_t hit = index_at_point(context, event.position);
+      // 连击判定（双击选词 / 三击选当前行），时间取自 `RenderContext`。
+      const std::int64_t now_ms = static_cast<std::int64_t>(context.time_seconds * 1000.0);
+      const bool near = std::abs(event.position.x - last_click_x_) < 6.0f;
+      const bool chained = last_click_ms_ >= 0 && (now_ms - last_click_ms_) < 500 && near;
+      click_streak_ = chained ? std::min(click_streak_ + 1, 3) : 1;
+      last_click_ms_ = now_ms;
+      last_click_x_ = event.position.x;
+
+      if (click_streak_ == 2) {
+        // 双击选词（词界由公共算法给；`\n` 不是词字符，所以不会越行）。
+        const auto [begin, end] = components_internal::word_range_at(text_, hit);
+        select_anchor_ = begin;
+        cursor_ = end;
+        selecting_ = false;
+        sync_scroll(context);
+        mark_dirty();
+        return true;
+      }
+      if (click_streak_ == 3) {
+        // 三击选**当前行**（多行编辑框的通行行为：选一段而不是整篇）。
+        const std::vector<Line> lines = layout_lines(context, inner_box(context).width);
+        const std::size_t row = row_of(lines, hit);
+        if (row < lines.size()) {
+          select_anchor_ = lines[row].begin;
+          cursor_ = lines[row].end;
+        }
+        selecting_ = false;
+        sync_scroll(context);
+        mark_dirty();
+        return true;
+      }
+      // Shift+点击：扩展已有选区；否则重新开始拖选。
+      if (event.shift && select_anchor_ != kNoSelection) {
+        cursor_ = hit;
+        selecting_ = false;
+      } else {
+        cursor_ = hit;
+        select_anchor_ = hit;
+        selecting_ = true;
+      }
       sync_scroll(context);
       mark_dirty();
       return true;
+    }
+    case EventKind::MouseMove: {
+      if (!selecting_) return false;
+      cursor_ = index_at_point(context, event.position);
+      mark_dirty();
+      return true;
+    }
+    case EventKind::MouseUp:
+      selecting_ = false;
+      return true;
+    case EventKind::Click:
+      return true;   // 与 MouseDown 不重复连击计数
     case EventKind::Wheel:
       scroll_ = scroll_ - event.wheel_delta;
       sync_scroll(context);
@@ -747,15 +1102,39 @@ auto TextArea::on_event(const RenderContext& context, Event& event) -> bool {
       return true;
     case EventKind::KeyDown: {
       const std::string& key = event.key;
-      // Ctrl+C：复制全文（只读展示也能复制——那正是只读展示的商频场景）。
-      if ((event.ctrl || event.meta) && (key == "c" || key == "C")) {
+      const bool ctrl = event.ctrl || event.meta;
+      const bool shift = event.shift;
+      // Ctrl+C：有选区 → 拷选区；无选区 → 拷全文（只读展示也能复制）。
+      if (ctrl && (key == "c" || key == "C")) {
         return invoke_action("copy", {});
+      }
+      // Ctrl+X / Ctrl+A：与 `Input` 同一组语义（只读下不剪切）。
+      if (ctrl && (key == "x" || key == "X")) {
+        if (read_only_ || !has_selection()) return true;
+        if (host() != nullptr) {
+          const std::string picked = selected_text();
+          if (!picked.empty()) (void)host()->host_set_clipboard_text(picked);
+        }
+        (void)erase_selection();
+        return true;
+      }
+      if (ctrl && (key == "a" || key == "A")) {
+        select_anchor_ = 0U;
+        cursor_ = text_.size();
+        sync_scroll(context);
+        mark_dirty();
+        return true;
       }
       // 编辑类按键在只读下**消费但不落字**（消费=不让它冒泡出去触发页面级快捷键；
       // 不落字=真的没改内容）。导航类按键（方向/Home/End/PageUp/PageDown）则照常。
       if (read_only_) {
         if (key == "Enter" || key == "Backspace" || key == "Delete") return true;
       }
+      // Shift = 扩选（不动锚点，只移光标）；无 Shift 的移动收起选区。
+      const auto extend = [this, shift]() {
+        if (shift && select_anchor_ == kNoSelection) select_anchor_ = cursor_;
+        if (!shift) select_anchor_ = kNoSelection;
+      };
       if (key == "Enter") {
         insert_text("\n");
         return true;
@@ -769,30 +1148,46 @@ auto TextArea::on_event(const RenderContext& context, Event& event) -> bool {
         return true;
       }
       if (key == "ArrowLeft") {
-        cursor_ = cursor_ > 0 ? utf8_prev(text_, cursor_) : 0;
+        if (has_selection() && !shift) {
+          cursor_ = ordered_selection().first;
+          select_anchor_ = kNoSelection;
+        } else {
+          extend();
+          cursor_ = cursor_ > 0 ? utf8_prev(text_, cursor_) : 0;
+        }
         sync_scroll(context);
         mark_dirty();
         return true;
       }
       if (key == "ArrowRight") {
-        cursor_ = std::min(utf8_next(text_, cursor_), text_.size());
+        if (has_selection() && !shift) {
+          cursor_ = ordered_selection().second;
+          select_anchor_ = kNoSelection;
+        } else {
+          extend();
+          cursor_ = std::min(utf8_next(text_, cursor_), text_.size());
+        }
         sync_scroll(context);
         mark_dirty();
         return true;
       }
       if (key == "ArrowUp") {
+        extend();
         move_vertical(context, -1);
         return true;
       }
       if (key == "ArrowDown") {
+        extend();
         move_vertical(context, 1);
         return true;
       }
       if (key == "Home") {
+        extend();
         move_to_line_edge(context, false);
         return true;
       }
       if (key == "End") {
+        extend();
         move_to_line_edge(context, true);
         return true;
       }
@@ -837,6 +1232,7 @@ auto TextArea::get_property(std::string_view name) const -> std::optional<std::s
   if (name == "cursor_index") return std::format("{}", cursor_);
   if (name == "scroll_offset") return std::format("{:.1f}", static_cast<double>(scroll_));
   if (name == "read_only") return read_only_ ? "true" : "false";
+  if (name == "selection") return selected_text();
   return std::nullopt;
 }
 
@@ -878,6 +1274,10 @@ auto TextArea::property_names() const -> std::vector<std::string_view> {
   return {"value", "text", "placeholder", "cursor_index", "scroll_offset", "read_only"};
 }
 
+auto TextArea::readonly_property_names() const -> std::vector<std::string_view> {
+  return {"selection"};
+}
+
 auto TextArea::invoke_action(std::string_view action, std::string_view argument) -> bool {
   if (action == "clear") {
     set_text({});
@@ -887,11 +1287,25 @@ auto TextArea::invoke_action(std::string_view action, std::string_view argument)
     activate();
     return true;
   }
+  // —— 文本选择（2026-10-14）与 `Input` 同一组动作名 ——
+  if (action == "select_all") {
+    select_anchor_ = 0U;
+    cursor_ = text_.size();
+    mark_dirty();
+    return true;
+  }
+  if (action == "clear_selection") {
+    clear_selection();
+    mark_dirty();
+    return true;
+  }
   if (action == "copy") {
-    // 多行域同样无选区概念（光标无 anchor）：复制即全文。
-    // 空文本/无宿主 → false。只读不拦：只读展示恰恰是复制的商频场景。
-    if (text_.empty() || host() == nullptr) return false;
-    return host()->host_set_clipboard_text(text_);
+    // 有选区 → 拷选区；无选区 → 拷全文（兼容既有调用方）。
+    // 只读不拦：只读展示恰恰是复制的商频场景。
+    if (host() == nullptr) return false;
+    const std::string text = has_selection() ? selected_text() : text_;
+    if (text.empty()) return false;
+    return host()->host_set_clipboard_text(text);
   }
   return Element::invoke_action(action, argument);
 }
