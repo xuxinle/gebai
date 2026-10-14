@@ -226,6 +226,15 @@ class MarkdownView : public Element {
     GroupKind group{GroupKind::None};
     math::Rect group_rect{};   ///< 组矩形（代码块/引用块）
     bool group_first{false};   ///< 组内首行：背景/边框/语言标签在此行绘制一次
+    /// 本组**首行的下标**（`group_first` 行的下标；非组行等于自身）。
+    ///
+    /// 为何要它（2026-10-14，实测修的一个**漏画**）：`paint_content` 现在用二分只遍历
+    /// 「与视口相交的行」。而组背景画在**组首行**那次绘制里——当组首行已滚到视口上方时，
+    /// 它不在区间内，背景就**整块不画**（实测：40 行代码块滚到中段后 code_bg 像素 = 0，
+    /// 而非白像素也是 0，即整屏全空）。
+    ///
+    /// 有了这个下标，区间内的任一行都能拿到“本组首行”，从而在它落在区间外时补画。
+    std::size_t group_head_row{0};
     std::string language{};    ///< 代码块语言标签
     math::Rect marker{};       ///< 项目符号区域（无序圆点/有序序号/任务框）
     bool marker_dot{false};

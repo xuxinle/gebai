@@ -217,3 +217,50 @@ ST_TEST(md_visible_range_is_safe_when_empty) {
   ST_CHECK_EQ(first, std::size_t{0});
   ST_CHECK_EQ(last, std::size_t{1});
 }
+
+/// **组背景跨越视口上边界时必须画** —— 二分引入的一处真实漏画的护栏（2026-10-14）。
+///
+/// 背景画在**组首行**那次绘制里；二分只遍历与视口相交的行，于是当组首行已滚到
+/// 视口上方时它不在区间内——背景**整块不画**（实测：40 行代码块滚到中段后
+/// `code_bg` 像素 = 0，且**非白像素也是 0**，即整个视口全空）。
+///
+/// 这条**只能用像素断言**（用“画了哪些行”测不到背景）：背景是 `paint_group` 里
+/// 一次 `fill_rect_shape`，不经过 `TextPort::draw`。
+ST_TEST(md_code_block_background_survives_scrolling) {
+  Fixture fixture;
+  // 一段正文 + 一个 40 行的代码块（组跨多屏，必然出现“首行在视口上方”的滚动位置）。
+  std::string markdown = "intro\n\n```cpp\n";
+  for (int line = 0; line < 40; ++line) {
+    markdown += "int code_line_" + std::to_string(line) + " = 1;\n";
+  }
+  markdown += "```\n\ntail\n";
+
+  MarkdownView view;
+  view.set_markdown(markdown);
+  (void)fixture.paint(view);  // 先排一次拿到 content_height
+
+  const st::math::Color code_bg = fixture.theme.colors().code_bg;
+  const auto count_code_bg = [&]() -> std::size_t {
+    std::size_t hits = 0;
+    for (int y = 0; y < kCanvasHeight; ++y) {
+      for (int x = 0; x < kCanvasWidth; ++x) {
+        const st::math::Color pixel = fixture.canvas.pixel_at(x, y);
+        if (pixel.r == code_bg.r && pixel.g == code_bg.g && pixel.b == code_bg.b) ++hits;
+      }
+    }
+    return hits;
+  };
+
+  // ① 视口在顶部（组首行可见）：背景必须画。
+  const std::size_t at_top = count_code_bg();
+  ST_CHECK(at_top > 0U);
+
+  // ② 滚到代码块中段（组首行**在视口上方**）：背景仍必须画。
+  view.scroll_to(view.content_height() * 0.55F);
+  (void)fixture.paint(view);
+  const auto [first, last] = view.visible_row_range_now();
+  ST_CHECK(first > 0U);  // 确实滚过去了（首行已不可见）
+  ST_CHECK(last < view.row_count());
+  const std::size_t at_middle = count_code_bg();
+  ST_CHECK(at_middle > 0U);  // ← 这条守的就是那个漏画
+}

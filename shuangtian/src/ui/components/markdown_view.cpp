@@ -863,6 +863,8 @@ void MarkdownView::append_code_block(const st::md::Block& block, const RenderCon
   const math::Rect group{frame.indent, top, box_width, bottom - top};
   for (std::size_t index = first_row; index < rows_.size(); ++index) {
     rows_[index].group_rect = group;
+    // 每行记住**本组首行**：二分跳过组首行时，区间内的行要能把它找回来补画背景。
+    rows_[index].group_head_row = first_row;
   }
   Row& head = rows_[first_row];
   head.group_first = true;
@@ -976,10 +978,13 @@ void MarkdownView::append_quote(const st::md::Block& block, const RenderContext&
   append_blocks(block.children, context, inner, y);
   y += kQuotePadY;
   if (rows_.size() > first_row) {
-    Row& head = rows_[first_row];
-    head.group = GroupKind::Quote;
-    head.group_rect = math::Rect{frame.indent, top, std::max(frame.avail, kMinTextWidth), y - top};
-    head.group_first = true;
+    for (std::size_t index = first_row; index < rows_.size(); ++index) {
+      rows_[index].group = GroupKind::Quote;
+      rows_[index].group_rect =
+          math::Rect{frame.indent, top, std::max(frame.avail, kMinTextWidth), y - top};
+      rows_[index].group_head_row = first_row;
+    }
+    rows_[first_row].group_first = true;
   } else {
     y = top;  // 空引用不占位
   }
@@ -1661,22 +1666,31 @@ void MarkdownView::paint_content(const RenderContext& context, raster::Surface& 
     const Row& row = rows_[row_index];
     const math::Rect box =
         math::Rect{row.box.x + origin.x, row.box.y + origin.y, row.box.width, row.box.height};
+    // —— 组背景（代码块/引用块）——
+    //
+    // 组背景跨**整组**，但只画一次（在组首行那次）。而二分后区间可能**不包含组首行**
+    // （它已滚到视口上方），所以这里要按「本组首行是否在区间内」分两种情况：
+    //
+    // | 情形 | 本组首行位置 | 该怎么办 |
+    // |---|---|---|
+    // | ① | 在区间**内** | 它自己会走到，在这里不要重复画（否则两遍） |
+    // | ② | 在区间**前**（滚过去了） | 本行就是可见的组内行 → **必须在这里补画** |
+    // | ③ | 在区间**后** | 不可能（本行可见 ⇐ 首行在它之前） |
+    //
+    // 为何要这层「首行下标」而不能只看 `group_first`（**实测踩到的漏画**，2026-10-14）：
+    // 改成二分后，40 行代码块滚到中段时区间是 `[18, 34)`，而组首行是第 2 行——
+    // 它不在区间里，于是背景**整块不画**（实测 code_bg 像素 = 0，且**非白像素也是 0**，
+    // 即整个视口全空）。这个漏画是**加二分那一步引入的**，不是旧代码就有的。
+    //
+    // 反过来，若简单地把“组首行必定在区间外”当成前提去掉判据（退回“永不剔除”），
+    // 则远处 4000 个屏幕外组的首行都会建 `Path` + `stroke_path`——那正是
+    // 4000 段 13.463 ms 的来源（见 `tools/ui_rich_views_bench.cpp`）。两者都要防住。
     if (row.group_first) {
-      // 组背景跨**整组**：判据必须是「**组矩形**是否与视口相交」，而不是
-      // 「组首行是否可见」——两种情形都真实存在：
-      //   ① 组首行在视口上方（已滚过），组体还延伸到视口里 → 必须画；
-      //   ② 整组都在视口外（远处下方的第 4000 个代码块）→ **不该画**。
-      //
-      // 为何这是个真缺陷（2026-10-14，实测）：旧条件只写了 `outside && !group_first`
-      // 就把组首行豁免掉了，于是**每个屏幕外组的首行都会调 `paint_group`**——
-      // 而它会建 `Path` + `stroke_path`（圆角描边），是每帧成本的主体。
-      // 量尺实测（`tools/ui_rich_views_bench.cpp`，稳态帧）：
-      //   500 段 1.894 ms · 1500 段 4.949 ms · **4000 段 13.463 ms**（线性）
-      // 而把判据换成组矩形相交后：0.365 / 0.374 / **0.372 ms**（与内容量无关）。
-      const math::Rect group_view = row.group_rect.offset(origin.x, origin.y);
-      if (!group_view.intersect(bounds_).is_empty()) {
-        paint_group(context, canvas, row, origin);
-      }
+      // 情形 ①：首行自己在区间内 → 就由它画（本帧只画这一次）。
+      paint_group(context, canvas, row, origin);
+    } else if (row.group != GroupKind::None && row.group_head_row < first_visible) {
+      // 情形 ②：本组的首行在区间之前（已滚过），而本行可见 → 由本行补画背景。
+      paint_group(context, canvas, rows_[row.group_head_row], origin);
     }
     const bool row_clip = !row.clip.is_empty();
     const math::Rect clip =
