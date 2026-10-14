@@ -1230,7 +1230,7 @@ auto TextArea::get_property(std::string_view name) const -> std::optional<std::s
   if (name == "value" || name == "text") return text_;
   if (name == "placeholder") return placeholder_;
   if (name == "cursor_index") return std::format("{}", cursor_);
-  if (name == "scroll_offset") return std::format("{:.1f}", static_cast<double>(scroll_));
+  if (name == "scroll") return std::format("{:.1f}", static_cast<double>(scroll_));
   if (name == "read_only") return read_only_ ? "true" : "false";
   if (name == "selection") return selected_text();
   return std::nullopt;
@@ -1257,7 +1257,7 @@ auto TextArea::set_property(std::string_view name, std::string_view value) -> bo
     set_cursor_index(static_cast<std::size_t>(*parsed));
     return true;
   }
-  if (name == "scroll_offset" || name == "scroll") {
+  if (name == "scroll") {
     const auto parsed = st::parse_f64(value);
     if (!parsed.has_value()) return false;
     set_scroll_offset(static_cast<float>(*parsed));
@@ -1271,7 +1271,7 @@ auto TextArea::set_property(std::string_view name, std::string_view value) -> bo
 }
 
 auto TextArea::property_names() const -> std::vector<std::string_view> {
-  return {"value", "text", "placeholder", "cursor_index", "scroll_offset", "read_only"};
+  return {"value", "text", "placeholder", "cursor_index", "scroll", "read_only"};
 }
 
 auto TextArea::readonly_property_names() const -> std::vector<std::string_view> {

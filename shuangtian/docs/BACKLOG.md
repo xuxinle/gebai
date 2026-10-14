@@ -3652,6 +3652,82 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
 
 ## 已完成（本轮「全部优化」落地，备查）
 
+### 两类「结构性缺陷」的主动排查：输入方向 + 缺省值即歧义值 —— 2026-10-14
+
+上一轮修的两处（滚轮方向、`--renderer auto`）都是**测试永远抓不到、只能靠人发现**的类型，
+所以这一轮按同一思路**主动把两类扫完**。
+
+#### A 类：输入方向/符号语义
+
+**排查方式**：枚举全库 `wheel_delta` 使用点 + 拖拽/缩放方向，逐个判定是否符合约定。
+
+结论：**方向语义目前全部一致**（下表）。三处非“内容偏移”类的也符合标准约定：
+
+| 类型 | 组件 | 约定 | 判定 |
+|---|---|---|---|
+| 纵向滚动 | ScrollView / MarkdownView / MergeView / FileDialog / CompletionPopup / Input / Tabs / Table(Shift) / CodeEditor / Terminal | 向下滚（delta<0）→ offset 变大 | ✅ |
+| 缩放 | Viewport / TimelineView（Ctrl+轮） | 上滚（delta>0）→ 放大 | ✅ 行业标准 |
+| 拖拽平移 | Viewport（中键） | “抓住内容拖”（drag_origin − 位移） | ✅ 行业标准 |
+
+**但发现两个真问题（都不是方向）**：
+
+**A-1：约定是全局的、测试是局部的。**
+方向约定只在 `scroll.cpp` 注释 + `ui_scroll_test.cpp` 的
+`scroll_view_wheel_direction_is_natural`（**只覆盖 `ScrollView`**）里存在。
+后果就是上一轮那两处 `+=` 各自测试全绿。
+
+→ 新增 `tests/ui_wheel_direction_contract_test.cpp`：**表驱动**，6 个纵向可滚动组件逐条验
+“向下滚必须让偏移变大”。表驱动的价值是**新增可滚动组件时漏测会被看见**。
+（不覆盖横向/缩放/终端——语义不同，在各自测试里断言；文件头写明了理由。）
+
+**A-2：滚动属性命名不统一。**
+`markdown_view`/`input`/`table` 用 `scroll_offset`，而多数组件用 `scroll`——
+同一件事两个名字，外部（控制通道/自动化/智能体）无法用同一句话问“你滚到哪了”。
+→ 统一为 `scroll`（`actions.cpp` 的通用可设集、`ui_table_test.cpp` 一并改），
+并在契约测试里加一条**命名统一性断言**（`property_names()` 必须含 `scroll`、不含 `scroll_offset`）。
+
+> 另：`Tree` 不进契约表——它**自身不处理滚轮**（`onEvent` 无 `Wheel`），由宿主 `ScrollView` 驱动；
+> 它的 `scroll` 属性是从绘制反推的（`first_visible × row_height`）。
+
+#### B 类：缺省值即歧义值
+
+**本仓自己已有权威判据**——`control.hpp` 里写着：
+
+> 为什么用 `optional` 而不是哨兵字符串：曾用 `std::string token{"\0"}` 当「自动生成」哨兵，
+> 但 `std::string` 从 `"\0"` 构造会**坍缩成空串**（遇 NUL 即止），于是「显式空串关闭鉴权」
+> 与「未设置」无法区分——鉴权测试当场抓住（无法关闭）。
+
+**同一文件里，只改了一半。** 紧邻的 `capture_dirs` 是：
+
+```cpp
+// 注释承诺：“空向量 = 禁止一切落盘（仍可 base64 回传）”
+std::vector<std::string> capture_dirs{};
+
+// 实现（server.cpp）：空 = 用默认白名单
+impl_->capture_dirs = options.capture_dirs.empty() ? options.default_capture_dirs()
+                                                  : options.capture_dirs;
+```
+
+⇒ **“想收紧到禁止落盘”会被静默扩成默认白名单（temp + exe 目录 + 控制文件目录）**——
+**安全语义的反向**（想变严却变松）。
+
+修法：改 `std::optional<std::vector<std::string>>`（与 `token` 同一形态）——
+`nullopt` = 用默认；**显式空向量 = 真禁止**。
+
+护栏 `capture_explicit_empty_whitelist_forbids_all_writes`，已反证（判据改回 `empty() ? 默认` 即红）。
+
+> ⚠ 已如实区分：当前内部调用方（`app.cpp`）并未传空向量，所以它是**潜伏**缺陷
+>（有注释承诺、测试也测不出）而非正在发作——但任何外部宿主/未来的开关都会踩到。
+
+**扫描过的、判定“不是缺陷”的**（口径：`auto`/`0` 是否有一个“写出来也达不到”的含义）：
+
+| 字段 | 缺省 | 判定 |
+|---|---|---|
+| `text_lcd` / `text_fit` / `text_gamma` / `ui_font_scale` … | `"auto"` | ✅ 未指定与显式 `auto` **结果相同**（都是“查 env 否则缺省”），无可达性差异 |
+| `jobs` / `jobs_large` | `0` | ✅ 文档化哨兵（`0` = 按内存预算推导，不是可用的并行度）；`--jobs` 无外部解析入口 |
+| `port` | `0` | ✅ 文档化（`0` = 内核分配，不是可绑定的端口） |
+| `log_level` / `profile` | `"info"` / `"debug"` | ✅ 枚举缺省，不存在“未指定”态 |
+
 ### 两个用户报的缺陷：滚轮方向反了 + `--renderer auto` 被静默吞掉 —— 2026-10-14
 
 #### ① 文件选择器滚轮方向反了（**同类共三处**）

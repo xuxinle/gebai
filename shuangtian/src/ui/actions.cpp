@@ -119,7 +119,7 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props)
   // 少数名字在部分元素上未被声明、但历史上一直可写：并集是"既消除分裂又不倒退"的做法。
   constexpr std::array<std::string_view, 9> kGenericSettable{
       "checked", "selected", "value", "text", "label", "icon", "options", "active",
-      "scroll_offset"};
+      "scroll"};
   // 布局属性（容器通用，任何元素可设；落到 `Style` 并标脏布局）：声明式 UI 的
   // Row/Column 与手搭代码/协议 `set` 共用同一份布局语义——不另立旁路（不变式 2）。
   const auto apply_layout_property = [&element](const std::string& name,

@@ -488,7 +488,7 @@ auto Table::get_property(std::string_view name) const -> std::optional<std::stri
   if (name == "rows") return std::format("{}", rows_.size());
   if (name == "row_height") return std::format("{}", row_height_);
   if (name == "zebra") return std::string(zebra_ ? kFlagTrue : "false");
-  if (name == "scroll_offset") return std::format("{}", scroll_offset_);
+  if (name == "scroll") return std::format("{}", scroll_offset_);
   if (name == "max_scroll") return std::format("{}", max_scroll());
   // 视口契约（与 Tree/List 对齐）：首可见行来自**上一帧绘制**，不是恒 0。
   if (name == "first_visible") return std::format("{}", last_visible_first_);
@@ -532,7 +532,7 @@ auto Table::set_property(std::string_view name, std::string_view value) -> bool 
     set_zebra(*parsed);
     return true;
   }
-  if (name == "scroll_offset" || name == "scroll") {
+  if (name == "scroll") {
     const auto parsed = st::parse_f64(value);
     if (!parsed.has_value()) return false;
     set_scroll_offset(static_cast<float>(*parsed));
@@ -553,7 +553,7 @@ auto Table::set_property(std::string_view name, std::string_view value) -> bool 
 }
 
 auto Table::property_names() const -> std::vector<std::string_view> {
-  return {"columns", "rows", "row_height", "zebra", "scroll_offset", "max_scroll",
+  return {"columns", "rows", "row_height", "zebra", "scroll", "max_scroll",
           "selected_row", "value", "first_visible", "visible_rows"};
 }
 

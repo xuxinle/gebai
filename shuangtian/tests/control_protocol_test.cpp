@@ -193,7 +193,11 @@ struct ServerFixture {
   std::uint16_t port{0};
   std::string token{};
 
-  explicit ServerFixture(std::optional<std::string> token_override = std::nullopt) {
+  /// `capture_dirs_override`：传 `std::vector<std::string>{}`（显式空）表示
+  /// **禁止一切落盘**；`std::nullopt` = 未设置（用 `default_capture_dirs()`）。
+  explicit ServerFixture(std::optional<std::string> token_override = std::nullopt,
+                         std::optional<std::vector<std::string>> capture_dirs_override =
+                             std::nullopt) {
     host.root_.set_theme(st::ui::Theme::light());
     // 子节点必须在 **set_content 之前** 挂好：`set_content` 里的 `assign_ids` 会把根
     // 内容自身的 id 写成 "root"（与虚拟根同名），而 `UiRoot::find` 的遍历先查父后查子——
@@ -222,6 +226,7 @@ struct ServerFixture {
     options.port = 0;
     // 显式覆盖：给空串 = 关闭鉴权（与「未指定」区分）。
     if (token_override) options.token = *token_override;
+    if (capture_dirs_override.has_value()) options.capture_dirs = capture_dirs_override;
     auto started = server->start(options);
     ST_CHECK(started.has_value());
     if (started) port = *started;
@@ -511,6 +516,42 @@ ST_TEST(invoke_reaches_component_custom_actions) {
 
   // 而真正未实现的动作仍然如实报 handled=false（不假装成功）
   ST_CHECK(!invoke("code", "teleport"));
+}
+
+/// **显式空白名单 = 禁止一切落盘**（而不是"未设置→用宽松默认"）。
+///
+/// 这条守的是"缺省值即歧义值"型缺陷的一个真实实例（2026-10-14，与 `token` 同型）：
+///
+/// ```cpp
+/// // 旧写法（server.cpp）
+/// impl_->capture_dirs = options.capture_dirs.empty() ? options.default_capture_dirs()
+///                                                   : options.capture_dirs;
+/// ```
+///
+/// 而 `control.hpp` 的注释承诺的是「**空向量 = 禁止一切落盘**（仍可 base64 回传）」——
+/// 于是"想收紧到禁止落盘"会被静默扩成默认白名单（temp + exe 目录 + 控制文件目录）。
+/// 这是**安全语义的反向**。
+///
+/// 同文件上方的 `token` 早有同名问题（`std::string token{"\0"}` 坍缩成空串，
+/// "显式空串关闭鉴权"与"未设置"不可分）并已改成 `optional`——
+/// **同一个错写法在同一文件里只改了一半**。这条用例把另一半钉住。
+///
+/// 反向验证：把 `server.cpp` 的判据改回 `empty() ? 默认 : 显式`，本用例立刻变红。
+ST_TEST(capture_explicit_empty_whitelist_forbids_all_writes) {
+  // 显式空白名单 = 禁止落盘。用既有 fixture（它自带 poll 泵）。
+  ServerFixture fx{std::nullopt, std::vector<std::string>{}};
+  Probe probe(fx.port, fx.token);
+  ST_REQUIRE(probe.call("hello").value("ok", false));
+
+  // 连"落在默认白名单里"的路径也必须被拒——那正是旧写法会放行的东西。
+  const auto dir = st::fs::make_temp_dir("st-capture-deny");
+  ST_REQUIRE(dir.has_value());
+  Json params = Json::object();
+  params["encode"] = "file";
+  params["path"] = st::fs::join(*dir, "shot.png");
+  const Json reply = probe.call("capture", params);
+  ST_CHECK(!reply.value("ok", false));
+  (void)st::fs::remove_all(*dir);
 }
 
 ST_TEST(capture_path_outside_whitelist_is_rejected) {

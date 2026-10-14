@@ -1755,9 +1755,11 @@ auto Server::start(const ServerOptions& options) -> Result<std::uint16_t> {
                      (std::hash<const void*>{}(entropy) << 17U) ^ (impl_->next_client_id << 33U);
     impl_->options.token = std::format("{:016x}", mix);
   }
-  // 落盘白名单：显式列表优先，否则默认（temp + 可执行文件目录）。
-  impl_->capture_dirs = options.capture_dirs.empty() ? options.default_capture_dirs()
-                                                      : options.capture_dirs;
+  // 落盘白名单：**显式列表优先（可为空 = 禁止落盘），未设置才用默认**。
+  // 旧写法 `options.capture_dirs.empty() ? 默认 : 显式` 把“显式空向量（禁止）”
+  // 当成“未设置”而扩成默认白名单——**安全语义的反向**（2026-10-14 修，同 `token`）。
+  impl_->capture_dirs =
+      options.capture_dirs.has_value() ? *options.capture_dirs : options.default_capture_dirs();
   auto listener = st::net::TcpListener::bind(options.bind, options.port);
   if (!listener) return forward_error(listener.error());
   listener->set_nonblocking(false);

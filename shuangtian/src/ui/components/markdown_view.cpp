@@ -411,7 +411,7 @@ auto MarkdownView::get_property(std::string_view name) const -> std::optional<st
   if (name == "text") return plain_;
   if (name == "block_count") return std::format("{}", blocks_.size());
   if (name == "content_height") return std::format("{:.2f}", content_height_);
-  if (name == "scroll_offset") return std::format("{:.2f}", scroll_offset_);
+  if (name == "scroll") return std::format("{:.2f}", scroll_offset_);
   if (name == "max_scroll") return std::format("{:.2f}", max_scroll());
   if (name == "selection") {
     // 只读快照（控制通道/测试面）：当前选中行的纯文本。
@@ -452,7 +452,7 @@ auto MarkdownView::set_property(std::string_view name, std::string_view value) -
     stick_to_bottom_ = *flag;
     return true;
   }
-  if (name == "scroll_offset") {
+  if (name == "scroll") {
     const auto number = st::parse_f64(value);
     if (!number.has_value()) return false;
     scroll_to(static_cast<float>(*number));
@@ -480,7 +480,7 @@ auto MarkdownView::set_property(std::string_view name, std::string_view value) -
 
 auto MarkdownView::property_names() const -> std::vector<std::string_view> {
   return {"markdown",       "text",          "block_count",    "content_height",
-          "scroll_offset",  "max_scroll",    "viewport_height", "base_font_size",
+          "scroll",         "max_scroll",    "viewport_height", "base_font_size",
           "code_font_size", "max_width",     "selectable",     "stick_to_bottom",
           "pending",        "selection",     "layout_width"};
 }
