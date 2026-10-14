@@ -20,7 +20,7 @@
 /// 噪声（实测抖动 < 15%）根本够不着它，而退化（≥12×）一定越线。
 /// 这也是它不必限定 release 档的原因——比值里没有"清屏 vs AA"那种跨档差异。
 ///
-/// ## 覆盖的组件（每个都对应本轮修过的一处缺口）
+/// ## 覆盖的组件（**十个**；前六个对应本轮修过的缺口，后四个是本轮扫描判定“当前健康”的）
 ///
 /// | 组件 | 缺口形态 | 修前比值 |
 /// |---|---|---|
@@ -28,6 +28,13 @@
 /// | `Table` | 提前退出 `row.y >= bounds_.bottom()` 在 ScrollView 下永不触发 | ≈ 40× |
 /// | `MarkdownView` | 组首行被剔除规则豁免 → 屏幕外每个组都建 `Path`+`stroke_path` | ≈ 20× |
 /// | `Tree` | `paint_content` 遍历全部行 | ≈ 12× |
+/// | `List` / `FileDialog` | 项是真子元素 / 自绘行，剔除在但不保证不被改坏 | — |
+/// | `SelectPanel` / `MenuPanel` / `Tabs` / `MergeView` | 扫描判定“当前健康”（依赖绘制层裁剪或数据量小） | — |
+///
+/// 把它们**全部**纳入的理由：扫描只能证明“**此刻**健康”，而门禁能证明“**将来**仍然健康”。
+/// 扫描的结论（“靠绘制层裁剪兜底”）是**可被静默破坏的假设**——
+/// 比如谁把宿主改成“画布不裁”（缩略图/离屏渲染/超长画布导出），
+/// 它们就会从“亚毫秒”变成“线性”。这条门禁就是那个假设的守护。
 /// | 多行 `Text`（直接） | 每帧 `wrap` 全部内容 + 逐行量宽 | ≈ 20× |
 ///
 /// ## 为什么断言"绘制"而不是"measure"
@@ -50,8 +57,13 @@
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
 #include "st/ui/components/basic.hpp"
+#include "st/ui/components/list.hpp"
 #include "st/ui/components/markdown_view.hpp"
+#include "st/ui/components/menu.hpp"
+#include "st/ui/components/merge_view.hpp"
+#include "st/ui/components/select.hpp"
 #include "st/ui/components/table.hpp"
+#include "st/ui/components/tabs.hpp"
 #include "st/ui/components/terminal.hpp"
 #include "st/ui/components/tree.hpp"
 #include "st/ui/theme.hpp"
@@ -305,4 +317,175 @@ ST_TEST(scale_gate_multiline_text_frame_is_independent_of_line_count) {
   const double small = measure_at(50U);
   const double large = measure_at(1000U);
   ST_CHECK(report_ratio("多行 Text 每帧", small, large, 20U) <= kMaxScaleRatio);
+}
+
+/// `List`：项数 20× 而每帧成本不变。
+///
+/// `List` 的项是真子元素（走 `Element::paint` 的元素级剔除），所以它是
+/// “靠子元素剔除兜底”的那一类——本门禁守的就是“这个兜底不被改坏”。
+ST_TEST(scale_gate_list_frame_is_independent_of_item_count) {
+  auto& setup = shared_setup();
+  if (!setup.ready) return;
+
+  const auto measure_at = [&](std::size_t items) {
+    st::ui::List list;
+    std::vector<st::ui::List::Entry> entries;
+    entries.reserve(items);
+    for (std::size_t index = 0; index < items; ++index) {
+      entries.push_back(st::ui::List::Entry{.key = "k" + std::to_string(index),
+                                            .label = "src/ui/file_" + std::to_string(index) + ".cpp",
+                                            .subtitle = "modified"});
+    }
+    list.sync_items(entries);
+    st::ui::RenderContext context = context_for(setup);
+    list.measure(context, st::ui::Constraints{});
+    // 内容全高（ScrollView 子元素的姿态）。
+    const float full = static_cast<float>(items) * (st::ui::ListItem::kHeight + 2.0F) + 40.0F;
+    list.arrange(context, st::math::Rect{0.0F, 0.0F, static_cast<float>(kWidth), full});
+    st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(kWidth, kHeight, 1.0f);
+    return best_ms([&] {
+      canvas.clear(st::math::Color{0xFF, 0xFF, 0xFF, 0xFF});
+      list.paint(context, canvas);
+    });
+  };
+
+  const double small = measure_at(50U);
+  const double large = measure_at(1000U);
+  ST_CHECK(report_ratio("List 每帧", small, large, 20U) <= kMaxScaleRatio);
+}
+
+/// `SelectPanel`：选项数 20× 而每帧成本不变。
+///
+/// 它**没有任何剔除**（面板一次铺开全部选项），完全依赖光栅层的裁剪矩形兜底。
+/// 扫描判定它健康（真实画布 800×600 下 100 项 0.875 ms），而 "画布尺寸" 正是它
+/// 唯一的护城河——所以这条门禁特别有价值：**画布尺寸是外部赋予的假设**，
+/// 而这假设一旦变（缩略图/离屏渲染），它会立刻变线性。
+ST_TEST(scale_gate_select_panel_frame_is_independent_of_option_count) {
+  auto& setup = shared_setup();
+  if (!setup.ready) return;
+
+  const auto measure_at = [&](std::size_t options) {
+    std::vector<st::ui::SelectOption> list;
+    list.reserve(options);
+    for (std::size_t index = 0; index < options; ++index) {
+      list.push_back(st::ui::SelectOption{.value = "v" + std::to_string(index),
+                                          .label = "选项 " + std::to_string(index)});
+    }
+    st::ui::SelectPanel panel{std::move(list), std::nullopt};
+    st::ui::RenderContext context = context_for(setup);
+    panel.measure(context, st::ui::Constraints{});
+    // **画布是屏幕尺寸**（不是面板高）——面板高到全部选项，但屏幕固定。
+    panel.arrange(context,
+                  st::math::Rect{0.0F, 0.0F, 320.0F, panel.measured_size().height});
+    st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(kWidth, kHeight, 1.0f);
+    return best_ms([&] {
+      canvas.clear(st::math::Color{0xFF, 0xFF, 0xFF, 0xFF});
+      panel.paint(context, canvas);
+    });
+  };
+
+  const double small = measure_at(50U);
+  const double large = measure_at(1000U);
+  ST_CHECK(report_ratio("SelectPanel 每帧", small, large, 20U) <= kMaxScaleRatio);
+}
+
+/// `MenuPanel`：菜单项数 20× 而每帧成本不变。
+ST_TEST(scale_gate_menu_panel_frame_is_independent_of_item_count) {
+  auto& setup = shared_setup();
+  if (!setup.ready) return;
+
+  const auto measure_at = [&](std::size_t items) {
+    std::vector<st::ui::MenuItem> entries;
+    entries.reserve(items);
+    for (std::size_t index = 0; index < items; ++index) {
+      st::ui::MenuItem item;
+      item.id = "id" + std::to_string(index);
+      item.label = "菜单项 " + std::to_string(index);
+      entries.push_back(std::move(item));
+    }
+    st::ui::MenuPanel panel{std::move(entries)};
+    panel.set_anchor(st::math::Rect{0.0F, 0.0F, 200.0F, 30.0F});
+    st::ui::RenderContext context = context_for(setup);
+    panel.measure(context, st::ui::Constraints{});
+    panel.arrange(context,
+                  st::math::Rect{0.0F, 0.0F, 240.0F, panel.measured_size().height});
+    st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(kWidth, kHeight, 1.0f);
+    return best_ms([&] {
+      canvas.clear(st::math::Color{0xFF, 0xFF, 0xFF, 0xFF});
+      panel.paint(context, canvas);
+    });
+  };
+
+  // 规模取**现实范围**：真实菜单 5~30 项，多的（"最近文件"）也就几十。
+  // 1000 项的面板高 28000px（比任何屏幕都高，且组件无滚动支持）——
+  // 那是"不存在的 UI"，量它只会引入噪声（阴影遮罩按矩形面积建，与剔除无关）。
+  const double small = measure_at(5U);
+  const double large = measure_at(100U);
+  ST_CHECK(report_ratio("MenuPanel 每帧", small, large, 20U) <= kMaxScaleRatio);
+}
+
+/// `Tabs`：标签数 20× 而每帧成本不变。
+ST_TEST(scale_gate_tabs_frame_is_independent_of_tab_count) {
+  auto& setup = shared_setup();
+  if (!setup.ready) return;
+
+  const auto measure_at = [&](std::size_t tabs) {
+    st::ui::Tabs bar;
+    std::vector<st::ui::Tabs::Tab> entries;
+    entries.reserve(tabs);
+    for (std::size_t index = 0; index < tabs; ++index) {
+      entries.push_back(st::ui::Tabs::Tab{.key = "t" + std::to_string(index),
+                                          .label = "file_" + std::to_string(index) + ".cpp"});
+    }
+    bar.sync_tabs(entries);
+    st::ui::RenderContext context = context_for(setup);
+    bar.measure(context, st::ui::Constraints{});
+    bar.arrange(context, st::math::Rect{0.0F, 0.0F, static_cast<float>(kWidth), 38.0F});
+    st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(kWidth, kHeight, 1.0f);
+    return best_ms([&] {
+      canvas.clear(st::math::Color{0xFF, 0xFF, 0xFF, 0xFF});
+      bar.paint(context, canvas);
+    });
+  };
+
+  const double small = measure_at(50U);
+  const double large = measure_at(1000U);
+  ST_CHECK(report_ratio("Tabs 每帧", small, large, 20U) <= kMaxScaleRatio);
+}
+
+/// `MergeView`：行数 20× 而每帧成本不变。
+///
+/// 两侧文本各 `lines` 行、每隔 50 行一处差异 —— 于是段数随行数一起长。
+ST_TEST(scale_gate_merge_view_frame_is_independent_of_line_count) {
+  auto& setup = shared_setup();
+  if (!setup.ready) return;
+
+  const auto make_side = [](std::size_t lines, bool theirs) {
+    std::string text;
+    for (std::size_t index = 0; index < lines; ++index) {
+      text += "line " + std::to_string(index);
+      if (theirs && index % 50U == 7U) text += "  <theirs>";
+      text += '\n';
+    }
+    return text;
+  };
+
+  const auto measure_at = [&](std::size_t lines) {
+    st::ui::MergeView view;
+    view.set_texts(make_side(lines, false), make_side(lines, true));
+    st::ui::RenderContext context = context_for(setup);
+    view.measure(context, st::ui::Constraints{});
+    view.arrange(context,
+                 st::math::Rect{0.0F, 0.0F, static_cast<float>(kWidth),
+                                static_cast<float>(kHeight)});
+    st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(kWidth, kHeight, 1.0f);
+    return best_ms([&] {
+      canvas.clear(st::math::Color{0xFF, 0xFF, 0xFF, 0xFF});
+      view.paint(context, canvas);
+    });
+  };
+
+  const double small = measure_at(50U);
+  const double large = measure_at(1000U);
+  ST_CHECK(report_ratio("MergeView 每帧", small, large, 20U) <= kMaxScaleRatio);
 }
