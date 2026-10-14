@@ -119,6 +119,18 @@ class MarkdownView : public Element {
   /// 内容坐标处的**行盒**（空 = 越界）。
   [[nodiscard]] auto row_box_at(float content_y) const -> math::Rect;
 
+  /// 上一帧实际绘制的行区间（半开；从未绘制过时为空区间）。
+  ///
+  /// 为何补（与 `Tree`/`Table`/`Text` 同一姿态）：`MarkdownView` 有 `content_height()`
+  /// 但**没有**“现在看得到哪几行”的读取口——而那是 AI 驱动界面时最常问的判断。
+  /// 绘制期二分出的区间正好是答案，缓存上一帧的值就够（与 `CodeEditor` 同一手法）。
+  [[nodiscard]] auto visible_row_range_now() const noexcept
+      -> std::pair<std::size_t, std::size_t> {
+    return {last_visible_first_, last_visible_last_};
+  }
+  /// 总行数（供视口断言与宿主估算用）。
+  [[nodiscard]] auto row_count() const noexcept -> std::size_t { return rows_.size(); }
+
  private:
   /// 绘制颜色角色（布局期只记语义角色，`paint` 时按主题解析为具体色值）。
   enum class ColorRole : std::uint8_t {
@@ -214,6 +226,15 @@ class MarkdownView : public Element {
     GroupKind group{GroupKind::None};
     math::Rect group_rect{};   ///< 组矩形（代码块/引用块）
     bool group_first{false};   ///< 组内首行：背景/边框/语言标签在此行绘制一次
+    /// 本组**首行的下标**（`group_first` 行的下标；非组行等于自身）。
+    ///
+    /// 为何要它（2026-10-14，实测修的一个**漏画**）：`paint_content` 现在用二分只遍历
+    /// 「与视口相交的行」。而组背景画在**组首行**那次绘制里——当组首行已滚到视口上方时，
+    /// 它不在区间内，背景就**整块不画**（实测：40 行代码块滚到中段后 code_bg 像素 = 0，
+    /// 而非白像素也是 0，即整屏全空）。
+    ///
+    /// 有了这个下标，区间内的任一行都能拿到“本组首行”，从而在它落在区间外时补画。
+    std::size_t group_head_row{0};
     std::string language{};    ///< 代码块语言标签
     math::Rect marker{};       ///< 项目符号区域（无序圆点/有序序号/任务框）
     bool marker_dot{false};
@@ -254,6 +275,10 @@ class MarkdownView : public Element {
   const TextPort* layout_port_{nullptr};
   float layout_width_{0.0f};
   float content_height_{0.0f};
+  /// 上一帧绘制的可见行区间（半开；`paint_content` 写，见 `visible_row_range_now()`）。
+  /// `mutable`：`paint_content` 是 const（「绘制不改元素状态」是框架硬约束）。
+  mutable std::size_t last_visible_first_{0};
+  mutable std::size_t last_visible_last_{0};
   float view_height_{0.0f};
   float scroll_offset_{0.0f};
   float max_width_{0.0f};

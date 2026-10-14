@@ -109,6 +109,39 @@ class Tree : public Element {
   /// 视口能整行容纳的行数（至少 1；未布局时退化为总行数）。
   [[nodiscard]] auto visible_row_count() const noexcept -> std::size_t;
 
+  /// 按行缓存的标签宽度（与 `rows_` 一一对应），供 `measure` 复用。
+  ///
+  /// 为何需要它（2026-10-14，实测）：`Tree::measure` 每次遍历全部行调
+  /// `TextPort::measure_width`，而文本层的宽度缓存**只有 4096 条**且满了会
+  /// **整表清空**（`text.cpp` 的 `if (cache_->widths.size() > 4096) clear();`）。
+  /// 于是超过 4096 行时，每轮 measure 都在一个“刚被清空”的缓存上做顺序扫描——
+  /// 命中率≈ 0，**断崖式**退化（实测 4000 行 0.136 ms → 4200 行 9.885 ms，
+  /// 5000 行 11.853 ms）。这是经典的「顺序扫描击穿 LRU」：工作集 > 容量时，
+  /// 无论 LRU 还是全清，每轮都全 miss。
+  ///
+  /// 为何由组件自己缓存而不是把文本层缓存调大：组件知道**自己的行什么时候变**
+  ///（`sync_nodes` / `clear_nodes`）与**尺寸什么时候变**（`set_row_height`、
+  /// `apply_theme` 改字号），所以它能做到精确失效；而文本层只能猜。
+  /// 调大阈值只是把崖推远（工作集终会超过它），且会全局抬高峰值内存。
+  ///
+  /// 失效契约（三条，缺一条就会“改了标签宽度却没变”）：
+  /// 刷新行 / 清空行 / 主题字号或本组件字号变化 → 整表重算。
+  /// 宽度只取决于 `(label, font_size)`，两者都被这三条覆盖。
+  mutable std::vector<float> row_label_widths_{};
+  /// 缓存对应的字号；与 `style_.font_size` 不符时整表重算。
+  mutable float label_widths_font_size_{-1.0F};
+
+  /// 上一帧**实际绘制过**的首/末可见行（半开区间 `[首, 末)`；从未绘制过为空区间）。
+  ///
+  /// 为何要它（与 `CodeEditor::visible_line_range_now()` 同一手法）：宿主想在
+  /// **帧首**做「只取看得见那些行的数据」（懒加载/注解）时拿不到 `RenderContext`，
+  /// 而帧内那趟算出的可见区间正好是答案——缓存上一帧的值就够（一帧的滞后在
+  /// 滚动补注解的场景里不可见）。属性面的 `first_visible` 也从这里回读真值。
+  [[nodiscard]] auto visible_row_range_now() const noexcept
+      -> std::pair<std::size_t, std::size_t> {
+    return {last_visible_first_, last_visible_last_};
+  }
+
   /// 目录行展开状态切换（点击目录行 / Enter / ← →）：调用方据此加载子节点并
   /// 重新 `sync_nodes`。`expanded` 是**目标状态**。
   std::function<void(std::string_view key, bool expanded)> on_toggle{};
@@ -129,6 +162,8 @@ class Tree : public Element {
  private:
   /// 行命中（含展开指示区的整行判定）；返回行号。
   [[nodiscard]] auto row_index_at(math::Point point) const -> std::optional<std::size_t>;
+  /// 使行宽缓存失效（行集变化时调用；见 `row_label_widths_` 的失效契约）。
+  void invalidate_label_widths() const noexcept;
   /// 对某行执行「激活」语义（文件=选中、目录=toggle）——点击/Enter/invoke 共用。
   void activate_row(std::size_t index);
   /// 触发 toggle（目标状态 = 当前行数据的反值）。
@@ -141,6 +176,12 @@ class Tree : public Element {
   float row_height_{kDefaultRowHeight};   ///< 行高（宿主可调，见 set_row_height）
   std::string selected_key_{};
   int hover_index_{-1};
+
+  /// 上一帧实际绘制的可见行区间（半开；见 `visible_row_range_now()`）。
+  /// `mutable`：`paint_content` 是 const 方法（「绘制不改元素状态」是框架硬约束），
+  /// 与 `CodeEditor::last_visible_first_` 同一套做法。
+  mutable std::size_t last_visible_first_{0};
+  mutable std::size_t last_visible_last_{0};
 };
 
 }  // namespace st::ui

@@ -111,9 +111,17 @@ struct AppOptions {
   std::string backend{};              ///< 空=自动（无显示则 headless）
   /// 渲染器：`auto`（**按实测帧耗时选更快的那条**）/ `gpu` / `software`。
   ///
+  /// 渲染器：**空串 = 未指定**（无头后端解析为 `software`；窗口后端解析为 `auto`）/ `auto` / `gpu` / `software`。
+  ///
+  /// 为何缺省是**空串而不是 `auto`**（2026-10-14 修）：两者在字符串上**不可区分**，
+  /// 于是无头后端无法兑现“显式 `auto` 照旧探测”这个承诺——实测后果是
+  /// `--renderer auto` 的无头 GPU 基准**静默跑在软件路径上**（1.44 ms → 11.49 ms），
+  /// 被当成 8.8 倍性能回归。改成空串后三态可区分：
+  /// 空 = 各后端自己的缺省；`auto` = 真的探测；`gpu`/`software` = 按名。
+  ///
   /// 为什么不硬编码 GPU 优先：渲染器优劣与机器强相关（GPU 弱、驱动差、或呈现路径
   /// 仍需 CPU 拷贝时，软件反而更快）。`auto` 的职责是**测出来**，而不是猜。
-  std::string renderer{"auto"};
+  std::string renderer{};
   /// 是否让窗口系统画标题栏/边框（默认 `false` = 自绘，见 `CONVENTIONS.md` §10 第 7 条）。
   bool decorations{false};
   /// 是否可缩放（拖边改尺寸）。

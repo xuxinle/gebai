@@ -121,27 +121,53 @@ ST_TEST(backend_reports_renderer_honestly) {
 ST_TEST(headless_defaults_to_software_renderer) {
   // **无头不该为 GPU 探测付代价**（2026-10-14）。
   //
-  // 起因（实测）：`auto` 在无头模式下**照样探测 GPU**——建 probe D3D11 设备 +
+  // 起因（实测）：缺省路径在无头模式下**照样探测 GPU**——建 probe D3D11 设备 +
   // 一块全尺寸 GPU 画布。无头（CI / 截图 / 自动化）根本不需要 GPU，却付出
   // RTX 驱动进程内常驻 ~53MB / ~55 线程 / ~4.6GB 虚拟地址，且全部付在
   // "任何像素产生之前"。
   //
-  // 这条用例钉住的是"**缺省路径不得探测**"这个事实：不传 renderer（或传 `auto`）时
+  // 本用例钉住的是「**缺省路径不得探测**」这个事实：**不传 renderer**（空串）时
   // 必须直接给软件光栅器。反向验证：把 `HeadlessBackend::create_window` 里的
-  // requested_renderer 分叉去掉（改回直传 options.renderer），本用例在
-  // "缺省不给软件"这一支上变红。
+  // `options.renderer.empty()` 分叉去掉（改回直传），本用例变红。
   //
-  // ⚠ 只断言"缺省是 software"，**不**假设机器上有没有 GPU：显式 `auto`
-  // 在本机（无 GPU）与报告机器（RTX 4080）上都会走探测分支，而那是另一条契约。
-  for (const char* requested : {"", "auto"}) {
+  // ⚠ **空串与 `auto` 必须分开测**（2026-10-14 修）：
+  // 本用例原先写成 `for (const char* requested : {"", "auto"})`，
+  // 于是把“显式传了 `--renderer auto`”也按“缺省”对待。那与代码注释、note 文案
+  // 三方矛盾（注释/文案都承诺“显式 auto 照旧探测”），而且真出了事故：
+  // `--renderer auto` 的无头 GPU 基准**静默跑在软件路径上**（1.44 ms → 11.49 ms），
+  // 差点被当成 8.8 倍性能回归。
+  //
+  // 所以这里拆成两条断言：缺省 → software（不探测）；显式 `auto` → 走探测分支
+  // （**不断言探测结果**：无 GPU 的机器与有 RTX 的机器都合法，那是另一条契约）。
+  {
     WindowOptions options;
     options.width = 320;
     options.height = 240;
-    options.renderer = requested;
-    auto backend = st::shell::create_backend("headless");
-    if (!backend.has_value()) continue;
-    if (auto status = (*backend)->create_window(options); !status) continue;
-    ST_CHECK_EQ(std::string((*backend)->renderer_name()), std::string("software"));
+    options.renderer.clear();  // 空串 = 未指定
+    if (auto backend = st::shell::create_backend("headless"); backend.has_value()) {
+      if (auto status = (*backend)->create_window(options); status) {
+        ST_CHECK_EQ(std::string((*backend)->renderer_name()), std::string("software"));
+        // 理由要**如实**说是“缺省”，不是“实测选的”（两者混为一谈会让排查的人去翻微基准）。
+        ST_CHECK((*backend)->renderer_note().find("缺省") != std::string::npos);
+      }
+    }
+  }
+  // 显式 `auto` 必须走**探测**分支（而不是被当成缺省改写成 software）。
+  //
+  // 不假设探测结果（无 GPU 机器选软件、有 RTX 的选 GPU 都合法）：只断言**理由**不是
+  // “缺省”——这是机器无关的，也是旧 bug 的直接体征（旧代码下它会被写成
+  // “无头缺省软件光栅器…”）。反向验证：把 backend.cpp 的判据改回
+  // `empty() || == "auto"`，本断言立刻变红。
+  {
+    WindowOptions options;
+    options.width = 320;
+    options.height = 240;
+    options.renderer = "auto";
+    if (auto backend = st::shell::create_backend("headless"); backend.has_value()) {
+      if (auto status = (*backend)->create_window(options); status) {
+        ST_CHECK((*backend)->renderer_note().find("缺省") == std::string::npos);
+      }
+    }
   }
   // 显式 `gpu` 仍会被尊重（无 GPU 时如实回退软件，但**理由**要说清是回退，
   // 而不是"缺省就是这么定的"）——两条理由不能混为一谈。

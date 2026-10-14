@@ -268,11 +268,11 @@ auto Tabs::active_label() const -> std::string_view { return tab_label(active_);
 
 auto Tabs::tab_rect(std::size_t index) const -> math::Rect {
   if (index >= widths_.size()) return math::Rect{};
-  float x = bounds_.x - scroll_offset_;
-  for (std::size_t cursor = 0; cursor < index; ++cursor) {
-    x += widths_[cursor] + gap_;
-  }
-  return math::Rect{x, bounds_.y, widths_[index], bounds_.height};
+  // 左缘 x 走**前缀和**（O(1)）：旧实现从 0 累加到 index，而 `paint_content` 对每个 index
+  // 都调它 → 绘制 O(N²)（实测 1000 个标签 2.437 ms，比值 11.48 被规模门禁抓住）。
+  const float offset = index < offsets_.size() ? offsets_[index] : 0.0F;
+  return math::Rect{bounds_.x - scroll_offset_ + offset, bounds_.y, widths_[index],
+                    bounds_.height};
 }
 
 auto Tabs::max_scroll() const noexcept -> float {
@@ -486,6 +486,15 @@ void Tabs::rebuild_widths(const RenderContext& context) const {
     widths_.push_back(width);
     total += width;
   }
+  // **前缀和**：`tab_rect` 据此 O(1) 拿到左缘 x（不再逐项累加 → 绘制从 O(N²) 回到 O(N)）。
+  offsets_.assign(widths_.size(), 0.0F);
+  {
+    float running = 0.0F;
+    for (std::size_t index = 0; index < widths_.size(); ++index) {
+      offsets_[index] = running;
+      running += widths_[index] + gap_;
+    }
+  }
   if (!labels_.empty() && gap_ > 0.0f) {
     total += gap_ * static_cast<float>(labels_.size() - 1);
   }
@@ -587,8 +596,38 @@ void Tabs::paint_content(const RenderContext& context, raster::Surface& canvas) 
   const float line = port.line_height(style_.font_size);
   const bool clipped = max_scroll() > 0.0f;
   if (clipped) canvas.push_clip_rect(bounds_);
+  // **标签级视口剔除**：`offsets_` 是前缀和（单调递增），所以首/末可见标签可以
+  // **二分**定位（与 `Tree`/`Table`/`MarkdownView` 同一手法）。
+  //
+  // 为何必须（2026-10-14，实测）：旧实现对**全部**标签逐个 `ellipsize` + `measure_width`
+  // + `draw`，不看视口。1000 个标签里视口只装得下 ~6 个，却为全部 1000 个付文本度量——
+  // 这是规模门禁比值 8.12 的**主要**来源（前缀和修掉的那部分 O(N²) 只占一小半）。
+  std::size_t first_tab = 0;
+  std::size_t last_tab = labels_.size();
+  if (clipped && !offsets_.empty()) {
+    const float clip_left = bounds_.x - scroll_offset_;
+    const float clip_right = clip_left + bounds_.width;
+    // 二分首个「右缘 > clip_left」的标签。
+    std::size_t low = 0;
+    std::size_t high = offsets_.size();
+    while (low < high) {
+      const std::size_t mid = low + (high - low) / 2U;
+      if (bounds_.x - scroll_offset_ + offsets_[mid] + widths_[mid] > clip_left) {
+        high = mid;
+      } else {
+        low = mid + 1U;
+      }
+    }
+    first_tab = low;
+    last_tab = first_tab;
+    while (last_tab < offsets_.size() &&
+           bounds_.x - scroll_offset_ + offsets_[last_tab] <= clip_right) {
+      ++last_tab;
+    }
+  }
+  (void)line;
 
-  for (std::size_t index = 0; index < labels_.size(); ++index) {
+  for (std::size_t index = first_tab; index < last_tab && index < labels_.size(); ++index) {
     const math::Rect tab = tab_rect(index);
     const bool is_active = index == active_;
     const bool is_hovered = static_cast<int>(index) == hover_index_;

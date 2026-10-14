@@ -200,11 +200,19 @@ class HeadlessBackend final : public Backend {
     //
     // 为何不是改 `WindowOptions::renderer` 的声明缺省：那个字段是**共享**的，
     // 窗口后端（win32）缺省 `auto` 是**对的**（有窗口时“谁画得更快”确实得测）。
-    // 因此按后端分叉：窗口后端不碰，无头后端把空串/`auto` 解析为 `software`；
+    // 因此按后端分叉：窗口后端不碰，无头后端只把**空串**（未指定）解析为 `software`；
     // 显式 `gpu` / `auto` 照旧探测（机器无 GPU 时 `auto` 会如实回退软件并说明原因）。
+    //
+    // ⚠ **判据必须是“空串”而不是“空串或 auto”**（2026-10-14 修）：
+    // `AppOptions::renderer` 的声明缺省本就是 `auto`，于是“没传 --renderer”与
+    // “显式传 --renderer auto”在字符串上**完全不可区分**——旧条件把两者一起改写为
+    // `software`，直接违背了本段注释与下面 note 文案的承诺（“显式 auto 照旧探测”）。
+    // 后果不是“少了点功能”而是**量错了机器**：`--renderer auto` 的无头 GPU 基准
+    // 会静默跑在软件路径上（实测 1.44 ms → 11.49 ms），差点被当成 8.8 倍性能回归。
+    // 修法：`AppOptions::renderer` 的缺省改为**空串**（= 未指定），于是三态可区分：
+    // 空 = 无头缺省软件；`auto` = 照旧探测；`gpu`/`software` = 按名。
     const std::string requested_renderer =
-        options.renderer.empty() || options.renderer == "auto" ? std::string("software")
-                                                              : options.renderer;
+        options.renderer.empty() ? std::string("software") : options.renderer;
     const bool defaulted_to_software = requested_renderer != options.renderer;
     SurfaceChoice choice = create_surface(resolved, requested_renderer);
     if (choice.surface == nullptr) return unexpected(ErrorCode::Unsupported, "创建绘制面失败");

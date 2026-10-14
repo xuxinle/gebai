@@ -488,7 +488,14 @@ auto ColorPicker::set_property(std::string_view name, std::string_view value) ->
 
 auto ColorPicker::property_names() const -> std::vector<std::string_view> {
   auto names = Element::property_names();
-  names.insert(names.end(), {"color", "hue", "saturation", "value", "eyedropper"});
+  // ⚠ **不重复声明 `color`**：基类表里已经有它，而本组件用自己的 `get/set_property`
+  // 覆写了它的取值（`color` → `hex_text()`）——语义上够了。
+  //
+  // 原先这里是 `{"color", "hue", ...}`（再插一次），而重复声明不是无害的：
+  // 控制通道按本表生成 `get` 快照（`control/server.cpp` 遍历 `property_names()`），
+  // 于是同一名字在快照里出现**两遍**；而“声明表不重复”是它作为**契约**的基本要求。
+  // 实测：`tests/ui_component_contract_test.cpp` 遍历 48 个组件时这条立刻变红。
+  names.insert(names.end(), {"hue", "saturation", "value", "eyedropper"});
   return names;
 }
 

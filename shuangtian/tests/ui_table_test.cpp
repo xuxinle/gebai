@@ -153,10 +153,23 @@ ST_TEST(ui_table_horizontal_scroll) {
 
   st::ui::Event shifted = plain;
   shifted.shift = true;
+  // **`wheel_delta = 1.0f` 是“向上滚” → 内容向左移（offset 减小）**。
+  // 本用例原先用 `plain`（delta = +1）却断言 `offset == 48`（offset 增大）——
+  // 那是与 `scroll.cpp` 的明文约定（“向上为正、向下为负；offset 变大 = 看到
+  // 更靠右的列”）相反，把 `table.cpp` 的反向 bug **固化成了期望值**（2026-10-14 一并修）。
+  // 改成 delta 为负（向下滚），才是“看到更靠右的列”的方向。
+  shifted.wheel_delta = -1.0f;
   ST_CHECK(table.on_event(context, shifted));
   ST_CHECK(shifted.handled);
   ST_CHECK_NEAR(table.scroll_offset(), 48.0f, 0.01f);
   ST_CHECK_NEAR(table.cell_rect(0U, 1U).x, 252.0f, 0.01f);  // 300 - 48
+
+  // 反向（向上滚）必须回到左端——方向对错的直接体征。
+  st::ui::Event back = plain;
+  back.shift = true;
+  back.wheel_delta = 1.0f;
+  ST_CHECK(table.on_event(context, back));
+  ST_CHECK_NEAR(table.scroll_offset(), 0.0f, 0.01f);
 
   // 键盘：End 到最大偏移、Home 回零
   st::ui::Event key;
@@ -168,8 +181,8 @@ ST_TEST(ui_table_horizontal_scroll) {
   ST_CHECK(table.on_event(context, key));
   ST_CHECK_NEAR(table.scroll_offset(), 0.0f, 0.01f);
 
-  // 偏移夹取 + 属性面
-  ST_CHECK(table.set_property("scroll_offset", "9999"));
+  // 偏移夹取 + 属性面（属性名已统一为 `scroll`；旧的 `scroll_offset` 名已废）
+  ST_CHECK(table.set_property("scroll", "9999"));
   ST_CHECK_NEAR(table.scroll_offset(), 200.0f, 0.01f);
   ST_CHECK(table.invoke_action("scroll_to", "60"));
   ST_CHECK_NEAR(table.scroll_offset(), 60.0f, 0.01f);

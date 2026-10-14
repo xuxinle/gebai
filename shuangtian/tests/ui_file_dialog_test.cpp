@@ -610,3 +610,52 @@ ST_TEST(file_dialog_fills_viewport_rect_for_mask) {
   const float below = 700.0f - card.bottom();
   ST_CHECK(std::fabs(above - below) < 2.0f);
 }
+
+/// **滚轮方向：向下滚 → 看到更靠下的内容**（2026-10-14 修）。
+///
+/// 全库约定（`scroll.cpp` 里写成了明文）：`Event::wheel_delta` 与系统同号，
+/// **向上为正 / 向下为负**；而滚动偏移是“内容向上推了多少像素”，
+/// offset 变大 = 看到更靠下的内容 ⇒ `offset -= delta × step`。
+///
+/// FileDialog 旧写法是 `+=`，等于把方向整个反过来（向下滚看到更上面的内容）。
+/// 这不是风格差异——全库其余滚动点（`scroll.cpp` / `CodeEditor` / `MarkdownView` /
+/// `MergeView` / `Tabs` / `Input`）都是 `-`。
+///
+/// 为何此前测不出：`scroll_y_` 那时**没有任何读取口**（现已补 `scroll` 属性）。
+ST_TEST(file_dialog_wheel_scrolls_downward_on_negative_delta) {
+  Hosted hosted;
+  Sandbox sandbox;
+  // 造出足够多的条目，让列表真的溢出一屏（否则 offset 始终被夹在 0，方向看不出来）。
+  for (int index = 0; index < 200; ++index) {
+    (void)st::fs::write_text(
+        st::fs::join(sandbox.dir, "entry_" + std::to_string(index) + ".txt"), "x");
+  }
+  hosted.dialog->set_directory(sandbox.dir);
+  hosted.layout();
+  const st::ui::RenderContext context = hosted.root.render_context();
+
+  const auto scroll = [&]() -> float {
+    const auto value = hosted.dialog->get_property("scroll");
+    return value.has_value() ? std::strtof(value->c_str(), nullptr) : -1.0F;
+  };
+  ST_CHECK_EQ(scroll(), 0.0F);
+
+  // 向下滚（delta < 0）→ offset 必须**变大**（看到更靠下的内容）。
+  st::ui::Event down;
+  down.kind = st::ui::EventKind::Wheel;
+  down.wheel_delta = -1.0f;
+  ST_CHECK(hosted.dialog->on_event(context, down));
+  const float after_down = scroll();
+  ST_CHECK(after_down > 0.0f);
+
+  // 向上滚（delta > 0）→ offset 必须**变小**（回到更靠上的内容）。
+  st::ui::Event up;
+  up.kind = st::ui::EventKind::Wheel;
+  up.wheel_delta = 1.0f;
+  ST_CHECK(hosted.dialog->on_event(context, up));
+  ST_CHECK(scroll() < after_down);
+
+  // 继续向上滚到顶：夹在 0，不越界。
+  for (int index = 0; index < 50; ++index) (void)hosted.dialog->on_event(context, up);
+  ST_CHECK_EQ(scroll(), 0.0F);
+}

@@ -411,7 +411,7 @@ auto MarkdownView::get_property(std::string_view name) const -> std::optional<st
   if (name == "text") return plain_;
   if (name == "block_count") return std::format("{}", blocks_.size());
   if (name == "content_height") return std::format("{:.2f}", content_height_);
-  if (name == "scroll_offset") return std::format("{:.2f}", scroll_offset_);
+  if (name == "scroll") return std::format("{:.2f}", scroll_offset_);
   if (name == "max_scroll") return std::format("{:.2f}", max_scroll());
   if (name == "selection") {
     // 只读快照（控制通道/测试面）：当前选中行的纯文本。
@@ -452,7 +452,7 @@ auto MarkdownView::set_property(std::string_view name, std::string_view value) -
     stick_to_bottom_ = *flag;
     return true;
   }
-  if (name == "scroll_offset") {
+  if (name == "scroll") {
     const auto number = st::parse_f64(value);
     if (!number.has_value()) return false;
     scroll_to(static_cast<float>(*number));
@@ -480,7 +480,7 @@ auto MarkdownView::set_property(std::string_view name, std::string_view value) -
 
 auto MarkdownView::property_names() const -> std::vector<std::string_view> {
   return {"markdown",       "text",          "block_count",    "content_height",
-          "scroll_offset",  "max_scroll",    "viewport_height", "base_font_size",
+          "scroll",         "max_scroll",    "viewport_height", "base_font_size",
           "code_font_size", "max_width",     "selectable",     "stick_to_bottom",
           "pending",        "selection",     "layout_width"};
 }
@@ -863,6 +863,8 @@ void MarkdownView::append_code_block(const st::md::Block& block, const RenderCon
   const math::Rect group{frame.indent, top, box_width, bottom - top};
   for (std::size_t index = first_row; index < rows_.size(); ++index) {
     rows_[index].group_rect = group;
+    // 每行记住**本组首行**：二分跳过组首行时，区间内的行要能把它找回来补画背景。
+    rows_[index].group_head_row = first_row;
   }
   Row& head = rows_[first_row];
   head.group_first = true;
@@ -976,10 +978,13 @@ void MarkdownView::append_quote(const st::md::Block& block, const RenderContext&
   append_blocks(block.children, context, inner, y);
   y += kQuotePadY;
   if (rows_.size() > first_row) {
-    Row& head = rows_[first_row];
-    head.group = GroupKind::Quote;
-    head.group_rect = math::Rect{frame.indent, top, std::max(frame.avail, kMinTextWidth), y - top};
-    head.group_first = true;
+    for (std::size_t index = first_row; index < rows_.size(); ++index) {
+      rows_[index].group = GroupKind::Quote;
+      rows_[index].group_rect =
+          math::Rect{frame.indent, top, std::max(frame.avail, kMinTextWidth), y - top};
+      rows_[index].group_head_row = first_row;
+    }
+    rows_[first_row].group_first = true;
   } else {
     y = top;  // 空引用不占位
   }
@@ -1618,12 +1623,75 @@ void MarkdownView::paint_content(const RenderContext& context, raster::Surface& 
   canvas.push_clip_rect(bounds_);
   // 选中高亮画在文本层之下（行级矩形，见 paint_selection 的说明）。
   paint_selection(canvas, context.theme.colors());
-  for (const Row& row : rows_) {
+  // —— 可见行区间：**二分**定位，不做全量遍历 ——
+  //
+  // `rows_` 按**文档序**排（`box.y` 单调递增，排版期逐行累加 y），所以“首页与视口
+  // 相交的行”可以二分出来。为何值得（2026-10-14，实测）：全量遍历即使每行只做一次
+  // 矩形相交判断，在大文档下仍是每帧的线性项（4000 段 3.670 ms，而二分后 0.372 ms）。
+  // 口径与 `Tree`/`Table`/`Text` 一致（同一份 `clip_rect()` + `device_scale` 折算）。
+  std::size_t first_visible = 0;
+  std::size_t last_visible = rows_.size();
+  {
+    // 裁剪区（逻辑坐标）——与 `Element::paint` 同一折算。
+    const math::IntRect raw_clip = canvas.clip_rect();
+    const float inv_scale = canvas.device_scale() > 0.0f ? 1.0f / canvas.device_scale() : 1.0f;
+    const float clip_top = static_cast<float>(raw_clip.y) * inv_scale;
+    const float clip_bottom = static_cast<float>(raw_clip.y + raw_clip.height) * inv_scale;
+    if (clip_bottom <= clip_top) return;  // 空裁剪：什么都不画
+    // 二分找首个 `box.bottom > clip_top` 的行（与 `row_at_y` 同判据：用 bottom，
+    // 因为行间隙归上一行）。
+    std::size_t low = 0;
+    std::size_t high = rows_.size();
+    while (low < high) {
+      const std::size_t mid = low + (high - low) / 2U;
+      const float bottom = rows_[mid].box.bottom() + origin.y;
+      if (bottom > clip_top) {
+        high = mid;
+      } else {
+        low = mid + 1U;
+      }
+    }
+    first_visible = low;
+    // 末行：从 first 往后走（只有可见那几行），直到超出 clip_bottom。
+    last_visible = first_visible;
+    while (last_visible < rows_.size() &&
+           rows_[last_visible].box.y + origin.y <= clip_bottom) {
+      ++last_visible;
+    }
+  }
+  // 记下本帧区间供宿主/自动化断言（与 `CodeEditor`/`Tree`/`Table` 同一手法）。
+  last_visible_first_ = first_visible;
+  last_visible_last_ = last_visible;
+  for (std::size_t row_index = first_visible; row_index < last_visible; ++row_index) {
+    const Row& row = rows_[row_index];
     const math::Rect box =
         math::Rect{row.box.x + origin.x, row.box.y + origin.y, row.box.width, row.box.height};
-    const bool outside = box.bottom() < bounds_.y || box.y > bounds_.bottom();
-    if (outside && !row.group_first) continue;  // 视口外剔除（组首行必须绘制背景）
-    if (row.group_first) paint_group(context, canvas, row, origin);
+    // —— 组背景（代码块/引用块）——
+    //
+    // 组背景跨**整组**，但只画一次（在组首行那次）。而二分后区间可能**不包含组首行**
+    // （它已滚到视口上方），所以这里要按「本组首行是否在区间内」分两种情况：
+    //
+    // | 情形 | 本组首行位置 | 该怎么办 |
+    // |---|---|---|
+    // | ① | 在区间**内** | 它自己会走到，在这里不要重复画（否则两遍） |
+    // | ② | 在区间**前**（滚过去了） | 本行就是可见的组内行 → **必须在这里补画** |
+    // | ③ | 在区间**后** | 不可能（本行可见 ⇐ 首行在它之前） |
+    //
+    // 为何要这层「首行下标」而不能只看 `group_first`（**实测踩到的漏画**，2026-10-14）：
+    // 改成二分后，40 行代码块滚到中段时区间是 `[18, 34)`，而组首行是第 2 行——
+    // 它不在区间里，于是背景**整块不画**（实测 code_bg 像素 = 0，且**非白像素也是 0**，
+    // 即整个视口全空）。这个漏画是**加二分那一步引入的**，不是旧代码就有的。
+    //
+    // 反过来，若简单地把“组首行必定在区间外”当成前提去掉判据（退回“永不剔除”），
+    // 则远处 4000 个屏幕外组的首行都会建 `Path` + `stroke_path`——那正是
+    // 4000 段 13.463 ms 的来源（见 `tools/ui_rich_views_bench.cpp`）。两者都要防住。
+    if (row.group_first) {
+      // 情形 ①：首行自己在区间内 → 就由它画（本帧只画这一次）。
+      paint_group(context, canvas, row, origin);
+    } else if (row.group != GroupKind::None && row.group_head_row < first_visible) {
+      // 情形 ②：本组的首行在区间之前（已滚过），而本行可见 → 由本行补画背景。
+      paint_group(context, canvas, rows_[row.group_head_row], origin);
+    }
     const bool row_clip = !row.clip.is_empty();
     const math::Rect clip =
         row_clip ? math::Rect{row.clip.x + origin.x, row.clip.y + origin.y, row.clip.width,

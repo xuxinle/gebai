@@ -12,6 +12,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "st/ui/element.hpp"
@@ -105,6 +106,18 @@ class Table : public Element {
   [[nodiscard]] auto invoke_action(std::string_view action, std::string_view argument)
       -> bool override;
 
+  // —— 视口契约（与 `Tree`/`List` 的列表类通用属性面对齐） ——
+  //
+  // 为何补：`Table` 之前只有 `rows`/`scroll_offset`，**没有** `first_visible`
+  // 与 `visible_rows`——而“用户现在看得到哪一块”是 AI 驱动界面时最常问的判断
+  //（见 DESIGN 里列表类通用视口契约那段）。“不可断言的效果 = 不可复用”。
+  [[nodiscard]] auto visible_row_count() const noexcept -> std::size_t;
+  /// 上一帧实际绘制的首/末可见行（半开；从未绘制过时为空区间）。
+  [[nodiscard]] auto visible_row_range_now() const noexcept
+      -> std::pair<std::size_t, std::size_t> {
+    return {last_visible_first_, last_visible_last_};
+  }
+
  private:
   /// 按可用宽度重算列宽与总宽（自适应列均分剩余宽度）。
   void recompute_columns(float available);
@@ -124,6 +137,11 @@ class Table : public Element {
   std::size_t hovered_row_{kNoRow};
   std::optional<std::size_t> selected_row_{};
   bool zebra_{false};
+
+  /// 上一帧实际绘制的可见行区间（半开）——与 `Tree::last_visible_first_` 同一手法。
+  /// `mutable`：`paint_content` 是 const（「绘制不改元素状态」是框架硬约束）。
+  mutable std::size_t last_visible_first_{0};
+  mutable std::size_t last_visible_last_{0};
 };
 
 }  // namespace st::ui

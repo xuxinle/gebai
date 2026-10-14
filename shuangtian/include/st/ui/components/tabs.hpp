@@ -213,6 +213,13 @@ class Tabs : public Element {
   std::vector<char> modified_{};         ///< 修改点标记（与 labels_ 同序）
   std::vector<char> closable_{};         ///< 可关闭标记（与 labels_ 同序）
   mutable std::vector<float> widths_{};  ///< 每个标签项宽（含内边距），布局期缓存
+  /// `widths_` 的**前缀和**（`offsets_[i]` = 第 i 个标签左缘相对标签区起点的 x）。
+  ///
+  /// 为何要它（2026-10-14，实测被规模门禁抓住）：`tab_rect(index)` 原本用
+  /// `for (cursor < index)` 累加前面所有标签的宽——而 `paint_content` 对**每个** index
+  /// 都调它，于是绘制是 **O(N²)**：50 个标签 0.212 ms → 1000 个 **2.437 ms**（比值 11.48）。
+  /// 前缀和把 `tab_rect` 变成 O(1)，整帧回到线性。
+  mutable std::vector<float> offsets_{};
   mutable float total_width_{0.0f};      ///< 标签条总宽（含项间距）
   std::size_t active_{0};
   float gap_{0.0f};         ///< 标签项间距（`metrics.space_xs`）

@@ -1,11 +1,13 @@
 #include "st/ui/components/tree.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <format>
 #include <utility>
 
 #include "st/core/string.hpp"
 #include "st/raster/paint.hpp"
+#include "st/raster/surface.hpp"
 #include "st/ui/icon.hpp"
 #include "st/ui/text_port.hpp"
 
@@ -30,6 +32,11 @@ void Tree::set_row_height(float height) noexcept {
   mark_dirty();
 }
 
+void Tree::invalidate_label_widths() const noexcept {
+  row_label_widths_.clear();
+  label_widths_font_size_ = -1.0F;
+}
+
 Tree::Tree() {
   style_.radius = 0.0f;
   set_focusable(true);
@@ -45,6 +52,10 @@ void Tree::sync_nodes(const std::vector<TreeNode>& nodes) {
   rows_.clear();
   rows_.reserve(nodes.size());
   for (const auto& node : nodes) rows_.push_back(Row{node});
+  // **行宽缓存必须显式失效**：上面那句 `rows_.clear()` 后紧接 push，行数可能与上次相同
+  //（常见的“刷新同一目录”）——只靠 `measure` 里“尺寸相同就不重算”的判定会读到**陈旧宽度**。
+  // 这是缓存一致性面的核心失效点（护栏：`tree_label_width_cache_follows_sync`）。
+  invalidate_label_widths();
   // 选中态跟 key 走：被移除的 key 如实清空（不静默挪到别的行上）
   if (!selected_key_.empty() && !index_of_key(selected_key_).has_value()) {
     selected_key_.clear();
@@ -54,6 +65,7 @@ void Tree::sync_nodes(const std::vector<TreeNode>& nodes) {
 
 void Tree::clear_nodes() {
   rows_.clear();
+  invalidate_label_widths();
   selected_key_.clear();
   hover_index_ = -1;
   mark_layout_dirty();
@@ -88,6 +100,55 @@ auto Tree::row_rect(std::size_t index) const -> math::Rect {
   if (index >= rows_.size() || bounds_.is_empty()) return {};
   const auto row = static_cast<float>(index);
   return math::Rect{bounds_.x, bounds_.y + row * row_height_, bounds_.width, row_height_};
+}
+
+/// 本帧**实际在裁剪区内的行区间** `[先, 后)`（半开）；无交集时 `[0, 0)`。
+///
+/// 为何需要它（2026-10-14，实测）：`Tree` 是**自绘**组件，行不是子元素，因此
+/// `Element::paint` 的视口剔除（只覆盖子元素树）覆盖不到它——`paint_content` 过去
+/// 无条件遍历全部行。实测 1000 行树、视口只有 400px（约 15 行可见）时每帧 **5.36 ms**，
+/// 2000 行 10.74 ms、5000 行 41.25 ms（完美线性）：**视口里只显示十几行，却为全部行付账**。
+/// `DESIGN.md §11` 那条「`tree`（1000 节点）< 5 ms」的目标，缺口正在这里。
+///
+/// 口径与 `Element::paint` **逐字一致**（读同一份 `canvas.clip_rect()`、同样按
+/// `device_scale` 折回逻辑坐标）——不另立一套。
+///
+/// 为什么可以**假定裁剪区已经扣掉了父级滚动偏移**：宿主把 `Tree` 放进 `ScrollView` 时，
+/// `ScrollView::arrange` 把偏移烘进子元素的 `bounds_.y`（`rect.y - offset_`），而 `row_rect`
+/// 是相对 `bounds_` 算的——所以 `(clip.top - bounds_.y)` 天然就是「首可见行的内容偏移」。
+/// 反过来，脱开 ScrollView 裸用时裁剪区至少含整棵树的包围盒（或整个画布），区间自然退化成全量。
+///
+/// 竖直方向**不额外加保险外扩**：这里剔除的是一次行填充 + 文本（不投阴影、不发光），
+/// 与元素剔除不同——那条路必须按 `paint_margin` 放宽（见 `Element::paint` 的两条安全前提）。
+/// 水平方向不参与：行的绘制天然受画布裁剪保护，且全宽行的右侧接缝会随着水平裁剪
+/// 出现或消失（若加水平剔除，缩放到某像素宽度时右侧指示条会闪）。
+[[nodiscard]] auto visible_row_range(const st::ui::Tree& tree, const st::raster::Surface& canvas)
+    -> std::pair<std::size_t, std::size_t> {
+  const std::size_t total = tree.node_count();
+  if (total == 0U) return {0U, 0U};
+  const math::Rect bounds = tree.bounds();
+  if (bounds.is_empty() || tree.row_height() <= 0.0f) return {0U, 0U};
+
+  const math::IntRect physical = canvas.clip_rect();
+  const float scale = canvas.device_scale();
+  const float inv = scale > 0.0f ? 1.0f / scale : 1.0f;
+  const float clip_top = static_cast<float>(physical.y) * inv;
+  const float clip_bottom = static_cast<float>(physical.y + physical.height) * inv;
+  if (clip_bottom <= clip_top) return {0U, 0U};  // 空裁剪区：什么都不该画
+
+  const float row_height = tree.row_height();
+  const float local_top = clip_top - bounds.y;
+  const float local_bottom = clip_bottom - bounds.y;
+  if (local_bottom <= 0.0f || local_top >= static_cast<float>(total) * row_height) {
+    return {0U, 0U};
+  }
+
+  const float first_f = std::max(0.0f, local_top) / row_height;
+  const float last_f = std::min(static_cast<float>(total) * row_height, local_bottom) / row_height;
+  const auto first = static_cast<std::size_t>(std::floor(first_f));
+  // 上界按 `ceil` 宽出半行，避免「裁剪区底边正落在行中」时漏画那一行的下半截。
+  const auto last = static_cast<std::size_t>(std::ceil(last_f)) + 1U;
+  return {std::min(first, total), std::min(last, total)};
 }
 
 auto Tree::node_rect(std::string_view key) const -> math::Rect {
@@ -141,12 +202,29 @@ void Tree::apply_theme(const Theme& theme) {
 void Tree::measure(const RenderContext& context, const Constraints& constraints) {
   const TextPort& port = text_port_of(context);
   const Metrics& metrics = context.theme.metrics();
+  const float font_size = style_.font_size;
+
+  // **行宽缓存**（见头文件 `row_label_widths_` 的说明——它换来的是“大目录刷新
+  // 不再线性重排”）：只在行集或字号变化时重算，其余时候 measure 是纯内存扫描。
+  //
+  // 无效判定与填充在同一个 `const` 方法里（缓存字段是 `mutable`，与
+  // `CodeEditor` 的几何缓存同一手法）。
+  if (row_label_widths_.size() != rows_.size() || label_widths_font_size_ != font_size) {
+    row_label_widths_.assign(rows_.size(), 0.0F);
+    for (std::size_t index = 0; index < rows_.size(); ++index) {
+      row_label_widths_[index] = port.measure_width(rows_[index].data.label, font_size);
+    }
+    label_widths_font_size_ = font_size;
+  }
+
+  // measure 第一遍：算出**行内容所需宽度**的最大值（行几何量：缩进 + 箭头 + 内边距）。
+  // 两遍而不是一遍：上面的缓存填充要先把宽度量出来，这一遍只是取最大值。
   float width = 0.0f;
-  for (const auto& row : rows_) {
-    const float indent = static_cast<float>(row.data.depth) * kIndentStep;
-    const float chevron = row.data.is_dir ? kChevronSize + metrics.space_xs : 0.0f;
-    const float need = indent + chevron + kTextInset + port.measure_width(row.data.label, style_.font_size)
-                       + kTextInset;
+  for (std::size_t index = 0; index < rows_.size(); ++index) {
+    const TreeNode& node = rows_[index].data;
+    const float indent = static_cast<float>(node.depth) * kIndentStep;
+    const float chevron = node.is_dir ? kChevronSize + metrics.space_xs : 0.0f;
+    const float need = indent + chevron + kTextInset + row_label_widths_[index] + kTextInset;
     width = std::max(width, need);
   }
   width = std::max(width, 80.0f);
@@ -164,7 +242,15 @@ void Tree::paint_content(const RenderContext& context, raster::Surface& canvas) 
   const Palette& colors = context.theme.colors();
   const Metrics& metrics = context.theme.metrics();
 
-  for (std::size_t index = 0; index < rows_.size(); ++index) {
+  // **逐行视口剔除**（见 `visible_row_range` 的说明）：只画裁剪区内那几行——
+  // 1000 行的树在 400px 视口里是 15 行而不是 1000 行。
+  const auto [first_row, last_row] = visible_row_range(*this, canvas);
+  // 记下本帧区间供宿主在帧首取用（`visible_row_range_now()`）——属性面的
+  // `first_visible` 也从这里回读真值（与 `CodeEditor` 同一手法）。
+  last_visible_first_ = first_row;
+  last_visible_last_ = last_row;
+
+  for (std::size_t index = first_row; index < last_row; ++index) {
     const TreeNode& node = rows_[index].data;
     const math::Rect row = row_rect(index);
     if (row.is_empty()) continue;
@@ -328,11 +414,25 @@ auto Tree::set_property(std::string_view name, std::string_view value) -> bool {
 
 auto Tree::get_property(std::string_view name) const -> std::optional<std::string> {
   if (name == "rows" || name == "count") return std::to_string(rows_.size());
-  // 树自身不滚动（由外部 ScrollView 承载）；`first_visible` 因此恒为 0，
-  // 但它在**契约里仍然必须存在**——“这个组件有没有视口概念”是调用方要问的问题。
-  if (name == "first_visible") return std::string("0");
+  // **视口真值来自上一帧绘制**（`visible_row_range_now()`）——不是恒 0。
+  //
+  // 为何不能"自己算"：`Tree` 自身不滚动，滚动偏移由外部 `ScrollView` 烘进它的
+  // `bounds_.y`；而"滚动到哪里了"这件事**只在绘制期知道**（宿主在帧首问属性时没有
+  // `RenderContext`）。所以缓存上一帧的区间是唯一同时正确又能脱画读到的答案
+  // ——与 `CodeEditor::visible_line_range_now()` 同一立法。
+  //
+  // 从未绘制过（或区块被剔除）时回退到"首行 0"：那是"没有视口信息时最保守的答案"，
+  // 也让"问一个脱画组件"不会得到荒谬的数字。
+  if (name == "first_visible") {
+    return std::to_string(rows_.empty() ? 0U : last_visible_first_);
+  }
   if (name == "visible_rows") return std::to_string(visible_row_count());
-  if (name == "scroll") return std::string("0.0");
+  if (name == "scroll") {
+    // 滚动像素 = 首可见行 × 行高（本组件自身无独立滚动状态，见上）。
+    const double offset = rows_.empty() ? 0.0 : static_cast<double>(last_visible_first_) *
+                                               static_cast<double>(row_height_);
+    return std::format("{:.1f}", offset);
+  }
   if (name == "row_height") return std::format("{:.0f}", row_height_);
   if (name == "selected_key") return std::string(selected_key_);
   if (name == "selected") {

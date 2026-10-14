@@ -445,6 +445,9 @@ auto MergeView::get_property(std::string_view name) const -> std::optional<std::
   if (name == "segments") return std::to_string(plan_.segments.size());
   if (name == "current") return std::to_string(current_segment_);
   if (name == "show_base") return show_base_ ? "true" : "false";
+  // 纵向滚动偏移（px）——与 `FileDialog`/`CompletionPopup` 同一姿态（2026-10-14）：
+  // 本组件原本**没有**滚动读取口，于是它的滚轮方向无法用断言钉住。
+  if (name == "scroll") return std::format("{:.1f}", static_cast<double>(scroll_));
   return Element::get_property(name);
 }
 
@@ -478,7 +481,7 @@ auto MergeView::set_property(std::string_view name, std::string_view value) -> b
 auto MergeView::property_names() const -> std::vector<std::string_view> {
   auto names = Element::property_names();
   names.insert(names.end(), {"conflicts", "resolved", "pending", "segments", "current",
-                             "show_base"});
+                             "show_base", "scroll"});
   return names;
 }
 
