@@ -4489,3 +4489,18 @@ release 档**，文档还记着它在本容器余量踩线 0.66 倍 < 下限 1.3
   （SFINAE 上下文是否被记录），而返回引用把需求彻底去掉，不依赖任何编译器。
 
 > 本章剩余的未完成项已归位到上方 P1/P2 待做区（2026-10-09 整理）。
+
+## Linux 窗口后端：如实未做的能力（2026-10-15）
+
+X11 与 Wayland 两个后端已落地（去装饰建窗、送帧、输入、窗口控制、DPI）。以下是
+**如实未实现**的部分——都返回 `Unsupported` 而不是假装成功，也都不影响主线
+（界面能起、能被控制通道驱动、能截图验证）：
+
+| 能力 | 现状 | 为什么没做 / 怎么做 |
+|---|---|---|
+| X11 窗口图标 | 未实现（`supports_window_icon()=false`） | 需要 `_NET_WM_ICON`（ARGB 数组属性）与 `WM_HINTS` 的 `icon_pixmap` 回退。Win32 侧已有 PNG→HICON 的实现（`platform_win32.cpp`），X11 侧要另写一份"PNG 解码 → ARGB 打包 → XChangeProperty"，工作量中等。优先级低：任务栏图标只在有 WM 的桌面会话里可见，而开发/CI 主要走无头与私有 X 显示 |
+| X11/Wayland 跨进程剪贴板 | 未实现（进程内闭环可用） | X11：完整 ICCCM——`XSetSelectionOwner` + 处理 `SelectionRequest`（按 `TARGETS`/`UTF8_STRING` 应答）+ 读取时发 `SelectionRequest` 等 `SelectionNotify`（**异步**，而 `clipboard_text()` 是同步接口，需要一次有限等待）。Wayland：`wl_data_device_manager` 的 `data_source`/`data_offer` + MIME 协商。两者都不小，且服务器上没有别的桌面应用来互操作——先记在这里 |
+| Wayland 窗口图标 | 未实现 | `xdg-shell` **没有** `set_icon`；标准做法是 `xdg-toplevel-icon-v3`（较新，GNOME 46+ 才支持）或退回 `_NET_WM_ICON`（仅 XWayland 路径）。需要把该协议也纳入 `tools/wayland_bindgen.py` 的输入 |
+| Wayland 分数缩放 | 未实现（用整数倍 `wl_output.scale`） | `wp_fractional_scale_v1`：合成器发 `preferred_scale`（如 150→1.5×），客户端按该值渲染。真做起来还要处理 `wp_viewporter` 的 `set_destination`（缓冲逻辑尺寸 ≠ 窗口尺寸时必须用 viewport 收缩，否则画面被拉伸）。GNOME 默认整数缩放，因此当前实现覆盖了绝大多数场景 |
+| Wayland 输入法（IME） | 未实现 | 需要 `text-input-v3` + `input-method-v2` 协议；当前键盘走 `libxkbcommon`，覆盖直接键入与非拉丁键盘布局，但**中文输入法的候选词窗口**不会出现 |
+| X11 取窗口位置（用于 `begin_move`） | 用"最近一次输入事件的根坐标"代替现场 `XQueryPointer` | 语义等价（WM 校验收到的正是同一事件的时间戳与坐标），且省一次往返。要严格现场取值就把 `XQueryPointer` 加进符号表即可 |

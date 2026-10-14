@@ -3664,8 +3664,9 @@ Result<std::unique_ptr<Backend>> create_backend(std::string_view name);   // 自
 - `headless`：**默认在无 DISPLAY/WAYLAND_DISPLAY 时自动选择**；离屏 Framebuffer，输入事件由控制通道注入。
 - 平台后端：运行时探测（`dlopen`/`LoadLibrary`），不产生链接期依赖；缺失或未实现时如实报 `Unsupported`。
 
-**实现状态**：`headless` 与 **`win32` 已实现**；`x11`/`wayland` 目前只做探测与明确的 `Unsupported`
-（UI 层与软件光栅器与平台无关，补后端是纯粹的窗口层工作量）。
+**实现状态（2026-10-15 更新）**：`headless`、**`win32`、`x11`、`wayland` 四个后端都已落地**。
+X11 与 Wayland 两个新后端与 Win32 同契约、同姿态（**运行时 `dlopen`**、不产生链接期依赖、
+不支持时如实报 `Unsupported`），细节见本节末「Linux 双后端」小节。
 
 **窗口装饰契约（已落地）**：窗框与标题栏**一律由 UI 层自绘，任何平台都不使用系统标题栏**
 （强制约束见 `CONVENTIONS.md` §10 第 7 条）。平台后端的职责因此收窄为三件：贴客户区像素、
@@ -3701,8 +3702,68 @@ Win32 侧的做法要点（**"外观自绘、行为仍用系统"**——不重�
 窗口控制接口齐备（真窗口验证：客户区 == 窗口矩形、最大化 == 工作区、三动作生效）；
 两个示例都已换壳为 `ui::WindowFrame`（gallery：标题栏内含品牌名 + 当前页名 + 主题/DPI/截图三控件；
 gbcode：标题栏内含文件名与脏点），旧的装饰性图标与自建顶部栏退役。
-`x11`/`wayland` 仍是探测 + `Unsupported`：它们的 `Backend` 走桩实现，`supports_window_control()`
-返回 `false`、动作如实拒绝——**组件与应用一行不用改**，补后端的活只剩“起无装饰窗口 + 实现那几个动作”。
+
+### 4.6.1 Linux 双后端（2026-10-15）
+
+X11 与 Wayland 各自落地为**真后端**（不再是桩）。两者与 Win32 逐条对照：
+
+| 能力 | Win32 | X11 | Wayland |
+|---|---|---|---|
+| 去装饰建窗 | `WS_POPUP`（去 `WS_CAPTION`） | `_MOTIF_WM_HINTS` decorations=0 | `zxdg_toplevel_decoration_v1.set_mode(client_side)` |
+| 客户区 == 整窗 | `WM_NCCALCSIZE` 返回 0 | 天然成立（WM 不画框） | 天然成立（客户端绘制） |
+| 帧缓冲上屏 | `BitBlt`（DIB） | `XPutImage`（XImage） | `wl_shm` 共享内存 + `wl_buffer` |
+| 尺寸真源 | 客户区（随时可问） | `XGetWindowAttributes`（随时可问） | **只有 configure 事件** |
+| 拖动 / 缩放 | `WM_NCLBUTTONDOWN` 模态循环 | `_NET_WM_MOVERESIZE` | `xdg_toplevel.move`/`resize(seat, serial, edge)` |
+| 最小化 | `ShowWindow(SW_MINIMIZE)` | `WM_CHANGE_STATE` = IconicState | `xdg_toplevel.set_minimized` |
+| 最大化切换 | `ShowWindow(SW_MAXIMIZE)` | `_NET_WM_STATE_MAXIMIZED_*` | `set_maximized`/`unset_maximized`（无 toggle） |
+| 关闭 | `PostMessage(WM_CLOSE)` | `WM_DELETE_WINDOW` | 无对应请求 → 置 `close_requested`（同一条收尾路径） |
+| 双击识别 | 系统（`CS_DBLCLKS`） | 自算（400ms / 4px） | 自算（同阈值） |
+| DPI 来源 | `GetDpiForWindow` | `Xft.dpi`（X resource） | `wl_output.scale` / `preferred_buffer_scale` |
+| 键盘翻译 | `WM_KEYDOWN` + `WM_CHAR` | `XkbKeycodeToKeysym` + `XLookupString` | `wl_keyboard.keymap` + **libxkbcommon** |
+| 剪贴板 | 系统剪贴板 | CLIPBOARD 选择（进程内闭环） | 未实现（需 `wl_data_device` 全套） |
+| 窗口图标 | `WM_SETICON` | 未实现（`_NET_WM_ICON`） | 未实现（xdg-shell 无 set_icon） |
+
+**为什么两个 Linux 后端都手写 ABI + `dlopen`（而不是 `#include <X11/Xlib.h>` / scanner 生成）**：
+
+- 框架硬约束是「系统能力一律运行时 `dlopen` 可选加载」（`CONVENTIONS.md` §10 第 1 条）。
+- 实测本机（Ubuntu + GNOME）**正是这条约束的最佳论据**：`libX11.so.6` 与
+  `libwayland-client.so.0` 都在，而 `/usr/include/X11/Xlib.h`、`<wayland-client.h>`、
+  `wayland-scanner`、`/usr/share/wayland-protocols` **一个都没有**（没装 `-dev` 包、无 sudo）。
+- 若改成编译期依赖：① 这类机器**根本编不出霜天**（连无头模式都跑不了）；
+  ② 版本不符时是链接期失败，而不是"如实报 `Unsupported` 并回退 headless"。
+- 手写 ABI 的代价是运行期崩溃而非编译期报错，因此每条假设都**有据可查**：
+  Win32 侧靠 SDK 头文件（随编译器走）；X11 侧按 `Xlib.h`/`X11.h`/`keysymdef.h` 抄常量、
+  按 `ImUtil.c` 核对 `XImage` 内存所有权；Wayland 侧按 `wayland-util.h` 抄结构、
+  按 `scanner.c`/`connection.c` 核对签名编码与**事件回调的确切签名**
+  （参考副本留档 `third_party/wayland/refs/`，不参与构建）。
+
+**Wayland 的协议绑定是自研生成的**（`tools/wayland_bindgen.py` → `wayland_protocol.hpp`）：
+输入是官方协议 XML（`third_party/wayland/*.xml`，含 SHA-256 台账），输出消息签名串、
+`wl_interface` 描述与 opcode 表；配合 `wl_proxy_marshal_array_flags` 这套**泛型调用**即可
+完成协议交互，因此不需要 scanner、也不需要链接 libwayland-client。
+
+**这一轮实测抓到的四类缺陷**（都记在代码注释里，因为它们会重演）：
+
+| 现象 | 真因 | 教训 |
+|---|---|---|
+| X11 属性读出来是垃圾 / 读不到 | `XGetWindowProperty` **漏抄第 7 个参数 `req_type`**（整条参数链错位一位） | 手写 ABI 的签名要逐字段与官方头对照；错位不会报错，只会"读不到" |
+| Wayland 起窗失败：`null value passed for arg 1` | `xl_surface.get_xdg_surface` 签名是 **`"no"`**（new_id 在前），而我在末尾追加 `new_id` | `new_id` 的位置由签名决定；libwayland 会明确报错（这次是它救了我） |
+| 像素比对报"75% 不同" | 帧缓冲是**整窗宽**、服务器取样区只有 160 宽，用同一线性游标遍历而**行距不同** | 跨行距的比对必须按 `(x,y)` 各算下标；"数字吓人"往往是工具错了 |
+| 验证"帧没涨 → 送帧坏了" | 静止界面**不该**重绘（省电的正确行为） | 判据要先问"这现象是否本就该发生"，再问"是不是坏了" |
+
+**验证**（真窗口，可重复执行）：
+
+- `tools/x11_win_check.py --spawn-xwayland`（15 项）：窗口已映射 / **去装饰生效**（无
+  `_NET_FRAME_EXTENTS`）/ 客户区 == 画布物理尺寸 / `_NET_WM_NAME`（UTF-8）/ `WM_PROTOCOLS`
+  含 `WM_DELETE_WINDOW` / `_NET_WM_PID` == 进程 pid / `metrics.backend == x11` /
+  **帧缓冲与服务器侧像素逐像素一致**（19200 像素样本）/ `invoke maximize|minimize` 受理 /
+  `invoke close` 正常收尾。脚本可 `--spawn-xwayland` 自起**无窗口管理器**的私有 X 显示
+  （坐标确定、不受桌面 reparenting 干扰）。
+- `tools/wayland_win_check.py`（10 项）：后端身份 / 非无头回退 / `device_scale=2.0` 取自
+  `wl_output.scale`（GNOME 2× 缩放协商生效）/ 帧缓冲 4096×2496 / 触发重绘后帧推进 /
+  组件树可读 / 截图落盘尺寸 == 帧缓冲尺寸 / `invoke close` 正常收尾。
+- `tests/shell_backend_test.cpp` 三条契约用例：后端**如实失败**（无显示服务时不得给假对象）、
+  后端名与请求一致（不得静默换）、无头后端**永不**声称支持窗口控制。
 
 验证（三道，见 §8.5）：`tests/ui_title_bar_test.cpp`（判定纯函数 + 几何/命中/动作面/无宿主降级 +
 窗框容器：内容槽/边缘条/附属槽 + **附属槽不触发窗口动作**两条：

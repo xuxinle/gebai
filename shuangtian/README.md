@@ -28,7 +28,7 @@
 | **没有 GPU / 驱动不全** | 软件光栅器（扫描线覆盖率抗锯齿 + SIMD 快路径）完整可用、且是**语义真相源**；GPU（D3D11）是首选路径，不可用时自动回退，不阻断任何功能 |
 | **HiDPI 屏上字发虚、发丝线糊** | 逻辑像素 / 物理像素分离：`Canvas` 绘制 API 收逻辑坐标，内部按 `device_scale` 在**物理分辨率**上光栅化（字形亦按物理尺寸重栅格化）；运行时 `app.set_scale` 即时切换 |
 | **想让界面逻辑少写 C++** | 内置脚本层（QuickJS，默认关闭）：`$('#status').set({text:'…'})`、`on('#save','click',…)`、`every(1000,…)`——读写与协议 `get`/`set`/`invoke` **同一份实现**；跨语言边界用「快照批量 + 变更集提交」，跨界次数与改了多少属性无关 |
-| **要真的弹出窗口** | Windows 上开箱即用（直接双击 exe）：Win32 窗口后端已实现——DPI 感知、鼠标/键盘/滚轮、剪贴板、**窗口缩放逐帧真重绘**（拖动中一直 1:1 锐利，不是“先拉伸、松手才重建”；实测拖动中画面与同尺寸正确渲染**逐像素相同**，见 `DESIGN.md` §4.6.1）；**窗框一律自绘**（`ui::WindowFrame`：标题栏 + 内容槽 + 八向缩放边缘，不用系统标题栏——三平台因此长得一模一样，见 `CONVENTIONS.md` §10 第 7 条）；Linux 侧 `x11`/`wayland` 仍是探测 + 明确 `Unsupported` |
+| **要真的弹出窗口** | Windows 上开箱即用（直接双击 exe）：Win32 窗口后端已实现——DPI 感知、鼠标/键盘/滚轮、剪贴板、**窗口缩放逐帧真重绘**（拖动中一直 1:1 锐利，不是“先拉伸、松手才重建”；实测拖动中画面与同尺寸正确渲染**逐像素相同**，见 `DESIGN.md` §4.6.1）；**窗框一律自绘**（`ui::WindowFrame`：标题栏 + 内容槽 + 八向缩放边缘，不用系统标题栏——三平台因此长得一模一样，见 `CONVENTIONS.md` §10 第 7 条）；**Linux 侧 `x11` 与 `wayland` 双后端已落地**（2026-10-15）：`--backend=x11` / `--backend=wayland` 起真窗口，窗口控制（最小化/最大化/关闭/拖动/八向缩放）齐备、鼠标键盘滚轮悬停可用、DPI 跟随系统（X11 读 `Xft.dpi`、Wayland 取 `wl_output.scale`——实测 GNOME 2× 下 `device_scale=2.0`）；两后端**都零编译期依赖**（运行时 `dlopen`，没装 `-dev` 包的机器照样能编、能跑、能无头） |
 | **要在别处写一个霜天应用** | 独立工程：清单写 `"framework": {"path": "…"}` 即可（源/头/标志/嵌入/交叉编译工具链自动并入，无需安装、无需 CMake）；`st init` 生成工程骨架，首个工程冷构建 ≈30s、**第二个 ≈4s**（共享对象缓存）。详见 `docs/independent_project.md` |
 | **要在 Linux 上产出 Windows 程序** | 交叉编译：清单声明工具链，`st build gallery --toolchain=mingw` → `build/dev-mingw/bin/gallery.exe`（实测 PE32+，仅依赖 Windows 自带 DLL） |
 | **要保证代码在三个平台都对** | `CONVENTIONS` §10 跨平台强制约束（平台差异只能进 `platform_*`；路径统一 UTF-8 经 `st::fs`；`argv` 经 `ST_MAIN` 正规化；系统库按目标平台解析） |
@@ -87,6 +87,27 @@ python3 tools/st_visual_check.py     # 完整视觉验证：dev + san 两档、D
 ./build/bin/st test                  # 全部单元测试
 ./build/bin/st test --san            # ASan + UBSan 档
 ./build/bin/st lint                  # 禁用特性静态扫描（CONVENTIONS §8）
+```
+
+### 有桌面会话时：起真窗口（2026-10-15 起可用）
+
+```bash
+# X11（含 XWayland；有 DISPLAY 即可）
+./build/dev/bin/gallery --backend=x11 --control-port 0 --control-file /tmp/st-ctl.json
+
+# Wayland（GNOME/KDE 原生会话；有 WAYLAND_DISPLAY 即可）
+./build/dev/bin/gallery --backend=wayland --control-port 0 --control-file /tmp/st-ctl.json
+```
+
+两个后端都**零编译期依赖**（运行时 `dlopen` libX11 / libwayland-client）——
+服务器上没装 `libx11-dev`/`libwayland-dev` 也能编、能跑；探测不到就如实报
+`Unsupported` 并（自动选择时）回退 headless，而不是链接期失败。
+
+真窗口验证（可自起一个无 WM 的私有 X 显示，坐标确定、不干扰桌面）：
+
+```bash
+python3 tools/x11_win_check.py --spawn-xwayland   # 去装饰/客户区==画布/像素逐像素一致/窗口控制
+python3 tools/wayland_win_check.py                # 后端身份/缩放/送帧推进/截图落盘
 ```
 
 在歌白智能体里，这一切由 **`shuangtian` 子代理**封装为工具：`shuangtian_run`（构建/测试/lint/启动/停止）、`shuangtian_tree/find/get/set/invoke`、`shuangtian_click/type/key`、`shuangtian_capture`（截图直接可见）、`shuangtian_visual/wait/metrics/call`。
@@ -289,8 +310,8 @@ shuangtian_run(action=build) → action=start（无头，返回端口/PID）
 | 能力 | 状态 |
 |---|---|
 | 无头后端（headless）+ 软件光栅器 | ✅ 完整（本仓库全部示例与验证都在无头下完成） |
-| 窗口后端 | ✅ **win32 完整**（真窗口 + 鼠标键盘 + 剪贴板 + DXGI swapchain 呈现 + DPI 感知与切换 + **首帧画完才显窗**，无启动黑框/白底）；⏳ x11 / wayland 未做（运行时探测缺失即回退 headless，不阻断流程） |
-| **窗框（自绘标题栏 + 窗框容器）** | ✅ **Win32 已落地**：去系统标题栏建窗（`WS_POPUP\|WS_THICKFRAME`）+ `WM_NCCALCSIZE` 客户区覆盖整窗 + `WM_NCHITTEST` 接管八向缩放与拖动（**保留 Aero Snap**）+ 最大化按工作区校正（不盖任务栏）+ `WM_GETMINMAXINFO` 最小尺寸护栏；组件 `ui::WindowFrame`（标题栏 + 内容槽 + **八向缩放边缘**）与 `ui::TitleBar`（标题/图标/三按钮/附属槽/双击最大化）+ `ui::WindowControl` 端口 + `Backend` 窗口控制接口；**两个示例已换壳**（gallery 标题栏含品牌名/当前页名/主题·DPI·截图；gbcode 含文件名与脏点，旧的装饰图标与自建顶栏退役）。真窗口验证：客户区 == 窗口矩形、最大化 == 工作区、三动作生效（`tools/title_bar_win_check.py`）。⏳ x11/wayland 按同一契约待补（当下 `supports_window_control()=false`、动作如实拒绝，**组件与应用无需改动**） |
+| 窗口后端 | ✅ **win32 / x11 / wayland 三个都已落地**（真窗口 + 鼠标键盘滚轮 + DPI + **首帧画完才显窗**，无启动黑框/白底）。win32 另有剪贴板与 DXGI swapchain 呈现；x11 有剪贴板（进程内）、去装饰走 `_MOTIF_WM_HINTS`；wayland 用 `wl_shm` 共享内存送帧、去装饰走 `xdg-decoration` 的 `client_side`。三者都**运行时探测**（不产生链接期依赖），缺失即回退 headless。⏳ 如实未做（不假装成功）：x11 窗口图标、x11/wayland 跨进程剪贴板、wayland 窗口图标与分数缩放 |
+| **窗框（自绘标题栏 + 窗框容器）** | ✅ **三平台已落地**（Win32 / X11 / Wayland）。**Win32**：去系统标题栏建窗（`WS_POPUP\|WS_THICKFRAME`）+ `WM_NCCALCSIZE` 客户区覆盖整窗 + `WM_NCHITTEST` 接管八向缩放与拖动（**保留 Aero Snap**）+ 最大化按工作区校正（不盖任务栏）+ `WM_GETMINMAXINFO` 最小尺寸护栏；组件 `ui::WindowFrame`（标题栏 + 内容槽 + **八向缩放边缘**）与 `ui::TitleBar`（标题/图标/三按钮/附属槽/双击最大化）+ `ui::WindowControl` 端口 + `Backend` 窗口控制接口；**两个示例已换壳**（gallery 标题栏含品牌名/当前页名/主题·DPI·截图；gbcode 含文件名与脏点，旧的装饰图标与自建顶栏退役）。真窗口验证：客户区 == 窗口矩形、最大化 == 工作区、三动作生效（`tools/title_bar_win_check.py`）。**X11**：`_MOTIF_WM_HINTS` 去装饰（实测 GNOME/Mutter 尊重它——`_NET_FRAME_EXTENTS` 消失）、`_NET_WM_MOVERESIZE` 拖动与八向缩放、`_NET_WM_STATE` 最大化、`WM_DELETE_WINDOW` 关闭（`tools/x11_win_check.py`，15 项）。**Wayland**：`xdg-decoration` 声明 `client_side`（xdg-shell 自身没有"不要服务端装饰"的表示）、`xdg_toplevel.move/resize(seat, serial)`、configure 握手（`tools/wayland_win_check.py`，10 项） |
 | 硬件合成 | ✅ **D3D11 全链路**（设备层→着色器原语→路径→DXGI 呈现，`--renderer=auto\|gpu\|software`）；三维为软件腿保底（系统高阶腿按测量触发，见 `DESIGN.md` §8.4）；⏳ Vulkan / Metal 待做 |
 | DPI（含非整数 1.5x、运行时切换） | ✅ |
 | 字体（TTF/OTF/OTC-CFF/CID、CJK 回退、SC face 优选） | ✅ |

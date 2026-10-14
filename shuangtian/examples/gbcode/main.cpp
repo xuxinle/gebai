@@ -100,6 +100,7 @@ using namespace gbcode_ui;
 
 struct Options {
   bool headless{false};
+  std::string backend{};
   float scale{0.0f};
   std::string theme{"light"};
   std::string language{"cpp"};
@@ -238,6 +239,14 @@ auto print_usage(std::string_view program) -> void {
       std::exit(0);
     }
     if (raw == "--headless") options.headless = true;
+
+    // `--backend` 必须照接：应用层有**自己的**参数解析（不过 `st::app::parse_cli`），
+
+    // 漏接的开关会被静默忽略——"我明明指定了 x11/wayland"会变成谜案
+
+    //（Linux 上验证两个窗口后端全靠它）。
+
+    if (raw == "--backend") options.backend = value("");
     else if (raw == "--enable-script") options.enable_script = true;
     // `--scale` 夹到 [0.1, 10]：0 会让一切尺寸归零（窗口/字号/命中区全灭），
     // 负数在多数后端是非法 DPI。夹取而非报错——意图明确（想大想小），只是数值过头。
@@ -321,7 +330,8 @@ auto run_app(int argc, char** argv) -> int {
   // 窗框一律自绘：窗口不带系统标题栏（`CONVENTIONS.md` §10 第 7 条）。
   // 装饰开关仍留给宿主——`--decorations` 是给"就想看系统窗框"的排查场景用的。
   app_options.decorations = options.decorations;
-  app_options.backend = options.headless ? "headless" : std::string{};
+  app_options.backend = !options.backend.empty() ? options.backend
+                        : (options.headless ? std::string("headless") : std::string{});
   // 脚本能力显式开启：默认关闭，控制通道的 `script` 方法仅在开启后可用
   app_options.enable_script = options.enable_script;
   app_options.text_lcd = options.text_lcd;

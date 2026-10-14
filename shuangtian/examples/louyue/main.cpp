@@ -51,6 +51,7 @@ namespace dsl = st::ui::dsl;
 /// 命令行选项（承 gallery/gbcode 的形态：只解析本示例关心的几个）。
 struct Options {
   bool headless{false};
+  std::string backend{};
   std::string theme{"light"};
   std::string control_port{"0"};
   std::string control_file{};
@@ -67,6 +68,12 @@ auto parse_options(int argc, char** argv) -> Options {
       return fallback;
     };
     if (raw == "--headless") options.headless = true;
+
+    // `--backend` 必须照接：应用层有**自己的**参数解析（不过 `st::app::parse_cli`），
+    // 漏接的开关会被静默忽略——"我明明指定了 x11/wayland"会变成谜案
+    //（Linux 上验证两个窗口后端全靠它）。
+
+    if (raw == "--backend") options.backend = value("");
     else if (raw == "--theme") options.theme = value("light");
     else if (raw == "--control-port") options.control_port = value("0");
     else if (raw == "--control-file") options.control_file = value({});
@@ -426,7 +433,8 @@ auto run_app(int argc, char** argv) -> int {
   app_options.height = 760;
   app_options.title = "镂月 Lunaris · 霜天";
   app_options.headless = options.headless;
-  app_options.backend = options.headless ? "headless" : std::string{};
+  app_options.backend = !options.backend.empty() ? options.backend
+                        : (options.headless ? std::string("headless") : std::string{});
   app_options.theme = options.theme == "dark" ? st::ui::ThemeMode::Dark : st::ui::ThemeMode::Light;
   app_options.control_port = static_cast<std::uint16_t>(std::stoi(options.control_port));
   app_options.control_file = options.control_file;

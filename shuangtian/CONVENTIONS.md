@@ -13,7 +13,7 @@
 | 标准 | `-std=c++20`（**GCC 13.3 / 16.2** 与 **Clang 23** 实测基线；`<format>`/`<expected>`/concepts/ranges/span 均须可用） |
 | 编译器 | 由 `stpm` 直驱（不经 CMake/Make）：**g++ 优先，clang++ 次之**——两者是**同一条口径**（GCC 风格标志 + `-MMD` 依赖 + `-l` 链接 + libstdc++ 运行库），所以构建系统只有一套命令，不按编译器族分叉。Windows 自举用 `bootstrap.ps1`（g++ 优先，MSVC 回退；对应 `bootstrap.sh`） |
 | 第三方依赖 | 框架本体**零第三方依赖**；后续引入的第三方源码一律由 `stpm` 统一管理（见 `DESIGN.md`「包管理」），不得绕过 |
-| 系统能力 | 一律**运行时 `dlopen` 可选加载**（X11/Wayland/GL/Vulkan/TLS），缺失即回退或明确报错 |
+| 系统能力 | 一律**运行时 `dlopen` 可选加载**（X11/Wayland/GL/Vulkan/TLS），缺失即回退或明确报错。**X11/Wayland 窗口后端即此条的最佳论据**：目标机器常常有运行库而无 `-dev` 头文件（实测 Ubuntu+GNOME 就是），编译期依赖会让"连无头都编不出来" |
 | 平台分支 | 用 `#if defined(_WIN32)` 等**条件编译指令**（允许），禁止用**函数式宏**做分支 |
 
 ## 2. 禁用清单（硬红线）

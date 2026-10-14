@@ -12,9 +12,13 @@
 
 #include "st/test/test.hpp"
 
+#include <cstdlib>
 #include <memory>
+#include <string>
+#include <string_view>
 
 #include "st/shell/shell.hpp"
+#include "st/ui/window_control.hpp"
 
 namespace {
 
@@ -203,4 +207,80 @@ ST_TEST(backend_headless_clipboard_roundtrip) {
   const auto second = backend->clipboard_text();
   ST_CHECK(second.has_value());
   if (second.has_value()) ST_CHECK_EQ(*second, std::string("new"));
+}
+
+// ————————————————————————————————————————————————————————————————————————————
+// 平台后端的**契约面**（2026-10-15，Linux 双后端落地时补）
+//
+// 为什么这些用例值得写（它们不测像素，只测"会不会撒谎"）：
+// 窗口后端的能力是靠**运行时探测**得到的（`dlopen` libX11 / libwayland-client），
+// 而"探测到了但用不了"与"压根没探测到"是两件事。若后端在后者上返回一个
+// 看似正常的对象，应用会拿到一个**永远不显示任何东西**的窗口——比启动失败难查得多。
+// 因此这里钉住三条不变量：
+//   ① 工厂在**不支持**时必须如实失败（而不是给个假对象）；
+//   ② `name()` 与请求的后端一致（"我明明指定了 x11"不能被静默换成别的）；
+//   ③ 无头后端永不声称支持窗口控制（UI 据此如实禁用按钮，而不是画个点不动的装饰）。
+// ————————————————————————————————————————————————————————————————————————————
+
+ST_TEST(platform_backends_report_unavailable_honestly) {
+  // 在**任意**机器上都成立的断言：不存在"探测到了库、却连窗口都不用建就报成功"这回事。
+  // x11/wayland 在无对应显示服务时必须失败；win32 在非 Windows 上必须失败。
+  // 反向验证：把 `create_backend` 里的 x11/wayland 分支改回"返回桩对象"，
+  // 在无 DISPLAY/WAYLAND_DISPLAY 的环境下本用例变红。
+  struct Case {
+    const char* backend;
+    bool requires_display;
+  };
+  const Case cases[] = {{"x11", true}, {"wayland", true}, {"win32", false}};
+  for (const Case& item : cases) {
+    const bool has_x11_display = std::getenv("DISPLAY") != nullptr;
+    const bool has_wayland_display = std::getenv("WAYLAND_DISPLAY") != nullptr;
+    const bool display_present = std::string_view(item.backend) == "x11" ? has_x11_display
+                                 : std::string_view(item.backend) == "wayland" ? has_wayland_display
+                                                                              : true;
+    auto backend = st::shell::create_backend(item.backend);
+    if (item.requires_display && !display_present) {
+      // 无显示服务：**必须如实失败**（而不是给一个永远不显示的窗口）
+      ST_CHECK(!backend.has_value());
+    } else if (backend.has_value()) {
+      // 有显示服务（或 win32 in Windows）：名字必须与请求一致——
+      // 静默换成别的后端会让"我指定了 x11"变成谜案。
+      ST_CHECK_EQ(std::string((*backend)->name()), std::string(item.backend));
+    }
+#if !defined(_WIN32)
+    // 非 Windows 上 win32 后端只能是"如实失败"
+    if (std::string_view(item.backend) == "win32") ST_CHECK(!backend.has_value());
+#endif
+  }
+}
+
+ST_TEST(headless_backend_never_claims_window_control) {
+  // 无头后端 `supports_window_control()` 必须是 false：UI 据此**如实禁用**窗框按钮
+  // （`ui::WindowControl::window_control_available`），而不是画一个点不动的装饰。
+  // 反过来，若它报 true 而动作全部 `Unsupported`，用户看到的是"按钮能点但没反应"。
+  auto backend = st::shell::create_backend("headless");
+  ST_CHECK(backend.has_value());
+  if (!backend.has_value()) return;
+  WindowOptions options;
+  options.width = 320;
+  options.height = 240;
+  options.renderer = "software";
+  if (auto status = (*backend)->create_window(options); !status) return;
+  ST_CHECK(!(*backend)->supports_window_control());
+  ST_CHECK(!(*backend)->headless() == false);   // 无头就是无头（不得谎报有窗口）
+  // 窗口动作一律如实拒绝（不是"静默无效"）
+  ST_CHECK(!(*backend)->minimize().has_value());
+  ST_CHECK(!(*backend)->toggle_maximize().has_value());
+  ST_CHECK(!(*backend)->begin_move().has_value());
+  ST_CHECK(!(*backend)->begin_resize(st::ui::WindowEdge::Right).has_value());
+  ST_CHECK(!(*backend)->maximized());
+}
+
+ST_TEST(unknown_backend_name_is_rejected_not_silently_ignored) {
+  // 拼错的后端名必须**报错**："我明明写了 x11 "（带空格）静默落回自动探测，
+  // 会让人以为后端工作正常，实际跑的是另一个后端。
+  auto backend = st::shell::create_backend("x11 ");
+  ST_CHECK(!backend.has_value());
+  auto second = st::shell::create_backend("nope");
+  ST_CHECK(!second.has_value());
 }
