@@ -195,6 +195,15 @@ class MarkdownView : public Element {
     float line_height{0.0f};   ///< 行高（文本垂直居中基准）
     float text_x{0.0f};        ///< 文本起点 x（项目符号列之后）
     std::vector<Span> spans{};
+    /// 本行**扁平纯文本 + 每码点前缀宽**，供**字符级选择**用。
+    ///
+    /// 为何要这份冗余：选择需要一个**单一坐标系**（字节偏移 ↔ x 可互推）。
+    /// 若在 `spans` 上直接算，每个 Span 各自计时会有“同一行两种口径”的风险
+    ///（折行/换行位置会静默错位），且**代码行以前根本不填 `span_x`**。
+    /// 分工：选择与命中用 `flat`/`flat_prefix`，绘制仍用 `spans`（保留着色）。
+    std::string flat{};
+    /// `flat` 里每个**码点起始处**的 x（相对 `text_x`；长度 = 码点数 + 1）。
+    std::vector<float> flat_prefix{};
   /// 每个 Span 的 x 区间（与 `spans` 一一对应，仅链接片段有意义）。
   ///
   /// 为何在**排版期**写：命中测试（`link_at`）需要“鼠标 x 落在哪个 Span 里”，
@@ -257,21 +266,37 @@ class MarkdownView : public Element {
   /// 当前悬停的链接（空 = 无）；悬停时链接额外加粗下划线强调。
   std::string hovered_link_{};
 
-  // —— 文本选择（2026-10-13：渲染视图可复制）——
-  // 行级选择：起点行/终点行（内容坐标的行下标，-1 = 无选择）。拖选跨行时
-  // 中间行整行高亮；复制时按行拼接**纯文本**（spans 的文字，去样式）。
-  // 为什么是行级而不是字符级：排版行没有「位置→字节」的逆映射（字符级要
-  // 逐 span 命中测试），而行级已覆盖「把这段拷走」的主用例；字符级精确选择
-  // 留给源码模式（那就是 CodeEditor）。
-  int select_anchor_{-1};    ///< 拖选起点行
-  int select_focus_{-1};     ///< 拖选终点行（高亮 [min, max]）
-  bool selecting_{false};    ///< 拖选中（MouseMove 继续更新 focus）
+  // —— 文本选择（2026-10-13）——
+  //
+  // **字符级**选择：锚点与焦点都是 `{line, offset}`（line = `rows_` 下标，
+  // offset = 该行 `flat` 里的**字节偏移**）。拖选时高亮精确到字符，
+  // 复制时分行拼接选中片段（跨行时行间补 `\n`）。
+  //
+  // 为何不再用行级：用户实测“不好用”——行级无法选中一行内的部分文字，
+  // 也无法从行中开始跨行选。字符级需要「位置 → 字节」的逆映射，
+  // 靠 `Row::flat` + `flat_prefix` 提供（排版期算好，命中期不重量宽）。
+  struct Caret {
+    int line{-1};
+    std::size_t offset{0};
+    [[nodiscard]] auto valid() const noexcept -> bool { return line >= 0; }
+  };
+  Caret select_anchor_{};        ///< 拖选起点（按下的那一端）
+  Caret select_focus_{};         ///< 拖选终点（跟随鼠标的那一端）
+  bool selecting_{false};        ///< 拖选中（MouseMove 继续更新 focus）
+  bool has_selection_{false};    ///< 是否存在非空选择（两端相等 = 无）
+
+  /// 选择区间的**有序**两端（begin ≤ end）。
+  [[nodiscard]] auto selection_ends() const -> std::pair<Caret, Caret>;
+  /// 命中：内容坐标 → 最近的车符位（行内按 x 找到最近的字节偏移）。
+  [[nodiscard]] auto caret_at(math::Point point) const -> Caret;
+  /// 行内字节偏移 → x（相对该行 `text_x`）；靠 `flat_prefix` 二分。
+  [[nodiscard]] auto offset_to_x(const Row& row, std::size_t offset) const -> float;
 
   // —— 排版 ——
   void rebuild_rows(const RenderContext& context, float width);
-  /// 行下标 ↔ 内容 y 的互查（选择用；越界/空白区返回最近行）。
+  /// 行下标 ↔ 内容 y 的互查（选择/滚动用；越界/空白区返回最近行）。
   [[nodiscard]] auto row_at_y(float content_y) const -> int;
-  /// 高亮选中行（paint 里画在文本层之下）。
+  /// 高亮选区（paint 里画在文本层之下，**逐行分段**：每行的选中区间独立算）。
   void paint_selection(raster::Surface& canvas, const struct Palette& colors) const;
   void append_blocks(const std::vector<st::md::Block>& blocks, const RenderContext& context,
                      const Frame& frame, float& y);

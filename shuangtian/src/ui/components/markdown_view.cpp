@@ -23,6 +23,33 @@ using components_internal::text_port_of;
 
 namespace {
 
+/// 把一个 Span 的文字拼进行内扁平文本，并把它的**每个码点起始 x** 追加到 `prefix`。
+///
+/// `start_x` = 该 Span 在本行内的起始 x（由调用方从上一个 Span 的末尾续传）——
+/// 这样 `prefix` 才是**行内全局**坐标，与 `Row::text_x` 配对后能直接得到屏幕 x。
+///
+/// 用模板推导 Span 类型：`Span` 是 `MarkdownView` 的嵌套类型，在匿名命名空间里
+/// 写 `const Span&` 会被解析成另一个不完整类型（实测报 "invalid initialization …
+/// from st::ui::MarkdownView::Span"）。
+///
+/// 为何每码点都要算（而不是只记 Span 端点）：字符级选择的「鼠标 x → 字节偏移」
+/// 要在**字符**粒度上取最近边界；只存端点就只能整段选。
+template <typename SpanT, typename TextPortT>
+void markdown_append_flat_prefix(std::string& flat, std::vector<float>& prefix, float start_x,
+                                 const SpanT& span, const TextPortT* port) {
+  if (port == nullptr) return;
+  if (prefix.empty()) prefix.push_back(start_x);   // 首码点边界 = Span 起点
+  const std::size_t count = st::utf8_length(span.text);
+  float x = start_x;
+  for (std::size_t i = 0; i < count; ++i) {
+    const std::string_view one = st::utf8_slice(span.text, i, 1);
+    // 与前缀累计同口径（逐码点）——整串测量含字距调整，会比逐字累加小。
+    x += port->measure_width(one, span.size);
+    prefix.push_back(x);
+  }
+  flat += span.text;
+}
+
 // —— 版式常量（尺寸/间距；颜色一律来自主题 token，不在此出现）——
 
 constexpr float kBodyLineHeight{1.6f};        ///< 正文学行高倍数（DESIGN §5：Markdown 段落 1.6）
@@ -242,9 +269,10 @@ void MarkdownView::set_markdown(std::string markdown) {
   if (!markdown.empty()) blocks_ = stream_.feed(markdown);
   rebuild_plain_text();
   scroll_offset_ = 0.0f;
-  // 内容全换：选择下标指向的行已不存在，一并清（防悬垂下标高亮到无关行）。
-  select_anchor_ = -1;
-  select_focus_ = -1;
+  // 内容全换：选择端点指向的行/偏移已失效，一并清（防高亮到无关位置）。
+  select_anchor_ = Caret{};
+  select_focus_ = Caret{};
+  has_selection_ = false;
   selecting_ = false;
   want_bottom_ = false;
   needs_layout_ = true;
@@ -476,8 +504,12 @@ auto MarkdownView::invoke_action(std::string_view action, std::string_view argum
   }
   if (action == "select_all") {
     if (rows_.empty()) return false;
-    select_anchor_ = 0;
-    select_focus_ = static_cast<int>(rows_.size()) - 1;
+    // 全选 = 首行首字 .. 末行末字（字符级语义）。
+    select_anchor_ = Caret{0, 0};
+    const int last = static_cast<int>(rows_.size()) - 1;
+    select_focus_ = Caret{last, rows_[static_cast<std::size_t>(last)].flat.size()};
+    has_selection_ = true;
+    selecting_ = false;
     mark_dirty();
     return true;
   }
@@ -629,7 +661,7 @@ void MarkdownView::push_spans(std::vector<Span> spans, const RenderContext& cont
   std::vector<std::pair<float, float>> line_x{};
 
   const auto flush = [&rows = rows_, &line, &line_x, &line_width, &y, x, width, line_height,
-                      kind]() {
+                      kind, &port]() {
     Row row;
     row.kind = kind;
     row.box = math::Rect{x, y, width, line_height};
@@ -637,6 +669,15 @@ void MarkdownView::push_spans(std::vector<Span> spans, const RenderContext& cont
     row.text_x = x;
     row.spans = line;
     row.span_x = line_x;
+    // 行内**扁平文本 + 每码点前缀宽**（字符级选择用，见 `Row::flat` 的说明）。
+    // 在这里做而不是在选择时做：排版期已经知道每个 Span 的字号（代码块与正文不同），
+    // 选择期只拿得到 `Row`——重算会与折行结果脱钩。
+    float prefix_x = 0.0f;
+    for (const Span& span : row.spans) {
+      markdown_append_flat_prefix(row.flat, row.flat_prefix, prefix_x, span, &port);
+      if (!row.flat_prefix.empty()) prefix_x = row.flat_prefix.back();
+    }
+    if (row.flat_prefix.empty()) row.flat_prefix.push_back(0.0f);
     rows.push_back(std::move(row));
     line.clear();
     line_x.clear();
@@ -762,7 +803,8 @@ auto MarkdownView::inline_spans(const std::vector<st::md::Inline>& inlines, Colo
 
 void MarkdownView::append_code_block(const st::md::Block& block, const RenderContext& context,
                                      const Frame& frame, float& y) {
-  (void)context;
+  // 代码行也要能字符级选中（缩进/列对齐早就有，但复制以前只能整行）。
+  const TextPort* port_ptr = &text_port_of(context);
   const float size = metrics_.code;
   const float line_height = size * kCodeLineHeight;
   const float box_width = std::max(frame.avail, kMinTextWidth);
@@ -774,7 +816,7 @@ void MarkdownView::append_code_block(const st::md::Block& block, const RenderCon
   const std::size_t first_row = rows_.size();
 
   const auto push_line = [this, &block, &text_x, &text_width, &frame, &box_width, &line_height,
-                          &size, &top](float line_y, std::size_t begin, std::size_t end,
+                          &size, &top, port_ptr](float line_y, std::size_t begin, std::size_t end,
                                        const std::vector<st::md::Token>& tokens,
                                        std::size_t& token_index) {
     Row row;
@@ -789,7 +831,15 @@ void MarkdownView::append_code_block(const st::md::Block& block, const RenderCon
       row.spans = code_line_spans(block.code, begin, end, tokens, token_index, size);
       // 代码块行全部走等宽（语法高亮的每个 token 片段都是代码）
       for (Span& span : row.spans) span.code = true;
+      // 字符级选择依赖 `flat`/`flat_prefix`——代码行以前**不填** `span_x`，
+      // 于是只能整行复制。这里与正文行同一套算法（代码的选择需求只会更强）。
+      float prefix_x = 0.0f;
+      for (const Span& span : row.spans) {
+        markdown_append_flat_prefix(row.flat, row.flat_prefix, prefix_x, span, port_ptr);
+        if (!row.flat_prefix.empty()) prefix_x = row.flat_prefix.back();
+      }
     }
+    if (row.flat_prefix.empty()) row.flat_prefix.push_back(0.0f);
     rows_.push_back(std::move(row));
   };
 
@@ -1171,44 +1221,119 @@ auto MarkdownView::row_at_y(float content_y) const -> int {
   return rows_.empty() ? -1 : static_cast<int>(rows_.size()) - 1;
 }
 
+auto MarkdownView::selection_ends() const -> std::pair<Caret, Caret> {
+  // 先比行，行同再比行内偏移（`Caret` 的序就是文档顺序）。
+  const bool anchor_first = select_anchor_.line < select_focus_.line ||
+                            (select_anchor_.line == select_focus_.line &&
+                             select_anchor_.offset <= select_focus_.offset);
+  return anchor_first ? std::pair<Caret, Caret>{select_anchor_, select_focus_}
+                      : std::pair<Caret, Caret>{select_focus_, select_anchor_};
+}
+
+auto MarkdownView::offset_to_x(const Row& row, std::size_t offset) const -> float {
+  // `flat_prefix[i]` = 第 i 个码点起始处的 x（相对 `text_x`）。
+  // 字节偏移→码点下标用 `utf8_length` 换算（选择只在行内扁平文本上做）。
+  if (row.flat_prefix.empty()) return 0.0f;
+  const std::size_t codepoints = row.flat_prefix.size() - 1U;
+  const std::size_t clamped = std::min(offset, row.flat.size());
+  std::size_t index = st::utf8_length(std::string_view(row.flat).substr(0, clamped));
+  if (index > codepoints) index = codepoints;
+  return row.flat_prefix[index];
+}
+
+auto MarkdownView::caret_at(math::Point content_point) const -> Caret {
+  const int index = row_at_y(content_point.y);
+  if (index < 0 || index >= static_cast<int>(rows_.size())) return Caret{};
+  const Row& row = rows_[static_cast<std::size_t>(index)];
+  if (row.flat.empty()) return Caret{index, 0};
+  // ⚠ `content_point.x` 是**相对控件左缘**的（调用方只减了 `bounds_.x`），
+  // 而 `row.text_x` 是**内容坐标**（绘制时还要再加 `padding.left`）。
+  // 两边必须同一基准，否则高亮会比选择区多（或少）一个 `padding.left`
+  //（实测：左端多出一段行首空白）。
+  const float local_x = content_point.x - style_.padding.left - row.text_x;
+  // 行内按 x 找最近边界：落在 [i-1, i) 之间时靠哪端近就取哪端。
+  // 不逐 span 算是因为各 span 的分段 x 可能与 `flat_prefix` 不同源——
+  // 单一坐标系才不会出现「高亮到了、复制少一个字」这类错位。
+  const std::size_t codepoints = row.flat_prefix.size() - 1U;
+  std::size_t best = 0;
+  if (local_x > 0.0f) {
+    best = codepoints;
+    for (std::size_t i = 1; i <= codepoints; ++i) {
+      if (row.flat_prefix[i] >= local_x) {
+        const float left = row.flat_prefix[i - 1];
+        const float right = row.flat_prefix[i];
+        best = (local_x - left) <= (right - local_x) ? i - 1 : i;
+        break;
+      }
+    }
+  }
+  return Caret{index, st::utf8_offset(row.flat, best)};
+}
+
 auto MarkdownView::selected_text() const -> std::string {
-  if (select_anchor_ < 0 || select_focus_ < 0) return {};
-  const int first = std::min(select_anchor_, select_focus_);
-  const int last = std::max(select_anchor_, select_focus_);
+  if (!has_selection_) return {};
+  const auto [begin, end] = selection_ends();
   std::string out;
-  for (int index = first; index <= last && index < static_cast<int>(rows_.size()); ++index) {
+  for (int index = begin.line; index <= end.line && index < static_cast<int>(rows_.size());
+       ++index) {
+    if (index < 0) continue;
     const Row& row = rows_[static_cast<std::size_t>(index)];
-    if (index > first) out += '\n';
-    // 拼接行内文字：正文/标题/列表用 spans；代码行 spans 即源码；表格行拼单元格。
-    for (const Span& span : row.spans) out += span.text;
+    if (index > begin.line) out += '\n';
+    // 表格行：单元格文本**不走 `flat`**（它们是 `Cell::lines` 折行后的多行），
+    // 按「一行一个表格行」拼接（空格连折行、`\t` 连列）。
     if (row.kind == RowKind::TableRow) {
+      if (row.cells.empty()) continue;
+      bool first_cell = true;
       for (const Cell& cell : row.cells) {
-        if (!out.empty() && out.back() != '\n' && out.back() != '\t') out += '\t';
-        // 单元格可能多行（折行）：拼接时用空格连接，不引入额外换行
-        //（保持「一行一个表格行」的复制形状）。
+        if (!first_cell) out += '\t';
         bool first_line = true;
         for (const std::string& line : cell.lines) {
           if (!first_line) out += ' ';
           out += line;
           first_line = false;
         }
+        first_cell = false;
       }
+      continue;
     }
+    const std::size_t from = index == begin.line ? begin.offset : 0U;
+    const std::size_t to = index == end.line ? end.offset : row.flat.size();
+    if (from >= to) continue;
+    const std::size_t safe_from = std::min(from, row.flat.size());
+    const std::size_t safe_to = std::min(to, row.flat.size());
+    if (safe_to > safe_from) out += row.flat.substr(safe_from, safe_to - safe_from);
   }
   return out;
 }
 
 void MarkdownView::paint_selection(raster::Surface& canvas, const Palette& colors) const {
-  if (select_anchor_ < 0 || select_focus_ < 0 || select_anchor_ == select_focus_) return;
-  const int first = std::min(select_anchor_, select_focus_);
-  const int last = std::max(select_anchor_, select_focus_);
+  if (!has_selection_) return;
+  const auto [begin, end] = selection_ends();
   // 视口内才画（行盒是内容坐标，平移到视口）。
-  for (int index = first; index <= last && index < static_cast<int>(rows_.size()); ++index) {
-    const math::Rect row = rows_[static_cast<std::size_t>(index)].box;
-    const math::Rect view{bounds_.x + style_.padding.left, bounds_.y + row.y - scroll_offset_,
-                          std::min(row.width, bounds_.width - style_.padding.horizontal()),
-                          row.height};
-    if (view.bottom() < bounds_.y || view.y > bounds_.bottom()) continue;
+  for (int index = begin.line; index <= end.line && index < static_cast<int>(rows_.size());
+       ++index) {
+    if (index < 0) continue;
+    const Row& row = rows_[static_cast<std::size_t>(index)];
+    const float row_top = bounds_.y + row.box.y - scroll_offset_;
+    if (row_top + row.box.height < bounds_.y || row_top > bounds_.bottom()) continue;
+    // 表格行没有 `flat`（单元格各自折行）：退化为**整行高亮**
+    //（与复制行为一致——表格一行是一个整体，不支持格内字符级选择）。
+    if (row.kind == RowKind::TableRow || row.flat.empty()) {
+      const math::Rect view{bounds_.x + style_.padding.left, row_top,
+                            std::min(row.box.width, bounds_.width - style_.padding.horizontal()),
+                            row.box.height};
+      fill_rect_shape(canvas, view, colors.selection, 2.0f);
+      continue;
+    }
+    const std::size_t from = index == begin.line ? begin.offset : 0U;
+    const std::size_t to = index == end.line ? end.offset : row.flat.size();
+    if (from >= to) continue;
+    // **逐行分段**：高亮区间 = 该行选中文字的**实际像素跨度**（不是整行矩形）。
+    // 基准必须与 `caret_at` 一致：内容坐标 x = `padding.left + row.text_x + 行内偏移`。
+    const float base = bounds_.x + style_.padding.left + row.text_x;
+    const float x0 = base + offset_to_x(row, from);
+    const float x1 = base + offset_to_x(row, to);
+    const math::Rect view{std::min(x0, x1), row_top, std::max(x1 - x0, 1.0f), row.box.height};
     fill_rect_shape(canvas, view, colors.selection, 2.0f);
   }
 }
@@ -1558,9 +1683,10 @@ auto MarkdownView::on_event(const RenderContext& context, Event& event) -> bool 
       }
       if (selectable_) {
         selecting_ = true;
-        const float content_y = event.position.y - bounds_.y + scroll_offset_;
-        select_anchor_ = row_at_y(content_y);
+        // **字符级**：锚点 = 鼠标位置对应的最近字符位（行 + 行内字节偏移）。
+        select_anchor_ = caret_at(content);
         select_focus_ = select_anchor_;
+        has_selection_ = false;   // 点一下还没选中任何字（拖了才有）
         mark_dirty();
       }
       event.handled = true;
@@ -1588,10 +1714,14 @@ auto MarkdownView::on_event(const RenderContext& context, Event& event) -> bool 
         }
         return !url.empty();
       }
-      const float content_y = event.position.y - bounds_.y + scroll_offset_;
-      const int row = row_at_y(content_y);
-      if (row != select_focus_) {
-        select_focus_ = row;
+      // 拖选中：扩展终点（字符级——同一行内也能继续扩，不只是换行）。
+      const math::Point drag_content{event.position.x - bounds_.x,
+                                     event.position.y - bounds_.y + scroll_offset_};
+      const Caret next = caret_at(drag_content);
+      if (next.line != select_focus_.line || next.offset != select_focus_.offset) {
+        select_focus_ = next;
+        has_selection_ = select_anchor_.line != select_focus_.line ||
+                         select_anchor_.offset != select_focus_.offset;
         mark_dirty();
       }
       return true;
@@ -1600,19 +1730,23 @@ auto MarkdownView::on_event(const RenderContext& context, Event& event) -> bool 
       // 释放：结束拖选。起点 == 终点（点了一下）= 清选择（点击取消是通行交互）。
       if (!selecting_) return false;
       selecting_ = false;
-      if (select_anchor_ == select_focus_) {
-        select_anchor_ = -1;
-        select_focus_ = -1;
+      const bool empty = select_anchor_.line == select_focus_.line &&
+                         select_anchor_.offset == select_focus_.offset;
+      if (empty) {
+        select_anchor_ = Caret{};
+        select_focus_ = Caret{};
+        has_selection_ = false;
         mark_dirty();
       }
       return true;
     }
     case EventKind::KeyDown: {
       // Ctrl+C：优先选中文本，无选择时复制全文（渲染视图的「拷走」主用例）。
-      // Ctrl+A：全选（行级语义 = 全部行）。
+      // Ctrl+A：全选（字符级语义 = 首行首字 .. 末行末字）。
       if (event.ctrl && (event.key == "c" || event.key == "C")) {
         if (!selectable_ || host() == nullptr) return false;
-        const std::string text = selected_text().empty() ? plain_ : selected_text();
+        const std::string picked = selected_text();
+        const std::string text = picked.empty() ? plain_ : picked;
         if (text.empty()) return false;
         (void)host()->host_set_clipboard_text(text);
         event.handled = true;
@@ -1620,8 +1754,10 @@ auto MarkdownView::on_event(const RenderContext& context, Event& event) -> bool 
       }
       if (event.ctrl && (event.key == "a" || event.key == "A")) {
         if (!selectable_ || rows_.empty()) return false;
-        select_anchor_ = 0;
-        select_focus_ = static_cast<int>(rows_.size()) - 1;
+        select_anchor_ = Caret{0, 0};
+        const int last = static_cast<int>(rows_.size()) - 1;
+        select_focus_ = Caret{last, rows_[static_cast<std::size_t>(last)].flat.size()};
+        has_selection_ = true;
         mark_dirty();
         event.handled = true;
         return true;

@@ -481,7 +481,10 @@ ST_TEST(md_view_selection_and_copy) {
   ST_CHECK(view.on_event(context, up));
   ST_CHECK_EQ(view.selected_text(), std::string{});
 
-  // 拖选两行：MouseDown → MouseMove → MouseUp → selection 非空且含首行文字。
+  // 拖选两行：MouseDown → MouseMove → MouseUp → selection 非空。
+  // ⚠ 字符级语义（2026-10-14）：起点在 x=40（首行**中部**），
+  // 所以选中的是「从首行第 40px 处到末行」而不是整行——**开头那几个字不在选区**。
+  // 旧断言查“含霜天”是行级时代的产物（那时首行必被整行选中）。
   ST_CHECK(view.on_event(context, down));
   st::ui::Event move = down;
   move.kind = st::ui::EventKind::MouseMove;
@@ -490,7 +493,88 @@ ST_TEST(md_view_selection_and_copy) {
   ST_CHECK(view.on_event(context, up));
   const std::string picked = view.selected_text();
   ST_CHECK(!picked.empty());
-  ST_CHECK(picked.find("霜天") != std::string::npos);
+  // 选中区跨行 → 含换行；且两端都有真实边界（不是整篇全选）。
+  ST_CHECK(picked.find('\n') != std::string::npos);
+  // 首行被选中的尾部非空（首行是标题，x=40 已落在标题内部）。
+  const std::size_t row_break = picked.find('\n');
+  ST_CHECK(row_break != std::string::npos);
+  ST_CHECK(row_break > 0U);
+}
+
+ST_TEST(md_view_selection_is_character_level) {
+  // 用户报「文本选择还是不好用」：行级选择只能整行拷（一行内选不了半边、
+  // 跨行也只能从行首起）。本用例钉**字符级**三件事：
+  //   ① 行内部分选择（同一行内，从中间到中间）；
+  //   ② 跨行选择的行间以 `\n` 相连；
+  //   ③ 未选到的地方**不在**结果里（“多一个字/少一个字”都能被拓到）。
+  //
+  // 为何不用行号作判据：行级实现的“跨行”也能过前两条——
+  // 第 ① 条（行内偏量）才是真正的分水岭。
+  const st::ui::Theme theme = st::ui::Theme::light();
+  st::ui::MarkdownView view{std::string(kSample)};
+  (void)render(view, theme, kCanvasWidth, kCanvasHeight);
+  const st::ui::RenderContext context{theme, &stub_port(), 0.0};
+
+  // 全选先拿到整个文档，用它反推行位置（不硬编坐标，避免排版微调即碎）。
+  st::ui::Event select_all;
+  select_all.kind = st::ui::EventKind::KeyDown;
+  select_all.key = "a";
+  select_all.ctrl = true;
+  ST_REQUIRE(view.on_event(context, select_all));
+  const std::string whole = view.selected_text();
+  ST_REQUIRE(!whole.empty());
+
+  // ① 行内偏量：在某行的**中间**按下并拖到该行更后面，得到该行的一个中段。
+  //    选择一段不含空格的连续文字（用第一行标题里的 “Markdown”）。
+  const std::size_t mark = whole.find("Markdown");
+  ST_REQUIRE(mark != std::string::npos);
+  // 第一行在 y≈小值处；用几组 x 扫得该词的覆盖区（字宽由桩决定，不硬编）。
+  // 做法：先在行内左端按下、往右拖，直到选中的文本“包含但不多于”该词。
+  bool found = false;
+  std::string partial;
+  for (float x0 = 10.0f; x0 < 200.0f && !found; x0 += 4.0f) {
+    for (float x1 = x0 + 4.0f; x1 < 400.0f; x1 += 4.0f) {
+      st::ui::Event down;
+      down.kind = st::ui::EventKind::MouseDown;
+      down.button = 1;
+      down.position = st::math::Point{x0, 12.0f};
+      (void)view.on_event(context, down);
+      st::ui::Event move = down;
+      move.kind = st::ui::EventKind::MouseMove;
+      move.position = st::math::Point{x1, 12.0f};
+      (void)view.on_event(context, move);
+      st::ui::Event up = down;
+      up.kind = st::ui::EventKind::MouseUp;
+      (void)view.on_event(context, up);
+      const std::string got = view.selected_text();
+      if (got == "Markdown") {
+        found = true;
+        partial = got;
+        break;
+      }
+    }
+  }
+  ST_CHECK(found);                       // 能在一行内精确选中一个词
+  ST_CHECK_EQ(partial, std::string("Markdown"));
+  ST_CHECK(partial.size() < whole.size());
+
+  // ② 跨行 + ③ 边界精确：从第一行中部拖到最后一行中部，结果应
+  //   “以首行尾部开头、以末行头部结尾，中间用 \n 连”。
+  st::ui::Event down2;
+  down2.kind = st::ui::EventKind::MouseDown;
+  down2.button = 1;
+  down2.position = st::math::Point{120.0f, 12.0f};
+  ST_REQUIRE(view.on_event(context, down2));
+  st::ui::Event move2 = down2;
+  move2.kind = st::ui::EventKind::MouseMove;
+  move2.position = st::math::Point{120.0f, kCanvasHeight - 8.0f};   // 拖到底部
+  (void)view.on_event(context, move2);
+  st::ui::Event up2 = down2;
+  up2.kind = st::ui::EventKind::MouseUp;
+  ST_REQUIRE(view.on_event(context, up2));
+  const std::string spanned = view.selected_text();
+  ST_CHECK(spanned.find('\n') != std::string::npos);   // ② 行间换行
+  ST_CHECK(spanned.size() < whole.size());             // ③ 不是全选（选到了真实边界）
 }
 
 ST_TEST(md_view_selection_highlight_pixels) {
