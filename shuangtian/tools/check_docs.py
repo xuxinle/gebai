@@ -158,6 +158,48 @@ if m:
         problems.append(f"DESIGN.md §4.5 组件清单虚报（代码中不存在）: {', '.join(missing)}")
     print(f"组件清单核对: 声明 {len(listed)} 个, 代码缺失 {len(missing)} 个")
 
+# ── ④b 组件**计数**核对：文档里「N 个内置组件」的 N 必须等于注册表实际条目数 ──
+#
+# 为何补这一条（2026-10-14）：④ 只核对“清单里的名字存在”，管不到散在正文里的**计数**。
+# 于是 `ST_COMPONENT_LIST` 从 32 长到 48 的过程中，三处「32 个内置组件」的表述
+# （`dsl.hpp` 两处 + `DESIGN.md` 一处）全部滞后——而这份工具**自称**核对「组件清单」。
+# 名字对得上、数字对不上，是两份口径分家的典型形态：读者按“32”估算组件库规模，
+# 而实际有 48。这一条把它钉成可自动判定的断言。
+dsl_cpp = root / 'src' / 'ui' / 'dsl.cpp'
+if dsl_cpp.exists():
+    dsl_text = dsl_cpp.read_text(encoding='utf-8')
+    block = re.search(r'#define ST_COMPONENT_LIST\(X\)(.*?)\n\n', dsl_text, re.S)
+    if block:
+        actual_count = len(re.findall(r'^\s*X\(', block.group(1), re.M))
+        count_sources = [root / 'DESIGN.md', root / 'include' / 'st' / 'ui' / 'dsl.hpp']
+        marker = '个内置组件'
+        reported = 0
+        for src in count_sources:
+            if not src.exists():
+                continue
+            for line_no, line in enumerate(src.read_text(encoding='utf-8').splitlines(), 1):
+                idx = line.find(marker)
+                while idx != -1:
+                    # 往 marker 前面回扫：**先跳过空白**（文本是「48 个内置组件」——
+                    # 数字与「个」之间有空格），再扫连续数字。
+                    # 不用正则：这段脚本的 `\d` 曾因转义层数写成字面量，
+                    # 静默把 48 读成 4（本次补丁的实测记录）。
+                    end = idx
+                    while end > 0 and line[end - 1].isspace():
+                        end -= 1
+                    begin = end
+                    while begin > 0 and line[begin - 1].isdigit():
+                        begin -= 1
+                    if begin < end:
+                        num = line[begin:end]
+                        reported += 1
+                        if int(num) != actual_count:
+                            problems.append(
+                                f"{src.relative_to(root)}:{line_no} 组件计数漂移: "
+                                f"写「{num} 个内置组件」，实际 {actual_count} 个")
+                    idx = line.find(marker, idx + len(marker))
+        print(f"组件计数核对: 注册表 {actual_count} 个，文档引用 {reported} 处已比对")
+
 # ── ⑤ 用例数/文件数核对：DESIGN §8.5 的数字必须与代码实测一致（终值，不允许滞后或虚报） ──
 st_test_count = 0
 st_assert_hint = 0

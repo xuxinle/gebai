@@ -703,7 +703,7 @@ void register_element_type_by_token(const void* token, std::string name);
 
 /// 逃生舱：声明式创建任意组件 + 容器语义，构造后经配置回调接一等接口。
 ///
-/// 为什么需要它：32 个内置组件各有**构造参数与一等接口**（`Tabs::sync_tabs`、
+/// 为什么需要它：48 个内置组件各有**构造参数与一等接口**（`Tabs::sync_tabs`、
 /// `MenuBar::on_action`、`CodeEditor::on_change`…）——为每个都写专用包装是无穷尽的追尾
 /// （新组件就要新包装），而属性面（`apply_properties`）只覆盖可序列化值。
 /// `custom<T>` 给出**一个**通用入口：声明式创建 + 容器语义 + 强类型指针。
@@ -1112,7 +1112,7 @@ template <class T, class Fetcher, class Input>
 ///
 /// ## 为何需要这个口子
 ///
-/// `make_element` 只查**内置**组件表（`ST_COMPONENT_LIST`，框架自己的 32 个）——
+/// `make_element` 只查**内置**组件表（`ST_COMPONENT_LIST`，框架自己的 48 个）——
 /// 而 `custom<T>` 的全部实现都建立在“能从名字造出元素”上。于是**示例级的自绘
 /// 组件**（鏤月的 `CanvasView`、裁云的时间轴）无法用 `custom<T>`：
 /// 它们不该为了能被声明式创建而挤进框架的组件清单（那会让框架的公开组件面

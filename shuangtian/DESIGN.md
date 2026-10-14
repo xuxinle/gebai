@@ -3325,7 +3325,7 @@ compose('TodoPage', () => Column([
 
 **C++ 宿主的关键原语：`custom<T>` 逃生舱**
 
-32 个内置组件各有**构造参数与一等接口**（`Tabs::sync_tabs`、`CodeEditor::on_change`、
+48 个内置组件各有**构造参数与一等接口**（`Tabs::sync_tabs`、`CodeEditor::on_change`、
 `MenuBar::on_action`…）——为每个都写专用包装是无穷尽的追尾（新组件就要新包装），
 而属性面只覆盖可序列化值。`custom<T>` 给出**一个**通用入口：
 
