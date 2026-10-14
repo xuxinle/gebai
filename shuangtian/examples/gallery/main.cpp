@@ -72,6 +72,9 @@ struct Options {
   std::string text_fit_max_size{"auto"};
 /// 界面字号缩放：auto/数值（见 `AppOptions::ui_font_scale`）。
 std::string ui_font_scale{"auto"};
+  std::string backend{};
+  int width{1280};
+  int height{800};
   std::uint16_t control_port{0};
   std::string control_file{};
   std::string shots{};
@@ -92,6 +95,13 @@ std::string ui_font_scale{"auto"};
       return fallback;
     };
     if (raw == "--headless") options.headless = true;
+    // `--backend` 必须照接：应用层有**自己的**参数解析（不过 `st::app::parse_cli`），
+    // 漏接的开关会被静默忽略——而"我明明指定了 wayland"变成谜案，正是本工程反复
+    // 记录的那类缺陷（静默失效字段）。**Linux 上验证 x11/wayland 后端全靠它**：
+    // 不接的话会走自动探测（有 DISPLAY 就选 x11），窗口后端根本没被换过。
+    else if (raw == "--backend") options.backend = next("");
+    else if (raw == "--width") options.width = std::stoi(next("1280"));
+    else if (raw == "--height") options.height = std::stoi(next("800"));
     else if (raw == "--renderer") options.renderer = next("auto");
     else if (raw == "--text-lcd") options.text_lcd = next("auto");
     else if (raw == "--text-fit") options.text_fit = next("auto");
@@ -119,7 +129,8 @@ std::string ui_font_scale{"auto"};
     else if (raw == "--ms") options.max_ms = std::stoi(next("0"));
     else if (raw == "--theme-file") options.theme_file = next("");
     else if (raw == "--help" || raw == "-h") {
-      st::print("用法: gallery [--headless] [--scale 2.0] [--theme dark] [--theme-file PATH] [--control-port 0]\n"
+      st::print("用法: gallery [--headless] [--backend auto|x11|wayland|win32|headless] [--scale 2.0]\n"
+                "               [--width N] [--height N] [--theme dark] [--theme-file PATH] [--control-port 0]\n"
                 "               [--control-file PATH] [--shots DIR] [--frames N] [--bench N] [--ms N]\n"
                 "               [--renderer auto|gpu|software] [--text-lcd auto|on|off] [--text-fit auto|off|light|normal]\n"
                 "               [--text-gamma auto|off|<数值>] [--ui-font-scale auto|<数值>]\n");
@@ -228,12 +239,13 @@ auto run_app(int argc, char** argv) -> int {
   const Options options = parse_options(argc, argv);
 
   st::app::AppOptions app_options;
-  app_options.width = 1280;
-  app_options.height = 800;
+  app_options.width = options.width;
+  app_options.height = options.height;
   app_options.scale = options.scale;
   app_options.title = "霜天 · 组件画廊";
   app_options.headless = options.headless;
-  app_options.backend = options.headless ? "headless" : std::string{};
+  app_options.backend = !options.backend.empty() ? options.backend
+                        : (options.headless ? std::string("headless") : std::string{});
   // 渲染器交给应用选：`auto` 会**实测**两条路径再定（见 shell/backend.cpp 的 create_surface）
   app_options.renderer = options.renderer;
   app_options.text_lcd = options.text_lcd;
