@@ -9,6 +9,7 @@
 #include "st/core/string.hpp"
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
+#include "st/raster/surface.hpp"
 #include "st/ui/text_port.hpp"
 
 #include "components_internal.hpp"
@@ -111,6 +112,55 @@ auto Table::max_scroll() const noexcept -> float {
   return std::max(0.0f, total_width_ - visible);
 }
 
+/// 本帧**实际在裁剪区内的行区间** `[先, 后)`（半开）；无交集时 `[首, 首)`。
+///
+/// 为何需要它（2026-10-14，实测）：`Table::paint_content` 里有一个看似能救场的提前退出
+/// `if (row.y >= bounds_.bottom()) break;`——但宿主把 Table 放进 `ScrollView` 时，
+/// `bounds_` 拿到的是**内容全高**（与 `Tree` 同样的情形），于是这个 break
+/// 在整个滚动过程中**一次都不触发**，仍然迭代全部行、全部列，每格调
+/// `ellipsize` + `measure_width`。
+///
+/// 实测（`tools/ui_table_rows_bench.cpp`，4 列 / 400px 视口 / 1000 行）：
+/// 真实场景（bounds=内容全高）**8.769 ms**，而对照（bounds 恰为视口高）只有 **0.500 ms**
+/// ——同一个 break，178× 的差距全在于它**看不到视口**。
+///
+/// 口径与 `Element::paint` / `Tree::visible_row_range` **一致**（同一份 `clip_rect()`、
+/// 同样按 `device_scale` 折回逻辑坐标），不另立一套。
+///
+/// `canvas` 为空时退化为全量（保持旧行为，且让无画布的测试仍可断言几何）。
+/// 之所以是**静态自由函数**：需要非 const 的 `Surface&`（`clip_rect()` 的签名），
+/// 而 `paint_content` 是 const。
+[[nodiscard]] auto visible_row_range(const Table& table, const st::raster::Surface* canvas,
+                                     float row_height, float header_height)
+    -> std::pair<std::size_t, std::size_t> {
+  const std::size_t total = table.row_count();
+  if (total == 0U || row_height <= 0.0f) return {0U, 0U};
+  const math::Rect bounds = table.bounds();
+  if (bounds.is_empty()) return {0U, 0U};
+  if (canvas == nullptr) return {0U, total};
+
+  const math::IntRect physical = canvas->clip_rect();
+  const float scale = canvas->device_scale();
+  const float inv = scale > 0.0f ? 1.0f / scale : 1.0f;
+  const float clip_top = static_cast<float>(physical.y) * inv;
+  const float clip_bottom = static_cast<float>(physical.y + physical.height) * inv;
+  if (clip_bottom <= clip_top) return {0U, 0U};
+
+  // 数据行从表头之下开始（与 `row_rect` 同一几何）。
+  const float rows_top = bounds.y + header_height;
+  const float content_bottom = rows_top + static_cast<float>(total) * row_height;
+  if (clip_bottom <= rows_top || clip_top >= content_bottom) return {0U, total};
+
+  const float first_f = std::max(0.0f, clip_top - rows_top) / row_height;
+  const float last_f = std::min(static_cast<float>(total) * row_height,
+                                clip_bottom - rows_top) /
+                       row_height;
+  const auto first = static_cast<std::size_t>(std::floor(first_f));
+  // 上界宽出一行：避免“裁剪区底边正落在行中”时漏画那一行。
+  const auto last = static_cast<std::size_t>(std::ceil(last_f)) + 1U;
+  return {std::min(first, total), std::min(last, total)};
+}
+
 void Table::set_scroll_offset(float offset) {
   const float limit = max_scroll();
   const float clamped = std::clamp(offset, 0.0f, limit);
@@ -199,6 +249,21 @@ auto Table::header_rect() const noexcept -> math::Rect {
   return math::Rect{bounds_.x, bounds_.y, bounds_.width, kHeaderHeight};
 }
 
+auto Table::visible_row_count() const noexcept -> std::size_t {
+  // **优先用上一帧的实际可见行数**（`last_visible_last_ - first`）。
+  //
+  // 为何不能只看 `bounds_.height`：`ScrollView` 给子元素的是**内容全高**，
+  // 所以 `bounds_.height / row_height_` 会算出“全部行”（实测：200 行的表报 200，
+  // 而视口里其实只看得到 11 行）——那样这个属性就答非所问了。
+  // 绘制期拿到的可见区间是**唯一可靠**的答案（与 `first_visible` 同源）。
+  if (last_visible_last_ > last_visible_first_) return last_visible_last_ - last_visible_first_;
+  // 从未绘制过（或空行集）：按 bounds 估（只在 bounds 恰为视口时准确）。
+  if (bounds_.is_empty() || row_height_ <= 0.0f) return rows_.empty() ? 1U : rows_.size();
+  const float body = std::max(0.0F, bounds_.height - kHeaderHeight);
+  const auto count = static_cast<std::size_t>(std::max(1.0F, body / row_height_));
+  return std::max<std::size_t>(1U, count);
+}
+
 auto Table::row_rect(std::size_t row) const noexcept -> math::Rect {
   return math::Rect{bounds_.x, bounds_.y + kHeaderHeight + row_height_ * static_cast<float>(row),
                     bounds_.width, row_height_};
@@ -261,10 +326,22 @@ void Table::paint_content(const RenderContext& context, raster::Surface& canvas)
 
   canvas.push_clip_rect(bounds_);
 
+  // **逐行视口剔除**（见 `visible_row_range` 的说明）：只画可见那几行——
+  // 1000 行的表格在 400px 视口里是 12 行而不是 1000 行。
+  // 旧代码靠 `if (row.y >= bounds_.bottom()) break;`——而 ScrollView 给子元素的是
+  // **内容全高**，那个 break 在滚动中永不触发（实测 178× 差距）。
+  const auto [first_row, last_row] = visible_row_range(*this, &canvas, row_height_, kHeaderHeight);
+  last_visible_first_ = first_row;
+  last_visible_last_ = last_row;
+  // 横向列区间：横向滚动时同样只需画交叠的那几列（`column_x` 已是滚动后坐标）。
+  const float clip_left = static_cast<float>(canvas.clip_rect().x) /
+                          std::max(canvas.device_scale(), 1.0f);
+  const float clip_right = static_cast<float>(canvas.clip_rect().x + canvas.clip_rect().width) /
+                           std::max(canvas.device_scale(), 1.0f);
+
   // 行底：选中行（primary_soft + 主色左缘条）优先于斑马纹与 hover。
-  for (std::size_t index = 0; index < rows_.size(); ++index) {
+  for (std::size_t index = first_row; index < last_row; ++index) {
     const math::Rect row = row_rect(index);
-    if (row.y >= bounds_.bottom()) break;
     const bool is_selected = selected_row_.has_value() && index == *selected_row_;
     const bool striped = !is_selected && ((zebra_ && index % 2U == 1U) || index == hovered_row_);
     if (is_selected) {
@@ -288,19 +365,22 @@ void Table::paint_content(const RenderContext& context, raster::Surface& canvas)
   }
 
   // 单元格文本（选中行文本用主色，与选中底同语义）。
-  for (std::size_t row = 0; row < rows_.size(); ++row) {
-    const math::Rect band = row_rect(row);
-    if (band.y >= bounds_.bottom()) break;
+  for (std::size_t row = first_row; row < last_row; ++row) {
     const bool is_selected = selected_row_.has_value() && row == *selected_row_;
     const math::Color text_color = is_selected ? colors.primary : colors.text;
     for (std::size_t column = 0; column < columns_.size(); ++column) {
-      draw_cell_text(context, canvas, cell(row, column), cell_rect(row, column), kCellPadding,
+      const math::Rect box = cell_rect(row, column);
+      // 列剔除：与裁剪区无交叠的列不画（也不付 `ellipsize`/`measure_width`）。
+      if (box.right() <= clip_left || box.x >= clip_right) continue;
+      draw_cell_text(context, canvas, cell(row, column), box, kCellPadding,
                      columns_[column].align, metrics.font_base, text_color);
     }
   }
-  // 表头文本。
+  // 表头文本（同样列剔除）。
   for (std::size_t column = 0; column < columns_.size(); ++column) {
-    draw_cell_text(context, canvas, columns_[column].name, header_cell_rect(column), kCellPadding,
+    const math::Rect box = header_cell_rect(column);
+    if (box.right() <= clip_left || box.x >= clip_right) continue;
+    draw_cell_text(context, canvas, columns_[column].name, box, kCellPadding,
                    columns_[column].align, metrics.font_xs, colors.text_muted);
   }
 
@@ -408,6 +488,9 @@ auto Table::get_property(std::string_view name) const -> std::optional<std::stri
   if (name == "zebra") return std::string(zebra_ ? kFlagTrue : "false");
   if (name == "scroll_offset") return std::format("{}", scroll_offset_);
   if (name == "max_scroll") return std::format("{}", max_scroll());
+  // 视口契约（与 Tree/List 对齐）：首可见行来自**上一帧绘制**，不是恒 0。
+  if (name == "first_visible") return std::format("{}", last_visible_first_);
+  if (name == "visible_rows") return std::format("{}", visible_row_count());
   if (name == "selected_row") {
     return selected_row_.has_value() ? std::format("{}", *selected_row_) : std::string("-1");
   }
@@ -469,7 +552,7 @@ auto Table::set_property(std::string_view name, std::string_view value) -> bool 
 
 auto Table::property_names() const -> std::vector<std::string_view> {
   return {"columns", "rows", "row_height", "zebra", "scroll_offset", "max_scroll",
-          "selected_row", "value"};
+          "selected_row", "value", "first_visible", "visible_rows"};
 }
 
 auto Table::invoke_action(std::string_view action, std::string_view argument) -> bool {
