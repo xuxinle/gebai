@@ -3508,6 +3508,25 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
 
 ## P2
 
+- [ ] **多行 `Text` 折行缓存的键不含 `RenderContext::text`（端口）**（2026-10-14 合并前复核发现）：
+  `basic.cpp` 的缓存判据是 `(content_, available, size)` 三元组，而 `wrap` 的结果
+  **也取决于当时的 `TextPort`**（字宽来自字体）。
+
+  **当前行为是对的**（已查实，不是活缺陷）：能让字宽变化的路径（DPI 切换重建 `TextRenderer`、
+  `UiRoot::set_text_port`、`set_theme`）都会走 `UiRoot::mark_dirty_all()`，
+  而它逐元素标 `layout_dirty_` 并重跑 `measure`——缓存分支重新进入时用的是**新端口**。
+
+  **但它不是靠机制保证的**：靠的是“那些路径恰好伴随内容/宽度/字号变化”。
+  若将来出现“**只换端口、其余全不变**”的路径（例如热重载字体、或无头/窗口双端口切换），
+  缓存会静默不失效，画出**用旧字体折的行**（行数/换行位置错，且不会报错）。
+
+  **修法**（一行）：缓存键加入 `context.text` 指针（同 `CodeEditor` 的
+  `layout_port_` 判据——它早就把端口纳入 key 了，`Text` 这里是对齐遗漏）：
+  ```cpp
+  mutable const st::ui::TextPort* layout_cache_port_{nullptr};
+  if (layout_cache_port_ != context.text || layout_cache_content_ != content_ || …)
+  ```
+
 - [ ] **`Tree` 缺程序化 select（写侧 `selected_key`）**（2026-10-12，gbcode 会话 e2e 亲历）：
   树有 `selected_key` 属性**读**（tree.cpp），但没有写入口——e2e 想点树行只能
   `bounds.y + row_h*1.5` 坐标猜行序，本轮首版就猜错（点成了默认样例）。
