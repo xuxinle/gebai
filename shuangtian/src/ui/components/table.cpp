@@ -422,7 +422,9 @@ auto Table::on_event(const RenderContext& context, Event& event) -> bool {
     }
     case EventKind::Wheel: {
       if (!event.shift || max_scroll() <= 0.0f) return false;
-      set_scroll_offset(scroll_offset_ + event.wheel_delta * kScrollStep);
+      // 方向：`-`（`wheel_delta` 向上为正；`offset` 变大 = 看到更靠右的列）。
+      // 旧写法的 `+` 把方向反了——与 `scroll.cpp` 的明文约定相反（2026-10-14 修）。
+      set_scroll_offset(scroll_offset_ - event.wheel_delta * kScrollStep);
       event.handled = true;
       return true;
     }

@@ -360,3 +360,44 @@ ST_TEST(completion_popup_hidden_skips_keyboard_dispatch) {
   press("ArrowDown");
   ST_CHECK_EQ(popup.selected_index(), std::ptrdiff_t{2});
 }
+
+/// **滚轮方向：向下滚 → 看到更靠下的候选**（2026-10-14 修）。
+///
+/// 全库约定（`scroll.cpp` 明文 + `ui_scroll_test.cpp:57` 同口径）：
+/// `wheel_delta` **向上为正 / 向下为负**；offset 变大 = 看到更靠下的内容。
+/// 补全弹窗旧写法是 `+=`，方向反了——而它那时**没有滚动读取口**，测不出来
+/// （现已补 `scroll` 属性）。
+ST_TEST(completion_popup_wheel_scrolls_downward_on_negative_delta) {
+  PopupFixture fixture;
+  CompletionPopup& popup = *fixture.popup;
+  popup.set_anchor(st::math::Rect{100.0F, 200.0F, 2.0F, 16.0F});
+  // 造出多于一屏的候选（弹窗高度有限，否则 offset 始终被夹在 0）。
+  std::vector<CompletionItemView> many;
+  for (int index = 0; index < 60; ++index) {
+    CompletionItemView view{};
+    view.label = "candidate_" + std::to_string(index);
+    view.insert_text = view.label;
+    many.push_back(std::move(view));
+  }
+  popup.set_items(many);
+  fixture.layout();
+
+  const auto scroll = [&]() -> float {
+    const auto value = popup.get_property("scroll");
+    return value.has_value() ? std::strtof(value->c_str(), nullptr) : -1.0F;
+  };
+  ST_CHECK_EQ(scroll(), 0.0F);
+
+  st::ui::Event down;
+  down.kind = st::ui::EventKind::Wheel;
+  down.wheel_delta = -1.0F;  // 向下滚
+  ST_CHECK(popup.on_event(fixture.root.render_context(), down));
+  const float after_down = scroll();
+  ST_CHECK(after_down > 0.0F);  // ← 方向反了的话这里恒为 0
+
+  st::ui::Event up;
+  up.kind = st::ui::EventKind::Wheel;
+  up.wheel_delta = 1.0F;  // 向上滚
+  ST_CHECK(popup.on_event(fixture.root.render_context(), up));
+  ST_CHECK(scroll() < after_down);
+}

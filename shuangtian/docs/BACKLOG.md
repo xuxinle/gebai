@@ -3652,6 +3652,65 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
 
 ## 已完成（本轮「全部优化」落地，备查）
 
+### 两个用户报的缺陷：滚轮方向反了 + `--renderer auto` 被静默吞掉 —— 2026-10-14
+
+#### ① 文件选择器滚轮方向反了（**同类共三处**）
+
+全库约定在 `scroll.cpp` 里写成了明文：`Event::wheel_delta` 与系统同号，
+**向上为正 / 向下为负**；而滚动偏移是“内容向上推了多少像素”，
+offset 变大 = 看到更靠下的内容 ⇒ `offset -= delta × step`。
+
+FileDialog 写的是 `+=`，等于把方向整个反过来。**排查后发现不是一处**：
+
+| 文件 | 修正前 | 修正后 |
+|---|---|---|
+| `file_dialog.cpp` | `scroll_y_ += delta × step` | `-=` |
+| `completion_popup.cpp` | `scroll_y_ += delta × step` | `-=` |
+| `table.cpp`（Shift+水平轮） | `scroll_offset_ += delta × kScrollStep` | `-=` |
+
+而全库其余滚动点（`scroll.cpp` / `CodeEditor` / `MarkdownView` / `MergeView` / `Tabs` / `Input`）
+都是 `-`。
+
+**为何长期测不出来**：`FileDialog::scroll_y_` 与 `CompletionPopup::scroll_y_`
+**没有任何读取口**——于是“方向反了”无法用断言钉住。已补属性 `scroll`（与
+`Tree`/`Table`/`MarkdownView` 的视口属性同一姿态：不可断言的效果 = 不可复用）。
+
+**两处测试“固化”了 bug**（反向的实测教训）：
+
+- `ui_table_test.cpp` 的 `ui_table_horizontal_scroll`：用 `wheel_delta = +1`（向上滚）
+  却断言 `offset == 48`（offset 增大）——与约定相反，把 `table.cpp` 的反向 bug 写成了期望值。
+  已改为 `-1`（向下滚 → 看到更靠右的列），并补一条反向断言（向上滚必须回到左端）。
+- `ui_tabs_test.cpp:751` 是**对的**（“滚轮向下（delta 负）= 向右滚动”），
+  `ui_scroll_test.cpp:57` 也对（“滚轮向下 = 负 delta……往下滚必须真的动”）——
+  两份权威约定在仓里本来就在，反向的那两处是孤例。
+
+护栏：`file_dialog_wheel_scrolls_downward_on_negative_delta`、
+`completion_popup_wheel_scrolls_downward_on_negative_delta`。
+已反证：把方向改回 `+`，两条都立刻红。
+
+#### ② 显式 `--renderer auto` 在 headless 下被静默吞掉
+
+**三方矛盾**：`backend.cpp` 的注释（204 行）与 note 文案（214 行）都承诺
+“显式 `auto` 照旧探测”，而代码（206 行）把空串与 `auto` **一起**改写为 `software`。
+
+根因：`AppOptions::renderer` 的声明缺省**本就是 `auto`**（`app.hpp:116`），
+CLI 只在传了 `--renderer` 时赋值——于是「没传」与「显式传 `auto`」
+**在字符串上完全不可区分**，那个判据根本无法兑现承诺。
+
+后果不是“少了点功能”，而是**量错了机器**：`--renderer auto` 的无头 GPU 基准
+静默跑在软件路径上（实测 1.44 ms → 11.49 ms），差点被当成 8.8 倍性能回归。
+
+修法：`AppOptions::renderer` 的缺省改为**空串**（= 未指定），于是三态可区分：
+空 = 无头缺省软件；`auto` = 照旧探测；`gpu`/`software` = 按名。
+（`WindowOptions::renderer` 不动：窗口后端缺省 `auto` 是对的，且 win32 早已把空串按 `auto` 处理。）
+
+**既有测试固化了 bug**：`shell_backend_test.cpp` 的
+`headless_defaults_to_software_renderer` 写成 `for (const char* requested : {"", "auto"})`
+——把“显式传 auto”也当“缺省”对待。已拆开：
+空串 → software（且 note 必须说明是“**缺省**”）；显式 `auto` → 走探测分支
+（不断言探测结果，只断言 note **不是**“缺省”——那是机器无关的，也是旧 bug 的直接体征）。
+已反证：把判据改回 `empty() || == "auto"`，该断言立刻红。
+
 ### 组件层视口剔除 + 全类型契约护栏 —— 2026-10-14
 
 **① `Tree` 逐行视口剔除（1000 行每帧 5.36 → 0.24 ms）。**

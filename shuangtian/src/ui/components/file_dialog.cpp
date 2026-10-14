@@ -815,7 +815,18 @@ auto FileDialog::on_event(const RenderContext& context, Event& event) -> bool {
                                   ? context.theme.metrics().wheel_step
                                   : 48.0f;
       const float max_scroll = std::max(0.0f, list_content_height() - list_.height);
-      scroll_y_ = std::clamp(scroll_y_ + event.wheel_delta * wheel_step, 0.0f, max_scroll);
+      // **方向：`-` 而不是 `+`**（2026-10-14 修）。
+      //
+      // `Event::wheel_delta` 与系统同号：**向上为正 / 向下为负**（`scroll.cpp` 里
+      // 把这条约定写成了明文：“与系统一致——向上为正、向下为负”）。而滚动偏移是
+      // “内容向上推了多少像素”：offset 变大 = 看到更靠下的内容。
+      // 因此“向下滚（delta<0）”应当让 offset **变大** ⇒ `offset -= delta × step`。
+      //
+      // 旧写法是 `+=`，等于把滚轮方向整个反过来：向下滚看到更上面的内容。
+      // 这不是“风格差异”——全库其余滚动点（`scroll.cpp`/`CodeEditor`/`MarkdownView`/
+      // `MergeView`/`Tabs`/`Input`）都是 `-`，只有这里和 `completion_popup`/`table`
+      // 是 `+`（已一并修）。
+      scroll_y_ = std::clamp(scroll_y_ - event.wheel_delta * wheel_step, 0.0f, max_scroll);
       mark_dirty();
       return true;
     }
@@ -919,6 +930,10 @@ auto FileDialog::get_property(std::string_view name) const -> std::optional<std:
     return entry != nullptr ? entry->name : std::string();
   }
   if (name == "show_hidden") return show_hidden_ ? std::string("true") : std::string("false");
+  // 列表滚动偏移。为何要读取口（2026-10-14）：它原本**没有**任何读取口——
+  // 于是“滚轮方向反了”这种可见错误**无法用断言钉住**（而那正是它长期存活的原因）。
+  // 与 `Tree`/`Table`/`MarkdownView` 的视口属性同一姿态：不可断言的效果 = 不可复用。
+  if (name == "scroll") return std::format("{:.1f}", static_cast<double>(scroll_y_));
   if (name == "filters") {
     std::string joined;
     for (const auto& ext : name_filters_) {
@@ -974,7 +989,7 @@ auto FileDialog::property_names() const -> std::vector<std::string_view> {
   std::vector<std::string_view> names = Element::property_names();
   names.insert(names.end(),
                {"directory", "filename", "mode", "error", "selected", "pending_path",
-                "show_hidden", "filters", "places"});
+                "show_hidden", "filters", "places", "scroll"});
   return names;
 }
 

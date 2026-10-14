@@ -398,7 +398,9 @@ auto CompletionPopup::on_event(const RenderContext& context, Event& event) -> bo
       const float row_h = kRowHeight;
       const float max_scroll =
           std::max(0.0f, static_cast<float>(visible_items_.size()) * row_h - list_.height);
-      scroll_y_ = std::clamp(scroll_y_ + event.wheel_delta * wheel_step, 0.0f, max_scroll);
+      // 方向：`-`（`wheel_delta` 向上为正；`offset` 变大 = 看到更靠下的内容）。
+      // 旧写法的 `+` 把方向反了——与 `scroll.cpp` 的明文约定相反（2026-10-14 修）。
+      scroll_y_ = std::clamp(scroll_y_ - event.wheel_delta * wheel_step, 0.0f, max_scroll);
       mark_dirty();
       return true;
     }
@@ -417,6 +419,9 @@ auto CompletionPopup::get_property(std::string_view name) const -> std::optional
   }
   if (name == "filter") return filter_;
   if (name == "detail") return detail_;
+  // 列表滚动偏移——与 `FileDialog::get_property("scroll")` 同一姿态（2026-10-14）：
+  // 原本没有读取口，于是“滚轮方向反了”无法用断言钉住。
+  if (name == "scroll") return std::format("{:.1f}", static_cast<double>(scroll_y_));
   if (name == "labels") {
     std::string joined;
     for (const auto& view : items_) {
@@ -458,7 +463,7 @@ auto CompletionPopup::set_property(std::string_view name, std::string_view value
 auto CompletionPopup::property_names() const -> std::vector<std::string_view> {
   auto names = Element::property_names();
   names.insert(names.end(), {"items", "visible_items", "selected", "selected_label", "filter",
-                             "detail", "labels", "visible_labels"});
+                             "detail", "labels", "visible_labels", "scroll"});
   return names;
 }
 
