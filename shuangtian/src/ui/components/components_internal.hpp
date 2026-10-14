@@ -28,6 +28,7 @@
 #include "st/ui/element.hpp"
 #include "st/ui/line_layout.hpp"
 #include "st/ui/text_port.hpp"
+#include "st/ui/text_selection.hpp"
 #include "st/ui/theme.hpp"
 
 namespace st::ui::components_internal {
@@ -215,125 +216,19 @@ inline void paint_outline(raster::Surface& canvas, math::Rect rect, float radius
 // 「选择」语义。收敛在这里而不是各写一份：三处独立实现必然漂移，而「选了 A 拷出 B」
 // 这类缺陷极难定位。约定见 `DESIGN.md` §4.2.17g。
 
-/// 车符位：`line` = 行下标（含义由组件定：视觉行/逻辑行/网格行），
-/// `offset` = **行内字节偏移**（UTF-8 安全，总是落在码点边界上）。
-struct Caret {
-  int line{-1};
-  std::size_t offset{0};
-  [[nodiscard]] auto valid() const noexcept -> bool { return line >= 0; }
-  friend auto operator==(const Caret& a, const Caret& b) noexcept -> bool {
-    return a.line == b.line && a.offset == b.offset;
-  }
-};
-
-/// 文档序比较（先比行、行同比偏移）。返回值 <0 / ==0 / >0。
-[[nodiscard]] inline auto compare_caret(const Caret& a, const Caret& b) noexcept -> int {
-  if (a.line != b.line) return a.line < b.line ? -1 : 1;
-  if (a.offset != b.offset) return a.offset < b.offset ? -1 : 1;
-  return 0;
-}
-
-/// 选择区间（**已归一化**：`begin <= end`）。
-struct SelectionRange {
-  Caret begin{};
-  Caret end{};
-  /// 是否非空（两端相等 = 无选择）。
-  [[nodiscard]] auto empty() const noexcept -> bool { return begin == end; }
-  /// 单行内的选中区间（跨行时该行取整行）。
-  [[nodiscard]] auto span_on_line(int line, std::size_t line_length) const
-      -> std::pair<std::size_t, std::size_t> {
-    if (line < begin.line || line > end.line) return {0U, 0U};
-    const std::size_t from = line == begin.line ? begin.offset : 0U;
-    const std::size_t to = line == end.line ? end.offset : line_length;
-    return from <= to ? std::make_pair(from, to) : std::make_pair(to, from);
-  }
-};
-
-/// 把两个端点归一化（拖选方向任意）。
-[[nodiscard]] inline auto normalize_selection(const Caret& anchor, const Caret& focus)
-    -> SelectionRange {
-  return compare_caret(anchor, focus) <= 0 ? SelectionRange{anchor, focus}
-                                           : SelectionRange{focus, anchor};
-}
-
-/// 行内**前缀宽表**的查找：给定「每码点起始 x」表与目标 x，返回最近的**码点下标**。
-///
-/// 语义（与浏览器一致）：落在两码点边界之间时，**靠哪端近就取哪端**。
-/// `prefix` 长度 = 码点数 + 1（尾元素 = 行尾 x）。
-[[nodiscard]] inline auto nearest_codepoint(const std::vector<float>& prefix, float x) noexcept
-    -> std::size_t {
-  if (prefix.size() <= 1U) return 0U;
-  const std::size_t count = prefix.size() - 1U;   // 码点数
-  if (x <= prefix.front()) return 0U;
-  if (x >= prefix.back()) return count;
-  // 二分找第一个 >= x 的边界，再取左右更近的一端。
-  std::size_t low = 0U;
-  std::size_t high = count;
-  while (low < high) {
-    const std::size_t mid = (low + high) / 2U;
-    if (prefix[mid] < x) low = mid + 1U;
-    else high = mid;
-  }
-  if (low == 0U) return 0U;
-  const float left = prefix[low - 1U];
-  const float right = prefix[low];
-  return (x - left) <= (right - x) ? low - 1U : low;
-}
-
-/// 词边界（双击选词用）：从 `offset` 出发，向左/右各扩展到词的边界。
-///
-/// 词字符的定义：**非空白、非标点**（字母/数字/下划线；含 CJK——中文双击取
-/// 连跑的一段汉字，与浏览器一致）。返回**字节偏移**区间 `[begin, end)`。
-[[nodiscard]] inline auto word_range_at(std::string_view text, std::size_t offset) noexcept
-    -> std::pair<std::size_t, std::size_t> {
-  const auto start = static_cast<std::ptrdiff_t>(std::min(offset, text.size()));
-  // 退化到码点边界（调用方可能给到码点中间）。
-  std::size_t pos = static_cast<std::size_t>(start);
-  while (pos > 0U && (static_cast<unsigned char>(text[pos]) & 0xC0U) == 0x80U) --pos;
-  const auto is_word_byte = [](std::string_view s, std::size_t index) noexcept -> bool {
-    const unsigned char byte = static_cast<unsigned char>(s[index]);
-    // ASCII 可见字符：字母/数字/下划线算词；其余（空白/标点）不算。
-    if (byte < 0x80U) {
-      return (byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'z') ||
-             (byte >= 'A' && byte <= 'Z') || byte == '_';
-    }
-    return true;   // 非 ASCII（含 CJK）：算词字符（中文连跑取整段）
-  };
-  // 若落在非词字符上，向前找最近的词字符起点。
-  std::size_t probe = pos;
-  while (probe < text.size() && !is_word_byte(text, probe)) {
-    const std::size_t next = st::utf8_next(text, probe);
-    if (next <= probe) break;
-    probe = next;
-  }
-  if (probe >= text.size()) return {pos, pos};
-  std::size_t begin = probe;
-  std::size_t end = probe;
-  while (begin > 0U) {
-    const std::size_t prev = st::utf8_prev(text, begin);
-    if (!is_word_byte(text, prev)) break;
-    begin = prev;
-  }
-  while (end < text.size() && is_word_byte(text, end)) {
-    const std::size_t next = st::utf8_next(text, end);
-    if (next <= end) break;
-    end = next;
-  }
-  return {begin, end};
-}
-
-/// 按选择区间切片一行（行尾多余空白是否裁掉由 `trim_trailing` 控制）。
-[[nodiscard]] inline auto slice_line(std::string_view line, std::size_t from, std::size_t to,
-                                     bool trim_trailing = false) -> std::string {
-  const std::size_t safe_from = std::min(from, line.size());
-  const std::size_t safe_to = std::min(std::max(to, safe_from), line.size());
-  std::string_view piece = line.substr(safe_from, safe_to - safe_from);
-  if (trim_trailing) {
-    while (!piece.empty() && (piece.back() == ' ' || piece.back() == '\t')) {
-      piece.remove_suffix(1U);
-    }
-  }
-  return std::string(piece);
-}
+/// 车符位 / 选择区间 / 词界 / 最近码点 / 切片——**已提升到公共头**
+/// `st/ui/text_selection.hpp`（应用与子 Agent 也需要它们；此前只在组件私有头里，
+/// 于是每个新组件各抄一份）。本头保留同名别名，既有组件无需改名。
+using st::ui::Caret;
+using st::ui::compare_caret;
+using st::ui::kLineEndSentinel;
+using st::ui::nearest_codepoint;
+using st::ui::normalize_selection;
+using st::ui::SelectionBand;
+using st::ui::SelectionRange;
+using st::ui::slice_line;
+using st::ui::TextSelectionHost;
+using st::ui::TextSelectionModel;
+using st::ui::word_range_at;
 
 }  // namespace st::ui::components_internal

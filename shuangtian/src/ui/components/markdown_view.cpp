@@ -1311,22 +1311,70 @@ auto MarkdownView::selected_text() const -> std::string {
   return out;
 }
 
-void MarkdownView::paint_selection(raster::Surface& canvas, const Palette& colors) const {
+/// 一行文字在**行盒内**的墨迹带（相对行盒顶的偏移 + 高度，逻辑单位）。
+///
+/// **全部委托给框架原语 `st::ui::layout_line`**（`line_layout.hpp`）——那是全仓
+/// 「一行文字坐哪儿」的唯一实现，一次给出文字落位、行带、**墨迹带**、基线。
+/// 本组件不再自己推几何：这类推导每多写一遍就多一个漂移点
+///（实测：手搓的版本把行距算了两遍，高亮跑到字上方）。
+///
+/// 为何不直接用 `LineGeometry::ink_top/ink_height`：那是**行带**口径
+///（= 整个行盒，供行背景/缩进线，故意撑满不留缝）；选中高亮要的是
+/// **`glyph_top/glyph_height`**（贴合字形，行距大时不多出空白）。
+[[nodiscard]] auto MarkdownView::line_geometry(const TextPort& port, float size,
+                                               float line_height, text::FontRole role) const
+    -> LineGeometry {
+  // sample 用框架的固定参考样本（逐行一致，不随本行文本跳变）；
+  // `role` 由调用方按**该行实际绘制用的角色**传入（绝对一致）。
+  return layout_line(port, kInkReferenceSample, size, line_height, role);
+}
+
+/// 控件坐标 → **内容坐标**（鼠标命中侧用的那个变换）。
+///
+/// 为何要抽成一个函数（而不是各处手写 `pos - bounds_ + scroll`）：
+/// 内容坐标的原点是 `content_box()`（含 `padding`），不是 `bounds_` 的左上角。
+/// 一处漏了 `padding` 就全盘错位（实测：高亮偏上 12px、拖选落错行、
+/// 链接命中偏），而且**每次只错一点、看着像“差不多对”**，最难查。
+/// 绘制、命中、高亮三路必须共用本函数——这是「同一坐标系」的唯一入口。
+auto MarkdownView::content_point_of(math::Point control_point) const -> math::Point {
+  const math::Rect content = content_box();
+  return math::Point{control_point.x - content.x, control_point.y - content.y + scroll_offset_};
+}
+
+void MarkdownView::paint_selection(const RenderContext& context, raster::Surface& canvas,
+                                   const Palette& colors) const {
   if (!has_selection_) return;
+  const TextPort& port = text_port_of(context);
+  // ⚠ y 基准必须与 `paint_content` **同一个**（含 `padding.top` 与滚动偏移）：
+  // 行盒 `box.y` 是**内容坐标**，内容原点在 `content_box().y`——
+  // 漏掉 padding 会让高亮整块偏上（实测：偏上 12px ≈ padding.top）。
+  // x 同理用 `content.x`（而非 `bounds_.x + padding.left` 单算）。
+  const math::Rect content = content_box();
+  const float origin_x = content.x;
+  const float origin_y = content.y - scroll_offset_;
   const auto [begin, end] = selection_ends();
   // 视口内才画（行盒是内容坐标，平移到视口）。
   for (int index = begin.line; index <= end.line && index < static_cast<int>(rows_.size());
        ++index) {
     if (index < 0) continue;
     const Row& row = rows_[static_cast<std::size_t>(index)];
-    const float row_top = bounds_.y + row.box.y - scroll_offset_;
+    const float row_top = origin_y + row.box.y;
     if (row_top + row.box.height < bounds_.y || row_top > bounds_.bottom()) continue;
+    // 垂直范围一律走**框架原语**（`line_geometry` → `layout_line`）：
+    // 取 `glyph_top/glyph_height`（字形墨迹带，贴合文字）而不是
+    // `ink_top/ink_height`（行带，撑满行盒——那是给行背景用的）。
+    const float size = row.spans.empty() ? metrics_.base : row.spans.front().size;
+    const text::FontRole role =
+        row.spans.empty() ? text::FontRole::Proportional : row.spans.front().font_role();
+    const LineGeometry geom = line_geometry(port, size, row.box.height, role);
+    const float band_top = row_top + geom.glyph_top;
+    const float band = geom.glyph_height;
     // 表格行没有 `flat`（单元格各自折行）：退化为**整行高亮**
     //（与复制行为一致——表格一行是一个整体，不支持格内字符级选择）。
     if (row.kind == RowKind::TableRow || row.flat.empty()) {
-      const math::Rect view{bounds_.x + style_.padding.left, row_top,
+      const math::Rect view{origin_x, band_top,
                             std::min(row.box.width, bounds_.width - style_.padding.horizontal()),
-                            row.box.height};
+                            band};
       fill_rect_shape(canvas, view, colors.selection, 2.0f);
       continue;
     }
@@ -1334,11 +1382,10 @@ void MarkdownView::paint_selection(raster::Surface& canvas, const Palette& color
     const std::size_t to = index == end.line ? end.offset : row.flat.size();
     if (from >= to) continue;
     // **逐行分段**：高亮区间 = 该行选中文字的**实际像素跨度**（不是整行矩形）。
-    // 基准必须与 `caret_at` 一致：内容坐标 x = `padding.left + row.text_x + 行内偏移`。
-    const float base = bounds_.x + style_.padding.left + row.text_x;
-    const float x0 = base + offset_to_x(row, from);
-    const float x1 = base + offset_to_x(row, to);
-    const math::Rect view{std::min(x0, x1), row_top, std::max(x1 - x0, 1.0f), row.box.height};
+    // 基准必须与 `caret_at` 一致：内容坐标 x = `origin_x + row.text_x + 行内偏移`。
+    const float x0 = origin_x + row.text_x + offset_to_x(row, from);
+    const float x1 = origin_x + row.text_x + offset_to_x(row, to);
+    const math::Rect view{std::min(x0, x1), band_top, std::max(x1 - x0, 1.0f), band};
     fill_rect_shape(canvas, view, colors.selection, 2.0f);
   }
 }
@@ -1377,16 +1424,9 @@ void MarkdownView::settle_scroll() {
 // —— 布局与绘制 ——
 
 void MarkdownView::measure(const RenderContext& context, const Constraints& constraints) {
-  float width = constraints.max_width < kUnbounded ? constraints.max_width : kDefaultViewWidth;
-  if (max_width_ > 0.0f) width = std::min(width, max_width_);
-  width = std::max(width, kMinViewWidth);
-  const float content_width = std::max(width - style_.padding.horizontal(), kMinTextWidth);
-  if (needs_layout_ || content_width != layout_width_ || context.text != layout_port_) {
-    rebuild_rows(context, content_width);
-    layout_width_ = content_width;
-    layout_port_ = context.text;
-    needs_layout_ = false;
-  }
+  set_layout_width(context, desired_width(constraints));
+  float width = layout_width_ + style_.padding.horizontal();
+  if (style_.has_explicit_width()) width = style_.width;
   float height = content_height_;  // 全量内容高度（与视口无关）
   if (style_.has_explicit_height()) height = style_.height;
   if (constraints.max_height < kUnbounded) height = std::min(height, constraints.max_height);
@@ -1395,7 +1435,35 @@ void MarkdownView::measure(const RenderContext& context, const Constraints& cons
   settle_scroll();
 }
 
+void MarkdownView::set_layout_width(const RenderContext& context, float width) {
+  const float content_width = std::max(width - style_.padding.horizontal(), kMinTextWidth);
+  if (needs_layout_ || content_width != layout_width_ || context.text != layout_port_) {
+    rebuild_rows(context, content_width);
+    layout_width_ = content_width;
+    layout_port_ = context.text;
+    needs_layout_ = false;
+  }
+}
+
+/// 本组件想要的排版宽：优先约束的上界，**无界时退到 `available_width`**。
+/// 只有两轴都无界（独立摆放）才回落兑底常量——行/列容器在 shrink-to-fit 语义下
+/// 会把 `kUnbounded` 一路传下来，直接当尺寸用就永远是兜底宽（实测：内容窄居左）。
+auto MarkdownView::desired_width(const Constraints& constraints) const noexcept -> float {
+  float width = constraints.max_width;
+  if (width >= kUnbounded) width = constraints.available_width;
+  if (width >= kUnbounded) width = kDefaultViewWidth;
+  width = std::max(width, kMinViewWidth);
+  if (max_width_ > 0.0f) width = std::min(width, max_width_);
+  return width;
+}
+
 void MarkdownView::arrange(const RenderContext& context, math::Rect rect) {
+  // **用已确定的真实矩形重排一次**（与 `ScrollView::arrange` 同一套路）：
+  // 测量阶段拿到的宽是父级给的**粗口径**（Row/Column 在 shrink-to-fit 语义下可能
+  // 一路传 `kUnbounded`），而文本排版必须按**控件真实宽**折行。少了这一步，
+  // 排版宽与控件宽分家——表现为行宽不随窗口变化、行尾提前断开、
+  // 进而**选中高亮与文字错位**（高亮按一套宽算、文字按另一套画）。
+  if (!rect.is_empty()) set_layout_width(context, rect.width);
   Element::arrange(context, rect);
   view_height_ = std::max(bounds_.height, 0.0f);
   settle_scroll();
@@ -1622,7 +1690,7 @@ void MarkdownView::paint_content(const RenderContext& context, raster::Surface& 
   const math::Point origin{content.x, content.y - scroll_offset_};
   canvas.push_clip_rect(bounds_);
   // 选中高亮画在文本层之下（行级矩形，见 paint_selection 的说明）。
-  paint_selection(canvas, context.theme.colors());
+  paint_selection(context, canvas, context.theme.colors());
   // —— 可见行区间：**二分**定位，不做全量遍历 ——
   //
   // `rows_` 按**文档序**排（`box.y` 单调递增，排版期逐行累加 y），所以“首页与视口
@@ -1710,8 +1778,15 @@ void MarkdownView::paint_content(const RenderContext& context, raster::Surface& 
       case RowKind::ListRow:
       case RowKind::CodeLine: {
         paint_marker(context, canvas, row, origin);
-        const float text_y =
-            box.y + std::max(0.0f, (row.box.height - row.line_height) * 0.5f);
+        // 文字落位与高亮**同源**：两处都取同一次 `line_geometry`（框架原语）
+        // ——文字用 `origin_y`，高亮用 `glyph_top/glyph_height`。
+        // 各自推一遍必然漂移（实测踩过：高亮悬在字上方）。
+        const float size = row.spans.empty() ? metrics_.base : row.spans.front().size;
+        const text::FontRole role =
+            row.spans.empty() ? text::FontRole::Proportional : row.spans.front().font_role();
+        const LineGeometry geom =
+            line_geometry(text_port_of(context), size, row.box.height, role);
+        const float text_y = box.y + geom.origin_y;
         draw_spans(context, canvas, row.spans, math::Point{row.text_x + origin.x, text_y},
                    std::min(clip.right(), box.right()), row.line_height);
         break;
@@ -1741,8 +1816,7 @@ auto MarkdownView::on_event(const RenderContext& context, Event& event) -> bool 
       // 左键在视图内：先看有没有点到链接（链接优先于拖选——点链接是
       // 用户意图更明确的动作）；没点到链接才开拖选。
       if (event.button != 1 || !bounds_.contains(event.position)) return false;
-      const math::Point content{event.position.x - bounds_.x + 0.0f,
-                                event.position.y - bounds_.y + scroll_offset_};
+      const math::Point content = content_point_of(event.position);
       const std::string url = link_at(content);
       if (!url.empty()) {
         if (on_link_click) on_link_click(url);
@@ -1782,10 +1856,9 @@ auto MarkdownView::on_event(const RenderContext& context, Event& event) -> bool 
         }
         return !url.empty();
       }
-      // 拖选中：扩展终点（字符级——同一行内也能继续扩，不只是换行）。
-      const math::Point drag_content{event.position.x - bounds_.x,
-                                     event.position.y - bounds_.y + scroll_offset_};
-      const Caret next = caret_at(drag_content);
+          // 拖选中：扩展终点（字符级——同一行内也能继续扩，不只是换行）。
+    const math::Point drag_content = content_point_of(event.position);
+    const Caret next = caret_at(drag_content);
       if (next.line != select_focus_.line || next.offset != select_focus_.offset) {
         select_focus_ = next;
         has_selection_ = select_anchor_.line != select_focus_.line ||

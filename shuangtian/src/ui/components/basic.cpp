@@ -194,12 +194,15 @@ void Text::paint_content(const RenderContext& context, raster::Surface& canvas) 
     if (selectable_ && has_selection()) {
       const float x0 = offset_to_x(context, 0U, select_begin_offset_);
       const float x1 = offset_to_x(context, 0U, select_end_offset_);
-      // 垂直范围取字形**墨迹区**（`ascent..descent`）而不是行高：
-      // 行高含 `line_gap` 与字体留白，用它作高度会让高亮上下各多出一段
-      //（实测：vision 复核报“高亮比文字高、呈整块矩形”）。
-      const float band_y = bounds_.y + port.ascent(size);
-      const float band_h = std::max(port.descent(size) - port.ascent(size), size * 0.6f);
-      canvas.fill_rect(math::Rect{std::min(x0, x1), band_y, std::max(x1 - x0, 1.0f), band_h},
+      // 垂直范围走**框架原语** `layout_line` 的 `glyph_top/glyph_height`
+      //（字形墨迹带——高亮/光标专用；不要用行带 `ink_top/ink_height`，
+      // 那是行背景口径，行距大时会让高亮多出一截）。
+      // 旧实现写 `descent − ascent`：两者都是**正数**，相减恒为负，
+      // 被 `max(..., size*0.6)` 兜住 ⇒ 高亮高永远是个固定值、与字体无关。
+      const LineGeometry geom =
+          layout_line(port, kInkReferenceSample, size, bounds_.height, text::FontRole::Proportional);
+      canvas.fill_rect(math::Rect{std::min(x0, x1), bounds_.y + geom.glyph_top,
+                                  std::max(x1 - x0, 1.0f), geom.glyph_height},
                        raster::Paint::solid(context.theme.colors().selection));
     }
     paint_text(context, canvas, content_, bounds_);
@@ -277,10 +280,11 @@ void Text::paint_content(const RenderContext& context, raster::Surface& canvas) 
       if (to > from) {
         const float head = x + port.measure_width(std::string_view(line).substr(0, std::min(from, line.size())), size);
         const float tail = x + port.measure_width(std::string_view(line).substr(0, std::min(to, line.size())), size);
-        // 同理：垂直取墨迹区。行内 y 是本行行顶，故向下偏移 `ascent`。
-        const float band_y = y + port.ascent(size);
-        const float band_h = std::max(port.descent(size) - port.ascent(size), size * 0.6f);
-        canvas.fill_rect(math::Rect{head, band_y, std::max(tail - head, 1.0f), band_h},
+        // 垂直同理走框架原语（行内 `y` 是本行行顶）。
+        const LineGeometry geom = layout_line(port, kInkReferenceSample, size, line_height,
+                                              text::FontRole::Proportional);
+        canvas.fill_rect(math::Rect{head, y + geom.glyph_top, std::max(tail - head, 1.0f),
+                                    geom.glyph_height},
                          raster::Paint::solid(context.theme.colors().selection));
       }
     }

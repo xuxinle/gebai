@@ -52,7 +52,7 @@ inline constexpr std::string_view kInkReferenceSample = "Ag(|)";
 struct LineGeometry {
   /// 传给 `TextPort::draw` 的 `origin.y`（= 行盒顶在该坐标系里的位置）。
   float origin_y{0.0f};
-  /// **行带**顶（画高亮带、光标、缩进参考线的顶）。
+  /// **行带**顶（画行背景、缩进参考线的顶）。
   ///
   /// ⚠ 这是**行带**（= 整个行盒），**不是**“本行墨迹的范围”——别拿它当“文字实际多高”。
   /// 名字沿用历史（曾按墨迹算），语义已由 2026-10-07 的第三次反馈定死为行盒。
@@ -66,6 +66,22 @@ struct LineGeometry {
   float ink_height{0.0f};
   /// 基线（多段文字/多列对齐时的共同参照）。
   float baseline{0.0f};
+  /// **字形墨迹带**顶：文字实际画出的笔画的上缘（相对盒顶）。
+  ///
+  /// 与 `ink_top` 的区别，是本节最容易混的一对量：
+  ///
+  /// | 量 | 回答的问题 | 口径 |
+  /// |---|---|---|
+  /// | `ink_top/ink_height`（行带） | “行背景/缩进参考线要多大才**装得下**这一行” | **整个行盒**（含行距） |
+  /// | `glyph_top/glyph_height`（墨迹带） | “**选中高亮/光标**要贴住文字、不多出空白” | 字形墨迹 |
+  ///
+  /// 拿行带去画选区，行距越大高亮就越臃肿（实测 Markdown 正文行距 1.6 倍时，
+  /// 高亮比文字高出近一整行——用户报“高亮还是没对上”）；
+  /// 反过来拿墨迹带去画行背景，行间就会出现缝隙（第三次反馈的成因）。
+  /// **两者都要有**，各用其处。
+  float glyph_top{0.0f};
+  /// 字形墨迹带高（选中高亮 / 光标条用）。
+  float glyph_height{0.0f};
 };
 
 /// 量一行文字的几何。`sample` 决定墨迹尺度，**必须是固定的参考样本**
@@ -99,7 +115,11 @@ struct LineGeometry {
     return LineGeometry{.origin_y = origin_y,
                         .ink_top = (box_height - fallback_height) * 0.5f,
                         .ink_height = fallback_height,
-                        .baseline = origin_y + ascent};
+                        .baseline = origin_y + ascent,
+                        // 报不出墨迹：墨迹带退化为行带的 0.8 倍高（可居中）——
+                        // 高亮/光标在无字体环境下仍可见（不给 0）。
+                        .glyph_top = (box_height - fallback_height) * 0.5f,
+                        .glyph_height = fallback_height};
   }
   // 墨迹中心相对**行盒顶**的位置：
   //   行盒顶 → 基线   = `shaped_ascent`（与 `draw` 同源；**不要**用 `ascent(size)`）
@@ -135,10 +155,21 @@ struct LineGeometry {
   // 文字仍按**墨迹区**居中（`origin_y` 的推导在上），所以盒高的多余部分
   // （行距增量 + 字体预留空间）**两侧均分**——这正是用户第一次报的
   // 「行间距全在行下方」要求的“两侧分摊”。
+
+  // —— 字形**墨迹带**（`glyph_top/glyph_height`）——
+  //
+  // 与上面的行带**不同的一对量**，供**选中高亮/光标**用（行带给行背景）。
+  // 基线在 `origin_y + ascent`，字形从基线向上 `above`、向下 `below`
+  //（`ink` 是**参考样本**量出的，因此**逐行一致**、不会因内容而跳）。
+  // 下延字形（`g`/`|`/括号）令带略高于小写字母——那正是要包住的量。
+  const float glyph_top = baseline - ink->above;
+  const float glyph_height = std::max(ink->above + ink->below, size * 0.6f);
   return LineGeometry{.origin_y = origin_y,
                       .ink_top = 0.0f,
                       .ink_height = box_height,
-                      .baseline = baseline};
+                      .baseline = baseline,
+                      .glyph_top = glyph_top,
+                      .glyph_height = glyph_height};
 }
 
 /// 便捷版：只取 `origin_y`（`TextPort::draw` 的入参）。

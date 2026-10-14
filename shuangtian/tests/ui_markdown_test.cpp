@@ -20,6 +20,7 @@
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/components/markdown_view.hpp"
+#include "st/ui/element.hpp"
 #include "st/ui/theme.hpp"
 #include "st/ui/ui_root.hpp"
 #include "tests/support/text_port_fixtures.hpp"
@@ -246,6 +247,76 @@ ST_TEST(md_view_stream_append_matches_oneshot) {
   ST_CHECK(partial.block_count() >= 2U);
   ST_CHECK(equals(*partial.get_property("pending"), "true"));
   ST_CHECK(partial.semantics_text().find("int x = 1;") != std::string::npos);
+}
+
+ST_TEST(md_view_layout_width_follows_real_control_geometry) {
+  // 回归：**排版宽 == 控件宽**（用户报“选中背景错位、没随窗口大小适应”）。
+  //
+  // 背景：`MarkdownView` 的排版宽以前只看 `constraints.max_width`。而 Row 容器
+  // 给子节点的上界是 `kUnbounded`（Flex 的 shrink-to-fit 语义），真可用宽在
+  // `available_width`——直接拿上界当尺寸就会落回兑底常量（640），
+  // 于是排版按 608 排、`arrange` 又给了真实控件宽的矩框：文字折行与选中高亮
+  // 的基准就分家了（高亮跑到文字外面）。
+  //
+  // 两个面都钉：① **直接调 `measure`**（Row 口径的约束：上界无界 + 可用宽有值）
+  // —— 排版宽必须跟随可用宽；② 经 `UiRoot` 的整链——排版宽严格等于控件内容宽。
+  const st::ui::Theme theme = st::ui::Theme::light();
+  const st::ui::RenderContext context{theme, &stub_port(), 0.0};
+
+  // ① 直接 measure：Row 口径（max_width 无界、available_width = 800）
+  {
+    st::ui::MarkdownView view{std::string(kSample)};
+    view.style().padding = st::math::Insets{12.0f, 16.0f, 12.0f, 16.0f};
+    const float padding = view.style().padding.horizontal();
+    st::ui::Constraints constraints;
+    constraints.max_width = st::ui::kUnbounded;
+    constraints.available_width = 800.0f;
+    constraints.max_height = st::ui::kUnbounded;
+    constraints.available_height = 400.0f;
+    view.measure(context, constraints);
+    const auto layout_width = view.get_property("layout_width");
+    ST_REQUIRE(layout_width.has_value());
+    // 排版宽 = 可用宽 − 自身 padding（旧实现落回兑底常量 640 − padding）
+    ST_CHECK_NEAR(std::stod(*layout_width), static_cast<double>(800.0f - padding), 0.5);
+  }
+
+  st::ui::UiRoot root;
+  root.set_text_port(&stub_port());
+  constexpr float kViewport = 640.0f;
+  root.set_viewport(st::math::Size{kViewport, 400.0f});
+
+  // ② 整链：MarkdownView 放在 **Row** 容器里（真实触发形态：分栏 + 同排兄弟）。
+  auto row = std::make_unique<st::ui::Panel>();
+  row->set_id("row");
+  row->style().direction = st::ui::FlexDirection::Row;
+  row->style().grow = true;
+
+  auto view = std::make_unique<st::ui::MarkdownView>(std::string(kSample));
+  view->set_id("md");
+  view->style().grow = true;
+  view->style().padding = st::math::Insets{12.0f, 16.0f, 12.0f, 16.0f};
+  st::ui::MarkdownView* md = view.get();
+  row->add_child(std::move(view));
+  root.set_content(std::move(row));
+  root.layout(true);
+
+  const float control_width = md->bounds().width;
+  const float content_width = control_width - md->style().padding.horizontal();
+  const auto layout_width = md->get_property("layout_width");
+  ST_REQUIRE(layout_width.has_value());
+  ST_CHECK_NEAR(std::stod(*layout_width), static_cast<double>(content_width), 0.5);
+  ST_CHECK(control_width > 300.0f);        // 真占了容器宽，而不是落回兑底常量
+
+  // 变宽后跟着变（“随窗口大小适应”的直接断言）
+  root.set_viewport(st::math::Size{kViewport + 200.0f, 400.0f});
+  root.layout(true);
+  const auto widened_layout = md->get_property("layout_width");
+  ST_REQUIRE(widened_layout.has_value());
+  const float widened_control = md->bounds().width - md->style().padding.horizontal();
+  ST_CHECK_NEAR(std::stod(*widened_layout), static_cast<double>(widened_control), 0.5);
+  ST_CHECK(std::stod(*widened_layout) > static_cast<double>(content_width) + 100.0);   // 真的变宽了
+
+  root.set_content(nullptr);
 }
 
 // ③ 渲染到 600×400 画布：内容包围盒非空、内容高度 > 视口（可滚动）
@@ -603,6 +674,135 @@ ST_TEST(md_view_selection_highlight_pixels) {
   ST_CHECK(diff > 500);   // 全选高亮是成片的色块，差异不可能是个位数
 }
 
+ST_TEST(md_view_selection_band_uses_ink_metrics) {
+  // 回归（用户：“高亮还是没对上”）：高亮的垂直范围必须取**字形墨迹**，不是行盒。
+  //
+  // 用一个能报墨迹量的桩（`above = 0.3×size`，远小于行盒 ascend 0.8×size）。
+  // 若实现回到“取行盒”（或忘传 `ink_metrics`），带高就会变成行盒的 above+below，
+  // 与本用例期望的 0.3×size + 0.2×size = 0.5×size 差出很多——回退后必红。
+  //
+  // 夹具 `ProportionalTextPort` 是 `final`（不可继承）——所以这里用**代理**
+  // 把它包一层，只覆写 `ink_metrics`，其余一律转发。
+  struct InkPort : st::ui::TextPort {
+    [[nodiscard]] auto measure(std::string_view utf8, float size) const
+        -> st::math::Size override {
+      return inner.measure(utf8, size);
+    }
+    [[nodiscard]] auto measure_width(std::string_view utf8, float size,
+                                     st::text::FontRole role = st::text::FontRole::Proportional) const
+        -> float override {
+      return inner.measure_width(utf8, size, role);
+    }
+    [[nodiscard]] auto line_height(float size) const -> float override {
+      return inner.line_height(size);
+    }
+    [[nodiscard]] auto ascent(float size) const -> float override { return inner.ascent(size); }
+    [[nodiscard]] auto descent(float size) const -> float override { return inner.descent(size); }
+    [[nodiscard]] auto ink_metrics(std::string_view utf8, float size,
+                                   st::text::FontRole role = st::text::FontRole::Proportional) const
+        -> std::optional<st::ui::TextPort::InkMetrics> override {
+      (void)utf8;
+      (void)role;
+      return st::ui::TextPort::InkMetrics{size * 0.3f, size * 0.2f};
+    }
+    void draw(st::raster::Surface& canvas, std::string_view utf8, st::math::Point origin,
+              float size, st::math::Color color,
+              st::text::FontRole role = st::text::FontRole::Proportional, float embolden = 0.0f,
+              bool bold = false) const override {
+      inner.draw(canvas, utf8, origin, size, color, role, embolden, bold);
+    }
+    [[nodiscard]] auto ellipsize(std::string_view utf8, float size, float max_width) const
+        -> std::string override {
+      return inner.ellipsize(utf8, size, max_width);
+    }
+    [[nodiscard]] auto wrap(std::string_view utf8, float size, float max_width) const
+        -> std::vector<std::string_view> override {
+      return inner.wrap(utf8, size, max_width);
+    }
+    [[nodiscard]] auto wrap_limited(std::string_view utf8, float size, float max_width,
+                                    std::size_t max_lines) const
+        -> std::vector<std::string> override {
+      return inner.wrap_limited(utf8, size, max_width, max_lines);
+    }
+    const st::test::ProportionalTextPort& inner;
+    explicit InkPort(const st::test::ProportionalTextPort& source) : inner(source) {}
+  };
+  static const InkPort port{stub_port()};
+
+  const st::ui::Theme theme = st::ui::Theme::light();
+  st::ui::MarkdownView view{std::string(kSample)};
+  view.apply_theme(theme);
+  const st::ui::RenderContext context{theme, &port, 0.0};
+  view.measure(context, constraints_for(kCanvasWidth, kCanvasHeight));
+  view.arrange(context, st::math::Rect{0.0f, 0.0f, static_cast<float>(kCanvasWidth),
+                                      static_cast<float>(kCanvasHeight)});
+
+  // 只选一行内一段（跨行会把相邻行的带连成一片，量不出单行范围）。
+  const float line_y = view.bounds().y + 70.0f;
+  st::ui::Event down;
+  down.kind = st::ui::EventKind::MouseDown;
+  down.button = 1;
+  down.position = st::math::Point{20.0f, line_y};
+  (void)view.on_event(context, down);
+  st::ui::Event move = down;
+  move.kind = st::ui::EventKind::MouseMove;
+  move.position = st::math::Point{200.0f, line_y + 1.0f};
+  (void)view.on_event(context, move);
+  st::ui::Event up = down;
+  up.kind = st::ui::EventKind::MouseUp;
+  (void)view.on_event(context, up);
+  ST_REQUIRE(!view.selected_text().empty());
+
+  st::raster::Canvas canvas{kCanvasWidth, kCanvasHeight};
+  view.paint(context, canvas);
+
+  // ⚠ 量法必须用**差分**：主题里 `selection=0xC6CBF7`（R=198,B=247），而
+  // `code_bg=0xECECF2` 等浅色块也满足“B>R”——用颜色判据会把代块底算进去
+  //（实测：带高恒为 35px、与字号无关，就是这个假象）。
+  // 干净的做法：同一视图画两次（有/无选区），只在**有差异**的像素上量。
+  st::ui::MarkdownView plain_view{std::string(kSample)};
+  plain_view.apply_theme(theme);
+  plain_view.measure(context, constraints_for(kCanvasWidth, kCanvasHeight));
+  plain_view.arrange(context, st::math::Rect{0.0f, 0.0f, static_cast<float>(kCanvasWidth),
+                                            static_cast<float>(kCanvasHeight)});
+  st::raster::Canvas plain{kCanvasWidth, kCanvasHeight};
+  plain_view.paint(context, plain);
+  // 同一视图不再重排，只清选择重画（排版结果一致，差异只来自高亮）。
+  std::vector<int> changed_rows;
+  for (int y = 0; y < kCanvasHeight; ++y) {
+    bool diff = false;
+    for (int x = 0; x < kCanvasWidth; ++x) {
+      if (!(canvas.pixel_at(x, y) == plain.pixel_at(x, y))) {
+        diff = true;
+        break;
+      }
+    }
+    if (diff) changed_rows.push_back(y);
+  }
+  ST_REQUIRE(!changed_rows.empty());
+  // 最长连续差异段 = 高亮带的纵向跨度。
+  int best = 0;
+  int band = 0;
+  for (std::size_t i = 0; i < changed_rows.size(); ++i) {
+    band = (i > 0 && changed_rows[i] == changed_rows[i - 1] + 1) ? band + 1 : 1;
+    best = std::max(best, band);
+  }
+  ST_REQUIRE(best > 0);
+
+  const float base = std::stof(*view.get_property("base_font_size"));
+  const float ink_height = base * 0.5f;              // 桩：above 0.3 + below 0.2
+  const float box_height = port.line_height(base);   // 行盒高（旧实现会用这个）
+  std::cout << std::format("  [md] 期望墨迹高={:.2f} 实测带高={} 行盒高={:.2f}\n", ink_height, best,
+                           box_height)
+            << std::flush;
+  // ① 带高 ≈ 墨迹高（容差 3px 吸收绘制取整/圆角混合）。
+  ST_CHECK_NEAR(static_cast<float>(best), ink_height, 3.0f);
+  // ② 前提成立：这个桩上行盒确实远高于墨迹（否则本条区分不出两者）。
+  ST_CHECK(box_height > ink_height * 1.2f);
+  // ③ 这才是“回退到行盒”会红的判据。
+  ST_CHECK(static_cast<float>(best) < box_height * 0.9f);
+}
+
 ST_TEST(md_view_link_hit_and_click_callback) {
   // 链接是一等交互（2026-10-13）：命中测试与绘制**同源**（共用 `rows_` 与
   // `Span::link`）；点击回调把 URL 交给宿主（打开浏览器是宿主的事）。
@@ -612,39 +812,42 @@ ST_TEST(md_view_link_hit_and_click_callback) {
   (void)render(view, theme, kCanvasWidth, kCanvasHeight);
   const st::ui::RenderContext context{theme, &stub_port(), 0.0};
 
-  // 命中测试：链接文字在首行，x 向右扫直到命中（不硬编码像素，避开字体差异）。
-  // 用公开面给出的控件原点：内容首行 ≈ `bounds.y`（内边距很小）。
-  const float top_y = view.bounds().y + 6.0f;
-  std::string hit;
-  for (float x = 0.0f; x < 400.0f && hit.empty(); x += 2.0f) {
-    hit = view.link_at(st::math::Point{x, top_y});
-  }
-  ST_CHECK_EQ(hit, std::string("https://example.com/docs"));
-  // 同一行里**非链接区域**不应误报（命中测试要真的看 x 区间）。
-  bool false_positive = false;
-  for (float x = 380.0f; x < 600.0f; x += 4.0f) {
-    if (!view.link_at(st::math::Point{x, top_y}).empty()) {
-      false_positive = true;
-    }
-  }
-  ST_CHECK(!false_positive);
-
-  // 点击回调：真实鼠标事件路径（MouseDown）应上报 URL。
+  // 链接文字在首行，x 向右扫直到命中（不硬编码像素，避开字体差异）。
+  // ⚠ 坐标语义（2026-10-14 统一）：`link_at` 收的是**内容坐标**
+  //（原点在 `content_box()`，含 padding），控件坐标 → 内容坐标的变换由
+  // `content_point_of` 统一提供。测试这里直接走**控件坐标的事件路径**
+  //（`on_event`），那才是真实用户路径、也才会暴露基准不一致。
+  //
+  // y 也扫不硬编：首行在内容原点的 padding 之下，具体多少由主题/字号定。
   std::string clicked;
   view.on_link_click = [&clicked](std::string_view url) { clicked = std::string(url); };
-  st::ui::Event down;
-  down.kind = st::ui::EventKind::MouseDown;
-  down.button = 1;
-  float hit_x = 0.0f;
-  for (float x = 0.0f; x < 400.0f; x += 2.0f) {
-    if (!view.link_at(st::math::Point{x, top_y}).empty()) {
-      hit_x = x;
-      break;
+  st::ui::Event probe;
+  probe.kind = st::ui::EventKind::MouseDown;
+  probe.button = 1;
+  float link_x = -1.0f;
+  float link_y = -1.0f;
+  for (float y = view.bounds().y; y < view.bounds().y + 60.0f && link_x < 0.0f; y += 2.0f) {
+    for (float x = 0.0f; x < 400.0f; x += 2.0f) {
+      clicked.clear();
+      probe.position = st::math::Point{view.bounds().x + x, y};
+      if (view.on_event(context, probe) && !clicked.empty()) {
+        link_x = x;
+        link_y = y;
+        break;
+      }
     }
   }
-  down.position = st::math::Point{view.bounds().x + hit_x, top_y};
-  ST_CHECK(view.on_event(context, down));
+  ST_CHECK(link_x >= 0.0f);
   ST_CHECK_EQ(clicked, std::string("https://example.com/docs"));
+
+  // 同行里**非链接区域**不应误报（命中测试要真的看 x 区间）。
+  bool false_positive = false;
+  for (float x = 380.0f; x < 600.0f; x += 4.0f) {
+    clicked.clear();
+    probe.position = st::math::Point{view.bounds().x + x, link_y};
+    if (view.on_event(context, probe) && !clicked.empty()) false_positive = true;
+  }
+  ST_CHECK(!false_positive);
 }
 
 ST_TEST(md_view_code_block_hit) {

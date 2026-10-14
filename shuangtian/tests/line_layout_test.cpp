@@ -234,3 +234,37 @@ ST_TEST(line_layout_geometry_is_self_consistent) {
   ST_CHECK(std::abs(g.ink_top - 0.0F) <= kTolerance);
   ST_CHECK(std::abs(g.ink_height - 26.0F) <= kTolerance);
 }
+
+ST_TEST(line_layout_glyph_band_hugs_ink_not_line_box) {
+  // ⑥ **行带 ≠ 墨迹带**（2026-10-14 新增的一对量，用户报「选中高亮对不上」）。
+  //
+  // `ink_top/ink_height` 是**行带**（= 整个行盒），供行背景/缩进参考线——
+  // 那时行距要算进去（否则带与带之间留缝）。而**选中高亮/光标**要的是
+  // 字形墨迹本身（`glyph_top/glyph_height`）：Markdown 正文行距 1.6 倍时，
+  // 拿行带当高亮会让它比文字高出一大截（实测：高亮悬在文字上方、
+  // 用户两次反馈“还是没对上”）。
+  //
+  // 本用例同时钉住「两个都在」与「各用其处」：
+  // ① 行带撑满盒（旧契约不变）；② 墨迹带贴合字形（新契约）；
+  // ③ 行距越大，两者差越多（证明确实是两个不同的量，不是一个量的两种叫法）。
+  const FixedPort port{20.0F, 12.0F, 3.0F, 0.8F};   // above=12, below=3
+  for (const float box : {20.0F, 26.0F, 32.0F}) {
+    const LineGeometry g = st::ui::layout_line(port, st::ui::kInkReferenceSample, 15.0F, box);
+    // ① 行带：撑满整盒。
+    ST_CHECK(std::abs(g.ink_top - 0.0F) <= kTolerance);
+    ST_CHECK(std::abs(g.ink_height - box) <= kTolerance);
+    // ② 墨迹带：高 = above + below（与盒高**无关**——它只跟字形与基线有关）。
+    ST_CHECK(std::abs(g.glyph_height - 15.0F) <= kTolerance);
+    // ③ 墨迹带必须落在盒内，且盒比墨迹高时两侧留白相等（居中）。
+    const float top_gap = g.glyph_top;
+    const float bottom_gap = box - (g.glyph_top + g.glyph_height);
+    ST_CHECK(top_gap >= -kTolerance);
+    ST_CHECK(bottom_gap >= -kTolerance);
+    ST_CHECK(std::abs(top_gap - bottom_gap) <= kTolerance);
+  }
+  // ④ 两个量确实不同：行距 1.6 时差 11px（+6 的盒高）。
+  const LineGeometry narrow = st::ui::layout_line(port, st::ui::kInkReferenceSample, 15.0F, 20.0F);
+  const LineGeometry wide = st::ui::layout_line(port, st::ui::kInkReferenceSample, 15.0F, 32.0F);
+  ST_CHECK(std::abs(narrow.ink_height - narrow.glyph_height - 5.0F) <= kTolerance);
+  ST_CHECK(std::abs(wide.ink_height - wide.glyph_height - 17.0F) <= kTolerance);
+}

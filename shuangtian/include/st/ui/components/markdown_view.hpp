@@ -33,6 +33,7 @@
 #include "st/md/markdown.hpp"
 #include "st/md/stream.hpp"
 #include "st/ui/element.hpp"
+#include "st/ui/line_layout.hpp"
 #include "st/ui/theme.hpp"
 
 namespace st::ui {
@@ -319,10 +320,27 @@ class MarkdownView : public Element {
 
   // —— 排版 ——
   void rebuild_rows(const RenderContext& context, float width);
+  /// 按**给定控件宽**重排内容（`measure` 与 `arrange` 共用唯一入口）。
+  void set_layout_width(const RenderContext& context, float width);
+  /// 本组件想要的排版宽（`max_width` → `available_width` → 兑底常量）。
+  [[nodiscard]] auto desired_width(const Constraints& constraints) const noexcept -> float;
+  /// 一行的垂直几何（**全部委托框架原语 `layout_line`**，见定义处的说明）。
+///
+/// ⚠ `role` 必须与**该行文字实际绘制时用的角色一致**：`layout_line` 拿它去量参考
+/// 样本的 ascender 来定基线，而不同字体面的 ascender 差得多
+///（实测同字号下拉丁 11.14 / 中文 15.87）——角色传错就是**整行文字偏移**
+///（实测：正文传成 Monospace 后文字比高亮低约 12px）。
+[[nodiscard]] auto line_geometry(const TextPort& port, float size, float line_height,
+                               text::FontRole role) const -> LineGeometry;
+  /// 控件坐标 → 内容坐标（绘制/命中/高亮三路**共用的唯一变换**）。
+  [[nodiscard]] auto content_point_of(math::Point control_point) const -> math::Point;
   /// 行下标 ↔ 内容 y 的互查（选择/滚动用；越界/空白区返回最近行）。
   [[nodiscard]] auto row_at_y(float content_y) const -> int;
   /// 高亮选区（paint 里画在文本层之下，**逐行分段**：每行的选中区间独立算）。
-  void paint_selection(raster::Surface& canvas, const struct Palette& colors) const;
+  ///
+  /// 需要 `port`（算字形**墨迹区**——高亮的垂直范围取墨迹不取行盒，见定义处的说明）。
+  void paint_selection(const RenderContext& context, raster::Surface& canvas,
+                       const struct Palette& colors) const;
   void append_blocks(const std::vector<st::md::Block>& blocks, const RenderContext& context,
                      const Frame& frame, float& y);
   void append_heading(const st::md::Block& block, const RenderContext& context, const Frame& frame,

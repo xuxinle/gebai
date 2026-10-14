@@ -1228,6 +1228,95 @@ MSVC 的 LNK1168/1104 与 POSIX 的 Text file busy）——裸报一句「链接
   旧法只加墨不改形，中英混排下「胖而糊」；现优选真粗体面（锐 36~37%、字面宽
   对齐浏览器参照），探不到时回退合成加粗。
 
+### 4.2.17i 文本选中：统一原语与公共层（2026-10-14）
+
+**需求**：框架里**每个**文字渲染组件都要能选中与复制。
+
+**为何要单独一层**：渲染文字的组件有二十多个，而 §4.2.17g 那轮是**五个组件各写一套**
+（`CodeEditor`/`MarkdownView`/`Terminal`/`Input`/`Text`）——每接一个就把同一批坑重踩一遍。
+实测代价：`MarkdownView` 那套把“高亮带的垂直范围”**连错两轮**，而正确几何就在
+`line_layout.hpp` 里。
+
+#### 两个几何量（极易混用，本节最重要的一对）
+
+`LineGeometry` 现在回答**两个不同的问题**：
+
+| 字段 | 回答 | 口径 | 谁用 |
+|---|---|---|---|
+| `ink_top` / `ink_height` | “行背景要多大才**装得下**这一行” | **整个行盒**（含行距） | 行背景 / 缩进参考线 / 差异带（要连成一片） |
+| `glyph_top` / `glyph_height` | “**选中高亮 / 光标**要贴住文字、不多出空白” | 字形墨迹 | 选区高亮、光标条 |
+
+两者**必须都在**：行距 1.6 倍时墨迹带比行带矮近一整行——拿行带画选中就是
+“高亮跑到字上方”（用户两次反馈），拿墨迹带画行背景就是“行间留缝”（2026-10-07 第三报）。
+
+#### 公共层与行为层
+
+| 层 | 位置 | 内容 | 为何分开 |
+|---|---|---|---|
+| 纯函数层 `st::ui::{Caret, word_range_at, nearest_codepoint, slice_line, normalize_selection}` | `include/st/ui/text_selection.hpp` | 端点比较 / 词界 / 最近码点 / 切片 | 与界面无关，可在无端口环境下钉死边界（UTF-8、反向拖选、空区间）；**放公共头**（原先在 `components_internal.hpp` 里，应用/子 Agent 拿不到，只能各抄一份） |
+| 行为层 `st::ui::TextSelectionModel` | 同上 | 拖选状态机 / 双击选词 / `Ctrl+A` / `Esc` / **高亮带几何** | 与组件形态无关；只有“坐标 ↔ 端点”因组件而异（三个回调） |
+
+**坐标系**：端点是 `{row, offset}`（`offset` = **行内字节偏移**），三种形态都能映射进来：
+`Input`/`TextArea` 的全串偏移换算一次即可；`Terminal` 的列乘 `cell_width` 即得 x。
+
+**接入方式**：组件持一个 `TextSelectionModel` 成员，填 `TextSelectionHost` 的回调
+（`line_count`/`line_text`/`hit_test`/`span_x`/`line_box`/`line_font`/`port`），
+然后把 `on_event` 的鼠标/键盘转发给它、把 `bands()` 的返回值交给 `fill_rect`。
+**高亮几何由本类算**（走 `layout_line`），组件**不要**再自己推偏移。
+
+**默认关**（与 §4.2.17g 同口径）：静态标签遍布界面，默认抢拖选手势会截断用户
+想划选一大片的意图；可选中的展示型文本显式 `set_enabled(true)`。
+
+回归：`tests/ui_text_selection_model_test.cpp`（行为层 6 用例）+
+`tests/ui_text_selection_test.cpp`（纯函数层）+ `tests/line_layout_test.cpp` 的
+`line_layout_glyph_band_hugs_ink_not_line_box`。均已逆向验证（回退后变红）。
+
+**未完成**：`Table`/`List`/`Tree`/`DiffView`/`MergeView`/`TimelineView` 等只读文本的逐个接入
+（机制已就绪，按需接），见 `docs/BACKLOG.md`。
+
+### 4.2.17h 排版宽必须等于控件宽（“选中背景错位/不随窗口适应”）（2026-10-14）
+
+**现象**（用户：“Markdown 选中背景错位、没随窗口大小适应”）：预览态里选中一段文字，
+高亮矩形跑在文字外面；把侧栏拖宽/收起，文字也不按新宽度重排。
+
+**量化**（无头控制通道读属性 + 截图差分）：`#md-preview` 的 `bounds.width=982.4`，
+而 `layout_width`（上次排版用的内容宽）只有 **733.89**；侧栏拖到 0.5 时
+`bounds=614 / layout=446.68`。三分之二的高亮行直接跑到文字右缘之外。
+
+**根因（两层，都是“宽度口径不一致”）**：
+
+1. `Element::measure` 在 **Row 容器**里给子节点的 `max_width` 是 `kUnbounded`
+   （Flex 的 shrink-to-fit 语义），真可用宽在 `available_width`——而后者**不扣同排
+   固定宽兄弟**（gbcode：活动栏 44px）。`SplitView::measure` 直接取 `max_width`：
+   分栏以为自己在无界空间里，退化成“两侧自然尺寸之和”（965.36），据此给子面板
+   分的宽就偏小；而 `arrange` 用的是真实 rect（982.4）。
+2. `MarkdownView::measure` 同样只看 `max_width`，而在无界时回落兜底常量 640；
+   当它直接挂在 Column 下（侧栏收起的情形）时，整个宽度链都是无界，
+   排版宽就死在 608。
+
+**修法**（照框架已有的 `fill_width` / `ScrollView::arrange` 惯例）：
+
+- 容器/内容型组件取宽一律走 `fill_width`（`max_width` → `available_width` → 兜底），
+  不手写 `has_explicit_width() ? width : max_width`；
+- **`arrange` 时用已确定的真实矩形给子面板重测/重排一次**（`SplitView::measure_with`
+  抽成 measure/arrange 共用的一份几何，`MarkdownView::set_layout_width` 同理）——
+  `arrange` 只给 rect、不重 measure，所以依赖宽度的排版必须在那里“补一课”。
+
+两条约定合起来的不变式：**排版宽 == 控件宽 − padding**（每帧成立，与父容器是
+Row 还是 Column 无关）。
+
+⚠ **重测不能加“几何变了才做”的早退**：measure 阶段的粗口径宽每帧都会把子组件
+按错宽重排一次；只在 rect 变化时补救 ⇒ 第二帧起不再修正，最终停在错值。
+（实测：加了早退后 `layout_width` 仍为按 1280 算的 985.6，而控件宽是 982.4。）
+重测本身便宜——内容型组件在宽归一到同一值时跳过重排。
+
+回归：`ui_split_view_children_get_bounded_width_inside_row`（分栏嵌在带固定宽兄弟的
+Row 里，断言给子面板的约束 == 真实分栏几何）、
+`md_view_layout_width_follows_real_control_geometry`（① 直接 measure 断言
+“无界上界 + 可用宽 800” ⇒ 排版宽 800−padding；② 整链断言排版宽 == 控件内容宽，
+且窗口变宽后跟着变）。均逆向验证：**完整回退**后变红
+（只回退 measure 一层不够——“arrange 重排”那层会把测试养绿，这是本节的实测教训）。
+
 ### 4.2.17g 文本选择：统一模型与全部文本组件落地（2026-10-14）
 
 **统一模型**（`CodeEditor` / `MarkdownView` / `Terminal` / `Input` / `TextArea` /
