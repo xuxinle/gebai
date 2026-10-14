@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cctype>
 #include <charconv>
 #include <cmath>
 #include <cstdint>
@@ -325,18 +326,82 @@ auto convert_json_to_js(JSContext* ctx, const Json& value, std::uint32_t depth,
 /// 特例：**内存耗尽**时 QuickJS 往往连异常对象都构造不出来（构造它也要分配内存），
 /// `JS_GetException` 只给出 null/undefined。此时不能把 `null` 当作错误消息丢给用户——
 /// 那等于什么都没说，得直接指向最可能的原因（内存上限）与具体数值。
+/// 取出 JS 异常的可读描述（消息 + 首行调用栈，含行号）。
+///
+/// ## 内存耗尽的两条路径（都要盖住）
+///
+/// ① **异常对象不可用**：内存耗尽时 QuickJS 可能连异常对象都构造不出来
+///    （构造它也要分配内存），`JS_GetException` 只给出 null/undefined。
+///    此时不能把 `null` 当作错误消息丢给用户；得直接指向最可能的原因与具体数值。
+/// ② **异常对象可用但文案不认识**（2026-10-14 修）：实测本轮引擎（quickjs-ng）
+///    的 OOM **会**产出一个真异常，文案是 `InternalError: out of memory`（英文），
+///    于是第 ① 条的兜底**根本没被走到**——使用者看到的是"脚本错误: InternalError:
+///    out of memory"，里面既没有"内存"也没有上限值。
+///
+/// 为何不能只测返回值上限（`memory_used <= 上限`）而不改文案：那条只能证明"没跑飞"，
+/// 而这里的契约是**可行动性**——"内存超限，上限 N MiB"告诉使用者去调哪个旋钮，
+/// `out of memory` 不能。
+///
+/// 判据用**大小写不敏感的 `out of memory`**（QuickJS 的原文）而不是"内存耗尽"这类
+/// 中文词：引擎升级换文案时，本条会失败在**测试**里（那时再补），而不是静默退化
+/// 成使用者看不懂的一句英文。
+/// 把 JS 异常描述**整形**成可行动的文案（见头文件里的公开说明）。
+///
+/// 两条分支都要盖住（各对应一种真实的引擎行为）：
+///   ① `raw` 为空 → 异常对象不可用（内存耗尽时常见），直接给上限值；
+///   ② `raw` 含 `out of memory` → 引擎**给了**异常但文案是英文，**追加上限值**
+///（保留原文便于与上游对照）。
+
+/// 执行收尾：记录统计（内存/耗时/指令数）。
+void record_stats(detail::ScriptState& state, ScriptStats& stats,
+                  std::chrono::steady_clock::time_point started) {
+  const auto stopped = std::chrono::steady_clock::now();
+  stats.elapsed = std::chrono::duration_cast<std::chrono::microseconds>(stopped - started);
+  stats.timed_out = state.timed_out;
+  stats.ops = state.ops;
+  JSMemoryUsage usage{};
+  JS_ComputeMemoryUsage(state.runtime, &usage);
+  stats.memory_used = static_cast<std::size_t>(std::max<std::int64_t>(0, usage.malloc_size));
+}
+
+
+/// 取出 JS 异常的可读描述（消息 + 首行调用栈，含行号）。
+///
+/// 整形交给 `describe_script_failure`（那样两条文案路径都能被**直接单测**），
+/// 本函数只负责从 `JSContext` 里取出原文与调用栈。
+}  // namespace
+
+[[nodiscard]] auto describe_script_failure(std::string_view raw, const ScriptLimits& limits)
+    -> std::string {
+  const auto memory_hint = [&limits] {
+    return std::format("（通常是内存超限：上限 {} MiB）", limits.memory_bytes / (1024U * 1024U));
+  };
+  if (raw.empty()) return std::format("引擎内部异常（异常对象不可用）{}", memory_hint());
+  std::string description(raw);
+  std::string lowered(raw);
+  std::ranges::transform(lowered, lowered.begin(),
+                         [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  if (lowered.find("out of memory") != std::string::npos) {
+    description.append(" ").append(memory_hint());
+  }
+  return description;
+}
+
+
 [[nodiscard]] auto describe_exception(JSContext* ctx, const ScriptLimits& limits) -> std::string {
   JsRef exception{ctx, JS_GetException(ctx)};
-  if (JS_IsNull(exception.get()) || JS_IsUndefined(exception.get())) {
-    return std::format("引擎内部异常（异常对象不可用，通常是内存超限：上限 {} MiB）",
-                       limits.memory_bytes / (1024U * 1024U));
+  const bool has_exception =
+      !JS_IsNull(exception.get()) && !JS_IsUndefined(exception.get());
+  std::string raw;
+  if (has_exception) {
+    const char* text = JS_ToCString(ctx, exception.get());
+    if (text != nullptr) {
+      raw = text;
+      JS_FreeCString(ctx, text);
+    }
   }
-  std::string description = "JS 异常";
-  const char* text = JS_ToCString(ctx, exception.get());
-  if (text != nullptr) {
-    description = text;
-    JS_FreeCString(ctx, text);
-  }
+  std::string description = describe_script_failure(raw, limits);
+  if (!has_exception) return description;
   JsRef stack{ctx, JS_GetPropertyStr(ctx, exception.get(), "stack")};
   if (JS_IsString(stack.get())) {
     const char* stack_text = JS_ToCString(ctx, stack.get());
@@ -352,19 +417,6 @@ auto convert_json_to_js(JSContext* ctx, const Json& value, std::uint32_t depth,
   return description;
 }
 
-/// 执行收尾：记录统计（内存/耗时/指令数）。
-void record_stats(detail::ScriptState& state, ScriptStats& stats,
-                  std::chrono::steady_clock::time_point started) {
-  const auto stopped = std::chrono::steady_clock::now();
-  stats.elapsed = std::chrono::duration_cast<std::chrono::microseconds>(stopped - started);
-  stats.timed_out = state.timed_out;
-  stats.ops = state.ops;
-  JSMemoryUsage usage{};
-  JS_ComputeMemoryUsage(state.runtime, &usage);
-  stats.memory_used = static_cast<std::size_t>(std::max<std::int64_t>(0, usage.malloc_size));
-}
-
-}  // namespace
 
 // ————————————————————————————————————————————————————————————————————————————
 // 生命周期

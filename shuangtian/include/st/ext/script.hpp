@@ -72,6 +72,23 @@ struct ScriptLimits {
   std::uint64_t max_interrupts{0};
 };
 
+/// 把 JS 异常描述**整形**成可行动的文案（纯函数，可直接单测）。
+///
+/// ## 为何单独抽出来（2026-10-14）
+///
+/// 这条整形逻辑原先埋在 `describe_exception` 里（要 `JSContext*`），于是一条“文案能不能读懂”
+/// 的断言只能通过**真跑脚本撞 OOM** 来触发——而**同引擎的 OOM 表现随构建档不同**：
+/// release 档产出真异常、文案是英文 `InternalError: out of memory`；dev 档下异常对象
+/// 不可用（各走一条分支）。于是同一个缺陷在一档红、一档绿，而且它让测试**无法定向验证**
+/// ——实测：把识别代码改成 `if (false)` 后用例仍然 PASS（因为被另一条分支满足了）。
+///
+/// 抽成纯函数后：两条路径的文案都能**直接断言**，与构建档无关。
+///
+/// @param raw    引擎给的原始描述（空 = 异常对象不可用）
+/// @param limits 内存上限（用于把上限值写进提示）
+[[nodiscard]] auto describe_script_failure(std::string_view raw, const ScriptLimits& limits)
+    -> std::string;
+
 /// 宿主函数：接收 JS 传入的参数（已转成 `Json`），返回结果（转回 JS）。
 ///
 /// 返回 `Result<Json>`：宿主侧的失败（如"没有这个文件"）应作为**错误**回给脚本，

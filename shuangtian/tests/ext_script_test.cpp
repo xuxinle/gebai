@@ -280,9 +280,48 @@ ST_TEST(script_memory_limit_stops_runaway_allocation) {
   ScriptEngine engine(limits);
   const auto hungry = engine.eval("const a = []; for (let i = 0; i < 1e7; ++i) a.push('xxxxxxxx' + i);");
   ST_REQUIRE(!hungry.has_value());
-  // 报错要指向"内存"而不是给个 null 异常——否则使用者无从下手
+  // 报错要指向"内存"而不是给个 null 异常——否则使用者无从下手。
   ST_CHECK(hungry.error().message.find("内存") != std::string::npos);
+  // ⚠ **还有一半判据在 2026-10-14 才补上**（本条在基线树上就红，原因不是缺文案而是缺**这一句**）：
+  //
+  // 实测：本引擎（quickjs-ng）的 OOM **会**产出一个真异常，文案是英文
+  // `InternalError: out of memory`——而 `describe_exception` 只在“异常对象不可用”
+  // 时才补“内存超限”提示，于是使用者看到的是那句英文，**上限值无处可查**。
+  // 修法在 `describe_exception`：识别引擎自己的 OOM 文案并补上可行动的上下文。
+  //
+  // 为何要断言**上限值**而不只看"内存"两个字：契约是**可行动性**——
+  // “内存超限，上限 N MiB”告诉使用者去调哪个旋钮；只写“内存”仍然不知道上限是多少。
+  ST_CHECK(hungry.error().message.find(std::format("{} MiB", limits.memory_bytes / (1024U * 1024U)))
+           != std::string::npos);
   ST_CHECK(engine.last_stats().memory_used <= 6U * 1024U * 1024U);
+}
+
+ST_TEST(script_failure_text_is_actionable_on_both_oom_paths) {
+  // **为何单独测纯函数**（2026-10-14 实测教训）：同引擎的 OOM 表现在不同构建档下不同——
+  // release 档产出真异常（文案英文 `InternalError: out of memory`），dev 档下异常对象
+  // **不可用**（走空描述分支）。于是“文案能不能读懂”这件事，若只靠“真跑脚本撞 OOM”
+  // 来验，就会**一档红一档绿**，而且**无法定向验证**：实测把识别代码改成 `if (false)`
+  // 后用例仍然 PASS（被另一条分支满足了）——那就是一条不 load-bearing 的判据。
+  //
+  // 抽成纯函数后，两条分支都能直接断言，与构建档无关。逆向验证：把任一条分支删掉，
+  // 对应用例当场变红（已做）。
+  ScriptLimits limits;
+  limits.memory_bytes = 6U * 1024U * 1024U;
+  // ① 异常对象不可用（空描述）
+  const std::string missing = st::ext::describe_script_failure("", limits);
+  ST_CHECK(missing.find("内存") != std::string::npos);
+  ST_CHECK(missing.find("6 MiB") != std::string::npos);
+  // ② 引擎给了英文 OOM 文案 → 保留原文 + 追加可行动的上下文
+  const std::string engine_oom =
+      st::ext::describe_script_failure("InternalError: out of memory", limits);
+  ST_CHECK(engine_oom.find("out of memory") != std::string::npos);   // 原文保留
+  ST_CHECK(engine_oom.find("6 MiB") != std::string::npos);           // 上限可查
+  // ③ 大小写不敏感（引擎版本差异不应当让识别失效）
+  ST_CHECK(st::ext::describe_script_failure("Out Of Memory", limits).find("6 MiB") !=
+           std::string::npos);
+  // ④ 与内存无关的异常**不得**被误加内存提示（否则是另一种误导）
+  const std::string syntax = st::ext::describe_script_failure("SyntaxError: unexpected token", limits);
+  ST_CHECK(syntax.find("MiB") == std::string::npos);
 }
 
 ST_TEST(script_interrupt_budget_is_enforced_before_timeout) {
