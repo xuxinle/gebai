@@ -140,24 +140,47 @@ void Text::measure(const RenderContext& context, const Constraints& constraints)
   const float line_height = port.line_height(size);
   if (multiline_) {
     const float available = constraints.max_width < kUnbounded ? constraints.max_width : 480.0f;
-    std::vector<std::string> lines = max_lines_ > 0
-                                         ? port.wrap_limited(content_, size, available, max_lines_)
-                                         : std::vector<std::string>{};
-    if (max_lines_ == 0) {
-      for (const auto& line : port.wrap(content_, size, available)) {
-        lines.emplace_back(line);
+    // **折行结果按 (内容, 宽度, 字号) 缓存**：三者不变就复用。
+    //
+    // 为何必要：`measure` 在每帧的 `layout()` 里都会跑，而全量 `wrap` 是 O(长度)；
+    // 把整份日志交给多行 `Text` 时，单是这一步就吃满了帧预算
+    // （实测见 hpp 里 `display_line_widths_` 的说明）。
+    if (layout_cache_content_ != content_ || layout_cache_width_ != available ||
+        layout_cache_font_size_ != size) {
+      std::vector<std::string> lines =
+          max_lines_ > 0
+              ? port.wrap_limited(content_, size, available, max_lines_)
+              : std::vector<std::string>{};
+      if (max_lines_ == 0) {
+        for (const auto& line : port.wrap(content_, size, available)) {
+          lines.emplace_back(line);
+        }
       }
+      display_lines_ = std::move(lines);
+      display_line_widths_.assign(display_lines_.size(), 0.0F);
+      layout_cache_content_ = content_;
+      layout_cache_width_ = available;
+      layout_cache_font_size_ = size;
+    }
+    // 行宽逐行缓存：只在对应的行还没量过时量（字符串可能因折行缓存复用而保留）。
+    if (display_line_widths_.size() != display_lines_.size()) {
+      display_line_widths_.assign(display_lines_.size(), 0.0F);
     }
     float widest = 0.0f;
-    for (const auto& line : lines) widest = std::max(widest, port.measure_width(line, size));
-    // 缓存显示行（`selected_text()` 用它；见头文件成员说明）。
-    display_lines_ = lines;
+    for (std::size_t index = 0; index < display_lines_.size(); ++index) {
+      if (display_line_widths_[index] <= 0.0F) {
+        display_line_widths_[index] = port.measure_width(display_lines_[index], size);
+      }
+      widest = std::max(widest, display_line_widths_[index]);
+    }
     measured_ = math::Size{std::min(widest, available),
-                           line_height * static_cast<float>(lines.empty() ? 1 : lines.size())};
+                           line_height *
+                               static_cast<float>(display_lines_.empty() ? 1 : display_lines_.size())};
     return;
   }
   const float width = port.measure_width(content_, size);
   display_lines_.assign(1U, content_);
+  display_line_widths_.assign(1U, width);
   measured_ = math::Size{std::min(width, constraints.max_width), line_height};
 }
 
@@ -182,17 +205,62 @@ void Text::paint_content(const RenderContext& context, raster::Surface& canvas) 
     return;
   }
   const float available = bounds_.width;
-  std::vector<std::string> lines;
-  if (max_lines_ > 0) {
-    lines = port.wrap_limited(content_, size, available, max_lines_);
-  } else {
-    for (const auto& line : port.wrap(content_, size, available)) lines.emplace_back(line);
+  // **复用排版缓存**（`measure` 已经算过——同一帧里它先跑），不再每帧重折行。
+  // 仅当缓存与当前 (内容, 宽度, 字号) 不符时才现场重算（如从未走过 layout 的直绘路径）。
+  if (layout_cache_content_ != content_ || layout_cache_width_ != available ||
+      layout_cache_font_size_ != size || display_line_widths_.size() != display_lines_.size()) {
+    std::vector<std::string> lines;
+    if (max_lines_ > 0) {
+      lines = port.wrap_limited(content_, size, available, max_lines_);
+    } else {
+      for (const auto& line : port.wrap(content_, size, available)) lines.emplace_back(line);
+    }
+    display_lines_ = std::move(lines);
+    display_line_widths_.assign(display_lines_.size(), 0.0F);
+    layout_cache_content_ = content_;
+    layout_cache_width_ = available;
+    layout_cache_font_size_ = size;
   }
+  const std::vector<std::string>& lines = display_lines_;
   const float line_height = port.line_height(size);
-  float y = bounds_.y;
-  for (std::size_t row = 0; row < lines.size(); ++row) {
+
+  // **逐行视口剔除**：只画落在裁剪区内的行。
+  //
+  // 为何必须（2026-10-14，实测）：旧实现对**全部行**做 `measure_width` + `draw`，
+  // 完全不看视口——把整份日志交给一个多行 `Text`（`Terminal` 行模式正是如此）
+  // 时，每帧成本直接等于内容长度：稳态帧 500 行 47 ms / 2000 行 705 ms /
+  // 20000 行 3299 ms（`tools/ui_big_editors_bench.cpp`）。
+  //
+  // 几何与 `Element::paint`/`Tree` 同一口径（同一份 `clip_rect()` + `device_scale`
+  // 折算）；竖直方向不需要保险外扩（行只画字形，不投阴影/发光）。
+  const math::IntRect clip_physical = canvas.clip_rect();
+  const float scale = canvas.device_scale();
+  const float inv = scale > 0.0f ? 1.0f / scale : 1.0f;
+  const float clip_top = static_cast<float>(clip_physical.y) * inv;
+  const float clip_bottom = static_cast<float>(clip_physical.y + clip_physical.height) * inv;
+  const float local_top = clip_top - bounds_.y;
+  const float local_bottom = clip_bottom - bounds_.y;
+
+  std::size_t first_row = 0;
+  std::size_t last_row = lines.size();
+  if (line_height > 0.0f && clip_bottom > clip_top) {
+    if (local_bottom <= 0.0f || local_top >= static_cast<float>(lines.size()) * line_height) {
+      return;  // 整块文本都在视口之外：一行也不画
+    }
+    first_row = static_cast<std::size_t>(std::floor(std::max(0.0F, local_top) / line_height));
+    // 上界宽出一行：避免“裁剪区底边正落在行中”时漏画下半截。
+    last_row = std::min(
+        lines.size(),
+        static_cast<std::size_t>(std::ceil(std::max(0.0F, local_bottom) / line_height)) + 1U);
+  }
+
+  float y = bounds_.y + static_cast<float>(first_row) * line_height;
+  for (std::size_t row = first_row; row < last_row && row < lines.size(); ++row) {
     const auto& line = lines[row];
-    const float width = port.measure_width(line, size);
+    // 行宽用缓存（`measure` 已量过）——不再每行现量。
+    const float width = row < display_line_widths_.size() && display_line_widths_[row] > 0.0F
+                            ? display_line_widths_[row]
+                            : port.measure_width(line, size);
     float x = bounds_.x;
     if (style_.text_align == TextAlign::Center) {
       x = bounds_.x + (bounds_.width - width) * 0.5f;

@@ -99,6 +99,26 @@ class Text : public Element {
   /// 变化后选出别处的字。
   /// `mutable`：在 `paint_content`（const）里也要写。
   mutable std::vector<std::string> display_lines_{};
+  /// 显示行的**行宽缓存**（与 `display_lines_` 一一对应）。
+  ///
+  /// 为何需要（2026-10-14，实测）：多行 `Text` 的 `paint_content` 过去每帧
+  /// 都 `port.wrap(content_)` **重新折行全部内容**、并逐行 `measure_width`、
+  /// 再逐行 `draw`——全不看视口。把整份日志交给一个多行 `Text` 的场景
+  /// （`Terminal` 行模式就是这么做的）因而以**内容长度**为每帧成本：
+  /// 实测稳态帧 500 行 **47 ms** / 2000 行 **705 ms** / 20000 行 **3299 ms**
+  /// （`tools/ui_big_editors_bench.cpp`）。
+  ///
+  /// 修法：折行结果与行宽都**按 (`content_`, `bounds_.width`, 字号) 缓存**，
+  /// 三者不变就复用（滚动时它们不变——滚动是内容顶的偏移，不是几何变化），
+  /// 且 `paint_content` 按裁剪区**只画可见那几行**。
+  ///
+  /// 为何缓存的三元组是这几个：折行宽度只取决于可用宽度与字号
+  /// （`wrap(content, size, max_width)`），内容变了才需重折；对齐只影响行首 x
+  /// （不参与缓存，每帧现算）。
+  mutable std::vector<float> display_line_widths_{};
+  mutable std::string layout_cache_content_{};
+  mutable float layout_cache_width_{-1.0F};
+  mutable float layout_cache_font_size_{-1.0F};
   /// 选区两端（已归一）；`line == npos` = 无选区。
   std::size_t select_begin_line_{std::string::npos};
   std::size_t select_begin_offset_{0};
