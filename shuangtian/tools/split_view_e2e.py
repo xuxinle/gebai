@@ -2,11 +2,11 @@
 """SplitView 端到端验证（gbcode 真实应用）：拖拽分栏 + 截图留证。
 
 验证：
-  1. 侧栏宽度符合初始比例
+  1. 侧栏初始宽度符合**应用默认比例**（gbcode = 1/5）
   2. 拖拽手柄 → 侧栏宽度变化（真实鼠标事件）
   3. 拖到超范围 → 夹取到 min_ratio
   4. 键盘/动作面（invoke step_forward）
-  5. 截图（三态：初始/加宽/收窄）
+  5. `reset` 归位到 `default_ratio`（不是写死的 0.5）+ 截图（三态：初始/加宽/归位）
 
 用法: python3 tools/split_view_e2e.py <binary> <ctl.json> <port> <shots-dir>
 """
@@ -77,14 +77,16 @@ def main():
             props = get(id_)["props"]
             return props.get(name)
 
-        # ① 初始比例（代码里 set_ratio(0.22)）
+        # ① 初始比例：应用声明的默认（gbcode 侧栏 = 1/5 宽）
         split = get("sidebar-split")
         print(f"[0] split 属性: {split['props']}")
         ratio0 = float(prop("sidebar-split", "ratio"))
+        default_ratio = float(prop("sidebar-split", "default_ratio"))
         sidebar0 = get("sidebar")["bounds"]["width"]
         split_w = split["bounds"]["width"]
-        assert abs(ratio0 - 0.22) < 0.001, ratio0
-        expected = (split_w - 8.0) * 0.22
+        assert abs(ratio0 - 0.2) < 0.001, ratio0
+        assert abs(default_ratio - ratio0) < 0.001, (default_ratio, ratio0)
+        expected = (split_w - 8.0) * ratio0
         assert abs(sidebar0 - expected) < 2.0, (sidebar0, expected)
         print(f"[1] 初始侧栏宽 {sidebar0:.0f}px（比例 {ratio0}，总宽 {split_w:.0f}）")
 
@@ -93,7 +95,7 @@ def main():
 
         # ② 拖拽手柄：从手柄中心拖到 split 左侧 + 60% 处
         handle = call(sock, nid(), "get", {"id": "sidebar-split"}, token)["result"]["bounds"]
-        # 手柄 x 位置：split.x + (split.w-8)*0.22 + 4
+        # 手柄 x 位置：split.x + (split.w-8)*ratio + 4
         handle_x = handle["x"] + (handle["width"] - 8.0) * ratio0 + 4.0
         handle_y = handle["y"] + handle["height"] / 2
         target_x = handle["x"] + (handle["width"] - 8.0) * 0.6 + 4.0
@@ -123,15 +125,24 @@ def main():
         assert ratio3 > ratio2, (ratio2, ratio3)
         print(f"[4] invoke step_forward: {ratio2:.2f} → {ratio3:.2f}")
 
-        # ⑤ 回到 0.5 收尾截图（手性视觉核验：分界线在正中）
+        # ⑤ 动作面 `set`：显式给比例（与本应用默认值无关）
         call(sock, nid(), "invoke", {"id": "sidebar-split", "action": "set",
                                      "argument": "0.5"}, token)
         call(sock, nid(), "wait", {"for": "frames", "frames": 3, "timeout_ms": 5000}, token)
         ratio4 = float(prop("sidebar-split", "ratio"))
         assert abs(ratio4 - 0.5) < 0.001, ratio4
         print(f"[5] invoke set 0.5 → 比例 {ratio4}")
+
+        # ⑥ `reset` 归位：回到**应用声明的默认比例**（1/5），不是写死的 0.5
+        call(sock, nid(), "invoke", {"id": "sidebar-split", "action": "reset"}, token)
+        call(sock, nid(), "wait", {"for": "frames", "frames": 3, "timeout_ms": 5000}, token)
+        ratio5 = float(prop("sidebar-split", "ratio"))
+        assert abs(ratio5 - default_ratio) < 0.001, (ratio5, default_ratio)
+        sidebar5 = get("sidebar")["bounds"]["width"]
+        assert abs(sidebar5 - sidebar0) < 2.0, (sidebar5, sidebar0)
+        print(f"[6] invoke reset → 归位到默认 {ratio5:.2f}（侧栏 {sidebar5:.0f}px）")
         call(sock, nid(), "capture", {"encode": "file",
-                                     "path": os.path.join(shots, "split-3-centered.png")}, token)
+                                     "path": os.path.join(shots, "split-3-default.png")}, token)
 
         print(f"\n[OK] SplitView 端到端全部通过（截图在 {shots}）")
         return 0

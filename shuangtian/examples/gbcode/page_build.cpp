@@ -407,9 +407,12 @@ namespace gbcode_ui {
             split.set_id("sidebar-split");
             split.set_min_ratio(0.12f);
             // 比例存档在 `sidebar_ratio_`（非响应式）：拖动回调写它，重组时读它。
-            // ⚠ 不能每帧写死 0.22：声明式每帧都会跳这个 configure，写死等于
-            // 把用户拖到的位置抹回默认（实测：拖到 0.5，一点任何按钮就弹回 0.22）。
+            // ⚠ 不能每帧写死默认值：声明式每帧都会跳这个 configure，写死等于
+            // 把用户拖到的位置抹回默认（实测：拖到 0.5，一点任何按钮就弹回默认）。
             split.set_ratio(sidebar_ratio_, false);
+            // 归位目标 = 默认比例（0.2 = 1/5 宽）：双击/单击分割线回到 1/5，
+            // 而不是跳到一半——「恢复默认布局」的语义该回到默认值。
+            split.set_default_ratio(kSidebarRatio);
             split.on_change = [this](float ratio) { sidebar_ratio_ = ratio; };
           },
           {.grow = true, .id = "sidebar-split"});
@@ -997,6 +1000,8 @@ namespace gbcode_ui {
             split.set_orientation(SplitView::Orientation::Vertical);
             split.set_min_ratio(0.05f);
             split.set_ratio(bottom_ratio_, false);
+            // 归位目标 = 默认比例（编辑器 2/3 ⇒ 终端 1/3 高）。
+            split.set_default_ratio(kTerminalTopRatio);
             // 收起/展开：只翻隐藏位（子元素与比例都保留）。
             split.set_second_hidden(!bottom_visible_.value());
             // 拖拽回调只写一个**非响应式**成员：比例由组件自己持有并重排，

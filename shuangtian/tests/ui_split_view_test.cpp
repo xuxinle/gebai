@@ -105,6 +105,74 @@ struct ConstraintProbe : Element {
 
 }  // namespace
 
+ST_TEST(ui_split_view_children_get_bounded_width_inside_row) {
+  // 回归：分栏处在**带固定宽兄弟的 Row 容器**里时，子面板必须拿到
+  // **真实可用宽**（不是父级 Row 给的粗口径）。
+  //
+  // 背景（实测缺陷，用户报“Markdown 选中背景错位、没随窗口适应”）：
+  // Row 给子节点的 `max_width` 是 `kUnbounded`（Flex 的 shrink-to-fit 语义），
+  // 真可用宽在 `available_width`——但后者**不扣同排固定宽兄弟**（如活动栏 44px）。
+  // 旧实现直接取 `max_width`：分栏以为自己在无界空间，退化成“两侧自然尺寸之和”，
+  // 据此给子面板分的宽度偏离真实值；而 `arrange` 用的是真实 rect——
+  //  **排版宽 ≠ 控件宽**，表现为文字按错误宽折行、选中高亮与文字错位。
+  //
+  // 判据：子面板的 `bounds().width`（arrange 给的真实几何）必须与它收到的
+  // **排布约定宽**一致；这里用探针同时记下 measure 约束与最终 bounds，
+  // 两者相等才算“排版与控件同口径”。
+  constexpr float kViewportWidth = 800.0f;
+  constexpr float kSidebarWidth = 44.0f;   // 同排固定兄弟（模拟 gbcode 的活动栏）
+  constexpr float kHandle = 8.0f;
+  constexpr float kRatio = 0.25f;
+
+  st::ui::UiRoot root;
+  root.set_viewport(st::math::Size{kViewportWidth, 400.0f});
+
+  auto row = std::make_unique<Panel>();
+  row->set_id("row");
+  row->style().direction = st::ui::FlexDirection::Row;
+  row->style().grow = true;
+
+  // 固定宽的兄弟（不 grow）：分栏必须把它的宽度扣掉。
+  auto bar = std::make_unique<Panel>();
+  bar->set_id("bar");
+  bar->style().width = kSidebarWidth;
+  row->add_child(std::move(bar));
+
+  auto split_view = std::make_unique<SplitView>(SplitView::Orientation::Horizontal);
+  split_view->set_id("split");
+  split_view->set_ratio(kRatio, false);
+  auto* first = split_view->add_child(std::make_unique<ConstraintProbe>());
+  auto* second = split_view->add_child(std::make_unique<ConstraintProbe>());
+  auto* probe_first = dynamic_cast<ConstraintProbe*>(first);
+  auto* probe_second = dynamic_cast<ConstraintProbe*>(second);
+  ST_REQUIRE(probe_first != nullptr);
+  ST_REQUIRE(probe_second != nullptr);
+  second->style().grow = true;
+  split_view->style().grow = true;
+  SplitView* split = split_view.get();
+  row->add_child(std::move(split_view));
+  root.set_content(std::move(row));
+  root.layout(true);
+
+  const Rect whole = split->bounds();
+  // 分栏真实宽 = 视口宽 − 固定兄弟（活动栏）宽。
+  const float expected_split = kViewportWidth - kSidebarWidth;
+  ST_CHECK_NEAR(whole.width, expected_split, 0.01f);
+
+  const float usable = expected_split - kHandle;
+  const float expected_first = usable * kRatio;
+  const float expected_second = usable - expected_first;
+
+  // ① 给子面板的 measure 约束 = 真实分栏几何（不是按视口宽算的偏大值）
+  ST_CHECK_NEAR(probe_first->seen_max_width, expected_first, 0.01f);
+  ST_CHECK_NEAR(probe_second->seen_max_width, expected_second, 0.01f);
+  // ② arrange 给的 bounds 与之一致（排版口径 == 控件口径）
+  ST_CHECK_NEAR(first->bounds().width, expected_first, 0.01f);
+  ST_CHECK_NEAR(second->bounds().width, expected_second, 0.01f);
+
+  root.set_content(nullptr);
+}
+
 ST_TEST(ui_split_view_ratio_layout_and_clamp) {
   SplitFixture fixture(SplitView::Orientation::Horizontal, 0.3f, st::math::Size{800.0f, 400.0f});
   auto* split = fixture.split;
@@ -242,6 +310,42 @@ ST_TEST(ui_split_view_keyboard_and_actions) {
   ST_CHECK_NEAR(split->ratio(), 0.5f, 0.0001f);
 }
 
+ST_TEST(ui_split_view_reset_and_activate_honor_default_ratio) {
+  // 归位目标不是写死的 0.5：应用可以声明自己的默认比例（gbcode 侧栏 0.2、
+  // 底部面板 2/3）——“点/双击分割线回到默认布局”是用户预期的手势语义。
+  SplitFixture fixture(SplitView::Orientation::Vertical, 0.55f, st::math::Size{800.0f, 600.0f});
+  auto* split = fixture.split;
+  ST_REQUIRE(split != nullptr);
+
+  // 未设置时仍是 0.5（既有行为不变）
+  ST_CHECK_NEAR(split->default_ratio(), 0.5f, 0.0001f);
+  split->activate();
+  ST_CHECK_NEAR(split->ratio(), 0.5f, 0.0001f);
+
+  // 声明默认 0.2：单击/双击与 reset 动作都回 0.2（不是 0.5）
+  split->set_default_ratio(0.2f);
+  ST_CHECK_NEAR(split->ratio(), 0.5f, 0.0001f);   // 只记目标，不动当前值
+  split->set_ratio(0.7f, false);
+  split->activate();
+  ST_CHECK_NEAR(split->ratio(), 0.2f, 0.0001f);
+  split->set_ratio(0.7f, false);
+  ST_CHECK(split->invoke_action("reset", {}));
+  ST_CHECK_NEAR(split->ratio(), 0.2f, 0.0001f);
+
+  // 默认值同样受夹取约束（不能给出一个两侧倒挂的比例）
+  split->set_min_ratio(0.1f);
+  split->set_default_ratio(0.0f);
+  ST_CHECK_NEAR(split->default_ratio(), 0.1f, 0.0001f);
+  split->activate();
+  ST_CHECK_NEAR(split->ratio(), 0.1f, 0.0001f);
+
+  // 属性面：可读可写（与 `ratio`/`min_ratio` 同一契约）
+  ST_CHECK(split->set_property("default_ratio", "1"));
+  ST_CHECK_NEAR(split->default_ratio(), 0.9f, 0.0001f);   // 夹到 1 - min_ratio
+  ST_CHECK(!split->set_property("default_ratio", "abc"));
+  ST_CHECK(split->get_property("default_ratio").has_value());
+}
+
 ST_TEST(ui_split_view_drag_release_click_does_not_reset_ratio) {
   // 回归：拖动后的松手**不是点击**（Win32 后端在 LBUTTONUP 后无条件补发 Click，
   // 见 platform_win32.cpp 的 WM_LBUTTONUP）。UiRoot 的 Click 兑底 activate() 若不
@@ -267,7 +371,7 @@ ST_TEST(ui_split_view_drag_release_click_does_not_reset_ratio) {
   ST_CHECK_NEAR(split->ratio(), 0.55f, 0.01f);   // 不能弹回 0.5
 
   // 对照：原地微动（位移 < 阈值 4px）的 Click 仍是点击 → 兑底 activate 照常工作
-  //（SplitView::activate = 归位 0.5；这证明修复没有误伤按钮类点击路径）。
+  //（SplitView::activate = 归位到 `default_ratio`（默认 0.5）；这证明修复没有误伤按钮类点击路径）。
   ST_CHECK(dispatch_kind(root, st::ui::EventKind::MouseDown, Point{target_x, mid_y}));
   (void)dispatch_kind(root, st::ui::EventKind::MouseMove, Point{target_x + 2.0f, mid_y});
   (void)dispatch_kind(root, st::ui::EventKind::MouseUp, Point{target_x + 2.0f, mid_y});

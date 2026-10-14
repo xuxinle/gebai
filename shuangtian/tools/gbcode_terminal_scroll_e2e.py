@@ -243,9 +243,12 @@ def main():
         time.sleep(0.3)
 
         # ⑤ **尺寸跟随**：把面板压矮 → 屏幕行数必须变少（否则渲染与滚动几何不一致）
+        # 手柄位置**从属性面读**（不写死比例）：默认比例是应用决策，写死一处会在
+        # 默认值变化时静默失效——拖不到手柄，探针却会把“什么也没发生”当成尺寸不跟随。
         split = client.bounds("#bottom-split")
+        ratio_now = float(client.props("bottom-split")["ratio"])
         handle_x = split["x"] + split["width"] / 2.0
-        handle_y = split["y"] + split["height"] * 0.55
+        handle_y = split["y"] + (split["height"] - 8.0) * ratio_now + 4.0
         client.ok("input.mouse", {"kind": "down", "x": handle_x, "y": handle_y, "button": 1})
         client.ok("input.mouse", {"kind": "move", "x": handle_x, "y": handle_y + 150, "button": 1})
         time.sleep(0.4)

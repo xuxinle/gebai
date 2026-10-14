@@ -87,6 +87,11 @@ void SplitView::set_min_ratio(float value) {
   set_ratio(ratio_, false);
 }
 
+void SplitView::set_default_ratio(float value) {
+  // 只记目标，**不动当前比例**（见头文件：声明式每帧都走 configure）。
+  default_ratio_ = clamp_ratio(value);
+}
+
 void SplitView::set_step(float step) {
   const float clamped = std::clamp(step, 0.001f, kMaxStep);
   if (clamped == step_) return;
@@ -125,10 +130,15 @@ void SplitView::apply_theme(const Theme& theme) {
 
 void SplitView::measure(const RenderContext& context, const Constraints& constraints) {
   const bool horizontal = orientation_ == Orientation::Horizontal;
-  // 大小 = 约束给的可得空间（分栏容器自身不做 shrink-to-fit——它的尺寸由父容器决定）；
-  // 没有显式尺寸且无上界时取两侧面板的自然尺寸之和（独立摆放时也有个合理值）。
-  float width = style_.has_explicit_width() ? style_.width : constraints.max_width;
-  float height = style_.has_explicit_height() ? style_.height : constraints.max_height;
+  // 大小 = 父级**实际可用**空间：用 `fill_width/fill_height`（`max_*` 在行布局里是
+  // `kUnbounded`——分栏既不 shrink-to-fit，也不该在无界空间里猜尺寸）。
+  //
+  // ⚠ 直接取 `max_width` 会让本组件以为自己在无界空间里：于是退化到
+  // “两侧面板自然尺寸之和”，据此给子面板分宽度；而 `layout_children` 拿的是
+  // **真实可用宽**（`arrange` 给的 rect）——两者分家，表现是「内容按窄宽排版、
+  // 却画在宽控件里」（实测：精选文字高亮在行尾提前断开、行宽随窗口变化不重排）。
+  float width = fill_width(constraints, style_.width, kUnbounded);
+  float height = fill_height(constraints, style_.height, kUnbounded);
 
   // **有界时：给子面板**按比例算出的有限约束**（与 `layout_children` 同一几何）。
   //
@@ -140,38 +150,8 @@ void SplitView::measure(const RenderContext& context, const Constraints& constra
   // 控件宽 957.8→736.8 而 `layout_width` 恒为 608）。
   //
   // 注意：arrange 只给 rect、**不会重 measure**，所以这里给错就永远错。
-  const auto measure_tiled = [&]() {
-    if (first_hidden_ || second_hidden_) {
-      // 单面板退化：可见侧占满（与 `layout_children` 的退化路径一致）。
-      Constraints whole;
-      whole.max_width = width;
-      whole.max_height = height;
-      whole.available_width = width;
-      whole.available_height = height;
-      for (std::size_t index = 0; index < children_.size() && index < 2; ++index) {
-        Element* child = children_[index].get();
-        if (child == nullptr) continue;
-        const bool hidden = (index == 0 && first_hidden_) || (index == 1 && second_hidden_);
-        if (hidden) continue;
-        child->measure(context, whole);
-      }
-      return;
-    }
-    const float usable = std::max(0.0f, (horizontal ? width : height) - handle_size_);
-    const float first_main = usable * ratio_;
-    const float second_main = usable - first_main;
-    for (std::size_t index = 0; index < children_.size() && index < 2; ++index) {
-      Element* child = children_[index].get();
-      if (child == nullptr) continue;
-      Constraints part;
-      // 主轴按 ratio 分；交叉轴拿满（与 `layout_children` 的 rect 逐项对应）。
-      part.max_width = horizontal ? (index == 0 ? first_main : second_main) : width;
-      part.max_height = horizontal ? height : (index == 0 ? first_main : second_main);
-      part.available_width = part.max_width;
-      part.available_height = part.max_height;
-      child->measure(context, part);
-    }
-  };
+  // （`arrange` 阶段会用已确定的真实矩形再重测一次，见那里的说明。）
+  const auto measure_tiled = [&]() { measure_with(context, width, height); };
 
   if (width < kUnbounded && height < kUnbounded) {
     // 两轴都有界：直接按比例给子面板有限约束（常规路径）。
@@ -227,8 +207,65 @@ void SplitView::measure(const RenderContext& context, const Constraints& constra
 
 void SplitView::arrange(const RenderContext& context, math::Rect rect) {
   bounds_ = rect;
+  // **用已确定的几何重测子面板**（与 `ScrollView::arrange` 同一套路）。
+  //
+  // 为何必须：`measure` 阶段拿到的可用宽是**父级给的**，而 Row 容器给 grow 子节点的是
+  // 无界上界（Flex 的 shrink-to-fit 语义）——于是分栏在同排还有兄弟元素时
+  //（gbcode：活动栏 44px + 分栏）会**高估**自己的宽，据此给子面板分的宽度就偏大；
+  // 而 `layout_children` 用的是这里的真实 rect。两边分家 = 「内容按一个宽排版、
+  // 却画在另一个宽的控件里」（实测：选中高亮在行尾提前断开、行宽随窗口变化不重排）。
+  //
+  // 代价：每个可见子面板多一次 `measure`（排版，不绘制）——换来“排版宽 == 控件宽”。
+  //
+  // ⚠ **每帧无条件重测**，不能加“几何变了才测”的早退：`measure` 阶段拿到的可用宽
+  // 是父级给的**粗口径**（Row 里 `available_width` 不扣同排固定兄弟，如 gbcode 的
+  // 活动栏 44px），于是**每帧**都会把子面板按偏大的宽重排一次；若只在 rect 变化时
+  // 重测，第二帧起就不修了→最终停在 measure 的错误宽度（实测：加了早退后
+  // `layout_width` 仍为按 1280 算的 985.6，而控件宽是 982.4）。
+  // 重测本身便宜：内容型组件在宽归一到同一值时跳过重排（见 MarkdownView::measure）。
+  if (!bounds_.is_empty()) {
+    measure_with(context, bounds_.width, bounds_.height);
+  }
   layout_children(context);
   layout_dirty_ = false;
+}
+
+/// 按**给定几何**给两侧子面板按比例分有限约束（`measure` 与 `arrange` 共用一份）。
+///
+/// 抽出来的理由：分栏的“子面板该拿多宽”在测量与排布两处必须逐像素一致，
+/// 而 `arrange` 阶段已知道真实矩形——它重测一次就是为了把**宽度定下来**，
+/// 让内容型子组件（MarkdownView/CodeEditor）不再停在“宽度未定”时的结果。
+void SplitView::measure_with(const RenderContext& context, float width, float height) {
+  const bool horizontal = orientation_ == Orientation::Horizontal;
+  if (first_hidden_ || second_hidden_) {
+    Constraints whole;
+    whole.max_width = width;
+    whole.max_height = height;
+    whole.available_width = width;
+    whole.available_height = height;
+    for (std::size_t index = 0; index < children_.size() && index < 2; ++index) {
+      Element* child = children_[index].get();
+      if (child == nullptr) continue;
+      const bool hidden = (index == 0 && first_hidden_) || (index == 1 && second_hidden_);
+      if (hidden) continue;
+      child->measure(context, whole);
+    }
+    return;
+  }
+  const float usable = std::max(0.0f, (horizontal ? width : height) - handle_size_);
+  const float first_main = usable * ratio_;
+  const float second_main = usable - first_main;
+  for (std::size_t index = 0; index < children_.size() && index < 2; ++index) {
+    Element* child = children_[index].get();
+    if (child == nullptr) continue;
+    Constraints part;
+    // 主轴按 ratio 分；交叉轴拿满（与 `layout_children` 的 rect 逐项对应）。
+    part.max_width = horizontal ? (index == 0 ? first_main : second_main) : width;
+    part.max_height = horizontal ? height : (index == 0 ? first_main : second_main);
+    part.available_width = part.max_width;
+    part.available_height = part.max_height;
+    child->measure(context, part);
+  }
 }
 
 auto SplitView::main_extent() const noexcept -> float {
@@ -418,9 +455,10 @@ auto SplitView::on_event(const RenderContext& context, Event& event) -> bool {
 }
 
 void SplitView::activate() {
-  // 双击手柄归位（0.5）：与 Slider 的「点击即跳」不同——分栏的位置由拖拽/键盘决定，
-  // 双击是「回到默认」的常用手势。
-  set_ratio(0.5f, true);
+  // 双击/单击手柄归位到 `default_ratio_`（不是写死的 0.5）：
+  // 面板的自然尺寸由应用决定（gbcode 侧栏是 1/5、底部面板 1/3），统一归到一半
+  // 与“恢复默认布局”的手势语义不符。未设置 default_ratio 时仍为 0.5。
+  set_ratio(default_ratio_, true);
 }
 
 auto SplitView::semantics_text() const -> std::string {
@@ -439,6 +477,7 @@ auto SplitView::semantics_flags() const -> SemanticsFlags {
 
 auto SplitView::get_property(std::string_view name) const -> std::optional<std::string> {
   if (name == "ratio") return std::format("{}", ratio_);
+  if (name == "default_ratio") return std::format("{}", default_ratio_);
   if (name == "min_ratio") return std::format("{}", min_ratio_);
   if (name == "step") return std::format("{}", step_);
   if (name == "first_hidden") return first_hidden_ ? std::string("true") : std::string("false");
@@ -472,6 +511,12 @@ auto SplitView::set_property(std::string_view name, std::string_view value) -> b
     set_min_ratio(static_cast<float>(*parsed));
     return true;
   }
+  if (name == "default_ratio") {
+    const auto parsed = parse_f64(value);
+    if (!parsed.has_value()) return false;
+    set_default_ratio(static_cast<float>(*parsed));
+    return true;
+  }
   if (name == "step") {
     const auto parsed = parse_f64(value);
     if (!parsed.has_value()) return false;
@@ -486,7 +531,7 @@ auto SplitView::set_property(std::string_view name, std::string_view value) -> b
 }
 
 auto SplitView::property_names() const -> std::vector<std::string_view> {
-  return {"ratio", "min_ratio", "step", "orientation", "first_hidden", "second_hidden"};
+  return {"ratio", "default_ratio", "min_ratio", "step", "orientation", "first_hidden", "second_hidden"};
 }
 
 auto SplitView::invoke_action(std::string_view action, std::string_view argument) -> bool {
@@ -512,7 +557,7 @@ auto SplitView::invoke_action(std::string_view action, std::string_view argument
     return true;
   }
   if (action == "reset" || action == "center") {
-    set_ratio(0.5f, true);
+    set_ratio(default_ratio_, true);
     return true;
   }
   if (action == "set") {

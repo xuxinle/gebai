@@ -2986,10 +2986,14 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
 **v0.1.5 补全的组件能力**（画廊全场景覆盖反推）：
 - **`SplitView`（可拖拽分栏）**：两个面板 + 中间手柄，拖拽改比例（`ratio` 夹取到
   `[min_ratio, 1-min_ratio]`）；悬停/拖拽三档视觉（发丝线 → `border_strong` → `primary`）；
-  键盘 ←/→（左右分栏）或 ↑/↓（上下分栏）步进、Home/End 到两端、双击归位；
-  属性面 `ratio/min_ratio/step/orientation`，动作面 `step_forward/step_backward/reset/set`；
+  键盘 ←/→（左右分栏）或 ↑/↓（上下分栏）步进、Home/End 到两端、双击/单击分割线归位；
+  属性面 `ratio/default_ratio/min_ratio/step/orientation`，动作面 `step_forward/step_backward/reset/set`；
   **单面板优雅退化**（占满全空间）；面板住在 `children_`（id/绘制/命中/语义树全部在树上）。
   由来：示例级自绘 `SplitHandle`（DESIGN §8.1.1 反推的框架缺口）——「该从示例级自绘升为框架组件」。
+  **归位目标是 `default_ratio`**（2026-10-14）：默认 0.5（历史行为不变），应用可声明自己的
+  自然比例——面板尺寸本就是应用决策，统一归到一半与「恢复默认布局」的语义不符。
+  只记目标、**不动当前比例**（与 `set_ratio` 同一条声明式教训：configure 每帧跑，写死会
+  把用户拖到的位置抹回默认）。gbcode 侧栏 = 1/5、底部面板 = 编辑器占 2/3（终端 1/3 高）。
 - **`svg`（SVG 图标子集渲染，2026-10-03）**：图标数据源从私有路径表升级为 **SVG**（业界图标库
   的通用语）：path `d` 全指令（含 A 圆弧→贝塞尔、S/T 平滑反射、相对坐标、隐式重复、科学计数法）、
   基本形状、`viewBox`→目标矩形变换（preserveAspectRatio meet/slice）、`<g>` 样式级联 +

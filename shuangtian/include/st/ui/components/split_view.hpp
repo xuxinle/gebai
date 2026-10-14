@@ -15,10 +15,14 @@
 /// 与 Flex 的关系：SplitView **不是** Flex 容器——它按比例分配，不做 shrink-to-fit；
 /// 子面板宽度由比例与总宽决定（应用侧不必也不该给子面板写死宽度）。
 ///
-/// 控制通道属性面：`ratio`（浮点字符串，写回即夹取并重排）、`min_ratio`、
+/// 控制通道属性面：`ratio`（浮点字符串，写回即夹取并重排）、`min_ratio`、`default_ratio`、
 /// `orientation`（`horizontal`/`vertical`）；动作面：`step_forward`/`step_backward`
-/// （按键盘步长挪）、`reset`（回默认比例）。拖拽走 `MouseDown`→`MouseMove`×n→`MouseUp`，
+/// （按键盘步长挪）、`reset`（回 `default_ratio`）。拖拽走 `MouseDown`→`MouseMove`×n→`MouseUp`，
 /// 与 ScrollBar 拖滑块同一套事件契约（`UiRoot` 的拖拽归属保证拖出手柄也不断）。
+///
+/// **「默认比例」不是内建的 0.5**：双击/单击分割线归位到 `default_ratio`——
+/// 侧栏这类面板的自然宽度由应用决定（gbcode 是 1/5），归位跳一半是没道理的。
+/// 未设置时 `default_ratio` = 0.5，行为与既有版本一致。
 
 #include <functional>
 #include <optional>
@@ -70,6 +74,14 @@ class SplitView : public Element {
   void set_min_ratio(float value);
   [[nodiscard]] auto min_ratio() const noexcept -> float { return min_ratio_; }
 
+  /// 归位目标比例（双击/单击分割线、`reset` 动作的落点；默认 0.5）。
+  ///
+  /// **不改变当前比例**（只记目标；当前值仍由 `set_ratio` 与拖拽决定）——
+  /// 声明式写法每帧都会走 configure，若这里顺手改当前比例，用户拖到的位置
+  /// 会被每帧抹回默认（与 `set_ratio` 同一条实测教训，见 gbcode 的调用点注释）。
+  void set_default_ratio(float value);
+  [[nodiscard]] auto default_ratio() const noexcept -> float { return default_ratio_; }
+
   /// 键盘步长（夹取到 `(0, 0.5)`）。
   void set_step(float step);
   [[nodiscard]] auto step() const noexcept -> float { return step_; }
@@ -115,6 +127,8 @@ class SplitView : public Element {
  private:
   /// 主轴总长（方向相关）。
   [[nodiscard]] auto main_extent() const noexcept -> float;
+  /// 按**给定几何**给两侧子面板按比例分有限约束（`measure` 与 `arrange` 共用）。
+  void measure_with(const RenderContext& context, float width, float height);
   /// 把指针坐标（主轴方向）映射为比例。
   [[nodiscard]] auto ratio_at(float pointer_main) const noexcept -> float;
   /// 按比例给两侧算出矩形（同一份几何，arrange 与拖拽共用）。
@@ -124,6 +138,7 @@ class SplitView : public Element {
 
   Orientation orientation_{Orientation::Horizontal};
   float ratio_{0.5f};
+  float default_ratio_{0.5f};
   float min_ratio_{0.15f};
   float step_{0.05f};
   float handle_size_{8.0f};

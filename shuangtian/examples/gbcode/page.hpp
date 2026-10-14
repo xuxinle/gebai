@@ -132,6 +132,14 @@ struct CodeEditorPage : Component {
 
   static constexpr std::size_t kNoMenu{static_cast<std::size_t>(-1)};
 
+  // —— 默认分栏比例（单一真值源：成员初值、分割线归位目标、测试与自动化都引这里）——
+  /// 侧栏默认宽度占比（= 1/5）。
+  static constexpr float kSidebarRatio{0.2f};
+  /// 上下分栏的默认 ratio（= 编辑器占 2/3 ⇒ **终端占 1/3 高**）。
+  /// 口径与 `SplitView::ratio` 一致：值是第一面板（编辑器）的份额，
+  /// 所以“终端占 1/3”在这里写作 `1 - 1/3`。
+  static constexpr float kTerminalTopRatio{2.0f / 3.0f};
+
   // —— 非状态引用（逃生舱的强类型句柄；每次 build 重新取得）——
   CodeEditor* editor{nullptr};
   /// 编辑器是否已套用初始配置（字号档位/缩进宽）。只做一次：
@@ -1985,7 +1993,8 @@ auto shutdown() -> void;
   /// 侧栏分栏当前宽度比例（与 `bottom_ratio_` 同一套模式，见其注释）：
   /// 拖动回调只写这个非响应式成员，跨重组记住用户拖到哪了。
   /// 口径：`SplitView::ratio` = 首面板（侧栏）的占比。
-  float sidebar_ratio_{0.22f};
+  /// 默认 **0.2 = 侧栏占 1/5 宽**（活动栏 44px 之外的横向空间）。
+  float sidebar_ratio_{CodeEditorPage::kSidebarRatio};
   /// 底部面板当前高度比例（上下分栏的 `ratio`）。
   ///
   /// **刻意不是 `State`**：分栏组件自己持有比例并据此重排，拖动时它逐像素回调本值——
@@ -1996,9 +2005,9 @@ auto shutdown() -> void;
   /// 实测踩到过反直觉的错误：把“想让终端占多”写成把比值改大（0.72 → 0.60），
   /// 结果编辑器反而吃掉了六成高度。
   ///
-  /// 把 0.72 → **0.55**：原先终端只拿到 28%（约 6 行）——真终端 6 行不可用
-  ///（`dir`/`git log` 一屏就满，连提示符都要滚）。现在终端约 295px ≈ 14 行。
-  float bottom_ratio_{0.55f};
+  /// 默认 **`2/3`：终端占 1/3 高**（口径换算：终端份额 = 1 − ratio）。
+  /// 早先终端只拿到 28%（约 6 行）——真终端 6 行不可用（`dir`/`git log` 一屏就满）。
+  float bottom_ratio_{CodeEditorPage::kTerminalTopRatio};
 
 };
 
