@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "st/app/text_port.hpp"
+#include "st/core/print.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
 #include "st/ui/components/tree.hpp"
@@ -87,7 +88,7 @@ auto main(int argc, char** argv) -> int {
 
   auto fonts = st::text::FontStack::system_default();
   if (!fonts.has_value()) {
-    std::printf("SKIP: 无系统字体，量尺不成立（measure_width 恒 0 会量出假结果）\n");
+    st::print("SKIP: 无系统字体，量尺不成立（measure_width 恒 0 会量出假结果）\n");
     return 0;
   }
   st::text::TextRenderer renderer{*fonts};
@@ -128,13 +129,13 @@ auto main(int argc, char** argv) -> int {
   // —— 尺子④：sync_nodes（刷新成本，含按 key 对齐）——
   const double sync_ms = best_ms(10, [&] { tree.sync_nodes(nodes); });
 
-  std::printf("rows=%zu  行高=%.0f  视口=400px(约 %zu 行)\n", rows, tree.row_height(),
-              static_cast<std::size_t>(400.0f / tree.row_height()));
-  std::printf("  sync_nodes       %8.3f ms\n", sync_ms);
-  std::printf("  measure+arrange  %8.3f ms\n", measure_ms);
-  std::printf("  paint(400px)     %8.3f ms   <- 每帧真实成本（视口只显示十几行）\n",
-              paint_viewport_ms);
-  std::printf("  paint(全量%5dpx) %8.3f ms   <- 上界：视口高到装下全部行\n", full_height,
-              paint_full_ms);
+  st::print("rows={}  行高={:.0f}  视口=400px(约 {} 行)\n", rows, tree.row_height(),
+            static_cast<std::size_t>(400.0f / tree.row_height()));
+  st::print("  sync_nodes       {:8.3f} ms\n", sync_ms);
+  st::print("  measure+arrange  {:8.3f} ms\n", measure_ms);
+  st::print("  paint(400px)     {:8.3f} ms   <- 每帧真实成本（视口只显示十几行）\n",
+            paint_viewport_ms);
+  st::print("  paint(全量{:5}px) {:8.3f} ms   <- 上界：视口高到装下全部行\n", full_height,
+            paint_full_ms);
   return 0;
 }
