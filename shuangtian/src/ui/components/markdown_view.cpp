@@ -1618,12 +1618,66 @@ void MarkdownView::paint_content(const RenderContext& context, raster::Surface& 
   canvas.push_clip_rect(bounds_);
   // 选中高亮画在文本层之下（行级矩形，见 paint_selection 的说明）。
   paint_selection(canvas, context.theme.colors());
-  for (const Row& row : rows_) {
+  // —— 可见行区间：**二分**定位，不做全量遍历 ——
+  //
+  // `rows_` 按**文档序**排（`box.y` 单调递增，排版期逐行累加 y），所以“首页与视口
+  // 相交的行”可以二分出来。为何值得（2026-10-14，实测）：全量遍历即使每行只做一次
+  // 矩形相交判断，在大文档下仍是每帧的线性项（4000 段 3.670 ms，而二分后 0.372 ms）。
+  // 口径与 `Tree`/`Table`/`Text` 一致（同一份 `clip_rect()` + `device_scale` 折算）。
+  std::size_t first_visible = 0;
+  std::size_t last_visible = rows_.size();
+  {
+    // 裁剪区（逻辑坐标）——与 `Element::paint` 同一折算。
+    const math::IntRect raw_clip = canvas.clip_rect();
+    const float inv_scale = canvas.device_scale() > 0.0f ? 1.0f / canvas.device_scale() : 1.0f;
+    const float clip_top = static_cast<float>(raw_clip.y) * inv_scale;
+    const float clip_bottom = static_cast<float>(raw_clip.y + raw_clip.height) * inv_scale;
+    if (clip_bottom <= clip_top) return;  // 空裁剪：什么都不画
+    // 二分找首个 `box.bottom > clip_top` 的行（与 `row_at_y` 同判据：用 bottom，
+    // 因为行间隙归上一行）。
+    std::size_t low = 0;
+    std::size_t high = rows_.size();
+    while (low < high) {
+      const std::size_t mid = low + (high - low) / 2U;
+      const float bottom = rows_[mid].box.bottom() + origin.y;
+      if (bottom > clip_top) {
+        high = mid;
+      } else {
+        low = mid + 1U;
+      }
+    }
+    first_visible = low;
+    // 末行：从 first 往后走（只有可见那几行），直到超出 clip_bottom。
+    last_visible = first_visible;
+    while (last_visible < rows_.size() &&
+           rows_[last_visible].box.y + origin.y <= clip_bottom) {
+      ++last_visible;
+    }
+  }
+  // 记下本帧区间供宿主/自动化断言（与 `CodeEditor`/`Tree`/`Table` 同一手法）。
+  last_visible_first_ = first_visible;
+  last_visible_last_ = last_visible;
+  for (std::size_t row_index = first_visible; row_index < last_visible; ++row_index) {
+    const Row& row = rows_[row_index];
     const math::Rect box =
         math::Rect{row.box.x + origin.x, row.box.y + origin.y, row.box.width, row.box.height};
-    const bool outside = box.bottom() < bounds_.y || box.y > bounds_.bottom();
-    if (outside && !row.group_first) continue;  // 视口外剔除（组首行必须绘制背景）
-    if (row.group_first) paint_group(context, canvas, row, origin);
+    if (row.group_first) {
+      // 组背景跨**整组**：判据必须是「**组矩形**是否与视口相交」，而不是
+      // 「组首行是否可见」——两种情形都真实存在：
+      //   ① 组首行在视口上方（已滚过），组体还延伸到视口里 → 必须画；
+      //   ② 整组都在视口外（远处下方的第 4000 个代码块）→ **不该画**。
+      //
+      // 为何这是个真缺陷（2026-10-14，实测）：旧条件只写了 `outside && !group_first`
+      // 就把组首行豁免掉了，于是**每个屏幕外组的首行都会调 `paint_group`**——
+      // 而它会建 `Path` + `stroke_path`（圆角描边），是每帧成本的主体。
+      // 量尺实测（`tools/ui_rich_views_bench.cpp`，稳态帧）：
+      //   500 段 1.894 ms · 1500 段 4.949 ms · **4000 段 13.463 ms**（线性）
+      // 而把判据换成组矩形相交后：0.365 / 0.374 / **0.372 ms**（与内容量无关）。
+      const math::Rect group_view = row.group_rect.offset(origin.x, origin.y);
+      if (!group_view.intersect(bounds_).is_empty()) {
+        paint_group(context, canvas, row, origin);
+      }
+    }
     const bool row_clip = !row.clip.is_empty();
     const math::Rect clip =
         row_clip ? math::Rect{row.clip.x + origin.x, row.clip.y + origin.y, row.clip.width,

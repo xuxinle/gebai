@@ -119,6 +119,18 @@ class MarkdownView : public Element {
   /// 内容坐标处的**行盒**（空 = 越界）。
   [[nodiscard]] auto row_box_at(float content_y) const -> math::Rect;
 
+  /// 上一帧实际绘制的行区间（半开；从未绘制过时为空区间）。
+  ///
+  /// 为何补（与 `Tree`/`Table`/`Text` 同一姿态）：`MarkdownView` 有 `content_height()`
+  /// 但**没有**“现在看得到哪几行”的读取口——而那是 AI 驱动界面时最常问的判断。
+  /// 绘制期二分出的区间正好是答案，缓存上一帧的值就够（与 `CodeEditor` 同一手法）。
+  [[nodiscard]] auto visible_row_range_now() const noexcept
+      -> std::pair<std::size_t, std::size_t> {
+    return {last_visible_first_, last_visible_last_};
+  }
+  /// 总行数（供视口断言与宿主估算用）。
+  [[nodiscard]] auto row_count() const noexcept -> std::size_t { return rows_.size(); }
+
  private:
   /// 绘制颜色角色（布局期只记语义角色，`paint` 时按主题解析为具体色值）。
   enum class ColorRole : std::uint8_t {
@@ -254,6 +266,10 @@ class MarkdownView : public Element {
   const TextPort* layout_port_{nullptr};
   float layout_width_{0.0f};
   float content_height_{0.0f};
+  /// 上一帧绘制的可见行区间（半开；`paint_content` 写，见 `visible_row_range_now()`）。
+  /// `mutable`：`paint_content` 是 const（「绘制不改元素状态」是框架硬约束）。
+  mutable std::size_t last_visible_first_{0};
+  mutable std::size_t last_visible_last_{0};
   float view_height_{0.0f};
   float scroll_offset_{0.0f};
   float max_width_{0.0f};
