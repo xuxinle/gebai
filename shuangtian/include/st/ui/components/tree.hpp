@@ -109,6 +109,17 @@ class Tree : public Element {
   /// 视口能整行容纳的行数（至少 1；未布局时退化为总行数）。
   [[nodiscard]] auto visible_row_count() const noexcept -> std::size_t;
 
+  /// 上一帧**实际绘制过**的首/末可见行（半开区间 `[首, 末)`；从未绘制过为空区间）。
+  ///
+  /// 为何要它（与 `CodeEditor::visible_line_range_now()` 同一手法）：宿主想在
+  /// **帧首**做「只取看得见那些行的数据」（懒加载/注解）时拿不到 `RenderContext`，
+  /// 而帧内那趟算出的可见区间正好是答案——缓存上一帧的值就够（一帧的滞后在
+  /// 滚动补注解的场景里不可见）。属性面的 `first_visible` 也从这里回读真值。
+  [[nodiscard]] auto visible_row_range_now() const noexcept
+      -> std::pair<std::size_t, std::size_t> {
+    return {last_visible_first_, last_visible_last_};
+  }
+
   /// 目录行展开状态切换（点击目录行 / Enter / ← →）：调用方据此加载子节点并
   /// 重新 `sync_nodes`。`expanded` 是**目标状态**。
   std::function<void(std::string_view key, bool expanded)> on_toggle{};
@@ -141,6 +152,12 @@ class Tree : public Element {
   float row_height_{kDefaultRowHeight};   ///< 行高（宿主可调，见 set_row_height）
   std::string selected_key_{};
   int hover_index_{-1};
+
+  /// 上一帧实际绘制的可见行区间（半开；见 `visible_row_range_now()`）。
+  /// `mutable`：`paint_content` 是 const 方法（「绘制不改元素状态」是框架硬约束），
+  /// 与 `CodeEditor::last_visible_first_` 同一套做法。
+  mutable std::size_t last_visible_first_{0};
+  mutable std::size_t last_visible_last_{0};
 };
 
 }  // namespace st::ui
