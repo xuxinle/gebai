@@ -201,6 +201,12 @@ class Backend {
 [[nodiscard]] auto win32_display_scale() noexcept -> float;
 /// 创建平台专属后端（各 `platform_*.cpp` 提供；未实现的平台在工厂里如实报 `Unsupported`）。
 [[nodiscard]] auto create_win32_backend() -> Result<std::unique_ptr<Backend>>;
+/// X11 后端（`src/shell/platform_x11.cpp`）：**运行期 `dlopen` 加载 libX11**，
+/// 不产生链接期依赖（`CONVENTIONS.md` §10 第 1 条）。无 libX11 / 无 `DISPLAY` 时
+/// 如实返回 `Unsupported`，由上层回退 headless。
+[[nodiscard]] auto create_x11_backend() -> Result<std::unique_ptr<Backend>>;
+/// Wayland 后端（`src/shell/platform_wayland.cpp`）：同上，运行期加载 `libwayland-client`。
+[[nodiscard]] auto create_wayland_backend() -> Result<std::unique_ptr<Backend>>;
 
 /// 创建后端（`name` 为空=自动选择：有显示则尝试平台后端，失败回退 headless）。
 [[nodiscard]] auto create_backend(std::string_view name = {}) -> Result<std::unique_ptr<Backend>>;

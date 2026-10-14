@@ -12,6 +12,7 @@
 #include "st/core/time.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/gpu.hpp"
+#include "backend_util.hpp"
 
 #if !defined(_WIN32)
 #include <dlfcn.h>
@@ -19,162 +20,6 @@
 
 namespace st::shell {
 namespace {
-
-/// 建绘制面：按 `renderer` 选择软件或 GPU，失败**如实回退**并记下原因。
-///
-/// 为什么把选择放在后端而不是应用：面（surface）由后端持有，应用只拿 `Surface&`；
-/// 让后端决定它是什么类型，应用与控制通道都不需要知道这一帧是谁画的。
-///
-/// `auto` 的语义是"**取更快的那条**"，但渲染器的优劣与机器强相关（GPU 弱、驱动差、
-/// 或呈现路径仍需 CPU 拷贝时，软件反而更快），所以这里不预设答案：
-/// 由调用方（`Application`）在能测到真实帧耗时时做实测选择，测不到才用下面的保守默认。
-/// 合成负载微基准（定义见下：`create_surface` 的 `auto` 分支要用它）。
-[[nodiscard]] auto benchmark_surface_impl(raster::Surface& target, int runs) -> double;
-
-struct SurfaceChoice {
-  std::unique_ptr<raster::Surface> surface{};
-  std::string name{"software"};
-  std::string note{};
-};
-
-[[nodiscard]] auto create_surface(const WindowOptions& options, std::string_view renderer)
-    -> SurfaceChoice {
-  SurfaceChoice choice;
-  const int physical_width = static_cast<int>(std::lround(
-      static_cast<double>(options.width > 0 ? options.width : 1280) *
-      static_cast<double>(options.scale > 0.0f ? options.scale : 1.0f)));
-  const int physical_height = static_cast<int>(std::lround(
-      static_cast<double>(options.height > 0 ? options.height : 720) *
-      static_cast<double>(options.scale > 0.0f ? options.scale : 1.0f)));
-  const float scale = options.scale > 0.0f ? options.scale : 1.0f;
-
-  // `auto` = 实测：两条都建出来，各跑一遍同样的负载，取更快的那条。
-  // 不做"GPU 优先"的硬编码——GPU 弱、驱动差、或呈现仍需 CPU 拷贝时，软件反而更快。
-  //
-  // **测量用缩尺画布**：选型要的是「谁更快」这个序关系，不是绝对帧耗时。
-  // 早先按真实尺寸（1920×1200）各跑 3 轮：软件光栅 86ms/轮 → 仅这一步就 261ms，
-  // 而它全在**窗口可见之前**（实测启动延迟 680ms 的主体，用户看到的是白底+黑框）。
-  // 光栅与合成的耗时对面积基本是线性的，缩小尺寸不改变两条的相对次序，
-  // 代价却从几百毫秒降到几毫秒——**启动路径上不该为选型付这种代价**。
-  if (renderer == "auto") {
-    // 长边夹取到 320：足够盖住固定开销（状态切换/提交/遮罩上传）与面积的转折点，
-    // 又不至于把时间花在像素上。保持长宽比，否则测的是另一种负载形状。
-    constexpr int kProbeLongEdge = 320;
-    const double long_edge = static_cast<double>(std::max(physical_width, physical_height));
-    const double shrink = long_edge > static_cast<double>(kProbeLongEdge)
-                              ? static_cast<double>(kProbeLongEdge) / long_edge
-                              : 1.0;
-    const int probe_width = std::max(32, static_cast<int>(std::lround(physical_width * shrink)));
-    const int probe_height = std::max(32, static_cast<int>(std::lround(physical_height * shrink)));
-    std::unique_ptr<raster::Surface> probe_software =
-        std::make_unique<raster::Canvas>(probe_width, probe_height, scale);
-    const double software_ms = benchmark_surface_impl(*probe_software, 3);
-    std::unique_ptr<raster::Surface> probe_gpu{};
-    std::string gpu_label{"不可用"};
-    if (raster::gpu::available()) {
-      if (auto created = raster::gpu::create_canvas(probe_width, probe_height, scale, {});
-          created.has_value()) {
-        probe_gpu = std::move(*created);
-        const auto info = raster::gpu::probe();
-        gpu_label = info.has_value() ? info->adapter : std::string("D3D11");
-      }
-    }
-    const double gpu_ms = probe_gpu != nullptr ? benchmark_surface_impl(*probe_gpu, 3) : 0.0;
-    bool pick_gpu = probe_gpu != nullptr && gpu_ms > 0.0 && gpu_ms < software_ms;
-    // ⚠ `had_gpu` 要在探测阶段就记下：它是「这台机器上 GPU 能不能用」的事实，
-    // 与「最后选了谁」是两件事（早先拿交付指针反推，move 之后必然得到相反的分支，
-    // 于是出现"名字说 gpu、理由说 GPU 不可用"的自相矛盾）。
-    const bool had_gpu = probe_gpu != nullptr;
-    // 测速画布丢弃，交付**真实尺寸**的那块。
-    if (pick_gpu) {
-      if (auto full = raster::gpu::create_canvas(physical_width, physical_height, scale, {});
-          full.has_value()) {
-        choice.surface = std::move(*full);
-        choice.name = "gpu";
-      } else {
-        pick_gpu = false;   // 真实尺寸建不出来 → 退软件（不影响已测出的序关系）
-      }
-    }
-    if (!pick_gpu) {
-      choice.surface = std::make_unique<raster::Canvas>(
-          raster::Canvas::for_logical_size(options.width > 0 ? options.width : 1280,
-                                           options.height > 0 ? options.height : 720, scale));
-      choice.name = "software";
-    }
-    choice.note = !had_gpu
-                      ? std::format("auto：GPU 不可用，选软件（缩尺实测软件 {:.2f} ms）", software_ms)
-                      : std::format("auto 实测（缩尺合成负载 {}x{}，不含呈现）：软件 {:.2f} ms vs GPU {} {:.2f} ms → 选{}",
-                                    probe_width, probe_height, software_ms, gpu_label, gpu_ms,
-                                    pick_gpu ? "GPU" : "软件");
-    return choice;
-  }
-
-  const bool want_gpu = renderer == "gpu";
-  if (want_gpu) {
-    if (!raster::gpu::available()) {
-      const auto probe = raster::gpu::probe();
-      choice.note = std::format("GPU 不可用（{}），已回退软件光栅器",
-                                probe.error().message);
-    } else {
-      auto created = raster::gpu::create_canvas(physical_width, physical_height, scale, {});
-      if (created.has_value()) {
-        choice.surface = std::move(*created);
-        choice.name = "gpu";
-        const auto info = raster::gpu::probe();
-        choice.note = info.has_value()
-                          ? std::format("D3D11 · {} · {}", info->adapter, info->feature_level)
-                          : std::string("D3D11");
-        return choice;
-      }
-      choice.note = std::format("GPU 画布创建失败（{}），已回退软件光栅器",
-                                created.error().message);
-    }
-  } else if (renderer == "software") {
-    choice.note = "显式指定软件光栅器";
-  }
-  choice.surface = std::make_unique<raster::Canvas>(
-      raster::Canvas::for_logical_size(options.width > 0 ? options.width : 1280,
-                                       options.height > 0 ? options.height : 720, scale));
-  return choice;
-}
-
-/// 合成负载：真实画布尺寸上跑一组有代表性的原语（圆角矩形 / 渐变 / 覆盖率遮罩），
-/// 取中位数。公共入口 `benchmark_surface` 在文件末尾转发到这里。
-[[nodiscard]] auto benchmark_surface_impl(raster::Surface& target, int runs) -> double {
-  const float width = static_cast<float>(target.width());
-  const float height = static_cast<float>(target.height());
-  if (width < 32.0f || height < 32.0f) return 0.0;
-  const raster::Paint solid = raster::Paint::solid(math::Color{0x40, 0x80, 0xFF, 0xFF});
-  const raster::Paint gradient = raster::Paint::with_gradient(raster::Gradient::linear(
-      math::Point{0.0f, 0.0f}, math::Point{width, 0.0f},
-      {{0.0f, math::Color{0xFF, 0x00, 0x80, 0xFF}}, {1.0f, math::Color{0x00, 0x80, 0xFF, 0xFF}}}));
-  // 小覆盖率位图（模拟字形遮罩：上传 + 采样，这是文字路径的成本特征）
-  std::vector<float> mask(16U * 16U, 0.5f);
-
-  std::vector<double> samples;
-  samples.reserve(static_cast<std::size_t>(runs));
-  for (int run = 0; run < runs; ++run) {
-    const std::int64_t start = st::time::now_ns();
-    target.clear(math::Color{0x10, 0x10, 0x18, 0xFF});
-    for (int index = 0; index < 400; ++index) {
-      const float x = static_cast<float>(index % 20) * (width / 20.0f);
-      const float y = static_cast<float>(index / 20) * (height / 20.0f);
-      target.fill_rect(math::Rect{x + 1.0f, y + 1.0f, width / 25.0f, height / 25.0f}, solid, 4.0f);
-    }
-    for (int index = 0; index < 40; ++index) {
-      target.fill_rect(math::Rect{0.0f, static_cast<float>(index) * (height / 40.0f), width,
-                                  height / 40.0f},
-                       gradient);
-    }
-    for (int index = 0; index < 200; ++index) {
-      target.blend_coverage_bitmap(index % 20 * 17, index / 20 * 17, mask, 16, 16, solid, 0.8f,
-                                   raster::BlendMode::SrcOver);
-    }
-    samples.push_back(static_cast<double>(st::time::now_ns() - start) / 1'000'000.0);
-  }
-  std::sort(samples.begin(), samples.end());
-  return samples[samples.size() / 2U];  // 中位数：忽略冷启动与偶发抖动
-}
 
 /// 离屏后端：无窗口、无显示服务依赖，像素结果与窗口模式一致。
 class HeadlessBackend final : public Backend {
@@ -214,7 +59,7 @@ class HeadlessBackend final : public Backend {
     const std::string requested_renderer =
         options.renderer.empty() ? std::string("software") : options.renderer;
     const bool defaulted_to_software = requested_renderer != options.renderer;
-    SurfaceChoice choice = create_surface(resolved, requested_renderer);
+    detail::SurfaceChoice choice = detail::create_surface(resolved, requested_renderer);
     if (choice.surface == nullptr) return unexpected(ErrorCode::Unsupported, "创建绘制面失败");
     if (defaulted_to_software) {
       // 理由要**如实**说：这是无头缺省，不是实测选出来的（与 `auto` 的实测理由
@@ -268,7 +113,7 @@ class HeadlessBackend final : public Backend {
     options.height = height_;
     options.scale = scale_;
     options.renderer = renderer_name_;
-    SurfaceChoice choice = create_surface(options, renderer_name_);
+    detail::SurfaceChoice choice = detail::create_surface(options, renderer_name_);
     if (choice.surface == nullptr) return unexpected(ErrorCode::Unsupported, "重建绘制面失败");
     surface_ = std::move(choice.surface);
     renderer_note_ = std::move(choice.note);
@@ -288,10 +133,23 @@ class HeadlessBackend final : public Backend {
   std::string renderer_note_{};
 };
 
-/// 运行时库探测（不产生链接期依赖）。
+}  // namespace
+
+namespace detail {
+
+/// 运行时库探测（**不产生链接期依赖**）：候选名用 `:` 分隔（如
+/// `libX11.so.6:libX11.so`），返回第一个可加载的名字；都不行返回空串。
+///
+/// 先试带版本号的 soname（发行版安装的形态），再试无版本的开发名。
+/// 两者都探不到就如实返回空串，调用方据此报"未探测到"，而不是链接期炸掉。
+///
+/// 落点说明：本文件是 L14 的**已登记豁免点**（`CONVENTIONS.md` §8：「需 `dlopen`
+/// 做运行时后端探测——而这正是 §10 第 1 条『平台后端一律运行时探测（不产生链接期依赖）』
+/// 的实现处」）。四个后端共用这一份，避免"探测口径分家"（两处对同一台机器给出
+/// 不同答案是最难查的一类不一致）。
 [[nodiscard]] auto library_available(std::string_view candidates) -> std::string {
 #if defined(_WIN32)
-  // Windows 平台库由系统保证存在，直接用 LOAD_LIBRARY_SEARCH_SYSTEM32 语义判断
+  // Windows 平台库由系统保证存在，用系统目录下的存在性判断即可
   const std::string name(candidates.substr(0, candidates.find(':')));
   const std::string path = fs::join("C:/Windows/System32", name);
   return fs::exists(path) ? name : std::string{};
@@ -308,57 +166,7 @@ class HeadlessBackend final : public Backend {
 #endif
 }
 
-/// 平台后端桩：诚实报告"已探测到/未探测到 + 本期实现范围"。
-///
-/// 自绘窗框的契约（`CONVENTIONS.md` §10 第 7 条）它同样受约束：`supports_window_control()`
-/// 默认 `false`（基类实现），窗口动作由基类**如实报 `Unsupported`**——因此 x11/wayland
-/// 未实现期间，`ui::TitleBar` 的按钮会返回"未生效"而不是静默假装成功。
-/// 补后端时要做的只有两件：起一个无装饰窗口 + 实现本文档声明的窗口控制（含
-/// `ui::resize_edge_at` 的边缘命中，Wayland 下交合成器）——组件與应用**一行不用改**。
-class PlatformStubBackend final : public Backend {
- public:
-  PlatformStubBackend(std::string name, std::string library) noexcept
-      : name_(std::move(name)), library_(std::move(library)) {}
-
-  [[nodiscard]] auto name() const noexcept -> std::string_view override { return name_; }
-  [[nodiscard]] auto headless() const noexcept -> bool override { return false; }
-
-  auto create_window(const WindowOptions& options) -> Status override {
-    (void)options;
-    return unexpected(ErrorCode::Unsupported,
-                      std::format("{} 后端（已探测到 {}）的窗口实现尚未提供；"
-                                  "请使用 headless 模式：控制通道可完成全部开发与验证",
-                                  name_, library_));
-  }
-
-  void present() override {}
-  [[nodiscard]] auto poll_event() -> std::optional<ui::Event> override { return std::nullopt; }
-  void set_title(std::string_view title) override { (void)title; }
-  [[nodiscard]] auto clipboard_text() -> Result<std::string> override {
-    return unexpected(ErrorCode::Unsupported, "平台后端未实现");
-  }
-  [[nodiscard]] auto set_clipboard_text(std::string_view text) -> Status override {
-    (void)text;
-    return unexpected(ErrorCode::Unsupported, "平台后端未实现");
-  }
-  [[nodiscard]] auto framebuffer() -> raster::Surface& override { return canvas_; }
-  [[nodiscard]] auto frame_count() const noexcept -> std::uint64_t override { return 0; }
-  [[nodiscard]] auto device_scale() const noexcept -> float override { return 1.0f; }
-  [[nodiscard]] auto logical_size() const noexcept -> math::Size override {
-    return math::Size{1.0f, 1.0f};
-  }
-  auto set_device_scale(float scale) -> Status override {
-    (void)scale;
-    return unexpected(ErrorCode::Unsupported, "平台后端未实现（v0.2）");
-  }
-
- private:
-  std::string name_{};
-  std::string library_{};
-  raster::Canvas canvas_{1, 1};
-};
-
-}  // namespace
+}  // namespace detail
 
 auto has_display() noexcept -> bool {
 #if defined(_WIN32)
@@ -378,8 +186,8 @@ auto probe_backend() -> std::string {
 #if defined(_WIN32)
   return "win32";
 #else
-  if (!library_available("libX11.so.6:libX11.so").empty()) return "x11";
-  if (!library_available("libwayland-client.so.0").empty()) return "wayland";
+  if (!detail::library_available("libX11.so.6:libX11.so").empty()) return "x11";
+  if (!detail::library_available("libwayland-client.so.0").empty()) return "wayland";
   return "headless";
 #endif
 }
@@ -399,22 +207,21 @@ auto create_backend(std::string_view name) -> Result<std::unique_ptr<Backend>> {
     return std::unique_ptr<Backend>(std::make_unique<HeadlessBackend>());
   }
   if (requested == "x11") {
-    const std::string library = library_available("libX11.so.6:libX11.so");
-    if (library.empty()) {
-      return unexpected(ErrorCode::Unsupported, "未探测到 libX11（无 X 显示服务）");
-    }
+#if defined(_WIN32)
+    return unexpected(ErrorCode::Unsupported, "x11 后端仅在 POSIX 宿主可用");
+#else
     if (!has_display()) {
       return unexpected(ErrorCode::Unsupported, "存在 libX11 但无 DISPLAY 环境变量（无桌面会话）");
     }
-    auto backend = std::unique_ptr<Backend>(std::make_unique<PlatformStubBackend>("x11", library));
-    return backend;
+    return create_x11_backend();
+#endif
   }
   if (requested == "wayland") {
-    const std::string library = library_available("libwayland-client.so.0");
-    if (library.empty()) {
-      return unexpected(ErrorCode::Unsupported, "未探测到 libwayland-client");
-    }
-    return std::unique_ptr<Backend>(std::make_unique<PlatformStubBackend>("wayland", library));
+#if defined(_WIN32)
+    return unexpected(ErrorCode::Unsupported, "wayland 后端仅在 POSIX 宿主可用");
+#else
+    return create_wayland_backend();
+#endif
   }
   if (requested == "win32") {
 #if defined(_WIN32)
@@ -426,11 +233,11 @@ auto create_backend(std::string_view name) -> Result<std::unique_ptr<Backend>> {
   return unexpected(ErrorCode::Invalid, std::format("未知后端: {}", requested));
 }
 
-/// 公共入口（声明见 shell.hpp）：两个后端共用的"更快"判据。
-/// 实现留在匿名命名空间里（`benchmark_surface_impl`），这里只做转发——
-/// 于是"更快怎么算"只定义一处，窗口与离屏不会得出不同结论。
+/// 公共入口（声明见 `shell.hpp`）：四个后端共用的"更快"判据。
+/// 实现住 `backend_util.cpp`（单一真源），这里只做转发——于是"更快怎么算"
+/// 只定义一处，窗口与离屏、四个后端不会得出不同结论。
 [[nodiscard]] auto benchmark_surface(raster::Surface& target, int runs) -> double {
-  return benchmark_surface_impl(target, runs);
+  return detail::benchmark_surface_impl(target, runs);
 }
 
 }  // namespace st::shell
