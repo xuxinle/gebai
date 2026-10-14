@@ -129,6 +129,20 @@ auto main(int argc, char** argv) -> int {
   // —— 尺子④：sync_nodes（刷新成本，含按 key 对齐）——
   const double sync_ms = best_ms(10, [&] { tree.sync_nodes(nodes); });
 
+  // —— 尺子⑤：**冷**一次（先清空本地文本缓存观感，再量一轮）——
+  //
+  // 为何要分开：尺子②③都是 `best_ms`（多次取最小值）——**热**起来之后整形缓存命中，
+  // 量到的是"缓存有效时"的成本。而真实编辑器的首个大目录是**冷**的：
+  // 第一次 `measure` 要为每一行付一次整形。两个数不是同一件事，合并会互相掩盖。
+  // （不做真正的缓存清空——那需要改文本层的 API；这里用"新构造一个 Tree +
+  //   首轮不预热"近似冷局，并如实标注这是近似值。）
+  st::ui::Tree cold_tree;
+  cold_tree.set_row_height(tree.row_height());
+  cold_tree.sync_nodes(nodes);
+  const auto cold_start = Clock::now();
+  cold_tree.measure(context, st::ui::Constraints{});
+  const double cold_measure_ms = elapsed_ms(cold_start);
+
   st::print("rows={}  行高={:.0f}  视口=400px(约 {} 行)\n", rows, tree.row_height(),
             static_cast<std::size_t>(400.0f / tree.row_height()));
   st::print("  sync_nodes       {:8.3f} ms\n", sync_ms);
@@ -137,5 +151,7 @@ auto main(int argc, char** argv) -> int {
             paint_viewport_ms);
   st::print("  paint(全量{:5}px) {:8.3f} ms   <- 上界：视口高到装下全部行\n", full_height,
             paint_full_ms);
+  st::print("  measure(冷首轮)   {:8.3f} ms   <- 近似值：整形缓存未预热的首轮\n",
+            cold_measure_ms);
   return 0;
 }

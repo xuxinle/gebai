@@ -32,6 +32,11 @@ void Tree::set_row_height(float height) noexcept {
   mark_dirty();
 }
 
+void Tree::invalidate_label_widths() const noexcept {
+  row_label_widths_.clear();
+  label_widths_font_size_ = -1.0F;
+}
+
 Tree::Tree() {
   style_.radius = 0.0f;
   set_focusable(true);
@@ -47,6 +52,10 @@ void Tree::sync_nodes(const std::vector<TreeNode>& nodes) {
   rows_.clear();
   rows_.reserve(nodes.size());
   for (const auto& node : nodes) rows_.push_back(Row{node});
+  // **行宽缓存必须显式失效**：上面那句 `rows_.clear()` 后紧接 push，行数可能与上次相同
+  //（常见的“刷新同一目录”）——只靠 `measure` 里“尺寸相同就不重算”的判定会读到**陈旧宽度**。
+  // 这是缓存一致性面的核心失效点（护栏：`tree_label_width_cache_follows_sync`）。
+  invalidate_label_widths();
   // 选中态跟 key 走：被移除的 key 如实清空（不静默挪到别的行上）
   if (!selected_key_.empty() && !index_of_key(selected_key_).has_value()) {
     selected_key_.clear();
@@ -56,6 +65,7 @@ void Tree::sync_nodes(const std::vector<TreeNode>& nodes) {
 
 void Tree::clear_nodes() {
   rows_.clear();
+  invalidate_label_widths();
   selected_key_.clear();
   hover_index_ = -1;
   mark_layout_dirty();
@@ -192,12 +202,29 @@ void Tree::apply_theme(const Theme& theme) {
 void Tree::measure(const RenderContext& context, const Constraints& constraints) {
   const TextPort& port = text_port_of(context);
   const Metrics& metrics = context.theme.metrics();
+  const float font_size = style_.font_size;
+
+  // **行宽缓存**（见头文件 `row_label_widths_` 的说明——它换来的是“大目录刷新
+  // 不再线性重排”）：只在行集或字号变化时重算，其余时候 measure 是纯内存扫描。
+  //
+  // 无效判定与填充在同一个 `const` 方法里（缓存字段是 `mutable`，与
+  // `CodeEditor` 的几何缓存同一手法）。
+  if (row_label_widths_.size() != rows_.size() || label_widths_font_size_ != font_size) {
+    row_label_widths_.assign(rows_.size(), 0.0F);
+    for (std::size_t index = 0; index < rows_.size(); ++index) {
+      row_label_widths_[index] = port.measure_width(rows_[index].data.label, font_size);
+    }
+    label_widths_font_size_ = font_size;
+  }
+
+  // measure 第一遍：算出**行内容所需宽度**的最大值（行几何量：缩进 + 箭头 + 内边距）。
+  // 两遍而不是一遍：上面的缓存填充要先把宽度量出来，这一遍只是取最大值。
   float width = 0.0f;
-  for (const auto& row : rows_) {
-    const float indent = static_cast<float>(row.data.depth) * kIndentStep;
-    const float chevron = row.data.is_dir ? kChevronSize + metrics.space_xs : 0.0f;
-    const float need = indent + chevron + kTextInset + port.measure_width(row.data.label, style_.font_size)
-                       + kTextInset;
+  for (std::size_t index = 0; index < rows_.size(); ++index) {
+    const TreeNode& node = rows_[index].data;
+    const float indent = static_cast<float>(node.depth) * kIndentStep;
+    const float chevron = node.is_dir ? kChevronSize + metrics.space_xs : 0.0f;
+    const float need = indent + chevron + kTextInset + row_label_widths_[index] + kTextInset;
     width = std::max(width, need);
   }
   width = std::max(width, 80.0f);
