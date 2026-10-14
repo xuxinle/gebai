@@ -2,6 +2,9 @@
 
 /// 文件系统与路径工具（`std::filesystem` 之上的薄封装，隔离平台差异）。
 /// 约定：所有路径参数用 `std::string`（UTF-8），返回值统一为 `Result`/`std::optional`。
+///
+/// 只读内存映射声明在此处（`MappedFile`）、实现在 `src/core/platform_fs_map.cpp`——
+/// 平台头只允许出现在那一层（`CONVENTIONS.md` §10 第 1 条 / lint L14）。
 
 #include <cstdint>
 #include <optional>
@@ -11,10 +14,62 @@
 #include <vector>
 
 #include "st/core/error.hpp"
+#include "st/core/fs_map.hpp"
 
 namespace st::fs {
 
 using Bytes = std::vector<std::uint8_t>;
+
+/// 只读**内存映射**文件（POSIX `mmap` / Windows `CreateFileMapping`）。
+///
+/// 为什么需要它（2026-10-14 内存评估的 P0）：「整读进 vector」是霜天内存占用的头号来源
+/// ——字体链 15 个 face 实测 ~86MB 常驻且**永不释放**。映射与整读的差别不在「快慢」，而在
+/// **内存归属**：映射进地址空间的是文件页的**共享副本**，系统在内存压力下可直接回收
+/// （后备存储就是文件本身，无脏页），而 `read_bytes` 的私有堆副本只能靠换页。
+///
+/// 契约：
+/// - **安全失败**：打开/取大小/映射任一步失败都返回 `Error`，调用方自行回退（不抛异常）。
+/// - **空文件视为失败**：映射长度 0 在 POSIX 是 `EINVAL`，而"没有内容"与"读不到"
+///   对调用方是同一件事（字体路径会因此回退到整读，拿到同样的空文件错误）。
+/// - **只读**：映射是 `PROT_READ`/`FILE_MAP_READ`；写入会崩（这是**刻意**的——
+///   解析层拿到的是 `span<const uint8_t>`，写不进）。
+/// - **生命周期**：视图在对象存活期内始终有效（析构时解映射）；不可拷贝、可移动。
+/// - ⚠ **文件被外部替换**（重装字体、构建覆盖产物）不会使已有映射失效，但映射内容仍是
+///   旧文件——需要"读到新内容"的地方得重新 `open`（字体缓存为此按 (路径, face) 缓存，
+///   而缓存的失效本来就是"进程重启"粒度）。
+class MappedFile {
+ public:
+  MappedFile() = default;
+  MappedFile(const MappedFile&) = delete;
+  auto operator=(const MappedFile&) -> MappedFile& = delete;
+  MappedFile(MappedFile&& other) noexcept;
+  auto operator=(MappedFile&& other) noexcept -> MappedFile&;
+  ~MappedFile();
+
+  /// 只读映射整个文件；失败返回 `Error`（`NotFound` 打不开、`Io` 映射失败）。
+  [[nodiscard]] static auto open(std::string_view path) -> Result<MappedFile>;
+
+  /// 映射视图（非空映射的长度即文件大小）。
+  [[nodiscard]] auto span() const noexcept -> std::span<const std::uint8_t>;
+  [[nodiscard]] auto size() const noexcept -> std::size_t { return size_; }
+  [[nodiscard]] auto valid() const noexcept -> bool { return data_ != nullptr; }
+
+ private:
+  /// 平台映射视图（句柄 + 数据指针；平台细节单点在 `platform_fs_map.cpp`）。
+  MappedView view_{};
+  const std::uint8_t* data_{nullptr};
+  std::size_t size_{0};
+
+  void reset() noexcept;
+};
+
+/// 读文件的一段（**只读需要的字节**）。
+///
+/// 与 `MappedFile` 的分工：映射适合"要整文件且要反复随机访问"（字体解析）；本函数适合
+/// "只需头部"（判断格式/取 face 数）——不必把 20MB 的 `.ttc` 拉进地址空间只为读 12 字节。
+/// 越出文件末尾的请求**截断到实际可读长度**（不报错）：调用方本来就按"够不够判别"用。
+[[nodiscard]] auto read_span(std::string_view path, std::uint64_t offset, std::size_t length)
+    -> Result<Bytes>;
 
 struct DirEntry {
   std::string name{};

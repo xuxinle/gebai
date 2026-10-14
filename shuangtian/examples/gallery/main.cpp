@@ -57,7 +57,7 @@ struct Options {
   std::string theme{"light"};
   /// 自定义主题 JSON（稀疏覆盖；`--theme-file` 或 `ST_THEME_FILE`）。
   std::string theme_file{};
-  /// 渲染器：auto（按实测帧耗时选更快）/ gpu / software。
+  /// 渲染器：auto（按实测帧耗时选更快；**无头缺省不探测，直接 software**）/ gpu / software。
   std::string renderer{"auto"};
   /// 文字抗锯齿：auto（有窗口 → LCD 亚像素；无头 → 灰度）/ on / off。
   std::string text_lcd{"auto"};

@@ -47,7 +47,7 @@ auto common_options_usage(std::string_view program) -> std::string {
       "  --title TEXT          窗口标题\n"
       "  --theme MODE          light / dark / system\n"
       "  --theme-file PATH     自定义主题 JSON（稀疏覆盖；也看 ST_THEME_FILE）\n"
-              "  --renderer MODE       渲染器：auto（按实测帧耗时选更快）/ gpu / software\n"
+              "  --renderer MODE       渲染器：auto（按实测帧耗时选更快；无头缺省不探测，直接 software）/ gpu / software\n"
         "  --text-lcd MODE       文字抗锯齿：auto（默认亚像素 LCD）/ on / off（灰度基准）\n"
         "  --text-fit MODE       字形网格拟合：auto（默认 off）/ off / light / normal\n"
         "  --text-fit-max-size N 拟合的适用字号上限（物理 px，0 = 不限）\n"

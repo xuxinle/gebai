@@ -167,6 +167,31 @@ struct OpScope {
   return source;
 }
 
+/// 相邻 run 是否**可能共享同一个像素**。
+///
+/// 用于 `blend_coverage_runs` 的路由：只有共享像素时才需要"先累加、同一像素只混一次"
+/// （见那里的长注释）；互不相交的 run（如一个矩形的两条竖边）走通用循环（含 full-span SIMD）更快。
+///
+/// 判据用**像素覆盖区间的交**而不是几何交集：两条 run 几何上不相交、但都被同一个像素的
+/// 量化零头碰到时（如 `[0.0,0.4)` 与 `[0.4,0.8)`），**也算共享**——那正是"斜边欠墨"的成因。
+/// 代价是判据偏保守（宁可多走一步累加，不可少走——少了就是缺墨）。
+[[nodiscard]] auto runs_share_pixels(std::span<const CoverageRun> runs, float clip_left,
+                                    float clip_right) noexcept -> bool {
+  int previous_last = -1;
+  for (const auto& run : runs) {
+    const float weight = std::abs(run.weight);
+    if (weight <= kCoverageEpsilon) continue;
+    const float a = std::max(run.x0, clip_left);
+    const float b = std::min(run.x1, clip_right);
+    if (b <= a) continue;
+    const int first = static_cast<int>(std::floor(a));
+    const int last = static_cast<int>(std::ceil(b)) - 1;   // 闭区间末像素
+    if (previous_last >= first) return true;
+    if (last > previous_last) previous_last = last;
+  }
+  return false;
+}
+
 /// 通用像素混合（`coverage` ∈ [0,1] 已含 opacity 与裁剪遮罩）。
 [[nodiscard]] auto blend_pixel_premul(std::uint32_t dst, std::uint32_t source_premul, float coverage,
                                       BlendMode mode) noexcept -> std::uint32_t {
@@ -710,41 +735,76 @@ void Canvas::blend_coverage_runs(int y, std::span<const CoverageRun> runs, const
   // 行中心对应的逻辑 y（行内常量；渐变快路径与回退路径共用）
   const float logical_y = (static_cast<float>(y) + 0.5f) * inverse_scale_;
 
-  // —— 逐像素累加覆盖率（纯色 + SrcOver + 无遮罩）——
+  // —— 覆盖率混合：**同一像素只混一次**，但整段仍走 `simd::blend_row` ——
   //
-  // 为何必须累加：覆盖率是**带符号权重之和**，而像素的最终不透明度是
-  // `1 - Π(1 - 本像素各段覆盖率)`——不是“逐段各混一次”的线性叠加。
-  // 旧写法逐段调用 `blend_one`，每段都要做一次 `alpha → u8 → 再回浮点`；
-  // 在**斜边**上同一像素会被多段各碰一点，量化/截断的零头每段都差一点，
-  // 累加后形成**系统性欠墨**（而水平/垂直边上每像素只被一段完整覆盖，恰好不差）。
+  // 为何"同一像素只混一次"：覆盖率是**带符号权重之和**，而像素的最终不透明度是
+  // `1 - Π(1 - 本像素各段覆盖率)`——不是“逐段各混一次”的线性叠加。旧写法逐段调用
+  // `blend_one`，每段都要做一次 `alpha → u8 → 再回浮点`；在**斜边**上同一像素会被
+  // 多段各碰一点，量化/截断的零头每段都差一点，累加后形成**系统性欠墨**
+  //（而水平/垂直边上每像素只被一段完整覆盖，恰好不差）。
   //
   // 实测（`tools/ring_raster_probe.cpp`，1 逻辑px 宽、60 逻辑px 长的带，scale=2）：
   //   0°/90°（水平/垂直）比 1.0000；15° 0.8817；30° 0.8713；**45° 0.8568**；75° 0.9462。
   // 圆角边框的弧段就是斜向带，于是“圆角看着比直边细”——用户报的就是这个现象。
   // 改为“先累加成每像素覆盖率、同一像素只混一次”后，上表七档全部回到 1.0000。
   //
-  // 只走这个分支的路由条件与后面的 `solid && !masked && SrcOver` 快路径一致；
+  // ## 但**不要**整行逐像素累加（2026-10-14 修，代价实测 ~20 倍）
+  //
+  // b420909 加的那版正是"整行逐像素累加"：它对每个像素调一次 `blend_pixel_premul`，
+  // **遮蔽了 `simd::blend_row` 的 full-span 快路径**（该快路径在下面通用循环里，
+  // 走的是"整段同 alpha → 向量化"）。同一份圆角卡片负载实测（release，
+  // `tools/rounded_fill_probe.cpp`）：
+  //
+  //   整行累加版：30.2 ms（26.7× 清屏单位）→ 本写法：1.5 ms（**1.32×**，**20 倍**）
+  //
+  // 而它想解决的"斜边欠墨"并不需要它：**`merge_runs`（rasterizer 侧）已把同一行的
+  // 重叠段落按事件扫描合并成互不重叠、权重唯一的段**（那是 b9166d5 渲染 5× 轮的成果）。
+  // "整行累加"是**上游已保证的不变量的重复实现**，还把 O(段数) 退化成 O(像素数)。
+  //
+  // ## 本写法的等价性论证
+  //
+  // ① **与旧（b420909 版）语义等价**：旧版对每个覆盖像素按 `covered` 混一次；本版
+  //    先按像素累加成 `covered`（与旧版同一个算式、同一份浮点累加），再**按
+  //    `clamp01(covered*opacity)` 量化后的字节值分组**，同值的极大段走向量化混合。
+  //    量化口径与 `blend_pixel_premul` 逐字相同（`*255+0.5` 截断，再 clamp），
+  //    所以**逐像素结果逐位相同**（见 `tests/paint_optimization_test.cpp` 的
+  //    斜带七档与环总墨量回归）。
+  // ② **段数**：旧版每像素一次混合；本版段数 ≤ 不同 alpha 字节值的个数 ≤ 256，
+  //    典型（斜带 / 圆角）只有 2~4 段，且**完全覆盖段恢复 SIMD**——那正是旧快路径。
+  // ③ **顺序无关**：每条 run 的累加顺序与旧版一致（都不处理 `weight <= ε` 的段），
+  //    浮点求和顺序也相同，故不存在"换个顺序就少一点墨"。
+  //
   // 遮罩（`effective_alpha` 逐像素查表）与非常规混合模式保留原逐段路径。
-  if (solid && !masked && blend == BlendMode::SrcOver) {
+  //
+  // ⚠ 只在**相邻 run 可能共享像素**时才走这条（`runs_share_pixels`）：单条 run
+  // （互不相交的运行段，比如一个矩形的左右两条竖边）根本不存在"同一像素被碰两次"，
+  // 白走一趟累加反而比通用循环慢（实测 1.32× → 6.85×，因为通用循环有 full-span SIMD）。
+  if (solid && !masked && blend == BlendMode::SrcOver && runs.size() > 1 &&
+      runs_share_pixels(runs, clip_left, clip_right)) {
     int lo = physical_width_;
     int hi = 0;
     for (const auto& run : runs) {
+      const float weight = std::abs(run.weight);
+      if (weight <= kCoverageEpsilon) continue;
       const float a = std::max(run.x0, clip_left);
       const float b = std::min(run.x1, clip_right);
       if (b <= a) continue;
       lo = std::min(lo, static_cast<int>(std::floor(a)));
-      hi = std::max(hi, static_cast<int>(std::ceil(b)));
+      hi = std::max(hi, static_cast<int>(std::ceil(b)) + 1);
     }
     if (hi > lo) {
-      coverage_accum_.assign(static_cast<std::size_t>(hi - lo), 0.0f);
+      hi = std::min(hi, physical_width_);
+      const auto width = static_cast<std::size_t>(hi - lo);
+      coverage_accum_.assign(width, 0.0f);
+      // 先把每像素覆盖率累加出来（缺省 0；只有真的被覆盖到的像素会被累加）
       for (const auto& run : runs) {
         const float weight = std::abs(run.weight);
         if (weight <= kCoverageEpsilon) continue;
         const float a = std::max(run.x0, clip_left);
         const float b = std::min(run.x1, clip_right);
         if (b <= a) continue;
-        const int first_pixel = static_cast<int>(std::floor(a));
-        const int last_pixel = static_cast<int>(std::ceil(b));
+        const int first_pixel = std::max(lo, static_cast<int>(std::floor(a)));
+        const int last_pixel = std::min(hi, static_cast<int>(std::ceil(b)));
         for (int x = first_pixel; x < last_pixel; ++x) {
           const float left = std::max(a, static_cast<float>(x));
           const float right = std::min(b, static_cast<float>(x) + 1.0f);
@@ -753,11 +813,26 @@ void Canvas::blend_coverage_runs(int y, std::span<const CoverageRun> runs, const
           }
         }
       }
-      for (std::size_t index = 0; index < coverage_accum_.size(); ++index) {
+      // 再按"量化后的 alpha 字节"分组输出：同值的极大段走 SIMD，逐像素结果与
+      // "每像素各自混合一次"完全相同（分组只是把相邻同值的混合合并成一条向量指令）。
+      std::size_t index = 0;
+      while (index < width) {
         const float covered = coverage_accum_[index];
-        if (covered <= kCoverageEpsilon) continue;
-        const int x = static_cast<int>(index) + lo;
-        row[x] = blend_pixel_premul(row[x], premul, covered * opacity, blend);
+        if (covered <= kCoverageEpsilon) {
+          ++index;
+          continue;
+        }
+        const auto alpha_byte =
+            static_cast<std::uint8_t>(math::clamp01(covered * opacity) * 255.0f + 0.5f);
+        std::size_t end = index + 1;
+        while (end < width && coverage_accum_[end] > kCoverageEpsilon) {
+          const auto next_byte = static_cast<std::uint8_t>(
+              math::clamp01(coverage_accum_[end] * opacity) * 255.0f + 0.5f);
+          if (next_byte != alpha_byte) break;
+          ++end;
+        }
+        simd::blend_row(row + lo + static_cast<int>(index), end - index, premul, alpha_byte);
+        index = end;
       }
       return;
     }

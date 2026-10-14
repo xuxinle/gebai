@@ -207,6 +207,25 @@
 | **先后两条一起跑才崩 = 跨用例状态污染** | 单跑全过、连跑必崩。定位靠 `--shard i/N` 缩小 + gdb 抓抛出点，**不要**先怀疑"环境抖动" | `BACKLOG.md` C 轮 |
 | **`-Wshadow`/`-Wconversion` 是结构错误的探测器** | 手工搬移代码块时括号数错 ⇒ `paint_content` 的行循环被提前关闭 ⇒ 后面几十条 `-Wshadow` 报"变量遮蔽"。**编译器先于运行期发现了它** | `src/ui/components/code_editor.cpp` |
 
+## 场景 14：改内存 / 产物大小（资源类指标）
+
+| 坑 | 一句话 | 出处 |
+|---|---|---|
+| **`thread_local` 缓存的真实代价是内存** | 字体的 `load_face_cached` 原先是 `thread_local`：Tasks 池 8 线程里任何非首线程首次碰字体都会**重新整读全部字体文件**（最坏 8×86MB）。且计数器也是线程局部时，“别的线程又读了一遍”在数字上根本看不见 | `src/text/text.cpp` 的 `load_face_cached` 注释 |
+| **“整读进 vector”与“内存映射”的差别在内存归属** | 不是快慢：`read_bytes` 是私有堆副本（常驻到 free），`mmap`/`CreateFileMapping` 是文件页的共享副本（压力下系统可回收）。字体链 15 个 face 的 ~86MB 常驻就是整读造成的 | `include/st/core/fs.hpp` 的 `MappedFile` 注释 |
+| **Windows 映射必须带 `FILE_SHARE_DELETE`** | 不加它，映射存活期间字体文件**无法删除/改名**（用户重装字体报“文件被占用”）；加上它映射仍读到旧内容，但不锁路径 | `src/core/platform_fs_map.cpp` 的 `open_file_mapping` 注释 |
+| **POSIX 上 `open` 目录会成功，`mmap` 才报 `ENODEV`** | 报错文本看着像硬件问题。显式挡目录，给可行动的理由 | 同上 |
+| **`-g1` 对 C++ 模板实例仍然很大** | 设计预期“只行号表所以小”，实测 `st.exe` dev 档 76.96MB **其中 89% 是 `.debug_*`**（模板/内联函数照样生成 DIE 骨架）。链接后 `objcopy` 三步（`--only-keep-debug` / `--strip-debug` / `--add-gnu-debuglink`）→ 4.59MB，调试能力不丢 | `src/pkg/build.cpp` 的 `separate_debug_info` 注释 |
+| **`objcopy --strip-debug` 会刷新产物 mtime** | 拿“`.debug` 比产物新”做幂等判据**恒假**（每次重链都白跑三遍）。正确判据是 `objdump -h` 看产物里还有没有 `.debug_info` | 同上（本轮被自己的用例抓住） |
+| **“`.debug` 已存在”不是“已分离”** | 重链后 `.debug` 是**上一次的**符号，产物却是新的新的——此时跳过 = **新产物的调试信息永久丢失**。宁多跑一遍不丢符号 | 同上 |
+| **系统头只能在 `platform_*`（包括这次）** | 第一版把 `mmap` 实现直接写进 `fs.cpp`，`st lint` 当场报两条 L14。规则的价值正在这里：把“顺手在通用层塞平台代码”变成必须跨过的一道门 | `include/st/core/fs_map.hpp` 的说明 |
+| **无头路径不该探测 GPU** | `auto` 会真的建 D3D11 设备：+53MB / +55 线程 / +4.6GB 虚拟地址（驱动进程内常驻），全付在“任何像素产生之前”。无头缺省应为软件光栅器 | `src/shell/backend.cpp` 的 `HeadlessBackend` 注释 |
+| **“先量内存再动手”而不是先改上限** | 缓存几十 MiB，而字体整读 86MB + 驱动常驻 53MB——不分解就去改缓存上限（小项）是拿大项换小项 | `DESIGN.md` §11.1 的内存去向表 |
+| **一个“逐像素累加”可以遮蔽整条 SIMD 快路径** | 修“圆角发虚”时在覆盖率混合里加回“整行逐像素累加”，它**遮蔽了 `simd::blend_row` 的 full-span 快路径**（而上游 `merge_runs` 早已合并了重叠段）——圆角填充 **1.32× → 26.7×（20 倍），而门禁一直在报，只是没人看**。修法：保留累加（正确性需要它）但按 alpha 字节分组走 SIMD | `src/raster/canvas.cpp` 的 `blend_coverage_runs` 注释 |
+| **基准分母不能是“可向量化到不像话”的量** | 性能门禁的分母是“清屏”（纯 `memset`，SIMD 快路径），而被测是标量 AA 光栅化——两者对 `-O` 响应不同，于是**同一负载的比值在 release 2.03× / dev 3.23×**、文本甚至反向。用它做门禁只能锁定单一优化档 | `tests/raster_bench_test.cpp` 的 `calibration_profile()` 注释 |
+| **“比值型”断言要认档（与 san 同一口径）** | 不把阈值按档放宽（那会真的把 release 门禁变松），而是非标定档**如实跳过并说明**；`__OPTIMIZE__` 在 `-O1` 就定义，区分不出档位——本仓用 `NDEBUG`（只有 release 带） | 同上 |
+| **性能红要先分清“环境”与“真回归”** | 本次差点把它归为“容器环境慢”（因为其它三项都吻合），实际是**一个真回归**。分辨法：① 比值是相对量，机器慢会**同时**抬高分子分母；② 用**同几何**的对照（同尺寸非对齐直角）比绝对耗时——两者一致就说明是路径本身慢 | `tools/rounded_fill_probe.cpp` 与 `docs/BACKLOG.md` 的性能门禁条 |
+
 ## 怎么用这份速查
 
 **开工前**：扫一眼你**当前场景**那一节（30 秒）。

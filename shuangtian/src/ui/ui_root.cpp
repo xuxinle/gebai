@@ -1172,12 +1172,21 @@ void UiRoot::register_declarative_host(std::function<bool()> advance) {
 }
 
 auto UiRoot::tick_declarative_hosts() -> std::size_t {
-  // 拷贝一份再遍历：推进过程中组件可能重建子树、甚至登记新的宿主
-  // （如页面切换）——直接迭代原容器会在遍历中失效。
-  const auto hosts = declarative_hosts_;
+  // **索引式遍历 + 条数快照**（2026-10-14）：旧实现先把整个 vector **拷一份**再遍历
+  //（`const auto hosts = declarative_hosts_;`）——每帧一次堆分配 + 拷贝，宿主数多时不小。
+  //
+  // 为何不能改成直接范围 for：推进过程中组件可能重建子树、甚至**登记新的宿主**
+  //（如页面切换）——`advance` 里 `push_back` 会让范围 for 的迭代器失效。
+  // 索引式 + 条数快照兼容了这个矛盾：
+  //   * 已存在的宿主在原位（不搬动，引用稳定）；
+  //   * 本轮新登记的宿主排在末尾，而 `index < count` 挡住了它——**本轮不跑**
+  //     （与旧快照实现“快照里没有它”逐帧等价），下一帧自然会轮到；
+  //   * 三个条件的 `index < declarative_hosts_.size()` 是**防御性**的：
+  //     万一将来出现“推进中移除宿主”（当前无此路径），也不会越界读。
   std::size_t rebuilt = 0;
-  for (const auto& advance : hosts) {
-    if (advance()) ++rebuilt;
+  const std::size_t count = declarative_hosts_.size();
+  for (std::size_t index = 0; index < count && index < declarative_hosts_.size(); ++index) {
+    if (declarative_hosts_[index]()) ++rebuilt;
   }
   return rebuilt;
 }

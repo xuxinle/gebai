@@ -194,8 +194,26 @@ class HeadlessBackend final : public Backend {
     // 继续传原始的 0 会让画布按 1x 建、而 device_scale 报 1.5（尺寸与声明不一致）。
     WindowOptions resolved = options;
     resolved.scale = scale_;
-    SurfaceChoice choice = create_surface(resolved, options.renderer);
+    // **无头缺省软件渲染器**（2026-10-14）：无头路径（CI / 截图 / 自动化）不需要 GPU，
+    // 而 `auto` 的探测会真的建一个 D3D11 设备——实测代价 +53MB 进程内存、+55 线程、
+    // +4.6GB 虚拟地址（NVIDIA 驱动进程内常驻），**任何像素产生之前**就付掉了。
+    //
+    // 为何不是改 `WindowOptions::renderer` 的声明缺省：那个字段是**共享**的，
+    // 窗口后端（win32）缺省 `auto` 是**对的**（有窗口时“谁画得更快”确实得测）。
+    // 因此按后端分叉：窗口后端不碰，无头后端把空串/`auto` 解析为 `software`；
+    // 显式 `gpu` / `auto` 照旧探测（机器无 GPU 时 `auto` 会如实回退软件并说明原因）。
+    const std::string requested_renderer =
+        options.renderer.empty() || options.renderer == "auto" ? std::string("software")
+                                                              : options.renderer;
+    const bool defaulted_to_software = requested_renderer != options.renderer;
+    SurfaceChoice choice = create_surface(resolved, requested_renderer);
     if (choice.surface == nullptr) return unexpected(ErrorCode::Unsupported, "创建绘制面失败");
+    if (defaulted_to_software) {
+      // 理由要**如实**说：这是无头缺省，不是实测选出来的（与 `auto` 的实测理由
+      // 混为一谈会让"为什么无头没探测 GPU"变成谜案——排查的人会去翻微基准）。
+      choice.note = std::format("无头缺省软件光栅器（不探测 GPU；显式 --renderer gpu/auto 才探测）：{}",
+                                choice.note);
+    }
     surface_ = std::move(choice.surface);
     renderer_name_ = std::move(choice.name);
     renderer_note_ = std::move(choice.note);

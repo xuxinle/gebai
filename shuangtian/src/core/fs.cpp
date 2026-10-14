@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "st/core/string.hpp"
+#include "st/core/fs_map.hpp"
 
 namespace st::fs {
 namespace {
@@ -234,6 +235,74 @@ auto write_bytes(std::string_view path, std::span<const std::uint8_t> data) -> S
     }
   }
   return ok();
+}
+
+// ── 只读内存映射（`MappedFile`）────────────────────────────────────────────────
+//
+// 为何要它：**内存归属**而非速度。`read_bytes` 拿到的是私有堆副本，常驻到 free 为止；
+// 映射拿到的是文件页的共享副本，内存压力下系统可直接回收（后备存储就是文件本身）。
+// 字体链 15 个 face 的 ~86MB 常驻就是整读造成的（见 2026-10-14 内存评估）。
+//
+// 平台实现单点在 `platform_fs_map.cpp`（L14：系统头不出现在通用层）——本文件只做
+// **生命周期外壳**，让 `MappedFile` 出现在 `fs.hpp` 里而不把平台头带进几百个包含者。
+
+MappedFile::MappedFile(MappedFile&& other) noexcept
+    : view_(other.view_),
+      data_(other.data_),
+      size_(other.size_) {
+  other.view_ = MappedView{};
+  other.data_ = nullptr;
+  other.size_ = 0;
+}
+
+auto MappedFile::operator=(MappedFile&& other) noexcept -> MappedFile& {
+  if (this != &other) {
+    reset();
+    view_ = other.view_;
+    data_ = other.data_;
+    size_ = other.size_;
+    other.view_ = MappedView{};
+    other.data_ = nullptr;
+    other.size_ = 0;
+  }
+  return *this;
+}
+
+void MappedFile::reset() noexcept {
+  close_file_mapping(view_);
+  data_ = nullptr;
+  size_ = 0;
+}
+
+MappedFile::~MappedFile() { reset(); }
+
+auto MappedFile::open(std::string_view path) -> Result<MappedFile> {
+  auto view = open_file_mapping(path);
+  if (!view) return forward_error(view.error());
+  MappedFile result;
+  result.view_ = *view;
+  result.data_ = view->data;
+  result.size_ = view->size;
+  return result;
+}
+
+auto MappedFile::span() const noexcept -> std::span<const std::uint8_t> {
+  return data_ != nullptr ? std::span<const std::uint8_t>(data_, size_)
+                          : std::span<const std::uint8_t>{};
+}
+
+auto read_span(std::string_view path, std::uint64_t offset, std::size_t length) -> Result<Bytes> {
+  auto file = FileHandle::open(path, "rb");
+  if (!file) return forward_error(file.error());
+  if (std::fseek(file->raw(), static_cast<long>(offset), SEEK_SET) != 0) {
+    return unexpected(ErrorCode::Io, std::string("seek failed '").append(path).append("'"));
+  }
+  Bytes bytes(length);
+  if (length == 0) return bytes;
+  const std::size_t read = std::fread(bytes.data(), 1, length, file->raw());
+  // 短读 = 文件提前结束：**截断而不报错**（调用方按实际长度判别）。
+  bytes.resize(read);
+  return bytes;
 }
 
 auto exists(std::string_view path) noexcept -> bool {

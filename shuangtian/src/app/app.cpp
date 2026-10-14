@@ -169,6 +169,78 @@ auto resolve_ui_font_scale(std::string_view mode) -> float {
   return from_env.has_value() ? *from_env : std::string{};
 }
 
+/// 定长**环形缓冲**（帧时序 / 日志尾部的替代，2026-10-14）。
+///
+/// 为何不用 `std::vector` + `erase(begin())`：那是一次 O(n) `memmove`，
+/// 而它在**每帧**都要做（`wall_times` / `frame_times` 各一次）——量小但纯浪费，
+/// 而且它给热路径引入了与窗口大小相关的隐藏成本。
+/// 环形缓冲把"丢弃最旧"变成"覆盖一个下标"（O(1)、无搬动）。
+///
+/// 读取时用 `for_each_oldest_first`（而非返回容器）：调用方都是"读一遍做统计/输出"，
+/// 而暴露内部布局会让两种状态（未满 / 已回绕）外溢到每个调用点。
+///
+/// 为何不用 `std::deque`：它每元素一次分散分配，帧环路径上反而更贵（本仓已有
+/// “热路径不用 deque”的先例：终端回滚缓冲）。
+struct RingBuffer {
+  std::vector<double> items{};
+  std::size_t next{0};      ///< 下一个写入位置
+  std::size_t filled{0};    ///< 已写入数量（<= capacity）
+
+  void set_capacity(std::size_t capacity) { items.resize(capacity); }
+
+  void push(double value) {
+    if (items.empty()) return;      // 容量未设：静默忽略（测试/极简路径）
+    items[next] = value;
+    next = (next + 1) % items.size();
+    if (filled < items.size()) ++filled;
+  }
+
+  /// 按**从旧到新**顺序调用 `visit`（与旧的 `vector` 顺序一致，调用方无需区分回绕）。
+  template <class Fn>
+  void for_each_oldest_first(Fn&& visit) const {
+    const std::size_t begin = (filled == items.size()) ? next : 0;
+    for (std::size_t offset = 0; offset < filled; ++offset) {
+      visit(items[(begin + offset) % (items.empty() ? 1 : items.size())]);
+    }
+  }
+};
+
+/// 字符串版环形缓冲（日志尾部）：同 `RingBuffer`，但元素不可拷贝构造成本低。
+struct LogRing {
+  std::vector<std::string> items{};
+  std::size_t next{0};
+  std::size_t filled{0};
+
+  void set_capacity(std::size_t capacity) {
+    if (capacity > 0) items.assign(capacity, std::string{});
+  }
+
+  void push(std::string value) {
+    if (items.empty()) return;
+    items[next] = std::move(value);
+    next = (next + 1) % items.size();
+    if (filled < items.size()) ++filled;
+  }
+
+  /// 取最近 `limit` 条（从旧到新）。
+  [[nodiscard]] auto tail(std::size_t limit) const -> std::vector<std::string> {
+    const std::size_t count = std::min(limit, filled);
+    const std::size_t begin_index = filled - count;
+    const std::size_t start = (filled == items.size() ? next : 0) + begin_index;
+    std::vector<std::string> out;
+    out.reserve(count);
+    for (std::size_t offset = 0; offset < count; ++offset) {
+      out.push_back(items[(start + offset) % (items.empty() ? 1 : items.size())]);
+    }
+    return out;
+  }
+};
+
+/// 帧时序样本上限（p50/p95 用它算）。
+inline constexpr std::size_t kFrameSampleCapacity = 240;
+/// 日志尾部保留行数（控制通道 `logs` 用）。
+inline constexpr std::size_t kLogLineCapacity = 512;
+
 struct Application::Impl {
   shell::Backend* backend{nullptr};
   std::unique_ptr<shell::Backend> backend_holder{};
@@ -178,11 +250,11 @@ struct Application::Impl {
   std::unique_ptr<control::Server> server{};
   /// 脚本宿主（仅 `AppOptions::enable_script` 时创建；协议层通过 `Application::script()` 取用）
   std::unique_ptr<ui::ScriptHost> script{};
-  std::vector<double> frame_times{};
+  RingBuffer frame_times{};
   /// 相邻帧开始时刻之差（墙钟间隔；与 `frame_times` 的帧内耗时对照看）。
-  std::vector<double> wall_times{};
+  RingBuffer wall_times{};
   std::int64_t last_frame_start_ns{0};
-  std::vector<std::string> log_lines{};
+  LogRing log_lines{};
   std::uint64_t frames{0};
   float device_scale{1.0f};
   /// 界面字号缩放（构造时解析一次，切主题时复用）——见 `Metrics::scale_fonts`。
@@ -224,6 +296,10 @@ Application::Application(std::string name, std::string version, AppOptions optio
     : impl_(std::make_unique<Impl>()), name_(std::move(name)), version_(std::move(version)),
       options_(std::move(options)) {
   log::set_level(log::level_from_name(options_.log_level));
+  // 帧时序与日志尾部改用环形缓冲：容量一次给定（旧实现是"超了 erase(begin())"）
+  impl_->frame_times.set_capacity(kFrameSampleCapacity);
+  impl_->wall_times.set_capacity(kFrameSampleCapacity);
+  impl_->log_lines.set_capacity(kLogLineCapacity);
   impl_->font_scale = resolve_ui_font_scale(options_.ui_font_scale);
   root_.set_theme(scaled_theme(options_.theme, impl_->font_scale));
   // 绘制剖析默认关闭：挂了才计时（代价是每次绘制两次时钟读）。
@@ -241,8 +317,7 @@ Application::Application(std::string name, std::string version, AppOptions optio
   // 不注销就是悬垂监听器——对象死后只要**任何线程**打一条日志
   // （典型：`st::pkg::build` 的编译 worker）就会踩已释放的 `this`。
   impl_->log_listener_id = log::add_listener([this](log::Level level, std::string_view message) {
-    impl_->log_lines.push_back(std::format("[{}] {}", to_string(level), message));
-    if (impl_->log_lines.size() > 512) impl_->log_lines.erase(impl_->log_lines.begin());
+    impl_->log_lines.push(std::format("[{}] {}", to_string(level), message));
   });
   // **自定义主题在日志监听器之后加载**：加载失败要写告警，而告警必须能被
   // 控制通道的 `logs` 读到（否则"主题没生效"在自动化流程里完全不可见）。
@@ -440,43 +515,47 @@ auto Application::theme_snapshot() const -> st::Json { return ui::theme_to_json(
 auto Application::quit_requested() const noexcept -> bool { return impl_->quit; }
 
 auto Application::log_lines(std::size_t limit) const -> std::vector<std::string> {
-  std::vector<std::string> out;
-  const std::size_t count = std::min(limit, impl_->log_lines.size());
-  const std::size_t begin = impl_->log_lines.size() - count;
-  for (std::size_t index = begin; index < impl_->log_lines.size(); ++index) {
-    out.push_back(impl_->log_lines[index]);
-  }
-  return out;
+  return impl_->log_lines.tail(limit);
 }
 
 auto Application::metrics() const -> control::Metrics {
   control::Metrics metrics;
   metrics.frames = impl_->frames;
+  // 字体加载方式（映射 / 回退整读）：内存改造后最重要的可观测项——
+  // “为什么这台机器多占 80MB”的答案就在这里。
+  {
+    const auto font_stats = st::text::font_cache_stats();
+    metrics.font_faces_loaded = font_stats.face_loads;
+    metrics.font_mapped_loads = font_stats.mapped_loads;
+    metrics.font_read_fallbacks = font_stats.read_fallbacks;
+  }
   metrics.last_frame_ms = impl_->last_frame_ms;
   metrics.layout_ms = impl_->layout_ms;
   metrics.paint_ms = impl_->paint_ms;
   metrics.present_ms = impl_->present_ms;
-  if (!impl_->frame_times.empty()) {
-    std::vector<double> sorted = impl_->frame_times;
-    std::ranges::sort(sorted);
-    const auto percentile = [&sorted](double ratio) -> double {
-      const auto index = static_cast<std::size_t>(
-          std::min(static_cast<double>(sorted.size() - 1), ratio * static_cast<double>(sorted.size() - 1)));
-      return sorted[index];
-    };
-    metrics.frame_p50_ms = percentile(0.5);
-    metrics.frame_p95_ms = percentile(0.95);
+  // p50/p95 从环形缓冲取副本后排序（两个 percentile 块合并成一处：
+  // 原先两份代码除容器外逐字相同——那种重复在改口径时必偏一半）。
+  const auto percentile_of = [](const std::vector<double>& sorted, double ratio) -> double {
+    const auto index = static_cast<std::size_t>(std::min(
+        static_cast<double>(sorted.size() - 1), ratio * static_cast<double>(sorted.size() - 1)));
+    return sorted[index];
+  };
+  const auto sorted_samples = [](const RingBuffer& ring) {
+    std::vector<double> samples;
+    samples.reserve(kFrameSampleCapacity);
+    ring.for_each_oldest_first([&samples](double value) { samples.push_back(value); });
+    std::ranges::sort(samples);
+    return samples;
+  };
+  if (impl_->frame_times.filled > 0) {
+    const std::vector<double> sorted = sorted_samples(impl_->frame_times);
+    metrics.frame_p50_ms = percentile_of(sorted, 0.5);
+    metrics.frame_p95_ms = percentile_of(sorted, 0.95);
   }
-  if (!impl_->wall_times.empty()) {
-    std::vector<double> sorted = impl_->wall_times;
-    std::ranges::sort(sorted);
-    const auto percentile = [&sorted](double ratio) -> double {
-      const auto index = static_cast<std::size_t>(
-          std::min(static_cast<double>(sorted.size() - 1), ratio * static_cast<double>(sorted.size() - 1)));
-      return sorted[index];
-    };
-    metrics.wall_p50_ms = percentile(0.5);
-    metrics.wall_p95_ms = percentile(0.95);
+  if (impl_->wall_times.filled > 0) {
+    const std::vector<double> sorted = sorted_samples(impl_->wall_times);
+    metrics.wall_p50_ms = percentile_of(sorted, 0.5);
+    metrics.wall_p95_ms = percentile_of(sorted, 0.95);
   }
   metrics.uptime_ms = time::now_ms() - impl_->started_ms;
   metrics.backend = std::string(backend_name());
@@ -963,9 +1042,8 @@ void Application::render_frame() {
   // 帧预算），不是性能问题；反过来才是真的重。两者对照才有完整图景，
   // 而只看一个必然误读（实测：首版压测只报墙钟，把 20ms 读成“重合成很慢”）。
   if (impl_->last_frame_start_ns > 0 && start_ns > impl_->last_frame_start_ns) {
-    impl_->wall_times.push_back(
-        static_cast<double>(start_ns - impl_->last_frame_start_ns) / 1'000'000.0);
-    if (impl_->wall_times.size() > 240) impl_->wall_times.erase(impl_->wall_times.begin());
+    // 环形缓冲：丢最旧是 O(1)（旧的 `erase(begin())` 每帧一次 O(n) 搬动）
+    impl_->wall_times.push(static_cast<double>(start_ns - impl_->last_frame_start_ns) / 1'000'000.0);
   }
   impl_->last_frame_start_ns = start_ns;
   raster::Surface& canvas = impl_->backend->framebuffer();
@@ -1005,8 +1083,7 @@ void Application::render_frame() {
   impl_->present_ms = to_ms(end_ns - present_start);
   ++impl_->frames;
   impl_->last_frame_ms = to_ms(end_ns - start_ns);
-  impl_->frame_times.push_back(impl_->last_frame_ms);
-  if (impl_->frame_times.size() > 240) impl_->frame_times.erase(impl_->frame_times.begin());
+  impl_->frame_times.push(impl_->last_frame_ms);
   impl_->repaint = false;
   root_.clear_dirty();
 }

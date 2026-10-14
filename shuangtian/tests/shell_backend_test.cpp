@@ -118,6 +118,44 @@ ST_TEST(backend_reports_renderer_honestly) {
   }
 }
 
+ST_TEST(headless_defaults_to_software_renderer) {
+  // **无头不该为 GPU 探测付代价**（2026-10-14）。
+  //
+  // 起因（实测）：`auto` 在无头模式下**照样探测 GPU**——建 probe D3D11 设备 +
+  // 一块全尺寸 GPU 画布。无头（CI / 截图 / 自动化）根本不需要 GPU，却付出
+  // RTX 驱动进程内常驻 ~53MB / ~55 线程 / ~4.6GB 虚拟地址，且全部付在
+  // "任何像素产生之前"。
+  //
+  // 这条用例钉住的是"**缺省路径不得探测**"这个事实：不传 renderer（或传 `auto`）时
+  // 必须直接给软件光栅器。反向验证：把 `HeadlessBackend::create_window` 里的
+  // requested_renderer 分叉去掉（改回直传 options.renderer），本用例在
+  // "缺省不给软件"这一支上变红。
+  //
+  // ⚠ 只断言"缺省是 software"，**不**假设机器上有没有 GPU：显式 `auto`
+  // 在本机（无 GPU）与报告机器（RTX 4080）上都会走探测分支，而那是另一条契约。
+  for (const char* requested : {"", "auto"}) {
+    WindowOptions options;
+    options.width = 320;
+    options.height = 240;
+    options.renderer = requested;
+    auto backend = st::shell::create_backend("headless");
+    if (!backend.has_value()) continue;
+    if (auto status = (*backend)->create_window(options); !status) continue;
+    ST_CHECK_EQ(std::string((*backend)->renderer_name()), std::string("software"));
+  }
+  // 显式 `gpu` 仍会被尊重（无 GPU 时如实回退软件，但**理由**要说清是回退，
+  // 而不是"缺省就是这么定的"）——两条理由不能混为一谈。
+  WindowOptions explicit_gpu;
+  explicit_gpu.width = 320;
+  explicit_gpu.height = 240;
+  explicit_gpu.renderer = "gpu";
+  if (auto backend = st::shell::create_backend("headless"); backend.has_value()) {
+    if (auto status = (*backend)->create_window(explicit_gpu); status) {
+      ST_CHECK(!(*backend)->renderer_note().empty());
+    }
+  }
+}
+
 ST_TEST(backend_headless_clipboard_roundtrip) {
   // headless 后端的剪贴板**读写闭环**（2026-10-12 补齐读侧）：
   // `set_clipboard_text` 一直在存 `clipboard_` 成员，但读侧报 Unsupported——

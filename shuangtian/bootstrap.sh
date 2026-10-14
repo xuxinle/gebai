@@ -222,6 +222,23 @@ done < "$LINK_LIBS_FILE"
 
 echo "[bootstrap] 链接 st ...（系统库：${LINK_LIBS[*]}）"
 "$CXX" "${FLAGS[@]}" "${OBJECTS[@]}" -o build/bin/st "${LINK_LIBS[@]}"
+
+# **链接后分离调试信息**（与 `st build` 的 `separate_debug_info` 同口径）：
+# 自举产物与 st 构建的产物应当**尺寸量级一致**（否则“自举出来的 st”与
+# “st 自己重建的 st”看起来像两个东西）。dev 档下 `.debug_*` 占 89%——
+# 实测 st 70.1MB → 4.59MB，而 gdb/addr2line 仍能用（它自己认 `.gnu_debuglink`）。
+#
+# ⚠ 失败**不阻断自举**（`|| true` 不是偷懒）：产物已经能跑，只是胖了点；
+# 为“有个文件多 65MB”把自举打回去，代价与收益不成比例。
+if command -v objcopy >/dev/null 2>&1 && [ "${ST_NO_STRIP:-0}" != "1" ]; then
+  if objcopy --only-keep-debug build/bin/st build/bin/st.debug \
+     && objcopy --strip-debug build/bin/st \
+     && objcopy --add-gnu-debuglink=build/bin/st.debug build/bin/st; then
+    echo "[bootstrap] 已分离调试信息 → build/bin/st（$(du -m build/bin/st | cut -f1) MB）+ st.debug（$(du -m build/bin/st.debug | cut -f1) MB）"
+  else
+    echo "[bootstrap] 警告：分离调试信息失败（产物仍可用，仅体积偏大）" >&2
+  fi
+fi
 END=$(date +%s%N)
 echo "[bootstrap] 完成 → build/bin/st（$(( (END-START)/1000000 )) ms）"
 "./build/bin/st" version || true

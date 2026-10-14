@@ -134,3 +134,80 @@ ST_TEST(fs_expand_glob_scopes_to_literal_prefix) {
 // `bench_thresholds_have_bounded_headroom` 因余量贴阈值而报警的先例），故不掺进回归套件。
 // 探针实测（本仓库，确定性量级）：全字面模式 ~0.0002s，子树展开 ~0.003s，
 // 全树 `walk` ~0.25s——退化回全量遍历会让后者乘上模式个数（本仓库 14）。
+
+// ── 只读内存映射（`MappedFile` / `read_span`）────────────────────────────────────
+//
+// 背景（2026-10-14 内存评估 P0）：字体链 15 个 face 的原始文件字节**整读进 vector
+// 且永不释放**，实测 ~86MB 常驻——而轮廓解析本来就是惰性的，那部分内存纯属白付。
+// 改用内存映射后，那部分是**文件页的共享副本**，内存压力下系统可直接回收。
+//
+// 下面三条钉住的是这个改造的**机制**（而不是“内存数字”——后者靠
+// `tools/mem_sample.py` 在真进程上量，不适合当回归断言：共享机器上不稳定）。
+
+ST_TEST(fs_mapped_file_exposes_the_same_bytes_as_read_bytes) {
+  // 映射与整读必须是**同一份内容**——否则“用映射替掉整读”就不是等价改造。
+  // 用真实的 `st.pkg`（非空、有一定大小，且本用例本来就在仓库根跑）验证。
+  const std::string path = "st.pkg";
+  const auto plain = st::fs::read_bytes(path);
+  ST_CHECK(plain.has_value());
+  if (!plain) return;
+
+  auto mapped = st::fs::MappedFile::open(path);
+  ST_CHECK(mapped.has_value());
+  if (!mapped) return;
+
+  ST_CHECK(mapped->valid());
+  ST_CHECK_EQ(mapped->size(), plain->size());
+  const auto view = mapped->span();
+  ST_CHECK_EQ(view.size(), plain->size());
+  // 逐字节比对（`std::equal`——两边都是 `const uint8_t` 视图，不做拷贝）
+  ST_CHECK(std::equal(view.begin(), view.end(), plain->begin()));
+}
+
+ST_TEST(fs_mapped_file_fails_safely_on_missing_file) {
+  // 安全失败：不存在的文件、目录都只返回错误（调用方据此回退到整读）——
+  // 而不是抛异常/崩溃。字体加载的回退路径就靠这条。
+  const auto missing = st::fs::MappedFile::open("no/such/file/font.ttf");
+  ST_CHECK(!missing.has_value());
+  // 目录：`open` 在 POSIX 上会成功、`mmap` 才报 `ENODEV`（“设备不支持”）——
+  // 看着像硬件问题。平台层显式挡掉，这里钉住“不崩且报错”。
+  const auto directory = st::fs::MappedFile::open(".");
+  ST_CHECK(!directory.has_value());
+}
+
+ST_TEST(fs_read_span_reads_exactly_the_requested_window) {
+  // `read_span` 的契约（`font_face_count` 靠它只看文件头）：
+  // ① 取出的窗口与整读的同区段**逐字节相同**；② 越出文件末尾**截断而不报错**。
+  const std::string path = "st.pkg";
+  const auto plain = st::fs::read_bytes(path);
+  ST_CHECK(plain.has_value());
+  if (!plain) return;
+  ST_CHECK(plain->size() > 64);
+
+  const auto head = st::fs::read_span(path, 0, 64);
+  ST_CHECK(head.has_value());
+  if (!head) return;
+  ST_CHECK_EQ(head->size(), static_cast<std::size_t>(64));
+  ST_CHECK(std::equal(head->begin(), head->end(), plain->begin()));
+
+  // 带偏移的窗口
+  const auto middle = st::fs::read_span(path, 32, 16);
+  ST_CHECK(middle.has_value());
+  if (middle) {
+    ST_CHECK_EQ(middle->size(), static_cast<std::size_t>(16));
+    ST_CHECK(std::equal(middle->begin(), middle->end(), plain->begin() + 32));
+  }
+
+  // 越界：请求比文件大得多 → 取到文件末尾为止（不报错、不越界读）
+  const auto oversized = st::fs::read_span(path, plain->size() - 4, 1U << 20U);
+  ST_CHECK(oversized.has_value());
+  if (oversized) ST_CHECK_EQ(oversized->size(), static_cast<std::size_t>(4));
+
+  // 完全在文件之外 → 空结果（不是错误）
+  const auto beyond = st::fs::read_span(path, plain->size() + 1024, 16);
+  ST_CHECK(beyond.has_value());
+  if (beyond) ST_CHECK(beyond->empty());
+
+  // 不存在的文件 → 错误（与上面的“越界”是两件事：一个能读、一个读不到）
+  ST_CHECK(!st::fs::read_span("no/such/file/font.ttf", 0, 16).has_value());
+}

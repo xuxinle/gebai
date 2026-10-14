@@ -154,18 +154,34 @@ struct FontCacheStats {
   std::size_t face_hits{0};
   /// `font_face_count`（读文件头）真正跑过的次数。
   std::size_t count_reads{0};
+  /// 加载时**走到内存映射**的次数（2026-10-14 新增）。
+  ///
+  /// 为何要这个数："字体不再整读"是个**机制断言**，而它无法从内存数字上稳定验证
+  /// （共享机器上 RSS 受 GC/换页影响）。数"这次加载走的哪条路"则是确定量。
+  std::size_t mapped_loads{0};
+  /// 加载时映射不可用、**退回整读进 vector** 的次数。
+  ///
+  /// 正常情况下恒为 0；非 0 说明挂了不支持映射的文件系统（网络盘等）——
+  /// 那时内存指标回到改造前，但功能不受影响（这正是保留回退的理由）。
+  std::size_t read_fallbacks{0};
 };
 
-/// 取当前计数。**线程局部**，与缓存本身同作用域（缓存是 `thread_local`，
-/// 计数器若做成进程级全局就与它语义不一致了）。
+/// 取当前计数。
+///
+/// **进程级**（2026-10-14 改，此前是 `thread_local`）：缓存本体已改为进程级共享
+/// （`load_face_cached`），计数器要是还线程局部就**测不出"其他线程有没有重复读盘"**
+/// ——而那正是本轮要防的隐患（Tasks 池 8 线程最坏 8×86MB）。
 [[nodiscard]] auto font_cache_stats() noexcept -> FontCacheStats;
 
-/// 计数器**可变引用**：供「确实发生了一次加载/命中/读头」的内部路径自增。
+/// 计数自增入口（进程级原子；只有 `font.cpp` / `text.cpp` 的内部路径调）。
 ///
-/// 为什么不封成 `note_hit()` 这类单向接口：计数点分散在三处
-/// （`FontFace::load` / `font_face_count` / `load_face_cached`），而它们各自
-/// 只增自己那一项——直接给结构体引用比开三个函数短且少一层间接。
+/// 为何不返回可变的 `FontCacheStats&`：多线程同时自增也需要原子性，
+/// 而返回引用必然诱使调用方写 `stats.face_loads += 1`（非原子读改写）。
 /// **不是公开语义的一部分**：外部只读 `font_cache_stats()`。
-[[nodiscard]] auto font_cache_stats_mutable() noexcept -> FontCacheStats&;
+void note_face_load() noexcept;
+void note_face_hit() noexcept;
+void note_face_count_read() noexcept;
+void note_face_mapped() noexcept;
+void note_face_read_fallback() noexcept;
 
 }  // namespace st::text

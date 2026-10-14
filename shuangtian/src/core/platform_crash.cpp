@@ -257,11 +257,24 @@ void walk_stack(EXCEPTION_POINTERS* info, const EXCEPTION_RECORD* record) {
       //
       // ⚠ `addr2line` 要的是 **link-time 地址**（含 PE 首选基址 0x140000000），
       // 不是模块内偏移——实测：传偏移全部得到 `??:0`，加上首选基址才出函数名。
+      //
+      // ⚠ **调试信息默认是分离的**（2026-10-14）：`st build` 链接后会把 `.debug_*`
+      // 搬到 `<产物>.debug`（产物 76.96MB → 4.6MB），此时 `addr2line -e <产物>`
+      // 会报“无调试信息”。下面直接把**分离符号文件的路径**写进提示，
+      // 让拿到的命令是可直接执行的（`addr2line -e x.exe.debug …`）——
+      // “给一条要改一步才能用的命令”在崩溃现场代价很大。
       static constexpr DWORD64 kPreferredBase = 0x0000000140000000ULL;
+      const std::string module = module_full_path(reinterpret_cast<void*>(address));
+      // 分离符号约定（与 `separate_debug_info` 一致）：同目录、同名的 `.debug`。
+      // 仅当它真存在时才推荐——不存在就说明本次构建用了 `--no-strip`（符号在产物里）。
+      const std::string debug_file = module.empty() ? std::string{} : module + ".debug";
+      const std::string symbol_source =
+          !debug_file.empty() && ::GetFileAttributesA(debug_file.c_str()) != INVALID_FILE_ATTRIBUTES
+              ? debug_file
+              : module;
       report += std::format(
           "    #-{:2d} {}  (MinGW/DWARF：addr2line -f -C -e \"{}\" 0x{:x})\n", index,
-          module_base_of(reinterpret_cast<void*>(address)),
-          module_full_path(reinterpret_cast<void*>(address)),
+          module_base_of(reinterpret_cast<void*>(address)), symbol_source,
           static_cast<std::size_t>(kPreferredBase + address - module_offset_base(address)));
     }
   }
@@ -408,6 +421,23 @@ void crash_signal(int signal_number) {
         "主要符号应可见）\n";
     safe_write(note);
     report_write(note);
+    // ⚠ **调试信息默认是分离的**（2026-10-14）：`st build` 链接后把 `.debug_*`
+    // 搬到 `<产物>.debug`（实测产物 76.96MB → 4.6MB），**符号表（`.symtab`）不动**，
+    // 所以上面的名字解析照常（那是 `backtrace_symbols` 读的）。但 **`addr2line` 需要**
+    // 行号信息——它在分离文件里。给一条可直接执行的命令，省掉现场“报无调试信息→
+    // 想一下→改路径”那一步。`dladdr` 能拿到模块路径，拿不到就只给通用提示。
+    // 注意：这一段是**信号安全路径外的 best-effort**（用 `snprintf` 与 `strlen`
+    // 而非 std::format/堆分配——与上面注释里 dladdr 那段同口径）。
+    Dl_info self_info{};
+    if (::dladdr(frames[1], &self_info) != 0 && self_info.dli_fname != nullptr) {
+      char hint[1024];
+      const int hint_length = std::snprintf(
+          hint, sizeof(hint),
+          "  （行号需分离符号：addr2line -f -C -e \"%s.debug\" <上面的地址>；"
+          "本次构建若用了 --no-strip 则调试信息在产物内）\n",
+          self_info.dli_fname);
+      if (hint_length > 0) safe_write(hint, static_cast<std::size_t>(hint_length));
+    }
   } else {
     const std::string_view note = "  （调用栈不可用：backtrace 未采集到帧）\n";
     safe_write(note);

@@ -27,6 +27,7 @@
 #include <string_view>
 #include <vector>
 
+#include "st/core/memory_budget.hpp"
 #include "st/math/color.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/paint.hpp"
@@ -170,7 +171,9 @@ class IconSetPainter {
     mutable raster::Canvas bitmap{0, 0};
     mutable std::uint64_t used{0};
   };
-  static constexpr std::size_t kMaxEntries = 256;
+  /// 缓存上限来自**内存预算单点**（`st::memory`；`ST_MEM_BUDGET=low` 声明式压缩）。
+  /// 字段而非 `static constexpr`：档位在**构造期**读环境（见 `memory_budget.hpp`）。
+  const std::size_t kMaxEntries = st::memory::scale_entry_limit(256U);
 
   std::shared_ptr<const IconSet> set_{};
   mutable std::vector<Entry> cache_{};
@@ -178,7 +181,7 @@ class IconSetPainter {
   mutable std::size_t hits_{0};
   mutable std::size_t misses_{0};
   mutable std::size_t cached_pixels_{0};
-  static constexpr std::size_t kPixelBudget = 16U << 20U;
+  const std::size_t kPixelBudget = st::memory::svg_cache_bytes();
 };
 
 /// 解析单个 `d` 属性为路径（独立入口：测试与 `Icon` 私有表迁移用）。

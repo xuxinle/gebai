@@ -12,6 +12,7 @@
 #include "st/core/fs.hpp"
 #include "st/core/font_platform.hpp"
 #include "st/core/hash.hpp"
+#include "st/core/memory_budget.hpp"
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
@@ -124,15 +125,53 @@ struct FontCandidate {
 [[nodiscard]] auto load_face_cached(std::string_view path, int face_index) -> Result<FontFace> {
   // 键：路径 + '#' + index（路径里不会出现 `#`——它是文件系统允许的字符，
   // 但用它将与 index 分隔比拼字符串 + 元组哈希更省事；真要撞也只影响缓存命中率）。
-  thread_local std::unordered_map<std::string, FontFace> cache;
+  //
+  // **进程级缓存**（2026-10-14 改，此前是 `thread_local`）：
+  //
+  // 为何必须改：`thread_local` 意味着**每个线程各持一份**已解析 face。而 Tasks 池
+  // （上限 8 线程）里任何非首线程首次碰字体都会重新走 `FontFace::load`——
+  // 在映射改造前那是**整读全部字体文件一遍**（实测最坏 8×86MB），映射改造后
+  // 每份仍是各自页表 + 各自的解析结果与字形/整形缓存。
+  // 当前没爆是因为 UI 渲染恰好在主线程，但那是**偶然**：任何一次"从工作线程量文字"
+  // （后台排版、异步测量、测试的并行用例）都会把它变成真问题。
+  //
+  // 锁口径：**临界区只保护容器**——命中也只插/查一次哈希表，而读盘/解析
+  // （尤其是 20MB 集合字体的表目录解析）**在锁外**做。代价是两个线程可能同时
+  // 加载同一个 face（重复一次解析，结果相同，后写者用双检让位给先写者）。
+  // 为何不引 `shared_mutex`：命中路径也得先拼 key，临界区本来就只剩查表
+  //  （纳秒级），读者/写者锁的额外开销与复杂度挣不回来。
+  //
+  // 不做 LRU：字体数量是**个位数**（系统链 15 个 face），淘汰反而把"偶发重读 20MB"
+  // 引回来；这个表只增不减，但大小上界由安装的字体数封顶。
+  //
+  // lint-allow: L8 字体 face 缓存按设计是**进程级共享**（与 text.cpp 的 thread_local
+  // 表相反）：它缓存的是"文件 → 不可变解析结果"的纯函数，多线程各持一份只会
+  // 重复付解析与内存。已加锁且临界区不含 I/O。
+  struct Cache {
+    std::mutex mutex{};
+    std::unordered_map<std::string, FontFace> entries{};
+  };
+  static Cache cache;
   std::string key = std::format("{}#{}", path, face_index);
-  if (const auto found = cache.find(key); found != cache.end()) {
-    font_cache_stats_mutable().face_hits += 1;
-    return found->second;
+  {
+    const std::scoped_lock guard(cache.mutex);
+    if (const auto found = cache.entries.find(key); found != cache.entries.end()) {
+      note_face_hit();
+      return found->second;   // `FontFace` 拷贝廉价（共享 `shared_ptr<Data>`）
+    }
   }
   auto face = FontFace::load(path, face_index);
   if (!face) return face;   // 失败不进缓存（见上）
-  cache.emplace(std::move(key), *face);
+  {
+    const std::scoped_lock guard(cache.mutex);
+    // 双检：锁外加载期间可能已有别的线程写入同一 key（用那份，避免后面的线程
+    // 抱着一份重复的解析结果回去、且两份的轮廓缓存不共享）。
+    if (const auto found = cache.entries.find(key); found != cache.entries.end()) {
+      note_face_hit();
+      return found->second;
+    }
+    cache.entries.emplace(std::move(key), *face);
+  }
   return face;
 }
 
@@ -444,13 +483,17 @@ struct TextRenderer::Cache {
   std::unordered_map<std::uint64_t, ShapedEntry> shaped{};
   std::list<std::uint64_t> shaped_lru{};
   std::size_t shaped_bytes{0};
-  static constexpr std::size_t kShapedMaxBytes = 16 * 1024 * 1024;
-  static constexpr std::size_t kShapedMaxEntries = 4096;
+  /// 上限来自**内存预算单点**（`st::memory`；`ST_MEM_BUDGET=low` 可声明式压缩）——
+  /// 原先这些魔数散在各个模块里，"这个进程最多为缓存吃多少"得翻三个文件。
+  /// 字段而非 `static constexpr`：预算档位在**构造期**读环境，需要是每实例的值
+  ///（虽然当前进程内一致，但写死 constexpr 会把"随环境变"这件事又绑回去）。
+  const std::size_t kShapedMaxBytes = st::memory::shaped_cache_bytes();
+  const std::size_t kShapedMaxEntries = st::memory::scale_entry_limit(4096U);
   /// 淘汰预算：按**内存**而不是条目数（字形位图大小差异极大——空白字形与 64px 汉字
   /// 差三个数量级；512 条目的旧上限对 16px 汉字只值 ~800 KiB，对 64px 却要 32 MiB）。
-  static constexpr std::size_t kMaxBytes = 24 * 1024 * 1024;
+  const std::size_t kMaxBytes = st::memory::glyph_cache_bytes();
   /// 条目数硬上限（防小位图海量时的 map 开销）。
-  static constexpr std::size_t kMaxEntries = 32768;
+  const std::size_t kMaxEntries = st::memory::scale_entry_limit(32768U);
 };
 
 TextRenderer::TextRenderer(const FontStack& stack, float supersample)
@@ -639,11 +682,11 @@ auto TextRenderer::shape_cached(std::string_view utf8, float size, FontRole role
   }
   auto shaped = std::make_shared<ShapedText>(shape_uncached(utf8, size, role, bold));
   const std::size_t bytes = shaped->runs.size() * sizeof(TextRun) + utf8.size() + 64;
-  if (bytes <= Cache::kShapedMaxBytes) {  // 超大文本不入缓存（一跳进就会出现"刚插就淘汰"）
+  if (bytes <= cache_->kShapedMaxBytes) {  // 超大文本不入缓存（一跳进就会出现"刚插就淘汰"）
     const std::scoped_lock lock(cache_->mutex);
     while (!cache_->shaped_lru.empty() &&
-           (cache_->shaped_bytes + bytes > Cache::kShapedMaxBytes ||
-            cache_->shaped.size() >= Cache::kShapedMaxEntries)) {
+           (cache_->shaped_bytes + bytes > cache_->kShapedMaxBytes ||
+            cache_->shaped.size() >= cache_->kShapedMaxEntries)) {
       const std::uint64_t victim = cache_->shaped_lru.back();
       cache_->shaped_lru.pop_back();
       const auto iterator = cache_->shaped.find(victim);
@@ -778,14 +821,14 @@ auto TextRenderer::index_at_x(std::string_view utf8, float size, float local_x) 
 
 /// 淘汰超出预算的条目（**调用方须持有锁**，且在插入之前调用）。
 ///
-/// 按 LRU 从尾部逐出；预算按字节（见 `Cache::kMaxBytes`）。
+/// 按 LRU 从尾部逐出；预算按字节（见 `cache_->kMaxBytes`）。
 /// `incoming_bytes` 是即将插入条目的内存量——先腾出它的位置再插入，
 /// 保持"先淘汰、后插入"的顺序（反过来曾出现"插入后清空"把新位图一起销毁，
 /// `return slot.get()` 返回悬垂指针，ASan 实测 heap-use-after-free）。
 void TextRenderer::trim_cache(std::size_t incoming_bytes) const {
   while (!cache_->lru_order.empty() &&
-         (cache_->glyph_bytes + incoming_bytes > Cache::kMaxBytes ||
-          cache_->glyphs.size() >= Cache::kMaxEntries)) {
+         (cache_->glyph_bytes + incoming_bytes > cache_->kMaxBytes ||
+          cache_->glyphs.size() >= cache_->kMaxEntries)) {
     const std::uint64_t victim = cache_->lru_order.back();
     cache_->lru_order.pop_back();
     const auto iterator = cache_->glyphs.find(victim);

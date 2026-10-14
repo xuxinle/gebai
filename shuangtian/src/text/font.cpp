@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstddef>
@@ -214,10 +215,19 @@ struct DictOp {
 };
 
 /// 字体解析结果与缓存（`FontFace::Data` 的实体；仅本 TU 可见）。
+///
+/// **文件字节的两种形态**（2026-10-14 内存评估 P0）：
+/// - `mapped`：只读内存映射（首选）。文件页是**共享副本**，内存压力下系统可直接回收——
+///   字体链 15 个 face 的 ~86MB 常驻正是"整读进 vector 永不释放"造成的。
+/// - `bytes`：整读回退（映射不可用时，如文件系统不支持 mmap）。
+///
+/// 两者**必然只有一份在**，且在 `load` 后不再变更——所以 `span()` 可以安全地
+/// 返回其中之一的视图（解析层因此完全不必知道用的是哪一条）。
 struct FontData {
   std::string path{};
   std::string name{};
   int face_index{0};
+  st::fs::MappedFile mapped{};
   std::vector<std::uint8_t> bytes{};
   std::vector<TableRecord> tables{};
   FontMetrics metrics{};
@@ -235,7 +245,12 @@ struct FontData {
   std::mutex hints_mutex{};
   std::unordered_map<GlyphId, std::vector<StemHint>> hints{};
 
-  [[nodiscard]] auto span() const noexcept -> std::span<const std::uint8_t> { return bytes; }
+  /// 是否用的内存映射（诊断/回归用：能直接断言"没走整读"）。
+  [[nodiscard]] auto uses_mapping() const noexcept -> bool { return mapped.valid(); }
+
+  [[nodiscard]] auto span() const noexcept -> std::span<const std::uint8_t> {
+    return mapped.valid() ? mapped.span() : std::span<const std::uint8_t>(bytes);
+  }
 
   [[nodiscard]] auto table(std::uint32_t want) const noexcept -> const TableRecord* {
     const auto it = std::lower_bound(
@@ -1882,62 +1897,117 @@ namespace {
 
 // ── 字体缓存计数器 ────────────────────────────────────────────────────────
 //
-// **thread_local 而非进程级全局**：缓存本身（`load_face_cached` / `face_count_cached`
-// 的 `thread_local` 表）就是线程局部的，计数器跟它同作用域才**语义一致**——
-// 进程级全局会让“多线程各持一份缓存”这件事在数字上看不出来。
-// 同时省掉 L8（可变全局）与数据竞争。计数只在测试/诊断路径上被读。
+// **进程级原子**（2026-10-14 改，此前是 `thread_local`）：缓存本体已改为进程级共享
+// （见 `text.cpp` 的 `load_face_cached`），计数器跟它同作用域才**语义一致**——
+// 线程局部版本有一个真实后果：**测不出"其他线程重复读盘"**，而那正是本轮要防的隐患。
+//
+// 用 `std::atomic<size_t>` 而非 `FontCacheStats&`：多线程同时自增需要原子性，
+// 而“返回结构体引用”必诱使调用方写非原子的读改写（`stats.x += 1`）。
+// 计数只在测试/诊断路径上读，所以 6 个独立原子量的开销可以忽略。
+
+/// 六个计数器（与 `FontCacheStats` 的字段一一对应）。
+struct FontCacheCounters {
+  std::atomic<std::size_t> face_loads{0};
+  std::atomic<std::size_t> face_hits{0};
+  std::atomic<std::size_t> count_reads{0};
+  std::atomic<std::size_t> mapped_loads{0};
+  std::atomic<std::size_t> read_fallbacks{0};
+};
+
+/// lint-allow: L8 字体缓存计数器按设计是**进程级**诊断量（跨线程汇总才有意义）。
+/// 它是纯计数（`atomic`，无业务状态），且只被本 TU 写、只通过 `font_cache_stats()` 读。
+[[nodiscard]] auto cache_counters() noexcept -> FontCacheCounters& {
+  static FontCacheCounters counters;
+  return counters;
+}
 
 }  // namespace
 
-// 注意：这两个函数要定义在匿名命名空间**之外**。放在里面会被编译器当成另一个实体
-// （`st::text::{anonymous}::font_cache_stats_mutable`），与 `font.hpp` 的声明打架。
-auto font_cache_stats_mutable() noexcept -> FontCacheStats& {
-  thread_local FontCacheStats instance{};
-  return instance;
+void note_face_load() noexcept { cache_counters().face_loads.fetch_add(1, std::memory_order_relaxed); }
+void note_face_hit() noexcept { cache_counters().face_hits.fetch_add(1, std::memory_order_relaxed); }
+void note_face_count_read() noexcept {
+  cache_counters().count_reads.fetch_add(1, std::memory_order_relaxed);
+}
+void note_face_mapped() noexcept { cache_counters().mapped_loads.fetch_add(1, std::memory_order_relaxed); }
+void note_face_read_fallback() noexcept {
+  cache_counters().read_fallbacks.fetch_add(1, std::memory_order_relaxed);
 }
 
-auto font_cache_stats() noexcept -> FontCacheStats { return font_cache_stats_mutable(); }
+auto font_cache_stats() noexcept -> FontCacheStats {
+  // 快照（各字段分别读；不做单一原子快照——计数在诊断语义下允许有微小偏差）。
+  FontCacheStats stats;
+  const auto& counters = cache_counters();
+  stats.face_loads = counters.face_loads.load(std::memory_order_relaxed);
+  stats.face_hits = counters.face_hits.load(std::memory_order_relaxed);
+  stats.count_reads = counters.count_reads.load(std::memory_order_relaxed);
+  stats.mapped_loads = counters.mapped_loads.load(std::memory_order_relaxed);
+  stats.read_fallbacks = counters.read_fallbacks.load(std::memory_order_relaxed);
+  return stats;
+}
 
 /// 字体文件包含的 face 数量（非集合字体为 1）。供 `FontStack` 探测 TTC/OTC 用。
 ///
-/// 只需读文件头（tag + face 数与目录），**不把整个文件读进内存**：
-/// 这个函数是「不要猜 face 下标」那条修正的依据（见 `font.hpp` 的说明），
-/// 它要是和 `load` 一样读全文件，省下的就只是解析开销而非读盘开销。
-/// 实现上仍调 `read_bytes`（`st::fs` 没有局部读接口），但语义与调用方约定了
-/// 「只需头部」——将来 `fs` 提供 `read_prefix` 时这里就换成它。
+/// **只读文件头**（2026-10-14）：只需 tag + face 数 + face 目录，
+/// 过去这里调 `read_bytes` 会把整个 19.5MB 的 `NotoSansCJK-Regular.ttc` 读一遍（注释里
+/// 早已自认此债）——而调用方每次 `system_default()` 都要为每个 CJK 候选走一遍。
+/// 现在先读 512 字节头（覆盖 face 目录：12 + 4·count，count 上限 64 也才 268 字节），
+/// 目录超窗时才按需补读——**常规字体一次 512 字节 I/O**。
 [[nodiscard]] auto font_face_count(std::string_view path) -> Result<std::uint32_t> {
-  font_cache_stats_mutable().count_reads += 1;   // 计数：读文件头（见 font.hpp）
-  auto content = st::fs::read_bytes(path);
+  note_face_count_read();   // 计数：读文件头（见 font.hpp）
+  constexpr std::size_t kHeaderBytes = 512;
+  auto content = st::fs::read_span(path, 0, kHeaderBytes);
   if (!content) return st::forward_error(content.error());
-  if (content->size() < 12) return unexpected(ErrorCode::Parse, "字体文件过短");
-  const std::span<const std::uint8_t> bytes(*content);
-  if (read_u32(bytes, 0) == tag_of('t', 't', 'c', 'f')) {
-    const std::uint32_t count = read_u32(bytes, 8);
-    if (count == 0 || count > k_max_face_count) {
-      return unexpected(ErrorCode::Parse, "集合字体 face 数非法");
-    }
-    if (!in_range(bytes, 12, static_cast<std::size_t>(count) * 4)) {
-      return unexpected(ErrorCode::Parse, "集合字体 face 目录截断");
-    }
-    return count;
+  auto bytes = std::span<const std::uint8_t>(*content);
+  if (bytes.size() < 12) return unexpected(ErrorCode::Parse, "字体文件过短");
+  if (read_u32(bytes, 0) != tag_of('t', 't', 'c', 'f')) return std::uint32_t{1};
+  const std::uint32_t count = read_u32(bytes, 8);
+  if (count == 0 || count > k_max_face_count) {
+    return unexpected(ErrorCode::Parse, "集合字体 face 数非法");
   }
-  return std::uint32_t{1};
+  const std::size_t directory_bytes = static_cast<std::size_t>(count) * 4U;
+  if (bytes.size() < 12 + directory_bytes) {
+    // 目录超出首读窗口（集合字体 face 多）：按需补读真正需要的字节。
+    // 不把窗口一次开大是因为 `read_span` 的语义是"只读要的"——而 64 face 的目录也才 256 字节。
+    auto full = st::fs::read_span(path, 0, 12 + directory_bytes);
+    if (!full) return st::forward_error(full.error());
+    *content = std::move(*full);
+    bytes = std::span<const std::uint8_t>(*content);
+  }
+  if (!in_range(bytes, 12, directory_bytes)) {
+    return unexpected(ErrorCode::Parse, "集合字体 face 目录截断");
+  }
+  return count;
 }
 
 auto FontFace::load(std::string_view path, int face_index) -> Result<FontFace> {
-  font_cache_stats_mutable().face_loads += 1;   // 计数：真正的读盘 + 解析（见 font.hpp）
+  note_face_load();   // 计数：真正的读盘 + 解析（见 font.hpp）
   if (face_index < 0) return unexpected(ErrorCode::Invalid, "face_index 不能为负");
-  auto content = st::fs::read_bytes(path);
-  if (!content) return st::forward_error(content.error());
-  if (content->empty()) return unexpected(ErrorCode::Parse, "字体文件为空");
-  if (content->size() > k_max_font_bytes) {
-    return unexpected(ErrorCode::Invalid, "字体文件过大（>256MB）");
-  }
   auto holder = std::make_shared<Data>();
   FontData& data = holder->value;
   data.path = std::string(path);
   data.face_index = face_index;
-  data.bytes = std::move(*content);
+  // **映射优先、整读回退**（2026-10-14 内存评估 P0）：
+  //
+  // 为何映射优先：字体的整文件字节**永不释放**（轮廓已是惰性解析，但原始文件一直留着）。
+  // 不用映射时那是 ~86MB 的私有堆常驻（Windows 常规/粗体/等宽三链 15 个 face）；
+  // 用映射后那部分是文件页的共享副本，内存压力下系统可直接回收。
+  //
+  // 为何保留回退：映射在部分文件系统/网络盘上不可用；"能跑但多占内存"远优于"字体加载不了"。
+  // 两者都失败才报错（错误信息取回退那条，它给的诊断更直接）。
+  if (auto mapped = st::fs::MappedFile::open(path); mapped.has_value()) {
+    data.mapped = std::move(*mapped);
+    note_face_mapped();
+  } else {
+    auto content = st::fs::read_bytes(path);
+    if (!content) return st::forward_error(content.error());
+    data.bytes = std::move(*content);
+    note_face_read_fallback();
+  }
+  const auto span = data.span();
+  if (span.empty()) return unexpected(ErrorCode::Parse, "字体文件为空");
+  if (span.size() > k_max_font_bytes) {
+    return unexpected(ErrorCode::Invalid, "字体文件过大（>256MB）");
+  }
 
   const auto bytes = data.span();
   if (bytes.size() < 12) return unexpected(ErrorCode::Parse, "字体文件过短");

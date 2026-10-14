@@ -18,8 +18,10 @@
 #include "st/core/font_platform.hpp"
 #include "st/test/test.hpp"
 
+#include <atomic>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include "st/core/font_platform.hpp"
 #include "st/text/font.hpp"
@@ -110,6 +112,55 @@ ST_TEST(font_stack_load_is_cached_across_calls) {
   // 命中数必须**真的在涨**——否则上面两条会被“什么都不做”满足（假绿）。
   const auto final_stats = st::text::font_cache_stats();
   ST_CHECK(final_stats.face_hits > warm_stats.face_hits);
+}
+
+ST_TEST(font_face_loading_uses_memory_mapping_not_whole_file_reads) {
+  // **字体不再整读进 vector**（2026-10-14 内存评估 P0）。
+  //
+  // 为何要这条用例：字体链 15 个 face 的原始文件字节**整读且永不释放**，实测 ~86MB
+  // 常驻——而轮廓解析本来就是惰性的，那部分内存纯属白付。改造后走内存映射
+  // （文件页的共享副本，内存压力下可回收）。
+  //
+  // ⚠ 为何不直接断言内存：RSS 在共享机器上受 GC/换页影响，判据会飘（本仓
+  // `bench_thresholds_have_bounded_headroom` 已有先例）。改成数**这次加载走的哪条路**
+  // ——确定量，且直接量的是契约本身。
+  //
+  // 反向验证：把 `FontFace::load` 里的 `MappedFile::open` 分支删掉（回到无条件
+  // `read_bytes`），本条的两个断言同时变红。
+  auto stack = st::text::FontStack::system_default();
+  if (!stack) return;   // 无字体环境：不适用
+
+  const auto stats = st::text::font_cache_stats();
+  ST_CHECK(stats.face_loads > 0);                            // 确实加载过（否则下面无意义）
+  ST_CHECK_EQ(stats.mapped_loads, stats.face_loads);         // 每次加载都走了映射
+  ST_CHECK_EQ(stats.read_fallbacks, static_cast<std::size_t>(0));   // 一次都没退回整读
+}
+
+ST_TEST(font_face_cache_is_process_wide_not_thread_local) {
+  // **缓存必须是进程级共享**（2026-10-14）。
+  //
+  // 起因（真隐患）：`load_face_cached` 的缓存原先是 `thread_local`——Tasks 池
+  // （上限 8 线程）里任何非首线程首次碰字体都会**重新走 `FontFace::load`**：
+  // 在映射改造前那是**整读全部字体文件一遍**（最坏 8×86MB）。
+  // 当前没爆只因 UI 渲染恰好在主线程——那是偶然，不是保证。
+  //
+  // 判据：主线程预热后，工作线程建字体栈必须**纯命中**（零新增加载）。
+  // 反向验证：把 `load_face_cached` 的缓存改回 `thread_local`，本用例变红
+  // （工作线程各持一份空表 → `face_loads` 增量等于 face 数）。
+  //
+  // 为何用 `FontStack::system_default()` 而不是直接调 `FontFace::load`：前者走的才是
+  // **缓存层**（`load_face` → `load_face_cached`）；后者是裸加载，本来就该真读。
+  if (!st::text::FontStack::system_default()) return;
+  const auto warm = st::text::font_cache_stats();
+
+  std::atomic<std::size_t> loads_seen_in_worker{0};
+  std::thread worker([&loads_seen_in_worker] {
+    (void)st::text::FontStack::system_default();   // 工作线程里重建一次
+    loads_seen_in_worker.store(st::text::font_cache_stats().face_loads);
+  });
+  worker.join();
+
+  ST_CHECK_EQ(loads_seen_in_worker.load(), warm.face_loads);
 }
 
 ST_TEST(font_platform_chain_is_non_empty_and_probeable) {

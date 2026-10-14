@@ -121,17 +121,64 @@ struct Measurement {
 #endif
 }
 
-/// 插桩档下跳过**比值型**阈值断言，并说明跳过了哪一条。
-/// 返回 `true` = 调用方应当返回（跳过）。
+/// 当前是**标定档（release）**——本文件所有阈值与"实测"注释都出自它。
 ///
-/// 统一成一个入口，是为了让"插桩档到底跳了多少东西"在一处可见——
-/// 分散写 `if (instrumented_build()) return;` 久了就没人说得清跳过面有多大。
-[[nodiscard]] inline auto skip_ratios_under_instrumentation(const char* name) -> bool {
-  if (!instrumented_build()) return false;
-  st::print("[bench] {}：插桩档（san）跳过比值阈值——ASan 开销 ∝ 内存访问量，\n"
-            "        而分母（清屏）是纯内存写，比值不再机器无关。标定以发布档为准。\n",
-            name);
+/// ## 为何**比值型**门禁必须只认标定档（2026-10-14）
+///
+/// 这些门禁靠的是"被测负载 / 清屏"这个比值**跨档稳定**。而清屏是纯 `memset`
+/// （可被优化器换成 SIMD/内联填充），AA 光栅化是逐像素标量循环——两者对 `-O1/-O2`
+/// 的响应**不同**，于是同一个负载在 dev 与 release 下能差 1.6 倍：
+///
+/// 实测（同一份圆角卡片代码，2026-10-14）：release `2.03×` / dev `3.23×`；
+/// 文本 release `26.96×` / dev `18.74×`（**反方向**）；投影与渐变同样两个方向都偏。
+/// 在 dev 档下拿 release 的阈值卡，两个方向都会错：
+///   * 圆角卡片偏大（3.23 > 3）→ **误报**（代码没变慢）；
+///   * 投影/渐变偏小（余量变大）→ **自检"余量超上限"红灯**，而且
+///     `kFaultFactor` 退化也报"抓不住"——门禁在 dev 档下**同时失去上下界**。
+///
+/// 这与 `instrumented_build()`（san 档）**同一类问题、同一口径**：
+/// 不把阈值按档放宽（那会真的把 release 门禁变松——同一份阈值两边共用），
+/// 而是**如实跳过并在报告里说清**。
+///
+/// ## 为何用 `NDEBUG` 而不用 `__OPTIMIZE__`
+///
+/// `__OPTIMIZE__` 在 `-O1` 就定义了（实测），区分不出 `dev`(-O1) 与 `release`(-O2)。
+/// 而本仓的档位是 `src/pkg/build.cpp` 的 `profile_flags` 定的，其中**只有 `release`
+/// 带 `-DNDEBUG`**（`dev`/`quick`/`debug`/`san` 都不带）——所以 `NDEBUG` 恰好就是
+/// "release 档"的精确判据。
+///
+/// ⚠ **这是一条对构建系统档位定义的耦合**（依赖 `profile_flags` 不把 `-DNDEBUG`
+/// 发给别的档）。写成常量后若那位改了口径，本函数会静默失准——所以这里把耦合一并
+/// 记在 `docs/BACKLOG.md`（性能门禁条目）里，改档位时搜 `NDEBUG` 能搜到。
+[[nodiscard]] constexpr auto calibration_profile() noexcept -> bool {
+  // 两个条件都要：`NDEBUG` 保证是本仓的 release 档，`__OPTIMIZE__` 保证它真的开了优化
+  //（有宿主自定义编译时可能出现"定义了 NDEBUG 但没开优化"的奇形）。
+#if defined(NDEBUG) && defined(__OPTIMIZE__)
   return true;
+#else
+  return false;
+#endif
+}
+
+/// 非标定档下跳过**比值型**阈值断言，并说明跳过了哪一条。
+/// 返回 `true` = 调用方应当返回（跳过）。
+[[nodiscard]] inline auto skip_ratios_under_instrumentation(const char* name) -> bool {
+  if (instrumented_build()) {
+    st::print("[bench] {}：插桩档（san）跳过比值阈值——ASan 开销 ∝ 内存访问量，\n"
+              "        而分母（清屏）是纯内存写，比值不再机器无关。标定以发布档为准。\n",
+              name);
+    return true;
+  }
+  if (!calibration_profile()) {
+    st::print("[bench] {}：非标定档（非 release）跳过比值阈值——清屏是纯 memset（可向量化）\n"
+              "        而 AA 光栅化是标量循环，两者对 -O 的响应不同，同一负载在 dev 与 release\n"
+              "        下比值相差 1.6 倍且**两个方向都会发生**（实测圆角 release 2.03× / dev 3.23×；\n"
+              "        文本 release 26.96× / dev 18.74×），而本文件的阈值与\"实测\"注释全是 release 标定。\n"
+              "        跑性能门禁：`st test --profile release --slow`。\n",
+              name);
+    return true;
+  }
+  return false;
 }
 
 }  // namespace
@@ -345,10 +392,11 @@ ST_TEST_SLOW(bench_thresholds_have_bounded_headroom) {
               limit, m.ratio, headroom, kMaxHeadroom);
     // 余量太小 → 机器噪声就会误报；太大 → 抓不住退化。两头都要卡住。
     //
-    // ⚠ 插桩档（`st test --san`）下这条**不适用**：ASan 的插桩开销正比于内存访问量，
-    // 而清屏是纯 `memset`——比值膨胀得极不均匀（见 `instrumented_build()` 的说明）。
-    // 这里如实跳过并说明，而不是把阈值放宽（那会真的把发布档门禁变松）。
-    if (instrumented_build()) return;
+    // ⚠ 只在**优化档**下成立：插桩档（`san`）的 ASan 开销正比于内存访问量，
+    // 而清屏是纯 `memset`；非优化档（`dev -O1`）两者对 `-O` 的响应也不同——
+    // 两种情况下"比值"都不再机器/档位无关（详见 `optimized_build()` 的说明）。
+    // 如实跳过并说明，而不是把阈值放宽（那会真的把发布档门禁变松）。
+    if (instrumented_build() || !calibration_profile()) return;
     ST_CHECK(headroom <= kMaxHeadroom);
     ST_CHECK(headroom >= 1.3);
   };
@@ -356,9 +404,10 @@ ST_TEST_SLOW(bench_thresholds_have_bounded_headroom) {
   check("卡片投影", kShadowLimit, measure_card_shadows(unit));
   check("渐变填充", kGradientLimit, measure_gradients(unit));
 
-  if (instrumented_build()) {
-    st::print("[bench-guard] 插桩档（san）：**跳过余量上下界断言**——ASan 的开销与内存访问量\n"
-              "              成正比，而清屏是纯内存写，比值不再机器无关。性能标定以发布档为准。\n");
+  if (instrumented_build() || !calibration_profile()) {
+    st::print("[bench-guard] 跳过余量上下界断言——{}。性能标定以发布档为准。\n",
+              instrumented_build() ? "插桩档：ASan 开销 ∝ 内存访问量，而清屏是纯内存写"
+                                   : "非标定档：清屏可向量化而 AA 光栅化是标量循环");
     return;
   }
   bool available = false;
@@ -381,6 +430,9 @@ ST_TEST_SLOW(bench_fault_multiplication_is_caught) {
     const bool caught = m.ratio * kFaultFactor > limit;
     st::print("[bench-guard] {}: 实测 {:.2f}× × {} 倍退化 = {:.2f}× vs 阈值 {:.1f}× → {}\n", name,
               m.ratio, kFaultFactor, m.ratio * kFaultFactor, limit, caught ? "会被抓住" : "**抓不住**");
+    // 与上一条自检同一限制：这条也建立在"比值机器/档位无关"之上
+    //（非优化档下比值偏小 → 会报出假的"抓不住"，而那与阈值标定无关）。
+    if (instrumented_build() || !calibration_profile()) return;
     ST_CHECK(caught);
   };
   check("圆角卡片", kRoundedCardsLimit, measure_rounded_cards(unit));

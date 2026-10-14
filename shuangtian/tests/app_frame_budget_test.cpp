@@ -108,6 +108,23 @@ inline constexpr bool kInstrumentedBuild{true};
 inline constexpr bool kInstrumentedBuild{false};
 #endif
 
+/// 当前是**标定档（release）**——本文件的 `kFrameLimit` 与两条自检的界限都出自它。
+///
+/// 与 `raster_bench_test.cpp` 的 `calibration_profile()` 同一个函数、同一理由（2026-10-14）：
+/// 清屏是可向量化的 `memset`，而被测的整帧是标量绘制 + 布局——两者对 `-O` 的响应不同。
+/// 实测同一份代码：release 帧比值 24.5×，dev 60.7×（**2.5 倍**），而自适应标定在 release。
+/// 在 dev 档下拿 release 的阈值卡，两个方向都会错（帧门禁这里就是偏大 → 自检红灯）。
+///
+/// 用 `NDEBUG` 判档而不是 `__OPTIMIZE__`：后人在 `-O1` 就定义（实测），区分不出
+/// `dev`(-O1) 与 `release`(-O2)；本仓只有 `release` 带 `-DNDEBUG`（见 `profile_flags`）。
+[[nodiscard]] constexpr auto calibration_profile() noexcept -> bool {
+#if defined(NDEBUG) && defined(__OPTIMIZE__)
+  return true;
+#else
+  return false;
+#endif
+}
+
 /// 测试场景的装配：**必须挂真实文本端口**。
 ///
 /// 本门禁与分阶段诊断长时间都**没挂**端口，于是 `Element::paint_text` 走
@@ -316,10 +333,10 @@ ST_TEST_SLOW(frame_budget_threshold_has_bounded_headroom) {
   // 看上去像“余量 1.18 倍但上限 3.5，为什么还能过”。
   st::print("[frame-guard] 阈值 {:.1f}× / 实测 {:.2f}× = 余量 {:.2f} 倍（上限 {}）\n", kFrameLimit,
             ratio, headroom, kFrameMaxHeadroom);
-  if (kInstrumentedBuild) {
-    st::print("[frame-guard] 插桩档（san）：**跳过余量上下界断言**——ASan 开销 ∝ 内存访问量，\n"
-              "              而分母是纯内存写，比值不再机器无关（实测 59×~142× 乱跳）。\n"
-              "              本门的标定与把关以发布档为准。\n");
+  if (kInstrumentedBuild || !calibration_profile()) {
+    st::print("[frame-guard] 跳过余量上下界断言——{}。本门的标定与把关以发布档为准。\n",
+              kInstrumentedBuild ? "插桩档：ASan 开销 ∝ 内存访问量，而分母是纯内存写（实测 59×~142× 乱跳）"
+                                 : "非标定档：分母（清屏）可向量化而整帧绘制是标量循环（实测 release 24.5× / dev 60.7×）");
     return;
   }
   ST_CHECK(headroom <= kFrameMaxHeadroom);
@@ -334,9 +351,9 @@ ST_TEST_SLOW(frame_budget_fault_multiplication_is_caught) {
   const bool caught = ratio * kFaultFactor > kFrameLimit;
   st::print("[frame-guard] 实测 {:.2f}× × {} 倍退化 = {:.2f}× vs 阈值 {:.1f}× → {}\n", ratio,
             kFaultFactor, ratio * kFaultFactor, kFrameLimit, caught ? "会被抓住" : "**抓不住**");
-  // 同上：插桩档的比值不可比，这条也不适用（它同样建立在"比值机器无关"之上）。
-  if (kInstrumentedBuild) {
-    st::print("[frame-guard] 插桩档（san）：跳过此自检（理由同上）。\n");
+  // 同上：插桩档 / 非标定档的比值不可比，这条也不适用（它同样建立在"比值机器无关"之上）。
+  if (kInstrumentedBuild || !calibration_profile()) {
+    st::print("[frame-guard] 跳过此自检（理由同上：比值在插桩档/非标定档不可比）。\n");
     return;
   }
   ST_CHECK(caught);

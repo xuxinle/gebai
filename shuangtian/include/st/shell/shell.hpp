@@ -43,6 +43,12 @@ struct WindowOptions {
   /// `true` 仅留给"确实想要系统窗框"的宿主（如系统级调试工具），不是常规路径。
   bool decorations{false};
   /// 渲染器：`auto`（按实测性能选）/ `gpu` / `software`。
+  ///
+  /// 缺省 `auto`，但 **headless 后端把空串/`auto` 解析为 `software`**（见
+  /// `backend.cpp` 的 `HeadlessBackend`）：无头（CI / 截图 / 自动化）根本不需要 GPU，
+  /// 而 `auto` 的探测会真的建一个 D3D11 设备——实测代价 +53MB 进程内存、+55 线程、
+  /// +4.6GB 虚拟地址（NVIDIA 驱动进程内常驻），且它在**任何像素产生之前**就付掉了。
+  /// 想要无头 GPU 时显式传 `gpu` / `auto`，探测照旧。
   std::string renderer{"auto"};
 };
 

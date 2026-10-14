@@ -107,6 +107,15 @@ struct Metrics {
   float text_gamma{0.0f};
   bool headless{true};
   float device_scale{1.0f};
+  /// 字体链的**加载方式与内存形态**（2026-10-14 内存改造后新增）。
+  ///
+  /// 为何要上报：字体原始文件字节是内存占用的头号单项（实测 15 个 face ~86MB）。
+  /// 改造后走**内存映射**（文件页共享副本，内存压力下可回收）而非整读进私有堆。
+  /// 但映射在部分文件系统（网络盘等）不可用，那时会**如实回退**到整读——
+  /// 回退了就得能看见，否则"为什么这台机器内存比那台高 80MB"会变成谜案。
+  std::uint64_t font_faces_loaded{0};    ///< 真正加载过的 face 次数（累计）
+  std::uint64_t font_mapped_loads{0};    ///< 其中走内存映射的次数
+  std::uint64_t font_read_fallbacks{0};  ///< 其中回退整读的次数（>0 = 该环境不支持映射）
   int physical_width{0};
   int physical_height{0};
   std::size_t nodes{0};

@@ -1503,6 +1503,12 @@ result["text_renderer"] = metrics.text_renderer;
 // 它与 text_renderer 一起构成“这一帧的字是怎么画的”。
 result["text_fit"] = metrics.text_fit;
 result["headless"] = metrics.headless;
+// 字体加载方式（映射 / 回退整读）：字体原始字节是内存占用的头号单项（实测 ~86MB），
+// 而“映射不可用 → 回退整读”这件事必须可见——否则内存差异会变成谜案。
+// 无字体环境（不链字体）时 `faces_loaded == 0`，如实报零。
+result["font_faces_loaded"] = metrics.font_faces_loaded;
+result["font_mapped_loads"] = metrics.font_mapped_loads;
+result["font_read_fallbacks"] = metrics.font_read_fallbacks;
 result["device_scale"] = static_cast<double>(metrics.device_scale);
 result["physical_width"] = static_cast<std::uint64_t>(metrics.physical_width);
 result["physical_height"] = static_cast<std::uint64_t>(metrics.physical_height);

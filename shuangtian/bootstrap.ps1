@@ -222,5 +222,32 @@ $linkOutput = & $CXX $objects '-o' $exe @linkLibArgs '-static-libgcc' '-static-l
 if ($LASTEXITCODE -ne 0) { Write-Host ($linkOutput | Out-String); Write-Error "链接失败" }
 
 $elapsed = ((Get-Date) - $started).TotalMilliseconds
+
+# **链接后分离调试信息**（与 `st build` 的 `separate_debug_info` 同口径，也与
+# `bootstrap.sh` 同一步）：dev 档下 `.debug_*` 占产物 89%（实测 st.exe 69.7MB → 4.57MB）。
+# ⚠ 失败**不阻断自举**：产物已经能跑，只是胖了点——为“多个文件”把自举打回去不划算。
+if (-not $env:ST_NO_STRIP) {
+  $objcopy = $null
+  $cand = Join-Path (Split-Path $CXX) 'objcopy.exe'
+  if (Test-Path $cand) { $objcopy = $cand }
+  if (-not $objcopy) {
+    $found = Get-Command 'objcopy' -ErrorAction SilentlyContinue
+    if ($found) { $objcopy = $found.Source }
+  }
+  if ($objcopy) {
+    $debugFile = "$exe.debug"
+    & $objcopy '--only-keep-debug' $exe $debugFile 2>&1 | Out-Null
+    & $objcopy '--strip-debug' $exe 2>&1 | Out-Null
+    & $objcopy "--add-gnu-debuglink=$debugFile" $exe 2>&1 | Out-Null
+    if (Test-Path $debugFile) {
+      $mainMb = [math]::Round((Get-Item $exe).Length / 1MB, 2)
+      $dbgMb = [math]::Round((Get-Item $debugFile).Length / 1MB, 2)
+      Write-Host "[bootstrap] 已分离调试信息 → $exe（$mainMb MB）+ st.exe.debug（$dbgMb MB）" -ForegroundColor Green
+    } else {
+      Write-Warning "[bootstrap] 分离调试信息失败（产物仍可用，仅体积偏大）"
+    }
+  }
+}
+
 Write-Host ("[bootstrap] 完成 → {0}（{1:N0} ms）" -f $exe, $elapsed) -ForegroundColor Green
 & $exe version

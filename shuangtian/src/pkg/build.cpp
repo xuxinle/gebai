@@ -1355,6 +1355,139 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
 
 }  // namespace
 
+/// 在**编译器旁边**找 binutils 工具（`objcopy` / `objdump`），找不到再回退 PATH。
+///
+/// 为何先找编译器旁：交叉工具链的 `x86_64-w64-mingw32-objcopy` 与它的 gcc 同装，
+/// 用宿主 objcopy 去处理交叉产物会因目标格式不同而报错（且报错文本不指向“工具选错”）。
+///
+/// ⚠ 交叉前缀不一定叫 `g++`（可能是 `gcc` / `clang++`）——所以剥离规则是
+/// "从最后一个 `-` 之前的前缀拿下"，探到不在就依次回退：
+/// 目标前缀 → 无前缀 → PATH。多试两个路径的成本远小于“工具找不到”。
+[[nodiscard]] auto find_binutil(std::string_view tool, std::string_view compiler_path,
+                               std::string_view executable_suffix) -> std::string {
+  const std::string suffix(executable_suffix);
+  const std::string compiler_dir = fs::parent(std::string(compiler_path));
+  if (!compiler_dir.empty()) {
+    const std::string stem = fs::file_name(compiler_path);
+    // `x86_64-w64-mingw32-g++` → 前缀 `x86_64-w64-mingw32-` → `x86_64-w64-mingw32-objcopy`
+    const std::size_t dash = stem.rfind('-');
+    if (dash != std::string::npos) {
+      const std::string candidate =
+          fs::join(compiler_dir, stem.substr(0, dash + 1) + std::string(tool) + suffix);
+      if (fs::is_regular_file(candidate)) return candidate;
+    }
+    // 无前缀（本机 g++ / clang++ → 同目录 objcopy）
+    const std::string plain = fs::join(compiler_dir, std::string(tool) + suffix);
+    if (fs::is_regular_file(plain)) return plain;
+  }
+  if (const auto found = process::which(tool); found.has_value()) return *found;
+  return {};
+}
+
+/// 分离调试信息：把产物里的 DWARF 搬到隔壁的 `<产物>.debug`，产物本体瘦身。
+///
+/// ## 为何需要（2026-10-14 产物评估实测）
+///
+/// `st.exe`（dev 档 `-O1 -g1`）实测 **76.96MB，其中 68.4MB（89%）是 `.debug_*`**
+/// （`.debug_info` 47.8MB + `.debug_loclists` 13.2MB），而 `.text` 仅 4.45MB。
+/// `-g1` 并没有像设计预期那样小：它对 **C++ 模板实例**（libstdc++ 头里爆炸的实例化）
+/// 仍要为每个内联/模板函数生成行号表与 DIE 骨架。而交付物根本不需要它。
+///
+/// ## 做法（与 gdb 的约定，而不是自定义格式）
+///
+/// ① `objcopy --only-keep-debug 产物 产物.debug`（把调试信息拷到分离文件）
+/// ② `objcopy --strip-debug 产物`（从产物里去掉它）
+/// ③ `objcopy --add-gnu-debuglink=产物.debug 产物`（记下"符号在隔壁"）
+///
+/// 第三步是关键：它让 **gdb 自动找到**分离符号（DebugLink 段里是文件名 + CRC），
+/// 不需要用户记住 `file`/`symbol-file` 命令。崩溃器的 `addr2line -e 产物` 也一样——
+/// 实测（本仓 st 自身）：**69.7MB → 4.57MB**，而 `nm`/`addr2line` 仍能解出函数名。
+///
+/// ## 边界
+///
+/// - **只对 ELF/PE 这类 objcopy 认的格式生效**；objcopy 不在（或报错）时**不算失败**
+///   （产物已链接成功，只是胖了点）——返回 `Error` 由调用方记一条 warn。
+/// - **不分离 `san`/`debug` 档的完整 `-g`**：那些档的调试体验是第一优先级，
+///   而且它们的使用场景是"就地调试"（分离反而多一步）。
+/// - `objcopy` 从**与编译器同目录**开始找（交叉工具链的 `*-objcopy` 与它的 gcc 同装），
+///   再回退 PATH——交叉构建时用宿主 objcopy 会因目标格式不同而报错。
+[[nodiscard]] auto separate_debug_info(const std::string& artifact,
+                                       std::string_view compiler_path,
+                                       std::string_view executable_suffix,
+                                       bool verbose) -> Status {
+  const std::string objcopy = find_binutil("objcopy", compiler_path, executable_suffix);
+  if (objcopy.empty()) {
+    return unexpected(ErrorCode::Unsupported, "未找到 objcopy（跳过调试信息分离）");
+  }
+
+  const std::string debug_file = artifact + ".debug";
+  // 幂等判据：**产物里已经没有调试段，且 `.debug` 已存在**，才跳过。
+  //
+  // ⚠ 这里踩过两次，两次都是”看起来显然“的写法错了：
+  //
+  // ① **不能拿 mtime 比**（第一版）：`objcopy --strip-debug` **会刷新产物的 mtime**，
+  //    于是 `.debug` 永远是“旧的”——判据恒假，每次重链都白跑三遍 objcopy。
+  // ② **不能只看`.debug` 存在**：重链后 `.debug` 是**上一次的**符号文件，产物却是新的
+  //    且未 strip。此时跳过 = **新产物的调试信息永久丢失**（比多跑一遍重得多）。
+  //
+  // 正确且可观测的事实：产物内不含调试段。用 `objdump -h` 看（与 objcopy 同属 binutils，
+  // 交叉工具链里必同装）。**objdump 探不到时按"需要重跑"处理**——多花时间是可接受的，
+  // 丢符号不可接受。
+  if (fs::is_regular_file(debug_file)) {
+    if (const std::string objdump = find_binutil("objdump", compiler_path, executable_suffix);
+        !objdump.empty()) {
+      if (auto headers = process::run(objdump, {"-h", artifact});
+          headers.has_value() && headers->exit_code == 0) {
+        // ELF 与 PE 的 DWARF 段名差一个下划线前缀（MinGW 实测为 `.debug_info`，
+        // 但 GNU 对 PE 的习惯是加 `_`）——两边都查。
+        const bool has_debug_sections =
+            headers->stdout_text.find(".debug_info") != std::string::npos ||
+            headers->stdout_text.find("__debug_info") != std::string::npos;
+        if (!has_debug_sections) return ok();
+      }
+    }
+  }
+
+  const auto run_objcopy = [&](const std::vector<std::string>& args) -> Status {
+    if (verbose) {
+      // 拼串而非 `st::join(args, ...)`：`st::join` 的参数是 `vector<string_view>`，
+      // 此处是 `vector<string>`（为去重而保留的容器类型）——直接拼接更短且无歧义。
+      std::string dump;
+      for (const auto& item : args) dump.append(" ").append(item);
+      ST_LOG_INFO("objcopy:{}", dump);
+    }
+    auto result = process::run(objcopy, args, process::Options{.cwd = fs::parent(artifact)});
+    if (!result.has_value()) return forward_error(result.error());
+    if (result->exit_code != 0) {
+      return unexpected(ErrorCode::Invalid,
+                        std::format("objcopy 失败（{}）：{}{}", args.empty() ? "" : args.front(),
+                                    result->stdout_text, result->stderr_text));
+    }
+    return ok();
+  };
+
+  // ① 拷出调试信息（先做它：万一 ② 之后才发现拷不出来，DWARF 已经没了）
+  if (auto status = run_objcopy({"--only-keep-debug", artifact, debug_file}); !status) {
+    return status;
+  }
+  // ② 从产物里去掉
+  if (auto status = run_objcopy({"--strip-debug", artifact}); !status) return status;
+  // ③ 记下"符号在隔壁"（gdb 靠 DebugLink 自动认）
+  if (auto status = run_objcopy({"--add-gnu-debuglink=" + debug_file, artifact}); !status) {
+    // DebugLink 没写上不算致命（产物已瘦身、`.debug` 也在），但 gdb 就不能自动找到了——
+    // 记一条 warn 而不是静默。
+    ST_LOG_WARN("未能写入 DebugLink（gdb 需手工 `symbol-file`）：{}", status.error().message);
+  }
+  const auto stripped_size = fs::file_size(artifact);
+  const auto debug_size = fs::file_size(debug_file);
+  if (stripped_size.has_value() && debug_size.has_value()) {
+    ST_LOG_INFO("已分离调试信息：{} → {:.2f} MB（分离符号 {:.2f} MB）", fs::file_name(artifact),
+                static_cast<double>(*stripped_size) / (1024.0 * 1024.0),
+                static_cast<double>(*debug_size) / (1024.0 * 1024.0));
+  }
+  return ok();
+}
+
 /// 链接诊断里「产物被占用」的判定（导出：`st::pkg::artifact_locked`，
 /// 声明在 build.hpp——测试 `pkg_build_lock_test.cpp` 直接断言三套工具链文案）。
 ///
@@ -1806,6 +1939,15 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   const std::int64_t link_start = time::now_ns();
   auto linked = link(manifest, options, link_units, output, *flags, *toolchain, {});
   if (!linked) return forward_error(linked.error());
+  if (options.strip_debug) {
+    // 分离调试信息（默认；`--no-strip` 关）。失败**不算构建失败**——产物已经能跑，
+    // 只是胖了点（分离是交付体验项，不是正确性项）。
+    if (auto stripped = separate_debug_info(output, toolchain->compiler_path,
+                                           toolchain->executable_suffix, options.verbose);
+        !stripped) {
+      ST_LOG_WARN("分离调试信息失败（产物仍可用，仅体积偏大）：{}", stripped.error().message);
+    }
+  }
   stats.linked = true;
   stats.link_ms = (time::now_ns() - link_start) / 1'000'000;
   // 记下本次链接的"成分"，下次据此判断能否跳过（写失败只是下次多链一次，不影响正确性）
@@ -2093,6 +2235,16 @@ auto run_tests(const Manifest& manifest, const BuildOptions& options, std::strin
   const std::string output = fs::join(bin_dir, "st_tests" + toolchain->executable_suffix);
   auto linked = link(manifest, options, units, output, *flags, *toolchain, {});
   if (!linked) return forward_error(linked.error());
+  // 测试二进制同样分离调试信息：它是**开发用**产物，但每次都链、而且比 gallery 大得多
+  // （几百个单元全静态链入）——留着 70MB 的 `.debug_*` 只会白占磁盘与拷贝时间。
+  // 崩了照样能回溯：`addr2line -e st_tests.debug` 或直接交给 gdb（它自己认分离符号）。
+  if (options.strip_debug) {
+    if (auto stripped = separate_debug_info(output, toolchain->compiler_path,
+                                           toolchain->executable_suffix, options.verbose);
+        !stripped) {
+      ST_LOG_WARN("分离调试信息失败（测试产物仍可用）：{}", stripped.error().message);
+    }
+  }
 
   std::vector<std::string> args = test_args(filter, list_only, include_slow);
   // 交叉产物仅在与宿主平台不同时拒绝执行（目标==宿主则照常跑，见 runs_on_host）

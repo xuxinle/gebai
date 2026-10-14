@@ -153,6 +153,8 @@ void print_usage() {
 
 命令:
   build [target]        构建工程或指定目标（--profile=debug|release|san，-j N，--verbose，--force）
+                        --no-strip 保留产物内调试信息（默认链接后分离到 <产物>.debug，
+                        产物本体可小 ~94%；gdb 会自动找分离符号）
                         并发默认按**内存预算**推导（读 cgroup 上限，不再默认吃满核数）；
                         --jobs-large N 限超大单元并发（默认 1）；--max-memory MiB 覆盖预算
                         交叉编译：--toolchain=<名>（工具链在 st.pkg 的 toolchains 段声明）
@@ -220,6 +222,9 @@ auto command_build(const Arguments& arguments) -> int {
   const auto max_memory = arguments.number("max-memory", 0.0);
   options.max_memory_mb = max_memory > 0.0 ? static_cast<std::uint64_t>(max_memory) : 0;
   options.use_pch = !arguments.has("no-pch");
+  // 调试信息分离默认开（`--no-strip` 关）：不分离的代价是“每个产物白胖 ~70MB”
+  //（实测 dev 档 st.exe 76.96MB，其中 89% 是 `.debug_*`），而分离的代价是零。
+  options.strip_debug = !arguments.has("no-strip");
 
   const std::int64_t start = st::time::now_ns();
   auto stats = st::pkg::build(*manifest, options);
@@ -301,6 +306,8 @@ auto command_test(const Arguments& arguments) -> int {
   // `--profile debug` 仍在。
   options.profile = arguments.has("san") ? "san" : arguments.get("profile", "dev");
   options.verbose = arguments.has("verbose");
+  // 测试二进制同样默认分离调试信息（它链入几百个单元，`.debug_*` 比 gallery 还大）
+  options.strip_debug = !arguments.has("no-strip");
   // 测试构建同样要能控并发：`san` 档插桩后编译期内存更高，受限容器里需要降并发
   // （实测 8 GiB cgroup 下全量 san 的 28 路并行会被 OOM killer 杀掉 cc1plus，
   //   表现为莫名其妙的链接错误——`.o` 只写了一半）。

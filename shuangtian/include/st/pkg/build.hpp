@@ -39,6 +39,21 @@ struct BuildOptions {
   /// 而“检查过了但编不过”会被归咎于编译器差异，不是两套枚举不一致（最难查的那种偏）。
   /// 检查模式下：不写 `.o`/`.d`、不查共享对象缓存、不读 PCH、不链接。
   bool check_only{false};
+  /// **构建后分离调试信息**（默认 true；命令行 `--no-strip` 关闭）。
+  ///
+  /// 背景（2026-10-14 产物评估）：`-g1` 并没有像预期那样小——`st.exe`（dev 档）实测
+  /// **76.96MB，其中 89% 是 `.debug_*`**（`.debug_info` 47.8MB + `.debug_loclists` 13.2MB），
+  /// 而 `.text` 只有 4.45MB。原因是 `-g1` 对 **C++ 模板实例**（libstdc++ 头里爆炸的实例化）
+  /// 仍要为每个内联/模板函数生成行号表与 DIE 骨架。
+  ///
+  /// 而交付物**根本不需要**它：崩溃回溯要的只是「文件名 + 行号」，链接后一份
+  /// `objcopy` 就能把它们搬到隔壁的 `<产物>.debug`——产物回到 4.6MB（-94%），
+  /// 调试能力一点不丢（gdb 与崩溃器的 `addr2line` 都会找分离符号）。
+  ///
+  /// 为何**默认开**：不分离的代价是“每个交付物白胖 70MB”，而分离的代价是“零”
+  ///（同一份 DWARF 只是换了个文件，且 gdb 自动认它）。想要单文件调试时
+  ///（拷一个文件到别处 gdb）用 `--no-strip`。
+  bool strip_debug{true};
   bool use_pch{true};                 ///< 使用预编译头（`include/st/pch.hpp`）加速
   std::vector<std::string> extra_include_dirs{};
   std::vector<std::string> extra_flags{};
@@ -72,6 +87,14 @@ struct BuildStats {
 
 /// profile → 编译/链接标志（debug: -O0 -g / release: -O2 -DNDEBUG / san: ASan+UBSan）。
 [[nodiscard]] auto profile_flags(std::string_view profile) -> Result<std::vector<std::string>>;
+/// 分离产物里的调试信息到 `<产物>.debug`（objcopy 三步：keep-debug → strip-debug → DebugLink）。
+///
+/// 为何导出它在头文件里：它是**构建器的一个可见行为**（默认开、可 `--no-strip` 关），
+/// 而不是内部工具——直接单测它（用真产物）能钉住"产物变小且 `.debug` 有符号"这两件事，
+/// 而不必跑一遍完整构建。详细背景见 `src/pkg/build.cpp` 的实现注释。
+[[nodiscard]] auto separate_debug_info(const std::string& artifact, std::string_view compiler_path,
+                                       std::string_view executable_suffix, bool verbose = false)
+    -> Status;
 /// 链接所需的系统库（按平台）。
 [[nodiscard]] auto default_system_libs() -> std::vector<std::string>;
 
