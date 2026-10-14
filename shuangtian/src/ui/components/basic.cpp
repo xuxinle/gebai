@@ -18,6 +18,17 @@
 #include "st/ui/text_port.hpp"
 
 namespace st::ui {
+
+namespace {
+
+/// 选区哨兵（`Text` 用，见 `select_all` / `selected_text`）：
+/// `kLineEnd` = “本行取到行尾”；`kLastLine` = “末行”（实际行数由排版缓存给）。
+/// 为什么用哨兵而不是“当场算行数”：行数只能在有渲染上下文时（折行）才知道，
+/// 而 `selected_text()` 是 const 无上下文接口。
+constexpr std::size_t kLineEnd = std::numeric_limits<std::size_t>::max();
+constexpr std::size_t kLastLine = std::numeric_limits<std::size_t>::max() / 2U;
+
+}  // namespace
 namespace {
 
 using components_internal::paint_focus_ring;
@@ -139,11 +150,14 @@ void Text::measure(const RenderContext& context, const Constraints& constraints)
     }
     float widest = 0.0f;
     for (const auto& line : lines) widest = std::max(widest, port.measure_width(line, size));
+    // 缓存显示行（`selected_text()` 用它；见头文件成员说明）。
+    display_lines_ = lines;
     measured_ = math::Size{std::min(widest, available),
                            line_height * static_cast<float>(lines.empty() ? 1 : lines.size())};
     return;
   }
   const float width = port.measure_width(content_, size);
+  display_lines_.assign(1U, content_);
   measured_ = math::Size{std::min(width, constraints.max_width), line_height};
 }
 
@@ -152,6 +166,18 @@ void Text::paint_content(const RenderContext& context, raster::Surface& canvas) 
   const TextPort& port = port_of(context);
   const float size = style_.font_size;
   if (!multiline_) {
+    // 单行：选区高亮画在文本下（复用同一份 `offset_to_x`，不会与字形错位）。
+    if (selectable_ && has_selection()) {
+      const float x0 = offset_to_x(context, 0U, select_begin_offset_);
+      const float x1 = offset_to_x(context, 0U, select_end_offset_);
+      // 垂直范围取字形**墨迹区**（`ascent..descent`）而不是行高：
+      // 行高含 `line_gap` 与字体留白，用它作高度会让高亮上下各多出一段
+      //（实测：vision 复核报“高亮比文字高、呈整块矩形”）。
+      const float band_y = bounds_.y + port.ascent(size);
+      const float band_h = std::max(port.descent(size) - port.ascent(size), size * 0.6f);
+      canvas.fill_rect(math::Rect{std::min(x0, x1), band_y, std::max(x1 - x0, 1.0f), band_h},
+                       raster::Paint::solid(context.theme.colors().selection));
+    }
     paint_text(context, canvas, content_, bounds_);
     return;
   }
@@ -164,13 +190,28 @@ void Text::paint_content(const RenderContext& context, raster::Surface& canvas) 
   }
   const float line_height = port.line_height(size);
   float y = bounds_.y;
-  for (const auto& line : lines) {
+  for (std::size_t row = 0; row < lines.size(); ++row) {
+    const auto& line = lines[row];
     const float width = port.measure_width(line, size);
     float x = bounds_.x;
     if (style_.text_align == TextAlign::Center) {
       x = bounds_.x + (bounds_.width - width) * 0.5f;
     } else if (style_.text_align == TextAlign::End) {
       x = bounds_.right() - width;
+    }
+    // 选区高亮（本行内的选中区间），画在字形之下。
+    if (selectable_ && has_selection() && row >= select_begin_line_ && row <= select_end_line_) {
+      const std::size_t from = row == select_begin_line_ ? select_begin_offset_ : 0U;
+      const std::size_t to = row == select_end_line_ ? select_end_offset_ : line.size();
+      if (to > from) {
+        const float head = x + port.measure_width(std::string_view(line).substr(0, std::min(from, line.size())), size);
+        const float tail = x + port.measure_width(std::string_view(line).substr(0, std::min(to, line.size())), size);
+        // 同理：垂直取墨迹区。行内 y 是本行行顶，故向下偏移 `ascent`。
+        const float band_y = y + port.ascent(size);
+        const float band_h = std::max(port.descent(size) - port.ascent(size), size * 0.6f);
+        canvas.fill_rect(math::Rect{head, band_y, std::max(tail - head, 1.0f), band_h},
+                         raster::Paint::solid(context.theme.colors().selection));
+      }
     }
     // **字重必须一起传**（与 `Element::paint_text` 同口径）：多行分支漏传会让
     // 段落/多行文本的粗体**静默退回 Regular**——实测踩到过。
@@ -183,6 +224,146 @@ void Text::paint_content(const RenderContext& context, raster::Surface& canvas) 
   }
 }
 
+// —— 选区（2026-10-14）——
+
+auto Text::rendered_lines(const RenderContext& context) const -> std::vector<RenderedLine> {
+  const TextPort& port = port_of(context);
+  const float size = style_.font_size;
+  const float line_height = port.line_height(size);
+  std::vector<std::string> texts;
+  if (!multiline_) {
+    texts.push_back(content_);
+  } else if (max_lines_ > 0) {
+    texts = port.wrap_limited(content_, size, bounds_.width, max_lines_);
+  } else {
+    for (const auto& line : port.wrap(content_, size, bounds_.width)) {
+      texts.emplace_back(line);
+    }
+  }
+  std::vector<RenderedLine> out;
+  out.reserve(texts.size());
+  float y = bounds_.y;
+  for (auto& text : texts) {
+    RenderedLine entry;
+    entry.width = port.measure_width(text, size);
+    entry.x = bounds_.x;
+    if (style_.text_align == TextAlign::Center) {
+      entry.x = bounds_.x + (bounds_.width - entry.width) * 0.5f;
+    } else if (style_.text_align == TextAlign::End) {
+      entry.x = bounds_.right() - entry.width;
+    }
+    entry.y = y;
+    entry.text = std::move(text);
+    out.push_back(std::move(entry));
+    y += line_height;
+  }
+  // 缓存显示行文本（`selected_text()` 用它——见该函数说明）。
+  // `paint_content` 是 const，故用 `mutable` 成员。
+  display_lines_.clear();
+  display_lines_.reserve(out.size());
+  for (const RenderedLine& entry : out) display_lines_.push_back(entry.text);
+  return out;
+}
+
+auto Text::offset_to_x(const RenderContext& context, std::size_t line,
+                       std::size_t offset) const -> float {
+  const TextPort& port = port_of(context);
+  const float size = style_.font_size;
+  const std::vector<RenderedLine> lines = rendered_lines(context);
+  if (lines.empty()) return bounds_.x;
+  const std::size_t row = std::min(line, lines.size() - 1U);
+  const RenderedLine& entry = lines[row];
+  const std::size_t bounded = std::min(offset, entry.text.size());
+  return entry.x + port.measure_width(std::string_view(entry.text).substr(0, bounded), size);
+}
+
+auto Text::caret_at(const RenderContext& context, math::Point point) const
+    -> std::pair<std::size_t, std::size_t> {
+  const TextPort& port = port_of(context);
+  const float size = style_.font_size;
+  const std::vector<RenderedLine> lines = rendered_lines(context);
+  if (lines.empty()) return {0U, 0U};
+  const float line_height = port.line_height(size);
+  // 行：按 y 算（line_height > 0 时）。
+  std::size_t row = 0;
+  if (line_height > 0.0f) {
+    const float raw = std::floor((point.y - bounds_.y) / line_height);
+    row = std::min(static_cast<std::size_t>(std::max(raw, 0.0f)), lines.size() - 1U);
+  }
+  const RenderedLine& entry = lines[row];
+  // 行内：逐码点累加，取最接近的字符边界（与 `MarkdownView` 同一策略）。
+  float pen = entry.x;
+  const std::size_t count = st::utf8_length(entry.text);
+  std::size_t best = 0U;
+  for (std::size_t i = 0; i <= count; ++i) {
+    if (i == count) { best = count; break; }
+    const std::string_view one = st::utf8_slice(entry.text, i, 1);
+    const float advance = port.measure_width(one, size);
+    if (point.x < pen + advance * 0.5f) { best = i; break; }
+    pen += advance;
+  }
+  return {row, st::utf8_offset(entry.text, best)};
+}
+
+auto Text::selected_text() const -> std::string {
+  if (!selectable_ || select_begin_line_ == std::string::npos) return {};
+  // 用**上次排版缓存**的显示行（`measure`/`paint_content` 时写入）：
+  // `selected_text()` 是 const 无上下文接口，无上下文就无从折行。
+  // 这也保证了“选中的字符”与“屏幕上看到的字”是同一份（若现场重折行，
+  // 窗口尺寸一变就会选出别处的字）。
+  if (display_lines_.empty()) return {};
+  const std::size_t last = display_lines_.size() - 1U;
+  const std::size_t from_line = std::min(select_begin_line_, last);
+  const std::size_t to_line = std::min(select_end_line_, last);
+  std::string out;
+  for (std::size_t row = from_line; row <= to_line; ++row) {
+    if (row > from_line) out += '\n';
+    const std::string& text = display_lines_[row];
+    const std::size_t from = row == from_line ? std::min(select_begin_offset_, text.size()) : 0U;
+    // ⚠ 末端的偏移**只在末行生效**；其余行取整行。
+    // 别写成 `min(select_end_offset_, text.size())`——`select_all()` 把末偏移
+    // 置 0（表示“到行尾”），那样会选中空串（实测：全选拷出来是空的）。
+    const std::size_t to =
+        row == to_line ? (select_end_offset_ == kLineEnd ? text.size()
+                                                         : std::min(select_end_offset_, text.size()))
+                       : text.size();
+    if (to > from) out += text.substr(from, to - from);
+  }
+  return out;
+}
+
+auto Text::has_selection() const -> bool {
+  if (!selectable_ || select_begin_line_ == std::string::npos) return false;
+  return select_end_line_ > select_begin_line_ || select_end_offset_ > select_begin_offset_;
+}
+
+void Text::clear_selection() noexcept {
+  select_begin_line_ = std::string::npos;
+  select_begin_offset_ = 0U;
+  select_end_line_ = 0U;
+  select_end_offset_ = 0U;
+  selecting_ = false;
+}
+
+void Text::select_all() {
+  if (!selectable_) return;
+  // 全选 = 首行首字 .. 末行末字。
+  // 行数需渲染上下文，故末行用一个**哨兵**，由 `selected_text()`/绘制按实际
+  // 行数夹取；末偏移用 `kLineEnd`（= “取整行”）。
+  select_begin_line_ = 0U;
+  select_begin_offset_ = 0U;
+  select_end_line_ = kLastLine;
+  select_end_offset_ = kLineEnd;
+  mark_dirty();
+}
+
+void Text::set_selectable(bool selectable) {
+  if (selectable == selectable_) return;
+  selectable_ = selectable;
+  if (!selectable_) clear_selection();
+  mark_dirty();
+}
+
 // —— Heading ——
 
 auto Text::get_property(std::string_view name) const -> std::optional<std::string> {
@@ -191,6 +372,8 @@ auto Text::get_property(std::string_view name) const -> std::optional<std::strin
   // 字号：与 `set_property` 对称（不报出去就改不了——`apply_properties` 的判据
   // 是“名字在元素自己声明的清单里”）。
   if (name == "size") return std::format("{}", style_.font_size);
+  if (name == "selectable") return selectable_ ? "true" : "false";
+  if (name == "selection") return selected_text();
   return std::nullopt;
 }
 
@@ -212,23 +395,103 @@ auto Text::set_property(std::string_view name, std::string_view value) -> bool {
     set_font_size(static_cast<float>(parsed));
     return true;
   }
+  if (name == "selectable") {
+    set_selectable(value == "true" || value == "1");
+    return true;
+  }
   return false;
 }
 
 auto Text::property_names() const -> std::vector<std::string_view> {
   // `size` 是字号（与 `Button` 的尺寸档位**同名不同义**——各自解释，见 `xml_ui.cpp`
   // 里 `normalize_property` 的说明）。
-  return {"text", "content", "multiline", "size"};
+  // `selectable` 可读写（自动化/声明式都靠它开启选区）。
+  return {"text", "content", "multiline", "size", "selectable"};
+}
+
+auto Text::readonly_property_names() const -> std::vector<std::string_view> {
+  // `selection` 只读（`get` 能读、`set` 不生效），与其他文本组件同一组名字。
+  return {"selection"};
 }
 
 auto Text::invoke_action(std::string_view action, std::string_view argument) -> bool {
   if (action == "copy") {
-    // 文本标签的复制语义：整个 content（标签没有选区概念）。
+    // 有选区 → 拷选区；无选区 → 拷整个 content（兼容旧语义）。
     // 空内容/无宿主不算复制成功（与 CodeEditor 空选区跳过同姿态）。
-    if (content_.empty() || host() == nullptr) return false;
-    return host()->host_set_clipboard_text(content_);
+    if (host() == nullptr) return false;
+    const std::string text = has_selection() ? selected_text() : content_;
+    if (text.empty()) return false;
+    return host()->host_set_clipboard_text(text);
+  }
+  if (action == "select_all") {
+    if (!selectable_) return false;
+    select_all();
+    return true;
+  }
+  if (action == "clear_selection") {
+    clear_selection();
+    mark_dirty();
+    return true;
   }
   return Element::invoke_action(action, argument);
+}
+
+auto Text::on_event(const RenderContext& context, Event& event) -> bool {
+  // 默认（`selectable_ == false`）**不拦截任何事件**：静态标签遍布界面，
+  // 抢拖选手势会变成干扰（见 `set_selectable` 的说明）。
+  if (!selectable_ || !enabled()) return false;
+  switch (event.kind) {
+    case EventKind::MouseDown: {
+      if (event.button != 1 || !bounds_.contains(event.position)) return false;
+      const auto [row, offset] = caret_at(context, event.position);
+      selecting_ = true;
+      select_begin_line_ = row;
+      select_begin_offset_ = offset;
+      select_end_line_ = row;
+      select_end_offset_ = offset;
+      mark_dirty();
+      event.handled = true;
+      return true;
+    }
+    case EventKind::MouseMove: {
+      if (!selecting_) return false;
+      const auto [row, offset] = caret_at(context, event.position);
+      // 归一化：保证 begin <= end（拖选方向任意）。
+      const bool forward = row > select_begin_line_ ||
+                           (row == select_begin_line_ && offset >= select_begin_offset_);
+      select_end_line_ = row;
+      select_end_offset_ = offset;
+      if (!forward) {
+        std::swap(select_begin_line_, select_end_line_);
+        std::swap(select_begin_offset_, select_end_offset_);
+      }
+      mark_dirty();
+      event.handled = true;
+      return true;
+    }
+    case EventKind::MouseUp:
+      selecting_ = false;
+      return true;
+    case EventKind::KeyDown: {
+      const bool ctrl = event.ctrl || event.meta;
+      if (ctrl && (event.key == "a" || event.key == "A")) {
+        select_all();
+        event.handled = true;
+        return true;
+      }
+      if (ctrl && (event.key == "c" || event.key == "C")) {
+        return invoke_action("copy", {});
+      }
+      if (event.key == "Escape" && has_selection()) {
+        clear_selection();
+        mark_dirty();
+        event.handled = true;
+        return true;
+      }
+      return false;
+    }
+    default: return false;
+  }
 }
 
 Heading::Heading(std::string content, std::uint32_t level) : Text(std::move(content)) {

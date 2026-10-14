@@ -93,15 +93,29 @@ class FixedAdvanceTextPort final : public ui::TextPort {
   [[nodiscard]] auto wrap(std::string_view utf8, float size, float max_width) const
       -> std::vector<std::string_view> override {
     // 定宽模型下等宽折行（不截断）。
+    //
+    // ⚠ **先按 `\n` 切段，再在段内等宽折行**：真实 `TextRenderer::wrap` 就是这么做的
+    //（它把 `\n` 当“硬换行”立即收行）。桩若忽略 `\n`，`Text::set_multiline` 的
+    // 多行测试就会自己骗自己——“显式换行没被尊重”这类缺陷测不出来（实测踩到）。
     std::vector<std::string_view> lines;
     (void)size;
     if (max_width <= 0.0f || utf8.empty()) return lines;
     const auto per_line = static_cast<std::size_t>(std::max(max_width / kAdvance, 1.0f));
     std::size_t offset = 0;
-    while (offset < utf8.size()) {
-      const std::size_t take = std::min(per_line, utf8.size() - offset);
-      lines.push_back(utf8.substr(offset, take));
-      offset += take;
+    while (offset <= utf8.size()) {
+      // 本段（到下一个 `\n` 或串尾）
+      std::size_t segment_end = utf8.find('\n', offset);
+      if (segment_end == std::string_view::npos) segment_end = utf8.size();
+      std::size_t cursor = offset;
+      // 段内按宽度切
+      while (cursor < segment_end) {
+        const std::size_t take = std::min(per_line, segment_end - cursor);
+        lines.push_back(utf8.substr(cursor, take));
+        cursor += take;
+      }
+      if (segment_end == utf8.size()) break;
+      if (segment_end == offset) lines.push_back(utf8.substr(offset, 0));   // 空行保留
+      offset = segment_end + 1U;
     }
     return lines;
   }

@@ -21,11 +21,29 @@ class Text : public Element {
 
   void set_content(std::string content);
   [[nodiscard]] auto content() const -> const std::string& { return content_; }
+  /// 事件：仅在 `set_selectable(true)` 时处理拖选 / `Ctrl+A` / `Ctrl+C`（其余一律放行）。
+  auto on_event(const RenderContext& context, Event& event) -> bool override;
   void set_multiline(bool multiline);
   void set_max_lines(std::size_t lines);
   void set_tone(Tone tone);
   void set_font_size(float size);
   void set_weight(FontWeight weight);
+
+  /// **可选**（默认关）：开启后文本可用鼠标拖选、`Ctrl+A` 全选、`Ctrl+C` 复制选中。
+  ///
+  /// 为何默认关（而不是像 MarkdownView 那样默认开）：
+  /// 静态标签遍布界面（表单说明、列表副标题、状态文字…），若默认抢拖选手势，
+  /// 用户想拖动窗口/划选整个区域时会被逐个标签截断——那不是“能力”，是干扰。
+  /// 需要“能选中某一小段”的展示型文本显式打开。
+  void set_selectable(bool selectable);
+  [[nodiscard]] auto selectable() const noexcept -> bool { return selectable_; }
+  /// 选中文本（无选区时为空串）。
+  [[nodiscard]] auto selected_text() const -> std::string;
+  /// 是否有非空选区。
+  [[nodiscard]] auto has_selection() const -> bool;
+  /// 清空选区 / 全选（自动化与宿主动作面用）。
+  void clear_selection() noexcept;
+  void select_all();
 
   void apply_theme(const Theme& theme) override;
   void measure(const RenderContext& context, const Constraints& constraints) override;
@@ -34,6 +52,8 @@ class Text : public Element {
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
   auto set_property(std::string_view name, std::string_view value) -> bool override;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  /// 只读属性（`selection`）：`get` 能读、`set` 不生效。
+  [[nodiscard]] auto readonly_property_names() const -> std::vector<std::string_view> override;
   /// `copy`：把文本内容写进宿主剪贴板（2026-10-12——文本标签此前完全无法复制：
   /// 键盘、动作面、协议全无路径，右键菜单也无从谈起）。
   /// 控制通道 `invoke <id> copy` 即可达；写失败（无宿主）返回 false 如实上报。
@@ -41,12 +61,50 @@ class Text : public Element {
       -> bool override;
 
  private:
+  /// 一条可见行（含它在本控件内的 x 区间）——选区与绘制共用同一份。
+  struct RenderedLine {
+    std::string text{};   ///< 本行的**显示文本**（折行/截断后的结果，不是原文切片）
+    float x{0.0f};        ///< 行首 x（受 `text_align` 影响）
+    float width{0.0f};
+    float y{0.0f};
+  };
+  /// 算出当前应当显示的每一行（与 `paint_content` / `measure` 同一套口径）。
+  ///
+  /// 为何要抽出来：选区命中必须建在**实际显示的行**上，而不是原文字符串的
+  /// 下标——折行与 `max_lines_` 截断会让两者彻底不同（截断后多出的字根本不展示，
+  /// 选中它就会出现“选了但看不见”）。
+  [[nodiscard]] auto rendered_lines(const RenderContext& context) const -> std::vector<RenderedLine>;
+  /// 坐标 → `{行下标, 行内字节偏移}`（越界夹到首/末行）。
+  [[nodiscard]] auto caret_at(const RenderContext& context, math::Point point) const
+      -> std::pair<std::size_t, std::size_t>;
+  /// `{行下标, 行内偏移}` → 屏幕 x。
+  [[nodiscard]] auto offset_to_x(const RenderContext& context, std::size_t line,
+                                 std::size_t offset) const -> float;
+
   std::string content_{};
   bool multiline_{false};
   std::size_t max_lines_{0};
   Tone tone_{Tone::Default};
   float font_size_override_{0.0f};
   FontWeight weight_{FontWeight::Regular};
+
+  // —— 选区（2026-10-14）——
+  // 用 `{行, 行内字节偏移}`（而不是全串字节偏移）：`Text` 的显示行是**离散字符串
+  // 数组**（折行/截断产生），没有“全串偏移 ↔ 显示位置”的线性映射。
+  bool selectable_{false};
+  /// 上次排版得到的**显示行文本**（`measure`/`paint_content` 时写）。
+  ///
+  /// 为何缓存：① `selected_text()` 无上下文、无从折行；② 更重要的是
+  /// “选中的字”必须与“屏幕上看到的字”是同一份——现场重折行会在窗口尺寸
+  /// 变化后选出别处的字。
+  /// `mutable`：在 `paint_content`（const）里也要写。
+  mutable std::vector<std::string> display_lines_{};
+  /// 选区两端（已归一）；`line == npos` = 无选区。
+  std::size_t select_begin_line_{std::string::npos};
+  std::size_t select_begin_offset_{0};
+  std::size_t select_end_line_{0};
+  std::size_t select_end_offset_{0};
+  bool selecting_{false};
 };
 
 /// 标题（按层级取字号与字重）。
