@@ -627,10 +627,12 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
   })
 
   // ------------------------------------------------------------------
-  // 续派全链（fix-2 / 547039f2）：同进程内一次性锁住四条——续派≠新建（会话数不变、
-  // 不占新建额度）、resume 消息分支、非池会话拒绝（授权面不外扩）、池满只挡新建。
+  // 续派全链（fix-2 / 547039f2）：同进程内一次性锁住——续派≠新建（会话数不变、不占新建
+  // 额度）、resume 消息分支、非池会话拒绝（授权面不外扩，**拒绝文案逐字钉死**）、池满只挡新建、
+  // 续派的**池登记后果**（idle 条目被标回 running 且不新增条目）。
   // 与上一条「续派」测试的分工：上条是**同语义的宽断言**；本条补齐量化与对照断言
   // （混合批次的额度记账、resume 分支的开合对照、拒绝路径的零副作用、真实存在的非池会话）。
+  // 边界分支（空池文案、session_id×fresh 冲突、preview 下的续派与授权前置）见紧随其后的两条测试。
   // ------------------------------------------------------------------
 
   test("续派全链：session_id 走续派而非新建——不新增会话、不占新建额度、消息点名「续派/从中断处继续」、非池会话被拒、池满只挡新建", async () => {
@@ -709,14 +711,18 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
     const ctrlBefore = controlOf(s)
     const sentBefore = s.sent.length
     const createdB = s.created.length
+    // **文案钉死**：模板逐字固定，池清单格式为 `别名=会话id` 以「、」连接。
+    // 拒绝文案是人机共同的可检索落点（「授权面不外扩」这句必须能被搜到），随意改字会让
+    // 这条保证失去锚点；清单段动态取池（避开批次重排导致的顺序脆弱，只钉格式不钉次序）。
+    const poolList = parseControl(controlOf(s)).workers.map((w) => `${w.alias}=${w.sessionId}`).join("、")
+    expect(poolList).toContain("lint-1=")               // 清单非空（空池变体是另一支文案，见下条测试）
     for (const [label, sid] of [["不存在的会话", "sess-stranger"], ["存在但非池（生生自己的控制会话）", String(s.ctx.sessionId)]] as const) {
       const rejected = await tool("dispatch").execute({ orders: [{ task: `越权续派（${label}）`, session_id: sid }] }, s.ctx)
-      expect(rejected.output).toContain("授权面不外扩")
-      expect(rejected.output).toContain("不是池中登记的 worker 会话")
-      expect((rejected.data as { blocked?: boolean }).blocked).toBe(true)
-      // 拒绝文案须可操作：列出池中 worker 供替换为合法寻址
-      expect(rejected.output).toContain(`${lintSid}`)
-      expect(rejected.output).toContain("lint-1")
+      expect(rejected.output).toBe(
+        `orders[].session_id=${sid} 不是池中登记的 worker 会话——续派只允许本演进线派生的 worker（授权面不外扩）。池中 worker：${poolList}。接手别的会话请按别名/领域复用或 fresh=true 新建。`,
+      )
+      // 机器可读面同样钉死（编排侧据 blocked 分流，不解析文案）
+      expect(rejected.data).toEqual({ blocked: true, unknownSession: sid })
     }
     expect(s.sent).toHaveLength(sentBefore)               // 未向非池会话注入
     expect(s.created).toHaveLength(createdB)              // 未新建
@@ -752,6 +758,100 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
     const bd = blocked.data as { blocked?: boolean; workers?: number; needNew?: number; limit?: number }
     expect(bd).toMatchObject({ blocked: true, workers: 3, needNew: 1, limit: 3 })
     expect(s.created).toHaveLength(createdB)
+
+    // ----------------------------------------------------------------
+    // ⑤ 续派的池登记后果：打到「已存在但 idle」的 worker → 池条目**标回 running**、
+    //    别名/领域/首派时间沿用、轮次前推、不新增池条目（同一会话仍恰一条）
+    // ----------------------------------------------------------------
+    s.running.clear()
+    // 中断恢复的现实场景：worker 跑完、上一轮已收藏（池中 idle），此时才有人续派它
+    await tool("collect").execute({ action: "collect", alias: "lint-1", summary: "上一轮要点" }, s.ctx)
+    const beforePool = parseControl(controlOf(s))
+    const lintBefore = beforePool.workers.find((w) => w.sessionId === lintSid)!
+    expect(lintBefore.status).toBe("idle")                                   // 前提：确是 idle
+    expect(beforePool.inflight.some((i) => i.sessionId === lintSid)).toBe(false)
+    const poolBefore = beforePool.workers.length
+
+    const resumedIdle = await tool("dispatch").execute({ orders: [{ task: "空闲后续派", session_id: lintSid }] }, s.ctx)
+    expect(resumedIdle.output).toContain("布雨完成")
+    expect(resumedIdle.output).toContain("续派")
+    const afterPool = parseControl(controlOf(s))
+    expect(afterPool.workers).toHaveLength(poolBefore)                        // **不新增池条目**
+    const lintAfter = afterPool.workers.filter((w) => w.sessionId === lintSid)
+    expect(lintAfter).toHaveLength(1)                                        // 同会话恰一条（upsert 取代，不并列）
+    expect(lintAfter[0]).toMatchObject({
+      alias: lintBefore.alias,                                               // 别名沿用（工人身份不变）
+      domain: lintBefore.domain,                                             // 领域沿用（未另传 domain）
+      status: "running",                                                     // **标回 running**——空闲复用后又在干活
+      dispatchedAt: lintBefore.dispatchedAt,                                 // 首派时间保留（不是本次派工时间）
+    })
+    expect(lintAfter[0].round).toBeGreaterThan(lintBefore.round)             // 轮次前推（新轮取代旧轮）
+    // 在途：同会话恰一条，方向为本次任务（闲置后再派=一条新在途，不是两条）
+    const inflightNow = afterPool.inflight.filter((i) => i.sessionId === lintSid)
+    expect(inflightNow).toHaveLength(1)
+    expect(inflightNow[0].direction).toBe("空闲后续派")
+    cleanup(s)
+  })
+
+  test("续派拒绝文案钉死（空池变体）：清单段退化为「（空）」——两步分支同属契约，且不新建不注入", async () => {
+    const s = stub()
+    await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+    // 池空时走同一条拒绝，只是清单段换成「（空）」——两支文案都要能搜到「授权面不外扩」
+    const r = await tool("dispatch").execute({ orders: [{ task: "空池越权续派", session_id: "sess-x" }] }, s.ctx)
+    expect(r.output).toBe(
+      "orders[].session_id=sess-x 不是池中登记的 worker 会话——续派只允许本演进线派生的 worker（授权面不外扩）。池中 worker：（空）。接手别的会话请按别名/领域复用或 fresh=true 新建。",
+    )
+    expect(r.data).toEqual({ blocked: true, unknownSession: "sess-x" })
+    expect(s.created).toHaveLength(0)                    // 不新建
+    expect(s.sent).toHaveLength(0)                       // 不注入
+    cleanup(s)
+  })
+
+  test("续派边界：session_id×fresh 冲突——显式寻址胜出不新建；preview 下续派只出标签、非池仍被拒", async () => {
+    const s = stub()
+    await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+    await tool("dispatch").execute({ orders: [{ task: "首单", domain: "a" }] }, s.ctx)
+    const sid = s.sent[0].sessionId
+    s.running.clear()
+
+    // **冲突输入**：session_id（点名一个具体会话）与 fresh（「别复用，开新的」）语义相反。
+    // 期望语义：**显式寻址胜出**——fresh 是自动匹配阶段的偏好提示，一旦点名了具体会话就不再适用；
+    // 若让 fresh 胜出而另开新会话，用户点名要的那个 worker 反被晾着，且凭空多占一格额度。
+    const createdBefore = s.created.length
+    const both = await tool("dispatch").execute({ orders: [{ task: "同传续派", session_id: sid, fresh: true }] }, s.ctx)
+    expect(both.output).toContain("布雨完成")
+    expect(both.output).toContain("续派")
+    expect(both.output).not.toContain("新建")
+    expect(s.created).toHaveLength(createdBefore)                     // 未新建
+    expect(s.sent[s.sent.length - 1].sessionId).toBe(sid)             // 注回被点名的那个会话
+    const bp = both.data as { plan: Array<{ created: boolean; resume?: boolean }> }
+    expect(bp.plan[0]).toMatchObject({ created: false, resume: true })
+    expect(s.sent[s.sent.length - 1].message).toContain("从中断处继续")
+    expect(parseControl(controlOf(s)).workers).toHaveLength(1)        // 池不因冲突输入膨胀
+
+    // preview：续派只出计划标签（`续派会话 <sid>`，非「新建」），不派工、不新建
+    s.running.clear()
+    const sentBefore = s.sent.length
+    s.ctx.env.SHENGSHENG_DISPATCH = "preview"
+    try {
+      const pre = await tool("dispatch").execute({ orders: [{ task: "预检续派", session_id: sid }] }, s.ctx)
+      expect(pre.output).toContain("布雨预检")
+      expect(pre.output).toContain(`续派会话 ${sid}`)
+      expect(pre.output).not.toContain("新建")
+      expect(s.sent).toHaveLength(sentBefore)                         // 预检不派工
+      expect((pre.data as { plan: Array<{ created: boolean; resume?: boolean }> }).plan[0]).toMatchObject({ created: false, resume: true })
+
+      // **授权前置**：非池会话在 preview 下**同样**被拒——预检不得把越权请求摊成一份
+      // 「看起来能跑」的计划（授权判定在计划构造段，早于 preview 返回，也早于容量检查）
+      const preStranger = await tool("dispatch").execute({ orders: [{ task: "预检越权", session_id: "sess-x" }] }, s.ctx)
+      expect(preStranger.output).toContain("授权面不外扩")
+      expect(preStranger.output).not.toContain("布雨预检")
+      expect((preStranger.data as { blocked?: boolean }).blocked).toBe(true)
+      expect(s.sent).toHaveLength(sentBefore)
+      expect(s.created).toHaveLength(createdBefore)
+    } finally {
+      delete s.ctx.env.SHENGSHENG_DISPATCH
+    }
     cleanup(s)
   })
 
