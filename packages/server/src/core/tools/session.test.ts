@@ -151,13 +151,30 @@ describe("session 工具：status / send / stop / delete", () => {
     expect(d.running).toBe(true)
   })
 
-  test("send：空闲会话注入即返回（异步语义）", async () => {
+  test("send：注入即返回（快任务同步完成如实报告）", async () => {
     const { svc, calls } = makeSvc()
     const created = await svc.store.createSession("u1", "驻留")
     const r = await sessionTool.execute({ action: "send", session_id: created.id, message: "继续演进：读台账选下个方向" }, ctxWith(svc))
     expect(r.output).toContain("已注入")
-    expect(r.output).toContain("异步")
+    expect(r.output).toContain("已完成")
     expect(calls.run).toEqual(["继续演进：读台账选下个方向"])
+  })
+
+  test("send：长任务 2 秒后放行（不阻塞控制会话）；短任务同步完成如实报告", async () => {
+    const { svc } = makeSvc()
+    const created = await svc.store.createSession("u1", "长活")
+    // 慢 run：6 秒才结束——send 必须在 ~2 秒内返回（早期失败窗口后放行）
+    ;(svc as unknown as { run: (id: string, u: string, p: string) => Promise<void> }).run = async () => {
+      await new Promise((res) => setTimeout(res, 6000))
+    }
+    const t0 = Date.now()
+    const r = await sessionTool.execute({ action: "send", session_id: created.id, message: "重活" }, ctxWith(svc))
+    expect(Date.now() - t0).toBeLessThan(4000)
+    expect(r.output).toContain("后台运行")
+    // 快 run：立即结束——报告「已完成」
+    ;(svc as unknown as { run: (id: string, u: string, p: string) => Promise<void> }).run = async () => {}
+    const r2 = await sessionTool.execute({ action: "send", session_id: created.id, message: "快活" }, ctxWith(svc))
+    expect(r2.output).toContain("已完成")
   })
 
   test("send：目标运行中 → 拒绝并给出 stop/等待指引", async () => {

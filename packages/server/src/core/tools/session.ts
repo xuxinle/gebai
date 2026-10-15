@@ -130,10 +130,20 @@ export const sessionTool: Tool = {
           data: { running: true },
         }
       }
-      // 脱管注入：不等待目标会话执行完（那是目标会话事件循环的事）；run 同步段失败（会话缺失等）如实抛出
-      await svc.run(sessionId, ctx.user, message)
+      // 脱管注入：不等待目标会话执行完（那是目标会话事件循环的事）——只同步等待启动早期错误
+      //（会话缺失/存储异常等同步段失败，约 2 秒窗口），之后立即放行（目标会话后台自行驱动）。
+      // 否则控制会话派发长任务 worker 时会被 run 的 Promise 拖住，控制平面自身被锁死。
+      const started = svc.run(sessionId, ctx.user, message)
+      const early = await Promise.race([started.then(() => "ok"), new Promise<string>((r) => setTimeout(() => r("bg"), 2000))])
+      if (early === "ok") {
+        // run 已完整结束（消息极短任务/目标会话立即出错）——若 throw 则如实上抛
+        return {
+          output: `消息已注入会话 ${sessionId}${target.name ? `「${target.name}」` : ""}，执行已完成（目标会话本次运行已结束）。用 action=status 查看。`,
+          data: { running: false },
+        }
+      }
       return {
-        output: `消息已注入会话 ${sessionId}${target.name ? `「${target.name}」` : ""}，执行已触发（异步——本调用不等待完成）。用 action=status 跟踪进展与消息尾部。`,
+        output: `消息已注入会话 ${sessionId}${target.name ? `「${target.name}」` : ""}，执行已触发（后台运行——本调用不等待完成）。用 action=status 跟踪进展与消息尾部。`,
         data: { running: true },
       }
     }
