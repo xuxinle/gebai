@@ -303,6 +303,46 @@ describe("三口径一致性：同一组输入下 徽标 / 编辑按钮 / 保存
     expect(saveRefusalText("rootsPending")).toContain("未就绪")
   })
 
+  /**
+   * 边界：**根清单未到与文件级不可写同时出现**（冷启动窗口里打开一个截断的大文件、或一个类型
+   * 不可编辑的文件——两个来源互不依赖，完全可以叠在一起）。此前矩阵只单独试过「根未知」与
+   * 「截断」，叠加态没有断言；而它恰恰是上面那条「唯一分歧」的**最坏形态**。
+   *
+   * 叠加时有一条不显然、必须说清的规则：
+   *   - 展示侧仍按**已知的**阻碍说（截断 > 类型不可编辑），未知不当成不可写——否则每次冷启动
+   *     都闪一个跟文件毫无关系的假「不可编辑」；
+   *   - 保存侧**先**判根：连目标根能不能写都不知道时，只能拦住并说「稍后重试」
+   *     （`rootsPending`），此时文件级原因**暂不报**——这正是上面那条「唯一分歧」在叠加态下的延伸。
+   *   - 硬要求是**两侧都拦住**：叠加态绝不能变成「徽标 warn、保存却放行」（放行即坏数据）。
+   *
+   * 注：让文件级原因在保存侧更靠前（截断/类型是已知事实，「稍后重试」对它们没有意义，改成
+   * 「请下载后编辑」更可操作）是一次**设计层**选择，本单只钉现状、不改判序。
+   */
+  test("边界：根未就绪与截断（或类型不可编辑）叠加——两侧都拦住，各自按已知层级措辞", () => {
+    const CASES = [
+      { label: "根未就绪 × 截断", input: { statEditable: true, truncated: true, rootWritable: null } },
+      { label: "根未就绪 × 类型不可编辑", input: { statEditable: false, truncated: false, rootWritable: null } },
+      { label: "根未就绪 × 截断 × 类型不可编辑", input: { statEditable: false, truncated: true, rootWritable: null } },
+    ] as const
+    for (const c of CASES) {
+      const ro = readOnlyReason(c.input)
+      const refusal = saveRefusal(c.input)
+      // 展示侧：仍是 warn（拦住），但原因取已知的文件级阻碍，不把「未知」当成不可写
+      expect(ro, `${c.label}：展示侧必须拦住——未知 ≠ 可写`).toBe(c.input.truncated ? "truncated" : "notEditable")
+      // 保存侧：根未知优先（连目标根可不可写都不知道，只能按「稍后再试」说）
+      expect(refusal, `${c.label}：保存侧必须拦住，且根未知时给出 rootsPending`).toBe("rootsPending")
+      // 三处一致性在叠加态下同样成立：徽标 warn ⇔ 保存侧拒绝
+      for (const mode of MODES) {
+        const badge = modeSlot({ mode, readOnly: ro })
+        const tag = `${c.label} / ${mode}`
+        expect(badge.cls, `${tag}：徽标配色与判据不一致`).toBe("warn")
+        expect(refusal === null, `${tag}：徽标说不可写、保存却放行`).toBe(badge.cls !== "warn")
+      }
+      // 拒绝提示必须是可读的一句（不是空串 or 只报原因不给下一步）
+      expect(saveRefusalText(refusal!).length, `${c.label}：拒绝提示为空`).toBeGreaterThan(0)
+    }
+  })
+
   test("同一组输入 × 两个 mode 全跑：三处的「不可写」判断必须同真同假", () => {
     for (const c of INPUTS) {
       if (c.input.rootWritable == null) continue

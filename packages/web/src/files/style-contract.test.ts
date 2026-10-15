@@ -112,6 +112,162 @@ function ruleBody(selector: string): string {
 }
 
 /**
+ * 源码断言 helper：**先剥注释再扫**。本仓惯于把「历史缺陷」的原文写进注释当反面教材，
+ * 不剥的话 `not.toContain("旧文案")` 会被自己的注释碰红——那时这条断言就只剩「删注释」的作用。
+ */
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "")
+}
+
+/** 取出 `call(` 的**每一处**实参文本（按括号配平截取，跨行也认）；一处都没有返回空数组。 */
+function callArgs(source: string, call: string): string[] {
+  const out: string[] = []
+  for (let i = source.indexOf(call); i >= 0; i = source.indexOf(call, i + call.length)) {
+    const open = i + call.length - 1
+    let depth = 0
+    let j = open
+    for (; j < source.length; j++) {
+      if (source[j] === "(") depth++
+      else if (source[j] === ")") {
+        depth--
+        if (depth === 0) break
+      }
+    }
+    out.push(source.slice(open + 1, j))
+  }
+  return out
+}
+
+/**
+ * 源码扫描的**归一化**：剥注释 + 抹平行尾分号与空白。
+ *
+ * 为什么要归一而不直接看原文：本仓代码常被 prettier 折成多行、且**不写行尾分号**（ASI），
+ * 而「某段代码在不在」与这两件事无关——把分号或换行写死进断言，就等于给好代码埋一个
+ * 与判据无关的碰红点（实测踩过：写死分号的那一版，把调用折成四行的良性重构就被误杀）。
+ */
+function normalized(source: string): string {
+  return stripComments(source)
+    .replace(/^[ \t]*import\b.*$/gm, "")
+    .replace(/[ \t]*;[ \t]*$/gm, "")
+    .replace(/\s+/g, " ")
+}
+
+/**
+ * 「由唯一取数口 `writabilityOf` 派生」的标识符集合——**逐语句的数据流**，不是字面包含。
+ *
+ * 为什么要到语句粒度：`saveItem({ dirty: t.dirty, refusal })` 里同时出现两个标识符——
+ * `dirty` 本来就是标签自己的字段（该自取），`refusal` 才是必须来自判据的那个。整段匹配会把
+ * 好代码判红（实测：把 `writabilityOf(t)` 提成局部变量、或多行排版，旧断言就报“输入未收口”，
+ * 而判据来源一个字没改）。这里对每个显式写出的实参**逐个**判定，并容许把取数口提出去。
+ *
+ * 闭包上限 4 轮：派生链在本仓最多两跳，够用且必然收敛。
+ */
+function writabilitySourced(source: string): Set<string> {
+  const assigned = [...source.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]*)/g)]
+  const sourced = new Set<string>()
+  for (let pass = 0; pass < 4; pass++) {
+    for (const m of assigned) {
+      const name = m[1]!
+      if (sourced.has(name)) continue
+      const rhs = m[2]!
+      if (rhs.includes("writabilityOf") || [...sourced].some((v) => new RegExp(`\\b${v}\\b`).test(rhs))) sourced.add(name)
+    }
+  }
+  return sourced
+}
+
+/** 实参去掉尾逗号后的形态。 */
+const trimmedArg = (arg: string) => arg.trim().replace(/,\s*$/, "").trim()
+
+/** 实参是否**就是一次** `writabilityOf(…)` 调用（配平的右括号就在末尾才算）。 */
+function isWritabilityCall(arg: string): boolean {
+  const t = trimmedArg(arg)
+  if (!t.startsWith("writabilityOf(")) return false
+  let depth = 0
+  for (let i = t.indexOf("("); i < t.length; i++) {
+    if (t[i] === "(") depth++
+    else if (t[i] === ")") {
+      depth--
+      if (depth === 0) return i === t.length - 1
+    }
+  }
+  return false
+}
+
+/**
+ * **对象实参的值**是否由取数口派生：引用了 `writabilityOf`，或引用了闭包判为派生的变量。
+ * 用于 `{ readOnly: … }` / `{ refusal: … }` 这类值的判定。
+ */
+function valueFromPort(value: string, sourced: Set<string>): boolean {
+  if (value.includes("writabilityOf")) return true
+  return [...sourced].some((v) => new RegExp(`\\b${v}\\b`).test(value))
+}
+
+/**
+ * **位置实参**是否就是取数口（或它的具名变量）：只收「整个实参就是一次取数口调用」与「整个实参就是一个
+ * 派生的具名变量」两种形态。
+ *
+ * 为什么这里不能像值那样用「包含」：`saveRefusal(writabilityOf(tab).rootWritable === false ? … : writabilityOf(tab))`
+ * 也含这个词，但那是在取数口结果上**又加了一道自己的判**——已经不是「一组输入、一个函数」了。
+ * 实测：用「包含」判定时这个退化漏检。
+ */
+function argFromPort(arg: string, sourced: Set<string>): boolean {
+  if (isWritabilityCall(arg)) return true
+  const t = trimmedArg(arg)
+  return /^[A-Za-z_$][\w$]*$/.test(t) && sourced.has(t)
+}
+
+/**
+ * 从一个调用实参里取出**顶层**条目（`{ dirty: t.dirty, refusal }` → `[{key:"dirty",value:"t.dirty"},{key:"refusal",value:"refusal"}]`）。
+ *
+ * 取**值**而不是整段实参——这是关键：`{ mode: t.mode, readOnly: null }` 与
+ * `{ mode: t.mode, readOnly: readOnlyReason(writabilityOf(t)) }` 整段看起来都“含 readOnly”，
+ * 只按整段是否出现某个变量名判定，会把前者（真的另拼了输入）放过去（实测漏检）。
+ */
+function argEntries(arg: string): Array<{ key: string; value: string }> {
+  const t0 = trimmedArg(arg)
+  // **必须整个实参就是一个对象字面量**才算对象形（否则像 `a ? {…} : b` 这种里层的 `{` 会被误当成对象）
+  if (!t0.startsWith("{")) return []
+  let depth = 0
+  let close = -1
+  for (let i = 0; i < t0.length; i++) {
+    if ("([{".includes(t0[i]!)) depth++
+    else if (")]}".includes(t0[i]!)) {
+      depth--
+      if (depth === 0) {
+        close = i
+        break
+      }
+    }
+  }
+  if (close !== t0.length - 1) return []
+  const inner = t0.slice(1, close)
+  const out: Array<{ key: string; value: string }> = []
+  let d = 0
+  let cur = ""
+  const push = () => {
+    const t = cur.trim()
+    cur = ""
+    if (!t) return
+    // 先试显式键（可带引号）；再试简写。顺序不能反——否则 `readOnly: null` 会把值 `null` 误当键名
+    const m = t.match(/^["']?([A-Za-z_$][\w$]*)["']?\s*:\s*([\s\S]*)$/)
+    if (m) out.push({ key: m[1]!, value: m[2]!.trim() })
+    else if (/^[A-Za-z_$][\w$]*$/.test(t)) out.push({ key: t, value: t })
+  }
+  for (const ch of inner) {
+    if ("([{<".includes(ch)) d++
+    else if (")\]}>`".includes(ch)) d--
+    if (ch === "," && d === 0) push()
+    else cur += ch
+  }
+  push()
+  return out
+}
+
+/** 取数口的三个原始输入字段名：消费点若**自己现拼**它们，就已经不是“一组输入”了。 */
+const PORT_FIELDS = ["statEditable", "truncated", "rootWritable"]
+
+/**
  * 样式契约：状态栏「查看 / 编辑」模式格的 **pri1 永不隐**，且只读原因的措辞只在一处。
  *
  * 存在的理由（两件都不报错、只在窄面板里静默发生）：
@@ -141,15 +297,15 @@ describe("样式契约：模式格 pri1 恒在 + 不可写原因单一来源", (
   })
 
   test("模式格带自查标记（否则 DOM 层面无从断言这一格是 pri1）", () => {
-    expect(readFileSync(join(SRC, "files", "main.ts"), "utf8")).toContain("dataset.fwModeSlot = slot.text")
-  })
+    // 只降格式断言：归一空白后找 `slotEl.dataset.fwModeSlot = slot.text` 这条赋值，
+    // 不锁多行 / 分号 / 换行位置——排版变化不该碰红契约测试。
+    const main = normalized(readFileSync(join(SRC, "files", "main.ts"), "utf8"))
+    expect(main).toContain("dataset.fwModeSlot = slot.text")  })
 
   test("不可写原因的文案只有 status-core 一处（按钮/徽标/保存拒绝共用 REASON）", () => {
     // **先剔掉注释**再扫：本仓惯于把“历史缺陷”原文写进注释当反面教材（如 renderTabActions 上方那段的
     // 「该文件类型不支持编辑」），不剔的话这条断言会被自己的注释碰红——那时它就只剩“删注释”的作用。
-    const main = readFileSync(join(SRC, "files", "main.ts"), "utf8")
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/^[ \t]*\/\/.*$/gm, "")
+    const main = stripComments(readFileSync(join(SRC, "files", "main.ts"), "utf8"))
     expect(main).toContain("readOnlyReason(")
     expect(main).toContain("editButton(")
     // 历史文案：不可写时一律说“类型不支持编辑”——三个原因（根只读/截断/类型）三种下一步，
@@ -161,25 +317,68 @@ describe("样式契约：模式格 pri1 恒在 + 不可写原因单一来源", (
   /**
    * 三口径的**接线契约**（行为契约在 status-core.test.ts 的「三口径一致性」块）。
    *
-   * 为什么两处都要有：行为测试只能证明**函数**自洽，证明不了 main.ts 真的调了它们——
-   * 有人把某处改回「自己取 `t.stat.editable`」时，status-core 的单测依然全绿（函数没变），
-   * 而界面又回到了三处各说各话的旧样子。本仓不跑 DOM 集成测试（main.ts 一 import 就绑真 DOM
-   * 与网络），所以只能扫源码钉住这三个调用点；好在它们是稳定结构，不是易漂的文案。
+   * 为什么要有：行为测试只能证明**函数**自洽，证明不了 main.ts 真的调了它们——有人把某处改回
+   * 「自己取 `t.stat.editable`」时，status-core 的单测依然全绿（函数没变），而界面又回到了三处各说各话
+   * 的旧样子。本仓不跑 DOM 集成测试（main.ts 一 import 就绑真 DOM 与网络），所以只能扫源码钉住接线。
+   *
+   * **本用例是重构友好版**（复核时实测重写）：只断言两件事，两件都与「代码长什么样」无关——
+   *   ① 取数口 `writabilityOf` 仍从**同一组三个来源**取（`stat.editable` / `truncated` / 根清单）；
+   *   ② `modeSlot` / `editButton` / `saveItem` / `readOnlyReason` / `saveRefusal` 的**每一处调用**，
+   *      其语义上该来自取数口的实参（`readOnly` / `refusal` / `o`）确实来自取数口（直接或经派生变量）。
+   *
+   * **旧的写法与它的两个毛病**（本单实测，供后人别再走回去）：原用字面片断
+   * （`toContain("const refusal = saveRefusal(writabilityOf(")` + 数 `writabilityOf` 出现次数 ≥ 4）——
+   *   ①「名字出现过 ≠ 真的接了」：把编辑按钮改回只判 `t.stat.editable` 时，`writabilityOf` 仍在保存那行
+   *      出现、计数仍 ≥ 4，**全绿放行**，而界面已经退回旧口径；
+   *   ②「好代码误杀」：把取数口提成局部变量（`const w2 = writabilityOf(t); saveRefusal(w2)`）是正常重构
+   *      却会碰红（实测：换行、硬括号、键名加引号、键顺序对调都会误杀）。
+   *
+   * 为什么不做「位置敏感性」断言（“modeSlot 的第一个实参必须是 writabilityOf(t)”）：实测那类正则
+   * 会把**局部变量提取**这类重构全判红（改前 vs 改后：良性重构误报 6 例）。而「拆开取数口」这种
+   * 真退化，`WritabilityInput` 是个**具名结构类型**——拆开时 TS 会报“参数类型不匹配”，编译期就拦住了，
+   * 不必再拿脆弱正则去重。
    */
   test("三处消费都接在 status-core 的同一判据上（徽标 / 按钮 / 保存拒绝）", () => {
-    const main = readFileSync(join(SRC, "files", "main.ts"), "utf8")
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/^[ \t]*\/\/.*$/gm, "")
-    // ① 单一取数口：三处都从 writabilityOf(tab) 取输入，不再各自从 t.stat / state.rootsResp 拼
-    expect(main, "三处输入应统一走 writabilityOf（否则同一事实会算出两个结论）").toContain("function writabilityOf(t: Tab): WritabilityInput")
-    expect((main.match(/writabilityOf\(/g) ?? []).length, "writabilityOf 应被三处消费调用（定义 + 徽标 + 按钮 + 保存）").toBeGreaterThanOrEqual(4)
-    // ② 保存侧：saveTab 与轮盘保存项共用 saveRefusal，不得退回只看根的老口径
-    expect(main).toContain("saveRefusal(writabilityOf(")
-    expect(main, "saveTab 不得再直接看 rootsResp.writable（截断/类型不可编辑会被放行）").not.toContain("rootsResp?.writable !== true")
-    expect((main.match(/saveRefusal\(writabilityOf\(/g) ?? []).length, "saveTab 与轮盘保存项两处都应接 saveRefusal").toBeGreaterThanOrEqual(2)
-    // ③ 保存项的禁用态/title 不得再自行判断（否则又出现「徽标说不可保存、保存按钮却亮着」）
-    expect(main, "轮盘保存项的禁用态应来自 saveItem（同一判据）").toContain("saveItem({")
-    expect(main, "轮盘保存项不得再自行拼「存不回」文案").not.toContain('`保存（Ctrl+S）· 存不回：${readOnlyWhy')
+    // 注释必须先剥：本块的反面教材文案（旧口径原文）就写在 main.ts 的注释里
+    const main = stripComments(readFileSync(join(SRC, "files", "main.ts"), "utf8"))
+    const SP = String.raw`\s*`
+    // ① 单一取数口的定义仍在，且确实从三个来源取——缺一项就不是同一组输入了
+    expect(main, "取数口 writabilityOf 不再从三个来源取（三处又会各拼一份输入）")
+      .toMatch(new RegExp(String.raw`function writabilityOf\(\w+: Tab\): WritabilityInput` + SP + String.raw`\{[^}]*statEditable: \w+\.stat\?\.editable[^}]*truncated: \w+\.truncated[^}]*rootWritable: state\.rootsResp\?\.writable`))
+    // ② 逐调用点判「输入从哪来」——不看长相，只看数据流（详见上方说明）
+    const sourced = writabilitySourced(main)
+    const loose: string[] = []
+    /** 只对「语义上必须是取数口派生」的显式键做判定；键不在名单里（如 `dirty` 由标签自取）就不管。 */
+    const check = (label: string, call: string, mustBeSourced: string[]) => {
+      const args = callArgs(main, call)
+      // 空集会让下面的循环空转成「静默通过」——改名或搬走时必须显式来改这份清单
+      expect(args.length, `${call}… 在 main.ts 里一处调用点都找不到（改名或搬走了？请同步本清单）`).toBeGreaterThan(0)
+      for (const arg of args) {
+        const entries = argEntries(arg)
+        // 位置参数形态（`readOnlyReason(o)` / `saveRefusal(o)` 就是这样被调的）：整个实参必须是取数口
+        if (entries.length === 0) {
+          if (!argFromPort(arg, sourced)) loose.push(`${label}：实参未从 writabilityOf 取（「${trimmedArg(arg).replace(/\s+/g, " ").slice(0, 60)}」）`)
+          continue
+        }
+        // 消费点**自己现拼取数口的三个字段**＝又在自己拼输入了（实测过的退化形态）
+        const handRolled = entries.filter((e) => PORT_FIELDS.includes(e.key))
+        if (handRolled.length > 0) loose.push(`${label}：消费点自己现拼了输入字段（${handRolled.map((e) => e.key).join("/")}）——应整体用 writabilityOf 的结果`)
+        // 对象参数形态：逐个看**值**（不看键——键名里也有 readOnly/refusal，会把自己的值盖住）
+        for (const { key: k, value } of entries) {
+          if (!mustBeSourced.includes(k)) continue
+          if (!valueFromPort(value, sourced)) loose.push(`${label}：${k} 未从 writabilityOf 取（值「${value.replace(/\s+/g, " ").slice(0, 60)}」）`)
+        }
+      }
+    }
+    check("模式格徽标", "modeSlot(", ["readOnly"])
+    check("标签栏编辑按钮", "editButton(", ["readOnly"])
+    check("轮盘保存项", "saveItem(", ["refusal"])
+    check("展示侧判据", "readOnlyReason(", ["o"])
+    check("保存侧判据", "saveRefusal(", ["o"])
+    expect(loose, "同一组事实被各拼了一份输入——三处又会算出两个结论").toEqual([])
+    // ③ 旧口径与旧文案的**读取**一旦回来就报错（断言「读」的形态；注释已剥，不会误伤注释里引用的旧代码）
+    expect(main, "saveTab 不得再直接看 rootsResp.writable（截断/类型不可编辑会被放行）").not.toMatch(/rootsResp\??\.writable\s*!==\s*true/)
+    expect(main, "轮盘保存项不得再自行拼「存不回」文案").not.toContain("`保存（Ctrl+S）· 存不回：${readOnlyWhy")
   })
 })
 
