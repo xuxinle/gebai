@@ -458,3 +458,69 @@ ST_TEST(lint_l14_exempts_platform_and_backend_files) {
   ST_CHECK_EQ(count_rule(plain, "L14"), 1U);
 }
 
+// ————————————————————————————————————————————————————————————————————————————
+// L16：层方向（core 不得 include ui）
+//
+// 本规则补的是 BACKLOG P1 的「lint 看不见」：core→ui 是**头文件级**依赖，
+// 编译不报错、链接恰能过（ ui 层在链接闭包里时），却把渲染链拖进工具链。
+// 实测形态：`platform_crash.cpp` 的死 include `st/ui/state_trace.hpp`。
+// ————————————————————————————————————————————————————————————————————————————
+
+/// 命中真实缺陷形态：core 层文件 include ui 头 → 必须命中（两个合法 core 路径寄都验）。
+///
+/// 不能用 `lint_source`（平铺名字）：层判定需要路径里带 `src/core/` 段，而
+/// `lint_source` 的 ofstream **不会建父目录**——名字带子目录时打开失败、文件
+/// 根本没写出来，`lint_file` 读失败返回空，断言拿到恒 0（实测踩过：两个「应命中」
+/// 用例全红而两个反例全绿——反例的绿是「读不到也是 0」的假绿，不是规则不误报）。
+ST_TEST(lint_l16_flags_core_including_ui_headers) {
+  const auto make = [](std::string_view hierarchy, std::string_view source) {
+    const std::string path = st::fs::join(st::fs::temp_dir(), std::string(hierarchy));
+    // 建父目录（建不了就跳过：环境异常时本用例无法给出有效信号）
+    const std::size_t slash = path.find_last_of("/\\");
+    const std::string parent = path.substr(0, slash);
+    if (!st::fs::create_directories(parent).has_value()) return std::vector<st::pkg::LintViolation>{};
+    {
+      std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+      stream << source;
+    }
+    auto result = st::pkg::lint_file(path);
+    (void)st::fs::remove_file(path);
+    if (!result) return std::vector<st::pkg::LintViolation>{};
+    return *result;
+  };
+  const std::string source = R"CPP(#include "st/core/fs.hpp"
+#include "st/ui/state_trace.hpp"
+)CPP";
+  const auto from_src = make("layer_l16/src/core/probe_crash.cpp", source);
+  ST_CHECK_EQ(count_rule(from_src, "L16"), 1U);
+
+  const auto from_include = make("layer_l16/include/st/core/probe.hpp", source);
+  ST_CHECK_EQ(count_rule(from_include, "L16"), 1U);
+}
+
+/// 不误报反例：ui→core 合法；shell→ui 是待解耦项（BACKLOG P1 根因②）不是违规；
+/// core include 自己层的头当然也不判。
+ST_TEST(lint_l16_does_not_flag_reverse_or_same_layer) {
+  const auto ui_source = R"CPP(
+#include "st/core/fs.hpp"
+#include "st/ui/element.hpp"
+)CPP";
+  ST_CHECK_EQ(count_rule(lint_source("src/ui/probe.cpp", ui_source), "L16"), 0U);
+
+  const auto shell_source = "#include \"st/ui/window_control.hpp\"\n";
+  ST_CHECK_EQ(count_rule(lint_source("src/shell/probe.cpp", shell_source), "L16"), 0U);
+
+  const auto core_only = "#include \"st/core/fs.hpp\"\n";
+  ST_CHECK_EQ(count_rule(lint_source("src/core/probe.cpp", core_only), "L16"), 0U);
+}
+
+/// 行内豁免与注释净化：`// lint-allow: L16 原因` 豁免单点；注释掉的 include 不算。
+ST_TEST(lint_l16_respects_allow_comment_and_comments) {
+  const auto allowed =
+      "#include \"st/ui/state_trace.hpp\"  // lint-allow: L16 桥接层待迁移（BACKLOG P1②）\n";
+  ST_CHECK_EQ(count_rule(lint_source("src/core/probe.cpp", allowed), "L16"), 0U);
+
+  const auto commented = "// #include \"st/ui/state_trace.hpp\"\n";
+  ST_CHECK_EQ(count_rule(lint_source("src/core/probe.cpp", commented), "L16"), 0U);
+}
+

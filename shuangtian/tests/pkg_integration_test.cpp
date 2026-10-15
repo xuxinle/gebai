@@ -106,7 +106,11 @@ ST_MAIN(run_app)
 
 }  // namespace
 
-ST_TEST_SLOW(independent_project_builds_links_and_runs) {
+/// 软超时 60s：真生成+真构建+真链接+真跑产物，耗时由工具链决定（debug 实测
+/// Linux ~18s / Windows 9~13s，共享机器还会被邻居抬高）——不覆盖默认 10s 的话
+/// 把「框架默认值不适合集成用例」误报成被测对象问题（2026-10-15 Windows 全量
+/// 实测 12.43s 误红，用例本身成功：产物输出 integration-ok）。
+ST_TEST_WITH_TIMEOUT(independent_project_builds_links_and_runs, 60'000) {
   if (const char* disabled = std::getenv("ST_INTEGRATION_BUILD");
       disabled != nullptr && std::string_view(disabled) == "0") {
     st::print("[独立工程] ST_INTEGRATION_BUILD=0 → 跳过（**非通过**：真构建被显式关闭）\n");

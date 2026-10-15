@@ -12,7 +12,6 @@
 
 #include "st/core/fs.hpp"
 #include "st/core/log_file.hpp"
-#include "st/ui/state_trace.hpp"
 
 #include <cstddef>
 #include <cstdint>

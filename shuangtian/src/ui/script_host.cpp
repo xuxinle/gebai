@@ -152,6 +152,14 @@ struct ScriptHost::Impl {
   }
 
   /// 取回并应用 JS 排队的变更集（一次跨边界取回全部）。
+  ///
+  /// ⚠ **不调 `mark_dirty_all`**（2026-10-15 收敛）：逐元素路径已自带精确标脏——
+  /// `apply_properties` 对每个真改到的属性调 `element.mark_dirty()`（元素级
+  /// damage 上报）与 `apply_layout_property` 尾部的 `mark_layout_dirty()`；
+  /// `invoke_element` 的 focus/blur 走 `root.set_focus`（自带标脏与
+  /// `note_changed`）。末尾再整帧标脏会把这套收敛摊回「每次 JS 写入都整帧重绘」
+  /// ——控制通道 `set`（server.cpp）同语义路径从没有这个尾巴。回归：
+  /// `script_write_takes_partial_damage_path`（ui_script_host_test）。
   auto commit_changes() -> void {
     auto changes = engine->call("__take_changes", {});
     if (!changes || !changes->is_array()) return;
@@ -171,7 +179,6 @@ struct ScriptHost::Impl {
         (void)invoke_element(*root, *element, action, st::json_get_string(change, "argument"));
       }
     }
-    root->mark_dirty_all();
   }
 
   /// 一次脚本入口的标准流程：失效快照 → 执行 → 提交变更。

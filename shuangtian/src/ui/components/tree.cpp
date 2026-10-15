@@ -409,6 +409,12 @@ auto Tree::set_property(std::string_view name, std::string_view value) -> bool {
     set_row_height(static_cast<float>(*parsed));
     return true;
   }
+  if (name == "selected_key") {
+    // 程序化选择（写侧）：与键盘/鼠标同链（notify=true 触发 `on_select`），
+    // 自动化按键精确驱动而不用坐标猜行序（gbcode e2e 亲历：首版就猜错）。
+    select_key(value, true);
+    return true;
+  }
   return Element::set_property(name, value);
 }
 

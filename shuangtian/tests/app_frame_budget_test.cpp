@@ -34,11 +34,13 @@
 #include "st/app/app.hpp"
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
+#include "st/ext/json.hpp"  // ScriptHost::eval 返回 Result<Json>（完整类型，json_fwd 不够）
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/test/test.hpp"
 #include "st/text/text.hpp"
 #include "st/ui/components/basic.hpp"
+#include "st/ui/script_host.hpp"
 #include "st/ui/theme.hpp"
 #include "st/ui/ui_root.hpp"
 
@@ -83,6 +85,7 @@ inline constexpr int kHeight = 800;
       card->style().width = 140.0f;
       card->style().height = 48.0f;
       auto label = std::make_unique<st::ui::Text>(std::format("卡片 {}·{}", row, column));
+      label->set_id(std::format("label-{}-{}", row, column));  // JS 写文本的入口（text 属性在 Text 上）
       label->style().font_size = 13.0f;
       card->add_child(std::move(label));
       row_panel->add_child(std::move(card));
@@ -397,4 +400,75 @@ ST_TEST_SLOW(frame_cost_breakdown_for_diagnostics) {
             layout_ms, layout_ms / unit, paint_ms, paint_ms / unit, layout_ms + paint_ms);
   ST_CHECK(layout_ms > 0.0);
   ST_CHECK(paint_ms > 0.0);
+}
+
+/// JS 写单元素的重绘成本对照（量化 2026-10-15 两次收敛的收益，不断言阈值）：
+///
+/// `script_host.commit_changes` / `declarative_host.__d_apply_batch` 删掉尾部
+/// `mark_dirty_all` 后，JS 写单元素的下一帧应走**局部损坏区**；作为对照，
+/// 手动 `mark_dirty_all` 后的整帧重绘是收敛前的旧路径成本。两个数都打出来
+/// （多轮取中位，与同文件其它量尺同构：单次测量把调度噪声当成本是踩过的坑）。
+/// 只设**量级断言**（局部至少比整帧便宜一半）——精细阈值交给 frame 门禁那条。
+ST_TEST_SLOW(script_write_partial_vs_full_frame_cost) {
+  RootFixture fixture;
+  st::ui::UiRoot& root = fixture.root();
+  st::ui::ScriptHost host{root};
+  st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(kWidth, kHeight, 1.0f);
+
+  // 预热：首帧（字体/懒分配）+ 进入稳态。
+  root.mark_dirty_all();
+  root.layout(true);
+  canvas.clear(st::math::Color::rgb(0xF7, 0xF8, 0xFA));
+  (void)root.paint_frame(canvas);
+  root.clear_dirty();
+
+  const auto paint_one_js_write = [&]() -> double {
+    // JS 写 card-0-0 内文本的 text（该卡片尺寸固定 140×48，文本变更不挑动兄弟
+    // → 几何签名不变 → 局部帧；与 script_write_takes_partial_damage_path 同型）。
+    (void)host.eval("$('#label-0-0').set({text:'局部'}); 'ok'");
+    canvas.clear(st::math::Color::rgb(0xF7, 0xF8, 0xFA));
+    const auto start = Clock::now();
+    (void)root.paint_frame(canvas);
+    const double ms = elapsed_ms(start);
+    root.clear_dirty();
+    return ms;
+  };
+  const auto paint_one_full = [&]() -> double {
+    // 旧路径（收敛前）：写属性后再整帧标脏。
+    (void)host.eval("$('#label-0-0').set({text:'整帧'}); 'ok'");
+    root.mark_dirty_all();
+    canvas.clear(st::math::Color::rgb(0xF7, 0xF8, 0xFA));
+    const auto start = Clock::now();
+    (void)root.paint_frame(canvas);
+    const double ms = elapsed_ms(start);
+    root.clear_dirty();
+    return ms;
+  };
+
+  constexpr int kRounds = 21;  // 奇数：中位数不需平均
+  std::vector<double> partial_samples;
+  std::vector<double> full_samples;
+  partial_samples.reserve(kRounds);
+  full_samples.reserve(kRounds);
+  bool last_partial_flag = false;
+  int dirty_w = 0;
+  int dirty_h = 0;
+  for (int index = 0; index < kRounds; ++index) {
+    partial_samples.push_back(paint_one_js_write());
+    last_partial_flag = root.last_frame_partial();
+    dirty_w = root.dirty_rect().width;
+    dirty_h = root.dirty_rect().height;
+    full_samples.push_back(paint_one_full());
+  }
+  std::ranges::sort(partial_samples);
+  std::ranges::sort(full_samples);
+  const double partial_median = partial_samples[kRounds / 2];
+  const double full_median = full_samples[kRounds / 2];
+  const double unit = clear_ms();
+  st::print("[frame-js-write] 局部帧中位 {:.3f}ms（{:.2f}× 清屏） vs 整帧中位 {:.3f}ms（{:.2f}× 清屏）"
+            "→ 局部/整帧 = {:.2f}（末轮局部={}，dirty={}×{}）\n",
+            partial_median, partial_median / unit, full_median, full_median / unit,
+            partial_median / full_median, last_partial_flag, dirty_w, dirty_h);
+  ST_CHECK(last_partial_flag);  // 必须真走局部路径（否则量的是两个整帧）
+  ST_CHECK(partial_median * 2.0 <= full_median);  // 量级断言：局部至少便宜一半
 }

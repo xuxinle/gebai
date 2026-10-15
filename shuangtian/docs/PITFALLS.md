@@ -20,6 +20,8 @@
 | **`--force` 才重编** | `st build` 增量按 **mtime** 判定；改了源码但结论没变时**先怀疑二进制是旧的**。强制重编用 `--force`，或在改动**新增文件**后删 `st_tests` 产物 | `CONVENTIONS.md` §7.4 |
 | **`st test <filter>` 不重编** | 带过滤器的 `test` 会重跑但**不重编**——"单跑绿、全量红"的经典成因。**已核实并修正（2026-10-13）：现行 `run_tests` 无条件 `compile_units`+`link`（mtime 增量），实测改源后 `st test <filter>` 正确重编重链（exe mtime > src mtime）。本条保留作为历史记录与复核方法：结论与源码矛盾时先比对 exe/src mtime** | `CONVENTIONS.md` §7.4；实测 2026-10-13（build.cpp 的 `run_tests`） |
 | **产物路径有两套** | `build/bin/st`（自举产物）与 `build/dev/bin/st`（真产物）**不是同一个文件**；改了 linter 却看到旧行为时先确认跑的是哪个 | 本文件 · 实测 2026-10-09 |
+| **字符串搜到 ≠ 新二进制** | 验证工具链是否含新逻辑，别在 exe 里搜字符串（新加的规则描述文本可能来自其它段/旧对象）；**决定性判据是行为**——如 lint 用 `--rules` 列表能不能列出新增规则（实测 2026-10-15：`Select-String st.exe "L16"` 命中但 `--rules` 没有——跑的是旧二进制） | `tools/stpm/main.cpp` 的 `--rules` 分支 |
+| **`st build st` 不能自举** | 用 `st.exe` 构建它自己时，链接器要覆写正在运行的 exe → `permission denied`。**用另一份构建器**（如 `build/bin/st.exe` 构建 dev 档，或反之）——两套产物路径在这里恰好成为优势 | `st.pkg` targets.st；实测 2026-10-15 |
 | **逆向验证用 `copy2` 恢复 = 假绿** | `copy2` 把**旧 mtime** 一起搬回来（比回退版编出的 `.o` 还旧）→ 跑的是上一份二进制。恢复要**删旧文件再写** | `CONVENTIONS.md` §7.3 表格 |
 | **测试结论与代码矛盾时** | 先查二进制是不是新的，**不要**先怀疑代码 | `CONVENTIONS.md` §7.4 |
 
@@ -36,6 +38,7 @@
 | **假 server 用 `sh` 脚本 = 只在 POSIX 成立** | Windows 的 `CreateProcessW` **不认 shebang**（报“%1 不是有效的 Win32 应用程序”），而用例里还跟着索引空 vector——两者叠加就是上一条。跑脚本的用例要么标 `ST_TEST_SLOW` + 平台跳过，要么换成真程序 | `tests/lsp_client_test.cpp` 的 `FakeServer` 注释 |
 | **“0 命中”与“读不到”必须是两个数** | “替换了 0 处”至少三种成因：目标不是磁盘文件 / 文件读失败 / 真没命中。只报一个总数时，排障要重跑一遍搜索才能区分。把**次因**（目标数/读失败数/无命中数）一并报出 | `examples/gbcode/main.cpp` 的 `replace_in_workspace` 注释 |
 | **回归测试要调生产函数** | 测试里“自己做一遍正确逻辑再断言”= 测的是测试自己；回退生产实现后依然全绿（实测：崩溃报告文件名那条，回退后仍 PASS；改成调 `crash_report_file_name` 后回退立刻变红） | `tests/core_log_file_test.cpp` 的 `log_crash_report_filename_has_no_colon` 注释 |
+| **按注册序取模的测试期望必须观察推导** | 分片（`--shard`）按**全局注册序**取模，而全局序由其它 TU 的用例数决定——早链接 TU 正常新增一例就把哨兵块整体平移，三处硬编码期望（块起点≡0 mod 4 / 落片号 / 空片选片）**全部误击**，现象像 flaky（同二进制忽绿忽红——其实是中途重建）。期望值只能**运行时观察**（无过滤 `--list` 行号即全局注册序），不能算术硬编码 | `tests/shard_parity_test.cpp` 的 `full_listing_lines` 注释；实测 2026-10-15 |
 
 ## 场景 3：改观感（字体/配色/动画/手感）
 
@@ -95,7 +98,8 @@
 | **判据落在产物存在性上** | 不要用退出码/日志当代理信号（实测：PCH 创建"报成功"其实静默空转） | `DESIGN.md` §8.2 第 49 条 |
 | **自举单元集必须从清单推导，不能按目录写死** | bootstrap 写死了 `src/core src/ext src/pkg`，与 `st.pkg` 脱节——新增 `src/ext/video.cpp` 引 `codec/raster` 后，报的是链接期一串 `undefined reference to st::...`（**报错指向源码，真因是"该编的单元没编"**）。现在按清单推：`sources − targets.st.exclude_sources + targets.st.sources` | `bootstrap.sh` / `bootstrap.ps1` 的相邻注释 |
 | **排除模式 `src/ui/*` 不跨子目录** | `*` 不跨 `/`（与 `fs::match_glob` 同口径），要跨得写 `src/ui/**`。写错的症状是**排除静默不生效**（只警告"未命中"），于是 `EXCLUDE` 形同虚设 | `src/core/fs.cpp` `match_segments` |
-| **工具链只该编它真需要的单元** | `st` 一行渲染都不跑，却被 `core/platform_crash.cpp → ui/state_trace.hpp` 与 `shell → ui/window_control.hpp` 两条**头文件级**反向依赖拖进整条渲染链（codec/raster/text/md/xml/shell）。见 `BACKLOG.md` P1 | `include/st/ui/window_control.hpp` 注释 |
+| **工具链只该编它真需要的单元** | `st` 一行渲染都不跑，却被 `core/platform_crash.cpp → ui/state_trace.hpp`（死 include）与 `shell → ui/window_control.hpp` 两条**头文件级**反向依赖拖进整条渲染链。前者已删 + lint **L16** 机械拦截（core 文件 include `st/ui/` 头即违规）；后者见 `BACKLOG.md` P1 | `include/st/ui/window_control.hpp` 注释 |
+| **幂等判据用 mtime 或「产物存在即跳过」都是错判据** | 实测两处：① mtime 比——`--strip-debug` 会刷新产物 mtime ⇒ 幂等判据恒假、每次白跑；② `.debug` 存在即跳过——重链后**新产物的调试信息永久丢失**。正解：探真实内容（`objdump -h` 查 `.debug_info` 是否还在），探不到时按需要重跑处理（安全方向） | `BACKLOG.md` 整改轮（2026-10-14）「本轮由自己的用例抓出的两处判据错」 |
 | **自举把"应用向"单元也编进来会撞构建期生成头** | `src/ui/script_host.cpp` / `declarative_host.cpp` include **构建期生成**的 `battery/embed.hpp`（由 `st build` 产出）——自举阶段它还不存在，编它们必然 `fatal error`。这两条又正好是"工具不需要的应用层" | `src/pkg/embed.cpp` 的 `generate_embeds` |
 | **`%lld` 与 `int64_t` 在 LP64 上不是同一类型** | Linux/macOS `int64_t` 是 `long`、Windows 是 `long long`。`sscanf("%lld", &int64_var)` 只在 Windows 合法，Linux 上 `-Wformat` + `-Werror` = **构建失败**（实测：WSL 跑 bootstrap 时刷屏）。用 `long long` 承接后显式转换 | `src/ext/video.cpp` 的 `parse_probe_output` 注释 |
 

@@ -500,6 +500,8 @@ PowerShell 的 PSReadLine 会画一段**只有显示、不是输入**的内联�
 | L12 | `\.at\s*\(`（键缺失即抛异常，而本框架无通用异常边界） | 无（Json 用 `json_at`/`json_find`，容器用 `find`） |
 | L13 | 组件**遮蔽** `Element` 保护成员（`focused_`/`key_`…）；`semantics_flags` 覆写以 `SemanticsFlags flags{}` 起手 | 无（专用检查：需判断「当前类是否继承 `Element`」与「是否在覆写体内」，单行正则表达不了；同类先例 L8） |
 | L14 | `#include <windows.h>`/`<unistd.h>`/`<dlfcn.h>`/`<shellapi.h>`/`<winsock2.h>`/`<arpa/inet.h>`/`<netinet/in.h>`/`<sys/socket.h>`/`<poll.h>`/`<fcntl.h>`，以及直接用 `dlopen`/`dlsym`（§10 第 1 条：平台差异只能出现在 `platform_*`） | `platform_*.cpp`（单点封装）；`shell/backend.cpp`（需 `dlopen` 做**运行时后端探测**本身）；清单 `lint.exempt.L14` 登记的 `core/entry.cpp`（见下表） |
+| L15 | raw string 无定界符（`R"(`）——内容里的 `)"` 会提前终结（提示级） | 无（改用 `R"x(…)x"`；本仓实测踩过两次） |
+| L16 | **层方向**：文件在 `src/core/`、`include/st/core/` 下且 `#include "st/ui/…"`（core 不得依赖 ui——BACKLOG P1 根因①的防护栏；`check_layer_includes` 专用检查，方向判定需文件路径，单行正则表达不了） | 无（core→ui 没有合法形态；将来若真需要，走清单豁免并在此登记） |
 
 **扫描语义（重要）**：匹配前先做两层净化——① **注释**不参与任何规则；② **字符串字面量内容**不参与任何规则
 （关键字表、规则表自身的正则字符串都不是代码，否则 linter 会对着自己的关键词表报几十条"违规"）。
@@ -521,6 +523,7 @@ PowerShell 的 PSReadLine 会画一段**只有显示、不是输入**的内联�
 | L8 | `tests/ui_dsl_test.cpp` 的用例级计数器 | 需被 lambda 捕获并跨重组共享；作用域限于单个用例（不跨用例泄漏） | 行内（前置） |
 | L14 | `src/core/entry.cpp` | `ST_MAIN` 需在调用点正规化 Windows 的 ANSI `argv`（`<windows.h>`/`<shellapi.h>`）+ POSIX 侧 `<unistd.h>`。这是**进程入口**的职责，不属于任何 `platform_*` 横切层 | **清单**（`st.pkg` 的 `lint.exempt.L14`） |
 | L3 | `src/net/platform_tls_openssl.cpp`（`ST_SYM`） | dlopen 符号还原样板：11 个 `ST_SYM` 展开是同一形参表，函数化反而藏错。行内豁免在此**结构上放不下**：`#define` 首行必须以 `\` 结尾（尾随注释在 Linux g++ 判 stray `'\'` 拒编），而 `has_allow_comment` 只认同一行 | **清单**（`st.pkg` 的 `lint.exempt.L3`） |
+| L3 | `tests/shard_parity_test.cpp`（`ST_SHARDPROBE_CASE`） | 哨兵生成 X 宏：12 个哨兵展开是同一段注册体，函数化反而藏错（且落片断言依赖哨兵按数值序注册，手写 12 段更容易插错位置）。行内豁免同样结构上放不下（多行宏首行以 `\` 结尾） | **清单**（`st.pkg` 的 `lint.exempt.L3`） |
 | L14 | `src/shell/backend.cpp` | 需 `dlopen` 做**运行时后端探测**——而这正是 §10 第 1 条「平台后端一律运行时探测（不产生链接期依赖）」的实现处：探测本身就是平台差异的唯一判定点 | 内置 |
 
 > 两条豁免通道都**各自计数**（`st lint` 汇总行报出「行内 N / 清单 M」），不允许静默。

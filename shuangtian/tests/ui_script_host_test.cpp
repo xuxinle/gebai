@@ -154,6 +154,30 @@ ST_TEST(script_triggers_component_action) {
   ST_CHECK(fx.root.focused() == fx.search);  // 裸指针走布尔断言（进不了 std::format）
 }
 
+/// JS 写入单元素后，重绘必须走**局部损坏区**路径，不是整帧
+/// （BACKLOG「script_host 提交链仍调 mark_dirty_all」的回归钉子：
+/// 逐元素路径 apply_properties/invoke_element 已自带精确标脏，
+/// 末尾的 mark_dirty_all 会把收敛摊回「每次 JS 写入都整帧重绘」）。
+ST_TEST(script_write_takes_partial_damage_path) {
+  Fixture fx;
+  st::raster::Canvas canvas =
+      st::raster::Canvas::for_logical_size(600.0f, 400.0f, 1.0f);
+  // 首帧：整帧（合理——还没上一帧），清脏后进入稳态。
+  (void)fx.root.paint_frame(canvas);
+  ST_CHECK(!fx.root.last_frame_partial());
+  fx.root.clear_dirty();
+
+  // JS 改一个元素的纯绘制属性（text 不影响布局）→ 下一帧必须局部。
+  ST_CHECK_EQ(fx.eval("$('#status').set({text:'局部更新'}); 'ok'"), std::string("ok"));
+  const bool partial = fx.root.paint_frame(canvas);
+  ST_CHECK(partial);
+  ST_CHECK(fx.root.last_frame_partial());
+  fx.root.clear_dirty();
+
+  // 写入确实生效（局部帧不是「没画」）。
+  ST_CHECK_EQ(fx.status->content(), std::string("局部更新"));
+}
+
 ST_TEST(script_missing_selector_is_observable_not_silent) {
   Fixture fx;
   // 未命中：读得到 undefined，写被忽略——但 `exists` 能判定，脚本可自查

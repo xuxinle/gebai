@@ -20,7 +20,7 @@ struct RuleSpec {
 };
 
 /// 规则表（与 `CONVENTIONS.md` §8 一一对应）。
-constexpr std::array<RuleSpec, 15> kRules{{
+constexpr std::array<RuleSpec, 16> kRules{{
     {"L1", "禁止裸 new/delete/malloc/free（用 unique_ptr/RAII/容器）",
      R"(\bnew\s|\bdelete\s|\bmalloc\s*\(|\bfree\s*\(|\brealloc\s*\()"},
     {"L2", "禁止 C 风格强制转换（用 static_cast/bit_cast）",
@@ -92,13 +92,23 @@ constexpr std::array<RuleSpec, 15> kRules{{
     {"L15", "raw string 建议带定界符（`R\"x(...)x\"`）——无定界符时内容里的 `)\"` 会提前终结（提示级）",
      // `R"(` 紧邻（无定界符）才报；`R"x(` 之类有定界符的**不**匹配。
      //
-     // ⚠ **不能作为单行正则实现**：`scan_text` 会先 `strip_string_literals`
-     //（字符串内容不参与任何规则），而 `R"(` 正是字符串字面量的**开头**——
-     // 剥完就没了。实数落空后才明白：这条必须走**专用检查**（同 L13），
-     // 在净化**之前**看原文（见 `check_raw_string_delimiters`）。
-     // 顺带记一笔：写这个正则时我自己用无定界符形式写它，被它提前终结了一次
-     //——这条规则的最佳示范就是它自己。
-     ""},
+         // ⚠ **不能作为单行正则实现**：`scan_text` 会先 `strip_string_literals`
+    //（字符串内容不参与任何规则），而 `R"(` 正是字符串字面量的**开头**——
+    // 剥完就没了。实数落空后才明白：这条必须走**专用检查**（同 L13），
+    // 在净化**之前**看原文（见 `check_raw_string_delimiters`）。
+    // 顺带记一笔：写这个正则时我自己用无定界符形式写它，被它提前终结了一次
+    //——这条规则的最佳示范就是它自己。
+    ""},
+    // L16：**层方向**——低层不得 include 高层头（core→ui 这类）。
+    //
+    // 为什么需要它（BACKLOG P1 实测）：`platform_crash.cpp` 曾 include
+    // `st/ui/state_trace.hpp`——是**死 include**（零符号使用），但正因为是
+    // 头文件级依赖，`st`（工具链）被迫把整条 ui 渲染链拖进链接闭包；
+    // 而 lint 看不见它（正则只看单行、看不到依赖方向），于是它活到 2026-10。
+    // BACKLOG 的原话：「两条根因都是头文件级的，所以 lint 看不见」——本条就是
+    // 把这道检查补上。命中方向：**core → 任何 ui 头**（将来可扩展到 core→shell 等）。
+    // 走专用检查（同 L13/L15）：方向判定需要文件路径，单行正则表达不了。
+    {"L16", "core 层不得 include ui 层头（依赖方向：ui 可用 core，core 不认识 ui）", ""},
 }};
 
 /// 去掉行注释与块注释状态（保留字符串内容，简单启发式）。
@@ -475,6 +485,50 @@ constexpr std::array<std::string_view, 19> kElementStateMembers{
   return violations;
 }
 
+/// **层方向检查（L16）**：core 层的文件不得 include ui 层的头。
+///
+/// 为什么这条要专用检查（同 L13/L15）：方向是**文件路径 × include 目标**的关系，
+/// 单行正则表达不了——正则只看得到「这行 include 了什么」，看不到「谁 include 的」。
+///
+/// 判据（刻意收窄，只判**确定性方向**）：
+/// - 文件在 `src/core/` 或 `include/st/core/` 下，且 include 了 `st/ui/` 开头的头
+///   → 违规（core 认识 ui 就是层次污染；实测形态：`platform_crash.cpp` 的死 include
+///   `st/ui/state_trace.hpp` 把渲染链拖进工具链闭包，BACKLOG P1 根因①）；
+/// - 其余方向**不判**：ui→core 合法；shell→ui 有合法前例（窗口命中契约在 ui，
+///   BACKLOG P1 根因②是待解耦项，不是违规项——本规则不替它报错）。
+[[nodiscard]] auto check_layer_includes(const std::vector<std::string_view>& lines,
+                                       std::string_view path, std::size_t& suppressed)
+    -> std::vector<LintViolation> {
+  // 判定调用方（本文件）是否属于 core 层：按路径片段判（`lint_file` 传绝对路径，
+  // `lint_project` 传相对路径，两寄都含 `core/` 段）。**先归一化分隔符**：Windows 的
+  // `fs::join` 产生反斜杠，而判据写的是正斜杠（实测：`lint_source` 临时文件在 Windows
+  // 上全是 `\`，不归一化则永不命中）。
+  std::string normalized{path};
+  for (char& character : normalized) {
+    if (character == '\\') character = '/';
+  }
+  const bool in_core = normalized.find("src/core/") != std::string::npos ||
+                       normalized.find("include/st/core/") != std::string::npos;
+  if (!in_core) return {};
+  std::vector<LintViolation> violations;
+  bool in_block_comment = false;
+  for (std::size_t index = 0; index < lines.size(); ++index) {
+    const std::string_view raw = lines[index];
+    if (has_allow_comment(raw, "L16")) {
+      ++suppressed;
+      continue;
+    }
+    const std::string uncommented = strip_comments(raw, in_block_comment);
+    // include 的 ui 头：`#include "st/ui/…"`（引号形式——框架内头都是引号 include）。
+    const std::size_t hit = uncommented.find("#include \"st/ui/");
+    if (hit == std::string::npos) continue;
+    violations.push_back(LintViolation{std::string(path), static_cast<int>(index) + 1, "L16",
+                                       "core 层 include 了 ui 层头（依赖方向反了）：" +
+                                           std::string(trim(raw))});
+  }
+  return violations;
+}
+
 /// 读遮蔽副本（或语义标志被重建）时，直接调 `set_focused` 的组件级单测读写落在同一侧，
 /// 只有真实应用（`UiRoot::set_focus`）才暴露。实测代价：`CodeEditor` 自带
 /// `bool focused_{false}` → 光标永不绘制、括号高亮失效，而测试全绿。
@@ -619,6 +673,9 @@ constexpr std::array<std::string_view, 19> kElementStateMembers{
     violations.push_back(std::move(violation));
   }
   for (auto& violation : check_raw_string_delimiters(lines, path, suppressed)) {
+    violations.push_back(std::move(violation));
+  }
+  for (auto& violation : check_layer_includes(lines, path, suppressed)) {
     violations.push_back(std::move(violation));
   }
   for (auto& violation : check_element_state(lines, path, suppressed)) {

@@ -169,7 +169,9 @@ auto DeclarativeHost::attach(ScriptHost& script, UiRoot& root, Element* host_ele
               auto removed = element->parent()->remove_child(element);
               (void)removed;
             }
-            root_ptr->mark_dirty_all();
+            // 不再 mark_dirty_all（2026-10-15 收敛）：结构变更自带精确标脏——
+            // remove_child/insert_child 尾部 mark_layout_dirty，重排后几何签名
+            // 变化时 UiRoot::layout 尾部自动整帧；根分支 set_content 自带整帧。
             return st::Json(true);
           });
       !status) {
@@ -216,7 +218,10 @@ auto DeclarativeHost::attach(ScriptHost& script, UiRoot& root, Element* host_ele
                 applied_count += applied.size();
               }
             }
-            root_ptr->mark_dirty_all();
+            // 不再 mark_dirty_all（2026-10-15 收敛，同 script_host commit_changes）：
+            // apply_properties 对每个真改到的属性自带元素级 mark_dirty + damage
+            // 上报；布局属性尾部 mark_layout_dirty，重排后几何签名不变时不触发
+            // 整帧（没挑动任何东西的重排不该重画，见 UiRoot::layout 尾部）。
             return st::Json(applied_count);
           });
       !status) {

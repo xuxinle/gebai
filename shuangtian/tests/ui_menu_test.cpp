@@ -323,6 +323,34 @@ ST_TEST(context_menu_item_click_activates) {
   ST_CHECK_EQ(closed, 1);
 }
 
+ST_TEST(menu_panel_activate_item_by_id_drives_same_chain) {
+  // 写侧动作面：`invoke("activate_item", id)` 与鼠标 Click 同链（on_activate），
+  // 自动化不再坐标猜行序——菜单动态化（最近打开）后行序会变，坐标法脆。
+  MenuPanel panel{std::vector<MenuItem>{
+      MenuItem{.id = "open", .label = "打开"},
+      MenuItem{.id = "sep", .label = "", .separator = true},
+      MenuItem{.id = "recent-1", .label = "最近打开 1"}}};
+  panel.set_anchor(st::math::Rect{10.0f, 10.0f, 120.0f, 28.0f});
+
+  std::vector<std::string> activated;
+  panel.on_activate = [&](std::size_t index) {
+    activated.push_back(std::string(panel.item_id(index)));
+  };
+
+  // 按 id 激活：走同一回调链，下标正确（动态化后行序变化也不受影响）。
+  ST_CHECK(panel.invoke_action("activate_item", "recent-1"));
+  ST_CHECK_EQ(activated.size(), 1U);
+  ST_CHECK_EQ(activated.front(), std::string("recent-1"));
+
+  // 未知 id：如实 false，不派发。
+  ST_CHECK(!panel.invoke_action("activate_item", "no-such-item"));
+  ST_CHECK_EQ(activated.size(), 1U);
+
+  // 分隔线（无 id）不被激活——即使 argument 为空串。
+  ST_CHECK(!panel.invoke_action("activate_item", ""));
+  ST_CHECK_EQ(activated.size(), 1U);
+}
+
 // ————————————————————————————————————————————————————————————————————————————
 // 面板生命周期：关闭必须通知调用方（否则 overlay 留在屏上）
 // ————————————————————————————————————————————————————————————————————————————

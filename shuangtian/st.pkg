@@ -49,7 +49,7 @@
     "//": "规则豁免：规则 id → 路径 glob。成片/基于位置的边界走这里（单点破例走行内 // lint-allow）。两通道都需在 CONVENTIONS.md §8 登记，且各自计数、不静默。",
     "exempt": {
       "L14": ["src/core/entry.cpp"],
-      "L3": ["src/net/platform_tls_openssl.cpp"]
+      "L3": ["src/net/platform_tls_openssl.cpp", "tests/shard_parity_test.cpp"]
     }
   },
   "//system_libs": "本机（非交叉）链接用的库。注意与 `toolchains.<名>.system_libs` 的分工：后者在**交叉编译**时**整体接管**（见 `resolve_system_libraries`），本机构建根本不看它。所以 Win32 相关的系统库（dbghelp 供崩溃调用栈符号化）两处都要写。",

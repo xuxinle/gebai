@@ -97,6 +97,24 @@ auto MenuPanel::property_names() const -> std::vector<std::string_view> {
   return names;
 }
 
+auto MenuPanel::invoke_action(std::string_view action, std::string_view argument) -> bool {
+  if (action == "activate_item") {
+    // 按 id 激活（与鼠标 Click 同链：走 `on_activate`，不是直接改高亮）：
+    // 自动化不再 `bounds.y + 16 + i*32` 数行序点击——菜单动态化（最近打开）
+    // 后行序会变，坐标法脆（gbcode e2e 亲历）。id 找不到时**如实 false**
+    // （与既有下标激活共存，不静默）。分隔线（无 id）不参与。
+    for (std::size_t index = 0; index < items_.size(); ++index) {
+      if (items_[index].separator || items_[index].id.empty()) continue;
+      if (items_[index].id == argument) {
+        if (on_activate) on_activate(index);
+        return true;
+      }
+    }
+    return false;
+  }
+  return Element::invoke_action(action, argument);
+}
+
 void MenuPanel::set_highlighted(std::size_t index) {
   if (index >= items_.size()) index = kNoIndex;
   if (index != kNoIndex && items_[index].separator) index = kNoIndex;

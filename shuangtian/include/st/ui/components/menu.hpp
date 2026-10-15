@@ -93,6 +93,10 @@ class MenuPanel : public Element {
   [[nodiscard]] auto get_property(std::string_view name) const
       -> std::optional<std::string> override;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  /// 动作面：`activate_item`（参数=item id）——自动化按键精确驱动，与鼠标
+  /// Click 同链（`on_activate`）；未知 id 如实 false，分隔线不参与。
+  [[nodiscard]] auto invoke_action(std::string_view action, std::string_view argument)
+      -> bool override;
 
   [[nodiscard]] auto item_count() const noexcept -> std::size_t;
   [[nodiscard]] auto item_id(std::size_t index) const -> std::string_view;

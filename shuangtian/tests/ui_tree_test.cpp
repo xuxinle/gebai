@@ -154,6 +154,32 @@ ST_TEST(tree_file_click_selects_and_notifies) {
   ST_CHECK_EQ(std::string(tree.selected_key()), std::string("README.md"));
 }
 
+ST_TEST(tree_selected_key_is_writable_via_property_and_notifies) {
+  // 写侧 selected_key（协议 set / 脚本 set / 声明式共用）：自动化按键精确驱动
+  // 而不用坐标猜行序（gbcode e2e 亲历：首版猜错点成了默认样例）。
+  Tree tree;
+  layout_tree(tree, sample_nodes());
+
+  std::string picked;
+  tree.on_select = [&](std::string_view key) { picked = std::string(key); };
+
+  // 有效 key：写入生效且触发回调（与键盘/鼠标同链）。
+  ST_CHECK(tree.set_property("selected_key", "src/main.cpp"));
+  ST_CHECK_EQ(std::string(tree.selected_key()), std::string("src/main.cpp"));
+  ST_CHECK_EQ(picked, std::string("src/main.cpp"));
+
+  // 读回一致（属性面对称）。
+  const auto read_back = tree.get_property("selected_key");
+  ST_CHECK(read_back.has_value());
+  ST_CHECK_EQ(*read_back, std::string("src/main.cpp"));
+
+  // 无效 key：清空选择（select_key 语义），回调不派发（valid=false 分支）。
+  picked.clear();
+  ST_CHECK(tree.set_property("selected_key", "no-such-key"));
+  ST_CHECK(std::string(tree.selected_key()).empty());
+  ST_CHECK(picked.empty());
+}
+
 ST_TEST(tree_keyboard_navigation_across_visible_rows) {
   Tree tree;
   layout_tree(tree, sample_nodes());

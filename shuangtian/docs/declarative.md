@@ -365,6 +365,9 @@ app.tick();
 
 - VDOM/重组器纯 JS（~400 行，编译期嵌入，机制同 `script_api.js`）；diff 在 JS 内完成，
   落地时**每帧最多一次跨界**（变更集批量提交，复用 ScriptHost 的 pending 队列）；
+  落地后**不整帧标脏**——逐元素路径自带精确标脏，重绘粒度与脚本/协议路径一致
+  （回归 `declarative_reconcile_takes_partial_damage_path`；结构变更由重排的几何
+  签名兑底决定是否整帧）；
 - **复用 ScriptHost 的引擎、事件桥、定时器**——一个应用一个 JS 上下文，
   `$('#x').set(...)`（命令式）与声明式 diff 共存共享提交管线；
 - 挂载点：`DeclarativeHost`（持有 ScriptHost + JS 重组器句柄）注册进 UiRoot 帧循环，

@@ -54,8 +54,14 @@ auto main(int argc, char** argv) -> int {
   if (list_only) return st::test::list_cases(filter);
   const int failed = st::test::run_all(filter);
   if (const char* junit = std::getenv("ST_JUNIT_XML"); junit != nullptr && junit[0] != '\0') {
-    const std::size_t written = st::test::write_junit(junit);
-    if (written == 0) std::fprintf(stderr, "JUnit 报告写入失败: %s\n", junit);
+    // `write_junit` 返回 0 有两种含义：**0 用例**（空分片/全被 filter 掉，合法形态
+    // ——`merge_junit_files` 对 0 用例片同语义：「没有结果不如不产出」）与**写失败**。
+    // 修复前两者不可区分，空分片会打出误导性的「JUnit 报告写入失败」（实测：
+    // `--test-jobs 4` + filter 只命中一个用例时，3 个空片各报一条 stderr 噪声）。
+    // 只报后者；0 用例是完全正常的状态，静默跳过。
+    if (!st::test::last_results().empty() && st::test::write_junit(junit) == 0) {
+      std::fprintf(stderr, "JUnit 报告写入失败: %s\n", junit);
+    }
   }
   return failed;
 }

@@ -132,6 +132,48 @@ ST_TEST(declarative_state_drives_reconcile) {
   ST_CHECK_EQ(content->child_at(0)->semantics_text(), std::string("点击了 3 次"));
 }
 
+/// 声明式重组后的属性更新必须走**局部损坏区**重绘，不是整帧
+/// （declarative_host __d_apply_batch/__d_unmount 收敛的回归钉子，
+/// 同 script_host commit_changes 那条：逐元素路径已自带精确标脏，
+/// 末尾 mark_dirty_all 会把收敛摊回「每次重组都整帧重绘」）。
+ST_TEST(declarative_reconcile_takes_partial_damage_path) {
+  Fixture fx;
+  ST_REQUIRE(fx.ready());
+  auto status = fx.decl->run(R"JS(
+    let count = null;
+    compose('Counter', () => {
+      if (count === null) count = useState(0);
+      return column({gap: 8}, [
+        text(() => '点击了 ' + count.value + ' 次'),
+        button('+1', () => { count.value = count.value + 1; }),
+      ]);
+    })
+  )JS");
+  ST_REQUIRE(status.has_value());
+  fx.root.layout(true);
+
+  st::raster::Canvas canvas =
+      st::raster::Canvas::for_logical_size(600.0F, 400.0F, 1.0F);
+  // 首帧整帧（无上一帧），清脏后进入稳态。
+  (void)fx.root.paint_frame(canvas);
+  ST_CHECK(!fx.root.last_frame_partial());
+  fx.root.clear_dirty();
+
+  // 状态写 → 重组：文本内容变（纯绘制变更，按钮几何未变）。
+  // ⚠ 重组会销毁重建元素：这里必须在重组**之后**重新拿元素指针。
+  st::ui::Element* button = fx.root.content()->child_at(1);
+  ST_CHECK(fx.real_click(*button));
+  ST_CHECK(fx.decl->tick());
+  const bool partial = fx.root.paint_frame(canvas);
+  ST_CHECK(partial);
+  ST_CHECK(fx.root.last_frame_partial());
+  fx.root.clear_dirty();
+
+  // 重组确实生效（局部帧不是「没画」）。
+  ST_CHECK_EQ(fx.root.content()->child_at(0)->semantics_text(),
+              std::string("点击了 1 次"));
+}
+
 // 协议路径：控制通道 `invoke click` 走 ui::invoke_element（合成事件通知观察者）——
 // 与真实鼠标点击对 JS 声明式层必须表现一致（DESIGN §6.7 事件顺序）。
 ST_TEST(declarative_protocol_invoke_click_drives_state) {

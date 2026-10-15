@@ -97,14 +97,25 @@
 >
 > 另：`independent_project_builds_links_and_runs` 在本容器**启动任何子进程后立即挂住**
 > （与本次改动无关的容器限制，需真编译真跑）。
+> ✅ Windows 宿主实测（2026-10-15）：**PASS**（9.27s / 10 断言，产物输出 integration-ok）
+> ——容器限制不复存在，该项在 Windows 可作为常规验证路径。
 >
 > **本轮由自己的用例抓出的两处判据错**（记一笔，因为都是“看起来显然”的写法）：
 > 分离调试信息的幂等判据先用 mtime 比（`--strip-debug` 会刷新产物 mtime ⇒ 恒假，每次白跑），
 > 后改成“`.debug` 存在即跳过”（重链后**新产物的调试信息会永久丢失**）——最终用
 > `objdump -h` 探“产物里还有没有 `.debug_info`”，探不到时**按需要重跑处理**（安全方向）。
 >
-> **待复测（需 Windows 机器）**：报告里的 Windows 数字（176MB / 53MB GPU 常驻 / 55 线程）
-> —— 本会话在 Linux 容器，无法复现；改动按跨平台实现，等效指标已在本侧实测。
+> **待复测（需 Windows 机器）——✅ 已复测（2026-10-15 第 5 轮，Windows 本机）**：
+> `mem_sample.py` 补 Windows 分支（ctypes：`GetProcessMemoryInfo` + Toolhelp32 线程计数，
+> 不起 PowerShell 子进程、不引 psutil），修复前在 Windows 上「采样失败」（逆向验证已回放）。
+> 实测（同报告口径，无头 software）：
+> | 路径 | RSS 峰值 | 私有内存 | 线程 |
+> |---|---|---|---|
+> | gallery dev+software | **30.5 MiB** | 20.9 MiB | 18 |
+> | gallery release+software | **35.2 MiB** | 20.5 MiB | 18 |
+> | gallery release+auto（GPU） | 48.9 MiB | 87.6 MiB | 73 |
+> 对照报告原始数字（176MB / 53MB GPU / 55 线程）：**整改收益在 Windows 上坐实**
+> （RSS 降为 1/5；GPU 路径线程 73 vs 报告 55——驱动栈差异，同量级）。
 > 复测口径：`python3 tools/mem_sample.py --exe <exe> -- --headless --control-port 0 --frames 100000 --renderer software`。
 >
 > 📋 2026-10-11 **自举修复轮**（Windows 首次自举链接失败）：现象是一串
@@ -175,10 +186,29 @@
 2. `src/shell/{backend,platform_win32}.cpp` `include "st/ui/window_control.hpp"`：
    「窗口边缘命中契约」定义在 `ui`（而 shell 必须用它），又把 `ui` 拉回工具链。
 
-**方向**：`ui::window_control`（窗口边缘判定 + `WindowControl` 抽象端口）**上移 `core`**
-（它本就"不含系统头、不认识窗口系统"），`shell` 与 `ui` 都从 `core` 取；
-`state_trace` 的崩溃钩子已经有函数指针（`set_crash_extra_provider`）解耦，
-剩下的是把头文件里的 `UiRoot*` 前向声明掉。做完则 `targets.st` 不再需要 `window_control` 补丁项。
+**根因①已修（2026-10-15，第 3 轮）**：取证发现它是**死 include**（零符号使用，
+崩溃钩子早已走 `set_crash_extra_provider` 函数指针）——删掉即根治，无需设计变更。
+同时新增 **lint L16 层方向规则**（core 文件 include `st/ui/` 头 → 违规）作为防护栏，
+防复发（详见 CONVENTIONS §8 规则表）。
+
+**根因②分析（只分析，未落地）**：`window_control` 契约（`WindowEdge` 枚举 +
+`kWindowResizeBorder` + `resize_edge_at` 纯函数 + `WindowControl` 抽象端口）
+上移 `core` 的影响面：
+
+- **方案**：新建 include/st/core/window_control.hpp（与现 `st/ui/window_control.hpp`
+  同内容，头文件注释同步改写「为什么放 core」）；`src/ui/window_control.cpp` →
+  `src/core/`（新建 `window_control.cpp`）；旧 `st/ui/window_control.hpp` 改为转发头
+  （`#include "st/core/window_control.hpp"`，过渡期兼容）或直接改全部 7 处引用点
+  （`shell.hpp`、`platform_{win32,x11,wayland}.cpp`、`title_bar.hpp`、`window_frame.hpp`、
+  `app.hpp`、`gallery/pages.hpp`）。
+- **收益**：`targets.st` 清单可删 `window_control.cpp` 补丁项，`st` 不再把窗框
+  契约编译进工具链；shell 不再 include ui。
+- **风险/代价**：① 层语义变化——「窗口」概念进入 core，需在 DESIGN.md 分层表
+  登记（core 新增职责：「与窗口系统无关的窗口几何契约」）；② `WindowControl`
+  端口的方法签名引用 `shell` 的能力语义，但端口本身纯虚、无系统头，无污染；
+  ③ 属**设计层面变更**，按协议要先定 DESIGN.md 分层表再动。
+
+**方向**：见上分析。做完则 `targets.st` 不再需要 `window_control` 补丁项。
 **属设计层面变更**（层间契约），要先定 `DESIGN.md` 的分层表再动。
 
 ### P2：构建期嵌入（`battery/embed.hpp`）与层闭包解耦
@@ -190,6 +220,44 @@
 `battery/embed.hpp: No such file or directory` 失败，而那看上去像路径问题。
 **方向**：嵌入资源改走「运行期读文件 + 可执行文件旁查找」或「显式的生成步骤前置」，
 让"能不能编"不再取决于"构建轮到哪一步"。
+
+**分析（2026-10-15 第 4 轮，只分析未落地）**：
+
+**现状机理**（取证）：`b::embed` 生成机制有三层作用域——工程库级（`st.pkg` 顶层
+`embed`，如 `src/ui/script_api.js`）、框架级（引用框架的独立工程用）、目标级
+（`targets.X.embed`，如 gallery 的 assets）。包含目录**按单元精确下发**
+（`attach_embeds`，build.cpp:317-343）——同一命令行出现两个 `battery/embed.hpp`
+时先命中的赢，另一方的资源 `static_assert` 失败（ODR 陷阱，DESIGN.md 缺陷表 #29）。
+消费端**只有 2 个框架源**：`src/ui/script_host.cpp:14`、`src/ui/declarative_host.cpp:10`
+（嵌 `script_api.js`/`declarative.js`——为可编辑器高亮 + 免转义，见 script_host.cpp:24-27
+的注释）。
+
+**候选方案对比**（代价递增，A/B/C/D）：
+
+- **A. 运行期读文件**：脚本前置改为启动时从可执行文件旁/包内读 `.js`。代价：
+  ① 丢「路径写错编译期报错」；② 分发形态变化（需随包带文件，单文件自包含性丢失）。
+  **不推荐**——嵌入的编译期检查与自包含性正是它的价值。
+- **B. 生成步骤前置**：把 `b::embed` 生成从「目标构建时」提到「自举之前」。
+  代价：自举脚本要复刻 stpm 的生成器逻辑（或先编一个最小生成器）——维护两份
+  生成逻辑，漂移风险高。**不推荐**。
+- **C. 消费端下沉到非生成依赖**：保持 `b::embed` 不变，但把 `script_host.cpp` 的
+  `b::embed` 调用改成**注入**——库层提供 `set_prelude_source(string_view)`
+  （或构造参数），由 app 层（在嵌入头可得的环境）注入。代价：改动小（两个文件
+  + 启动接线），但**只是把问题从 ui 移到 app**——app 层单元若被工具链需要，
+  同样的坑还在。
+- **D. 延迟 include**（最小侵入）：`script_host.cpp` 用 `#if ST_HAS_EMBED`
+  门控——自举/工具链编译时退化为运行期读文件（保留嵌入为默认）。代价：
+  两套加载路径并存，行为差异需测试覆盖。
+
+**推荐**：维持现状 + 把隐性问题显性化——机械护栏（启发式与 L16 同型）：
+`check_layer_includes` 再加一条「框架源 include `battery/embed.hpp` 时，
+若该单元属于工具链闭包（st.pkg targets.st 未排除）则报」是过度耦合的机械检查，
+但「谁属于工具链闭包」只有清单知道，lint 拿不到清单——退而求其次：
+**在 `bootstrap.sh` 排除段加一行断言**：排除后的单元集若仍含
+`script_host.cpp`/`declarative_host.cpp`（即消费 `battery/embed.hpp` 的两个文件），
+直接报「层闭包问题，不是路径问题」并 exit 1。这把 BACKLOG 原文担心的
+「将来某个工具单元用上 b::embed」变成**即时可诊断**的失败。
+设计层变更（生成时序/作用域规则 A-D）仍留人工决策。
 
 **已完成**：解码侧（`st::ext::VideoDecoder`，经 `ffmpeg` 子进程：抽帧 + 元信息 +
 探测不到如实不支持，见 `docs/../include/st/ext/video.hpp`）。
@@ -204,12 +272,101 @@
 **实时播放不够**。两条路：常驻进程 + 管道（要处理进程死了/管道堵了/卡帧），
 或链接 libavcodec（要解决依赖与交叉编译，见 `video.hpp` 的对比表）。
 
-### P2：分片与全跑的**口径统一**
+### P2：POSIX 侧 `process::run` 的 env 覆盖语义与 Windows 不一致
 
-`st test --test-jobs N` 跑分片、不带参数跑全量。两者此前**不等价**
-（分片会避开某些跨用例状态污染，而全跑会崩）——根因已修（异常边界），
-但"两条路径应当给出同一结论"这件事**没有回归钉住**：将来再出现"只有一条路径崩"
-的缺陷，仍会先被当成"环境抖动"。值得加一条用例：分片结果的并集 == 全跑结果。
+**现象**（分片口径统一轮实测发现）：`src/core/platform_process.cpp` POSIX 分支把
+`options.env` **追加**在 `environ` 之后（同名键出现两次，`getenv` 取前者⇒覆盖静默失效）；
+Windows 分支 `build_environment` 正确去重覆盖。影响面：覆盖**已存在**键时 POSIX 静默失效
+（新增键两平台都对）；`run_shards` 下发 `ST_JUNIT_XML` 是新键故未爆。
+**方向**：POSIX 分支改为与 Windows 同语义——先收集 environ 中未被 overrides 命中的键，
+再拼接 overrides；需同步一条跨平台回归（Windows 本机可验覆盖语义，POSIX 侧需在
+Linux/WSL 上验）。**附带项（已修，2026-10-15 同日）**：空分片「JUnit 报告写入失败」噪声——`test_main.cpp`
+把 `write_junit` 返回 0 的两种含义（0 用例 vs 写失败）混为一谈；修复后只报后者，
+回归用例 `empty_shard_writes_no_junit_and_reports_no_failure`（逆向验证变红确认），
+`--test-jobs 4` 空片输出噪声实测消失。
+
+### P2：帧门禁 `frame_cost_stays_within_budget` 在 Windows 上双档恒红（比值口径跨平台不稳）
+
+**现象**（2026-10-15 Windows 宿主实测，正是整改轮注明「应以 Windows 宿主/发布档为准」的环境）：
+`st test --slow` 里 `frame_cost_stays_within_budget` 恒红——
+- dev 档（-O1）：best 53.86× 清屏 vs 阈值 50×（余量 0.92）；
+- release 档（-O2）：best **56.06×** vs 50×——帧绝对耗时 9.06ms（比 Linux 容器快 40%），
+  但清屏分母 0.162ms（快 2.3 倍），**比值反而超标**。
+
+**根因**：比值（整帧耗时 / 清屏耗时）的两个成分对机器/编译器的敏感度不同——
+分母是可向量化的 `memset`（对 CPU 存储带宽/自动向量化极敏感），分子是标量绘制循环。
+阈值 50× 在 Linux 容器（release 38×~45×）标定，到 Windows 上分母缩小更快 → 比值系统性
+偏大 → 护栏失明（恒红后，真回归也会被当「环境噪声」忽略）。与测试自己注释里的
+档位问题（release 24.5× / dev 60.7×）同根：**比值不是机器无关量**。
+
+**方向（设计决策，待人工定夺）**：
+- A. 阈值按「标定环境」自适应（构建时探测 OS/档位选阈值表）——把隐式假设显式化；
+- B. 分母换成更稳定的参照（如固定字节数的 memset 基准而非清屏，或比值上下界同档自适应）；
+- C. 主门禁只在标定档（release + Linux CI）跑，其它档降为提示级——与
+  `frame_budget_threshold_has_bounded_headroom` 的 `calibration_profile()` 跳过策略同型。
+
+**另注**：p95 门（100×）与故障检测门在 Windows 双档均绿——问题只出在 50× 主门。
+
+**补充观察（2026-10-15 全量串行实测）**：同一台 Windows、同一天，`--slow` 单跑
+双档恒红（53.86×/56.06×）而全量串行里** PASS**（1.95s）——比值不仅跨平台不稳，
+还**跨机器状态不稳**（单跑 vs 混在 1464 例里的缓存/频率状态不同）。这坐实方案
+A/B 的必要性：阈值只要还挂在「单点标定」上，无论标在哪个平台都会在另一个
+时间维度上重现这个问题。同日第二次全量串行又红（复跑间隔约 20 分钟）——
+三次观察（单跑红/全量绿/全量红）确认其**同机同时段内随机翻转**，这不是
+「换平台重标一次」能解决的，必须换口径（方案 B）或按环境自适应（方案 A）。
+
+**收益量化（同轮落地，224e625）**：script_write_partial_vs_full_frame_cost 在
+96 卡片基准场景量出 JS 写单卡片文本的**局部帧中位 0.69ms** vs 强制整帧
+**15.0ms**（约 22×，dirty 区 185×97）——这是 mark_dirty_all 收敛
+（8f3fd00/3636500）在真实写路径上的收益数字，几何签名注释已引用。
+
+**方案 C 的补强论证（读 app_frame_budget_test.cpp 拓出）**：主门禁已对**插桩档**
+做了同型松弛（`kFrameLimitInstrumented=90×`，268-274 行：「本门禁断言的是整帧
+没失控，松弛后仍是有效安全网；而 50× 是为发布档标定的」）——但 **dev 档没有**，
+尽管文件自己实测记录了 dev/release 比值差 2.5 倍（60.7×/24.5×）且
+`calibration_profile()` 已承认非标定档比值不可比。dev 档主门禁沿同一论证松弛
+（如 90×，或与插桩档共用常量）是最小改动；Windows dev 实测 53.86×~56.06×
+在 50× 上下随机翻转正是这个不对称的直接后果。仍属阈值语义决策→待人工定夺。
+
+### P1：阴影贴图「将被覆盖区域」提示接口（PAINT_DIAGNOSIS §4.1 留白，预计再省 ≈2.5 ms/帧）
+
+**现象与量化**（PAINT_DIAGNOSIS §4.1 探针已验证）：`draw_shadow_layered` 合并贴图后，
+贴图非零 15744 px，而卡片自身只 6720 px——**每次投影一半以上的混合做在
+「随后会被卡片自己的不透明底色完全盖住」的区域**（内存下界 5.56 ms 中约
+2.5 ms 是这种无效混合）。接口落地后非零像素 15744 → ≈6500。
+
+**接口形态（候选，待人工定夺）**：`Surface::draw_shadow_layered` 加可选参数
+`covered_region`（或 `DrawOptions` 加字段）——后端合成时跳过该矩形内的像素。
+
+**不变量清单（落地的离风险点，2026-10-15 第 7 轮分析）**：
+1. **调用点保证**：`Element::paint_box`（element.cpp:783-806）是唯一 UI 调用点，
+   序列 shadow → `fill_rect`（不透明底色）→ 边框。传 `covered_region=box` 成立的
+   前提是 `background.a == 0xFF`——**半透明底色时不能跳**（跳过会露出阴影本色），
+   必须条件传参；
+2. **透明度链**：`style_.opacity < 1` 时底色合成后仍半透明，同样不能跳；
+3. **后端一致**：默认实现（退化两次 `draw_shadow`）与 GPU 路径收到同一提示，
+   语义写进接口注释（同「先环境层后关键层」的写法）；
+4. **验证口径**：像素容差测试（同 `paint_optimization_test` 既有形态）——不透明底色
+   + 跳过 → 逐像素相等（硬保证，同 src-over 结合律）；半透明底色 + 跳过 → 差异
+   可观测（断言拦住错误用法）。
+
+**属公共接口变更**（`include/st/raster/surface.hpp` + 全部后端）→ 只分析不落地，
+待人工审阅接口形态后再实施。
+
+## 已完成（2026-10-15：分片与全跑的口径统一，P2 落地）
+
+> 原 P2 条目「分片与全跑的**口径统一**」已落地为回归钉子：`tests/shard_parity_test.cpp`。
+> 12 个哨兵用例（env 门控）+ 主用例自启动本二进制，分三路口径钉住：
+> ① 选择口径：`--list` 不分片 vs `--shard i/4`，逐片位置强断言（第 i 片第 k 名 == 全集下标 k*4+(i-1)，
+>   同时钉住「并集为全集」「互不重叠」）；
+> ② 执行口径：过滤执行退出码 0，执行名单 == 片 --list 名单，四片执行并集（集合相等）== 全跑名单；
+> ③ 失败口径：哨兵 07 故意 FAIL，落第 4 片（7%4=3）退出码 1、四片和 == 全跑 == 1——失败不被分片吞掉也不被放大。
+> **验证**：filter 直跑 PASS（99 断言）；单进程全跑 1443 passed / 0 failed / 26788 assertions；
+> `--test-jobs 4` 分片驱动 exit 0；**逆向验证**：注释 run_all 的 in_shard 过滤行后用例三路口径全红
+> （片名单 12≠3、并集 48≠12、failed_shard_sum 4≠1），恢复后回绿。lint 0 违规
+> （L3 X 宏走清单豁免，已登记 CONVENTIONS §8）。
+> **顺带记录**（未修，见下方 P2 新条目）：POSIX 侧 `process::run` 的 env 是追加式、
+> 同名键不覆盖（Windows 侧正确去重）；空分片的「JUnit 报告写入失败」噪声。
 
 ## 已完成（2026-10-11 C 轮：「数据层已完成」的 4 项补完 + 2 项评估定案）
 
@@ -3062,8 +3219,12 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
   客户端此前 `keep_events` 是死参数（BACKLOG 写「已做」是文档漂移，本次补实）。
   测试：`ui_changed_event_carries_changed_ids` 协议用例 + `tools/events_e2e.py` 三路
   （set/invoke/input.text）+ TS 两用例。
-- [ ] **script_host 提交链仍调 `mark_dirty_all`**（控制通道路径已改损坏区驱动）：
-  JS 写入目前仍整帧；待脚本路径补上元素级标脏验证后再同样收敛。
+ - [x] **script_host 提交链仍调 `mark_dirty_all`**（控制通道路径已改损坏区驱动）——
+   2026-10-15 已收敛（提交 8f3fd00）：`commit_changes` 删尾部整帧标脏，逐元素路径
+   （apply_properties/invoke_element/apply_layout_property）已自带精确标脏；
+   回归 `script_write_takes_partial_damage_path`（JS 写单元素 → 局部损坏区重绘）。
+   同轮拓出并修复 shard_parity_test 硬编码全局注册序的脆弱性（早链接 TU 正常
+   新增用例即误击，改观察推导）。
 - [ ] **声明式 UI 后续里程碑**（M1–M4 主体已落地，设计与路线见 `docs/declarative.md`）：
   - [x] **状态系统高层原语（双宿主）**：C++ `memo`/`effect`/`ref`/`persisted`
     与 JS `useMemo`/`useEffect`/`useRef`/`usePersisted`（§4 的契约全部落实）。
@@ -3266,6 +3427,13 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
   release 下的余量是 1.42~2.84（上限 3.5），比原前的 3.46~3.51 宽松了些（因为圆角那条从
   “踩线”回到正常），但“重编改变代码布局→比值漂移”仍可能把一条推到边界之外。
   真正的解法是把基准单位从“清屏”换成一个**有代表性成本**的量（如一次 `fill_rect` + 混合）。
+
+  📊 **Windows 宿主基线（2026-10-15 实测，dev 档，与帧门禁问题同族）**：4 条 bench
+  门禁在 Windows **全绿**（Linux 容器当时全红——再次坐实“容器不能作判据环境”）：
+  圆角 3.39×（阈 3）/ 投影 7.33×（阈 24）/ 文本 32.08×（阈 50）/ 渐变 1.20×（阈 4）。
+  但**投影的故障检测贴边**：3 倍退化 23.48× vs 阈值 24× → **抓不住**（自检如实打印但
+  未断言；与帧门禁同族：比值口径跨平台/跨档不稳，阈值标定只覆盖了单点）。
+  同族问题的完整分析与方案 A/B/C 见「帧门禁在 Windows 双档恒红」条目（2026-10-15）。
 
 > 审视报告「第一梯队」与「第二梯队」（含渲染侧：增量重绘/整形缓存/LRU/渐变快路径）
 > 均已在上述条目落地；无头环境无法验证的窗口模式 vsync 如实留在 P1。
@@ -3562,11 +3730,12 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
   if (layout_cache_port_ != context.text || layout_cache_content_ != content_ || …)
   ```
 
-- [ ] **`Tree` 缺程序化 select（写侧 `selected_key`）**（2026-10-12，gbcode 会话 e2e 亲历）：
-  树有 `selected_key` 属性**读**（tree.cpp），但没有写入口——e2e 想点树行只能
-  `bounds.y + row_h*1.5` 坐标猜行序，本轮首版就猜错（点成了默认样例）。
-  加 `set_property("selected_key", key)`（触发 `on_select`，与键盘/鼠标同链）
-  即可让自动化按键精确驱动。配套单测。
+- [x] **`Tree` 缺程序化 select（写侧 `selected_key`）**（2026-10-12，gbcode 会话 e2e 亲历；
+  2026-10-15 落地）：已加 `set_property("selected_key", key)`（notify=true 与键盘/
+  鼠标同链，无效 key 清空选择不派发）；回归
+  `tree_selected_key_is_writable_via_property_and_notifies`（含读回对称与无效 key
+  分支，逆向验证：回退 notify=true 后断言变红）。e2e 从此可按键精确驱动，
+  不再 `bounds.y + row_h*1.5` 坐标猜行序。
 - [ ] **`MenuPanel` 缺按 id 激活的动作面**（同上亲历）：e2e 只能
   `bounds.y + 16 + i*32` 数行序点击；菜单动态化（最近打开）后行序会变，
   坐标法脆。加 `invoke_action("activate_item", item_id)` 一劳永逸。

@@ -3574,6 +3574,8 @@ if (palette_open_.value()) {          // 条件声明
   `__d_unmount(node.el)` 变成对「整棵卸载」的递归调用（条件分支收不回、换页叠树）。
   新增本层全局名前先确认宿主桥里没有它；
 - 属性在重组末尾经 `__d_apply_batch` **一次跨界批量落地**（走 `ui::apply_properties`）；
+  重绘粒度与脚本/协议路径一致——批量落地后**不整帧标脏**（逐元素路径自带精确标脏，
+  结构变更由重排的几何签名兑底决定是否整帧；回归 `declarative_reconcile_takes_partial_damage_path`）；
 - **事件绑定按元素身份持有**（`eventHolders[id] = {node, kinds, bindings}`，宿主处理器只把事件
   转给「当前这一帧」的 VNode）：绑定只在**该元素首次出现回调时**登记、卸载时反注册——
   复用帧**零事件成本**，而「回调是最新一帧的」由指针更新保证。为何不能按「回调变了就重绑」
@@ -4313,6 +4315,13 @@ state      := visible | hidden | focused | enabled | disabled | checked | select
 | 所有事件都桥接 | 只桥接**被显式监听**的（选择器 × 事件类型）；鼠标移动类高频事件按帧合并 |
 
 一次脚本入口的跨界次数是**常数级**（取变更集 1 次 + 事件派发 1 次），与“改了多少属性”无关。
+
+**重绘粒度与协议路径一致**：变更集应用后**不整帧标脏**——逐元素路径已自带精确标脏
+（`apply_properties` 对每个真改到的属性 `element.mark_dirty()` + damage 上报，
+`apply_layout_property` 尾部 `mark_layout_dirty()`，`invoke_element` 的 focus/blur 走
+`root.set_focus` 自带标脏）。JS 写入一个元素 → 下一帧走**局部损坏区**重绘
+（回归：`script_write_takes_partial_damage_path`）。曾长期在提交链末尾调
+`mark_dirty_all`（把每次 JS 写入都摊回整帧重绘），已收敛（2026-10-15）。
 
 ### 三条路径一套语义
 
@@ -5057,15 +5066,15 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
 | 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case
-  超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑） | `st test` | **1062 用例**（源码 `ST_TEST*` 声明数，即 `check_docs.py` 的核对口径）/ **22103 断言**（多片自报值累加；dev 档实测，另 14 个慢用例默认跳过）。另有 `--list` 报 1077 的口径差异（含分片元信息），以源码声明数为准 |
+  超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑） | `st test` | **1434 用例**（源码 `ST_TEST*` 声明数，即 `check_docs.py` 的核对口径）/ **26788 断言**（单进程全跑自报；dev 档实测，另 16 个慢用例默认跳过）。另有 `--list` 报数的口径差异（含分片元信息），以源码声明数为准 |
 | 跨编译器检查 | **`st check --toolchain=<名>`**：同一个工程用另一个编译器做**语义分析**，不产出、不链接。与 `build` 共用单元枚举/标志组装/按族收敛（`options.check_only`），所以两者**不可能分叉**。实测全量 77 单元 clang 15.0 s / gcc 21.3 s（gcc 全量构建 36 s），**可查出 GCC 不报的自家缺陷**（未使用私有字段 / 未使用 lambda 捕获 / 隐式变号 / 死代码），**查不出链接期问题**（ODR 违反、符号缺失、ABI 不匹配） | `st check --toolchain=clang` | 已接入（本轮实测拓出一处：`build.cpp` 里 `dep_warning` 是移除 MSVC 时留下的死变量） |
-| 并行测试的资源推导 | **`--test-jobs N` 分片**：同一份 `st_tests` 被拉起 N 次（每次 `--shard i/N`），片内顺序不变、片间不共享内存；每片写各自的 JUnit，父进程合并成一份（用例名排序，逐字节可复现）。**片数按机器实际资源推导**（`plan_test_shards`，与编译并发同一套探测）：内核测试进程 CPU/墙钟 ≈ 0.98（占满一个核）而峰值工作集仅 112 MB，所以上界依次是**核数（含 cgroup CPU 配额）→ 内存预算 → 策略上限**，三者取小；**不做“核数 / 2”**——那个除数是给内存敏感的编译并发用的，对测试进程没有依据 | `st test --test-jobs 16` | **纯执行 22.9 s → 3.8 s（6.0×）**；机时代价 2.13×。与串行逐用例比对 `missing=0 extra=0 failDiff=0 dupes=0`（见 `docs/BUILD_TEST_PERF.md`） |
+| 并行测试的资源推导 | **`--test-jobs N` 分片**：同一份 `st_tests` 被拉起 N 次（每次 `--shard i/N`），片内顺序不变、片间不共享内存；每片写各自的 JUnit，父进程合并成一份（用例名排序，逐字节可复现）。**片数按机器实际资源推导**（`plan_test_shards`，与编译并发同一套探测）：内核测试进程 CPU/墙钟 ≈ 0.98（占满一个核）而峰值工作集仅 112 MB，所以上界依次是**核数（含 cgroup CPU 配额）→ 内存预算 → 策略上限**，三者取小；**不做“核数 / 2”**——那个除数是给内存敏感的编译并发用的，对测试进程没有依据 | `st test --test-jobs 16` | **纯执行 22.9 s → 3.8 s（6.0×）**；机时代价 2.13×。与串行逐用例比对 `missing=0 extra=0 failDiff=0 dupes=0`（见 `docs/BUILD_TEST_PERF.md`）；**分片与全跑的口径统一有回归钉住**（`tests/shard_parity_test.cpp`：哨兵 + 自启动核对选择/执行/失败三口径，逆向验证变红确认护栏有效） |
 | 独立工程集成 | **真建一个引用 framework 的最小工程**、真构建真跑（`tests/pkg_integration_test.cpp`）
  | `st test pkg_integration` | 全绿（`ST_INTEGRATION_BUILD=0` 可关；关掉时明确跳过而非假绿） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告（需带 sanitizer 运行库的编译器；MinGW 发行版不带时构建前明确报错） |
 | 内置通道一致性 | `tools/st_consistency_check.py`：窗口帧缓冲 vs 客户区实际像素（逐像素） + 无头 vs 窗口同参数（scale/文本形态/拟合/截图接近度） | `python tools/st_consistency_check.py`（Windows 真机） | 5 项全过（呈现 0.000%、同源项全等） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告 |
-| 禁令扫描 | **13 条**禁用特性规则（L1–L13；L8/L13 为作用域感知的专用检查）+ 文件布局 + 禁用 include；豁免两条通道：**行内** `// lint-allow:` 与**清单** `lint.exempt`（规则 × 路径 glob，现测 12 处均为行内、清单 0 处） | `st lint` | 0 违规（289 文件、豁免 12 处） |
+| 禁令扫描 | **16 条**禁用特性规则（L1–L16；L8/L13/L16 为作用域/路径感知的专用检查，L16 守 core→ui 层方向）+ 文件布局 + 禁用 include；豁免两条通道：**行内** `// lint-allow:` 与**清单** `lint.exempt` | `st lint` | 0 违规（行内豁免 71 处 + 清单 6 处） |
 | 无头视觉 | `tools/st_visual_check.py`：dev/san × gallery/gbcode 全序列（查询/操作/输入/主题/DPI 2x）+ 截图 + sanitizer 日志检查 | `python3 tools/st_visual_check.py` | 0 失败步 |
 | 字体对照 | `tools/ft_compare.cpp`：用 FreeType 对照自研 CFF 解释器的轮廓数/包围盒（**仅测试用，不进框架构建**） | 手工编译运行 | 一致 |
 | 文字抗锯齿对照 | `tools/lcd_compare.cpp`：同一段文字按 灰度/亚像素(滤波)/亚像素(原始) 各渲一张 PNG，并打印某个扫描行的边缘剖面（**仅验证用，不进框架构建**） | 手工编译运行（命令见文件头） | 见 §4.3.1 的实测表 |
@@ -5157,8 +5166,8 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 
 | 项 | 目标 | 实测 |
 |---|---|---|
-| **内存：无头软件路径（空应用）** | < 120 MiB | *本轮改动后待复测*（改动前 Windows 176 MB / Linux 容器 137.6 MiB；主项为字体 + CRT 基线） |
-| 内存：窗口 GPU 路径（空应用） | < 250 MiB | *待复测*（无头 176 MB + 驱动常驻 53 MB） |
+| **内存：无头软件路径（空应用）** | < 120 MiB | ✅ Windows 实测（2026-10-15，gallery）：RSS **35.2 MiB** / 私有 20.5 MiB / 18 线程（dev 30.5）——整改前 Windows 176 MB / Linux 137.6 MiB | 
+| 内存：窗口 GPU 路径（空应用） | < 250 MiB | ✅ Windows 实测（无头 auto，D3D11）：RSS 48.9 MiB / 私有 87.6 MiB / 73 线程（驱动栈差异：线程 73 vs 报告 55，同量级） |
 | 其中：字体整文件驻留 | **< 5 MiB** | 本轮改为**内存映射**（文件页共享副本，压力下可回收）；实测取证见 `docs/BACKLOG.md` |
 | 内存：缓存总预算 | 字形 24 + 整形 16 + SVG 16 MiB | `ST_MEM_BUDGET=low` 可声明式压到 1/4（CI / 低配） |
 | **产物：release 最小应用** | — | **6.37 MB**（含 quickjs + sqlite 静态库，其中二者仅 0.87 MB） |
