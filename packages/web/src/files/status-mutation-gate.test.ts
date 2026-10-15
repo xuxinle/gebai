@@ -35,7 +35,7 @@
  */
 import { describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, posix } from "node:path"
 import {
@@ -50,6 +50,7 @@ import {
   STAMP_ROOTS,
   computeFiles,
   fingerprintInputs,
+  hashFile,
   readStamp,
   staleFiles,
 } from "../../../../tools/mutation/status-core/stamp"
@@ -944,5 +945,259 @@ describe("真仓闭包非空：真仓里四份根的依赖真的进了指纹面�
     const closureOf = (ps: readonly string[]): string[] => ps.filter((p) => !rootsOnly.includes(p))
     expect(closureOf(rootsOnly).length, "「只哈希根」的面竟然非空？那本组的对照失去意义").toBe(0)
     expect(closureOf(fingerprintInputs()).length, "真仓闭包为空——上面三条是在空转").toBeGreaterThan(0)
+  })
+})
+
+/* ================================================================== *
+ * 闭包拦截真生效：在**本仓副本**上真改文件，断言「过期」与「不过期」
+ * ================================================================== */
+
+/**
+ * ## 本组的存在理由（它是 `bc5a8e72` 那次**人工验证**的固化形态）
+ *
+ * `bc5a8e72` 修掉「真仓闭包为空集」之后，用在**真仓**手动改一份被 import 的模块、看常规测试
+ * 变红的方式验证过「拦截真生效」——那条证据是真的（当次提交信息里有「1 条红、指名 closure.ts
+ * 内容已变」的原文），但它有一个**一次性**的属性：验证完就还原了，**没有任何断言在守它**。
+ * 下一次谁把 `fingerprintInputs()` 退化成只拼根、或把 `hashFile` 的归一写成「按文件名哈希」，
+ * 上面那几组（键集对账 / 期望闭包对账 / 真仓非空）**照旧全绿**——它们判的是「面里有没有这一份」，
+ * 不是「改了它，闸门会不会报过期」。
+ *
+ * 本组把那条人工验证固定成**可重复的自动化用例**，做法是 `bc5a8e72` 没做的另一半：
+ * **不碰真仓文件**，把一份**本仓副本**（面 + 依赖图 + 一份面外无关文件）复制到临时目录，
+ * 在副本上**真改文件**，拿**生产口径**的函数（`computeFiles(base)` / `hashFile(rel, base)` /
+ * `staleFiles`）算两遍指纹——
+ *
+ *   ① **改一份被 import 的本仓模块 → 指纹过期**（且只报它、报对那一句「记录 X → 现在 Y」）；
+ *   ② **改一份没被 import 的无关文件 → 不过期**（防误红：过宽那一侧同样是错，只是方向不同）。
+ *
+ * ## 为什么是「复制到临时目录」而不是「传一个假的 `current` 映射」
+ *
+ * 上面「依赖闭包算法」那组已经用合成树 + 注入 `recorded` / `current` 验过**判据逻辑**；本组要验的是
+ * **另一件事**：把**真仓的这几份真实文件**放在盘上、真改它们的字节之后，「过期」这个结论**还成不成立**
+ * ——即「哈希函数真的读了盘上的内容」这一环。注入式的假映射恰好绕过了这一环（它直接给出哈希，
+ * 那正是想验的东西），所以本组必须让 `hashFile` / `computeFiles` 真的去读盘。
+ *
+ * ## 三处刻意的设计（每处对应一个真实会走的弯路）
+ *
+ * 1. **副本必须含「豁免的中间层」（`stamp.ts`）**。闭包是**递归**收的：`closure.ts` 之所以在面内，
+ *    靠的是链路 `bench.ts`（根）→ `stamp.ts`（**豁免**）→ `closure.ts`。只复制「面」是不够的
+ *    ——`stamp.ts` 不在面内（它被豁免）、但它仍是**依赖图**上的一环；少了它，副本里 `bench.ts` 那条
+ *    import 解析不到，算出的面会比真仓少一份（实测：`face(copy) ≠ face(real)`，`staleFiles` 报
+ *    「已不在指纹面内」而不是「内容已变」——**看似通过、实际验的是另一件事**）。故复制范围取
+ *    `[...STAMP_ROOTS, ...depClosure(STAMP_ROOTS, [])]`（**不剪豁免**的全图），再加一份面外无关文件。
+ * 2. **`base` 是可注入的**（`computeFiles(base)` / `hashFile(rel, base)`，与 `fingerprintInputs(input)` /
+ *    `depClosure(roots, exempt, base)` 同脉的口子）：副本上算指纹走的是**生产口径的同一份实现**，
+ *    而不是在测试里另写一遍哈希——那会变成「实现一处、判据另一处」的反面（同一口径写两处，迟早漂移）。
+ *    缺省仍是 `REPO`，故执行器与自助定位的行为逐字节不变。
+ * 3. **先断言「副本与真仓同源」**（`face(copy) === face(real)` 且 `computeFiles(copy)` 等于那一次的记录）：
+ *    否则后面两条「改了它过期 / 改它不过期」可能只是在一个**本来就与真仓不同**的副本上跑，结论无效
+ *    （这正是第 1 条那个坑被发现的方式）。
+ *
+ * ## 为何用「附加一行注释」当改动
+ *
+ * 与闸门口径一致：**哈希不区分注释与代码**（「按内容判定，不按文件名判定」）。附加一行注释既**不改变
+ * 模块行为**（副本不会被真执行，安全性也因此无关），又保证了「改的是真实字节」——比替换一行代码更少
+ * 顾虑（不必担心误伤语法）。真仓文件全程**只读复制**，`finally` 里递归删除临时目录（含失败跑——
+ * 反向验证时本组会红，断言一红就会跳过末尾那行，故清场必须走 `finally`）。
+ *
+ * ## 它守不住什么（如实记）
+ *
+ * 它守「哈希真的读了盘、真仓这几份真实文件改了会报过期」，**不守**「矩阵真的判到了它」（那是那台
+ * 变异台的职责，见 DESIGN「测试策略 → 变异验证」）。两道分工与上面几组同款：轻的进常规测试、
+ * 重的按需人工跑。
+ */
+describe("闭包拦截真生效：本仓副本上真改文件——被 import 的模块改了过期，面外的改了不过期", () => {
+  /** 被 import 的本仓模块（当前真仓**唯一**一份闭包成员；它不在根里——故「只哈希根」的面看不见它）。 */
+  const MEMBER = "tools/mutation/status-core/closure.ts"
+
+  /**
+   * 面外的**无关文件**（对照那半边）：它在本仓里、是普通源码、也在闭包边界内
+   * （`inFingerprintScope` 为真），但**没有任何面内成员引用它**——故它改了不该红。
+   *
+   * 挑它的口径：既不能是「闭包收不到」（那种文件改了本来就不会红，对照会空转），也不能是
+   * 「闭包收得到」（那就成了面内成员）。这里取 `status-core.test.ts`——它是**语义契约测试**，
+   * 与判定链无关（变异台只跑矩阵 + `tsc`，不跑它），面里也刻意不含它。下面有断言钉住这三点前提。
+   */
+  const OUTSIDE = "packages/web/src/files/status-core.test.ts"
+
+  /** 探针内容：只加注释，不改行为（理由见本组注释「为何用『附加一行注释』当改动」）。 */
+  const PROBE = "\n// 自检探针：闭包拦截真生效（副本专用，不改行为）\n"
+
+  /**
+   * **不剪豁免的全图**：`STAMP_ROOTS` ∪ `depClosure(roots, [])`。
+   *
+   * 为什么不是 `fingerprintInputs()`（= 剪掉豁免之后的面）：面里没有 `stamp.ts`，而它是
+   * `bench.ts → closure.ts` 那条链的**中间层**——只复制面，副本的依赖图就是断的（本组注释第 1 条）。
+   */
+  const fullGraph = [...new Set([...STAMP_ROOTS, ...depClosure(STAMP_ROOTS, [])])]
+
+  /** 一份**本仓副本**：全图（不剪豁免）+ 那份面外文件，逐字节复制。 */
+  const COPY = mkdtempSync(join(tmpdir(), "gebai-closure-live-"))
+  /**
+   * 本文件被加载时**已经**躺在临时目录里的同名残留（多半是上一次被强杀/崩溃的跑留下的）。
+   *
+   * 为什么要一个「基线」：末条要断言「本组没泄漏副本」，而直接数临时目录里的
+   * `gebai-closure-live-*` 会把**别人**（另一次跑、另一次崩溃）的残留算到本组头上——那是一次
+   * **假红**，而且它会持续存在、直到有人手去删。改比集合后，这条只对「**本次跑新增的**残留」报红，
+   * 正是它该守的那件事。
+   */
+  const LEAKED_BEFORE = new Set(readdirSync(tmpdir()).filter((n) => n.startsWith("gebai-closure-live-")))
+  const prepare = (): void => {
+    for (const rel of [...fullGraph, OUTSIDE]) {
+      mkdirSync(join(COPY, posix.dirname(rel)), { recursive: true })
+      copyFileSync(join(REPO, rel), join(COPY, rel))
+    }
+  }
+  const cleanup = (): void => rmSync(COPY, { recursive: true, force: true })
+
+  /** 那一次跑记下的指纹（**真仓**的；副本与它同源是本组的前提，故它同时也是副本的「改前」快照）。 */
+  const recorded = (): Record<string, string> => {
+    const stamp = readStamp()
+    expect(stamp, `缺少可用的 ${STAMP_FILE}：跑 ${RERUN}`).not.toBeNull()
+    return stamp!.files
+  }
+
+  test("前提：本仓副本与真仓**同源**（面相同、逐份哈希与那一次的记录相同）", () => {
+    /* 这条是上面两条判据的**地基**，故单列（并可独立失败）：若它不成立，「改它过期 / 改它不过期」
+     * 两条可能只是在一个本来就不一致的副本上跑——看似通过、实际验的是别的东西。 */
+    try {
+      prepare()
+      const faceCopy = fingerprintInputs({ base: COPY })
+      expect(faceCopy, "副本上算出的指纹面与真仓不同（复制范围错了：多半漏了豁免的中间层）").toEqual(fingerprintInputs())
+      expect(computeFiles(COPY), "副本上的逐份哈希与那一次的记录不同（复制不全 / 不是逐字节复制）").toEqual(recorded())
+      /* 副本里必须真的躺着**面外**那份文件——否则下面「改它不过期」那条会因为「文件不存在」而
+       * 以另一种方式通过（`hashFile` 缺失记 `missing`，而那与「改了它哈希没变」不是同一件事）。 */
+      expect(existsSync(join(COPY, OUTSIDE)), `副本里缺 ${OUTSIDE}——「改面外文件不过期」那条会空转`).toBe(true)
+      expect(readFileSync(join(COPY, OUTSIDE), "utf8"), "副本里的面外文件与真仓不同源").toBe(
+        readFileSync(join(REPO, OUTSIDE), "utf8"),
+      )
+      /* 四条**前提事实**（每一条都是下面某条判据能成立的理由，写死在这里免得它们随源码静默漂移）：
+       *   ① 被改的那份**不在根里**——否则「只哈希根」的旧口径也能看见它，本组验不到闭包这半边；
+       *   ② 被改的那份**真的在面里**（它是闭包成员）——否则「改它过期」是在验一件不存在的事；
+       *   ③ 面外那份**真的不在面里**——否则「改它不过期」是在验一件错的事；
+       *   ④ 面外那份**真的没被面内成员引用、也不在闭包可达范围内**——否则闭包本来就该收它。 */
+      expect((EXPECTED_ROOTS as readonly string[]).includes(MEMBER), `${MEMBER} 竟然是根？那本组验不到闭包这半边`).toBe(false)
+      expect(fingerprintInputs().includes(MEMBER), `${MEMBER} 不在指纹面里——「改它过期」这条在验一件不存在的事`).toBe(true)
+      expect(fingerprintInputs().includes(OUTSIDE), `${OUTSIDE} 竟在指纹面里——「改它不过期」这条是在验一件错的事`).toBe(false)
+      expect(
+        importersOf(OUTSIDE, fullGraph).length,
+        `${OUTSIDE} 被面内成员引用了（闭包**应该**收它）——那就不是合适的「无关文件」对照，请换一份`,
+      ).toBe(0)
+      expect(depClosure(STAMP_ROOTS, []).includes(OUTSIDE), `${OUTSIDE} 在依赖闭包可达范围内——它不是面外无关文件`).toBe(false)
+      expect(inFingerprintScope(OUTSIDE), `${OUTSIDE} 落位在闭包边界外——那它本来就收不到，对照会空转`).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("① 改一份被 import 的本仓模块 → 指纹**过期**（且只报它、报出「记录 X → 现在 Y」）", () => {
+    /* 这就是 `bc5a8e72` 那次**人工验证**（在真仓改一份被 import 的模块 → 常规测试变红）的固化形态：
+     * 同样的改动、同样的比对路径，只是改在**副本**上，因而可以每次都跑。 */
+    try {
+      prepare()
+      const before = recorded()
+      const memberPath = join(COPY, MEMBER)
+      const body = readFileSync(memberPath, "utf8")
+
+      /* 改动前先确认「副本里这一份与真仓逐字节同源」——否则下面的哈希差可能来自复制误差，
+       * 而不是来自这次改动。 */
+      expect(hashFile(MEMBER, COPY), `副本里的 ${MEMBER} 与真仓不同源（复制误差会让下面那条失去意义）`).toBe(
+        hashFile(MEMBER),
+      )
+
+      writeFileSync(memberPath, body + PROBE, "utf8")
+
+      /* 走**生产口径**的同一个入口（`hashFile(rel, base)` → `computeFiles(base)` → `staleFiles`）：
+       * 这里必须真的读盘，故不能用注入式假映射（那会把本组要验的「哈希真的读了盘」这一环绕过去）。 */
+      const after = computeFiles(COPY)
+      expect(after[MEMBER], `副本上 ${MEMBER} 的哈希没变——哈希没在读盘上的内容？`).not.toBe(before[MEMBER])
+
+      const stale = staleFiles(before, after)
+      expect(
+        stale.length,
+        `改了一份**被 import 的本仓模块**（${MEMBER}）却报「不过期」——这正是「真仓闭包为空集」那个缺口\n` +
+          `  的形态（机制看着在、实际没拦）：闸门不会红，而矩阵照旧全绿。`,
+      ).toBe(1)
+      expect(stale[0], "报出来的应当是那份被改的闭包成员").toContain(`${MEMBER}：内容已变`)
+      /* 报出来的**形态**也要对（带「记录 X → 现在 Y」）：「记录值 → 现在值」是这条失败信息可复核的
+       * 那一半（人不必去猜是哪个字节变了）。 */
+      expect(stale[0], "过期信息里应带「记录 X → 现在 Y」两边的短哈希（自助定位靠它）").toMatch(
+        /记录 [0-9a-f]{8} → 现在 [0-9a-f]{8}/,
+      )
+      expect(stale[0], "报出的记录值应当就是那一次跑记下的值").toContain(before[MEMBER]!.slice(7, 15))
+      expect(stale[0], "报出的现在值应当是副本上刚改出来的值").toContain(after[MEMBER]!.slice(7, 15))
+
+      /* **反面**（证明上面那条不是空转）：旧的「只哈希根」面对同一份改动**看不见**它——
+       * 若它也看得见，说明这份成员其实也是根，那本组没在验「闭包」这件事。
+       * 这条与上面并排写，空数组那一侧才让「1 条」那一侧有意义。 */
+      const rootsOnly = (o: Record<string, string>): Record<string, string> =>
+        Object.fromEntries(Object.entries(o).filter(([p]) => (EXPECTED_ROOTS as readonly string[]).includes(p)))
+      expect(
+        staleFiles(rootsOnly(before), rootsOnly(after)),
+        `「只哈希根」的面竟然看见了 ${MEMBER} 的改动？那它本来就是根，本组没在验闭包（上面那条在空转）`,
+      ).toEqual([])
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("② 改一份**没被** import 的无关文件 → **不过期**（防误红：过宽也是错，只是方向不同）", () => {
+    /* 另一侧的判据。上面那条守「过窄 = 假绿」，这条守「过宽 = 噪声红」——一个会为无关文件报红的
+     * 门禁很快就会被绕过（本仓已在「为什么不进 CI」里写过这个代价）。
+     *
+     * 它与本文件里已有的「面外文件不参与指纹」那组**不可互替**：那组验的是「面里没有这份文件」
+     * （一个**集合**判据），本组验的是「盘上它的**字节**变了，指纹比对仍然说不出话」（一条**行为**
+     * 判据）。集合判据绿、而行为判据红是完全可能的（例如 `hashFile` 忽略了 `rel`、拿了别的路径）。 */
+    try {
+      prepare()
+      const before = recorded()
+      const outsidePath = join(COPY, OUTSIDE)
+      const body = readFileSync(outsidePath, "utf8")
+      /* 这份面外文件的「副本侧」改前哈希（直接给 `base`——它**不在**指纹面里，故不在 `before` 里）。
+       * 它下面用作**正面对照**：若拿 `base` 去读盘这条路是通的，它就必须跟着变；若没变，说明
+       * 「不过期」不是因为「它在面外」，而只是因为「哈希根本没去读副本」（那就是空转）。 */
+      const outsideBefore = hashFile(OUTSIDE, COPY)
+
+      writeFileSync(outsidePath, body + PROBE, "utf8")
+
+      /* 先确认「改动**真的**落到了盘上」——否则这条会因为「没改成功」而通过，那是空转。 */
+      expect(readFileSync(outsidePath, "utf8"), "探针没写进去（这条会因「没改成功」而空转）").not.toBe(body)
+      /* **正面对照（这条让「不过期」不再是空转）**：同一份文件的「副本侧」哈希**必须**变——
+       * 它变了、而指纹比对仍然说不出话，才说明「不过期」是因为**它在面外**；
+       * 若它也不变，那就是「哈希压根没去读副本」，本组两条判据都会因这同一个原因而绿——而 `base`
+       * 这个口子就没被验到（反向验证实测：把 `hashFile` 改成永远读真仓 → 只有这一条把它抓住）。 */
+      expect(
+        hashFile(OUTSIDE, COPY),
+        `副本上的 ${OUTSIDE} 改了，而拿 base 去读盘却读不出这个改动——「不过期」等于在空转（它不是因为「在面外」而不红）`,
+      ).not.toBe(outsideBefore)
+
+      const after = computeFiles(COPY)
+      expect(
+        staleFiles(before, after),
+        `改了面外的无关文件（${OUTSIDE}）却报指纹过期——过宽 = 噪声红（改一次无关文件就要等 30 秒的台）`,
+      ).toEqual([])
+      /* 更强的一层：副本上**所有**算出的哈希都与改动前一致（不只是「报不出来」）。 */
+      expect(after, `${OUTSIDE} 的改动改变了副本上的指纹快照？`).toEqual(before)
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("真仓零改动：本组全程只读真仓（副本改得再狠，面内文件的真身哈希不变）", () => {
+    /* 为什么单列这条：本组会**真写文件**（本文件里仅有的两处写盘之一，另一处是合成树那组），
+     * 而「测试写了真仓的产品文件」是本仓明确要避免的事故。这条把「只写副本」从一句纪律变成
+     * 可自动核验的事实：跑完前面几条之后（它们各写、各删了一份副本），真仓的每一份面内文件与
+     * 那一次的记录**仍然逐字节相同**；临时副本也已清干净。 */
+    expect(fingerprintInputs().every((p) => hashFile(p) === recorded()[p]), "真仓的面内文件被改动了——本组只该写临时副本").toBe(
+      true,
+    )
+    expect(existsSync(join(REPO, MEMBER)), `真仓的 ${MEMBER} 不见了（本组不该碰它）`).toBe(true)
+    expect(existsSync(COPY), "临时副本没清干净（失败跑会跳过末尾那行——故清场一律走 finally）").toBe(false)
+    /* 只对「**本次跑新增的**同名残留」报红（`LEAKED_BEFORE` 的理由见它自己那里）：这条守的是
+     * 「三条用例都没泄漏」——若某条把 `finally` 里的 `cleanup()` 去了，它当场红。 */
+    const leakedNow = readdirSync(tmpdir()).filter(
+      (n) => n.startsWith("gebai-closure-live-") && !LEAKED_BEFORE.has(n),
+    )
+    expect(leakedNow, "临时副本有残留（本次跑新建的）——清场必须走 finally，失败跑也不例外").toEqual([])
   })
 })

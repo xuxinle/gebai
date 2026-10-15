@@ -121,10 +121,16 @@ export interface Stamp {
  * 于是同一份提交在 Windows 上读到的字节与在 WSL/Linux 上读到的**不同**——直接哈希内容，
  * 一次 Windows 上的跑会把指纹钉成 CRLF 版本，Linux 侧一 checkout 就判「文件已变」。
  * 归一后哈希的是**语义内容**（与行尾无关），跨平台同一份源码得到同一个值。
+ *
+ * `base` 可注入（同 `fingerprintInputs(input)` / `staleFiles(recorded, current)` / `depClosure(roots, exempt, base)`
+ * 一脉的「拿合成树/副本走**真实现**」口子）：闸门侧复制一份**本仓副本**到临时目录、在副本上**真改文件**，
+ * 断言「改一个被 import 的模块 → 指纹过期」（见 `status-mutation-gate.test.ts` 的「闭包拦截真生效」一组）
+ * ——那里要的正是**生产口径**的哈希，而不是在测试里另写一份（口径分两处 = 迟早漂移）。
+ * 缺省 `REPO`，故生产路径（`computeFiles()` / `writeStamp()`）行为逐字节不变。
  */
-export function hashFile(rel: string): string {
+export function hashFile(rel: string, base: string = REPO): string {
   try {
-    const body = readFileSync(join(REPO, rel)).toString("utf8").replace(/\r\n/g, "\n")
+    const body = readFileSync(join(base, rel)).toString("utf8").replace(/\r\n/g, "\n")
     return `sha256:${createHash("sha256").update(body).digest("hex")}`
   } catch {
     return "missing"
@@ -168,10 +174,15 @@ export function fingerprintInputs(input: FingerprintFaceInput = {}): string[] {
   return [...roots, ...closure.filter((p) => !skip.has(p))]
 }
 
-/** 当前指纹面（执行器与闸门共用这一份计算，避免「写的一处、读的另一处」两处实现漂移）。 */
-export function computeFiles(): Record<string, string> {
+/**
+ * 当前指纹面（执行器与闸门共用这一份计算，避免「写的一处、读的另一处」两处实现漂移）。
+ *
+ * `base` 可注入（同上 `hashFile(rel, base)`）——闸门侧拿它把一份**仓副本**走一遍**生产口径**的快照计算。
+ * 缺省 `REPO`，故执行器 / 自助定位那两处调用行为逐字节不变。
+ */
+export function computeFiles(base: string = REPO): Record<string, string> {
   const out: Record<string, string> = {}
-  for (const p of fingerprintInputs()) out[p] = hashFile(p)
+  for (const p of fingerprintInputs({ base })) out[p] = hashFile(p, base)
   return out
 }
 
