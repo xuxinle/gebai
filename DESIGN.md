@@ -1532,7 +1532,11 @@ export const preload = false
   - **控制面（生生）** 由心跳任务的 `resolveSession` 建立——新建会话时**显式写 `loadedSubAgents = ["shengsheng", 可选 "task"]`**（tasks.ts），故生生拿到自己的完整提示词与三工具；任务型执行以 `autoApprove` 运行（部署层授权）。
   - **worker（数据面）** 由 `dispatch` 经 `SessionControlService` 建立：`store.createSession` + `setEnv`（项目坐标）+ `run(sessionId, user, message, { autoApprove: true, interactionMode: "none" })`，注入后立即返回不等完成。**派工即授权**——`dispatch` 的审批就是该 worker 全部动作的授权（均属任务型无人值守同一授权面）；不这么做的话 worker 走默认实时审批，无人应答时会挂在「待决交互」直到超时，每个重活 worker 都中道而废（已实测并修复）。派工消息内亦重述无人值守约束（与 task 型 hint 同文案）。
   - **worker 不继承生生的提示词**：新建会话不设 `loadedSubAgents`，也不预载任何子Agent（全局预载名单 `GEBAI_PRELOAD_SUB_AGENTS` 为空时）——worker 拿到的是全局工具 + 自包含派工消息 + 项目坐标 env。已验证：worker 会话 `loadedSubAgents` 为 `undefined`、消息流无 `loadedAgent` 系统消息。例外是**全局「可选子Agent」目录**对所有会话可见（worker 能看到 shengsheng 的描述行并可用 `agent_load` 主动装载），但不注入人格（worker 自述「only as part of the sub-agent catalog description, not as an active role」）。
-  - **管理回路**：池/在途登记在 `.evolve/control.md`（别名/会话 id/领域/任务/派发时间/状态），`state` 每息摊出；`collect` 负责收藏（入台账 + 标 idle 留池）与退役（`idle`/`stop`/`delete`）；复用判据为同域 idle，活动 worker 上限 3。
+  - **管理回路**：池/在途登记在 `.evolve/control.md`（别名/会话 id/领域/任务/派发时间/**轮次**/状态），`state` 每息摊出；`collect` 负责收藏（入台账 + 标 idle 留池）与退役（`idle`/`stop`/`delete`）；复用判据为同域 idle，活动 worker 上限 3。三处易错点已有代码与测试固定：
+    - **复用不改名**：复用匹配先于别名派生——命中的 worker 沿用**它的既有别名**（否则同一会话会被改名，旧别名立即失效、台账与派工消息也无法回溯同一工人）。
+    - **幂等键按轮次**：台账键为 `会话:r<轮次>`，轮次由 `state.seq`（单调递增的派工序号，逐单递增、只有真派出的单占号）来源。不用时间戳：复用场景下 worker 与 inflight 的时间戳不同源，键会漂移（既挡不住真重复也可能误伤）。
+    - **台账读改写串行**：`appendLedger` 在本进程内按路径串行（`withLedgerLock`），且用**文件本身**做幂等源（每次读到最新内容）——避免「先判定未入账、后双写」。台账是控制平面唯一的成果记忆，宁可慢也不能写坏。
+    - **复用代数提示**：同一会话承接单数达 `REUSE_GENERATION_HINT`（8）时在派工回显提示「宜收藏后退役换新」（上下文渐胖，继续复用质量下降）。
 - **环境变量**（`SHENGSHENG_` 前缀，见 def.envVars）：`SHENGSHENG_ROOT`（项目根，`init` 写入会话 env / 派工写入 worker 会话 env）、`SHENGSHENG_TASK_NAME`（心跳任务名，缺省 `SHENGSHENG_EVOLVE`）、`SHENGSHENG_VERIFY`/`SHENGSHENG_SEED_DOC`/`SHENGSHENG_RULES`（验证命令/种子库/硬约束文档的项目坐标，参与派工消息模板）、`SHENGSHENG_DISPATCH`（`preview` 只预检不派工）。
 - **心跳任务形态**：`state action=task op=ensure` 幂等创建/启用（`kind=scheduled`、`runner=prompt`、`target=sticky`、`agents=["shengsheng"]`、任务级 env 带项目坐标、`notifyOn=model`、连续失败 5 次自动停用）；唤醒消息自带项目坐标，故 sticky 会话重建后仍能自行复位（磁盘是唯一可信长期记忆）。已有同名任务时只补齐启用与表达式，不新建。
 - **预加载**：`preload = false`，按需装载（由心跳任务的任务级 `agents` 预载到执行会话）。

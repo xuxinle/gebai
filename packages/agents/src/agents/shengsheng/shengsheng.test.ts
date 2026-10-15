@@ -173,8 +173,9 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
     const md = renderControl({
       coord: { root: "/p", verify: "bun test", seedDoc: "docs/seed.md" },
       breath: 7,
-      workers: [{ alias: "lint-1", sessionId: "abc", domain: "lint", task: "修 lint", dispatchedAt: 111, status: "running" }],
-      inflight: [{ alias: "lint-1", direction: "修 lint", deliverable: "补丁", dispatchedAt: 111 }],
+      seq: 12,
+      workers: [{ alias: "lint-1", sessionId: "abc", domain: "lint", task: "修 lint", dispatchedAt: 111, round: 12, status: "running" }],
+      inflight: [{ alias: "lint-1", direction: "修 lint", deliverable: "补丁", dispatchedAt: 111, round: 12 }],
       seeds: [{ priority: "P1", direction: "docs 补齐", source: "台账", constraint: "只分析" }],
       pending: [],
       note: "观复到 lint-1",
@@ -182,12 +183,14 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
     const back = parseControl(md)
     expect(back.coord).toEqual({ root: "/p", verify: "bun test", seedDoc: "docs/seed.md" })
     expect(back.breath).toBe(7)
-    expect(back.workers[0]).toMatchObject({ alias: "lint-1", sessionId: "abc", status: "running" })
+    expect(back.seq).toBe(12)
+    expect(back.workers[0]).toMatchObject({ alias: "lint-1", sessionId: "abc", status: "running", round: 12 })
+    expect(back.inflight[0]).toMatchObject({ alias: "lint-1", round: 12 })
     expect(back.seeds[0]).toMatchObject({ priority: "P1", direction: "docs 补齐" })
     expect(back.note).toBe("观复到 lint-1")
     expect(renderControl(back)).toBe(md)
     // 空态也保留节结构（可人工查看）
-    expect(renderControl({ coord: {}, breath: 0, workers: [], inflight: [], seeds: [], pending: [] })).toContain("## 种子队列")
+    expect(renderControl({ coord: {}, breath: 0, seq: 0, workers: [], inflight: [], seeds: [], pending: [] })).toContain("## 种子队列")
   })
 
   test("初生：control.md 缺失时引导 init，init 固化坐标并落盘", async () => {
@@ -281,6 +284,102 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
     cleanup(s)
   })
 
+  test("复用不改名：同域第二单沿用原别名（旧别名仍可收藏，会话不被重复登记）", async () => {
+    const s = stub()
+    await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+    await tool("dispatch").execute({ orders: [{ task: "第 1 单", domain: "lint" }] }, s.ctx)
+    const first = parseControl(controlOf(s))
+    expect(first.workers[0].alias).toBe("lint-1")
+    s.running.clear()
+    await tool("collect").execute({ action: "collect", alias: "lint-1", summary: "第一轮" }, s.ctx)
+
+    // 同域第二单：应复用 lint-1，而非派生 lint-2（避免同一会话多别名、旧别名失效）
+    const d2 = await tool("dispatch").execute({ orders: [{ task: "第 2 单", domain: "lint" }] }, s.ctx)
+    expect(d2.output).toContain("lint-1")
+    expect(d2.output).toContain("复用")
+    const st = parseControl(controlOf(s))
+    expect(st.workers).toHaveLength(1)
+    expect(st.workers[0].alias).toBe("lint-1")
+    expect(st.workers[0].round).toBe(2)          // 轮次递增
+    expect(st.seq).toBe(2)                        // 派工序号推进
+    // 旧别名仍有效（工具回显与派工消息里一直是这个名字）
+    s.running.clear()
+    const c2 = await tool("collect").execute({ action: "collect", alias: "lint-1", summary: "第二轮" }, s.ctx)
+    expect(c2.output).toContain("收藏完成")
+    const led = ledgerOf(s)
+    expect(led).toContain("第一轮")
+    expect(led).toContain("第二轮")
+    expect(led).toContain(":r1 -->")              // 幂等键按轮次（不是时间戳）
+    expect(led).toContain(":r2 -->")
+    expect(led).toContain("轮次 2")
+    cleanup(s)
+  })
+
+  test("幂等键按轮次：同一轮重复收藏被拦，新轮可入账", async () => {
+    const s = stub()
+    await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+    await tool("dispatch").execute({ orders: [{ task: "分析 A", domain: "a" }] }, s.ctx)
+    s.running.clear()
+    const c1 = await tool("collect").execute({ action: "collect", alias: "a-1", summary: "第一轮要点" }, s.ctx)
+    expect(c1.output).toContain("收藏完成")
+    // 同一轮再收（在途已清，回退到 worker.round）——键仍为 r1，应拦下
+    const again = await tool("collect").execute({ action: "collect", alias: "a-1", summary: "重复要点" }, s.ctx)
+    expect(again.output).toContain("幂等跳过")
+    expect(ledgerOf(s)).not.toContain("重复要点")
+    cleanup(s)
+  })
+
+  test("复用代数提示：同一会话承接多单后按单数提示换新", async () => {
+    const s = stub()
+    await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+    // 伪装一个已承接 REUSE_GENERATION_HINT 轮的 idle worker
+    await tool("dispatch").execute({ orders: [{ task: "首单", domain: "g" }] }, s.ctx)
+    const st0 = parseControl(controlOf(s))
+    st0.workers[0].status = "idle"
+    st0.workers[0].round = 8
+    st0.seq = 8
+    await Bun.write(join(s.root, ".evolve", "control.md"), renderControl(st0))
+    s.running.clear()
+    const d = await tool("dispatch").execute({ orders: [{ task: "续单", domain: "g" }] }, s.ctx)
+    expect(d.output).toContain("已承接")
+    expect(d.output).toContain("退役换新")
+    cleanup(s)
+  })
+
+  test("collect：台账读改写串行（同轮并发只入账一次）", async () => {
+    const s = stub()
+    await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+    await tool("dispatch").execute({ orders: [{ task: "并发分析", domain: "c" }] }, s.ctx)
+    s.running.clear()
+    const [r1, r2] = await Promise.all([
+      tool("collect").execute({ action: "collect", alias: "c-1", summary: "并发要点" }, s.ctx),
+      tool("collect").execute({ action: "collect", alias: "c-1", summary: "并发要点" }, s.ctx),
+    ])
+    const okCount = [r1, r2].filter((r) => r.output.includes("收藏完成")).length
+    const skipCount = [r1, r2].filter((r) => r.output.includes("幂等跳过")).length
+    expect(okCount).toBe(1)
+    expect(skipCount).toBe(1)
+    const hits = (ledgerOf(s).match(/并发要点/g) ?? []).length
+    expect(hits).toBe(1)
+    cleanup(s)
+  })
+
+  test("派工消息：预载与上下文撞同一路径时给出区分说明", async () => {
+    const s = stub()
+    await tool("state").execute({ action: "init", root: s.root, verify: "bun test", seed_doc: "AGENTS.md" }, s.ctx)
+    await tool("dispatch").execute({ orders: [{ task: "占位", domain: "x" }] }, s.ctx)
+    const st = parseControl(controlOf(s))
+    st.workers[0].status = "idle"
+    await Bun.write(join(s.root, ".evolve", "control.md"), renderControl(st))
+    s.running.clear()
+    // 上下文与预载同为 AGENTS.md（坐标里 seedDoc=AGENTS.md，preload 也传同值）
+    await tool("dispatch").execute({ orders: [{ task: "撞路径", domain: "y", preload: "AGENTS.md" }] }, s.ctx)
+    const msg = s.sent[s.sent.length - 1].message
+    expect(msg).toContain("AGENTS.md")
+    expect(msg).toContain("分别理解")
+    cleanup(s)
+  })
+
   test("收藏：台账追加幂等 + worker 标 idle + 在途清除 + 建议下一条入种子", async () => {
     const s = stub()
     await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
@@ -305,6 +404,8 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
     expect(st.seeds.some((x) => x.direction === "补 lint CI 门禁")).toBe(true)
 
     // 幂等：同一 worker 再收藏不入账第二次
+    // 同一轮重复收藏（先 mark 已读，避开防误改）：键含轮次号 → 必拦
+    void readFileSync(join(s.root, ".evolve", "ledger.md"), "utf8")
     const again = await tool("collect").execute({ action: "collect", alias: "lint-1", summary: "重复要点" }, s.ctx)
     expect(again.output).toContain("幂等跳过")
     expect(ledgerOf(s)).not.toContain("重复要点")

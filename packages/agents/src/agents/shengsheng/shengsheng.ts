@@ -67,8 +67,12 @@ export interface Worker {
   alias: string
   sessionId: string
   domain: string
+  /** 最近一次派工的任务摘要。 */
   task: string
+  /** 首次派发时间（复用者保留：体现“这一位工人的资历”）。 */
   dispatchedAt: number
+  /** 最近一次派工的轮次号（台账幂等键的稳定来源）。 */
+  round: number
   status: "running" | "idle"
 }
 
@@ -78,6 +82,8 @@ export interface Inflight {
   direction: string
   deliverable: string
   dispatchedAt: number
+  /** 本次派工的轮次号（与 Worker.round 同源写入；collect 据此去重）。 */
+  round: number
 }
 
 /** 种子（值得生的方向）。 */
@@ -98,6 +104,9 @@ export interface Pending {
 export interface EvolveState {
   coord: Coord
   breath: number
+  /** 派工轮次计数器（单调递增，跨息持续）：每派一单 +1，作为台账幂等键的稳定来源。
+   *  不用时间戳的理由：复用时 worker 与 inflight 的时间戳不同源，键会漂移。 */
+  seq: number
   workers: Worker[]
   inflight: Inflight[]
   seeds: Seed[]
@@ -113,7 +122,7 @@ const COORD_LABELS: Array<[keyof Coord, string]> = [
   ["preload", "worker 预载提示"],
 ]
 
-const EMPTY: EvolveState = { coord: {}, breath: 0, workers: [], inflight: [], seeds: [], pending: [] }
+const EMPTY: EvolveState = { coord: {}, breath: 0, seq: 0, workers: [], inflight: [], seeds: [], pending: [] }
 
 /** `.evolve` 目录与两个状态文件的位置（给定项目根）。 */
 function evolvePaths(root: string): { dir: string; control: string; ledger: string } {
@@ -177,9 +186,11 @@ export function parseControl(md: string | null): EvolveState {
     if (hit && m[2].trim()) coord[hit[0]] = m[2].trim()
   }
   const breathMatch = /-\s*呼吸[：:]\s*(\d+)/.exec(sectionText(md, "计数"))
+  const seqMatch = /-\s*派工序号[：:]\s*(\d+)/.exec(sectionText(md, "计数"))
   const state: EvolveState = {
     coord,
     breath: breathMatch ? Number(breathMatch[1]) : 0,
+    seq: seqMatch ? Number(seqMatch[1]) : 0,
     workers: tableRows(md, "worker 池")
       .map((c): Worker => ({
         alias: c[0] ?? "",
@@ -187,10 +198,13 @@ export function parseControl(md: string | null): EvolveState {
         domain: c[2] ?? "",
         task: c[3] ?? "",
         dispatchedAt: Number(c[4]) || 0,
-        status: c[5] === "idle" ? "idle" : "running",
+        round: Number(c[5]) || 0,
+        status: c[6] === "idle" ? "idle" : "running",
       }))
       .filter((w) => w.alias),
-    inflight: tableRows(md, "在途").map((c) => ({ alias: c[0] ?? "", direction: c[1] ?? "", deliverable: c[2] ?? "", dispatchedAt: Number(c[3]) || 0 })).filter((i) => i.alias),
+    inflight: tableRows(md, "在途")
+      .map((c) => ({ alias: c[0] ?? "", direction: c[1] ?? "", deliverable: c[2] ?? "", dispatchedAt: Number(c[3]) || 0, round: Number(c[4]) || 0 }))
+      .filter((i) => i.alias),
     seeds: tableRows(md, "种子队列").map((c) => ({ priority: c[0] ?? "", direction: c[1] ?? "", source: c[2] ?? "", constraint: c[3] ?? "" })).filter((s) => s.direction),
     pending: tableRows(md, "收藏待办").map((c) => ({ alias: c[0] ?? "", summary: c[1] ?? "", at: Number(c[2]) || 0 })).filter((p) => p.alias),
   }
@@ -218,12 +232,13 @@ export function renderControl(state: EvolveState): string {
     "",
     "## 计数",
     `- 呼吸：${state.breath}`,
+    `- 派工序号：${state.seq}`,
     "",
     "## worker 池",
-    renderTable(["别名", "会话", "领域", "任务", "派发时间", "状态"], state.workers.map((w) => [w.alias, w.sessionId, w.domain, w.task, String(w.dispatchedAt), w.status])),
+    renderTable(["别名", "会话", "领域", "任务", "派发时间", "轮次", "状态"], state.workers.map((w) => [w.alias, w.sessionId, w.domain, w.task, String(w.dispatchedAt), String(w.round), w.status])),
     "",
     "## 在途",
-    renderTable(["别名", "方向", "预期产出", "派发时间"], state.inflight.map((i) => [i.alias, i.direction, i.deliverable, String(i.dispatchedAt)])),
+    renderTable(["别名", "方向", "预期产出", "派发时间", "轮次"], state.inflight.map((i) => [i.alias, i.direction, i.deliverable, String(i.dispatchedAt), String(i.round)])),
     "",
     "## 种子队列",
     renderTable(["优先级", "方向", "来源", "约束"], state.seeds.map((s) => [s.priority, s.direction, s.source, s.constraint])),
@@ -326,22 +341,39 @@ async function loadState(ctx: ToolContext, argRoot?: string): Promise<Loaded> {
   return { root, via, state: parseControl(r.text ?? null), initialized: r.text !== null }
 }
 
-const freshState = (): EvolveState => ({ coord: {}, breath: 0, workers: [], inflight: [], seeds: [], pending: [] })
+const freshState = (): EvolveState => ({ coord: {}, breath: 0, seq: 0, workers: [], inflight: [], seeds: [], pending: [] })
 
 async function saveState(ctx: ToolContext, root: string, state: EvolveState): Promise<{ error?: string }> {
   return writeAbs(ctx, evolvePaths(root).control, renderControl(state))
 }
 
-/** 台账追加（含记录键：同一 worker 只入一次，重放幂等）。 */
+/**
+ * 台账追加（含记录键：同一轮只入一次，重放幂等）。
+ *
+ * 读改写序列在本进程内按路径串行（同一次心跳里 collect 与 state.note 并发调用时不互相踩），
+ * 且**用文件本身做幂等源**（每次读到的都是最新内容）——避免「先判定未入账、后双写」。
+ * 台账是控制平面唯一的成果记忆，宁可慢一点也不能写坏。
+ */
+const ledgerLocks = new Map<string, Promise<unknown>>()
+
+function withLedgerLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
+  const prev = ledgerLocks.get(path) ?? Promise.resolve()
+  const next = prev.then(fn, fn)
+  ledgerLocks.set(path, next.catch(() => {}))
+  return next
+}
+
 async function appendLedger(ctx: ToolContext, root: string, key: string, block: string): Promise<{ path: string; appended: boolean; error?: string }> {
   const path = evolvePaths(root).ledger
-  const r = await readAbs(ctx, path)
-  if (r.error) return { path, appended: false, error: r.error }
-  const md = r.text ?? "# 演进台账\n\n（生生逐轮追加——每轮一次 worker 交付，记录键保证幂等。）\n"
-  if (md.includes(key)) return { path, appended: false }
-  const w = await writeAbs(ctx, path, `${md.replace(/\s*$/, "")}\n\n${block}\n`)
-  if (w.error) return { path, appended: false, error: w.error }
-  return { path, appended: true }
+  return withLedgerLock(path, async () => {
+    const r = await readAbs(ctx, path)
+    if (r.error) return { path, appended: false, error: r.error }
+    const md = r.text ?? "# 演进台账\n\n（生生逐轮追加——每轮一次 worker 交付，记录键保证幂等。）\n"
+    if (md.includes(key)) return { path, appended: false }
+    const w = await writeAbs(ctx, path, `${md.replace(/\s*$/, "")}\n\n${block}\n`)
+    if (w.error) return { path, appended: false, error: w.error }
+    return { path, appended: true }
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -426,15 +458,21 @@ function liveLine(alias: string, w: Worker | undefined, live: Live | undefined):
 
 /** 派工/继承：装配自包含派工消息（任务/上下文/交付/验证/纪律/预载——模板由代码保证不漏项）。 */
 function renderOrderPrompt(order: Order, coord: Coord, injectedEnv: string[]): string {
+  const contextLine = (order.context ?? coord.seedDoc ?? "（无——自行摸底定位）").trim()
   const lines = [
     `任务：${order.task.trim()}`,
-    `上下文：${(order.context ?? coord.seedDoc ?? "（无——自行摸底定位）").trim()}`,
+    `上下文：${contextLine}`,
     `交付：${(order.deliver ?? "具体产出物与落盘路径（代码+回归测试 / 分析方案 / 基线数据）").trim()}`,
     `验证：${(order.verify ?? coord.verify ?? "（未提供验证命令）——无法运行时说明原因并给出可复现的验证步骤").trim()}`,
     `纪律：${(order.rules ?? coord.rules ?? "原子提交不 push；设计层/公共接口变更只分析不落地").trim()}`,
   ]
   const preload = (order.preload ?? coord.preload ?? "").trim()
   if (preload) lines.push(`预载：${preload}`)
+  if (preload && preload === contextLine) {
+    // 同一路径既是「上下文」又是「预载」：前者是「去读它」，后者是「把它当子Agent 装载」——语义不同，
+    // 不点名会派出去一个语义冲突的消息（worker 无法判断到底该读还是该装）。
+    lines.push(`（注：「预载」与「上下文」指向同一路径——前者是子Agent 名清单（按需 agent_load），后者是资料文件（直接 read）；本条请分别理解。）`)
+  }
   if (injectedEnv.length) lines.push(`环境：本会话已注入 ${injectedEnv.join("、")}（项目坐标）`)
   lines.push("本次为无人值守执行（无交互通道）：不要依赖询问用户与前端渲染（ask、show 的页面预览、页面捕获不可用）；需审批工具已由本次派工授权自动通过——不需要为工具审批等待或重试。")
   lines.push("单任务完成即止——输出最终报告后结束，不要循环找新事。报告须含：交付／验证证据／未竟事项／建议下一条。")
@@ -474,6 +512,8 @@ export const WORKER_CTX_LIMIT = 150_000
 export const ACTIVE_WORKER_LIMIT = 3
 /** 单批派工上限。 */
 export const DISPATCH_LIMIT = 8
+/** 同一 worker 会话承接单数达此值即提示换新（上下文渐胖，继续复用质量下降）。 */
+export const REUSE_GENERATION_HINT = 8
 
 const sanitizeAlias = (s: string): string =>
   s
@@ -817,6 +857,8 @@ interface PlanItem {
   sessionId: string
   reuse: boolean
   created: boolean
+  /** 复用命中时的原池条目（沿用其别名与首派时间）。 */
+  revived?: Worker
   note?: string
 }
 
@@ -874,21 +916,26 @@ const dispatchTool: Tool = {
     const taken = new Set<string>()
     const plans: PlanItem[] = []
     for (const order of orders) {
-      const alias = ensureUniqueAlias(state, order, taken)
-      taken.add(alias)
-      const domain = order.domain?.trim() || alias.replace(/-\d+$/, "")
+      // 复用匹配**先于**别名派生：命中的 worker 必须沿用它的既有别名——
+      // 否则同一个会话会被改名（旧别名立即失效，台账/派工消息也无法回溯同一工人）。
       let reuse = false
       let sessionId = order.session_id ?? ""
+      let revived: Worker | undefined
       if (!sessionId && !order.fresh) {
-        // 复用匹配：显式领域优先；未给领域且池中恰有一个 idle worker 时复用它
-        const idleWorkers = state.workers.filter((w) => w.status === "idle")
+        // 复用匹配：显式领域优先（在 `taken` 之外的 idle worker 中取首个）；
+        // 未给领域且池中恰有一个 idle worker 时复用它
+        const idleWorkers = state.workers.filter((w) => w.status === "idle" && !taken.has(w.alias))
         const hit = order.domain ? idleWorkers.find((w) => w.domain === order.domain) : idleWorkers.length === 1 ? idleWorkers[0] : undefined
         if (hit) {
           sessionId = hit.sessionId
           reuse = true
+          revived = hit
         }
       }
-      plans.push({ alias, domain, task: order.task, sessionId, reuse, created: !reuse && !sessionId })
+      const alias = revived ? revived.alias : ensureUniqueAlias(state, order, taken)
+      taken.add(alias)
+      const domain = order.domain?.trim() || revived?.domain || alias.replace(/-\d+$/, "")
+      plans.push({ alias, domain, task: order.task, sessionId, reuse, created: !reuse && !sessionId, revived })
     }
 
     // 池容量：活动 worker（running + idle）上限——只挡住新增，不阻断回收
@@ -911,6 +958,8 @@ const dispatchTool: Tool = {
     const now = Date.now()
     const kicked: Promise<void>[] = []
     const results: string[] = []
+    // 派工轮次号逐单递增（幂等键来源）；只有**真正派出**的单占号，被挡下的不占
+    let nextSeq = state.seq
     for (let i = 0; i < plans.length; i++) {
       const plan = plans[i]
       const order = orders[i]
@@ -949,17 +998,30 @@ const dispatchTool: Tool = {
           results.push(`- ${plan.alias}：注入后运行报错——${describeError(err)}`)
         })
         kicked.push(started)
-        // 池 upsert（复用者保留原派发时间，新建者记当前）
+        nextSeq += 1
+        // 池 upsert（复用者保留原别名与首派时间，新建者记当前）：round 为本次派工轮次号
         const prev = state.workers.find((w) => w.sessionId === plan.sessionId)
-        const worker: Worker = { alias: plan.alias, sessionId: plan.sessionId, domain: plan.domain, task: plan.task.slice(0, 80), dispatchedAt: prev?.dispatchedAt ?? now, status: "running" }
+        const worker: Worker = {
+          alias: plan.alias,
+          sessionId: plan.sessionId,
+          domain: plan.domain,
+          task: plan.task.slice(0, 80),
+          dispatchedAt: prev?.dispatchedAt ?? now,
+          round: nextSeq,
+          status: "running",
+        }
         state.workers = [...state.workers.filter((w) => w.sessionId !== plan.sessionId && w.alias !== plan.alias), worker]
-        const inflight: Inflight = { alias: plan.alias, direction: order.task, deliverable: order.deliver ?? "", dispatchedAt: now }
+        const inflight: Inflight = { alias: plan.alias, direction: order.task, deliverable: order.deliver ?? "", dispatchedAt: now, round: worker.round }
         state.inflight = [...state.inflight.filter((x) => x.alias !== plan.alias), inflight]
-        results.push(`- ${plan.alias}｜${plan.reuse ? "复用" : "新建"}会话 ${plan.sessionId}｜${plan.domain}｜${plan.task.slice(0, 60)}`)
+        // 复用代数提示：同一会话连续承接的单数（首派 1）——接近上限时建议收藏后退役换新上下文
+        const generation = prev ? prev.round + 1 : 1
+        const genNote = generation >= REUSE_GENERATION_HINT ? `｜**已承接 ${generation} 单**（上下文渐胖，宜收藏后退役换新）` : ""
+        results.push(`- ${plan.alias}｜${plan.reuse ? "复用" : "新建"}会话 ${plan.sessionId}｜${plan.domain}｜轮次 ${worker.round}｜${plan.task.slice(0, 60)}${genNote}`)
       } catch (err) {
         results.push(`- ${plan.alias}：**派工失败**——${describeError(err)}`)
       }
     }
+    state.seq = nextSeq
     // 初期错误窗口（会话缺失/存储异常等同步段失败）：不等待执行完成，只捞早期异常
     await Promise.race([Promise.allSettled(kicked), new Promise((r) => setTimeout(r, 1500))])
     const w = await saveState(ctx, root, state)
@@ -1055,20 +1117,23 @@ const collectTool: Tool = {
       const next = args.next != null ? String(args.next).trim() : ""
       const inflight = state.inflight.find((i) => i.alias === worker.alias)
       const stamp = new Date().toISOString()
-      // 幂等键：worker 会话 + 本轮派发时刻（dispatch 时写入，跨息稳定；新派发即新一轮，可再入账）
-      const roundKey = inflight?.dispatchedAt ?? worker.dispatchedAt
+      // 幂等键：worker 会话 + **本轮轮次号**（dispatch 写入的单调递增代号）。
+      // 不用时间戳：复用时 worker 与 inflight 的时间戳不同源，键会漂移（既挡不住真重复、也可能误伤）。
+      // 轮次号在会话内单调递增，语义就是「第几轮交付」——同一轮重复 collect 必被拦，新轮必可入账。
+      const roundKey = inflight?.round ?? worker.round ?? 0
+      const ledgerKey = `collect:${worker.sessionId}:r${roundKey}`
       const block = [
-        `<!-- collect:${worker.sessionId}:${roundKey} -->`,
+        `<!-- ${ledgerKey} -->`,
         `## ${stamp}｜${worker.alias}｜${worker.domain}`,
         "",
         `- 方向：${inflight?.direction ?? worker.task}`,
         inflight?.deliverable ? `- 预期产出：${inflight.deliverable}` : "",
-        `- 会话：${worker.sessionId}`,
+        `- 会话：${worker.sessionId}｜轮次 ${roundKey}`,
         "",
         summary,
         next ? `\n建议下一条：${next}` : "",
       ].filter(Boolean).join("\n")
-      const led = await appendLedger(ctx, root, `<!-- collect:${worker.sessionId}:${roundKey} -->`, block)
+      const led = await appendLedger(ctx, root, ledgerKey, block)
       if (led.error) return { output: led.error }
       if (!led.appended) return { output: `台账已有该 worker 的记录（幂等跳过，未重复追加）：${worker.alias}｜${led.path}\n若要点有更新，请先 \`action=retire\` 让该 worker 退出池，下轮以新记录入账。` }
 
