@@ -29,6 +29,7 @@ import { attachDocument, attachedServerOf, hasLsp, initLsp, lspServerDetailOf, n
 import { wordWrapTitle } from "./wrap"
 import { minimapTitle } from "./minimap"
 import { branchTitle, changeParts } from "./git-counts"
+import { modeSlot, readOnlyReason } from "./status-core"
 import { installWorkbenchKeys, workbenchKeymap } from "./keymap-wb"
 import { FOCUS_ALL_FIELDS, validateKeymap, helpGroups, popKeyScope, pushEscScope } from "../keymap"
 import type { KeyBinding } from "../keymap"
@@ -2042,7 +2043,8 @@ function renderStatus(): void {
    */
   const sig = [
     tab?.id ?? "-", tab?.kind ?? "", tab?.mode ?? "", tab?.encoding ?? "", tab?.eol ?? "",
-    tab?.stat?.language ?? "", tab?.stat?.size ?? "", tab?.editor ? 1 : 0,
+    tab?.stat?.language ?? "", tab?.stat?.size ?? "", tab?.stat?.editable ? 1 : 0, tab?.truncated ? 1 : 0,
+    tab?.editor ? 1 : 0,
     state.cursor.line, state.cursor.column, state.cursor.selected,
     explorer.getRoot(), root?.name ?? "", root?.path ?? "", root?.isRepo ? 1 : 0,
     g?.isRepo ? 1 : 0, g?.branch ?? "", g?.detached ? 1 : 0, g?.ahead ?? 0, g?.behind ?? 0,
@@ -2148,7 +2150,13 @@ function renderStatus(): void {
     const statInfo = t.stat
     // 语言 / 只读态、行列坐标：窄屏下比编码、大小、时间更常看，优先级高一级
     statusbar.appendChild(item("", { pri: 2, text: statInfo?.language || "plaintext" }))
-    statusbar.appendChild(item(t.mode === "edit" ? "" : "warn", { pri: 1, text: t.mode === "edit" ? "编辑" : "只读" }))
+    /* 「查看 / 编辑」格 = **模式 × 可写性**两个维度（判据见 status-core.ts，纯函数带单测）：
+       可写时中性色——查看态「查看」、编辑态「编辑」；不可写时一律 warn 色，且查看态说「不可编辑」、
+       编辑态说「不可保存」（Ctrl+E 不看 editable 就能进编辑态，编辑器却仍只读、保存也会被拒——
+       那时显示中性「编辑」会让用户以为改动存得下去）。原因与下一步动作都在 title 里。
+       pri 恒 1：这一格回答的是“我现在能不能改这个文件”，与最左的根目录格同级，窄面板下不能被隐掉。 */
+    const slot = modeSlot({ mode: t.mode, readOnly: readOnlyReason({ statEditable: statInfo?.editable, truncated: t.truncated, rootWritable: state.rootsResp?.writable }) })
+    statusbar.appendChild(item(slot.cls, { pri: 1, text: slot.text, title: slot.title }))
     if (t.editor) {
       statusbar.appendChild(item("", { pri: 2, text: `行 ${state.cursor.line}，列 ${state.cursor.column}${state.cursor.selected ? `（选中 ${state.cursor.selected}）` : ""}` }))
     }
@@ -2178,7 +2186,13 @@ function renderStatus(): void {
       item("", { pri: 3, title: `语言服务器：${lspServerDetailOf(tab?.editor?.model?.() ?? null) || lspServer}`, text: lspServer }),
     )
   }
-  if (state.rootsResp && !state.rootsResp.writable) statusbar.appendChild(item("warn", { pri: 1, text: "只读模式" }))
+  /* 根目录整体不可写（GEBAI_FS_WRITE=false）：与文件级的那格是两回事——这格在**任何标签**下都在
+     （包括没打开任何文件时），回答的是“这个工作区能不能落盘”。补上原因 title，避免与文件级只读混淆。 */
+  if (state.rootsResp && !state.rootsResp.writable) {
+    statusbar.appendChild(
+      item("warn", { pri: 1, title: "当前工作区以只读方式挂载（服务端 GEBAI_FS_WRITE=false）：保存 / 新建 / 删除都会被拒绝", text: "只读模式" }),
+    )
+  }
 }
 
 function setEol(tab: Tab, eol: "lf" | "crlf" | "keep"): void {
