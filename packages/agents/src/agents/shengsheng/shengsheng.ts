@@ -190,6 +190,20 @@ function aliasToSession(workers: Worker[]): Map<string, string> {
   return out
 }
 
+/**
+ * 登记**身份键**：在途条目**优先取会话 id**（自带列 → 经池解析别名，即 {@link inflightSession}），
+ * 只有「会话线索全缺」时才退化为别名（此时它确实是「无从核实」那一类）；池条目的身份键就是它的会话 id
+ * （{@link dedupeWorkers} 直接用 `w.sessionId`）。
+ *
+ * 为什么在途不能只用别名当键：别名是**显示名**、会话才是本体——旧版工具写下的同一会话两个别名
+ * （别名漂移）会让「按别名过滤/寻址」两边都漏：写侧 `filter((x) => x.alias !== plan.alias)` 过滤不掉
+ * 旧名那条，`collect`/`retire` 按 worker 别名也删不掉它，于是**同一会话在途并列两条**（已实测：
+ * 池 1 条、在途 2 条，且旧名那条因轮次更大而在读侧归一里胜出，顶掉本轮新登记）。
+ * 会话判定直接复用 `inflightSession`——读态「这条在途是谁的」与写侧「该清哪条」必须是**同一个判据**，
+ * 各自实现一分就会出现「读态认得出、收藏清不掉」这类裂缝。
+ */
+const inflightIdentity = (i: Inflight, workers: Worker[]): string => inflightSession(i, workers) ?? i.alias
+
 /** 在途的会话线索：自带列优先，旧格式回落到池的同名条目解析（仍解析不到 = 无从核实）。 */
 export function inflightSession(i: Inflight, workers: Worker[]): string | undefined {
   return i.sessionId || aliasToSession(workers).get(i.alias) || undefined
@@ -206,10 +220,34 @@ function dedupeWorkers(workers: Worker[]): Worker[] {
   return dedupeBySession(workers, (w) => w.sessionId, (w) => w.round || 0)
 }
 
-/** 在途归一：同一会话只留最新一轮；会话线索缺失的条目无从判定同源，一律保留。 */
+/** 在途归一：同一会话只留最新一轮（身份键经 {@link inflightIdentity} 解析——会话优先、无会话
+ *  线索者才用别名）；身份键为空（无别名、也不属任何会话）的条目无从判定同源，一律保留。 */
 function dedupeInflight(inflight: Inflight[], workers: Worker[]): Inflight[] {
-  const byAlias = aliasToSession(workers)
-  return dedupeBySession(inflight, (i) => i.sessionId || byAlias.get(i.alias) || "", (i) => i.round || 0)
+  return dedupeBySession(inflight, (i) => inflightIdentity(i, workers), (i) => i.round || 0)
+}
+
+/** 该 worker 的在途登记（们）：**会话 id 为主键**、兼按别名——读态、深观、收藏、退役共用同一判据，
+ *  故「池里一个工人 ↔ 在途一条登记」在四处一致；旧版遗留的**别名漂移残留**也归到同一个工人名下。 */
+function inflightOf(state: EvolveState, worker: Worker): Inflight[] {
+  return state.inflight.filter((i) => i.alias === worker.alias || inflightIdentity(i, state.workers) === worker.sessionId)
+}
+
+/** 取走该 worker 的全部在途登记（会话 id 为主键、兼按别名；含别名漂移的陈旧残留）并就地移除。 */
+function takeInflight(state: EvolveState, worker: Worker): Inflight[] {
+  const hit = inflightOf(state, worker)
+  if (hit.length) state.inflight = state.inflight.filter((i) => !hit.includes(i))
+  return hit
+}
+
+/** 在途方向退回种子队列（按方向去重）——退役/清理路径统一走它，别名漂移的残留也不丢方向。 */
+function returnToSeeds(state: EvolveState, rows: Inflight[], prefix: string, reason: string, constraint: string): boolean {
+  let pushed = false
+  for (const i of rows) {
+    if (state.seeds.some((s) => s.direction === i.direction)) continue
+    state.seeds.push({ priority: "待定", direction: i.direction, source: `${prefix} ${i.alias}${reason ? `（${reason}）` : ""}`, constraint })
+    pushed = true
+  }
+  return pushed
 }
 
 /** 取 `## <标题>` 段落内的表格数据行（跳过表头与分隔行；`（空）` 视为零条目）。 */
@@ -1231,7 +1269,9 @@ const dispatchTool: Tool = {
         }
         state.workers = dedupeWorkers([...state.workers.filter((w) => w.sessionId !== plan.sessionId && w.alias !== plan.alias), worker])
         const inflight: Inflight = { alias: plan.alias, sessionId: plan.sessionId, direction: order.task, deliverable: order.deliver ?? "", dispatchedAt: now, round: worker.round }
-        state.inflight = dedupeInflight([...state.inflight.filter((x) => x.alias !== plan.alias), inflight], state.workers)
+        // 在途 upsert **按会话 id 取代**——仅按别名过滤会漏掉旧名残留（别名漂移），而它随后可能因轮次
+        // 更大而在归一里胜出、顶掉本轮新登记。写侧与读侧（parseControl 的归一）因此共用同一套身份键。
+        state.inflight = dedupeInflight([...state.inflight.filter((x) => x.alias !== plan.alias && inflightIdentity(x, state.workers) !== plan.sessionId), inflight], state.workers)
         // 复用代数提示：同一会话连续承接的单数（首派 1）——接近上限时建议收藏后退役换新上下文
         const generation = prev ? prev.round + 1 : 1
         const genNote = generation >= REUSE_GENERATION_HINT ? `｜**已承接 ${generation} 单**（上下文渐胖，宜收藏后退役换新）` : ""
@@ -1302,9 +1342,11 @@ const collectTool: Tool = {
     const inflightByAlias = findInflight(alias)
     // 会话 id 命中的在途（在途自带会话列时可用）：池条目已被清、只在途还留着的那条——
     // 按 session_id 也能定向到它（否则一条「会话可达但不在池」的在途既收不回也清不掉）。
-    const inflightBySession = sidArg ? state.inflight.find((i) => inflightSession(i, state.workers) === sidArg) : undefined
-    const stale = inflightByAlias ?? inflightBySession
-    const staleKey = inflightByAlias ? `alias=${alias}` : `session_id=${sidArg}`
+    // 同传别名与会话 id 时**先按会话 id 取**（会话是主键）：两者因别名漂移而不一致时，
+    // 取别名会把「同一个工人的旧名登记」当成另一个工人——定向清理就清到了错的那条。
+    const inflightBySession = sidArg ? state.inflight.find((i) => inflightIdentity(i, state.workers) === sidArg) : undefined
+    const stale = inflightBySession ?? inflightByAlias
+    const staleKey = inflightBySession ? `session_id=${sidArg}` : `alias=${alias}`
     const candidates = () => [
       state.workers.length ? `池中 worker：\n${state.workers.map((w) => `- ${w.alias}｜${w.domain}｜${w.task}｜${w.status}`).join("\n")}` : "池中无 worker。",
       state.inflight.length
@@ -1352,14 +1394,14 @@ const collectTool: Tool = {
     // 寻址回工（命中的池条目 + 会话经池解析出的本轮在途）：凡用 session_id 寻址（或委托寻址）都回工，
     if (sidArg) {
       res.alias = worker.alias
-      res.inflight = state.inflight.find((i) => i.alias === worker.alias) ?? null
+      res.inflight = inflightOf(state, worker)[0] ?? null
     } else if (alias && alias !== worker.alias) {
       res.aliasBySession = worker.alias
     }
 
     // ---- review：深观（只读）----
     if (action === "review") {
-      const inflight = state.inflight.find((i) => i.alias === worker.alias)
+      const inflight = inflightOf(state, worker)[0]
       const advice: string[] = []
       if (!live.exists) advice.push("会话不存在（外部删除/服务重启）→ `shengsheng_collect action=retire mode=idle`（在途退回种子队列）")
       else if (live.running) {
@@ -1401,19 +1443,22 @@ const collectTool: Tool = {
         }
       }
       const next = args.next != null ? String(args.next).trim() : ""
-      const inflight = state.inflight.find((i) => i.alias === worker.alias)
+      // 本轮在途（会话 id 优先）：台账的行数与幂等键都取自它，不能用别名找——别名漂移时会漏掉本轮那条，
+      // 幂等键回落到池的轮次上（与派工时写入的键不一致即挡不住真重复）。
+      const current = inflightOf(state, worker)[0]
       const stamp = new Date().toISOString()
-      // 幂等键：worker 会话 + **本轮轮次号**（dispatch 写入的单调递增代号）。
+      // 幂等键：worker 会话 + **轮到哪一轮**（dispatch 写入的单调递增代号）。
       // 不用时间戳：复用时 worker 与 inflight 的时间戳不同源，键会漂移（既挡不住真重复、也可能误伤）。
-      // 轮次号在会话内单调递增，语义就是「第几轮交付」——同一轮重复 collect 必被拦，新轮必可入账。
-      const roundKey = inflight?.round ?? worker.round ?? 0
+      // 取值次序为 `max(在途, 池)` 而非 `在途 ?? 池`：在途清掉后再收（或旧版残留的轮次低于池时）
+      // 回落到池轮次会造出一个**更小的新键**——同一轮于是被当成新轮重复入账（幂等键一旦回退就不再幂等）。
+      const roundKey = Math.max(current?.round ?? 0, worker.round ?? 0)
       const ledgerKey = `collect:${worker.sessionId}:r${roundKey}`
       const block = [
         `<!-- ${ledgerKey} -->`,
         `## ${stamp}｜${worker.alias}｜${worker.domain}`,
         "",
-        `- 方向：${inflight?.direction ?? worker.task}`,
-        inflight?.deliverable ? `- 预期产出：${inflight.deliverable}` : "",
+        `- 方向：${current?.direction ?? worker.task}`,
+        current?.deliverable ? `- 预期产出：${current.deliverable}` : "",
         `- 会话：${worker.sessionId}｜轮次 ${roundKey}`,
         "",
         summary,
@@ -1425,8 +1470,11 @@ const collectTool: Tool = {
 
       const w = state.workers.find((x) => x.alias === worker.alias)
       if (w) w.status = "idle"
-      state.inflight = state.inflight.filter((i) => i.alias !== worker.alias)
+      // 在途清除**按会话 id**（主键）兼按别名：只按别名清不掉「别名已漂移」的那条残留，
+      // 而它随后会在读态里重新被报成「待收藏/无从核实」——收藏过的东西又冒出来，是同一裂缝的另一面。
+      const cleared = takeInflight(state, worker)
       state.pending = state.pending.filter((p) => p.alias !== worker.alias)
+      returnToSeeds(state, cleared.filter((i) => i.alias !== worker.alias), "在途回退", "（别名漂移的陈旧登记）", "worker 会话不可用，重开时从种子库/台账重新摸底")
       let seedNote = ""
       if (next) {
         if (state.seeds.some((s) => s.direction === next)) seedNote = `「建议下一条」已在种子队列（未重复入队）`
@@ -1457,18 +1505,9 @@ const collectTool: Tool = {
         if (live.running) {
           svc.engine.cancel(worker.sessionId)
         }
-        const anchor = state.workers.find((w) => w.alias === worker.alias)
-        if (anchor) {
-          anchor.status = "idle"
-          anchor.domain = `${anchor.domain}（已退役）`
-        }
-        const inflight = state.inflight.find((i) => i.alias === worker.alias)
-        if (inflight) {
-          state.inflight = state.inflight.filter((i) => i.alias !== worker.alias)
-          if (!state.seeds.some((s) => s.direction === inflight.direction)) {
-            state.seeds.push({ priority: "待定", direction: inflight.direction, source: `中道而废 ${worker.alias}${reason ? `（${reason}）` : ""}`, constraint: "重开时先读台账上一轮的中断点" })
-          }
-        }
+        // 在途取出**按会话 id**（主键）兼按别名：别名漂移的残留也一并带走（否则它永远卡在盘上）
+        const inflight = takeInflight(state, worker)
+        returnToSeeds(state, inflight, "中道而废", reason, "重开时先读台账上一轮的中断点")
         state.workers = state.workers.filter((w) => w.alias !== worker.alias)
         const sw = await saveState(ctx, root, state)
         if (sw.error) return { output: sw.error }
@@ -1477,13 +1516,8 @@ const collectTool: Tool = {
       if (mode === "delete") {
         if (live.running) return { output: `会话 ${worker.sessionId} 正在运行——先 \`action=retire mode=stop\` 终止再删除（删除运行中会话会留下孤儿任务态）。` }
         await svc.store.delete(worker.sessionId, ctx.user)
-        const inflight = state.inflight.find((i) => i.alias === worker.alias)
-        if (inflight) {
-          state.inflight = state.inflight.filter((i) => i.alias !== worker.alias)
-          if (!state.seeds.some((s) => s.direction === inflight.direction)) {
-            state.seeds.push({ priority: "待定", direction: inflight.direction, source: `在途回退 ${worker.alias}${reason ? `（${reason}）` : ""}`, constraint: "" })
-          }
-        }
+        const inflight = takeInflight(state, worker)
+        returnToSeeds(state, inflight, "在途回退", reason, "")
         state.workers = state.workers.filter((w) => w.alias !== worker.alias)
         state.pending = state.pending.filter((p) => p.alias !== worker.alias)
         const sw = await saveState(ctx, root, state)
@@ -1491,14 +1525,11 @@ const collectTool: Tool = {
         return { output: `已删除会话并退役：${worker.alias}（${worker.sessionId} 进归档，7 天内可由管理员恢复）${sidArg ? `｜寻址：按 session_id 命中本条（别名 ${worker.alias}｜轮次 ${worker.round}）` : ""}。${reason ? `原因：${reason}` : ""}`, data: { worker, seeds: state.seeds, ...res } }
       }
       // mode=idle：仅清出池（在途退回种子）
-      const inflight = state.inflight.find((i) => i.alias === worker.alias)
+      const inflight = takeInflight(state, worker)
       let back = ""
-      if (inflight) {
-        state.inflight = state.inflight.filter((i) => i.alias !== worker.alias)
-        if (!state.seeds.some((s) => s.direction === inflight.direction)) {
-          state.seeds.push({ priority: "待定", direction: inflight.direction, source: `在途回退 ${worker.alias}${reason ? `（${reason}）` : ""}`, constraint: "worker 会话不可用，重开时从种子库/台账重新摸底" })
-          back = `；在途方向已退回种子队列`
-        } else back = `；在途方向已在种子队列（未重复）`
+      if (inflight.length) {
+        const pushed = returnToSeeds(state, inflight, "在途回退", reason, "worker 会话不可用，重开时从种子库/台账重新摸底")
+        back = pushed ? `；在途方向已退回种子队列` : `；在途方向已在种子队列（未重复）`
       }
       state.workers = state.workers.filter((w) => w.alias !== worker.alias)
       state.pending = state.pending.filter((p) => p.alias !== worker.alias)

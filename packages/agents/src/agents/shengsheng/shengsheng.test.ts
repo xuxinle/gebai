@@ -5,6 +5,10 @@ import { dirname, join, resolve } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
 import { def as shengshengDef, parseControl, renderControl, dedupeState, inflightSession } from "./shengsheng"
 
+/** 测试内复刻 `inflightIdentity`（未导出）：断言按会话 id 认帐时用同一判据。 */
+const inflightIdentityForTest = (i: { alias: string; sessionId?: string }, workers: Array<{ alias: string; sessionId: string }>): string =>
+  i.sessionId || workers.find((w) => w.alias === i.alias)?.sessionId || i.alias
+
 const tool = (n: string) => shengshengDef.tools![n]
 
 interface Stub {
@@ -1027,5 +1031,265 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
     const src = [w("a-1", "s1", 2), w("a-2", "s1", 5)]
     dedupeState({ ...base, workers: src })
     expect(src).toHaveLength(2)
+  })
+
+  // ------------------------------------------------------------------
+  // 跨模块全场景回归（续派路径 × 池去重）：一条测试、同一进程、一个场景走到底。
+  //
+  // 为什么把「续派四契约」与「池去重三重登记一致」两个视角合并成一条：分开写时，
+  // 「续派后池一条 + 在途一条」与「收藏/退役能把那条清掉」各自都能被**局部**满足——
+  // 池按会话 id upsert 了、在途按轮次归了一了，看上去都对；可一旦两处的**主键判据不同**
+  // （池按会话登记、在途只按别名过滤/寻址），残留条目就卡在夹缝里：写侧过滤不掉、读侧归
+  // 并不掉、collect/retire 也删不掉。「同一会话两轮派工」是唯一能同时打到这三处的场景。
+  //
+  // 盘上预备的是**旧版工具写下的别名漂移残留**（在本条测试里手写重建：旧版 `ensureUniqueAlias`
+  // 不认 revived，续派会给同一会话派一个新别名；在途 upsert 只按别名过滤，旧行因此留在盘上；
+  // 两张表各自按轮次归一，幸存者可以不是「同一条」）：同一会话两个别名（池 a-9 / 在途 a-1），
+  // 且在途轮次**高于**本次续派将写入的轮次——对本次续派最不利的排序。若实现只是「恰好因为
+  // 轮次更大而胜出」，这里就会露出来。
+  // ------------------------------------------------------------------
+
+  test("跨模块全场景：同一会话两轮派工（第二轮续派）——池/在途各一条当前登记、续派后标回 running、无「中道而废」假阳性，收藏与退役按会话 id 真正清空登记", async () => {
+    const s = stub()
+    await tool("state").execute({ action: "init", root: s.root, verify: "bun run test" }, s.ctx)
+
+    // 第一轮：走真实路径新建 worker 并派工（不是手写盘）
+    await tool("dispatch").execute({ orders: [{ task: "第一轮：摸底", domain: "drift", deliver: "基线数据" }] }, s.ctx)
+    const sid = s.sent[0].sessionId
+    expect(s.created).toHaveLength(1)
+    s.running.clear()                                   // 第一轮跑完，worker 空闲
+
+    // 盘上残留（旧版工具形态）：池 a-9@3（该会话）＋ 在途 a-1@9（同一会话、别名漂移、轮次更高）
+    await Bun.write(join(s.root, ".evolve", "control.md"), [
+      "## 项目坐标",
+      `- 项目根：${s.root}`,
+      "",
+      "## 计数",
+      "- 呼吸：1",
+      "- 派工序号：5",
+      "",
+      "## worker 池",
+      "| 别名 | 会话 | 领域 | 任务 | 派发时间 | 轮次 | 状态 |",
+      "| --- | --- | --- | --- | --- | --- | --- |",
+      `| a-9 | ${sid} | drift | 第一轮：摸底 | 1000 | 3 | idle |`,
+      "",
+      "## 在途",
+      "| 别名 | 会话 | 方向 | 预期产出 | 派发时间 | 轮次 |",
+      "| --- | --- | --- | --- | --- | --- |",
+      `| a-1 | ${sid} | 第一轮：摸底 |  | 2000 | 9 |`,
+      "",
+      "## 种子队列",
+      "（空）",
+      "",
+      "## 收藏待办",
+      "（空）",
+      "",
+      "## 断点",
+      "（无）",
+      "",
+    ].join("\n"))
+    const before = parseControl(controlOf(s))
+    expect(before.workers.map((w) => w.alias)).toEqual(["a-9"])
+    expect(before.inflight.map((i) => i.alias)).toEqual(["a-1"])
+    expect(inflightSession(before.inflight[0], before.workers)).toBe(sid)      // 会话线索在 → 判定得了
+
+    // ---------- ① 续派（第二轮）：不新建、消息走 resume 分支、同一执行姿态 ----------
+    const createdBefore = s.created.length
+    const r = await tool("dispatch").execute({ orders: [{ task: "第二轮：从中断处继续", session_id: sid }] }, s.ctx)
+    expect(r.output).toContain("布雨完成")
+    expect(r.output).toContain("续派")
+    expect(s.created).toHaveLength(createdBefore)                              // 续派不新建会话
+    expect(s.sent[s.sent.length - 1].sessionId).toBe(sid)
+    expect(s.sent[s.sent.length - 1].message).toContain("从中断处继续")
+    expect(s.sent[s.sent.length - 1].opts).toEqual({ autoApprove: true, interactionMode: "none" })
+    expect((r.data as { plan: Array<{ created: boolean; resume?: boolean }> }).plan[0]).toMatchObject({ created: false, resume: true })
+
+    // ---------- ② 三重登记一致：池/在途各只一条当前登记，且同指一个「工人」 ----------
+    const st = parseControl(controlOf(s))
+    const poolHits = st.workers.filter((w) => w.sessionId === sid)
+    const flightHits = st.inflight.filter((i) => inflightSession(i, st.workers) === sid)
+    expect(poolHits).toHaveLength(1)                                          // 池：无重复登记
+    expect(flightHits).toHaveLength(1)                                        // 在途：无重复登记
+    expect(st.workers).toHaveLength(1)
+    expect(st.inflight).toHaveLength(1)
+    expect(flightHits[0].alias).toBe(poolHits[0].alias)                       // 别名不漂移（同一会话两个身份即裂缝）
+    expect(flightHits[0].direction).toBe("第二轮：从中断处继续")                // 在途记的是**本轮**方向，不是旧轮
+    expect(flightHits[0].round).toBe(poolHits[0].round)                       // 轮次同源（幂等键据此，漂移即重复入账）
+
+    // ---------- ③ 续派后该会话标记回 running（空闲续派不是「留在 idle」）----------
+    expect(poolHits[0].status).toBe("running")
+
+    // ---------- ④ 读态：无「中道而废」假阳性、无「虚假产能」、运行中不算待收藏 ----------
+    const read = await tool("state").execute({}, s.ctx)
+    const rd = read.data as { gone: unknown[]; unresolved: unknown[]; awaiting: unknown[] }
+    expect(rd.gone).toHaveLength(0)
+    expect(rd.unresolved).toHaveLength(0)
+    expect(read.output).not.toContain("中道而废")
+    expect(read.output).not.toContain("虚假产能")
+    expect(rd.awaiting).toHaveLength(0)                                       // 会话正在运行 → 不是「待收藏」
+
+    s.running.clear()                                                         // 第二轮跑完
+    const done = await tool("state").execute({}, s.ctx)
+    expect((done.data as { awaiting: unknown[] }).awaiting).toHaveLength(1)    // 待收藏线索恰一条（不是两条）
+    expect(done.output).not.toContain("中道而废")
+
+    // ---------- ⑤ 收藏（按会话 id 寻址）：该会话在途清空、留池标 idle ----------
+    const c = await tool("collect").execute({ action: "collect", session_id: sid, summary: "第二轮要点" }, s.ctx)
+    expect(c.output).toContain("收藏完成")
+    const afterCollect = parseControl(controlOf(s))
+    expect(afterCollect.inflight).toHaveLength(0)                             // 清得掉：别名漂移不得成为豁免
+    expect(afterCollect.workers.find((w) => w.sessionId === sid)!.status).toBe("idle")
+    expect((await tool("state").execute({}, s.ctx)).output).not.toContain("待收藏线索")
+
+    // ---------- ⑥ 退役（按会话 id 寻址）：控制面不得再留该会话任何登记 ----------
+    const rt = await tool("collect").execute({ action: "retire", session_id: sid, mode: "idle", reason: "全场景回归" }, s.ctx)
+    expect(rt.output).toContain("已退役")
+    const afterRetire = parseControl(controlOf(s))
+    expect(afterRetire.workers.some((w) => w.sessionId === sid)).toBe(false)
+    expect(afterRetire.inflight.some((i) => inflightSession(i, afterRetire.workers) === sid)).toBe(false)
+
+    // ---------- ⑦ 授权面不放宽：该会话退役后即池外，续派请求仍被拒且零副作用 ----------
+    const beforeReject = controlOf(s)
+    const rejected = await tool("dispatch").execute({ orders: [{ task: "越权续派", session_id: sid }] }, s.ctx)
+    expect(rejected.output).toContain("授权面不外扩")
+    expect(rejected.output).toContain("池中 worker：（空）")
+    expect(rejected.data).toEqual({ blocked: true, unknownSession: sid })
+    expect(s.sent).toHaveLength(2)                                            // 只派过两轮（越权单未注入）
+    expect(controlOf(s)).toBe(beforeReject)                                   // 拒绝即无副作用
+
+    // ---------- ⑧ 盘上残留不经续派、直接进回收：清理路径自己就得按会话 id 认帐 ----------
+    // 为什么单靠①-⑥还不够：续派会在写侧把残留**顺带清掉**，于是后面的收藏/退役面对的是一张干净表，
+    // 那两处的旧实现（只按别名过滤）就永远测不出来了。而现实中完全可能没人续派——生生开一息，
+    // 读态报出待收藏，直接 collect/retire。故这里在**同一场景内**把漂移残留重铺一次直接走回收。
+    const reseedDrift = async (poolAlias: string, poolRound: number, flightAlias: string, flightRound: number): Promise<void> => {
+      await Bun.write(join(s.root, ".evolve", "control.md"), [
+        "## 项目坐标", `- 项目根：${s.root}`, "", "## 计数", "- 呼吸：2", "- 派工序号：12", "",
+        "## worker 池", "| 别名 | 会话 | 领域 | 任务 | 派发时间 | 轮次 | 状态 |", "| --- | --- | --- | --- | --- | --- | --- |",
+        `| ${poolAlias} | ${sid} | drift | 第三轮：收尾 | 3000 | ${poolRound} | idle |`, "",
+        "## 在途", "| 别名 | 会话 | 方向 | 预期产出 | 派发时间 | 轮次 |", "| --- | --- | --- | --- | --- | --- |",
+        `| ${flightAlias} | ${sid} | 第三轮：收尾 |  | 4000 | ${flightRound} |`, "",
+        "## 种子队列", "（空）", "", "## 收藏待办", "（空）", "", "## 断点", "（无）", "",
+      ].join("\n"))
+    }
+
+    // ⑧-a 收藏：只按别名清不掉漂移残留（会重新被读态报成「待收藏」——收藏过的又冒出来）
+    await reseedDrift("drift-9", 6, "drift-1", 7)
+    const c2 = await tool("collect").execute({ action: "collect", session_id: sid, summary: "直接回收（未经续派）" }, s.ctx)
+    expect(c2.output).toContain("收藏完成")
+    const st8 = parseControl(controlOf(s))
+    expect(st8.inflight.filter((i) => inflightSession(i, st8.workers) === sid)).toHaveLength(0)
+    expect(st8.workers.find((w) => w.sessionId === sid)!.status).toBe("idle")
+    // 旧名残留被清时，它在途方向必须退回种子队列（否则该方向连同进度从登记里消失）
+    expect(st8.seeds.map((x) => x.direction)).toContain("第三轮：收尾")
+    const read8 = await tool("state").execute({}, s.ctx)
+    expect(read8.output).not.toContain("待收藏线索")
+    expect(read8.output).not.toContain("无从核实")
+
+    // ⑧-b 退役：同一判据得站在清理侧——池与在途不得再留该会话任何痕迹
+    await reseedDrift("drift-8", 6, "drift-2", 7)
+    const rt2 = await tool("collect").execute({ action: "retire", session_id: sid, mode: "idle", reason: "清理漂移残留" }, s.ctx)
+    expect(rt2.output).toContain("已退役")
+    const st9 = parseControl(controlOf(s))
+    expect(st9.workers.some((w) => w.sessionId === sid)).toBe(false)
+    expect(st9.inflight.filter((i) => inflightIdentityForTest(i, st9.workers) === sid)).toHaveLength(0)
+
+    // ⑧-c 新旧两代格式**同一张在途表并存**：新版那行自带会话列，旧版残行没有。
+    // 旧行只能靠**池解析别名**换回会话——归一必须把两行归到同一个会话，否则同一会话又一次并列两条。
+    // 这是「旧格式兼容那一档」的辨别格：身份键若只认自带列，旧行退化为用**别名**当身份（与新版那行的
+    // 会话 id 不同键）→ 两行不同键 → 全部保留。
+    await Bun.write(join(s.root, ".evolve", "control.md"), [
+      "## 项目坐标", `- 项目根：${s.root}`, "", "## 计数", "- 呼吸：2", "- 派工序号：21", "",
+      "## worker 池", "| 别名 | 会话 | 领域 | 任务 | 派发时间 | 轮次 | 状态 |", "| --- | --- | --- | --- | --- | --- | --- |",
+      `| drift-7 | ${sid} | drift | 第三轮 | 3000 | 20 | idle |`, "",
+      "## 在途", "| 别名 | 会话 | 方向 | 预期产出 | 派发时间 | 轮次 |", "| --- | --- | --- | --- | --- | --- |",
+      `| drift-7 | ${sid} | 第三轮 |  | 4000 | 21 |`,
+      "| drift-7 | 第三轮 |  | 3500 | 19 |", "",
+      "## 种子队列", "（空）", "", "## 收藏待办", "（空）", "", "## 断点", "（无）", "",
+    ].join("\n"))
+    const st7 = parseControl(controlOf(s))
+    expect(st7.workers).toHaveLength(1)
+    expect(st7.inflight).toHaveLength(1)                                      // 两行同会话（旧行经池解析）→ 归一为一条
+    expect(st7.inflight[0].round).toBe(21)                                    // 幸存者是轮次更高的那一条
+    const c7 = await tool("collect").execute({ action: "collect", session_id: sid, summary: "新旧格式并存残留" }, s.ctx)
+    expect(c7.output).toContain("收藏完成")
+    const read7 = await tool("state").execute({}, s.ctx)
+    expect((read7.data as { awaiting: unknown[] }).awaiting).toHaveLength(0)
+    expect((read7.data as { unresolved: unknown[] }).unresolved).toHaveLength(0)
+
+    // ---------- ⑨ 旧格式在途（无会话列）：凭池解析别名也得归到该会话名下 ----------
+    // 旧版工具写的表没「会话」列；在途身份若只看自带列，这条就永远核不出会话——留着它，
+    // 读态会把它报成「无从核实」，而它事实上就是池里那个工人未收的那一单。
+    await Bun.write(join(s.root, ".evolve", "control.md"), [
+      "## 项目坐标", `- 项目根：${s.root}`, "", "## 计数", "- 呼吸：3", "- 派工序号：13", "",
+      "## worker 池", "| 别名 | 会话 | 领域 | 任务 | 派发时间 | 轮次 | 状态 |", "| --- | --- | --- | --- | --- | --- | --- |",
+      `| drift-3 | ${sid} | drift | 第四轮 | 5000 | 8 | idle |`, "",
+      "## 在途", "| 别名 | 方向 | 预期产出 | 派发时间 | 轮次 |", "| --- | --- | --- | --- | --- |",
+      "| drift-3 | 第四轮 |  | 6000 | 9 |", "",
+      "## 种子队列", "（空）", "", "## 收藏待办", "（空）", "", "## 断点", "（无）", "",
+    ].join("\n"))
+    const st10 = parseControl(controlOf(s))
+    expect(inflightSession(st10.inflight[0], st10.workers)).toBe(sid)          // 旧格式经池解析仍核得出会话
+    const read10 = await tool("state").execute({}, s.ctx)
+    expect((read10.data as { unresolved: unknown[] }).unresolved).toHaveLength(0)   // 不得谎报「无从核实」
+    expect((read10.data as { awaiting: unknown[] }).awaiting).toHaveLength(1)       // 它就是待收藏那一单
+    const c3 = await tool("collect").execute({ action: "collect", session_id: sid, summary: "旧格式残留" }, s.ctx)
+    expect(c3.output).toContain("收藏完成")
+    expect(parseControl(controlOf(s)).inflight).toHaveLength(0)
+
+    // ---------- ⑩ 寻址取会话（主键）而非别名（显示名）----------
+    // 池条目已被清、只剩在途残留时，同时传「陈旧别名 + 会话 id」：命中说明必须回工 **session_id**
+    // （别名是那个工人已改掉的旧名，拿它当寻址依据会把「同一个工人的旧名」当成另一个工人）。
+    await Bun.write(join(s.root, ".evolve", "control.md"), [
+      "## 项目坐标", `- 项目根：${s.root}`, "", "## 计数", "- 呼吸：3", "- 派工序号：13", "",
+      "## worker 池", "（空）", "",
+      "## 在途", "| 别名 | 会话 | 方向 | 预期产出 | 派发时间 | 轮次 |", "| --- | --- | --- | --- | --- | --- |",
+      `| drift-4 | ${sid} | 第五轮 |  | 7000 | 10 |`, "",
+      "## 种子队列", "（空）", "", "## 收藏待办", "（空）", "", "## 断点", "（无）", "",
+    ].join("\n"))
+    const staleRt = await tool("collect").execute({ action: "retire", alias: "drift-4", session_id: sid, mode: "idle", reason: "定向清理" }, s.ctx)
+    expect(staleRt.output).toContain("已清掉陈旧在途登记")
+    expect(staleRt.output).toContain(`会话 ${sid}`)                        // 认的是会话（主键），不是那个旧别名
+    expect(staleRt.data).toMatchObject({ inflight: { alias: "drift-4", sessionId: sid } })
+    expect(parseControl(controlOf(s)).inflight).toHaveLength(0)
+
+    // ---------- ⑪ `mode=stop` 退役（超时终止那条路）也得按会话 id 带走漂移残留 ----------
+    // 与 ⑥ 的分工：那条走 `mode=idle`（保留会话）、这条走 `mode=stop`（终止运行中会话）——
+    // 两条分支各自清理在途，任一漏改就各自漏一条。此处池里有该会话（别名 drift-9，派工时的名字），
+    // 在途残留却是旧名 drift-5；**只传 session_id 寻址**（不传别名）——别名过滤在写侧没东西可过滤。
+    await Bun.write(join(s.root, ".evolve", "control.md"), [
+      "## 项目坐标", `- 项目根：${s.root}`, "", "## 计数", "- 呼吸：3", "- 派工序号：14", "",
+      "## worker 池", "| 别名 | 会话 | 领域 | 任务 | 派发时间 | 轮次 | 状态 |", "| --- | --- | --- | --- | --- | --- | --- |",
+      `| drift-9 | ${sid} | drift | 第六轮：收尾 | 7000 | 11 | running |`, "",
+      "## 在途", "| 别名 | 会话 | 方向 | 预期产出 | 派发时间 | 轮次 |", "| --- | --- | --- | --- | --- | --- |",
+      `| drift-5 | ${sid} | 第六轮：收尾 |  | 8000 | 12 |`, "",
+      "## 种子队列", "（空）", "", "## 收藏待办", "（空）", "", "## 断点", "（无）", "",
+    ].join("\n"))
+    const stopRetire = await tool("collect").execute({ action: "retire", session_id: sid, mode: "stop", reason: "超 40 分钟" }, s.ctx)
+    expect(stopRetire.output).toContain("已终止并退役")
+    const st11 = parseControl(controlOf(s))
+    expect(st11.inflight).toHaveLength(0)                                     // 旧名残留一并未带走
+    expect(st11.workers.some((w) => w.sessionId === sid)).toBe(false)
+    expect(st11.seeds.map((x) => x.direction)).toContain("第六轮：收尾")        // 方向退回种子、不得丢
+
+    // ---------- ⑫ 寻址取会话（主键）而非别名（显示名）——两者指向**不同**在途时的取舍 ----------
+    // 别名的病在于它不是身份：传进来的别名可能属于**别的会话**的在途残留。假设盘上有两条在途：
+    // `ghost-1`（别人的，别名恰好等于传入别名）与 `drift-6`（本会话的，别名就是旧名）。
+    // 按别名优先会清掉**别人的那条**、留下自己那条——越权且没清干净；按会话 id 优先才对。
+    await Bun.write(join(s.root, ".evolve", "control.md"), [
+      "## 项目坐标", `- 项目根：${s.root}`, "", "## 计数", "- 呼吸：3", "- 派工序号：15", "",
+      "## worker 池", "（空）", "",
+      "## 在途", "| 别名 | 会话 | 方向 | 预期产出 | 派发时间 | 轮次 |", "| --- | --- | --- | --- | --- | --- |",
+      `| ghost-1 | sess-other | 别人的方向 |  | 9000 | 4 |`,
+      `| drift-6 | ${sid} | 本会话的方向 |  | 9000 | 13 |`, "",
+      "## 种子队列", "（空）", "", "## 收藏待办", "（空）", "", "## 断点", "（无）", "",
+    ].join("\n"))
+    const pick = await tool("collect").execute({ action: "retire", alias: "ghost-1", session_id: sid, mode: "idle", reason: "定向清理" }, s.ctx)
+    expect(pick.output).toContain("已清掉陈旧在途登记")
+    expect(pick.output).toContain(`会话 ${sid}`)                              // 命中的是本会话那条
+    const st12 = parseControl(controlOf(s))
+    expect(st12.inflight.map((i) => i.alias)).toEqual(["ghost-1"])            // 别人的那条分毫未动
+    expect(st12.seeds.map((x) => x.direction)).toContain("本会话的方向")
+    expect(st12.seeds.map((x) => x.direction)).not.toContain("别人的方向")
+    cleanup(s)
   })
 })
