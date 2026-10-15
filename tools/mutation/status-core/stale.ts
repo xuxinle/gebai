@@ -12,7 +12,7 @@
  * （那才要人去看）。
  *
  * ## 三种输出，各对应一类真实处境
- *   ① **指纹新鲜**：判据面四份与那一次跑逐字节同源，且清单条数对得上 → 不必跑；
+ *   ① **指纹新鲜**：判据面（四份根**及它们的依赖闭包**）与那一次跑逐字节同源，且清单条数对得上 → 不必跑；
  *   ② **指纹过期**：逐份列出「记录值 → 当前值」，并说明哪些文件在面外被动了（面被缩/被扩也报）；
  *   ③ **没有指纹**：`stamp.json` 缺失/结构不符 → 本仓从未跑过（或结构版本升了），先跑一次立证据。
  *
@@ -20,7 +20,8 @@
  * 它**只读**指纹、不参与判定：改了它的输出措辞不该要人重跑那台（同 `stamp.ts` 与闸门测试，
  * 见 `stamp.ts` 文件头「一处不放进指纹面的东西」）。把它加进面内只会制造噪声红。
  */
-import { STAMP_FILE, STAMP_INPUTS, computeFiles, readStamp, staleFiles } from "./stamp"
+import { STAMP_FILE, STAMP_ROOTS, computeFiles, fingerprintInputs, readStamp, staleFiles } from "./stamp"
+import { importersOf } from "./closure"
 import { MUTANTS } from "./mutants"
 
 /** 补跑命令（失败信息里逐字给出来——人不该需要记得它长什么样）。 */
@@ -41,6 +42,8 @@ if (!stamp) {
 /* ---- ① 判据面逐份对账（含「面被缩小/扩大」两个方向） ---- */
 const stale = staleFiles(stamp.files)
 const current = computeFiles()
+const inputs = fingerprintInputs()
+const closure = inputs.filter((p) => !(STAMP_ROOTS as readonly string[]).includes(p))
 
 /* ---- ② 清单条数对账：容易忘的一条是「发现了新缺陷、补了一条变异体」 ---- */
 const currentCounts: Record<string, number> = {}
@@ -49,10 +52,14 @@ const kinds = [...new Set([...Object.keys(stamp.mutants), ...Object.keys(current
 const countDrift = kinds.filter((k) => (stamp.mutants[k] ?? 0) !== (currentCounts[k] ?? 0))
 
 if (stale.length === 0 && countDrift.length === 0) {
-  console.log("✅ 指纹新鲜：判据面四份与那次跑逐字节同源，变异体条数也对得上——不必重跑。")
+  console.log("✅ 指纹新鲜：判据面与那次跑逐字节同源（含依赖闭包），变异体条数也对得上——不必重跑。")
   console.log(`   指纹记着：${kinds.map((k) => `${k} 杀 ${stamp.result[k]?.killed ?? "?"}/${stamp.result[k]?.total ?? "?"}`).join("、")}`)
-  console.log(`   判据面（${STAMP_INPUTS.length} 份）：`)
-  for (const p of STAMP_INPUTS) console.log(`     - ${p}  ${short(current[p]!)}`)
+  console.log(`   判据面（${inputs.length} 份 = ${STAMP_ROOTS.length} 份根 + ${closure.length} 份依赖闭包）：`)
+  for (const p of STAMP_ROOTS) console.log(`     - ${p}  ${short(current[p]!)}   [根]`)
+  for (const p of closure) {
+    const by = importersOf(p, inputs)
+    console.log(`     - ${p}  ${short(current[p]!)}   [闭包${by.length > 0 ? `，被 ${by.join("、")} 引用` : ""}]`)
+  }
   process.exit(0)
 }
 

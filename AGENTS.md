@@ -272,6 +272,5 @@ bun run mutate:status:why  # 自助定位：指纹过期了没、该不该重跑
 
 - 提交前先看 `git status` / `git diff`，只暂存预期文件，不提交密钥。
 - 完成后运行 `bun run test`、`bun run typecheck`、`bun run lint` 确认通过。
-- **动了文件工作台状态格判据面就要跑变异台**（`bun run mutate:status`）——判据面 = `files/status-core.ts` + `files/status-matrix.test.ts` + `tools/mutation/status-core/{mutants,bench}.ts`（四份，**按内容判**：改一句注释也算）。跑成功会自动刷新 `stamp.json`；忘了跑的话常规测试会红并告诉你这条命令（闸门清单见上「测试策略 → 硬约束」）。
-  忘了跑的话测试会红并在提示里给出这条命令（机制见上「测试策略 → 硬约束」）。
+- **动了文件工作台状态格判据面就要跑变异台**（`bun run mutate:status`）——判据面 = `files/status-core.ts` + `files/status-matrix.test.ts` + `tools/mutation/status-core/{mutants,bench}.ts` **四份根，加上它们递归引用到的本仓源码（依赖闭包；改了被 `import` 的模块同样要重跑）**（**按内容判**：改一句注释也算）。跑成功会自动刷新 `stamp.json`；忘了跑的话常规测试会红并告诉你这条命令（闸门清单见上「测试策略 → 硬约束」）。
 - 设计变更记得回写 `DESIGN.md`。

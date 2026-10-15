@@ -18,8 +18,12 @@
  *    `git diff` 里**出现** stamp.json 的改动本身是一句可读信号：判据面变了、证据刚重立。
  * 2. **只在「跑全集 且 全部符合期望」时写**：`--only` 的部分跑、失败跑**都不许**刷新指纹——
  *    否则一次只跑一条的调试跑会把闸门刷绿，闸门当场变成摆设。写入口径由执行器把守（见 bench.ts）。
- * 3. **指纹面显式列出，且每一项都对应「为什么它变了就得重跑」**（`STAMP_INPUTS`）：被改坏的产品
+ * 3. **指纹面显式列出，且每一项都对应「为什么它变了就得重跑」**（`STAMP_ROOTS`）：被改坏的产品
  *    源码、判它的矩阵、变异体清单、执行器。四者任一改动都让上一次的结论失去依据——这正是要的语义。
+ * 4. **指纹面 = 那几份根 + 它们的依赖闭包**（`closure.ts`）：根**引用**到的本仓源码同样在判定链上——
+ *    把取词表抽成 `status-labels.ts`、把类型抽成 `status-types.ts` 之后，改坏**被 import 的那份**
+ *    同样会变行为，而根的字节没变。缺了这半边就是一次**假绿**（闸门不红而矩阵的「绿」已不代表守住），
+ *    故选自动收录而非人工登记。边界与豁免见 `closure.ts` 文件头与本文件 `EXEMPT_FROM_FINGERPRINT`。
  *
  * ## 边界（写清楚，免得被当成防伪）
  * 本机制守的是**防忘**，不是**防伪**：人手改 `stamp.json` 也能骗过它。它要解决的是「忘了跑」这件
@@ -32,31 +36,54 @@
  * 「判据面到底是哪四份」见 DESIGN.md「测试策略 → 变异验证 → 判据面 / 防忘闸门」。
  *
  * ## 一处不放进指纹面的东西（有意为之）
- * 本文件（stamp.ts）与闸门测试自身**不进指纹面**：它们不参与判定，改它们不需要重跑变异台。
- * 而「偷偷把某个文件从指纹面里去掉」这条路是堵死的——判据侧另有一处**独立**的对账：
- * 闸门测试里写死了期望的指纹面（`EXPECTED_INPUTS`），少一个文件就红（两处独立，不得互推）。
+ * 本文件（stamp.ts）与闸门测试自身、以及 `closure.ts` / `stale.ts` **不进指纹面**：它们不参与判定，
+ * 改它们不需要重跑变异台。而「偷偷把某个文件从指纹面里去掉」这条路是堵死的——判据侧另有一处**独立**
+ * 的对账：闸门测试里写死了期望的根（`EXPECTED_ROOTS`）与期望的闭包（`EXPECTED_CLOSURE`），
+ * 少一个文件就红（两处独立，不得互推）；闭包算法本身也由闸门侧在同一文件里用**合成依赖树**独立验过
+ * （递归 / 环 / 边界 / 注释安全——见 `status-mutation-gate.test.ts` 的「依赖闭包」一组）。
  */
 import { createHash } from "node:crypto"
 import { readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { REPO_ROOT, depClosure } from "./closure"
 
 /** 仓根：由本文件位置推出（`tools/mutation/status-core/` → 上溯三层），**不依赖 cwd**。 */
-const REPO = join(import.meta.dir, "..", "..", "..")
+const REPO = REPO_ROOT
 
 /**
- * **指纹面**：这四份文件里任何一份变了，上一次的变异结论就不再成立，必须重跑。
+ * **判据面的四份根**：这几份里任何一份变了，上一次的变异结论就不再成立，必须重跑。
  *
  * - `status-core.ts`：**被改坏的产品源码**——它就是被审的对象，动了当然要重量；
  * - `status-matrix.test.ts`：**判官**——判官换了，杀/活的判据就换了（同一批变异体可能换结论）；
  * - `mutants.ts`：**变异体清单**——新增一条变异体而没跑，等于新规则**没人审过**（这条最容易忘）；
  * - `bench.ts`：**执行器**——判定逻辑（怎么算「被杀」、基线怎么算）在它手里。
+ *
+ * 这是**根**不是全部：指纹面 = 根 ∪ 它们的依赖闭包（`fingerprintInputs()`）。
  */
-export const STAMP_INPUTS = [
+export const STAMP_ROOTS = [
   "packages/web/src/files/status-core.ts",
   "packages/web/src/files/status-matrix.test.ts",
   "tools/mutation/status-core/mutants.ts",
   "tools/mutation/status-core/bench.ts",
 ] as const
+
+/**
+ * **闭包成员的豁免表**（逐条写明理由；不是「放行表」——放行会让「过窄」无声发生）。
+ *
+ * 为什么需要它：闭包是**自动**递归收录的，而「记录层」这类文件确实被根引用、却**不参与判定**——
+ * 把它们的改动也算成「结论作废」只会制造噪声红（改一句指纹文案就要等 30 秒），而会无故报红的门禁
+ * 很快就会被绕过。豁免的代价如实写着：**方向是假红、不是假绿**（记录层真被改成与闸门不一致时，
+ * 闸门会自己报「内容已变」）——这个方向是本仓明确选的那一侧（假红可忍、假绿不可忍）。
+ *
+ * 目前唯一一条 `→ stamp.ts`：算哈希、写 JSON、算闭包，**不参与「杀掉 vs 存活」的判定**。
+ * 它引用的 `closure.ts`（闭包算法）随之整棵子树被剪掉——记录层引用的东西仍是记录层。
+ * 而「剪错了」不是靠信任拦住：闸门侧有**独立**的对账（豁免表逐字写死 + 闭包算法用合成树验），
+ * 它一旦把真成员剪掉就红。
+ */
+export const EXEMPT_FROM_FINGERPRINT: Record<string, string> = {
+  "tools/mutation/status-core/stamp.ts":
+    "记录层（算哈希 / 写 JSON / 算依赖闭包），不参与「杀掉 vs 存活」的判定；进面只会让改一句指纹文案也要重跑 30 秒",
+}
 
 /** 证据指纹的落盘位置（相对仓根；**入库**——它要随提交走，才谈得上「这份提交的证据」）。 */
 export const STAMP_FILE = "tools/mutation/status-core/stamp.json"
@@ -100,10 +127,21 @@ export function hashFile(rel: string): string {
   }
 }
 
+/**
+ * **当前指纹面**：根（`STAMP_ROOTS`）∪ 它们的依赖闭包（递归 import 图），减去豁免表里的成员。
+ *
+ * 这是**唯一**的指纹面计算处（执行器、闸门、自助定位三处都调它），故不存在「写的一处、读的另一处」漂移。
+ * 顺序确定：根按声明序在前，闭包成员排序在后——指纹文件的键序因此逐字节稳定，可 `git diff` 读。
+ */
+export function fingerprintInputs(): string[] {
+  const closure = depClosure(STAMP_ROOTS, Object.keys(EXEMPT_FROM_FINGERPRINT))
+  return [...STAMP_ROOTS, ...closure.filter((p) => !(p in EXEMPT_FROM_FINGERPRINT))]
+}
+
 /** 当前指纹面（执行器与闸门共用这一份计算，避免「写的一处、读的另一处」两处实现漂移）。 */
 export function computeFiles(): Record<string, string> {
   const out: Record<string, string> = {}
-  for (const p of STAMP_INPUTS) out[p] = hashFile(p)
+  for (const p of fingerprintInputs()) out[p] = hashFile(p)
   return out
 }
 
@@ -129,10 +167,13 @@ export function readStamp(): Stamp | null {
  * 三个方向都要报，理由各不同：
  *   - 记录里有、当前算出不同 → 文件被改了（最常见：改了 `status-core.ts` 没重跑）；
  *   - 记录里有、当前集合里没有 → 指纹面被缩小了（旧证据覆盖的面比现在大，等于证据变弱）；
- *   - 当前集合里有、记录里没有 → 指纹面被扩大了（新纳入的文件从未被那次跑覆盖）。
+ *   - 当前集合里有、记录里没有 → 指纹面被扩大了（新纳入的文件从未被那次跑覆盖）——**依赖闭包的新成员走的正是这一支**：
+ *     根的 import 图里多出一份本仓源码（或被引用那份本身刚变），不管它是新加的、先前被豁免、
+ *     还是**在面外被改了**，都在这里当场红。闸门不必区分是哪一种，它只知道「这个集合与那次跑不一致」。
+ *
+ * `current` 可注入（默认现算）：闸门侧要拿**合成依赖图**验证这一支真的覆盖了「被引用文件改了」这件事。
  */
-export function staleFiles(recorded: Record<string, string>): string[] {
-  const current = computeFiles()
+export function staleFiles(recorded: Record<string, string>, current: Record<string, string> = computeFiles()): string[] {
   const out: string[] = []
   for (const [p, h] of Object.entries(recorded)) {
     if (!(p in current)) out.push(`${p}：已不在指纹面内（旧证据覆盖的范围与现在不一致）`)
@@ -154,9 +195,9 @@ function short(h: string): string {
  * 返回是否真的写了——调用方把它打进输出（「已刷新」/「已是最新」），免得读者以为每次都写了。
  */
 export function writeStamp(s: Omit<Stamp, "version">): { written: boolean } {
-  // 键序固定（指纹面按 STAMP_INPUTS 顺序、kind 按传入顺序）→ 同样输入得到同样字节，可用 diff 读
+  // 键序固定（指纹面按 `fingerprintInputs()` 顺序、kind 按传入顺序）→ 同样输入得到同样字节，可用 diff 读
   const files: Record<string, string> = {}
-  for (const p of STAMP_INPUTS) files[p] = s.files[p]!
+  for (const p of fingerprintInputs()) files[p] = s.files[p] ?? hashFile(p)
   const next: Stamp = { version: STAMP_VERSION, files, mutants: s.mutants, result: s.result }
   const body = `${JSON.stringify(next, null, 2)}\n`
   const path = join(REPO, STAMP_FILE)

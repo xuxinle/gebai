@@ -16,8 +16,8 @@
  * 只做**哈希对账**，不 spawn 任何子进程，毫秒级，也不会受抖动影响（哈希没有抖动）。
  *
  * ## 它报什么（三种红，各自对应一类真实遗忘）
- *   1. **指纹过期**：`status-core.ts` / 矩阵 / 变异体清单 / 执行器 有一样变了而指纹没刷
- *      → 改了判据、或加了变异体、或改了判定逻辑，都没重跑；
+ *   1. **指纹过期**：判据面（`status-core.ts` / 矩阵 / 变异体清单 / 执行器 **及它们的依赖闭包**）有一样变了
+ *      而指纹没刷 → 改了判据、或加了变异体、或改了判定逻辑、或改了**被它们 import 的模块**，都没重跑；
  *   2. **没有指纹**：`stamp.json` 缺失/结构不符 → 这台从未在本仓跑过（或结构版本升了），先跑一次；
  *   3. **实测结果与清单对不上**：例如清单里 21 条 `code` 却记着杀掉 20 条 → 有人手改了指纹。
  *
@@ -26,14 +26,15 @@
  * 蓄意绕过交给 code review——`stamp.json` 里逐 kind 的条数就是给 review 看的数字。
  *
  * ## 为什么这个文件叫 `.test.ts`（与变异台文件**刻意相反**）
- * 变异台本体（`bench.ts` / `mutants.ts` / `stamp.ts`）必须**不带** `.test` 标记，否则 `bun test`
+ * 变异台本体（`bench.ts` / `mutants.ts` / `stamp.ts` / `closure.ts`）必须**不带** `.test` 标记，否则 `bun test`
  * 会把它当用例跑起来、spawn 几十秒。本文件恰好相反：它**就是要**被 `bun test` 采到——它不 spawn
- * 任何东西，只读判据面那几份文件算哈希（外加沿依赖走一遍闭包，见文末那组）。名字是这里的关键，
- * 改动前先想清楚这一点。
+ * 任何东西，只读判据面（含依赖闭包）算哈希，外加在**临时目录里造合成依赖树**把闭包算法自己验一遍
+ * （最后一组）。名字是这里的关键，改动前先想清楚这一点。
  */
 import { describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join, posix } from "node:path"
 import {
   MATRIX_TEST,
@@ -41,7 +42,16 @@ import {
   TARGET_FILE,
   expectsKill,
 } from "../../../../tools/mutation/status-core/mutants"
-import { STAMP_FILE, STAMP_INPUTS, computeFiles, readStamp, staleFiles } from "../../../../tools/mutation/status-core/stamp"
+import {
+  EXEMPT_FROM_FINGERPRINT,
+  STAMP_FILE,
+  STAMP_ROOTS,
+  computeFiles,
+  fingerprintInputs,
+  readStamp,
+  staleFiles,
+} from "../../../../tools/mutation/status-core/stamp"
+import { depClosure, importersOf, inFingerprintScope, staticDeps } from "../../../../tools/mutation/status-core/closure"
 
 /* ------------------------------------------------------------------ *
  * 判据面的成员（路径常量集中在此，下面几组共用；语义见文末「判据面定义」一组）
@@ -57,13 +67,30 @@ const STAMP_TS = "tools/mutation/status-core/stamp.ts"
 const GATE_FILE = "packages/web/src/files/status-mutation-gate.test.ts"
 
 /**
- * 指纹面的**独立对账**（不得由 stamp.ts 的 `STAMP_INPUTS` 反推——那等于自己验自己）。
+ * 指纹面的**独立对账**（不得由 stamp.ts 的 `STAMP_ROOTS` / `fingerprintInputs()` 反推——那等于自己验自己）。
  *
  * 为什么要在这里写死：否则「把某个文件从指纹面里去掉」就成了绕过闸门的最短路径——改一行
- * `STAMP_INPUTS`，那文件从此改坏也不再触发重跑。两处独立列出后，去掉一个就红在这里。
+ * `STAMP_ROOTS`，那文件从此改坏也不再触发重跑。两处独立列出后，去掉一个就红在这里。
  * 新增指纹面成员时**两处都要加**（这处是判据，stamp.ts 那处是实现，同 AGENTS.md 的口径）。
  */
-const EXPECTED_INPUTS: string[] = [TARGET_FILE, MATRIX_TEST, MUTANTS_FILE, BENCH_FILE]
+const EXPECTED_ROOTS: string[] = [TARGET_FILE, MATRIX_TEST, MUTANTS_FILE, BENCH_FILE]
+
+/**
+ * **期望的依赖闭包**（写死的判据侧对账——同样不得由实现反推）。
+ *
+ * 当前是**空**：四份根本下零依赖——`status-core.ts` 是零依赖纯模块（下面有硬检查）、矩阵只引它、
+ * 清单只写路径常量、执行器除了清单只剩一个被豁免的 `stamp.ts`（记录层）。
+ *
+ * 空数组不是「这条检查在空转」：它是一条**会响的警报线**——四份根里任何一份将来真的 import 了
+ * 本仓别的源码（例如把取词表抽成 `status-labels.ts`），`fingerprintInputs()` 会当场多出一份，
+ * 而这里写死的是空 → 红，逼人做一次显式决定：让它留在闭包里（于是今后改它必须重跑变异台），
+ * 还是列进 `EXEMPT_FROM_FINGERPRINT` 并写明理由。而「被引用的那份改了」这件事本身由指纹自动覆盖
+ * （见「依赖闭包」一组里那条端到端用例）。
+ */
+const EXPECTED_CLOSURE: string[] = []
+
+/** 豁免表也写死在判据侧：把真成员偷偷豁免掉 = 把闸门掏空，这里对账。 */
+const EXPECTED_EXEMPT: string[] = [STAMP_TS]
 
 /** 补跑命令（失败信息里逐字给出来——人不该需要记得它长什么样）。 */
 const RERUN = "bun run mutate:status"
@@ -71,9 +98,9 @@ const REPO = join(import.meta.dir, "..", "..", "..", "..")
 
 describe("变异台防忘闸门：判据面一变，常规测试就该红", () => {
   test("指纹面与判据侧写死的清单逐字一致（少一项 = 那条路径的改动将静默逃过闸门）", () => {
-    const declared: string[] = [...STAMP_INPUTS]
-    expect(declared.sort(), "指纹面被改动过：新增/删除成员必须同步本文件的 EXPECTED_INPUTS").toEqual(
-      [...EXPECTED_INPUTS].sort(),
+    const declared: string[] = [...STAMP_ROOTS]
+    expect(declared.sort(), "指纹面的根被改动过：新增/删除成员必须同步本文件的 EXPECTED_ROOTS").toEqual(
+      [...EXPECTED_ROOTS].sort(),
     )
   })
 
@@ -81,10 +108,13 @@ describe("变异台防忘闸门：判据面一变，常规测试就该红", () =
     expect(existsSync(join(REPO, STAMP_FILE)), `缺少 ${STAMP_FILE}：先跑一次 \`${RERUN}\` 把证据立起来`).toBe(true)
     const stamp = readStamp()
     expect(stamp, `${STAMP_FILE} 读不出（坏 JSON / 结构版本不符）：跑 \`${RERUN}\` 重新生成`).not.toBeNull()
-    expect(Object.keys(stamp!.files).length, "指纹面为空 = 这份证据什么也没覆盖").toBe(EXPECTED_INPUTS.length)
+    expect(
+      Object.keys(stamp!.files).sort(),
+      "指纹记录的键集与「根 + 依赖闭包」不一致（少一个 = 那份改坏也静默逃过闸门）",
+    ).toEqual([...fingerprintInputs()].sort())
   })
 
-  test("指纹未过期：判据面四份文件与那一次跑时逐字节同源", () => {
+  test("指纹未过期：判据面（四份根 + 依赖闭包）与那一次跑时逐字节同源", () => {
     const stamp = readStamp()
     expect(stamp, `缺少可用的 ${STAMP_FILE}：跑 \`${RERUN}\``).not.toBeNull()
     const stale = staleFiles(stamp!.files)
@@ -226,7 +256,7 @@ describe("变异台防忘闸门：证据指纹机制自身可复核", () => {
   })
 
   test("指纹面里的每一份文件都真实存在于仓库（路径写错会让闸门空转）", () => {
-    for (const p of EXPECTED_INPUTS) {
+    for (const p of fingerprintInputs()) {
       expect(existsSync(join(REPO, p)), `指纹面成员不存在：${p}`).toBe(true)
     }
   })
@@ -247,7 +277,7 @@ describe("变异台防忘闸门：证据指纹机制自身可复核", () => {
   })
 
   test("本文件自己不进指纹面（闸门改动不该要求重跑变异台）", () => {
-    expect(EXPECTED_INPUTS.includes(GATE_FILE), "闸门自身进了指纹面 = 改闸门也要重跑那台，无谓的成本").toBe(false)
+    expect(fingerprintInputs().includes(GATE_FILE), "闸门自身进了指纹面 = 改闸门也要重跑那台，无谓的成本").toBe(false)
     expect(readFileSync(import.meta.path, "utf8").length).toBeGreaterThan(0)
   })
 })
@@ -278,60 +308,35 @@ describe("变异台防忘闸门：证据指纹机制自身可复核", () => {
  * `DESIGN.md`「测试策略 → 防忘闸门 → 自助定位」里。
  *
  * ## 为何刻意**不**放进面的
- * - `status-mutation-gate.test.ts`（本文件）与 `stamp.ts`：它们**不参与判定**，只记录与对账结论；
- *   改一句失败文案就要重跑 30 秒的台，没人受得了（且很快就会被绕过）。
+ * - `status-mutation-gate.test.ts`（本文件）、`stamp.ts` 与 `closure.ts`：它们**不参与判定**，
+ *   只记录、对账、算闭包；改一句失败文案就要重跑 30 秒的台，没人受得了（且很快就会被绕过）。
  * - `status-core.test.ts`（语义契约测试）、`style-contract.test.ts`（接线契约）：变异台**不跑它们**
  *   （它只跑矩阵 + `tsc`），故它们变了不影响这台台的结论。
  * - `DESIGN.md` / `AGENTS.md`：文档随判据一起改是**正常**的，要文档一变就重跑，闸门就成噪声源了。
+ *
+ * ## 指纹 = 根 + 依赖闭包（**这是本条改动补的那半边**）
+ * 「判据面」不只是那四份根文件本身：判定链并不止那几份。矩阵判 `status-core.ts`，而一旦
+ * `status-core.ts` 开始引用别的模块（把取词表抽成 `status-labels.ts`、把类型抽成 `status-types.ts`），
+ * **被引用的那段代码就成了判据的一部分**——它被改坏时根的字节没变，缺了闭包就是一次**假绿**。
+ * 故指纹面 = `STAMP_ROOTS` ∪ 它们的**递归 import 闭包**（`closure.ts` 算，只收本仓 `packages/` 与
+ * `tools/` 下的源码），并在 `EXEMPT_FROM_FINGERPRINT` 里逐条写明不参与判定的记录层。
  *
  * ## 两个方向的价都写过：过宽 vs 过窄
  * - **过窄 = 假绿**（比过宽严重得多）：漏进去的那份改了却不红，让人误以为「刚验过」；
  * - **过宽 = 噪声红**：把不影响判定的文件算进来，每改一次无关文件都要等 30 秒——而会无故报红的
  *   门禁很快就会被绕过（本仓已在 DESIGN「为什么不进 CI」里写过这个代价）。
  *
- * 下列三条把这个定义钉在**可自动核验的判据**上（否则它就只是文档里的一句话，而没人会在改代码时去翻）：
- * ① **依赖闭包自足**：面内每份文件真正引用的文件，要么也在面内、要么在**显式豁免表**里写明理由——
- *    「过窄」就此从「事后才发现」变成「新增依赖当场红」；
- * ② **清单与实算一致**：写死的依赖表 `KNOWN_DEPS` 与源码实算逐项相同（防它随源码漂移而变空话）；
- * ③ **面外文件不影响闸门**：面是精确的这四份、不多不少（过宽侧的边界，内含「四份都必须真在面内」的反向检查）。
+ * 下列四条把这个定义钉在**可自动核验的判据**上（否则它就只是文档里的一句话，而没人会在改代码时去翻）：
+ * ① **闭包可复算、键集对得上**：`fingerprintInputs()`（根 ∪ 闭包）与 `stamp.json` 记的键集逐项一致——
+ *    少一个就是「那份改坏也静默逃过闸门」；
+ * ② **写死的期望不得随源码漂移**：`KNOWN_DEPS`（逐份直接依赖）与 `EXPECTED_CLOSURE`（当前闭包为空）
+ *    两条独立列出，源码新增依赖就红，逼一次显式决定；
+ * ③ **闭包算法自己可测**：在**临时目录里造合成依赖树**验递归传递、豁免剪枝、边界（`node_modules` /
+ *    `vendor` / `dist` / `public` / `node:` / 裸包名 / 出仓 / 环）与注释安全——把 `closure.ts` 掏空
+ *    （恒返回 `[]`）会当场红，而不是静默丢掉覆盖；
+ * ④ **端到端**：拿合成树走 `staleFiles`，断言「被引用的那份被改了」真的被报成过期（接口级，不碰真仓库）。
  */
-describe("判据面定义：依赖闭包自足（过窄=假绿，这里先红）", () => {
-  const normNL = (s: string): string => s.replace(/\r\n/g, "\n")
-  /** 去注释后再扫，避免注释里的示例串被当成真依赖。 */
-  const strip = (s: string): string => normNL(s).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "")
-
-  /**
-   * 一份文件**真正引用的仓内文件**（判定相关依赖的实算口径）。
-   *
-   * 证据只认两种，因为本仓只存在这两种形态，且它们都要求写出**可解析的字面量**：
-   *   - `from "…"`——ESM 引用（判官导入被审源码、执行器导入清单与指纹）；
-   *   - 源码里的 `"….ts"` 字面量——`readFileSync(join(import.meta.dir, "status-core.ts"))` 这种读法。
-   *
-   * 不做完整 AST：这两条已盖住本仓全部真实依赖，而「认一切像路径的串」漏口更大（路径一旦装进变量
-   * 就漏，等于自欺）。解析不到文件的一律不算（`bun:test` / `node:fs` / 包名——改了它们不会让本仓
-   * 某份源码变样）。**新增依赖时会以「清单与实算不一致」红**，那时人工把它写进 `KNOWN_DEPS`
-   * （要判「进面并跑台」还是「豁免并写理由」）——那份写死的表就是「想过了」的证据。
-   */
-  function staticDeps(abs: string, relPath: string): string[] {
-    const src = strip(readFileSync(abs, "utf8"))
-    const dir = posix.dirname(relPath)
-    const specs = new Set<string>()
-    for (const m of src.matchAll(/\bfrom\s*"([^"]+)"/g)) specs.add(m[1]!)
-    for (const m of src.matchAll(/"([^"]*\.ts)"/g)) specs.add(m[1]!)
-
-    const out: string[] = []
-    for (const spec of specs) {
-      /* 相对说明符（`./status-core`）与裸文件名（`"status-core.ts"`）都按**本文件所在目录**解析——
-       * 这正是判官读被审源码的方式（`join(import.meta.dir, "status-core.ts")`）。 */
-      const joined = posix.join(dir, spec)
-      const hit = [joined, `${joined}.ts`, `${joined}/index.ts`].find(
-        (c) => !c.startsWith("..") && existsSync(join(REPO, c)),
-      )
-      if (hit) out.push(posix.normalize(hit))
-    }
-    return [...new Set(out)]
-  }
-
+describe("判据面定义：依赖闭包（过窄=假绿，这里先红）", () => {
   /**
    * 依赖清单（**写死的期望**，逐份对应上面的「判据面定义」表）。
    *
@@ -347,47 +352,57 @@ describe("判据面定义：依赖闭包自足（过窄=假绿，这里先红）
   }
 
   /**
-   * **显式豁免**：依赖在面外、但经判断**不需要**跟着重跑，逐条写明理由。
+   * **豁免表**：闭包收得到、但经判断**不需要**跟着重跑的文件——逐条写明理由（对象本体在 `stamp.ts`，
+   * 这里只对账它的成员，两边独立列出）。
    *
-   * 为什么要有这张表而不是直接放行：放行 = 「过窄」无声发生（新增依赖照样全绿）。豁免要求写出理由，
-   * 于是「这台变异台的判据面为什么是这四份」在代码里就是可复核的，而不是散在文档里的一句话。
+   * 为什么要有它而不是直接放行：放行 = 「过窄」无声发生（新增依赖照样全绿）。豁免要求写出理由，
+   * 于是「这台变异台的判据面为什么是这些」在代码里就是可复核的，而不是散在文档里的一句话。
    *
-   * 目前唯一一条 `BENCH_FILE → STAMP_TS`：`stamp.ts` 是**记录层**（算哈希、写 JSON），它不参与
+   * 目前唯一一条 `STAMP_TS`：`stamp.ts` 是**记录层**（算哈希 / 写 JSON / 算闭包），它不参与
    * 「杀掉 / 存活」的判定——改它的哈希口径不会让任何一条变异体换结论。反过来把它放进面内还会
-   * 制造**噪声红**：改一句指纹的失败文案就要重跑 30 秒。代价如实写着：若 `stamp.ts` 的哈希口径真被
-   * 改成与闸门不一致，闸门会以「内容已变」报红（带补跑命令），方向是**假红**（多跑一次），不是假绿。
+   * 制造**噪声红**：改一句指纹的失败文案就要重跑 30 秒。代价如实写着：若它真被改成与闸门不一致，
+   * 闸门会自己报「内容已变」（带补跑命令），方向是**假红**（多跑一次），不是假绿。
    * 这个方向的错是本仓明确选的那一侧（假红可忍、假绿不可忍，同 DESIGN「为什么不进 CI」）。
    */
-  const OUT_OF_FACE_OK: Record<string, string> = {
-    [STAMP_TS]: "记录层（算哈希/写 JSON），不参与「杀掉 vs 存活」的判定；进面只会让改指纹文案也要重跑 30 秒",
-  }
+  test("豁免表成员逐字对账（把真成员偷偷豁免掉 = 把闸门掏空）", () => {
+    expect(
+      Object.keys(EXEMPT_FROM_FINGERPRINT).sort(),
+      "豁免表被改动过：新增/删除豁免必须同步本文件的 EXPECTED_EXEMPT 并写明理由",
+    ).toEqual([...EXPECTED_EXEMPT].sort())
+    for (const p of Object.keys(EXEMPT_FROM_FINGERPRINT)) {
+      expect(fingerprintInputs().includes(p), `${p} 既在豁免表里又在指纹面里（两张表互相矛盾）`).toBe(false)
+    }
+  })
 
   test("面内每份文件引用的文件，要么也在面内、要么在豁免表里写明理由（过窄 = 假绿）", () => {
-    const inside = new Set(EXPECTED_INPUTS)
+    const inputs = new Set(fingerprintInputs())
+    const exempt = new Set([...Object.keys(EXEMPT_FROM_FINGERPRINT), ...EXPECTED_EXEMPT])
     const leaked: string[] = []
-    for (const p of EXPECTED_INPUTS) {
-      for (const dep of staticDeps(join(REPO, p), p)) {
-        if (inside.has(dep) || dep in OUT_OF_FACE_OK) continue
+    for (const p of fingerprintInputs()) {
+      for (const dep of staticDeps(p)) {
+        /* 闭包**本来就是递归**收的，故这里真正的判据是：面内成员引用到的东西，
+         * 必须要么已在这个面里（说明它被收进来了）、要么进了豁免表（说明有人为它写下了理由）。 */
+        if (inputs.has(dep) || exempt.has(dep)) continue
         leaked.push(`${p} → ${dep}`)
       }
       /* `status-core.ts` 有一条硬性质：**它自己零依赖**（纯函数模块、无 import）。
-       * 它一旦开始引用别的源码，就把新文件拉进了判据面——那条依赖必须先被显式决定。 */
+       * 它一旦开始引用别的源码，就把新文件拉进了判据面——那条依赖必须先被显式决定
+       * （闭包会自动收录它，于是这里会从 `KNOWN_DEPS` 那一关先红）。 */
       if (p === TARGET_FILE) {
-        const imports = [...strip(readFileSync(join(REPO, p), "utf8")).matchAll(/\bfrom\s*"([^"]+)"/g)].map((m) => m[1]!)
-        expect(imports, `${TARGET_FILE} 出现了 import——它本是零依赖纯模块，新增依赖必须先进指纹面`).toEqual([])
+        expect(staticDeps(p), `${TARGET_FILE} 出现了依赖——它本是零依赖纯模块，新增依赖必须先进指纹面`).toEqual([])
       }
     }
     expect(
       leaked,
       `这些依赖既不在指纹面内、也不在豁免表里：改了它们闸门不会红（假绿）。\n` +
-        `  请二选一：① 加进 STAMP_INPUTS + EXPECTED_INPUTS 并跑一次 \`${RERUN}\`；\n` +
-        `            ② 确与判定无关 → 写进本组 OUT_OF_FACE_OK 并注明理由。`,
+        `  请二选一：① 让它留在闭包里（跑一次 \`${RERUN}\`，并把 EXPECTED_CLOSURE 同步进去）；\n` +
+        `            ② 确与判定无关 → 写进 EXEMPT_FROM_FINGERPRINT 与 EXPECTED_EXEMPT 并注明理由。`,
     ).toEqual([])
   })
 
-  test("闭包结论与指纹面一一对应（写死的期望与实算逐项相同，防它随源码漂移）", () => {
-    for (const p of EXPECTED_INPUTS) {
-      const got = staticDeps(join(REPO, p), p).sort()
+  test("直接依赖与 KNOWN_DEPS 逐项相同（防它随源码漂移而变成一句空话）", () => {
+    for (const p of EXPECTED_ROOTS) {
+      const got = staticDeps(p).sort()
       const want = [...new Set(KNOWN_DEPS[p] ?? [])].sort()
       expect(
         got,
@@ -397,8 +412,30 @@ describe("判据面定义：依赖闭包自足（过窄=假绿，这里先红）
     }
   })
 
+  test("指纹面 = 根 + 闭包，且闭包成员与判据侧写死的 EXPECTED_CLOSURE 相同", () => {
+    const inputs = fingerprintInputs()
+    const closure = inputs.filter((p) => !(EXPECTED_ROOTS as readonly string[]).includes(p))
+    expect(
+      [...inputs].sort(),
+      "指纹面被改动过：根集合须同步 EXPECTED_ROOTS，闭包集合须同步 EXPECTED_CLOSURE",
+    ).toEqual([...EXPECTED_ROOTS, ...EXPECTED_CLOSURE].sort())
+    expect([...closure].sort(), "依赖闭包与判据侧写死的期望不符（新增/删除了被引用的文件）").toEqual([...EXPECTED_CLOSURE].sort())
+    /* 根与闭包不得重叠、也不得重复：重叠说明实现在「去重」上破了，重复会让计数类判据失去意义。 */
+    expect(new Set(inputs).size, "指纹面里出现重复项").toBe(inputs.length)
+    for (const r of EXPECTED_ROOTS) {
+      expect(closure.includes(r), `${r} 同时出现在根与闭包里`).toBe(false)
+    }
+    /* 闭包成员必须真的**由**面内某份文件引用而来（否则它是从哪进来的？）——顺带把「为什么在面内」变成可读的。 */
+    for (const p of closure) {
+      expect(
+        importersOf(p, inputs).length,
+        `${p} 在闭包里、却没有任何面内成员引用它——收错了？`,
+      ).toBeGreaterThan(0)
+    }
+  })
+
   test("面外文件不参与指纹：改「不该进面」的文件不会把闸门弄红（过宽侧的边界）", () => {
-    /* 「过宽」方向：判据面是**精确的这四份**，不多不少。以下文件的改动必须**不影响**指纹——它们改变的是
+    /* 「过宽」方向：判据面是**精确的这几份**（根 + 闭包），不多不少。以下文件的改动必须**不影响**指纹——它们改变的是
      * 「怎么记」（stamp.ts / 本文件）或「这台变异台之外还守了什么」（语义契约与接线契约测试、文档），
      * 不是「这台变异台的结论」。若哪天它们进了面，每改一句文案都要等 30 秒，闸门就成了噪声源。 */
     const outside = [
@@ -406,19 +443,241 @@ describe("判据面定义：依赖闭包自足（过窄=假绿，这里先红）
       "AGENTS.md",
       STAMP_TS,
       GATE_FILE,
+      "tools/mutation/status-core/closure.ts", // 闭包算法：只有闸门侧用（实现处，不参与判定）
+      "tools/mutation/status-core/stale.ts", // 自助定位：只读指纹、只报过期项
       "packages/web/src/files/status-core.test.ts",
       "packages/web/src/files/style-contract.test.ts",
+      "packages/web/src/files/status-matrix.test.ts.bak", // 不存在的邻居也不例外
     ]
     for (const p of outside) {
-      expect(EXPECTED_INPUTS.includes(p), `${p} 不该进指纹面（它不参与判定；进去 = 每改一次无关文件都要重跑 30 秒）`).toBe(false)
+      expect(fingerprintInputs().includes(p), `${p} 不该进指纹面（它不参与判定；进去 = 每改一次无关文件都要重跑 30 秒）`).toBe(false)
     }
-    /* 反面：确参与判定的四份**必须**在面内（同一件事的另一半——少一份即假绿）。 */
-    for (const p of [TARGET_FILE, MATRIX_TEST, MUTANTS_FILE, BENCH_FILE]) {
-      expect(EXPECTED_INPUTS.includes(p), `${p} 必须在指纹面内（它是判定链上的一环）`).toBe(true)
+    /* 反面：确参与判定的根**必须**在面内（同一件事的另一半——少一份即假绿）。 */
+    for (const p of EXPECTED_ROOTS) {
+      expect(fingerprintInputs().includes(p), `${p} 必须在指纹面内（它是判定链上的一环）`).toBe(true)
     }
-    /* 面内成员不得重复：重复项不增加覆盖，却会让「四份」这个计数失去意义（上面第 75 行拿它当判据）。 */
-    expect(new Set(EXPECTED_INPUTS).size, "指纹面里出现重复项").toBe(EXPECTED_INPUTS.length)
     /* 面内**有且仅有矩阵这一份测试文件**（它是判官）；否则说明有人把别的测试也算了进来（过宽）。 */
-    expect(EXPECTED_INPUTS.filter((p) => p.endsWith(".test.ts")), "指纹面里应只有矩阵这一份测试文件").toEqual([MATRIX_TEST])
+    expect(
+      fingerprintInputs().filter((p) => p.endsWith(".test.ts")),
+      "指纹面里应只有矩阵这一份测试文件",
+    ).toEqual([MATRIX_TEST])
+    /* 面内**不得**出现第三方/随包资源/构建产物（闭包边界：否则第一个 import 就会把 6908 份 node_modules 拖进来）。
+     * 注意这条**不重**：边界算法本身由下一组的合成树独立验（这里只验真指纹没被越界的成员污染）。 */
+    const BLOCK = ["node_modules", "vendor", "dist", "build", "public"]
+    for (const p of fingerprintInputs()) {
+      const hit = BLOCK.find((seg) => p.split("/").includes(seg))
+      expect(hit, `${p} 命中边界排除段 \`${hit}\`——第三方/构建产物不该进指纹面（纯噪声红）`).toBeUndefined()
+    }
+    /* 结构判据（写在这里是因为它是**闭包边界**的性质，不是「根该是哪四份」的性质）：
+     * 面里唯一的测试文件就是矩阵；`tools/` 下的成员只能是那两个变异的**输入与执行器**。 */
+    expect(
+      fingerprintInputs().filter((p) => p.startsWith("tools/")),
+      "tools/ 下只该有变异体清单与执行器进面（别的 tools 源码进来 = 边界失控）",
+    ).toEqual([MUTANTS_FILE, BENCH_FILE])
+  })
+})
+
+/* ================================================================== *
+ * 闭包算法自身：在临时目录里造合成依赖树（唯一能独立验它的办法）
+ * ================================================================== */
+
+/**
+ * ## 为什么要造树（而不是拿真仓库的文件验）
+ * 真仓库当下**几乎没有闭包成员**（四份根本下零依赖，只有一条被豁免的记录层），于是拿它当靶子只验到
+ * 「空集也是集」。而这条机制要防的恰恰是**将来**那次「根的 import 图里多出一份」——那件事在真仓库
+ * 里没法安全地造（要么改真源码、要么放过它）。故这里用**临时目录 + 合成源码**：写得出的依赖形态
+ * 全都造一遍（相对路径 / 裸文件名 / 动态 import / 只副作用 import / TS 扩展名 / 目录 index / 注释里的
+ * 假依赖 / 环），再断言闭包逐份收对。
+ *
+ * **这也让「把 `closure.ts` 掏空」当场红**（恒返回 `[]` 时下面多条会失败）：本仓的分工是
+ * **实现一处、判据另一处**——`closure.ts` 自己不进指纹面（改它不该要人重跑 30 秒），
+ * 但它的行为被这里独立钉住，不会静默退化。
+ */
+describe("依赖闭包算法：在合成依赖树上验（递归 / 边界 / 豁免 / 环 / 注释安全）", () => {
+  /** 一份合成树：`文件 → 源码`。写入临时目录后即是「（迷你）仓根」。 */
+  const TREE: Record<string, string> = {
+    "tools/app/main.ts": [
+      `import { a } from "./mid"`, // 相对路径 + 扩展名补全
+      `import "side/x.ts"`, // 只副作用 import + 显式扩展名
+      `const dyn = await import("./deep/leaf")`, // 动态 import
+      `import { s } from "./stringy"`, // 这份里的路径字面量长在字符串里（注释安全的反证）
+      `import { t } from "./loopy-a"`, // 环的入口
+      // 下面六份各自引用一个「不该进闭包的标的」——用来验边界只挡**被引用的目标**，
+      // 不株连「引用了它的文件」（否则一次无关引用会把整份文件从覆盖里挤出去）
+      `import "./to-node-modules"`,
+      `import "./to-vendor"`,
+      `import "./to-public"`,
+      `import "./to-outside"`,
+      `import "./to-bare"`,
+      `import "./to-builtin"`,
+    ].join("\n"),
+    "tools/app/mid.ts": `import { g } from "./deep/grand"`, // 下标文件：验递归的**第二层**
+    "tools/app/deep/grand.ts": `export const g = 1`,
+    "tools/app/deep/leaf.ts": `export const l = 1`,
+    "tools/app/side/x.ts": `export const sx = 1`,
+    // 注释安全：`from` 出现在块注释里（旧的非贪婪正则会吞掉它**之后**的真代码，把 mid 看漏）
+    "tools/app/stringy.ts": [
+      `/* 例子：import { x } from "./never" */ import { a } from "./mid"`,
+      `const P = "tools/app/mid.ts"`,
+      `// import { y } from "./also-never"`,
+    ].join("\n"),
+    "tools/app/loopy-a.ts": `import { b } from "./loopy-b"`,
+    "tools/app/loopy-b.ts": `import { a } from "./loopy-a"`, // 环：不得挂死、不得重复收
+    // 边界：这四份都不该进闭包
+    "node_modules/pkg/index.ts": `export const n = 1`,
+    "vendor/third/a.ts": `export const v = 1`,
+    "dist/build.ts": `export const d = 1`,
+    "packages/web/public/vendor/a.ts": `export const p = 1`,
+    // 引用「不该进闭包」的两份（各从面内文件引一次，验边界真的挡住了）
+    "tools/app/to-node-modules.ts": `import { n } from "../../node_modules/pkg/index"`,
+    "tools/app/to-vendor.ts": `import { v } from "../../vendor/third/a"`,
+    "tools/app/to-public.ts": `import { p } from "../../packages/web/public/vendor/a"`,
+    "tools/app/to-outside.ts": `import { o } from "../../../outside/o"`, // 出仓
+    "tools/app/to-bare.ts": `import { r } from "react"`, // 裸包名
+    "tools/app/to-builtin.ts": `import { readFileSync } from "node:fs"`, // 内建
+  }
+  /** 入口根（与真仓库同形：一份 `tools/` 下的、一份 `packages/` 下的）。 */
+  const ROOTS = ["tools/app/main.ts", "packages/web/src/root.ts"]
+
+  /** 把合成树落到临时目录（两级 `../../../../` 的距离要与真仓库一致，才验得到同一套路径解析）。 */
+  const dir = (() => {
+    const d = mkdtempSync(join(tmpdir(), "gebai-closure-"))
+    const roots: Record<string, string> = {
+      ...TREE,
+      "packages/web/src/root.ts": `import { a } from "../../../../tools/app/mid"\n`,
+    }
+    for (const [rel, body] of Object.entries(roots)) {
+      // 目录用**仓根相对**的那个片段去建（不能拿绝对路径喂 `posix.dirname`：Windows 绝对路径里没有 `/`）
+      const relDir = posix.dirname(rel)
+      if (relDir !== ".") mkdirSync(join(d, relDir), { recursive: true })
+      writeFileSync(join(d, rel), body, "utf8")
+    }
+    return d
+  })()
+
+  /** 清场（本文件是全仓第一个「往磁盘写东西」的测试，故刻意写在文件末尾那一条的尾巴上）。 */
+  const cleanup = (): void => rmSync(dir, { recursive: true, force: true })
+
+  test("递归收录：直接 + 传递依赖（含扩展名补全、目录 index、动态/副作用 import）", () => {
+    expect(depClosure(ROOTS, [], dir).sort()).toEqual(
+      [
+        "tools/app/mid.ts",
+        "tools/app/side/x.ts",
+        "tools/app/deep/grand.ts", // ← 第二层：mid 的依赖
+        "tools/app/deep/leaf.ts",
+        "tools/app/stringy.ts",
+        "tools/app/loopy-a.ts",
+        "tools/app/loopy-b.ts",
+        // 六份边界探针：它们**自己**在 `tools/` 下、是正常成员，被它们引用的标的不是
+        "tools/app/to-node-modules.ts",
+        "tools/app/to-vendor.ts",
+        "tools/app/to-public.ts",
+        "tools/app/to-outside.ts",
+        "tools/app/to-bare.ts",
+        "tools/app/to-builtin.ts",
+      ].sort(),
+    )
+  })
+
+  test("递归是**真递**的（拿掉第一层，第二层就看不见——证明上面那棵树不是一次性拍平）", () => {
+    const flat = depClosure(["tools/app/main.ts"], [], dir)
+    expect(flat.includes("tools/app/deep/grand.ts"), "grand 是靠 mid 才被收进来的").toBe(true)
+    expect(staticDeps("tools/app/main.ts", dir).includes("tools/app/deep/grand.ts"), "grand 不是 main 的直接依赖").toBe(false)
+  })
+
+  test("豁免是**连子树一起剪**的（记录层引用的东西仍是记录层）", () => {
+    const all = depClosure(ROOTS, [], dir)
+    const cut = depClosure(ROOTS, ["tools/app/mid.ts"], dir)
+    expect(cut.includes("tools/app/mid.ts"), "被豁免的文件本身不该进闭包").toBe(false)
+    expect(cut.includes("tools/app/deep/grand.ts"), "被豁免文件的依赖（更深的层）也不该进——整棵子树都剪").toBe(false)
+    /* 但剪掉的只是那一支：别的分支照收（否则「豁免」就成了「停表」）。 */
+    expect(cut.length).toBeGreaterThan(0)
+    expect(cut.includes("tools/app/loopy-a.ts")).toBe(true)
+    expect(all.length, "豁免应当**严格减少**闭包（否则这条测试在空转）").toBeGreaterThan(cut.length)
+  })
+
+  test("边界：第三方/随包资源/构建产物/出仓/内建/裸包名一个都不进（过宽侧的假红防线）", () => {
+    const hit = depClosure(ROOTS, [], dir)
+    for (const p of [
+      "node_modules/pkg/index.ts",
+      "vendor/third/a.ts",
+      "dist/build.ts",
+      "packages/web/public/vendor/a.ts",
+    ]) {
+      expect(hit.includes(p), `${p} 不该进闭包（它是第三方 / 随包资源 / 构建产物）`).toBe(false)
+    }
+    /* 另三类（出仓 / 裸包名 / 内建）连**目标文件都不存在**，故用「引用它们的文件自己有没有进来」
+     * 反证：入口确实被读到了（六份探针全在 `tools/` 下、都是正常成员）——否则上面那几条是在空转。 */
+    for (const p of [
+      "tools/app/to-node-modules.ts",
+      "tools/app/to-vendor.ts",
+      "tools/app/to-public.ts",
+      "tools/app/to-outside.ts",
+      "tools/app/to-bare.ts",
+      "tools/app/to-builtin.ts",
+    ]) {
+      expect(hit.includes(p), `${p} 本身在 tools/ 下，是正常成员（探针文件不得被株连）`).toBe(true)
+    }
+  })
+
+  test("边界判据本身可测（纯函数：逐类路径给结论）", () => {
+    const cases: Array<[string, boolean]> = [
+      ["packages/web/src/files/status-core.ts", true],
+      ["tools/mutation/status-core/bench.ts", true],
+      ["node_modules/pkg/index.ts", false],
+      ["packages/web/node_modules/pkg/index.ts", false],
+      ["vendor/reel/runtime/x.ts", false],
+      ["packages/web/dist/a.ts", false],
+      ["packages/web/build/a.ts", false],
+      ["packages/web/public/vendor/a.ts", false],
+      ["shuangtian/src/a.ts", false], // 本仓另一棵树：不在闭包范围内
+      ["../outside/a.ts", false],
+      ["DESIGN.md", false],
+    ]
+    for (const [p, want] of cases) expect(inFingerprintScope(p), `${p} 的边界判定错了`).toBe(want)
+  })
+
+  test("环安全：互为依赖不得挂死、不得重复收", () => {
+    const out = depClosure(["tools/app/loopy-a.ts"], [], dir)
+    expect(out).toEqual(["tools/app/loopy-b.ts"]) // a → b → a：环上的另一份收进来，闭环不再展开
+  })
+
+  test("注释安全：注释里的假依赖不算，注释**之后**的真依赖不许被吞（假绿侧）", () => {
+    const got = staticDeps("tools/app/stringy.ts", dir)
+    expect(got, "注释里那两条 `from` 不该被当成依赖").not.toContain("tools/app/never.ts")
+    expect(got, "注释里那两条 `from` 不该被当成依赖").not.toContain("tools/app/also-never.ts")
+    /* 这条是**真判据**：旧的非贪婪块注释正则会把 `/* … *​/` **之后**的真代码一起吞掉，
+     * 于是 `stringy.ts` 对 `mid.ts` 的真依赖会被看漏——那正是「假绿」那一侧的错。 */
+    expect(got, "行内块注释之后的真 import 被吞了（去注释实现有假绿风险）").toContain("tools/app/mid.ts")
+    expect(staticDeps("tools/app/stringy.ts", dir)).toContain("tools/app/mid.ts")
+  })
+
+  test("顶层文件不存在 / 不是源码时不抛错（返回空，由「成员必须存在」那条查）", () => {
+    expect(staticDeps("tools/app/nope.ts", dir)).toEqual([])
+    expect(depClosure(["tools/app/nope.ts"], [], dir)).toEqual([])
+  })
+
+  /**
+   * **端到端**：拿合成树走一遍 `staleFiles`（闸门判「过期」的那个函数），断言
+   * 「**被引用的那份**（闭包成员）被改了」真的会被报成过期——这正是本单要补的那半边。
+   *
+   * 用 `staleFiles(recorded, current)` 的注入参数，所以**不碰真仓库**：`recorded` 用改前的哈希，
+   * `current` 用改后的——两者之差即是「闭包成员改了而没重跑」。
+   */
+  test("端到端：闭包成员被改了 → staleFiles 报出它（这就是原来漏掉的那种假绿）", () => {
+    const inputs = [...ROOTS, ...depClosure(ROOTS, [], dir)]
+    const h = (s: string): string => `sha256:${createHash("sha256").update(s).digest("hex")}`
+    const snapshot = (): Record<string, string> => {
+      const out: Record<string, string> = {}
+      for (const p of inputs) out[p] = h(readFileSync(join(dir, p), "utf8"))
+      return out
+    }
+    const before = snapshot()
+    // 改坏**被引用**的那份（不是根）
+    writeFileSync(join(dir, "tools/app/deep/grand.ts"), "export const g = 2 // 改坏了\n", "utf8")
+    const stale = staleFiles(before, snapshot())
+    expect(stale.length, "闭包成员被改了却报「不过期」——这就是要修的那种假绿").toBe(1)
+    expect(stale[0], "报出来的应当是那份被改的闭包成员").toContain("tools/app/deep/grand.ts")
+    cleanup()
   })
 })

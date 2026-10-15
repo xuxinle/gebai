@@ -350,6 +350,7 @@ if (noStamp) {
   }
   const { written } = writeStamp({ files: computeFiles(), mutants, result })
   console.log(`\n[指纹] 证据指纹${written ? "已刷新" : "已是最新（内容未变，未写盘）"}：${STAMP_FILE}`)
-  console.log(`       它会被常规测试 status-mutation-gate.test.ts 对账——改了判据面却忘了重跑这台，测试会红。`)
+  console.log(`       指纹面 = 四份根 + 它们的**依赖闭包**（递归 import 图，只收本仓 packages/ 与 tools/ 下的源码）。`)
+  console.log(`       它会被常规测试 status-mutation-gate.test.ts 对账——改了判据面（含被它 import 的模块）却忘了重跑，测试会红。`)
 }
 process.exit(exitCode)
