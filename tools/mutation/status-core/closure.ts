@@ -29,9 +29,18 @@
  *   - `from "…"` / `import("…")` / `import "…"`：ESM 三态；
  *   - 源码里的 `"….ts"` 字面量：`readFileSync(join(import.meta.dir, "status-core.ts"))` 这种读法
  *     （矩阵正是这么读被审源码的——它是一条**真依赖**，不比 `import` 弱）；
- *   - **相对说明符与裸文件名一律按「本文件所在目录」解析**（`"./status-core"` 与 `"status-core.ts"` 等价）；
+ *   - **相对说明符**（`"./x"` / `"../x"`）按「本文件所在目录」解析；
+ *   - **裸文件名 / 仓根相对路径**（`"status-core.ts"`、`"packages/web/src/files/status-core.ts"`）
+ *     先按「本文件所在目录」试，**再按仓根**试——两种写法本仓都在用，而**后者是判据面里真出现的那种**
+ *     （`mutants.ts` 用 `TARGET_FILE` / `MATRIX_TEST` 两个**仓根相对**常量登记被审对象与判官）。
+ *     只试仓根**不**试任意目录：否则任何一个 `"….ts"` 字面量都会去扫全仓，闭包随时可能被一句注释里的
+ *     示例路径撑大（那是「过宽 = 噪声红」那一侧）。
  *   - 扩展名补全 `.ts` / `.tsx` / `/index.ts` / `/index.tsx`（与 TS 的 bundler 解析习惯一致）。
  *   - **认不出的不算**：路径一旦装进变量就看不见。这与既有闸门的取舍一致（不上 AST、按「与蓄意绕过同类」处置）。
+ *   - **但「认不出」不许退化成「更小的心照不宣的范围」**：解析口径在真仓里落空时（例如四份根本下
+ *     零依赖），闭包会是**空集**，而空集让「只哈希根文件」与「根 + 闭包」**行为等价**——机制看着在、
+ *     实际没拦。闸门侧因此有一条**只盯真仓**的断言：四份根的直接依赖**一条都不许解析不到**（见
+ *     `status-mutation-gate.test.ts` 的「真仓解析零漏」一例）。
  *
  * **去注释走一个引号感知的状态机**，而不用「块注释配对」那条非贪婪正则：后者会把字符串里的注释样式文本、
  * 以及**同一行行内块注释之后**的真代码一起吞掉（实测：`const A = 1` 后跟一段行内块注释再跟 `const B = 2`，
@@ -133,23 +142,38 @@ function scanSpecifiers(src: string): string[] {
 /**
  * 把**一个**说明符解析成仓根相对路径；解析不到（内建 / 裸包名 / 出仓 / 越界 / 文件不存在）返回 `null`。
  *
- * 相对说明符与裸文件名都按本文件所在目录解析——这正是矩阵读被审源码的写法。
+ * **两个基准目录，按序试**（顺序本身是判据，别调换）：
+ *   ① 本文件所在目录——相对说明符（`"./x"` / `"../x"`）与**裸文件名**（`"status-core.ts"`）都走这一支，
+ *      这正是矩阵 `readFileSync(join(import.meta.dir, "status-core.ts"))` 的写法；
+ *   ② **仓根**——只在 ①落空时试，且只对**仓根相对路径字面量**（`"packages/web/src/files/status-core.ts"`）。
+ *
+ * ② 为什么必须有（它修的是一个**真实的空集**，不是理论缺口）：判据面里登记被审对象与判官的方式就是
+ * 两个**仓根相对**常量（`mutants.ts` 的 `TARGET_FILE` / `MATRIX_TEST`）。少了这一支，那两条依赖一律
+ * 解析不到——执行器那一支整条断掉、`closure.ts` 也进不来，**真仓闭包因此恒为空集**，而空集让
+ * 「只哈希根」与「根 + 闭包」行为等价（机制在、但没拦）。
+ *
+ * ② 为什么**不**试「任意祖先目录」：那会让闭包随「某份文件恰好放在哪一层」而变，也会让一句注释里的
+ * 示例路径把无关文件拖进面里——而**过宽 = 噪声红**（改一个无关文件也要等 30 秒），本仓明确不要那一侧。
  */
 function resolveSpecifier(fromRel: string, spec: string, base: string): string | null {
   if (spec.startsWith("node:") || spec.startsWith("bun:")) return null
   const isRelative = spec.startsWith("./") || spec.startsWith("../")
   // 裸说明符只有长得像文件名（带 .ts/.tsx）才可能是本仓文件；`react` / `zod/v4` 这类一律不算
   if (!isRelative && !/\.tsx?$/.test(spec)) return null
-  const head = norm(posix.join(posix.dirname(norm(fromRel)), spec))
-  if (head.startsWith("..")) return null
-  const candidates = [head, `${head}.ts`, `${head}.tsx`, posix.join(head, "index.ts"), posix.join(head, "index.tsx")]
-  for (const c of candidates) {
-    const rel = norm(c)
-    if (!inFingerprintScope(rel)) continue
-    try {
-      if (statSync(join(base, rel)).isFile()) return rel
-    } catch {
-      // 不存在 → 试下一个候选
+  const bases = isRelative ? [posix.dirname(norm(fromRel))] : [posix.dirname(norm(fromRel)), "."]
+  for (const dir of bases) {
+    const head = norm(posix.join(dir, spec))
+    // 出仓（`..` 开头）与「原地打转」（`.`）都不是本仓文件
+    if (head === "." || head.startsWith("..")) continue
+    const candidates = [head, `${head}.ts`, `${head}.tsx`, posix.join(head, "index.ts"), posix.join(head, "index.tsx")]
+    for (const c of candidates) {
+      const rel = norm(c)
+      if (!inFingerprintScope(rel)) continue
+      try {
+        if (statSync(join(base, rel)).isFile()) return rel
+      } catch {
+        // 不存在 → 试下一个候选
+      }
     }
   }
   return null
@@ -179,8 +203,18 @@ export function staticDeps(rel: string, base: string = REPO_ROOT): string[] {
 /**
  * **依赖闭包**：从若干「根」出发，递归收录它们引用到的本仓源码（不含根自身）。
  *
- * - **豁免的连子树一起豁免**：`exempt` 里的文件既不进闭包，也不再往下走——记录层引用的东西仍是记录层，
- *   这比「进闭包再逐条豁免」少一层噪声（当前唯一豁免是 `stamp.ts`，见 `stamp.ts` 的 `EXEMPT_FROM_FINGERPRINT`）。
+ * - **豁免只剪「被点名的那一份」**（默认；`pruneSubtree` 可改成整棵子树一起剪）：
+ *   被豁免者自己不进闭包、也**不再往下走**（省一层噪声）；但它只要被面内**另一条**路径引用到，
+ *   就仍然照常进面、并照常往下递归。
+ *
+ *   为什么默认必须是「只剪点名的那份」（这条修的是一个**真实的空集**，不是洁癖）：上一版是「被豁免者
+ *   连子树一起剪」，于是 `stamp.ts` 被豁免时，它引用的 `closure.ts`（闭包算法本体）**和无条件递归
+ *   完全等价**——而 `closure.ts` 又是执行器 `bench.ts` 的依赖。结果是四份根里**唯一**能收到的依赖
+ *   （`bench.ts → closure.ts`）被这张豁免表的**间接效果**剪掉了，真仓闭包恒为空集：机制在，但一次都
+ *   没生效过。「豁免」的语义本该是「这份不参与判定」（一个**逐文件**的判断），不该顺手把依赖图也剪短
+ *   ——依赖图短了，判据面就小了，而判据面小了是**假绿**那一侧（本仓明说不可接受的那一侧）。
+ *   保留整树剪枝开关是为了让「连树剪」这个语义仍可被合成树测到（见闸门「豁免是连子树一起剪的」一组），
+ *   也为了哪天真需要它时不必重写一遍遍历。
  * - **环安全**：`seen` 集合既挡重复也断环（本仓当下无环，但依赖图里出现环是正常的，不能因此挂死）。
  * - **确定性**：返回排序后的数组——指纹的键序要逐字节稳定（同 `stamp.ts` 的「内容确定」纪律）。
  */
@@ -188,7 +222,9 @@ export function depClosure(
   roots: readonly string[],
   exempt: Iterable<string> = [],
   base: string = REPO_ROOT,
+  opts: { pruneSubtree?: boolean } = {},
 ): string[] {
+  const pruneSubtree = opts.pruneSubtree ?? false
   const skip = new Set([...exempt].map(norm))
   const seen = new Set(roots.map(norm))
   const queue = [...seen]
@@ -198,7 +234,12 @@ export function depClosure(
     for (const dep of staticDeps(rel, base)) {
       if (seen.has(dep)) continue
       seen.add(dep)
-      if (skip.has(dep)) continue
+      if (skip.has(dep)) {
+        // 只剪点名的那一份时，仍要往下走一步：被豁免者引用的东西**不是**被豁免者，
+        // 它们该不该进面取决于**谁引用它们**——上面那个 `seen` 已经保证只走一遍。
+        if (!pruneSubtree) queue.push(dep)
+        continue
+      }
       out.push(dep)
       queue.push(dep)
     }

@@ -4,7 +4,8 @@
     "packages/web/src/files/status-core.ts": "sha256:03a0ab955ccc37256751121b29cf250f7c1e171445e2fc0b7a74df1675246b87",
     "packages/web/src/files/status-matrix.test.ts": "sha256:306472633e66911806a337a0c16f4f0e4a1cc384b13801fdcd5bd55208221650",
     "tools/mutation/status-core/mutants.ts": "sha256:f2f36e7811d45eb654d798b3acfc5a8711d26190da473bb36e7b72629aa65312",
-    "tools/mutation/status-core/bench.ts": "sha256:3d4d83f12e2ad85bde716631f58b74cc1598f2abcab63ac75aecb3ddd9a80073"
+    "tools/mutation/status-core/bench.ts": "sha256:3d4d83f12e2ad85bde716631f58b74cc1598f2abcab63ac75aecb3ddd9a80073",
+    "tools/mutation/status-core/closure.ts": "sha256:59f7582fc3696d9787a7b8820b45fe09ee6f290f01ec55e579279d5f9c20c580"
   },
   "mutants": {
     "code": 21,

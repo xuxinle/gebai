@@ -204,7 +204,7 @@ bun run mutate:status   # 约 30 秒，退出码 0 = 全部符合期望；跑成
 bun run mutate:status:why  # 自助定位：指纹过期了没、该不该重跑（只读，毫秒级；0=不必跑、1=要跑）
 ```
 
-**判据面 = 四份文件，改了其中任何一份就要重跑**（按内容判、不按文件名判——改一句注释也算）：
+**判据面 = 四份根 + 它们递归引用到的本仓源码（依赖闭包），改了其中任何一份就要重跑**（按内容判、不按文件名判——改一句注释也算）：
 
 | 文件 | 在判据里充当什么 |
 |------|----------------|
@@ -212,8 +212,9 @@ bun run mutate:status:why  # 自助定位：指纹过期了没、该不该重跑
 | `packages/web/src/files/status-matrix.test.ts` | **判官**（杀/活的唯一判据来源，34 用例 / 511 断言） |
 | `tools/mutation/status-core/mutants.ts` | **变异体清单**（33 条历史缺陷清单，新增一条而没跑最易忘） |
 | `tools/mutation/status-core/bench.ts` | **执行器**（基线/杀活的判定逻辑、行尾归一） |
+| `tools/mutation/status-core/closure.ts` | **依赖闭包**（闭包算法本体，链路 `bench.ts` → `stamp.ts` → `closure.ts`）——当前**唯一**一份闭包成员 |
 
-面外的文件（`stamp.ts` / 闸门自身 / 两份面外测试 / `test-preload.ts` / 文档）改了**不会**红，且不该进面（详见 `DESIGN.md` 同节）。**依赖闭包自足**由闸门自动核：面内文件新增对面外源码的依赖会当场红，逼你决定「进面并跑台」还是「豁免并写理由」。
+面外的文件（`stamp.ts` / 闸门自身 / 两份面外测试 / `test-preload.ts` / 文档）改了**不会**红，且不该进面（详见 `DESIGN.md` 同节）。**依赖闭包自足**由闸门自动核：面内文件新增对面外源码的依赖会当场红，逼你决定「进面并跑台」还是「豁免并写理由」。真仓闭包**非空且零漏**也由闸门专盯（`20d245fe` 之前它恒为空集——空集 = 机制在、但一次都没拦过）。
 
 **这条不靠你记得**：变异台跑成功会把「指纹面 + 实测结果」写进入库的
 `tools/mutation/status-core/stamp.json`，而 `packages/web/src/files/status-mutation-gate.test.ts` 在
@@ -272,5 +273,5 @@ bun run mutate:status:why  # 自助定位：指纹过期了没、该不该重跑
 
 - 提交前先看 `git status` / `git diff`，只暂存预期文件，不提交密钥。
 - 完成后运行 `bun run test`、`bun run typecheck`、`bun run lint` 确认通过。
-- **动了文件工作台状态格判据面就要跑变异台**（`bun run mutate:status`）——判据面 = `files/status-core.ts` + `files/status-matrix.test.ts` + `tools/mutation/status-core/{mutants,bench}.ts` **四份根，加上它们递归引用到的本仓源码（依赖闭包；改了被 `import` 的模块同样要重跑）**（**按内容判**：改一句注释也算）。跑成功会自动刷新 `stamp.json`；忘了跑的话常规测试会红并告诉你这条命令（闸门清单见上「测试策略 → 硬约束」）。
+- **动了文件工作台状态格判据面就要跑变异台**（`bun run mutate:status`）——判据面 = `files/status-core.ts` + `files/status-matrix.test.ts` + `tools/mutation/status-core/{mutants,bench}.ts` **四份根，加上它们递归引用到的本仓源码（依赖闭包；改了被 `import` 的模块同样要重跑——当前真仓是 `tools/mutation/status-core/closure.ts`）**（**按内容判**：改一句注释也算）。跑成功会自动刷新 `stamp.json`；忘了跑的话常规测试会红并告诉你这条命令（闸门清单见上「测试策略 → 硬约束」）。
 - 设计变更记得回写 `DESIGN.md`。

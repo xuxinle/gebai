@@ -29,7 +29,8 @@
  * 变异台本体（`bench.ts` / `mutants.ts` / `stamp.ts` / `closure.ts`）必须**不带** `.test` 标记，否则 `bun test`
  * 会把它当用例跑起来、spawn 几十秒。本文件恰好相反：它**就是要**被 `bun test` 采到——它不 spawn
  * 任何东西，只读判据面（含依赖闭包）算哈希，外加在**临时目录里造合成依赖树**把闭包算法自己验一遍，
- * 并用同一棵树做一条**防退化自检**（指纹键集必须含闭包成员——真仓闭包为空，那半边只有合成树能验）。
+ * 并用合成树 + **真仓**两侧做「防退化自检」：真仓那侧断言闭包**非空**且一条依赖都不被静默丢掉
+ * （`20d245fe` 之前真仓闭包恒为空集，空集让「退回只哈希根文件」行为等价——机制在、但一次都没生效过）。
  * 名字是这里的关键，改动前先想清楚这一点。
  */
 import { describe, expect, test } from "bun:test"
@@ -64,6 +65,8 @@ const MUTANTS_FILE = "tools/mutation/status-core/mutants.ts"
 const BENCH_FILE = "tools/mutation/status-core/bench.ts"
 /** 指纹实现自身（**只记录结论、不参与判定**——故刻意不在指纹面内）。 */
 const STAMP_TS = "tools/mutation/status-core/stamp.ts"
+/** 闭包算法（`depClosure` / `staticDeps`）——**它在指纹面内**，理由见下面 `EXPECTED_CLOSURE`。 */
+const CLOSURE_TS = "tools/mutation/status-core/closure.ts"
 /** 本文件（闸门自身——同样刻意不在面内：改闸门不该要求重跑那台 30 秒的台）。 */
 const GATE_FILE = "packages/web/src/files/status-mutation-gate.test.ts"
 
@@ -79,16 +82,24 @@ const EXPECTED_ROOTS: string[] = [TARGET_FILE, MATRIX_TEST, MUTANTS_FILE, BENCH_
 /**
  * **期望的依赖闭包**（写死的判据侧对账——同样不得由实现反推）。
  *
- * 当前是**空**：四份根本下零依赖——`status-core.ts` 是零依赖纯模块（下面有硬检查）、矩阵只引它、
- * 清单只写路径常量、执行器除了清单只剩一个被豁免的 `stamp.ts`（记录层）。
+ * 当前是 **1 份：闭包算法 `closure.ts` 自己**。它为什么真的在判定链上（而不是「把算法也塞进面以求非空」）：
+ * 指纹面是 `bench.ts` 跑完后由 `computeFiles()` → `fingerprintInputs()` → `depClosure()`（在 `closure.ts` 里）
+ * 算出来的——**改了 `closure.ts`，算出的面就可能变**（退化成 `[]`、或漏掉某个候选扩展名，都会让
+ * 「上一次的结论覆盖哪几份」与当下不一致），与「根变了要重跑」是同一类事。具体路径：
+ * `bench.ts` →（记录的）`stamp.ts` →（闭包算法）`closure.ts`。
  *
- * 空数组不是「这条检查在空转」：它是一条**会响的警报线**——四份根里任何一份将来真的 import 了
- * 本仓别的源码（例如把取词表抽成 `status-labels.ts`），`fingerprintInputs()` 会当场多出一份，
- * 而这里写死的是空 → 红，逼人做一次显式决定：让它留在闭包里（于是今后改它必须重跑变异台），
- * 还是列进 `EXEMPT_FROM_FINGERPRINT` 并写明理由。而「被引用的那份改了」这件事本身由指纹自动覆盖
- * （见「依赖闭包」一组里那条端到端用例）。
+ * **这份非空本身就是一条重要事实**（上一单最危险的形态）：`dfe18f67`…`20d245fe` 期间真仓闭包是
+ * **空集**——于是「把实现退回只哈希四份根文件」在真仓里**行为等价、无人察觉**（本节的
+ * `EXPECTED_ROOTS` / `EXPECTED_CLOSURE` /「指纹面 = 根 + 闭包」三条对账会全部照旧绿）。那不是一个
+ * 「刚好很小」的集合，而是一个**机制在、但一次都没生效过**的集合；下面「防退化自检」一组里对
+ * **真仓**（不只是合成树）的断言就是为这件事立的。
+ *
+ * 它同时仍是一条**会响的警报线**：四份根里任何一份将来真的 import 了别的本仓源码（例如把取词表
+ * 抽成 `status-labels.ts`），`fingerprintInputs()` 会当场多出一份，而这里写死的是当前这一份 → 红，
+ * 逼人做一次显式决定：让它留在闭包里（于是今后改它必须重跑变异台），还是列进
+ * `EXEMPT_FROM_FINGERPRINT` 并写明理由。
  */
-const EXPECTED_CLOSURE: string[] = []
+const EXPECTED_CLOSURE: string[] = [CLOSURE_TS]
 
 /** 豁免表也写死在判据侧：把真成员偷偷豁免掉 = 把闸门掏空，这里对账。 */
 const EXPECTED_EXEMPT: string[] = [STAMP_TS]
@@ -342,13 +353,15 @@ describe("判据面定义：依赖闭包（过窄=假绿，这里先红）", () 
    * 依赖清单（**写死的期望**，逐份对应上面的「判据面定义」表）。
    *
    * - `MATRIX_TEST → TARGET_FILE`：判官引用被审对象（`import … from "./status-core"` 加源码字面量）；
+   * - `MUTANTS_FILE → TARGET_FILE` / `→ MATRIX_TEST`：清单里登记被审对象与判官的那两个**仓根相对**常量
+   *   （`TARGET_FILE` / `MATRIX_TEST`）——**这两条是仓根相对路径字面量**，与上面那条走的是两种解析口径；
    * - `BENCH_FILE → MUTANTS_FILE`：执行器读清单（判定逻辑与数据的接口）；
    * - `BENCH_FILE → STAMP_TS`：执行器把结论写进指纹——**这条是豁免**（见下 `OUT_OF_FACE_OK`）。
    */
   const KNOWN_DEPS: Record<string, string[]> = {
     [TARGET_FILE]: [],
     [MATRIX_TEST]: [TARGET_FILE],
-    [MUTANTS_FILE]: [],
+    [MUTANTS_FILE]: [TARGET_FILE, MATRIX_TEST],
     [BENCH_FILE]: [MUTANTS_FILE, STAMP_TS],
   }
 
@@ -426,11 +439,16 @@ describe("判据面定义：依赖闭包（过窄=假绿，这里先红）", () 
     for (const r of EXPECTED_ROOTS) {
       expect(closure.includes(r), `${r} 同时出现在根与闭包里`).toBe(false)
     }
-    /* 闭包成员必须真的**由**面内某份文件引用而来（否则它是从哪进来的？）——顺带把「为什么在面内」变成可读的。 */
+    /* 闭包成员必须真的**由**面内某份文件（可经**豁免的中间层**）引用而来（否则它是从哪进来的？）——
+     * 顺带把「为什么在面内」变成可读的。这里拿**全图**（`depClosure(roots, [])`：不剪豁免）当搜索范围，
+     * 因为真实链条可以是「根 → 豁免的记录层 → 在面内的成员」：`bench.ts`（根）→ `stamp.ts`（豁免，
+     * 它被豁免是因为它不参与判杀）→ `closure.ts`（**在面内**：算闭包的那个函数决定面长什么样）。
+     * 拿缩小后的面当范围会把这条链断在半路，从而误报「收错了」。 */
+    const fullGraph = [...STAMP_ROOTS, ...depClosure(STAMP_ROOTS, [])]
     for (const p of closure) {
       expect(
-        importersOf(p, inputs).length,
-        `${p} 在闭包里、却没有任何面内成员引用它——收错了？`,
+        importersOf(p, fullGraph).length,
+        `${p} 在闭包里、却没有任何面内成员（含豁免的中间层）引用它——收错了？`,
       ).toBeGreaterThan(0)
     }
   })
@@ -444,7 +462,6 @@ describe("判据面定义：依赖闭包（过窄=假绿，这里先红）", () 
       "AGENTS.md",
       STAMP_TS,
       GATE_FILE,
-      "tools/mutation/status-core/closure.ts", // 闭包算法：只有闸门侧用（实现处，不参与判定）
       "tools/mutation/status-core/stale.ts", // 自助定位：只读指纹、只报过期项
       "packages/web/src/files/status-core.test.ts",
       "packages/web/src/files/style-contract.test.ts",
@@ -470,11 +487,12 @@ describe("判据面定义：依赖闭包（过窄=假绿，这里先红）", () 
       expect(hit, `${p} 命中边界排除段 \`${hit}\`——第三方/构建产物不该进指纹面（纯噪声红）`).toBeUndefined()
     }
     /* 结构判据（写在这里是因为它是**闭包边界**的性质，不是「根该是哪四份」的性质）：
-     * 面里唯一的测试文件就是矩阵；`tools/` 下的成员只能是那两个变异的**输入与执行器**。 */
+     * 面里唯一的测试文件就是矩阵；`tools/` 下的成员只能是那两个变异的**输入与执行器**，
+     * 加上**闭包算法本体**（它是执行器的依赖，在面内的理由见 `EXPECTED_CLOSURE`）。 */
     expect(
       fingerprintInputs().filter((p) => p.startsWith("tools/")),
-      "tools/ 下只该有变异体清单与执行器进面（别的 tools 源码进来 = 边界失控）",
-    ).toEqual([MUTANTS_FILE, BENCH_FILE])
+      "tools/ 下只该有变异体清单、执行器与闭包算法进面（别的 tools 源码进来 = 边界失控）",
+    ).toEqual([MUTANTS_FILE, BENCH_FILE, CLOSURE_TS])
   })
 })
 
@@ -484,11 +502,11 @@ describe("判据面定义：依赖闭包（过窄=假绿，这里先红）", () 
 
 /**
  * ## 为什么要造树（而不是拿真仓库的文件验）
- * 真仓库当下**几乎没有闭包成员**（四份根本下零依赖，只有一条被豁免的记录层），于是拿它当靶子只验到
- * 「空集也是集」。而这条机制要防的恰恰是**将来**那次「根的 import 图里多出一份」——那件事在真仓库
- * 里没法安全地造（要么改真源码、要么放过它）。故这里用**临时目录 + 合成源码**：写得出的依赖形态
- * 全都造一遍（相对路径 / 裸文件名 / 动态 import / 只副作用 import / TS 扩展名 / 目录 index / 注释里的
- * 假依赖 / 环），再断言闭包逐份收对。
+ * 真仓库当下**只有一个闭包成员**（`closure.ts`），不足以覆盖闭包算法的分支（传递层、环、豁免、六类边界），
+ * 故这里用**临时目录 + 合成源码**：写得出的依赖形态全都造一遍（相对路径 / **仓根相对路径** / 裸文件名 /
+ * 动态 import / 只副作用 import / TS 扩展名 / 目录 index / 注释里的假依赖 / 环），再断言闭包逐份收对。
+ * 真仓那一侧另有一组独立断言（「真仓闭包非空」，见本文件末尾）：它守的是「机制在真仓真的生效」，
+ * 而本组守的是「算法本身对不对」——两者相互不可替代（合成树可以全绿而真仓是空集）。
  *
  * **这也让「把 `closure.ts` 掏空」当场红**（恒返回 `[]` 时下面多条会失败）：本仓的分工是
  * **实现一处、判据另一处**——`closure.ts` 自己不进指纹面（改它不该要人重跑 30 秒），
@@ -586,15 +604,39 @@ describe("依赖闭包算法：在合成依赖树上验（递归 / 边界 / 豁�
     expect(staticDeps("tools/app/main.ts", dir).includes("tools/app/deep/grand.ts"), "grand 不是 main 的直接依赖").toBe(false)
   })
 
-  test("豁免是**连子树一起剪**的（记录层引用的东西仍是记录层）", () => {
+  test("豁免是**逐文件**的：只剪被点名的那份，它引用的东西照收（默认口径）", () => {
+    /* 为何默认改成「只剪点名的那份」（本单修正）：上一版「豁免连子树一起剪」把
+     * `stamp.ts`（豁免）引用的 `closure.ts` 也剪了，而后者是执行器唯一能收到的本仓依赖
+     * ——真仓闭包因此恒为空集（机制在、一次都没生效过）。豁免的语义是「**这份**不参与判定」
+     * （一个逐文件的判断），不是把依赖图剪短的许可。 */
     const all = depClosure(ROOTS, [], dir)
     const cut = depClosure(ROOTS, ["tools/app/mid.ts"], dir)
     expect(cut.includes("tools/app/mid.ts"), "被豁免的文件本身不该进闭包").toBe(false)
-    expect(cut.includes("tools/app/deep/grand.ts"), "被豁免文件的依赖（更深的层）也不该进——整棵子树都剪").toBe(false)
-    /* 但剪掉的只是那一支：别的分支照收（否则「豁免」就成了「停表」）。 */
+    expect(
+      cut.includes("tools/app/deep/grand.ts"),
+      "grand 是 mid 引用的、但它**自己没被豁免**——默认口径下必须照收（上一版会把它一起剪掉）",
+    ).toBe(true)
+    /* 反向：面里**仍然**没有任何别人引用 grand，故它进面只能是因为 mid 那一条边没被剪断。
+     * 否则上面那条会为「面恰好被别的路径撑满」而绿。 */
+    expect(importersOf("tools/app/deep/grand.ts", ["tools/app/mid.ts"], dir), "grand 只由 mid 引用").toEqual([
+      "tools/app/mid.ts",
+    ])
+    /* 但剪掉的只是那一份：别的分支照收（否则「豁免」就成了「停表」）。 */
     expect(cut.length).toBeGreaterThan(0)
     expect(cut.includes("tools/app/loopy-a.ts")).toBe(true)
     expect(all.length, "豁免应当**严格减少**闭包（否则这条测试在空转）").toBeGreaterThan(cut.length)
+  })
+
+  test("豁免也可**连子树一起剪**（`pruneSubtree`，保留的口径：合成树自己把它验住）", () => {
+    /* 这条是上一条的反面：`opts.pruneSubtree` 把旧口径（整棵子树一起剪）保留下来。
+     * 保留它有两个理由：① 旧口径本身是一种可选的取舍，不该因默认改了就直接删掉；
+     * ② 真实现里那条分支得有判据当着——否则它就是一段没人跑过的代码。
+     * 真仓当下**不用**它（`stamp.ts` 的 `depClosure` 调用不传该选项）。 */
+    const cut = depClosure(ROOTS, ["tools/app/mid.ts"], dir, { pruneSubtree: true })
+    expect(cut.includes("tools/app/mid.ts"), "被豁免的文件本身不进闭包").toBe(false)
+    expect(cut.includes("tools/app/deep/grand.ts"), "整棵子树一起剪：mid 引用的 grand 也不进").toBe(false)
+    const loose = depClosure(ROOTS, ["tools/app/mid.ts"], dir)
+    expect(loose.length, "连树剪应当比逐文件剪**严格更少**（否则这个开关在空转）").toBeGreaterThan(cut.length)
   })
 
   test("边界：第三方/随包资源/构建产物/出仓/内建/裸包名一个都不进（过宽侧的假红防线）", () => {
@@ -731,8 +773,14 @@ describe("防退化自检：指纹键集必须含闭包成员（否则退回「�
     "packages/web/src/status-types.ts": `export const t = 1\n`,
     // 工具侧：根 → 清单 → 清单又被更下一层引用
     "tools/app/bench-probe.ts": `import { M } from "./mutants-probe"\nexport const b = M\n`,
-    "tools/app/mutants-probe.ts": `import { d } from "./data/names"\nexport const M = d\n`,
-    "tools/app/data/names.ts": `export const d = 1\n`,
+    "tools/app/mutants-probe.ts": `import { d, R } from "./data/names"\nimport { T } from "./registry-probe"\nexport const M = d + T\n`,
+    "tools/app/data/names.ts": `export const d = 1\nexport const R = 0\n`,
+    // **仓根相对字面量**（不是相对说明符）：`mutants.ts` 的 `TARGET_FILE` / `MATRIX_TEST` 就是这种写法，
+    // 而它曾经**一条都解析不到**（只按本文件所在目录解析）——真仓闭包为空集的原因之一。
+    // `registry-probe` 自己靠**相对**说明符被拉进来，它指向的 `root-only.ts` 则只有**仓根基准**能解析到：
+    // 两者分开写，是为了让「仓根这一支又丢了」在本用例里**当场红**（丢了 `root-only.ts` 就不会进面）。
+    "tools/app/registry-probe.ts": `export const T = "packages/web/src/root-only.ts"\n`,
+    "packages/web/src/root-only.ts": `export const ro = 1\n`,
     // 干扰项：面外（不该进闭包）——证明下面收到的那几份是**按判据**收的，不是把临时目录全扫进来
     "shuangtian/not-in-scope.ts": `export const n = 1\n`,
   }
@@ -748,6 +796,8 @@ describe("防退化自检：指纹键集必须含闭包成员（否则退回「�
     "packages/web/src/status-types.ts",
     "tools/app/mutants-probe.ts",
     "tools/app/data/names.ts",
+    "tools/app/registry-probe.ts", // 被清单相对引用（普通闭包成员）
+    "packages/web/src/root-only.ts", // **只能靠仓根相对字面量**被引用——仓根基准丢了就收不到
   ]
   /** 期望面的**顺序**：根按声明序在前、闭包排序在后（与 `fingerprintInputs()` 的确定性口径同款）。 */
   const EXPECTED_FACE_ORDERED = [...ROOTS_PROBE, ...[...EXPECTED_CLOSURE_PROBE].sort()]
@@ -761,12 +811,14 @@ describe("防退化自检：指纹键集必须含闭包成员（否则退回「�
       face.length,
       "指纹键集只有根——实现已退回「只哈希四份根文件」（dfe18f67 修掉的那个坑）",
     ).toBeGreaterThan(ROOTS_PROBE.length)
-    /* ③ 逐份点名：`status-core` 那一侧的依赖必须在键集里（任务要的那一条），含**传递**层。 */
+    /* ③ 逐份点名：`status-core` 那一侧的依赖必须在键集里（任务要的那一条），含**传递**层；
+     *    `root-only.ts` 则点名**仓根相对字面量**那一支解析（它只能由仓根基准解析到）。 */
     for (const p of [
       "packages/web/src/status-labels.ts", // status-core 拆出取词表之后，它就是判据的一部分
       "packages/web/src/status-types.ts", // 再下一层（递归，不只是直接依赖）
       "tools/app/mutants-probe.ts", // 执行器读的清单
       "tools/app/data/names.ts", // 清单再下一层
+      "packages/web/src/root-only.ts", // 只靠仓根相对字面量被引用（`mutants.ts` 那种写法）
     ]) {
       expect(face.includes(p), `${p} 未进指纹键集——被引用的那份改了不会被察觉（假绿）`).toBe(true)
     }
@@ -807,5 +859,90 @@ describe("防退化自检：指纹键集必须含闭包成员（否则退回「�
        * 而断言一红就会跳过末尾那行——失败跑把临时树留在 `%TEMP%` 里（实测：一次反向验证泄漏两份）。 */
       cleanup()
     }
+  })
+})
+
+/* ================================================================== *
+ * 真仓闭包非空：上面那组用合成树验「机制对不对」，这组验「真仓里真的生效了没有」
+ * ================================================================== */
+
+/**
+ * ## 为什么要单列这一组（这是本单修的那个缺口的**判据侧锁**）
+ *
+ * 上面「防退化自检」那组拿合成树验了机制，但它有一个**它自己看不见的盲区**：合成树里依赖链总是非空的
+ * （那是手造出来的），而**真仓**的闭包完全可能是空集——两种情形下面那组全绿。这正是发生过的：
+ * `dfe18f67` 把指纹改成「根 ∪ 依赖闭包」之后，`20d245fe` 复核发现真仓闭包是**空集**（四份根本下零依赖），
+ * 于是「把实现退回只哈希根文件」在真仓里**行为等价、无人察觉**——闸门一次都没拦过。
+ *
+ * 空集不是「集合刚好很小」，而是**机制在、一次都没生效过**：它与「忘了跑变异台」恰好相反——它把
+ * 「忘了跑」变成「跑了也白跑」，而且**伪装成正常状态的绿**。所以这里对真仓（不是合成树）断言三件事：
+ *
+ *   ① **闭包非空**（至少一个成员）——这是全组存在的主要理由；
+ *   ② **每个成员真的会被改动弄脏指纹**（拿它的真实哈希走 `staleFiles`）；
+ *   ③ **没有真正的依赖被静默丢掉**：逐条列出四份根的**可解析**依赖（`staticDeps` 认得出的），
+ *      它们必须在面内（或被写入豁免表）。这条比 ① 狠：它把「非空就行」拉成「一条都不许漏」
+ *      ——包括将来把判据拆成模块之后新生的依赖。
+ *
+ * ## 与「豁免」的关系（这里是「过窄 = 假绿」那一侧的检查）
+ * 正确形态不该是「找一个文件把面填满」，而是「判定链上真被用到的本仓源码都在面内」。故豁免表里多一条、
+ * 面内少一份都会被这里的 ③ 报到（豁免是**逐文件**的判断，写下来的理由要经得住看）。
+ */
+describe("真仓闭包非空：真仓里四份根的依赖真的进了指纹面（空集 = 机制没生效）", () => {
+  test("真仓指纹面含闭包成员（空集即本单修的那个缺口）", () => {
+    const inputs = fingerprintInputs()
+    const closure = inputs.filter((p) => !(EXPECTED_ROOTS as readonly string[]).includes(p))
+    expect(
+      closure.length,
+      "真仓依赖闭包是**空集**——面 = 四份根，于是「退回只哈希根文件」行为等价、闸门永远不会红。\n" +
+        `  这不是「集合刚巧很小」而是「机制没生效」：四份根的依赖必须真被收进来（本单修的是「仓根相对路径\n` +
+        `  字面量解析不到」与「豁免连子树一起剪」两处）。修完应当是：${EXPECTED_CLOSURE.join("、")}。`,
+    ).toBeGreaterThan(0)
+    expect([...closure].sort(), "真仓闭包与判据侧写死的 EXPECTED_CLOSURE 不符").toEqual([...EXPECTED_CLOSURE].sort())
+  })
+
+  test("真仓解析零漏：四份根的**可解析**依赖一条都不许被静默丢掉", () => {
+    const inputs = new Set(fingerprintInputs())
+    const exempt = new Set([...Object.keys(EXEMPT_FROM_FINGERPRINT), ...EXPECTED_EXEMPT])
+    const missed: string[] = []
+    for (const r of EXPECTED_ROOTS) {
+      for (const dep of staticDeps(r)) {
+        if (inputs.has(dep) || exempt.has(dep)) continue
+        missed.push(`${r} → ${dep}`)
+      }
+    }
+    expect(
+      missed,
+      `这些依赖真被四份根引用、却既不在指纹面内也不在豁免表里（改了不会红 = 假绿）：\n` +
+        `  请二选一：① 让它留在闭包里（把 EXPECTED_CLOSURE 同步进去并跑一次 \`${RERUN}\`）；\n` +
+        `            ② 确与判定无关 → 写进 EXEMPT_FROM_FINGERPRINT 与 EXPECTED_EXEMPT 并注明理由。`,
+    ).toEqual([])
+  })
+
+  test("每个真仓闭包成员被改了都会把指纹弄脏（拿它的真实哈希走 staleFiles）", () => {
+    const stamp = readStamp()
+    expect(stamp, `缺少可用的 ${STAMP_FILE}：跑 \`${RERUN}\``).not.toBeNull()
+    const recorded = stamp!.files
+    for (const p of EXPECTED_CLOSURE) {
+      expect(existsSync(join(REPO, p)), `闭包成员不存在：${p}（前缀路径会解析到已删文件）`).toBe(true)
+      const h = recorded[p]
+      expect(h, `闭包成员 ${p} 没被那次跑记进指纹——它不在面内，改了不会被察觉`).toBeDefined()
+      /* 拿**别的哈希**当「它被改了」：看 staleFiles 会不会把它报出来。这条走的是闸门真实的比对路径，
+       * 而不是只看键存不存在。 */
+      const stale = staleFiles({ ...recorded, [p]: "sha256:deadbeef" })
+      expect(
+        stale.some((s) => s.startsWith(`${p}：`)),
+        `${p} 改了却报「不过期」——它在密钥里、却不在闸门的比对路径上`,
+      ).toBe(true)
+    }
+  })
+
+  test("反向对照：真仓若被退回「只哈希根」，上面这组必红（证明它不是空转）", () => {
+    /* 为什么要写这条：上面三条都是「闭包非空」的正面断言，而**空集状态下它们会不会也绿**才是关键。
+     * 这里拿「只哈希根」的面跑一遍：它必须**看不见**闭包成员的改动（于是第① 条会因 `closure.length === 0`
+     * 红）——若它也能看见，说明真仓的闭包成员其实也是根，那这组测试没在守任何事情。 */
+    const rootsOnly = [...EXPECTED_ROOTS]
+    const closureOf = (ps: readonly string[]): string[] => ps.filter((p) => !rootsOnly.includes(p))
+    expect(closureOf(rootsOnly).length, "「只哈希根」的面竟然非空？那本组的对照失去意义").toBe(0)
+    expect(closureOf(fingerprintInputs()).length, "真仓闭包为空——上面三条是在空转").toBeGreaterThan(0)
   })
 })
