@@ -30,12 +30,19 @@
  * inflightHeader() / inflightCells() 现行形态 → 表头/格（写出侧；与版本声明同源）
  * ```
  *
- * **加一列要改哪里**（本模块存在的理由，逐处可数）：
- * 1. {@link INFLIGHT_VERSIONS} 加一条**版本声明**（列名 + 各字段的位置 {@link FieldSpec}）；
- * 2. 若新列要进域对象：{@link Inflight} 接口加字段 + {@link inflightCells} 加一格（写出侧）；
- * 3. **读入侧零改动**——判代（{@link selectInflightVer}）、位置读取（{@link readFields}）、
- *    升级（{@link migrateInflight}）都是**表驱动**的，不含任何版本号字面量。
- *    （`migrateInflight` 由声明推出「该代没有哪些列」并补空，故它也不需要加分支。）
+ * **加一列要改哪里**（本模块存在的理由，逐处可数；**读入侧与写出侧皆表驱动**）：
+ * 1. {@link InflightVer} 加新版本号（TS 侧的联合类型——类型系统据此卡住声明表的完备性）；
+ * 2. {@link INFLIGHT_VERSIONS} 加一条**版本声明**（列名 + 各字段的位置 {@link FieldSpec}）；
+ * 3. 若新列要进域对象：{@link Inflight} 接口加字段 + {@link INFLIGHT_WRITE} 加一行**取值器**
+ *    （写出侧只需说「怎么取值」，**列序由位置声明推出**——不再是另抄一份的数组字面量）；
+ * 4. **判代 / 读取 / 升级 / 写出列序一行不改**——判代（{@link selectInflightVer}）、位置读取
+ *    （{@link readFields}）、升级（{@link migrateInflight}）、列序（{@link fieldOrder}）全是
+ *    **表驱动**的，不含任何版本号字面量。（`migrateInflight` 由声明推出「该代没有哪些列」并补空，
+ *    故它也不需要加分支。）
+ *
+ * **这张清单不是承诺，是可执行断言**：单测「加一列只动声明」真的在运行时加一族版本
+ * （含前置列 / 尾部列 / 空值新列 / 打乱声明次序），把 parse → migrate → **render** 往返走一遍，
+ * 并断言写出侧的列序与声明**同源**。清单一旦失准（有人把列序/列名列表写死回实现里），那条测试立刻红。
  *
  * 与 {@link import("./shengsheng")} 的关系：本模块只负责**格式**（版本、位置、升级），
  * 「这条登记是谁的」（身份键 `inflightIdentity`）与去重归一留在原处——那是语义、不是格式。
@@ -96,13 +103,22 @@ export function tableBlock(md: string, heading: string): { rows: string[][]; dec
     const line = lines[i]
     if (/^##\s/.test(line.trim())) break
     if (!line.trim().startsWith("|")) continue
-    if (isSeparator(line)) continue
+    if (isSeparator(line)) {
+      // 表头 = **分隔行紧邻的上一条表格行**——markdown 结构使然，与列名/列序**无关**。
+      // 为什么不能只按列名认（旧实现：『首格是不是「别名」』）：**加一列就等于换一套列头**，
+      // 「前置一列」会让首格不再是任何已知列名 → 表头认不出 → 表头行被当数据行读进来、
+      // `declared` 缺失又使判代退到「按格数猜」。这正是「加列仍不止动声明」的残留之一，
+      // 故改按**结构**认（分隔行在前）——它天然随声明表演进，不必再维护一份列名清单。
+      if (declared === undefined && rows.length) declared = rows.pop()!.length
+      continue
+    }
     const c = cells(line)
-    if (c[0] === "别名" || c[0] === "优先级" || c[0] === "键") {
+    if (c[0] === "（空）") continue
+    // 兜底（无分隔行的手写/半截文件）：首格是已知列名时按表头跳过。有分隔行时上面已判完。
+    if (declared === undefined && (c[0] === "别名" || c[0] === "优先级" || c[0] === "键")) {
       declared = c.length // 表头
       continue
     }
-    if (c[0] === "（空）") continue
     rows.push(c)
   }
   return { rows, declared }
@@ -131,7 +147,9 @@ export function isSessionIdShape(v: string): boolean {
 // ---------------------------------------------------------------------------
 
 /** 一个字段在行里的位置：**三者只取其一**——自左定址（`at`）、自尾定址（`fromEnd`，1 = 行尾那格）、
- *  或「自由文本列」（`at` + `overflow`：把溢出的格并回本列，见 {@link readFields}）。 */
+ *  或「自由文本列」（`at` + `overflow`：把溢出的格并回本列，见 {@link readFields}）。
+ *  自尾定址（`fromEnd`）为什么必要：自由文本列里的**裸竖线**会让行多切若干格（旧渲染器不转义），
+ *  于是行尾那些**定长列**（时间/轮次/状态）按固定下标取就会取到正文——锚在行尾才稳。 */
 export interface FieldSpec {
   /** 自左定位（0 基；越界 → 空串）。 */
   at?: number
@@ -144,6 +162,49 @@ export interface FieldSpec {
 
 /** 泛化的行：字段名 → 该行里的取数位置。 */
 export type FieldMap = Record<string, FieldSpec>
+
+/** 一张表的**写出侧**所需的最小声明：列数（`columns.length`，自尾定址的换算基准）＋位置声明。
+ *  {@link InflightVersion}/{@link PoolVersion} 都满足它。 */
+export interface TableDecl {
+  columns: readonly string[]
+  read: FieldMap
+}
+
+/** **声明表 → 列序**：把该代的字段位置换算成下标后升序排（自左定址用 `at`；自尾定址换成
+ *  `columns.length - fromEnd`）。
+ *
+ * 为什么要把列序也做成表驱动的：写出侧原先与表头**各拄一份数组字面量**（`inflightCells` 里手写
+ * 六个元素的次序、`inflightHeader` 从声明取）——两处一漂就是整行错位（列名与值对不上），且
+ * **加一列时不知道要记得改它**。改由位置声明推出后，写出侧与读入侧**同源**，列序不再是第二处真相。
+ * 代价：**自左列与自尾列的映射须一致**（同一代里一个字段不能两种定址）。 */
+export function fieldOrder(map: FieldMap, ncols: number): string[] {
+  const idx = (s: FieldSpec): number => (typeof s.fromEnd === "number" ? ncols - s.fromEnd : s.at ?? 0)
+  return Object.keys(map).sort((a, b) => idx(map[a]) - idx(map[b]))
+}
+
+/** 按**声明列序**写一行（写出侧的表驱动入口）。
+ *
+ * `getters` 只说「怎么取这个字段的值」、**不说次序**——次序完全由 `decl.read` 给出。
+ * 缺取值器时**当场报错**（而不是静默写个 `undefined` 进盘）：这是加列时最易漏的一处
+ * （声明里加了位置、取值器没补），让它以一句可读错误暴露，而不是盘上一行空格。
+ *
+ * 另有一道**列覆盖校验**：推出的列序必须**恰好逐列对位**（字段数 = 列数、下标恰为 `0..n-1`）。
+ * 不过这道时宁可抛错也不写出——错位的表格是**静默数据损坏**（列名与值对不上，读回来是
+ * 「合法的错值」），比一句报错危险得多。（池表 v1 的声明共用现行锚点、并不逐列对位，
+ * 故它**只能读不能写**——写出侧永远用 {@link POOL_CURRENT}。） */
+export function writeRow<T>(decl: TableDecl, getters: Record<string, ((v: T) => string) | undefined>, value: T): string[] {
+  const order = fieldOrder(decl.read, decl.columns.length)
+  const idx = (s: FieldSpec): number => (typeof s.fromEnd === "number" ? decl.columns.length - s.fromEnd : s.at ?? 0)
+  const slots = order.map((f) => idx(decl.read[f])).sort((a, b) => a - b)
+  if (order.length !== decl.columns.length || slots.some((v, i) => v !== i)) {
+    throw new Error(`写出侧声明未逐列覆盖：${decl.columns.length} 列但位置声明给出 ${JSON.stringify(order)}（加列时位置声明与字段集须同步）`)
+  }
+  return order.map((f) => {
+    const g = getters[f]
+    if (typeof g !== "function") throw new Error(`写出侧缺字段取值器：${f}（加列时须在取值器表里补一行）`)
+    return g(value)
+  })
+}
 
 /** 一行的读取实现——**表驱动，不含任何版本号字面量**（加列时无需改这里）：只要给一份
  *  `FieldMap`（该代的位置声明）就能把一行读成「字段名 → 字符串」。 */
@@ -216,17 +277,24 @@ export const INFLIGHT_VERSIONS: readonly InflightVersion[] = [
   },
 ]
 
-/** 现行在途版本（写出侧永远用这一代；读入侧识别到的旧代经 {@link migrateInflight} 升级到它）。 */
-export const INFLIGHT_CURRENT: InflightVer = 3
-
 const inflightVer = (ver: InflightVer, versions: readonly InflightVersion[] = INFLIGHT_VERSIONS): InflightVersion => {
   const v = versions.find((x) => x.ver === ver)
   if (!v) throw new Error(`未知的在途格式版本：${ver}`)
   return v
 }
 
-/** 现行在途表头（渲染用：与 {@link INFLIGHT_VERSIONS} 同一份声明，不会各写各的）。 */
-export const inflightHeader = (): string[] => [...inflightVer(INFLIGHT_CURRENT).columns]
+/** **现行版 = 声明表末条**（声明表按版本号递增，有用例钉住）。
+ *
+ * 为什么不让写出侧另拄一个字面量：写出侧与读入侧的「现行」必须是**同一个来源**——两处各写一个数字，
+ * 加列时就会漂成「读按 v4、写回 v3」（行被写旧、新列静默丢失）。搞成「末条」后，加一列时它自动跟上。 */
+const latestVer = <V extends { ver: number }>(versions: readonly V[]): V["ver"] => versions[versions.length - 1].ver
+
+/** 现行在途版本（写出侧永远用这一代）= **声明表的末条**。 */
+export const INFLIGHT_CURRENT: InflightVer = latestVer(INFLIGHT_VERSIONS)
+
+/** 现行在途表头（渲染用：与 {@link INFLIGHT_VERSIONS} 同一份声明，不会各写各的）。
+ *  `versions` 缺省即现行声明表；可传**扩表版**用于「加列只动声明」的演练（见单测）。 */
+export const inflightHeader = (versions: readonly InflightVersion[] = INFLIGHT_VERSIONS): string[] => [...inflightVer(latestVer(versions), versions).columns]
 
 // ---------------------------------------------------------------------------
 // 在途表：版本选择（**证据优先于格数**）
@@ -337,10 +405,30 @@ export function migrateInflight(parsed: ParsedInflight): Inflight {
   }
 }
 
-/** 现行形态 → 格（写出侧）。与 {@link inflightHeader} 的列序**一一对应**——两处同源于
- *  {@link INFLIGHT_VERSIONS} 的现行条目，不会各写各的。 */
-export function inflightCells(i: Inflight): string[] {
-  return [i.alias, i.sessionId ?? "", i.direction, i.deliverable, String(i.dispatchedAt), String(i.round)]
+/** 写出侧的**取值器表**：字段名 → 「怎么取值」。
+ *  键集与 {@link Inflight} 接口**逐一对应**（`{[K in keyof Required<Inflight>]}`）——给接口加字段而
+ *  忘了给取值器，**typecheck 直接红**（这是「加列要改哪里」里唯一需要人动手的写出侧环节）。
+ *  导出是为了让**加列演练**能真的按「补一行取值器」的方式扩表（见单测）。 */
+export type InflightWriteMap = { [K in keyof Required<Inflight>]: (i: Inflight) => string }
+
+export const INFLIGHT_WRITE: InflightWriteMap = {
+  alias: (i) => i.alias,
+  sessionId: (i) => i.sessionId ?? "",
+  direction: (i) => i.direction,
+  deliverable: (i) => i.deliverable,
+  dispatchedAt: (i) => String(i.dispatchedAt),
+  round: (i) => String(i.round),
+}
+
+/** 现行形态 → 格（写出侧）。**列序由 {@link INFLIGHT_VERSIONS} 的现行条目推出**（{@link writeRow}）
+ *  ——与 {@link inflightHeader} 同源，不会「表头与行各写一份次序」而错位。
+ *  `versions` 缺省即现行声明表；可传**扩表版**（现行 = 末条）与**补过行的取值器表**用于加列演练。 */
+export function inflightCells(
+  i: Inflight,
+  versions: readonly InflightVersion[] = INFLIGHT_VERSIONS,
+  getters: Record<string, ((v: Inflight) => string) | undefined> = INFLIGHT_WRITE,
+): string[] {
+  return writeRow(inflightVer(latestVer(versions), versions), getters, i)
 }
 
 // ---------------------------------------------------------------------------
@@ -383,28 +471,46 @@ export const POOL_VERSIONS: readonly PoolVersion[] = [
   { ver: 2, columns: ["别名", "会话", "领域", "任务", "派发时间", "轮次", "状态"], hasRound: true, read: POOL_READ },
 ]
 
-/** 现行池版本（写出侧永远用这一代）。 */
-export const POOL_CURRENT: PoolVer = 2
+/** 现行池版本（写出侧永远用这一代）= **声明表的末条**。 */
+export const POOL_CURRENT: PoolVer = latestVer(POOL_VERSIONS)
 
-const poolVer = (ver: PoolVer): PoolVersion => {
-  const v = POOL_VERSIONS.find((x) => x.ver === ver)
+const poolVer = (ver: PoolVer, versions: readonly PoolVersion[] = POOL_VERSIONS): PoolVersion => {
+  const v = versions.find((x) => x.ver === ver)
   if (!v) throw new Error(`未知的池格式版本：${ver}`)
   return v
 }
 
-/** 现行池表头（渲染用）。 */
-export const poolHeader = (): string[] => [...poolVer(POOL_CURRENT).columns]
+/** 现行池表头（渲染用）。`versions` 缺省即现行声明表。 */
+export const poolHeader = (versions: readonly PoolVersion[] = POOL_VERSIONS): string[] => [...poolVer(latestVer(versions), versions).columns]
 
 /** 池表版本选择：**表头声明**即代次（缺表头时退回本行格数）。两代的差异只在「轮次」列的有无，
- *  而位置声明两代相同，故读出的值一致；版本号仍显式带出，供结果断言与日后按版本分支读取。 */
-export function selectPoolVer(c: readonly string[], ctx: { declared?: number } = {}): PoolVer {
+ *  而位置声明两代相同，故读出的值一致；版本号仍显式带出，供结果断言与日后按版本分支读取。
+ *
+ * **不含版本号字面量**：声明列数命中哪条声明就取哪个版本（池表不像在途表那样需要证据判代——
+ * 两代读法相同、误判无代价）；都没命中（无表头、半截残行）则回落到**声明表的末条**（最新一代，
+ * 也是读法最齐的一代）。加一列时本函数无需改动。 */
+export function selectPoolVer(c: readonly string[], ctx: { declared?: number } = {}, versions: readonly PoolVersion[] = POOL_VERSIONS): PoolVer {
   const declared = ctx.declared ?? c.length
-  return declared === POOL_VERSIONS.find((v) => !v.hasRound)!.columns.length ? 1 : 2
+  return (versions.find((v) => v.columns.length === declared) ?? versions[versions.length - 1]).ver
 }
 
 // ---------------------------------------------------------------------------
 // worker 池表：位置读取 → 升级
 // ---------------------------------------------------------------------------
+
+/** 池写出侧的取值器表：键集与 {@link Worker} 接口逐一对应（类型上卡死，忘补则 typecheck 红）。
+ *  导出理由同在途（加列演练按「补一行取值器」的方式扩表）。 */
+export type PoolWriteMap = { [K in keyof Required<Worker>]: (w: Worker) => string }
+
+export const POOL_WRITE: PoolWriteMap = {
+  alias: (w) => w.alias,
+  sessionId: (w) => w.sessionId,
+  domain: (w) => w.domain,
+  task: (w) => w.task,
+  dispatchedAt: (w) => String(w.dispatchedAt),
+  round: (w) => String(w.round),
+  status: (w) => w.status,
+}
 
 const POOL_FIELDS = ["alias", "sessionId", "domain", "task", "dispatchedAt", "round", "status"] as const
 type PoolField = (typeof POOL_FIELDS)[number]
@@ -416,15 +522,15 @@ export interface ParsedPool {
   fields: PoolFields
 }
 
-/** 解析一行池条目的**格** → `{ ver, fields }`。 */
-export function parsePoolRow(c: readonly string[], ctx: { declared?: number } = {}): ParsedPool {
-  const ver = selectPoolVer(c, ctx)
-  return { ver, fields: readFields(c, poolVer(ver).read) as PoolFields }
+/** 解析一行池条目的**格** → `{ ver, fields }`。`versions` 缺省即现行声明表（可传扩表版）。 */
+export function parsePoolRow(c: readonly string[], ctx: { declared?: number } = {}, versions: readonly PoolVersion[] = POOL_VERSIONS): ParsedPool {
+  const ver = selectPoolVer(c, ctx, versions)
+  return { ver, fields: readFields(c, poolVer(ver, versions).read) as PoolFields }
 }
 
 /** 解析**一整行**池条目（先按 {@link cells} 切格）。 */
-export function parsePoolLine(line: string, ctx: { declared?: number } = {}): ParsedPool {
-  return parsePoolRow(cells(line), ctx)
+export function parsePoolLine(line: string, ctx: { declared?: number } = {}, versions: readonly PoolVersion[] = POOL_VERSIONS): ParsedPool {
+  return parsePoolRow(cells(line), ctx, versions)
 }
 
 /** **升级函数**：把某一代的池行升级为现行形态（{@link Worker}）。
@@ -442,7 +548,12 @@ export function migratePool(parsed: ParsedPool): Worker {
   }
 }
 
-/** 现行形态 → 格（写出侧）。 */
-export function poolCells(w: Worker): string[] {
-  return [w.alias, w.sessionId, w.domain, w.task, String(w.dispatchedAt), String(w.round), w.status]
+/** 现行形态 → 格（写出侧）。列序由声明表推出（{@link writeRow}），与 {@link poolHeader} 同源。
+ *  `versions` 缺省即现行声明表；可传**扩表版**（现行 = 末条）与**补过行的取值器表**用于加列演练。 */
+export function poolCells(
+  w: Worker,
+  versions: readonly PoolVersion[] = POOL_VERSIONS,
+  getters: Record<string, ((v: Worker) => string) | undefined> = POOL_WRITE,
+): string[] {
+  return writeRow(poolVer(latestVer(versions), versions), getters, w)
 }

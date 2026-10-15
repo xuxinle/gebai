@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, existsSync } from "node:f
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
-import { def as shengshengDef, parseControl, renderControl, dedupeState, inflightSession, isSessionIdShape } from "./shengsheng"
+import { def as shengshengDef, parseControl, renderControl, dedupeState, inflightSession, isSessionIdShape, tableBlock } from "./shengsheng"
 // 版本化解析模块（本单新抽）：判代/位置读取/升级函数与其版本声明——单测直接锁它的契约
 import {
   parseInflightRow,
@@ -16,10 +16,17 @@ import {
   inflightHeader,
   inflightCells,
   poolHeader,
+  poolCells,
+  INFLIGHT_WRITE,
+  POOL_WRITE,
+  fieldOrder,
+  writeRow,
   POOL_VERSIONS,
   INFLIGHT_VERSIONS,
   INFLIGHT_CURRENT,
   POOL_CURRENT,
+  type InflightVersion,
+  type FieldMap,
 } from "./control-format"
 
 /** 测试内复刻 `inflightIdentity`（未导出）：断言按会话 id 认帐时用同一判据。 */
@@ -1749,52 +1756,198 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
     expect(old.inflight.find((i) => i.alias === "o-2")).toMatchObject({ sessionId: "", direction: "旧行方向", round: 4 })
   })
 
-  test("加一列只动声明：给在途表加一代（v4）后，判代/位置读取/升级函数**一行不改**即能读新旧混排行", () => {
-    // 本用例是「版本化解析」这个抽象的**可执行证人**：不靠文字声称“日后加列很容易”，而是真的
-    // 在运行时把声明表加一条 v4（尾部加「心跳」列），再用**原封不动的** `selectInflightVer` /
-    // `parseInflightRow` / `migrateInflight`（仅多传一个「声明表」参数）去读它。
-    // 若哪天有人把版本号写死回判代函数里（`c.length >= 6`、`declared === 6` 那类），本条立刻红。
+  test("加一列只动声明：真的走一遍 parse → migrate → render 往返（新增字段），旧行仍能解析", () => {
+    // 本用例是「版本化解析」这个抽象的**可执行证人**。它不靠文字声称“日后加列很容易”，而是真的：
+    //   ① 在运行时给声明表加一族新版本（尾部加「心跳」列）；
+    //   ② 用**原封不动的** `selectInflightVer` / `parseInflightRow` / `migrateInflight` /
+    //      `writeRow` / `inflightHeader`（只多传一个「声明表」参数）走完
+    //      **parse → migrate → render → 再解析**；
+    //   ③ 断言往返等价、写出列序与声明同源、旧代行仍认得出。
+    // 哪天有人把版本号/列序/列名列表写死回实现里（`c.length >= 6`、手写数组字面量那类），本条立刻红。
+    //
+    // 加一列**要动的地方全在下面这一块**（这正是收益：四处声明，而不是 N 处判据）：
+    //   ① 版本号类型（TS 侧的联合类型）；② 一条版本声明；③ 现行版本标记（= 声明表末条，自动跟上）；
+    //   ④ 写出侧取值器表加一行（新列要落盘时）。**判代 / 位置读取 / 升级 / 写出列序一行不改。**
     const SID = "aaaabbbbccccddddeeeeffff00001111"
-    // 加一列要动的东西全在这里：① 版本号类型（TS 侧）；② 一条版本声明；③ 现行版本标记；
-    // ④ 写出侧 `inflightCells`（新列要落盘）。**判代/位置读取/升级函数不在此列**——这正是收益所在。
     const V4 = {
       ver: 4 as const,
       columns: ["别名", "会话", "方向", "预期产出", "派发时间", "轮次", "心跳"],
       ownSession: true,
-      read: { alias: { at: 0 }, sessionId: { at: 1 }, direction: { at: 2 }, deliverable: { at: 3, overflow: true }, dispatchedAt: { fromEnd: 3 }, round: { fromEnd: 2 } },
+      read: {
+        alias: { at: 0 }, sessionId: { at: 1 }, direction: { at: 2 },
+        deliverable: { at: 3, overflow: true }, dispatchedAt: { fromEnd: 3 }, round: { fromEnd: 2 },
+        heartbeat: { fromEnd: 1 },   // ← 新增列：**自尾锚定**（尾部定长列，行变长也不串位）
+      },
     }
-    // 声明表扩表版（类型上宽一格：`ver` 是联合类型，演示扩表故显式放宽）
-    const extended = [...INFLIGHT_VERSIONS, V4] as unknown as typeof INFLIGHT_VERSIONS
-    const extendedVersions = extended as unknown as ReadonlyArray<import("./control-format").InflightVersion>
+    // 现行（v4）行（新列待填）：正文里同时含**裸竖线**与**反斜杠**（转义感知往返）
+    const full = { alias: "a4", sessionId: SID, direction: "方向 | 裸竖线 \\ C:\\Users", deliverable: "产出", dispatchedAt: 1000, round: 9 }
+    const extended = [...INFLIGHT_VERSIONS, V4] as unknown as readonly InflightVersion[]
+    const shuffled = [V4, ...INFLIGHT_VERSIONS] as unknown as readonly InflightVersion[]
+    // 加列的**写出侧那一步**也真的走一遍：给取值器表补一行，再把它接进**真写出入口**。
+    // 注意这里用的是 `inflightCells`（真公开面）而不是自己调 `writeRow`——写成后者会绕过真实现，
+    // 「写出侧退回硬编码数组」这类退化就杀不死了（实测：自调 writeRow 时该变异体存活）。
+    const write4 = { ...INFLIGHT_WRITE, heartbeat: (i: { direction: string }) => (i.direction.includes("心跳") ? "7" : "") }
+    const cells4 = (i: import("./shengsheng").Inflight) => inflightCells(i, extended, write4)
+    // 未补取值器时**当场报错**（而不是静默把 undefined 写进盘）——这正是加列最易漏的一处
+    expect(() => inflightCells(full, extended), "漏取值器 → 报错（加列时最易漏的一处）").toThrow(/缺字段取值器：heartbeat/)
 
-    // 同一张表（表头声明 7 列，含新列）里混排 v4 / v3 / v2 行：各代**各归各代**
-    const ctx = { declared: 7, poolSessions: new Set([SID]) }
-    const rows: Array<[string, string[], number, number, number]> = [
-      ["v4", ["a4", SID, "方向", "产出", "1000", "9", "0"], 4, 1000, 9],   // 多了新列 → 尾锚点整体后移一位
-      ["v3", ["a3", SID, "方向", "产出", "1000", "8"], 3, 1000, 8],
-      ["v2", ["a2", "旧行方向", "产出", "1000", "7"], 2, 1000, 7],
-    ]
-    for (const [label, c, wantVer, wantAt, wantRound] of rows) {
-      // **真实现**、只多传一个声明表
-      const parsed = parseInflightRow(c, ctx, extendedVersions)
-      const m = migrateInflight(parsed)
-      // `ver` 的类型是联合类型（今天的 1|2|3）——扩表后会带上 4，故断言处宽化为 number 比较
-      expect(parsed.ver as number, `${label} 判代`).toBe(wantVer)
-      expect(m.dispatchedAt, `${label} 派发时间`).toBe(wantAt)
-      expect(m.round, `${label} 轮次`).toBe(wantRound)
-      // 升级后形状统一（该代没有的列 → 空值，而不是缺键）
-      expect(m.sessionId ?? "", `${label} 会话`).toBe(label === "v2" ? "" : SID)
+    // —— ① 写出侧：声明 → 列序（**由位置声明推出**，不是另拄一份数组字面量） ——
+    expect(fieldOrder(V4.read, V4.columns.length)).toEqual(["alias", "sessionId", "direction", "deliverable", "dispatchedAt", "round", "heartbeat"])
+    // 历代各代的列序都必须**逐列对位**（位置声明的键集与列集一致）——否则写出会静默错位
+    for (const v of [...INFLIGHT_VERSIONS, V4]) {
+      expect(fieldOrder(v.read, v.columns.length), `在途#${v.ver} 列序逐列覆盖`).toHaveLength(v.columns.length)
     }
-    // v4 行必须被认成 v4（新代在心）——若判代只试到 v3，尾锚点会错位（在时间/轮次上看到）
-    expect(parseInflightRow(["a4", SID, "方向", "产出", "1000", "9", "0"], ctx, extendedVersions).ver as number).toBe(4)
-    // **声明次序不必等于列数次序**：把声明表故意写成「v4 在 v3 之前」（人工编辑/合并冲突后的常见形态），
-    // 7 格的 v4 行仍必须被判成 v4——这就是判代里「列数降序试」的必要性（按声明次序试会先撞上 v3）。
-    const shuffled = [V4, ...INFLIGHT_VERSIONS] as unknown as ReadonlyArray<import("./control-format").InflightVersion>
+    // 现行池表（v2）的列序与历史实现逐位相同
+    expect(fieldOrder(POOL_VERSIONS[POOL_VERSIONS.length - 1].read, POOL_VERSIONS[POOL_VERSIONS.length - 1].columns.length))
+      .toEqual(["alias", "sessionId", "domain", "task", "dispatchedAt", "round", "status"])
+
+    // —— ② 表头：与声明同源（**现行 = 声明表末条**，扩表后自动跟上） ——
+    expect(inflightHeader(extended)).toEqual([...V4.columns])
+    expect(inflightHeader()).toEqual([...INFLIGHT_VERSIONS[INFLIGHT_VERSIONS.length - 1].columns])
+    // 这条规则**依赖声明表按版本号有序**——故次序本身有契约（「版本契约」用例钉着 `d.ver === i+1`）：
+    // 发出去的声明表里，末条必须就是最大版本号（否则写出侧会把新行写成旧格式、新列静默丢）。
+    expect(INFLIGHT_CURRENT, "现行在途版 = 声明表里最大版本号").toBe(Math.max(...INFLIGHT_VERSIONS.map((v) => v.ver)) as typeof INFLIGHT_CURRENT)
+    expect(POOL_CURRENT, "现行池版 = 声明表里最大版本号").toBe(Math.max(...POOL_VERSIONS.map((v) => v.ver)) as typeof POOL_CURRENT)
+    // 把声明表写乱只会影响**写出侧的现行**（末条变了）；**读入侧与声明次序无关**（见 ⑤）。
+    expect(inflightHeader(shuffled), "乱序后末条是一条旧代（写出侧只认末条）").toEqual([...INFLIGHT_VERSIONS[INFLIGHT_VERSIONS.length - 1].columns])
+
+    // —— ③ 往返：**真的** parse → migrate → render → 再解析 ——
+    // 走**真文档**（表头 + 分隔行 + 数据行）再从它读回来——即 `tableBlock` 那条真路，而不是自己手拼
+    // 格数组（那会绕过表头识别，正是残留①藏身的地方）。
+    const TAIL = ["", "## 种子队列", "（空）", "", "## 收藏待办", "（空）", "", "## 断点", "（无）", ""]
+    const rowLine = (cellsOut: string[]) => `| ${cellsOut.map((c) => c.replace(/\|/g, "\\|").replace(/\r?\n/g, " ")).join(" | ")} |`
+    const doc = (header: string[], rows: string[]) => [
+      "## 项目坐标", "- 项目根：/drill", "", "## 计数", "- 呼吸：1", "- 派工序号：9", "",
+      "## worker 池", "（空）", "",
+      "## 在途", `| ${header.join(" | ")} |`, `| ${header.map(() => "---").join(" | ")} |`, ...rows,
+      ...TAIL,
+    ].join("\n")
+
+    const rendered = doc(inflightHeader(extended), [rowLine(cells4(full))])
+    // 写出侧真的把新列落盘了（表头 7 格、数据行 7 格）——这里新列为**空值**（方向里无「心跳」标记）
+    const blk = tableBlock(rendered, "在途")
+    expect(blk.declared, "表头列数被认出").toBe(7)
+    expect(blk.rows[0]).toEqual([full.alias, full.sessionId, full.direction, full.deliverable, "1000", "9", ""])
+    expect(rendered, "正文竖线按转义写盘").toContain("方向 \\| 裸竖线 \\ C:\\Users")
+    const back = migrateInflight(parseInflightRow(blk.rows[0], { declared: blk.declared, poolSessions: new Set([SID]) }, extended))
+    expect(back, "往返等价：写出→读回，逐字段相同").toEqual(full as typeof back)
+    // 再走一遍（render → parse → render）——幂等，不因往返而漂
+    expect(doc(inflightHeader(extended), [rowLine(cells4(back))])).toBe(rendered)
+
+    // 新列**非空**那一档：值落在声明指定的那一格（心跳 = 最后一格）
+    const hbIdx = fieldOrder(V4.read, V4.columns.length).indexOf("heartbeat")
+    expect(hbIdx, "新列的声明位置就是它的输出位").toBe(6)
+    const hbFull = { ...full, direction: "方向（带心跳标记）" }
+    const withHb = cells4(hbFull)
+    expect(withHb).toHaveLength(7)
+    expect(withHb[6], "新列按声明取值").toBe("7")
+    // 多字段边界：新列有值 + 正文含裸竖线（溢格并回交付列），新列表头仍对位
+    const multi = doc(inflightHeader(extended), [rowLine(withHb), rowLine(cells4({ ...full, alias: "a4b", direction: "溢 | 格", deliverable: "产 | 出" }))])
+    const multiBlk = tableBlock(multi, "在途")
+    expect(multiBlk.declared).toBe(7)
+    const multiParsed = multiBlk.rows.map((c) => migrateInflight(parseInflightRow(c, { declared: multiBlk.declared, poolSessions: new Set([SID]) }, extended)))
+    expect(multiParsed[0]).toEqual(hbFull as (typeof multiParsed)[number])
+    expect(multiParsed[1]).toEqual({ ...full, alias: "a4b", direction: "溢 | 格", deliverable: "产 | 出" })
+
+    // —— 旧代行**同表混排**：各代各归各代、都不被新列带偏，且升级后形状统一 ——
+    const mixed = doc(inflightHeader(extended), [
+      rowLine(withHb),                                 // v4（新列有值）
+      `| a3 | ${SID} | 方向三 | 产出三 | 1000 | 8 |`,   // v3（少一列）
+      "| a2 | 旧行方向 | 产出二 | 1000 | 7 |",          // v2（旧代，无会话列）
+      "| a1 | 方向一 | 产出一 | 700 |",                 // v1（无轮次列）
+    ])
+    const mixedBlock = tableBlock(mixed, "在途")
+    expect(mixedBlock.rows).toHaveLength(4)
+    const parsedMixed = mixedBlock.rows.map((c) => parseInflightRow(c, { declared: mixedBlock.declared, poolSessions: new Set([SID]) }, extended))
+    expect(parsedMixed.map((p) => p.ver as number), "四代各归各代").toEqual([4, 3, 2, 1])
+    const migrated = parsedMixed.map(migrateInflight)
+    expect(migrated[0]).toEqual(hbFull as (typeof migrated)[number])
+    expect(migrated[1]).toMatchObject({ alias: "a3", sessionId: SID, direction: "方向三", deliverable: "产出三", dispatchedAt: 1000, round: 8 })
+    expect(migrated[2]).toMatchObject({ alias: "a2", sessionId: "", direction: "旧行方向", deliverable: "产出二", dispatchedAt: 1000, round: 7 })
+    expect(migrated[3]).toMatchObject({ alias: "a1", sessionId: "", direction: "方向一", deliverable: "产出一", dispatchedAt: 700, round: 0 })
+    // 升级后形状统一：旧代缺的列也**存在**（空值，而非缺键）
+    for (const m of migrated) expect(Object.keys(m).sort()).toEqual(["alias", "deliverable", "direction", "dispatchedAt", "round", "sessionId"])
+
+    // —— ④ **前置**一列同样只动声明：表头识别不得依赖列名/列序 ——
+    // （残留①的回归位：旧 `tableBlock` 按「首格是不是已知列名」认表头，前置列后首格变成新列名 →
+    //   表头认不出 → 表头行被当数据行读进来。现改为「分隔行的上一行即表头」，与列名无关。）
+    const V5 = {
+      ver: 5 as const,
+      columns: ["序号", ...V4.columns],   // 8 列：前置一列（新列在**最前**，彻底改变首格）
+      ownSession: true,
+      read: {
+        seq: { at: 0 }, alias: { at: 1 }, sessionId: { at: 2 }, direction: { at: 3 },
+        deliverable: { at: 4, overflow: true }, dispatchedAt: { fromEnd: 3 }, round: { fromEnd: 2 },
+        heartbeat: { fromEnd: 1 },
+      },
+    }
+    const ext5 = [...INFLIGHT_VERSIONS, V4, V5] as unknown as readonly InflightVersion[]
+    expect(V5.columns).toHaveLength(8)
+    expect(fieldOrder(V5.read, V5.columns.length)).toEqual(["seq", "alias", "sessionId", "direction", "deliverable", "dispatchedAt", "round", "heartbeat"])
+    const prepended = doc(inflightHeader(ext5), ["| 1 | p5 | " + SID + " | 方向五 | 产出五 | 1000 | 5 | 2 |"])
+    const preBlock = tableBlock(prepended, "在途")
+    expect(preBlock.declared, "前置列的表头也被认出").toBe(8)
+    expect(preBlock.rows, "表头行不得被当成数据行").toHaveLength(1)
+    expect(preBlock.rows[0][0], "首个数据行的首格就是它的内容").toBe("1")
+    const preParsed = parseInflightRow(preBlock.rows[0], { declared: preBlock.declared }, ext5)
+    expect(preParsed.ver as number).toBe(5)
+    expect(preParsed.fields).toMatchObject({ seq: "1", alias: "p5", sessionId: SID, direction: "方向五", deliverable: "产出五", dispatchedAt: "1000", round: "5" })
+
+    // —— ⑤ 声明次序**不必**等于列数次序（人工编辑/合并冲突后的常见形态） ——
     expect(shuffled[0].ver as number, "声明表确实被写乱了").toBe(4)
-    expect(parseInflightRow(["a4", SID, "方向", "产出", "1000", "9", "0"], ctx, shuffled).ver as number, "打乱声明次序也要判对").toBe(4)
-    expect(parseInflightRow(["a3", SID, "方向", "产出", "1000", "8"], ctx, shuffled).ver as number).toBe(3)
-    // 真实现今日的现行版仍是 v3（本用例只在旁路演示扩表，不改现行声明）
+    expect(parseInflightRow(["a4", SID, "方向", "产出", "1000", "9", "0"], { declared: 7 }, shuffled).ver as number, "打乱声明次序也要判对").toBe(4)
+    expect(parseInflightRow(["a3", SID, "方向", "产出", "1000", "8"], { declared: 7 }, shuffled).ver as number).toBe(3)
+
+    // —— ⑥ 写出侧的**失败面**：声明与取值器/列集不同步时当场报错，而不是静默写坏盘 ——
+        const gA = { alias: (i: typeof full) => i.alias }
+    expect(() => writeRow(V4, gA as never, full), "取值器表整个缺新列 → 同样报错").toThrow(/缺字段取值器/)
+    const tbl = (read: FieldMap) => ({ columns: ["甲", "乙"], read })
+    expect(() => writeRow(tbl({ a: { at: 0 } }), { a: () => "x" }, {}), "少一列").toThrow(/未逐列覆盖/)
+    expect(() => writeRow(tbl({ a: { at: 0 }, b: { at: 0 } }), { a: () => "x", b: () => "y" }, {}), "两字段同址").toThrow(/未逐列覆盖/)
+    expect(() => writeRow(tbl({ a: { at: 0 }, b: { at: 5 } }), { a: () => "x", b: () => "y" }, {}), "下标越界").toThrow(/未逐列覆盖/)
+
+    // —— ⑦ 池表加代同理（判代与写出侧都**不含版本号字面量**） ——
+    expect(selectPoolVer(["a", SID, "d", "t", "100", "idle"], { declared: 6 })).toBe(1)
+    expect(selectPoolVer(["a", SID, "d", "t", "100", "7", "idle"], { declared: 7 })).toBe(2)
+    // 声明表里没有的列数（无表头 / 半截行）→ 回落到**现行版**，而不是硬编码撞出另一代
+    expect(selectPoolVer(["a", SID, "d"], { declared: 3 })).toBe(POOL_CURRENT)
+    expect(migratePool(parsePoolRow(["a", SID, "d", "t", "100", "7", "idle"], { declared: 7 })), "现行池行时间位在自尾 3（不被新增列带偏）").toEqual({ alias: "a", sessionId: SID, domain: "d", task: "t", dispatchedAt: 100, round: 7, status: "idle" })
+    // 加了一代（8 列）之后，**同一个 8 列声明就认得出来了**——判代随声明表演进，不靠改代码
+    // （池表加列正是「轮次」那一列的做法：插在中间并**重新锤定尾锚点**）
+    const P2 = POOL_VERSIONS[POOL_VERSIONS.length - 1]
+    const P3 = {
+      ver: 3 as const,
+      columns: ["别名", "会话", "领域", "任务", "派发时间", "轮次", "心跳", "状态"],
+      hasRound: true,
+      // 尾锤点**整体后移一位**：时间 = 自尾 4、轮次 = 自尾 3、心跳 = 自尾 2、状态 = 自尾 1
+      // （与 74a2e6b9 给池表加「轮次」时同一手法：中间**插入一列就必须重锤定全部尾列**——
+      //   漏掉任何一个，写作侧会当场报「未逐列覆盖」而不是默默写错位）
+      read: { ...P2.read, dispatchedAt: { fromEnd: 4 }, round: { fromEnd: 3 }, heartbeat: { fromEnd: 2 }, status: { fromEnd: 1 } },
+    }
+    const ext3 = [...POOL_VERSIONS, P3] as unknown as readonly import("./control-format").PoolVersion[]
+    expect(poolHeader(ext3)).toEqual([...P3.columns])   // 加代后写出侧自动跟上（末条即现行）
+    // 旧声明表里 8 列是未知列数 → 回落到现行（不硬编码撞代）；本用例里它是 P3（见上显式声明）
+    expect(fieldOrder(P3.read, P3.columns.length)).toEqual(["alias", "sessionId", "domain", "task", "dispatchedAt", "round", "heartbeat", "status"])
+    // 池写出侧由声明推出列序，且与历史实现逐位相同
+    const w = { alias: "wa", sessionId: SID, domain: "dp", task: "tk", dispatchedAt: 1000, round: 7, status: "idle" as const }
+    expect(poolCells(w)).toEqual(["wa", SID, "dp", "tk", "1000", "7", "idle"])
+    // 给池表加一列的写出侧：写取值器表补一行，走**真入口**（`poolCells` 扩表版）｜列序由声明推出。
+    // 另加一条**历史读法不变**的回归：两代共用同一组尾锤点的旧行为不得因本单而变（见「版本契约」用例）。
+    const poolWrite3 = { ...POOL_WRITE, heartbeat: (x: { round: number }) => (x.round === 7 ? "1" : "0") }
+    expect(poolCells(w, ext3, poolWrite3)).toEqual(["wa", SID, "dp", "tk", "1000", "7", "1", "idle"])
+    // 漏补取值器 → 当场报错（同前；而不是静默把新列写成空）
+    expect(() => poolCells(w, ext3), "漏取值器 → 报错").toThrow(/缺字段取值器：heartbeat/)
+    // 真声明表（v2，7 列）下写出侧仍逐位等同历史实现（不放宽、不错位）
+    expect(poolCells(w, [...POOL_VERSIONS])).toEqual(["wa", SID, "dp", "tk", "1000", "7", "idle"])
+    // 加代后**读出侧**才认得 8 列（同一行在旧声明表里只能回落到现行、在新声明表里才是 v3）
+    expect(selectPoolVer(["wa", SID, "dp", "tk", "1000", "7", "1", "idle"], { declared: 8 }, ext3), "加代后判代随声明表演进").toBe(P3.ver as typeof POOL_CURRENT)
+    const pool3Parsed = migratePool(parsePoolRow(["wa", SID, "dp", "tk", "1000", "7", "1", "idle"], { declared: 8 }, ext3))
+    expect(pool3Parsed).toEqual(w)   // 新声明的状态位仍在最后一格（各行锚点均按新声明重锤定）
+
+    // —— ⑧ 真实现今日的现行版仍是 v3/v2（本用例只在旁路演示扩表，不改现行声明） ——
     expect(INFLIGHT_CURRENT).toBe(3)
+    expect(POOL_CURRENT).toBe(2)
     expect(extended.length).toBe(INFLIGHT_VERSIONS.length + 1)
   })
 })
+
