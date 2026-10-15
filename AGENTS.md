@@ -117,6 +117,10 @@ bun run typecheck:custom   # 只检二开域（custom/）
 bun run typecheck:scripts  # 只检根 scripts/（仓库级构建/下载脚本）
 bun run lint
 
+# 变异台（开发期复核：故意改坏 status-core，看矩阵认不认得出来）
+bun run mutate:status    # 约 30 秒，退出码 0 = 全部符合期望；跑成功自动刷新证据指纹 stamp.json
+                         # 改了 files/status-core.ts 及其判据面就要跑——忘了跑的话 bun test 会红并提示这条命令
+
 # 霜天（原生桌面框架，C++20；与 TS 侧测试相互独立）
 (cd shuangtian && ./bootstrap.sh)                    # 自举工具链（首次/工具链改动后）
 (cd shuangtian && ./build/bin/st build codeeditor --profile dev) # 构建示例（增量：改一文件约 3s）
@@ -189,6 +193,25 @@ bun run e2e:term:all     # 三者依次跑；失败现场截图落 /tmp/gebai-e2
 
 ## 测试策略
 
+### 硬约束：改了 `status-core` 判据面，必须跑变异台（不靠人记）
+
+`packages/web/src/files/status-core.ts`（文件工作台状态格判据）与其判据矩阵、变异体清单、变异台执行器
+构成一个**判据面**：改动其中任何一份，上一次的「21/21 杀」就不再代表当前源码，必须重跑变异台。
+
+```bash
+bun run mutate:status   # 约 30 秒，退出码 0 = 全部符合期望；跑成功自动刷新证据指纹
+```
+
+**这条不靠你记得**：变异台跑成功会把「指纹面 + 实测结果」写进入库的
+`tools/mutation/status-core/stamp.json`，而 `packages/web/src/files/status-mutation-gate.test.ts` 在
+**每次常规测试**里用当前源码对账这份指纹——改了判据面而没重跑，`bun test` 当场红，失败信息
+直接给出上面那条命令。所以正常流程是：**改完 → 跑 `bun test`（或 `bun run --cwd packages/web test src/files/`）
+→ 若红则按提示跑 `bun run mutate:status` → 再跑测试**。
+
+变异台**本身**不进 CI 门禁（串行 30 秒，且 CI 满载的抖动会把测试抖动失败记成「变异被杀」——在
+`code` 类上就是一次**假通过**），进的是对这个证据做一次哈希核对的无抖动门。判据、五类变异体、
+已知盲区（含那条**不是缺陷、别去修**的「残余 1」）见 `DESIGN.md`「测试策略 → 变异验证」。
+
 - 统一 `bun test`，测试文件与被测代码同目录（`*.test.ts`）。
 - **turbo 的 `test`/`build` 是带缓存的：命中时回放日志、不真跑**。要确信“真跑过”就用 `bun run --cwd <pkg> test` 或 `turbo run test --force`。跨包依赖目录（`keqing/`、`custom/`、其他包的 `src/`）已声明进 turbo `inputs`——改它们会让相关包的构建与测试**失效重跑**（否则会拿到陈旧产物与陈旧的 PASS）。
 - **客卿 Python 侧测试**：`keqing/python/tests/*_test.py`（纯标准库运行器 `run_tests.py`；pytest 风格命名但不依赖 pytest，缺依赖的用例用 `skip()` 显式跳过）。已由 `bun test` 包装（`packages/server/src/core/agents/keqing-python.test.ts`），缺 Python 解释器时跳过而非失败（`GEBAI_TEST_PYTHON` 可指定解释器）。
@@ -235,4 +258,6 @@ bun run e2e:term:all     # 三者依次跑；失败现场截图落 /tmp/gebai-e2
 
 - 提交前先看 `git status` / `git diff`，只暂存预期文件，不提交密钥。
 - 完成后运行 `bun run test`、`bun run typecheck`、`bun run lint` 确认通过。
+- **动了文件工作台状态格判据面就要跑变异台**（`bun run mutate:status`）——判据面 = `files/status-core.ts` + `files/status-matrix.test.ts` + `tools/mutation/status-core/{mutants,bench}.ts`。
+  忘了跑的话测试会红并在提示里给出这条命令（机制见上「测试策略 → 硬约束」）。
 - 设计变更记得回写 `DESIGN.md`。

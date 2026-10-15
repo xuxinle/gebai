@@ -26,6 +26,7 @@ import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { MATRIX_TEST, MUTANTS, TARGET_FILE, expectsKill, type Mutant } from "./mutants"
+import { STAMP_FILE, computeFiles, writeStamp, type KindResult } from "./stamp"
 
 /* ------------------------------------------------------------------ *
  * 路径与运行参数
@@ -47,6 +48,8 @@ const argv = process.argv.slice(2)
 const only = argv.includes("--only") ? argv[argv.indexOf("--only") + 1] : undefined
 /** `--print`：不符合期望时打印该条的 find/replace 与原始输出尾部（排查用）。 */
 const printRaw = argv.includes("--print")
+/** `--no-stamp`：跑完不刷新证据指纹（只在「只是想看看当前状态」时用；正常跑不要加）。 */
+const noStamp = argv.includes("--no-stamp")
 
 /* ------------------------------------------------------------------ *
  * 清理 ANSI：bun test 在非 TTY 下也偶带色码，干扰 `N fail` 的解析
@@ -90,7 +93,26 @@ const workDir = mkdtempSync(join(tmpdir(), "gebai-mutation-"))
 const corePath = join(workDir, "status-core.ts")
 const matrixPath = join(workDir, "status-matrix.test.ts")
 const tsconfigPath = join(workDir, "tsconfig.json")
-const origCore = readFileSync(CORE_SRC, "utf8")
+
+/**
+ * **行尾归一**：变异台在整条链路上只看 `\n` 形态的源码，与宿主工作区的行尾无关。
+ *
+ * 为何必须做（实测的潜伏缺陷，不是洁癖）：本仓 `core.autocrlf=true`——**索引里一律 LF，Windows 工作区
+ * 检出为 CRLF**（见 `.gitattributes`）。而变异体的 `find` 串是写在 `mutants.ts` 里的**模板字面量**，
+ * 其中的转义 `\n` 是**裸 LF**、绝不可能是 CRLF。于是不归一时的后果是：
+ *   - **Windows 工作区**（`status-core.ts` 检出为 CRLF、`mutants.ts` 里的 `\n` 仍是 LF）：
+ *     所有**跨行**的 `find` 一律「未命中」——实测 33 条里有 **9 条**这样失效，而它们**只能靠
+ *     `--only <跨行的那条>` 才暴露**：全量跑（默认）时 A 组那 21 条跨行条目会被 `validate()` 当成
+ *     「清单失效」直接报错退出，尚能看到；而一条**新加的、恰好跨行的**变异体在 --only 调试时
+ *     会以「未命中」静默失效，人很容易把它读成「源码改过了」而不是「工具坏了」。
+ *   - **WSL/Linux 工作区**（全 LF）：一切正常——于是这个缺陷还会**只在 Windows 上出现**，
+ *     而本仓主要在 Windows 上开发（见 AGENTS.md「跨平台作业」）。
+ * 归一后：不论在哪个平台、工作区是什么行尾，读到的都是同一份语义内容、命中的是同一批 `find`——
+ * 同一份提交在两个平台得到同一个判定。同一条口径也被 `stamp.ts` 的 `hashFile` 采用（那里的理由是
+ * 防指纹假红），两处必须一致，否则「指纹对了、变异台却跑不动」。
+ */
+const norm = (s: string): string => s.replace(/\r\n/g, "\n")
+const origCore = norm(readFileSync(CORE_SRC, "utf8"))
 
 /**
  * 临时副本的 tsconfig：把 tsc 指向**副本目录**（否则它只看得见真 src，看不见被改坏的副本，
@@ -213,6 +235,7 @@ function main(): void {
 
   /* ---- ③ 逐条施加变异（串行；理由见文件头②） ---- */
   for (const m of selected) {
+    // find/replace 都按 LF 形态的字面量施加（见文件头「行尾归一」）：归一后不论哪个平台都能命中
     writeFileSync(corePath, origCore.replace(m.find, m.replace), "utf8")
     const t = runMatrix(matrixPath)
     if (t.crashed) {
@@ -296,4 +319,35 @@ if (problems.length > 0) {
   console.log("\n✅ 全部符合期望（回归变异全杀、良性重构全存活、新分支被拦、盲区如实记录）")
 }
 console.log("\n产品源码未被写入（变异只发生在临时副本）——`git status` 不应出现任何产品文件改动。")
+
+/* ------------------------------------------------------------------ *
+ * 证据指纹：把「这次跑是在什么源码上、结论是什么」落成可核对的文件
+ * ------------------------------------------------------------------ */
+
+/*
+ * 只在**跑全集 且 全部符合期望**时刷新——两个条件缺一不可，理由各是一条会被滥用的路径：
+ *   - `--only` 的部分跑：调试单条时把闸门刷绿，闸门当场变摆设；
+ *   - 失败的跑：失败=没有证据可立，刷新指纹等于把「没守住」记成「刚验过」。
+ * 另：`--only` 与「有问题」的路径在 `main()` 里已 `return`（results 为空或不符期望），天然不会走到这。
+ */
+if (noStamp) {
+  console.log("\n[指纹] --no-stamp：未刷新证据指纹（下一次常规测试会因指纹过期而红，属预期）。")
+} else if (only) {
+  console.log(`\n[指纹] --only ${only} 是部分跑，未刷新证据指纹（部分跑不构成证据）。`)
+} else if (exitCode !== 0) {
+  console.log("\n[指纹] 有不符合期望的条目，未刷新证据指纹（失败不立证据）。")
+} else {
+  // 清单条数与实测结果都按 kind 归：清单条数用来发现「加了变异体没重跑」，实测结果是给人读的那次数
+  const kinds = [...new Set(MUTANTS.map((m) => m.kind))]
+  const mutants: Record<string, number> = {}
+  const result: Record<string, KindResult> = {}
+  for (const k of kinds) {
+    const rs = results.filter((r) => r.mutant.kind === k)
+    mutants[k] = MUTANTS.filter((m) => m.kind === k).length
+    result[k] = { killed: rs.filter((r) => r.killed).length, total: rs.length }
+  }
+  const { written } = writeStamp({ files: computeFiles(), mutants, result })
+  console.log(`\n[指纹] 证据指纹${written ? "已刷新" : "已是最新（内容未变，未写盘）"}：${STAMP_FILE}`)
+  console.log(`       它会被常规测试 status-mutation-gate.test.ts 对账——改了判据面却忘了重跑这台，测试会红。`)
+}
 process.exit(exitCode)

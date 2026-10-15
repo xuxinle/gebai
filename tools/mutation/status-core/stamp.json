@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "files": {
+    "packages/web/src/files/status-core.ts": "sha256:03a0ab955ccc37256751121b29cf250f7c1e171445e2fc0b7a74df1675246b87",
+    "packages/web/src/files/status-matrix.test.ts": "sha256:306472633e66911806a337a0c16f4f0e4a1cc384b13801fdcd5bd55208221650",
+    "tools/mutation/status-core/mutants.ts": "sha256:2081d3c0c0319da39d8b9bb37c09962416707f941e9a1d86f8cb6f1fab161f09",
+    "tools/mutation/status-core/bench.ts": "sha256:d2c5051cbca6051004fadd4222343baca6b10c43001ff65dd4f82aa290e5da10"
+  },
+  "mutants": {
+    "code": 21,
+    "benign": 8,
+    "branch": 1,
+    "blind": 2,
+    "residual": 1
+  },
+  "result": {
+    "code": {
+      "killed": 21,
+      "total": 21
+    },
+    "benign": {
+      "killed": 0,
+      "total": 8
+    },
+    "branch": {
+      "killed": 1,
+      "total": 1
+    },
+    "blind": {
+      "killed": 2,
+      "total": 2
+    },
+    "residual": {
+      "killed": 0,
+      "total": 1
+    }
+  }
+}
