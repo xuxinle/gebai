@@ -10,7 +10,9 @@
  * 真不可写时若也只给中性文案，用户会白按几次 Ctrl+E 才意识到要改 GEBAI_FS_WRITE 或下载后编辑。
  *
  * 判据口径**必须与标签栏的编辑按钮、以及 saveTab 的拒绝口径一致**（main.ts `renderTabActions`
- * 里那颗按钮的 disabled），否则会出现「徽标说能编辑、按钮却是灰的」这种自相矛盾。四处输入：
+ * 里那颗按钮的 disabled），否则会出现「徽标说能编辑、按钮却是灰的」这种自相矛盾。三处共用
+ * `WritabilityInput` 一组输入（`readOnlyReason`），保存侧另走 `saveRefusal`（同判据 + 一条保存独有严判）。
+ * 四处输入：
  *   ① `roots.writable === false`：整站只读根源模式（`GEBAI_FS_WRITE=false`，`saveTab` 直接拒）；
  *   ② `truncated`：只加载了前 N MB，为防误保存服务端/编辑器都禁写（见 loadTab 的 warn 横幅）；
  *   ③ `stat.editable === false`：服务端按文件类型/权限判定不可写（`FileStat.editable`）；
@@ -25,6 +27,12 @@
  * 不可保存 → warn 的「不可保存」（与查看态的「不可编辑」对称：一个说存不下、一个说改不了）。
  *
  * 纯函数、不碰 DOM：文案与配色是验收点（中性 vs warn 可区分），单测钉在这里。
+ *
+ * **消费侧一览（三口径一致性由 status-core.test.ts 的「三口径同一组输入」块钉住）**：
+ *   ① 状态栏模式格徽标 → `modeSlot`；② 标签栏编辑按钮 → `editButton`；
+ *   ③ `saveTab` 的拒绝判定 → `saveRefusal`（轮盘保存项：`saveItem`）。
+ * ①②只看「能不能改」，③看「能不能存」——两者共用 `readOnlyReason`，唯一分歧是**根可写性未知**
+ * （展示按可写算、保存拦住），见 `saveRefusal`。
  */
 
 /** 模式格的视觉档位：`""` 中性 / `"warn"` 警示（CSS 里 warn 才是橙色的 `--warning`）。 */
@@ -41,6 +49,22 @@ export interface ModeSlot {
 
 /** 不可写原因（枚举顺序即展示优先级：先报阻碍最大的那个）。 */
 export type ReadOnlyReason = "readonlyRoot" | "truncated" | "notEditable"
+
+/**
+ * **三处共用的同一组原始输入**（状态栏徽标 / 标签栏编辑按钮 / saveTab 的拒绝判定）。
+ *
+ * 特意给它一个名字：三处原先各取各的字段、各拼各的判断（按钮只判 `editable`、保存只看根
+ * `rootsResp.writable`），于是同一组事实能得出两个结论。名字在这里统一后，「三处输入同一个对象」
+ * 在调用点上就能被看出来，回归测试也能直接拿同一组输入跑三处（见 status-core.test.ts）。
+ */
+export interface WritabilityInput {
+  /** 文件自身的可写性（`stat.editable`；stat 未到时不传） */
+  statEditable?: boolean
+  /** 内容是否被截断（只加载了前一段） */
+  truncated?: boolean
+  /** 当前根是否可写：true/false 为已知；**null/undefined = 未知（根清单未到）** */
+  rootWritable?: boolean | null
+}
 
 /** 逐因文案与下一步动作（按 enum 穷举，避免漏分支时静默给空 title）。 */
 const REASON: Record<ReadOnlyReason, { why: string; next: string }> = {
@@ -59,7 +83,7 @@ const REASON: Record<ReadOnlyReason, { why: string; next: string }> = {
  * @param truncated    内容是否被截断（只加载了前一段）
  * @param rootWritable 当前根是否可写：true/false 为已知；**null = 未知（根清单未到）**，按可写算
  */
-export function readOnlyReason(o: { statEditable?: boolean; truncated?: boolean; rootWritable?: boolean | null }): ReadOnlyReason | null {
+export function readOnlyReason(o: WritabilityInput): ReadOnlyReason | null {
   if (o.rootWritable === false) return "readonlyRoot"
   if (o.truncated) return "truncated"
   if (o.statEditable === false) return "notEditable"
@@ -90,6 +114,28 @@ export function modeSlot(o: { mode: "view" | "edit"; readOnly: ReadOnlyReason | 
   return { text: "不可编辑", cls: "warn", title: `不可编辑：${r.why}；${r.next}` }
 }
 
+/**
+ * 保存放行判定（`saveTab` 的拒绝口径）：**与徽标 / 编辑按钮同一判据**（`readOnlyReason`），
+ * 只多一条保存侧独有的严判。
+ *
+ * **为什么展示侧与保存侧对「根可写性未知」刻意取反**：徽标与按钮在根清单没到时先按可写算
+ * （否则每次冷启动都会闪一个假「不可编辑」——那是不实提示）；而保存无从判断目标根到底可不可写，
+ * 只能拦住（放行后吃 403、或在只读站上真写一次再失败，都更难懂）。这是三处里**唯一**允许的分歧，
+ * 故用一个具名结果 `rootsPending` 把它显式化，回归测试也据此把「唯一例外」钉成一条。
+ *
+ * 其余逐因必须与展示侧相同。本轮之前 `saveTab` 只看根（`rootsResp?.writable !== true`），于是
+ * 「截断的大文件」与「类型不可编辑的文件」出现同屏矛盾：徽标说「不可编辑」、按钮禁用、轮盘保存项
+ * 也禁用并写着「存不回」，而 `Ctrl+S` 仍然放行——截断文件写回时会把**磁盘上的文件截成已加载的
+ * 那一段**（真数据损坏），非文本文件则以文本编码往返写坏。判据收口到这一处后不可能再各说各话。
+ */
+export type SaveRefusal = ReadOnlyReason | "rootsPending"
+
+/** 保存放行判定：可保存返回 null，否则返回拒绝原因（`rootsPending` = 根清单未到，仅保存侧有）。 */
+export function saveRefusal(o: WritabilityInput): SaveRefusal | null {
+  if (o.rootWritable == null) return "rootsPending"
+  return readOnlyReason(o)
+}
+
 /** 不可写原因的「为什么」（`why`）——按钮 title、状态栏徽标、保存拒绝提示共用同一份措辞。 */
 export function readOnlyWhy(r: ReadOnlyReason): string {
   return REASON[r].why
@@ -98,6 +144,47 @@ export function readOnlyWhy(r: ReadOnlyReason): string {
 /** 不可写原因的「下一步」（`next`）。 */
 export function readOnlyNext(r: ReadOnlyReason): string {
   return REASON[r].next
+}
+
+/** `rootsPending` 的措辞：**自成一句、不带「下一步」**（这是「等一下」不是「去改什么」）。
+ *  文本与收口前 `saveTab` 写的那句逐字相同——收口换的是判据，不是用户读到的话。 */
+const PENDING = "根清单尚未就绪，请稍后重试"
+
+/** 保存拒绝原因的「为什么」：`rootsPending` 与 `ReadOnlyReason` 共用同一取词入口（模板一致）。 */
+export function saveRefusalWhy(r: SaveRefusal): string {
+  return r === "rootsPending" ? PENDING : readOnlyWhy(r)
+}
+
+/**
+ * 保存被拒的完整提示（`saveTab` 的 toast 全文）——**三处措辞同一份模板**：
+ * 有原因表的走「无法保存：why；next」，根清单未到的自成一句。
+ * 这段文本原先写在 `main.ts` 的 `saveTab` 里，且只可能说 `readonlyRoot` 一种原因；
+ * 收口后与判据同步收到这里，逐因文案不可能再与徽标/按钮漂移。
+ */
+export function saveRefusalText(r: SaveRefusal): string {
+  return r === "rootsPending" ? `无法保存：${PENDING}` : `无法保存：${readOnlyWhy(r)}；${readOnlyNext(r)}`
+}
+
+/** 轮盘里那颗保存项的渲染规格（禁用态 + 悬浮说明）。 */
+export interface SaveItem {
+  title: string
+  disabled: boolean
+}
+
+/**
+ * 轮盘保存项 ← **与 `saveTab` 同一判据**（二者必须同生共死）。
+ *
+ * 原先它单看 `rootsResp.writable`：于是状态栏已按 `truncated` 说了「不可保存」、而保存按钮还是亮的——
+ * 点下去才被拒（或被写坏，见 `saveRefusal`）。现在禁用态与 title 都从 `saveRefusal` 来：
+ * 按钮灰着的理由，与真按 `Ctrl+S` 时收到的拒绝文案是同一句话。
+ *
+ * 不可保存时 title 只报「为什么」不报「下一步」：轮盘按钮的空间只有一行，下一步动作由 hover
+ * 时展开的扇形与拒绝 toast 承担（徽标/编辑按钮的 title 才给全文）。
+ */
+export function saveItem(o: { dirty: boolean; refusal: SaveRefusal | null }): SaveItem {
+  if (!o.dirty) return { title: "保存（Ctrl+S）", disabled: true }
+  if (o.refusal) return { title: `保存（Ctrl+S）· 存不回：${saveRefusalWhy(o.refusal)}`, disabled: true }
+  return { title: "保存（Ctrl+S）· 有未保存的修改", disabled: false }
 }
 
 /** 标签栏编辑按钮的渲染规格（文案 / 禁用态 / 按下态一次给全）。 */

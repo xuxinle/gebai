@@ -157,6 +157,30 @@ describe("样式契约：模式格 pri1 恒在 + 不可写原因单一来源", (
     expect(main, "main.ts 里不得再自行拼不可写文案（口径会与状态栏漂移）").not.toContain("该文件类型不支持编辑")
     expect(main, "saveTab 的拒绝原因应取 readOnlyWhy 而非自写一份").not.toContain("当前为只读模式（GEBAI_FS_WRITE=false），无法保存")
   })
+
+  /**
+   * 三口径的**接线契约**（行为契约在 status-core.test.ts 的「三口径一致性」块）。
+   *
+   * 为什么两处都要有：行为测试只能证明**函数**自洽，证明不了 main.ts 真的调了它们——
+   * 有人把某处改回「自己取 `t.stat.editable`」时，status-core 的单测依然全绿（函数没变），
+   * 而界面又回到了三处各说各话的旧样子。本仓不跑 DOM 集成测试（main.ts 一 import 就绑真 DOM
+   * 与网络），所以只能扫源码钉住这三个调用点；好在它们是稳定结构，不是易漂的文案。
+   */
+  test("三处消费都接在 status-core 的同一判据上（徽标 / 按钮 / 保存拒绝）", () => {
+    const main = readFileSync(join(SRC, "files", "main.ts"), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^[ \t]*\/\/.*$/gm, "")
+    // ① 单一取数口：三处都从 writabilityOf(tab) 取输入，不再各自从 t.stat / state.rootsResp 拼
+    expect(main, "三处输入应统一走 writabilityOf（否则同一事实会算出两个结论）").toContain("function writabilityOf(t: Tab): WritabilityInput")
+    expect((main.match(/writabilityOf\(/g) ?? []).length, "writabilityOf 应被三处消费调用（定义 + 徽标 + 按钮 + 保存）").toBeGreaterThanOrEqual(4)
+    // ② 保存侧：saveTab 与轮盘保存项共用 saveRefusal，不得退回只看根的老口径
+    expect(main).toContain("saveRefusal(writabilityOf(")
+    expect(main, "saveTab 不得再直接看 rootsResp.writable（截断/类型不可编辑会被放行）").not.toContain("rootsResp?.writable !== true")
+    expect((main.match(/saveRefusal\(writabilityOf\(/g) ?? []).length, "saveTab 与轮盘保存项两处都应接 saveRefusal").toBeGreaterThanOrEqual(2)
+    // ③ 保存项的禁用态/title 不得再自行判断（否则又出现「徽标说不可保存、保存按钮却亮着」）
+    expect(main, "轮盘保存项的禁用态应来自 saveItem（同一判据）").toContain("saveItem({")
+    expect(main, "轮盘保存项不得再自行拼「存不回」文案").not.toContain('`保存（Ctrl+S）· 存不回：${readOnlyWhy')
+  })
 })
 
 /**

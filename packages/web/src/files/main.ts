@@ -29,7 +29,7 @@ import { attachDocument, attachedServerOf, hasLsp, initLsp, lspServerDetailOf, n
 import { wordWrapTitle } from "./wrap"
 import { minimapTitle } from "./minimap"
 import { branchTitle, changeParts } from "./git-counts"
-import { editButton, modeSlot, readOnlyNext, readOnlyReason, readOnlyWhy } from "./status-core"
+import { editButton, modeSlot, readOnlyReason, saveItem, saveRefusal, saveRefusalText, type WritabilityInput } from "./status-core"
 import { installWorkbenchKeys, workbenchKeymap } from "./keymap-wb"
 import { FOCUS_ALL_FIELDS, validateKeymap, helpGroups, popKeyScope, pushEscScope } from "../keymap"
 import type { KeyBinding } from "../keymap"
@@ -1107,6 +1107,21 @@ function findTab(id: string): Tab | undefined {
   return state.tabs.find((t) => t.id === id)
 }
 
+/**
+ * **可写性判据的单一取数口**：把标签与服务端状态折成 `status-core` 要的那组输入。
+ *
+ * 三处消费（状态栏模式格徽标 / 标签栏编辑按钮 / `saveTab` 的拒绝）都调本函数，而不是各自从
+ * `t.stat` / `state.rootsResp` 拼一份——同一个事实只取一次，三处就不可能算出两个结论
+ * （历史上真是各拼一份：按钮只判 `editable`、保存只看根 `rootsResp.writable`）。
+ * 新增入口时也只会多一个调用点，不会多一套判据。
+ *
+ * 注意：差异标签与合并视图没有 `stat`，两者都不会走到这里（`renderTabActions` / `renderStatus`
+ * 在此之前已按 `kind/stat` 返回；`saveTab` 也先卡 `kind !== 'file'`）——故这里只面对文件标签。
+ */
+function writabilityOf(t: Tab): WritabilityInput {
+  return { statEditable: t.stat?.editable, truncated: t.truncated, rootWritable: state.rootsResp?.writable }
+}
+
 const viewHosts = new Map<string, HTMLElement>()
 
 /**
@@ -1853,7 +1868,7 @@ function renderTabActions(box: HTMLElement): void {
    * 不是各自写一份：分开写过一次，结果是按钮一律说「该文件类型不支持编辑」、而状态栏说「根只读」，
    * 同一屏两个口径——用户只能去猜哪个是真的。
    */
-  const readOnly = readOnlyReason({ statEditable: t.stat.editable, truncated: t.truncated, rootWritable: state.rootsResp?.writable })
+  const readOnly = readOnlyReason(writabilityOf(t))
   const editSpec = editButton({ mode: t.mode, readOnly })
   const modeBtn = btn(editSpec.icon, editSpec.title, () => toggleMode(t), editSpec.active ? "active" : "")
   modeBtn.disabled = editSpec.disabled
@@ -1870,11 +1885,13 @@ function renderTabActions(box: HTMLElement): void {
   const items: WheelItem[] = []
 
   // 文件本身的动作（保存 / 重载 / 下载 / 复制路径）+ 显示开关（自动换行）
-  /* 保存的**禁用态与 title 都跟随上面那个 readOnly 判据**（不再单独看 `rootsResp.writable`）：
+  /* 保存的**禁用态与 title 都跟随同一判据**（不再单独看 `rootsResp.writable`）：
      否则会出现「状态栏说不可保存、保存按钮却是亮的」这种同屏矛盾——点了才被拒绝，
-     user 只能理解为工具坏了。原因文案也走 status-core 的同一份 REASON。 */
-  const saveTitle = !t.dirty ? "保存（Ctrl+S）" : readOnly ? `保存（Ctrl+S）· 存不回：${readOnlyWhy(readOnly)}` : "保存（Ctrl+S）· 有未保存的修改"
-  items.push({ el: wheelBtn("save", saveTitle, () => void saveTab(t), t.dirty ? "primary" : "", !t.dirty || readOnly !== null) })
+     user 只能理解为工具坏了。而这里与 `saveTab` 用的是**同一个 `saveRefusal`**，
+     所以“按钮灰着”与“按 Ctrl+S 被拒”必然同时发生（文案也是同一份 REASON）。 */
+  const refusal = saveRefusal(writabilityOf(t))
+  const saveSpec = saveItem({ dirty: t.dirty, refusal })
+  items.push({ el: wheelBtn("save", saveSpec.title, () => void saveTab(t), t.dirty ? "primary" : "", saveSpec.disabled) })
   items.push({ el: wheelBtn("refresh", "重新加载当前文件", () => void loadTab(t)) })
   items.push({ el: wheelBtn("download", "下载", () => window.open(downloadUrl({ api, root: t.root, path: t.path }), "_blank")) })
   items.push({ el: wheelBtn("copy", "复制路径", () => void navigator.clipboard.writeText(t.path).then(() => toast("已复制路径", "success"))) })
@@ -2166,7 +2183,7 @@ function renderStatus(): void {
        编辑态说「不可保存」（Ctrl+E 不看 editable 就能进编辑态，编辑器却仍只读、保存也会被拒——
        那时显示中性「编辑」会让用户以为改动存得下去）。原因与下一步动作都在 title 里。
        pri 恒 1：这一格回答的是“我现在能不能改这个文件”，与最左的根目录格同级，窄面板下不能被隐掉。 */
-    const slot = modeSlot({ mode: t.mode, readOnly: readOnlyReason({ statEditable: statInfo?.editable, truncated: t.truncated, rootWritable: state.rootsResp?.writable }) })
+    const slot = modeSlot({ mode: t.mode, readOnly: readOnlyReason(writabilityOf(t)) })
     const slotEl = item(slot.cls, { pri: 1, text: slot.text, title: slot.title })
     /* 供自查/回归测试断言这一格**确实**是 pri1（窄屏让位规则只隐 pri3/pri2，pri1 恒在）；
        没有它就没法在 DOM 层面把「不被隐掉」钉住——只能靠读 CSS。 */
@@ -2446,11 +2463,20 @@ function toggleMode(tab: Tab): void {
 
 async function saveTab(tab: Tab, opts: { force?: boolean } = {}): Promise<boolean> {
   if (tab.kind !== "file" || !tab.editor) return false
-  if (state.rootsResp?.writable !== true) {
-    /* 拒绝口径与状态栏「不可保存」/ 标签栏编辑按钮**同一份原因措辞**（status-core 的 REASON.why）：
-       三处说得不一样时，用户会以为是权限随手一拍，而不是“要改服务端开关 / 下载后编辑”。
-       根清单未到（rootsResp 为空）也走这里：此时确实无从判断，拦住比放行后吃 403 更明白。 */
-    toast(state.rootsResp ? `无法保存：${readOnlyWhy("readonlyRoot")}；${readOnlyNext("readonlyRoot")}` : "无法保存：根清单尚未就绪，请稍后重试", "error")
+  /*
+   * 拒绝判据 ← **与徽标 / 编辑按钮同一组输入、同一份原因**（`writabilityOf` + `status-core.saveRefusal`）。
+   *
+   * 原先这里只看根（`rootsResp?.writable !== true`），于是「徽标说不可保存、保存按钮也是灰的、
+   * 而 `Ctrl+S` 却真写下去了」——而且写下去的是**坏数据**：截断的大文件回写会把磁盘上的文件
+   * 截成已加载的那一段，非文本文件则以文本编码往返写坏。三处判据收口到 `saveRefusal` 后，
+   * 「界面说存不回」与「真去存会不会被拒」不可能再各说各话。
+   *
+   * 展示侧与保存侧**唯一**允许的分歧是根清单未到（`rootsPending`）：徽标/按钮先按可写算（否则
+   * 每次冷启动都会闪一个假「不可编辑」），而保存无从判断目标根，只能拦住（见 status-core 说明）。
+   */
+  const refusal = saveRefusal(writabilityOf(tab))
+  if (refusal) {
+    toast(saveRefusalText(refusal), "error")
     return false
   }
   const content = tab.editor.getValue()

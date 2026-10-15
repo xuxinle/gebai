@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { editButton, modeSlot, readOnlyNext, readOnlyReason, readOnlyWhy } from "./status-core"
+import { editButton, modeSlot, readOnlyNext, readOnlyReason, readOnlyWhy, saveItem, saveRefusal, saveRefusalText, saveRefusalWhy } from "./status-core"
 
 /**
  * 本文件钉住的是**行为契约**而不是实现细节：中性态与警示态必须可区分，
@@ -230,6 +230,129 @@ describe("editButton：不可写时按钮与徽标同一份原因，且编辑态
     for (const r of ["readonlyRoot", "truncated", "notEditable"] as const) {
       expect(readOnlyWhy(r).length).toBeGreaterThan(0)
       expect(readOnlyNext(r).length).toBeGreaterThan(0)
+    }
+  })
+})
+
+/**
+ * **三口径一致性回归**（本单的收口锁）：同一组输入（`statEditable` / `truncated` / `rootWritable`）
+ * 配上同一个 mode，三处消费必须自洽——
+ *   ① 状态栏模式格徽标 `modeSlot`；② 标签栏编辑按钮 `editButton`；③ `saveTab` 的拒绝判定 `saveRefusal`。
+ *
+ * 为什么值得单开一块：这三处原先**各自拼输入**（按钮只判 `editable`、保存只看根 `rootsResp.writable`），
+ * 于是同一组事实能得出两个结论。实测形态是同屏矛盾：截断的大文件、类型不可编辑的文件上，
+ * 徽标写着 warn「不可编辑」、按钮是灰的、轮盘保存项也灰着写「存不回」，而 `Ctrl+S` 却真写下去了——
+ * 写下去的还是**坏数据**（截断文件回写会把磁盘上的文件截成已加载的那一段）。
+ * 前两块单测各自只盯自家函数，抓不到“两处对同一事实得出不同结论”；这里用**矩阵跑三处**补上。
+ *
+ * 钉住的是一条**逐因同一**的不变量（不是“大方向一致”）：根可写性已知时，保存侧拒绝的原因必须与
+ * 展示侧 `readOnlyReason` 返回的**同一个枚举值**；唯一允许的分歧是根清单未到（`rootsPending`），
+ * 因为此时展示侧按可写算（防冷启动假「不可编辑」）而保存侧无从判断只能拦住——这条也显式钉死，
+ * 免得日后有人把 `saveRefusal` 简化成直接转调 `readOnlyReason` 而静默放行。
+ */
+describe("三口径一致性：同一组输入下 徽标 / 编辑按钮 / 保存拒绝 必须自洽", () => {
+  /** 全量输入矩阵：三个来源 × 取值（含「未知」这一哨兵）的关键组合。 */
+  const INPUTS = [
+    { label: "普通可写文件", input: { statEditable: true, truncated: false, rootWritable: true } },
+    { label: "根只读（GEBAI_FS_WRITE=false）", input: { statEditable: true, truncated: false, rootWritable: false } },
+    { label: "超大文件截断", input: { statEditable: true, truncated: true, rootWritable: true } },
+    { label: "类型/权限不可编辑", input: { statEditable: false, truncated: false, rootWritable: true } },
+    { label: "根可写性未知（根清单未到）", input: { statEditable: true, truncated: false, rootWritable: null } },
+  ] as const
+  const MODES = ["view", "edit"] as const
+
+  test("要求的三个基准形态：可写查看 / 不可写查看 / 不可写编辑", () => {
+    // ① 可写查看 → 徽标**中性**「查看」，按钮可点
+    const ok = INPUTS[0]!
+    expect(modeSlot({ mode: "view", readOnly: readOnlyReason(ok.input) })).toMatchObject({ text: "查看", cls: "" })
+    expect(editButton({ mode: "view", readOnly: readOnlyReason(ok.input) }).disabled).toBe(false)
+
+    // ② 不可写查看（三因各一遍）→ 徽标 warn「不可编辑」+ 按钮 disabled + title 含原因
+    for (const c of [INPUTS[1]!, INPUTS[2]!, INPUTS[3]!]) {
+      const ro = readOnlyReason(c.input)
+      expect(ro, `${c.label}：应当判为不可写`).not.toBeNull()
+      const badge = modeSlot({ mode: "view", readOnly: ro })
+      const btn = editButton({ mode: "view", readOnly: ro })
+      expect(badge.text, c.label).toBe("不可编辑")
+      expect(badge.cls, c.label).toBe("warn")
+      expect(btn.disabled, c.label).toBe(true)
+      expect(btn.title, `${c.label}：按钮 title 必须点名真正的原因`).toContain(readOnlyWhy(ro!))
+    }
+
+    // ③ 不可写编辑（Ctrl+E 不看可写性能进编辑态）→ 徽标 warn「不可保存」
+    for (const c of [INPUTS[1]!, INPUTS[2]!, INPUTS[3]!]) {
+      const badge = modeSlot({ mode: "edit", readOnly: readOnlyReason(c.input) })
+      expect(badge.text, c.label).toBe("不可保存")
+      expect(badge.cls, c.label).toBe("warn")
+    }
+  })
+
+  test("逐因同一：根可写性已知时，保存侧拒绝的原因 == 展示侧判定的原因（同一枚举值）", () => {
+    for (const c of INPUTS) {
+      if (c.input.rootWritable == null) continue // 未知是刻意分歧，另见下一条
+      const ro = readOnlyReason(c.input)
+      expect(saveRefusal(c.input), `${c.label}：保存侧与展示侧给出了不同的原因`).toBe(ro)
+    }
+  })
+
+  test("唯一的刻意分歧：根清单未到时展示按可写算（不闪假警告）、保存拦住（只能拦住）", () => {
+    const pending = INPUTS[4]!
+    expect(readOnlyReason(pending.input), "展示侧：未知按可写算，否则每次冷启动都会闪「不可编辑」").toBeNull()
+    expect(saveRefusal(pending.input), "保存侧：无从判断只能拦住，放行会吃 403 或在只读站上真写一次").toBe("rootsPending")
+    // 且这条分歧是显式具名的，不是靠“恰好都返回 null”蒙出来的
+    expect(saveRefusalText("rootsPending")).toContain("未就绪")
+  })
+
+  test("同一组输入 × 两个 mode 全跑：三处的「不可写」判断必须同真同假", () => {
+    for (const c of INPUTS) {
+      if (c.input.rootWritable == null) continue
+      const ro = readOnlyReason(c.input)
+      const refusal = saveRefusal(c.input)
+      for (const mode of MODES) {
+        const badge = modeSlot({ mode, readOnly: ro })
+        const btn = editButton({ mode, readOnly: ro })
+        const tag = `${c.label} / ${mode}`
+        // 徽标 warn ⇔ 判为不可写 ⇔ 保存侧同样拒绝（逐因同一）
+        expect(badge.cls === "warn", `${tag}：徽标配色与判据不一致`).toBe(ro !== null)
+        expect(refusal === null, `${tag}：存不存在拒绝与徽标不一致`).toBe(ro === null)
+        // 查看态：按钮禁用 ⇔ 徽标 warn（同屏不得一个说能改、一个说不能）
+        if (mode === "view") expect(btn.disabled, `${tag}：按钮禁用态与徽标不一致`).toBe(badge.cls === "warn")
+        // 编辑态：按钮恒可点（否则用户被困在编辑态退不回来）
+        else expect(btn.disabled, `${tag}：编辑态禁用 = 退不回查看态`).toBe(false)
+        // warn 时三处必须说同一个原因（按钮 title / 徽标 title / 保存拒绝文案）
+        if (ro) {
+          expect(btn.title, `${tag}：按钮 title 未点名原因`).toContain(readOnlyWhy(ro))
+          expect(badge.title, `${tag}：徽标 title 未点名原因`).toContain(readOnlyWhy(ro))
+          expect(saveRefusalText(refusal!), `${tag}：保存拒绝文案未点名原因`).toContain(readOnlyWhy(ro))
+          expect(saveRefusalText(refusal!), `${tag}：保存拒绝文案未给出下一步`).toContain(readOnlyNext(ro))
+        }
+      }
+    }
+  })
+
+  test("轮盘保存项与 saveTab 同一判据：按钮灰着的理由 == 真按 Ctrl+S 收到的拒绝文案", () => {
+    for (const c of INPUTS) {
+      const refusal = saveRefusal(c.input)
+      // 有未保存改动时，保存项禁用 ⇔ 保存会被拒（同生共死：点了才被拒 = 工具像坏了）
+      const item = saveItem({ dirty: true, refusal })
+      expect(item.disabled, `${c.label}：保存按钮可用性未跟随判据`).toBe(refusal !== null)
+      // 保存项 title 只给「为什么」（一行放不下下一步）；「下一步」由拒绝 toast 承担。
+      // 但**原因咬字必须逐字同源**：否则同屏又出现两种解释。
+      if (refusal) expect(item.title, `${c.label}：保存项 title 与拒绝原因不同源`).toContain(saveRefusalWhy(refusal))
+      // 无改动时按钮恒灰（与可写性无关），且不得误报「存不回」
+      const clean = saveItem({ dirty: false, refusal })
+      expect(clean.disabled, `${c.label}：无改动时保存按钮应恒灰`).toBe(true)
+      expect(clean.title, `${c.label}：无改动时不应报存不回`).not.toContain("存不回")
+    }
+  })
+
+  test("展示侧中性态：可写时一律不带 warn，也不宣称不可编辑/不可保存", () => {
+    for (const mode of MODES) {
+      const badge = modeSlot({ mode, readOnly: null })
+      expect(badge.cls, `${mode}：可写态不得带 warn`).toBe("")
+      expect(["查看", "编辑"]).toContain(badge.text)
+      expect(badge.title).not.toContain("不可")
+      expect(editButton({ mode, readOnly: null }).disabled, `${mode}：可写态按钮必须可点`).toBe(false)
     }
   })
 })
