@@ -1,0 +1,274 @@
+{
+  "01-new-header-mixed.md": {
+    "state": {
+      "coord": {
+        "root": "/corpus/01",
+        "verify": "bun run typecheck",
+        "seedDoc": "docs/seed.md"
+      },
+      "breath": 3,
+      "seq": 11,
+      "workers": [
+        {
+          "alias": "wb-1",
+          "sessionId": "aaaabbbbccccddddeeeeffff00001111",
+          "domain": "ui",
+          "task": "修状态栏 | 语义（转义竖线）",
+          "dispatchedAt": 1000,
+          "round": 4,
+          "status": "running"
+        },
+        {
+          "alias": "wb-2",
+          "sessionId": "bbbbaaaaccccddddeeeeffff11110000",
+          "domain": "ui",
+          "task": "任务甲 | 带裸竖线 | 交付乙",
+          "dispatchedAt": 1000,
+          "round": 5,
+          "status": "idle"
+        }
+      ],
+      "inflight": [
+        {
+          "alias": "wb-2",
+          "sessionId": "",
+          "direction": "空会话列的新版行",
+          "deliverable": "交付乙",
+          "dispatchedAt": 1000,
+          "round": 5
+        },
+        {
+          "alias": "wb-1",
+          "sessionId": "aaaabbbbccccddddeeeeffff00001111",
+          "direction": "新版方向丙 | 溢格",
+          "deliverable": "交付丙",
+          "dispatchedAt": 1000,
+          "round": 6
+        },
+        {
+          "alias": "legacy-2",
+          "sessionId": "",
+          "direction": "旧行的方向（表头说 6 列、本行只有 5 格）",
+          "deliverable": "旧行的预期产出",
+          "dispatchedAt": 900,
+          "round": 3
+        }
+      ],
+      "seeds": [
+        {
+          "priority": "P1",
+          "direction": "语料 01 的方向甲",
+          "source": "种子库",
+          "constraint": "只读语料"
+        }
+      ],
+      "pending": [
+        {
+          "alias": "wb-1",
+          "summary": "上一轮交付摘要",
+          "at": 990
+        }
+      ],
+      "note": "语料 01：新表头 + 存量旧行混排。"
+    },
+    "sessions": [
+      "bbbbaaaaccccddddeeeeffff11110000",
+      "aaaabbbbccccddddeeeeffff00001111",
+      null
+    ],
+    "rendered": "> 生生调度状态（`shengsheng_state` 托管，勿手改）。\n\n## 项目坐标\n- 项目根：/corpus/01\n- 验证命令：bun run typecheck\n- 种子库：docs/seed.md\n\n## 计数\n- 呼吸：3\n- 派工序号：11\n\n## worker 池\n| 别名 | 会话 | 领域 | 任务 | 派发时间 | 轮次 | 状态 |\n| --- | --- | --- | --- | --- | --- | --- |\n| wb-1 | aaaabbbbccccddddeeeeffff00001111 | ui | 修状态栏 \\| 语义（转义竖线） | 1000 | 4 | running |\n| wb-2 | bbbbaaaaccccddddeeeeffff11110000 | ui | 任务甲 \\| 带裸竖线 \\| 交付乙 | 1000 | 5 | idle |\n\n## 在途\n| 别名 | 会话 | 方向 | 预期产出 | 派发时间 | 轮次 |\n| --- | --- | --- | --- | --- | --- |\n| wb-2 |  | 空会话列的新版行 | 交付乙 | 1000 | 5 |\n| wb-1 | aaaabbbbccccddddeeeeffff00001111 | 新版方向丙 \\| 溢格 | 交付丙 | 1000 | 6 |\n| legacy-2 |  | 旧行的方向（表头说 6 列、本行只有 5 格） | 旧行的预期产出 | 900 | 3 |\n\n## 种子队列\n| 优先级 | 方向 | 来源 | 约束 |\n| --- | --- | --- | --- |\n| P1 | 语料 01 的方向甲 | 种子库 | 只读语料 |\n\n## 收藏待办\n| 别名 | 摘要 | 时间 |\n| --- | --- | --- |\n| wb-1 | 上一轮交付摘要 | 990 |\n\n## 断点\n语料 01：新表头 + 存量旧行混排。\n",
+    "roundTrip": {
+      "coord": {
+        "root": "/corpus/01",
+        "verify": "bun run typecheck",
+        "seedDoc": "docs/seed.md"
+      },
+      "breath": 3,
+      "seq": 11,
+      "workers": [
+        {
+          "alias": "wb-1",
+          "sessionId": "aaaabbbbccccddddeeeeffff00001111",
+          "domain": "ui",
+          "task": "修状态栏 | 语义（转义竖线）",
+          "dispatchedAt": 1000,
+          "round": 4,
+          "status": "running"
+        },
+        {
+          "alias": "wb-2",
+          "sessionId": "bbbbaaaaccccddddeeeeffff11110000",
+          "domain": "ui",
+          "task": "任务甲 | 带裸竖线 | 交付乙",
+          "dispatchedAt": 1000,
+          "round": 5,
+          "status": "idle"
+        }
+      ],
+      "inflight": [
+        {
+          "alias": "wb-2",
+          "sessionId": "",
+          "direction": "空会话列的新版行",
+          "deliverable": "交付乙",
+          "dispatchedAt": 1000,
+          "round": 5
+        },
+        {
+          "alias": "wb-1",
+          "sessionId": "aaaabbbbccccddddeeeeffff00001111",
+          "direction": "新版方向丙 | 溢格",
+          "deliverable": "交付丙",
+          "dispatchedAt": 1000,
+          "round": 6
+        },
+        {
+          "alias": "legacy-2",
+          "sessionId": "",
+          "direction": "旧行的方向（表头说 6 列、本行只有 5 格）",
+          "deliverable": "旧行的预期产出",
+          "dispatchedAt": 900,
+          "round": 3
+        }
+      ],
+      "seeds": [
+        {
+          "priority": "P1",
+          "direction": "语料 01 的方向甲",
+          "source": "种子库",
+          "constraint": "只读语料"
+        }
+      ],
+      "pending": [
+        {
+          "alias": "wb-1",
+          "summary": "上一轮交付摘要",
+          "at": 990
+        }
+      ],
+      "note": "语料 01：新表头 + 存量旧行混排。"
+    }
+  },
+  "02-legacy-header-mixed.md": {
+    "state": {
+      "coord": {
+        "root": "/corpus/02",
+        "verify": "bun test packages/agents/src/agents/shengsheng/"
+      },
+      "breath": 17,
+      "seq": 40,
+      "workers": [
+        {
+          "alias": "wb-1",
+          "sessionId": "aaaabbbbccccddddeeeeffff00001111",
+          "domain": "workbench-ui",
+          "task": "任务里带裸竖线：mode==='view' | stat.editable===false",
+          "dispatchedAt": 1792087248971,
+          "round": 38,
+          "status": "idle"
+        },
+        {
+          "alias": "legacy-2",
+          "sessionId": "bbbbaaaaccccddddeeeeffff11110000",
+          "domain": "legacy",
+          "task": "旧版工具写下的历史任务",
+          "dispatchedAt": 1792087248971,
+          "round": 40,
+          "status": "running"
+        }
+      ],
+      "inflight": [
+        {
+          "alias": "legacy-2",
+          "sessionId": "",
+          "direction": "旧行方向含裸竖线",
+          "deliverable": "预期产出乙",
+          "dispatchedAt": 1000,
+          "round": 4
+        },
+        {
+          "alias": "wb-1",
+          "sessionId": "",
+          "direction": "aaaabbbbccccddddeeeeffff00001111",
+          "deliverable": "交付甲 | 带竖线",
+          "dispatchedAt": 1000,
+          "round": 5
+        },
+        {
+          "alias": "ghost-9",
+          "sessionId": "",
+          "direction": "无线索的旧行方向",
+          "deliverable": "",
+          "dispatchedAt": 900,
+          "round": 12
+        }
+      ],
+      "seeds": [],
+      "pending": [],
+      "note": "语料 02：旧表头 + 两难格 + 无线索行。"
+    },
+    "sessions": [
+      "bbbbaaaaccccddddeeeeffff11110000",
+      "aaaabbbbccccddddeeeeffff00001111",
+      null
+    ],
+    "rendered": "> 生生调度状态（`shengsheng_state` 托管，勿手改）。\n\n## 项目坐标\n- 项目根：/corpus/02\n- 验证命令：bun test packages/agents/src/agents/shengsheng/\n\n## 计数\n- 呼吸：17\n- 派工序号：40\n\n## worker 池\n| 别名 | 会话 | 领域 | 任务 | 派发时间 | 轮次 | 状态 |\n| --- | --- | --- | --- | --- | --- | --- |\n| wb-1 | aaaabbbbccccddddeeeeffff00001111 | workbench-ui | 任务里带裸竖线：mode==='view' \\| stat.editable===false | 1792087248971 | 38 | idle |\n| legacy-2 | bbbbaaaaccccddddeeeeffff11110000 | legacy | 旧版工具写下的历史任务 | 1792087248971 | 40 | running |\n\n## 在途\n| 别名 | 会话 | 方向 | 预期产出 | 派发时间 | 轮次 |\n| --- | --- | --- | --- | --- | --- |\n| legacy-2 |  | 旧行方向含裸竖线 | 预期产出乙 | 1000 | 4 |\n| wb-1 |  | aaaabbbbccccddddeeeeffff00001111 | 交付甲 \\| 带竖线 | 1000 | 5 |\n| ghost-9 |  | 无线索的旧行方向 |  | 900 | 12 |\n\n## 种子队列\n（空）\n\n## 收藏待办\n（空）\n\n## 断点\n语料 02：旧表头 + 两难格 + 无线索行。\n",
+    "roundTrip": {
+      "coord": {
+        "root": "/corpus/02",
+        "verify": "bun test packages/agents/src/agents/shengsheng/"
+      },
+      "breath": 17,
+      "seq": 40,
+      "workers": [
+        {
+          "alias": "wb-1",
+          "sessionId": "aaaabbbbccccddddeeeeffff00001111",
+          "domain": "workbench-ui",
+          "task": "任务里带裸竖线：mode==='view' | stat.editable===false",
+          "dispatchedAt": 1792087248971,
+          "round": 38,
+          "status": "idle"
+        },
+        {
+          "alias": "legacy-2",
+          "sessionId": "bbbbaaaaccccddddeeeeffff11110000",
+          "domain": "legacy",
+          "task": "旧版工具写下的历史任务",
+          "dispatchedAt": 1792087248971,
+          "round": 40,
+          "status": "running"
+        }
+      ],
+      "inflight": [
+        {
+          "alias": "legacy-2",
+          "sessionId": "",
+          "direction": "旧行方向含裸竖线",
+          "deliverable": "预期产出乙",
+          "dispatchedAt": 1000,
+          "round": 4
+        },
+        {
+          "alias": "wb-1",
+          "sessionId": "",
+          "direction": "aaaabbbbccccddddeeeeffff00001111",
+          "deliverable": "交付甲 | 带竖线",
+          "dispatchedAt": 1000,
+          "round": 5
+        },
+        {
+          "alias": "ghost-9",
+          "sessionId": "",
+          "direction": "无线索的旧行方向",
+          "deliverable": "",
+          "dispatchedAt": 900,
+          "round": 12
+        }
+      ],
+      "seeds": [],
+      "pending": [],
+      "note": "语料 02：旧表头 + 两难格 + 无线索行。"
+    }
+  }
+}

@@ -4,6 +4,23 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
 import { def as shengshengDef, parseControl, renderControl, dedupeState, inflightSession, isSessionIdShape } from "./shengsheng"
+// 版本化解析模块（本单新抽）：判代/位置读取/升级函数与其版本声明——单测直接锁它的契约
+import {
+  parseInflightRow,
+  parseInflightLine,
+  migrateInflight,
+  parsePoolRow,
+  migratePool,
+  selectInflightVer,
+  selectPoolVer,
+  inflightHeader,
+  inflightCells,
+  poolHeader,
+  POOL_VERSIONS,
+  INFLIGHT_VERSIONS,
+  INFLIGHT_CURRENT,
+  POOL_CURRENT,
+} from "./control-format"
 
 /** 测试内复刻 `inflightIdentity`（未导出）：断言按会话 id 认帐时用同一判据。 */
 const inflightIdentityForTest = (i: { alias: string; sessionId?: string }, workers: Array<{ alias: string; sessionId: string }>): string =>
@@ -1562,5 +1579,222 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
     expect(st.inflight).toHaveLength(1)                                // 同会话（旧行经池解析）→ 归一
     expect(st.inflight[0].round).toBe(9)                               // 幸存者是轮次更大那条
     expect(st.inflight[0].sessionId).toBe(SID)
+  })
+
+  // ------------------------------------------------------------------
+  // 版本化解析：把「格式版本 + 升级函数」从散落的旧行分支里抽成显式小模块。
+  //
+  // 两节：① **等价性基线**——逐字节对照（语料 × 现场 × 写入），保证重构不改行为；
+  //       ② **版本契约**——判代是显式可断言的（`parseInflightRow` 回 `{ ver, fields }`），
+  //          多代行混排各归各代，加列只需加一支版本分支。
+  // ------------------------------------------------------------------
+
+  test("版本化解析·等价性基线：多版本语料上 parseControl/renderControl 与升级前逐字节一致（含写入等价性）", () => {
+    // 黄金基线从**升级前**的实现捕获、随语料入库（只读）：重构后必须逐字节不变。
+    // 比对的四维：state（解析结果）、sessions（每条在途归哪个会话——身份键不许漂）、
+    // rendered（**写入等价性**：已落盘 control.md 的渲染结果不许变）、roundTrip（写入→重读恒等）。
+    const golden = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "control-format-corpus", "golden.json"), "utf8")) as Record<
+      string,
+      { state: unknown; sessions: unknown; rendered: string; roundTrip: unknown }
+    >
+    expect(Object.keys(golden).sort()).toEqual(["01-new-header-mixed.md", "02-legacy-header-mixed.md"])
+    for (const [file, g] of Object.entries(golden)) {
+      const md = readFileSync(join(import.meta.dir, "fixtures", "control-format-corpus", file), "utf8")
+      const st = parseControl(md)
+      // `toStrictEqual`：**字段存在性也算契约**（旧代必须补 `sessionId: ""` 而不是缺这个键——
+      // 对象形状与现行版一致是往返恒等与下游取数的前提）。
+      expect(st, `${file} 解析结果等价`).toStrictEqual(g.state as never)
+      expect(st.inflight.map((i) => inflightSession(i, st.workers) ?? null), `${file} 会话归属等价`).toStrictEqual(g.sessions as never)
+      expect(renderControl(st), `${file} 渲染逐字节等价`).toBe(g.rendered)
+      expect(parseControl(renderControl(st)), `${file} 往返恒等`).toStrictEqual(g.roundTrip as never)
+      // 旧代行必带 `sessionId` 这个键（不能是缺键）——统一形状是升级函数的职责
+      for (const i of st.inflight) expect(Object.keys(i)).toContain("sessionId")
+    }
+    // 现场 ③：本仓存量旧格式夹具（`.evolve/control.md` 的在途表就长这样）也不得变形
+    const legacy = parseControl(LEGACY_FIXTURE)
+    expect(renderControl(legacy)).toBe(renderControl(parseControl(renderControl(legacy))))
+  })
+
+  test("版本契约：判代是显式的（ver 可断言），多代行混排各归各代，加列只需加一支版本分支", () => {
+    const SID = "aaaabbbbccccddddeeeeffff00001111"
+    const pool = new Set([SID])
+
+    // —— 版本声明表自身的契约（“加一列 = 加一支版本分支”的机制保证）——
+    // 版本号严格递增、列名不重复、列数即表头声明数；现行版就是声明表的最后一条。
+    for (const [name, decls] of [
+      ["在途", INFLIGHT_VERSIONS as ReadonlyArray<{ ver: number; columns: readonly string[] }>],
+      ["池", POOL_VERSIONS as ReadonlyArray<{ ver: number; columns: readonly string[] }>],
+    ] as const) {
+      expect(decls.length, `${name}至少两代`).toBeGreaterThanOrEqual(2)
+      decls.forEach((d, i) => {
+        expect(d.ver, `${name}版本号递增`).toBe(i + 1)
+        if (i) expect(d.columns.length, `${name}只加列不减列`).toBeGreaterThanOrEqual(decls[i - 1].columns.length)
+        expect(new Set(d.columns).size, `${name}列名不重复`).toBe(d.columns.length)
+        if (i) for (const col of decls[i - 1].columns) expect(d.columns, `${name}既有列保留`).toContain(col)
+      })
+    }
+    expect(INFLIGHT_CURRENT).toBe(INFLIGHT_VERSIONS[INFLIGHT_VERSIONS.length - 1].ver)
+    expect(POOL_CURRENT).toBe(POOL_VERSIONS[POOL_VERSIONS.length - 1].ver)
+    // 自带会话列只在末代（现行）为真——它正是本次版本化的核心差异
+    expect(INFLIGHT_VERSIONS.filter((v) => v.ownSession).map((v) => v.ver)).toEqual([INFLIGHT_CURRENT])
+    // **加列只动声明**的可验证保证（“判代不得写死代次/列数”——这正是散落旧行分支的病根）：
+    // ① 每代的**位置声明**只能提字段名（不得出现表外的键：升级函数不认的键就是死声明）；
+    // ② 判代是**纯函数**（同一输入两次调用同结果）——不与调用次序/残留状态相关；
+    // ③ 判代按**声明的列数**判“本行装得下哪一代”（见下各条正向用例：v1/v2/v3 的边界就是列数）。
+    const inflightKeys = new Set(["alias", "sessionId", "direction", "deliverable", "dispatchedAt", "round"])
+    const poolKeys = new Set(["alias", "sessionId", "domain", "task", "dispatchedAt", "round", "status"])
+    for (const d of INFLIGHT_VERSIONS) for (const k of Object.keys(d.read)) expect(inflightKeys, `在途#${d.ver} 位置声明的键须是已知字段`).toContain(k)
+    for (const d of POOL_VERSIONS) for (const k of Object.keys(d.read)) expect(poolKeys, `池#${d.ver} 位置声明的键须是已知字段`).toContain(k)
+    const probeRow = ["a", SID, "方向", "产出", "100", "3"]
+    expect(selectInflightVer(probeRow, { declared: 6 })).toBe(selectInflightVer(probeRow, { declared: 6 }))
+    expect(parseInflightRow(probeRow, { declared: 6 })).toEqual(parseInflightRow(probeRow, { declared: 6 }))
+    const probePool = ["a", SID, "d", "t", "100", "7", "idle"]
+    expect(selectPoolVer(probePool, { declared: 7 })).toBe(selectPoolVer(probePool, { declared: 7 }))
+    // 行入口（parseInflightLine）与格入口（parseInflightRow）同源：给出同一 `{ ver, fields }`
+    expect(parseInflightLine(`| a | ${SID} | 方向 | 产出 | 100 | 3 |`, { declared: 6 })).toEqual(parseInflightRow(["a", SID, "方向", "产出", "100", "3"], { declared: 6 }))
+
+    // —— 判代（在途）：每一档证据各自的判代结果——
+    // v3：自带会话列（形状档 / 同源档 / 空值档）
+    expect(parseInflightRow(["a", SID, "方向", "产出", "100", "3"], { declared: 6 }).ver).toBe(3)
+    expect(parseInflightRow(["a", SID, "方向", "产出", "100", "3"], { declared: 6, poolSessions: pool }).ver).toBe(3)
+    expect(parseInflightRow(["a", "", "方向", "产出", "100", "3"], { declared: 6 }).ver).toBe(3)
+    // v3：表头正对位（6 格且声明 6 列）——即使会话列不像 id、也不在池里
+    expect(parseInflightRow(["a", "手写的会话", "方向", "产出", "100", "3"], { declared: 6 }).ver).toBe(3)
+    // v3：非 32hex 但**在池里认得**（同源档）——溢了格也认
+    expect(parseInflightRow(["a", "sess-abc", "方向", "溢格", "产出", "100", "3"], { declared: 6, poolSessions: new Set(["sess-abc"]) }).ver).toBe(3)
+    // v2：表头说旧版（声明 5 列）——无论第 2 格长得像不像会话 id，都不升格
+    expect(parseInflightRow(["a", SID, "方向", "产出", "100", "3"], { declared: 5, poolSessions: pool }).ver).toBe(2)
+    // v2：无表头声明 + 6 格 + 第 2 格不像会话 id（**两难格**）——按保守一侧读旧版
+    expect(parseInflightRow(["a", "方向碎片", "方向甲", "产出", "100", "3"], {}).ver).toBe(2)
+    // v2：格数 ≥ 5（5 格、7 格都算）——尾列锚定对溢格也是正确读法
+    expect(parseInflightRow(["a", "方向", "产出", "100", "3"], {}).ver).toBe(2)
+    expect(parseInflightRow(["a", "方向", "产出1", "产出2", "100", "3"], {}).ver).toBe(2)
+    // v1：无轮次列（4 格）——轮次为 0，不再拿第 3 格当时间
+    expect(parseInflightRow(["a", "方向", "产出", "100"], {}).ver).toBe(1)
+    // **判代先看“本行装得下哪一代”**（列数就是边界）：只 5 格的行即便第 2 格像会话 id、池里也认得，
+    // 也不得升格为 v3——5 格里根本没有「会话」那一列，第 2 格就是方向本身
+    //（旧行的方向恰是一串 hash 的形态）。否则方向会被当成会话→探一个不存在的会话→假阳性。
+    const fiveCell = parseInflightRow(["a", SID, "方向", "产出", "100"], { declared: 6, poolSessions: pool })
+    expect(fiveCell.ver).toBe(2)
+    expect(fiveCell.fields.direction).toBe(SID)
+
+    // —— 升级函数：各代 → 现行形态（字段齐全、类型定型） ——
+    expect(migrateInflight(parseInflightRow(["a", "方向", "产出", "100"], {}))).toEqual({ alias: "a", sessionId: "", direction: "方向", deliverable: "产出", dispatchedAt: 100, round: 0 })
+    expect(migrateInflight(parseInflightRow(["a", SID, "方向", "产出", "100", "7"], { declared: 6 }))).toEqual({ alias: "a", sessionId: SID, direction: "方向", deliverable: "产出", dispatchedAt: 100, round: 7 })
+
+    // —— 判代（池）：表头声明即代次 ——
+    expect(parsePoolRow(["a", SID, "d", "t", "100", "7", "idle"], { declared: 7 }).ver).toBe(2)
+    expect(parsePoolRow(["a", SID, "d", "t", "100", "idle"], { declared: 6 }).ver).toBe(1)
+    // 池表 v1 行的**历史读法**（本单只做抽取、不改语义）：v1 没有「轮次」列，而尾锚点仍按**历史上那一组**取——
+    // 故 6 格 v1 行的「状态」位落到第 6 格（idle→idle）、时间位落到第 5 格（非数字→0）。
+    // 这是已由既有用例盖住的旧行为，**不得在重构里「顺手改正」**（要修正须单独一单 + 专门用例）。
+    expect(migratePool(parsePoolRow(["a", SID, "d", "t", "派发时间甲", "idle"], { declared: 6 })))
+      .toEqual({ alias: "a", sessionId: SID, domain: "d", task: "t", dispatchedAt: 0, round: 0, status: "idle" })
+    // 对照：**v2** 行（声明 7 列）在同一组锚点上是正确的——时间取第 5 格、轮次第 6 格、状态第 7 格
+    expect(migratePool(parsePoolRow(["a", SID, "d", "t", "100", "7", "idle"], { declared: 7 })))
+      .toEqual({ alias: "a", sessionId: SID, domain: "d", task: "t", dispatchedAt: 100, round: 7, status: "idle" })
+
+    // —— 现行表头与格（写出侧）与版本声明同源，不会各写各的 ——
+    expect(inflightHeader()).toEqual(["别名", "会话", "方向", "预期产出", "派发时间", "轮次"])
+    expect(poolHeader()).toEqual(["别名", "会话", "领域", "任务", "派发时间", "轮次", "状态"])
+    expect(inflightCells({ alias: "a", sessionId: undefined, direction: "d", deliverable: "p", dispatchedAt: 1, round: 2 })).toEqual(["a", "", "d", "p", "1", "2"])
+
+    // ================================================================
+    // 多版本行**同一张表混排**：判代逐行独立，各归各代，谁也不带偏谁。
+    // 语料的表头是**新版**（声明 6 列）而盘上有历代写下的行（工具升级不迁移数据）：
+    // ================================================================
+    const POOL = ["## worker 池", "| 别名 | 会话 | 领域 | 任务 | 派发时间 | 轮次 | 状态 |", "| --- | --- | --- | --- | --- | --- | --- |"]
+    const TAIL = ["", "## 种子队列", "（空）", "", "## 收藏待办", "（空）", "", "## 断点", "（无）", ""]
+    const doc = (flightHead: string[], rows: string[]) =>
+      ["## 项目坐标", "- 项目根：/x", "", "## 计数", "- 呼吸：1", "- 派工序号：9", "", ...POOL, `| wb-1 | ${SID} | d | t | 100 | 9 | idle |`, "", "## 在途", ...flightHead, ...rows, ...TAIL].join("\n")
+    const HEAD_NEW = ["| 别名 | 会话 | 方向 | 预期产出 | 派发时间 | 轮次 |", "| --- | --- | --- | --- | --- | --- |"]
+    // 四代形态同表（新表头下）：v1 残行 / v2 旧行 / v2 溢格旧行 / v3 自带列行 / v3 空会话列行
+    // 别名各自区分：同名会因「无从核会话时退化为别名」而先被归一到一条，反而看不清单行判代。
+    const mixed = doc(HEAD_NEW, [
+      "| m-1 | 只有四格的残行 | 产出甲 | 700 |",                          // v1（盘上格数 < 5）
+      "| m-2 | 旧行方向 | 产出乙 | 800 | 3 |",                           // v2（恰 5 格）
+      "| m-3 | 旧行方向（含裸竖线）| 溢出甲 | 溢出乙 | 产出丙 | 800 | 4 |",    // v2 溢格（7 格 → 对齐档不成立）
+      `| m-4 | ${SID} | 新版方向 | 产出丁 | 900 | 5 |`,                  // v3（形状/同源档）
+      "| m-5 |  | 空会话列的新版行 | 产出戊 | 950 | 6 |",               // v3（空值档）
+    ])
+    const st = parseControl(mixed)
+    const byAlias = (a: string) => st.inflight.find((i) => i.alias === a)!
+    // **升级后形状统一**：不管哪一代读进来的，在途条目都是现行形态——六列全在（旧代缺的列补空值），
+    // 不因代次而缺键（缺键会让下游取数与序列化各处各防一遍）。
+    for (const i of st.inflight) expect(Object.keys(i).sort(), `升级后六列齐备（${i.alias}）`).toEqual(["alias", "deliverable", "direction", "dispatchedAt", "round", "sessionId"])
+    // v1 行：轮次为 0（盘上无此列）；时间取第 4 格
+    expect(byAlias("m-1")).toMatchObject({ direction: "只有四格的残行", deliverable: "产出甲", dispatchedAt: 700, round: 0, sessionId: "" })
+    // v2 行：会话列为空、尾列取行尾两位
+    expect(byAlias("m-2")).toMatchObject({ direction: "旧行方向", deliverable: "产出乙", dispatchedAt: 800, round: 3, sessionId: "" })
+    // v2 溢格行：溢出的格并回交付（不丢正文）、会话列不得从碎片里长出来
+    expect(byAlias("m-3")).toMatchObject({ direction: "旧行方向（含裸竖线）", deliverable: "溢出甲 | 溢出乙 | 产出丙", dispatchedAt: 800, round: 4, sessionId: "" })
+    expect(inflightSession(byAlias("m-2"), st.workers)).toBeUndefined()   // 别名不在池里 → 无从核实（不谎报）
+    // v3 行：会话列自带 / 空值——方向**不得**被下一格顶掉
+    expect(byAlias("m-4")).toMatchObject({ direction: "新版方向", deliverable: "产出丁", dispatchedAt: 900, round: 5, sessionId: SID })
+    expect(byAlias("m-5")).toMatchObject({ direction: "空会话列的新版行", deliverable: "产出戊", dispatchedAt: 950, round: 6, sessionId: "" })
+    // 混排不归一为一条：只有 m-4 归到池里那个会话（另四条无会话线索 → 各留一条，不误杀）
+    expect(st.inflight).toHaveLength(5)
+    expect(st.inflight.filter((i) => inflightSession(i, st.workers) === SID)).toHaveLength(1)
+    // 混排现场**写入等价**：渲染→重读不再变（判代稳定，不会每渲染一次就换一代）
+    expect(parseControl(renderControl(st))).toEqual(st)
+
+    // 反向：**旧表头**（声明 5 列）下的同批行仍各归各代——旧表头不因行像新版就升格
+    const HEAD_OLD = ["| 别名 | 方向 | 预期产出 | 派发时间 | 轮次 |", "| --- | --- | --- | --- | --- |"]
+    const old = parseControl(doc(HEAD_OLD, [
+      `| wb-1 | ${SID} | 交付甲 | 800 | 3 |`,                            // 两难格：按旧版读（第 2 格是方向、不是会话）
+      "| o-2 | 旧行方向 | 产出乙 | 800 | 4 |",                          // 普通旧行（别名不在池 → 无从核实）
+    ]))
+    expect(old.inflight.find((i) => i.alias === "wb-1")).toMatchObject({ sessionId: "", direction: SID, deliverable: "交付甲", round: 3, dispatchedAt: 800 })
+    expect(inflightSession(old.inflight.find((i) => i.alias === "wb-1")!, old.workers)).toBe(SID)   // 会话仍经池认得
+    expect(old.inflight.find((i) => i.alias === "o-2")).toMatchObject({ sessionId: "", direction: "旧行方向", round: 4 })
+  })
+
+  test("加一列只动声明：给在途表加一代（v4）后，判代/位置读取/升级函数**一行不改**即能读新旧混排行", () => {
+    // 本用例是「版本化解析」这个抽象的**可执行证人**：不靠文字声称“日后加列很容易”，而是真的
+    // 在运行时把声明表加一条 v4（尾部加「心跳」列），再用**原封不动的** `selectInflightVer` /
+    // `parseInflightRow` / `migrateInflight`（仅多传一个「声明表」参数）去读它。
+    // 若哪天有人把版本号写死回判代函数里（`c.length >= 6`、`declared === 6` 那类），本条立刻红。
+    const SID = "aaaabbbbccccddddeeeeffff00001111"
+    // 加一列要动的东西全在这里：① 版本号类型（TS 侧）；② 一条版本声明；③ 现行版本标记；
+    // ④ 写出侧 `inflightCells`（新列要落盘）。**判代/位置读取/升级函数不在此列**——这正是收益所在。
+    const V4 = {
+      ver: 4 as const,
+      columns: ["别名", "会话", "方向", "预期产出", "派发时间", "轮次", "心跳"],
+      ownSession: true,
+      read: { alias: { at: 0 }, sessionId: { at: 1 }, direction: { at: 2 }, deliverable: { at: 3, overflow: true }, dispatchedAt: { fromEnd: 3 }, round: { fromEnd: 2 } },
+    }
+    // 声明表扩表版（类型上宽一格：`ver` 是联合类型，演示扩表故显式放宽）
+    const extended = [...INFLIGHT_VERSIONS, V4] as unknown as typeof INFLIGHT_VERSIONS
+    const extendedVersions = extended as unknown as ReadonlyArray<import("./control-format").InflightVersion>
+
+    // 同一张表（表头声明 7 列，含新列）里混排 v4 / v3 / v2 行：各代**各归各代**
+    const ctx = { declared: 7, poolSessions: new Set([SID]) }
+    const rows: Array<[string, string[], number, number, number]> = [
+      ["v4", ["a4", SID, "方向", "产出", "1000", "9", "0"], 4, 1000, 9],   // 多了新列 → 尾锚点整体后移一位
+      ["v3", ["a3", SID, "方向", "产出", "1000", "8"], 3, 1000, 8],
+      ["v2", ["a2", "旧行方向", "产出", "1000", "7"], 2, 1000, 7],
+    ]
+    for (const [label, c, wantVer, wantAt, wantRound] of rows) {
+      // **真实现**、只多传一个声明表
+      const parsed = parseInflightRow(c, ctx, extendedVersions)
+      const m = migrateInflight(parsed)
+      // `ver` 的类型是联合类型（今天的 1|2|3）——扩表后会带上 4，故断言处宽化为 number 比较
+      expect(parsed.ver as number, `${label} 判代`).toBe(wantVer)
+      expect(m.dispatchedAt, `${label} 派发时间`).toBe(wantAt)
+      expect(m.round, `${label} 轮次`).toBe(wantRound)
+      // 升级后形状统一（该代没有的列 → 空值，而不是缺键）
+      expect(m.sessionId ?? "", `${label} 会话`).toBe(label === "v2" ? "" : SID)
+    }
+    // v4 行必须被认成 v4（新代在心）——若判代只试到 v3，尾锚点会错位（在时间/轮次上看到）
+    expect(parseInflightRow(["a4", SID, "方向", "产出", "1000", "9", "0"], ctx, extendedVersions).ver as number).toBe(4)
+    // **声明次序不必等于列数次序**：把声明表故意写成「v4 在 v3 之前」（人工编辑/合并冲突后的常见形态），
+    // 7 格的 v4 行仍必须被判成 v4——这就是判代里「列数降序试」的必要性（按声明次序试会先撞上 v3）。
+    const shuffled = [V4, ...INFLIGHT_VERSIONS] as unknown as ReadonlyArray<import("./control-format").InflightVersion>
+    expect(shuffled[0].ver as number, "声明表确实被写乱了").toBe(4)
+    expect(parseInflightRow(["a4", SID, "方向", "产出", "1000", "9", "0"], ctx, shuffled).ver as number, "打乱声明次序也要判对").toBe(4)
+    expect(parseInflightRow(["a3", SID, "方向", "产出", "1000", "8"], ctx, shuffled).ver as number).toBe(3)
+    // 真实现今日的现行版仍是 v3（本用例只在旁路演示扩表，不改现行声明）
+    expect(INFLIGHT_CURRENT).toBe(3)
+    expect(extended.length).toBe(INFLIGHT_VERSIONS.length + 1)
   })
 })

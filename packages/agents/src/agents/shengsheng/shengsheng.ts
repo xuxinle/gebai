@@ -15,6 +15,24 @@
 import type { SubAgentDef, Tool, ToolContext } from "@gebai/sdk"
 // 系统提示词拆为独立 md 维护（目录形式约定：{dir}/{dir}.md）。
 import systemPromptBase from "./shengsheng.md" with { type: "text" }
+// control.md 两张登记表的**格式版本与版本化解析**（在途/池的历代列、证据判代、升级函数）
+// 拆在独立模块：加列只需在那里加一支版本分支，本模块只认现行形态（下游零改动）。
+import {
+  tableBlock,
+  tableRows,
+  parseInflightRow,
+  migrateInflight,
+  inflightHeader,
+  inflightCells,
+  parsePoolRow,
+  migratePool,
+  poolHeader,
+  poolCells,
+} from "./control-format"
+
+// 解析面的公共出口（**兼容面**：形状判据与表格读取历来由此模块导出，其它模块/测试按其引用；
+// 实现在 `control-format.ts`，此处只做转出——单一实现，不会两处各写一份）。
+export { cells, isSeparator, tableBlock, tableRows, isSessionIdShape } from "./control-format"
 
 function schema(properties: Record<string, unknown>, required: string[] = []) {
   return { type: "object", properties, required } as Tool["parameters"]
@@ -138,40 +156,6 @@ function evolvePaths(root: string): { dir: string; control: string; ledger: stri
   return { dir, control: `${dir}/control.md`, ledger: `${dir}/ledger.md` }
 }
 
-/** 表格行拆分（`| a | b |` → ["a","b"]）——**转义感知**：`\|` 是正文里的字面竖线、不是分隔符。
- *
- * 为什么必须认转义：`renderTable` 把正文的 `|` 写成 `\|`（历代渲染器都如此），而切分不认转义时，
- * 含一个竖线的字段就**多切一格**——在「在途」表里这一格足以把旧格式行（5 列）顶成新版行（6 列）：
- * 会话列被填成方向的碎片，读态拿这个伪线索去探一个不存在的会话，可达会话于是被判「中道而废」
- * （正是身份键单一化要堵的那类假阳性，只是从旧格式这一侧重新漏进来）。
- *
- * 只认 `\|` 一种转义、不认 `\\`：历代渲染器只转义竖线，正文里的反斜杠是**原样写下**的——若一律
- * 吃掉反斜杠，`C:\Users` 会被蚀成 `C:Users`。而「只转义 `|`」与「只认 `\|`」恰好互为逆运算，
- * 任何字段（含反斜杠、含竖线）都能无损往返，历史内容也无须改写。 */
-function cells(line: string): string[] {
-  const body = line.trim().replace(/^\|/, "").replace(/\|$/, "")
-  const out: string[] = []
-  let cur = ""
-  for (let i = 0; i < body.length; i++) {
-    const ch = body[i]
-    if (ch === "\\" && body[i + 1] === "|") {
-      cur += "|"
-      i += 1
-      continue
-    }
-    if (ch === "|") {
-      out.push(cur.trim())
-      cur = ""
-      continue
-    }
-    cur += ch
-  }
-  out.push(cur.trim())
-  return out
-}
-
-const isSeparator = (line: string): boolean => /^\|[\s:|-]+\|$/.test(line.trim())
-
 // ---------------------------------------------------------------------------
 // 登记去重（主键 = 会话 id）：同一会话只保留最新一轮
 // ---------------------------------------------------------------------------
@@ -231,18 +215,6 @@ export function inflightSession(i: Inflight, workers: Worker[]): string | undefi
   return i.sessionId || aliasToSession(workers).get(i.alias) || undefined
 }
 
-/** 会话 id 的形状（在途表「会话」列的辨识依据）：存储层白名单就是 `^[0-9a-f]{32}$`
- *  （见 `packages/server/src/core/base/paths.ts` 的 `isValidSessionId`——会话 id 是 `randomUUID()` 去连字符，
- *  飞书桥接的确定性 id 是 sha256 前 32 位 hex，两路都落在这个形状里）。
- *
- * 用它挡「旧格式行被误当新版行」：旧行没有会话列，而自由文本（方向/交付）里一个**裸竖线**（旧渲染器
- * 不转义）就能让旧行多切一格、把方向碎片顶到会话位上。形状不符时**选保守一侧**——不认这一格是会话：
- * 认错（把碎片当 id）= 拿伪线索去探一个不存在的会话 → 可达会话被判「中道而废」（假阳性）；
- * 不认（丢掉真 id）= 回落到池按别名解析同一会话，**值一模一样**。代价不对称，故形状可据。 */
-export function isSessionIdShape(v: string): boolean {
-  return /^[0-9a-f]{32}$/.test(v.trim())
-}
-
 /** 会话 id 短形（回显用：完整 id 不丢，短形只为对齐与可读）。 */
 function idShort(id: string | undefined): string {
   if (!id) return "（未登记）"
@@ -284,38 +256,6 @@ function returnToSeeds(state: EvolveState, rows: Inflight[], prefix: string, rea
   return pushed
 }
 
-/** 取 `## <标题>` 段落内的表格：数据行（跳过表头与分隔行；`（空）` 视为零条目）＋该表**表头声明的列数**。
- *
- * 为什么要把表头列数一并取出：它是这张表的**代次标志**（旧版在途表 5 列、新版 6 列）。
- * 行自身的格数在旧表里**不可靠**——旧渲染器不转义竖线（见 {@link cells}），正文里一个裸竖线
- * 就让旧行多切一格、长得像新版行。表头是同一个渲染器写的，与行的代次同源，比格数稳。 */
-function tableBlock(md: string, heading: string): { rows: string[][]; declared?: number } {
-  const lines = md.split(/\r?\n/)
-  const start = lines.findIndex((l) => l.trim() === `## ${heading}`)
-  if (start < 0) return { rows: [] }
-  const rows: string[][] = []
-  let declared: number | undefined
-  for (let i = start + 1; i < lines.length; i++) {
-    const line = lines[i]
-    if (/^##\s/.test(line.trim())) break
-    if (!line.trim().startsWith("|")) continue
-    if (isSeparator(line)) continue
-    const c = cells(line)
-    if (c[0] === "别名" || c[0] === "优先级" || c[0] === "键") {
-      declared = c.length // 表头
-      continue
-    }
-    if (c[0] === "（空）") continue
-    rows.push(c)
-  }
-  return { rows, declared }
-}
-
-/** 取 `## <标题>` 段落内的表格数据行（只有行、不看表头——种子/待办两表用）。 */
-function tableRows(md: string, heading: string): string[][] {
-  return tableBlock(md, heading).rows
-}
-
 /** 取 `## <标题>` 段落下的自由文本（非表格行）。 */
 function sectionText(md: string, heading: string): string {
   const lines = md.split(/\r?\n/)
@@ -345,56 +285,16 @@ export function parseControl(md: string | null): EvolveState {
   // 池先归一，在途再按归一的池解析别名 → 会话：**读进来就是干净的**，下游（读态/收藏/布雨）
   // 一律以「同一会话至多一条」为前提，不必各自再防一遍。
   const workBlock = tableBlock(md, "worker 池")
-  const workRows = workBlock.rows.map((c): Worker => {
-    // 池表两代列数一致（7 列）。时间/轮次/状态一律取**尾列**、任务列吃中间：正文里的竖线
-    // （转义或未转义）只可能落在任务列上，尾列是不受它影响的哨兵列。
-    const nth = (n: number) => c[c.length - n] ?? ""
-    return {
-      alias: c[0] ?? "",
-      sessionId: c[1] ?? "",
-      domain: c[2] ?? "",
-      task: c.length > 7 ? c.slice(3, c.length - 3).join(" | ") : c[3] ?? "",
-      dispatchedAt: Number(nth(3)) || 0,
-      round: Number(nth(2)) || 0,
-      status: nth(1) === "idle" ? "idle" : "running",
-    }
-  })
+  // 池工表：历代读法（版本声明、尾列锚点、溢格并回）全在 `control-format.ts` 里；
+  // 本处只做「取格 → 按版本升级为现行形态」。
+  const workRows = workBlock.rows.map((c): Worker => migratePool(parsePoolRow(c, { declared: workBlock.declared })))
   const flightBlock = tableBlock(md, "在途")
   // 池表先出“同文件证据”：在途会话列的辨识除了形状，还认「这一格就是池里某个 worker 的会话」——
   // 池是在途的登记源（派工写两侧），两侧同源、同文件，比形状更贴身份。
   const poolSessions = new Set(workRows.map((w) => w.sessionId).filter(Boolean))
-  const flightRows = flightBlock.rows.map((c): Inflight => {
-    // 在途表两代格式：旧版（无「会话」列，会话靠池解析）与现行版（自带会话 id）。
-    // 旧的补 `sessionId: ""` 占位：对象形状与新版一致，渲染→解析→渲染往返恒等。
-    //
-    // 为什么不能只看列数：方向/交付是自由文本，**旧版渲染器不转义竖线**，正文里一个裸竖线就让
-    // 旧行多切一格、长得像新版行，会话列被填成方向的碎片。误判的代价不对称：
-    // 把旧行读成新版 → 拿伪会话 id 去探一个不存在的会话 → 可达会话被判「中道而废」（假阳性）；
-    // 把新版行读成旧行 → 丢掉真会话 id，但可经池按别名解析回来（同会话并列两条会被归一，不误判）。
-    // 故会话列按**证据**辨识，不按格数（证据四档见下）。
-    // 表头声明 5 列 = 旧版在途表（无会话列），此时第 2 格就是方向本身。
-    const legacyHeader = flightBlock.declared !== undefined && flightBlock.declared <= 5
-    // 会话列在不在：看**证据**（不看整行格数——格数在旧表里不可靠，裸竖线会多切一格）。三档任一成立即认：
-    //   ① 形状：`^[0-9a-f]{32}$`（真实会话 id 只有这两路：randomUUID 去连字符 / 飞书 sha256 前 32 位）；
-    //   ② 同源：这一格**就是同文件池里某个 worker 的会话**（池是在途的登记源，两侧同源写入）；
-    //   ③ 对位：表头声明 6 列且本行恰 6 格——无溢格可言，「裸竖线把方向顶上来」没有发生的余地。
-    // 空值也算「有会话列」（新版行的会话列可以为空，此时方向不会顶到第 2 格上）。
-    //
-    // 其余一律按旧版读（表头说旧版、格 2 既非 id 也非空、少格——即“与本行/表头对不上”的一切形态）。
-    // 为什么保守一侧必须是旧版：**旧版读法也是新版行缺列时的正确读法**（会话列丢了，方向就落到第 2 格，
-    // 恰好对位）。而认错的代价不对称：把方向碎片当会话 → 拿伪线索探一个不存在的会话 →
-    // 可达会话被判「中道而废」（假阳性）；不认（丢掉真 id）→ 回落到池按别名解析同一会话，**值一模一样**。
-    const sessionCell = c[1] ?? ""
-    const aligned = flightBlock.declared === 6 && c.length === 6
-    const hasSessionCol = !legacyHeader && c.length >= 6 && (sessionCell === "" || isSessionIdShape(sessionCell) || poolSessions.has(sessionCell) || aligned)
-    // 尾列取数两代共用：正文里的竖线（转义未转义）只可能落在中间的**方向/预期产出**上，
-    // 派发时间/轮次总在行尾两个位——行越长（被竖线撑开）越不能按固定下标去取，否则取到的是正文。
-    const tailAt = c.length >= 5 ? c[c.length - 2] : c[3]
-    const tailRound = c.length >= 5 ? c[c.length - 1] : c[4]
-    if (!hasSessionCol) return { alias: c[0] ?? "", sessionId: "", direction: c[1] ?? "", deliverable: c.length > 5 ? c.slice(2, c.length - 2).join(" | ") : c[2] ?? "", dispatchedAt: Number(tailAt) || 0, round: Number(tailRound) || 0 }
-    // 新版行：会话列自带；方向吃下游的碎格（多切出来的格只能是正文里的竖线）
-    return { alias: c[0] ?? "", sessionId: sessionCell, direction: c[2] ?? "", deliverable: c.slice(3, c.length - 2).join(" | "), dispatchedAt: Number(tailAt) || 0, round: Number(tailRound) || 0 }
-  })
+  // 在途行同理：**判代（按证据，不看格数）+ 升级为现行形态**都在 `control-format.ts`——
+  // 旧代（无会话列）在此补 `sessionId: ""` 占位，对象形状与新版一致，渲染→解析→渲染往返恒等。
+  const flightRows = flightBlock.rows.map((c): Inflight => migrateInflight(parseInflightRow(c, { declared: flightBlock.declared, poolSessions })))
   // 池/在途**先清无会话 id 的坏行**再归一：去重的主键是会话 id，主键为空即不构成「同一会话」的并列
   // （无会话列的表头行、半截写入的残行）——不清会把它们当成合法登记留在盘上，而它们永远核不出会话。
   const workers = dedupeWorkers(workRows.filter((w) => w.alias && w.sessionId))
@@ -442,10 +342,10 @@ export function renderControl(state: EvolveState): string {
     `- 派工序号：${state.seq}`,
     "",
     "## worker 池",
-    renderTable(["别名", "会话", "领域", "任务", "派发时间", "轮次", "状态"], state.workers.map((w) => [w.alias, w.sessionId, w.domain, w.task, String(w.dispatchedAt), String(w.round), w.status])),
+    renderTable(poolHeader(), state.workers.map(poolCells)),
     "",
     "## 在途",
-    renderTable(["别名", "会话", "方向", "预期产出", "派发时间", "轮次"], state.inflight.map((i) => [i.alias, i.sessionId ?? "", i.direction, i.deliverable, String(i.dispatchedAt), String(i.round)])),
+    renderTable(inflightHeader(), state.inflight.map(inflightCells)),
     "",
     "## 种子队列",
     renderTable(["优先级", "方向", "来源", "约束"], state.seeds.map((s) => [s.priority, s.direction, s.source, s.constraint])),
