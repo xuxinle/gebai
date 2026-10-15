@@ -3,6 +3,10 @@
 .env.*
 !.env.example
 
+# 演进调度状态（生生 shengsheng 子Agent 托管：.evolve/control.md 与 ledger.md）——
+# 项目本地的驻留开发台账，非项目产物；多台机器/多开发者各自一份，不入库
+.evolve/
+
 # deps
 node_modules/
 

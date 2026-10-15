@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, existsSync } from "node:f
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
-import { def as shengshengDef, parseControl, renderControl } from "./shengsheng"
+import { def as shengshengDef, parseControl, renderControl, dedupeState, inflightSession } from "./shengsheng"
 
 const tool = (n: string) => shengshengDef.tools![n]
 
@@ -467,9 +467,10 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
     expect(lost.output).not.toContain("待收藏线索")
     expect(lost.output).toContain("中道而废")
     expect(lost.output).toContain("虚假产能")
-    const ld = lost.data as { awaiting: unknown[]; lost: unknown[] }
+    const ld = lost.data as { awaiting: unknown[]; gone: unknown[]; unresolved: unknown[] }
     expect(ld.awaiting).toHaveLength(0)
-    expect(ld.lost).toHaveLength(1)
+    expect(ld.gone).toHaveLength(1)
+    expect(ld.unresolved).toHaveLength(0)
     cleanup(s)
   })
 
@@ -559,5 +560,243 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
     // 未初始化时不再赘述池内容
     expect(existsSync(join(s.root, ".evolve", "control.md"))).toBe(true)
     cleanup(s)
+  })
+
+  test("根解析不跨会话泄漏：他根的 init 记忆不得成为本会话基线", async () => {
+    const a = stub()
+    const b = stub()
+    await tool("state").execute({ action: "init", root: a.root, verify: "bun test" }, a.ctx)
+    expect((await tool("state").execute({}, a.ctx)).output).toContain(a.root)
+
+    // 会话 B 未 init：记忆若按会话 ID 存，A 的根就会成为 B 的基线（B 的读/写打到 A 的项目上）
+    const readB = await tool("state").execute({}, b.ctx)
+    expect(readB.output).not.toContain(a.root)
+    expect(readB.output).toContain("action=init")
+    const addB = await tool("state").execute({ action: "seed_add", direction: "B 的种子" }, b.ctx)
+    expect(addB.output).toContain("action=init")
+    expect(controlOf(a)).not.toContain("B 的种子")
+    expect((await tool("state").execute({}, b.ctx)).output).toContain("action=init")
+    cleanup(a)
+    cleanup(b)
+  })
+
+  test("陈旧 env 不阻断：核不中即回落本会话记忆，写分支照常落地", async () => {
+    const s = stub()
+    const here = String(s.ctx.sessionWorkdir ?? s.ctx.workdir)
+    await tool("state").execute({ action: "init", root: here, verify: "bun test" }, s.ctx)
+    // 陈旧 env（指向已删路径的根）：不得据此判「初生」或让解析停在它上面
+    s.sessionEnv.SHENGSHENG_ROOT = join(s.home, "gone", "final-evolve")
+    const r = await tool("state").execute({}, s.ctx)
+    expect(r.output).not.toContain("final-evolve")
+    expect(r.output).toContain(here)
+    expect(r.output).toContain("init 记忆")
+    const add = await tool("state").execute({ action: "seed_add", direction: "陈旧 env 下仍可入队" }, s.ctx)
+    expect(add.output).toContain("种子入队")
+    expect(readFileSync(join(here, ".evolve", "control.md"), "utf8")).toContain("陈旧 env 下仍可入队")
+    cleanup(s)
+  })
+
+  test("续派：session_id 指定既有 worker 会话——沿用无人值守授权，不新建、不占新建额度，且不向池外会话外扩授权", async () => {
+    const s = stub()
+    await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+    await tool("dispatch").execute({ orders: [{ task: "首单", domain: "a" }, { task: "第二单", domain: "b" }, { task: "第三单", domain: "c" }] }, s.ctx)
+    const sid = s.sent[0].sessionId
+    const createdBefore = s.created.length
+    expect(createdBefore).toBe(3)
+
+    // 池满（活动上限 3）也不阻断续派：续派不改池容量
+    s.running.clear()
+    const r = await tool("dispatch").execute({ orders: [{ task: "接着干被中断的步骤", session_id: sid }] }, s.ctx)
+    expect(r.output).toContain("布雨完成")
+    expect(r.output).toContain("续派")
+    expect(s.created).toHaveLength(createdBefore)          // 不新建会话
+    // **续跑泄漏修复的核心断言**：续派同样以无人值守姿态运行（否则需审批工具各挂 5 分钟审批超时后被跳过）
+    expect(s.sent[s.sent.length - 1].opts).toEqual({ autoApprove: true, interactionMode: "none" })
+    // 续派消息点名「从中断处继续」（另一关键点：worker 不得从头重做或绕开被中断的步骤）
+    expect(s.sent[s.sent.length - 1].message).toContain("从中断处继续")
+    // 池内仍是 3 个 worker（旧条目按会话 upsert，不重复登记）
+    expect(parseControl(controlOf(s)).workers).toHaveLength(3)
+    expect(parseControl(controlOf(s)).workers.find((w) => w.sessionId === sid)!.alias).toBe("a-1")
+
+    // 授权面不外扩：session_id 只认池中登记的 worker 会话
+    const stranger = await tool("dispatch").execute({ orders: [{ task: "越权单", session_id: "sess-stranger" }] }, s.ctx)
+    expect(stranger.output).toContain("授权面不外扩")
+    expect(s.created).toHaveLength(createdBefore)
+    expect(s.sent).toHaveLength(4)                          // 未向非池会话注入
+    cleanup(s)
+  })
+
+  // ------------------------------------------------------------------
+  // 主键去重：同一会话连续两轮派工后，池/在途各只有一条当前登记
+  // （本机实测两次的缺陷：续派后同会话并列两条，旧条目被判「中道而废」）
+  // ------------------------------------------------------------------
+
+  test("续派去重：同一会话两轮派工后池/在途各一条当前登记（无第二条、无「不可达」假阳性）", async () => {
+    const s = stub()
+    await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+    await tool("dispatch").execute({ orders: [{ task: "第一轮", domain: "a" }] }, s.ctx)
+    const sid = s.sent[0].sessionId
+    const r1 = parseControl(controlOf(s)).workers[0].round
+
+    // 第一轮跑完（空闲）后**续派同一会话**——下一条在途必须取代上一条，而不是并列
+    s.running.clear()
+    const d = await tool("dispatch").execute({ orders: [{ task: "第二轮", session_id: sid }] }, s.ctx)
+    expect(d.output).toContain("续派")
+    expect(s.created).toHaveLength(1)                        // 未新建
+
+    const st = parseControl(controlOf(s))
+    expect(st.workers).toHaveLength(1)                       // 池：同会话只一条
+    expect(st.workers[0]).toMatchObject({ alias: "a-1", sessionId: sid })
+    expect(st.workers[0].round).toBeGreaterThan(r1)           // 旧轮已被新轮取代
+    expect(st.inflight).toHaveLength(1)                       // 在途：同会话只一条
+    expect(st.inflight[0]).toMatchObject({ alias: "a-1", sessionId: sid, direction: "第二轮" })
+    expect(st.workers[0].alias).toBe(st.inflight[0].alias)    // 池与在途同指一个「工人」
+
+    // 在途自带会话列 → 不依赖别名也核得出会话（“先探会话再判生死”的前提）
+    expect(inflightSession(st.inflight[0], st.workers)).toBe(sid)
+
+    // **假阳性回归**：会话可达且仍在运行 → 不得进「中道而废」、不得报「虚假产能」
+    s.running.add(sid)
+    const running = await tool("state").execute({}, s.ctx)
+    expect(running.output).not.toContain("中道而废")
+    expect(running.output).not.toContain("虚假产能")
+    expect((running.data as { lost?: unknown[] }).lost).toBeUndefined()
+    expect((running.data as { gone: unknown[] }).gone).toHaveLength(0)
+    expect((running.data as { awaiting: unknown[] }).awaiting).toHaveLength(0)   // 运行中不是「待收藏」
+
+    // 跑完转空闲 → 待收藏线索恰好一条（不是两条、也不是中道而废）
+    s.running.delete(sid)
+    const done = await tool("state").execute({}, s.ctx)
+    const dd = done.data as { awaiting: unknown[]; gone: unknown[]; unresolved: unknown[] }
+    expect(dd.awaiting).toHaveLength(1)
+    expect(dd.gone).toHaveLength(0)
+    expect(dd.unresolved).toHaveLength(0)
+    expect(done.output).not.toContain("中道而废")
+
+    // 定向清理：两路寻址（session_id / alias）命中的是**同一条当前轮**，并回工命中结果
+    const bySid = await tool("collect").execute({ action: "review", session_id: sid }, s.ctx)
+    expect(bySid.output).toContain(`按 session_id=${sid} 命中本条`)
+    expect(bySid.output).toContain("别名 a-1")
+    expect(bySid.output).toContain("在途 有")
+    const byAlias = await tool("collect").execute({ action: "review", alias: "a-1" }, s.ctx)
+    expect(byAlias.output).toContain("worker a-1")
+    expect(byAlias.output).toContain("在途登记：第二轮")            // 别名与 session_id 命中同一条
+
+    // 别名与 session_id 矛盾时不猜（否则会拿另一个会话的报告入账）
+    await tool("dispatch").execute({ orders: [{ task: "别的线", domain: "b" }] }, s.ctx)
+    const clash = await tool("collect").execute({ action: "collect", alias: "b-1", session_id: sid, summary: "x" }, s.ctx)
+    expect(clash.output).toContain("请只传一个")                     // 工具不猜：指向不同 worker 就拒绝
+
+    // 收藏后池一条 idle、在途清空（b-1 是另一条演进线，仍在途）
+    const c = await tool("collect").execute({ action: "collect", session_id: sid, summary: "第二轮要点" }, s.ctx)
+    expect(c.output).toContain("收藏完成")
+    const after = parseControl(controlOf(s))
+    expect(after.inflight.map((i) => i.alias)).toEqual(["b-1"])            // 只清掉该会话那一条
+    expect(after.workers.find((w) => w.sessionId === sid)!.status).toBe("idle")
+    cleanup(s)
+  })
+
+  test("登记归一：同会话并列多条（旧格式/人工误改）读侧即归一，陈旧在途可定向清理、不误判可达", async () => {
+    const s = stub()
+    await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+    await tool("dispatch").execute({ orders: [{ task: "第一轮", domain: "a" }] }, s.ctx)
+    await tool("dispatch").execute({ orders: [{ task: "别的线", domain: "b" }] }, s.ctx)
+    const sid = s.sent[0].sessionId
+    s.running.clear()
+
+    // 直接在手写的 control.md 里重建缺陷现场：同一会话并列两条池条目 + 两条在途
+    //（旧版工具就这样写；且旧格式在途没有「会话」列——归一必须兑住它）
+    const bad = [
+      "## 项目坐标",
+      `- 项目根：${s.root}`,
+      "",
+      "## worker 池",
+      "| 别名 | 会话 | 领域 | 任务 | 派发时间 | 轮次 | 状态 |",
+      "| --- | --- | --- | --- | --- | --- | --- |",
+      `| a-1 | ${sid} | a | 第一轮 | 1000 | 1 | running |`,
+      `| a-9 | ${sid} | a | 第一轮（旧轮） | 900 | 1 | running |`,   // 同轮并列：靠后偏胜
+      "| b-1 | sess2 | b | 别的线 | 1000 | 2 | idle |",
+      "",
+      "## 在途",
+      "| 别名 | 方向 | 预期产出 | 派发时间 | 轮次 |",
+      "| --- | --- | --- | --- | --- |",
+      `| a-1 | 第二轮 |  | 1000 | 3 |`,                             // 别名不在池中（池只剩 a-9）：无从核实
+      "| ghost-1 | 无处安放的在途 |  | 800 | 4 |",                     // 同上——旧格式没会话列
+      "",
+      "## 种子队列",
+      "（空）",
+      "",
+      "## 收藏待办",
+      "（空）",
+      "",
+      "## 断点",
+      "（无）",
+      "",
+    ].join("\n")
+    await Bun.write(join(s.root, ".evolve", "control.md"), bad)
+
+    // 读侧归一：并列条目只留一条（会话为主键 → 同一会话两个别名是同一“工人”的两个名字）
+    const st = parseControl(bad)
+    expect(st.workers).toHaveLength(2)
+    expect(st.workers.filter((w) => w.sessionId === sid)).toHaveLength(1)
+    // 旧格式在途（无会话列）：归一**只能靠池解析别名**——两条的别名都不在池（同会话幸存者是 a-9），
+    // 故无从判定同源而全部保留（宁多留一条，也不错杀一条真实在途：它们进「无从核实」而非「中道而废」）
+    expect(st.inflight.map((i) => i.alias)).toEqual(["a-1", "ghost-1"])
+    expect(inflightSession(st.inflight[0], st.workers)).toBeUndefined()
+    expect(inflightSession(st.inflight[1], st.workers)).toBeUndefined()
+    // 归一幂等：再渲染再解析不再变
+    expect(parseControl(renderControl(st))).toEqual(st)
+
+    // 读态：池中会话均可达 → 无「中道而废」；两条无会话线索的在途进「无从核实」（不得谎报可达、也不得谎报已死）
+    const read = await tool("state").execute({}, s.ctx)
+    const rd = read.data as { awaiting: unknown[]; gone: { alias: string }[]; unresolved: { alias: string }[] }
+    expect(rd.gone).toHaveLength(0)
+    expect(rd.unresolved.map((i) => i.alias)).toEqual(["a-1", "ghost-1"])
+    expect(rd.awaiting).toHaveLength(0)
+    expect(read.output).toContain("无从核实")
+    expect(read.output).not.toContain("中道而废")            // 归属不明≠确已死：不得借“不可达”之名诬告
+    expect(read.output).not.toContain("虚假产能")
+
+    // 陈旧在途定向清理：**仅剩别名可寻**（池中无对应 worker）——用 alias 精准清这一条
+    const wrong = await tool("collect").execute({ action: "review", alias: "ghost-1" }, s.ctx)
+    expect(wrong.output).toContain("只在「在途」里的陈旧登记")
+    const cleaned = await tool("collect").execute({ action: "retire", alias: "ghost-1", mode: "idle", reason: "陈旧残留" }, s.ctx)
+    expect(cleaned.output).toContain("已清掉陈旧在途登记")
+    const after = parseControl(controlOf(s))
+    expect(after.inflight.map((i) => i.alias)).toEqual(["a-1"])            // 只清掉那一条
+    expect(after.seeds.some((x) => x.direction === "无处安放的在途")).toBe(true)
+    expect(after.workers.find((w) => w.sessionId === sid)!.alias).toBe("a-9")
+
+    // 别名指向池中在途时不误清：review 按别名命中真 worker
+    const real = await tool("collect").execute({ action: "review", alias: "a-9" }, s.ctx)
+    expect(real.output).toContain("worker a-9")
+    cleanup(s)
+  })
+
+  test("去重契约：池按会话主键（新轮取代旧轮）、在途同会话只留最新一轮（无会话线索者不误杀）", () => {
+    const w = (alias: string, sessionId: string, round: number): { alias: string; sessionId: string; domain: string; task: string; dispatchedAt: number; round: number; status: "running" | "idle" } =>
+      ({ alias, sessionId, domain: "d", task: "t", dispatchedAt: 1, round, status: "running" })
+    const base = { coord: {}, breath: 0, seq: 0, seeds: [], pending: [], workers: [], inflight: [], note: undefined } as unknown as Parameters<typeof dedupeState>[0]
+
+    // 池：同会话两条 → 留 round 更大者；同轮并列 → 靠后者偏胜；无会话 id 的条目一律保留（不误杀）
+    const r1 = dedupeState({ ...base, workers: [w("a-1", "s1", 2), w("a-2", "s1", 5), w("b-1", "s2", 1), w("c-1", "", 1)] })
+    expect(r1.workers.map((x) => x.alias)).toEqual(["a-2", "b-1", "c-1"])
+    expect(r1.dropped).toBe(1)
+    const tie = dedupeState({ ...base, workers: [w("a-1", "s1", 3), w("a-2", "s1", 3)] })
+    expect(tie.workers.map((x) => x.alias)).toEqual(["a-2"])
+
+    // 在途：会话线索取自带列（旧格式回落到池解析）——同会话只留最新轮，无从判定者保留
+    const f = (alias: string, round: number, sessionId?: string) => ({ alias, sessionId, direction: `d${round}`, deliverable: "", dispatchedAt: round, round })
+    const r2 = dedupeState({
+      ...base,
+      workers: [w("a-1", "s1", 3), w("b-1", "s2", 1)],
+      inflight: [f("a-1", 3), f("a-1", 4), f("b-1", 1), f("ghost", 9), f("old", 1, "s1")],
+    })
+    // a-1 两条 → 留轮次 4；old 自带 s1 且轮次 1 → 被 a-1/r4 取代；ghost 无线索 → 保留
+    expect(r2.inflight.map((x) => `${x.alias}:${x.round}`)).toEqual(["a-1:4", "b-1:1", "ghost:9"])
+    // 归一不就地改调用方持有的数组
+    const src = [w("a-1", "s1", 2), w("a-2", "s1", 5)]
+    dedupeState({ ...base, workers: src })
+    expect(src).toHaveLength(2)
   })
 })

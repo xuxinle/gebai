@@ -62,7 +62,9 @@ export interface Coord {
   preload?: string
 }
 
-/** worker 池条目（复用单位：同域下一单直接续派，记忆延续）。 */
+/** worker 池条目。**主键 = `sessionId`**：同一会话在池中只保留**最新一轮**登记（续派/复用取代旧轮）。
+ *  别名是「工人」的显示名、会话是「工人」的本体——同一会话换轮次不得换别名（换了旧别名立即失效，
+ *  台账与派工消息再无同一工人可回溯），也不得并列两条（并列即「同一会话两个身份」的登记裂缝）。 */
 export interface Worker {
   alias: string
   sessionId: string
@@ -76,9 +78,15 @@ export interface Worker {
   status: "running" | "idle"
 }
 
-/** 在途（已布未收）。 */
+/** 在途（已布未收）。**主键 = 会话 id**：同一会话只保留最新一轮在途（写侧 upsert + 读侧归一）。
+ *  `sessionId` 是登记里**必须自带**的一列：别名只是池里的影子，别名漂移/池条目被清后就只剩会话一个实体
+ *  线索——不带着它，「在途」就无从“先探会话再判生死”（只能按别名猜，而猜会把可达会话误判为死单）。
+ *  旧格式（无此列）仍可解析：会话经池的同名条目解析，解析不到即无从核实。
+ *  引擎不变量撑着去重——同一会话同一时刻只有一次运行，故「同一会话两条在途」必然是陈旧残留。 */
 export interface Inflight {
   alias: string
+  /** 本轮的 worker 会话 id（与池同名条目同源写入；旧格式缺失时经池解析）。 */
+  sessionId?: string
   direction: string
   deliverable: string
   dispatchedAt: number
@@ -142,6 +150,68 @@ function cells(line: string): string[] {
 
 const isSeparator = (line: string): boolean => /^\|[\s:|-]+\|$/.test(line.trim())
 
+// ---------------------------------------------------------------------------
+// 登记去重（主键 = 会话 id）：同一会话只保留最新一轮
+// ---------------------------------------------------------------------------
+
+/**
+ * 登记**就地归一**：同一会话只保留**最新一轮**（round 最大；并列时取靠后一条，视作同轮重复登记）。
+ *
+ * 为什么读侧也要归一，而不只在写侧 upsert：`control.md` 是磁盘上的共享态——上一版工具写下的
+ * 「同一会话并列多条」还留在盘上，人工查看也可能误改。读侧不归一，裂缝就会一直活着：按别名寻址
+ * 撞上旧条目、按会话 id 寻址命中当前条目而**清不掉**陈旧的另一条（已实测两次的缺陷形态）。
+ *
+ * 归一保持条目**原相对次序**（幸存者留在它原本的位置），故渲染结果确定、人工可读、往返幂等。
+ */
+function dedupeBySession<T>(items: T[], sessionOf: (item: T) => string, roundOf: (item: T) => number): T[] {
+  const winners = new Map<string, T>()
+  const superseded = new Set<T>()
+  for (const item of items) {
+    const key = sessionOf(item)
+    // 无会话 id 的条目**无从判定同源**：一律保留——宁可多留一条登记，不可错杀一条真实在途。
+    if (!key) continue
+    const current = winners.get(key)
+    if (!current) {
+      winners.set(key, item)
+      continue
+    }
+    if (roundOf(item) >= roundOf(current)) {
+      superseded.add(current)
+      winners.set(key, item)
+    } else superseded.add(item)
+  }
+  return items.filter((i) => !superseded.has(i))
+}
+
+/** 别名 → 会话 id（池是别名的权威；旧格式在途缺会话列时靠它解析）。 */
+function aliasToSession(workers: Worker[]): Map<string, string> {
+  const out = new Map<string, string>()
+  for (const w of workers) if (w.alias) out.set(w.alias, w.sessionId)
+  return out
+}
+
+/** 在途的会话线索：自带列优先，旧格式回落到池的同名条目解析（仍解析不到 = 无从核实）。 */
+export function inflightSession(i: Inflight, workers: Worker[]): string | undefined {
+  return i.sessionId || aliasToSession(workers).get(i.alias) || undefined
+}
+
+/** 会话 id 短形（回显用：完整 id 不丢，短形只为对齐与可读）。 */
+function idShort(id: string | undefined): string {
+  if (!id) return "（未登记）"
+  return id.length > 12 ? `${id.slice(0, 8)}…` : id
+}
+
+/** 池归一（纯函数，返回新数组——不就地改调用方持有的 state）。 */
+function dedupeWorkers(workers: Worker[]): Worker[] {
+  return dedupeBySession(workers, (w) => w.sessionId, (w) => w.round || 0)
+}
+
+/** 在途归一：同一会话只留最新一轮；会话线索缺失的条目无从判定同源，一律保留。 */
+function dedupeInflight(inflight: Inflight[], workers: Worker[]): Inflight[] {
+  const byAlias = aliasToSession(workers)
+  return dedupeBySession(inflight, (i) => i.sessionId || byAlias.get(i.alias) || "", (i) => i.round || 0)
+}
+
 /** 取 `## <标题>` 段落内的表格数据行（跳过表头与分隔行；`（空）` 视为零条目）。 */
 function tableRows(md: string, heading: string): string[][] {
   const lines = md.split(/\r?\n/)
@@ -187,24 +257,33 @@ export function parseControl(md: string | null): EvolveState {
   }
   const breathMatch = /-\s*呼吸[：:]\s*(\d+)/.exec(sectionText(md, "计数"))
   const seqMatch = /-\s*派工序号[：:]\s*(\d+)/.exec(sectionText(md, "计数"))
+  // 池先归一，在途再按归一的池解析别名 → 会话：**读进来就是干净的**，下游（读态/收藏/布雨）
+  // 一律以「同一会话至多一条」为前提，不必各自再防一遍。
+  const workRows = tableRows(md, "worker 池").map((c): Worker => ({
+    alias: c[0] ?? "",
+    sessionId: c[1] ?? "",
+    domain: c[2] ?? "",
+    task: c[3] ?? "",
+    dispatchedAt: Number(c[4]) || 0,
+    round: Number(c[5]) || 0,
+    status: c[6] === "idle" ? "idle" : "running",
+  }))
+  const flightRows = tableRows(md, "在途").map((c): Inflight => {
+    // 列数分辨新旧格式：旧版（≤5 列）没有「会话」列（会话靠池解析）；新版（6 列）自带会话 id。
+    // 不分辨会把旧表的「方向」当会话 id——一次错位就把整张在途表读成幻影。
+    // 旧行也补 `sessionId: ""` 占位：对象形状与新版一致，渲染→解析→渲染往返恒等（测试与下游都好写）。
+    if (c.length <= 5) return { alias: c[0] ?? "", sessionId: "", direction: c[1] ?? "", deliverable: c[2] ?? "", dispatchedAt: Number(c[3]) || 0, round: Number(c[4]) || 0 }
+    return { alias: c[0] ?? "", sessionId: c[1] ?? "", direction: c[2] ?? "", deliverable: c[3] ?? "", dispatchedAt: Number(c[4]) || 0, round: Number(c[5]) || 0 }
+  })
+  // 池/在途**先清无会话 id 的坏行**再归一：去重的主键是会话 id，主键为空即不构成「同一会话」的并列
+  // （无会话列的表头行、半截写入的残行）——不清会把它们当成合法登记留在盘上，而它们永远核不出会话。
+  const workers = dedupeWorkers(workRows.filter((w) => w.alias && w.sessionId))
   const state: EvolveState = {
     coord,
     breath: breathMatch ? Number(breathMatch[1]) : 0,
     seq: seqMatch ? Number(seqMatch[1]) : 0,
-    workers: tableRows(md, "worker 池")
-      .map((c): Worker => ({
-        alias: c[0] ?? "",
-        sessionId: c[1] ?? "",
-        domain: c[2] ?? "",
-        task: c[3] ?? "",
-        dispatchedAt: Number(c[4]) || 0,
-        round: Number(c[5]) || 0,
-        status: c[6] === "idle" ? "idle" : "running",
-      }))
-      .filter((w) => w.alias),
-    inflight: tableRows(md, "在途")
-      .map((c) => ({ alias: c[0] ?? "", direction: c[1] ?? "", deliverable: c[2] ?? "", dispatchedAt: Number(c[3]) || 0, round: Number(c[4]) || 0 }))
-      .filter((i) => i.alias),
+    workers,
+    inflight: dedupeInflight(flightRows.filter((i) => i.alias), workers),
     seeds: tableRows(md, "种子队列").map((c) => ({ priority: c[0] ?? "", direction: c[1] ?? "", source: c[2] ?? "", constraint: c[3] ?? "" })).filter((s) => s.direction),
     pending: tableRows(md, "收藏待办").map((c) => ({ alias: c[0] ?? "", summary: c[1] ?? "", at: Number(c[2]) || 0 })).filter((p) => p.alias),
   }
@@ -219,6 +298,14 @@ function renderTable(header: string[], rows: string[][]): string {
   const head = `| ${header.join(" | ")} |`
   const sep = `| ${header.map(() => "---").join(" | ")} |`
   return [head, sep, ...rows.map((r) => `| ${r.map((c) => c.replace(/\|/g, "\\|").replace(/\r?\n/g, " ")).join(" | ")} |`)].join("\n")
+}
+
+/** 登记归一入口（导出以便单测直接锁契约）：池/在途各返回去重后的副本 + 被取代的条目数。
+ *  写侧（dispatch）也走同一对纯函数——「读进来归一」与「写回去归一」共用一套判据。 */
+export function dedupeState(state: EvolveState): { workers: Worker[]; inflight: Inflight[]; dropped: number } {
+  const workers = dedupeWorkers(state.workers)
+  const inflight = dedupeInflight(state.inflight, workers)
+  return { workers, inflight, dropped: state.workers.length - workers.length + (state.inflight.length - inflight.length) }
 }
 
 /** 序列化 control.md（节结构确定性重写，内容全部来自解析后的状态）。 */
@@ -238,7 +325,7 @@ export function renderControl(state: EvolveState): string {
     renderTable(["别名", "会话", "领域", "任务", "派发时间", "轮次", "状态"], state.workers.map((w) => [w.alias, w.sessionId, w.domain, w.task, String(w.dispatchedAt), String(w.round), w.status])),
     "",
     "## 在途",
-    renderTable(["别名", "方向", "预期产出", "派发时间", "轮次"], state.inflight.map((i) => [i.alias, i.direction, i.deliverable, String(i.dispatchedAt), String(i.round)])),
+    renderTable(["别名", "会话", "方向", "预期产出", "派发时间", "轮次"], state.inflight.map((i) => [i.alias, i.sessionId ?? "", i.direction, i.deliverable, String(i.dispatchedAt), String(i.round)])),
     "",
     "## 种子队列",
     renderTable(["优先级", "方向", "来源", "约束"], state.seeds.map((s) => [s.priority, s.direction, s.source, s.constraint])),
@@ -256,31 +343,87 @@ export function renderControl(state: EvolveState): string {
 // 项目根解析
 // ---------------------------------------------------------------------------
 
-/** 进程内会话级项目根（`state action=init` 写入）：会话 env 由引擎在 run 开始时解析，
- *  同一息内 init 之后写的 env 本息读不到——布雨须紧跟 init，故另置此进程内记忆（会话级，
- *  服务重启即空；环境变量 `SHENGSHENG_ROOT` 是跨重启的那条路）。 */
+/** 进程内会话级项目根记忆（仅 state action=init 写入）。
+ *  以会话**工作目录**为键：工作目录是「会话身份」的稳定投影——同一目录下的会话共享同一份既存
+ *  .evolve/control.md 记忆（重启后新会话沿用同一目录，init 记忆因此在进程内存活）；按会话 ID
+ *  作键时「本会话未 init」与「会话换了 ID」无法区分，一旦记忆被当成解析来源就会把**其他根**
+ *  当成会话基线（陈旧未初始化）。读/记两处一律按同一归一化键。
+ *
+ *  **只装既有 .evolve/control.md 的根**——没有该文件的目录不得作为解析结果参与回落，
+ *  否则会凭空造出既非本会话记忆、也非探测目标的路径。 */
 const rootMemo = new Map<string, string>()
 
-/** 项目根解析：显式参数 > 会话 env / 本进程 init 记忆 > 工作目录向上探测既有 `.evolve/control.md`。 */
+/** 记忆键：会话工作目录（相对路径不得作键——按目录归一化后即会话身份）。 */
+const memoKey = (ctx: ToolContext): string => String(ctx.sessionWorkdir ?? ctx.workdir ?? "").replace(/[\\/]+$/, "")
+
+/** 读本会话记忆：键不中即无——绝不回落到其他根。 */
+function memoizedRoot(ctx: ToolContext): string | undefined {
+  const key = memoKey(ctx)
+  if (!key) return undefined
+  return rootMemo.get(key)
+}
+
+const cleanRoot = (p: string): string => p.trim().replace(/[\\/]+$/, "")
+const isAbsRoot = (p: string): boolean => /^[\\/]/.test(p) || /^[A-Za-z]:[\\/]/.test(p)
+
+/** 记本会话记忆（state action=init 用）：只记绝对路径——相对根已由参数按会话工作目录解释，
+ *  写进记忆只会留下脏条目供其他动作误用。 */
+function rememberRoot(ctx: ToolContext, root: string): void {
+  const key = memoKey(ctx)
+  if (!key) return
+  const abs = cleanRoot(root)
+  if (!isAbsRoot(abs)) return
+  rootMemo.set(key, abs)
+}
+
+/** 未初始化时的统一引导：区分「根已解析但没有既有 control.md」与「本会话无从解析项目根」。
+ *  两种情形都不得凭空造根——写分支（seed_add/seed_done/note/task）与布雨/收藏都以既有 control.md 为基线。 */
+function notInitialized(root: string | undefined, via: string, control: string): string {
+  if (root) return "项目根已解析（" + via + "）：" + control + " 不存在——尚未初始化。请用 action=init 固化坐标（root=" + root + "），否则写分支与布雨/收藏无基线可依。"
+  return "本会话无从解析项目根（显式 root、会话 env SHENGSHENG_ROOT、本会话 init 记忆、工作目录向上 4 层的 .evolve/control.md 皆无）：请传 root=<项目根绝对路径> 并用 action=init 固化。"
+}
+
+/** 项目根解析：显式参数 > 会话 env > 本会话 init 记忆 > 工作目录向上探测（候选须含既有 .evolve/control.md）。
+ *
+ *  **候选一律核实**：参数与 env 都可能带进陈旧路径（项目改名/搬迁/删除、env 未随会话清理），故核到
+ *  .evolve/control.md 才采纳；核不中即回落下一级，而不是拿这个候选去判「初生」（那会让写分支无从落地，
+ *  也把不存在或别处的根误当本会话基线）。工作目录探测本身以 control.md 为硬判据，无需再核；
+ *  **记忆不外泄**：记忆键为会话工作目录且只在 init 时写入——任何其他根（参数/env）的解析结果都不落记忆。 */
 async function resolveRoot(ctx: ToolContext, argRoot?: string): Promise<{ root?: string; via: string; error?: string }> {
-  const clean = (p: string): string => p.trim().replace(/[\\/]+$/, "")
   const explicit = (argRoot ?? "").trim()
-  if (explicit) return { root: clean(explicit), via: "参数" }
+  if (explicit) {
+    const cand = cleanRoot(explicit)
+    const r = await readAbs(ctx, evolvePaths(cand).control)
+    if (r.error) return { via: "参数", error: r.error }
+    if (r.text != null) return { root: cand, via: "参数" }
+    return { root: cand, via: "参数（无既有 control.md）" }
+  }
   const fromEnv = (ctx.env?.SHENGSHENG_ROOT ?? "").trim()
-  if (fromEnv) return { root: clean(fromEnv), via: "环境变量 SHENGSHENG_ROOT" }
-  const memo = rootMemo.get(ctx.sessionId)
-  if (memo) return { root: memo, via: "本会话 init 记忆" }
-  let dir = (ctx.sessionWorkdir ?? ctx.workdir ?? "").replace(/[\\/]+$/, "")
+  if (fromEnv) {
+    const cand = cleanRoot(fromEnv)
+    const r = await readAbs(ctx, evolvePaths(cand).control)
+    if (r.error) return { via: "环境变量 SHENGSHENG_ROOT", error: r.error }
+    if (r.text != null) return { root: cand, via: "环境变量 SHENGSHENG_ROOT" }
+    return { root: cand, via: "环境变量 SHENGSHENG_ROOT（无既有 control.md）" }
+  }
+  const memo = memoizedRoot(ctx)
+  if (memo) {
+    const r = await readAbs(ctx, evolvePaths(memo).control)
+    if (r.error) return { via: "本会话 init 记忆", error: r.error }
+    if (r.text != null) return { root: memo, via: "本会话 init 记忆" }
+  }
+  let dir = memoKey(ctx)
   for (let i = 0; i < 4 && dir; i++) {
-    const r = await readAbs(ctx, `${dir}/.evolve/control.md`)
+    const r = await readAbs(ctx, dir + "/.evolve/control.md")
     if (r.error) return { via: "工作目录探测", error: r.error }
-    if (r.text) return { root: dir, via: "工作目录探测" }
+    if (r.text != null) return { root: dir, via: "工作目录探测" }
     const parent = dir.replace(/[\\/][^\\/]+$/, "")
     if (parent === dir) break
     dir = parent
   }
   return { via: "未解析" }
 }
+
 
 /** 路径闸门：绝对路径经 `ctx.resolvePath` 解析（服务模式下越界抛错即拒绝）。 */
 function gate(ctx: ToolContext, abs: string): { path?: string; error?: string } {
@@ -333,12 +476,22 @@ interface Loaded {
 }
 
 async function loadState(ctx: ToolContext, argRoot?: string): Promise<Loaded> {
-  const { root, via, error } = await resolveRoot(ctx, argRoot)
-  if (error) return { via, state: { ...EMPTY, coord: {}, workers: [], inflight: [], seeds: [], pending: [] }, initialized: false, error }
-  if (!root) return { via, state: { ...EMPTY, coord: {}, workers: [], inflight: [], seeds: [], pending: [] }, initialized: false }
-  const r = await readAbs(ctx, evolvePaths(root).control)
-  if (r.error) return { root, via, state: parseControl(null), initialized: false, error: r.error }
-  return { root, via, state: parseControl(r.text ?? null), initialized: r.text !== null }
+  const resolved = await resolveRoot(ctx, argRoot)
+  if (resolved.error) return { via: resolved.via, state: parseControl(null), initialized: false, error: resolved.error }
+  // 回落链：解析结果 → 本会话 init 记忆 → 会话工作目录。任一层核到既有 control.md 即采纳——
+  // 根不存在 / control.md 不存在（陈旧参数或 env）时不得直接判「初生」而让写分支无从落地。
+  const candidates: Array<[string, string]> = []
+  if (resolved.root) candidates.push([resolved.root, resolved.via])
+  const memo = memoizedRoot(ctx)
+  if (memo && !candidates.some((c) => c[0] === memo)) candidates.push([memo, "本会话 init 记忆"])
+  const here = memoKey(ctx)
+  if (here && !candidates.some((c) => c[0] === here)) candidates.push([here, "会话工作目录"])
+  for (const [dir, via] of candidates) {
+    const r = await readAbs(ctx, evolvePaths(dir).control)
+    if (r.error) return { root: dir, via, state: parseControl(null), initialized: false, error: r.error }
+    if (r.text != null) return { root: dir, via, state: parseControl(r.text), initialized: true }
+  }
+  return { root: resolved.root, via: resolved.via, state: parseControl(null), initialized: false }
 }
 
 const freshState = (): EvolveState => ({ coord: {}, breath: 0, seq: 0, workers: [], inflight: [], seeds: [], pending: [] })
@@ -456,8 +609,8 @@ function liveLine(alias: string, w: Worker | undefined, live: Live | undefined):
   return `- ${bits.join("｜")}`
 }
 
-/** 派工/继承：装配自包含派工消息（任务/上下文/交付/验证/纪律/预载——模板由代码保证不漏项）。 */
-function renderOrderPrompt(order: Order, coord: Coord, injectedEnv: string[]): string {
+/** 派工/继承/续派：装配自包含派工消息（任务/上下文/交付/验证/纪律/预载——模板由代码保证不漏项）。 */
+function renderOrderPrompt(order: Order, coord: Coord, injectedEnv: string[], opts: { resume?: boolean } = {}): string {
   const contextLine = (order.context ?? coord.seedDoc ?? "（无——自行摸底定位）").trim()
   const lines = [
     `任务：${order.task.trim()}`,
@@ -466,6 +619,10 @@ function renderOrderPrompt(order: Order, coord: Coord, injectedEnv: string[]): s
     `验证：${(order.verify ?? coord.verify ?? "（未提供验证命令）——无法运行时说明原因并给出可复现的验证步骤").trim()}`,
     `纪律：${(order.rules ?? coord.rules ?? "原子提交不 push；设计层/公共接口变更只分析不落地").trim()}`,
   ]
+  if (opts.resume) {
+    // 续派消息必须点名「这是接着干」：同一模板另起一单会让 worker 从头重做或绕开被中断的步骤。
+    lines.splice(1, 0, "续派：本会话此前已承接同一演进线的任务（你的上下文里有那段进度）——从中断处继续，把被中断的步骤补齐，不要从头重做、也不要绕开它。")
+  }
   const preload = (order.preload ?? coord.preload ?? "").trim()
   if (preload) lines.push(`预载：${preload}`)
   if (preload && preload === contextLine) {
@@ -564,11 +721,11 @@ function normalizeOrders(raw: unknown): Order[] {
 const stateTool: Tool = {
   name: "state",
   description:
-    "生生的读态与收息工具（一息入口）。无参=复命：返回项目坐标、呼吸计数、worker 池、在途、种子队列，以及各 worker 的实时态（运行中/空闲/起始时间/待决交互）与待收藏线索。action=init 从唤醒消息固化项目坐标（初生第一动作）；seed_add/seed_done 择种入队与销账；note 落断点并推进呼吸（每息收尾）；task 管理心跳驱动任务（op=ensure 幂等确保定时任务存在并启用；op=pause 记暂停+通知用户+停用任务；op=resume 重新启用；op=status 只看状态）。control.md（调度状态）由本工具托管——勿用 read/write 手工编辑。",
+    "生生的读态与收息工具（一息入口）。无参=复命：返回项目坐标、呼吸计数、worker 池、在途、种子队列，以及各 worker 的实时态（运行中/空闲/起始时间/待决交互）与**三类回收线索**（判据都是逐个会话的实测结果，不拿登记猜真值）：待收藏线索（在途且会话可达已空闲）；中道而废（在途且会话**确已不存在**——退回种子）；无从核实（在途无会话线索、别名也不属本会话——不可当可达、也不可当已死，须先核实）。池与在途均以**会话 id 为主键**：同一会话只保留最新一轮（旧轮已被新轮取代，不并列、不标脏）。action=init 从唤醒消息固化项目坐标（初生第一动作）；seed_add/seed_done 择种入队与销账；note 落断点并推进呼吸（每息收尾）；task 管理心跳驱动任务（op=ensure 幂等确保定时任务存在并启用；op=pause 记暂停+通知用户+停用任务；op=resume 重新启用；op=status 只看状态）。control.md（调度状态）由本工具托管——勿用 read/write 手工编辑。",
   parameters: schema(
     {
       action: { enum: ["read", "init", "seed_add", "seed_done", "note", "task"], description: "动作（缺省 read=读态）" },
-      root: { type: "string", description: "项目根绝对路径（缺省：会话 env SHENGSHENG_ROOT > 工作目录向上探测既有 .evolve/control.md）" },
+      root: { type: "string", description: "项目根绝对路径（解析次序：显式参数 > 会话 env SHENGSHENG_ROOT > 本会话 init 记忆 > 工作目录向上探测既有 .evolve/control.md；候选一律核到既有 control.md 才采纳，核不中即往下回落）" },
       verify: { type: "string", description: "init：worker 三重门第一门——验证命令原样（派工消息原样传递，你永不执行）" },
       seed_doc: { type: "string", description: "init：种子库文档路径（待做方向清单，可选）" },
       rules: { type: "string", description: "init：硬约束文档路径（worker 必守的项目规矩，可选）" },
@@ -614,7 +771,7 @@ const stateTool: Tool = {
       const w = await saveState(ctx, coord.root!, state)
       if (w.error) return { output: w.error }
       // 本进程记忆（同一息后续调用立即可解析）+ 会话 env（跨轮次/跨息，粘性会话复用）
-      rootMemo.set(ctx.sessionId, coord.root!)
+      rememberRoot(ctx, coord.root!)
       let envNote = ""
       if (svc) {
         try {
@@ -643,7 +800,7 @@ const stateTool: Tool = {
     if (loaded.error) return { output: loaded.error }
     if (!loaded.root || !loaded.initialized) {
       return {
-        output: "未解析出项目根：请在首次调用时传 root=<项目根绝对路径>（并把坐标以 action=init 固化），或设置会话环境变量 SHENGSHENG_ROOT。"
+        output: notInitialized(loaded.root, loaded.via, loaded.root ? evolvePaths(loaded.root).control : "")
       }
     }
     const { root, state } = loaded
@@ -791,20 +948,44 @@ const stateTool: Tool = {
     const active = state.workers.length
     const idle = state.workers.filter((w) => w.status === "idle").length
     const runningNow = state.workers.filter((w) => live[w.sessionId]?.running).length
-    // 待收藏线索：在途但已空闲（worker 跑完了等回收）。**仅限会话仍存活者**——会话不存在的
-    // 在途不是「可收藏」（无消息尾可 review、无交付物可入账），而是「中道而废」：应 retire 回退种子。
-    // 不区分这两种，会把死会话当成可收藏产能嗂给模型。
-    const awaiting = state.inflight.filter((i) => {
-      const w = state.workers.find((x) => x.alias === i.alias)
-      if (!w) return false
-      const l = live[w.sessionId]
-      return !!l?.exists && !l.running
-    })
-    // 中道而废：在途且会话不可恢复（不存在）——回退种子队列后退役
-    const lost = state.inflight.filter((i) => {
-      const w = state.workers.find((x) => x.alias === i.alias)
-      return !w || !live[w.sessionId]?.exists
-    })
+    // 回收线索一律**先探会话、再判生死**：会话是实体，别名只是它在池中的影子——池条目被清、别名漂移
+    // 都不等于会话消失。旧判据「别名不在池中 ⇒ 中道而废」会把**会话仍活着并在跑**的在途误判为收不回的
+    // 死单（已实测两次的假阳性），也会把这种误判当作「可回收产能」的反面嘴给模型。
+    interface Trail {
+      i: Inflight
+      /** 会话线索（自带列优先，旧格式经池解析）。 */
+      sid?: string
+      raw?: Live
+    }
+    const trails: Trail[] = []
+    // 控制面不可用时**不探也不判**：那种情况下所有在途都「核不到」，硬判就是把整张表诬告
+    // （本行末尾已显式报「仅读磁盘状态」）。
+    if (svc) for (const i of state.inflight) {
+      // 会话线索自带优先（别名漂移出池也能核实）；旧格式回落到池解析；都没有即无从核实。
+      const sid = inflightSession(i, state.workers)
+      if (!sid) {
+        // 无从解析 = 查证不了 ⇒ **不得当作可达**（谎报「在途且空闲」会嗂给模型一个收不回的实物）
+        trails.push({ i })
+        continue
+      }
+      // 顺带核到的会话并入 live：别名不在池中的陈旧在途也因此能在盘上验明生死
+      if (!live[sid]) live[sid] = (await observe(ctx, svc, [sid]))[sid] ?? { exists: false, running: false }
+      trails.push({ i, sid, raw: live[sid] })
+    }
+    // 待收藏线索：在途、**会话确实可达且已空闲**（有消息尾可 review、有交付物可入账）。
+    // 不另加「别名仍须在池中」：可达会话就是真在途（派工授权随会话走，不在池也收得回来），
+    // 多一道影子条件只会把真在途误判成「中道而废」（反方向的假阳性）。
+    const awaiting = trails.filter((t) => t.raw?.exists && !t.raw.running).map((t) => t.i)
+    // 不可达（会话确实不存在）——退回种子后退役。
+    const gone = trails.filter((t) => t.sid && t.raw?.exists === false).map((t) => t.i)
+    // **无从核实**（在途无会话线索，旧格式里别名又不属本会话）——单独一栏，不算可达、也不算已死（第三类）：
+    // 旧格式在途没会话列、且别名漂移出了池（正是同会话并列条目的历史形态）——此时**无从探会话**。
+    // 不归入「中道而废」也不归入「待收藏」：把没探过的东西当已死，与把没探过的东西当可达一样，都是
+    // 在登记上猜真值（会话可能还活着、也可能早没了）——归入哪一边都是假信号。
+    const unresolved = trails.filter((t) => !t.sid).map((t) => t.i)
+    // 虚假产能：池中会话**全部核实为不存在**——复用价值已随会话消失。判据是会话本身的实测结果，
+    // 未核实（会话控制面不可用/池空）不得诬告。
+    const allGone = !!(svc && active > 0 && state.workers.every((w) => live[w.sessionId]?.exists === false))
     const lines = [
       `坐标（${loaded.via}）：${root}`,
       `- 验证命令：${state.coord.verify ?? "（未固化）"}`,
@@ -812,14 +993,24 @@ const stateTool: Tool = {
       state.coord.rules ? `- 硬约束：${state.coord.rules}` : "",
       `呼吸：${state.breath}｜池 ${active}（${idle} idle，运行中 ${runningNow}）｜在途 ${state.inflight.length}｜种子 ${state.seeds.length}｜收藏待办 ${state.pending.length}`,
       state.note ? `断点：${state.note}` : "",
-      active && active === idle && lost.length ? "池内 worker 的会话全部不可达——**池中 idle 是虚假产能**：复用价值已随会话消失，布雨须 fresh=true。" : "",
-      state.inflight.length ? `在途：\n${state.inflight.map((i) => `- ${i.alias}｜${i.direction}${i.deliverable ? `｜交付 ${i.deliverable}` : ""}`).join("\n")}` : "在途：（空）",
+      active && idle === active && allGone ? "池内 worker 的会话全部不可达（已逐会话核实）——**池中 idle 是虚假产能**：复用价值已随会话消失，布雨须 fresh=true。" : "",
+      state.inflight.length ? `在途：\n${state.inflight.map((i) => `- ${i.alias}｜会话 ${idShort(inflightSession(i, state.workers))}｜${i.direction}${i.deliverable ? `｜交付 ${i.deliverable}` : ""}`).join("\n")}` : "在途：（空）",
       state.workers.length ? `池：\n${state.workers.map((w) => liveLine(w.alias, w, live[w.sessionId])).join("\n")}` : "池：（空）",
       awaiting.length
         ? `待收藏线索（在途但已空闲——用 shengsheng_collect review/collect 处理）：\n${awaiting.map((i) => `- ${i.alias}｜${i.direction}`).join("\n")}`
         : "",
-      lost.length
-        ? `中道而废（在途但会话不可达——review 取不到消息尾、无交付物可入账：应 retire mode=idle 清池并把方向退回种子队列，**不要**按「待收藏」处理）：\n${lost.map((i) => `- ${i.alias}｜${i.direction}`).join("\n")}`
+      gone.length
+        ? [
+            "中道而废（在途但会话**确已不存在**——review 取不到消息尾、无交付物可入账：应 retire mode=idle 清池并把方向退回种子队列，**不要**按「待收藏」处理）：",
+            ...gone.map((i) => `- ${i.alias}｜${i.direction}`),
+          ].join("\n")
+        : "",
+      unresolved.length
+        ? [
+            "无从核实（在途无会话线索、别名也不属本会话——登记里查不到它是谁：**既不可当可达、也不可当已死**）：",
+            ...unresolved.map((i) => `- ${i.alias}｜${i.direction}`),
+            "（处置：先核实（台账/会话列表）再决定——能核到会话则按待收藏收，核不到才 retire mode=idle 退回种子；定向清理用 `action=retire alias=<该条别名>`）",
+          ].join("\n")
         : "",
       state.pending.length ? `收藏待办：\n${state.pending.map((p) => `- ${p.alias}｜${p.summary}`).join("\n")}` : "",
       state.seeds.length
@@ -839,7 +1030,8 @@ const stateTool: Tool = {
         seeds: state.seeds,
         pending: state.pending,
         awaiting,
-        lost,
+        gone,
+        unresolved,
         note: state.note ?? null,
       },
     }
@@ -857,7 +1049,9 @@ interface PlanItem {
   sessionId: string
   reuse: boolean
   created: boolean
-  /** 复用命中时的原池条目（沿用其别名与首派时间）。 */
+  /** 续派：`orders[].session_id` 指向池中既有 worker 会话（不新建、不占新建额度；同样无人值守授权）。 */
+  resume?: boolean
+  /** 复用/续派命中时的原池条目（沿用其别名与首派时间）。 */
   revived?: Worker
   note?: string
 }
@@ -871,7 +1065,7 @@ function ensureUniqueAlias(state: EvolveState, order: Order, taken: Set<string>)
 const dispatchTool: Tool = {
   name: "dispatch",
   description:
-    "布雨：把一批工单派给 worker 会话（一息一次调用，1~8 单）。同领域 idle worker 直接复用（摸底归零、记忆延续），异领域或 fresh=true 时新建会话；派工消息按模板装配（任务/上下文/交付/验证命令/纪律/预载/无人值守提示——代码保证不漏项），注入后立即返回**不等 worker 完成**，并自动登记池与在途。**派工即授权**：本工具的审批就是该 worker 全部动作的授权——worker 以无人值守姿态运行（需审批工具自动通过、无交互通道），不会为单个工具等待确认。活动 worker（运行中+空闲）上限 3：已达上限时先收藏/退役再布雨。派工消息自包含——worker 是普通会话，只凭这一条消息独立干活。不传 orders 或 env SHENGSHENG_DISPATCH=preview 时只出计划不派工（预检）。",
+    "布雨：把一批工单派给 worker 会话（一息一次调用，1~8 单）。同领域 idle worker 直接复用（摸底归零、记忆延续），异领域或 fresh=true 时新建会话；**续派**——orders[].session_id 指向池中既有 worker 会话（只认本演进线派生的 worker），用于中断后接着干或人工抢跑后续跑（详见 description 末）。派工消息按模板装配（任务/上下文/交付/验证命令/纪律/预载/无人值守提示——代码保证不漏项），注入后立即返回**不等 worker 完成**，并自动登记池与在途。**派工即授权**：本工具的审批就是该 worker 全部动作的授权（新建/复用/续派三条路一视同仁）——worker 以无人值守姿态运行（需审批工具自动通过、无交互通道），不会为单个工具等待确认。活动 worker（运行中+空闲）上限 3：**只挡新建**——复用与续派不改池容量，不受限。派工消息自包含——worker 是普通会话，只凭这一条消息独立干活。不传 orders 或 env SHENGSHENG_DISPATCH=preview 时只出计划不派工（预检）。",
   parameters: schema(
     {
       orders: {
@@ -882,7 +1076,7 @@ const dispatchTool: Tool = {
           properties: {
             task: { type: "string", description: "任务描述（含背景与验收标准，必填）" },
             alias: { type: "string", description: "worker 别名（缺省按领域自动派生，如 refactor-1）" },
-            session_id: { type: "string", description: "直接指定 worker 会话 id（缺省按别名/领域解析）" },
+            session_id: { type: "string", description: "续派：指定池中既有 worker 会话 id（从中断处接着干、或人工抢跑后续跑——不得用 session send，那条路丢无人值守授权）。只认池中登记的 worker（本演进线派生）；不新建、不占新建额度" },
             fresh: { type: "boolean", description: "强制新建会话（不复用池中 idle worker）" },
             domain: { type: "string", description: "领域标签（复用匹配键，如 lint / docs / perf）" },
             context: { type: "string", description: "上下文（种子库条目原文 / 台账相关轮次 / 关键文件:行号）" },
@@ -919,9 +1113,22 @@ const dispatchTool: Tool = {
       // 复用匹配**先于**别名派生：命中的 worker 必须沿用它的既有别名——
       // 否则同一个会话会被改名（旧别名立即失效，台账/派工消息也无法回溯同一工人）。
       let reuse = false
+      let resume = false
       let sessionId = order.session_id ?? ""
       let revived: Worker | undefined
-      if (!sessionId && !order.fresh) {
+      if (sessionId) {
+        // 续派：只认**池中登记的 worker 会话**——dispatch 的审批只覆盖本演进线自己派生的会话；
+        // 放任意 session id 以 autoApprove 跑，等于把「派工即授权」扩大到用户会话（授权面放大）。
+        const known = state.workers.find((w) => w.sessionId === sessionId)
+        if (!known) {
+          return {
+            output: `orders[].session_id=${sessionId} 不是池中登记的 worker 会话——续派只允许本演进线派生的 worker（授权面不外扩）。池中 worker：${state.workers.length ? state.workers.map((w) => `${w.alias}=${w.sessionId}`).join("、") : "（空）"}。接手别的会话请按别名/领域复用或 fresh=true 新建。`,
+            data: { blocked: true, unknownSession: sessionId },
+          }
+        }
+        revived = known
+        resume = true
+      } else if (!order.fresh) {
         // 复用匹配：显式领域优先（在 `taken` 之外的 idle worker 中取首个）；
         // 未给领域且池中恰有一个 idle worker 时复用它
         const idleWorkers = state.workers.filter((w) => w.status === "idle" && !taken.has(w.alias))
@@ -935,7 +1142,7 @@ const dispatchTool: Tool = {
       const alias = revived ? revived.alias : ensureUniqueAlias(state, order, taken)
       taken.add(alias)
       const domain = order.domain?.trim() || revived?.domain || alias.replace(/-\d+$/, "")
-      plans.push({ alias, domain, task: order.task, sessionId, reuse, created: !reuse && !sessionId, revived })
+      plans.push({ alias, domain, task: order.task, sessionId, reuse, created: !reuse && !sessionId, revived, resume })
     }
 
     // 池容量：活动 worker（running + idle）上限——只挡住新增，不阻断回收
@@ -949,7 +1156,7 @@ const dispatchTool: Tool = {
 
     if (preview) {
       return {
-        output: [`布雨预检（未派工${svc ? "" : "；会话控制面不可用"}）：`, ...plans.map((p) => `- ${p.alias}｜${p.created ? "新建" : "复用"}${p.reuse ? "（同域 idle）" : ""}｜${p.domain}｜${p.task}`)].join("\n"),
+        output: [`布雨预检（未派工${svc ? "" : "；会话控制面不可用"}）：`, ...plans.map((p) => `- ${p.alias}｜${p.created ? "新建" : p.resume ? `续派会话 ${p.sessionId}` : "复用（同域 idle）"}｜${p.domain}｜${p.task}`)].join("\n"),
         data: { preview: true, plan: plans },
       }
     }
@@ -974,6 +1181,16 @@ const dispatchTool: Tool = {
           } catch (err) {
             plan.note += `，env 注入失败（${describeError(err)}）`
           }
+        } else {
+          // 复用/续派：会话 env 是内存态（服务重启即空）——重注入项目坐标，使派工消息里
+          //「环境：本会话已注入…」为真（续跑多发生在中断/重启之后，此时 env 往往已丢）。
+          const kind = plan.resume ? "续派" : "复用"
+          try {
+            await svc!.store.setEnv(plan.sessionId, ctx.user, envPatch)
+            plan.note = `${kind}会话 ${plan.sessionId}（项目坐标 env 已重注入）`
+          } catch (err) {
+            plan.note = `${kind}会话 ${plan.sessionId}（env 重注入失败：${describeError(err)}）`
+          }
         }
         if (!plan.sessionId) {
           results.push(`- ${plan.alias}：**未派**（无可用会话且新建失败）`)
@@ -981,14 +1198,14 @@ const dispatchTool: Tool = {
         }
         const live = (await observe(ctx, svc!, [plan.sessionId]))[plan.sessionId]
         if (live && live.exists && live.running) {
-          results.push(`- ${plan.alias}：**未派**（会话 ${plan.sessionId} 正在运行——同会话并发注入会被拒，下息再派或换 worker）`)
+          results.push(`- ${plan.alias}：**未派**（会话 ${plan.sessionId} 正在运行——同会话并发注入会被拒；若它卡在待决审批（无人应答约 5 分钟超时），等本轮结束再用 session_id 续派）`)
           continue
         }
         if (live && !live.exists) {
           results.push(`- ${plan.alias}：**未派**（会话 ${plan.sessionId} 不存在——用 collect action=retire 清出池后重派）`)
           continue
         }
-        const message = renderOrderPrompt(order, state.coord, Object.keys(envPatch))
+        const message = renderOrderPrompt(order, state.coord, Object.keys(envPatch), { resume: plan.resume })
         // worker 继承本次派工的授权：派工本身经用户审批（dispatch 是需审批工具），
         // 派出去的就是这一次已授权的一次性执行——若仍按实时审批逐工具等确认，无人值守下
         // 会挂到审批超时才继续（每个重活 worker 都中道而废）。故以 autoApprove 运行，
@@ -999,7 +1216,9 @@ const dispatchTool: Tool = {
         })
         kicked.push(started)
         nextSeq += 1
-        // 池 upsert（复用者保留原别名与首派时间，新建者记当前）：round 为本次派工轮次号
+        // 池 upsert（**主键 = 会话 id**，复用/续派者保留原别名、领域与首派时间）：round 为本次派工轮次号。
+        // 同一会话只留一条——旧轮次被本次取代（round 递增即“已被新轮次取代”的机器可读证据），
+        // 不并列、不标脏（陈旧并列条目正是「同一会话两个身份」的登记裂缝来源）。
         const prev = state.workers.find((w) => w.sessionId === plan.sessionId)
         const worker: Worker = {
           alias: plan.alias,
@@ -1010,13 +1229,14 @@ const dispatchTool: Tool = {
           round: nextSeq,
           status: "running",
         }
-        state.workers = [...state.workers.filter((w) => w.sessionId !== plan.sessionId && w.alias !== plan.alias), worker]
-        const inflight: Inflight = { alias: plan.alias, direction: order.task, deliverable: order.deliver ?? "", dispatchedAt: now, round: worker.round }
-        state.inflight = [...state.inflight.filter((x) => x.alias !== plan.alias), inflight]
+        state.workers = dedupeWorkers([...state.workers.filter((w) => w.sessionId !== plan.sessionId && w.alias !== plan.alias), worker])
+        const inflight: Inflight = { alias: plan.alias, sessionId: plan.sessionId, direction: order.task, deliverable: order.deliver ?? "", dispatchedAt: now, round: worker.round }
+        state.inflight = dedupeInflight([...state.inflight.filter((x) => x.alias !== plan.alias), inflight], state.workers)
         // 复用代数提示：同一会话连续承接的单数（首派 1）——接近上限时建议收藏后退役换新上下文
         const generation = prev ? prev.round + 1 : 1
         const genNote = generation >= REUSE_GENERATION_HINT ? `｜**已承接 ${generation} 单**（上下文渐胖，宜收藏后退役换新）` : ""
-        results.push(`- ${plan.alias}｜${plan.reuse ? "复用" : "新建"}会话 ${plan.sessionId}｜${plan.domain}｜轮次 ${worker.round}｜${plan.task.slice(0, 60)}${genNote}`)
+        const kind = plan.created ? "新建" : plan.resume ? "续派" : "复用"
+        results.push(`- ${plan.alias}｜${kind}会话 ${plan.sessionId}｜${plan.domain}｜轮次 ${worker.round}｜${plan.task.slice(0, 60)}${genNote}`)
       } catch (err) {
         results.push(`- ${plan.alias}：**派工失败**——${describeError(err)}`)
       }
@@ -1046,12 +1266,12 @@ const COLLECT_SNIPPET = 600
 const collectTool: Tool = {
   name: "collect",
   description:
-    "收藏与退役（回收阶段）。action=review：深观一个 worker（运行态/起始时间/消息数/上下文水位/待决交互/最后一条回复）并给出处置建议（只读）。action=collect：把报告要点追加进演进台账（幂等——同一 worker 只入一次）、worker 标 idle 留池、在途清除、建议下一条自动入种子队列。action=retire：退役 worker——mode=idle 清出池并把在途方向退回种子队列（会话不存在/领域已终）、mode=stop 终止超时运行（先 review 抢救结论）、mode=delete 删除会话（运行中会被拒绝）。",
+    "收藏与退役（回收阶段）。action=review：深观一个 worker（运行态/起始时间/消息数/上下文水位/待决交互/最后一条回复）并给出处置建议（只读）。action=collect：把报告要点追加进演进台账（幂等——同一 worker 只入一次）、worker 标 idle 留池、在途清除、建议下一条自动入种子队列。action=retire：退役 worker——mode=idle 清出池并把在途方向退回种子队列（会话不存在/领域已终）、mode=stop 终止超时运行（先 review 抢救结论）、mode=delete 删除会话（运行中会被拒绝）。**寻址语义**：同一会话在池/在途只保留**当前轮**（会话 id 为主键，旧轮已被新轮取代）——`session_id` 命中的就是该会话的当前轮条目（返回里回工命中的别名与轮次），别名与 session_id 指向同一会话时可只传其一（两者矛盾时拒绝不猜）；别名只在在途、池中无对应 worker 的**陈旧残留**用 `alias=` 定向清理（session_id 寻不到残留）。",
   parameters: schema(
     {
       action: { enum: ["review", "collect", "retire"], description: "动作" },
-      alias: { type: "string", description: "worker 别名（池登记用；也可传 session_id）" },
-      session_id: { type: "string", description: "worker 会话 id（缺省按别名解析）" },
+      alias: { type: "string", description: "worker 别名（池登记用）；**别名优先**——也是清理「池中无对应 worker 的陈旧在途残留」的唯一寻址手段" },
+      session_id: { type: "string", description: "worker 会话 id（缺省按别名解析）：按**会话当前轮**命中池条目与其在途（旧轮已归一，不存在「命中较新、陈旧寻不到」）；返回里回工命中的别名与轮次" },
       summary: { type: "string", description: "collect：报告要点（markdown，原样入台账——交付/验证证据/未竟事项）" },
       next: { type: "string", description: "collect：报告「建议下一条」（自动入种子队列）" },
       mode: { enum: ["idle", "stop", "delete"], description: "retire：退役方式（缺省 idle=仅清出池）" },
@@ -1071,15 +1291,71 @@ const collectTool: Tool = {
     const { root, state } = loaded
     const alias = args.alias != null ? String(args.alias).trim() : ""
     const sidArg = args.session_id != null ? String(args.session_id).trim() : ""
-    const worker = state.workers.find((w) => (alias && w.alias === alias) || (sidArg && w.sessionId === sidArg))
-    const candidates = () => state.workers.length
-      ? `池中 worker：\n${state.workers.map((w) => `- ${w.alias}｜${w.domain}｜${w.task}｜${w.status}`).join("\n")}`
-      : "池中无 worker。"
-    if (!worker) return { output: `未在池中找到该 worker（alias=${alias || "（未传）"}${sidArg ? ` session_id=${sidArg}` : ""}）。${candidates()}` }
+    // **寻址语义（session_id 指向会话，不指向「某条登记」）**：
+    // - 池：会话 id 为主键，读侧已归一 → 按 session_id 命中的就是该会话的**当前轮**条目；
+    // - 在途：同一会话至多一条（写侧 upsert + 读侧归一），故 `alias` 与 `session_id` 指向同一条，
+    //   不存在「按 session_id 命中较新、陈旧条目寻不到」的空间（那是「同会话并列两条」时代的病）；
+    // - 别名两侧都查：池先命中、再落到在途——别名已漂移出池的**陈旧在途残留**因此仍可定向（见下方 retire 分支）。
+    const worker = state.workers.find((w) => (sidArg && w.sessionId === sidArg) || (alias && w.alias === alias))
+    const findInflight = (a: string): Inflight | undefined => (a ? state.inflight.find((i) => i.alias === a) : undefined)
+    // 别名命中的在途（陈旧残留的别名不属于该会话，只此一路可寻）
+    const inflightByAlias = findInflight(alias)
+    // 会话 id 命中的在途（在途自带会话列时可用）：池条目已被清、只在途还留着的那条——
+    // 按 session_id 也能定向到它（否则一条「会话可达但不在池」的在途既收不回也清不掉）。
+    const inflightBySession = sidArg ? state.inflight.find((i) => inflightSession(i, state.workers) === sidArg) : undefined
+    const stale = inflightByAlias ?? inflightBySession
+    const staleKey = inflightByAlias ? `alias=${alias}` : `session_id=${sidArg}`
+    const candidates = () => [
+      state.workers.length ? `池中 worker：\n${state.workers.map((w) => `- ${w.alias}｜${w.domain}｜${w.task}｜${w.status}`).join("\n")}` : "池中无 worker。",
+      state.inflight.length
+        ? `在途中：\n${state.inflight.map((i) => `- ${i.alias}｜会话 ${idShort(inflightSession(i, state.workers))}｜轮次 ${i.round}｜${i.direction.slice(0, 40)}`).join("\n")}`
+        : "在途：（空）",
+    ].join("\n")
+    if (!worker) {
+      // 池中无此 worker，但别名/会话命中一条在途：池条目已被清、登记却还在的**陈旧在途残留**
+      // （历史缺陷或人工误改）。它不进「中道而废」列表的寻址范围——清理须定向。
+      if (stale) {
+        const staleSid = inflightSession(stale, state.workers)
+        const where = staleSid ? `会话 ${staleSid}` : "无从核实的会话"
+        if (action !== "retire") {
+          return {
+            output: `按 ${staleKey} 命中的是**只在「在途」里的陈旧登记**（别名 ${stale.alias}｜${where}），池中无对应 worker——${action === "collect" ? "没有池条目可收藏（collect 需要 worker 与其会话）" : "无池条目可深观"}。\n- 在途方向：${stale.direction}（轮次 ${stale.round}）\n- 清掉它用 \`action=retire ${staleKey} mode=idle\`（方向退回种子队列）。`,
+            data: { inflight: stale, stale: true },
+          }
+        }
+        const reason = args.reason != null ? String(args.reason).trim() : ""
+        state.inflight = state.inflight.filter((i) => i !== stale)
+        let back = ""
+        if (!state.seeds.some((s) => s.direction === stale.direction)) {
+          state.seeds.push({ priority: "待定", direction: stale.direction, source: `在途回退 ${stale.alias}${reason ? `（${reason}）` : ""}`, constraint: "worker 会话不可用，重开时从种子库/台账重新摸底" })
+          back = "；方向已退回种子队列"
+        } else back = "；方向已在种子队列（未重复）"
+        const sw = await saveState(ctx, root, state)
+        if (sw.error) return { output: sw.error }
+        return {
+          output: `已清掉陈旧在途登记：${stale.alias}（轮次 ${stale.round}｜${where}）${back}。池中无对应 worker——无会话可终止/删除（销个会话请走 session 工具或先重新派工）。${reason ? `原因：${reason}` : ""}`,
+          data: { inflight: stale, seeds: state.seeds },
+        }
+      }
+      return { output: `未在池中找到该 worker（alias=${alias || "（未传）"}${sidArg ? ` session_id=${sidArg}` : ""}）。${candidates()}` }
+    }
 
+    const res: Record<string, unknown> = {}
+    // 两参数指向不同条目时的显式提示（读只提示；collect 则拒绝——误寻址不静默取一）
+    const addrNote =
+      !alias || alias === worker?.alias
+        ? ""
+        : `alias=${alias} ${state.workers.some((w) => w.alias === alias) ? "与 session_id 指向不同 worker" : "不在池中"}；session_id=${sidArg} 命中的是 ${worker?.alias ?? "（无）"}——请只传一个（工具不猜）`
     const svc = sessionsOf(ctx)
     if (!svc) return { output: "会话控制面不可用（ctx.sessions 未注入）——无法观察/操作 worker 会话。" }
     const live = (await observe(ctx, svc, [worker.sessionId]))[worker.sessionId] ?? { exists: false, running: false }
+    // 寻址回工（命中的池条目 + 会话经池解析出的本轮在途）：凡用 session_id 寻址（或委托寻址）都回工，
+    if (sidArg) {
+      res.alias = worker.alias
+      res.inflight = state.inflight.find((i) => i.alias === worker.alias) ?? null
+    } else if (alias && alias !== worker.alias) {
+      res.aliasBySession = worker.alias
+    }
 
     // ---- review：深观（只读）----
     if (action === "review") {
@@ -1099,6 +1375,8 @@ const collectTool: Tool = {
       return {
         output: [
           `worker ${worker.alias}（${worker.domain}）｜会话 ${worker.sessionId}`,
+          sidArg ? `- 寻址：按 session_id=${sidArg} 命中本条——别名 ${worker.alias}｜轮次 ${worker.round}｜在途 ${inflight ? `有（轮次 ${inflight.round}）` : "无"}（同一会话只保留当前轮，无旧轮并列可寻）` : "",
+          alias && alias !== worker.alias ? `- 寻址：alias=${alias} 不在池中；仅 session_id 解析到 ${worker.alias}（两者不同——请只传一个）` : "",
           `- 任务：${worker.task}｜派发 ${new Date(worker.dispatchedAt).toLocaleString("zh-CN")}｜池状态 ${worker.status}`,
           `- 现有态：${!live.exists ? "会话不存在" : live.running ? `运行中 ${live.minutes ?? "?"} 分钟` : "空闲"}${live.messages != null ? `｜消息 ${live.messages}` : ""}${live.ctxTokens != null ? `｜ctx ${live.ctxTokens}` : ""}${live.toolCalls ? `｜在途工具 ${live.toolCalls}` : ""}`,
           live.pending?.length ? `- 待决：${live.pending.join("、")}` : "",
@@ -1106,7 +1384,7 @@ const collectTool: Tool = {
           live.last ? `- 最后一条回复（截断 ${COLLECT_SNIPPET} 字）：\n${live.last.slice(0, COLLECT_SNIPPET)}` : "- 最后一条回复：**（无文本/未产出）**",
           `处置建议：\n${advice.map((a) => `- ${a}`).join("\n")}`,
         ].filter(Boolean).join("\n"),
-        data: { worker, live, inflight: inflight ?? null, advice },
+        data: { worker, live, inflight: inflight ?? null, advice, ...res },
       }
     }
 
@@ -1114,6 +1392,14 @@ const collectTool: Tool = {
     if (action === "collect") {
       const summary = String(args.summary ?? "").trim()
       if (!summary) return { output: "collect 需要 summary（报告要点：交付/验证证据/未竟事项）——原样入台账。" }
+      // 误寻址护栏：显式别名与 session_id 指向**不同** worker 时不得静默取其一。
+      // 会话 id 是主键、别名是显示名，正常二者同指；报错不猜——猜错会拿别的会话的报告入账。
+      if (addrNote) {
+        return {
+          output: `寻址冲突：${addrNote}。${candidates()}`,
+          data: { conflict: { alias, session_id: sidArg, resolved: worker.alias } },
+        }
+      }
       const next = args.next != null ? String(args.next).trim() : ""
       const inflight = state.inflight.find((i) => i.alias === worker.alias)
       const stamp = new Date().toISOString()
@@ -1159,7 +1445,7 @@ const collectTool: Tool = {
           seedNote ? `- ${seedNote}（现 ${state.seeds.length} 条）` : "- 未给 next（报告里的建议下一条没进队列）",
           `- 在途剩 ${state.inflight.length}｜池 ${state.workers.length}（${state.workers.filter((x) => x.status === "idle").length} idle）`,
         ].join("\n"),
-        data: { ledger: led.path, worker, seeds: state.seeds, inflight: state.inflight },
+        data: { ledger: led.path, worker, seeds: state.seeds, inflight: state.inflight, ...res },
       }
     }
 
@@ -1186,7 +1472,7 @@ const collectTool: Tool = {
         state.workers = state.workers.filter((w) => w.alias !== worker.alias)
         const sw = await saveState(ctx, root, state)
         if (sw.error) return { output: sw.error }
-        return { output: `已终止并退役：${worker.alias}（会话 ${worker.sessionId} 保留可查；在途方向已退回种子队列）。${reason ? `原因：${reason}` : ""}`, data: { worker, seeds: state.seeds } }
+        return { output: `已终止并退役：${worker.alias}｜会话 ${worker.sessionId}（保留可查）${sidArg ? `｜寻址：按 session_id 命中本条（别名 ${worker.alias}｜轮次 ${worker.round}）` : ""}（在途方向已退回种子队列）。${reason ? `原因：${reason}` : ""}`, data: { worker, seeds: state.seeds, ...res } }
       }
       if (mode === "delete") {
         if (live.running) return { output: `会话 ${worker.sessionId} 正在运行——先 \`action=retire mode=stop\` 终止再删除（删除运行中会话会留下孤儿任务态）。` }
@@ -1202,7 +1488,7 @@ const collectTool: Tool = {
         state.pending = state.pending.filter((p) => p.alias !== worker.alias)
         const sw = await saveState(ctx, root, state)
         if (sw.error) return { output: sw.error }
-        return { output: `已删除会话并退役：${worker.alias}（${worker.sessionId} 进归档，7 天内可由管理员恢复）。${reason ? `原因：${reason}` : ""}`, data: { worker, seeds: state.seeds } }
+        return { output: `已删除会话并退役：${worker.alias}（${worker.sessionId} 进归档，7 天内可由管理员恢复）${sidArg ? `｜寻址：按 session_id 命中本条（别名 ${worker.alias}｜轮次 ${worker.round}）` : ""}。${reason ? `原因：${reason}` : ""}`, data: { worker, seeds: state.seeds, ...res } }
       }
       // mode=idle：仅清出池（在途退回种子）
       const inflight = state.inflight.find((i) => i.alias === worker.alias)
@@ -1219,8 +1505,8 @@ const collectTool: Tool = {
       const sw = await saveState(ctx, root, state)
       if (sw.error) return { output: sw.error }
       return {
-        output: `已退役（仅清出池）：${worker.alias}${live.exists ? `——会话 ${worker.sessionId} 保留在磁盘，需彻底清理由 action=retire mode=delete` : "（会话已不存在）"}${back}${reason ? `。原因：${reason}` : ""}`,
-        data: { worker, seeds: state.seeds },
+        output: `已退役（仅清出池）：${worker.alias}${live.exists ? `——会话 ${worker.sessionId} 保留在磁盘，需彻底清理由 action=retire mode=delete` : "（会话已不存在）"}${sidArg ? `｜寻址：按 session_id 命中本条（别名 ${worker.alias}｜轮次 ${worker.round}）` : ""}${back}${reason ? `。原因：${reason}` : ""}`,
+        data: { worker, seeds: state.seeds, ...res },
       }
     }
 
