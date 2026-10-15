@@ -3,11 +3,15 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, existsSync } from "node:f
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
-import { def as shengshengDef, parseControl, renderControl, dedupeState, inflightSession } from "./shengsheng"
+import { def as shengshengDef, parseControl, renderControl, dedupeState, inflightSession, isSessionIdShape } from "./shengsheng"
 
 /** 测试内复刻 `inflightIdentity`（未导出）：断言按会话 id 认帐时用同一判据。 */
 const inflightIdentityForTest = (i: { alias: string; sessionId?: string }, workers: Array<{ alias: string; sessionId: string }>): string =>
   i.sessionId || workers.find((w) => w.alias === i.alias)?.sessionId || i.alias
+
+/** 旧格式在途条目的只读夹具（真实数据形态：无会话列、方向是含裸竖线的工单原文）。
+ *  夹具只读——用例把它读进来后在临时目录重建现场，**任何测试都不得回写该文件**。 */
+const LEGACY_FIXTURE = readFileSync(join(import.meta.dir, "fixtures", "control-legacy-inflight.md"), "utf8")
 
 const tool = (n: string) => shengshengDef.tools![n]
 
@@ -1291,5 +1295,272 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
     expect(st12.seeds.map((x) => x.direction)).toContain("本会话的方向")
     expect(st12.seeds.map((x) => x.direction)).not.toContain("别人的方向")
     cleanup(s)
+  })
+
+  // ------------------------------------------------------------------
+  // 在途登记格式兼容：盘上的**旧格式在途条目**（无会话列）必须"不误判、不静默丢弃"
+  //
+  // 这条测的是迁移面而不是新增面：e1e803ce 把身份键单一化为会话 id 后，"会话列自带"成了主路，
+  // 而**盘上的存量行没有这一列**（工具升级不迁移数据，旧行会一直躺到被收藏/退役）。
+  // 两条历史形态最容易漏：
+  //   ① 旧行靠**池解析别名**换回会话——若身份键只认自带列，同一会话就会因新旧两代键不同而并列两条；
+  //   ② 旧行没有转义，**方向里一个裸竖线就多切一格**——格数在旧表里不可靠，把 5 列的旧行顶成
+  //      "6 列的新版行"、把方向碎片填进会话位。①② 都会把**可达会话误判为「中道而废」**
+  //      （拿登记猜真值——这正是身份键单一化要堵的假阳性，只是从旧格式这一侧重新漏进来）。
+  // 夹具是只读的（fixtures/control-legacy-inflight.md），用例只读它、在临时目录重建现场。
+  // ------------------------------------------------------------------
+
+  test("格式兼容：旧格式在途（无会话列）按池解析认帐、含裸竖线不被误当新版行，读态/寻址不误判也不丢弃", async () => {
+    // —— ⓪ 夹具本身：形状、列数、往返（先把夹具的形态钉住，后面的断言才有根据）——
+    const fix = parseControl(LEGACY_FIXTURE)
+    expect(fix.workers.map((w) => w.alias)).toEqual(["wb-1", "legacy-2"])
+    // 池表的**任务**列含裸竖线也不得截断（同一张渲染器的同类病：尾列并回、正文完整）
+    expect(fix.workers[1].task).toContain("mode==='view' | stat.editable===false")
+    expect(fix.workers[1].round).toBe(40)                         // 轮次/时间没被多切出来的格顶掉
+    expect(fix.workers[1].dispatchedAt).toBe(1792087248971)
+    expect(fix.workers[1].status).toBe("running")
+    // 四条在途都**无会话列**（旧格式）：自带列解析不出来，只能靠池
+    expect(fix.inflight.map((i) => i.alias)).toEqual(["wb-1", "legacy-2", "wb-2", "ghost-9"])
+    expect(fix.inflight.every((i) => !i.sessionId)).toBe(true)
+    // 旧行不可因含裸竖线而被当新版行：方向/交付各自完整（含各自的竖线），尾列不被溢出的格顶掉
+    const wb = fix.inflight.find((i) => i.alias === "wb-1")!
+    const lg = fix.inflight.find((i) => i.alias === "legacy-2")!
+    expect(wb.round).toBe(39)
+    expect(wb.dispatchedAt).toBe(1792087248971)
+    expect(lg.direction).toContain("mode==='view'")
+    expect(lg.round).toBe(37)                                    // 行尾两位是时间/轮次，不是正文
+    expect(lg.dispatchedAt).toBe(1792077365617)
+    // 预期产出里的裸竖线**不得丢**：裸切后它落在「轮次/时间」两格之前，必须被并回预期产出
+    expect(lg.deliverable).toContain("实测截图或 DOM 断言证据")
+    expect(lg.direction).toContain("stat.editable===false | truncated | roots.writable===false")   // 方向不得被腰斩
+    // 夹具在途段：恰 4 条数据行，且其中含裸竖线那条**按裸分隔符切会多出格**（夹具确实带着这个病）
+    const flightSection: string[] = []
+    let inFlight = false
+    for (const l of LEGACY_FIXTURE.split(/\r?\n/)) {
+      if (/^##\s/.test(l)) { inFlight = l.trim() === "## 在途"; continue }
+      if (inFlight && l.trim().startsWith("|")) flightSection.push(l)
+    }
+    const dataRows = flightSection.filter((l) => !/^\|[\s:|-]+\|$/.test(l.trim()) && !l.includes("| 别名 |"))
+    expect(dataRows).toHaveLength(4)
+    const naive = (l: string) => l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|")
+    const pipedRow = dataRows.find((l) => l.startsWith("| legacy-2 |"))!
+    expect(naive(pipedRow).length).toBeGreaterThan(6)            // 病在：裸竖线把旧行切成 7 格
+    expect(fix.inflight.find((i) => i.alias === "legacy-2")!.sessionId).toBe("")   // 但读出来仍是旧格式
+    // 夹具往返恒等（渲染→解析→渲染不变形：不得把旧行升级成新版行）
+    expect(parseControl(renderControl(fix))).toEqual(fix)
+    // 只读约束：本条用例跑完夹具**逐字节未变**（任务纪律：不得改写用户既有状态）
+    expect(readFileSync(join(import.meta.dir, "fixtures", "control-legacy-inflight.md"), "utf8")).toBe(LEGACY_FIXTURE)
+
+    // —— ① 端到端：把夹具搬进临时目录的真现场（根改成临时根），走读态与寻址 ——
+    const s = stub()
+    await tool("state").execute({ action: "init", root: s.root, verify: "bun test packages/agents/src/agents/shengsheng/" }, s.ctx)
+    const SID_WB = "aaaabbbbccccddddeeeeffff00001111"       // 活会话（有清单）
+    const SID_LEGACY = "bbbbaaaaccccddddeeeeffff11110000"   // 活会话（有清单）
+    expect(isSessionIdShape(SID_WB)).toBe(true)
+    expect(isSessionIdShape(SID_LEGACY)).toBe(true)
+    // 把夹具按临时根重建（只换“项目根”一行；存量旧行原样搬）
+    const relocated = LEGACY_FIXTURE.replace(/^- 项目根：.*$/m, `- 项目根：${s.root}`)
+    await Bun.write(join(s.root, ".evolve", "control.md"), relocated)
+    // 两个池会话都**可达且空闲**——这是最不利的对照：误判成「中道而废」会直接露出来
+    s.sessions.set(SID_WB, { id: SID_WB, messages: [{ role: "assistant", content: "报告：交付 X；验证 Y（尾巴够长以落入待收藏）".padEnd(260, "、") }] })
+    s.sessions.set(SID_LEGACY, { id: SID_LEGACY, messages: [{ role: "assistant", content: "报告：交付 Z；验证 W（尾巴够长以落入待收藏）".padEnd(260, "、") }] })
+
+    // 读态：可达会话的两条进「待收藏」；`ghost-9` 无任何会话线索 → 第三类「无从核实」（不诬告已死、不谎报可达）
+    const read = await tool("state").execute({}, s.ctx)
+    const rd = read.data as { awaiting: { alias: string }[]; gone: { alias: string }[]; unresolved: { alias: string }[] }
+    expect(rd.awaiting.map((i) => i.alias).sort()).toEqual(["legacy-2", "wb-1"])
+    expect(rd.gone).toHaveLength(0)
+    expect(rd.unresolved.map((i) => i.alias)).toEqual(["wb-2", "ghost-9"])   // 池里没有这两个别名 → 无从核实
+    expect(read.output).not.toContain("中道而废")            // 旧格式不得被读成“会话没了”
+    expect(read.output).toContain("无从核实")
+    // 读态也不得把旧行静默丢弃：三条都在在途一览里（且旧行的会话经池解析回了真会话）
+    for (const i of fix.inflight) expect(read.output).toContain(`- ${i.alias}｜`)
+    expect(read.output).toContain(`会话 ${SID_LEGACY.slice(0, 8)}…`)   // 旧行认回了池里那个会话
+
+    // ① -a review 按 alias 命中旧行：认得它是池里那个 worker，在途登记读得出、方向完整
+    const rv = await tool("collect").execute({ action: "review", alias: "legacy-2" }, s.ctx)
+    expect(rv.output).toContain("worker legacy-2")
+    expect(rv.output).toContain(`会话 ${SID_LEGACY}`)
+    expect(rv.output).toContain("在途登记：文件工作台：状态栏「只读」标记")
+    expect(rv.output).not.toContain("陈旧登记")               // 不得当“只在在途里的陈旧登记”处理
+
+    // ① -b 旧行也能被「按会话 id」寻到（经池解析别名回工——寻址判据与会话一致）
+    const rvSid = await tool("collect").execute({ action: "review", session_id: SID_LEGACY }, s.ctx)
+    expect(rvSid.output).toContain("按 session_id=")
+    expect(rvSid.output).toContain("worker legacy-2")
+
+    // —— ② 「无会话可探」必须按**中道而废**而不是崩溃/误报可达 ——
+    // 把池里的 wb-1 换成一条**会话已不存在**的登记（旧格式行仍无会话列），并把 legacy-2 回收掉
+    s.sessions.delete(SID_LEGACY)                                  // 该会话已从存储消失（外部删除）
+    await Bun.write(join(s.root, ".evolve", "control.md"), [
+      "## 项目坐标", `- 项目根：${s.root}`, "",
+      "## 计数", "- 呼吸：18", "- 派工序号：40", "",
+      "## worker 池", "| 别名 | 会话 | 领域 | 任务 | 派发时间 | 轮次 | 状态 |", "| --- | --- | --- | --- | --- | --- | --- |",
+      `| wb-1 | ${SID_LEGACY} | workbench-ui | 会话已消失的历史轮 | 1792087248971 | 39 | running |`, "",
+      "## 在途", "| 别名 | 方向 | 预期产出 | 派发时间 | 轮次 |", "| --- | --- | --- | --- | --- |",
+      "| wb-1 | 第三轮：老会话的方向 | 预期产出甲 | 1792087248971 | 39 |",
+      "| ghost-9 | 只在这张文里出现过的在途方向 |  | 1792077365617 | 12 |", "",
+      "## 种子队列", "（空）", "", "## 收藏待办", "（空）", "", "## 断点", "（无）", "",
+    ].join("\n"))
+    const read2 = await tool("state").execute({}, s.ctx)
+    const rd2 = read2.data as { awaiting: { alias: string }[]; gone: { alias: string }[]; unresolved: { alias: string }[] }
+    expect(rd2.gone.map((i) => i.alias)).toEqual(["wb-1"])          // 探过且确不存在 → 中道而废
+    expect(rd2.awaiting).toHaveLength(0)
+    expect(rd2.unresolved.map((i) => i.alias)).toEqual(["ghost-9"]) // 没探过的仍归第三类，不混入
+    expect(read2.output).toContain("中道而废")
+
+    // ② -a 中道而废那条走 retire alias=… mode=idle：清干净且方向退回种子（旧行不得静默消失）
+    const rt = await tool("collect").execute({ action: "retire", alias: "wb-1", mode: "idle", reason: "夹具：会话确已不存在" }, s.ctx)
+    expect(rt.output).toContain("已退役")
+    const after = parseControl(controlOf(s))
+    expect(after.inflight.map((i) => i.alias)).toEqual(["ghost-9"])   // 只清那一条
+    expect(after.workers).toHaveLength(0)
+    expect(after.seeds.map((x) => x.direction)).toContain("第三轮：老会话的方向")
+
+    // ② -b 无线索那条按「无从核实」的处置路径定向清理（旧行的方向仍然不许丢）
+    const rtGhost = await tool("collect").execute({ action: "retire", alias: "ghost-9", mode: "idle", reason: "夹具：核不到会话" }, s.ctx)
+    expect(rtGhost.output).toContain("已清掉陈旧在途登记")
+    const after2 = parseControl(controlOf(s))
+    expect(after2.inflight).toHaveLength(0)
+    expect(after2.seeds.map((x) => x.direction)).toContain("只在这张文里出现过的在途方向")
+
+    // —— ③ 反向对照：**新版**行（自带会话列）仍按新版读——也不得被旧格式兼容逻辑拖回去 ——
+    await Bun.write(join(s.root, ".evolve", "control.md"), [
+      "## 项目坐标", `- 项目根：${s.root}`, "",
+      "## 计数", "- 呼吸：19", "- 派工序号：41", "",
+      "## worker 池", "（空）", "",
+      "## 在途", "| 别名 | 会话 | 方向 | 预期产出 | 派发时间 | 轮次 |", "| --- | --- | --- | --- | --- | --- |",
+      `| ghost-1 | ${SID_WB} | 新版行的方向 | 预期产出 | 5000 | 42 |`, "",
+      "## 种子队列", "（空）", "", "## 收藏待办", "（空）", "", "## 断点", "（无）", "",
+    ].join("\n"))
+    const st3 = parseControl(controlOf(s))
+    expect(st3.inflight[0].sessionId).toBe(SID_WB)                     // 自带列被采纳（池里没有它也认得）
+    expect(st3.inflight[0].direction).toBe("新版行的方向")
+    expect(st3.inflight[0].round).toBe(42)
+    // 池外 + 自带会话列：会话可达 → 待收藏；**不得**退化成“无从核实”
+    s.sessions.set(SID_WB, { id: SID_WB, messages: [{ role: "assistant", content: "新版行报告：交付 Y；验证 Z（尾巴够长以落入待收藏）".padEnd(260, "、") }] })
+    const read3 = await tool("state").execute({}, s.ctx)
+    const rd3 = read3.data as { awaiting: { alias: string }[]; unresolved: unknown[] }
+    expect(rd3.awaiting.map((i) => i.alias)).toEqual(["ghost-1"])
+    expect(rd3.unresolved).toHaveLength(0)
+    cleanup(s)
+  })
+
+  // ------------------------------------------------------------------
+  // 旧格式行的「两难格」：一格既非会话 id 形状、也不在池里，而手写新格式行又必须被完整读回。
+  //
+  // 这是格式兼容里唯一真正两难的一格：同一份文本（6 格、第 2 格是自由文本）可以是
+  //   ① 旧格式行的方向被一个裸竖线切成两格（实例：本仓现存 control.md 的在途表就是这种行）；
+  //   ② 手写/外部工具写的**新格式行**，会话 id 不是引擎发的 32hex。
+  // 两种读法不可能同时正确，只能选代价小的一侧——**选①**（按旧版读），因为：
+  //   认错（把方向碎片当会话）= 拿伪线索探一个不存在的会话 → 可达会话被判「中道而废」（假阳性）；
+  //   不认（丢掉真 id）= 回落到池按别名解析同一会话，**值一模一样**。
+  // 下面把两侧都钉死，免得日后有人“顺手”改宽。
+  // ------------------------------------------------------------------
+
+  test("格式兼容·两难格：6 格而第 2 格不像会话 id 时按旧版读（宁可回落到池，也不拿伪线索探会话）", () => {
+    const SID = "aaaabbbbccccddddeeeeffff00001111"
+    const HEAD_NEW = ["| 别名 | 会话 | 方向 | 预期产出 | 派发时间 | 轮次 |", "| --- | --- | --- | --- | --- | --- |"]
+    const HEAD_OLD = ["| 别名 | 方向 | 预期产出 | 派发时间 | 轮次 |", "| --- | --- | --- | --- | --- |"]
+    const POOL = ["## worker 池", "| 别名 | 会话 | 领域 | 任务 | 派发时间 | 轮次 | 状态 |", "| --- | --- | --- | --- | --- | --- | --- |"]
+    const TAIL = ["", "## 种子队列", "（空）", "", "## 收藏待办", "（空）", "", "## 断点", "（无）", ""]
+    const doc = (pool: string[], flightHead: string[], flight: string[]) =>
+      ["## 项目坐标", "- 项目根：/x", "", "## 计数", "- 呼吸：1", "- 派工序号：9", "", ...POOL, ...pool, "", "## 在途", ...flightHead, ...flight, ...TAIL].join("\n")
+
+    // ① 旧表头 + 方向被裸竖线切成 6 格 → 仍是旧版行（会话列不得从方向碎片里长出来）
+    const legacySplit = doc([`| wb-1 | ${SID} | d | t | 100 | 3 | idle |`], HEAD_OLD, ["| wb-1 | 方向甲 | 带竖线 | 交付乙 | 100 | 3 |"])
+    const stA = parseControl(legacySplit)
+    const a = stA.inflight[0]
+    expect(a.sessionId).toBe("")                                       // 不给方向碎片发会话名
+    expect(inflightSession(a, stA.workers)).toBe(SID)                  // 但经池仍认得出会话
+    expect(a.round).toBe(3)                                            // 尾列取量后两位，不被溢出的格顶掉
+    expect(a.dispatchedAt).toBe(100)
+    expect(a.direction).toBe("方向甲")
+    expect(a.deliverable).toBe("带竖线 | 交付乙")                        // 溢出的格并回预期产出，不丢
+
+    // ② 同一格形态但表头已升级为 6 列且本行**恰 6 格**（对位无溢格）：按新版读
+    const alignedNew = doc([`| wb-1 | ${SID} | d | t | 100 | 3 | idle |`], HEAD_NEW, ["| wb-1 | 手写的会话 id | 方向甲 | 交付乙 | 100 | 3 |"])
+    const b = parseControl(alignedNew).inflight[0]
+    expect(b.sessionId).toBe("手写的会话 id")
+    expect(b.direction).toBe("方向甲")
+    expect(b.deliverable).toBe("交付乙")
+    expect(b.round).toBe(3)
+
+    // ③ 新表头但**会话是池里认得的合成 id**（非 32hex）、**且行溢了格**：仍按新版读（只靠池这一档）
+    const poolSynthetic = doc(["| wb-1 | sess-abc | d | t | 100 | 3 | idle |"], HEAD_NEW, ["| wb-1 | sess-abc | 方向甲 | 带竖线 | 交付乙 | 100 | 3 |"])
+    const c = parseControl(poolSynthetic).inflight[0]
+    expect(c.sessionId).toBe("sess-abc")
+    expect(c.direction).toBe("方向甲")
+    expect(c.deliverable).toBe("带竖线 | 交付乙")
+
+    // ④ 池表的**任务**列（同一张渲染器的同类位）溢了格也不得截断
+    const poolPiped = doc(
+      ["| wb-1 | sess-abc | d | 任务甲 | 带竖线 | 交付乙 | 100 | 3 | idle |"],
+      HEAD_NEW, ["| wb-1 | sess-abc | 方向甲 | 交付乙 | 100 | 3 |"])
+    const pw = parseControl(poolPiped).workers[0]
+    expect(pw.task).toBe("任务甲 | 带竖线 | 交付乙")
+    expect(pw.round).toBe(3)
+    expect(pw.dispatchedAt).toBe(100)
+    expect(pw.status).toBe("idle")
+
+    // ⑤ 新版行**溢了格**（方向/预期产出里是裸竖线）：会话列照旧自带、溢出格并回、不丢
+    const rawPipeNew = doc([], HEAD_NEW, [`| wb-1 | ${SID} | 方向甲 | 带竖线 | 交付乙 | 100 | 3 |`])
+    const stRaw = parseControl(rawPipeNew)
+    expect(stRaw.inflight[0].sessionId).toBe(SID)
+    expect(stRaw.inflight[0].direction).toBe("方向甲")
+    expect(stRaw.inflight[0].deliverable).toBe("带竖线 | 交付乙")
+    expect(stRaw.inflight[0].round).toBe(3)
+
+    // ⑤ 新版行但**方向恰是一串 32hex**（工单原文里带 hash）：表头说 6 列时，形状/池都对不上时
+    // 「表头正对位」这一档必须站住（否则这行会被丢回旧版读，方向被当成会话）
+    const alignedHex = doc([], HEAD_NEW, [`| wb-1 | ${SID} | 方向甲 | 交付乙 | 100 | 3 |`])
+    const stAligned = parseControl(alignedHex)
+    expect(stAligned.inflight[0].sessionId).toBe(SID)
+    expect(stAligned.inflight[0].direction).toBe("方向甲")
+
+    // ⑥ 尾列取的是**行尾两位**而非固定下标（溢格后若按 c[3]/c[4] 取会拿到正文）
+    const tailProbe = doc([], HEAD_NEW, [`| wb-1 | ${SID} | 方向甲\\|甲 | 带竖线 | 交付乙\\|乙 | 100 | 7 |`])
+    const tp = parseControl(tailProbe).inflight[0]
+    expect(tp.dispatchedAt).toBe(100)
+    expect(tp.round).toBe(7)
+    expect(tp.direction).toBe("方向甲|甲")
+    expect(tp.deliverable).toBe("带竖线 | 交付乙|乙")
+
+    // ⑦ 形状档：真会话 id 即使不在池、且行**溢了格**（长度不是 6）也认——池条目被清后的残留就靠它认
+    const shapeOnly = doc([], HEAD_NEW, [`| wb-1 | ${SID} | 方向甲\\|带竖线 | 交付乙 | 100 | 3 |`])
+    const stShape = parseControl(shapeOnly)
+    expect(stShape.inflight[0].sessionId).toBe(SID)
+    expect(stShape.inflight[0].direction).toBe("方向甲|带竖线")
+
+    // ⑧ 旧表头档不能被前几档劫走：旧表头的行无论第 2 格长得像不像会话 id，都是旧版行
+    //（否则「方向恰好是一串 32hex」就会被当成会话去探一个不存在的会话）
+    const legacyHexLike = doc([`| wb-1 | ${SID} | d | t | 100 | 3 | idle |`], HEAD_OLD, [`| wb-1 | ${SID} | 交付乙 | 100 | 3 |`])
+    const stHex = parseControl(legacyHexLike)
+    expect(stHex.inflight[0].sessionId).toBe("")
+    expect(stHex.inflight[0].direction).toBe(SID)                     // 它就是方向本身
+    expect(inflightSession(stHex.inflight[0], stHex.workers)).toBe(SID)   // 会话仍经池认得
+
+    // ⑨ 表头档的**判别格**：旧表头 + 6 格行且第 2 格**确实是 32hex**——这是「形状/池/对位」三档都
+    // 会点头的一格（形状像是 id、恰好也等于池里那个会话、格数也对）。但表头说这张表没有会话列，
+    // 旧表里多出来的第 6 格只能来自**方向里的裸竖线**（旧渲染器就是这个病）——故仍按旧版读：
+    // 方向就是那串 32hex、不得把它升格成会话（升格等于拿方向去探会话，会把可达的那条误判为已死）。
+    const legacyHexSix = doc([`| wb-1 | ${SID} | d | t | 100 | 3 | idle |`], HEAD_OLD, [`| wb-1 | ${SID} | 交付甲 | 带竖线 | 100 | 3 |`])
+    const stHex6 = parseControl(legacyHexSix).inflight[0]
+    expect(stHex6.sessionId).toBe("")                                  // 表头说旧版 → 不升格
+    expect(stHex6.direction).toBe(SID)
+    expect(stHex6.deliverable).toBe("交付甲 | 带竖线")                  // 溢出格并回预期产出（不丢正文）
+    expect(stHex6.dispatchedAt).toBe(100)                              // 尾列仍取行尾两位
+    expect(stHex6.round).toBe(3)
+    expect(inflightSession(stHex6, parseControl(legacyHexSix).workers)).toBe(SID)
+
+    // ⑨ 新旧两代行**同一张表并存**：旧行靠池解析、新行自带列——两行归一为同一会话一条（不是并列两条）
+    const mixed = doc([`| wb-1 | ${SID} | d | t | 100 | 9 | idle |`], HEAD_NEW, [
+      `| wb-1 | ${SID} | 新版轮 |  | 200 | 9 |`,
+      "| wb-1 | 旧版轮 |  | 150 | 3 |",
+    ])
+    const st = parseControl(mixed)
+    expect(st.inflight).toHaveLength(1)                                // 同会话（旧行经池解析）→ 归一
+    expect(st.inflight[0].round).toBe(9)                               // 幸存者是轮次更大那条
+    expect(st.inflight[0].sessionId).toBe(SID)
   })
 })
