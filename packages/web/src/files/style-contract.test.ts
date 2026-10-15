@@ -112,6 +112,54 @@ function ruleBody(selector: string): string {
 }
 
 /**
+ * 样式契约：状态栏「查看 / 编辑」模式格的 **pri1 永不隐**，且只读原因的措辞只在一处。
+ *
+ * 存在的理由（两件都不报错、只在窄面板里静默发生）：
+ * ① 状态栏是 flex + `overflow: hidden`、条目右对齐且 nowrap——**宽度不够时被裁的是靠后的格**。
+ *   模式格回答“我现在能不能改这个文件”，在窄面板（分屏常态）里被裁掉就只剩用户自己猜；
+ *   而“它被裁了”在任何单测与页面报错里都看不出来，只有缩到 700px 以下才看得到。
+ * ② 不可写的**原因文案**（`status-core` 的 REASON）被三处消费：状态栏徽标的 title、标签栏编辑按钮的
+ *   title、`saveTab` 的拒绝 toast。任一处另写一份，同一屏幕上就会出现两种解释——用户只能猜。
+ *   这里用**存在性 + 结构**检查（`ruleBody` / 源码扫描）钉住，不依赖真实排版。
+ */
+describe("样式契约：模式格 pri1 恒在 + 不可写原因单一来源", () => {
+  /** 把 CSS 里所有规则按 `@media` 块归位（顶层媒体查询不嵌套，足够本仓使用）。 */
+  function mediaBlocks(css: string): Array<{ cond: string; body: string }> {
+    const out: Array<{ cond: string; body: string }> = []
+    const re = /@media([^{]+)\{([\s\S]*?)\n\}/g
+    for (const m of css.matchAll(re)) out.push({ cond: m[1]!.trim(), body: m[2]! })
+    return out
+  }
+
+  test("退让规则只点名 pri3 / pri2，没有任何「pri1 在窄屏被隐」的写法", () => {
+    const media = mediaBlocks(allCss()).filter((b) => /max-width/.test(b.cond))
+    expect(media.length, "一个宽度退让块都没有？退让规则被误删了").toBeGreaterThan(0)
+    for (const b of media) {
+      const hides = [...b.body.matchAll(/\[data-pri="(\d)"\]\s*\{[^}]*display:\s*none/g)].map((m) => m[1]!)
+      expect(hides, `@media ${b.cond} 隐掉了 pri1（模式格/根名格必须恒在）`).not.toContain("1")
+    }
+  })
+
+  test("模式格带自查标记（否则 DOM 层面无从断言这一格是 pri1）", () => {
+    expect(readFileSync(join(SRC, "files", "main.ts"), "utf8")).toContain("dataset.fwModeSlot = slot.text")
+  })
+
+  test("不可写原因的文案只有 status-core 一处（按钮/徽标/保存拒绝共用 REASON）", () => {
+    // **先剔掉注释**再扫：本仓惯于把“历史缺陷”原文写进注释当反面教材（如 renderTabActions 上方那段的
+    // 「该文件类型不支持编辑」），不剔的话这条断言会被自己的注释碰红——那时它就只剩“删注释”的作用。
+    const main = readFileSync(join(SRC, "files", "main.ts"), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^[ \t]*\/\/.*$/gm, "")
+    expect(main).toContain("readOnlyReason(")
+    expect(main).toContain("editButton(")
+    // 历史文案：不可写时一律说“类型不支持编辑”——三个原因（根只读/截断/类型）三种下一步，
+    // 一律归到“类型”会让人去扩展名上找原因。它只允许出现在 status-core 的 REASON 里。
+    expect(main, "main.ts 里不得再自行拼不可写文案（口径会与状态栏漂移）").not.toContain("该文件类型不支持编辑")
+    expect(main, "saveTab 的拒绝原因应取 readOnlyWhy 而非自写一份").not.toContain("当前为只读模式（GEBAI_FS_WRITE=false），无法保存")
+  })
+})
+
+/**
  * 样式契约：标签栏溢出时**标签条自己滚**、动作区留在右端。
  *
  * 存在的理由：这件事由三条规则共同成立——标签条可被压缩且可横向滚动（`flex: 0 1 auto` +

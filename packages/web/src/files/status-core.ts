@@ -89,3 +89,48 @@ export function modeSlot(o: { mode: "view" | "edit"; readOnly: ReadOnlyReason | 
   if (o.mode === "edit") return { text: "不可保存", cls: "warn", title: `编辑模式，但本文件存不回：${r.why}；${r.next}（Ctrl+E 切回查看）` }
   return { text: "不可编辑", cls: "warn", title: `不可编辑：${r.why}；${r.next}` }
 }
+
+/** 不可写原因的「为什么」（`why`）——按钮 title、状态栏徽标、保存拒绝提示共用同一份措辞。 */
+export function readOnlyWhy(r: ReadOnlyReason): string {
+  return REASON[r].why
+}
+
+/** 不可写原因的「下一步」（`next`）。 */
+export function readOnlyNext(r: ReadOnlyReason): string {
+  return REASON[r].next
+}
+
+/** 标签栏编辑按钮的渲染规格（文案 / 禁用态 / 按下态一次给全）。 */
+export interface EditButton {
+  /** 图标名：查看态给 `edit`（去编辑），编辑态给 `eye`（回查看） */
+  icon: "edit" | "eye"
+  /** 悬浮说明：可写时说下一步动作，不可写时说清原因（与状态栏徽标同一份 REASON） */
+  title: string
+  disabled: boolean
+  active: boolean
+}
+
+/**
+ * 标签栏那颗编辑按钮 ← **与状态栏「查看 / 编辑」格同源同口径**。
+ *
+ * 收进来的两个实际缺陷（都不报错，只让人白找原因 / 卡住）：
+ * ① 原先不可写时 title 一律写「该文件类型不支持编辑」，而不可写有三个来源（根只读 / 截断 / 类型），
+ *    根只读（`GEBAI_FS_WRITE=false`）与超大文件截断都会被说成“类型不支持”——用户会去扩展名上找原因，
+ *    而真正要做的是改服务端开关或下载后编辑。按钮与徽标说得不一样时，两个都不可信。
+ * ② 编辑态**不能**跟着禁用：`Ctrl+E`（`toggleActiveMode`）不看可写性就能进编辑态，按钮若在不可写时
+ *    恒 disabled，用户进了编辑态就**退不出来**（唯一退路只剩再按一次 Ctrl+E——而界面上的按钮是灰的，
+ *    等于告诉用户“这里关不掉”）。故编辑态一律可点。
+ */
+export function editButton(o: { mode: "view" | "edit"; readOnly: ReadOnlyReason | null }): EditButton {
+  if (o.mode === "edit") {
+    return {
+      icon: "eye",
+      // 不可写时先把「存不回」说在前面，免得用户以为切回查看就等于问题解决了
+      title: o.readOnly ? `切换为查看（Ctrl+E）——本文件存不回：${readOnlyWhy(o.readOnly)}` : "切换为查看（Ctrl+E）",
+      disabled: false,
+      active: true,
+    }
+  }
+  if (!o.readOnly) return { icon: "edit", title: "编辑（Ctrl+E）", disabled: false, active: false }
+  return { icon: "edit", title: `无法编辑：${readOnlyWhy(o.readOnly)}；${readOnlyNext(o.readOnly)}`, disabled: true, active: false }
+}

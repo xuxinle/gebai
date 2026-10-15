@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { modeSlot, readOnlyReason } from "./status-core"
+import { editButton, modeSlot, readOnlyNext, readOnlyReason, readOnlyWhy } from "./status-core"
 
 /**
  * 本文件钉住的是**行为契约**而不是实现细节：中性态与警示态必须可区分，
@@ -147,6 +147,89 @@ describe("编辑态 + 真不可写：必须 warn 且明说「存不回」，不�
       const s = modeSlot({ mode: "edit", readOnly: readOnlyReason(input) })
       expect(s.cls).toBe("warn")
       expect(s.title).toContain("存不回")
+    }
+  })
+})
+
+/**
+ * 标签栏编辑按钮 ← 与状态栏模式格**同源同口径**（本单收口）。
+ *
+ * 原先 `renderTabActions` 自己判 `editable` 并写死一句「该文件类型不支持编辑」：不可写的三个原因
+ * （根只读 / 截断 / 类型）被说成同一个，用户会去扩展名上找原因——而真正要做的是改服务端开关
+ * 或下载后编辑。这里钉住「按钮说出的原因 == 状态栏说出的原因」。
+ */
+describe("editButton：不可写时按钮与徽标同一份原因，且编辑态必须能退出来", () => {
+  test("可写 + 查看态：可点，去编辑，提示 Ctrl+E", () => {
+    const b = editButton({ mode: "view", readOnly: null })
+    expect(b.icon).toBe("edit")
+    expect(b.disabled).toBe(false)
+    expect(b.active).toBe(false)
+    expect(b.title).toContain("Ctrl+E")
+  })
+
+  test("可写 + 编辑态：可点（回查看）、按下态", () => {
+    const b = editButton({ mode: "edit", readOnly: null })
+    expect(b.icon).toBe("eye")
+    expect(b.disabled).toBe(false)
+    expect(b.active).toBe(true)
+  })
+
+  test("不可写 + 查看态：禁用，且 title 点名**真正**的原因，不是一律「类型不支持」", () => {
+    const root = editButton({ mode: "view", readOnly: "readonlyRoot" })
+    const trunc = editButton({ mode: "view", readOnly: "truncated" })
+    const kind = editButton({ mode: "view", readOnly: "notEditable" })
+    expect([root.disabled, trunc.disabled, kind.disabled]).toEqual([true, true, true])
+    // 三种原因必须给出三种不同的下一步（一律归到“类型不支持”正是原先的缺陷）
+    expect(new Set([root.title, trunc.title, kind.title]).size).toBe(3)
+    expect(root.title).toContain("GEBAI_FS_WRITE")
+    expect(trunc.title).toContain("过大")
+    expect(kind.title).toContain("不支持编辑")
+    // 与状态栏徽标同一份 REASON（按钮 title 内含徽标 title 的核心措辞）
+    for (const r of ["readonlyRoot", "truncated", "notEditable"] as const) {
+      expect(editButton({ mode: "view", readOnly: r }).title).toContain(readOnlyWhy(r))
+      expect(editButton({ mode: "view", readOnly: r }).title).toContain(readOnlyNext(r))
+      expect(modeSlot({ mode: "view", readOnly: r }).title).toContain(readOnlyWhy(r))
+    }
+  })
+
+  /**
+   * 这一条是本单最有价值的回归：编辑态禁用 = 用户退不出来。
+   * 路径真实存在——`Ctrl+E`（`toggleActiveMode`）不看可写性就能翻模式，进到编辑态后若那颗按钮是灰的，
+   * 界面上就没有“回查看”的入口（只剩再按一次 Ctrl+E，而按钮的灰态正告诉用户这里关不掉）。
+   */
+  test("不可写 + **编辑态**：按钮必须仍可点（否则用户被困在编辑态）", () => {
+    for (const r of ["readonlyRoot", "truncated", "notEditable"] as const) {
+      const b = editButton({ mode: "edit", readOnly: r })
+      expect(b.disabled, `${r}：编辑态下按钮被禁用 = 退不回查看态`).toBe(false)
+      expect(b.active).toBe(true)
+      // 但仍要把“存不回”说清楚，免得用户以为切回查看就等于问题解决了
+      expect(b.title).toContain("存不回")
+      expect(b.title).toContain(readOnlyWhy(r))
+    }
+  })
+
+  test("按钮与徽标的口径不变量：按钮禁用 ⇔ 徽标为 warn（同屏不得一个说能改、一个说不能）", () => {
+    const inputs = [
+      { statEditable: true, truncated: false, rootWritable: true },
+      { statEditable: false, truncated: false, rootWritable: true },
+      { statEditable: true, truncated: true, rootWritable: true },
+      { statEditable: true, truncated: false, rootWritable: false },
+      { statEditable: true, truncated: false, rootWritable: null },
+    ] as const
+    for (const input of inputs) {
+      const ro = readOnlyReason(input)
+      const badge = modeSlot({ mode: "view", readOnly: ro })
+      const btn = editButton({ mode: "view", readOnly: ro })
+      expect(btn.disabled).toBe(badge.cls === "warn")
+      // 徽标说不可编辑时，按钮 title 必须给出同一句话里的同一原因
+      if (badge.cls === "warn") expect(btn.title).toContain(readOnlyWhy(ro!))
+    }
+  })
+
+  test("readOnlyWhy / readOnlyNext 对三因都有非空值（漏分支时编译期就该报错）", () => {
+    for (const r of ["readonlyRoot", "truncated", "notEditable"] as const) {
+      expect(readOnlyWhy(r).length).toBeGreaterThan(0)
+      expect(readOnlyNext(r).length).toBeGreaterThan(0)
     }
   })
 })

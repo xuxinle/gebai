@@ -805,7 +805,12 @@ button.fw-status-item:hover {
 
 /* 状态栏条目随宽度逐级退让（data-pri：1 最要，3 最先隐）。
    分屏常在“半宽多一点”（面板 ≈ 860px，去掉活动栏与左栏后状态栏只剩 ~570px），
-   按面板宽分三级：≤900 隐 pri3（编码/EOL/大小/时间/Monaco 内核），≤700 再隐 pri2（语言/行列）。 */
+   按面板宽分三级：≤900 隐 pri3（编码/EOL/大小/时间/Monaco 内核），≤700 再隐 pri2（语言/行列）。
+
+   **pri1 永不隐**：上面两条只按 pri 数值点名（3 / 2），pri1 被天然排除——最左的根名格、
+   「查看 / 编辑」模式格、只读提示都属这一档，它们是“我现在在哪、能不能改”这类**事后补看不到**的信息。
+   这条不变量由 `style-contract.test.ts` 钉住（扫本文件，任何把 pri1 隐掉的新规则都会让测试变红）：
+   写成代码里的注释挡不住以后有人图省事加一条 `[data-pri="1"]{display:none}`。 */
 @media (max-width: 900px) {
   .fw-statusbar .fw-status-item[data-pri="3"] { display: none; }
 }

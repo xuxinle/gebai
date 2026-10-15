@@ -29,7 +29,7 @@ import { attachDocument, attachedServerOf, hasLsp, initLsp, lspServerDetailOf, n
 import { wordWrapTitle } from "./wrap"
 import { minimapTitle } from "./minimap"
 import { branchTitle, changeParts } from "./git-counts"
-import { modeSlot, readOnlyReason } from "./status-core"
+import { editButton, modeSlot, readOnlyNext, readOnlyReason, readOnlyWhy } from "./status-core"
 import { installWorkbenchKeys, workbenchKeymap } from "./keymap-wb"
 import { FOCUS_ALL_FIELDS, validateKeymap, helpGroups, popKeyScope, pushEscScope } from "../keymap"
 import type { KeyBinding } from "../keymap"
@@ -1846,10 +1846,17 @@ function renderTabActions(box: HTMLElement): void {
   // 合并视图自带工具条（且没有 stat）——不重复给按钮
   if (t.kind !== "file" || !t.stat) return
 
-  // 常驻动作：切编辑态（每步编码都要用）；存盘在轮盘里（Ctrl+S 与脏标记 ● 已足够高频提示）
-  const editable = !!t.stat.editable && !t.truncated && state.rootsResp?.writable !== false
-  const modeBtn = btn(t.mode === "edit" ? "eye" : "edit", t.mode === "edit" ? "切换为查看（Ctrl+E）" : editable ? "编辑（Ctrl+E）" : "该文件类型不支持编辑", () => toggleMode(t), t.mode === "edit" ? "active" : "")
-  modeBtn.disabled = !editable
+  /*
+   * 常驻动作：切编辑态（每步编码都要用）；存盘在轮盘里（Ctrl+S 与脏标记 ● 已足够高频提示）。
+   *
+   * 判据与**状态栏「查看 / 编辑」格同源**（`status-core.readOnlyReason` + `editButton`），
+   * 不是各自写一份：分开写过一次，结果是按钮一律说「该文件类型不支持编辑」、而状态栏说「根只读」，
+   * 同一屏两个口径——用户只能去猜哪个是真的。
+   */
+  const readOnly = readOnlyReason({ statEditable: t.stat.editable, truncated: t.truncated, rootWritable: state.rootsResp?.writable })
+  const editSpec = editButton({ mode: t.mode, readOnly })
+  const modeBtn = btn(editSpec.icon, editSpec.title, () => toggleMode(t), editSpec.active ? "active" : "")
+  modeBtn.disabled = editSpec.disabled
   box.appendChild(modeBtn)
 
   /* 可渲染文件（图表源码 / markdown）：源码 ⇄ 渲染预览**常驻**——它决定看到的是图/文档还是文本，
@@ -1863,7 +1870,11 @@ function renderTabActions(box: HTMLElement): void {
   const items: WheelItem[] = []
 
   // 文件本身的动作（保存 / 重载 / 下载 / 复制路径）+ 显示开关（自动换行）
-  items.push({ el: wheelBtn("save", t.dirty ? "保存（Ctrl+S）· 有未保存的修改" : "保存（Ctrl+S）", () => void saveTab(t), t.dirty ? "primary" : "", !t.dirty || !state.rootsResp?.writable) })
+  /* 保存的**禁用态与 title 都跟随上面那个 readOnly 判据**（不再单独看 `rootsResp.writable`）：
+     否则会出现「状态栏说不可保存、保存按钮却是亮的」这种同屏矛盾——点了才被拒绝，
+     user 只能理解为工具坏了。原因文案也走 status-core 的同一份 REASON。 */
+  const saveTitle = !t.dirty ? "保存（Ctrl+S）" : readOnly ? `保存（Ctrl+S）· 存不回：${readOnlyWhy(readOnly)}` : "保存（Ctrl+S）· 有未保存的修改"
+  items.push({ el: wheelBtn("save", saveTitle, () => void saveTab(t), t.dirty ? "primary" : "", !t.dirty || readOnly !== null) })
   items.push({ el: wheelBtn("refresh", "重新加载当前文件", () => void loadTab(t)) })
   items.push({ el: wheelBtn("download", "下载", () => window.open(downloadUrl({ api, root: t.root, path: t.path }), "_blank")) })
   items.push({ el: wheelBtn("copy", "复制路径", () => void navigator.clipboard.writeText(t.path).then(() => toast("已复制路径", "success"))) })
@@ -2156,7 +2167,11 @@ function renderStatus(): void {
        那时显示中性「编辑」会让用户以为改动存得下去）。原因与下一步动作都在 title 里。
        pri 恒 1：这一格回答的是“我现在能不能改这个文件”，与最左的根目录格同级，窄面板下不能被隐掉。 */
     const slot = modeSlot({ mode: t.mode, readOnly: readOnlyReason({ statEditable: statInfo?.editable, truncated: t.truncated, rootWritable: state.rootsResp?.writable }) })
-    statusbar.appendChild(item(slot.cls, { pri: 1, text: slot.text, title: slot.title }))
+    const slotEl = item(slot.cls, { pri: 1, text: slot.text, title: slot.title })
+    /* 供自查/回归测试断言这一格**确实**是 pri1（窄屏让位规则只隐 pri3/pri2，pri1 恒在）；
+       没有它就没法在 DOM 层面把「不被隐掉」钉住——只能靠读 CSS。 */
+    slotEl.dataset.fwModeSlot = slot.text
+    statusbar.appendChild(slotEl)
     if (t.editor) {
       statusbar.appendChild(item("", { pri: 2, text: `行 ${state.cursor.line}，列 ${state.cursor.column}${state.cursor.selected ? `（选中 ${state.cursor.selected}）` : ""}` }))
     }
@@ -2186,9 +2201,16 @@ function renderStatus(): void {
       item("", { pri: 3, title: `语言服务器：${lspServerDetailOf(tab?.editor?.model?.() ?? null) || lspServer}`, text: lspServer }),
     )
   }
-  /* 根目录整体不可写（GEBAI_FS_WRITE=false）：与文件级的那格是两回事——这格在**任何标签**下都在
-     （包括没打开任何文件时），回答的是“这个工作区能不能落盘”。补上原因 title，避免与文件级只读混淆。 */
-  if (state.rootsResp && !state.rootsResp.writable) {
+  /* 根目录整体不可写（GEBAI_FS_WRITE=false）：与文件级的那格是两回事——这格在**没打开文件**时也在，
+     回答的是“这个工作区能不能落盘”。补上原因 title，避免与文件级只读混淆。
+
+     为什么打开了文件就不再显示这格（原先是无条件显示）：此时上面那格已经按 readonlyRoot 说了
+     「不可编辑」/「不可保存」，原因与下一步一模一样，**同一屏两格说同一件事**；而状态栏是
+     `overflow: hidden` + 右侧优先被裁的布局（见 css/files.css 的 data-pri 段），后出现的这格
+     恰好排在最后、又占 4 个汉字宽——它挤掉的正是同一行的其它 pri1 格（模式格首当其冲）。
+     信息一条不少：这格本就是“没有文件级那格时”的兜底。 */
+  const fileSlotShown = tab?.kind === "file" && !!tab.stat
+  if (state.rootsResp && !state.rootsResp.writable && !fileSlotShown) {
     statusbar.appendChild(
       item("warn", { pri: 1, title: "当前工作区以只读方式挂载（服务端 GEBAI_FS_WRITE=false）：保存 / 新建 / 删除都会被拒绝", text: "只读模式" }),
     )
@@ -2424,8 +2446,11 @@ function toggleMode(tab: Tab): void {
 
 async function saveTab(tab: Tab, opts: { force?: boolean } = {}): Promise<boolean> {
   if (tab.kind !== "file" || !tab.editor) return false
-  if (!state.rootsResp?.writable) {
-    toast("当前为只读模式（GEBAI_FS_WRITE=false），无法保存", "error")
+  if (state.rootsResp?.writable !== true) {
+    /* 拒绝口径与状态栏「不可保存」/ 标签栏编辑按钮**同一份原因措辞**（status-core 的 REASON.why）：
+       三处说得不一样时，用户会以为是权限随手一拍，而不是“要改服务端开关 / 下载后编辑”。
+       根清单未到（rootsResp 为空）也走这里：此时确实无从判断，拦住比放行后吃 403 更明白。 */
+    toast(state.rootsResp ? `无法保存：${readOnlyWhy("readonlyRoot")}；${readOnlyNext("readonlyRoot")}` : "无法保存：根清单尚未就绪，请稍后重试", "error")
     return false
   }
   const content = tab.editor.getValue()
