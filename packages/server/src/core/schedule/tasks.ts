@@ -1087,8 +1087,9 @@ export class TaskManager {
   }
   // ---- 执行 ----
 
-  /** 解析 prompt 型执行会话：ephemeral 每次新建（可选预载子Agent）；sticky 专用会话惰性创建并复用；
-   *  session 用绑定会话（已删除则自愈降级为新建会话）。 */
+  /** 解析 prompt 型执行会话：ephemeral 每次新建（可选预载子Agent）；sticky 专用会话惰性创建并复用，
+   *  绑定丢失（会话被删/任务改 target）时按标题找回本任务之前执行过的会话（继承执行上下文，减少重复摸底踩坑）
+   *  ——找不到才新建；session 用绑定会话（已删除则自愈降级为独立会话）。 */
   private async resolveSession(entry: Task): Promise<string | undefined> {
     const store = this.deps.store
     const target = entry.target ?? "ephemeral"
@@ -1099,8 +1100,23 @@ export class TaskManager {
       entry.target = "ephemeral"
       entry.sessionId = undefined
       entry.lastError = "绑定会话已删除，本次起改为独立会话执行"
-    } else if (target === "sticky" && entry.stickySessionId && existsSync(join(sessionPath(this.deps.home, entry.user, entry.stickySessionId), "chat.json"))) {
-      return entry.stickySessionId
+    } else if (target === "sticky") {
+      if (entry.stickySessionId && existsSync(join(sessionPath(this.deps.home, entry.user, entry.stickySessionId), "chat.json"))) {
+        return entry.stickySessionId
+      }
+      // 绑定缺失（sticky 新任务首跳/既有会话被删/target 改入）：按标题找回本任务之前执行过的会话，
+      // 优先最新（最近一次执行上下文最新鲜）；找回归位 stickySessionId，避免每次执行都从零摸底。
+      const title = this.sessionTitle(entry)
+      try {
+        const same = (await store.listSessions(entry.user)).filter((s) => s.name === title)
+        const found = same.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0]
+        if (found) {
+          entry.stickySessionId = found.id
+          return found.id
+        }
+      } catch {
+        // 列表失败不阻断执行：退回新建会话
+      }
     }
     const session = await store.createSession(entry.user, this.sessionTitle(entry))
     // 预载子Agent：写入会话装载名单，engine.run 的装载保障按此注册工具与提示词；

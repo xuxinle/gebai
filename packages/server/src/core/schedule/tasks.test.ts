@@ -1155,6 +1155,32 @@ describe("prompt 型执行目标与会话解析", () => {
     }
   })
 
+  test("sticky：绑定丢失（会话被删/target 改入）时按标题找回既有执行会话，不盲目新建", async () => {
+    const h = setup()
+    try {
+      const task = await h.tasks.add("default", { kind: "manual", runner: "prompt", prompt: "延续上下文", target: "sticky", name: "控制平面" })
+      await waitDone(h, task.id, 1)
+      const firstId = internal(h, task.id).stickySessionId!
+      // 会话被删（如人工归档/GC）：绑定指向不存在路径 → 应按标题找回最新同名会话
+      // 模拟：先用 ephemeral 跑出历史同名会话，再删绑定
+      const ephemeral = await h.store.createSession("default", "普通任务「控制平面」")
+      // 删除绑定会话目录（chat.json 没了）
+      const { rmSync } = await import("node:fs")
+      rmSync(join(h.home, "users", "default", "sessions", firstId.slice(0, 2), firstId.slice(2, 4), firstId), { recursive: true, force: true })
+      internal(h, task.id).stickySessionId = ""
+      h.store.cache.delete(firstId)
+      await h.tasks.run("default", task.id)
+      await waitDone(h, task.id, 2)
+      // 找回的应该是那个同名 ephemeral 会话（最新 updatedAt），而不是新建
+      expect(h.runCalls[1].sid).toBe(ephemeral.id)
+      expect(internal(h, task.id).stickySessionId).toBe(ephemeral.id)
+      // 未新建：同名会话只剩找回的那个（首个 sticky 会话目录已删，若盲建会多出一个）
+      expect((await h.store.listSessions("default")).filter((s) => s.name === "普通任务「控制平面」")).toHaveLength(1)
+    } finally {
+      await cleanup(h)
+    }
+  })
+
   test("session：绑定既有会话执行；绑定会话被删除则自愈降级为独立会话", async () => {
     const h = setup()
     try {
