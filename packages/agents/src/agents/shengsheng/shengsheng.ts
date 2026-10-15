@@ -256,14 +256,34 @@ function returnToSeeds(state: EvolveState, rows: Inflight[], prefix: string, rea
   return pushed
 }
 
-/** 取 `## <标题>` 段落下的自由文本（非表格行）。 */
+/** 渲染器写出的**全部规范节标题**（按写出次序）——`renderControl` 只写这些节。
+ *
+ *  为什么需要显式清单：断点是**自由文本节**（正文由模型写，可能是多段 markdown），若把任何
+ *  `^##\s` 行都当节边界，正文里一行手写的小标题（`## 下一步`、粘贴进来的 md 片段）就会**静默截断**
+ *  断点——读进来只剩前半段，下一次 `note` 写回时后半段永久丢失。改为只认规范节标题：非规范
+ *  `## ` 行是内容而不是结构。手写文件里多出的非规范标题也归到所在节正文（**不静默丢**）。 */
+export const SECTION_HEADINGS = ["项目坐标", "计数", "worker 池", "在途", "种子队列", "收藏待办", "断点"] as const
+
+/** 这一行是不是**规范节标题**（`## <清单里的标题>`）。 */
+const isSectionHeading = (line: string): boolean => {
+  const t = line.trim()
+  return t.startsWith("## ") && (SECTION_HEADINGS as readonly string[]).includes(t.slice(3).trim())
+}
+
+/** 节标题行：入参限定为语料里的标题——拼错或漏登一个节，编译期即报（写出侧与解析侧同源）。 */
+const H = (title: (typeof SECTION_HEADINGS)[number]): string => `## ${title}`
+
+/** 取 `## <标题>` 段落下的自由文本（非表格行）。
+ *
+ *  边界只认**规范节标题**（见 {@link SECTION_HEADINGS}）：断点正文里的 `## ` 行是内容，不是结构——
+ *  否则一段以 `## ` 开头的手写小标题会被当成节边界，断点被静默截断（写回时后半段丢失）。 */
 function sectionText(md: string, heading: string): string {
   const lines = md.split(/\r?\n/)
   const start = lines.findIndex((l) => l.trim() === `## ${heading}`)
   if (start < 0) return ""
   const out: string[] = []
   for (let i = start + 1; i < lines.length; i++) {
-    if (/^##\s/.test(lines[i].trim())) break
+    if (isSectionHeading(lines[i])) break
     out.push(lines[i])
   }
   return out.join("\n").trim()
@@ -328,32 +348,34 @@ export function dedupeState(state: EvolveState): { workers: Worker[]; inflight: 
   return { workers, inflight, dropped: state.workers.length - workers.length + (state.inflight.length - inflight.length) }
 }
 
-/** 序列化 control.md（节结构确定性重写，内容全部来自解析后的状态）。 */
+/** 序列化 control.md（节结构确定性重写，内容全部来自解析后的状态）。
+ *
+ *  节标题一律经 {@link H} 取自语料（{@link SECTION_HEADINGS}）——写错或漏登一个节，编译期即报。 */
 export function renderControl(state: EvolveState): string {
   const coordLines = COORD_LABELS.filter(([k]) => state.coord[k]).map(([k, label]) => `- ${label}：${state.coord[k]}`)
   const parts = [
     "> 生生调度状态（`shengsheng_state` 托管，勿手改）。",
     "",
-    "## 项目坐标",
+    H("项目坐标"),
     coordLines.length ? coordLines.join("\n") : "（未固化）",
     "",
-    "## 计数",
+    H("计数"),
     `- 呼吸：${state.breath}`,
     `- 派工序号：${state.seq}`,
     "",
-    "## worker 池",
+    H("worker 池"),
     renderTable(poolHeader(), state.workers.map((w) => poolCells(w))),
     "",
-    "## 在途",
+    H("在途"),
     renderTable(inflightHeader(), state.inflight.map((i) => inflightCells(i))),
     "",
-    "## 种子队列",
+    H("种子队列"),
     renderTable(["优先级", "方向", "来源", "约束"], state.seeds.map((s) => [s.priority, s.direction, s.source, s.constraint])),
     "",
-    "## 收藏待办",
+    H("收藏待办"),
     renderTable(["别名", "摘要", "时间"], state.pending.map((p) => [p.alias, p.summary, String(p.at)])),
     "",
-    "## 断点",
+    H("断点"),
     state.note?.trim() ? state.note.trim() : "（无）",
     "",
   ]
@@ -860,6 +882,9 @@ const stateTool: Tool = {
       const note = args.note != null ? String(args.note) : ""
       const clearing = /^（?无）?$/.test(note.trim())
       state.note = note.trim() && !clearing ? note.trim() : undefined
+      // 呼吸计数**在此推进**（每息收尾一次）：它是「这条河跑了多久」的唯一计数，
+      // 也是断点文本之外唯一能自查的机器可读量——不推进则永远停在初值、与断点叙述相左（登记与真值裂缝）。
+      state.breath += 1
       const w = await saveState(ctx, root, state)
       if (w.error) return { output: w.error }
       return {

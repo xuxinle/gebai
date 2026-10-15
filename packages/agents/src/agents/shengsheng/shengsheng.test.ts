@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, existsSync } from "node:f
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
-import { def as shengshengDef, parseControl, renderControl, dedupeState, inflightSession, isSessionIdShape, tableBlock } from "./shengsheng"
+import { def as shengshengDef, parseControl, renderControl, dedupeState, inflightSession, isSessionIdShape, tableBlock, SECTION_HEADINGS } from "./shengsheng"
 // 版本化解析模块（本单新抽）：判代/位置读取/升级函数与其版本声明——单测直接锁它的契约
 import {
   parseInflightRow,
@@ -256,9 +256,20 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
     expect(done.output).toContain("种子销账")
     const note = await tool("state").execute({ action: "note", note: "布雨 1 单，一单在途" }, s.ctx)
     expect(note.output).toContain("断点已落盘")
+    // 呼吸**真的推进了一息**（工具描述与提示词都写着「note 推进呼吸」——
+    // 名字里写着的东西必须有断言守着，否则「写了机制 ≠ 机制生效」在此重演）
+    expect(note.output).toContain("呼吸 1")
+    expect((note.data as { breath: number }).breath).toBe(1)
     const state = parseControl(controlOf(s))
+    expect(state.breath).toBe(1)          // 落盘真值同步（不只是返回文案）
     expect(state.seeds).toHaveLength(1)
     expect(state.note).toBe("布雨 1 单，一单在途")
+    // 再落一次 → 再到下一息（单调递增，不重置、不卡住）
+    const next = await tool("state").execute({ action: "note", note: "第二息" }, s.ctx)
+    expect((next.data as { breath: number }).breath).toBe(2)
+    expect(parseControl(controlOf(s)).breath).toBe(2)
+    // 读态如实报出当前呼吸（与落盘一致）
+    expect((await tool("state").execute({}, s.ctx)).output).toContain("呼吸：2")
     cleanup(s)
   })
 
@@ -504,6 +515,59 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
     expect(ld.gone).toHaveLength(1)
     expect(ld.unresolved).toHaveLength(0)
     cleanup(s)
+  })
+
+  // ------------------------------------------------------------------
+  // 断点节往返保真：断点是**自由文本节**（正文由模型写），而 `sectionText` 原先一律在
+  // 任何 `^##\s` 行处截断——正文里一行手写小标题（`## 下一步`、粘贴的 md 片段）会被当成
+  // 节边界，断点被**静默截断**（读进来只剩前半段，下次 note 写回时后半段永久丢失）。
+  // 边界改为只认**规范节标题**（SECTION_HEADINGS）。
+  // ------------------------------------------------------------------
+
+  test("断点往返保真：正文里的 `## ` 行是内容不是结构（不被静默截断、写回不丢后半段）", async () => {
+    const s = stub()
+    const md = renderControl({
+      coord: { root: "C:/p", verify: "bun test" },
+      breath: 3,
+      seq: 9,
+      workers: [],
+      inflight: [],
+      seeds: [],
+      pending: [],
+      note: "前半段：观到三单在跑。\n\n## 下一步\n\n- 收 ss-1；- 布一雨。\n\n尾段：别忘了核提交数。",
+    })
+    // 写进真现场（与工具同一路径），再用**真工具**读回来
+    mkdirSync(join(s.root, ".evolve"), { recursive: true })
+    await Bun.write(join(s.root, ".evolve", "control.md"), md)
+    await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+
+    const read = await tool("state").execute({}, s.ctx)
+    const note = (read.data as { note: string | null }).note ?? ""
+    expect(note).toContain("## 下一步")            // 非规范 `## ` 行是内容
+    expect(note).toContain("尾段：别忘了核提交数")   // **后半段没被截掉**（修复前这里丢）
+
+    // 往返：再落一次断点（带上尾巴）→ 重读仍在（不静默丢）
+    await tool("state").execute({ action: "note", note: `${note}\n\n（复核：三单已收）` }, s.ctx)
+    const again = await tool("state").execute({}, s.ctx)
+    const back = (again.data as { note: string | null }).note ?? ""
+    expect(back).toContain("## 下一步")
+    expect(back).toContain("尾段：别忘了核提交数")
+    expect(back).toContain("（复核：三单已收）")
+
+    // 对照：**规范**节标题仍是边界——后一节的正文不得泄进断点
+    expect(back).not.toContain("## 种子队列")
+    // 再往返一次恒等（解析 → 渲染 → 解析）
+    const once = parseControl(controlOf(s))
+    expect(parseControl(renderControl(once)).note).toBe(once.note)
+    cleanup(s)
+  })
+
+  test("节结构单源：写出侧节标题集 == 解析侧认的规范标题集（次序一致，两边漂开即报）", () => {
+    const md = renderControl({ coord: {}, breath: 0, seq: 0, workers: [], inflight: [], seeds: [], pending: [] })
+    const written = md.split(/\r?\n/).filter((l) => /^##\s/.test(l.trim())).map((l) => l.trim().slice(3).trim())
+    // 逐字且**次序一致**：渲染器写出的每个节都在语料里，语料里的每个节也都被写出
+    expect(written).toEqual([...SECTION_HEADINGS])
+    expect(new Set(written).size).toBe(SECTION_HEADINGS.length)
   })
 
   test("心跳任务：ensure 幂等创建（sticky + 预载 shengsheng + 项目 env），已有则不新建", async () => {
