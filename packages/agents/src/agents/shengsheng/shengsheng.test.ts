@@ -627,6 +627,135 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
   })
 
   // ------------------------------------------------------------------
+  // 续派全链（fix-2 / 547039f2）：同进程内一次性锁住四条——续派≠新建（会话数不变、
+  // 不占新建额度）、resume 消息分支、非池会话拒绝（授权面不外扩）、池满只挡新建。
+  // 与上一条「续派」测试的分工：上条是**同语义的宽断言**；本条补齐量化与对照断言
+  // （混合批次的额度记账、resume 分支的开合对照、拒绝路径的零副作用、真实存在的非池会话）。
+  // ------------------------------------------------------------------
+
+  test("续派全链：session_id 走续派而非新建——不新增会话、不占新建额度、消息点名「续派/从中断处继续」、非池会话被拒、池满只挡新建", async () => {
+    const s = stub()
+    await tool("state").execute({ action: "init", root: s.root, verify: "bun run test" }, s.ctx)
+
+    // 先立一条演进线的两个 worker（池 = 2，活动上限 = 3——留一格空位供「占额度」量化）
+    await tool("dispatch").execute({ orders: [{ task: "首单：修 lint", domain: "lint" }, { task: "次单：补文档", domain: "docs" }] }, s.ctx)
+    const lintSid = s.sent[0].sessionId
+    const docsSid = s.sent[1].sessionId
+    expect(s.created.map((c) => c.id)).toEqual([lintSid, docsSid])
+    // 对照基线：正常新建单的消息**不带**续派分支（否则下面的 resume 分支断言就失去意义）
+    expect(s.sent[0].message).not.toContain("续派")
+    expect(s.sent[1].message).not.toContain("续派")
+
+    // ----------------------------------------------------------------
+    // ① 续派：session_id 指向池中 worker → 不新增会话、不占新建额度
+    // ----------------------------------------------------------------
+    s.running.clear()                                   // 两单跑完（同会话并发注入会被拒）
+    const createdBefore = s.created.length
+    const r = await tool("dispatch").execute({ orders: [{ task: "接着干被中断的步骤", session_id: lintSid }] }, s.ctx)
+    expect(r.output).toContain("布雨完成")
+    expect(r.output).toContain("续派")
+    expect(s.created).toHaveLength(createdBefore)        // 不新增会话
+    expect(s.sent).toHaveLength(3)
+    expect(s.sent[2].sessionId).toBe(lintSid)            // 注入的仍是原会话
+    // 机器可读契约：plan 标 resume、非 created（编排侧据此判额度，不能只看文本）
+    const rd = r.data as { plan: Array<{ alias: string; sessionId: string; reuse: boolean; created: boolean; resume?: boolean; note?: string }> }
+    expect(rd.plan).toHaveLength(1)
+    expect(rd.plan[0]).toMatchObject({ alias: "lint-1", sessionId: lintSid, reuse: false, created: false, resume: true })
+    expect(rd.plan[0].note).toContain("续派会话")          // 走的是续派分支（非新建、非同域复用）
+    // 续派=复用会话：项目坐标 env 重注入（服务重启后 env 常已丢，续跑多发生在此之后）
+    const reinject = s.envWrites.filter(([id]) => id === lintSid).pop()![1]
+    expect(reinject.SHENGSHENG_ROOT).toBe(s.root)
+    expect(reinject.SHENGSHENG_VERIFY).toBe("bun run test")
+    // 池：同会话按会话 upsert——仍是 2 条、别名不变、轮次前推（旧轮被新轮取代）
+    const st1 = parseControl(controlOf(s))
+    expect(st1.workers).toHaveLength(2)
+    const lintWorker = st1.workers.find((w) => w.sessionId === lintSid)!
+    expect(lintWorker.alias).toBe("lint-1")
+    expect(lintWorker.round).toBeGreaterThan(1)
+
+    // **不占新建额度（量化断言）**：池 = 2、上限 3 —— 一批 [续派 + 新建] 必须放行。
+    // 若续派被误算作新建，则为 2 + 2 = 4 > 3，整批被「上限 3」挡下。
+    s.running.clear()
+    const mixed = await tool("dispatch").execute({ orders: [{ task: "续派第二刀", session_id: lintSid }, { task: "新领域首单", domain: "perf" }] }, s.ctx)
+    expect(mixed.output).toContain("布雨完成")
+    expect(mixed.output).not.toContain("上限 3")
+    expect(s.created).toHaveLength(createdBefore + 1)     // 只有新建那一单占额度
+    expect(parseControl(controlOf(s)).workers).toHaveLength(3)
+
+    // ----------------------------------------------------------------
+    // ② resume 分支：续派消息点名「续派/从中断处继续」，且顺序在模板头部
+    // ----------------------------------------------------------------
+    const resumeMsg = s.sent[3].message                    // mixed 批次里的续派单
+    expect(resumeMsg).toContain("续派：")
+    expect(resumeMsg).toContain("从中断处继续")
+    expect(resumeMsg).toContain("不要从头重做")
+    expect(resumeMsg.indexOf("任务：")).toBeLessThan(resumeMsg.indexOf("续派："))
+    expect(resumeMsg.indexOf("续派：")).toBeLessThan(resumeMsg.indexOf("上下文："))
+    // 续派仍带完整模板与同一执行姿态（授权沿调用链随行：无人值守自动通过）
+    expect(resumeMsg).toContain("任务：续派第二刀")
+    expect(resumeMsg).toContain("验证：bun run test")
+    expect(resumeMsg).toContain("无人值守执行")
+    expect(s.sent[3].opts).toEqual({ autoApprove: true, interactionMode: "none" })
+    // 对照：同一模板的**新建**单不含续派行（分支按 resume 开合，不是恒插）
+    expect(s.sent[4].message).not.toContain("续派")
+    expect(s.sent[4].sessionId).not.toBe(lintSid)
+
+    // ----------------------------------------------------------------
+    // ③ 非池会话被拒：授权面不外扩，且拒绝路径零副作用
+    // ----------------------------------------------------------------
+    s.running.clear()
+    // 让「生生自己的控制会话」真实存在——存在不等于在授权面内：判据是**池中登记**
+    s.sessions.set(String(s.ctx.sessionId), { id: String(s.ctx.sessionId), messages: [] })
+    const ctrlBefore = controlOf(s)
+    const sentBefore = s.sent.length
+    const createdB = s.created.length
+    for (const [label, sid] of [["不存在的会话", "sess-stranger"], ["存在但非池（生生自己的控制会话）", String(s.ctx.sessionId)]] as const) {
+      const rejected = await tool("dispatch").execute({ orders: [{ task: `越权续派（${label}）`, session_id: sid }] }, s.ctx)
+      expect(rejected.output).toContain("授权面不外扩")
+      expect(rejected.output).toContain("不是池中登记的 worker 会话")
+      expect((rejected.data as { blocked?: boolean }).blocked).toBe(true)
+      // 拒绝文案须可操作：列出池中 worker 供替换为合法寻址
+      expect(rejected.output).toContain(`${lintSid}`)
+      expect(rejected.output).toContain("lint-1")
+    }
+    expect(s.sent).toHaveLength(sentBefore)               // 未向非池会话注入
+    expect(s.created).toHaveLength(createdB)              // 未新建
+    expect(controlOf(s)).toBe(ctrlBefore)                 // 池/在途/序号原封不动（拒绝即无副作用）
+
+    // ----------------------------------------------------------------
+    // ④ 池满（活动 worker = 3）时复用/续派不被挡——只挡新建
+    // ----------------------------------------------------------------
+    s.running.clear()
+    await tool("collect").execute({ action: "collect", alias: "docs-1", summary: "文档轮次完成" }, s.ctx)
+    expect(parseControl(controlOf(s)).workers.filter((w) => w.status === "idle")).toHaveLength(1)
+
+    // 复用（同域 idle）放行
+    const reuse = await tool("dispatch").execute({ orders: [{ task: "docs 跟进", domain: "docs" }] }, s.ctx)
+    expect(reuse.output).toContain("布雨完成")
+    expect(reuse.output).toContain("复用")
+    expect(reuse.output).not.toContain("上限")
+    expect(s.created).toHaveLength(createdB)              // 复用不新建
+    expect(s.sent[s.sent.length - 1].sessionId).toBe(docsSid)
+
+    // 续派放行
+    const resumeAtFull = await tool("dispatch").execute({ orders: [{ task: "池满续派", session_id: lintSid }] }, s.ctx)
+    expect(resumeAtFull.output).toContain("布雨完成")
+    expect(resumeAtFull.output).toContain("续派")
+    expect(resumeAtFull.output).toContain("池 3")
+    expect(s.created).toHaveLength(createdB)
+    expect(s.sent[s.sent.length - 1].sessionId).toBe(lintSid)
+
+    // 新建被挡（同一池满前提下）——额度记账只算新建
+    s.running.clear()
+    const blocked = await tool("dispatch").execute({ orders: [{ task: "池满新单", domain: "brandnew", fresh: true }] }, s.ctx)
+    expect(blocked.output).toContain("上限 3")
+    const bd = blocked.data as { blocked?: boolean; workers?: number; needNew?: number; limit?: number }
+    expect(bd).toMatchObject({ blocked: true, workers: 3, needNew: 1, limit: 3 })
+    expect(s.created).toHaveLength(createdB)
+    cleanup(s)
+  })
+
+  // ------------------------------------------------------------------
   // 主键去重：同一会话连续两轮派工后，池/在途各只有一条当前登记
   // （本机实测两次的缺陷：续派后同会话并列两条，旧条目被判「中道而废」）
   // ------------------------------------------------------------------
