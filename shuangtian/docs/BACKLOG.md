@@ -3527,6 +3527,22 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
 
 ## P2
 
+- [ ] **控制通道 find 的 `#` 选择器对含点 id 失配（文档/容错双缺口）**（2026-10-15 Windows
+  全面测试轮发现）：`ui::Selector` 按 CSS 语义把 `.` 当类分隔符，而业务 id 常含点
+  （`git-file-<path>`、`tasks/ListItem@task-42`）——`find("#git-file-alpha.txt")`
+  被拆成 `Id: git-file-alpha + Type: txt`，count 恒 0，报错却是「找不到元素」
+  （离真因很远）。实测 `Button[id=git-file-alpha.txt]` 属性写法可绕过。
+  方向：文档明确警示；或 find 时对 `#` 前缀的整体做「完整 id 匹配优先」的容错
+  （先试整串，再退 CSS 解析）。为什么值得做：智能体/脚本最容易写 `#id`，
+  而含点 id 在 git 面板里是常态，这个坑会反复撞。
+
+- [ ] **控制文件为裸文件名（无目录）时落盘白名单的 `.` 条目形同虚设**（2026-10-15 同轮）：
+  `default_capture_dirs` 对无分隔符的 control_file 放行字面 `"."`，
+  而客户端请求的是绝对路径——前缀比较永远不匹配（该目录下全部拒绝）。
+  方向：无分隔符时用进程 CWD 的绝对路径展开（`fs::current_dir()` + "/"）。
+  为什么值得做：智能体会话里 ctl.json 常直接写在 CWD，视觉断言基线写入
+  会莫名被拒，而报错文案不会指向这个原因。
+
 - [ ] **多行 `Text` 折行缓存的键不含 `RenderContext::text`（端口）**（2026-10-14 合并前复核发现）：
   `basic.cpp` 的缓存判据是 `(content_, available, size)` 三元组，而 `wrap` 的结果
   **也取决于当时的 `TextPort`**（字宽来自字体）。

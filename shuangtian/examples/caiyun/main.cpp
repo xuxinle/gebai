@@ -460,7 +460,11 @@ auto run_app(int argc, char** argv) -> int {
 
   st::app::Application app("caiyun", "0.1.0", app_options);
   // **自绘组件必须先注册**（`custom<T>` 用它之前）——见 louyue 同名注释。
-  if (!dsl::register_element_type<TimelineView>("TimelineView") ||
+  // ⚠ 注册名不能用 "TimelineView"：内置组件清单已新增同名时间线组件
+  //（dsl.cpp ST_COMPONENT_LIST），重名会被拒（防静默失效的正确行为），
+  // 表现是 caiyun 启动即退（实测 Windows 首跑发现）。改用带前缀的名字，
+  // C++ 类名不动（它是视频剪辑时间轴，与内置 TimelineView 语义无关）。
+  if (!dsl::register_element_type<TimelineView>("CaiyunTimeline") ||
       !dsl::register_element_type<MonitorView>("MonitorView")) {
     std::fprintf(stderr, "自绘组件注册失败（与内置组件重名？）\n");
     return 1;

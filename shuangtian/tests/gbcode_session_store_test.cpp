@@ -8,6 +8,11 @@
 #include "st/core/fs.hpp"
 #include "st/test/test.hpp"
 
+#include <string>
+#include <vector>
+
+#include "st/core/print.hpp"
+
 // session_store 是 gbcode 的应用层源（不在框架 sources 清单里）——与
 // gbcode_lsp_bridge_test 同一策略：直接 include 实现编译进测试。
 #include "examples/gbcode/session_store.hpp"
@@ -31,8 +36,7 @@ auto check_list(const std::vector<std::string>& actual, const std::vector<std::s
   ST_CHECK_EQ(actual.size(), expected.size());
   for (std::size_t index = 0; index < actual.size() && index < expected.size(); ++index) {
     if (actual[index] != expected[index]) {
-      std::printf("  不符（%s[%zu]）：%s != %s\n", what, index, actual[index].c_str(),
-                  expected[index].c_str());
+      st::print("  不符（{}[{}]）：{} != {}\n", what, index, actual[index], expected[index]);
       ST_CHECK(false);
     }
   }

@@ -520,6 +520,7 @@ PowerShell 的 PSReadLine 会画一段**只有显示、不是输入**的内联�
 | L8 | `src/ui/icon.cpp` 的 `svg_registry` | 图标 sprite 表按设计全局唯一（启动时装载一次，所有 `IconView` 共享），只持有不可变源文本与位图缓存 | 行内 |
 | L8 | `tests/ui_dsl_test.cpp` 的用例级计数器 | 需被 lambda 捕获并跨重组共享；作用域限于单个用例（不跨用例泄漏） | 行内（前置） |
 | L14 | `src/core/entry.cpp` | `ST_MAIN` 需在调用点正规化 Windows 的 ANSI `argv`（`<windows.h>`/`<shellapi.h>`）+ POSIX 侧 `<unistd.h>`。这是**进程入口**的职责，不属于任何 `platform_*` 横切层 | **清单**（`st.pkg` 的 `lint.exempt.L14`） |
+| L3 | `src/net/platform_tls_openssl.cpp`（`ST_SYM`） | dlopen 符号还原样板：11 个 `ST_SYM` 展开是同一形参表，函数化反而藏错。行内豁免在此**结构上放不下**：`#define` 首行必须以 `\` 结尾（尾随注释在 Linux g++ 判 stray `'\'` 拒编），而 `has_allow_comment` 只认同一行 | **清单**（`st.pkg` 的 `lint.exempt.L3`） |
 | L14 | `src/shell/backend.cpp` | 需 `dlopen` 做**运行时后端探测**——而这正是 §10 第 1 条「平台后端一律运行时探测（不产生链接期依赖）」的实现处：探测本身就是平台差异的唯一判定点 | 内置 |
 
 > 两条豁免通道都**各自计数**（`st lint` 汇总行报出「行内 N / 清单 M」），不允许静默。

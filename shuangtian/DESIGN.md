@@ -893,7 +893,7 @@ class DiffView : public Element {
 |---|---|
 | 左侧「变更」行 | 点开**并列差异**（HEAD↔暂存、或暂存↔工作区：按该文件是否只有暂存侧改动推） |
 | 底部 Git → 选中提交 | 列出该提交改动的文件，点文件开“父提交 ↔ 本提交”的并列差异（**根提交归一到空树**） |
-| 活动栏「比较」 | 任意两端（工作区/暂存区/任意 rev，含三点 merge-base）→ 文件清单 → 单文件并列差异 |
+| ~~活动栏「比较」~~ | **已下线**（2026-10-14，1014 提交：用户要求删除比较侧栏）。任意两端比较的数据能力（`read_compare`/`read_diff_text`）保留在 `git_service`，无 UI 入口；恢复时接回 `ensure_compare` 即可 |
 | F7 / Shift+F7 | 下一个 / 上一个差异块（差异视图在场时生效） |
 
 数据侧（`examples/gbcode/git_service.hpp` / `.cpp`）新增端点语义表 `diff_args`（**返回 `nullopt` 表示不支持**，
@@ -956,7 +956,7 @@ class DiffView : public Element {
 
 | 位置 | 内容 |
 |---|---|
-| 左侧「变更」 | 工具条（刷新 / 全部暂存 / 全部取消暂存 / 折叠全部 / 展开全部 / 与…比较 / 放弃全部）；四分组（冲突/已暂存/未暂存/未跟踪）各自可折叠 + **整组动作**；每行状态字母 + 路径 + 三个行内动作（暂存/取消/放弃）；底部**提交面板**（消息行 / 修正 / 最近消息 / 提交 / 提交并推送 / 更多选项（作者覆盖）/ 暂存全部 / 已暂存计数） |
+| 左侧「变更」 | 工具条（刷新 / 全部暂存 / 全部取消暂存 / 折叠全部 / 展开全部 / 放弃全部；「与…比较」已随比较视图下线 2026-10-14）；四分组（冲突/已暂存/未暂存/未跟踪）各自可折叠 + **整组动作**；每行状态字母 + 路径 + 三个行内动作（暂存/取消/放弃）；底部**提交面板**（消息行 / 修正 / 最近消息 / 提交 / 提交并推送 / 更多选项（作者覆盖）/ 暂存全部 / 已暂存计数） |
 | 底部 Git 工具窗 | **三栏**：左栏引用（分支/标签/暂存/远程 四个分组切换）/ 中栏日志（过滤 + 泳道）/ 右栏提交内容（元信息 + 文件清单，点开并列差异）；顶部多步操作横幅 |
 | ——为何是三栏 | 三者是一条**动线**：「选一个引用（在看哪个分支）→ 看它的提交 → 看某笔改了什么」，每步的结果都是下一步的输入。互斥标签会把这条动线拆成三次“切回去再切过来”，而把“改了什么”压在日志下面又会被迫滚动 |
 | 左栏·分支 | 切换（远程分支自动建本地跟踪）/ 新建（浮层）/ 删除（`-d`，未合并会被拒） |
@@ -4205,8 +4205,8 @@ raster 层的缺省是 `butt/miter`（与 SVG/CSS 默认一致），但图标不
 | `wait` | `{for, selector?, text?, timeout_ms?, stable_ms?}` | `{satisfied, elapsed_ms, detail}` | `for`: `element` `gone` `text` `text_gone` `stable` `frames` |
 | `metrics` | — | `{backend, headless, renderer, text_renderer, uptime_ms, frames, fps, frame_ms:{p50,p95}, dirty_ratio, nodes, allocations}` | 运行时指标 |
 | `events` | `{enable, kinds?}` | `{enabled, kinds}` | 订阅：`ui.changed` `frame` `input` `log` `theme`。`ui.changed` 事件 data = `{version, changed?:[id…]}`——变更元素 id 清单（去重、单帧上限 64；只报状态/内容变更，不含悬浮过渡/光标闪烁这类逐帧噪声） |
-| `theme` | `{mode?}` | `{mode, tokens}` | 读/切主题（`light`/`dark`/`system`） |
-| `app` | `{action, args?}` | `{ok}` | `resize` `quit` `reload` `screenshot_dir` `title` |
+| `theme` | `{mode?, set?, tokens?}` | `{mode, name, tokens?}` | 读/切主题（`light`/`dark`/`toggle`）；`set` 运行时稀疏覆盖 token；`tokens:true` 回传完整快照（默认省略） |
+| `app` | `{action, args?}` | 按动作而异 | 动作：`quit`/`close`（退出）、`reload`/`repaint`（重绘）、`set_scale`/`scale`（需 `scale` 参数，改 DPI）、`log`（需 `limit` 参数）、`focus`（需 `id` 参数，聚焦元素） |
 | `script` | `{code?, function?, args?, filename?}` | `{result, ops?, memory?}` | **默认禁用**（需 `--enable-script`）。`code` 直接执行；或 `function`+`args` 调用已定义函数；受内存/栈/时长/转换深度四重配额 |
 | `shutdown` | `{graceful?}` | `{ok}` | 关闭服务（应用退出） |
 

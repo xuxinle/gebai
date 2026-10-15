@@ -261,14 +261,21 @@ class Win32Backend final : public Backend {
     // （这一条是自绘窗框最容易做坏的地方：把 `WS_THICKFRAME` 一起去掉，拖动吸附与边缘缩放
     //   就同时消失，而它不会报错，只表现为"变得不好用"。）
     DWORD style = 0;
+    bool need_adjust = true;
     if (decorations_) {
       style = WS_OVERLAPPEDWINDOW;
       if (!options.resizable) style &= ~static_cast<DWORD>(WS_THICKFRAME | WS_MAXIMIZEBOX);
     } else {
       style = WS_POPUP | WS_CLIPCHILDREN | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
       if (options.resizable) style |= WS_THICKFRAME;
+      // `WS_POPUP` 弹窗的客户区就是整窗（系统边框不占面积，命中由 `WM_NCHITTEST`
+      // 接管）——再对它调 `AdjustWindowRectEx` 会为 `WS_THICKFRAME` 加上
+      // 8px/边的外框，实际却不占：窗口比目标物理尺寸大 16px，客户区
+      // 与无头通道不同源（实测 125% 下 1616x1016 vs 1600x1000）。
+      // 跳过：物理尺寸即整体尺寸。
+      need_adjust = false;
     }
-    ::AdjustWindowRectEx(&rect, style, FALSE, 0);
+    if (need_adjust) ::AdjustWindowRectEx(&rect, style, FALSE, 0);
     const std::wstring title = to_wide(options.title);
 
     window_ = ::CreateWindowExW(0, kWindowClass, title.c_str(), style, CW_USEDEFAULT, CW_USEDEFAULT,
@@ -388,11 +395,16 @@ class Win32Backend final : public Backend {
         static_cast<double>(logical_width_) * static_cast<double>(scale_))));
     const int client_height = std::max(1, static_cast<int>(std::lround(
         static_cast<double>(logical_height_) * static_cast<double>(scale_))));
-    RECT rect{0, 0, client_width, client_height};
-    const DWORD style = static_cast<DWORD>(::GetWindowLongPtrW(window_, GWL_STYLE));
-    if (::AdjustWindowRectEx(&rect, style, FALSE, 0) == 0) {
-      return unexpected(ErrorCode::Io, "AdjustWindowRectEx 失败");
-    }
+          RECT rect{0, 0, client_width, client_height};
+      const DWORD style = static_cast<DWORD>(::GetWindowLongPtrW(window_, GWL_STYLE));
+      // 自绘窗框（`WS_POPUP`）：客户区即整窗，不能再让 `AdjustWindowRectEx` 加
+      // `WS_THICKFRAME` 的 8px/边（同创建路径的说明——两处口径必须一致，
+      // 否则 DPI 变化后窗口又胖一圈）。
+      if ((style & WS_POPUP) == 0) {
+        if (::AdjustWindowRectEx(&rect, style, FALSE, 0) == 0) {
+          return unexpected(ErrorCode::Io, "AdjustWindowRectEx 失败");
+        }
+      }
     RECT current{};
     if (::GetWindowRect(window_, &current) == 0) return ok();
     const int wanted_width = rect.right - rect.left;

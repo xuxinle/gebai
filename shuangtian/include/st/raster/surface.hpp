@@ -91,7 +91,7 @@ class Surface {
   Surface(const Surface&) = delete;
   auto operator=(const Surface&) -> Surface& = delete;
   // 接口本身无数据，移动就是“能力转移”（具体实现自己决定要不要真移动缓冲）
-  Surface(Surface&&) = default;
+  Surface(Surface&&) = default;  // lint-allow: L10 移动构造需隐式（return 依赖它，加 explicit 有害）
   auto operator=(Surface&&) -> Surface& = default;
   virtual ~Surface() = default;
 

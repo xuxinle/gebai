@@ -19,6 +19,7 @@
 #include "st/test/test.hpp"
 
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>

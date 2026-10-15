@@ -186,26 +186,24 @@ def main():
     proc = None
     try:
         proc, client, info, shots = start(repo)
-        wait_until(lambda: client.count("#activity-compare") == 1, what="活动栏出现「比较」")
-
-        # ① 比较视图
-        client.click("#activity-compare")
-        wait_until(lambda: client.count("#compare-view") == 1, what="比较视图出现")
-        check(client.count("#compare-view") == 1, "点活动栏「比较」→ 比较视图出现")
-
-        # ② 两端用侧栏的「设 A / 设 B」按钮设好 → 文件清单出现
-        #（端点按钮的 id 形如 `compare-from-HEAD~1`，但侧栏那套按钮在**比较侧栏**里，
-        #  活动栏切过去才会出现——所以先点活动栏再点它们）。
-        client.click("#compare-from-HEAD~1")
-        client.click("#compare-to-HEAD")
-        wait_until(lambda: client.count("#compare-file-0") == 1, what="文件清单出现")
-        check(True, "A=HEAD~1 / B=HEAD → 清单出现")
-        label = client.props("compare-file-0").get("text", "")
-        check("alpha.txt" in label, f"清单第一条是 alpha.txt（实际：{label}）")
-
-        # ③ 点文件 → 并列差异
-        client.click("#compare-file-0")
+        # 比较视图已随 1014 提交下线（用户要求删除比较侧栏）。
+        # 单文件并列差异的能力仍在：改走「变更面板点变更文件」这个入口
+        #（与 gbcode_git_e2e 同源），③④⑤ 的 DiffView 断言原样保留。
+        client.click("#activity-scm")
+        wait_until(lambda: client.count("#scm-toolbar") == 1, what="变更工具条出现")
+        wait_until(lambda: client.count("#diff-view") == 0 and client.count("#git-group-未暂存") == 1,
+                   what="未暂存分组出现")
+        # 变更行：变更面板的文件行 id 是 `git-file-<path>`（page_sidebar.cpp）。
+        # ⚠ 选择器必须用属性写法 `Button[id=…]`：`#git-file-alpha.txt` 会被 CSS 语义
+        # 拆成 id + 类（`.` 在 CSS 里是类分隔符），count 恒 0（实测）。
+        wait_until(lambda: client.count("Button[id=git-file-alpha.txt]") == 1,
+                   what="变更面板出现 alpha.txt 行")
+        found = client.ok("find", {"selector": "Button[id=git-file-alpha.txt]", "limit": 1})
+        bounds = found["matches"][0]["bounds"]
+        client.ok("input.mouse", {"kind": "click", "x": bounds["x"] + bounds["width"] / 2.0,
+                                   "y": bounds["y"] + bounds["height"] / 2.0, "button": 1})
         wait_until(lambda: client.count("#diff-view") == 1, what="差异视图出现")
+        check(True, "点变更文件 → 并列差异视图出现（原比较入口已下线）")
         props = client.props("diff-view")
         hunks = props.get("hunks", "0")
         check(hunks not in ("", "0"), f"差异块数 = {hunks}")

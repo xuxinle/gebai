@@ -238,6 +238,9 @@ auto print_usage(std::string_view program) -> void {
       print_usage(argv[0]);
       std::exit(0);
     }
+    // `--headless` 必须接在 else-if 链的链首：独立 if 会在设置 headless 后
+    // 继续落入链尾的「未知参数」分支（实测 `--headless` 报 exit 2，
+    // 而所有 gbcode e2e 的启动参数都以它开关头——整条 e2e 生态全灭）。
     if (raw == "--headless") options.headless = true;
 
     // `--backend` 必须照接：应用层有**自己的**参数解析（不过 `st::app::parse_cli`），
@@ -246,7 +249,7 @@ auto print_usage(std::string_view program) -> void {
 
     //（Linux 上验证两个窗口后端全靠它）。
 
-    if (raw == "--backend") options.backend = value("");
+    else if (raw == "--backend") options.backend = value("");
     else if (raw == "--enable-script") options.enable_script = true;
     // `--scale` 夹到 [0.1, 10]：0 会让一切尺寸归零（窗口/字号/命中区全灭），
     // 负数在多数后端是非法 DPI。夹取而非报错——意图明确（想大想小），只是数值过头。

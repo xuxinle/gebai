@@ -57,8 +57,10 @@ struct Options {
   std::string theme{"light"};
   /// 自定义主题 JSON（稀疏覆盖；`--theme-file` 或 `ST_THEME_FILE`）。
   std::string theme_file{};
-  /// 渲染器：auto（按实测帧耗时选更快；**无头缺省不探测，直接 software**）/ gpu / software。
-  std::string renderer{"auto"};
+  /// 渲染器：空串（未指定——无头后端解析为 software，窗口后端解析为 auto）/ auto（按实测帧耗时选更快）/ gpu / software。
+  /// 不能默认 `"auto"`：那会让无头启动也真建 GPU 设备（+53MB/55 线程），
+  /// 与 AppOptions::renderer 的空串三态约定冲突（见 app.hpp 的注释）。
+  std::string renderer{};
   /// 文字抗锯齿：auto（有窗口 → LCD 亚像素；无头 → 灰度）/ on / off。
   std::string text_lcd{"auto"};
   /// 字形网格拟合：auto/off/light/normal（见 AppOptions::text_fit）。
@@ -88,6 +90,34 @@ std::string ui_font_scale{"auto"};
 
 [[nodiscard]] auto parse_options(int argc, char** argv) -> Options {
   Options options;
+  // 数值参数解析：**不抛异常**（`std::stoi/stod` 对非法值抛 `invalid_argument`，
+  // 未捕获即 `terminate` 崩溃——实测 `--scale abc` 直接崩；与框架公共解析器
+  // `parse_int/parse_float`（返回 `Result` 错误）同语义：报错 + exit 2）。
+  const auto int_or_die = [](const std::string& text, std::string_view name,
+                             int fallback) -> int {
+    try {
+      return std::stoi(text);
+    } catch (const std::exception&) {
+      st::eprint("gallery: {} 的取值不是整数: {}\n", name, text);
+      std::exit(2);
+    }
+    (void)fallback;
+  };
+  const auto float_or_die = [](const std::string& text, std::string_view name,
+                               float fallback) -> float {
+    try {
+      const double parsed = std::stod(text);
+      if (parsed <= 0.0) {
+        st::eprint("gallery: {} 的取值不是正数: {}\n", name, text);
+        std::exit(2);
+      }
+      return static_cast<float>(parsed);
+    } catch (const std::exception&) {
+      st::eprint("gallery: {} 的取值不是正数: {}\n", name, text);
+      std::exit(2);
+    }
+    (void)fallback;
+  };
   for (int index = 1; index < argc; ++index) {
     const std::string_view raw = argv[index];
     const auto next = [&](std::string fallback) -> std::string {
@@ -100,8 +130,8 @@ std::string ui_font_scale{"auto"};
     // 记录的那类缺陷（静默失效字段）。**Linux 上验证 x11/wayland 后端全靠它**：
     // 不接的话会走自动探测（有 DISPLAY 就选 x11），窗口后端根本没被换过。
     else if (raw == "--backend") options.backend = next("");
-    else if (raw == "--width") options.width = std::stoi(next("1280"));
-    else if (raw == "--height") options.height = std::stoi(next("800"));
+    else if (raw == "--width") options.width = int_or_die(next("1280"), "--width", 1280);
+    else if (raw == "--height") options.height = int_or_die(next("800"), "--height", 800);
     else if (raw == "--renderer") options.renderer = next("auto");
     else if (raw == "--text-lcd") options.text_lcd = next("auto");
     else if (raw == "--text-fit") options.text_fit = next("auto");
@@ -117,16 +147,16 @@ std::string ui_font_scale{"auto"};
     else if (raw == "--text-han-gamma") options.text_han_gamma = next("auto");
     else if (raw == "--text-fit-max-size") options.text_fit_max_size = next("auto");
     else if (raw == "--ui-font-scale") options.ui_font_scale = next("auto");
-    else if (raw == "--scale") options.scale = static_cast<float>(std::stod(next("1")));
-    else if (raw == "--dpi") options.scale = static_cast<float>(std::stod(next("1")));
+    else if (raw == "--scale") options.scale = float_or_die(next("1"), "--scale", 1.0f);
+    else if (raw == "--dpi") options.scale = float_or_die(next("1"), "--dpi", 1.0f);
     else if (raw == "--theme") options.theme = next("light");
     else if (raw == "--decorations") options.decorations = true;
-    else if (raw == "--control-port") options.control_port = static_cast<std::uint16_t>(std::stoi(next("0")));
+    else if (raw == "--control-port") options.control_port = static_cast<std::uint16_t>(int_or_die(next("0"), "--control-port", 0));
     else if (raw == "--control-file") options.control_file = next("");
     else if (raw == "--shots") options.shots = next("");
-    else if (raw == "--frames") options.frames = static_cast<std::uint32_t>(std::stoi(next("0")));
-    else if (raw == "--bench") options.bench = static_cast<std::uint32_t>(std::stoi(next("0")));
-    else if (raw == "--ms") options.max_ms = std::stoi(next("0"));
+    else if (raw == "--frames") options.frames = static_cast<std::uint32_t>(int_or_die(next("0"), "--frames", 0));
+    else if (raw == "--bench") options.bench = static_cast<std::uint32_t>(int_or_die(next("0"), "--bench", 0));
+    else if (raw == "--ms") options.max_ms = int_or_die(next("0"), "--ms", 0);
     else if (raw == "--theme-file") options.theme_file = next("");
     else if (raw == "--help" || raw == "-h") {
       st::print("用法: gallery [--headless] [--backend auto|x11|wayland|win32|headless] [--scale 2.0]\n"

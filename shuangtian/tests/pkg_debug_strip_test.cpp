@@ -43,7 +43,13 @@ namespace {
 [[nodiscard]] auto build_probe_binary(const std::string& compiler, const std::string& dir)
     -> std::string {
   const std::string source = st::fs::join(dir, "probe.cpp");
-  const std::string binary = st::fs::join(dir, "probe_bin");
+  std::string binary = st::fs::join(dir, "probe_bin");
+  // Windows/MinGW 上链接器对 pe 目标会**自动追加 .exe**（`-o probe_bin` 产出
+  // `probe_bin.exe`）——原样返回无后缀路径会让 `file_size` 扑空，用例假红
+  //（Linux 写就、Windows 首跑现形）。编译后探测两种名字，哪个在用哪个。
+  const auto probe_exists = [](const std::string& path) {
+    return st::fs::file_size(path).has_value();
+  };
   // 内容故意含一个**模板实例**与一个内联函数：那正是 `-g1` 下 DWARF 爆炸的来源
   //（若只写 `int main(){}`，二进制太小、分离前后看不出差别，用例会变成假绿）。
   const std::string code =
@@ -57,6 +63,8 @@ namespace {
   if (auto status = st::fs::write_text(source, code); !status) return {};
   auto compiled = st::process::run(compiler, {"-std=c++23", "-O1", "-g1", source, "-o", binary});
   if (!compiled.has_value() || compiled->exit_code != 0) return {};
+  if (!probe_exists(binary) && probe_exists(binary + ".exe")) binary += ".exe";
+  if (!probe_exists(binary)) return {};
   return binary;
 }
 

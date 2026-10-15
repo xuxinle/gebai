@@ -70,10 +70,10 @@ auto load_ssl() -> const SslAbi* {
       abi.load_error = "未找到 libcrypto";
       return;
     }
-// lint-allow: L3 dlopen 符号还原样板：11 个 ST_SYM 展开是同一形参表，函数化反而藏错。
-// ⚠ 注释必须在宏定义**之外**：续行 `\` 后面跟 `//` 会让 `\` 不在行尾
-// （GCC 判 stray '\'——Windows MinGW 上能过是因为它宽容尾随内容，
-// Linux g++ 直接拒编；本文件首次在 Linux 上编译时现形）。
+// dlopen 符号还原样板：11 个 ST_SYM 展开是同一形参表，函数化反而藏错。
+// L3 豁免登记在 st.pkg 的 lint.exempt（同步 CONVENTIONS §8 表）——行内
+// lint-allow 在这里结构上放不下：#define 首行必须以 \ 结尾（尾随注释会让
+// GCC 判 stray '\'，Linux 直接拒编），而 has_allow_comment 只认同一行。
 #define ST_SYM(var, handle, name)                                         \
   do {                                                                    \
     (var) = reinterpret_cast<decltype(var)>(dlsym((handle), (name)));     \

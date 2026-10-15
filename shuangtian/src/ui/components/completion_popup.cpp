@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <format>
 
 #include "st/core/string.hpp"
 #include "st/raster/paint.hpp"

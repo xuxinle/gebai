@@ -179,8 +179,9 @@ def main():
         wait_until(lambda: client.count("#scm-toolbar") == 1, what="变更工具条出现")
         check(client.count("#scm-toolbar") == 1, "变更视图有工具条")
         check(client.count("#scm-stage-all") == 1, "工具条有「全部暂存」")
-        check(client.count("#scm-compare") == 1, "工具条有「与…比较」入口")
-        check(client.count("#git-group-冲突") == 1, "冲突分组出现（merge 冲突中）")
+        # 「与…比较」入口已随比较视图下线（1014 提交，用户要求删除比较侧栏）。
+        # 工具条本体仍在：改验冲突分组（后续步骤依赖它，顺带钉住工具条在场）。
+        check(client.count("#git-group-冲突") == 1, "冲突分组出现（merge 冲突中；比较入口已下线）")
 
         # ② 底部 Git 工具窗：**三栏**（引用 | 日志 | 提交内容）。
         #    三栏是三个**同时在场**的面板（是一条动线，不是互斥标签）。
