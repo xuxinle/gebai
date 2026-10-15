@@ -21,7 +21,7 @@ export type {
   SubAgentDef,
 } from "@gebai/sdk"
 
-/** 引擎增强的 ToolContext：在契约基础上注入引擎服务（sh 异步任务/子会话运行/后端图表渲染）。
+/** 引擎增强的 ToolContext：在契约基础上注入引擎服务（sh 异步任务/子会话运行/后端图表渲染/会话管控）。
  *  全部可选——子代理与测试桩只依赖契约字段即可运行。 */
 export type ToolContext = ContractToolContext & {
   /** sh 异步后台任务服务（引擎按会话注入，会话 tmp/sh-tasks/ 落盘）。 */
@@ -30,6 +30,10 @@ export type ToolContext = ContractToolContext & {
   subSessions?: import("../session/subsessions").SubSessionService
   /** 通用后台任务视图（BG_task 的 j 前缀；引擎按会话注入——工具可启动/查询/取消本会话的异步任务）。 */
   bgJobs?: import("../session/jobs").BackgroundJobRegistry
+  /** 会话管控服务（session 工具，DESIGN「会话管控」）：跨会话控制平面（create/list/status/send/stop/delete）。
+ *  结构化服务视图（store/engine 双柄 + 脱管 run），工具层不直接引用引擎内部类型；
+ *  子代理上下文缺省不注入（子代理不见引擎服务）。会话 env 为内存态（store.setEnv，零落盘）。 */
+  sessions?: SessionControlService
   /** 子会话向父会话合入/拉取（subsession_merge 工具；仅异步子会话运行上下文注入）。 */
   subSessionMerge?: (content?: string) => Promise<string>
   /** 后端渲染图表源码为 PNG 字节（show 图表分支 render=backend 时用）。 */
@@ -43,6 +47,28 @@ export type ToolContext = ContractToolContext & {
 
 /** 会话级运行时定义工具（js defineTool）的持久化形态（契约类型同形，引擎侧引用别名）。 */
 export type DynamicToolDef = ContractDynamicToolDef
+
+/** 会话管控服务视图（ToolContext.sessions，session 工具消费）：store 双柄 + 脱管执行入口。
+ *  引擎侧实现（buildContext 注入）结构兼容即可；字段签名与 SessionStore/AgentEngine 公开面一致。 */
+export interface SessionControlService {
+  store: {
+    createSession(userId: string, name?: string): Promise<SessionData>
+    setEnv(sessionId: string, userId: string, vars: Record<string, string | null>): Promise<Record<string, string>>
+    listSessionInfos(userId: string): Promise<Array<{ id: string; name?: string; updatedAt: number; createdAt: number }>>
+    load(id: string, user?: string): Promise<SessionData | null>
+    delete(id: string, userId: string): Promise<void>
+  }
+  engine: {
+    isRunning(sessionId: string): boolean
+    cancel(sessionId: string): void
+    windDown(sessionId: string, opts: { reason: string; graceMs?: number }): Promise<void>
+    runtimeOf(user: string): Promise<Record<string, import("../engine/engine").RuntimeSessionInfo>>
+    runningIds(user: string): Promise<string[]>
+  }
+  /** 触发目标会话执行（session 工具 send）：引擎 run 的脱管调用面——注入用户消息并驱动一轮。
+ *  目标会话忙时抛错（同会话并发 run 竞态保护，引擎 tasks.has 检查）。 */
+  run: (sessionId: string, user: string, prompt: string, opts?: Record<string, unknown>) => Promise<void>
+}
 
 /** 引擎侧 Tool：契约 Tool 的 execute/requiresApproval 换用引擎增强 ToolContext（shTasks/subSessions 等服务
  *  注入字段，全部可选）。增强字段均为可选——契约工具（execute 接收契约 ctx）经函数参数逆变仍可

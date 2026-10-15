@@ -1787,6 +1787,27 @@ private activeSchemas(sessionId: string) {
       // 待办：父会话为会话级清单（随 chat.json 落盘）；子会话为运行内隔离清单（不落盘、不回流、不继承）
       getTodos: opts?.todoScope ? () => opts.todoScope!.get() : () => store.getTodos(sessionId, user),
       setTodos: opts?.todoScope ? (todos) => opts.todoScope!.set(todos) : (todos) => store.setTodos(sessionId, todos, user),
+      // 会话管控服务（session 工具，DESIGN「会话管控」）：跨会话控制平面。store/engine 双柄注入公开面；
+      // run 入口同 REST prompt 语义（脱管——不等待完成，会话事件循环自行驱动）。
+      // 子会话/子代理上下文同注入（管控面不区分父子——只看目标会话与当前会话的自身保护，
+      // 在工具层拒绝操作 ctx.sessionId 自身）。
+      sessions: {
+        store: {
+          createSession: (userId: string, name?: string) => store.createSession(userId, name),
+          setEnv: (id: string, userId: string, vars: Record<string, string | null>) => store.setEnv(id, userId, vars),
+          listSessionInfos: (userId: string) => store.listSessionInfos(userId),
+          load: (id: string, userId?: string) => store.load(id, userId ?? user),
+          delete: (id: string, userId: string) => store.delete(id, userId),
+        },
+        engine: {
+          isRunning: (id: string) => self.isRunning(id),
+          cancel: (id: string) => self.cancel(id),
+          windDown: (id: string, o: { reason: string; graceMs?: number }) => self.windDown(id, o),
+          runtimeOf: (userId: string) => self.runtimeOf(userId),
+          runningIds: (userId: string) => self.runningIds(userId),
+        },
+        run: (id: string, userId: string, prompt: string, o?: Record<string, unknown>) => self.run(id, userId, prompt, o),
+      },
       registry: {
         schemas: (enabledOnly = true) => (opts?.registry ?? self.opts.registry).schemas(enabledOnly),
         resolve: (name) => {
