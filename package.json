@@ -18,6 +18,7 @@
     "typecheck:scripts": "bunx tsc -p scripts/tsconfig.json",
     "typecheck:tools": "bunx tsc -p tools/tsconfig.json",
     "mutate:status": "bun run tools/mutation/status-core/bench.ts",
+    "mutate:status:why": "bun run tools/mutation/status-core/stale.ts",
     "e2e:term": "bun run scripts/e2e/files-e2e.mjs",
     "e2e:term:tui": "bun run scripts/e2e/files-tui.mjs",
     "e2e:term:edit": "bun run scripts/e2e/files-edit.mjs",

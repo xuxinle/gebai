@@ -28,12 +28,13 @@
  * ## 为什么这个文件叫 `.test.ts`（与变异台文件**刻意相反**）
  * 变异台本体（`bench.ts` / `mutants.ts` / `stamp.ts`）必须**不带** `.test` 标记，否则 `bun test`
  * 会把它当用例跑起来、spawn 几十秒。本文件恰好相反：它**就是要**被 `bun test` 采到——它不 spawn
- * 任何东西，只读四个文件算哈希。名字是这里的关键，改动前先想清楚这一点。
+ * 任何东西，只读判据面那几份文件算哈希（外加沿依赖走一遍闭包，见文末那组）。名字是这里的关键，
+ * 改动前先想清楚这一点。
  */
 import { describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 import { existsSync, readFileSync } from "node:fs"
-import { join } from "node:path"
+import { join, posix } from "node:path"
 import {
   MATRIX_TEST,
   MUTANTS,
@@ -42,6 +43,19 @@ import {
 } from "../../../../tools/mutation/status-core/mutants"
 import { STAMP_FILE, STAMP_INPUTS, computeFiles, readStamp, staleFiles } from "../../../../tools/mutation/status-core/stamp"
 
+/* ------------------------------------------------------------------ *
+ * 判据面的成员（路径常量集中在此，下面几组共用；语义见文末「判据面定义」一组）
+ * ------------------------------------------------------------------ */
+
+/** 变异体清单（**数据**：33 条变异体；新增一条而没跑台 = 新规则没人审过）。 */
+const MUTANTS_FILE = "tools/mutation/status-core/mutants.ts"
+/** 执行器（**判定逻辑**：基线怎么算、怎么判「被杀」、行尾归一在哪一行）。 */
+const BENCH_FILE = "tools/mutation/status-core/bench.ts"
+/** 指纹实现自身（**只记录结论、不参与判定**——故刻意不在指纹面内）。 */
+const STAMP_TS = "tools/mutation/status-core/stamp.ts"
+/** 本文件（闸门自身——同样刻意不在面内：改闸门不该要求重跑那台 30 秒的台）。 */
+const GATE_FILE = "packages/web/src/files/status-mutation-gate.test.ts"
+
 /**
  * 指纹面的**独立对账**（不得由 stamp.ts 的 `STAMP_INPUTS` 反推——那等于自己验自己）。
  *
@@ -49,12 +63,7 @@ import { STAMP_FILE, STAMP_INPUTS, computeFiles, readStamp, staleFiles } from ".
  * `STAMP_INPUTS`，那文件从此改坏也不再触发重跑。两处独立列出后，去掉一个就红在这里。
  * 新增指纹面成员时**两处都要加**（这处是判据，stamp.ts 那处是实现，同 AGENTS.md 的口径）。
  */
-const EXPECTED_INPUTS: string[] = [
-  TARGET_FILE,
-  MATRIX_TEST,
-  "tools/mutation/status-core/mutants.ts",
-  "tools/mutation/status-core/bench.ts",
-]
+const EXPECTED_INPUTS: string[] = [TARGET_FILE, MATRIX_TEST, MUTANTS_FILE, BENCH_FILE]
 
 /** 补跑命令（失败信息里逐字给出来——人不该需要记得它长什么样）。 */
 const RERUN = "bun run mutate:status"
@@ -238,8 +247,178 @@ describe("变异台防忘闸门：证据指纹机制自身可复核", () => {
   })
 
   test("本文件自己不进指纹面（闸门改动不该要求重跑变异台）", () => {
-    const self = "packages/web/src/files/status-mutation-gate.test.ts"
-    expect(EXPECTED_INPUTS.includes(self), "闸门自身进了指纹面 = 改闸门也要重跑那台，无谓的成本").toBe(false)
+    expect(EXPECTED_INPUTS.includes(GATE_FILE), "闸门自身进了指纹面 = 改闸门也要重跑那台，无谓的成本").toBe(false)
     expect(readFileSync(import.meta.path, "utf8").length).toBeGreaterThan(0)
+  })
+})
+
+/* ================================================================== *
+ * 判据面定义：它是「哪些文件算在内」+「为何过宽/过窄都不可接受」
+ * ================================================================== */
+
+/**
+ * ## 判据面 = 指纹面（`EXPECTED_INPUTS` 那四份）
+ *
+ * 「判据面」是**四份文件的并集**，每份各自对应一类「改了它，上一次的结论就作废」：
+ *
+ * | # | 文件 | 在判据里充当什么 | 改了不重跑会怎样 |
+ * |---|------|----------------|----------------|
+ * | ① | `packages/web/src/files/status-core.ts` | **被审对象**（全部 33 条变异的施加目标） | 改坏判据而无人发现：矩阵照旧全绿，而「绿」不再代表守住了 |
+ * | ② | `packages/web/src/files/status-matrix.test.ts` | **判官**（杀/活的唯一判据来源，34 用例 / 511 断言） | 判官换了判据也换了，同一批变异体可能换结论——旧结论不再可比 |
+ * | ③ | `tools/mutation/status-core/mutants.ts` | **变异体清单**（33 条，本身就是历史缺陷清单） | 新增一条变异体而没跑 = 那条新规则**从未被审过**（最容易忘的一条） |
+ * | ④ | `tools/mutation/status-core/bench.ts` | **执行器**（基线怎么算、怎么判「被杀」、行尾归一在哪一行） | 判定逻辑变了，写进 stamp 的旧数字不再由同一套判法产出的 |
+ *
+ * **按内容判定，不按文件名判定**：判据面成员只要**字节**变了就算（哈希不区分注释与代码）——改一句
+ * 注释也得重跑。这看着笨，但「哪几行算语义」本身要维护一张口径表，而口径每宽/窄一寸都要付错价的
+ * 代价（见下）。
+ *
+ * ## 改完判据面怎么自助定位该跑什么
+ * 闸门红了**不用猜**：失败信息里逐条给出「哪份文件、记录什么值、现在算出什么值」，并直接附上补跑
+ * 命令；拿不准时还有一条零依赖的自查命令（读指纹、只报过期项，不跑任何变异）——两处都写在
+ * `DESIGN.md`「测试策略 → 防忘闸门 → 自助定位」里。
+ *
+ * ## 为何刻意**不**放进面的
+ * - `status-mutation-gate.test.ts`（本文件）与 `stamp.ts`：它们**不参与判定**，只记录与对账结论；
+ *   改一句失败文案就要重跑 30 秒的台，没人受得了（且很快就会被绕过）。
+ * - `status-core.test.ts`（语义契约测试）、`style-contract.test.ts`（接线契约）：变异台**不跑它们**
+ *   （它只跑矩阵 + `tsc`），故它们变了不影响这台台的结论。
+ * - `DESIGN.md` / `AGENTS.md`：文档随判据一起改是**正常**的，要文档一变就重跑，闸门就成噪声源了。
+ *
+ * ## 两个方向的价都写过：过宽 vs 过窄
+ * - **过窄 = 假绿**（比过宽严重得多）：漏进去的那份改了却不红，让人误以为「刚验过」；
+ * - **过宽 = 噪声红**：把不影响判定的文件算进来，每改一次无关文件都要等 30 秒——而会无故报红的
+ *   门禁很快就会被绕过（本仓已在 DESIGN「为什么不进 CI」里写过这个代价）。
+ *
+ * 下列三条把这个定义钉在**可自动核验的判据**上（否则它就只是文档里的一句话，而没人会在改代码时去翻）：
+ * ① **依赖闭包自足**：面内每份文件真正引用的文件，要么也在面内、要么在**显式豁免表**里写明理由——
+ *    「过窄」就此从「事后才发现」变成「新增依赖当场红」；
+ * ② **清单与实算一致**：写死的依赖表 `KNOWN_DEPS` 与源码实算逐项相同（防它随源码漂移而变空话）；
+ * ③ **面外文件不影响闸门**：面是精确的这四份、不多不少（过宽侧的边界，内含「四份都必须真在面内」的反向检查）。
+ */
+describe("判据面定义：依赖闭包自足（过窄=假绿，这里先红）", () => {
+  const normNL = (s: string): string => s.replace(/\r\n/g, "\n")
+  /** 去注释后再扫，避免注释里的示例串被当成真依赖。 */
+  const strip = (s: string): string => normNL(s).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "")
+
+  /**
+   * 一份文件**真正引用的仓内文件**（判定相关依赖的实算口径）。
+   *
+   * 证据只认两种，因为本仓只存在这两种形态，且它们都要求写出**可解析的字面量**：
+   *   - `from "…"`——ESM 引用（判官导入被审源码、执行器导入清单与指纹）；
+   *   - 源码里的 `"….ts"` 字面量——`readFileSync(join(import.meta.dir, "status-core.ts"))` 这种读法。
+   *
+   * 不做完整 AST：这两条已盖住本仓全部真实依赖，而「认一切像路径的串」漏口更大（路径一旦装进变量
+   * 就漏，等于自欺）。解析不到文件的一律不算（`bun:test` / `node:fs` / 包名——改了它们不会让本仓
+   * 某份源码变样）。**新增依赖时会以「清单与实算不一致」红**，那时人工把它写进 `KNOWN_DEPS`
+   * （要判「进面并跑台」还是「豁免并写理由」）——那份写死的表就是「想过了」的证据。
+   */
+  function staticDeps(abs: string, relPath: string): string[] {
+    const src = strip(readFileSync(abs, "utf8"))
+    const dir = posix.dirname(relPath)
+    const specs = new Set<string>()
+    for (const m of src.matchAll(/\bfrom\s*"([^"]+)"/g)) specs.add(m[1]!)
+    for (const m of src.matchAll(/"([^"]*\.ts)"/g)) specs.add(m[1]!)
+
+    const out: string[] = []
+    for (const spec of specs) {
+      /* 相对说明符（`./status-core`）与裸文件名（`"status-core.ts"`）都按**本文件所在目录**解析——
+       * 这正是判官读被审源码的方式（`join(import.meta.dir, "status-core.ts")`）。 */
+      const joined = posix.join(dir, spec)
+      const hit = [joined, `${joined}.ts`, `${joined}/index.ts`].find(
+        (c) => !c.startsWith("..") && existsSync(join(REPO, c)),
+      )
+      if (hit) out.push(posix.normalize(hit))
+    }
+    return [...new Set(out)]
+  }
+
+  /**
+   * 依赖清单（**写死的期望**，逐份对应上面的「判据面定义」表）。
+   *
+   * - `MATRIX_TEST → TARGET_FILE`：判官引用被审对象（`import … from "./status-core"` 加源码字面量）；
+   * - `BENCH_FILE → MUTANTS_FILE`：执行器读清单（判定逻辑与数据的接口）；
+   * - `BENCH_FILE → STAMP_TS`：执行器把结论写进指纹——**这条是豁免**（见下 `OUT_OF_FACE_OK`）。
+   */
+  const KNOWN_DEPS: Record<string, string[]> = {
+    [TARGET_FILE]: [],
+    [MATRIX_TEST]: [TARGET_FILE],
+    [MUTANTS_FILE]: [],
+    [BENCH_FILE]: [MUTANTS_FILE, STAMP_TS],
+  }
+
+  /**
+   * **显式豁免**：依赖在面外、但经判断**不需要**跟着重跑，逐条写明理由。
+   *
+   * 为什么要有这张表而不是直接放行：放行 = 「过窄」无声发生（新增依赖照样全绿）。豁免要求写出理由，
+   * 于是「这台变异台的判据面为什么是这四份」在代码里就是可复核的，而不是散在文档里的一句话。
+   *
+   * 目前唯一一条 `BENCH_FILE → STAMP_TS`：`stamp.ts` 是**记录层**（算哈希、写 JSON），它不参与
+   * 「杀掉 / 存活」的判定——改它的哈希口径不会让任何一条变异体换结论。反过来把它放进面内还会
+   * 制造**噪声红**：改一句指纹的失败文案就要重跑 30 秒。代价如实写着：若 `stamp.ts` 的哈希口径真被
+   * 改成与闸门不一致，闸门会以「内容已变」报红（带补跑命令），方向是**假红**（多跑一次），不是假绿。
+   * 这个方向的错是本仓明确选的那一侧（假红可忍、假绿不可忍，同 DESIGN「为什么不进 CI」）。
+   */
+  const OUT_OF_FACE_OK: Record<string, string> = {
+    [STAMP_TS]: "记录层（算哈希/写 JSON），不参与「杀掉 vs 存活」的判定；进面只会让改指纹文案也要重跑 30 秒",
+  }
+
+  test("面内每份文件引用的文件，要么也在面内、要么在豁免表里写明理由（过窄 = 假绿）", () => {
+    const inside = new Set(EXPECTED_INPUTS)
+    const leaked: string[] = []
+    for (const p of EXPECTED_INPUTS) {
+      for (const dep of staticDeps(join(REPO, p), p)) {
+        if (inside.has(dep) || dep in OUT_OF_FACE_OK) continue
+        leaked.push(`${p} → ${dep}`)
+      }
+      /* `status-core.ts` 有一条硬性质：**它自己零依赖**（纯函数模块、无 import）。
+       * 它一旦开始引用别的源码，就把新文件拉进了判据面——那条依赖必须先被显式决定。 */
+      if (p === TARGET_FILE) {
+        const imports = [...strip(readFileSync(join(REPO, p), "utf8")).matchAll(/\bfrom\s*"([^"]+)"/g)].map((m) => m[1]!)
+        expect(imports, `${TARGET_FILE} 出现了 import——它本是零依赖纯模块，新增依赖必须先进指纹面`).toEqual([])
+      }
+    }
+    expect(
+      leaked,
+      `这些依赖既不在指纹面内、也不在豁免表里：改了它们闸门不会红（假绿）。\n` +
+        `  请二选一：① 加进 STAMP_INPUTS + EXPECTED_INPUTS 并跑一次 \`${RERUN}\`；\n` +
+        `            ② 确与判定无关 → 写进本组 OUT_OF_FACE_OK 并注明理由。`,
+    ).toEqual([])
+  })
+
+  test("闭包结论与指纹面一一对应（写死的期望与实算逐项相同，防它随源码漂移）", () => {
+    for (const p of EXPECTED_INPUTS) {
+      const got = staticDeps(join(REPO, p), p).sort()
+      const want = [...new Set(KNOWN_DEPS[p] ?? [])].sort()
+      expect(
+        got,
+        `${p} 的依赖与 KNOWN_DEPS 里写死的不符——源码新增/删除了对文件的依赖。\n` +
+          `  这不是「测试过时」，而是一个必须做的决定：新依赖进不进判据面？（见本组头注释）`,
+      ).toEqual(want)
+    }
+  })
+
+  test("面外文件不参与指纹：改「不该进面」的文件不会把闸门弄红（过宽侧的边界）", () => {
+    /* 「过宽」方向：判据面是**精确的这四份**，不多不少。以下文件的改动必须**不影响**指纹——它们改变的是
+     * 「怎么记」（stamp.ts / 本文件）或「这台变异台之外还守了什么」（语义契约与接线契约测试、文档），
+     * 不是「这台变异台的结论」。若哪天它们进了面，每改一句文案都要等 30 秒，闸门就成了噪声源。 */
+    const outside = [
+      "DESIGN.md",
+      "AGENTS.md",
+      STAMP_TS,
+      GATE_FILE,
+      "packages/web/src/files/status-core.test.ts",
+      "packages/web/src/files/style-contract.test.ts",
+    ]
+    for (const p of outside) {
+      expect(EXPECTED_INPUTS.includes(p), `${p} 不该进指纹面（它不参与判定；进去 = 每改一次无关文件都要重跑 30 秒）`).toBe(false)
+    }
+    /* 反面：确参与判定的四份**必须**在面内（同一件事的另一半——少一份即假绿）。 */
+    for (const p of [TARGET_FILE, MATRIX_TEST, MUTANTS_FILE, BENCH_FILE]) {
+      expect(EXPECTED_INPUTS.includes(p), `${p} 必须在指纹面内（它是判定链上的一环）`).toBe(true)
+    }
+    /* 面内成员不得重复：重复项不增加覆盖，却会让「四份」这个计数失去意义（上面第 75 行拿它当判据）。 */
+    expect(new Set(EXPECTED_INPUTS).size, "指纹面里出现重复项").toBe(EXPECTED_INPUTS.length)
+    /* 面内**有且仅有矩阵这一份测试文件**（它是判官）；否则说明有人把别的测试也算了进来（过宽）。 */
+    expect(EXPECTED_INPUTS.filter((p) => p.endsWith(".test.ts")), "指纹面里应只有矩阵这一份测试文件").toEqual([MATRIX_TEST])
   })
 })

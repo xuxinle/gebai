@@ -120,6 +120,7 @@ bun run lint
 # 变异台（开发期复核：故意改坏 status-core，看矩阵认不认得出来）
 bun run mutate:status    # 约 30 秒，退出码 0 = 全部符合期望；跑成功自动刷新证据指纹 stamp.json
                          # 改了 files/status-core.ts 及其判据面就要跑——忘了跑的话 bun test 会红并提示这条命令
+bun run mutate:status:why # 只读自查：指纹过期了没、该不该重跑（毫秒级；0=不必跑、1=要跑）
 
 # 霜天（原生桌面框架，C++20；与 TS 侧测试相互独立）
 (cd shuangtian && ./bootstrap.sh)                    # 自举工具链（首次/工具链改动后）
@@ -200,17 +201,30 @@ bun run e2e:term:all     # 三者依次跑；失败现场截图落 /tmp/gebai-e2
 
 ```bash
 bun run mutate:status   # 约 30 秒，退出码 0 = 全部符合期望；跑成功自动刷新证据指纹
+bun run mutate:status:why  # 自助定位：指纹过期了没、该不该重跑（只读，毫秒级；0=不必跑、1=要跑）
 ```
+
+**判据面 = 四份文件，改了其中任何一份就要重跑**（按内容判、不按文件名判——改一句注释也算）：
+
+| 文件 | 在判据里充当什么 |
+|------|----------------|
+| `packages/web/src/files/status-core.ts` | **被审对象**（33 条变异体全部施加在它身上，含其 9 个导出函数与全部文案） |
+| `packages/web/src/files/status-matrix.test.ts` | **判官**（杀/活的唯一判据来源，34 用例 / 511 断言） |
+| `tools/mutation/status-core/mutants.ts` | **变异体清单**（33 条历史缺陷清单，新增一条而没跑最易忘） |
+| `tools/mutation/status-core/bench.ts` | **执行器**（基线/杀活的判定逻辑、行尾归一） |
+
+面外的文件（`stamp.ts` / 闸门自身 / 两份面外测试 / `test-preload.ts` / 文档）改了**不会**红，且不该进面（详见 `DESIGN.md` 同节）。**依赖闭包自足**由闸门自动核：面内文件新增对面外源码的依赖会当场红，逼你决定「进面并跑台」还是「豁免并写理由」。
 
 **这条不靠你记得**：变异台跑成功会把「指纹面 + 实测结果」写进入库的
 `tools/mutation/status-core/stamp.json`，而 `packages/web/src/files/status-mutation-gate.test.ts` 在
 **每次常规测试**里用当前源码对账这份指纹——改了判据面而没重跑，`bun test` 当场红，失败信息
-直接给出上面那条命令。所以正常流程是：**改完 → 跑 `bun test`（或 `bun run --cwd packages/web test src/files/`）
-→ 若红则按提示跑 `bun run mutate:status` → 再跑测试**。
+直接给出补跑命令（并逐份列出「记录值 → 现在值」，不用猜）。所以正常流程是：**改完 → 跑 `bun test`（或 `bun run --cwd packages/web test src/files/`）
+→ 若红则按提示跑 `bun run mutate:status` → 再跑测试**。拿不准要不要重跑时用 `bun run mutate:status:why`（毫秒级）。
 
 变异台**本身**不进 CI 门禁（串行 30 秒，且 CI 满载的抖动会把测试抖动失败记成「变异被杀」——在
-`code` 类上就是一次**假通过**），进的是对这个证据做一次哈希核对的无抖动门。判据、五类变异体、
-已知盲区（含那条**不是缺陷、别去修**的「残余 1」）见 `DESIGN.md`「测试策略 → 变异验证」。
+`code` 类上就是一次**假通过**），进的是对这个证据做一次哈希核对的无抖动门。判据（含那张判据面表）、
+五类变异体、已知盲区（含那条**不是缺陷、别去修、也别叫它「等价变异」**的「残余 1」）见
+`DESIGN.md`「测试策略 → 变异验证 → 判据面 / 防忘闸门」。
 
 - 统一 `bun test`，测试文件与被测代码同目录（`*.test.ts`）。
 - **turbo 的 `test`/`build` 是带缓存的：命中时回放日志、不真跑**。要确信“真跑过”就用 `bun run --cwd <pkg> test` 或 `turbo run test --force`。跨包依赖目录（`keqing/`、`custom/`、其他包的 `src/`）已声明进 turbo `inputs`——改它们会让相关包的构建与测试**失效重跑**（否则会拿到陈旧产物与陈旧的 PASS）。
@@ -258,6 +272,6 @@ bun run mutate:status   # 约 30 秒，退出码 0 = 全部符合期望；跑成
 
 - 提交前先看 `git status` / `git diff`，只暂存预期文件，不提交密钥。
 - 完成后运行 `bun run test`、`bun run typecheck`、`bun run lint` 确认通过。
-- **动了文件工作台状态格判据面就要跑变异台**（`bun run mutate:status`）——判据面 = `files/status-core.ts` + `files/status-matrix.test.ts` + `tools/mutation/status-core/{mutants,bench}.ts`。
+- **动了文件工作台状态格判据面就要跑变异台**（`bun run mutate:status`）——判据面 = `files/status-core.ts` + `files/status-matrix.test.ts` + `tools/mutation/status-core/{mutants,bench}.ts`（四份，**按内容判**：改一句注释也算）。跑成功会自动刷新 `stamp.json`；忘了跑的话常规测试会红并告诉你这条命令（闸门清单见上「测试策略 → 硬约束」）。
   忘了跑的话测试会红并在提示里给出这条命令（机制见上「测试策略 → 硬约束」）。
 - 设计变更记得回写 `DESIGN.md`。

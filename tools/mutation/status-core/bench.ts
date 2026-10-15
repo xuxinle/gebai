@@ -334,8 +334,10 @@ if (noStamp) {
   console.log("\n[指纹] --no-stamp：未刷新证据指纹（下一次常规测试会因指纹过期而红，属预期）。")
 } else if (only) {
   console.log(`\n[指纹] --only ${only} 是部分跑，未刷新证据指纹（部分跑不构成证据）。`)
+  console.log(`       想知道指纹到底过期了没：\`bun run mutate:status:why\`（只读、毫秒级，不跑任何变异）。`)
 } else if (exitCode !== 0) {
   console.log("\n[指纹] 有不符合期望的条目，未刷新证据指纹（失败不立证据）。")
+  console.log("       先看上面哪几条不符期望——修完判据面再重跑全集（部分跑不立证据）。")
 } else {
   // 清单条数与实测结果都按 kind 归：清单条数用来发现「加了变异体没重跑」，实测结果是给人读的那次数
   const kinds = [...new Set(MUTANTS.map((m) => m.kind))]
