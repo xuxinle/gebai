@@ -1168,7 +1168,7 @@ describe("prompt 型执行目标与会话解析", () => {
       const { rmSync } = await import("node:fs")
       rmSync(join(h.home, "users", "default", "sessions", firstId.slice(0, 2), firstId.slice(2, 4), firstId), { recursive: true, force: true })
       internal(h, task.id).stickySessionId = ""
-      h.store.cache.delete(firstId)
+      h.store.evict(firstId)
       await h.tasks.run("default", task.id)
       await waitDone(h, task.id, 2)
       // 找回的应该是那个同名 ephemeral 会话（最新 updatedAt），而不是新建

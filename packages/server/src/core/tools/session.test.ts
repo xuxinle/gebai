@@ -34,7 +34,7 @@ function makeSvc(opts: { running?: string[]; selfId?: string } = {}): { svc: Ses
         return vars as never
       },
       listSessionInfos: async (userId) => [...sessions.values()].filter((s) => s.userId === userId).map((s) => ({ id: s.id, name: s.name, updatedAt: Date.now(), createdAt: Date.now() })) as never,
-      load: async (id, user) => (sessions.has(id) ? sessions.get(id)! : null) as never,
+      load: async (id) => (sessions.has(id) ? sessions.get(id)! : null) as never,
       delete: async (id) => {
         sessions.delete(id)
         calls.delete.push(id)
