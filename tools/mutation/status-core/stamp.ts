@@ -128,14 +128,40 @@ export function hashFile(rel: string): string {
 }
 
 /**
+ * `fingerprintInputs()` 的**可注入输入**——只给闸门侧用：拿一棵**合成依赖树**走一遍**真实现的那个入口**。
+ *
+ * 为什么要留这个口子（对应一次真实存在的**退化路径**）：真仓当下的闭包是**空集**（四份根本下零依赖），
+ * 于是「把实现退回只哈希根文件」在真仓里**看不见**——`EXPECTED_ROOTS` / `EXPECTED_CLOSURE`（写死为空）/
+ * 「指纹面 = 根 + 闭包」三条对账全都会照旧绿。没有这个口子，那条退化就只能等到「有人再把判据拆出一份新
+ * 模块」时才显形，而那时没人会想到来看这里（详见 `status-mutation-gate.test.ts` 的「防退化自检」一组）。
+ *
+ * 注入的是**输入**、不是判据：拼装逻辑（根 ∪ 闭包、去重、排序）仍只有下面 `fingerprintInputs()` 这一处实现，
+ * 故不构成「自己验自己」。同一脉的既有做法见 `staleFiles(recorded, current)` 与 `closure.ts` 的
+ * `depClosure(roots, exempt, base)`——那两处也是为「拿合成树验真实现」而留的口子。
+ */
+export interface FingerprintFaceInput {
+  /** 根（默认 `STAMP_ROOTS`）。 */
+  roots?: readonly string[]
+  /** 豁免成员（默认 `EXEMPT_FROM_FINGERPRINT` 的键）。 */
+  exempt?: Iterable<string>
+  /** 基准目录（默认本仓根）；闸门侧传合成树所在目录。 */
+  base?: string
+}
+
+/**
  * **当前指纹面**：根（`STAMP_ROOTS`）∪ 它们的依赖闭包（递归 import 图），减去豁免表里的成员。
  *
  * 这是**唯一**的指纹面计算处（执行器、闸门、自助定位三处都调它），故不存在「写的一处、读的另一处」漂移。
  * 顺序确定：根按声明序在前，闭包成员排序在后——指纹文件的键序因此逐字节稳定，可 `git diff` 读。
+ *
+ * `input` 缺省即「真仓当下的面」；闸门侧传合成树的 `{ roots, exempt, base }`（见 `FingerprintFaceInput`）。
  */
-export function fingerprintInputs(): string[] {
-  const closure = depClosure(STAMP_ROOTS, Object.keys(EXEMPT_FROM_FINGERPRINT))
-  return [...STAMP_ROOTS, ...closure.filter((p) => !(p in EXEMPT_FROM_FINGERPRINT))]
+export function fingerprintInputs(input: FingerprintFaceInput = {}): string[] {
+  const roots = input.roots ?? STAMP_ROOTS
+  const exempt = [...(input.exempt ?? Object.keys(EXEMPT_FROM_FINGERPRINT))]
+  const skip = new Set(exempt)
+  const closure = depClosure(roots, exempt, input.base ?? REPO)
+  return [...roots, ...closure.filter((p) => !skip.has(p))]
 }
 
 /** 当前指纹面（执行器与闸门共用这一份计算，避免「写的一处、读的另一处」两处实现漂移）。 */

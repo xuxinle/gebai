@@ -28,8 +28,9 @@
  * ## 为什么这个文件叫 `.test.ts`（与变异台文件**刻意相反**）
  * 变异台本体（`bench.ts` / `mutants.ts` / `stamp.ts` / `closure.ts`）必须**不带** `.test` 标记，否则 `bun test`
  * 会把它当用例跑起来、spawn 几十秒。本文件恰好相反：它**就是要**被 `bun test` 采到——它不 spawn
- * 任何东西，只读判据面（含依赖闭包）算哈希，外加在**临时目录里造合成依赖树**把闭包算法自己验一遍
- * （最后一组）。名字是这里的关键，改动前先想清楚这一点。
+ * 任何东西，只读判据面（含依赖闭包）算哈希，外加在**临时目录里造合成依赖树**把闭包算法自己验一遍，
+ * 并用同一棵树做一条**防退化自检**（指纹键集必须含闭包成员——真仓闭包为空，那半边只有合成树能验）。
+ * 名字是这里的关键，改动前先想清楚这一点。
  */
 import { describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
@@ -679,5 +680,132 @@ describe("依赖闭包算法：在合成依赖树上验（递归 / 边界 / 豁�
     expect(stale.length, "闭包成员被改了却报「不过期」——这就是要修的那种假绿").toBe(1)
     expect(stale[0], "报出来的应当是那份被改的闭包成员").toContain("tools/app/deep/grand.ts")
     cleanup()
+  })
+})
+
+/* ================================================================== *
+ * 防退化自检：指纹的键集必须真的含**闭包成员**（真仓闭包为空，只能拿合成树验）
+ * ================================================================== */
+
+/**
+ * ## 为什么单列这一组（这是一条**防退化**锁，守的是一段真实的失败历史）
+ *
+ * 指纹原先**只哈希四份根文件本身**（`dfe18f67^` 的 `stamp.ts`：`computeFiles()` 里
+ * `for (const p of STAMP_INPUTS)`——面就是那四份字符串，没有第二处来源）。后果是：判据一旦被
+ * 拆成多份模块（把取词表抽成 `status-labels.ts`、把类型抽成 `status-types.ts`），**被引用的那份
+ * 就成了判据的一部分、却不在指纹里**——它被改坏时根的字节没变、指纹没脏、闸门不红，而矩阵照旧
+ * 全绿。这就是「过窄 = 假绿」，也是「防忘」这台机器唯一不能出的错。
+ *
+ * `dfe18f67` 把它修成「根 ∪ 依赖闭包」，但**真仓当下的闭包是空集**（四份根本下零依赖）——
+ * 于是有个反直觉的后果：**把实现退回只哈希根文件，真仓里一点反应都没有**。`EXPECTED_ROOTS` /
+ * `EXPECTED_CLOSURE`（写死为空）/ 「指纹面 = 根 + 闭包」三条对账全都会照旧绿，没人会发现。
+ * 换言之，修复机制本身**没有防退化的锁**——而这正是本任务要补的那一环。
+ *
+ * ## 做法：拿合成树（依赖链非空）走**真入口** `fingerprintInputs()`
+ * 断言两件事：
+ *   1. **键集含闭包成员**（不止根）——特别是 `status-core` 那一层的依赖，对应「把取词表拆出去」；
+ *   2. **旧的退化形态当场红**：拿 `staleFiles` 拿「只哈希根」的面去对，它**看不见**闭包成员的改动
+ *      （报空），而正确的面**看得见**。两条并排写，`false` 的那条才说明另一条不是空转。
+ *
+ * ## 为何不碰真仓库、为何不引入新变量
+ * 用 `fingerprintInputs({ roots, exempt, base })` 的注入参数（见 `stamp.ts` 的 `FingerprintFaceInput`），
+ * 合成树写在临时目录、验完即删。注入的是**输入**、不是判据：拼装逻辑（根 ∪ 闭包、去重、排序）仍在
+ * `stamp.ts` 那一处实现，因而这只是「拿真实现跑一遍合成输入」，不是自己验自己（同 `staleFiles`）。
+ *
+ * ## 它守不住什么（如实记）
+ * 闭包为空时「根 ∪ 空 = 根」，故这种退化在**真仓当下**是**行为等价**的（不是当场能看到的错）。
+ * 这组测试把「等价」变成「**必须显式改掉一个红测试**」：想去掉闭包收录，就得先删掉这里两条用例
+ * （而它们是**入判据**的、会出现在 diff 里），于是「无声退回」变成「有人当着面删锁」。
+ */
+describe("防退化自检：指纹键集必须含闭包成员（否则退回「只哈希根文件」无人察觉）", () => {
+  /** 合成仓根 = 一对「四份根」的缩影：`status-core` 那侧的根 + `tools/` 那侧的根。 */
+  const ROOTS_PROBE = [
+    "packages/web/src/status-labels-probe.ts", // 相当于 status-core.ts 拆出取词表之后的形态
+    "tools/app/bench-probe.ts", // 相当于执行器（工具侧判据）
+  ]
+  const dir = mkdtempSync(join(tmpdir(), "gebai-anti-regress-"))
+  const TREE: Record<string, string> = {
+    // 被审对象那一侧：根 → 取词表 → 更下一层（**传递**依赖，不只是直接依赖）
+    "packages/web/src/status-labels-probe.ts": `import { L } from "./status-labels"\nexport const x = L\n`,
+    "packages/web/src/status-labels.ts": `import { t } from "./status-types"\nexport const L = t\n`,
+    "packages/web/src/status-types.ts": `export const t = 1\n`,
+    // 工具侧：根 → 清单 → 清单又被更下一层引用
+    "tools/app/bench-probe.ts": `import { M } from "./mutants-probe"\nexport const b = M\n`,
+    "tools/app/mutants-probe.ts": `import { d } from "./data/names"\nexport const M = d\n`,
+    "tools/app/data/names.ts": `export const d = 1\n`,
+    // 干扰项：面外（不该进闭包）——证明下面收到的那几份是**按判据**收的，不是把临时目录全扫进来
+    "shuangtian/not-in-scope.ts": `export const n = 1\n`,
+  }
+  for (const [rel, body] of Object.entries(TREE)) {
+    mkdirSync(join(dir, posix.dirname(rel)), { recursive: true })
+    writeFileSync(join(dir, rel), body, "utf8")
+  }
+  const cleanup = (): void => rmSync(dir, { recursive: true, force: true })
+
+  /** 闭包成员（= 面减去根）——**这就是「只哈希根文件」会漏掉的那一批**。 */
+  const EXPECTED_CLOSURE_PROBE = [
+    "packages/web/src/status-labels.ts",
+    "packages/web/src/status-types.ts",
+    "tools/app/mutants-probe.ts",
+    "tools/app/data/names.ts",
+  ]
+  /** 期望面的**顺序**：根按声明序在前、闭包排序在后（与 `fingerprintInputs()` 的确定性口径同款）。 */
+  const EXPECTED_FACE_ORDERED = [...ROOTS_PROBE, ...[...EXPECTED_CLOSURE_PROBE].sort()]
+
+  test("指纹键集含闭包成员（不只是根）——退回「只哈希根文件」这里先红", () => {
+    const face = fingerprintInputs({ roots: ROOTS_PROBE, exempt: [], base: dir })
+    /* ① 形状：键序确定（指纹文件要能逐字节稳定、可 git diff 读）。 */
+    expect(face, "指纹键集不对：应为「根（按声明序）∪ 闭包（排序）」").toEqual(EXPECTED_FACE_ORDERED)
+    /* ② 这一条**直接**钉住「只哈希根文件」那种退化：根集合本身是不够的。 */
+    expect(
+      face.length,
+      "指纹键集只有根——实现已退回「只哈希四份根文件」（dfe18f67 修掉的那个坑）",
+    ).toBeGreaterThan(ROOTS_PROBE.length)
+    /* ③ 逐份点名：`status-core` 那一侧的依赖必须在键集里（任务要的那一条），含**传递**层。 */
+    for (const p of [
+      "packages/web/src/status-labels.ts", // status-core 拆出取词表之后，它就是判据的一部分
+      "packages/web/src/status-types.ts", // 再下一层（递归，不只是直接依赖）
+      "tools/app/mutants-probe.ts", // 执行器读的清单
+      "tools/app/data/names.ts", // 清单再下一层
+    ]) {
+      expect(face.includes(p), `${p} 未进指纹键集——被引用的那份改了不会被察觉（假绿）`).toBe(true)
+    }
+    /* ④ 反向：面外的干扰项一个都不许进（否则这条测试会为「面被放大」而绿）。 */
+    expect(face.includes("shuangtian/not-in-scope.ts"), "面外源码进了指纹面（过宽侧）").toBe(false)
+    /* ⑤ 面与「根 ∪ 闭包」逐项相等（判据侧写死，不由实现反推）。 */
+    expect([...face].sort(), "合成树上的指纹面 ≠ 根 ∪ 闭包（与判据侧写死的期望不符）").toEqual(
+      [...EXPECTED_FACE_ORDERED].sort(),
+    )
+    /* 不在这里 cleanup：临时树由本组**末尾那一条**统一清（同文件开头那组的约定）——那条用 `finally`，
+     * 故本组在失败跑（反向验证）时也不泄漏临时目录。 */
+  })
+
+  test("对照：旧的「只哈希根」面对同一份改动**看不见**（证明上面那条不是空转）", () => {
+    /* 这条是上面那条的**反面**：把「只哈希根」当作旧实现来跑，它必须**看不见**闭包成员的改动——
+     * 若它也能看见，那说明「闭包」这件事在这棵树上根本不起作用，上面那条就是在空转。 */
+    try {
+      const h = (p: string): string => `sha256:${createHash("sha256").update(readFileSync(join(dir, p), "utf8")).digest("hex")}`
+      const face = fingerprintInputs({ roots: ROOTS_PROBE, exempt: [], base: dir })
+      const oldFace = [...ROOTS_PROBE] // ← dfe18f67^ 的 `STAMP_INPUTS` 面：只有根
+      const before = (ps: readonly string[]): Record<string, string> => Object.fromEntries(ps.map((p) => [p, h(p)]))
+
+      const oldBefore = before(oldFace)
+      const newBefore = before(face)
+      // 改坏「被引用、但不是根」的那份（对应「把取词表抽出去之后又把它改坏」）
+      writeFileSync(join(dir, "packages/web/src/status-labels.ts"), `import { t } from "./status-types"\nexport const L = t + 1 // 改坏了\n`, "utf8")
+
+      const oldReport = staleFiles(oldBefore, before(oldFace))
+      const newReport = staleFiles(newBefore, before(face))
+      expect(
+        oldReport,
+        "「只哈希根」的面竟然看见了闭包成员的改动？那这棵合成树没在验「闭包」这件事（上面那条在空转）",
+      ).toEqual([])
+      expect(newReport.length, "正确的面必须看见闭包成员的改动（看不见 = 就是那个假绿）").toBe(1)
+      expect(newReport[0], "报出来的应当是那份被改的闭包成员").toContain("packages/web/src/status-labels.ts")
+    } finally {
+      /* `finally` 而不是「末尾一行」：**这条正好是被反向验证时会红的那一条**（临时把实现退回旧口径），
+       * 而断言一红就会跳过末尾那行——失败跑把临时树留在 `%TEMP%` 里（实测：一次反向验证泄漏两份）。 */
+      cleanup()
+    }
   })
 })
