@@ -33,8 +33,33 @@ namespace {
   return true;
 }
 
-}  // namespace
+/// 判断属性名是否属于布局/样式面（`apply_layout_property` 的分支清单）。
+///
+/// 用途：`set` 被拒项的拒因分类——布局名字若被拒，只能是**值不合法**
+/// （枚举拼错/颜色解析失败），不能归为「未知名」。与 `apply_layout_property`
+/// 的分支清单**同步维护**（新增布局属性时两处都要加）。
+[[nodiscard]] auto is_layout_property_name(std::string_view name) -> bool {
+  constexpr std::array kLayoutNames{
+      std::string_view{"gap"},          std::string_view{"padding"},
+      std::string_view{"padding_x"},    std::string_view{"padding_y"},
+      std::string_view{"margin"},       std::string_view{"width"},
+      std::string_view{"height"},       std::string_view{"grow"},
+      std::string_view{"radius"},       std::string_view{"direction"},
+      std::string_view{"min_width"},    std::string_view{"min_height"},
+      std::string_view{"max_width"},    std::string_view{"max_height"},
+      std::string_view{"shrink"},       std::string_view{"wrap"},
+      std::string_view{"align_items"},  std::string_view{"align_self"},
+      std::string_view{"justify"},      std::string_view{"surface"},
+      std::string_view{"background"},   std::string_view{"text_color"},
+      std::string_view{"text_size"},    std::string_view{"text_align"},
+      std::string_view{"font_size"},    std::string_view{"font_weight"},
+      std::string_view{"monospace"},    std::string_view{"border_width"},
+      std::string_view{"border_color"}, std::string_view{"opacity"},
+      std::string_view{"clip_children"}};
+  return std::ranges::find(kLayoutNames, name) != kLayoutNames.end();
+}
 
+}  // namespace
 
 auto rect_to_json(math::Rect rect) -> st::Json {
   st::Json value = st::Json::object();
@@ -102,7 +127,8 @@ auto rect_to_json(math::Rect rect) -> st::Json {
   return snapshot;
 }
 
-/// 把一批属性应用到元素上，返回实际生效的属性名。
+/// 把一批属性应用到元素上，返回实际生效的属性名；
+/// `rejected` 非空时同步收集**被拒项**（名字+拒因，与 changed 对偶）。
 ///
 /// 控制通道的 `set` 方法与脚本宿主的 `ui.set` **共用这一份实现**——
 /// 否则"两条路径能改的属性不一致"会变成难以察觉的语义分裂。
@@ -114,7 +140,13 @@ auto rect_to_json(math::Rect rect) -> st::Json {
 ///
 /// `enabled` / `visible` / `focused` 三个是框架级属性（不经 `set_property`，
 /// 因为它们需要 `UiRoot` 参与焦点管理），先单独处理。
-auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props) -> Json {
+auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props,
+                      std::vector<RejectedProperty>* rejected) -> Json {
+  // 被拒项登记（带拒因分类，BACKLOG 4022 方向①）：
+  //  `rejected` 为 nullptr（旧调用方）时静默不收，行为与旧版完全一致。
+  const auto note_rejected = [rejected](std::string_view name, RejectReason reason) {
+    if (rejected != nullptr) rejected->push_back(RejectedProperty{std::string(name), reason});
+  };
   Json changed = Json::array();
   // 少数名字在部分元素上未被声明、但历史上一直可写：并集是"既消除分裂又不倒退"的做法。
   constexpr std::array<std::string_view, 9> kGenericSettable{
@@ -257,6 +289,9 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props)
   };
   for (const auto& [name, value] : props.items()) {
     bool applied = false;
+    // 未进入任何可写面时才登记未知名；一旦进入任一可写面（名字是认得的），
+    // 后续若被拒只能是「值不合法」或「能力未开」——两种拒因下面分别登记。
+    bool known_name = false;
     if (name == "enabled") {
       element.set_enabled(st::json_as_bool(value, true));
       applied = true;
@@ -273,35 +308,56 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props)
       element.set_visible(st::json_as_bool(value, true));
       applied = true;
     } else if (name == "focused") {
+      known_name = true;   // 框架级属性：名字一定认得，拒绝只能是能力未开
       // 接受与否如实回传：不可聚焦元素被 set_focus 拒绝时不能报「已应用」
       if (st::json_as_bool(value)) {
         applied = root.set_focus(&element);
       } else {
         applied = root.focused() != &element || root.set_focus(nullptr);
       }
-    } else if (apply_layout_property(name, value)) {
-      applied = true;
     } else {
-      // 元素自己声明的属性面优先；未声明时回退到一份通用名（见函数注释）。
-      const auto declared = element.property_names();
-      const bool known =
-          std::ranges::find(declared, name) != declared.end() ||
-          std::ranges::find(kGenericSettable, std::string_view(name)) != kGenericSettable.end();
-      if (known) {
-        const std::string text =
-            value.is_string() ? st::json_as_string(value) : st::json_dump(value);
-        applied = element.set_property(name, text);
+      // 布局/样式属性先试（名字在 apply_layout_property 的分支里）。
+      if (apply_layout_property(name, value)) {
+        applied = true;
+      } else {
+        // 元素自己声明的属性面优先；未声明时回退到一份通用名（见函数注释）。
+        const auto declared = element.property_names();
+        const bool known =
+            std::ranges::find(declared, name) != declared.end() ||
+            std::ranges::find(kGenericSettable, std::string_view(name)) != kGenericSettable.end();
+        if (known) {
+          known_name = true;   // 名字认得：若拒绝则是值不合法（元素/枚举/颜色解析拒了）
+          const std::string text =
+              value.is_string() ? st::json_as_string(value) : st::json_dump(value);
+          applied = element.set_property(name, text);
+        }
       }
     }
     if (applied) {
       changed.push_back(name);
       element.mark_dirty();
+    } else {
+      // 与 changed 对偶的拒绝面（BACKLOG 4022 方向①）：被拒项按拒因分类回传，
+      // 调用方不必 diff changed 才能发现「拼错名字/值」——那曾是 e2e 静默跳断言点的
+      // 成因。拒因分三类：未知名（名字不认得）/ 无效值（名字认得但值被拒）/
+      // 未开能力（focused=true 但元素不可聚焦）。
+      const bool layout_name = is_layout_property_name(name);
+      note_rejected(name,
+                    name == "focused"           ? RejectReason::Unfocusable
+                    : known_name || layout_name ? RejectReason::InvalidValue
+                                                : RejectReason::UnknownName);
     }
   }
   // 变更清单登记（`ui.changed` 事件携带）：只在**真的改到了**属性时登记，
   // 各路径（协议 set / 脚本写入 / 声明式 diff）共用同一入口。
   if (!changed.empty()) root.note_changed(element);
   return changed;
+}
+
+auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props) -> Json {
+  // 旧签名（无拒绝收集）：既有调用方（脚本桥/XML/声明式/单元测试）零改动，
+  // 行为与收集版完全一致（不收被拒项，只回 changed）。
+  return apply_properties(root, element, props, nullptr);
 }
 
 /// 触发元素动作（控制通道 `invoke` 与脚本宿主 `ui.invoke` 共用）。

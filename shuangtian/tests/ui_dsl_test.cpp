@@ -11,6 +11,7 @@
 #include "st/ui/components/input.hpp"
 #include "st/ui/components/list.hpp"
 #include "st/ui/components/markdown_view.hpp"
+#include "st/ui/components/menu.hpp"
 #include "st/ui/components/overlay.hpp"
 #include "st/ui/components/scroll.hpp"
 #include "st/ui/components/select.hpp"
@@ -242,6 +243,133 @@ ST_TEST(dsl_tabs_data_driven) {
   page->active.set(2);
   (void)host->tick();
   ST_CHECK_EQ(std::string(tabs->active_key()), std::string("z"));
+}
+
+// ── 5f2. context_menu：从注册名造元素 + 构造后写入 anchor/items ─────────────
+
+ST_TEST(dsl_context_menu_creates_from_registry_and_writes_anchor_items) {
+  // BACKLOG「ContextMenu 未进声明式注册表」收口：注册表工厂（X 宏清单）与
+  // `context_menu` 包装（锚点 + 条目两段式写入）之间的完整链路。
+  // 夹具避退化：锚点非原点，条目含分隔线与递归子菜单，菜单走真实挂载形态
+  // （overlay 槽内声明——dismiss barrier 才接得到键盘/点击）。
+  UiRoot root;
+  root.set_viewport({400.0F, 300.0F});
+  struct Page : Component {
+    State<bool> open{true};
+    ContextMenu* menu{nullptr};  // 包装返回的引用（元素归声明式树持有，跨帧稳定）
+    void build(Composer& c) override {
+      column(c, {}, [&] { text(c, [] { return std::string("宿主内容"); }); });
+      if (open.value()) {
+        (void)overlay(c, "context-menu", {}, [&] {
+          menu = &context_menu(c, st::math::Point{120.0F, 40.0F},
+                               {MenuItem{.id = "cut", .label = "剪切"},
+                                MenuItem{.id = "sep", .separator = true},
+                                MenuItem{.id = "paste", .label = "粘贴"},
+                                MenuItem{.id = "more", .label = "更多",
+                                         .children = {MenuItem{.id = "deep", .label = "深层项"}}}},
+                               {.id = "test-context-menu", .key = "ctx"});
+        });
+      }
+    }
+  };
+  auto page = std::make_shared<Page>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  root.layout(true);
+
+  // ① 注册名直达：元素由工厂表里的 "ContextMenu" 构造（非 custom<T> 逃生舱）。
+  Element* menu_element = root.find("test-context-menu");
+  ST_REQUIRE(menu_element != nullptr);
+  ST_CHECK_EQ(std::string(menu_element->type()), std::string("ContextMenu"));
+  auto* menu = dynamic_cast<ContextMenu*>(menu_element);
+  ST_CHECK(menu != nullptr);
+  if (menu == nullptr) return;
+
+  // ② 锚点写入（非退化位置，非构造默认 Point{}）。
+  ST_CHECK_EQ(menu->anchor_.x, 120.0f);
+  ST_CHECK_EQ(menu->anchor_.y, 40.0f);
+
+  // ③ 条目写入：面板读回四项（分隔线也在 items_ 里），id 逐项对得上。
+  const MenuPanel* panel = menu->panel();
+  ST_CHECK(panel != nullptr);
+  if (panel != nullptr) {
+    ST_CHECK_EQ(panel->item_count(), 4U);
+    ST_CHECK_EQ(std::string(panel->item_id(0)), std::string("cut"));
+    ST_CHECK_EQ(std::string(panel->item_id(2)), std::string("paste"));
+    ST_CHECK_EQ(std::string(panel->item_id(3)), std::string("more"));
+  }
+
+  // ④ 面板布局落在锚点右下（写入的 anchor 经 arrange 生效）。
+  ST_REQUIRE(panel != nullptr);
+  ST_CHECK_EQ(panel->bounds().x, 120.0f);
+  ST_CHECK_EQ(panel->bounds().y, 40.0f);
+  ST_CHECK_EQ(panel->bounds().height, 4 * MenuPanel::kItemHeight);
+
+  // ⑤ 挂载形态可用：overlay 内的 ContextMenu 接得到键盘——Esc 摘除信号可达
+  //（声明式里「关闭」靠这个回调把宿主状态写回，下一帧不声明即 sweep）。
+  int closed = 0;
+  menu->on_close = [&closed, page]() {
+    ++closed;
+    page->open.set(false);   // 真实用法：回调里写状态，下一帧 sweep 摘 overlay
+  };
+  Event escape;
+  escape.kind = EventKind::KeyDown;
+  escape.key = "Escape";
+  ST_CHECK(root.dispatch(escape));
+  ST_CHECK_EQ(closed, 1);
+  (void)host->tick();
+  root.layout(true);
+  ST_CHECK(root.find("test-context-menu") == nullptr);   // 已随 sweep 摘除
+}
+
+// ── 5f3. context_menu：状态驱动重组（同 key 复用、锚点跟随、条目仍在）──────
+
+ST_TEST(dsl_context_menu_reconcile_follows_state) {
+  // 与 5f2 钉的是不同面：5f2 钉「从注册名造元素 + 构造后写入 + overlay 形态下
+  // Esc→on_close→sweep 全链」（静态声明面）；本用例钉「声明式 = 每帧重设」——
+  // 写状态 → 重组 → 同 key 复用宿主元素（身份不变）、锚点跟随状态、条目经
+  // 每帧重设仍在（`set_items` 内容没变就早退，逐帧声明无额外代价）。
+  // 锚点由 State 驱动（而非 5f2 的字面量）：重组路径才会在本用例里真正跑起来。
+  UiRoot root;
+  root.set_viewport({400.0F, 300.0F});
+  struct Page : Component {
+    State<st::math::Point> anchor{st::math::Point{120.0F, 90.0F}};
+    State<bool> open{true};
+    std::vector<MenuItem> items{MenuItem{.id = "cut", .label = "剪切"},
+                                MenuItem{.id = "copy", .label = "复制"},
+                                MenuItem{.id = "sep", .separator = true},
+                                MenuItem{.id = "paste", .label = "粘贴"}};
+    ContextMenu* menu{nullptr};  // 包装返回的引用（元素归声明式树持有，跨帧稳定）
+    void build(Composer& c) override {
+      (void)anchor.value();  // 读：登记依赖（后续 anchor.set 才会触发本作用域重组）
+      if (!open.value()) return;  // 关闭 → 本帧不声明 → 下一帧 sweep 移除
+      menu = &context_menu(c, anchor.value(), items, {.id = "test-ctx", .key = "ctx"});
+    }
+  };
+  auto page = std::make_shared<Page>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  root.layout(true);
+  auto* menu = dynamic_cast<ContextMenu*>(root.find("test-ctx"));
+  ST_REQUIRE(menu != nullptr);
+  const ElementId id_before = menu->derived_id();
+  ST_CHECK_EQ(menu->anchor_.x, 120.0f);
+  ST_CHECK_EQ(menu->anchor_.y, 90.0f);
+  ST_REQUIRE(menu->panel() != nullptr);
+  ST_CHECK_EQ(menu->panel()->item_count(), 4U);
+
+  // 事件回调外写 State：走全局注册表通知（与 dsl_state_drives_reconcile 的
+  // `button->on_click()` 同机制——那里回调里也没有 Composer 上下文）。
+  page->anchor.set(st::math::Point{300.0F, 240.0F});
+  ST_CHECK(host->dirty());
+  (void)host->tick();  // 帧首重组
+  root.layout(true);
+
+  ST_CHECK_EQ(menu->anchor_.x, 300.0f);  // 锚点跟随状态
+  ST_CHECK_EQ(menu->anchor_.y, 240.0f);
+  ST_CHECK(menu->derived_id() == id_before);  // 同 key 复用：身份不变
+  ST_CHECK_EQ(menu->panel()->item_count(), 4U);  // 条目经每帧重设仍在
+  ST_CHECK_EQ(std::string(menu->panel()->item_id(3)), std::string("paste"));
 }
 
 // ── 5g. 嵌套作用域树 + 取消语义 ───────────────────────────

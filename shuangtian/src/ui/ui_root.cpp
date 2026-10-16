@@ -345,6 +345,29 @@ void UiRoot::unregister_shortcut(const std::string& key, Shortcut mods) {
   });
 }
 
+auto UiRoot::shortcuts() const -> std::vector<ShortcutInfo> {
+  // 值快照（只读枚举面）：见 ui_root.hpp 的 ShortcutInfo 说明。
+  //
+  // 为何不返回 span/引用：①枚举面不得交出可变视图（硬约束：只读不可变）；
+  // ②注册表随时可能被 register/unregister 改动，调用方拿着引用就是悬垂窗口。
+  // 快照的成本是一次 vector 拷贝（帮助卡只在开卡/对账时调，非热路径）。
+  std::vector<ShortcutInfo> out;
+  out.reserve(shortcuts_.size());
+  for (const auto& entry : shortcuts_) {
+    // 存偅形状是 pair<string, ShortcutEntry>（first=登记名）；快照里把
+    // Shortcut 的 key 字段同步为登记名（mods.key 原本就存注册时传的值，
+    // 与登记名同源——但历史注册点存在两者不同字的写法，如 gbcode 的
+    // "alt-up"（登记名）vs "ArrowUp"（mods.key）：枚举面以登记名为准，
+    // 它才是派发比对真正用的那个）。
+    ShortcutInfo info;
+    info.name = entry.first;
+    info.mods = entry.second.mods;
+    info.mods.key = entry.first;
+    out.push_back(std::move(info));
+  }
+  return out;
+}
+
 auto UiRoot::dispatch_to(Element& element, Event& event) -> bool {
   const RenderContext context = render_context();
   bool handled = false;

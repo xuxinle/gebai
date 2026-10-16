@@ -922,10 +922,24 @@ if (element == nullptr) {
 }
 const Json& props = json_at(params, "props");
 if (!props.is_object()) return unexpected(ErrorCode::Invalid, "props 必须是对象");
-Json changed = ui::apply_properties(root, *element, props);
+// 被拒项与 changed 对偶回传（BACKLOG 4022 方向①）：拼错名字/值不再需要 diff
+// changed 才能发现。非空才带字段（与 ui.changed 事件的 "changed" 同一写法），
+// 老客户端（不读 rejected）零感知。
+std::vector<ui::RejectedProperty> rejected;
+Json changed = ui::apply_properties(root, *element, props, &rejected);
 host.request_repaint();
 Json result = Json::object();
 result["changed"] = std::move(changed);
+if (!rejected.empty()) {
+  Json list = Json::array();
+  for (const auto& item : rejected) {
+    Json entry = Json::object();
+    entry["name"] = item.name;
+    entry["reason"] = std::string(ui::to_string(item.reason));
+    list.push_back(std::move(entry));
+  }
+  result["rejected"] = std::move(list);
+}
 return result;
   
 }

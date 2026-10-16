@@ -52,6 +52,9 @@
 
 namespace st::ui {
 class MenuBar;      // 菜单栏（组件头在实现文件；声明式这里只用引用）
+struct MenuItem;    // 菜单条目（`context_menu` 形参用：声明处只需名字可见，
+                    // 完整类型是定义/调用点的要求——两者都在 .cpp 里含 menu.hpp）
+class ContextMenu;  // 右键上下文菜单（`context_menu` 包装返回引用）
 class TitleBar;     // 自绘标题栏（`title_bar()` 包装用）
 class WindowFrame;  // 窗框容器（`window_frame()` 包装用）
 }
@@ -771,6 +774,23 @@ struct MenuData {
   /// 把 `bar` 的第 `index` 个菜单的下拉面板挂成 overlay（**只在菜单打开时调用**）。
 /// 槽位 key 取 `bar->menu_id(index)`；不调用 → 下一帧 sweep 自动移除。
 void menu_panel_overlay(Composer& c, MenuBar& bar, std::size_t index);
+
+/// 右键上下文菜单：`anchor` 为期望的面板左上角（通常鼠标位置），条目直接用
+/// 组件层的 `MenuItem`（`st/ui/components/menu.hpp`；dsl 层不另造镜像结构——
+/// 上下文菜单的条目没有「菜单栏那套 MenuData/MenuItemData」的转发需求，
+/// 声明处就是消费处）。
+///
+/// 从注册名 `"ContextMenu"` 造元素（与 `menu_bar` 同一条工厂路径），锚点与条目
+/// 构造后写入（与 `ContextMenu::make` 工厂同一套两段式）。返回引用供接线
+/// `on_close`（Esc / 点面板外 / 条目激活后由调用方摘除）；与 `menu_panel_overlay`
+/// 同一「不声明 = 消失」语义：本帧不调，下一帧 sweep 自动移除。
+///
+/// 挂载形态提示：上下文菜单是 `FillViewport` 浮层，通常声明在 `overlay(c, key, ...)`
+/// 槽位里而不是根层（dismiss barrier 才接得到 Esc / 点击，见回归
+/// `dsl_context_menu_creates_from_registry_and_writes_anchor_items`）；条目每帧
+/// 重设（`set_items` 内容没变就早退），声明式逐帧调用无额外代价。
+[[nodiscard]] auto context_menu(Composer& c, math::Point anchor, std::vector<MenuItem> items,
+                               const BoxProps& props = {}) -> ContextMenu&;
 
 // —— 列表类（数据型子项走 sync 接口，v1 覆盖 List；Table/Tabs 见 v1.1）——
 /// 列表项数据。

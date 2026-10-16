@@ -10,6 +10,7 @@
 
 #include "st/raster/path.hpp"
 #include "st/ui/text_port.hpp"
+#include "st/ui/timeline.hpp"  // format_timecode 收口（拆解方案步骤 1）
 
 namespace caiyun {
 
@@ -285,14 +286,21 @@ void render_generator(Canvas& target, GeneratorKind kind, double local_time, Col
 }
 
 auto format_timecode(double seconds) -> std::string {
+  // 收口到框架版 `timeline::format_timecode`（拆解方案步骤 1 / BACKLOG:3954）——
+  // 时间码是「被标尺/片段标签/状态栏共用」的量，各写一份必然不一致（框架头文件
+  // timeline.hpp:181-185 对此的论证）。本函数只剩秒→毫秒的换算：caiyun 的
+  // 时间轴以秒为原生单位（Project 字段），而框架模型是毫秒制。
+  // 舍入：+0.5 再取整与旧实现逐字符等价（18 覆盖值探针比对，含 61.4995
+  // 舍入路径边界与负值 clamp——见 tmp/tc_probe/timecode_probe.cpp）。
   if (seconds < 0.0) seconds = 0.0;
-  const auto total_ms = static_cast<std::int64_t>(seconds * 1000.0 + 0.5);
-  const std::int64_t ms = total_ms % 1000;
-  const std::int64_t total_s = total_ms / 1000;
-  return std::format("{:02}:{:02}:{:02}.{:03}", total_s / 3600, (total_s / 60) % 60,
-                     total_s % 60, ms);
+  const auto ms = static_cast<std::int64_t>(seconds * 1000.0 + 0.5);
+  return st::ui::timeline::format_timecode(ms);
 }
 
+// format_short 保留独立实现（**不**改调框架 compact 形态）——诚实边界：两者
+// 形态不同，caiyun 的标尺要「mm:ss」（无毫秒），而 timeline::format_timecode
+// 的 compact 分支是「mm:ss.mmm」（省小时但保留毫秒，src/ui/timeline.cpp:244-245）。
+// 换过去标尺标签会从 "00:05" 变 "00:05.000"，属于可感知的视觉回归——不收口。
 auto format_short(double seconds) -> std::string {
   if (seconds < 0.0) seconds = 0.0;
   const auto total_s = static_cast<std::int64_t>(seconds);

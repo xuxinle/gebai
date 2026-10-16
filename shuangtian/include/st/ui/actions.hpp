@@ -20,6 +20,34 @@
 
 namespace st::ui {
 
+/// `set` 被拒属性的拒因分类（与 `changed` 对偶的反馈面）。
+///
+/// 为什么必须分类而不能只报名字：调用方拼错名字（未知名）与拼错取值
+/// （无效值）的**修复动作完全不同**——前者查文档找真名，后者查枚举表改值。
+/// 只回「rejected: ["foo"]」时两者不可分辨，e2e 脚本仍要在文档里盲搜。
+enum class RejectReason {
+  UnknownName,   ///< 名字不属于该元素（不在 property_names()/通用名/布局属性/框架级）
+  InvalidValue,  ///< 名字认得但值不合法（枚举拼错/非法颜色串等，元素/布局层拒绝）
+  Unfocusable,   ///< 名字合法、能力未开：`focused=true` 但元素 `focusable()==false`
+};
+
+/// 拒因的稳定短名（协议 `set.rejected[].reason` 用；与 `to_string(FontWeight)`
+/// 同一先例：不要拿枚举序号当协议值，那会随枚举顺序变）。
+[[nodiscard]] constexpr auto to_string(RejectReason reason) noexcept -> std::string_view {
+  switch (reason) {
+    case RejectReason::UnknownName: return "unknown_name";
+    case RejectReason::InvalidValue: return "invalid_value";
+    case RejectReason::Unfocusable: return "unfocusable";
+  }
+  return "unknown_name";
+}
+
+/// 一条被拒属性的反馈（`set` 应答 `rejected` 数组的元素形态）。
+struct RejectedProperty {
+  std::string name{};         ///< 被拒的属性名（原样回显）
+  RejectReason reason{};      ///< 拒因分类
+};
+
 /// 矩形 → JSON（`{x,y,width,height}`，**逻辑像素**）。
 [[nodiscard]] auto rect_to_json(math::Rect rect) -> st::Json;
 
@@ -34,8 +62,19 @@ namespace st::ui {
 /// 应用一批属性，返回**实际生效**的属性名数组。
 ///
 /// 未识别的属性名被忽略（不报错）：调用方常批量下发，其中个别属性不被该组件支持是正常的。
+/// （注意与“忽略”区分：真正拒绝的是 `rejected` 出参，见下。旧签名保持不变，
+/// 既有调用方零改动。）
 [[nodiscard]] auto apply_properties(UiRoot& root, Element& element, const st::Json& properties)
     -> st::Json;
+
+/// 同上，但把**被拒的属性**（未识别名/无效值/能力未开）逐项收集进 `rejected`。
+///
+/// 与返回的 `changed` 数组对偶：changed ∪ rejected = 本次下发的属性集，
+/// 且两者不相交（同一属性要么生效要么被拒，不重复出现）。
+/// 控制通道 `set` 的应答里 `rejected` 数组（非空才带）就来自这里；
+/// 传 `nullptr` 时与旧重载行为完全一致（不收集，零开销）。
+[[nodiscard]] auto apply_properties(UiRoot& root, Element& element, const st::Json& properties,
+                                  std::vector<RejectedProperty>* rejected) -> st::Json;
 
 /// 触发元素动作（`click`/`focus`/`blur`/`submit`/…）。
 ///

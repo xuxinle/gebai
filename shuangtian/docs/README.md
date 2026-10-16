@@ -129,7 +129,7 @@
 - **逆向验证**（`*_reverse_verify.py`）：把修复回退、断言变红——证明测试**真能抓住**缺陷
 - **像素/文字量测**（`*_probe.py`、`*_ink*.py`、`text_*.py`）：从截图里量几何与墨量（观感类改动的尺子）
 - **诊断探针**（`tools/*.cpp`）：`crash_probe`、`icon_metric_probe`、`icon_ascii_probe`、`make_sample_png` 等
-- **文档/结构核对**（`check_docs.py`、`check_includes.py`、`check_selfcontained.py`）
+- **文档/结构核对**（`check_docs.py`、`check_selfcontained.py`）
 
 **② 测试即规格（`tests/`，116 个文件）**——每条 `ST_TEST` 的名字就是一条**不变量**。
 想确认"某个行为是不是被保证的"，grep 用例名比读文档更准（文档会漂，测试会红）。

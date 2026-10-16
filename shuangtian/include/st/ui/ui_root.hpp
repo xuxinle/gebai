@@ -122,6 +122,25 @@ class UiRoot : public Element::HostFocus {
   [[nodiscard]] auto shortcut_count() const noexcept -> std::size_t {
     return shortcuts_.size();
   }
+  /// 注册表的**只读快照**（枚举面，2026-10-16；BACKLOG「快捷键注册表无可枚举面」）。
+  ///
+  /// 返回**值拷贝**（不暴露 vector 内部、不暴露 handler、不持有内部引用）：
+  /// 快捷键表是根级资源，帮助卡/文档生成/协议层要能枚举它，但**不得**经枚举面
+  /// 改到注册表或触发 handler——枚举面只读，写入仍只有 register/unregister 两个口。
+  ///
+  /// 字段口径（与 `register_shortcut` 的存储一致，帮助卡从它生成）：
+  /// - `name`：**登记名**（注册时传的 key，已小写归一）——派发时与归一后的
+  ///   `event.key` 比对的就是它。同键位不同修饰键的多条注册同名共存
+  ///   （如 f12 家族四条），它们靠 `mods` 区分。
+  /// - `mods`：修饰键组合（含 `mods.key`；与登记名同值冗余存偅，枚举时两者都给）。
+  ///
+  /// 顺序：**注册顺序**（与 `shortcut_count()` 同源同序，不重排——派发是后注册优先，
+  /// 枚举按注册序让调用方既能对上调试输出，也能自己反转出派发优先序）。
+  struct ShortcutInfo {
+    std::string name{};   ///< 登记名（小写归一后的注册键）
+    Shortcut mods{};      ///< 修饰键组合（mods.key 与 name 同值）
+  };
+  [[nodiscard]] auto shortcuts() const -> std::vector<ShortcutInfo>;
 
   /// 设置键盘焦点（`nullptr` = 清除焦点）。
   ///

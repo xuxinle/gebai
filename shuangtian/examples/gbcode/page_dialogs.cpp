@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "page.hpp"
+#include "shortcut_help.hpp"   // 快捷键单源表：帮助卡正文从它生成（BACKLOG 3982）
 #include "st/core/string.hpp"
 #include "st/ui/components/command_palette.hpp"
 
@@ -616,48 +617,19 @@ namespace gbcode_ui {
 
   /// 键盘快捷键一览（`Ctrl+K` 或帮助菜单）。
   ///
-  /// ⚠ **本表是手工维护的**，与 `main.cpp` 里注册的快捷键表是两份数据：注册表
-  /// 不可枚举（框架缺口：`UiRoot::register_shortcut` 只登记不暴露清单），做不到
-  /// 真正同源。**新增键位必须同步此表**——漏同步就是用户照着卡按键没反应。
+  /// **正文从注册表生成**（`shortcuts_card_body(root.shortcuts())`，2026-10-16
+  /// BACKLOG 3982）：不再手写第二份键位表——单源表 `shortcut_help.hpp` 决定
+  /// 注册什么（main.cpp 的注册块从它来），这里从**注册表快照**生成卡片，
+  /// 两边由对账测试（`tests/gbcode_shortcut_card_test.cpp`）锁死。
+  /// 「新增键位必须同步此表」的手写纪律就此废除：改单源表 = 注册+卡片+对账
+  /// 三处同步变，漏同步当场红。
   void CodeEditorPage::build_shortcuts_card(Composer& c) {
     if (!shortcuts_open_.value()) return;
     (void)overlay(c, "shortcuts", {}, [&] {
-      (void)custom<Dialog>(c, [this](Dialog& dialog) {
+      (void)custom<Dialog>(c, [this, &c](Dialog& dialog) {
         dialog.set_id("shortcuts-dialog");
         dialog.set_title("键盘快捷键");
-        dialog.set_body(
-            "文件\n"
-            "  Ctrl+S          保存            Ctrl+W   关闭当前编辑器\n"
-            "  Ctrl+Shift+S    另存为          Ctrl+O   打开文件\n"
-            "  Ctrl+Alt+S      全部保存        Ctrl+Shift+O 打开文件夹（换工作区）\n"
-            "  Ctrl+N          新建文件\n"
-            "\n"
-            "编辑\n"
-            "  Ctrl+Z/Y        撤销 / 重做     Ctrl+/   切换行注释\n"
-            "  Ctrl+A          全选            Ctrl+D   选中下一处同词\n"
-            "  Alt+↑ / Alt+↓   上/下移当前行   F2       重命名符号\n"
-            "  Ctrl+Space      手动触发补全    Shift+Alt+F  格式化\n"
-            "\n"
-            "导航\n"
-            "  Ctrl+F/Ctrl+H   查找 / 替换     Ctrl+G   转到行…\n"
-            "  Ctrl+P          快速打开文件    Ctrl+Shift+P  命令面板\n"
-            "  Ctrl+T          工作区符号      Ctrl+Shift+E/F/G 资源管理器/搜索/变更\n"
-            "  Ctrl+Tab        循环切换标签    Ctrl+B   切换侧栏\n"
-            "  F8              下一处问题\n"
-            "\n"
-            "跳转（F12 家族）\n"
-            "  F12             转到定义        Shift+F12   查找引用\n"
-            "  Alt+F12         查看声明        Ctrl+F12   转到实现\n"
-            "  Alt+←           返回上一个光标位置\n"
-            "\n"
-            "差异视图\n"
-            "  F7 / Shift+F7   下一个 / 上一个差异\n"
-            "\n"
-            "查看\n"
-            "  Ctrl+J          切换底部面板    Ctrl+K   本帮助\n"
-            "  Ctrl+`          切换终端（VSCode 同键位）\n"
-            "  Ctrl+Shift+V    Markdown 预览/源码切换\n"
-            "  Esc             关闭浮层\n");
+        dialog.set_body(shortcuts_card_body(c.root().shortcuts()));
         dialog.set_actions({"知道了"});
         dialog.on_action = [this](std::size_t) { shortcuts_open_.set(false); };
         dialog.on_dismiss = [this] { shortcuts_open_.set(false); };

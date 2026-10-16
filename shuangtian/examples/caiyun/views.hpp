@@ -1,22 +1,32 @@
 #pragma once
 
-/// 裁云（Nimbus）的**自绘时间轴**与**预览监视器**。
+/// 裁云（Nimbus）的**时间轴适配器**与**预览监视器**。
 ///
-/// 这两个都是 `Element` 子类、走 `dsl::custom<T>` 逃生舱（同 louyue 的
-/// `CanvasView`）：时间轴是连续拖拽交互面，监视器是每帧重合成的自绘面，
-/// 都不适合进声明式重组树。
+/// ## 时间轴已换内置件（2026-10-16，caiyun 拆解步骤 6）
 ///
-/// ## 几何层已回流 `st::ui::timeline::Model`（整件回流的第一步）
+/// 原先这里是 450 行手绘时间轴（标尺/轨道/片段/命中/拖拽/吸附全在类里，只靠
+/// e2e 截图断言）。55 轮曾定案「整件换内置不做」——前提是「需造 Model→Project
+/// 反向同步桥，复杂度不低于手写面」。**该前提已被拆解计划推翻**：S1 把桥做进了
+/// 组件接口（`st::ui::TimelineView::EditDelegate`，21 例 view 测试钉住），编辑
+/// 语义经 delegate 走 Project 同源，桥的复杂度从应用层移到框架层一次实现
+///（docs/caiyun_timelineview_refactor_plan.md §③「判据反转」）。于是本类瘦身为
+/// **薄适配器**：
+/// - 内部持 `st::ui::TimelineView`（组合转发五大生命周期）；
+/// - **绘制/命中/几何**全部来自内置件（投影：`sync_from_project` 每次交互前
+///   从 Project 重建 Model）；
+/// - **编辑全部走 Project**：`EditDelegate` 的 move/trim 转
+///   `Project::move_clip/trim`（波纹/重叠/时长钳制等领域规则在 Project），
+///   snap 候选也按 Project 真值平移；播放头拖动/seek 转 `Project::playhead`
+///   写 + 双通知（on_seek/on_project_changed）；
+/// - 控制协议薄壳（九动作四属性）原样平移——**e2e 契约字节不变**；
+/// - 选中态真值留 Project（本类不再自存 selected——C1-C3 双源同步缺陷面就此
+///   消灭，读取恒经 `project_->selected`）。
 ///
-/// 「先在示例里自绘验证形态、稳定后内置化」：v0.1.7 把几何层（`timeline::Model`）
-/// 收进框架（7 例 79 断言的纯逻辑测试接管，双份漂移收口）；随后内置的通用
-/// `st::ui::TimelineView`（标尺/轨道/片段/播放头 + 拖拽修剪）也已在册。但
-/// **整件换内置已定案不做**（2026-10-16 评估）：内置件是通用查看/编辑面，编辑
-/// 直改自带 Model；而本视图的编辑必须走 `Project`（波纹/重叠校验/检查器/渲染
-/// 同源），换件需造 Model→Project 反向桥，复杂度不低于现有手写面且引入双源同步
-/// 新缺陷面——几何层共享（现状）恰是分层正确形态：领域语义留示例，通用能力
-/// 进框架。吸附经 `Model::snap` 且**排除被拖对象自身**：旧 `Project::snap`
-/// 不排自己，拖拽时会吸在自己刚离开的位置（经典"拖不动"错法）。
+/// 注册名 `CaiyunTimeline`（main.cpp:540，e2e 选择器依赖）；C++ 类名保留
+/// `TimelineView`（示例内既有引用面不动）。
+///
+/// 监视器（`MonitorView`）与时间轴分离的理由不变：监视器的重绘频率（播放中
+/// 每帧）远高于时间轴（只有播放头动），合成到一起会让整条时间轴跟着每帧重画。
 
 #include <functional>
 #include <string>
@@ -25,17 +35,17 @@
 #include "st/ui/element.hpp"
 #include "st/ui/text_port.hpp"
 #include "st/ui/theme.hpp"
-#include "st/ui/timeline.hpp"  // 几何层回流：换算/命中/吸附/标尺步长的真值源（见文件头）
+#include "st/ui/components/timeline_view.hpp"  // 内置时间轴（本适配器的全部几何/绘制/命中）
+#include "st/ui/timeline.hpp"                  // 时间单位与换算（秒 ↔ 毫秒集中一处）
 
 namespace caiyun {
 
-/// 时间轴的命中区（拖拽开始时判定"抓到什么"）。
-enum class TimelineGrab : std::uint8_t { None, Playhead, ClipBody, ClipLeftEdge, ClipRightEdge };
-
-/// 自绘时间轴：标尺 + 轨道 + 片段块 + 修剪手柄 + 播放头。
+/// 时间轴薄适配器：内置 `st::ui::TimelineView` + Project 投影 + EditDelegate 编辑通道。
 class TimelineView final : public st::ui::Element {
  public:
   TimelineView();
+  ~TimelineView() override;   // 定义在 views.cpp（delegate_ 是 unique_ptr<不完整类>，
+                              // 析构必须留在 Delegate 完整的翻译单元）
 
   [[nodiscard]] auto type() const noexcept -> std::string_view override { return "TimelineView"; }
   [[nodiscard]] auto role() const noexcept -> st::ui::Role override { return st::ui::Role::Panel; }
@@ -46,67 +56,45 @@ class TimelineView final : public st::ui::Element {
   /// 播放头变化（拖动中）的回调——监视器据此重画。
   std::function<void()> on_seek{};
 
-  [[nodiscard]] auto selected_clip() const noexcept -> int { return selected_; }
+  /// 选中片段 id（真值在 Project；`-1` = 无）。
+  [[nodiscard]] auto selected_clip() const noexcept -> int {
+    return project_ != nullptr ? project_->selected : -1;
+  }
 
   void apply_theme(const st::ui::Theme& theme) override;
   void measure(const st::ui::RenderContext& context, const st::ui::Constraints& constraints) override;
+  void arrange(const st::ui::RenderContext& context, st::math::Rect rect) override;
   void paint_content(const st::ui::RenderContext& context, st::raster::Surface& canvas) const override;
   auto on_event(const st::ui::RenderContext& context, st::ui::Event& event) -> bool override;
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
   auto set_property(std::string_view name, std::string_view value) -> bool override;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
-  [[nodiscard]] auto invoke_action(std::string_view action, std::string_view argument)
+  auto invoke_action(std::string_view action, std::string_view argument)
       -> bool override;
 
  private:
-  /// 把 Project 重建进 `model_`（轨道按视觉序：V2 在上 = Model 下标 0）。
-  /// set_project / paint / on_event 入口调用——绘制与命中始终读到最新几何；
-  /// 拖拽帧里 `snap_time` 的候选也来自刚同步的活数据（与旧版语义一致）。
+  /// 把 Project 重建进内置件的 Model（**投影**：轨道按视觉序 V2 上 = 下标 0；
+  /// tint 映射 generator_color；选中态从 Project.selected 反推）。set_project /
+  /// paint / on_event 入口调用——绘制与命中始终读到最新几何。
   void sync_from_project() const;
 
-  /// 时间 → 视口 x（秒 → 像素）。
-  [[nodiscard]] auto time_to_x(double time) const -> float;
-  [[nodiscard]] auto x_to_time(float x) const -> double;
-  /// 某轨道的行矩形（逻辑坐标）。
-  [[nodiscard]] auto track_rect(int track) const -> st::math::Rect;
-  /// 片段块的矩形。
-  [[nodiscard]] auto clip_rect(const Clip& clip) const -> st::math::Rect;
-  /// 命中的片段与抓取部位。
-  ///
-  /// ⚠ 名字**不能叫 `hit_test`**：`Element` 已有一个返回 `bool` 的虚函数叫那名
-  ///（“这个点是否命中本元素”），同名不同返回类型会编译报 conflicting return type；
-  /// 而且即使返回类型相同，覆写基类的命中语义也会把点派发弄坏。
-  [[nodiscard]] auto grab_at(st::math::Point point) const -> std::pair<int, TimelineGrab>;
-  /// 吸附（`Model::snap` 包装，秒 ↔ 毫秒换算）。`exclude_id >= 0`：拖的是该片段，
-  /// 排除它自身的边缘候选（不排会"永远吸在原位"）；`< 0`：拖的是播放头，
-  /// 排除播放头候选（否则每帧都吸回上一帧位置——旧版实际存在的手感缺陷）。
-  [[nodiscard]] auto snap_time(double time, int exclude_id) const -> double;
+  /// 交互后统一走这条（监视器 refresh + 检查器 bump 都挂在宿主回调上）。
   void notify_changed();
+  /// 播放头变了：双通知（on_seek 每帧跟手 + on_project_changed 状态刷新）。
   void notify_seek();
 
-  Project* project_{nullptr};
-  /// 几何真值源（换算/命中/吸附/标尺步长全走 Model）：内容在 sync_from_project()
-  /// 从 Project 重建——Project 仍是编辑语义的唯一真值源。`mutable`：
-  /// `paint_content` 是 const 方法（"绘制不改状态"是框架硬约束），与
-  /// `Tree::row_label_widths_` 同一套"const 绘制路径刷新缓存"的先例。
-  mutable st::ui::timeline::Model model_{};
-  int selected_{-1};
-  int hover_clip_{-1};
-  TimelineGrab grab_{TimelineGrab::None};
-  int grab_clip_{-1};
-  /// 拖拽片段时的抓取偏移（秒）：保持"抓到哪就跟着哪"，避免块跳到鼠标位置。
-  double grab_offset_{0.0};
-  bool dragging_playhead_{false};
+  /// EditDelegate 的实现（内部类，定义在 views.cpp）：move/trim 转 Project，
+  /// snap 按 Project 真值平移。`mutable`：投影同步发生在 const 路径
+  ///（`paint_content`），delegate 内部触发 `sync_from_project` 与之同因。
+  struct Delegate;
 
-  st::math::Color ruler_bg_{};
-  st::math::Color track_bg_{};
-  st::math::Color track_bg_alt_{};
-  st::math::Color grid_{};
-  st::math::Color clip_fill_{};
-  st::math::Color clip_selected_{};
-  st::math::Color clip_border_{};
-  st::math::Color playhead_{};
-  st::math::Color text_{};
+  Project* project_{nullptr};
+  /// 内置时间轴（拥有；组合而非继承——Element 契约面由本类转发，避免双亲
+  /// 双 bounds 的二义性）。
+  std::unique_ptr<st::ui::TimelineView> view_{std::make_unique<st::ui::TimelineView>()};
+  /// delegate 实例（拥有；`view_->set_edit_delegate` 收它的裸指针，生命周期
+  /// 由本类的 unique_ptr 保证——两个成员同生共死，无悬垂窗口）。
+  std::unique_ptr<Delegate> delegate_{};
 };
 
 /// 自绘预览监视器：显示播放头处当前帧的合成结果。
@@ -136,7 +124,7 @@ class MonitorView final : public st::ui::Element {
   void paint_content(const st::ui::RenderContext& context, st::raster::Surface& canvas) const override;
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
-  [[nodiscard]] auto invoke_action(std::string_view action, std::string_view argument)
+  auto invoke_action(std::string_view action, std::string_view argument)
       -> bool override;
 
  private:

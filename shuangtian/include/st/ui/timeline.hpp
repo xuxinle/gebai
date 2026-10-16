@@ -24,6 +24,8 @@
 #include <string_view>
 #include <vector>
 
+#include "st/math/color.hpp"
+
 namespace st::ui::timeline {
 
 /// 时间戳（毫秒）。
@@ -43,6 +45,12 @@ struct Clip {
   Millis source_in{0};
   /// 是否选中（绘制高亮与批量操作都看它）。
   bool selected{false};
+  /// 可选填充色（宿主按内容着色：生成器色/级别色/轨道类型色…）。
+  /// `nullopt`（默认）= 走主题令牌——不填它，绘制行为与旧版一致；
+  /// 有值 = 以它为基色参与绘制（选中/hover 仍在其上叠加，见组件实现）。
+  /// 纯数据字段：本层只存不解释，`Model` 不落盘、无序列化面，
+  /// 几何/命中/吸附/时长换算全不看它（model 测试钉住「默认零变化」）。
+  std::optional<math::Color> tint{};
 
   [[nodiscard]] auto end() const noexcept -> Millis { return start + duration; }
   /// 是否与 `[from, to)` 有交集（半开区间）。

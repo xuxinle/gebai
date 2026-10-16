@@ -401,6 +401,62 @@ A/B 的必要性：阈值只要还挂在「单点标定」上，无论标在哪�
 **属公共接口变更**（`include/st/raster/surface.hpp` + 全部后端）→ 只分析不落地，
 待人工审阅接口形态后再实施。
 
+## 已完成（2026-10-16：UiRoot 快捷键枚举面 + gbcode 帮助卡单源化，原 P2 落地）
+
+> 原待做条（本文件 4009 行附近的「`UiRoot` 快捷键注册表无可枚举面」）已落地。
+> 处置（框架面）：`UiRoot::shortcuts()` 只读**值快照**（`ShortcutInfo{name, mods}`，
+> 登记名小写归一、注册序、不暴露 handler）——枚举面只读，写入仍只有
+> register/unregister 两口；实现见 `src/ui/ui_root.cpp`（快照而非引用：枚举面
+> 不得交出可变视图，且注册表随时可能变动，引用即悬垂窗口）。
+> 处置（应用面，gbcode）：新增单源表 `examples/gbcode/shortcut_help.hpp`
+>（41 条 spec：键位/修饰键/守卫形态/文案/分组一体登记），main.cpp 注册块改
+> bind-by-id（键位零手抄，行为/顺序/守卫忠实移植），帮助卡正文改
+> `shortcuts_card_body(root.shortcuts())` 生成（手写体废除），启动时
+> `shortcut_drift` 对账点名表外/漏注册/抢注（实测零漂移）。
+> 对账钉进测试：`tests/gbcode_shortcut_card_test.cpp` 五用例
+>（round-trip 双向差集/文案⇄修饰键/卡片⇄注册表/守卫形态/基线数量）；
+> 框架面补 `tests/ui_shortcut_test.cpp` 两用例（快照字段与独立性/枚举不触发
+> handler）。
+> 逆向验证：回退 shortcuts() 为返回空表（可编译形态）→ 3+3 用例红（不是假绿）；
+> 顺带抓到并修掉测试自身的失败路径 bug（ST_CHECK 失败不中断用例，带下标断言
+> 未守长度会越界崩进程）。恢复后全绿（9 用例 154 断言）。
+> e2e：headless 真 gbcode 按下 Ctrl+K——卡片分组/关键行/36 行/零「其他」节，
+> Esc 关卡、Ctrl+G/Ctrl+J 抽查键位真生效。
+> 已知历史形态如实迁移：Alt+↑/↓ 根级登记名（"alt-up"/"alt-down"）与后端键名
+>（ArrowUp/ArrowDown）不匹配，真移行是 CodeEditor 自己的分支——原样保留，
+> 键位归一另单处理；表内已用注释点名，不在本单扩散。
+
+## 已完成（2026-10-16：ContextMenu 声明式收尾，注册表 + 包装声明）
+
+> 原待做条（本文件待做区「`ContextMenu` 未进声明式注册表」）已落地。
+> 真值校准：注册表条目（`ST_COMPONENT_LIST` 的 `X(ContextMenu, ...)`）与
+> `dsl::context_menu` 包装实现（dsl.cpp）**早已存在**，缺的是公共头声明与
+> 库内测试（全仓无声明无调用的孤儿函数）——本单只补齐这两样，未重写任何实现。
+> 处置：① `dsl.hpp` 补 `context_menu` 声明（menu_bar 同区），依赖面用最小代价——
+> `st::ui` 命名空间下前向声明 `ContextMenu`/`MenuItem`（与既有 `MenuBar` 前向声明
+> 同款先例），`menu.hpp` 的包含仍留在 .cpp；② 新增
+> `tests/ui_dsl_test.cpp` 的
+> `dsl_context_menu_creates_from_registry_and_writes_anchor_items`
+> （作曲后从注册名造元素 + anchor/items 写入断言 + overlay 形态下 Esc→on_close→sweep
+> 全链，18 断言）。
+> 逆向验证：注释 dsl.hpp 声明 → 测试 TU 编译失败
+>（`'context_menu' was not declared in this scope`，无声明则其它 TU 调不到）；
+> 临时禁用 dsl.cpp 写入段（可编译形态）→ 测试红
+>（`期望 menu->anchor_.x == 120.0f，实际 0 != 120`），恢复后回绿。
+> 同步：DESIGN.md 声明式章节（浮层生命周期节）补 context_menu 条目。
+
+## 已完成（2026-10-16：删除已被取代的 IWYU 差集体检脚本，P2 落地）
+
+> 原 P2 条目（`## P2` 章末的废弃工具清理条）已落地：`tools/` 下只做「直接用到的
+> std 实体」与「显式 include 的标准库头」差集的 IWYU 体检脚本已删除——它只查
+> `.cpp`、包含根写死为无、实际从未被跑（528 处全假阳，输出在 GBK 控制台还是
+> 乱码），且已被 `tools/check_selfcontained.py` 取代（后者连头文件一起真编一遍、
+> 按组补齐包含根，是真验证；取代史已并入 `tools/README.md` 该行）。
+> 处置：删文件 + `docs/README.md` 工具分类清单、`tools/README.md` 工具表同步摘除；
+> 全仓字面名清零（git grep 兜底扫描，仅 `.evolve/` 调度器托管件命中）。
+> 验证：check_docs.py 全绿（§ 引用/路径实存/BACKLOG 结构/PITFALLS 格式均合规）；
+> 构建面零依赖（st.pkg 不含它、src/ 无引用、无脚本调用），按清理单零构建收单。
+
 ## 已完成（2026-10-15：裸文件名控制文件的落盘白名单修复，P2 落地）
 
 > 原 P2 条目（本文件 3757 行附近）已落地：`default_capture_dirs` 对无分隔符的
@@ -3919,9 +3975,6 @@ token/include 目录——**不含源内容与 mtime**；版本判定全在 `obj
   ⇒ “等标记”退化成“等回显”，前置条件形同虚设（仍 25% 红）。现两平台都拼起来：
   PowerShell `('ru'+'nning-9271')`、bash `'ru''nning-9271'`。
   逆向验证：取 HEAD 原版 → **25 轮红 9 轮**；修复版 → **25 轮红 0 轮**。
-- [ ] `check_includes.py` 实际从未被跑过（528 处"缺失"全假阳，且输出在 GBK 控制台是乱码）——
-  已由 `check_selfcontained.py` 取代（它真编一遍，不问"包含集"）。前者可删。
-
 - [ ] 多窗口抽象（Window/WindowManager 进 shell，control::Host 带窗口维度）。
 - [ ] 统一动画系统（现每组件手工状态机：advance_hover/last_hover_time_）。
 - [ ] DisplayList（立即模式→保留模式）：解锁多线程分帧、录制回放测试、GPU 图层缓存。
@@ -3964,6 +4017,13 @@ token/include 目录——**不含源内容与 mtime**；版本判定全在 `obj
   试验田，但双份漂移风险永存）。**控制面推荐①**（护栏差距悬殊：50+ vs 0；
   DSL 已注册回流成本低；「能力存在但外部不用」正是 rescan 的核心病灶），
   但 caiyun 侧需排中单（耦合面大），louyue 侧小单可做。定案前不排工。
+  **→ caiyun 半边已收账（2026-10-16，拆解步骤 6）**：经 S1-S5 框架增强
+  （EditDelegate 委托通道/set_playhead_external/投影刷新防线/头部栏开关/tint）
+  后换件落地——手写 450 行删除，`views.cpp` 瘦身为薄适配器（投影+编辑转发+控制
+  协议薄壳），e2e 五段零修改全过（逆向验证：编辑绕过 Project 时第 2d 段检查器
+  断言必红）。G25「外部真值源 + 委托编辑」示范位闭合，选中态真值归 Project
+  （L3）。**louyue 半边仍开放**（ColorPicker+Viewport 回流，小单）——决策档
+  保留至 louyue 侧落地后一并勾销。
 
 - [ ] **状态类组件缺 `Change` 事件（ScriptBridge 事件表）**（v2.2 第 32 轮 rescan
   反推，xmlapp 实证）：勾选框只能挂 `click`（写 `change` 不报错但永不触发——
@@ -3978,11 +4038,6 @@ token/include 目录——**不含源内容与 mtime**；版本判定全在 `obj
   ListItemData.key 机制，JS 侧三原语（build/clear/set）无对应物——跨语言能力面
   不对齐，「两种开发形态」的承诺打折。建议：`ui.build` 条目支持可选 `key`，
   宿主按 key 对齐复用（与声明式同一套对齐语义）。
-
-- [ ] **`UiRoot` 快捷键注册表无可枚举面**（同上反推，gbcode 实证）：快捷键卡
-  只能手写，手写必分叉（已分叉缺 15+，第 33 轮临时手补 14 条只是止血）。
-  建议：`UiRoot::shortcuts()` 只读枚举（登记名/键/修饰键），帮助卡与文档从它
-  生成。表与代码要么同源、要么有对账，二选一——现在两者皆无。
 
 - [ ] **gallery 组件页对账机制**（同上反推）：gallery 自称「控件全集」但缺 8
   个展示卡（TimelineView/ColorPicker/Viewport 全库零展示位），新增组件不会自动
@@ -4044,15 +4099,6 @@ token/include 目录——**不含源内容与 mtime**；版本判定全在 `obj
       两族持平——见 `docs/BUILD_TEST_PERF.md` §5）。压缩方向不在 PCH 体积而在**模块分层**（待验证）。
 
   - [ ] **编辑器分组**：VSCode 式左右分屏各持独立标签组需容器级支持。
-
-- [ ] **`ContextMenu` 未进声明式注册表（本轮绕过）**
-
-
-  - **现象**：`ContextMenu` 是框架组件，但 `ST_COMPONENT_LIST` 里没有它——声明式里
-  只能用 `custom<ContextMenu>` 逃生舱，且条目只能在构造时给（表要求无参构造）。
-  - **本轮绕法**：`MenuPanel::set_items`（新增的一等接口）+ `custom<ContextMenu>`。
-  - **方向**：把它加进注册表并给一个 `dsl::context_menu(anchor, items)` 包装；
-  当前未做是因为 `dsl.hpp` 对 `MenuItem` 只有前向声明，加声明要顺带梳理那个头的依赖面。
 
 - [ ] **`Panel` 不对子元素做裁剪 / 副轴尺寸传播**
 
@@ -4820,7 +4866,8 @@ release 档**，文档还记着它在本容器余量踩线 0.66 倍 < 下限 1.3
   只有首次自举报 `'uint16_t' in namespace 'std' does not name a type`，
   且行号指向 `channel.cpp:67` 而非缺头的那一行。
   **与 `<map>` 那条是同一个根因，而"新增约定"没拦住它**——因为约定只是一句话，
-  日常命令里没有任何一条会去跑它（`check_includes.py` 只查 `.cpp`、包含根写死，且从未被跑）。
+  日常命令里没有任何一条会去跑它（当时的 IWYU 差集体检脚本只查 `.cpp`、包含根写死，且从未被跑；
+  该脚本已于 2026-10-16 删除，见上方「已完成」段）。
   因此这轮把门禁做成可执行工具：**`tools/check_selfcontained.py`**
   （头文件探针 + 按组补齐包含根的翻译单元编译；实测扫 302 个文件，失败 0）。
   逆向验证：回退 `channel.hpp` 两行 include → 头文件组与框架单元组各报红，

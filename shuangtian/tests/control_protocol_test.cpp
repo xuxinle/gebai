@@ -27,6 +27,7 @@
 #include "st/core/fs.hpp"
 #include "st/core/net.hpp"
 #include "st/core/time.hpp"
+#include "st/ui/actions.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/code_editor.hpp"
 #include "st/ui/components/file_dialog.hpp"
@@ -1825,4 +1826,136 @@ ST_TEST(invoke_confirm_reaches_directory_mode_file_dialog_via_protocol) {
     ST_CHECK(reply["result"].value("handled", false));
   }
   ST_CHECK_EQ(confirmed, st::fs::join(dir, "sub"));
+}
+
+ST_TEST(set_reports_rejected_properties_alongside_changed) {
+  // set 应答的 rejected 清单（BACKLOG 4022 方向①，与 changed 对偶）：混合批次
+  // 一次下发「合法名 + 拼错名 + 无效值 + 能力未开」，断言 changed/rejected **各自**
+  // 的内容与拒因分类——e2e 拼错属性名不再需要 diff changed 才能发现静默跳过。
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_REQUIRE(probe.call("hello").value("ok", false));
+
+  // 在同一棵夹具树上加一个**不可聚焦**的 Text（基类 focusable_=false 且不开启），
+  // 专测「名字合法但能力未开」的拒因——Button/Input 是可聚焦的，测不到这个分支。
+  auto text = std::make_unique<st::ui::Text>("一段只读文本");
+  text->set_id("plain-text");
+  fx.host.root_.find("root-panel")->add_child(std::move(text));
+
+  const auto reason_of = [](const Json& reply, const std::string& name) -> std::string {
+    if (!reply.contains("result")) return "<no-result>";
+    const Json& result = reply["result"];
+    if (!result.contains("rejected")) return "<no-rejected>";
+    for (const auto& item : result["rejected"]) {
+      if (item.value("name", std::string{}) == name) {
+        return item.value("reason", std::string("<no-reason>"));
+      }
+    }
+    return "<not-rejected>";
+  };
+  const auto in_changed = [](const Json& reply, const std::string& name) -> bool {
+    if (!reply.contains("result")) return false;
+    const Json& result = reply["result"];
+    if (!result.contains("changed")) return false;
+    for (const auto& item : result["changed"]) {
+      if (item.get<std::string>() == name) return true;
+    }
+    return false;
+  };
+
+  // ① 混合批次（主体断言）：四类属性一次下发，changed/rejected 各归各位。
+  {
+    Json params = Json::object();
+    params["id"] = "btn-ok";
+    Json props = Json::object();
+    props["label"] = "保存";           // 合法：元素声明的属性面（changed）
+    props["labell"] = "拼错的属性名";   // 拼错名：unknown_name（原缺陷场景本体）
+    props["variant"] = "primry";       // 无效值：名字认得但枚举拼错（invalid_value）
+    props["align_items"] = "middle";   // 无效值：布局面枚举拼错（invalid_value）
+    props["border_color"] = "not-a-color";  // 无效值：颜色解析拒（invalid_value）
+    params["props"] = props;
+    const Json reply = probe.call("set", params);
+    ST_REQUIRE(reply.value("ok", true));   // 元素存在即 ok：批量语义不变
+
+    // changed：恰好只含 label（全部合法项）
+    ST_REQUIRE(reply["result"].contains("changed"));
+    ST_REQUIRE(reply["result"]["changed"].is_array());
+    ST_CHECK_EQ(reply["result"]["changed"].size(), 1U);
+    ST_CHECK(in_changed(reply, "label"));
+    // 改动真的落位（回读走 get，不同信念源）
+    {
+      Json get_params = Json::object();
+      get_params["id"] = "btn-ok";
+      const Json got = probe.call("get", get_params);
+      ST_REQUIRE(got.value("ok", false));
+      ST_CHECK_EQ(got["result"]["props"]["label"].get<std::string>(), std::string("保存"));
+    }
+
+    // rejected：四项各自带正确拒因
+    ST_REQUIRE(reply["result"].contains("rejected"));
+    ST_REQUIRE(reply["result"]["rejected"].is_array());
+    ST_CHECK_EQ(reply["result"]["rejected"].size(), 4U);
+    ST_CHECK_EQ(reason_of(reply, "labell"), std::string("unknown_name"));
+    ST_CHECK_EQ(reason_of(reply, "variant"), std::string("invalid_value"));
+    ST_CHECK_EQ(reason_of(reply, "align_items"), std::string("invalid_value"));
+    ST_CHECK_EQ(reason_of(reply, "border_color"), std::string("invalid_value"));
+    // 对偶不变式：同一属性不重复出现（拼错项不得混进 changed）
+    ST_CHECK(!in_changed(reply, "labell"));
+    ST_CHECK(!in_changed(reply, "variant"));
+  }
+
+  // ② 能力未开：focused=true 到不可聚焦元素（名字合法但能力没开，unfocusable）。
+  {
+    Json params = Json::object();
+    params["id"] = "plain-text";
+    Json props = Json::object();
+    props["focused"] = true;
+    params["props"] = props;
+    const Json reply = probe.call("set", params);
+    ST_REQUIRE(reply.value("ok", true));
+    ST_CHECK(!in_changed(reply, "focused"));   // 旧口径不变：不进 changed
+    ST_CHECK_EQ(reason_of(reply, "focused"), std::string("unfocusable"));
+    // 拒因分类是关键差异：名字认得且值是合法布尔，只是元素不可聚焦——
+    // 若误报 invalid_value，调用方会去改值而不是去查元素类型。
+  }
+
+  // ③ 未知布局名 vs 已知布局名的区分度：拼错的布局名仍归 unknown_name
+  //    （is_layout_property_name 只认完整真名，不前缀匹配）。
+  {
+    Json params = Json::object();
+    params["id"] = "btn-ok";
+    Json props = Json::object();
+    props["pading"] = 8;   // "padding" 拼错：名字不认得 → unknown_name
+    params["props"] = props;
+    const Json reply = probe.call("set", params);
+    ST_REQUIRE(reply.value("ok", true));
+    ST_CHECK_EQ(reason_of(reply, "pading"), std::string("unknown_name"));
+    ST_CHECK(!in_changed(reply, "pading"));
+  }
+}
+
+ST_TEST(set_all_valid_props_stays_legacy_compatible) {
+  // 全合法 set 的**兼容性**用例（BACKLOG 4022 方向①的零破坏面）：
+  // 没有被拒项时，应答**不携带 rejected 字段**（与 ui.changed 事件「非空才带」
+  // 同一写法）——老客户端（不认识 rejected）永远看不到它，新客户端可据此
+  // 省一次判空。
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_REQUIRE(probe.call("hello").value("ok", false));
+
+  Json params = Json::object();
+  params["id"] = "btn-ok";
+  Json props = Json::object();
+  props["label"] = "全合法批次";   // 元素属性面
+  props["enabled"] = true;        // 框架级
+  props["margin"] = 6;            // 布局面
+  params["props"] = props;
+  const Json reply = probe.call("set", params);
+  ST_REQUIRE(reply.value("ok", false));
+
+  ST_REQUIRE(reply["result"].contains("changed"));
+  ST_CHECK_EQ(reply["result"]["changed"].size(), 3U);
+  // 兼容性断言本体：rejected 字段**缺席**（不是空数组——空数组也是新形态，
+  // 老客户端拿严格 schema 校验会失败）。
+  ST_CHECK(!reply["result"].contains("rejected"));
 }

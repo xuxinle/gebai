@@ -8,9 +8,11 @@
 
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "st/math/color.hpp"
 #include "st/test/test.hpp"
 #include "st/ui/timeline.hpp"
 
@@ -269,4 +271,48 @@ ST_TEST(timeline_ruler_step_uses_nice_steps) {
   // 非法输入不崩。
   ST_CHECK(ruler_step(0, 100.0f) > 0);
   ST_CHECK(ruler_step(1000, 0.0f) > 0);
+}
+
+ST_TEST(timeline_clip_tint_is_optional_data_only) {
+  // 片段着色（caiyun 拆解步骤 5，S5/G7）：tint 是**数据接口**不是绘制效果——
+  // Model 层只存不解释；本用例钉住「默认 nullopt、显式赋值/复位往返、
+  // 不参与任何几何/命中/吸附计算」三件事，绘制侧的消费在 view 测试。
+  std::vector<Track> tracks = make_tracks();
+  ST_CHECK(!tracks[0].clips[0].tint.has_value());   // 默认 nullopt（零破坏：不填它
+  ST_CHECK(!tracks[1].clips[0].tint.has_value());   //  的存量代码与旧版数据形态一致）
+
+  tracks[0].clips[0].tint = st::math::Color::rgb(200, 60, 30);
+  Model model;
+  model.set_tracks(std::move(tracks));
+  const Clip* clip = model.find_clip(0, 0);
+  ST_REQUIRE(clip != nullptr);
+  ST_REQUIRE(clip->tint.has_value());
+  ST_CHECK_EQ(clip->tint->r, 200);
+  ST_CHECK_EQ(clip->tint->g, 60);
+  ST_CHECK_EQ(clip->tint->b, 30);
+  ST_CHECK_EQ(clip->tint->a, 255);
+
+  // 可变访问同往返（宿主经 tracks() 改色）。
+  Model mutable_model = make_model();
+  mutable_model.tracks()[1].clips[0].tint = st::math::Color::rgb(1, 2, 3);
+  const Clip* audio = mutable_model.find_clip(1, 0);
+  ST_REQUIRE(audio != nullptr);
+  ST_REQUIRE(audio->tint.has_value());
+  ST_CHECK_EQ(audio->tint->g, 2);
+  mutable_model.tracks()[1].clips[0].tint.reset();
+  ST_CHECK(!mutable_model.find_clip(1, 0)->tint.has_value());
+
+  // **默认零变化**：tint 不改任何几何/命中/吸附结果——nullopt 片段与有值片段
+  // 走完全同一套换算（着色是纯数据面，本层不该因它长出任何分支）。
+  Model plain = make_model();
+  Model tinted = make_model();
+  tinted.tracks()[0].clips[0].tint = st::math::Color::rgb(9, 9, 9);
+  for (const Millis time : {0, 500, 1500, 3000}) {
+    ST_CHECK(plain.time_to_x(time) == tinted.time_to_x(time));
+  }
+  const auto plain_left = plain.clip_x_range(0, 0);
+  const auto tinted_left = tinted.clip_x_range(0, 0);
+  ST_CHECK(plain_left == tinted_left);
+  ST_CHECK(plain.hit_test(100.0f, 10.0f).clip == tinted.hit_test(100.0f, 10.0f).clip);
+  ST_CHECK_EQ(plain.content_duration(), tinted.content_duration());
 }

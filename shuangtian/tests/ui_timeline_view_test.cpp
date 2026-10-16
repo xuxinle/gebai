@@ -297,6 +297,83 @@ ST_TEST(timeline_view_locked_track_resists_editing) {
   ST_CHECK(fx.view.model().find_clip(1, 0)->start > 1000);
 }
 
+ST_TEST(timeline_view_set_playhead_external_updates_silently) {
+  // **S2 播放头静默写入口**（caiyun 换件方案步骤 2）：宿主主循环每帧推进播放头
+  // 时，必须能「写进去且被重画」但**不回调**——否则形成「写→on_playhead_changed→
+  // 宿主 refresh/再写」的推拉回环。三条断言分别钉住①值更新②回调不触发③重绘生效；
+  // 末尾用 set_property 对照组证明判据真的能抓到「回调被触发了」。
+  Fixture fx;
+  fx.load_default();
+  int external_changes = 0;
+  int silent_changes = 0;
+  fx.view.on_playhead_changed = [&silent_changes](Millis) { ++silent_changes; };
+
+  // 先走到稳态：画一帧 + 清脏（dirty 标记断言的前提——Element 初始即脏）。
+  const auto settle = [&fx]() {
+    (void)fx.render();
+    fx.view.clear_dirty();
+  };
+  settle();
+  ST_CHECK(!fx.view.dirty());
+
+  fx.view.set_playhead_external(2500);   // 2500ms ⇒ lane 内 250px
+
+  // ① Model 值更新：属性面与模型面读到同一新值。
+  ST_CHECK_EQ(fx.view.model().playhead(), Millis{2500});
+  ST_CHECK_EQ(*fx.view.get_property("playhead"), std::string("2500"));
+
+  // ② 回调不被触发（静默语义的全部内容）。
+  ST_CHECK_EQ(silent_changes, 0);
+  ST_CHECK_EQ(external_changes, 0);
+
+  // ③ mark_dirty 生效：脏标记被置上（下一帧会重画）。
+  ST_CHECK(fx.view.dirty());
+  // 佐证（像素）：新位置的竖线真的画出来了——在旧位置采样不到它。
+  {
+    const auto canvas = fx.render();
+    const float new_x = kOriginX + TimelineView::kTrackHeaderWidth + 250.0f;
+    const int probe_y = static_cast<int>(kOriginY + TimelineView::kRulerHeight + 8.0f);
+    const Color on_head = canvas.pixel_at(static_cast<int>(new_x), probe_y);
+    const Color next_to = canvas.pixel_at(static_cast<int>(new_x + 30.0f), probe_y);
+    ST_CHECK(on_head != next_to);
+  }
+  // 连写两次仍零回调（每帧推进的形态）。
+  fx.view.set_playhead_external(2600);
+  fx.view.set_playhead_external(2700);
+  ST_CHECK_EQ(fx.view.model().playhead(), Millis{2700});
+  ST_CHECK_EQ(silent_changes, 0);
+  ST_CHECK_EQ(external_changes, 0);
+
+  // —— 对照组：set_property("playhead") 是「对外通知」口径（控制协议/脚本），
+  // 必须发回调——若静默入口的判据（计数器）抓不到回调，这条会先红。
+  fx.view.set_property("playhead", "1234");
+  ST_CHECK_EQ(fx.view.model().playhead(), Millis{1234});
+  ST_CHECK_EQ(silent_changes, 1);
+
+  // 对照组反向：静默写不干扰后续交互路径的正常回调（点标尺仍应通知）。
+  Event down;
+  down.kind = EventKind::MouseDown;
+  down.button = 1;
+  down.position = Point{kOriginX + TimelineView::kTrackHeaderWidth + 100.0f, kOriginY + 6.0f};
+  (void)fx.view.on_event(fx.context, down);
+  ST_CHECK_EQ(silent_changes, 2);
+}
+
+ST_TEST(timeline_view_set_playhead_external_marks_dirty_not_layout) {
+  // S2 的重绘分寸：播放头只是绘制内容变化，不该牵动 measure/arrange（整帧重排）。
+  // 语义基准：set_property("playhead")（同款写）在实现里也只 mark_dirty。
+  Fixture fx;
+  fx.load_default();
+  (void)fx.render();
+  fx.view.clear_dirty();
+  ST_CHECK(!fx.view.dirty());
+  ST_CHECK(!fx.view.layout_dirty());
+
+  fx.view.set_playhead_external(1000);
+  ST_CHECK(fx.view.dirty());
+  ST_CHECK(!fx.view.layout_dirty());   // 播放头移动不需要重排
+}
+
 ST_TEST(timeline_view_snap_pulls_to_neighbouring_clip) {
   Fixture fx;
   fx.load_default();
@@ -477,4 +554,564 @@ ST_TEST(timeline_view_trim_handles_visible_only_when_enabled_and_selected) {
   const Color unselected = handle_pixel();
   ST_CHECK(fx.view.set_property("trim_handles", "true"));
   ST_CHECK(handle_pixel() == unselected);
+}
+
+ST_TEST(timeline_view_track_headers_toggle_collapses_prefix_column) {
+  // 头部栏开关（caiyun 拆解步骤 5，S4/G11）：关掉后 lane 从组件左缘起，
+  // 几何/命中坐标整体平移——方案验收：lane_rect().x == bounds().x（对外不可见，
+  // 用「点同一 x 命中同一时刻」的等价判据）+ 开/关两态像素采样。
+  Fixture fx;
+  fx.load_default();
+  ST_CHECK(fx.view.show_track_headers());   // 默认开（存量行为不变）
+
+  // 播放头移到 A 中部：它在头部栏区域（默认在 lane 左缘 x=0 处）不可见，
+  // 关掉头部栏后应出现——这是「lane 左缘左移了」的可见证据。
+  fx.view.model().set_playhead(500);
+  fx.layout();
+  const float with_header_head_x = kOriginX + TimelineView::kTrackHeaderWidth + 50.0f;
+  ST_CHECK(fx.render().pixel_at(static_cast<int>(with_header_head_x),
+                                static_cast<int>(kOriginY + 100.0f)) !=
+           fx.render().pixel_at(static_cast<int>(with_header_head_x + 20.0f),
+                                static_cast<int>(kOriginY + 100.0f)));
+
+  // 关掉：lane 左缘 = 组件左缘。播放头同一时刻右移了 kTrackHeaderWidth。
+  fx.view.set_show_track_headers(false);
+  ST_CHECK(!fx.view.show_track_headers());
+  fx.layout();
+  const float no_header_head_x = kOriginX + 50.0f;
+  const auto canvas = fx.render();
+  ST_CHECK(canvas.pixel_at(static_cast<int>(no_header_head_x),
+                           static_cast<int>(kOriginY + 100.0f)) !=
+           canvas.pixel_at(static_cast<int>(no_header_head_x + 20.0f),
+                           static_cast<int>(kOriginY + 100.0f)));
+
+  // 开/关两态像素对比：原头部栏区域（组件左缘内 10px）从名称栏色变为
+  // 轨道内容色（这里应恰是 A 片段本体——A 从 0ms 起铺满 lane）。
+  const Point header_zone{kOriginX + 10.0f, kOriginY + TimelineView::kRulerHeight + 10.0f};
+  const Color clip_body = canvas.pixel_at(
+      static_cast<int>(kOriginX + TimelineView::kTrackHeaderWidth + 10.0f),
+      static_cast<int>(kOriginY + TimelineView::kRulerHeight + 10.0f));
+  ST_CHECK(canvas.pixel_at(static_cast<int>(header_zone.x),
+                           static_cast<int>(header_zone.y)) == clip_body);
+
+  // 命中坐标同步平移：点组件内同一屏幕 x（头部栏区域里，lane 左缘左侧），
+  // 开关前后命中**同一时刻**——方案验收「点击同一 x 命中同一时间」的等价判据：
+  // 拿播放头当探针（标尺点击 = x_to_time，直接量坐标换算，不经过手势选择）。
+  // 开态：该 x 在头部栏（lane 外）→ 不消费；关态：该 x 在 lane 内 → 消费且命中 0ms。
+  const float probe_x = kOriginX + 40.0f;
+  fx.view.set_show_track_headers(false);
+  fx.layout();
+  Event hit;
+  hit.kind = EventKind::MouseDown;
+  hit.button = 1;
+  hit.position = Point{probe_x, kOriginY + 6.0f};   // 标尺带内
+  ST_CHECK(fx.view.on_event(fx.context, hit));
+  // 关态 lane 左缘 = 组件左缘：probe_x（组件内 40px）→ 40px / 100pps = 400ms。
+  // 开态同一 x 在头部栏里，永远到不了这里——播放头位置的差值正是头部栏宽度
+  // 所代表的时刻差（坐标换算的平移量被重接量化）。
+  ST_CHECK_EQ(fx.view.model().playhead(), Millis{400});
+  Event up;
+  up.kind = EventKind::MouseUp;
+  up.position = hit.position;
+  (void)fx.view.on_event(fx.context, up);
+
+  // 对照：重新打开后，同一 x 在头部栏（lane 外）→ 不消费、播放头不动。
+  fx.view.set_show_track_headers(true);
+  fx.layout();
+  fx.view.model().set_playhead(777);
+  Event hit2;
+  hit2.kind = EventKind::MouseDown;
+  hit2.button = 1;
+  hit2.position = Point{probe_x, kOriginY + 6.0f};
+  ST_CHECK(!fx.view.on_event(fx.context, hit2));
+  ST_CHECK_EQ(fx.view.model().playhead(), Millis{777});
+  Event out2;
+  out2.kind = EventKind::HoverOut;
+  (void)fx.view.on_event(fx.context, out2);
+
+  // 属性面同口径：set/get 与显式 setter 等价，乱值如实拒绝（与 snap/trim_handles
+  // 同一严格口径）。
+  ST_CHECK(fx.view.set_property("track_headers", "false"));
+  ST_CHECK(!fx.view.show_track_headers());
+  ST_CHECK_EQ(*fx.view.get_property("track_headers"), std::string("false"));
+  ST_CHECK(fx.view.set_property("track_headers", "true"));
+  ST_CHECK_EQ(*fx.view.get_property("track_headers"), std::string("true"));
+  ST_CHECK(!fx.view.set_property("track_headers", "maybe"));
+}
+
+ST_TEST(timeline_view_clip_tint_paints_and_default_stays_theme) {
+  // 片段着色（caiyun 拆解步骤 5，S5/G7）：数据接口（timeline::Clip::tint）的
+  // 绘制侧验证——方案验收：两片段不同 tint ⇒ 块内像素可区分；默认 nullopt
+  // ⇒ 主题色（与改动前一致）。
+  Fixture fx;
+  fx.load_default();
+  fx.view.set_snap_enabled(false);
+
+  // 基线：两个无 tint 片段同一主题色（同轨道同状态）。采样避开标签行
+  //（块顶 +3 画 label，+10y 会采到文字色），取块内下半的中带；
+  // 两端各让开 4px（描边与内缩缝）。
+  const auto sample = [&fx](std::size_t t, std::size_t c) {
+    const auto block = fx.clip_screen_rect(t, c);
+    return fx.render().pixel_at(static_cast<int>(block.x + 20.0f),
+                                static_cast<int>(block.y + block.height * 0.7f));
+  };
+  const Color theme_a = sample(0, 0);
+  const Color theme_b = sample(0, 1);
+  ST_CHECK(theme_a == theme_b);
+
+  // 给 A 一个与主题色差异明显的 tint（饱和红），B 保持 nullopt。采样点同上
+  //（同一 lambda 同一座标系——采样点漂移会让前后像素不可比）。
+  fx.view.model().find_clip(0, 0)->tint = Color::rgb(200, 40, 20);
+  const auto canvas = fx.render();
+  const auto block_a = fx.clip_screen_rect(0, 0);
+  const auto block_b = fx.clip_screen_rect(0, 1);
+  const Color tinted = canvas.pixel_at(
+      static_cast<int>(block_a.x + 20.0f),
+      static_cast<int>(block_a.y + block_a.height * 0.7f));
+  const Color plain = canvas.pixel_at(
+      static_cast<int>(block_b.x + 20.0f),
+      static_cast<int>(block_b.y + block_b.height * 0.7f));
+  // 两片段像素可区分：tint 生效且默认片段仍走主题色（回「默认零变化」）。
+  ST_CHECK(tinted != plain);
+  ST_CHECK(plain == theme_b);
+  // tint 真的落到像素上：与主题基色本身不同（不是「着色被忽略」的假绿）。
+  ST_CHECK(tinted != theme_a);
+
+  // tint 不影响几何：块矩形/命中与着色前一致（数据接口非绘制效果的分界线）。
+  const auto rect_before = fx.clip_screen_rect(0, 0);
+  ST_CHECK(fx.view.model().find_clip(0, 0)->tint.has_value());
+  const auto rect_after = fx.clip_screen_rect(0, 0);
+  ST_CHECK(rect_before.x == rect_after.x);
+  ST_CHECK(rect_before.width == rect_after.width);
+
+  // hover 语义在 tint 上叠加：悬停 tint 片段 → 像素变化（提亮跟着基色走）。
+  const Point over{block_a.x + 20.0f, block_a.y + block_a.height * 0.7f};
+  Event enter;
+  enter.kind = EventKind::MouseMove;
+  enter.position = over;
+  (void)fx.view.on_event(fx.context, enter);
+  ST_CHECK_EQ(*fx.view.get_property("hover_clip"), std::string("0:0"));
+  const Color hovered =
+      fx.render().pixel_at(static_cast<int>(over.x), static_cast<int>(over.y));
+  ST_CHECK(hovered != tinted);
+
+  // 选中态仍用主题选中色（组件状态语义不被宿主配色夺走）。
+  Event down;
+  down.kind = EventKind::MouseDown;
+  down.button = 1;
+  down.position = over;
+  (void)fx.view.on_event(fx.context, down);
+  ST_CHECK(fx.view.model().find_clip(0, 0)->selected);
+  const Color selected =
+      fx.render().pixel_at(static_cast<int>(over.x), static_cast<int>(over.y));
+  ST_CHECK(selected != tinted);
+  ST_CHECK(selected != hovered);
+}
+
+// ============================================================================
+// 编辑委托通道（caiyun 拆解步骤 4，S1）——「数据在别处」形态的用例组。
+//
+// 前面 13 例钉的是**自持直写**语义（不挂 delegate 时行为字节不变——那本身就是本步
+// 的硬约束）；这里钉的是挂上 delegate 后的六件事：
+// ① move 接受：投影按目标更新 + on_clip_moved 仍发；
+// ② move 拒绝：投影回到裁决前（净效果 = Model 不动）+ 交互回调不发；
+// ③④ trim 同型两例（出点接受/入点拒绝——入点连带 source_in，拒绝时三字段一起回）；
+// ⑤ 投影重建：宿主在回调里改真值源后 set_tracks，宿主值存活、快照不除旧；
+// ⑥ 吸附通道随编辑权一并移交（候选/排除口径可验证）+ 不挂 delegate 时零调用。
+// ============================================================================
+namespace {
+
+using Edge = TimelineView::EditDelegate::Edge;
+
+/// move 回调的记账（断言要能看见组件传了什么，而不是桩自己算一遍再比对——
+/// PITFALLS 场景 2「假绿：桩把差异抹平」的反面写法）。
+struct MoveCall {
+  std::size_t track{};
+  std::size_t clip{};
+  Millis new_start{};
+};
+struct TrimCall {
+  std::size_t track{};
+  std::size_t clip{};
+  Edge edge{};
+  Millis time{};
+};
+struct SnapCall {
+  Millis candidate{};
+  Millis exclude{};
+};
+
+/// 测试桩：只记账 + 可配置的裁决/吸附行为 + 可选的重入钩子（用例⑤）。
+class RecordingDelegate : public TimelineView::EditDelegate {
+ public:
+  std::vector<MoveCall> moves{};
+  std::vector<TrimCall> trims{};
+  std::vector<SnapCall> snaps{};
+  /// 全局裁决开关（true = 接受所有编辑）。
+  bool accept{true};
+  /// 吸附行为：默认恒等（原样返回）；置真则返回 snap_override（吸到指定点）。
+  bool override_snap{false};
+  Millis snap_override{};
+  /// 重入钩子（用例⑤）：首次 move 时模拟宿主改真值源后重建投影。
+  /// `view` 为非拥有指针（桩不持有组件，生命周期由用例的 Fixture 保证）。
+  TimelineView* view{nullptr};
+  bool rebuild_once{false};
+  bool rebuilt{false};
+  Millis host_start{};   ///< 重建时真值源里的起点（模拟宿主另行裁决后的形态）
+
+  auto move(std::size_t track, std::size_t clip, Millis new_start) -> bool override {
+    moves.push_back(MoveCall{track, clip, new_start});
+    if (rebuild_once && !rebuilt && view != nullptr) {
+      rebuilt = true;
+      // 宿主「真值源」里这个片段其实在 5000（例：被另一条编辑链波纹推过去了）。
+      // 重建投影是预期用法——宿主的值必须最后落笔，组件的乐观目标不得残留。
+      Track video;
+      video.id = "v1";
+      video.label = "视频";
+      video.clips.push_back(Clip{.id = "a", .label = "A", .start = host_start,
+                                 .duration = 2000});
+      Track audio;
+      audio.id = "a1";
+      audio.label = "音频";
+      audio.height = 36.0f;
+      audio.clips.push_back(Clip{.id = "c", .label = "C", .start = 1000, .duration = 500});
+      view->model().set_tracks({video, audio});
+    }
+    return accept;
+  }
+
+  auto trim(std::size_t track, std::size_t clip, Edge edge, Millis time) -> bool override {
+    trims.push_back(TrimCall{track, clip, edge, time});
+    return accept;
+  }
+
+  auto snap(Millis candidate, Millis exclude) -> Millis override {
+    snaps.push_back(SnapCall{candidate, exclude});
+    return override_snap ? snap_override : candidate;
+  }
+};
+
+}  // namespace
+
+ST_TEST(timeline_view_delegate_move_accepted_writes_model_and_notifies) {
+  // ① 接受：投影按目标更新 + 交互回调照发（宿主的撤销栈/检查器刷新都挂在这条上）。
+  Fixture fx;
+  fx.load_default();
+  RecordingDelegate delegate;
+  fx.view.set_edit_delegate(&delegate);
+  fx.view.set_snap_enabled(false);
+  ST_CHECK(fx.view.edit_delegate() == &delegate);
+
+  const auto block = fx.clip_screen_rect(0, 0);
+  const Point from{block.x + block.width * 0.5f, block.y + block.height * 0.5f};
+  const Point to{from.x + 40.0f, from.y};   // 右移 40px = +400ms
+  int moved = 0;
+  fx.view.on_clip_moved = [&moved](std::size_t, std::size_t) { ++moved; };
+
+  // 佐证基底：目标区域在拖前是空白色（拖后应是片段色——绘制仍读自持投影）。
+  const Point probe{to.x + 20.0f, from.y};
+  const Color gap_before =
+      fx.render().pixel_at(static_cast<int>(probe.x), static_cast<int>(probe.y));
+
+  ST_CHECK(drag(fx.view, fx.context, from, to));
+
+  // 投影更新到目标：move 收到的与写入的都是绝对目标 400（不是增量）。
+  ST_CHECK_EQ(fx.view.model().find_clip(0, 0)->start, Millis{400});
+  ST_REQUIRE(delegate.moves.size() == 1);
+  ST_CHECK_EQ(delegate.moves[0].track, std::size_t{0});
+  ST_CHECK_EQ(delegate.moves[0].clip, std::size_t{0});
+  ST_CHECK_EQ(delegate.moves[0].new_start, Millis{400});
+  // 移动不是缩放：duration/source_in 不动（委托通道同样遵守）。
+  ST_CHECK_EQ(fx.view.model().find_clip(0, 0)->duration, Millis{2000});
+  ST_CHECK_EQ(fx.view.model().find_clip(0, 0)->source_in, Millis{0});
+  // 接受时交互回调仍发（一次拖拽一次）。
+  ST_CHECK_EQ(moved, 1);
+  // 像素佐证：新位置画出了片段（绘制读的就是刚写的投影）。
+  const Color clip_after =
+      fx.render().pixel_at(static_cast<int>(probe.x), static_cast<int>(probe.y));
+  ST_CHECK(clip_after != gap_before);
+}
+
+ST_TEST(timeline_view_delegate_move_rejected_leaves_model_untouched) {
+  // ② 拒绝：投影回到裁决前——净效果 = 自持 Model 不动；交互回调不发。
+  Fixture fx;
+  fx.load_default();
+  RecordingDelegate delegate;
+  delegate.accept = false;   // 宿主一概拒绝（例：只读预览形态/锁定语义在宿主侧）
+  fx.view.set_edit_delegate(&delegate);
+  fx.view.set_snap_enabled(false);
+
+  const auto block = fx.clip_screen_rect(0, 0);
+  const Point from{block.x + block.width * 0.5f, block.y + block.height * 0.5f};
+  int moved = 0;
+  fx.view.on_clip_moved = [&moved](std::size_t, std::size_t) { ++moved; };
+
+  ST_CHECK(drag(fx.view, fx.context, from, Point{from.x + 40.0f, from.y}));
+
+  // 三个字段全部回到拖拽前（乐观写被回滚，没有残留）。
+  ST_CHECK_EQ(fx.view.model().find_clip(0, 0)->start, Millis{0});
+  ST_CHECK_EQ(fx.view.model().find_clip(0, 0)->duration, Millis{2000});
+  ST_CHECK_EQ(fx.view.model().find_clip(0, 0)->source_in, Millis{0});
+  // 宿主确实被问过（拿到的是绝对目标 400）。
+  ST_REQUIRE(delegate.moves.size() == 1);
+  ST_CHECK_EQ(delegate.moves[0].new_start, Millis{400});
+  // 拒绝时交互回调不发（没发生的编辑不该进宿主的撤销栈）。
+  ST_CHECK_EQ(moved, 0);
+}
+
+ST_TEST(timeline_view_delegate_trim_right_accepted_writes_duration) {
+  // ③a 出点修剪接受：duration 更新、start/source_in 不动；edge/time 口径可验证。
+  Fixture fx;
+  fx.load_default();
+  RecordingDelegate delegate;
+  fx.view.set_edit_delegate(&delegate);
+  fx.view.set_snap_enabled(false);
+
+  const auto block = fx.clip_screen_rect(0, 0);
+  const Point from{block.right() - 2.0f, block.y + block.height * 0.5f};   // 抓右缘
+  const Point to{from.x - 50.0f, from.y};                                 // -500ms
+  int trimmed = 0;
+  fx.view.on_clip_trimmed = [&trimmed](std::size_t, std::size_t) { ++trimmed; };
+
+  ST_CHECK(drag(fx.view, fx.context, from, to));
+
+  ST_CHECK_EQ(fx.view.model().find_clip(0, 0)->duration, Millis{1500});
+  ST_CHECK_EQ(fx.view.model().find_clip(0, 0)->start, Millis{0});
+  ST_CHECK_EQ(fx.view.model().find_clip(0, 0)->source_in, Millis{0});
+  // trim 收到：Right 边 + 新**结束时刻**（start+duration = 1500，不是新时长）。
+  ST_REQUIRE(delegate.trims.size() == 1);
+  ST_CHECK(delegate.trims[0].edge == Edge::Right);   // 枚举无 formatter，用布尔断言
+  ST_CHECK_EQ(delegate.trims[0].time, Millis{1500});
+  ST_CHECK_EQ(trimmed, 1);
+}
+
+ST_TEST(timeline_view_delegate_trim_left_rejected_leaves_clip_intact) {
+  // ③b 入点修剪拒绝：start/duration/**source_in** 三字段一起回滚（入点的乐观写
+  // 连带源入点，拒绝时只回 start 不回 source_in 就会把「修剪」错留成半截位移）。
+  Fixture fx;
+  fx.load_default();
+  RecordingDelegate delegate;
+  delegate.accept = false;
+  fx.view.set_edit_delegate(&delegate);
+  fx.view.set_snap_enabled(false);
+  fx.view.model().find_clip(0, 0)->source_in = 1000;   // 非零源入点
+
+  const auto block = fx.clip_screen_rect(0, 0);
+  const Point from{block.x + 2.0f, block.y + block.height * 0.5f};   // 抓左缘
+  const Point to{from.x + 30.0f, from.y};                           // +300ms
+  int trimmed = 0;
+  fx.view.on_clip_trimmed = [&trimmed](std::size_t, std::size_t) { ++trimmed; };
+
+  ST_CHECK(drag(fx.view, fx.context, from, to));
+
+  ST_CHECK_EQ(fx.view.model().find_clip(0, 0)->start, Millis{0});
+  ST_CHECK_EQ(fx.view.model().find_clip(0, 0)->duration, Millis{2000});
+  ST_CHECK_EQ(fx.view.model().find_clip(0, 0)->source_in, Millis{1000});
+  // trim 收到：Left 边 + 新**起点**（300，不是新时长/新结束）。
+  ST_REQUIRE(delegate.trims.size() == 1);
+  ST_CHECK(delegate.trims[0].edge == Edge::Left);   // 枚举无 formatter，用布尔断言
+  ST_CHECK_EQ(delegate.trims[0].time, Millis{300});
+  ST_CHECK_EQ(trimmed, 0);
+}
+
+ST_TEST(timeline_view_delegate_rebuild_projection_inside_callback_survives) {
+  // ④ 投影语义：宿主在 move 回调里改真值源后 set_tracks 重建——宿主值必须
+  // 存活（组件的乐观目标不残留）；且重建不断拖拽：下一次 MouseDown 的快照
+  // 取自重建后的投影，move 收到的目标不再基于拖拽起点的旧值。
+  Fixture fx;
+  fx.load_default();
+  RecordingDelegate delegate;
+  delegate.rebuild_once = true;
+  delegate.host_start = 5000;
+  delegate.view = &fx.view;
+  fx.view.set_edit_delegate(&delegate);
+  fx.view.set_snap_enabled(false);
+
+  const auto block = fx.clip_screen_rect(0, 0);
+  const Point from{block.x + block.width * 0.5f, block.y + block.height * 0.5f};
+  ST_CHECK(drag(fx.view, fx.context, from, Point{from.x + 40.0f, from.y}));
+
+  // 宿主重建后的投影存活：乐观目标 400 被重建盖掉，起点是真值源里的 5000。
+  ST_CHECK_EQ(fx.view.model().find_clip(0, 0)->start, Millis{5000});
+  ST_CHECK_EQ(delegate.moves.size(), std::size_t{1});
+  ST_CHECK_EQ(delegate.moves[0].new_start, Millis{400});   // 组件间的是它的目标
+
+  // 同一次拖拽会话已结束；从**重建后的新位置**再拖一格（+100px = +1000ms）：
+  // 快照必须取自重建后的投影（5000），move 收到绝对目标 6000——若组件用旧
+  // 快照（拖拽起点的 0）就会报 1000，这正是「重建不断拖拽」要钉的语义。
+  const auto moved_block = fx.clip_screen_rect(0, 0);
+  const Point from2{moved_block.x + 20.0f, moved_block.y + moved_block.height * 0.5f};
+  ST_CHECK(drag(fx.view, fx.context, from2, Point{from2.x + 100.0f, from2.y}));
+  ST_REQUIRE(delegate.moves.size() == std::size_t{2});
+  ST_CHECK_EQ(delegate.moves[1].new_start, Millis{6000});
+  // 这次没有重建钩子（只一次）：接受后乐观写存活。
+  ST_CHECK_EQ(fx.view.model().find_clip(0, 0)->start, Millis{6000});
+}
+
+ST_TEST(timeline_view_delegate_snap_channel_and_absent_delegate_baseline) {
+  // ⑤ 吸附通道随编辑权一并移交（候选/排除口径可验证）+ 保底：不挂 delegate
+  // 时它一次都不被调用，直写路径照旧。
+  Fixture fx;
+  fx.load_default();
+  fx.view.set_snap_enabled(false);
+  RecordingDelegate idle;   // 造出来但**不挂**——它的任何记账都是「不该发生」证据
+  const auto block = fx.clip_screen_rect(0, 0);
+  const Point from{block.x + block.width * 0.5f, block.y + block.height * 0.5f};
+  ST_CHECK(drag(fx.view, fx.context, from, Point{from.x + 40.0f, from.y}));
+  // 直写路径照旧（未挂 delegate）：Model 直写、零回调进入桩。
+  ST_CHECK_EQ(fx.view.model().find_clip(0, 0)->start, Millis{400});
+  ST_CHECK_EQ(idle.moves.size(), std::size_t{0});
+  ST_CHECK_EQ(idle.trims.size(), std::size_t{0});
+  ST_CHECK_EQ(idle.snaps.size(), std::size_t{0});
+
+  // 同一 Fixture 换轨道：挂 delegate、开吸附，把片段 a 换到非零起点 1000
+  //（exclude 口径要有非零值才验得出错——全 0 会把「传错」也藏成绿）。
+  fx.load_default();
+  fx.view.model().find_clip(0, 0)->start = 1000;
+  fx.layout();
+  RecordingDelegate delegate;
+  delegate.override_snap = true;
+  delegate.snap_override = 1500;   // 宿主吸附点：真值源里别的片段边缘
+  fx.view.set_edit_delegate(&delegate);
+  fx.view.set_snap_enabled(true);
+
+  const auto shifted = fx.clip_screen_rect(0, 0);
+  const Point from2{shifted.x + shifted.width * 0.5f,
+                    shifted.y + shifted.height * 0.5f};
+  ST_CHECK(drag(fx.view, fx.context, from2, Point{from2.x + 40.0f, from2.y}));
+
+  // snap 收到：candidate = 拖拽目标（1000+400 = 1400），exclude = 快照起点 1000
+  //（排除被拖片段的语义随编辑权一并移交，时间口径）。
+  ST_REQUIRE(delegate.snaps.size() == std::size_t{1});
+  ST_CHECK_EQ(delegate.snaps[0].candidate, Millis{1400});
+  ST_CHECK_EQ(delegate.snaps[0].exclude, Millis{1000});
+  // move 收到的是吸附后的目标（1500），投影也落在那。
+  ST_REQUIRE(delegate.moves.size() == std::size_t{1});
+  ST_CHECK_EQ(delegate.moves[0].new_start, Millis{1500});
+  ST_CHECK_EQ(fx.view.model().find_clip(0, 0)->start, Millis{1500});
+}
+
+ST_TEST(timeline_view_model_replaced_mid_drag_releases_drag) {
+  // 步骤 3 的核心用例：拖拽中途宿主 `set_tracks` 重建数据 + 调
+  // `notify_model_replaced()` 后，继续移动鼠标**不得**改到新下标对应的片段
+  //（悬置快照指向旧投影，陈旧下标会改错对象——本单要抓的目标缺陷）。
+  Fixture fx;
+  fx.load_default();
+  fx.view.set_snap_enabled(false);
+  const auto block = fx.clip_screen_rect(0, 0);
+  const Point from{block.x + block.width * 0.5f, block.y + block.height * 0.5f};
+
+  // 按下（不抬起）：进入拖拽态。
+  Event down;
+  down.kind = EventKind::MouseDown;
+  down.button = 1;
+  down.position = from;
+  ST_CHECK(fx.view.on_event(fx.context, down));
+
+  // 宿主整体重建：同下标 (0,0) 换成完全不同的几何（模拟「新投影」）。
+  Track video;
+  video.id = "v2";
+  video.label = "视频";
+  video.clips.push_back(Clip{.id = "x", .label = "X", .start = 0, .duration = 1000});
+  fx.set_tracks({video});
+  fx.view.notify_model_replaced();
+
+  // 继续移动（旧快照下 +100px = +1000ms；若悬置态残留，新 (0,0) 的 start
+  // 会被改成 1000）。复位后 move 走悬停分支**不消费**（返回 false）——
+  // 与「抬起后移动不再消费」同一口径，消费了反证拖拽态还在。
+  Event move;
+  move.kind = EventKind::MouseMove;
+  move.position = Point{from.x + 100.0f, from.y};
+  ST_CHECK(!fx.view.on_event(fx.context, move));
+  const Clip* clip = fx.view.model().find_clip(0, 0);
+  ST_REQUIRE(clip != nullptr);
+  ST_CHECK_EQ(clip->start, Millis{0});   // 新片段原封不动
+  ST_CHECK_EQ(clip->duration, Millis{1000});
+
+  // 悬置拖拽已复位：此后的 MouseMove 不再处于拖拽态（回到悬停追踪分支）。
+  Event move2;
+  move2.kind = EventKind::MouseMove;
+  move2.position = Point{from.x + 120.0f, from.y};
+  ST_CHECK(!fx.view.on_event(fx.context, move2));
+  ST_CHECK_EQ(fx.view.model().find_clip(0, 0)->start, Millis{0});
+}
+
+ST_TEST(timeline_view_model_replaced_mid_trim_releases_drag) {
+  // 修剪同型：拖左边缘中途重建数据，后续 move 不得拿旧快照去改新下标的片段
+  //（ClipLeft 分支会同时写 start/duration/source_in 三个字段——改错对象的
+  // 伤害面比移动更大）。
+  Fixture fx;
+  fx.load_default();
+  fx.view.set_snap_enabled(false);
+  fx.view.model().find_clip(0, 0)->source_in = 500;
+  const auto block = fx.clip_screen_rect(0, 0);
+  const Point from{block.x + 2.0f, block.y + block.height * 0.5f};   // 抓左缘
+
+  Event down;
+  down.kind = EventKind::MouseDown;
+  down.button = 1;
+  down.position = from;
+  ST_CHECK(fx.view.on_event(fx.context, down));
+
+  // 宿主重建：新 (0,0) 是不同几何的片段。
+  Track video;
+  video.id = "v2";
+  video.label = "视频";
+  video.clips.push_back(Clip{.id = "x", .label = "X", .start = 2000, .duration = 800,
+                             .source_in = 300});
+  fx.set_tracks({video});
+  fx.view.notify_model_replaced();
+
+  // 继续修（旧快照下 +30px = +300ms；残留态会把新片段的 start 改成 300）。
+  // 复位后 move 不消费（同上一例的口径）。
+  Event move;
+  move.kind = EventKind::MouseMove;
+  move.position = Point{from.x + 30.0f, from.y};
+  ST_CHECK(!fx.view.on_event(fx.context, move));
+  const Clip* clip = fx.view.model().find_clip(0, 0);
+  ST_REQUIRE(clip != nullptr);
+  ST_CHECK_EQ(clip->start, Millis{2000});
+  ST_CHECK_EQ(clip->duration, Millis{800});
+  ST_CHECK_EQ(clip->source_in, Millis{300});
+}
+
+ST_TEST(timeline_view_stale_snapshot_without_notify_still_releases) {
+  // 兜底防线：宿主重建数据但**忘调** `notify_model_replaced()`——MouseMove 的
+  // 快照自校验必须自行复位（步骤 3 计划原文：「若 drag_ 捕获的快照与当前 Model
+  // 不符则复位 drag_」）。
+  Fixture fx;
+  fx.load_default();
+  fx.view.set_snap_enabled(false);
+  const auto block = fx.clip_screen_rect(0, 0);
+  const Point from{block.x + block.width * 0.5f, block.y + block.height * 0.5f};
+
+  Event down;
+  down.kind = EventKind::MouseDown;
+  down.button = 1;
+  down.position = from;
+  ST_CHECK(fx.view.on_event(fx.context, down));
+
+  // 宿主重建且不调薄入口（新投影里 (0,0) 的几何与拖拽时捕获的快照不符）。
+  Track video;
+  video.id = "v2";
+  video.label = "视频";
+  video.clips.push_back(Clip{.id = "x", .label = "X", .start = 0, .duration = 1000});
+  fx.set_tracks({video});
+
+  // 继续移动：自校验发现快照陈旧 → 复位拖拽态并吃掉本次事件，新片段原封不动。
+  Event move;
+  move.kind = EventKind::MouseMove;
+  move.position = Point{from.x + 100.0f, from.y};
+  ST_CHECK(fx.view.on_event(fx.context, move));
+  const Clip* clip = fx.view.model().find_clip(0, 0);
+  ST_REQUIRE(clip != nullptr);
+  ST_CHECK_EQ(clip->start, Millis{0});
+  ST_CHECK_EQ(clip->duration, Millis{1000});
+
+  // 与上一例同理：后续 move 回到无拖拽分支（不消费）。
+  Event move2;
+  move2.kind = EventKind::MouseMove;
+  move2.position = Point{from.x + 120.0f, from.y};
+  ST_CHECK(!fx.view.on_event(fx.context, move2));
+  ST_CHECK_EQ(fx.view.model().find_clip(0, 0)->start, Millis{0});
 }

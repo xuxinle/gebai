@@ -1063,8 +1063,9 @@ auto open_recent(const std::string& path) -> void;
    void build_close_confirm(Composer& c);
 
 
-  /// 键盘快捷键一览（`Ctrl+K` 或帮助菜单；内容与代码里注册的表同源，不手写第二份）。
-   void build_shortcuts_card(Composer& c);
+    /// 键盘快捷键一览（`Ctrl+K` 或帮助菜单；正文从注册表快照生成，见
+  /// `shortcut_help.hpp` 单源表与 `page_dialogs.cpp` 的实现——不再手写第二份）。
+  void build_shortcuts_card(Composer& c);
 
 
    void open_file_dialog();

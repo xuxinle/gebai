@@ -122,6 +122,71 @@ ST_TEST(shortcut_unregister_and_re_register) {
 }
 
 // ————————————————————————————————————————————————————————————————————————————
+// ①′ 注册表枚举面（`UiRoot::shortcuts()`，2026-10-16 BACKLOG「快捷键注册表无可枚举面」）
+// ————————————————————————————————————————————————————————————————————————————
+
+ST_TEST(shortcut_enumeration_snapshots_the_registry) {
+  // 空表：空快照（不是错误——没注册过就一枚举不到，与 shortcut_count 同源）。
+  {
+    UiRoot root;
+    ST_CHECK(root.shortcuts().empty());
+  }
+
+  UiRoot root;
+  ST_CHECK(root.register_shortcut("S", UiRoot::Shortcut{.ctrl = true}, [] { return true; }));
+  ST_CHECK(root.register_shortcut(
+      "F12", {}, [] { return true; }));
+  ST_CHECK(root.register_shortcut(
+      "F12", UiRoot::Shortcut{.shift = true}, [] { return true; }));
+
+  const std::vector<st::ui::UiRoot::ShortcutInfo> snapshot = root.shortcuts();
+  ST_CHECK_EQ(snapshot.size(), std::size_t{3});
+  ST_CHECK_EQ(root.shortcut_count(), snapshot.size());   // 同源同数量
+
+  // 字段口径：登记名（小写归一后的注册键）+ 修饰键；派发比对用的就是登记名，
+  // 枚举面不得把大写原样带回（否则帮助卡对账时 "S" vs "s" 两套口径又分叉）。
+  ST_CHECK_EQ(snapshot[0].name, std::string{"s"});
+  ST_CHECK(snapshot[0].mods.ctrl);
+  ST_CHECK(!snapshot[0].mods.shift);
+  ST_CHECK_EQ(snapshot[1].name, std::string{"f12"});
+  ST_CHECK(!snapshot[1].mods.ctrl);
+  ST_CHECK_EQ(snapshot[1].mods.key, snapshot[1].name);   // mods.key 同步为登记名
+  ST_CHECK_EQ(snapshot[2].name, std::string{"f12"});
+  ST_CHECK(snapshot[2].mods.shift);                      // 同名不同修饰键共存，靠 mods 区分
+  ST_CHECK(!snapshot[2].mods.ctrl);
+
+  // 快照是**值拷贝**且不被后续注册污染：拿着旧快照再注册/注销，旧快照内容不变。
+  // （枚举面不得交出内部引用——返回引用会让"注册表变了，快照跟着变"或悬垂，
+  // 对账/帮助卡这类"拍下当前清单"的用途两者都不可接受。）
+  ST_CHECK(root.register_shortcut("w", UiRoot::Shortcut{.ctrl = true}, [] { return true; }));
+  ST_CHECK_EQ(snapshot.size(), std::size_t{3});
+  ST_CHECK_EQ(root.shortcuts().size(), std::size_t{4});  // 新枚举看到新表
+  root.unregister_shortcut("s", UiRoot::Shortcut{.ctrl = true});
+  ST_CHECK_EQ(root.shortcuts().size(), std::size_t{3});
+  ST_CHECK_EQ(root.shortcuts()[0].name, std::string{"f12"});  // 注销后快照同步反映
+}
+
+ST_TEST(shortcut_enumeration_is_read_only_surface) {
+  // 枚举面只读的两种含义：①返回值改了不影响注册表（值拷贝，上面已断言）；
+  // ②**枚举不触发 handler**——枚举面被帮助卡/协议层高频调用，若枚举会连带
+  // 调到注册的回调，等于开了个隐藏的“远程触发快捷键”入口。
+  UiRoot root;
+  int fired = 0;
+  ST_CHECK(root.register_shortcut(
+      "s", UiRoot::Shortcut{.ctrl = true}, [&fired]() {
+        ++fired;
+        return true;
+      }));
+  const std::size_t rounds = 4;
+  for (std::size_t index = 0; index < rounds; ++index) {
+    (void)root.shortcuts();
+  }
+  ST_CHECK_EQ(fired, 0);
+  ST_CHECK(press(root, "s", true));   // 真派发才触发（对照组：枚举≠触发）
+  ST_CHECK_EQ(fired, 1);
+}
+
+// ————————————————————————————————————————————————————————————————————————————
 // ② 未识别组合键放行冒泡（on_event 返回值契约）
 // ————————————————————————————————————————————————————————————————————————————
 

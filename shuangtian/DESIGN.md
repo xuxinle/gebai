@@ -1557,11 +1557,135 @@ append/clear` 六个便利函数（**薄包装** `apply_properties`/`invoke_elem
 |---|---|---|
 | **三方合并** | `st::text::merge_three_way` / `merge_apply` | 五态区段（`BothSame` 不算冲突）、逐块取舍。与 git 无关（配置/翻译稿合并同形） |
 | **合并视图** | `st::ui::MergeView` | 三栏 + 每段"取我方/取他方" + 未决定冲突计数与 F7 跳转 |
-| **时间轴视图** | `st::ui::TimelineView` | 标尺/轨道/片段/播放头；拖体=移动（只改 `start`）、拖边缘=修剪（左缘同步 `source_in`） |
+| **时间轴视图** | `st::ui::TimelineView` | 标尺/轨道/片段/播放头；拖体=移动（只改 `start`）、拖边缘=修剪（左缘同步 `source_in`）；头部栏可关（`set_show_track_headers`），片段可按内容着色（`Clip::tint`） |
 | **逐行暂存** | `CodeEditor::LineDecoration::Check` + `DiffView::staging_mode` | 勾选框是装饰的一部分（逐行对齐只有编辑器知道） |
 | **帧内输入合并** | `st::ui::InputCoalescer` | 一帧内的多次指针移动并成一次派发；**保留首尾**（只给最新会丢整段路）；拖拽期间不合并 |
 | **视频解码** | `st::ext::VideoDecoder` | `ffmpeg` 子进程抽帧与元信息；探测不到如实 `Unsupported`。定位是素材查看，不是播放 |
 | **用例异常边界** | `test_runner.cpp` | 用例里未捕获的异常记 FAIL 并继续，不再 `terminate` 整个测试进程 |
+
+### 4.2.25 TimelineView 播放头静默写入口（2026-10-16，caiyun 拆解步骤 2）
+
+**缺口**：播放头此前有两个写口——交互路径（拖拽/点标尺，组件自发回调）与控制协议
+`set_property("playhead")`（timeline_view.cpp，写 Model + mark_dirty + **发**
+on_playhead_changed）。但「时间真值源在宿主手里」的集成形态（播放循环每帧推进、
+检查器滑杆、步进）需要一个**不发回调**的写口：若走 set_property，会形成
+「写→on_playhead_changed→宿主 refresh/再写」的推拉回环（caiyun 换件方案 S2，
+docs/caiyun_timelineview_refactor_plan.md §③/G21——任何「数据在别处」的时间轴应用
+都会撞上，非 caiyun 特有）。
+
+**接口**：`set_playhead_external(timeline::Millis)`——写 Model + `mark_dirty()`，
+零回调；只标脏不标 layout_dirty（播放头移动不需要重排）。「谁该用哪个」的判据写进
+头文件注释：交互→组件自发；控制协议→set_property（对外通知口径）；宿主主循环
+推进→本入口。Model 层零改动（`Model::set_playhead` 裸写入口本就存在，timeline.hpp）。
+
+**回归**：`timeline_view_set_playhead_external_updates_silently`（三断言：写后
+Model/属性面双读回新值；回调计数器全程为 0；dirty 标记置上 + 新位置像素佐证。
+末尾 set_property 对照组证明计数器判据真能抓到「回调被触发了」，静默写也不干扰
+后续交互路径的正常回调）与 `timeline_view_set_playhead_external_marks_dirty_not_layout`
+（重绘分寸：dirty 但非 layout_dirty）。逆向验证三变体均必红后恢复回绿：
+改回触发回调→计数器断言红；去掉 mark_dirty→dirty 断言红（像素佐证仍绿——
+测试 Fixture 直调 paint 绕过帧调度，恰好证明 dirty 标记才是正确主判据）；
+不写 Model→值断言红。
+
+### 4.2.26 TimelineView 头部栏开关与片段着色（2026-10-16，caiyun 拆解步骤 5）
+
+两件通用视图自由度（方案 S4/G11 + S5/G7，
+docs/caiyun_timelineview_refactor_plan.md §④步骤 5）：不是所有时间轴都要 88px
+轨道名前缀栏，也不是所有领域都接受单一主题色片段——但它们都是**展示层开关**，
+不含任何领域语义（“按内容配色”的具体色值由宿主填，组件只提供接口）。
+
+**头部栏可关**：`set_show_track_headers(bool)`（默认 true，存量行为不变）。几何面
+**全部**经 `lane_rect()/ruler_rect()`（头部栏宽度是那儿的局部变量，不散落在
+命中/绘制/滚动各处）——开关只改一个偏移量；命中坐标随 lane 左缘整体平移，
+「点同一个 x 命中同一个时刻」的换算关系在开关前后保持。属性面同步：
+`track_headers`（严格 true/false 口径，与 `snap`/`trim_handles` 同一套）。开关用
+`mark_layout_dirty`（lane 宽度变了，Model 的 `viewport_width` 要重新同步）。
+
+**片段着色（数据接口，非绘制效果）**：`timeline::Clip::tint`
+（`std::optional<math::Color>`，默认 `nullopt`）——宿主按内容填色（生成器色/
+级别色/轨道类型色）；`nullopt` 走主题令牌 `primary_soft`，**不填它就是旧形态**
+（零破坏：几何/命中/吸附/导出全不看它，model 测试钉住“默认零变化”）。绘制侧
+的层次结构保持：选中=主题选中色（组件状态语义，不被宿主配色夺走）；
+hover=基色提亮一档（`lighten(0.10)`，提亮系数是组件的、基色是宿主的，两者叠加
+不互相劫持；提亮跟随基色现算而非预存主题色——tint 后每个片段基色可能不同，
+悬停色随之从 apply_theme 的成员变量改为 paint 内现算）。
+
+**回归**：`timeline_clip_tint_is_optional_data_only`（model 层：默认 nullopt、
+set/mutable/reset 往返、不改换算/命中/吸附/时长）与
+`timeline_view_track_headers_toggle_collapses_prefix_column`（关后 lane 左缘=组件
+左缘：播放头同时刻右移整幅头宽、原头部栏区域像素变为片段本体色、原头部栏区域
+的 x 在关态命中 400ms/开态不消费、属性面严格口径）与
+`timeline_view_clip_tint_paints_and_default_stays_theme`（两片段不同 tint 块内
+像素可区分、默认 nullopt 仍主题色、几何不变、hover 提亮与选中色在 tint 上叠加）。
+逆向验证两变体均必红后恢复回绿：lane_rect 开关退化→头部栏用例的像素断言红；
+paint 忽略 tint→着色用例的「可区分」断言红——测试对两条特性都有独立判别力。
+
+### 4.2.27 TimelineView 编辑委托通道（2026-10-16，caiyun 拆解步骤 4）
+
+**缺口**：内置组件的编辑一直是「直写自持 Model，改完才回调」——真值源在宿主
+手里（工程文件/Project）的集成形态下，宿主既无法否决也无法同步外部真值源
+（方案 S1/G15/G16：任何「数据在别处」的时间轴应用都会撞，非 caiyun 特有）。
+
+**接口**：嵌套抽象 `TimelineView::EditDelegate`（三纯虚回调）+
+`set_edit_delegate(EditDelegate*)`（`nullptr` = 卸下回直写；不持有所有权）：
+- `move(track, clip, new_start) -> bool`：目标是拖拽想达成的**绝对新起点**（非
+  增量——增量口径会把快照知识泄漏给宿主）；返回 false = 宿主拒绝该编辑。
+- `trim(track, clip, Edge, time) -> bool`：`Edge` 是嵌套窄枚举（Left/Right，与
+  命中面 ClipPart 分开——「trim 收到 Body」在类型上就不可能）；`time` 口径为
+  Left=新起点、Right=新**结束时刻**（start+duration）。返回 false = 拒绝。
+- `snap(candidate, exclude) -> Millis`：吸附随编辑权一并移交（吸附点在真值源里）
+  ——不吸附就原样返回；返回什么组件用什么（吸附的最终解释权在宿主，无法拒绝）。
+  `exclude` 是被拖片段拖拽前的起点（排除自片段语义换成时间口径）。
+
+**帧序语义**（改顺序 = 改语义，用例钉死）：挂 delegate 时 Drag 三分支
+（Body/Left/Right）走「①算目标（含 delegate->snap）→ ②乐观写投影（拖拽跟手的
+绘制来源）→ ③交宿主裁决；true=投影保持目标（或宿主回调里 set_tracks 重建的新
+投影——宿主的值永远最后落笔）；false=把投影恢复到**本帧裁决前**存档（净效果
+= 自持 Model 不动）」。恢复带 **id 守卫**：宿主回调里重建投影后同下标可能是另一
+个片段，把旧存档写到它头上正是「下标当身份用」的坑（PITFALLS 场景 5 同族）；
+id 不符时不动投影（宿主的重建结果就是它要的投影）。命中与绘制仍读自持 Model
+（投影）。不挂 delegate 时全部路径字节不变（gallery 卡与全部存量用例零改动
+——本步硬约束）。
+
+**与 S3 的交互契约**（写给步骤 3 合并时）：挂 delegate 时宿主每帧重建投影是常态
+预期（重入说明已写进 set_edit_delegate 注释），S3 的「陈旧快照即复位 drag_」
+判据在委托形态下**不适用**（合并时须豁免）——否则宿主重建会把正在进行的拖拽
+中断掉。
+
+**回归**：六例用例组（ui_timeline_view_test.cpp 尾部，自带 RecordingDelegate
+记账桩）钉住全语义：① move 接受→投影=目标+回调发+像素佐证；② move 拒绝→三字
+段回到裁决前+回调不发；③④ trim 同型两例（出点接受/入点拒绝——入点拒绝连
+source_in 一起回滚）；⑤投影重建：宿主回调内 set_tracks 后宿主值存活、且下一
+次拖拽快照取自重建后投影（重建不断拖拽）；⑥吸附通道口径（candidate/exclude
+可验证）+不挂 delegate 时零调用保底。逆向验证：临时把裁决结果改成无视否决
+（等价回退直写语义）→ 两个否决用例精确变红、其余四例绿 → 恢复后全绿。
+
+### 4.2.26 TimelineView 投影刷新防线（2026-10-16，caiyun 拆解步骤 3）
+
+**缺口**：拖拽中的 `drag_` 快照（track/clip 下标 + 起点几何）指向**开始拖时**的投影。
+宿主在拖拽中途整体重建数据（`set_tracks` / 改 `tracks()`）时，快照指向旧投影——
+后续 MouseMove 会拿旧下标去改**新投影里同下标的另一个片段**（陈旧下标改错对象，
+组件自身无法发现；caiyun 换件方案 S3，
+docs/caiyun_timelineview_refactor_plan.md §④步骤 3——任何「数据在别处」的时间轴
+应用都会撞上，非 caiyun 特有）。
+
+**两道防线**（给不同读者）：
+① `notify_model_replaced()`——宿主整体重建数据后的显式薄入口（契约）：复位
+`drag_`、`dragging_playhead_` 与悬停标记，拖拽「松手」而不是「粘住指针」；
+② MouseMove 快照自校验（保险）：拖拽分支入口比对快照与当前 Model——判据是
+「快照 ≠ 上一帧应有落点」（正常拖拽中每帧 move 后组件写下的值必与快照一致，
+被宿主改过才会不一致），不符即复位并吃掉本次事件。宿主忘调①也不会改错对象。
+两道防线的事件语义不同且被测试钉住：①在事件流之外复位（后续 move 不消费、
+回悬停分支）；②在事件处理中复位（该次 move 被消费，防宿主层误处理半死拖拽）。
+Model 层零改动。
+
+**回归**：`timeline_view_model_replaced_mid_drag_releases_drag`（移动中途重建：
+新片段原封不动 + 后续 move 不消费）、`timeline_view_model_replaced_mid_trim_releases_drag`
+（修剪同型：start/duration/source_in 三字段都不被陈旧快照改写）、
+`timeline_view_stale_snapshot_without_notify_still_releases`（不调薄入口的兜底路径）。
+逆向验证三变体均必红后恢复回绿：两道防线全关→3 例全红；只关兜底→恰好红兜底
+用例；只关入口→恰好红两个入口用例（消费语义差异同时被钉住）——测试对每道
+防线都有独立判别力，不是恒绿护栏。
 
 ### 4.3 text
 ```cpp
@@ -3132,7 +3256,13 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
 - **全局快捷键**：`UiRoot::register_shortcut(key, {ctrl,shift,alt,meta}, handler)`；
   KeyDown 派发顺序固定为**快捷键表 → 浮层 → 焦点元素 → Tab 焦点环**（后注册优先；
   派发前不可见子树整体不接键——隐藏面板里的组件不该继续吃键盘，2026-10-09；
-  handler 返回 false 放弃消费继续下沉）。
+  handler 返回 false 放弃消费继续下沉）。**枚举面**（2026-10-16，BACKLOG 3982）：
+  `UiRoot::shortcuts()` 返回注册表的只读**值快照**（`ShortcutInfo{name, mods}`，
+  name=登记名（小写归一，即派发比对键）、顺序=注册序）——帮助卡/文档生成/对账
+  从它取材，不暴露 handler、不交出内部引用（枚举面只读，写入仍只有
+  register/unregister 两个口）。应用侧示范：gbcode 的快捷键卡从它生成，
+  「表与代码同源」——注册、卡片、对账测试三面共用单源表
+  （`examples/gbcode/shortcut_help.hpp`；对账见 `tests/gbcode_shortcut_card_test.cpp`）。
 - **命中拦截**：`Element::intercepts_input()`（默认 true）——不可见/不拦截的浮层不再
   截住下层内容（`Dialog` 覆写为 `visible()`）。
 - **行为注入**：`Element::set_event_handler(fn)`（组件实现之后、冒泡之前调用；免子类化
@@ -3485,6 +3615,17 @@ if (palette_open_.value()) {          // 条件声明
 菜单栏同理：`menu_bar(...)` 声明 + `on_open_menu` 写状态，面板由 `menu_panel_overlay`
 按状态声明（面板内容首次认领时构造，同 key 复用）。
 
+右键菜单同一形态：`context_menu(c, anchor, items)` 从注册表造出 `ContextMenu`
+（锚点与条目是构造后写入的一等接口，与 `ContextMenu::make` 同一套两段式），
+调用方在返回引用上接 `on_close`——Esc / 点面板外 / 激活条目都经它发摘除信号，
+ 回调里写状态、下一帧不声明即 sweep（与 overlay 生命周期同一套表达）。
+ 补齐：`dsl_context_menu_reconcile_follows_state` 钉「状态驱动重组」面——写
+ anchor 状态 → 同 key 复用（`derived_id` 不变）、锚点跟随、条目经每帧重设仍在
+（`set_items` 内容没变就早退）。
+ 回归：`tests/ui_dsl_test.cpp` 的
+ `dsl_context_menu_creates_from_registry_and_writes_anchor_items` 与
+ `dsl_context_menu_reconcile_follows_state`。
+
 **浮层宿主的命中语义（`OverlayHost`）**
 
 浮层内容挂在铺满视口的宿主上，而宿主若按 `bounds` 命中就会**吃掉整屏输入**
@@ -3640,10 +3781,10 @@ if (palette_open_.value()) {          // 条件声明
 > （JS 十一用例）+ `tests/ui_declarative_parity_test.cpp`（双宿主一致性）完整钉住，
 > 界面演示由上面两个示例承载——示例不再重复单测已覆盖的验证。
 
-测试：`tests/ui_dsl_test.cpp`（C++ **二十八**用例：含 overlay 生命周期 / 异步 resource 与取消 /
+测试：`tests/ui_dsl_test.cpp`（C++ **二十九**用例：含 overlay 生命周期 / 异步 resource 与取消 /
 嵌套作用域树 / 构造期属性组件 / 多作用域细粒度 / 子树挂载 / 载体内部件不被裁剪 /
 **memo·effect·ref·persisted 四个原语**（含「memo 命中缓存仍保持订阅」的反向验收）/ `for_each` key 复用 /
-递归 build 深度拦截与预算顺延的谬误注入）、
+递归 build 深度拦截与预算顺延的谬误注入 / context_menu 状态驱动重组），
 `tests/ui_declarative_host_test.cpp`（JS **二十**用例，含 `useMemo`/`useEffect`/`useRef`/
 `usePersisted`、「五个 hook 混用不串槽」、片段摊平、事件绑定跨帧不重绑与卸载反注册、
 换页不叠树与卸载跑 effect 清理）、
@@ -4208,7 +4349,7 @@ raster 层的缺省是 `butt/miter`（与 SVG/CSS 默认一致），但图标不
 | `tree` | `{depth?}` | `{tree:{id,type,role,bounds,state,text,children:[...]}, version}` | **嵌套**语义树快照（`depth` 可限深；`version` 用于判断是否需要重新拉取） |
 | `find` | `{selector, limit?, visible_only?}` | `{selector, count, total, matches:[{id,type,role,bounds,text,path}]}` | 选择器查询。**`count` = 本次返回条数（受 `limit` 限制）；`total` = 命中总数（不受 `limit` 影响）**——两个数分开才能判断“是不是被截断了”，只看 `count` 会把“命中 20+”读成“命中 20” |
 | `get` | `{id, props?}` | `{id, type, props:{...}}` | 读取属性（缺省返回全部） |
-| `set` | `{id, props}` | `{changed:[...]}` | 设置属性/文本/值（触发重绘与 `ui.changed`） |
+| `set` | `{id, props}` | `{changed:[...], rejected?:[{name, reason}]}` | 设置属性/文本/值（触发重绘与 `ui.changed`）。**`rejected` 与 `changed` 对偶**（非空才带，老客户端零感知）：被拒属性逐项报 `name` + 拒因分类 `reason`——`unknown_name`（名字不属于该元素，拼错属性名的典型形态）/ `invalid_value`（名字认得但值不合法：枚举拼错、非法颜色串等）/ `unfocusable`（名字值均合法但能力未开，如对不可聚焦元素设 `focused=true`）。调用方不必 diff `changed` 就能发现「拼错静默跳过」（BACKLOG 4022 方向①） |
 | `ui.create` | `{type, props?, parent?, index?, key?, id?}` | `{id, type}` | **在线建元素**（与声明式共用工厂注册表；缺省 parent 挂 root 内容，指定则挂为子元素） |
 | `ui.remove` | `{id}` | `{removed, id}` | **在线删元素**（根元素时清空内容） |
 | `invoke` | `{id, action, args?}` | `{ok, handled, state?, error?}` | 动作：`click` `dblclick` `focus` `blur` `toggle` `select` `scroll_to` `submit` `open` `close`；**`handled` 是权威答复**（元素存在即 `ok=true`，但动作未被元素处理时 `handled=false` 且带顶层 `error` 说明——调用方必须读它，否则会把「没发生」当「发生了」） |
@@ -4711,10 +4852,12 @@ mingw 交叉编译在**发布前手工执行**（`st build gallery --toolchain=m
 | `gallery` | **组件集 / 设计系统巡检**：导航、统计卡、按钮矩阵、图标墙、表单、列表、进度条、主题与 DPI 切换、截图 | 组件库完整度、设计令牌一致性、DPI 正确性、控制通道可达性 |
 | `gbcode` | **VSCode 式代码编辑器**：标题栏/菜单栏/**常驻**活动栏+可收起侧栏（资源管理器·搜索·源代码管理·运行·扩展）/多标签编辑区（修改点、可关闭）/底部面板（**真终端**：多会话标签栏——标签默认 shell 名、`OSC` 标题实时覆盖、尾部动作钮（清屏/中止/收起）+ 回看滚动条 + 隐藏保留会话的面板显隐）/状态栏；命令面板（Ctrl+Shift+P）、**打开文件夹换工作区**（Ctrl+Shift+O）、全局快捷键、8 种内置语言 + 自定义语言 `stlog` | **易用性**（一个 IDE 形态界面 ≈ 数百行声明式组装，全部用内置组件，零自绘）、**组件库覆盖度**（MenuBar/Tabs/Tree/List/Overlay/快捷键在同一真实形态下的协同）、**控制通道全链路**（多编辑器实例的属性面与动作） |
 | **`louyue` 镂月** | **图像编辑器**：左工具栏（移动=平移模式/画笔/橡皮/油漆桶/吸管/选区/裁切）+ 中央**自绘画布**（内置 Viewport 外壳：棋盘格底、缩放档位 25%~800%（`snap_zoom` 吸附收口）、中键/移动工具拖拽平移、首帧 fit 居中）+ 右侧图层列表与内置 ColorPicker + 状态栏 | **像素 / 光栅创作面**：PNG 编解码**往返**首次跑在真实用户路径（此前只有单测）、**九种混合模式**首次在真实界面里被人眼与像素断言同时检验、撤销栈（命令式，非整图快照） |
-| **`caiyun` 裁云** | **视频剪辑器**：上预览监视器 + 时间码 + 传输控制；左素材箱、右属性检查器；下**自绘时间轴**（轨道 V1/V2、修剪手柄、可拖播放头、时间标尺、吸附、分割/波纹删除） | **时间 / 动效应用面**：唯一由应用时间轴驱动**持续动画**的示例——帧预算与续帧协议的真实压测位；**确定性帧哈希**（区分“预览跟着播放头走”与“静帧”）；连续拖拽交互 |
+| **`caiyun` 裁云** | **视频剪辑器**：上预览监视器 + 时间码 + 传输控制；左素材箱、右属性检查器；下**内置 TimelineView 薄适配器**（轨道 V1/V2、修剪手柄、可拖播放头、时间标尺、吸附、分割/波纹删除） | **时间 / 动效应用面**：唯一由应用时间轴驱动**持续动画**的示例——帧预算与续帧协议的真实压测位；**确定性帧哈希**（区分“预览跟着播放头走”与“静帧”）；连续拖拽交互；**内置时间轴的「外部真值源 + 委托编辑」应用示范位**（2026-10-16 换件：手写 450 行已删，绘制/命中用内置件，编辑经 `EditDelegate` 走 Project——G25 缺口闭合，docs/caiyun_timelineview_refactor_plan.md 步骤 6） |
 
 两个新示例都由 `dsl::custom<T>` 逃生舱**持自绘元素**（壳声明式 + 高频自绘面不
-进重组树，与 `gbcode` 持 `CodeEditor` 同构），并且都对外暴露**命令式动作面**
+进重组树，与 `gbcode` 持 `CodeEditor` 同构）——注：caiyun 的时间轴已于 2026-10-16
+换为内置 `st::ui::TimelineView` 的薄适配器（不再是自绘元素，但仍在 `custom<T>`
+逃生舱里持它），并且都对外暴露**命令式动作面**
 （`stroke`/`export`/`split`/`ripple_delete`…）——于是控制通道可以“命令式地做一个
 真实操作 → 用截图或导出的像素做断言”，这是无头闭环里杀伤力最大的靶场形态。
 

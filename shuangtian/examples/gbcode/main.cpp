@@ -67,6 +67,7 @@
 
 #include "git_service.hpp"   // Git 集成（版本管理重构）
 #include "lsp_bridge.hpp"   // 语言服务集成（LSP 阶段 3）
+#include "shortcut_help.hpp"   // 快捷键单源表（注册 + 帮助卡 + 对账三面同源，BACKLOG 3982）
 #include "st/ui/components/command_palette.hpp"
 #include "st/ui/components/diff_view.hpp"
 #include "st/ui/components/merge_view.hpp"
@@ -553,216 +554,154 @@ auto run_app(int argc, char** argv) -> int {
 
   // —— 全局快捷键（注册到 UiRoot：先于焦点链派发，文本组件吞键也拦得住）——
   //
-  // **除 Esc 外的一律先让路给浮层**：浮层是当前交互的“前台”（对话框、查找条、
-  // 命令面板、转到行、菜单面板），用户在浮层里的按键不应被编辑区快捷键抢走。
-  // 具体的坑：浮层带输入框时，Ctrl+S/Ctrl+D 这类“编辑器动作”会在输入框收到
-  // 字符之前就被根级处理器吃掉——用户以为自己只是在浮层里打字。
+  // **键位/修饰键/守卫口径全部来自单源表** `shortcut_help.hpp`（kShortcutSpecs）：
+  // 这里只给「按了做什么」（动作返回值 = 消费与否），键位不再手抄第二份——
+  // 帮助卡（page_dialogs.cpp）与对账测试（gbcode_shortcut_card_test.cpp）
+  // 从同一张表/同一份注册表读，「表与代码分叉」从机制上消灭（BACKLOG 3982）。
+  //
+  // **除 Esc 外的一律先让路给浮层**（`LetOverlayDecide` 形态）：浮层是当前交互的
+  // “前台”（对话框、查找条、命令面板、转到行、菜单面板），用户在浮层里的按键
+  // 不应被编辑区快捷键抢走。具体的坑：浮层带输入框时，Ctrl+S/Ctrl+D 这类
+  // “编辑器动作”会在输入框收到字符之前就被根级处理器吃掉——用户以为自己
+  // 只是在浮层里打字。
+  //
+  // **Consume 形态**（无 overlay 守卫）的键位与原因见各动作处的注释
+  //（补全弹层自己要用的键不能被守卫挡；F7 族无差异视图时让路；Esc 无事可关
+  // 时让路——动作自己的返回值表达，包装层不越权）。
   {
     UiRoot* root = &app.root();
     const auto overlay_open = [root]() -> bool { return root->overlay_count() > 0; };
-    const auto bind = [root, overlay_open](const char* key, bool shift,
-                                          std::function<void()> action) {
-      UiRoot::Shortcut mods{};
-      mods.key = key;
-      mods.ctrl = true;
-      mods.shift = shift;
-      (void)root->register_shortcut(key, mods, [action = std::move(action), overlay_open]() {
-        // 浮层开着 = 这次按键属于浮层：**不消费**，让它继续下沉到浮层里的输入框。
-        if (overlay_open()) return false;
-        action();
-        return true;   // 全局命令：总是消费，不再下沉
-      });
+    // 按 id 注册（键位/修饰键/守卫从表来）：失败 = id 拼错或 Never 条被误用——
+    // 都是调用方 bug，会被启动对账（下方 shortcut_drift）的 missing 名单当场
+    // 点名，这里不再逐条判返回值。
+    const auto bind = [&root, &overlay_open](std::string_view id,
+                                            std::function<bool()> action) {
+      (void)register_shortcut_by_id(*root, id, std::move(action), overlay_open);
     };
-    bind("s", false, [page] { page->save(); });
-    bind("s", true, [page] { page->save_as(); });
-    // 全部保存：Ctrl+Alt+S。
-    //
-    // 为何不是 VSCode 的 Ctrl+K S（和弦）：本框架没有和弦键位机制（与
-    // Ctrl+Shift+O 处记的原因相同）—— 单键的可发现性反而更好，
-    // 且 Ctrl+S / Ctrl+Shift+S 已占，附上 Alt 是唯一不冲突的档位。
-    {
-      UiRoot::Shortcut all{};
-      all.key = "s";
-      all.ctrl = true;
-      all.alt = true;
-      (void)root->register_shortcut("s", all, [page, overlay_open]() {
-        if (overlay_open()) return false;
-        page->save_all();
-        return true;
-      });
-    }
-    bind("w", false, [page] { page->close_active(); });
-    bind("o", false, [page] { page->open_file_dialog(); });
-  // Ctrl+Shift+O：打开文件夹（换工作区）。与 VSCode 的 Ctrl+K Ctrl+O 同义，
-  // 用单键是因为本框架没有和弦键位机制——单键的可发现性反而更好。
-  bind("o", true, [page] { page->open_folder_dialog(); });
-    bind("n", false, [page] { page->new_file_request(); });
+    bind("save", [page] { page->save(); return true; });
+    bind("save-as", [page] { page->save_as(); return true; });
+    // 全部保存 Ctrl+Alt+S：为何不是 VSCode 的 Ctrl+K S（和弦）——本框架没有
+    // 和弦键位机制（与 Ctrl+Shift+O 同因），单键可发现性反而更好，且
+    // Ctrl+S / Ctrl+Shift+S 已占，附上 Alt 是唯一不冲突的档位。
+    bind("save-all", [page] { page->save_all(); return true; });
+    bind("close", [page] { page->close_active(); return true; });
+    bind("open", [page] { page->open_file_dialog(); return true; });
+    // Ctrl+Shift+O：打开文件夹（换工作区）。与 VSCode 的 Ctrl+K Ctrl+O 同义，
+    // 用单键是因为本框架没有和弦键位机制——单键的可发现性反而更好。
+    bind("open-folder", [page] { page->open_folder_dialog(); return true; });
+    bind("new", [page] { page->new_file_request(); return true; });
     // Ctrl+T：工作区符号（跨文件搜符号）。VSCode 同键位。
-    bind("t", false, [page] { page->symbols_request(false); });
-    bind("b", false, [page] { page->sidebar_visible_.set(!page->sidebar_visible_.value()); });
-    bind("j", false, [page] { page->toggle_terminal_panel(); });   // Ctrl+J：切换终端面板
+    bind("symbols", [page] { page->symbols_request(false); return true; });
+    bind("toggle-sidebar", [page] {
+      page->sidebar_visible_.set(!page->sidebar_visible_.value());
+      return true;
+    });
+    // Ctrl+J：切换底部面板（与 Ctrl+` 同一条路径，后者另收 Backquote 布局）。
+    bind("toggle-bottom", [page] { page->toggle_terminal_panel(); return true; });
     // Ctrl+Shift+V：Markdown 预览/源码切换（VSCode 同键位；非 md 文件上如实提示）。
-    bind("v", true, [page] { page->toggle_md_preview(); });
-    // Ctrl+`（VSCode 的终端默认键位）：与活动栏那个按钮同一条路径。
-    // 注：`` ` `` 在不同键盘布局上键名不一（`\`` / `Backquote`），两种都收。
-    bind("`", false, [page] { page->toggle_terminal_panel(); });
-    bind("Backquote", false, [page] { page->toggle_terminal_panel(); });
-    bind("k", false, [page] { page->shortcuts_open_.set(!page->shortcuts_open_.value()); });
+    bind("md-preview", [page] { page->toggle_md_preview(); return true; });
+    // Ctrl+` / Ctrl+Backquote（VSCode 的终端默认键位）：与活动栏那个按钮同一条
+    // 路径。`` ` `` 在不同键盘布局上键名不一，两种都收（表里 alias 两条）。
+    bind("toggle-terminal", [page] { page->toggle_terminal_panel(); return true; });
+    bind("toggle-terminal-alt", [page] { page->toggle_terminal_panel(); return true; });
+    bind("help", [page] {
+      page->shortcuts_open_.set(!page->shortcuts_open_.value());
+      return true;
+    });
     // F2：重命名符号；Shift+Alt+F：格式化（都与 VSCode 同键位）。
-    {
-      UiRoot::Shortcut plain{};
-      plain.key = "f2";
-      (void)root->register_shortcut("f2", plain, [page]() {
-        page->rename_request();
-        return true;
-      });
-      UiRoot::Shortcut format{};
-      format.key = "f";
-      format.shift = true;
-      format.alt = true;
-      (void)root->register_shortcut("f", format, [page]() {
-        page->format_request();
-        return true;
-      });
-    }
+    bind("rename", [page] { page->rename_request(); return true; });
+    bind("format", [page] { page->format_request(); return true; });
     // —— 差异视图导航（F7 / Shift+F7，与主流 IDE 同键位）——
     // “下一个差异 / 上一个差异”是差异视图最常用的两个动作，必须有键盘入口：
     // 否则就只能靠鼠标滚——而“一个差异一个差异地看”本来就是顺序行为。
-    {
-      UiRoot::Shortcut next_hunk{};
-      next_hunk.key = "f7";
-      (void)root->register_shortcut("f7", next_hunk, [page]() {
-        if (page->diff_view_ptr == nullptr) return false;
-        page->diff_view_ptr->next_hunk();
-        return true;
-      });
-      UiRoot::Shortcut prev_hunk{};
-      prev_hunk.key = "f7";
-      prev_hunk.shift = true;
-      (void)root->register_shortcut("f7", prev_hunk, [page]() {
-        if (page->diff_view_ptr == nullptr) return false;
-        page->diff_view_ptr->previous_hunk();
-        return true;
-      });
-    }
-    // F12：跳定义；Shift+F12：找引用；Ctrl+K：悬停信息（VSCode 是 Ctrl+K Ctrl+I，
-    // 但两段式键在我们这套表里表达不了——单段 Ctrl+K 更直接）。
-    {
-      UiRoot::Shortcut plain{};
-      plain.key = "f12";
-      (void)root->register_shortcut("f12", plain, [page]() {
-        page->definition_request();
-        return true;
-      });
-      UiRoot::Shortcut with_shift{};
-      with_shift.key = "f12";
-      with_shift.shift = true;
-      (void)root->register_shortcut("f12", with_shift, [page]() {
-        page->references_request();
-        return true;
-      });
-      // 导航族补齐：声明（Alt+F12）/实现（Ctrl+F12）/返回（Alt+Left）。
-      // 键位对齐 VSCode 的 F12 家族直觉；Alt+Left 是浏览器同源的"返回"。
-      UiRoot::Shortcut alt_f12{};
-      alt_f12.key = "f12";
-      alt_f12.alt = true;
-      (void)root->register_shortcut("f12", alt_f12, [page]() {   // 登记名=事件键；修饰键区分同键位
-        page->declaration_request();
-        return true;
-      });
-      UiRoot::Shortcut ctrl_f12{};
-      ctrl_f12.key = "f12";
-      ctrl_f12.ctrl = true;
-      (void)root->register_shortcut("f12", ctrl_f12, [page]() {   // 同上：修饰键区分
-        page->implementation_request();
-        return true;
-      });
-      UiRoot::Shortcut alt_left{};
-      alt_left.key = "ArrowLeft";
-      alt_left.alt = true;
-      // 登记名必须就是事件键名（匹配用它，见 `UiRoot::register_shortcut`）。
-      (void)root->register_shortcut("ArrowLeft", alt_left, [page]() {
-        page->navigate_back_request();
-        return true;
-      });
-    }
+    // 无差异视图时返回 false 让路（原行为：不能消费不属于自己场景的键）。
+    bind("next-hunk", [page] {
+      if (page->diff_view_ptr == nullptr) return false;
+      page->diff_view_ptr->next_hunk();
+      return true;
+    });
+    bind("prev-hunk", [page] {
+      if (page->diff_view_ptr == nullptr) return false;
+      page->diff_view_ptr->previous_hunk();
+      return true;
+    });
+    // F12：跳定义；Shift+F12：找引用；Alt+F12：声明；Ctrl+F12：实现；
+    // Alt+Left：返回上一个光标位置（浏览器同源的“返回”）。
+    // 键位对齐 VSCode 的 F12 家族直觉；同键位族靠修饰键区分（登记名同为 f12）。
+    bind("definition", [page] { page->definition_request(); return true; });
+    bind("references", [page] { page->references_request(); return true; });
+    bind("declaration", [page] { page->declaration_request(); return true; });
+    bind("implementation", [page] { page->implementation_request(); return true; });
+    bind("navigate-back", [page] { page->navigate_back_request(); return true; });
     // Ctrl+Space：手动触发补全（VSCode/IDEA 的通用键位）。
     //
-    // ⚠ 这里**不能走 `bind`**（它的 `overlay_open` 守卫会挡住补全弹层自己）——
-    // 用户按 Ctrl+Space 时弹层通常已经开着（想重新触发/换一批候选），
-    // 走守卫就变成"按了没反应"。直接注册，自己判断"是不是补全弹层"。
-    {
-      UiRoot::Shortcut mods{};
-      mods.key = "space";
-      mods.ctrl = true;
-      (void)root->register_shortcut("space", mods, [page]() {
-        page->completion_request();
-        return true;
-      });
-    }
+    // ⚠ 这里**不能装 `overlay_open` 守卫**（表的 reg=Consume）：用户按 Ctrl+Space
+    // 时补全弹层通常已经开着（想重新触发/换一批候选），走守卫就变成“按了没反应”。
+    bind("completion", [page] { page->completion_request(); return true; });
     // Ctrl+G：真的“转到行…”浮层（与选择菜单那一条同一条链路）。
-    bind("g", false, [page] { page->open_goto_line(); });
-    // Ctrl+D：选中下一处同词；Alt+↑/↓：上/下移当前行。
+    bind("goto-line", [page] { page->open_goto_line(); return true; });
+    // Ctrl+D：选中下一处同词。
     //
-    // 为何要**重复**注册（组件 `handle_key` 里已经处理过一遍）：这两组键在
-    // 编辑器未聚焦时（刚点过侧栏/终端）也应当生效，而全局表先于焦点链派发——
-    // 焦点在编辑器时先被根吃下，不会出现“一次按键搬两行”。
-    bind("d", false, [page] {
-      if (page->editor == nullptr) return;
+    // 为何要**重复**注册（组件 `handle_key` 里已经处理过一遍）：这组键在编辑器
+    // 未聚焦时（刚点过侧栏/终端）也应当生效，而全局表先于焦点链派发——
+    // 焦点在编辑器时先被根吃下，不会出现“一次按键选两处”。
+    bind("select-next-occurrence", [page] {
+      if (page->editor == nullptr) return true;   // 无编辑器：消费但无事可做（原行为）
       // 状态栏如实报“选了哪个词 / 找不到下一处”——两者都不是错误，但必须能区分。
       if (page->editor->select_next_occurrence()) {
         page->status_.set("已选中「" + page->editor->selected_text() + "」");
       } else {
         page->status_.set("没有下一处同词");
       }
+      return true;
     });
-    {
-      UiRoot::Shortcut alt_up{};
-      alt_up.key = "ArrowUp";
-      alt_up.alt = true;
-      (void)root->register_shortcut("alt-up", alt_up, [page, overlay_open]() {
-        if (overlay_open()) return false;
-        if (page->editor != nullptr && page->editor->move_lines(-1)) page->status_.set("已上移当前行");
-        return true;
-      });
-      UiRoot::Shortcut alt_down{};
-      alt_down.key = "ArrowDown";
-      alt_down.alt = true;
-      (void)root->register_shortcut("alt-down", alt_down, [page, overlay_open]() {
-        if (overlay_open()) return false;
-        if (page->editor != nullptr && page->editor->move_lines(1)) page->status_.set("已下移当前行");
-        return true;
-      });
-    }
-    // Ctrl+Shift+E / F / G：切到三个主视图（与歌白文件工作台同一套键位）
-    bind("e", true, [page] {
+    // Alt+↑/↓：上/下移当前行。根级登记名 "alt-up"/"alt-down" 与后端键名
+    // （ArrowUp/ArrowDown）不匹配——真移行是 CodeEditor 自己的 Alt+方向键分支；
+    // 这两条是编辑器未聚焦时的备份（靠动作里的 editor->move_lines 兜底），
+    // 从未以根级身份被派发命中过。原样保留（键位归一另单处理，见表头注释）。
+    bind("move-line-up", [page] {
+      if (page->editor != nullptr && page->editor->move_lines(-1)) {
+        page->status_.set("已上移当前行");
+      }
+      return true;
+    });
+    bind("move-line-down", [page] {
+      if (page->editor != nullptr && page->editor->move_lines(1)) {
+        page->status_.set("已下移当前行");
+      }
+      return true;
+    });
+    // Ctrl+Shift+E / F / G：切到三个主视图（与歌白文件工作台同一套键位）。
+    bind("view-explorer", [page] {
       page->activity_.set(0);
       page->sidebar_visible_.set(true);
       page->mark_sidebar_visited(0);
+      return true;
     });
-    bind("f", true, [page] {
+    bind("view-search", [page] {
       page->activity_.set(1);
       page->sidebar_visible_.set(true);
       page->mark_sidebar_visited(1);
+      return true;
     });
-    bind("g", true, [page] {
+    bind("view-git", [page] {
       page->activity_.set(2);
       page->sidebar_visible_.set(true);
       page->mark_sidebar_visited(2);
       page->refresh_git_request();
+      return true;
     });
-    bind("p", true, [page] { page->open_palette(false); });          // Ctrl+Shift+P：命令表
-    bind("p", false, [page] { page->open_palette(true); });          // Ctrl+P：快速打开文件
-    bind("f", false, [page] { page->open_find(); });                 // Ctrl+F：查找
-    bind("h", false, [page] { page->open_find(); });                 // Ctrl+H：查找替换
-    bind("tab", false, [page] {                                      // Ctrl+Tab：循环切标签
+    bind("palette", [page] { page->open_palette(false); return true; });   // Ctrl+Shift+P：命令表
+    bind("quick-open", [page] { page->open_palette(true); return true; }); // Ctrl+P：快速打开文件
+    bind("find", [page] { page->open_find(); return true; });              // Ctrl+F：查找
+    bind("replace", [page] { page->open_find(); return true; });           // Ctrl+H：查找替换
+    bind("next-tab", [page] {                                              // Ctrl+Tab：循环切标签
       const auto count = page->buffers_.value().size();
       if (count > 1) page->active_.set((page->active_.value() + 1) % count);
+      return true;
     });
-    // F8：跳到当前文件的第一处问题（与 VSCode 的“下一处问题”同语义）
-    UiRoot::Shortcut f8{};
-    f8.key = "f8";
-    (void)root->register_shortcut("f8", f8, [page]() {
+    // F8：跳到当前文件的第一处问题（与 VSCode 的“下一处问题”同语义）。
+    bind("next-problem", [page] {
       page->refresh_problems();
       if (page->problems_.empty()) {
         page->status_.set("没有问题可跳转");
@@ -771,15 +710,13 @@ auto run_app(int argc, char** argv) -> int {
       page->jump_to_problem_request(0);
       return true;
     });
-    // Esc 关闭查找条与转到行浮层（`Input` 不认 Esc，用根级快捷键；**只在自己可见时
-    // 接管**，免得吃掉别的场景的 Esc——比如命令面板自己要用的那个）。
+    // Esc 关闭查找条与转到行浮层（`Input` 不认 Esc，用根级快捷键；**只在自己
+    // 可见时接管**，免得吃掉别的场景的 Esc——比如命令面板自己要用的那个）。
     //
     // 为何两条要排在一起：它们是同一类“小浮层”，Esc 是它们共同的出口。
     // 只给查找条接 Esc 会让另一个变成“关不掉的浮层”（实测：转到行浮层开着时
     // 连 Ctrl+F 都打不开——快捷键被“浮层优先”让路，而它自己又不认 Esc）。
-    UiRoot::Shortcut plain{};
-    plain.key = "escape";
-    (void)root->register_shortcut("escape", plain, [page]() {
+    bind("escape", [page]() {
       if (page->goto_line_open_.value()) {
         page->goto_line_open_.set(false);
         page->goto_line_error_.set("");
@@ -793,10 +730,29 @@ auto run_app(int argc, char** argv) -> int {
         page->fs_action_kind_.set(CodeEditorPage::FsAction::None);
         return true;
       }
-      if (!page->find_open_.value()) return false;
+      if (!page->find_open_.value()) return false;   // 无事可关：让路（不消费）
       page->dismiss_find();
       return true;
     });
+    // —— 启动对账：注册面 ⇄ 单源表（表外注册/漏注册当场点名到日志）——
+    //
+    // 注册块零手抄键位之后，剩下的风险是「绕过表另写 register_shortcut」
+    //（unknown）与「表改了、某条 bind 被删」（missing）——这里全部点名到
+    // stderr（日志文件里可查），对账测试（gbcode_shortcut_card_test.cpp）
+    // 则把同一份 diff 钉红。
+    {
+      const ShortcutDrift drift = shortcut_drift(root->shortcuts());
+      for (const std::string& name : drift.unknown) {
+        std::fprintf(stderr, "[gbcode] 表外快捷键（不在 shortcut_help.hpp 单源表）：%s\n",
+                     name.c_str());
+      }
+      for (const std::string& id : drift.missing) {
+        std::fprintf(stderr, "[gbcode] 快捷键漏注册（表有但没 bind）：%s\n", id.c_str());
+      }
+      for (const std::string& name : drift.reserved) {
+        std::fprintf(stderr, "[gbcode] 编辑器内键位被根级抢注：%s\n", name.c_str());
+      }
+    }
   }
   // —— 编辑器右键菜单的触发链路 ——
   //
