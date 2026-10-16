@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, existsSync } from "node:f
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
-import { def as shengshengDef, parseControl, renderControl, dedupeState, inflightSession, isSessionIdShape, tableBlock, SECTION_HEADINGS } from "./shengsheng"
+import { def as shengshengDef, parseControl, renderControl, dedupeState, inflightSession, isSessionIdShape, tableBlock, SECTION_HEADINGS, activeWorkerLimit } from "./shengsheng"
 // 问卦内核（纯数据/纯函数）与测试用常量直引，不经 def（工具面断言与内核断言分开两把尺）
 import {
   buildHexagram,
@@ -333,16 +333,18 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
     expect(third.output).toContain("新建")
     expect(s.created).toHaveLength(2)
 
-    // 活动 worker 上限（3）挡新增
+    // 活动 worker 上限（3）：池已 2，本批 2 单新建 → **放行 1 单、顺延 1 单**（不整批拒绝）
     const fifth = await tool("dispatch").execute({ orders: [{ task: "第四单", domain: "docs" }, { task: "第五单", domain: "perf" }] }, s.ctx)
-    expect(fifth.output).toContain(`上限 ${3}`)
-    expect(s.created).toHaveLength(2)
+    expect(fifth.output).toContain("布雨完成")
+    expect(fifth.output).toContain("上限 3")
+    expect(fifth.output).toContain("未派")
+    expect(s.created).toHaveLength(3)
 
     // preview：只出计划不派工
     s.ctx.env.SHENGSHENG_DISPATCH = "preview"
     const preview = await tool("dispatch").execute({ orders: [{ task: "预检单", domain: "lint" }] }, s.ctx)
     expect(preview.output).toContain("布雨预检")
-    expect(s.sent).toHaveLength(3)
+    expect(s.sent).toHaveLength(4)
     cleanup(s)
   })
 
@@ -653,6 +655,112 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
     expect(tool("dispatch").requiresApproval).toBe(true)
   })
 
+  test("心跳任务按项目归属：同名任务属他项时，ensure 不复用、pause 不停用（跨项目撞名护栏）", async () => {
+    const s = stub()
+    const other = join(s.home, "other-proj")
+    mkdirSync(other, { recursive: true })
+    // 盘上先有一条**别的项目**的心跳任务（历史缺省名，正是撞名现场）
+    s.tasks.push({ id: "t-other", name: "SHENGSHENG_EVOLVE", kind: "scheduled", runner: "prompt", enabled: true, state: "idle", runCount: 0, schedule: "@every 3m", env: { SHENGSHENG_ROOT: other } })
+    await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+    const otherBefore = JSON.stringify(s.tasks[0])
+
+    // status：如实报「本项目尚无心跳任务」，并点名他项任务——不把它当本项目的心跳
+    const st = await tool("state").execute({ action: "task", op: "status" }, s.ctx)
+    expect(st.output).toContain("尚无心跳任务")
+    expect(st.output).toContain("其他项目")
+    expect(st.output).toContain(other)
+
+    // ensure：不复用他项任务，为本项目**新建**（名字按项目派生）
+    const ens = await tool("state").execute({ action: "task", op: "ensure" }, s.ctx)
+    expect(ens.output).toContain("心跳任务已创建")
+    expect(s.tasks).toHaveLength(2)
+    const mine = s.tasks.find((t) => t.id !== "t-other")!
+    expect((mine.env as Record<string, string>).SHENGSHENG_ROOT).toBe(s.root)
+    expect(String(mine.name)).toContain("::")
+    expect(String(mine.name)).not.toBe("SHENGSHENG_EVOLVE")
+    expect(ens.output).toContain("其他项目")          // 同批一并提示他项任务
+    // 他项任务**一字未动**（未被 patch 启用态、未被改名）
+    expect(JSON.stringify(s.tasks.find((t) => t.id === "t-other"))).toBe(otherBefore)
+
+    // ensure 幂等：再调一次仍命中本项目那条
+    const again = await tool("state").execute({ action: "task", op: "ensure" }, s.ctx)
+    expect(again.output).toContain("已存在（幂等，未新建）")
+    expect(again.output).toContain("与本项目一致")
+    expect(s.tasks).toHaveLength(2)
+
+    // pause：只停本项目的心跳，**他项任务不得被停用**
+    const pa = await tool("state").execute({ action: "task", op: "pause", reason: "种子柟" }, s.ctx)
+    expect(pa.output).toContain("演进已暂停")
+    expect(s.tasks.find((t) => t.id === "t-other")!.enabled).toBe(true)
+    expect(mine.enabled).toBe(false)
+
+    // 显式点名他项任务 id：直接拒绝（不复用、不停用、也不顺手另建）
+    const byId = await tool("state").execute({ action: "task", op: "ensure", task_id: "t-other" }, s.ctx)
+    expect(byId.output).toContain("拒绝")
+    expect(byId.output).toContain("不属于本项目")
+    expect(s.tasks.find((t) => t.id === "t-other")!.enabled).toBe(true)
+    expect(s.tasks).toHaveLength(2)
+    cleanup(s)
+  })
+
+  test("心跳任务升级：旧版任务归属可从唤醒 prompt 回读，ensure 不另建", async () => {
+    const s = stub()
+    // 旧版形态：任务级 env 无 root，但唤醒 prompt 带「项目根：」（本仓升级前的真实形态）
+    s.tasks.push({ id: "t-legacy", name: "SHENGSHENG_EVOLVE", kind: "scheduled", runner: "prompt", enabled: true, state: "idle", runCount: 0, schedule: "@every 3m", env: {}, prompt: `SHENGSHENG_EVOLVE 心跳：生生，执行一息。\n项目根：${s.root}\n一息流程：…` })
+    await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+    const ens = await tool("state").execute({ action: "task", op: "ensure" }, s.ctx)
+    expect(ens.output).toContain("已存在（幂等，未新建）")
+    expect(s.tasks).toHaveLength(1)
+    // 归属证据补齐（env 落 root）——下息起不再依赖 prompt 回读
+    expect((s.tasks[0].env as Record<string, string>).SHENGSHENG_ROOT).toBe(s.root)
+    cleanup(s)
+  })
+
+  test("并发：SHENGSHENG_MAX_WORKERS 解析与放宽（缺省仍是 3，误设被夹）", () => {
+    expect(activeWorkerLimit(undefined)).toBe(3)
+    expect(activeWorkerLimit({})).toBe(3)
+    expect(activeWorkerLimit({ SHENGSHENG_MAX_WORKERS: "6" })).toBe(6)
+    expect(activeWorkerLimit({ SHENGSHENG_MAX_WORKERS: "2|6" })).toBe(2)
+    expect(activeWorkerLimit({ SHENGSHENG_MAX_WORKERS: "|6" })).toBe(6)     // 只给硬顶
+    expect(activeWorkerLimit({ SHENGSHENG_MAX_WORKERS: "999" })).toBe(64)   // 误设被夹到硬顶
+    expect(activeWorkerLimit({ SHENGSHENG_MAX_WORKERS: "abc" })).toBe(3)    // 非法回落缺省
+    expect(activeWorkerLimit({ SHENGSHENG_MAX_WORKERS: "0" })).toBe(1)
+  })
+
+  test("并发：放宽后一批多单同时派出；缺省下池满只顺延新建、复用与续派不受限", async () => {
+    // 放宽：4 单全出
+    const s = stub()
+    await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+    s.ctx.env.SHENGSHENG_MAX_WORKERS = "5"
+    const wide = await tool("dispatch").execute({ orders: [
+      { task: "并发 1", domain: "a" }, { task: "并发 2", domain: "b" }, { task: "并发 3", domain: "c" }, { task: "并发 4", domain: "d" },
+    ] }, s.ctx)
+    expect(wide.output).toContain("布雨完成")
+    expect(wide.output).not.toContain("未派")
+    expect(s.created).toHaveLength(4)
+    expect(parseControl(controlOf(s)).workers).toHaveLength(4)
+    cleanup(s)
+
+    // 缺省（3）：同样的四单出 3、顺延 1（不再整批拒绝）
+    const s2 = stub()
+    await tool("state").execute({ action: "init", root: s2.root, verify: "bun test" }, s2.ctx)
+    const narrow = await tool("dispatch").execute({ orders: [
+      { task: "默认 1", domain: "a" }, { task: "默认 2", domain: "b" }, { task: "默认 3", domain: "c" }, { task: "默认 4", domain: "d" },
+    ] }, s2.ctx)
+    expect(s2.created).toHaveLength(3)
+    expect(narrow.output).toContain("未派")
+    expect(narrow.output).toContain("上限 3")
+    // 池内 3 个 idle 时，复用仍可派出（只有新建受限）
+    s2.running.clear()
+    const pc = parseControl(controlOf(s2))
+    for (const w of pc.workers) w.status = "idle"
+    await Bun.write(join(s2.root, ".evolve", "control.md"), renderControl(pc))
+    const reuse = await tool("dispatch").execute({ orders: [{ task: "复用一单", domain: "a" }] }, s2.ctx)
+    expect(reuse.output).toContain("布雨完成")
+    expect(s2.created).toHaveLength(3)
+    cleanup(s2)
+  })
+
   test("沙箱边界：项目根在会话外时如实报错，不绕过约束", async () => {
     const s = stub()
     s.denied.push("/outside")
@@ -866,12 +974,12 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
     expect(s.created).toHaveLength(createdB)
     expect(s.sent[s.sent.length - 1].sessionId).toBe(lintSid)
 
-    // 新建被挡（同一池满前提下）——额度记账只算新建
+    // 新建超出上限——本单顺延（不再整批拒绝）：如实报「未派」且不新建
     s.running.clear()
     const blocked = await tool("dispatch").execute({ orders: [{ task: "池满新单", domain: "brandnew", fresh: true }] }, s.ctx)
     expect(blocked.output).toContain("上限 3")
-    const bd = blocked.data as { blocked?: boolean; workers?: number; needNew?: number; limit?: number }
-    expect(bd).toMatchObject({ blocked: true, workers: 3, needNew: 1, limit: 3 })
+    expect(blocked.output).toContain("未派")
+    expect((blocked.data as { limit?: number }).limit).toBe(3)
     expect(s.created).toHaveLength(createdB)
 
     // ----------------------------------------------------------------

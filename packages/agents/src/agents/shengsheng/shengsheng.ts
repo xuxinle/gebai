@@ -417,6 +417,84 @@ function memoizedRoot(ctx: ToolContext): string | undefined {
 const cleanRoot = (p: string): string => p.trim().replace(/[\\/]+$/, "")
 const isAbsRoot = (p: string): boolean => /^[\\/]/.test(p) || /^[A-Za-z]:[\\/]/.test(p)
 
+// ---------------------------------------------------------------------------
+// 心跳任务的项目归属（任务面按**名字**反查，名字因此必须承载项目身份）
+// ---------------------------------------------------------------------------
+
+/** 历史缺省任务名：早于按项目派生的版本用它建任务，故仍须认得（升级不丢既有项目的驱动任务）。 */
+const LEGACY_TASK_NAME = "SHENGSHENG_EVOLVE"
+
+/** 根归一化键：统一分隔符、去尾分隔符、Windows 盘符与大小写归一——仅比字符串会把同一项目判成两个。 */
+function rootKey(p: string): string {
+  const s = cleanRoot(p).replace(/\\/g, "/")
+  return /^[A-Za-z]:/.test(s) ? s.toLowerCase() : s
+}
+
+/** 两个项目根是否同一项目（任一为空即否：无从归属的登记不得据以复用或停用）。 */
+function sameRoot(a: string | undefined, b: string | undefined): boolean {
+  return !!a && !!b && rootKey(a) === rootKey(b)
+}
+
+/** 任务登记上的项目根（任务级 env 的 `SHENGSHENG_ROOT`；兼容从唤醒 prompt 的「项目根：」行回读）。
+ *  这是任务与项目之间**唯一**的绑定证据——`ensure`/`pause`/`resume` 的归属判据全部落在它上面。 */
+function taskRootOf(task: Record<string, unknown> | undefined): string | undefined {
+  const envRoot = taskEnvRoot(task)
+  if (envRoot) return envRoot
+  const prompt = typeof task?.prompt === "string" ? task.prompt : ""
+  const m = prompt.match(/^\s*项目根[:：]\s*(.+?)\s*$/m)
+  return m ? cleanRoot(m[1]) : undefined
+}
+
+/** 任务级 env 上的项目根（**只读 env**，不做 prompt 回读——用于判断「env 绑定是否已写」）。 */
+function taskEnvRoot(task: Record<string, unknown> | undefined): string | undefined {
+  const env = task?.env as Record<string, unknown> | undefined
+  const v = typeof env?.SHENGSHENG_ROOT === "string" ? env.SHENGSHENG_ROOT.trim() : ""
+  return v ? cleanRoot(v) : undefined
+}
+
+/** 按项目派生的心跳任务名：`SHENGSHENG_EVOLVE::<根名>-<根哈希>`。
+ *
+ *  **为什么不能是常量名**：任务面按名字反查（`tasks.list()`），多个演进项目共存时同名心跳会彼此
+ *  命中对方的任务——`ensure` 会把别人的驱动任务当成自己的（复用它＝唤醒别人的项目），
+ *  `pause` 会把别人的演进停掉。根名只为可读，**根哈希**才是判据（跨机、同名目录不撞）；
+ *  同根多次调用派生同一名字，故幂等。 */
+function evolveTaskName(root: string): string {
+  const key = rootKey(root)
+  const base = (key.replace(/\/+$/, "").split("/").pop() || "root").replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 32).replace(/^-+|-+$/g, "") || "root"
+  let h = 0x811c9dc5
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i)
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return `${LEGACY_TASK_NAME}::${base}-${h.toString(16).padStart(8, "0")}`
+}
+
+/** 心跳任务名解析（task 分支专用）。归属判据一律是任务上的项目根，**名字只作候选**：
+ *  - 本项目**已绑定**的任务（旧常量名 / 派生名 / 显式名依次探测）沿用其名——一条演进线只有一条心跳，
+ *    升级也不强制改名（唤醒消息自带项目坐标，改名只为人眼可读）；
+ *  - 尚无绑定任务时：显式名（会话 env，人写的，未被他项占用）优先于派生名；
+ *  - 被其他项目占用的同名任务一并回报（供调用方如实提示，不得静默复用）。 */
+function evolveTaskNames(
+  root: string,
+  all: Array<Record<string, unknown>>,
+  legacy: string,
+  explicit: string,
+): { name: string; conflicts: Array<Record<string, unknown>> } {
+  const byName = (n: string) => all.find((t) => String(t.name ?? "") === n)
+  const mine = (t: Record<string, unknown> | undefined) => !!t && sameRoot(taskRootOf(t), root)
+  const explicitClean = explicit.trim()
+  const derived = evolveTaskName(root)
+  for (const n of [legacy, derived, explicitClean]) {
+    if (n && mine(byName(n))) return { name: n, conflicts: [] }
+  }
+  const conflicts = [legacy, explicitClean, derived]
+    .filter((n, i, a) => n && a.indexOf(n) === i)
+    .map(byName)
+    .filter((t): t is Record<string, unknown> => !!t)
+  const name = explicitClean && explicitClean !== legacy && !byName(explicitClean) ? explicitClean : derived
+  return { name, conflicts }
+}
+
 /** 记本会话记忆（state action=init 用）：只记绝对路径——相对根已由参数按会话工作目录解释，
  *  写进记忆只会留下脏条目供其他动作误用。 */
 function rememberRoot(ctx: ToolContext, root: string): void {
@@ -716,8 +794,20 @@ export interface Order {
 
 /** worker 会话上下文水位上限（超此值的 idle worker 不再复用——上下文过肥，续派质量下降）。 */
 export const WORKER_CTX_LIMIT = 150_000
-/** 活动 worker 上限（running + idle）。 */
-export const ACTIVE_WORKER_LIMIT = 3
+/** 活动 worker 上限（running + idle）的**缺省值**；实际值由会话 env `SHENGSHENG_MAX_WORKERS` 决定。 */
+export const DEFAULT_ACTIVE_WORKER_LIMIT = 3
+/** 活动 worker 上限的**从宽上界**：防止环境变量误设（多写一个零）把控制面拖垮。 */
+export const MAX_ACTIVE_WORKER_LIMIT = 64
+/** 活动 worker 上限解析（每次调用现算）：env 形如 `6`、`1x`、`2|6`（默认|硬顶）。
+ *  默认值仍是 3（产品决策不变），要跑得更宽由会话 env 放开——演进会话里做一次性拓宽不必改源码。 */
+export function activeWorkerLimit(env?: Record<string, string | undefined>): number {
+  const raw = (env?.SHENGSHENG_MAX_WORKERS ?? "").trim()
+  if (!raw) return DEFAULT_ACTIVE_WORKER_LIMIT
+  const [d, c] = raw.split(/[|/,]/).map((x) => x.trim())
+  const cap = /^\d+$/.test(c ?? "") ? Math.max(1, Math.min(Number(c), MAX_ACTIVE_WORKER_LIMIT)) : MAX_ACTIVE_WORKER_LIMIT
+  if (!/^\d+$/.test(d)) return cap === MAX_ACTIVE_WORKER_LIMIT ? DEFAULT_ACTIVE_WORKER_LIMIT : cap
+  return Math.max(1, Math.min(Number(d), cap))
+}
 /** 单批派工上限。 */
 export const DISPATCH_LIMIT = 8
 /** 同一 worker 会话承接单数达此值即提示换新（上下文渐胖，继续复用质量下降）。 */
@@ -907,29 +997,65 @@ const stateTool: Tool = {
       const op = String(args.op ?? "status").trim() || "status"
       const tasks = tasksOf(ctx)
       if (!tasks) return { output: "任务能力未启用（服务端未挂调度器）——生生无法管理心跳任务。" }
-      const taskName = (ctx.env?.SHENGSHENG_TASK_NAME ?? "SHENGSHENG_EVOLVE").trim() || "SHENGSHENG_EVOLVE"
       const all = await tasks.list()
       const explicitId = args.task_id != null ? String(args.task_id).trim() : ""
-      let task = explicitId ? all.find((t) => String(t.id) === explicitId) : all.find((t) => String(t.name ?? "") === taskName)
+      // 归属解析：名字候选**一律按任务上的项目根核实**——同名但属他项的任务绝不当成本项目的（见 evolveTaskNames）。
+      const explicitName = (ctx.env?.SHENGSHENG_TASK_NAME ?? "").trim()
+      const resolved = evolveTaskNames(root, all, LEGACY_TASK_NAME, explicitName)
+      const taskName = resolved.name
+      const byId = explicitId ? all.find((t) => String(t.id) === explicitId) : undefined
+      // 显式点名 id：仍须核归属（id 可能来自别的演进线），核不中即拒——不采信、不改动。
+      const byIdForeign = !!explicitId && !!byId && !sameRoot(taskRootOf(byId), root)
+      let task = explicitId ? (byIdForeign ? undefined : byId) : all.find((t) => String(t.name ?? "") === taskName)
+      /** 同名但属他项的任务（含显式 id 撞他项）：停下来如实报，不复用。 */
+      const foreign = byIdForeign
+        ? [{ task: byId!, name: String(byId!.name ?? "") }]
+        : resolved.conflicts.map((t) => ({ task: t, name: String(t.name ?? "") }))
+      const foreignLine = (indent: string) =>
+        foreign.length
+          ? [
+              `${indent}提示：以下同名心跳任务属于**其他项目**，不是本项目的——不得复用、不得停用（要管它们，去那个项目的会话里按 id 操作）：`,
+              ...foreign.map((f) => `${indent}  - 「${f.name}」id=${f.task.id}｜项目根 ${taskRootOf(f.task) ?? "（登记无项目根，无从归属）"}`),
+            ].join("\n")
+          : ""
+      /** 「本项目没有心跳任务」的统一表述（status / resume 共用）：一并道出同名但属他项的任务。 */
+      const missing = () =>
+        [
+          explicitId
+            ? `未找到心跳任务 id=${explicitId}${byId ? "（该任务属于其他项目，已按归属拒绝）" : ""}。`
+            : `本项目（${root}）尚无心跳任务（探测名：${LEGACY_TASK_NAME} / ${evolveTaskName(root)}${explicitName ? ` / ${explicitName}` : ""}）。`,
+          foreignLine("-"),
+        ].filter(Boolean).join("\n")
+
+      // 显式点名了他项任务的 id：**直接拒绝**（既不采信也不改动，也不顺手另建一份）——
+      // 复用/停用别人的演进任务正是本归属校验要杜绝的错。
+      if (byIdForeign) {
+        return {
+          output: [`拒绝：任务 id=${explicitId} 不属于本项目（${root}）——不得复用、不得停用，也不代为新建。`, foreignLine("-")].join("\n"),
+          data: { blocked: true, task: byId, foreign: [byId], root },
+        }
+      }
 
       if (op === "status") {
-        if (!task) return { output: `未找到心跳任务（名 ${taskName}${explicitId ? ` / id ${explicitId}` : ""}）——用 action=task op=ensure 创建。`, data: { found: false } }
+        if (!task) return { output: `${missing()}\n——用 action=task op=ensure 创建。`, data: { found: false, foreign: foreign.map((f) => f.task), root } }
         return {
           output: [
             `心跳任务：${task.id}「${task.name ?? ""}」`,
+            `- 归属：项目根 ${taskRootOf(task) ?? "（登记无项目根——旧版创建，归属无从核实）"}`,
             `- 状态：${task.enabled ? "启用" : "停用"}｜运行态 ${task.state ?? "idle"}｜已运行 ${task.runCount ?? 0} 次`,
             task.schedule ? `- 周期：${task.schedule}` : "- 周期：（未设置）",
             task.nextRunAt ? `- 下次：${new Date(Number(task.nextRunAt)).toLocaleString("zh-CN")}` : "",
             task.lastStatus ? `- 上次：${task.lastStatus}${task.lastError ? `（${String(task.lastError).slice(0, 200)}）` : ""}` : "",
+            foreignLine("-"),
           ].filter(Boolean).join("\n"),
-          data: { task },
+          data: { task, foreign: foreign.map((f) => f.task), root },
         }
       }
 
       if (op === "resume") {
-        if (!task) return { output: `未找到心跳任务（名 ${taskName}）——用 op=ensure 创建。` }
+        if (!task) return { output: `${missing()}——用 op=ensure 创建。`, data: { found: false, foreign: foreign.map((f) => f.task) } }
         const updated = await tasks.update(String(task.id), { enabled: true })
-        return { output: `心跳任务已启用：${updated?.id}${updated?.schedule ? `（${updated.schedule}）` : ""}——演进恢复，下一息由它送达。`, data: { task: updated } }
+        return { output: `心跳任务已启用：${updated?.id}${updated?.schedule ? `（${updated.schedule}）` : ""}（项目根 ${taskRootOf(task) ?? "未知"}）——演进恢复，下一息由它送达。`, data: { task: updated } }
       }
 
       if (op === "pause") {
@@ -938,10 +1064,11 @@ const stateTool: Tool = {
         const led = await appendLedger(ctx, root, `<!-- pause:${stamp} -->`, `## 演进暂停（${stamp}）\n\n${reason}\n\n（恢复：用户启用心跳任务，或 shengsheng_state action=task op=resume。）`)
         if (led.error) return { output: led.error }
         let disabled = ""
+        // 停用是有破坏性的写：任务存在但归属核不中时**只按 id 且已核归属**才动（此处 task 已核过归属）
         if (task) {
           const updated = await tasks.update(String(task.id), { enabled: false })
-          disabled = updated ? `心跳任务已停用：${updated.id}` : "心跳任务停用失败"
-        } else disabled = `未找到心跳任务（名 ${taskName}）——无需停用`
+          disabled = updated ? `心跳任务已停用：${updated.id}（项目根 ${taskRootOf(task) ?? "未知"}）` : "心跳任务停用失败"
+        } else disabled = `未找到本项目的心跳任务（名 ${taskName}）——无需停用`
         let notifyNote = "未配置通知通道（暂停信息已写入台账）"
         if (task) {
           try {
@@ -954,21 +1081,29 @@ const stateTool: Tool = {
         state.note = `演进暂停：${reason}`
         const w = await saveState(ctx, root, state)
         if (w.error) return { output: w.error }
-        return { output: `演进已暂停（藏器于身，待时而动）：\n- ${disabled}\n- ${notifyNote}\n- 台账：${led.path}`, data: { paused: true, reason } }
+        return { output: [`演进已暂停（藏器于身，待时而动）：`, `- ${disabled}`, `- ${notifyNote}`, `- 台账：${led.path}`, foreignLine("-")].filter(Boolean).join("\n"), data: { paused: true, reason, foreign: foreign.map((f) => f.task) } }
       }
 
-      // op=ensure：幂等确保心跳任务存在且启用
+      // op=ensure：幂等确保本项目的心跳任务存在且启用
       const schedule = String(args.schedule ?? "@every 3m").trim() || "@every 3m"
       if (task) {
         const patch: Record<string, unknown> = {}
         if (!task.enabled) patch.enabled = true
         if (task.kind === "scheduled" && String(task.schedule ?? "") !== schedule) patch.schedule = schedule
+        // 旧版建的任务若任务级 env 缺项目根（唤醒 prompt 里带也可能被人改），补写一次——
+        // 归属从此有机器可读的绑定（幂等：env 已一致时不写）。
+        if (!sameRoot(taskEnvRoot(task), root)) patch.env = { ...((task.env as Record<string, string>) ?? {}), SHENGSHENG_ROOT: root }
         const updated = Object.keys(patch).length ? await tasks.update(String(task.id), patch) : task
         task = updated ?? task
         const kindNote = task.kind === "scheduled" ? "" : `\n- 注意：该任务类别为 ${task.kind}（非定时）——心跳不会自动送达，请改用 scheduled 任务或手动 task_run。`
         return {
-          output: `心跳任务已存在（幂等，未新建）：${task.id}「${task.name ?? ""}」——${task.enabled ? "启用" : "停用"}｜周期 ${task.schedule ?? "（未设置）"}${task.nextRunAt ? `｜下次 ${new Date(Number(task.nextRunAt)).toLocaleString("zh-CN")}` : ""}${kindNote}`,
-          data: { task, created: false },
+          output: [
+            `心跳任务已存在（幂等，未新建）：${task.id}「${task.name ?? ""}」`,
+            `- 归属：项目根 ${taskRootOf(task) ?? "未知"}${sameRoot(taskRootOf(task), root) ? "（与本项目一致）" : ""}`,
+            `- 状态：${task.enabled ? "启用" : "停用"}｜周期 ${task.schedule ?? "（未设置）"}${task.nextRunAt ? `｜下次 ${new Date(Number(task.nextRunAt)).toLocaleString("zh-CN")}` : ""}${kindNote}`,
+            foreignLine("-"),
+          ].filter(Boolean).join("\n"),
+          data: { task, created: false, root, foreign: foreign.map((f) => f.task) },
         }
       }
       const created = await tasks.add({
@@ -991,8 +1126,12 @@ const stateTool: Tool = {
         notifyOn: "model",
       })
       return {
-        output: `心跳任务已创建：${created.id}「${created.name ?? taskName}」｜周期 ${schedule}｜执行目标 sticky（下次触发时自动新建专用会话并预载 shengsheng）｜连续失败 5 次自动停用。\n第一息可立即验证：用 task_run 手动跑一次（或等下一定时触发）。`,
-        data: { task: created, created: true },
+        output: [
+          `心跳任务已创建：${created.id}「${created.name ?? taskName}」｜项目根 ${root}｜周期 ${schedule}｜执行目标 sticky（下次触发时自动新建专用会话并预载 shengsheng）｜连续失败 5 次自动停用。`,
+          `第一息可立即验证：用 task_run 手动跑一次（或等下一定时触发）。`,
+          foreignLine("-"),
+        ].filter(Boolean).join("\n"),
+        data: { task: created, created: true, root, foreign: foreign.map((f) => f.task) },
       }
     }
 
@@ -1070,7 +1209,7 @@ const stateTool: Tool = {
       state.seeds.length
         ? `种子队列：\n${state.seeds.map((s) => `- [${s.priority}] ${s.direction}（${s.source}）${s.constraint ? `｜${s.constraint}` : ""}`).join("\n")}`
         : "种子队列：（空）",
-      active >= ACTIVE_WORKER_LIMIT ? `活动 worker 已达上限 ${ACTIVE_WORKER_LIMIT}——本息只回收不布雨。` : "",
+              active >= activeWorkerLimit(ctx.env) ? `活动 worker 已达上限 ${activeWorkerLimit(ctx.env)}（可用 env SHENGSHENG_MAX_WORKERS 放宽）——本息只回收不布雨。` : "",
       !svc ? "会话控制面不可用（ctx.sessions 未注入）——仅读磁盘状态。" : "",
     ].filter(Boolean)
     return {
@@ -1199,19 +1338,25 @@ const dispatchTool: Tool = {
       plans.push({ alias, domain, task: order.task, sessionId, reuse, created: !reuse && !sessionId, revived, resume })
     }
 
-    // 池容量：活动 worker（running + idle）上限——只挡住新增，不阻断回收
-    const newCount = plans.filter((p) => p.created).length
-    if (!preview && state.workers.length + newCount > ACTIVE_WORKER_LIMIT) {
-      return {
-        output: `活动 worker 已 ${state.workers.length}，本次还需新建 ${newCount} → 超过上限 ${ACTIVE_WORKER_LIMIT}。先回收：读态（shengsheng_state）看哪些 idle/超时，然后 shengsheng_collect（collect 入账 / retire 退役），再布雨。`,
-        data: { blocked: true, workers: state.workers.length, needNew: newCount, limit: ACTIVE_WORKER_LIMIT },
-      }
-    }
+    // 池容量：活动 worker（running + idle）上限——**只挡新增**（新建），不阻断复用/续派（它们不增活动数）。
+    // 超出部分**本批不新建**（不整批拒绝：可复用的单照派、把新建的单如实回给模型下息补）——
+    // 整批原子拒绝会让一息凭空白费，是本仓实测的产能浪费形态。
+    const limit = activeWorkerLimit(ctx.env)
+    const room = Math.max(0, limit - state.workers.length)
+    const plannedNew = plans.filter((p) => p.created)
+    const over = new Set(plannedNew.slice(room))
+    const overflowNote = over.size
+      ? `容量提示：活动 worker 当前 ${state.workers.length}、上限 ${limit}——本批 ${over.size} 单新建已顺延到下息（回收后再派）；复用/续派不受限。`
+      : ""
 
     if (preview) {
       return {
-        output: [`布雨预检（未派工${svc ? "" : "；会话控制面不可用"}）：`, ...plans.map((p) => `- ${p.alias}｜${p.created ? "新建" : p.resume ? `续派会话 ${p.sessionId}` : "复用（同域 idle）"}｜${p.domain}｜${p.task}`)].join("\n"),
-        data: { preview: true, plan: plans },
+        output: [
+          `布雨预检（未派工${svc ? "" : "；会话控制面不可用"}）：`,
+          ...plans.map((p) => `- ${p.alias}｜${over.has(p) ? "新建（超出上限，待下息）" : p.created ? "新建" : p.resume ? `续派会话 ${p.sessionId}` : "复用（同域 idle）"}｜${p.domain}｜${p.task}`),
+          overflowNote,
+        ].filter(Boolean).join("\n"),
+        data: { preview: true, plan: plans, limit, over: [...over].length },
       }
     }
 
@@ -1225,6 +1370,11 @@ const dispatchTool: Tool = {
       const plan = plans[i]
       const order = orders[i]
       try {
+        // 超出活动上限的新建单：本批顺延（不占额度、不占轮次号）
+        if (over.has(plan)) {
+          results.push(`- ${plan.alias}：**未派**（活动 worker 达上限 ${limit}，当前 ${state.workers.length}——下息回收后再派）`)
+          continue
+        }
         if (plan.created) {
           const created = await svc!.store.createSession(ctx.user, `evolve-w-${plan.alias}`)
           plan.sessionId = created.id
@@ -1306,9 +1456,10 @@ const dispatchTool: Tool = {
       output: [
         `布雨完成（在途 ${state.inflight.length}｜池 ${state.workers.length}）：`,
         ...results,
+        overflowNote,
         "worker 在后台自行运行——**不要等**，本息到此收息（shengsheng_state action=note），下息由 shengsheng_state 的 awaiting 提示回收。",
-      ].join("\n"),
-      data: { root, plan: plans, workers: state.workers, inflight: state.inflight },
+      ].filter(Boolean).join("\n"),
+      data: { root, plan: plans, workers: state.workers, inflight: state.inflight, limit },
     }
   },
 }
@@ -1868,6 +2019,7 @@ export const envVars = [
   { name: "SHENGSHENG_VERIFY", description: "默认验证命令（派工消息原样传递，生生永不执行）" },
   { name: "SHENGSHENG_SEED_DOC", description: "种子库文档路径（待做方向清单）" },
   { name: "SHENGSHENG_RULES", description: "硬约束文档路径（worker 必守的项目规矩）" },
+  { name: "SHENGSHENG_MAX_WORKERS", description: "活动 worker 上限（running+idle，缺省 3）——形如 `6` 或 `默认|硬顶`（如 `3|16`），用于放宽并发" },
   { name: "SHENGSHENG_DISPATCH", description: "设为 preview 时 dispatch 只出计划不派工（预检）" },
 ]
 
