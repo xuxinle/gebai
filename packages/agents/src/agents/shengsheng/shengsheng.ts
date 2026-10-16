@@ -29,6 +29,15 @@ import {
   poolHeader,
   poolCells,
 } from "./control-format"
+// 卦象数据与起卦内核（纯数据 + 纯函数）：三张表（八卦/64 卦名/爻位语义）与「由输入算卦」的
+// 实现都在那里，本模块只负责「感天时」（读环境）与「落卦」（记档、闸门）。
+import {
+  buildHexagram,
+  hourIndexOf,
+  pickCandidate,
+  trigramOf,
+  type DivineInputs,
+} from "./hexagrams"
 
 // 解析面的公共出口（**兼容面**：形状判据与表格读取历来由此模块导出，其它模块/测试按其引用；
 // 实现在 `control-format.ts`，此处只做转出——单一实现，不会两处各写一份）。
@@ -975,7 +984,7 @@ const stateTool: Tool = {
           state.coord.verify ? `验证命令（只转发给 worker，你永不执行）：${state.coord.verify}` : "",
           state.coord.seedDoc ? `种子库：${state.coord.seedDoc}` : "",
           state.coord.rules ? `硬约束文档：${state.coord.rules}` : "",
-          "一息流程：shengsheng_state（读态）→ 观复（看 awaiting 与各 worker 实时态）→ shengsheng_collect（收藏/退役）→ 择种布雨（shengsheng_dispatch）→ shengsheng_state action=note（收息）。",
+          "一息流程：shengsheng_state（读态）→ 观复（看 awaiting 与各 worker 实时态）→ shengsheng_collect（收藏/退役）→ 择种布雨（shengsheng_dispatch；迷茫时先 shengsheng_divine）→ shengsheng_state action=note（收息）。",
         ].filter(Boolean).join("\n"),
         env: workerEnv(root, state.coord),
         maxConsecutiveErrors: 5,
@@ -1553,15 +1562,304 @@ const collectTool: Tool = {
 }
 
 // ---------------------------------------------------------------------------
+// divine：问卦（择的探索哨兵）
+// ---------------------------------------------------------------------------
+
+/** 台账里卦史的记录键前缀（与 `collect:` / `pause:` 并列，各自独立不吞噬）。 */
+const DIVINE_KEY = "divine"
+/** 问句哈希长度（**定长** hex）：`appendLedger` 的幂等判据是 `md.includes(key)` 的**子串**匹配，
+ *  变长键会让短的前缀被长的吞掉（`divine:3:ab` 命中 `divine:3:abc` 的记录）——定长即无此患。 */
+export const DIVINE_HASH_LEN = 8
+/** 卦史警示窗口：近 N 息内已问 ≥ K 卦时给模型一句提醒（**不拒**——要证据在场与迷茫，最终仍由它断）。 */
+export const DIVINE_WARN_WINDOW = 5
+export const DIVINE_WARN_COUNT = 3
+
+/** 问句哈希（定长 hex，FNV-1a 双流）：仅作**记录与回看**的标识，不参与幂等——
+ *  幂等键若掺问句，换个说法就能重掷，「初筮告再三渎」的闸等于没有。 */
+export function questionHash(question: string): string {
+  const norm = question.replace(/\s+/g, " ").trim()
+  let h1 = 0x811c9dc5
+  let h2 = 0x01000193
+  for (let i = 0; i < norm.length; i++) {
+    const c = norm.charCodeAt(i)
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0
+    h2 = Math.imul(h2 ^ (c + i), 0x85ebca6b) >>> 0
+  }
+  return (h1.toString(16).padStart(8, "0") + h2.toString(16).padStart(8, "0")).slice(0, DIVINE_HASH_LEN)
+}
+
+/** 掷值（0..2^32-1）：取**密码学随机源**，不用 `Date.now()`——
+ *  后者的分布由「模型何时决定调用」决定，越犹豫越集中于常用区间，等于让被随机化者提供随机性。 */
+function drawValue(): number {
+  try {
+    return crypto.getRandomValues(new Uint32Array(1))[0]
+  } catch {
+    return Math.floor(Math.random() * 0x100000000)
+  }
+}
+
+/** 时辰名（子一 … 亥十二），与 {@link hourIndexOf} 同序。 */
+const HOUR_NAMES = ["子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥"] as const
+const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"] as const
+
+/** 地气＝当前分支名（只读 `.git/HEAD` 一行）。
+ *  **不解析 HEAD hash、不跟随 gitdir（worktree）、不回退 packed-refs**：它只用于断卦合参、不入公式，
+ *  而那三种布局（worktree 的 `.git` 是文件、gc 后的 packed-refs、bare）各有代价；读不到一律写「未取」。 */
+async function readGitBranch(ctx: ToolContext, root: string): Promise<string> {
+  const r = await readAbs(ctx, `${root.replace(/[\\/]+$/, "")}/.git/HEAD`)
+  if (r.error || r.text == null) return "未取"
+  const m = /^ref:\s*refs\/heads\/(.+)$/m.exec(r.text.trim())
+  return m ? m[1].trim() : "未取（游离 HEAD 或非常规布局）"
+}
+
+/** 台账尾部的最近几条记录标题（不入公式，仅供断卦合参）。 */
+function ledgerTail(md: string, n: number): string[] {
+  return md
+    .split(/\r?\n/)
+    .filter((l) => /^##\s/.test(l.trim()))
+    .map((l) => l.trim().slice(2).trim())
+    .slice(-n)
+}
+
+/** 卦史：台账里带 `<!-- divine:{breath}:{hash} -->` 的已问息数。 */
+function divineBreaths(md: string): number[] {
+  const out: number[] = []
+  const re = /<!--\s*divine:(\d+):/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(md))) out.push(Number(m[1]))
+  return out
+}
+
+const divineTool: Tool = {
+  name: "divine",
+  description:
+    "问卦（择的探索哨兵）——前途迷茫时起一卦：环境数据入卦（呼吸/在途/池/种子/时辰/分支）、卦象入台账、卦指即落向。**只在迷茫时用**：岔口（≥2 候选证据平衡，传 candidates 定卦）、方向枯（种子空而河将断未断，不传 candidates 开卦）、势乱（大裂痕刚清完）。**证据明确、有待收成果、裂缝在场时不问**（问卦是渎）；无向可择的枯才问，需人拍板/环境受限的有向枯是缺门、不问。**一息一卦**（初筮告，再三渎，渎则不告）：同息再问不掷新卦，返回前卦原文——没有这道闸，模型会重掷到自己喜欢的答案。卦只给方向域，具体落向由你断（象/境/合参/落向）；定卦模式下「卦指即落」，但**卦不得覆盖硬约束**（违约束则弃卦并记一行理由），且**卦决定方向不等于保证可派**（池满派不出就把方向落种子、记「卦落未派」，不重掷）。卦落之向本息内不翻悔，新证据到下一息可改道（台账记「卦改判」）。不派 worker、不执行命令、不写 control.md。",
+  parameters: schema(
+    {
+      question: { type: "string", description: "迷茫之问（一句话，入台账）——须是真的迷茫：证据平衡的岔口、方向枯、势乱" },
+      candidates: { type: "array", items: { type: "string" }, description: "定卦模式：候选清单（通常为种子队列同优先级条目）。传即定卦（卦指即落），不传即开卦（卦只给方向域）" },
+      root: { type: "string", description: "项目根绝对路径（解析次序与 state 一致：显式参数 > 会话 env SHENGSHENG_ROOT > 本会话 init 记忆 > 工作目录向上探测）" },
+    },
+    ["question"],
+  ),
+  // 与 collect 同级：只读 + 台账追加（不派会话、不执行命令、不写 control.md）
+  requiresApproval: false,
+  outputSchema: schema(
+    {
+      mode: { title: "模式", type: "string", enum: ["定卦", "开卦"] },
+      question: { title: "问", type: "string" },
+      hexagram: {
+        title: "卦卡",
+        type: "object",
+        properties: {
+          name: { title: "本卦", type: "string" },
+          upperName: { title: "上卦", type: "string" },
+          lowerName: { title: "下卦", type: "string" },
+          moving: { title: "动爻", type: "number" },
+          movingLabel: { title: "爻位", type: "string" },
+          changed: { title: "变卦", type: "string" },
+          yong: { title: "用卦", type: "string" },
+          saying: { title: "生生断", type: "string" },
+          lineSemantics: { title: "爻位语义", type: "string" },
+        },
+        required: ["name", "moving", "changed"],
+      },
+      pick: { title: "卦指", type: "object", description: "定卦模式才有：指中的候选序号（自 1 起）与候选原文", properties: { index: { type: "number" }, candidate: { type: "string" } } },
+      env: { title: "环境快照", type: "object", description: "感天时得的实测值（卦卡同源）" },
+      inputs: { title: "起卦输入", type: "object", description: "全部起卦输入（含掷值）——卦可据此复算回放" },
+      replayKey: { title: "回放键", type: "string" },
+      replayed: { title: "是否回放", type: "boolean", description: "true = 同息再问，未掷新卦，返回前卦原文" },
+      ledgerKey: { title: "记录键", type: "string" },
+      accounted: { title: "是否已记档", type: "boolean" },
+      note: { title: "附注", type: "string" },
+    },
+    ["mode", "hexagram", "env", "inputs", "replayed"],
+  ),
+  async execute(args, ctx) {
+    const question = String(args.question ?? "").trim()
+    if (!question) return { output: "divine 需要 question（迷茫之问，一句话）——空问不成卦。" }
+    const rootArg = args.root != null ? String(args.root) : undefined
+    const loaded = await loadState(ctx, rootArg)
+    if (loaded.error) return { output: loaded.error }
+    if (!loaded.initialized || !loaded.root) {
+      return { output: `未初始化：内势无据（呼吸/池/在途都读不到），先 \`shengsheng_state action=init\` 固化坐标。${notInitialized(loaded.root, loaded.via, "")}` }
+    }
+    const root = loaded.root
+    const state = loaded.state
+
+    // 台账全文取一次：**一息一卦的闸与卦史都从它读**（台账是卦的唯一持久记忆）。
+    const led = await readAbs(ctx, evolvePaths(root).ledger)
+    if (led.error) return { output: `台账不可读（${led.error}）——卦可掷但无处记档，且无法判定同息是否已问：先修台账可达性。` }
+    const ledgerMd = led.text ?? ""
+    const prior = divineBreaths(ledgerMd)
+
+    // ---- 一息一卦（初筮告，再三渎，渎则不告）----
+    // 键只含呼吸、**不含问句哈希**：换一个说法就能重掷的闸等于没有。
+    // 定卦与开卦共用这一把锁（同息先开卦再定卦同样被挡）。
+    const already = prior.includes(state.breath)
+    if (already) {
+      const at = ledgerMd.indexOf(`<!-- ${DIVINE_KEY}:${state.breath}:`)
+      const rest = at >= 0 ? ledgerMd.slice(at) : ""
+      const next = rest.indexOf("<!--", 5)
+      const block = (next > 0 ? rest.slice(0, next) : rest.slice(0, 2000)).trim()
+      return {
+        output: [
+          `再三渎，渎则不告——第 ${state.breath} 息已问过一卦，本息不再掷。前卦原文：`,
+          "",
+          block || "（台账里该息的卦块读不出原文）",
+          "",
+          "卦落之向本息内不翻悔；新证据（worker 回报 / 深观发现）到**下一息**可改道（台账记「卦改判」及理由）。",
+        ].join("\n"),
+        data: { mode: "（未掷）", answer: "渎则不告", breath: state.breath, replayed: true, replayKey: `${DIVINE_KEY}:${state.breath}`, archived: block, accounted: true },
+      }
+    }
+
+    // ---- 感天时：全部实测，不造数 ----
+    const now = new Date()
+    const month = now.getMonth() + 1
+    const day = now.getDate()
+    const hourIndex = hourIndexOf(now.getHours())
+    const running = state.workers.filter((w) => w.status !== "idle").length
+    const draw = drawValue()
+    const branch = await readGitBranch(ctx, root)
+
+    const inputs: DivineInputs = {
+      breath: state.breath,
+      inflight: state.inflight.length,
+      running,
+      seeds: state.seeds.length,
+      seq: state.seq,
+      month,
+      day,
+      hourIndex,
+      draw,
+    }
+    const hex = buildHexagram(inputs)
+    const replayKey = [DIVINE_KEY, state.breath, month, day, hourIndex, state.seq, state.seeds.length, state.inflight.length, running, draw].join(":")
+
+    // ---- 定卦：候选入卦，卦指即落 ----
+    const cands = Array.isArray(args.candidates) ? (args.candidates as unknown[]).map((c) => String(c ?? "").trim()).filter(Boolean) : []
+    const mode = cands.length ? "定卦" : "开卦"
+    let pick: { index: number; candidate: string } | undefined
+    let pickLine = ""
+    if (cands.length) {
+      const index = pickCandidate(hex, cands.length, draw)
+      pick = { index, candidate: cands[index - 1] }
+      pickLine = `卦指：第 ${index} 候选（共 ${cands.length}）——**${pick.candidate}**`
+    }
+
+    // ---- 环境快照（原文与数值都呈给模型；工具只呈事实、不解读）----
+    const prio = state.seeds.reduce<Record<string, number>>((acc, s) => {
+      const k = s.priority || "待定"
+      acc[k] = (acc[k] ?? 0) + 1
+      return acc
+    }, {})
+    const prioText = Object.entries(prio).map(([k, v]) => `${k}×${v}`).join(" ") || "（无）"
+    const idle = state.workers.length - running
+    const recent = ledgerTail(ledgerMd, 4)
+    const near = prior.filter((b) => b > state.breath - DIVINE_WARN_WINDOW && b < state.breath)
+
+    const envLines = [
+      `- 天时：${HOUR_NAMES[hourIndex - 1]}时（${hourIndex}）｜星期${WEEKDAYS[now.getDay()]}｜${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`,
+      `- 内势：呼吸 ${state.breath}｜池 ${state.workers.length}（${running} 跑 / ${idle} 闲）｜在途 ${state.inflight.length}`,
+      `- 粮草：种子 ${state.seeds.length}（${prioText}）`,
+      `- 地气：分支 ${branch}`,
+      `- 近收：${recent.length ? recent.join("；") : "（台账无记录）"}`,
+    ]
+
+    const card = [
+      `# 卦·第 ${state.breath} 息｜${hex.name}`,
+      "",
+      `- 卦：**${hex.name}**（上${hex.upperName}${trigramOf(hex.upper).symbol} 下${hex.lowerName}${trigramOf(hex.lower).symbol}）动**${hex.movingLabel}**爻（${hex.moving}）→ 变**${hex.changed}**`,
+      `- 体用：用 ${hex.yong.name}（${hex.yong.side}——事在${hex.yong.scope}）｜体 ${hex.ti.name}（${hex.ti.side}）`,
+      `- 生生断：${hex.saying}`,
+      `- 爻位：${hex.movingLabel}＝${hex.lineSemantics}`,
+      pickLine ? `- ${pickLine}` : `- 开卦：卦只给方向域（爻位 + 生生断 + 变卦之势），据此择一条新方向入种子再布雨`,
+    ]
+      .filter(Boolean)
+      .join("\n")
+
+    const envBlock = ["## 环境快照（实测）", "", ...envLines].join("\n")
+    const frame = [
+      "## 断卦框架（你来填，四行）",
+      "",
+      "1. **象**：本卦→变卦，是什么势；",
+      "2. **境**：环境快照里最硬的一个事实；",
+      "3. **合参**：卦象呼应了环境里哪件事；",
+      "4. **落向**：具体动作（seed_add / dispatch / 修门 / 停）。",
+      "",
+      mode === "定卦"
+        ? "定卦模式：**卦指即落**——迷茫即证据平衡，卦的全部价值就是终结选择。布雨照常走 dispatch 纪律（同域复用、池限额一概不变）；**卦不得覆盖硬约束**（候选违约束则弃卦并记一行理由），**派不出不算渎**（落种子记「卦落未派」，不重掷）。"
+        : "开卦模式：卦只给方向域，据爻位 + 生生断 + 变卦之势择一条新方向 seed_add（可回读台账找与卦象呼应的旧线索），再布雨。",
+    ].join("\n")
+
+    // ---- 落卦：记档（幂等）+ 承诺 ----
+    const stamp = now.toISOString()
+    const hash = questionHash(question)
+    const ledgerKey = `${DIVINE_KEY}:${state.breath}:${hash}`
+    const block = [
+      `<!-- ${ledgerKey} -->`,
+      `## 卦·${stamp}｜第 ${state.breath} 息`,
+      "",
+      `- 问：${question}`,
+      `- 卦：${hex.name}（上${hex.upperName}下${hex.lowerName}）动${hex.movingLabel}爻 → 变${hex.changed}｜用${hex.yong.name}（${hex.yong.side}·事在${hex.yong.scope}）`,
+      `- 天时：${HOUR_NAMES[hourIndex - 1]}时｜星期${WEEKDAYS[now.getDay()]}｜${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`,
+      `- 内势：呼吸 ${state.breath}｜池 ${running} 跑 ${idle} 闲｜在途 ${state.inflight.length}`,
+      `- 粮草：种子 ${state.seeds.length}（${prioText}）`,
+      `- 地气：分支 ${branch}`,
+      `- 近收：${recent.join("；") || "（无）"}`,
+      pick ? `- 卦指：第 ${pick.index} 候选／${cands.length}——${pick.candidate}` : `- 开卦：${hex.saying}`,
+      `- 起卦输入（可复算）：${replayKey}`,
+    ].join("\n")
+    const appended = await appendLedger(ctx, root, `<!-- ${ledgerKey} -->`, block)
+    let note = ""
+    if (appended.error) note = `台账不可写（${appended.error}）——**未记档的卦不算掷过**，下息可重问。`
+    else if (!appended.appended) note = "台账已有该息的卦（并发写入被另一路先落）——以台账上那一卦为准。"
+
+    // 滥用提示（不拒）：问卦比硬想便宜，纪律只写在提示词里易被自己绕过。
+    const warn = near.length >= DIVINE_WARN_COUNT ? `\n\n⚠ 近 ${DIVINE_WARN_WINDOW} 息已问 ${near.length} 卦（本息为第 ${near.length + 1}）——**证据在场时问卦是渎**；裂缝在场先修门、有待收先收，比问卦大。` : ""
+
+    return {
+      output: [card, "", envBlock, "", frame, note ? `\n（落卦：${note}）` : `\n（落卦：已记档 ${appended.path}｜${ledgerKey}）`].join("\n") + warn,
+      data: {
+        mode,
+        question,
+        hexagram: {
+          name: hex.name,
+          upper: hex.upper,
+          lower: hex.lower,
+          upperName: hex.upperName,
+          lowerName: hex.lowerName,
+          moving: hex.moving,
+          movingLabel: hex.movingLabel,
+          changed: hex.changed,
+          yong: `${hex.yong.name}（${hex.yong.side}·事在${hex.yong.scope}）`,
+          saying: hex.saying,
+          lineSemantics: hex.lineSemantics,
+        },
+        pick: pick ?? null,
+        env: { month, day, hourIndex, hourName: HOUR_NAMES[hourIndex - 1], weekday: WEEKDAYS[now.getDay()], branch, breath: state.breath, pool: state.workers.length, running, idle, inflight: state.inflight.length, seeds: state.seeds.length, priority: prio, recent },
+        inputs,
+        replayKey,
+        replayed: false,
+        ledgerKey,
+        accounted: !appended.error && appended.appended,
+        note: note || null,
+      },
+    }
+  },
+}
+
+// ---------------------------------------------------------------------------
 // 定义
 // ---------------------------------------------------------------------------
 
 export const name = "shengsheng"
 export const description =
-  "生生（shengsheng）——《周易》「生生之谓易」。项目驻留自主演进的调度中枢：由定时任务周期唤醒（sticky 会话），每息择种下一个最值得做的方向、派 worker 会话并行干落地（编码/验证/分析）、回收成果入台账——控制平面自己永不干活，重活全在 worker，死一跳不丢全局。自带三工具（state=读态/坐标/择种/断点/心跳任务；dispatch=布雨派工；collect=深观/收藏/退役），`.evolve/control.md` 与台账由工具托管。适合给任意 git 项目搭「持续变好、无人值守」的演进流水线。当用户说「演进」「驻留开发」「持续改进这个项目」或要为项目创建自主演进任务时装载。输入：驱动任务的唤醒消息（含项目根/验证命令/种子库等项目坐标）。"
+  "生生（shengsheng）——《周易》「生生之谓易」。项目驻留自主演进的调度中枢：由定时任务周期唤醒（sticky 会话），每息择种下一个最值得做的方向、派 worker 会话并行干落地（编码/验证/分析）、回收成果入台账——控制平面自己永不干活，重活全在 worker，死一跳不丢全局。自带四工具（state=读态/坐标/择种/断点/心跳任务；dispatch=布雨派工；collect=深观/收藏/退役；divine=问卦——迷茫时起一卦，环境数据入卦、卦象入台账、卦指即落向，一息一卦），`.evolve/control.md` 与台账由工具托管。适合给任意 git 项目搭「持续变好、无人值守」的演进流水线。当用户说「演进」「驻留开发」「持续改进这个项目」「算卦/问卦/迷茫问向」或要为项目创建自主演进任务时装载。输入：驱动任务的唤醒消息（含项目根/验证命令/种子库等项目坐标）。"
 export const systemPrompt = systemPromptBase.endsWith("\n") ? systemPromptBase : `${systemPromptBase}\n`
-export const tools: Record<string, Tool> = { state: stateTool, dispatch: dispatchTool, collect: collectTool }
-/** 审批：布雨会派生会改仓库的会话（派生前确认）；state 的原子动作按分支动态门控（见工具定义）；收藏/退役是回收动作，免审批。 */
+export const tools: Record<string, Tool> = { state: stateTool, dispatch: dispatchTool, collect: collectTool, divine: divineTool }
+/** 审批：布雨会派生会改仓库的会话（派生前确认）；state 的原子动作按分支动态门控（见工具定义）；收藏/退役是回收动作、问卦是只读+台账追加，皆免审批。 */
 export const requiresApproval: Record<string, boolean> = { dispatch: true, collect: false }
 export const preload = false
 export const envVars = [

@@ -4,6 +4,22 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
 import { def as shengshengDef, parseControl, renderControl, dedupeState, inflightSession, isSessionIdShape, tableBlock, SECTION_HEADINGS } from "./shengsheng"
+// 问卦内核（纯数据/纯函数）与测试用常量直引，不经 def（工具面断言与内核断言分开两把尺）
+import {
+  buildHexagram,
+  hexagramName,
+  hourIndexOf,
+  pickCandidate,
+  trigramOrderOf,
+  trigramOf,
+  TRIGRAMS,
+  HEXAGRAM_SAYINGS,
+  LINE_LABELS,
+  LINE_SEMANTICS,
+  OPERATION_FAMILIES,
+  type DivineInputs,
+} from "./hexagrams"
+import { questionHash, DIVINE_WARN_COUNT, DIVINE_HASH_LEN } from "./shengsheng"
 // 版本化解析模块（本单新抽）：判代/位置读取/升级函数与其版本声明——单测直接锁它的契约
 import {
   parseInflightRow,
@@ -189,13 +205,16 @@ const controlOf = (s: Stub) => readFileSync(join(s.root, ".evolve", "control.md"
 const ledgerOf = (s: Stub) => readFileSync(join(s.root, ".evolve", "ledger.md"), "utf8")
 
 describe("shengsheng sub-agent（演进调度中枢）", () => {
-  test("工具面精简：三工具覆盖一息，不复刻已有能力", () => {
-    expect(Object.keys(shengshengDef.tools!)).toEqual(["state", "dispatch", "collect"])
+  test("工具面精简：四工具覆盖一息，不复刻已有能力", () => {
+    expect(Object.keys(shengshengDef.tools!)).toEqual(["state", "dispatch", "collect", "divine"])
     for (const t of ["read", "write", "edit", "sh", "py", "file", "list", "status", "send", "create", "notify", "run"]) {
       expect(Object.keys(shengshengDef.tools!)).not.toContain(t)
     }
-    // 回收动作免审批；布雨独立会话/停用任务需审批
+    // 回收与原问免审批；布雨独立会话/停用任务需审批
     expect(shengshengDef.requiresApproval).toEqual({ dispatch: true, collect: false })
+    // divine 的免审批走**工具级**声明（与 state 同型），不进 requiresApproval 映射：
+    // 映射是子Agent 级覆盖表，两键（dispatch/collect）是既有契约，加键会动到别人的断言面。
+    expect(tool("divine").requiresApproval).toBe(false)
     expect(shengshengDef.preload).toBe(false)
     expect(shengshengDef.envVars?.every((v) => v.name.startsWith("SHENGSHENG_"))).toBe(true)
     expect(shengshengDef.systemPrompt).toContain("生生")
@@ -2012,6 +2031,211 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
     expect(INFLIGHT_CURRENT).toBe(3)
     expect(POOL_CURRENT).toBe(2)
     expect(extended.length).toBe(INFLIGHT_VERSIONS.length + 1)
+  })
+
+  // -------------------------------------------------------------------------
+  // 问卦（divine）：起卦内核 + 择的哨兵
+  // -------------------------------------------------------------------------
+
+  describe("问卦（divine）", () => {
+    const base = (over: Partial<DivineInputs> = {}): DivineInputs => ({
+      breath: 1, inflight: 0, running: 0, seeds: 0, seq: 0, month: 1, day: 1, hourIndex: 1, draw: 0, ...over,
+    })
+
+    test("卦表完整性：64 卦名唯一、生生断 64 句齐备、爻位语义六行", () => {
+      const names = new Set<string>()
+      for (let u = 1; u <= 8; u++) for (let l = 1; l <= 8; l++) names.add(hexagramName(u, l))
+      expect(names.size).toBe(64)
+      expect(Object.keys(HEXAGRAM_SAYINGS)).toHaveLength(64)
+      for (const n of names) expect(HEXAGRAM_SAYINGS[n], `缺断语：${n}`).toBeTruthy()
+      for (const k of Object.keys(HEXAGRAM_SAYINGS)) expect(names.has(k), `断语表有陌生卦名：${k}`).toBe(true)
+      expect(LINE_SEMANTICS).toHaveLength(6)
+      expect(LINE_LABELS).toEqual(["初", "二", "三", "四", "五", "上"])
+      // 八卦表：序、名、三爻同源（序→爻是其二进制自下而上）
+      for (const t of TRIGRAMS) {
+        expect(t.order).toBeGreaterThanOrEqual(1)
+        expect(t.order).toBeLessThanOrEqual(8)
+        expect(trigramOrderOf(t.lines), `${t.name} 序爻同源`).toBe(t.order)
+      }
+      expect(TRIGRAMS.map((t) => t.name).join("")).toBe("乾兑离震巽坎艮坤")
+      // 生生断必须命中操作动词族（断语是方向不是文学）——64 句均须可执行
+      const noVerb = Object.entries(HEXAGRAM_SAYINGS).filter(([, s]) => !OPERATION_FAMILIES.some((f) => s.includes(f))).map(([k]) => k)
+      expect(noVerb, `断语未命中任何操作族：${noVerb.join("/")}`).toEqual([])
+    })
+
+    test("成卦可复算（同输入同卦）+ 定卦与变卦正确（动爻翻转）+ 体用归属随爻位", () => {
+      const i = base({ breath: 7, inflight: 1, running: 2, seeds: 3, seq: 4, month: 5, day: 6, hourIndex: 2, draw: 12345 })
+      const a = buildHexagram(i)
+      const b = buildHexagram({ ...i })
+      expect(b).toEqual(a) // 纯函数：可复算回放
+      expect(a.saying).toBe(HEXAGRAM_SAYINGS[a.name])
+      expect(a.changed).toBeTruthy()
+      const t = trigramOf(a.moving <= 3 ? a.lower : a.upper)
+      expect(a.yong.name).toBe(t.name)
+      expect(a.yong.scope).toBe(a.moving <= 3 ? "本家" : "方向库")
+      expect(a.ti.name).toBe(trigramOf(a.moving <= 3 ? a.upper : a.lower).name)
+      expect(a.lineSemantics).toBe(LINE_SEMANTICS[a.moving - 1])
+      expect(a.moving).toBeGreaterThanOrEqual(1)
+      expect(a.moving).toBeLessThanOrEqual(6)
+      // 动爻不翻转则变卦即本卦（参照点）：对某些输入应出现，证明变卦非恒等也非恒异
+      expect(hexagramName(a.upper, a.lower)).toBe(a.name)
+    })
+
+    test("呼吸入卦：内势同则本卦同（本卦是处境不是抽签），呼吸 +1 则本卦必不同", () => {
+      const i = base({ breath: 5, inflight: 1, running: 2 })
+      const at = (breath: number, draw: number) => buildHexagram({ ...i, breath, draw })
+      // 同一息：掷值不同只换动爻（与变卦），本卦不动
+      expect(at(5, 0).name).toBe(at(5, 999999).name)
+      expect(at(5, 0).lower).toBe(at(5, 999999).lower)
+      // 呼吸 +1（内势其余项不变）⇒ 下卦序 +1 ⇒ 本卦必不同
+      expect(at(6, 0).lower).not.toBe(at(5, 0).lower)
+      expect(at(6, 0).name).not.toBe(at(5, 0).name)
+      // 内势任一量变都会改变下卦序（卦随河变）
+      expect(buildHexagram({ ...i, running: 3 }).lower).not.toBe(buildHexagram({ ...i }).lower)
+    })
+
+    test("卦指分布：任意候选数都可达、无死区（旧式「卦序号+动爻」取模在 k>6 时有永不可达项）", () => {
+      const h = buildHexagram(base({ breath: 3 }))
+      for (const k of [1, 2, 3, 4, 5, 6, 7, 8, 9, 13]) {
+        const seen = new Set<number>()
+        for (let d = 0; d < 4096; d++) seen.add(pickCandidate(h, k, d))
+        expect(seen.size, `k=${k} 有候选项永不可达`).toBe(k)
+        for (const p of seen) {
+          expect(p).toBeGreaterThanOrEqual(1)
+          expect(p).toBeLessThanOrEqual(k)
+        }
+      }
+      // 单向性：固定掷值同卦同 k ⇒ 同结果（可复算）
+      expect(pickCandidate(h, 7, 12345)).toBe(pickCandidate(h, 7, 12345))
+    })
+
+    test("时辰序：子一…亥十二，跨子时边界", () => {
+      expect(hourIndexOf(0)).toBe(1)   // 23:00–00:59 子
+      expect(hourIndexOf(1)).toBe(2)   // 01:00–02:59 丑
+      expect(hourIndexOf(2)).toBe(2)   // 丑
+      expect(hourIndexOf(12)).toBe(7)  // 午
+      expect(hourIndexOf(23)).toBe(1)  // 子（跨夜）
+    })
+
+    test("问卦：环境入卦 + 卦入台账 + 断卦框架（零新执行面：不派会话、不执行命令、不写 control.md）", async () => {
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      await tool("state").execute({ action: "seed_add", direction: "修复验证门", priority: "P0" }, s.ctx)
+      const controlBefore = controlOf(s)
+      const r = await tool("divine").execute({ question: "下一步做什么" }, s.ctx)
+      expect(r.output).toContain("# 卦")
+      expect(r.output).toContain("环境快照")
+      expect(r.output).toContain("断卦框架")
+      const d = r.data as Record<string, unknown>
+      expect(d.mode).toBe("开卦")
+      expect(d.replayed).toBe(false)
+      expect((d.hexagram as Record<string, unknown>).name).toBeTruthy()
+      const env = d.env as Record<string, number | string>
+      expect(env.breath).toBe(0)
+      expect(env.seeds).toBe(1)
+      expect(env.branch).toBeTruthy() // stub 无 .git ⇒ 「未取」（降级不抛）
+      expect(ledgerOf(s)).toContain("## 卦·")
+      expect(ledgerOf(s)).toContain(String(d.ledgerKey))
+      // 零新执行面：不派会话、不跑命令、不动 control.md
+      expect(s.sent).toHaveLength(0)
+      expect(s.created).toHaveLength(0)
+      expect(controlOf(s)).toBe(controlBefore)
+      cleanup(s)
+    })
+
+    test("一息一卦：同息再问不掷新卦、返回前卦原文（换问句也绕不过——键不含问句哈希）", async () => {
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      const first = await tool("divine").execute({ question: "下一步做什么" }, s.ctx)
+      const firstCard = String((first.data as Record<string, unknown>).hexagram ? (first.data as { hexagram: { name: string } }).hexagram.name : "")
+      const second = await tool("divine").execute({ question: "完全换一个说法：接下来该往哪走？" }, s.ctx)
+      expect(second.output).toContain("渎则不告")
+      expect((second.data as Record<string, unknown>).replayed).toBe(true)
+      expect(second.output).toContain(firstCard) // 返回前卦原文
+      // 台账只落了一卦（同息）
+      const md = ledgerOf(s)
+      expect(md.split("## 卦·").length - 1).toBe(1)
+      cleanup(s)
+    })
+
+    test("定卦：传 candidates 即卦指即落（1 起序号 + 候选原文），且卦指在候选范围内", async () => {
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      const cands = ["甲方向", "乙方向", "丙方向", "丁方向", "戊方向"]
+      const r = await tool("divine").execute({ question: "甲乙丙丁戊证据平衡，先做哪个", candidates: cands }, s.ctx)
+      const d = r.data as { mode: string; pick: { index: number; candidate: string } }
+      expect(d.mode).toBe("定卦")
+      expect(d.pick.index).toBeGreaterThanOrEqual(1)
+      expect(d.pick.index).toBeLessThanOrEqual(cands.length)
+      expect(d.pick.candidate).toBe(cands[d.pick.index - 1])
+      expect(r.output).toContain("卦指")
+      expect(ledgerOf(s)).toContain(d.pick.candidate)
+      cleanup(s)
+    })
+
+    test("渎则不告跨息解除：note 推进呼吸后，下一息可再问", async () => {
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      await tool("divine").execute({ question: "第一息" }, s.ctx)
+      await tool("state").execute({ action: "note", note: "收息" }, s.ctx) // 呼吸 0 → 1
+      const r = await tool("divine").execute({ question: "第二息" }, s.ctx)
+      expect((r.data as Record<string, unknown>).replayed).toBe(false)
+      expect(ledgerOf(s).split("## 卦·").length - 1).toBe(2)
+      cleanup(s)
+    })
+
+    test("未初始化拒绝问卦：内势无据（不掷、不落档）", async () => {
+      const s = stub()
+      // 不 init：根下无 .evolve/control.md
+      const r = await tool("divine").execute({ question: "问什么", root: s.root }, s.ctx)
+      expect(r.output).toContain("未初始化")
+      expect(existsSync(join(s.root, ".evolve", "ledger.md"))).toBe(false)
+      cleanup(s)
+    })
+
+    test("台账键不互吞：定长问句哈希，前缀型键不误命中（appendLedger 是子串判据）", () => {
+      const a = questionHash("下一步做什么")
+      const b = questionHash("下一步做什么！")
+      expect(a).toHaveLength(DIVINE_HASH_LEN)
+      expect(b).toHaveLength(DIVINE_HASH_LEN)
+      expect(a).not.toBe(b)
+      // 子串判据下的关键性质：两个键不互为前缀（定长 ⇒ 恒成立）
+      expect(`<!-- divine:3:${a} -->`.includes(`<!-- divine:3:${b} -->`)).toBe(false)
+      // 空白归一只做「压连续空白 + 去首尾」——问句内部的空白仍视为不同问（哈希**不参与幂等**，
+      // 它只是记录标识，故无需更激进的标点/全半角归一；一息一卦的闸看的是呼吸）。
+      expect(questionHash("  下一步做什么 ")).toBe(a)
+      expect(questionHash("下一步\t做什么")).toBe(questionHash("下一步 做什么"))
+    })
+
+    test("候选边界：空数组=开卦（不开定卦）、单个候选恒指它、全空串视同未传", async () => {
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      const one = await tool("divine").execute({ question: "只有一个候选", candidates: ["唯一方向"] }, s.ctx)
+      const d1 = one.data as { mode: string; pick: { index: number; candidate: string } }
+      expect(d1.mode).toBe("定卦")
+      expect(d1.pick).toEqual({ index: 1, candidate: "唯一方向" })
+      await tool("state").execute({ action: "note", note: "收息" }, s.ctx)
+      // 空数组 / 全空串：视同未传（开卦）——定卦模式不得因空清单而成「指了个空」
+      const empty = await tool("divine").execute({ question: "空清单", candidates: [] }, s.ctx)
+      expect((empty.data as Record<string, unknown>).mode).toBe("开卦")
+      expect((empty.data as Record<string, unknown>).pick).toBeNull()
+      await tool("state").execute({ action: "note", note: "收息" }, s.ctx)
+      const blank = await tool("divine").execute({ question: "全空串", candidates: ["  ", ""] }, s.ctx)
+      expect((blank.data as Record<string, unknown>).mode).toBe("开卦")
+      cleanup(s)
+    })
+
+    test("卦史滥用提示：近窗内问得密则附一句提醒（不拒）", async () => {
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      let last = ""
+      for (let i = 0; i < DIVINE_WARN_COUNT + 1; i++) {
+        last = (await tool("divine").execute({ question: `第 ${i} 问` }, s.ctx)).output
+        await tool("state").execute({ action: "note", note: "收息" }, s.ctx)
+      }
+      expect(last).toContain("问卦是渎")
+      cleanup(s)
+    })
   })
 })
 
