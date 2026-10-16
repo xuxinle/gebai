@@ -1,12 +1,12 @@
 /**
- * local_infer 的**统一推理目标层**（providers）：把「这次推理打哪个端点」从调用层里抽出来。
+ * llm_infer 的**统一推理目标层**（providers）：把「这次推理打哪个端点」从调用层里抽出来。
  *
  * 三类目标（同一个 target 字符串就能切换，generate/batch/jobs 全部通用）：
  *   1. `local`（缺省）：本机受管 llama-server——端口取服务实例状态文件（`readServerStates`，多个实例时取
- *      端口最小的一个并把其余列进 note），没有状态文件时退回 `LOCAL_INFER_PORT` / 8080；
+ *      端口最小的一个并把其余列进 note），没有状态文件时退回 `GEBAI_LLM_INFER_PORT` / 8080；
  *   2. 直连 URL：`target="http://192.168.1.20:8080"` 或 `https://...`——任意 OpenAI 兼容端点
  *      （局域网另一台机器、LM Studio/vLLM/Ollama 的兼容口、云端网关都算）；
- *   3. 命名目标：环境变量 `LOCAL_INFER_TARGETS`（JSON 数组，元素 `{ name, base_url, api_key?, model?, note? }`）
+ *   3. 命名目标：环境变量 `GEBAI_LLM_INFER_TARGETS`（JSON 数组，元素 `{ name, base_url, api_key?, model?, note? }`）
  *      里声明的目标，`target="<name>"` 选用。
  *
  * 设计要点：
@@ -19,10 +19,11 @@
 import type { Tool, ToolSchema } from "@gebai/sdk"
 import { probe, type ProbeResult } from "./api"
 import { baseUrl, defaultPort, inferHome, readServerStates, type ServerState } from "./paths"
+import { envDeprecationLines, envVar } from "./env"
 
 // ── 类型 ──────────────────────────────────────────────────────────────────
 
-/** LOCAL_INFER_TARGETS 里声明的命名目标（环境变量形态：JSON 数组的一个元素）。 */
+/** GEBAI_LLM_INFER_TARGETS 里声明的命名目标（环境变量形态：JSON 数组的一个元素）。 */
 export interface TargetSpec {
   name: string
   base_url: string
@@ -35,7 +36,7 @@ export interface TargetSpec {
 export interface InferTarget {
   /** 目标标识：`local`、命名目标的 name，或直连 URL 原文（会落进 job.json，便于追溯结果出自哪个端点）。 */
   name: string
-  /** `local` = 本机受管服务（状态文件 / LOCAL_INFER_PORT）；`remote` = 直连 URL 或命名目标（不由本机管理）。 */
+  /** `local` = 本机受管服务（状态文件 / GEBAI_LLM_INFER_PORT）；`remote` = 直连 URL 或命名目标（不由本机管理）。 */
   kind: "local" | "remote"
   baseUrl: string
   apiKey?: string
@@ -66,24 +67,24 @@ const CONFIG_EXAMPLE = '{"name":"lan","base_url":"http://192.168.1.20:8080","api
 // ── 环境变量解析 ──────────────────────────────────────────────────────────
 
 /**
- * 解析 `LOCAL_INFER_TARGETS`（容错：非 JSON / 非数组 / 缺字段 / 非法端点 / 重复名 / 占用保留名
+ * 解析 `GEBAI_LLM_INFER_TARGETS`（容错：非 JSON / 非数组 / 缺字段 / 非法端点 / 重复名 / 占用保留名
  * 一律收集进 `errors` 而不抛）。返回的 `targets` 只含可用项，坏条目跳过并各记一条带序号的错误，
  * 调用方可原样展示（"哪一项坏了、为什么"比"配置无效"有用得多）。
  */
 export function parseTargetsEnv(env: Record<string, string>): { targets: TargetSpec[]; errors: string[] } {
   const errors: string[] = []
-  const raw = env?.["LOCAL_INFER_TARGETS"]
+  const raw = envVar(env, "TARGETS")
   if (raw == null || raw.trim() === "") return { targets: [], errors }
 
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
   } catch (e) {
-    return { targets: [], errors: [`LOCAL_INFER_TARGETS 不是合法 JSON：${(e as Error).message}`] }
+    return { targets: [], errors: [`GEBAI_LLM_INFER_TARGETS 不是合法 JSON：${(e as Error).message}`] }
   }
   if (!Array.isArray(parsed)) {
     const kind = parsed === null ? "null" : typeof parsed
-    return { targets: [], errors: [`LOCAL_INFER_TARGETS 必须是 JSON 数组（形如 [${CONFIG_EXAMPLE}]），当前是 ${kind}`] }
+    return { targets: [], errors: [`GEBAI_LLM_INFER_TARGETS 必须是 JSON 数组（形如 [${CONFIG_EXAMPLE}]），当前是 ${kind}`] }
   }
 
   const targets: TargetSpec[] = []
@@ -133,7 +134,7 @@ export function parseTargetsEnv(env: Record<string, string>): { targets: TargetS
 
 // ── 目标解析 ──────────────────────────────────────────────────────────────
 
-/** 本机目标：状态文件里的实例优先（多实例取端口最小的一个），否则 LOCAL_INFER_PORT / 8080。 */
+/** 本机目标：状态文件里的实例优先（多实例取端口最小的一个），否则 GEBAI_LLM_INFER_PORT / 8080。 */
 function resolveLocalTarget(env: Record<string, string>, apiKey?: string): InferTarget {
   let states: ServerState[] = []
   try {
@@ -159,7 +160,7 @@ function resolveLocalTarget(env: Record<string, string>, apiKey?: string): Infer
     }
     target.note = note
   } else {
-    target.note = `无服务实例状态文件，按 LOCAL_INFER_PORT 或 8080 推断为端口 ${port}；服务可能尚未启动`
+    target.note = `无服务实例状态文件，按 GEBAI_LLM_INFER_PORT 或 8080 推断为端口 ${port}；服务可能尚未启动`
   }
 
   if (apiKey) target.apiKey = apiKey
@@ -171,21 +172,21 @@ function unknownTargetError(key: string, targets: TargetSpec[], errors: string[]
   const names = targets.map((t) => t.name)
   const lines = [
     `未知推理目标 "${key}"：既不是 local、也不是 http(s) 端点、也不在命名目标里。`,
-    names.length ? `可用命名目标：${names.join("、")}` : "当前没有命名目标（LOCAL_INFER_TARGETS 未配置或全部无效）。",
+    names.length ? `可用命名目标：${names.join("、")}` : "当前没有命名目标（GEBAI_LLM_INFER_TARGETS 未配置或全部无效）。",
     '也可以直接给端点：target="http://192.168.1.20:8080"（任意 OpenAI 兼容端点）。',
-    `配置命名目标（环境变量 LOCAL_INFER_TARGETS，JSON 数组）：LOCAL_INFER_TARGETS='[${CONFIG_EXAMPLE}]'`,
+    `配置命名目标（环境变量 GEBAI_LLM_INFER_TARGETS，JSON 数组）：GEBAI_LLM_INFER_TARGETS='[${CONFIG_EXAMPLE}]'`,
   ]
-  if (errors.length) lines.push(`LOCAL_INFER_TARGETS 解析告警：${errors.slice(0, 5).join("；")}`)
+  if (errors.length) lines.push(`GEBAI_LLM_INFER_TARGETS 解析告警：${errors.slice(0, 5).join("；")}`)
   return lines.join("\n")
 }
 
 /**
  * 解析本次调用要用的目标：
- *   * `undefined` / `"local"` → 本机（状态文件 > LOCAL_INFER_PORT > 8080）；
+ *   * `undefined` / `"local"` → 本机（状态文件 > GEBAI_LLM_INFER_PORT > 8080）；
  *   * `http(s)://…` → 直连该端点；
- *   * 其它 → 按命名目标查 LOCAL_INFER_TARGETS（未知名返回 `{ error }`，**不抛异常**）。
+ *   * 其它 → 按命名目标查 GEBAI_LLM_INFER_TARGETS（未知名返回 `{ error }`，**不抛异常**）。
  *
- * api_key 优先级：显式参数 > 命名目标字段 > 环境变量 `LOCAL_INFER_REMOTE_API_KEY`。
+ * api_key 优先级：显式参数 > 命名目标字段 > 环境变量 `GEBAI_LLM_INFER_REMOTE_API_KEY`。
  */
 export function resolveTarget(
   name: string | undefined,
@@ -195,7 +196,7 @@ export function resolveTarget(
   const env = ctx?.env ?? {}
   const key = str(name) ?? LOCAL_NAME
   const explicit = str(explicitKey)
-  const envKey = str(env["LOCAL_INFER_REMOTE_API_KEY"])
+  const envKey = str(envVar(env, "REMOTE_API_KEY"))
 
   if (key === LOCAL_NAME) return resolveLocalTarget(env, explicit ?? envKey)
 
@@ -297,8 +298,8 @@ const targetsTool: Tool = {
   name: "targets",
   safeMode: true, // 只读：列目标 + GET 探活（/health、/props），不发写操作
   description:
-    "列出可用的推理目标——推理不限于本机：local（本机受管 llama-server，端口取服务实例状态文件或 LOCAL_INFER_PORT）" +
-    "与 LOCAL_INFER_TARGETS 环境变量声明的命名目标（局域网另一台机器 / 云端 OpenAI 兼容端点），密钥一律掩码显示。" +
+    "列出可用的推理目标——推理不限于本机：local（本机受管 llama-server，端口取服务实例状态文件或 GEBAI_LLM_INFER_PORT）" +
+    "与 GEBAI_LLM_INFER_TARGETS 环境变量声明的命名目标（局域网另一台机器 / 云端 OpenAI 兼容端点），密钥一律掩码显示。" +
     "probe=true 时逐个探活（GET /health + /props），给出可用性、n_ctx、slots（并发上限）与模型名——" +
     "批量条目长度预算与并发上限都以它为依据。只读、免审批。",
   parameters: schema({
@@ -330,17 +331,18 @@ const targetsTool: Tool = {
     })
 
     if (errors.length) {
-      lines.push("", `LOCAL_INFER_TARGETS 解析告警（${errors.length} 条）：`)
+      lines.push("", `GEBAI_LLM_INFER_TARGETS 解析告警（${errors.length} 条）：`)
       for (const e of errors.slice(0, 10)) lines.push(`  - ${e}`)
     }
     lines.push("")
     if (!named.length) {
-      lines.push(`尚未配置命名目标。配一个即可跑在局域网/云端：LOCAL_INFER_TARGETS='[${CONFIG_EXAMPLE}]'`)
+      lines.push(`尚未配置命名目标。配一个即可跑在局域网/云端：GEBAI_LLM_INFER_TARGETS='[${CONFIG_EXAMPLE}]'`)
     }
     lines.push(
       '选用：generate / batch 传 target="<名字>" 或 target="http://host:port"（缺省 local，即本机受管实例）。',
-      "密钥：命名目标配 api_key 字段，或本次调用传 api_key 参数，或设 LOCAL_INFER_REMOTE_API_KEY（优先级同此顺序）。",
+      "密钥：命名目标配 api_key 字段，或本次调用传 api_key 参数，或设 GEBAI_LLM_INFER_REMOTE_API_KEY（优先级同此顺序）。",
       "注意：远端目标不受本机档位（profiles.json）约束——并发按服务端 slots 自行控制。",
+      ...envDeprecationLines(env), // 旧名仍可读，但当场告诉调用方该改名了
     )
 
     return {

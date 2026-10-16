@@ -1,5 +1,5 @@
 /**
- * local_infer 的**引擎层**：把「用哪个 llama.cpp、跑在什么设备上、从哪来」从代码里解耦成
+ * llm_infer 的**引擎层**：把「用哪个 llama.cpp、跑在什么设备上、从哪来」从代码里解耦成
  * `infer/config/engines.json` 的引擎矩阵，并负责**跨平台**的引擎获取（下载 + 校验 + 解压 + 安装）。
  *
  * 设计要点：
@@ -818,9 +818,9 @@ function formatEngineTable(
       lines.push(`  ${e.id}${e.device ? `（${e.device}）` : ""}${e.from_source ? " 源码编译" : ""}`)
       lines.push(`      exe: ${e.exe}`)
     }
-    lines.push("  重新编译：local_infer_source_build(source=\"<候选 id>\", device=\"…\")")
+    lines.push("  重新编译：llm_infer_source_build(source=\"<候选 id>\", device=\"…\")")
   }
-  lines.push("", '安装：local_infer_engine_fetch(id="…")；内网源码编译：local_infer_source_build；实测设备与推荐：local_infer_engines(action="detect")')
+  lines.push("", '安装：llm_infer_engine_fetch(id="…")；内网源码编译：llm_infer_source_build；实测设备与推荐：llm_infer_engines(action="detect")')
   return lines.join("\n")
 }
 
@@ -842,7 +842,7 @@ function formatEngineDetail(
     view?.notes ? `  说明：${view.notes}` : undefined,
     view?.requires ? `  依赖：${view.requires}` : undefined,
     "",
-    `安装：local_infer_engine_fetch(id="${def.id}")`,
+    `安装：llm_infer_engine_fetch(id="${def.id}")`,
   ].filter((l): l is string => l !== undefined)
   return lines.join("\n")
 }
@@ -851,7 +851,7 @@ const enginesTool: Tool = {
   name: "engines",
   safeMode: true, // 只读：读矩阵/安装标记 + 只读设备探测命令，不下载不落盘，安全模式可用
   description:
-    "查看**跨平台**推理引擎矩阵与安装状态（llama.cpp 各平台发行版：linux/win32/darwin × cpu/cuda/vulkan/metal/rocm/sycl/openvino）。action=list 列出引擎清单（平台/架构/设备/是否已安装/可否下载/是否本机平台 + 本机平台条目详情）；action=detect 输出本机设备探测（CPU 核数、CUDA/Vulkan/Metal 与每条结论的探测依据）并给出按实测结果推荐的引擎 id。只读、免审批；要安装引擎用 local_infer_engine_fetch。",
+    "查看**跨平台**推理引擎矩阵与安装状态（llama.cpp 各平台发行版：linux/win32/darwin × cpu/cuda/vulkan/metal/rocm/sycl/openvino）。action=list 列出引擎清单（平台/架构/设备/是否已安装/可否下载/是否本机平台 + 本机平台条目详情）；action=detect 输出本机设备探测（CPU 核数、CUDA/Vulkan/Metal 与每条结论的探测依据）并给出按实测结果推荐的引擎 id。只读、免审批；要安装引擎用 llm_infer_engine_fetch。",
   parameters: schema({
     action: { type: "string", enum: ["list", "detect"], description: "list=引擎矩阵清单（缺省）；detect=本机设备探测 + 推荐引擎" },
     id: { type: "string", description: "list 时只看该引擎（详情）；detect 时评定该引擎在本机的可用性" },
@@ -921,7 +921,7 @@ const enginesTool: Tool = {
         output:
           `引擎矩阵缺失或损坏：${enginesConfigPath(home)}\n` +
           "应含 release.llama_cpp.{tag,base} 与 engines[]（见 infer/config/engines.json）；" +
-          "确认 LOCAL_INFER_HOME 指向子项目 infer/ 后重试。",
+          "确认 GEBAI_LLM_INFER_HOME 指向子项目 infer/ 后重试。",
         data: { action, platform: plat.platform, arch: plat.arch },
       }
     }
@@ -985,10 +985,10 @@ const engineFetch: Tool = {
   safeMode: false, // 安全模式下不提供：会下载资产并写入 vendor/
   requiresApproval: true,
   description:
-    "按 id 下载并安装**跨平台**推理引擎（llama.cpp 发行版）：下载资产（断点续传 + 大小校验；CUDA 档一并装 cudart）→ 解压 → 递归定位 llama-server（chmod 可执行）→ 写入安装标记 .engine.json，落 vendor/<id>/。已安装则直接返回（force=true 强制重装）。跨平台：linux/win32/darwin × cpu/cuda/vulkan/metal/rocm/sycl/openvino 均由 config/engines.json 声明，先 local_infer_engines 看清单。需审批（下载与落盘）。",
+    "按 id 下载并安装**跨平台**推理引擎（llama.cpp 发行版）：下载资产（断点续传 + 大小校验；CUDA 档一并装 cudart）→ 解压 → 递归定位 llama-server（chmod 可执行）→ 写入安装标记 .engine.json，落 vendor/<id>/。已安装则直接返回（force=true 强制重装）。跨平台：linux/win32/darwin × cpu/cuda/vulkan/metal/rocm/sycl/openvino 均由 config/engines.json 声明，先 llm_infer_engines 看清单。需审批（下载与落盘）。",
   parameters: schema(
     {
-      id: { type: "string", description: "引擎 id（见 local_infer_engines 的清单，如 linux-cpu-x64 / win-cuda-12.4-x64）" },
+      id: { type: "string", description: "引擎 id（见 llm_infer_engines 的清单，如 linux-cpu-x64 / win-cuda-12.4-x64）" },
       force: { type: "boolean", description: "已安装时强制重装（缺省 false：已安装即直接返回）" },
     },
     ["id"],
@@ -1009,7 +1009,7 @@ const engineFetch: Tool = {
     const id = args.id != null ? String(args.id).trim() : ""
     if (!id) {
       return {
-        output: '缺少参数 id——先 local_infer_engines(action="list") 看可用引擎清单（如 linux-cpu-x64）。',
+        output: '缺少参数 id——先 llm_infer_engines(action="list") 看可用引擎清单（如 linux-cpu-x64）。',
         data: { ok: false, error: "缺少 id" },
       }
     }
@@ -1047,7 +1047,7 @@ const engineFetch: Tool = {
           `  资产: ${existing.asset} @ ${existing.tag}`,
           `  设备匹配：${avail.ok ? "可用" : "不可用"}——${avail.why}`,
           "",
-          `下一步：local_infer_start 的 engine 参数（或档位 engine 字段 = "${id}"）启用；确需重装加 force=true。`,
+          `下一步：llm_infer_start 的 engine 参数（或档位 engine 字段 = "${id}"）启用；确需重装加 force=true。`,
         ].join("\n"),
         data: { ok: true, id, cached: true, dir: existing.dir, exe: existing.exe, available: avail },
       }
@@ -1066,7 +1066,7 @@ const engineFetch: Tool = {
     })
     if (!out.ok || !out.engine) {
       return {
-        output: [`引擎 ${id} 安装失败：`, `  ${out.error ?? "未知错误"}`, "", "排查：local_infer_engines(action=\"list\") 核对 id/平台；网络受限时先手工放好资产再重试。"].join("\n"),
+        output: [`引擎 ${id} 安装失败：`, `  ${out.error ?? "未知错误"}`, "", "排查：llm_infer_engines(action=\"list\") 核对 id/平台；网络受限时先手工放好资产再重试。"].join("\n"),
         data: { ok: false, id, error: out.error },
       }
     }
@@ -1087,9 +1087,9 @@ const engineFetch: Tool = {
         "",
         ...notes,
         "下一步：",
-        `  · 启动服务：local_infer_start（engine="${id}"；配合档位/模型，如 CPU 用 profile="cpu-small"）`,
-        `  · 看状态与矩阵：local_infer_status / local_infer_engines(action="list")`,
-        `  · 缺模型：local_infer_model_fetch(preset="qwen2.5-0.5b")（CPU 小模型档位）`,
+        `  · 启动服务：llm_infer_start（engine="${id}"；配合档位/模型，如 CPU 用 profile="cpu-small"）`,
+        `  · 看状态与矩阵：llm_infer_status / llm_infer_engines(action="list")`,
+        `  · 缺模型：llm_infer_model_fetch(preset="qwen2.5-0.5b")（CPU 小模型档位）`,
       ].join("\n"),
       data: {
         ok: true,
@@ -1124,7 +1124,7 @@ const modelFetch: Tool = {
     path: { type: "string", description: "模型文件绝对路径" },
     bytes: { type: "number", description: "文件字节数" },
     skipped: { type: "boolean", description: "true = 已存在且大小达标，本次未下载" },
-    dir: { type: "string", description: "模型目录（LOCAL_INFER_MODELS_DIR 或 {GEBAI_HOME}/resources/models/infer）" },
+    dir: { type: "string", description: "模型目录（GEBAI_LLM_INFER_MODELS_DIR 或 {GEBAI_HOME}/resources/models/infer）" },
     error: { type: "string", description: "失败原因（可操作说明）" },
   }),
   async execute(args, ctx) {
@@ -1204,7 +1204,7 @@ const modelFetch: Tool = {
         `  ${r.bytes} 字节${sha ? "（sha256 校验通过）" : ""}${expect ? `，与期望 ${expect} 字节一致` : ""}（末阶段 ${lastPhase}，最后进度 ${received} 字节）`,
         fromPreset?.notes ? `  ${fromPreset.notes}` : "",
         "",
-        `下一步：local_infer_start（profile="cpu-small"，model="${name}"）——纯 CPU 可跑；GPU 机器可换 35B 档位。`,
+        `下一步：llm_infer_start（profile="cpu-small"，model="${name}"）——纯 CPU 可跑；GPU 机器可换 35B 档位。`,
       ]
         .filter(Boolean)
         .join("\n"),

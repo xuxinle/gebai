@@ -4,15 +4,19 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
   buildL1Schema,
+  defaultL1MaxTokens,
+  TRIAGE_DEFAULT_L1_MAX_TOKENS,
   buildL1Prompt,
   buildL2Prompt,
   classifyL1,
   defaultJobDir,
   hasOwnConfidence,
+  isRetriableL1Failure,
   parseL2Output,
   runTriage,
   toL1Record,
 } from "./pipeline"
+import type { BatchResult } from "../../agents/llm_infer/api"
 import type { L1Record, TriageOptions } from "./types"
 
 // ── 测试替身 ──────────────────────────────────────────────────────────────
@@ -78,6 +82,27 @@ function l1Fetch(byId: Record<string, () => Response>): { fetchImpl: typeof fetc
     },
   } as unknown as { fetchImpl: typeof fetch; calls: number }
 }
+
+// ── 失败重试谓词（纯函数，先固定语义） ────────────────────────────────────
+
+describe("isRetriableL1Failure", () => {
+  const r = (over: Partial<BatchResult>): BatchResult => ({ id: "a", index: 0, ok: false, attempts: 1, elapsed_ms: 0, ...over })
+  test("传输类失败可重试", () => {
+    expect(isRetriableL1Failure(r({ error: "请求失败：fetch failed" }))).toBe(true)
+    expect(isRetriableL1Failure(r({ error: "请求中止或超时（30000 ms）：aborted" }))).toBe(true)
+    expect(isRetriableL1Failure(r({ error: "HTTP 503: upstream busy" }))).toBe(true)
+    expect(isRetriableL1Failure(r({ error: "HTTP 429: too many requests" }))).toBe(true)
+  })
+  test("模型不调工具 / 结构化不过：不重试（重试只会再付一次生成成本）", () => {
+    expect(isRetriableL1Failure(r({ error: "模型未调用输出工具 submit_result（已提醒 3 次）", tool_call_missing: true }))).toBe(false)
+    expect(isRetriableL1Failure(r({ error: "输出工具参数不合法", json_errors: ["label 不是枚举值"] }))).toBe(false)
+  })
+  test("成功、非暂停类 4xx：不重试", () => {
+    expect(isRetriableL1Failure(r({ ok: true }))).toBe(false)
+    expect(isRetriableL1Failure(r({ error: "HTTP 400: bad request" }))).toBe(false)
+    expect(isRetriableL1Failure(r({}))).toBe(false)
+  })
+})
 
 // ── schema 信封 ───────────────────────────────────────────────────────────
 
@@ -267,6 +292,41 @@ describe("L2 输出解析", () => {
   test("id 完全不匹配且条数不一致 → 报错（不猜）", () => {
     const { error } = parseL2Output('{"results":[{"id":"x","result":{},"confidence":1}]}', ["t-1001", "t-1002"])
     expect(error).toContain("不匹配")
+  })
+})
+
+describe("L1 输出预算（max_tokens）", () => {
+  test("缺省 32768——不是 300（300 会因预算不够截断工具参数，整批报「参数不是合法 JSON」）", () => {
+    expect(TRIAGE_DEFAULT_L1_MAX_TOKENS).toBe(32768)
+    expect(defaultL1MaxTokens({})).toBe(32768)
+    expect(defaultL1MaxTokens(undefined)).toBe(32768)
+  })
+
+  test("`GEBAI_TRIAGE_L1_MAX_TOKENS` 可全局覆写；非法值回落缺省", () => {
+    expect(defaultL1MaxTokens({ GEBAI_TRIAGE_L1_MAX_TOKENS: "8000" })).toBe(8000)
+    expect(defaultL1MaxTokens({ GEBAI_TRIAGE_L1_MAX_TOKENS: "0" })).toBe(32768)
+    expect(defaultL1MaxTokens({ GEBAI_TRIAGE_L1_MAX_TOKENS: "abc" })).toBe(32768)
+    expect(defaultL1MaxTokens({ GEBAI_TRIAGE_L1_MAX_TOKENS: "  " })).toBe(32768)
+  })
+
+  test("接口/工具参数优先于环境变量（notes 里能看到实际用的值）", async () => {
+    let seen: number | undefined
+    const fetchImpl = (async (_i: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { max_tokens?: number }
+      seen = body.max_tokens
+      return toolReply({ result: { label: "无异常" }, confidence: 0.95, reason: "r", evidence_index: ["exit 0"] })
+    }) as unknown as typeof fetch
+    const summary = await runTriage({
+      user: "tester",
+      jobId: "max-tokens",
+      jobDir: tempJobDir("maxtok"),
+      items: [{ id: "a", features: "fa" }],
+      labelEnum: LABELS,
+      l1: { baseUrl: "http://maxtok", fetchImpl, maxTokens: 4096 },
+      env: { GEBAI_TRIAGE_L1_MAX_TOKENS: "9000" },
+    })
+    expect(seen).toBe(4096) // 显式参数赢
+    expect(summary.notes.join(" ")).toContain("单条输出上限 4096 token")
   })
 })
 
@@ -468,5 +528,220 @@ describe("两级研判端到端", () => {
     expect(second.calls).toBe(0) // 命中 l1.jsonl 缓存
     expect(s2.adopted).toBe(1)
     expect(s2.notes.join(" ")).toContain("断点续跑")
+  })
+})
+
+// ── 结果落盘顺序（断点续跑/长任务 tail 的语义基础） ─────────────────────
+
+describe("结果落盘顺序", () => {
+  test("条目乱序完成，results.jsonl 仍按输入顺序（续跑与 tail 都好读）", async () => {
+    const jobDir = tempJobDir("order")
+    // a 最慢、c 最快：完成顺序 c → b → a，但落盘必须是 a → b → c
+    const delays: Record<string, number> = { a: 30, b: 8, c: 1 }
+    const fetchImpl = (async (_i: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { messages?: Array<{ content: string }> }
+      const text = body.messages?.map((m) => m.content).join("\n") ?? ""
+      const id = ["a", "b", "c"].find((x) => text.includes(`【条目】${x}`)) ?? "c"
+      await new Promise((r) => setTimeout(r, delays[id] ?? 0))
+      return toolReply({ result: { label: "代码退出" }, confidence: 0.95, reason: "r", evidence_index: ["exit 1 at step 4"] })
+    }) as unknown as typeof fetch
+
+    const summary = await runTriage({
+      user: "tester",
+      jobId: "order",
+      jobDir,
+      items: [
+        { id: "a", features: "fa" },
+        { id: "b", features: "fb" },
+        { id: "c", features: "fc" },
+      ],
+      labelEnum: LABELS,
+      l1: { baseUrl: "http://l1", fetchImpl, concurrency: 3 },
+    })
+    expect(summary.adopted).toBe(3)
+    const rows = readFileSync(join(jobDir, "results.jsonl"), "utf-8").trim().split("\n").map((l) => JSON.parse(l).id)
+    expect(rows).toEqual(["a", "b", "c"])
+  })
+})
+
+// ── 全局公平闸门（小任务不被大任务饿死） ──────────────────────────────────
+
+describe("L1 全局公平闸门", () => {
+  /** 带延迟的 L1 端点替身：记录**实际在途峰值**，用于断言全局上限真的生效。 */
+  function delayedL1(delayMs: number): { fetchImpl: typeof fetch; peak: () => number; calls: () => number } {
+    let inflight = 0
+    let peak = 0
+    let calls = 0
+    const fetchImpl = (async (_i: unknown, init?: RequestInit) => {
+      calls++
+      inflight++
+      peak = Math.max(peak, inflight)
+      const body = JSON.parse(String(init?.body ?? "{}")) as { messages?: Array<{ content: string }> }
+      const text = body.messages?.map((m) => m.content).join("\n") ?? ""
+      const m = /【条目】(\S+)/.exec(text)
+      const id = m?.[1] ?? "x"
+      await new Promise((r) => setTimeout(r, delayMs))
+      inflight--
+      return toolReply({ result: { label: "代码退出" }, confidence: 0.95, reason: "r", evidence_index: ["exit 1 at step 4"], id })
+    }) as unknown as typeof fetch
+    return { fetchImpl, peak: () => peak, calls: () => calls }
+  }
+
+  const items = (n: number, prefix: string): Array<{ id: string; features: string }> =>
+    Array.from({ length: n }, (_, i) => ({ id: `${prefix}${i}`, features: `f${i}` }))
+
+  test("两个任务共用一个端点：全局在途不超过上限（不相加）", async () => {
+    const ep = delayedL1(20)
+    const opts = (jobId: string, baseUrl: string, ids: Array<{ id: string; features: string }>): TriageOptions => ({
+      user: "tester",
+      jobId,
+      jobDir: tempJobDir(jobId),
+      items: ids,
+      labelEnum: LABELS,
+      l1: { baseUrl, fetchImpl: ep.fetchImpl, concurrency: 4 },
+    })
+    // 两个 job 共用**同一端点**（同一 baseUrl）→ 共享闸门
+    const url = "http://gate-shared"
+    const [sa, sb] = await Promise.all([
+      runTriage(opts("gateA", url, items(6, "a"))),
+      runTriage(opts("gateB", url, items(6, "b"))),
+    ])
+    expect(sa.adopted + sb.adopted).toBe(12)
+    expect(ep.peak()).toBeLessThanOrEqual(4) // 4（不是 8）：跨任务共享额度
+    expect(`${sa.notes.join(" ")} ${sb.notes.join(" ")}`).toContain("与同端点其他任务共享在途额度")
+  })
+
+  test("闸门上限可显式指定（GEBAI_TRIAGE_L1_GATE / l1_gate）", async () => {
+    const ep = delayedL1(10)
+    const summary = await runTriage({
+      user: "tester",
+      jobId: "gate-cap",
+      jobDir: tempJobDir("gatecap"),
+      items: items(5, "c"),
+      labelEnum: LABELS,
+      l1: { baseUrl: "http://gate-cap", fetchImpl: ep.fetchImpl, concurrency: 5 },
+      env: { GEBAI_TRIAGE_L1_GATE: "2" },
+    })
+    expect(summary.adopted).toBe(5)
+    expect(ep.peak()).toBeLessThanOrEqual(2)
+    expect(summary.notes.join(" ")).toContain("全局在途上限 2")
+  })
+
+  test("并发缺省按端点类型：远程 4 / 本机 1（可在 notes 里看到依据）", async () => {
+    const ep = delayedL1(1)
+    const remote = await runTriage({
+      user: "tester",
+      jobId: "conc-remote",
+      jobDir: tempJobDir("concremote"),
+      items: items(3, "r"),
+      labelEnum: LABELS,
+      l1: { baseUrl: "http://conc-remote", kind: "remote", fetchImpl: ep.fetchImpl },
+    })
+    expect(remote.notes.join(" ")).toContain("缺省 4（远程）")
+
+    const local = await runTriage({
+      user: "tester",
+      jobId: "conc-local",
+      jobDir: tempJobDir("conclocal"),
+      items: items(3, "l"),
+      labelEnum: LABELS,
+      l1: { baseUrl: "http://conc-local", kind: "local", fetchImpl: ep.fetchImpl },
+    })
+    expect(local.notes.join(" ")).toContain("缺省 1（本机）")
+
+    const overridden = await runTriage({
+      user: "tester",
+      jobId: "conc-env",
+      jobDir: tempJobDir("concenv"),
+      items: items(3, "e"),
+      labelEnum: LABELS,
+      l1: { baseUrl: "http://conc-env", kind: "local", fetchImpl: ep.fetchImpl },
+      env: { GEBAI_TRIAGE_L1_CONCURRENCY: "3" },
+    })
+    expect(overridden.notes.join(" ")).toContain("缺省 3")
+  })
+})
+
+// ── L1 失败重试（只重试传输类） ───────────────────────────────────────────
+
+describe("L1 失败重试", () => {
+  const okReply = () => toolReply({ result: { label: "代码退出" }, confidence: 0.95, reason: "r", evidence_index: ["exit 1 at step 4"] })
+
+  test("传输类失败（5xx）重试一次即成功", async () => {
+    const jobDir = tempJobDir("retry-net")
+    let calls = 0
+    const fetchImpl = (async () => {
+      calls++
+      if (calls === 1) return jsonResponse({ error: { message: "upstream busy" } }, 503)
+      return okReply()
+    }) as unknown as typeof fetch
+    const summary = await runTriage({
+      user: "tester",
+      jobId: "retry-net",
+      jobDir,
+      items: [{ id: "a", features: "fa" }],
+      labelEnum: LABELS,
+      l1: { baseUrl: "http://retry-net", fetchImpl, retryDelayMs: 1 },
+    })
+    expect(calls).toBe(2)
+    expect(summary.adopted).toBe(1)
+    expect(summary.failed).toBe(0)
+    expect(summary.notes.join(" ")).toContain("失败重试 1 次")
+    expect(JSON.parse(readFileSync(join(jobDir, "l1.jsonl"), "utf-8").trim()).ok).toBe(true)
+  })
+
+  test("模型不调输出工具：**不**重试（再跑也是白付一次生成）", async () => {
+    let calls = 0
+    const fetchImpl = (async () => {
+      calls++
+      return textReply("我就是不调用工具")
+    }) as unknown as typeof fetch
+    const summary = await runTriage({
+      user: "tester",
+      jobId: "retry-tool",
+      jobDir: tempJobDir("retrytool"),
+      items: [{ id: "a", features: "fa" }],
+      labelEnum: LABELS,
+      l1: { baseUrl: "http://retry-tool", fetchImpl, reminders: 0, retryDelayMs: 1 },
+    })
+    expect(calls).toBe(1) // 只调用一次
+    expect(summary.escalated).toBe(1) // 如实上升兜底
+  })
+
+  test("始终 5xx：重试耗尽后如实失败（不谎报成功）", async () => {
+    let calls = 0
+    const fetchImpl = (async () => {
+      calls++
+      return jsonResponse({ error: { message: "boom" } }, 500)
+    }) as unknown as typeof fetch
+    const summary = await runTriage({
+      user: "tester",
+      jobId: "retry-exhaust",
+      jobDir: tempJobDir("retryexhaust"),
+      items: [{ id: "a", features: "fa" }],
+      labelEnum: LABELS,
+      l1: { baseUrl: "http://retry-exhaust", fetchImpl, retryDelayMs: 1 },
+    })
+    expect(calls).toBe(2) // 1 + 1 次重试
+    expect(summary.escalated).toBe(1)
+    expect(summary.results[0].l1?.ok).toBe(false)
+  })
+
+  test("l1_retries=0 可关掉重试（旧行为）", async () => {
+    let calls = 0
+    const fetchImpl = (async () => {
+      calls++
+      return jsonResponse({ error: { message: "boom" } }, 500)
+    }) as unknown as typeof fetch
+    const summary = await runTriage({
+      user: "tester",
+      jobId: "retry-off",
+      jobDir: tempJobDir("retryoff"),
+      items: [{ id: "a", features: "fa" }],
+      labelEnum: LABELS,
+      l1: { baseUrl: "http://retry-off", fetchImpl, retries: 0 },
+    })
+    expect(calls).toBe(1)
+    expect(summary.escalated).toBe(1)
   })
 })

@@ -7,7 +7,7 @@
 #   bash infer/scripts/smoke-source-build.sh --device cuda --items 4
 #   bash infer/scripts/smoke-source-build.sh --keep --port 19181
 #
-# 为什么包装成脚本而不是直接写 shell：编译流程与产品共用同一套实现（local_infer 子Agent 的工具），
+# 为什么包装成脚本而不是直接写 shell：编译流程与产品共用同一套实现（llm_infer 子Agent 的工具），
 # 脚本里重复一遍 cmake 调用必然与产品漂移。本包装只负责找到 bun 并把参数原样透传。
 #
 # 退出码：0 全通过 / 1 有失败项（可接 CI）。

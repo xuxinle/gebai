@@ -152,7 +152,7 @@ interface BatchData {
 describe("generate", () => {
   test("结构化输出：schema 约束成功 → json 解析 + 实测吞吐", async () => {
     const home = makeHome()
-    const ctx = makeCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) })
+    const ctx = makeCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) })
     requests = []
     const r = await tools.generate.execute({ prompt: "VALID 请给出结果", schema: SCHEMA, enable_thinking: false }, ctx)
     const d = r.data as GenerateData
@@ -172,7 +172,7 @@ describe("generate", () => {
 
   test("结构化校验失败 → 回灌错误重试一次后仍失败（attempts=2，保留 json_errors）", async () => {
     const home = makeHome()
-    const ctx = makeCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) })
+    const ctx = makeCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) })
     requests = []
     const r = await tools.generate.execute({ prompt: "BAD 请给出结果", schema: SCHEMA }, ctx)
     const d = r.data as GenerateData
@@ -186,7 +186,7 @@ describe("generate", () => {
 
   test("未给 prompt/messages 时给出用法提示（不发请求）", async () => {
     const home = makeHome()
-    const ctx = makeCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) })
+    const ctx = makeCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) })
     requests = []
     const r = await tools.generate.execute({}, ctx)
     expect(r.output).toContain("需要 prompt 或 messages")
@@ -195,7 +195,7 @@ describe("generate", () => {
 
   test("grammar / json_object 两种降级约束路径", async () => {
     const home = makeHome()
-    const ctx = makeCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) })
+    const ctx = makeCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) })
     requests = []
     const g = await tools.generate.execute({ prompt: "语法约束", grammar: 'root ::= "{}"' }, ctx)
     expect((g.data as GenerateData).structured_via).toBe("grammar")
@@ -217,7 +217,7 @@ describe("batch", () => {
 
   test("批量提交：三件套落盘 + 逐条结果 + 失败计数", async () => {
     const home = makeHome()
-    const ctx = makeCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) })
+    const ctx = makeCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) })
     const r = await tools.batch.execute({ items: ITEMS, schema: SCHEMA, job_id: "job-t1" }, ctx)
     const d = r.data as BatchData
     expect(d.ok).toBe(2)
@@ -243,7 +243,7 @@ describe("batch", () => {
 
   test("同一 job_id 续跑：跳过已成功条目，只处理剩余", async () => {
     const home = makeHome()
-    const ctx = makeCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) })
+    const ctx = makeCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) })
     await tools.batch.execute({ items: ITEMS, schema: SCHEMA, job_id: "job-r" }, ctx)
     const r2 = await tools.batch.execute({ items: ITEMS, schema: SCHEMA, job_id: "job-r" }, ctx)
     const d2 = r2.data as BatchData
@@ -254,7 +254,7 @@ describe("batch", () => {
 
   test("items_file（JSONL）作为条目来源", async () => {
     const home = makeHome()
-    const ctx = makeCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) })
+    const ctx = makeCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) })
     mkdirSync(join(home, "bench"), { recursive: true })
     const file = join(home, "bench", "questions.jsonl")
     writeFileSync(file, ['{"id":"a","prompt":"VALID 甲"}', "", "// 注释行", '{"id":"b","prompt":"VALID 乙"}'].join("\n"))
@@ -270,7 +270,7 @@ describe("batch", () => {
 
   test("items_file 带 BOM / CRLF（Windows PowerShell 写出的文件）也能读", async () => {
     const home = makeHome()
-    const ctx = makeCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) })
+    const ctx = makeCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) })
     mkdirSync(join(home, "bench"), { recursive: true })
     const file = join(home, "bench", "bom.jsonl")
     writeFileSync(file, "\uFEFF" + ['{"id":"a","prompt":"VALID 甲"}', '{"id":"b","prompt":"VALID 乙"}'].join("\r\n"))
@@ -282,7 +282,7 @@ describe("batch", () => {
 
   test("max_items 分片：本次只处理前 N 条，输出提示剩余量", async () => {
     const home = makeHome()
-    const ctx = makeCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) })
+    const ctx = makeCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) })
     const r = await tools.batch.execute({ items: ITEMS, schema: SCHEMA, job_id: "job-slice", max_items: 2 }, ctx)
     const d = r.data as BatchData
     expect(d.processed).toBe(2)
@@ -292,16 +292,16 @@ describe("batch", () => {
 
   test("并发夹取：超过档位 parallel 时按档位值下调并说明", async () => {
     const home = makeHome()
-    const ctx = makeCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) })
+    const ctx = makeCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) })
     const r = await tools.batch.execute({ items: [{ id: "c1", prompt: "VALID 并发" }], schema: SCHEMA, job_id: "job-conc", concurrency: 4 }, ctx)
     const d = r.data as BatchData
     expect(d.concurrency).toBe(1)
     expect(r.output).toContain("已夹取到 1")
   })
 
-  test("LOCAL_INFER_BATCH_MAX_ITEMS 兜底分片（未给 max_items 时防一次提交占死会话）", async () => {
+  test("GEBAI_LLM_INFER_BATCH_MAX_ITEMS 兜底分片（未给 max_items 时防一次提交占死会话）", async () => {
     const home = makeHome()
-    const ctx = makeCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port), LOCAL_INFER_BATCH_MAX_ITEMS: "1" })
+    const ctx = makeCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port), GEBAI_LLM_INFER_BATCH_MAX_ITEMS: "1" })
     const r = await tools.batch.execute({ items: ITEMS, schema: SCHEMA, job_id: "job-envcap" }, ctx)
     const d = r.data as BatchData
     expect(d.processed).toBe(1)
@@ -310,14 +310,14 @@ describe("batch", () => {
 
   test("条目缺失时给出用法提示", async () => {
     const home = makeHome()
-    const ctx = makeCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) })
+    const ctx = makeCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) })
     const r = await tools.batch.execute({}, ctx)
     expect(r.output).toContain("需要 items 数组或 items_file")
   })
 
   test("并发限流：concurrency=2 时同时最多 2 条在飞", async () => {
     const home = makeHome()
-    const ctx = makeCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port), LOCAL_INFER_PROFILE: "wide" })
+    const ctx = makeCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port), GEBAI_LLM_INFER_PROFILE: "wide" })
     maxInFlight = 0
     const items = [1, 2, 3, 4].map((i) => ({ id: `p${i}`, prompt: "VALID SLOW" }))
     const r = await tools.batch.execute({ items, schema: SCHEMA, job_id: "job-par", concurrency: 2 }, ctx)
@@ -328,7 +328,7 @@ describe("batch", () => {
 
   test("输入数据集与任务目录留存不同时给出提示（仍按 id 续跑）", async () => {
     const home = makeHome()
-    const ctx = makeCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) })
+    const ctx = makeCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) })
     await tools.batch.execute({ items: [{ id: "q1", prompt: "VALID" }], schema: SCHEMA, job_id: "job-chg" }, ctx)
     const r = await tools.batch.execute(
       { items: [{ id: "q1", prompt: "VALID" }, { id: "q9", prompt: "VALID 新增" }], schema: SCHEMA, job_id: "job-chg" },
@@ -343,7 +343,7 @@ describe("batch", () => {
 describe("jobs", () => {
   test("list → status → results（含 only=failed 过滤）", async () => {
     const home = makeHome()
-    const ctx = makeCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) })
+    const ctx = makeCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) })
     await tools.batch.execute(
       { items: [{ id: "k1", prompt: "VALID" }, { id: "k2", prompt: "BAD" }], schema: SCHEMA, job_id: "job-j1" },
       ctx,
@@ -368,7 +368,7 @@ describe("jobs", () => {
 
   test("cancel 写回状态；未知 job_id 给出可操作提示", async () => {
     const home = makeHome()
-    const ctx = makeCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) })
+    const ctx = makeCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) })
     await tools.batch.execute({ items: [{ id: "z1", prompt: "VALID" }], schema: SCHEMA, job_id: "job-cancel" }, ctx)
     const r = await tools.jobs.execute({ action: "cancel", job_id: "job-cancel" }, ctx)
     expect(r.output).toContain("已标记为 cancelled")
@@ -434,7 +434,7 @@ function livenessCtx(env: Record<string, string>, alivePids: number[]): ToolCont
 describe("后台批次（background=true）", () => {
   test("立即返回并在进程内跑完：终态与产物齐全", async () => {
     const home = makeHome()
-    const ctx = livenessCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) }, [process.pid])
+    const ctx = livenessCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) }, [process.pid])
     const items = [1, 2, 3, 4].map((i) => ({ id: `bg${i}`, prompt: "VALID SLOWER" }))
 
     const t0 = Date.now()
@@ -467,7 +467,7 @@ describe("后台批次（background=true）", () => {
 
   test("同一 job_id 重复提交被拒（防两个执行体交叉写产物）", async () => {
     const home = makeHome()
-    const ctx = livenessCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) }, [process.pid])
+    const ctx = livenessCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) }, [process.pid])
     const items = [1, 2, 3].map((i) => ({ id: `r${i}`, prompt: "VALID SLOWER" }))
 
     await tools.batch.execute({ items, schema: SCHEMA, job_id: "job-dup", background: true }, ctx)
@@ -491,7 +491,7 @@ describe("后台批次（background=true）", () => {
   test("服务重启语义：属主进程已退出 → 改判已中断并给出续跑指引（幂等）", async () => {
     const home = makeHome()
     // 探活一律判「已退出」：模拟另一个已消失的服务进程
-    const ctx = livenessCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) }, [])
+    const ctx = livenessCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) }, [])
     await tools.batch.execute({ items: [{ id: "d1", prompt: "VALID" }], schema: SCHEMA, job_id: "job-dead" }, ctx)
     writeJob(home, "job-dead", { state: "running", background: true, owner_pid: 999999, finished_at: undefined, phase: "running（后台）" })
 
@@ -507,7 +507,7 @@ describe("后台批次（background=true）", () => {
 
   test("list 标出后台/同步与存活状态", async () => {
     const home = makeHome()
-    const ctx = livenessCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) }, [])
+    const ctx = livenessCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) }, [])
     await tools.batch.execute({ items: [{ id: "s1", prompt: "VALID" }], schema: SCHEMA, job_id: "job-sync" }, ctx)
     writeJob(home, "job-sync", { state: "running", background: true, owner_pid: 999999, finished_at: undefined })
 
@@ -520,7 +520,7 @@ describe("后台批次（background=true）", () => {
 
   test("心跳过期：状态 running 且超过 10 分钟未更新 → 提示可能已卡住", async () => {
     const home = makeHome()
-    const ctx = livenessCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) }, [process.pid])
+    const ctx = livenessCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) }, [process.pid])
     await tools.batch.execute({ items: [{ id: "h1", prompt: "VALID" }], schema: SCHEMA, job_id: "job-hb" }, ctx)
     writeJob(home, "job-hb", {
       state: "running",
@@ -538,7 +538,7 @@ describe("后台批次（background=true）", () => {
 
   test("旧版 job.json（无 background/owner_pid）查询不报错，running 时明示无法确认", async () => {
     const home = makeHome()
-    const ctx = livenessCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) }, [process.pid])
+    const ctx = livenessCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) }, [process.pid])
     await tools.batch.execute({ items: [{ id: "l1", prompt: "VALID" }], schema: SCHEMA, job_id: "job-old" }, ctx)
     const jp = jobFile(home, "job-old")
     const j = JSON.parse(readFileSync(jp, "utf-8")) as Record<string, unknown>
@@ -560,7 +560,7 @@ describe("后台批次（background=true）", () => {
 describe("批次取消（真中止）", () => {
   test("取消在飞的后台批次：状态置 cancelled、剩余条目可 resume 续跑", async () => {
     const home = makeHome()
-    const ctx = livenessCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) }, [process.pid])
+    const ctx = livenessCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) }, [process.pid])
     const items = [1, 2, 3, 4, 5, 6].map((i) => ({ id: `c${i}`, prompt: "VALID SLOWER" }))
 
     await tools.batch.execute({ items, schema: SCHEMA, job_id: "job-cancel-bg", background: true }, ctx)
@@ -594,7 +594,7 @@ describe("批次取消（真中止）", () => {
 
   test("已完成的任务：仍按「仅标记」语义（不误报为中止）", async () => {
     const home = makeHome()
-    const ctx = livenessCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) }, [process.pid])
+    const ctx = livenessCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) }, [process.pid])
     await tools.batch.execute({ items: [{ id: "f1", prompt: "VALID" }], schema: SCHEMA, job_id: "job-done-cancel" }, ctx)
     const r = await tools.jobs.execute({ action: "cancel", job_id: "job-done-cancel" }, ctx)
     expect(r.output).toContain("已标记为 cancelled")
@@ -657,9 +657,9 @@ describe("推理目标（target）", () => {
 
   /** 带一个命名目标（lan → mock 远端）的 ctx 环境。 */
   const lanEnv = (home: string, extra: Record<string, string> = {}): Record<string, string> => ({
-    LOCAL_INFER_HOME: home,
-    LOCAL_INFER_PORT: String(port),
-    LOCAL_INFER_TARGETS: JSON.stringify([
+    GEBAI_LLM_INFER_HOME: home,
+    GEBAI_LLM_INFER_PORT: String(port),
+    GEBAI_LLM_INFER_TARGETS: JSON.stringify([
       { name: "lan", base_url: `http://127.0.0.1:${remotePort}`, api_key: "sk-lan-abcdef123456", note: "模拟局域网" },
     ]),
     ...extra,
@@ -685,7 +685,7 @@ describe("推理目标（target）", () => {
     expect(r.output).toContain("单条 prompt 约可用")
   })
 
-  test("api_key 参数覆盖命名目标的密钥；直连 URL 也能直接用（不配 LOCAL_INFER_TARGETS）", async () => {
+  test("api_key 参数覆盖命名目标的密钥；直连 URL 也能直接用（不配 GEBAI_LLM_INFER_TARGETS）", async () => {
     const home = makeHome()
     auths = []
     const ctx = makeCtx(lanEnv(home))
@@ -695,7 +695,7 @@ describe("推理目标（target）", () => {
 
     // 直连目标 + 显式密钥：环境里不配任何命名目标也能跑通
     auths = []
-    const bare = makeCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) })
+    const bare = makeCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) })
     const r = await tools.generate.execute({ prompt: "直连测试", target: `http://127.0.0.1:${remotePort}`, api_key: "sk-direct-123456" }, bare)
     expect(auths).toEqual(["Bearer sk-direct-123456"])
     expect((r.data as GenerateData).content).toContain("远端回复")
@@ -734,7 +734,7 @@ describe("推理目标（target）", () => {
   test("target 缺省或显式 local：仍打本机端点，job.json 记 target=local", async () => {
     const home = makeHome()
     requests = []
-    const ctx = makeCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port) })
+    const ctx = makeCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port) })
     const r = await tools.generate.execute({ prompt: "本机测试", target: "local" }, ctx)
     expect((r.data as GenerateData).ok).toBe(true)
     expect(r.output).toContain("目标 local ｜ 本机")
@@ -780,8 +780,8 @@ describe("推理目标（target）", () => {
     expect(g.output).toContain("推理目标解析失败")
     expect(g.output).toContain('未知推理目标 "typo"')
     expect(g.output).toContain("lan")
-    expect(g.output).toContain("LOCAL_INFER_TARGETS")
-    expect(g.output).toContain("local_infer_targets")
+    expect(g.output).toContain("GEBAI_LLM_INFER_TARGETS")
+    expect(g.output).toContain("llm_infer_targets")
     expect(requests.length).toBe(0)
 
     const b = await tools.batch.execute({ items: [{ id: "x1", prompt: "甲" }], job_id: "job-typo", target: "typo" }, ctx)
@@ -790,7 +790,7 @@ describe("推理目标（target）", () => {
     expect(auths.length).toBe(0)
 
     // 环境变量本身是坏 JSON 时同样只给可读错误（不抛异常）
-    const bad = makeCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: String(port), LOCAL_INFER_TARGETS: "[{oops}]" })
+    const bad = makeCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: String(port), GEBAI_LLM_INFER_TARGETS: "[{oops}]" })
     const g2 = await tools.generate.execute({ prompt: "x", target: "lan" }, bad)
     expect(g2.output).toContain("不是合法 JSON")
     expect(g2.output).toContain("当前没有有效的命名目标")

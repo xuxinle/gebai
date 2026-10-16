@@ -82,7 +82,7 @@ function expectTarget(r: InferTarget | { error: string }): InferTarget {
 describe("parseTargetsEnv", () => {
   test("正常解析：可选字段、尾斜杠归一；未配置时为空且无错误", () => {
     const env = {
-      LOCAL_INFER_TARGETS: JSON.stringify([
+      GEBAI_LLM_INFER_TARGETS: JSON.stringify([
         { name: "lan", base_url: "http://192.168.1.20:8080/", api_key: "sk-lan-123456", model: "qwen2.5", note: "备机" },
         { name: "cloud", base_url: "https://api.example.com" },
       ]),
@@ -95,25 +95,25 @@ describe("parseTargetsEnv", () => {
     ])
 
     expect(parseTargetsEnv({})).toEqual({ targets: [], errors: [] })
-    expect(parseTargetsEnv({ LOCAL_INFER_TARGETS: "   " })).toEqual({ targets: [], errors: [] })
+    expect(parseTargetsEnv({ GEBAI_LLM_INFER_TARGETS: "   " })).toEqual({ targets: [], errors: [] })
   })
 
   test("非 JSON / 非数组：容错返回 errors，不抛异常", () => {
-    const bad = parseTargetsEnv({ LOCAL_INFER_TARGETS: "[{name:lan}]" })
+    const bad = parseTargetsEnv({ GEBAI_LLM_INFER_TARGETS: "[{name:lan}]" })
     expect(bad.targets).toEqual([])
     expect(bad.errors.length).toBe(1)
     expect(bad.errors[0]).toContain("不是合法 JSON")
 
-    const notArray = parseTargetsEnv({ LOCAL_INFER_TARGETS: '{"name":"lan"}' })
+    const notArray = parseTargetsEnv({ GEBAI_LLM_INFER_TARGETS: '{"name":"lan"}' })
     expect(notArray.targets).toEqual([])
     expect(notArray.errors[0]).toContain("必须是 JSON 数组")
 
-    expect(parseTargetsEnv({ LOCAL_INFER_TARGETS: "null" }).errors[0]).toContain("当前是 null")
+    expect(parseTargetsEnv({ GEBAI_LLM_INFER_TARGETS: "null" }).errors[0]).toContain("当前是 null")
   })
 
   test("坏条目逐条报错并跳过，好条目保留", () => {
     const { targets, errors } = parseTargetsEnv({
-      LOCAL_INFER_TARGETS: JSON.stringify([
+      GEBAI_LLM_INFER_TARGETS: JSON.stringify([
         "lan",
         { base_url: "http://a:1" },
         { name: "no_base" },
@@ -131,7 +131,7 @@ describe("parseTargetsEnv", () => {
 
   test("重复名保留先声明的一个；local 是保留名", () => {
     const { targets, errors } = parseTargetsEnv({
-      LOCAL_INFER_TARGETS: JSON.stringify([
+      GEBAI_LLM_INFER_TARGETS: JSON.stringify([
         { name: "dup", base_url: "http://first:1" },
         { name: "dup", base_url: "http://second:2" },
         { name: "local", base_url: "http://l:9" },
@@ -146,9 +146,9 @@ describe("parseTargetsEnv", () => {
 // ── resolveTarget ─────────────────────────────────────────────────────────
 
 describe("resolveTarget（缺省 local）", () => {
-  test("无状态文件：退回 LOCAL_INFER_PORT / 8080", () => {
+  test("无状态文件：退回 GEBAI_LLM_INFER_PORT / 8080", () => {
     const home = makeHome()
-    const withEnv = expectTarget(resolveTarget(undefined, makeCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: "18080" })))
+    const withEnv = expectTarget(resolveTarget(undefined, makeCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: "18080" })))
     expect(withEnv.kind).toBe("local")
     expect(withEnv.name).toBe("local")
     expect(withEnv.baseUrl).toBe("http://127.0.0.1:18080")
@@ -156,16 +156,16 @@ describe("resolveTarget（缺省 local）", () => {
     expect(String(withEnv.note)).toContain("无服务实例状态文件")
 
     // 显式 "local" 与 undefined 等价；端口未配置时用 8080
-    const noPort = expectTarget(resolveTarget("local", makeCtx({ LOCAL_INFER_HOME: makeHome() })))
+    const noPort = expectTarget(resolveTarget("local", makeCtx({ GEBAI_LLM_INFER_HOME: makeHome() })))
     expect(noPort.baseUrl).toBe("http://127.0.0.1:8080")
   })
 
-  test("有状态文件：状态文件端口优先于 LOCAL_INFER_PORT，带档位/模型；多实例取端口最小并列出其余", () => {
+  test("有状态文件：状态文件端口优先于 GEBAI_LLM_INFER_PORT，带档位/模型；多实例取端口最小并列出其余", () => {
     const home = makeHome([
       { port: 8081, profile: "quality", model: "q.gguf" },
       { port: 8090, profile: "fast", model: "f.gguf" },
     ])
-    const t = expectTarget(resolveTarget("local", makeCtx({ LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: "9999" })))
+    const t = expectTarget(resolveTarget("local", makeCtx({ GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: "9999" })))
     expect(t.baseUrl).toBe("http://127.0.0.1:8081")
     expect(t.model).toBe("q.gguf")
     expect(String(t.note)).toContain("本机受管实例")
@@ -176,7 +176,7 @@ describe("resolveTarget（缺省 local）", () => {
 
 describe("resolveTarget（直连与命名目标）", () => {
   test("http(s):// 直连：归一尾斜杠、kind=remote、显式密钥生效", () => {
-    const ctx = makeCtx({ LOCAL_INFER_HOME: makeHome() })
+    const ctx = makeCtx({ GEBAI_LLM_INFER_HOME: makeHome() })
     const t = expectTarget(resolveTarget("http://192.168.1.20:8080/", ctx, " sk-direct-123456 "))
     expect(t).toMatchObject({ name: "http://192.168.1.20:8080", kind: "remote", baseUrl: "http://192.168.1.20:8080", apiKey: "sk-direct-123456" })
     expect(targetHeaders(t)).toEqual({ authorization: "Bearer sk-direct-123456" })
@@ -188,18 +188,18 @@ describe("resolveTarget（直连与命名目标）", () => {
 
   test("命名目标：取 base_url/model/note", () => {
     const ctx = makeCtx({
-      LOCAL_INFER_HOME: makeHome(),
-      LOCAL_INFER_TARGETS: JSON.stringify([{ name: "lan", base_url: "http://192.168.1.20:8080", model: "qwen2.5", note: "备机" }]),
+      GEBAI_LLM_INFER_HOME: makeHome(),
+      GEBAI_LLM_INFER_TARGETS: JSON.stringify([{ name: "lan", base_url: "http://192.168.1.20:8080", model: "qwen2.5", note: "备机" }]),
     })
     const t = expectTarget(resolveTarget("lan", ctx))
     expect(t).toMatchObject({ name: "lan", kind: "remote", baseUrl: "http://192.168.1.20:8080", model: "qwen2.5", note: "备机" })
   })
 
-  test("api_key 三级优先级：显式参数 > 命名目标字段 > LOCAL_INFER_REMOTE_API_KEY", () => {
+  test("api_key 三级优先级：显式参数 > 命名目标字段 > GEBAI_LLM_INFER_REMOTE_API_KEY", () => {
     const env = {
-      LOCAL_INFER_HOME: makeHome(),
-      LOCAL_INFER_REMOTE_API_KEY: "sk-env-999999",
-      LOCAL_INFER_TARGETS: JSON.stringify([
+      GEBAI_LLM_INFER_HOME: makeHome(),
+      GEBAI_LLM_INFER_REMOTE_API_KEY: "sk-env-999999",
+      GEBAI_LLM_INFER_TARGETS: JSON.stringify([
         { name: "lan", base_url: "http://lan:1", api_key: "sk-named-111111" },
         { name: "bare", base_url: "http://bare:2" },
       ]),
@@ -216,8 +216,8 @@ describe("resolveTarget（直连与命名目标）", () => {
 
   test("未知名：返回 error（不抛），含可用名清单与配置指引", () => {
     const ctx = makeCtx({
-      LOCAL_INFER_HOME: makeHome(),
-      LOCAL_INFER_TARGETS: JSON.stringify([{ name: "lan", base_url: "http://lan:1" }, { name: "cloud", base_url: "https://c" }]),
+      GEBAI_LLM_INFER_HOME: makeHome(),
+      GEBAI_LLM_INFER_TARGETS: JSON.stringify([{ name: "lan", base_url: "http://lan:1" }, { name: "cloud", base_url: "https://c" }]),
     })
     const r = resolveTarget("nope", ctx)
     expect("error" in r).toBe(true)
@@ -225,11 +225,11 @@ describe("resolveTarget（直连与命名目标）", () => {
     expect(msg).toContain('未知推理目标 "nope"')
     expect(msg).toContain("lan")
     expect(msg).toContain("cloud")
-    expect(msg).toContain("LOCAL_INFER_TARGETS")
+    expect(msg).toContain("GEBAI_LLM_INFER_TARGETS")
     expect(msg).toContain("target=\"http://192.168.1.20:8080\"")
 
     // 没有命名目标时也给出同样的指引（不抛）
-    const empty = resolveTarget("nope", makeCtx({ LOCAL_INFER_HOME: makeHome() })) as { error: string }
+    const empty = resolveTarget("nope", makeCtx({ GEBAI_LLM_INFER_HOME: makeHome() })) as { error: string }
     expect(empty.error).toContain("当前没有命名目标")
   })
 })
@@ -326,9 +326,9 @@ describe("probeTarget", () => {
 
 describe("targets 工具", () => {
   const envWithTargets = (home: string): Record<string, string> => ({
-    LOCAL_INFER_HOME: home,
-    LOCAL_INFER_PORT: "18081",
-    LOCAL_INFER_TARGETS: JSON.stringify([
+    GEBAI_LLM_INFER_HOME: home,
+    GEBAI_LLM_INFER_PORT: "18081",
+    GEBAI_LLM_INFER_TARGETS: JSON.stringify([
       { name: "lan", base_url: "http://192.168.1.20:8080", api_key: "sk-lan-abcdef123", model: "qwen2.5", note: "备机" },
       { name: "broken", base_url: "192.168.1.21:8080" },
     ]),
@@ -342,7 +342,7 @@ describe("targets 工具", () => {
     expect(r.output).toContain("· lan ｜ 远端 ｜ http://192.168.1.20:8080")
     expect(r.output).toContain("key sk-***123")
     expect(r.output).not.toContain("sk-lan-abcdef123")
-    expect(r.output).toContain("LOCAL_INFER_TARGETS 解析告警（1 条）")
+    expect(r.output).toContain("GEBAI_LLM_INFER_TARGETS 解析告警（1 条）")
     expect(r.output).toContain("不是 http(s) 端点")
     expect(r.output).not.toContain("探活：")
 
@@ -372,8 +372,8 @@ describe("targets 工具", () => {
 
     try {
       const ctx = makeCtx({
-        LOCAL_INFER_HOME: makeHome(),
-        LOCAL_INFER_TARGETS: JSON.stringify([{ name: "live", base_url: `http://127.0.0.1:${server.port}` }, { name: "dead", base_url: `http://127.0.0.1:${deadPort}` }]),
+        GEBAI_LLM_INFER_HOME: makeHome(),
+        GEBAI_LLM_INFER_TARGETS: JSON.stringify([{ name: "live", base_url: `http://127.0.0.1:${server.port}` }, { name: "dead", base_url: `http://127.0.0.1:${deadPort}` }]),
       })
       const r = await tools.targets.execute({ probe: true }, ctx)
       expect(r.output).toContain("n_ctx=8192")

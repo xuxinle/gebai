@@ -155,7 +155,7 @@ function makeCtx(
     workdir,
     sessionWorkdir: workdir,
     home,
-    env: { LOCAL_INFER_HOME: home, LOCAL_INFER_MODELS_DIR: join(home, "models") },
+    env: { GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_MODELS_DIR: join(home, "models") },
     sandboxed: false,
     resolvePath: (p) => join(workdir, p),
     readFile: async (p) => Bun.file(p).text(),
@@ -837,7 +837,7 @@ describe("tools 契约", () => {
     const r = await tools.engine_fetch.execute({ id: "test-cpu-x64" }, ctx)
     expect(r.output).toContain("安装完成")
     expect(r.output).toContain("llama-server")
-    expect(r.output).toContain("local_infer_start")
+    expect(r.output).toContain("llm_infer_start")
     const data = r.data as Record<string, unknown>
     expect(data.ok).toBe(true)
     expect(data.cached).toBe(false)

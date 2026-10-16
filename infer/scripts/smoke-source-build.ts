@@ -1,7 +1,7 @@
 /**
  * smoke-source-build —— 内网源码编译的**一条命令冒烟**（跨平台，不需要 PowerShell、不需要 GEBAI 服务在跑）。
  *
- * 设计原则：**零重复实现**。本脚本直接调用 local_infer 子Agent 的真实工具
+ * 设计原则：**零重复实现**。本脚本直接调用 llm_infer 子Agent 的真实工具
  * （sources / source_build / engines / start / status / generate / batch / stop），
  * 因此它验证的就是模型走的那条路径——脚本与产品不会漂移。
  *
@@ -23,7 +23,7 @@ import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
-import { tools } from "../../packages/agents/src/agents/local_infer/local_infer"
+import { tools } from "../../packages/agents/src/agents/llm_infer/llm_infer"
 
 // ── 参数 ──────────────────────────────────────────────────────────────────
 
@@ -76,7 +76,7 @@ function parseArgs(argv: string[]): Opts {
   return o
 }
 
-const HELP = `smoke-source-build —— 内网源码编译冒烟（调用 local_infer 真实工具）
+const HELP = `smoke-source-build —— 内网源码编译冒烟（调用 llm_infer 真实工具）
 
 用法: bun run infer/scripts/smoke-source-build.ts [选项]
       bash  infer/scripts/smoke-source-build.sh  [选项]
@@ -98,7 +98,7 @@ const HELP = `smoke-source-build —— 内网源码编译冒烟（调用 local_
   -h, --help                             显示本帮助
 
 前置:
-  · 源码：把 llama.cpp 源码目录或归档放进 {GEBAI_HOME}/resources/src/（或用 LOCAL_INFER_SOURCE_DIRS 指定）；
+  · 源码：把 llama.cpp 源码目录或归档放进 {GEBAI_HOME}/resources/src/（或用 GEBAI_LLM_INFER_SOURCE_DIRS 指定）；
     联网机器可先拉：bun run resources:download --only="src/**"
   · 模型：{GEBAI_HOME}/resources/models/infer/ 下至少一个 GGUF（缺小模型可用 model_fetch preset=qwen2.5-0.5b）
   · 工具链：cmake + ninja/make + 编译器（CUDA 还需 nvcc）——第 2 步会如实报缺什么、怎么补
@@ -138,8 +138,8 @@ function makeCtx(inferRoot: string, repoRoot: string): ToolContext {
   mkdirSync(workdir, { recursive: true })
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
-    LOCAL_INFER_HOME: inferRoot,
-    ...(process.env.LOCAL_INFER_MODELS_DIR ? {} : { LOCAL_INFER_MODELS_DIR: join(repoRoot, "resources", "models", "infer") }),
+    GEBAI_LLM_INFER_HOME: inferRoot,
+    ...(process.env.GEBAI_LLM_INFER_MODELS_DIR ? {} : { GEBAI_LLM_INFER_MODELS_DIR: join(repoRoot, "resources", "models", "infer") }),
   }
   return {
     user: "smoke",
@@ -294,7 +294,7 @@ async function main(): Promise<number> {
       return finish()
     }
     if (!check(`编译成功（${secs}）`, state === "done", state === "done" ? `引擎 ${engineId}` : err.split("\n")[0])) {
-      info(`日志尾部：local_infer_source_build(action="log", build_id="${buildId}")`)
+      info(`日志尾部：llm_infer_source_build(action="log", build_id="${buildId}")`)
       return finish()
     }
     if (!check("产物可执行文件存在", Boolean(exe) && existsSync(exe), exe || "未报告 exe")) return finish()
@@ -333,7 +333,7 @@ async function main(): Promise<number> {
     model = names.find((n) => /0\.[5-9]B|1B|1\.5B|2B|3B/i.test(n)) ?? names[0] ?? ""
     if (names.length) info(`模型：自动选用 ${model}（目录内 ${names.length} 个 GGUF；可用 --model 指定）`)
   }
-  if (!check("模型文件可用", Boolean(model), model || "模型目录内无 GGUF——可 local_infer_model_fetch(preset=\"qwen2.5-0.5b\")")) return finish()
+  if (!check("模型文件可用", Boolean(model), model || "模型目录内无 GGUF——可 llm_infer_model_fetch(preset=\"qwen2.5-0.5b\")")) return finish()
 
   const startRes = await call(
     "start",
@@ -421,7 +421,7 @@ async function main(): Promise<number> {
   // ── 8. 清理 ────────────────────────────────────────────────────────────
   section("[8/8] 清理")
   if (opts.keep) {
-    info(`已指定 --keep：服务保留在 ${base}（停止：local_infer_stop(port=${opts.port})）`)
+    info(`已指定 --keep：服务保留在 ${base}（停止：llm_infer_stop(port=${opts.port})）`)
   } else {
     const stopRes = await call("stop", { port: opts.port }, ctx)
     console.log(stopRes.output)

@@ -1,5 +1,5 @@
 /**
- * local_infer 的【推理进程管理】工具层：服务状态（含实例列表与 PID 存活校验）、
+ * llm_infer 的【推理进程管理】工具层：服务状态（含实例列表与 PID 存活校验）、
  * 启停与重启、服务日志查看、基准测试、GGUF 结构解析。
  *
  * 三层分工（单一事实来源）：
@@ -8,7 +8,7 @@
  *   * 本文件   —— 命令组织、结果解释与人读输出；launcher 的命令纯函数在这里再导出，兼容既有引用。
  *
  * 启动默认走 launcher（TS 直接 spawn，不需要 PowerShell，Linux/macOS 同样可用）；
- * `mode: "script"`（或环境变量 LOCAL_INFER_LAUNCH=script）回退到 scripts/run-server.ps1——仅 Windows 兼容路径。
+ * `mode: "script"`（或环境变量 GEBAI_LLM_INFER_LAUNCH=script）回退到 scripts/run-server.ps1——仅 Windows 兼容路径。
  */
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { join, dirname } from "node:path"
@@ -31,6 +31,7 @@ import {
   waitReady,
   type LaunchResult,
 } from "./launcher"
+import { envDeprecationLines, envVar } from "./env"
 import {
   type InferProfile,
   type InferProfiles,
@@ -153,14 +154,14 @@ function agoLabel(iso?: string): string {
 
 /** 缺省档位名（环境变量优先，其次 profiles 的 default_profile）。 */
 function activeProfile(prof: InferProfiles | null, env: Record<string, string>): string {
-  return env.LOCAL_INFER_PROFILE ?? prof?.default_profile ?? "fast"
+  return envVar(env, "PROFILE") ?? prof?.default_profile ?? "fast"
 }
 
 /** 检查子项目根，缺失时返回可操作的提示文本。 */
 function homeGuard(ctx: ToolContext): { home: string; error?: string } {
   const home = inferHome(ctx.env)
   if (!existsSync(home)) {
-    return { home, error: `未找到本地推理子项目：${home}（可用 LOCAL_INFER_HOME 指定）` }
+    return { home, error: `未找到本地推理子项目：${home}（可用 GEBAI_LLM_INFER_HOME 指定）` }
   }
   return { home }
 }
@@ -247,7 +248,7 @@ export async function doStatus(args: Record<string, unknown>, ctx: ToolContext, 
   const lines: string[] = []
 
   if (!existsSync(home)) {
-    return `未找到本地推理子项目：${home}\n可通过 LOCAL_INFER_HOME 指定子项目根，或在仓库中初始化 infer/。`
+    return `未找到本地推理子项目：${home}\n可通过 GEBAI_LLM_INFER_HOME 指定子项目根，或在仓库中初始化 infer/。`
   }
   lines.push(`子项目根: ${home}`)
 
@@ -284,7 +285,7 @@ export async function doStatus(args: Record<string, unknown>, ctx: ToolContext, 
     lines.push(`可执行文件: ${resolved.exe}（${resolved.via === "engine" ? "已安装引擎" : "档位 engine_dir"}）`)
   } else {
     lines.push(`可执行文件: **未找到**——${resolved.note ?? ""}`)
-    lines.push(`缺引擎时：local_infer_engines 看可下载项 → local_infer_engine_fetch 安装（启动仍需先解决引擎）`)
+    lines.push(`缺引擎时：llm_infer_engines 看可下载项 → llm_infer_engine_fetch 安装（启动仍需先解决引擎）`)
   }
   if (prof?.engine_dir) lines.push(`档位 engine_dir: ${join(home, prof.engine_dir)}`)
 
@@ -364,10 +365,13 @@ const status: Tool = {
   description:
     "查看本地推理引擎运行状态：服务实例列表（状态文件里的 PID，逐个校验存活）、进程、端口监听与占用者、/health 与 /props 探测（n_ctx、slot 数=并发上限）、GPU 显存与利用率、当前档位与模型、最近一次启动记录。只读，不改变任何状态。",
   parameters: schema({
-    port: { type: "number", description: "服务端口（缺省 LOCAL_INFER_PORT 或 8080）" },
+    port: { type: "number", description: "服务端口（缺省 GEBAI_LLM_INFER_PORT 或 8080）" },
   }),
   async execute(args, ctx) {
-    return { output: await doStatus(args, ctx) }
+    // 状态输出顺带提醒旧 env 名（改名迁移期，模型/用户在这里最容易看到）
+    const dep = envDeprecationLines(ctx.env)
+    const out = await doStatus(args, ctx)
+    return { output: dep.length ? `${out}\n\n${dep.join("\n")}` : out }
   },
 }
 
@@ -450,13 +454,13 @@ const READY_TIMEOUT_MS = 180_000
 /** 输出尾部固定提示（推理型模型的正文与思维链）。 */
 const INFER_TIP = "提示：推理型模型的输出正文在 content、思维链在 reasoning_content，两者都要看。"
 
-/** 启动方式解析：显式 mode 参数 > 环境变量 LOCAL_INFER_LAUNCH > 缺省 launcher。
+/** 启动方式解析：显式 mode 参数 > 环境变量 GEBAI_LLM_INFER_LAUNCH > 缺省 launcher。
  *  `forced` 表示用户明确要求（此时不做 Windows 的自动回退，见 doStart）。 */
 export function resolveLaunch(o: { mode?: unknown; env: Record<string, string> }): { mode: LaunchMode; forced: boolean; reason: string } {
   const fromArg = typeof o.mode === "string" ? o.mode.trim().toLowerCase() : ""
   if (fromArg === "script" || fromArg === "launcher") return { mode: fromArg, forced: true, reason: `mode 参数：${fromArg}` }
-  const fromEnv = (o.env.LOCAL_INFER_LAUNCH ?? "").trim().toLowerCase()
-  if (fromEnv === "script" || fromEnv === "launcher") return { mode: fromEnv, forced: true, reason: `环境变量 LOCAL_INFER_LAUNCH=${fromEnv}` }
+  const fromEnv = (envVar(o.env, "LAUNCH") ?? "").trim().toLowerCase()
+  if (fromEnv === "script" || fromEnv === "launcher") return { mode: fromEnv, forced: true, reason: `环境变量 GEBAI_LLM_INFER_LAUNCH=${fromEnv}` }
   return { mode: "launcher", forced: false, reason: "缺省 launcher（跨平台，不需要 PowerShell）" }
 }
 
@@ -550,7 +554,7 @@ async function startViaScript(
   }
   const tail = wr.ok
     ? `服务就绪 ${baseUrl(port)}（加载 ${wr.secs}s，OpenAI 兼容端点 /v1/chat/completions）`
-    : `等待 ${wr.secs}s 仍未就绪（${wr.error ?? "未知原因"}）——大模型首次加载可能更久，用 local_infer_status 复查进程与日志（local_infer_logs 看日志尾部）`
+    : `等待 ${wr.secs}s 仍未就绪（${wr.error ?? "未知原因"}）——大模型首次加载可能更久，用 llm_infer_status 复查进程与日志（llm_infer_logs 看日志尾部）`
   return [`${head}启动方式: script（scripts/run-server.ps1）`, out, "", tail, ...notes, "", INFER_TIP].join("\n")
 }
 
@@ -586,9 +590,9 @@ export async function doStart(args: Record<string, unknown>, ctx: ToolContext, p
       `引擎解析: ${resolved.note ?? "未知"}`,
       "",
       "下一步：",
-      "  1) local_infer_engines —— 查看本机平台可下载/可用的引擎（矩阵按 linux/win32/darwin × cpu/cuda/vulkan/metal 列全）；",
-      "  2) local_infer_engine_fetch —— 安装选定引擎（下载 + 校验 + 解压到 vendor/<engine-id>/）；",
-      "  3) 再 local_infer_start（仍失败就看 local_infer_logs 的尾部与「疑似错误」）。",
+      "  1) llm_infer_engines —— 查看本机平台可下载/可用的引擎（矩阵按 linux/win32/darwin × cpu/cuda/vulkan/metal 列全）；",
+      "  2) llm_infer_engine_fetch —— 安装选定引擎（下载 + 校验 + 解压到 vendor/<engine-id>/）；",
+      "  3) 再 llm_infer_start（仍失败就看 llm_infer_logs 的尾部与「疑似错误」）。",
       "（临时可用 mode=\"script\" 走 Windows 的 run-server.ps1 兼容路径，但它需要 Windows + PowerShell + 预解压的 engine_dir。）",
     ].join("\n")
   }
@@ -602,7 +606,7 @@ export async function doStart(args: Record<string, unknown>, ctx: ToolContext, p
   const pre = await ctx.runCommand(portOwnerCmd(port, platform), { timeoutMs: 20000 })
   if (isListening(pre.stdout)) {
     const owner = parsePortOwner(pre.stdout, platform)
-    return `端口 :${port} 已被占用${owner ? `（PID ${owner}）` : ""}——先 local_infer_stop（或 stop 指定 port），或换一个 port 参数。`
+    return `端口 :${port} 已被占用${owner ? `（PID ${owner}）` : ""}——先 llm_infer_stop（或 stop 指定 port），或换一个 port 参数。`
   }
 
   const split = splitExtraArgs(p.extra_args)
@@ -630,7 +634,7 @@ export async function doStart(args: Record<string, unknown>, ctx: ToolContext, p
   try {
     res = await spawnServerAsync({ exe: resolved.exe, args: argv, logPath, cwd: home, env: launcherEnv(platform) })
   } catch (e) {
-    return `启动失败：${(e as Error).message}\n\n排查：上面的日志尾部就是引擎自己的报错（参数不被接受/显存不足/端口冲突等）；也可用 local_infer_logs 复查与状态确认。`
+    return `启动失败：${(e as Error).message}\n\n排查：上面的日志尾部就是引擎自己的报错（参数不被接受/显存不足/端口冲突等）；也可用 llm_infer_logs 复查与状态确认。`
   }
 
   // 引擎标识：显式/档位指定的优先；否则从**安装布局**反推——vendor/<engine-id>/ 下的一级目录名才是引擎 id
@@ -681,7 +685,7 @@ export async function doStart(args: Record<string, unknown>, ctx: ToolContext, p
   ]
   const tail = wr.ok
     ? `服务就绪 ${baseUrl(port)}（加载 ${wr.secs}s，OpenAI 兼容端点 /v1/chat/completions）`
-    : `服务进程已启动但 ${wr.secs}s 内未就绪（${wr.error ?? "未知原因"}）——大模型首次加载可能更久，用 local_infer_status 复查进程与 local_infer_logs 看日志尾部`
+    : `服务进程已启动但 ${wr.secs}s 内未就绪（${wr.error ?? "未知原因"}）——大模型首次加载可能更久，用 llm_infer_status 复查进程与 llm_infer_logs 看日志尾部`
   return [...head, "", tail, "", INFER_TIP].join("\n")
 }
 
@@ -690,13 +694,13 @@ const start: Tool = {
   safeMode: false, // 安全模式下不提供：会拉起 GPU 服务进程
   description:
     "按档位启动本地推理服务（OpenAI 兼容端点，默认 127.0.0.1:8080）。会占用整张 GPU（模型约 13GB 显存，加载约 10-20 秒），启动前请确认没有其他 GPU 任务。启动成功后就绪并写入服务状态文件（run/server-<port>.json），供 status/stop/logs 精确管理。" +
-    "启动方式：缺省 mode=launcher——TS 直接 spawn llama-server 并脱离当前进程树（跨平台，Linux/macOS/Windows 均不需 PowerShell，日志重定向到 bench/reports/server-<时间戳>.log）；mode=script 走 scripts/run-server.ps1（仅 Windows 的兼容回退，环境变量 LOCAL_INFER_LAUNCH=script 可全局强制）。" +
-    "launcher 模式下找不到引擎时不直接报错：会告诉你用 local_infer_engines 看可下载项、local_infer_engine_fetch 安装。需审批。",
+    "启动方式：缺省 mode=launcher——TS 直接 spawn llama-server 并脱离当前进程树（跨平台，Linux/macOS/Windows 均不需 PowerShell，日志重定向到 bench/reports/server-<时间戳>.log）；mode=script 走 scripts/run-server.ps1（仅 Windows 的兼容回退，环境变量 GEBAI_LLM_INFER_LAUNCH=script 可全局强制）。" +
+    "launcher 模式下找不到引擎时不直接报错：会告诉你用 llm_infer_engines 看可下载项、llm_infer_engine_fetch 安装。需审批。",
   requiresApproval: true,
   parameters: schema({
     profile: { type: "string", description: "运行档位名（缺省用配置的默认档，推荐 fast）" },
     model: { type: "string", description: "模型文件名（缺省用档位指定的模型；也可直接给绝对路径）" },
-    port: { type: "number", description: "服务端口（缺省 LOCAL_INFER_PORT 或 8080）" },
+    port: { type: "number", description: "服务端口（缺省 GEBAI_LLM_INFER_PORT 或 8080）" },
     n_cpu_moe: { type: "number", description: "留在 CPU 的专家层数（0=全部专家进显存，性能最优；缺省用档位值）" },
     engine: { type: "string", description: "引擎 id（engines.json 的引擎标识，如 linux-cpu-x64；缺省用档位的 engine 字段，再缺省用 vendor/ 下唯一已安装引擎）" },
     mode: { type: "string", description: "启动方式：launcher（缺省，TS 直接 spawn，跨平台、不需 PowerShell）/ script（调用 scripts/run-server.ps1，仅 Windows 兼容回退）" },
@@ -795,7 +799,7 @@ async function withGpuTail(ctx: ToolContext, lines: string[], show: boolean): Pr
     const smi = await ctx.runCommand(`nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader`, { timeoutMs: 20000 })
     if (smi.code === 0 && smi.stdout.trim()) lines.push(`显存: ${smi.stdout.trim()}`)
   }
-  lines.push("提示：显存释放有数秒延迟（进程退出后驱动回收），随即用 local_infer_status 复查。")
+  lines.push("提示：显存释放有数秒延迟（进程退出后驱动回收），随即用 llm_infer_status 复查。")
   return lines.join("\n")
 }
 
@@ -849,7 +853,7 @@ const restart: Tool = {
   parameters: schema({
     profile: { type: "string", description: "目标运行档位名（缺省用配置的默认档）" },
     model: { type: "string", description: "目标模型文件名（缺省用档位指定的模型）" },
-    port: { type: "number", description: "服务端口（缺省 LOCAL_INFER_PORT 或 8080）" },
+    port: { type: "number", description: "服务端口（缺省 GEBAI_LLM_INFER_PORT 或 8080）" },
     n_cpu_moe: { type: "number", description: "留在 CPU 的专家层数（0=全部专家进显存）" },
     engine: { type: "string", description: "引擎 id（缺省用档位的 engine 字段或唯一已安装引擎）" },
     mode: { type: "string", description: "启动方式：launcher（缺省）/ script（Windows 的 run-server.ps1 兼容路径）" },

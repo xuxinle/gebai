@@ -122,6 +122,8 @@ export type TriageL2Runner = (req: {
 export interface TriageL1Options {
   /** OpenAI 兼容端点（本机小模型 / 局域网 / 云端）。 */
   baseUrl: string
+  /** 端点类型（`local` 本机受管服务 / `remote` 远程或直连 URL）：决定并发缺省与闸门分档。 */
+  kind?: "local" | "remote"
   /** 端点鉴权头（远端）。 */
   headers?: Record<string, string>
   /** 模型名（端点需要时）。 */
@@ -130,13 +132,27 @@ export interface TriageL1Options {
   system?: string
   /** 单条用户提示模板（占位符 `{id}` / `{title}` / `{features}` / `{labels}`）。 */
   promptTemplate?: string
-  /** 并发度（缺省 1；仅在短 prompt + slot 匹配时有收益）。 */
+  /** 并发度（缺省 1；仅在短 prompt + slot 匹配时有收益）。
+   *  **真实在途上限是全局的**：同一推理端点上的多个研判任务共享公平闸门（按任务轮转），
+   *  本值只决定本任务请求的并发意图（见 pipeline 的 `l1GateHub` / `GEBAI_TRIAGE_L1_GATE`）。 */
   concurrency?: number
   maxTokens?: number
   temperature?: number
   /** 工具式输出：未调用输出工具时的提醒次数上限（缺省 3）。 */
   reminders?: number
   timeoutMs?: number
+  /**
+   * 单条失败重试次数（缺省 1）。**只重试传输类失败**（网络/超时/429/5xx）——
+   * 「模型不调输出工具」与「结构化校验不过」再跑一次大概率同样失败，不重试（那是实打实的算力浪费）。
+   */
+  retries?: number
+  /** 重试退避基数（毫秒，缺省 500；第 n 次失败后等 `delay * n`）。 */
+  retryDelayMs?: number
+  /**
+   * L1 全局在途上限（跨任务的公平闸门容量）。不设时取「该端点同时挂着的各任务并发度的最大值」
+   * （单任务 c8 就是 8，与无闸门一致；两个 c8 任务共享 8 个额度并轮转）；设了就以此为硬上限。
+   */
+  gateCap?: number
   /** 思维链开关（缺省 false——思考链会吃光输出预算）。 */
   enableThinking?: boolean
   fetchImpl?: typeof fetch
@@ -169,6 +185,8 @@ export interface TriageOptions {
   user: string
   /** 数据根（缺省 `GEBAI_HOME` 环境变量；仅用于推导缺省 jobDir）。 */
   home?: string
+  /** 读全局调优的环境（`GEBAI_TRIAGE_L1_CONCURRENCY` / `GEBAI_TRIAGE_L1_GATE`）；不传则不读。 */
+  env?: Record<string, string>
   items: TriageItem[]
   /**
    * 业务结果 schema。引擎会自动外包一层分析信封（confidence/reason/evidence_index）；
@@ -198,6 +216,7 @@ export interface TriageOptions {
   /** 任务标识（缺省按时间戳生成；同 job_id 重复调用按 id 跳过已完成的 L1）。 */
   jobId?: string
   onResult?: (r: TriageResult) => void | Promise<void>
+  /** 进度回调：同一个 job 可能有多条管线并行（分片），实现需自带同步。 */
   onProgress?: (p: TriageProgress) => void | Promise<void>
   signal?: AbortSignal
 }

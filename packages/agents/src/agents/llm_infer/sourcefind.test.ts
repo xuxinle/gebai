@@ -117,7 +117,7 @@ function makeCtx(
     workdir,
     sessionWorkdir: workdir,
     home,
-    env: { LOCAL_INFER_HOME: home },
+    env: { GEBAI_LLM_INFER_HOME: home },
     sandboxed: false,
     runCommand: async (cmd: string, o?: { timeoutMs?: number }) => {
       calls.push({ cmd, opts: o })
@@ -147,7 +147,7 @@ function makeRealCtx(home: string): { ctx: ToolContext; calls: CmdCall[] } {
     workdir,
     sessionWorkdir: workdir,
     home,
-    env: { LOCAL_INFER_HOME: home },
+    env: { GEBAI_LLM_INFER_HOME: home },
     sandboxed: false,
     runCommand: async (cmd: string, o?: { timeoutMs?: number }) => {
       calls.push({ cmd, opts: o })
@@ -177,36 +177,36 @@ describe("sourceRoots", () => {
     expect(roots[0]?.endsWith(join("gebai", "resources", "src"))).toBe(true)
   })
 
-  test("LOCAL_INFER_SOURCE_DIRS 优先，`:` 与 `;` 都当分隔符，空段忽略", () => {
+  test("GEBAI_LLM_INFER_SOURCE_DIRS 优先，`:` 与 `;` 都当分隔符，空段忽略", () => {
     const t = makeTree()
     const defaults = [resolve(t.home, "..", "resources", "src"), resolve(t.home, "..", "resources", "engines"), join(t.home, "engine")]
 
-    const colon = sourceRoots(t.home, { LOCAL_INFER_SOURCE_DIRS: "/opt/src-a::/opt/src-b" })
+    const colon = sourceRoots(t.home, { GEBAI_LLM_INFER_SOURCE_DIRS: "/opt/src-a::/opt/src-b" })
     expect(colon.slice(0, 2)).toEqual(["/opt/src-a", "/opt/src-b"])
     expect(colon.slice(2)).toEqual(defaults)
 
-    const semi = sourceRoots(t.home, { LOCAL_INFER_SOURCE_DIRS: "; /opt/src-a ;/opt/src-b;" })
+    const semi = sourceRoots(t.home, { GEBAI_LLM_INFER_SOURCE_DIRS: "; /opt/src-a ;/opt/src-b;" })
     expect(semi.slice(0, 2)).toEqual(["/opt/src-a", "/opt/src-b"])
     expect(semi.slice(2)).toEqual(defaults)
   })
 
   test("盘符冒号不当分隔（C:\\a:D:\\b → 两条），相对路径按 cwd 解析", () => {
     const t = makeTree()
-    const win = sourceRoots(t.home, { LOCAL_INFER_SOURCE_DIRS: "C:\\src-b;D:\\src-c" })
+    const win = sourceRoots(t.home, { GEBAI_LLM_INFER_SOURCE_DIRS: "C:\\src-b;D:\\src-c" })
     expect(win.slice(0, 2)).toEqual(["C:\\src-b", "D:\\src-c"])
-    const winColon = sourceRoots(t.home, { LOCAL_INFER_SOURCE_DIRS: "C:\\src-b:D:\\src-c" })
+    const winColon = sourceRoots(t.home, { GEBAI_LLM_INFER_SOURCE_DIRS: "C:\\src-b:D:\\src-c" })
     expect(winColon.slice(0, 2)).toEqual(["C:\\src-b", "D:\\src-c"])
     expect(win[0]).toBe(winColon[0])
 
     const rel = `rel-src-${rnd()}`
-    const relRoots = sourceRoots(t.home, { LOCAL_INFER_SOURCE_DIRS: rel })
+    const relRoots = sourceRoots(t.home, { GEBAI_LLM_INFER_SOURCE_DIRS: rel })
     expect(relRoots[0]).toBe(resolve(process.cwd(), rel))
   })
 
   test("去重：与默认根重复（含尾分隔符）只保留一次", () => {
     const t = makeTree()
     const src = resolve(t.home, "..", "resources", "src")
-    const roots = sourceRoots(t.home, { LOCAL_INFER_SOURCE_DIRS: `${src}:${src}/` })
+    const roots = sourceRoots(t.home, { GEBAI_LLM_INFER_SOURCE_DIRS: `${src}:${src}/` })
     expect(roots).toEqual([src, resolve(t.home, "..", "resources", "engines"), join(t.home, "engine")])
   })
 })
@@ -416,7 +416,7 @@ describe("discoverSources", () => {
       symlinked = false // 无权限建符号链接（部分 Windows 环境）：该分支跳过
     }
 
-    const res = await discoverSources(t.home, { LOCAL_INFER_SOURCE_DIRS: `${notADir}:${missingRoot}` })
+    const res = await discoverSources(t.home, { GEBAI_LLM_INFER_SOURCE_DIRS: `${notADir}:${missingRoot}` })
     const notes = res.notes.join("\n")
     expect(notes).toContain("发现根不是目录")
     if (symlinked) expect(notes).toContain("条目不可读")
@@ -491,7 +491,7 @@ describe("findSource", () => {
     expect(r.error).toContain("llama.cpp-b11175")
     expect(r.error).toContain("plain-make")
     expect(r.error).toContain("{GEBAI_HOME}/resources/src/")
-    expect(r.error).toContain("LOCAL_INFER_SOURCE_DIRS")
+    expect(r.error).toContain("GEBAI_LLM_INFER_SOURCE_DIRS")
   })
 
   test("无任何源码时也给出建议；URL / 空 ref / 普通文件都返回可操作 error", async () => {

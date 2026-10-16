@@ -310,7 +310,7 @@ describe("resolveEngineExe", () => {
     expect(listInstalledEngines(home, "linux")).toEqual([])
     const r = resolveEngineExe({ home, platform: "linux" })
     expect(r.via).toBe("none")
-    expect(r.note).toContain("local_infer_engine_fetch")
+    expect(r.note).toContain("llm_infer_engine_fetch")
   })
 
   test("无引擎标记、只有 engine_dir 下同名 exe → via engine_dir", () => {
@@ -334,8 +334,8 @@ describe("resolveEngineExe", () => {
     const r = resolveEngineExe({ home, platform: "linux" })
     expect(r.via).toBe("none")
     expect(r.exe).toBeUndefined()
-    expect(r.note).toContain("local_infer_engines")
-    expect(r.note).toContain("local_infer_engine_fetch")
+    expect(r.note).toContain("llm_infer_engines")
+    expect(r.note).toContain("llm_infer_engine_fetch")
 
     // 指定了一个没装的引擎、engine_dir 也没有 → note 里要提到它，别只报「无引擎」
     const home2 = mkTmp("launcher-none-id")
@@ -461,9 +461,9 @@ describe("启动与就绪", () => {
     await expect(p).rejects.toThrow(/找不到可执行文件/)
     await p.catch((e: Error) => {
       expect(e.message).toContain("日志尾部")
-      expect(e.message).toContain("local_infer_engine_fetch")
+      expect(e.message).toContain("llm_infer_engine_fetch")
     })
-    expect(() => assertExecutable(join(dir, "nope"))).toThrow(/local_infer_engines/)
+    expect(() => assertExecutable(join(dir, "nope"))).toThrow(/llm_infer_engines/)
   })
 
   test("spawnServerAsync：进程启动后立即退出 → reject，错误里带日志尾部（stderr 内容）", async () => {

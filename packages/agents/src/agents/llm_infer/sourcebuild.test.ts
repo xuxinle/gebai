@@ -173,7 +173,7 @@ function makeCtx(home: string, env: Record<string, string> = {}): { ctx: ToolCon
   const calls: CmdCall[] = []
   const workdir = join(home, "sessions", "s1", "tmp")
   mkdirSync(workdir, { recursive: true })
-  const ctxEnv: Record<string, string> = { LOCAL_INFER_HOME: home, ...env }
+  const ctxEnv: Record<string, string> = { GEBAI_LLM_INFER_HOME: home, ...env }
   const ctx = {
     user: "default",
     sessionId: "s1",
@@ -467,7 +467,7 @@ describe("buildFromSource：编译 + 安装（假 cmake）", () => {
     expect(r.logPath).toBeDefined()
     expect(existsSync(r.logPath!)).toBe(true)
     const log = readFileSync(r.logPath!, "utf-8")
-    expect(log).toContain("local_infer 源码编译安装")
+    expect(log).toContain("llm_infer 源码编译安装")
     // 日志：命令行原文 + 退出码都在（cmake 可能是 PATH 解析名，也可能是探测到的绝对路径，
     // Windows 上还带 .cmd/.exe 扩展名——故只断言命令行形态，不写死命令名）
     expect(log).toMatch(/\$ .*cmake.* -S /)

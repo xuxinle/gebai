@@ -39,7 +39,7 @@ function makeCtx(home: string, run?: (cmd: string) => { stdout: string; stderr: 
     workdir,
     sessionWorkdir: workdir,
     home,
-    env: { LOCAL_INFER_HOME: home },
+    env: { GEBAI_LLM_INFER_HOME: home },
     sandboxed: false,
     resolvePath: (p: string) => (p.startsWith("/") ? p : join(workdir, p)),
     readFile: async (p: string) => Bun.file(p).text(),
@@ -125,7 +125,7 @@ describe("sources：发现与工具链", () => {
     const { ctx } = makeCtx(home)
     const r = await tools.sources.execute({ action: "list" }, ctx)
     expect(r.output).toContain("（无）")
-    expect(r.output).toContain("LOCAL_INFER_SOURCE_DIRS")
+    expect(r.output).toContain("GEBAI_LLM_INFER_SOURCE_DIRS")
     expect(r.output).toContain("resources:download")
   })
 

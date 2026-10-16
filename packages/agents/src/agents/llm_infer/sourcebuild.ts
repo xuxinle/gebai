@@ -1,5 +1,5 @@
 /**
- * local_infer 的**源码编译安装层**：把「内网/离线拿不到预编译包」变成「有源码就能出引擎」。
+ * llm_infer 的**源码编译安装层**：把「内网/离线拿不到预编译包」变成「有源码就能出引擎」。
  *
  * 与同目录两层的关系（分工是清晰的，互不越界）：
  *   * engines.ts      —— 下载安装层：从发行版拉预编译包 → 解压 → 装到 `vendor/<id>/` → 写 `.engine.json`；
@@ -636,7 +636,7 @@ function copyRuntimeDir(srcDir: string, destDir: string): { copied: number; fail
   return { copied, failed }
 }
 
-/** 本地时间戳（日志名用：肉眼可读且可排序，与其它 local_infer 日志同一形态）。 */
+/** 本地时间戳（日志名用：肉眼可读且可排序，与其它 llm_infer 日志同一形态）。 */
 function stamp(d = new Date()): string {
   const p = (n: number, w = 2): string => String(n).padStart(w, "0")
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
@@ -729,7 +729,7 @@ export async function buildFromSource(o: {
   })
 
   // ① 参数校验（配置错误也走返回错误，不抛）
-  if (!home) return fail("home 为空：无法确定 infer 子项目根（应由 LOCAL_INFER_HOME 或引擎注入）")
+  if (!home) return fail("home 为空：无法确定 infer 子项目根（应由 GEBAI_LLM_INFER_HOME 或引擎注入）")
   if (!engineId) return fail("engine_id 为空：请指定要安装到的引擎 id（安装落点 vendor/<engine_id>）")
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(engineId)) {
     return fail(`engine_id 不合法：${engineId}——只允许字母/数字/._-（它同时是 vendor 下的目录名，不能含路径分隔符）`)
@@ -808,7 +808,7 @@ export async function buildFromSource(o: {
   appendLog(
     logPath,
     [
-      "===== local_infer 源码编译安装 =====",
+      "===== llm_infer 源码编译安装 =====",
       `引擎 ${engineId} · 设备 ${device} · 并行 ${jobs}${offline ? " · 离线模式" : ""} · 主机 ${process.platform}-${process.arch}`,
       `源码 ${sourceDir}`,
       `构建 ${buildDir}`,

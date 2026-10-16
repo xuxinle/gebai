@@ -1,5 +1,5 @@
 /**
- * local_infer 的【跨平台进程管理层】：启动参数组装 → 脱离进程树启动 → 就绪轮询 → 进程/端口操作。
+ * llm_infer 的【跨平台进程管理层】：启动参数组装 → 脱离进程树启动 → 就绪轮询 → 进程/端口操作。
  *
  * 为什么不再依赖 PowerShell：验证与部署机可能是 Linux（无 pwsh）。TS 层直接用 node:child_process
  * 的 spawn 就能跨平台完成启动/停止/探活，`infer/scripts/run-server.ps1` 降为 Windows 的兼容回退
@@ -142,7 +142,7 @@ export function logTail(logPath: string, lines = 20): string {
 /** 可执行文件预检：不存在/不可执行时**同步**抛出可读错误（spawn 的 ENOENT 是异步事件，不利于 fail-fast）。 */
 export function assertExecutable(exe: string, platform: NodeJS.Platform = process.platform): void {
   if (!existsSync(exe)) {
-    throw new Error(`找不到可执行文件：${exe}（本平台没有已安装引擎时，先用 local_infer_engines 查看可下载项、local_infer_engine_fetch 安装）`)
+    throw new Error(`找不到可执行文件：${exe}（本平台没有已安装引擎时，先用 llm_infer_engines 查看可下载项、llm_infer_engine_fetch 安装）`)
   }
   if (platform !== "win32") {
     try {
@@ -455,7 +455,7 @@ function scanVendorBins(home: string, platform: NodeJS.Platform): { id: string; 
  *   ① 引擎层（engines.ts）：engineId 指定则只认它（installedEngine）；否则听本机推荐（矩阵 × 已安装）
  *   ② 文件系统扫描 `vendor/<id>/.engine.json` 安装标记（矩阵缺失/手工解压的场景也能定位）——① ② 均为 via "engine"
  *   ③ 目录约定回退：档位 engine_dir → vendor/<id>/ 下未写标记但能找到的 llama-server（via "engine_dir"）
- *   ④ 都没有 → via "none" + 可操作 note（指向 local_infer_engines / engine_fetch）
+ *   ④ 都没有 → via "none" + 可操作 note（指向 llm_infer_engines / engine_fetch）
  */
 export function resolveEngineExe(o: {
   home: string
@@ -504,7 +504,7 @@ export function resolveEngineExe(o: {
   // ④ none
   return {
     via: "none",
-    note: `${notes.length ? `${notes.join("；")}。` : ""}该平台无已安装引擎——先 local_infer_engines 查看可下载项、local_infer_engine_fetch 安装（或把预编译包解压到 profiles.json 的 engine_dir）`,
+    note: `${notes.length ? `${notes.join("；")}。` : ""}该平台无已安装引擎——先 llm_infer_engines 查看可下载项、llm_infer_engine_fetch 安装（或把预编译包解压到 profiles.json 的 engine_dir）`,
   }
 }
 

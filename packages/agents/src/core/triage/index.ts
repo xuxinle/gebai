@@ -4,4 +4,6 @@
  */
 export * from "./types"
 export * from "./pipeline"
+export * from "./scheduler"
+export * from "./preset"
 export * from "./params"

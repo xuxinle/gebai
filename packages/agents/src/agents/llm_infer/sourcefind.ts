@@ -1,5 +1,5 @@
 /**
- * local_infer 的**源码发现层**：解决「内网/离线环境下拿不到预编译包」——把源码放进 `resources/src/`
+ * llm_infer 的**源码发现层**：解决「内网/离线环境下拿不到预编译包」——把源码放进 `resources/src/`
  * （或既有约定目录），由本层发现、识别、探测工具链、按需解压，交给 sourcebuild.ts 就地编译成引擎。
  *
  * 与 engines.ts 的分工：
@@ -9,7 +9,7 @@
  *     同一标记文件格式，因此 launcher/status/start 无需区分来源）。
  *
  * 发现根（按优先级）：
- *   1. `LOCAL_INFER_SOURCE_DIRS` 环境变量（路径分隔符分隔，`:` 与 `;` 都认，便于跨平台配置）；
+ *   1. `GEBAI_LLM_INFER_SOURCE_DIRS` 环境变量（路径分隔符分隔，`:` 与 `;` 都认，便于跨平台配置）；
  *   2. `{GEBAI_HOME}/resources/src/`（**内网预置源码的主目录**：把源码目录或源码归档放这里）；
  *   3. `{GEBAI_HOME}/resources/engines/`；
  *   4. `<infer>/engine/`（仓库既有约定，`engine/llama.cpp-*` 在这里）。
@@ -43,6 +43,7 @@ import type { Stats } from "node:fs"
 import { unzipSync } from "fflate"
 import type { ToolContext } from "@gebai/sdk"
 import { downloadCacheDir, isAbsolutePath } from "./paths"
+import { envVar } from "./env"
 
 /** 可编译源码的种类（决定 sourcebuild 用哪套构建预设）。 */
 export type SourceKind = "llama_cpp" | "cmake" | "make" | "script" | "unknown"
@@ -298,7 +299,7 @@ function safeRel(name: string): string | null {
 // ── 发现根 ────────────────────────────────────────────────────────────────
 
 /**
- * 切分 `LOCAL_INFER_SOURCE_DIRS`：`;` 与 `:` 都当分隔符（跨平台配置同一份环境变量），空段忽略。
+ * 切分 `GEBAI_LLM_INFER_SOURCE_DIRS`：`;` 与 `:` 都当分隔符（跨平台配置同一份环境变量），空段忽略。
  * 但带盘符的 Windows 路径（`C:\src`、`D:/s`）里的冒号属于路径本身，不作分隔——
  * 否则 `C:\src` 会被切成 `C` 与 `\src` 两个无意义段。
  */
@@ -346,7 +347,7 @@ export function sourceRoots(home: string, env: Record<string, string>): string[]
     seen.add(key)
     out.push(abs)
   }
-  for (const p of splitSourceDirs(env.LOCAL_INFER_SOURCE_DIRS ?? "")) push(p)
+  for (const p of splitSourceDirs(envVar(env, "SOURCE_DIRS") ?? "")) push(p)
   // 与 paths.modelsDir 同口径：{GEBAI_HOME} = home/..，资源目录都在 {GEBAI_HOME}/resources/ 下
   push(resolve(home, "..", "resources", "src"))
   push(resolve(home, "..", "resources", "engines"))
@@ -769,10 +770,10 @@ export async function findSource(
   opts?: { ctx?: ToolContext },
 ): Promise<{ candidate?: SourceCandidate; error?: string }> {
   const raw = String(ref ?? "").trim()
-  if (!raw) return { error: "需要源码 id 或目录/归档路径：先用 local_infer_source_list 看已发现清单。" }
+  if (!raw) return { error: "需要源码 id 或目录/归档路径：先用 llm_infer_source_list 看已发现清单。" }
   if (/^https?:\/\//i.test(raw)) {
     return {
-      error: `本层只处理本地源码（内网/离线）：不支持 URL ${raw}——请先下载并解压到 {GEBAI_HOME}/resources/src/，或用 LOCAL_INFER_SOURCE_DIRS 指向已解压目录。`,
+      error: `本层只处理本地源码（内网/离线）：不支持 URL ${raw}——请先下载并解压到 {GEBAI_HOME}/resources/src/，或用 GEBAI_LLM_INFER_SOURCE_DIRS 指向已解压目录。`,
     }
   }
 
@@ -796,7 +797,7 @@ export async function findSource(
   const ids = found.candidates.map((c) => c.id)
   const list = ids.length ? `已发现的 id：${ids.join("、")}` : "当前未发现任何源码"
   return {
-    error: `${raw} 既不是存在的路径，也不是已发现的源码 id。${list}。把源码（目录或 .tar.gz/.zip）放到 {GEBAI_HOME}/resources/src/，或用 LOCAL_INFER_SOURCE_DIRS 指定扫描根。`,
+    error: `${raw} 既不是存在的路径，也不是已发现的源码 id。${list}。把源码（目录或 .tar.gz/.zip）放到 {GEBAI_HOME}/resources/src/，或用 GEBAI_LLM_INFER_SOURCE_DIRS 指定扫描根。`,
   }
 }
 
@@ -879,7 +880,7 @@ export async function ensureSourceDir(
 ): Promise<{ dir?: string; extracted?: boolean; error?: string }> {
   if (!candidate.archive) {
     const dir = candidate.path
-    if (!existsSync(dir)) return { error: `源码目录不存在：${dir}（可能已被移动/删除；重跑 local_infer_source_list 确认）` }
+    if (!existsSync(dir)) return { error: `源码目录不存在：${dir}（可能已被移动/删除；重跑 llm_infer_source_list 确认）` }
     // 构建入口：CMakeLists.txt / Makefile 是硬要求；script 类候选只有构建脚本，同样放行（否则 discovery 发现的它无路可走）
     if (!buildEntry(dir)) {
       return { error: `目录无可识别的构建入口：${dir}——需含 CMakeLists.txt、Makefile 或 build.sh/build.bat 之一。` }
@@ -892,7 +893,7 @@ export async function ensureSourceDir(
 
   const reuse = adoptedDir(workDir)
   if (reuse) return { dir: reuse, extracted: false }
-  if (!existsSync(archive.path)) return { error: `归档不存在：${archive.path}（可能已被移动/删除；重跑 local_infer_source_list 确认）` }
+  if (!existsSync(archive.path)) return { error: `归档不存在：${archive.path}（可能已被移动/删除；重跑 llm_infer_source_list 确认）` }
 
   const staging = `${workDir}.part-${process.pid.toString(36)}-${Date.now().toString(36)}`
   try {

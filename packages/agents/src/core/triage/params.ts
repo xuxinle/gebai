@@ -11,7 +11,7 @@
  */
 import { existsSync, readFileSync } from "node:fs"
 import { isAbsolute, resolve } from "node:path"
-import { resolveTarget, targetHeaders, type InferTarget } from "../../agents/local_infer/providers"
+import { resolveTarget, targetHeaders, type InferTarget } from "../../agents/llm_infer/providers"
 import { defaultJobDir } from "./pipeline"
 import type { TriageItem, TriageL2Runner, TriageOptions } from "./types"
 
@@ -54,14 +54,14 @@ export const TRIAGE_PARAM_SPECS: TriageParamSpec[] = [
     type: "string",
     aliases: ["l1_target", "l1.target", "l1.base_url"],
     description:
-      '推理目标：缺省 local（本机受管推理服务，按服务状态文件定位端口）；也可为命名目标（LOCAL_INFER_TARGETS 里声明的 name）' +
+      '推理目标：缺省 local（本机受管推理服务，按服务状态文件定位端口）；也可为命名目标（GEBAI_LLM_INFER_TARGETS 里声明的 name）' +
       '或直连 URL（"http://192.168.1.20:8080"，任意 OpenAI 兼容端点）。',
   },
   {
     name: "target_api_key",
     type: "string",
     aliases: ["l1_api_key", "l1.api_key"],
-    description: "推理目标鉴权密钥（远端需要时；不传则用命名目标的 api_key 字段或 LOCAL_INFER_REMOTE_API_KEY）",
+    description: "推理目标鉴权密钥（远端需要时；不传则用命名目标的 api_key 字段或 GEBAI_LLM_INFER_REMOTE_API_KEY）",
   },
   {
     name: "schema",
@@ -123,13 +123,18 @@ export const TRIAGE_PARAM_SPECS: TriageParamSpec[] = [
     name: "l1_concurrency",
     type: "number",
     aliases: ["l1.concurrency"],
-    description: "小模型并发度（缺省 1；仅在短 prompt + slot 数匹配时有收益，CPU 上并发无增益）",
+    description:
+      "小模型并发度（缺省：远程端点 4 / 本机受管服务 1；GEBAI_TRIAGE_L1_CONCURRENCY 可全局覆写）。" +
+      "真实在途上限是全局的：同一端点上的多个任务共享公平闸门并按任务轮转（见 l1_gate），" +
+      "本值只决定本任务请求的并发意图。",
   },
   {
     name: "l1_max_tokens",
     type: "number",
     aliases: ["l1.max_tokens"],
-    description: "单条最大输出 token（缺省 300）",
+    description:
+      "单条最大输出 token（缺省 32768，`GEBAI_TRIAGE_L1_MAX_TOKENS` 可全局覆盖）。" +
+      "**别调得太小**：schema 字段一多时预算不够，会只截断工具参数、整批报「参数不是合法 JSON」而失败（实测踩过）。",
   },
   {
     name: "l1_temperature",
@@ -148,6 +153,29 @@ export const TRIAGE_PARAM_SPECS: TriageParamSpec[] = [
     type: "number",
     aliases: ["l1.timeout_ms"],
     description: "单条请求超时毫秒数（缺省 600000）",
+  },
+  {
+    name: "l1_retries",
+    type: "number",
+    aliases: ["l1.retries"],
+    description:
+      "单条失败重试次数（缺省 1）：**只重试传输类失败**（网络/超时/429/5xx）；" +
+      "「模型不调输出工具」与「结构化校验不过」不重试（再跑一次大概率同样失败，白付一次完整生成）。",
+  },
+  {
+    name: "l1_retry_delay_ms",
+    type: "number",
+    aliases: ["l1.retry_delay_ms"],
+    description: "重试退避基数毫秒（缺省 500；第 n 次失败后等 delay×n，上限 10s）",
+  },
+  {
+    name: "l1_gate",
+    type: "number",
+    aliases: ["l1.gate", "l1_gate_cap"],
+    description:
+      "L1 全局在途上限（同一推理端点上跨任务的公平闸门容量）。不设时取该端点各任务并发度的最大值" +
+      "（单任务 c8 就是 8；两个 c8 任务共享 8 个额度并按任务轮转——小任务不再被大任务饿死）；" +
+      "环境变量 GEBAI_TRIAGE_L1_GATE 可全局设置。",
   },
   {
     name: "l1_enable_thinking",
@@ -275,6 +303,9 @@ export interface TriageL1Params {
   temperature?: number
   reminders?: number
   timeoutMs?: number
+  retries?: number
+  retryDelayMs?: number
+  gateCap?: number
   enableThinking?: boolean
 }
 
@@ -305,8 +336,13 @@ export interface TriageParams {
   jobId?: string
   jobDir?: string
   resultLimit: number
-  /** 执行模式（缺省 `sync`）：`sync` = 本次调用等整批跑完；`async` = 后台执行并立即返回任务 id。 */
+/** 执行模式（缺省 `sync`）：`sync` = 本次调用等整批跑完；`async` = 后台执行并立即返回任务 id。 */
   mode: "sync" | "async"
+  /**
+   * 同步请求的整体超时（毫秒；**REST 通道专属**）。超过即转后台并返 202 + job_id（任务不中断）。
+   * 缺省读 `GEBAI_TRIAGE_SYNC_TIMEOUT_MS`（再缺省 120s）；0 = 不限（保持旧行为）。
+   */
+  syncTimeoutMs?: number
 }
 
 // ── 条目归一与校验（两条通道同一份报错） ──────────────────────────────────
@@ -380,19 +416,32 @@ export interface NormalizeOptions {
   itemsBaseDir: string
   /** 读文本（工具传 ctx 侧读取器以走宿主守卫；缺省 node:fs）。 */
   readText?: (absPath: string) => string
+  /**
+   * 业务面预设（`GEBAI_TRIAGE_L1_PRESET` 的解析结果）：把它当**参数最底层缺省**。
+   * 优先级恒为「显式调用参数 > 预设 > 内置缺省」——不传即完全不介入（旧调用方行为不变）。
+   */
+  preset?: Record<string, unknown>
 }
 
 /**
  * 归一调用参数：把扁平规范名、嵌套写法与既有别名收敛为一份 `TriageParams`，
  * 并做跨通道一致的校验（条目、阈值范围）。
+ *
+ * 取值顺序：显式参数 → 预设（`o.preset`）→ 内置缺省。预设只能把「不传时的缺省」从硬编码换成可配置，
+ * 因此**已显式传参的调用方行为一个字节不变**。
  */
 export function normalizeTriageParams(
   raw: Record<string, unknown>,
   o: NormalizeOptions,
 ): { params: TriageParams } | { error: string } {
+  const preset = o.preset ?? {}
+  /** 取值：显式参数优先，其次预设（都按规范名与别名查找，不合法值不参与回退）。 */
   const of = (name: string): unknown => {
     const spec = TRIAGE_PARAM_SPECS.find((s) => s.name === name)
-    return spec ? pick(raw, spec) : undefined
+    if (!spec) return undefined
+    const explicit = pick(raw, spec)
+    if (explicit !== undefined) return explicit
+    return pick(preset, spec)
   }
 
   // ① 条目：内联数组优先，其次条目文件
@@ -451,6 +500,9 @@ export function normalizeTriageParams(
         temperature: asNum(of("l1_temperature")),
         reminders: asNum(of("l1_reminders")),
         timeoutMs: asNum(of("l1_timeout_ms")),
+        retries: asNum(of("l1_retries")),
+        retryDelayMs: asNum(of("l1_retry_delay_ms")),
+        gateCap: asNum(of("l1_gate")),
         enableThinking: asBool(of("l1_enable_thinking")),
       },
       l2: {
@@ -473,7 +525,7 @@ export function normalizeTriageParams(
 
 // ── 端点解析与 options 组装（两条通道同源） ────────────────────────────────
 
-/** 解析推理目标：`local` 走服务状态文件，命名目标走 LOCAL_INFER_TARGETS，URL 直连。 */
+/** 解析推理目标：`local` 走服务状态文件，命名目标走 GEBAI_LLM_INFER_TARGETS，URL 直连。 */
 export function resolveL1Endpoint(
   params: TriageParams,
   env: Record<string, string>,
@@ -528,6 +580,7 @@ export function toTriageOptions(
     options: {
       user: o.user,
       home: o.home,
+      env: o.env,
       items: params.items,
       schema: params.schema,
       labelEnum: params.labelEnum,
@@ -546,6 +599,9 @@ export function toTriageOptions(
         temperature: params.l1.temperature,
         reminders: params.l1.reminders,
         timeoutMs: params.l1.timeoutMs,
+        retries: params.l1.retries,
+        retryDelayMs: params.l1.retryDelayMs,
+        gateCap: params.l1.gateCap,
         enableThinking: params.l1.enableThinking,
       },
       l2,

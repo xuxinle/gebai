@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterAll, describe, expect, test } from "bun:test"
-import { def, inferHome, listModels, loadProfiles, modelsDir, profileModel, profilesPath, requiresApproval } from "./local_infer"
+import { def, inferHome, listModels, loadProfiles, modelsDir, profileModel, profilesPath, requiresApproval } from "./llm_infer"
 
 const tmp = mkdtempSync(join(tmpdir(), "gebai-localinfer-"))
 afterAll(() => rmSync(tmp, { recursive: true, force: true }))
@@ -13,9 +13,9 @@ function makeHome(): string {
   return home
 }
 
-describe("local_infer 子Agent 定义", () => {
+describe("llm_infer 子Agent 定义", () => {
   test("名称与工具集符合契约（引擎供给 + 进程管理 + 目标/推理调用 + 基准/解析）", () => {
-    expect(def.name).toBe("local_infer")
+    expect(def.name).toBe("llm_infer")
     expect(def.preload).toBe(false)
     const expected = [
       // 引擎供给（跨平台跨设备）
@@ -44,6 +44,12 @@ describe("local_infer 子Agent 定义", () => {
     for (const t of expected) expect(def.tools![t]).toBeDefined()
     // 不多不少：17 个工具
     expect(Object.keys(def.tools!).sort()).toEqual([...expected].sort())
+    // 对外名是 `{子Agent名}_{工具名}`（宿主注册表统一拼接，见 registry.ts）——
+    // 所以单工具名里**不得自带前缀**（自带就会出现 llm_infer_llm_infer_xxx 这类双重前缀）
+    for (const t of expected) {
+      expect(t.startsWith("llm_infer_")).toBe(false)
+      expect(t.startsWith("local_infer_")).toBe(false)
+    }
 
     // 改变服务状态、下载落盘与编译落盘的工具需审批；只读工具与推理调用免审批
     expect(requiresApproval).toEqual({
@@ -68,11 +74,11 @@ describe("local_infer 子Agent 定义", () => {
     expect(def.tools!.generate.description).toContain("结构化")
     expect(def.tools!.jobs.description.length).toBeGreaterThan(20)
     // 系统提示词需覆盖四条主线（否则模型不知道怎么用这批工具）
-    for (const kw of ["local_infer_generate", "local_infer_batch", "local_infer_jobs", "结构化", "slot"]) {
+    for (const kw of ["llm_infer_generate", "llm_infer_batch", "llm_infer_jobs", "结构化", "slot"]) {
       expect(def.systemPrompt).toContain(kw)
     }
     // 跨平台/跨设备、统一目标、内网源码编译（新增能力必须在提示词里可达，否则模型不会用）
-    for (const kw of ["local_infer_engines", "local_infer_engine_fetch", "local_infer_model_fetch", "local_infer_targets", "local_infer_sources", "local_infer_source_build", "target", "CPU", "Vulkan", "内网"]) {
+    for (const kw of ["llm_infer_engines", "llm_infer_engine_fetch", "llm_infer_model_fetch", "llm_infer_targets", "llm_infer_sources", "llm_infer_source_build", "target", "CPU", "Vulkan", "内网"]) {
       expect(def.systemPrompt).toContain(kw)
     }
     expect(def.description).toContain("跨平台")
@@ -90,10 +96,10 @@ describe("local_infer 子Agent 定义", () => {
     for (const t of Object.keys(def.tools!)) expect(t).toMatch(/^[a-zA-Z0-9_]+$/)
   })
 
-  test("环境变量声明白名单以 LOCAL_INFER_ 前缀", () => {
+  test("环境变量声明白名单以 GEBAI_LLM_INFER_ 前缀", () => {
     expect(def.envVars!.length).toBeGreaterThan(0)
     for (const v of def.envVars!) {
-      expect(v.name.startsWith("LOCAL_INFER_")).toBe(true)
+      expect(v.name.startsWith("GEBAI_LLM_INFER_")).toBe(true)
       expect(v.description.length).toBeGreaterThan(0)
     }
   })
@@ -108,15 +114,15 @@ describe("local_infer 子Agent 定义", () => {
 })
 
 describe("路径与环境解析", () => {
-  test("LOCAL_INFER_HOME 绝对路径直接采用（POSIX 与 Windows 形态跨平台识别）", () => {
-    expect(inferHome({ LOCAL_INFER_HOME: "C:\\infer-x" })).toBe("C:\\infer-x")
-    expect(inferHome({ LOCAL_INFER_HOME: "C:/infer-x" })).toBe("C:/infer-x")
-    expect(inferHome({ LOCAL_INFER_HOME: "\\\\srv\\share\\infer" })).toBe("\\\\srv\\share\\infer")
-    expect(inferHome({ LOCAL_INFER_HOME: "/mnt/data/infer" })).toBe("/mnt/data/infer")
+  test("GEBAI_LLM_INFER_HOME 绝对路径直接采用（POSIX 与 Windows 形态跨平台识别）", () => {
+    expect(inferHome({ GEBAI_LLM_INFER_HOME: "C:\\infer-x" })).toBe("C:\\infer-x")
+    expect(inferHome({ GEBAI_LLM_INFER_HOME: "C:/infer-x" })).toBe("C:/infer-x")
+    expect(inferHome({ GEBAI_LLM_INFER_HOME: "\\\\srv\\share\\infer" })).toBe("\\\\srv\\share\\infer")
+    expect(inferHome({ GEBAI_LLM_INFER_HOME: "/mnt/data/infer" })).toBe("/mnt/data/infer")
   })
 
-  test("LOCAL_INFER_HOME 相对路径按 cwd 解析", () => {
-    expect(inferHome({ LOCAL_INFER_HOME: "sub/infer" })).toBe(join(process.cwd(), "sub/infer"))
+  test("GEBAI_LLM_INFER_HOME 相对路径按 cwd 解析", () => {
+    expect(inferHome({ GEBAI_LLM_INFER_HOME: "sub/infer" })).toBe(join(process.cwd(), "sub/infer"))
   })
 
   test("未配置时推导到子项目 infer/（不以分隔符结尾）", () => {
@@ -129,9 +135,9 @@ describe("路径与环境解析", () => {
     expect(profilesPath("/x/infer")).toBe(join("/x/infer", "config", "profiles.json"))
   })
 
-  test("模型目录缺省为子项目同级 resources 下（可被 LOCAL_INFER_MODELS_DIR 覆盖）", () => {
+  test("模型目录缺省为子项目同级 resources 下（可被 GEBAI_LLM_INFER_MODELS_DIR 覆盖）", () => {
     expect(modelsDir("/x/infer", {})).toBe(resolve("/x/infer", "..", "resources", "models", "infer"))
-    expect(modelsDir("/x/infer", { LOCAL_INFER_MODELS_DIR: "C:\\m" })).toBe("C:\\m")
+    expect(modelsDir("/x/infer", { GEBAI_LLM_INFER_MODELS_DIR: "C:\\m" })).toBe("C:\\m")
   })
 })
 

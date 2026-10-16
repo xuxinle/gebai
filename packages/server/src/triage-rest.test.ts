@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { startServer, type ServerHandle } from "./index"
@@ -89,13 +89,53 @@ const home = mkdtempSync(join(tmpdir(), "gebai-triage-rest-"))
 let handle: ServerHandle
 let l1: { port: number; stop: () => void }
 
+/** 慢 L1 stub：每条延迟 `delayMs` 后回工具调用（用于测整体超时降级与运行中部分结果）。 */
+function startSlowL1Stub(delayMs: number): { port: number; stop: () => void } {
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      if (!req.url.endsWith("/v1/chat/completions")) return new Response("not found", { status: 404 })
+      await new Promise((r) => setTimeout(r, delayMs))
+      return Response.json({
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: "",
+              tool_calls: [
+                {
+                  id: "c1",
+                  type: "function",
+                  function: {
+                    name: "submit_result",
+                    arguments: JSON.stringify({ result: { label: "代码退出" }, confidence: 0.95, reason: "日志含 exit 1", evidence_index: ["exit 1"] }),
+                  },
+                },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+        usage: { prompt_tokens: 30, completion_tokens: 10 },
+      })
+    },
+  })
+  return { port: server.port ?? 0, stop: () => server.stop(true) }
+}
+
 beforeAll(async () => {
+  // 本文件用例密集（且含多个预设/降级场景），每用户限流（10 突发 / 2 每秒）会把后面的请求打成 429——
+  // 测试关上它（0 = 不限流），免得用例之间互相干扰；限流本身另有独立的参数解析断言
+  process.env.GEBAI_TRIAGE_RATE_BURST = "0"
+  process.env.GEBAI_TRIAGE_RATE_PER_SEC = "0"
   l1 = startL1Stub()
   handle = await startServer({ gebaiHome: home, auth: "local", sandbox: "off", binaryMode: false, preloadSubAgents: [], port: 0 })
   ;(handle.engine as unknown as { opts: { provider: LLMProvider } }).opts.provider = new L2Fake()
 })
 
 afterAll(() => {
+  delete process.env.GEBAI_TRIAGE_RATE_BURST
+  delete process.env.GEBAI_TRIAGE_RATE_PER_SEC
   l1?.stop()
   handle?.gc?.stop()
   handle?.server.stop(true)
@@ -290,9 +330,179 @@ describe("参数契约（与工具调用一致）", () => {
     expect(weak).toMatchObject({ layer: "L1", ok: true, confidence: 0.2 })
   })
 
+  test("sync 整体超时：降级为后台并返 202（任务不中断，可轮询到完成）", async () => {
+    // 用慢 L1 端点 + 极小 sync_timeout_ms 把降级路径逼出来（不必真等几十秒）
+    const slow = startSlowL1Stub(1200)
+    try {
+      const res = await post({
+        items: [{ id: "good", features: "命令 exit 1" }],
+        label_enum: LABELS,
+        job_id: "rest-degrade",
+        target: `http://127.0.0.1:${slow.port}`,
+        escalate: false,
+        sync_timeout_ms: 100,
+      })
+      expect(res.status).toBe(202)
+      const body = (await res.json()) as Record<string, unknown>
+      expect(body.state).toBe("running")
+      expect(String(body.degraded ?? "")).toContain("已转为后台执行")
+      expect(String(body.job ?? "")).toMatch(/^j[0-9a-f]{8}$/)
+
+      // 降级不是失败：后台把它跑完，轮询能拿到 done 与结论
+      let state = "running"
+      for (let i = 0; i < 100 && state !== "done"; i++) {
+        await new Promise((r) => setTimeout(r, 100))
+        const j = (await (await fetch(`${base()}/api/v1/triage/jobs/rest-degrade`)).json()) as Record<string, unknown>
+        state = String(j.state ?? "running")
+      }
+      expect(state).toBe("done")
+      const results = (await (await fetch(`${base()}/api/v1/triage/jobs/rest-degrade/results`)).json()) as Record<string, unknown>
+      expect(results.count).toBe(1)
+    } finally {
+      slow.stop()
+    }
+  })
+
+  test("sync_timeout_ms=0：显式关掉整体超时（旧行为）", async () => {
+    const res = await post({
+      items: [{ id: "good", features: "命令 exit 1" }],
+      label_enum: LABELS,
+      job_id: "rest-no-timeout",
+      target: `http://127.0.0.1:${l1.port}`,
+      escalate: false,
+      sync_timeout_ms: 0,
+    })
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as Record<string, unknown>).state).toBe("done")
+  })
+
+  test("运行中的任务：可拿到已完成的部分结论（增量消费）", async () => {
+    const slow = startSlowL1Stub(150)
+    try {
+      const start = await post({
+        items: [
+          { id: "good", features: "命令 exit 1" },
+          { id: "weak", features: "状态卡在 pending" },
+        ],
+        label_enum: LABELS,
+        job_id: "rest-partial",
+        mode: "async",
+        target: `http://127.0.0.1:${slow.port}`,
+        escalate: false,
+      })
+      expect(start.status).toBe(202)
+
+      // 至少等到**部分**结论落盘（不必等整批跑完）
+      let partial: Record<string, unknown> | undefined
+      for (let i = 0; i < 60; i++) {
+        await new Promise((r) => setTimeout(r, 20))
+        const r = (await (await fetch(`${base()}/api/v1/triage/jobs/rest-partial/results`)).json()) as Record<string, unknown>
+        if (Number(r.count) >= 1) {
+          partial = r
+          break
+        }
+      }
+      expect(partial).toBeDefined()
+      expect(Number(partial!.count)).toBeGreaterThanOrEqual(1)
+    } finally {
+      slow.stop()
+    }
+  })
+
   test("target 命名目标未命中 → 400 且给可操作提示（同一份目标解析）", async () => {
     const res = await post({ items: ITEMS, target: "nope-not-a-target", escalate: false })
     expect(res.status).toBe(400)
     expect(((await res.json()) as Record<string, unknown>).error).toContain("未知推理目标")
+  })
+})
+
+// 任务配置（{GEBAI_HOME}/triage/preset.json）：调用方从此只需传 items
+describe("预设文件", () => {
+  const SCHEMA = { type: "object", properties: { label: { type: "string" } }, required: ["label"] }
+  const LABELS = ["代码退出", "网络", "未知"]
+  const post = (body: Record<string, unknown>) =>
+    fetch(`${base()}/api/v1/triage/analyze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })
+  /** 写/清预设文件（复用 beforeAll 建的 home，因此服务已在跑——正好验证「改完即生效」）。 */
+  const presetFile = (): string => join(home, "triage", "preset.json")
+  const writePreset = (content: unknown): void => {
+    mkdirSync(join(home, "triage"), { recursive: true })
+    writeFileSync(presetFile(), typeof content === "string" ? content : JSON.stringify(content, null, 2), "utf-8")
+  }
+  afterEach(() => rmSync(presetFile(), { force: true }))
+
+  test("只传 items：schema/标签/阈值/目标全部来自预设文件", async () => {
+    writePreset({
+      target: `http://127.0.0.1:${l1.port}`,
+      schema: SCHEMA,
+      label_enum: LABELS,
+      threshold: 0.85,
+      escalate: false,
+    })
+    const res = await post({ items: ITEMS, job_id: "rest-preset" })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as Record<string, unknown>
+    const summary = body.summary as Record<string, unknown>
+    expect(summary.adopted).toBe(2) // 两条都有结论（含低置信度直出，因预设 escalate=false）
+    expect(body.escalate).toBe(false) // 预设里的 escalate 生效了
+    expect((body.target as Record<string, unknown>).kind).toBe("remote") // 预设里的 target 生效（结果出自指定端点）
+  })
+
+  test("改完即生效：不重启服务，下一次调用就用新预设", async () => {
+    const base = { target: `http://127.0.0.1:${l1.port}`, label_enum: LABELS, escalate: false }
+    // 预设 A：把「未知」列入白名单——weak 条命中白名单，不需要看置信度即采纳
+    writePreset({ ...base, accept_labels: ["未知"] })
+    const first = (await (await post({ items: ITEMS, job_id: "rest-preset-live-1" })).json()) as Record<string, unknown>
+    expect((first.summary as Record<string, unknown>).escalated).toBe(0)
+
+    // 预设 B（同一进程、未重启）：白名单去掉——weak 条又回到低置信度
+    writePreset({ ...base, accept_labels: [] })
+    const second = (await (await post({ items: ITEMS, job_id: "rest-preset-live-2" })).json()) as Record<string, unknown>
+    expect((second.summary as Record<string, unknown>).escalated).toBe(1)
+  })
+
+  test("显式参数仍能覆盖预设（同一次部署里做 A/B 不靠改文件）", async () => {
+    writePreset({ target: `http://127.0.0.1:${l1.port}`, label_enum: LABELS, escalate: false })
+    const body = (await (await post({ items: ITEMS, job_id: "rest-preset-override", escalate: true, l2_max_items: 0 })).json()) as Record<string, unknown>
+    expect(body.escalate).toBe(true) // 显式参数赢
+  })
+
+  test("预设写坏 → 400 并指明文件路径（不让配置错得无声无息）", async () => {
+    writePreset('{"threshold":0.7,}')
+    const res = await post({ items: ITEMS })
+    expect(res.status).toBe(400)
+    const err = String(((await res.json()) as Record<string, unknown>).error)
+    expect(err).toContain("preset.json")
+  })
+
+  test("预设存在时，接口仍能传 schema/标签/阈值/目标（预设只是缺省，不是锁死）", async () => {
+    // 预设指向一个**未监听**的端点，且标签/阈值都是预设值；接口改传真端点 + 真标签 + 白名单
+    writePreset({
+      target: "http://127.0.0.1:1",
+      schema: { type: "object", properties: { label: { type: "string" } }, required: ["label"] },
+      label_enum: ["预设标签"],
+      threshold: 0.01,
+      accept_labels: ["不存在"],
+      escalate: false,
+    })
+    const res = await post({
+      items: ITEMS,
+      job_id: "rest-preset-call-override",
+      target: `http://127.0.0.1:${l1.port}`, // 覆盖预设的错误端点
+      label_enum: LABELS, // 覆盖预设标签
+      accept_labels: ["未知"], // 覆盖预设白名单：weak 条命中即采纳
+      threshold: 0.95,
+      min_evidence_chars: 3,
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as Record<string, unknown>
+    const summary = body.summary as Record<string, unknown>
+    // 白名单生效（否则 weak=0.2 会落到低置信度）；目标也被覆盖成真端点（否则连不上会全失败）
+    expect(summary.adopted).toBe(2)
+    expect(summary.escalated).toBe(0)
+    expect(summary.failed).toBe(0)
   })
 })

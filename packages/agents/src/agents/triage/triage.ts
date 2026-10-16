@@ -9,6 +9,7 @@ import { resolve } from "node:path"
 import type { SubAgentDef, Tool, ToolContext, ToolSchema } from "@gebai/sdk"
 import {
   defaultJobDir,
+  loadTriagePreset,
   normalizeTriageParams,
   runTriage,
   toTriageOptions,
@@ -125,8 +126,13 @@ const run: Tool = {
     "同 job_id 续跑会复用已有小模型结果。免审批（不改变服务状态，但会占用算力）。",
   parameters: schema(triageToolProperties()),
   async execute(args, ctx) {
-    // ① 参数归一（与 REST 接口同一份契约与校验）
-    const norm = normalizeTriageParams(args, { itemsBaseDir: ctx.sessionWorkdir ?? ctx.workdir })
+    // ① 参数归一（与 REST 接口同一份契约与校验；任务配置来自 {GEBAI_HOME}/triage/preset.json，两侧同一优先级）
+    const preset = loadTriagePreset({ home: ctx.home })
+    if (preset.error) return { output: preset.error }
+    const norm = normalizeTriageParams(args, {
+      itemsBaseDir: ctx.sessionWorkdir ?? ctx.workdir,
+      preset: preset.fields,
+    })
     if ("error" in norm) return { output: norm.error }
     const params = norm.params
 
@@ -192,9 +198,9 @@ const run: Tool = {
       return {
         output:
           `${built.error}\n` +
-          '用法：target 缺省 local（本机受管推理服务，需先用 local_infer_start 起服务）；' +
-          '也可给命名目标（LOCAL_INFER_TARGETS）或直连 URL，如 target="http://192.168.1.20:8080"。\n' +
-          '本机小模型可用 cpu-small 档（不占显卡）：装载 local_infer 子Agent 后 local_infer_start(profile="cpu-small")。',
+          '用法：target 缺省 local（本机受管推理服务，需先用 llm_infer_start 起服务）；' +
+          '也可给命名目标（GEBAI_LLM_INFER_TARGETS）或直连 URL，如 target="http://192.168.1.20:8080"。\n' +
+          '本机小模型可用 cpu-small 档（不占显卡）：装载 llm_infer 子Agent 后 llm_infer_start(profile="cpu-small")。',
       }
     }
     // ⑤ 执行：async 走通用后台任务注册表（与 bg_task 同一管理面），sync 当场等结果

@@ -1,5 +1,5 @@
 /**
- * local_infer 的推理调用层：OpenAI 兼容端点的请求构造、响应解析、**结构化输出**
+ * llm_infer 的推理调用层：OpenAI 兼容端点的请求构造、响应解析、**结构化输出**
  * （JSON 抽取 + JSON Schema 轻量校验 + 失败重试）与批量调度（限流 worker pool、逐条回调、重试）。
  *
  * 设计要点：
@@ -782,6 +782,9 @@ export interface BatchResult extends InferTuning {
   tool_call_missing?: boolean
   usage?: InferUsage
   decode_tps?: number
+  /** HTTP 状态码（拿到响应时有）：传输类失败的重试判定靠它——OpenAI 兼容端点常把 5xx/429 的
+   *  响应体写成 `{"error":{"message":"…"}}`，解析后错误文案里就没有状态码了。 */
+  http_status?: number
   error?: string
   warning?: string
   meta?: Record<string, unknown>
@@ -797,13 +800,30 @@ export interface BatchOptions {
   baseUrl: string
   /** 模型名（远端 OpenAI 兼容端点需要 model 字段时给出）。 */
   model?: string
-  /** 并发度（缺省 1）。仅在 slot 数匹配且 prompt 较短的批量场景才有收益——并发上限按档位 parallel。 */
+  /**
+   * 并发度（缺省 1）。仅在 slot 数匹配且 prompt 较短的批量场景才有收益——并发上限按档位 parallel。
+   * **给了 `slotGate` 时它只决定本批的 worker 数，真实在途上限由闸门跨批次统一裁决**（见 `slotGate`）。
+   */
   concurrency?: number
   timeoutMs?: number
   /** 额外请求头（远端端点鉴权）。 */
   headers?: Record<string, string>
   /** 单条失败后的重试次数（缺省 0；含结构化校验失败）。 */
   retries?: number
+  /**
+   * 重试谓词（缺省全部重试）。**区分「重试就能好」与「重试也是白搭」是省算力的关键**：
+   * 传输类失败（网络/超时/429/5xx）重试有效；`tool_call_missing`（模型就是不调工具）与
+   * 结构化校验失败再跑一次大概率同样失败，却要再付一次完整生成的成本——研判管线据此只重试前者。
+   */
+  retryOn?: (r: BatchResult) => boolean
+  /** 每次重试前的退避基数（毫秒，缺省 0 = 不退避；第 n 次失败后等 `delay * n`，上限 10s）。 */
+  retryDelayMs?: number
+  /**
+   * 全局公平闸门（跨批次共享的在途额度）：每条目在**发起请求前**取一个槽位、结束时释放。
+   * 由研判管线注入（同一推理端点上的多个任务按 owner 轮转，避免大任务饿死小任务）；
+   * 不注入则本批只受 `concurrency` 约束（现有行为不变）。
+   */
+  slotGate?: { acquire(opts?: { owner?: string; signal?: AbortSignal }): Promise<() => void>; owner?: string }
   /** 批量默认调参（可被条目覆盖）。 */
   defaults?: InferTuning
   /** 批量默认结构化约束（可被条目覆盖）。 */
@@ -827,13 +847,17 @@ export interface BatchSummary extends BatchProgress {
 
 /**
  * 批量提交：限流 worker pool（并发 = concurrency，缺省串行）逐条推理，
- * 逐条回调落盘，失败按 retries 重试（结构化校验不过也算失败）。
+ * 逐条回调落盘，失败按 retries 重试（结构化校验不过也算失败；`retryOn` 可限定只重试哪些失败）。
  * 不在此层做持久化——调用方（tasks.ts）负责把每条结果写 JSONL 与进度文件。
+ *
+ * 注入 `slotGate` 后，本批每个请求都要先向闸门取槽——**在途上限因此是全局的**，
+ * 本批的 `concurrency` 只决定 worker 数（多余 worker 在闸门前排队，不占算力也不烧 token）。
  */
 export async function runBatch(items: BatchItem[], opts: BatchOptions): Promise<BatchSummary> {
   const total = items.length
   const concurrency = Math.max(1, Math.min(opts.concurrency ?? 1, Math.max(1, total)))
   const retries = Math.max(0, opts.retries ?? 0)
+  const retryDelayMs = Math.max(0, opts.retryDelayMs ?? 0)
   const results: BatchResult[] = new Array(total)
 
   const t0 = Date.now()
@@ -861,6 +885,23 @@ export async function runBatch(items: BatchItem[], opts: BatchOptions): Promise<
         continue
       }
 
+      // 全局公平闸门：取槽（拿不到就排队等，不占算力也不烧 token）；取槽失败 = 任务中止
+      let release: (() => void) | undefined
+      if (opts.slotGate) {
+        try {
+          release = await opts.slotGate.acquire({ owner: opts.slotGate.owner, signal: opts.signal })
+        } catch {
+          const aborted: BatchResult = { id, index, ok: false, attempts: 0, elapsed_ms: 0, error: "任务已取消", meta: item.meta }
+          results[index] = aborted
+          failed++
+          done++
+          await opts.onResult?.(aborted)
+          await opts.onProgress?.({ done, failed, total })
+          continue
+        }
+      }
+
+      try {
       const req: InferRequest = {
         messages: item.messages,
         prompt: item.prompt,
@@ -875,41 +916,51 @@ export async function runBatch(items: BatchItem[], opts: BatchOptions): Promise<
         structured: item.structured ?? opts.structured,
       }
 
+      const build = (resp: InferResponse | undefined, err: string | undefined, attempts: number): BatchResult => {
+        const ok = Boolean(resp?.ok) && !(resp?.json_errors?.length)
+        return {
+          id,
+          index,
+          ok,
+          attempts,
+          elapsed_ms: Date.now() - itemStart,
+          content: resp?.content,
+          reasoning: resp?.reasoning,
+          json: resp?.json,
+          json_errors: resp?.json_errors,
+          tool_call: resp?.tool_call,
+          tool_reminders_used: resp?.tool_reminders_used,
+          tool_call_missing: resp?.tool_call_missing,
+          usage: resp?.usage,
+          decode_tps: resp?.decode_tps,
+          http_status: resp?.http_status,
+          error: ok ? undefined : err,
+          warning: resp?.warning,
+          meta: item.meta,
+        }
+      }
+
       let resp: InferResponse | undefined
       let error: string | undefined
-      let attempts = 0
+      // 重试循环的计数自己数（一次 chatOnce 内部可能已含回灌/提醒重试，不能用响应侧的 attempts 代替）
+      let calls = 0
       for (let attempt = 0; attempt <= retries; attempt++) {
-        attempts++
+        calls++
         resp = await chatOnce(req, { baseUrl: opts.baseUrl, timeoutMs: opts.timeoutMs, signal: opts.signal, fetchImpl: opts.fetchImpl, headers: opts.headers })
         if (resp.ok && !(resp.json_errors?.length)) {
           error = undefined
           break
         }
         error = resp.error ?? `结构化校验未通过：${(resp.json_errors ?? []).join("; ")}`
+        if (attempt >= retries) break
+        // 重试谓词：只重试「重试有意义」的失败（传输类）——模型不调工具/结构化不过再跑也是白搭
+        if (opts.retryOn && !opts.retryOn(build(resp, error, attempt + 1))) break
+        // 退避：网关过载/限流时立刻重发只会加剧排队
+        if (retryDelayMs > 0) await new Promise<void>((res) => setTimeout(res, Math.min(10_000, retryDelayMs * (attempt + 1))))
       }
 
-      const ok = Boolean(resp?.ok) && !(resp?.json_errors?.length)
-      const result: BatchResult = {
-        id,
-        index,
-        ok,
-        attempts,
-        elapsed_ms: Date.now() - itemStart,
-        content: resp?.content,
-        reasoning: resp?.reasoning,
-        json: resp?.json,
-        json_errors: resp?.json_errors,
-        tool_call: resp?.tool_call,
-        tool_reminders_used: resp?.tool_reminders_used,
-        tool_call_missing: resp?.tool_call_missing,
-        usage: resp?.usage,
-        decode_tps: resp?.decode_tps,
-        error: ok ? undefined : error,
-        warning: resp?.warning,
-        meta: item.meta,
-      }
-
-      if (ok) {
+      const result = build(resp, error, calls)
+      if (result.ok) {
         done++
         tokensIn += resp?.usage?.prompt_tokens ?? 0
         tokensOut += resp?.usage?.completion_tokens ?? 0
@@ -920,6 +971,9 @@ export async function runBatch(items: BatchItem[], opts: BatchOptions): Promise<
       results[index] = result
       await opts.onResult?.(result)
       await opts.onProgress?.({ done, failed, total })
+      } finally {
+        release?.()
+      }
     }
   }
 

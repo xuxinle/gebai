@@ -13,7 +13,8 @@
  */
 import { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { runBatch, extractJson, type BatchItem, type BatchResult } from "../../agents/local_infer/api"
+import { runBatch, extractJson, type BatchItem, type BatchResult } from "../../agents/llm_infer/api"
+import { l1GateHub } from "./scheduler"
 import type {
   EvidenceLink,
   L1Record,
@@ -31,8 +32,28 @@ import type {
 export const TRIAGE_DEFAULT_THRESHOLD = 0.85
 export const TRIAGE_DEFAULT_MAX_L2 = 20
 export const TRIAGE_DEFAULT_L2_BATCH = 5
-export const TRIAGE_DEFAULT_L1_MAX_TOKENS = 300
+/**
+ * L1 单条输出的 token 上限（缺省 32768）。
+ *
+ * **为何不再用 300**：实测踩过——schema 字段一多（如 label + root_cause + fix 三个字段），
+ * 300 个 token 装不下，工具式输出的 `arguments` 被**截断成不合法 JSON**，表现是整批
+ * `输出工具参数不合法（… Unterminated string / Unexpected EOF）`、全部失败，而根因一点都不显然
+ * （像是模型不会用工具）。L1 的输出是「受限的结构化结论」，不是长文，所以“给足预算”比“抠 token”
+ * 重要得多——上限只是防失控，不该成为失败源。
+ *
+ * 可用 `GEBAI_TRIAGE_L1_MAX_TOKENS`（环境变量）或 `l1_max_tokens`（接口/工具参数）覆盖：
+ * 小模型端点（如本机 CPU 档）可以调小，云端端点可调大。
+ */
+export const TRIAGE_DEFAULT_L1_MAX_TOKENS = 32768
 export const TRIAGE_DEFAULT_CONCURRENCY = 1
+/** 远程端点的缺省并发（本机受管服务用 1）：实测 c1=75.3s → c8=51.3s（+47%），c4≈c1。
+ *  取 4 而不是 8：再高只是让网关排队，单条延迟上升而总吞吐不涨（内网批量可经 `l1_concurrency` / 
+ *  `GEBAI_TRIAGE_L1_CONCURRENCY` 自行放大，并由公平闸门兜住全局在途）。 */
+export const TRIAGE_DEFAULT_CONCURRENCY_REMOTE = 4
+/** L1 单条失败重试次数（缺省 1：传输类抖动重试一次即好，不把成本花在「模型就是不调工具」上）。 */
+export const TRIAGE_DEFAULT_L1_RETRIES = 1
+/** 重试退避基数（毫秒）：网关过载时立刻重发只会加剧排队。 */
+export const TRIAGE_DEFAULT_L1_RETRY_DELAY_MS = 500
 
 /** 信封字段：调用方 schema 未自带时由引擎统一附加。 */
 export const TRIAGE_ENVELOPE_FIELDS = ["confidence", "reason", "evidence_index"] as const
@@ -65,6 +86,51 @@ export const DEFAULT_L2_SYSTEM =
   "2) 能确认的给出确定结论并列出证据链（工具名 + 关键发现原文）；不能确认的明确输出「证据不足」，并列出待查清单\n" +
   "3) 禁止无证据猜测；可以推翻或修正 L1 的判罚并说明原因\n" +
   "4) 只输出一个 JSON 对象，不要解释、不要代码块"
+
+/**
+ * L1 单条失败「值不值得重试」：只重试传输类失败。
+ *
+ * 不重试的两类：`tool_call_missing`（模型就是不调输出工具）与结构化校验失败——
+ * 再跑一次大概率同样结果，却要再付一次完整生成的成本（批量场景下这是实打实的算力浪费）。
+ * 重试的：网络失败、超时、429/5xx（重试往往就好）。
+ */
+export function isRetriableL1Failure(r: BatchResult): boolean {
+  if (r.ok) return false
+  if (r.tool_call_missing) return false
+  if (r.json_errors?.length) return false
+  // 状态码优先：OpenAI 兼容端点常把 5xx/429 的响应体写成 {"error":{...}}，解析后错误文案里没状态码
+  const status = r.http_status
+  if (status !== undefined) return status === 408 || status === 425 || status === 429 || status >= 500
+  const e = r.error ?? ""
+  if (!e) return false
+  if (/^请求失败：/.test(e)) return true
+  if (/^请求中止或超时/.test(e)) return true
+  return /HTTP\s*(408|425|429|5\d\d)\b/.test(e)
+}
+
+/**
+ * L1 并发缺省：远程端点 4、本机受管服务 1。
+ *
+ * 为何分档而不统一：本机受管服务的并发档位由 llama.cpp `--parallel` 决定（CPU 档就是 1，
+ * 开高只会排队）；远程网关（sglang/vLLM/局域网机器）才吃并发收益。环境变量
+ * `GEBAI_TRIAGE_L1_CONCURRENCY` 可全局覆写（内网批量直接放大，全局在途仍由公平闸门兜住）。
+ */
+export function defaultL1Concurrency(kind: "local" | "remote" | undefined): number {
+  return kind === "remote" ? TRIAGE_DEFAULT_CONCURRENCY_REMOTE : TRIAGE_DEFAULT_CONCURRENCY
+}
+
+/** `GEBAI_TRIAGE_L1_GATE` / `GEBAI_TRIAGE_L1_CONCURRENCY` 的正整数解析（非法/缺省返回 undefined）。 */
+function envPositiveInt(env: Record<string, string> | undefined, name: string): number | undefined {
+  const v = env?.[name]
+  if (typeof v !== "string" || !v.trim()) return undefined
+  const n = Number(v)
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : undefined
+}
+
+/** `GEBAI_TRIAGE_L1_MAX_TOKENS` 的正整数解析（非法/缺省返回 undefined）。 */
+export function defaultL1MaxTokens(env: Record<string, string> | undefined): number {
+  return envPositiveInt(env, "GEBAI_TRIAGE_L1_MAX_TOKENS") ?? TRIAGE_DEFAULT_L1_MAX_TOKENS
+}
 
 // ── L1 schema：信封包装 ────────────────────────────────────────────────────
 
@@ -423,7 +489,17 @@ export async function runTriage(opts: TriageOptions): Promise<TriageSummary> {
 
   const pending = items.filter((it) => !l1ById.has(it.id))
   let l1Failed = 0
+  // L1 全局公平闸门：同一推理端点上的多个任务共享在途额度并按任务轮转——
+  // 「1000/2000 条的大任务占满后，20 条的小任务卡 90s+ 进不去」就死在这里。
+  // 闸门按端点 baseUrl 共享，任务跑完卸载（卸载后上限按剩余成员重算）。
+  const gateKey = l1Opts.baseUrl
+  const requestedConcurrency = l1Opts.concurrency ?? envPositiveInt(opts.env, "GEBAI_TRIAGE_L1_CONCURRENCY") ?? defaultL1Concurrency(l1Opts.kind)
+  const gateCap = l1Opts.gateCap ?? envPositiveInt(opts.env, "GEBAI_TRIAGE_L1_GATE")
+  const gate = pending.length ? l1GateHub.attach(gateKey, jobId, requestedConcurrency, gateCap) : undefined
+  let gatePeakInflight = 0
+  let gatePeakWaiting = 0
   if (pending.length) {
+    const l1Retries = Math.max(0, l1Opts.retries ?? TRIAGE_DEFAULT_L1_RETRIES)
     const batchItems: BatchItem[] = pending.map((it) => ({
       id: it.id,
       prompt: buildL1Prompt(it, { template: l1Opts.promptTemplate, labelEnum: opts.labelEnum }),
@@ -431,36 +507,58 @@ export async function runTriage(opts: TriageOptions): Promise<TriageSummary> {
       meta: it.meta,
     }))
     let done = 0
-    await runBatch(batchItems, {
-      baseUrl: l1Opts.baseUrl,
-      model: l1Opts.model,
-      headers: l1Opts.headers,
-      concurrency: l1Opts.concurrency ?? TRIAGE_DEFAULT_CONCURRENCY,
-      timeoutMs: l1Opts.timeoutMs,
-      fetchImpl: l1Opts.fetchImpl,
-      signal: opts.signal,
-      defaults: {
-        max_tokens: l1Opts.maxTokens ?? TRIAGE_DEFAULT_L1_MAX_TOKENS,
-        temperature: l1Opts.temperature ?? 0,
-        enable_thinking: l1Opts.enableThinking ?? false,
-      },
-      structured: { schema: l1Schema, output_tool: { reminders: l1Opts.reminders ?? 3 } },
-      onResult: (r: BatchResult) => {
-        const rec = toL1Record(r, wrapped)
-        l1ById.set(r.id, rec)
-        appendFileSync(l1Path, `${JSON.stringify({ id: r.id, ...rec })}\n`, "utf-8")
-        if (!rec.ok) l1Failed++
-        done++
-        return opts.onProgress?.({
-          phase: "l1",
-          done,
-          total: pending.length,
-          adopted: 0,
-          escalated: 0,
-          failed: l1Failed,
-        })
-      },
-    })
+    try {
+      await runBatch(batchItems, {
+        baseUrl: l1Opts.baseUrl,
+        model: l1Opts.model,
+        headers: l1Opts.headers,
+        concurrency: requestedConcurrency,
+        timeoutMs: l1Opts.timeoutMs,
+        retries: l1Retries,
+        retryOn: isRetriableL1Failure,
+        retryDelayMs: l1Opts.retryDelayMs ?? TRIAGE_DEFAULT_L1_RETRY_DELAY_MS,
+        ...(gate ? { slotGate: { acquire: (o) => gate.acquire(o), owner: jobId } } : {}),
+        fetchImpl: l1Opts.fetchImpl,
+        signal: opts.signal,
+        defaults: {
+          max_tokens: l1Opts.maxTokens ?? defaultL1MaxTokens(opts.env),
+          temperature: l1Opts.temperature ?? 0,
+          enable_thinking: l1Opts.enableThinking ?? false,
+        },
+        structured: { schema: l1Schema, output_tool: { reminders: l1Opts.reminders ?? 3 } },
+        onResult: (r: BatchResult) => {
+          const rec = toL1Record(r, wrapped)
+          l1ById.set(r.id, rec)
+          appendFileSync(l1Path, `${JSON.stringify({ id: r.id, ...rec })}\n`, "utf-8")
+          if (!rec.ok) l1Failed++
+          done++
+          const st = gate?.stats()
+          if (st) {
+            gatePeakInflight = Math.max(gatePeakInflight, st.peak_inflight)
+            gatePeakWaiting = Math.max(gatePeakWaiting, st.peak_waiting)
+          }
+          return opts.onProgress?.({
+            phase: "l1",
+            done,
+            total: pending.length,
+            adopted: 0,
+            escalated: 0,
+            failed: l1Failed,
+          })
+        },
+      })
+    } finally {
+      if (gate) l1GateHub.detach(gateKey, jobId)
+    }
+    const concurrentNote = l1Opts.concurrency !== undefined ? `指定 ${requestedConcurrency}` : `缺省 ${requestedConcurrency}（${l1Opts.kind === "remote" ? "远程" : "本机"}）`
+    const maxTokensUsed = l1Opts.maxTokens ?? defaultL1MaxTokens(opts.env)
+    notes.push(
+      `L1 并发 ${concurrentNote}${gateCap ? `，全局在途上限 ${gateCap}` : gate ? `，与同端点其他任务共享在途额度（上限 ${gate.limit}）` : ""}` +
+        `；失败重试 ${l1Retries} 次（仅传输类：网络/超时/429/5xx）；单条输出上限 ${maxTokensUsed} token。`,
+    )
+    if (gatePeakWaiting > 0) {
+      notes.push(`L1 排队等待过：峰值 ${gatePeakWaiting} 条同时在等槽位、${gatePeakInflight} 条在途——说明该端点上有多个任务在争（公平轮转，小任务不会被大任务饿死）。`)
+    }
   }
   const missingToolCalls = [...l1ById.values()].filter((r) => r.tool_call_missing).length
   if (missingToolCalls) {

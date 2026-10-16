@@ -20,6 +20,43 @@
 
 **参数与 REST 接口（`POST /api/v1/triage/analyze`）完全一致**：同一份参数表、同一份校验与缺省值。对外批量投喂可直接用接口，不必走会话。
 
+## 并发与多任务（多个研判同时在跑时）
+
+- **并发缺省按端点分档**：远程端点 4 / 本机受管服务 1（`GEBAI_TRIAGE_L1_CONCURRENCY` 可全局覆写）。实测网关（sglang/llama.cpp）**总吞吐守恒**：c1=75.3s / c8=51.3s / c4≈c1——并发只换单条延迟，不涨总吞吐。
+- **同一端点上的多个任务共享在途上限并按任务轮转**：不是各自开并发相加（两个 c8 任务共享 8 个在途、轮转各占一半）。**大任务不会饿死小任务**：大任务占满时一个 20 条的小任务仍能在下一轮拿到份额，而不是等大任务跑完（`l1_gate` 可显式设上限，`GEBAI_TRIAGE_L1_GATE` 全局设）。
+- **失败只重试传输类**：`l1_retries`（缺省 1）只重试网络/超时/429/5xx；「模型不调输出工具」与「结构化校验不过」不重试（再跑一次大概率同样失败，却要再付一次完整生成）。
+- **长期任务用 `mode=async` + 轮询**；REST 的 sync 请求超 `sync_timeout_ms`（缺省 120s）会**自动转后台并返 202**（不是失败），拿 `job_id` 继续轮询即可；运行中的任务也能通过 `jobs/{id}/results` **拿到已完成的部分结论**（增量消费）。
+- **`results.jsonl` 按输入顺序收尾重写**（不按完成顺序），所以拿它做断点续跑与「先看一部分」都稳。
+- **推荐组合**：`l1_concurrency` 不手调（用分档缺省）+ `mode=async`（>200 条）+ 同 `job_id` 续跑（失败重跑）+ `threshold`/`accept_labels` 按业务校准。
+
+## 配置：写一份预设文件，不用每次传参
+
+任务配置（schema / 标签 / 提示词 / 阈值 / 目标选择）放**文件**，调用方只传 `items`：
+
+```
+{GEBAI_HOME}/triage/preset.json
+{
+  "name": "日志研判",
+  "target": "small",
+  "l1_model": "qwen3-4b",
+  "threshold": 0.7,
+  "min_evidence_chars": 8,
+  "label_enum": ["无异常", "代码退出", "网络", "调度"],
+  "accept_labels": ["无异常"],
+  "schema": {"type":"object","properties":{"label":{"type":"string"}},"required":["label"]}
+}
+```
+
+然后调用就只剩一行：`POST /api/v1/triage/analyze  {"items": [...]}`（或 `triage_run` 只给 `items`）。
+
+- **为什么是文件不是环境变量**：这些是**任务配置**不是启动参数——JSON 塞进 shell 单引号后中文/引号转义极易出错、每改一次要重启服务、还会随 `job.json` 选项快照散落到产物里。文件可以带 `name`/`description` 说明地维护，**改完即生效（每次调用重读，不必重启）**。
+- **优先级恒为：显式调用参数 > 预设 > 内置缺省**——已显式传参的调用方行为不变，也可以用单次参数覆盖预设做 A/B。
+- **端点在 `GEBAI_LLM_INFER_TARGETS`，业务面在预设文件**：预设的 `target` 只填**目标名**（如 `"small"`），不填 URL/密钥——密钥只存一处，掩码与审计口径不分裂。
+- **配错要响**：JSON 写坏、填了 `items`/`mode` 这类调用侧字段、`threshold` 越界——都直接报错**并带上文件路径**，不静默忽略（静默忽略会让人以为配上了、实际没生效）。
+- 需要多套预设（不同业务各带自己的标签与提示词）时，文件可放旁处并用名字指定（如 `<home>/triage/log-check.json`）——当前通道尚未暴露该开关，需要时再加。
+
+**仍然走环境变量的**（它们随机器/部署走，不随研判任务走）：小模型端点 `GEBAI_LLM_INFER_TARGETS` + `GEBAI_LLM_INFER_REMOTE_API_KEY`、并发 `GEBAI_TRIAGE_L1_CONCURRENCY`、全局在途上限 `GEBAI_TRIAGE_L1_GATE`、单条输出上限 `GEBAI_TRIAGE_L1_MAX_TOKENS`（缺省 32768）、REST 同步超时 `GEBAI_TRIAGE_SYNC_TIMEOUT_MS`、限流 `GEBAI_TRIAGE_RATE_BURST` / `GEBAI_TRIAGE_RATE_PER_SEC`。
+
 ## 关键约定（都是踩过的坑）
 
 1. **`features` 必须含能区分阶段的证据**（时间线/状态序列/关键字段），不能只给一段报错文本——信息不全时小模型会自信地给出**高置信度的错误结论**。这是适配器（调用方）的责任。
@@ -33,7 +70,7 @@
 
 ## 工作要点
 
-- 推理目标缺省 `local`（本机受管推理服务，按服务状态文件定位端口）：先确认服务在跑（必要时装载 `local_infer` 子Agent 用 `local_infer_status` / `local_infer_start`；本机小模型用 cpu-small 档即可，不占显卡）；也可传命名目标（`LOCAL_INFER_TARGETS`）或直连 URL。
+- 推理目标缺省 `local`（本机受管推理服务，按服务状态文件定位端口）：先确认服务在跑（必要时装载 `llm_infer` 子Agent 用 `llm_infer_status` / `llm_infer_start`；本机小模型用 cpu-small 档即可，不占显卡）；也可传命名目标（`GEBAI_LLM_INFER_TARGETS`）或直连 URL。
 - 兜底缺省沿用当前会话的模型；要换更强的模型就传 `l2_model`（`GEBAI_LLM_ROUTES` 里的命名路由或字面模型名），并可用 `l2_agents` 指定取证要用的领域子Agent（如 `code`、`wps`、`nsight`）。
 - **兜底可指向独立端点**：`l2_api_base` + `l2_api_key`（可配 `l2_model`）——会话内通道经**子会话自定义环境变量**落实，与 REST 通道能力一致（优先级高于 `model` 路由）。
 - **同步/异步只差「等不等」**：`mode=async` 立即返回，用 `bg_task`（id 前缀 `j`）查进度/取摘要/中止（`stop` 是协作中止，已落盘的部分结论保留）；产物目录的 `results.jsonl` 是**跨重启的权威口径**（`triage_view` 可读——后台任务记录随进程消失）。

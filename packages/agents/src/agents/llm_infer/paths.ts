@@ -1,5 +1,5 @@
 /**
- * local_infer 子Agent 的数据访问层：路径解析、档位定义、模型清单，
+ * llm_infer 子Agent 的数据访问层：路径解析、档位定义、模型清单，
  * 以及**服务状态文件 / 启动记录 / 日志**的读写（进程管理的唯一事实来源）。
  *
  * 状态文件布局（子项目 infer/ 内，全部可重建、不入库）：
@@ -10,6 +10,7 @@
  */
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { isAbsolute, join, resolve, win32 } from "node:path"
+import { envVar } from "./env"
 
 // ── 路径解析 ──────────────────────────────────────────────────────────────
 
@@ -20,9 +21,9 @@ export function isAbsolutePath(p: string): boolean {
   return isAbsolute(p) || win32.isAbsolute(p)
 }
 
-/** 子项目根：LOCAL_INFER_HOME 优先；dev 模式按模块路径推导（src/agents/local_infer → 仓库根/infer）。 */
+/** 子项目根：GEBAI_LLM_INFER_HOME 优先；dev 模式按模块路径推导（src/agents/llm_infer → 仓库根/infer）。 */
 export function inferHome(env: Record<string, string>): string {
-  const h = env.LOCAL_INFER_HOME
+  const h = envVar(env, "HOME")
   if (h) return isAbsolutePath(h) ? h : resolve(process.cwd(), h)
   return resolve(import.meta.dirname, "..", "..", "..", "..", "..", "infer")
 }
@@ -34,14 +35,14 @@ export function profilesPath(home: string): string {
 
 /** 模型权重目录（{GEBAI_HOME}/resources/models/infer）。 */
 export function modelsDir(home: string, env: Record<string, string>): string {
-  const dir = env.LOCAL_INFER_MODELS_DIR
+  const dir = envVar(env, "MODELS_DIR")
   if (dir) return isAbsolutePath(dir) ? dir : resolve(process.cwd(), dir)
   return resolve(home, "..", "resources", "models", "infer")
 }
 
-/** 服务端口（LOCAL_INFER_PORT 或 8080）。 */
+/** 服务端口（GEBAI_LLM_INFER_PORT 或 8080）。 */
 export function defaultPort(env: Record<string, string>): number {
-  const p = Number(env.LOCAL_INFER_PORT ?? 8080)
+  const p = Number(envVar(env, "PORT") ?? 8080)
   return Number.isFinite(p) && p > 0 ? p : 8080
 }
 

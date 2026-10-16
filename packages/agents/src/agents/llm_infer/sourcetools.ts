@@ -1,11 +1,11 @@
 /**
- * local_infer 的【源码发现与自动编译】工具层：内网/离线环境下把 `resources/src/` 里的源码就地编译成引擎。
+ * llm_infer 的【源码发现与自动编译】工具层：内网/离线环境下把 `resources/src/` 里的源码就地编译成引擎。
  *
  * 与另两层的关系：
  *   * `sourcefind.ts`/`sourcebuild.ts` 是能力实现（发现 + 编译）；
  *   * 本文件只做参数解析、进度/状态落盘、人读输出与结构化 data（与 tasks.ts 的做法一致）；
  *   * 编译产物走 `vendor/<engine-id>/` + `.engine.json` 标记 —— 与下载安装的引擎**同一落点与格式**，
- *     因此 `local_infer_start` / `status` / `engines` 无需区分来源。
+ *     因此 `llm_infer_start` / `status` / `engines` 无需区分来源。
  *
  * 两个工具：
  *   * `sources`（只读）：发现清单 / 工具链与设备就绪 / 单候选详情；
@@ -23,6 +23,7 @@ import {
   type ToolchainInfo,
 } from "./sourcefind"
 import { BUILD_DEVICES, buildFromSource, defaultJobs, type BuildDevice, type BuildStep } from "./sourcebuild"
+import { envVar } from "./env"
 
 function schema(properties: Record<string, unknown>, required: string[] = []): ToolSchema {
   return { type: "object", properties, required }
@@ -160,9 +161,9 @@ const sources: Tool = {
   safeMode: true, // 只读：发现/探测/预览，不落地不编译
   description:
     "发现本机可编译的推理源码（内网/离线场景的主力：把 llama.cpp 源码或源码归档放进 {GEBAI_HOME}/resources/src/，" +
-    "或用 LOCAL_INFER_SOURCE_DIRS 指定目录）并给出编译可行性依据（工具链与设备后端就绪、归档内是否自带 vendor/ 依赖）。" +
+    "或用 GEBAI_LLM_INFER_SOURCE_DIRS 指定目录）并给出编译可行性依据（工具链与设备后端就绪、归档内是否自带 vendor/ 依赖）。" +
     "action=list 列候选（目录/归档；归档只预览不解压）；action=toolchain 列工具链与各设备就绪 + 内网补齐办法；" +
-    "action=inspect 看单个候选详情。只读，不改变任何状态；编译用 local_infer_source_build。",
+    "action=inspect 看单个候选详情。只读，不改变任何状态；编译用 llm_infer_source_build。",
   parameters: schema({
     action: { type: "string", enum: ["list", "toolchain", "inspect"], description: "操作（缺省 list）" },
     id: { type: "string", description: "候选 id 或路径（inspect 用；也支持直接给目录/归档的绝对路径）" },
@@ -176,7 +177,7 @@ const sources: Tool = {
   }),
   async execute(args, ctx) {
     const home = inferHome(ctx.env)
-    if (!existsSync(home)) return { output: `未找到本地推理子项目：${home}（可用 LOCAL_INFER_HOME 指定）` }
+    if (!existsSync(home)) return { output: `未找到本地推理子项目：${home}（可用 GEBAI_LLM_INFER_HOME 指定）` }
     const action = String(args.action ?? "list")
 
     if (action === "toolchain") {
@@ -184,7 +185,7 @@ const sources: Tool = {
       const ready = BUILD_DEVICES.filter((d) => tc.devices[d]?.ready)
       const lines = toolchainLines(tc)
       lines.push("", `可编译后端：${ready.length ? ready.join("、") : "无（先按上面的提示补齐工具链）"}`)
-      lines.push(`下一步：local_infer_source_build(source="<候选 id>", device="${ready[0] ?? "cpu"}")`)
+      lines.push(`下一步：llm_infer_source_build(source="<候选 id>", device="${ready[0] ?? "cpu"}")`)
       return { output: lines.join("\n"), data: { action, toolchain: tc, ready } }
     }
 
@@ -222,17 +223,18 @@ const sources: Tool = {
     }
     lines.push("", "候选：")
     if (!res.candidates.length) {
-      lines.push("  （无）——把 llama.cpp 源码目录或源码归档放进上面的资源目录，或用 LOCAL_INFER_SOURCE_DIRS 指定路径。")
+      lines.push("  （无）——把 llama.cpp 源码目录或源码归档放进上面的资源目录，或用 GEBAI_LLM_INFER_SOURCE_DIRS 指定路径。")
       lines.push("  联网机器下载源码归档：bun run resources:download --only=\"src/**\"（清单已登记 src/llama.cpp-<tag>.tar.gz）")
     } else {
       for (const c of res.candidates) lines.push(...candidateLines(c), "")
-      lines.push("编译：local_infer_source_build(source=\"<候选 id>\", device=\"cpu\"|\"cuda\"|\"vulkan\"|...；先 action=\"toolchain\" 看后端就绪)")
+      lines.push("编译：llm_infer_source_build(source=\"<候选 id>\", device=\"cpu\"|\"cuda\"|\"vulkan\"|...；先 action=\"toolchain\" 看后端就绪)")
     }
     if (res.notes.length) {
       lines.push("", "提示：")
       for (const n of res.notes) lines.push(`  · ${n}`)
     }
-    lines.push("", `LOCAL_INFER_SOURCE_DIRS 当前${ctx.env.LOCAL_INFER_SOURCE_DIRS ? "：" + ctx.env.LOCAL_INFER_SOURCE_DIRS : "未配置（可选，额外发现根，路径分隔符分隔）"}`)
+    const srcDirs = envVar(ctx.env, "SOURCE_DIRS")
+    lines.push("", `GEBAI_LLM_INFER_SOURCE_DIRS 当前${srcDirs ? "：" + srcDirs : "未配置（可选，额外发现根，路径分隔符分隔）"}`)
     return {
       output: lines.join("\n"),
       data: { action: "list", count: res.candidates.length, candidates: res.candidates, roots: res.scanned, notes: res.notes },
@@ -249,7 +251,7 @@ async function runBuild(
 ): Promise<{ output: string; data?: unknown }> {
   const ref = args.source != null ? String(args.source) : ""
   if (!ref) {
-    return { output: "source_build 需要 source（候选 id 或源码目录/归档路径）——先用 local_infer_sources 查看候选清单。" }
+    return { output: "source_build 需要 source（候选 id 或源码目录/归档路径）——先用 llm_infer_sources 查看候选清单。" }
   }
   // 先校验纯参数（不动盘、不探测），再解析源码——参数错误应最先暴露
   const device = (args.device != null ? String(args.device) : "cpu") as BuildDevice
@@ -361,9 +363,9 @@ async function runBuild(
         header,
         "",
         "[已后台启动] 编译在服务进程内继续（耗时：CPU 后端数分钟，CUDA/Vulkan 后端可能十几分钟到数十分钟）。",
-        `查进度：local_infer_source_build(action="status", build_id="${buildId}")`,
-        `看日志：local_infer_source_build(action="log", build_id="${buildId}")`,
-        `取消：local_infer_source_build(action="cancel", build_id="${buildId}")（阶段之间生效，不会打断正在跑的 cmake）`,
+        `查进度：llm_infer_source_build(action="status", build_id="${buildId}")`,
+        `看日志：llm_infer_source_build(action="log", build_id="${buildId}")`,
+        `取消：llm_infer_source_build(action="cancel", build_id="${buildId}")（阶段之间生效，不会打断正在跑的 cmake）`,
       ].join("\n"),
       data: { build_id: buildId, state: "running", engine_id: engineId, device, background: true },
     }
@@ -383,8 +385,8 @@ async function runBuild(
         `  日志: ${r.logPath ?? "-"}`,
         "",
         "下一步：",
-        `  · 启动服务：local_infer_start(engine="${engineId}", profile="${device === "cpu" ? "cpu-small" : "fast"}")`,
-        "  · 确认引擎：local_infer_engines(action=\"list\")（已安装列表里会带 build 来源信息）",
+        `  · 启动服务：llm_infer_start(engine="${engineId}", profile="${device === "cpu" ? "cpu-small" : "fast"}")`,
+        "  · 确认引擎：llm_infer_engines(action=\"list\")（已安装列表里会带 build 来源信息）",
       ].join("\n"),
       data: { build_id: buildId, state: "done", engine: r.engine, log: r.logPath, steps: st.steps },
     }
@@ -441,13 +443,13 @@ const source_build: Tool = {
   description:
     "把发现的源码**就地编译**成推理引擎（内网/离线部署的主力：预编译包需要外网，这里只依赖本机源码 + 工具链）。" +
     "流程：解压(如需) → 工具链与设备门禁 → cmake 配置 → 编译 → 定位 llama-server → 安装到 vendor/<engine-id>/ → 写引擎标记" +
-    "（与下载安装的引擎同一落点与格式，因此 local_infer_start/status 无需区分来源）。" +
+    "（与下载安装的引擎同一落点与格式，因此 llm_infer_start/status 无需区分来源）。" +
     "action=build（缺省）编译；background=true 立即返回 build_id（CPU 数分钟、CUDA 等十几分钟以上，建议后台）；" +
     "action=status 看进度/存活；action=log 看构建日志尾部；action=list 列历史；action=cancel 取消（阶段之间生效）。" +
     "offline 缺省 true（内网：缺依赖立即失败并给出补齐办法，不挂死网络）。",
   parameters: schema({
     action: { type: "string", enum: ["build", "status", "log", "list", "cancel"], description: "操作（缺省 build）" },
-    source: { type: "string", description: "候选 id 或源码目录/归档路径（build 用；先 local_infer_sources 查看）" },
+    source: { type: "string", description: "候选 id 或源码目录/归档路径（build 用；先 llm_infer_sources 查看）" },
     engine_id: { type: "string", description: "目标引擎 id（缺省 <平台>-<后端>-<架构>，如 linux-cpu-x64；同名已安装时请显式换个 id 避免覆盖）" },
     device: { type: "string", enum: [...BUILD_DEVICES], description: "后端（缺省 cpu；cuda/vulkan/metal/rocm 需对应工具链）" },
     jobs: { type: "number", description: "并行编译任务数（缺省 = CPU 核数的 75%）" },
@@ -460,7 +462,7 @@ const source_build: Tool = {
   }, ["action"]),
   async execute(args, ctx) {
     const home = inferHome(ctx.env)
-    if (!existsSync(home)) return { output: `未找到本地推理子项目：${home}（可用 LOCAL_INFER_HOME 指定）` }
+    if (!existsSync(home)) return { output: `未找到本地推理子项目：${home}（可用 GEBAI_LLM_INFER_HOME 指定）` }
     const action = String(args.action ?? "build")
 
     if (action === "build") return await runBuild(args, ctx, home)
@@ -488,13 +490,13 @@ const source_build: Tool = {
 
     if (action === "list") {
       const list = readBuildStates(home)
-      if (!list.length) return { output: `暂无编译任务记录。编译：local_infer_source_build(source="<候选 id>", device="cpu")` }
+      if (!list.length) return { output: `暂无编译任务记录。编译：llm_infer_source_build(source="<候选 id>", device="cpu")` }
       const lines = [`编译任务（${list.length} 个，新→旧）：`, ""]
       for (const s of list) {
         const live = s.state === "running" && s.owner_pid === process.pid ? "进行中" : s.state
         lines.push(`  ${s.build_id}  [${live}]  ${s.source} → ${s.engine_id}（${s.device}）  ${s.steps.length} 步  ${s.started_at}`)
       }
-      lines.push("", "详情：local_infer_source_build(action=\"status\", build_id=\"…\")；日志：action=\"log\"")
+      lines.push("", "详情：llm_infer_source_build(action=\"status\", build_id=\"…\")；日志：action=\"log\"")
       return { output: lines.join("\n"), data: { count: list.length, builds: list } }
     }
 

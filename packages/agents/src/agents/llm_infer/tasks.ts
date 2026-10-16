@@ -1,5 +1,5 @@
 /**
- * local_infer 的推理任务层：单条提交（generate）、批量提交（batch）、批次进度与结果（jobs）。
+ * llm_infer 的推理任务层：单条提交（generate）、批量提交（batch）、批次进度与结果（jobs）。
  *
  * 分工：`api.ts` 负责「怎么调」（请求构造 / 解析 / 调度），`paths.ts` 负责「存哪」（任务目录与进度文件），
  * `providers.ts` 负责「打哪个端点」（本机受管服务 / 直连 URL / 命名目标），本文件只做参数解析、产物落盘、
@@ -11,6 +11,7 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { envNum, envVar } from "./env"
 import type { Tool, ToolContext, ToolSchema } from "@gebai/sdk"
 import {
   chatOnce,
@@ -33,13 +34,6 @@ function schema(properties: Record<string, unknown>, required: string[] = []): T
 }
 
 const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined)
-
-/** 环境变量取数（环境变量恒为字符串；空串与非法值当作未配置）。 */
-const envNum = (v: string | undefined): number | undefined => {
-  if (v == null || v === "") return undefined
-  const n = Number(v)
-  return Number.isFinite(n) ? n : undefined
-}
 
 /** 参数 → 结构化约束（output_tool > schema > grammar > json_object；都未给则 undefined = 不约束）。 */
 function structuredFrom(args: Record<string, unknown>): StructuredOutput | undefined {
@@ -182,9 +176,9 @@ function parseMessages(v: unknown): ChatMessage[] | undefined {
   })
 }
 
-/** 单条请求超时：显式参数 > LOCAL_INFER_TIMEOUT_MS > undefined（chatOnce 默认 600000）。 */
+/** 单条请求超时：显式参数 > GEBAI_LLM_INFER_TIMEOUT_MS（兼容旧名） > undefined（chatOnce 默认 600000）。 */
 function resolveTimeout(args: Record<string, unknown>, env: Record<string, string>): number | undefined {
-  return num(args.timeout_ms) ?? envNum(env.LOCAL_INFER_TIMEOUT_MS)
+  return num(args.timeout_ms) ?? envNum(env, "TIMEOUT_MS")
 }
 
 // ── 推理目标（providers）接入 ─────────────────────────────────────────────
@@ -205,15 +199,15 @@ function withPortOverride(t: InferTarget, args: Record<string, unknown>): InferT
   return { ...t, baseUrl: url, note: `${t.note ? `${t.note}；` : ""}端口参数覆盖为 ${p}` }
 }
 
-/** 目标解析失败的人读输出：解析原因 + 可用目标 + 怎么配 LOCAL_INFER_TARGETS（不抛异常）。 */
+/** 目标解析失败的人读输出：解析原因 + 可用目标 + 怎么配 GEBAI_LLM_INFER_TARGETS（不抛异常）。 */
 function targetErrorText(error: string, ctx: ToolContext): string {
   const { targets: named } = parseTargetsEnv(ctx.env ?? {})
   const lines = [`推理目标解析失败：${error}`, ""]
   lines.push(`可用目标：local（本机受管实例，缺省）${named.length ? `、${named.map((t) => t.name).join("、")}` : "（当前没有有效的命名目标）"}`)
   lines.push('也可直接给端点：target="http://192.168.1.20:8080"（任意 OpenAI 兼容端点，可再传 api_key 参数）。')
-  lines.push("配置命名目标（环境变量 LOCAL_INFER_TARGETS，JSON 数组）：")
-  lines.push('  LOCAL_INFER_TARGETS=\'[{"name":"lan","base_url":"http://192.168.1.20:8080","api_key":"sk-..."}]\'')
-  lines.push("用 local_infer_targets 查看全部可用目标（可加 probe=true 探活）。")
+  lines.push("配置命名目标（环境变量 GEBAI_LLM_INFER_TARGETS，JSON 数组）：")
+  lines.push('  GEBAI_LLM_INFER_TARGETS=\'[{"name":"lan","base_url":"http://192.168.1.20:8080","api_key":"sk-..."}]\'')
+  lines.push("用 llm_infer_targets 查看全部可用目标（可加 probe=true 探活）。")
   return lines.join("\n")
 }
 
@@ -298,7 +292,7 @@ const generate: Tool = {
   safeMode: false, // 安全模式下不提供：会向推理端点发起请求（占 GPU 且属外发请求）
   description:
     '向推理目标提交一条推理任务并取回结果（OpenAI 兼容 /v1/chat/completions）：缺省打本机受管服务，' +
-    '也可用 target 指向局域网另一台机器或云端 OpenAI 兼容端点（target="http://host:port" 或 LOCAL_INFER_TARGETS 里声明的目标名）。支持 messages 或单轮 prompt；' +
+    '也可用 target 指向局域网另一台机器或云端 OpenAI 兼容端点（target="http://host:port" 或 GEBAI_LLM_INFER_TARGETS 里声明的目标名）。支持 messages 或单轮 prompt；' +
     "传入 schema（JSON Schema，服务端转 GBNF 约束解码）、grammar（GBNF 语法）或 json_object 可得结构化输出，工具侧做解析与校验，" +
     "校验不过会把错误回灌给模型重试一次（retry_on_invalid=false 可关）；output_tool=true 改用**工具式输出**——把 schema 注册为 function tool、" +
     "模型必须调用它产出结果，未调用则按 tool_reminders（缺省 3）重新提醒，耗尽即失败（tool_call_missing=true）——不依赖服务端 JSON 约束支持，异构端点更通用。" +
@@ -329,15 +323,15 @@ const generate: Tool = {
         "「调用工具」本身即模型对结论的显式声明。未给 schema 时接受任意对象参数。",
     },
     tool_reminders: { type: "number", description: "工具式输出：模型未调用输出工具时的提醒次数上限（缺省 3；0 = 首次未调用即失败，失败信息见返回的 tool_call_missing）" },
-    port: { type: "number", description: "本机服务端口（只对缺省的本机目标有意义；缺省按状态文件 / LOCAL_INFER_PORT / 8080）" },
+    port: { type: "number", description: "本机服务端口（只对缺省的本机目标有意义；缺省按状态文件 / GEBAI_LLM_INFER_PORT / 8080）" },
     timeout_ms: { type: "number", description: "单条请求超时毫秒数（缺省 600000，本地模型很慢，勿设得过小）" },
     target: {
       type: "string",
       description:
-        '推理目标：缺省 local（本机受管服务，端口取状态文件 / LOCAL_INFER_PORT）；也可给命名目标（LOCAL_INFER_TARGETS 里声明的 name）' +
-        '或直连 URL（target="http://192.168.1.20:8080" / "https://..."）。用 local_infer_targets 查看可用目标。',
+        '推理目标：缺省 local（本机受管服务，端口取状态文件 / GEBAI_LLM_INFER_PORT）；也可给命名目标（GEBAI_LLM_INFER_TARGETS 里声明的 name）' +
+        '或直连 URL（target="http://192.168.1.20:8080" / "https://..."）。用 llm_infer_targets 查看可用目标。',
     },
-    api_key: { type: "string", description: "端点鉴权密钥（仅对直连 URL / 命名目标有意义；不传时用命名目标的 api_key 字段或 LOCAL_INFER_REMOTE_API_KEY）" },
+    api_key: { type: "string", description: "端点鉴权密钥（仅对直连 URL / 命名目标有意义；不传时用命名目标的 api_key 字段或 GEBAI_LLM_INFER_REMOTE_API_KEY）" },
   }),
   async execute(args, ctx) {
     const home = inferHome(ctx.env)
@@ -476,7 +470,7 @@ function readResults(file: string): BatchResult[] {
 function clampConcurrency(home: string, env: Record<string, string>, requested: number): { concurrency: number; note?: string } {
   const prof = loadProfiles(home)
   if (!prof) return { concurrency: requested }
-  const active = env.LOCAL_INFER_PROFILE ?? prof.default_profile
+  const active = envVar(env, "PROFILE") ?? prof.default_profile
   const parallel = prof.profiles[active]?.parallel ?? 1
   if (requested > parallel) {
     return {
@@ -501,7 +495,7 @@ const batch: Tool = {
     "target 指定推理目标（缺省 local = 本机受管服务，也可为命名目标或直连 URL）：job.json 会记下目标名与端点（不含密钥），" +
     "便于追溯每批结果出自哪台机器；同一 job_id 换目标续跑会给出提示但仍按本次目标执行。" +
     "缺省同步执行（本次调用等批次跑完，条目多时耗时很长）；background=true 则立即返回 job_id，批次随服务进程在后台逐条落盘，" +
-    "用 local_infer_jobs 查进度/取消（服务重启会留下「已中断」状态与完整产物，可 resume 续跑）。免审批（不改变服务状态）。",
+    "用 llm_infer_jobs 查进度/取消（服务重启会留下「已中断」状态与完整产物，可 resume 续跑）。免审批（不改变服务状态）。",
   parameters: schema({
     items: {
       type: "array",
@@ -531,21 +525,21 @@ const batch: Tool = {
     background: {
       type: "boolean",
       description:
-        "后台执行（缺省 false = 同步，本次调用等批次跑完）：true 时立即返回 job_id，批次随服务进程在后台跑，用 local_infer_jobs 查进度/取消；" +
+        "后台执行（缺省 false = 同步，本次调用等批次跑完）：true 时立即返回 job_id，批次随服务进程在后台跑，用 llm_infer_jobs 查进度/取消；" +
         "不随本次工具调用与会话中断，但随服务进程存活（服务重启 → jobs 报「已中断」，可 resume 续跑）",
     },
-    port: { type: "number", description: "本机服务端口（只对缺省的本机目标有意义；缺省按状态文件 / LOCAL_INFER_PORT / 8080）" },
+    port: { type: "number", description: "本机服务端口（只对缺省的本机目标有意义；缺省按状态文件 / GEBAI_LLM_INFER_PORT / 8080）" },
     target: {
       type: "string",
       description:
-        '推理目标：缺省 local（本机受管服务）；也可为命名目标（LOCAL_INFER_TARGETS 里声明的 name）或直连 URL（target="http://192.168.1.20:8080"）。' +
-        "远端目标不受本机档位（profiles.json）约束，并发请勿超过服务端 slots（见 local_infer_targets probe=true）。",
+        '推理目标：缺省 local（本机受管服务）；也可为命名目标（GEBAI_LLM_INFER_TARGETS 里声明的 name）或直连 URL（target="http://192.168.1.20:8080"）。' +
+        "远端目标不受本机档位（profiles.json）约束，并发请勿超过服务端 slots（见 llm_infer_targets probe=true）。",
     },
-    api_key: { type: "string", description: "端点鉴权密钥（仅对直连 URL / 命名目标有意义；不传时用命名目标的 api_key 字段或 LOCAL_INFER_REMOTE_API_KEY）" },
+    api_key: { type: "string", description: "端点鉴权密钥（仅对直连 URL / 命名目标有意义；不传时用命名目标的 api_key 字段或 GEBAI_LLM_INFER_REMOTE_API_KEY）" },
   }),
   async execute(args, ctx) {
     const home = inferHome(ctx.env)
-    if (!existsSync(home)) return { output: `未找到本地推理子项目：${home}\n可通过 LOCAL_INFER_HOME 指定子项目根。` }
+    if (!existsSync(home)) return { output: `未找到本地推理子项目：${home}\n可通过 GEBAI_LLM_INFER_HOME 指定子项目根。` }
     const picked = pickTarget(args, ctx)
     if ("error" in picked) return { output: picked.error }
     const target = picked.target
@@ -596,12 +590,12 @@ const batch: Tool = {
     }
 
     const pending = normalized.filter((it) => !doneIds.has(String(it.id)))
-    // 分片上限：显式 max_items 优先；否则用 LOCAL_INFER_BATCH_MAX_ITEMS 兜底（防一次提交把会话占死）。
+    // 分片上限：显式 max_items 优先；否则用 GEBAI_LLM_INFER_BATCH_MAX_ITEMS 兜底（防一次提交把会话占死）。
     // 上限为 0 或未配置时不分片。
     const cap =
       num(args.max_items) && num(args.max_items)! > 0
         ? num(args.max_items)!
-        : Math.max(0, Math.floor(envNum(ctx.env.LOCAL_INFER_BATCH_MAX_ITEMS) ?? 0))
+        : Math.max(0, Math.floor(envNum(ctx.env, "BATCH_MAX_ITEMS") ?? 0))
     const slice = cap > 0 ? pending.slice(0, cap) : pending
     const remaining = pending.length - slice.length
 
@@ -609,7 +603,7 @@ const batch: Tool = {
       return {
         output:
           `任务 ${jobId}（目标 ${target.name}）：没有待处理条目（数据集 ${normalized.length} 条，已成功 ${doneIds.size} 条${resume ? "" : "，本次 resume=false 未跳过"}）。\n` +
-          `产物：${resultsPath}\n用 local_infer_jobs action=results job_id=${jobId} 查看结果。`,
+          `产物：${resultsPath}\n用 llm_infer_jobs action=results job_id=${jobId} 查看结果。`,
         data: { job_id: jobId, total: normalized.length, processed: 0, skipped, remaining: 0, results_file: resultsPath, job_file: jobPath, results: [] },
       }
     }
@@ -621,7 +615,7 @@ const batch: Tool = {
       return {
         output:
           `任务 ${jobId} 正在本进程执行中，已拒绝重复提交（同一 job_id 并发写会互相覆盖产物）。\n` +
-          `用 local_infer_jobs(action="status", job_id="${jobId}") 看进度，action="cancel" 可中止；或换一个 job_id。`,
+          `用 llm_infer_jobs(action="status", job_id="${jobId}") 看进度，action="cancel" 可中止；或换一个 job_id。`,
         data: { job_id: jobId, rejected: "already_running" },
       }
     }
@@ -636,7 +630,7 @@ const batch: Tool = {
     const reqConcurrency = Math.max(1, num(args.concurrency) ?? 1)
     const { concurrency, note } = target.kind === "local" ? clampConcurrency(home, ctx.env, reqConcurrency) : { concurrency: reqConcurrency }
     const prof = loadProfiles(home)
-    const activeProfile = target.kind === "local" ? (ctx.env.LOCAL_INFER_PROFILE ?? prof?.default_profile) : undefined
+    const activeProfile = target.kind === "local" ? (envVar(ctx.env, "PROFILE") ?? prof?.default_profile) : undefined
     // 服务端能力探测（n_ctx 窗口 / slots / 模型名）：失败不阻断，只作提示
     const probe = await probeTarget(target, { timeoutMs: 3000 })
     // 本机目标时模型名以**实际运行实例**为准（探测/状态文件优先，档位缺省值作最后回退）——
@@ -806,8 +800,8 @@ const batch: Tool = {
         `本次排队 ${slice.length} 条 ｜ 并发 ${concurrency} ｜ 数据集合计 ${normalized.length} 条${skipped ? ` ｜ 跳过 ${skipped}（已成功项）` : ""}`,
         `产物：${resultsPath}（逐条追加，可实时查看）`,
         "",
-        `查进度：local_infer_jobs(action="status", job_id="${jobId}") ｜ 看结果：action="results"`,
-        `取消：local_infer_jobs(action="cancel", job_id="${jobId}")——批次在落到下一条边界时停止，已产出结果保留`,
+        `查进度：llm_infer_jobs(action="status", job_id="${jobId}") ｜ 看结果：action="results"`,
+        `取消：llm_infer_jobs(action="cancel", job_id="${jobId}")——批次在落到下一条边界时停止，已产出结果保留`,
         `说明：后台批次随本 GEBAI 服务进程存活（不随工具调用/会话中断）。服务重启后 jobs 会显示「已中断」，此时用 batch(job_id="${jobId}", resume=true) 续跑剩余条目。`,
         ...commonNotes(),
       ]
@@ -902,7 +896,7 @@ const jobs: Tool = {
     if (action === "list") {
       const list = listBatchJobs(home, limit)
       if (!list.length) {
-        return { output: `暂无批量任务（目录：${runsDir(home)}）。用 local_infer_batch 提交（items 或 items_file）。`, data: { jobs: [] } }
+        return { output: `暂无批量任务（目录：${runsDir(home)}）。用 llm_infer_batch 提交（items 或 items_file）。`, data: { jobs: [] } }
       }
       const lines = [`批量任务（${list.length} 个，新→旧）：`, ""]
       for (const j of list) {
@@ -925,13 +919,13 @@ const jobs: Tool = {
           lines.push(`    └ 存活：${mark}`)
         }
       }
-      lines.push("", `用 local_infer_jobs action=status job_id=<id> 看进度；action=results 看逐条结果。`)
+      lines.push("", `用 llm_infer_jobs action=status job_id=<id> 看进度；action=results 看逐条结果。`)
       return { output: lines.join("\n"), data: { jobs: list.map((j) => ({ ...j })) } }
     }
 
     if (!jobId) return { output: `action=${action} 需要 job_id（先用 action=list 查看可用任务）。` }
     const job = readBatchJob(home, jobId)
-    if (!job) return { output: `未找到任务 ${jobId}（目录：${join(runsDir(home), jobId)}）。用 local_infer_jobs action=list 查看现有任务。` }
+    if (!job) return { output: `未找到任务 ${jobId}（目录：${join(runsDir(home), jobId)}）。用 llm_infer_jobs action=list 查看现有任务。` }
     const resultsFile = job.results_file ?? join(job.dir, "results.jsonl")
 
     if (action === "cancel") {
@@ -942,7 +936,7 @@ const jobs: Tool = {
 
       // ① 本进程正在跑（后台批次）：写取消标记 → 执行体在下一轮轮询中止，等在飞条目收尾
       if (running) {
-        writeFileSync(marker, `${new Date().toISOString()} 由 local_infer_jobs cancel 写入\n`, "utf-8")
+        writeFileSync(marker, `${new Date().toISOString()} 由 llm_infer_jobs cancel 写入\n`, "utf-8")
         const stopped = await waitFor(() => !runningBatches.has(job.dir), 30000, 100)
         const after = readBatchJob(home, jobId) as BatchJobView | null
         const produced = countLines(after?.results_file ?? resultsFile)
@@ -951,7 +945,7 @@ const jobs: Tool = {
           output:
             `任务 ${jobId} 已请求取消（写取消标记 ${marker}）：${stopped ? "批次已停止" : "批次仍在收尾（当前在飞条目跑完后停止）"}。\n` +
             `已产出 ${produced} 条 ｜ 状态 ${after?.state ?? "cancelling"}${after?.phase ? `（${after.phase}）` : ""} ｜ 剩余约 ${remaining} 条未产出。\n` +
-            `已产出的结果保留在 ${after?.results_file ?? resultsFile}；剩余条目可用 local_infer_batch(job_id="${jobId}", resume=true) 续跑（未成功条目不算已完成）。`,
+            `已产出的结果保留在 ${after?.results_file ?? resultsFile}；剩余条目可用 llm_infer_batch(job_id="${jobId}", resume=true) 续跑（未成功条目不算已完成）。`,
           data: { job_id: jobId, state: after?.state ?? "cancelling", cancelled: true, stopped, produced, remaining },
         }
       }
@@ -1005,7 +999,7 @@ const jobs: Tool = {
           patchJobFile(job.dir, { state: "interrupted", phase: "已中断（执行进程退出）", error: `执行进程 PID ${pid} 已退出，任务中断` })
           job.state = "interrupted"
           job.phase = "已中断（执行进程退出）"
-          liveness = `已中断（执行进程 PID ${pid} 已退出）——已产出结果保留，剩余条目用 local_infer_batch(job_id="${jobId}", resume=true) 续跑。`
+          liveness = `已中断（执行进程 PID ${pid} 已退出）——已产出结果保留，剩余条目用 llm_infer_batch(job_id="${jobId}", resume=true) 续跑。`
         }
       }
 

@@ -84,7 +84,7 @@ if (Test-Path $statePath) {
     if ($st.log -and (Test-Path $st.log)) { Write-Host "         日志: $($st.log)（$([math]::Round((Get-Item $st.log).Length/1KB,1)) KB）" }
     else { Write-Host "         （日志尚未落盘或路径未写：注意旧版启动脚本不写状态文件，工具会按端口补写）" -ForegroundColor Yellow }
 } else {
-    Check "run/server-$Port.json 存在" $false '无状态文件（服务可能由旧版脚本启动，local_infer_status 会按端口反查 PID）'
+    Check "run/server-$Port.json 存在" $false '无状态文件（服务可能由旧版脚本启动，llm_infer_status 会按端口反查 PID）'
 }
 
 # ── 3. 结构化输出 ───────────────────────────────────────────────────────
@@ -195,7 +195,7 @@ if ($maxPred -gt 0) {
 Write-Host "`n[5] 结果落盘" -ForegroundColor Cyan
 Check "results.jsonl 存在且行数 = $Items" ((Test-Path $resultsPath) -and ((Get-Content $resultsPath).Count -eq $Items)) '文件缺失或行数不符'
 Write-Host "         任务目录: $jobDir"
-Write-Host "         续跑用法: local_infer_batch(job_id=`"$jobId`", resume=true)（同 id 重跑只处理未成功项）"
+Write-Host "         续跑用法: llm_infer_batch(job_id=`"$jobId`", resume=true)（同 id 重跑只处理未成功项）"
 
 # ── 可选：另写一份输入 JSONL 供 items_file 用法 ────────────────────────
 if ($Fixture) {
@@ -203,7 +203,7 @@ if ($Fixture) {
     New-Item -ItemType Directory -Force -Path $runsDir | Out-Null
     @(1..3) | ForEach-Object { (@{ id = "q$_"; prompt = "第 $_ 个问题：用一句 JSON（字段 text）说明本地推理的一个优势。" } | ConvertTo-Json -Compress) } |
         Set-Content -Encoding UTF8 $fx
-    Write-Host "`n已写输入样本: $fx（用法 local_infer_batch(items_file=`"bench/runs/smoke-questions.jsonl`")）"
+    Write-Host "`n已写输入样本: $fx（用法 llm_infer_batch(items_file=`"bench/runs/smoke-questions.jsonl`")）"
 }
 
 Write-Host ""

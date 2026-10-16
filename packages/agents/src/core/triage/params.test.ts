@@ -223,10 +223,10 @@ describe("端点解析与选项组装", () => {
     if ("error" in unknown) expect(unknown.error).toContain("未知推理目标")
   })
 
-  test("target 缺省走 local（状态文件 > LOCAL_INFER_PORT > 8080，不硬编码端口）", () => {
+  test("target 缺省走 local（状态文件 > GEBAI_LLM_INFER_PORT > 8080，不硬编码端口）", () => {
     const home = tempDir()
-    // LOCAL_INFER_HOME 指向空目录：无服务状态文件 → 回落到 LOCAL_INFER_PORT
-    const t = resolveL1Endpoint({} as never, { LOCAL_INFER_HOME: home, LOCAL_INFER_PORT: "19191" })
+    // GEBAI_LLM_INFER_HOME 指向空目录：无服务状态文件 → 回落到 GEBAI_LLM_INFER_PORT
+    const t = resolveL1Endpoint({} as never, { GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_PORT: "19191" })
     expect("error" in t).toBe(false)
     if ("error" in t) return
     expect(t.kind).toBe("local")

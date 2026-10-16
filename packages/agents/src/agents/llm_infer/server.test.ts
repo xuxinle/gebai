@@ -76,7 +76,7 @@ function makeCtx(
     workdir,
     sessionWorkdir: workdir,
     home,
-    env: { LOCAL_INFER_HOME: home },
+    env: { GEBAI_LLM_INFER_HOME: home },
     sandboxed: false,
     resolvePath: (p) => join(workdir, p),
     readFile: async (p) => Bun.file(p).text(),
@@ -544,12 +544,12 @@ function makeHomeWithEngine(opts: { fakeExe: boolean; modelsDir?: string; profil
 }
 
 describe("start 的启动方式", () => {
-  test("resolveLaunch：mode 参数 > LOCAL_INFER_LAUNCH 环境变量 > 缺省 launcher", () => {
+  test("resolveLaunch：mode 参数 > GEBAI_LLM_INFER_LAUNCH 环境变量 > 缺省 launcher", () => {
     expect(resolveLaunch({ env: {} }).mode).toBe("launcher") // 缺省不再依赖 PowerShell
     expect(resolveLaunch({ env: {} }).forced).toBe(false)
-    expect(resolveLaunch({ env: { LOCAL_INFER_LAUNCH: "script" } }).mode).toBe("script")
-    expect(resolveLaunch({ env: { LOCAL_INFER_LAUNCH: "SCRIPT" } }).mode).toBe("script") // 大小写不敏感
-    expect(resolveLaunch({ mode: "launcher", env: { LOCAL_INFER_LAUNCH: "script" } }).mode).toBe("launcher") // 参数优先
+    expect(resolveLaunch({ env: { GEBAI_LLM_INFER_LAUNCH: "script" } }).mode).toBe("script")
+    expect(resolveLaunch({ env: { GEBAI_LLM_INFER_LAUNCH: "SCRIPT" } }).mode).toBe("script") // 大小写不敏感
+    expect(resolveLaunch({ mode: "launcher", env: { GEBAI_LLM_INFER_LAUNCH: "script" } }).mode).toBe("launcher") // 参数优先
     expect(resolveLaunch({ mode: "不认识的", env: {} }).mode).toBe("launcher") // 非法值不报错，回缺省
   })
 
@@ -567,12 +567,12 @@ describe("start 的启动方式", () => {
     }
   })
 
-  test("LOCAL_INFER_LAUNCH=script 环境变量同样强制脚本模式", async () => {
+  test("GEBAI_LLM_INFER_LAUNCH=script 环境变量同样强制脚本模式", async () => {
     const home = makeHome()
     const { server, port } = startMockServer()
     try {
       const { ctx, calls } = makeCtx(home, (cmd) => (/run-server\.ps1/.test(cmd) ? { stdout: "ok\n", stderr: "", code: 0 } : undefined))
-      ;(ctx as { env: Record<string, string> }).env.LOCAL_INFER_LAUNCH = "script"
+      ;(ctx as { env: Record<string, string> }).env.GEBAI_LLM_INFER_LAUNCH = "script"
       await doStart({ port }, ctx, "linux")
       expect(calls.some((c) => /run-server\.ps1/.test(c.cmd))).toBe(true)
     } finally {
@@ -580,13 +580,13 @@ describe("start 的启动方式", () => {
     }
   })
 
-  test("launcher 模式无引擎：给出可操作提示（local_infer_engines / engine_fetch），不写状态文件", async () => {
+  test("launcher 模式无引擎：给出可操作提示（llm_infer_engines / engine_fetch），不写状态文件", async () => {
     const home = makeHomeWithEngine({ fakeExe: false })
     const { ctx, calls } = makeCtx(home)
     const out = await doStart({ port: 8123 }, ctx, "linux")
     expect(out).toContain("没有可用的 llama-server")
-    expect(out).toContain("local_infer_engines")
-    expect(out).toContain("local_infer_engine_fetch")
+    expect(out).toContain("llm_infer_engines")
+    expect(out).toContain("llm_infer_engine_fetch")
     expect(readServerStates(home).length).toBe(0)
     expect(calls.length).toBe(0) // 引擎都没找到，不该去跑任何命令
   })
@@ -620,7 +620,7 @@ describe("start 的启动方式", () => {
   test("launcher 模式：模型缺失与端口被占用都提前说清楚", async () => {
     const models = mkdtempSync(join(tmp, "models-"))
     const home = makeHomeWithEngine({ fakeExe: true, modelsDir: models })
-    const env = { LOCAL_INFER_HOME: home, LOCAL_INFER_MODELS_DIR: models }
+    const env = { GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_MODELS_DIR: models }
 
     // ① 引擎在、模型缺
     const miss = makeCtx(home)
@@ -635,7 +635,7 @@ describe("start 的启动方式", () => {
     ;(busy.ctx as { env: Record<string, string> }).env = env
     const outBusy = await doStart({ port: 8123 }, busy.ctx, "linux")
     expect(outBusy).toContain("端口 :8123 已被占用（PID 4242）")
-    expect(outBusy).toContain("local_infer_stop")
+    expect(outBusy).toContain("llm_infer_stop")
   })
 
   test("launcher 模式全链路：真 spawn 假 llama-server → 写状态文件 → 就绪", async () => {
@@ -661,7 +661,7 @@ describe("start 的启动方式", () => {
         `exec "${process.execPath}" "${js}" --port "$port" "${argvFile}"\n`,
       { mode: 0o755 },
     )
-    const env = { LOCAL_INFER_HOME: home, LOCAL_INFER_MODELS_DIR: models }
+    const env = { GEBAI_LLM_INFER_HOME: home, GEBAI_LLM_INFER_MODELS_DIR: models }
     const ctx = realCtx(home, env)
     const port = freePort()
     let pid = 0
@@ -729,7 +729,7 @@ describe("status 引擎信息", () => {
     const out = await doStatus({}, ctx, "linux")
     expect(out).toContain("当前: win-cuda-12.4-x64")
     expect(out).toContain("未找到")
-    expect(out).toContain("local_infer_engine_fetch")
+    expect(out).toContain("llm_infer_engine_fetch")
   })
 
   test("engineIdFromState：引擎 id 原样，旧的 exe 全路径取末级目录名", () => {
