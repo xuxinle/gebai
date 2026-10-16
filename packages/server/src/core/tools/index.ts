@@ -32,7 +32,7 @@ export * from "../support/exec-opts"
 export * from "./shared"
 // 家族文件具名再导出（原 core/tools.ts 兼容面）：不使用 export *——各文件均导出注册表 globalTools，
 // 星号再导出会重名冲突；新文件新增的工具请从所在文件直接 import（不经 barrel）。
-export { readTool, writeTool, lsTool, fileTool, grepTool, globTool, editTool, patchTool } from "./fs"
+export { readTool, writeTool, lsTool, fileTool, grepTool, globTool, editTool } from "./fs"
 export { shTool, pyTool, resolvePythonCmd, _resetPythonCmdCache } from "./exec"
 export { showTool, fetchUrlTool, SHOW_MAX_BYTES, SHOW_TEXT_DIRECT_BYTES, SHOW_TEXT_MAX_CHARS } from "./show"
 // extras.ts 已整体迁 @gebai/agents（page_capture → shared/page-capture，read_feedback → shared/feedback）

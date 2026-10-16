@@ -4,7 +4,7 @@
  * - `js`：静态扫描（scanJsReadOnly 拦 import/require/eval/Function 等运行时无法拦截的通道）+
  *   子进程运行时 shim（Bun 写/进程/网络 API 屏蔽，仅保留文件读取）
  * - `py`：子进程内 sys.addaudithook 审计钩子（PY_SAFE_BOOTSTRAP）：写模式 open、进程/网络/文件变更系统调用全部拒绝
- * - `write`/`edit`/`patch`/`file`：限定安全写范围内（safeModeWriteCheck）
+ * - `write`/`edit`/`file`：限定安全写范围内（safeModeWriteCheck）
  * - 定时任务调度（task_add/update/remove/run/cancel）：维持硬阻断（定时/立即触发任意执行，无法降级）
  * - 子Agent 工具：自主声明 `Tool.safeMode`（true=作者判定可提供 / false=判定不提供），未声明按短名风险规则默认
  *
@@ -28,7 +28,7 @@ export function isToolBlockedInSafeMode(name: string): boolean {
 /** 短名风险规则（安全模式下子Agent 工具的**默认**注册判定；`Tool.safeMode` 声明可覆盖）：
  *  命令执行（sh/py/js）/写删文件/任务调度与资源文件读写的短名视为默认不提供。 */
 export const SAFE_MODE_RISKY_TOOLS = new Set([
-  "sh", "py", "js", "write", "edit", "patch", "file", "delete",
+  "sh", "py", "js", "write", "edit", "file", "delete",
   "task_add", "task_update", "task_remove", "task_run", "task_cancel", "task_files",
 ])
 
@@ -47,7 +47,7 @@ export function safeModeRestrictionMsg(name: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// 安全写范围（write/edit/patch/file 与 sh 重定向目标共用）
+// 安全写范围（write/edit/file 与 sh 重定向目标共用）
 // ---------------------------------------------------------------------------
 
 /** 安全模式下允许写入的根目录列表：沙箱模式=用户数据根；本地模式=OS 用户主目录 + GEBAI_HOME + 会话工作目录。 */

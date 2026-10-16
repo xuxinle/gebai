@@ -162,7 +162,7 @@ export type ToolContext = {
   /** 会话级已读文件追踪（防误覆盖/防陈旧覆盖）。可选：测试桩/无引擎环境不注入时相关守卫自动放行。 */
   fileGuard?: FileGuardContext
   /** 写范围守卫（子Agent 声明、引擎按「会话已装载/子会话预加载的子Agent」注入）：文件写类工具
-   *  （write/edit/patch/file（rename/move/delete））写入前以**解析后的绝对路径**调用，
+   *  （write/edit/file（rename/move/delete））写入前以**解析后的绝对路径**调用，
    *  返回非空字符串 = 拒绝写入（作为工具结果返回引导模型调整，不抛错）。可选：未注入时不限制。 */
   writeGuard?: (absPaths: string[]) => string | null | Promise<string | null>
   /** 预置项目注册表（{AGENT_NAME_UPPER}_PROJECTS 环境变量解析，子Agent 运行环境注入）。 */

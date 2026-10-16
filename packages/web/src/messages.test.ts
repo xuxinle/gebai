@@ -1405,7 +1405,7 @@ describe("edit 工具 edits 参数模式（旧/新对比块，替代 JSON）", (
   })
 })
 
-describe("code 参数折叠（write/patch/js 等长内容默认收起）", () => {
+describe("code 参数折叠（write/js 等长内容默认收起）", () => {
   test("超长 code 参数自动折叠", () => {
     __setToolCardMetaForTest([["write", { titleParams: ["path"], args: "code", codeField: "content" }]])
     const bubble = toolBubbleFor({ id: "tc1", role: "tool", name: "write", content: "", arguments: { path: "a.ts", content: "x".repeat(900) }, createdAt: 0 }, "")

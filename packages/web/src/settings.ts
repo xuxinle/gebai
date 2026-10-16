@@ -126,7 +126,7 @@ function renderSettingsAppearance() {
   trRow.append(trInfo, trBtn)
   list.appendChild(trRow)
 
-  // 文件展示方式：read/write/edit/patch 等文件工具（含 code 子Agent 同款工具）的**产物文件卡**——
+  // 文件展示方式：read/write/edit 等文件工具（含 code 子Agent 同款工具）的**产物文件卡**——
   // 弹窗（默认：收敛为文件链接，点击弹窗查看；适配会话相对与项目路径）或嵌入（卡片内联展示文件内容）；
   // 参数区与输出不受影响
   const fdRow = el("div", "settings-row")

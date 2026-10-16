@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname, resolve } from "node:path"
-import { readTool, writeTool, editTool, systemInfoTool, shTool, bgTaskTool, pyTool, showTool, SHOW_TEXT_MAX_CHARS, pageCaptureTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, isTruncationNotice, TRUNCATION_MARKER, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, askTool, planFileName, buildPlanMarkdown } from "."
+import { readTool, writeTool, editTool, systemInfoTool, shTool, bgTaskTool, pyTool, showTool, SHOW_TEXT_MAX_CHARS, pageCaptureTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, isTruncationNotice, TRUNCATION_MARKER, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, gitTool, agentListTool, agentLoadTool, askTool, planFileName, buildPlanMarkdown } from "."
 import { createAllGlobalTools, createGlobalTools, isGlobalToolExcluded, resolvePythonCmd, _resetPythonCmdCache, _setExcludedGlobalToolsForTest, PAGE_CAPTURE_HTML_LIMIT } from "."
 import { searchSymbolsTool } from "@gebai/agents"
 import { SessionStore } from "../session/store"
@@ -577,7 +577,7 @@ describe("global tools", () => {
     cleanup(home)
   })
 
-  test("BOM 感知：read 显示去 BOM、edit/patch/write 保留回写（首行匹配不再静默失败）", async () => {
+  test("BOM 感知：read 显示去 BOM、edit/write 保留回写（首行匹配不再静默失败）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-bom-"))
     const c = ctx(home)
     const BOM = "\uFEFF"
@@ -592,12 +592,12 @@ describe("global tools", () => {
     const afterEdit = await rawText(join(c.workdir, "b1.ts"))
     expect(afterEdit.startsWith(BOM)).toBe(true)
     expect(afterEdit).toContain("const A = 1")
-    // patch：同样去 BOM 匹配/写回补 BOM
-    const p2 = await patchTool.execute({ path: "b1.ts", patch: "@@ -2,1 +2,1 @@\n-const b = 2\n+const b = 22\n" }, c)
-    expect(p2.output).toContain("已写入")
-    const afterPatch = await rawText(join(c.workdir, "b1.ts"))
-    expect(afterPatch.startsWith(BOM)).toBe(true)
-    expect(afterPatch).toContain("const b = 22")
+    // edit：第二处修改同样去 BOM 匹配、写回补 BOM（多次编辑不丢文件头）
+    const e2 = await editTool.execute({ path: "b1.ts", edits: [{ old_string: "const b = 2", new_string: "const b = 22" }] }, c)
+    expect(e2.output).toContain("已对 b1.ts")
+    const afterEdit2 = await rawText(join(c.workdir, "b1.ts"))
+    expect(afterEdit2.startsWith(BOM)).toBe(true)
+    expect(afterEdit2).toContain("const b = 22")
     // write 覆盖：原 BOM 文件覆盖写后 BOM 保留（内容前缀 BOM 不重复）
     await readTool.execute({ path: "b1.ts" }, c)
     await writeTool.execute({ path: "b1.ts", content: "const x = 9\n" }, c)
@@ -1588,7 +1588,7 @@ describe("global tools", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-write-guard-"))
     const c = ctx(home)
     c.fileGuard = fakeGuard()
-    // 会话外预置的已存在文件（未经 read/write/edit/patch）：盲覆盖被拒
+    // 会话外预置的已存在文件（未经 read/write/edit）：盲覆盖被拒
     writeFileSync(join(c.workdir, "pre.txt"), "v1")
     const blind = await writeTool.execute({ path: "pre.txt", content: "v2" }, c)
     expect(blind.output).toContain("防盲覆盖")
@@ -1607,7 +1607,7 @@ describe("global tools", () => {
     cleanup(home)
   })
 
-  test("write 防陈旧覆盖守卫：读后被外部/并行改动拒绝，重读后放行；append 同规则；edit/patch 同拦截", async () => {
+  test("write 防陈旧覆盖守卫：读后被外部/并行改动拒绝，重读后放行；append 同规则；edit 同拦截", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-write-stale-"))
     const c = ctx(home)
     const guard = fakeGuard()
@@ -1622,16 +1622,14 @@ describe("global tools", () => {
     // append 同规则（陈旧追加同样拒绝，防基于旧内容拼出错误结果）
     const staleAppend = await writeTool.execute({ path: "s.txt", content: "x", append: true }, c)
     expect(staleAppend.output).toContain("已被修改")
-    // edit/patch 同拦截（patch 行号模糊容错可对漂移内容误命中，前置陈旧拦截更直接）
+    // edit 同拦截（前置陈旧拦截，防对漂移内容误命中错位应用）
     const staleEdit = await editTool.execute({ path: "s.txt", edits: [{ old_string: "v1", new_string: "X" }] }, c)
     expect(staleEdit.output).toContain("已被修改")
-    const stalePatch = await patchTool.execute({ path: "s.txt", patch: "@@ -1,1 +1,1 @@\n-v1 改\n+X\n" }, c)
-    expect(stalePatch.output).toContain("已被修改")
     // 重新 read 后放行
     await readTool.execute({ path: "s.txt" }, c)
     const ok = await writeTool.execute({ path: "s.txt", content: "v2" }, c)
     expect(ok.output).toContain("已写入")
-    // 写后未再改动：连续 write/edit/patch 放行（写后内容即已掌握，指纹随写刷新）
+    // 写后未再改动：连续 write/edit 放行（写后内容即已掌握，指纹随写刷新）
     const again = await writeTool.execute({ path: "s.txt", content: "v3", append: true }, c)
     expect(again.output).toContain("已追加")
     const editOk = await editTool.execute({ path: "s.txt", edits: [{ old_string: "v2v3", new_string: "V" }] }, c)
@@ -3299,94 +3297,6 @@ describe("preview_server", () => {
   })
 })
 
-describe("patch tool", () => {
-  test("applies unified diff to existing file", async () => {
-    const home = mkdtempSync(join(tmpdir(), "gebai-applypatch-"))
-    const c = ctx(home)
-    await writeTool.execute({ path: "src/a.ts", content: "const a = 1\nconst b = 2\nconst c = 3\n" }, c)
-    const r = await patchTool.execute({ path: "src/a.ts", patch: "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -2,1 +2,1 @@\n-const b = 2\n+const b = 22\n" }, c)
-    expect(r.output).toContain("已写入 src/a.ts")
-    expect(r.output).toContain("1 处 hunk")
-    expect(await Bun.file(join(sessionPath(home, "default", SID), "tmp", "src", "a.ts")).text()).toBe("const a = 1\nconst b = 22\nconst c = 3\n")
-    cleanup(home)
-  })
-
-  test("dry_run validates without writing", async () => {
-    const home = mkdtempSync(join(tmpdir(), "gebai-applypatch-dry-"))
-    const c = ctx(home)
-    await writeTool.execute({ path: "a.ts", content: "a\nb\nc\n" }, c)
-    const r = await patchTool.execute({ path: "a.ts", patch: "@@ -2,1 +2,1 @@\n-b\n+B\n", dry_run: true }, c)
-    expect(r.output).toContain("预演")
-    expect(r.output).toContain("未写入")
-    expect(await Bun.file(join(sessionPath(home, "default", SID), "tmp", "a.ts")).text()).toBe("a\nb\nc\n")
-    cleanup(home)
-  })
-
-  test("mismatched patch fails atomically without modifying file", async () => {
-    const home = mkdtempSync(join(tmpdir(), "gebai-applypatch-fail-"))
-    const c = ctx(home)
-    await writeTool.execute({ path: "a.ts", content: "a\nb\nc\n" }, c)
-    const r = await patchTool.execute({ path: "a.ts", patch: "@@ -2,1 +2,1 @@\n-zzz\n+ZZZ\n" }, c)
-    expect(r.output).toContain("未匹配")
-    expect(await Bun.file(join(sessionPath(home, "default", SID), "tmp", "a.ts")).text()).toBe("a\nb\nc\n")
-    cleanup(home)
-  })
-
-  test("creates new file from /dev/null patch", async () => {
-    const home = mkdtempSync(join(tmpdir(), "gebai-applypatch-new-"))
-    const c = ctx(home)
-    const r = await patchTool.execute({ path: "new.ts", patch: "--- /dev/null\n+++ b/new.ts\n@@ -0,0 +1,2 @@\n+export const x = 1\n+export const y = 2\n" }, c)
-    expect(r.output).toContain("已写入 new.ts")
-    expect(await Bun.file(join(sessionPath(home, "default", SID), "tmp", "new.ts")).text()).toBe("export const x = 1\nexport const y = 2\n")
-    cleanup(home)
-  })
-
-  test("多文件补丁按文件头逐文件应用（跨文件原子）；空补丁报无 hunk；无头多段缺 path 报错", async () => {
-    const home = mkdtempSync(join(tmpdir(), "gebai-applypatch-multi-"))
-    const c = ctx(home)
-    await writeTool.execute({ path: "x.ts", content: "a\n" }, c)
-    await writeTool.execute({ path: "y.ts", content: "c\n" }, c)
-    const multi = await patchTool.execute({
-      patch: "--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-a\n+b\n--- a/y.ts\n+++ b/y.ts\n@@ -1 +1 @@\n-c\n+d\n",
-    }, c)
-    expect(multi.output).toContain("2 个文件")
-    expect(multi.output).toContain("x.ts")
-    expect(multi.output).toContain("y.ts")
-    expect(await Bun.file(join(sessionPath(home, "default", SID), "tmp", "x.ts")).text()).toBe("b\n")
-    expect(await Bun.file(join(sessionPath(home, "default", SID), "tmp", "y.ts")).text()).toBe("d\n")
-    // 任一文件不匹配整体失败（跨文件原子，两边都不落盘）
-    await writeTool.execute({ path: "z.ts", content: "keep\n" }, c)
-    const failMulti = await patchTool.execute({
-      patch: "--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-b\n-B\n--- a/z.ts\n+++ b/z.ts\n@@ -1 +1 @@\n-nope\n+NOPE\n",
-    }, c)
-    expect(failMulti.output).toContain("未匹配")
-    expect(await Bun.file(join(sessionPath(home, "default", SID), "tmp", "x.ts")).text()).toBe("b\n")
-    expect(await Bun.file(join(sessionPath(home, "default", SID), "tmp", "z.ts")).text()).toBe("keep\n")
-    // 空补丁（无 hunk）报错
-    const empty = await patchTool.execute({ path: "x.ts", patch: "--- a/x.ts\n+++ b/x.ts\n" }, c)
-    expect(empty.output).toContain("未解析到任何 hunk")
-    // 多段但无文件头且未传 path：无法定位目标
-    const noTarget = await patchTool.execute({ patch: "@@ -1 +1 @@\n-a\n+b\n@@ -1 +1 @@\n-c\n+d\n" }, c)
-    expect(noTarget.output).toContain("文件头")
-    cleanup(home)
-  })
-
-  test("patch 防盲改守卫：未读过的已存在文件拒绝，read 后放行（与 write/edit 同规则）", async () => {
-    const home = mkdtempSync(join(tmpdir(), "gebai-applypatch-guard-"))
-    const c = ctx(home)
-    c.fileGuard = fakeGuard()
-    writeFileSync(join(c.workdir, "pre.txt"), "a\n")
-    const blind = await patchTool.execute({ path: "pre.txt", patch: "@@ -1 +1 @@\n-a\n+b\n" }, c)
-    expect(blind.output).toContain("防盲改")
-    expect(await Bun.file(join(c.workdir, "pre.txt")).text()).toBe("a\n")
-    await readTool.execute({ path: "pre.txt" }, c)
-    const ok = await patchTool.execute({ path: "pre.txt", patch: "@@ -1 +1 @@\n-a\n+b\n" }, c)
-    expect(ok.output).toContain("已写入")
-    expect(await Bun.file(join(c.workdir, "pre.txt")).text()).toBe("b\n")
-    cleanup(home)
-  })
-})
-
 describe("git tool", () => {
   test("status runs git in resolved dir with structured output", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-git-status-"))
@@ -3649,18 +3559,17 @@ describe("产物块解析路径（read/write 产物 file 块携带可预览路�
     }
   })
 
-  test("edit/patch 产物块：修改后的文件内容卡（与 read/write 同款，弹窗查看模式收敛为文件链接）", async () => {
+  test("edit 产物块：修改后的文件内容卡（与 read/write 同款，弹窗查看模式收敛为文件链接）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-fileref-"))
     try {
       const c = ctx(home)
       await writeTool.execute({ path: "w.ts", content: "a\nb\nc\n" }, c)
       const e = await editTool.execute({ path: "w.ts", edits: [{ old_string: "b", new_string: "B" }] }, c)
       expect((e.blocks as Array<{ path?: string }>)[0]?.path).toBe("tmp/w.ts")
-      const p2 = await patchTool.execute({ path: "w.ts", patch: "@@ -1,1 +1,1 @@\n-a\n+A\n" }, c)
-      expect((p2.blocks as Array<{ path?: string }>)[0]?.path).toBe("tmp/w.ts")
-      // dry_run 不落盘：无产物块
-      const dry = await patchTool.execute({ path: "w.ts", patch: "@@ -1,1 +1,1 @@\n-A\n+X\n", dry_run: true }, c)
-      expect(dry.blocks).toBeUndefined()
+      // 内容无变化（pattern 替换后与原文字节一致）时不落盘、无产物块
+      const noop = await editTool.execute({ path: "w.ts", edits: [{ pattern: "B", new_string: "$&" }] }, c)
+      expect(noop.output).toContain("内容无变化")
+      expect(noop.blocks).toBeUndefined()
     } finally {
       rmSync(home, { recursive: true, force: true })
     }
@@ -3685,7 +3594,7 @@ describe("产物块解析路径（read/write 产物 file 块携带可预览路�
   })
 })
 
-test("edit/patch 行尾自适应：CRLF 文件 × LF old_string/补丁——匹配成功、行尾保持、守卫不误判", async () => {
+test("edit 行尾自适应：CRLF 文件 × LF old_string——匹配成功、行尾保持、守卫不误判", async () => {
   const home = mkdtempSync(join(tmpdir(), "gebai-eol-"))
   const c = ctx(home)
   const rawText = async (p: string) => (await import("node:fs/promises")).readFile(p, "utf8")
@@ -3701,13 +3610,10 @@ test("edit/patch 行尾自适应：CRLF 文件 × LF old_string/补丁——匹�
   const r2 = await editTool.execute({ path: "crlf.txt", edits: [{ old_string: "alpha\r\nBETA", new_string: "ALPHA\r\nBETA" }] }, c)
   expect(r2.output).toContain("已对 crlf.txt") // 修复前此处会误报「内容已被修改」
   // CRLF old_string 同样可用（双向自适应：精确匹配兜底优先）
-  // patch：LF 补丁打 CRLF 文件（修复前 hunk 必不匹配 + 行尾被写坏为 LF）
-  writeFileSync(join(c.workdir, "crlf2.txt"), "line1\r\nline2\r\nline3\r\n")
-  await readTool.execute({ path: "crlf2.txt" }, c)
-  const r3 = await patchTool.execute({ path: "crlf2.txt", patch: "@@ -2,1 +2,1 @@\n-line2\n+LINE2\n" }, c)
-  expect(r3.output).toContain("patch 已写入")
-  const after3 = await rawText(join(c.workdir, "crlf2.txt"))
-  expect(after3).toBe("line1\r\nLINE2\r\nline3\r\n")
+  const r3 = await editTool.execute({ path: "crlf.txt", edits: [{ old_string: "BETA\r\nGAMMA", new_string: "BETA\r\nGAMMA2" }] }, c)
+  expect(r3.output).toContain("已对 crlf.txt")
+  const after3 = await rawText(join(c.workdir, "crlf.txt"))
+  expect(after3).toBe("ALPHA\r\nBETA\r\nGAMMA2\r\n")
   // LF 文件不受影响（回归：无 CRLF 时不做任何变换）
   await writeTool.execute({ path: "lf.txt", content: "a\nb\n" }, c)
   const r4 = await editTool.execute({ path: "lf.txt", edits: [{ old_string: "a\nb", new_string: "A\nB" }] }, c)

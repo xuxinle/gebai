@@ -121,14 +121,14 @@ export function isBlockOnly(name: string): boolean {
   return metaOf(name)?.args === "block"
 }
 
-/** 文件卡声明判定（card.file）：read/write/edit/patch 等文件工具（code 子Agent 同款包装自动继承）。 */
+/** 文件卡声明判定（card.file）：read/write/edit 等文件工具（code 子Agent 同款包装自动继承）。 */
 function isFileCardTool(name: string, meta?: NonNullable<ToolInfo["card"]>): boolean {
   return !!(meta ?? metaOf(name))?.file
 }
 
 /** 单个产物块是否改渲染为文件链接（参数区与输出不受影响，仅下方产物文件卡在「嵌入内容卡 ↔ 链接弹窗」
  *  间切换，DESIGN「文件展示方式」）：
- *  - 外层工具自己声明了文件卡（read/write/edit/patch…，含 code 子Agent 同款包装）→ 收敛；
+ *  - 外层工具自己声明了文件卡（read/write/edit…，含 code 子Agent 同款包装）→ 收敛；
  *  - 脚本桥（js/py）透传的产物没有可归因的外层工具名，改看**块上的来源工具名**（`via`，由桥汇集时写入）
  *    ——桥内调用 read 与直接调用 read 表现一致；主动展示类工具（show，未声明文件卡）的产物照常内联。 */
 export function fileBlockAsLink(outerName: string | undefined, block: ContentBlock): boolean {

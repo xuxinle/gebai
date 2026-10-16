@@ -29,10 +29,10 @@ describe("安全模式判定", () => {
   })
 
   test("短名风险规则（子Agent 工具默认注册判定）", () => {
-    for (const n of ["sh", "py", "js", "write", "edit", "patch", "file", "delete", "task_add", "task_update", "task_remove", "task_run", "task_cancel", "task_files"]) {
+    for (const n of ["sh", "py", "js", "write", "edit", "file", "delete", "task_add", "task_update", "task_remove", "task_run", "task_cancel", "task_files"]) {
       expect(isRiskyToolName(n)).toBe(true)
     }
-    for (const n of ["code_sh", "code_write", "code_edit", "code_patch", "code_file", "code_delete"]) {
+    for (const n of ["code_sh", "code_write", "code_edit", "code_file", "code_delete"]) {
       expect(isRiskyToolName(n)).toBe(true)
     }
     for (const n of [

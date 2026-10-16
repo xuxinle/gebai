@@ -1,4 +1,4 @@
-/** 文本行拆分与语法语言推断（read/show/patch 等共用的小工具）。 */
+/** 文本行拆分与语法语言推断（read/show 等共用的小工具）。 */
 
 /** 按扩展名推断语法高亮语言（与前端 EXT_LANG 保持一致）。 */
 const EXT_LANG: Record<string, string> = {

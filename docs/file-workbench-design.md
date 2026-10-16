@@ -323,7 +323,7 @@ app.get(`${base}/files/*`, handler)        // 深链（如 /files?root=proj:geba
   - URL 状态（当前 root/path/行号/模式）：可分享深链；`popstate` 支持浏览器前进后退（工作台内的轻量路由：栈式 `pushState`）。
 - **并发与刷新**：
   - 打开文件时记录 `etag`；前端轮询（页面可见时 3s，不可见时停）校验 `etag`+目录 `mtime` → 变更则刷新树/提示「磁盘已变更」（IDEA 的 "File changed on disk"）。
-  - 订阅 WS：`event.tool.call/tool.result` 中涉及文件工具（read/write/edit/patch/show）→ 立即失效相关路径缓存并提示；`event.git.changed` → 刷 Changes 与日志图。
+  - 订阅 WS：`event.tool.call/tool.result` 中涉及文件工具（read/write/edit/show）→ 立即失效相关路径缓存并提示；`event.git.changed` → 刷 Changes 与日志图。
   - 编辑中若磁盘被外部改动：**不自动覆盖编辑器内容**，弹三选（载入磁盘版 / 保留我的并差异化 / 手动合并）。
 
 ### 4.4 文件树（Project 工具窗）

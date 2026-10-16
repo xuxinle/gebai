@@ -316,14 +316,14 @@ Monorepo（Bun workspaces + Turborepo）；核心模块全部接口化 + 依赖�
 
 ## 全局工具 | Global Tools
 
-共 **20 个**全局工具（子 Agent 的独有工具以 `{agent}_{tool}` 命名空间另计）。文件/路径类工具统一带 `project` 参数（项目根路由：预置项目名 / 项目根路径 / `tmp` 会话工作区）。
+共 **19 个**全局工具（子 Agent 的独有工具以 `{agent}_{tool}` 命名空间另计）。文件/路径类工具统一带 `project` 参数（项目根路由：预置项目名 / 项目根路径 / `tmp` 会话工作区）。
 
 | 工具 | 能力 | 审批 |
 |------|------|------|
 | `read` / `write` / `ls` | 读文件（带行号，大文件分段）/ 写文件（`append` 分段续写）/ 列目录 | 免审 |
 | `grep` / `glob` | 正则递归内容搜索（内置 ripgrep 优先，不可用自动回退内置引擎）/ 文件名模式查找 | 免审 |
 | `file` | 文件管理多动作：`copy`/`rename`/`move`/`mkdir`/`delete`/`info`（按内容探测类型） | `delete` 动态需审批 |
-| `edit` / `patch` | 定点替换（`old_string`/正则，多处原子落盘）/ unified diff 补丁（可多文件、可 `dry_run`） | 免审 |
+| `edit` | 定点替换（`old_string`/正则，可一次多处、**按序应用**——后项原文落在前项改写范围内则自动合并；整体原子落盘） | 免审 |
 | `sh` | 执行 shell 命令（Windows 经 PowerShell、POSIX 经 bash），`async:true` 转后台任务，`timeout` 调整个别超时 | 默认需审批（只读/测试类白名单可免审） |
 | `py` | 执行 Python 代码（本地模式带工具桥：工具名即函数、`tools.call`、`ctx`/`input` 注入） | 恒需审批 |
 | `js` | 执行 JS/TS 脚本（Bun 运行时）：脚本内工具即函数（`await read(...)`）、`defineTool` 注册会话级动态工具、`bg_task` 调度后台任务 | 默认需审批（词元扫描通过可免审） |
@@ -339,7 +339,7 @@ Monorepo（Bun workspaces + Turborepo）；核心模块全部接口化 + 依赖�
 
 `agent_list` 与 `subsession_merge` 不是全局工具——前者由引擎在「可委派」场景注入，后者仅异步子会话运行上下文可见。
 
-**English.** Twenty global tools ship with the engine: file read/write/ls, ripgrep-backed grep and glob, a multi-action `file` manager, `edit`/`patch`, the three script tools (`sh`/`py`/`js`), `fetch_url`, `show`, `ask`, `todo`, `tool_schemas`, `agent_load`, `subsession_run`, `bg_task` and `restart_server`. Approval posture: `py` and `restart_server` always require approval, `sh`/`js`/`file delete` decide per call, the rest are approval-free; file/path tools accept a `project` parameter for project-root routing.
+**English.** Nineteen global tools ship with the engine: file read/write/ls, ripgrep-backed grep and glob, a multi-action `file` manager, `edit`, the three script tools (`sh`/`py`/`js`), `fetch_url`, `show`, `ask`, `todo`, `tool_schemas`, `agent_load`, `subsession_run`, `bg_task` and `restart_server`. Approval posture: `py` and `restart_server` always require approval, `sh`/`js`/`file delete` decide per call, the rest are approval-free; file/path tools accept a `project` parameter for project-root routing.
 
 ## 内置子 Agent | Built-in Sub-Agents
 

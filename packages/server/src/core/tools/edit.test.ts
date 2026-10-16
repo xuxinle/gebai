@@ -235,7 +235,7 @@ describe("edit 正则匹配与参数健壮性", () => {
     expect(readFileSync(join(c.workdir, "a.txt"), "utf8")).toBe("hello\n")
   })
 
-  test("多编辑项：按原文位置应用、行号回报基于原文；区间交叠时整体失败", async () => {
+  test("多编辑项：按序应用、行号回报基于原文；后项原文落在前项改写范围内时自动合并（不报重叠）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-edit-multi2-"))
     const c = ctx(home)
     await writeTool.execute({ path: "m.ts", content: "aaa\nbbb\nccc\n" }, c)
@@ -245,11 +245,78 @@ describe("edit 正则匹配与参数健壮性", () => {
     expect(ok.output).toContain("1) 行 3")
     expect(ok.output).toContain("2) 行 1")
     expect(readFileSync(join(c.workdir, "m.ts"), "utf8")).toBe("AAA\nbbb\nCCC\n")
-    // 与前面编辑项重叠：整体失败
+  })
+
+  test("编辑项按序应用：后项原文落在前项改写结果内→合并应用（不再报区间重叠）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-edit-merge-"))
+    const c = ctx(home)
+    // 形态 A（项内嵌套）：先改一整段，再补改段内一行——后项原文是前项 new_string 里的内容
+    await writeTool.execute({ path: "a.ts", content: "import { x } from \"./x\"\n\nconst y = 1\n" }, c)
+    const r1 = await editTool.execute(
+      {
+        path: "a.ts",
+        edits: [
+          { old_string: 'import { x } from "./x"', new_string: 'import { x, z } from "./x"\nimport { w } from "./w"' },
+          { old_string: 'import { w } from "./w"', new_string: 'import { w } from "./w2"' },
+        ],
+      },
+      c,
+    )
+    expect(r1.output).toContain("已对 a.ts")
+    expect(r1.output).toContain("与第 1 项的替换结果相接")
+    expect(readFileSync(join(c.workdir, "a.ts"), "utf8")).toBe('import { x, z } from "./x"\nimport { w } from "./w2"\n\nconst y = 1\n')
+
+    // 形态 B（项间同锚点）：两项各自定位同一区域的不同片段（原文区间交错）
+    await writeTool.execute({ path: "b.ts", content: "function render() {\n  clear(el)\n  draw()\n}\n" }, c)
+    const r2 = await editTool.execute(
+      {
+        path: "b.ts",
+        edits: [
+          { old_string: "function render() {\n  clear(el)", new_string: "function render() {\n  if (key === last) return\n  clear(el)" },
+          { old_string: "function render() {", new_string: "let last = \"\"\n\nfunction render() {" },
+        ],
+      },
+      c,
+    )
+    expect(r2.output).toContain("已对 b.ts")
+    expect(readFileSync(join(c.workdir, "b.ts"), "utf8")).toBe(
+      'let last = ""\n\nfunction render() {\n  if (key === last) return\n  clear(el)\n  draw()\n}\n',
+    )
+
+    // 后项在**前面项应用后**的内容里也匹配不上（原文真被改写掉了）：报错指向序次原因，且不落盘
+    await writeTool.execute({ path: "c.ts", content: "const v = 1\n" }, c)
     await expect(
-      editTool.execute({ path: "m.ts", edits: [{ old_string: "AAA\nbbb", new_string: "X" }, { old_string: "bbb", new_string: "Y" }] }, c),
-    ).rejects.toThrow("重叠")
-    expect(readFileSync(join(c.workdir, "m.ts"), "utf8")).toBe("AAA\nbbb\nCCC\n")
+      editTool.execute(
+        {
+          path: "c.ts",
+          edits: [
+            { old_string: "const v = 1", new_string: "const v = 2" },
+            { old_string: "const v = 1\n", new_string: "const v = 3\n" },
+          ],
+        },
+        c,
+      ),
+    ).rejects.toThrow("前面 1 项应用后")
+    expect(readFileSync(join(c.workdir, "c.ts"), "utf8")).toBe("const v = 1\n")
+  })
+
+  test("编辑项按序应用：前项替换文本会被后续项继续匹配（多处顺序改写同一段）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-edit-chain-"))
+    const c = ctx(home)
+    await writeTool.execute({ path: "s.ts", content: "let a = 1\nlet b = 2\n" }, c)
+    const r = await editTool.execute(
+      {
+        path: "s.ts",
+        edits: [
+          { old_string: "let a = 1", new_string: "let a = 1\nlet c = 3" },
+          { old_string: "let c = 3", new_string: "let c = 33" },
+          { old_string: "let b = 2", new_string: "let b = 22" },
+        ],
+      },
+      c,
+    )
+    expect(r.output).toContain("已对 s.ts")
+    expect(readFileSync(join(c.workdir, "s.ts"), "utf8")).toBe("let a = 1\nlet c = 33\nlet b = 22\n")
   })
 
   test("pattern 匹配数超上限（1000）时拒绝：无法安全判定替换范围", async () => {
@@ -260,4 +327,17 @@ describe("edit 正则匹配与参数健壮性", () => {
     await expect(editTool.execute({ path: "many.txt", edits: [{ pattern: "x", new_string: "y", replace_all: true }] }, c)).rejects.toThrow("超过")
     expect(readFileSync(join(c.workdir, "many.txt"), "utf8")).toBe("x\n".repeat(1200))
   }, 60_000)
+
+  test("零长度匹配（^ / a* 类空匹配）拒绝且不落盘；pattern 多处命中未 replace_all 时列行号报错", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-edit-zerolen-"))
+    const c = ctx(home)
+    await writeTool.execute({ path: "o.txt", content: "aaa\n" }, c)
+    // 零长度模式（a* 在非 a 位置可空匹配）明确拒绝
+    await expect(editTool.execute({ path: "o.txt", edits: [{ pattern: "a*", new_string: "X", replace_all: true }] }, c)).rejects.toThrow("零长度")
+    // 前瞻锚点（(\?=(a))）零长度命中同样拒绝
+    await expect(editTool.execute({ path: "o.txt", edits: [{ pattern: "(?=(a))", new_string: "X", replace_all: true }] }, c)).rejects.toThrow("零长度")
+    // 零长度缺失时：多处命中未 replace_all → 报错列行号，不落盘
+    await expect(editTool.execute({ path: "o.txt", edits: [{ pattern: "a", new_string: "X" }] }, c)).rejects.toThrow("匹配 3 处")
+    expect(readFileSync(join(c.workdir, "o.txt"), "utf8")).toBe("aaa\n")
+  })
 })

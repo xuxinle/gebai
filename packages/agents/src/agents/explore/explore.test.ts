@@ -58,7 +58,7 @@ describe("explore sub-agent（只读代码探索）", () => {
       expect(names).not.toContain(t)
     }
     // 硬约束：探索不修改——写/执行/删除类工具一律缺席
-    for (const t of ["write", "edit", "patch", "sh", "py", "file"]) {
+    for (const t of ["write", "edit", "sh", "py", "file"]) {
       expect(names).not.toContain(t)
     }
     for (const t of ["search_symbols", "analyze", "git"]) {

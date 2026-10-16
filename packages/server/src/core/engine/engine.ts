@@ -77,7 +77,7 @@ const MAX_TOOL_ROUNDS = Number.POSITIVE_INFINITY
 const MAX_TODO_CONTINUE = 1
 /** 收尾验证提醒轮次上限：改了代码文件但全程未跑测试/检查的任务，结束时最多注入一次提醒（防反复打扰）。 */
 const MAX_VERIFY_NUDGE = 1
-/** 收尾验证提醒——代码文件判定（write/edit/patch 命中这些扩展名的 path 才计入；md/txt 等文档不触发；
+/** 收尾验证提醒——代码文件判定（write/edit 命中这些扩展名的 path 才计入；md/txt 等文档不触发；
  *  **会话工作区（session tmp/）内的文件另行排除**——见 inSessionTmp：那是临时产物/测试夹具，非代码改动）。 */
 const VERIFY_CODE_FILE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|kts|c|h|cpp|hpp|cc|cs|rb|php|swift|scala|vue|svelte|dart|lua|sh|bash|sql)$/i
 /** 收尾验证提醒——测试/检查类命令判定（sh/py 的 command 文本匹配；宽匹配宁漏勿紧：误判已验证只少一次提醒）。
@@ -332,12 +332,12 @@ export class AgentEngine {
   private tasks = new Map<string, TaskState>()
 
   /** 任务级「收尾验证提醒」数据（DESIGN「收尾验证提醒」）：sessionId → { 修改的代码文件, 是否已运行测试/检查类命令 }。
-   *  run() 开始置位、runToolInterruptible 收集（write/edit/patch 成功改代码文件、sh/py 执行测试/检查命令）、
+   *  run() 开始置位、runToolInterruptible 收集（write/edit 成功改代码文件、sh/py 执行测试/检查命令）、
    *  任务结束清理——与待办续做同机制的兜底：模型改了代码却全程没跑验证时注入一次提醒。 */
   private taskMods = new Map<string, { files: Set<string>; verified: boolean }>()
 
   /** 会话级已读文件追踪（fileGuard 防误覆盖/防陈旧覆盖，DESIGN「write 防误覆盖守卫」）：sessionId → (已读绝对路径 →
-   *  读取/写入时内容指纹)。read/edit/patch/write 成功后登记（含指纹），write/edit/patch 写前按「未读 → 防盲写、
+   *  读取/写入时内容指纹)。read/edit/write 成功后登记（含指纹），write/edit 写前按「未读 → 防盲写、
    *  指纹漂移 → 防陈旧覆盖」两档拦截（并行分支/主线/脚本命令/外部编辑改动均会漂移指纹）；
    *  继承上下文的子会话独立快照（runSubSession 拷贝本表——子会话已读基线 = fork 点父会话可见内容，互不串扰）；
    *  会话删除经 forgetSession 释放（进程内无界增长防护）。 */
@@ -1714,7 +1714,7 @@ private activeSchemas(sessionId: string) {
         return sandbox.resolvePath(user, sessionId, p)
       },
       // node utf8 读取保留 UTF-8 BOM（Bun.file().text() 会剥离）——read 展示/edit 匹配在工具层统一
-      // stripBom 去除、edit/patch/write 写回时按原文件补回（BOM 文件往返编辑不丢头，见 DESIGN「BOM 感知」）
+      // stripBom 去除、edit/write 写回时按原文件补回（BOM 文件往返编辑不丢头，见 DESIGN「BOM 感知」）
       readFile: async (p) => {
         const { readFile } = await import("node:fs/promises")
         return readFile(p, "utf8")
@@ -2693,7 +2693,7 @@ private activeSchemas(sessionId: string) {
     return abs === tmp || abs.startsWith(tmp + sep)
   }
 
-  /** 收尾验证提醒数据收集：write/edit/patch 成功修改代码文件（拒绝/安全模式拦截与 dryRun 不计）记入文件清单；
+  /** 收尾验证提醒数据收集：write/edit 成功修改代码文件（拒绝/安全模式拦截与 dryRun 不计）记入文件清单；
    *  验证判定覆盖三条通道——① sh/py 的 command 命中测试/检查关键词；② 验证类工具调用（名称后缀 `run_tests`，
    *  含命名空间形态 `self_optimize_run_tests`）；③ js 编排（脚本内以 sh/py/bg_task 执行验证命令）。
    *  写类工具取命名空间短名（code_write 与全局 write 同权）；**验证工具必须用后缀正则**（短名判定会漏）. */
@@ -2703,7 +2703,7 @@ private activeSchemas(sessionId: string) {
     const short = name.includes("_") ? name.slice(name.lastIndexOf("_") + 1) : name
     if (VERIFY_TOOL_RE.test(name)) {
       mods.verified = true
-    } else if (short === "write" || short === "edit" || short === "patch") {
+    } else if (short === "write" || short === "edit") {
       if (typeof args.path !== "string") return
       if (args.dry_run === true || args.dryRun === true || result.output.includes("预演")) return
       if (MOD_REJECTED_RE.test(result.output)) return
@@ -2890,10 +2890,10 @@ private activeSchemas(sessionId: string) {
         }
       }
       const safeNote = this.opts.config.safeMode
-        ? `\n安全模式已启用（风险能力降级而非禁用）：sh 仅允许只读命令白名单；py/js 为只读运行时（写文件/子进程/网络屏蔽，仅保留文件读取）；write/edit/patch/file 限定用户目录内；任务调度（task_*）不可用；部分子Agent 风险工具未注册。`
+        ? `\n安全模式已启用（风险能力降级而非禁用）：sh 仅允许只读命令白名单；py/js 为只读运行时（写文件/子进程/网络屏蔽，仅保留文件读取）；write/edit/file 限定用户目录内；任务调度（task_*）不可用；部分子Agent 风险工具未注册。`
         : ""
       const globalsNote = inheritGlobals
-        ? `全局工具已继承进本会话（read/write/edit/patch/ls/grep/glob/file/sh/py/fetch_url/todo/ask 等，与父会话同名同参——文件工具可用 project 参数路由项目，未传时相对路径以${baseProjectRoot ? "项目根" : "会话工作目录"}为基准）；预加载子Agent 只提供独有工具（以 {agent}_ 前缀调用）。`
+        ? `全局工具已继承进本会话（read/write/edit/ls/grep/glob/file/sh/py/fetch_url/todo/ask 等，与父会话同名同参——文件工具可用 project 参数路由项目，未传时相对路径以${baseProjectRoot ? "项目根" : "会话工作目录"}为基准）；预加载子Agent 只提供独有工具（以 {agent}_ 前缀调用）。`
         : `本会话未继承全局工具（inherit_global_tools=false）：仅预加载子Agent 的工具（以 {agent}_ 前缀调用）与内建编排（tool_schemas/js）。`
       const globalPromptPart = spec.inheritGlobalPrompt !== false
         ? `以下为总Agent 全局系统提示词（父会话行为约定与全局能力说明；路径基准与工具可用性以本会话上文为准）:\n${this.buildSystemPrompt(sessionId, user, env)}\n\n`

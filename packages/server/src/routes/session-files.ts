@@ -71,7 +71,7 @@ export function registerSessionFileRoutes(rc: RouteCtx): void {
     })
   })
 
-  // 文件预览（DESIGN「文件链接弹窗查看」）：read/write/edit/patch 等文件工具卡片链接的取数入口——
+  // 文件预览（DESIGN「文件链接弹窗查看」）：read/write/edit 等文件工具卡片链接的取数入口——
   // 会话相对路径以 tmp/ 为根；绝对路径（code 项目文件）按用户隔离边界放行（沙箱用户限本用户数据目录内）。
   // ?download=1 时以附件形式返回（文件卡工具栏下载对项目文件同样经此入口）。
   app.get("/api/v1/sessions/:id/files/preview", async (c) => {
