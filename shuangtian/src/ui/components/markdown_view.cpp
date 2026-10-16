@@ -331,7 +331,12 @@ void MarkdownView::apply_theme(const Theme& theme) {
   next.heading_sizes = {metrics.font_3xl, metrics.font_2xl, metrics.font_xl,
                         metrics.font_lg,  metrics.font_base, metrics.font_base};
   next.heading_margins = kHeadingMargins;
-  next.base = base_font_size_ > 0.0f ? base_font_size_ : metrics.font_base;
+  // 排版三件套的组件侧落点：DSL `markdown(..., {.size = 16})` 走这里改正文
+  // 基准字号（包装层把 `props.size` 写进 `set_base_font_size`，这里每帧回放），
+  // `hex_color`/`color` 的显式覆盖同样末尾回放（盖过主题的 text 色）。
+  next.base = text_size_override() > 0.0f ? text_size_override()
+                                          : (base_font_size_ > 0.0f ? base_font_size_
+                                                                    : metrics.font_base);
   next.code = code_font_size_ > 0.0f ? code_font_size_ : metrics.font_sm;
   next.table = metrics.font_xs;
   if (!(next == metrics_)) {
@@ -342,6 +347,7 @@ void MarkdownView::apply_theme(const Theme& theme) {
   style_.color = theme.colors().text;
   style_.font_size = metrics_.base;
   style_.padding = math::Insets::symmetric(16.0f, 12.0f);
+  apply_text_overrides();
 }
 
 // —— 语义文本 ——
@@ -1493,10 +1499,21 @@ auto MarkdownView::role_of_token(st::md::TokenKind kind) -> ColorRole {
   return ColorRole::CodePlain;
 }
 
-auto MarkdownView::color_of(const Theme& theme, ColorRole role) -> math::Color {
+auto MarkdownView::color_of(const Theme& theme, ColorRole role) const -> math::Color {
   const Palette& colors = theme.colors();
   switch (role) {
-    case ColorRole::Text: return colors.text;
+    case ColorRole::Text: {
+      // 显式文字色覆盖（DSL `BoxProps::color/hex_color`）：只盖**正文**角色
+      //（标题/代码/表格等结构角色仍按主题语义色，才读得出层级）；语义色调
+      //（tone）跟随主题，字面色（hex_color）不随主题变——与 Text 的分工一致。
+      if (const auto& override_color = text_color_override(); override_color.has_value()) {
+        return *override_color;
+      }
+      if (const auto& override_tone = text_tone_override(); override_tone.has_value()) {
+        return tone_color(theme, *override_tone);
+      }
+      return colors.text;
+    }
     case ColorRole::Muted: return colors.text_muted;
     case ColorRole::Faint: return colors.text_faint;
     case ColorRole::Primary: return colors.primary;

@@ -1101,6 +1101,11 @@ void KeyValueRow::set_value(std::string value) {
 void KeyValueRow::apply_theme(const Theme& theme) {
   style_.font_size = theme.metrics().font_sm;
   style_.background = math::Color{0, 0, 0, 0};
+  // 显式排版覆盖最后回放（与 Text/Button 同口径）：字号覆盖直接改写 style_
+  //（measure/paint 都从 style_.font_size 取）；颜色覆盖存起来供 paint_content
+  // 的左右两段取色用（两段各自有 muted/text 的语义分工，不能整体盖）。不设则
+  // 沿用主题两段色——覆盖在这里只做"记录"，取色在绘制时问 text_color_override。
+  apply_text_overrides();
 }
 
 void KeyValueRow::measure(const RenderContext& context, const Constraints& constraints) {
@@ -1115,10 +1120,16 @@ void KeyValueRow::paint_content(const RenderContext& context, raster::Surface& c
   // 与 `Element::paint_text` / `draw_line` / `Button` 同一口径：按**墨迹区**居中。
   const float y = centered_line_top(port, label_, size, bounds_.y,
                                                          bounds_.height);
+  // 左右两段各有语义色（muted/text）；显式文字色覆盖（DSL `BoxProps::color`）
+  // 只盖**值**一段——它是"这条信息的重点"，键保持 muted 才读得出主次。
+  math::Color value_color = context.theme.colors().text;
+  if (const auto& override_color = text_color_override(); override_color.has_value()) {
+    value_color = *override_color;
+  }
   port.draw(canvas, label_, math::Point{bounds_.x, y}, size, context.theme.colors().text_muted);
   const float value_width = port.measure_width(value_, size);
   port.draw(canvas, value_, math::Point{bounds_.right() - value_width, y}, size,
-            context.theme.colors().text);
+            value_color);
 }
 
 }  // namespace st::ui

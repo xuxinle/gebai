@@ -71,14 +71,26 @@ void ListItem::set_selected(bool value) {
   mark_dirty();
 }
 
+void ListItem::apply_theme(const Theme& theme) {
+  // 基类实现里已含 apply_text_overrides（本组件不重算字号/字色，主题态即默认态）；
+  // 覆盖在 Element::apply_theme 末尾统一回放进 style_，measure/paint 从 style_ 取。
+  //（容器 List 的下放覆盖会写进本项的 extras，见 List::apply_theme_to_items。）
+  Element::apply_theme(theme);
+}
+
 void ListItem::measure(const RenderContext& context, const Constraints& constraints) {
   const TextPort& port = text_port_of(context);
   const Metrics& metrics = context.theme.metrics();
   // **文本宽度缓存**（见 hpp）：只量文案本身（不含内边距与夹取），
   // 它只取决于 `(文案, 字号)`。文案变由 `set_label`/`set_subtitle` 失效；
-  // 字号变（主题换档 / `scale_fonts`）由这里比对字号失效。
-  const float label_font = metrics.font_base;
-  const float subtitle_font = metrics.font_xs;
+  // 字号变（主题换档 / `scale_fonts` / 排版覆盖）由这里比对字号失效。
+  //
+  // ⚠ 不从 style_.font_size 取：既有调用方（如 width-cache 测试）可不经过
+  // apply_theme 直接 measure，style_ 停在构造默认值；度量口径必须与
+  //「无覆盖 = 主题 font_base」保持一致（直接向意图侧问，不依赖回放时机）。
+  const float label_font =
+      text_size_override() > 0.0f ? text_size_override() : metrics.font_base;
+  const float subtitle_font = label_font * (metrics.font_xs / metrics.font_base);
   if (label_width_ < 0.0F || label_width_font_size_ != label_font) {
     label_width_ = port.measure_width(label_, label_font);
     label_width_font_size_ = label_font;
@@ -123,19 +135,30 @@ void ListItem::paint_content(const RenderContext& context, raster::Surface& canv
     canvas.fill_rect(bounds_, raster::Paint::solid(colors.surface_alt), metrics.radius_sm);
   }
 
-  const math::Color label_color = selected_ ? colors.primary : colors.text;
+  const math::Color label_color = [this, &colors]() {
+    // 显式文字色覆盖（DSL `BoxProps::color/hex_color`）盖过选中/常态色
+    //（与 Tree 行文本同口径）。lambda 而非直写：选中色的优先级在覆盖之下，
+    // 直接三元表达式会把覆盖写法搞成两分支都问一遍。
+    if (const auto& override_color = text_color_override(); override_color.has_value()) {
+      return *override_color;
+    }
+    return selected_ ? colors.primary : colors.text;
+  }();
   const math::Rect text_area = bounds_.inset(math::Insets::symmetric(
       kTextInset, metrics.space_xs));
+  // 与 measure 同一口径：向意图侧问字号（不依赖 apply_theme 回放时机）。
+  const float label_size =
+      text_size_override() > 0.0f ? text_size_override() : metrics.font_base;
   if (subtitle_.empty()) {
-    draw_text(context, canvas, label_, text_area, metrics.font_base, label_color, TextAlign::Start);
+    draw_text(context, canvas, label_, text_area, label_size, label_color, TextAlign::Start);
     return;
   }
-  const float label_height = metrics.font_base * metrics.line_height_body;
+  const float label_height = label_size * metrics.line_height_body;
   const math::Rect label_box{text_area.x, text_area.y, text_area.width, label_height};
   const math::Rect subtitle_box{text_area.x, label_box.bottom(), text_area.width,
                                 text_area.bottom() - label_box.bottom()};
-  draw_text(context, canvas, label_, label_box, metrics.font_base, label_color, TextAlign::Start);
-  draw_text(context, canvas, subtitle_, subtitle_box, metrics.font_xs, colors.text_muted,
+  draw_text(context, canvas, label_, label_box, label_size, label_color, TextAlign::Start);
+  draw_text(context, canvas, subtitle_, subtitle_box, label_size * 0.75f, colors.text_muted,
             TextAlign::Start);
 }
 
@@ -164,6 +187,46 @@ auto ListItem::semantics_flags() const -> SemanticsFlags {
 }
 
 // —— List ——
+
+// —— 列表项的排版覆盖下放（与四先例的"各组件自己接"同口径）——
+
+void ListItem::apply_container_text_overrides(const Element& container) {
+  // 容器（List）记的排版覆盖镜像到本项（字是项画的，见 List::apply_theme_to_items
+  // 的说明）。容器没设的那项镜像为空（`nullopt`/`-1`，即"无覆盖"），而不是保留
+  // 旧值——每帧镜像一次，不会累积，也保证容器撤掉覆盖后项跟着回退。
+  const auto& color = container.text_color_override();
+  const float size = container.text_size_override();
+  RenderExtras& state = extras();
+  state.text_color_override = color;
+  state.text_size_override = size;
+  mark_layout_dirty();
+}
+
+// —— List（容器：自身不画字，排版覆盖下放给项）——
+
+void List::apply_theme(const Theme& theme) {
+  // 自身作为容器不画字：基类 apply_theme（含覆盖回放）跑完后，把覆盖镜像给每个
+  // 项——apply_theme_tree 是父先子后，紧接着项的基类 apply_theme 会把镜像值
+  // 回放进项的 style_（视觉树/get_property 的读回口都读 style_）。
+  Element::apply_theme(theme);
+  apply_theme_to_items();
+}
+
+void List::apply_theme_to_items() {
+  // DSL 的 list(...) 把 BoxProps 应用在 List 容器上，而字是 ListItem 画的——
+  // 不下放就是"容器记了覆盖、项不认"的静默不生效。
+  //
+  // 镜像语义：容器没设的那项镜像为"无覆盖"（nullopt/-1），而非保留旧值
+  // ——每帧镜像一次不累积，也保证容器撤掉覆盖后项跟着回退。
+  // 无覆盖时零开销（早退）；这里只镜像，真正的回放在项自己的 apply_theme。
+  if (extras_if_any() == nullptr) return;   // 容器从没设过覆盖：项也不必动
+  if (!text_color_override().has_value() && text_size_override() <= 0.0f) return;
+  for (std::size_t index = 0; index < children_.size(); ++index) {
+    Element* child = child_at(index);
+    if (child == nullptr || child->type() != "ListItem") continue;
+    static_cast<ListItem*>(child)->apply_container_text_overrides(*this);
+  }
+}
 
 List::List() {
   style_.direction = FlexDirection::Column;

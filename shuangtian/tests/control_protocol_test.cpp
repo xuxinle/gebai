@@ -29,7 +29,9 @@
 #include "st/core/time.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/code_editor.hpp"
+#include "st/ui/components/file_dialog.hpp"
 #include "st/ui/components/input.hpp"
+#include "st/ui/components/menu.hpp"
 #include "st/ui/ui_root.hpp"
 
 #include "st/ext/json.hpp"
@@ -566,6 +568,157 @@ ST_TEST(capture_path_outside_whitelist_is_rejected) {
   if (reply.contains("error")) {
     ST_CHECK_EQ(reply["error"].value("code", std::string()), "invalid");
   }
+}
+
+/// 裸文件名控制文件（无目录）的落盘白名单（BACKLOG P2 2026-10-15）：
+///
+/// `default_capture_dirs` 对无分隔符 control_file 曾放行字面 "." ——而客户端请求的
+/// path 是绝对路径，前缀比较永远不匹配，该目录下全部拒绝；智能体会话里 ctl.json
+/// 常直接写在 CWD，视觉断言基线写入会莫名被拒，报错文案也不指向这个原因。
+///
+/// 契约（三分支）：
+///   ① 裸文件名 control_file → CWD 绝对路径下的请求放行；
+///   ② 白名单外的目录仍然拒绝（安全语义不因容错而松动）；
+///   ③ 带目录的 control_file（绝对路径）行为不变。
+///
+/// 逆向验证：把裸文件名分支回退成 `dirs.push_back(".")` 后，用例①变红（拒绝），
+/// 用例②③不受影响；恢复后回绿。实测 2026-10-15。
+ST_TEST(capture_bare_control_file_allows_cwd_and_rejects_outside) {
+  // 本用例不能被 TokenFixture 复用：它不设 control_file，测不到裸文件名分支。
+  // 自建 fixture：control_file 为裸文件名，其他选项与 ServerFixture 一致。
+  TestHost host{};
+  host.root_.set_theme(st::ui::Theme::light());
+  auto panel = std::make_unique<Panel>();
+  panel->set_id("root-panel");
+  auto button = std::make_unique<Button>("确定");
+  button->set_id("btn-ok");
+  panel->add_child(std::move(button));
+  host.root_.set_content(std::move(panel));
+  host.root_.set_viewport({400, 300});
+  host.root_.layout();
+
+  const auto cwd_result = st::fs::current_dir();
+  ST_REQUIRE(cwd_result.has_value());
+  const std::string control_file = "ctl-bare-cwd-test.json";   // 裸文件名：无目录分隔符
+
+  st::control::Server server(host);
+  st::control::ServerOptions options;
+  options.port = 0;
+  options.control_file = control_file;
+  auto started = server.start(options);
+  ST_REQUIRE(started.has_value());
+  const std::uint16_t port = *started;
+  const std::string token = server.token();
+  std::atomic<bool> pumping{false};
+  std::thread pump([&server, &pumping] {
+    while (pumping) {
+      server.poll();
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  });
+  pumping = true;
+
+  Probe probe(port, token);
+  ST_REQUIRE(probe.call("hello").value("ok", false));
+
+  const auto cleanup = [&] {
+    pumping = false;
+    if (pump.joinable()) pump.join();
+    server.stop();
+  };
+
+  // ① CWD 绝对路径下的基线写入：放行（修复前：字面 "." 前缀比较不匹配，被拒）。
+  {
+    const std::string baseline = st::fs::join(*cwd_result, "st-bare-ctl-baseline.png");
+    Json write = Json::object();
+    write["path"] = baseline;
+    write["write_baseline"] = true;
+    const Json written = probe.call("visual.diff", write);
+    ST_CHECK(written.value("ok", false));
+    ST_CHECK(st::fs::exists(baseline));
+    (void)st::fs::remove_all(baseline);
+  }
+
+  // capture 显式 path 同口径：CWD 下放行（另一条白名单拦的通道）。
+  {
+    Json params = Json::object();
+    params["encode"] = "file";
+    params["path"] = st::fs::join(*cwd_result, "st-bare-ctl-shot.png");
+    const Json reply = probe.call("capture", params);
+    ST_CHECK(reply.value("ok", false));
+  }
+
+  // ② 白名单外的目录：仍然拒绝（安全语义不能松动）。
+  {
+    Json params = Json::object();
+    params["encode"] = "file";
+    params["path"] = "C:/Windows/system32/evil.png";
+    const Json reply = probe.call("capture", params);
+    ST_CHECK(!reply.value("ok", false));
+    if (reply.contains("error")) {
+      ST_CHECK_EQ(reply["error"].value("code", std::string()), "invalid");
+    }
+  }
+
+  // ③ 带目录的 control_file：行为不变（目录条目照旧、不在白名单的目录照拒）。
+  {
+    const auto dir = st::fs::make_temp_dir("st-bare-ctl-dir");
+    ST_REQUIRE(dir.has_value());
+    TestHost host2{};
+    host2.root_.set_theme(st::ui::Theme::light());
+    auto panel2 = std::make_unique<Panel>();
+    panel2->set_id("root-panel");
+    panel2->add_child(std::make_unique<Button>("确定"));
+    host2.root_.set_content(std::move(panel2));
+    host2.root_.set_viewport({400, 300});
+    host2.root_.layout();
+
+    st::control::Server server2(host2);
+    st::control::ServerOptions options2;
+    options2.port = 0;
+    options2.control_file = st::fs::join(*dir, "ctl.json");
+    auto started2 = server2.start(options2);
+    ST_REQUIRE(started2.has_value());
+    const std::uint16_t port2 = *started2;
+    const std::string token2 = server2.token();
+    std::atomic<bool> pumping2{false};
+    std::thread pump2([&server2, &pumping2] {
+      while (pumping2) {
+        server2.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+    });
+    pumping2 = true;
+
+    Probe probe2(port2, token2);
+    ST_REQUIRE(probe2.call("hello").value("ok", false));
+
+    // ③a 该目录下的基线写入：照旧放行（既有行为）。
+    {
+      const std::string baseline = st::fs::join(*dir, "baseline.png");
+      Json write = Json::object();
+      write["path"] = baseline;
+      write["write_baseline"] = true;
+      const Json written = probe2.call("visual.diff", write);
+      ST_CHECK(written.value("ok", false));
+    }
+    // ③b 裸文件名场景下才放的 CWD：在带目录场景中**不在白名单**，必须拒
+    // （不同控制文件形态的白名单互不串味——这是「行为不变」的负向钉子）。
+    {
+      Json write = Json::object();
+      write["path"] = st::fs::join(*cwd_result, "st-bare-ctl-stray.png");
+      write["write_baseline"] = true;
+      const Json reply = probe2.call("visual.diff", write);
+      ST_CHECK(!reply.value("ok", false));
+    }
+
+    pumping2 = false;
+    if (pump2.joinable()) pump2.join();
+    server2.stop();
+    (void)st::fs::remove_all(*dir);
+  }
+
+  cleanup();
 }
 
 /// 区域参数：**半形参数一律报错，不静默当全屏**。
@@ -1289,4 +1442,387 @@ ST_TEST(capabilities_list_matches_implemented_methods) {
     const bool unknown_method = message.find("未知方法") != std::string::npos;
     ST_CHECK(!unknown_method);
   }
+}
+
+// ————————————————————————————————————————————————————————————————————————————
+// `#` 选择器对含点 id 的容错（BACKLOG P2 2026-10-15）：整串 id 匹配优先
+// ————————————————————————————————————————————————————————————————————————————
+
+/// `Selector::parse` 按 CSS 语义把 `.` 当类型分隔符，而业务 id 常含点
+/// （git 面板的 `git-file-<path>` 等）——`find("#git-file-alpha.txt")` 被拆成
+/// `Id: git-file-alpha + Type: txt`，count 恒 0，调用方只看到「找不到元素」，
+/// 离真因很远（智能体会反复撞）。
+///
+/// 容错契约：`#xxx` 形态的纯 id 选择器先按整串试精确匹配，命中即用；
+/// 不命中退回 CSS 解析。三条断言分别钉住：
+///   ① 含点 id 经 `#` 整串找到；
+///   ② 不含点 id 行为不变（两条路径本就等价）；
+///   ③ 双失败时报错文案含属性写法指引（不再只有一句「找不到」）。
+/// 逆向验证：把 server.cpp 里整串优先分支临时回退（只走 CSS 解析）后，
+/// 用例①变红（count 恒 0）、用例③变红（报错变回静默 count:0），
+/// 用例②始终绿（它守的就是不变量）。实测 2026-10-15。
+ST_TEST(find_hash_selector_matches_id_containing_dots) {
+  ServerFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_REQUIRE(probe.call("hello").value("ok", false));
+
+  // 含点 id 的元素（git 面板业务 id 的形态）
+  {
+    Json create = Json::object();
+    create["type"] = "Button";
+    Json props = Json::object();
+    props["label"] = "alpha";
+    create["id"] = "git-file-alpha.txt";
+    create["props"] = props;
+    ST_REQUIRE(probe.call("ui.create", create).value("ok", false));
+  }
+
+  // ① 含点 id：`#` 整串容错命中（修复前拆成 Id: git-file-alpha + Type: txt，count 恒 0）
+  {
+    Json params = Json::object();
+    params["selector"] = "#git-file-alpha.txt";
+    const Json reply = probe.call("find", params);
+    ST_REQUIRE(reply.value("ok", false));
+    const Json& result = reply["result"];
+    // matches 非空作为前置（REQUIRES）：回退验证时它是空数组，若只 CHECK size 后面
+    // 的 [0] 索引会越界 abort 杀掉整个分片（PITFALLS 场景 2：分片静默失联）。
+    ST_REQUIRE(result["matches"].is_array() && !result["matches"].empty());
+    ST_CHECK_EQ(result["matches"].size(), 1U);
+    ST_CHECK_EQ(result["count"].get<std::uint64_t>(), 1U);
+    ST_CHECK_EQ(result.value("total", std::uint64_t{0}), 1U);
+    ST_CHECK_EQ(result["matches"][0].value("id", std::string{}), std::string("git-file-alpha.txt"));
+  }
+
+  // 与属性写法互为对照：同一元素，`[id=...]` 两条路径都能命中（语义一致性）
+  {
+    Json params = Json::object();
+    params["selector"] = "[id=git-file-alpha.txt]";
+    const Json reply = probe.call("find", params);
+    ST_REQUIRE(reply.value("ok", false));
+    ST_CHECK_EQ(reply["result"]["matches"].size(), 1U);
+  }
+
+  // ② 不含点 id：行为与修复前完全一致（夹具自带 #btn-ok）
+  {
+    Json params = Json::object();
+    params["selector"] = "#btn-ok";
+    const Json reply = probe.call("find", params);
+    ST_REQUIRE(reply.value("ok", false));
+    ST_REQUIRE(reply["result"]["matches"].is_array());
+    ST_CHECK_EQ(reply["result"]["matches"].size(), 1U);
+  }
+  // 不存在的无点 id：仍是「ok + count 0」的静默形态（既有调用方依赖它做存在性探询）
+  {
+    Json params = Json::object();
+    params["selector"] = "#btn-missing";
+    const Json reply = probe.call("find", params);
+    ST_REQUIRE(reply.value("ok", false));
+    ST_CHECK_EQ(reply["result"]["matches"].size(), 0U);
+    ST_CHECK_EQ(reply["result"]["count"].get<std::uint64_t>(), 0U);
+  }
+
+  // ③ 含点且整串不中、CSS 拆分也不中：报错文案必须含属性写法指引
+  {
+    Json params = Json::object();
+    params["selector"] = "#git-file-missing.txt";
+    const Json reply = probe.call("find", params);
+    // 先查 ok 再取 error（PITFALLS：nlohmann 缺键 operator[] const 是 UB）
+    ST_REQUIRE(!reply.value("ok", true));
+    ST_REQUIRE(reply.contains("error") && reply["error"].is_object());
+    const std::string message = reply["error"].value("message", std::string{});
+    ST_CHECK(message.find("[id=git-file-missing.txt]") != std::string::npos);
+    ST_CHECK(message.find("CSS") != std::string::npos);
+  }
+
+  // 混合选择器不受容错影响：`#` 后带空格/属性段的仍走 CSS 解析（本例按 Button 类型命中）
+  {
+    Json params = Json::object();
+    params["selector"] = "#btn-ok[enabled=true]";
+    const Json reply = probe.call("find", params);
+    ST_REQUIRE(reply.value("ok", false));
+    ST_CHECK_EQ(reply["result"]["matches"].size(), 1U);
+  }
+}
+
+ST_TEST(invoke_activate_item_reaches_menu_panel_by_id) {
+  // MenuPanel 动作面端到端（BACKLOG 3800）：`invoke("activate_item", item_id)`
+  // ——e2e 原本只能 `bounds.y + 16 + i*32` 数行序点击，菜单动态化（最近打开）后
+  // 行序会变，坐标法脆。这条用例钉住协议层三件事：
+  //   ① id 激活可达且真的派发了动作（on_activate 链）；
+  //   ② 无效 id 如实 `handled=false`（不假装成功、不报错——自动化据此分支）；
+  //   ③ 未命中后面板仍在（不关不派发，可重试）。
+  // 单元层的同链断言见 ui_menu_test.cpp 的
+  // `menu_panel_activate_item_by_id_drives_same_chain`。
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_REQUIRE(probe.call("hello").value("ok", false));
+
+  // 面板必须先“打开”：MenuPanel 本身是 overlay（dsl 的 menu_panel_overlay），
+  // 挂到 root 才能被 find 定位（UiRoot::find 会搜 overlay 树，但不会凭空造出它）。
+  auto menu = std::make_unique<st::ui::MenuPanel>(std::vector<st::ui::MenuItem>{
+      st::ui::MenuItem{.id = "new", .label = "新建"},
+      st::ui::MenuItem{.id = "sep", .label = "", .separator = true},
+      st::ui::MenuItem{.id = "recent-1", .label = "最近打开 1"}});
+  menu->set_id("demo-menu");  // 已有 id 会保留（assign_ids 只填空 id）
+  st::ui::MenuPanel* menu_ptr = menu.get();
+  fx.host.root_.add_overlay(std::move(menu), UiRoot::OverlayLayout::FillViewport);
+  fx.host.root_.layout();
+
+  std::vector<std::string> activated;
+  int closed = 0;
+  menu_ptr->on_activate = [&activated, menu_ptr](std::size_t index) {
+    activated.push_back(std::string(menu_ptr->item_id(index)));
+  };
+  menu_ptr->on_close = [&closed]() { ++closed; };
+
+  const auto invoke_action = [&probe](const char* id, const char* action,
+                                       const char* argument) -> bool {
+    Json params = Json::object();
+    params["id"] = id;
+    params["action"] = action;
+    params["argument"] = argument;
+    const Json reply = probe.call("invoke", params);
+    if (!reply.value("ok", false)) return false;
+    if (!reply.contains("result")) return false;
+    return reply["result"].value("handled", false);
+  };
+
+  // ① id 激活：动作真实发生（回调链走到，下标指向带 id 的那一项）。
+  ST_REQUIRE(invoke_action("demo-menu", "activate_item", "recent-1"));
+  ST_CHECK_EQ(activated.size(), 1U);
+  ST_CHECK_EQ(activated.front(), std::string("recent-1"));
+  // 与鼠标 Click 同链的关闭信号也到了（声明式 overlay 据此摘面板）。
+  ST_CHECK_EQ(closed, 1);
+
+  // ② 无效 id：如实 handled=false，不派发、不关闭。
+  ST_CHECK(!invoke_action("demo-menu", "activate_item", "no-such-item"));
+  ST_CHECK_EQ(activated.size(), 1U);
+  ST_CHECK_EQ(closed, 1);
+
+  // ③ 未命中后面板仍在：find 仍能定位（自动化可重试或改走下标路径）。
+  Json find_params = Json::object();
+  find_params["selector"] = "#demo-menu";
+  const Json found = probe.call("find", find_params);
+  ST_REQUIRE(found.value("ok", false));
+  ST_CHECK_EQ(found["result"]["matches"].size(), 1U);
+}
+
+ST_TEST(set_pending_paths_reaches_file_dialog_via_protocol) {
+  // FileDialog 多选选路的协议层端到端（BACKLOG 3895，MenuPanel 用例同模式）：
+  // `ui.create` 建对话框（工厂默认 Open）→ `set` multi_select/pending_paths →
+  // `get`/`invoke` 回带的 state 读回 `selected_paths` → `invoke confirm` 驱动
+  // `on_confirm_multiple` 整份交付。这条钉住的是「外部（智能体）与界面之间唯一的
+  // 通用通道」上能力可达——只留 C++ 接口等于“能力存在但外部用不到”。
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_REQUIRE(probe.call("hello").value("ok", false));
+
+  // 造临时文件树（同目录两个文件——多选的前提）。
+  auto made = st::fs::make_temp_dir("st-fd-proto");
+  ST_REQUIRE(made.has_value());
+  const std::string dir = *made;
+  (void)st::fs::write_text(st::fs::join(dir, "a.txt"), "abc");
+  (void)st::fs::write_text(st::fs::join(dir, "b.md"), "hello");
+  struct Clean { std::string d; ~Clean() { (void)st::fs::remove_all(d); } } clean{dir};
+
+  // 建对话框：FileDialog 工厂注册在 ui.create（dsl.cpp X 宏），挂 root 后可 find。
+  Json create_params = Json::object();
+  create_params["type"] = "FileDialog";
+  create_params["id"] = "the-dialog";
+  const Json created = probe.call("ui.create", create_params);
+  ST_REQUIRE(created.value("ok", false));
+  ST_CHECK_EQ(created["result"]["type"].get<std::string>(), std::string("FileDialog"));
+
+  // 回调挂接：元素在服务进程里，只能从测试宿主侧拿（find 同一棅树）。
+  st::ui::FileDialog* dialog =
+      dynamic_cast<st::ui::FileDialog*>(fx.host.root_.find("the-dialog"));
+  ST_REQUIRE(dialog != nullptr);
+  std::vector<std::string> delivered;
+  dialog->on_confirm_multiple = [&](const std::vector<std::string>& paths) {
+    delivered = paths;
+  };
+
+  const auto set_prop = [&probe](const char* id, const char* name,
+                                 const std::string& value) -> bool {
+    Json params = Json::object();
+    params["id"] = id;
+    Json props = Json::object();
+    props[name] = value;
+    params["props"] = props;
+    const Json reply = probe.call("set", params);
+    if (!reply.value("ok", false)) return false;
+    if (!reply.contains("result") || !reply["result"].contains("changed")) return false;
+    for (const auto& item : reply["result"]["changed"]) {
+      if (item.get<std::string>() == std::string(name)) return true;
+    }
+    return false;
+  };
+
+  // ① 开多选：changed 回带（apply_properties 只把元素声明的属性放行，
+  // multi_select 已在 property_names 里——这条同时钉住「声明即可达」）。
+  ST_CHECK(set_prop("the-dialog", "multi_select", "true"));
+  // ② 程序化多选选路：`|` 分隔两个路径。
+  const std::string a = st::fs::join(dir, "a.txt");
+  const std::string b = st::fs::join(dir, "b.md");
+  ST_CHECK(set_prop("the-dialog", "pending_paths", a + "|" + b));
+  // ③ get 快照读回：selected_paths 与注入一致（顺序保留）。
+  {
+    Json params = Json::object();
+    params["id"] = "the-dialog";
+    const Json got = probe.call("get", params);
+    ST_REQUIRE(got.value("ok", false));
+    ST_CHECK_EQ(got["result"]["props"]["selected_paths"].get<std::string>(),
+                a + "|" + b);
+  }
+  // ④ invoke confirm：handled=true，回带 state 里 selected_paths 仍在，
+  // 且 on_confirm_multiple 已收到整份清单（外部驱动 → 元素回调链全通）。
+  {
+    Json params = Json::object();
+    params["id"] = "the-dialog";
+    params["action"] = "confirm";
+    params["argument"] = "";
+    const Json reply = probe.call("invoke", params);
+    ST_REQUIRE(reply.value("ok", false));
+    ST_CHECK(reply["result"].value("handled", false));
+    ST_CHECK_EQ(reply["result"]["state"]["selected_paths"].get<std::string>(),
+                a + "|" + b);
+  }
+  ST_CHECK_EQ(delivered.size(), std::size_t{2});
+  ST_CHECK(delivered.size() == 2U && delivered[0] == a && delivered[1] == b);
+
+  // ⑤ 无效路径不静默：set 响应仍 ok（元素存在即 ok），但 changed 清单里
+  // **没有** pending_paths（apply_properties 只把真正应用的名字登记进去）——
+  // 调用方看 changed 就能判别“没改到”，不会把失败误读成成功。
+  // ⚠ 这里同时是一条已知缺口（见终报）：set 对“声明过但 set_property 拒了”的
+  // 属性**没有顶层 error**（与 invoke 的 handled=false 红线不同口径）。
+  {
+    Json params = Json::object();
+    params["id"] = "the-dialog";
+    Json props = Json::object();
+    props["pending_paths"] = st::fs::join(dir, "nope.txt");
+    params["props"] = props;
+    const Json reply = probe.call("set", params);
+    ST_REQUIRE(reply.value("ok", true));
+    bool in_changed = false;
+    if (reply.contains("result") && reply["result"].contains("changed")) {
+      for (const auto& item : reply["result"]["changed"]) {
+        if (item.get<std::string>() == std::string("pending_paths")) in_changed = true;
+      }
+    }
+    ST_CHECK(!in_changed);   // 不在 changed 里 = 没改到，调用方可判别
+  }
+}
+
+ST_TEST(invoke_confirm_reaches_directory_mode_file_dialog_via_protocol) {
+  // 选目录模式的协议层端到端（BACKLOG 3895 后半，mode 写侧补齐后改纯协议路径）：
+  // `ui.create` 建 Open（工厂无参只能建 Open）→ `set mode=directory` **纯协议切到
+  // Directory 模式** → `set pending_path` 指向目录 → `invoke confirm` 交出**目录本身**。
+  // 这条钉住“换工作区”类自动化（gbcode open_folder_dialog）的协议面可达性。
+  //（旧版用 C++ 侧 `FileDialog::make(Directory)` 挂载——那是因为 mode 无写侧；
+  // 写侧接通后，C++ 侧挂载反而是被测缺口本身未覆盖的盲区。）
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_REQUIRE(probe.call("hello").value("ok", false));
+
+  auto made = st::fs::make_temp_dir("st-fd-dir-proto");
+  ST_REQUIRE(made.has_value());
+  const std::string dir = *made;
+  (void)st::fs::create_directories(st::fs::join(dir, "sub"));
+  struct Clean { std::string d; ~Clean() { (void)st::fs::remove_all(d); } } clean{dir};
+
+  // FileDialog 是模态浮层形态：ui.create 协议建 Open 模式实例（工厂无参构造），
+  // 挂 root 为 overlay（与旧版 C++ 侧挂载同一条 overlay 路）。
+  {
+    Json params = Json::object();
+    params["type"] = "FileDialog";
+    params["id"] = "dir-dialog";
+    const Json reply = probe.call("ui.create", params);
+    ST_REQUIRE(reply.value("ok", false));
+  }
+  // ⓪ set mode=directory：纯协议切模式（本用例的主断言对象）。
+  // changed 里必须出现 mode（apply_properties 只登记真正应用的名字）。
+  {
+    Json params = Json::object();
+    params["id"] = "dir-dialog";
+    Json props = Json::object();
+    props["mode"] = "directory";
+    params["props"] = props;
+    const Json reply = probe.call("set", params);
+    ST_REQUIRE(reply.value("ok", false));
+    bool mode_changed = false;
+    for (const auto& item : reply["result"]["changed"]) {
+      if (item.get<std::string>() == std::string("mode")) mode_changed = true;
+    }
+    ST_CHECK(mode_changed);
+  }
+  // ⓪' 无效模式串不静默：不在 changed 里（拼写错不猜，与 pending_paths 的
+  // 无效路径同口径）。
+  {
+    Json params = Json::object();
+    params["id"] = "dir-dialog";
+    Json props = Json::object();
+    props["mode"] = "directry";   // 故意拼错
+    params["props"] = props;
+    const Json reply = probe.call("set", params);
+    ST_REQUIRE(reply.value("ok", true));
+    bool in_changed = false;
+    if (reply.contains("result") && reply["result"].contains("changed")) {
+      for (const auto& item : reply["result"]["changed"]) {
+        if (item.get<std::string>() == std::string("mode")) in_changed = true;
+      }
+    }
+    ST_CHECK(!in_changed);
+  }
+  // get 读回 mode 确认切换落位（读侧与写侧同口径：小写 `directory`）。
+  {
+    Json params = Json::object();
+    params["id"] = "dir-dialog";
+    const Json got = probe.call("get", params);
+    ST_REQUIRE(got.value("ok", false));
+    ST_CHECK_EQ(got["result"]["props"]["mode"].get<std::string>(),
+                std::string("directory"));
+  }
+
+  // 找回对话框接上确认回调（与 set_pending_paths 用例同手法：ui.create 后元素
+  // 归 UiRoot 管，find 同一棅树拿到裸指针，不断所有权）。
+  auto* raw = dynamic_cast<st::ui::FileDialog*>(fx.host.root_.find("dir-dialog"));
+  ST_REQUIRE(raw != nullptr);
+  std::string confirmed;
+  raw->on_confirm = [&](const std::string& path) { confirmed = path; };
+
+  // ① set pending_path（目录路径）：changed 回带（进入该目录）。
+  {
+    Json params = Json::object();
+    params["id"] = "dir-dialog";
+    Json props = Json::object();
+    props["pending_path"] = st::fs::join(dir, "sub");
+    params["props"] = props;
+    const Json reply = probe.call("set", params);
+    ST_REQUIRE(reply.value("ok", false));
+    bool in_changed = false;
+    for (const auto& item : reply["result"]["changed"]) {
+      if (item.get<std::string>() == std::string("pending_path")) in_changed = true;
+    }
+    ST_CHECK(in_changed);
+  }
+  // ② get 读回 directory 就是目标目录。
+  {
+    Json params = Json::object();
+    params["id"] = "dir-dialog";
+    const Json got = probe.call("get", params);
+    ST_REQUIRE(got.value("ok", false));
+    ST_CHECK_EQ(got["result"]["props"]["directory"].get<std::string>(),
+                st::fs::join(dir, "sub"));
+  }
+  // ③ invoke confirm：交出目录本身（不是拼接路径）。
+  {
+    Json params = Json::object();
+    params["id"] = "dir-dialog";
+    params["action"] = "confirm";
+    params["argument"] = "";
+    const Json reply = probe.call("invoke", params);
+    ST_REQUIRE(reply.value("ok", false));
+    ST_CHECK(reply["result"].value("handled", false));
+  }
+  ST_CHECK_EQ(confirmed, st::fs::join(dir, "sub"));
 }

@@ -330,6 +330,8 @@ void Toast::apply_theme(const Theme& theme) {
   style_.font_size = metrics.font_base;
   style_.text_align = TextAlign::Start;
   style_.padding = math::Insets{kAccentWidth + kPaddingX, 0.0f, kPaddingX, 0.0f};
+  // 显式排版覆盖最后回放（与 Text/Button 同口径）：消息文本走 paint_text（读 style_）。
+  apply_text_overrides();
 }
 
 void Toast::measure(const RenderContext& context, const Constraints& constraints) {

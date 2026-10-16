@@ -7,9 +7,11 @@
 #include "st/test/test.hpp"
 #include "st/ui/actions.hpp"
 #include "st/ui/components/basic.hpp"
+#include "st/ui/components/feedback.hpp"
 #include "st/ui/components/input.hpp"
 #include "st/ui/components/list.hpp"
 #include "st/ui/components/markdown_view.hpp"
+#include "st/ui/components/overlay.hpp"
 #include "st/ui/components/scroll.hpp"
 #include "st/ui/components/select.hpp"
 #include "st/ui/components/table.hpp"
@@ -1466,6 +1468,155 @@ ST_TEST(dsl_box_props_survive_theme_reapply) {
   ST_REQUIRE(dark_hex != nullptr);
   ST_CHECK_EQ(dark_err->text_color, tone_color(Theme::dark(), Tone::Danger).to_css());
   ST_CHECK_EQ(dark_hex->text_color, std::string("#d13b40"));   // 字面色值不随主题变
+}
+
+// ── 排版覆盖扩展：其余会画字的组件（BACKLOG 3901-3905）─────────────────────
+//
+// 四先例（Text/Heading/IconView/Button）之后，Badge/Chip/Avatar/Tooltip/Toast/
+// Table/Tree/ListItem/Tabs/KeyValueRow/Select/Checkbox 这些"会画字"的组件陆续接上
+// 了 apply_text_overrides 的末尾回放（各组件的 apply_theme 里，与四先例同口径）。
+//
+// 与上面两用例同判据：① 设了 color/size/weight 后从视觉树读回生效；② 多帧重组后
+// 仍生效（防"首帧对、下一帧被主题盖回"）。
+//
+// ⚠ 视觉树只在 `semantics_text()` 非空的层上报文本三件（见 `Element::collect_visual`），
+// 所以读回口依赖各组件的语义文本非空：Badge/Chip/Tooltip/Toast/ListItem 天然非空；
+// Table 的语义文本是列名拼接、Tree 是行数、Tabs 是活动标签——它们的 style 读回
+// 走同一通道（文本三件挂在组件自身的 VisualNode 上）。
+
+/// 各会画字组件同页声明：每件给一个显式覆盖，验证落到视觉树。
+struct TypoOverridesPage : Component {
+  State<int> noise{0};
+
+  void build(Composer& c) override {
+    column(c, {.gap = 4.0F, .id = "typo-page"}, [&] {
+      // ⚠ 指定初始化器按声明顺序：color/hex_color/size/weight 在 id/key 之前。
+      badge(c, "新", {.hex_color = "#d13b40", .id = "ov-badge"});
+      list(c, {{.key = "k1", .label = "列表项一", .subtitle = ""}}, {},
+           {.hex_color = "#d13b40", .size = 18.0F, .id = "ov-list"});
+      table(c, {{.label = "列", .width = 100.0F}}, {{"单元格"}}, {},
+            {.hex_color = "#d13b40", .size = 20.0F, .id = "ov-table"});
+      tree(c, {{.key = "n1", .label = "树节点", .is_dir = false}}, {}, {},
+           {.hex_color = "#d13b40", .size = 16.0F, .id = "ov-tree"});
+      (void)noise.value();
+    });
+  }
+};
+
+ST_TEST(dsl_box_props_reach_badge_list_table_tree) {
+  UiRoot root;
+  root.set_viewport({400.0F, 400.0F});
+  auto page = std::make_shared<TypoOverridesPage>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  root.layout(true);
+
+  // 多帧重组（防首帧对、下一帧被主题盖回）
+  for (int frame = 0; frame < 3; ++frame) {
+    page->noise.set(page->noise.value() + 1);
+    (void)host->tick();
+    root.layout(true);
+  }
+
+  const VisualNode tree = root.visual_tree();
+  const VisualNode* badge_node = find_visual(tree, "ov-badge");
+  ST_REQUIRE(badge_node != nullptr);
+  ST_CHECK_EQ(badge_node->text_color, std::string("#d13b40"));
+
+  // List 的字在项上：容器层的覆盖经 List::apply_theme_to_items 下放到每个项
+  //（找项的自动 id：List 的子项按 key 命名）。直接按 key 找项元素再读视觉树。
+  const auto find_element = [](auto&& self, const Element& element,
+                               const std::string& key) -> const Element* {
+    if (element.key() == key) return &element;
+    for (std::size_t index = 0; index < element.child_count(); ++index) {
+      if (const Element* hit = self(self, *element.child_at(index), key)) return hit;
+    }
+    return nullptr;
+  };
+  ST_REQUIRE(root.content() != nullptr);
+  const Element* list_item = find_element(find_element, *root.content(), "k1");
+  ST_REQUIRE(list_item != nullptr);
+  // 读回口用最终值（get_property("color") = style_.color，镜像后项的 apply_theme
+  // 已回放进 style_——这才证明下放链真的走完，而不只是镜像到了 extras）。
+  const auto item_color = list_item->get_property("color");
+  ST_REQUIRE(item_color.has_value());
+  ST_CHECK_EQ(*item_color, std::string("#d13b40"));
+  const auto item_size = list_item->get_property("size");
+  ST_REQUIRE(item_size.has_value());
+  ST_CHECK(std::abs(std::stof(*item_size) - 18.0F) < 0.05F);
+
+  // Table/Tree：组件自身的视觉树读回（字号覆盖 + 颜色覆盖）
+  const VisualNode* table_node = find_visual(tree, "ov-table");
+  const VisualNode* tree_node = find_visual(tree, "ov-tree");
+  ST_REQUIRE(table_node != nullptr);
+  ST_REQUIRE(tree_node != nullptr);
+  ST_CHECK(std::abs(table_node->font_size - 20.0F) < 0.001F);
+  ST_CHECK(std::abs(tree_node->font_size - 16.0F) < 0.001F);
+}
+
+/// Tooltip/Toast/Tabs/KeyValueRow/Select：C++ 侧直接设覆盖（它们不走 DSL 包装
+/// 的主路径，Tooltip/Toast 经 overlay 通道，Tabs/Select/KeyValueRow 有独立入口），
+/// 断言同一件事：设了 color/size 后读回生效。
+ST_TEST(typo_overrides_reach_cpp_sided_components) {
+  // Tooltip：设字色/字号的显式覆盖 → apply_theme 回放进 style_，读回。
+  Tooltip tooltip{"提示"};
+  tooltip.set_text_color(st::math::Color{0xd1, 0x3b, 0x40, 0xff});
+  tooltip.set_text_size(16.0F);
+  tooltip.apply_theme(Theme::light());
+  ST_CHECK_EQ(tooltip.style().color.to_css(), std::string("#d13b40"));
+  ST_CHECK(std::abs(tooltip.style().font_size - 16.0F) < 0.001F);
+
+  // Toast：同理（覆盖回放，且不被主题的 font_base 盖回）。
+  Toast toast("已保存");
+  toast.set_text_color(st::math::Color{0xd1, 0x3b, 0x40, 0xff});
+  toast.set_text_size(18.0F);
+  toast.apply_theme(Theme::light());
+  ST_CHECK_EQ(toast.style().color.to_css(), std::string("#d13b40"));
+  ST_CHECK(std::abs(toast.style().font_size - 18.0F) < 0.001F);
+
+  // Tabs：字号覆盖落到 style_（标签文本从 style_.font_size 取）。
+  Tabs tabs;
+  tabs.sync_tabs({Tabs::Tab{"t1", "标签一", false, false}});
+  tabs.set_text_size(17.0F);
+  tabs.apply_theme(Theme::light());
+  ST_CHECK(std::abs(tabs.style().font_size - 17.0F) < 0.001F);
+
+  // KeyValueRow：字号覆盖落到 style_（measure/paint 从 style_.font_size 取）。
+  KeyValueRow row{"键", "值"};
+  row.set_text_size(13.0F);
+  row.apply_theme(Theme::light());
+  ST_CHECK(std::abs(row.style().font_size - 13.0F) < 0.001F);
+  ST_CHECK_EQ(row.text_color_override().has_value(), false);   // 未设色：意图侧干净
+
+  // Select：覆盖回放（字色存意图侧，字号落 style_）。
+  Select select;
+  select.set_text_size(15.0F);
+  select.apply_theme(Theme::light());
+  ST_CHECK(std::abs(select.style().font_size - 15.0F) < 0.001F);
+
+  // Badge（DSL 包装之外再来一次 C++ 侧直证：覆盖回放后从视觉树读回）。
+  Badge badge{"徽"};
+  badge.set_text_color(st::math::Color{0xd1, 0x3b, 0x40, 0xff});
+  badge.set_text_weight(FontWeight::Bold);
+  badge.apply_theme(Theme::light());
+  ST_CHECK_EQ(badge.style().color.to_css(), std::string("#d13b40"));
+  ST_CHECK_EQ(static_cast<int>(badge.style().font_weight), static_cast<int>(FontWeight::Bold));
+
+  // Avatar（字号由尺寸推导，覆盖语义仍成立：显式字号盖过推导值）。
+  Avatar avatar{"沈"};
+  avatar.set_text_size(20.0F);
+  avatar.apply_theme(Theme::light());
+  ST_CHECK(std::abs(avatar.style().font_size - 20.0F) < 0.001F);
+
+  // Checkbox（toggle 家族）：sync_style 里回放（字号落到 style_，多帧稳定）。
+  Checkbox checkbox{"勾选"};
+  checkbox.set_text_size(16.0F);
+  checkbox.set_text_color(st::math::Color{0xd1, 0x3b, 0x40, 0xff});
+  RenderContext context{Theme::light(), nullptr, 0.0};
+  const Constraints unbounded{};
+  checkbox.measure(context, unbounded);   // 内部 sync_style → 回放
+  ST_CHECK(std::abs(checkbox.style().font_size - 16.0F) < 0.001F);
+  ST_CHECK_EQ(checkbox.style().color.to_css(), std::string("#d13b40"));
 }
 
 // ── `for_each` 的 index 参数（重复文案的列表项不再串台）────────────────────────

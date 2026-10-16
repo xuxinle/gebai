@@ -379,7 +379,10 @@ class MarkdownView : public Element {
 
   // —— 绘制（`paint_content` 的分工；颜色在此时按主题解析）——
   [[nodiscard]] static auto role_of_token(st::md::TokenKind kind) -> ColorRole;
-  [[nodiscard]] static auto color_of(const Theme& theme, ColorRole role) -> math::Color;
+  /// 取色。非 static：正文角色（`ColorRole::Text`）要读本元素的显式文字色覆盖
+  ///（`text_color_override`/`text_tone_override`，DSL `BoxProps` 的落点）——
+  /// 没有 this 拿不到；两个调用点都在 `paint_content` 体系的成员函数里。
+  [[nodiscard]] auto color_of(const Theme& theme, ColorRole role) const -> math::Color;
   /// 绘制文本（端口无字重通道：Bold/SemiBold 以亚像素偏移二次绘制近似）。
   static void draw_text_weighted(const TextPort& port, raster::Surface& canvas,
                                  std::string_view text, math::Point origin, float size,

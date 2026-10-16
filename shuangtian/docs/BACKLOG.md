@@ -173,6 +173,36 @@
 > 计数被压成“已…”、确认框按钮无稳定 id、标签名里的点在 CSS 选择器里被当类分隔符）。
 > 下面三条是接下去的路。
 
+### P1：测试产物缓存不重扫新增源文件 + 陈旧链接防护（2026-10-16 第 40 轮破案衍生）
+
+**现象 A（缓存不重扫）**：`build/release` 目录是 10-15 12:45 旧产物，今日新增
+`tests/gallery_component_parity_test.cpp` 后跑 `st build --profile release`，报
+「重编 0 / 命中缓存 139」并直接重链旧 obj——**新 TU 从未编译**，产出的
+`st_tests.exe` 不含新用例（过滤运行 0 匹配），且「全绿」极具迷惑性（1447 passed
+是旧测试集的绿）。根因疑在构建 manifest 缓存对 `tests/*.cpp` 通配的展开结果不失效。
+
+**现象 B（陈旧链接静默崩溃）**：改共享头（`gallery_exhibits.hpp` 的 `inline constexpr
+std::array` 尺寸 30→34）后只跑 `st build gallery`（指定目标不链测试），旧
+`st_tests.exe` 里按旧尺寸编译的符号照常链接——运行期 `std::bad_alloc` /
+`0xC0000005`，编译期零告警；六跳排查才定位（详见 `.evolve/troubleshooting.md`）。
+
+**修法方向**：①构建系统级——头文件依赖变更时传递失效到所有引用目标（含
+`st_tests`）；或至少 `st build` 后提示「测试二进制未重链」。②缓存命中日志区分
+「未变更」与「未扫描」。验收：改共享头尺寸后仅跑 `st build <target>`，`st_tests` 能自动重编或明确报出。
+
+### P1：git_service 家族分片并行随机误伤（2026-10-16 第 40 轮观察）
+
+**现象**：`st test` 全量（16 分片并行）时 git_service 家族随机失败——不同轮次
+2→5→17 例不等，失败名单不固定；17 例逐个单跑全绿（`st test <name>` 三轮验证）。
+历史上 29 轮已记录过同族并行误伤，今晨规模扩大。
+
+**推测根因**：该家族用临时目录+git 子进程（磁盘/句柄竞争），16 进程并行时
+子进程创建或临时目录操作随机超时。
+
+**修法方向**：①该族用例打「环境敏感」标记进慢/隔离集（`--slow` 跳过）；
+②或分片调度同族用例集中到单片；③或用例内部重试一次。验收：连续 10 轮
+`st test` 全量不再出现该族随机红。
+
 ### P1：打破 `core → ui` 的传递依赖（工具链别再吞渲染链）
 
 **现象**：`st`（构建/测试/lint/依赖管理，**一行渲染都不跑**）的单元集里有一半是渲染层
@@ -272,15 +302,33 @@
 **实时播放不够**。两条路：常驻进程 + 管道（要处理进程死了/管道堵了/卡帧），
 或链接 libavcodec（要解决依赖与交叉编译，见 `video.hpp` 的对比表）。
 
-### P2：POSIX 侧 `process::run` 的 env 覆盖语义与 Windows 不一致
+### P2：示例：caiyun 真实视频素材导入
+
+现状：`st::ext::VideoDecoder` 已落地（v0.1.7）但**全库零使用**，caiyun 的素材
+仍全部是程序化生成片段（诚实边界注释已同步为这个事实）。导入真实视频要的
+不是一行解码调用：导入时读元信息（时长/分辨率/音轨）→ 缩略图与时间轴片段
+卡的帧预览（抽帧 ~30ms/帧，必须缓存）→ 播放预览的降级策略（合成素材的
+确定性 e2e 判据不能丢）。涉及 Project 模型扩一类「真实视频片段」（不可用
+Generator 渲染）。为什么值得做：它是解码器能力的唯一应用示范位，也是
+「能力存在但外部用不到」这条反推链的闭环；但要先定缩略图缓存策略再动工。
+
+### P2：POSIX 侧 `process::run` 的 env 覆盖语义与 Windows 不一致（已修，2026-10-15 P1 落地单）
 
 **现象**（分片口径统一轮实测发现）：`src/core/platform_process.cpp` POSIX 分支把
 `options.env` **追加**在 `environ` 之后（同名键出现两次，`getenv` 取前者⇒覆盖静默失效）；
 Windows 分支 `build_environment` 正确去重覆盖。影响面：覆盖**已存在**键时 POSIX 静默失效
 （新增键两平台都对）；`run_shards` 下发 `ST_JUNIT_XML` 是新键故未爆。
-**方向**：POSIX 分支改为与 Windows 同语义——先收集 environ 中未被 overrides 命中的键，
-再拼接 overrides；需同步一条跨平台回归（Windows 本机可验覆盖语义，POSIX 侧需在
-Linux/WSL 上验）。**附带项（已修，2026-10-15 同日）**：空分片「JUnit 报告写入失败」噪声——`test_main.cpp`
+**修复**：env 拼接逻辑提炼为平台无关纯函数（`src/core/process_env.hpp` 与
+`src/core/process_env.cpp`）
+（`merge_environment`：先剔除 base 中被 overrides 命中的键再拼接；键匹配大小写
+敏感性参数化——Windows 不敏感/POSIX 敏感，两平台语义差异显式钉住而非磁巧一致）；
+POSIX 分支 `run()` 改调它（`case_insensitive=false`），Windows `build_environment`
+语义不动、注释指向同一事实源。回归 `tests/core_process_env_test.cpp` 六用例
+（覆盖生效/新增键/两平台大小写语义/畸形条目与空 overrides 透传/键提取）——
+**两平台本机都能跑**（提炼即为了这个：Windows 全量 st test 验语义，Linux/WSL
+轮验同用例同语义）；逆向验证口径：注释掉 `merge_environment` 的剔除行即回追加式，
+「覆盖生效/不敏感剔除」两组必红。
+**附带项（已修，2026-10-15 同日）**：空分片「JUnit 报告写入失败」噪声——`test_main.cpp`
 把 `write_junit` 返回 0 的两种含义（0 用例 vs 写失败）混为一谈；修复后只报后者，
 回归用例 `empty_shard_writes_no_junit_and_reports_no_failure`（逆向验证变红确认），
 `--test-jobs 4` 空片输出噪声实测消失。
@@ -352,6 +400,31 @@ A/B 的必要性：阈值只要还挂在「单点标定」上，无论标在哪�
 
 **属公共接口变更**（`include/st/raster/surface.hpp` + 全部后端）→ 只分析不落地，
 待人工审阅接口形态后再实施。
+
+## 已完成（2026-10-15：裸文件名控制文件的落盘白名单修复，P2 落地）
+
+> 原 P2 条目（本文件 3757 行附近）已落地：`default_capture_dirs` 对无分隔符的
+> control_file 不再放行字面 `"."`（客户端请求的是绝对路径，前缀比较永远不匹配，
+> 该目录下全部拒绝），改为展开为**进程 CWD 的绝对路径**（`fs::current_dir()`，
+> `generic_u8string()` 正斜杠口径，与 `capture_path_allowed` 归一化比较同口径）。
+> 顺带：拒绝报错文案改为附**实际白名单内容**（旧文案不指向真因；新文案列出
+> 具体目录，裸文件名场景能直接看到 CWD 绝对路径）。
+> 安全语义不变：带目录的 control_file 行为照旧；白名单外目录照拒。
+> 证据：`tests/core_basics_test.cpp`（`has_cwd` / `!has_literal_dot` 断言）+
+> `tests/control_protocol_test.cpp` 的 `capture_bare_control_file_allows_cwd_and_rejects_outside`
+> （三分支：①裸文件名 CWD 下放行 ②白名单外照拒 ③带目录形态行为不变）；
+> 逆向验证：回退展开逻辑后①变红（拒）、恢复后回绿，实测 2026-10-15。
+
+## 已完成（2026-10-15：find 的 `#` 选择器含点 id 容错，P2 落地）
+
+> 原 P2 条目（本文件 3698 行附近）已落地：`find` 对 `#xxx` 形态的纯 id 选择器
+> 先按整串试精确 id 匹配（`ui::Selector::exact_id`，不 CSS 拆分），命中即用；
+> 不命中退回 CSS 解析；两者都不中且 `#` 后含 `.`/`:` 时报错文案附
+> `[id=...]` 属性写法指引（不再只有一句「找不到」）。
+> 不含点 `#id` 两条路径本就等价（精确 id 匹配），行为零变化。
+> 证据：`tests/control_protocol_test.cpp` 的 `find_hash_selector_matches_id_containing_dots`
+> （48 断言，逆向验证回退容错后用例①③变红）；文档警示见 `DESIGN.md` §6.3 与
+> `docs/PITFALLS.md` 场景 5。
 
 ## 已完成（2026-10-15：分片与全跑的口径统一，P2 落地）
 
@@ -3335,6 +3408,12 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
 ### 从其它章归位（本次整理；原章声明已失效，条目内容未改）
 
 - [ ] **字形笔位被 `lround` 取整 → 字距随相位跳**（指导书 §1.1）。
+  > ⚠ 回滚记（2026-10-16）：曾落地「相位档」修复（eb86f72）并在此标 x，但真窗口
+  > 观感**变差**（用户实测）——量化档位在小字上产生字形形状随档位微变的抖动感，
+  > 墨心 σ 改善未能兑换成人眼收益。已整体回滚（代码/测试/量尺/文档），恢复待做。
+  > 重做前必读：DESIGN §4.3.3 曾记录的实现铁律（平移在 grid_fit 后/锢定不变式/
+  > phase 进缓存键）与 `.evolve/backup-v22-full-workspace.patch` 里的完整实现——
+  > 下一次尝试要么拿到可信参照后再改，要么改用分档位图缓存以外的路径。
   `TextRenderer::draw` 的落点是 `x_begin = lround((origin.x + run.x) * device_scale) + offset_x`：
   整形保留的浮点笔位在**绘制时被抹掉**。实测（`tools/glyph_phase_probe.cpp`，1.5× DPI / 13.5px /
   4 段真实 UI 串 / 200 字形）：
@@ -3345,19 +3424,6 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
   | 字形被取整挪动量（均值） | **0.235px**（均匀相位理论值 0.250px） |
   | **相邻字距误差标准差** | **0.406px**（最坏 **0.905px**） |
   | 保留 1/4 像素相位后 | ≤ 0.125px； 1/64 相位 ≤ 0.008px |
-
-  即：UI 正文的字距在 ±0.4 物理像素上**抖动**（= 0.27 逻辑 px @1.5×），
-  这是小字「不够齐」的直接来源，且与 gamma/拟合无关（两个不同层）。
-
-  **实施要点**（下一轮）：
-  1. 位图原点按**相位档**偏移（1/4 像素 → 4 档），并把该相位并入缓存键；
-  2. 位图的**物理像素网格锢定不变式**（§4.3.3：`origin % supersample == 0`）必须保住，
-     否则会反过来把墨迹糊开——相位应体现在**偏移量**上而不是破坏格点对齐；
-  3. 亚像素模式下相位档改为 1/3 像素（与子像素列同构）；
-  4. 回归：字距误差标准差 < 0.15px；同一字形在不同相位下**形状不变**（只是平移）。
-
-  > 缓存代价：相位档从 1 → 4，字形位图条目 ×4。当前预算 24 MiB / 32768 项，
-  > 对一屏约 2000 字形而言仍宽裕，但要跟着量一次（`tools/text_weight_cost.cpp` 同法）。
 
 - [ ] **下一步（方向已探明）**：正确方向是**加墨 + 拉陡过渡带**（γ<1 一侧，即 ClearType/Skia
   `SkMaskGamma` 干的事）。实测 γ=0.7：实心占比 10.8% → **11.8%**、过渡带 13.1% → **12.4%**
@@ -3695,7 +3761,7 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
 
 ## P2
 
-- [ ] **控制通道 find 的 `#` 选择器对含点 id 失配（文档/容错双缺口）**（2026-10-15 Windows
+- [x] **控制通道 find 的 `#` 选择器对含点 id 失配（文档/容错双缺口）**（2026-10-15 Windows
   全面测试轮发现）：`ui::Selector` 按 CSS 语义把 `.` 当类分隔符，而业务 id 常含点
   （`git-file-<path>`、`tasks/ListItem@task-42`）——`find("#git-file-alpha.txt")`
   被拆成 `Id: git-file-alpha + Type: txt`，count 恒 0，报错却是「找不到元素」
@@ -3703,32 +3769,61 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
   方向：文档明确警示；或 find 时对 `#` 前缀的整体做「完整 id 匹配优先」的容错
   （先试整串，再退 CSS 解析）。为什么值得做：智能体/脚本最容易写 `#id`，
   而含点 id 在 git 面板里是常态，这个坑会反复撞。
+  → **已落地（2026-10-15 演进轮）**：整串优先容错 + 报错指引 + 文档警示，
+  详见上方「已完成」段与回归用例 `find_hash_selector_matches_id_containing_dots`。
 
-- [ ] **控制文件为裸文件名（无目录）时落盘白名单的 `.` 条目形同虚设**（2026-10-15 同轮）：
+- [x] **declarative_host 其余 `__d_*` 桥同族 `mark_dirty_all` 冗余核实（P1 只分析轮）**
+  （2026-10-15 第 13 轮，第 9 轮 3636500 的顺藤摸瓜收尾）：对
+  `__d_set_root` / `__d_mount` / `__d_move` / `__d_clear_slot` 逐桥取证，
+  **结论：无冗余——四个桥尾部均无 `mark_dirty_all`，无需落地改动**。
+  逐桥证据（安全链与第 9 轮判据同构：逐属性标脏 / 结构操作自带 layout 脏 /
+  重排几何签名兑底 / set_content 自带整帧）：
+  - `__d_set_root`（declarative_host.cpp:104-122）：单根分支尾部
+    `UiRoot::set_content`（ui_root.cpp:44-55）**自带 mark_dirty_all**（这处整帧
+    属实，且是首帧语义所需）；子树分支 `insert_child` → Element::insert_child
+    （element.cpp:234 标脏）。注意与 `__d_unmount`/`__d_apply_batch` 相反：
+    此处整帧锤子**长在下游 `set_content` 里而非桥内**，下游自身服务全框架语义
+    （UIA 挂树即换根），桥内本就没调，无冗余可删。
+  - `__d_mount`（declarative_host.cpp:128-156）：尾部仅 `insert_child` →
+    Element::insert_child 尾部 `mark_layout_dirty`（element.cpp:234）→
+    `mark_layout_dirty` 沿 parent 链冒泡到根（element.cpp:431-438）→
+    `UiRoot::layout` 尾部几何签名比对（ui_root.cpp:150-175）决定是否整帧——
+    首挂/增项几何必变⇒自动整帧，与第 9 轮 `__d_unmount` 的安全链完全同构。
+    组件覆写（ScrollView:170 / TitleBar::insert_child→add_trailing:241-247 /
+    WindowFrame:125）全部转调 `Element::insert_child` 兜底，无旁路。
+  - `__d_move`（declarative_host.cpp:261-296）：幂等护栏（element.cpp 同源逻辑
+    返回 false）之后**尾部显式 `parent->mark_layout_dirty()`**（declarative_host.cpp:294
+    ——拆下待插期间 parent 已达整帧脏，此为局部收紧非冗余）；下游
+    remove_child + insert_child 各自标脏双保险，几何签名兑底。
+  - `__d_clear_slot`（declarative_host.cpp:246-257）：尾部仅
+    `host_element->remove_child(...)` → Element::remove_child 自带
+    `mark_layout_dirty`（element.cpp:244），与第 9 轮删除 `__d_unmount` 尾部
+    锤子的那条安全链逐字同构。
+  为什么值得核实：第 9 轮 grep 只见 `__d_apply_batch`/`__d_unmount` 两处命中，
+  但 `__d_set_root`/`__d_clear_slot` 走 `set_content`/`remove_child` 之外的
+  结构路径（子树形态 insert/remove + 单根 set_content），需逐一确认下游标脏；
+  现已逐桥确认闭环。附带核对：其余 `__d_` 桥中 `__d_create`（建而不挂，无树变）、
+  `__d_slot_root`（纯读）、`__d_set_direction`（尾部自带 `mark_layout_dirty`）
+  均无整帧锤子；`src/ui/declarative_host.cpp` 全文件 `mark_dirty_all` **零命中**
+  （仅存两条 2026-10-15 历史注释），全仓存活点（set_theme/set_text_port/
+  set_viewport/overlay 增删/DPI 切换）均为真全局变更的正当语义。只分析轮，
+  无代码改动（免回归），证据链与结论见 `.evolve/ledger.md` 第 13 轮。
+
+- [x] **控制文件为裸文件名（无目录）时落盘白名单的 `.` 条目形同虚设**（2026-10-15 同轮）：
   `default_capture_dirs` 对无分隔符的 control_file 放行字面 `"."`，
   而客户端请求的是绝对路径——前缀比较永远不匹配（该目录下全部拒绝）。
   方向：无分隔符时用进程 CWD 的绝对路径展开（`fs::current_dir()` + "/"）。
   为什么值得做：智能体会话里 ctl.json 常直接写在 CWD，视觉断言基线写入
   会莫名被拒，而报错文案不会指向这个原因。
+  → **已落地（2026-10-15 演进轮）**：CWD 绝对路径展开 + 报错文案附白名单内容，
+  详见上方「已完成」段与回归用例 `capture_bare_control_file_allows_cwd_and_rejects_outside`。
 
-- [ ] **多行 `Text` 折行缓存的键不含 `RenderContext::text`（端口）**（2026-10-14 合并前复核发现）：
-  `basic.cpp` 的缓存判据是 `(content_, available, size)` 三元组，而 `wrap` 的结果
-  **也取决于当时的 `TextPort`**（字宽来自字体）。
-
-  **当前行为是对的**（已查实，不是活缺陷）：能让字宽变化的路径（DPI 切换重建 `TextRenderer`、
-  `UiRoot::set_text_port`、`set_theme`）都会走 `UiRoot::mark_dirty_all()`，
-  而它逐元素标 `layout_dirty_` 并重跑 `measure`——缓存分支重新进入时用的是**新端口**。
-
-  **但它不是靠机制保证的**：靠的是“那些路径恰好伴随内容/宽度/字号变化”。
-  若将来出现“**只换端口、其余全不变**”的路径（例如热重载字体、或无头/窗口双端口切换），
-  缓存会静默不失效，画出**用旧字体折的行**（行数/换行位置错，且不会报错）。
-
-  **修法**（一行）：缓存键加入 `context.text` 指针（同 `CodeEditor` 的
-  `layout_port_` 判据——它早就把端口纳入 key 了，`Text` 这里是对齐遗漏）：
-  ```cpp
-  mutable const st::ui::TextPort* layout_cache_port_{nullptr};
-  if (layout_cache_port_ != context.text || layout_cache_content_ != content_ || …)
-  ```
+- [x] **多行 `Text` 折行缓存的键不含 `RenderContext::text`（端口）**（2026-10-15 销账：
+  已实现于主线——basic.cpp measure/paint_content 判据已是四元组含
+  `layout_cache_port_ != context.text`；护栏测试 ui_text_wrap_cache_test.cpp
+  2026-10-14 已在线（text_wrap_cache_follows_text_port 双桩端口断言折行跟随，
+  含换回还原分支）。条目是合并前复核记录，修复落地后未勾账。v2.2 台账 24 轮。
+  原复核细节与修法草稿已随实现落地，不再保留。）
 
 - [x] **`Tree` 缺程序化 select（写侧 `selected_key`）**（2026-10-12，gbcode 会话 e2e 亲历；
   2026-10-15 落地）：已加 `set_property("selected_key", key)`（notify=true 与键盘/
@@ -3736,35 +3831,67 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
   `tree_selected_key_is_writable_via_property_and_notifies`（含读回对称与无效 key
   分支，逆向验证：回退 notify=true 后断言变红）。e2e 从此可按键精确驱动，
   不再 `bounds.y + row_h*1.5` 坐标猜行序。
-- [ ] **`MenuPanel` 缺按 id 激活的动作面**（同上亲历）：e2e 只能
-  `bounds.y + 16 + i*32` 数行序点击；菜单动态化（最近打开）后行序会变，
-  坐标法脆。加 `invoke_action("activate_item", item_id)` 一劳永逸。
-  （注意与既有下标激活共存：id 找不到时如实 false。）
-- [ ] **`ST_REQUIRE` 在非 void 函数里编译失败**（2026-10-12，写单测亲历）：
-  宏体是裸 `return`，返回值函数里用直接 -fpermissive 报错，被迫改成
-  `if (!ok) return "<failed>"` 的丑写法。修法：宏里 `return;` 改为
-  `return static_cast<void>();`？不行（void 表达式不能 return 到非 void）——
-  可选方案是提供 `ST_REQUIRE_OR(expr, fallback)` 或文档化“仅限 void 用例体”。
-  定方案时注意：绝大多数用例体就是 void，别为小众场景复杂化主流宏。
-- [ ] **`ST_CHECK_EQ` 不支持 `std::vector<std::string>`**（同上亲历）：
-  `std::format` 没有它的 formatter，断言直接编译失败；被迫手写 `check_list`
-  辅助（gbcode_session_store_test.cpp 里有现成实现可上提）。可提供
-  `ST_CHECK_LIST(actual, expected)` 或给 vector<string> 特化 formatter。
+- [x] **`MenuPanel` 缺按 id 激活的动作面**（同上亲历；2026-10-15 落地）：已加
+  `invoke_action("activate_item", item_id)`——与鼠标 Click 同一条链
+  （`set_highlighted` → `on_activate` → `on_close`；“激活后关闭”不能省：`on_close`
+  是声明式 overlay 的“不认领”信号，缺了它面板就留在屏上挡后续交互）；无效 id
+  如实 false（不抛错不静默），分隔线（无 id）不参与；与既有下标激活（Click/Enter）
+  共存、互不干扰。回归：`menu_panel_activate_item_by_id_drives_same_chain`
+  （含高亮跟选的读回对称、无效 id 分支、未命中后面板不动），
+  `menu_panel_id_and_index_activation_coexist`（Click/Enter/id 三路径同一面板，
+  各自回调到位、不多不少），以及协议层端到端
+  `invoke_activate_item_reaches_menu_panel_by_id`（`tests/control_protocol_test.cpp`，
+  含无效 id `handled=false` 与未命中后面板仍可 find）。e2e 从此可按 id 精确驱动，
+  不再 `bounds.y + 16 + i*32` 坐标猜行序。（原条目：菜单动态化——最近打开——
+  后行序会变，坐标法脆。）
+- [x] **`ST_REQUIRE` 在非 void 函数里编译失败**（2026-10-12，写单测亲历；2026-10-16 落地）：
+  已取**方案②+③混合**：新增 `ST_REQUIRE_OR(expr, fallback)`（值返回 helper/lambda 里用：
+  失败时记录失败 + `return (fallback)`，回什么由调用方给——语义是"早退当前函数"，
+  不冒充弃跑用例）；同时 `ST_REQUIRE` 注释文档化"仅限 void 函数体，非 void 里
+  编译失败是刻意护栏"。弃方案①（`return static_cast<void>()`：void 表达式
+  return 到非 void 仍是硬错，条目原文已自我否定）。主流宏零改动（200+ 处用法
+  不受影响）；豁免零新增（test.hpp 文件级 L3 已覆盖，与 ST_SKIP 同先例）。
+  护栏互为镜像：ST_REQUIRE 在非 void 里硬错、ST_REQUIRE_OR 在 void 里硬错
+  （`return (fallback)` 非法）——误用形态直接编译失败，不产生静默错语义。
+  回归 `tests/require_or_test.cpp` 2 用例（失败路径记失败+回 fallback+计数；
+  通过路径零干扰）+ 文件头说明与 expect() 型 void 化 helper 惯例的分工。
+- [x] **`ST_CHECK_EQ` 不支持 `std::vector<std::string>`**（同上亲历；2026-10-15 落地）：
+  已取 `ST_CHECK_LIST(actual, expected)` 宏方案（弃 formatter 特化——std 模板
+  显式特化须依赖程序定义类型，是 UB）；失败消息含双方完整列表+首个不符下标，
+  消息件 format_list/list_diff 提成可单测函数；gbcode_session_store_test 手写
+  check_list 32 行上提删除。回归 test_framework_list_test.cpp 6 用例
+  （含消息内容断言与临时值按值捕获），见 v2.2 台账第 21 轮（81729f6）。
 
 - [ ] **`check_selfcontained.py` 纳入发布前流程**（当前是手工跑；无 CI，见下文 CI 已删）。
   本轮已发现它**首次运行就有真产出**（`channel.hpp` + `core_fs_test.cpp` 两处），
   说明"约定 + 手工习惯"这条路已经证明不够——但先观察几轮再定接入方式。
-- [ ] **对象缓存对“头文件变化”的失效范围要查**（2026-10-08 调试时踩到，未定论）：
-  改完 `tests/ui_terminal_pty_test.cpp` 后反复跑 `st test`，输出一直显示**旧的断言数**（6 而非 7），
-  且 `build/dev/obj` 里根本没有该单元的对象文件 —— 说明对象是从
-  `~/.shuangtian/cache/objects` 恢复的。补 `ST_NO_CACHE=1` 后仍一次没生效，
-  删掉旧对象再跑就对了。**待查**：缓存键（`cache_key_for`）包含编译器/族/三元组/依赖格式版本/
-  标志，但**不包含源文件内容或 mtime** —— 那么“工程内对象被删了”这条路径上，
-  共享缓存凭什么知道自己的条目是哪个版本的源码编的？（可能靠 `.d` 里的 mtime，
-  也可能确实缺一环。）没量清不修。
-- [ ] **`st test` 的“链接失败被当成测试失败”很难看出**：`ld.lld: error: failed to write
-  output ... permission denied`（防病毒短暂占用，`CONVENTIONS` 末尾已记过）时，
-  整体输出与“一堆用例没跑”混在一起，本轮误判过一次。值得把链接失败与用例失败分开报。
+- [x] **对象缓存对“头文件变化”的失效范围要查**（2026-10-08 调试时踩到；
+2026-10-15 v2.2 第 30 轮控制面探针已量清机制；**第 47 轮已修 restore 路径**，1032e80）：
+改完 `tests/ui_terminal_pty_test.cpp` 后反复跑 `st test`，输出一直显示**旧的断言数**（6 而非 7），
+且 `build/dev/obj` 里根本没有该单元的对象文件 —— 说明对象是从
+`~/.shuangtian/cache/objects` 恢复的。补 `ST_NO_CACHE=1` 后仍一次没生效，
+删掉旧对象再跑就对了。
+**探针结论（第 30 轮，代码级量清）**：缓存键 `cache_key_for`（build.cpp:871-896）
+含编译器路径/族/三元组/deps 格式版本/标志/档位标志/源路径/三方与框架标记/PCH
+token/include 目录——**不含源内容与 mtime**；版本判定全在 `object_cache_restore`
+（build.cpp:226-246）的**依赖新鲜度校验**：源文件与 `.d` 里每个依赖的 mtime
+都不得比缓存对象新。所以“工程内对象被删”路径上，共享缓存靠 **mtime 比对**
+知道条目版本（亲历当时是踩中了 mtime 未变化的窗口）。
+**修复（第 47 轮，1032e80）**：restore 路径 mtime+size 双校验——缓存条目新增
+`unit.meta`（逐行 `path TAB mtime TAB size`）；旧条目无 meta 走原 mtime-only
+（老缓存不失效零行为变化）；mtime 严格不等兼兜时钟回拨；元数据先行落盘防错配。
+实测：新条目 meta 落盘格式正确；探针（改 size 钉 mtime）确认**工程内快路径
+不走 restore**——**残余窗口是 profile 内 .o 命中路径仍是 mtime-only**（同秒改+建
+/旧 mtime 拷贝在快路径下仍可骗过，即下方 3620 条目——待后续单）；
+以及等长改写（要哈希才能根治）。⚠️ 亲历「ST_NO_CACHE=1 补了没生效」未复现——
+下次踩到先记录现场再排查。
+  实测过程注意：st build 不含 tests 单元（删 tests 对象须用 st test 验证）；
+  集成用例 `independent_project_*` 真建真编独立工程 ~5 分钟，探针时勿带。
+- [x] **`st test` 的“链接失败被当成测试失败”很难看出**（2026-10-15 落地）：链接类错误
+  现在分节「===== 链接/构建失败 =====」+「本轮没有任何用例结果——不是测试失败」
+  + 固定退 125（不与失败用例数碰撞）；失败用例另分节「===== 失败用例（N）=====」
+  退码仍=失败数。判据 is_link_failure 纯函数（消息前缀，非 ErrorCode——无 Link 位）。
+  实测双分支（产物占用真链接挂→125；负载误伤→3+分节）。见 pkg_test_link_split_test.cpp。
 
 - [x] **`font_stack_load_is_cached_across_calls` 常态红灯 —— 已修**（2026-10-08）：
   原断言 `hot_ms < 1.0`，实测 172 / 173 / 181 ms（单跑 3 次全红）。
@@ -3824,18 +3951,83 @@ clangd 已装环境，对 gbcode 逐功能实测。下面每条都附「现象 �
   （`examples/gallery/pages.cpp`）。更好的做法是从源头改：让 `memo` 返回**轻量句柄**
   （而非裸引用）或收 `Deps` 为值参——但那会动 API 形态，需权衡。
 
-- [ ] **基础组件未接排版覆盖**：本轮只给 `Text`/`Heading`/`IconView`/`Button` 接上了
-  `apply_text_overrides()`（基类已提供入口）。`Badge`/`Table`/`List` 项/`Tree` 等
-  会画文字的组件若要支持 `BoxProps::color/size/weight`，各自加一行调用即可——
-  但**现在没接**（标了“不支持”还是默默不生效，需要定口径：建议在未接的组件上
-  明确上报“该属性不支持”而不是静默忽略）。
+- [ ] **示例级组件回流决策：caiyun TimelineView / louyue ColorPicker+Viewport 双份维护**
+  （v2.2 第 32 轮 rescan 发现，第 36 轮控制面量清，2026-10-16）：三个内置组件都从
+  这两例泛化而来（v0.1.6/v0.1.7），原示例仍维护手写版。**量清事实**：内置版
+  护栏齐全（timeline model 7 例+view 8 例/color_picker 8 例/viewport 族 35+ 例），
+  且三组件均已 DSL X 宏注册（`dsl::TimelineView/ColorPicker/Viewport` 直接可用）；
+  示例手写版 caiyun views.cpp 485 行（与 Project/snap/trim 模型深度耦合——监视器
+  同步/检查器联动在类里）、louyue HSV 三滑块+棋盘格缩放规模小但同样无共享护栏
+  （只靠 e2e 截图断言），行为漂移不可见。**两方向**：①示例回流内置版
+  （删手写，示例变内置组件应用场景示范——caiyun 是接口重构非删代码，
+  louyue 是小改）；②文档化「示例自绘验证场」定位（保留手写版作为泛化前
+  试验田，但双份漂移风险永存）。**控制面推荐①**（护栏差距悬殊：50+ vs 0；
+  DSL 已注册回流成本低；「能力存在但外部不用」正是 rescan 的核心病灶），
+  但 caiyun 侧需排中单（耦合面大），louyue 侧小单可做。定案前不排工。
 
-- [ ] **FileDialog 的程序化选路只覆盖“单个路径”**：多选（Open + multi）与
-  “选目录”模式（PickDirectory）无程序化入口。
+- [ ] **状态类组件缺 `Change` 事件（ScriptBridge 事件表）**（v2.2 第 32 轮 rescan
+  反推，xmlapp 实证）：勾选框只能挂 `click`（写 `change` 不报错但永不触发——
+  app.js:59 注释踩过）。Checkbox/Switch/Radio/Select 的语义是「状态变了」，宿主 JS
+  拿不到与点击解耦的状态变化通知（程序化 set 后 JS 无感知）。建议：事件表补
+  `Change`（set_checked/set_selected_index 等状态写入路径统一派发），与 Click
+  并存不互斥。JS 逻辑层路线里最高频的事件类型，缺它所有表单类 JS 应用都带着
+  语义错位写。
 
-- [ ] **`st test` 的集成用例在无框架根的目录下静默跳过**：
+- [ ] **ScriptBridge `ui.build` 无 key 对齐**（同上反推）：xmlapp render() 每次
+  全量 clear+rebuild，行内输入态/滚动位置在数据刷新时全丢。dsl::list 已有
+  ListItemData.key 机制，JS 侧三原语（build/clear/set）无对应物——跨语言能力面
+  不对齐，「两种开发形态」的承诺打折。建议：`ui.build` 条目支持可选 `key`，
+  宿主按 key 对齐复用（与声明式同一套对齐语义）。
+
+- [ ] **`UiRoot` 快捷键注册表无可枚举面**（同上反推，gbcode 实证）：快捷键卡
+  只能手写，手写必分叉（已分叉缺 15+，第 33 轮临时手补 14 条只是止血）。
+  建议：`UiRoot::shortcuts()` 只读枚举（登记名/键/修饰键），帮助卡与文档从它
+  生成。表与代码要么同源、要么有对账，二选一——现在两者皆无。
+
+- [ ] **gallery 组件页对账机制**（同上反推）：gallery 自称「控件全集」但缺 8
+  个展示卡（TimelineView/ColorPicker/Viewport 全库零展示位），新增组件不会自动
+  暴露缺失。建议：最低成本单测断言「ST_COMPONENT_LIST（dsl.cpp 注册表）-
+  已知豁免清单 == gallery 展示集」——组件表加项不补卡即红。v0.1.5 专项后新增
+  组件零跟进，缺机制的模式正在复发。
+
+- [x] **基础组件未接排版覆盖**（2026-10-15 落地）：13 组件全接
+  （Badge/Table/List 项/Tree/Select/Tabs/Checkbox/Tooltip/Toast/Avatar/
+  KeyValueRow/Toggle/MarkdownView——四先例模式跟随）；口径：未接组件不再
+  静默，DSL BoxProps 传到 C++ 侧可读回（typo_overrides_reach_cpp_sided_components
+  直证）。回归 2 用例，全量 1471/0/27787。见 v2.2 台账第 23 轮（9ffffda）。
+
+- [x] **FileDialog 的程序化选路只覆盖“单个路径”**（2026-10-16 落地）：多选已加
+  `set_pending_paths` / 属性面 `pending_paths`（`|` 分隔，前置 `multi_select=true` +
+  Open 模式；任一路径无效/跨目录/混目录 → 整单 false 零状态改动，不静默截断）+
+  `on_confirm_multiple` 整份交付 + Ctrl+Click 同状态链 + 换目录/换模式自动清集合；
+  选目录模式 `pending_path` 指向目录 → 进入并可确认（交出目录本身），指向文件
+  如实 false。回归 4 用例（multi 完整链路 / 无效值七分支 / 选目录进+确认+
+  拒文件 / 单路径不回归含 multi 回调零牵连）。
+
+- [x] **`st test` 的集成用例在无框架根的目录下静默跳过**：
   `tests/pkg_integration_test.cpp` 拿不到 `ST_TEST_FRAMEWORK_ROOT` 时跳过（不假绿，
   但也不提醒）。若将来把它当 CI 门禁，需要让“跳过”在汇总里也可见（如计数行报“跳过 N”）。
+
+  **已修（2026-10-16，控制面 bee6586b 单）**：摸底确认环境跳过与慢用例跳过是**两条路**
+  （慢用例走注册期 `Case::slow` + `skipped_slow` 计数、汇总行「另 N 个」；环境跳过
+  在用例体内 print+return，计成 PASS——st-tests-slow.log:1207 实证）。
+  落码统一：新增 `ST_SKIP(reason)`（`Registry::record_skip` 进程级标志）——结果行
+  报黄色 `SKIP`、汇总行报「`, N skipped（环境前置不满足，ST_SKIP）`」、退出码仍 0
+  （不算通过也不算失败）；JUnit 报告跳过用例输出 `<skipped/>`。
+  `pkg_integration_test.cpp` 三处环境跳过（ST_INTEGRATION_BUILD=0 / 框架根缺失 /
+  st.pkg 缺失）全部改接 ST_SKIP。
+  回归：`tests/skip_visibility_test.cpp`（哨兵自启动范式，钉结果行/汇总行/退出码
+  三处可见性）；DESIGN §8.5 已同步。待实跑刷新断言数。
+
+- [ ] **控制协议 `set` 对被拒属性的反馈只靠 changed 缺名，拼写错误易静默化**
+  （v2.2 演进第 26 轮 w-fd 发现，控制面评估 2026-10-15）：`set` 应答 ok=true +
+  changed 清单（真的改到的才进）；被拒属性（未知名/无效值/未开能力）仅表现为
+  **changed 里没有它**——与 invoke 的 handled=false 红线不同。**评估结论：不是协议
+  缺陷而是批量语义的如实设计**（invoke 是单动作二元结果，set 是批量属性表，
+  逐属性结果在 changed）；但调用方不 diff changed 就误以为成功的风险真实存在
+  （e2e 脚本拼写错误会静默跳过断言点）。候选方向（需权衡，不动协议主干）：
+  ① set 响应加可选 `rejected` 清单（与 changed 对偶，零破坏增量）；
+  ② 文档化「调用方必须 diff changed」约定 + e2e 辅助函数。定案前不排工。
 
 - [ ] **第三方头应走 `-isystem` 而不是逐类抑制**。现状是 `-Wno-old-style-cast` 等会**全局**生效，
       连我们自己代码里的同类问题也一并放过（本轮之所以还能抓到 9 处自家缺陷，是因为那些

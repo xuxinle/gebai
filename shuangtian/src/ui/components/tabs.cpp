@@ -515,6 +515,9 @@ void Tabs::apply_theme(const Theme& theme) {
   style_.direction = FlexDirection::Row;
   style_.align_items = Align::Center;
   gap_ = metrics.space_xs;
+  // 显式排版覆盖最后回放（与 Text/Button 同口径）：字号覆盖直接改写 style_，
+  // 颜色覆盖存起来供 paint_content 的文本取色用（三态色在绘制时才解析）。
+  apply_text_overrides();
 }
 
 void Tabs::measure(const RenderContext& context, const Constraints& constraints) {
@@ -659,6 +662,11 @@ void Tabs::paint_content(const RenderContext& context, raster::Surface& canvas) 
         color = colors.text_faint;
       } else if (is_active) {
         color = colors.text;
+      }
+      // 显式文字色覆盖（DSL `BoxProps::color/hex_color`）盖过三态色：调用方
+      // 设了就是"我不管激活态，这行字就是这个色"的显式意图（与 Badge 同口径）。
+      if (const auto& override_color = text_color_override(); override_color.has_value()) {
+        color = *override_color;
       }
       if (!shown.empty()) {
         port.draw(canvas, shown, math::Point{draw_x, draw_y}, style_.font_size, color);

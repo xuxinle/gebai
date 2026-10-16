@@ -19,9 +19,12 @@
 /// 它同时是 XML 通路与 JS 桥这两块框架能力的端到端回归——
 /// 出问题时最先坏的就是"XML 建不出树"或"JS 调不到 C++"。
 
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <format>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "st/app/app.hpp"
@@ -122,11 +125,30 @@ struct TaskStore {
 struct Options {
   bool headless{false};
   std::string theme{"light"};
-  std::string control_port{"0"};
+  std::uint16_t control_port{0};
   std::string control_file{};
   std::string shots{};
   std::string ui_dir{"ui"};   ///< 放 main.xml 与 app.js 的目录
 };
+
+/// 用法说明。**必须有**：未知参数会报错退出，没有 `--help` 就等于"报错了也没处查"
+///（承 gbcode 同名函数）。
+auto print_usage(std::string_view program) -> void {
+  st::print(
+      "用法: {} [选项]\n"
+      "\n"
+      "窗口/主题\n"
+      "  --headless            无头模式（无窗口；控制通道照常可用）\n"
+      "  --theme light|dark    主题\n"
+      "\n"
+      "内容/自动化\n"
+      "  --ui DIR              资源目录（main.xml 与 app.js 所在处，默认 ui）\n"
+      "  --control-port N      控制通道端口（0 = 自动）\n"
+      "  --control-file PATH   控制信息落盘路径\n"
+      "  --shots DIR           无头截图目录\n"
+      "  -h, --help            显示本帮助\n",
+      program);
+}
 
 auto parse_options(int argc, char** argv) -> Options {
   Options options;
@@ -135,18 +157,61 @@ auto parse_options(int argc, char** argv) -> Options {
     const auto next = [&]() -> std::string {
       return index + 1 < argc ? std::string(argv[++index]) : std::string{};
     };
+    // —— 数值参数统一走带校验的解析（承 gbcode 的同条纪律，逐字对齐）——
+    //
+    // 为何不能裸调 `std::stoi`：传非数字（如 `--control-port abc`）时它抛
+    // `std::invalid_argument`，无人捕获 → `terminate`（实测退出码 0xC0000409，
+    // 屏幕上一行 what(): stoi）——用户看不懂、脚本拿不到码。而同一命令行里的
+    // `--bogus-flag` 走的是「报错 + exit 2」的干净路径。**非法值必须与未知参数
+    // 同一条路径**（报错可读、退出码稳定），不能一快一崩。
+    const auto parse_int = [&](const char* flag) -> long long {
+      // ⚠ 与 gbcode 版的差别：本示例的 `next()` 无 fallback 形参（缺值返空串），
+      // 于是缺值在此也走报错路径（gbcode 会静默用 fallback）——对"必填端口"更诚实。
+      const std::string text = next();
+      long long parsed = 0;
+      std::size_t consumed = 0;
+      const bool ok = !text.empty() && [&] {
+        try {
+          parsed = std::stoll(text, &consumed);
+        } catch (const std::exception&) {
+          return false;
+        }
+        return consumed == text.size();   // 尾巴（如 `8x`）也是非法值
+      }();
+      if (!ok) {
+        st::eprint("参数 {} 需要一个整数，得到：{}（用 --help 看可用项）\n",
+                   flag, text.empty() ? "（缺值）" : text);
+        std::exit(2);
+      }
+      return parsed;
+    };
+    if (arg == "--help" || arg == "-h") {
+      print_usage(argv[0]);
+      std::exit(0);
+    }
     if (arg == "--headless") {
       options.headless = true;
     } else if (arg == "--theme") {
       options.theme = next();
     } else if (arg == "--control-port") {
-      options.control_port = next();
+      const long long port = parse_int("--control-port");
+      if (port < 0 || port > 65535) {
+        st::eprint("参数 --control-port 超出端口范围：{}\n", port);
+        std::exit(2);
+      }
+      options.control_port = static_cast<std::uint16_t>(port);
     } else if (arg == "--control-file") {
       options.control_file = next();
     } else if (arg == "--shots") {
       options.shots = next();
     } else if (arg == "--ui") {
       options.ui_dir = next();
+    }
+    // **未知参数报错，不静默忽略**（gbcode 实证过的温床：新加的开关被静默
+    // 吃掉，表现是"三档渲染出来的图几乎一样"，差点被当成结论）。
+    else {
+      st::eprint("未知参数：{}（用 --help 看可用项）\n", arg);
+      std::exit(2);
     }
   }
   return options;
@@ -174,7 +239,7 @@ auto run_app(int argc, char** argv) -> int {
   app_options.headless = options.headless;
   app_options.backend = options.headless ? "headless" : std::string{};
   app_options.theme = options.theme == "dark" ? st::ui::ThemeMode::Dark : st::ui::ThemeMode::Light;
-  app_options.control_port = static_cast<std::uint16_t>(std::stoi(options.control_port));
+  app_options.control_port = options.control_port;
   app_options.control_file = options.control_file;
   app_options.screenshot_dir = options.shots;
   // 脚本宿主只在需要时创建（默认关）——纯 C++ 应用不必付这份开销。

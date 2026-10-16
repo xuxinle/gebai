@@ -60,6 +60,11 @@ struct Arguments {
   }
 };
 
+/// `st` 版本——**单一真源**（`st version` / `st doctor` 共用）。
+/// 与 `st.pkg` 的 `version`、`ST_VERSION` 宏（清单 defines）同步升版：
+/// 此前两处字面量各写各的，已经漂移过一轮。
+constexpr const char* kStpmVersion = "0.1.0";
+
 /// **布尔选项**名单：它们没有值，后面跟的东西是**位置参数**，不是它们的值。
 ///
 /// 为何必须显式列：解析器把 `--name <非减号开头>` 一律当成“带值选项”（见下方分支），
@@ -69,7 +74,7 @@ struct Arguments {
 [[nodiscard]] auto is_boolean_option(std::string_view name) -> bool {
   static constexpr std::string_view kBooleanOptions[] = {
       "san", "list", "slow", "verbose", "v", "force", "all", "help", "rules",
-      "no-pch", "quiet", "release",
+      "no-pch", "no-strip", "offline", "locked", "quiet", "release",
   };
   return std::ranges::find(kBooleanOptions, name) != std::end(kBooleanOptions);
 }
@@ -93,16 +98,7 @@ struct Arguments {
       // 下一个参数只要以 `-` 开头就不当值：否则 `--san -j 6` 会把 `-j` 吃成 `--san` 的值
       // （表现为"档位变成 debug + filter 变成 6"，两处都不报错，极难察觉）。
       if (index + 1 < argc && !std::string_view(argv[index + 1]).starts_with("-")) {
-        const std::string_view next = argv[index + 1];
-        const bool looks_like_value =
-            next.find('/') != std::string_view::npos || next.find('.') != std::string_view::npos ||
-            !next.empty();
-        if (looks_like_value && !std::isdigit(static_cast<unsigned char>(next.front())) == false) {
-          arguments.options[std::string(body)] = std::string(next);
-          ++index;
-          continue;
-        }
-        arguments.options[std::string(body)] = std::string(next);
+        arguments.options[std::string(body)] = std::string(argv[index + 1]);
         ++index;
         continue;
       }
@@ -152,7 +148,8 @@ void print_usage() {
 用法: st <命令> [参数]
 
 命令:
-  build [target]        构建工程或指定目标（--profile=debug|release|san，-j N，--verbose，--force）
+  build [target]        构建工程或指定目标（--profile=quick|dev|debug|release|san，默认 dev；
+                        -j N，--verbose，--force）
                         --no-strip 保留产物内调试信息（默认链接后分离到 <产物>.debug，
                         产物本体可小 ~94%；gdb 会自动找分离符号）
                         并发默认按**内存预算**推导（读 cgroup 上限，不再默认吃满核数）；
@@ -171,9 +168,12 @@ void print_usage() {
                         实测全量 77 单元 ~15s（gcc 全量构建 36s），且无副作用、可重复跑
                         可查：未使用私有字段/未使用 lambda 捕获/隐式变号/死代码……
                         **不查链接期问题**（ODR 违反、符号缺失、ABI 不匹配）——那些得真链接
-  deps                  解析依赖并打印依赖树（--locked 只读 st.lock）
-  fetch                 解析 + 拉取依赖到缓存/工作区，并写 st.lock
-  vendor                把依赖源码固化进 vendor/（离线可构建）
+  deps                  列出并**回溯求解**第三方源码依赖（语义版本；--locked 只读 st.lock，
+                        锁不住即失败——CI 可复现构建的兜底；传递依赖读各依赖自己的 st.pkg）
+  fetch                 求解 + 获取依赖到共享缓存并写 st.lock（path/已解包目录源可直接用；
+                        sha256 缺失时如实计算；http/归档解包待 st::codec 接入，见 DESIGN §7.4）
+  vendor                把已获取的依赖源码固化进 vendor/ + vendor.lock（随仓库分发、
+                        离线可构建）；--offline 禁网络只走本地/缓存
   doctor                环境自检（编译器/字体/显示后端/GPU/缓存）
   tree                  打印清单概览（目标、源文件数、依赖）
   init <name>           生成工程骨架（--framework=框架根；默认由 st 位置推断）
@@ -350,8 +350,19 @@ auto command_test(const Arguments& arguments) -> int {
   auto code = st::pkg::run_tests(*manifest, options, filter, list_only, junit_path,
                                  /*include_slow=*/arguments.has("slow"));
   if (!code) {
-    std::fprintf(stderr, "%s\n", code.error().message.c_str());
+    const st::Error& error = code.error();
+    if (st::pkg::is_link_failure(error)) {
+      // 链接/构建失败 ≠ 用例失败：固定退 125，脚本不用再从 stderr 猜（BACKLOG 3837）。
+      // 125 同 POSIX「命令不可运行」位（timeout 命令的同款语义），不会与任何失败用例数碰撞。
+      std::fprintf(stderr, "\n===== 链接/构建失败 =====\n%s\n（产物未产出或分片进程未跑完，"
+                  "本轮没有任何用例结果——不是测试失败）\n", error.message.c_str());
+      return 125;
+    }
+    std::fprintf(stderr, "%s\n", error.message.c_str());
     return 1;
+  }
+  if (*code > 0) {
+    std::fprintf(stderr, "\n===== 失败用例（%d）=====\n（以上为用例断言红；产物正常、分片正常）\n", *code);
   }
   return *code;
 }
@@ -415,7 +426,7 @@ auto command_check(const Arguments& arguments) -> int {
   options.check_only = true;               // ← 关键：同一段决策，不产出
   // 并发：检查是**纯 CPU**（无对象写盘、无链接），不需按编译的内存预算保守推导，
   // 所以不用 `plan_concurrency` 的内存口径；但也不超订硬件核数（超了只会互相抢）。
-  const auto jobs = arguments.number("jobs", 0.0);
+  const auto jobs = arguments.number_any({"j", "jobs"}, 0.0);
   options.jobs = jobs > 0.0 ? static_cast<std::size_t>(jobs) : st::hardware_concurrency();
 
   st::print("检查 [{}]{}{}", options.profile,
@@ -483,7 +494,7 @@ auto command_lint(const Arguments& arguments) -> int {
 auto command_doctor(const Arguments& arguments) -> int {
   (void)arguments;
   st::print("霜天环境自检\n");
-  st::print("  版本            : {}\n", "0.1.0");
+  st::print("  版本            : {}\n", kStpmVersion);
   const auto compiler = st::pkg::detect_compiler();
   st::print("  C++ 编译器      : {}\n",
               compiler ? compiler->c_str() : std::format("未找到（{}）", compiler.error().message));
@@ -600,6 +611,70 @@ auto command_tree(const Arguments& arguments) -> int {
   return 0;
 }
 
+// —— 依赖命令三兄弟（deps / fetch / vendor）的公共前置 ——
+
+/// 共享缓存根（与 `st clean --all`、doctor 同一处）：`{ST_HOME:-~/.shuangtian}/cache`。
+[[nodiscard]] auto shared_cache_dir() -> std::string {
+  std::string home;
+  if (const auto env = st::fs::read_env("ST_HOME"); env.has_value() && !env->empty()) {
+    home = *env;
+  } else {
+    home = st::fs::join(st::fs::home_dir(), ".shuangtian");
+  }
+  return st::fs::join(home, "cache");
+}
+
+/// 求解出的（或 `--locked` 从锁文件读入的）依赖图。
+struct DependencyPlan {
+  st::pkg::ResolvedGraph graph{};   ///< 拓扑序，依赖在前
+  std::string lock_path{};          ///< st.lock 的落盘位置（清单旁）
+};
+
+/// registry 源：任一 Registry 依赖给出索引地址（多个时取第一个，并在解析处如实校验）；
+/// 无 registry 依赖 → 空索引（path 源依赖仍可解，求解器会给出合成版本）。
+[[nodiscard]] auto load_registry(const st::pkg::Manifest& manifest)
+    -> st::Result<st::pkg::Registry> {
+  for (const auto& dependency : manifest.dependencies) {
+    if (dependency.source.kind == st::pkg::SourceSpec::Kind::Registry &&
+        !dependency.source.location.empty()) {
+      return st::pkg::Registry::load(dependency.source.location);
+    }
+  }
+  return st::pkg::Registry::parse_json(st::Json::object(), "(empty)");
+}
+
+/// 求解（或 `--locked` 时读锁）。
+/// 传递依赖的清单读**依赖自己的 st.pkg**（`DependencyProvider` 注入：求解器不做 I/O，
+/// 生产侧在这里读依赖目录）。归档/http 源当前拿不到源码目录（解包待 st::codec），
+/// 如实报错而不是假装"无传递依赖"——那会把缺依赖静默漏掉。
+[[nodiscard]] auto plan_dependencies(const st::pkg::Manifest& manifest, bool locked)
+    -> st::Result<DependencyPlan> {
+  const std::string lock_path = st::fs::join(manifest.directory, "st.lock");
+  if (locked) {
+    auto graph = st::pkg::lock_read(lock_path);
+    if (!graph) return st::forward_error(graph.error());
+    return DependencyPlan{std::move(*graph), lock_path};
+  }
+  auto registry = load_registry(manifest);
+  if (!registry) return st::forward_error(registry.error());
+  const st::pkg::DependencyProvider provider = [](const st::pkg::ResolvedPackage& package)
+      -> st::Result<std::vector<st::pkg::DependencySpec>> {
+    if (!package.source.is_directory_source() || package.source.location.empty()) {
+      return st::unexpected(st::ErrorCode::Unsupported,
+                            std::format("依赖 {} 的来源（{}）暂不能读传递依赖：归档解包"
+                                        "待 st::codec 接入（DESIGN §7.4）",
+                                        package.name,
+                                        st::pkg::source_kind_name(package.source.kind)));
+    }
+    auto nested = st::pkg::Manifest::load(st::fs::join(package.source.location, "st.pkg"));
+    if (!nested) return st::forward_error(nested.error());
+    return nested->dependencies;
+  };
+  auto graph = st::pkg::resolve(manifest.dependencies, *registry, provider);
+  if (!graph) return st::forward_error(graph.error());
+  return DependencyPlan{std::move(*graph), lock_path};
+}
+
 auto command_deps(const Arguments& arguments) -> int {
   auto manifest = load_manifest(arguments);
   if (!manifest) {
@@ -607,26 +682,109 @@ auto command_deps(const Arguments& arguments) -> int {
     return 1;
   }
   if (manifest->dependencies.empty()) {
-    st::print("无第三方源码依赖（框架本体零依赖；需要时 `st add <name>` 引入）\n");
+    // 引导语不再提不存在的 `st add`：登记依赖就是编辑 st.pkg 的 dependencies 段。
+    st::print("无第三方源码依赖（框架本体零依赖；需要时在 st.pkg 的 dependencies.source 段登记）\n");
     return 0;
   }
-  st::print("依赖解析（回溯求解 · 语义版本）\n");
-  std::size_t complete = 0;
-  for (const auto& dependency : manifest->dependencies) {
-    const char* kind = "path";
-    switch (dependency.source.kind) {
-      case st::pkg::SourceSpec::Kind::Path: kind = "path"; break;
-      case st::pkg::SourceSpec::Kind::Http: kind = "http"; break;
-      case st::pkg::SourceSpec::Kind::GitTarball: kind = "git-tarball"; break;
-      case st::pkg::SourceSpec::Kind::Registry: kind = "registry"; break;
-    }
-    const auto requirement = st::pkg::VersionReq::parse(dependency.version_req);
-    st::print("  {:<20} {:<12} {:<12} {}\n", dependency.name,
-                requirement ? requirement->to_string() : "?（约束非法）", kind,
-                dependency.source.location);
-    ++complete;
+  auto plan = plan_dependencies(*manifest, arguments.has("locked"));
+  if (!plan) {
+    std::fprintf(stderr, "错误: %s\n", plan.error().to_string().c_str());
+    return 1;
   }
-  st::print("\n共 {} 个直接依赖；已解析 {} 个\n", manifest->dependencies.size(), complete);
+  st::print("依赖解析（回溯求解 · 语义版本）{}\n",
+            arguments.has("locked") ? " · --locked（只读 st.lock）" : "");
+  for (const auto& package : plan->graph.packages) {
+    // 标记直接依赖（*）：求解后的图是全量的，混在一起看不出哪些是清单自己声明的。
+    const bool direct = std::any_of(manifest->dependencies.begin(), manifest->dependencies.end(),
+                                    [&](const st::pkg::DependencySpec& root) {
+                                      return root.name == package.name;
+                                    });
+    st::print("  {} {:<20} {:<12} {:<12} {}\n", direct ? "*" : " ", package.name,
+              package.version.to_string(),
+              st::pkg::source_kind_name(package.source.kind), package.source.location);
+  }
+  st::print("\n共 {} 个直接依赖；解析后共 {} 个包（拓扑序，依赖在前；* = 直接依赖）\n",
+            manifest->dependencies.size(), plan->graph.packages.size());
+  return 0;
+}
+
+auto command_fetch(const Arguments& arguments) -> int {
+  auto manifest = load_manifest(arguments);
+  if (!manifest) {
+    std::fprintf(stderr, "错误: %s\n", manifest.error().to_string().c_str());
+    return 1;
+  }
+  if (manifest->dependencies.empty()) {
+    st::print("无第三方源码依赖，无需获取\n");
+    return 0;
+  }
+  auto plan = plan_dependencies(*manifest, arguments.has("locked"));
+  if (!plan) {
+    std::fprintf(stderr, "错误: %s\n", plan.error().to_string().c_str());
+    return 1;
+  }
+  st::pkg::FetchOptions options;
+  options.work_dir = manifest->directory;
+  options.cache_dir = shared_cache_dir();
+  options.offline = arguments.has("offline");
+  auto fetched = st::pkg::fetch_all(plan->graph, options);
+  if (!fetched) {
+    std::fprintf(stderr, "错误: %s\n", fetched.error().to_string().c_str());
+    return 1;
+  }
+  for (const auto& item : *fetched) {
+    st::print("  {:<20} → {}（sha256 {}）\n", item.package.name, item.directory,
+              item.sha256.empty() ? "-" : item.sha256);
+  }
+  // `--locked` 时不重写锁（只读语义）；否则锁是求解结果的落盘。
+  if (!arguments.has("locked")) {
+    if (auto status = st::pkg::lock_write(plan->lock_path, plan->graph); !status) {
+      std::fprintf(stderr, "错误: %s\n", status.error().to_string().c_str());
+      return 1;
+    }
+    st::print("已写 {}\n", plan->lock_path);
+  }
+  st::print("获取完成，共 {} 个包\n", fetched->size());
+  return 0;
+}
+
+auto command_vendor(const Arguments& arguments) -> int {
+  auto manifest = load_manifest(arguments);
+  if (!manifest) {
+    std::fprintf(stderr, "错误: %s\n", manifest.error().to_string().c_str());
+    return 1;
+  }
+  if (manifest->dependencies.empty()) {
+    st::print("无第三方源码依赖，无需固化\n");
+    return 0;
+  }
+  // vendor 走真求解（不吃 --locked：固化的是"现在解出来的"这棵树，锁是它的产物之一）。
+  auto plan = plan_dependencies(*manifest, /*locked=*/false);
+  if (!plan) {
+    std::fprintf(stderr, "错误: %s\n", plan.error().to_string().c_str());
+    return 1;
+  }
+  st::pkg::FetchOptions options;
+  options.work_dir = manifest->directory;
+  options.cache_dir = shared_cache_dir();
+  options.offline = arguments.has("offline");
+  auto fetched = st::pkg::fetch_all(plan->graph, options);
+  if (!fetched) {
+    std::fprintf(stderr, "错误: %s\n", fetched.error().to_string().c_str());
+    return 1;
+  }
+  const std::string vendor_root = st::fs::join(manifest->directory, "vendor");
+  if (auto status = st::pkg::vendor_packages(*fetched, vendor_root); !status) {
+    std::fprintf(stderr, "错误: %s\n", status.error().to_string().c_str());
+    return 1;
+  }
+  if (auto status = st::pkg::lock_write(plan->lock_path, plan->graph); !status) {
+    std::fprintf(stderr, "错误: %s\n", status.error().to_string().c_str());
+    return 1;
+  }
+  st::print("已固化 {} 个包到 {}（vendor.lock 随源码树；离线可构建）\n", fetched->size(),
+            vendor_root);
+  st::print("已写 {}\n", plan->lock_path);
   return 0;
 }
 
@@ -855,7 +1013,7 @@ auto run_app(int argc, char** argv) -> int {
   if (arguments.has("verbose") || arguments.has("v")) st::log::set_level(st::log::Level::Info);
 
   if (arguments.command == "version") {
-    st::print("st (霜天工具链) {}\n", "0.1.0");
+    st::print("st (霜天工具链) {}\n", kStpmVersion);
     const auto compiler = st::pkg::detect_compiler();
     st::print("编译器: {}\n", compiler ? compiler->c_str() : "未找到");
     return 0;
@@ -869,6 +1027,8 @@ auto run_app(int argc, char** argv) -> int {
   if (arguments.command == "doctor") return command_doctor(arguments);
   if (arguments.command == "tree") return command_tree(arguments);
   if (arguments.command == "deps") return command_deps(arguments);
+  if (arguments.command == "fetch") return command_fetch(arguments);
+  if (arguments.command == "vendor") return command_vendor(arguments);
   if (arguments.command == "init") return command_init(arguments);
   if (arguments.command == "clean") return command_clean(arguments);
 

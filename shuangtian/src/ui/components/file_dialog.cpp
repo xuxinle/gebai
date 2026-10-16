@@ -180,6 +180,10 @@ auto FileDialog::set_pending_path(const std::string& path) -> bool {
     mark_dirty();
     return true;
   }
+  // `Directory` 模式（选目录）**不接受文件**：该模式下文件名不参与语义
+  // （`set_mode` 切换时已清空、界面上也隐藏）——回填等于给确认埋一个拼接伪路径，
+  // 进它的父目录则更糟（"调了没报错但去了别处"）。如实 false，不动任何状态。
+  if (mode_ == Mode::Directory) return false;
   // 文件：先进入它所在目录（`reload` 会把 selected_ 复位），再回填文件名。
   // 顺序不能反——`set_directory` 内部会清选中态。
   set_directory(st::fs::parent(path));
@@ -192,6 +196,62 @@ auto FileDialog::set_pending_path(const std::string& path) -> bool {
       break;
     }
   }
+  mark_dirty();
+  return true;
+}
+
+void FileDialog::set_multi_select(bool multi) {
+  if (multi_select_ == multi) return;
+  multi_select_ = multi;
+  if (!multi_select_) selected_paths_.clear();
+  mark_dirty();
+}
+
+void FileDialog::toggle_multi_path(const std::string& path) {
+  for (auto it = selected_paths_.begin(); it != selected_paths_.end(); ++it) {
+    if (*it == path) {
+      selected_paths_.erase(it);   // 再点一次 = 取消该项
+      mark_dirty();
+      return;
+    }
+  }
+  selected_paths_.push_back(path);
+  mark_dirty();
+}
+
+auto FileDialog::is_multi_selected_name(const std::string& name) const -> bool {
+  for (const std::string& picked : selected_paths_) {
+    if (st::fs::file_name(picked) == name) return true;
+  }
+  return false;
+}
+
+auto FileDialog::set_pending_paths(const std::vector<std::string>& paths) -> bool {
+  // 入口前置：多选只在 Open 模式有语义，且开关没开时这个入口不可用
+  //（如实 false——"能力存在但没开"与"路径不存在"对自动化同样需要可判别）。
+  if (paths.empty() || mode_ != Mode::Open || !multi_select_) return false;
+  // 先验后写：全部存在、全为文件、同一父目录（任一不满足 → 整单拒绝，零状态改动）。
+  std::string common_parent;
+  for (const std::string& path : paths) {
+    if (path.empty() || !st::fs::exists(path) || st::fs::is_directory(path)) return false;
+    const std::string parent = st::fs::parent(path);
+    // 裸文件名（无目录分量）拒收：`parent("a.txt")` 是空串，没有稳定基准目录，
+    // 而拿"当前目录"当基准会随导航漂移（自动化最忌讳的靶子）。
+    if (parent.empty()) return false;
+    if (common_parent.empty()) common_parent = parent;
+    else if (parent != common_parent) return false;
+  }
+  // 进入共同父目录（reload 会清多选集合与单选态——先清后注，顺序不能反）。
+  set_directory(common_parent);
+  selected_paths_ = paths;
+  // 列表锚点：集合里首个可见项作为键盘导航起点（集合内多行高亮见 paint_content）。
+  for (std::size_t index = 0; index < visible_.size(); ++index) {
+    if (is_multi_selected_name(entries_[visible_[index]].name)) {
+      selected_ = index;
+      break;
+    }
+  }
+  filename_.clear();   // 多选语义下文件名行不代表任何单个选择，清掉防单路径分支误确认
   mark_dirty();
   return true;
 }
@@ -230,6 +290,9 @@ void FileDialog::reload() {
   visible_.clear();
   selected_ = static_cast<std::size_t>(-1);
   scroll_y_ = 0.0f;
+  // 多选集合属于"当前列出的目录"：目录一换（导航/程序化选路先复位再注入），
+  // 旧集合全部作废——留着会让确认交出与界面所见不符的路径。
+  selected_paths_.clear();
   auto listed = st::fs::list_dir(directory_);
   if (!listed) {
     error_ = listed.error().to_string();
@@ -307,6 +370,15 @@ void FileDialog::move_selection(int delta) {
 }
 
 void FileDialog::confirm() {
+  // 多选（Open + multi）：整份集合交给 `on_confirm_multiple`；集合空则不触发——
+  // 与单路径"文件名空则不触发"同一条诚实口径。
+  if (multi_select_ && mode_ == Mode::Open) {
+    if (!selected_paths_.empty() && on_confirm_multiple) {
+      on_confirm_multiple(selected_paths_);
+    }
+    mark_dirty();
+    return;
+  }
   if (on_confirm == nullptr) {
     mark_dirty();
     return;
@@ -673,7 +745,9 @@ void FileDialog::paint_content(const RenderContext& context, raster::Surface& ca
     const math::Rect row = entry_rect(index);
     if (row.bottom() < list_.y || row.y > list_.bottom()) continue;  // 视口剔除
     const st::fs::DirEntry& entry = entries_[visible_[index]];
-    const bool is_selected = index == selected_;
+    // 多选集合内的行同样高亮（与单选同一视觉语言——"程序化状态与界面所见一致"）。
+    const bool is_selected = index == selected_ ||
+                             (multi_select_ && is_multi_selected_name(entry.name));
     if (is_selected) {
       // 选中底 + 左侧 2px 指示条（与 List 视觉同源）。
       fill_round_rect(canvas, row, metrics.radius_sm, colors.primary_soft);
@@ -888,6 +962,13 @@ auto FileDialog::on_event(const RenderContext& context, Event& event) -> bool {
           if (row.is_empty() || !row.contains(event.position)) continue;
           selected_ = index;
           const st::fs::DirEntry* entry = FileDialog::entry(index);
+          // Ctrl+Click（多选开着的 Open 模式）：文件行进/出多选集合——
+          // 用户侧链路与 `pending_paths` 程序化入口写**同一份状态**。
+          if (multi_select_ && mode_ == Mode::Open && event.ctrl && entry != nullptr &&
+              !entry->is_dir) {
+            toggle_multi_path(st::fs::join(directory_, entry->name));
+            return true;
+          }
           if (event.kind == EventKind::DoubleClick ||
               event.kind == EventKind::TripleClick) {
             activate_entry(index);  // 双击：目录进入/文件确认
@@ -930,6 +1011,18 @@ auto FileDialog::get_property(std::string_view name) const -> std::optional<std:
     return entry != nullptr ? entry->name : std::string();
   }
   if (name == "show_hidden") return show_hidden_ ? std::string("true") : std::string("false");
+  if (name == "multi_select") {
+    return multi_select_ ? std::string("true") : std::string("false");
+  }
+  if (name == "selected_paths") {
+    // 多选集合（`|` 连接，与 filters/places 同分隔符先例；空集 = 空串）。
+    std::string joined;
+    for (const auto& path : selected_paths_) {
+      if (!joined.empty()) joined.push_back('|');
+      joined += path;
+    }
+    return joined;
+  }
   // 列表滚动偏移。为何要读取口（2026-10-14）：它原本**没有**任何读取口——
   // 于是“滚轮方向反了”这种可见错误**无法用断言钉住**（而那正是它长期存活的原因）。
   // 与 `Tree`/`Table`/`MarkdownView` 的视口属性同一姿态：不可断言的效果 = 不可复用。
@@ -962,12 +1055,47 @@ auto FileDialog::set_property(std::string_view name, std::string_view value) -> 
     set_filename(std::string(value));
     return true;
   }
+  // `mode`：模式写侧（读侧早已存在，见 get_property 的同名分支）。协议层建
+  // Directory/Save 对话框只能靠它——只读不写等于"能力存在但外部用不到"
+  //（与 `pending_path` 同一理由，26 轮用例 2 曾被迫走 C++ 侧挂载）。
+  // 值与读侧同口径（小写 `open`/`save`/`directory`）；无效值**如实 false**，
+  // 不静默也不猜（拼写错误拼成 oepn 不该被当成 open 收下）。
+  // 走 `set_mode` 而不直接改 `mode_`：模式切换要连带复位多选开关/集合与
+  // filename（Directory 模式无文件名语义），绕过它等于埋一个状态不一致。
+  if (name == "mode") {
+    if (value == "open") {
+      set_mode(Mode::Open);
+    } else if (value == "save") {
+      set_mode(Mode::Save);
+    } else if (value == "directory") {
+      set_mode(Mode::Directory);
+    } else {
+      return false;
+    }
+    return true;
+  }
   // `pending_path`：**程序化选路**（无头/自动化唯一的选路入口，见 `set_pending_path`）。
   // 走属性面而不是只留 C++ 接口：控制通道的 `set` 是外部（智能体）与界面之间
   // **唯一**的通用写入口——只开 C++ 接口等于"能力存在但外部用不到"。
   // 失败（路径不存在）返回 false，`set` 会如实报错，不静默。
   if (name == "pending_path") {
     return set_pending_path(std::string(value));
+  }
+  // `pending_paths`：多选的程序化选路（`|` 分隔路径清单，与 filters/places 同先例）。
+  // 失败（前置不满足/任一路径无效）如实 false，`set` 会报错，不静默。
+  if (name == "pending_paths") {
+    std::vector<std::string> parts;
+    for (const auto& part : st::split(value, '|')) {
+      if (!part.empty()) parts.emplace_back(part);
+    }
+    return set_pending_paths(parts);
+  }
+  // `multi_select`：多选开关。Save/Directory 模式下无多选语义——如实拒绝，
+  // 不静默收下（否则"开成功了"却永远不生效，调用方无从判别）。
+  if (name == "multi_select") {
+    if (mode_ != Mode::Open) return false;
+    set_multi_select(value == "true" || value == "1");
+    return true;
   }
   if (name == "show_hidden") {
     set_show_hidden(value == "true" || value == "1");
@@ -989,6 +1117,7 @@ auto FileDialog::property_names() const -> std::vector<std::string_view> {
   std::vector<std::string_view> names = Element::property_names();
   names.insert(names.end(),
                {"directory", "filename", "mode", "error", "selected", "pending_path",
+                "pending_paths", "multi_select", "selected_paths",
                 "show_hidden", "filters", "places", "scroll"});
   return names;
 }

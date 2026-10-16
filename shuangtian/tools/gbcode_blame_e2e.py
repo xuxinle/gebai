@@ -21,6 +21,12 @@ BIN = ROOT / "build" / "dev" / "bin" / ("gbcode.exe" if __import__("os").name ==
 sys.path.insert(0, str(ROOT / "tools"))
 from gbcode_hint_e2e import Client, wait_until  # noqa: E402
 
+# 非 UTF-8 控制台自愈：GBK 代码页下 print 中文/符号（如 '⇄'）会 UnicodeEncodeError 崩整跑；
+# 已是 UTF-8 则不动，残余不可编字符以 '?' 兜底（宁可错印不崩）。
+if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 def log(message):
     print(message, flush=True)

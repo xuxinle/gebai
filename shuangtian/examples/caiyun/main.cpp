@@ -12,8 +12,11 @@
 ///
 /// ## 诚实边界
 ///
-/// 框架没有视频解码器。这里的"素材"全部是**程序化生成片段**（本地光栅原语
-/// 实时渲染）；真实解码显式记作框架缺口，不做假占位、不冒充能播。
+/// 框架已内置 `st::ext::VideoDecoder`（v0.1.7，ffmpeg 子进程：抽帧 + 读元信息，
+/// 探测不到如实不支持）；但它的定位是**素材查看/预处理**，不是逐帧播放
+///（每抽一帧起一个进程 ~30ms，见 st/ext/video.hpp 的代价表）。本示例的"素材"
+/// 仍全部是**程序化生成片段**（本地光栅原语实时渲染）——真实视频素材导入
+/// 需要缩略图/缓存策略配合，作为后续大单记在 BACKLOG；不假占位、不冒充能播。
 
 #include <algorithm>
 #include <cmath>
@@ -23,6 +26,7 @@
 #include <format>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "project.hpp"
@@ -55,12 +59,32 @@ struct Options {
   bool headless{false};
   std::string backend{};
   std::string theme{"light"};
-  std::string control_port{"0"};
+  std::uint16_t control_port{0};
   std::string control_file{};
   std::string shots{};
   std::string export_dir{};   ///< `--export-dir <dir>`：启动即导出帧序列（设计文档 §4.3）
   int bench_seconds{0};       ///< `--bench <秒>`：播放压测时长（设计文档 §7.4）
 };
+
+/// 用法说明。**必须有**：未知参数会报错退出，没有 `--help` 就等于"报错了也没处查"
+///（承 gbcode 同名函数）。
+auto print_usage(std::string_view program) -> void {
+  st::print(
+      "用法: {} [选项]\n"
+      "\n"
+      "窗口/主题\n"
+      "  --headless            无头模式（无窗口；控制通道照常可用）\n"
+      "  --theme light|dark    主题\n"
+      "\n"
+      "内容/自动化\n"
+      "  --control-port N      控制通道端口（0 = 自动）\n"
+      "  --control-file PATH   控制信息落盘路径\n"
+      "  --shots DIR           无头截图目录\n"
+      "  --export-dir DIR      启动即导出帧序列（真实 PNG + manifest）\n"
+      "  --bench N             真开播放压测 N 秒后退出\n"
+      "  -h, --help            显示本帮助\n",
+      program);
+}
 
 auto parse_options(int argc, char** argv) -> Options {
   Options options;
@@ -70,19 +94,68 @@ auto parse_options(int argc, char** argv) -> Options {
       if (i + 1 < argc) return argv[++i];
       return fallback;
     };
-    if (raw == "--headless") options.headless = true;
-
-    // `--backend` 必须照接：应用层有**自己的**参数解析（不过 `st::app::parse_cli`），
-    // 漏接的开关会被静默忽略——"我明明指定了 x11/wayland"会变成谜案
-    //（Linux 上验证两个窗口后端全靠它）。
-
-    if (raw == "--backend") options.backend = value("");
+    // —— 数值参数统一走带校验的解析（承 gbcode 的同条纪律，逐字对齐）——
+    //
+    // 为何不能裸调 `std::atoi`/`stoi`：传非数字（如 `--control-port abc`）时
+    // `stoi` 抛 `std::invalid_argument` 无人捕获 → `terminate`（退出码
+    // 0xC0000409，屏幕上一行 what(): stoi）；`atoi` 更糟——静默返 0，错值
+    // 变成"端口 0（自动）"。而同一命令行里的 `--bogus-flag` 走的是
+    // 「报错 + exit 2」的干净路径。**非法值必须与未知参数同一条路径**
+    //（报错可读、退出码稳定），不能一快一崩。
+    const auto parse_int = [&](const char* flag, long long fallback) -> long long {
+      const std::string text = value(std::format("{}", fallback).c_str());
+      long long parsed = 0;
+      std::size_t consumed = 0;
+      const bool ok = !text.empty() && [&] {
+        try {
+          parsed = std::stoll(text, &consumed);
+        } catch (const std::exception&) {
+          return false;
+        }
+        return consumed == text.size();   // 尾巴（如 `8x`）也是非法值
+      }();
+      if (!ok) {
+        st::eprint("参数 {} 需要一个整数，得到：{}（用 --help 看可用项）\n", flag, text);
+        std::exit(2);
+      }
+      return parsed;
+    };
+    if (raw == "--help" || raw == "-h") {
+      print_usage(argv[0]);
+      std::exit(0);
+    }
+    // ⚠ headless 必须与下方 else-if 链同体（首个分支）：独立 if 命中后继续
+    // 落进链尾 else 兜底会被误判「未知参数」。
+    if (raw == "--headless") {
+      options.headless = true;
+    }
+    else if (raw == "--backend") options.backend = value("");
     else if (raw == "--theme") options.theme = value("light");
-    else if (raw == "--control-port") options.control_port = value("0");
-    else if (raw == "--control-file") options.control_file = value({});
-    else if (raw == "--shots") options.shots = value({});
-    else if (raw == "--export-dir") options.export_dir = value({});
-    else if (raw == "--bench") options.bench_seconds = std::atoi(value("0").c_str());
+    else if (raw == "--control-port") {
+      const long long port = parse_int("--control-port", 0);
+      if (port < 0 || port > 65535) {
+        st::eprint("参数 --control-port 超出端口范围：{}\n", port);
+        std::exit(2);
+      }
+      options.control_port = static_cast<std::uint16_t>(port);
+    }
+    else if (raw == "--control-file") options.control_file = value("");
+    else if (raw == "--shots") options.shots = value("");
+    else if (raw == "--export-dir") options.export_dir = value("");
+    else if (raw == "--bench") {
+      const long long seconds = parse_int("--bench", 0);
+      if (seconds < 0) {
+        st::eprint("参数 --bench 不能为负：{}\n", seconds);
+        std::exit(2);
+      }
+      options.bench_seconds = static_cast<int>(seconds);
+    }
+    // **未知参数报错，不静默忽略**（gbcode 实证过的温床：新加的开关被静默
+    // 吃掉，表现是"三档渲染出来的图几乎一样"，差点被当成结论）。
+    else {
+      st::eprint("未知参数：{}（用 --help 看可用项）\n", raw);
+      std::exit(2);
+    }
   }
   return options;
 }
@@ -454,7 +527,7 @@ auto run_app(int argc, char** argv) -> int {
   app_options.backend = !options.backend.empty() ? options.backend
                         : (options.headless ? std::string("headless") : std::string{});
   app_options.theme = options.theme == "dark" ? st::ui::ThemeMode::Dark : st::ui::ThemeMode::Light;
-  app_options.control_port = static_cast<std::uint16_t>(std::stoi(options.control_port));
+  app_options.control_port = options.control_port;
   app_options.control_file = options.control_file;
   app_options.screenshot_dir = options.shots;
 

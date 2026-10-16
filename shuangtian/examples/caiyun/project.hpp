@@ -4,9 +4,13 @@
 ///
 /// ## 诚实边界（设计文档 §4.1）
 ///
-/// **框架没有视频解码器**。v1 的"素材"全部是**程序化生成片段**（走本地光栅
-/// 原语实时渲染）；真实视频解码是显式记入 BACKLOG 的框架缺口，**不做假占位、
-/// 不冒充能播**。
+/// 框架已内置 `st::ext::VideoDecoder`（v0.1.7，ffmpeg 子进程：抽帧 + 读元信息；
+/// 探测不到 ffmpeg 时如实 `available()=false`，不做静默空实现）。但**本示例仍用
+/// 程序化生成片段演示**：解码器的定位是素材查看/预处理而非逐帧播放（每抽一帧起
+/// 一个进程 ~30ms，见 video.hpp 的代价表），把它接进「时间轴预览跟着播放头走」
+/// 需要的是缩略图/缓存策略，不是一行解码调用——真实视频素材导入作为后续大单
+/// 记在 BACKLOG（docs/BACKLOG.md「示例：caiyun 真实视频素材导入」）。
+/// 不假占位、不冒充能播的精神不变。
 ///
 /// ## 为什么片段是"纯函数式生成器"
 ///
@@ -97,6 +101,8 @@ struct Project {
   double playhead{0.0};
   bool playing{false};
   bool loop{true};
+  /// 吸附开关（吸附逻辑已回流 `st::ui::timeline::Model::snap`，经
+  /// `TimelineView::snap_time` 调用；阈值换算见该处）。
   bool snapping{true};
   /// 吸附阈值（秒）：拖拽时落点靠近片段边缘/播放头就吸附到它。
   double snap_threshold{0.12};
@@ -130,8 +136,6 @@ struct Project {
   auto trim(int id, int edge, double time) -> bool;
   /// 移动片段到新入点（保持时长）。
   auto move_clip(int id, double new_t_in) -> bool;
-  /// 把 `time` 吸附到最近的片段边缘或播放头（阈值内）；吸附关闭时原样返回。
-  [[nodiscard]] auto snap(double time) const -> double;
 
   /// 合成一帧到 `target`（`target` 尺寸决定输出分辨率）。
   ///

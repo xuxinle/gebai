@@ -367,3 +367,114 @@ ST_TEST(timeline_view_zoom_and_scroll_actions) {
   ST_REQUIRE(duration.has_value());
   ST_CHECK_EQ(*duration, std::string("4000"));
 }
+
+ST_TEST(timeline_view_hover_brightens_clip_and_reads_back) {
+  Fixture fx;
+  fx.load_default();
+  const auto block = fx.clip_screen_rect(0, 0);
+  const Point over{block.x + block.width * 0.5f, block.y + block.height * 0.5f};
+
+  // 初始无悬停（读回口是属性面的可验证面，不止像素）。
+  ST_CHECK_EQ(*fx.view.get_property("hover_clip"), std::string("-1:-1"));
+
+  // 悬停前后的像素不同：hover 提亮真的画出来了。
+  const Color before = fx.render().pixel_at(static_cast<int>(over.x), static_cast<int>(over.y));
+  Event enter;
+  enter.kind = EventKind::MouseMove;
+  enter.position = over;
+  (void)fx.view.on_event(fx.context, enter);
+  ST_CHECK_EQ(*fx.view.get_property("hover_clip"), std::string("0:0"));
+  const Color after = fx.render().pixel_at(static_cast<int>(over.x), static_cast<int>(over.y));
+  ST_CHECK(before != after);
+
+  // 移出片段（同轨道空白处）→ 悬停清除、像素回到常态。
+  Event leave;
+  leave.kind = EventKind::MouseMove;
+  leave.position = Point{fx.clip_screen_rect(0, 1).x - 40.0f, over.y};
+  (void)fx.view.on_event(fx.context, leave);
+  ST_CHECK_EQ(*fx.view.get_property("hover_clip"), std::string("-1:-1"));
+  ST_CHECK(fx.render().pixel_at(static_cast<int>(over.x), static_cast<int>(over.y)) == before);
+
+  // HoverOut（指针离开组件）也是同一条清除路径。
+  Event enter2;
+  enter2.kind = EventKind::MouseMove;
+  enter2.position = over;
+  (void)fx.view.on_event(fx.context, enter2);
+  ST_CHECK_EQ(*fx.view.get_property("hover_clip"), std::string("0:0"));
+  Event out;
+  out.kind = EventKind::HoverOut;
+  (void)fx.view.on_event(fx.context, out);
+  ST_CHECK_EQ(*fx.view.get_property("hover_clip"), std::string("-1:-1"));
+}
+
+ST_TEST(timeline_view_hover_survives_drag_and_clears_after) {
+  Fixture fx;
+  fx.load_default();
+  const auto block = fx.clip_screen_rect(0, 0);
+  const Point from{block.x + block.width * 0.5f, block.y + block.height * 0.5f};
+
+  // 先悬停上（MouseMove 无拖拽分支才更新 hover_*），再从片段上按下拖走：
+  // 拖拽中的 move 走拖拽分支、不碰 hover——指针滑出片段后状态仍保留
+  //（拖拽中清会闪烁）。抬起后离开组件才清。
+  Event enter;
+  enter.kind = EventKind::MouseMove;
+  enter.position = from;
+  (void)fx.view.on_event(fx.context, enter);
+  ST_CHECK_EQ(*fx.view.get_property("hover_clip"), std::string("0:0"));
+
+  ST_CHECK(drag(fx.view, fx.context, from, Point{from.x + 100.0f, from.y}));
+  ST_CHECK_EQ(*fx.view.get_property("hover_clip"), std::string("0:0"));
+
+  Event out;
+  out.kind = EventKind::HoverOut;
+  (void)fx.view.on_event(fx.context, out);
+  ST_CHECK_EQ(*fx.view.get_property("hover_clip"), std::string("-1:-1"));
+}
+
+ST_TEST(timeline_view_trim_handles_visible_only_when_enabled_and_selected) {
+  Fixture fx;
+  fx.load_default();
+  // ⚠ 播放头必须移开：默认 0ms 的播放头竖线（x∈[lane.x, lane.x+2)）压在块 a
+  // 的左缘上且画在最上层——手柄采样点（块左缘+1）会被它统一覆盖，
+  // 开/关手柄都采到播放头色，断言必红（控制面实跑的教训，几何非色彩问题）。
+  fx.view.model().set_playhead(1500);
+  fx.layout();
+  const auto block = fx.clip_screen_rect(0, 0);
+  const Point center{block.x + block.width * 0.5f, block.y + block.height * 0.5f};
+  const auto handle_pixel = [&fx, &block]() {
+    return fx.render().pixel_at(static_cast<int>(block.x + 1.0f),
+                                static_cast<int>(block.y + block.height * 0.5f));
+  };
+
+  // 默认关：点选片段后，左缘手柄位置仍是片段本体色（不是白色手柄）。
+  Event down;
+  down.kind = EventKind::MouseDown;
+  down.button = 1;
+  down.position = center;
+  (void)fx.view.on_event(fx.context, down);
+  ST_CHECK(fx.view.model().find_clip(0, 0)->selected);
+  ST_CHECK(!fx.view.show_trim_handles());
+  const Color body = handle_pixel();
+
+  // 开关打开：同一位置像素变化（手柄画出来了；半透明白叠在块色上，
+  // 不做精确色断言——只断言"变了"与后文"关掉变回来"，往返即证因果）。
+  fx.view.set_show_trim_handles(true);
+  ST_CHECK(fx.view.show_trim_handles());
+  const Color handle = handle_pixel();
+  ST_CHECK(handle != body);
+
+  // 属性面同口径：set/get 与显式 setter 等价，乱值如实拒绝。
+  ST_CHECK(fx.view.set_property("trim_handles", "false"));
+  ST_CHECK(!fx.view.show_trim_handles());
+  ST_CHECK_EQ(*fx.view.get_property("trim_handles"), std::string("false"));
+  ST_CHECK(!fx.view.set_property("trim_handles", "maybe"));
+  ST_CHECK(handle_pixel() == body);
+
+  // 未选中片段不受开关影响：开关开、但没选中时手柄不画（左缘仍是块本体色）。
+  // 基线取「未选中+开关关」的常态色，再开开关验证不变。
+  fx.view.model().clear_selection();
+  ST_CHECK(fx.view.set_property("trim_handles", "false"));
+  const Color unselected = handle_pixel();
+  ST_CHECK(fx.view.set_property("trim_handles", "true"));
+  ST_CHECK(handle_pixel() == unselected);
+}

@@ -150,6 +150,62 @@ struct CompileUnit {
   return object + ".flags";
 }
 
+/// 工程内快路径的依赖快照侧边车：`<对象>.meta`（与 `.flags` 同目录同寿命）。
+///
+/// 记录「这份 .o 编出来时」源文件与全部依赖的 (mtime, size)——快路径的
+/// `needs_rebuild` 据此做 mtime+size 双校验（共享缓存 `object_cache_restore`
+/// 读的 `unit.meta` 是同一套格式，见 `serialize_deps_meta`）。两个出生路径都写：
+/// 真编译后、从共享缓存恢复后——只要 .o 在，它的出生描述就在。
+[[nodiscard]] auto deps_meta_path(const std::string& object) -> std::string {
+  return object + ".meta";
+}
+
+/// 依赖快照（mtime+size）的反序列化目标：restore 与快路径共用。
+using DepsMeta = std::map<std::string, std::pair<std::int64_t, std::uint64_t>>;
+
+/// 依赖快照序列化：`path<TAB>mtime<TAB>size` 逐行，覆盖源文件与 `.d` 里的全部依赖。
+///
+/// 含制表符的路径**不记录**（也不引入转义语法）：`\t` 在 Windows 路径里是
+/// `D:\tools` 这类真实子串，转义/反转义会把无辜路径改坏；而真实路径几乎不含
+/// 制表符，跳过即可——该依赖退回 mtime-only（保守方向，不交付旧内容）。
+/// 读不到 mtime/size 的路径同样不记（两侧对称：不记 = 不校）。
+[[nodiscard]] auto serialize_deps_meta(const std::string& source, const std::string& depfile) -> std::string {
+  std::string meta;
+  const auto append_entry = [&meta](const std::string& path) {
+    if (path.find('\t') != std::string::npos) return;
+    const auto time = fs::modified_ns(path);
+    const auto size = fs::file_size(path);
+    if (!time.has_value() || !size.has_value()) return;
+    meta += path;
+    meta += '\t';
+    meta += std::to_string(*time);
+    meta += '\t';
+    meta += std::to_string(*size);
+    meta += '\n';
+  };
+  append_entry(source);
+  for (const auto& dep : parse_depfile(depfile)) append_entry(dep);
+  return meta;
+}
+
+/// 依赖快照反序列化（与 `serialize_deps_meta` 对称）。空文本/损坏行 → 空表或
+/// 缺行，调用方按"无记录不校验"处理——旧条目/旧对象不因此失效。
+[[nodiscard]] auto parse_deps_meta(std::string_view text) -> DepsMeta {
+  DepsMeta snapshot;
+  for (const std::string_view line : st::split(text, '\n')) {
+    if (line.empty()) continue;
+    const std::size_t first = line.find('\t');
+    if (first == std::string_view::npos) continue;
+    const std::size_t second = line.find('\t', first + 1);
+    if (second == std::string_view::npos) continue;
+    const auto mtime = st::parse_i64(line.substr(first + 1, second - first - 1));
+    const auto size = st::parse_u64(line.substr(second + 1));
+    if (!mtime.has_value() || !size.has_value()) continue;
+    snapshot.emplace(std::string(line.substr(0, first)), std::pair{*mtime, *size});
+  }
+  return snapshot;
+}
+
 /// 目标是否需要重建：源文件、**任一被包含的头文件**、**编译标志**或 **PCH 身份**变化时重建。
 [[nodiscard]] auto needs_rebuild(const CompileUnit& unit,
                                  const std::vector<std::string>& unit_flags,
@@ -171,6 +227,27 @@ struct CompileUnit {
     const auto dep_time = fs::modified_ns(dep);
     if (dep_time && *dep_time > *object_time) return true;
     if (!dep_time && !fs::exists(dep)) return true;  // 头被删除 → 重编
+  }
+  // **mtime+size 双校验（快路径）**：上面纯 mtime 判定抓不住「内容变了但 mtime
+  // 没变」的窗口（同秒改+建、拷贝保留旧 mtime、时钟回拨）——旧对象一声不响地
+  // 继续链接。侧边车 `<obj>.meta` 记着这份 .o 出生时的源+依赖 (mtime, size)，
+  // 严格不等比对（`!=` 而非 `>`：回拨后的 mtime 比 .o 还旧，`>` 抓不住）。
+  // 与 restore 路径同一套序列化（`parse_deps_meta`），两路判定语义一致。
+  // 缺侧边车（本改动前构建的旧对象）→ 退回 mtime-only，不阻塞构建。
+  if (const auto meta_text = fs::read_text(deps_meta_path(unit.object)); meta_text.has_value()) {
+    const DepsMeta snapshot = parse_deps_meta(*meta_text);
+    const auto changed = [&](const std::string& path) -> bool {
+      const auto found = snapshot.find(path);
+      if (found == snapshot.end()) return false;   // 无记录不校验（对称：写入侧不记）
+      const auto time = fs::modified_ns(path);
+      if (time.has_value() && *time != found->second.first) return true;
+      if (fs::file_size(path).value_or(found->second.second) != found->second.second) return true;
+      return false;
+    };
+    if (changed(unit.source)) return true;
+    for (const auto& dep : parse_depfile(unit.depfile)) {
+      if (changed(dep)) return true;
+    }
   }
   return false;
 }
@@ -195,8 +272,9 @@ struct CompileUnit {
 /// （不套工程的 `-I`，也不用工程的 PCH），这样键才跨工程稳定。
 ///
 /// **有效性判定**：复用增量构建那一套——缓存对象的 `.d` 里记着全部依赖，
-/// 只要没有依赖比缓存对象新，缓存对象就是最新的。**不引入第二套判定逻辑**，
-/// 否则"增量构建"与"缓存"迟早会在边界条件上给出不同答案。
+/// 没有依赖比缓存对象新（mtime）且侧边车 `unit.meta` 记录的 (mtime, size) 都
+/// 未变，缓存对象才是最新的（两路共用 `parse_deps_meta`，不引入第二套判定逻辑
+/// ——否则"增量构建"与"缓存"迟早会在边界条件上给出不同答案）。
 struct ObjectCache {
   std::string root{};     ///< 缓存根（空 = 未启用）
   std::size_t hits{0};
@@ -232,26 +310,71 @@ struct ObjectCache {
   if (!fs::is_regular_file(cached_object) || !fs::is_regular_file(cached_depfile)) return false;
   const auto cached_time = fs::modified_ns(cached_object);
   if (!cached_time) return false;
-  // 依赖新鲜度：源文件与 `.d` 里的每个依赖都不得比缓存对象新
-  const auto source_time = fs::modified_ns(unit.source);
-  if (!source_time || *source_time > *cached_time) return false;
+  // mtime+size 双校验（BACKLOG「对象缓存对头文件变化的失效范围」修复；旧条目无
+  // .meta 时按 mtime-only 放行——见下方逐处注释）。
+  const std::string cached_meta = fs::join(directory, "unit.meta");
+  // 解析与序列化是共用的一对（`parse_deps_meta`/`serialize_deps_meta`——工程内
+  // 快路径侧边车 `<obj>.meta` 与共享缓存 `unit.meta` 同一套格式）；解析失败/
+  // 空文本 = 无记录不校验，旧条目不因此失效。
+  const DepsMeta snapshot = parse_deps_meta(fs::read_text(cached_meta).value_or(""));
+  const bool has_meta = !snapshot.empty();
+  // 依赖新鲜度：源文件与 `.d` 里的每个依赖都不得比缓存对象新；有元数据时
+  // **再加 mtime+size 严格比对**——mtime 窗口（同秒改+建、拷贝保留旧 mtime、
+  // 时钟回拨）里内容变了 mtime 大概率也变，兜住绝大多数静默旧对象顶替。
+  // 等长改写仍漏（那要内容哈希才能根治，见 BACKLOG 观察方向）。无记录（旧条目）不校验。
+  const auto stale = [&](const std::string& path) -> bool {
+    const auto dep_time = fs::modified_ns(path);
+    if (!dep_time) return !fs::exists(path);   // 头被删除 → 重编
+    if (*dep_time > *cached_time) return true;
+    if (has_meta) {
+      if (const auto found = snapshot.find(path); found != snapshot.end()) {
+        // mtime **严格等于记录值**才放行：`>` 比对抓不住时钟回拨（回拨后改的文件
+        // mtime 比缓存对象还旧，看起来"更不新"），`!=` 抓得住。误伤面仅 touch/
+        // 跨文件系统拷贝带来的 mtime 抖动（FAT 2s 粒度）——多编一次后重写
+        // .meta 即恢复，保守方向不交付旧内容。
+        if (*dep_time != found->second.first) return true;
+        if (fs::file_size(path).value_or(found->second.second) != found->second.second) {
+          return true;   // size 变了：内容已不是编出缓存对象的那份
+        }
+      }
+    }
+    return false;
+  };
+  if (stale(unit.source)) return false;
   for (const auto& dep : parse_depfile(cached_depfile)) {
-    const auto dep_time = fs::modified_ns(dep);
-    if (dep_time && *dep_time > *cached_time) return false;
-    if (!dep_time && !fs::exists(dep)) return false;
+    if (stale(dep)) return false;
   }
   if (auto status = fs::copy_file(cached_object, unit.object); !status) return false;
   if (auto status = fs::copy_file(cached_depfile, unit.depfile); !status) return false;
+  // **同步落工程内侧边车**：restore 复制回来的对象进入快路径（下一轮
+  // `needs_rebuild` 直接判它），侧边车让快路径读到同一套 (mtime, size) 快照——
+  // 两条路径一个真值源。旧缓存条目（无 .meta，快照空）时这里不写：该对象走
+  // 快路径 mtime-only（与历史行为一致，不阻塞构建）。
+  if (has_meta) {
+    if (const auto meta_text = fs::read_text(cached_meta)) {
+      (void)fs::write_text(deps_meta_path(unit.object), *meta_text);
+    }
+  }
   return true;
 }
 
 /// 编译成功后写入缓存（失败不影响构建：缓存是加速手段，不是正确性前提）。
+///
+/// 元数据 `unit.meta`（BACKLOG 修复）：逐行 `path<TAB>mtime<TAB>size`（格式与
+/// 含制表符路径的处理见 `serialize_deps_meta`），覆盖源文件与 `.d` 里的全部依赖
+/// ——restore 时 mtime+size 双校验。
 auto object_cache_store(const ObjectCache& cache, std::string_view key, const CompileUnit& unit,
                         std::atomic<std::size_t>& stores) -> void {
   if (!cache.enabled()) return;
   if (!fs::is_regular_file(unit.object) || !fs::is_regular_file(unit.depfile)) return;
   const std::string directory = fs::join(cache.root, key);
   if (auto status = fs::create_directories(directory); !status) return;
+  // 元数据先行：对象落盘前的窗口里，restore 看到的是"新 .o + 无/旧 .meta"，
+  // 后者只会退化到 mtime-only（保守方向——多编一次，不交付旧内容）。
+  if (auto status = fs::write_text(fs::join(directory, "unit.meta"),
+                                   serialize_deps_meta(unit.source, unit.depfile)); !status) {
+    return;
+  }
   if (auto status = fs::copy_file(unit.object, fs::join(directory, "unit.o")); !status) return;
   if (auto status = fs::copy_file(unit.depfile, fs::join(directory, "unit.d")); !status) return;
   stores.fetch_add(1);
@@ -1070,6 +1193,10 @@ struct LanguageFlags {
           flags_stamp_path(unit->object),
           compile_fingerprint(toolchain.kind, unit_flags, profile_flags_list,
                               unit->third_party, pch_token_for(*unit)));
+      // 依赖快照侧边车（快路径 mtime+size 双校验用）：与共享缓存 `unit.meta` 同一套
+      // 序列化。写失败同样不影响本次构建（缺侧边车 → 快路径退回 mtime-only）。
+      (void)fs::write_text(deps_meta_path(unit->object),
+                           serialize_deps_meta(unit->source, unit->depfile));
       // 编译成功：写入共享缓存（失败不影响构建——缓存是加速手段，不是正确性前提）
       object_cache_store(object_cache, cache_key_for(*unit), *unit, cache_stores);
       ++done;
@@ -1343,8 +1470,9 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
       return unexpected(
           ErrorCode::Io,
           std::format("链接失败：产物被占用（{}）\n"
-                      "请先结束正在运行的实例（例如 `st stop {}` 或结束进程），再重新构建。\n{}",
-                      output, manifest.name, diagnostics));
+                      "请先结束正在运行的实例（如关掉那个窗口 / 任务管理器结束进程；"
+                      "它占着旧产物，链接器写不进去），再重新构建。\n{}",
+                      output, diagnostics));
     }
     return unexpected(ErrorCode::Invalid,
                       std::format("链接失败: {}\n{}", output, diagnostics));
@@ -2229,12 +2357,21 @@ auto run_tests(const Manifest& manifest, const BuildOptions& options, std::strin
   std::size_t rebuilt = 0;
   auto compiled = compile_units(effective, options, units, *flags, *toolchain,
                                 framework_flags.has_value() ? &*framework_flags : nullptr, rebuilt);
-  if (!compiled) return forward_error(compiled.error());
+  if (!compiled) {
+    return unexpected(compiled.error().code,
+                      std::format("测试构建失败（编译段）：{}", compiled.error().message));
+  }
   ST_LOG_INFO("测试构建：{} 单元（重编 {}）", units.size(), rebuilt);
 
   const std::string output = fs::join(bin_dir, "st_tests" + toolchain->executable_suffix);
   auto linked = link(manifest, options, units, output, *flags, *toolchain, {});
-  if (!linked) return forward_error(linked.error());
+  if (!linked) {
+    // 链接失败单独报（BACKLOG 3837）：ld.lld「failed to write output … permission denied」
+    // 曾被误判为「一堆用例没跑＝测试失败」——产物没出来，用例根本没跑。
+    // 「测试构建失败」前缀是 is_link_failure 的判据，不能改。
+    return unexpected(linked.error().code,
+                      std::format("测试构建失败（链接段）：{}", linked.error().message));
+  }
   // 测试二进制同样分离调试信息：它是**开发用**产物，但每次都链、而且比 gallery 大得多
   // （几百个单元全静态链入）——留着 70MB 的 `.debug_*` 只会白占磁盘与拷贝时间。
   // 崩了照样能回溯：`addr2line -e st_tests.debug` 或直接交给 gdb（它自己认分离符号）。
@@ -2253,6 +2390,20 @@ auto run_tests(const Manifest& manifest, const BuildOptions& options, std::strin
                       std::format("交叉编译产物无法在宿主执行: {}（请在目标平台运行）", output));
   }
   return run_shards(output, manifest.directory, args, list_only, junit_path, options.test_jobs);
+}
+
+/// 错误分类：`run_tests` 链路上哪些失败是「链接/构建失败」而非「用例断言红」。
+///
+/// 判据（产品实测口径，2026-10 BACKLOG 3837）：
+/// - 编译/链接段的失败（build.cpp:2228-2232 段）以「测试构建失败」开头；
+/// - 分片进程异常退出/未启动以「测试分片 …/N」开头（含真 abort 与起不来两种）；
+/// - 其余（清单加载、工具链解析、JUnit 合并失败……）不是用例失败，但也不属
+///   「产物没出来」——归入非链接类，CLI 层按旧语义报（不影响退码判断）。
+/// 退出码语义见 command_test：链接失败类固定退 125，与「恰好 N 个用例失败」
+/// 区分开，脚本/演进循环不再需要从 stderr 文本里猜。
+[[nodiscard]] bool is_link_failure(const st::Error& error) {
+  const std::string_view message = error.message;
+  return message.starts_with("测试构建失败") || message.starts_with("测试分片");
 }
 
 }  // namespace st::pkg

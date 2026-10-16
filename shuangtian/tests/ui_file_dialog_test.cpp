@@ -419,6 +419,163 @@ ST_TEST(file_dialog_directory_mode_confirms_the_current_directory) {
   ST_CHECK_EQ(confirmed, sandbox.dir);   // **目录本身**，不是 join(dir, "")
 }
 
+ST_TEST(file_dialog_directory_mode_pending_path_enters_directory_and_confirms_it) {
+  // 选目录模式的程序化选路（BACKLOG 3895 后半）：`pending_path` 指向**目录**时进入它，
+  // 再 confirm 交出的就是那个目录——「换工作区」类自动化（gbcode 的
+  // open_folder_dialog）从此可端到端驱动；指向**文件**则如实 false 且状态不动
+  //（该模式下文件名不参与语义，回填等于埋一个拼接伪路径）。
+  Sandbox sandbox;
+  Hosted hosted;
+  hosted.dialog->set_mode(FileDialog::Mode::Directory);
+  hosted.dialog->set_directory(sandbox.dir);
+  hosted.layout();
+
+  const std::string target_dir = st::fs::join(sandbox.dir, "sub");
+  ST_CHECK(hosted.dialog->set_pending_path(target_dir));
+  ST_CHECK_EQ(hosted.dialog->directory(), target_dir);
+  ST_CHECK_EQ(hosted.dialog->entry_count(), std::size_t{1});   // sub 里只有 c.txt
+  ST_CHECK(hosted.dialog->filename().empty());
+
+  std::string confirmed;
+  hosted.dialog->on_confirm = [&](const std::string& path) { confirmed = path; };
+  ST_CHECK(hosted.dialog->invoke_action("confirm", ""));
+  ST_CHECK_EQ(confirmed, target_dir);   // 交出的是**目录本身**
+
+  // 文件路径：false 且零状态改动（仍在 sub，无回填）。
+  ST_CHECK(!hosted.dialog->set_pending_path(st::fs::join(sandbox.dir, "a.txt")));
+  ST_CHECK_EQ(hosted.dialog->directory(), target_dir);
+  ST_CHECK(hosted.dialog->filename().empty());
+
+  // 属性面同口径（控制通道 set 的落点）：目录 true、文件 false。
+  ST_CHECK(hosted.dialog->set_property("pending_path", st::fs::join(sandbox.dir, "zdir")));
+  ST_CHECK_EQ(hosted.dialog->directory(), st::fs::join(sandbox.dir, "zdir"));
+  ST_CHECK(!hosted.dialog->set_property("pending_path", st::fs::join(sandbox.dir, "b.md")));
+  ST_CHECK_EQ(hosted.dialog->directory(), st::fs::join(sandbox.dir, "zdir"));
+}
+
+ST_TEST(file_dialog_multi_select_pending_paths_complete_flow) {
+  // 多选的程序化选路（BACKLOG 3895 前半）：`pending_paths`（`|` 分隔）→
+  // 进入共同目录 + 集合就位（属性面读回一致）→ confirm 经 `on_confirm_multiple`
+  // 整份交付，注入顺序保留。判据端到端（与单路径用例同口径）：
+  // 只断言"返回 true"是"接口存在"，不是"流程跑得通"。
+  Sandbox sandbox;
+  Hosted hosted;
+  ST_CHECK(hosted.dialog->set_property("multi_select", "true"));
+  hosted.dialog->set_directory(sandbox.dir);
+  hosted.layout();
+
+  const std::string a = st::fs::join(sandbox.dir, "a.txt");
+  const std::string b = st::fs::join(sandbox.dir, "b.md");
+  ST_CHECK(hosted.dialog->set_property("pending_paths", a + "|" + b));
+  ST_CHECK_EQ(hosted.dialog->directory(), sandbox.dir);
+  // 读回对称（属性面）：`|` 连接，顺序即注入顺序。
+  ST_CHECK_EQ(hosted.dialog->get_property("selected_paths").value_or(""), a + "|" + b);
+  ST_CHECK(hosted.dialog->filename().empty());   // 多选下文件名不代表任何单个选择
+  // 集合内的行在可见列表里（锚点选中与集合命中都是它们）。
+  const auto* anchor = hosted.dialog->selected_entry();
+  ST_REQUIRE(anchor != nullptr);
+  ST_CHECK(anchor->name == "a.txt" || anchor->name == "b.md");
+
+  std::vector<std::string> delivered;
+  hosted.dialog->on_confirm_multiple = [&](const std::vector<std::string>& paths) {
+    delivered = paths;
+  };
+  ST_CHECK(hosted.dialog->invoke_action("confirm", ""));
+  ST_CHECK_EQ(delivered.size(), std::size_t{2});
+  ST_CHECK(delivered.size() == 2U && delivered[0] == a && delivered[1] == b);   // 顺序保留
+}
+
+ST_TEST(file_dialog_multi_select_rejects_bad_input_without_moving) {
+  // 多选入口的诚实契约（与单路径 rejects_missing 同口径，自动化最怕
+  // "调了没报错但去了别处"）：任一路径无效/跨目录/空清单 → false 且零状态改动；
+  // 模式与开关前置不满足同样如实 false。另钉 Ctrl+Click 用户侧链路写同一份状态。
+  Sandbox sandbox;
+  Hosted hosted;
+  ST_CHECK(hosted.dialog->set_property("multi_select", "true"));
+  hosted.dialog->set_directory(sandbox.dir);
+  hosted.layout();
+
+  const std::string a = st::fs::join(sandbox.dir, "a.txt");
+  const std::string c = st::fs::join(st::fs::join(sandbox.dir, "sub"), "c.txt");   // 跨目录
+  // 预置有效集合（后续各分支的旧值基准）
+  std::vector<std::string> good{a, st::fs::join(sandbox.dir, "b.md")};
+  ST_CHECK(hosted.dialog->set_pending_paths(good));
+  // ① 不存在的路径混入：整单拒绝，旧集合完好。
+  std::vector<std::string> missing{a, st::fs::join(sandbox.dir, "nope.txt")};
+  ST_CHECK(!hosted.dialog->set_pending_paths(missing));
+  ST_CHECK_EQ(hosted.dialog->selected_paths().size(), std::size_t{2});
+  // ② 跨目录：整单拒绝（桌面文件对话框的通行约束）。
+  std::vector<std::string> cross{a, c};
+  ST_CHECK(!hosted.dialog->set_pending_paths(cross));
+  ST_CHECK_EQ(hosted.dialog->selected_paths().size(), std::size_t{2});
+  // ③ 混入目录：同样无效（多选的是文件清单）。
+  std::vector<std::string> with_dir{a, st::fs::join(sandbox.dir, "sub")};
+  ST_CHECK(!hosted.dialog->set_pending_paths(with_dir));
+  ST_CHECK_EQ(hosted.dialog->selected_paths().size(), std::size_t{2});
+  // ④ 空清单：false（空集合不是一次选路意图，与单路径空串同口径）。
+  ST_CHECK(!hosted.dialog->set_pending_paths({}));
+  ST_CHECK_EQ(hosted.dialog->selected_paths().size(), std::size_t{2});
+  // ⑤ 裸文件名（无目录分量）：拒收——`parent("a.txt")` 是空串，没有稳定基准目录
+  //（拿当前目录当基准会随导航漂移）；与单路径先例不同，后者回填文件名属 Open 语义。
+  ST_CHECK(!hosted.dialog->set_pending_paths({std::string("a.txt")}));
+  ST_CHECK_EQ(hosted.dialog->selected_paths().size(), std::size_t{2});
+  ST_CHECK_EQ(hosted.dialog->directory(), sandbox.dir);   // 目录从未被动过
+
+  // ⑥ 前置：非 Open 模式拒绝（Save 确认单输出路径，无多选语义）。
+  hosted.dialog->set_mode(FileDialog::Mode::Save);
+  ST_CHECK(!hosted.dialog->set_property("multi_select", "true"));
+  hosted.dialog->set_mode(FileDialog::Mode::Open);  // set_mode 返回 void（模式切换恒成功，无失败分支可断言）
+  // ⑦ 前置：开关没开时入口不可用（能力存在但没开 ≠ 路径无效，都可判别）。
+  ST_CHECK(!hosted.dialog->set_pending_paths(good));
+  ST_CHECK_EQ(hosted.dialog->selected_paths().size(), std::size_t{0});
+
+  // ⑧ Ctrl+Click 用户侧链路与程序化入口写同一份状态：
+  // 开着多选的 Open 模式里点文件行 = 进集合，再点 = 出集合。
+  ST_CHECK(hosted.dialog->set_property("multi_select", "true"));
+  const st::ui::RenderContext context = hosted.root.render_context();
+  st::ui::Event ctrl_click_a;
+  ctrl_click_a.kind = st::ui::EventKind::Click;
+  ctrl_click_a.ctrl = true;
+  const st::math::Rect a_row = hosted.dialog->entry_rect(2);   // 排序后：0=sub 1=zdir 2=a.txt
+  ctrl_click_a.position = st::math::Point{a_row.x + 30.0f, a_row.y + a_row.height * 0.5f};
+  (void)hosted.dialog->on_event(context, ctrl_click_a);
+  ST_CHECK_EQ(hosted.dialog->selected_paths().size(), std::size_t{1});
+  ST_CHECK(hosted.dialog->selected_paths().size() == 1U &&
+           hosted.dialog->selected_paths().front() == a);
+  (void)hosted.dialog->on_event(context, ctrl_click_a);   // 再点 = 取消
+  ST_CHECK(hosted.dialog->selected_paths().empty());
+}
+
+ST_TEST(file_dialog_single_path_flow_does_not_regress_with_multi_surface) {
+  // 回归面：多选能力上桌后，**单路径链路一行未变**——`pending_path`（单路径）/
+  // select/activate 语义与既有用例逐字一致（未开多选时确认仍走 `on_confirm`）。
+  Sandbox sandbox;
+  Hosted hosted;
+  hosted.dialog->set_directory(sandbox.dir);
+  hosted.layout();
+
+  const std::string target = st::fs::join(sandbox.dir, "a.txt");
+  ST_CHECK(hosted.dialog->set_property("pending_path", target));
+  ST_CHECK_EQ(hosted.dialog->filename(), std::string("a.txt"));
+  std::string confirmed;
+  int multi_confirms = 0;
+  hosted.dialog->on_confirm = [&](const std::string& path) { confirmed = path; };
+  hosted.dialog->on_confirm_multiple = [&](const std::vector<std::string>&) { ++multi_confirms; };
+  ST_CHECK(hosted.dialog->invoke_action("confirm", ""));
+  ST_CHECK_EQ(confirmed, target);          // 单路径确认链路原样
+  ST_CHECK_EQ(multi_confirms, 0);          // 多选回调未被牵连
+
+  // 单路径属性/动作面不受新属性干扰：`selected_paths` 空集读回空串，
+  // `select`/`activate` 语义同旧（不确认/确认）。
+  ST_CHECK_EQ(hosted.dialog->get_property("selected_paths").value_or("-"), std::string(""));
+  ST_CHECK(hosted.dialog->invoke_action("select", "2"));   // 单击 a.txt：不确认
+  ST_CHECK_EQ(confirmed, target);
+  confirmed.clear();
+  ST_CHECK(hosted.dialog->invoke_action("activate", "2")); // 双击 a.txt：确认
+  ST_CHECK_EQ(confirmed, target);
+  ST_CHECK_EQ(multi_confirms, 0);
+}
+
 ST_TEST(file_dialog_directory_mode_ignores_files_and_text_input) {
   // 目录模式的两条边界（都是“用户会误触”的路径）：
   // ① 点一个**文件**不该确认——否则浏览时误点就会把“该文件所在目录”当结果交出去；

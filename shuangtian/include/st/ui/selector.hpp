@@ -28,6 +28,11 @@ class Selector {
 
   static auto parse(std::string_view text) -> Result<Selector>;
 
+  /// 构造「整串精确 id 匹配」的选择器：不做 CSS 拆分，`id` 里的 `.`/`:` 等字符
+  /// 按字面处理。控制通道 `find` 对 `#xxx` 形态用它做「完整 id 匹配优先」的容错
+  /// （BACKLOG P2 2026-10-15：含点 id 被 CSS 拆分后 count 恒 0，报错离真因很远）。
+  static auto exact_id(std::string_view id) -> Selector;
+
   [[nodiscard]] auto matches(const Element& element) const -> bool;
   /// 带层级匹配（`>` 要求直接父子）。
   [[nodiscard]] auto matches_with_ancestors(const Element& element) const -> bool;

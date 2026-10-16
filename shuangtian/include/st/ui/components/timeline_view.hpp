@@ -67,6 +67,11 @@ class TimelineView : public Element {
   [[nodiscard]] auto snap_options() const noexcept -> const timeline::SnapOptions& {
     return snap_options_;
   }
+  /// 选中片段的修剪手柄（左右缘竖条）显隐。默认 false：手柄只在**选中**且开关
+  /// 打开时画——与全时段可见的「命中带」（`Model::hit_test` 的 kEdgePx，恒在）
+  /// 是两回事：命中带管“能不能抓”，手柄管“看得见抓哪”。
+  void set_show_trim_handles(bool value) { show_trim_handles_ = value; mark_dirty(); }
+  [[nodiscard]] auto show_trim_handles() const noexcept -> bool { return show_trim_handles_; }
 
   // —— 回调（宿主据此更新"当前时间"显示、落盘撤销栈等）——
   std::function<void(timeline::Millis)> on_playhead_changed{};
@@ -86,6 +91,9 @@ class TimelineView : public Element {
                                    std::string_view argument) -> bool override;
 
  private:
+  /// “无悬停/无命中”哨兵（不同子组件间通用，`std::size_t` 的 kNone 同族）。
+  static constexpr std::size_t kNoIndex{static_cast<std::size_t>(-1)};
+
   /// 拖拽目标（一次只可能拖一样）。
   struct Drag {
     enum class Kind : std::uint8_t { None, Playhead, ClipBody, ClipLeft, ClipRight, Pan };
@@ -118,10 +126,16 @@ class TimelineView : public Element {
   timeline::Model model_{};
   bool show_ruler_{true};
   bool snap_enabled_{true};
+  bool show_trim_handles_{false};
   timeline::SnapOptions snap_options_{};
   Drag drag_{};
   /// 播放头是否正在被拖（绘制时把柄画实心，提示"你抓着它"）。
   bool dragging_playhead_{false};
+  /// 悬停中的片段（lane 内坐标；无悬停 = kNone）。自绘内容不受 Element 框体层
+  /// hover_effect 管（那只作用于整块框体），片段级悬停须组件自跟踪：MouseMove
+  /// 查询命中更新，HoverOut 清除（与 caiyun 手写版同一套最小实现）。
+  std::size_t hover_track_{kNoIndex};
+  std::size_t hover_clip_{kNoIndex};
 
   math::Color surface_{};
   math::Color surface_alt_{};
@@ -132,6 +146,7 @@ class TimelineView : public Element {
   math::Color accent_{};
   math::Color clip_fill_{};
   math::Color clip_selected_{};
+  math::Color clip_hover_{};
   math::Color playhead_color_{};
   math::Color muted_track_{};
   float font_size_{12.0f};

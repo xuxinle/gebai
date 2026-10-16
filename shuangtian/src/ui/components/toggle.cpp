@@ -63,14 +63,26 @@ void paint_label(const RenderContext& context, raster::Surface& canvas, std::str
 }
 
 /// 控件自身尺寸（指示器 + 间距 + 标签 + 上下留白，留白容纳焦点环）。
+/// 标签字号用回放后的 `style_.font_size`（排版覆盖生效时宽度跟着变，不截字）。
 [[nodiscard]] auto control_size(const RenderContext& context, const TextPort& port, float marker_width,
-                                const std::string& label) -> math::Size {
+                                const std::string& label, const Style& style) -> math::Size {
   const Metrics& metrics = context.theme.metrics();
   const float pad = metrics.space_xs;
-  const float line = port.line_height(metrics.font_base);
+  const float font = style.font_size > 0.0f ? style.font_size : metrics.font_base;
+  const float line = port.line_height(font);
   float width = pad * 2.0f + marker_width;
-  if (!label.empty()) width += metrics.space_sm + port.measure_width(label, metrics.font_base);
+  if (!label.empty()) width += metrics.space_sm + port.measure_width(label, font);
   return math::Size{width, std::max(k_box_size, line) + pad * 2.0f};
+}
+
+/// 标签取色：显式文字色覆盖（DSL `BoxProps::color/hex_color`）盖过可用/禁用色
+///（Checkbox/Radio/Switch 三件共用，与 Badge 同口径）。
+[[nodiscard]] auto label_color(const Element& element, const Palette& colors) -> math::Color {
+  if (const auto& override_color = element.text_color_override();
+      override_color.has_value()) {
+    return *override_color;
+  }
+  return element.enabled() ? colors.text : colors.text_faint;
 }
 
 /// 夹取到布局约束（组件自算尺寸后自行收敛，与容器约束保持一致）。
@@ -95,6 +107,10 @@ void sync_style(Element& element, const RenderContext& context, float radius) {
   style.border_width = 0.0f;
   style.border_color = math::Color{0, 0, 0, 0};
   style.align_items = Align::Center;
+  // 显式排版覆盖最后回放（与 Text/Button 同口径；三件套 Checkbox/Radio/Switch
+  // 共用本助手，一处回放三件生效）。字号覆盖同步改标签度量（control_size
+  // 在本函数之后跑，读的是回放后的 style_.font_size，宽度跟随不截字）。
+  element.apply_text_overrides();
 }
 
 }  // namespace
@@ -131,7 +147,7 @@ void Checkbox::measure(const RenderContext& context, const Constraints& constrai
   const float radius = std::min(context.theme.metrics().radius_sm, k_box_radius_max);
   sync_style(*this, context, radius);
   const TextPort& port = text_port_of(context);
-  measured_ = fit_size(control_size(context, port, k_box_size, label_), style_, constraints);
+  measured_ = fit_size(control_size(context, port, k_box_size, label_, style_), style_, constraints);
 }
 
 void Checkbox::paint_content(const RenderContext& context, raster::Surface& canvas) const {
@@ -172,7 +188,7 @@ void Checkbox::paint_content(const RenderContext& context, raster::Surface& canv
 
   const float gap = label_.empty() ? 0.0f : metrics.space_sm;
   paint_label(context, canvas, label_, label_box_after(box, bounds_, gap), style_.font_size,
-              enabled_ ? colors.text : colors.text_faint);
+              label_color(*this, colors));
   if (focused_) paint_focus_ring(context, canvas, box, radius);
 }
 
@@ -278,7 +294,7 @@ auto Radio::indicator_rect(const RenderContext& context) const -> math::Rect {
 void Radio::measure(const RenderContext& context, const Constraints& constraints) {
   sync_style(*this, context, k_box_size * 0.5f);  // 圆形：圆角 = 半径
   const TextPort& port = text_port_of(context);
-  measured_ = fit_size(control_size(context, port, k_box_size, label_), style_, constraints);
+  measured_ = fit_size(control_size(context, port, k_box_size, label_, style_), style_, constraints);
 }
 
 void Radio::paint_content(const RenderContext& context, raster::Surface& canvas) const {
@@ -317,7 +333,7 @@ void Radio::paint_content(const RenderContext& context, raster::Surface& canvas)
 
   const float gap = label_.empty() ? 0.0f : metrics.space_sm;
   paint_label(context, canvas, label_, label_box_after(box, bounds_, gap), style_.font_size,
-              enabled_ ? colors.text : colors.text_faint);
+              label_color(*this, colors));
   if (focused_ && box.width > 0.0f) {
     // 圆弧描边在交点处靠圆头连接补形，故环画在指示器外沿（半径夹取见 `paint_focus_ring`）。
     paint_focus_ring(context, canvas, box, radius);
@@ -457,7 +473,7 @@ auto Switch::knob_progress(const RenderContext& context) const -> float {
 void Switch::measure(const RenderContext& context, const Constraints& constraints) {
   sync_style(*this, context, k_track_height * 0.5f);
   const TextPort& port = text_port_of(context);
-  measured_ = fit_size(control_size(context, port, k_track_width, label_), style_, constraints);
+  measured_ = fit_size(control_size(context, port, k_track_width, label_, style_), style_, constraints);
 }
 
 void Switch::paint_content(const RenderContext& context, raster::Surface& canvas) const {
@@ -507,7 +523,7 @@ void Switch::paint_content(const RenderContext& context, raster::Surface& canvas
 
   const float gap = label_.empty() ? 0.0f : metrics.space_sm;
   paint_label(context, canvas, label_, label_box_after(track, bounds_, gap), style_.font_size,
-              enabled_ ? colors.text : colors.text_faint);
+              label_color(*this, colors));
   if (focused_) paint_focus_ring(context, canvas, track, radius);
 }
 

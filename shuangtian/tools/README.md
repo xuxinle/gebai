@@ -5,7 +5,7 @@
 | 类别 | 去处 | 例子 |
 |---|---|---|
 | **代码**（含生成的代码） | 直接进仓库 | `third_party/quickjs`、`nlohmann`、`battery`（`opengl/gl.h` **已随 OpenGL 方案移除**，见 `DESIGN.md` §8.4.1） |
-| **二进制 / 大源码库** | 资源管理（不进仓库） | 模型权重走 `resources/`（见 `resources/README.md`）、13–17 GB 的 GGUF 走主仓库 `infer/config/assets.manifest.json` |
+| **二进制 / 大源码库** | 资源管理（不进仓库） | 模型权重走主仓库 `resources/models/`（不进本仓；推理侧另有 `infer/config/assets.manifest.json` 管 13–17 GB 的 GGUF） |
 
 界是"它是不是给人读/给编译器读的代码"。
 

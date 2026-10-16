@@ -20,6 +20,7 @@
 #include <format>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "canvas_view.hpp"
@@ -31,6 +32,8 @@
 #include "st/core/print.hpp"
 #include "st/core/time.hpp"
 #include "st/ui/components/basic.hpp"
+#include "st/ui/components/color_picker.hpp"
+#include "st/ui/components/file_dialog.hpp"
 #include "st/ui/components/menu.hpp"
 #include "st/ui/components/slider.hpp"
 #include "st/ui/components/split_view.hpp"
@@ -41,6 +44,7 @@
 namespace {
 
 using louyue::CanvasView;
+using louyue::CanvasViewport;
 using louyue::Document;
 using louyue::Swatch;
 using louyue::Tool;
@@ -53,11 +57,30 @@ struct Options {
   bool headless{false};
   std::string backend{};
   std::string theme{"light"};
-  std::string control_port{"0"};
+  std::uint16_t control_port{0};
   std::string control_file{};
   std::string shots{};
   std::string open{};   ///< `--open <png>`：启动即打开一个真实 PNG 文件
 };
+
+/// 用法说明。**必须有**：未知参数会报错退出，没有 `--help` 就等于"报错了也没处查"
+///（承 gbcode 同名函数）。
+auto print_usage(std::string_view program) -> void {
+  st::print(
+      "用法: {} [选项]\n"
+      "\n"
+      "窗口/主题\n"
+      "  --headless            无头模式（无窗口；控制通道照常可用）\n"
+      "  --theme light|dark    主题\n"
+      "\n"
+      "内容/自动化\n"
+      "  --open PNG            启动即打开一个真实 PNG 文件\n"
+      "  --control-port N      控制通道端口（0 = 自动）\n"
+      "  --control-file PATH   控制信息落盘路径\n"
+      "  --shots DIR           无头截图目录\n"
+      "  -h, --help            显示本帮助\n",
+      program);
+}
 
 auto parse_options(int argc, char** argv) -> Options {
   Options options;
@@ -67,18 +90,59 @@ auto parse_options(int argc, char** argv) -> Options {
       if (i + 1 < argc) return argv[++i];
       return fallback;
     };
-    if (raw == "--headless") options.headless = true;
-
-    // `--backend` 必须照接：应用层有**自己的**参数解析（不过 `st::app::parse_cli`），
-    // 漏接的开关会被静默忽略——"我明明指定了 x11/wayland"会变成谜案
-    //（Linux 上验证两个窗口后端全靠它）。
-
-    if (raw == "--backend") options.backend = value("");
+    // —— 数值参数统一走带校验的解析（承 gbcode 的同条纪律，逐字对齐）——
+    //
+    // 为何不能裸调 `std::stoi`：传非数字（如 `--control-port abc`）时它抛
+    // `std::invalid_argument`，无人捕获 → `terminate`（实测退出码 0xC0000409，
+    // 屏幕上一行 what(): stoi）——用户看不懂、脚本拿不到码。而同一命令行里的
+    // `--bogus-flag` 走的是「报错 + exit 2」的干净路径。**非法值必须与未知参数
+    // 同一条路径**（报错可读、退出码稳定），不能一快一崩。
+    const auto parse_int = [&](const char* flag, long long fallback) -> long long {
+      const std::string text = value(std::format("{}", fallback).c_str());
+      long long parsed = 0;
+      std::size_t consumed = 0;
+      const bool ok = !text.empty() && [&] {
+        try {
+          parsed = std::stoll(text, &consumed);
+        } catch (const std::exception&) {
+          return false;
+        }
+        return consumed == text.size();   // 尾巴（如 `8x`）也是非法值
+      }();
+      if (!ok) {
+        st::eprint("参数 {} 需要一个整数，得到：{}（用 --help 看可用项）\n", flag, text);
+        std::exit(2);
+      }
+      return parsed;
+    };
+    if (raw == "--help" || raw == "-h") {
+      print_usage(argv[0]);
+      std::exit(0);
+    }
+    if (raw == "--headless") {
+      options.headless = true;
+    }
+    // ⚠ 独立 if 与下方 else-if 链的陷阱：命中独立 if 的参数若继续落进链尾
+    // else 兜底会被误判「未知参数」——所以 headless 必须与链同体（首个 else-if）。
+    else if (raw == "--backend") options.backend = value("");
     else if (raw == "--theme") options.theme = value("light");
-    else if (raw == "--control-port") options.control_port = value("0");
-    else if (raw == "--control-file") options.control_file = value({});
-    else if (raw == "--shots") options.shots = value({});
-    else if (raw == "--open") options.open = value({});
+    else if (raw == "--control-port") {
+      const long long port = parse_int("--control-port", 0);
+      if (port < 0 || port > 65535) {
+        st::eprint("参数 --control-port 超出端口范围：{}\n", port);
+        std::exit(2);
+      }
+      options.control_port = static_cast<std::uint16_t>(port);
+    }
+    else if (raw == "--control-file") options.control_file = value("");
+    else if (raw == "--shots") options.shots = value("");
+    else if (raw == "--open") options.open = value("");
+    // **未知参数报错，不静默忽略**（gbcode 实证过的温床：新加的开关被静默
+    // 吃掉，表现是"三档渲染出来的图几乎一样"，差点被当成结论）。
+    else {
+      st::eprint("未知参数：{}（用 --help 看可用项）\n", raw);
+      std::exit(2);
+    }
   }
   return options;
 }
@@ -116,8 +180,10 @@ class LouyuePage final : public dsl::Component {
 
   [[nodiscard]] auto document() noexcept -> Document& { return *document_; }
   [[nodiscard]] auto canvas() noexcept -> CanvasView* { return canvas_; }
+  /// 菜单「退出」（主循环退出位；窗口关闭钮走 `app.quit_requested()`）。
+  [[nodiscard]] auto quit_requested() const noexcept -> bool { return quit_requested_; }
 
-  /// 载入一个真实 PNG 文件（`--open` 与菜单「打开」共用）。
+  /// 载入一个真实 PNG 文件（`--open` 与菜单「文件→打开」共用）。
   auto open_file(const std::string& path) -> bool {
     const auto image = st::codec::png_read_file(path);
     if (!image.has_value()) return false;
@@ -131,6 +197,7 @@ class LouyuePage final : public dsl::Component {
     (void)layers_version_.value();
     (void)canvas_version_.value();
     dsl::column(c, {.gap = 0.0f, .grow = true, .id = "louyue-root"}, [&] {
+      build_menu_bar(c);
       dsl::row(c, {.gap = 0.0f, .grow = true, .id = "main-row"}, [&] {
         build_toolbar(c);
         build_viewport(c);
@@ -138,6 +205,7 @@ class LouyuePage final : public dsl::Component {
       });
       build_status_bar(c);
     });
+    build_file_dialog(c);
   }
 
   // —— 供 e2e 的动作面（设计文档 §3.4，**不可改名**）——
@@ -185,6 +253,95 @@ class LouyuePage final : public dsl::Component {
     if (canvas_ != nullptr) canvas_->mark_dirty();
   }
 
+  /// 菜单栏（与 gbcode 同一条 `dsl::menu_bar` + `menu_panel_overlay` 链路）。
+  ///
+  /// 「文件→打开/另存」曾是注释里的虚指（`--open` 注释声称共用，菜单却
+  /// 不存在）——这不是补一个装饰：`open_file`/`export_png` 的能力早就在，
+  /// 缺的只是 UI 入口。`FileDialog` 是框架组件（目录浏览/双击进入/面包屑
+  /// 都现成），无头下还可程序化选路（`set_pending_path`）。
+  void build_menu_bar(dsl::Composer& c) {
+    const std::vector<dsl::MenuData> menus = {
+        {"file", "文件",
+         {{.id = "open", .label = "打开 PNG…"},
+          {.id = "save-as", .label = "导出 PNG…"},
+          {.separator = true},
+          {.id = "quit", .label = "退出"}}},
+    };
+    menu_bar_ = dsl::menu_bar(
+        c, menus,
+        [this](const std::string& menu, const std::string& item) {
+          if (menu != "file") return;
+          if (item == "open") {
+            file_dialog_mode_ = 0;
+            file_dialog_open_.set(true);
+          } else if (item == "save-as") {
+            file_dialog_mode_ = 1;
+            file_dialog_open_.set(true);
+          } else if (item == "quit") {
+            quit_requested_ = true;
+          }
+        },
+        [this](std::size_t index) {
+          // 与 gbcode 的 MenuHeader 同构：再点同一标题 = 收起（kNoMenu 哨兵）；
+          // `menu_bar` 内部关闭路径（Esc/点外/选条目）也经这里传 kNoMenu。
+          menu_open_.set(menu_open_.value() == index ? kNoMenu : index);
+        },
+        {.id = "menubar"});
+    // 打开状态 → 下一帧声明面板 overlay（不声明 = 自动消失，框架 sweep）。
+    if (menu_open_.value() != kNoMenu && menu_bar_ != nullptr) {
+      dsl::menu_panel_overlay(c, *menu_bar_, menu_open_.value());
+    }
+  }
+
+  /// 文件对话框（打开/导出共用，`file_dialog_mode_` 区分——与 gbcode 的
+  /// `build_open_dialog` 同构，含它踩过的两个坑：
+  /// ① 标题必须设（无标题顶部空一块，像"内容没加载出来"）；
+  /// ② 起始目录只在**一次新的打开动作里**设（每帧无条件 set 会把用户导航
+  ///   打回起点——面包屑只有一段、进不去任何目录，实测踩到）。
+  void build_file_dialog(dsl::Composer& c) {
+    if (!file_dialog_open_.value()) {
+      dialog_seen_ = false;   // 不在树上：下次重新打开要重新初始化目录
+      return;
+    }
+    const bool saving = file_dialog_mode_ == 1;
+    const bool fresh_open = !dialog_seen_;   // 本帧才被声明 = 一次新的打开动作
+    dialog_seen_ = true;
+    (void)dsl::overlay(c, "file-dialog", {}, [&] {
+      (void)dsl::custom<st::ui::FileDialog>(
+          c, [this, saving, fresh_open](st::ui::FileDialog& dialog) {
+            dialog.set_id("file-dialog");
+            dialog.set_title(saving ? "导出 PNG" : "打开 PNG");
+            dialog.set_mode(saving ? st::ui::FileDialog::Mode::Save
+                                   : st::ui::FileDialog::Mode::Open);
+            if (fresh_open) {
+              dialog.set_directory(".");
+              if (saving && !document_->file_path().empty()) {
+                // 预填当前文件名：改几个字比从零敲快得多（gbcode 同做法）。
+                const std::size_t slash = document_->file_path().find_last_of("/\\");
+                dialog.set_filename(slash == std::string::npos
+                                        ? document_->file_path()
+                                        : document_->file_path().substr(slash + 1));
+              }
+            }
+            if (!saving) dialog.set_name_filters({".png"});
+            dialog.on_confirm = [this, saving](const std::string& path) {
+              file_dialog_open_.set(false);
+              if (saving) {
+                if (!document_->export_png(path)) {
+                  st::eprint("导出失败：{}\n", path);
+                }
+                return;
+              }
+              if (!open_file(path)) {
+                st::eprint("无法打开：{}\n", path);
+              }
+            };
+            dialog.on_cancel = [this] { file_dialog_open_.set(false); };
+          },
+          {.id = "file-dialog"});
+    });
+  }
+
   void build_toolbar(dsl::Composer& c) {
     dsl::column(c, {.gap = 2.0f, .padding_y = 4.0f, .width = 44.0f,
                     .surface = st::ui::Element::Surface::Alt, .id = "toolbar"}, [&] {
@@ -211,10 +368,49 @@ class LouyuePage final : public dsl::Component {
   }
 
   void build_viewport(dsl::Composer& c) {
-    // `custom<T>`：高频自绘不进重组树（状态变化走 `mark_dirty`）。
-    (void)dsl::custom<CanvasView>(
-        c, [this](CanvasView& view) { bind_canvas(view); },
-        {.grow = true, .id = "canvas", .key = "canvas"});
+    // 回流第二跳（拆迁完成）：`CanvasViewport`（内置 Viewport 外壳）包住
+    // **文档原生尺寸**的 `CanvasView`。缩放/平移/棋盘格/裁剪全部在外壳；
+    // 画布只画位图 + 工具输入 + 文档级动作。
+    //
+    // 子元素声明用 `custom_container`（ScrollView 内嵌 List 的同款容器形态）：
+    // DSL 每帧按游标对齐复用同一个 CanvasView 实例（key="canvas" 命中即复用；
+    // 笔刷拖拽进行态/画布指针跨帧保持）。
+    //
+    // `on_view_changed` 里两件事：① `snap_zoom` 档位吸附（连续值收口——
+    // 旧隐疾 #1 根治，协议 set 任意浮点后终值恒在档位表上）；② 触发重组让
+    // 状态栏回显跟随（dsl::text 闭包在 build 期求值，不重组就永远旧文案）。
+    // 闭包**只捕 this**：shell 是 configure 栈引用（每帧重定义），捕它悬垂。
+    CanvasViewport& shell = dsl::custom_container<CanvasViewport>(
+        c,
+        [&] {
+          (void)dsl::custom<CanvasView>(
+              c, [this](CanvasView& view) { bind_canvas(view); },
+              {.id = "canvas", .key = "canvas"});
+        },
+        [this](CanvasViewport& outer) {
+          outer.set_id("canvas-viewport");
+          outer.on_view_changed = [this] {
+            if (canvas_ != nullptr) {
+              if (auto* live = dynamic_cast<CanvasViewport*>(canvas_->viewport());
+                  live != nullptr) {
+                live->snap_zoom();   // 吸附后若 zoom 变了会再进本回调一次（收敛于档位值）
+              }
+            }
+            canvas_version_.set(canvas_version_.value() + 1U);   // 重组：状态栏跟显
+          };
+        },
+        {.grow = true, .id = "canvas-viewport", .key = "canvas-viewport"});
+    // 画布的坐标换算/缩放真值源指向外壳：在 custom_container **返回之后**接
+    //（此时子元素已声明完，父子关系已落）——首帧即生效，不等第二次重组
+    //（首帧后若无 State 写入不会再 build，依赖“下一帧补接”会让 e2e 的
+    // 首个 zoom_in 落空）。`wants_pan` 同时注入：左键拖拽平移的判定
+    //（当前工具 == 移动）是宿主/内容层的知识，外壳只认回调。
+    if (canvas_ != nullptr) {
+      canvas_->set_viewport(&shell);
+      shell.wants_pan = [this] {
+        return canvas_ != nullptr && canvas_->tool() == Tool::Move;
+      };
+    }
   }
 
   void bind_canvas(CanvasView& view) {
@@ -310,73 +506,40 @@ class LouyuePage final : public dsl::Component {
     });
   }
 
-  void build_color_panel(dsl::Composer& c) {
-    dsl::text(c, [] { return std::string("颜色"); }, {.id = "color-title"});
-    const Color color = canvas_ != nullptr ? canvas_->foreground() : Color{0, 0, 0, 255};
-    dsl::row(c, {.gap = 8.0f, .id = "swatch-row"}, [&] {
-      // 色块：**自绘元素**（`Swatch`）——不用 `Panel` + `style().background`，
-      // 理由见 `Swatch` 定义处（`apply_theme` 每帧覆盖调用方写的背景色）。
-      (void)dsl::custom<Swatch>(c, [color](Swatch& swatch) { swatch.set_color(color); },
-                                {.id = "swatch"});
-      dsl::text(c,
-                [color] { return std::format("#{:02X}{:02X}{:02X}", color.r, color.g, color.b); },
-                {.id = "hex-label", .key = "hex"});
-    });
-    build_hsv_slider(c, "hue", "色相", hue_);
-    build_hsv_slider(c, "saturation", "饱和度", saturation_);
-    build_hsv_slider(c, "value", "明度", value_);
-  }
-
-  void build_hsv_slider(dsl::Composer& c, std::string_view id, std::string_view label,
-                        dsl::State<float>& value) {
-    dsl::row(c, {.gap = 8.0f, .id = std::format("{}-row", id)}, [&] {
-      dsl::text(c, [label] { return std::string(label); }, {.width = 52.0f});
-      (void)dsl::slider(
-          c, value.value(),
-          [this, id](float v) {
-            if (id == "hue") {
-              hue_.set(v);
-            } else if (id == "saturation") {
-              saturation_.set(v);
-            } else {
-              value_.set(v);
-            }
-            apply_hsv();
-          },
-          {.grow = true, .id = std::format("{}-slider", id), .key = "hsv"});
-    });
-  }
-
-  /// HSV → RGB 并推给画布（前景色）。
-  void apply_hsv() {
-    const float h = hue_.value() / 360.0f;
-    const float s = saturation_.value();
-    const float v = value_.value();
-    const float sector = h * 6.0f;
-    const int i = static_cast<int>(std::floor(sector));
-    const float f = sector - static_cast<float>(i);
-    const float p = v * (1.0f - s);
-    const float q = v * (1.0f - f * s);
-    const float t = v * (1.0f - (1.0f - f) * s);
-    float r = 0.0f;
-    float g = 0.0f;
-    float b = 0.0f;
-    switch (i % 6) {
-      case 0: r = v; g = t; b = p; break;
-      case 1: r = q; g = v; b = p; break;
-      case 2: r = p; g = v; b = t; break;
-      case 3: r = p; g = q; b = v; break;
-      case 4: r = t; g = p; b = v; break;
-      default: r = v; g = p; b = q; break;
-    }
-    const auto channel = [](float value) {
-      return static_cast<std::uint8_t>(std::clamp(value * 255.0f, 0.0f, 255.0f));
-    };
-    if (canvas_ != nullptr) {
-      canvas_->set_foreground(Color{channel(r), channel(g), channel(b), 255});
-    }
-    canvas_version_.set(canvas_version_.value() + 1U);
-  }
+   void build_color_panel(dsl::Composer& c) {
+ dsl::text(c, [] { return std::string("颜色"); }, {.id = "color-title"});
+ const Color color = canvas_ != nullptr ? canvas_->foreground() : Color{0, 0, 0, 255};
+ dsl::row(c, {.gap = 8.0f, .id = "swatch-row"}, [&] {
+ // 色块：**自绘元素**（`Swatch`）——不用 `Panel` + `style().background`，
+ // 理由见 `Swatch` 定义处（`apply_theme` 每帧覆盖调用方写的背景色）。
+ (void)dsl::custom<Swatch>(c, [color](Swatch& swatch) { swatch.set_color(color); },
+ {.id = "swatch"});
+ dsl::text(c,
+ [color] { return std::format("#{:02X}{:02X}{:02X}", color.r, color.g, color.b); },
+ {.id = "hex-label", .key = "hex"});
+ });
+ // 取色：内置 `ColorPicker`（36 轮回流决策）——手写 HSV 三滑杆曾是它的
+ // 源头（见 color_picker.hpp 文件头），现在回到示例里成为它的**应用示范位**。
+ // 组件自带色相条/SV 块/十六进制输入，不接吸管源（`set_eyedropper_source`）——
+ // 无头下没有屏幕可截，让它如实禁用。
+ // 颜色链路不变：`on_change` → `canvas_->set_foreground`（画笔真值源）。
+ // **每帧把画布前景色同步进控件**（`notify=false`：同步不触发回调，
+ // 否则与用户操作混淆）；画布前景色只有本面板能改，两者实际上同源，
+ // 这一句主要是给初始色对齐（控件默认黑，画布初始 #20222C）。
+ (void)dsl::custom<st::ui::ColorPicker>(
+ c, [this, color](st::ui::ColorPicker& picker) {
+ picker.set_id("color-picker");
+ if (picker.color() != color) picker.set_color(color, false);
+ picker.on_change = [this](st::math::Color picked) {
+ if (canvas_ != nullptr) canvas_->set_foreground(picked);
+ // 触发重组让 swatch/hex-label 跟色（闭包按值捕获前景色，不标脏不会重捕；
+ // 与 opacity 滑块的 on_change 同款）。
+ canvas_version_.set(canvas_version_.value() + 1U);
+ if (canvas_ != nullptr) canvas_->mark_dirty();
+ };
+ },
+ {.id = "color-picker", .key = "picker"});
+ }
 
   void build_status_bar(dsl::Composer& c) {
     dsl::row(c, {.gap = 16.0f, .padding_x = 10.0f, .height = 26.0f,
@@ -395,6 +558,8 @@ class LouyuePage final : public dsl::Component {
       dsl::text(
           c,
           [this] {
+            // 回流第二跳：缩放真值在外层视口（档位吸附后的终值）。经 canvas_
+            // 间接取（闭包不捕栈引用 shell；canvas_ 由 bind_canvas 每帧刷新）。
             const float zoom = canvas_ != nullptr ? canvas_->zoom() : 1.0f;
             return std::format("{:.0f}%", static_cast<double>(zoom) * 100.0);
           },
@@ -416,12 +581,21 @@ class LouyuePage final : public dsl::Component {
 
   std::unique_ptr<Document> document_{};
   CanvasView* canvas_{nullptr};
-  dsl::State<std::size_t> canvas_version_{0};
-  dsl::State<std::size_t> layers_version_{0};
-  dsl::State<float> hue_{210.0f};
-  dsl::State<float> saturation_{0.75f};
-  dsl::State<float> value_{0.85f};
-};
+
+  // —— 菜单 / 文件对话框（打开·导出入口，见 build_menu_bar/build_file_dialog）——
+  static constexpr std::size_t kNoMenu{static_cast<std::size_t>(-1)};
+  /// 当前打开的下拉菜单（`kNoMenu` = 无）。**必须是 State**：点击标题只发生在
+  /// 事件分发里，不标脏就不会触发下一帧重组——面板 overlay（在 build 里声明）
+  /// 永远不会出现（gbcode 的 MenuHeader 同款坑）。
+  dsl::State<std::size_t> menu_open_{kNoMenu};
+  st::ui::MenuBar* menu_bar_{nullptr};      ///< 每帧 build 重新取得（非拥有）
+  dsl::State<bool> file_dialog_open_{false};
+  int file_dialog_mode_{0};                 ///< 0 = 打开 PNG；1 = 导出 PNG
+  bool dialog_seen_{false};                 ///< 对话框是否在树上（新开动作判据）
+  bool quit_requested_{false};              ///< 菜单「退出」（主循环退出位）
+   dsl::State<std::size_t> canvas_version_{0};
+ dsl::State<std::size_t> layers_version_{0};
+ };
 
 }  // namespace
 
@@ -436,7 +610,7 @@ auto run_app(int argc, char** argv) -> int {
   app_options.backend = !options.backend.empty() ? options.backend
                         : (options.headless ? std::string("headless") : std::string{});
   app_options.theme = options.theme == "dark" ? st::ui::ThemeMode::Dark : st::ui::ThemeMode::Light;
-  app_options.control_port = static_cast<std::uint16_t>(std::stoi(options.control_port));
+  app_options.control_port = options.control_port;
   app_options.control_file = options.control_file;
   app_options.screenshot_dir = options.shots;
 
@@ -446,6 +620,12 @@ auto run_app(int argc, char** argv) -> int {
   // 被具体示例的需求撑大）；`register_element_type` 就是为此留的口子。
   if (!dsl::register_element_type<CanvasView>("CanvasView")) {
     std::fprintf(stderr, "CanvasView 注册失败（与内置组件重名？）\n");
+    return 1;
+  }
+  // 回流第一跳的外壳（内置 Viewport 子类）也要登记——`custom<T>` 走注册表
+  // 创建（dsl.hpp：未注册直接 abort）。
+  if (!dsl::register_element_type<CanvasViewport>("CanvasViewport")) {
+    std::fprintf(stderr, "CanvasViewport 注册失败（与内置组件重名？）\n");
     return 1;
   }
   if (!dsl::register_element_type<Swatch>("Swatch")) {
@@ -503,7 +683,7 @@ auto run_app(int argc, char** argv) -> int {
   // （`tick_declarative_hosts`）——`DeclarativeHost` 登记的帧回调里已经内建
   // “先 pump_async 再判 dirty”的顺序，调用方不再重写（见 gallery 同段注释）。
   std::uint64_t frames = 0;
-  while (!app.quit_requested()) {
+  while (!app.quit_requested() && !page->quit_requested()) {
     const std::int64_t frame_start_ms = st::time::now_ms();
     if (app.root().tick_declarative_hosts() > 0U) app.request_repaint();
     app.tick();

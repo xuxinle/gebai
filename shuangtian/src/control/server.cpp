@@ -292,6 +292,18 @@ struct Server::Impl {
     return false;
   }
 
+  /// 白名单内容拼成一行（拒绝报错用）：报错时把实际放行目录列出来，
+  /// 调用方（智能体）不必猜「控制文件目录是哪里」——裸文件名控制文件的场景里
+  /// 这一行会显示 CWD 绝对路径（BACKLOG P2：旧文案不指向真因，排查多走一轮）。
+  [[nodiscard]] auto capture_dirs_text() const -> std::string {
+    std::string text;
+    for (const auto& dir : capture_dirs) {
+      if (!text.empty()) text.append("; ");
+      text.append(dir);
+    }
+    return text;
+  }
+
   [[nodiscard]] auto find_element(std::string_view id) -> ui::Element* {
     if (!id.empty() && id.front() == '#') id.remove_prefix(1);
     return host.root().find(id);
@@ -814,8 +826,43 @@ auto Server::Impl::handle_find([[maybe_unused]] Client& client, [[maybe_unused]]
                                [[maybe_unused]] const Json& params,
                                [[maybe_unused]] bool& deferred) -> Result<Json> {
   [[maybe_unused]] auto& root = host.root();
-auto selector = ui::Selector::parse(json_get_string(params, "selector"));
+const std::string selector_text = json_get_string(params, "selector");
+auto selector = ui::Selector::parse(selector_text);
 if (!selector) return forward_error(selector.error());
+
+// 含点 id 的容错（BACKLOG P2 2026-10-15 轮发现）：`Selector::parse` 按 CSS 语义把
+// `.` 当类型分隔符，而业务 id 常含点（`git-file-<path>`、`task-42`）——
+// `find("#git-file-alpha.txt")` 被拆成 `Id: git-file-alpha + Type: txt`，count 恒 0，
+// 调用方只看到「找不到元素」，离真因很远（智能体会反复撞）。
+// 容错策略：**整串 id 匹配优先**——形如 `#xxx` 的纯 id 选择器先按整串试精确 id 匹配，
+// 命中即用；不命中再退回 CSS 解析结果；两者都不中且 `#` 后含 `.`/`:` 时，报错文案
+// 附属性写法指引（不再只有一句「找不到」）。
+// 语义不变性：不带 `.`/`:`/`[` 的 `#id` 两条路径本就等价（精确 id 匹配）；带分隔符时
+// 整串命中优先只会覆盖「拆分后碰巧还能中」的场景（如 `#a.b` 命中 id=a.b 的元素——
+// 这正是期望的业务语义），而 CSS 拆分仍作为第二道路径保留。
+std::size_t whole_id_total = 0;
+if (selector_text.size() >= 2 && selector_text[0] == '#') {
+  const std::string whole_id = selector_text.substr(1);
+  // 遇到 CSS 元字符（` ` 祖先组合子 / `>` 子代 / `[` 属性段）即不适用：容错只
+  // 针对「纯 id 选择器」，混合选择器的语义不能被覆盖。
+  if (whole_id.find_first_of(" >[") == std::string::npos) {
+    const ui::Selector exact = ui::Selector::exact_id(whole_id);
+    whole_id_total = root.query(exact, 0).size();
+    if (whole_id_total > 0) {
+      const auto whole_matches = root.query(
+          exact, static_cast<std::size_t>(json_get_i64(params, "limit", 50)));
+      Json list = Json::array();
+      for (auto* element : whole_matches) list.push_back(ui::element_to_json(*element));
+      Json whole = Json::object();
+      whole["selector"] = selector_text;
+      whole["count"] = static_cast<std::uint64_t>(list.size());
+      whole["total"] = static_cast<std::uint64_t>(whole_id_total);
+      whole["matches"] = std::move(list);
+      return whole;
+    }
+  }
+}
+
 const auto limit = static_cast<std::size_t>(json_get_i64(params, "limit", 50));
 // `total` = **命中总数**（不受 `limit` 影响），`count` 保留为「本次返回条数」。
 //
@@ -828,6 +875,21 @@ const auto total = root.query(*selector, 0).size();
 auto matches = root.query(*selector, limit);
 Json list = Json::array();
 for (auto* element : matches) list.push_back(ui::element_to_json(*element));
+// 整串与 CSS 两条路径都不中，且 `#` 后含 `.`/`:`：报错文案附属性写法指引。
+// 此时 `#xxx.yyy` 多半是把含特殊字符的 id 直接写成了 CSS 语法——仅报「找不到」
+// 会让调用方反复撞同一堵墙（BACKLOG：离真因很远）；指引给出可用的替代写法。
+if (matches.empty() && whole_id_total == 0 && selector_text.size() >= 2 &&
+    selector_text[0] == '#') {
+  const std::string whole_id = selector_text.substr(1);
+  if (whole_id.find_first_of(" >[") == std::string::npos &&
+      whole_id.find_first_of(".:") != std::string::npos) {
+    return unexpected(
+        ErrorCode::NotFound,
+        std::format("找不到元素：选择器 {} 未命中（含 . 或 : 的 id 会被按 CSS 语法拆分；"
+                    "可用属性写法 [id=...] 精确匹配，如 [id={}]）",
+                    selector_text, whole_id));
+  }
+}
 Json result = Json::object();
 result["selector"] = json_get_string(params, "selector");
 result["count"] = static_cast<std::uint64_t>(list.size());
@@ -1220,8 +1282,8 @@ if (encode == "file" || params.contains("path")) {
   // （落在自己的 shots 目录，安全）；显式 path 必须落在白名单目录内。
   if (!path.empty() && !capture_path_allowed(path)) {
     return unexpected(ErrorCode::Invalid,
-                      std::format("截图落盘路径不在白名单目录内: {}（允许：temp、可执行文件目录与控制文件目录）",
-                                  path));
+                      std::format("截图落盘路径不在白名单目录内: {}（白名单：{}）",
+                                  path, capture_dirs_text()));
   }
   auto saved = host.capture_to_file(path, region);
   if (!saved) return forward_error(saved.error());
@@ -1313,7 +1375,9 @@ if (write_baseline || !fs::exists(path)) {
   }
   if (!capture_path_allowed(path)) {
     return unexpected(ErrorCode::Invalid,
-                      std::format("基线写入路径不在白名单目录内: {}（同 capture 落盘白名单）", path));
+                      std::format("基线写入路径不在白名单目录内: {}（白名单：{}；控制文件为裸文件名时，"
+                                  "白名单含进程 CWD 的绝对路径）",
+                                  path, capture_dirs_text()));
   }
   codec::PngImage image;
   image.width = static_cast<std::uint32_t>(current->width);
@@ -1869,7 +1933,13 @@ auto ServerOptions::default_capture_dirs() const -> std::vector<std::string> {
       }
       dirs.push_back(std::move(dir));
     } else {
-      dirs.push_back(".");  // 相对路径无分隔符：当前目录
+      // 裸文件名（无分隔符）：控制文件落在进程 CWD，白名单必须放行**该目录的绝对路径**，
+      // 不能放行字面 "."——客户端请求的 path 是绝对路径，前缀比较永远不匹配，
+      // 该目录下会全部拒绝（BACKLOG P2 2026-10-15：视觉断言基线写入莫名被拒的真因）。
+      // `current_dir()` 走 `generic_u8string()`（正斜杠、UTF-8），与
+      // `capture_path_allowed` 的归一化比较口径一致。
+      const auto cwd = fs::current_dir();
+      if (cwd) dirs.push_back(*cwd);
     }
   }
   return dirs;

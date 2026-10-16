@@ -133,6 +133,8 @@ class Table : public Element {
   std::function<void(std::size_t)> on_row_click_{};
   float total_width_{0.0f};
   float row_height_{kDefaultRowHeight};
+  /// 调用方显式设过 `set_row_height`：字号覆盖不再改写行高（见 apply_theme）。
+  bool explicit_row_height_{false};
   float scroll_offset_{0.0f};
   std::size_t hovered_row_{kNoRow};
   std::optional<std::size_t> selected_row_{};

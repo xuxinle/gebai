@@ -16,6 +16,12 @@ import time
 
 import st_client_lib  # 本地模块（同目录）：带 token/握手的单次调用
 
+# 非 UTF-8 控制台自愈：GBK 代码页下 print 中文/符号（如 '⇄'）会 UnicodeEncodeError 崩整跑；
+# 已是 UTF-8 则不动，残余不可编字符以 '?' 兜底（宁可错印不崩）。
+if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # 根目录可参数化（默认：脚本所在目录的上一级），Windows/Linux 通用；SHUANGTIAN_ROOT 可覆盖。
 ROOT = os.environ.get("SHUANGTIAN_ROOT", os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 SHOTS = os.environ.get("SHUANGTIAN_SHOTS", os.path.join(tempfile.gettempdir(), "st-visual"))

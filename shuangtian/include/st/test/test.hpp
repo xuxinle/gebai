@@ -38,6 +38,14 @@ struct Case {
   /// 它们耗时由环境决定，在共享机器上还会被邻居抬高而**偶发红灯**。
   /// 把“代码对不对”与“这台机器此刻快不快”分开报，是它们不阻塞内循环的前提。
   bool slow{false};
+  /// 本用例所在翻译单元（`ST_TEST` 展开处的 `__FILE__`；手写注册为空）。
+  ///
+  /// 用途：分片调度按 TU 装箱——同 TU 用例天然同族（共享静态/全局状态、
+  /// 同类外部资源如临时目录/git 子进程），集中到单片后同族串行，
+  /// 跨进程随机竞争消失（git_service 家族 16 片并行随机误伤的根修，
+  /// BACKLOG「git_service 家族分片并行随机误伤」）。为空时退回注册序均分
+  /// （与旧调度同一语义，向后兼容）。
+  std::string file{};
 };
 
 /// 单个用例的运行结果（junit 报告与超时标记用）。
@@ -45,6 +53,7 @@ struct CaseResult {
   std::string name{};
   bool passed{false};
   bool timed_out{false};          ///< 超过软超时：用例可能仍在跑，结果标记为失败
+  bool skipped{false};            ///< 运行中主动跳过（`ST_SKIP`）：不算通过、不算失败
   double elapsed_ms{0.0};
   std::vector<std::string> failures{};
 };
@@ -55,15 +64,26 @@ class Registry {
   static auto instance() -> Registry&;
 
   void add(std::string name, std::function<void()> body);
+  /// 带来源文件的注册（`__FILE__`；分片按 TU 装箱用，见 `Case::file`）。
+  void add(std::string name, std::function<void()> body, std::string file);
   /// 带显式软超时的注册（ms；`0` = 用默认值）。
   void add(std::string name, std::function<void()> body, std::int64_t timeout_ms);
+  /// 带来源文件与软超时的注册。
+  void add(std::string name, std::function<void()> body, std::string file,
+           std::int64_t timeout_ms);
   /// 注册一个**慢**用例（默认不跑，`--slow` 开启）。
   void add_slow(std::string name, std::function<void()> body);
+  /// 带来源文件注册慢用例。
+  void add_slow(std::string name, std::function<void()> body, std::string file);
   [[nodiscard]] auto cases() -> std::vector<Case>&;
 
   void record_failure(std::string_view file, int line, std::string message);
+  /// 运行中跳过当前用例（`ST_SKIP`）：**不算通过**（防"环境缺失被计成绿灯"），
+  /// 汇总行如实报"跳过 N"。跳过与失败同时发生时失败优先（跳过不吞失败）。
+  void record_skip(std::string_view reason);
   void clear_failures();
   [[nodiscard]] auto failures() const -> const std::vector<std::string>&;
+  [[nodiscard]] auto skip_requested() const noexcept -> bool;
   [[nodiscard]] auto check_count() const noexcept -> std::uint64_t;
   void count_check() noexcept;
 };
@@ -123,9 +143,19 @@ struct Registrar {
   Registrar(std::string_view name, std::function<void()> body) {
     Registry::instance().add(std::string(name), std::move(body));
   }
+  /// 带来源文件的注册（`ST_TEST` 宏展开处自动传 `__FILE__`；分片按 TU 装箱用，
+  /// 见 `Case::file`）。旧形态（无文件）仍可用——手写注册或第三方接入不受影响。
+  Registrar(std::string_view name, std::function<void()> body, std::string_view file) {
+    Registry::instance().add(std::string(name), std::move(body), std::string(file));
+  }
   /// 带显式软超时的注册（`ST_TEST_WITH_TIMEOUT` 用）。
   Registrar(std::string_view name, std::function<void()> body, std::int64_t timeout_ms) {
     Registry::instance().add(std::string(name), std::move(body), timeout_ms);
+  }
+  /// 带来源文件与软超时的注册（`ST_TEST_WITH_TIMEOUT` 宏展开自动传 `__FILE__`）。
+  Registrar(std::string_view name, std::function<void()> body, std::string_view file,
+            std::int64_t timeout_ms) {
+    Registry::instance().add(std::string(name), std::move(body), std::string(file), timeout_ms);
   }
 };
 
@@ -133,6 +163,10 @@ struct Registrar {
 struct SlowRegistrar {
   SlowRegistrar(std::string_view name, std::function<void()> body) {
     Registry::instance().add_slow(std::string(name), std::move(body));
+  }
+  /// 带来源文件的注册（`ST_TEST_SLOW` 宏展开自动传 `__FILE__`）。
+  SlowRegistrar(std::string_view name, std::function<void()> body, std::string_view file) {
+    Registry::instance().add_slow(std::string(name), std::move(body), std::string(file));
   }
 };
 
@@ -143,7 +177,7 @@ struct SlowRegistrar {
   static void st_test_case_##test_name();                                         \
   namespace {                                                                     \
   const ::st::test::Registrar st_test_registrar_##test_name{                      \
-      #test_name, &st_test_case_##test_name};                                     \
+      #test_name, &st_test_case_##test_name, __FILE__};                           \
   }                                                                               \
   static void st_test_case_##test_name()
 
@@ -155,9 +189,9 @@ struct SlowRegistrar {
 #define ST_TEST_SLOW(test_name)                                                    \
   static void st_test_case_##test_name();                                          \
   namespace {                                                                      \
-  const ::st::test::SlowRegistrar st_test_registrar_##test_name{                   \
-      #test_name, &st_test_case_##test_name};                                      \
-  }                                                                                \
+    const ::st::test::SlowRegistrar st_test_registrar_##test_name{                   \
+      #test_name, &st_test_case_##test_name, __FILE__};                            \
+  }                                                                               \
   static void st_test_case_##test_name()
 
 /// 同 `ST_TEST`，但指定本用例的**软超时上限**（ms）。
@@ -168,8 +202,8 @@ struct SlowRegistrar {
 #define ST_TEST_WITH_TIMEOUT(test_name, timeout_ms)                                \
   static void st_test_case_##test_name();                                         \
   namespace {                                                                     \
-  const ::st::test::Registrar st_test_registrar_##test_name{                      \
-      #test_name, &st_test_case_##test_name, (timeout_ms)};                        \
+    const ::st::test::Registrar st_test_registrar_##test_name{                       \
+      #test_name, &st_test_case_##test_name, __FILE__, (timeout_ms)};              \
   }                                                                               \
   static void st_test_case_##test_name()
 
@@ -184,6 +218,11 @@ struct SlowRegistrar {
   } while (false)
 
 /// 前置断言：失败即结束当前用例。
+///
+/// **仅限 void 函数体**（用例体或 void helper）：宏体是裸 `return;`，在值返回
+/// 函数里直接编译失败（`-fpermissive` 也救不了）——这是刻意的护栏而不是缺陷：
+/// 值返回 helper 里的早退只退出 helper 自己，不弃跑用例，若让它编译通过反而
+/// 把「半途回值」伪装成「用例结束」。需要该形态时用 `ST_REQUIRE_OR(expr, fallback)`。
 #define ST_REQUIRE(expr)                                                            \
   do {                                                                              \
     ::st::test::Registry::instance().count_check();                                  \
@@ -191,6 +230,26 @@ struct SlowRegistrar {
       ::st::test::Registry::instance().record_failure(                               \
           __FILE__, __LINE__, std::format("前置断言失败: {}", #expr));                \
       return;                                                                        \
+    }                                                                                \
+  } while (false)
+
+/// 同 `ST_REQUIRE`，但用于**值返回函数**（helper/lambda）：失败时记录失败并
+/// `return (fallback)`。语义：早退当前函数并由调用方给回什么——不会、也不能
+/// 替用例决定弃跑（helper 的 return 只退出 helper 自己）。
+///
+/// 为何不回默认值而要显式 fallback：回什么由调用方定才不会把语义藏进宏里
+/// （`std::string_view{}` vs `"<failed>"` vs `false` 都是合法选择，取决于
+/// 调用方后续怎么消费）。
+///
+/// 护栏：在 void 函数里误用会直接编译失败（`return (fallback)` 在 void 里非法），
+/// 与 `ST_REQUIRE` 在非 void 里的硬错互为镜像。
+#define ST_REQUIRE_OR(expr, fallback)                                               \
+  do {                                                                              \
+    ::st::test::Registry::instance().count_check();                                  \
+    if (!(expr)) {                                                                   \
+      ::st::test::Registry::instance().record_failure(                               \
+          __FILE__, __LINE__, std::format("前置断言失败: {}", #expr));                \
+      return (fallback);                                                             \
     }                                                                                \
   } while (false)
 
@@ -213,6 +272,8 @@ struct SlowRegistrar {
   } while (false)
 
 /// 浮点近似断言。
+///
+/// **按值落地两侧**的理由同 ST_CHECK_EQ（临时对象生存期，见其注释）。
 #define ST_CHECK_NEAR(actual, expected, epsilon)                                     \
   do {                                                                               \
     ::st::test::Registry::instance().count_check();                                   \
@@ -228,7 +289,76 @@ struct SlowRegistrar {
 
 /// 直接失败。
 #define ST_FAIL(message)                                                            \
-  do {                                                                              \
-    ::st::test::Registry::instance().record_failure(                                \
-        __FILE__, __LINE__, std::format("显式失败: {}", (message)));                  \
+  do {                                                                               \
+    ::st::test::Registry::instance().record_failure(                                 \
+        __FILE__, __LINE__, std::format("显式失败: {}", (message)));                 \
+  } while (false)
+
+/// 跳过当前用例（不算通过、不算失败；汇总行如实报数）。**从用例内 return 不了的地方**
+/// 也能用，但注意它只标记，不转移控制流——直接 `return` 跳过时也建议先调它。
+/// 典型场景：环境前置不满足（框架根缺失、ffmpeg/git 未安装）——"静默跳过 + 计成
+/// PASS"会把环境缺失伪装成绿灯（`ST_TEST_FRAMEWORK_ROOT` 缺失时的
+/// `independent_project_builds_links_and_runs` 曾如此，BACKLOG 3903）。
+#define ST_SKIP(reason)                                                              \
+  do {                                                                               \
+    ::st::test::Registry::instance().record_skip(reason);                            \
+  } while (false)
+
+// —— 列表断言（vector<string> 等 std::format 无 formatter 的序列）——————
+//
+// 为何不走「特化 std::formatter<std::vector<std::string>>」：std 命名空间模板的
+// 显式特化必须依赖程序定义类型（[namespace.std]），对标准库类型特化是 UB。
+// 故另立宏，格式化与差异定位提成函数（可在不弄红套件的前提下直接单测消息内容）。
+
+namespace st::test {
+
+/// 序列格式化成单行 `[a, b, c]`（消息里与行内差异描述统一用同一形态）。
+/// 泛型版：任意元素可 format 的序列都是同一段代码；vector<string> 是最常用特例。
+template <typename Sequence>
+[[nodiscard]] auto format_list(const Sequence& items) -> std::string {
+  std::string out{"["};
+  for (const auto& item : items) {
+    if (out.size() != 1) out += ", ";
+    out += std::format("{}", item);
+  }
+  out += "]";
+  return out;
+}
+
+/// 两个序列的逐元素差异描述（不含前缀）：列出首个不符项及下标，
+/// 长度不同时列出双方长度；无差异返回空串。
+template <typename Sequence>
+[[nodiscard]] auto list_diff(const Sequence& actual, const Sequence& expected) -> std::string {
+  const std::size_t common = actual.size() < expected.size() ? actual.size() : expected.size();
+  for (std::size_t index = 0; index < common; ++index) {
+    if (!(actual[index] == expected[index])) {
+      return std::format("首个不符在 [{}]：{} != {}（actual 共 {} 项，expected 共 {} 项）",
+                         index, actual[index], expected[index], actual.size(), expected.size());
+    }
+  }
+  if (actual.size() != expected.size()) {
+    return std::format("长度不同：actual {} 项，expected {} 项；公共前缀一致",
+                       actual.size(), expected.size());
+  }
+  return {};
+}
+
+}  // namespace st::test
+
+/// 序列相等断言（ST_CHECK_EQ 的序列版：元素级差异定位，不等时能看清差在哪）。
+/// 元素类型需可 `==` 且可 `std::format`；ST_CHECK_LIST(recents, (std::vector<std::string>{"c", "b", "a"}))
+/// 这种带括号的 initializer_list 实参也接（按值落地，与 ST_CHECK_EQ 同一理由）。
+#define ST_CHECK_LIST(actual, expected)                                              \
+  do {                                                                               \
+    ::st::test::Registry::instance().count_check();                                   \
+    const auto st_actual = (actual);                                                  \
+    const auto st_expected = (expected);                                              \
+    if (!(st_actual == st_expected)) {                                                \
+      ::st::test::Registry::instance().record_failure(                                \
+          __FILE__, __LINE__,                                                         \
+          std::format("期望 {} == {}，实际 {} != {}；{}", #actual, #expected,           \
+                      ::st::test::format_list(st_actual),                             \
+                      ::st::test::format_list(st_expected),                            \
+                      ::st::test::list_diff(st_actual, st_expected)));                 \
+    }                                                                                \
   } while (false)

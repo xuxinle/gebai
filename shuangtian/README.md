@@ -87,6 +87,10 @@ python3 tools/st_visual_check.py     # 完整视觉验证：dev + san 两档、D
 ./build/bin/st test                  # 全部单元测试
 ./build/bin/st test --san            # ASan + UBSan 档
 ./build/bin/st lint                  # 禁用特性静态扫描（CONVENTIONS §8）
+
+# ⑥ 示例 e2e（控制通道驱动、带断言；清单与跑法见 docs/EXAMPLES_E2E.md）
+python3 tools/gbcode_e2e.py          # gbcode 主全量走查（29 组）
+python3 tools/st_visual_check.py     # gallery + gbcode 视觉与稳定性双档
 ```
 
 ### 有桌面会话时：起真窗口（2026-10-15 起可用）
@@ -204,7 +208,7 @@ macOS 上 GL 已废弃）。它既不是"保证腿"也不是"加分腿"，因此
 
 ## 示例
 
-**四个示例、四个职责面**（示例只留「一看就懂 + 能当靶场」的那几个；
+**五个示例、五个职责面**（示例只留「一看就懂 + 能当靶场」的那几个；
 其余能力由单元测试钉住，不另起示例重复验证）：
 
 | 示例 | 职责面 | 主表面 | 检验什么 |
@@ -213,6 +217,7 @@ macOS 上 GL 已废弃）。它既不是"保证腿"也不是"加分腿"，因此
 | `gbcode` | 文本 / 编辑器（应用面，全声明式） | `CodeEditor` | 声明式组装复杂应用、组件协同 |
 | **`louyue` 镂月** | **像素 / 光栅创作面** | **自绘画布**（自定义 `paint_content`） | 光栅管线实战：`BlendMode`/`Surface` 合成、逐像素操作、PNG 编解码**往返**、撤销栈 |
 | **`caiyun` 裁云** | **时间 / 动效应用面** | **自绘时间轴 + 播放**（应用时间轴驱动） | 帧预算与续帧协议、播放/擦洗、拖拽修剪这类连续交互 |
+| **`xmlapp`** | **纯 XML + JS 通路**（零 C++ 界面代码） | `ui/main.xml` + `ui/app.js` | XML 界面描述 + `ScriptBridge` JS 驱动：动态界面不写一行 C++ 也能成应用（`docs/xml-ui.md`、`DESIGN.md` §4.2.20–22） |
 
 命名出处：镂月成歌扇，裁云作舞衣。—— 唐·李义府《堂堂词》。两个示例都走
 `dsl::custom<T>` 逃生舱持自绘元素（与 gbcode 持 `CodeEditor` 同构）——壳是声明式的，

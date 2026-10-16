@@ -19,6 +19,12 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 from st_client_lib import call_with_token, load_control  # noqa: E402
 
+# 非 UTF-8 控制台自愈：GBK 代码页下 print 中文/符号（如 '⇄'）会 UnicodeEncodeError 崩整跑；
+# 已是 UTF-8 则不动，残余不可编字符以 '?' 兜底（宁可错印不崩）。
+if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 DEFAULT_BIN = os.path.join(ROOT, "build", "debug", "bin", "gallery.exe")
 
 

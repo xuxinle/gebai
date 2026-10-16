@@ -162,16 +162,24 @@ namespace gbcode_ui {
   }
 
 
-  /// 打开真实文件（资源树 / 搜索命中 / 快速打开共用）。
+  /// 打开真实文件（资源树 / 搜索命中 / 快速打开 / 对话框单选与多选共用）。
   auto CodeEditorPage::open_path(const std::string& path) -> void {
+    // 路径规范化：不同入口交来的同一文件可能形态不同（Windows 短路径 8.3 名 vs
+    // 真名——FileDialog 单选确认交的是目录枚举出的真名，而协议注入的
+    // pending_path/pending_paths 可能是短路径形态；不规范化的话去重失配、
+    // 同一文件开出两个标签，实测 e2e 复现：多选开短路径标签 → 单选开同一文件
+    // → 真名不匹配短路径 → 重复标签）。全部入口在此统一成绝对真名，
+    // `read_into_buffers` 的按 path 去重从此只比一种形态。
+    const std::string canonical =
+        st::fs::absolute(path).value_or(std::string(path));
     auto list = buffers_.value();
     stash_active_text(list);
-    const std::size_t index = read_into_buffers(list, path);
+    const std::size_t index = read_into_buffers(list, canonical);
     if (index >= list.size()) {
       status_.set("打开失败：" + path);
       return;
     }
-    gbcode::push_recent(recent_files_, path);   // 最近打开（菜单/命令面板/下次恢复共用）
+    gbcode::push_recent(recent_files_, canonical);   // 最近打开（菜单/命令面板/下次恢复共用；与去重同一形态）
     buffers_.set(std::move(list));
     active_.set(index);
     // 打开文件 = 当前要看的内容换成编辑器：关掉差异/合并标签（若有）。

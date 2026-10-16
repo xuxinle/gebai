@@ -614,7 +614,11 @@ namespace gbcode_ui {
   }
 
 
-  /// 键盘快捷键一览（`Ctrl+K` 或帮助菜单；内容与代码里注册的表同源，不手写第二份）。
+  /// 键盘快捷键一览（`Ctrl+K` 或帮助菜单）。
+  ///
+  /// ⚠ **本表是手工维护的**，与 `main.cpp` 里注册的快捷键表是两份数据：注册表
+  /// 不可枚举（框架缺口：`UiRoot::register_shortcut` 只登记不暴露清单），做不到
+  /// 真正同源。**新增键位必须同步此表**——漏同步就是用户照着卡按键没反应。
   void CodeEditorPage::build_shortcuts_card(Composer& c) {
     if (!shortcuts_open_.value()) return;
     (void)overlay(c, "shortcuts", {}, [&] {
@@ -625,20 +629,34 @@ namespace gbcode_ui {
             "文件\n"
             "  Ctrl+S          保存            Ctrl+W   关闭当前编辑器\n"
             "  Ctrl+Shift+S    另存为          Ctrl+O   打开文件\n"
+            "  Ctrl+Alt+S      全部保存        Ctrl+Shift+O 打开文件夹（换工作区）\n"
             "  Ctrl+N          新建文件\n"
             "\n"
             "编辑\n"
             "  Ctrl+Z/Y        撤销 / 重做     Ctrl+/   切换行注释\n"
             "  Ctrl+A          全选            Ctrl+D   选中下一处同词\n"
-            "  Alt+↑ / Alt+↓   上/下移当前行\n"
+            "  Alt+↑ / Alt+↓   上/下移当前行   F2       重命名符号\n"
+            "  Ctrl+Space      手动触发补全    Shift+Alt+F  格式化\n"
             "\n"
             "导航\n"
             "  Ctrl+F/Ctrl+H   查找 / 替换     Ctrl+G   转到行…\n"
-            "  F8              下一处问题\n"
             "  Ctrl+P          快速打开文件    Ctrl+Shift+P  命令面板\n"
-            "  Ctrl+Shift+E/F/G 资源管理器 / 搜索 / 变更\n"
+            "  Ctrl+T          工作区符号      Ctrl+Shift+E/F/G 资源管理器/搜索/变更\n"
             "  Ctrl+Tab        循环切换标签    Ctrl+B   切换侧栏\n"
+            "  F8              下一处问题\n"
+            "\n"
+            "跳转（F12 家族）\n"
+            "  F12             转到定义        Shift+F12   查找引用\n"
+            "  Alt+F12         查看声明        Ctrl+F12   转到实现\n"
+            "  Alt+←           返回上一个光标位置\n"
+            "\n"
+            "差异视图\n"
+            "  F7 / Shift+F7   下一个 / 上一个差异\n"
+            "\n"
+            "查看\n"
             "  Ctrl+J          切换底部面板    Ctrl+K   本帮助\n"
+            "  Ctrl+`          切换终端（VSCode 同键位）\n"
+            "  Ctrl+Shift+V    Markdown 预览/源码切换\n"
             "  Esc             关闭浮层\n");
         dialog.set_actions({"知道了"});
         dialog.on_action = [this](std::size_t) { shortcuts_open_.set(false); };
@@ -669,6 +687,11 @@ namespace gbcode_ui {
 
 
   /// 文件对话框（打开 / 另存为 / 新建共用；`pending_open_mode_` 区分）。
+  ///
+  /// 打开模式（mode 0）升级为多选批量开标签（rescan P2#5）：`multi_select` 常开、
+  /// `on_confirm_multiple` 按序整份交付——无头/协议层用 `set pending_paths`
+  ///（'|' 分隔）注入清单即可驱动，用法参照 tests/control_protocol_test.cpp 的
+  /// set_pending_paths_reaches_file_dialog_via_protocol。
   ///
   /// 为什么用真 `FileDialog` 而不是自绘输入框：目录浏览/上级/双击进入这些行为
   /// 组件已经写好且**在无头下可程序化选路**（`set_pending_path`），自绘会全部重写一遍。
@@ -708,12 +731,25 @@ namespace gbcode_ui {
         }
         // 打开模式：过滤到**可编辑的代码/文本文件**（框架组件的后缀白名单；
         // 目录不过滤——导航不受影响）。另存为/新建不过滤（目标名字任意）。
-        if (!saving && pending_open_mode_ == 0) {
+        // ⚠ 必须关进 `fresh_open`（与上面起始目录同一条纪律的**第二个理由**）：
+        // `set_name_filters` 内部会 reload，而 reload 把多选集合整个清空——
+        // 每帧重设等于「协议注入的 pending_paths 清单活不过下一次重组」
+        //（实测链条：set 注入 → 下一帧 setup 又 reload → 集合归零 → 确认空集）。
+        if (fresh_open && !saving && pending_open_mode_ == 0) {
           dialog.set_name_filters({".cpp", ".hpp", ".c", ".h", ".cc", ".cxx",
                                    ".py", ".js", ".ts", ".rs", ".go", ".java",
                                    ".md", ".txt", ".json", ".yaml", ".yml",
                                    ".toml", ".sh", ".stlog"});
         }
+        // 多选开关：打开模式（rescan P2#5，框架多选面最自然的应用示范位）常开；
+        // 另存为/新建/选目录**显式关掉**。两个理由：①它们是单输出/单目录语义，
+        // 多选无意义；②元素按 key 复用，上一次打开会话留下的 multi 开关与残留
+        // 集合不能带进下一次会话（框架 set_mode 只在换模式时清，同模式连开
+        // 两次不会走那条路，应用侧得自己归位）。
+        // **只在 fresh_open 设，不每帧重设**：开关属于「这一次对话框会话的状态」,
+        // 协议层可以显式关掉它走单选回归（见 gbcode_e2e.py 的 [14c]）——每帧
+        // 重设会把自动化写入顶回去。
+        if (fresh_open) dialog.set_multi_select(pending_open_mode_ == 0);
         // 位置侧栏：工作区永远在（跨盘跳转的高频目标）。
         if (!workspace_.empty()) {
           dialog.set_places({{"工作区", workspace_}});
@@ -758,6 +794,26 @@ namespace gbcode_ui {
             return;
           }
           open_path(path);
+        };
+        // 多选确认（打开模式）：整份清单**按序批量开标签**，活动标签自然落在
+        // 最后一个（`open_path` 每次都切活动项）。清单只有一条 = 与单选同效
+        // 开一个标签——「选一个开一个」不需要用户先关掉多选。
+        // 框架口径：multi 开着时确认**只**走这里（`FileDialog::confirm` 的
+        // 多选分支早退，集合空不触发也不回退 `on_confirm`），所以本回调是
+        // 打开模式下批量语义的唯一入口——不能只挂不实现。
+        dialog.on_confirm_multiple = [this](const std::vector<std::string>& paths) {
+          new_file_open_.set(false);
+          if (paths.empty()) return;   // 框架契约已挡空集；这里再守一道（防御式）
+          const std::string& first = paths.front();
+          // 记住这次所在的目录（下次打开从这起）——与 on_confirm 同一口径。
+          dialog_start_dir_ = st::fs::parent(first).empty() ? std::string(".")
+                                                            : std::string(st::fs::parent(first));
+          for (const std::string& one : paths) {
+            open_path(one);   // 单个失败（不存在/读不了）由 open_path 落状态栏，不中断整批
+          }
+          if (paths.size() > 1) {
+            status_.set(std::format("已多选打开 {} 个标签", paths.size()));
+          }
         };
         dialog.on_cancel = [this] { new_file_open_.set(false); };
       }, {.id = "file-dialog"});

@@ -11,15 +11,24 @@
 #include <vector>
 
 #include "battery/embed.hpp"  // 编译期资源嵌入（stpm 生成）
+#include "st/core/fs.hpp"      // FileDialog 卡起始目录（st::fs::current_dir）
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/paint.hpp"
 #include "st/ui/components/basic.hpp"
+#include "st/ui/components/code_editor.hpp"
+#include "st/ui/components/color_picker.hpp"
+#include "st/ui/components/command_palette.hpp"
+#include "st/ui/components/completion_popup.hpp"
+#include "st/ui/components/diff_view.hpp"
 #include "st/ui/components/feedback.hpp"
+#include "st/ui/components/file_dialog.hpp"
 #include "st/ui/components/input.hpp"
 #include "st/ui/components/list.hpp"
 #include "st/ui/components/markdown_view.hpp"
+#include "st/ui/components/menu.hpp"
+#include "st/ui/components/merge_view.hpp"
 #include "st/ui/components/overlay.hpp"
 #include "st/ui/components/scroll.hpp"
 #include "st/ui/components/select.hpp"
@@ -27,8 +36,12 @@
 #include "st/ui/components/split_view.hpp"
 #include "st/ui/components/table.hpp"
 #include "st/ui/components/tabs.hpp"
+#include "st/ui/components/terminal.hpp"
+#include "st/ui/components/timeline_view.hpp"
 #include "st/ui/components/title_bar.hpp"
 #include "st/ui/components/toggle.hpp"
+#include "st/ui/components/tree.hpp"
+#include "st/ui/components/viewport.hpp"
 #include "st/ui/components/scene_view.hpp"
 #include "st/ui/dsl.hpp"          // 声明式页（声明式 UI 的演示）
 #include "st/ui/icon.hpp"
@@ -46,9 +59,18 @@ using st::ui::Badge;
 using st::ui::Button;
 using st::ui::Card;
 using st::ui::Checkbox;
+using st::ui::CodeEditor;
+using st::ui::ColorPicker;
+using st::ui::CommandPalette;
+using st::ui::CompletionItemView;
+using st::ui::CompletionPopup;
+using st::ui::ContextMenu;
 using st::ui::Chip;
+using st::ui::DiffLayout;
+using st::ui::DiffView;
 using st::ui::Divider;
 using st::ui::Element;
+using st::ui::FileDialog;
 using st::ui::FlexDirection;
 using st::ui::FontWeight;
 using st::ui::Heading;
@@ -59,6 +81,11 @@ using st::ui::Justify;
 using st::ui::KeyValueRow;
 using st::ui::List;
 using st::ui::MarkdownView;
+using st::ui::Menu;
+using st::ui::MenuBar;
+using st::ui::MenuItem;
+using st::ui::MenuPanel;
+using st::ui::MergeView;
 using st::ui::Panel;
 using st::ui::ProgressBar;
 using st::ui::Radio;
@@ -70,9 +97,20 @@ using st::ui::Switch;
 using st::ui::Table;
 using st::ui::TableColumn;
 using st::ui::Tabs;
+using st::ui::Terminal;
 using st::ui::Text;
 using st::ui::TextAlign;
+using st::ui::TimelineView;
 using st::ui::Tone;
+using st::ui::Tooltip;
+using st::ui::Tree;
+using st::ui::TreeNode;
+using st::ui::Viewport;
+// 时间轴模型的四个名字（TimelineView 卡直接填 Model：与 caiyun 几何层回流同一套数据层）。
+using st::ui::timeline::Clip;
+using st::ui::timeline::Millis;
+using st::ui::timeline::SnapOptions;
+using st::ui::timeline::Track;
 
 // ————————————————————————————————————————————————————————————————————————————
 // 通用小组件：让每个页面用同一套节奏，避免"每页各写一种间距"
@@ -582,7 +620,7 @@ namespace {
 
 [[nodiscard]] auto build_components(const PageHooks& hooks) -> std::unique_ptr<Panel> {
   auto page = make_page("components", "组件",
-                        "选择控件 · 滑块 · 标签页 · 下拉 · 反馈徽标 · 图标 · 文字 · 浮层 · 多行文本 · 禁用态");
+                        "选择控件 · 滑块 · 标签页 · 下拉 · 反馈徽标 · 图标 · 文字 · 浮层 · 多行文本 · 禁用态 · 树 · 提示气泡 · 取色器 · 缩放视口 · 代码编辑器 · 差异视图 · 补全弹层 · 命令面板 · 时间轴 · 三方合并 · 菜单栏 · 右键菜单 · 文件对话框 · 终端");
 
   // —— 选择控件 ——
   auto choice_card = make_card("card-choice", "选择控件");
@@ -1001,6 +1039,420 @@ namespace {
       "语义树可见 disabled 标记；点击/键盘均不响应（选择器 `Button:disabled` 可命中）"));
   page->add_child(std::move(disabled_card));
 
+  // —— 树（Tree）：无子元素、扁平数组驱动；展开/选中状态由调用方数据表达 ——
+  auto tree_card = make_card("card-tree", "树（Tree）");
+  tree_card->add_child(make_caption(
+      "目录行点击展开/收起（状态由调用方数据表达，组件不持有层级）；"
+      "文件行点击选中；↑↓ 移动、Enter 激活、←→ 收起/展开；"
+      "控制通道：get rows·selected_key，invoke click——本树静态演示不接懒加载"));
+  auto tree_demo = std::make_unique<Tree>();
+  tree_demo->set_id("demo-tree");
+  tree_demo->set_row_height(26.0f);
+  tree_demo->style().height = 130.0f;
+  auto* tree_ptr = tree_demo.get();
+  auto tree_state = std::make_unique<Text>("未选中");
+  tree_state->set_id("tree-state");
+  tree_state->set_tone(Tone::Faint);
+  tree_state->set_font_size(12.0f);
+  auto* tree_state_ptr = tree_state.get();
+  tree_card->add_child(std::move(tree_demo));
+  tree_card->add_child(std::move(tree_state));
+  page->add_child(std::move(tree_card));
+
+  // —— 提示气泡（Tooltip）——
+  auto tooltip_card = make_card("card-tooltip", "提示气泡（Tooltip）");
+  tooltip_card->add_child(make_caption(
+      "按钮“显示气泡”把一张 Tooltip 挂到 UiRoot 叠加层：它按目标矩形自动定位到上方居中（"
+      "空间不足翻到下方），set_active 控制显隐——UiRoot 悬停 450ms 的 hint-bubble 走的是"
+      "同一张组件（Element::set_hint，见右侧按钮，无头验证控制面可用）"));
+  auto tooltip_actions = make_row(8.0f, /*wrap=*/true);
+  auto tooltip_button = std::make_unique<Button>("显示气泡", Button::Variant::Secondary,
+                                                 Button::Size::Small);
+  tooltip_button->set_id("btn-tooltip");
+  auto tooltip_hide_button = std::make_unique<Button>("隐藏", Button::Variant::Ghost,
+                                                       Button::Size::Small);
+  tooltip_hide_button->set_id("btn-tooltip-hide");
+  auto* tooltip_button_ptr = tooltip_button.get();
+  auto* tooltip_hide_ptr = tooltip_hide_button.get();
+  tooltip_button->set_hint("悬停 450ms 也会弹出这张气泡（UiRoot 共享气泡，与本卡同一组件）");
+  tooltip_hide_button->set_hint("Ghost 变体 + 提示气泡");
+  tooltip_actions->add_child(std::move(tooltip_button));
+  tooltip_actions->add_child(std::move(tooltip_hide_button));
+  tooltip_card->add_child(std::move(tooltip_actions));
+  auto tooltip_state = std::make_unique<Text>("气泡未挂出");
+  tooltip_state->set_id("tooltip-state");
+  tooltip_state->set_tone(Tone::Faint);
+  tooltip_state->set_font_size(12.0f);
+  auto* tooltip_state_ptr = tooltip_state.get();
+  tooltip_card->add_child(std::move(tooltip_state));
+  page->add_child(std::move(tooltip_card));
+
+  // —— 取色器（ColorPicker）：HSV 交互、RGB 真值 ——
+  auto color_card = make_card("card-color", "取色器（ColorPicker）");
+  color_card->add_child(make_caption(
+      "色相条 + 饱和度/明度块可拖拽；十六进制输入只认 #RRGGBB(AABB)、"
+      "解析失败如实拒绝并保留原色；拖拽与输入均经 on_change 回显——真值源是 RGB，HSV 只是交互量"));
+  auto picker_row = make_row(24.0f, /*wrap=*/true);
+  auto picker = std::make_unique<ColorPicker>();
+  picker->set_id("demo-colorpicker");
+  picker->set_color(st::math::Color::rgb(37, 99, 235), /*notify=*/false);
+  auto* picker_ptr = picker.get();
+  picker_row->add_child(std::move(picker));
+  auto picker_state = std::make_unique<Text>("#2563EB（rgba(37, 99, 235, 255)）");
+  picker_state->set_id("colorpicker-state");
+  picker_state->set_tone(Tone::Faint);
+  picker_state->set_font_size(12.0f);
+  auto* picker_state_ptr = picker_state.get();
+  auto picker_swatch = std::make_unique<Panel>(FlexDirection::Column);
+  picker_swatch->set_id("colorpicker-swatch");
+  picker_swatch->style().gap = 6.0f;
+  auto* picker_swatch_ptr = picker_swatch.get();
+  picker_swatch->add_child(std::move(picker_state));
+  picker_swatch->add_child(make_caption("拖 SV 块/色相条或改十六进制，色板与回显实时联动"));
+  picker_row->add_child(std::move(picker_swatch));
+  color_card->add_child(std::move(picker_row));
+  page->add_child(std::move(color_card));
+
+  // —— 视口（Viewport）：二维缩放/平移，与 ScrollView 的一维滚动分工 ——
+  auto viewport_card = make_card("card-viewport", "缩放视口（Viewport）");
+  viewport_card->add_child(make_caption(
+      "滚轮以光标为锚缩放、中键/空格拖拽平移、fit 适配内容；棋盘格是透明底不是白像素；"
+      "控制通道：get/set zoom·pan_x·pan_y，invoke zoom_in·zoom_out·fit；"
+      "内容是一张真实子元素（矢量图标），二维缩放平移都是它的变化"));
+  auto viewport_demo = std::make_unique<Viewport>();
+  viewport_demo->set_id("demo-viewport");
+  viewport_demo->style().height = 160.0f;
+  {
+    auto image = std::make_unique<st::ui::IconView>("image", 120.0f);
+    image->set_id("demo-viewport-content");
+    viewport_demo->set_content(std::move(image));
+  }
+  auto* viewport_ptr = viewport_demo.get();
+  viewport_card->add_child(std::move(viewport_demo));
+  auto viewport_state = std::make_unique<Text>("缩放 100% · pan (0, 0)——滚轮/拖拽后实时回显");
+  viewport_state->set_id("viewport-state");
+  viewport_state->set_tone(Tone::Faint);
+  viewport_state->set_font_size(12.0f);
+  auto* viewport_state_ptr = viewport_state.get();
+  viewport_card->add_child(std::move(viewport_state));
+  page->add_child(std::move(viewport_card));
+
+  // —— 代码编辑器（CodeEditor）：语法高亮 + 查找高亮 + 只读切换 ——
+  // 四卡第二包（编辑器族；对账兑现见 tests/support/gallery_exhibits.hpp）：四组件
+  // 的组件页首现；交互面按「真实可交互」标准——每个操作都有稳定 id 与回显。
+  auto editor_card = make_card("card-code-editor", "代码编辑器（CodeEditor）");
+  editor_card->add_child(make_caption(
+      "语法高亮（内置 30+ 语言）· 行号/缩进参考线· 只读切换 · 查找高亮；"
+      "控制通道：get text·language·read_only·lines，invoke select_all·find·goto_line——本卡只演示一层交互面，完整能力见 gbcode"));
+  auto editor_demo = std::make_unique<CodeEditor>();
+  editor_demo->set_id("demo-code-editor");
+  editor_demo->set_language("cpp");
+  editor_demo->set_tab_width(2);
+  editor_demo->set_text(
+      "// 编辑器内直接敲字、拖选、Ctrl+Z 撤销——都走真值树\n"
+      "int main() {\n"
+      "  int answer = 42;\n"
+      "  return answer;  // 控制通道可断言 selection/read_only\n"
+      "}\n");
+  editor_demo->style().height = 150.0f;
+  auto* editor_ptr = editor_demo.get();
+  editor_card->add_child(std::move(editor_demo));
+  auto editor_actions = make_row(8.0f, /*wrap=*/true);
+  auto editor_ro_button = std::make_unique<Button>("切只读", Button::Variant::Secondary,
+                                                   Button::Size::Small);
+  editor_ro_button->set_id("btn-editor-readonly");
+  auto* editor_ro_button_ptr = editor_ro_button.get();
+  editor_actions->add_child(std::move(editor_ro_button));
+  auto editor_find_button = std::make_unique<Button>("查找 answer", Button::Variant::Ghost,
+                                                     Button::Size::Small);
+  editor_find_button->set_id("btn-editor-find");
+  auto* editor_find_button_ptr = editor_find_button.get();
+  editor_actions->add_child(std::move(editor_find_button));
+  editor_card->add_child(std::move(editor_actions));
+  auto editor_state = std::make_unique<Text>("（装载后回显行数/字符数）");
+  editor_state->set_id("editor-state");
+  editor_state->set_tone(Tone::Faint);
+  editor_state->set_font_size(12.0f);
+  auto* editor_state_ptr = editor_state.get();
+  editor_card->add_child(std::move(editor_state));
+  page->add_child(std::move(editor_card));
+
+  // —— 差异视图（DiffView）：两段文本 → 高亮差异 + hunk 导航 + 布局切换 ——
+  auto diff_card = make_card("card-diff", "差异视图（DiffView）");
+  diff_card->add_child(make_caption(
+      "两段文本→行级差异（删除红/新增绿/占位对齐）；←→ 在 hunk 间环绕跳转；"
+      "并列/内联两布局；控制通道：get hunk_count·current_hunk，invoke next_hunk·set_layout"));
+  auto diff_demo = std::make_unique<DiffView>();
+  diff_demo->set_id("demo-diff");
+  diff_demo->set_read_only(true);
+  diff_demo->set_texts(
+      "int main() {\n  int a = 1;\n  int b = 2;\n  return a + b;\n}\n",
+      "int main() {\n  int a = 1;\n  int b = 4;\n  int c = 5;\n  return a + b + c;\n}\n");
+  diff_demo->style().height = 170.0f;
+  auto* diff_ptr = diff_demo.get();
+  diff_card->add_child(std::move(diff_demo));
+  auto diff_actions = make_row(8.0f, /*wrap=*/true);
+  auto diff_next_button = std::make_unique<Button>("下一处差异", Button::Variant::Secondary,
+                                                   Button::Size::Small);
+  diff_next_button->set_id("btn-diff-next");
+  diff_next_button->set_hint("DiffView::next_hunk（环绕）");
+  auto diff_layout_button = std::make_unique<Button>("切内联/并列", Button::Variant::Ghost,
+                                                     Button::Size::Small);
+  diff_layout_button->set_id("btn-diff-layout");
+  diff_layout_button->set_hint("DiffLayout::Unified / SideBySide");
+  auto* diff_next_button_ptr = diff_next_button.get();
+  auto* diff_layout_button_ptr = diff_layout_button.get();
+  diff_actions->add_child(std::move(diff_next_button));
+  diff_actions->add_child(std::move(diff_layout_button));
+  diff_card->add_child(std::move(diff_actions));
+  auto diff_state = std::make_unique<Text>("（装载后回显差异块数）");
+  diff_state->set_id("diff-state");
+  diff_state->set_tone(Tone::Faint);
+  diff_state->set_font_size(12.0f);
+  auto* diff_state_ptr = diff_state.get();
+  diff_card->add_child(std::move(diff_state));
+  page->add_child(std::move(diff_card));
+
+  // —— 补全弹层（CompletionPopup）：候选列表 + 键盘导航 + 选中回显 ——
+  // 浮层组件：按钮触发时才构造并挂叠加层（锚点 = 触发按钮实时 bounds）；
+  // ⚠ 构造默认不可见，挂载后必须显式 set_visible(true)（否则绘制与键盘派发都被跳过）。
+  auto completion_card = make_card("card-completion", "补全弹层（CompletionPopup）");
+  completion_card->add_child(make_caption(
+      "按钮唤起：候选列表（徽标+类型）贴锚点下方、空间不足翻上方；↑↓ 导航、Enter/Tab 接受、Esc 关闭；"
+      "控制通道：get items·visible_items·selected，invoke next·prev·select·accept"));
+  auto completion_open_button = std::make_unique<Button>("唤起补全弹层", Button::Variant::Secondary,
+                                                         Button::Size::Small);
+  completion_open_button->set_id("btn-completion-open");
+  completion_open_button->set_hint("锚点 = 本按钮实时 bounds（点击时已排布）");
+  auto* completion_open_ptr = completion_open_button.get();
+  completion_card->add_child(std::move(completion_open_button));
+  auto completion_state = std::make_unique<Text>("未唤起（LSP 场景见 gbcode；本卡静态候选表）");
+  completion_state->set_id("completion-state");
+  completion_state->set_tone(Tone::Faint);
+  completion_state->set_font_size(12.0f);
+  auto* completion_state_ptr = completion_state.get();
+  completion_card->add_child(std::move(completion_state));
+  page->add_child(std::move(completion_card));
+
+  // —— 命令面板（CommandPalette）：Ctrl+Shift+P 形态的命令入口 ——
+  auto palette_card = make_card("card-palette", "命令面板（CommandPalette）");
+  palette_card->add_child(make_caption(
+      "顶部居中卡片 + 输入过滤（title/detail 子串、不分大小写）；↑↓ 环绕导航、Enter 执行、Esc/遮罩关闭；"
+      "挂载后必须 grab_focus（否则敲的字跑进底层焦点元素）；控制通道：get query·match_count·active，invoke activate·close"));
+  auto palette_open_button = std::make_unique<Button>("唤起命令面板", Button::Variant::Primary,
+                                                       Button::Size::Small);
+  palette_open_button->set_id("btn-palette-open");
+  auto* palette_open_ptr = palette_open_button.get();
+  palette_card->add_child(std::move(palette_open_button));
+  auto palette_state = std::make_unique<Text>("未唤起（选命令后回显；Esc/点遮罩关闭）");
+  palette_state->set_id("palette-state");
+  palette_state->set_tone(Tone::Faint);
+  palette_state->set_font_size(12.0f);
+  auto* palette_state_ptr = palette_state.get();
+  palette_card->add_child(std::move(palette_state));
+  page->add_child(std::move(palette_card));
+
+  // —— 时间轴（TimelineView）：标尺 + 轨道 + 片段块 + 播放头，几何层为
+  // timeline::Model（与 caiyun 几何层回流同一套数据层）。
+  auto timeline_card = make_card("card-timeline", "时间轴（TimelineView）");
+  timeline_card->add_child(make_caption(
+      "两轨道三片段：拖播放头/片段体/左右边缘（吸附到边缘/播放头，阈值 8px）；"
+      "滚轮缩放（指针下那刻不动）、Shift+滚轮平移、空白拖拽平移；"
+      "控制通道：get playhead·pixels_per_second·snap，invoke zoom_in·zoom_out·play·scroll_to"));
+  auto timeline_demo = std::make_unique<TimelineView>();
+  timeline_demo->set_id("demo-timeline");
+  {
+    // 填 Model：两轨道（视频/音频）×三片段；与 caiyun 同构的毫秒制数据层。
+    auto& model = timeline_demo->model();
+    Track video;
+    video.label = "V";
+    video.height = 40.0f;
+    video.locked = false;
+    video.clips = {Clip{.id = "v1", .label = "开场", .start = 0, .duration = 4000,
+                        .source_in = 0, .selected = true},
+                   Clip{.id = "v2", .label = "中段", .start = 4500, .duration = 3000,
+                        .source_in = 0, .selected = false}};
+    Track audio;
+    audio.label = "A";
+    audio.height = 40.0f;
+    audio.locked = false;
+    audio.clips = {Clip{.id = "a1", .label = "配音", .start = 0, .duration = 7500,
+                        .source_in = 0, .selected = false}};
+    model.set_tracks({std::move(video), std::move(audio)});
+    model.set_playhead(2000);
+    model.set_pixels_per_second(48.0f);
+    SnapOptions snap_options;
+    snap_options.threshold_px = 8.0f;
+    snap_options.to_zero = true;
+    snap_options.to_playhead = true;
+    snap_options.to_clip_edges = true;
+    timeline_demo->set_snap_options(snap_options);
+  }
+  timeline_demo->style().height = 150.0f;
+  auto* timeline_ptr = timeline_demo.get();
+  timeline_card->add_child(std::move(timeline_demo));
+  auto timeline_state = std::make_unique<Text>("（装载后回显播放头时间码）");
+  timeline_state->set_id("timeline-state");
+  timeline_state->set_tone(Tone::Faint);
+  timeline_state->set_font_size(12.0f);
+  auto* timeline_state_ptr = timeline_state.get();
+  timeline_card->add_child(std::move(timeline_state));
+  page->add_child(std::move(timeline_card));
+
+  // —— 三方合并（MergeView）：base/ours/theirs 三栏并列，冲突段逐段取舍 ——
+  auto merge_card = make_card("card-merge", "三方合并（MergeView）");
+  merge_card->add_child(make_caption(
+      "与 Git 无关的纯文本三方合并：只有冲突段需要人来选（未变/单侧改/双侧同改自动可解）；"
+      "按钮逐段取舍或一键全取；控制通道：get conflicts·resolved·pending·current，"
+      "invoke take_ours·take_theirs·take_ours_all·take_theirs_all·next_conflict·previous_conflict"));
+  auto merge_demo = std::make_unique<MergeView>();
+  merge_demo->set_id("demo-merge");
+  merge_demo->set_sides(
+      "第一行：共同祖先\n第二行：我方保留\n第三行：双改冲突\n第四行：他方新增\n",
+      "第一行：共同祖先\n第二行：我方保留\n第三行：我方修改\n第四行：他方新增\n第五行：我方收尾\n",
+      "第一行：共同祖先\n第二行：我方保留\n第三行：他方改法\n第四行：他方新增\n第五行：我方收尾\n");
+  merge_demo->style().height = 180.0f;
+  auto* merge_ptr = merge_demo.get();
+  merge_card->add_child(std::move(merge_demo));
+  auto merge_actions = make_row(8.0f, /*wrap=*/true);
+  auto merge_ours_button = std::make_unique<Button>("当前段取我方", Button::Variant::Secondary,
+                                                    Button::Size::Small);
+  merge_ours_button->set_id("btn-merge-ours");
+  merge_ours_button->set_hint("take_ours：作用于当前聚焦段");
+  auto merge_theirs_button = std::make_unique<Button>("当前段取他方", Button::Variant::Secondary,
+                                                      Button::Size::Small);
+  merge_theirs_button->set_id("btn-merge-theirs");
+  merge_theirs_button->set_hint("take_theirs：作用于当前聚焦段");
+  auto merge_next_button = std::make_unique<Button>("下一处冲突", Button::Variant::Ghost,
+                                                    Button::Size::Small);
+  merge_next_button->set_id("btn-merge-next");
+  merge_next_button->set_hint("next_pending_conflict（未决定的才算）");
+  auto* merge_ours_button_ptr = merge_ours_button.get();
+  auto* merge_theirs_button_ptr = merge_theirs_button.get();
+  auto* merge_next_button_ptr = merge_next_button.get();
+  merge_actions->add_child(std::move(merge_ours_button));
+  merge_actions->add_child(std::move(merge_theirs_button));
+  merge_actions->add_child(std::move(merge_next_button));
+  merge_card->add_child(std::move(merge_actions));
+  auto merge_state = std::make_unique<Text>("（装载后回显冲突/已解计数）");
+  merge_state->set_id("merge-state");
+  merge_state->set_tone(Tone::Faint);
+  merge_state->set_font_size(12.0f);
+  auto* merge_state_ptr = merge_state.get();
+  merge_card->add_child(std::move(merge_state));
+  page->add_child(std::move(merge_card));
+
+  // —— 菜单栏（MenuBar）：顶部标题条 + 下拉面板（overlay；锚点惰性跟标题）——
+  auto menubar_card = make_card("card-menubar", "菜单栏（MenuBar）");
+  menubar_card->add_child(make_caption(
+      "三顶级菜单：点标题/悬停切换/键盘 ←→+Enter 都能开；面板是叠加层，"
+      "Esc/点外/激活后关闭；控制通道：面板 get anchor，invoke activate_item（参数=条目 id）"));
+  auto menubar_demo = std::make_unique<MenuBar>();
+  menubar_demo->set_id("demo-menubar");
+  menubar_demo->set_menus(std::vector<Menu>{
+      Menu{.id = "file", .label = "文件", .items = {
+                MenuItem{.id = "file.new", .label = "新建"},
+                MenuItem{.id = "file.open", .label = "打开…"},
+                MenuItem{.id = "sep1", .label = "", .separator = true},
+                MenuItem{.id = "file.quit", .label = "退出"},
+            }},
+      Menu{.id = "edit", .label = "编辑", .items = {
+                MenuItem{.id = "edit.undo", .label = "撤销"},
+                MenuItem{.id = "edit.redo", .label = "重做"},
+                MenuItem{.id = "edit.find", .label = "查找…"},
+            }},
+      Menu{.id = "view", .label = "查看", .items = {
+                MenuItem{.id = "view.zoom_in", .label = "放大"},
+                MenuItem{.id = "view.zoom_out", .label = "缩小"},
+                MenuItem{.id = "view.icons", .label = "查看图标页"},
+            }},
+  });
+  auto* menubar_ptr = menubar_demo.get();
+  // 面板身份记在 shared_ptr 单元格里：与首包 Tooltip 同一套防悬垂/防重复挂层手段
+  //（on_open_menu 生命周期长于本函数栈帧，裸捕栈引用会悬垂）。
+  auto menubar_panel_cell = std::make_shared<MenuPanel*>(nullptr);
+  menubar_card->add_child(std::move(menubar_demo));
+  auto menubar_state = std::make_unique<Text>("点菜单标题展开；条目点击回显到这里");
+  menubar_state->set_id("menubar-state");
+  menubar_state->set_tone(Tone::Faint);
+  menubar_state->set_font_size(12.0f);
+  auto* menubar_state_ptr = menubar_state.get();
+  menubar_card->add_child(std::move(menubar_state));
+  page->add_child(std::move(menubar_card));
+
+  // —— 右键菜单（ContextMenu）：按钮触发 + dismiss barrier（点外/Esc 关闭）——
+  auto context_card = make_card("card-context", "右键菜单（ContextMenu）");
+  context_card->add_child(make_caption(
+      "按钮唤起（锚点=按钮实时 bounds；真实场景是右键，gbcode 编辑器右键同款）："
+      "面板外不拦截命中，点击面板外或 Esc 触发 on_close；"
+      "控制通道：面板 get anchor，invoke activate_item（参数=条目 id）"));
+  auto context_open_button = std::make_unique<Button>("唤起右键菜单", Button::Variant::Secondary,
+                                                       Button::Size::Small);
+  context_open_button->set_id("btn-context-open");
+  context_open_button->set_hint("锚点 = 本按钮实时 bounds（点击时已排布）");
+  auto* context_open_ptr = context_open_button.get();
+  context_card->add_child(std::move(context_open_button));
+  auto context_state = std::make_unique<Text>("未唤起（条目激活后回显；Esc/点外关闭）");
+  context_state->set_id("context-state");
+  context_state->set_tone(Tone::Faint);
+  context_state->set_font_size(12.0f);
+  auto* context_state_ptr = context_state.get();
+  context_card->add_child(std::move(context_state));
+  page->add_child(std::move(context_card));
+
+  // —— 文件对话框（FileDialog）：打开模式，真实目录浏览 ——
+  auto filedialog_card = make_card("card-filedialog", "文件对话框（FileDialog）");
+  filedialog_card->add_child(make_caption(
+      "打开模式：左侧常用位置/盘符 + 面包屑 + 目录列表（双击进入）+ 文件名行 +"
+      "确认/取消；Esc/遮罩/取消三路关闭；控制通道：get directory·filename，"
+      "invoke select·activate·confirm·up·goto_place"));
+  auto filedialog_open_button = std::make_unique<Button>("打开文件对话框", Button::Variant::Secondary,
+                                                          Button::Size::Small);
+  filedialog_open_button->set_id("btn-filedialog-open");
+  filedialog_open_button->set_hint("起始目录 = 进程 CWD（失败兑底主目录）");
+  auto* filedialog_open_ptr = filedialog_open_button.get();
+  filedialog_card->add_child(std::move(filedialog_open_button));
+  auto filedialog_state = std::make_unique<Text>("未打开（确认后回显全路径；Esc/取消关闭）");
+  filedialog_state->set_id("filedialog-state");
+  filedialog_state->set_tone(Tone::Faint);
+  filedialog_state->set_font_size(12.0f);
+  auto* filedialog_state_ptr = filedialog_state.get();
+  filedialog_card->add_child(std::move(filedialog_state));
+  page->add_child(std::move(filedialog_card));
+
+  // —— 终端（Terminal）：行模式静态回显 + 按钮注入（真 PTY 形态见 gbcode）——
+  auto terminal_card = make_card("card-terminal", "终端（Terminal）");
+  terminal_card->add_child(make_caption(
+      "行模式（非 PTY）：等宽字体、滚回截断上限 4000 行、标签栏可关；"
+      "真终端（PTY/ConPTY、字节级输入、vim 可开）见 gbcode 的 Ctrl+`；"
+      "控制通道与属性面详 terminal.cpp；本卡演示 append 静态回显 + 按钮注入"));
+  auto terminal_demo = std::make_unique<Terminal>();
+  terminal_demo->set_id("demo-terminal");
+  terminal_demo->set_tabs_visible(true);
+  auto* terminal_ptr = terminal_demo.get();
+  terminal_card->add_child(std::move(terminal_demo));
+  auto terminal_actions = make_row(8.0f, /*wrap=*/true);
+  auto terminal_send_button = std::make_unique<Button>("注入一条命令回显", Button::Variant::Secondary,
+                                                        Button::Size::Small);
+  terminal_send_button->set_id("btn-terminal-send");
+  terminal_send_button->set_hint("append()：行模式宿主写入输出");
+  auto* terminal_send_button_ptr = terminal_send_button.get();
+  terminal_actions->add_child(std::move(terminal_send_button));
+  auto terminal_clear_button = std::make_unique<Button>("清屏", Button::Variant::Ghost,
+                                                        Button::Size::Small);
+  terminal_clear_button->set_id("btn-terminal-clear");
+  terminal_clear_button->set_hint("clear()：行模式清滚回");
+  auto* terminal_clear_button_ptr = terminal_clear_button.get();
+  terminal_actions->add_child(std::move(terminal_clear_button));
+  terminal_card->add_child(std::move(terminal_actions));
+  auto terminal_state = std::make_unique<Text>("（装载后回显行数）");
+  terminal_state->set_id("terminal-state");
+  terminal_state->set_tone(Tone::Faint);
+  terminal_state->set_font_size(12.0f);
+  auto* terminal_state_ptr = terminal_state.get();
+  terminal_card->add_child(std::move(terminal_state));
+  page->add_child(std::move(terminal_card));
+
   // —— 浮层交互逻辑（Dialog / Toast：面板挂 UiRoot 叠加层，摘除经 hooks） ——
   dialog_button_ptr->on_click = [hooks, overlay_state_ptr]() {
     auto dialog = std::make_unique<st::ui::Dialog>(
@@ -1057,6 +1509,368 @@ namespace {
     textarea_state_ptr->set_content(
         std::format("内容 {} 字 · {} 行", st::utf8_length(initial), lines));
   }
+
+  // —— 四卡交互接线（Tree/Tooltip/ColorPicker/Viewport；静态展示部分在建卡处） ——
+
+  // Tree：静态两层树（组件只要求“可见行扁平数组”，本卡不接懒加载；点目录行只回报 toggle 意图）
+  tree_ptr->sync_nodes(std::vector<TreeNode>{
+      {"src", "src", true, true, 0},
+      {"src/ui", "ui", true, true, 1},
+      {"tree.hpp", "tree.hpp", false, false, 2},
+      {"viewport.hpp", "viewport.hpp", false, false, 2},
+      {"examples", "examples", true, true, 0},
+      {"gallery", "gallery", false, true, 1},
+      {"README.md", "README.md", false, false, 0},
+  });
+  tree_ptr->on_select = [tree_state_ptr, hooks](std::string_view key) {
+    tree_state_ptr->set_content(std::format("选中 {}（目录行不选，只展开）", key));
+    hooks.set_status(std::format("树选中：{}", key));
+  };
+  tree_ptr->on_toggle = [tree_state_ptr](std::string_view key, bool expanded) {
+    tree_state_ptr->set_content(std::format("{} {}（静态演示不重灌数据）", key,
+                                           expanded ? "展开" : "收起"));
+  };
+
+  // Tooltip：按挂出时按钮的实时 bounds 定位（FillViewport 形态：气泡在 arrange 里自定位）。
+  // 生命周期：气泡挂出后由 UiRoot 叠加层持有，本卡不再移除（唯一所有者恒为叠加层，
+  // 裸指针不悬垂）；指针存 shared_ptr 单元格是因为 on_click 生命周期长于本函数栈帧，
+  // 直接捕栈引用会悬垂。显隐走 set_active：语义树上恒在（get id 可见），绘制/命中随 active 开关。
+  auto bubble_cell = std::make_shared<Tooltip*>(nullptr);
+  const auto tooltip_show = [hooks, bubble_cell, tooltip_state_ptr](Element* target) {
+    if (Tooltip* live = *bubble_cell; live != nullptr) {  // 已挂出：只按最新目标矩形重新定位
+      live->set_target_rect(target->bounds());
+      live->set_active(true);
+      tooltip_state_ptr->set_content("气泡已重新定位（set_target_rect → 上方居中）");
+      return;
+    }
+    auto bubble = std::make_unique<Tooltip>(
+        "组件级 Tooltip：挂 UiRoot 叠加层，按目标矩形自动定位");
+    bubble->set_id("demo-tooltip");
+    bubble->set_target_rect(target->bounds());
+    bubble->set_active(true);
+    *bubble_cell = bubble.get();
+    if (hooks.add_overlay) hooks.add_overlay(std::move(bubble));
+    tooltip_state_ptr->set_content("气泡已挂出（set_target_rect 后自动上方居中）");
+  };
+  tooltip_button_ptr->on_click = [tooltip_show, tooltip_button_ptr]() {
+    tooltip_show(tooltip_button_ptr);
+  };
+  tooltip_hide_ptr->on_click = [bubble_cell, tooltip_state_ptr]() {
+    if (Tooltip* live = *bubble_cell; live != nullptr) {
+      live->set_active(false);
+      tooltip_state_ptr->set_content("气泡已收起（set_active(false)：绘制与命中关，语义树仍在）");
+    } else {
+      tooltip_state_ptr->set_content("气泡尚未挂出");
+    }
+  };
+
+  // ColorPicker：颜色变化回显（拖拽/十六进制输入均触发；程序 set_color(..., false) 不触发）。
+  // 色板直接改 style().background（Panel 默认 surface=None，不会被主题重刷覆盖）。
+  picker_ptr->on_change = [picker_swatch_ptr, picker_state_ptr, hooks](st::math::Color color) {
+    picker_swatch_ptr->style().background = color;
+    picker_state_ptr->set_content(std::format("当前 rgba({}, {}, {}, {})",
+                                              static_cast<int>(color.r),
+                                              static_cast<int>(color.g),
+                                              static_cast<int>(color.b),
+                                              static_cast<int>(color.a)));
+    hooks.set_status(std::format("取色器：rgba({}, {}, {}, {})",
+                                  static_cast<int>(color.r), static_cast<int>(color.g),
+                                  static_cast<int>(color.b), static_cast<int>(color.a)));
+  };
+
+  // Viewport：缩放/平移变化回显（滚轮、拖拽、控制通道 set/invoke 均经此回调）。
+  const auto refresh_viewport_state = [viewport_ptr, viewport_state_ptr]() {
+    const float zoom = viewport_ptr->zoom();
+    const st::math::Point pan = viewport_ptr->pan();
+    viewport_state_ptr->set_content(std::format(
+        "缩放 {:.0f}% · pan ({:.0f}, {:.0f})", zoom * 100.0f, pan.x, pan.y));
+  };
+  viewport_ptr->on_view_changed = refresh_viewport_state;
+
+  // —— 编辑器族四卡接线（CodeEditor/DiffView/CompletionPopup/CommandPalette）——
+
+  // CodeEditor：只读切换（按钮文案与状态回显同步）；查找高亮 + 命中导航。
+  // on_change 只在用户编辑时触发（程序化 set_text 不冒充——与 Input/TextArea 同决议），
+  // 所以回显状态条在切只读/查找时由各自按钮直接刷新；字符数则在真编辑时更新。
+  const auto refresh_editor_state = [editor_ptr, editor_state_ptr, hooks]() {
+    std::string finds;
+    if (editor_ptr->find_match_count() > 0U) {
+      finds = std::format("，命中 {} 处", editor_ptr->find_match_count());
+      if (editor_ptr->find_active_index() != CodeEditor::kNoFindMatch) {
+        finds += std::format("（当前 #{}）", editor_ptr->find_active_index() + 1);
+      }
+    }
+    editor_state_ptr->set_content(std::format(
+        "{}（高亮 {}；内容 {} 字 · {} 行{}）",
+        editor_ptr->read_only() ? "只读（仍可选中/复制）" : "可编辑",
+        editor_ptr->language(), st::utf8_length(editor_ptr->text()),
+        editor_ptr->line_count(), finds));
+    hooks.set_status(std::format("编辑器：{} 行 · {}只读", editor_ptr->line_count(),
+                                 editor_ptr->read_only() ? "" : "非"));
+  };
+  editor_ro_button_ptr->on_click = [editor_ptr, editor_ro_button_ptr, refresh_editor_state]() {
+    const bool next = !editor_ptr->read_only();
+    editor_ptr->set_read_only(next);
+    editor_ro_button_ptr->set_label(next ? "切可编辑" : "切只读");
+    refresh_editor_state();
+  };
+  editor_find_button_ptr->on_click = [editor_ptr, refresh_editor_state]() {
+    if (editor_ptr->find_needle() == "answer") {
+      (void)editor_ptr->find_next();  // 再点：在命中间环绕跳
+    } else {
+      (void)editor_ptr->set_find("answer");  // 首点：全部命中高亮
+      (void)editor_ptr->find_next();
+    }
+    refresh_editor_state();
+  };
+  editor_ptr->on_change = [refresh_editor_state](std::string_view) { refresh_editor_state(); };
+
+  // DiffView：hunk 导航回显 + 布局切换（并列 ⇄ 内联，重建两侧文本）。
+  const auto refresh_diff_state = [diff_ptr, diff_state_ptr]() {
+    diff_state_ptr->set_content(std::format(
+        "差异块 {} 处 · 当前 #{}（{}布局）", diff_ptr->hunk_count(),
+        diff_ptr->current_hunk() + 1,
+        diff_ptr->layout() == DiffLayout::Unified ? "内联" : "并列"));
+  };
+  diff_ptr->on_hunk_change = [refresh_diff_state](std::size_t) { refresh_diff_state(); };
+  diff_next_button_ptr->on_click = [diff_ptr, refresh_diff_state, hooks]() {
+    if (diff_ptr->hunk_count() == 0U) return;
+    (void)diff_ptr->next_hunk();
+    refresh_diff_state();
+    hooks.set_status(std::format("差异跳到 #{} / {}", diff_ptr->current_hunk() + 1,
+                                 diff_ptr->hunk_count()));
+  };
+  diff_layout_button_ptr->on_click = [diff_ptr, refresh_diff_state, hooks]() {
+    const bool unified = diff_ptr->layout() == DiffLayout::Unified;
+    diff_ptr->set_layout(unified ? DiffLayout::SideBySide : DiffLayout::Unified);
+    refresh_diff_state();
+    hooks.set_status(unified ? "差异切回并列两栏" : "差异切到内联单栏");
+  };
+
+  // CompletionPopup：按钮唤起（锚点=按钮实时 bounds）→ 候选导航/接受回显；
+  // 关闭路径（Esc/点别处/接受后）统一走 on_dismiss 摘除浮层。
+  completion_open_ptr->on_click = [hooks, completion_open_ptr, completion_state_ptr]() {
+    auto popup = std::make_unique<CompletionPopup>();
+    popup->set_id("demo-completion");
+    popup->set_anchor(completion_open_ptr->bounds());
+    popup->set_items(std::vector<CompletionItemView>{
+        {.label = "gallery", .detail = "str", .badge = "\u25cb"},
+        {.label = "gallery_exhibits", .detail = "file", .badge = "\u25cb"},
+        {.label = "gbcode", .detail = "dir", .badge = "\u25cb"},
+        {.label = "grab_focus", .detail = "method", .badge = "\u0192"},
+        {.label = "goto_line", .detail = "method", .badge = "\u0192"},
+    });
+    popup->set_visible(true);
+    auto* popup_ptr = popup.get();
+    popup->on_accept = [popup_ptr, completion_state_ptr, hooks](const std::string& insert) {
+      completion_state_ptr->set_content(std::format("已接受候选「{}」（insert_text 回报）", insert));
+      hooks.set_status(std::format("补全接受：{}", insert));
+      if (hooks.remove_overlay) hooks.remove_overlay(popup_ptr);  // 接受后关闭（gbcode 同策略）
+    };
+    popup->on_dismiss = [hooks, popup_ptr, completion_state_ptr](bool accepted) {
+      if (hooks.remove_overlay) hooks.remove_overlay(popup_ptr);
+      if (!accepted) {
+        completion_state_ptr->set_content("已取消（Esc / 点击弹层外）");
+      }
+    };
+    if (hooks.add_overlay) hooks.add_overlay(std::move(popup));
+    completion_state_ptr->set_content("弹层展示中：↑↓ 导航、Enter/Tab 接受、Esc 取消");
+  };
+
+  // CommandPalette：按钮唤起 → 命令表过滤/执行回显；Esc/遮罩关闭。
+  // 挂载后必须 grab_focus（否则键盘进不来——组件注释里的实测坑）；
+  // on_command 只回 id，执行的语义在各 handler 里（本表把 id 回显到状态条）。
+  palette_open_ptr->on_click = [hooks, palette_state_ptr]() {
+    auto palette = std::make_unique<CommandPalette>(std::vector<CommandPalette::Command>{
+        {.id = "demo.a", .title = "演示: 打个招呼", .detail = "状态栏回显命令 id"},
+        {.id = "demo.b", .title = "演示: 报个时辰", .detail = "证明 handler 真在跑"},
+        {.id = "demo.c", .title = "演示: 什么都不做", .detail = "空 handler（如实回报）"},
+        {.id = "view.icons", .title = "查看: 图标全集", .detail = "本页下方图标卡"},
+        {.id = "view.split", .title = "查看: 可拖拽分栏", .detail = "本页分栏卡"},
+    });
+    palette->set_id("demo-palette");
+    // CommandPalette 构造即可见（与 CompletionPopup 相反——那个构造默认隐藏，
+    // 必须显式 set_visible(true)，见上一卡的坑）；这里无需再设。
+    auto* palette_ptr = palette.get();
+    palette->on_command = [palette_state_ptr, hooks, palette_ptr](std::string_view id) {
+      palette_state_ptr->set_content(std::format("已执行「{}」（{} 条命中，active）", id,
+                                                 palette_ptr->match_count()));
+      hooks.set_status(std::format("命令面板执行：{}", id));
+    };
+    palette->on_close = [hooks, palette_ptr, palette_state_ptr]() {
+      if (hooks.remove_overlay) hooks.remove_overlay(palette_ptr);
+      palette_state_ptr->set_content("面板已关闭（Esc / 遮罩 / 执行后）");
+    };
+    if (hooks.add_overlay) hooks.add_overlay(std::move(palette));
+    // 挂树之后才能把焦点交给过滤框：grab_focus 经 UiRoot::set_focus 生效
+    // （gbcode 实测坑：挂前调不生效，敲的字会跑进底层焦点元素）。
+    // （命令面板不自动关：执行后由用户 Esc——本表是演示，多选几条看回显。）
+    palette_ptr->grab_focus();
+    palette_state_ptr->set_content("面板展示中：输入过滤 · ↑↓ 导航 · Enter 执行 · Esc 关闭");
+  };
+
+  // —— 六卡接线（TimelineView/MergeView/MenuBar/ContextMenu/FileDialog/Terminal；
+  // 静态展示部分在建卡处）——
+
+  // TimelineView：播放头/片段拖动与修剪回显（组件改 Model 后回调；拖拽期间
+  // 不吸附到自己——组件内已按约定传 exclude）。
+  const auto refresh_timeline_state = [timeline_ptr, timeline_state_ptr, hooks]() {
+    const Millis playhead = timeline_ptr->model().playhead();
+    timeline_state_ptr->set_content(std::format(
+        "播放头 {:02}:{:02}.{:03} · 缩放 {:.0f}px/s",
+        static_cast<int>(playhead / 60000), static_cast<int>((playhead / 1000) % 60),
+        static_cast<int>(playhead % 1000), timeline_ptr->model().pixels_per_second()));
+    hooks.set_status(std::format("时间轴：播放头 {}ms", static_cast<long long>(playhead)));
+  };
+  timeline_ptr->on_playhead_changed = [refresh_timeline_state](Millis) { refresh_timeline_state(); };
+  timeline_ptr->on_clip_moved = [timeline_state_ptr, hooks](std::size_t track, std::size_t clip) {
+    timeline_state_ptr->set_content(std::format("片段移动：轨道 #{} · #{}（吸附候选拉齐）",
+                                                track, clip));
+    hooks.set_status(std::format("时间轴：轨道 #{} 片段 #{} 已移动", track, clip));
+  };
+  timeline_ptr->on_clip_trimmed = [timeline_state_ptr, hooks](std::size_t track, std::size_t clip) {
+    timeline_state_ptr->set_content(std::format("片段修剪：轨道 #{} · #{}（左右边缘）",
+                                                track, clip));
+    hooks.set_status(std::format("时间轴：轨道 #{} 片段 #{} 已修剪", track, clip));
+  };
+
+  // MergeView：冲突计数回显 + 当前段取舍按钮（作用于当前聚焦段，非冲突段如实拒绝）。
+  const auto refresh_merge_state = [merge_ptr, merge_state_ptr]() {
+    merge_state_ptr->set_content(std::format(
+        "冲突 {} 段 · 已解 {} · {}（当前段 #{}）", merge_ptr->conflict_count(),
+        merge_ptr->resolved_count(),
+        merge_ptr->has_pending_conflicts() ? "还有待决" : "全部已决",
+        merge_ptr->current_segment()));
+  };
+  merge_ptr->on_choice_changed = [refresh_merge_state]() { refresh_merge_state(); };
+  merge_ours_button_ptr->on_click = [merge_ptr, refresh_merge_state, hooks]() {
+    (void)merge_ptr->invoke_action("take_ours", {});  // 与控制通道同一条路径
+    refresh_merge_state();
+    hooks.set_status("合并：当前段取我方");
+  };
+  merge_theirs_button_ptr->on_click = [merge_ptr, refresh_merge_state, hooks]() {
+    (void)merge_ptr->invoke_action("take_theirs", {});
+    refresh_merge_state();
+    hooks.set_status("合并：当前段取他方");
+  };
+  merge_next_button_ptr->on_click = [merge_ptr, refresh_merge_state, hooks]() {
+    (void)merge_ptr->invoke_action("next_conflict", {});
+    refresh_merge_state();
+    hooks.set_status(std::format("合并：跳到未决冲突段 #{}", merge_ptr->current_segment()));
+  };
+
+  // MenuBar：开面板（make_panel 锚定到标题下方）→ 挂 overlay；条目激活回显。
+  // 切换菜单时框架先触发 on_menu_close（尽旧面板）再回调本处（参数=目标菜单序号，
+  // 此时 open_index_ 已改到目标——直接用参数，不反读内部状态）。
+  menubar_ptr->on_open_menu = [menubar_ptr, menubar_panel_cell, hooks](std::size_t index) {
+    if (MenuPanel* live = *menubar_panel_cell; live != nullptr) {
+      if (hooks.remove_overlay) hooks.remove_overlay(live);  // 兜底：首开/未走 close 路径
+      *menubar_panel_cell = nullptr;
+    }
+    if (auto panel = menubar_ptr->make_panel(index); panel != nullptr) {
+      panel->set_id("demo-menubar-panel");
+      MenuPanel* panel_ptr = panel.get();
+      *menubar_panel_cell = panel_ptr;
+      panel->on_close = [menubar_panel_cell, hooks]() {
+        if (MenuPanel* live = *menubar_panel_cell; live != nullptr) {
+          if (hooks.remove_overlay) hooks.remove_overlay(live);
+          *menubar_panel_cell = nullptr;
+        }
+      };
+      if (hooks.add_overlay) hooks.add_overlay(std::move(panel));
+    }
+  };
+  menubar_ptr->on_menu_close = [menubar_panel_cell, hooks]() {
+    if (MenuPanel* live = *menubar_panel_cell; live != nullptr) {
+      if (hooks.remove_overlay) hooks.remove_overlay(live);
+      *menubar_panel_cell = nullptr;
+    }
+  };
+  menubar_ptr->on_action = [menubar_state_ptr, hooks](const std::string& menu_id,
+                                                       const std::string& item_id) {
+    menubar_state_ptr->set_content(std::format("已执行 {}.{}（on_action 回报）", menu_id, item_id));
+    hooks.set_status(std::format("菜单执行：{}.{}", menu_id, item_id));
+  };
+
+  // ContextMenu：按钮唤起（锚点=按钮实时 bounds）→ 条目激活/关闭回显。
+  // 工厂 make 已接面板 on_close → 转发 on_close；条目激活需自己接（on_activate）。
+  context_open_ptr->on_click = [hooks, context_open_ptr, context_state_ptr]() {
+    auto menu = ContextMenu::make(
+        Point{context_open_ptr->bounds().x, context_open_ptr->bounds().y},
+        std::vector<MenuItem>{
+            MenuItem{.id = "ctx.copy", .label = "复制"},
+            MenuItem{.id = "ctx.paste", .label = "粘贴"},
+            MenuItem{.id = "sep", .label = "", .separator = true},
+            MenuItem{.id = "ctx.rename", .label = "重命名…"},
+            MenuItem{.id = "ctx.delete", .label = "删除"},
+        });
+    menu->set_id("demo-context");
+    auto* menu_ptr = menu.get();
+    menu->panel()->on_activate = [menu_ptr, context_state_ptr, hooks](std::size_t index) {
+      context_state_ptr->set_content(std::format(
+          "已激活条目 #{}（id={}，invoke activate_item 同路径）", index,
+          menu_ptr->panel()->item_id(index)));
+      hooks.set_status(std::format("右键菜单：条目 #{}", index));
+    };
+    menu->on_close = [hooks, menu_ptr, context_state_ptr]() {
+      if (hooks.remove_overlay) hooks.remove_overlay(menu_ptr);
+      context_state_ptr->set_content("已关闭（Esc / 点击面板外 / 激活条目后）");
+    };
+    if (hooks.add_overlay) hooks.add_overlay(std::move(menu));
+    context_state_ptr->set_content("菜单展示中：点击条目激活 · Esc/点外关闭");
+  };
+
+  // FileDialog：按钮打开（Open 模式；起始目录 = 进程 CWD）→ 确认回显全路径。
+  // ⚠ 构造即建一个会话并进入目录（reload 同步 fs），所以只在打开时构造，
+  // 不预建常驻（每帧重组不存在——本页是命令式，面板生命周期由叠加层持有）。
+  filedialog_open_ptr->on_click = [hooks, filedialog_state_ptr]() {
+    auto dialog = std::make_unique<FileDialog>(FileDialog::Mode::Open, "打开文件");
+    dialog->set_id("demo-filedialog");
+    std::string start_dir = ".";
+    if (const auto cwd = st::fs::current_dir(); cwd) start_dir = *cwd;
+    dialog->set_directory(start_dir);
+    auto* dialog_ptr = dialog.get();
+    dialog->on_confirm = [dialog_ptr, filedialog_state_ptr, hooks](const std::string& full_path) {
+      filedialog_state_ptr->set_content(std::format("已确认：{}", full_path));
+      hooks.set_status(std::format("文件对话框：{}", full_path));
+      if (hooks.remove_overlay) hooks.remove_overlay(dialog_ptr);
+    };
+    dialog->on_cancel = [hooks, dialog_ptr, filedialog_state_ptr]() {
+      if (hooks.remove_overlay) hooks.remove_overlay(dialog_ptr);
+      filedialog_state_ptr->set_content("已取消（Esc / 取消按钮 / 遮罩点击）");
+    };
+    if (hooks.add_overlay) hooks.add_overlay(std::move(dialog));
+    filedialog_state_ptr->set_content("对话框展示中：双击进入目录 · Enter 确认 · Esc 取消");
+  };
+
+  // Terminal：行模式静态输出 + 按钮注入/清屏（行模式不需要每帧 pump）。
+  terminal_ptr->append("$ stpm run gallery --headless");
+  terminal_ptr->append("[就绪] 行模式静态回显（无 PTY；真终端见 gbcode Ctrl+`）");
+  terminal_ptr->append("[提示] 点「注入一条命令回显」看 append；「清屏」走 clear()");
+  const auto refresh_terminal_state = [terminal_ptr, terminal_state_ptr]() {
+    terminal_state_ptr->set_content(std::format(
+        "行模式 · 当前会话 {} 行（标签栏可见，单会话演示）",
+        terminal_ptr->line_count(terminal_ptr->active_session())));
+  };
+  terminal_send_button_ptr->on_click = [terminal_ptr, refresh_terminal_state, hooks]() {
+    terminal_ptr->append("$ echo gallery-terminal（按钮注入）");
+    terminal_ptr->append("gallery-terminal");
+    refresh_terminal_state();
+    hooks.set_status("终端：已注入一条命令回显");
+  };
+  terminal_clear_button_ptr->on_click = [terminal_ptr, refresh_terminal_state, hooks]() {
+    terminal_ptr->clear();
+    refresh_terminal_state();
+    hooks.set_status("终端：已清屏");
+  };
+  refresh_terminal_state();  // 初值回显（建卡处占位换成实测行数）
+
+  // 编辑器/差异卡初值回显（建卡处的占位文案在此换成实测值；与首包 TextArea 同姿态）。
+  refresh_editor_state();
+  refresh_diff_state();
+  refresh_timeline_state();
+  refresh_merge_state();
+
   return page;
 }
 

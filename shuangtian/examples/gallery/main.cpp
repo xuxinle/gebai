@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <format>
 #include <memory>
+#include <ranges>     // std::ranges::sort/unique/binary_search（树自检集合运算）
 #include <string>
 #include <thread>
 #include <vector>
@@ -34,7 +35,114 @@
 #include "st/ui/dsl.hpp"   // 声明式页的宿主（`dsl::mount_into`）
 #include "st/ui/icon.hpp"
 
+// 展示集登记真源（tests 与 gallery 共用；树自检的对账基准，不手抄）。
+#include "../../tests/support/gallery_exhibits.hpp"
+
 namespace {
+
+/// 树自检（39 轮对账单未竟项②：登记与实物一致性由运行时实证，不再靠人工 grep）。
+///
+/// 遍历启动树收集 type()，与登记集（kGalleryExhibits 真源）双向对账：
+/// - **全展示**：每个非懒 exhibit（kGalleryExhibits − kGalleryLazy）至少上树一次
+///   ——「登记了却没真卡」当场红；懒创建卡（kGalleryLazy）另有触发钮在场断言。
+/// - **登记外放行**：树上出现但不在登记集的 type 必须在放行清单里逐名白名单
+///   （注入型/自绘类，见 gallery_exhibits.hpp 头部口径）；新名字冒出来即红
+///   ——登记集漂移（漏登/改名）无处藏。
+/// - **注入型在场**：建卡期即随父组件出现的注入型（ListItem/ScrollBar/TitleBar）
+///   不在树上也要红（防放行清单烂成坟场，与豁免两条铁律同族）；MenuPanel 是菜单卡
+///   交互触发（make_panel 在回调里），启动不要求在场，仅登记外放行。
+///
+/// 集合运算用 vector + std::ranges::sort/unique（避开 set 红黑树首用例重分配的
+/// 真实性陷阱——disjoint 教训；两个 std::set 头文件从不引入）。
+auto audit_gallery_tree(const st::ui::UiRoot& root) -> void {
+  // 树上 type 收集（递归；children() span 直接遍历）。
+  std::vector<std::string> seen;
+  const auto collect = [&seen](const st::ui::Element& node, auto&& self) -> void {
+    seen.emplace_back(node.type());
+    for (const auto& child : node.children()) {
+      if (child != nullptr) self(*child, self);
+    }
+  };
+  if (const st::ui::Element* content = root.content(); content != nullptr) {
+    collect(*content, collect);
+  }
+  std::ranges::sort(seen);
+  seen.erase(std::ranges::unique(seen).begin(), seen.end());
+
+  // 登记集（真源拷入 vector；懒创建单独一份）。拷贝后统一排序——三份都不是
+  // 字典序（注册序/触发钮序/分组序），而下方全部 binary_search 都要求有序。
+  std::vector<std::string> exhibits{gallery::kGalleryExhibits.begin(),
+                                   gallery::kGalleryExhibits.end()};
+  std::vector<std::string> lazy{gallery::kGalleryLazy.begin(),
+                                gallery::kGalleryLazy.end()};
+  std::vector<std::string> allowed{
+      // —— 放行清单（与 gallery_exhibits.hpp 头部口径逐条对应）——
+      // 注入型（前三个建卡期即在场，见下方 injected 断言；MenuPanel 是菜单卡
+      // 点击后 make_panel 才挂层的交互触发型——启动不在场，仅放行不要求在场）：
+      "ListItem", "ScrollBar", "MenuPanel", "TitleBar",
+      // 非注册的框架组件（gallery 直接 new，无展示义务）：SceneView 未
+      // override type()，树上以基类默认「Element」露面（scene_view.hpp 无 type 重写）。
+      "Element",
+      // gallery 自绘演示类（pages.cpp 本地类）：
+      "ProgressRow", "IconCell", "SvgIconCell",
+      // 框架懒注入（交互触发，非登记实例）：
+      "SelectPanel",
+  };
+  // 结构性豁免名同样放行：豁免理由是「无展示价值/父组件内建」，不是「不上树」
+  // ——例：声明式页的 dsl::spacer() 会把「Spacer」造上树；豁免里的注入型名字
+  //（ListItem/ScrollBar/MenuPanel）与上面重复登记也无妨（排序去重后等价）。
+  for (const auto& [name, reason] : gallery::kGalleryExempt) {
+    (void)reason;
+    allowed.emplace_back(name);
+  }
+  std::ranges::sort(exhibits);
+  std::ranges::sort(lazy);
+  std::ranges::sort(allowed);
+  allowed.erase(std::ranges::unique(allowed).begin(), allowed.end());
+  // ⚠ Tooltip 是懒注入（hint-bubble）+ 直接卡同 type：直接卡在场由 exhibits 断言
+  // 盯住，这里不另列放行（树上有它不红——它本就在登记集里）。
+
+  std::vector<std::string> missing;   // 登记了却不上树（非懒）
+  std::vector<std::string> injected;  // 放行清单里要求在场却缺席的注入型
+  for (const std::string& name : exhibits) {
+    if (std::ranges::binary_search(lazy, name)) continue;  // 懒创建：启动树不要求在场
+    if (!std::ranges::binary_search(seen, name)) missing.push_back(name);
+  }
+  // 注入型在场：只有「建卡期即随父组件出现」的三类（List 卡的 ListItem、
+  // ScrollView 构造内建的 ScrollBar、WindowFrame 恒建的 TitleBar）要求在场；
+  // MenuPanel 是菜单卡交互触发（make_panel 在回调里），启动树不要求。
+  for (const std::string_view name : {"ListItem", "ScrollBar", "TitleBar"}) {
+    if (!std::ranges::binary_search(seen, std::string{name})) injected.emplace_back(name);
+  }
+
+  // 登记外：树上出现、但不在（登记 ∪ 懒 ∪ 放行）里的 type。
+  std::vector<std::string> unexpected;
+  for (const std::string& name : seen) {
+    const bool known = std::ranges::binary_search(exhibits, name) ||
+                       std::ranges::binary_search(lazy, name) ||
+                       std::ranges::binary_search(allowed, name);
+    if (!known) unexpected.push_back(name);
+  }
+
+  // 对账结论：不达标不阻断启动（展示型自检，失败也照常进入主循环），
+  // 但逐条打印——无头 e2e/人工都能从启动日志直接看到。
+  const bool ok = missing.empty() && injected.empty() && unexpected.empty();
+  if (!ok) {
+    st::print("[gallery 树自检] 登记与实物不符：\n");
+    for (const std::string& name : missing) {
+      st::print("  - 展示集登记了「{}」但启动树上没有（非懒卡应建卡即上树）\n", name);
+    }
+    for (const std::string& name : injected) {
+      st::print("  - 放行清单要求「{}」在场（注入型，父组件应在）但树上没有\n", name);
+    }
+    for (const std::string& name : unexpected) {
+      st::print("  - 树上出现登记集外的「{}」（新组件？该登记进 kGalleryExhibits 或放行）\n", name);
+    }
+  } else {
+    st::print("[gallery 树自检] 通过：树上 {} 种 type，登记 {}（含懒 {}）/豁免外放行 {}\n",
+              seen.size(), exhibits.size(), lazy.size(), allowed.size());
+  }
+}
 
 using st::math::Insets;
 using st::ui::Align;
@@ -600,6 +708,9 @@ auto run_app(int argc, char** argv) -> int {
                                         gallery::make_declarative_component());
     if (decl_host == nullptr) st::print("声明式页挂载失败（该页将只显示壳）\n");
   }
+  // 启动树自检（mount_into 之后：声明式子树也是被审计对象；39 轮未竟项②）。
+  // 不达标不阻断启动（展示型自检），结论打印在启动日志；无头 e2e 可 grep 断言。
+  audit_gallery_tree(app.root());
   status_right_ptr->set_content(std::format("{} · headless={} · DPI {:.1f} · 控制通道 127.0.0.1:{}",
                                             app.backend_name(), app.headless(),
                                             static_cast<double>(app.device_scale()),

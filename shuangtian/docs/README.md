@@ -2,7 +2,7 @@
 
 **哪份文档答哪个问题、它还跟不跟着代码变。**
 
-> 这份地图是**入口**：除了它自己，其余 20 份文档都在下表中。
+> 这份地图是**入口**：除了它自己，其余 22 份文档都在下表中。
 > 加新文档时同步改这里（见文末「新知识该写哪份」——地图烂掉的根因是只写读法不写写法）。
 
 ## 一句话：先按意图找，再按「寿命契约」决定信多少
@@ -22,7 +22,7 @@
 
 ---
 
-## A. 活文档（8 份）——写代码前后的必读
+## A. 活文档（9 份）——写代码前后的必读
 
 | 文档 | 回答的问题 | 什么时候看 | 契约 |
 |---|---|---|---|
@@ -33,6 +33,7 @@
 | [`declarative.md`](declarative.md) | 声明式 UI（`st::ui::dsl` + `declarative.js`）的设计与**调用方契约** | 用声明式写界面，或给声明式加能力时 | 活·**接口** |
 | [`perceptual_changes.md`](perceptual_changes.md) | 观感类改动（字体/配色/动画/手感）怎么做：正交量、量尺三坑、八步循环 | **验收标准是"人的感受"**时（不是测试红绿） | 活 |
 | [`PITFALLS.md`](PITFALLS.md) | **坑位速查**：按**发生场景**（刚改完代码/写回归测试/改观感/跨平台/…）索引"这类事以前踩过什么" | **开工前**扫一眼当前场景那一节（30 秒）；卡住时先来查 | 活·索引 |
+| [`EXAMPLES_E2E.md`](EXAMPLES_E2E.md) | 五示例 e2e 驱动入口表：哪个脚本验证哪个面、怎么跑全量 | 新增示例/e2e 脚本时同步登记；跑示例验收时查表 | 活 |
 | [`../docs/README.md`](README.md) | 本文件 | —— | 活 |
 
 ## B. 待办台账（1 份）
@@ -58,7 +59,7 @@
 | [`SKIA_TEXT_RENDERING_STUDY.md`](SKIA_TEXT_RENDERING_STUDY.md) | Skia/Chromium 覆盖率与网格拟合怎么做的（给"中文线条不均匀"找有依据的方向） | 源码 1 处 | 实测 |
 | [`BASELINE_METRICS_20261014.md`](BASELINE_METRICS_20261014.md) | **基础指标基线**（性能/产物大小/内存）：改动前后的可复跑数字 + 内存去向分解 + 「为何把 <20MiB 改成分档」 | `DESIGN.md` §11.1、`BACKLOG.md` | 实测 |
 
-## D. 设计与修复记录（6 份）——已落地，读它是为了**别重蹈**
+## D. 设计与修复记录（7 份）——已落地，读它是为了**别重蹈**
 
 | 文档 | 讲的是什么 | 契约 |
 |---|---|---|
@@ -68,13 +69,15 @@
 | [`OPTIMIZATION_BASELINE.md`](OPTIMIZATION_BASELINE.md) | 结构优化**改动前**的快照（对比基准） | 记录 |
 | [`OPTIMIZATION_PROGRESS.md`](OPTIMIZATION_PROGRESS.md) | 结构优化过程与交接 | 记录 |
 | [`OPTIMIZATION_REPORT.md`](OPTIMIZATION_REPORT.md) | 结构优化收尾报告（17 个提交，每阶段可单独回滚） | 记录 |
+| [`MERGE_REVIEW.md`](MERGE_REVIEW.md) | `optimize/ui-viewport-2026` 分支的合并前复核（16 笔提交逐笔：改动/验证/风险/回滚点；2026-10-14）——分支合并前的复核范式 | 记录（一次性，分支已并入） |
 
-## E. 专题设计（2 份）
+## E. 专题设计（3 份）
 
 | 文档 | 讲的是什么 | 契约 |
 |---|---|---|
 | [`independent_project.md`](independent_project.md) | 怎么用本框架建**自己的**应用工程（清单/构建/运行全流程） | 活 |
 | [`LOUYUE_CAIYUN.md`](LOUYUE_CAIYUN.md) | 「镂月裁云」两示例的设计规约 | 记录（**已实现**；权威现状见 README「示例」节） |
+| [`xml-ui.md`](xml-ui.md) | 纯 XML + JS 通路（`examples/xmlapp`）：XML 描述界面 + `ScriptBridge` JS 驱动 | 记录（已落地，`DESIGN.md` §4.2.20–22） |
 
 ## F. 各目录里的文档
 
@@ -83,7 +86,7 @@
 | [`../tools/README.md`](../tools/README.md) | 探针/脚本怎么用、依赖放哪（代码进仓库 / 二进制走资源管理） |
 | [`../third_party/SOURCES.md`](../third_party/SOURCES.md) | 随仓库分发的第三方源码有哪些、版本/来源/许可、动了哪些上游代码 |
 | [`../third_party/sqlite/PROVENANCE.md`](../third_party/sqlite/PROVENANCE.md) | SQLite 这个具体依赖的取数路径、改动面、裁剪结果 |
-| [`../../resources/README.md`](../../resources/README.md)（主仓库） | 模型与运行时资源怎么获取（**二进制资源**的集中地） |
+| [`../../resources/models/`](../../resources/models/)（主仓库） | 模型与运行时资源的实际存放地（推理侧模型权重等**二进制资源**不进本仓库） |
 
 ---
 

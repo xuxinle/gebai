@@ -93,7 +93,7 @@ shuangtian/
 ├── src/<层>/*.cpp        # 实现（与头同名优先）
 │   └── **/platform_*.cpp # 平台/系统 API 单点封装（禁令受控例外）
 ├── tests/<层>_<模块>_test.cpp
- ├── examples/{gallery,gbcode}/
+ ├── examples/{gallery,gbcode,louyue,caiyun,xmlapp}/   # 五示例：组件面 / 编辑器面 / 光栅面 / 动效面 / 纯 XML+JS 面（见根 README「示例」节）
 ├── third_party/<name>/   # 外部依赖源码（直接内联、随仓库分发）：nlohmann/json、quickjs-ng、
 │                         # batterycenter/embed、sqlite（amalgamation 源码内置）；
 │                         # 来源/许可/校验和见 SOURCES.md 与 CHECKSUMS.sha256
@@ -1896,6 +1896,13 @@ Chrome 边缘：  背景(24,24,29) → 蓝(24,24,133) → 亮(172,205,211)   ←
 提升全在几何（其中心拟合最优的 ⌀ 参数就是 `gamma=1, contrast=0`）。
 因此该方向在当前几何质量下**不值得做**，数字留在量尺里，避免下次又去追。
 
+> **相位档回滚记（2026-10-16）**：曾在此记录「笔位相位档」实现（灰度 4 档/亚像素
+> 3 档、平移在 grid_fit 后、phase 进缓存键；墨心 σ 0.3987→0.0974px）并默认开启，
+> 但真窗口观感实测**变差**（小字字形随档位微抖）——量化档位的形状变化被
+> 人眼捕获，墨心指标的改善未兑换成观感收益。已整体回滚；实现细节与实测数据
+> 存档于 `.evolve/backup-v22-full-workspace.patch`，重做前先读 BACKLOG 对应条目的
+> 回滚记。
+
 ### 4.3.4 字重（`FontWeight`）——从「只是个属性」到「落到像素」
 
 **缺陷**：`Element::paint_text`（`src/ui/element.cpp`）**完全不读** `style_.font_weight`。
@@ -3363,6 +3370,14 @@ compose('TodoPage', () => Column([
   动作 `select`）：给 headless/自动化一条程序化选路入口——组件选路全靠鼠标点列表 +
   在文件名行打字，无头下智能体根本“选不了文件”。语义：目录→进入；文件→进入其所在目录 +
   回填文件名 + 选中列表项；**不存在→返回 false 且不改任何状态**（不静默去别处）。
+  `Mode::Directory` 下指向目录 → 进入并可确认（选目录模式的原生选路）；指向文件
+  → 如实 false（该模式下文件名不参与语义，回填等于埋伪路径）。
+- **`FileDialog::set_pending_paths(paths)`**（属性面 `pending_paths`，`|` 分隔；
+  前置 `multi_select=true` 且 `Mode::Open`）：多选的程序化选路——清单全部存在、
+  全为文件、同一目录 → 进入该目录 + 集合就位（读回 `selected_paths`，`|` 连接），
+  确认经 `on_confirm_multiple` 整份交付（顺序保留）；任一不满足 → false 且零状态改动
+  （不静默截断）。配套：`multi_select` 属性开关（非 Open 模式如实拒绝）、
+  Ctrl+Click 进/出集合（用户侧链路写同一份状态）、换目录/换模式自动清集合。
 
 - **单根语义**：build 的首个顶层声明直接落在 `UiRoot::content()` 槽位（不预建容器层）。
 - **位置对齐复用 + key 复用**：每个父元素一个子游标，重跑 build 时按位置+类型对齐——同位同型只
@@ -4249,6 +4264,15 @@ state      := visible | hidden | focused | enabled | disabled | checked | select
 示例：`Button`、`#save-btn`、`Panel > Button[text~=保存]`、`Input:focus`、`ListItem:selected`。
 匹配子串时对 UTF-8 安全；`find` 返回按树的先序顺序。
 
+**含 `.`/`:` 的 id（警示）**：选择器按 CSS 语义把 `.` 当类型分隔符、`:` 当状态分隔符，
+而业务 id 常含这些字符（git 面板的 `git-file-<path>`、任务项的 `task-42` 等）。
+`#git-file-alpha.txt` 会被拆成 `Id: git-file-alpha + Type: txt`。
+`find` 对此有容错：**形如 `#xxx` 的纯 id 选择器先按整串试精确匹配**，命中即用，
+不命中再退回 CSS 解析；两者都不中时报错文案会提示改用属性写法（`[id=git-file-alpha.txt]`，
+语义上与整串精确匹配等价）。`ui.query`/脚本 `$()` 走 `Selector::parse`，无此容错——
+在脚本里查含特殊字符的 id 请直接用属性写法。
+回归：`tests/control_protocol_test.cpp` 的 `find_hash_selector_matches_id_containing_dots`。
+
 ### 6.4 语义树 vs 视觉树
 - `tree`/`find` 走 **语义树**（组件声明自己要暴露什么；`role` 面向无障碍与自动化，与 DOM/a11y 概念对齐）。
 - `visual` 走 **绘制层树**（实际画了什么、z 序、命中区），用于「看起来对不对」的验证与像素级调试。
@@ -4686,7 +4710,7 @@ mingw 交叉编译在**发布前手工执行**（`st build gallery --toolchain=m
 |---|---|---|
 | `gallery` | **组件集 / 设计系统巡检**：导航、统计卡、按钮矩阵、图标墙、表单、列表、进度条、主题与 DPI 切换、截图 | 组件库完整度、设计令牌一致性、DPI 正确性、控制通道可达性 |
 | `gbcode` | **VSCode 式代码编辑器**：标题栏/菜单栏/**常驻**活动栏+可收起侧栏（资源管理器·搜索·源代码管理·运行·扩展）/多标签编辑区（修改点、可关闭）/底部面板（**真终端**：多会话标签栏——标签默认 shell 名、`OSC` 标题实时覆盖、尾部动作钮（清屏/中止/收起）+ 回看滚动条 + 隐藏保留会话的面板显隐）/状态栏；命令面板（Ctrl+Shift+P）、**打开文件夹换工作区**（Ctrl+Shift+O）、全局快捷键、8 种内置语言 + 自定义语言 `stlog` | **易用性**（一个 IDE 形态界面 ≈ 数百行声明式组装，全部用内置组件，零自绘）、**组件库覆盖度**（MenuBar/Tabs/Tree/List/Overlay/快捷键在同一真实形态下的协同）、**控制通道全链路**（多编辑器实例的属性面与动作） |
-| **`louyue` 镂月** | **图像编辑器**：左工具栏（移动/画笔/橡皮/油漆桶/吸管/选区/裁切）+ 中央**自绘画布**（棋盘格底、缩放档位 25%~800%、笔刷光标圈）+ 右侧图层列表与 HSV 颜色面板 + 状态栏 | **像素 / 光栅创作面**：PNG 编解码**往返**首次跑在真实用户路径（此前只有单测）、**九种混合模式**首次在真实界面里被人眼与像素断言同时检验、撤销栈（命令式，非整图快照） |
+| **`louyue` 镂月** | **图像编辑器**：左工具栏（移动=平移模式/画笔/橡皮/油漆桶/吸管/选区/裁切）+ 中央**自绘画布**（内置 Viewport 外壳：棋盘格底、缩放档位 25%~800%（`snap_zoom` 吸附收口）、中键/移动工具拖拽平移、首帧 fit 居中）+ 右侧图层列表与内置 ColorPicker + 状态栏 | **像素 / 光栅创作面**：PNG 编解码**往返**首次跑在真实用户路径（此前只有单测）、**九种混合模式**首次在真实界面里被人眼与像素断言同时检验、撤销栈（命令式，非整图快照） |
 | **`caiyun` 裁云** | **视频剪辑器**：上预览监视器 + 时间码 + 传输控制；左素材箱、右属性检查器；下**自绘时间轴**（轨道 V1/V2、修剪手柄、可拖播放头、时间标尺、吸附、分割/波纹删除） | **时间 / 动效应用面**：唯一由应用时间轴驱动**持续动画**的示例——帧预算与续帧协议的真实压测位；**确定性帧哈希**（区分“预览跟着播放头走”与“静帧”）；连续拖拽交互 |
 
 两个新示例都由 `dsl::custom<T>` 逃生舱**持自绘元素**（壳声明式 + 高频自绘面不
@@ -5066,11 +5090,11 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
 | 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case
-  超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑） | `st test` | **1434 用例**（源码 `ST_TEST*` 声明数，即 `check_docs.py` 的核对口径）/ **26788 断言**（单进程全跑自报；dev 档实测，另 16 个慢用例默认跳过）。另有 `--list` 报数的口径差异（含分片元信息），以源码声明数为准 |
+  超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑；**`ST_SKIP` 运行中跳过**（环境前置不满足时用例自报：结果行 SKIP、汇总行报「N skipped」、退出码仍 0，不算通过也不算失败）；**`ST_REQUIRE` 仅限 void 函数体**（非 void 里编译失败是刻意护栏），值返回 helper 用 `ST_REQUIRE_OR(expr, fallback)`（失败时记失败 + 回 fallback，不冒充弃跑用例） | `st test` | **1440 用例**（源码 `ST_TEST*` 声明数，即 `check_docs.py` 的核对口径；含 louyue 视口回流档位钉 7 例；相位档五用例随 2026-10-16 回滚移除）/ **26788 断言**（单进程全跑自报；skip 可见化与 REQUIRE_OR 两轮各 +2 用例、louyue 视口档位钉 +7，待实跑刷新；dev 档实测，另 16 个慢用例默认跳过）。另有 `--list` 报数的口径差异（含分片元信息），以源码声明数为准 |
 | 跨编译器检查 | **`st check --toolchain=<名>`**：同一个工程用另一个编译器做**语义分析**，不产出、不链接。与 `build` 共用单元枚举/标志组装/按族收敛（`options.check_only`），所以两者**不可能分叉**。实测全量 77 单元 clang 15.0 s / gcc 21.3 s（gcc 全量构建 36 s），**可查出 GCC 不报的自家缺陷**（未使用私有字段 / 未使用 lambda 捕获 / 隐式变号 / 死代码），**查不出链接期问题**（ODR 违反、符号缺失、ABI 不匹配） | `st check --toolchain=clang` | 已接入（本轮实测拓出一处：`build.cpp` 里 `dep_warning` 是移除 MSVC 时留下的死变量） |
 | 并行测试的资源推导 | **`--test-jobs N` 分片**：同一份 `st_tests` 被拉起 N 次（每次 `--shard i/N`），片内顺序不变、片间不共享内存；每片写各自的 JUnit，父进程合并成一份（用例名排序，逐字节可复现）。**片数按机器实际资源推导**（`plan_test_shards`，与编译并发同一套探测）：内核测试进程 CPU/墙钟 ≈ 0.98（占满一个核）而峰值工作集仅 112 MB，所以上界依次是**核数（含 cgroup CPU 配额）→ 内存预算 → 策略上限**，三者取小；**不做“核数 / 2”**——那个除数是给内存敏感的编译并发用的，对测试进程没有依据 | `st test --test-jobs 16` | **纯执行 22.9 s → 3.8 s（6.0×）**；机时代价 2.13×。与串行逐用例比对 `missing=0 extra=0 failDiff=0 dupes=0`（见 `docs/BUILD_TEST_PERF.md`）；**分片与全跑的口径统一有回归钉住**（`tests/shard_parity_test.cpp`：哨兵 + 自启动核对选择/执行/失败三口径，逆向验证变红确认护栏有效） |
 | 独立工程集成 | **真建一个引用 framework 的最小工程**、真构建真跑（`tests/pkg_integration_test.cpp`）
- | `st test pkg_integration` | 全绿（`ST_INTEGRATION_BUILD=0` 可关；关掉时明确跳过而非假绿） |
+ | `st test pkg_integration` | 全绿（`ST_INTEGRATION_BUILD=0` 可关；关掉或框架根缺失时 `ST_SKIP` 明确跳过并计入汇总「N skipped」，而非假绿） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告（需带 sanitizer 运行库的编译器；MinGW 发行版不带时构建前明确报错） |
 | 内置通道一致性 | `tools/st_consistency_check.py`：窗口帧缓冲 vs 客户区实际像素（逐像素） + 无头 vs 窗口同参数（scale/文本形态/拟合/截图接近度） | `python tools/st_consistency_check.py`（Windows 真机） | 5 项全过（呈现 0.000%、同源项全等） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告 |
@@ -5104,8 +5128,8 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | **v0.1.5（画廊全场景）** | ① 画廊补齐 Dialog/Toast/Tooltip/TextArea/禁用态/表格选中行/实时统计卡（28 组件全部有可视化场景）② `Toast` 自动消失（帧时间轴）③ `Table` 选中行（视觉+语义+属性）④ `TextArea` 属性面补齐 ⑤ **叠加层 z 序修正**（浮层在景上）+ `find/query` 覆盖叠加层 ⑥ `SceneView` 逐帧调试输出移除 | ✅ 已完成 |
 | **v0.1.6（2026-10-11 「待做」清账轮）** | ① **纯 XML + JS 应用通路**（`st::xml` 解析 / `build_from_xml` / `ScriptBridge` / `examples/xmlapp`，见 §4.2.19–22）② **编辑器行尾注解**（`LineDecoration::end_text`：blame 的作者与日期）③ **行内字符级差异**（`diff_inline` 按**码位**而非字节；编辑器行内区间底色）④ **`st::edit::UndoStack`** 撤销栈原语 ⑤ **`st::ui::Viewport`** 二维缩放/平移 + 棋盘格透明底 ⑥ **`st::ui::ColorPicker`** HSV 面板 + 十六进制 + 吸管 ⑦ **`st::text` 三方合并**（五态区段，含“两侧同改不算冲突”）⑧ **`st::ui::timeline::Model`** 时间轴数据模型 ⑨ **部分暂存**（`build_partial_patch` + `WriteOp::StagePatch`）⑩ **`TitleBar` 品牌区**（不再复用 `leading` 槽）⑪ **墙钟帧间隔**指标（`wall_p50_ms`）⑫ gbcode：`--open` / 单文件历史弹窗 / blame 开关 ⑬ **构建期根治**：测试链接命令行超限（响应文件退路，**解锁新增测试文件**）+ `dbghelp`/`nanosrv` 库口径统一（`independent_project` 长期失败转 PASS） | ✅ 已完成 |
 | **v0.1.7（2026-10-11 C 轮）** | ① **三方合并**：`st::text::merge_three_way`（五态区段，`BothSame` 不算冲突）+ `st::ui::MergeView`（三栏 + 逐块取舍 + 冲突跳转）+ `read_conflict_sides`（`git show :1:/:2:/:3:`）② **`st::ui::TimelineView`**（标尺/轨道/片段/播放头 + 拖拽移动与修剪）③ **逐行暂存界面**（差异视图勾选列 + 工具条 + `StagePatch`/`UnstagePatch`）④ **高频指针移动的帧内合并**（`st::ui::InputCoalescer`；louyue 做到「一笔一条历史」）⑤ **`st::ext::VideoDecoder`**（经 `ffmpeg` 子进程抽帧与读元信息，探测不到如实不支持）⑥ **测试框架的用例异常边界**（未捕获异常记 FAIL 而不再带走整进程）⑦ **`ScriptBridge::expose` 命名空间契约修正**（统一挂 `app.` 之下） | ✅ 已完成 |
-| v0.2 | 文本选择与复制、更多组件（日期选择、图表）、X11 / Wayland 窗口后端 | 待做 |
-| v0.3 | Vulkan 合成后端、**图层缓存与局部重绘**（当前 `dirty_rect_` 只有整视口口径）、多窗口 | 待做 |
+| v0.2 | 文本选择与复制、更多组件（日期选择、图表）、X11 / Wayland 窗口后端 | 部分完成：**X11 / Wayland 已落地**（真后端，见 §4.6.1；2026-10-15）；文本选择与复制已实现（`ui_text_selection_*` 测试族）；日期选择、图表待做 |
+| v0.3 | Vulkan 合成后端、**图层缓存与局部重绘**、多窗口 | 部分完成：**局部重绘已落地**（损坏区机制，见 §4.2.8.1，实测 paint 38ms→1.86ms）；Vulkan 合成后端、多窗口待做 |
 | v0.4 | 原生源码依赖生态（`st-packages` 索引）、`st publish` | 待做 |
 
 ## 11. 性能目标（v0.1 基线）

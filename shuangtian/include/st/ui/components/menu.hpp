@@ -94,7 +94,8 @@ class MenuPanel : public Element {
       -> std::optional<std::string> override;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
   /// 动作面：`activate_item`（参数=item id）——自动化按键精确驱动，与鼠标
-  /// Click 同链（`on_activate`）；未知 id 如实 false，分隔线不参与。
+  /// Click 同链（`on_activate` → `on_close`，高亮跟选）；未知 id 如实 false，
+  /// 分隔线不参与。与既有下标激活（Click 坐标 / Enter 键盘）共存。
   [[nodiscard]] auto invoke_action(std::string_view action, std::string_view argument)
       -> bool override;
 

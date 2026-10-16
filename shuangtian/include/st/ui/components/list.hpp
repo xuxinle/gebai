@@ -60,6 +60,12 @@ class ListItem : public Element {
   [[nodiscard]] auto semantics_text() const -> std::string override;
   [[nodiscard]] auto semantics_flags() const -> SemanticsFlags override;
 
+  /// 把容器（`List`）记的排版覆盖镜像到本项（字是项画的，见
+  /// `List::apply_theme_to_items` 的说明）。每帧镜像，不累积。
+  void apply_container_text_overrides(const Element& container);
+
+  void apply_theme(const Theme& theme) override;
+
  private:
   std::string label_{};
   std::string subtitle_{};
@@ -150,6 +156,12 @@ class List : public Element {
 
   auto on_event(const RenderContext& context, Event& event) -> bool override;
   [[nodiscard]] auto semantics_value() const -> std::string override;
+
+  /// 容器层的排版覆盖（DSL `BoxProps::color/size`）下放到每个项。
+  /// 字是 `ListItem` 画的，容器只记不画——不下放就是静默不生效。
+  /// 在 `apply_theme` 末尾调：镜像完紧跟项的基类 apply_theme 回放进 style_。
+  void apply_theme_to_items();
+  void apply_theme(const Theme& theme) override;
 
   // —— 列表类通用视口契约（与 `Tree` 同口径，见 tree.hpp 的说明）——
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;

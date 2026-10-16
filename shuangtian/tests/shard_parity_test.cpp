@@ -16,8 +16,10 @@
 ///    二进制既是「被分片的套件」又是「执行核对的一方」，不需要第二个测试产物。
 /// 2. 主用例（`shard_parity_selection_and_results_match_unsharded`）**自启动本二进制**：
 ///    - `--list` 三类：不分片、`--shard i/4`（i=1..4），核对**选择口径**——
-///      各片名单按注册顺序取模分配、并集为全集且互不重叠（`run_all` 与 `case_names`/
-///      `list_cases` 走同一个 `in_shard`，这是「`st test --jobs N` 预先算片」依赖的不变量）；
+///      各片名单并集为全集且互不重叠，且**同 TU 用例不跨片**（TU 装箱调度：
+///      同翻译单元用例集中到单片同族串行，git_service 根修；`run_all` 与
+///      `case_names`/`list_cases` 走同一个 `in_shard`，这是「`st test --jobs N`
+///      预先算片」依赖的不变量）；
 ///    - 过滤执行运行：`--shard i/4 shardprobe`（带 filter）跑一遍并核对**执行口径**——
 ///      各片执行到的哨兵名单 == 该片 `--list` 的哨兵名单（执行即通过，退出码 0），
 ///      全跑 `shardprobe` 的哨兵名单 == 四片并集。过滤运行是关键：整套件跑一遍太贵且
@@ -31,18 +33,18 @@
 ///
 /// - 主用例只在 `ST_PARITY_PROBE` **未设**时执行（哨兵运行里它自动空转）；
 /// - 子进程**不设 `ST_JUNIT_XML`**，也不试图清空它：分片驱动下本进程带着它，子进程会
-///   继承并在退出时把父分片的报告写一遍（POSIX 侧子进程 env 是追加式、同名键压不住，
-///   清空在 Windows 生效但 POSIX 取到旧值）。这是**安全的**：子进程的写入发生在
+///   继承并在退出时把父分片的报告写一遍。这是**安全的**：子进程的写入发生在
 ///   `run_all` 执行期间，而父分片自己的 `write_junit` 在进程退出前才写——最后一次写
 ///   按序胜出，合并时拿到的是父分片的完整报告（分片驱动下实测 exit 0）。
-///   若未来 POSIX 侧 env 改为覆盖语义（见 BACKLOG），可改为显式置空彻底隔离。
+///   （历史注：POSIX 侧 env 曾是追加式、同名键压不住，“清空隔离”在当时不可靠，
+///   2026-10-15 已改覆盖语义——BACKLOG 315；如今显式置空可行，但“继承写入被父进程
+///   按序覆盖”的现有论证仍成立，不改。）
 /// - 所有证据都取自 stdout 与退出码，**不写中间文件**（分片运行时多片并行写同一路径
 ///   会互踩——`shard_suffix()` 存在的原因；这里干脆不用文件）。
 
 #include <algorithm>
 #include <cstdlib>
 #include <format>
-#include <map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -114,27 +116,6 @@ void check_names_equal(const std::vector<std::string>& actual, const std::vector
   return st::process::run(*exe, arguments, options);
 }
 
-/// 无过滤 `--list` 的全部行（**行号 = 全局注册序**）。
-///
-/// 哨兵/主用例的**绝对**注册序由其它 TU 的用例数决定——早于本文件链接的 TU 新增或
-/// 删除一例，哨兵块就整体平移（2026-10-15 实测：一处正常的新增用例把本文件三处
-/// 硬编码期望全部打破）。分片取模发生在全局注册序上，所以期望值只能**观察**
-/// （无过滤名单的行号），不能假设「哨兵块起点 ≡ 0 (mod 4)」这类算术关系。
-[[nodiscard]] auto full_listing_lines() -> st::Result<std::vector<std::string>> {
-  auto run = run_self({"--list"}, false);
-  if (!run) return st::unexpected(run.error());
-  std::vector<std::string> lines;
-  const std::string& text = run->stdout_text;
-  std::size_t cursor = 0;
-  while (cursor < text.size()) {
-    const std::size_t end = text.find('\n', cursor);
-    const std::size_t line_end = end == std::string::npos ? text.size() : end;
-    lines.emplace_back(text.substr(cursor, line_end - cursor));
-    cursor = end == std::string::npos ? text.size() : end + 1;
-  }
-  return lines;
-}
-
 }  // namespace
 
 // —— 哨兵段：12 个占位用例（名字即契约，两位数下标让序号分布对 4 片是 3/3/3/3、
@@ -157,9 +138,9 @@ ST_SHARDPROBE_CASE(06)
 #undef ST_SHARDPROBE_CASE
 
 /// 07 号哨兵：`ST_PARITY_FAIL_07=1` 时故意失败（其余时刻与别的哨兵一样秒过）。
-/// **必须手写在 06 与 08 之间**：分片按下标取模，落片由注册顺序决定——它挂在
-/// 宏列表末尾会让下标从 7 变 11，落片计算随之错（写错位置时恰好同余、侥幸不炸，
-/// 但注释与事实不符且换片数就露馅）。全集下标 7 → 7%4=3 → 第 4 片。
+/// 保持在 06 与 08 之间（注册序连续）：TU 装箱下哨兵同 TU 必落同片；它的归属
+/// 片由主用例从逐片名单观察（不再从序号取模推导——旧注释的「7%4=3 → 第 4 片」
+/// 已随取模调度退役）。
 ST_TEST(shardprobe_case_07) {
   if (!parity_probe_enabled()) return;
   if (parity_fail_armed()) {
@@ -185,29 +166,17 @@ ST_TEST_WITH_TIMEOUT(shard_parity_selection_and_results_match_unsharded, 60'000)
   if (parity_probe_enabled()) return;  // 哨兵运行里空转（防重入：子进程会再跑全套件）
 
   // —— 第一步：选择口径（`--list`）——
-  // 不分片的名单是基准；`--shard i/4` 的名单必须按注册序取模分配、并集为全集。
+  // 不分片的名单是基准；`--shard i/4` 的名单必须并集为全集且互不重叠
+  //（TU 装箱调度：同 TU 不跨片，见下方不变量断言）。
   auto all_run = run_self({"--list", "shardprobe"}, false);
   ST_REQUIRE(all_run.has_value());
   const std::vector<std::string> all_names = extract_probe_names(all_run->stdout_text);
   ST_REQUIRE(all_names.size() == 12);  // 哨兵没被注册全（宏未展开/名字变更）时后续断言全是噪声，必须前置拦住
 
-  // 哨兵的全局注册序（取模发生在**全局序**上，不是哨兵块内序）：从无过滤 `--list`
-  // 的行号观察得到，不假设哨兵块起点对 4 的余数（那由其它 TU 的用例数决定，
-  // 别人正常加一例就会平移——2026-10-15 实测踩中）。
-  auto full_lines = full_listing_lines();
-  ST_REQUIRE(full_lines.has_value());
+  // 哨兵的落片必须**观察**得到而不能推导：TU 装箱的落片由贪心装箱的桶负载
+  // 决定，不透明但确定。下方逐片 `--list` 后从「哪片含哨兵」观察，供第三步
+  // 失败口径使用。
   constexpr std::size_t kShards = 4;
-  std::map<std::string, std::size_t> global_ordinal;
-  for (std::size_t line = 0; line < full_lines->size(); ++line) {
-    global_ordinal[full_lines->at(line)] = line;
-  }
-  ST_REQUIRE(global_ordinal.count("shardprobe_case_07") == 1);
-  // 取值不走 `.at()`（L12：键缺失即抛，而测试框架无异常边界）——find + 解引用。
-  const auto ordinal_it = global_ordinal.find("shardprobe_case_07");
-  const std::size_t ordinal_07 = ordinal_it->second;
-  // 07 落在哪片由全局序决定：片号 = 序号 % 4 + 1（与 `in_shard` 同式）。
-  // 失败注入只作用于 07 → 有且仅有这一片退出码非零。
-  const std::size_t failing_shard = ordinal_07 % kShards;  // 0 起
 
   std::vector<std::vector<std::string>> shard_names(kShards);
   for (std::size_t index = 0; index < kShards; ++index) {
@@ -218,21 +187,34 @@ ST_TEST_WITH_TIMEOUT(shard_parity_selection_and_results_match_unsharded, 60'000)
     shard_names[index] = extract_probe_names(listing->stdout_text);
   }
 
-  // 取模分配是强断言（不是「恰好凑齐」）：哨兵块的**全局序**从无过滤名单观察
-  // （哨兵 j 的全局序 = 块起点 + j），它落片 = 全局序 % 4——期望名单据此推导，
-  // 不假设块起点对 4 的余数（那是别人 TU 的用例数决定的）。显式比对而不是
-  // 集合差——错位比缺失更能暴露口径漂移，且同时钉住「并集为全集」与「互不重叠」。
-  ST_REQUIRE(global_ordinal.count("shardprobe_case_00") == 1);
-  const auto block_start_it = global_ordinal.find("shardprobe_case_00");
-  const std::size_t block_start = block_start_it->second;
-  for (std::size_t index = 0; index < kShards; ++index) {
-    std::vector<std::string> expected_names;
-    for (std::size_t j = 0; j < all_names.size(); ++j) {
-      if ((block_start + j) % kShards == index) expected_names.push_back(all_names[j]);
+  // 并集 = 全集、互不重叠（不重不漏）：TU 装箱与旧取模调度共同必须成立的不变量，
+  // 与具体分配算法无关。
+  {
+    std::vector<std::string> union_names;
+    for (const auto& names : shard_names) {
+      union_names.insert(union_names.end(), names.begin(), names.end());
     }
-    ST_CHECK_EQ(shard_names[index].size(), expected_names.size());
-    check_names_equal(shard_names[index], expected_names);
+    std::vector<std::string> union_sorted = union_names;
+    std::vector<std::string> all_sorted = all_names;
+    std::sort(union_sorted.begin(), union_sorted.end());
+    std::sort(all_sorted.begin(), all_sorted.end());
+    check_names_equal(union_sorted, all_sorted);
   }
+  // **TU 装箱不变量**：哨兵 12 条同 TU（本文件），必须全部落在同一片——
+  // 除这一片外任何片都不得含哨兵（同 TU 跨片 = 装箱被破坏，本单根修目标）。
+  {
+    std::size_t shards_with_sentinels = 0;
+    for (const auto& names : shard_names) {
+      if (!names.empty()) ++shards_with_sentinels;
+    }
+    ST_CHECK_EQ(shards_with_sentinels, std::size_t{1});
+  }
+  // 失败注入片 = 07 的实际归属片（观察得到：唯一含哨兵的那片），不再从序号推导。
+  std::size_t failing_shard = kShards;   // 哨兵所在片（0 基）；哨兵必在 → 会被赋值
+  for (std::size_t index = 0; index < kShards; ++index) {
+    if (!shard_names[index].empty()) failing_shard = index;
+  }
+  ST_REQUIRE(failing_shard < kShards);
 
   // —— 第二步：执行口径（过滤运行，全部通过）——
   // 各片执行到的哨兵名单 == 该片 --list 名单；各片退出码 0，之和 == 全跑退出码 0。
@@ -249,9 +231,9 @@ ST_TEST_WITH_TIMEOUT(shard_parity_selection_and_results_match_unsharded, 60'000)
     union_names.insert(union_names.end(), executed.begin(), executed.end());
   }
   // 并集与全集**作为集合**相等：排序后逐位比对。不排序直接比是错的——
-  // 各片拿到的是交错下标（片内顺序拼接天然不是注册序），要钉的性质是
-  // 「每个用例恰好被执行一次：不多、不少、不重」，顺序口径已由上面的
-  // 逐片位置断言钉过，这里不重复。
+  // 各片名单是注册序的保序子序列，片间拼接天然不是全局注册序，要钉的性质是
+  // 「每个用例恰好被选中一次：不多、不少、不重」；片内的保序性由 `case_names`
+  // 按注册序遍历的实现语义保证（下一步执行口径比对同一份名单，间接覆盖）。
   std::vector<std::string> union_sorted = union_names;
   std::vector<std::string> all_sorted = all_names;
   std::sort(union_sorted.begin(), union_sorted.end());
@@ -264,8 +246,10 @@ ST_TEST_WITH_TIMEOUT(shard_parity_selection_and_results_match_unsharded, 60'000)
   check_names_equal(extract_probe_names(all_executed->stdout_text), all_names);
 
   // —— 第三步：失败口径（哨兵 07 故意 FAIL）——
-  // 落片与选择口径一致：07 的全局序观察得 failing_shard，该片退出码 1、其余 0，
-  // 之和 == 全跑退出码 1。失败不被分片吞掉（和为 1）也不被放大（只有该片为 1）。
+  // 哨兵归属片已在第一步观察（failing_shard）。哨兵同 TU → 全部哨兵与 07 同片
+  //（同注册表同算法，子进程与本进程算出同一映射）。失败注入后重跑四片执行：
+  // 归属片退出码 1、其余 0，之和 == 全跑退出码 1：失败不被分片吞掉（和为 1）
+  // 也不被放大（只有该片为 1）。
   int failed_shard_sum = 0;
   int failing_shard_index = -1;
   for (std::size_t index = 0; index < kShards; ++index) {
@@ -306,22 +290,30 @@ ST_TEST(empty_shard_writes_no_junit_and_reports_no_failure) {
   ST_REQUIRE(st::fs::create_directories(report_dir).has_value());
   const std::string report_path = st::fs::join(report_dir, "empty-shard.xml");
 
-  // 选一个「filter 只命中主用例名」下的**真空片**：主用例的全局序从无过滤
-  // `--list` 观察（不硬编码——早链接 TU 增删用例会平移它，2026-10-15 实测踩中：
-  // 正常新增一例让硬编码的 2/4 不再是空片，断言「不产出报告」被误击）。
-  // 片号 = 全局序 % 4 + 1，避开它取任一其它片。
-  auto full_lines = full_listing_lines();
-  ST_REQUIRE(full_lines.has_value());
-  std::size_t main_case_ordinal = full_lines->size();  // 找不到时退到「不存在的片号」
-  for (std::size_t line = 0; line < full_lines->size(); ++line) {
-    if (full_lines->at(line) == "shard_parity_selection_and_results_match_unsharded") {
-      main_case_ordinal = line;
+  // 选一个「filter 只命中主用例名」下的**真空片**：主用例的归属片从**无过滤
+  // `--list` 逐片观察**（不硬编码——注册表漂移/装箱变化都会平移归属；更不能
+  // 从全局序取模推导：TU 装箱落片不透明，旧注释的「序号%4」推导已随取模调度
+  // 退役，2026-10-15 的教训是「期望值只能观察」——现在连片号也不推导）。
+  // 避开它取任一其它片：它要么空、要么含别的 TU 用例——filter 后同样空。
+  constexpr std::size_t kShards = 4;
+  std::size_t main_shard = kShards;   // 0 基；主用例必在 → 会被赋值
+  for (std::size_t index = 0; index < kShards; ++index) {
+    st::process::Options probe;
+    probe.env["ST_PARITY_PROBE"] = "1";
+    auto exe = st::process::executable_path();
+    ST_REQUIRE(exe.has_value());
+    auto listing = st::process::run(
+        *exe, {"--list", "shard_parity_selection_and_results_match_unsharded",
+               "--shard", std::format("{}/{}", index + 1, kShards)},
+        probe);
+    ST_REQUIRE(listing.has_value());
+    if (listing->stdout_text.find("shard_parity_selection_and_results_match_unsharded")
+        != std::string::npos) {
+      main_shard = index;
       break;
     }
   }
-  ST_REQUIRE(main_case_ordinal < full_lines->size());
-  constexpr std::size_t kShards = 4;
-  const std::size_t main_shard = main_case_ordinal % kShards;  // 0 起
+  ST_REQUIRE(main_shard < kShards);
   const std::size_t empty_shard = (main_shard + 1) % kShards;  // 任一非主用例片
 
   st::process::Options options;

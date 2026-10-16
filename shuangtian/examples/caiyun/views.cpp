@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <format>
+#include <string>
 
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
@@ -24,6 +26,11 @@ constexpr float kTrackHeight = 40.0f;
 constexpr float kTrackGap = 6.0f;
 constexpr float kEdgeGrabWidth = 6.0f;   ///< 修剪手柄的抓取宽度
 constexpr float kLabelPad = 6.0f;
+
+/// 秒 → 毫秒（`st::ui::timeline::Model` 的时间单位；换算集中在此一处）。
+[[nodiscard]] auto to_ms(double seconds) -> std::int64_t {
+  return static_cast<std::int64_t>(std::llround(seconds * 1000.0));
+}
 
 /// 片段块的配色按生成器区分（一眼能看出"这条轨道上是什么内容"）。
 [[nodiscard]] auto generator_color(GeneratorKind kind) -> st::math::Color {
@@ -54,37 +61,77 @@ TimelineView::TimelineView() { set_focusable(true); }
 void TimelineView::set_project(Project* project) {
   project_ = project;
   selected_ = project != nullptr ? project->selected : -1;
+  sync_from_project();
   mark_dirty();
 }
 
+void TimelineView::sync_from_project() const {
+  if (project_ == nullptr) {
+    model_ = {};
+    return;
+  }
+  // 旧「全时长铺满视口」的换算语义经 Model 等价重建：pps = 视口宽 / 工程时长
+  //（滚动恒 0）。视口宽取当前 bounds（未布局时兑底 480）。
+  const float lane_width = bounds().width > 1.0f ? bounds().width : 480.0f;
+  model_.set_viewport_width(lane_width);
+  model_.set_pixels_per_second(static_cast<float>(
+      static_cast<double>(lane_width) / std::max(0.001, project_->duration)));
+  model_.set_scroll(0);
+  model_.set_playhead(to_ms(project_->playhead));
+
+  // 轨道按视觉序（V2 在上 = Model 下标 0，与 hit_test 的"上层先抓"一致）；
+  // 带高含 6px 轨道间隙，与旧 track_rect 的阶梯几何一致。
+  std::vector<st::ui::timeline::Track> lanes;
+  lanes.reserve(2);
+  for (int visual = 0; visual < 2; ++visual) {
+    st::ui::timeline::Track lane;
+    lane.label = visual == 0 ? "V2" : "V1";
+    lane.height = kTrackHeight + kTrackGap;
+    for (const Clip& clip : project_->clips) {
+      if (clip.track != (visual == 0 ? 1 : 0)) continue;
+      lane.clips.push_back(st::ui::timeline::Clip{
+          .id = std::to_string(clip.id),
+          .start = to_ms(clip.t_in),
+          .duration = to_ms(clip.t_out) - to_ms(clip.t_in),
+          .source_in = to_ms(clip.source_in),
+          .selected = clip.id == selected_,
+      });
+    }
+    lanes.push_back(std::move(lane));
+  }
+  model_.set_tracks(std::move(lanes));
+}
+
 auto TimelineView::time_to_x(double time) const -> float {
-  if (project_ == nullptr || project_->duration <= 0.0) return bounds().x;
-  const float usable = std::max(1.0f, bounds().width);
-  return bounds().x + static_cast<float>(time / project_->duration) * usable;
+  // 换算唯一入口改走 Model；屏幕坐标语义保留（+ bounds().x，绘制侧零改动）。
+  return bounds().x + model_.time_to_x(to_ms(time));
 }
 
 auto TimelineView::x_to_time(float x) const -> double {
-  if (project_ == nullptr || project_->duration <= 0.0) return 0.0;
-  const float usable = std::max(1.0f, bounds().width);
-  const double ratio = static_cast<double>(x - bounds().x) / static_cast<double>(usable);
-  return std::clamp(ratio * project_->duration, 0.0, project_->duration);
+  const double raw = static_cast<double>(model_.x_to_time(x - bounds().x)) / 1000.0;
+  if (project_ == nullptr) return raw;
+  return std::clamp(raw, 0.0, project_->duration);  // 旧版的 [0, duration] 夹取保留
 }
 
 auto TimelineView::track_rect(int track) const -> st::math::Rect {
-  const float top = bounds().y + kRulerHeight + kTrackGap +
-                    static_cast<float>(1 - track) * (kTrackHeight + kTrackGap);
-  return st::math::Rect{bounds().x, top, bounds().width, kTrackHeight};
+  // V2（track=1）在上 = Model 下标 0；带高含轨道间隙（sync 时折入），还原旧阶梯。
+  const auto [top, bottom] = model_.track_rect(track == 1 ? 0U : 1U);
+  return st::math::Rect{bounds().x, bounds().y + kRulerHeight + kTrackGap + top,
+                        bounds().width, (bottom - top) - kTrackGap};
 }
 
 auto TimelineView::clip_rect(const Clip& clip) const -> st::math::Rect {
   const st::math::Rect track = track_rect(clip.track);
-  const float x0 = time_to_x(clip.t_in);
-  const float x1 = time_to_x(clip.t_out);
-  return st::math::Rect{x0, track.y + 3.0f, std::max(2.0f, x1 - x0), track.height - 6.0f};
+  const auto [lane, index] = model_.locate(std::to_string(clip.id));
+  if (lane == st::ui::timeline::Model::kNone) return st::math::Rect{};
+  const auto [left, right] = model_.clip_x_range(lane, index);
+  return st::math::Rect{bounds().x + left, track.y + 3.0f, std::max(2.0f, right - left),
+                        track.height - 6.0f};
 }
 
 auto TimelineView::grab_at(st::math::Point point) const -> std::pair<int, TimelineGrab> {
   if (project_ == nullptr) return {-1, TimelineGrab::None};
+  sync_from_project();
 
   // 播放头优先（它在最上层，且很细——不优先就永远抓不到）。
   const float head_x = time_to_x(project_->playhead);
@@ -92,20 +139,47 @@ auto TimelineView::grab_at(st::math::Point point) const -> std::pair<int, Timeli
       point.y <= bounds().bottom()) {
     return {-1, TimelineGrab::Playhead};
   }
-  // 片段：**上层优先**（V2 盖住 V1 的部分该抓 V2）。
-  for (int track = 1; track >= 0; --track) {
-    for (const auto& clip : project_->clips) {
-      if (clip.track != track) continue;
-      const st::math::Rect rect = clip_rect(clip);
-      if (!rect.contains(point)) continue;
-      if (point.x - rect.x <= kEdgeGrabWidth) return {clip.id, TimelineGrab::ClipLeftEdge};
-      if (rect.right() - point.x <= kEdgeGrabWidth) return {clip.id, TimelineGrab::ClipRightEdge};
-      return {clip.id, TimelineGrab::ClipBody};
+  // 片段与修剪边缘：`Model::hit_test`（坐标换到内容区原点）。边缘带对窄片段
+  // 自动收窄（不超片宽 1/3，"窄片段只能修不能移"的护栏）；同 x 多条时取上面
+  // ——V2 在上 = Model 下标 0，与旧「上层优先」一致；命中身份按 id 串回 Project。
+  const float mx = point.x - bounds().x;
+  const float my = point.y - bounds().y - kRulerHeight - kTrackGap;
+  if (my >= 0.0f) {
+    const st::ui::timeline::Hit hit = model_.hit_test(mx, my, kEdgeGrabWidth);
+    if (hit.clip != st::ui::timeline::Hit::kNone) {
+      const int id = std::stoi(model_.tracks()[hit.track].clips[hit.clip].id);
+      return {id, hit.part == st::ui::timeline::ClipPart::LeftEdge
+                     ? TimelineGrab::ClipLeftEdge
+                 : hit.part == st::ui::timeline::ClipPart::RightEdge
+                     ? TimelineGrab::ClipRightEdge
+                     : TimelineGrab::ClipBody};
     }
   }
   // 标尺上任意点击 = 定位播放头。
   if (point.y <= bounds().y + kRulerHeight) return {-1, TimelineGrab::Playhead};
   return {-1, TimelineGrab::None};
+}
+
+auto TimelineView::snap_time(double time, int exclude_id) const -> double {
+  if (project_ == nullptr || !project_->snapping) return time;
+  sync_from_project();
+  // 阈值换算：Project 记秒（0.12s），Model 要像素——秒 × pps 等价旧手感
+  //（旧实际像素阈值 ≈ 0.12s × 48px/s ≈ 5.8px）。
+  st::ui::timeline::SnapOptions options;
+  options.threshold_px = static_cast<float>(
+      project_->snap_threshold * static_cast<double>(model_.pixels_per_second()));
+  options.to_playhead = exclude_id >= 0;  // 拖播放头时不吸播放头自己
+  std::size_t exclude_track = st::ui::timeline::Model::kNone;
+  std::size_t exclude_clip = st::ui::timeline::Model::kNone;
+  if (exclude_id >= 0) {
+    const auto [lane, index] = model_.locate(std::to_string(exclude_id));
+    if (lane != st::ui::timeline::Model::kNone) {
+      exclude_track = lane;
+      exclude_clip = index;
+    }
+  }
+  return static_cast<double>(
+             model_.snap(to_ms(time), options, exclude_track, exclude_clip)) / 1000.0;
 }
 
 void TimelineView::notify_changed() {
@@ -147,16 +221,17 @@ void TimelineView::paint_content(const st::ui::RenderContext& context,
   if (area.is_empty()) return;
   canvas.fill_rect(area, Paint::solid(track_bg_alt_));
   if (project_ == nullptr) return;
+  sync_from_project();  // 几何真值源刷新（绘制/命中/吸附共用同一份 Model）
 
   // —— 标尺 ——
   const st::math::Rect ruler{area.x, area.y, area.width, kRulerHeight};
   canvas.fill_rect(ruler, Paint::solid(ruler_bg_));
-  // 每秒一个刻度、每 5 秒一个长刻度 + 文字（标签密度随缩放自适应，
-  // 否则窄视口上文字会糊成一片——这在小窗口下最容易出问题）。
-  const float pixels_per_second = area.width / static_cast<float>(std::max(0.001, project_->duration));
-  int step = 1;
-  if (pixels_per_second < 40.0f) step = 5;
-  if (pixels_per_second < 16.0f) step = 10;
+  // 步长改走 `timeline::ruler_step`（1/2/5×10ⁿ 跳档——等分刻度会出现 0:03.333
+  // 这种要心算的标签）；min_px=40 对齐旧密度（旧阈值 40px/16px 在本例 10s 工程
+  // 下同为整秒刻度）。极端缩放下兑底整秒，防步长截断成 0。
+  int step = static_cast<int>(st::ui::timeline::ruler_step(
+                 to_ms(project_->duration), model_.pixels_per_second(), 40.0f) / 1000);
+  if (step < 1) step = 1;
   for (int second = 0; second <= static_cast<int>(project_->duration); second += step) {
     const float x = time_to_x(static_cast<double>(second));
     canvas.fill_rect(st::math::Rect{x, ruler.y + kRulerHeight - 6.0f, 1.0f, 6.0f},
@@ -233,19 +308,19 @@ auto TimelineView::on_event(const st::ui::RenderContext& context, Event& event) 
                         ? id
                         : -1;
       if (dragging_playhead_) {
-        project_->playhead = project_->snap(x_to_time(event.position.x));
+        project_->playhead = snap_time(x_to_time(event.position.x), /*exclude_id=*/-1);
         notify_seek();
         return true;
       }
       if (grab_ == TimelineGrab::ClipBody && grab_clip_ >= 0) {
         const double target = x_to_time(event.position.x) - grab_offset_;
-        (void)project_->move_clip(grab_clip_, project_->snap(target));
+        (void)project_->move_clip(grab_clip_, snap_time(target, grab_clip_));
         notify_seek();
         return true;
       }
       if ((grab_ == TimelineGrab::ClipLeftEdge || grab_ == TimelineGrab::ClipRightEdge) &&
           grab_clip_ >= 0) {
-        const double time = project_->snap(x_to_time(event.position.x));
+        const double time = snap_time(x_to_time(event.position.x), grab_clip_);
         (void)project_->trim(grab_clip_, grab_ == TimelineGrab::ClipLeftEdge ? 0 : 1, time);
         notify_seek();
         return true;
@@ -265,7 +340,7 @@ auto TimelineView::on_event(const st::ui::RenderContext& context, Event& event) 
       grab_clip_ = id;
       if (grab == TimelineGrab::Playhead) {
         dragging_playhead_ = true;
-        project_->playhead = project_->snap(x_to_time(event.position.x));
+        project_->playhead = snap_time(x_to_time(event.position.x), /*exclude_id=*/-1);
         notify_seek();
         return true;
       }

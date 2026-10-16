@@ -67,6 +67,10 @@ class FileDialog : public Element {
     if (mode_ == mode) return;
     mode_ = mode;
     if (mode_ == Mode::Directory) filename_.clear();
+    // 多选状态（开关 + 集合）属于上一个模式：换模式后语义已变
+    //（Save 单输出/Directory 单目录），留着开关会让后续 Open 会话带着旧开关。
+    multi_select_ = false;
+    selected_paths_.clear();
     mark_layout_dirty();
   }
   [[nodiscard]] auto mode() const noexcept -> Mode { return mode_; }
@@ -95,6 +99,15 @@ class FileDialog : public Element {
   /// Windows 的隐藏属性不在此列（`list_dir` 未暴露该位；且 DOS/系统文件误伤面大）。
   void set_show_hidden(bool show);
   [[nodiscard]] auto show_hidden() const noexcept -> bool { return show_hidden_; }
+
+  // —— 多选（`Mode::Open` 专用：Save 确认单输出路径、Directory 选单目录，都无多选语义）——
+  /// 开关（属性面在非 Open 模式下如实拒绝写入）。关掉时清空多选集合。
+  void set_multi_select(bool multi);
+  [[nodiscard]] auto multi_select() const noexcept -> bool { return multi_select_; }
+  /// 多选集合（当前列出的目录内的文件全路径；空 = 未多选）。
+  [[nodiscard]] auto selected_paths() const noexcept -> const std::vector<std::string>& {
+    return selected_paths_;
+  }
 
   // —— 位置侧栏（跨平台的"常用位置"）——
   /// 自定义位置项（追加在内置项之后；`path` 不存在时自动跳过显示）。
@@ -143,6 +156,16 @@ class FileDialog : public Element {
   /// 否则"程序化选路"与"用户在界面上看到的"会不一致。
   [[nodiscard]] auto set_pending_path(const std::string& path) -> bool;
 
+  /// **程序化指向多个路径**（多选的选路入口；须 `Mode::Open` 且 `multi_select` 已开）。
+  ///
+  /// 语义（`set_pending_path` 同一条诚实契约的批量版，BACKLOG 3895）：
+  /// - 清单**全部存在、全为文件、且同在一个目录** → 进入该目录 + 集合整体就位
+  ///   （确认时经 `on_confirm_multiple` 整份交付，注入顺序保留）；
+  /// - 任一不满足 → **返回 false 且不改变任何状态**（不静默截断剩下的——自动化
+  ///   拿到"少了一半还以为成功"的清单比直接失败糟得多）。限单目录是桌面文件
+  ///   对话框的通行约束（跨目录多选没有稳定的视觉呈现）。
+  [[nodiscard]] auto set_pending_paths(const std::vector<std::string>& paths) -> bool;
+
   /// 程序化选中第 index 个条目（越界返回 false）。与鼠标点击走**同一个**
   /// `activate_entry`，因此回填文件名等副作用完全一致
   /// （避免"程序化路径是另一套语义"这类分叉）。
@@ -150,6 +173,9 @@ class FileDialog : public Element {
 
   /// 确认（按钮/Enter/双击文件）：文件名空则不触发。参数为「目录/文件名」拼好的全路径。
   std::function<void(const std::string& full_path)> on_confirm{};
+  /// 确认（**多选**：Open + multi 且集合非空时走这里，替代 `on_confirm`）——
+  /// 参数是整份路径清单（注入顺序）。集合空则不触发（与"文件名空则不触发"同口径）。
+  std::function<void(const std::vector<std::string>& paths)> on_confirm_multiple{};
   /// 取消（Esc/按钮/遮罩点击）。
   std::function<void()> on_cancel{};
 
@@ -215,6 +241,10 @@ class FileDialog : public Element {
   /// 输入行文本插入/删除（自绘单行编辑）。
   void input_insert(std::string_view text);
   void input_backspace();
+  /// 多选集合增删（Ctrl+Click 的用户侧链路——与 `pending_paths` 写同一份状态）。
+  void toggle_multi_path(const std::string& path);
+  /// 条目名是否在多选集合里（列表高亮与选路锚点共用；同目录内名唯一）。
+  [[nodiscard]] auto is_multi_selected_name(const std::string& name) const -> bool;
 
   Mode mode_{Mode::Open};
   std::string title_{};
@@ -226,6 +256,8 @@ class FileDialog : public Element {
   std::string error_{};
   std::vector<std::string> name_filters_{};   ///< 后缀白名单（空 = 全部）
   bool show_hidden_{false};                   ///< `.` 开头条目的显隐
+  bool multi_select_{false};                  ///< 多选开关（仅 Open 模式参与语义）
+  std::vector<std::string> selected_paths_{}; ///< 多选集合（当前目录内文件全路径）
   std::vector<Place> custom_places_{};        ///< 宿主自定义位置项
   float scroll_y_{0.0f};             ///< 列表纵向滚动（自绘行滚轮）
   bool input_focused_{false};        ///< 文件名行聚焦态（自绘光标依据）

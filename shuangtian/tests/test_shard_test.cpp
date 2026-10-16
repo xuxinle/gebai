@@ -142,20 +142,38 @@ ST_TEST(shard_indices_are_one_based_and_stable) {
   const auto full = all_case_names();
   ST_REQUIRE(full.size() >= 6);
 
-  // 第 1 片的第 0/1 个用例 = 全集下标 0/8（按注册顺序取模）
+  // 1 基：0 下标与越界下标都归「不分片」（`set_shard` 的契约，与 `parse_shard`
+  // 同口径）——不分片时名单就是全集。
+  {
+    const ShardGuard guard(0, 8);
+    ST_CHECK_EQ(st::test::shard().first, std::size_t{0});
+    ST_CHECK_EQ(st::test::case_names("").size(), full.size());
+  }
+  {
+    const ShardGuard guard(9, 8);
+    ST_CHECK_EQ(st::test::shard().first, std::size_t{0});
+    ST_CHECK_EQ(st::test::case_names("").size(), full.size());
+  }
+  // 稳定 = **确定性**：TU 装箱只依赖注册表（同清单同算法无时间依赖），同一
+  // (index, count) 的两次查询——中间隔着别的 set_shard（缓存重建）——必须给出
+  // 逐位相同的名单。这是 16 个分片进程各自本地算出同一份映射的前提，也是
+  // 注册序取模旧调度里「同参数同结果」性质的新语义等价物（不再断言具体落片
+  // 位置——TU 装箱的落片由清单决定，不透明但必须可重现）。
+  std::vector<std::string> first;
   {
     const ShardGuard guard(1, 8);
-    const auto part = st::test::case_names("");
-    ST_REQUIRE(part.size() >= 2);
-    ST_CHECK_EQ(part[0], full[0]);
-    ST_CHECK_EQ(part[1], full[8]);
+    first = st::test::case_names("");
   }
-  // 第 2 片的首个 = 全集下标 1
+  // 套件用例数远大于片数且 TU 数 ≥ 片数：贪心装箱每个桶都会分到组，片 1 非空。
+  ST_REQUIRE(!first.empty());
   {
-    const ShardGuard guard(2, 8);
-    const auto part = st::test::case_names("");
-    ST_REQUIRE(!part.empty());
-    ST_CHECK_EQ(part[0], full[1]);
+    const ShardGuard guard(1, 8);
+    const auto second = st::test::case_names("");
+    ST_CHECK_EQ(second.size(), first.size());
+    const std::size_t common = std::min(second.size(), first.size());
+    for (std::size_t index = 0; index < common; ++index) {
+      ST_CHECK_EQ(second[index], first[index]);
+    }
   }
 }
 
@@ -196,13 +214,14 @@ ST_TEST(shard_filter_still_applies_within_partition) {
   ST_REQUIRE(filtered.size() >= 2);
   for (const auto& name : filtered) ST_CHECK(name.find(needle) != std::string::npos);
 
-  // 分片后的候选集必须是**全集∩filter** 的子集（且下标口径仍按全集——最容易写错的地方）
+  // 分片后的候选集必须是**全集∩filter** 的子集（TU 装箱与 filter 正交：装箱基于
+  // 全量注册表，filter 只做名字过滤——`case_names` 内两步独立先后）
   const ShardGuard guard(1, 4);
   const auto part = st::test::case_names(needle);
   for (const auto& name : part) {
     ST_CHECK(std::ranges::find(filtered, name) != filtered.end());
   }
-  // 并集口径：四片的 filter 结果合起来应恰好等于 filtered
+  // 并集口径：四片的 filter 结果合起来应恰好等于 filtered（不重不漏）
   std::vector<std::string> union_all;
   for (std::size_t index = 1; index <= 4; ++index) {
     st::test::set_shard(index, 4);
@@ -210,6 +229,30 @@ ST_TEST(shard_filter_still_applies_within_partition) {
     union_all.insert(union_all.end(), piece.begin(), piece.end());
   }
   ST_CHECK_EQ(union_all.size(), filtered.size());
+
+  // **TU 装箱核心不变量（本单设计目标的守护）**：同一 TU 的用例必须全部落在同一片。
+  // 取同 TU 的两条用例（本文件自己）：观察它们在各片的归属，若两片各自含有其一
+  // → 同 TU 跨片 → 装箱不变量被破坏（git_service 根修失去保证）。
+  {
+    // 本文件的两条用例：同 TU（shard_parity_test.cpp）。观察法：哪一片的名
+    // 单里同时含这两条，其他片都不含——不能断言具体片号（装箱落片不透明但确定）。
+    const std::string probe_a = "shard_parity_selection_and_results_match_unsharded";
+    const std::string probe_b = "empty_shard_writes_no_junit_and_reports_no_failure";
+    ST_REQUIRE(std::ranges::find(full, probe_a) != full.end());
+    ST_REQUIRE(std::ranges::find(full, probe_b) != full.end());
+    std::size_t shards_with_both = 0;
+    std::size_t shards_with_either = 0;
+    for (std::size_t index = 1; index <= 4; ++index) {
+      st::test::set_shard(index, 4);
+      const auto members = st::test::case_names("");
+      const bool has_a = std::ranges::find(members, probe_a) != members.end();
+      const bool has_b = std::ranges::find(members, probe_b) != members.end();
+      if (has_a && has_b) ++shards_with_both;
+      if (has_a || has_b) ++shards_with_either;
+    }
+    ST_CHECK_EQ(shards_with_both, std::size_t{1});
+    ST_CHECK_EQ(shards_with_either, std::size_t{1});
+  }
 }
 
 // ————————————————————————————————————————————————————————————————————————————

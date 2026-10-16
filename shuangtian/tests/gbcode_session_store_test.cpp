@@ -8,11 +8,6 @@
 #include "st/core/fs.hpp"
 #include "st/test/test.hpp"
 
-#include <string>
-#include <vector>
-
-#include "st/core/print.hpp"
-
 // session_store 是 gbcode 的应用层源（不在框架 sources 清单里）——与
 // gbcode_lsp_bridge_test 同一策略：直接 include 实现编译进测试。
 #include "examples/gbcode/session_store.hpp"
@@ -27,19 +22,6 @@ namespace {
   const auto dir = st::fs::make_temp_dir(std::string("gbsession-") + tag);
   if (!dir.has_value()) return std::string("<temp-dir-failed>/session.json");
   return st::fs::join(*dir, "session.json");
-}
-
-/// vector<string> 的相等断言（ST_CHECK_EQ 不接受 vector——std::format 没有它的
-/// formatter；拆成逐项比较，报错消息里带下标）。
-auto check_list(const std::vector<std::string>& actual, const std::vector<std::string>& expected,
-                const char* what) -> void {
-  ST_CHECK_EQ(actual.size(), expected.size());
-  for (std::size_t index = 0; index < actual.size() && index < expected.size(); ++index) {
-    if (actual[index] != expected[index]) {
-      st::print("  不符（{}[{}]）：{} != {}\n", what, index, actual[index], expected[index]);
-      ST_CHECK(false);
-    }
-  }
 }
 
 }  // namespace
@@ -64,8 +46,8 @@ ST_TEST(gbcode_session_roundtrip_preserves_all_fields) {
   ST_CHECK_EQ(loaded.files[1].path, std::string("C:/work/proj/中文 名.md"));
   ST_CHECK_EQ(loaded.files[1].line, std::size_t{12});
   ST_CHECK_EQ(loaded.active, std::size_t{1});
-  check_list(loaded.recent_files, saved.recent_files, "recent_files");
-  check_list(loaded.recent_folders, saved.recent_folders, "recent_folders");
+  ST_CHECK_LIST(loaded.recent_files, saved.recent_files);
+  ST_CHECK_LIST(loaded.recent_folders, saved.recent_folders);
 }
 
 ST_TEST(gbcode_session_load_is_fail_safe) {
@@ -116,10 +98,10 @@ ST_TEST(gbcode_push_recent_is_mru_with_dedup_and_limit) {
   gbcode::push_recent(recents, "b");
   gbcode::push_recent(recents, "c");
   // 头插：最新在前。
-  check_list(recents, {"c", "b", "a"}, "recents");
+  ST_CHECK_LIST(recents, (std::vector<std::string>{"c", "b", "a"}));
   // 重复项提到队首（去重，不重复占位）。
   gbcode::push_recent(recents, "a");
-  check_list(recents, {"a", "c", "b"}, "recents");
+  ST_CHECK_LIST(recents, (std::vector<std::string>{"a", "c", "b"}));
   // 超上限截断（ oldest 掉出）。
   for (char letter = 'd'; letter < 'z'; ++letter) {
     gbcode::push_recent(recents, std::string(1, letter));

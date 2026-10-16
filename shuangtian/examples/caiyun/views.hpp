@@ -6,12 +6,17 @@
 /// `CanvasView`）：时间轴是连续拖拽交互面，监视器是每帧重合成的自绘面，
 /// 都不适合进声明式重组树。
 ///
-/// ## 为什么时间轴要自绘而不是用现成组件拼
+/// ## 几何层已回流 `st::ui::timeline::Model`（整件回流的第一步）
 ///
-/// 设计文档 §8 把 `Timeline` 列为"最大件"的框架缺口候选，路径是
-/// **先在示例里自绘验证形态、稳定后再内置化**（§8.1.1 的演进策略，
-/// `SplitView`/`CommandPalette` 当年走的同一条路）。所以这里刻意不抽通用
-/// 组件：形态还没定，抽早了就是把未定的东西固化成接口。
+/// 「先在示例里自绘验证形态、稳定后内置化」：v0.1.7 把几何层（`timeline::Model`）
+/// 收进框架（7 例 79 断言的纯逻辑测试接管，双份漂移收口）；随后内置的通用
+/// `st::ui::TimelineView`（标尺/轨道/片段/播放头 + 拖拽修剪）也已在册。但
+/// **整件换内置已定案不做**（2026-10-16 评估）：内置件是通用查看/编辑面，编辑
+/// 直改自带 Model；而本视图的编辑必须走 `Project`（波纹/重叠校验/检查器/渲染
+/// 同源），换件需造 Model→Project 反向桥，复杂度不低于现有手写面且引入双源同步
+/// 新缺陷面——几何层共享（现状）恰是分层正确形态：领域语义留示例，通用能力
+/// 进框架。吸附经 `Model::snap` 且**排除被拖对象自身**：旧 `Project::snap`
+/// 不排自己，拖拽时会吸在自己刚离开的位置（经典"拖不动"错法）。
 
 #include <functional>
 #include <string>
@@ -20,6 +25,7 @@
 #include "st/ui/element.hpp"
 #include "st/ui/text_port.hpp"
 #include "st/ui/theme.hpp"
+#include "st/ui/timeline.hpp"  // 几何层回流：换算/命中/吸附/标尺步长的真值源（见文件头）
 
 namespace caiyun {
 
@@ -53,6 +59,11 @@ class TimelineView final : public st::ui::Element {
       -> bool override;
 
  private:
+  /// 把 Project 重建进 `model_`（轨道按视觉序：V2 在上 = Model 下标 0）。
+  /// set_project / paint / on_event 入口调用——绘制与命中始终读到最新几何；
+  /// 拖拽帧里 `snap_time` 的候选也来自刚同步的活数据（与旧版语义一致）。
+  void sync_from_project() const;
+
   /// 时间 → 视口 x（秒 → 像素）。
   [[nodiscard]] auto time_to_x(double time) const -> float;
   [[nodiscard]] auto x_to_time(float x) const -> double;
@@ -66,10 +77,19 @@ class TimelineView final : public st::ui::Element {
   ///（“这个点是否命中本元素”），同名不同返回类型会编译报 conflicting return type；
   /// 而且即使返回类型相同，覆写基类的命中语义也会把点派发弄坏。
   [[nodiscard]] auto grab_at(st::math::Point point) const -> std::pair<int, TimelineGrab>;
+  /// 吸附（`Model::snap` 包装，秒 ↔ 毫秒换算）。`exclude_id >= 0`：拖的是该片段，
+  /// 排除它自身的边缘候选（不排会"永远吸在原位"）；`< 0`：拖的是播放头，
+  /// 排除播放头候选（否则每帧都吸回上一帧位置——旧版实际存在的手感缺陷）。
+  [[nodiscard]] auto snap_time(double time, int exclude_id) const -> double;
   void notify_changed();
   void notify_seek();
 
   Project* project_{nullptr};
+  /// 几何真值源（换算/命中/吸附/标尺步长全走 Model）：内容在 sync_from_project()
+  /// 从 Project 重建——Project 仍是编辑语义的唯一真值源。`mutable`：
+  /// `paint_content` 是 const 方法（"绘制不改状态"是框架硬约束），与
+  /// `Tree::row_label_widths_` 同一套"const 绘制路径刷新缓存"的先例。
+  mutable st::ui::timeline::Model model_{};
   int selected_{-1};
   int hover_clip_{-1};
   TimelineGrab grab_{TimelineGrab::None};

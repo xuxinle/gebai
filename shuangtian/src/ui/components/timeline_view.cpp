@@ -42,6 +42,11 @@ void TimelineView::apply_theme(const Theme& theme) {
   // 片段块与选中态都用主题令牌（硬编码在另一主题上会变成刺眼的块）。
   clip_fill_ = colors.primary_soft;
   clip_selected_ = colors.primary;
+  // 悬停态：同向提亮一档（`lighten`，量纲 0..1 的亮度比例）——不用 `mix` 掺
+  // `surface_hover`：悬停稳定后那是完全替换，会把 primary_soft 洗成中性灰
+  //（Element 框体层 hover 实测踩过的坑，同法不同层不重蹈）。量级 0.10 与
+  // 框体层暗色 up（见 element.cpp 悬停提亮）同档，保证任何主题下「提亮但不刺眼」。
+  clip_hover_ = clip_fill_.lighten(0.10f);
   playhead_color_ = colors.danger;
   muted_track_ = colors.surface_alt;
   font_size_ = theme.metrics().font_xs;
@@ -146,9 +151,22 @@ void TimelineView::paint_content(const RenderContext& context, raster::Surface& 
       if (!clip.intersects(visible_from, visible_to)) continue;   // 视口剔除
       const math::Rect block = clip_rect(track, index);
       if (block.is_empty()) continue;
-      const math::Color fill = clip.selected ? clip_selected_ : clip_fill_;
+      const bool hovered = track == hover_track_ && index == hover_clip_;
+      // 选中态优先于悬停色（选中是持续状态）；选中+悬停叠加时再轻提一档
+      //（0.05 < 0.10：选中色已比常态亮，再满幅提亮会过曝）。
+      math::Color fill = clip.selected ? clip_selected_ : (hovered ? clip_hover_ : clip_fill_);
+      if (clip.selected && hovered) fill = clip_selected_.lighten(0.05f);
       canvas.fill_rect(block, raster::Paint::solid(fill), 3.0f);
-      components_internal::paint_outline(canvas, block, 3.0f, border_, 1.0f);
+      components_internal::paint_outline(canvas, block, 3.0f,
+                                          hovered ? accent_ : border_, hovered ? 1.5f : 1.0f);
+      // 修剪手柄：`show_trim_handles_` 打开且选中时，左右缘各一道竖条
+      //（不默认开——全时段可见会让时间轴很吵，与 caiyun 手写版同一取舍）。
+      if (show_trim_handles_ && clip.selected && block.width > 12.0f) {
+        canvas.fill_rect(math::Rect{block.x, block.y, 2.0f, block.height},
+                         raster::Paint::solid(math::Color{255, 255, 255, 200}), 0.0f);
+        canvas.fill_rect(math::Rect{block.right() - 2.0f, block.y, 2.0f, block.height},
+                         raster::Paint::solid(math::Color{255, 255, 255, 200}), 0.0f);
+      }
       // 标签：**装不下就不画**（截断成半句比不画更难读——与行尾注解同一约定）。
       const float available = block.width - 8.0f;
       if (available > 12.0f && !clip.label.empty()) {
@@ -290,7 +308,23 @@ auto TimelineView::on_event(const RenderContext& /*context*/, Event& event) -> b
       return true;
     }
     case EventKind::MouseMove: {
-      if (drag_.kind == Drag::Kind::None) return false;
+      if (drag_.kind == Drag::Kind::None) {
+        // 无拖拽时的悬停追踪：命中即记入 hover_*，变化才标重绘（每帧 MouseMove
+        // 都 mark_dirty 会让整条时间轴跟着鼠标走——无谓的全重绘）。
+        const float local_x = event.position.x - lane.x;
+        const float local_y = event.position.y - lane.y;
+        const timeline::Hit hit = lane.contains(event.position)
+                                      ? model_.hit_test(local_x, local_y, kEdgePx)
+                                      : timeline::Hit{};
+        const std::size_t track = hit.clip != timeline::Hit::kNone ? hit.track : kNoIndex;
+        const std::size_t clip = hit.clip != timeline::Hit::kNone ? hit.clip : kNoIndex;
+        if (track != hover_track_ || clip != hover_clip_) {
+          hover_track_ = track;
+          hover_clip_ = clip;
+          mark_dirty();
+        }
+        return false;   // 不消费：悬停态更新不阻断后续事件（光标形态等由宿主定）
+      }
       if (drag_.kind == Drag::Kind::Playhead) {
         model_.set_playhead(std::max<Millis>(0, x_to_time(event.position.x)));
         if (on_playhead_changed) on_playhead_changed(model_.playhead());
@@ -375,6 +409,17 @@ auto TimelineView::on_event(const RenderContext& /*context*/, Event& event) -> b
       event.handled = true;
       return true;
     }
+    case EventKind::HoverOut: {
+      // 离开组件：清悬停（不清的话片段会永远亮着——“鼠标走了还亮”是悬停态
+      // 最经典的残留缺陷）。拖拽中不清——拖拽时指针常滑出组件，清了会闪烁。
+      if (drag_.kind == Drag::Kind::None &&
+          (hover_track_ != kNoIndex || hover_clip_ != kNoIndex)) {
+        hover_track_ = kNoIndex;
+        hover_clip_ = kNoIndex;
+        mark_dirty();
+      }
+      return false;
+    }
     case EventKind::Wheel: {
       if (!lane.contains(event.position) || event.wheel_delta == 0.0f) return false;
       if (event.ctrl) {
@@ -412,6 +457,13 @@ auto TimelineView::get_property(std::string_view name) const -> std::optional<st
   if (name == "tracks") return std::to_string(model_.track_count());
   if (name == "duration") return std::to_string(model_.content_duration());
   if (name == "snap") return snap_enabled_ ? "true" : "false";
+  if (name == "hover_clip") {
+    // 悬停态的读回口：与 Element 框体层 `hovered` 同理——"只能看像素"的状态
+    // 不给读口，自动化验证就只能截图猜。形态 "track:clip"，无悬停为 "-1:-1"。
+    return std::format("{}:{}", hover_track_ == kNoIndex ? -1 : static_cast<int>(hover_track_),
+                       hover_clip_ == kNoIndex ? -1 : static_cast<int>(hover_clip_));
+  }
+  if (name == "trim_handles") return show_trim_handles_ ? "true" : "false";
   return Element::get_property(name);
 }
 
@@ -463,13 +515,25 @@ auto TimelineView::set_property(std::string_view name, std::string_view value) -
     }
     return false;
   }
+  if (name == "trim_handles") {
+    // 与 `snap` 同一严格口径（明确两个词，乱值如实拒绝）。
+    if (value == "true") {
+      set_show_trim_handles(true);
+      return true;
+    }
+    if (value == "false") {
+      set_show_trim_handles(false);
+      return true;
+    }
+    return false;
+  }
   return Element::set_property(name, value);
 }
 
 auto TimelineView::property_names() const -> std::vector<std::string_view> {
   auto names = Element::property_names();
   names.insert(names.end(), {"playhead", "pixels_per_second", "scroll", "tracks", "duration",
-                             "snap"});
+                             "snap", "hover_clip", "trim_handles"});
   return names;
 }
 

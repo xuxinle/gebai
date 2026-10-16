@@ -299,6 +299,9 @@ void Select::apply_theme(const Theme& theme) {
   style_.text_align = TextAlign::Start;
   style_.direction = FlexDirection::Row;
   style_.align_items = Align::Center;
+  // 显式排版覆盖最后回放（与 Text/Button 同口径）：选中值/占位文本走 paint_line
+  //（读 style_.font_size；颜色覆盖在 paint_content 读回，三态色在绘制时才解析）。
+  apply_text_overrides();
 }
 
 void Select::measure(const RenderContext& context, const Constraints& constraints) {
@@ -417,8 +420,13 @@ void Select::paint_content(const RenderContext& context, raster::Surface& canvas
                                          k_chevron_size,
                                      0.0f),
                             bounds_.height};
-  const math::Color text_color =
+  math::Color text_color =
       !enabled_ ? colors.text_faint : (has_value ? colors.text : colors.text_faint);
+  // 显式文字色覆盖（DSL `BoxProps::color/hex_color`）盖过三态色
+  //（与 Tabs 行文本同口径）。
+  if (const auto& override_color = text_color_override(); override_color.has_value()) {
+    text_color = *override_color;
+  }
   paint_line(context, canvas, shown, text_box, style_.font_size, text_color);
 
   const math::Rect chevron{bounds_.right() - metrics.space_md - k_chevron_size,

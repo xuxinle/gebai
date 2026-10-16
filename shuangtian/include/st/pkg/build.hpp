@@ -123,4 +123,9 @@ struct BuildStats {
 /// 纯函数，供 `pkg_build_lock_test` 断言三套文案各命中/不误报。
 [[nodiscard]] bool artifact_locked(std::string_view diagnostics);
 
+/// 错误分类：`run_tests` 链路上哪些失败是「链接/构建失败」而非「用例断言红」。
+/// 返回 true = 链接失败类（产物没出来或子进程起不来，用例根本没跑）。
+/// 纯函数，供 `pkg_test_link_split_test` 断言分类边界。
+[[nodiscard]] bool is_link_failure(const st::Error& error);
+
 }  // namespace st::pkg

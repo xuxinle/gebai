@@ -361,19 +361,25 @@ void Input::paint_content(const RenderContext& context, raster::Surface& canvas)
                           band_h};
     canvas.fill_rect(band, raster::Paint::solid(colors.selection), k_cursor_radius);
   }
-  if (shown.empty()) {
+    if (shown.empty()) {
     if (!placeholder_.empty()) {
       port.draw(canvas, port.ellipsize(placeholder_, size, box.width),
                 math::Point{box.x, text_y}, size, colors.text_faint);
     }
   } else {
+    // 显式文字色覆盖（DSL `BoxProps::color/hex_color`）盖过可用/禁用色
+    //（Input 不覆写 apply_theme，基类已把覆盖回放进 style_；这里读回）。
+    math::Color text_color = usable ? colors.text : colors.text_faint;
+    if (const auto& override_color = text_color_override(); override_color.has_value()) {
+      text_color = *override_color;
+    }
     port.draw(canvas, port.ellipsize(shown, size, box.width), math::Point{box.x, text_y}, size,
-              usable ? colors.text : colors.text_faint);
+              text_color);
   }
   if (usable && focused() && blink_visible(context)) {
     const float height = std::min(line, box.height);
     const math::Rect caret{cursor_x(context), box.y + (box.height - height) * 0.5f, k_cursor_width,
-                           height};
+                          height};
     canvas.fill_rect(caret, raster::Paint::solid(colors.primary), k_cursor_radius);
   }
   canvas.pop_clip();
@@ -910,14 +916,19 @@ void TextArea::paint_content(const RenderContext& context, raster::Surface& canv
   } else {
     const float first = std::max(0.0f, std::floor(scroll_ / line));
     const auto first_row = static_cast<std::size_t>(first);
+    // 显式文字色覆盖（DSL `BoxProps::color/hex_color`）：与 Input 同口径
+    //（TextArea 不覆写 apply_theme，基类已回放进 style_，这里读回）。
+    math::Color text_color = usable ? colors.text : colors.text_faint;
+    if (const auto& override_color = text_color_override(); override_color.has_value()) {
+      text_color = *override_color;
+    }
     for (std::size_t row = first_row; row < lines.size(); ++row) {
       const float y = box.y + static_cast<float>(row) * line - scroll_;
       if (y > box.bottom()) break;
       const Line& entry = lines[row];
       if (entry.end <= entry.begin) continue;
       const std::string_view content = whole.substr(entry.begin, entry.end - entry.begin);
-      port.draw(canvas, content, math::Point{box.x, y}, size,
-                usable ? colors.text : colors.text_faint);
+      port.draw(canvas, content, math::Point{box.x, y}, size, text_color);
     }
   }
 

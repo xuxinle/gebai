@@ -16,6 +16,7 @@
 #include "st/core/fs.hpp"
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
+#include "process_env.hpp"   // merge_environment：子进程 env 覆盖语义的单一事实源（BACKLOG 315）
 
 #if defined(_WIN32)
 // `windows.h` 默认把 `min`/`max` 定义成宏，会**静默破坏**所有 `std::min`/`std::max`/
@@ -122,7 +123,10 @@ namespace {
 ///
 /// **为什么不能“直接追加同名变量”**：环境变量名大小写不敏感，追加会同时留下两份 `PATH`/`INCLUDE`，
 /// 生效的是哪一份由内部查找顺序决定——表现为“明明注入了工具链环境，编译器却找不到头文件”。
-/// 因此先剔除被覆盖的旧条目，再合并。
+/// 因此先剔除被覆盖的旧条目，再合并。剔除/拼接的**语义契约**与 POSIX 侧同源：
+/// `src/core/process_env.hpp` 的 `merge_environment`（键匹配的平台差异——本侧
+/// 大小写不敏感、POSIX 敏感——在那里参数化；本函数因宽字符/双 NUL/排序三处
+/// 平台格式差异保留各自实现，但“同名键至多一份、overrides 优先”两侧行为一致）。
 [[nodiscard]] auto build_environment(const std::map<std::string, std::string>& overrides)
     -> std::vector<wchar_t> {
   std::vector<std::wstring> entries;
@@ -424,12 +428,22 @@ auto run(std::string_view program, const std::vector<std::string>& args, const O
   for (auto& item : storage) argv.push_back(item.data());
   argv.push_back(nullptr);
 
+  // 子进程环境：overrides 优先（BACKLOG 315 修复）——曾经是**追加式**：overrides 拼
+  // 在 environ 之后，POSIX 的 `getenv` 取**首个**同名条目，注入的新值永远取不到
+  // （覆盖已存在键时静默失效；Windows 侧 `build_environment` 一直是正确的剔除式）。
+  // 现在两侧同语义：先剔除 environ 中被 overrides 命中的键再拼接，同名键至多一份。
+  // POSIX 键大小写敏感（`Path` 与 `PATH` 是两个键），与 Windows 的不敏感匹配
+  // （build_environment 里 env_key 归一）不同——这正是两平台的真实差异，由参数钉住。
   std::vector<std::string> env_storage;
-  for (const auto& [key, value] : options.env) env_storage.push_back(std::format("{}={}", key, value));
   std::vector<char*> envp;
   char** base_env = environ;
-  if (!env_storage.empty()) {
-    for (char** item = environ; item != nullptr && *item != nullptr; ++item) envp.push_back(*item);
+  if (!options.env.empty()) {
+    std::vector<std::string> inherited;
+    for (char** item = environ; item != nullptr && *item != nullptr; ++item) {
+      inherited.emplace_back(*item);
+    }
+    env_storage = merge_environment(inherited, options.env, /*case_insensitive=*/false);
+    envp.reserve(env_storage.size() + 1);
     for (auto& item : env_storage) envp.push_back(item.data());
     envp.push_back(nullptr);
     base_env = envp.data();

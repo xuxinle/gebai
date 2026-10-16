@@ -1867,6 +1867,21 @@ auto markdown(Composer& c, std::function<std::string()> source, const BoxProps& 
     // `source` 是惰性闭包（与 `text` 同口径）：重组时重新求值，闭包内读 State 即自动订阅。
     // `set_markdown` 自带相等早退，所以这里不必像 `input` 那样手写幂等判定。
     view->set_markdown(source ? source() : std::string());
+    // 排版三件套的下放（dsl.hpp 的 markdown 声明注释早已承诺，此前从未接上）
+    //（见 `MarkdownView::apply_theme` 里的同一段说明）：
+    //   `size`  → 正文字号（`set_base_font_size`，盖过主题的 font_base；
+    //             代码块字号与标题阶梯仍按主题算）；
+    //   `color`/`hex_color` → 文字色显式覆盖（每帧回放，盖过主题的 text 色）。
+    // 不接的话，DSL 侧写了 `.size = 16` 首帧看似生效、下一帧被 apply_theme 盖回
+    //（文档承诺与实现脱节的静默失效）。
+    if (props.size >= 0.0f) view->set_base_font_size(props.size);
+    if (!props.hex_color.empty()) {
+      if (const auto parsed = svg::parse_color(props.hex_color); parsed.has_value()) {
+        view->set_text_color(*parsed);
+      }
+    } else if (props.color.has_value()) {
+      view->set_text_tone(*props.color);
+    }
   }
   return *element;
 }

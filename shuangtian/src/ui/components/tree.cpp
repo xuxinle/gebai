@@ -197,6 +197,10 @@ void Tree::apply_theme(const Theme& theme) {
   style_.radius = metrics.radius_sm;
   style_.color = theme.colors().text;
   style_.font_size = metrics.font_base;
+  // 显式排版覆盖最后回放（与 Text/Button 同口径）。字号覆盖直接改写 style_
+  //（measure/paint 的行宽缓存与 draw_line 都从 style_.font_size 取，会自动跟随）；
+  // 颜色覆盖存起来供 paint_content 的行文本取色用（选中/hover 态色在绘制时才解析）。
+  apply_text_overrides();
 }
 
 void Tree::measure(const RenderContext& context, const Constraints& constraints) {
@@ -278,7 +282,12 @@ void Tree::paint_content(const RenderContext& context, raster::Surface& canvas) 
       cursor_x += kChevronSize + metrics.space_xs;
     }
 
-    const math::Color label_color = selected ? colors.primary : colors.text;
+    math::Color label_color = selected ? colors.primary : colors.text;
+    // 显式文字色覆盖（DSL `BoxProps::color/hex_color`）盖过选中/常态色：
+    // 设了就是"这棵树的字都是这个色"的显式意图（与 Badge 同口径）。
+    if (const auto& override_color = text_color_override(); override_color.has_value()) {
+      label_color = *override_color;
+    }
     const math::Rect text_box{cursor_x, row.y, row.right() - kTextInset - cursor_x, row.height};
     draw_line(context, canvas, node.label, text_box, style_.font_size, label_color);
   }

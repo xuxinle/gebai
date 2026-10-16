@@ -27,6 +27,12 @@ import time
 import zlib
 from pathlib import Path
 
+# 非 UTF-8 控制台自愈：GBK 代码页下 print 中文/符号（如 '⇄'）会 UnicodeEncodeError 崩整跑；
+# 已是 UTF-8 则不动，残余不可编字符以 '?' 兜底（宁可错印不崩）。
+if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_BIN = os.path.join(ROOT, "build", "dev", "bin", "louyue.exe")
 
@@ -320,6 +326,25 @@ def main():
         check(zoomed > 1.0, f"缩放未生效: {zoomed}")
         check(client.invoke("canvas", "zoom_out"), "缩小失败")
         print(f"[5] 交互链路通过（工具切换 / 图层增删 / 缩放档位 {zoomed}→回退）")
+
+        # —— 6. 取色回流内置 ColorPicker（36 轮回流决策；手写 HSV 三滑杆已拆） ——
+        #
+        # 交互面换成 #color-picker（内置组件），验证三件事：
+        # ① 组件真在树上（手写 HSV 滑杆退役的同位替换，不是叠加）；
+        # ② 协议 set 颜色 → 组件回读一致（属性面可用——这是无头下唯一的取色驱动入口）；
+        # ③ 链路闭合：颜色变化真的写进了画笔（swatch 是自绘色块，读它的 color 属性
+        #    就是读画布前景色——与手写时代同一个真值源，不另造第二份状态）。
+        check(client.count("#color-picker") == 1, "内置 ColorPicker 未挂上（HSV 回流未完成）")
+        check(client.count("#hue-slider") == 0, "手写 HSV 滑杆未拆除（旧控件还在树上）")
+        check(client.ok("set", {"id": "color-picker", "props": {"color": "#3366CC"}}),
+              "协议设色失败")
+        picked = client.props("color-picker")["color"]
+        check(picked.upper() == "#3366CC", f"ColorPicker 颜色回读不一致: {picked!r}")
+        time.sleep(0.4)   # 等下一帧重组：swatch/hex-label 从画布前景色重读
+        swatch_color = client.props("swatch")["color"]
+        check(swatch_color.upper() == "#3366CC",
+              f"取色未写进画笔（swatch 仍为 {swatch_color!r}，画布前景色与控件脱钩）")
+        print("[6] 取色回流内置 ColorPicker：协议设色 → 画笔真值同步（swatch 跟色）")
 
         print("\n[OK] 镂月端到端全部通过")
         return 0

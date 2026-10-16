@@ -1075,7 +1075,8 @@ auto open_recent(const std::string& path) -> void;
    void open_folder_dialog();
 
 
-  /// 文件对话框（打开 / 另存为 / 新建共用；`pending_open_mode_` 区分）。
+  /// 文件对话框（打开 / 另存为 / 新建共用；`pending_open_mode_` 区分）。打开模式为
+  /// 多选（`on_confirm_multiple` 批量开标签；协议层 `set pending_paths` '|' 注入）。
   ///
   /// 为什么用真 `FileDialog` 而不是自绘输入框：目录浏览/上级/双击进入这些行为
   /// 组件已经写好且**在无头下可程序化选路**（`set_pending_path`），自绘会全部重写一遍。

@@ -1,4 +1,7 @@
-/// 镂月自绘画布视口的实现（见 `canvas_view.hpp`）。
+/// 镂月自绘画布的实现（见 `canvas_view.hpp`）。
+///
+/// 视口职责已回流内置 Viewport（第二跳）：本文件不再有几何换算/档位缩放/
+/// 棋盘格/视口裁剪——只剩「画文档原生尺寸的位图 + 工具输入 + 文档级动作」。
 
 #include "canvas_view.hpp"
 
@@ -15,15 +18,6 @@ namespace {
 using st::raster::Paint;
 using st::ui::Event;
 using st::ui::EventKind;
-
-/// 缩放档位（设计文档 §3.3：25/50/100/200/400/800）。
-/// **离散档位**而不是连续缩放：连续缩放会让像素对齐一直在变，
-/// 100% 时"一个图素对一个像素"这个最重要的档位反而很难停准。
-constexpr float kZoomSteps[] = {0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 8.0f};
-constexpr int kZoomCount = static_cast<int>(std::size(kZoomSteps));
-
-/// 棋盘格边长（视口像素）。
-constexpr float kCheckerSize = 8.0f;
 
 }  // namespace
 
@@ -55,6 +49,12 @@ auto tool_icon(Tool tool) -> const char* {
 
 CanvasView::CanvasView() { set_focusable(true); }
 
+auto CanvasView::zoom() const noexcept -> float {
+  return viewport_ != nullptr ? viewport_->zoom() : 1.0f;
+}
+
+void CanvasView::set_viewport(st::ui::Viewport* viewport) { viewport_ = viewport; }
+
 void CanvasView::set_document(Document* document) {
   document_ = document;
   mark_dirty();
@@ -65,31 +65,10 @@ void CanvasView::set_tool(Tool tool) {
   mark_dirty();
 }
 
-void CanvasView::set_zoom(float zoom) {
-  zoom_ = std::clamp(zoom, kZoomSteps[0], kZoomSteps[kZoomCount - 1]);
-  mark_dirty();
-}
-
-void CanvasView::zoom_step(int delta) {
-  int index = 0;
-  float best = 1.0e9f;
-  for (int i = 0; i < kZoomCount; ++i) {
-    const float distance = std::abs(kZoomSteps[i] - zoom_);
-    if (distance < best) {
-      best = distance;
-      index = i;
-    }
-  }
-  index = std::clamp(index + delta, 0, kZoomCount - 1);
-  set_zoom(kZoomSteps[index]);
-}
-
 void CanvasView::set_foreground(st::math::Color color) {
   foreground_ = color;
   mark_dirty();
 }
-
-void CanvasView::set_background(st::math::Color color) { background_ = color; }
 
 void CanvasView::set_brush_radius(float radius) {
   brush_radius_ = std::clamp(radius, 1.0f, 64.0f);
@@ -102,108 +81,78 @@ auto CanvasView::cursor_color() const -> st::math::Color {
                                     static_cast<int>(std::floor(cursor_.y)));
 }
 
-auto CanvasView::canvas_rect() const -> st::math::Rect {
-  if (document_ == nullptr) return st::math::Rect{};
-  const float w = static_cast<float>(document_->width()) * zoom_;
-  const float h = static_cast<float>(document_->height()) * zoom_;
-  const st::math::Rect area = bounds();
-  return st::math::Rect{area.x + (area.width - w) * 0.5f, area.y + (area.height - h) * 0.5f, w, h};
-}
-
-auto CanvasView::to_image(st::math::Point view) const -> st::math::Point {
-  const st::math::Rect area = canvas_rect();
-  if (zoom_ <= 0.0f) return st::math::Point{};
-  return st::math::Point{(view.x - area.x) / zoom_, (view.y - area.y) / zoom_};
-}
-
-auto CanvasView::to_view(st::math::Point image) const -> st::math::Point {
-  const st::math::Rect area = canvas_rect();
-  return st::math::Point{area.x + image.x * zoom_, area.y + image.y * zoom_};
+auto CanvasView::image_at(st::math::Point window) const -> st::math::Point {
+  // 事件携带**窗口绝对坐标**：先减视口 bounds 转局部（与基类滚轮路径同式，
+  // viewport.cpp 的 `to_content` 收视口局部坐标），再走基类换算到文档坐标。
+  if (viewport_ == nullptr) return st::math::Point{};
+  const st::math::Rect area = viewport_->bounds();
+  return viewport_->to_content(st::math::Point{window.x - area.x, window.y - area.y});
 }
 
 void CanvasView::apply_theme(const st::ui::Theme& theme) {
   const auto& colors = theme.colors();
   style().background = colors.surface_sunken;
-  checker_light_ = colors.surface;
-  // 棋盘格的深色格：在 sunken 底上再压一档，保证两种格能分辨
-  //（同色或过近会让"透明区"看起来像纯色块）。
-  checker_dark_ = colors.surface_alt;
   border_ = colors.border;
 }
 
 void CanvasView::measure(const st::ui::RenderContext& context, const st::ui::Constraints& constraints) {
+  // **文档原生尺寸**（不再吃满视口）：缩放/平移/裁剪全部由外层 Viewport 的
+  // arrange 实现。约束恒忽略——内容有自己的固有大小，「被压扁」正是「缩放」
+ // 与「重排」的区别（基类给内容传无界约束也是同一理由，viewport.cpp 注释）。
   (void)context;
-  // 视口占满可用空间（它在外层是 `grow` 的），最小给一点避免布局塌成 0。
+  (void)constraints;
   float width = 320.0f;
-  float height = 240.0f;
-  if (constraints.max_width < st::ui::kUnbounded) width = constraints.max_width;
-  if (constraints.max_height < st::ui::kUnbounded) height = constraints.max_height;
+  float height = 200.0f;
+  if (document_ != nullptr) {
+    width = static_cast<float>(document_->width());
+    height = static_cast<float>(document_->height());
+  }
   measured_ = st::math::Size{width, height};
 }
 
-void CanvasView::paint_checkerboard(st::raster::Surface& canvas, st::math::Rect area) const {
-  canvas.fill_rect(area, Paint::solid(checker_light_));
-  // 只画"深色格"：亮格由底色承担，画两遍纯属浪费（大画布下可见）。
-  const int cols = static_cast<int>(std::ceil(area.width / kCheckerSize));
-  const int rows = static_cast<int>(std::ceil(area.height / kCheckerSize));
-  for (int row = 0; row < rows; ++row) {
-    for (int col = 0; col < cols; ++col) {
-      if (((row + col) & 1) == 0) continue;
-      const float x = area.x + static_cast<float>(col) * kCheckerSize;
-      const float y = area.y + static_cast<float>(row) * kCheckerSize;
-      const float w = std::min(kCheckerSize, area.right() - x);
-      const float h = std::min(kCheckerSize, area.bottom() - y);
-      if (w <= 0.0f || h <= 0.0f) continue;
-      canvas.fill_rect(st::math::Rect{x, y, w, h}, Paint::solid(checker_dark_));
-    }
-  }
-}
-
-void CanvasView::paint_content(const st::ui::RenderContext& context, st::raster::Surface& canvas) const {
+void CanvasView::paint_content(const st::ui::RenderContext& context,
+                               st::raster::Surface& canvas) const {
   (void)context;
+  if (document_ == nullptr) return;
   const st::math::Rect area = bounds();
   if (area.is_empty()) return;
 
-  // 视口底（画布之外的留白）。
-  canvas.fill_rect(area, Paint::solid(style().background));
-  if (document_ == nullptr) return;
-
-  const st::math::Rect target = canvas_rect();
-  // 画布区裁剪到视口内（缩放 >100% 时画布会超出视口）。
-  const st::math::Rect visible{
-      std::max(target.x, area.x), std::max(target.y, area.y),
-      std::min(target.right(), area.right()) - std::max(target.x, area.x),
-      std::min(target.bottom(), area.bottom()) - std::max(target.y, area.y)};
-  if (visible.width <= 0.0f || visible.height <= 0.0f) return;
-
-  paint_checkerboard(canvas, visible);
-
-  // 合成到离屏画布再整体贴上来：逐层 `draw_canvas` 直接画到视口会在缩放时
-  // 每层各做一次重采样（层数一多就糊，且层间插值不一致）。
+  // 合成到离屏画布再整体贴上来：逐层 `draw_canvas` 直接画会在缩放时每层
+  // 各做一次重采样（层数一多就糊，且层间插值不一致）。刻意保留（第二跳
+  // 的反向警示：这条不是隐疾，是防混合模糊的正确设计，别「顺手优化」掉）。
   st::raster::Canvas composed{document_->width(), document_->height(), 1.0f};
   document_->composite(composed);
-  canvas.draw_canvas(composed, target);
+  canvas.draw_canvas(composed, area);
 
   // 画布边框（100% 时帮用户判断“图到哪里为止”）。
   {
     st::raster::Path frame;
-    frame.move_to(st::math::Point{target.x, target.y});
-    frame.line_to(st::math::Point{target.right(), target.y});
-    frame.line_to(st::math::Point{target.right(), target.bottom()});
-    frame.line_to(st::math::Point{target.x, target.bottom()});
+    frame.move_to(st::math::Point{area.x, area.y});
+    frame.move_to(st::math::Point{area.right(), area.y});
+    frame.move_to(st::math::Point{area.right(), area.bottom()});
+    frame.move_to(st::math::Point{area.x, area.bottom()});
     frame.close();
     canvas.stroke_path(frame, Paint::solid(border_), 1.0f);
   }
-  // 笔刷光标：在光标处画一个空心圆（半径 = 笔刷半径 × 缩放），
-  // 让“落笔会有多大”在落笔前就看得见。
+  // 笔刷光标：在光标处画一个空心圆（半径 = 笔刷半径 × 视口缩放，
+  // 让“落笔会有多大”在落笔前就看得见）。光标圆心在**本元素局部**算：
+  // 文档坐标 → 视口坐标 → 减去本元素 bounds 左上（元素随视口 pan 移动，
+  // 光标位置取自事件时刻的换算，与本帧绘制时刻的元素位置可能有一帧差）。
   if (cursor_inside_ && (tool_ == Tool::Brush || tool_ == Tool::Eraser)) {
-    const float r = brush_radius_ * zoom_;
-    const st::math::Point center = to_view(st::math::Point{cursor_.x + 0.5f, cursor_.y + 0.5f});
-    if (r > 1.0f) {
-      // 双色描边（外白内黑）：单色圆在浅底/深底上总有一侧看不见。
-      const st::raster::Path ring = st::raster::make_circle(center, r);
-      canvas.stroke_path(ring, Paint::solid(st::math::Color{255, 255, 255, 200}), 1.5f);
-      canvas.stroke_path(ring, Paint::solid(st::math::Color{0, 0, 0, 120}), 0.5f);
+    const st::ui::Viewport* view = viewport();
+    if (view != nullptr) {
+      const st::math::Rect viewport_area = view->bounds();
+      const st::math::Point in_view =
+          view->to_view(st::math::Point{cursor_.x, cursor_.y});
+      const st::math::Point center{
+          viewport_area.x + in_view.x - area.x, viewport_area.y + in_view.y - area.y};
+      const float radius = brush_radius_ * view->zoom();
+      if (radius > 1.0f) {
+        // 双色描边（外白内黑）：单色圆在浅底/深底上总有一侧看不见。
+        const st::raster::Path ring = st::raster::make_circle(center, radius);
+        canvas.stroke_path(ring, Paint::solid(st::math::Color{255, 255, 255, 200}), 1.5f);
+        canvas.stroke_path(ring, Paint::solid(st::math::Color{0, 0, 0, 120}), 0.5f);
+      }
     }
   }
 }
@@ -248,7 +197,7 @@ auto CanvasView::on_event(const st::ui::RenderContext& context, Event& event) ->
   switch (event.kind) {
     case EventKind::HoverIn:
     case EventKind::MouseMove: {
-      const st::math::Point image = to_image(event.position);
+      const st::math::Point image = image_at(event.position);
       cursor_ = st::math::Point{std::floor(image.x), std::floor(image.y)};
       cursor_inside_ = document_ != nullptr && cursor_.x >= 0.0f && cursor_.y >= 0.0f &&
                        cursor_.x < static_cast<float>(document_->width()) &&
@@ -269,7 +218,12 @@ auto CanvasView::on_event(const st::ui::RenderContext& context, Event& event) ->
     case EventKind::MouseDown: {
       if (event.button != 1) return false;
       set_focused(true);
-      const st::math::Point image = to_image(event.position);
+      if (tool_ == Tool::Move) {
+        // Move 工具 = 平移模式：不消费，冒泡给外壳接左键拖拽平移
+        //（旧隐疾#3：该工具曾是空操作）。
+        return false;
+      }
+      const st::math::Point image = image_at(event.position);
       if (tool_ == Tool::Eyedropper) {
         (void)pick_at(image);
         return true;
@@ -292,11 +246,8 @@ auto CanvasView::on_event(const st::ui::RenderContext& context, Event& event) ->
       if (document_ != nullptr) document_->seal_stroke();
       return false;
     case EventKind::Wheel: {
-      // Ctrl+滚轮 = 缩放（设计文档 §3.3）；不按 Ctrl 的滚轮留给外层滚动。
-      if (event.ctrl) {
-        zoom_step(event.wheel_delta > 0.0f ? 1 : -1);
-        return true;
-      }
+      // 缩放档位已随几何层回流外壳：滚轮（无论是否 Ctrl）冒泡给
+      // `CanvasViewport`（旧实现是 Ctrl+滚轮在这里消费、无 Ctrl 放行）。
       return false;
     }
     default:
@@ -305,7 +256,7 @@ auto CanvasView::on_event(const st::ui::RenderContext& context, Event& event) ->
 }
 
 auto CanvasView::get_property(std::string_view name) const -> std::optional<std::string> {
-  if (name == "zoom") return std::format("{:.2f}", static_cast<double>(zoom_));
+  if (name == "zoom") return std::format("{:.2f}", static_cast<double>(zoom()));
   if (name == "tool") return std::string(tool_name(tool_));
   if (name == "brush_radius") return std::format("{:.1f}", static_cast<double>(brush_radius_));
   if (name == "cursor") {
@@ -337,8 +288,11 @@ auto CanvasView::set_property(std::string_view name, std::string_view value) -> 
     }
   };
   if (name == "zoom") {
+    // 连续值直接进视口——吸附由 `on_view_changed` 里的 snap_zoom 收口
+    //（档位不变量的唯一闸门；读回来恒是档位值）。
+    if (viewport_ == nullptr) return false;
     if (const auto parsed = parse_float(value); parsed.has_value()) {
-      set_zoom(*parsed);
+      viewport_->set_zoom(*parsed);
       return true;
     }
     return false;
@@ -382,6 +336,7 @@ auto CanvasView::invoke_action(std::string_view action, std::string_view argumen
 
   if (action == "stroke") {
     // 形如 `x1,y1,x2,y2` —— 设计文档 §3.4 约定的动作面（e2e 依赖，不可改名）。
+    // 坐标是**文档坐标**——与视口无关（命令式动作不经坐标换算，e2e 契约原样）。
     const std::size_t comma = argument.find(',');
     if (comma == std::string_view::npos) return false;
     const std::string_view rest = argument.substr(comma + 1);
@@ -406,12 +361,14 @@ auto CanvasView::invoke_action(std::string_view action, std::string_view argumen
     }
     return false;
   }
-  if (action == "zoom_in") {
-    zoom_step(1);
-    return true;
-  }
-  if (action == "zoom_out") {
-    zoom_step(-1);
+  // e2e 契约动作 `zoom_in`/`zoom_out`：缩放真值在外壳，经**委托转发**保住
+  // `invoke canvas zoom_in` 的协议面（外壳是本元素的父，控制通道 find id=canvas
+  // 只到本元素）。
+  if (action == "zoom_in" || action == "zoom_out") {
+    auto* shell = dynamic_cast<CanvasViewport*>(viewport_);
+    if (shell == nullptr) return false;
+    if (action == "zoom_in") shell->zoom_in();
+    else shell->zoom_out();
     return true;
   }
   // —— 文档级动作（设计文档 §3.4：不可改名，`tools/louyue_e2e.py` 依赖）——
@@ -603,5 +560,10 @@ auto Swatch::get_property(std::string_view name) const -> std::optional<std::str
 }
 
 auto Swatch::property_names() const -> std::vector<std::string_view> { return {"color"}; }
+
+// —— CanvasViewport：全部定义在 canvas_view.hpp（头内 inline）——
+// 无 key function（所有虚函数含构造路径均在头），vtable/typeinfo 按需弱发射，
+// tests 目标（不链 examples 源）也能链接（vtable 错锚在 cpp 的教训见
+// `wants_pan` 处的链接说明）。本文件不再有任何 CanvasViewport:: 定义。
 
 }  // namespace louyue

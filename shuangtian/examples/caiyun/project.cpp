@@ -256,26 +256,6 @@ auto Project::move_clip(int id, double new_t_in) -> bool {
   return true;
 }
 
-auto Project::snap(double time) const -> double {
-  if (!snapping) return time;
-  double best = time;
-  double best_distance = snap_threshold;
-  const auto consider = [&](double candidate) {
-    const double distance = std::abs(candidate - time);
-    if (distance < best_distance) {
-      best_distance = distance;
-      best = candidate;
-    }
-  };
-  consider(0.0);
-  consider(playhead);
-  for (const auto& clip : clips) {
-    consider(clip.t_in);
-    consider(clip.t_out);
-  }
-  return best;
-}
-
 void Project::render_frame(Canvas& target, double time, const st::ui::TextPort* text_port) const {
   target.clear(Color{0, 0, 0, 255});
   // 自底向上：轨道 V1（track 0）在下、V2（track 1）在上。

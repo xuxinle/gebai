@@ -324,8 +324,9 @@ ST_TEST(context_menu_item_click_activates) {
 }
 
 ST_TEST(menu_panel_activate_item_by_id_drives_same_chain) {
-  // 写侧动作面：`invoke("activate_item", id)` 与鼠标 Click 同链（on_activate），
-  // 自动化不再坐标猜行序——菜单动态化（最近打开）后行序会变，坐标法脆。
+  // 写侧动作面：`invoke("activate_item", id)` 与鼠标 Click 同链
+  //（`set_highlighted` → `on_activate` → `on_close`），自动化不再坐标猜行序
+  //——菜单动态化（最近打开）后行序会变，坐标法脆。
   MenuPanel panel{std::vector<MenuItem>{
       MenuItem{.id = "open", .label = "打开"},
       MenuItem{.id = "sep", .label = "", .separator = true},
@@ -333,22 +334,99 @@ ST_TEST(menu_panel_activate_item_by_id_drives_same_chain) {
   panel.set_anchor(st::math::Rect{10.0f, 10.0f, 120.0f, 28.0f});
 
   std::vector<std::string> activated;
+  int closed = 0;
   panel.on_activate = [&](std::size_t index) {
     activated.push_back(std::string(panel.item_id(index)));
   };
+  panel.on_close = [&closed]() { ++closed; };
 
   // 按 id 激活：走同一回调链，下标正确（动态化后行序变化也不受影响）。
   ST_CHECK(panel.invoke_action("activate_item", "recent-1"));
   ST_CHECK_EQ(activated.size(), 1U);
   ST_CHECK_EQ(activated.front(), std::string("recent-1"));
+  // 与 Click 同链的读回面：高亮跟到被激活项（Click/Enter 都 set_highlighted）。
+  ST_CHECK_EQ(panel.highlighted(), std::size_t{2});
+  // 激活后关闭（Click/Enter 同链；on_close 是声明式 overlay 的摘除信号）。
+  ST_CHECK_EQ(closed, 1);
 
   // 未知 id：如实 false，不派发。
   ST_CHECK(!panel.invoke_action("activate_item", "no-such-item"));
   ST_CHECK_EQ(activated.size(), 1U);
+  ST_CHECK_EQ(closed, 1);  // 未命中不动面板（不关、不派发）
 
   // 分隔线（无 id）不被激活——即使 argument 为空串。
   ST_CHECK(!panel.invoke_action("activate_item", ""));
   ST_CHECK_EQ(activated.size(), 1U);
+
+  // 未知动作名：交回基类（Element 基线返回 false）。
+  ST_CHECK(!panel.invoke_action("no-such-action", ""));
+}
+
+ST_TEST(menu_panel_id_and_index_activation_coexist) {
+  // 「与既有下标激活共存」面：id 动作面与鼠标 Click（下标路径）、键盘 Enter
+  //（下标路径）互不干扰——同一面板上先后用两种方式激活，各自回调到位、互不重复。
+  //
+  // 背景（BACKLOG 3800）：e2e 原本只能 `bounds.y + 16 + i*32` 数行序点击；
+  // 动作面是新增路径，必须证明它**没有改变**既有路径的行为。
+  UiRoot root;
+  root.set_viewport(st::math::Size{800.0f, 600.0f});
+  auto bar = std::make_unique<MenuBar>();
+  bar->set_menus(sample_menus());
+  MenuBar* bar_ptr = bar.get();
+  root.set_content(std::move(bar));
+  root.layout(true);
+
+  int closed = 0;
+  std::vector<std::string> actions;
+  bar_ptr->on_action = [&actions](const std::string&, const std::string& item) {
+    actions.push_back(item);
+  };
+  bar_ptr->on_menu_close = [&closed]() { ++closed; };
+
+  // ① 既有下标路径之一：真实鼠标 Click（dispatch_click_sequence 是完整手势序列）。
+  auto panel = bar_ptr->make_panel(0);  // “文件”：new/open/分隔线/save
+  ST_CHECK(panel != nullptr);
+  MenuPanel* panel_ptr = panel.get();
+  root.add_overlay(std::move(panel), UiRoot::OverlayLayout::FillViewport);
+  root.layout(true);
+
+  const st::math::Rect row = panel_ptr->item_rect(1);  // “打开”（下标 1）
+  dispatch_click_sequence(root, row.x + 20.0f, row.y + 16.0f);
+  ST_CHECK_EQ(actions.size(), 1U);
+  ST_CHECK_EQ(actions.front(), std::string("open"));
+  ST_CHECK_EQ(closed, 1);
+
+  // ② 新增 id 路径：同一菜单重开面板，按 id 激活同一项。
+  //   上一步 Click 激活后面板 on_close 已把 open_index_ 清回（bind_panel 的
+  //   闭包负责），这里直接再 make_panel 重开即可。
+  auto panel2 = bar_ptr->make_panel(0);
+  ST_CHECK(panel2 != nullptr);
+  MenuPanel* panel2_ptr = panel2.get();
+  root.add_overlay(std::move(panel2), UiRoot::OverlayLayout::FillViewport);
+  root.layout(true);
+
+  ST_CHECK(panel2_ptr->invoke_action("activate_item", "save"));
+  ST_CHECK_EQ(actions.size(), 2U);
+  ST_CHECK_EQ(actions.back(), std::string("save"));
+  ST_CHECK_EQ(closed, 2);  // id 激活也走了“激活后关闭”链
+  ST_CHECK_EQ(bar_ptr->open_index(), MenuBar::kNoIndex);  // 菜单栏状态与 Click 路径归一
+
+  // ③ 键盘 Enter（另一条既有下标路径）：set_highlighted 后回车，仍走 on_activate。
+  auto panel3 = bar_ptr->make_panel(0);
+  ST_CHECK(panel3 != nullptr);
+  MenuPanel* panel3_ptr = panel3.get();
+  root.add_overlay(std::move(panel3), UiRoot::OverlayLayout::FillViewport);
+  root.layout(true);
+
+  panel3_ptr->set_highlighted(0);  // “新建”
+  ST_CHECK(press(root, "Enter"));
+  ST_CHECK_EQ(actions.size(), 3U);
+  ST_CHECK_EQ(actions.back(), std::string("new"));
+  ST_CHECK_EQ(closed, 3);
+
+  // 两路激活都不多不少：三次激活、三次关闭，没有重复派发。
+  ST_CHECK_EQ(actions.size(), 3U);
+  ST_CHECK_EQ(closed, 3);
 }
 
 // ————————————————————————————————————————————————————————————————————————————

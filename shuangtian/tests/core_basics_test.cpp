@@ -3,6 +3,7 @@
 
 #include "st/control/control.hpp"
 #include "st/core/error.hpp"
+#include "st/core/fs.hpp"
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
 #include "st/test/test.hpp"
@@ -136,13 +137,19 @@ ST_TEST(capture_default_dirs_include_control_file_directory) {
     ST_CHECK(dir.find("agent-session") == std::string::npos);
   }
 
-  // 相对路径无分隔符：放行当前目录
+  // 裸文件名（无分隔符）：白名单条目必须是 CWD 的**绝对路径**，不是字面 "." ——
+  // 客户端请求的 path 是绝对路径，字面 "." 的前缀比较永远不匹配（BACKLOG P2 2026-10-15）。
   st::control::ServerOptions relative;
   relative.control_file = "control.json";
   const auto relative_dirs = relative.default_capture_dirs();
-  bool has_dot = false;
+  const auto cwd = st::fs::current_dir();
+  ST_REQUIRE(cwd.has_value());
+  bool has_cwd = false;
+  bool has_literal_dot = false;
   for (const auto& dir : relative_dirs) {
-    if (dir == ".") has_dot = true;
+    if (dir == *cwd) has_cwd = true;
+    if (dir == ".") has_literal_dot = true;
   }
-  ST_CHECK(has_dot);
+  ST_CHECK(has_cwd);          // 展开为绝对路径：客户端绝对路径请求可命中
+  ST_CHECK(!has_literal_dot); // 字面 "." 形同虚设，不允许再出现
 }

@@ -194,6 +194,21 @@ auto Selector::parse(std::string_view text) -> Result<Selector> {
   return selector;
 }
 
+auto Selector::exact_id(std::string_view id) -> Selector {
+  // 与 parse("#<id>") 的区别：不拆分 `.`/`:`——整串作为唯一 Id term，专给含特殊字符的
+  // id 用（如 git 面板的 `git-file-<path>`）。独立于 parse 存在（而不是给 parse 加开关），
+  // 保证 parse 的既有 CSS 语义零改动。
+  Selector selector;
+  selector.text_ = std::string(id);
+  Compound compound;
+  Term term;
+  term.kind = Term::Kind::Id;
+  term.value = std::string(id);
+  compound.terms.push_back(std::move(term));
+  selector.compounds_.push_back(std::move(compound));
+  return selector;
+}
+
 auto Selector::matches(const Element& element) const -> bool {
   if (compounds_.empty()) return false;
   const Compound& compound = compounds_.back();

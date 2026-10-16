@@ -21,7 +21,8 @@
 /// ## 成本控制
 ///
 /// 真构建 ≈ 10 s（83 单元，多数命中共享对象缓存；框架规模决定，本仓库实测）。
-/// `ST_INTEGRATION_BUILD=0` 可关——但关掉时用例**明确跳过并打印原因**，不制造假绿信号。
+/// `ST_INTEGRATION_BUILD=0` 可关——但关掉时用例**明确跳过并计入汇总**（ST_SKIP，
+/// 不算通过也不算失败），不制造假绿信号。
 
 #include <cstdlib>
 #include <format>
@@ -113,16 +114,18 @@ ST_MAIN(run_app)
 ST_TEST_WITH_TIMEOUT(independent_project_builds_links_and_runs, 60'000) {
   if (const char* disabled = std::getenv("ST_INTEGRATION_BUILD");
       disabled != nullptr && std::string_view(disabled) == "0") {
-    st::print("[独立工程] ST_INTEGRATION_BUILD=0 → 跳过（**非通过**：真构建被显式关闭）\n");
+    ST_SKIP("[独立工程] ST_INTEGRATION_BUILD=0 → 跳过（真构建被显式关闭，非通过）");
     return;
   }
   const std::string framework = framework_root();
   if (framework.empty()) {
-    st::print("[独立工程] 未提供 ST_TEST_FRAMEWORK_ROOT → 跳过\n");
+    // ST_SKIP：计入汇总"跳过 N"（不算通过）——门禁环境下"没验"必须可见，
+    // 不能藏在 PASS 计数里（BACKLOG 3903）。
+    ST_SKIP("[独立工程] 未提供 ST_TEST_FRAMEWORK_ROOT → 跳过（不猜仓库布局）");
     return;
   }
   if (!st::fs::is_regular_file(st::fs::join(framework, "st.pkg"))) {
-    st::print("[独立工程] {} 下没有 st.pkg → 跳过\n", framework);
+    ST_SKIP(std::format("[独立工程] {} 下没有 st.pkg → 跳过", framework));
     return;
   }
 

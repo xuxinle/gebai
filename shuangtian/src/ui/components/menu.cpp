@@ -99,16 +99,22 @@ auto MenuPanel::property_names() const -> std::vector<std::string_view> {
 
 auto MenuPanel::invoke_action(std::string_view action, std::string_view argument) -> bool {
   if (action == "activate_item") {
-    // 按 id 激活（与鼠标 Click 同链：走 `on_activate`，不是直接改高亮）：
-    // 自动化不再 `bounds.y + 16 + i*32` 数行序点击——菜单动态化（最近打开）
-    // 后行序会变，坐标法脆（gbcode e2e 亲历）。id 找不到时**如实 false**
-    // （与既有下标激活共存，不静默）。分隔线（无 id）不参与。
+    // 按 id 激活（与鼠标 Click 同一条链：`set_highlighted` → `on_activate` →
+    // `on_close`）：自动化不再 `bounds.y + 16 + i*32` 数行序点击——菜单动态化
+    // （最近打开）后行序会变，坐标法脆（gbcode e2e 亲历）。id 找不到时
+    // **如实 false**（不抛错不静默），分隔线（无 id）不参与。
+    //
+    // `on_close` 不能省：Click/Enter 都是“激活后关闭”（`on_close` 是声明式
+    // overlay 的“不认领”信号，宿主据此摘面板）。动作面若只激活不关闭，
+    // 面板就留在屏上挡住后续交互——与 CommandPalette `invoke(close)` 那条
+    // “关不掉的遮罩”（e2e 里“关了面板再点菜单”永远失败）是同一个坑。
     for (std::size_t index = 0; index < items_.size(); ++index) {
       if (items_[index].separator || items_[index].id.empty()) continue;
-      if (items_[index].id == argument) {
-        if (on_activate) on_activate(index);
-        return true;
-      }
+      if (items_[index].id != argument) continue;
+      set_highlighted(index);         // 高亮跟选（与 Click 同视觉，也是读回面）
+      if (on_activate) on_activate(index);
+      if (on_close) on_close();       // 激活后关闭（与 Click/Enter 同链）
+      return true;
     }
     return false;
   }

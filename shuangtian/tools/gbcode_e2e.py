@@ -8,6 +8,7 @@
 """
 import json
 import os
+import shutil
 import socket
 import struct
 import subprocess
@@ -16,6 +17,12 @@ import tempfile
 import subprocess
 import time
 from pathlib import Path
+
+# 非 UTF-8 控制台自愈：GBK 代码页下 print 中文/符号（如 '⇄'）会 UnicodeEncodeError 崩整跑；
+# 已是 UTF-8 则不动，残余不可编字符以 '?' 兜底（宁可错印不崩）。
+if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_BIN = os.path.join(ROOT, "build", "dev", "bin", "gbcode" + (".exe" if os.name == "nt" else ""))
@@ -471,6 +478,85 @@ def main():
         client.ok("set", {"id": "editor", "props": {"read_only": "false"}})
         time.sleep(0.3)
         print("[14] 只读模式挡住 Delete/Backspace/insert")
+
+        # —— 14b. Ctrl+O 多选批量开标签（rescan P2#5；框架多选面的应用层示范） ——
+        #
+        # 链路：真按键 Ctrl+O 开对话框（gbcode 侧打开模式已 multi_select 常开）→
+        # 协议 set pending_paths（'|' 分隔的两个真实文件，同目录）→ invoke confirm
+        # → gbcode 的 on_confirm_multiple 按序批量 open_path。断言三件事：
+        # 标签数 +2、两个新标签都在、活动标签落在最后一个（顺序保留的可见后果）。
+        # 协议用法与 tests/control_protocol_test.cpp 的
+        # set_pending_paths_reaches_file_dialog_via_protocol 同源（第 26 轮钉的口径）。
+        multi_work = Path(tempfile.mkdtemp(prefix="gbcode-multiselect-e2e-"))
+        try:
+            (multi_work / "notes.md").write_text("multi-select notes\n", encoding="utf-8")
+            (multi_work / "data.json").write_text("{}\n", encoding="utf-8")
+            first_multi = str(multi_work / "notes.md")
+            second_multi = str(multi_work / "data.json")
+            client.ok("input.key", {"key": "o", "ctrl": True, "kind": "press"})
+            time.sleep(0.6)
+            check(client.count("#file-dialog") == 1, "Ctrl+O 未打开文件对话框")
+            # multi 开关：gbcode 侧 fresh_open 帧已设；协议可回读（属性面声明过）。
+            check(client.ok("get", {"id": "file-dialog"})["props"].get("multi_select") == "true",
+                  "打开模式对话框的 multi_select 未开（gbcode 侧应默认多选）")
+            # 程序化多选选路：'|' 序列化注入两个同目录真实文件。
+            client.ok("set", {"id": "file-dialog", "props": {
+                "pending_paths": first_multi + "|" + second_multi}})
+            time.sleep(0.2)
+            got = client.ok("get", {"id": "file-dialog"})["props"].get("selected_paths", "")
+            check(got == first_multi + "|" + second_multi,
+                  f"多选选路未就位: {got!r}")
+            tabs_before = client.ok("get", {"id": "editor-tabs"})["props"]["options"]
+            n_before = len([t for t in tabs_before.split("|") if t])
+            reply = client.ok("invoke", {"id": "file-dialog", "action": "confirm"})
+            check(reply.get("handled"), "多选确认未被对话框接住（handled=false）")
+            time.sleep(0.6)
+            check(client.count("#file-dialog") == 0, "确认后文件对话框未关闭")
+            tabs_after = client.ok("get", {"id": "editor-tabs"})["props"]["options"]
+            n_after = len([t for t in tabs_after.split("|") if t])
+            check(n_after - n_before == 2,
+                  f"多选确认未批量开两个标签（{n_before} → {n_after}: {tabs_after!r}）")
+            check("notes.md" in tabs_after and "data.json" in tabs_after,
+                  f"多选开的标签不在标签栏: {tabs_after!r}")
+            active_tab = client.ok("get", {"id": "editor-tabs"})["props"]["active"]
+            check(tabs_after.split("|")[int(active_tab)] == "data.json",
+                  f"活动标签未落在最后打开的文件: active={active_tab} tabs={tabs_after!r}")
+            print(f"[14b] Ctrl+O 多选确认批量开 {n_before}→{n_after} 标签，活动标签落最后")
+
+            # —— 14c. 单选回归：协议关掉多选 → 单路径确认 → 开一个标签 ——
+            #
+            # gbcode 默认多选后，「打开一个文件开一个标签」的原路径必须仍绿：
+            # 协议 set multi_select=false（框架口径：multi 开着时确认只走
+            # on_confirm_multiple，关掉才回到 on_confirm 单路径）→ set pending_path
+            # 单路径 → confirm → 标签 +1。这同时钉住「应用侧没有把多选开关每帧顶回去」
+            #（若顶回去，multi_select 回读会是 true，下面第一条断言就拦住）。
+            client.ok("input.key", {"key": "o", "ctrl": True, "kind": "press"})
+            time.sleep(0.6)
+            check(client.count("#file-dialog") == 1, "单选回归：Ctrl+O 未重新打开对话框")
+            client.ok("set", {"id": "file-dialog", "props": {"multi_select": "false"}})
+            time.sleep(0.2)
+            check(client.ok("get", {"id": "file-dialog"})["props"].get("multi_select") == "false",
+                  "协议关多选被应用侧顶回 true（多选开关不能每帧重设）")
+            single_file = str(multi_work / "notes.md")   # 已开过的文件：断言走「标签不重复」分支
+            tabs_before = client.ok("get", {"id": "editor-tabs"})["props"]["options"]
+            n_before = len([t for t in tabs_before.split("|") if t])
+            client.ok("set", {"id": "file-dialog", "props": {"pending_path": single_file}})
+            time.sleep(0.2)
+            reply = client.ok("invoke", {"id": "file-dialog", "action": "confirm"})
+            check(reply.get("handled"), "单选确认未被对话框接住（handled=false）")
+            time.sleep(0.6)
+            check(client.count("#file-dialog") == 0, "单选确认后对话框未关闭")
+            tabs_after = client.ok("get", {"id": "editor-tabs"})["props"]["options"]
+            n_after = len([t for t in tabs_after.split("|") if t])
+            check(n_after == n_before,
+                  f"单选重复打开同一文件不应新增标签（{n_before} → {n_after}）")
+            active_tab = client.ok("get", {"id": "editor-tabs"})["props"]["active"]
+            check(tabs_after.split("|")[int(active_tab)] == "notes.md",
+                  f"单选确认后活动标签未切到目标文件: active={active_tab} tabs={tabs_after!r}")
+            print(f"[14c] 单选回归：关多选 → 单路径确认仍开一个标签（{n_after} 个，活动→notes.md）")
+        finally:
+            # 临时目录不留垃圾（gbcode 不持有句柄，随时可删）。
+            shutil.rmtree(multi_work, ignore_errors=True)
 
         # —— 15. 属性面不被每次重组重置（旧行为：切底部面板 → language/read_only 回默认）——
         client.ok("set", {"id": "editor", "props": {"language": "python", "read_only": "true"}})

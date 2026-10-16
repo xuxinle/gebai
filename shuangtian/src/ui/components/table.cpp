@@ -101,6 +101,7 @@ void Table::set_zebra(bool value) {
 }
 
 void Table::set_row_height(float height) {
+  explicit_row_height_ = true;   // 显式设置优先：字号覆盖不再改写行高
   const float clamped = height > 0.0f ? height : kDefaultRowHeight;
   if (row_height_ == clamped) return;
   row_height_ = clamped;
@@ -189,6 +190,17 @@ void Table::apply_theme(const Theme& theme) {
   style_.font_size = metrics.font_base;
   style_.padding = math::Insets{};
   style_.align_items = Align::Stretch;
+  // 显式排版覆盖最后回放（与 Text/Button 同口径）。字号覆盖直接改写 style_
+  //（paint 的单元格/表头文本都从 style_.font_size 取）；颜色覆盖存起来供
+  // paint_content 的单元格取色用（选中态色在绘制时才解析）。
+  apply_text_overrides();
+  // 行高跟随字号（字号盖过后不让字溢出行盒）：行高 = max(默认行高, 字号×行高系数)。
+  // 不跟随的话，size=28 的单元格字会被 32px 行盒上下裁切——"设了但看不全"与
+  // "设了但不生效"一样是静默失效。调用方显式 `set_row_height` 过的以它为准
+  //（记录在 `explicit_row_height_`；字号覆盖只指底，不指过显式设置）。
+  if (!explicit_row_height_ && style_.font_size > 0.0f) {
+    row_height_ = std::max(kDefaultRowHeight, style_.font_size * 1.6f);
+  }
 }
 
 void Table::recompute_columns(float available) {
@@ -367,21 +379,29 @@ void Table::paint_content(const RenderContext& context, raster::Surface& canvas)
   // 单元格文本（选中行文本用主色，与选中底同语义）。
   for (std::size_t row = first_row; row < last_row; ++row) {
     const bool is_selected = selected_row_.has_value() && row == *selected_row_;
-    const math::Color text_color = is_selected ? colors.primary : colors.text;
+    math::Color text_color = is_selected ? colors.primary : colors.text;
+    // 显式文字色覆盖（DSL `BoxProps::color/hex_color`）盖过选中/常态色
+    //（与 Tree 行文本同口径）。
+    if (const auto& override_color = text_color_override(); override_color.has_value()) {
+      text_color = *override_color;
+    }
     for (std::size_t column = 0; column < columns_.size(); ++column) {
       const math::Rect box = cell_rect(row, column);
       // 列剔除：与裁剪区无交叠的列不画（也不付 `ellipsize`/`measure_width`）。
       if (box.right() <= clip_left || box.x >= clip_right) continue;
       draw_cell_text(context, canvas, cell(row, column), box, kCellPadding,
-                     columns_[column].align, metrics.font_base, text_color);
+                     columns_[column].align, style_.font_size, text_color);
     }
   }
-  // 表头文本（同样列剔除）。
+  // 表头文本（同样列剔除）。字号按既有比例跟随覆盖（表头/正文 = font_xs/font_base，
+  // 无覆盖时仍是 font_xs）：覆盖盖的是整体字号档位，表头略小的层级关系保留。
+  const float header_font =
+      style_.font_size * (metrics.font_xs / metrics.font_base);
   for (std::size_t column = 0; column < columns_.size(); ++column) {
     const math::Rect box = header_cell_rect(column);
     if (box.right() <= clip_left || box.x >= clip_right) continue;
     draw_cell_text(context, canvas, columns_[column].name, box, kCellPadding,
-                   columns_[column].align, metrics.font_xs, colors.text_muted);
+                   columns_[column].align, header_font, colors.text_muted);
   }
 
   // 横向滚动指示（内容超出容器时）。

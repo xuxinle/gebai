@@ -284,6 +284,9 @@ void Badge::apply_theme(const Theme& theme) {
   style_.padding = math::Insets::symmetric(kPaddingX, 0.0f);
   style_.border_color = math::Color{0, 0, 0, 0};
   style_.border_width = 0.0f;
+  // 显式排版覆盖最后回放（与 Text/Button 同口径）：Badge 画字走 paint_text（读
+  // style_），覆盖不回放就是"设了颜色首帧对、下一帧被主题盖回"。
+  apply_text_overrides();
 }
 
 void Badge::measure(const RenderContext& context, const Constraints& constraints) {
@@ -386,6 +389,8 @@ void Chip::apply_theme(const Theme& theme) {
   style_.padding = math::Insets{};
   style_.border_color = math::Color{0, 0, 0, 0};
   style_.border_width = 0.0f;
+  // 显式排版覆盖最后回放（与 Text/Button 同口径）：Chip 的文本同样走 paint_text。
+  apply_text_overrides();
 }
 
 void Chip::measure(const RenderContext& context, const Constraints& constraints) {
@@ -540,6 +545,9 @@ void Avatar::apply_theme(const Theme& theme) {
   style_.padding = math::Insets{};
   style_.border_color = math::Color{0, 0, 0, 0};
   style_.border_width = 0.0f;
+  // 显式排版覆盖最后回放（与 Text/Button 同口径）：首字母走 paint_text（读 style_）。
+  // 字号覆盖会盖过"按头像直径推字号"——那是显式意图，语义上应优先。
+  apply_text_overrides();
 }
 
 void Avatar::measure(const RenderContext& context, const Constraints& constraints) {
@@ -615,6 +623,8 @@ void Tooltip::apply_theme(const Theme& theme) {
   style_.font_weight = FontWeight::Medium;
   style_.text_align = TextAlign::Center;
   style_.padding = math::Insets::symmetric(kPaddingX, kPaddingY);
+  // 显式排版覆盖最后回放（与 Text/Button 同口径）：气泡文本走 paint_text（读 style_）。
+  apply_text_overrides();
 }
 
 void Tooltip::paint_content(const RenderContext& context, raster::Surface& canvas) const {
