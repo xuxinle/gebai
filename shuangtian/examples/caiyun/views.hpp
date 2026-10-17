@@ -47,7 +47,10 @@ class TimelineView final : public st::ui::Element {
   ~TimelineView() override;   // 定义在 views.cpp（delegate_ 是 unique_ptr<不完整类>，
                               // 析构必须留在 Delegate 完整的翻译单元）
 
-  [[nodiscard]] auto type() const noexcept -> std::string_view override { return "TimelineView"; }
+  /// 注册名必须与 `register_element_type<T>` 的名字**逐字一致**（否则声明式每次
+  /// 重组都会把元素当"类型不符"销毁重建——实测现象是每帧一条
+  /// "同位类型切换"日志、且元素级状态（拖拽/滚动）永远归零）。
+  [[nodiscard]] auto type() const noexcept -> std::string_view override { return "CaiyunTimeline"; }
   [[nodiscard]] auto role() const noexcept -> st::ui::Role override { return st::ui::Role::Panel; }
 
   void set_project(Project* project);

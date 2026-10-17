@@ -1,0 +1,72 @@
+{
+  "name": "歌白 · 10 秒宣传片",
+  "fps": 30,
+  "size": [1920, 1080],
+  "transition": 0.32,
+  "fade_in": 0.24,
+  "fade_out": 0.55,
+  "audio": {
+    "enabled": true,
+    "style": "uplift",
+    "bpm": 112,
+    "gain": 0.6,
+    "voice": [
+      { "path": "vo/s1.wav", "start": 0.35, "gain": 0.95 },
+      { "path": "vo/s2.wav", "start": 2.55, "gain": 0.95 },
+      { "path": "vo/s3.wav", "start": 5.15, "gain": 0.95 },
+      { "path": "vo/s4.wav", "start": 7.55, "gain": 0.95 }
+    ]
+  },
+  "scenes": [
+    {
+      "kind": "title",
+      "duration": 2.2,
+      "title": "歌白",
+      "subtitle": "GEBAI AGENT",
+      "lines": ["融合旧世界 IT 的所有技术", "打造新世界智能的躯体"],
+      "accent": "#7ab4ffff",
+      "background": ["#060a16ff", "#162344ff"]
+    },
+    {
+      "kind": "terminal",
+      "duration": 2.3,
+      "title": "一个 TS 文件 = 一个子 Agent",
+      "subtitle": "声明的工具即刻并入当前会话 · 全程审批留痕",
+      "lines": [
+        "export default {",
+        "  name: 'facts',",
+        "  tools: { read, grep },",
+        "};  // agent_load('facts')"
+      ],
+      "accent": "#7ce2b2ff",
+      "background": ["#081018ff", "#0d2028ff"]
+    },
+    {
+      "kind": "triptych",
+      "duration": 2.2,
+      "title": "能力外置，权力内守",
+      "subtitle": "任意语言、任意进程，统一裁决",
+      "lines": ["子 Agent 扩展", "工具统一收编", "审批与留痕"],
+      "accent": "#ffc478ff",
+      "background": ["#140c1aff", "#2a1828ff"]
+    },
+    {
+      "kind": "metrics",
+      "duration": 1.9,
+      "title": "一个二进制，三端合一",
+      "subtitle": "桌面 · 浏览器 · 服务端",
+      "lines": ["子 Agent", "工具", "测试"],
+      "values": [26, 120, 2650],
+      "accent": "#96c8ffff",
+      "background": ["#040a1aff", "#0a162eff"]
+    },
+    {
+      "kind": "outro",
+      "duration": 1.4,
+      "title": "歌白",
+      "subtitle": "GEBAI AGENT · 新世界智能的躯体",
+      "accent": "#7ab4ffff",
+      "background": ["#060a16ff", "#0e162cff"]
+    }
+  ]
+}

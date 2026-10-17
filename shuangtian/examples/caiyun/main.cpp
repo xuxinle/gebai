@@ -1,22 +1,25 @@
-/// 裁云（Nimbus）— 视频剪辑器示例。
+/// 裁云（Nimbus）— **AI 驱动的视频生成器**（霜天示例）。
 ///
-/// ## 这个示例检验什么（设计文档 §1）
+/// ## 定位（本次升级）
 ///
-/// **时间 / 动效应用面**——它是**唯一由 `UiRoot` 时间轴驱动持续动画的示例**。
-/// 检验的是别处检验不到的东西：
+/// 旧版是「时间轴剪辑器」：素材是测试卡，成品是帧序列。现在的定位是
+/// **「AI 控制生成高质量视频 + 人工微调」**：
 ///
-/// - 播放中的**帧预算与续帧协议**（§11 性能目标的真实压测位）；
-/// - **确定性**：`seek` 到同一时刻两次渲染逐像素相同——这是"预览真的跟着
-///   播放头走"与"预览是静帧"的唯一可靠区分（截图肉眼看不出静帧）；
-/// - 拖拽修剪这类**连续交互**（SplitView 拖手柄之外的又一类）。
+/// - **AI 的入口是一份导演脚本**（`director.hpp` 的 JSON）：分镜、文案、配色、节奏、
+///   配乐全在里面。智能体写脚本 → `invoke load_script` / `invoke script` 应用 →
+///   `invoke render` 出成片，全程不需要人类点界面；
+/// - **人工操作面保留但收敛**（以 AI 为主）：时间轴（修剪/移动/分割/波纹删除/吸附）、
+///   检查器（不透明度/速度/字幕文案）、传输控制、播放头擦洗；
+/// - **渲染管线**（`render.hpp`）：1080p PNG 帧序列 + 内置合成配乐 + ffmpeg 封装 mp4，
+///   工作线程执行、进度可查、可中止。
 ///
-/// ## 诚实边界
+/// 默认工程就是**「歌白 10 秒宣传片」**——启动即可预览，一键即出成片。
 ///
-/// 框架已内置 `st::ext::VideoDecoder`（v0.1.7，ffmpeg 子进程：抽帧 + 读元信息，
-/// 探测不到如实不支持）；但它的定位是**素材查看/预处理**，不是逐帧播放
-///（每抽一帧起一个进程 ~30ms，见 st/ext/video.hpp 的代价表）。本示例的"素材"
-/// 仍全部是**程序化生成片段**（本地光栅原语实时渲染）——真实视频素材导入
-/// 需要缩略图/缓存策略配合，作为后续大单记在 BACKLOG；不假占位、不冒充能播。
+/// ## 这个示例检验什么（`docs/LOUYUE_CAIYUN.md` §1）
+///
+/// **时间 / 动效应用面**——它是**唯一由 `UiRoot` 时间轴驱动持续动画的示例**：
+/// 播放中的帧预算与续帧协议、`seek` 到同一时刻两次渲染逐像素相同（确定性）、
+/// 拖拽修剪这类连续交互；外加**跨线程长任务**（渲染作业 → 进度回 UI）的真实位。
 
 #include <algorithm>
 #include <cmath>
@@ -29,7 +32,10 @@
 #include <string_view>
 #include <vector>
 
+#include "director.hpp"
+#include "director_bridge.hpp"
 #include "project.hpp"
+#include "render.hpp"
 #include "views.hpp"
 #include "st/app/app.hpp"
 #include "st/codec/png.hpp"
@@ -38,6 +44,7 @@
 #include "st/core/print.hpp"
 #include "st/core/time.hpp"
 #include "st/ui/components/basic.hpp"
+#include "st/ui/components/scroll.hpp"
 #include "st/ui/components/slider.hpp"
 #include "st/ui/components/title_bar.hpp"
 #include "st/ui/components/window_frame.hpp"
@@ -49,10 +56,15 @@ using caiyun::Clip;
 using caiyun::format_timecode;
 using caiyun::GeneratorKind;
 using caiyun::kGenerators;
+using caiyun::DirectorBridge;
 using caiyun::MonitorView;
 using caiyun::Project;
+using caiyun::RenderJob;
+using caiyun::Renderer;
+using caiyun::RenderStatus;
 using caiyun::TimelineView;
 using st::ui::Button;
+using st::ui::ScrollView;
 namespace dsl = st::ui::dsl;
 
 struct Options {
@@ -62,12 +74,18 @@ struct Options {
   std::uint16_t control_port{0};
   std::string control_file{};
   std::string shots{};
-  std::string export_dir{};   ///< `--export-dir <dir>`：启动即导出帧序列（设计文档 §4.3）
-  int bench_seconds{0};       ///< `--bench <秒>`：播放压测时长（设计文档 §7.4）
+  /// `--script <路径>`：启动即装载导演脚本（AI/CI 的入口）。
+  std::string script{};
+  /// `--render <输出 mp4>` + `--render-size WxH` + `--render-frames N`：启动即渲染。
+  std::string render_output{};
+  int render_width{1920};
+  int render_height{1080};
+  int render_frames{0};
+  std::string export_dir{};   ///< `--export-dir <dir>`：启动即导出 PNG 帧序列（旧口径，保留）
+  int bench_seconds{0};       ///< `--bench <秒>`：播放压测时长
 };
 
-/// 用法说明。**必须有**：未知参数会报错退出，没有 `--help` 就等于"报错了也没处查"
-///（承 gbcode 同名函数）。
+/// 用法说明。**必须有**：未知参数会报错退出，没有 `--help` 就等于"报错了也没处查"。
 auto print_usage(std::string_view program) -> void {
   st::print(
       "用法: {} [选项]\n"
@@ -77,11 +95,15 @@ auto print_usage(std::string_view program) -> void {
       "  --theme light|dark    主题\n"
       "\n"
       "内容/自动化\n"
+      "  --script PATH         启动即装载导演脚本（JSON；缺省 = 内置歌白 10 秒宣传片）\n"
+      "  --render PATH         启动即渲染成片（mp4；需本机有 ffmpeg）\n"
+      "  --render-size WxH     成片分辨率（缺省 1920x1080）\n"
+      "  --render-frames N     只渲染前 N 帧（快速试渲）\n"
+      "  --export-dir DIR      启动即导出 PNG 帧序列（320x180，无 ffmpeg 时的兜底）\n"
+      "  --bench N             真开播放压测 N 秒后退出\n"
       "  --control-port N      控制通道端口（0 = 自动）\n"
       "  --control-file PATH   控制信息落盘路径\n"
       "  --shots DIR           无头截图目录\n"
-      "  --export-dir DIR      启动即导出帧序列（真实 PNG + manifest）\n"
-      "  --bench N             真开播放压测 N 秒后退出\n"
       "  -h, --help            显示本帮助\n",
       program);
 }
@@ -94,65 +116,65 @@ auto parse_options(int argc, char** argv) -> Options {
       if (i + 1 < argc) return argv[++i];
       return fallback;
     };
-    // —— 数值参数统一走带校验的解析（承 gbcode 的同条纪律，逐字对齐）——
-    //
-    // 为何不能裸调 `std::atoi`/`stoi`：传非数字（如 `--control-port abc`）时
-    // `stoi` 抛 `std::invalid_argument` 无人捕获 → `terminate`（退出码
-    // 0xC0000409，屏幕上一行 what(): stoi）；`atoi` 更糟——静默返 0，错值
-    // 变成"端口 0（自动）"。而同一命令行里的 `--bogus-flag` 走的是
-    // 「报错 + exit 2」的干净路径。**非法值必须与未知参数同一条路径**
-    //（报错可读、退出码稳定），不能一快一崩。
+    // 数值参数统一走带校验的解析（承 gbcode 的纪律）：非法值必须与未知参数
+    // 同一条路径（报错可读、退出码稳定），不能"一快一崩"。
     const auto parse_int = [&](const char* flag, long long fallback) -> long long {
       const std::string text = value(std::format("{}", fallback).c_str());
       long long parsed = 0;
       std::size_t consumed = 0;
-      const bool ok = !text.empty() && [&] {
-        try {
-          parsed = std::stoll(text, &consumed);
-        } catch (const std::exception&) {
-          return false;
-        }
-        return consumed == text.size();   // 尾巴（如 `8x`）也是非法值
-      }();
+      bool ok = false;
+      try {
+        parsed = std::stoll(text, &consumed);
+        ok = consumed == text.size();
+      } catch (const std::exception&) {
+        ok = false;
+      }
       if (!ok) {
-        st::eprint("参数 {} 需要一个整数，得到：{}（用 --help 看可用项）\n", flag, text);
+        st::eprint("参数 {} 需要一个整数，收到「{}」\n", flag, text);
         std::exit(2);
       }
       return parsed;
     };
-    if (raw == "--help" || raw == "-h") {
-      print_usage(argv[0]);
-      std::exit(0);
-    }
-    // ⚠ headless 必须与下方 else-if 链同体（首个分支）：独立 if 命中后继续
-    // 落进链尾 else 兜底会被误判「未知参数」。
     if (raw == "--headless") {
       options.headless = true;
-    }
-    else if (raw == "--backend") options.backend = value("");
-    else if (raw == "--theme") options.theme = value("light");
-    else if (raw == "--control-port") {
-      const long long port = parse_int("--control-port", 0);
-      if (port < 0 || port > 65535) {
-        st::eprint("参数 --control-port 超出端口范围：{}\n", port);
+    } else if (raw == "--theme") {
+      options.theme = value("light");
+    } else if (raw == "--backend") {
+      options.backend = value("");
+    } else if (raw == "--control-port") {
+      options.control_port = static_cast<std::uint16_t>(std::clamp(parse_int("--control-port", 0), 0LL, 65535LL));
+    } else if (raw == "--control-file") {
+      options.control_file = value("");
+    } else if (raw == "--shots") {
+      options.shots = value("");
+    } else if (raw == "--script") {
+      options.script = value("");
+    } else if (raw == "--render") {
+      options.render_output = value("");
+    } else if (raw == "--export-dir") {
+      options.export_dir = value("");
+    } else if (raw == "--render-size") {
+      const std::string text = value("1920x1080");
+      const auto at = text.find('x');
+      if (at == std::string::npos) {
+        st::eprint("参数 --render-size 需要 WxH（如 1920x1080），收到「{}」\n", text);
         std::exit(2);
       }
-      options.control_port = static_cast<std::uint16_t>(port);
-    }
-    else if (raw == "--control-file") options.control_file = value("");
-    else if (raw == "--shots") options.shots = value("");
-    else if (raw == "--export-dir") options.export_dir = value("");
-    else if (raw == "--bench") {
-      const long long seconds = parse_int("--bench", 0);
-      if (seconds < 0) {
-        st::eprint("参数 --bench 不能为负：{}\n", seconds);
+      try {
+        options.render_width = std::clamp(std::stoi(text.substr(0, at)), 64, 7680);
+        options.render_height = std::clamp(std::stoi(text.substr(at + 1)), 64, 4320);
+      } catch (const std::exception&) {
+        st::eprint("参数 --render-size 不是合法尺寸：「{}」\n", text);
         std::exit(2);
       }
-      options.bench_seconds = static_cast<int>(seconds);
-    }
-    // **未知参数报错，不静默忽略**（gbcode 实证过的温床：新加的开关被静默
-    // 吃掉，表现是"三档渲染出来的图几乎一样"，差点被当成结论）。
-    else {
+    } else if (raw == "--render-frames") {
+      options.render_frames = static_cast<int>(std::clamp(parse_int("--render-frames", 0), 0LL, 100000LL));
+    } else if (raw == "--bench") {
+      options.bench_seconds = static_cast<int>(std::clamp(parse_int("--bench", 0), 0LL, 3600LL));
+    } else if (raw == "-h" || raw == "--help") {
+      print_usage(argv[0]);
+      std::exit(0);
+    } else {
       st::eprint("未知参数：{}（用 --help 看可用项）\n", raw);
       std::exit(2);
     }
@@ -162,39 +184,101 @@ auto parse_options(int argc, char** argv) -> Options {
 
 class CaiyunPage final : public dsl::Component {
  public:
-  CaiyunPage() {
-    project_.duration = 10.0;
-    // 预置一条**真实可用**的时间轴：四类生成器各一段，分布在两条轨道上。
-    // 不做"空轨道 + 占位块"——设计文档 §3.3 的标准（内容都是真的）。
-    const int a = project_.add_clip(GeneratorKind::TestChart, 0, 0.0, 3.0);
-    (void)a;
-    (void)project_.add_clip(GeneratorKind::ColorBars, 0, 3.0, 6.5);
-    (void)project_.add_clip(GeneratorKind::Shapes, 0, 6.5, 10.0);
-    (void)project_.add_clip(GeneratorKind::Subtitle, 1, 1.0, 4.0);
-    (void)project_.add_clip(GeneratorKind::ColorBars, 1, 5.0, 8.0);
-    project_.selected = project_.clips.empty() ? -1 : project_.clips.front().id;
-    project_.playhead = 1.5;
+  explicit CaiyunPage(std::string script_path) : script_path_(std::move(script_path)) {
+    project_.apply_script(load_initial_script(script_path_));
+    project_.playhead = 1.2;
   }
 
   [[nodiscard]] auto project() noexcept -> Project& { return project_; }
+  [[nodiscard]] auto renderer() noexcept -> Renderer& { return renderer_; }
+  void set_tasks(st::app::Tasks* tasks) { tasks_ = tasks; }
+  void set_text_port(const st::ui::TextPort* port) { text_port_ = port; }
 
-  /// 导出帧序列到目录（`frame_0001.png` + `manifest.json`）。
+  /// 把脚本里的**相对路径**改成相对脚本所在目录的绝对路径（旁白 WAV 等）。
   ///
-  /// ⚠ `text_port` 必须传入：不传时字幕类片段退化为几何占位块，于是
-  /// **导出的帧与预览不一致**（预览有字幕、导出没有）——对剪辑器而言这是
-  /// 硬缺陷（发布的片子丢字幕），而不是渲染细节。
+  /// 为何在这里做：脚本是外部输入，用自身位置引用素材（`vo/s1.wav`）才是可移植
+  /// 的写法；而渲染可能在**任意工作目录**下跑（GUI 双击、CI、控制通道）。
+  /// 只改这一处，渲染器就只管拿绝对路径读文件。
+  static void rebase_relative_paths(caiyun::Script& script, const std::string& script_path) {
+    if (script_path.empty()) return;
+    const std::string base = st::fs::parent(script_path);
+    if (base.empty()) return;
+    for (auto& track : script.audio.voice) {
+      if (track.path.empty() || st::fs::is_absolute(track.path)) continue;
+      track.path = st::fs::join(base, track.path);
+    }
+  }
+
+  /// 装载脚本（路径为空则用内置歌白宣传片）。失败时**保留原工程**并返回错误。
+  auto load_script(const std::string& path) -> st::Result<std::string> {
+    caiyun::Script script = caiyun::builtin_gebai_promo();
+    if (!path.empty()) {
+      const auto text = st::fs::read_text(path);
+      if (!text) return st::forward_error(text.error());
+      const auto parsed = caiyun::parse_script(text.value());
+      if (!parsed) return st::forward_error(parsed.error());
+      script = parsed.value();
+      rebase_relative_paths(script, path);
+    }
+    if (!project_.apply_script(script)) {
+      return st::unexpected(st::ErrorCode::Invalid, "脚本没有分镜（scenes 为空）");
+    }
+    script_path_ = path;
+    selected_scene_ = 0;
+    if (monitor_ != nullptr) monitor_->refresh();
+    if (timeline_ != nullptr) timeline_->set_project(&project_);
+    bump();
+    log(std::format("已应用脚本：{}（{} 个场景 / {:.2f}s）", project_.script.name,
+                    project_.script.scenes.size(), project_.duration));
+    return project_.script.name;
+  }
+
+  /// 把当前工程**回写**成脚本文件（人工微调后再落盘，让脚本成为真值源）。
+  auto save_script(const std::string& path) const -> bool {
+    return st::fs::write_text(path, caiyun::script_to_json(project_.script)).has_value();
+  }
+
+  /// 启动渲染（工作线程）。返回作业是否真的起来了。
+  auto start_render(RenderJob job) -> bool {
+    if (tasks_ == nullptr) return false;
+    if (text_port_ == nullptr) {
+      log("渲染失败：文本端口未就绪");
+      return false;
+    }
+    if (renderer_.running()) {
+      log("已有渲染作业在跑，忽略本次请求");
+      return false;
+    }
+    job.output_dir = job.output_dir.empty() ? st::fs::join(st::fs::temp_dir(), "caiyun-render")
+                                            : job.output_dir;
+    const bool started = renderer_.start(*tasks_, project_, job, text_port_, [this] {
+      // 工作线程 → 主线程：只 marker + 请求重绘（不碰 UI 树）。
+      if (tasks_ != nullptr) tasks_->post_ui([this] { bump(); });
+    });
+    if (started) {
+      log(std::format("渲染开始：{}x{} @{:.0f}fps → {}", job.width, job.height, job.fps,
+                      job.output_file.empty() ? job.output_dir : job.output_file));
+      bump();
+    }
+    return started;
+  }
+
+  /// 旧的 `--export-dir` 路径（320×180 PNG 帧序列 + manifest）：无 ffmpeg 时的兜底，
+  /// 也是既有 e2e 的契约面。
   auto export_frames(const std::string& dir, const st::ui::TextPort* text_port) -> int {
     const int frames = static_cast<int>(std::ceil(project_.duration * project_.fps));
     st::raster::Canvas canvas{320, 180, 1.0f};
     std::string manifest = std::format(
-        "{{\n  \"fps\": {:.3f},\n  \"duration\": {:.3f},\n  \"frames\": {},\n  \"clips\": [\n",
-        project_.fps, project_.duration, frames);
+        "{{\n  \"fps\": {:.3f},\n  \"duration\": {:.3f},\n  \"frames\": {},\n  \"scenes\": {},\n"
+        "  \"clips\": [\n",
+        project_.fps, project_.duration, frames, project_.script.scenes.size());
     for (std::size_t i = 0; i < project_.clips.size(); ++i) {
       const Clip& clip = project_.clips[i];
+      const char* kind = clip.is_scene() ? "scene" : caiyun::to_string(clip.generator);
       manifest += std::format(
           "    {{\"id\": {}, \"track\": {}, \"t_in\": {:.3f}, \"t_out\": {:.3f}, "
-          "\"generator\": \"{}\"}}{}\n",
-          clip.id, clip.track, clip.t_in, clip.t_out, caiyun::to_string(clip.generator),
+          "\"kind\": \"{}\"}}{}\n",
+          clip.id, clip.track, clip.t_in, clip.t_out, kind,
           i + 1 < project_.clips.size() ? "," : "");
     }
     manifest += "  ]\n}\n";
@@ -206,42 +290,147 @@ class CaiyunPage final : public dsl::Component {
       st::codec::PngImage image;
       image.width = 320;
       image.height = 180;
-      image.rgba.resize(320U * 180U * 4U);
-      for (int y = 0; y < 180; ++y) {
-        for (int x = 0; x < 320; ++x) {
-          const auto pixel = canvas.pixel_at(x, y);
-          const std::size_t at = (static_cast<std::size_t>(y) * 320U + x) * 4U;
-          image.rgba[at + 0] = pixel.r;
-          image.rgba[at + 1] = pixel.g;
-          image.rgba[at + 2] = pixel.b;
-          image.rgba[at + 3] = pixel.a;
-        }
-      }
+      image.rgba = canvas.to_rgba8();
       const std::string path = std::format("{}/frame_{:04}.png", dir, index + 1);
-      if (!st::codec::png_write_file(path, image).has_value()) break;
+      if (!st::codec::png_write_file(path, image, 4).has_value()) break;
       ++written;
     }
     (void)st::fs::write_text(std::format("{}/manifest.json", dir), manifest);
     return written;
   }
 
+  /// 控制面钩子（元素 #director 的动作面）。全部转发到本页的真实能力上——
+  /// 桥里**不做任何业务判断**（脚本解析/渲染调度都只有一份实现）。
+  [[nodiscard]] auto make_hooks() -> DirectorBridge::Hooks {
+    DirectorBridge::Hooks hooks{};
+    hooks.apply_script = [this](const std::string& json) -> std::string {
+      const auto result = apply_script_text(json);
+      return result ? std::string{} : result.error().message;
+    };
+    hooks.load_script = [this](const std::string& path) -> std::string {
+      const auto result = load_script(path);
+      return result ? std::string{} : result.error().message;
+    };
+    hooks.save_script = [this](const std::string& path) -> std::string {
+      if (path.empty()) return std::string("save_script 需要文件路径");
+      return save_script(path) ? std::string{} : std::format("写入失败：{}", path);
+    };
+    hooks.start_render = [this](const std::string& spec) -> std::string {
+      // spec 形如 "<输出 mp4 路径>" 或 "<输出 mp4 路径> 1280x720"。
+      RenderJob job{};
+      std::string path = spec;
+      const std::size_t space = spec.rfind(' ');
+      if (space != std::string::npos) {
+        const std::string tail = spec.substr(space + 1);
+        const std::size_t x = tail.find('x');
+        if (x != std::string::npos) {
+          try {
+            job.width = std::clamp(std::stoi(tail.substr(0, x)), 64, 7680);
+            job.height = std::clamp(std::stoi(tail.substr(x + 1)), 64, 4320);
+            path = spec.substr(0, space);
+          } catch (...) {
+            // 尾巴不是尺寸：整串当路径（按脚本分辨率渲染）。
+          }
+        }
+      }
+      if (path.empty()) return std::string("render 需要输出路径（如 /tmp/out.mp4）");
+      job.output_file = path;
+      job.output_dir = st::fs::parent(path);
+      if (job.output_dir.empty()) job.output_dir = ".";
+      if (job.width == 1920 && job.height == 1080 && project_.script.width > 0) {
+        job.width = project_.script.width;
+        job.height = project_.script.height;
+      }
+      job.fps = project_.fps;
+      job.audio = project_.script.audio.enabled;
+      return start_render(job) ? std::string{} : std::string("渲染未能启动（已有作业在跑？）");
+    };
+    hooks.stop_render = [this] { renderer_.cancel(); };
+    hooks.script_json = [this] { return caiyun::script_to_json(project_.script); };
+    hooks.project_value = [this](const std::string& key) -> std::string {
+      if (key == "scene_count") return std::to_string(project_.script.scenes.size());
+      if (key == "duration") return std::format("{:.3f}", project_.duration);
+      if (key == "fps") return std::format("{:.3f}", project_.fps);
+      if (key == "size") return std::format("{}x{}", project_.script.width, project_.script.height);
+      if (key == "name") return project_.script.name;
+      if (key == "clip_count") return std::to_string(project_.clips.size());
+      return {};
+    };
+    hooks.render_value = [this](const std::string& key) -> std::string {
+      const RenderStatus status = renderer_.status();
+      if (key == "stage") return status.stage;
+      if (key == "progress") return std::format("{:.4f}", status.progress());
+      if (key == "output") return status.output;
+      if (key == "error") return status.error;
+      if (key == "frames_done") return std::to_string(status.frames_done);
+      if (key == "frames_total") return std::to_string(status.frames_total);
+      if (key == "elapsed") return std::format("{:.2f}", status.elapsed_s);
+      if (key == "log") {
+        std::string joined;
+        for (const std::string& line : status.log) {
+          if (!joined.empty()) joined.push_back('\n');
+          joined += line;
+        }
+        return joined;
+      }
+      return {};
+    };
+    return hooks;
+  }
+
   void build(dsl::Composer& c) override {
     (void)version_.value();
     dsl::column(c, {.gap = 0.0f, .grow = true, .id = "caiyun-root"}, [&] {
-      // 上：监视器 + 时间码 + 传输控制
+      // 控制面（0×0）：AI 经 invoke apply_script / invoke render 驱动本应用的唯一
+      // 稳定寻址点。放在根列第一个，保证任何布局下都存在。
+      (void)dsl::custom<DirectorBridge>(
+          c,
+          [this](DirectorBridge& bridge) {
+            bridge.set_id("director");
+            bridge.set_hooks(make_hooks());
+          },
+          {.width = 0.0f, .height = 0.0f, .key = "director-bridge"});
       build_monitor(c);
-      // 中：素材箱（左） + 检查器（右）
-      dsl::row(c, {.gap = 8.0f, .padding_x = 8.0f, .grow = true, .id = "middle-row"}, [&] {
-        build_bin(c);
+      dsl::row(c, {.gap = 8.0f, .padding_x = 8.0f, .height = 340.0f, .id = "middle-row"}, [&] {
+        build_director(c);
         build_inspector(c);
+        (void)dsl::spacer(c, 1.0f);
       });
-      // 下（主表面）：时间轴
       build_timeline(c);
     });
   }
 
  private:
   void bump() { version_.set(version_.value() + 1U); }
+
+  void log(std::string line) {
+    log_lines_.push_back(std::move(line));
+    if (log_lines_.size() > 40) log_lines_.erase(log_lines_.begin());
+    bump();
+  }
+
+  /// 启动时装载脚本（构造函数路径）。
+  ///
+  /// **必须与 `load_script` 走同一个解析/重基入口**：早先这里自己又写了一遍
+  /// “读文件 + parse”，漏了 `rebase_relative_paths`——于是命令行启动的工程里
+  /// 旁白仍是 `vo/s1.wav`（相对 cwd），而 UI 按钮装载的却是绝对路径。结果
+  /// 同一个脚本两条路径两种行为（实测：命令行出片 0/4 轨配音）。
+  static auto load_initial_script(const std::string& path) -> caiyun::Script {
+    if (path.empty()) return caiyun::builtin_gebai_promo();
+    const auto text = st::fs::read_text(path);
+    if (!text) {
+      st::eprint("脚本读取失败：{}（改用内置歌白宣传片）\n", text.error().message);
+      return caiyun::builtin_gebai_promo();
+    }
+    const auto parsed = caiyun::parse_script(text.value());
+    if (!parsed) {
+      st::eprint("脚本解析失败：{}（改用内置歌白宣传片）\n", parsed.error().message);
+      return caiyun::builtin_gebai_promo();
+    }
+    caiyun::Script script = parsed.value();
+    rebase_relative_paths(script, path);
+    return script;
+  }
 
   void build_monitor(dsl::Composer& c) {
     dsl::column(c, {.gap = 6.0f, .padding = 8.0f, .id = "monitor-panel"}, [&] {
@@ -252,7 +441,7 @@ class CaiyunPage final : public dsl::Component {
             monitor.set_project(&project_);
             monitor_ = &monitor;
           },
-          {.height = 260.0f, .key = "monitor"});
+          {.height = 236.0f, .key = "monitor"});
       dsl::row(c, {.gap = 12.0f, .id = "transport-row"}, [&] {
         (void)dsl::custom<Button>(
             c,
@@ -299,8 +488,7 @@ class CaiyunPage final : public dsl::Component {
             },
             {.width = 36.0f, .height = 30.0f, .key = "step-fwd"});
         dsl::text(
-            c,
-            [this] { return format_timecode(project_.playhead); },
+            c, [this] { return format_timecode(project_.playhead); },
             {.id = "timecode", .key = "timecode"});
         (void)dsl::spacer(c, 1.0f);
         (void)dsl::custom<Button>(
@@ -327,59 +515,168 @@ class CaiyunPage final : public dsl::Component {
     });
   }
 
-  void build_bin(dsl::Composer& c) {
-    dsl::column(c, {.gap = 6.0f, .padding = 8.0f, .width = 220.0f,
-                    .surface = st::ui::Element::Surface::Alt, .id = "bin"}, [&] {
-      dsl::text(c, [] { return std::string("素材箱"); }, {.id = "bin-title"});
-      const char* icons[] = {"diff", "image", "circle", "grid"};
-      for (std::size_t i = 0; i < caiyun::kGeneratorCount; ++i) {
-        const auto kind = kGenerators[i];
-        const std::string id = std::format("bin-{}", i);
+  /// 左侧：**AI 导演面板**（脚本 / 渲染 / 进度 / 日志）——AI 与人的共用入口。
+  void build_director(dsl::Composer& c) {
+    // 面板内容比可视高度长（脚本 + 渲染 + 进度 + 日志），**必须能滚**：
+    // 不包滚动容器时底部（日志/错误行）会被直接裁掉——表现是"功能没做完"。
+    (void)dsl::custom_container<ScrollView>(
+        c,
+        [&] {
+    dsl::column(c, {.gap = 8.0f, .padding = 8.0f,
+                    .surface = st::ui::Element::Surface::Alt, .id = "director-panel"}, [&] {
+      dsl::text(c, [] { return std::string("AI 导演"); },
+                {.size = 15.0f, .weight = st::ui::FontWeight::SemiBold, .id = "director-title"});
+      dsl::text(c, [this] { return std::format("工程：{}", project_.script.name); },
+                {.id = "director-project", .key = "project-name"});
+      dsl::text(c,
+                [this] {
+                  return std::format("{}×{} · {:.0f}fps · {} 场景 · {:.2f}s",
+                                     project_.script.width, project_.script.height,
+                                     project_.script.fps, project_.script.scenes.size(),
+                                     project_.duration);
+                },
+                {.id = "director-meta", .key = "meta"});
+      // 脚本路径（AI 侧通常直接用控制通道 apply_script，这里是人工换片子的入口）。
+      dsl::text(c, [] { return std::string("脚本路径"); }, {});
+      (void)dsl::input(
+          c, script_path_,
+          [this](std::string value) {
+            script_path_ = std::move(value);
+          },
+          {.id = "director-script-path", .key = "script-path"});
+      dsl::row(c, {.gap = 6.0f, .id = "director-buttons"}, [&] {
         (void)dsl::custom<Button>(
             c,
-            [this, kind, id, i, &icons](Button& b) {
-              b.set_id(id);
-              b.set_icon(icons[i]);
-              b.set_label(caiyun::to_string(kind));
-              b.set_variant(Button::Variant::Ghost);
+            [this](Button& b) {
+              b.set_id("btn-apply-script");
+              b.set_label("应用脚本");
+              b.set_icon("play");
               b.set_size(Button::Size::Small);
-              // 双击语义的简化：点击即"加到时间轴"（拖拽另有时序问题，
-              // 而控制通道驱动拖拽在 e2e 里很难稳定；`invoke add_clip` 是权威路径）。
-              b.on_click = [this, kind] {
-                // 落在播放头处、默认 2 秒长；超出工程时长则往前贴。
-                const double length = 2.0;
-                double t_in = project_.playhead;
-                if (t_in + length > project_.duration) {
-                  t_in = std::max(0.0, project_.duration - length);
-                }
-                const int created = project_.add_clip(kind, 0, t_in, t_in + length);
-                if (created >= 0) {
-                  if (timeline_ != nullptr) timeline_->set_project(&project_);
-                  bump();
-                }
+              b.set_variant(Button::Variant::Soft);
+              b.on_click = [this] { apply_script_clicked(); };
+            },
+            {.key = "apply"});
+        (void)dsl::custom<Button>(
+            c,
+            [this](Button& b) {
+              b.set_id("btn-save-script");
+              b.set_label("另存");
+              b.set_icon("download");
+              b.set_size(Button::Size::Small);
+              b.set_variant(Button::Variant::Ghost);
+              b.on_click = [this] {
+                const std::string path =
+                    script_path_.empty() ? std::string("caiyun-project.json") : script_path_;
+                log(save_script(path) ? std::format("脚本已保存：{}", path)
+                                      : std::format("脚本保存失败：{}", path));
               };
             },
-            {.id = id, .key = id});
-      }
-      (void)dsl::spacer(c, 1.0f);
+            {.key = "save"});
+      });
+      // 渲染控制。
+      dsl::text(c, [] { return std::string("渲染"); },
+                {.size = 13.0f, .weight = st::ui::FontWeight::SemiBold});
+      dsl::row(c, {.gap = 6.0f, .id = "render-buttons"}, [&] {
+        (void)dsl::custom<Button>(
+            c,
+            [this](Button& b) {
+              b.set_id("btn-render");
+              b.set_label("渲染成片");
+              b.set_icon("sparkles");
+              b.set_size(Button::Size::Small);
+              b.set_variant(Button::Variant::Primary);
+              b.on_click = [this] { render_clicked(); };
+            },
+            {.key = "render"});
+        (void)dsl::custom<Button>(
+            c,
+            [this](Button& b) {
+              b.set_id("btn-render-stop");
+              b.set_label("中止");
+              b.set_icon("square");
+              b.set_size(Button::Size::Small);
+              b.set_variant(Button::Variant::Ghost);
+              b.on_click = [this] {
+                renderer_.cancel();
+                log("已请求中止渲染");
+              };
+            },
+            {.key = "render-stop"});
+      });
+      const RenderStatus status = renderer_.status();
+      (void)dsl::progress(c, status.progress(), {.id = "director-progress", .key = "progress"});
       dsl::text(c,
-                [this] { return std::format("{} 个片段", project_.clips.size()); },
-                {.id = "bin-clip-count", .key = "clip-count"});
+                [this] {
+                  const RenderStatus now = renderer_.status();
+                  return std::format("{} · 帧 {}/{} · {:.2f}s", now.stage, now.frames_done,
+                                     now.frames_total, now.elapsed_s);
+                },
+                {.id = "director-status", .key = "status"});
+      if (!status.output.empty()) {
+        dsl::text(c, [this] { return std::format("成片：{}", renderer_.status().output); },
+                  {.size = 11.0f, .id = "director-output", .key = "output"});
+      }
+      if (!status.error.empty()) {
+        dsl::text(c, [this] { return renderer_.status().error; },
+                  {.color = st::ui::Tone::Danger, .size = 11.0f, .id = "director-error", .key = "error"});
+      }
+      (void)dsl::divider(c);
+      dsl::text(c, [] { return std::string("日志"); }, {.size = 11.0f});
+      dsl::column(c, {.gap = 2.0f, .id = "director-log"}, [&] {
+        const std::size_t begin = log_lines_.size() > 6 ? log_lines_.size() - 6 : 0;
+        for (std::size_t i = begin; i < log_lines_.size(); ++i) {
+          const std::string line = log_lines_[i];
+          dsl::text(c, [line] { return line; }, {.size = 11.0f, .key = line});
+        }
+        const RenderStatus now = renderer_.status();
+        for (std::size_t i = 0; i < now.log.size(); ++i) {
+          if (i + 6 < now.log.size()) continue;
+          const std::string line = now.log[i];
+          dsl::text(c, [line] { return line; }, {.size = 11.0f, .key = "r" + line});
+        }
+      });
     });
+        },
+        [](ScrollView& view) { view.set_id("director-scroll"); },
+        {.width = 280.0f, .height = 340.0f, .key = "director-scroll"});
+  }
+
+  void apply_script_clicked() {
+    const auto name = load_script(script_path_);
+    if (!name) log(std::format("应用失败：{}", name.error().message));
+  }
+
+  void render_clicked() {
+    RenderJob job{};
+    job.output_dir = st::fs::join(st::fs::temp_dir(), "caiyun-render");
+    job.output_file = st::fs::join(job.output_dir, "caiyun-film.mp4");
+    job.width = project_.script.width;
+    job.height = project_.script.height;
+    job.fps = project_.fps;
+    job.audio = project_.script.audio.enabled;
+    (void)start_render(job);
   }
 
   void build_inspector(dsl::Composer& c) {
-    dsl::column(c, {.gap = 8.0f, .padding = 8.0f, .width = 220.0f,
+    (void)dsl::custom_container<ScrollView>(
+        c,
+        [&] {
+    dsl::column(c, {.gap = 8.0f, .padding = 8.0f,
                     .surface = st::ui::Element::Surface::Alt, .id = "inspector"}, [&] {
-      dsl::text(c, [] { return std::string("属性"); }, {.id = "inspector-title"});
+      dsl::text(c, [] { return std::string("属性"); },
+                {.size = 15.0f, .weight = st::ui::FontWeight::SemiBold, .id = "inspector-title"});
       const Clip* clip = project_.find_clip(selected_id());
       if (clip == nullptr) {
         dsl::text(c, [] { return std::string("（未选中片段）"); }, {.id = "inspector-empty"});
         return;
       }
+      const caiyun::Scene* scene = project_.scene_of(*clip);
       dsl::text(c,
-                [clip] {
-                  return std::format("#{} · {}", clip->id, caiyun::to_string(clip->generator));
+                [clip, scene] {
+                  return scene != nullptr
+                             ? std::format("#{} · 场景 {}", clip->id,
+                                           caiyun::scene_kind_name(scene->kind))
+                             : std::format("#{} · {}", clip->id, caiyun::to_string(clip->generator));
                 },
                 {.id = "inspector-clip", .key = "clip"});
       dsl::text(c,
@@ -413,7 +710,39 @@ class CaiyunPage final : public dsl::Component {
             bump();
           },
           {.id = "inspector-speed", .key = "speed"});
+      if (scene != nullptr) {
+        (void)dsl::divider(c);
+        dsl::text(c, [] { return std::string("文案（人工微调）"); }, {.size = 12.0f});
+        const int scene_index = clip->scene_index;
+        (void)dsl::input(
+            c, scene->title,
+            [this, scene_index](std::string value) {
+              if (scene_index < 0 ||
+                  static_cast<std::size_t>(scene_index) >= project_.script.scenes.size()) {
+                return;
+              }
+              project_.script.scenes[static_cast<std::size_t>(scene_index)].title = value;
+              if (monitor_ != nullptr) monitor_->refresh();
+              bump();
+            },
+            {.id = "inspector-title-input", .key = "scene-title"});
+        (void)dsl::input(
+            c, scene->subtitle,
+            [this, scene_index](std::string value) {
+              if (scene_index < 0 ||
+                  static_cast<std::size_t>(scene_index) >= project_.script.scenes.size()) {
+                return;
+              }
+              project_.script.scenes[static_cast<std::size_t>(scene_index)].subtitle = value;
+              if (monitor_ != nullptr) monitor_->refresh();
+              bump();
+            },
+            {.id = "inspector-subtitle-input", .key = "scene-subtitle"});
+      }
     });
+        },
+        [](ScrollView& view) { view.set_id("inspector-scroll"); },
+        {.width = 260.0f, .height = 340.0f, .key = "inspector-scroll"});
   }
 
   void build_timeline(dsl::Composer& c) {
@@ -434,6 +763,12 @@ class CaiyunPage final : public dsl::Component {
               };
             },
             {.key = "snap"});
+        (void)spacer(c, 1.0f);
+        dsl::text(c,
+                  [this] {
+                    return std::format("V1 · {} 段", project_.clips.size());
+                  },
+                  {.id = "timeline-clip-count", .key = "clip-count"});
       });
       (void)dsl::custom<TimelineView>(
           c,
@@ -441,8 +776,7 @@ class CaiyunPage final : public dsl::Component {
             timeline.set_id("timeline");
             timeline.set_project(&project_);
             // 两个回调都在**每一步变化**后触发，含拖拽中的每一帧——
-            // 监视器必须跟着重合成，否则拖动播放头时预览是静止的（最容易被
-            // 误判成"功能已实现"的那类缺陷）。
+            // 监视器必须跟着重合成，否则拖动播放头时预览是静止的。
             timeline.on_seek = [this] {
               if (monitor_ != nullptr) monitor_->refresh();
               bump();
@@ -491,8 +825,7 @@ class CaiyunPage final : public dsl::Component {
   }
 
  public:
-  /// 播放推进（由主循环每帧调）——**时间轴必须由应用推进**（设计文档 §4.3）。
-  /// 返回是否真的推进了（调用方据此决定要不要请求重绘）。
+  /// 播放推进（由主循环每帧调）——**时间轴必须由应用推进**。
   auto advance(double delta_seconds) -> bool {
     if (!project_.playing) return false;
     project_.playhead += delta_seconds;
@@ -507,10 +840,36 @@ class CaiyunPage final : public dsl::Component {
   [[nodiscard]] auto monitor() noexcept -> MonitorView* { return monitor_; }
   [[nodiscard]] auto timeline_widget() noexcept -> TimelineView* { return timeline_; }
 
+  /// 应用脚本文本（控制通道 `invoke script` 的落点；走 `parse_script` 同一口径）。
+  auto apply_script_text(std::string_view json) -> st::Result<std::string> {
+    const auto parsed = caiyun::parse_script(json);
+    if (!parsed) return st::forward_error(parsed.error());
+    caiyun::Script script = parsed.value();
+    if (!project_.apply_script(script)) {
+      return st::unexpected(st::ErrorCode::Invalid, "脚本没有分镜");
+    }
+    if (monitor_ != nullptr) monitor_->refresh();
+    if (timeline_ != nullptr) timeline_->set_project(&project_);
+    bump();
+    log(std::format("已应用内联脚本：{}（{} 场景）", project_.script.name,
+                    project_.script.scenes.size()));
+    return project_.script.name;
+  }
+
+  [[nodiscard]] auto script_json() const -> std::string {
+    return caiyun::script_to_json(project_.script);
+  }
+
  private:
   Project project_{};
+  Renderer renderer_{};
   MonitorView* monitor_{nullptr};
   TimelineView* timeline_{nullptr};
+  st::app::Tasks* tasks_{nullptr};
+  const st::ui::TextPort* text_port_{nullptr};
+  std::string script_path_{};
+  std::vector<std::string> log_lines_{};
+  int selected_scene_{0};
   dsl::State<std::size_t> version_{0};
 };
 
@@ -520,8 +879,8 @@ auto run_app(int argc, char** argv) -> int {
   const Options options = parse_options(argc, argv);
 
   st::app::AppOptions app_options;
-  app_options.width = 1120;
-  app_options.height = 780;
+  app_options.width = 1180;
+  app_options.height = 900;
   app_options.title = "裁云 Nimbus · 霜天";
   app_options.headless = options.headless;
   app_options.backend = !options.backend.empty() ? options.backend
@@ -531,26 +890,26 @@ auto run_app(int argc, char** argv) -> int {
   app_options.control_file = options.control_file;
   app_options.screenshot_dir = options.shots;
 
-  st::app::Application app("caiyun", "0.1.0", app_options);
-  // **自绘组件必须先注册**（`custom<T>` 用它之前）——见 louyue 同名注释。
-  // ⚠ 注册名不能用 "TimelineView"：内置组件清单已新增同名时间线组件
-  //（dsl.cpp ST_COMPONENT_LIST），重名会被拒（防静默失效的正确行为），
-  // 表现是 caiyun 启动即退（实测 Windows 首跑发现）。改用带前缀的名字，
-  // C++ 类名不动（它是视频剪辑时间轴，与内置 TimelineView 语义无关）。
+  st::app::Application app("caiyun", "0.2.0", app_options);
+  // **自绘组件必须先注册**（`custom<T>` 用它之前）。注册名不能与内置组件重名。
   if (!dsl::register_element_type<TimelineView>("CaiyunTimeline") ||
-      !dsl::register_element_type<MonitorView>("MonitorView")) {
+      !dsl::register_element_type<MonitorView>("MonitorView") ||
+      !dsl::register_element_type<DirectorBridge>("CaiyunDirector")) {
     std::fprintf(stderr, "自绘组件注册失败（与内置组件重名？）\n");
     return 1;
   }
 
-  auto page = std::make_shared<CaiyunPage>();
+  auto page = std::make_shared<CaiyunPage>(options.script);
+  if (!options.export_dir.empty()) {
+    (void)st::fs::create_directories(options.export_dir);
+  }
 
-  auto frame = std::make_unique<st::ui::WindowFrame>("裁云 Nimbus · 霜天");
+  auto frame = std::make_unique<st::ui::WindowFrame>("裁云 Nimbus · AI 视频导演");
   frame->set_id("window-frame");
   frame->set_window_control(&app);
   if (frame->title_bar() != nullptr) {
     frame->title_bar()->set_id("titlebar");
-    frame->title_bar()->set_icon("image");
+    frame->title_bar()->set_icon("sparkles");
   }
   st::ui::Element* slot = frame->content();
   app.set_content(std::move(frame));
@@ -561,28 +920,36 @@ auto run_app(int argc, char** argv) -> int {
   }
   (void)host->tick();
 
-  // 启动即导出（设计文档 §4.3 的 `--export-dir`）：真实产物、无假编码器。
-  // 文本端口从 root 取（与预览走**同一个**端口——否则导出的帧会丢字幕）。
-  if (!options.export_dir.empty()) {
-    const int written = page->export_frames(options.export_dir, app.root().text_port());
-    st::print("已导出 {} 帧到 {}\n", written, options.export_dir);
-  }
-
-  // `--bench`：**真开播放**再压测。为什么必须真播放：不播放时监视器不会每帧
-  // 重合成（`frame_time_ == playhead` 直接命中缓存），量出来的是“空转主循环”的
-  // 成本，而不是“持续动画下”的真实成本——而后者才是本示例要压的东西
-  //（设计文档 §4.3：连续动画的帧预算与续帧协议）。
-  if (options.bench_seconds > 0) {
-    page->project().playing = true;
-  }
-
   if (auto status = app.start(); !status) {
     std::fprintf(stderr, "启动失败：%s\n", status.error().message.c_str());
     return 1;
   }
 
-  // 主循环：**时间轴必须由应用推进**（`ui_root.hpp` 明写的那条教训——
-  // 框架不替应用推进时间，因为它不知道"这一帧该走多久"）。
+  // 启动期自动化：导出帧序列 / 渲染成片（在控制通道起来之后做，便于观察进度）。
+  page->set_tasks(&app.tasks());
+  page->set_text_port(app.root().text_port());
+  if (!options.export_dir.empty()) {
+    const int written = page->export_frames(options.export_dir, app.root().text_port());
+    st::print("已导出 {} 帧到 {}\n", written, options.export_dir);
+  }
+  bool render_launched = false;
+  if (!options.render_output.empty()) {
+    RenderJob job{};
+    job.output_dir = st::fs::parent(options.render_output);
+    job.output_file = options.render_output;
+    job.width = options.render_width;
+    job.height = options.render_height;
+    job.fps = page->project().fps;
+    job.audio = page->project().script.audio.enabled;
+    job.last_frame = options.render_frames;
+    render_launched = page->start_render(job);
+    st::print("渲染启动：{}x{} → {}\n", job.width, job.height, job.output_file);
+  }
+
+  // `--bench`：真开播放再压测（背景：不播放时监视器不重合成，量到的是空转成本）。
+  if (options.bench_seconds > 0) page->project().playing = true;
+
+  // 主循环：时间轴必须由应用推进。
   std::uint64_t frames = 0;
   const std::int64_t bench_deadline =
       options.bench_seconds > 0 ? st::time::now_ms() + options.bench_seconds * 1000 : 0;
@@ -596,20 +963,27 @@ auto run_app(int argc, char** argv) -> int {
     if (app.root().tick_declarative_hosts() > 0U) app.request_repaint();
     app.tick();
     ++frames;
+    // 一次性渲染作业：完成后收尾退出（CI/CLI 用）。
+    if (render_launched) {
+      const RenderStatus status = page->renderer().status();
+      if (!status.running && (status.finished || status.failed || status.cancelled)) {
+        for (const std::string& line : status.log) {
+          // 逐帧进度只显示尾部（40 条环形缓冲里大半是它，会把"每帧耗时"这类
+          // 真正有用的汇总行挤掉）。
+          if (line.starts_with("帧 ") && !line.starts_with("帧完成")) continue;
+          st::print("  {}\n", line);
+        }
+        st::print("渲染结果：{}（{} 帧 / {:.2f}s）{}\n", status.stage, status.frames_done,
+                  status.elapsed_s, status.error.empty() ? "" : " · " + status.error);
+        if (!status.output.empty()) st::print("成片：{}\n", status.output);
+        if (options.bench_seconds <= 0) break;
+        render_launched = false;
+      }
+    }
     if (bench_deadline != 0 && st::time::now_ms() >= bench_deadline) break;
     app.pace_loop(frame_start);
   }
   if (options.bench_seconds > 0) {
-    // ⚠ 报告**两个口径**，别混：
-    //   * **墙钟帧间隔**含 `pace_loop` 的帧预算睡眠（默认 16ms）——它反映“实际
-    //     帧率”，不反映“渲染成本”；
-    //   * **帧内耗时**（`frame_p50/p95`）才是“能不能抱住 60fps”的依据。
-    // 实测（1680×1170 @1.5、两层合成）：墙钟 ~20ms 而真实 p50 = 10.4ms
-    //——只看前者会误以为“重合成很慢”，实际是节流在起作用。
-    //
-    // 墙钟值改由 `metrics.wall_p50_ms` 给出（框架统一口径）：以前这里用
-    // “总秒数 / 总帧数” 自算，那是**平均**而 p50/p95 是**分位**——两种统计量
-    // 摆在一行里会被当成同类（平均会被一次长卡顿拉高，分位不会）。
     const auto metrics = app.metrics();
     st::print("压测：{} 秒 / {} 帧；墙钟间隔 p50={:.2f}ms p95={:.2f}ms（含帧预算睡眠），"
               "帧内耗时 p50={:.2f}ms p95={:.2f}ms（绘制 {:.2f}ms）\n",

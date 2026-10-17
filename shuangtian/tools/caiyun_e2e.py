@@ -172,10 +172,13 @@ def main():
         print(f"已连接：{info.get('app')} {info.get('version')} 后端={info.get('backend')}")
 
         # —— 0. 骨架 ——
-        for selector in ("#timeline", "#monitor", "#timecode", "#bin", "#inspector",
-                         "#transport-play"):
+        # 素材箱在「AI 导演」升级里退役（AI 面板取代了它）；控制面 #director
+        # 是新的稳定寻址点，与时间轴/监视器同级。
+        for selector in ("#timeline", "#monitor", "#timecode", "#director-panel", "#director",
+                         "#inspector", "#transport-play"):
             check(client.count(selector) >= 1, f"缺少元素 {selector}")
-        check(client.props("timeline")["clip_count"] == "5", "预置片段数不是 5")
+        check(client.props("timeline")["clip_count"] == "5",
+              f"内置工程的场景片段数不是 5：{client.props('timeline')['clip_count']}")
         print("[0] 骨架齐备；预置 5 个片段")
 
         # —— 1. 确定性：同帧两次哈希一致；异帧哈希不同（验收标准 1）——

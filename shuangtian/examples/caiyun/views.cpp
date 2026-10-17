@@ -14,6 +14,7 @@
 #include <span>
 #include <string>
 
+#include "motion.hpp"
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
 
@@ -45,14 +46,25 @@ constexpr float kTimelineHeight = st::ui::TimelineView::kRulerHeight +
   return static_cast<double>(ms) / 1000.0;
 }
 
-/// 片段块的配色按生成器区分（一眼能看出"这条轨道上是什么内容"）。
-/// 换件后经 `timeline::Clip::tint` 投影进内置件（步骤 5 落的数据接口）。
+/// 片段块的配色：场景片段按**场景模板**区分（一眼看出这条轨道上是什么内容），
+/// 生成器片段按生成器类型。换件后经 `timeline::Clip::tint` 投影进内置件。
 [[nodiscard]] auto generator_color(GeneratorKind kind) -> st::math::Color {
   switch (kind) {
     case GeneratorKind::ColorBars: return st::math::Color{78, 110, 180, 255};
     case GeneratorKind::Subtitle: return st::math::Color{150, 96, 160, 255};
     case GeneratorKind::Shapes: return st::math::Color{70, 140, 120, 255};
     case GeneratorKind::TestChart: return st::math::Color{150, 120, 70, 255};
+  }
+  return st::math::Color{90, 90, 90, 255};
+}
+
+[[nodiscard]] auto scene_color(SceneKind kind) -> st::math::Color {
+  switch (kind) {
+    case SceneKind::Title: return st::math::Color{86, 122, 208, 255};
+    case SceneKind::Terminal: return st::math::Color{64, 156, 132, 255};
+    case SceneKind::Triptych: return st::math::Color{176, 124, 84, 255};
+    case SceneKind::Metrics: return st::math::Color{112, 104, 196, 255};
+    case SceneKind::Outro: return st::math::Color{132, 108, 168, 255};
   }
   return st::math::Color{90, 90, 90, 255};
 }
@@ -184,14 +196,20 @@ void TimelineView::sync_from_project() const {
     lane.height = kTrackHeight + kTrackGap;
     for (const Clip& clip : project_->clips) {
       if (clip.track != (visual == 0 ? 1 : 0)) continue;
+      // 场景片段的标签写场景模板名（比"色板/字幕"更能说明这段是什么）。
+      const Scene* scene = project_->scene_of(clip);
+      const std::string label =
+          scene != nullptr ? std::string(scene_kind_name(scene->kind)) : to_string(clip.generator);
+      const st::math::Color tint =
+          scene != nullptr ? scene_color(scene->kind) : generator_color(clip.generator);
       lane.clips.push_back(st::ui::timeline::Clip{
           .id = std::to_string(clip.id),
-          .label = to_string(clip.generator),
+          .label = label,
           .start = to_ms(clip.t_in),
           .duration = to_ms(clip.t_out) - to_ms(clip.t_in),
           .source_in = to_ms(clip.source_in),
           .selected = clip.id == project_->selected,
-          .tint = generator_color(clip.generator),   // 换件行为差异点：生成器配色
+          .tint = tint,
       });
     }
     lanes.push_back(std::move(lane));
@@ -431,6 +449,27 @@ auto TimelineView::invoke_action(std::string_view action, std::string_view argum
     notify_changed();
     return true;
   }
+  if (action == "set_opacity" || action == "set_speed") {
+    // 形式：`<片段 id> <数值>`——检查器的滑杆改的是同一个量，控制通道要有等价入口
+    //（否则“AI 能改字幕却不能改透明度”，两个入口的能力就分叉了）。
+    const std::size_t space = argument.find(' ');
+    if (space == std::string_view::npos) return false;
+    try {
+      const int id = std::stoi(std::string(argument.substr(0, space)));
+      const double value = std::stod(std::string(argument.substr(space + 1)));
+      Clip* clip = project_->find_clip(id);
+      if (clip == nullptr) return false;
+      if (action == "set_opacity") {
+        clip->opacity = static_cast<float>(std::clamp(value, 0.0, 1.0));
+      } else {
+        clip->speed = static_cast<float>(std::clamp(value, 0.25, 4.0));
+      }
+      notify_changed();
+      return true;
+    } catch (...) {
+      return false;
+    }
+  }
   return false;
 }
 
@@ -473,31 +512,25 @@ void MonitorView::paint_content(const st::ui::RenderContext& context,
   canvas.fill_rect(area, Paint::solid(background_));
   if (project_ == nullptr) return;
 
-  // 合成目标尺寸固定为 **320×180**（16:9）：与窗口大小解耦，
-  // 于是“同一时刻两次渲染逐像素相同”这条判据不依赖窗口尺寸。
-  constexpr int kWidth = 320;
-  constexpr int kHeight = 180;
+  // 合成目标保持 **16:9** 且与窗口大小解耦（“同一时刻两次渲染逐像素相同”这条
+  // 判据不依赖窗口尺寸）；分辨率从 320×180 提到 **960×540**：320 宽的预览里
+  // 设计字号 188 的大标题只剩 ~31px，且细线/字距看不出来——预览因此失去验收价值。
+  constexpr int kWidth = 960;
+  constexpr int kHeight = 540;
   const double time = project_->playhead;
   if (!frame_valid_ || frame_time_ != time) {
-    // `resize` 返回 Status（`nodiscard`）；尺寸恒为 320×180、失败只可能是
-    // 显存/分配问题——那时后续渲染会画到旧尺寸上，不该静默放过。
     const auto resized = frame_.resize(kWidth, kHeight);
     if (!resized.has_value()) return;
     frame_.clear(st::math::Color{0, 0, 0, 255});
-    // ⚠ 合成时必须把**真实文本端口**传进去：不传的话字幕类片段退化为几何占位块
-    //（实测：预览里字幕位置是一条灰条——初看像“字幕功能没做完”，实际是渲染时
-    // 没给 text port）。端口来自本帧的渲染上下文（由 `UiRoot` 拥有）。
+    // ⚠ 合成时必须把**真实文本端口**传进去：不传的话文字类内容退化为几何占位块。
     project_->render_frame(frame_, time, context.text);
     // ⚠ **必须在渲染之后取像素**：`pixels()` 是只读视图，位置对了才有意义。
-    // 为什么用 FNV-1a 而不是 crc32：无表、无状态、几行就能写对，且 e2e 侧
-    // 用同一条常量即可独立复算。
     frame_hash_ = fnv1a(frame_.pixels());
     frame_time_ = time;
     frame_valid_ = true;
   }
-  // ⚠ **必须保持 16:9**：把 320×180 直接拉到 `area` 会在宽面板里把画面横拉
-  //（实测：预览区 3.3:1 时圆形变成椭圆、字幕拉伸）——视频预览的“纵横比失真”
-  // 是最容易被一眼看出、又最容易在“先跑通”阶段被漏掉的一类错。
+  // ⚠ **必须保持 16:9**：直接拉到 `area` 会在宽面板里把画面横拉
+  //（实测：预览区 3.3:1 时圆形变成椭圆、字幕拉伸）。
   const float scale = std::min(area.width / static_cast<float>(kWidth),
                                area.height / static_cast<float>(kHeight));
   const float draw_w = static_cast<float>(kWidth) * scale;

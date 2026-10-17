@@ -131,6 +131,8 @@
                               "exclude_sources": ["src/pkg/*"] },
     "button_center_probe": { "kind": "executable", "sources": ["tools/button_center_probe.cpp"],
                              "exclude_sources": ["src/pkg/*"] },
+    "gradient_fill_probe": { "kind": "executable", "sources": ["tools/gradient_fill_probe.cpp"],
+                             "exclude_sources": ["src/pkg/*"] },
     "icon_sheet_probe": { "kind": "executable", "sources": ["tools/icon_sheet_probe.cpp"],
                           "exclude_sources": ["src/pkg/*"] },
     "icon_metric_probe": { "kind": "executable", "sources": ["tools/icon_metric_probe.cpp"],
