@@ -30,7 +30,7 @@ auto valid_name(const std::string& name) -> std::optional<std::string> {
   if (name.front() == '_') {
     return "名字不能以下划线开头（`__` 是框架内建扩展层的命名段）";
   }
-  if (name.find("..") != std::string::npos) return "名字不能含连续的点";
+  if (name.contains("..")) return "名字不能含连续的点";
   std::size_t begin = 0;
   while (true) {
     const std::size_t dot = name.find('.', begin);

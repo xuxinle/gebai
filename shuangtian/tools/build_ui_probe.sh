@@ -42,6 +42,6 @@ if [ "${#objs[@]}" -lt 40 ]; then
   exit 1
 fi
 
-g++ -std=c++20 -O2 -I"$root/include" -I"$root/third_party" -I"$root/third_party/sqlite" \
+g++ -std=c++23 -O2 -I"$root/include" -I"$root/third_party" -I"$root/third_party/sqlite" \
     "$root/tools/$name.cpp" "${objs[@]}" -o "$outdir/$name" -lpthread -ldl -lm
 echo "== OK: $outdir/$name"

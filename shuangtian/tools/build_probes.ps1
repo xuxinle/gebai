@@ -33,7 +33,7 @@ foreach ($name in $probes) {
   if (Test-Path $exe) { Remove-Item $exe -Force -ErrorAction SilentlyContinue }
   # `-Itools`：A/B 探针要 `#include "text_ab_<name>_rows.inc"`（与 HTML/JSON 同源的行表，
   # 由 `tools/gen_text_ab.py` 生成）。Linux 侧用 `tools/build_one_probe.sh`。
-  $flags = @('-std=c++20', '-O1', '-Iinclude', '-Itools', '-Ithird_party', '-Ithird_party/sqlite')
+  $flags = @('-std=c++23', '-O1', '-Iinclude', '-Itools', '-Ithird_party', '-Ithird_party/sqlite')
   $log = & g++ @flags $source @objs '-o' $exe '-lws2_32' '-lwinpthread' 2>&1
   if ($LASTEXITCODE -ne 0) {
     Write-Host "== 失败: $name" -ForegroundColor Red

@@ -15,7 +15,7 @@
 /// ```bash
 /// cd shuangtian && ./build/bin/st build st --profile dev
 /// OBJS=$(ls build/dev/obj/*.o | grep -v -E "(main\.cpp\.o|_test\.cpp\.o|test_runner\.cpp\.o|_vendor_|examples_)")
-/// g++ -std=c++20 -O1 -Iinclude -Ithird_party tools/stem_phase_probe.cpp $OBJS -o /tmp/stem_probe -lpthread -ldl -lm
+/// g++ -std=c++23 -O1 -Iinclude -Ithird_party tools/stem_phase_probe.cpp $OBJS -o /tmp/stem_probe -lpthread -ldl -lm
 /// /tmp/stem_probe                 # 现状
 /// /tmp/stem_probe --fit=light     # 网格拟合后（同一把尺子）
 /// ```

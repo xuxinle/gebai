@@ -32,6 +32,11 @@ class ThreadPool {
   auto operator=(ThreadPool&&) -> ThreadPool& = delete;
 
   /// 提交任务，返回 future（`Result` 语义的任务由调用方自行承载错误）。
+  ///
+  /// 任务队列用的是 `std::move_only_function<void()>`（C++23）而**不是** `std::function`：
+  /// 后者要求可拷贝，于是捕获了 `unique_ptr` 的任务只能绕着走（`shared_ptr` 包一层）；
+  /// 线程池本就只把任务**移动**进队列再移动出来，并不需要拷贝能力。
+  /// 注：`<move_only_function>` 没有独立头（在 `<functional>` 里，`pch.hpp` 已注释这一点）。
   template <class Fn>
   auto submit(Fn&& fn) -> std::future<std::invoke_result_t<Fn>> {
     using R = std::invoke_result_t<Fn>;
@@ -69,13 +74,15 @@ class ThreadPool {
   void wait_idle();
 
  private:
-  void enqueue(std::function<void()> job);
+  /// 任务类型：只可移动（见 `submit` 的注释）。
+  using Job = std::move_only_function<void()>;
+  void enqueue(Job job);
   void worker_loop(std::stop_token token);
 
   std::mutex mutex_{};
   std::condition_variable_any cv_{};
   std::condition_variable idle_cv_{};
-  std::queue<std::function<void()>> jobs_{};
+  std::queue<Job> jobs_{};
   std::size_t active_{0};
   std::vector<std::jthread> workers_{};
 };

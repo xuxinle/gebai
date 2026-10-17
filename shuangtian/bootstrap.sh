@@ -115,13 +115,23 @@ mapfile -t PKG_DEFINES < <(json_emit 'data.get("defines") or []')
 mapfile -t PKG_CFLAGS < <(json_emit 'data.get("c_flags") or []')
 if [ "${#PKG_CFLAGS[@]}" -eq 0 ]; then PKG_CFLAGS=(-std=gnu11); fi
 mapfile -t PKG_THIRD_PARTY < <(json_emit 'data.get("third_party_sources") or []')
+# 语言标准：**单一真源在清单**（`cxx_standard`），与 `src/pkg/build.cpp` 同口径。
+# `json_emit` 是逐行输出（标量会被逐字符拆开），所以标量项用专门的一行读法。
+PKG_STANDARD=$(python3 - "$PKG" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+print(data.get("cxx_standard") or 23)
+PY
+)
+if [ -z "$PKG_STANDARD" ]; then PKG_STANDARD=23; fi
 
 INCLUDES=()
 for dir in "${PKG_INCLUDES[@]}"; do INCLUDES+=("-I$dir"); done
 DEFINES=()
 for macro in "${PKG_DEFINES[@]}"; do DEFINES+=("-D$macro"); done
 
-FLAGS=(-std=c++20 -O1 -g "${INCLUDES[@]}" "${DEFINES[@]}" -fno-strict-aliasing
+FLAGS=("-std=c++$PKG_STANDARD" -O1 -g "${INCLUDES[@]}" "${DEFINES[@]}" -fno-strict-aliasing
        -Wall -Wextra -Wconversion -Wshadow -Wpedantic -Wold-style-cast -Wnon-virtual-dtor)
 
 # C 源用清单里的 `c_flags`（含 SQLite 的 `-include`）+ 宏 + 包含路径：

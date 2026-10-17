@@ -507,8 +507,8 @@ constexpr std::array<std::string_view, 19> kElementStateMembers{
   for (char& character : normalized) {
     if (character == '\\') character = '/';
   }
-  const bool in_core = normalized.find("src/core/") != std::string::npos ||
-                       normalized.find("include/st/core/") != std::string::npos;
+  const bool in_core = normalized.contains("src/core/") ||
+                       normalized.contains("include/st/core/");
   if (!in_core) return {};
   std::vector<LintViolation> violations;
   bool in_block_comment = false;

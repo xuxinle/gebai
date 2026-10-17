@@ -9,7 +9,7 @@
 /// 汉字 +26~29% 墨量，而拉丁（另在 DejaVu，TrueType）几乎不受影响。
 ///
 /// 编译（FreeType 是**分析用**依赖，框架本体仍零第三方依赖）：
-///   g++ -std=c++20 -O1 -I/usr/include/freetype2 tools/stem_darkening_probe.cpp \
+///   g++ -std=c++23 -O1 -I/usr/include/freetype2 tools/stem_darkening_probe.cpp \
 ///       -o build/probe/stem_darkening_probe -lfreetype
 /// 用法：stem_darkening_probe [font.ttc] [--face N] [--sample 串] [ppem...]
 ///

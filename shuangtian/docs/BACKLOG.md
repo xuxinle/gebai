@@ -52,6 +52,102 @@
 
 ## 待做（2026-10-09 起）
 
+> 📋 2026-10-17 **全面升到 C++23（含公共 API 扩展）**：清单 `cxx_standard` 成为
+> 语言标准的**单一真源**（构建驱动、自举脚本、探针脚本同源派生），
+> `Result<T>` 内芯换 `std::expected`（外形不变、新增 monadic 接口），
+> `Surface::pixel_view()` 新增 `std::mdspan` 二维像素视图。
+> 硬约束与“能用/不能用”的实测边界见 `docs/PITFALLS.md` 的「C++23」行。
+> 本轮**刻意没做**的两项（各有实测依据，见下方 P1/P2）。
+>
+> ### P1：`std::print` —— 符号在 `libstdc++exp`，**加 `-lstdc++exp` 就能用**（未接）
+>
+> ⚠ **先前的结论错过一次，这里是修正后的版本**。当时看到链接失败
+> （`undefined reference to std::__open_terminal(_iobuf*)` / `std::__write_to_terminal`）
+> 就写成“MinGW 没实现这两个符号”——**错**。它们实现在 **`libstdc++exp.a`** 里
+> （`ar t libstdc++exp.a` 可见 `print.o`），只是**不会自动链接**。
+> `nm -A libstdc++exp.a | grep __open_terminal` 一行可证。
+>
+> 实测（g++ 16.2 / MinGW-w64，2026-10-17）：
+>
+> | 组合 | 结果 |
+> |---|---|
+> | 不加 `-lstdc++exp` | ❌ `undefined reference to std::__open_terminal` |
+> | 加 `-lstdc++exp`（g++） | ✅ 正常 |
+> | 加 `-lstdc++exp`（clang + `--target=x86_64-w64-windows-gnu`） | ✅ 正常 |
+> | 中文 / emoji（非 BMP）/ stdout 为管道 | ✅ 全部正确（终端分支走 `WriteConsoleW`，非终端降级到 UTF-8 `fwrite`） |
+>
+> 所以：**`std::print` 能力上完全可用，甚至比 `st::print` 强一点**（终端上输出原生
+> Unicode，不依赖控制台代码页）。目前不接的理由是**代价**，不是不可行：
+> 1. `st.pkg` 的 `system_libs` 要**按平台**加 `stdc++exp`（Linux 上没有这个名字），
+>    而这正是 `CONVENTIONS.md` §10 在防的“只在部分目标生效的分支”；
+> 2. `exp` 库的定位是**未定 ABI 的预发布区**（见下一条 P2），将来可能改名或并入主库，
+>    链接随之要改；
+> 3. 收益小：`st::print` 已是 `std::format` + 直写 fd，功能等价；霜天的输出主要走
+>    控制通道/日志/测试捕获，不靠 Windows 控制台画字。
+>
+> 要做就做成**能力探测**（像 sanitizer 那样探库是否存在），可用则切、不可用退回，
+> 而不是硬编码平台分支。
+>
+> ### P2：`libstdc++exp` 是什么（别被名字骗了）
+> 它不是“实验性质的玩具”，而是 **GCC 给“尚未进入稳定 ABI 承诺的设施”单开的库**：
+> `ar t libstdc++exp.a` 只有 23 个目标文件——`print.o`、`stacktrace.o`（+ 15 个
+> `std_stacktrace-*.o`，内嵌 libbacktrace 的 dwarf/pecoff 解析与 demangle）、
+> `text_encoding.o`（C++26）、`contract26.o`（C++26 契约），以及 `<filesystem>` 的旧版残留。
+> 体积 991 KB（主库 `libstdc++.a` 是 7.8 MB）。
+>
+> 关键事实：**同一设施在两个库之间不存在副本**——`std::print` / `std::stacktrace` 的
+> 实现**只在** `exp` 里。碰见这两个设施的 `undefined reference` 时，
+> **先查库再下结论**：`nm -A <lib>.a | grep <symbol>`，不要直接归因成“平台没实现”。
+>
+> ### P2：`std::stacktrace` 能链接但无法定位（符号化失效）
+> 与 `std::print` **同处 `libstdc++exp.a`**（`stacktrace.o` + `std_stacktrace-*.o`，
+> 其中含 `std_stacktrace-pecoff.o`——PE/COFF 的符号化路径）。
+> `-lstdc++exp` 能链接成功、`current()` 也返回了 5 帧，
+> 但 **5 帧全部解析成同一个无意义名字**（`register_frame_ctor`）——即符号化实际没工作。
+> 注意它与 `std::print` 的区别：**同一个库里，一个能用、一个不能用**，
+> 所以“加 `-lstdc++exp` 就完事”是错的推广——要逐设施验。
+> clang 目标下则是链接直接失败（`_S_current` 未定义）。
+> 结论：崩溃报告仍走自研路径（DbgHelp / addr2line），
+> 判据与证据在 `tools/stacktrace_probe.cpp`（跑一次即可复核，退出码区分
+> “无帧 / 全同名 / 不可用”）。重试前先跑它，别再从头摸。
+>
+> ### P2：`std::flat_map` 已量，**不换**（无查询收益）
+> 按本仓真实访问形态实测（构建一次 + 大量 string_view 查询）：
+> N=200 / 2000 条时 flat_map 相对 map 的查询是 **+2.7% / −0.2%**（无收益，
+> 二分与红黑树都是 O(log N) 次字符串比较），相对 unordered_map 慢 **3~5 倍**。
+> 小表（N ≤ 128）时 flat_map 的真收益在**构建**（比 map 快 30~60%，比 unordered_map
+> 还快），查询仍与 map 持平、比 unordered_map 慢。
+> 结论：不为了用新设施而换容器；将来遇到“高频建小表 + 数据量极小”的真热点再考虑，
+> 基准可重跑（`tmp/flat_map_bench.cpp`、`tmp/flat_map_small_bench.cpp` 的形态）。
+> 顺带：`lint` 每次 `manifest_exempt` 都构造临时 `std::string`（实测 32000 次查询
+> 0.785 → 0.665 ms，改异质查找可省 ~15%）——量太小（整趟 lint 14 s），不值得单独做。
+>
+> ### P1：`--extra-flags` 未接线（命令行参数被静默丢弃）
+> `BuildOptions::extra_flags`（`include/st/pkg/build.hpp`）存在且会被拼进编译标志，
+> 但 **`tools/stpm/main.cpp` 没有任何代码把 `--extra-flags` 传给它**——
+> 传了等于没传，构建照常成功、无任何提示（实测：`--extra-flags=-Os` 改成 `--force`
+> 重建，编译命令行里仍是 `-O2`）。
+> 危害不是“少个开关”，而是**实验档位时会把结论测反**：以为在测 `-Os`，实际在测 `-O2`，
+> 而两者产物体积相差 2 MB。
+> 方向：解析进 `Arguments.options` 并以空白切分追加到 `BuildOptions::extra_flags`；
+> 同时**入缓存键**（否则“换 flags 但命中旧对象”会再次制造假读数）。
+>
+> ### P2：档位标志在清单 `flags` 之后，清单里写 `-O` 无效
+> `build_language_flags` 的顺序是「清单 `flags` → 档位 → 工具链收敛」，而 GCC 取**最后**
+> 出现的 `-O`。所以往 `st.pkg` 的 `flags` 里加 `-Os` 会被档位的 `-O2` 覆盖——
+> 实测写进去后产物体积一字不差（5,575,682 字节完全相同）。
+> 当前要改档位只能改 `profile_flags()`。这不算错误（顺序有明确理由：分档要做可追溯的例外），
+> 但**清单里写 `-O` 是一个沉默的坑**，要么在解析时告警，要么在文档里写清。
+>
+> ### P2：体积参考值（2026-10-17 实测，供将来定档位用）
+> `st.exe` **本来就是动态链接**（依赖 `libstdc++-6.dll` + `libgcc_s_seh-1.dll`；
+> `st.pkg` 的 `-static-libgcc -static-libstdc++` 只在 mingw 交叉工具链下生效）。
+> 均已剥调试信息：`dev -O1` **4,502 KB** / `release -O2` **5,445 KB** /
+> `release -Os` **3,397 KB** / `release -Os` + `strip --strip-all` **3,036 KB**。
+> 两个反直觉点：**`-O2` 反而比 `-O1` 大 21%**（内联展开使 `.text` 从 3.3 MB 涨到 4.3 MB）；
+> `.text` 2.28 MB 是体积下限（真实代码），可剥的非必要段合计只 1 KB。
+> 改 `release` 用 `-Os` 前须先过性能门禁（`frame_cost_stays_within_budget` 类用例）。
+
 > 📋 2026-10-17 **X11 双缓冲上屏（P2 落地）**：两块共享段交替 + `XShmCompletionEvent`
 > 判段可用，不再每帧 `XSync`。实现与理由见 `DESIGN.md` §4.6.2；状态机
 > `include/st/shell/present_slots.hpp`；真窗口验证 `tools/x11_double_buffer_check.py`。

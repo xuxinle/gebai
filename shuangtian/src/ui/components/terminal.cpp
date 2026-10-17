@@ -185,7 +185,7 @@ auto Terminal::current() -> TerminalSession& {
 
 auto Terminal::current() const -> const TerminalSession& {
   // 越界时返回**函数内静态**的空白会话，而不是返回引用到可能被写的位置：
-  // 这是只读路径，调用方拿不到可写句柄（`terminal_dirty_` 那条 L8 规则
+  // 这是只读路径，调用方拿不到可写句柄（L8 规则针对的是可变全局状态，
   // 针对的是可变全局状态，这是 const 的例外，已用 `const` 限定意图）。
   if (sessions_.empty() || active_ >= sessions_.size()) {
     static const TerminalSession kEmpty{};
@@ -1214,8 +1214,11 @@ void Terminal::sync_scrollbar(const TerminalSession& session, float line_h) {
   scroll_bar_->set_visible(usable && session.screen != nullptr &&
                            session.screen->scrollback_count() > 0);
   if (!scroll_bar_->visible()) return;
-  const float content = static_cast<float>(
-      session.screen->rows() + session.screen->scrollback_count()) * line_h;
+  // 行数统一到 `size_t` 再加：`rows()` 是 `int`、`scrollback_count()` 是 `size_t`，
+  // 直接相加会走隐式变号转换（clang 的 `-Wsign-conversion` 会直接报）。
+  const auto total_rows = static_cast<std::size_t>(session.screen->rows()) +
+                          session.screen->scrollback_count();
+  const float content = static_cast<float>(total_rows) * line_h;
   const float viewport = static_cast<float>(session.screen->rows()) * line_h;
   // 滚动条偏移语义（从内容顶量）：底部 = content - viewport，
   // 回看偏移是从底往上翻的行数——贴底时 offset = max，翻到底时 = 0。

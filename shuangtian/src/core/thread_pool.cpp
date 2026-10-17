@@ -20,7 +20,7 @@ ThreadPool::~ThreadPool() {
   cv_.notify_all();
 }
 
-void ThreadPool::enqueue(std::function<void()> job) {
+void ThreadPool::enqueue(std::move_only_function<void()> job) {
   {
     const std::scoped_lock lock(mutex_);
     jobs_.push(std::move(job));
@@ -30,7 +30,7 @@ void ThreadPool::enqueue(std::function<void()> job) {
 
 void ThreadPool::worker_loop(std::stop_token token) {
   while (true) {
-    std::function<void()> job;
+    std::move_only_function<void()> job;
     {
       std::unique_lock lock(mutex_);
       cv_.wait(lock, token, [this] { return !jobs_.empty(); });

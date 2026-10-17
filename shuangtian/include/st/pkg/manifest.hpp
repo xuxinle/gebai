@@ -132,6 +132,15 @@ struct Manifest {
   std::string name{};
   std::string version{"0.1.0"};
   std::string kind{"static_library"};
+  /// C++ 语言标准（`-std=c++XX` 的年号值：20 / 23）。**构建侧唯一的真源**：
+  /// 构建驱动、PCH 创建与消费、自举脚本都从这里派生，不再各自硬编码串。
+  ///
+  /// 缺省取 `kDefaultCxxStandard`。年号是否"能编"由构建侧判断（框架源码不保证
+  /// 20 以下可编），本字段只承载清单声明。
+  static constexpr std::uint32_t kDefaultCxxStandard = 23;
+  /// 标准年号 → 编译器标志（`-std=c++23`）。接受域 `20..26` 之外返回空串。
+  [[nodiscard]] static auto cxx_standard_flag(std::uint32_t standard) -> std::string;
+  std::uint32_t cxx_standard{kDefaultCxxStandard};
   std::string directory{};  ///< 清单所在目录（绝对路径，供源/包含路径解析）
   std::vector<std::string> modules{};
   std::vector<std::string> include_dirs{};
@@ -147,7 +156,7 @@ struct Manifest {
   /// （如脚本运行时前置 `src/ui/script_api.js`——它属于框架实现，不该让每个应用重复嵌入）；
   /// 目标级用于"应用自己的资源"。标识符前缀分别取工程名与目标名。
   std::vector<std::string> embed{};
-  /// C 源（`.c`）专用标志（默认 `-std=gnu11`）；C 源不得用 `-std=c++20` 编。
+  /// C 源（`.c`）专用标志（默认 `-std=gnu11`）；C 源不得用 `-std=c++XX` 编。
   std::vector<std::string> c_flags{};
   std::vector<std::string> defines{};
   std::vector<std::string> system_libs{};

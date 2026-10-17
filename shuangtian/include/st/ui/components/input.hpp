@@ -117,7 +117,6 @@ auto set_property(std::string_view name, std::string_view value) -> bool overrid
   static constexpr std::size_t kNoSelection = std::numeric_limits<std::size_t>::max();
   std::size_t select_anchor_{kNoSelection};   ///< 拖选起点（按下那一端）
   bool selecting_{false};                     ///< 鼠标拖选中
-  bool double_click_{false};                  ///< 本次按下是双击（用于选词）
   /// 双击/三击判定：上次按下的时间与位置（时间取自 `RenderContext`）。
   std::int64_t last_click_ms_{-1};
   float last_click_x_{0.0f};

@@ -219,7 +219,7 @@ auto HttpResponseParser::parse_headers() -> bool {
       }
       const auto length = response_.headers.get("Content-Length");
       const auto encoding = response_.headers.get("Transfer-Encoding");
-      if (encoding.has_value() && lower(*encoding).find("chunked") != std::string::npos) {
+      if (encoding.has_value() && lower(*encoding).contains("chunked")) {
         state_ = State::BodyChunked;
         return true;
       }

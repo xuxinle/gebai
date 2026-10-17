@@ -10,15 +10,15 @@ namespace st::pkg {
 
 auto compiler_kind_of(std::string_view compiler) -> Result<CompilerKind> {
   const std::string name = st::ascii_lower(fs::file_name(compiler));
-  // `clang-cl` 是 MSVC 风味的 clang（`/std:c++20`、`/I`、`/WX`…）：本层不支持 MSVC 口径，
-  // 误判成 Clang 会拿 `-std=c++20` 去喂它，报一堆与真正原因相隔很远的错。
-  if (name.find("clang-cl") != std::string::npos) {
+  // `clang-cl` 是 MSVC 风味的 clang（`/std:c++XX`、`/I`、`/WX`…）：本层不支持 MSVC 口径，
+  // 误判成 Clang 会拿 `-std=c++XX` 去喂它，报一堆与真正原因相隔很远的错。
+  if (name.contains("clang-cl")) {
     return unexpected(ErrorCode::Unsupported,
                       std::format("不支持 clang-cl（MSVC 口径的工具链）: {}；"
                                   "请用 GCC 风格的 clang++（必要时配 --target）",
                                   compiler));
   }
-  if (name.find("clang") != std::string::npos) return CompilerKind::Clang;
+  if (name.contains("clang")) return CompilerKind::Clang;
   // `g++` / `c++` / `x86_64-w64-mingw32-g++` 都是 GCC 系（含交叉编译器）
   return CompilerKind::Gcc;
 }
@@ -36,7 +36,7 @@ auto compiler_kind_name(CompilerKind kind) -> std::string_view {
 auto dialect_flags(CompilerKind kind, SourceLanguage language) -> std::vector<std::string> {
   (void)kind;
   (void)language;
-  // GCC 与 Clang 的方言固定项为空：`-std=c++20` 由清单 `flags` 给出（两族拼法相同），
+  // GCC 与 Clang 的方言固定项为空：`-std=c++XX` 由清单 `cxx_standard` 给出（两族拼法相同），
   // 编码无需干预（两族都按 UTF-8 读源码）。
   // 保留这个函数是因为"恒定标志"这个概念必须有一个落点——它是**跨平台清单**
   // 与**某族特例**之间的边界——将来若新增族（标志拼法不同的前端）只需在这里补分支。

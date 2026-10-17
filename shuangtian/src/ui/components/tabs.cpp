@@ -26,7 +26,6 @@ namespace {
 // —— 几何常量（颜色/间距/字号一律取自 `context.theme` 的 token）——
 constexpr float k_indicator_height = 2.0f;  // 选中指示条厚度
 constexpr float k_min_tab_width = 36.0f;    // 标签项最小宽度（避免空标签塌陷）
-constexpr float k_default_max_tab_width = 200.0f;  // 标签项默认最大宽度（长标题省略号）
 constexpr float k_close_zone = 20.0f;       // × 命中区边长（大于视觉 × 本体，好点）
 constexpr float k_close_glyph = 8.0f;       // × 视觉尺寸
 constexpr float k_modified_dot = 6.0f;      // 修改点直径

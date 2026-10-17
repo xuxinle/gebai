@@ -7,7 +7,7 @@
 
 把 **SQLite 3.50.2 的 amalgamation（`sqlite3.c` + `sqlite3.h`）直接编进霜天的静态库**：
 应用与独立工程拿到的是一份**随源码交付、零安装、版本自定、可审计**的数据库能力，
-对外只暴露 `st::ext::Database` 这层 C++20 门面。
+对外只暴露 `st::ext::Database` 这层 C++23 门面。
 
 这也是上游推荐的用法——[How To Compile SQLite](https://sqlite.org/howtocompile.html)：
 

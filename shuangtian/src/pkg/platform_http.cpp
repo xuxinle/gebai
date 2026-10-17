@@ -517,7 +517,7 @@ struct RawResponse {
 
   const std::span<const std::uint8_t> body_bytes = payload.subspan(body_start);
   std::vector<std::uint8_t> body;
-  if (transfer_encoding.find("chunked") != std::string::npos) {
+  if (transfer_encoding.contains("chunked")) {
     const auto decoded = decode_chunked(body_bytes);
     if (!decoded) return forward_error(decoded.error());
     body = *decoded;

@@ -12,7 +12,7 @@
 /// cd shuangtian
 /// ./build/bin/st build st --profile dev          # 先确保框架对象是新的
 /// OBJS=$(ls build/dev/obj/*.o | grep -v -E "(main\.cpp\.o|_test\.cpp\.o|test_runner\.cpp\.o|_vendor_|examples_)")
-/// g++ -std=c++20 -O1 -Iinclude -Ithird_party tools/lcd_compare.cpp $OBJS -o /tmp/lcd_compare -lpthread -ldl -lm
+/// g++ -std=c++23 -O1 -Iinclude -Ithird_party tools/lcd_compare.cpp $OBJS -o /tmp/lcd_compare -lpthread -ldl -lm
 /// /tmp/lcd_compare /tmp/lcd-shots                  # 输出三张 PNG + 边缘剖面
 /// ```
 ///

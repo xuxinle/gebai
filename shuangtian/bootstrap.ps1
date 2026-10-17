@@ -5,7 +5,7 @@
 #
 # 编译器选择：**g++ 优先，clang++ 次之**——与框架侧的探测顺序一致
 # （`pkg/build.cpp` 的 `detect_compiler`）。两者是**同一条口径**：GCC 风格标志
-# （`-std=c++20`/`-I`/`-D`/`-Wall`）+ `-MMD` 依赖 + `-l` 链接 + libstdc++ 运行库。
+# （`-std=c++XX`/`-I`/`-D`/`-Wall`）+ `-MMD` 依赖 + `-l` 链接 + libstdc++ 运行库。
 # 因此本脚本只有一套编译/链接命令，不按编译器族分叉。
 #
 # clang++ 走 GNU 目标时吃 MinGW 的 libstdc++；若它默认指向别的目标（LLVM 官方 Windows
@@ -112,6 +112,11 @@ function Test-GlobMatch([string]$Pattern, [string]$Path) {
 
 $pkg = Get-Content (Join-Path $Root 'st.pkg') -Raw | ConvertFrom-Json
 $pkgVersion = if ($pkg.version) { $pkg.version } else { '0.1.0' }
+# 语言标准：**单一真源在清单**（`cxx_standard`），与 `src/pkg/build.cpp` 同口径。
+# 曾几何时这里与构建驱动各写一份 `-std=c++20`，升标准时两处不同步就会出现
+# “st build 用新标准、自举出的 st 用旧标准”这种只在细节上错位的产物，且两边各自都能编过。
+$pkgStandard = if ($pkg.cxx_standard) { [int]$pkg.cxx_standard } else { 23 }
+$stdFlag = "-std=c++$pkgStandard"
 $pkgIncludes = if ($pkg.include_dirs) { @($pkg.include_dirs) } else { @('include', 'third_party') }
 $pkgDefines = if ($pkg.defines) { @($pkg.defines) } else { @('ST_VERSION="' + $pkgVersion + '"', 'ST_ENABLE_LINT=1') }
 $pkgCFlags = if ($pkg.c_flags) { @($pkg.c_flags) } else { @('-std=gnu11') }
@@ -158,7 +163,7 @@ $platformDefines = @('-D_WIN32_WINNT=0x0A00', '-DWINVER=0x0A00', '-DNTDDI_VERSIO
 $defines = @($pkgDefines | ForEach-Object { "-D$_" }) + $platformDefines
 $includeFlags = @($pkgIncludes | ForEach-Object { "-I$_" })
 $common = $includeFlags + $defines
-$cxxFlags = @('-std=c++20', '-fno-strict-aliasing',
+$cxxFlags = @($stdFlag, '-fno-strict-aliasing',
               '-Wall', '-Wextra', '-Wconversion', '-Wshadow', '-Wpedantic',
               '-Wold-style-cast', '-Wnon-virtual-dtor') + $common
 # C 源标志与构建驱动同源：清单的 c_flags（含 SQLite 的 `-include`）+ 宏 + 包含路径。

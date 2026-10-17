@@ -381,7 +381,7 @@ void record_stats(detail::ScriptState& state, ScriptStats& stats,
   std::string lowered(raw);
   std::ranges::transform(lowered, lowered.begin(),
                          [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-  if (lowered.find("out of memory") != std::string::npos) {
+  if (lowered.contains("out of memory")) {
     description.append(" ").append(memory_hint());
   }
   return description;

@@ -65,7 +65,7 @@ def base_flags(manifest: dict) -> list[str]:
     刻意**不带**告警严格集（`-Werror` 那套）：本脚本问的是「编不编得过」，
     告警由 `st check` 负责——把两件事混在一起，一处新告警就会淹掉真正的自包含缺陷。
     """
-    flags = ["-std=c++20", "-fsyntax-only", "-fno-strict-aliasing"]
+    flags = [f"-std=c++{manifest.get('cxx_standard') or 23}", "-fsyntax-only", "-fno-strict-aliasing"]
     flags += [f"-D{d}" for d in manifest.get("defines", [])]
     for toolchain in manifest.get("toolchains", {}).values():
         flags += [f"-D{d}" for d in toolchain.get("defines", [])]

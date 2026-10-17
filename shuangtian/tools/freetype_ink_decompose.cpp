@@ -10,7 +10,7 @@
 /// 从而决定修法（实现 hint 执行 vs 做覆盖率补偿）。
 ///
 /// 编译（FreeType 是**分析用**依赖，框架本体仍零第三方依赖）：
-///   g++ -std=c++20 -O1 -Iinclude -Ithird_party -I/usr/include/freetype2 \
+///   g++ -std=c++23 -O1 -Iinclude -Ithird_party -I/usr/include/freetype2 \
 ///       tools/freetype_ink_decompose.cpp \
 ///       $(ls build/dev/obj/*.o | grep -E '_shuangtian_src_(core|math|raster|text)_' | grep -v -E 'raster_platform_|_test\.') \
 ///       -o build/probe/freetype_ink_decompose -lfreetype -lpthread -ldl -lm

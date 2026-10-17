@@ -17,7 +17,7 @@
 /// ```bash
 /// cd shuangtian && ./build/bin/st build st --profile dev
 /// OBJS=$(ls build/dev/obj/*.o | grep -v -E "(main\.cpp\.o|_test\.cpp\.o|test_runner\.cpp\.o|_vendor_|examples_)")
-/// g++ -std=c++20 -O1 -Iinclude -Ithird_party -I/usr/include/freetype2 \
+/// g++ -std=c++23 -O1 -Iinclude -Ithird_party -I/usr/include/freetype2 \
 ///     tools/hinting_gain_probe.cpp $OBJS -o /tmp/hgain -lfreetype -lpthread -ldl -lm
 /// /tmp/hgain /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc 2
 /// ```

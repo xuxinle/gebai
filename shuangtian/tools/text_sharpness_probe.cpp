@@ -20,7 +20,7 @@
 /// $objs = Get-ChildItem build\dev\obj -Filter *.o |
 ///   Where-Object { $_.Name -match "_src_(core|math|codec|raster|text)_" -and
 ///                  $_.Name -notmatch "platform_gl|_test|test_runner" } | ForEach-Object { $_.FullName }
-/// g++ -std=c++20 -O1 -Iinclude -Ithird_party tools/text_sharpness_probe.cpp @objs `
+/// g++ -std=c++23 -O1 -Iinclude -Ithird_party tools/text_sharpness_probe.cpp @objs `
 ///   -o out/text_sharpness_probe.exe -lws2_32 -lwinpthread
 /// out/text_sharpness_probe.exe <输出目录> [device_scale]
 /// ```

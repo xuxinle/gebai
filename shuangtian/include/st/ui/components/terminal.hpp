@@ -404,7 +404,6 @@ class Terminal : public Element {
   /// 而容器会随增删重排。指针保地址稳定，也保住了"会话对象不搬家"这条不变式。
   std::vector<std::unique_ptr<TerminalSession>> sessions_{};
   std::size_t active_{0};
-  std::size_t title_seq_{1};
 
   /// 光标默认形状（宿主偏好；程序可用 `DECSCUSR` 覆盖）。默认**竖线**：
   /// 终端里最常用的是插入点（提示符处、`vim` 插入模式），
@@ -437,7 +436,6 @@ class Terminal : public Element {
   int job_code_{0};
   std::string job_name_{};
   std::size_t job_session_{0};
-  bool terminal_dirty_{false};
   /// 待上报的 PTY 尺寸（在 `arrange` 里算、在下一帧 `paint_content` 里报——
   /// 布局阶段不直接改 PTY，免得测量多次导致尺寸抖动）。
   st::process::PtySize pending_size_{80, 24};
@@ -500,7 +498,6 @@ class Terminal : public Element {
   std::int64_t last_click_ms_{-1};
   math::Point last_click_pos_{};
   /// 拖选时的自动滚动累积（超出视口边缘时按行滚）。
-  std::int64_t last_drag_ms_{-1};
 
   // —— 子件（组合而非自绘：标签与滚动是既有组件）——
   Tabs* tabs_{nullptr};

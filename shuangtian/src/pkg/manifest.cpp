@@ -19,12 +19,12 @@ namespace st::pkg {
 namespace {
 
 /// 本层已识别的顶层字段（其余进 `extra_fields`，回写时保留）。
-inline constexpr std::array<std::string_view, 21> known_keys{
+inline constexpr std::array<std::string_view, 22> known_keys{
     "name",       "version",     "kind",        "modules",        "include_dirs",
     "sources",    "tests",       "flags",       "defines",        "system_libs",
     "targets",    "dependencies", "dependency_modules", "dependency_system",
     "third_party_sources", "c_flags", "embed", "toolchains", "framework",
-    "shuangtian_pkg_format", "log"};
+    "shuangtian_pkg_format", "log", "cxx_standard"};
 
 [[nodiscard]] auto known_key(std::string_view key) -> bool {
   for (const auto candidate : known_keys) {
@@ -222,6 +222,18 @@ auto Manifest::parse_json(const st::Json& json, std::string_view directory) -> R
   }
   manifest.kind = json_get_string(json, "kind", "static_library");
   if (manifest.kind.empty()) manifest.kind = "static_library";
+  // `cxx_standard`：C++ 语言标准年号（`-std=c++XX` 的 XX）。构建侧所有标志的**唯一来源**。
+  // 允许的取值域由 `cxx_standard_flag` 判定：域外值直接报错而不是静默回落——
+  // 静默回落会让"清单写了 23、实际用 20 编"这种偏差一路隐形到产物里。
+  const auto standard = json_get_i64(json, "cxx_standard",
+                                     static_cast<std::int64_t>(Manifest::kDefaultCxxStandard));
+  if (standard < 0 || standard > 999 || Manifest::cxx_standard_flag(
+                                            static_cast<std::uint32_t>(standard))
+                                        .empty()) {
+    return unexpected(ErrorCode::Parse,
+                      std::format("清单 cxx_standard 非法（{}）：支持 20..26", standard));
+  }
+  manifest.cxx_standard = static_cast<std::uint32_t>(standard);
   manifest.directory = std::string(directory);
   manifest.modules = json_get_string_array(json, "modules");
   manifest.include_dirs = json_get_string_array(json, "include_dirs");
@@ -390,11 +402,22 @@ auto Manifest::find(std::string_view directory) -> Result<Manifest> {
   return load(candidate);
 }
 
+auto Manifest::cxx_standard_flag(std::uint32_t standard) -> std::string {
+  // 接受域 20..26：下限是本仓源码的**实际**要求（`std::expected`/`<format>` 等已全面使用，
+  // C++17 编不过）；上限是"还没发布的标准不猜拼法"。两种编译器族的拼法相同（都是 `-std=c++XX`），
+  // 所以这里不需要按族分叉——这也是清单能保持跨平台的一点依据。
+  if (standard < 20 || standard > 26) return {};
+  return std::format("-std=c++{}", standard);
+}
+
 auto Manifest::to_json() const -> st::Json {
   st::Json json = st::Json::object();
   json["name"] = name;
   json["version"] = version;
   json["kind"] = kind;
+  // `cxx_standard` **总是写出**（包括等于缺省值时）：它决定产物能不能用，
+  // 隐式缺省在"清单被另一份工具读取"时就丢了语义。
+  json["cxx_standard"] = static_cast<std::int64_t>(cxx_standard);
   json["modules"] = to_array(modules);
   json["include_dirs"] = to_array(include_dirs);
   json["sources"] = to_array(sources);

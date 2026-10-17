@@ -213,7 +213,7 @@ struct FontCandidate {
       if (!face) break;
       if (!face->has_glyph(kProbe)) continue;
       const std::string name = face->name();
-      if (name.find("SC") != std::string::npos || name.find("Simplified") != std::string::npos) {
+      if (name.contains("SC") || name.contains("Simplified")) {
         return face;
       }
       if (!first_covering.has_value()) first_covering = std::move(*face);

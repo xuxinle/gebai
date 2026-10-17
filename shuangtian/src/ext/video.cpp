@@ -62,7 +62,7 @@ struct ProbeCache {
     const std::string key = line.substr(0, colon);
     const std::string value = line.substr(colon + 2);
 
-    if (key.find("Duration") != std::string::npos) {
+    if (key.contains("Duration")) {
       // `Duration: 00:00:05.28, start: …` → 毫秒。
       const std::size_t comma = value.find(',');
       const std::string time = value.substr(0, comma);
@@ -79,8 +79,8 @@ struct ProbeCache {
                                1000 +
                            static_cast<std::int64_t>(seconds * 1000.0);
       }
-    } else if (key.find("Stream #") != std::string::npos) {
-      if (value.find("Video:") != std::string::npos) {
+    } else if (key.contains("Stream #")) {
+      if (value.contains("Video:")) {
         // `h264 (High) (avc1 / 0x31637661), yuv420p, 1920x1080 [SAR 1:1 …], 30 fps, …`
         const std::size_t codec_end = value.find_first_of(" (,");
         if (codec_end != std::string::npos) info.codec = value.substr(0, codec_end);
@@ -113,10 +113,10 @@ struct ProbeCache {
             info.fps = 0.0;
           }
         }
-      } else if (value.find("Audio:") != std::string::npos) {
+      } else if (value.contains("Audio:")) {
         info.has_audio = true;
       }
-    } else if (key.find("Input #") != std::string::npos) {
+    } else if (key.contains("Input #")) {
       // `Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'x.mp4':` → 容器类型。
       const std::size_t from = line.find(", from ");
       if (from != std::string::npos) {

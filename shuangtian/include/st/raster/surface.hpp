@@ -14,12 +14,18 @@
 /// 两条约束：
 /// 1. **接口只放"两边都能做"的原语**。像"按覆盖率运行段混合一行"这种软件内部机制
 ///    留在 `Canvas` 上（`Surface` 不暴露），否则 GPU 实现被迫模拟 CPU 的内部数据结构。
-/// 2. **像素访问是接口的一部分**（`pixels`/`to_rgba8`/`pixel_at`）：控制通道的截图、
+/// 2. **像素访问是接口的一部分**（`pixels`/`pixel_view`/`to_rgba8`/`pixel_at`）：控制通道的截图、
 ///    回归测试的逐像素断言都依赖它。GPU 实现走回读，慢但正确——它只在"要看像素"时才走。
+///
+/// `pixels` 与 `pixel_view` 的分工：前者是一维线形视图（既有代码/协议用），后者是
+/// **二维带边界检查的视图**（`std::mdspan`）——多了一眼就能看出"行列对不对"的能力。
+/// 两者指向**同一块内存**（不拷贝）：`pixel_view` 只是把 `pixels()` 重新解释成 `height × width`，
+/// 所以不存在"两个视图不同步"的问题。
 
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <mdspan>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -284,6 +290,16 @@ class Surface {
   /// 预乘 RGBA8 像素（**可能触发 GPU 回读**；只在"要看像素"时用）。
   [[nodiscard]] virtual auto pixels() const noexcept -> std::span<const std::uint32_t> = 0;
   [[nodiscard]] virtual auto pixels() noexcept -> std::span<std::uint32_t> = 0;
+  /// 二维像素视图（`std::mdspan`，行主序、**物理**尺寸）：与 `pixels()` 同一块内存，不拷贝。
+  ///
+  /// 返回 `matrix_view<const uint32_t>`：`view[y, x]` 直接取像素，行列写反了">尺寸对不上"
+  /// （而非静默读到邻行）——这是换成 `mdspan` 的全部理由。
+  /// 尺寸由 `pixels().size()` 与物理宽高共同决定：两者不一致（未初始化的后端）时返回空视图，
+  /// 而不是把错误尺寸传给 `mdspan`（后者是硬 UB，不是可捕获的错误）。
+  [[nodiscard]] auto pixel_view() const noexcept
+      -> std::mdspan<const std::uint32_t, std::dextents<std::size_t, 2>>;
+  [[nodiscard]] auto pixel_view() noexcept
+      -> std::mdspan<std::uint32_t, std::dextents<std::size_t, 2>>;
   /// 导出为直通 RGBA8 字节流（PNG 编码/截图用；物理分辨率）。
   [[nodiscard]] virtual auto to_rgba8() const -> std::vector<std::uint8_t> = 0;
   /// 非全透明像素的最小包围盒（**物理**像素；测试与截图裁剪用）。
@@ -293,6 +309,36 @@ class Surface {
 
  protected:
   Surface() = default;
-};
+
+  /// 由（像素跨度、物理宽高）构造二维视图：尺寸不匹配时返回空视图。
+  ///
+  /// 抽成静态模板是为了让 const / 非 const 两个重载共用同一道**尺寸一致性检查**——
+  /// 这道检查是必要的：`mdspan` 对越界尺寸不做验证，传错就是直接踩内存。
+  template <class Element>
+  [[nodiscard]] static auto make_pixel_view(std::span<Element> flat, int physical_width_value,
+                                            int physical_height_value) noexcept
+      -> std::mdspan<Element, std::dextents<std::size_t, 2>> {
+    using View = std::mdspan<Element, std::dextents<std::size_t, 2>>;
+    if (physical_width_value <= 0 || physical_height_value <= 0) return View{};
+    const auto columns = static_cast<std::size_t>(physical_width_value);
+    const auto rows = static_cast<std::size_t>(physical_height_value);
+    if (flat.size() != columns * rows) return View{};
+    return View(flat.data(), rows, columns);
+  }
+};  // class Surface
+
+// —— 内联实现（依赖 `physical_width()/physical_height()` 与 `pixels()` 两个虚函数）——
+
+inline auto Surface::pixel_view() const noexcept
+    -> std::mdspan<const std::uint32_t, std::dextents<std::size_t, 2>> {
+  return make_pixel_view(pixels(), physical_width(), physical_height());
+}
+
+inline auto Surface::pixel_view() noexcept
+    -> std::mdspan<std::uint32_t, std::dextents<std::size_t, 2>> {
+  // 非 const 重载要调**非 const** `pixels()`（它可能触发 GPU 回读）：
+  // 若这里调了 const 版，GPU 后端的可写视图会拿到一份“只读副本”并将其写丢。
+  return make_pixel_view(pixels(), physical_width(), physical_height());
+}
 
 }  // namespace st::raster

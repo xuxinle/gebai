@@ -13,6 +13,30 @@
 /// `st build` 会先编译本文件为 `.gch`，再以 `-include st.hpp` 让每个 .cpp 复用。
 /// 手工编译时同样可以照此使用；不加 PCH 也能正常编译（本头**不引入任何语义**）。
 
+// —— 语言标准守卫与可选设施探测 ——
+// PCH 包含了全部标准库头，本就只有在 C++23 下才能成形；把守卫放在最前，
+// 让任何走 PCH 的单元在报错时看到的是"标准低了"，而不是一大堆标准库内部错。
+#include "st/core/cxx.hpp"
+
+// —— C++23 设施 ——
+// 只收**本仓真在用且两族都能用**的：`<expected>`（Result 内芯）、`<mdspan>`（像素视图）、
+// `<flat_map>`（小表查找）。
+//
+// ⚠ `std::move_only_function` 的宏 `__cpp_lib_move_only_function` 在 libstdc++ 16 里**已定义**，
+// 但**没有独立头** `<move_only_function>`（它住在 `<functional>` 里）——按宏去写
+// `#include <move_only_function>` 会直接 `fatal error: No such file or directory`。
+// 这就是“能力宏存在 ≠ 该这么包含”的典型：要查头的就查 `__has_include`。
+//
+// 刻意**不收**的三个（用 `st::has_lib_*` 判断，不进 PCH）：
+// - `<print>` / `<stacktrace>`：实现住在 **`libstdc++exp.a`**（`print.o` / `stacktrace.o`），
+//   后者主库里没有副本且**不自动链接**——加 `-lstdc++exp` 后 `std::print` 可用，
+//   而 `std::stacktrace` 能链但符号化失效（逐设施验，不要整库推广）。
+// - `<generator>`：clang 目标下缺失（libstdc++ 协程门控不成立）；
+// - `<stacktrace>`：GCC 要额外链接 `libstdc++_libbacktrace`，发行包常不带。
+#include <expected>
+#include <flat_map>
+#include <mdspan>
+
 // —— 语言设施 ——
 #include <algorithm>
 #include <array>

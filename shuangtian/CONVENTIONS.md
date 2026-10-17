@@ -1,16 +1,17 @@
-# 霜天（Shuangtian）编码约定 — 全现代 C++20，禁用易错特性
+# 霜天（Shuangtian）编码约定 — 全现代 C++23，禁用易错特性
 
 本文件是霜天框架的**强制**编码契约。违反即视为缺陷，由三重机制拦截：**① 人工审阅口径（本文档）② 编译器加严警告（`-Werror`）③ 自研 `st lint` 静态扫描**。设计内容见 `DESIGN.md`。
 
 ## 0. 一句话
 
-> 只用**现代 C++20 中可静态验证的安全子集**；凡历史上以「易错」著称的语言特性，一律禁用并由工具链强制。
+> 只用**现代 C++23 中可静态验证的安全子集**；凡历史上以「易错」著称的语言特性，一律禁用并由工具链强制。
 
 ## 1. 语言与工具链
 
 | 项 | 规定 |
 |---|---|
-| 标准 | `-std=c++20`（**GCC 13.3 / 16.2** 与 **Clang 23** 实测基线；`<format>`/`<expected>`/concepts/ranges/span 均须可用） |
+| 标准 | **C++23**（`-std=c++23`）。**唯一真源是清单 `st.pkg` 的 `cxx_standard`**（缺省 23）：构建驱动、PCH 创建与消费、自举脚本、探针脚本全从它派生；绕过构建驱动的路径由 `st/core/cxx.hpp` 的 `#error` 守卫拦住。实测基线：**GCC 13.3 / 16.2** 与 **Clang 23** |
+| C++23 设施的**可用性边界** | 能力分层，**四种判据各不相同**：① 宏在（`__cpp_lib_*`）；② 头存在（`__has_include`）；③ **能链接**（还要分“不报错”与“默认就链上”）；④ **能工作**。本机实测：`<print>` 需 `-lstdc++exp`（加上就完全可用）；`<stacktrace>` 同在 `exp` 但**符号化失效**；`<move_only_function>` 无独立头（在 `<functional>` 里）；`<generator>` clang 目标下缺失。要用就查 `st::has_lib_*()` 探针（`st/core/cxx.hpp`），**不要**直接写 `#ifdef`；遇 `undefined reference` 先 `nm -A <库>.a \| grep <符号>` 再归因 |
 | 编译器 | 由 `stpm` 直驱（不经 CMake/Make）：**g++ 优先，clang++ 次之**——两者是**同一条口径**（GCC 风格标志 + `-MMD` 依赖 + `-l` 链接 + libstdc++ 运行库），所以构建系统只有一套命令，不按编译器族分叉。Windows 自举用 `bootstrap.ps1`（g++ 优先，MSVC 回退；对应 `bootstrap.sh`） |
 | 第三方依赖 | 框架本体**零第三方依赖**；后续引入的第三方源码一律由 `stpm` 统一管理（见 `DESIGN.md`「包管理」），不得绕过 |
 | 系统能力 | 一律**运行时 `dlopen` 可选加载**（X11/Wayland/GL/Vulkan/TLS），缺失即回退或明确报错。**X11/Wayland 窗口后端即此条的最佳论据**：目标机器常常有运行库而无 `-dev` 头文件（实测 Ubuntu+GNOME 就是），编译期依赖会让"连无头都编不出来" |
@@ -216,7 +217,7 @@ visible/enabled/focused/hovered/pressed —— 焦点经 `UiRoot::set_focus` 设
 ## 4. 编译强制集（写进 `st.pkg`）
 
 ```text
--std=c++20 -fno-strict-aliasing
+-std=c++23 -fno-strict-aliasing
 -Wall -Wextra -Werror -Wconversion -Wshadow -Wpedantic
 -Wold-style-cast -Wnon-virtual-dtor -Wcast-align -Wnull-dereference
 -Woverloaded-virtual -Wdouble-promotion -Wimplicit-fallthrough
@@ -802,9 +803,12 @@ Windows 上 `std::filesystem::path` 的两个方向都会抛（UTF-8→宽在字
 ### 10.1 编译器口径（两族：GCC 与 Clang，**同一条口径**）
 
 **探测优先序**：`ST_CXX/CXX 显式指定 → g++（主版本 ≥ 13）→ clang++/c++`。
-低于 13 的 g++ 缺 C++20 关键项（`<format>` 等），会被跳过并告警。
+低于 13 的 g++ 缺关键项（`<format>` 等），会被跳过并告警。
 
-**为什么两族能共用一套构建命令**：清单恒写 GCC 风格（`-std=c++20`/`-Ifoo`/`-DNAME`/`-Wall`），
+**语言标准不在这里选**：它取自清单的 `cxx_standard`（缺省 23），两族拼法相同（`-std=c++XX`），
+所以无法按族分叉，也不需要在这层留分支。
+
+**为什么两族能共用一套构建命令**：清单恒写 GCC 风格（`-std=c++XX`/`-Ifoo`/`-DNAME`/`-Wall`），
 依赖产出恒用 `-MMD -MF`（写 GCC 风格 `.d`），链接恒用 `-lfoo`，运行库恒取 libstdc++。
 因此本框架**没有"标志翻译层"**：清单写什么，命令行就是什么。这消掉了一整类问题
 （"哪个平台漏了哪个开关"、"翻译后的标志与缓存键不一致"）。
@@ -891,7 +895,7 @@ py -3 tools/check_selfcontained.py --tu-only  # 只查翻译单元
 
 ```bash
 cd build/..   # 工程根
-FLAGS='-std=c++20 -fsyntax-only -DST_VERSION="0.1.0" -DST_ENABLE_LINT=1 \
+FLAGS='-std=c++23 -fsyntax-only -DST_VERSION="0.1.0" -DST_ENABLE_LINT=1 \
   -Iinclude -Ithird_party -Ithird_party/sqlite -Ibuild/dev/embed/lib/include'
 for f in $(ls src/*/*.cpp src/*/*/*.cpp); do g++ $FLAGS "$f" >/dev/null || echo "FAIL $f"; done
 ```

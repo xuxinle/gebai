@@ -46,7 +46,7 @@ enum class SourceLanguage : std::uint8_t { Cxx, C };
 /// 由编译器路径/名字判定族。名字含 `clang` → Clang；其余按 GCC 系。
 ///
 /// **`clang-cl` 明确拒绝**：它是"MSVC 风味的 clang"（标志、环境、链接都按 MSVC 走），
-/// 本层不支持 MSVC 口径，把它误判成 Clang 会给出 `-std=c++20` 而它期待 `/std:c++20`——
+/// 本层不支持 MSVC 口径，把它误判成 Clang 会给出 `-std=c++XX` 而它期待 `/std:c++XX`——
 /// 报一堆看不懂的错。返回错误比静默误判省时间。
 [[nodiscard]] auto compiler_kind_of(std::string_view compiler) -> Result<CompilerKind>;
 
@@ -54,7 +54,7 @@ enum class SourceLanguage : std::uint8_t { Cxx, C };
 
 /// 该族的**恒定**编译标志（方言固定项）。
 ///
-/// GCC/Clang 在此返回空：`-std=c++20` 由清单的 `flags` 统一给出（两族拼法相同），
+/// GCC/Clang 在此返回空：`-std=c++XX` 由清单的 `cxx_standard` 统一派生（两族拼法相同），
 /// GCC 专有的档标（`-Wno-array-bounds` 等）由工具链的 `suppressions` 按族收敛
 /// （见 `ToolchainSpec::suppressions`）。
 [[nodiscard]] auto dialect_flags(CompilerKind kind, SourceLanguage language)

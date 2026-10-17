@@ -26,7 +26,7 @@ if [ "${#objs[@]}" -lt 10 ]; then
   exit 1
 fi
 
-g++ -std=c++20 -O1 -DSVG_AB_CASES_DIR="\"$root/tools\"" -I"$root/include" -I"$root/tools" -I"$root/third_party" \
+g++ -std=c++23 -O1 -DSVG_AB_CASES_DIR="\"$root/tools\"" -I"$root/include" -I"$root/tools" -I"$root/third_party" \
     -I"$root/third_party/sqlite" \
     "$root/tools/$name.cpp" "${objs[@]}" -o "$outdir/$name" -lpthread -ldl -lm
 echo "== OK: $outdir/$name"

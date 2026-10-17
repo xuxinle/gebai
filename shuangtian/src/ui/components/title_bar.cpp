@@ -50,11 +50,6 @@ constexpr float k_title_icon_size = 16.0f;
 constexpr float k_padding_x = 12.0f;
 /// 图标与标题之间的间距。
 constexpr float k_icon_gap = 8.0f;
-/// 关闭按钮悬浮时的底色透明度（danger 色派生；系统惯例——它是最"危险"的那一个）。
-constexpr float k_close_hover_alpha = 0.16f;
-/// 普通控制按钮悬浮/按压底色透明度（`surface_pressed` 派生）。
-constexpr float k_button_hover_alpha = 0.10f;
-constexpr float k_button_press_alpha = 0.18f;
 
 /// 悬停块的**纵向**内缩（逻辑 px）：横向贴满按钮，纵向各缩 4。
 ///

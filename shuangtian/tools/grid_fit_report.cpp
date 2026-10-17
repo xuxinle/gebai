@@ -15,7 +15,7 @@
 /// ```bash
 /// cd shuangtian && ./build/bin/st build st --profile dev
 /// OBJS=$(ls build/dev/obj/*.o | grep -v -E "(main\.cpp\.o|_test\.cpp\.o|test_runner\.cpp\.o|_vendor_|examples_)")
-/// g++ -std=c++20 -O1 -Iinclude -Ithird_party tools/grid_fit_report.cpp $OBJS -o /tmp/gridfit_report -lpthread -ldl -lm
+/// g++ -std=c++23 -O1 -Iinclude -Ithird_party tools/grid_fit_report.cpp $OBJS -o /tmp/gridfit_report -lpthread -ldl -lm
 /// /tmp/gridfit_report
 /// ```
 #include <algorithm>

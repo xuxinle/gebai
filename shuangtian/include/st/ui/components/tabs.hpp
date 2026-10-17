@@ -228,7 +228,7 @@ class Tabs : public Element {
   int hover_trailing_{-1};  ///< 尾部动作钮悬停（-1 无）
   float scroll_offset_{0.0f};  ///< 横向滚动偏移（溢出时 > 0）
   bool show_add_{false};    ///< 尾部「+」是否显示
-  float max_tab_width_{200.0f};  ///< 标签项最大宽度（≤0 = 不限；缺省 200，与 cpp 的 k_default_max_tab_width 同值）
+  float max_tab_width_{200.0f};  ///< 标签项最大宽度（≤0 = 不限；缺省 200）
 
   /// 尾部动作钮（自绘轻量按钮：图标 + 回调 + hover 提亮）。
   struct TrailingButton {

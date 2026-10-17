@@ -30,7 +30,7 @@ auto detect_compiler(std::string_view override_compiler) -> Result<std::string> 
     if (const auto value = fs::read_env(name); value.has_value() && !value->empty()) return *value;
   }
   // 两个前端**同一条口径**（GCC 风格标志 + libstdc++ 运行库），所以优先序只影响"用哪个前端"，
-  // 不影响构建语义。g++ 在前：它的 C++20 支持随发行版走，且 Windows 上自带 libstdc++。
+  // 不影响构建语义。g++ 在前：它对标准的支持随发行版走，且 Windows 上自带 libstdc++。
   for (const auto name : {"g++", "clang++", "c++"}) {
     if (auto found = process::which(name); found.has_value()) return *found;
   }
@@ -41,7 +41,7 @@ auto detect_compiler(std::string_view override_compiler) -> Result<std::string> 
 
 namespace {
 
-/// 源文件语言（决定编译器标志：`.c` 必须按 C 编译，不能用 `-std=c++20`）。
+/// 源文件语言（决定编译器标志：`.c` 必须按 C 编译，不能用 `-std=c++XX`）。
 enum class SourceLang : std::uint8_t { Cxx, C };
 
 struct CompileUnit {
@@ -801,7 +801,13 @@ struct FrameworkFlags {
                                         const std::vector<std::string>& profile_flags_list,
                                         const ResolvedToolchain& toolchain) -> FrameworkFlags {
   FrameworkFlags out;
-  out.flags.push_back("-std=c++20");
+  // 语言标准由**框架清单**的 `cxx_standard` 派生（不是调用方工程的）：框架源是按框架自己
+  // 声明的标准写的，用调用方的标准去编它会造成"同一份源码按不同标准编出不同对象"，
+  // 共享对象缓存的键也就随工程漂移。清单没写时 `parse_json` 已经填入缺省值，
+  // 这里的空串分支只防手段性直构 `Manifest`（如测试/嵌入方）绕过了解析。
+  const auto standard_flag = Manifest::cxx_standard_flag(framework_manifest.cxx_standard);
+  out.flags.push_back(standard_flag.empty() ? std::format("-std=c++{}", Manifest::kDefaultCxxStandard)
+                                            : standard_flag);
   for (const auto& item : framework_manifest.flags) out.flags.push_back(item);
   for (const auto& item : framework_manifest.defines) {
     out.flags.push_back(std::format("-D{}", item));
@@ -862,7 +868,13 @@ struct LanguageFlags {
   // 「option is valid for C++ but not for C」。因此 C 源只取 `c_flags` + 档位 + 宏 + 包含路径；
   // 想让自家 C 源也严格，就在 `c_flags` 里显式写 `-Wall -Werror`（第三方源则另有 `-w`）。
   LanguageFlags out;
-  out.cxx.push_back("-std=c++20");
+  // 语言标准：来自**本工程清单**的 `cxx_standard`（构建侧唯一真源）。
+  // 它必须排在最前：后随的档位/工程 flags 可能再给 `-std=`，按编译器"后者覆盖前者"的
+  // 惯例，那样才轮得到工程显式覆盖；但缺省情况下清单值就是最终生效值。
+  const auto standard_flag = Manifest::cxx_standard_flag(manifest.cxx_standard);
+  out.cxx.push_back(standard_flag.empty()
+                        ? std::format("-std=c++{}", Manifest::kDefaultCxxStandard)
+                        : standard_flag);
   for (const auto& item : manifest.flags) out.cxx.push_back(item);
   for (const auto& item : options.extra_flags) out.cxx.push_back(item);
   for (const auto& item : manifest.defines) out.cxx.push_back(std::format("-D{}", item));
@@ -978,7 +990,7 @@ struct LanguageFlags {
     // 为什么不给全工程开：`-mavx2` 会改变全局代码生成与 ABI 假设，且 CPUID 门控在运行时
     // 才发生——编译期全局开关会牺牲老 CPU 兼容性；只在运行时按能力分派的文件里启用，
     // 其他单元保持默认（SSE2 基线）。
-    if (!is_c && unit.source.find("simd.cpp") != std::string::npos) {
+    if (!is_c && unit.source.contains("simd.cpp")) {
       chosen.emplace_back("-mavx2");
     }
     return chosen;
@@ -1272,7 +1284,7 @@ struct LanguageFlags {
     const auto defaults = default_system_libs(toolchain.platform);
     const auto other_platform_libs = default_system_libs(
         toolchain.platform == "windows" ? "posix" : "windows");
-    const auto keep = [&toolchain, &defaults, &other_platform_libs](const std::string& lib) {
+    const auto keep = [&defaults, &other_platform_libs](const std::string& lib) {
       // 工程自声明库：不在任何一个平台节里 → 与平台无关，保留。
       const bool platform_lib =
           std::ranges::find(defaults, lib) != defaults.end() ||
@@ -1569,8 +1581,8 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
         // ELF 与 PE 的 DWARF 段名差一个下划线前缀（MinGW 实测为 `.debug_info`，
         // 但 GNU 对 PE 的习惯是加 `_`）——两边都查。
         const bool has_debug_sections =
-            headers->stdout_text.find(".debug_info") != std::string::npos ||
-            headers->stdout_text.find("__debug_info") != std::string::npos;
+            headers->stdout_text.contains(".debug_info") ||
+            headers->stdout_text.contains("__debug_info");
         if (!has_debug_sections) return ok();
       }
     }

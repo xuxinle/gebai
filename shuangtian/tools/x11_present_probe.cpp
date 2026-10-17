@@ -28,7 +28,7 @@
 //
 // 构建：本文件自带 Xlib 最小 ABI 与 dlopen（不依赖 -lX11 / X11 头）——
 //
-//     g++ -std=c++20 -O2 -mavx2 -Iinclude tools/x11_present_probe.cpp -o /tmp/x11_present_probe -ldl
+//     g++ -std=c++23 -O2 -mavx2 -Iinclude tools/x11_present_probe.cpp -o /tmp/x11_present_probe -ldl
 //
 // 用法： x11_present_probe [width] [height] [frames] [--rect WxH] [--double] [--pace MS]
 //

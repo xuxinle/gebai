@@ -19,7 +19,7 @@
 
 | 项 | 值 |
 |---|---|
-| 框架 | 霜天 `shuangtian`（自研构建驱动 `st`；C++20，PCH，97 单元库 + 87 个测试文件） |
+| 框架 | 霜天 `shuangtian`（自研构建驱动 `st`；C++23，PCH，97 单元库 + 87 个测试文件） |
 | GCC | `g++` **16.2.0**（MinGW-w64，x86_64-win32-seh-rev1） |
 | Clang（旧） | `clang++` **18.1.8**（LLVM 官方 Windows 版，**不可用作本机构建器**：见 §4） |
 | Clang（新） | `clang++` **21.x**（LLVM.LLVM winget 包；MSVC STL 要求 Clang ≥ 20） |
