@@ -6,6 +6,20 @@
 # 演进调度状态（生生 shengsheng 子Agent 托管：.evolve/control.md 与 ledger.md）——
 # 项目本地的驻留开发台账，非项目产物；多台机器/多开发者各自一份，不入库
 .evolve/
+# 仓级共享租约（.evolve-shared/leases.json）：落在 **git 顶层**，是同一棵树上多条演进线共用的
+# 独占资源登记（跨线的“谁在用这台机器”）。它是**运行时状态**而不是项目文件，同 .evolve/ 一样不入库。
+# 注意：它可能落在仓库根也可能落在任一子目录（取决于哪条线先领），故用无路径前缀的裸模式。
+.evolve-shared/
+
+# 逆向验证 / 门禁的三类**运行时状态文件**（都是设计上该留在盘上的诊断线索，不是项目文件）——
+# 用无路径前缀的裸模式：它们落在 packages/agents/src/agents/shengsheng/ 下，也可能落在
+# 任意被验的源码目录里。
+# ① 逆向验证的临时回退备份（正常退出会删；SIGKILL/异常会留）——首行残留即「上一轮未完成」的线索
+*.revbak
+# ② kill_drill 的救援快照（`reverse_verify_kill_drill.py:70` 明写「非 *.revbak，脚本不会碰」——用于 SIGKILL 场景救援）
+*.drill-snapshot
+# ③ verify_guard 的并发锁（陈旧时按 pid 存活 + boot_id 自清，但自清只在下次拿锁时触发，所以会长期留在盘上）
+.reverse_verify.lock
 
 # deps
 node_modules/

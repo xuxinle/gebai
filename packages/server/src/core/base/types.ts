@@ -64,6 +64,10 @@ export interface SessionControlService {
     windDown(sessionId: string, opts: { reason: string; graceMs?: number }): Promise<void>
     runtimeOf(user: string): Promise<Record<string, import("../engine/engine").RuntimeSessionInfo>>
     runningIds(user: string): Promise<string[]>
+    /** **真实模型上下文窗口**（token，0 = 未知）：子Agent 用它当“离截断多远”的真实分母。
+     *  为何必须从引擎取、不能写死：窗口由 provider 能力决定（`.env` 的 `GEBAI_LLM_MAX_CONTEXT`），
+     *  写死一个数会在配置改小时**静默说错话**——那是“一个数字两个源”的同型缺陷。 */
+    contextWindow?(): number
   }
   /** 触发目标会话执行（session 工具 send）：引擎 run 的脱管调用面——注入用户消息并驱动一轮。
  *  目标会话忙时抛错（同会话并发 run 竞态保护，引擎 tasks.has 检查）。 */

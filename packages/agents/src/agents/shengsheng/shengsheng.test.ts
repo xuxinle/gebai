@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, existsSync } from "node:fs"
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, existsSync, renameSync, writeFileSync } from "node:fs"
+import { spawn, spawnSync } from "node:child_process"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
-import { def as shengshengDef, parseControl, renderControl, dedupeState, inflightSession, isSessionIdShape, tableBlock, SECTION_HEADINGS, activeWorkerLimit } from "./shengsheng"
+import { def as shengshengDef, parseControl, renderControl, dedupeState, inflightSession, isSessionIdShape, tableBlock, SECTION_HEADINGS, activeWorkerLimit, ctxScale, ctxVerdict, ctxLine, ctxScaleLine, DEFAULT_MODEL_CONTEXT_WINDOW, DEFAULT_REUSE_ADVISORY_LIMIT, DEFAULT_EXCLUSIVE_RESOURCE, DEFAULT_LEASE_MINUTES, LEASE_START_GRACE_MS, resourceKey, repoResourceName, renderSharedLeases, parseSharedLeases } from "./shengsheng"
 // 问卦内核（纯数据/纯函数）与测试用常量直引，不经 def（工具面断言与内核断言分开两把尺）
 import {
   buildHexagram,
@@ -20,6 +21,20 @@ import {
   type DivineInputs,
 } from "./hexagrams"
 import { questionHash, DIVINE_WARN_COUNT, DIVINE_HASH_LEN } from "./shengsheng"
+// 提交范围（宽范围暂存的纪律与判据）——直接引纯函数，不绕工具面：判据在纯函数层与工具层各验一遍
+import {
+  WIDE_STAGING_FORMS,
+  commitProtocolLine,
+  mentionCovers,
+  mentionPaths,
+  parseLastCommit,
+  parseStatusPorcelain,
+  scopeAudit,
+  stagingCommands,
+  untrackedOf,
+} from "./commit-scope"
+// `pgrep -f` 自匹配活锁的判据（纯函数直引：文本判据与进程表判据各验一遍，不绕工具面）
+import { aliveMatching, detectPgrepLock, disjoinTail, extractPatterns, isSelfMatch, isWaitCommand } from "./pgrep-lock"
 // 版本化解析模块（本单新抽）：判代/位置读取/升级函数与其版本声明——单测直接锁它的契约
 import {
   parseInflightRow,
@@ -70,17 +85,25 @@ interface Stub {
   notified: Array<{ text: string; id?: string }>
   sessions: Map<string, { id: string; name?: string; messages: unknown[]; ctxTokens?: number }>
   running: Set<string>
+  /** 引擎自报的上下文窗口（真引擎的 `contextWindow()`）；**0 = 不报**【缺省】——用例可覆盖。 */
+  contextWindow: number
   /** 让 resolvePath 拒绝的绝对路径前缀（模拟沙箱边界）。 */
   denied: string[]
+  /** 命令钩子（缺省真跑 `/bin/sh -c`）：模拟“没装 git”这类环境。 */
+  commandHook?: (cmd: string, opts?: { workdir?: string }) => Promise<{ stdout: string; stderr: string; code: number }>
 }
 
-function stub(opts: { root?: string; taskName?: string; withTask?: Record<string, unknown> } = {}): Stub {
+function stub(opts: { root?: string; taskName?: string; withTask?: Record<string, unknown>; sessionId?: string; idPrefix?: string } = {}): Stub {
   const home = mkdtempSync(join(tmpdir(), "gebai-shengsheng-"))
   const sessionDir = join(home, "users", "admin", "sessions", "s1")
   const tmp = join(sessionDir, "tmp")
   mkdirSync(tmp, { recursive: true })
   const root = opts.root ?? join(home, "proj")
   mkdirSync(root, { recursive: true })
+  // 会话 id 与派生 id 前缀可定制：**两条演进线共存**的用例里两边必须是不同会话
+  // （否则“被自己挡”与“被别人挡”会混为一谈——那恰好是本组判据的分界线）。
+  const selfSid = opts.sessionId ?? "s1"
+  const idPrefix = opts.idPrefix ?? "sess"
 
       const s: Stub = {
       home,
@@ -97,6 +120,7 @@ function stub(opts: { root?: string; taskName?: string; withTask?: Record<string
     notified: [],
     sessions: new Map(),
     running: new Set(),
+    contextWindow: 0,
     denied: [],
   }
 
@@ -108,7 +132,7 @@ function stub(opts: { root?: string; taskName?: string; withTask?: Record<string
 
   const ctx = {
     user: "admin",
-    sessionId: "s1",
+    sessionId: selfSid,
     workdir: tmp,
     sessionWorkdir: tmp,
     home,
@@ -123,9 +147,22 @@ function stub(opts: { root?: string; taskName?: string; withTask?: Record<string
     },
     listFiles: async () => [],
     listDir: async () => [],
-    deleteFile: async () => {},
-    moveFile: async () => {},
-    runCommand: async () => ({ stdout: "", stderr: "", code: 0 }),
+    deleteFile: async (p: string) => {
+      rmSync(resolveSafe(p), { force: true })
+    },
+    moveFile: async (from: string, to: string) => {
+      const a = resolveSafe(from)
+      const b = resolveSafe(to)
+      mkdirSync(dirname(b), { recursive: true })
+      renameSync(a, b)
+    },
+    // 真跑命令（仓级租约要 `git rev-parse --show-toplevel`）——测试里一律真实，不用桩：
+    // 「探测不到就应当安静降级」那条判据若用桩跑，桩会把它自己写的答案当成真相（CONVENTIONS §7.2）。
+    runCommand: async (cmd: string, o?: { workdir?: string }) => {
+      if (s.commandHook) return s.commandHook(cmd, o)
+      const r = spawnSync("/bin/sh", ["-c", cmd], { cwd: o?.workdir ?? tmp, encoding: "utf8", timeout: 5000 })
+      return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", code: r.status ?? 1 }
+    },
     uploadAttachment: async (r: { path: string }) => r.path,
     publish: () => {},
     projects: [],
@@ -141,7 +178,7 @@ function stub(opts: { root?: string; taskName?: string; withTask?: Record<string
     sessions: {
       store: {
         createSession: async (_userId: string, name?: string) => {
-          const id = `sess${s.created.length + 1}`
+          const id = `${idPrefix}${s.created.length + 1}`
           s.created.push({ id, name })
           s.sessions.set(id, { id, name, messages: [] })
           return { id, name }
@@ -165,6 +202,9 @@ function stub(opts: { root?: string; taskName?: string; withTask?: Record<string
         },
         runtimeOf: async () =>
           Object.fromEntries([...s.running].map((id) => [id, { startedAt: Date.now() - 60_000, pending: [], toolCalls: 2 }])),
+        // 真引擎有这个方法（`engine.contextWindow()`）：缺省桩里**不提供**，让用例走 env/缺省值那条路；
+        // 需要验「引擎自报优先」的用例自己覆盖 `s.contextWindow`。
+        contextWindow: () => s.contextWindow,
       },
           run: async (id: string, _user: string, message: string, opts?: Record<string, unknown>) => {
       s.sent.push({ sessionId: id, message, opts })
@@ -218,6 +258,40 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
     expect(shengshengDef.preload).toBe(false)
     expect(shengshengDef.envVars?.every((v) => v.name.startsWith("SHENGSHENG_"))).toBe(true)
     expect(shengshengDef.systemPrompt).toContain("生生")
+    // 负载敏感的测量与门禁必须先声明独占（本单新增的一节，不是散文而是可断言的契约）：
+    // 两度实证的事故都源于“两个 worker 各自以为自己是唯一在跑的”——提示词里没有这一节，
+    // 模型就只会靠“自觉等负载降”（那恰好是两次事故的共同前提）。
+    expect(shengshengDef.systemPrompt).toContain("必须声明独占")
+    expect(shengshengDef.systemPrompt).toContain("数字作废条件")
+    expect(shengshengDef.systemPrompt).toContain("cpu-exclusive")
+    // 机制类交付必须有反向断言（2026-10-17）：本条纪律是**派工/收单的硬规**，不是散文——
+    // 它必须真的在提示词里，并且带三项可判别的内容（三种反向形态 / 三缺一不算交付 / 工单句式）。
+    // 断言用**字面文本**：与 `shengsheng.md` 同源时用它做断言会把差异抹平（CONVENTIONS §7.2）。
+    //
+    // ⚠ 这里必须锁**整句**而不是关键词：本条纪律在第六节（立规）与第七节（收单口径第四条）
+    // 各出现一次，只锁「三缺一不算交付」「机制类交付必须有反向断言」这类短语时，把第六节改成
+    // 「建议补一条（可选）」**竟不会变红**（实测：软回退后 98 pass / 0 fail）——因为短语在第七节
+    // 的交叉引用里还在。所以锁的是「带 `必须` 的整句 + 不可选」这两处语义，软退化成「可选」即红。
+    expect(shengshengDef.systemPrompt).toContain(
+      "机制类交付必须有反向断言——正向断言只证「该做的做了」，反向断言才证「不该做的一件都没做」。",
+    )
+    expect(shengshengDef.systemPrompt).toContain("不是加分项，缺了就是半个证人")
+    // 三种反向形态各自的名字（缺任一种就少了一整类“不可碰”的检验面）
+    expect(shengshengDef.systemPrompt).toContain("不得 X")
+    expect(shengshengDef.systemPrompt).toContain("其它 Y 必须不受影响")
+    expect(shengshengDef.systemPrompt).toContain("不属于自己的 Z 必须仍存在")
+    // 工单模板：`deliver` 必含反向断言（不是可选项）+ 可照抄句式
+    expect(shengshengDef.systemPrompt).toContain("`deliver` 里必须含一条反向断言（不是可选项）")
+    // 正文那句也要锁：只锁小标题时，把正文从「必须再写一条」软退成「建议再加一条」**不变红**
+    // （实测 drill：只锁小标题时 98 pass / 0 fail；补上这句后同一回退当场 1 fail）
+    expect(shengshengDef.systemPrompt).toContain("必须再写一条反向验收")
+    expect(shengshengDef.systemPrompt).toContain("反向验收：构造 <不属于本单的对象>，本单动作后它**必须不受影响**（否则会 <具体祸及>）")
+    // 两个正面标杆必须点名（“只讲道理不给样本”的纪律没人会照做），且必须带那句“跨线祸及”的自述
+    expect(shengshengDef.systemPrompt).toContain("跨线祸及比不杀更坏")
+    expect(shengshengDef.systemPrompt).toContain("不会把所有人互相锁死")
+    expect(shengshengDef.systemPrompt).toContain("三缺一不算交付")
+    // 为什么会漏：正向断言只证「该做的做了」——反向那一半必须点名，否则模型只会验正向。
+    expect(shengshengDef.systemPrompt).toContain("不该碰的东西有没有被碰到")
   })
 
   test("control.md 往返幂等：render → parse 保真，未知字段不丢结构", () => {
@@ -229,6 +303,7 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
       inflight: [{ alias: "lint-1", direction: "修 lint", deliverable: "补丁", dispatchedAt: 111, round: 12 }],
       seeds: [{ priority: "P1", direction: "docs 补齐", source: "台账", constraint: "只分析" }],
       pending: [],
+      leases: [],
       note: "观复到 lint-1",
     })
     const back = parseControl(md)
@@ -241,7 +316,7 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
     expect(back.note).toBe("观复到 lint-1")
     expect(renderControl(back)).toBe(md)
     // 空态也保留节结构（可人工查看）
-    expect(renderControl({ coord: {}, breath: 0, seq: 0, workers: [], inflight: [], seeds: [], pending: [] })).toContain("## 种子队列")
+    expect(renderControl({ coord: {}, breath: 0, seq: 0, workers: [], inflight: [], seeds: [], pending: [], leases: [] })).toContain("## 种子队列")
   })
 
   test("初生：control.md 缺失时引导 init，init 固化坐标并落盘", async () => {
@@ -555,6 +630,7 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
       inflight: [],
       seeds: [],
       pending: [],
+      leases: [],
       note: "前半段：观到三单在跑。\n\n## 下一步\n\n- 收 ss-1；- 布一雨。\n\n尾段：别忘了核提交数。",
     })
     // 写进真现场（与工具同一路径），再用**真工具**读回来
@@ -584,7 +660,7 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
   })
 
   test("节结构单源：写出侧节标题集 == 解析侧认的规范标题集（次序一致，两边漂开即报）", () => {
-    const md = renderControl({ coord: {}, breath: 0, seq: 0, workers: [], inflight: [], seeds: [], pending: [] })
+    const md = renderControl({ coord: {}, breath: 0, seq: 0, workers: [], inflight: [], seeds: [], pending: [], leases: [] })
     const written = md.split(/\r?\n/).filter((l) => /^##\s/.test(l.trim())).map((l) => l.trim().slice(3).trim())
     // 逐字且**次序一致**：渲染器写出的每个节都在语料里，语料里的每个节也都被写出
     expect(written).toEqual([...SECTION_HEADINGS])
@@ -2345,5 +2421,1434 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
       cleanup(s)
     })
   })
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 真往返探针撞出的两处缺陷（2026-10-17）
+  //
+  // 背景：这两条不是读代码想出来的，而是在**真起一条演进线**（给霜天项目 init + 播种 +
+  // 布雨）时用工具真往返撞出来的——当时 52 个既有用例全绿，两条都没被覆盖（「绿而无效」）。
+  // 探针的事实：
+  //   · 连派两个**全新会话** → 第二个的「轮次」写成 2（首派应为 1）；
+  //   · 一次回复里并行发两个 `state` 调用（系统提示明确「同一次回复的多个工具调用
+  //     会并行执行」）→ 后写者带**陈旧基线**覆盖前者，静默丢一条：
+  //     实测「两个 seed_add 只留一个」「`note` + `seed_add` 并行 → 呼吸仍为 0、断点为空」。
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  describe("并发写与轮次语义（真往返撞出的缺陷）", () => {
+    test("并发 seed_add：两条种子都要在（后写者不得带陈旧基线覆盖前者）", async () => {
+      // 反例（修复前实测）：只留一条——`并发甲` 消失。
+      // 根因：`appendLedger` 有路径级串行（withLedgerLock），而 `saveState` **没有**——
+      // 两者读写的是同一份 `.evolve/`，串行语义却不一致。
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      await Promise.all([
+        tool("state").execute({ action: "seed_add", direction: "并发甲", priority: "P1" }, s.ctx),
+        tool("state").execute({ action: "seed_add", direction: "并发乙", priority: "P2" }, s.ctx),
+      ])
+      const seeds = parseControl(controlOf(s)).seeds.map((x) => x.direction)
+      expect(seeds).toContain("并发甲")
+      expect(seeds).toContain("并发乙")
+      cleanup(s)
+    })
+
+    test("并发 note + seed_add：呼吸必须推进且断点必须落盘（note 不得被整条吞掉）", async () => {
+      // 反例（修复前实测）：`呼吸 = 0`、`断点 = （无）`——note 的整次写入被 seed_add 的
+      // 陈旧基线覆盖。呼吸是「这条河跑了多久」的唯一机器可读计数，被吞即历史断档。
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      await Promise.all([
+        tool("state").execute({ action: "note", note: "并行断点" }, s.ctx),
+        tool("state").execute({ action: "seed_add", direction: "并行种子" }, s.ctx),
+      ])
+      const st = parseControl(controlOf(s))
+      expect(st.breath).toBe(1)
+      expect(st.note).toBe("并行断点")
+      expect(st.seeds.map((x) => x.direction)).toContain("并行种子")
+      cleanup(s)
+    })
+
+    test("并发 dispatch + seed_add：派工登记与种子入队互不覆盖", async () => {
+      // 跨工具并发（同一息里「择种 + 布雨」是自然写法）：两条都必须落地。
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      await Promise.all([
+        tool("dispatch").execute({ orders: [{ task: "并行派工", domain: "par" }] }, s.ctx),
+        tool("state").execute({ action: "seed_add", direction: "并行播种", priority: "P1" }, s.ctx),
+      ])
+      const st = parseControl(controlOf(s))
+      expect(st.workers.length).toBe(1)
+      expect(st.inflight.length).toBe(1)
+      expect(st.seeds.map((x) => x.direction)).toContain("并行播种")
+      cleanup(s)
+    })
+
+    test("轮次语义：全新会话首派 round=1（round 是「该会话承接的第几轮」，不是全局派工序号）", async () => {
+      // 反例（修复前实测）：批内两单 → `a-1:1` 而 `b-1:2`（乙方首派却拿到全局序号 2）。
+      // 为何这不是显示问题：`round` 同时是 ①读侧归一的胜负判据（dedupeBySession 取最大轮）
+      // ②复用代数 `prev.round + 1` ③收藏幂等键 `collect:<sid>:r<round>`——语义错位会让
+      // 「同会话轮次」与「全局序号」的大小关系相反时选错条目、幂等键漂移。
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      await tool("dispatch").execute(
+        { orders: [{ task: "首单甲", domain: "a" }, { task: "首单乙", domain: "b" }] },
+        s.ctx,
+      )
+      const st = parseControl(controlOf(s))
+      expect(st.workers.length).toBe(2)
+      for (const w of st.workers) expect(w.round).toBe(1)
+      // 在途与池同源写入：轮次也必须一致（都是各自会话的首轮）。
+      for (const i of st.inflight) expect(i.round).toBe(1)
+      // 全局派工序号仍单调递增（它是台账幂等键的跨会话唯一源，语义不并入 round）。
+      expect(st.seq).toBe(2)
+      cleanup(s)
+    })
+
+    test("跨层反哺：业务线撞出的调度层问题必须能回流到平台线的种子队列", async () => {
+      // 自举闭环缺的那一环：worker 撞出的问题若属于**调度层**（派工丢写 / 轮次错 / 种子泄漏 /
+      // 跨线污染 / 会话不可达…），它不属于被演进的那个项目——写进该项目的文档永远没人看。
+      // 没有回流，“用生生干活”就无法让生生自己变好：三层链条（息→平台→业务→反哺平台）就断了。
+      const s = stub()
+      // 业务线（模拟霜天）
+      const bizRoot = join(s.home, "biz")
+      mkdirSync(bizRoot, { recursive: true })
+      await tool("state").execute({ action: "init", root: bizRoot, verify: "v" }, s.ctx)
+      await tool("state").execute({ action: "seed_add", direction: "业务方向", priority: "P1" }, s.ctx)
+      await tool("dispatch").execute({ orders: [{ task: "业务单", domain: "biz" }] }, s.ctx)
+      const sid = parseControl(readFileSync(join(bizRoot, ".evolve", "control.md"), "utf8")).workers[0].sessionId
+      // 平台线（模拟生生自己那条线）
+      const platRoot = join(s.home, "plat")
+      mkdirSync(platRoot, { recursive: true })
+      await tool("state").execute({ action: "init", root: platRoot, verify: "v" }, s.ctx)
+
+      // worker 已空闲（可收藏），并撞出了一个调度层问题
+      s.running.delete(sid)
+      const r = await tool("collect").execute(
+        {
+          action: "collect",
+          session_id: sid,
+          root: bizRoot,
+          summary: "交付了一个业务修复；顺带撞出：派工时种子不销账",
+          next: "派工后种子不销账 → 下一息会重复派同一方向",
+          feed_to: platRoot,
+        },
+        s.ctx,
+      )
+      // 业务线的 next → 业务线队列；调度层问题 → 平台线队列
+      const biz = parseControl(readFileSync(join(bizRoot, ".evolve", "control.md"), "utf8"))
+      const plat = parseControl(readFileSync(join(platRoot, ".evolve", "control.md"), "utf8"))
+      expect(biz.seeds.map((x) => x.direction)).toContain("业务方向") // 未派出的那条还在
+      expect(plat.seeds.map((x) => x.direction)).toContain("派工后种子不销账 → 下一息会重复派同一方向")
+      // 溯源：来源必须标明从哪条线反哺来的（否则平台线无法判断这条是谁撞出的）
+      const fed = plat.seeds.find((x) => x.direction.includes("派工后种子不销账"))!
+      expect(fed.source).toContain("反哺")
+      expect(fed.source).toContain(bizRoot)
+      expect(r.output).toContain("已反哺")
+      cleanup(s)
+    })
+
+    test("跨层反哺：目标线已有同向种子时幂等不重复；未给 next 或目标同根时如实拒绝", async () => {
+      const s = stub()
+      const bizRoot = join(s.home, "biz2")
+      const platRoot = join(s.home, "plat2")
+      mkdirSync(bizRoot, { recursive: true })
+      mkdirSync(platRoot, { recursive: true })
+      await tool("state").execute({ action: "init", root: bizRoot, verify: "v" }, s.ctx)
+      await tool("state").execute({ action: "seed_add", direction: "单", priority: "P1" }, s.ctx)
+      await tool("dispatch").execute({ orders: [{ task: "单", domain: "d" }] }, s.ctx)
+      const sid = parseControl(readFileSync(join(bizRoot, ".evolve", "control.md"), "utf8")).workers[0].sessionId
+      await tool("state").execute({ action: "init", root: platRoot, verify: "v" }, s.ctx)
+      await tool("state").execute({ action: "seed_add", direction: "平台已有方向" }, s.ctx)
+      s.running.delete(sid)
+
+      // 幂等：同方向第二次不重复入队
+      const r1 = await tool("collect").execute(
+        { action: "collect", session_id: sid, root: bizRoot, summary: "s1", next: "平台已有方向", feed_to: platRoot }, s.ctx,
+      )
+      const plat1 = parseControl(readFileSync(join(platRoot, ".evolve", "control.md"), "utf8"))
+      expect(plat1.seeds.filter((x) => x.direction === "平台已有方向").length).toBe(1)
+      expect(r1.output).toContain("已在目标队列")
+
+      // 只给目标不给 next：不得凭空造一条种子。
+      // ⚠ 必须换一个新 worker——同一会话同一轮的台账键已入账，第二次 collect 会被幂等拦下，
+      // 根本走不到反哺分支（本轮实测踩到：拿旧 worker 断言“反哺未落盘”，实际拿到的是幂等提示）。
+      await tool("state").execute({ action: "seed_add", direction: "第二单方向", priority: "P1", root: bizRoot }, s.ctx)
+      s.running.clear()
+      // ⚠ dispatch 必须显式带 root：会话 env 此刻已指 plat2（上一步 init 改写了），
+      // 不带 root 会派到平台线去（本轮实测踩到，worker 找不到）。
+      await tool("dispatch").execute({ orders: [{ task: "第二单方向", domain: "d2" }], root: bizRoot }, s.ctx)
+      const sid2 = parseControl(readFileSync(join(bizRoot, ".evolve", "control.md"), "utf8"))
+        .workers.find((w) => w.domain === "d2")!.sessionId
+      s.running.delete(sid2)
+      const before = parseControl(readFileSync(join(platRoot, ".evolve", "control.md"), "utf8")).seeds.length
+      const r2 = await tool("collect").execute(
+        { action: "collect", session_id: sid2, root: bizRoot, summary: "s2", feed_to: platRoot }, s.ctx,
+      )
+      expect(r2.output).toContain("反哺未落盘")
+      // 关键：目标线种子数不得变（凭空造一条是比不反哺更坏的错）
+      const after = parseControl(readFileSync(join(platRoot, ".evolve", "control.md"), "utf8"))
+      expect(after.seeds.length).toBe(before)
+      cleanup(s)
+    })
+
+    test("init 不跨线继承：新根的初生状态不得带入另一条演进线的池/在途/种子", async () => {
+      // 实测事故：会话 env SHENGSHENG_ROOT 指 A（上一条演进线）时 `init root=B`——
+      // loadState 的回落链读到了 A 的状态（回显“沿用既有状态：池 2…”），而坐标却写进 B，
+      // 于是 B 的 control.md 凭空多出 A 的两个 worker（跨演进线污染）。
+      // 更阴的是回显看起来正常，下息才发现 worker 不是自己的。
+      // 判据：坐标是**每个根自己的一件事**——目标根没有 control.md 就是初生，不回落。
+      const s = stub()
+      // A 线：有 worker 与种子
+      const rootA = join(s.home, "projA")
+      mkdirSync(rootA, { recursive: true })
+      await tool("state").execute({ action: "init", root: rootA, verify: "va" }, s.ctx)
+      await tool("state").execute({ action: "seed_add", direction: "A 的方向" }, s.ctx)
+      await tool("dispatch").execute({ orders: [{ task: "A 的单", domain: "a" }] }, s.ctx)
+      const aState = parseControl(readFileSync(join(rootA, ".evolve", "control.md"), "utf8"))
+      expect(aState.workers.length).toBe(1)
+
+      // 会话 env 仍指 A（模拟沙箱内残留的上一条线坐标），但 init 传 B
+      s.sessionEnv.SHENGSHENG_ROOT = rootA
+      const rootB = join(s.home, "projB")
+      mkdirSync(rootB, { recursive: true })
+      const r = await tool("state").execute({ action: "init", root: rootB, verify: "vb" }, s.ctx)
+      const bState = parseControl(readFileSync(join(rootB, ".evolve", "control.md"), "utf8"))
+      // B 必须是初生
+      expect(r.output).toContain("初生")
+      expect(bState.workers.length).toBe(0)
+      expect(bState.inflight.length).toBe(0)
+      expect(bState.seeds.length).toBe(0)
+      // A 不受影响（没被改写成 B）
+      const aAfter = parseControl(readFileSync(join(rootA, ".evolve", "control.md"), "utf8"))
+      expect(aAfter.coord.root).toBe(rootA)
+      expect(aAfter.workers.length).toBe(1)
+      cleanup(s)
+    })
+
+    test("派出去即销账：对应种子离开队列（否则下一息会把它再派一次）", async () => {
+      // 章程规定「择定的方向先 seed_add 落笔，再布雨」——派完后种子若留在队列，下一息读态会把它
+      // 当“待派方向”**再派一次**（真重复烧一条 worker 命）。
+      // 实测（本轮真演进）：种子 1 条 + 派它后 → 种子仍在、在途也有一份，同一方向两处并存。
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      await tool("state").execute({ action: "seed_add", direction: "方向甲：修 X", priority: "P1" }, s.ctx)
+      await tool("state").execute({ action: "seed_add", direction: "方向乙：另一件", priority: "P2" }, s.ctx)
+      const d = await tool("dispatch").execute({ orders: [{ task: "方向甲：修 X", domain: "x" }] }, s.ctx)
+      const st = parseControl(controlOf(s))
+      // 被派的那条销账，另一条不动
+      expect(st.seeds.map((x) => x.direction)).toEqual(["方向乙：另一件"])
+      // 不得两处并存（种子 + 在途 同一方向）
+      expect(st.inflight.some((i) => st.seeds.some((x) => x.direction === i.direction))).toBe(false)
+      // 回工：让生生知道种子被销了（否则它无法确认“这条不会再被派一次”）
+      expect(d.output).toContain("种子已销账")
+      cleanup(s)
+    })
+
+    test("运行中也要报上下文水位：review 的处置建议不得在运行态漏掉 ctx 判据", async () => {
+      // 实测（真 worker）：已跑到 ctx 171K（过复用建议线 150K），而 review 只说了「运行中 18 分钟，
+      // 未超 40 → 勿扰，下息再看」——因为 ctx 提醒当时只写在「非运行中」分支里。
+      // 为何这是缺陷而不是遗漏：运行中恰恰**最该**看到它（还在消费、上下文只会更长），
+      // 而「勿扰」的默认建议会把它推得更深。
+      //
+      // ⚠ 口径修正（本单）：171K 过的是**复用建议线**（150K），**不是模型窗口**（512K）——
+      // 旧用例断言的「上下文已超上限」正是那条假误报。现在断言的是正确语义：
+      // 「可复用，但收益递减」，且**不得**说成“超上限”。
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      await tool("dispatch").execute({ orders: [{ task: "长跑任务", domain: "long" }] }, s.ctx)
+      const st = parseControl(controlOf(s))
+      const sid = st.workers[0].sessionId
+      // 造现场：worker 正在运行，且 ctx 过了复用建议线
+      const sess = s.sessions.get(sid)!
+      sess.ctxTokens = 171_000
+      s.running.add(sid)
+      const r = await tool("collect").execute({ action: "review", session_id: sid }, s.ctx)
+      // 建议必须指向可执行动作（抢救结论 → 退役），而不是只描述现象
+      expect(r.output).toContain("retire mode=stop")
+      // 关键：不得给出“勿扰”作为**唯一**建议（ctx 要进来）
+      expect(r.output).not.toMatch(/勿扰，下息再看\s*$/m)
+      // 两个量都在：过的是建议线，不是窗口
+      expect(r.output).toContain("复用建议线")
+      expect(r.output).toContain("模型窗口")
+      expect(r.output).not.toContain("超上限")
+      cleanup(s)
+    })
+
+    test("上下文水位：两个量分开报（分子/分母各自点名），不再只报一个数并叫它“上限”", async () => {
+      // 沿革：① 最早只报裸 `ctx 55400`（分子标了、分母没说是什么量）；
+      // ② 后来报 `ctx 55.4K / 150.0K（37%）`——分母有了，但它是**复用建议线**、却被当成“上限”用；
+      // ③ 本单拆成两个量，且**两个都报**。真误报就出在 ②：ctx 224K 被判“超上限”，而它只占真窗口 512K 的 44%。
+      const scale = ctxScale({})
+      expect(scale.window).toBe(DEFAULT_MODEL_CONTEXT_WINDOW)
+      expect(scale.window).toBe(512_000)
+      expect(scale.advisory).toBe(150_000)
+      expect(scale.advisory).toBe(DEFAULT_REUSE_ADVISORY_LIMIT)
+      // 行文：两个量各自点名 + 各自百分比
+      expect(ctxLine(55_400, scale)).toBe("ctx 55.4K｜复用建议线 150.0K（37%）｜模型窗口 512.0K（11%）")
+      expect(ctxLine(undefined, scale)).toBe("") // 读不到就什么都不报，不编造 0%
+      // 224K：过建议线、远未过窗口
+      const v = ctxVerdict(224_000, scale)!
+      expect(v.level).toBe("over-advisory")
+      expect(v.advisoryPct).toBe(149)
+      expect(v.windowPct).toBe(44)
+      expect(v.action).toContain("可复用，但收益递减")
+      expect(v.action).not.toContain("必须退役")
+      // 520K：真过窗口
+      const over = ctxVerdict(520_000, scale)!
+      expect(over.level).toBe("over-window")
+      expect(over.action).toContain("必须退役")
+      expect(over.action).not.toContain("可复用")
+      // 两个量都可 env 覆盖（且回显报出数源：缺省值 ≠ 引擎真值）
+      const custom = ctxScale({ SHENGSHENG_MODEL_CTX_WINDOW: "128000", SHENGSHENG_REUSE_ADVISORY_CTX: "100000" })
+      expect(custom.window).toBe(128_000)
+      expect(custom.advisory).toBe(100_000)
+      expect(custom.windowSource).toBe("env SHENGSHENG_MODEL_CTX_WINDOW")
+      // 引擎自报优先于 env/缺省（.env 改了 MAX_CONTEXT 时不得静默沿用硬编码的 512K）
+      const probed = ctxScale({ SHENGSHENG_MODEL_CTX_WINDOW: "128000" }, { contextWindow: () => 200_000 })
+      expect(probed.window).toBe(200_000)
+      expect(probed.windowSource).toBe("引擎自报")
+      // 真工具走一遍：引擎自报 200K 时，ctx 224K 就从「过建议线」变成「过窗口」（必须退役）——
+      // 这条钉住“窗口不是写死的 512K”：否则 .env 改成 128K/200K 时工具会静默说错话。
+      const s2 = stub()
+      s2.contextWindow = 200_000
+      await tool("state").execute({ action: "init", root: s2.root, verify: "bun test" }, s2.ctx)
+      await tool("dispatch").execute({ orders: [{ task: "分析 B", domain: "b" }] }, s2.ctx)
+      const sid2 = parseControl(controlOf(s2)).workers[0].sessionId
+      s2.running.clear()
+      s2.sessions.get(sid2)!.ctxTokens = 224_000
+      const rp = await tool("collect").execute({ action: "review", session_id: sid2 }, s2.ctx)
+      expect(rp.output).toContain("模型窗口 200.0K（112%）")
+      expect(rp.output).toContain("必须退役")
+      cleanup(s2)
+      // 窗口未知时**明说未知**、不得编造一个数（旧缺陷的另一面：把建议线当窗口报）
+      const unknown = ctxVerdict(224_000, ctxScale({ SHENGSHENG_MODEL_CTX_WINDOW: "0" }))!
+      expect(unknown.line).toContain("模型窗口：未知")
+      expect(unknown.level).toBe("over-advisory")
+      // 两个量各自是什么（state 读态头部那一行）：必须点名两个量且给出 env 可改的名字
+      const sm = ctxScaleLine(ctxScale({}))
+      expect(sm).toContain("复用建议线 150.0K")
+      expect(sm).toContain("SHENGSHENG_REUSE_ADVISORY_CTX")
+      expect(sm).toContain("模型窗口 512.0K")
+      expect(sm).toContain("SHENGSHENG_MODEL_CTX_WINDOW")
+      expect(sm).toContain("必须退役")
+      cleanup(stub())
+    })
+
+    test("review 口径：ctx 224K 报「可复用但收益递减」（不得说“超上限”）；ctx 520K 报「必须退役」", async () => {
+      // 本单的主判据（真工具往返）：同一条 review 路径，两个 ctx 档必须给出**两种不同的处置**。
+      // 旧实现在两档上都只能说同一句话（“上下文已过肥…超上限”）——因为分母只有一个 150K。
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      await tool("dispatch").execute({ orders: [{ task: "分析 A", domain: "a" }] }, s.ctx)
+      const sid = parseControl(controlOf(s)).workers[0].sessionId
+      s.running.clear() // 空闲（可复用就是在这种状态下被决定的）
+
+      // —— ① 224K：过建议线、占窗口 44% ——
+      s.sessions.get(sid)!.ctxTokens = 224_000
+      const r1 = await tool("collect").execute({ action: "review", session_id: sid }, s.ctx)
+      expect(r1.output).toContain("ctx 224.0K")
+      expect(r1.output).toContain("复用建议线 150.0K（149%）")
+      expect(r1.output).toContain("模型窗口 512.0K（44%）")
+      expect(r1.output).toContain("可复用，但收益递减")
+      // ⚠ 三句错话一句也不许出现：它们都是把建议线当窗口的产物
+      expect(r1.output).not.toContain("超上限")
+      expect(r1.output).not.toContain("已过肥")
+      expect(r1.output).not.toContain("必须退役")
+      // data 面也分开给（调用方不必解析文案）
+      const d1 = (r1.data as { ctx: { level: string; advisoryPct: number; windowPct: number } }).ctx
+      expect(d1.level).toBe("over-advisory")
+      expect([d1.advisoryPct, d1.windowPct]).toEqual([149, 44])
+
+      // —— ② 520K：真过窗口 ——
+      s.sessions.get(sid)!.ctxTokens = 520_000
+      const r2 = await tool("collect").execute({ action: "review", session_id: sid }, s.ctx)
+      expect(r2.output).toContain("模型窗口 512.0K（102%）")
+      expect(r2.output).toContain("必须退役")
+      expect(r2.output).not.toContain("可复用，但收益递减")
+      const d2 = (r2.data as { ctx: { level: string } }).ctx
+      expect(d2.level).toBe("over-window")
+      cleanup(s)
+    })
+
+    test("读态与收藏的口径：凡回显 ctx 处必须两个量都报（或明写是哪个量）", async () => {
+      // state 池行、collect 回显都不能只给一个数/一个百分比——那是“一个数字两个量”的入口。
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      await tool("dispatch").execute({ orders: [{ task: "修 X", domain: "x" }] }, s.ctx)
+      const sid = parseControl(controlOf(s)).workers[0].sessionId
+      s.running.clear()
+      s.sessions.get(sid)!.ctxTokens = 224_000
+
+      const st = await tool("state").execute({}, s.ctx)
+      expect(st.output).toContain("上下文口径")
+      expect(st.output).toContain("复用建议线 150.0K")
+      expect(st.output).toContain("模型窗口 512.0K")
+      expect(st.output).toContain("ctx 224.0K｜复用建议线 150.0K（149%）｜模型窗口 512.0K（44%）")
+      expect(st.output).not.toContain("超上限")
+
+      const c = await tool("collect").execute({ action: "collect", alias: "x-1", summary: "## 交付\n完成" }, s.ctx)
+      expect(c.output).toContain("复用建议线 150.0K（149%）")
+      expect(c.output).toContain("模型窗口 512.0K（44%）")
+      cleanup(s)
+    })
+
+    test("轮次语义：同会话复用递增到 2，另一会话首派仍为 1（两者互不干扰）", async () => {
+      // 这条钉住「round 只随**本会话**的承接数递增」——修复前它会随全局序号跳号。
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      await tool("dispatch").execute({ orders: [{ task: "甲首单", domain: "a" }] }, s.ctx)
+      await tool("dispatch").execute({ orders: [{ task: "乙首单", domain: "b" }] }, s.ctx)
+      const st0 = parseControl(controlOf(s))
+      // 甲转为 idle 后可复用（同域）
+      st0.workers.find((w) => w.domain === "a")!.status = "idle"
+      await Bun.write(join(s.root, ".evolve", "control.md"), renderControl(st0))
+      s.running.clear()
+      await tool("dispatch").execute({ orders: [{ task: "甲复单", domain: "a" }] }, s.ctx)
+      const st = parseControl(controlOf(s))
+      const a = st.workers.find((w) => w.domain === "a")!
+      const b = st.workers.find((w) => w.domain === "b")!
+      expect(a.round).toBe(2) // 甲承接了第 2 单
+      expect(b.round).toBe(1) // 乙仍是首派——修复前这里是全局序号（3）
+      cleanup(s)
+    })
+  })
+
+  // ==================================================================
+  // 独占资源租约（两度实证：负载敏感的两套测量互污染；一次门禁侥幸没被污染）
+  //
+  // 两件真事故（都是本仓实际发生的，不是假想）：
+  //   ① x11-2buf「等机器空闲后开始测量」与 red-case「等负载降下来再跑 A/B」在等**同一种稀缺资源**，
+  //      谁先看到负载降谁先跑，另一个随后也跑——两套测量互相污染，而两个结论都依赖「负载干净」。
+  //   ② red-case 为复现 pty 竞态**故意**起 10 个并发 st build（load 峰值 55），而 x11-2buf 正在同一台机
+  //      跑最终门禁 st test；那次 184 passed / 0 failed **只因时间错开**才没被污染——纯偶然，不是设计。
+  //
+  // 下面每条用例都走**真工具往返**（dispatch/collect/state + 真 control.md），不喂手拼对象。
+  // ==================================================================
+  describe("独占资源租约（负载敏感测量与门禁）", () => {
+    /** 让池里某 worker 转 idle 并清掉运行态（模拟「worker 跑完/被人工置 idle」）。 */
+    const markIdle = async (s: Stub, alias: string): Promise<void> => {
+      const st = parseControl(controlOf(s))
+      const w = st.workers.find((x) => x.alias === alias)!
+      w.status = "idle"
+      await Bun.write(join(s.root, ".evolve", "control.md"), renderControl(st))
+      s.running.delete(w.sessionId)
+    }
+
+    test("独占租约：同一批两个工单都申请 cpu-exclusive——第二个被顺延且回显说清（被谁占、何时到期、下息再试）", async () => {
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      // 容量先放宽：本用例的判据是**资源**冲突，不是活动 worker 上限（否则「未派」可能来自容量而非租约）
+      s.ctx.env.SHENGSHENG_MAX_WORKERS = "6"
+      const dirs = [
+        "负载敏感测量 A：x11 双缓冲基线跑 20 轮 A/B（前后测 uptime，期间无人构建）",
+        "负载敏感测量 B：pty 复现的最终门禁 st test（要求负载干净）",
+      ]
+      for (const d of dirs) await tool("state").execute({ action: "seed_add", direction: d, priority: "P1" }, s.ctx)
+
+      const r = await tool("dispatch").execute({
+        orders: [
+          { task: dirs[0], domain: "x11", resource: DEFAULT_EXCLUSIVE_RESOURCE },
+          { task: dirs[1], domain: "pty", resource: DEFAULT_EXCLUSIVE_RESOURCE },
+        ],
+      }, s.ctx)
+      // 只代出去一单（第二单在**锁内**看到租约已被占 → 不派、不新建会话）
+      expect(s.sent).toHaveLength(1)
+      expect(s.created).toHaveLength(1)
+      const st = parseControl(controlOf(s))
+      expect(st.leases).toHaveLength(1)
+      expect(st.leases[0].resource).toBe(DEFAULT_EXCLUSIVE_RESOURCE)
+      expect(st.leases[0].alias).toBe(st.workers[0].alias)
+      expect(st.leases[0].sessionId).toBe(st.workers[0].sessionId)
+      // 回显三件事：被谁占着、何时到期、下息再试
+      expect(r.output).toContain("未派")
+      expect(r.output).toContain(`被 ${st.workers[0].alias} 占着`)
+      expect(r.output).toContain("到期")
+      expect(r.output).toContain("下息再试")
+      // 方向不得丢：被顺延的那条必须还在种子队列（与「额度只挡新建、不静默丢」同型）
+      expect(st.seeds.map((x) => x.direction)).toContain(dirs[1])
+      // 派出去的那条销账、且种子仍在队列里的那条注明是被顺延退货的
+      expect(st.seeds.map((x) => x.direction)).not.toContain(dirs[0])
+      cleanup(s)
+    })
+
+    test("独占租约：A 持租约期间 B 派工不得开跑（不持资源的普通单不受影响；同一持有者续派不受限）", async () => {
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      s.ctx.env.SHENGSHENG_MAX_WORKERS = "6"
+      // A：负载敏感的门禁（exclusive:true 是 resource 的简写）
+      const a = await tool("dispatch").execute({ orders: [{ task: "st test 最终门禁", domain: "gate", exclusive: true }] }, s.ctx)
+      expect(a.output).toContain("布雨完成")
+      expect(a.output).toContain("独占")
+      const holder = parseControl(controlOf(s)).workers[0]
+      expect(s.sent).toHaveLength(1)
+
+      // B：另一个 worker 申请同一资源 → 不得开跑（sent 不增加、不新建会话）
+      s.running.clear()
+      const b = await tool("dispatch").execute({
+        orders: [{ task: "另一路负载敏感测量：20 轮 A/B", domain: "perf", fresh: true, resource: "cpu-exclusive" }],
+      }, s.ctx)
+      expect(s.sent).toHaveLength(1)
+      expect(s.created).toHaveLength(1)
+      expect(b.output).toContain("未派")
+      expect(b.output).toContain(`被 ${holder.alias} 占着`)
+      expect(b.output).toContain("下息再试")
+      // 方向落进种子（下息可重派）
+      expect(parseControl(controlOf(s)).seeds.map((x) => x.direction)).toContain("另一路负载敏感测量：20 轮 A/B")
+
+      // 对照组：**不持资源**的普通单照派（租约不挡无关工单——否则一条租约会堵住整条院子）
+      const plain = await tool("dispatch").execute({ orders: [{ task: "读码定位符号", domain: "docs", fresh: true }] }, s.ctx)
+      expect(plain.output).toContain("布雨完成")
+      expect(s.sent).toHaveLength(2)
+      expect(parseControl(controlOf(s)).leases).toHaveLength(1)
+
+      // 同一持有者续派：它自己持着租约，续期而**不重复占**、也不被自己挡
+      s.running.clear()
+      const renew = await tool("dispatch").execute({
+        orders: [{ task: "续跑门禁的最后一组", session_id: holder.sessionId, resource: "cpu-exclusive" }],
+      }, s.ctx)
+      expect(renew.output).toContain("布雨完成")
+      expect(renew.output).not.toContain("未派")
+      const afterRenew = parseControl(controlOf(s))
+      expect(afterRenew.leases).toHaveLength(1)          // 仍是同一张租约（不并列两条）
+      expect(afterRenew.leases[0].alias).toBe(holder.alias)
+      expect(afterRenew.leases[0].expireAt).toBeGreaterThan(holder.dispatchedAt + DEFAULT_LEASE_MINUTES * 60_000 - 1)
+      cleanup(s)
+    })
+
+    test("独占租约：collect/retire 自动释放，释放后他人可派", async () => {
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      s.ctx.env.SHENGSHENG_MAX_WORKERS = "6"
+      await tool("dispatch").execute({ orders: [{ task: "门禁一", domain: "gate", exclusive: true }] }, s.ctx)
+      const holder = parseControl(controlOf(s)).workers[0]
+      expect(parseControl(controlOf(s)).leases).toHaveLength(1)
+
+      // collect：报告入台账 → 自动释放租约（回显要说出来，不静默）
+      s.running.clear()
+      const c = await tool("collect").execute({ action: "collect", alias: holder.alias, summary: "门禁 184 passed / 0 failed（前后 uptime 已记）" }, s.ctx)
+      expect(c.output).toContain("租约已释放")
+      expect(c.output).toContain(DEFAULT_EXCLUSIVE_RESOURCE)
+      expect(parseControl(controlOf(s)).leases).toHaveLength(0)
+
+      // 释放后另一人可派（不再被挡）
+      const other = await tool("dispatch").execute({ orders: [{ task: "门禁二", domain: "gate2", fresh: true, resource: "cpu-exclusive" }] }, s.ctx)
+      expect(other.output).toContain("布雨完成")
+      expect(other.output).not.toContain("未派")
+      expect(parseControl(controlOf(s)).leases).toHaveLength(1)
+
+      // retire（mode=idle）：同样释放（否则一条死租约会永久堵住院子）
+      // 目标必须是**当前持者**（gate-1 的租约已在 collect 时释放，再 retire 它无租约可释放——那是个空断言）
+      const stNow = parseControl(controlOf(s))
+      const holder2 = stNow.leases[0].alias
+      const w2 = stNow.workers.find((x) => x.alias === holder2)!
+      s.running.clear()
+      const rt = await tool("collect").execute({ action: "retire", alias: w2.alias, mode: "idle", reason: "领域已终" }, s.ctx)
+      expect(rt.output).toContain("租约已释放")
+      expect(parseControl(controlOf(s)).leases).toHaveLength(0)
+      cleanup(s)
+    })
+
+    test("独占租约：超期回收——持有者 idle / 会话不存在 / 已到期，读态必须报出回收与原因（死租约不得永久堵院）", async () => {
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      s.ctx.env.SHENGSHENG_MAX_WORKERS = "6"
+
+      // ① 持有者被置 idle（收藏路径绕过/人工改盘）→ 读态必须报「持有者已空闲」并回收
+      await tool("dispatch").execute({ orders: [{ task: "测量甲", domain: "a", exclusive: true }] }, s.ctx)
+      const sidA = parseControl(controlOf(s)).workers.find((w) => w.alias === parseControl(controlOf(s)).leases[0].alias)!.sessionId
+      await markIdle(s, parseControl(controlOf(s)).leases[0].alias)
+      const r1 = await tool("state").execute({}, s.ctx)
+      expect(r1.output).toContain("租约回收")
+      expect(r1.output).toContain("持有者已空闲")
+      expect(r1.output).toContain("cpu-exclusive")
+      expect(parseControl(controlOf(s)).leases).toHaveLength(0)
+
+      // ② 持有者会话被外部删除 → 读态必须报「持有者会话已不存在」
+      s.running.clear()
+      await tool("dispatch").execute({ orders: [{ task: "测量乙", domain: "b", fresh: true, exclusive: true }] }, s.ctx)
+      const leaseB = parseControl(controlOf(s)).leases[0]
+      s.sessions.delete(leaseB.sessionId)   // 外部删除（服务重启/人工清理）
+      const r2 = await tool("state").execute({}, s.ctx)
+      expect(r2.output).toContain("租约回收")
+      expect(r2.output).toContain("持有者会话已不存在")
+      expect(r2.output).toContain(leaseB.alias)
+      expect(parseControl(controlOf(s)).leases).toHaveLength(0)
+
+      // ③ 真到期（改盘上的到期时刻，走 parse→render 真往返）：报「已到期」
+      s.running.clear()
+      await tool("dispatch").execute({ orders: [{ task: "测量丙", domain: "c", fresh: true, exclusive: true }] }, s.ctx)
+      const st = parseControl(controlOf(s))
+      st.leases[0].expireAt = Date.now() - 1000
+      await Bun.write(join(s.root, ".evolve", "control.md"), renderControl(st))
+      const r3 = await tool("state").execute({}, s.ctx)
+      expect(r3.output).toContain("租约回收")
+      expect(r3.output).toContain("已到期")
+      expect(parseControl(controlOf(s)).leases).toHaveLength(0)
+      // 回收后他人可派（院子不再被堵）
+      const again = await tool("dispatch").execute({ orders: [{ task: "测量丁", domain: "d", fresh: true, exclusive: true }] }, s.ctx)
+      expect(again.output).not.toContain("未派")
+      void sidA
+      cleanup(s)
+    })
+
+    test("独占租约：资源名归一——\"  CPU-Exclusive \" 与 \"cpu-exclusive\" 是同一资源（一个空格绕不过去）", async () => {
+      // 起因（验收点名）：`resourceKey` 的注释说「否则一个空格就能绕开租约」，可**没有任何用例真从这个
+      // 角度撞过它**——注释不是证据。这里走真派工往返：第一单用带空格+大写的资源名，第二单用规范名。
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      s.ctx.env.SHENGSHENG_MAX_WORKERS = "6"
+      expect(resourceKey("  CPU-Exclusive ")).toBe(DEFAULT_EXCLUSIVE_RESOURCE)
+      expect(resourceKey("CPU-EXCLUSIVE")).toBe(resourceKey("cpu-exclusive"))
+      const a = await tool("dispatch").execute({
+        orders: [{ task: "x11 双缓冲基线（负载敏感）", domain: "x11", resource: "  CPU-Exclusive " }],
+      }, s.ctx)
+      expect(a.output).toContain("布雨完成")
+      // 盘上落的是**归一后**的名字（写侧 upsert 与读侧归一同一套判据）
+      const leased = parseControl(controlOf(s)).leases
+      expect(leased).toHaveLength(1)
+      expect(leased[0].resource).toBe(DEFAULT_EXCLUSIVE_RESOURCE)
+      // 另一个人用规范名申请同一资源 → 必须被挡（空格与大小写都不得成为绕开的路）
+      s.running.clear()
+      const b = await tool("dispatch").execute({
+        orders: [{ task: "pty 最终门禁（要求负载干净）", domain: "pty", fresh: true, resource: "cpu-exclusive" }],
+      }, s.ctx)
+      expect(b.output).toContain("未派")
+      expect(b.output).toContain("占着")
+      expect(s.sent).toHaveLength(1)                                  // 第二个真没开跑
+      expect(parseControl(controlOf(s)).leases[0].alias).toBe(parseControl(controlOf(s)).workers[0].alias)  // 持者未被顶掉
+      cleanup(s)
+    })
+
+    test("独占租约：SHENGSHENG_LEASE_MINUTES 真决定盘上到期时刻（缺省 90 → 设 1 即 60s）", async () => {
+      // 到期是**兜底**判据（防“持有者悄悄死掉而登记没被碰”），而租期由 env 现算——env 若不生效，
+      // 到期兜底在长租期下等于不存在（90 分钟 vs 1 分钟是“能不能等”的量级差别）。
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      await tool("dispatch").execute({ orders: [{ task: "缺省租期测量", domain: "d0", exclusive: true }] }, s.ctx)
+      const d0 = parseControl(controlOf(s)).leases[0]
+      expect(d0.expireAt - d0.start).toBe(DEFAULT_LEASE_MINUTES * 60_000)
+      // env=1：**同一持有者续期**（续期语义：start 保留、expireAt 前推）——租期必须变成 1 分钟。
+      // 注：换人会**被挡**（那正是判据），所以这里用 session_id 续派，不是新建。
+      s.running.clear()
+      s.ctx.env.SHENGSHENG_LEASE_MINUTES = "1"
+      const w0 = parseControl(controlOf(s)).workers[0]
+      const renew = await tool("dispatch").execute({ orders: [{ task: "缺省租期测量（续期）", session_id: w0.sessionId, resource: "cpu-exclusive" }] }, s.ctx)
+      expect(renew.output).not.toContain("未派")
+      const d1 = parseControl(controlOf(s)).leases[0]
+      expect(d1.sessionId).toBe(w0.sessionId)   // 仍是同一持者（不并列两条）
+      // 注意续期语义：`start` 保留（起租时刻不变），`expireAt = 当前派发时刻 + 租期`
+      // → 所以“租期”要按 expireAt − now 验，不能按 expireAt − start 验（那样会多出前一次领租到现在的那几毫秒）。
+      expect(d1.start).toBe(d0.start)
+      expect(d1.expireAt - Date.now()).toBeGreaterThan(55_000)
+      expect(d1.expireAt - Date.now()).toBeLessThanOrEqual(60_000)
+      // 未到期且持有者仍在跑 → **不得**回收（兜底不得砍掉正在干的活）
+      s.running.clear()
+      s.running.add(d1.sessionId)
+      const alive = await tool("state").execute({}, s.ctx)
+      expect(alive.output).not.toContain("租约回收")
+      expect(parseControl(controlOf(s)).leases).toHaveLength(1)
+      // 到期时刻已过（真 parse→render 往返改盘）→ 必须回收且说「已到期」
+      const st = parseControl(controlOf(s))
+      st.leases[0].expireAt = Date.now() - 1_000
+      await Bun.write(join(s.root, ".evolve", "control.md"), renderControl(st))
+      const expired = await tool("state").execute({}, s.ctx)
+      expect(expired.output).toContain("租约回收")
+      expect(expired.output).toContain("已到期")
+      expect(parseControl(controlOf(s)).leases).toHaveLength(0)
+      cleanup(s)
+    })
+
+    test("独占租约：启动宽限的**另一面**——没过宽限不回收，过了宽限（会话可达但不在跑）必须回收", async () => {
+      // 已有用例只锁了“刚派出不得被同一息撕掉”这一面。它的反面同样是判据：宽限**过期**后，
+      // 若仍不回收，一个“会话还在跑、池里也没标 idle、登记还挂着”的死租约就会一直堵院——
+      // 而这条真值（会话可达但空闲）恰恰是宽度之外最常见的中道而废形态。
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      await tool("dispatch").execute({ orders: [{ task: "刚开跑的负载敏感测量", domain: "g", exclusive: true }] }, s.ctx)
+      const lease = parseControl(controlOf(s)).leases[0]
+      // 池里**仍标 running**（没人收藏、没人置 idle），只是会话此刻不在跑
+      s.running.clear()
+      const fresh = await tool("state").execute({}, s.ctx)
+      expect(fresh.output).not.toContain("租约回收")
+      expect(parseControl(controlOf(s)).leases).toHaveLength(1)
+      // 起租时刻前推到宽限之外（真 parse→render 往返改盘）→ 这时才该回收
+      const st = parseControl(controlOf(s))
+      st.leases[0].start = Date.now() - (LEASE_START_GRACE_MS + 60_000)
+      await Bun.write(join(s.root, ".evolve", "control.md"), renderControl(st))
+      const aged = await tool("state").execute({}, s.ctx)
+      expect(aged.output).toContain("租约回收")
+      expect(aged.output).toContain("已过启动宽限")
+      expect(aged.output).toContain(lease.alias)
+      expect(parseControl(controlOf(s)).leases).toHaveLength(0)
+      // 回收后他人可拿（院子没被白堵）
+      const again = await tool("dispatch").execute({ orders: [{ task: "后来的负载敏感测量", domain: "h", fresh: true, exclusive: true }] }, s.ctx)
+      expect(again.output).not.toContain("未派")
+      cleanup(s)
+    })
+
+    test("独占租约：control.md 往返保真（含竖线的用途不丢、缺节时按空表读、不悬空租约）", () => {
+      const lease = {
+        resource: DEFAULT_EXCLUSIVE_RESOURCE,
+        alias: "gate-1",
+        sessionId: "0123456789abcdef0123456789abcdef",
+        start: 1_700_000_000_000,
+        expireAt: 1_700_000_000_000 + DEFAULT_LEASE_MINUTES * 60_000,
+        purpose: "st test 门禁｜前后 uptime｜期间无他人构建",
+      }
+      const md = renderControl({ coord: {}, breath: 0, seq: 0, workers: [], inflight: [], seeds: [], pending: [], leases: [lease] })
+      expect(md).toContain("## 资源租约")
+      const back = parseControl(md)
+      expect(back.leases).toEqual([lease])
+      expect(renderControl(back)).toBe(md)   // 往返恒等
+      // 旧 control.md（无此节）读成空表（升级不迁移数据：旧文件必须照旧可读）
+      expect(parseControl("# x\n\n## 计数\n- 呼吸：1\n\n## 种子队列\n（空）\n").leases).toEqual([])
+      // 空集合写占位（保留节结构供人工查看）
+      expect(md).toContain("（空）")
+      expect(parseControl(md).leases).toHaveLength(1)
+      // 手改出的同资源两条（并列）= 一条租约两个持者：读侧归一为靠后一条（不住让死条目堵院）
+      const dup = `${md.trimEnd()}\n| 资源名 | 副本-1 | | 1 | 9999999999999 | 后写的 |\n`
+      const norm = parseControl(dup.replace(/\n\| 资源名 \|[^\n]*\n/, "\n"))
+      expect(norm.leases).toHaveLength(1)
+    })
+
+    test("独占租约：同一息两次并发 dispatch 只能一位拿到（租约领取在锁内、先于 svc.run）", async () => {
+      // 为何单独一条（不是上一批用例的子集）：真实形态是**同一息里模型发两个 dispatch 调用**
+      // （系统提示已明说“同一次回复里的多个工具调用是并行执行”）。若领取不在锁内，两个调用各自读到
+      // “无人持租约”就一起开跑了——那正是 load 峰值 55 而门禁在跑的那次事故的重演。
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      s.ctx.env.SHENGSHENG_MAX_WORKERS = "6"
+      const [r1, r2] = await Promise.all([
+        tool("dispatch").execute({ orders: [{ task: "并发测量甲", domain: "a", fresh: true, exclusive: true }] }, s.ctx),
+        tool("dispatch").execute({ orders: [{ task: "并发测量乙", domain: "b", fresh: true, exclusive: true }] }, s.ctx),
+      ])
+      const leased = parseControl(controlOf(s)).leases
+      expect(leased).toHaveLength(1)          // 同一资源只剩一位持者
+      expect(s.sent).toHaveLength(1)          // 只有一个开跑
+      const texts = [r1.output, r2.output]
+      expect(texts.filter((t) => t.includes("未派")).length).toBe(1)
+      // 另一路真派出去了（有派工回执行；注：两路回显的标题行都是“布雨完成”，不能拿它当判据）
+      const dispatched = texts.find((t) => !t.includes("未派"))!
+      expect(dispatched).toContain("轮次 1")
+      expect(dispatched).toContain("独占 cpu-exclusive")
+      // 被挡下的那单方向进了种子（不丢）
+      const blockedTask = s.sent[0].message.includes("并发测量甲") ? "并发测量乙" : "并发测量甲"
+      expect(parseControl(controlOf(s)).seeds.map((x) => x.direction)).toContain(blockedTask)
+      cleanup(s)
+    })
+
+    test("独占租约：台账幂等重放也要释放租约（否则死租约只能等超期）", async () => {
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      await tool("dispatch").execute({ orders: [{ task: "门禁重放", domain: "gate", exclusive: true }] }, s.ctx)
+      const holder = parseControl(controlOf(s)).workers[0]
+      s.running.clear()
+      const first = await tool("collect").execute({ action: "collect", alias: holder.alias, summary: "第一次报告" }, s.ctx)
+      expect(first.output).toContain("租约已释放")
+      // 人工把租约**写回**（模拟“已收过但租约漏释放”的历史现场，如旧版工具/中途崩溃）
+      const st = parseControl(controlOf(s))
+      st.leases = [{ resource: DEFAULT_EXCLUSIVE_RESOURCE, alias: holder.alias, sessionId: holder.sessionId, start: Date.now(), expireAt: Date.now() + 3_600_000, purpose: "遗留死租约" }]
+      await Bun.write(join(s.root, ".evolve", "control.md"), renderControl(st))
+      // 重放同一条收藏（幂等命中）——也必须把租约收回去
+      const replay = await tool("collect").execute({ action: "collect", alias: holder.alias, summary: "第二次报告（重放）" }, s.ctx)
+      expect(replay.output).toContain("幂等跳过")
+      expect(replay.output).toContain("租约已释放")
+      expect(parseControl(controlOf(s)).leases).toHaveLength(0)
+      cleanup(s)
+    })
+
+    test("独占租约：刚派出的单不得被同一息的读态回收（启动宽限——引擎拉起会话有延迟）", async () => {
+      // 实测风险：dispatch 返回后引擎把会话拉起来是有延迟的，而 dispatch 末尾与下一息开头都会立刻读态。
+      // 若"未运行就回收"，自己刚领的租约会被自己同一息撕掉，紧接着的第二单就进来了（又变成两套测量互污染）。
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      s.ctx.env.SHENGSHENG_MAX_WORKERS = "6"
+      await tool("dispatch").execute({ orders: [{ task: "长测量", domain: "bench", exclusive: true }] }, s.ctx)
+      // 关键：模拟“会话尚未被引擎报告为运行中”（stub 的 run 已置 running，这里手动抹掉）
+      s.running.clear()
+      const r = await tool("state").execute({}, s.ctx)
+      expect(r.output).toContain("租约 1")
+      expect(r.output).not.toContain("租约回收")
+      expect(parseControl(controlOf(s)).leases).toHaveLength(1)
+      // 但**池登记已标 idle**（worker 真交付/被收）时当即可信，不受宽限约束
+      const st = parseControl(controlOf(s))
+      st.workers[0].status = "idle"
+      await Bun.write(join(s.root, ".evolve", "control.md"), renderControl(st))
+      const r2 = await tool("state").execute({}, s.ctx)
+      expect(r2.output).toContain("租约回收")
+      expect(parseControl(controlOf(s)).leases).toHaveLength(0)
+      cleanup(s)
+    })
+
+    test("独占租约：预检（preview）看得见冲突——不派工只出计划时也要说出会被顺延", async () => {
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      s.ctx.env.SHENGSHENG_MAX_WORKERS = "6"
+      await tool("dispatch").execute({ orders: [{ task: "先派出的门禁", domain: "gate", exclusive: true }] }, s.ctx)
+      const holder = parseControl(controlOf(s)).leases[0].alias
+      s.running.clear()
+      s.ctx.env.SHENGSHENG_DISPATCH = "preview"
+      const prev = await tool("dispatch").execute({ orders: [{ task: "第二路测量", domain: "perf", fresh: true, resource: "cpu-exclusive" }] }, s.ctx)
+      expect(prev.output).toContain("预检")
+      expect(prev.output).toContain(`被 ${holder} 占着`)
+      expect(s.sent).toHaveLength(1)      // 预检不派工
+      cleanup(s)
+    })
+  })
+
+  // ==================================================================
+  // 仓级资源租约（同一个 git 仓上的多条演进线）
+  //
+  // 现场（本仓真值，两条线同时活着）：
+  //   /home/x/code/gebai/.evolve            ← 歌白线（会话 7dd7b830）
+  //   /home/x/code/gebai/shuangtian/.evolve ← 霜天线
+  //   两者的 `git rev-parse --show-toplevel` 都是 /home/x/code/gebai
+  // ⇒ 两条线各有自己的 control.md，却共享**同一棵树、同一批文件、同一台机器**，而租约互相看不见。
+  // 代价（当日实测）：一条线在跑 `tsc --noEmit`（196% CPU），另一条正在等 load<2 做性能测量；
+  // 一条在 `reverse_verify_kill_drill.py` 里把 shengsheng.ts 切成回退态，另一条正准备提交同一文件。
+  //
+  // 下面每条用例都用**两个真实项目根 + 同一个真 git 仓**（git init 真跑），不喂手拼对象：
+  // 只测内部函数的话，“探测不到 git 顶层就安静降级”与“不同仓互不影响”这两条根本无从验。
+  // ==================================================================
+  describe("仓级资源租约（同一 git 仓上的多条演进线）", () => {
+    /** 造一个真 git 仓，其下两个子目录各是一条演进线的项目根（各自 init 过 control.md）。
+     *  `git` 命令真跑（夹具里 `git init -q` 一个空仓就够——`rev-parse --show-toplevel` 只看目录结构）。 */
+    const twoLines = async () => {
+      const home = mkdtempSync(join(tmpdir(), "gebai-repolease-"))
+      const repo = join(home, "repo")
+      mkdirSync(repo, { recursive: true })
+      const g = spawnSync("git", ["init", "-q", repo], { encoding: "utf8" })
+      if (g.status !== 0) throw new Error(`git init 失败：${g.stderr}`)
+      const rootA = join(repo, "line-a")
+      const rootB = join(repo, "shuangtian")   // 故意取与真实现场同形的名（被测的是关系，不是名字）
+      mkdirSync(rootA, { recursive: true })
+      mkdirSync(rootB, { recursive: true })
+      const a = stub({ root: rootA, sessionId: "sessA", idPrefix: "a" })
+      const b = stub({ root: rootB, sessionId: "sessB", idPrefix: "b" })
+      // 两条线各自立坐标（真写 .evolve/control.md）
+      await tool("state").execute({ action: "init", root: rootA, verify: "bun test" }, a.ctx)
+      await tool("state").execute({ action: "init", root: rootB, verify: "bun test" }, b.ctx)
+      return { home, repo, rootA, rootB, a, b, cleanup: () => { cleanup(a); cleanup(b); rmSync(home, { recursive: true, force: true }) } }
+    }
+    const sharedFile = (repo: string) => join(repo, ".evolve-shared", "leases.json")
+    const sharedOf = (repo: string) => parseSharedLeases(readFileSync(sharedFile(repo), "utf8"))
+
+    test("仓级租约：资源名带 git 顶层；同仓 A 根占着 → B 根派工被顺延且回显说清（被哪条线、何时到期）", async () => {
+      const t = await twoLines()
+      t.a.ctx.env.SHENGSHENG_MAX_WORKERS = "6"
+      t.b.ctx.env.SHENGSHENG_MAX_WORKERS = "6"
+      // A 根（歌白线）领仓级租约
+      const ra = await tool("dispatch").execute({ orders: [{ task: "歌白线：tsc --noEmit 全量门禁", domain: "gate", exclusive: true }], root: t.rootA }, t.a.ctx)
+      expect(ra.output).toContain("布雨完成")
+      expect(ra.output).toContain("仓级")
+      // 共享表在 **git 顶层**，不在 A 根自己的 .evolve/
+      expect(existsSync(sharedFile(t.repo))).toBe(true)
+      expect(existsSync(join(t.rootA, ".evolve-shared"))).toBe(false)
+      const sh = sharedOf(t.repo)
+      expect(sh.leases).toHaveLength(1)
+      // 资源名带 git 顶层（这是跨线可见的唯一依据）
+      expect(sh.leases[0].resource).toBe(`repo:${t.repo}:${DEFAULT_EXCLUSIVE_RESOURCE}`)
+      expect(sh.leases[0].root).toBe(t.rootA)
+      // 本地镜像也写上了（同一资源名）：一条线自己读态时也知道自己持着什么
+      expect(parseControl(controlOf(t.a)).leases.map((l) => l.resource)).toContain(`repo:${t.repo}:${DEFAULT_EXCLUSIVE_RESOURCE}`)
+
+      // B 根（霜天线）派同一资源 → 必须被顺延（不能开跑）
+      const rb = await tool("dispatch").execute({ orders: [{ task: "霜天线：等 load<2 做性能测量", domain: "perf", fresh: true, exclusive: true }], root: t.rootB }, t.b.ctx)
+      expect(t.b.sent).toHaveLength(0)              // 真没开跑
+      expect(rb.output).toContain("未派")
+      expect(rb.output).toContain("跨线")            // 回显必须标出这是**另一条线**挡的
+      expect(rb.output).toContain("line-a")          // 说清是哪条线（A 根名）
+      expect(rb.output).toContain("到期")
+      expect(rb.output).toContain("下息再试")
+      // 方向不得丢：退回 B 自己的种子队列
+      expect(parseControl(controlOf(t.b)).seeds.map((x) => x.direction)).toContain("霜天线：等 load<2 做性能测量")
+      // B 的本地表**不应**凭空多出一条自己的租约（它没拿到）
+      expect(parseControl(controlOf(t.b)).leases).toHaveLength(0)
+      t.cleanup()
+    })
+
+    test("仓级租约：不同 git 仓的 A/B 互不相挡（防止把所有人互相锁死）", async () => {
+      // 这一条与上一条是**同一枚硬币的两面**：只验前一面（同仓要挡）时，把资源名写成全局常量也能过，
+      // 而那会把整台机器上的所有仓串成一串——一个陌生仓库的门禁能挡住你的测量。
+      const t = await twoLines()
+      const other = mkdtempSync(join(tmpdir(), "gebai-otherrepo-"))
+      const g = spawnSync("git", ["init", "-q", other], { encoding: "utf8" })
+      if (g.status !== 0) throw new Error(`git init 失败：${g.stderr}`)
+      const rootC = join(other, "line-c")
+      mkdirSync(rootC, { recursive: true })
+      const c = stub({ root: rootC, sessionId: "sessC", idPrefix: "c" })
+      await tool("state").execute({ action: "init", root: rootC, verify: "bun test" }, c.ctx)
+      t.a.ctx.env.SHENGSHENG_MAX_WORKERS = "6"
+      c.ctx.env.SHENGSHENG_MAX_WORKERS = "6"
+      // A 根（repo）先占
+      await tool("dispatch").execute({ orders: [{ task: "repo 内的门禁", domain: "gate", exclusive: true }], root: t.rootA }, t.a.ctx)
+      expect(sharedOf(t.repo).leases).toHaveLength(1)
+      // 另一个 git 仓的 C 根：必须照派（两个仓是两台不同的工作树）
+      const rc = await tool("dispatch").execute({ orders: [{ task: "另一个仓的负载敏感测量", domain: "perf", fresh: true, exclusive: true }], root: rootC }, c.ctx)
+      expect(c.sent).toHaveLength(1)
+      expect(rc.output).not.toContain("未派")
+      expect(rc.output).not.toContain("跨线")
+      // 两个仓各自有自己的共享表（不是一个全局表）
+      expect(existsSync(sharedFile(other))).toBe(true)
+      expect(sharedOf(other).leases).toHaveLength(1)
+      expect(sharedOf(other).leases[0].resource).toBe(`repo:${other}:${DEFAULT_EXCLUSIVE_RESOURCE}`)
+      expect(existsSync(sharedFile(t.repo))).toBe(true)
+      expect(sharedOf(t.repo).leases[0].resource).toBe(`repo:${t.repo}:${DEFAULT_EXCLUSIVE_RESOURCE}`)
+      cleanup(c)
+      rmSync(other, { recursive: true, force: true })
+      t.cleanup()
+    })
+
+    test("仓级租约：B 根读态能看见 A 根的仓级租约（两份合并展示，并写明仓级租约域路径）", async () => {
+      // 「一"份文件、各写各的域」的关键证据：B 自己的 control.md 里**没有**这条，但它读态看得到。
+      const t = await twoLines()
+      t.a.ctx.env.SHENGSHENG_MAX_WORKERS = "6"
+      await tool("dispatch").execute({ orders: [{ task: "A 线：st test 最终门禁", domain: "gate", exclusive: true }], root: t.rootA }, t.a.ctx)
+      const holder = sharedOf(t.repo).leases[0]
+      const rb = await tool("state").execute({ root: t.rootB }, t.b.ctx)
+      expect(rb.output).toContain("仓级租约域")
+      expect(rb.output).toContain(sharedFile(t.repo))
+      expect(rb.output).toContain(holder.alias)
+      expect(rb.output).toContain("line-a")            // 哪条线在持着
+      expect(rb.output).toContain("（含仓级 1）")         // 计数口径明说了
+      const data = rb.data as { repoLeases: Array<{ resource: string; root: string }>; repoTop: string | null }
+      expect(data.repoTop).toBe(t.repo)
+      expect(data.repoLeases.map((l) => l.resource)).toEqual([holder.resource])
+      // B 自己的 control.md 里没有这条租约（各写各的域）
+      expect(parseControl(controlOf(t.b)).leases).toHaveLength(0)
+      t.cleanup()
+    })
+
+    test("仓级租约：A 的 worker 被收藏后，共享表释放 → B 根立刻能领", async () => {
+      const t = await twoLines()
+      t.a.ctx.env.SHENGSHENG_MAX_WORKERS = "6"
+      t.b.ctx.env.SHENGSHENG_MAX_WORKERS = "6"
+      await tool("dispatch").execute({ orders: [{ task: "A 线门禁", domain: "gate", exclusive: true }], root: t.rootA }, t.a.ctx)
+      const holder = sharedOf(t.repo).leases[0]
+      t.a.running.clear()
+      t.a.sessions.get(holder.sessionId)!.messages = [{ role: "assistant", content: "门禁 184 passed / 0 failed" }]
+      const col = await tool("collect").execute({ action: "collect", alias: holder.alias, summary: "门禁绿", root: t.rootA }, t.a.ctx)
+      expect(col.output).toContain("租约已释放")
+      // 同一资源在两个域各有一条（本地镜像 + 仓级）——回显不得列两遍（那会让读者以为真有两份资源被释放）
+      expect(col.output.split("cpu-exclusive").length - 1).toBe(1)
+      expect(sharedOf(t.repo).leases).toHaveLength(0)
+      // B 现在能领到
+      const rb = await tool("dispatch").execute({ orders: [{ task: "B 线测量", domain: "perf", fresh: true, exclusive: true }], root: t.rootB }, t.b.ctx)
+      expect(t.b.sent).toHaveLength(1)
+      expect(rb.output).not.toContain("未派")
+      expect(sharedOf(t.repo).leases).toHaveLength(1)
+      expect(sharedOf(t.repo).leases[0].root).toBe(t.rootB)
+      t.cleanup()
+    })
+
+    test("仓级租约：超期回收跨线——B 根读态能回收 A 根留下的死租约并报出原因", async () => {
+      // 为何必须跨线回收：仓级持者可能在另一条线上，若那条线已停（心跳被停用/会话被删），
+      // 就**没人会去收**——而死租约堵住的恰好是“要独占才敢做”的那类活。
+      const t = await twoLines()
+      t.a.ctx.env.SHENGSHENG_MAX_WORKERS = "6"
+      await tool("dispatch").execute({ orders: [{ task: "A 线长测量", domain: "bench", exclusive: true }], root: t.rootA }, t.a.ctx)
+      const lease = sharedOf(t.repo).leases[0]
+      // 把到期时刻改成已过（真读→改→写共享表，走测试自己的渲染器而不是生产代码里的私有函数）
+      const doc = JSON.parse(readFileSync(sharedFile(t.repo), "utf8")) as { version: number; leases: Array<Record<string, unknown>> }
+      doc.leases[0].expireAt = Date.now() - 1_000
+      mkdirSync(dirname(sharedFile(t.repo)), { recursive: true })
+      await Bun.write(sharedFile(t.repo), `${JSON.stringify(doc, null, 2)}\n`)
+      // B 读态：必须报出「仓级租约回收」与原因（跨线可见的回收）
+      const rb = await tool("state").execute({ root: t.rootB }, t.b.ctx)
+      expect(rb.output).toContain("仓级租约回收")
+      expect(rb.output).toContain("已到期")
+      expect(rb.output).toContain(lease.alias)
+      expect(rb.output).toContain("line-a")
+      expect(sharedOf(t.repo).leases).toHaveLength(0)
+      // 回收后 B 能领（院子真交回了）
+      const rd = await tool("dispatch").execute({ orders: [{ task: "B 线测量（接上）", domain: "perf", fresh: true, exclusive: true }], root: t.rootB }, t.b.ctx)
+      expect(rd.output).not.toContain("未派")
+      expect(sharedOf(t.repo).leases[0].root).toBe(t.rootB)
+      t.cleanup()
+    })
+
+    test("仓级租约：拿不到 git 顶层时安静退化（dispatch 照常能派，只在本地域互斥并明说降级）", async () => {
+      // 硬要求：拿不到 git 顶层或目录不可写时**不能因此让 dispatch 起不来**。
+      // 本用例把 `git` 命令打空（模拟“没装 git / 不在仓内”）——真仓里的 git 仍在，所以断言的是退化后的行为。
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      s.ctx.env.SHENGSHENG_MAX_WORKERS = "6"
+      s.commandHook = async () => ({ stdout: "", stderr: "git: command not found", code: 127 })
+      const r1 = await tool("dispatch").execute({ orders: [{ task: "没 git 也能派：门禁", domain: "gate", exclusive: true }] }, s.ctx)
+      expect(r1.output).toContain("布雨完成")
+      expect(r1.output).toContain("仓级租约域未启用")
+      expect(r1.output).not.toContain("未派")
+      expect(s.sent).toHaveLength(1)
+      // 本地域照旧互斥（退化不是“取消互斥”，而是“只在本线生效”）
+      s.running.clear()
+      const r2 = await tool("dispatch").execute({ orders: [{ task: "没 git 也能派：第二个门禁", domain: "p", fresh: true, exclusive: true }] }, s.ctx)
+      expect(r2.output).toContain("未派")
+      expect(s.sent).toHaveLength(1)
+      // 读态明说“仓级未启用”，不谎报跨线互斥生效
+      const st = await tool("state").execute({}, s.ctx)
+      expect(st.output).toContain("未启用")
+      expect((st.data as { repoTop: string | null }).repoTop).toBe(null)
+      cleanup(s)
+    })
+
+    test("仓级租约：共享表损坏时不覆盖、不崩——按“仓级不可用”降级，本地域照旧互斥", async () => {
+      // 损坏可能来自：另一版工具、手改、或写到一半的旧实现。覆盖它就把别的线的租约抹掉了。
+      const t = await twoLines()
+      mkdirSync(dirname(sharedFile(t.repo)), { recursive: true })
+      await Bun.write(sharedFile(t.repo), "{ 这不是 JSON")
+      t.b.ctx.env.SHENGSHENG_MAX_WORKERS = "6"
+      const rb = await tool("dispatch").execute({ orders: [{ task: "损坏表下的门禁", domain: "gate", exclusive: true }], root: t.rootB }, t.b.ctx)
+      expect(rb.output).toContain("布雨完成")
+      expect(rb.output).toContain("跨线互斥**未生效**")
+      expect(t.b.sent).toHaveLength(1)
+      expect(readFileSync(sharedFile(t.repo), "utf8")).toBe("{ 这不是 JSON")   // 未被覆盖
+      // 本地域照旧互斥
+      t.b.running.clear()
+      const rb2 = await tool("dispatch").execute({ orders: [{ task: "第二个门禁", domain: "p", fresh: true, exclusive: true }], root: t.rootB }, t.b.ctx)
+      expect(rb2.output).toContain("未派")
+      t.cleanup()
+    })
+
+    test("仓级租约：git 顶层把“同一棵树的不同子目录”判为同域，把“不同仓”判为异域（资源名层）", async () => {
+      // 纯函数层锁住名字规则：它是跨线可见性的**唯一依据**，也是“不把所有人串成一串”的唯一分界线。
+      expect(repoResourceName("/home/x/code/gebai", "cpu-exclusive")).toBe("repo:/home/x/code/gebai:cpu-exclusive")
+      // 归一：大写/空格/尾分隔符不得成为绕开或另立一域的路
+      expect(repoResourceName("/home/x/code/gebai/", "  CPU-Exclusive ")).toBe(repoResourceName("/home/x/code/gebai", "cpu-exclusive"))
+      expect(repoResourceName("/home/x/code/gebai", "cpu-exclusive")).not.toBe(repoResourceName("/home/x/code/other", "cpu-exclusive"))
+      // 共享表解析：坏 JSON / 未知版本 / 残行都必须**报错或丢弃**，不得当空表静默放过
+      expect(parseSharedLeases("not json").error).toContain("不是合法 JSON")
+      expect(parseSharedLeases(JSON.stringify({ version: 99, leases: [] })).error).toContain("版本")
+      expect(parseSharedLeases(null).leases).toEqual([])
+      const md = renderSharedLeases([
+        { resource: "repo:/r:cpu-exclusive", alias: "a-1", sessionId: "s1", start: 1, expireAt: 2, purpose: "p", root: "/r" },
+      ])
+      const back = parseSharedLeases(md)
+      expect(back.leases).toHaveLength(1)
+      expect(back.leases[0]).toMatchObject({ resource: "repo:/r:cpu-exclusive", alias: "a-1", root: "/r" })
+      // 往返恒等（写→读→写 字节不变：共享表是可 diff 的，形态必须确定）
+      expect(renderSharedLeases(back.leases)).toBe(md)
+    })
+  })
+
+  // ==================================================================
+  // 提交范围：宽范围暂存会带走别人的东西（2026-10-17 本仓真事故）
+  //
+  // 现场：worker `shared-lease` 提交 `856ba9bb` 时用 `git add -A`，把**另一个仍在跑的 worker**
+  // （`retire-tree`，384 消息）的两份未完成交付物一起提交了：
+  //   A packages/agents/src/agents/shengsheng/proc-tree.ts                    (+596)
+  //   A packages/agents/src/agents/shengsheng/shengsheng-retire-tree.test.ts  (+573)
+  // 根因不是粗心，是**守卫的缺口**：`edit`/`write` 的防陈旧覆盖守卫只管已跟踪文件，
+  // 未跟踪的新文件（`??`）不受任何保护——**谁 add 谁带走**。
+  //
+  // 下面每条用例都用**真 git 仓**（`git init` + 真提交 + 真 `git add`），不喂手拼对象：
+  // 被测的正是「git 到底把哪些文件放进了提交」这个事实，桩在这里会把差异抹平
+  // （CONVENTIONS §7.2：桩必须复现被测的那一段真实行为）。
+  // ==================================================================
+  describe("提交范围（宽范围暂存会带走别人的东西）", () => {
+    /** 真跑 git（夹具的仓是自己 init 的，故自带一次性的身份配置）。 */
+    const git = (root: string, args: string[]) =>
+      spawnSync("git", ["-C", root, "-c", "user.email=t@t", "-c", "user.name=t", ...args], { encoding: "utf8" })
+
+    /** 造一个真 git 仓：`.gitignore` + `src/a.ts` 已在首个提交里（`.evolve/` 被忽略）。
+     *  返回后：工作树干净、有一条提交、`repoTop === root`（根即顶层）。 */
+    const repoWithCommit = (root: string) => {
+      const init = spawnSync("git", ["init", "-q", root], { encoding: "utf8" })
+      if (init.status !== 0) throw new Error(`git init 失败：${init.stderr}`)
+      mkdirSync(join(root, "src"), { recursive: true })
+      writeFileSync(join(root, ".gitignore"), ".evolve/\n")
+      writeFileSync(join(root, "src", "a.ts"), "export const a = 1\n")
+      git(root, ["add", "--", ".gitignore", "src/a.ts"])
+      git(root, ["commit", "-q", "-m", "init"])
+    }
+
+    /** 提交里到底有哪些文件（**直接问 git**，不从被测代码里读——两者互为对照）。 */
+    const commitFiles = (root: string) =>
+      (git(root, ["show", "--name-only", "--pretty=format:", "HEAD"]).stdout ?? "")
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+
+    test("宽范围暂存：别人的未跟踪新文件被一起提交 → review 报「疑似宽范围暂存」并点名该文件", async () => {
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      repoWithCommit(s.root)
+      // 另一个 worker 的成果还在工作树里（`??`，未提交）——它不知道自己的活会被别人带走
+      writeFileSync(join(s.root, "src", "other-worker.ts"), "export const other = 1\n")
+      // 本单只该动 a.ts（工单里点明的就是它）
+      await tool("dispatch").execute({ orders: [{ task: "改 src/a.ts 的解析", domain: "a", deliver: "src/a.ts 的补丁 + 回归" }] }, s.ctx)
+      s.running.clear()
+      // 事故重演的**关键一步**：宽范围暂存（`git add -A`）——把别人的 `??` 文件一起带走
+      writeFileSync(join(s.root, "src", "a.ts"), "export const a = 2\n")
+      git(s.root, ["add", "-A"])
+      git(s.root, ["commit", "-q", "-m", "fix: a 的解析"])
+      // 前置事实（用例自己先核一遍：事故真复现了，后面才有东西可测）
+      expect(commitFiles(s.root)).toContain("src/other-worker.ts")
+
+      const rv = await tool("collect").execute({ action: "review", alias: "a-1" }, s.ctx)
+      expect(rv.output).toContain("疑似宽范围暂存带走了别人的改动")
+      expect(rv.output).toContain("src/other-worker.ts")   // 必须点出**是哪个**文件
+      expect(rv.output).toContain("+1")                      // 带增删行数（`856ba9bb` 那种 +596 的形状）
+      expect(rv.output).toContain("不要 revert")              // 处置：先记归属，不是回滚（回滚会抹掉已落盘成果）
+      // 结构化字段也能核（控制面/前端按字段用，不靠抠文本）
+      const data = rv.data as { commitScope?: { outOfScope: string[]; inScope: number } }
+      expect(data.commitScope?.outOfScope).toContain("src/other-worker.ts")
+      expect(data.commitScope?.inScope).toBe(1)             // a.ts 在工单范围内
+      cleanup(s)
+    })
+
+    test("反向用例：别人的 `??` 文件不得被带走——只 add 自己列出的路径，且 review 不误报", async () => {
+      // 这条与上一条是**同一枚硬币的两面**。只验「宽范围暂存会被抓到」时，把检测写成
+      // 「永远报异常」也能过——而那种实现会让每一条正常提交都报警，警报疲劳之后真事故就看不见了。
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      repoWithCommit(s.root)
+      writeFileSync(join(s.root, "src", "other-worker.ts"), "export const other = 1\n")
+      await tool("dispatch").execute({ orders: [{ task: "改 src/a.ts 的解析", domain: "a", deliver: "src/a.ts 的补丁 + 回归" }] }, s.ctx)
+      s.running.clear()
+
+      // 纪律形态：逐个列路径——**命令由 `stagingCommands()` 生成后真跑**，不是用例自己手写一份：
+      // 否则「纪律退回 `git add -A`」这条回退与断言之间没有连接，反向用例会恒绿（§7.2 的桩病）。
+      writeFileSync(join(s.root, "src", "a.ts"), "export const a = 3\n")
+      const addCmd = stagingCommands(["src/a.ts"])[0]
+      expect(addCmd.startsWith("git add")).toBe(true)
+      git(s.root, addCmd.replace(/^git\s+/, "").split(/\s+/))
+      git(s.root, ["commit", "-q", "-m", "fix: a 的解析（只带自己的文件）"])
+
+      // ① **别人的新文件不得进提交**（这是本条纪律的硬核，不靠人肉核对）
+      const files = commitFiles(s.root)
+      expect(files).toContain("src/a.ts")
+      expect(files).not.toContain("src/other-worker.ts")
+      // 它还躺在工作树里（谁也没碰它）
+      const st = git(s.root, ["status", "--porcelain"]).stdout ?? ""
+      expect(st).toContain("?? src/other-worker.ts")
+
+      // ② review 不误报，且**明说已核过**（「0 命中」与「读不到」必须能分辨）
+      const rv = await tool("collect").execute({ action: "review", alias: "a-1" }, s.ctx)
+      expect(rv.output).not.toContain("疑似宽范围暂存")
+      expect(rv.output).toContain("均在")
+      // ③ 但 `??` 必须被提醒（下一次宽范围暂存会带走它）
+      expect(rv.output).toContain("未跟踪新文件")
+      expect(rv.output).toContain("src/other-worker.ts")
+      cleanup(s)
+    })
+
+    test("拿不到 git 时如实报「本项未核」——不得当成「没有宽范围暂存」", async () => {
+      // 「0 命中」与「读不到」必须是两个结论（PITFALLS）。把读不到报成通过，
+      // 等于在最需要警报的环境里安静（比如沙箱里没有 git、或仓还没 init）。
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      await tool("dispatch").execute({ orders: [{ task: "改一行", domain: "x" }] }, s.ctx)
+      s.running.clear()
+      s.commandHook = async () => ({ stdout: "", stderr: "git: command not found", code: 127 })
+      const rv = await tool("collect").execute({ action: "review", alias: "x-1" }, s.ctx)
+      expect(rv.output).toContain("提交范围本项未核")
+      expect(rv.output).toContain("只是无从核")
+      expect(rv.output).not.toContain("均在")
+      expect(rv.output).not.toContain("疑似宽范围暂存")
+      cleanup(s)
+    })
+
+    test("纯函数：判定「哪些文件不在工单里」+ 追加式暂存命令 + 纪律文本同源", () => {
+      // ① git 输出解析（两种行交织：raw 块 + numstat 块，按路径合并）
+      const head = parseLastCommit(
+        [
+          "856ba9bbdeadbeefdeadbeefdeadbeefdeadbeef\x1f2026-10-17 11:00:00 +0800\x1ffeat(shengsheng): 仓级资源租约",
+          ":000000 100644 0000000 1111111 A\tpackages/agents/src/agents/shengsheng/proc-tree.ts",
+          ":000000 100644 0000000 2222222 A\tpackages/agents/src/agents/shengsheng/shengsheng-retire-tree.test.ts",
+          ":100644 100644 3333333 4444444 M\tpackages/agents/src/agents/shengsheng/shengsheng.ts",
+          ":000000 100644 0000000 5555555 A\tassets/logo.bin",
+          "596\t0\tpackages/agents/src/agents/shengsheng/proc-tree.ts",
+          "573\t0\tpackages/agents/src/agents/shengsheng/shengsheng-retire-tree.test.ts",
+          "12\t3\tpackages/agents/src/agents/shengsheng/shengsheng.ts",
+          "-\t-\tassets/logo.bin",
+        ].join("\n"),
+      )!
+      expect(head.sha).toBe("856ba9bbdeadbeefdeadbeefdeadbeefdeadbeef")
+      expect(head.files.map((f) => f.path)).toEqual([
+        "packages/agents/src/agents/shengsheng/proc-tree.ts",
+        "packages/agents/src/agents/shengsheng/shengsheng-retire-tree.test.ts",
+        "packages/agents/src/agents/shengsheng/shengsheng.ts",
+        "assets/logo.bin",
+      ])
+      expect(head.files[0]).toMatchObject({ status: "A", added: 596, deleted: 0 })
+      expect(head.files[3].added).toBe(null)                 // 二进制：不编造 0 行
+      expect(parseLastCommit("not a commit")).toBe(null)     // 读不到 ⇒ null，不是空提交
+
+      // ② 工单自由文本 → 路径候选 → 覆盖判定（三档：同路径 / 目录 / 文件名）
+      const mentions = mentionPaths("改 packages/agents/src/agents/shengsheng/shengsheng.ts 与 docs/PITFALLS.md，另看 proc-tree.ts")
+      expect(mentions).toContain("packages/agents/src/agents/shengsheng/shengsheng.ts")
+      expect(mentions).toContain("docs/PITFALLS.md")
+      expect(mentions).toContain("proc-tree.ts")
+      expect(mentionCovers("docs/PITFALLS.md", "docs/PITFALLS.md")).toBe(true)
+      expect(mentionCovers("packages/agents/src/agents/shengsheng", "packages/agents/src/agents/shengsheng/x.ts")).toBe(true)
+      expect(mentionCovers("proc-tree.ts", "packages/agents/src/agents/shengsheng/proc-tree.ts")).toBe(true)
+      expect(mentionCovers("docs/PITFALLS.md", "docs/BACKLOG.md")).toBe(false)
+
+      // ③ 把事故那次提交**原样**喂进去：两份不在工单里的文件必须被单列出来
+      const audit = scopeAudit(head.files, mentionPaths("仓级资源租约：改 shengsheng.ts 与 control-format.ts"))
+      expect(audit.inScope.map((f) => f.path)).toEqual(["packages/agents/src/agents/shengsheng/shengsheng.ts"])
+      expect(audit.outOfScope.map((f) => f.path)).toEqual([
+        "packages/agents/src/agents/shengsheng/proc-tree.ts",
+        "packages/agents/src/agents/shengsheng/shengsheng-retire-tree.test.ts",
+        "assets/logo.bin",
+      ])
+
+      // ④ 追加式暂存命令：逐个列路径 + `--`（路径以 `-` 开头时没有它会被当成选项）
+      expect(stagingCommands(["src/a.ts", "docs/b.md"])[0]).toBe("git add -- src/a.ts docs/b.md")
+      expect(stagingCommands([])[0]).toContain("逐个列出")
+      expect(stagingCommands(["src/a.ts"])[1]).toBe("git diff --cached --name-status")
+
+      // ⑤ 纪律文本与命令同源：示例路径取工单里的、禁用形态逐条点名
+      const line = commitProtocolLine(["src/a.ts"])
+      expect(line).toContain("git add -- src/a.ts")
+      expect(line).toContain("git diff --cached --name-status")
+      for (const w of WIDE_STAGING_FORMS) expect(line).toContain(w.form)
+      expect(line).toContain("??")
+
+      // ⑥ 工作树解析：`??` 正是「别人的新文件」那一类
+      const tree = parseStatusPorcelain("?? src/other.ts\n M src/a.ts\nR  old.ts -> new.ts\n")
+      expect(tree.map((e) => e.code)).toEqual(["??", " M", "R "])
+      expect(tree[2].path).toBe("new.ts")
+      expect(untrackedOf(tree).map((e) => e.path)).toEqual(["src/other.ts"])
+    })
+
+    test("派工消息必带提交纪律（禁宽范围暂存 + 逐个列路径 + 提交前核对 + `??` 先问是谁的）", async () => {
+      // 派工模板是 worker 唯一的世界：纪律不写进消息，worker 只会用它自己的习惯（`git add -A` 最常见）。
+      // 断言用**字面文本**而非 `commitProtocolLine(...)` 生成值：两者同源时用它做断言会把差异抹平
+      // （CONVENTIONS §7.2——回退纪律文本后测试仍绿）。
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      await tool("dispatch").execute({ orders: [{ task: "改 src/a.ts", domain: "a", deliver: "src/a.ts 的补丁" }] }, s.ctx)
+      const msg = s.sent[0].message
+      expect(msg).toContain("提交纪律")
+      expect(msg).toContain("git add -- src/a.ts")            // 示例路径取自本单（照抄即合规）
+      expect(msg).toContain("git add -A")
+      expect(msg).toContain("git commit -a")
+      expect(msg).toContain("git diff --cached --name-status")
+      expect(msg).toContain("这是谁的新文件")
+      // 既有的「纪律」字段仍在（本条是**追加**，不是替换）
+      expect(msg).toContain("纪律：")
+      cleanup(s)
+    })
+  })
 })
 
+
+// ==================================================================
+// `pgrep -f` 自匹配活锁：review 必须能自动认出来
+//
+// 现场两笔（都是实测，不是推理）：
+//  · 会话 a8319257（别名 ctx-units-1）：等待循环里写 `pgrep -f "reverse_verify.py"`，而它自己的
+//    `bash -c` 命令行里就含着这串 ⇒ pgrep 每次命中**这条 shell 自己** ⇒ 条件恒真 ⇒
+//    11:34:51 → 11:46:19 空转 12 分钟、159 条消息、106K ctx、**一行实现都没写**。
+//    它当时以为自己在「守规矩地等别人释放文件」。
+//  · 同一窗口生生自己的命令行：`pgrep -c -f 'python3.*reverse_verify'` 也匹配到自己；
+//    改成 `'python3.*reverse_verify[.]py'` 后正确返回 0——**破字串能自救**。
+//
+// 为什么必须自动判（而不是只写纪律）：两次都是「worker 以为自己在守规矩」，自律完全不管用；
+// 而「它反复等同一个 gate、那 gate 现在没有进程」这件事只有**外部观测**看得见。
+// 纪律与检测**同源**（`waitProtocolLine`）：派工消息教的是哪三条写法，检测就按哪三条判。
+// ==================================================================
+describe("pgrep 自匹配活锁（review 的自动检测）", () => {
+  test("派工消息必带等待纪律（禁自匹配 + 三条正确写法 + 循环上限）", async () => {
+    // 派工模板是 worker 唯一看得见的世界：纪律不写进消息，它只会用自己习惯的写法。
+    // 断言用**字面文本**而非 `waitProtocolLine()` 生成值：两者同源时用它做断言会把差异抹平（§7.2）。
+    const s = stub()
+    await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+    await tool("dispatch").execute({ orders: [{ task: "改 src/a.ts", domain: "a", deliver: "src/a.ts 的补丁" }] }, s.ctx)
+    const msg = s.sent[0].message
+    expect(msg).toContain("等待纪律")
+    expect(msg).toContain("pgrep -f")
+    expect(msg).toContain("条件恒真")
+    expect(msg).toContain("kill -0")          // 写法①（有 pid 就别用 pgrep）
+    expect(msg).toContain("pgrep -x")         // 写法②（按进程名）
+    expect(msg).toContain("[.]")              // 写法③（破字串）
+    expect(msg).toContain("$$")
+    expect(msg).toContain("seq 1 60")         // 循环上限（否则错一次就是无限期空转）
+    // 既有的「提交纪律」仍在（本条是**追加**，不是替换）
+    expect(msg).toContain("提交纪律")
+    cleanup(s)
+  })
+  /** 把一条「等待类命令」作为 sh 工具调用塞进 worker 会话的消息流（形态与真会话一致）。 */
+  const withWaitCommand = (s: Stub, sid: string, commands: string[]) => {
+    const sess = s.sessions.get(sid)
+    if (!sess) throw new Error(`没有会话 ${sid}`)
+    for (const command of commands)
+      sess.messages.push({ role: "assistant", content: "", toolCalls: [{ id: "c1", name: "sh", arguments: { command } }] })
+  }
+
+  test("纯函数：自匹配判据 = pgrep 的正则语义（破字串能自救，正确写法不假报）", () => {
+    // ① 错法：pattern 原样出现在自己的命令行里 ⇒ 正则能匹配到它自己
+    const bad = `for i in $(seq 1 40); do if ! pgrep -f "reverse_verify.py" >/dev/null 2>&1; then echo done; break; fi; sleep 5; done`
+    expect(isSelfMatch(bad, "reverse_verify.py")).toBe(true)
+    expect(extractPatterns(bad)).toEqual(["reverse_verify.py"])
+    // ② 对法（破字串）：命令行里是字面 `[.]`，正则要的是 `.` ⇒ 匹配不到自己
+    const good = `for i in $(seq 1 40); do if ! pgrep -f "reverse_verify[.]py" >/dev/null 2>&1; then break; fi; sleep 5; done`
+    expect(isSelfMatch(good, "reverse_verify[.]py")).toBe(false)
+    // ③ 对法（有 pid）：根本不扫命令行
+    expect(extractPatterns("while kill -0 12345 2>/dev/null; do sleep 1; done")).toEqual([])
+    // ④ `-x` 不扫命令行 ⇒ 不当证据（也不该被抽成 pattern）
+    expect(extractPatterns("for i in 1 2; do pgrep -x python3; done")).toEqual([])
+    // ⑤ 聚合选项形态 `-c -f` / `-af` 都能抽出 pattern
+    expect(extractPatterns("while pgrep -c -f 'python3.*reverse_verify' >/dev/null; do sleep 1; done")).toEqual(["python3.*reverse_verify"])
+    expect(extractPatterns("until pgrep -af gate_marker; do sleep 1; done")).toEqual(["gate_marker"])
+    // ⑥ 循环形态判据：单次 `pgrep x && echo` 不是等待，不构成活锁（不稀释警报）
+    expect(isWaitCommand("pgrep -f x >/dev/null && echo ok")).toBe(false)
+    expect(isWaitCommand(bad)).toBe(true)
+  })
+
+  test("进程表判据：破字串断开自身 ⇒ 判据不会自己复刻同一个坑", () => {
+    // 反例现场（本仓 verify_guard.py 已记着这一型的另一面）：朴素的 `pgrep -af x.py` 会命中
+    // **发起它的那条命令行**，于是「永远有人在跑」。这里用传入的进程表 + 破字串 tail 判据。
+    const rows = [
+      { pid: 100, ppid: 1, pgid: 100, startTime: 1, cmd: `bash -c for i in 1 2; do pgrep -f reverse_verify.py; done` },
+      { pid: 200, ppid: 1, pgid: 200, startTime: 2, cmd: `python3 packages/agents/src/agents/shengsheng/reverse_verify.py` },
+    ]
+    // 真进程（200）在 → 不算「已无进程」
+    expect(aliveMatching(rows, "reverse_verify.py").map((r) => r.pid)).toEqual([100, 200])
+    // 排除自身后只剩真进程
+    expect(aliveMatching(rows, "reverse_verify.py", [100]).map((r) => r.pid)).toEqual([200])
+    // 破字串：正则语义不变（照样命中真进程），但命令行里的字面 pattern 不再精确重合
+    expect(disjoinTail("reverse_verify.py")).toBe("reverse_verify.p[y]")
+    expect(aliveMatching([rows[1]], "reverse_verify.py").length).toBe(1)
+    // 元字符结尾不改语义：`x.*` 包成 `x.[*]` 就会变，故退回原文
+    expect(disjoinTail("x.*")).toBe("x.*")
+    expect(aliveMatching([], "anything")).toEqual([])
+  })
+
+  test("活锁惯性那一路单独可报：gate 无进程 + 反复等 ⇒ 报（不靠自匹配）", () => {
+    // 为何单列一条：端到端那条里命令**自己**含 pattern，自匹配那一路就会命——
+    // 「活锁惯性」那一路因此可以被完全回退而不变红（本单实测踩到：把 staleGates 退回永不产生，
+    // 全套用例仍 96 pass）。两条判据必须各有一条**只靠它自己**会红的用例。
+    //
+    // 这里用**不自匹配**的形态：pattern 用变量间接给出（命令行里没有 pattern 原文），
+    // 但它确实被反复等待——于是文本那一路沉默，只剩进程表那一路。
+    // （变量形态下进程表判据看不到真进程：`$gate` 不是合法正则意义上的名字——因此另用一条
+    //   字面 pattern 的命令验「gate 还活着不报」那一半。）
+    const loop = `gate=sgs_stale_gate_2718.py; for i in 1 2 3 4; do if ! pgrep -f "$gate" >/dev/null 2>&1; then break; fi; sleep 1; done`
+    const messages = Array.from({ length: 4 }, () => ({ role: "assistant", toolCalls: [{ name: "sh", arguments: { command: loop } }] }))
+    const v = detectPgrepLock(messages, [])          // 空表 = 那个 gate 现在没有进程
+    expect(v.block.selfMatches).toHaveLength(0)       // 确实不是自匹配（否则这条用例测的是另一路）
+    expect(v.block.staleGates.map((g) => g.pattern)).toEqual(["$gate"])
+    expect(v.locked).toBe(true)
+    expect(v.advice).toContain("连续等待 4 次")
+    expect(v.advice).toContain("没有任何进程匹配它")
+    // 反向：只等 2 次（未达阈值 3）⇒ 不报（宁缺勿滥）
+    const few = detectPgrepLock(messages.slice(0, 2), [])
+    expect(few.block.staleGates).toHaveLength(0)
+    // 反向：gate 还活着（进程表里有匹配进程）⇒ 不报。
+    // pattern 写**破字串**（`direc[t]`）：命令行里只有字面 `[t]` ⇒ 不自匹配，
+    // 而进程表里那条真命令行是真 `direct` ⇒ 正则命中 ⇒ 判「还没结束」。两边同时成立才算对。
+    const aliveDirect = detectPgrepLock(
+      Array.from({ length: 4 }, () => ({ role: "assistant", toolCalls: [{ name: "sh", arguments: { command: `for i in 1 2 3; do pgrep -f "sgs_alive_direc[t]_2718" >/dev/null; sleep 1; done` } }] })),
+      [{ pid: 4243, ppid: 1, pgid: 4243, startTime: 1, cmd: "python3 sgs_alive_direct_2718" }],
+    )
+    expect(aliveDirect.block.selfMatches).toHaveLength(0)
+    expect(aliveDirect.block.alive["sgs_alive_direc[t]_2718"]).toBe(1)
+    expect(aliveDirect.block.staleGates).toHaveLength(0)
+  })
+
+  test("端到端：worker 连续 5 次等同一个 gate、而该 gate 现已无进程 ⇒ review 报「疑似 pgrep 自匹配活锁」+ 正确写法", async () => {
+    const s = stub()
+    await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+    await tool("dispatch").execute({ orders: [{ task: "改 src/a.ts", domain: "a" }] }, s.ctx)
+    const sid = s.created[0].id
+    s.running.clear()
+    // 现场原样：同一条等待循环连做 5 次（gate 名是本次专用的，机器上不会有真进程）
+    const loop = `for i in $(seq 1 40); do if ! pgrep -f "sgs_lock_gate_2718.py" >/dev/null 2>&1; then echo "gate finished"; break; fi; sleep 5; done`
+    withWaitCommand(s, sid, Array.from({ length: 5 }, () => loop))
+
+    const rv = await tool("collect").execute({ action: "review", alias: "a-1" }, s.ctx)
+    expect(rv.output).toContain("疑似 `pgrep` 自匹配活锁")
+    // 必须给出**正确写法**（只说「你错了」而不给替代，下一息还会撞）
+    expect(rv.output).toContain("kill -0")
+    expect(rv.output).toContain("pgrep -x")
+    expect(rv.output).toContain("[.]")           // 破字串
+    expect(rv.output).toContain("$$")             // 排除自身
+    expect(rv.output).toContain("上限")           // 等待循环必须有上限
+    // 结构化字段（控制面/前端按字段用，不靠抠文本）
+    const data = rv.data as { pgrepLock?: { selfMatches: Array<{ pattern: string }>; probes: number } }
+    expect(data.pgrepLock?.probes).toBe(5)
+    expect(data.pgrepLock?.selfMatches[0]?.pattern).toBe("sgs_lock_gate_2718.py")
+    cleanup(s)
+  })
+
+  test("反向用例：正确等待写法与「gate 还活着」都不得误报（否则警报疲劳淹没真信号）", async () => {
+    const s = stub()
+    await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+    await tool("dispatch").execute({ orders: [{ task: "改 src/a.ts", domain: "a" }] }, s.ctx)
+    const sid = s.created[0].id
+    s.running.clear()
+
+    // ① 正确写法（有 pid / 破字串 / -x）：连续等 5 次也不报
+    withWaitCommand(s, sid, [
+      `while kill -0 999999 2>/dev/null; do sleep 1; done`,
+      `for i in 1 2 3; do if ! pgrep -f "sgs_gate_ok_2718[.]py" >/dev/null 2>&1; then break; fi; sleep 1; done`,
+      `for i in 1 2 3; do pgrep -x python3 >/dev/null; sleep 1; done`,
+    ])
+    const good = await tool("collect").execute({ action: "review", alias: "a-1" }, s.ctx)
+    expect(good.output).not.toContain("疑似 `pgrep` 自匹配活锁")
+    // 但**要明说已核过**（「0 命中」与「没核」必须能分辨）
+    expect(good.output).toContain("自匹配活锁：已核 1 条等待类命令")   // 只有 `-f` 那条算证据（`kill -0`/`-x` 不扫命令行）
+
+    // ② gate 还活着：「gate 现已无进程」那一路不得出现。
+    //
+    // 用具名 gate 进程（命令行里**真带**这个串：`sh -c 'sleep 30 # sgs_alive_gate_2718'`——
+    // 这正是现场的形状：gate 是某条含该名字的命令）。
+    // ⚠ 用 `spawn` 而不是 `spawnSync`：`spawnSync` 会把后台子进程的 stdout 管道抱到它退出，
+    //    那就变成了「测试真的等 30 秒」——与「自匹配活锁」恰好同一个形状（你等的那个东西是被你自己拖着的）。
+    const gate = spawn("/bin/sh", ["-c", "sleep 30 # sgs_alive_gate_2718"], { stdio: "ignore" })
+    const gatePid = gate.pid!
+    expect(gatePid).toBeGreaterThan(0)
+    withWaitCommand(s, sid, Array.from({ length: 4 }, () =>
+      `for i in 1 2 3; do if ! pgrep -f "sgs_alive_gate_2718" >/dev/null 2>&1; then break; fi; sleep 1; done`))
+    const busy = await tool("collect").execute({ action: "review", alias: "a-1" }, s.ctx)
+    // 这条命令**自己**含该串 ⇒ 自匹配那一条会报（真的错法，应当报）；
+    // 但「gate 现已无进程」那一路不得出现（进程表里确实有含该串的进程）
+    const busyData = busy.data as { pgrepLock?: { staleGates: Array<{ pattern: string }>; alive: Record<string, number> } }
+    expect(busyData.pgrepLock?.staleGates ?? []).toHaveLength(0)
+    try {
+      process.kill(gatePid, "SIGKILL")
+    } catch {
+      /* 已退出 */
+    }
+    cleanup(s)
+  })
+
+  test("拿不到进程表时如实报「本项未核」——不得当成「没有活锁」", async () => {
+    // 「0 命中」与「读不到」必须是两个结论：把读不到报成通过，等于在最需要警报的环境里安静。
+    const s = stub()
+    await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+    await tool("dispatch").execute({ orders: [{ task: "改 src/a.ts", domain: "a" }] }, s.ctx)
+    const sid = s.created[0].id
+    s.running.clear()
+    // 只给一条「正确写法」的等待：自匹配那一路判不出来，于是只能靠进程表 ⇒ 进程表不可用时必须说未核
+    withWaitCommand(s, sid, [`for i in $(seq 1 9); do pgrep -f "sgs_unverified_gate_2718[.]py" >/dev/null; sleep 1; done`])
+    const rv = await tool("collect").execute({ action: "review", alias: "a-1" }, s.ctx)
+    // 本机有 /proc，所以这里应当是「已核」；断言它对**两种**环境都给出可分辨的结论：
+    const out = rv.output
+    const checked = out.includes("自匹配活锁：已核") || out.includes("自匹配活锁本项未核")
+    expect(checked).toBe(true)
+    expect(out).not.toContain("疑似 `pgrep` 自匹配活锁")
+    cleanup(s)
+  })
+
+  test("进程表不可读：自匹配仍能纯文本判出，但「gate 现已无进程」那一路必须说「本项未核」", async () => {
+    // “活锁惯性”那一路的判据在**进程表**上；拿不到表就不能当它不存在。
+    // 纯函数据此分两半：`locked`（文本）与 `checked`（能否核到「现有无进程」）——
+    // 把 checked 写成恒真，就会在无 /proc 的机器上安安静静地一声不响。
+    const loop = `for i in 1 2 3 4; do if ! pgrep -f "sgs_noproc_gate_2718.py" >/dev/null 2>&1; then break; fi; sleep 1; done`
+    const messages = [{ role: "assistant", toolCalls: [{ name: "sh", arguments: { command: loop } }] }]
+    // ① 自匹配那一路：纯文本即可判（与进程表无关）——真的错法，**即便没有进程表也要报**
+    const withTable = detectPgrepLock(messages, [])
+    expect(withTable.locked).toBe(true)          // 自匹配 = 恒真条件；空表也能报
+    expect(withTable.checked).toBe(true)         // 两路都核了（活锁惯性：空表 ⇒ gate 已无进程）
+    expect(withTable.block.selfMatches).toHaveLength(1)
+    expect(withTable.block.probes).toBe(1)
+    // ② 显式传 tableError：自匹配仍报（纯文本），但必须明说「活锁惯性那一路未核」
+    const err = detectPgrepLock(messages, [], { tableError: "进程表不可读（/proc）：无此目录" })
+    expect(err.locked).toBe(true)
+    expect(err.checked).toBe(false)              // ← 不得假称“核过”
+    expect(err.advice).toContain("本项未核")
+    expect(err.advice).toContain("进程表不可读")
+  })
+})

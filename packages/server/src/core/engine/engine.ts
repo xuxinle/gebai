@@ -1805,6 +1805,10 @@ private activeSchemas(sessionId: string) {
           windDown: (id: string, o: { reason: string; graceMs?: number }) => self.windDown(id, o),
           runtimeOf: (userId: string) => self.runtimeOf(userId),
           runningIds: (userId: string) => self.runningIds(userId),
+          // **真实模型上下文窗口**（0 = 未知）：供子Agent 用真实分母报“离截断多远”。
+          // 不能硬编码：`.env` 的 `GEBAI_LLM_MAX_CONTEXT` 改成 128000 时，写死的 512K 会静默说错话
+          // （那就是把「一个数字两个量」换成「一个数字两个源」的同型错）。
+          contextWindow: () => self.contextWindow(),
         },
         run: (id: string, userId: string, prompt: string, o?: Record<string, unknown>) => self.run(id, userId, prompt, o),
       },

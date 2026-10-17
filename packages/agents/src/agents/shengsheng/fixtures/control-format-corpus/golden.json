@@ -69,6 +69,7 @@
           "at": 990
         }
       ],
+      "leases": [],
       "note": "语料 01：新表头 + 存量旧行混排。"
     },
     "sessions": [
@@ -76,7 +77,7 @@
       "aaaabbbbccccddddeeeeffff00001111",
       null
     ],
-    "rendered": "> 生生调度状态（`shengsheng_state` 托管，勿手改）。\n\n## 项目坐标\n- 项目根：/corpus/01\n- 验证命令：bun run typecheck\n- 种子库：docs/seed.md\n\n## 计数\n- 呼吸：3\n- 派工序号：11\n\n## worker 池\n| 别名 | 会话 | 领域 | 任务 | 派发时间 | 轮次 | 状态 |\n| --- | --- | --- | --- | --- | --- | --- |\n| wb-1 | aaaabbbbccccddddeeeeffff00001111 | ui | 修状态栏 \\| 语义（转义竖线） | 1000 | 4 | running |\n| wb-2 | bbbbaaaaccccddddeeeeffff11110000 | ui | 任务甲 \\| 带裸竖线 \\| 交付乙 | 1000 | 5 | idle |\n\n## 在途\n| 别名 | 会话 | 方向 | 预期产出 | 派发时间 | 轮次 |\n| --- | --- | --- | --- | --- | --- |\n| wb-2 |  | 空会话列的新版行 | 交付乙 | 1000 | 5 |\n| wb-1 | aaaabbbbccccddddeeeeffff00001111 | 新版方向丙 \\| 溢格 | 交付丙 | 1000 | 6 |\n| legacy-2 |  | 旧行的方向（表头说 6 列、本行只有 5 格） | 旧行的预期产出 | 900 | 3 |\n\n## 种子队列\n| 优先级 | 方向 | 来源 | 约束 |\n| --- | --- | --- | --- |\n| P1 | 语料 01 的方向甲 | 种子库 | 只读语料 |\n\n## 收藏待办\n| 别名 | 摘要 | 时间 |\n| --- | --- | --- |\n| wb-1 | 上一轮交付摘要 | 990 |\n\n## 断点\n语料 01：新表头 + 存量旧行混排。\n",
+    "rendered": "> 生生调度状态（`shengsheng_state` 托管，勿手改）。\n\n## 项目坐标\n- 项目根：/corpus/01\n- 验证命令：bun run typecheck\n- 种子库：docs/seed.md\n\n## 计数\n- 呼吸：3\n- 派工序号：11\n\n## worker 池\n| 别名 | 会话 | 领域 | 任务 | 派发时间 | 轮次 | 状态 |\n| --- | --- | --- | --- | --- | --- | --- |\n| wb-1 | aaaabbbbccccddddeeeeffff00001111 | ui | 修状态栏 \\| 语义（转义竖线） | 1000 | 4 | running |\n| wb-2 | bbbbaaaaccccddddeeeeffff11110000 | ui | 任务甲 \\| 带裸竖线 \\| 交付乙 | 1000 | 5 | idle |\n\n## 在途\n| 别名 | 会话 | 方向 | 预期产出 | 派发时间 | 轮次 |\n| --- | --- | --- | --- | --- | --- |\n| wb-2 |  | 空会话列的新版行 | 交付乙 | 1000 | 5 |\n| wb-1 | aaaabbbbccccddddeeeeffff00001111 | 新版方向丙 \\| 溢格 | 交付丙 | 1000 | 6 |\n| legacy-2 |  | 旧行的方向（表头说 6 列、本行只有 5 格） | 旧行的预期产出 | 900 | 3 |\n\n## 资源租约\n（空）\n\n## 种子队列\n| 优先级 | 方向 | 来源 | 约束 |\n| --- | --- | --- | --- |\n| P1 | 语料 01 的方向甲 | 种子库 | 只读语料 |\n\n## 收藏待办\n| 别名 | 摘要 | 时间 |\n| --- | --- | --- |\n| wb-1 | 上一轮交付摘要 | 990 |\n\n## 断点\n语料 01：新表头 + 存量旧行混排。\n",
     "roundTrip": {
       "coord": {
         "root": "/corpus/01",
@@ -146,6 +147,7 @@
           "at": 990
         }
       ],
+      "leases": [],
       "note": "语料 01：新表头 + 存量旧行混排。"
     }
   },
@@ -205,6 +207,7 @@
       ],
       "seeds": [],
       "pending": [],
+      "leases": [],
       "note": "语料 02：旧表头 + 两难格 + 无线索行。"
     },
     "sessions": [
@@ -212,7 +215,7 @@
       "aaaabbbbccccddddeeeeffff00001111",
       null
     ],
-    "rendered": "> 生生调度状态（`shengsheng_state` 托管，勿手改）。\n\n## 项目坐标\n- 项目根：/corpus/02\n- 验证命令：bun test packages/agents/src/agents/shengsheng/\n\n## 计数\n- 呼吸：17\n- 派工序号：40\n\n## worker 池\n| 别名 | 会话 | 领域 | 任务 | 派发时间 | 轮次 | 状态 |\n| --- | --- | --- | --- | --- | --- | --- |\n| wb-1 | aaaabbbbccccddddeeeeffff00001111 | workbench-ui | 任务里带裸竖线：mode==='view' \\| stat.editable===false | 1792087248971 | 38 | idle |\n| legacy-2 | bbbbaaaaccccddddeeeeffff11110000 | legacy | 旧版工具写下的历史任务 | 1792087248971 | 40 | running |\n\n## 在途\n| 别名 | 会话 | 方向 | 预期产出 | 派发时间 | 轮次 |\n| --- | --- | --- | --- | --- | --- |\n| legacy-2 |  | 旧行方向含裸竖线 | 预期产出乙 | 1000 | 4 |\n| wb-1 |  | aaaabbbbccccddddeeeeffff00001111 | 交付甲 \\| 带竖线 | 1000 | 5 |\n| ghost-9 |  | 无线索的旧行方向 |  | 900 | 12 |\n\n## 种子队列\n（空）\n\n## 收藏待办\n（空）\n\n## 断点\n语料 02：旧表头 + 两难格 + 无线索行。\n",
+    "rendered": "> 生生调度状态（`shengsheng_state` 托管，勿手改）。\n\n## 项目坐标\n- 项目根：/corpus/02\n- 验证命令：bun test packages/agents/src/agents/shengsheng/\n\n## 计数\n- 呼吸：17\n- 派工序号：40\n\n## worker 池\n| 别名 | 会话 | 领域 | 任务 | 派发时间 | 轮次 | 状态 |\n| --- | --- | --- | --- | --- | --- | --- |\n| wb-1 | aaaabbbbccccddddeeeeffff00001111 | workbench-ui | 任务里带裸竖线：mode==='view' \\| stat.editable===false | 1792087248971 | 38 | idle |\n| legacy-2 | bbbbaaaaccccddddeeeeffff11110000 | legacy | 旧版工具写下的历史任务 | 1792087248971 | 40 | running |\n\n## 在途\n| 别名 | 会话 | 方向 | 预期产出 | 派发时间 | 轮次 |\n| --- | --- | --- | --- | --- | --- |\n| legacy-2 |  | 旧行方向含裸竖线 | 预期产出乙 | 1000 | 4 |\n| wb-1 |  | aaaabbbbccccddddeeeeffff00001111 | 交付甲 \\| 带竖线 | 1000 | 5 |\n| ghost-9 |  | 无线索的旧行方向 |  | 900 | 12 |\n\n## 资源租约\n（空）\n\n## 种子队列\n（空）\n\n## 收藏待办\n（空）\n\n## 断点\n语料 02：旧表头 + 两难格 + 无线索行。\n",
     "roundTrip": {
       "coord": {
         "root": "/corpus/02",
@@ -268,6 +271,7 @@
       ],
       "seeds": [],
       "pending": [],
+      "leases": [],
       "note": "语料 02：旧表头 + 两难格 + 无线索行。"
     }
   }
