@@ -27,6 +27,7 @@
 
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/text/text.hpp"
@@ -124,6 +125,14 @@ auto snapshot(const st::raster::PaintProfiler& profiler) -> Snapshot {
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "整帧绘制分解探针（性能轮）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("frame_profile_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const int frames = argc > 1 ? std::atoi(argv[1]) : 24;
   const float scale = argc > 2 ? static_cast<float>(std::atof(argv[2])) : 1.0f;
   Config config;
@@ -228,5 +237,7 @@ auto main(int argc, char** argv) -> int {
   }
   st::print("  （分解 {:.2f}ms / 帧计 {:.2f}ms；差 {:.2f}ms = 树遍历+剔除+调度）\n", accounted,
             best.paint_ms, best.paint_ms - accounted);
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

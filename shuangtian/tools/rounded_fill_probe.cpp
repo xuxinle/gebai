@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 
@@ -55,7 +56,15 @@ template <class Measure>
 
 }  // namespace
 
-auto main() -> int {
+auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "圆角填充 vs 直角填充的**成本对照探针**（release 档跑）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("rounded_fill_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const double unit = baseline_ms_per_pixel();
   const st::raster::Paint paint =
       st::raster::Paint::solid(st::math::Color::rgb(0x2F, 0x6F, 0xE0));
@@ -117,5 +126,7 @@ auto main() -> int {
   report("直角 radius=0（整数对齐）", square_ms);
   report("直角 radius=0（非对齐）", square_path_ms);
   st::print("\n比值口径与 tests/raster_bench_test.cpp 一致（每张卡片每像素 / 清屏每像素）\n");
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
@@ -84,6 +85,14 @@ auto clear_canvas(st::raster::Canvas& canvas) -> void {
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "绘制原语消融 / 候选方案对照探针（性能轮）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("paint_ablation_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const int repeat = argc > 1 ? std::atoi(argv[1]) : 40;
   Config config;
   config.clear_each = env_flag("ST_ABLATION_CANVAS", false);
@@ -230,5 +239,7 @@ auto main(int argc, char** argv) -> int {
   for (const Row& row : rows) {
     st::print("  {:<40} {:>9.3} ms · {:>8.1} µs\n", row.name, row.ms, row.ms * 1000.0);
   }
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

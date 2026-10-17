@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/path.hpp"
@@ -24,6 +25,14 @@ using st::math::Rect;
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "把图标渲染成**逐像素 ASCII**，核验形态（这个渲染器下的既定排查手段）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("icon_ascii_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const std::string name = argc > 1 ? argv[1] : "diff";
   const int size = argc > 2 ? std::atoi(argv[2]) : 16;
   const std::string mode = argc > 3 ? argv[3] : "auto";
@@ -67,5 +76,7 @@ auto main(int argc, char** argv) -> int {
     }
     (void)path;
   }
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/ui/theme.hpp"
@@ -34,6 +35,14 @@ auto elapsed_ms(const Clock::time_point& start) -> double {
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "阴影「遮罩构建 vs 合成」成本分离（性能轮）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("shadow_cache_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const int repeat = argc > 1 ? std::atoi(argv[1]) : 60;
   const st::ui::Theme theme = st::ui::Theme::light();
   const st::ui::Shadow md = st::ui::shadow_md(theme);
@@ -123,5 +132,7 @@ auto main(int argc, char** argv) -> int {
     }
     st::print("⑤ 96 张卡片两层阴影（每张换几何，全未命中）：{:>8.3} ms/帧\n", elapsed_ms(start));
   }
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

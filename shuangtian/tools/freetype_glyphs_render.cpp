@@ -25,6 +25,7 @@
 
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 
 namespace {
 
@@ -177,6 +178,14 @@ void render(FT_Library library, FT_Face face, const std::vector<Line>& rows, int
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "**FreeType 侧逐字形渲染**（仅验证用，不进框架构建、不进 `st.pkg`）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("freetype_glyphs_render", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   std::string out_dir = ".";
   std::string font = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
   std::string rows_path = "tools/text_ab_allglyphs_rows.inc";
@@ -213,5 +222,7 @@ auto main(int argc, char** argv) -> int {
   st::print("已写 {}/ft-hint-on.png 与 ft-hint-off.png\n", out_dir);
   FT_Done_Face(face);
   FT_Done_FreeType(library);
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

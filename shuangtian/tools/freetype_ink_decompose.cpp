@@ -25,6 +25,7 @@
 #include FT_MODULE_H
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -98,6 +99,14 @@ std::string utf8_of(unsigned long cp) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  const st::probe::spec spec{
+      .title = "**机制拆解探针**：把 FreeType 侧相对霜天多出来的墨，拆到「hinting」与「stem darkening」两项。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("freetype_ink_decompose", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   // **参数解析：按前缀分流，不靠"顺序"猜**。
   // 踩过的坑：早期写成"`--cp` 之后所有数字都是码点"——于是 `--cp 0x30 15` 把 15 当成了
   // U+000F（画出豆腐块、霜天侧为 0，看起来像崩溃）。现在 `0x…` 一律是码点、
@@ -157,5 +166,7 @@ int main(int argc, char** argv) {
   }
   FT_Done_Face(ft);
   FT_Done_FreeType(library);
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

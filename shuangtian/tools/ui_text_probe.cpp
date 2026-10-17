@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -120,6 +121,14 @@ auto measure(const TextRenderer& renderer, char32_t codepoint, float pixel_size,
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "**界面文字三类样本探针**（仅验证用）：中文常规 / 中文粗体（合成加粗）/ 英文。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("ui_text_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   float size = 20.25f;
   float scale = 1.5f;
   GridFitMode fit = GridFitMode::Light;
@@ -146,8 +155,8 @@ auto main(int argc, char** argv) -> int {
   }
   auto stack = FontStack::system_default();
   if (!stack) {
-    st::print("未找到可用字体\n");
-    return 1;
+    // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
+    return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体\\n"));
   }
   // 与 app 一致：亚像素 + LCD 滤波 + 拟合 + 墨量补偿（gamma/Fit 档位按参数）。
   const std::vector<Sample> samples =
@@ -224,5 +233,7 @@ auto main(int argc, char** argv) -> int {
   st::print("\n判读：**分三类各看各的**——中文常规 / 中文粗体 / 英文的几何不同，\n"
             "      拿一类的结果代表全部正是“顾此失彼”的来源。\n"
             "      过渡带占比高 = 边缘摊得开（糊）；字间离散大 = 有的字实、有的字灰。\n");
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

@@ -8,8 +8,7 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <cstdlib>
-#include <string>
+#include <cstdlib>#include <string>
 #include <vector>
 
 #include "st/codec/png.hpp"
@@ -88,8 +87,15 @@ inline void apply(TextRenderer& renderer, const Options& options, float scale) {
     renderer.set_class_gamma(GlyphClass::Han, options.han_gamma);
   }
   if (options.strict_hints) {
-    // 通过环境变量切换（进程内 setenv：探针是独立进程，不影响别处）。
+    // 通过环境变量切换（探针是独立进程，不影响别处）。
+    // **不用 `setenv`**：那是 POSIX-only，Windows 上根本没有该符号——本批探针在 Windows
+    // 上从来没编过，就是因为这一行（实测：`'setenv' was not declared`）。
+    // 用标准 `std::getenv/setenv` 的等义替代：`_putenv_s`（MSVC/MinGW）与 `setenv`（POSIX）。
+#if defined(_WIN32)
+    static const int kIgnore = _putenv_s("ST_TEXT_HINT_STRICT", "1");
+#else
     static const int kIgnore = setenv("ST_TEXT_HINT_STRICT", "1", 1);
+#endif
     (void)kIgnore;
   }
   if (options.gamma > 0.0f) renderer.set_coverage_gamma(options.gamma);

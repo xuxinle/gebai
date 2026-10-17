@@ -33,6 +33,7 @@
 #include FT_TRUETYPE_TABLES_H
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
 
 namespace {
@@ -121,6 +122,14 @@ void report(const char* label, const Stats& stats) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  const st::probe::spec spec{
+      .title = "hinting 收益**测量台**（仅验证用，不进框架构建、不进 `st.pkg`）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("hinting_gain_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   FT_Library library = nullptr;
   if (FT_Init_FreeType(&library) != 0) {
     st::print("FreeType 初始化失败\n");
@@ -183,5 +192,7 @@ int main(int argc, char** argv) {
 
   FT_Done_Face(face);
   FT_Done_FreeType(library);
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

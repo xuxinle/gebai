@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
 #include "st/text/grid_fit.hpp"
 #include "st/text/text.hpp"
@@ -28,6 +29,14 @@ using st::text::GridFitMode;
 using st::text::TextRenderer;
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "**笔画召回率扫描**（仅验证用）：把 `max_edge_slant`（直线边允许的最大横向跨度，",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("fit_recall_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const float device_scale = argc > 1 ? std::stof(argv[1]) : 1.5f;
   const float pixel_size = argc > 2 ? std::stof(argv[2]) : 20.25f;
   const std::vector<std::string> texts =
@@ -36,8 +45,8 @@ auto main(int argc, char** argv) -> int {
                                           "资源管理器打开文件设置"};
   auto stack = FontStack::system_default();
   if (!stack) {
-    st::print("未找到可用字体\n");
-    return 1;
+    // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
+    return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体\\n"));
   }
   st::print("device_scale={} 物理字号={}\n", device_scale, pixel_size);
   struct Row {
@@ -84,5 +93,7 @@ auto main(int argc, char** argv) -> int {
             "  “全部边→直线边” 掉 ⇒ 轮廓以**曲线**为主（该支持曲线边才能提高召回）；\n"
             "  “够直→配对失败” 掉 ⇒ 宽度/跨度条件太紧；\n"
             "  “找到笔画→被拒” 掉 ⇒ 预算不足（调 `max_shift`）。\n");
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

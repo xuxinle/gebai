@@ -16,6 +16,7 @@
 
 #include "text_ab_common.hpp"
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/svg.hpp"
@@ -52,6 +53,14 @@ auto json_strings(std::string_view text, std::string_view key) -> std::vector<st
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "**真实 SVG 矢量图形**的 A/B 探针：霜天侧（仅验证用，不进框架构建、不进 `st.pkg`）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("svg_ab_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const std::string out_dir = argc > 1 ? argv[1] : ".";
   const float scale = argc > 2 ? std::stof(argv[2]) : 1.5f;
   bool dark = false;
@@ -111,5 +120,7 @@ auto main(int argc, char** argv) -> int {
   ab::save(canvas.to_rgba8(), width, height, path);
   st::print("已写 {}（{} case，{}x{} 物理像素，scale={}，dark={}）\n", path, drawn, width, height,
             scale, dark);
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

@@ -29,6 +29,7 @@
 #include FT_MODULE_H
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 
 namespace {
 
@@ -99,6 +100,14 @@ void set_stem_darkening(FT_Library lib, FT_Bool disable) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  const st::probe::spec spec{
+      .title = "**对账探针**：把 FreeType（浏览器那条路）与霜天（自研栅格器）在同字号下的墨量放在一张表里。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("stem_darkening_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   std::string path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
   long face_index = 2;
   std::vector<double> ppems;
@@ -141,5 +150,7 @@ int main(int argc, char** argv) {
   }
   FT_Done_Face(face);
   FT_Done_FreeType(lib);
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

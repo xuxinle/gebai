@@ -23,6 +23,7 @@
 #include "rasterize_internal.hpp"
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
@@ -170,7 +171,15 @@ auto report(const char* name, const std::vector<st::raster::Polyline>& polylines
 
 }  // namespace
 
-auto main() -> int {
+auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "扫描线「边扫描量」统计（性能轮）：搞清楚 `fill_path_aa` 的成本是不是花在**逐行扫边**上。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("scanline_edges_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const st::math::Rect box{100.0f, 100.0f, 140.0f, 48.0f};
   constexpr float kRadius = 12.0f;
 
@@ -205,5 +214,7 @@ auto main() -> int {
   st::raster::Path circle;
   circle.add_circle(st::math::Point{200.0f, 200.0f}, 40.0f);
   report("圆形填充 r=40", circle.flatten(0.25f));
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

@@ -13,6 +13,7 @@
 
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -38,6 +39,14 @@ constexpr std::string_view kSample = "组件画廊 Overview 24";
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "单行字号渲染（仅验证用）：一页一行，供「整幅总墨量」比（不依赖裁剪/对齐）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("size_line_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const std::string out_path = argc > 1 ? argv[1] : "out.png";
   const float scale = argc > 2 ? std::stof(argv[2]) : 1.5f;
   const float gamma = argc > 3 ? std::stof(argv[3]) : 0.6f;
@@ -61,8 +70,8 @@ auto main(int argc, char** argv) -> int {
 
   auto stack = FontStack::system_default();
   if (!stack) {
-    st::print("未找到可用字体\n");
-    return 1;
+    // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
+    return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体\\n"));
   }
   const FontStack& fonts = *stack;
   Canvas canvas{static_cast<int>(kWidth * scale), static_cast<int>(kHeight * scale), scale};
@@ -84,5 +93,7 @@ auto main(int argc, char** argv) -> int {
     st::print("写 {} 失败\n", out_path);
     return 1;
   }
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

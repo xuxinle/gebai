@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/math/color.hpp"
 
 namespace {
@@ -68,6 +69,14 @@ template <class Body>
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "阴影合成的「固定开销 vs 逐像素开销」分解（性能轮）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("shadow_inner_loop_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const int repeat = argc > 1 ? std::atoi(argv[1]) : 2000;
   const st::math::Color color = st::math::Color::rgb(0x0F, 0x17, 0x2A).with_alpha_f(0.15f);
   const std::uint32_t premul = st::math::premultiply(color);
@@ -132,5 +141,7 @@ auto main(int argc, char** argv) -> int {
             best_ms(repeat, [&] { std::fill(pixels.begin(), pixels.end(), fill); }),
             1e6 * best_ms(repeat, [&] { std::fill(pixels.begin(), pixels.end(), fill); }) /
                 static_cast<double>(kCount));
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

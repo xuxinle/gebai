@@ -10,6 +10,7 @@
 #include <cstdlib>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
@@ -65,6 +66,14 @@ void report(const char* label, const Path& path, double expect_logical, float sc
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "圆角边框环的光栅化精度诊断：把「外圈 / 内圈 / 环」三条路径分别光栅化，",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("ring_raster_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const float scale = argc > 1 ? static_cast<float>(std::atof(argv[1])) : 2.0f;
   const st::math::Rect box{40.0f, 30.0f, 100.0f, 60.0f};
   constexpr float kRadius = 14.0f;
@@ -117,5 +126,7 @@ auto main(int argc, char** argv) -> int {
     st::print("  {:>2}°  实测 {:9.2f}  解析 {:9.2f}  比 {:.4f}  差 {:+.2f}\n", angle_deg, measured,
               expect, measured / expect, measured - expect);
   }
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

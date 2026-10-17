@@ -34,6 +34,7 @@
 #include "rasterize_internal.hpp"
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -265,6 +266,14 @@ auto fill_round_rect(Buffer& buffer, st::math::Rect rect, float radius, st::math
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "阴影合成核（kernel）对照探针（性能轮）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("shadow_kernel_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const int repeat = argc > 1 ? std::atoi(argv[1]) : 300;
   const float blur = argc > 2 ? static_cast<float>(std::atof(argv[2])) : 22.0f;
   const float card_w = argc > 3 ? static_cast<float>(std::atof(argv[3])) : 140.0f;
@@ -380,5 +389,7 @@ auto main(int argc, char** argv) -> int {
   st::print("  铺底色后 D vs 现状：超差 {} px（最大Δ{}）← **最终画面等价性**\n", final_diff.differing,
             final_diff.max_delta);
   (void)surface;
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

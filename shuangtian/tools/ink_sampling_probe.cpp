@@ -15,6 +15,7 @@
 
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/text/text.hpp"
 #include "st/ui/line_layout.hpp"
 
@@ -38,11 +39,19 @@ void dump(const st::ui::TextPort& port, std::string_view label, std::string_view
 
 }  // namespace
 
-auto main() -> int {
+auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "`ink_metrics` 的口径探针：**代码行**的墨迹带该怎么取样本。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("ink_sampling_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   auto stack = st::text::FontStack::system_default();
   if (!stack) {
-    st::print("无可用字体栈——无法量测\n");
-    return 1;
+    // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
+    return st::probe::main_of(spec, opts, st::probe::skip("无可用字体栈——无法量测\\n"));
   }
   st::text::TextRenderer renderer(*stack);
   const st::app::RendererTextPort port(renderer);
@@ -104,5 +113,7 @@ auto main() -> int {
     st::print("{:<14} {:>6.2f} {:>6.2f} {:>8.2f} {:>+10.2f} {:>+11.2f}\n", row.label, ink->above,
               ink->below, ink->above + ink->below, (ink->below - ink->above) * 0.5F, -ink->above);
   }
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

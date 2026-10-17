@@ -25,6 +25,7 @@
 
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
 #include "st/ui/components/select.hpp"
@@ -64,6 +65,14 @@ template <class Fn>
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "`SelectPanel` 选项数量尺 —— 收尾扫描（前面几轮的判据：有没有未剔除的项循环）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("ui_select_options_bench", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const std::size_t count = argc > 1 ? static_cast<std::size_t>(std::atoll(argv[1])) : 200U;
 
   auto fonts = st::text::FontStack::system_default();
@@ -95,5 +104,7 @@ auto main(int argc, char** argv) -> int {
   st::print("options={}  面板高={:.0f}px  画布=800×600（屏幕尺寸）\n", count, height);
   st::print("  measure   {:8.3f} ms\n", measure_ms);
   st::print("  paint     {:8.3f} ms   <- 每帧成本\n", paint_ms);
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

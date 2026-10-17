@@ -22,6 +22,7 @@
 #include "st/codec/png.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
@@ -138,6 +139,14 @@ void draw_row(Canvas& canvas, const Spec& spec, float x0, float y0, int hovered)
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "标题栏**窗口控制按钮**的候选对照图（观感类改动的\"先给候选\"环节）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("title_bar_buttons_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const std::string dir = argc > 1 ? argv[1] : ".";
 
   // —— 候选档：每档相对「当前」只改一个正交量 ——
@@ -213,5 +222,7 @@ auto main(int argc, char** argv) -> int {
   }
   st::print("{}", report);
   st::print("度量: {}\n", text_path);
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

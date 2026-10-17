@@ -25,6 +25,7 @@
 
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
@@ -102,11 +103,19 @@ void print_profile(const FontStack& stack, const Mode& mode, int row, int from, 
 }  // namespace
 
 int main(int argc, char** argv) {
+  const st::probe::spec spec{
+      .title = "文字抗锯齿**对照工具**（仅验证用，不进框架构建、不进 `st.pkg`）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("lcd_compare", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const std::string out_dir = argc > 1 ? argv[1] : ".";
   auto stack = FontStack::system_default();
   if (!stack) {
-    st::print("未找到可用字体（ST_FONT_LATIN/ST_FONT_CJK 可显式指定）\n");
-    return 1;
+    // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
+    return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体（ST_FONT_LATIN/ST_FONT_CJK 可显式指定）\\n"));
   }
   for (const Mode& mode : kModes) {
     render_mode(*stack, mode, out_dir + "/" + mode.name + ".png");
@@ -140,5 +149,7 @@ int main(int argc, char** argv) {
   for (const Mode& mode : kModes) {
     print_profile(*stack, mode, best_row, first_ink - 2, first_ink + 9);
   }
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

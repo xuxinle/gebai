@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
 #include "st/text/grid_fit.hpp"
 #include "st/text/text.hpp"
@@ -22,6 +23,14 @@ using st::text::GridFitMode;
 using st::text::TextRenderer;
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "**拟合生效性/拒载诊断**（仅验证用）：逐个字形报位图网格、**被拒笔画数**与",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("fit_reject_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const float device_scale = argc > 1 ? std::stof(argv[1]) : 1.5f;
   const float pixel_size = argc > 2 ? std::stof(argv[2]) : 20.25f;
   const std::vector<std::string> texts =
@@ -30,8 +39,8 @@ auto main(int argc, char** argv) -> int {
                                           "资源管理器打开文件设置", "霜天自绘渲染"};
   auto stack = FontStack::system_default();
   if (!stack) {
-    st::print("未找到可用字体\n");
-    return 1;
+    // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
+    return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体\\n"));
   }
   const int supersample = std::max(1, static_cast<int>(std::lround(device_scale)));
   st::print("device_scale={} 物理字号={}（supersample={}，拟合的 grid 口径）\n", device_scale,
@@ -69,5 +78,7 @@ auto main(int argc, char** argv) -> int {
   st::print("判读：被拒 ⇒ 该笔画的位移需求超过 `max_shift + grid/2`（小字号当前 {:.1f}+{:.1f}）；\n"
             "      “最坏被拒位移”就是 `max_shift` 要放到多大才收得下它。\n",
             1.0f, static_cast<float>(supersample) * 0.5f);
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

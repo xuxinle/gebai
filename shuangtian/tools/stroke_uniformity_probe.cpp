@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -138,6 +139,14 @@ void report(std::string_view label, const Summary& summary) {
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "**笔画均匀度量尺**（仅验证用，不进框架构建、不进 `st.pkg`）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("stroke_uniformity_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   float device_scale = 1.5f;
   float pixel_size = 20.25f;
   GridFitMode fit = GridFitMode::Normal;
@@ -164,8 +173,8 @@ auto main(int argc, char** argv) -> int {
   }
   auto stack = FontStack::system_default();
   if (!stack) {
-    st::print("未找到可用字体\n");
-    return 1;
+    // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
+    return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体\\n"));
   }
   st::print("device_scale={} 逻辑字号={} fit={} gamma={}\n", device_scale, pixel_size,
             fit == GridFitMode::Off ? "off" : (fit == GridFitMode::Light ? "light" : "normal"),
@@ -208,5 +217,7 @@ auto main(int argc, char** argv) -> int {
     }
     st::print("   ← 非整数墨量的笔画（越少越均匀）\n");
   }
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

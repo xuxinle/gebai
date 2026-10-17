@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
@@ -114,6 +115,14 @@ auto report(const std::string& name, const Diff& result) -> void {
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "边框实现等价性 / 成本对照（性能轮，修正版）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("paint_equiv_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const int repeat = argc > 1 ? std::atoi(argv[1]) : 300;
   const st::ui::Theme theme = st::ui::Theme::light();
   const st::raster::Paint border = st::raster::Paint::solid(theme.colors().border);
@@ -193,5 +202,7 @@ auto main(int argc, char** argv) -> int {
   st::print("  环形路径构造 + fill     {:.4} ms\n", best_ms(repeat, [&] {
              canvas.fill_path(make_border_ring(box, 12.0f, 1.0f), border);
            }));
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

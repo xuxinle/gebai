@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
@@ -55,7 +56,15 @@ constexpr int kH = 60;
 
 }  // namespace
 
-auto main() -> int {
+auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "**笔画重量守恒**量尺：量化后的笔画，墨重量是否还等得住原设计？",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("text_ink_conserve", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   auto stack = FontStack::system_default();
   if (!stack) return 1;
   const FontStack& fonts = *stack;
@@ -99,5 +108,7 @@ auto main() -> int {
     }
     st::print("\n");
   }
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

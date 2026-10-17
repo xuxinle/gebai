@@ -11,6 +11,7 @@
 
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 
 namespace {
@@ -21,6 +22,14 @@ using st::math::Rect;
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "生成镂月示例的内嵌样例 PNG（一小张可辨认的测试图：色块 + 对角斜线 + 半透明区）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("make_sample_png", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const std::string out = argc > 1 ? argv[1] : "sample.png";
   constexpr int kWidth = 320;
   constexpr int kHeight = 200;
@@ -59,5 +68,7 @@ auto main(int argc, char** argv) -> int {
     return 1;
   }
   st::print("已写出 {}（{}×{}）\n", out, kWidth, kHeight);
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

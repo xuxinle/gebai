@@ -11,6 +11,7 @@
 #include <string>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/path.hpp"
 
 namespace {
@@ -170,7 +171,15 @@ void check_wall_thickness(const Path& ring, float radius, float width) {
 
 }  // namespace
 
-auto main() -> int {
+auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "圆角边框环路径的几何诊断探针。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("ring_path_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const st::math::Rect box{0.0f, 0.0f, 100.0f, 60.0f};
   const Path ring = st::raster::make_rounded_border_ring(box, 14.0f, 1.0f);
   st::print("=== 环路径（100x60, r=14, w=1）===\n");
@@ -183,5 +192,7 @@ auto main() -> int {
       st::math::Rect{0.0f, 0.0f, 200.0f, 120.0f}, 28.0f, 2.0f);
   check_inner_arc_geometry(ring2, st::math::Rect{0.0f, 0.0f, 200.0f, 120.0f}, 28.0f, 2.0f);
   check_wall_thickness(ring2, 28.0f, 2.0f);
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/ui/theme.hpp"
@@ -76,7 +77,15 @@ auto report(const char* name, const SpanStats& s) -> void {
 
 }  // namespace
 
-auto main() -> int {
+auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "阴影合成区域的「行内跨度」统计（性能轮）：`draw_shadow` 的复合循环按 region 全矩形跑，",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("shadow_span_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const st::ui::Theme theme = st::ui::Theme::light();
   const st::ui::Shadow sm = st::ui::shadow_sm(theme);
   const st::ui::Shadow md = st::ui::shadow_md(theme);
@@ -88,5 +97,7 @@ auto main() -> int {
   report("md 环境层 blur=22", stats(md, md.blur2, md.color2, md.offset2_y));
   report("lg 关键层 blur=10", stats(lg, lg.blur, lg.color, lg.offset_y));
   report("lg 环境层 blur=40", stats(lg, lg.blur2, lg.color2, lg.offset2_y));
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

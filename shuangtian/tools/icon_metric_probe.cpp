@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/icon.hpp"
@@ -73,6 +74,14 @@ struct Ink {
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "量「图标实际渲染多大」——按真实光栅化结果，不靠几何算式推断。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("icon_metric_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const int size = argc > 1 ? std::atoi(argv[1]) : 64;
   st::print("渲染盒 {}×{} 逻辑 px（与 Button::paint_content 同调用形态）\n", size, size);
   st::print("理论：几何墨迹最长边被归一到 kOpticalTargetPx=17 单位 → "
@@ -116,5 +125,7 @@ auto main(int argc, char** argv) -> int {
   st::print("\n描边式均值 {:.2f}px（n={}）· 实心式均值 {:.2f}px（n={}）\n",
             n_stroked > 0 ? sum_stroked / n_stroked : 0.0, n_stroked,
             n_filled > 0 ? sum_filled / n_filled : 0.0, n_filled);
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

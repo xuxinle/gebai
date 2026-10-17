@@ -12,12 +12,21 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/text/text.hpp"
 
 using st::text::FontRole;
 using st::text::FontStack;
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "字体栈诊断（仅验证用）：打印**每个码点实际由哪个 face 提供**，并报告该字形的度量。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("font_stack_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   // `--faces <path>`：遍历集合字体的各个 face，打印 name 与汉字墨迹高度。
   // 用途：判断"某个 face 虽然覆盖汉字、但字形是别的语种变体"（实测踩到：
   // `msyh.ttc` face 0 有汉字码点却比浏览器用的中文面**矮 19%**）。
@@ -51,8 +60,8 @@ auto main(int argc, char** argv) -> int {
 
   auto stack = FontStack::system_default();
   if (!stack) {
-    st::print("未找到可用字体\n");
-    return 1;
+    // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
+    return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体\\n"));
   }
   const FontStack& fonts = *stack;
   st::print("=== FontStack 实际装配 ===\n");
@@ -108,5 +117,7 @@ auto main(int argc, char** argv) -> int {
     st::print("  U+{:04X}  ← {}\n", static_cast<unsigned>(cp),
               bold_face != nullptr ? bold_face->path() : std::string("<无覆盖>"));
   }
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

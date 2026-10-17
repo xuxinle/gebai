@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
 #include "st/text/text.hpp"
 
@@ -34,6 +35,14 @@ using st::text::FontStack;
 using st::text::TextRenderer;
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "**字形落点相位量尺**（仅验证用，不进框架构建、不进 `st.pkg`）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("glyph_phase_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const float device_scale = argc > 1 ? std::stof(argv[1]) : 1.5f;
   const float size = argc > 2 ? std::stof(argv[2]) : 13.5f;
   const std::vector<std::string> texts =
@@ -46,8 +55,8 @@ auto main(int argc, char** argv) -> int {
                  };
   auto stack = FontStack::system_default();
   if (!stack) {
-    st::print("未找到可用字体\n");
-    return 1;
+    // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
+    return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体\\n"));
   }
   TextRenderer renderer(*stack, device_scale);
   st::print("device_scale={} 逻辑字号={} 物理字号={}\n", device_scale, size, size * device_scale);
@@ -120,5 +129,7 @@ auto main(int argc, char** argv) -> int {
   st::print("字距误差：均值 {:+.4f}px  标准差 {:.4f}px  最坏 {:.4f}px\n", mean_spacing,
             std::sqrt(std::max(0.0, var_spacing)), worst_spacing_err);
   st::print("（对照：保留 1/4 像素相位 → 误差上界 ±0.125px；1/64 像素相位 → ±0.008px）\n");
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

@@ -43,6 +43,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/core/pty.hpp"
 #include "st/text/ansi_screen.hpp"
 #include "st/ui/components/terminal.hpp"
@@ -190,6 +191,14 @@ void print_tally(const Arm& arm, const Tally& tally, double load_before, double 
 }  // namespace
 
 int main(int argc, char** argv) {
+  const st::probe::spec spec{
+      .title = "A/B 实验：`terminal_pty_stop_interrupts_without_killing_the_shell` 偶发红的因果与修法。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("pty_form_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const int per_arm = argc > 1 ? std::atoi(argv[1]) : 20;
   const std::string only = argc > 2 ? argv[2] : "all";
   if (!st::process::PtySession::supported()) {
@@ -237,5 +246,7 @@ int main(int argc, char** argv) {
   for (std::size_t index = 0; index < arms.size(); ++index) {
     print_tally(arms[index], tallies[index], load_at_start, load_at_end);
   }
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -37,6 +38,14 @@ struct Weight {
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "**逐字形渲染诊断**（仅验证用）：对一串文字**逐字**报「本次是否被拟合」、",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("glyph_weight_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   float scale = 1.5f;
   float size = 20.25f;
   GridFitMode fit = GridFitMode::Normal;
@@ -62,8 +71,8 @@ auto main(int argc, char** argv) -> int {
   }
   auto stack = FontStack::system_default();
   if (!stack) {
-    st::print("未找到可用字体\n");
-    return 1;
+    // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
+    return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体\\n"));
   }
   st::print("scale={} 物理字号={} fit={} gamma={}\n", scale, size,
             fit == GridFitMode::Off ? "off" : (fit == GridFitMode::Light ? "light" : "normal"),
@@ -102,5 +111,7 @@ auto main(int argc, char** argv) -> int {
   st::print("\n判读：同一字号/字重下**墨量应当接近**。哪个字被拟合（“拟合=是”）且\n"
             "墨量峰值高（接近 1.0），它就是“清晰的那个”——其余字是没被处理的那批。\n"
             "若同一串里拟合与否混杂，就是“字间不一致”的直接证据。\n");
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

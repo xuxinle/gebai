@@ -29,6 +29,7 @@
 #include "rasterize_internal.hpp"
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -270,6 +271,14 @@ auto diff_buffers(const Buffer& a, const Buffer& b) -> Diff {
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "阴影结构方案对照（性能轮）：两层各自合成 vs 合并成一张「阴影贴图」一次贴。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("shadow_sprite_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const int repeat = argc > 1 ? std::atoi(argv[1]) : 200;
   const float card_w = argc > 2 ? static_cast<float>(std::atof(argv[2])) : 140.0f;
   const float card_h = argc > 3 ? static_cast<float>(std::atof(argv[3])) : 48.0f;
@@ -339,5 +348,7 @@ auto main(int argc, char** argv) -> int {
   (void)blit_sprite(c_buffer, sprite, true, &cover);
   const Diff raw = diff_buffers(a_buffer, c_buffer);
   st::print("  A vs C（未铺底）：超差 {} px（最大Δ{}）\n", raw.differing, raw.max_delta);
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

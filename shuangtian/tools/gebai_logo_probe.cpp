@@ -28,6 +28,7 @@
 
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/svg.hpp"
 #include "st/ui/theme.hpp"
@@ -90,6 +91,14 @@ auto measure(const st::raster::Surface& surface) -> Metrics {
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "歌白品牌标记的接触印相（contact sheet）：把 `examples/assets/gebai-logo.svg` 在多个尺寸下",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("gebai_logo_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const std::string out = argc > 1 ? argv[1] : "gebai-logo-sheet.png";
   const std::string path =
       argc > 2 ? argv[2] : "examples/assets/gebai-logo.svg";
@@ -173,5 +182,7 @@ auto main(int argc, char** argv) -> int {
     }
     st::print("已写出 {}（{}×{} 裸图标，供窗口/任务栏使用）\n", icon_path, kIconSize, kIconSize);
   }
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

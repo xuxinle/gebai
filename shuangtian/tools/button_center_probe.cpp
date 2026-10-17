@@ -4,7 +4,8 @@
 // 不一致」这类问题——那正是真机上纵向偏 1~2px 的嫌疑来源。本探针用真字体，
 // 把「按 ink_metrics 推出来的墨迹中心」与「图上实际的墨迹中心」并排打出来。
 //
-// 用法： button_center_probe [font_size]
+// 判据：纵向偏移 |Δy| ≤ 1.0 px（超过即「字体度量与实际墨迹不一致」）。
+// 横向不判——比例字体的末字右侧留白本就使墨迹中心偏离框中心，那是排版事实而非缺陷。
 
 #include <algorithm>
 #include <cmath>
@@ -13,6 +14,7 @@
 
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
 #include "st/ui/components/basic.hpp"
@@ -64,12 +66,23 @@ struct InkBox {
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
-  const float size = argc > 1 ? std::stof(argv[1]) : 14.0f;
+  const st::probe::spec spec{
+      .title = "按钮居中：按 ink_metrics 推出的墨迹中心 vs 图上实际墨迹中心",
+      .criterion = "纵向偏移 |Δy| ≤ 1.0 px",
+      .usage_args = "[font_size]",
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("button_center_probe", spec, opts)) return st::probe::exit_ok;
+  // 参数非法不再抛（`std::stof` 越界/非数字是 UB 或异常）：缺失即取缺省值。
+  const float size = opts.positional_int(0) ? static_cast<float>(*opts.positional_int(0)) : 14.0f;
+
   auto loaded = st::text::FontStack::system_default();
   if (!loaded || loaded->empty()) {
-    st::print("字体栈不可用\n");
-    return 0;
+    // **不能返回 0**：字体栈不可用是「没测成」而非「测过且合格」。
+    // 返回 0 会让 CI 把「本机没字体」当成「居中没问题」——正是本仓反复出现的假绿。
+    return st::probe::main_of(spec, opts, st::probe::skip("字体栈不可用（本机无可用系统字体）"));
   }
+  st::probe::result verdict{};
   auto stack = std::make_shared<st::text::FontStack>(std::move(*loaded));
   auto renderer = std::make_unique<st::text::TextRenderer>(*stack, 1.0f);
   auto port = st::app::make_text_port(*renderer);
@@ -114,6 +127,11 @@ auto main(int argc, char** argv) -> int {
               static_cast<double>(box.center().x), static_cast<double>(ink.x0),
               static_cast<double>(ink.x1), static_cast<double>(ink.cx()),
               static_cast<double>(ink.cx() - box.center().x));
+    // 只判纵向：横向的偏移来自比例字体末字右侧留白（排版事实，不是缺陷）。
+    const double dy = static_cast<double>(ink.cy() - box.center().y);
+    verdict.add(std::string{item.tag} + " 纵向偏移", std::abs(dy) <= 1.0,
+                std::format("Δy={:+.3f}px", dy));
   }
-  return 0;
+  verdict.conclude();
+  return st::probe::main_of(spec, opts, verdict);
 }

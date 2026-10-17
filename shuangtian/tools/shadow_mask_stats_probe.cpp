@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/ui/theme.hpp"
@@ -77,7 +78,15 @@ auto report(const char* name, const Stats& stats) -> void {
 
 }  // namespace
 
-auto main() -> int {
+auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "阴影遮罩代价解剖（性能轮）：量出 md 两层阴影的遮罩里**真实有多少像素值得混合**。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("shadow_mask_stats_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const st::ui::Theme theme = st::ui::Theme::light();
   const st::ui::Shadow sm = st::ui::shadow_sm(theme);
   const st::ui::Shadow md = st::ui::shadow_md(theme);
@@ -93,5 +102,7 @@ auto main() -> int {
   // 对照：仅 key 层（单层阴影）的可见量
   st::print("对照：\n");
   report("md 两层合计", measure_shadow(md, md.blur, md.color, md.offset_y, false));
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

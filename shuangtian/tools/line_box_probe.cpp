@@ -23,6 +23,7 @@
 
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/text/text.hpp"
 #include "st/ui/text_port.hpp"
 #include "st/ui/line_layout.hpp"
@@ -58,11 +59,19 @@ void report(const st::ui::TextPort& port, std::string_view label, std::string_vi
 
 }  // namespace
 
-auto main() -> int {
+auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "代码编辑器「行内垂直几何」量尺：行距倍数的增量落到哪一侧。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("line_box_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   auto stack = st::text::FontStack::system_default();
   if (!stack) {
-    st::print("无可用字体栈——无法量测（本机缺字体时属预期）\n");
-    return 1;
+    // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
+    return st::probe::main_of(spec, opts, st::probe::skip("无可用字体栈——无法量测（本机缺字体时属预期）\\n"));
   }
   st::text::TextRenderer renderer(*stack);
   const st::app::RendererTextPort port(renderer);
@@ -80,5 +89,7 @@ auto main() -> int {
   }
   st::print("▲ 判据：spacing 从 1.0 加到 1.5 时，**上/下留白应各分增量的一半**。\n");
   st::print("  若『上留白』几乎不变而『下留白』吃掉全部增量，就是“间距全在行下方”。\n");
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

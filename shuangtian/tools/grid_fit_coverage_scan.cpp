@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -94,6 +95,14 @@ void scan(const st::text::TextRenderer::GlyphBitmap& bitmap, bool vertical,
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "**网格拟合覆盖率门槛扫描**（仅验证用）：把 `min_stem_coverage` 逐档扫过，",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("grid_fit_coverage_scan", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   float scale = 1.5f;
   float size = 20.25f;
   std::vector<std::string> texts;
@@ -109,8 +118,8 @@ auto main(int argc, char** argv) -> int {
   }
   auto stack = FontStack::system_default();
   if (!stack) {
-    st::print("未找到可用字体\n");
-    return 1;
+    // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
+    return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体\\n"));
   }
   st::print("scale={} 物理字号={}  覆盖率门槛扫描（汉字，γ=0.6，LCD）\n", scale, size);
   st::print("\n{:<10s} {:>8s} {:>12s} {:>10s}\n", "门槛", "应用率", "双峰笔划占比", "墨色 sd");
@@ -230,5 +239,7 @@ auto main(int argc, char** argv) -> int {
             "      对双峰组占比（同组内实心与发灰共存 = 观感上的“粗细不均”）。\n"
             "      门槛抬高会让更多字形整体放弃：这是“看得见的代价”（应用率下降），\n"
             "      换来的是不再产出**带低覆盖率却声称已拟合**的混合字形（看不见的那种）。\n");
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

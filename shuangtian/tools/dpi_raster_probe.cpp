@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -36,6 +37,14 @@ struct Shape {
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "**DPI 缩放路径验证**（仅验证用）：回答「先渲染再放大，还是按缩放后大小直接渲染」。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("dpi_raster_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   float logic_size = 20.0f;
   std::vector<std::string> texts;
   for (int index = 1; index < argc; ++index) {
@@ -46,8 +55,8 @@ auto main(int argc, char** argv) -> int {
   if (texts.empty()) texts = {"运行 霜天 R"};
   auto stack = FontStack::system_default();
   if (!stack) {
-    st::print("未找到可用字体\n");
-    return 1;
+    // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
+    return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体\\n"));
   }
   st::print("逻辑字号={}  文本：{}\n\n", logic_size, texts.front());
   st::print("{:<6s} {:>8s} {:>8s} {:>10s} {:>10s} {:>12s} {:>14s}\n", "缩放", "字形宽", "字形高",
@@ -100,5 +109,7 @@ auto main(int argc, char** argv) -> int {
   st::print("\n判读：**直接按物理尺寸栅格化** ⇒ 「宽÷缩放」恒定（=逻辑宽），"
             "且「过渡/墨像素」随缩放**递减（≈1/s）**。\n"
             "      **先渲染再放大** ⇒ 「过渡/墨像素」**保持不变**（边缘与字身同步被放大）。\n");
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

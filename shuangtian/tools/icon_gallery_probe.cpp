@@ -14,6 +14,7 @@
 
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/svg.hpp"
@@ -28,6 +29,14 @@ constexpr int kRowPitch = 40;   ///< 每行的纵向间距（在逻辑像素上�
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "**图标集总览**探针：把 sprite 里的每个图标按多个尺寸渲染成一张网格图（仅验证用）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("icon_gallery_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const std::string icons_path = argc > 1 ? argv[1] : "examples/gallery/assets/icons.svg";
   const std::string out_dir = argc > 2 ? argv[2] : ".";
   const float scale = argc > 3 ? std::stof(argv[3]) : 2.0f;
@@ -77,5 +86,7 @@ auto main(int argc, char** argv) -> int {
             std::size(kSizes), canvas.physical_width(), canvas.physical_height());
   for (const auto& id : ids) st::print("  {}", id);
   st::print("\n");
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

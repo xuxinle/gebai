@@ -16,6 +16,7 @@
 
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/gpu.hpp"
 #include "st/raster/surface.hpp"
@@ -89,7 +90,15 @@ struct Scene {
 
 }  // namespace
 
-auto main() -> int {
+auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "GPU/软件结构性差异的**空间分布**诊断：把同一个场景渲染两份，按行统计「差 >64」的",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("gpu_structural_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   Scene scene;
   if (scene.gpu == nullptr) {
     st::print("GPU 表面不可用\n");
@@ -169,5 +178,7 @@ auto main() -> int {
               static_cast<double>(bounds.width), type);
   }
   (void)kBackground;
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

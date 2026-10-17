@@ -30,6 +30,7 @@
 #include FT_OUTLINE_H
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/path.hpp"
 #include "st/text/font.hpp"
 
@@ -166,6 +167,14 @@ int cubic_to(const FT_Vector* c1, const FT_Vector* c2, const FT_Vector* to, void
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "**轮廓对照探针**：霜天自研 CFF/TTF 解释器 vs FreeType，逐字形比几何。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("glyph_outline_compare", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const std::string path = argc > 1 ? argv[1]
                                     : "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
   const int face_index = argc > 2 ? std::atoi(argv[2]) : 2;
@@ -224,5 +233,7 @@ auto main(int argc, char** argv) -> int {
   }
   FT_Done_Face(ft);
   FT_Done_FreeType(lib);
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

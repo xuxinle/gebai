@@ -13,6 +13,7 @@
 #include "rasterize_internal.hpp"
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
@@ -48,6 +49,14 @@ auto count_points(const std::vector<st::raster::Polyline>& lines) -> std::size_t
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "描边路径成本分解（性能轮）：把 `stroke_path` 拆成「扁平化 / 扩展成轮廓 / 扫描线光栅化」三段，",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("stroke_cost_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const int repeat = argc > 1 ? std::atoi(argv[1]) : 200;
   st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(kWidth, kHeight, 1.0f);
   canvas.clear(st::math::Color::rgb(0xF7, 0xF8, 0xFA));
@@ -101,5 +110,7 @@ auto main(int argc, char** argv) -> int {
   for (const Row& row : rows) {
     st::print("  {:<34} {:>9.4} ms · {:>9.1} µs\n", row.name, row.ms, row.ms * 1000.0);
   }
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

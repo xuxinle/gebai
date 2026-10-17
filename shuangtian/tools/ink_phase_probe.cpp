@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
 
@@ -41,6 +42,14 @@ auto ink_of(const Canvas& canvas) -> double {
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "**字形相位对墨量的影响**（仅验证用，不进框架构建、不进 `st.pkg`）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("ink_phase_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const float size = argc > 1 ? std::stof(argv[1]) : 11.0f;
   const std::string ch = argc > 2 ? argv[2] : "l";
   auto stack = FontStack::system_default();
@@ -133,5 +142,7 @@ auto main(int argc, char** argv) -> int {
   }
   st::print("\n判据：① 若同一字形只改起点小数部分就让墨量明显变化（几 % 级），\n");
   st::print("      则「孤立单字形 vs 文本串」的差异主要是**采样相位**，不是渲染质量差异。\n");
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

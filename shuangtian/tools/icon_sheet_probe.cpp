@@ -20,6 +20,7 @@
 
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/icon.hpp"
 #include "st/ui/theme.hpp"
@@ -32,6 +33,14 @@ using st::math::Rect;
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "图标接触印相（contact sheet）：把全部内置图标渲成一张大图，供肉眼评估“美不美”。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("icon_sheet_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const std::string out = argc > 1 ? argv[1] : "icon-sheet.png";
   const int cell = argc > 2 ? std::atoi(argv[2]) : 72;
   const std::string theme_name = argc > 3 ? argv[3] : "dark";
@@ -110,5 +119,7 @@ auto main(int argc, char** argv) -> int {
     }
   }
   st::print("已写出 {}\n", out);
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

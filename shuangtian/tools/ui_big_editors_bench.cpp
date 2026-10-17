@@ -31,6 +31,7 @@
 
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
 #include "st/ui/components/code_editor.hpp"
@@ -75,6 +76,14 @@ template <class Fn>
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "`CodeEditor` / `Terminal` 大内容量尺 —— 与 `ui_tree_rows_bench` 同一套口径。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("ui_big_editors_bench", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const std::size_t lines = argc > 1 ? static_cast<std::size_t>(std::atoll(argv[1])) : 2000U;
 
   auto fonts = st::text::FontStack::system_default();
@@ -152,5 +161,7 @@ auto main(int argc, char** argv) -> int {
     st::print("  Terminal    paint(稳态)   {:8.3f} ms   <- 每帧成本\n", steady_ms);
   }
 
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

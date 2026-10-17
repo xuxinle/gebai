@@ -13,6 +13,7 @@
 #include <string>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/ui/components/basic.hpp"
@@ -77,6 +78,14 @@ auto build_ui(const Config& config) -> std::unique_ptr<st::ui::Element> {
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "整帧热点探针（性能轮）：**只为采样剖析存在**——无限循环跑「标脏 → 布局 → 清屏 → 绘制整树」，",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("paint_hotspot_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const int max_frames = argc > 1 ? std::atoi(argv[1]) : 0;
   Config config;
   config.text = env_flag("ST_HOTSPOT_TEXT", true);
@@ -107,5 +116,7 @@ auto main(int argc, char** argv) -> int {
                         .count();
   st::print("hotspot probe: {} 帧 · {:.2f} ms/帧（{:.1f} FPS）\n", frames, ms / frames,
             1000.0 * static_cast<double>(frames) / ms);
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

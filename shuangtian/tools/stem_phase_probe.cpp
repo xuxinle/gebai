@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
 #include "st/text/font.hpp"
 #include "st/text/grid_fit.hpp"
@@ -213,6 +214,14 @@ void report(const char* title, const Tally& data) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  const st::probe::spec spec{
+      .title = "小字锐度**量尺**（仅验证用，不进框架构建、不进 `st.pkg`）：统计 13.5px 正文字形的",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("stem_phase_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   GridFitMode mode = GridFitMode::Off;
   bool latin = false;
   for (int index = 1; index < argc; ++index) {
@@ -224,8 +233,8 @@ int main(int argc, char** argv) {
 
   auto stack = st::text::FontStack::system_default();
   if (!stack) {
-    st::print("无可用字体（ST_FONT_LATIN/ST_FONT_CJK 可显式指定）\n");
-    return 1;
+    // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
+    return st::probe::main_of(spec, opts, st::probe::skip("无可用字体（ST_FONT_LATIN/ST_FONT_CJK 可显式指定）\\n"));
   }
   const auto faces = stack->faces();
   if (faces.empty()) return 1;
@@ -251,5 +260,7 @@ int main(int argc, char** argv) {
                          static_cast<double>(cjk_face.metrics().units_per_em), mode));
   }
   st::print("  （{}）\n", label);
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

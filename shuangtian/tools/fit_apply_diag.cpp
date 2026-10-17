@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
 #include "st/text/font.hpp"
 #include "st/text/grid_fit.hpp"
@@ -43,11 +44,19 @@ namespace {
 
 }  // namespace
 
-auto main() -> int {
+auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "逐字形拟合生效性诊断（仅验证用）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("fit_apply_diag", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   auto stack = FontStack::system_default();
   if (!stack) {
-    st::print("未找到字体\n");
-    return 1;
+    // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
+    return st::probe::main_of(spec, opts, st::probe::skip("未找到字体\\n"));
   }
   const FontStack& fonts = *stack;
   const float pixel_size = 20.25f;
@@ -76,5 +85,7 @@ auto main() -> int {
       }
     }
   }
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

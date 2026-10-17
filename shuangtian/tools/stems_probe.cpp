@@ -13,6 +13,7 @@
 #include <cstdlib>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/text/text.hpp"
 
 using st::text::FontRole;
@@ -59,11 +60,19 @@ const char* kSamples[] = {
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const st::probe::spec spec{
+      .title = "**hint 路径验收入口**（仅验证用，不进框架构建、不进 `st.pkg`）。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("stems_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   float logical = argc > 1 && argv[1][0] != '-' ? std::stof(argv[1]) : 15.0f;
   auto stack = FontStack::system_default();
   if (!stack) {
-    st::print("未找到可用字体\n");
-    return 1;
+    // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
+    return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体\\n"));
   }
   const FontStack& fonts = *stack;
   const float scale = 1.5f;
@@ -138,5 +147,7 @@ auto main(int argc, char** argv) -> int {
   }
   st::print("合计：{} 个字形中 {} 个用上了 hints，{} 个没有；笔画总数 {}（其中 hint {}）\n", with_hint + without_hint,
             with_hint, without_hint, total_stems, total_hint);
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }

@@ -17,6 +17,7 @@
 #include <thread>
 
 #include "st/core/print.hpp"
+#include "st/probe/probe.hpp"
 #include "st/core/pty.hpp"
 #include "st/text/ansi_screen.hpp"
 #include "st/ui/components/terminal.hpp"
@@ -201,6 +202,14 @@ void one_round(int round, int settle_ms, bool early_stop) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  const st::probe::spec spec{
+      .title = "量清 `terminal_pty_stop_interrupts_without_killing_the_shell` 为何偶发红。",
+      .criterion = "",  // 判据由人补（脚本不猜合格线）
+  };
+  const auto opts = st::probe::options::from(argc, argv);
+  if (st::probe::help_requested("pty_stop_probe", spec, opts)) return st::probe::exit_ok;
+  st::probe::result verdict{};
+
   const int rounds = argc > 1 ? std::atoi(argv[1]) : 5;
   const int settle_ms = argc > 2 ? std::atoi(argv[2]) : 0;
   const bool early_stop = argc > 3 && std::atoi(argv[3]) != 0;
@@ -211,5 +220,7 @@ int main(int argc, char** argv) {
   st::print("轮数={} · 发 Ctrl+C 前的额外延时={} ms · 不等前置={}\n", rounds, settle_ms,
             early_stop ? 1 : 0);
   for (int i = 1; i <= rounds; ++i) one_round(i, settle_ms, early_stop);
-  return 0;
+  // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
+
+  return st::probe::main_of(spec, opts, verdict);
 }
