@@ -1574,6 +1574,9 @@ result["backend"] = metrics.backend;
 // 渲染器必须可查：`auto` 是按实测选的，用户有权知道这一帧谁画的、以及为什么。
 result["renderer"] = metrics.renderer;
 result["renderer_note"] = metrics.renderer_note;
+// 上屏路径（X11：MIT-SHM vs XPutImage）：与 renderer_note 并列上报——
+// 两者一起构成“这一帧是谁画的、怎么送上屏的”完整事实。
+result["present_note"] = metrics.present_note;
 // 文字抗锯齿形态："字看着糊/带彩边"这类观感问题，第一件要确认的就是它在用哪一种
 // （它随“有无窗口”与启动参数而变，不报就只能猜）
 result["text_renderer"] = metrics.text_renderer;

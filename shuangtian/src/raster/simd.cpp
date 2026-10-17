@@ -239,4 +239,39 @@ void erase_row(std::uint32_t* dst, std::size_t count, std::uint8_t alpha) noexce
   fill_row(dst, count, value);
 }
 
+void convert_rgba_to_xrgb_row(std::uint32_t* dst, const std::uint32_t* src,
+                              std::size_t count) noexcept {
+  if (count == 0) return;
+#if ST_SIMD_AVX2
+  if (cpu_has_avx2()) {
+    const __m256i alpha_bits = _mm256_set1_epi32(static_cast<int>(0xFF000000U));
+    std::size_t index = 0;
+    for (; index + 8 <= count; index += 8) {
+      const __m256i value = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + index));
+      // `srli_epi32(…, 8)` 得 `0x00RRGGBB`，再置高字节为 `0xFF`（不透明标记，
+      // 与标量实现及旧版后端逐字节一致）。
+      const __m256i shifted = _mm256_srli_epi32(value, 8);
+      _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + index),
+                          _mm256_or_si256(shifted, alpha_bits));
+    }
+    for (; index < count; ++index) dst[index] = ((src[index] >> 8U) & 0x00FFFFFFU) | 0xFF000000U;
+    return;
+  }
+#endif
+#if ST_SIMD_X86
+  const __m128i alpha_bits = _mm_set1_epi32(static_cast<int>(0xFF000000U));
+  std::size_t index = 0;
+  for (; index + 4 <= count; index += 4) {
+    const __m128i value = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + index));
+    const __m128i shifted = _mm_srli_epi32(value, 8);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + index), _mm_or_si128(shifted, alpha_bits));
+  }
+  for (; index < count; ++index) dst[index] = ((src[index] >> 8U) & 0x00FFFFFFU) | 0xFF000000U;
+#else
+  for (std::size_t index = 0; index < count; ++index) {
+    dst[index] = ((src[index] >> 8U) & 0x00FFFFFFU) | 0xFF000000U;
+  }
+#endif
+}
+
 }  // namespace st::raster::simd

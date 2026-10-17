@@ -2,7 +2,7 @@
 
 **哪份文档答哪个问题、它还跟不跟着代码变。**
 
-> 这份地图是**入口**：除了它自己，其余 22 份文档都在下表中。
+> 这份地图是**入口**：除了它自己，其余 24 份文档都在下表中。
 > 加新文档时同步改这里（见文末「新知识该写哪份」——地图烂掉的根因是只写读法不写写法）。
 
 ## 一句话：先按意图找，再按「寿命契约」决定信多少
@@ -22,7 +22,7 @@
 
 ---
 
-## A. 活文档（9 份）——写代码前后的必读
+## A. 活文档（10 份）——写代码前后的必读
 
 | 文档 | 回答的问题 | 什么时候看 | 契约 |
 |---|---|---|---|
@@ -34,6 +34,7 @@
 | [`perceptual_changes.md`](perceptual_changes.md) | 观感类改动（字体/配色/动画/手感）怎么做：正交量、量尺三坑、八步循环 | **验收标准是"人的感受"**时（不是测试红绿） | 活 |
 | [`PITFALLS.md`](PITFALLS.md) | **坑位速查**：按**发生场景**（刚改完代码/写回归测试/改观感/跨平台/…）索引"这类事以前踩过什么" | **开工前**扫一眼当前场景那一节（30 秒）；卡住时先来查 | 活·索引 |
 | [`EXAMPLES_E2E.md`](EXAMPLES_E2E.md) | 五示例 e2e 驱动入口表：哪个脚本验证哪个面、怎么跑全量 | 新增示例/e2e 脚本时同步登记；跑示例验收时查表 | 活 |
+| [`VERIFY-PLAYBOOK.md`](VERIFY-PLAYBOOK.md) | **收单前逐项勾的验收判据总表**：四类交付各要过哪些门、用什么命令、去哪看原文 | **收任何一单之前**（漏查的那道门，代价见它文末的真实案例） | 活·索引 |
 | [`../docs/README.md`](README.md) | 本文件 | —— | 活 |
 
 ## B. 待办台账（1 份）
@@ -59,7 +60,7 @@
 | [`SKIA_TEXT_RENDERING_STUDY.md`](SKIA_TEXT_RENDERING_STUDY.md) | Skia/Chromium 覆盖率与网格拟合怎么做的（给"中文线条不均匀"找有依据的方向） | 源码 1 处 | 实测 |
 | [`BASELINE_METRICS_20261014.md`](BASELINE_METRICS_20261014.md) | **基础指标基线**（性能/产物大小/内存）：改动前后的可复跑数字 + 内存去向分解 + 「为何把 <20MiB 改成分档」 | `DESIGN.md` §11.1、`BACKLOG.md` | 实测 |
 
-## D. 设计与修复记录（7 份）——已落地，读它是为了**别重蹈**
+## D. 设计与修复记录（8 份）——已落地（或已成文的方案），读它是为了**别重蹈**
 
 | 文档 | 讲的是什么 | 契约 |
 |---|---|---|
@@ -70,6 +71,7 @@
 | [`OPTIMIZATION_PROGRESS.md`](OPTIMIZATION_PROGRESS.md) | 结构优化过程与交接 | 记录 |
 | [`OPTIMIZATION_REPORT.md`](OPTIMIZATION_REPORT.md) | 结构优化收尾报告（17 个提交，每阶段可单独回滚） | 记录 |
 | [`MERGE_REVIEW.md`](MERGE_REVIEW.md) | `optimize/ui-viewport-2026` 分支的合并前复核（16 笔提交逐笔：改动/验证/风险/回滚点；2026-10-14）——分支合并前的复核范式 | 记录（一次性，分支已并入） |
+| [`BUILD_ISOLATION_PLAN.md`](BUILD_ISOLATION_PLAN.md) | **构建隔离方案（未落地）**：同域多 worker 互踩的四层机制（含两层静默）+ 量化实测、`--build-dir`/`ST_BUILD_DIR` vs 构建锁的改动面与代价、推荐顺序 | 方案（公共接口**只分析未落地**；现状与判据见 `CONVENTIONS.md` §9.0④） |
 
 ## E. 专题设计（3 份）
 
@@ -105,6 +107,7 @@
 | 知道三维为什么还没有 GPU 实现 | `DESIGN.md` §8.4.2（触发条件与阈值，而不是"以后补"） |
 | 知道渲染架构为什么这样分 | `DESIGN.md` §8.4.1（三条腿的取舍与移除 OpenGL 的依据） |
 | 知道谁画得快、为什么 | `DESIGN.md` §4.2.3（覆盖率运行段）、§4.2.8（逐原语剖析）、`docs/PAINT_DIAGNOSIS.md` |
+| **验收一单之前：该逐项查什么** | `docs/VERIFY-PLAYBOOK.md`（**判据总表**：按交付类型分行，每道门只给一句话 + 命令 + 指过去的详述） |
 | **别重蹈覆辙** | **三处按场景查**：`docs/PITFALLS.md`（**坑位速查**，按“你此刻在做什么”索引，开工前扫一眼）→ `DESIGN.md` §8.2（60 条真实缺陷，带现象/根因/修复）→ `docs/BACKLOG.md`「已完成」段（同一缺陷的完整取证过程；**它也是坑库，不只记结果**） |
 | 写视觉相关代码（颜色、阴影、尺度） | `CONVENTIONS.md` §9.1 + `DESIGN.md` §4.2.4~4.2.6、§5 |
 | **改观感**（字体/配色/动画/手感） | `docs/perceptual_changes.md`（**先读它**，含量尺三坑与八步循环） |
@@ -127,6 +130,7 @@
 **① 探针与脚本（`tools/`，160 个）**——用途见 [`../tools/README.md`](../tools/README.md)，按用途分：
 - **e2e 驱动**（`*_e2e.py`）：控制通道端到端（`gbcode`/`gallery`/`louyue`/`caiyun`/`split_view`/`theme_file`/`input_action`/`visual_assert`/`events`/`framework_gaps`）
 - **逆向验证**（`*_reverse_verify.py`）：把修复回退、断言变红——证明测试**真能抓住**缺陷
+- **PTY 中止判据**（判 `terminal_pty_stop_interrupts_without_killing_the_shell` 那条「`Ctrl+C` 被吞」的竞态）：**主判据是 `tools/pty_timeline.py` 量出的 `t_fg − t_marker` 的符号**（标记字节到达 − 前台进程组易主，µs；`python3 tools/pty_timeline.py [每形态轮数]`）——**旧写法 `echo …; sleep 60` 为正**（标记先出、交接在后 ⇒ 窗口在，实测 +0.6 ms p50）、**新写法 `/bin/sh -c "…; exec sleep 60"` 为负**（交接在标记之前 ⇒ 窗口关，实测 −1.1 ms p50）；它不受负载扰动，比红率硬。辅助三件：`tools/pty_form_probe.cpp`（三臂形态对照：`st build pty_form_probe --profile dev` 后跑 `build/dev/bin/pty_form_probe <每臂轮数> [P\|A\|B\|all]`；它需在 `st.pkg` 的 `targets` 里声明，写法同相邻的 `pty_stop_probe` 一条）、`tools/pty_stop_ab.py`（失败形态分类：被吞还是僵住 + 负载相关性）、`tools/pty_form_reverse_verify.py`（把窗口固定放大到 300 ms 再回退的逆向验证；它自己会判「零红 = 本环境复现不出，没有判别力」）。红率只能作旁证且必须同时报轮数、对照条件与检出下限
 - **像素/文字量测**（`*_probe.py`、`*_ink*.py`、`text_*.py`）：从截图里量几何与墨量（观感类改动的尺子）
 - **诊断探针**（`tools/*.cpp`）：`crash_probe`、`icon_metric_probe`、`icon_ascii_probe`、`make_sample_png` 等
 - **文档/结构核对**（`check_docs.py`、`check_selfcontained.py`）

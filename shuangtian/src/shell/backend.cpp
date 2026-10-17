@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <chrono>
+#include <cmath>
 #include <format>
 
 #include "st/core/fs.hpp"
@@ -199,6 +200,26 @@ auto system_display_scale() noexcept -> float {
   // 无“系统显示缩放”概念：1.0（与窗口后端在无 DPI 概念平台上的默认一致）。
   return 1.0f;
 #endif
+}
+
+auto resolve_present_area(math::IntRect region, float scale, int width, int height) noexcept
+    -> math::IntRect {
+  const auto clamp_axis = [](int value, int limit) { return std::clamp(value, 0, limit); };
+  if (width <= 0 || height <= 0) return math::IntRect{};
+  if (region.is_empty()) return math::IntRect{0, 0, width, height};
+  const double factor = scale > 0.0f ? static_cast<double>(scale) : 1.0;
+  // 左/上向下取整、右/下向上取整：**向外取整**——宁可多发一列也不能漏一条边缘
+  // （`round` 会把 100.4 的右缘收成 100，漏掉半像素，表现为“动一下边缘就缺一条”）。
+  const int left = clamp_axis(static_cast<int>(std::floor(static_cast<double>(region.x) * factor)),
+                              width);
+  const int top = clamp_axis(static_cast<int>(std::floor(static_cast<double>(region.y) * factor)),
+                             height);
+  const int right = clamp_axis(
+      static_cast<int>(std::ceil(static_cast<double>(region.x + region.width) * factor)), width);
+  const int bottom = clamp_axis(
+      static_cast<int>(std::ceil(static_cast<double>(region.y + region.height) * factor)), height);
+  if (right <= left || bottom <= top) return math::IntRect{};
+  return math::IntRect{left, top, right - left, bottom - top};
 }
 
 auto create_backend(std::string_view name) -> Result<std::unique_ptr<Backend>> {

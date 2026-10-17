@@ -284,3 +284,124 @@ ST_TEST(unknown_backend_name_is_rejected_not_silently_ignored) {
   auto second = st::shell::create_backend("nope");
   ST_CHECK(!second.has_value());
 }
+
+ST_TEST(present_region_empty_means_full_canvas) {
+  // “没说改哪里”的最安全解释就是“哪里都可能改了”——后端据此整屏上屏。
+  // 反向验证：把 `resolve_present_area` 的空区分支改成返回空矩形，本用例变红。
+  const auto full = st::shell::resolve_present_area(st::math::IntRect{}, 1.0f, 800, 600);
+  ST_CHECK_EQ(full.x, 0);
+  ST_CHECK_EQ(full.y, 0);
+  ST_CHECK_EQ(full.width, 800);
+  ST_CHECK_EQ(full.height, 600);
+  // 宽/高为 0 的退化画布：不得返回负数宽（那是后面 `for (row…)` 越界的入口）。
+  const auto degenerate = st::shell::resolve_present_area(st::math::IntRect{}, 1.0f, 0, 600);
+  ST_CHECK(degenerate.width <= 0);
+}
+
+ST_TEST(present_region_scales_outward_and_clamps) {
+  // 逻辑 → 物理的换算规则：左/上向下取整、右/下**向上取整**（向外取整）。
+  // 为什么这条值得单测：`round` 会把 100.4 的右缘收成 100——**漏掉半像素**，
+  // 表现为“悬浮某个按钮时它右缘缺一条”。它只在像素级比对里能看出来，
+  // 而那类缺陷极难归因（全自绘框架没有系统合成器兜底）。
+  //
+  // 反向验证（两处都要回退才变红，见 CONVENTIONS §7.3“回退半边修复”）：
+  // ① 把右/下的 `ceil` 改回 `round`；② 去掉 `clamp_axis`。
+  {
+    const auto area = st::shell::resolve_present_area(st::math::IntRect{10, 20, 30, 40}, 1.5f,
+                                                      800, 600);
+    ST_CHECK_EQ(area.x, 15);    // floor(10 * 1.5)
+    ST_CHECK_EQ(area.y, 30);    // floor(20 * 1.5)
+    ST_CHECK_EQ(area.width, 45);   // ceil(40*1.5)=60 - 15
+    ST_CHECK_EQ(area.height, 60);  // ceil(60*1.5)=90 - 30
+  }
+  // 非整数缩放下的**向外取整**：源区 100.4~118.9 物理像素必须覆盖 100~119。
+  {
+    const auto area = st::shell::resolve_present_area(st::math::IntRect{67, 0, 12, 5}, 1.0f, 800,
+                                                      600);
+    ST_CHECK_EQ(area.x, 67);
+    ST_CHECK_EQ(area.width, 12);
+  }
+  // **向外取整的作用点是非整数缩放**（源区已是整数逻辑像素，但 ×1.5 会落出小数）：
+  // `left=7, width=3` 在 1.5× 下对应物理 [10.5, 15.0)——左缘 floor 成 10、
+  // 右缘 ceil 成 15。若右缘也用 floor，`[10.5, 15.0)` 会被算成 [10, 10) = **空区**，
+  // 或者 [10.5, 15.0) 算成 [10, 15) 看着对、但 `[3,0,1,1]` 这种小区会整块消失。
+  {
+    const auto area = st::shell::resolve_present_area(st::math::IntRect{7, 0, 3, 3}, 1.5f, 800,
+                                                      600);
+    ST_CHECK_EQ(area.x, 10);
+    ST_CHECK_EQ(area.width, 5);  // ceil(15.0) - floor(10.5) = 15 - 10
+  }
+  {
+    // ★ **能区分 ceil/floor 的关键用例**：右/下缘乘完后落在**非整数**上。
+    // 逻辑 [4, 7.5) 在 1.5× 下是物理 [6.0, 11.25)——但 `IntRect` 的右缘是 4+1=5，
+    // 物理 [6.0, 7.5)：ceil(7.5)=8、floor(7.5)=7。少这一列像素 = 右/下边缘缺一条。
+    // ⚠ 前两版的测例（{7,0,3,3} ×1.5 → 10.0~15.0）两个取整函数结果**相同**，
+    // 回退 ceil→floor 后测试仍是绿的（逆向验证当场抓出来：“假绿”）。
+    const auto area =
+        st::shell::resolve_present_area(st::math::IntRect{4, 0, 1, 1}, 1.5f, 800, 600);
+    ST_CHECK_EQ(area.x, 6);      // floor(4 * 1.5) = floor(6.0)
+    ST_CHECK_EQ(area.width, 2);  // ceil(5 * 1.5) = ceil(7.5) = 8；8 - 6
+  }
+  {
+    // 单像素源区在 1.5× 下必须仍然非空（向内取整会静默吞掉的最小用例）。
+    const auto area = st::shell::resolve_present_area(st::math::IntRect{3, 0, 1, 1}, 1.5f, 800,
+                                                      600);
+    ST_CHECK(!area.is_empty());
+    ST_CHECK_EQ(area.x, 4);
+    ST_CHECK_EQ(area.width, 2);  // ceil(6.0) - floor(4.5)
+  }
+  // 越界必须夹到画布内（不夹的话 `blit` 的行偏移会越出像素缓冲 → 越界读）。
+  {
+    const auto area = st::shell::resolve_present_area(st::math::IntRect{700, 500, 400, 400}, 1.0f,
+                                                      800, 600);
+    ST_CHECK_EQ(area.x, 700);
+    ST_CHECK_EQ(area.y, 500);
+    ST_CHECK_EQ(area.width, 100);
+    ST_CHECK_EQ(area.height, 100);
+  }
+  // 完全在画布外 → 空矩形（调用方据此跳过本帧，而不是发一个零尺寸请求）。
+  {
+    const auto area = st::shell::resolve_present_area(st::math::IntRect{900, 900, 50, 50}, 1.0f, 800,
+                                                      600);
+    ST_CHECK(area.is_empty());
+  }
+  // 负坐标（滚出视口的内容）同样夹到 0，不得返回负偏移。
+  {
+    const auto area = st::shell::resolve_present_area(st::math::IntRect{-50, -30, 100, 60}, 1.0f,
+                                                      800, 600);
+    ST_CHECK_EQ(area.x, 0);
+    ST_CHECK_EQ(area.y, 0);
+    ST_CHECK_EQ(area.width, 50);
+    ST_CHECK_EQ(area.height, 30);
+  }
+  // scale=1 时换算必须是恒等（否则“1x DPI 下局部重绘偏移”会静默引入）。
+  {
+    const st::math::IntRect source{37, 11, 123, 45};
+    const auto area = st::shell::resolve_present_area(source, 1.0f, 800, 600);
+    ST_CHECK_EQ(area.x, source.x);
+    ST_CHECK_EQ(area.y, source.y);
+    ST_CHECK_EQ(area.width, source.width);
+    ST_CHECK_EQ(area.height, source.height);
+  }
+}
+
+ST_TEST(headless_present_region_is_accepted_and_ignored) {
+  // `set_present_region` 的契约：后端**可以忽略它**（无头写入离屏缓冲，无传输范围可言），
+  // 但接口必须存在且在任意合法值下不得崩。这是“应用不必知道后端会不会用它”的前提——
+  // 否则应用侧得写 `#if` 分后端，那正是分层要消除的东西。
+  auto backend = st::shell::create_backend("headless");
+  ST_CHECK(backend.has_value());
+  if (!backend.has_value()) return;
+  WindowOptions options;
+  options.width = 320;
+  options.height = 240;
+  options.renderer = "software";
+  if (auto status = (*backend)->create_window(options); !status) return;
+  (*backend)->set_present_region(st::math::IntRect{10, 10, 20, 20});
+  (*backend)->present();
+  (*backend)->set_present_region(st::math::IntRect{});
+  (*backend)->present();
+  (*backend)->set_present_region(st::math::IntRect{-5, -5, 1000, 1000});
+  (*backend)->present();
+  ST_CHECK_EQ((*backend)->frame_count(), std::uint64_t{3});
+}

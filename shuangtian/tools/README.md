@@ -84,6 +84,10 @@
 | `font_stack_cost_probe.cpp` | **字体栈热调用成本分解**：平台层候选链枚举 / 文件存在性探测 / 完整 `system_default()` 各一段，取**最小值**（均值会被一次杀毒扫描带偏）。曾用来把“热调用 44 ms”定位到 `load_face` |
 | `font_face_index_cost_probe.cpp` | **逐 (字体, face_index) 的 `FontFace::load` 耗时**：定位「失败不进缓存 × 盲试 face 下标」——越界那次也要读完全文件才报 `NotFound`，且每次调用重付 |
 | `pty_stop_probe.cpp` | **PTY 中止时机探针**：发 `Ctrl+C` 前后逐轮报状态（回显/标记/提示符数/屏幕字节数）。关键发现：命令未真正跑起来时中断会被**吞掉**，且**再发一次 15 ms 就恢复**（⇒ 是测试时序问题，不是会话僵住）。带 `settle_ms`/`early_stop` 旋钮做对照实验 |
+| `pty_timeline.py` | **竞态窗口量尺（主判据）**：逐轮采样 `t_marker`（标记字节从 pty 读到）与 `t_fg`（前台进程组易主），报两者**差值的符号**。正 = 标记先出、终端交接在后 ⇒ 这中间的 `Ctrl+C` 会被 bash 收下并丢弃（窗口存在）；负 = 交接早于标记 ⇒ 窗口不存在。实测旧写法 `echo …; sleep 60` **+569…+2277 µs**、新写法 `/bin/sh -c "…; exec sleep 60"` **−1845…−1196 µs**。**它不受 CPU 负载扰动**（负载会同时拖慢两侧、相对时序不变），因此比红率硬：96 路空转加压跑 60 轮仍 0/60 红，而本脚本单跑就能给出正负号。用法：`python3 tools/pty_timeline.py [每形态轮数]` |
+| `pty_form_probe.cpp` | **三臂形态对照探针**：P（只等命令行回显）/ A（等 bash 内建 `echo` 打的标记）/ B（整条一个前台作业，`sh -c '…; exec sleep 60'`）——**逐轮轮转**三臂（避免“先跑的那臂恰好赶上别人的构建”变成系统性偏差），各报红率 / 绿轮耗时 / 负载。P 臂是**灵敏度正对照**：P 零红就说明机器太闲、本实验无效，必须加压重跑。用法：`st build pty_form_probe --profile dev` 后 `build/dev/bin/pty_form_probe [每臂轮数] [P\|A\|B\|all]`（需先在 `st.pkg` 的 `targets` 里按 `pty_stop_probe` 同款加一条） |
+| `pty_stop_ab.py` | **失败形态分类器**：把 `pty_stop_probe` 的逐轮输出归成两类——「等得不够久」（`back_to_prompt` 晚）vs「`Ctrl+C` 被整条吞掉」（失败轮里再发一次 3 s 内恢复，说明是测试时序而非会话僵住），并报红轮里「after-stop 可见也判绿」的**弱判据**轮次与起止负载。用法：`python3 tools/pty_stop_ab.py <轮数> [--label 名字]`（探针路径经 `PTY_PROBE` 覆盖，默认 `build/dev/bin/pty_stop_probe`） |
+| `pty_form_reverse_verify.py` | **逆向验证（pty 前置形态）**：把 `tests/ui_terminal_pty_test.cpp` 的 `long_cmd` 回退成**结构等价、窗口固定放大到 300 ms** 的旧形态（`echo MARK; sh -c 'trap "" INT; sleep 0.3; exec sleep 60'`），要求旧形态**真的变红**、新形态零红。默认用放大器而不用裸旧写法：裸写法窗口只有 1–2 ms，**低负载下 20 轮零红**，拿它当判据会把“复现不出”误读成“旧写法没问题”（`--raw` 仅作对照、不作判据）。**它自己会判「旧形态零红 ⇒ 本环境没有判别力，不要当结论」**。负载生成器只吃 CPU、不碰构建目录，每个 burner 由 `timeout` 把守 + 整段 `try/finally`（早退也不留孤儿空转进程）。用法：`python3 tools/pty_form_reverse_verify.py [每形态轮数] [--raw] [--load N]` |
 | `gen_text_ab.py` | **文字 A/B 对照的单一真源**：生成两侧的 HTML / C++ 行表 / JSON 元数据（字符集页 + 字号阶梯页）。三份表手工维护必然漂移，而漂移出来的错位会被读成"渲染差异" |
 | `text_ab_shot.mjs` | **浏览器侧参照截图**（真窗口 headed + Xvfb，非 headless）+ 导出逐行**实际字体归属**（CDP）与 DOM 像素框。字体不同源时量到的是字体差异——`text_ab_diff.py` 会据此直接报错 |
 | `text_ab_diff.py` | **逐带 A/B 量化**：两侧各自按行投影切带、按序配对（两侧基线口径不同源，@15px/1.5 差 7.8 物理像素），逐通道覆盖率投影。报墨量/实心/过渡三个比值 + 带高带宽比 |
@@ -109,3 +113,6 @@
 | `split_view_e2e.py` | **SplitView 端到端**：真实应用上验证初始比例/拖拽改比例/越界夹取/动作面/截图留证 |
 | `input_action_e2e.py` | **Input 动作面端到端**：`invoke submit`（不经键盘 Enter）/ `clear` / 未知动作拒绝 |
 | `gallery_declarative_e2e.py` | **gallery 声明式页端到端**（`mount_into` 子树挂载路径）：进页 → 声明式元素在树上 → 状态驱动回显 → 列表增项（key 对齐：既有项 id 不变）→ 条件内容裁剪与重新进场 → 截图 |
+| `frame_breakdown.py` | **帧分解量尺**（layout/paint/present + p50/p95）：同机同参跨后端/尺寸对照。⚠ 它量的是**按需帧**（gallery 只画 5~7 帧就静止）——只适合看静态开销；反映动画/拖动压力要用 `--bench N`（连续强制全量重绘） |
+| `x11_present_probe.cpp` | **X11 上屏路径对照探针**：`XPutImage`（走 socket）vs `XShmPutImage`（共享内存）× 整屏/局部 × 是否每帧 `XSync`，各自报「客户端提交」与「端到端稳态吞吐」。**自带 Xlib 最小 ABI（不链 -lX11、不装 X11 头）**——正是框架“系统能力一律运行时 dlopen”的同一姿态。它量出了“上屏占整帧 27%”与本轮改造的收益上限（见 `DESIGN.md` §4.6.2） |
+| `present_reverse_verify.py` | **逆向验证（上屏区域换算）**：4 条回退（丢掉不透明标记 / 向内取整 / 空区当成空 / 去掉夹取）→ 期望红 → 恢复。内含三条**写这类脚本必踩的坑**：判“编译成功”不能用退出码（`st test` 有失败用例时也非 0）、输出带 ANSI 颜色码（不剥掉则恒报全绿）、档位必须编译与运行一致（`st test` 默认 debug）；另有一条“回退测例下修复与缺陷行为相同 ⇒ 假绿”的实例（见 `docs/PITFALLS.md` 场景 15） |

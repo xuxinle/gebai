@@ -42,8 +42,10 @@
 #if !defined(_WIN32)
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -57,12 +59,16 @@
 #include <vector>
 
 #include <dlfcn.h>  // lint-allow: L14 本文件即 platform_* 单点封装（§10 第 1 条）
+#include <sys/ipc.h>   // lint-allow: L14 MIT-SHM 共享内存（System V IPC）
+#include <sys/shm.h>   // lint-allow: L14 同上
 
 #include "st/core/error.hpp"
 #include "st/core/log.hpp"
 #include "st/core/process.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
+#include "st/raster/simd.hpp"
+#include "st/shell/present_slots.hpp"
 #include "st/shell/shell.hpp"
 #include "st/ui/window_control.hpp"
 #include "backend_util.hpp"
@@ -259,6 +265,59 @@ struct XSetWindowAttributes {
 
 using XErrorHandler = int (*)(XDisplay*, XEvent*);
 
+/// `XShmSegmentInfo`（`X11/extensions/XShm.h`）：共享内存段的四元组。
+///
+/// 字段顺序与 `XShm.h` 逐项一致——Xlib 按它解释 `shmaddr` 与 `shmseg`，
+/// 抄错一处（比如把 `read_only` 提前）会把段 ID 读成指针（直接崩）。
+struct XShmSegmentInfo {
+  XId shmseg;   ///< 服务端侧的段标识（`XShmAttach` 后由服务端填）
+  int shmid;    ///< 客户端 System V 共享内存 ID（`shmget` 的返回值）
+  char* shmaddr;
+  int read_only;
+};
+
+/// `XShmCompletionEvent`（`X11/extensions/shmstr.h`）：共享段“已被服务端读走”的回执。
+///
+/// 字段布局**按实测钉住**：在本机 Xwayland `:0` 上收一枚真实完成事件，逐 8 字节槽位比对得出
+/// `serial`=8 / `send_event`=16 / `display`=24 / `drawable`=32 / `major_code`=40 /
+/// `minor_code`=44 / **`shmseg`=48**（8 字节对齐，不紧接 44）/ `offset`=56 / `data`=64。
+/// 抄错一处就是把段 ID 读成别的字段——而失效方式是“完成事件永远认不出自己那一块”，
+/// 表现为上屏静默退化（不崩、不报错），是最难查的那类手写 ABI 错误。
+struct XShmCompletionEvent {
+  int type;
+  unsigned long serial;
+  int send_event;
+  XDisplay* display;
+  XId drawable;
+  int major_code;
+  int minor_code;
+  XId shmseg;
+  unsigned long offset;
+  unsigned long data;
+};
+
+static_assert(offsetof(XShmCompletionEvent, shmseg) == 48,
+              "XShmCompletionEvent.shmseg 必须在偏移 48（X 协议 + 8 字节对齐）");
+static_assert(offsetof(XShmCompletionEvent, drawable) == 32,
+              "XShmCompletionEvent.drawable 必须在偏移 32");
+
+/// libXext（MIT-SHM 扩展）函数表。**独立于 libX11**：扩展库不在时不影响
+/// X11 后端本身可用（上屏回退到 `XPutImage` 并如实记原因）——这正是
+/// 「能力运行期探测、缺失如实回退」的同一条姿态。
+struct XextApi {
+  std::string library{};
+  void* handle{nullptr};
+
+  int (*query_extension)(XDisplay*, int*, int*, int*);
+  XImage* (*create_image)(XDisplay*, void*, unsigned int, int, char*, XShmSegmentInfo*,
+                          unsigned int, unsigned int);
+  int (*attach)(XDisplay*, XShmSegmentInfo*);
+  int (*detach)(XDisplay*, XShmSegmentInfo*);
+  int (*put_image)(XDisplay*, XId, void*, XImage*, int, int, int, int, unsigned int, unsigned int,
+                   int);
+  int (*get_event_base)(XDisplay*);
+};
+
 /// libX11 函数表：`dlopen` 一次，全进程共用。
 ///
 /// 取符号的策略：**一次性取全**。缺任何一个就整体视为不可用——
@@ -388,6 +447,34 @@ template <typename Fn>
 
 [[nodiscard]] auto x11_available() -> bool { return x11_library().handle != nullptr; }
 
+/// 探测并加载 libXext 的 MIT-SHM 符号。
+///
+/// 与 libX11 同一策略（一次取全、缺一即不可用）——它只是**可选加速**：
+/// 拿不到就走 `XPutImage`，如实记原因（与「能力运行期探测、缺失如实回退」同姿态）。
+[[nodiscard]] auto xext_library() -> const XextApi& {
+  static const XextApi instance = [] {
+    XextApi api;
+    const std::string name = detail::library_available("libXext.so.6:libXext.so");
+    if (name.empty()) return api;
+    void* handle = ::dlopen(name.c_str(), RTLD_LAZY | RTLD_LOCAL);
+    if (handle == nullptr) return api;
+    const bool ok = load_symbol(handle, "XShmQueryExtension", api.query_extension) &&
+                    load_symbol(handle, "XShmCreateImage", api.create_image) &&
+                    load_symbol(handle, "XShmAttach", api.attach) &&
+                    load_symbol(handle, "XShmDetach", api.detach) &&
+                    load_symbol(handle, "XShmPutImage", api.put_image) &&
+                    load_symbol(handle, "XShmGetEventBase", api.get_event_base);
+    if (!ok) {
+      ::dlclose(handle);
+      return api;
+    }
+    api.library = name;
+    api.handle = handle;
+    return api;
+  }();
+  return instance;
+}
+
 // ————————————————————————————————————————————————————————————————————————————
 // X11 协议常量（`X11/X.h` / `X11/keysymdef.h` 的数值）
 //
@@ -411,6 +498,9 @@ constexpr int kPropertyNotify{28};
 constexpr int kSelectionClear{29};
 constexpr int kSelectionRequest{30};
 constexpr int kClientMessage{33};
+/// MIT-SHM 完成事件：`XShmGetEventBase(display) + ShmCompletion`（`shmstr.h` 里
+/// `ShmCompletion = 0`）。基址是**运行期**取值（每个显示不同），不能当常量写死。
+constexpr int kShmCompletionOffset{0};
 
 constexpr long kKeyPressMask{1L << 0};
 constexpr long kKeyReleaseMask{1L << 1};
@@ -557,9 +647,14 @@ template <typename T>
 /// X11 窗口后端（与 `Win32Backend` 同一契约，见文件头的能力对照表）。
 class X11Backend final : public Backend {
  public:
+  /// 一块共享段槽：段 + 它的 `XImage` 视图（两者一起建、一起拆）。
+  struct ShmSlot {
+    XShmSegmentInfo segment{};
+    XImage* image{nullptr};
+  };
+
   X11Backend() = default;
   ~X11Backend() override { teardown(); }
-
   [[nodiscard]] auto name() const noexcept -> std::string_view override { return "x11"; }
   [[nodiscard]] auto headless() const noexcept -> bool override { return false; }
   [[nodiscard]] auto close_requested() const noexcept -> bool override { return close_requested_; }
@@ -653,6 +748,10 @@ class X11Backend final : public Backend {
     renderer_note_ = std::move(choice.note);
     surface_->clear(math::Color{0, 0, 0, 0});
 
+    // 上屏通道探测（MIT-SHM）：**在首个缓冲建立之前**完成，使后续每次尺寸重建
+    // 都直接知道该走哪条路径（而不是每帧重试 dlopen/query）。
+    try_enable_shm();
+
     if (auto status = sync_buffers_to_client(); !status) {
       teardown();
       return status;
@@ -681,9 +780,22 @@ class X11Backend final : public Backend {
     if (window_ == 0 || surface_ == nullptr) return;
     // 尺寸重建发生在**取画布处**（见 `framebuffer()`），这里不再重复——
     // 与 Win32 同一时序结论：重建必须在"画"之前，否则本帧画旧画布。
-    blit();
+    //
+    // **局部上屏**：应用已告知本帧唯一被改动的区域（`set_present_region`），
+    // 整屏重排 + 整屏上屏等于把没变的像素又送一遍——1080p 下那是 0.96 ms 的重排
+    // 与 2.3 ms 的送显。局部上屏把两者都按区域缩小（400×300 实测 0.85 ms/帧）。
+    //
+    // 两种时候必须整屏：① 应用报了空矩形（本帧走了全量，或回调未装）；
+    // ② 尚未建立“服务端已有完整画面”的前提（映射后首帧，见 `show_when_ready`）。
+    if (present_region_.is_empty()) {
+      blit();
+    } else {
+      blit(&present_region_);
+    }
     ++frames_;
   }
+
+  void set_present_region(math::IntRect region) override { present_region_ = region; }
 
   [[nodiscard]] auto poll_event() -> std::optional<ui::Event> override {
     pump_events();
@@ -843,6 +955,19 @@ class X11Backend final : public Backend {
     return renderer_name_;
   }
   [[nodiscard]] auto renderer_note() const -> std::string override { return renderer_note_; }
+  /// 上屏路径 + **本帧实际送显的像素面积**。
+  ///
+  /// 面积是量出来的事实，不是声明：“局部上屏到底生效了没有”只能靠它回答
+  /// （生效时该值远小于画布面积；等于画布面积就是走了整屏）。
+  [[nodiscard]] auto present_note() const -> std::string override {
+    const char* path = using_shm_ ? (shm_no_completion_ ? "MIT-SHM 单块段" : "MIT-SHM") : "XPutImage";
+    const std::string slots = using_shm_ ? std::format(" · {}/{} 块", present_slots_.slot_count(),
+                                                       kPresentSlotLimit)
+                                        : std::string{};
+    if (shm_status_.empty()) return std::format("{}{}（探测未进行）", path, slots);
+    return std::format("{}{}（{}；上帧送显 {}x{}；完成事件 {} 个）", path, slots, shm_status_,
+                       last_present_width_, last_present_height_, shm_completions_seen_);
+  }
   [[nodiscard]] auto frame_count() const noexcept -> std::uint64_t override { return frames_; }
   [[nodiscard]] auto device_scale() const noexcept -> float override { return scale_; }
   [[nodiscard]] auto logical_size() const noexcept -> math::Size override {
@@ -1127,29 +1252,6 @@ class X11Backend final : public Backend {
   /// 不会去释放我们的 vector，也不会有跨分配器释放。
   /// （`f.destroy_image` 是 Xlib 的公开扩展点：`XImage` 的函数表按设计可由调用方替换，
   ///   这正是"自定义后备存储"的官方用法。）
-  [[nodiscard]] auto ensure_backbuffer(int width, int height) -> Status {
-    const XlibApi& x = x11_library();
-    if (display_ == nullptr || window_ == 0) return ok();
-    if (image_ != nullptr && image_width_ == width && image_height_ == height) return ok();
-    destroy_backbuffer();
-    pixels_.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0U);
-    image_ = x.create_image(display_, visual_, static_cast<unsigned int>(depth_), kZPixmap, 0,
-                            reinterpret_cast<char*>(pixels_.data()),  // lint-allow: L6 像素视图
-                            static_cast<unsigned int>(width), static_cast<unsigned int>(height),
-                            32, 0);
-    if (image_ == nullptr) {
-      pixels_.clear();
-      return unexpected(ErrorCode::Io, std::format("XCreateImage 失败（{}x{}）", width, height));
-    }
-    image_width_ = width;
-    image_height_ = height;
-    // 接管销毁：shim 会先归还 `data`（我们的 vector）再释放 XImage 结构本体。
-    // 取 `&X11Backend::destroy_image_shim` 得到一个**函数指针**（静态成员函数即普通函数），
-    // 再按 `XImage` 函数表的 C 签名存进去。
-    image_->f.destroy_image = reinterpret_cast<void*>(&destroy_image_shim);  // lint-allow: L6
-    return ok();
-  }
-
   /// `XDestroyImage` 在 Xlib 里是宏：`(*((ximage)->f.destroy_image))((ximage))`——
   /// 默认的 `_XDestroyImage` 会依次 `Xfree(data); Xfree(obdata); Xfree(image)`。
   ///
@@ -1174,32 +1276,368 @@ class X11Backend final : public Backend {
       (void)x.destroy_image(image_);
       image_ = nullptr;
     }
+    destroy_shm_slots();
     pixels_.clear();
     image_width_ = 0;
     image_height_ = 0;
+    present_slots_.reset(0);
+  }
+
+  /// 拆掉一个共享段槽（映射 + System V 段 + `XImage` 视图）。
+  ///
+  /// 顺序：先 `XShmDetach`（让**服务端**放下该段），再 `shmdt`（本地取消映射），
+  /// 最后 `IPC_RMID`（内核回收）。三段错一步就是泄漏或下一帧 `BadShmSeg`。
+  void destroy_slot(ShmSlot& slot) {
+    const XlibApi& x = x11_library();
+    const XextApi& ext = xext_library();
+    if (slot.segment.shmaddr != nullptr) {
+      if (slot.segment.shmseg != 0 && ext.detach != nullptr && display_ != nullptr) {
+        (void)ext.detach(display_, &slot.segment);  // lint-allow: L9 XShmDetach 是 Xlib C API
+      }
+      (void)::shmdt(slot.segment.shmaddr);
+      if (slot.segment.shmid >= 0) (void)::shmctl(slot.segment.shmid, IPC_RMID, nullptr);
+    }
+    if (slot.image != nullptr) {
+      // `image->data` 指向共享段，**不能**交给 Xlib 释放（那是映射内存，
+      // 不是 `Xmalloc` 的堆块）。置空后原销毁函数只释放结构本体。
+      slot.image->data = nullptr;
+      if (x.destroy_image != nullptr) (void)x.destroy_image(slot.image);
+    }
+    slot = ShmSlot{};
+    slot.segment.shmid = -1;
+  }
+
+  void destroy_shm_slots() {
+    for (auto& slot : shm_slots_) destroy_slot(slot);
+    shm_slots_.fill(ShmSlot{});
+    for (auto& slot : shm_slots_) slot.segment.shmid = -1;
+  }
+
+  [[nodiscard]] auto shm_slot_count() const noexcept -> int {
+    int count = 0;
+    for (const auto& slot : shm_slots_) {
+      if (slot.image != nullptr) ++count;
+    }
+    return count;
+  }
+
+  /// 建一个共享段槽：`shmget` → `shmat` → `XShmCreateImage` → `XShmAttach`。
+  ///
+  /// 必须**就地**建在目标槽里（不能先建到局部变量再拷进去）：`XShmCreateImage` 把
+  /// `XShmSegmentInfo*` 存进 `XImage::obdata`，之后每次 `XShmPutImage` 都**跟着那个指针
+  /// 读段 ID**。拷一份结构体后指针仍指向已销毁的局部对象 → 读到垃圾段 ID →
+  /// 服务端报 `BadShmSeg`（实测：上屏全部失败，日志里一帧两条协议错误，而画面“看起来没崩”）。
+  ///
+  /// 失败时把已建的部分**完整拆掉**（一段都不能漏，否则是进程存活期的泄漏）
+  /// 并返回 false——调用方据此降级（双块退单块，或整条 SHM 回 `XPutImage`）。
+  [[nodiscard]] auto create_slot(int width, int height) -> bool {
+    const XextApi& ext = xext_library();
+    int index = -1;
+    for (int candidate = 0; candidate < kPresentSlotLimit; ++candidate) {
+      if (shm_slots_[static_cast<std::size_t>(candidate)].image == nullptr) {
+        index = candidate;
+        break;
+      }
+    }
+    if (index < 0) return false;  // 槽位已满（不应发生：调用方先查过容量）
+    ShmSlot& slot = shm_slots_[static_cast<std::size_t>(index)];
+    const std::size_t bytes = static_cast<std::size_t>(width) *
+                              static_cast<std::size_t>(height) * sizeof(std::uint32_t);
+    const int shmid = ::shmget(IPC_PRIVATE, bytes, IPC_CREAT | 0600);
+    if (shmid < 0) return false;
+    slot.segment = XShmSegmentInfo{};
+    slot.segment.shmid = shmid;
+    slot.segment.shmaddr = static_cast<char*>(::shmat(shmid, nullptr, 0));
+    slot.segment.read_only = 0;
+    if (slot.segment.shmaddr == nullptr) {
+      (void)::shmctl(shmid, IPC_RMID, nullptr);
+      slot.segment.shmid = -1;
+      return false;
+    }
+    slot.image = ext.create_image(display_, visual_, static_cast<unsigned int>(depth_), kZPixmap,
+                                  slot.segment.shmaddr, &slot.segment,
+                                  static_cast<unsigned int>(width),
+                                  static_cast<unsigned int>(height));
+    if (slot.image == nullptr || ext.attach(display_, &slot.segment) == 0) {
+      destroy_slot(slot);
+      return false;
+    }
+    return true;
+  }
+
+  /// 槽 `slot` 的像素首地址（共享段时指向段内，否则指向自己的 vector）。
+  ///
+  /// 为什么共享段优先：X11 的“上屏”是客户端把像素**交出去**。私有 vector 只能
+  /// 经 socket 逐字节拷给服务端（`XPutImage`）；共享段则让服务端直接读。
+  [[nodiscard]] auto backbuffer_pixels(int slot) -> std::uint32_t* {
+    if (slot >= 0 && slot < kPresentSlotLimit) {
+      const auto& shm = shm_slots_[static_cast<std::size_t>(slot)];
+      if (shm.segment.shmaddr != nullptr) {
+        return reinterpret_cast<std::uint32_t*>(shm.segment.shmaddr);  // lint-allow: L6 像素视图
+      }
+    }
+    return pixels_.empty() ? nullptr : pixels_.data();
+  }
+
+  /// 槽 `slot` 对应的 `XImage`（共享段时是它自己那块；私有缓冲时恒为 `image_`）。
+  [[nodiscard]] auto slot_image(int slot) -> XImage* {
+    if (slot >= 0 && slot < kPresentSlotLimit) {
+      if (XImage* image = shm_slots_[static_cast<std::size_t>(slot)].image; image != nullptr) {
+        return image;
+      }
+    }
+    return image_;
+  }
+
+  /// 尝试建 MIT-SHM 上屏通道（失败**不报错**：如实记原因并按 `XPutImage` 走）。
+  ///
+  /// 三道门都得过：① `libXext` 可加载且符号齐（dlopen 探测）；
+  /// ② 服务端在**当前 DISPLAY 上**支持 MIT-SHM（`XShmQueryExtension`）——远程 X
+  /// （SSH 转发）通常不支持，那时共享段建出来也不能用；
+  /// ③ 能取到完成事件基址（`XShmGetEventBase`）——双缓冲靠它判“哪块能写”。
+  /// 前两道不过走 `XPutImage`；第三道不过而前两道过，仍可用 SHM，只是走单段 + 每帧排空。
+  void try_enable_shm() {
+    if (shm_slot_count() > 0 || shm_attempted_) return;
+    shm_attempted_ = true;
+    const XextApi& ext = xext_library();
+    if (ext.handle == nullptr) {
+      shm_status_ = "libXext 不可加载（未装/未探测到）——上屏走 XPutImage";
+      return;
+    }
+    int major = 0;
+    int minor = 0;
+    int pixmaps = 0;
+    if (ext.query_extension(display_, &major, &minor, &pixmaps) == 0) {
+      shm_status_ = std::format("服务端未启用 MIT-SHM（DISPLAY={}）——上屏走 XPutImage",
+                                std::getenv("DISPLAY") != nullptr ? std::getenv("DISPLAY") : "");
+      return;
+    }
+    shm_completion_base_ = ext.get_event_base(display_) + kShmCompletionOffset;
+    shm_extension_ready_ = true;
+    shm_status_ = std::format("MIT-SHM 已启用（{}.{}）", major, minor);
+  }
+
+  /// 为 `width`×`height` 准备上屏缓冲：先试共享段，不成则回退私有 vector。
+  ///
+  /// 两件事一次做完（而不是“先建 SHM 再建私有”）的理由：像素重排的目标地址
+  /// 必须**只有一个**，否则每帧都要问“这次写哪里”，而写错的那一边会静默地
+  /// 上屏旧内容（那类缺陷在截图上只表现为“画面不跟手”）。
+  [[nodiscard]] auto prepare_backbuffer(int width, int height) -> Status {
+    const XlibApi& x = x11_library();
+    if (display_ == nullptr || window_ == 0) return ok();
+    // 已就绪的判据**两条路径都要看**：只判 `image_` 会让 SHM 路径每帧重走一次
+    // “shmget + shmat + XShmAttach + XSync + 拆段”（实测症状：日志刷屏、
+    // 送显 6.2 ms/帧——建段比上屏还贵，因为每帧都在建）。
+    const bool ready = (shm_slot_count() > 0 || image_ != nullptr) &&
+                       image_width_ == width && image_height_ == height;
+    if (ready) return ok();
+    destroy_backbuffer();
+    const std::size_t bytes = static_cast<std::size_t>(width) *
+                              static_cast<std::size_t>(height) * sizeof(std::uint32_t);
+    // 用显式标志而不是 `shm_status_` 的字符串前缀：两者一旦不同步，"探测到了但没建成"
+    // 这条分支就永远不进去（而它只能靠日志发现）。
+    if (shm_extension_ready_) {
+      // 先试两块（双缓冲）：交替写入两块段，靠完成事件判“哪块已被服务端读完”。
+      // 第二块建不出来时**如实降级到单块**（而不是整条路径回退）——单块 + 每帧
+      // 排空仍然比 `XPutImage` 快一个量级（见 `DESIGN.md` §4.6.2 的对照表）。
+      for (int index = 0; index < shm_slot_goal_; ++index) {
+        if (!create_slot(width, height)) break;
+      }
+      const int built = shm_slot_count();
+      if (built > 0) {
+        // `XShmAttach` 的段 ID 由服务端异步回填。不排空就上屏，首个请求可能带
+        // 未定的段 ID（`BadShmSeg`，服务端 xerror）。
+        x.sync(display_, 0);
+        image_width_ = width;
+        image_height_ = height;
+        using_shm_ = true;
+        if (built < kPresentSlotLimit) {
+          shm_status_ = std::format("MIT-SHM 已启用，但只建成 {} 块段（另一块建不出来或已降级）——"
+                                    "降为单块 + 每帧排空",
+                                    built);
+        }
+        present_slots_.reset(built);
+        ST_LOG_INFO("x11 上屏走 MIT-SHM（{}x{} · {} 块段 · 每块 {} 字节 · 完成事件类型 {}）", width,
+                    height, built, bytes, shm_completion_base_);
+        return ok();
+      }
+      ST_LOG_WARN("MIT-SHM 共享段建立失败，本次回退 XPutImage");
+      shm_status_ =
+          "MIT-SHM 已探测到，但共享段建立失败（shmget/shmat/XShmAttach；可能受 kernel.shmmax / "
+          "shmall 限制）——上屏走 XPutImage";
+    }
+    // 回退：私有中转缓冲（内存归本对象所有，Xlib 只拿一个“只读视图”）。
+    pixels_.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0U);
+    image_ = x.create_image(display_, visual_, static_cast<unsigned int>(depth_), kZPixmap, 0,
+                            reinterpret_cast<char*>(pixels_.data()),  // lint-allow: L6 像素视图
+                            static_cast<unsigned int>(width), static_cast<unsigned int>(height),
+                            32, 0);
+    if (image_ == nullptr) {
+      pixels_.clear();
+      return unexpected(ErrorCode::Io, std::format("XCreateImage 失败（{}x{}）", width, height));
+    }
+    image_width_ = width;
+    image_height_ = height;
+    using_shm_ = false;
+    present_slots_.reset(1);
+    // 接管销毁：shim 会先归还 `data`（我们的 vector）再释放 XImage 结构本体。
+    // 取 `&X11Backend::destroy_image_shim` 得到一个**函数指针**（静态成员函数即普通函数），
+    // 再按 `XImage` 函数表的 C 签名存进去。
+    image_->f.destroy_image = reinterpret_cast<void*>(&destroy_image_shim);  // lint-allow: L6
+    return ok();
+  }
+
+  /// `ensure_backbuffer` 的旧名保留给调用点（语义已合并到 `prepare_backbuffer`）。
+  [[nodiscard]] auto ensure_backbuffer(int width, int height) -> Status {
+    return prepare_backbuffer(width, height);
   }
 
   /// 画布像素 → X11 像素并上屏。
-  void blit() {
+  ///
+  /// ## 为什么要分「交付路径」与「局部区域」两件事
+  ///
+  /// 上屏是 X11 后端**单帧最大的一段固定开销**（1080p 实测：整屏 `XPutImage`
+  /// 17.9 ms/帧，而绘制本身才 17.9 ms——两者同量级）。两条改进分离病因：
+  ///   ① **传输介质**：`XPutImage` 走 socket 逐字节拷给服务端；`XShmPutImage`
+  ///      走 System V 共享内存（服务端直接读）。1080p 实测 17.9 → 2.4 ms/帧（7.5×）；
+  ///   ② **传输范围**：局部上屏（只转换+送损坏区）把转换从 0.96 ms 降到 0.05 ms
+  ///      （400×300 区），局部 SHM 上屏 0.85 ms/帧（整屏 2.27 ms）。
+  ///
+  /// `region` 为空 = 整屏（曝光事件、首次映射、尺寸变化都必须走这条）。
+  void blit(const math::IntRect* region = nullptr) {
     const XlibApi& x = x11_library();
     if (surface_ == nullptr || window_ == 0 || gc_ == nullptr) return;
     const int width = surface_->physical_width();
     const int height = surface_->physical_height();
     if (auto status = ensure_backbuffer(width, height); !status) return;
-    const std::span<const std::uint32_t> source = surface_->pixels();
-    const std::size_t count = std::min(
-        source.size(), static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
-    for (std::size_t index = 0; index < count; ++index) {
-      const std::uint32_t pixel = source[index];
-      // 画布：R<<24 | G<<16 | B<<8 | A。X11 小端 ZPixmap 的像素值就是 0x00RRGGBB，
-      // 所以取 (pixel >> 8) 即得 R/G/B 三通道，再补上不透明标记。
-      // alpha 被丢弃：窗口内容不透明（自绘窗框不依赖系统透明度，与 Win32 的 DIB 路径
-      // 同一口径；画布清屏用 alpha=0，若不补 0xFF 会在 X11 上留下黑边/穿透）。
-      pixels_[index] = ((pixel >> 8U) & 0x00FFFFFFU) | 0xFF000000U;
+
+    // 把逻辑像素的损坏区换算成物理像素并夹到画布内。
+    // 换算规则是**共用纯函数**（`resolve_present_area`）：两端对“区域边界”的解释
+    // 必须逐位一致，否则同一个应用在两个后端的局部重绘边缘会差一列像素。
+    math::IntRect area{0, 0, width, height};
+    if (region != nullptr) {
+      area = resolve_present_area(*region, scale_, width, height);
+      if (area.is_empty()) return;  // 区域在画布外：本帧无事可做
     }
-    x.put_image(display_, window_, gc_, image_, 0, 0, 0, 0, static_cast<unsigned int>(width),
-                static_cast<unsigned int>(height));
+
+    // 选槽：所有槽都在途时必须先让服务端追上（或者这个环境根本不回报完成事件 →
+    // 降级成单段 + 每帧排空，与改造前完全一致，只是如实记下原因）。
+    ensure_slot_available();
+    const int slot = present_slots_.pick();
+    if (slot < 0) return;
+    std::uint32_t* target = backbuffer_pixels(slot);
+    XImage* image = slot_image(slot);
+    if (target == nullptr || image == nullptr) return;
+
+    const std::span<const std::uint32_t> source = surface_->pixels();
+    const std::size_t stride = static_cast<std::size_t>(width);
+    for (int row = 0; row < area.height; ++row) {
+      const std::size_t offset =
+          static_cast<std::size_t>(area.y + row) * stride + static_cast<std::size_t>(area.x);
+      if (offset + static_cast<std::size_t>(area.width) > source.size()) break;
+      // 画布：`R<<24 | G<<16 | B<<8 | A`；X11 小端 ZPixmap 的像素值是 0xFFRRGGBB。
+      // 这段重排下沉在 `st::raster::simd`（两端共用同一语义，三路逐像素一致有测试钉住）。
+      raster::simd::convert_rgba_to_xrgb_row(target + offset, source.data() + offset,
+                                             static_cast<std::size_t>(area.width));
+    }
+
+    const auto src_x = static_cast<unsigned int>(area.x);
+    const auto src_y = static_cast<unsigned int>(area.y);
+    const auto put_width = static_cast<unsigned int>(area.width);
+    const auto put_height = static_cast<unsigned int>(area.height);
+    last_present_width_ = area.width;
+    last_present_height_ = area.height;
+    present_slots_.commit(slot);
+    if (using_shm_) {
+      const XextApi& ext = xext_library();
+      // `send_event` = 1：要求服务端读完后回一枚 `XShmCompletionEvent`（带 `shmseg`）。
+      // 之后**只 flush 不 sync**：请求必须现在发出去（否则下一帧写另一块段时
+      // 服务端还没看到上一帧），但不必等它读完——那是双缓冲省下的那一次往返。
+      ext.put_image(display_, window_, gc_, image, static_cast<int>(src_x), static_cast<int>(src_y),
+                    static_cast<int>(src_x), static_cast<int>(src_y), put_width, put_height, 1);
+      present_slots_.mark_in_flight(slot);
+      x.flush(display_);
+      return;
+    }
+    x.put_image(display_, window_, gc_, image, static_cast<int>(src_x), static_cast<int>(src_y),
+                static_cast<int>(src_x), static_cast<int>(src_y), put_width, put_height);
     x.flush(display_);
+  }
+
+  /// 确保**当前至少有一块可用槽**（所有槽都在途时先让服务端追上）。
+  ///
+  /// 三级退让，每级都比前一级贵，但只在真需要时才走到：
+  ///  ① **快路径**：已有一块空闲（上一帧/上上帧的完成事件已在事件泵里收过了）——
+  ///     不 sync、不等待，这就是双缓冲的全部收益；
+  ///  ② **补齐路径**：先收一遍已到达的完成事件（别的进 `held_events_`，不能丢）；
+  ///  ③ **兜底路径**：跑一次 `XSync`。它回来就**证明**服务端已处理完全部请求（含读完段），
+  ///     所以“段现在安全”这个事实不依赖完成事件是否到达。据此：若仍认领不到而
+  ///     累计从未见过完成事件 → 这环境不回报它 → 降为单块段 + 每帧排空（与改造前同路）；
+  ///     若只是这次没到（之前见过）→ 段已安全，直接放开在途标记继续用双缓冲。
+  void ensure_slot_available() {
+    if (present_slots_.in_flight_count() <= 0) return;
+    if (!using_shm_ || shm_slots_[0].image == nullptr) {
+      present_slots_.mark_all_idle();  // 私有缓冲：像素是我们的副本，无"服务端在读"可言
+      return;
+    }
+    const XlibApi& x = x11_library();
+    bool got_now = false;
+    collect_pending_completions(got_now);
+    if (present_slots_.in_flight_count() <= 0) return;
+    x.sync(display_, 0);
+    collect_pending_completions(got_now);
+    // `XSync` 已回 ⇒ 服务端处理完了全部 PutImage ⇒ 没有任何段还在被读。
+    // 放开标记是**安全**的（与是否收到完成事件无关）。
+    present_slots_.mark_all_idle();
+    if (decide_after_sync_wait(static_cast<int>(shm_completions_seen_), got_now) ==
+        SyncVerdict::Degrade) {
+      degrade_to_single();
+    }
+  }
+
+  /// 把已到达的完成事件收掉（其余事件进 `held_events_`，不能丢）。
+  void collect_pending_completions(bool& got_any) {
+    const XlibApi& x = x11_library();
+    int guard = 0;
+    while (x.pending(display_) > 0) {
+      if (++guard > 4096) break;
+      XEvent event{};
+      x.next_event(display_, &event);
+      if (event.type == shm_completion_base_) {
+        if (collect_completion(event)) got_any = true;
+        continue;
+      }
+      held_events_.push_back(event);
+    }
+  }
+
+  /// 降为单块段：拆掉多余的段。
+  void degrade_to_single() {
+    if (shm_no_completion_) return;
+    shm_no_completion_ = true;
+    shm_slot_goal_ = 1;
+    for (int index = 1; index < kPresentSlotLimit; ++index) {
+      destroy_slot(shm_slots_[static_cast<std::size_t>(index)]);
+    }
+    present_slots_.degrade_to_single();
+    shm_status_ = "MIT-SHM 已启用，但收不到 XShmCompletionEvent（服务端不回报）——"
+                  "降为单块段 + 每帧 XSync 排空（与单缓冲路径同代价）";
+    ST_LOG_WARN("x11 上屏：收不到 XShmCompletionEvent → 降为单共享段 + 每帧排空");
+  }
+
+  /// 处理一枚完成事件：按 `shmseg` 认领它对应哪块槽（**不能**按下标猜——
+  /// 完成事件的到达顺序与提交顺序在乱序实现下不保证一致）。
+  [[nodiscard]] auto collect_completion(const XEvent& event) -> bool {
+    const auto& completion = as<XShmCompletionEvent>(event);
+    ++shm_completions_seen_;
+    for (int index = 0; index < kPresentSlotLimit; ++index) {
+      const auto& slot = shm_slots_[static_cast<std::size_t>(index)];
+      if (slot.image == nullptr || slot.segment.shmseg != completion.shmseg) continue;
+      if (!present_slots_.in_flight(index)) return true;
+      present_slots_.mark_idle(index);
+      return true;
+    }
+    return false;
   }
 
   // —— 事件泵 ——
@@ -1207,11 +1645,23 @@ class X11Backend final : public Backend {
   void pump_events() {
     const XlibApi& x = x11_library();
     if (display_ == nullptr) return;
+    // 先倒出等待完成事件期间“挟”住的其它事件：它们比队列里现有的更早，
+    // 顺序错了会让“按键→松开”这类成对事件乱序（拖选、双击计数都会错）。
+    while (!held_events_.empty()) {
+      XEvent event = held_events_.front();
+      held_events_.pop_front();
+      handle_event(event);
+    }
     int guard = 0;
     while (x.pending(display_) > 0) {
       if (++guard > 4096) break;  // 病态事件风暴时不死循环（如实丢弃剩余）
       XEvent event{};
       x.next_event(display_, &event);
+      // 完成事件不对外派发：它是上屏状态机的内部消息（与输入/窗口事件无关）。
+      if (using_shm_ && event.type == shm_completion_base_) {
+        (void)collect_completion(event);
+        continue;
+      }
       handle_event(event);
     }
   }
@@ -1472,6 +1922,11 @@ class X11Backend final : public Backend {
 
   void teardown() {
     const XlibApi& x = x11_library();
+    // 拆段前先让服务端把在途的读完（否则 `XShmDetach` 与仍在处理的上屏请求竞争：
+    // 服务端报 `BadShmSeg`，而错误处理器只会记一笔日志）。
+    if (display_ != nullptr && present_slots_.in_flight_count() > 0) x.sync(display_, 0);
+    present_slots_.mark_all_idle();
+    held_events_.clear();
     destroy_backbuffer();
     if (display_ != nullptr) {
       if (gc_ != nullptr) {
@@ -1511,8 +1966,32 @@ class X11Backend final : public Backend {
   std::unique_ptr<raster::Surface> surface_{};
   XImage* image_{nullptr};
   std::vector<std::uint32_t> pixels_{};
+  /// 共享段槽（可用时上屏走它；否则都不为真）。
+  /// 两块 = 双缓冲（交替写，靠完成事件判哪块已被服务端读完）。
+  std::array<ShmSlot, kPresentSlotLimit> shm_slots_{};
+  /// 槽环状态（哪块在途 / 复用前要补写哪里）。纯逻辑，有单测。
+  PresentSlotRing present_slots_{0};
+  /// 想建几块段：2 = 双缓冲；降级/尺寸重建保留它的当前值。
+  int shm_slot_goal_{kPresentSlotLimit};
+  /// `XShmGetEventBase + ShmCompletion`：完成事件的 `type` 值（运行期取，不是常量）。
+  int shm_completion_base_{0};
+  /// 收到过的完成事件总数（判“这个环境到底回报不回报”的依据，见 `ensure_slot_available`）。
+  std::uint64_t shm_completions_seen_{0};
+  /// 环境不回报完成事件（已降级为单块段 + 每帧排空）。
+  bool shm_no_completion_{false};
+  /// 等待完成事件期间“挟”到的事件（不能丢：它们先于我们自己的事件到达）。
+  std::deque<XEvent> held_events_{};
+  std::string shm_status_{};
+  bool shm_attempted_{false};
+  /// `XShmQueryExtension` 已通过（= 探测到扩展，可以尝试建段）。
+  /// 与 `shm_status_` 的文案分开：文案是给人看的，不能兼任控制流判据。
+  bool shm_extension_ready_{false};
+  bool using_shm_{false};
   int image_width_{0};
   int image_height_{0};
+  /// 上一帧实际上屏的区域尺寸（诊断用；`present_note` 报它）。
+  int last_present_width_{0};
+  int last_present_height_{0};
 
   std::deque<ui::Event> events_{};
   std::function<void()> repaint_{};
@@ -1531,6 +2010,8 @@ class X11Backend final : public Backend {
   bool maximized_{false};
   bool size_dirty_{false};
   bool resizing_{false};
+  /// 本帧被改动的区域（逻辑像素；空 = 整帧）——由 `set_present_region` 写入。
+  math::IntRect present_region_{};
 
   int logical_width_{1280};
   int logical_height_{720};

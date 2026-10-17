@@ -110,6 +110,8 @@
                          "exclude_sources": ["src/pkg/*"] },
     "pty_stop_probe": { "kind": "executable", "sources": ["tools/pty_stop_probe.cpp"],
                         "exclude_sources": ["src/pkg/*"] },
+    "pty_form_probe": { "kind": "executable", "sources": ["tools/pty_form_probe.cpp"],
+                         "exclude_sources": ["src/pkg/*"] },
     "font_stack_probe": { "kind": "executable", "sources": ["tools/font_stack_probe.cpp"],
                           "exclude_sources": ["src/pkg/*"] },
     "ring_path_probe": { "kind": "executable", "sources": ["tools/ring_path_probe.cpp"],

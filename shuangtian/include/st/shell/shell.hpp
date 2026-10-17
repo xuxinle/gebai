@@ -72,6 +72,19 @@ class Backend {
   [[nodiscard]] virtual auto headless() const noexcept -> bool = 0;
 
   virtual auto create_window(const WindowOptions& options) -> Status = 0;
+  /// 告知后端**本帧被改动的区域**（逻辑像素；空矩形 = 整帧）。
+  ///
+  /// 为什么由应用告知而不是后端自己猜：只有应用知道“本帧究竟重画了多少”
+  /// （`UiRoot::paint_frame` 会按损坏区大小自动选全量/局部，且会在重排、
+  /// 显式整帧标记时保守回落全量）。后端只能看到最终像素，看不出哪些是新的。
+  ///
+  /// 契约：`present()` 之前的最近一次调用为准；后端**可以忽略它**（默认空实现），
+  /// 但不得把它当“必须局部上屏”的命令——传输范围只影响快慢，不影响正确性，
+  /// 而后端比应用更清楚自己的上屏机制（比如共享内存上屏要的是“哪些段需要重传”）。
+  ///
+  /// 受益者：窗口后端把“整屏重排 + 整屏送显”缩到该区域（X11 实测：1080p 下
+  /// 重排 0.96 → 0.05 ms、送显 2.3 → 0.85 ms）。无头写入离屏缓冲，默认忽略即可。
+  virtual void set_present_region(math::IntRect region) { (void)region; }
   /// 提交一帧（headless 时写入离屏缓冲）。
   virtual void present() = 0;
   /// 取回输入事件（无则空）。headless 恒为空——输入由控制通道直接投递。
@@ -110,6 +123,13 @@ class Backend {
     return "software";
   }
   [[nodiscard]] virtual auto renderer_note() const -> std::string { return {}; }
+  /// 上屏路径的**如实描述**（如 X11 的 `MIT-SHM` 还是 `XPutImage`）。
+  ///
+  /// 为何必须可上报：上屏是窗口后端单帧最大的一段固定开销（1080p 实测：
+  /// 整屏 `XPutImage` 17.9 ms/帧），而它**走哪条路取决于环境**（libXext 在不在、
+  /// 服务端支不支持 MIT-SHM、远程 X 转发与否）。回退了就得能看见——
+  /// 否则“这台机器为什么掉帧”会变成谜案（与 `font_read_fallbacks` 同一条理由）。
+  [[nodiscard]] virtual auto present_note() const -> std::string { return {}; }
   /// 运行时切换 DPI（重分配帧缓冲；无头与窗口模式一致）。
   virtual auto set_device_scale(float scale) -> Status = 0;
   /// 逻辑视口尺寸（窗口尺寸，不含 DPI 放大）。
@@ -186,6 +206,25 @@ class Backend {
   /// 窗口当前是否最大化（自绘窗框据此切换按钮形态）。
   [[nodiscard]] virtual auto maximized() const noexcept -> bool { return false; }
 };
+
+/// 可复用纯函数：**逻辑坐标的损坏区 → 物理像素的上屏区域**。
+///
+/// 为什么住这里而不是后端内部：窗口后端（X11/Wayland）都要做这一步，而
+/// “弄错一个边界就是漏画一条边”是那类只能在截图上看到、且很难归因的缺陷
+/// （全自绘框架里没有系统合成器兜底）。纯函数 + 单测才可能钉住它。
+///
+/// 语义：
+/// - `region` 为空（宽或高 ≤ 0）→ 返回**整块画布**（{0,0,width,height}）——
+///   “没说改哪里”最安全的解释就是“哪里都可能改了”；
+/// - 否则按 `scale` 换算：左/上**向下取整**、右/下**向上取整**（故意向外取整——
+///   宁可多发一列像素也不能漏一条边缘；`round` 会把 100.4 的右缘收成 100，漏掉半像素）；
+/// - 再夹到画布内；夹完为空（区域完全在画布外）→ 返回空矩形，调用方跳过本帧。
+[[nodiscard]] auto resolve_present_area(math::IntRect region, float scale, int width,
+                                        int height) noexcept -> math::IntRect;
+
+/// 窗口系统后端专用：它比无头多一件事——**把画布像素搬进窗口系统的缓冲**。
+/// `st::shell::Backend` 已经是那个契约面（含 `set_present_region` / `present_note`），
+/// 这里不再另立一个接口。
 
 /// 是否检测到显示服务（DISPLAY / WAYLAND_DISPLAY）。
 [[nodiscard]] auto has_display() noexcept -> bool;

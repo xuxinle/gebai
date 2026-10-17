@@ -24,6 +24,7 @@ D3D11_CPP = "src/raster/platform_d3d11.cpp"
 TEXT_CPP = "src/text/text.cpp"
 TEXT_PORT_HPP = "include/st/ui/text_port.hpp"
 BASIC_CPP = "src/ui/components/basic.cpp"
+TIMELINE_VIEW_CPP = "src/ui/components/timeline_view.cpp"
 
 # (说明, 文件, 原文, 回退后的文本, 期望变红的用例名)
 CASES = [
@@ -222,6 +223,15 @@ CASES = [
         "  const bool draws_icon = !icon_.empty() && Icon::has(icon_);",
         "  const bool draws_icon = !icon_.empty();",
         "button_with_unknown_icon_stays_centered",
+    ),
+    (
+        "时间轴头部栏：lane 左缘不再随开关收拢（开关退化成纯装饰）",
+        TIMELINE_VIEW_CPP,
+        "  const float header = show_track_headers_ ? kTrackHeaderWidth : 0.0f;\n"
+        "  return math::Rect{bounds_.x + header, top,",
+        "  const float header = kTrackHeaderWidth;\n"
+        "  return math::Rect{bounds_.x + header, top,",
+        "timeline_view_track_headers_toggle_collapses_prefix_column",
     ),
 ]
 

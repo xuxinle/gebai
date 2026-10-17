@@ -115,3 +115,48 @@ ST_TEST(simd_erase_row_matches_reference) {
     }
   }
 }
+
+/// 画布行 → 窗口系统行（`0xRRGGBBAA` → `0xFFRRGGBB`）的 SIMD/标量对齐。
+///
+/// 判据取的是**窗口后端实际依赖的那条语义**（X11 `XPutImage` / Wayland `wl_shm`
+/// 都按这个布局解释内存）：高字节是不透明标记、低三字节取画布的 R/G/B，
+/// 且**与画布 alpha 无关**（清屏 alpha=0 的像素也必须变成不透明）。
+ST_TEST(simd_convert_rgba_to_xrgb_matches_reference) {
+  // 覆盖：非 4/8 倍数长度（走标量尾巴）、全透明、半透明、全不透明、极值。
+  const std::vector<std::uint32_t> source = {
+      0x00000000U,  // 全透明清屏色
+      0xFF3F7FAFU,  // 全不透明
+      0x80112233U,  // 半透明（预乘）
+      0xFFFFFFFFU, 0x01020304U, 0x7F7F7F7FU, 0xFE0000FFU,
+      0x00FFFFFFU, 0x12345678U, 0xAABBCCDDU, 0x0F0F0F0FU,
+  };
+  for (const std::size_t count : {std::size_t{1}, std::size_t{3}, std::size_t{4}, std::size_t{7},
+                                  std::size_t{8}, std::size_t{11}, std::size_t{16},
+                                  std::size_t{23}, std::size_t{64}}) {
+    std::vector<std::uint32_t> input(count);
+    for (std::size_t index = 0; index < count; ++index) {
+      input[index] = source[index % source.size()];
+    }
+    std::vector<std::uint32_t> out(count, 0xDEADBEEFU);
+    st::raster::simd::convert_rgba_to_xrgb_row(out.data(), input.data(), count);
+    for (std::size_t index = 0; index < count; ++index) {
+      const std::uint32_t expected = ((input[index] >> 8U) & 0x00FFFFFFU) | 0xFF000000U;
+      ST_CHECK_EQ(out[index], expected);
+      // 不透明标记必须置位（清屏 alpha=0 的像素也不例外）
+      ST_CHECK((out[index] >> 24U) == 0xFFU);
+    }
+  }
+  // 原地转换（dst == src）必须与另存结果一致——后端可能直接重排进中转缓冲。
+  {
+    std::vector<std::uint32_t> in_place = make_row(37, 0x3366AAFFU);
+    std::vector<std::uint32_t> copied = in_place;
+    std::vector<std::uint32_t> out_place(in_place.size(), 0U);
+    st::raster::simd::convert_rgba_to_xrgb_row(in_place.data(), in_place.data(), in_place.size());
+    st::raster::simd::convert_rgba_to_xrgb_row(out_place.data(), copied.data(), copied.size());
+    for (std::size_t index = 0; index < in_place.size(); ++index) {
+      ST_CHECK_EQ(in_place[index], out_place[index]);
+    }
+  }
+  // count=0 不得触碰指针（传 nullptr 是合法调用）。
+  st::raster::simd::convert_rgba_to_xrgb_row(nullptr, nullptr, 0);
+}

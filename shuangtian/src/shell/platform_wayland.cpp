@@ -64,6 +64,7 @@
 #include "st/core/log.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
+#include "st/raster/simd.hpp"  // 像素重排下沉点（与 X11 后端共用同一语义）
 #include "st/shell/shell.hpp"
 #include "st/ui/window_control.hpp"
 #include "backend_util.hpp"
@@ -414,6 +415,15 @@ class WaylandBackend final : public Backend {
     return renderer_name_;
   }
   [[nodiscard]] auto renderer_note() const -> std::string override { return renderer_note_; }
+  /// 上屏路径 + **本帧实际重排的像素面积**。
+  ///
+  /// 面积是量出来的事实：“局部上屏到底生效了没有”只能靠它回答
+  /// （生效时远小于缓冲尺寸；等于缓冲尺寸就是走了整屏）。
+  [[nodiscard]] auto present_note() const -> std::string override {
+    return std::format("wl_shm 共享缓冲（{} 块双缓冲；上帧重排 {}x{}）", buffers_.size(),
+                       last_present_width_, last_present_height_);
+  }
+  void set_present_region(math::IntRect region) override { present_region_ = region; }
   [[nodiscard]] auto frame_count() const noexcept -> std::uint64_t override { return frames_; }
   [[nodiscard]] auto device_scale() const noexcept -> float override { return scale_; }
   [[nodiscard]] auto logical_size() const noexcept -> math::Size override {
@@ -532,6 +542,11 @@ class WaylandBackend final : public Backend {
   bool close_requested_{false};
   bool maximized_{false};
   bool size_dirty_{false};
+  /// 本帧被改动的区域（逻辑像素；空 = 整帧）——由 `set_present_region` 写入。
+  math::IntRect present_region_{};
+  /// 上一帧重排上屏的区域尺寸（诊断用；`present_note` 报它）。
+  int last_present_width_{0};
+  int last_present_height_{0};
   bool resizing_{false};
   bool explicit_scale_{false};
   bool xdg_configured_{false};
@@ -1131,15 +1146,24 @@ auto WaylandBackend::commit_frame() -> Status {
     }
   }
   if (target == nullptr) return ok();
-  // 画布（预乘 0xRRGGBBAA）→ XRGB8888（小端 0x00RRGGBB）：与 X11 的转换同源，
-  // 差异只在 alpha 位（XRGB 的 X 被忽略，填什么都行）。
+  // 画布（预乘 0xRRGGBBAA）→ XRGB8888（小端 0x00RRGGBB）：与 X11 的转换**同源**
+  // （共用 `simd::convert_rgba_to_xrgb_row`，AVX2/SSE2/标量三路逐像素一致有测试钉住）；
+  // 差异只在 alpha 位（XRGB 的 X 被忽略，填 0 或 0xFF 都行——这里保持与旧实现逐字节相同）。
+  //
+  // ⚠ **本后端不能做“只重排损坏区”的局部上屏**（与 X11 的关键差异）：
+  // Wayland 的 `wl_surface` 是**双缓冲**（`ensure_buffers` 建两块，交替 attach），
+  // 而每块缓冲都必须是一张**完整帧**——只重排当前 `target` 的损坏区，另一块还是
+  // 上一帧（甚至更早）的像素，下一次 attach 它时就是旧内容（交替提交时表现为闪烁）。
+  // 协议里确实有 `wl_surface.damage_buffer` + buffer age 这类增量手段，
+  // 但那要求客户端能查询缓冲年龄（`wp_presentation`/EGL 扩展），本后端不用它们。
+  // X11 之所以能安全局部：它每次都是把同一块画布内容推给服务端，没有“另一块”。
   const std::span<const std::uint32_t> source = canvas_->pixels();
   const std::size_t count = std::min(
       source.size(),
       static_cast<std::size_t>(buffer_width_) * static_cast<std::size_t>(buffer_height_));
-  for (std::size_t index = 0; index < count; ++index) {
-    target->pixels[index] = (source[index] >> 8U) & 0x00FFFFFFU;
-  }
+  raster::simd::convert_rgba_to_xrgb_row(target->pixels, source.data(), count);
+  last_present_width_ = buffer_width_;
+  last_present_height_ = buffer_height_;
   const WaylandApi& api = wayland_library();
   const proto::Message* attach = find_request(proto::kwl_surface, "attach");
   const proto::Message* damage = find_request(proto::kwl_surface, "damage");

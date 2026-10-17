@@ -585,14 +585,49 @@ ST_TEST(timeline_view_track_headers_toggle_collapses_prefix_column) {
            canvas.pixel_at(static_cast<int>(no_header_head_x + 20.0f),
                            static_cast<int>(kOriginY + 100.0f)));
 
-  // 开/关两态像素对比：原头部栏区域（组件左缘内 10px）从名称栏色变为
+  // 开/关两态像素对比：原头部栏区域（组件左缘内 10px）从头部栏底色变为
   // 轨道内容色（这里应恰是 A 片段本体——A 从 0ms 起铺满 lane）。
-  const Point header_zone{kOriginX + 10.0f, kOriginY + TimelineView::kRulerHeight + 10.0f};
-  const Color clip_body = canvas.pixel_at(
-      static_cast<int>(kOriginX + TimelineView::kTrackHeaderWidth + 10.0f),
-      static_cast<int>(kOriginY + TimelineView::kRulerHeight + 10.0f));
-  ST_CHECK(canvas.pixel_at(static_cast<int>(header_zone.x),
-                           static_cast<int>(header_zone.y)) == clip_body);
+  //
+  // ⚠ 采样点必须落在**纯底色**上，而这两个 x 天生压着文字：轨道名画在
+  // `bounds.x + 8`、片段标签画在 `block.x + 4`（首字形横跨 lane 左缘内 4~13px）。
+  // 不处理时同一像素在开态取到轨道名笔画、在关态取到片段标签笔画，两边都是
+  // **字形的抗锯齿混色**而不是任何底色——断言恒红，且量的是字宽与字体版本
+  // 而不是几何（实测该点：开态 0x88888B、关态 0xAFB0B9，与两侧底色都对不上）。
+  // 两处文字都不属于本用例被测的机制（头部栏收拢），所以先把它们清空，
+  // 让采样点是**只由 lane 几何决定的底色**（与系统字体无关）。
+  auto& tracks = fx.view.model().tracks();
+  const std::string track_label = tracks[0].label;
+  const std::string clip_label = tracks[0].clips[0].label;
+  tracks[0].label.clear();
+  tracks[0].clips[0].label.clear();
+
+  // 采样点：组件左缘内 10px、轨道带内 20px（落在 A 片段块里，避开块顶标签行
+  // 与块内缩边；即使字体行高变化也留有余量）。
+  const int sample_x = static_cast<int>(kOriginX + 10.0f);
+  const int sample_y = static_cast<int>(kOriginY + TimelineView::kRulerHeight + 20.0f);
+  const auto off_canvas = fx.render();
+  const Color at_left_edge = off_canvas.pixel_at(sample_x, sample_y);
+  // 判据不用常量色（绘制会与底色做 alpha 混合，落盘像素≠主题令牌）：拿 lane
+  // **深处**同一行的 A 本体色当参照——A 从 0ms 起铺满 lane，深处必然是本体系。
+  const Color clip_body = off_canvas.pixel_at(static_cast<int>(kOriginX + 150.0f), sample_y);
+  ST_CHECK(at_left_edge == clip_body);
+
+  // 对照（开态）：同一像素是头部栏底色——与关态的片段本体**不同**，且与同一
+  // 轨道带里 A、B 之间的空白处同色（那块地这次铺的是轨道底色，不是片段）。
+  fx.view.set_show_track_headers(true);
+  fx.layout();
+  const auto on_canvas = fx.render();
+  const Color in_header = on_canvas.pixel_at(sample_x, sample_y);
+  ST_CHECK(in_header != at_left_edge);
+  ST_CHECK(in_header ==
+           on_canvas.pixel_at(
+               static_cast<int>(kOriginX + TimelineView::kTrackHeaderWidth + 250.0f), sample_y));
+  // 标签复原（后续断言虽不看它们，但不动被测对象的无关状态更安全）。
+  tracks[0].label = track_label;
+  tracks[0].clips[0].label = clip_label;
+  // 回到关态（后续断言量的是关态几何）。
+  fx.view.set_show_track_headers(false);
+  fx.layout();
 
   // 命中坐标同步平移：点组件内同一屏幕 x（头部栏区域里，lane 左缘左侧），
   // 开关前后命中**同一时刻**——方案验收「点击同一 x 命中同一时间」的等价判据：

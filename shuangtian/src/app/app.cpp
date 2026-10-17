@@ -561,6 +561,9 @@ auto Application::metrics() const -> control::Metrics {
   metrics.backend = std::string(backend_name());
   metrics.renderer = std::string(impl_->backend->renderer_name());
   metrics.renderer_note = impl_->backend->renderer_note();
+  // 上屏路径（如 X11 的 MIT-SHM vs XPutImage）：它**取决于环境**（扩展库/服务端/
+  // 远程转发），回退了得一跟可见——与 `renderer` 同一条理由。
+  metrics.present_note = impl_->backend->present_note();
   if (impl_->renderer != nullptr) {
     metrics.text_renderer = impl_->renderer->subpixel() ? "lcd" : "grayscale";
     // 把拟合模式一并上报：它不是“开关”而是三档（off/light/normal），
@@ -1073,7 +1076,11 @@ void Application::render_frame() {
   const std::int64_t paint_start = time::now_ns();
   // 绘制一帧：`paint_frame` 自动选择全量/局部（损坏区驱动；软件画布走局部，
   // GPU 画布与全局变化恒走全量——语义与旧路径完全一致，只少了无效的整帧重画）。
-  root_.paint_frame(canvas);
+  // 返回值为 false 即**本帧走了全量**（清屏 + 绘整树）——这个事实要告诉后端：
+  // 窗口后端的“局部上屏”只在本帧确实只改了那一个矩形时才成立（否则上屏一块
+  // 而画布已整屏重画的其余部分就送不出去，表现为“画面停在旧帧上”）。
+  const bool partial = root_.paint_frame(canvas);
+  impl_->backend->set_present_region(partial ? root_.dirty_rect() : math::IntRect{});
   const std::int64_t present_start = time::now_ns();
   impl_->backend->present();
   const std::int64_t end_ns = time::now_ns();

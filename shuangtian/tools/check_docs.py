@@ -3,9 +3,13 @@
 v2 新增（2026-09-30 审视后）：文档声称的数字/清单/路径与代码实测自动对照，
 杜绝「DisplayList 存在」「vendor/ 目录」「组件 37 个」这类漂移再发生。
 运行：python tools/check_docs.py（仓库根 cwd）
+
+v3（2026-10-19）：③ 的“路径实存”升级为“实存 ∧ 已入仓”——只查磁盘会放过“文档引用了
+只在磁盘、不在仓里”的文件（本地看着正常，`git clean`/切分支后引用悬空）。两种红分开报，
+读不到 git 时明说“本项未核”而不当通过。
 """
 from pathlib import Path
-import re, sys
+import re, subprocess, sys
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 root = Path('.')
@@ -112,32 +116,154 @@ DOC_FILES = sorted(
     + [p for p in (root / 'docs').glob('*.md')]
     + [p for p in (root / 'tools').glob('*.md')]
 )
+
+# ── ③b 「已入仓」集合：一次 `git ls-files -z` 建集合，之后逐引用只做集合查找 ──
+#
+# ## 为什么“路径实存”不够（本仓三次实测，根因完全相同）
+#
+# 只查 `Path.exists()` 的 ③ 有个洞：文档引用了**只在磁盘、不在仓里**的文件——
+#   ① pty 四工具（第 27 息）：`docs/BACKLOG.md` 与用例注释引用 `tools/pty_timeline.py` /
+#      `tools/pty_form_reverse_verify.py`，而它们还是 `??`；
+#   ② wait_probe.sh（第 58 息）：`pgrep-lock.ts` 头注释与 `docs/PITFALLS.md` 都引用了那批
+#      实测数据，而脚本在 `/tmp`；
+#   ③ lease 三脚本（第 61 息）：`DESIGN.md:1543` 引用 `lease_accept_live_1017.ts`，它从未入仓。
+# 三次的形态一致：**本地看着一切正常**。磁盘有、仓里没有 ⇒ 一旦有人 `git clean`／切分支／
+# 重启，引用就变成悬空，而校验器全程报绿。所以判据要从「磁盘存在」升级为「磁盘存在 ∧ 已入仓」。
+#
+# ## 两种红必须分开报（后果完全不同）
+#   · `路径不存在`：真的写错了／文件被删了——读者当场就找不到;
+#   · `路径存在但未入仓`：**三次的真形态**——现在读得到，清理/切换后就消失。
+# 合成一句报错会让人按“写错路径”去查，而实际要做的是 `git add` 或删掉引用。
+#
+# ## 三态纪律（与 `commit-scope.ts` 的 collect review 同型）
+# 读不到 git（不在仓内／没装 git／命令失败）**≠ 没问题**。此时逐项明说「本项未核」并在
+# 汇总行单独计数——**不计入通过**。绝不让“读不到”静默变成绿灯（那等于在最需要警报的
+# 环境里安静）。注意：`git ls-files --cached` 只列**文件**，从不列目录，所以目录引用必须
+# 按「有已跟踪文件以它开头」判（否则 `src/`、`examples/gbcode` 这类目录引用会被误报
+# “未入仓”——本层实测第一版就是错在这里，52 处假红）。
+def _git_out(args, cwd=None):
+    """跑一条 git 命令：成功返回 (stdout_bytes, '')，失败返回 (None, 原因)。"""
+    try:
+        r = subprocess.run(['git'] + list(args), capture_output=True, cwd=cwd)
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, f'git 不可执行（{type(e).__name__}）'
+    if r.returncode != 0:
+        first = r.stderr.decode('utf-8', 'replace').strip().splitlines()
+        return None, (f"git {' '.join(args)} 返回 {r.returncode}"
+                      + (f"（{first[0][:80]}）" if first else ''))
+    return r.stdout, ''
+
+GIT_ROOT = None          # 仓库根（绝对、已 resolve），用于把磁盘路径换算成 ls-files 的键
+TRACKED = set()          # git ls-files --cached 的文件键集合（相对仓库根）
+TRACKED_DIRS = set()     # 由上面派生：所有“含已跟踪文件”的目录前缀
+GIT_UNAVAILABLE = ''     # 非空 ⇒ 入仓性**本项未核**（其原因）
+
+_raw, _why = _git_out(['rev-parse', '--show-toplevel'])
+if _raw is None:
+    GIT_UNAVAILABLE = _why
+else:
+    GIT_ROOT = Path(_raw.decode('utf-8', 'replace').strip()).resolve()
+    # ⚠ 必顶 `cwd=GIT_ROOT`：`git ls-files` 在子目录里跑时**只列 cwd 下的文件**且输出
+    # **相对 cwd** 的路径。而下面 `repo_key()` 给的是相对**仓库根**的键（`shuangtian/tools/x.py`）
+    # ——两者直接拼一起就是“键对不上”，实测第一版因此把 687 处已入仓的引用全部报成未入仓。
+    _raw, _why = _git_out(['ls-files', '-z', '--cached'], cwd=GIT_ROOT)
+    if _raw is None:
+        GIT_UNAVAILABLE = _why
+    else:
+        TRACKED = {s for s in _raw.decode('utf-8', 'replace').split('\0') if s}
+        for _t in TRACKED:
+            _parts = _t.split('/')
+            for _i in range(1, len(_parts)):
+                TRACKED_DIRS.add('/'.join(_parts[:_i]))
+        if not TRACKED:
+            GIT_UNAVAILABLE = '仓库里没有任何已跟踪文件（空仓？）'
+
+def repo_key(disk):
+    """磁盘路径 → `git ls-files` 的键（相对仓库根）；换算不出（仓外）返回 None ⇒ 本项未核。"""
+    if GIT_ROOT is None:
+        return None
+    try:
+        return disk.resolve().relative_to(GIT_ROOT).as_posix()
+    except (ValueError, OSError):
+        return None
+
+# ③ 的两层判定的计数（必须能对账：total = 各去向之和）
+ref_total = 0        # 正则抽到的路径引用总数
+ref_glob = 0         # glob/占位符/上级相对：不核
+ref_removal = 0      # 移除/历史语境放行
+ref_external = 0     # 外部仓库语境放行
+ref_tracked = 0      # 实存 ∧ 已入仓
+ref_untracked = 0    # 实存 ∧ 未入仓  ← 三次事故的真形态
+ref_missing = 0      # 磁盘上不存在
+ref_unverified = []  # 实存但读不到 git ⇒ 本项未核
+
 for p in DOC_FILES:
     text = p.read_text(encoding='utf-8')
+    doc_lines = text.splitlines()
     for m in path_ref.finditer(text):
         ref = m.group(0).strip('`')
+        ref_total += 1
         if '*' in ref or '<' in ref or '{' in ref:
+            ref_glob += 1
             continue  # glob/占位符
         if '..' in ref:
+            ref_glob += 1
             continue  # 显式相对上级（写法本身已表明“不在本工程内”）
         line_no = text[:m.start()].count('\n') + 1
-        lines = text.splitlines()
-        ctx = ' '.join(lines[max(0, line_no - 3):min(len(lines), line_no + 2)])
+        ctx = ' '.join(doc_lines[max(0, line_no - 3):min(len(doc_lines), line_no + 2)])
         if any(k in ctx for k in REMOVAL_CTX):
+            ref_removal += 1
             continue  # 移除记录语境（前后 2 行）：故意引用已不存在的历史路径
         if any(k in ctx for k in EXTERNAL_REPO_CTX):
+            ref_external += 1
             continue  # 外部仓库语境：保留上游坐标（不是本仓路径）
+
+        # ── 第一层：磁盘实存（原有判据，语义不变）──
+        disk = None
         if (root / ref).exists():
-            continue
-        if (MONOREPO_ROOT / ref).exists():
-            continue  # 主仓库根（shuangtian/ 的上一级）：docs/、resources/ 等主仓文件
-        # 构建产物：`tools/<名>` 这类指“编出来的可执行目标”，源码存在即算成立。
-        if ref.startswith(BUILD_ARTIFACT_ROOTS):
+            disk = root / ref
+        elif (MONOREPO_ROOT / ref).exists():
+            disk = MONOREPO_ROOT / ref  # 主仓库根（shuangtian/ 的上一级）：docs/、resources/ 等主仓文件
+        elif ref.startswith(BUILD_ARTIFACT_ROOTS):
+            # 构建产物：`tools/<名>` 这类指“编出来的可执行目标”，源码存在即算成立。
             leaf = ref.rsplit('/', 1)[-1]
-            if any((root / d / f'{leaf}.cpp').exists()
-                   for d in ('tools',)):
-                continue
-        problems.append(f"{p}:{line_no} 引用的路径不存在: {ref}")
+            for d in ('tools',):
+                cand = root / d / f'{leaf}.cpp'
+                if cand.exists():
+                    disk = cand
+                    break
+        if disk is None:
+            ref_missing += 1
+            problems.append(f"{p}:{line_no} 引用的路径不存在: {ref}")
+            continue
+
+        # ── 第二层：已入仓（本次新增；磁盘有 ≠ 仓里有）──
+        key = repo_key(disk)
+        if key is None or GIT_UNAVAILABLE:
+            ref_unverified.append(
+                f"{p}:{line_no} `{ref}` — 本项未核（{GIT_UNAVAILABLE or '路径不在 git 仓库根下' }）")
+            continue
+        if key in TRACKED or key.rstrip('/') in TRACKED_DIRS:
+            ref_tracked += 1
+            continue
+        ref_untracked += 1
+        problems.append(
+            f"{p}:{line_no} 引用的 `{ref}` 存在于磁盘但**未被 git 跟踪**"
+            f"（`git clean`/切换分支后会丢）——请入仓或在文档里去掉该引用")
+
+print(f"引用入仓核对: 抽到路径引用 {ref_total} 处 → 实存∧入仓 {ref_tracked} 处 · 未入仓 {ref_untracked} 处 · "
+      f"不存在 {ref_missing} 处 · 移除/外部语境放行 {ref_removal + ref_external} 处 · "
+      f"glob/上级相对不核 {ref_glob} 处")
+if GIT_UNAVAILABLE:
+    print(f"  入仓性**本项未核** {len(ref_unverified)} 处（读不到 git：{GIT_UNAVAILABLE}）——"
+          f"它们**不计入**上面的“实存∧入仓")
+    for u in ref_unverified[:10]:
+        print('  [~]', u)
+    if len(ref_unverified) > 10:
+        print(f'  [~] …还有 {len(ref_unverified) - 10} 处')
+else:
+    print(f"  入仓性已核 {ref_tracked + ref_untracked}/{ref_tracked + ref_untracked} 处（git ls-files 共 "
+          f"{len(TRACKED)} 个已跟踪文件 / {len(TRACKED_DIRS)} 个派生目录）")
 
 # ── ④ 组件清单核对：DESIGN.md §4.5 列出的组件必须真实存在 ──
 comp_dir = root / 'include' / 'st' / 'ui' / 'components'
@@ -308,10 +434,25 @@ for path, needles in expect.items():
             problems.append(f"{path}: 缺少 {n!r}")
 
 print()
+# ── 三态收尾：**红 / 绿 / 未核**必须分开，且“未核”不得落在绿里 ──
+#
+# 为何要单独一段（本层实测踩到）：第一版只把“本项未核”**打印**出来，没进 `problems`——
+# 于是在一个没有 .git 的目录里跑（验证器自身可移植的场景），它会以 **exit 0 + [OK]** 收尾，
+# 而 1 处引用根本没被核过。那正是“在最需要警报的环境里安静”（与 `commit-scope.ts` 的
+# collect review 同型）：读者看到绿灯，以为入仓性核过了。
+# 正确的三态：有错 ⇒ 红（exit 1）；无可核但读不到 git ⇒ **未核**（exit 2，不当通过）；
+# 全部核过且无异常 ⇒ 绿（exit 0，且明说“已核 N/N”）。
 if problems:
     print(f"发现 {len(problems)} 个问题：")
     for p in problems:
         print('  [X]', p)
+    if ref_unverified:
+        print(f"另有 {len(ref_unverified)} 处入仓性**本项未核**（{GIT_UNAVAILABLE or '路径不在 git 仓库根下'}）")
     sys.exit(1)
-print("[OK] § 引用有效 · 旧值清零 · 路径实存 · 组件/用例数与代码一致 · BACKLOG 结构合规 · "
+if ref_unverified:
+    print(f"[未核] 其余检查均通过，但入仓性有 {len(ref_unverified)} 处**本项未核**："
+          f"{GIT_UNAVAILABLE or '路径不在 git 仓库根下'}")
+    print("  按三态纪律：未核 ≠ 通过。入仓性校验请在有 git 的仓库里重跑。")
+    sys.exit(2)
+print("[OK] § 引用有效 · 旧值清零 · 路径实存且已入仓 · 组件/用例数与代码一致 · BACKLOG 结构合规 · "
       "PITFALLS 格式合规 · 新内容就位")
