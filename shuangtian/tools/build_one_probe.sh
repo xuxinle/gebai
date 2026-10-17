@@ -16,10 +16,9 @@ mkdir -p "$outdir"
 mapfile -t objs < <(ls "$objdir"/*.o | grep -E '_shuangtian_src_(core|math|codec|raster|text)_' \
   | grep -v -E 'raster_platform_|shell_platform_|platform_gl|_test\.|test_runner|zz_probe')
 case "$name" in
-  svg_ab_probe|icon_gallery_probe)
-    mapfile -t svgobjs < <(ls "$objdir"/*.o | grep -E '_shuangtian_src_ui_svg\.cpp\.o$')
-    objs+=("${svgobjs[@]}")
-    ;;
+  # 无探针需额外补 ui 层对象。留这个分支是为了下次需要时只改这里，
+  # 不用重新想 grep 写法（原先的两条 SVG 探针已退役）。
+  __none__) ;;
 esac
 
 if [ "${#objs[@]}" -lt 10 ]; then
