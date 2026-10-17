@@ -322,7 +322,59 @@ auto TimelineView::get_property(std::string_view name) const -> std::optional<st
   if (name == "transport") {
     return project_ != nullptr && project_->playing ? std::string("playing") : std::string("paused");
   }
+  // —— 读面补齐：写得到就要读得回 ——
+  //
+  // 动因（实测）：`set_opacity`/`set_speed`/`trim`/`move` 都写得到，但属性面只有
+  // selected/clip_count/playhead/transport——于是**人调过的值 AI 读不回来**，
+  // “AI 为主、人机共用”就断在了共享真值无法被双方读出这一步。
+  //
+  // `clip` 用行式给整张片段表（AI 一次拉全，比逐 id 多轮往返省得多）；
+  // `clip.<字段>` 是单片段快照。
+  if (project_ == nullptr) return std::nullopt;
+  if (name == "clip") return clip_table();
+  if (name.starts_with("clip.")) {
+    const int id = parse_id(name.substr(5));
+    const Clip* clip = project_->find_clip(id);
+    if (clip == nullptr) return std::nullopt;
+    const std::string_view field = name.substr(5 + std::to_string(id).size() + 1);
+    return clip_field(*clip, field);
+  }
   return std::nullopt;
+}
+
+auto TimelineView::parse_id(std::string_view text) -> int {
+  int value = 0;
+  bool any = false;
+  for (const char c : text) {
+    if (c < '0' || c > '9') break;
+    value = value * 10 + (c - '0');
+    any = true;
+  }
+  return any ? value : -1;
+}
+
+auto TimelineView::clip_field(const Clip& clip, std::string_view field) -> std::optional<std::string> {
+  if (field == "track") return std::to_string(clip.track);
+  if (field == "in") return std::format("{:.3f}", clip.t_in);
+  if (field == "out") return std::format("{:.3f}", clip.t_out);
+  if (field == "duration") return std::format("{:.3f}", clip.duration());
+  if (field == "source_in") return std::format("{:.3f}", clip.source_in);
+  if (field == "opacity") return std::format("{:.3f}", clip.opacity);
+  if (field == "speed") return std::format("{:.3f}", clip.speed);
+  if (field == "scene") return std::to_string(clip.scene_index);
+  return std::nullopt;
+}
+
+auto TimelineView::clip_table() const -> std::string {
+  // 一行一片段、空格分隔字段、换行分段——比 JSON 好读，也比“只报个数”有信息量。
+  // 字段：`id track in out opacity speed scene`（后三项是写入口能改的东西）。
+  std::string out;
+  for (const Clip& clip : project_->clips) {
+    if (!out.empty()) out.push_back('\n');
+    out += std::format("{} {} {:.3f} {:.3f} {:.3f} {:.3f} {}", clip.id, clip.track, clip.t_in,
+                       clip.t_out, clip.opacity, clip.speed, clip.scene_index);
+  }
+  return out;
 }
 
 auto TimelineView::set_property(std::string_view name, std::string_view value) -> bool {
@@ -340,10 +392,6 @@ auto TimelineView::set_property(std::string_view name, std::string_view value) -
     }
   }
   return false;
-}
-
-auto TimelineView::property_names() const -> std::vector<std::string_view> {
-  return {"selected", "clip_count", "playhead", "transport"};
 }
 
 auto TimelineView::invoke_action(std::string_view action, std::string_view argument) -> bool {

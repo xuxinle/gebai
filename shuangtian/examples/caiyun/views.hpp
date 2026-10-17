@@ -71,7 +71,17 @@ class TimelineView final : public st::ui::Element {
   auto on_event(const st::ui::RenderContext& context, st::ui::Event& event) -> bool override;
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
   auto set_property(std::string_view name, std::string_view value) -> bool override;
-  [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  /// 只读属性面。「写得到的就要读得回」：四个写入口之外的量（不透明度/速度/
+  /// 区间）都由 `clip`（整张表）与 `clip.<id>.<字段>`（单项）暴露。
+  [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override {
+    return {"selected", "clip_count", "playhead", "transport", "clip"};
+  }
+  [[nodiscard]] auto clip_table() const -> std::string;
+  /// 单个片段的某个字段（`opacity`/`speed`/`in`/`out`/`track`/`scene`…）。
+  [[nodiscard]] static auto clip_field(const Clip& clip, std::string_view field)
+      -> std::optional<std::string>;
+  /// 属性名里取前导数字（`clip.3.opacity` → 3）；无数字返回 -1。
+  [[nodiscard]] static auto parse_id(std::string_view text) -> int;
   auto invoke_action(std::string_view action, std::string_view argument)
       -> bool override;
 

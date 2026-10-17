@@ -313,6 +313,30 @@ def main():
         check(client.invoke("timeline", "set_opacity", "2 0.8"), "解锁后编辑仍被拒（锁没真正解开）")
         print("[6b] 交还编辑权：编辑恢复可用")
 
+        # —— 7. 共享真值：AI 写得到的，也要读得回 ——
+        #
+        # 这是「AI 为主、人机共用」的命门：两方写同一份数据，却只有一方能看见，
+        # 就不叫共用。实测曾经 `set_opacity`/`set_speed`/`trim`/`move` 都写得到，
+        # 而属性面只有 selected/clip_count/playhead/transport——人调过的值 AI 读不回来。
+        check(client.invoke("timeline", "set_opacity", "2 0.6"), "set_opacity 失败")
+        check(client.invoke("timeline", "set_speed", "2 1.5"), "set_speed 失败")
+        table = client.props("timeline")["clip"]
+        rows = [line.split() for line in table.strip().splitlines()]
+        check(len(rows) == int(client.props("timeline")["clip_count"]),
+              f"clip 表行数与 clip_count 不一致：{len(rows)} vs {client.props('timeline')['clip_count']}")
+        check(all(len(row) == 7 for row in rows), f"clip 表列数不是 7：{rows[:1]}")
+        row2 = [row for row in rows if row[0] == "2"]
+        check(bool(row2), f"clip 表里找不到片段 2：{rows}")
+        opacity_2 = float(row2[0][4])
+        speed_2 = float(row2[0][5])
+        check(abs(opacity_2 - 0.6) < 0.01, f"AI 读回的不透明度不是刚写的 0.6：{opacity_2}")
+        check(abs(speed_2 - 1.5) < 0.01, f"AI 读回的速度不是刚写的 1.5：{speed_2}")
+        # 区间也必须可读（trim/move 的结果）：入/出点与时长自洽
+        t_in, t_out = float(row2[0][2]), float(row2[0][3])
+        check(t_out > t_in, f"片段 2 区间不自洽：{t_in} → {t_out}")
+        print(f"[7] 共享真值可读：片段 2 opacity={opacity_2:.2f} speed={speed_2:.2f} "
+              f"[{t_in:.2f},{t_out:.2f}]，{len(rows)} 行整表")
+
         print("\n[OK] 裁云 AI 导演闭环全部通过")
         return 0
     finally:
