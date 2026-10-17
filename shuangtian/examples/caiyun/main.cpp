@@ -76,6 +76,11 @@ struct Options {
   std::string shots{};
   /// `--script <路径>`：启动即装载导演脚本（AI/CI 的入口）。
   std::string script{};
+  /// `--ai-control`：启动即进入 AI 控制态（人只能查看）。
+  ///
+  /// 为何要这个开关而不是“让 AI 自己发 edit_lock”：演示/人机同屏时，
+  /// **启动那一刻就不该给人工编辑留窗口**——先把界面摆对，再开始放片子。
+  bool ai_control{false};
   /// `--render <输出 mp4>` + `--render-size WxH` + `--render-frames N`：启动即渲染。
   std::string render_output{};
   int render_width{1920};
@@ -96,6 +101,7 @@ auto print_usage(std::string_view program) -> void {
       "\n"
       "内容/自动化\n"
       "  --script PATH         启动即装载导演脚本（JSON；缺省 = 内置歌白 10 秒宣传片）\n"
+  "  --ai-control          启动即进入 AI 控制态（人工编辑控件置灰，只能查看/播放）\n"
       "  --render PATH         启动即渲染成片（mp4；需本机有 ffmpeg）\n"
       "  --render-size WxH     成片分辨率（缺省 1920x1080）\n"
       "  --render-frames N     只渲染前 N 帧（快速试渲）\n"
@@ -147,9 +153,11 @@ auto parse_options(int argc, char** argv) -> Options {
       options.control_file = value("");
     } else if (raw == "--shots") {
       options.shots = value("");
-    } else if (raw == "--script") {
-      options.script = value("");
-    } else if (raw == "--render") {
+      } else if (raw == "--script") {
+    options.script = value("");
+  } else if (raw == "--ai-control") {
+    options.ai_control = true;
+  } else if (raw == "--render") {
       options.render_output = value("");
     } else if (raw == "--export-dir") {
       options.export_dir = value("");
@@ -347,6 +355,21 @@ class CaiyunPage final : public dsl::Component {
     };
     hooks.stop_render = [this] { renderer_.cancel(); };
     hooks.script_json = [this] { return caiyun::script_to_json(project_.script); };
+    hooks.set_edit_lock = [this](bool on) -> std::string {
+      if (!project_.set_ai_control(on)) {
+        // 重复设置不算错（幂等），但也不报“失败”。
+        return {};
+      }
+      // 交接时**已经重建了片段**（以脚本为准），所以这里同步时间轴与监视器。
+      if (timeline_ != nullptr) timeline_->set_project(&project_);
+      if (monitor_ != nullptr) monitor_->refresh();
+      selected_scene_ = 0;
+      log(on ? "AI 接管编辑：人工控件已置灰（仍可查看/播放）"
+             : "AI 交还编辑权：人工控件已恢复");
+      bump();
+      return {};
+    };
+    hooks.edit_locked = [this] { return project_.ai_controlled; };
     hooks.project_value = [this](const std::string& key) -> std::string {
       if (key == "scene_count") return std::to_string(project_.script.scenes.size());
       if (key == "duration") return std::format("{:.3f}", project_.duration);
@@ -491,23 +514,27 @@ class CaiyunPage final : public dsl::Component {
             c, [this] { return format_timecode(project_.playhead); },
             {.id = "timecode", .key = "timecode"});
         (void)dsl::spacer(c, 1.0f);
+        // 编辑类按钮：AI 控制态下置灰（门禁在 Project，这里只是让用户**看得见**）。
+        const bool editable = project_.can_edit();
         (void)dsl::custom<Button>(
             c,
-            [this](Button& b) {
+            [this, editable](Button& b) {
               b.set_id("btn-split");
               b.set_icon("diff");
               b.set_size(Button::Size::Small);
               b.set_variant(Button::Variant::Ghost);
+              b.set_enabled(editable);
               b.on_click = [this] { do_split(); };
             },
             {.key = "split"});
         (void)dsl::custom<Button>(
             c,
-            [this](Button& b) {
+            [this, editable](Button& b) {
               b.set_id("btn-ripple-delete");
               b.set_icon("trash");
               b.set_size(Button::Size::Small);
               b.set_variant(Button::Variant::Ghost);
+              b.set_enabled(editable);
               b.on_click = [this] { do_ripple_delete(); };
             },
             {.key = "ripple"});
@@ -526,6 +553,16 @@ class CaiyunPage final : public dsl::Component {
                     .surface = st::ui::Element::Surface::Alt, .id = "director-panel"}, [&] {
       dsl::text(c, [] { return std::string("AI 导演"); },
                 {.size = 15.0f, .weight = st::ui::FontWeight::SemiBold, .id = "director-title"});
+      // **控制态横幅**：AI 接管时这一行是用户唯一能看出“为什么点不动”的地方。
+      // 所以它必须是常驻的一行（不是 toostip）——置灰的控件不自解释。
+      dsl::text(
+          c,
+          [this] {
+            return project_.ai_controlled
+                       ? std::string("AI 控制中 · 仅可查看（播放/暂停/拖动时间轴仍可用）")
+                       : std::string("人工编辑模式");
+          },
+          {.size = 12.0f, .id = "director-control-state", .key = "control-state"});
       dsl::text(c, [this] { return std::format("工程：{}", project_.script.name); },
                 {.id = "director-project", .key = "project-name"});
       dsl::text(c,
@@ -538,21 +575,24 @@ class CaiyunPage final : public dsl::Component {
                 {.id = "director-meta", .key = "meta"});
       // 脚本路径（AI 侧通常直接用控制通道 apply_script，这里是人工换片子的入口）。
       dsl::text(c, [] { return std::string("脚本路径"); }, {});
+      const bool editable = project_.can_edit();
       (void)dsl::input(
           c, script_path_,
           [this](std::string value) {
             script_path_ = std::move(value);
           },
-          {.id = "director-script-path", .key = "script-path"});
+          {.id = "director-script-path", .key = "script-path"})
+          .set_enabled(editable);
       dsl::row(c, {.gap = 6.0f, .id = "director-buttons"}, [&] {
         (void)dsl::custom<Button>(
             c,
-            [this](Button& b) {
+            [this, editable](Button& b) {
               b.set_id("btn-apply-script");
               b.set_label("应用脚本");
               b.set_icon("play");
               b.set_size(Button::Size::Small);
               b.set_variant(Button::Variant::Soft);
+              b.set_enabled(editable);
               b.on_click = [this] { apply_script_clicked(); };
             },
             {.key = "apply"});
@@ -579,12 +619,15 @@ class CaiyunPage final : public dsl::Component {
       dsl::row(c, {.gap = 6.0f, .id = "render-buttons"}, [&] {
         (void)dsl::custom<Button>(
             c,
-            [this](Button& b) {
+            [this, editable](Button& b) {
               b.set_id("btn-render");
               b.set_label("渲染成片");
               b.set_icon("sparkles");
               b.set_size(Button::Size::Small);
               b.set_variant(Button::Variant::Primary);
+              // 渲染不是“编辑”，但 AI 正在驱动时也不该被重开第二个作业
+              //（渲染器一次只跑一个，重开只会得一句失败）。
+              b.set_enabled(editable);
               b.on_click = [this] { render_clicked(); };
             },
             {.key = "render"});
@@ -689,27 +732,28 @@ class CaiyunPage final : public dsl::Component {
                 {.id = "inspector-duration", .key = "duration"});
       dsl::text(c, [] { return std::string("不透明度"); }, {});
       const int id = clip->id;
+      const bool editable = project_.can_edit();
       (void)dsl::slider(
           c, clip->opacity,
           [this, id](float value) {
-            Clip* target = project_.find_clip(id);
-            if (target == nullptr) return;
-            target->opacity = std::clamp(value, 0.0f, 1.0f);
+            // 门禁在 Project 里（`set_opacity` 自己拒绝）——这里不再重复判断，
+            // 否则“两处都要改”迟早漏一处。
+            if (!project_.set_opacity(id, value)) return;
             if (monitor_ != nullptr) monitor_->refresh();
             bump();
           },
-          {.id = "inspector-opacity", .key = "opacity"});
+          {.id = "inspector-opacity", .key = "opacity"})
+          .set_enabled(editable);
       dsl::text(c, [] { return std::string("速度"); }, {});
       (void)dsl::slider(
           c, clip->speed,
           [this, id](float value) {
-            Clip* target = project_.find_clip(id);
-            if (target == nullptr) return;
-            target->speed = std::clamp(value, 0.25f, 4.0f);
+            if (!project_.set_speed(id, value)) return;
             if (monitor_ != nullptr) monitor_->refresh();
             bump();
           },
-          {.id = "inspector-speed", .key = "speed"});
+          {.id = "inspector-speed", .key = "speed"})
+          .set_enabled(editable);
       if (scene != nullptr) {
         (void)dsl::divider(c);
         dsl::text(c, [] { return std::string("文案（人工微调）"); }, {.size = 12.0f});
@@ -717,27 +761,21 @@ class CaiyunPage final : public dsl::Component {
         (void)dsl::input(
             c, scene->title,
             [this, scene_index](std::string value) {
-              if (scene_index < 0 ||
-                  static_cast<std::size_t>(scene_index) >= project_.script.scenes.size()) {
-                return;
-              }
-              project_.script.scenes[static_cast<std::size_t>(scene_index)].title = value;
+              if (!project_.set_scene_text(scene_index, 0, std::move(value))) return;
               if (monitor_ != nullptr) monitor_->refresh();
               bump();
             },
-            {.id = "inspector-title-input", .key = "scene-title"});
+            {.id = "inspector-title-input", .key = "scene-title"})
+            .set_enabled(editable);
         (void)dsl::input(
             c, scene->subtitle,
             [this, scene_index](std::string value) {
-              if (scene_index < 0 ||
-                  static_cast<std::size_t>(scene_index) >= project_.script.scenes.size()) {
-                return;
-              }
-              project_.script.scenes[static_cast<std::size_t>(scene_index)].subtitle = value;
+              if (!project_.set_scene_text(scene_index, 1, std::move(value))) return;
               if (monitor_ != nullptr) monitor_->refresh();
               bump();
             },
-            {.id = "inspector-subtitle-input", .key = "scene-subtitle"});
+            {.id = "inspector-subtitle-input", .key = "scene-subtitle"})
+            .set_enabled(editable);
       }
     });
         },
@@ -900,6 +938,9 @@ auto run_app(int argc, char** argv) -> int {
   }
 
   auto page = std::make_shared<CaiyunPage>(options.script);
+  // 启动即接管（`--ai-control`）：必须在**首帧之前**设好，否则会出现“先能改、
+  // 锁上”的一瞬——而那一瞬恰好是演示时镜头对着屏幕的时候。
+  if (options.ai_control) (void)page->project().set_ai_control(true);
   if (!options.export_dir.empty()) {
     (void)st::fs::create_directories(options.export_dir);
   }

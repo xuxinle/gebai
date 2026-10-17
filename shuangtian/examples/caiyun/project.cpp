@@ -195,6 +195,10 @@ void Project::rebuild_from_script() {
 }
 
 auto Project::add_clip(GeneratorKind kind, int track, double t_in, double t_out) -> int {
+  // **AI 控制态一律拒绝**（用户要求：AI 剪的时候人只能看）。守在这里而不是 UI 层，
+  // 是因为编辑入口有六七个，逐个禁用必漏一个；漏掉的那个就是真实缺口。
+  if (!can_edit()) return -1;
+
   if (track < 0 || track > 1) return -1;
   if (t_in < 0.0) t_in = 0.0;
   if (t_out - t_in < kMinClipDuration) return -1;
@@ -215,6 +219,10 @@ auto Project::add_clip(GeneratorKind kind, int track, double t_in, double t_out)
 }
 
 auto Project::remove_clip(int id) -> bool {
+  // **AI 控制态一律拒绝**（用户要求：AI 剪的时候人只能看）。守在这里而不是 UI 层，
+  // 是因为编辑入口有六七个，逐个禁用必漏一个；漏掉的那个就是真实缺口。
+  if (!can_edit()) return false;
+
   for (auto it = clips.begin(); it != clips.end(); ++it) {
     if (it->id != id) continue;
     clips.erase(it);
@@ -225,6 +233,10 @@ auto Project::remove_clip(int id) -> bool {
 }
 
 auto Project::ripple_delete(int id) -> bool {
+  // **AI 控制态一律拒绝**（用户要求：AI 剪的时候人只能看）。守在这里而不是 UI 层，
+  // 是因为编辑入口有六七个，逐个禁用必漏一个；漏掉的那个就是真实缺口。
+  if (!can_edit()) return false;
+
   const Clip* target = find_clip(id);
   if (target == nullptr) return false;
   const int track = target->track;
@@ -247,6 +259,10 @@ auto Project::ripple_delete(int id) -> bool {
 }
 
 auto Project::split_at(double time) -> bool {
+  // **AI 控制态一律拒绝**（用户要求：AI 剪的时候人只能看）。守在这里而不是 UI 层，
+  // 是因为编辑入口有六七个，逐个禁用必漏一个；漏掉的那个就是真实缺口。
+  if (!can_edit()) return false;
+
   // 优先切选中的（用户意图更明确）；没选中时切"最上层命中"的那个。
   int target_id = selected;
   if (const Clip* chosen = find_clip(target_id); chosen == nullptr || !chosen->covers(time)) {
@@ -275,6 +291,10 @@ auto Project::split_at(double time) -> bool {
 }
 
 auto Project::trim(int id, int edge, double time) -> bool {
+  // **AI 控制态一律拒绝**（用户要求：AI 剪的时候人只能看）。守在这里而不是 UI 层，
+  // 是因为编辑入口有六七个，逐个禁用必漏一个；漏掉的那个就是真实缺口。
+  if (!can_edit()) return false;
+
   Clip* clip = find_clip(id);
   if (clip == nullptr) return false;
   if (edge == 0) {
@@ -291,6 +311,10 @@ auto Project::trim(int id, int edge, double time) -> bool {
 }
 
 auto Project::move_clip(int id, double new_t_in) -> bool {
+  // **AI 控制态一律拒绝**（用户要求：AI 剪的时候人只能看）。守在这里而不是 UI 层，
+  // 是因为编辑入口有六七个，逐个禁用必漏一个；漏掉的那个就是真实缺口。
+  if (!can_edit()) return false;
+
   Clip* clip = find_clip(id);
   if (clip == nullptr) return false;
   const double length = clip->duration();
@@ -298,6 +322,47 @@ auto Project::move_clip(int id, double new_t_in) -> bool {
   if (in + length > duration) in = std::max(0.0, duration - length);
   clip->t_in = in;
   clip->t_out = in + length;
+  return true;
+}
+
+auto Project::set_opacity(int id, float value) -> bool {
+  if (!can_edit()) return false;
+  Clip* clip = find_clip(id);
+  if (clip == nullptr) return false;
+  clip->opacity = std::clamp(value, 0.0f, 1.0f);
+  return true;
+}
+
+auto Project::set_speed(int id, float value) -> bool {
+  if (!can_edit()) return false;
+  Clip* clip = find_clip(id);
+  if (clip == nullptr) return false;
+  clip->speed = std::clamp(value, 0.25f, 4.0f);
+  return true;
+}
+
+auto Project::set_scene_text(int scene_index, int field, std::string value) -> bool {
+  if (!can_edit()) return false;
+  if (scene_index < 0 || static_cast<std::size_t>(scene_index) >= script.scenes.size()) {
+    return false;
+  }
+  Scene& scene = script.scenes[static_cast<std::size_t>(scene_index)];
+  if (field == 0) {
+    scene.title = std::move(value);
+  } else if (field == 1) {
+    scene.subtitle = std::move(value);
+  } else {
+    return false;
+  }
+  return true;
+}
+
+auto Project::set_ai_control(bool on) -> bool {
+  if (ai_controlled == on) return false;
+  ai_controlled = on;
+  // AI 接管时以**脚本**为准重建片段：AI 改的是脚本，而 `clips` 还带着历史人工
+  // 编辑；不重建就会出现“脚本早换了、时间轴还是手动剪过的样子”。
+  if (on) rebuild_from_script();
   return true;
 }
 

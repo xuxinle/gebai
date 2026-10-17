@@ -452,20 +452,20 @@ auto TimelineView::invoke_action(std::string_view action, std::string_view argum
   if (action == "set_opacity" || action == "set_speed") {
     // 形式：`<片段 id> <数值>`——检查器的滑杆改的是同一个量，控制通道要有等价入口
     //（否则“AI 能改字幕却不能改透明度”，两个入口的能力就分叉了）。
+    //
+    // **必须走 Project 的 setter**（而不是直接写 `clip->opacity`）：AI 控制态的
+    // 门禁长在 Project 里；绕过去就是“AI 在剪、用户还能把画面调没”的真实缺口
+    //（实测：这里直接写字段时 `set_opacity` 在锁定态仍返回 true）。
     const std::size_t space = argument.find(' ');
     if (space == std::string_view::npos) return false;
     try {
       const int id = std::stoi(std::string(argument.substr(0, space)));
       const double value = std::stod(std::string(argument.substr(space + 1)));
-      Clip* clip = project_->find_clip(id);
-      if (clip == nullptr) return false;
-      if (action == "set_opacity") {
-        clip->opacity = static_cast<float>(std::clamp(value, 0.0, 1.0));
-      } else {
-        clip->speed = static_cast<float>(std::clamp(value, 0.25, 4.0));
-      }
-      notify_changed();
-      return true;
+      const bool ok = action == "set_opacity"
+                          ? project_->set_opacity(id, static_cast<float>(value))
+                          : project_->set_speed(id, static_cast<float>(value));
+      if (ok) notify_changed();
+      return ok;
     } catch (...) {
       return false;
     }

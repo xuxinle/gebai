@@ -26,6 +26,9 @@ void DirectorBridge::paint_content(const st::ui::RenderContext& context,
 
 auto DirectorBridge::get_property(std::string_view name) const -> std::optional<std::string> {
   if (name == "script") return hooks_.script_json ? hooks_.script_json() : std::string{};
+  if (name == "edit_locked") {
+    return hooks_.edit_locked && hooks_.edit_locked() ? "true" : "false";
+  }
   if (name == "last_action") return last_action_;
   if (name == "last_error") return last_error_;
   if (name.starts_with("render_")) {
@@ -53,7 +56,7 @@ auto DirectorBridge::set_property(std::string_view name, std::string_view value)
 }
 
 auto DirectorBridge::property_names() const -> std::vector<std::string_view> {
-  return {"script", "last_action", "last_error", "render_stage", "render_progress",
+  return {"script", "last_action", "last_error", "edit_locked", "render_stage", "render_progress",
           "render_output", "render_error", "render_frames_done", "render_frames_total",
           "render_log", "scene_count", "duration", "fps", "size", "name"};
 }
@@ -73,6 +76,14 @@ auto DirectorBridge::invoke_action(std::string_view action, std::string_view arg
     last_error_ = hooks_.start_render ? hooks_.start_render(std::string(argument)) : "未接线";
   } else if (action == "render_stop") {
     if (hooks_.stop_render) hooks_.stop_render();
+  } else if (action == "edit_lock" || action == "unlock_edit") {
+    // AI 接管/交还编辑权。`edit_lock` 可带参数（`on`/`off`/`false`/`0`），
+    // 不带则视为开启——“交给 AI”本来就是默认意图。
+    bool on = action == "edit_lock";
+    if (action == "edit_lock" && !argument.empty()) {
+      on = !(argument == "off" || argument == "false" || argument == "0");
+    }
+    last_error_ = hooks_.set_edit_lock ? hooks_.set_edit_lock(on) : "未接线";
   } else {
     last_error_ = std::format("未知动作：{}", action);
     return false;

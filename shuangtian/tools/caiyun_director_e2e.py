@@ -271,6 +271,48 @@ def main():
         check("1.00" in range_text, f"检查器未反映修剪后的出点：{range_text}")
         print(f"[5] 人工微调同源：检查器 {range_text}，场景数仍为 3")
 
+        # —— 6. AI 控制态：人只能看 ——
+        #
+        # 判据分两半，缺一不可：
+        #   ① **编辑全被拒**——而且必须逐个动作拿：删一个入口就少一条护栏；
+        #   ② **查看仍然可用**——seek/播放不能被一起锁死（那变成“死界面”）。
+        # 为什么逐动作而不是只看 clip_count：早期 `set_opacity` 绕过 Project 直接写字段，
+        # 它在锁定态**返回 true** 而片段数根本不变——只数片段数就漏了。
+        check(not client.props("director")["edit_locked"] == "true",
+              "初始不应处于 AI 控制态")
+        check(client.invoke("director", "edit_lock"), "edit_lock 未生效")
+        locked = client.props("director")
+        check(locked["edit_locked"] == "true", f"edit_locked 属性应为 true，实为 {locked['edit_locked']}")
+        clips_before = client.props("timeline")["clip_count"]
+        seek_before = client.props("monitor")["frame_time"]
+        edits = {
+            "分割": ("timeline", "split", "1.0"),
+            "波纹删除": ("timeline", "ripple_delete", "1"),
+            "修剪": ("timeline", "trim", "2 1 1.2"),
+            "移动": ("timeline", "move", "2 3.0"),
+            "不透明度": ("timeline", "set_opacity", "2 0.4"),
+            "速度": ("timeline", "set_speed", "2 2.5"),
+            "新增片段": ("timeline", "add_clip", "0 0 0.0 0.5"),
+        }
+        leaked = []
+        for name, (element, action, argument) in edits.items():
+            if client.invoke(element, action, argument):
+                leaked.append(name)
+        check(not leaked, f"AI 控制态下这些编辑没被拦住：{leaked}")
+        check(client.props("timeline")["clip_count"] == clips_before,
+              "锁定态下片段数变了（有编辑真的生效）")
+        # 查看通道必须仍然可用
+        check(client.invoke("timeline", "seek", "3.5"), "锁定态下 seek 被拒（查看也不能了）")
+        check(client.props("monitor")["frame_time"] != seek_before, "锁定时 seek 后画面没动")
+        check(client.invoke("timeline", "select", "2"), "锁定时连选中（只读操作）都不允许")
+        print(f"[6] AI 控制态：{len(edits)} 个编辑动作全部被拦、seek/选中仍可用")
+
+        # 交还编辑权后必须恢复（否则“锁一次就永久锁死”）
+        check(client.invoke("director", "unlock_edit"), "unlock_edit 未生效")
+        check(client.props("director")["edit_locked"] == "false", "解锁后 edit_locked 仍为 true")
+        check(client.invoke("timeline", "set_opacity", "2 0.8"), "解锁后编辑仍被拒（锁没真正解开）")
+        print("[6b] 交还编辑权：编辑恢复可用")
+
         print("\n[OK] 裁云 AI 导演闭环全部通过")
         return 0
     finally:

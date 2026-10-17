@@ -49,6 +49,10 @@ class DirectorBridge final : public st::ui::Element {
     std::function<void()> stop_render{};
     /// 当前脚本 JSON。
     std::function<std::string()> script_json{};
+    /// 读写 **AI 控制态**：`true` = AI 接管编辑、人只能查看（`edit_lock` 动作）。
+    std::function<std::string(bool)> set_edit_lock{};
+    /// 当前是否处于 AI 控制态。
+    std::function<bool()> edit_locked{};
     /// 工程摘要（`scene_count` / `duration` / `fps` / `size` 等一条键值）。
     std::function<std::string(const std::string& key)> project_value{};
     /// 渲染状态里的一项。

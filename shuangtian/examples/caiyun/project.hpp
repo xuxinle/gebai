@@ -114,6 +114,24 @@ struct Project {
   /// 吸附阈值（秒）：拖拽时落点靠近片段边缘/播放头就吸附到它。
   double snap_threshold{0.12};
 
+  /// —— **AI 控制态**（用户明确要求：AI 控制编辑时，人只能看）——
+  ///
+  /// 为真是**开关在数据层**而不是在 UI 层：人工编辑有六七个入口（时间轴拖拽 /
+  /// 分割 / 波纹删除 / 不透明度 / 速度 / 文案输入 / 应用脚本），在 UI 层逐个禁用
+  /// 必然漏一个；而漏掉的那个就是“AI 在剪、用户把片段拖走了”的真实缺口”。
+  /// 所以所有变更函数入口先问 `can_edit()`，UI 只管把控件置灰并说明原因。
+  bool ai_controlled{false};
+
+  /// 当前能否人工编辑。**默认放行**（无 AI 控制时应用就是普通剪辑器）。
+  [[nodiscard]] auto can_edit() const noexcept -> bool { return !ai_controlled; }
+
+  /// 控制态切换。返回 false = 没变化（重复设置不算错，但调用方无需刷新）。
+  ///
+  /// 交接时呼一次 `rebuild_from_script()`：AI 编辑的是**脚本**，而 `clips` 是
+  /// 脚本 + 历史人工编辑的混血——不重建就会出现“脚本早换了、时间轴还是手动
+  /// 剪过的样子”。重建后两边再次同源。
+  auto set_ai_control(bool on) -> bool;
+
   /// 导演脚本（场景真值）。`clips` 是它的**投影** + 人工编辑的结果：
   /// 应用脚本会按脚本重建片段；人工编辑只改片段（脚本保留，可另存）。
   Script script{builtin_gebai_promo()};
@@ -152,6 +170,8 @@ struct Project {
   void rebuild_from_script();
 
   /// 新增片段（返回新 id；区间非法时返回 -1）。
+  ///
+  /// **AI 控制态下返回 -1 且不改工程**（`can_edit()` 为假）；UI 层另会把按钮置灰。
   auto add_clip(GeneratorKind kind, int track, double t_in, double t_out) -> int;
   /// 删除片段（返回是否删掉）。
   auto remove_clip(int id) -> bool;
@@ -163,6 +183,16 @@ struct Project {
   auto trim(int id, int edge, double time) -> bool;
   /// 移动片段到新入点（保持时长）。
   auto move_clip(int id, double new_t_in) -> bool;
+
+  /// 改不透明度（钳到 0~1）。与上面几个同属**编辑**，同样受 `can_edit()` 把关。
+  ///
+  /// 为何收进 Project：早先滑杆回调直接写 `clip->opacity`——那条路径绕过了任何
+  /// 门禁，是“AI 控制态下用户还能改画面”的现成缺口。
+  auto set_opacity(int id, float value) -> bool;
+  /// 改速度（钳到 0.25~4.0）。
+  auto set_speed(int id, float value) -> bool;
+  /// 改场景文案（标题/副标题）；`field` = 0 标题 / 1 副标题。
+  auto set_scene_text(int scene_index, int field, std::string value) -> bool;
 
   /// 合成一帧到 `target`（`target` 尺寸决定输出分辨率）。
   ///
