@@ -244,6 +244,12 @@ function cleanup(s: Stub): void {
 const controlOf = (s: Stub) => readFileSync(join(s.root, ".evolve", "control.md"), "utf8")
 const ledgerOf = (s: Stub) => readFileSync(join(s.root, ".evolve", "ledger.md"), "utf8")
 
+/** 本文件里有三组用例**必须**用 POSIX 的 `/bin/sh`（真跑 `git rev-parse`、真起一个 gate 进程）。
+ *  Windows 上没有它 ⇒ 那几组会以 `ENOENT` 失败，而失败原因与行为对错无关。
+ *  挡掉而不是留红：一个「因环境必然红」的套件会让人学会不看红。
+ *  （与 `shengsheng-retire-tree.test.ts` 的真进程场景同一口径。） */
+const isWin = process.platform === "win32"
+
 describe("shengsheng sub-agent（演进调度中枢）", () => {
   test("工具面精简：四工具覆盖一息，不复刻已有能力", () => {
     expect(Object.keys(shengshengDef.tools!)).toEqual(["state", "dispatch", "collect", "divine"])
@@ -2990,6 +2996,41 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
       cleanup(s)
     })
 
+    test("独占租约：到期只在 `state` 读态被消费——直接 `dispatch` 仍被挡（这是取舍，不是缺陷）", async () => {
+      // 为何必须有这一条：`expireAt` 是兜底，防「持有者悄悄死掉而登记没被碰」
+      // ⇒ 一条死租约会永久堵院，而堵住的恰好是「要独占才敢做」的那类活。
+      // 但回收**只在读态发生**：`dispatch` 不自己回收（那会把「刚过期但正干着活」的单砍掉）。
+      // 代价是：跳过读态就派 ⇒ 一条已过期的租约仍能挡住人——本条把这个取舍钉成行为契约，
+      // 免得后来人以为「过期即自清」而省掉那一息。
+      const s = stub()
+      await tool("state").execute({ action: "init", root: s.root, verify: "bun test" }, s.ctx)
+      s.ctx.env.SHENGSHENG_MAX_WORKERS = "6"
+
+      await tool("dispatch").execute({ orders: [{ task: "测量甲", domain: "a", exclusive: true }] }, s.ctx)
+      // 把到期时刻改到过去（parse→render 真往返），且**不**调用 state
+      const st = parseControl(controlOf(s))
+      st.leases[0].expireAt = Date.now() - 1_000
+      await Bun.write(join(s.root, ".evolve", "control.md"), renderControl(st))
+      s.running.clear()
+
+      // ① 直接 dispatch（不经 state）⇒ **仍被挡**，且回显要标出「已到期」
+      // 用**增量**而非绝对值：上一单（测量甲）已经开跑过，`s.sent` 里本就有它。
+      const sentBefore = s.sent.length
+      const blocked = await tool("dispatch").execute({ orders: [{ task: "测量乙", domain: "b", fresh: true, exclusive: true }] }, s.ctx)
+      expect(blocked.output).toContain("未派")
+      expect(blocked.output).toContain("已到期")
+      expect(s.sent).toHaveLength(sentBefore) // 真没开跑
+
+      // ② 先读态（回收）再 dispatch ⇒ 这次能派
+      const read = await tool("state").execute({}, s.ctx)
+      expect(read.output).toContain("租约回收")
+      expect(parseControl(controlOf(s)).leases).toHaveLength(0)
+      const ok = await tool("dispatch").execute({ orders: [{ task: "测量乙", domain: "b", fresh: true, exclusive: true }] }, s.ctx)
+      expect(ok.output).not.toContain("未派")
+      expect(s.sent).toHaveLength(sentBefore + 1)
+      cleanup(s)
+    })
+
     test("独占租约：资源名归一——\"  CPU-Exclusive \" 与 \"cpu-exclusive\" 是同一资源（一个空格绕不过去）", async () => {
       // 起因（验收点名）：`resourceKey` 的注释说「否则一个空格就能绕开租约」，可**没有任何用例真从这个
       // 角度撞过它**——注释不是证据。这里走真派工往返：第一单用带空格+大写的资源名，第二单用规范名。
@@ -3204,12 +3245,12 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
   //   两者的 `git rev-parse --show-toplevel` 都是 /home/x/code/gebai
   // ⇒ 两条线各有自己的 control.md，却共享**同一棵树、同一批文件、同一台机器**，而租约互相看不见。
   // 代价（当日实测）：一条线在跑 `tsc --noEmit`（196% CPU），另一条正在等 load<2 做性能测量；
-  // 一条在 `reverse_verify_kill_drill.py` 里把 shengsheng.ts 切成回退态，另一条正准备提交同一文件。
+  // 一条线在回退型门禁里把 shengsheng.ts 切成回退态，另一条正准备提交同一文件。
   //
   // 下面每条用例都用**两个真实项目根 + 同一个真 git 仓**（git init 真跑），不喂手拼对象：
   // 只测内部函数的话，“探测不到 git 顶层就安静降级”与“不同仓互不影响”这两条根本无从验。
   // ==================================================================
-  describe("仓级资源租约（同一 git 仓上的多条演进线）", () => {
+  describe.skipIf(isWin)("仓级资源租约（同一 git 仓上的多条演进线）", () => {
     /** 造一个真 git 仓，其下两个子目录各是一条演进线的项目根（各自 init 过 control.md）。
      *  `git` 命令真跑（夹具里 `git init -q` 一个空仓就够——`rev-parse --show-toplevel` 只看目录结构）。 */
     const twoLines = async () => {
@@ -3443,7 +3484,7 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
   // 被测的正是「git 到底把哪些文件放进了提交」这个事实，桩在这里会把差异抹平
   // （CONVENTIONS §7.2：桩必须复现被测的那一段真实行为）。
   // ==================================================================
-  describe("提交范围（宽范围暂存会带走别人的东西）", () => {
+  describe.skipIf(isWin)("提交范围（宽范围暂存会带走别人的东西）", () => {
     /** 真跑 git（夹具的仓是自己 init 的，故自带一次性的身份配置）。 */
     const git = (root: string, args: string[]) =>
       spawnSync("git", ["-C", root, "-c", "user.email=t@t", "-c", "user.name=t", ...args], { encoding: "utf8" })
@@ -3648,7 +3689,7 @@ describe("shengsheng sub-agent（演进调度中枢）", () => {
 // 而「它反复等同一个 gate、那 gate 现在没有进程」这件事只有**外部观测**看得见。
 // 纪律与检测**同源**（`waitProtocolLine`）：派工消息教的是哪三条写法，检测就按哪三条判。
 // ==================================================================
-describe("pgrep 自匹配活锁（review 的自动检测）", () => {
+describe.skipIf(isWin)("pgrep 自匹配活锁（review 的自动检测）", () => {
   test("派工消息必带等待纪律（禁自匹配 + 三条正确写法 + 循环上限）", async () => {
     // 派工模板是 worker 唯一看得见的世界：纪律不写进消息，它只会用自己习惯的写法。
     // 断言用**字面文本**而非 `waitProtocolLine()` 生成值：两者同源时用它做断言会把差异抹平（§7.2）。

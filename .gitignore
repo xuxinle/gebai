@@ -16,7 +16,7 @@
 # 任意被验的源码目录里。
 # ① 逆向验证的临时回退备份（正常退出会删；SIGKILL/异常会留）——首行残留即「上一轮未完成」的线索
 *.revbak
-# ② kill_drill 的救援快照（`reverse_verify_kill_drill.py:70` 明写「非 *.revbak，脚本不会碰」——用于 SIGKILL 场景救援）
+# ② 回退演练的救援快照（`reverse_verify.py` 的演练钩子明写「非 *.revbak，脚本不会碰」——用于 SIGKILL 场景救援）
 *.drill-snapshot
 # ③ verify_guard 的并发锁（陈旧时按 pid 存活 + boot_id 自清，但自清只在下次拿锁时触发，所以会长期留在盘上）
 .reverse_verify.lock

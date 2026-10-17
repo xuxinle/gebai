@@ -1016,6 +1016,27 @@
 @keyframes card-in {
   from { opacity: 0; transform: translateY(6px) scale(0.98); }
 }
+/* 引擎主动通知弹窗（`event.notice`，见 ui.ts 的 showNoticeDialog）
+   与 confirm-card 共用底座，但正文可滚动、宽度更大——简报这类内容会被截断就没意义了。
+   `warn`/`error` 用左边框颜色区分：文案本身已经说清了，颜色只是让人一眼看出“这条要紧”。*/
+.notice-card {
+  width: min(560px, 100%);
+  display: flex;
+  flex-direction: column;
+  border-left: 3px solid var(--accent);
+}
+.notice-card.notice-warn { border-left-color: var(--warn, #d97706); }
+.notice-card.notice-error { border-left-color: var(--danger, #dc2626); }
+.notice-body {
+  margin: 10px 0 14px;
+  max-height: min(60vh, 560px);
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
 /* 快捷键一览（标题栏轮盘入口）：内容由键位表生成，见 keymap-main.ts */
 .kbd-sheet {
   width: min(560px, 100%);

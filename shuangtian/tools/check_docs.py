@@ -126,7 +126,8 @@ DOC_FILES = sorted(
 #      `tools/pty_form_reverse_verify.py`，而它们还是 `??`；
 #   ② wait_probe.sh（第 58 息）：`pgrep-lock.ts` 头注释与 `docs/PITFALLS.md` 都引用了那批
 #      实测数据，而脚本在 `/tmp`；
-#   ③ lease 三脚本（第 61 息）：`DESIGN.md:1543` 引用 `lease_accept_live_1017.ts`，它从未入仓。
+#   ③ lease 三脚本（第 61 息）：`DESIGN.md` 引用 `lease_accept_live_1017.ts`，它从未入仓
+#      （该批脚本事后已删——其判据已转成 `shengsheng.test.ts` 里的正式用例）。
 # 三次的形态一致：**本地看着一切正常**。磁盘有、仓里没有 ⇒ 一旦有人 `git clean`／切分支／
 # 重启，引用就变成悬空，而校验器全程报绿。所以判据要从「磁盘存在」升级为「磁盘存在 ∧ 已入仓」。
 #

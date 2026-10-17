@@ -64,7 +64,7 @@ INT_EXIT = {signal.SIGINT: 130, signal.SIGTERM: 143}
 
 # ── 判据（三条，缺一不可解释）─────────────────────────────────────────────────
 # ① 本仓所有回退型门禁都叫 `*reverse_verify*.py`（reverse_verify.py /
-#    reverse_verify_kill_drill.py / shuangtian/tools/pty_form_reverse_verify.py …）。
+#    reverse_verify_retire_tree.py / shuangtian/tools/pty_form_reverse_verify.py …）。
 #    要求「以 .py 结尾的路径词」——这样 `grep reverse_verify`（不带 .py）不会误中。
 VERIFY_PY_RE = re.compile(r"(?:^|[\s/='\"(])([^\s/='\"()]*reverse_verify[^\s'\"()]*\.py)(?=$|[\s'\"()])")
 # ② 任何 `bun test …`（门禁自己跑测试时，别人跑 bun test 会读到回退版源码 → 假红）。

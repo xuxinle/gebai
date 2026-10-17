@@ -94,6 +94,50 @@ export function toast(text: string, kind: "error" | "ok" = "error"): void {
   toastCore.push(text, kind)
 }
 
+/* ---------- 主动通知弹窗（引擎侧 `event.notice`） ---------- */
+
+export interface NoticeOptions {
+  title: string
+  /** 正文（markdown 源文本；按纯文本保留换行，不在这里做渲染——弹窗只负责「把原话摆给人看」） */
+  body: string
+  level?: "info" | "warn" | "error"
+}
+
+/**
+ * 通知弹窗：可滚动正文 + 关闭。
+ *
+ * 为何不用 `toast`：toast 是**本页操作回馈**（一行、可忽略）；而引擎主动告知的事
+ * （如「演进卡住 48h」「简报」）可能很长、也很关键——一行截断会把关键信息丢掉，
+ * 而自动消失会让它彻底没人看到。故：弹窗常驻、需手动关闭。
+ */
+export function showNoticeDialog(opts: NoticeOptions): void {
+  const overlay = el("div", "preview-overlay")
+  const card = el("div", "confirm-card notice-card")
+  const level = opts.level ?? "info"
+  card.classList.add(`notice-${level}`)
+  card.append(el("div", "confirm-title", opts.title || "通知"))
+  const body = el("div", "notice-body")
+  body.textContent = opts.body
+  card.append(body)
+  const actions = el("div", "confirm-actions")
+  const ok = el("button", "confirm-ok", "知道了")
+  actions.append(ok)
+  card.append(actions)
+  overlay.appendChild(card)
+  document.body.appendChild(overlay)
+
+  const close = () => {
+    overlay.remove()
+    popKeyScope(scopeId)
+  }
+  const scopeId = pushEscScope("main.notice", "关闭通知弹窗", close)
+  overlay.onclick = (ev) => {
+    if (ev.target === overlay) close()
+  }
+  ok.onclick = close
+  ok.focus()
+}
+
 /* ---------- 确认对话框（替换 confirm） ---------- */
 
 export interface ConfirmOptions {

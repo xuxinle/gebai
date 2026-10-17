@@ -56,7 +56,7 @@
     是否同一次开机」自清。
   · 排除自己/祖先/后代进程：`pgrep -af reverse_verify` 会命中它自己那条命令，不排除则「永远有人在跑」。
 
-演练钩子（仅供 `packages/agents/scripts/reverse_verify_kill_drill.py`，默认不生效）：
+演练钩子（供外部演练脚本用，默认不生效）：
   REVERSE_VERIFY_TEST_PAUSE_AFTER_ROLLBACK=1  回退写入后暂停，等待外部信号
   REVERSE_VERIFY_TEST_PAUSE_SECONDS=60        暂停上限（秒，收到信号立即跳出）
 """
@@ -358,7 +358,7 @@ def _on_signal(signum, count):
           flush=True)
     if os.environ.get(TRAP_DEGRADE_ENV) == "1":
         # 【演练钩子·降级】把处置交回内核：下一次信号会直接杀死本进程，finally 跑不完。
-        # 只为反向验证“收尾中的信号确实能留下半回退态”（kill_drill 的 S6 用）。
+        # 只为反向验明“收尾中的信号确实能留下半回退态”（演练用例 S6 用）。
         for s in (signal.SIGINT, signal.SIGTERM):
             try:
                 TRAPS._cb = None
@@ -574,7 +574,7 @@ def maybe_pause_after_rollback() -> None:
     except ValueError:
         secs = 60.0
     print(f"[演练钩子] 源码已进入回退态（{_ACTIVE.get('target') or SRC} + {ROLLBACK_SUFFIX} 已就位），暂停 ≤{secs:g}s 等信号"
-          f"（{PAUSE_ENV}=1，仅 reverse_verify_kill_drill.py 使用）", flush=True)
+          f"（{PAUSE_ENV}=1，仅外部演练脚本使用）", flush=True)
     deadline = time.monotonic() + secs
     while time.monotonic() < deadline and not _SIG["signum"]:
         time.sleep(0.05)

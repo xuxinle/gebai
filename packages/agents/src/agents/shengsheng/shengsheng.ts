@@ -71,6 +71,25 @@ import {
 // 派工模板里注入**同源的**等待纪律（`waitProtocolLine`）——纪律与检测不会各说一套。
 // 判据（命令文本 + 进程表）与调度逻辑无关，独立成模块（见 pgrep-lock.ts 头部两次实测现场）。
 import { REPEAT_THRESHOLD, detectPgrepLock, waitProtocolLine, type PgrepLockVerdict } from "./pgrep-lock"
+// 治理：授权面 / 收单门禁 / 定期简报——三者口径同源，放一处以免“两把尺子”
+import {
+  applyForce,
+  buildBriefing,
+  decideScope,
+  dueForBriefing,
+  gateAnchors,
+  gateCommitScope,
+  gateReverseVerify,
+  renderBriefing,
+  summarize,
+  type Authority,
+  type ForceSkip,
+  type GateOutcome,
+  type GateReport,
+} from "./governance"
+import type { ReverseSpec } from "./verify-gate"
+// 反向验证的执行面：真的改一次源码再改回来（采集观察集），交 `verify-gate.judge` 裁决
+import { runReverseVerify } from "./reverse-run"
 
 // 解析面的公共出口（**兼容面**：形状判据与表格读取历来由此模块导出，其它模块/测试按其引用；
 // 实现在 `control-format.ts`，此处只做转出——单一实现，不会两处各写一份）。
@@ -155,6 +174,22 @@ export interface Inflight {
   dispatchedAt: number
   /** 本次派工的轮次号（与 Worker.round 同源写入；collect 据此去重）。 */
   round: number
+}
+
+/**
+ * 反向验证声明（工单给出，落**旁挂文件** `<项目根>/.evolve/verify/<alias>.json`，
+ * 由收单门禁的第三道消费）。
+ *
+ * 为何不进 `Inflight` 行：在途行是**版本化格式**（`INFLIGHT_VERSIONS` + 往返等价
+ * +「加一列只动声明」演练），而 spec 是**交付内容**（长命令 + 源码片段），两个
+ * 性质不同；塞进去会让每一次改 spec 都变成一次格式变更。
+ *
+ * 四个字段缺一不可——没有 `rollback`/`defect` 就没有干顶，而“没有干顶就没有判定”
+ * （否则一条恒绿命令就能充数，见 `verify-gate.ts` 头部）。
+ */
+export interface VerifyDecl extends ReverseSpec {
+  /** 最近一次执行的判定结果（由 `reverse-run.ts` 写入；缺失 = 没跑）。 */
+  lastResult?: { verdict: string; reason: string; at?: number }
 }
 
 /** 种子（值得生的方向）。 */
@@ -1216,18 +1251,176 @@ async function rollbackResidueText(ctx: ToolContext, root: string): Promise<stri
  * ——新增文件不受 `edit`/`write` 的防陈旧覆盖守卫保护（守卫只管已跟踪文件）。
  *
  * 只读：不碰工作树、不碰 index。读不到就如实说读不到，不当成通过。
+ *
+ * `facts` 是给**收单门禁**（`governance.ts`）用的结构化三态结论：`advice` 给人看，
+ * `facts` 给闸门判。两者同源——各算一套就会出现「文案说绿、门禁说红」。
  */
+/** 提交范围核对的结构化结论（门禁消费；与文案同源）。 */
+export type CommitScopeFacts =
+  | { kind: "pass"; inScope: number; total: number; head: string }
+  | { kind: "fail"; head: string; inScope: number; outOfScope: { path: string; added: number | null; deleted: number | null }[] }
+  | { kind: "unknown"; reason: string }
+
+/** 未声明 spec 的空形态（门③的输入；集中在一处，不与真声明混淆）。 */
+function emptyVerifySpec(): VerifyDecl {
+  return { cmd: "", file: "", rollback: "", defect: "" }
+}
+
+/** 读授权面（`.evolve/authority.json`）；读不到 = **未授权**（`allowPaths` 空 ⇒ 默认拒绝）。
+ *  为何缺省是“什么都没授权”而不是“全都能改”：默认允许就等于没有围栏，
+ *  而人只会在出事之后才发现——那时已经迟了。 */
+async function readAuthority(ctx: ToolContext, root: string): Promise<Authority> {
+  try {
+    const r = await ctx.readFile(`${evolvePaths(root).dir}/authority.json`)
+    const text = typeof r === "string" ? r : String((r as { text?: string }).text ?? "")
+    const o = JSON.parse(text) as Partial<Authority>
+    return {
+      allowPaths: Array.isArray(o.allowPaths) ? o.allowPaths.map(String) : [],
+      denyPaths: Array.isArray(o.denyPaths) ? o.denyPaths.map(String) : undefined,
+      allowKinds: Array.isArray(o.allowKinds) ? o.allowKinds.map(String) : undefined,
+      grantedBy: o.grantedBy,
+      grantedAt: o.grantedAt,
+      expiresAt: o.expiresAt ?? null,
+      // 文件存在（即使内容空）= 显式声明过
+      declared: true,
+    }
+  } catch {
+    // **读不到文件 ⇒ 未声明**（`declared: false`），不得凭空造一个空授权——
+    // 空授权会让所有方向都“越界”（实测：53 条测试与所有存量演进线会全停派）。
+    return { allowPaths: [], declared: false }
+  }
+}
+
+/** 读本单的 spec（旁挂文件 `<root>/.evolve/verify/<alias>.json`）；读不到 / 坏 JSON 一律当未声明。
+ *  为何不把坏 JSON 当「声明了但没跑」：坏 JSON 与没写文件在门③里处置相同（unknown）——
+ *  但理由不同，所以在返回值里带上原因，免得人误以为是「忘了跑」。 */
+async function readVerifyDecl(ctx: ToolContext, root: string, alias: string): Promise<VerifyDecl> {
+  const path = `${evolvePaths(root).dir}/verify/${alias}.json`
+  try {
+    const r = await ctx.readFile(path)
+    const text = typeof r === "string" ? r : String((r as { text?: string }).text ?? "")
+    const o = JSON.parse(text) as Partial<VerifyDecl>
+    return {
+      cmd: String(o.cmd ?? ""),
+      file: String(o.file ?? ""),
+      rollback: String(o.rollback ?? ""),
+      defect: String(o.defect ?? ""),
+      lastResult: o.lastResult,
+    }
+  } catch {
+    return emptyVerifySpec()
+  }
+}
+
+/** 写回 spec（只更新 `lastResult`，其余字段原样保留）：不写就得每次收单重跑一遍改源码的流程，
+ *  且被拒时无从查因（人看不到到底是哪一档没过）。 */
+async function writeVerifyDecl(ctx: ToolContext, root: string, alias: string, decl: VerifyDecl): Promise<void> {
+  const dir = `${evolvePaths(root).dir}/verify`
+  try {
+    await ctx.writeFile(`${dir}/${alias}.json`, JSON.stringify(decl, null, 2))
+  } catch {
+    // 写不回不是致命错误：门③ 仍能拿到本次的 `judged` 做判定，只是下次收单会重跑
+  }
+}
+
+/**
+ * 收单门禁：把三套已有但「只输出建议」的判据接成 collect 的**必经路径**。
+ *
+ * 只读：不改工作树、不写 control.md、不跑会写源码的东西（锚点用哨兵的 `--anchors`
+ * 只读模式；反向验证只判 spec 是否齐备，真执行由`reverse-run.ts` 做——见 DESIGN）。
+ *
+ * 三态口径：读不到 / 没声明 ⇒ `unknown`（挡入账但不算发现缺陷）；
+ * 核过有问题 ⇒ `fail`。**永不把 unknown 降成 pass**。
+ */
+async function runCollectGates(
+  ctx: ToolContext,
+  root: string,
+  opts: { worker: Worker; inflight: Inflight | undefined; args: Record<string, unknown>; skipReverseRun?: boolean },
+): Promise<GateReport & { skipped: string[]; verified: string[] }> {
+  const outcomes: GateOutcome[] = []
+
+  // —— 门①：修复锚点（不可跳）——
+  // 只取 `--anchors`（只读、不写快照、不跑测试），因为它只回答一个可判定问题：
+  // 8 条修复锤子还都在不在。它在仓外 / 哨兵脚本不在时报 `unknown` 而非 `fail`：
+  // “没能力核”与“核出了问题”是两件事，混同会让小仓/沙箱里永远收不了单。
+  const run = (ctx as { runCommand?: NonNullable<ToolContext["runCommand"]> }).runCommand
+  outcomes.push(await gateAnchors(run, root))
+
+  // —— 门②：提交范围（不可跳）——用 `governance.gateCommitScope` 的同一判据，
+  // 免得「文案一个口径、门禁另一个口径」（那正是「两把尺子各算一套」的缺陷）。
+  const scope = await auditCommitScope(ctx, root, opts.worker, opts.inflight)
+  outcomes.push(
+    await gateCommitScope(
+      scope.facts.kind === "unknown" ? null : { outOfScope: scope.facts.kind === "fail" ? scope.facts.outOfScope : [], inScope: scope.facts.inScope },
+      scope.facts.kind === "unknown" ? scope.facts.reason : undefined,
+    ),
+  )
+
+  // —— 门③：反向验证（可跳，需理由）——
+  // spec 落**旁挂文件**而不是在途行：在途行是版本化格式（往返等价 + 加列演练），
+  // 而 spec 是交付内容（长命令 + 源码片段）——两个性质不同，混在一处会让每次改 spec 都成为格式变更。
+  //
+  // **声明 → 执行 → 判定 → 回写**是一条链：只看 `lastResult` 而不去跑，门③ 永远停在
+  // “声明了但没跑”（unknown）——那等于门禁存在但从不生效。所以这里真的跑一次
+  // `runReverseVerify`（改源码 → 观测 → 回填），把结论写回 spec 文件后再判。
+  const ver = await readVerifyDecl(ctx, root, opts.worker.alias)
+  let judged = ver.lastResult ?? null
+  if (ver.cmd.trim() && !opts.skipReverseRun) {
+    const run = await runReverseVerify(ctx, { cmd: ver.cmd, file: ver.file, rollback: ver.rollback, defect: ver.defect }, { repoRoot: root })
+    judged = { verdict: run.gate.verdict, reason: run.gate.reason, at: Date.now() }
+    // 回写结论（不写就等于每次收单都重跑一遍改源码的流程，且被拒时无从查因）
+    await writeVerifyDecl(ctx, root, opts.worker.alias, { ...ver, lastResult: judged })
+  }
+  outcomes.push(ver.cmd.trim() ? gateReverseVerify(true, judged) : gateReverseVerify(false, null))
+
+  // —— 缺声明的处置：`unknown` 而非 `fail`，且**不阻断** ——
+  // 机制类交付必须声明 spec，但不是每一单都是机制类。把“没声明”一律当阻断，
+  // 结果是所有非机制类单都要带理由强制跳过（那就是“门禁一上线就被绕过”）。
+  // 所以：没声明 ⇒ 留一条**显式提示**（人/模型看得到），但不入账闸。
+  // 声明了但判不过 ⇒ 那是 fail，照样挡。
+  //
+  // —— `unknown` 的处置：同理，**不阻断，但必须显式报出来** ——
+  // 一个“核不了”的环境（沙箱、仓外目录、未装哨兵）里，如果 `unknown` 也挡，
+  // 结果是门禁在那类环境里**全盘不可用**——而人/模型学会的第一件事就是加 `force`，
+  // 那比没有门禁更坏（看似有门，实际每次都被跳过）。
+  // 所以分两类：
+  //   · `fail`（核过了，确实有问题）→ **阻断**（这是门的全部意义）；
+  //   · `unknown`（没能力核 / 没声明）→ **不阻断，但列进 `skipped`**（显式留痕，不是静默放行）。
+  // 这两类的区分本身就是本仓的一条纪律：把“读不到”报成“有问题”会让人去修一个没坏的东西；
+  // 把“读不到”当“没问题”则是最坏的一种假绿——本文选择第三种：**说清楚，不冒充**。
+  const failing = outcomes.filter((o) => o.state === "fail")
+  const unknown = outcomes.filter((o) => o.state === "unknown")
+  const skips = Array.isArray(opts.args.force)
+    ? (opts.args.force as ForceSkip[]).filter((s) => s && typeof s.gate === "string" && typeof s.reason === "string")
+    : []
+  const forced = applyForce(summarize(failing), skips)
+  const notes = unknown.map((o) => `[${o.gate}] ${o.detail}`)
+  // 把通过的也带上，让回显里能看到“哪几道真的核过了”——否则“没报警”分不清是“核过了”还是“没核”
+  // 将通过的也带上，让回显里能看到“哪几道真的核过了”——否则“没报警”分不清是“核过了”还是“没核”
+  const verified = outcomes.filter((o) => o.state === "pass").map((o) => `[${o.gate}] ${o.detail}`)
+  return { ...forced, skipped: [...forced.skipped, ...notes], verified }
+}
+
 async function auditCommitScope(
   ctx: ToolContext,
   root: string,
   worker: Worker,
   inflight: Inflight | undefined,
-): Promise<{ advice?: string; block?: Record<string, unknown> }> {
+): Promise<{ advice?: string; block?: Record<string, unknown>; facts: CommitScopeFacts }> {
   const probe = await repoTopOf(ctx, root)
-  if (!probe.top) return { advice: `提交范围本项未核：拿不到 git 顶层（${probe.reason}）——这不等于「没有宽范围暂存」，只是无从核` }
+  if (!probe.top) {
+    const reason = `拿不到 git 顶层（${probe.reason}）`
+    return { advice: `提交范围本项未核：${reason}——这不等于「没有宽范围暂存」，只是无从核`, facts: { kind: "unknown", reason } }
+  }
   const head = await readLastCommit(ctx, probe.top)
-  if (!head) return { advice: `提交范围本项未核：读不到最近一次提交（git log 失败或仓内无提交）——不等于无异常` }
-  if (!head.files.length) return { advice: `提交范围：最近一次提交 ${head.sha.slice(0, 8)}「${head.subject}」无文件改动（合并/空提交？）——本项无可核` }
+  if (!head) {
+    const reason = "读不到最近一次提交（git log 失败或仓内无提交）"
+    return { advice: `提交范围本项未核：${reason}——不等于无异常`, facts: { kind: "unknown", reason } }
+  }
+  if (!head.files.length) {
+    const reason = `最近一次提交 ${head.sha.slice(0, 8)}「${head.subject}」无文件改动（合并/空提交？）`
+    return { advice: `提交范围：${reason}——本项无可核`, facts: { kind: "unknown", reason } }
+  }
 
   // 工单的「这一单该动哪些文件」全在自由文本里：方向（task）+ 预期产出（deliver）+ 本单任务摘要。
   // 三条都抽（任一条提到即算覆盖）——只用工单原文会漏掉「worker 交付时写的具体路径」。
@@ -1249,6 +1442,7 @@ async function auditCommitScope(
     return {
       advice: `提交范围：最近一次提交 ${head8}「${head.subject}」${head.files.length} 个文件**均在**工单提到的路径内（已核：${audit.inScope.length}/${head.files.length}）✅；${untrackedNote}`,
       block: { head: head8, inScope: audit.inScope.length, outOfScope: [] as string[], untracked: untracked.map((e) => e.path) },
+      facts: { kind: "pass", inScope: audit.inScope.length, total: head.files.length, head: head8 },
     }
   }
 
@@ -1266,6 +1460,12 @@ async function auditCommitScope(
       `  ${untrackedNote}`,
     ].join("\n"),
     block: { head: head8, inScope: audit.inScope.length, outOfScope: names, untracked: untracked.map((e) => e.path), mentions: audit.mentions },
+    facts: {
+      kind: "fail",
+      head: head8,
+      inScope: audit.inScope.length,
+      outOfScope: audit.outOfScope.map((f) => ({ path: f.path, added: f.added, deleted: f.deleted })),
+    },
   }
 }
 
@@ -1809,7 +2009,7 @@ const stateTool: Tool = {
     "生生的读态与收息工具（一息入口）。无参=复命：返回项目坐标、呼吸计数、worker 池、在途、**独占资源租约**、种子队列，以及各 worker 的实时态（运行中/空闲/起始时间/待决交互）与**三类回收线索**（判据都是逐个会话的实测结果，不拿登记猜真值）：待收藏线索（在途且会话可达已空闲）；中道而废（在途且会话**确已不存在**——退回种子）；无从核实（在途无会话线索、别名也不属本会话——不可当可达、也不可当已死，须先核实）。池与在途均以**会话 id 为主键**：同一会话只保留最新一轮（旧轮已被新轮取代，不并列、不标脏）。**租约超期回收在读态顺手完成**：持有者会话已不存在 / 已转 idle / 已到期 → 自动释放并显式报出原因（否则一条死租约永久堵院）。action=init 从唤醒消息固化项目坐标（初生第一动作）；seed_add/seed_done 择种入队与销账；note 落断点并推进呼吸（每息收尾）；task 管理心跳驱动任务（op=ensure 幂等确保定时任务存在并启用；op=pause 记暂停+通知用户+停用任务；op=resume 重新启用；op=status 只看状态）。control.md（调度状态）由本工具托管——勿用 read/write 手工编辑。",
   parameters: schema(
     {
-      action: { enum: ["read", "init", "seed_add", "seed_done", "note", "task"], description: "动作（缺省 read=读态）" },
+      action: { enum: ["read", "init", "seed_add", "seed_done", "note", "task", "brief"], description: "动作（缺省 read=读态）。brief=生成本窗口的**定期简报**（只报异常与待你决定的事）" },
       root: { type: "string", description: "项目根绝对路径（解析次序：显式参数 > 会话 env SHENGSHENG_ROOT > 本会话 init 记忆 > 工作目录向上探测既有 .evolve/control.md；候选一律核到既有 control.md 才采纳，核不中即往下回落）" },
       verify: { type: "string", description: "init：worker 三重门第一门——验证命令原样（派工消息原样传递，你永不执行）" },
       seed_doc: { type: "string", description: "init：种子库文档路径（待做方向清单，可选）" },
@@ -1825,6 +2025,9 @@ const stateTool: Tool = {
       schedule: { type: "string", description: "task op=ensure：心跳表达式（缺省 @every 3m）" },
       reason: { type: "string", description: "task op=pause：暂停原因（写入台账并通知用户）" },
       task_id: { type: "string", description: "task：直接指定心跳任务 ID（缺省按任务名 SHENGSHENG_TASK_NAME 反查）" },
+      window_hours: { type: "number", description: "brief：窗口长度（小时，缺省 24）——与上一份简报对齐，报表不接受“随便看一段”" },
+      force: { type: "boolean", description: "brief：窗口未到也强制出一份（否则 `due=false` 时只报“未到出简报的时间”就退出）" },
+      deliver: { type: "boolean", description: "brief：是否推送给人（缺省 true）——通道不可达时会如实报“送不到”，不会静默" },
     },
     [],
   ),
@@ -1903,6 +2106,90 @@ const stateTool: Tool = {
       }
     }
     const { root, state } = loaded
+
+    // ---- brief：定期简报（只报异常与待决项；不替人下结论）----
+    // 为何住在 state 而不是另开一个工具：一息只四个动作（观/择/生/收），简报是**观**的一种——
+    // 开第五个工具会撕裂「观/择/生/收」这条架子。
+    // 位置必须在 `loadState` 之后：它需要已解析的 root（与其余动作同一口径）。
+    if (action === "brief") {
+      const windowH = Number(args.window_hours ?? 24)
+      const windowMs = (Number.isFinite(windowH) && windowH > 0 ? windowH : 24) * 3_600_000
+      const ledgerRead = await readAbs(ctx, evolvePaths(root).ledger)
+      // 「该不该出」由磁盘上上一份简报的 `<!-- brief:ts -->` 标记算（不另存状态文件：
+      // 多一份状态就多一处不一致）。`due=false` 时只报一句“未到时间”并退出——
+      // 节律必须由机制判，而不是由模型记得去问。
+      const briefMarks = ledgerRead.text?.match(/<!-- brief:(\d{13}) -->/g) ?? []
+      const lastBriefAt = briefMarks.length
+        ? Number(/(\d{13})/.exec(briefMarks[briefMarks.length - 1])?.[1] ?? 0)
+        : null
+      const due = args.force === true || dueForBriefing(lastBriefAt, Date.now(), windowMs)
+      if (!due) {
+        return {
+          output: `未到出简报的时间：上一份在 ${new Date(lastBriefAt!).toLocaleString("zh-CN")}，窗口 ${Math.round(windowMs / 3_600_000)}h（要强制出，传 force=true）。`,
+          data: { due: false, lastBriefAt, windowMs },
+        }
+      }
+      const tasks = tasksOf(ctx)
+      // 通知通道可达性：**未核就是 null**（拿不到通道信息时不能假定可达）
+      let notifyReachable: boolean | null = null
+      let mineTask: Record<string, unknown> | undefined
+      if (tasks && typeof tasks.notify === "function") {
+        // 不为探活而发消息（那会给人塞噪音），只看本项目任务上有没有配通道：
+        // 有 ⇒ 可达；任务在但列表空 ⇒ 不可达；取不到任务 ⇒ **未核**（不等于不可达）。
+        const list = await tasks.list().catch(() => [])
+        mineTask = list.find((t) => sameRoot(taskRootOf(t), root))
+        if (mineTask) {
+          const chs = (mineTask.notify ?? mineTask.notifyChannels) as unknown[] | undefined
+          notifyReachable = Array.isArray(chs) && chs.length > 0 ? true : false
+        }
+      }
+      const b = buildBriefing({
+        now: Date.now(),
+        since: Date.now() - windowMs,
+        state,
+        ledger: ledgerRead.error ? null : (ledgerRead.text ?? null),
+        notifyReachable,
+      })
+      const text = renderBriefing(b)
+      // 留痕：简报本身进台账（带机器可读标记 `<!-- brief:ts -->`），下一份据此算窗口
+      const appended = await appendLedger(ctx, root, `<!-- brief:${b.window.to} -->`, `## 简报 ${new Date(b.window.to).toISOString()}\n\n${text}`)
+      let deliverNote = "未推送（deliver=false）"
+      if (args.deliver !== false) {
+        // **先发前端弹窗**：它是唯一不依赖任何外部通道配置的路径（通道没配也能送到人眼前）。
+        // level 由待决项性质定：有 error 级（越界/通道不达）就提级，否则有待决项就 warn。
+        // 无待决项且无缺口 → info（人看到「没事」，而不必去翻台账）。
+        const level = b.decisions.some((d) => d.kind === "out-of-scope" || d.kind === "unreachable")
+          ? "error"
+          : b.decisions.length || b.gaps.length
+            ? "warn"
+            : "info"
+        try {
+          ctx.publish("event.notice", {
+            title: b.decisions.length ? `演进简报：${b.decisions.length} 项待你决定` : "演进简报",
+            body: text,
+            level,
+          })
+          deliverNote = "已推送前端弹窗"
+        } catch (err) {
+          deliverNote = `前端弹窗发不出去：${describeError(err)}`
+        }
+        if (!tasks) deliverNote += "；宿主不提供任务通道"
+        else {
+          try {
+            const r = await tasks.notify({ text, title: "生生·演进简报" }, mineTask ? String(mineTask.id) : undefined)
+            deliverNote += r.delivered
+              ? `｜已推送 ${r.delivered} 个通道`
+              : `｜外部通道未投递（${r.errors.join("；") || "无可用通道"}）`
+          } catch (err) {
+            deliverNote += `｜外部通道失败：${describeError(err)}`
+          }
+        }
+      }
+      return {
+        output: [text, "", `- 推送：${deliverNote}`, `- 台账：${appended.path}`].join("\n"),
+        data: { briefing: b, delivered: deliverNote, ledger: appended.path },
+      }
+    }
 
     // ---- seed_add / seed_done：择种 ----
     if (action === "seed_add") {
@@ -2106,6 +2393,8 @@ const stateTool: Tool = {
           state.coord.seedDoc ? `种子库：${state.coord.seedDoc}` : "",
           state.coord.rules ? `硬约束文档：${state.coord.rules}` : "",
           "一息流程：shengsheng_state（读态）→ 观复（看 awaiting 与各 worker 实时态）→ shengsheng_collect（收藏/退役）→ 择种布雨（shengsheng_dispatch；迷茫时先 shengsheng_divine）→ shengsheng_state action=note（收息）。",
+          // 定期简报：由心跳自己按窗口节律触发（不另建一个定时任务——两个任务争同一个 sticky 会话会互遮）。
+          "定期简报：若距上一份简报已过 `SHENGSHENG_BRIEF_HOURS`（缺省 24 小时）→ 在收息**之前**跑 `shengsheng_state action=brief`。它是给人看的：只报异常与待决项。若回显报「送不到」，在断点里写明（那是人得不到消息的事实，不能只写在自己肚子里）。",
         ].filter(Boolean).join("\n"),
         env: workerEnv(root, state.coord),
         maxConsecutiveErrors: 5,
@@ -2394,6 +2683,9 @@ interface PlanItem {
   leaseBlocked?: AnyLease
   /** 本单实际获得的租约（派遣时回显用）。 */
   lease?: AnyLease
+  /** 授权围栏判定：非 `accept` 的单**不派**，但保留 `plans[i]` 与 `orders[i]` 的
+   *  索引对应关系——执行阶段用 `plans[i]` 取单，过滤不得动数组。 */
+  scopeHold?: { action: "hold" | "reject"; note: string }
 }
 
 /** 租约申请结果：`granted` = 已持有（`renewed` 表续期），`blocked` = 被他人持着（未写盘，方向已退回种子）。
@@ -2588,7 +2880,15 @@ const dispatchTool: Tool = {
 
     const taken = new Set<string>()
     const plans: PlanItem[] = []
+    // 授权面（`.evolve/authority.json`）：判定在每单的 plan 构造处做（保索引一致）。
+    const authority = await readAuthority(ctx, root)
     for (const order of orders) {
+      // 授权围栏：**AI 不得扩大自己的行动面**。判定在下方每单的 `plan` 构造处（见 `decideScope`）：
+      // 三态——`in-scope` 与 `unverified`（方向是自然语言）**照派**；`out-of-scope` 不派。
+      // 为何 `unverified` 不能拦：大多数方向就是自然语言，拦了就变成「停止演进」。
+      //
+      // ⚠ 不跳过本循环：执行阶段用 `plans[i]` 取单，跳过会让两个数组错位
+      // （那会把 A 单的工单发到 B 单的会话里——比不派更坏）。
       // 复用匹配**先于**别名派生：命中的 worker 必须沿用它的既有别名——
       // 否则同一个会话会被改名（旧别名立即失效，台账/派工消息也无法回溯同一工人）。
       let reuse = false
@@ -2621,7 +2921,20 @@ const dispatchTool: Tool = {
       const alias = revived ? revived.alias : ensureUniqueAlias(state, order, taken)
       taken.add(alias)
       const domain = order.domain?.trim() || revived?.domain || alias.replace(/-\d+$/, "")
-      plans.push({ alias, domain, task: order.task, sessionId, reuse, created: !reuse && !sessionId, revived, resume, resource: orderResource(order) || undefined })
+      // 授权围栏在此判定（与 plan 同一循环，保计划与工单索引一致）
+      const scope = decideScope(order.task, authority)
+      plans.push({
+        alias,
+        domain,
+        task: order.task,
+        sessionId,
+        reuse,
+        created: !reuse && !sessionId,
+        revived,
+        resume,
+        resource: orderResource(order) || undefined,
+        ...(scope.action === "accept" ? {} : { scopeHold: { action: scope.action, note: scope.note } }),
+      })
     }
 
     // 池容量：活动 worker（running + idle）上限——**只挡新增**（新建），不阻断复用/续派（它们不增活动数）。
@@ -2681,6 +2994,16 @@ const dispatchTool: Tool = {
       const plan = plans[i]
       const order = orders[i]
       try {
+        // 授权围栏：越界/未核的单**不派**，方向退回种子（不丢），且不进建会话与 svc.run。
+        // 为什么这必须最先判：它比额度、比租约都靠前——那些是「现在能不能派」，
+        // 而授权是「该不该派」。允许一条越界的单先领租约，等于给它占了资源才拒。
+        if (plan.scopeHold) {
+          results.push(
+            `- ${plan.alias}：**${plan.scopeHold.action === "reject" ? "拒" : "未派"}**（授权围栏：${plan.scopeHold.note}）`,
+          )
+          returnToSeeds(state, [{ alias: plan.alias, direction: order.task, deliverable: order.deliver ?? "", dispatchedAt: now, round: 0 }], "授权围栏", "（方向未丢，待授权/待人工判定）", "超出当前授权面或方向未声明路径，不派")
+          continue
+        }
         // 超出活动上限的新建单：本批顺延（不占额度、不占轮次号）
         if (over.has(plan)) {
           results.push(`- ${plan.alias}：**未派**（活动 worker 达上限 ${limit}，当前 ${state.workers.length}——下息回收后再派）`)
@@ -3113,6 +3436,28 @@ const collectTool: Tool = {
         }
       }
       const next = args.next != null ? String(args.next).trim() : ""
+      // ---- 收单门禁（硬约束）：三道门不开就**收不进去** ----
+      // 为何在这里而不在 review：review 是只读的，它给出的 block 字段只有建议权——
+      // 一条纪律是否被遵守取决于当息那个模型记不记得看，那就不是约束。
+      // 门禁只读不写；拒绝时**不入账、不动在途、不释放租约**（全部状态原封不动）。
+      // 本轮在途（同会话只保留最新一轮）是门禁判断“这一单交什么”的输入。
+      const gateInflight = inflightOf(state, worker)[0]
+      const gateReport = await runCollectGates(ctx, root, { worker, inflight: gateInflight, args })
+      if (!gateReport.ok) {
+        return {
+          output: [
+            `⛔ **收单被门禁拒绝（未入账、状态未动）**：${worker.alias}（${worker.domain}）`,
+            "",
+            ...gateReport.blockers.map((b) => `- ${b}`),
+            gateReport.skipped.length ? `\n未核成 / 未声明（不阻断，但**不能当已核**）：\n${gateReport.skipped.map((s) => `- ${s}`).join("\n")}` : "",
+            "",
+            "闸门的两种处置（不能默认「先收了再说」）：",
+            "1. **补证据**：把缺的东西补上再收（锚点回退→先查哪处修复退了；提交范围→先核归属；反向验证→补真能变红的命令）；",
+            "2. **带理由强制跳过**：`force=[{gate:'anchors',reason:'…'}]`——跳过会记进台账（谁跳的、原判是什么），不能静默。",
+          ].filter(Boolean).join("\n"),
+          data: { gate: gateReport, refused: true },
+        }
+      }
       // 本轮在途（会话 id 优先）：台账的行数与幂等键都取自它，不能用别名找——别名漂移时会漏掉本轮那条，
       // 幂等键回落到池的轮次上（与派工时写入的键不一致即挡不住真重复）。
       const current = inflightOf(state, worker)[0]
@@ -3233,8 +3578,13 @@ const collectTool: Tool = {
           feedNote ? `- ${feedNote}` : "",
           repoError ? `- ⚠ ${repoError}` : "",
           `- 在途剩 ${done.inflight!.length}｜池 ${done.workers!.length}（${done.workers!.filter((x) => x.status === "idle").length} idle）`,
+          // 门禁足迹写进**成功回显**：否则“没报警”分不清是“核过了”还是“没核”。
+          // 这是「三态」在成功路径上的对应面——没这一行，门禁就又变成了一个只看得到没事的摆设。
+          gateReport.skipped.length
+            ? `- 门禁：全通过以外的情况已记台账\n${gateReport.skipped.map((s) => `  · ${s}`).join("\n")}`
+            : `- 门禁：${gateReport.verified.length} 道核过（${gateReport.verified.join("｜")}）`,
         ].filter(Boolean).join("\n"),
-        data: { ledger: done.led.path, worker, seeds: done.seeds, inflight: done.inflight, released: done.released, feed: feedNote || null, ...res },
+        data: { ledger: done.led.path, worker, seeds: done.seeds, inflight: done.inflight, released: done.released, feed: feedNote || null, gate: gateReport, ...res },
       }
     }
 

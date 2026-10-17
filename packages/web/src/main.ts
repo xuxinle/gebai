@@ -39,7 +39,7 @@ import { enqueueFront, enqueueInput, setQueueExecutor, type QueuedInput } from "
 import { client, composer, exportBtn, getCurrentSession, input, isDraftView, lastSessionId, pendingFiles, runs, setConn, setCurrentSession, setMaxCtxTokens, setSubAgentNames } from "./state"
 import { onApprovalRequest, onTodoUpdate, onChoiceRequest, onEnvRequest, onDrawRender, onCaptureRequest, onToolCall, onToolResult, onMessageCompact, touchRunActivity } from "./events"
 import { consumeTaskStream } from "./stream"
-import { bindTooltips, toast } from "./ui"
+import { bindTooltips, showNoticeDialog, toast } from "./ui"
 // 副作用导入（勿删）：attach.ts 向 sessions.ts 注册运行中会话附加钩子（setRunningAttach）——
 // 模块无具名导出，不导入则钩子恒为 null，刷新后运行中会话不恢复（在途流不续接/待决卡片不重建、任务超时）
 import "./attach"
@@ -295,6 +295,20 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
       })
       scrollIfSticky()
       refreshJumpBottom()
+    } else if (ev.type === "event.notice") {
+      // 主动通知弹窗（引擎侧 `notice` 工具 / 任务通知 / 演进简报走这条）：
+      // 与 toast 的分工——toast 是**本页操作回馈**（短暂、可忽略），而 notice 是
+      // **引擎主动告知的事**（可能很关键，比如「演进卡住 48h」），所以：
+      //   · `level=error/warn` 用常驻浮层（需手动关），避免关键的告警自动消失就没人看到；
+      //   · `level=info` 用自动消退提示；
+      //   · 带 `body` 的（如简报）用**可展开弹窗**，而不是一行被截断的 toast。
+      const rawLevel = String(ev.payload.level ?? "info")
+      const level: "info" | "warn" | "error" = rawLevel === "warn" || rawLevel === "error" ? rawLevel : "info"
+      const title = String(ev.payload.title ?? "")
+      const body = ev.payload.body == null ? "" : String(ev.payload.body)
+      if (body) showNoticeDialog({ title, body, level })
+      // 无正文的短通知：落到 toast（`error` 常驻、其余自动消退）
+      else toast(title, level === "error" ? "error" : "ok")
     } else if (ev.type === "event.verify.nudge") {
       // 收尾验证提醒实时可见（DESIGN「收尾验证提醒」）：消息落盘为 **user 角色 + engineNote 标记**
       // （与用户输入同角色，思考类模型不接受以 assistant 结尾的请求；标记供展示形态区分），
