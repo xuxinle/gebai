@@ -313,6 +313,28 @@ def main():
         check(client.invoke("timeline", "set_opacity", "2 0.8"), "解锁后编辑仍被拒（锁没真正解开）")
         print("[6b] 交还编辑权：编辑恢复可用")
 
+        # —— 6c. **人自己就能切**：控制权不是只有 AI 能拨 ——
+        #
+        # 这是本单的核心诉求（“人可切换主动控制和自动接管”）。之前只有控制通道
+        # 能改，人被锁住后**无法自己拿回控制权**——界面上必须有个“把手”。
+        # 判据：开关存在且双向可用；拨过去 → 编辑被拒；拨回来 → 恢复。
+        check(client.count("#control-switch") == 1,
+              "AI 面板没有控制权开关——人无法自己切换主动控制/自动接管")
+        # 走 `activate`：`Switch::activate()` → `toggle()` → `on_change`，与用户点击同一条路径。
+        # ⚠ **不能用 `set checked`**：`Switch::set_property` 只改 `checked_`、**不调 on_change**
+        # （框架的既定语义：set 是"设状态"，activate 才是"触发动作"）。用它验会得到假绿。
+        check(client.invoke("control-switch", "activate"), "控制权开关 activate 失败")
+        check(client.props("director")["edit_locked"] == "true",
+              "人拨开关后没进入 AI 接管态")
+        check(not client.invoke("timeline", "set_opacity", "2 0.4"),
+              "人拨到自动接管后，编辑竟仍可用")
+        check(client.invoke("control-switch", "activate"), "控制权开关第二次 activate 失败")
+        check(client.props("director")["edit_locked"] == "false",
+              "人拨回后仍在 AI 接管态")
+        check(client.invoke("timeline", "set_opacity", "2 0.55"),
+              "人拨回主导后编辑仍被拒")
+        print("[6c] 人可自己切换：开关双向生效（接管→编辑被拒；拨回→恢复）")
+
         # —— 7. 共享真值：AI 写得到的，也要读得回 ——
         #
         # 这是「AI 为主、人机共用」的命门：两方写同一份数据，却只有一方能看见，

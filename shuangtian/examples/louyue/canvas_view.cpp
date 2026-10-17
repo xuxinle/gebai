@@ -159,6 +159,8 @@ void CanvasView::paint_content(const st::ui::RenderContext& context,
 
 auto CanvasView::stroke(st::math::Point from, st::math::Point to) -> bool {
   if (document_ == nullptr || !document_->has_layer()) return false;
+  // AI 接管时不接受人工笔触（鼠标/触控也走这里）。
+  if (!document_->can_edit()) return false;
 
   // 橡皮与画笔的差别只在"画什么"：橡皮不是画白色，而是把该处抹成透明
   //（否则黑色背景上的橡皮笔迹是白的，观感完全不对）。
@@ -323,6 +325,19 @@ auto CanvasView::property_names() const -> std::vector<std::string_view> {
 }
 
 auto CanvasView::invoke_action(std::string_view action, std::string_view argument) -> bool {
+  // —— AI 控制态：编辑类动作一律拒绝 ——
+  //
+  // 只看类动作（`pick`/`zoom_in`/`zoom_out`/`export` 与自省类）不问门禁；其余写动作
+  // 全部拦。为何在**动作面入口**统一判、而不在每个分支里判：写动作有十几个，
+  // 逐个判必然漏一处——本仓已因“入口多、逐个禁用”踩过一次（裁云的 set_opacity）。
+  //
+  // 白名单写在前面（而不是黑名单）：将来新加的写动作**默认被拦**，
+  // 忘了登记只是“该能用却不能用”（看得见、好查），而不是“该拦住却放行了”。
+  if (document_ != nullptr && !document_->can_edit()) {
+    const bool read_only = action == "pick" || action == "zoom_in" ||
+                           action == "zoom_out" || action == "export" || action == "refresh";
+    if (!read_only) return false;
+  }
   const auto parse_pair = [](std::string_view text) -> std::optional<std::pair<float, float>> {
     const std::size_t comma = text.find(',');
     if (comma == std::string_view::npos) return std::nullopt;

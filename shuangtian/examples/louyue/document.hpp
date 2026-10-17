@@ -168,6 +168,18 @@ class Document {
 
   [[nodiscard]] auto dirty() const noexcept -> bool { return dirty_; }
   void set_dirty(bool value) noexcept { dirty_ = value; }
+
+  /// —— **AI 控制态**（与裁云同构：AI 接管时人只能看）——
+  ///
+  /// 为何门禁在 Document 而不是在各 UI 控件：编辑入口有十几处（画笔/橡皮/油漆桶/
+  /// 图层增删合/不透明度/混合模式/清空/改像素…），逐个置灰必漏一处；而漏的那处
+  /// 就是“AI 正改海报、用户一布拉走了图层”的真实缺口。
+  /// 所以 `Document` 持状态并提供 `can_edit()`，UI 只负责把控件置灰与解释原因。
+  bool ai_controlled{false};
+  [[nodiscard]] auto can_edit() const noexcept -> bool { return !ai_controlled; }
+
+  /// 切换控制权。返回 false = 状态没变（幂等，不算错）。
+  auto set_ai_control(bool on) -> bool;
   [[nodiscard]] auto file_path() const -> const std::string& { return file_path_; }
   void set_file_path(std::string path) { file_path_ = std::move(path); }
 

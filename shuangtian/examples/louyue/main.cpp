@@ -25,9 +25,12 @@
 
 #include "canvas_view.hpp"
 #include "document.hpp"
+#include "poster.hpp"
+#include "poster_bridge.hpp"
 #include "battery/embed.hpp"   // 编译期资源嵌入（stpm 生成）
 #include "st/app/app.hpp"
 #include "st/codec/png.hpp"
+#include "st/math/geometry.hpp"
 #include "st/core/entry.hpp"   // `ST_MAIN`（跨平台入口：正规化 argv 编码）
 #include "st/core/print.hpp"
 #include "st/core/time.hpp"
@@ -183,6 +186,127 @@ class LouyuePage final : public dsl::Component {
   /// 菜单「退出」（主循环退出位；窗口关闭钮走 `app.quit_requested()`）。
   [[nodiscard]] auto quit_requested() const noexcept -> bool { return quit_requested_; }
 
+  /// 文字端口（海报渲染需要字体；`Application::root().text_port()` 给）。
+  ///
+  /// 这里顺手渲染默认海报：字体在 `start()` 之后才可用，没有这一步的后果不是报错，
+  /// 而是**海报里一个字都没有**（文字层静默跳过）。
+  void set_text_port(const st::ui::TextPort* port) {
+    text_port_ = port;
+    apply_poster(poster_);
+    // 首帧已过（`apply_poster` 里的 `fit_pending_` 在首帧被消费掉了），所以这里
+    // 直接按当前视口尺寸算一次适配缩放。**不依赖 `bounds()`**：视口的 `fit_to_view`
+    // 需要几何，而这里只想要“装得下”——视口宽从 `width()` 拿不到时就不适配，
+    // 等用户自己滚滚轮（不报错）。
+    if (canvas_ != nullptr) {
+      if (auto* shell = dynamic_cast<CanvasViewport*>(canvas_->viewport()); shell != nullptr) {
+        const float view_w = shell->bounds().width;
+        const float view_h = shell->bounds().height;
+        const float doc_w = static_cast<float>(document_->width());
+        const float doc_h = static_cast<float>(document_->height());
+        if (view_w > 8.0f && view_h > 8.0f && doc_w > 0.0f && doc_h > 0.0f) {
+          const float fit = std::min(view_w / doc_w, view_h / doc_h);
+          if (fit > 0.01f && fit < 0.999f) {
+            shell->fit_to_view();
+            canvas_version_.set(canvas_version_.value() + 1U);
+          }
+        }
+      }
+    }
+  }
+
+  /// 切换控制权的**唯一实现**（人拨开关 / AI 发 `edit_lock` / 启动参数都走它）。
+  ///
+  /// 为何收成一处：切控制权不只是改一个 bool——还要重画画布、刷新面板、落日志。
+  /// 这些步骤散在多个入口里，新加一个入口就会漏一步，而漏的那步表现为
+  /// “切了但界面没跟上”。（裁云同构，见 `CaiyunPage::set_control`。）
+  void set_control(bool on, std::string_view source) {
+    if (!document_->set_ai_control(on)) return;
+    invalidate_all();
+    log(on ? std::format("AI 接管（{}）：人工控件已置灰，仍可查看", source)
+           : std::format("人拿回主导（{}）：人工控件已恢复", source));
+  }
+
+  /// 应用一份海报脚本：解析 → 渲染成图层 → 换掉当前文档。
+  ///
+  /// 为何**换文档**而不是往现有文档里画：脚本是作品真值，一个人工的旧文档混在里面
+  /// 会让“这份海报到底是什么”变成两套说法。要保留手绘内容，另存 PNG 再合成。
+  auto apply_poster_text(const std::string& json) -> st::Result<std::string> {
+    const auto parsed = louyue::parse_poster(json);
+    if (!parsed) return st::forward_error(parsed.error());
+    louyue::PosterScript poster = parsed.value();
+    if (!poster_script_path_.empty()) rebase_poster_paths(poster);
+    apply_poster(poster);
+    return poster.name;
+  }
+
+  /// 从文件装载海报脚本。失败时**保留原作品**并返回可读原因。
+  auto load_poster(const std::string& path) -> st::Result<std::string> {
+    const auto text = st::fs::read_text(path);
+    if (!text) return st::forward_error(text.error());
+    const auto parsed = louyue::parse_poster(text.value());
+    if (!parsed) return st::forward_error(parsed.error());
+    louyue::PosterScript poster = parsed.value();
+    poster_script_path_ = path;
+    rebase_poster_paths(poster);
+    apply_poster(poster);
+    return poster.name;
+  }
+
+  [[nodiscard]] auto save_poster(const std::string& path) const -> bool {
+    return st::fs::write_text(path, louyue::poster_to_json(poster_)).has_value();
+  }
+
+  /// 导出当前文档为 PNG（`spec` = `path` 或 `path WxH`）。
+  ///
+  /// 尺寸不同时**按脚本重新渲染**（而不是缩放像素）：海报的层次是矢量摆放关系，
+  /// 缩放会把字号/间距一起拉糊；重渲染在那个尺寸下重新算排版。
+  auto export_poster(const std::string& spec) -> std::string {
+    std::string path = spec;
+    int width = 0;
+    int height = 0;
+    const std::size_t space = spec.rfind(' ');
+    if (space != std::string::npos) {
+      const std::string tail = spec.substr(space + 1);
+      const std::size_t x = tail.find('x');
+      if (x != std::string::npos) {
+        try {
+          width = std::stoi(tail.substr(0, x));
+          height = std::stoi(tail.substr(x + 1));
+          path = spec.substr(0, space);
+        } catch (...) {
+          width = 0;
+          height = 0;
+        }
+      }
+    }
+    // 没给尺寸就按**作品设计尺寸**导出（而不是当前画布尺寸）。
+    //
+    // 画布会被 `sync_poster_to_viewport` 缩成视口大小（860×483），那是**看**的尺寸；
+    // 交付物要的是脚本里的 1920×1080。两者混用会导出小图（实测过）。
+    if (width <= 0 || height <= 0) {
+      width = poster_.width;
+      height = poster_.height;
+    }
+    if (path.empty()) return "export_png 需要输出路径（如 /tmp/poster.png）";
+    if (width > 0 && height > 0) {
+      louyue::PosterScript sized = poster_;
+      sized.out_width = std::clamp(width, 64, 7680);
+      sized.out_height = std::clamp(height, 64, 7680);
+      st::raster::Canvas canvas{sized.export_width(), sized.export_height(), 1.0f};
+      louyue::render_poster(canvas, sized, text_port_);
+      st::codec::PngImage image;
+      image.width = static_cast<std::uint32_t>(canvas.physical_width());
+      image.height = static_cast<std::uint32_t>(canvas.physical_height());
+      image.rgba = canvas.to_rgba8();
+      if (!st::codec::png_write_file(path, image, 3).has_value()) {
+        return std::format("写文件失败：{}", path);
+      }
+      last_export_ = path;
+      return {};
+    }
+    return std::format("导出尺寸无效：{}x{}", width, height);
+  }
+
   /// 载入一个真实 PNG 文件（`--open` 与菜单「文件→打开」共用）。
   auto open_file(const std::string& path) -> bool {
     const auto image = st::codec::png_read_file(path);
@@ -197,6 +321,15 @@ class LouyuePage final : public dsl::Component {
     (void)layers_version_.value();
     (void)canvas_version_.value();
     dsl::column(c, {.gap = 0.0f, .grow = true, .id = "louyue-root"}, [&] {
+      // 控制面（0×0）：AI 经 `invoke apply_poster` / `export_png` / `edit_lock`
+      // 驱动本应用的唯一稳定寻址点。放在根列**第一个**，任何布局下都存在。
+      (void)dsl::custom<louyue::PosterBridge>(
+          c,
+          [this](louyue::PosterBridge& bridge) {
+            bridge.set_id("poster");
+            bridge.set_hooks(make_poster_hooks());
+          },
+          {.width = 0.0f, .height = 0.0f, .key = "poster-bridge"});
       build_menu_bar(c);
       dsl::row(c, {.gap = 0.0f, .grow = true, .id = "main-row"}, [&] {
         build_toolbar(c);
@@ -209,6 +342,44 @@ class LouyuePage final : public dsl::Component {
   }
 
   // —— 供 e2e 的动作面（设计文档 §3.4，**不可改名**）——
+
+  /// 海报控制面的钩子（全部转发到本页真实能力；桥里不做业务判断）。
+  [[nodiscard]] auto make_poster_hooks() -> louyue::PosterBridge::Hooks {
+    louyue::PosterBridge::Hooks hooks{};
+    hooks.apply_poster = [this](const std::string& json) -> std::string {
+      const auto result = apply_poster_text(json);
+      return result ? std::string{} : result.error().message;
+    };
+    hooks.load_poster = [this](const std::string& path) -> std::string {
+      const auto result = load_poster(path);
+      return result ? std::string{} : result.error().message;
+    };
+    hooks.save_poster = [this](const std::string& path) -> std::string {
+      if (path.empty()) return std::string("save_poster 需要文件路径");
+      return save_poster(path) ? std::string{} : std::format("写入失败：{}", path);
+    };
+    hooks.export_png = [this](const std::string& spec) -> std::string {
+      return export_poster(spec);
+    };
+    hooks.poster_json = [this] { return louyue::poster_to_json(poster_); };
+    hooks.poster_value = [this](const std::string& key) -> std::string {
+      if (key == "blocks") return std::to_string(poster_.blocks.size());
+      if (key == "layer_count") return std::to_string(document_->layers().size());
+      if (key == "size") return std::format("{}x{}", poster_.width, poster_.height);
+      if (key == "export_size") {
+        return std::format("{}x{}", poster_.export_width(), poster_.export_height());
+      }
+      if (key == "name") return poster_.name;
+      return {};
+    };
+    hooks.set_edit_lock = [this](bool on) -> std::string {
+      set_control(on, "AI 请求");
+      return {};
+    };
+    hooks.edit_locked = [this] { return document_->ai_controlled; };
+    hooks.last_export = [this] { return last_export_; };
+    return hooks;
+  }
 
   auto invoke_export(const std::string& path) -> bool { return document_->export_png(path); }
   auto invoke_undo() -> bool { return document_->undo(); }
@@ -347,16 +518,20 @@ class LouyuePage final : public dsl::Component {
                     .surface = st::ui::Element::Surface::Alt, .id = "toolbar"}, [&] {
       const Tool tools[] = {Tool::Move,   Tool::Brush, Tool::Eraser, Tool::Bucket,
                             Tool::Eyedropper, Tool::Select, Tool::Crop};
+      // AI 接管时工具置灰（「移动」仍可用——那是查看/平移，不是编辑）。
+      const bool editable = document_->can_edit();
       for (const Tool tool : tools) {
         const std::string id = std::format("tool-{}", louyue::tool_icon(tool));
         const bool active = canvas_ != nullptr && canvas_->tool() == tool;
+        const bool enabled = editable || tool == Tool::Move;
         (void)dsl::custom<Button>(
             c,
-            [this, tool, id, active](Button& b) {
+            [this, tool, id, active, enabled](Button& b) {
               b.set_id(id);
               b.set_icon(louyue::tool_icon(tool));
               b.set_variant(active ? Button::Variant::Soft : Button::Variant::Ghost);
               b.set_size(Button::Size::Small);
+              b.set_enabled(enabled);
               b.on_click = [this, tool] {
                 if (canvas_ != nullptr) canvas_->set_tool(tool);
                 invalidate_all();
@@ -411,18 +586,23 @@ class LouyuePage final : public dsl::Component {
         return canvas_ != nullptr && canvas_->tool() == Tool::Move;
       };
     }
+    // 视口适配**不在 build 里做**：build 期间视口还没排布（`bounds` 为 0），
+    // 在这里算出的适配值无意义——实测它会把 `view_fitted_` 误置成 true，
+    // 于是主循环里的适配永远不再发生（海报停在 100%、只看得见一角）。
+    // 真正的适配在主循环首帧后（`LouyuePage::fit_view_once`）。
   }
 
   void bind_canvas(CanvasView& view) {
-    view.set_id("canvas");
-    view.set_document(document_.get());
-    view.on_document_changed = [this] { invalidate_all(); };
-    canvas_ = &view;
-  }
+  view.set_id("canvas");
+  view.set_document(document_.get());
+  view.on_document_changed = [this] { invalidate_all(); };
+  canvas_ = &view;
+}
 
   void build_side_panels(dsl::Composer& c) {
     dsl::column(c, {.gap = 8.0f, .padding = 8.0f, .width = 260.0f,
                     .surface = st::ui::Element::Surface::Alt, .id = "side-panels"}, [&] {
+      build_poster_panel(c);
       build_layer_panel(c);
       build_color_panel(c);
     });
@@ -464,7 +644,8 @@ class LouyuePage final : public dsl::Component {
           canvas_version_.set(canvas_version_.value() + 1U);
           if (canvas_ != nullptr) canvas_->mark_dirty();
         },
-        {.id = "opacity-slider", .key = "opacity"});
+        {.id = "opacity-slider", .key = "opacity"})
+        .set_enabled(document_->can_edit());
 
     dsl::row(c, {.gap = 6.0f, .id = "layer-actions"}, [&] {
       (void)dsl::custom<Button>(
@@ -501,8 +682,77 @@ class LouyuePage final : public dsl::Component {
               invalidate_all();
             };
           },
-          {.width = 32.0f, .height = 28.0f, .key = "layer-merge"});
+          {.width = 32.0f, .height = 28.0f,       .key = "layer-merge"});
       });
+    });
+  }
+
+  /// **海报面板**（AI 作品面）：人也能自己切控制权、应用/导出，不是只能看。
+  ///
+  /// 为何需要：AI 接管后人工编辑控件会置灰（画布/图层/颜色），而**这个面板不能跟着灰**
+  /// ——它就是人把控制权拿回去的地方。“把手”被锁住等于锁死。
+  void build_poster_panel(dsl::Composer& c) {
+    dsl::column(c, {.gap = 6.0f, .id = "poster-panel", .key = "poster-panel"}, [&] {
+      dsl::text(c, [] { return std::string("海报（AI 作品）"); }, {.id = "poster-title"});
+      dsl::row(c, {.gap = 8.0f, .id = "poster-control-row"}, [&] {
+        dsl::text(c, [] { return std::string("自动接管"); }, {});
+        (void)dsl::switch_(c, document_->ai_controlled,
+                           [this](bool on) { set_control(on, "手动切换"); },
+                           {.id = "poster-control-switch", .key = "poster-control-switch"});
+      });
+      dsl::text(
+          c,
+          [this] {
+            return document_->ai_controlled
+                       ? std::string("AI 接管中 · 仅可查看")
+                       : std::string("人工主导 · 可自由编辑");
+          },
+          {.size = 12.0f, .id = "poster-control-state", .key = "poster-control-state"});
+      dsl::text(
+          c,
+          [this] {
+            return std::format("{} · {}×{} · {} 块", poster_.name, poster_.export_width(),
+                               poster_.export_height(), poster_.blocks.size());
+          },
+          {.size = 12.0f, .id = "poster-meta", .key = "poster-meta"});
+      dsl::row(c, {.gap = 6.0f, .id = "poster-actions"}, [&] {
+        const bool editable = document_->can_edit();
+        (void)dsl::custom<Button>(
+            c,
+            [this, editable](Button& b) {
+              b.set_id("poster-apply");
+              b.set_label("歌白海报");
+              b.set_icon("sparkles");
+              b.set_size(Button::Size::Small);
+              b.set_variant(Button::Variant::Soft);
+              b.set_enabled(editable);
+              b.on_click = [this] {
+                apply_poster(louyue::builtin_gebai_poster());
+                poster_script_path_.clear();
+              };
+            },
+            {.key = "poster-apply"});
+        (void)dsl::custom<Button>(
+            c,
+            [this, editable](Button& b) {
+              b.set_id("poster-export");
+              b.set_label("导出");
+              b.set_icon("download");
+              b.set_size(Button::Size::Small);
+              b.set_variant(Button::Variant::Ghost);
+              b.set_enabled(editable);
+              b.on_click = [this] {
+                const std::string path = "poster.png";
+                const std::string error = export_poster(path);
+                log(error.empty() ? std::format("已导出：{}", path) : error);
+              };
+            },
+            {.key = "poster-export"});
+      });
+      // 日志（最近几条；AI 的动作也落在这里，两边看同一份历史）。
+      for (const std::string& line : log_lines_) {
+        dsl::text(c, [line] { return line; }, {.size = 11.0f});
+      }
     });
   }
 
@@ -579,8 +829,116 @@ class LouyuePage final : public dsl::Component {
     });
   }
 
-  std::unique_ptr<Document> document_{};
-  CanvasView* canvas_{nullptr};
+   std::unique_ptr<Document> document_{};
+ CanvasView* canvas_{nullptr};
+
+ // —— 海报（AI 作品面；见 poster.hpp / poster_bridge.hpp）——
+ louyue::PosterScript poster_{louyue::builtin_gebai_poster()};
+ std::string poster_script_path_{};
+ std::string last_export_{};
+ const st::ui::TextPort* text_port_{nullptr};
+ /// 等画布排布完成后适配视口（见 `apply_poster` 的注释）。
+ bool fit_pending_{false};
+  /// 是否已按视口尺寸同步过一次（只做一次，避免冲掉人工改动）。
+  bool view_fitted_{false};
+  /// 这次 `apply_poster` 来自自动同步（不重置 `view_fitted_`，否则会死循环重渲染）。
+  bool data_override_{false};
+
+ public:
+  /// 是否已完成首次视口适配（主循环判据）。
+  [[nodiscard]] auto is_view_fitted() const noexcept -> bool { return view_fitted_; }
+
+  /// 把海报**按视口可用尺寸**渲染一次（首帧之后）。
+  ///
+  /// ⚠ 为何不用 `Viewport::fit_to_view`：它读 `content_size()`，而子元素
+  /// （`CanvasView`）的尺寸要等它自己 `measure` 过才有值；换文档后即便先
+  /// `mark_layout_dirty()`，`content_size()` 仍是旧值——实测 view=876x662 /
+  /// doc=1920x1080，调用后 `zoom` 纹丝不动（仍 1.00）。
+  ///
+  /// 改成**换渲染尺寸**而不是换缩放：视口多大就把海报渲染多大（保持宽高比，
+  /// 留 8px 边），于是 100% 缩放天然装得下，用户还能照常用滚轮放大看细节。
+  ///
+  /// 只做一次（`view_fitted_`）：之后用户改窗口/缩放都不再重渲染——重渲染会
+  /// 丢掉人工在画布上做的任何像素修改。
+  bool sync_poster_to_viewport() {
+    if (view_fitted_ || canvas_ == nullptr || data_override_) return false;
+    auto* shell = dynamic_cast<CanvasViewport*>(canvas_->viewport());
+    if (shell == nullptr) return false;
+    const float view_w = shell->bounds().width - 16.0f;
+    const float view_h = shell->bounds().height - 16.0f;
+    if (view_w < 64.0f || view_h < 64.0f) return false;   // 还没排布
+    // 保持海报宽高比，缩到视口内。
+    const float ratio = static_cast<float>(poster_.width) / static_cast<float>(poster_.height);
+    int target_w = static_cast<int>(view_w);
+    int target_h = static_cast<int>(static_cast<float>(target_w) / ratio);
+    if (static_cast<float>(target_h) > view_h) {
+      target_h = static_cast<int>(view_h);
+      target_w = static_cast<int>(static_cast<float>(target_h) * ratio);
+    }
+    target_w = std::clamp(target_w, 160, 3840);
+    target_h = std::clamp(target_h, 160, 3840);
+    if (target_w == poster_.export_width() && target_h == poster_.export_height()) {
+      // 尺寸没变也要把内容居中——启动时 pan 停在旧偏移上，画布会偏出半屏
+      // （实测：海报完整、但视口里只看到下半张）。
+      shell->set_zoom(1.0f);
+      shell->set_pan(st::math::Point{0.0f, 0.0f});
+      view_fitted_ = true;
+      canvas_version_.set(canvas_version_.value() + 1U);
+      return false;
+    }
+    poster_.out_width = target_w;
+    poster_.out_height = target_h;
+    view_fitted_ = true;
+    data_override_ = true;   // 这是一次自动同步，不是用户改脚本
+    apply_poster(poster_);
+    data_override_ = false;
+    // 画布尺寸正好等于视口可用区 → zoom 1.0 + pan 0 就是居中。
+    if (auto* fresh = dynamic_cast<CanvasViewport*>(canvas_->viewport()); fresh != nullptr) {
+      fresh->set_zoom(1.0f);
+      fresh->set_pan(st::math::Point{0.0f, 0.0f});
+    }
+    canvas_version_.set(canvas_version_.value() + 1U);
+    return true;
+  }
+
+
+ /// 海报渲染成图层 → 换掉文档（详见 `apply_poster_text` 的注释）。
+ void apply_poster(const louyue::PosterScript& poster) {
+   poster_ = poster;
+   const int width = poster_.export_width();
+   const int height = poster_.export_height();
+   document_ = std::make_unique<Document>(width, height);
+   st::raster::Canvas canvas{width, height, 1.0f};
+   louyue::render_poster(canvas, poster_, text_port_);
+   st::codec::PngImage image;
+   image.width = static_cast<std::uint32_t>(width);
+   image.height = static_cast<std::uint32_t>(height);
+   image.rgba = canvas.to_rgba8();
+   (void)document_->load_png(image);
+   document_->set_dirty(false);
+   canvas_version_.set(canvas_version_.value() + 1U);
+   layers_version_.set(layers_version_.value() + 1U);
+   if (canvas_ != nullptr) {
+     canvas_->set_document(document_.get());
+     canvas_->mark_dirty();
+     fit_pending_ = true;
+     // 自动同步（`data_override_`）不算"用户换了作品"，不要重置已同步标记，
+     // 否则 `sync_poster_to_viewport` 会再进来一次、无限重渲染。
+     if (!data_override_) view_fitted_ = false;
+   }
+   // 日志只报**作品设计尺寸**：画布尺寸是"看"的尺寸（随视口变），报它没意义。
+   log(std::format("海报：{} · {} 块 · {}×{}", poster_.name, poster_.blocks.size(),
+                   poster_.width, poster_.height));
+ }
+
+ /// 海报脚本里的相对路径按脚本所在目录重基（现在没有外部素材，留位子以防日后加图片块）。
+ void rebase_poster_paths(louyue::PosterScript& poster) const { (void)poster; }
+
+ void log(std::string line) {
+   log_lines_.push_back(std::move(line));
+   if (log_lines_.size() > 40) log_lines_.erase(log_lines_.begin());
+   canvas_version_.set(canvas_version_.value() + 1U);
+ }
 
   // —— 菜单 / 文件对话框（打开·导出入口，见 build_menu_bar/build_file_dialog）——
   static constexpr std::size_t kNoMenu{static_cast<std::size_t>(-1)};
@@ -593,9 +951,10 @@ class LouyuePage final : public dsl::Component {
   int file_dialog_mode_{0};                 ///< 0 = 打开 PNG；1 = 导出 PNG
   bool dialog_seen_{false};                 ///< 对话框是否在树上（新开动作判据）
   bool quit_requested_{false};              ///< 菜单「退出」（主循环退出位）
-   dsl::State<std::size_t> canvas_version_{0};
+    dsl::State<std::size_t> canvas_version_{0};
  dsl::State<std::size_t> layers_version_{0};
- };
+ std::vector<std::string> log_lines_{};
+};
 
 }  // namespace
 
@@ -629,9 +988,14 @@ auto run_app(int argc, char** argv) -> int {
     return 1;
   }
   if (!dsl::register_element_type<Swatch>("Swatch")) {
-    std::fprintf(stderr, "Swatch 注册失败（与内置组件重名？）\n");
-    return 1;
-  }
+  std::fprintf(stderr, "Swatch 注册失败（与内置组件重名？）\n");
+  return 1;
+}
+// 海报控制面（AI 作品级入口）：与 CanvasView 同理，是示例级自绘元素。
+if (!dsl::register_element_type<louyue::PosterBridge>("LouyuePoster")) {
+  std::fprintf(stderr, "PosterBridge 注册失败（与内置组件重名？）\n");
+  return 1;
+}
   auto page = std::make_shared<LouyuePage>();
   if (!options.open.empty()) {
     if (!page->open_file(options.open)) {
@@ -675,21 +1039,28 @@ auto run_app(int argc, char** argv) -> int {
   // 漏了它的表现是“进程在跑、界面也在画，但控制文件永远不会出现”，
   // 从外部看就是“启动超时”（实测踩到）。
   if (auto status = app.start(); !status) {
-    std::fprintf(stderr, "启动失败：%s\n", status.error().message.c_str());
-    return 1;
-  }
+  std::fprintf(stderr, "启动失败：%s\n", status.error().message.c_str());
+  return 1;
+}
+// **必须在 start() 之后**：`root().text_port()` 要等应用初始化完成才可用。
+// 没有这一步的后果不是报错，而是**海报里一个字都没有**——文字层静默跳过（实测）。
+page->set_text_port(app.root().text_port());
 
   // 主循环形态**承 gallery**：需要每帧显式推进声明式宿主
   // （`tick_declarative_hosts`）——`DeclarativeHost` 登记的帧回调里已经内建
   // “先 pump_async 再判 dirty”的顺序，调用方不再重写（见 gallery 同段注释）。
   std::uint64_t frames = 0;
-  while (!app.quit_requested() && !page->quit_requested()) {
-    const std::int64_t frame_start_ms = st::time::now_ms();
-    if (app.root().tick_declarative_hosts() > 0U) app.request_repaint();
-    app.tick();
-    ++frames;
-    app.pace_loop(frame_start_ms);
-  }
+while (!app.quit_requested() && !page->quit_requested()) {
+  const std::int64_t frame_start_ms = st::time::now_ms();
+  if (app.root().tick_declarative_hosts() > 0U) app.request_repaint();
+  // **海报按视口尺寸渲染一次**：视口几何只有在首帧排布之后才有效（`build()` 期间
+  // `bounds` 是 0），所以这件事必须在主循环里做。做完就置位、不再重做
+  //（否则用户自己缩放/改窗口都会被强制重渲染，白丢编辑）。
+  if (!page->is_view_fitted() && page->sync_poster_to_viewport()) app.request_repaint();
+  app.tick();
+  ++frames;
+  app.pace_loop(frame_start_ms);
+}
   st::print("镂月退出：{} 帧，DPI {:.1f}，后端 {}\n", frames,
             static_cast<double>(app.device_scale()), std::string(app.backend_name()));
   return 0;

@@ -223,17 +223,25 @@ Document::Document(int width, int height) : width_(width), height_(height) {
   layers_.front().pixels.clear(Color{255, 255, 255, 255});
 }
 
+auto Document::set_ai_control(bool on) -> bool {
+  if (ai_controlled == on) return false;
+  ai_controlled = on;
+  return true;
+}
+
 void Document::set_active_layer(std::size_t index) {
   if (index < layers_.size()) active_ = index;
 }
 
 void Document::add_layer(std::string name) {
+  if (!can_edit()) return;
   layers_.push_back(Layer{std::move(name), width_, height_});
   active_ = layers_.size() - 1;
   dirty_ = true;
 }
 
 auto Document::remove_layer(std::size_t index) -> bool {
+  if (!can_edit()) return false;
   // 至少保留一层：删空之后没有"在哪画"这个概念，界面上会直接崩在 `active_pixels()`。
   if (layers_.size() <= 1U || index >= layers_.size()) return false;
   layers_.erase(layers_.begin() + static_cast<std::ptrdiff_t>(index));
@@ -243,6 +251,7 @@ auto Document::remove_layer(std::size_t index) -> bool {
 }
 
 auto Document::move_layer(std::size_t index, int delta) -> bool {
+  if (!can_edit()) return false;
   if (index >= layers_.size()) return false;
   const auto target = static_cast<std::ptrdiff_t>(index) + delta;
   if (target < 0 || target >= static_cast<std::ptrdiff_t>(layers_.size())) return false;
@@ -257,6 +266,7 @@ auto Document::move_layer(std::size_t index, int delta) -> bool {
 }
 
 auto Document::merge_down(std::size_t index) -> bool {
+  if (!can_edit()) return false;
   // 最底层没有"下面"；越界也拒绝。
   if (index == 0U || index >= layers_.size()) return false;
   Layer& upper = layers_[index];

@@ -356,17 +356,9 @@ class CaiyunPage final : public dsl::Component {
     hooks.stop_render = [this] { renderer_.cancel(); };
     hooks.script_json = [this] { return caiyun::script_to_json(project_.script); };
     hooks.set_edit_lock = [this](bool on) -> std::string {
-      if (!project_.set_ai_control(on)) {
-        // 重复设置不算错（幂等），但也不报“失败”。
-        return {};
-      }
-      // 交接时**已经重建了片段**（以脚本为准），所以这里同步时间轴与监视器。
-      if (timeline_ != nullptr) timeline_->set_project(&project_);
-      if (monitor_ != nullptr) monitor_->refresh();
-      selected_scene_ = 0;
-      log(on ? "AI 接管编辑：人工控件已置灰（仍可查看/播放）"
-             : "AI 交还编辑权：人工控件已恢复");
-      bump();
+      // 两个入口都走 `set_control`：人拨开关与 AI 发 `edit_lock` 必须**同一行为**
+      //（包括重建、刷新、日志）——两处各写一份必漂移。
+      set_control(on, "AI 请求");
       return {};
     };
     hooks.edit_locked = [this] { return project_.ai_controlled; };
@@ -553,14 +545,24 @@ class CaiyunPage final : public dsl::Component {
                     .surface = st::ui::Element::Surface::Alt, .id = "director-panel"}, [&] {
       dsl::text(c, [] { return std::string("AI 导演"); },
                 {.size = 15.0f, .weight = st::ui::FontWeight::SemiBold, .id = "director-title"});
+      // **控制权开关**（人自己就能拨）：不需要等 AI 发 `edit_lock`，也不必重启应用。
+      //
+      // 为何用“自动接管”而不是“两个角色按钮”：控制态是个**二元状态**，开关
+      // 天然表达这一点；两个按钮就得自己管“哪个是当前”的选中态——多一处会漂移的状态。
+      dsl::row(c, {.gap = 8.0f, .id = "control-row", .key = "control-row"}, [&] {
+        dsl::text(c, [] { return std::string("自动接管"); }, {});
+        (void)dsl::switch_(c, project_.ai_controlled,
+                           [this](bool on) { set_control(on, "手动切换"); },
+                           {.id = "control-switch", .key = "control-switch"});
+      });
       // **控制态横幅**：AI 接管时这一行是用户唯一能看出“为什么点不动”的地方。
       // 所以它必须是常驻的一行（不是 toostip）——置灰的控件不自解释。
       dsl::text(
           c,
           [this] {
             return project_.ai_controlled
-                       ? std::string("AI 控制中 · 仅可查看（播放/暂停/拖动时间轴仍可用）")
-                       : std::string("人工编辑模式");
+                       ? std::string("AI 接管中 · 仅可查看（播放/拖动时间轴仍可用）")
+                       : std::string("人工主导 · 可自由编辑");
           },
           {.size = 12.0f, .id = "director-control-state", .key = "control-state"});
       dsl::text(c, [this] { return std::format("工程：{}", project_.script.name); },
@@ -834,6 +836,23 @@ class CaiyunPage final : public dsl::Component {
       return timeline_->selected_clip();
     }
     return project_.selected;
+  }
+
+  /// 切换控制权的**唯一实现**（人拨开关 / AI 发 `edit_lock` / 启动参数都走它）。
+  ///
+  /// 为何收成一处：切控制权不只是改一个 bool——还要以脚本为准重建片段、同步时间轴与
+  /// 监视器、落日志。这些步骤散在多个入口里，新加一个入口就会漏一步，而漏的那一步
+  /// 表现为“切了但界面没跟上”（最难查的那类）。
+  ///
+  /// `source` 只影响日志文案（人手动 / AI 请求 / 启动参数），便于事后看是谁改的。
+  void set_control(bool on, std::string_view source) {
+    if (!project_.set_ai_control(on)) return;   // 幂等：状态没变就不做多余工作
+    if (timeline_ != nullptr) timeline_->set_project(&project_);
+    if (monitor_ != nullptr) monitor_->refresh();
+    selected_scene_ = 0;
+    log(on ? std::format("AI 接管编辑（{}）：人工控件已置灰，仍可查看/播放", source)
+           : std::format("人拿回主导（{}）：人工控件已恢复", source));
+    bump();
   }
 
   void step_frame(int delta) {

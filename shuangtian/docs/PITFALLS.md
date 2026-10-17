@@ -196,6 +196,9 @@
 | **同一件事写成两条路径，其中一条漏了一步** | 脚本装载有两条入口（启动构造 / UI 按钮）：只有后者做了相对路径重基，于是命令行出片“0/4 轨配音”、UI 出片正常。**相同输入两条路径两种行为**的经典形态 | `README.md` §caiyun；子Agent 提示词「同一件事只留一个入口」 |
 | **“锁住编辑”不能在 UI 层逐个禁用** | 编辑入口有六七处，逐个置灰必漏一处；而 `控制通道 invoke` 本身就绕过 `enabled`。门禁必须长在数据层（`Project::can_edit()`），UI 只负责让人看见原因 | `README.md` §“AI 控制态”；`tools/caiyun_director_e2e.py` 第 6 步 |
 | **验证“控件点不动”必须用真鼠标** | `invoke` 走的是“直接触发”通道（绕 enabled），拿它验 UI 层会假绿。真窗口 + `mouse_event` 才能验到 `set_enabled(false)`；无头模式下没有系统鼠标事件 | `tools/caiyun_lock_realwindow.py` |
+| **`set` 属性不会触发 `on_change`** | `Switch::set_property("checked", …)` 只改 `checked_`，不调 `on_change`（`activate()` 才调）——拿它验「人拨开关」会得到恒绿的假测试。验“动作”一律走 `invoke activate`；也说明开关类控件必须用 `activate` 路径才等价于点击 | `tools/caiyun_director_e2e.py` 第 6c 步 |
+| **算点击坐标不能用窗口矩形** | `GetWindowRect` 含标题栏/边框，而控制通道的逻辑坐标从**客户区**左上算。用窗口矩形会让点击整体下移一个标题栏高——实测开关在逻辑 y=402，却点到了 624，然后被误读成“框架的 on_change 没接上”（在框架里多查了一轮）。用 `ClientToScreen(0,0)` 拿客户区原点；DPI 倍率取 `metrics.device_scale`，**不要从窗口像素反推**（窗口逻辑宽随布局变） | `tools/control_switch_realwindow.py` |
+| **`Viewport::fit_to_view` 换文档后无效** | 它读子元素的 `content_size()`，而换了文档后子元素还没重新 `measure`（即使先 `mark_layout_dirty()`）——实测 view=876x662 / doc=1920x1080，调用后 zoom 纹丝不动。要让大图装进小视口，**改渲染尺寸**而不是改缩放 | `examples/louyue/main.cpp`；README §×镂月海报面 |
 
 ## 场景 9：下结论 / 归因（元层面，最贵的一类）
 
