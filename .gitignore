@@ -149,3 +149,47 @@ packages/server/src/core/cv/cvdriver.embedded.generated.json
 /.gebai-local/
 # Go 工具链分发包（本地下载缓存，勿提交）
 go.zip
+
+# ── 生成成品与二进制资产不入库 ──
+# 媒体素材（截图 / 底图 / 生成图 / 视频 / 音频）由 imagegen、裁云、镂月等能力在本地生成——
+# 它们体积大、可复现、且会随每次调参反复变化，入库只会让历史膨胀、diff 噪音化。
+# 需要随仓库分发的**功能必需**图标（PWA manifest、示例应用图标）用下文 `!` 规则显式放行。
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.bmp
+*.ico
+*.mp4
+*.mov
+*.webm
+*.avi
+*.wav
+*.mp3
+*.m4a
+*.flac
+
+# 生成媒体目录里的成品：用「排除全部 + 显式放行必需项」而不是排除整个目录——
+# 目录级排除会让下面的 ! 放行全部失效（git 无法对“父目录已排除”的内容重新包含），实测踩到。
+shuangtian/examples/*/assets/media/*.png
+shuangtian/examples/*/assets/vo/*.wav
+
+# 放行：应用与示例运行所必需的图标（删了 manifest 或示例脚本会失效）
+!packages/web/public/icons/icon-192.png
+!packages/web/public/icons/icon-512.png
+!packages/web/public/icons/*.png
+!shuangtian/examples/gbcode/assets/gbcode-icon.png
+!shuangtian/examples/louyue/assets/sample.png
+
+# 放行：入门示例（sample-basic / sample-cinematic）引用的底图——
+# 这几个是“克隆后第一眼看到的东西”，缺图会让示例看起来像坏的。
+# 它们命名固定、体量小（每个 <1MB）、且不随调参变化（区别于 gb-*/cyber-* 这类生成物）。
+!shuangtian/examples/caiyun/assets/media/bg-aurora.png
+!shuangtian/examples/caiyun/assets/media/bg-deep.png
+!shuangtian/examples/caiyun/assets/media/bg-mesh.png
+!shuangtian/examples/caiyun/assets/media/bg-slate.png
+!shuangtian/examples/caiyun/assets/media/accent-glow.png
+
+# 文档截图（README/DESIGN 内联引用的界面图，属于文档本体）
+!docs/screenshots/*.png
