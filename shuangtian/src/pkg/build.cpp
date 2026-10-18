@@ -1367,6 +1367,77 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
 
 // 匿名 namespace 内的 link() 用下方的占用判定（定义在 st::pkg 层供测试直连）。
 
+/// 把 Windows 图标资源编成对象文件（`RT_GROUP_ICON` + `RT_ICON`）。
+///
+/// 为何走“生成 `.rc` 再编”而不是直接调 `windres`：
+/// - `g++ x.rc` 会自己找 `windres`（MinGW 装里就带），交叉工具链前缀也自动对——
+///   少一条“用户得先装 windres 并配 PATH”的隐形成本；
+/// - 直接调 `windres` 要多维护一套工具链路径解析。
+///
+/// 产物落在产物同级的 `.res/` 下（而不是 build 根的固定位置）：图标属于**目标**，
+/// 同名不同目标不能互相覆盖（否则 gallery 与 gbcode 会抢同一个 `icon.o`）。
+///
+/// 幂等：`.rc` 内容与时间戳都比对象新时才重编——图标很少变，没必要每轮链接都跑。
+[[nodiscard]] auto compile_windows_resource(const TargetSpec& target, const BuildOptions& options,
+                                           const ResolvedToolchain& toolchain,
+                                           const std::string& output)
+    -> Result<std::string> {
+  const std::string root = options.root.empty() ? std::string{"."} : options.root;
+  const std::string icon_path = root + "/" + target.icon;
+  if (!fs::is_regular_file(icon_path)) {
+    return unexpected(ErrorCode::NotFound,
+                      std::format("目标 {} 声明的图标不存在：{}", target.name, target.icon));
+  }
+  // `.ico` 路径在 `.rc` 里要写成 Windows 路径（反斜杠 + 转义）。
+  std::string rc_icon = icon_path;
+  for (auto& character : rc_icon) {
+    if (character == '/') character = '\\';
+  }
+  std::string escaped;
+  for (const char character : rc_icon) {
+    if (character == '\\') escaped += "\\\\";
+    else escaped += character;
+  }
+  // `1 ICON` 里的 1 是资源 ID，要小于 0x8000 才允许由应用自己分配（编译器口径）。
+  const std::string rc_source = std::format("1 ICON \"{}\"\n", escaped);
+
+  const std::string resource_dir = output + ".res";
+  if (auto status = fs::create_directories(resource_dir); !status) {
+    return forward_error(status.error());
+  }
+  const std::string rc_path = resource_dir + "/icon.rc";
+  const std::string object_path = resource_dir + "/icon.o";
+
+  bool needs_rebuild = !fs::is_regular_file(object_path);
+  if (!needs_rebuild) {
+    // 判据只看 **`.rc` 内容是否变了**（图标路径或 ID 换了）。
+    // 为何不靠时间戳：框架没有暴露 stat 的 mtime，而“内容相等就不重编”
+    // 在语义上更准——它直接回答“这份 `.rc` 换了吗”。
+    auto existing = fs::read_text(rc_path);
+    needs_rebuild = !existing || *existing != rc_source;
+  }
+  if (needs_rebuild) {
+    if (auto status = fs::write_text(rc_path, rc_source); !status) {
+      return forward_error(status.error());
+    }
+    // `-c` 不可省：`g++ x.rc -o x.o` 默认按**链接**处理（不编译），
+    // 于是它拿 `x.rc` 当输入文件去链接，报 `ld returned 1 exit status`。
+    // 加上 `-c` 才是“只编译不链接”，产物才是真正的对象文件。
+    std::vector<std::string> command{"-c", rc_path, "-o", object_path};
+    auto built = process::run(toolchain.compiler_path, command,
+                             process::Options{.cwd = root, .env = toolchain.env});
+    if (!built) return forward_error(built.error());
+    if (built->exit_code != 0) {
+      std::string shown;
+      for (const auto& part : command) shown += (shown.empty() ? "" : " ") + part;
+      return unexpected(ErrorCode::Internal,
+                        std::format("编译 Windows 图标资源失败\n{}{}\n{}",
+                                    built->stdout_text, built->stderr_text, shown));
+    }
+  }
+  return object_path;
+}
+
 [[nodiscard]] auto link(const Manifest& manifest, const BuildOptions& options,
                         const std::vector<CompileUnit>& units, const std::string& output,
                         const std::vector<std::string>& profile_flags_list,
@@ -1413,20 +1484,18 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
   }
   // 目标三元组：链接侧必须与编译侧**同一个**（否则拿 A 目标的运行库链 B 目标的对象）
   for (const auto& item : toolchain.target_args()) args.push_back(item);
-  for (const auto& unit : units) long_args.push_back(unit.object);
-  for (const auto& extra : extra_sources) long_args.push_back(extra);
-  tail.push_back("-o");
-  tail.push_back(output);
-  const auto link_arguments = link_library_arguments(toolchain.platform, libraries);
-  for (const auto& item : link_arguments) tail.push_back(item);
-  for (const auto& flag : toolchain.extra_flags) tail.push_back(flag);
-  // 完整命令行（未启用响应文件时用它；长度估算也基于它）。
-  std::vector<std::string> full_args = args;
-  full_args.insert(full_args.end(), long_args.begin(), long_args.end());
-  full_args.insert(full_args.end(), tail.begin(), tail.end());
+
+  // ⚠ **以下所有 `args` 追加必须发生在 `full_args` 拼接之前**。
+  //
+  // 踩过的真坑（2026-10-18）：`full_args` 是 `args` 的**快照**（拷贝）。
+  // 把新旗标推到 `args` 而快照已经拼好——那条旗标就**静默丢弃**了：
+  // 链接器收到的是一个不含它的命令行，既不报错也不警告。
+  // 这也是 Windows 静态链运行库长期没生效的原因（它在快照之后）。
+  // 判据：命令行走 `full_args`，响应文件路径走 `args`——两路必须看到同一堆旗标。
+
   // Windows 目标的**静态链接 C++ 运行库**（`-static-libgcc -static-libstdc++`）。
   // 不静态时产物要求 `libgcc_s_seh-1.dll`/`libstdc++-6.dll` 在 PATH 上——用户双击 exe
-  // 或从别的目录启动时就报"找不到 dll"（与 mingw 交叉档同口径，见 st.pkg 的 extra_flags）。
+  // 或从别的目录启动时就报“找不到 dll”（与 mingw 交叉档同口径，见 st.pkg 的 extra_flags）。
   if (toolchain.platform == "windows") {
     for (const auto* flag : {"-static-libgcc", "-static-libstdc++"}) {
       if (std::ranges::find(args, flag) == args.end() &&
@@ -1435,6 +1504,58 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
       }
     }
   }
+
+  // —— Windows 图形子系统 + exe 图标（2026-10-18）——
+  //
+  // `-mwindows` 把 PE 头的 Subsystem 从 3(CONSOLE) 改成 2(WINDOWS_GUI)：
+  // 双击 exe **不再弹控制台窗口**。这是交付级要求——带黑框的 GUI 程序
+  // 在用户眼里就是“没做完”。
+  //
+  // **不需要另写 `WinMain`**：`startup_arguments()` 走的是
+  // `GetCommandLineW` + `CommandLineToArgvW`，不依赖控制台的 `argc/argv`，
+  // 所以现有 `main()` 在 GUI 子系统下照常工作。
+  // （反例：很多项目为转 GUI 手写一层 `WinMain` 转发——多一套入口就多一处
+  //   不一致的可能，而这里根本不需要。）
+  const TargetSpec* link_target = nullptr;
+  if (!options.target.empty()) {
+    // `targets` 是 **vector**（保持清单声明顺序，便于确定性输出）——线性找。
+    for (const auto& candidate : manifest.targets) {
+      if (candidate.name == options.target) {
+        link_target = &candidate;
+        break;
+      }
+    }
+  }
+  if (toolchain.platform == "windows" && link_target != nullptr &&
+      link_target->system == "gui") {
+    args.emplace_back("-mwindows");
+  }
+  // 图标：`.ico` 必须先编成对象再链进去（GNU 驱动不认识 `.ico`）。
+  // 编好的对象放进 `long_args`（与其它对象同一批），不额外占命令行长度预算。
+  if (toolchain.platform == "windows" && link_target != nullptr && !link_target->icon.empty()) {
+    if (auto resource = compile_windows_resource(*link_target, options, toolchain, output);
+        resource) {
+      long_args.push_back(*resource);
+    } else {
+      return forward_error(resource.error());
+    }
+  }
+
+  // 对象与额外源："一参数一项"，进响应文件（`long_args`）。
+  for (const auto& unit : units) long_args.push_back(unit.object);
+  for (const auto& extra : extra_sources) long_args.push_back(extra);
+  // `tail` = `-o 产物` + 库 + 工具链附加旗标（**库必须在对象之后**，链接器单趟解析）。
+  tail.push_back("-o");
+  tail.push_back(output);
+  const auto link_arguments = link_library_arguments(toolchain.platform, libraries);
+  for (const auto& item : link_arguments) tail.push_back(item);
+  for (const auto& flag : toolchain.extra_flags) tail.push_back(flag);
+
+  // 完整命令行（未启用响应文件时用它；长度估算也基于它）。
+  // **必须在上面所有 `args` 追加完成之后才拼**（见上面的踩坑注释）。
+  std::vector<std::string> full_args = args;
+  full_args.insert(full_args.end(), long_args.begin(), long_args.end());
+  full_args.insert(full_args.end(), tail.begin(), tail.end());
 
   // 主动判长度：超阈值就直接用响应文件，不等失败。
   //

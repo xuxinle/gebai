@@ -48,6 +48,33 @@ namespace {
 
 void startup_configure_console() {
 #if defined(_WIN32)
+  // ## GUI 子系统下把输出接回**父控制台**（2026-10-18）
+  //
+  // 链接成 `-mwindows` 后进程**没有自己的控制台**，`stdout`/`stderr` 句柄无效——
+  // `st::print` 与日志全部静默丢弃。双击启动时这正确（本来就不该有黑框），
+  // 但用户从 cmd/PowerShell 里跑 `gbcode --help` 时会看到**什么也没打印**，
+  // 那比“有个黑框”更让人困惑。
+  //
+  // `AttachConsole(ATTACH_PARENT_PROCESS)` 把本进程挂到**父进程的控制台上**，
+  // 于是输出回到用户眼前。失败（没有父控制台 = 双击启动）就保持无控制台。
+  //
+  // ⚠ **重定向优先于接管**（否则会弄坏 `gbcode --help > out.txt`）：
+  // 若父进程已经给了有效的 `stdout`（重定向到文件/管道），那些句柄是**有效的**，
+  // 不能再 `freopen("CONOUT$")` 把它们抢回控制台——那会让重定向静默失效。
+  // 只要句柄有效（不管是控制台还是文件），就不该插手。
+  const auto stdout_ok = ::GetStdHandle(STD_OUTPUT_HANDLE) != INVALID_HANDLE_VALUE &&
+                         ::GetStdHandle(STD_OUTPUT_HANDLE) != nullptr &&
+                         ::GetFileType(::GetStdHandle(STD_OUTPUT_HANDLE)) != FILE_TYPE_UNKNOWN;
+  if (!stdout_ok && ::AttachConsole(ATTACH_PARENT_PROCESS) != 0) {
+    if (std::FILE* stream = nullptr;
+        freopen_s(&stream, "CONOUT$", "w", stdout) == 0 && stream != nullptr) {
+      std::setvbuf(stdout, nullptr, _IONBF, 0);
+    }
+    if (std::FILE* stream = nullptr;
+        freopen_s(&stream, "CONOUT$", "w", stderr) == 0 && stream != nullptr) {
+      std::setvbuf(stderr, nullptr, _IONBF, 0);
+    }
+  }
   // 控制台代码页设为 UTF-8：否则 `st::print` 输出的中文在 cmd/PowerShell 里是乱码。
   // 失败无副作用（例如被重定向到管道时会失败），因此不检查返回值。
   ::SetConsoleOutputCP(CP_UTF8);

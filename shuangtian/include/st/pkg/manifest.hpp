@@ -73,6 +73,25 @@ struct TargetSpec {
   std::vector<std::string> embed{};
   /// 日志代码是否编进本目标（覆盖工程级；`std::optional` 才能区分“未指定”与“显式 false”）。
   std::optional<bool> log_enabled{};
+  /// 链接子系统：`"console"`（默认）或 `"gui"`。
+  ///
+  /// 仅 Windows 有区别：`gui` 对应链接器的 `-mwindows`（PE 头的 Subsystem=2
+  /// WINDOWS_GUI），双击 exe **不弹控制台窗口**；`console` 是 Subsystem=3，
+  /// 双击会先冒一个黑框。GUI 应用发布时必须用 `gui`。
+  ///
+  /// 为何不给所有目标默认 `gui`：工具链（`st`）、探测程序、e2e 辅助工具都要
+  /// 在终端里跑并读输出，转成 GUI 会让 `stdout` 无处可写。默认 `console`
+  /// = 保持既有行为不变，需要图形界面的**应用**显式声明。
+  ///
+  /// 非 Windows 平台忽略本字段（没有子系统概念）。
+  std::string system{"console"};
+  /// Windows 可执行文件的**图标**（`.ico` 路径；可选）。
+  ///
+  /// 为何不能只靠运行期 `SetWindowIcon`：那换的是**窗口**图标，而资源管理器/
+  /// 任务栏/快捷方式看到的是 **PE 文件里的图标资源**（`RT_GROUP_ICON`）。
+  /// 没有那份资源，exe 在资源管理器里就是空白默认图标。
+  /// 做法是把 `.ico` 编成 `.o` 再链进产物（见 `build.cpp` 的 `compile_resource`）。
+  std::string icon{};
 };
 
 /// 交叉编译工具链描述（`st.pkg` 的 `toolchains` 段）。

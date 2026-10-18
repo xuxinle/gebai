@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "st/pkg/build.hpp"
+#include "st/pkg/manifest.hpp"
 #include "st/test/test.hpp"
 
 namespace {
@@ -61,4 +62,64 @@ ST_TEST(pkg_link_lock_requires_both_mingw_keywords) {
   // 顺序无关（诊断里两段可以分开出现）。
   ST_CHECK(st::pkg::artifact_locked(
       "warning: something\npermission denied …\nld: failed to write output 'x.exe'"));
+}
+
+/// **Windows 目标可以声明 GUI 子系统与 exe 图标**（回归：用户报「release 版本要
+/// WinMain 链接、不要控制台窗口、exe 图标也要有」）。
+///
+/// 缺陷形态（2026-10-18 实测）：`build/dev/bin/gbcode.exe` 的 PE 头
+/// `Subsystem = 3 (CONSOLE)`——双击先弹一个黑框；且全仓没有任何 `.rc`/`.ico`，
+/// 资源管理器里显示的是空白默认图标。
+///
+/// 这一层只能测**清单解析**（真正的链接结果要看 PE 头）。但解析错了一样会让
+/// 上游静默走 console：字段名少一个字母、默认值写反，链接器就会照旧产出
+/// Subsystem=3 的产物，**不报任何错**。所以把解析口径钉住。
+namespace {
+
+[[nodiscard]] auto parse_target_spec(std::string_view json_text)
+    -> st::Result<st::pkg::Manifest> {
+  const auto json = st::json_parse(json_text);
+  if (!json) return st::unexpected(st::ErrorCode::Parse, "测试内 JSON 写错了");
+  return st::pkg::Manifest::parse_json(*json, ".");
+}
+
+}  // namespace
+
+ST_TEST(manifest_target_system_and_icon_are_parsed) {
+  // ① 缺省是 console（保持既有行为不变——工具链/探测程序不该被静默改成 GUI）。
+  {
+    const auto parsed = parse_target_spec(R"({
+      "name": "demo", "version": "0.1.0", "kind": "static_library",
+      "targets": { "tool": { "kind": "executable", "sources": ["a.cpp"] } }
+    })");
+    ST_REQUIRE(parsed.has_value());
+    ST_REQUIRE(parsed->targets.size() == 1);
+    ST_CHECK_EQ(parsed->targets[0].system, std::string{"console"});
+    ST_CHECK(parsed->targets[0].icon.empty());
+  }
+
+  // ② 显式 gui + icon 要原样读进来（链接层据此加 `-mwindows` 与资源对象）。
+  {
+    const auto parsed = parse_target_spec(R"({
+      "name": "demo", "version": "0.1.0", "kind": "static_library",
+      "targets": { "app": { "kind": "executable", "sources": ["a.cpp"],
+                            "system": "gui", "icon": "assets/app.ico" } }
+    })");
+    ST_REQUIRE(parsed.has_value());
+    ST_REQUIRE(parsed->targets.size() == 1);
+    ST_CHECK_EQ(parsed->targets[0].system, std::string{"gui"});
+    ST_CHECK_EQ(parsed->targets[0].icon, std::string{"assets/app.ico"});
+  }
+
+  // ③ 拼错的 system 必须**报错**而不是静默回退到 console。
+  //    为何这条重要：写成 "GUI"（大写）或 "windows" 都很自然，而静默回退的
+  //    表现是“我明明配了 gui、怎么还弹黑框”——排查方向会被完全带偏。
+  {
+    const auto parsed = parse_target_spec(R"({
+      "name": "demo", "version": "0.1.0", "kind": "static_library",
+      "targets": { "app": { "kind": "executable", "sources": ["a.cpp"],
+                            "system": "GUI" } }
+    })");
+    ST_CHECK(!parsed.has_value());
+  }
 }

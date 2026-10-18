@@ -161,6 +161,11 @@ go.zip
 *.gif
 *.bmp
 *.ico
+# 例外：Windows 可执行文件的**图标资源是构建输入**，不是生成物。
+# 没有它，`st build <target>` 会直接报“声明的图标不存在”——
+# 而生成脚本（tools/make_ico.py）需要先有一张源 PNG，不能凭空重建。
+# 其余 `*.ico`（截图/导出产物）仍然不入库。
+!**/assets/**/*.ico
 *.mp4
 *.mov
 *.webm

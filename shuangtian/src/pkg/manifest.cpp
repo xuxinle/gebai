@@ -55,6 +55,14 @@ inline constexpr std::array<std::string_view, 22> known_keys{
   if (const st::Json* log_value = st::json_find(json, "log"); log_value != nullptr && log_value->is_boolean()) {
     target.log_enabled = log_value->get<bool>();
   }
+  // 链接子系统与图标。解析层**不做平台判断**：清单是纯数据，
+  // “非 Windows 时忽略”由构建层决定（否则同一份清单在不同宿主上语义不一）。
+  target.system = json_get_string(json, "system", "console");
+  target.icon = json_get_string(json, "icon", "");
+  if (target.system != "console" && target.system != "gui") {
+    return unexpected(ErrorCode::Parse, std::format("目标 {} 的 system 只能是 console 或 gui，得到：{}",
+                                                    name, target.system));
+  }
   return target;
 }
 
