@@ -11,9 +11,11 @@
 
 #include "st/test/test.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "st/text/text.hpp"
 
@@ -114,4 +116,59 @@ ST_TEST(font_stack_reports_monospace_availability) {
   const bool has = fixture.stack->has_monospace();
   const auto faces = fixture.stack->monospace_faces();
   ST_CHECK(has == !faces.empty());
+}
+
+ST_TEST(text_width_cache_evicts_incrementally_not_all_at_once) {
+  // **超上限时只能增量淘汰，不能全清**（回归：5465 行文档编辑帧 90ms）。
+  //
+  // 缺陷形态（实测）：`measure_width` 的宽度缓存曾是
+  //   `if (widths.size() > 4096) widths.clear();`
+  // 而条目数上限与“正常文件的行数”同量级。打开 5465 行的 DESIGN.md 后，
+  // 每行宽度都会进缓存 → 任何一次超限插入都命中“全清”分支 → 下一次
+  // **全部重新整形**。用户感知就是“整页变卡、打字有延迟”
+  //（单帧 paint 从 4.5ms 涨到 90ms）。
+  //
+  // 判据用**命中率**而不是耗时（关键教训）：
+  // 同一实现换台机器/换个负载，耗时能差几倍，写成断言会时红时绿（试过，不可靠）。
+  // 而命中率是缓存策略的确定性后果：
+  //   - 增量 LRU：容量够时重查老条目几乎全命中（命中率 ≈ 1）；
+  //   - 全清：每次超限插入都清空，重查老条目**全 miss**（命中率 ≈ 0）。
+  //
+  // ⚠ 为什么不能只查“一条老的”：全清实现下清空后立刻又填满，
+  // 紧接着查某项仍可能命中。必须**成批重查**才能让差异显现（实测踩过）。
+  Fixture fixture;
+  if (!fixture.ok) return;
+  TextRenderer renderer(*fixture.stack);
+
+  const auto measure_one = [&](const std::string& item) {
+    (void)renderer.measure_width(item, 14.0F, FontRole::Monospace);
+  };
+  const auto stats = [&] { return renderer.width_cache_stats(); };
+
+  // 塞 4000 条互不相同的文本（**刚好在上限之内**：先建立一份可用的热缓存）。
+  for (int index = 0; index < 4000; ++index) {
+    measure_one("warm-line-" + std::to_string(index) + "-payload");
+  }
+
+  // 重查这 4000 条 → 统计命中率。容量够（上限 ≥ 4000）时应当几乎全命中。
+  const auto [before_hits, before_misses] = stats();
+  for (int index = 0; index < 4000; ++index) {
+    measure_one("warm-line-" + std::to_string(index) + "-payload");
+  }
+  const auto [after_hits, after_misses] = stats();
+  const std::size_t hits = after_hits - before_hits;
+  const std::size_t misses = after_misses - before_misses;
+
+  // ① 不允许“成批 miss”：4000 次重查里未命中不得超过 10%
+  //    （宽紧适度：给容量边界一点余量，但全清实现会 100% miss）。
+  ST_CHECK(misses * 10 < 4000U);
+  // ② 命中数必须占绝对多数（与 ① 同向，但单独断言更易读）。
+  ST_CHECK(hits > 3600U);
+
+  // ③ 顺带守住“不能假命中”：全新文本必 miss（否则会量错宽度）。
+  const auto [pre_new_hits, pre_new_misses] = stats();
+  measure_one("brand-new-never-seen-text-for-cold-reference");
+  const auto [new_hits, new_misses] = stats();
+  ST_CHECK_EQ(new_misses - pre_new_misses, std::size_t{1});
+  ST_CHECK_EQ(new_hits - pre_new_hits, std::size_t{0});
 }

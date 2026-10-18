@@ -123,12 +123,18 @@ struct Harness {
 }  // namespace
 
 ST_TEST(terminal_pty_mode_opens_a_real_shell) {
-  // 起真 shell 之后：组件报告 PTY 模式、屏幕模型存在、子进程在跑。
+  // 起真 shell 之后：组件报告 PTY 模式、屏幕模型存在、**shell 进程活着**。
+  //
+  // ⚠ `busy()` 不再回答“shell 活着”（2026-10-18 语义修正，实测驱动）：
+  // 它现在答“命令在跑”——刚开的终端一条命令都没发过，所以是 `false`。
+  // “会话能不能用”看属性面 `running`（= shell 进程活着），本次也一并断言。
   if (!st::process::PtySession::supported()) return;   // 老系统上跳过（而非失败）
   Harness harness;
   harness.terminal->open_shell();
   ST_CHECK(harness.terminal->pty_active());
-  ST_CHECK(harness.terminal->busy());
+  ST_CHECK(!harness.terminal->busy());   // 未发命令 → 不忙（旧的“shell 活着”请读 running）
+  ST_CHECK_EQ(harness.terminal->get_property("running").value_or(""), std::string("true"));
+  ST_CHECK_EQ(harness.terminal->get_property("command_issued").value_or(""), std::string("false"));
   const auto* screen = harness.terminal->screen(0);
   ST_REQUIRE(screen != nullptr);
   // shell 的 banner / 提示符会自己出现在屏幕上——**我们不拼任何文字**。
@@ -212,7 +218,9 @@ ST_TEST(terminal_pty_stop_interrupts_without_killing_the_shell) {
   Harness harness;
   harness.terminal->open_shell();
   ST_REQUIRE(harness.wait_for(test_shell().prompt_needle));
-  ST_CHECK(harness.terminal->busy());
+  // 刚开终端、未发命令：不忙（`busy()` 的新语义）；但 shell 进程是活的。
+  ST_CHECK(!harness.terminal->busy());
+  ST_CHECK_EQ(harness.terminal->get_property("running").value_or(""), std::string("true"));
 
   // 长命令与“打印一行”按平台选（旧写法写死了 PowerShell 的 `Start-Sleep`/
   // `Write-Output`，配上 POSIX 测试 shell 时两者都“命令不存在”——报错信息里
@@ -299,6 +307,13 @@ ST_TEST(terminal_pty_stop_interrupts_without_killing_the_shell) {
   const bool started = harness.wait_until(
       [&] { return harness.screen_text().find(kRunningMarker) != std::string::npos; }, 3000);
   ST_REQUIRE(started);
+  // 命令真的在跑：`busy()` 必须为真（旧实现恒真、新实现靠提示符识别——
+  // 这条断言把“新判定的正向一半”钉住，否则只看“跑完回假”会被“永远假”蒙过）。
+  //
+  // 为何用条件等待而不是直接断言：新判定是“屏幕安静 ≥ 180ms 且末行是提示符”，
+  // 标记刚出来那一瞬间仍在安静期内（必然忙）——但“必然忙”不是我们要验的，
+  // 要验的是“长命令持续跑的时候它确实一直忙”。等一个安静期再断言才验到真东西。
+  ST_CHECK(harness.wait_until([&] { return harness.terminal->busy(); }, 1000));
 
   // **关键断言的前置**：记下中断前的时刻。长命令是 60 秒，所以只要它在
   // 远短于 60 秒内回到提示符，就只可能是被 `Ctrl+C` 打断了——
@@ -324,6 +339,12 @@ ST_TEST(terminal_pty_stop_interrupts_without_killing_the_shell) {
   // 真的被中断了：提示符回来了，而且是在长命令（60s）到位之前。
   ST_CHECK(back_to_prompt);
   ST_CHECK(elapsed < 10000);   // 若是命令自己跑完，得 ≥ 60s
+  // **忙闲语义跟着命令走**（新增，2026-10-18）：长命令在跑 → `busy()` 真；
+  // 中断后回到提示符 → `busy()` 回假。这正是旧实现做不到的那件事（旧值恒真）。
+  //
+  // 同样用条件等待：提示符刚画上去那一瞬仍在 180ms 安静期内，直接断言会
+  // 偶发红（机器慢时尤其）。等它真的回假——超时即失败，语义不变。
+  ST_CHECK(harness.wait_until([&] { return !harness.terminal->busy(); }, 2000));
   // shell 仍在（能接着用），这是与“杀进程”最直接的分界。
   ST_CHECK(harness.terminal->pty_active());
   // 再送一条命令，应该能执行（把中断后的输入流验证一下）。

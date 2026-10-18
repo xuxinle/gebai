@@ -5,6 +5,7 @@
 
 #include "st/test/test.hpp"
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
@@ -328,3 +329,54 @@ ST_TEST(tree_row_height_is_configurable) {
   ST_CHECK_EQ(raw->row_rect(2).height, 20.0F);
   ST_CHECK_EQ(raw->row_rect(2).y - raw->row_rect(0).y, 40.0F);   // 2 行 × 20px
 }
+
+ST_TEST(tree_rows_are_readable_and_activatable_by_key) {
+  // **Agent 驱动树的两条硬需求**（2026-10-18 实测驱动）：
+  // ① 读得到“树里有哪些行”——`Tree` 是自绘组件（行不是 Element），此前
+  //    语义文本只有「N 行」，调用方无法知道树里有什么、也无法验证“展开对了没有”；
+  // ② 点得准——行号会随展开/收起漂移，按坐标算出来的位置随时可能落到别的行上
+  //    （Agent 用坐标驱动文件树时最危险的失效）。
+  //
+  // 现在 `labels` / `keys` / `rows_detail` 给读面，`activate_key` 给写面（与点行同链）。
+  Tree tree;
+  layout_tree(tree, sample_nodes());
+
+  std::string opened;
+  std::string toggled;
+  tree.on_select = [&](std::string_view key) { opened = std::string(key); };
+  tree.on_toggle = [&](std::string_view key, bool expanded) {
+    toggled = std::string(key) + (expanded ? ":open" : ":close");
+  };
+
+  // 读面 ①：标签与 key 同序、行数与 rows 一致。
+  ST_CHECK_EQ(tree.get_property("labels").value_or(""),
+              std::string("src\nmain.cpp\nutil\nREADME.md"));
+  ST_CHECK_EQ(tree.get_property("keys").value_or(""),
+              std::string("src\nsrc/main.cpp\nsrc/util\nREADME.md"));
+  // 读面 ②：每行结构（label\tdir?\tdepth）。
+  const std::string detail = tree.get_property("rows_detail").value_or("");
+  ST_CHECK(detail.find("main.cpp\tsrc/main.cpp\tfalse\t1\tfalse") != std::string::npos);
+  ST_CHECK(detail.find("src\tsrc\ttrue\t0\ttrue") != std::string::npos);
+
+  // 写面 ①：按 key 打开文件（文件行 = 选中 + `on_select`）。
+  ST_CHECK(tree.set_property("activate_key", "src/main.cpp"));
+  ST_CHECK_EQ(opened, std::string("src/main.cpp"));
+  ST_CHECK_EQ(std::string(tree.selected_key()), std::string("src/main.cpp"));
+
+  // 写面 ②：按 key 点目录（目录行 = toggle，参数是**目标状态**）。
+  ST_CHECK(tree.set_property("activate_key", "src"));
+  ST_CHECK_EQ(toggled, std::string("src:close"));
+
+  // 不存在的 key：**如实拒绝**（`set` 回 rejected，不静默成功）。
+  toggled.clear();
+  ST_CHECK(!tree.set_property("activate_key", "no-such-key"));
+  ST_CHECK(toggled.empty());
+
+  // 属性名都进得了快照（否则 `get` 默认那份 prop 里看不到它们）。
+  const auto names = tree.property_names();
+  for (const auto* wanted : {"labels", "keys", "rows_detail", "activate_key"}) {
+    const bool present = std::find(names.begin(), names.end(), std::string_view(wanted)) != names.end();
+    ST_CHECK(present);
+  }
+}
+

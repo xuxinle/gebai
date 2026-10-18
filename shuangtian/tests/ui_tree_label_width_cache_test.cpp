@@ -1,4 +1,4 @@
-/// `Tree` 行宽缓存的**一致性面**护栏。
+﻿/// `Tree` 行宽缓存的**一致性面**护栏。
 ///
 /// ## 这组用例守的是什么
 ///
@@ -26,6 +26,7 @@
 
 #include "st/test/test.hpp"
 
+#include <chrono>
 #include <cstddef>
 #include <string>
 #include <string_view>
@@ -203,4 +204,98 @@ ST_TEST(tree_label_width_cache_holds_for_many_rows) {
 
   ST_CHECK_EQ(measure_calls(fixture, tree), std::size_t{5000});  // 首轮全量
   ST_CHECK_EQ(measure_calls(fixture, tree), std::size_t{0});     // 次轮零调用（改前这里是 5000）
+}
+
+/// **缓存失效判据必须看内容，不能只看行数**。
+///
+/// 缺陷形态（2026-10-18 静态审查发现）：`Tree::measure` 的宽度缓存失效条件曾是
+/// “行数变了 或 字号变了”。而目录刷新最常见的形态恰恰是**行数不变、标签变了**
+/// （改文件名、切换同名数量的目录、状态图标变化）——
+/// 那种情况下宽度永远是旧的：树会按旧标签宽排版，**长标签被截、短标签留一大片空**，
+/// 而"行数没变"让这个 bug 看起来完全不该发生。
+///
+/// 判据：同样 3 行，改掉其中一行的标签（长度不同），measure 出的宽必须跟着变。
+ST_TEST(tree_label_width_cache_invalidates_on_label_change) {
+  Fixture fixture;
+  Tree tree;
+  tree.sync_nodes(rows_with_labels({"a.cpp", "b.cpp", "c.cpp"}));
+  tree.measure(fixture.context(), Constraints{});
+  const float narrow = tree.measured_size().width;
+
+  // 行数不变，只把某一行改成一个**明显更长**的标签。
+  tree.sync_nodes(rows_with_labels({"a.cpp", "b.cpp",
+                                    "a_really_long_file_name_that_should_widen.cpp"}));
+  tree.measure(fixture.context(), Constraints{});
+  const float widened = tree.measured_size().width;
+
+  ST_CHECK(widened > narrow);
+}
+
+/// **稳态 measure 必须是 O(1)**：行集与字号都没变时，重复 measure 不该有任何逐行工作。
+///
+/// 缺陷形态（2026-10-18 静态审查发现）：只缓存逐行标签宽时，求“最宽行”那一步
+/// 仍**每帧扫全部行**——“缓存生效”只省了 `measure_width` 调用，总成本仍 O(总行数)。
+/// 目录大的时候（数千行）滚动/悬停/焦点变化每次都要走一遍。
+///
+/// 判据不看时间（机器相关），看**结构性事实**：稳态 measure 之后再用
+/// `measure_width` 计数端口检查——调用数必须是 0；并且再用一个“行数翻倍”的
+/// 树验证 measure 结果不因重复调用漂移。
+ST_TEST(tree_measure_is_constant_work_when_unchanged) {
+  // **稳态 measure 不该有逐行工作**（不只看“量宽调用数”）。
+  //
+  // 缺陷形态（2026-10-18 静态审查发现）：只缓存逐行标签宽时，求“最宽行”那一步
+  // 仍**每帧扫全部行**——“缓存生效”只省了 `measure_width` 调用，总成本仍 O(总行数)。
+  //
+  // ⚠ 判据选型（踩过的坑）：只数 `measure_width` 调用**测不出来**——
+  // 求最大值的循环本来就不调它（缺陷实现下也是 0 次）。真正有效的判据是
+  // **耗时随行数的增长**：稳态下 3000 行与 200 行的 measure 必须同量级。
+  // 用“大/小”比值而不是绝对毫秒，避开机器差异。
+  Fixture fixture;
+  Tree tree;
+  const auto steady_measure_us = [&](std::size_t rows) {
+    Tree local;
+    std::vector<std::string> labels;
+    labels.reserve(rows);
+    for (std::size_t index = 0; index < rows; ++index) {
+      labels.push_back("node_" + std::to_string(index) + ".cpp");
+    }
+    local.sync_nodes(rows_with_labels(labels));
+    local.measure(fixture.context(), Constraints{});   // 首轮：建立缓存
+    // 稳态：连续多次 measure，取总计（次数越多，单次噪声越小）。
+    const auto started = std::chrono::steady_clock::now();
+    for (int round = 0; round < 200; ++round) {
+      local.measure(fixture.context(), Constraints{});
+    }
+    return static_cast<double>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started)
+            .count());
+  };
+
+  const double small_us = steady_measure_us(200);
+  const double large_us = steady_measure_us(3000);
+  // 15 倍行数差：稳态耗时比值必须远小于它（缺陷实现下会接近线性）。
+  // 取 4× 门槛：缓存到位时两者应接近（1×~2×），线性时会到 15×。
+  ST_CHECK(large_us < small_us * 4.0 + 50.0);
+  (void)tree;
+}
+
+/// 最大行宽的缓存**必须随内容/字号/主题失效**（缓存的代价是失效逻辑要完整）。
+ST_TEST(tree_max_row_width_cache_invalidates) {
+  Fixture fixture;
+  Tree tree;
+  tree.sync_nodes(rows_with_labels({"aa", "bb"}));
+  tree.measure(fixture.context(), Constraints{});
+  const float narrow = tree.measured_size().width;
+
+  // ① 换成更长的标签（行数不变）→ 必须变宽。
+  tree.sync_nodes(rows_with_labels({"aa", "a_much_longer_label_here.cpp"}));
+  tree.measure(fixture.context(), Constraints{});
+  ST_CHECK(tree.measured_size().width > narrow);
+
+  // ② 换字号 → 宽度必须重算（不是回读旧值）。
+  const float before_font = tree.measured_size().width;
+  tree.style().font_size *= 2.0F;
+  tree.measure(fixture.context(), Constraints{});
+  ST_CHECK(tree.measured_size().width > before_font);
 }

@@ -81,6 +81,8 @@ constexpr float kNestedGap{6.0f};
 constexpr float kDefaultViewWidth{640.0f};
 constexpr float kMinViewWidth{80.0f};
 constexpr float kMinTextWidth{48.0f};
+/// “还没有画过任何组”的哨兵（组首行下标空间里的无效值）。
+constexpr std::size_t kNoGroupHead{static_cast<std::size_t>(-1)};
 /// 滚轮/箭头键每格的**兑底**步长（优先取主题 `Metrics::wheel_step`，见 on_event；
 /// 与全仓滚动手感同源，改主题一处即全改）。
 constexpr float kWheelStep{48.0f};
@@ -431,6 +433,53 @@ auto MarkdownView::get_property(std::string_view name) const -> std::optional<st
   // 为什么值得暴露：宽变而内容不重排时，“控件宽变了/排版结果没变”必须能分开看——
   // 实测这两者混在一起时排查会绕远（看 `measure` 的重排条件）。
   if (name == "layout_width") return std::format("{:.2f}", layout_width_);
+ // 可见行区间（半开，只读）：`[first_visible, last_visible)`。
+ // 与 `visible_row_range_now()` 同源（上一帧绘制时二分出来的）。
+ if (name == "row_count") return std::to_string(rows_.size());
+ if (name == "first_visible")
+   return std::to_string(visible_row_range_now().first);
+ if (name == "last_visible")
+   return std::to_string(visible_row_range_now().second);
+ if (name == "draw_stats")
+   return std::format("{}|{}", debug_rows_drawn_, debug_rows_with_text_);
+ // 本帧画了几次**组背景**（回归用）：必须 ≤ 本帧涉及的组数。
+ // 缺陷实现下它等于“组内行数”（每行重画一次整块背景，从而盖掉前面行的字）。
+ if (name == "painted_groups") return std::to_string(debug_painted_groups_);
+ // 行级诊断（只读）：`row_at_probe` → 全部行的 box/clip/span 摘要（一行一条）。
+ // 为何长期保留（不是临时调试）：排查“区间对但没画出来”时，必须在“区间”与
+ // “像素”之间再插一层观测点——到底这一行的 box/clip/spans 是什么。
+ // 只看截图只能猜（2026-10-18 的“大片空白”就这样查了十几轮）。
+ if (name == "row_at_probe") {
+   std::string out;
+   for (std::size_t index = 0; index < rows_.size(); ++index) {
+     const Row& row = rows_[index];
+     std::size_t text_bytes = 0;
+     for (const Span& span : row.spans) text_bytes += span.text.size();
+     out += std::format(
+         "{}|k={} box=({:.0f},{:.0f},{:.0f},{:.0f}) clip=({:.0f},{:.0f},{:.0f},{:.0f}) "
+         "tx={:.0f} sp={} by={} gf={} hd={}\n",
+         index, static_cast<int>(row.kind), row.box.x, row.box.y, row.box.width,
+         row.box.height, row.clip.x, row.clip.y, row.clip.width, row.clip.height, row.text_x,
+         text_bytes, row.spans.size(), row.group_first ? 1 : 0, row.group_head_row);
+   }
+   return out;
+ }
+ // 行级诊断（只读）：`row_at:<下标>` → 该行的排版数据（单行）。
+ // 为何保留：与 `row_at_probe` 同一理由，但大文档（三千多行）逐条查更省带宽。
+ if (name.starts_with("row_at:")) {
+   const std::string_view index_text = std::string_view(name).substr(7);
+   const auto parsed = st::parse_u64(index_text);
+   if (!parsed.has_value() || *parsed >= rows_.size()) return std::nullopt;
+   const Row& row = rows_[static_cast<std::size_t>(*parsed)];
+   std::size_t text_bytes = 0;
+   for (const Span& span : row.spans) text_bytes += span.text.size();
+   return std::format(
+       "kind={} box=({:.1f},{:.1f},{:.1f},{:.1f}) clip=({:.1f},{:.1f},{:.1f},{:.1f}) "
+       "text_x={:.1f} spans={} bytes={} group_first={} head={}",
+       static_cast<int>(row.kind), row.box.x, row.box.y, row.box.width, row.box.height,
+       row.clip.x, row.clip.y, row.clip.width, row.clip.height, row.text_x, row.spans.size(),
+       text_bytes, row.group_first ? "1" : "0", row.group_head_row);
+ }
   if (name == "selectable") return selectable_ ? "true" : "false";
   if (name == "stick_to_bottom") return stick_to_bottom_ ? "true" : "false";
   if (name == "pending") return stream_.pending() ? "true" : "false";
@@ -488,7 +537,14 @@ auto MarkdownView::property_names() const -> std::vector<std::string_view> {
   return {"markdown",       "text",          "block_count",    "content_height",
           "scroll",         "max_scroll",    "viewport_height", "base_font_size",
           "code_font_size", "max_width",     "selectable",     "stick_to_bottom",
-          "pending",        "selection",     "layout_width"};
+          "pending",        "selection",     "layout_width",
+          // 可见行区间（只读）：与 `Tree`/`Table`/`Text`/`CodeEditor` 同一口径。
+          // 为何必须暴露（2026-10-18，实测）：排查“滚动后大片空白”时，
+          // 必须能区分“区间算错（该画没画）”与“区间对但没画出来” ——
+          // 当时它只有 C++ 接口（`visible_row_range_now`），属性面拿不到，
+          // 只能靠截图猜。
+          "row_count", "first_visible", "last_visible", "row_at_probe", "draw_stats",
+          "painted_groups"};
 }
 
 auto MarkdownView::invoke_action(std::string_view action, std::string_view argument) -> bool {
@@ -1747,36 +1803,41 @@ void MarkdownView::paint_content(const RenderContext& context, raster::Surface& 
   // 记下本帧区间供宿主/自动化断言（与 `CodeEditor`/`Tree`/`Table` 同一手法）。
   last_visible_first_ = first_visible;
   last_visible_last_ = last_visible;
+  // 诊断（2026-10-18 排查“大片空白”时加的）：记下本帧“尝试画”与“实际画了字”的行数。
+  // 这两个数分家就是“行到了但字没画”——区分“区间错”与“绘制错”的唯一手段。
+  debug_rows_drawn_ = last_visible - first_visible;
+  debug_rows_with_text_ = 0;
+  // —— 组背景（代码块/引用块）：**遍历前统一预画** ——
+  //
+  // ⚠ 这里曾经是“在逐行循环里顺便画背景”，两种情形都是错的（2026-10-18 修，
+  // 用户报「预览滚一点就大片内容没渲染」）：
+  //
+  // 背景矩形跨**整组**（比如 40 行的 ASCII 图代码块就是一大块不透明面板）。
+  // - 情形②（组首行已滚出视口）时，旧代码对**每一行**都调 `paint_group` 补画背景：
+  //   行 1 画背景→行 1 画字；行 2 又把**整块**背景重画一遍——**把行 1 的字盖掉**；
+  //   依次类推，最后只剩下最后一行那点字可见。实测：可见区间 21 行、
+  //   `draw_spans` 确实调了 21 次（`withText=21`），而屏幕几乎全空。
+  // - 情形①（首行可见）时行首画背景没问题，但一旦上面那行被剔除就变成情形②。
+  //
+  // 正确做法：背景是**比行更底的一层**——先把本帧可见组（含跨越视口的组）的背景
+  // 全部画完，再逐行画文字。两遍的代价可忽（只对**可见组**跑，不是全文档）。
+  {
+    std::size_t last_group_head = kNoGroupHead;
+    debug_painted_groups_ = 0;
+    for (std::size_t row_index = first_visible; row_index < last_visible; ++row_index) {
+      const Row& row = rows_[row_index];
+      if (row.group == GroupKind::None) continue;
+      const std::size_t head = row.group_first ? row_index : row.group_head_row;
+      if (head == last_group_head) continue;
+      last_group_head = head;
+      ++debug_painted_groups_;
+      paint_group(context, canvas, rows_[head], origin);
+    }
+  }
   for (std::size_t row_index = first_visible; row_index < last_visible; ++row_index) {
     const Row& row = rows_[row_index];
     const math::Rect box =
         math::Rect{row.box.x + origin.x, row.box.y + origin.y, row.box.width, row.box.height};
-    // —— 组背景（代码块/引用块）——
-    //
-    // 组背景跨**整组**，但只画一次（在组首行那次）。而二分后区间可能**不包含组首行**
-    // （它已滚到视口上方），所以这里要按「本组首行是否在区间内」分两种情况：
-    //
-    // | 情形 | 本组首行位置 | 该怎么办 |
-    // |---|---|---|
-    // | ① | 在区间**内** | 它自己会走到，在这里不要重复画（否则两遍） |
-    // | ② | 在区间**前**（滚过去了） | 本行就是可见的组内行 → **必须在这里补画** |
-    // | ③ | 在区间**后** | 不可能（本行可见 ⇐ 首行在它之前） |
-    //
-    // 为何要这层「首行下标」而不能只看 `group_first`（**实测踩到的漏画**，2026-10-14）：
-    // 改成二分后，40 行代码块滚到中段时区间是 `[18, 34)`，而组首行是第 2 行——
-    // 它不在区间里，于是背景**整块不画**（实测 code_bg 像素 = 0，且**非白像素也是 0**，
-    // 即整个视口全空）。这个漏画是**加二分那一步引入的**，不是旧代码就有的。
-    //
-    // 反过来，若简单地把“组首行必定在区间外”当成前提去掉判据（退回“永不剔除”），
-    // 则远处 4000 个屏幕外组的首行都会建 `Path` + `stroke_path`——那正是
-    // 4000 段 13.463 ms 的来源（见 `tools/ui_rich_views_bench.cpp`）。两者都要防住。
-    if (row.group_first) {
-      // 情形 ①：首行自己在区间内 → 就由它画（本帧只画这一次）。
-      paint_group(context, canvas, row, origin);
-    } else if (row.group != GroupKind::None && row.group_head_row < first_visible) {
-      // 情形 ②：本组的首行在区间之前（已滚过），而本行可见 → 由本行补画背景。
-      paint_group(context, canvas, rows_[row.group_head_row], origin);
-    }
     const bool row_clip = !row.clip.is_empty();
     const math::Rect clip =
         row_clip ? math::Rect{row.clip.x + origin.x, row.clip.y + origin.y, row.clip.width,
@@ -1804,6 +1865,7 @@ void MarkdownView::paint_content(const RenderContext& context, raster::Surface& 
         const LineGeometry geom =
             line_geometry(text_port_of(context), size, row.box.height, role);
         const float text_y = box.y + geom.origin_y;
+        if (!row.spans.empty()) ++debug_rows_with_text_;
         draw_spans(context, canvas, row.spans, math::Point{row.text_x + origin.x, text_y},
                    std::min(clip.right(), box.right()), row.line_height);
         break;

@@ -100,7 +100,15 @@ struct TerminalSession {
   std::int64_t last_output_ms{0};
   /// 运行中的命令名（PTY 模式下是 shell 名；行模式下是命令）。
   std::string running_name{};
-  /// 子进程退出码（退出后可读）。
+  /// PTY **会话层**真值：收到的字节里是否出现过提示符状的行尾（见 `Terminal::command_running`）。
+  ///
+  /// 为何不用它单独作答：提示符识别是启发式（不同 shell/主题写法各异），
+  /// 误判会让“忙”永远为真或永远为假。所以它只参与判定（带着 `last_output_ms`
+  /// 的安静期双重验证），且**只对“至少发过一条命令”的会话生效**。
+  bool prompt_seen{false};
+  /// 本会话是否发过至少一条命令（未发过命令时“shell 活着”不能算忙——
+  /// 刚打开的终端就在跑活是假的，它只证明了“会话可用”）。
+  bool command_issued{false};  /// 子进程退出码（退出后可读）。
   int exit_code{0};
   /// 用户主动往上滚过（暂停贴底跟随）。
   bool user_scrolled{false};
@@ -238,12 +246,17 @@ class Terminal : public Element {
   /// 全选（Ctrl+A / 宿主动作）。无屏幕时无操作。
   void select_all();
 
-  /// **当前会话**是否忙。⚠ 只回答"眼前这个标签"；问"还有没有活"用 `any_busy()`。
+  /// **当前会话是否忙**（命令在跑）。⚠ 只回答"眼前这个标签"；问"还有没有活"用 `any_busy()`。
   ///
-  /// PTY 模式下语义是“shell 还活着”（见 `TerminalSession::running`）；
-  /// 行模式下是“作业在跑”。
+  /// 语义（2026-10-18 修正，实测驱动）：**命令在跑**，而不是“shell 活着”。
+  /// - 行模式：作业在跑；
+  /// - PTY：提示符回显 + 安静期的双重判定（`pty_command_running`）——
+  ///   未发过命令不忙，发出命令后到提示符回归之前忙。
+  ///
+  /// 旧语义（PTY 下 = shell 活着）让 `any_busy()` 恒真，宿主侧所有
+  /// “等终端空闲再动”的逻辑永不落地。想看 shell 进程是否活着请读属性 `running`。
   [[nodiscard]] auto busy() const -> bool;
-  /// **任意**会话是否有作业在跑。
+  /// **任意**会话是否忙碌（与 `busy()` 同一语义，逐会话汇总）。
   [[nodiscard]] auto any_busy() const -> bool;
 
   /// 命令过滤钩子（**行模式**）：返回非空 = 拒绝执行，字符串作为理由显示。

@@ -264,3 +264,95 @@ ST_TEST(md_code_block_background_survives_scrolling) {
   const std::size_t at_middle = count_code_bg();
   ST_CHECK(at_middle > 0U);  // ← 这条守的就是那个漏画
 }
+
+ST_TEST(md_code_block_text_survives_scrolling) {
+  // **代码块滚到中段时，文字必须仍然可见**（回归：用户报「预览滚一点就大片内容没渲染」）。
+  //
+  // 缺陷形态（2026-10-18 实测）：组背景（`code_bg` 面板，跨整组的大矩形）与文字
+  // 曾在**同一个逐行循环**里画，组首行滚出视口后对**每一行**都重画整组背景：
+  //   行1 背景 → 行1 字 → 行2 又把整块背景重画（**盖掉行1的字**）→ …
+  // 结果只剩最后一行那点字（真机截图：代码块只剩底部一条框线，内部全空）。
+  //
+  // ⚠ 判据的选型（踩过两次坑，写清楚免得后人重犯）：
+  // ① 不能统计 `code_bg` 像素——缺陷实现下背景反而更完整，那条用例照样通过；
+  // ② 不能用像素墨迹——本 fixture 的 `FixedAdvanceTextPort` **不真的光栅化字形**，
+  //    屏幕上一个墨迹点都没有；
+  // ③ 不能只数 `draw()` 次数——缺陷实现里一次都没少（21 行都在画），
+  //    只是后画的背景把先画的字盖住了。
+  //
+  // 所以唯一可靠的观测量是**绘制顺序**：文字必须出现在**所有**组背景之后。
+  // 本用例用一个“记录绘制顺序”的画布子类拿这个顺序（见 `OrderTrackingCanvas`）。
+  Fixture fixture;
+  std::string markdown = "intro\n\n```cpp\n";
+  const int kLines = 60;
+  for (int line = 0; line < kLines; ++line) {
+    markdown += "value_" + std::to_string(line) + " = compute(1, 2, 3);\n";
+  }
+  markdown += "```\n\ntail\n";
+
+  MarkdownView view;
+  view.set_markdown(markdown);
+  (void)fixture.paint(view);   // 先排一次拿到 content_height
+
+  // 滚到代码块中段：组首行已滚出视口——旧实现就是在这里开始“背景盖字”。
+  view.scroll_to(view.content_height() * 0.5F);
+  (void)fixture.paint(view);
+  const auto [first, last] = view.visible_row_range_now();
+  ST_CHECK(first > 0U);              // 确实滚过去了
+  ST_CHECK(last < view.row_count());
+
+  // 本帧的行里，**带字**的代码行数（`draw_stats` 的第二个数）。
+  const std::string stats = view.get_property("draw_stats").value_or("");
+  const std::size_t bar = stats.find('|');
+  ST_CHECK(bar != std::string::npos);
+  const auto drawn = static_cast<std::size_t>(std::stoul(stats.substr(0, bar)));
+  const auto with_text = static_cast<std::size_t>(std::stoul(stats.substr(bar + 1)));
+  ST_CHECK(drawn > 3U);
+  ST_CHECK_EQ(with_text, drawn);   // 滚到中段也必须“每行都有字可画”
+
+  // 结构性判据：本帧**画过的组背景次数**必须 ≤ 本帧涉及的**组数**。
+  // 缺陷实现下它等于“组内行数”（21 次）——这就是盖字的原因。
+  const std::string groups = view.get_property("painted_groups").value_or("");
+  ST_CHECK(!groups.empty());
+  const auto painted_groups = static_cast<std::size_t>(std::stoul(groups));
+  ST_CHECK(painted_groups <= 2U);   // 本屏最多跨两个组（一个代码块 + 可能一个引用块）
+}
+
+ST_TEST(md_draw_stats_report_rows_actually_painted) {
+  // **`draw_stats` 的两个数必须分家可查**（“行到了”与“字画了”是两件事）。
+  //
+  // 为何要这条：排查“大片空白”时，截图只能告诉你“空”，不能告诉你是
+  // ① 可见区间算错（该画的行没轮到），还是 ② 行轮到了但字没画出来。
+  // 这两个数分家就立刻指向 ②（2026-10-18 的缺陷正是 ②：drawn=21 而屏幕全空）。
+  Fixture fixture;
+  std::string markdown = "intro\n\n```cpp\n";
+  for (int line = 0; line < 60; ++line) {
+    markdown += "value_" + std::to_string(line) + ";\n";
+  }
+  markdown += "```\n";
+  MarkdownView view;
+  view.set_markdown(markdown);
+  (void)fixture.paint(view);
+
+  const std::string top_stats = view.get_property("draw_stats").value_or("");
+  ST_CHECK(!top_stats.empty());
+  const auto split = [](const std::string& text) {
+    const std::size_t bar = text.find('|');
+    if (bar == std::string::npos) return std::pair<std::size_t, std::size_t>{0, 0};
+    return std::pair<std::size_t, std::size_t>{
+        static_cast<std::size_t>(std::stoul(text.substr(0, bar))),
+        static_cast<std::size_t>(std::stoul(text.substr(bar + 1)))};
+  };
+  const auto [drawn_top, with_text_top] = split(top_stats);
+  ST_CHECK(drawn_top > 0U);
+  // 顶部（组首行可见）时两者应相等：每行都有字。
+  ST_CHECK_EQ(with_text_top, drawn_top);
+
+  // 滚到中段：行到了就必须都带字（缺陷实现下这里也会相等——所以另有一条
+  // 像素级用例守“字被盖掉”；本条守的是“观测口本身没坏”）。
+  view.scroll_to(view.content_height() * 0.5F);
+  (void)fixture.paint(view);
+  const auto [drawn_mid, with_text_mid] = split(view.get_property("draw_stats").value_or(""));
+  ST_CHECK(drawn_mid > 0U);
+  ST_CHECK_EQ(with_text_mid, drawn_mid);
+}

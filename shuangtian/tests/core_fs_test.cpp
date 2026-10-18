@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <string>
 
 #include "st/core/fs.hpp"
@@ -210,4 +212,38 @@ ST_TEST(fs_read_span_reads_exactly_the_requested_window) {
 
   // 不存在的文件 → 错误（与上面的“越界”是两件事：一个能读、一个读不到）
   ST_CHECK(!st::fs::read_span("no/such/file/font.ttf", 0, 16).has_value());
+}
+
+ST_TEST(fs_read_text_strips_utf8_bom) {
+  // **UTF-8 BOM 不属于文本内容**（2026-10-18 实测驱动）。
+  //
+  // 背景：Windows 上很多工具（记事本/旧版 VS）保存的文件带 `EF BB BF`。编辑器若把它
+  // 当正文，首行就多一个不可见的 U+FEFF：光标在行首按“向右”要按两次、首字符怎么都
+  // 删不掉，把文件存回去还可能变成双 BOM。
+  //
+  // 修在 `read_text`（文本读取的公共入口）：所有调用方（编辑器/配置/样例）口径一致。
+  const std::string path = "st_bom_probe.txt";
+  const std::string body = "hello\n世界\n";
+  {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    ST_REQUIRE(out.good());
+    out.write("\xEF\xBB\xBF", 3);
+    out.write(body.data(), static_cast<std::streamsize>(body.size()));
+  }
+  const auto text = st::fs::read_text(path);
+  ST_CHECK(text.has_value());
+  if (text) {
+    ST_CHECK_EQ(*text, body);                       // BOM 被剥掉，正文逐字节一致
+    ST_CHECK(text->find("\xEF\xBB\xBF") == std::string::npos);   // 字节级无残留
+  }
+  // 无 BOM 的文件不受影响（不能“误删”正文首字节）。
+  {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(body.data(), static_cast<std::streamsize>(body.size()));
+  }
+  const auto plain = st::fs::read_text(path);
+  ST_CHECK(plain.has_value());
+  if (plain) ST_CHECK_EQ(*plain, body);
+  std::error_code ignored;
+  std::filesystem::remove(path, ignored);
 }

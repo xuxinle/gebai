@@ -209,28 +209,36 @@ void Tree::measure(const RenderContext& context, const Constraints& constraints)
   const float font_size = style_.font_size;
 
   // **行宽缓存**（见头文件 `row_label_widths_` 的说明——它换来的是“大目录刷新
-  // 不再线性重排”）：只在行集或字号变化时重算，其余时候 measure 是纯内存扫描。
+  // 不再线性重排”）：只在行集或字号变化时重算。
   //
   // 无效判定与填充在同一个 `const` 方法里（缓存字段是 `mutable`，与
   // `CodeEditor` 的几何缓存同一手法）。
-  if (row_label_widths_.size() != rows_.size() || label_widths_font_size_ != font_size) {
+  //
+  // ⚠ 这里还要**把“最宽行”一起缓存**（2026-10-18，与 `CodeEditor` 同一种缺陷）：
+  // 旧实现即使缓存全命中，下面那个“求最大值”的循环仍然**每帧扫全部行**——
+  // 于是“缓存生效”只省掉了 `measure_width` 调用，总成本仍是 O(总行数)。
+  // 实测参照（`CodeEditor` 的同型缺陷）：5 千行文件单帧 paint 从 4.5ms 涨到 90ms。
+  // 行数不变的稳态（滚动/悬停/焦点变化）应该完全 O(1)。
+  if (row_label_widths_.size() != rows_.size() || label_widths_font_size_ != font_size ||
+      cached_width_metrics_ != &metrics) {
     row_label_widths_.assign(rows_.size(), 0.0F);
     for (std::size_t index = 0; index < rows_.size(); ++index) {
       row_label_widths_[index] = port.measure_width(rows_[index].data.label, font_size);
     }
     label_widths_font_size_ = font_size;
+    cached_width_metrics_ = &metrics;
+    // 顺手把“最大所需宽”算出来，下一帧就不用再扫（与上面的填充同一趟）。
+    cached_max_row_width_ = 0.0F;
+    for (std::size_t index = 0; index < rows_.size(); ++index) {
+      const TreeNode& node = rows_[index].data;
+      const float indent = static_cast<float>(node.depth) * kIndentStep;
+      const float chevron = node.is_dir ? kChevronSize + metrics.space_xs : 0.0f;
+      const float need = indent + chevron + kTextInset + row_label_widths_[index] + kTextInset;
+      cached_max_row_width_ = std::max(cached_max_row_width_, need);
+    }
   }
 
-  // measure 第一遍：算出**行内容所需宽度**的最大值（行几何量：缩进 + 箭头 + 内边距）。
-  // 两遍而不是一遍：上面的缓存填充要先把宽度量出来，这一遍只是取最大值。
-  float width = 0.0f;
-  for (std::size_t index = 0; index < rows_.size(); ++index) {
-    const TreeNode& node = rows_[index].data;
-    const float indent = static_cast<float>(node.depth) * kIndentStep;
-    const float chevron = node.is_dir ? kChevronSize + metrics.space_xs : 0.0f;
-    const float need = indent + chevron + kTextInset + row_label_widths_[index] + kTextInset;
-    width = std::max(width, need);
-  }
+  float width = cached_max_row_width_;
   width = std::max(width, 80.0f);
   width = std::clamp(width, style_.min_width, style_.max_width);
   if (constraints.max_width < kUnbounded) width = std::min(width, constraints.max_width);
@@ -424,6 +432,21 @@ auto Tree::set_property(std::string_view name, std::string_view value) -> bool {
     select_key(value, true);
     return true;
   }
+  // —— 按行号/按 key 的**动作面**（`set` 也能驱动，与 `invoke` 等价）——
+  //
+  // 为什么 `Tree` 需要这两条：行不是元素（组件自绘、无子 Element），所以
+  // `input.mouse{id:...}` 这类“按 id 点”对行无效，调用方只能
+  // “拿 bounds + 行高 + 行号自己算坐标”——而**行号会随展开/收起漂移**，
+  // 算出来的坐标随时可能落到别的行上（Agent 用坐标驱动文件树时最危险的失效）。
+  //
+  // 写侧用 `key`（业务身份）而不是行号：`activate_key` 对“点开某个文件”
+  // 是稳定入口；行号留给“第几行”这类纯几何操作（仍提供，但只作用于当前快照）。
+  if (name == "activate_key") {
+    const auto index = index_of_key(value);
+    if (!index.has_value()) return false;
+    activate_row(*index);
+    return true;
+  }
   return Element::set_property(name, value);
 }
 
@@ -442,6 +465,38 @@ auto Tree::get_property(std::string_view name) const -> std::optional<std::strin
     return std::to_string(rows_.empty() ? 0U : last_visible_first_);
   }
   if (name == "visible_rows") return std::to_string(visible_row_count());
+  // —— 行内容读面（Agent 的唯一“看得见树里有什么”的通道）——
+  //
+  // 组件自绘、行不是 Element，所以 `tree`/`find` 拿不到行文本（实测：
+  // `#workspace-tree` 的语义文本只有 `"6 行"`，Agent 无法知道树里有哪些
+  // 文件、也无法验证“展开对了没有”）。这两条把行集变成可读事实：
+  // - `labels`：全部可见行文本，`\n` 分隔（第 i 行 = 第 i 个标签）；
+  // - `keys`：  同上，但给的是行的业务 key（点行/激活行用它）。
+  // 两个数组同序，调用方按 `index_of` 就能从“我要的文件名”拿到 key。
+  if (name == "labels" || name == "keys") {
+    std::string out;
+    for (std::size_t index = 0; index < rows_.size(); ++index) {
+      if (index != 0) out.push_back('\n');
+      out += name == "labels" ? rows_[index].data.label : rows_[index].data.key;
+    }
+    return out;
+  }
+  // 行详情（`rows_detail`）= 每行一条 `label\tkey\tis_dir\tdepth\texpanded`，`\n` 分隔。
+  //
+  // 为何不叫 `row:N`：属性面是**由 `property_names()` 列举的快照**（`get` 默认只返回
+  // 那一份），名字里带参数就进不进快照了（实测：`get row:0` 永远拿不到）。
+  // 拼成整表既不破这个契约，也让“批量看结构”只花一次往返。
+  if (name == "rows_detail") {
+    std::string out;
+    for (std::size_t index = 0; index < rows_.size(); ++index) {
+      if (index != 0) out.push_back('\n');
+      const TreeNode& node = rows_[index].data;
+      out += std::format("{}\t{}\t{}\t{}\t{}", node.label, node.key,
+                         node.is_dir ? "true" : "false", node.depth,
+                         node.expanded ? "true" : "false");
+    }
+    return out;
+  }
   if (name == "scroll") {
     // 滚动像素 = 首可见行 × 行高（本组件自身无独立滚动状态，见上）。
     const double offset = rows_.empty() ? 0.0 : static_cast<double>(last_visible_first_) *
@@ -467,6 +522,12 @@ auto Tree::property_names() const -> std::vector<std::string_view> {
   names.push_back("scroll");
   names.push_back("selected_key");
   names.push_back("selected");
+  // 行内容读面（见 get_property 里的说明）：`labels` / `keys` 是整表，
+  // `row:N` 是单行；`activate_key` 是按业务 key 激活（写侧，与点行同链）。
+  names.push_back("labels");
+  names.push_back("keys");
+  names.push_back("rows_detail");
+  names.push_back("activate_key");
   return names;
 }
 

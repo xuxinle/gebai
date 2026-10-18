@@ -182,6 +182,20 @@ auto read_text(std::string_view path) -> Result<std::string> {
     const std::streamsize taken = stream.gcount();
     if (taken > 0) content.append(buffer.data(), static_cast<std::size_t>(taken));
   }
+  // **剥 UTF-8 BOM**（EF BB BF）：编辑器不该把不可见的 U+FEFF 当一个字符。
+  //
+  // 实测（gbcode 打开 Windows 上保存过的文件）：正文首字符是 U+FEFF，光标在
+  // 行首按 “向右” 要按两次，而首行看起来“多一个空格”；更阴的是把这样的文本
+  // 原样写回去会让 BOM 变成双份。本函数是文本读取的公共入口（编辑器/配置/样例
+  // 全走它），在这里剥离则所有调用方口径一致。
+  //
+  // 为何不在 `write_text` 一侧剥：写侧的字节可能是用户有意为之（二进制粘贴），
+  // 而“读到的文本里不应包含编码前缀”是文本语义的常态。
+  if (content.size() >= 3 && static_cast<unsigned char>(content[0]) == 0xEFU &&
+      static_cast<unsigned char>(content[1]) == 0xBBU &&
+      static_cast<unsigned char>(content[2]) == 0xBFU) {
+    content.erase(0, 3);
+  }
   return content;
 }
 

@@ -69,6 +69,45 @@ namespace {
   return tail.empty() ? path : tail;
 }
 
+/// 标签标题用的 shell 短名：去掉目录与 `.exe`。
+///
+/// 为何不只用 `tail_name`（实测踩到）：Windows 上 `which("pwsh")` 返回的是**完整
+/// 路径**（`C:\Program Files\WindowsApps\…\pwsh.exe`），而旧实现把它直接当标签标题
+/// ——标签栏于是撞成 `C:\Program Files\WindowsApps\Microsoft.PowerShell_7.6.7.0_…`，
+/// 用户看不到那个标签到底叫什么（截图实测）。标签只需要“哪种 shell”。
+[[nodiscard]] auto shell_label(const std::string& path) -> std::string {
+  std::string name = tail_name(path);
+  constexpr std::string_view kExe = ".exe";
+  if (name.size() > kExe.size() &&
+      st::ascii_lower(std::string_view(name).substr(name.size() - kExe.size())) == kExe) {
+    name.resize(name.size() - kExe.size());
+  }
+  return name.empty() ? std::string("shell") : name;
+}
+
+/// OSC 标题 → 标签文字：路径形态的标题取尾名（去目录、去 `.exe`），其余原样（限长）。
+///
+/// 为何两者要分开：`shell_label` 处理的是「我们自己的 shell 路径」，而 OSC 标题是
+/// **shell 自己定的**（PowerShell 默认就发完整 exe 路径；bash 发目录或 `用户@主机: 目录`）。
+/// 对前者用文件名、对后者保留原意（它可能包含有用的命令名/目录名）——但**路径形态**
+/// 一律取尾名，否则标签栏会被一整条路径撞碎（截图实测）。限长 48 字符，超出用 `…`。
+[[nodiscard]] auto tab_label(const std::string& title) -> std::string {
+  std::string value = title;
+  // 路径形态：带目录分隔符且没有空格以外的 shell 提示符特征 → 取尾名。
+  const bool looks_like_path =
+      value.find('/') != std::string::npos || value.find('\\') != std::string::npos;
+  if (looks_like_path) value = shell_label(value);
+  constexpr std::size_t kMaxLabel = 48;
+  if (value.size() > kMaxLabel) {
+    // 按码点边界截（不能把 UTF-8 字符切成半个）。
+    std::size_t cut = kMaxLabel;
+    while (cut > 0 && (static_cast<unsigned char>(value[cut]) & 0xC0U) == 0x80U) --cut;
+    value.resize(cut);
+    value.append("…");
+  }
+  return value;
+}
+
 /// 终端索引色 → RGB（xterm 的 256 色表）。
 ///
 /// 前 16 色**来自主题**（`TerminalPalette::ansi`）——它们是协议固定语义
@@ -140,7 +179,7 @@ Terminal::Terminal() {
   // 不变式：**永远至少一个会话**。默认标题用 shell 短名（`bash`/`pwsh`）——
   // 真实身份比序号有用；shell 的 OSC 标题到达后覆盖它。
   sessions_.push_back(std::make_unique<TerminalSession>(
-      TerminalSession{.title = tail_name(shell_)}));
+      TerminalSession{.title = shell_label(shell_)}));
   // 面板头动作钮（标签栏尾部）在 `ensure_children` 里装：清屏常驻，
   // "中止"与"收起"按忙闲/回调有无动态出现（见那儿的说明）。
 }
@@ -177,7 +216,7 @@ auto Terminal::default_factory() const -> const st::exec::ChannelFactory& {
 auto Terminal::current() -> TerminalSession& {
   if (sessions_.empty()) {
     sessions_.push_back(std::make_unique<TerminalSession>(
-        TerminalSession{.title = tail_name(shell_)}));
+        TerminalSession{.title = shell_label(shell_)}));
   }
   if (active_ >= sessions_.size()) active_ = sessions_.size() - 1;
   return *sessions_[active_];
@@ -215,7 +254,7 @@ auto Terminal::add_session(std::string title) -> std::size_t {
   // 期待是在同一个地方接着干）。
   auto fresh = std::make_unique<TerminalSession>();
   // 默认标题 = shell 短名（与首个会话同口径；多会话下由 OSC 标题自然区分）。
-  fresh->title = title.empty() ? tail_name(shell_) : std::move(title);
+  fresh->title = title.empty() ? shell_label(shell_) : std::move(title);
   fresh->cwd = sessions_.empty() ? std::string{} : current().cwd;
   sessions_.push_back(std::move(fresh));
   const std::size_t index = sessions_.size() - 1;
@@ -276,7 +315,7 @@ void Terminal::apply_pending_close() {
     //（它拿 `last` 参数判断）。**补的这个不自动起 shell**——面板马上要收起，
     // 白起一个进程；用户再打开时 `open_shell` 会补上。
     sessions_.push_back(std::make_unique<TerminalSession>(
-        TerminalSession{.title = tail_name(shell_)}));
+        TerminalSession{.title = shell_label(shell_)}));
     active_ = 0;
   } else if (active_ >= sessions_.size()) {
     active_ = sessions_.size() - 1;
@@ -405,7 +444,7 @@ void Terminal::open_shell(st::process::PtySize size) {
   // 屏幕模型与 PTY 同尺寸（TUI 程序的排版按这个来）。
   auto screen = std::make_shared<st::text::AnsiScreen>(size.cols, size.rows);
   screen->set_cursor_shape(cursor_shape_);   // 宿主默认形状（程序可用 DECSCUSR 覆盖）
-  start_pty(pty, screen, tail_name(shell_));
+  start_pty(pty, screen, shell_label(shell_));
   if (on_busy_change) on_busy_change(true);
   mark_dirty();
   mark_layout_dirty();
@@ -415,7 +454,7 @@ void Terminal::attach_pty(std::shared_ptr<st::process::PtySession> pty) {
   if (pty == nullptr || !pty->valid()) return;
   auto screen = std::make_shared<st::text::AnsiScreen>(pty_size_.cols, pty_size_.rows);
   screen->set_cursor_shape(cursor_shape_);
-  start_pty(pty, screen, tail_name(shell_));
+  start_pty(pty, screen, shell_label(shell_));
   mark_dirty();
 }
 
@@ -427,6 +466,12 @@ auto Terminal::pty_active() const -> bool {
 void Terminal::send_bytes(std::string_view bytes) {
   TerminalSession& target = current();
   if (target.pty == nullptr || !target.pty->valid() || bytes.empty()) return;
+  // **发出字节 = 开始干活**（`busy()` 的前提）：真键盘敲的字节也算。
+  //
+  // 为何不只在 `send_line` 里置位：用户是真键盘一下下敲的（`input.key` 送单个
+  // 字符），“是否发过命令”得从第一个字节就开始跟踪——否则一条敲回车发出去的
+  // `sleep 30` 永远不会被看成忙（中止按钮不出现、运行面板不转）。
+  target.command_issued = true;
   // PTY 写入可能部分成功；补齐剩余部分（否则长粘贴会丢尾巴）。
   std::size_t offset = 0;
   while (offset < bytes.size()) {
@@ -527,7 +572,47 @@ void Terminal::clear() {
   mark_dirty();
 }
 
-auto Terminal::busy() const -> bool { return current().running; }
+/// PTY 会话“命令是否在跑”的判定（**框架唯一一处**，`busy()` 与 `running_name` 共用）。
+///
+/// 为什么要启发式：真终端里“命令跑完了没有”只有 shell 自己知道（它没义务告诉外界），
+/// 组件能看到的只有屏幕。两条信号组合后足够稳：
+/// - **提示符回显**：无论 bash 的 `$ ` / PowerShell 的 `PS C:\…> ` / zsh 的 `❯ `，
+///   提示符都出现在一行**末尾**。发出命令后“末尾行以提示符结尾”≈ 命令已跑完。
+///   交互式程序（top/vim）占屏时末行不是提示符，于是仍判忙——正是想要的。
+/// - **安静期**：命令刚发出、回显还没到时屏幕上仍是上一条提示符，单看提示符会立即
+///   判“已结束”；所以要求“最近一次输出距今 ≥ `kQuietMs`”才行。
+///
+/// 与旧的 `running` 的区别（实测）：后者在 PTY 下只在**进程退出**时才清，shell
+/// 活着期间恒真——宿主侧 `!any_busy()` 的延迟动作永不落地，侧栏「运行」面板永远
+/// 转圈显示「终端忙」。
+[[nodiscard]] static auto pty_command_running(const TerminalSession& session, std::int64_t now_ms)
+    -> bool {
+  constexpr std::int64_t kQuietMs = 180;
+  if (!session.command_issued) return false;
+  if (session.screen == nullptr) return false;
+  if (session.last_output_ms <= 0) return true;   // 发过命令却从未有输出：还在跑
+  if (now_ms - session.last_output_ms < kQuietMs) return true;   // 还在刷 → 忙
+  // 安静了：看最后一条**非空**行是不是提示符。
+  for (int row = session.screen->rows() - 1; row >= 0; --row) {
+    std::string line = session.screen->row_text(row);
+    while (!line.empty() && (line.back() == ' ' || line.back() == '\t')) line.pop_back();
+    if (line.empty()) continue;
+    const char tail = line.back();
+    const bool prompt = tail == '>' || tail == '$' || tail == '#' || tail == '%' ||
+                        line.ends_with("❯") || line.ends_with("→");
+    return !prompt;
+  }
+  return true;   // 屏幕全空（清屏后）：保守判忙
+}
+
+auto Terminal::busy() const -> bool {
+  // **语义：“命令在跑”，不是“shell 活着”**（见 `pty_command_running`）。
+  //
+  // 行模式下 `running` 就是作业在跑，直接用；PTY 下用屏幕/安静期启发式。
+  const TerminalSession& target = current();
+  if (target.pty == nullptr) return target.running;
+  return pty_command_running(target, st::time::now_ms());
+}
 
 auto Terminal::idle_ms(std::int64_t now_ms) const -> std::int64_t {
   // 取所有会话里**最新**的一次输出：只要还有一条在刷，就不算安静。
@@ -542,9 +627,16 @@ auto Terminal::idle_ms(std::int64_t now_ms) const -> std::int64_t {
 }
 
 auto Terminal::any_busy() const -> bool {
+  // 与 `busy()` 同语义（“命令在跑”），逐会话汇总。
+  //
+  // 为何不能继续用 `session->running`：PTY 下那是“shell 活着”（恒真），
+  // 使宿主所有 `!any_busy()` 的延迟动作永不生效（实测）。
+  const std::int64_t now_ms = st::time::now_ms();
   return std::any_of(sessions_.begin(), sessions_.end(),
-                     [](const std::unique_ptr<TerminalSession>& session) {
-                       return session != nullptr && session->running;
+                     [now_ms](const std::unique_ptr<TerminalSession>& session) {
+                       if (session == nullptr) return false;
+                       if (session->pty == nullptr) return session->running;   // 行模式作业
+                       return pty_command_running(*session, now_ms);
                      });
 }
 
@@ -908,7 +1000,13 @@ void Terminal::pump() {
       // 标题变化（`OSC 0/2`）：shell 会设成"当前命令/目录"，标签跟着变更好用。
       // ⚠ 归属修正：标题属于**这个会话**，用它在容器里的真实序号——
       // 旧实现硬发 `active_`，后台会话改标题会把前台标签改掉（串台另一型）。
-      const std::string title = target->screen->title();
+      //
+      // ⚠ **不能直接把 OSC 标题当标签**（实测）：Windows PowerShell 7 一启动就发
+      // `OSC 0;C:\Program Files\WindowsApps\Microsoft.PowerShell_7.6.7.0_x64__…\pwsh.exe`
+      // ——整整一条路径把标签栏撑满，用户看不到这个标签叫什么。所以经 `tab_label`
+      // 归一（去目录、去 `.exe`），与默认标题 `shell_label` 同一口径。
+      const std::string raw_title = target->screen->title();
+      const std::string title = raw_title.empty() ? raw_title : tab_label(raw_title);
       if (!title.empty() && title != target->title && on_title_change) {
         std::size_t index = sessions_.size();
         for (std::size_t at = 0; at < sessions_.size(); ++at) {
@@ -1896,11 +1994,16 @@ auto Terminal::on_event(const RenderContext& context, Event& event) -> bool {
 
 auto Terminal::property_names() const -> std::vector<std::string_view> {
   auto names = Element::property_names();
-  names.insert(names.end(),
-               {"sessions", "active_session", "session_title", "working_directory", "busy",
-                "output", "screen", "cursor", "cursor_rect", "pty", "alt_screen", "scroll",
-                "user_scrolled", "cursor_shape", "screen_cursor_shape", "monospace",
-                "tabs_visible", "add_button", "font_scale", "scrollbar"});
+    names.insert(names.end(),
+              {"sessions", "active_session", "session_title", "working_directory", "busy",
+               "output", "screen", "cursor", "cursor_rect", "pty", "alt_screen", "scroll",
+               "user_scrolled", "cursor_shape", "screen_cursor_shape", "monospace",
+               "tabs_visible", "add_button", "font_scale", "scrollbar",
+               // 命令忙闲面（供侧栏「运行」面板/自动化断言）：
+               // `running` = shell 进程是否活着（旧 busy 语义，仍可读）；
+               // `running_name` = 正在跑的命令名（忙时非空）；
+               // `idle_ms` = 距最近一次输出的毫秒。
+               "running", "running_name", "idle_ms", "command_issued"});
   return names;
 }
 
@@ -1917,7 +2020,17 @@ auto Terminal::get_property(std::string_view name) const -> std::optional<std::s
     return target != nullptr ? target->title : std::string{};
   }
   if (name == "working_directory") return effective_cwd(active_);
-  if (name == "busy") return current().running ? "true" : "false";
+  if (name == "busy") return busy() ? "true" : "false";
+  // —— 命令忙闲面（与 `busy()` 同一套判定，单一真值源）——
+  //
+  // 为何要三个新属性：旧的 `busy` 在 PTY 下曾是“shell 活着”（恒真），宿主
+  // 想把“还有活干”与“会话可用”分开就无从下手（侧栏「运行」面板实测恒转圈）。
+  // 现在 `busy` 是真语义，另补：`running`（shell 进程活着）、
+  // `running_name`（在跑的命令名；空 = 空闲）、`idle_ms`（距最近输出多久）。
+  if (name == "running") return current().running ? "true" : "false";
+  if (name == "command_issued") return current().command_issued ? "true" : "false";
+  if (name == "running_name") return busy() ? current().running_name : std::string{};
+  if (name == "idle_ms") return std::to_string(idle_ms(st::time::now_ms()));
   if (name == "output") return session_text(active_);
   if (name == "cursor") {
     if (target == nullptr || target->screen == nullptr) return std::string("0,0");

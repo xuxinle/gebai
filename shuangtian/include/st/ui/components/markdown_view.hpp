@@ -278,9 +278,17 @@ class MarkdownView : public Element {
   float content_height_{0.0f};
   /// 上一帧绘制的可见行区间（半开；`paint_content` 写，见 `visible_row_range_now()`）。
   /// `mutable`：`paint_content` 是 const（「绘制不改元素状态」是框架硬约束）。
-  mutable std::size_t last_visible_first_{0};
-  mutable std::size_t last_visible_last_{0};
-  float view_height_{0.0f};
+   mutable std::size_t last_visible_first_{0};
+ mutable std::size_t last_visible_last_{0};
+ /// 诊断计数（`paint_content` 写，属性面 `draw_stats` 读）：本帧“遍历到的行数”
+ /// 与“其中真的带了字的行数”。两者分家 = “行到了但字没画”；
+ /// 是 2026-10-18 排查“滚动后大片空白”时加的唯一能区分两种成因的观测点。
+ mutable std::size_t debug_rows_drawn_{0};
+ mutable std::size_t debug_rows_with_text_{0};
+ /// 本帧画了几次组背景（`paint_content` 写，属性面 `painted_groups` 读）。
+ /// 必须 ≤ 本帧涉及的组数；缺陷实现下等于“组内行数”（每行重画整块背景）。
+ mutable std::size_t debug_painted_groups_{0};
+ float view_height_{0.0f};
   float scroll_offset_{0.0f};
   float max_width_{0.0f};
   float base_font_size_{0.0f};

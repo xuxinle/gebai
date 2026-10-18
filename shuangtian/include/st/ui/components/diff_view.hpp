@@ -185,13 +185,21 @@ class DiffView : public Element {
   struct Side {
     std::string text{};
     std::size_t lines{0};
-    /// 是否画勾选列（逐行暂存模式；只有左栏会开，见 `begin_row`）。
+    /// 是否画勾选列（逐行暂存模式）。
+    ///
+    /// 两侧都会开（2026-10-18 改）：只开左栏时，“新增一行”在右侧根本没有勾选框
+    ///（实测：只有删除行能勾，新增类型改动无法逐行暂存）。
     bool staging{false};
     /// 本侧第 `row`（0 起显示行）对应的勾选态。
     ///
     /// 为何按**显示行**而不按 `(hunk, line)`：`begin_row` 只知道显示行——
-    /// 它是“往一侧追加一行”的唯一入口。身份映射另建 `checkbox_targets_`（同批追加）。
+    /// 它是“往一侧追加一行”的唯一入口。身份映射另建 `checkbox_targets`（同批追加）。
     std::vector<CodeEditor::LineDecoration::Check> checks{};
+    /// 本侧第 `row` 个显示行属于哪个 `(hunk, line)`（`kNoHunk` = 不可选）。
+    ///
+    /// 与 `checks` **同批追加**（见 `rebuild_side_by_side`）——两者一旦分家，
+    /// 勾选框就会与它作用的行错位（而画面上完全看不出）。
+    std::vector<std::pair<std::size_t, std::size_t>> checkbox_targets{};
     // 故意**不提供** `check_for(row)` 这类按显示行下标的访问器：
     // 它的下标空间与"已 push 的项数"差一位（`begin_row` 内部才自增 `lines`），
     // 提供它就等于给后人留一个必然越界的口子（第一版正是这样丢掉了整个勾选列）。
@@ -241,11 +249,8 @@ class DiffView : public Element {
 
   /// 逐行暂存模式开关（见 `set_staging_mode` 的说明）。
   bool staging_mode_{false};
-  /// 「第 i 个显示行属于 (hunk, line)」（`kNoHunk` = 该行不可选）。
-  ///
-  /// 与 `Side::checks` 在同一次遍历里同步建立（见 `rebuild`），所以下标空间一致——
-  /// 这两张表一旦分家，勾选框就会与它作用的行错位（而画面上完全看不出）。
-  std::vector<std::pair<std::size_t, std::size_t>> checkbox_targets_{};
+  // 身份映射表已下沉到 `Side::checkbox_targets`（2026-10-18）：两栏各有自己的表，
+  // 因为它们各自的显示行空间不同（右栏有为对齐而补的填充行）。
   /// 已选中的 `(hunk, line)` 对，**保持插入顺序**（补丁里的行序靠它稳定）。
   ///
   /// 为何用有序 vector 而不是 `set`：`build_partial_patch` 按给定顺序拼补丁，

@@ -7,7 +7,7 @@
 清单与 tools/ 下实际文件的差异由对账自检暴露（见 main 尾部）。
 
 用法：
-  py -3 tools/examples_e2e_all.py                 # 默认：17 个断言型脚本
+  py -3 tools/examples_e2e_all.py                 # 默认：18 个断言型脚本
   py -3 tools/examples_e2e_all.py --with-bench    # 追加 bench 对照（无断言）
   py -3 tools/examples_e2e_all.py --with-debug    # 追加 gallery_declarative（需 debug 档）
   py -3 tools/examples_e2e_all.py --timeout 900   # 单脚本超时秒数（默认 900，超时计失败）
@@ -52,6 +52,10 @@ SEQUENCE = [
     "gbcode_sidebar_keepalive_e2e.py",
     "gbcode_terminal_keepalive_e2e.py",
     "gbcode_terminal_scroll_e2e.py",
+    # 真实使用者路径（真磁盘工作区 + 真 git 仓 + 真 shell）：功能面全绿时
+    # 用户仍会翻车的那些点——BOM/CRLF 保真、Shift+Tab、终端忙闲语义、
+    # 菜单/树行的零坐标驱动（2026-10-18 实测所得）。
+    "gbcode_usability_e2e.py",
     "louyue_e2e.py",
     "caiyun_e2e.py",
     "xmlapp_e2e.py",

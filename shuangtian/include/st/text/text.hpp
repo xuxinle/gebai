@@ -13,6 +13,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "st/core/error.hpp"
@@ -165,6 +166,16 @@ class TextRenderer {
                              FontRole role = FontRole::Proportional) const -> math::Size;
   [[nodiscard]] auto measure_width(std::string_view utf8, float size,
                                    FontRole role = FontRole::Proportional) const -> float;
+  /// 宽度缓存的**命中/未命统计**（自构造起到现在）。
+  ///
+  /// 为何要暴露它（可观测性）：缓存策略是否正确**只能用命中率证**——
+  /// 计时在共享/负载波动的机器上噪声极大（同一个实现可能时快时慢），写成回归断言
+  /// 会时红时绿。而“命中率跌到 0”是缓存被全清的确定性指纹：实测踩到的缺陷正是
+  /// `if (size > N) clear();` 让超过 N 行的文档变成“每次重算 → 全清 → 下次全部重算”，
+  /// 当时**无法用一个稳定断言把它钉住**（试过耗时比，不可靠）。
+  ///
+  /// 返回 `(hits, misses)`。
+  [[nodiscard]] auto width_cache_stats() const -> std::pair<std::size_t, std::size_t>;
   [[nodiscard]] auto line_height(float size) const -> float;
   /// 基线相对行顶的偏移（逻辑单位）。
   [[nodiscard]] auto ascent(float size) const -> float;

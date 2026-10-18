@@ -10,6 +10,7 @@
 #include "st/ui/components/code_editor.hpp"
 #include "st/ui/theme.hpp"
 
+#include <chrono>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -351,6 +352,32 @@ ST_TEST(code_editor_tab_inserts_spaces_or_indents_selection) {
   fx.editor.set_selection(0, 3);
   fx.press("Tab");
   ST_CHECK_EQ(fx.editor.text(), std::string("  a\n  b"));
+}
+
+ST_TEST(code_editor_shift_tab_outdents_even_without_selection) {
+  // **Shift+Tab = 反缩进**（编辑器通行手感）。
+  //
+  // 回归（2026-10-18 实测）：旧实现只判 `has_selection()`，于是**没有选区时**
+  // Shift+Tab 落到 `insert_text(indent_unit())`——按 Shift+Tab 反而**增加**缩进。
+  // 这是“键坏了”级别的手感缺陷（用户会反复按、以为程序卡了）。
+  Fixture fx;
+  fx.editor.set_tab_width(4);
+
+  // ① 无选区：反缩进当前行（不是继续缩进）。
+  fx.editor.set_text("    indented = 1\nsecond");
+  fx.editor.set_selection(6, 6);
+  fx.press("Tab", false, true);
+  ST_CHECK_EQ(fx.editor.text(), std::string("indented = 1\nsecond"));
+
+  // ② 已无缩进时按 Shift+Tab：内容不变（不能凭空加空格）。
+  fx.press("Tab", false, true);
+  ST_CHECK_EQ(fx.editor.text(), std::string("indented = 1\nsecond"));
+
+  // ③ 有选区：多行一起反缩进。
+  fx.editor.set_text("    a\n    b");
+  fx.editor.set_selection(0, 11);
+  fx.press("Tab", false, true);
+  ST_CHECK_EQ(fx.editor.text(), std::string("a\nb"));
 }
 
 // ————————————————————————————————————————————————————————————————————————————
@@ -937,6 +964,19 @@ ST_TEST(code_editor_auto_pairs_can_be_disabled) {
   ST_CHECK(fx.editor.auto_pairs());
 }
 
+ST_TEST(code_editor_auto_pairs_at_crlf_line_end) {
+  // **CRLF 行尾也必须配对**（2026-10-18 实测驱动）。
+  //
+  // Windows 上绝大多数文件是 CRLF：一行真正的结尾下一个字符是 `\r` 而不是 `\n`。
+  // 旧实现的行尾集合只有 `\n`，于是“在 CRLF 文件的行尾敲 `(` 不配对”，
+  // 而同一段文字改成 LF 就正常——这类“只在另一种行尾下才坏”的缺陷最难察觉。
+  Fixture fx;
+  fx.editor.set_text("x = 1\r\nnext");
+  fx.editor.set_cursor_index(5);   // 行尾（`\r` 之前）
+  fx.type_text("(");
+  ST_CHECK_EQ(fx.editor.text(), std::string("x = 1()\r\nnext"));
+}
+
 ST_TEST(code_editor_smart_home_toggles_between_indent_and_column_zero) {
   // 两段式 Home：第一次落在行首非空列，第二次落到列 0。
   Fixture fx;
@@ -1312,3 +1352,101 @@ ST_TEST(code_editor_ctrl_click_without_callback_falls_back_to_plain_click) {
   (void)fx.editor.on_event(fx.context, event);
   ST_CHECK_EQ(fx.editor.cursor_index(), target);
 }
+
+// ————————————————————————————————————————————————————————————————————————————
+// 大文档的性能不变式（2026-10-18 实测驱动）
+// ————————————————————————————————————————————————————————————————————————————
+
+ST_TEST(code_editor_edit_frame_cost_does_not_scale_with_line_count) {
+  // **编辑一帧的成本不得随文档行数增长**（回归：5465 行文档打一个字 90ms）。
+  //
+  // 缺陷形态（实测）：`TextRenderer` 的**宽度缓存**在条目数超 4096 时做
+  // `clear()` 全清，而同一次绘制里还要逐行量宽度（`max_line_width` 那时是
+  // 在几何重建里全量做的）。超过 4096 行的文档于是每秒都在
+  // 「插入一条 → 全清 → 下次全部重新整形」的抖动区，单帧 paint 从 4.5ms
+  // 涨到 90ms，用户感知是“整页变卡、打字有延迟”。
+  //
+  // 本用例不测绝对毫秒（机器差异太大），而测**两个规模的成本比**：
+  // 小文档（200 行）与大文档（6000 行）各改一个字、各画一帧，
+  // 两者耗时应处于同一量级（给 4× 的宽容度——大文档仍应有少量额外工作，
+  // 比如行索引与缓存预热，但绝不该是 7×~20×）。
+  Fixture fx;
+  if (!fx.has_font()) return;   // 无字体环境跳过（量文本成本没意义）
+
+  const int width = static_cast<int>(fx.editor.bounds().right());
+  const int height = static_cast<int>(fx.editor.bounds().bottom());
+  const auto frame_cost_ms = [&](std::size_t lines) {
+    std::string text;
+    text.reserve(lines * 80);
+    for (std::size_t index = 0; index < lines; ++index) {
+      // 每行内容唯一：让宽度缓存键各不相同（同内容会被缓存合并，掩盖抖动）。
+      text += "line " + std::to_string(index) + " content for cache key uniqueness\n";
+    }
+    fx.editor.set_text(text);
+    st::raster::Canvas canvas(width, height);
+    // 先画两帧预热（首帧含字形栅格化，不代表稳态）。
+    for (int warm = 0; warm < 2; ++warm) {
+      canvas.clear(fx.theme.colors().surface);
+      fx.editor.paint_content(fx.context, canvas);
+    }
+    // 改一个字（触发文本变更 → 几何重建 → 全量重绘）再量一帧。
+    fx.editor.set_cursor_index(0);
+    fx.editor.insert_text("x");
+    canvas.clear(fx.theme.colors().surface);
+    const auto started = std::chrono::steady_clock::now();
+    fx.editor.paint_content(fx.context, canvas);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    return static_cast<double>(
+               std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()) /
+           1000.0;
+  };
+
+  const double small = frame_cost_ms(200);
+  const double large = frame_cost_ms(6000);
+  // 断言：大文档不超过小文档的 4 倍。修复前实测比 ≈ 7×~8×
+  //（546 行 11.3ms vs 5465 行 89.8ms），修复后 ≈ 1×。
+  ST_CHECK(large <= small * 4.0 + 2.0);   // +2ms 容忍测量噪声（小文档可能极快）
+}
+
+ST_TEST(code_editor_max_line_width_is_lazy_and_cached) {
+  // `max_line_width` 只为横向滚动服务，**不该在每次编辑时全量量行**。
+  //
+  // 行为契约（回归上面那个缺陷的另一半）：
+  //  ① 不查它时，编辑一帧不受文档行数影响（由上一条用例守住）；
+  //  ② 文本没再变时重复查询**不再全量扫描**（拿缓存）——用耗时比作证。
+  //
+  // 从属性面看：`scroll_width` 就是“内容宽度”（含 gutter 与内边距），
+  // 它背后调 `content_width` → `max_line_width`。
+  Fixture fx;
+  if (!fx.has_font()) return;
+
+  std::string text;
+  for (int index = 0; index < 3000; ++index) {
+    text += "row " + std::to_string(index) + "\n";
+  }
+  // 中间夹一条明显更宽的行（量的是最大值，不是首行/末行）。
+  text += std::string(400, 'W') + "\n";
+  fx.editor.set_text(text);
+  fx.editor.measure(fx.context, st::ui::Constraints{800.0f, 400.0f});
+  fx.editor.arrange(fx.context, st::math::Rect{0.0f, 0.0f, 800.0f, 400.0f});
+
+  const auto wider_than_view = [&]() {
+    return fx.editor.content_width(fx.context) > fx.editor.bounds().width;
+  };
+  ST_CHECK(wider_than_view());   // 400 个 W 远宽于 800px 视口
+
+  // 同一文本重复查询：应几乎瞬时（缓存命中）。
+  const auto started = std::chrono::steady_clock::now();
+  for (int repeat = 0; repeat < 50; ++repeat) {
+    (void)wider_than_view();
+  }
+  const auto cached_ms = static_cast<double>(
+      std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                                           started)
+          .count()) /
+      1000.0;
+  // 50 次重复查询合计应 < 20ms（每次 <0.4ms）。若每次都全量扫 3000 行，
+  // 实测会到数百毫秒（每行一次 shaping 缓存查找 + hash）。
+  ST_CHECK(cached_ms < 20.0);
+}
+

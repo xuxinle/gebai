@@ -124,24 +124,34 @@ ST_TEST(diff_view_staging_mode_toggles_checkbox_column) {
 }
 
 ST_TEST(diff_view_toggle_line_selects_only_stageable_lines) {
+  // **选中的单位是“一处改动”，不是“一行”**（2026-10-18 语义修正，实测驱动）。
+  //
+  // 为何（实测缺陷）：勾选列只能画在一侧（左栏），而"修改一行"在屏幕上是一对
+  // `-旧` / `+新`——用户勾的是前者。旧实现只选中那一行，`build_partial_patch`
+  // 于是生成"只删不增"的补丁：勾 `line 2` 的结果是把内容**删掉了**（而用户
+  // 想的是改成 `CHANGED_A`）。所以现在勾任一行 → 选中它所在的整个连续改动区段。
   Fixture fx;
   fx.load();
   const auto added = fx.find_line(DiffLineKind::Added);
   const auto removed = fx.find_line(DiffLineKind::Removed);
   ST_REQUIRE(added.first != DiffView::kNoHunk);
   ST_REQUIRE(removed.first != DiffView::kNoHunk);
+  // 夹具里第一处改动是 `-old2 / +new2`：它们属于**同一个**改动区段。
+  ST_REQUIRE(added.first == removed.first);
 
   int changes = 0;
   fx.view.on_selection_changed = [&changes] { ++changes; };
 
-  // 新增行可选。
+  // 勾新增行 → 整对都选中（删旧 + 加新）。
   ST_CHECK(fx.view.toggle_line(added.first, added.second));
   ST_CHECK(fx.view.is_line_selected(added.first, added.second));
-  ST_CHECK_EQ(fx.view.selected_count(), std::size_t{1});
+  ST_CHECK(fx.view.is_line_selected(removed.first, removed.second));
+  ST_CHECK_EQ(fx.view.selected_count(), std::size_t{2});
   ST_CHECK_EQ(changes, 1);
-  // 再点一次取消。
+  // 再点同一区段内的任一行 → 整对取消（不是“只取消这一行”）。
   ST_CHECK(!fx.view.toggle_line(added.first, added.second));
   ST_CHECK(!fx.view.is_line_selected(added.first, added.second));
+  ST_CHECK(!fx.view.is_line_selected(removed.first, removed.second));
   ST_CHECK_EQ(fx.view.selected_count(), std::size_t{0});
   ST_CHECK_EQ(changes, 2);
 
@@ -168,29 +178,39 @@ ST_TEST(diff_view_toggle_line_selects_only_stageable_lines) {
 }
 
 ST_TEST(diff_view_selection_stays_sorted_for_stable_patches) {
-  // 先点后面的行、再点前面的行：内部顺序必须按文件序（补丁的行序靠它稳定，
+  // 先点后面的改动、再点前面的：内部顺序必须按文件序（补丁的行序靠它稳定，
   // 而用户点选顺序是任意的）。
+  //
+  // ⚠ 每处改动**只点一行**（点它的代表行）：因为选中单位是整段，
+  // 把一对 `-x/+x` 里的两行都点一遍等于“点上又取消”。
   Fixture fx;
   fx.view.set_texts("a\nb\nc\nd\ne\nf\ng\n", "A\nb\nc\nd\nE\nf\nG\n");
   fx.layout();
-  std::vector<std::pair<std::size_t, std::size_t>> picked;
-  for (std::size_t hunk = 0; hunk < fx.view.diff().hunks.size(); ++hunk) {
-    for (std::size_t line = 0; line < fx.view.diff().hunks[hunk].lines.size(); ++line) {
-      if (fx.view.diff().hunks[hunk].lines[line].kind != DiffLineKind::Context) {
-        picked.emplace_back(hunk, line);
-      }
+  std::vector<std::pair<std::size_t, std::size_t>> leaders;
+  const auto& hunks = fx.view.diff().hunks;
+  for (std::size_t hunk = 0; hunk < hunks.size(); ++hunk) {
+    bool in_segment = false;
+    for (std::size_t line = 0; line < hunks[hunk].lines.size(); ++line) {
+      const bool changed = hunks[hunk].lines[line].kind != DiffLineKind::Context;
+      if (changed && !in_segment) leaders.emplace_back(hunk, line);
+      in_segment = changed;
     }
   }
-  ST_REQUIRE(picked.size() >= 2U);
-  // 逆序点（后一行先点）。
-  for (auto iterator = picked.rbegin(); iterator != picked.rend(); ++iterator) {
+  ST_REQUIRE(leaders.size() >= 2U);
+  // 逆序点（后一处先点）。
+  for (auto iterator = leaders.rbegin(); iterator != leaders.rend(); ++iterator) {
     (void)fx.view.toggle_line(iterator->first, iterator->second);
   }
+  std::vector<std::pair<std::size_t, std::size_t>> expected;
+  for (std::size_t hunk = 0; hunk < hunks.size(); ++hunk) {
+    for (std::size_t line = 0; line < hunks[hunk].lines.size(); ++line) {
+      if (hunks[hunk].lines[line].kind != DiffLineKind::Context) expected.emplace_back(hunk, line);
+    }
+  }
   const auto& selected = fx.view.selected_lines();
-  ST_REQUIRE(selected.size() == picked.size());
+  ST_CHECK_EQ(selected.size(), expected.size());
   ST_CHECK(std::is_sorted(selected.begin(), selected.end()));
-  ST_CHECK(selected.front() == picked.front());
-  ST_CHECK(selected.back() == picked.back());
+  ST_CHECK(selected == expected);
 }
 
 ST_TEST(diff_view_build_patch_contains_only_selected_lines) {
@@ -204,37 +224,39 @@ ST_TEST(diff_view_build_patch_contains_only_selected_lines) {
   // 空选择 → 空补丁（**不是**一个空 hunk：那会让 git 报与意图无关的错）。
   ST_CHECK(fx.view.build_stage_patch().empty());
 
-  // 只选新增行：补丁里只该有那一行 `+`。
+  // 勾一处改动 → 补丁里是**完整的整对**（`-old2` 与 `+new2` 都在）。
   //
-  // ⚠ `find_line` 返回的是**第一处**这类行——所以这里的新增行文本是 `new2`
-  //（不是后面那处 `added4`）。第一版断言写成了 `added4`，白追一轮
-  //（而补丁其实是对的：探针打出来就是 `+new2`）。**断言里的具体文本要与
-  // "取到的是哪一处"对齐**——`find_line` 的语义是"第一个"，就写第一个的文本。
-  ST_CHECK(fx.view.toggle_line(added.first, added.second));
-  const std::string added_patch = fx.view.build_stage_patch();
-  ST_CHECK(!added_patch.empty());
-  const auto added_lines = patch_payload(added_patch);
-  ST_CHECK(contains(added_lines, "+new2"));
-  ST_CHECK(!contains(added_lines, "+added4"));
-  // 未选中的删除行要**降级成上下文**（它仍存在，只是这次不删）——
-  // 所以它既不该以 `-` 出现，也不该消失（消失会让 hunk 的行数对不上）。
-  ST_CHECK(!contains(added_lines, "-old2"));
-  ST_CHECK(contains(added_lines, " old2"));
-
-  // 换成只选删除行：这次出现 `-old2`，且新增行不出现。
-  fx.view.set_all_selected(false);
+  // 为何必须是整对（实测驱动）：勾选列只能画在一侧，用户能点到的往往只是
+  // 删除行；只暂存“删除”就等于把内容删了（而非改成新值）。夹具里还有一处
+  // 独立的 `+added4`，它没被勾，不该出现在补丁里。
   ST_CHECK(fx.view.toggle_line(removed.first, removed.second));
-  const auto removed_lines = patch_payload(fx.view.build_stage_patch());
-  ST_CHECK(contains(removed_lines, "-old2"));
-  ST_CHECK(!contains(removed_lines, "+new2"));
+  const std::string first_patch = fx.view.build_stage_patch();
+  ST_CHECK(!first_patch.empty());
+  const auto first_lines = patch_payload(first_patch);
+  ST_CHECK(contains(first_lines, "-old2"));
+  ST_CHECK(contains(first_lines, "+new2"));
+  ST_CHECK(!contains(first_lines, "+added4"));
 
-  // 同一处改动的 **新增 + 删除** 都选：两条都在（这是"整行替换"的完整形态）。
-  fx.view.set_all_selected(false);
-  ST_CHECK(fx.view.toggle_line(added.first, added.second));
-  ST_CHECK(fx.view.toggle_line(removed.first, removed.second));
+  // 勾另一处独立的改动（`+added4`）→ 只多出那一条新增，而且两处在同一 hunk 里
+  // （中间隔着上下文行）：这验证“区段不跨上下文”成立——否则第一处会被连带重算。
+  std::size_t added4_hunk = DiffView::kNoHunk;
+  std::size_t added4_line = 0;
+  const auto& hunks = fx.view.diff().hunks;
+  for (std::size_t hunk = 0; hunk < hunks.size(); ++hunk) {
+    for (std::size_t line = 0; line < hunks[hunk].lines.size(); ++line) {
+      if (hunks[hunk].lines[line].kind == DiffLineKind::Added &&
+          hunks[hunk].lines[line].text == "added4") {
+        added4_hunk = hunk;
+        added4_line = line;
+      }
+    }
+  }
+  ST_REQUIRE(added4_hunk != DiffView::kNoHunk);
+  ST_CHECK(fx.view.toggle_line(added4_hunk, added4_line));
   const auto both_lines = patch_payload(fx.view.build_stage_patch());
-  ST_CHECK(contains(both_lines, "+new2"));
+  ST_CHECK(contains(both_lines, "+added4"));
   ST_CHECK(contains(both_lines, "-old2"));
+  ST_CHECK(contains(both_lines, "+new2"));
 
   // `set_hunk_selected` 一次选中整块（等价逐行选）。
   fx.view.set_all_selected(false);
@@ -255,7 +277,7 @@ ST_TEST(diff_view_changing_diff_clears_selection) {
   const auto added = fx.find_line(DiffLineKind::Added);
   ST_REQUIRE(added.first != DiffView::kNoHunk);
   ST_CHECK(fx.view.toggle_line(added.first, added.second));
-  ST_CHECK_EQ(fx.view.selected_count(), std::size_t{1});
+  ST_CHECK(fx.view.selected_count() >= 1U);
 
   int changes = 0;
   fx.view.on_selection_changed = [&changes] { ++changes; };
@@ -299,6 +321,42 @@ ST_TEST(diff_view_paints_checkbox_column_only_in_staging_mode) {
   ST_CHECK(before != after);
 }
 
+ST_TEST(diff_view_checkbox_tables_align_with_display_rows) {
+  // **两栏的勾选表长度 = 各自的显示行数**（2026-10-18）。
+  //
+  // 为何这是一条值得钉的约束：`begin_row` 画装饰时取的是 `checks.back()`——
+  // 只 push 一部分（例如“填充行不 push”）就会从那一行起整体错位一格，
+  // 而画面上完全看不出（勾选框照样画、照样能点，只是点它动的是别的行）。
+  Fixture fx;
+  fx.view.set_staging_mode(true);
+  fx.load();
+  fx.view.set_staging_mode(true);   // 再设一次，确保装饰是按新模式重建的
+  fx.layout();
+
+  const auto* left = fx.view.left_editor();
+  const auto* right = fx.view.right_editor();
+  ST_REQUIRE(left != nullptr);
+  ST_REQUIRE(right != nullptr);
+  // 装饰行数与编辑器行数一致——这是 `begin_row` 那份“同批追加”的不变式。
+  ST_CHECK_EQ(left->line_decorations().size(), fx.view.line_count(false));
+  ST_CHECK_EQ(right->line_decorations().size(), fx.view.line_count(true));
+  // ———————————————————————————————————————————————————————————————
+  // 而且每一行都要有勾选态（`None`/`Disabled` 也算“有”），不得缺项。
+  // 代表行（新增行）在右侧必须是可勾的（`Unchecked`/`Checked`，不是 `None`）。
+  const auto added = fx.find_line(DiffLineKind::Added);
+  ST_REQUIRE(added.first != DiffView::kNoHunk);
+  ST_CHECK(fx.view.toggle_line(added.first, added.second));
+  fx.layout();
+  std::size_t selectable = 0;
+  for (const auto& item : fx.view.right_editor()->line_decorations()) {
+    if (item.check == st::ui::CodeEditor::LineDecoration::Check::Checked ||
+        item.check == st::ui::CodeEditor::LineDecoration::Check::Unchecked) {
+      ++selectable;
+    }
+  }
+  ST_CHECK(selectable >= 2U);   // 至少：这一处改动的那一对
+}
+
 ST_TEST(diff_view_staging_mode_off_has_no_checkbox_decoration) {
   // 关掉模式后装饰里不该残留勾选框（否则 gutter 会一直宽着）。
   Fixture fx;
@@ -309,4 +367,43 @@ ST_TEST(diff_view_staging_mode_off_has_no_checkbox_decoration) {
   fx.layout();
   ST_CHECK(!fx.view.is_line_selected(0, 0));
   ST_CHECK(fx.view.selected_count() == 0U);
+}
+
+ST_TEST(diff_view_checkbox_appears_on_both_panes) {
+  // **两栏都要有勾选框**（2026-10-18 实测驱动）。
+  //
+  // 为何：勾选列原本只画在左栏（旧侧），于是“新增一行”在屏幕上根本没有
+  // 可勾的东西——用户能看到的只有删除行的勾选框。后果不是“少了个入口”那么轻：
+  // 勾中删除行后只暂存了删除部分，把内容**删掉**而不是改成新值。
+  // 所以两栏都必须画、都必须能勾（身份是同一个 `(hunk, line)`）。
+  Fixture fx;
+  fx.load();
+  fx.view.set_staging_mode(true);
+  fx.layout();
+
+  // 两侧的装饰里都该出现 Check（不是全 None）——按像素/装饰直接验：
+  // 左右栏的 `line_decorations()` 就是 `DiffView` 推给它们的那一份。
+  const auto check_count = [](const auto& decorations, auto wanted) {
+    std::size_t count = 0;
+    for (const auto& item : decorations) {
+      if (item.check == wanted) ++count;
+    }
+    return count;
+  };
+  const auto* left = fx.view.left_editor();
+  const auto* right = fx.view.right_editor();
+  ST_REQUIRE(left != nullptr);
+  ST_REQUIRE(right != nullptr);
+  ST_CHECK(check_count(left->line_decorations(),
+                       st::ui::CodeEditor::LineDecoration::Check::Unchecked) > 0U);
+  ST_CHECK(check_count(right->line_decorations(),
+                       st::ui::CodeEditor::LineDecoration::Check::Unchecked) > 0U);
+
+  // 勾新增行 → 右侧该行的勾选态变 Checked（这是“新增行可逐行暂存”的直接证据）。
+  const auto added = fx.find_line(DiffLineKind::Added);
+  ST_REQUIRE(added.first != DiffView::kNoHunk);
+  ST_CHECK(fx.view.toggle_line(added.first, added.second));
+  fx.layout();
+  ST_CHECK(check_count(fx.view.right_editor()->line_decorations(),
+                       st::ui::CodeEditor::LineDecoration::Check::Checked) >= 1U);
 }

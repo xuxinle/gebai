@@ -470,6 +470,28 @@ struct TextRenderer::Cache {
   std::list<std::uint64_t> lru_order{};
   std::size_t glyph_bytes{0};
   std::unordered_map<std::uint64_t, float> widths{};  ///< 文本宽度缓存（键：文本 + 字号档）
+  /// `widths` 的 LRU 顺序（front = 最近使用）+ 反向索引（key → 它在链中的位置）。
+  ///
+  /// 为何从“超限全清”改成真 LRU（2026-10-18，实测驱动）：旧实现是
+  /// `if (widths.size() > 4096) widths.clear();`——而**条目数上限与文档行数同量级**。
+  /// 打开 5465 行的 DESIGN.md 后每行宽度都会进缓存，于是任何一次重算都会把整表清空、
+  /// 下次全部重新整形：实测单帧 paint 从 4.5ms 涨到 **90ms**，用户感知就是“整页变卡”。
+  /// 与字形位图缓存同构（那边早已改成 LRU，注释里还记着 CJK 大文档的同一类帧尖峰——
+  /// 宽度缓存当时漏了）。
+  ///
+  /// 为何另存 `widths_pos`：LRU 命中时要把节点挤到队首，而 `std::list::remove`
+  /// 是**线性扫**——32k 条目下每次命中都扫一遍，热路径会退化成 O(n)。
+  /// 存迭代器后命中/插入/淘汰都是 O(1)。
+  std::list<std::uint64_t> widths_lru{};
+  std::unordered_map<std::uint64_t, std::list<std::uint64_t>::iterator> widths_pos{};
+  /// 宽度缓存的条目上限（来自内存预算单点，与字形/整形缓存同口径）。
+  const std::size_t kWidthsMaxEntries = st::memory::scale_entry_limit(32768U);
+  /// 命中/未命计数（`width_cache_stats()` 读它）。
+  ///
+  /// 为何要在热路径上加两个整数：它们是“缓存策略是否退化成全清”的唯一
+  /// 确定性观测量（当时试过“耗时比”，在负载波动的机器上不可靠）。开销两次自增。
+  std::size_t width_hits{0};
+  std::size_t width_misses{0};
   /// 整形结果缓存（键：文本 + 字号档 + role + 字体栈指纹，与 widths 同构）。
   ///
   /// 为什么值得缓存：`draw()` 每帧对每段文本重新整形（逐码点 face 查找 + 字距 +
@@ -488,7 +510,14 @@ struct TextRenderer::Cache {
   /// 字段而非 `static constexpr`：预算档位在**构造期**读环境，需要是每实例的值
   ///（虽然当前进程内一致，但写死 constexpr 会把"随环境变"这件事又绑回去）。
   const std::size_t kShapedMaxBytes = st::memory::shaped_cache_bytes();
-  const std::size_t kShapedMaxEntries = st::memory::scale_entry_limit(4096U);
+  /// 条目数上限（与宽度缓存对齐）。
+  ///
+  /// 为何从 4096 抬到同口径的上限（2026-10-18）：整形与宽度缓存都按**行**入缓存，
+  /// 而 4096 这个数字与“正常文件的行数”同量级——超过它的文档会持续落于
+  /// “插入一条→淘汰一条”的抖动区，每帧都在重新整形。实测 5465 行的 DESIGN.md
+  /// 编辑时单帧 paint 90ms（同内容 546 行仅 11ms）。预算仍由
+  /// `kShapedMaxBytes`（内存）卡住，抬条目数不会让内存失控。
+  const std::size_t kShapedMaxEntries = st::memory::scale_entry_limit(32768U);
   /// 淘汰预算：按**内存**而不是条目数（字形位图大小差异极大——空白字形与 64px 汉字
   /// 差三个数量级；512 条目的旧上限对 16px 汉字只值 ~800 KiB，对 64px 却要 32 MiB）。
   const std::size_t kMaxBytes = st::memory::glyph_cache_bytes();
@@ -771,16 +800,47 @@ auto TextRenderer::measure_width(std::string_view utf8, float size, FontRole rol
   {
     const std::scoped_lock lock(cache_->mutex);
     if (const auto iterator = cache_->widths.find(key); iterator != cache_->widths.end()) {
+      // 命中：移到 LRU 队首（用反向索引，O(1)；已在前头就不动）。
+      if (cache_->widths_lru.front() != key) {
+        cache_->widths_lru.splice(cache_->widths_lru.begin(), cache_->widths_lru,
+                                  cache_->widths_pos[key]);
+      }
+      ++cache_->width_hits;
       return iterator->second;
     }
   }
   const float width = shape_cached(utf8, size, role)->width;
   {
     const std::scoped_lock lock(cache_->mutex);
-    if (cache_->widths.size() > 4096) cache_->widths.clear();
+    // **增量淘汰而非全清**（2026-10-18 修，见 `widths_lru` 的注释）。
+    //
+    // 旧写法 `if (size > 4096) clear();` 在“行数 > 4096”的文档上是灾难：
+    // 每次新增一条就可能触发一次全清，而随后的重建又要把所有行重新整形。
+    // 实测：5465 行的 DESIGN.md 编辑时单帧 paint 90ms（同内容 546 行仅 11ms）。
+    //
+    // 现在：超限时只淘汰 LRU 尾部（一条一条淘，直到回到上限之下）。
+    while (cache_->widths.size() >= cache_->kWidthsMaxEntries &&
+           !cache_->widths_lru.empty()) {
+      const std::uint64_t oldest = cache_->widths_lru.back();
+      cache_->widths_lru.pop_back();
+      cache_->widths.erase(oldest);
+      cache_->widths_pos.erase(oldest);
+    }
+    // 新条目同时入 map 与 LRU 队首（若键已存在，先从链上摘掉旧位置）。
+    if (const auto where = cache_->widths_pos.find(key); where != cache_->widths_pos.end()) {
+      cache_->widths_lru.erase(where->second);
+    }
+    cache_->widths_lru.push_front(key);
+    cache_->widths_pos[key] = cache_->widths_lru.begin();
     cache_->widths[key] = width;
+    ++cache_->width_misses;
   }
   return width;
+}
+
+auto TextRenderer::width_cache_stats() const -> std::pair<std::size_t, std::size_t> {
+  const std::scoped_lock lock(cache_->mutex);
+  return {cache_->width_hits, cache_->width_misses};
 }
 
 auto TextRenderer::measure(std::string_view utf8, float size, FontRole role) const -> math::Size {
