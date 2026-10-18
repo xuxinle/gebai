@@ -5,6 +5,7 @@
 
 #include "st/test/test.hpp"
 #include "st/ui/components/command_palette.hpp"
+#include "st/ui/components/input.hpp"
 #include "st/ui/theme.hpp"
 #include "st/ui/ui_root.hpp"
 
@@ -257,4 +258,95 @@ ST_TEST(palette_click_and_enter_have_identical_effects) {
   ST_CHECK_EQ(after_enter, std::string("alpha"));
   ST_CHECK_EQ(fx.executed, after_enter);        // 外部通知一致
   ST_CHECK_EQ(handler_calls, handlers_after_enter + 1);  // handler 也真的跑了
+}
+
+/// **卡片配色必须跟随主题**（回归：用户报「Ctrl+P 面板配色不对」）。
+///
+/// 缺陷形态（2026-10-18）：`CommandPalette::apply_theme` 只把主题色算进
+/// `card_bg_` / `card_border_` 两个**成员字段**，而绘制读的是
+/// `card->style().background`——字段与真值分家。于是切主题时
+/// 卡片颜色纹丝不动，与内部 `Input`/`ListItem`（它们用主题色）对不上：
+/// 暗色界面上出现一块浅色卡片，或反之。
+///
+/// 判据不是「像素好看」，而是**结构契约**：`apply_theme(theme)` 之后，
+/// 卡片实际用于绘制的 `style().background` 必须等于该主题的
+/// `surface_raised`（弹层底色的语义位）。这条把「字段算对了」与
+/// 「字段真的落地了」区分开——后者才是缺陷所在。
+ST_TEST(palette_card_background_follows_theme) {
+  PaletteFixture fixture;
+  const st::ui::Element* card = fixture.root.overlay_at(0);
+  ST_CHECK(card != nullptr);
+  // 找 `palette-card`（它挂在 overlay 根的子树里）。
+  const st::ui::Element* found = nullptr;
+  const auto search = [&](auto&& self, const st::ui::Element& element) -> void {
+    if (element.id() == "palette-card") found = &element;
+    for (std::size_t index = 0; index < element.children().size(); ++index) {
+      if (element.child_at(index) != nullptr) self(self, *element.child_at(index));
+    }
+  };
+  search(search, *card);
+  ST_CHECK(found != nullptr);
+
+  const auto background_of = [&] { return found->style().background; };
+  const auto same = [](st::math::Color left, st::math::Color right) {
+    return left.r == right.r && left.g == right.g && left.b == right.b && left.a == right.a;
+  };
+
+  // ① 暗色：卡片必须用暗色的 `surface_raised`（而不是亮色，也不是硬编码色）。
+  // 模拟 `UiRoot::layout` 的真实递归（`apply_theme` 只作用于单元素，递归由树侧负责）。
+  const auto apply_tree = [](auto&& self, st::ui::Element& element, const Theme& theme) -> void {
+    element.apply_theme(theme);
+    for (std::size_t index = 0; index < element.children().size(); ++index) {
+      if (element.child_at(index) != nullptr) self(self, *element.child_at(index), theme);
+    }
+  };
+  const Theme dark = Theme::dark();
+  apply_tree(apply_tree, *fixture.palette, dark);
+  ST_CHECK(same(background_of(), dark.colors().surface_raised));
+
+  // ② 浅色：必须跟着换（这就是「只改字段不写回 style」会失败的那一步）。
+  const Theme light = Theme::light();
+  apply_tree(apply_tree, *fixture.palette, light);
+  ST_CHECK(same(background_of(), light.colors().surface_raised));
+
+  // ③ 两个主题的 `surface_raised` 本身必须不同——否则上面两条断言是空转。
+  ST_CHECK(!same(dark.colors().surface_raised, light.colors().surface_raised));
+}
+
+/// **切换主题后，面板里的子元素也必须换色**（输入框走 `theme.surface`）。
+///
+/// 与上一条互补：上一条守「卡片自己的色落地了」，这条守「子树收到了新主题」。
+/// 两者缺一就会出现「卡片换了、里面还是旧色」的半吊子状态——而那在截图里
+/// 看起来就像「配色不对」，很难一眼定位到是卡片的锅还是子元素的锅。
+ST_TEST(palette_children_follow_theme_switch) {
+  PaletteFixture fixture;
+  const st::ui::Element* card = fixture.root.overlay_at(0);
+  ST_CHECK(card != nullptr);
+  const st::ui::Input* input = nullptr;
+  const auto search = [&](auto&& self, const st::ui::Element& element) -> void {
+    if (element.type() == "Input") input = dynamic_cast<const st::ui::Input*>(&element);
+    for (std::size_t index = 0; index < element.children().size(); ++index) {
+      if (element.child_at(index) != nullptr) self(self, *element.child_at(index));
+    }
+  };
+  search(search, *card);
+  ST_CHECK(input != nullptr);
+
+  // 输入框的底色在 `apply_theme` 里落到 `style().background`（见 `input.cpp` 的
+  // `apply_*` 段）。暗色下它应当是暗色的 `surface`——**不是**亮色的。
+  const auto apply_tree = [](auto&& self, st::ui::Element& element, const Theme& theme) -> void {
+    element.apply_theme(theme);
+    for (std::size_t index = 0; index < element.children().size(); ++index) {
+      if (element.child_at(index) != nullptr) self(self, *element.child_at(index), theme);
+    }
+  };
+  apply_tree(apply_tree, *fixture.palette, Theme::dark());
+  const st::math::Color dark_bg = input->style().background;
+  apply_tree(apply_tree, *fixture.palette, Theme::light());
+  const st::math::Color light_bg = input->style().background;
+  ST_CHECK(dark_bg.r != light_bg.r || dark_bg.g != light_bg.g || dark_bg.b != light_bg.b);
+  // 暗色主题下的输入底应当**比浅色主题明显更暗**（判据取亮度，不锁死色值）。
+  const int dark_luma = static_cast<int>(dark_bg.r) + dark_bg.g + dark_bg.b;
+  const int light_luma = static_cast<int>(light_bg.r) + light_bg.g + light_bg.b;
+  ST_CHECK(dark_luma < light_luma);
 }

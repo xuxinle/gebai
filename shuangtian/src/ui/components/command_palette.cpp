@@ -14,18 +14,28 @@ CommandPalette::CommandPalette(std::vector<Command> commands)
   set_id("command-palette");
   // 遮罩：半透明黑（亮暗主题同形——浮层惯例，与 Dialog 遮罩同族）
   mask_color_ = math::Color{0, 0, 0, 110};
-  card_bg_ = math::Color::rgb(26, 34, 48);
-  card_border_ = math::Color::rgba(255, 255, 255, 26);
+
+  // —— 卡片配色**跟随主题**（2026-10-18 修，用户报“Ctrl+P 面板配色不对”）——
+  //
+  // 旧实现把卡片写成**硬编码深蓝**（`rgb(26,34,48)`），而卡片里的 `Input` /
+  // `ListItem` 用的是**主题色**（`surface` / `primary_soft`）。于是暗色主题下：
+  //   卡片 = 硬编码深蓝  ·  输入框 = theme.surface（#15151A）
+  //   选中项 = theme.primary_soft（#282B40）
+  // 三个色号互不相关，看起来就是“亮底套暗底、选中项反而更暗”。
+  // 更糟的是 `apply_theme` 只改了 `card_bg_` 字段、**没写回 style**
+  //（card 指针没存），所以连“切主题”都不能纠正它。
+  //
+  // 现在统一：卡片用 `surface_raised`（抬升面 = 弹层底色的语义位），
+  // 边框跟随 `border`；具体色值在 `apply_theme` 里按当前主题写入。
 
   auto card = std::make_unique<Panel>(FlexDirection::Column);
   card->set_id("palette-card");
   card->style().width = kCardWidth;
-  card->style().background = card_bg_;
   card->style().radius = 10.0f;
-  card->style().border_color = card_border_;
   card->style().border_width = 1.0f;
   card->style().shadow = Shadow{};
   card->style().clip_children = true;
+  card_ = card.get();   // `apply_theme` 要把主题色写回它的 style（见下）
 
   auto input_row = std::make_unique<Panel>(FlexDirection::Row);
   input_row->set_id("palette-input-row");
@@ -187,11 +197,20 @@ void CommandPalette::select(std::size_t index) {
 void CommandPalette::apply_theme(const Theme& theme) {
   Element::apply_theme(theme);
   mask_color_ = math::Color{0, 0, 0, 110};
-  // 深底浮层在亮暗主题下同形（与示例期实现一致——浮层惯例）；边框随主题取弱对比
-  card_bg_ = theme.mode() == ThemeMode::Light ? math::Color::rgb(38, 46, 60)
-                                              : math::Color::rgb(26, 34, 48);
-  card_border_ = theme.mode() == ThemeMode::Light ? math::Color::rgba(255, 255, 255, 26)
-                                                  : math::Color::rgba(255, 255, 255, 26);
+  // **必须写回 style**（2026-10-18 修）：旧实现只改 `card_bg_` 字段，
+  // 而绘制读的是 `card->style().background`——于是切主题时卡片颜色纹丝不动，
+  // 字段与画面分家。这类“改了缓存却没落到真值上”的缺陷在截图上看不出来
+  //（除非像现在这样切一次主题对比）。
+  const Palette& colors = theme.colors();
+  card_bg_ = colors.surface_raised;
+  card_border_ = colors.border;
+  if (card_ != nullptr) {
+    card_->style().background = card_bg_;
+    card_->style().border_color = card_border_;
+    // 不在此 `mark_dirty()`：`apply_theme` 现每帧都跑（主题传播与重排解耦），
+    // 标脏会把增量重绘作废。主题真的变时由 `UiRoot::set_theme`
+    // → `mark_dirty_all()` 统一标脏。
+  }
 }
 
 void CommandPalette::measure(const RenderContext& context, const Constraints& constraints) {

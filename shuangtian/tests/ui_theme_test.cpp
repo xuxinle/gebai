@@ -15,11 +15,14 @@
 #include <string_view>
 
 #include "st/math/color.hpp"
+#include "st/ui/components/basic.hpp"
 #include "st/ui/theme.hpp"
 
 namespace {
 
 using st::math::Color;
+using st::ui::Element;
+using st::ui::Panel;
 
 /// 对比度用框架自带的 `math::contrast_ratio`（WCAG 2.1，1:1 ~ 21:1）——
 /// 不再另写一份：同一套公式全框架只有一处，测试与运行期自检结果才必然一致。
@@ -305,4 +308,57 @@ ST_TEST(theme_metrics_scale_is_consistent) {
   ST_CHECK(metrics.line_height_body > 1.0f);
   ST_CHECK(metrics.line_height_heading > 1.0f);
   ST_CHECK(metrics.line_height_heading < metrics.line_height_body);
+}
+
+/// **内容区（编辑器/终端）必须与外壳、侧栏分得开**（回归：用户报「编辑器背景不够
+/// 下沉、与 UI 没区分度」）。
+///
+/// 缺陷形态（2026-10-18 实测）：`sidebar`/`editor-column` 这些容器**没有声明
+/// `Surface`**，于是底色透明、落到页面 `bg` 上——编辑器、侧栏、标签条全成同一个色
+/// （实测对比度 **1.000**），而资源管理器里的 `Tree` 自己填了 `surface`，
+/// 反而比编辑器更亮，形成"内亮外暗"的颠倒。
+///
+/// 本用例锁的是**关系**不是具体色值（色值可以调，层次不能塌）：
+///   ① 三个语义档（外壳 `alt` / 侧栏 `base` / 内容 `content`）两两可辨；
+///   ② 内容区是**阅读焦点**：暗色下最沉、亮色下最亮——两个模式方向刻意相反，
+///      这正是 `Surface::Content` 存在的理由（单一 `sunken` 做不到）。
+ST_TEST(theme_content_surface_is_distinct_from_shell_and_panel) {
+  const auto luminance = [](const Color& color) {
+    return static_cast<double>(st::math::relative_luminance(color));
+  };
+
+  const st::ui::Theme dark = st::ui::Theme::dark();
+  const st::ui::Palette& dp = dark.colors();
+  // 暗色：外壳最亮 → 面板居中 → 内容最沉（往里沉）。
+  ST_CHECK(contrast(dp.surface_alt, dp.surface) >= 1.10);
+  ST_CHECK(contrast(dp.surface, dp.surface_sunken) >= 1.10);
+  ST_CHECK(luminance(dp.surface_sunken) < luminance(dp.surface));
+
+  const st::ui::Theme light = st::ui::Theme::light();
+  const st::ui::Palette& lp = light.colors();
+  // 亮色：**方向相反**——内容区归白（阅读焦点），外壳压成浅灰。
+  // 这条是本次修复的核心断言：亮色下若把编辑器做成"更暗"，观感是脏的。
+  ST_CHECK(contrast(lp.surface_raised, lp.surface_alt) >= 1.05);
+  ST_CHECK(contrast(lp.surface, lp.surface_alt) >= 1.05);
+  ST_CHECK(luminance(lp.surface_raised) >= luminance(lp.surface));
+
+  // 两个模式的 `Content` 档必须真的**取不同的层**，否则这层语义是摆设。
+  ST_CHECK(dp.surface_sunken.r != lp.surface_raised.r ||
+           dp.surface_sunken.g != lp.surface_raised.g);
+}
+
+/// `Surface::Content` 在两个模式下解析到**不同的 token**（这就是它存在的全部理由）。
+ST_TEST(theme_content_surface_resolves_differently_per_mode) {
+  const auto background_for = [](const st::ui::Theme& theme) {
+    st::ui::Panel panel;
+    panel.set_surface(st::ui::Element::Surface::Content);
+    panel.apply_theme(theme);
+    return panel.style().background;
+  };
+  const Color dark_bg = background_for(st::ui::Theme::dark());
+  const Color light_bg = background_for(st::ui::Theme::light());
+  // 暗色下内容区必须是**暗**的，亮色下必须是**亮**的（否则阅读面选错了层）。
+  ST_CHECK(st::math::relative_luminance(dark_bg) < 0.05F);
+  ST_CHECK(st::math::relative_luminance(light_bg) > 0.85F);
+  ST_CHECK(dark_bg.r != light_bg.r);
 }

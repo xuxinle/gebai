@@ -87,13 +87,24 @@ auto set_property(std::string_view name, std::string_view value) -> bool overrid
 [[nodiscard]] auto invoke_action(std::string_view action, std::string_view argument)
 -> bool override;
 
+  /// 主题变化 → 重落底色/描边（见 `.cpp` 处的注释：它们原本只在 measure 里
+  /// 做一次性“未设则填”，切主题时 style 会永久停在旧值）。
+  void apply_theme(const Theme& theme) override;
+
   /// 内容变化回调（实参为最新文本，指向组件内部存储）。
   std::function<void(std::string_view)> on_change{};
   /// `Enter` 提交回调。
   std::function<void(std::string_view)> on_submit{};
 
- private:
-  [[nodiscard]] auto inner_box(const RenderContext& context) const -> math::Rect;
+  private:
+ /// 我方上一次写进 `style_.background` / `border_color` 的值（全透明 = 从未写过）。
+ /// 用于区分“这个色是主题落的”与“这个色是调用方显式设的”——前者该随主题更新，
+ /// 后者不能动。仅看 `a == 0` 不够：首轮填充后它就再也分不清两者了。
+ math::Color applied_theme_bg_{};
+ math::Color applied_theme_border_{};
+ /// 底色/描边是否已由主题接管（首轮无条件接管一次，之后才看“有没有被调用方改过”）。
+ bool theme_style_owned_{false};
+ [[nodiscard]] auto inner_box(const RenderContext& context) const -> math::Rect;
   [[nodiscard]] auto display_text() const -> std::string;
   [[nodiscard]] auto cursor_x(const RenderContext& context) const -> float;
   /// 给定**字节索引** → 屏幕 x（与 `cursor_x` 同算法；选区高亮两端用它）。

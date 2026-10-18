@@ -116,6 +116,10 @@ class CommandPalette : public Element {
   std::size_t highlight_{kNoSelection};
   Input* input_{nullptr};   // 非拥有（子元素）
   List* list_{nullptr};     // 非拥有（子元素）
+  /// 卡片面板（非拥有）：`apply_theme` 要把主题色**写回它的 style**——
+  /// 只改 `card_bg_` 字段不影响画面（2026-10-18 修的真实缺陷：字段与
+  /// 绘制用的 style 分家，切主题时卡片颜色纹丝不动，与子元素主题色对不上）。
+  Panel* card_{nullptr};
   math::Rect card_rect_{};
   math::Color mask_color_{};
   math::Color card_bg_{};

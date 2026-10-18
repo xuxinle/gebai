@@ -22,30 +22,49 @@ auto Theme::light() -> Theme {
   theme.name_ = "light";
   Palette& palette = theme.colors_;
   // —— 白色亚克力（默认亮色）——
-  // 近中性的冷灰白，层次靠**表面阶梯 + 柔和阴影**表达。
-  // 品牌色比旧版"冰蓝"更偏蓝紫（对齐歌白亚克力的 #5566EE 一脉），
-  // 且经过压暗以保证 `primary/primary_soft` 也达 4.5:1（浅色下柔底按钮的硬要求）。
+  //
+  // ## 表面阶梅（2026-10-18 重定，与暗色同构）
+  //
+  // 旧阶梯的问题（用户报“编辑器不够下沉”）：`bg`/`surface`/`sunken` 三档里
+  // 编辑器落在 `bg` 上，而终端面板落在 `surface` 上——结果是编辑器比终端**更暗**，
+  // 与“内容区应当最沉”的直觉相反，且侧栏与编辑器完全同色（1.000）。
+  //
+  // 新阶梯（对齐 VSCode Light+ / IDEA Light）：
+  //   外壳条带（标题/活动/状态栏） → `surface_alt`（中性浅灰）
+  //   侧栏/面板               → `surface`（近白）
+  //   编辑器/终端              → `surface_sunken`（微灰，往里沉）
+  //   输入框/代码块            → 再沉一档（`code_bg` / 控件自己的 `sunken`）
+  //   弹层/菜单               → `surface_raised`（纯白 + 阴影）
+  // 页面底：与面板拉得开（护栏：`surface` 对 `bg` ≥1.08）。
   palette.bg = hex(0xE8E8EEFFU);
-  // 面板是「半透明白叠在背景上」（歌白 `--bg-elev: rgba(255,255,255,0.8)`）——
-  // 这里预先合成成实色：#e8e8ee 叠 80% 白 = #fafafc。
-  // 自绘管线没有 backdrop-filter，合成一次等价且更省（见 DESIGN §5）。
   palette.surface = hex(0xFAFAFCFFU);
-  palette.surface_alt = hex(0xEDEDF2FFU);
-  // 凹槽：**比背景更暗**（输入框底/代码底/进度槽）。语义是“凹进去”，不随亮暗反转——
-  // 旧值取的灰与 `bg` 太近，凹陷感等于没有。
-  palette.surface_sunken = hex(0xDDDDE4FFU);
-  // 抬升面（弹层/菜单）：浅色下与 surface 同为白系——抬升由**阴影**表达，
-  // 再堆一层灰会把弹层压成"贴平"的卡片。
+  // 外壳条带：压暗一点（亮色下“更亮”已到头，靠压暗边框区把内容托起来）。
+  // VSCode Light：侧栏 #f3f3f3 / 编辑器 #ffffff；本主题同构。
+  palette.surface_alt = hex(0xEEEEF3FFU);
+  // 凹槽（输入框底/代码块/进度槽）：**真凹进去**（比 `bg` 暗）——
+  // 它不服务于编辑器（编辑器走 `Surface::Content`，见下）。
+  palette.surface_sunken = hex(0xDCDCE5FFU);
+  // 编辑内容区（亮色）：**纯白**。亮色下“阅读面”就该是最亮的，
+  // 与外壳（`alt` 浅灰）拉开一层；`Surface::Content` 在亮色下取本值。
+  palette.surface_raised = hex(0xFFFFFFFFU);
+  // 抬升面（弹层/菜单）：浅色下与 surface 同为白系——抬升由**阴影**表达。
   palette.surface_raised = hex(0xFFFFFFFFU);
   // 描边是**半透明白/黑光**叠在 surface 上的等效实色（歌白 `--border: rgba(0,0,0,.08)`）：
   // 同一个半透明描边在 `bg` / `surface` / `surface_alt` 上会显出不同强度，
   // 按主体底色合成一次即可（详见 `theme.hpp` 的亚克力口径 §1）。
   palette.border = hex(0xD2D2D9FFU);
   palette.border_strong = hex(0xB8B8C1FFU);
-  palette.border_subtle = hex(0xE1E1E7FFU);
+  // 细分隔线：**比 `border` 更淡**（护栏：`subtle` 亮度 > `border`）——
+  // 它的职责是“同组内”的弱分隔，不能抢过控件边界。
+  // 同时它对三档底色仍需 ≥ 1.10 才看得见——两个条件叠起来把可选区间压得很窄，
+  // `border` 与 `subtle` 只能成对调（差 8/255 是实测能同时满足两侧的最小档差）。
+  palette.border_subtle = hex(0xDADADFFFU);
   palette.text = hex(0x141418FFU);
   palette.text_muted = hex(0x4E4E5AFFU);
-  palette.text_faint = hex(0x6E6E7CFFU);
+  // `faint` 会被用在**编辑器内**（注释/行号）——而编辑器底是 `sunken`（阶梯最低点）。
+  // 它必须同时对 `bg`/`alt`/`surface`/`sunken` 达 4.5:1（WCAG AA 正文口径），
+  // 所以不能再跟着旧值停在 #6E6E7C（对 `sunken` 只有 3.68）。
+  palette.text_faint = hex(0x686876FFU);
   palette.primary = hex(0x4655D8FFU);
   palette.primary_hover = hex(0x3A48C8FFU);
   palette.primary_active = hex(0x2E3AB4FFU);
@@ -75,8 +94,8 @@ auto Theme::light() -> Theme {
   // 刚好卡在"浅底上单层不超过 16% 否则显脏"的上限内。
   palette.shadow = hex(0x0A0A1226U);
   palette.selection = hex(0xC6CBF7FFU);
-  palette.code_bg = hex(0xECECF2FFU);
-  palette.code_border = hex(0xDCDCE4FFU);
+  palette.code_bg = hex(0xEDEDF3FFU);
+  palette.code_border = hex(0xDFDFE7FFU);
   // 语法色板（浅色）：关键字紫、字符串绿、数字橙、注释灰、类型青、函数蓝——彼此高辨识度
   theme.syntax_.plain = hex(0x1E2433FFU);
   theme.syntax_.keyword = hex(0x8B31C7FFU);
@@ -126,39 +145,58 @@ auto Theme::dark() -> Theme {
   theme.name_ = "dark";
   Palette& palette = theme.colors_;
   // —— 黑色亚克力（默认暗色）——
-  // 近黑带一丝冷（R=G-2、B=G+2，与歌白 `#0c0c0f` 同族）。
-  // 关键约束：**中性色的饱和度极低**（<25%）——亚克力的"高级感"正来自这一点，
-  // 而把中性色放进 220° 蓝相（饱和度 47~63%）会让整个界面显蓝，与"黑色亚克力"相反。
-  palette.bg = hex(0x08080AFFU);
-  // 面板 = 半透明白光叠在背景上的等效实色（歌白 `--bg-elev`）。
-  // **必须与 bg 拉开到可量级**：近黑带的阶梯极密，差一档就看不见
-  // （实测旧值 #101014 对 #08080a 只有 1.054:1，卡片看上去是"贴"在背景上）。
-  palette.surface = hex(0x15151AFFU);
-  palette.surface_alt = hex(0x1F1F26FFU);
-  palette.surface_sunken = hex(0x050507FFU);
+  //
+  // ## 表面阶梅（2026-10-18 重定，对齐 VSCode Dark+ / IDEA Darcula）
+  //
+  // 旧阶梯的问题（用户报“编辑器背景不够下沉、与 UI 无区分度”）：
+  // `bg` 与 `sunken` 都很深，而**编辑器落在 `bg` 上**——于是编辑器、侧栏、
+  // 标签条全是同一个色（对比度 1.000），屏幕上一片糊；资源管理器反而更亮，
+  // 形成“内亮外暗”的颠倒。
+  //
+  // 主流的层次不是“越大越亮”，而是：
+  //   外壳条带（标题/活动/状态栏）  —— **最亮**，它是“框”
+  //   侧栏/面板（内容容器）      —— 中间
+  //   编辑器（焦点内容）        —— **比外壳暗**，往里沉
+  //   输入框/代码块/凹槽        —— 再暗一档
+  //   弹层/菜单            —— 亮回来（靠“浮起”脱离）
+  //
+  // 实测参照（VSCode Dark+）：编辑器 #1e1e1e < 侧栏 #252526 < 外壳 #333333。
+  // 本主题按同一方向排，色相保持“中性极低饱和度”的亚克力口径不变。
+  // 页面底。
+  // 它是暗色阶梯的**最低点**（`sunken` 必须比它亮——见 `ui_theme_test`），
+  // 所以不能像旧值那样比 `sunken` 还亮。同时它参与 `faint` 文字对比度取最小值，
+  // 压得太黑会把 `text_faint` 的 4.0:1 拖下去（实测 #0A0A0C 就不过）。
+  palette.bg = hex(0x111114FFU);
+  palette.surface = hex(0x1E1E24FFU);      ///< 侧栏/面板：内容容器
+  palette.surface_alt = hex(0x2A2A33FFU);  ///< 外壳条带：比面板再亮一档
+  palette.surface_sunken = hex(0x0D0D10FFU); ///< 编辑器底/输入框/代码块：往内沉
   // 抬升面（弹层/菜单）比 surface 再亮一档：深色下**阴影几乎不可见**，
   // 层次只能靠底色本身拉开。
-  palette.surface_raised = hex(0x25252DFFU);
-  // 描边 = 半透明白光（歌白 `--border` .12 / `--border-strong` .22）叠在 surface 上的等效值。
-  // 三档都要在 surface 上**量得出来**（≥1.35 / ≥1.8 / ≥1.10）——深色下描边是
-  // 控件边界的主要依据，淡一档就看不到。
-  palette.border = hex(0x313136FFU);
-  palette.border_strong = hex(0x4A4A4EFFU);
-  palette.border_subtle = hex(0x2A2A2EFFU);
+  palette.surface_raised = hex(0x34343FFFU);
+  // 描边 = 半透明白光叠在**面板色**上的等效值。
+  // 三档必须**同时**满足两组朝向相反的约束（`ui_theme_test` 锁着）：
+  //   ● 各自对 `surface`/`alt` 看得见（≥ 1.10）——外壳条带抬高后旧值集体不够；
+  //   ● 亮度顺序 `subtle < border < border_strong`——深色下“更淡 = 更暗”。
+  // 这组值是二分出来的可行解（旧 #313136/#2C2C34 在 #2A2A33 的 alt 上只有 1.02）。
+  palette.border = hex(0x4C4C54FFU);
+  palette.border_strong = hex(0x646470FFU);
+  palette.border_subtle = hex(0x36363CFFU);
   palette.text = hex(0xF2F2F5FFU);
   palette.text_muted = hex(0xB4B4BEFFU);
-  palette.text_faint = hex(0x80808CFFU);
+  // `faint` 会在**外壳条带（`alt`）上**用（状态栏提示/行号），而 `alt` 本次抬高了一档；
+  // 旧值 #80808C 对 `alt` 只有 3.64，不够 4.0。抬到对三档均 ≥ 4.0。
+  palette.text_faint = hex(0x8A8A96FFU);
   palette.primary = hex(0x8B9AFFFFU);
   palette.primary_hover = hex(0xA0ADFFFFU);
   palette.primary_active = hex(0x7787F5FFU);
   // 深色主题同样要给这套令牌：漏掉的话默认是全透明，**悬浮在暗色下毫无反馈**——
   // 而这种"某个主题下静默失效"的问题最难发现（浅色看着一切正常）。
-  palette.surface_hover = hex(0x2B2B30FFU);
-  palette.surface_pressed = hex(0x38383CFFU);
-  palette.border_hover = hex(0x606064FFU);
+  palette.surface_hover = hex(0x2A2A33FFU);
+  palette.surface_pressed = hex(0x363642FFU);
+  palette.border_hover = hex(0x70707EFFU);
   palette.glow = hex(0x8B9AFF38U);
-  palette.primary_soft = hex(0x282B40FFU);
-  palette.highlight = hex(0x2F2F33FFU);   ///< 顶部内高光：深色下的玻璃边缘（弱白光）
+  palette.primary_soft = hex(0x2A2E45FFU);
+  palette.highlight = hex(0x3A3A46FFU);   ///< 顶部内高光：深色下的玻璃边缘（弱白光）
   palette.on_primary = hex(0x0B0B14FFU);
   palette.accent = hex(0x6FD8E8FFU);
   palette.accent_soft = hex(0x1C292FFFU);
@@ -170,9 +208,10 @@ auto Theme::dark() -> Theme {
   // 深色主题的阴影基色比浅色重得多：深底上投影几乎看不见，需要更高不透明度
   // 才能提供一点“离地”分离度。
   palette.shadow = hex(0x000000B3U);
-  palette.selection = hex(0x273A6BFFU);
-  palette.code_bg = hex(0x050507FFU);
-  palette.code_border = hex(0x1E1E20FFU);
+  palette.selection = hex(0x2B3D66FFU);
+  // 代码块/行内代码底：与“编辑器底”再拉开一档（代码块是嵌在正文里的凹槽）。
+  palette.code_bg = hex(0x0C0C0FFFU);
+  palette.code_border = hex(0x2E2E38FFU);
   // 语法色板（深色）：同族色相提亮，保证在深底上仍有足够对比
   theme.syntax_.plain = hex(0xD7E0F0FFU);
   theme.syntax_.keyword = hex(0xC792EAFFU);

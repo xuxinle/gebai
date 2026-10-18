@@ -51,6 +51,10 @@ constexpr double k_blink_duty = 0.55;
 }
 
 /// 把主题 token 同步到 `style_`（仅填充未显式设置的项），供 `paint_box` 与 `visual` 树使用。
+///
+/// ⚠ 判据是 `a == 0`（“未显式设过”）：所以它**只能承担首次填充**，不能当主题刷新用——
+/// 一旦填过，`a != 0` 就永远是旧值（那是 2026-10-18 修的第二个缺陷，
+/// 见 `Input::apply_theme` 的注释）。
 void sync_control_style(Element& element, const RenderContext& context) {
   const Palette& colors = context.theme.colors();
   const Metrics& metrics = context.theme.metrics();
@@ -96,7 +100,12 @@ void paint_border(raster::Surface& canvas, math::Rect rect, float radius, math::
 
 // ————————————————— Input —————————————————
 
-Input::Input() { set_focusable(true); }
+Input::Input() {
+  set_focusable(true);
+  // 输入框 = 可编辑文字 → I-beam 指针（原生应用的通用约定：
+  // 看到插入点光标就知道“这里能打字/能选字”）。
+  set_cursor(MouseCursor::Text);
+}
 
 void Input::set_text(std::string text) {
   text_ = std::move(text);
@@ -279,6 +288,49 @@ auto Input::index_at_x(const RenderContext& context, float x) const -> std::size
     text_index = text_next;
   }
   return text_view.size();
+}
+
+void Input::apply_theme(const Theme& theme) {
+  Element::apply_theme(theme);
+  // **输入框的底色/描边必须随主题重落**（2026-10-18 修）。
+  //
+  // 缺陷形态（实测踩到）：`Input` 原本**没有** `apply_theme`，底色只在
+  // `measure` 里由 `sync_control_style` 做一次“未设则填”。而那次填充之后
+  // `style.background.a != 0`，后续每次 measure 都跳过——于是切主题时
+  // `style().background` 永久停在首次主题上。
+  //
+  // 为何“画面看着对”却仍是缺陷：`paint_content` 直读 `colors.surface`，
+  // 所以屏幕上的输入框会变；但 `style().background` 还供给 `visual` 树、
+  // `paint_box` 与控制通道的属性快照——它停在旧主题就造成“屏幕一套、
+  // 语义树另一套”。嵌在暗色命令面板里的输入框因此看着像一块没跟上的浅色区域。
+  //
+  // “显式设置优先”的保住方式：只在我方上一次写入的值**未被别人改过**时才覆盖。
+  //
+  // ⚠ 首轮特判不能省（实测踩到）：构造时 `applied_*` 是全透明，而 `style_` 可能
+  // 已被 `measure` 的 “未设则填” 写成某个具体色。若只看“是否等于我方上次写的值”，
+  // 首轮就会判为“被别人改过”→ 永远不更新 → 主题切换完全无效。
+  // 用 `theme_style_owned_` 记“这份色是我们落的”这个事实。
+  const math::Color next_bg = theme.colors().surface;
+  const math::Color next_border = theme.colors().border;
+  const auto untouched = [](math::Color current, math::Color mine) {
+    return current.r == mine.r && current.g == mine.g && current.b == mine.b &&
+           current.a == mine.a;
+  };
+  if (!theme_style_owned_ || untouched(style_.background, applied_theme_bg_)) {
+    style_.background = next_bg;
+    applied_theme_bg_ = next_bg;
+    theme_style_owned_ = true;
+  }
+  if (!theme_style_owned_ || untouched(style_.border_color, applied_theme_border_)) {
+    style_.border_color = next_border;
+    applied_theme_border_ = next_border;
+  }
+  // ⚠ **不要在这里 `mark_dirty()`**（实测踩到：加了它会让
+  // `script_write_takes_partial_damage_path` 这类“局部重绘”用例直接变红）：
+  // `apply_theme` 现在每帧都会被调（主题传播与重排解耦，见 `UiRoot::layout`），
+  // 无条件标脏等于“每帧整帧重绘”，把增量重绘整体作废。
+  // 真正需要重画的情况（主题真的变了）由 `UiRoot::set_theme` 的
+  // `mark_dirty_all()` 负责——那才是“全局变化”的正确入口。
 }
 
 void Input::measure(const RenderContext& context, const Constraints& constraints) {
@@ -640,7 +692,10 @@ auto Input::semantics_flags() const -> SemanticsFlags {
 
 // ————————————————— TextArea —————————————————
 
-TextArea::TextArea() { set_focusable(true); }
+TextArea::TextArea() {
+  set_focusable(true);
+  set_cursor(MouseCursor::Text);
+}
 
 void TextArea::set_read_only(bool value) noexcept {
   if (read_only_ == value) return;
