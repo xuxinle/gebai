@@ -504,7 +504,10 @@ void paint_wrap(Painter& p, const Scene& scene, float local_time, int scene_inde
                  slots.brand.latin, scene.accent, t * 0.9f);
   p.progress_dots(grid.center_x(), grid.height - grid.margin * 1.55f, scene_total, scene_index,
                   26.0f, scene.accent, t * 0.85f);
-  p.footer(grid.margin, grid.height - grid.margin * 0.92f, grid.width, scene.footer_note,
+  // 页脚左字：场景没给就用片名（空着会让包装缺一块，画面读起来仍然"散"）。
+  const std::string note = scene.footer_note.empty() ? std::string("GEBAI · 智体")
+                                                     : scene.footer_note;
+  p.footer(grid.margin, grid.height - grid.margin * 0.92f, grid.width, note,
            std::format("{:02d} / {:02d}", scene_index + 1, scene_total), scene.accent,
            t * 0.9f);
 }
