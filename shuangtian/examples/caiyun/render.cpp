@@ -87,6 +87,10 @@ auto Renderer::synth_audio(const AudioSpec& spec, double duration_s, const std::
                            VoiceReport* report) -> bool {
   if (!spec.enabled || duration_s <= 0.05) return false;
   constexpr int kRate = 44100;
+  // 输出电平预算（混音全程共用）：峰值空间配乐 0.28 / 人声 0.55 / 余量到 0.83。
+  // 配乐峰值必须低于人声峰值——否则无论怎么 duck 都盖不住旁白。
+  constexpr double kMusicCeiling = 0.28;
+  constexpr double kTotalCeiling = 0.86;
   const double bpm = static_cast<double>(std::min(std::max(spec.bpm, 40), 240));
   const double beat = 60.0 / bpm;
   const std::int64_t total = static_cast<std::int64_t>(duration_s * kRate) + kRate / 2;
@@ -146,9 +150,15 @@ auto Renderer::synth_audio(const AudioSpec& spec, double duration_s, const std::
   // 首尾淡入淡出的包络在最后的混音循环里一并施（见下方 `tail_fade`）。
 
   // —— 配乐归一化（先定好配乐自己的音量，再叠人声）——
+  //
+  // 电平分配（关键——直接决定「配乐盖不盖旁白」）：
+  // 峰值空间按 配乐 0.28 / 人声 0.55 划分（合计 0.83，留出 -1.6dBFS 余量）。
+  // 旧实现把配乐峰值直接推到 0.80，人声只剩下 0.15 的余地——峰值上配乐比人声
+  // 还高，无论怎么 ducking 都盖不住（实测人声仅比配乐高 1.7dB）。
+  // 宣传片里旁白是主、配乐是底，峰值上就该让配乐更低。
   double music_peak = 0.0;
   for (const double sample : mix) music_peak = std::max(music_peak, std::abs(sample));
-  const double music_target = 0.80 * static_cast<double>(std::clamp(spec.gain, 0.0f, 1.0f));
+  const double music_target = kMusicCeiling * static_cast<double>(std::clamp(spec.gain, 0.0f, 1.0f));
   const double music_scale = music_peak > 1e-6 ? music_target / music_peak : 0.0;
   for (double& sample : mix) sample *= music_scale;
 
@@ -157,7 +167,11 @@ auto Renderer::synth_audio(const AudioSpec& spec, double duration_s, const std::
   // 分工写在 `director.hpp` 的 VoiceTrack 上：**TTS 由 AI 侧做**（框架不含语音合成），
   // 裁云负责把成品人声与配乐混在一起封进 mp4。
   std::vector<double> voice_mix(static_cast<std::size_t>(total), 0.0);
-  std::vector<bool> ducked(static_cast<std::size_t>(total), false);
+  // 人声能量包络（供 ducking 用）：**逐样本的 |x|>阈值 不能当 ducking 门控**——
+  // 语音波形每个周期都穿零两次，逐样本判定会让压音增益在 1.0 与 0.35 之间以每秒上千次
+  // 的频率跳变，形成明显的门限噪声（实测 1777 次/秒，听感就是持续沙沙声）。
+  // 改为先求整流后的瞬时能量，再用一阶低通做快速起/慢速落的包络跟随，增益就变连续了。
+  std::vector<double> voice_env(static_cast<std::size_t>(total), 0.0);
   // 每一条读不到的轨都要留一句话：成片会“看起来正常、只是没人声”，
   // 而这正是最需要**说出来**的那类失败（配音是外部产物，缺席是常态）。
   const auto note = [report](std::string text) {
@@ -246,26 +260,53 @@ auto Renderer::synth_audio(const AudioSpec& spec, double duration_s, const std::
                            sample_at(std::min(frame_index + 1, frames - 1)) * fraction;
       const std::size_t slot = static_cast<std::size_t>(at);
       voice_mix[slot] += value * static_cast<double>(track.gain);
-      if (std::abs(value) > 0.02) ducked[slot] = true;
+      // 包络取整流后的幅度（不带 gain：门控只管"有没有人在说"）
+      voice_env[slot] = std::max(voice_env[slot], std::abs(value));
     }
     if (report != nullptr) ++report->mixed;
   }
 
-  // —— 混音：配乐在人声时段压到 35%（ducking），否则"BGM 盖住旁白"——
-  // 这是宣传片最常见的听感缺陷，而人工调音量很难逐个时段对得准。
+  // —— 混音 + ducking ——
   //
-  // 反向验证口径：把 `voice_mix[i]` 的乘数改成 `0.0` 后重建，
-  // `caiyun_director_e2e.py` 的 “[4b] 旁白轨混入”立即变红（已实测：
-  // “人声段 -31.9dB vs 空白段 -21.1dB”）。
-  constexpr double kDuckRatio = 0.35;
-  double peak = 0.0;
+  // **不能用逐样本的 |x|>阈值 当门控**：语音波形每周期穿零两次，二值门控会让压音增益
+  // 以每秒上千次的频率跳变——实测 1777 次/秒，听感是持续沙沙声（门限噪声）。
+  // 改为整流包络 + 一阶低通跟随，增益随人声连续变化。
+  constexpr double kDuckDepth = 0.65;   // 最多压下 65%（配乐 → 35%）
+  const double env_attack = 1.0 - std::exp(-1.0 / (0.015 * kRate));
+  const double env_release = 1.0 - std::exp(-1.0 / (0.350 * kRate));
+  constexpr double kEnvThreshold = 0.02;   // 低于此幅度视为「没人在说」
+  constexpr double kEnvFull = 0.12;        // 高于此幅度视为「满压」
+
+  // 人声轨先单独限幅到剩余余量（体积小，单跑一遗）
+  const double voice_room = std::max(0.0, kTotalCeiling - kMusicCeiling);
+  double voice_peak = 0.0;
+  for (const double sample : voice_mix) voice_peak = std::max(voice_peak, std::abs(sample));
+  // 人声归一化到自己的峰值上限（不问「剩余多少」，而是给足空间）
+  const double voice_scale = voice_peak > 1e-6 ? voice_room / voice_peak : 1.0;
+
+  // 叠混：同时求出配乐侧与总输出的峰值
+  double env = 0.0;
+  double ducked_music_peak = 0.0;
+  double total_peak = 0.0;
   for (std::size_t i = 0; i < mix.size(); ++i) {
-    const double music = ducked[i] ? mix[i] * kDuckRatio : mix[i];
-    mix[i] = music + voice_mix[i];
-    peak = std::max(peak, std::abs(mix[i]));
+    const double instant = voice_env[i];
+    // 快起慢落：起用 15ms、落用 350ms——与广播音频的 duck 惯例一致
+    const double coeff = instant > env ? env_attack : env_release;
+    env += (instant - env) * coeff;
+    const double control =
+        std::clamp((env - kEnvThreshold) / (kEnvFull - kEnvThreshold), 0.0, 1.0);
+    const double music = mix[i] * (1.0 - kDuckDepth * control);
+    const double mixed = music + voice_mix[i] * voice_scale;
+    mix[i] = mixed;
+    ducked_music_peak = std::max(ducked_music_peak, std::abs(music));
+    total_peak = std::max(total_peak, std::abs(mixed));
   }
-  const double limit = 0.95;
-  const double scale_final = peak > limit ? limit / peak : 1.0;
+
+  // 最后一道：只修「超顶」的突发峰值，不做整体抬升（抬升会把配乐一起推高，
+  // 反而把人声盖住——原实现 limit=0.95 就有这个毛病）。
+  const double scale_final = total_peak > kTotalCeiling ? kTotalCeiling / total_peak : 1.0;
+  // 配乐侧的归一化已经在 music_target 一步做过，此处只补突变保护
+  (void)ducked_music_peak;
   std::string wav;
   wav.reserve(static_cast<std::size_t>(total) * 2U + 44U);
   wav.append("RIFF");

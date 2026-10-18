@@ -908,8 +908,13 @@ void paint_terminal(Painter& p, const Scene& scene, float local_time, float dura
   }
 
   // 光标：闪烁（1.0s 周期，占空 55%）。
+  //
+  // 位置要**夹在卡片内**：卡片高度按"全部行"预留（`168 + 76*n`），而敲完最后一行后
+  // `cursor_y` 已经走到 `140 + 76*n`——直接画就落在卡片下边框之外 20px（实测：
+  // 一条蓝色竖块悬在卡片底边外面，看着像渲染错位）。夹一行内边距即可。
   if (typed > 0.0f && std::fmod(local_time, 1.0f) < 0.55f) {
-    p.fill(cursor_x, cursor_y + 8.0f, 16.0f, 40.0f, with_alpha(scene.accent, 0.9f));
+    const float cursor_top = std::min(cursor_y, card_y + card_h - 64.0f);
+    p.fill(cursor_x, cursor_top + 8.0f, 16.0f, 40.0f, with_alpha(scene.accent, 0.9f));
   }
 
   // 底部说明（打完才出现）。

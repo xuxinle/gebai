@@ -157,6 +157,23 @@ void render_test_chart(Canvas& canvas, double time, Color tint, const st::ui::Te
 auto Project::apply_script(Script next) -> bool {
   if (next.scenes.empty()) return false;
   script = std::move(next);
+  // 品牌识标与页脚从 Script 级**下发到每个 Scene**（`Scene::brand_wordmark` 注释里
+  // 写着"由 apply_script 从 Script 复制"，但早先这里没有这段——于是包装层的
+  // 识标与页脚永远不画，脚本里写了 `brand_wordmark`/`footer_note` 也静默无效果）。
+  //
+  // 为何要复制而不是渲染时回查 Script：渲染是**纯函数**（只依赖 Scene 与 time），
+  // 回查 Script 会引入隐藏输入，破坏"同一时刻两次渲染逐像素相同"的判据。
+  for (Scene& scene : script.scenes) {
+    if (script.show_brand) {
+      scene.brand_wordmark = script.brand_wordmark;
+      scene.brand_latin = script.brand_latin;
+    } else {
+      scene.brand_wordmark.clear();
+      scene.brand_latin.clear();
+    }
+    // 片段级 `footer_note` 优先（脚本显式写了就用它），否则继承 Script 级。
+    if (scene.footer_note.empty()) scene.footer_note = script.footer_note;
+  }
   fps = script.fps;
   duration = std::max(0.2, script.total_duration());
   playhead = std::clamp(playhead, 0.0, duration);

@@ -1,0 +1,399 @@
+{
+  "name": "歌白 · 竖版主题海报",
+  "width": 1080,
+  "height": 1920,
+  "out_width": 1080,
+  "out_height": 1920,
+  "background": "#08080c",
+  "blocks": [
+    {
+      "kind": "background",
+      "name": "底色",
+      "color": "#08080c",
+      "color_alt": "#151522"
+    },
+    {
+      "kind": "grid",
+      "name": "栅格",
+      "color": "#8b9aff0e",
+      "width": 4,
+      "inset": 100,
+      "thickness": 1
+    },
+    {
+      "kind": "frame",
+      "name": "版心",
+      "color": "#8b9aff22",
+      "inset": 56,
+      "thickness": 1.5
+    },
+    {
+      "kind": "corners",
+      "name": "角标",
+      "color": "#8b9aff6e",
+      "inset": 36,
+      "size": 40,
+      "thickness": 2
+    },
+    {
+      "kind": "body",
+      "name": "品牌",
+      "text": "歌白",
+      "x": 0.07777777777777778,
+      "y": 132,
+      "align": 1,
+      "size": 44,
+      "bold": true,
+      "color": "#f2f2f5"
+    },
+    {
+      "kind": "body",
+      "name": "品牌拉丁",
+      "text": "GEBAI AGENT",
+      "x": 0.07777777777777778,
+      "y": 198,
+      "align": 1,
+      "size": 19,
+      "tracking": 7,
+      "color": "#8b9aff"
+    },
+    {
+      "kind": "body",
+      "name": "HUD1",
+      "text": "SHUANGTIAN · C++ NATIVE",
+      "x": 0.9222222222222223,
+      "y": 140,
+      "align": 2,
+      "size": 16,
+      "tracking": 5,
+      "color": "#b4b4bec4"
+    },
+    {
+      "kind": "body",
+      "name": "HUD2",
+      "text": "22 SUB-AGENTS · 4 SIDE-CAR LANGS",
+      "x": 0.9222222222222223,
+      "y": 172,
+      "align": 2,
+      "size": 15,
+      "tracking": 3,
+      "color": "#80808cb4"
+    },
+    {
+      "kind": "line",
+      "name": "连线",
+      "x1": 423.5,
+      "y1": 526,
+      "x2": 259.9,
+      "y2": 421.9,
+      "color": "#8b9aff4d",
+      "thickness": 1.4
+    },
+    {
+      "kind": "line",
+      "name": "连线",
+      "x1": 656.5,
+      "y1": 526,
+      "x2": 820.1,
+      "y2": 421.9,
+      "color": "#8b9aff4d",
+      "thickness": 1.4
+    },
+    {
+      "kind": "line",
+      "name": "连线",
+      "x1": 423.5,
+      "y1": 674,
+      "x2": 259.9,
+      "y2": 778.1,
+      "color": "#8b9aff4d",
+      "thickness": 1.4
+    },
+    {
+      "kind": "line",
+      "name": "连线",
+      "x1": 656.5,
+      "y1": 674,
+      "x2": 820.1,
+      "y2": 778.1,
+      "color": "#8b9aff4d",
+      "thickness": 1.4
+    },
+    {
+      "kind": "badge",
+      "name": "外环",
+      "x": 0.5,
+      "y": 600,
+      "radius": 138,
+      "color": "#8b9aff"
+    },
+    {
+      "kind": "badge",
+      "name": "内环",
+      "x": 0.5,
+      "y": 600,
+      "radius": 88,
+      "color": "#ffffff77"
+    },
+    {
+      "kind": "badge",
+      "name": "节点 TS",
+      "x": 0.22037037037037038,
+      "y": 408,
+      "radius": 26,
+      "color": "#8b9aff"
+    },
+    {
+      "kind": "body",
+      "name": "节点标签 TS",
+      "text": "TS",
+      "x": 0.22037037037037038,
+      "y": 456,
+      "size": 22,
+      "tracking": 3,
+      "bold": true,
+      "color": "#f2f2f5"
+    },
+    {
+      "kind": "body",
+      "name": "节点副标 TS",
+      "text": "SUB-AGENT",
+      "x": 0.22037037037037038,
+      "y": 488,
+      "size": 13,
+      "tracking": 3,
+      "color": "#80808c"
+    },
+    {
+      "kind": "badge",
+      "name": "节点 PYTHON",
+      "x": 0.7796296296296297,
+      "y": 408,
+      "radius": 26,
+      "color": "#8b9aff"
+    },
+    {
+      "kind": "body",
+      "name": "节点标签 PYTHON",
+      "text": "PYTHON",
+      "x": 0.7796296296296297,
+      "y": 456,
+      "size": 22,
+      "tracking": 3,
+      "bold": true,
+      "color": "#f2f2f5"
+    },
+    {
+      "kind": "body",
+      "name": "节点副标 PYTHON",
+      "text": "SIDE-CAR",
+      "x": 0.7796296296296297,
+      "y": 488,
+      "size": 13,
+      "tracking": 3,
+      "color": "#80808c"
+    },
+    {
+      "kind": "badge",
+      "name": "节点 C++",
+      "x": 0.22037037037037038,
+      "y": 792,
+      "radius": 26,
+      "color": "#8b9aff"
+    },
+    {
+      "kind": "body",
+      "name": "节点标签 C++",
+      "text": "C++",
+      "x": 0.22037037037037038,
+      "y": 840,
+      "size": 22,
+      "tracking": 3,
+      "bold": true,
+      "color": "#f2f2f5"
+    },
+    {
+      "kind": "body",
+      "name": "节点副标 C++",
+      "text": "SIDE-CAR",
+      "x": 0.22037037037037038,
+      "y": 872,
+      "size": 13,
+      "tracking": 3,
+      "color": "#80808c"
+    },
+    {
+      "kind": "badge",
+      "name": "节点 GO / RUST",
+      "x": 0.7796296296296297,
+      "y": 792,
+      "radius": 26,
+      "color": "#8b9aff"
+    },
+    {
+      "kind": "body",
+      "name": "节点标签 GO / RUST",
+      "text": "GO / RUST",
+      "x": 0.7796296296296297,
+      "y": 840,
+      "size": 22,
+      "tracking": 3,
+      "bold": true,
+      "color": "#f2f2f5"
+    },
+    {
+      "kind": "body",
+      "name": "节点副标 GO / RUST",
+      "text": "SIDE-CAR",
+      "x": 0.7796296296296297,
+      "y": 872,
+      "size": 13,
+      "tracking": 3,
+      "color": "#80808c"
+    },
+    {
+      "kind": "body",
+      "name": "图注",
+      "text": "能力外置 · 权力内守",
+      "x": 0.5,
+      "y": 926,
+      "size": 27,
+      "tracking": 8,
+      "color": "#8b9aff"
+    },
+    {
+      "kind": "body",
+      "name": "主标题1",
+      "text": "融合旧世界 IT 的所有技术",
+      "x": 0.5,
+      "y": 1042,
+      "size": 68,
+      "tracking": 3,
+      "bold": true,
+      "color": "#f2f2f5"
+    },
+    {
+      "kind": "body",
+      "name": "主标题2",
+      "text": "打造新世界智能的躯体",
+      "x": 0.5,
+      "y": 1132,
+      "size": 68,
+      "tracking": 3,
+      "bold": true,
+      "color": "#f2f2f5"
+    },
+    {
+      "kind": "rule",
+      "name": "强调线",
+      "x": 0.5,
+      "y": 1246,
+      "width": 220,
+      "color": "#8b9aff"
+    },
+    {
+      "kind": "body",
+      "name": "副标",
+      "text": "一个能收编任意技术、也能改自己代码的智体",
+      "x": 0.5,
+      "y": 1282,
+      "size": 27,
+      "tracking": 3,
+      "color": "#b4b4be"
+    },
+    {
+      "kind": "divider",
+      "name": "分区线上",
+      "x": 0.5,
+      "y": 1376,
+      "inset": 120,
+      "thickness": 1.2,
+      "color": "#8b9aff26"
+    },
+    {
+      "kind": "body",
+      "name": "要点1",
+      "text": "能力外置　任何语言、任何进程皆为躯体材料",
+      "flow": 1,
+      "flow_rank": 0,
+      "x": 0.5,
+      "y": 1426,
+      "size": 29,
+      "tracking": 2,
+      "color": "#d6dcf0"
+    },
+    {
+      "kind": "body",
+      "name": "要点2",
+      "text": "权力内守　裁决留在 TS 引擎，审批留痕可审计",
+      "flow": 1,
+      "flow_rank": 1,
+      "x": 0.5,
+      "y": 1426,
+      "size": 29,
+      "tracking": 2,
+      "color": "#d6dcf0"
+    },
+    {
+      "kind": "body",
+      "name": "要点3",
+      "text": "代码即一切　改代码不改权重，测试是唯一凭证",
+      "flow": 1,
+      "flow_rank": 2,
+      "x": 0.5,
+      "y": 1426,
+      "size": 29,
+      "tracking": 2,
+      "color": "#d6dcf0"
+    },
+    {
+      "kind": "divider",
+      "name": "分区线下",
+      "x": 0.5,
+      "y": 1596,
+      "inset": 120,
+      "thickness": 1.2,
+      "color": "#8b9aff26"
+    },
+    {
+      "kind": "body",
+      "name": "页脚数据",
+      "text": "22 子 Agent · Python / C++ / Go / Rust 客卿 · 283 测试文件",
+      "x": 0.5,
+      "y": 1638,
+      "size": 21,
+      "tracking": 2,
+      "color": "#b4b4be"
+    },
+    {
+      "kind": "body",
+      "name": "页脚形态",
+      "text": "桌面应用 · 本地浏览器 · 服务端部署 —— 一个二进制，零运行时依赖",
+      "x": 0.5,
+      "y": 1684,
+      "size": 21,
+      "tracking": 2,
+      "color": "#b4b4be"
+    },
+    {
+      "kind": "body",
+      "name": "页脚自证",
+      "text": "本海报由 镂月 Lunaris（霜天 C++ 渲染器）渲染",
+      "x": 0.5,
+      "y": 1766,
+      "size": 16,
+      "tracking": 3,
+      "color": "#80808c"
+    },
+    {
+      "kind": "body",
+      "name": "页脚版权",
+      "text": "MIT © GEBAI CONTRIBUTORS",
+      "x": 0.5,
+      "y": 1808,
+      "size": 13,
+      "tracking": 5,
+      "color": "#80808c99"
+    }
+  ]
+}

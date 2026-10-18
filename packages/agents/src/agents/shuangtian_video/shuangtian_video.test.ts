@@ -74,14 +74,25 @@ describe("shuangtian_video / shuangtian_poster", () => {
 
   test("视频子代理带上了语音与音效工具（裁云不自合成音效，靠 tts_sfx 出 WAV）", async () => {
     // 这条钉住一个**能力边界**：裁云渲染器只混音、不合成音效。
-    // 若有人把 tts 从工具面里去掉，子代理就再也做不出 riser→impact→sparkle 收尾，
-    // 而这种缺失在出片时只表现为"片子没声音"——很难从现象反推。
+    // 工具必须在位，否则子代理就做不出任何音效（出片时只表现为"片子没声音"，很难反推）。
+    // 注意：**工具在位 ≠ 默认该用**——何时该用由下一条测试（默认零音效）约束。
     const mod = shuangtianVideo as unknown as { tools: Record<string, unknown> }
     for (const required of ["speak", "sfx", "voices", "effect", "mix"]) {
       expect(mod.tools).toHaveProperty(required)
     }
     expect(shuangtianVideo.systemPrompt).toContain("tts_sfx")
-    expect(shuangtianVideo.systemPrompt).toContain("riser")
+  })
+
+  test("音效默认零（模板不得再鼓励 riser→impact→sparkle 三件套）", async () => {
+    // 踩过的坑：模板原本写着「收尾固定 riser→impact→sparkle 三件套」，子代理于是
+    // 照模板填满音效，而裁云只对**配乐**做 ducking、对音效不做——实测音效比旁白还响，
+    // 听感是「叮一下把说话盖掉」。根因在规则本身，所以规则要反过来。
+    const prompt = shuangtianVideo.systemPrompt
+    expect(prompt).toContain("音效默认不加")
+    expect(prompt).not.toContain("收尾固定")
+    // 加音效的三条硬约束必须在场：gain 上限、响度比旁白低 6dB、只在旁白空隙
+    expect(prompt).toContain("0.25")
+    expect(prompt).toContain("6dB")
   })
 
   test("提示词里写清了关键事实（不是空壳）", async () => {
