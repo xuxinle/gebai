@@ -86,9 +86,40 @@ class SplitView : public Element {
   void set_step(float step);
   [[nodiscard]] auto step() const noexcept -> float { return step_; }
 
-  /// 手柄宽/高（命中区尺寸，默认 8px；视觉线宽见 paint）。
+  /// 手柄命中区宽/高（默认 **12px**，两侧各张 6px）。
+  ///
+  /// 为什么可以给得比视觉线宽得多（2026-10-18）：手柄已改为**不占布局空间**
+  ///（贴边重叠，见 `handle_rect`），它不再撑开两个面板——所以这个值
+  /// **纯粹是“好不好抓”**，与分割线看上去多粗毫无关系。
+  /// 12px 是桌面拖拽把手的常规量级（Figma / VSCode 的分栏命中区同数量级），
+  /// 鼠标过来就抓得住，不用像素级瞄准。
+  ///
+  /// 代价：它会向两侧面板各盖 6px。面板边缘本来也不放可点内容
+  ///（`CodeEditor` 左边是行号栏、侧栏右边是滚动条留白），所以实际无感。
   void set_handle_size(float size);
   [[nodiscard]] auto handle_size() const noexcept -> float { return handle_size_; }
+
+  // —— 命中 ——
+  /// 手柄区域归自己（**不是整块矩形**）：只有落在手柄内才算“点到了分割线”，
+  /// 其余一律 false 交给子面板——否则 SplitView 会把里面所有按钮的点击都吃掉。
+  [[nodiscard]] auto hit_test(math::Point point) const noexcept -> bool override {
+    return handle_rect().contains(point);
+  }
+  /// 手柄贴边重叠：必须在子元素**之前**拿命中，否则永远拖不动
+  ///（理由见 `Element::claims_hit_before_children`）。
+  [[nodiscard]] auto claims_hit_before_children(math::Point point) const noexcept
+      -> bool override {
+    return handle_rect().contains(point);
+  }
+  /// 分隔线 → 双向箭头（方向跟分栏方向一致）；其余位置交给子面板。
+  ///
+  /// ⚠ 这里返回 `Arrow` 表示“我没意见”：`UiRoot` 会**逐级向上回退**，
+  /// 最终落到子元素自己声明的光标上（如面板里的编辑器是 I-beam）。
+  /// 所以不能在非手柄区返回别的值，否则会把整个面板的光标都吃掉。
+  [[nodiscard]] auto cursor_at(math::Point point) const noexcept -> MouseCursor override {
+    if (!handle_rect().contains(point)) return MouseCursor::Arrow;
+    return orientation_ == Orientation::Horizontal ? MouseCursor::ResizeH : MouseCursor::ResizeV;
+  }
 
   // —— 面板显隐（保留子元素，只退出布局与交互）——
   //
@@ -141,7 +172,7 @@ class SplitView : public Element {
   float default_ratio_{0.5f};
   float min_ratio_{0.15f};
   float step_{0.05f};
-  float handle_size_{8.0f};
+  float handle_size_{12.0f};
   bool dragging_{false};
   bool first_hidden_{false};
   bool second_hidden_{false};

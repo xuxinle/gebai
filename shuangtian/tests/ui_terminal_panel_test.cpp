@@ -149,9 +149,13 @@ ST_TEST(split_view_hidden_second_degrades_to_single_panel) {
   SplitView* split_ptr = split.get();
   root.set_content(std::move(split));
   root.layout(true);
-  // 双侧：各半减手柄，手柄在中间。
-  ST_CHECK(first->bounds().height < 300.0f);
-  ST_CHECK(second->bounds().height < 300.0f);
+  // 双侧：各占**正好一半**（2026-10-18 起手柄不占布局，所以不再“各半减手柄”），
+  // 两面板直接相邻。旧断言写的是 `< 300`（因为那时手柄吃掉了高度）——
+  // 现在 600/2 = 300 整，应该用 `<=` 并额外锁住“相邻不漏缝”。
+  ST_CHECK(first->bounds().height <= 300.0f + 0.01f);
+  ST_CHECK(second->bounds().height <= 300.0f + 0.01f);
+  ST_CHECK_NEAR(first->bounds().height + second->bounds().height, 600.0f, 0.01f);
+  ST_CHECK_NEAR(second->bounds().y, first->bounds().bottom(), 0.01f);
   ST_CHECK(split_ptr->handle_rect().height > 0.0f);
 
   // 隐藏第二面板：第一面板占满，手柄消失，第二面板不可见。
@@ -167,7 +171,7 @@ ST_TEST(split_view_hidden_second_degrades_to_single_panel) {
   split_ptr->set_second_hidden(false);
   root.layout(true);
   ST_CHECK(second->visible());
-  ST_CHECK(first->bounds().height < 300.0f);
+  ST_CHECK(first->bounds().height <= 300.0f + 0.01f);
   ST_CHECK(split_ptr->handle_rect().height > 0.0f);
   ST_CHECK_EQ(split_ptr->get_property("second_hidden").value_or(""), std::string{"false"});
 }

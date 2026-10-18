@@ -192,10 +192,11 @@ void SplitView::measure(const RenderContext& context, const Constraints& constra
       if (height >= kUnbounded) height = first_h;
     } else {
       if (width >= kUnbounded) {
-        width = horizontal ? first_w + handle_size_ + second_w : std::max(first_w, second_w);
+        // 无界主轴时不再加手柄尺寸：手柄不占布局（见 `handle_rect`）。
+        width = horizontal ? first_w + second_w : std::max(first_w, second_w);
       }
       if (height >= kUnbounded) {
-        height = horizontal ? std::max(first_h, second_h) : first_h + handle_size_ + second_h;
+        height = horizontal ? std::max(first_h, second_h) : first_h + second_h;
       }
     }
     // 尺寸已定：**用有限约束重测子面板**（主轴上按 ratio 分）。
@@ -252,7 +253,8 @@ void SplitView::measure_with(const RenderContext& context, float width, float he
     }
     return;
   }
-  const float usable = std::max(0.0f, (horizontal ? width : height) - handle_size_);
+  // 主轴按 ratio 直接分（不再减手柄：手柄不占布局，与 `layout_children` 同几何）。
+  const float usable = std::max(0.0f, horizontal ? width : height);
   const float first_main = usable * ratio_;
   const float second_main = usable - first_main;
   for (std::size_t index = 0; index < children_.size() && index < 2; ++index) {
@@ -280,15 +282,23 @@ auto SplitView::handle_rect() const -> math::Rect {
   // 空矩形同时让绘制与命中自然失效）。
   if (first_hidden_ || second_hidden_) return math::Rect{};
   const bool horizontal = orientation_ == Orientation::Horizontal;
-  // 手柄中心 = 首面板宽 + 手柄一半（与 layout_children 同一份几何：两处必须逐像素一致，
-  // 否则「拖到零界」与「画在零界」错位）。首面板宽 = 可用空间 × ratio。
-  const float usable = std::max(0.0f, main_extent() - handle_size_);
-  const float center = usable * ratio_ + handle_size_ * 0.5f;
+  // ## 手柄**贴边重叠**，不占布局空间（2026-10-18 修）
+  //
+  // 旧实现让手柄占据 8px 布局空间（`usable = main - handle; 面板 + 手柄 + 面板`），
+  // 而 `SplitView` 自身 `background` 是全透明——于是那 8px 露出的是**页面底色**，
+  // 与两侧面板色都不同，在屏幕上就是一条“有宽度的填充带”；中间再叠 1px 线，
+  // 观感就是“填充 + 边框”的条块（用户原话：分割线显示一条线就行，
+  // 不要有填充宽度和边框）。实测像素：侧栏 (30,30,36) → 4px (17,17,20)
+  // → 1px (76,76,84) → 4px (17,17,20) → 编辑区 (13,13,16)。
+  //
+  // 现在：两侧面板**直接相邻**（见 `layout_children`），手柄矩形以边界为中轴
+  // 向两侧各张开一半——纯命中区，不参与布局。视觉上两面板紧贴，只剩那条 1px 线。
+  const float boundary = bounds_.x + (horizontal ? main_extent() * ratio_ : 0.0f);
+  const float half = handle_size_ * 0.5f;
   if (horizontal) {
-    return math::Rect{bounds_.x + center - handle_size_ * 0.5f, bounds_.y, handle_size_,
-                      bounds_.height};
+    return math::Rect{boundary - half, bounds_.y, handle_size_, bounds_.height};
   }
-  return math::Rect{bounds_.x, bounds_.y + center - handle_size_ * 0.5f, bounds_.width,
+  return math::Rect{bounds_.x, bounds_.y + main_extent() * ratio_ - half, bounds_.width,
                     handle_size_};
 }
 
@@ -306,31 +316,31 @@ void SplitView::layout_children(const RenderContext& context) {
     if (only != nullptr) only->arrange(context, bounds_);
     return;
   }
-  const float grabbed = handle_size_;
-  // 两侧可用空间按 ratio 分配（ratio 是「首面板占**可用**空间的比例」）：
-  // 含手柄时几何也保持「ratio=0.5 两侧等宽」的直觉。
-  const float usable = std::max(0.0f, main_extent() - grabbed);
-  const float first_main = usable * ratio_;
-  const float second_main = usable - first_main;
+  const float first_main = main_extent() * ratio_;
+  const float second_main = main_extent() - first_main;
 
+  // **两侧面板直接相邻，不为手柄留缝**（2026-10-18）：
+  // 手柄只存在于命中层（`handle_rect` 以边界为中轴张开），不参与布局。
+  // 这样分割线在屏幕上就是“两个面板贴在一起 + 一条 1px 线”，而不是
+  // “面板 + 一条 8px 的页面底色缝 + 面板”。
   if (horizontal) {
     first->arrange(context, math::Rect{bounds_.x, bounds_.y, first_main, bounds_.height});
     second->arrange(context,
-                    math::Rect{bounds_.x + first_main + grabbed, bounds_.y, second_main,
+                    math::Rect{bounds_.x + first_main, bounds_.y, second_main,
                                bounds_.height});
   } else {
     first->arrange(context, math::Rect{bounds_.x, bounds_.y, bounds_.width, first_main});
-    second->arrange(context, math::Rect{bounds_.x, bounds_.y + first_main + grabbed,
+    second->arrange(context, math::Rect{bounds_.x, bounds_.y + first_main,
                                         bounds_.width, second_main});
   }
 }
 
 auto SplitView::ratio_at(float pointer_main) const noexcept -> float {
-  const float usable = std::max(1.0f, main_extent() - handle_size_);
+  const float usable = std::max(1.0f, main_extent());
   const float base = orientation_ == Orientation::Horizontal ? bounds_.x : bounds_.y;
-  // 指针主轴坐标 → 手柄中心 → 比例（手柄中心 = usable·ratio + H/2，解出 ratio）。
-  const float center = pointer_main - base - handle_size_ * 0.5f;
-  return clamp_ratio(center / usable);
+  // 指针主轴坐标 → 比例。手柄不再占布局空间，所以分隔线就落在 `base + extent*ratio`，
+  // 不需要再减那一半手柄（减了会让拖拽点与线错开半个手柄宽）。
+  return clamp_ratio((pointer_main - base) / usable);
 }
 
 void SplitView::paint_content(const RenderContext& context, raster::Surface& canvas) const {
@@ -480,6 +490,10 @@ auto SplitView::get_property(std::string_view name) const -> std::optional<std::
   if (name == "default_ratio") return std::format("{}", default_ratio_);
   if (name == "min_ratio") return std::format("{}", min_ratio_);
   if (name == "step") return std::format("{}", step_);
+  // 只读：手柄命中区尺寸。**给自动化用**——拖拽把手的位置 = 边界 ± 它的一半，
+  // 不知道这个值就只能靠猜（旧 e2e 就写死了 `(height - 8) * ratio + 4`，
+  // 而默认值从 8 改成 6 后直接抓不到。暴露真值比让每个调用方维护副本可靠）。
+  if (name == "handle_size") return std::format("{}", handle_size_);
   if (name == "first_hidden") return first_hidden_ ? std::string("true") : std::string("false");
   if (name == "second_hidden") return second_hidden_ ? std::string("true") : std::string("false");
   if (name == "orientation") {
@@ -531,7 +545,10 @@ auto SplitView::set_property(std::string_view name, std::string_view value) -> b
 }
 
 auto SplitView::property_names() const -> std::vector<std::string_view> {
-  return {"ratio", "default_ratio", "min_ratio", "step", "orientation", "first_hidden", "second_hidden"};
+  // `handle_size` 是**只读**的（不列在 `set_property` 里）：它供自动化计算
+  // 拖拽把手的真实落点，改了它只会让命中区与视觉错位。
+  return {"ratio",       "default_ratio", "min_ratio", "step",      "orientation",
+          "first_hidden", "second_hidden", "handle_size"};
 }
 
 auto SplitView::invoke_action(std::string_view action, std::string_view argument) -> bool {

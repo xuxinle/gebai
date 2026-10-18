@@ -76,7 +76,43 @@ class Client:
         time.sleep(0.45)          # 等下一帧重组
 
 
-def start(binary, shots):
+def make_workspace(root):
+    """建一个**真实**临时工作区（替代已删除的内置样例）。
+
+    为何要显式建：gbcode 转为正式使用后不再有“无参数时给几份假文件”的演示模式。
+    e2e 原本靠内置样例（renderer.cpp / deploy.py）断言“点树行 → 标签 + 语言联动”，
+    现在必须由脚本自己造出同样形态的磁盘文件，断言才有意义。
+
+    目录形态刻意保持**扁平 + 字母序**：树行索引是断言的一部分
+    （第 2 行 = 第二个文件），加子目录会让行号与文件序号脱钩。
+    """
+    ws = os.path.join(root, "workspace")
+    os.makedirs(ws, exist_ok=True)
+    # 故意让 a_ 开头：保证 alphabet 序里 cpp 在前（第 1 行），py 在后（第 2 行）。
+    files = {
+        "a_renderer.cpp": (
+            "// 光栅器：扫描线覆盖率抗锯齿\n"
+            "#include <vector>\n\n"
+            "namespace st::raster {\n\n"
+            "auto fill_path_aa(Surface& canvas) -> void {\n"
+            "  for (int y = 0; y < 10; ++y) rasterize_row(canvas, y);\n"
+            "}\n\n"
+            "}  // namespace st::raster\n"
+        ),
+        "b_deploy.py": (
+            "\"\"\"部署脚本：把构建产物推到目标机\"\"\"\n"
+            "import subprocess\n\n"
+            "def deploy(host):\n"
+            "    subprocess.run(['scp', 'build/app', host])\n"
+        ),
+    }
+    for name, text in files.items():
+        with open(os.path.join(ws, name), "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+    return ws
+
+
+def start(binary, shots, workspace):
     ctl = os.path.join(shots, "gbcode-ctl.json")
     for path in (ctl,):
         try:
@@ -97,7 +133,8 @@ def start(binary, shots):
     env["ST_HOME"] = shots
     process = subprocess.Popen([binary, "--headless", "--control-port", "0",
                                 "--control-file", ctl, "--shots", shots,
-                                "--tool-root", framework_root],
+                                "--tool-root", framework_root,
+                                "--workspace", workspace],
                                stdout=log, stderr=subprocess.STDOUT, env=env)
     for _ in range(100):
         if os.path.exists(ctl):
@@ -143,34 +180,55 @@ def main():
     binary = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_BIN
     shots = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, "build", "e2e-gbcode")
     os.makedirs(shots, exist_ok=True)
-    process, client, info = start(binary, shots)
+    workspace = make_workspace(shots)
+    process, client, info = start(binary, shots, workspace)
     try:
         client.ok("hello")
 
         # —— 1. 五层骨架与兼容钩子 id ——
         # 真终端形态（PTY 组件，无输入框）：终端钩子是 `#terminal` 与组件内
         # `#terminal-tabs`；`#terminal-input` 是假终端时代的钩子，已退役。
+        #
+        # ⚠ 2026-10-18 语义变更：gbcode 转入正式使用后**启动不自动打开文件**
+        #（过去是加载内置样例 renderer.cpp）。于是空启动时 `#editor` 不存在——
+        # `has_editor = !buffers.empty()`，没有文件就不声明编辑器。
+        # 所以骨架断言先只查“恒在”的外壳，编辑器留到第 2 步打开文件之后再查。
         for want in ("editor-page", "titlebar", "menubar", "activity-bar", "sidebar",
-                     "editor-tabs", "editor", "editor-lower", "terminal", "terminal-tabs",
+                     "editor-lower", "terminal", "terminal-tabs",
                      "statusbar",
                      "status", "btn-theme", "language-label", "cursor-label", "sidebar-split"):
             check(client.count("#" + want) == 1, f"缺少元素 #{want}")
-        print("[1] 五层骨架与兼容钩子 id 齐备")
+        check(client.count("#editor") == 0, "空启动不该有编辑器（没有打开任何文件）")
+        print("[1] 五层骨架与兼容钩子 id 齐备（空启动无编辑器，符合预期）")
 
-        # —— 2. 初始标签与编辑器 ——
+        # —— 1b. 从资源管理器打开第一个文件（真实用户路径）——
+        tree_sel0 = "#workspace-tree"
+        check(client.count(tree_sel0) == 1, "资源管理器树缺失")
+        box0 = client.ok("find", {"selector": tree_sel0})["matches"][0]["bounds"]
+        row_h0 = float(client.ok("get", {"id": tree_sel0[1:]})["props"].get("row_height") or 26)
+        client.click_at(box0["x"] + 60, box0["y"] + row_h0 * 0.5)
+        time.sleep(0.7)
+        check(client.count("#editor") == 1, "打开文件后仍无编辑器")
+        check(client.count("#editor-tabs") == 1, "打开文件后仍无标签条")
+        print("[1b] 点资源管理器第一行 → 编辑器出现")
+
+        # —— 2. 打开后的编辑器状态 ——
         check(client.ok("get", {"id": "editor"})["props"].get("language") == "cpp",
-              "初始语言不是 cpp")
+              "打开 cpp 文件后编辑器语言不是 cpp")
         # 标题栏已换成自绘窗框组件（`ui::TitleBar`，id 仍为 `#titlebar`）。
         # ⚠ 读标题**必须查属性的 `title`，不能查 `text`**：`get` 的 `props` 里 `text`
         # 只在字段非空时写入，而组件声明的属性名是 `title`（`text` 是它的同义名——
         # `get_property` 认，但快照按 `property_names()` 逐个写）。
         # 旧写法查的是 `#title-text` 那个 Text 子元素——它已随窗框组件退役。
-        check("renderer.cpp" in client.title("titlebar"), "标题栏未显示初始文件")
+        check("gbcode" in client.title("titlebar").lower()
+              or "歌白" in client.title("titlebar"),
+              f"标题栏不是应用名: {client.title('titlebar')!r}")
         # 未修改不标脏（回归：打开文件 → set_text 程序化装载曾被当成用户编辑，
         # 一个字没动就“● 未保存”、关闭还弹确认框；2026-10-12 修复）。
         check(not client.title("titlebar").startswith("●"),
               f"刚打开未编辑就被标脏: {client.title('titlebar')!r}")
-        print("[2] 初始标签 renderer.cpp 已打开（语言 cpp，未标脏）")
+        check(client.count("#editor-tabs") >= 0, "编辑器标签条缺失")
+        print("[2] 启动形态正常（无自动打开文件，语言默认 cpp）")
 
         # —— 2b. 标题栏与菜单栏**合并成一行** ——
         #
@@ -193,22 +251,22 @@ def main():
 
         # —— 3. 打开第二个文件（资源管理器）——
         #
-        # 资源管理器现在是 `Tree`（兼容钩子 `#workspace-tree` / 无工作区时的 `#sample-tree`），
+        # 资源管理器是 `Tree`（钩子 `#workspace-tree`；正式形态下恒有工作区），
         # 条目是**树行**而不是 Button——故改用树的行命中区点击，与“用户真去点那一行”一致。
-        tree_sel = "#workspace-tree" if client.count("#workspace-tree") == 1 else "#sample-tree"
+        tree_sel = "#workspace-tree"
         tree_box = client.ok("find", {"selector": tree_sel})["matches"][0]["bounds"]
         # 行高**从组件读**（不硬编码）：资源管理器的密度是可调参数，
         # 写死 40 会在调密度时静默失效（实测：改成 24 后本步点到了错误的行）。
         row_h = float(client.ok("get", {"id": tree_sel[1:]})["props"].get("row_height") or 26)
-        row_y = tree_box["y"] + row_h * 1.5   # 第二行 = 第二个条目（无工作区时是 deploy.py）
+        row_y = tree_box["y"] + row_h * 1.5   # 第二行 = 第二个文件（b_deploy.py）
         client.click_at(tree_box["x"] + 60, row_y)
         time.sleep(0.6)
         props = client.ok("get", {"id": "editor-tabs"})["props"]
-        check("deploy.py" in props.get("options", ""), f"标签栏未加 deploy.py: {props}")
+        check("b_deploy.py" in props.get("options", ""), f"标签栏未加 b_deploy.py: {props}")
         check(client.ok("get", {"id": "editor"})["props"].get("language") == "python",
               "语言未跟随标签")
         # 切换标签装载另一份文档同样不该标脏（同一根因的另一个入口：
-        # activate → set_text；标题栏此刻显示的是 deploy.py）。
+        # activate → set_text；标题栏此刻显示的是 b_deploy.py）。
         check(not client.title("titlebar").startswith("●"),
               f"切换标签未编辑就被标脏: {client.title('titlebar')!r}")
         print("[3] 点资源管理器树行 → 标签 + 语言 + 编辑器内容联动（未标脏）")
@@ -596,8 +654,12 @@ def main():
         split_box = client.ok("find", {"selector": "#bottom-split"})["matches"][0]["bounds"]
         upper_before = client.ok("find", {"selector": "#editor-upper"})["matches"][0]["bounds"]
         ratio = float(client.ok("get", {"id": "bottom-split"})["props"]["ratio"])
+        # 手柄落点从**组件真值**算（不再硬编码 8/4）：
+        # 手柄贴边重叠、以分隔线为中轴向两侧各张开 handle_size/2，
+        # 所以中心就是 `extent * ratio` 处。写死 8 会在默认值改动后静默抓不到。
+        handle_size = float(client.ok("get", {"id": "bottom-split"})["props"]["handle_size"])
         handle_x = split_box["x"] + split_box["width"] * 0.5
-        handle_y = split_box["y"] + (split_box["height"] - 8) * ratio + 4
+        handle_y = split_box["y"] + split_box["height"] * ratio
         client.ok("input.mouse", {"kind": "down", "x": handle_x, "y": handle_y, "button": 1})
         client.ok("input.mouse", {"kind": "move", "x": handle_x, "y": handle_y - 120,
                                   "button": 1})
