@@ -30,6 +30,7 @@
 | `gbcode_sidebar_keepalive_bench.py` | gbcode | （bench 对照，非断言）常驻声明 vs 旧写法切换的帧耗时分段对照，不改任何代码 | `py -3 tools/gbcode_sidebar_keepalive_bench.py` |
 | `gbcode_terminal_keepalive_e2e.py` | gbcode | 终端保活：面板收起再展开，内容/尺寸/会话/工作目录原样（PTY 未被 resize、缓冲未清） | `py -3 tools/gbcode_terminal_keepalive_e2e.py` |
 | `gbcode_terminal_scroll_e2e.py` | gbcode | 终端滚动：PTY 尺寸跟随（面板压矮 → 屏幕行数变少）/滚轮回看/拖到底/回到底部，收起展开后仍可用 | `py -3 tools/gbcode_terminal_scroll_e2e.py` |
+| `gbcode_usability_e2e.py` | gbcode | **真实使用者路径**（真磁盘工作区 + 真 git 仓 + 真 shell）：树行可读与零坐标驱动/BOM 与 CRLF 保真/Shift+Tab 反缩进/查找替换/终端忙闲语义与标签短名/菜单项按 id 激活/状态栏格子反馈/Git 暂存与提交真落盘/大文件滚动 | `py -3 tools/gbcode_usability_e2e.py` |
 | `louyue_e2e.py` | louyue | 设计文档 §7 四条验收：两笔不同混合模式笔画导出后独立解码 PNG 逐像素断色（±2/255）/撤销重做逐像素一致/九种混合模式对 W3C 公式/交互链路 | `py -3 tools/louyue_e2e.py` |
 | `caiyun_e2e.py` | caiyun | 设计文档 §7 五条验收：帧哈希确定性（同刻两次一致、异刻不同——证明预览跟着播放头走）/修剪分割移动入出点/导出帧数与抽查哈希/`--bench` 压测 | `py -3 tools/caiyun_e2e.py` |
 | `xmlapp_e2e.py` | xmlapp | 通路的三个接缝：XML 建出界面树/JS 调 C++ 真落数据/JS 动态建删结构 | `py -3 tools/xmlapp_e2e.py` |

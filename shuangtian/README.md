@@ -56,7 +56,7 @@ shuangtian/
 ├── third_party/        # 第三方源码内联（nlohmann/json + quickjs-ng + battery/embed + sqlite，见 third_party/SOURCES.md 与 CHECKSUMS.sha256）
 ├── src/<层>/…       # 实现（与头同名；platform_*.cpp 为系统 API 单点封装）
 ├── examples/gallery/    # 示例一：组件集 / 设计系统巡检（含「声明式」页）
-├── examples/gbcode/ # 示例二：代码编辑器（声明式组装的 VSCode 式布局）
+├── examples/gbcode/ # 示例二：代码编辑器（声明式组装；**已转正式使用**：无演示壳，工作区来自磁盘）
 ├── examples/louyue/ # 示例三：图像编辑器（自绘画布 + 图层/混合模式/撤销栈）
 ├── examples/caiyun/ # 示例四：AI 视频导演（导演脚本 → 1080p 成片：程序化场景 + 配乐 + 旁白 + ffmpeg 封装）
 ├── tests/               # 自研测试框架（ST_TEST/ST_CHECK…），st test 运行
@@ -214,7 +214,7 @@ macOS 上 GL 已废弃）。它既不是"保证腿"也不是"加分腿"，因此
 | 示例 | 职责面 | 主表面 | 检验什么 |
 |---|---|---|---|
 | `gallery` | 组件 / 设计系统（能力面） | 内置组件全集 | 组件库完整度、令牌一致性、DPI |
-| `gbcode` | 文本 / 编辑器（应用面，全声明式） | `CodeEditor` | 声明式组装复杂应用、组件协同 |
+| `gbcode` | 文本 / 编辑器（应用面，全声明式；**正式可用**） | `CodeEditor` | 声明式组装复杂应用、组件协同；真实文件/ LSP/ Git/ 终端全链路 |
 | **`louyue` 镂月** | **像素 / 光栅创作面** | **自绘画布**（自定义 `paint_content`） | 光栅管线实战：`BlendMode`/`Surface` 合成、逐像素操作、PNG 编解码**往返**、撤销栈 |
 | **`caiyun` 裁云** | **时间 / 动效应用面 + AI 生成面** | **导演脚本 + 成片管线**（脚本 → 场景片段 → 1080p 帧序列 → mp4） | 帧预算与续帧协议、播放/擦洗、拖拽修剪这类连续交互；跨线程长任务 + 进度回 UI；内置时间轴「外部真值源 + 委托编辑」应用示范位 |
 | **`xmlapp`** | **纯 XML + JS 通路**（零 C++ 界面代码） | `ui/main.xml` + `ui/app.js` | XML 界面描述 + `ScriptBridge` JS 驱动：动态界面不写一行 C++ 也能成应用（`docs/xml-ui.md`、`DESIGN.md` §4.2.20–22） |

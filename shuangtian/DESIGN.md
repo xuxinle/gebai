@@ -909,9 +909,9 @@ class DiffView : public Element {
 
 | 项 | 状态 |
 |---|---|
-| 逐块/逐行暂存（从 hunk 构造补丁 → `git apply --cached`） | 未开始（数据结构已够） |
-| 三方合并视图（base/ours/theirs） | 未开始（冲突取数 `git show :1:/:2:/:3:` 尚未接） |
-| 行内字符级差异（同一行内的字符差异） | 未开始（接口不变） |
+| 逐块/逐行暂存（从 hunk 构造补丁 → `git apply --cached`） | **已完成**（2026-10-11 C 轮；2026-10-18 修了“只删不加”与按钮恒灰两个实测缺陷，见 `docs/BACKLOG.md`） |
+| 三方合并视图（base/ours/theirs） | **已完成**（`st::text::merge_three_way` + `st::ui::MergeView` + `read_conflict_sides`） |
+| 行内字符级差异 | **已完成**（`diff_inline` / `LineDecoration::inline_ranges`） |
 
 ### 4.2.12 Git 写操作与安全网（2026-10-11）
 
@@ -1558,7 +1558,7 @@ append/clear` 六个便利函数（**薄包装** `apply_properties`/`invoke_elem
 | **三方合并** | `st::text::merge_three_way` / `merge_apply` | 五态区段（`BothSame` 不算冲突）、逐块取舍。与 git 无关（配置/翻译稿合并同形） |
 | **合并视图** | `st::ui::MergeView` | 三栏 + 每段"取我方/取他方" + 未决定冲突计数与 F7 跳转 |
 | **时间轴视图** | `st::ui::TimelineView` | 标尺/轨道/片段/播放头；拖体=移动（只改 `start`）、拖边缘=修剪（左缘同步 `source_in`）；头部栏可关（`set_show_track_headers`），片段可按内容着色（`Clip::tint`） |
-| **逐行暂存** | `CodeEditor::LineDecoration::Check` + `DiffView::staging_mode` | 勾选框是装饰的一部分（逐行对齐只有编辑器知道） |
+| **逐行暂存** | `CodeEditor::LineDecoration::Check` + `DiffView::staging_mode` | 勾选框是装饰的一部分（逐行对齐只有编辑器知道）。**选择单位是“改动区段”**：勾一行 = 整对改动（删旧+加新）；两栏都画勾选框（只画一侧时“新增行”无法逐行暂存，且会造成只删不加写坏文件）；属性面 `staging`/`selected_count`/`selected_lines` + 动作 `toggle_line "hunk,line"` 供自动化驱动 |
 | **帧内输入合并** | `st::ui::InputCoalescer` | 一帧内的多次指针移动并成一次派发；**保留首尾**（只给最新会丢整段路）；拖拽期间不合并 |
 | **视频解码** | `st::ext::VideoDecoder` | `ffmpeg` 子进程抽帧与元信息；探测不到如实 `Unsupported`。定位是素材查看，不是播放 |
 | **用例异常边界** | `test_runner.cpp` | 用例里未捕获的异常记 FAIL 并继续，不再 `terminate` 整个测试进程 |
@@ -4623,8 +4623,13 @@ state.count = (state.count ?? 0) + 1     // 脚本侧状态（跨执行保留，
 
 ### 嵌入的 JS 资源
 
-`src/ui/script_api.js`（运行时前置）与示例的 `assets/logic.js` 都是**编译期嵌入的真实文件**
+`src/ui/script_api.js`（运行时前置）是**编译期嵌入的真实文件**
 （battery::embed，见 §7.8）：编辑器里能高亮、无需 C++ 原始字符串转义，改完重新构建即生效。
+
+> 2026-10-18：示例侧那份 `assets/logic.js` 已删除。它是“证明脚本能跑”的演示脚本
+>（每 2 秒刷心跳、改写状态栏），而 gbcode 转入正式使用后，用户没要求的心跳
+> 会持续污染状态栏。**能力本身保留**（`--enable-script` + 控制通道 `script` 方法），
+> 只是不再有内置脚本自动运行。
 
 ## 7. 包管理（stpm）
 
@@ -4983,9 +4988,11 @@ mingw 交叉编译在**发布前手工执行**（`st build gallery --toolchain=m
   入口三处——文件菜单尾部「最近打开」小节（各自前 5，不用子菜单：`MenuPanel` 的 children
   只画箭头无交互）、命令面板头部（完整 10 条）、以及下次启动的会话恢复；
 - **关窗恢复**：`shutdown()` 里保存（工作区/真实文件标签/活动项/光标——脏文件只存路径不存内容，
-  内容以磁盘为准）；无 `--workspace` 且无 `--open` 启动时恢复（命令行意图优先，VSCode 同语义），
-  恢复成功则跳过初始样例（否则活动项被样例夺走）；缺失文件跳过、光标用 pending 跳转机制落地；
-- 内置样例模式（无工作区）不存会话（样例无磁盘身份）。
+  内容以磁盘为准）；无 `--workspace` 且无 `--open` 启动时恢复（命令行意图优先，VSCode 同语义）；
+  缺失文件跳过、光标用 pending 跳转机制落地；
+- 工作区缺省 = **当前工作目录**（2026-10-18 起；不再有内置样例模式），
+  且“是否恢复上次会话”看**用户有没有显式给 `--workspace`**，不看待填充后的值
+  （两者混用会让无参数启动永远不恢复）。
 配套框架修复：`MenuBar::set_menus` 加相等早退（动态菜单每帧重设不再重置 `open_index_`）；
 回归：`tests/gbcode_session_store_test.cpp` 四条 + `tools/gbcode_e2e_session.py` 全链路
 （两轮启动：开文件→退→重启断言恢复）+ 既有 e2e 全绿。
@@ -5376,6 +5383,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | **v0.1.5（画廊全场景）** | ① 画廊补齐 Dialog/Toast/Tooltip/TextArea/禁用态/表格选中行/实时统计卡（28 组件全部有可视化场景）② `Toast` 自动消失（帧时间轴）③ `Table` 选中行（视觉+语义+属性）④ `TextArea` 属性面补齐 ⑤ **叠加层 z 序修正**（浮层在景上）+ `find/query` 覆盖叠加层 ⑥ `SceneView` 逐帧调试输出移除 | ✅ 已完成 |
 | **v0.1.6（2026-10-11 「待做」清账轮）** | ① **纯 XML + JS 应用通路**（`st::xml` 解析 / `build_from_xml` / `ScriptBridge` / `examples/xmlapp`，见 §4.2.19–22）② **编辑器行尾注解**（`LineDecoration::end_text`：blame 的作者与日期）③ **行内字符级差异**（`diff_inline` 按**码位**而非字节；编辑器行内区间底色）④ **`st::edit::UndoStack`** 撤销栈原语 ⑤ **`st::ui::Viewport`** 二维缩放/平移 + 棋盘格透明底 ⑥ **`st::ui::ColorPicker`** HSV 面板 + 十六进制 + 吸管 ⑦ **`st::text` 三方合并**（五态区段，含“两侧同改不算冲突”）⑧ **`st::ui::timeline::Model`** 时间轴数据模型 ⑨ **部分暂存**（`build_partial_patch` + `WriteOp::StagePatch`）⑩ **`TitleBar` 品牌区**（不再复用 `leading` 槽）⑪ **墙钟帧间隔**指标（`wall_p50_ms`）⑫ gbcode：`--open` / 单文件历史弹窗 / blame 开关 ⑬ **构建期根治**：测试链接命令行超限（响应文件退路，**解锁新增测试文件**）+ `dbghelp`/`nanosrv` 库口径统一（`independent_project` 长期失败转 PASS） | ✅ 已完成 |
 | **v0.1.7（2026-10-11 C 轮）** | ① **三方合并**：`st::text::merge_three_way`（五态区段，`BothSame` 不算冲突）+ `st::ui::MergeView`（三栏 + 逐块取舍 + 冲突跳转）+ `read_conflict_sides`（`git show :1:/:2:/:3:`）② **`st::ui::TimelineView`**（标尺/轨道/片段/播放头 + 拖拽移动与修剪）③ **逐行暂存界面**（差异视图勾选列 + 工具条 + `StagePatch`/`UnstagePatch`）④ **高频指针移动的帧内合并**（`st::ui::InputCoalescer`；louyue 做到「一笔一条历史」）⑤ **`st::ext::VideoDecoder`**（经 `ffmpeg` 子进程抽帧与读元信息，探测不到如实不支持）⑥ **测试框架的用例异常边界**（未捕获异常记 FAIL 而不再带走整进程）⑦ **`ScriptBridge::expose` 命名空间契约修正**（统一挂 `app.` 之下） | ✅ 已完成 |
+| **v0.1.8（2026-10-18 gbcode 可用性实测轮）** | ① **终端忙闲语义**（`busy()` = “命令在跑”而非“shell 活着”；新增 `running`/`running_name`/`idle_ms`/`command_issued`）② **终端标签短名**（`shell_label` + OSC 标题 `tab_label` 归一）③ **UTF-8 BOM 剥离**（`fs::read_text` 公共入口）④ **二进制文件只读保护**（`looks_binary` + `OpenBuffer::binary` + 保存双拒）⑤ **Shift+Tab 无选区反缩进** ⑥ **CRLF 行尾自动配对** ⑦ **`Tree` 行读面/写面**（`labels`/`keys`/`rows_detail`/`activate_key`）⑧ **逐行暂存修正**：选择单位抬成“改动区段”、勾选列两栏都画、补属性面与动作面、`set_diff` 相等早退 ⑨ **状态栏编码格可点** ⑩ 新增 `tools/gbcode_usability_e2e.py`（真实使用路径≈60 条断言）⑪ **大文档卡顿根治**：文本宽度缓存改真 LRU（原“超 4096 条全清”）、`max_line_width` 惰性化、`width_cache_stats()` 可观测性（5 千行编辑帧 90ms → 12.7ms）⑫ **Markdown 预览大片空白**：组背景改为遍历前统一预画（原来逐行重画把文字盖掉）+ `MarkdownView` 补 `first_visible`/`last_visible`/`draw_stats`/`painted_groups` ⑬ **命令面板配色**：`apply_theme` 把主题色**写回 style**（原来只改字段）、`Input` 补 `apply_theme`（原来只在 measure 里做一次性“未设则填”）⑭ `Tree::measure` 连最宽值一起缓存（稳态 O(1)）⑮ 查找命中改按行分桶（100 万命中编辑帧 74.2ms → 28.6ms）| ✅ 已完成 |
 | v0.2 | 文本选择与复制、更多组件（日期选择、图表）、X11 / Wayland 窗口后端 | 部分完成：**X11 / Wayland 已落地**（真后端，见 §4.6.1；2026-10-15）；文本选择与复制已实现（`ui_text_selection_*` 测试族）；日期选择、图表待做 |
 | v0.3 | Vulkan 合成后端、**图层缓存与局部重绘**、多窗口 | 部分完成：**局部重绘已落地**（损坏区机制，见 §4.2.8.1，实测 paint 38ms→1.86ms）；Vulkan 合成后端、多窗口待做 |
 | v0.4 | 原生源码依赖生态（`st-packages` 索引）、`st publish` | 待做 |
