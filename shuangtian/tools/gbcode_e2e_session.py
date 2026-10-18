@@ -145,12 +145,13 @@ def main():
         client.click_at(tree_box["x"] + 60, tree_box["y"] + row_h * 1.5)   # 第 2 行 = b.py
         tabs = client.ok("get", {"id": "editor-tabs"})["props"].get("options", "")
         check("b.py" in tabs, f"标签栏出现 b.py: {tabs}")
-        # 活动标签切回 a.cpp：Ctrl+Tab 环绕（初始样例 renderer.cpp 也在标签里，
-        # 当前 active=b.py，连按两次 → renderer → a.cpp）。按标题栏断言到位。
+        # 活动标签切回 a.cpp：Ctrl+Tab 环绕。
+        # ⚠ 2026-10-18：标签集只有 a.cpp / b.py 两个了（不再有启动时自动打开的
+        # 内置样例 renderer.cpp），所以当前 active=b.py 时**按一次**就回到 a.cpp——
+        # 旧断言写死“连按两次”是因为有三个标签，会给多按一次就跳过头。
         client.ok("invoke", {"id": "editor", "action": "focus"})
-        for _ in range(2):
-            client.ok("input.key", {"key": "Tab", "ctrl": True, "kind": "press"})
-            time.sleep(0.3)
+        client.ok("input.key", {"key": "Tab", "ctrl": True, "kind": "press"})
+        time.sleep(0.4)
         active_label = client.title("titlebar")
         check("a.cpp" in active_label, f"Ctrl+Tab 切回 a.cpp: {active_label!r}")
         # 光标到第 30 行（区分度：恢复后应停在 30 附近）。

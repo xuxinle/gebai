@@ -82,8 +82,7 @@ namespace gbcode_ui {
   }
 
   auto CodeEditorPage::save_session() -> void {
-    // 无工作区的内置样例模式不存会话：样例没有磁盘身份，存了也无法恢复到
-    // “用户当时看的东西”（下次启动反正都会加载样例）。
+    // 没有工作区就没有可恢复的磁盘身份，不存会话。
     if (workspace_.empty()) return;
     gbcode::SessionState state;
     state.workspace = workspace_;
@@ -124,28 +123,6 @@ namespace gbcode_ui {
   }
 
 
-  /// 打开一份内置样例（已在标签里 = 激活；不在 = 新标签）。
-  auto CodeEditorPage::open_sample(const Sample& sample) -> void {
-    auto list = buffers_.value();
-    for (std::size_t index = 0; index < list.size(); ++index) {
-      if (list[index].key == sample.name) {
-        activate(list, index);
-        status_.set(sample.name + " · 已激活");
-        return;
-      }
-    }
-    stash_active_text(list);
-    OpenBuffer buffer;
-    buffer.key = sample.name;
-    buffer.label = sample.name;
-    buffer.language = sample.language;
-    buffer.text = sample.code;
-    list.push_back(std::move(buffer));
-    buffers_.set(std::move(list));
-    active_.set(buffers_.value().size() - 1);
-    status_.set(sample.name + " · " + std::to_string(st::utf8_length(sample.code)) +
-                " 字符 · 已打开");
-  }
 
 
   /// `--open <path>` 的待办：**不在构造期打开**（那会在构建期写 State，见 `main` 的注释），
@@ -206,26 +183,6 @@ namespace gbcode_ui {
   }
 
 
-  auto CodeEditorPage::open_stlog() -> void {
-    auto list = buffers_.value();
-    for (std::size_t index = 0; index < list.size(); ++index) {
-      if (list[index].key == "stlog.log") {
-        activate(list, index);
-        return;
-      }
-    }
-    stash_active_text(list);
-    OpenBuffer buffer;
-    buffer.key = "stlog.log";
-    buffer.label = "stlog.log";
-    buffer.language = "stlog";
-    buffer.text = std::string(kStlogSample);
-    list.push_back(std::move(buffer));
-    buffers_.set(std::move(list));
-    active_.set(buffers_.value().size() - 1);
-    status_.set("自定义语言 stlog（运行时注册的规则）");
-  }
-
 
   /// 关闭一个标签（按 key——索引会随增删漂移，key 才是业务身份）。
   auto CodeEditorPage::close(std::string_view key) -> void {
@@ -275,7 +232,7 @@ namespace gbcode_ui {
   }
 
 
-  /// 保存当前标签：真实文件走 `fs::write_text`，内置样例走内存模拟。
+  /// 保存当前标签：真实文件走 `fs::write_text`；未命名的缓冲区走“另存为”。
   auto CodeEditorPage::save() -> void {
     auto list = buffers_.value();
     if (list.empty()) {
@@ -284,6 +241,13 @@ namespace gbcode_ui {
     }
     stash_active_text(list);
     OpenBuffer& buffer = list[active_.value()];
+    // **二进制文件拒绝写盘**（最后一道防线：编辑器已置只读，但路径很多——
+    // 保存全部/快捷键/菜单都能到这儿）。真写下去就等于用屏幕上的乱码
+    // 覆盖原字节，不可恢复（实测：改 3 个字节再保存，文件就毁了）。
+    if (buffer.binary) {
+      status_.set("拒绕保存：二进制文件（" + buffer.label + "）— 本编辑器只编辑文本");
+      return;
+    }
     if (!buffer.path.empty()) {
       const bool saved = st::fs::write_text(buffer.path, buffer.text).has_value();
       status_.set(saved ? "已保存 " + buffer.path
@@ -319,10 +283,17 @@ namespace gbcode_ui {
     std::size_t saved = 0;
     std::size_t skipped = 0;
     std::size_t failed = 0;
+    std::size_t refused_binary = 0;
     for (auto& buffer : list) {
       if (!buffer.dirty) continue;
       if (buffer.path.empty()) {
         ++skipped;
+        continue;
+      }
+      // 二进制文件不写（与 `save()` 同一道防线；这里也要拦，
+      // 否则“保存全部”会成为绕过单文件保护的缺口）。
+      if (buffer.binary) {
+        ++refused_binary;
         continue;
       }
       if (st::fs::write_text(buffer.path, buffer.text).has_value()) {
@@ -337,6 +308,7 @@ namespace gbcode_ui {
     buffers_.set(std::move(list));
     std::string message = std::format("已保存 {} 个文件", saved);
     if (skipped > 0) message += std::format("；{} 个未命名缓冲需「另存为」", skipped);
+    if (refused_binary > 0) message += std::format("；{} 个二进制文件拒绕写盘", refused_binary);
     if (failed > 0) message += std::format("；{} 个写入失败", failed);
     status_.set(message);
   }
@@ -406,7 +378,7 @@ namespace gbcode_ui {
     if (!has_active) return;
     // **LSP 优先**：真语义诊断比启发式检查有价值得多（"未声明的标识符"这种事
     // lint 永远看不出来）。有 LSP 诊断时就用它，没有再退回内置 lint——
-    // 不是为了省事，而是**没有 server 的语言（如 gbcode 自己的 stlog）仍要有问题提示**。
+    // 不是为了省事，而是**没有 LSP server 的语言仍要有问题提示**。
     if (from_lsp) {
       problems_.reserve(lsp_.problems().size());
       for (const auto& problem : lsp_.problems()) {
@@ -576,9 +548,9 @@ void CodeEditorPage::load_active_text() {
     // `loaded_key_` 是“编辑器里现在装着哪个缓冲”的唯一判据，而 `build()` 末尾的
     // 灌入逻辑只在它与当前标签不一致时才写。构造期（首帧之前，编辑器还没创建）
     // 调到这里时，旧实现无条件写 `loaded_key_` —— 于是那一帧之后
-    // “已装载”与实际内容不符，**编辑器永远停在默认样例上**。
+    // “已装载”与实际内容不符，**编辑器永远停在上一个文件的内容上**。
     // 实测：`--open <file>` 只在构造期调一次（打开路径就是本函数），
-    // 表现为“标签从 renderer.cpp 切到了 sample.cpp、内容却还是 renderer.cpp”。
+    // 表现为“标签已经切到 B、正文却还是 A”。
     loaded_key_.clear();
     return;
   }
@@ -588,16 +560,6 @@ void CodeEditorPage::load_active_text() {
   refresh_problems();
 }
 
-
-  void CodeEditorPage::open_by_name(const std::string& name) {
-    for (const auto& sample : files_) {
-      if (sample.name == name) {
-        open_sample(sample);
-        return;
-      }
-    }
-    if (name == "stlog.log") open_stlog();
-  }
 
 
   void CodeEditorPage::switch_tab(std::size_t index) {
@@ -913,7 +875,7 @@ void CodeEditorPage::load_active_text() {
   }
 
 
-  /// 递归搜工作区（无工作区时搜内置样例）；结果写进 `search_hits_`。
+  /// 递归搜工作区；结果写进 `search_hits_`。
   ///
   /// 改自原先的“只找一个词”：新增 glob 过滤与大小写/全词/正则三个开关，
   /// 并把命中**按文件分组**（同一个文件的命中排在一起，前缀行给文件名）——
@@ -1021,10 +983,6 @@ void CodeEditorPage::load_active_text() {
           scan_text(full, item.name, *content);
         }
       }
-    } else {
-      // 内置样例回退（无 --workspace 时保持自包含）
-      for (const auto& sample : files_) scan_text(sample.name, sample.name, sample.code);
-      scan_text("stlog.log", "stlog.log", std::string(kStlogSample));
     }
 
     if (hits.empty()) {
@@ -1715,7 +1673,7 @@ void CodeEditorPage::load_active_text() {
   void CodeEditorPage::refresh_tree() {
     dir_cache_.clear();   // 显式刷新：目录缓存全部作废（磁盘可能已变化）
     dir_expanded_.set(dir_expanded_.value());   // 触发一次重组，树数据本就每帧重扫
-    status_.set(workspace_.empty() ? "内置样例模式" : "已刷新工作区树");
+    status_.set(workspace_.empty() ? "未打开工作区" : "已刷新工作区树");
   }
 
 
@@ -1753,8 +1711,9 @@ void CodeEditorPage::load_active_text() {
 
   /// 新建文件：有工作区时开文件对话框选路径；无工作区时开一份内存缓冲（`untitled-N`）。
   ///
-  /// 为何两档都要：内置样例模式的演示价值就在于“不用开文件对话框也能跑起来”，
-  /// 而如果无工作区时只回一句“需要 --workspace”，那“新建文件”这个入口在演示里就是死的。
+  /// 为何内存缓冲这一档要保留：它是**真实功能**而不是演示占位——VSCode/IDEA 同样
+  /// 允许“先写点东西、保存时再决定放哪里”。无工作区时若只回一句“需要 --workspace”，
+  /// 那“新建文件”这个入口就是死的。
   void CodeEditorPage::new_file_prompt() {
     if (workspace_.empty()) {
       auto list = buffers_.value();
@@ -1943,12 +1902,7 @@ void CodeEditorPage::load_active_text() {
     const std::size_t line = index < search_hit_lines_.size() ? search_hit_lines_[index] : 1;
     const std::size_t column = index < search_hit_columns_.size() ? search_hit_columns_[index] : 0;
     const std::string path = search_hit_paths_[index];
-    // 内置样例模式：path 是样例名，不是真文件。
-    if (!st::fs::is_absolute(path) && workspace_.empty()) {
-      open_by_name(path);
-    } else {
-      open_path(path);
-    }
+    open_path(path);
     pending_jump_ = {line, column};
     if (editor != nullptr) {
       apply_jump(line, column);
@@ -2728,7 +2682,6 @@ void CodeEditorPage::load_active_text() {
       open_file_dialog();
     } else if (id.rfind("path:", 0) == 0) {
       // Ctrl+P 文件表的条目（见 `file_commands`）：id 直接携带完整路径。
-      // 必须是**真开文件**，与「按名字查内置样例」的 `file.open.<名>` 分流。
       open_path(id.substr(5));
     } else if (id.rfind("recent:", 0) == 0) {
       // 命令面板的「最近」条目：id 前缀 + 完整路径（与菜单的 recent-file: 同源不同名
@@ -2741,10 +2694,6 @@ void CodeEditorPage::load_active_text() {
       jump_to_symbol(static_cast<std::size_t>(std::stoul(id.substr(7))));
     } else if (id == "file.open-folder") {
       open_folder_dialog();
-    } else if (id.rfind("file.open.", 0) == 0) {
-      open_by_name(id.substr(10));
-    } else if (id.rfind("lang.", 0) == 0) {
-      open_stlog();
     } else if (id == "file.save") {
       save();
     } else if (id == "file.save-all") {
@@ -2839,21 +2788,16 @@ void CodeEditorPage::load_active_text() {
     // 键盘入口补在这里——曾经声称绑在 Ctrl+K 上，而 Ctrl+K 实际是快捷键一览，
     // 无人调用导致它成了死代码（BACKLOG P1「界面在说谎」条目）。
     add("nav.hover", "转到: 悬停信息", "光标处的 LSP 信息（鼠标悬停同链路）");
-    add("help.about", "帮助: 关于", "歌白代码 · 霜天示例");
-    for (const auto& sample : files_) {
-      add("file.open." + sample.name, "文件: 打开 " + sample.name, "语言 " + sample.language);
-    }
-    add("lang.stlog", "语言: 打开 stlog 样例", "自定义语言（运行时注册）");
+    add("help.about", "帮助: 关于", "歌白代码");
     return table;
   }
 
 
-  /// 快速打开的文件表（Ctrl+P）：有工作区时列真实文件（递归、限量）。
+  /// 快速打开的文件表（Ctrl+P）：列工作区里的真实文件（递归、限量）。
   ///
-  /// **id 带 `path:` 前缀**：条目身份是一整条磁盘路径，与「按名字查内置样例」
-  /// 的 `file.open.<名>` 是两回事——`run_command` 里对两种 id 各自分流。
-  /// 曾经直接把路径当 id，于是两条分支都不命中，只剩兜底的「已打开 …」状态栏
-  /// 文案（面板关了、文件没开）。
+  /// **id 带 `path:` 前缀**：条目身份是一整条磁盘路径，`run_command` 按它
+  /// 分流到 `open_path`。曾经直接把路径当 id，于是分支不命中，只剩兜底的
+  /// 「已打开 …」状态栏文案（面板关了、文件没开）。
   [[nodiscard]] auto CodeEditorPage::file_commands() const -> std::vector<CommandPalette::Command> {
     std::vector<CommandPalette::Command> table;
     if (!workspace_.empty()) {
@@ -2877,10 +2821,6 @@ void CodeEditorPage::load_active_text() {
         }
       }
       return table;
-    }
-    for (const auto& sample : files_) {
-      table.push_back(CommandPalette::Command{.id = sample.name, .title = sample.name,
-                                              .detail = "语言 " + sample.language, .handler = {}});
     }
     return table;
   }

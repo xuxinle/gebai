@@ -1,4 +1,9 @@
-/// 代码编辑器演示：按 VSCode 的信息架构组装的 IDE 形态界面（**声明式版**）。
+/// 歌白代码（gbcode）：按 VSCode 信息架构组装的**原生 GUI 代码编辑器**。
+///
+/// **定位（2026-10-18 起）**：从“框架演示”转为**正式可用的编辑器**。
+/// 因此去掉了全部演示壳：内置样例工作区（内存假文件）、启动自动打开样例、
+/// 内置 JS 逻辑（心跳/状态栏回显）。
+/// 现在工作区一律来自磁盘：`--workspace <dir>`，不传就是**当前目录**。
 ///
 /// 布局五层（自上而下）：
 /// - 标题栏：文件名（脏标记）+ 应用名 + 装饰性窗口控制（— □ ×）
@@ -10,22 +15,22 @@
 ///
 /// **为什么用声明式**：整份界面由 `CodeEditorPage::build()` 描述「状态对应的形态」，
 /// 「改完要点哪里」的手工同步全部消失——改状态 → 下一帧重组 → 真值树按 diff 更新。
-/// 旧的命令式实现（1966 行：逐层 `std::make_unique` + 手工持指针、七处重复同步标题栏）
-/// 已在本次整合中被它替换；`examples/gbcode-dsl`（声明式重写版）同时并入，不再有分身。
 ///
 /// **真值树唯一**：声明式不绕过 `apply_properties` —— `tree`/`get`/`set`/`invoke`
 /// 对这里的元素照常可用（协议自动化与手搭界面完全一致）。少数属性面覆盖不到的一等接口
 /// （`CodeEditor::on_change`、`MenuBar` 下拉、`CommandPalette` 的命令表…）走 `custom<T>`
 /// 逃生舱，不做属性面穷举。
 ///
-/// 演示点：
+/// 核心能力（均为**真实实现**，非演示）：
 /// - **多标签编辑模型**：打开/切换/关闭/脏标记（`dsl::tabs` 按 key 对齐复用）
-/// - **真实文件工作区**：`--workspace <dir>` 下资源树 `fs::list_dir`、点文件打开、
-///   Ctrl+S `fs::write_text` 真实写盘（脏标记/标题栏/状态栏全联动）
+/// - **真实文件工作区**：资源树 `fs::list_dir`、点文件打开、Ctrl+S `fs::write_text`
+///   真实写盘（脏标记/标题栏/状态栏全联动）
 /// - **查找替换**：Ctrl+F / Ctrl+H 浮条（命中高亮、计数 n/m、环绕、替换/全部）
 /// - **命令面板**：Ctrl+Shift+P（全部命令）/ Ctrl+P（快速打开文件）
 /// - **问题检查**：行尾空白 / Tab 缩进 / TODO·FIXME / 超长行（真检查，点了跳行）
-/// - **脚本逻辑层**：`--enable-script` 时编译期嵌入的 `assets/logic.js` 生效
+/// - **LSP / Git / 终端**：clangd 诊断与补全、git 状态与 blame、真 PTY shell
+/// - **进程内脚本**：`--enable-script` 开放控制通道 `script` 方法（AI 可读写界面）；
+///   不再自动载入任何内置脚本
 ///
 /// 控制通道兼容钩子（`tools/*.py` 与子代理依赖，**不可改名**）：
 /// `#btn-theme`（主题）、`#editor`（活动编辑器）、`#status`（状态栏文案）、
@@ -139,10 +144,10 @@ struct Options {
   bool enable_script{false};
   /// 请求系统标题栏/边框（默认关：窗框一律自绘）。仅给排查用。
   bool decorations{false};
-  /// 工作区目录（真实文件模式）：资源管理器/打开/保存全部走 `st::fs` 真实读写；
-  /// 缺省回退内置样例工作区（内存模拟）。
+  /// 工作区目录：资源管理器/打开/保存全部走 `st::fs` 真实读写。
+  /// 缺省 = 当前工作目录（正式形态：不再回退内存样例）。
   std::string workspace{};
-  /// `--open <path>`：启动即打开的文件（空 = 用内置样例）。
+  /// `--open <path>`：启动即打开的文件。
   std::string open_path{};
   /// 霜天仓库根（`--tool-root`）：跑任务/构建时找 `st` 工具链用。
   std::string tool_root{};
@@ -174,7 +179,7 @@ auto print_usage(std::string_view program) -> void {
       "\n"
       "内容/自动化\n"
       "  --language NAME       初始语言（默认 cpp；--list-languages 可列）\n"
-      "  --workspace DIR       工作区目录（真实文件；缺省用内置样例）\n"
+      "  --workspace DIR       工作区目录（缺省 = 当前目录）\n"
       "  --tool-root DIR       霜天仓根（PATH 无 st 时到它下面 build/bin/st 找；跑任务用）\n"
       "  --control-port N      控制通道端口（0 = 自动）\n"
       "  --control-file PATH   控制信息落盘路径\n"
@@ -409,6 +414,21 @@ auto run_app(int argc, char** argv) -> int {
     }
     return parsed;
   };
+  // 工作区缺省 = **当前工作目录**（正式形态）。
+  //
+  // 为何不留在空串：空串在过去意味着“进内置样例模式”（内存假文件）。
+  // 样例表已删，空串现在只会得到一个空资源管理器——而“双击启动就站在
+  // 当前目录”是编辑器的正常预期（`code .` 同款语义）。
+  //
+  // ⚠ `explicit_workspace` 必须单独记：下面“是否恢复上次会话”依赖
+  // **用户有没有显式指定**，而不是“最终工作区是不是空的”。把两者混为一谈
+  // 会让“无参数启动”永远不恢复会话（那是没人要的行为）。
+  const bool explicit_workspace = !options.workspace.empty();
+  std::string workspace = options.workspace;
+  if (workspace.empty()) {
+    auto cwd = st::fs::current_dir();
+    if (cwd && !cwd->empty()) workspace = *cwd;
+  }
   float editor_font_scale = kEditorFontScale;
   if (options.editor_font_scale != "auto") {
     editor_font_scale = static_cast<float>(
@@ -419,14 +439,14 @@ auto run_app(int argc, char** argv) -> int {
     editor_line_spacing = static_cast<float>(parse_late_double(
         "--editor-line-spacing", options.editor_line_spacing, CodeEditor::kDefaultLineSpacing));
   }
-  auto page = std::make_shared<CodeEditorPage>(samples(), options.workspace, options.tool_root,
+  auto page = std::make_shared<CodeEditorPage>(workspace, options.tool_root,
                                                editor_font_scale, editor_line_spacing);
   // **命令行 --workspace 也要告知语言服务**：`switch_workspace()`（UI 对话框路径）
   // 会调 `lsp_.set_workspace`，而命令行启动这条路从没调过——后果是 clangd 拿着
   // 空 rootPath 起（无 compile_commands.json 可寻、相对 include 解不开），
   // 诊断永远不回（实测：真仓库 + clangd 在 PATH，打开 .cpp 等 25s 仍 0 诊断，
   // 而 clangd 进程活着——BACKLOG「clangd 已装但语言服务从未就绪」的真根因之一）。
-  if (!options.workspace.empty()) page->set_language_workspace(options.workspace);
+  if (!workspace.empty()) page->set_language_workspace(workspace);
   // —— 会话（最近打开 + 关窗恢复）——
   //
   // 路径在构造后定（`session_path_` 是普通成员，不在构造列表里——两个构造重载
@@ -442,8 +462,8 @@ auto run_app(int argc, char** argv) -> int {
     const gbcode::SessionState saved = gbcode::load_session(page->session_path_);
     page->recent_files_ = saved.recent_files;
     page->recent_folders_ = saved.recent_folders;
-    if (!options.workspace.empty()) {
-      gbcode::push_recent(page->recent_folders_, options.workspace);
+    if (explicit_workspace) {
+      gbcode::push_recent(page->recent_folders_, workspace);
     } else if (options.open_path.empty() && page->restore_session(saved)) {
       st::print("已恢复上次会话（工作区 {}，{} 个标签）\n", saved.workspace,
                 saved.files.size());
@@ -507,32 +527,12 @@ auto run_app(int argc, char** argv) -> int {
     }
     page->menu_host_ = page->menu_host_owned_.get();
   }
-  // 初始文件（--language 指定；都没有则第一个）。
-  // **会话恢复成功时跳过**：初始样例是“空启动”的填位内容，而恢复已经把
-  // 上次的真实文件装回了标签——再 open_sample 会把活动项夺走
-  //（实测：恢复后活动标签被 renderer.cpp 覆盖，标题栏显示错文件）。
-  bool session_restored = false;
-  {
-    // 恢复与否在前面已经决策过（restore_session 的返回值）；这里不复真读文件，
-    // 只看 buffers 里有没有**磁盘文件**标签（样例的 path 为空——恢复只收真文件）。
-    for (const auto& buffer : page->buffers_.value()) {
-      if (!buffer.path.empty()) {
-        session_restored = true;
-        break;
-      }
-    }
-  }
-  const Sample* initial = session_restored ? nullptr
-      : (page->files_.empty() ? nullptr : &page->files_.front());
-  if (!session_restored) {
-    for (const auto& sample : page->files_) {
-      if (sample.language == options.language) {
-        initial = &sample;
-        break;
-      }
-    }
-  }
-  if (initial != nullptr) page->open_sample(*initial);
+  // 启动时的初始文件：
+  // - 会话恢复已装回真文件 → 不再插手（旧实现会再 open_sample 把活动项夺走，
+  //   实测表现为“恢复后活动标签被 renderer.cpp 覆盖、标题栏显示错文件”）。
+  // - 否则：若指定了 `--open`，它由页面的帧首泵打开；除此之外不主动开任何文件
+  //   ——正式形态下“启动即打开一个凭空造的文件”是演示行为，不是产品行为。
+  //   想看内容就用资源管理器 / Ctrl+P / `--open`。
   // 首帧重组 + 聚焦编辑器：**必须在 `start()` 之前完成**。
   // `start()` 内会开控制通道，而客户端（脚本）一看到控制文件就连——
   // 那时如果界面还没建好（或焦点还没设），它拿到的是半成品状态
@@ -778,18 +778,13 @@ auto run_app(int argc, char** argv) -> int {
   (void)host->tick();
   app.render_frame();
 
-  // 脚本逻辑层（仅 `--enable-script` 时可用）：**组件控制逻辑用 JS 写**。
-  // 这份 JS 是编译期嵌入的真实资源（`assets/logic.js`）——与 C++ 里那堆 raw string 不同，
-  // 它在编辑器里有高亮、不需要转义，改完重新构建即生效。
-  if (auto* script = app.script(); script != nullptr) {
-    const auto logic = b::embed<"examples/gbcode/assets/logic.js">();
-    const std::string_view source(logic.data(), logic.length());
-    if (auto loaded = script->eval(source, "assets/logic.js"); !loaded) {
-      st::print("示例 JS 逻辑载入失败: {}\n", loaded.error().message);
-    } else {
-      st::print("示例 JS 逻辑已载入（{} 字节）\n", logic.length());
-    }
-  }
+  // 进程内脚本能力（`--enable-script`）：**能力保留，演示脚本已删除**。
+  //
+  // 旧实现启动时自动载入 `assets/logic.js`——那份脚本的作用是“证明脚本能跑”
+  //（状态栏回显行数、每 2 秒刷心跳）。正式形态下这属于演示噪声：
+  // 用户没要求的心跳会不断改写状态栏。
+  // 能力本身（控制通道 `script` 方法 / AI 读写界面）与 `--enable-script` 开关
+  // 都原样保留——只是不再有内置脚本自动运行。
 
   const std::int64_t started_ms = st::time::now_ms();
   std::uint32_t frames = 1;

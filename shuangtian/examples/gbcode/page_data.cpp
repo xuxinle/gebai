@@ -1,4 +1,7 @@
-// 数据与工具的实现（声明见 page_data.hpp）。拆分自 main.cpp，零逻辑改动。
+// 数据与工具的实现（声明见 page_data.hpp）。
+//
+// 2026-10-18：内置样例表（`samples()`）已删除——gbcode 转为正式使用后
+// 工作区数据一律来自磁盘，不再有“无参数时给假文件”的演示形态。
 
 #include <algorithm>
 #include <string>
@@ -11,171 +14,10 @@
 
 namespace gbcode_ui {
 
-[[nodiscard]] auto samples() -> std::vector<Sample> {
-  std::vector<Sample> list;
-  list.push_back(Sample{
-      "renderer.cpp", "cpp",
-      R"(// 霜天光栅器：扫描线覆盖率抗锯齿
-#include <vector>
-
-namespace st::raster {
-
-auto fill_path_aa(Surface& canvas, const Path& path, const Paint& paint) -> void {
-  const auto polylines = path.flatten(0.25f);
-  const Rect bounds = path.flattened_bounds(0.25f);
-  // 覆盖率是**带符号**量（非零环绕）：画布侧取绝对值
-  for (int y = first_y; y < last_y; ++y) {
-    rasterize_row(canvas, polylines, y, paint);
-  }
-}
-
-}  // namespace st::raster
-)",
-      "src/raster/renderer.cpp"});
-  list.push_back(Sample{
-      "deploy.py", "python",
-      R"("""部署脚本：把构建产物推到目标机"""
-import subprocess
-from pathlib import Path
-
-class Deployer:
-    def __init__(self, host: str, port: int = 22):
-        self.host = host
-        self.port = port
-
-    def push(self, artifact: Path) -> bool:
-        # 只推可执行文件与资源清单
-        cmd = f"scp -P {self.port} {artifact} {self.host}:/opt/app/"
-        return subprocess.run(cmd, shell=True).returncode == 0
-
-if __name__ == "__main__":
-    ok = Deployer("10.0.0.7").push(Path("build/dev/bin/gallery"))
-    print("部署成功" if ok else "部署失败")
-)",
-      "tools/deploy.py"});
-  list.push_back(Sample{
-      "control.rs", "rust",
-      R"(// 控制通道：帧 = uint32 大端长度 + JSON
-use std::io::Write;
-use std::net::TcpStream;
-
-pub struct Frame {
-    pub id: u32,
-    pub method: String,
-}
-
-impl Frame {
-    pub fn encode(&self) -> Vec<u8> {
-        let body = format!(r#"{{"id":{},"method":"{}"}}"#, self.id, self.method);
-        let mut out = (body.len() as u32).to_be_bytes().to_vec();
-        out.extend_from_slice(body.as_bytes());
-        out
-    }
-}
-
-fn main() -> std::io::Result<()> {
-    let mut stream = TcpStream::connect("127.0.0.1:9000")?;
-    stream.write_all(&Frame { id: 1, method: "tree".into() }.encode())?;
-    Ok(())
-}
-)",
-      "src/control/frame.rs"});
-  list.push_back(Sample{
-      "theme.json", "json",
-      R"({
-  "name": "霜天 · 暗色",
-  "version": "0.1.0",
-  "colors": {
-    "background": "#0E1626",
-    "keyword": "#C792EA",
-    "string": "#A5E075",
-    "numbers": [1, 2.5, -3e4],
-    "opacity": 0.86
-  },
-  "enabled": true,
-  "fallbacks": null
-})",
-      "assets/theme.json"});
-  list.push_back(Sample{
-      "pipeline.yaml", "yaml",
-      R"(# CI 流水线：构建 → 测试 → 打包
-name: shuangtian-ci
-on:
-  push:
-    branches: [main, dev]
-jobs:
-  build:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: 自举工具链
-        run: ./bootstrap.sh
-      - name: 构建与测试
-        run: |
-          ./build/bin/st build gallery --profile dev
-          ./build/bin/st test --san
-      - name: 禁令扫描
-        run: ./build/bin/st lint
-)",
-      ".github/pipeline.yaml"});
-  list.push_back(Sample{
-      "panel.html", "html",
-      R"(<!-- 组件画廊：一个卡片 -->
-<!DOCTYPE html>
-<html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <title>霜天 · 组件画廊</title>
-    <style>
-      .card { border-radius: 12px; padding: 16px; box-shadow: 0 2px 8px #0002; }
-      .card__title { font-weight: 600; color: #2563EB; }
-    </style>
-  </head>
-  <body>
-    <div class="card" data-kind="stat">
-      <span class="card__title">渲染后端</span>
-      <b>软件光栅器</b>
-    </div>
-  </body>
-</html>
-)",
-      "web/panel.html"});
-  list.push_back(Sample{
-      "query.sql", "sql",
-      R"(-- 会话与工具调用统计
-SELECT
-    s.user_id,
-    COUNT(DISTINCT s.id)       AS sessions,
-    COUNT(t.id)                AS tool_calls,
-    ROUND(AVG(t.duration_ms))  AS avg_ms
-FROM sessions AS s
-LEFT JOIN tool_calls AS t ON session_id = s.id
-WHERE s.created_at >= '2026-01-01'
-  AND t.status <> 'cancelled'
-GROUP BY s.user_id
-HAVING COUNT(t.id) > 10
-ORDER BY tool_calls DESC
-LIMIT 20;
-)",
-      "stats/query.sql"});
-  list.push_back(Sample{
-      "fix.patch", "diff",
-      R"(--- a/src/raster/rasterizer.cpp
-+++ b/src/raster/rasterizer.cpp
-@@ -60,6 +60,12 @@ void rasterize_polylines(...) {
-   for (const auto& polyline : polylines) {
-     if (polyline.points.size() < 2) continue;
-+    // 填充语义要求隐式闭合子路径
-+    const bool needs_closing_edge = distance(first, last) > 1.0e-4f;
-     for (std::size_t index = 1; index < polyline.points.size(); ++index) {
--      const math::Point to = polyline.points[index];
-+      const math::Point to = index == size ? first : polyline.points[index];
- )",
-      "patches/fix.patch"});
-  return list;
-}
-
-/// 自定义语言：业务日志（演示"规则即数据"，与内置语言走同一台扫描器）。
+/// 自定义语言：业务日志（`stlog`）。
+///
+/// 这是**真能力**：运行时注册的语言与内置语言走同一台扫描器（“规则即数据”），
+/// 产物是可用的高亮语言而不是界面上的弹窗。
 void register_custom_language() {
   st::text::LanguageSpec spec = st::text::make_language("stlog");
   st::text::with_aliases(spec, {"slog", "applog"});
@@ -223,22 +65,51 @@ void register_custom_language() {
     -> std::size_t {
   auto content = st::fs::read_text(path);
   if (!content) return buffers.size();
+  // 二进制保护（实测踩到）：二进制文件按文本展示只是难看，**能被编辑并保存**
+  // 才是真危险——Ctrl+S 会把屏幕上的乱码写回原文件（原字节不可恢复）。
+  // 所以在这里一次性判定，后续（打开/激活/保存）全部看 `buffer.binary`。
+  const bool binary = looks_binary(*content);
   for (std::size_t index = 0; index < buffers.size(); ++index) {
     if (buffers[index].path == path) {
       buffers[index].text = *content;
       buffers[index].dirty = false;
+      buffers[index].binary = binary;
       return index;
     }
   }
   OpenBuffer buffer;
   buffer.key = path;
   buffer.path = path;
+  buffer.binary = binary;
   const std::size_t slash = path.find_last_of("/\\");
   buffer.label = slash == std::string::npos ? path : path.substr(slash + 1);
   buffer.language = st::text::language_from_path(path).value_or("");
   buffer.text = std::move(*content);
   buffers.push_back(std::move(buffer));
   return buffers.size() - 1;
+}
+
+[[nodiscard]] auto looks_binary(std::string_view bytes) -> bool {
+  // 只看头 8 KiB：足以认出 PE/PNG/ZIP/ELF/数据库文件，且不会为了判定
+  // 一个 200MB 的日志把整文件扫一遍（读进内存的代价已经付过一次了）。
+  const std::size_t window = std::min<std::size_t>(bytes.size(), 8192);
+  if (window == 0) return false;
+  std::size_t suspicious = 0;
+  for (std::size_t index = 0; index < window; ++index) {
+    const auto byte = static_cast<unsigned char>(bytes[index]);
+    if (byte == 0x00) return true;   // NUL：文本文件里不出现（最硬的信号）
+    const bool printable_control = byte == '\t' || byte == '\r' || byte == '\n' || byte == '\f' ||
+                                   byte == '\v' || byte == '\b';
+    if (byte < 0x20 && !printable_control) ++suspicious;
+  }
+  // 两条同时满足才算二进制：
+  // ① 控制字符密度 > 5%（真正的二进制文件远超这个数）；
+  // ② **控制字符个数 ≥ 8**。
+  //
+  // 为何必须有第二条（实测踩到）：只比密度的话，一个**短**文件里恰好有两三个
+  // ANSI 转义符（带颜色的日志片段、make 输出）就会被判成二进制——
+  // 而它明明是可读的文本（回归用例 `gbcode_looks_binary_detects_…` 当场抓住）。
+  return suspicious >= 8 && suspicious * 20 > window;
 }
 
 /// 扫描一层目录并归一为「目录在前、各自字典序、忽略点开头」的稳定序。

@@ -1,5 +1,8 @@
-/// gbcode 数据与工具（与界面无关）：内置样例表、轻量检查、缓冲区读取、目录扫描。
-/// 拆分自 main.cpp 第一节，零逻辑改动。
+/// gbcode 数据与工具（与界面无关）：轻量检查、缓冲区读取、自定义语言注册。
+///
+/// ⚠ 2026-10-18：**内置样例表已删除**（`samples()` / `Sample`）。
+/// 理由：gbcode 转为正式使用后，工作区数据一律来自磁盘（`--workspace` / 当前目录），
+/// “无参数时给几份假文件”是演示形态，不是产品形态。
 
 #pragma once
 
@@ -20,27 +23,12 @@ namespace gbcode_ui {
 /// `1.0` = **与正文同级**（与组件默认一致）。`--editor-font-scale` 可覆盖。
 constexpr float kEditorFontScale{1.0f};
 
-/// 内置样例文件（无 `--workspace` 时的自包含工作区）。
-struct Sample {
-  std::string name;
-  std::string language;
-  std::string code;
-  std::string tree_key;  ///< 资源管理器里的路径（相对工作区根）
-};
-
-[[nodiscard]] std::vector<Sample> samples();
-
-/// 自定义语言：业务日志（演示"规则即数据"，与内置语言走同一台扫描器）。
+/// 自定义语言：业务日志（`stlog`）。
+///
+/// 这不是演示摆拍：它验证一个**真能力**——运行时注册的语言规则
+/// 与内置语言走同一台扫描器（“规则即数据”）。产物是用户可用的高亮语言
+///（`include/st/text/language_registry.hpp`），而不是界面上的弹窗。
 void register_custom_language();
-
-/// stlog 样例文本（`--language stlog` / open_stlog 用）。
-inline constexpr std::string_view kStlogSample =
-    "# 业务日志（自定义语言：运行时注册的规则）\n"
-    "INFO  service=gateway trace_id=9f2c 请求进入 duration=12ms\n"
-    "DEBUG service=gateway trace_id=9f2c 命中缓存 true\n"
-    "WARN  service=renderer component=font 字形缓存接近上限\n"
-    "ERROR service=net trace_id=9f2c 连接失败 resp=null  # 需要重试\n"
-    "FATAL service=core 磁盘写入失败，进程退出\n";
 
 /// 一条轻量检查结果（**真检查**，不是占位数据）。
 struct Problem {
@@ -59,7 +47,15 @@ struct OpenBuffer {
   std::string language;
   std::string text;      ///< 当前文本（切回来时恢复）
   bool dirty{false};     ///< 修改点
-  std::string path{};    ///< 真实文件绝对路径（空 = 内置样例，保存走内存模拟）
+  std::string path{};    ///< 真实文件绝对路径（空 = 尚无命名的未保存缓冲区）
+  /// **二进制文件（只读打开）**：见 `looks_binary`。
+  ///
+  /// 为何要这个位（实测踩到）：二进制文件按文本读进来有两个后果——
+  /// ① 屏幕上是一堆控制字符（无意义，也谈不上高亮）；
+  /// ② 更危险：它**可以被编辑并 Ctrl+S 写回磁盘**——实测输入 3 个字节后保存，
+  ///    文件就变成了乱码。所以在打开那一刻就判定“这不是文本”，
+  ///    按只读展示（编辑器 read_only=true）+ 保存路径直接拒绕。
+  bool binary{false};
 
   /// 相等：`State<T>::set` 用它判变化（整个 vector 的比较依赖它）。
   /// 文本比较成本可接受（只在写入时判一次）；真要省可就只比元数据，
@@ -69,6 +65,13 @@ struct OpenBuffer {
 
 /// 读文件进列表（已打开则刷新内容，保持同一标签）；返回该标签下标（失败 = size()）。
 [[nodiscard]] std::size_t read_into_buffers(std::vector<OpenBuffer>& buffers, const std::string& path);
+
+/// 这段字节像不像二进制（而非文本）。
+///
+/// 判据（工程折中，不求严格）：头 8 KiB 里出现 `\0`，或控制字符（除 `\t\r\n\f\v\b`）
+/// 占比 > 5%。两条合起来既能把 PE/PNG/压缩包一次认出来，也不会误伤正常源码
+///（源码里偶发一个 ANSI 转义字符不至于被当成二进制）。
+[[nodiscard]] bool looks_binary(std::string_view bytes);
 
 /// 树目录扫描的最小条目（比 `st::fs::DirEntry` 轻：不带 path/size）。
 struct DirEntryLite {

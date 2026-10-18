@@ -289,7 +289,14 @@ auto LanguageService::ensure_started(std::string_view file_path, std::string_vie
   const LanguageServerRecipe* recipe = recipe_for_language(language);
   if (recipe == nullptr) recipe = recipe_for_path(file_path);
   if (recipe == nullptr) {
-    impl_->error = "没有可用的语言服务器";
+    // **没有 recipe 不是错误**（2026-10-18，转正后清理）：
+    // Markdown / JSON / 纯文本这类语言本来就不需要 LSP，给它们报
+    // “没有可用的语言服务器”会往状态栏刷一句噪声——而用户看的是 README，
+    // 本来就没指望补全。
+    // 区分两种情形：
+    //   ● 语言没有 recipe  → 静默（`error` 留空 = 调用方不报）
+    //   ● 有 recipe 但程序不在 → 如实报“未安装 xxx”（那才是用户需要知道的）
+    impl_->error.clear();
     return false;
   }
   // server 程序不存在：**如实不启用**（不假装"正在检查"）。

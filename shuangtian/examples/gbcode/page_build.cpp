@@ -276,6 +276,10 @@ namespace gbcode_ui {
     if (editor != nullptr && active < buffers.size() && buffers[active].key != loaded_key_) {
       editor->set_language(buffers[active].language);
       editor->set_text(buffers[active].text);
+      // 二进制文件按只读打开（与 `OpenBuffer::binary` 同一真值源）。
+      // 不设的话它能被编辑、Ctrl+S 把屏幕上的乱码写回原文件（实测）。
+      // 非二进制一律回 false：否则从二进制标签切到普通文件会“继承”只读态。
+      editor->set_read_only(buffers[active].binary);
       loaded_key_ = buffers[active].key;
       // 切到新文件：把语言服务指向它（懒启动 server）——只对**磁盘上的真文件**做，
       // 内存缓冲（untitled-N）没有 URI 可同步。
@@ -397,11 +401,27 @@ namespace gbcode_ui {
           c,
           [&] {
             (void)custom_container<Panel>(c, [&] { build_sidebar(c, buffers, active); },
-                                          [](Panel& panel) { panel.set_id("sidebar"); },
+                                          [](Panel& panel) {
+                                            panel.set_id("sidebar");
+                                            // 侧栏是“内容容器”：`Surface::Base`。
+                                            // 为何必须声明（2026-10-18 配色重整）：不声明 = 透明，
+                                            // 底色会透到页面 `bg` 上，与里面的 `Tree`（自己填 `surface`）
+                                            // 形成“外暗内亮”的颠倒；而且与编辑器完全同色（对比度 1.000）。
+                                            panel.set_surface(Element::Surface::Base);
+                                          },
                                           {.key = "sidebar"});
             (void)custom_container<Panel>(
                 c, [&] { build_editor_area(c, buffers, active, has_editor); },
-                [](Panel& panel) { panel.set_id("editor-column"); }, {.grow = true, .key = "editor"});
+                [](Panel& panel) {
+                  panel.set_id("editor-column");
+                  // 编辑区是“**内容阅读面**”：`Surface::Content`。
+                  // 为何不用 `Sunken`：两个主题的“围白方向”相反——
+                  //   暗色：内容比外壳**暗**（往里沉）；
+                  //   亮色：内容**归白**、外壳压浅灰（VSCode Light / IDEA Light 同构）。
+                  // 一个档位表达语义，具体取哪层 token 由主题决定（见 `Surface::Content`）。
+                  panel.set_surface(Element::Surface::Content);
+                },
+                {.grow = true, .key = "editor"});
           },
           [this](SplitView& split) {
             split.set_id("sidebar-split");
@@ -661,7 +681,8 @@ namespace gbcode_ui {
                          (buffers[active].path.ends_with(".md") ||
                           buffers[active].path.ends_with(".markdown") ||
                           buffers[active].path.ends_with(".mdx"));
-      (void)row(c, {.gap = 0.0f, .height = 34.0f, .id = "tabbar"}, [&] {
+      (void)row(c, {.gap = 0.0f, .height = 34.0f, .surface = Element::Surface::Alt,
+                    .id = "tabbar"}, [&] {
         Element& tabs_element = dsl::tabs(
             c, tabs, active_index, [this](std::size_t index) { switch_tab(index); },
             [this](const std::string& key) { request_close(key); },
@@ -766,14 +787,16 @@ namespace gbcode_ui {
                 b.set_label("暂存选中行");
                 b.set_size(Button::Size::Small);
                 // 未选任何行时就**如实禁用**（按了没反应比看得见的禁用更差）。
-                b.set_enabled(diff_view_ptr != nullptr && diff_view_ptr->selected_count() > 0U);
+                // 读 State 而非直读组件：`selected_count()` 是组件内部值，
+                // 不用 State 的话勾选变化不会触发重组，按钮永远不解除禁用（实测）。
+                b.set_enabled(diff_selected_count_.value() > 0U);
                 b.on_click = [this] { stage_selected_diff_lines(); };
               }, {.height = 24.0f, .id = "diff-stage-selected-btn"});
               (void)custom<Button>(c, [this](Button& b) {
                 b.set_id("diff-unstage-selected");
                 b.set_label("取消暂存选中");
                 b.set_size(Button::Size::Small);
-                b.set_enabled(diff_view_ptr != nullptr && diff_view_ptr->selected_count() > 0U);
+                b.set_enabled(diff_selected_count_.value() > 0U);
                 b.on_click = [this] { unstage_selected_diff_lines(); };
               }, {.height = 24.0f, .id = "diff-unstage-selected-btn"});
               (void)custom<Button>(c, [this](Button& b) {
@@ -790,6 +813,18 @@ namespace gbcode_ui {
             view.set_font_size(0.0f);
             view.set_staging_mode(diff_staging_.value());
             view.set_diff(diff_file_.value());
+            // 勾选变化 → **必须触发一次重组**。
+            //
+            // 为何（实测）：工具条上的「暂存选中行」按 `selected_count()` 算 enabled，
+            // 而 `enabled` 是**构建期写入**的属性。勾选发生在组件内部（自绘命中），
+            // 不经过声明式的状态，于是没有重组——按钮永远停在初始的 disabled，
+            // 用户勾了行也点不动（看上去像“勾选没生效”）。这里用一个应用层计数 State
+            // 把“组件内部选择变了”抬成响应式信号。
+            view.on_selection_changed = [this] {
+              const std::size_t count =
+                  diff_view_ptr == nullptr ? 0U : diff_view_ptr->selected_count();
+              if (diff_selected_count_.value() != count) diff_selected_count_.set(count);
+            };
             diff_view_ptr = &view;   // F7（下一个差异）靠它
           }, {.grow = true, .id = "diff-view-host"});
         });
@@ -935,7 +970,7 @@ namespace gbcode_ui {
   void CodeEditorPage::build_breadcrumb(Composer& c, const std::vector<OpenBuffer>& buffers, std::size_t active) {
     if (active >= buffers.size()) return;
     const OpenBuffer& buffer = buffers[active];
-    // 显示路径：真实文件取相对工作区的路径；内置样例用 `tree_key`。
+    // 显示路径：取相对工作区的路径（没有工作区时回退到 buffer.path）。
     std::string shown = buffer.path.empty()
                             ? buffer.key
                             : (workspace_.empty() ? buffer.path
@@ -1050,7 +1085,14 @@ namespace gbcode_ui {
       // 缩进 / 编码：点一下就地切换（缩进 2↔4↔8；编码在演示里是只读事实）。
       status_item(c, "status-indent", "", [this] { return std::format("空格: {}", tab_width_); },
                   [this] { cycle_tab_width(); }, "缩进宽度 — 点一下切换（2 / 4 / 8）");
-      (void)text(c, [] { return std::string("UTF-8"); }, {.id = "status-encoding"});
+      // 编码：做成可点状态项（与缩进/语言同构）。
+  //
+  // 为何必须可点（实测）：它是纯 `text` 时点击什么也不发生——而它两边都是
+  // **可点格子**（缩进切档、语言开列表），第三个格子“点了没反应”会被当成键坏。
+  // 点它的合理语义：告诉用户当前编码是怎么判定的、换不了的原因。
+  status_item(c, "status-encoding", "", [] { return std::string("UTF-8"); }, [this] {
+    status_.set("编码：UTF-8（本编辑器以 UTF-8 读写；非 UTF-8 文件不做自动转换）");
+  }, "文件编码 — 点一下看说明");
       // 语言：点一下切到「扩展」视图（那里列出全部可选语言）
       status_item(c, "language-label", "", [this] { return active_language(); }, [this] {
         activity_.set(4);

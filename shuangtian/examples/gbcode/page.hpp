@@ -51,18 +51,16 @@ using namespace st::ui::dsl;
 
 struct CodeEditorPage : Component {
  public:
-  CodeEditorPage(std::vector<Sample> files, std::string workspace, std::string tool_root,
+  CodeEditorPage(std::string workspace, std::string tool_root,
                  float editor_font_scale = kEditorFontScale,
                  float editor_line_spacing = CodeEditor::kDefaultLineSpacing)
       : editor_font_scale_(editor_font_scale), editor_line_spacing_(editor_line_spacing),
-        tool_root_(std::move(tool_root)), files_(std::move(files)),
-        workspace_(std::move(workspace)) {}
+        tool_root_(std::move(tool_root)), workspace_(std::move(workspace)) {}
 
-  CodeEditorPage(std::vector<Sample> files, std::string workspace,
-                 float editor_font_scale = kEditorFontScale,
+  CodeEditorPage(std::string workspace, float editor_font_scale = kEditorFontScale,
                  float editor_line_spacing = CodeEditor::kDefaultLineSpacing)
       : editor_font_scale_(editor_font_scale), editor_line_spacing_(editor_line_spacing),
-        files_(std::move(files)), workspace_(std::move(workspace)) {}
+        workspace_(std::move(workspace)) {}
 
   /// 真值源读取口（`run_app` 注入为 `UiRoot::theme().mode()`）。
   ///
@@ -308,6 +306,13 @@ struct CodeEditorPage : Component {
   /// 为何是模式而不是"永远显示勾选列"：勾选列会占掉左侧栏宽度（本来就窄），
   /// 而"挑着提交几行"是阶段性动作（做完就回到"看差异"）。
   State<bool> diff_staging_{false};
+/// 差异视图里已勾选的行数（由组件的 `on_selection_changed` 同步）。
+///
+/// 为何要把它抬成 `State`（实测）：工具条的「暂存选中行」按钮按选中数算 enabled，
+/// 而`enabled` 是**构建期写入**的。勾选发生在 `DiffView` 内部（自绘命中），
+/// 不经过声明式状态——不把计数变成响应式的话，勾了一行按钮仍然 disabled，
+/// 用户点不动（看上去像“勾选没生效”）。
+State<std::size_t> diff_selected_count_{0};
 
   // —— 三方合并视图（冲突处置）——
   ///
@@ -398,10 +403,6 @@ struct CodeEditorPage : Component {
   // —— 动作：只写状态（同步由框架做）——
 
 
-  /// 打开一份内置样例（已在标签里 = 激活；不在 = 新标签）。
-   auto open_sample(const Sample& sample) -> void;
-
-
   /// `--open <path>` 的待办：**不在构造期打开**（那会在构建期写 State，见 `main` 的注释），
 /// 而由帧首泵在首帧之后就打开一次。
 void set_pending_open_path(std::string path);
@@ -439,8 +440,6 @@ auto open_recent(const std::string& path) -> void;
    auto open_path(const std::string& path) -> void;
 
 
-   auto open_stlog() -> void;
-
 
   /// 关闭一个标签（按 key——索引会随增删漂移，key 才是业务身份）。
    auto close(std::string_view key) -> void;
@@ -454,7 +453,7 @@ auto open_recent(const std::string& path) -> void;
    auto close_active() -> void;
 
 
-  /// 保存当前标签：真实文件走 `fs::write_text`，内置样例走内存模拟。
+  /// 保存当前标签：真实文件走 `fs::write_text`；未命名缓冲区走“另存为”。
    auto save() -> void;
 
 
@@ -1111,8 +1110,6 @@ auto open_recent(const std::string& path) -> void;
   /// 把当前标签的文本灌进编辑器（切标签/打开文件的唯一入口）。
   void load_active_text();
 
-
-   void open_by_name(const std::string& name);
 
 
    void switch_tab(std::size_t index);
@@ -1874,13 +1871,11 @@ auto shutdown() -> void;
  public:
   // —— 供入口与主循环使用 ——
   /// 编辑器字号档位（构造时定，`--editor-font-scale` 可覆盖）。
-  /// 声明在 `files_` 之前：初始化顺序按**声明序**，否则 -Werror=reorder 直接编译失败。
   float editor_font_scale_{kEditorFontScale};
   /// 编辑器行距倍数（构造时定，`--editor-line-spacing` 可覆盖）。
   float editor_line_spacing_{CodeEditor::kDefaultLineSpacing};
   /// 霜天仓库根（`--tool-root`）：PATH 上没有 `st` 时到它下面 `build/bin/st[.exe]` 找。
   std::string tool_root_{};
-  std::vector<Sample> files_{};
   std::string workspace_{};
   std::vector<Problem> problems_{};
   /// `problems_` 的指纹（`problems_fingerprint`）：变了才真正重建问题列表。

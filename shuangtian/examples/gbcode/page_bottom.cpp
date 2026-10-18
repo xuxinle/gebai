@@ -1,4 +1,4 @@
-// 底部面板族：终端/Git 工具窗（分支|日志|标签|暂存|远程）与提交详情、
+﻿// 底部面板族：终端/Git 工具窗（分支|日志|标签|暂存|远程）与提交详情、
 // 不可逆写操作的确认浮层触发（ask_*）。拆分自 main.cpp，零逻辑改动。
 
 #include <algorithm>
@@ -47,6 +47,9 @@ namespace gbcode_ui {
         [&] { build_terminal_body(c); },
         [this](Panel& panel) {
           panel.set_id("terminal-panel");
+          // 终端也是“内容区”：`Sunken`。与编辑器同档——两者都是“我在这里读/写内容”，
+          // 而外壳条带（标签条/状态栏）才是 `Alt`。
+          panel.set_surface(Element::Surface::Content);
           panel.set_visible(bottom_tab_.value() == 0);
         },
         {.grow = true, .key = "pane:terminal"});
@@ -55,6 +58,7 @@ namespace gbcode_ui {
         [&] { build_git_view(c); },
         [this](Panel& panel) {
           panel.set_id("git-panel");
+          panel.set_surface(Element::Surface::Content);
           panel.set_visible(bottom_tab_.value() != 0);
         },
         {.grow = true, .key = "pane:git"});
@@ -120,7 +124,7 @@ namespace gbcode_ui {
     // 是"视图里没有内容"，两码事）。
     if (workspace_.empty()) {
       column(c, {.padding = 12.0f, .grow = true, .id = "git-view"}, [&] {
-        (void)text(c, [] { return std::string("内置样例模式：没有工作区"); });
+        (void)text(c, [] { return std::string("没有工作区 —— 文件 → 打开文件夹"); });
       });
       return;
     }

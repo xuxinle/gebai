@@ -176,24 +176,19 @@ namespace gbcode_ui {
   }
 
 
-  // —— 视图 0：资源管理器（真工作区树 / 内置样例列表）——
+  // —— 视图 0：资源管理器（真工作区树）——
+  //
+  // 2026-10-18：无工作区时的“内置样例列表”分支已删除。正式形态下没有工作区
+  // 就**如实显示空状态**（并指路去打开文件夹），而不是拿假文件把界面填满。
   void CodeEditorPage::build_explorer(Composer& c) {
-    build_sidebar_head(c, workspace_.empty() ? "内置样例" : "资源管理器");
+    build_sidebar_head(c, "资源管理器");
     if (workspace_.empty()) {
-      // 无 `--workspace`：仍是自包含演示，但用 Tree 形态（与真实工作区同一套视觉）,
-      // 且按扩展名给图标——否则“有工作区/无工作区”两份界面的语言不一致。
-      std::vector<TreeNodeData> nodes;
-      for (const auto& sample : files_) {
-        nodes.push_back(TreeNodeData{.key = "sample:" + sample.name, .label = sample.tree_key});
-      }
-      nodes.push_back(TreeNodeData{.key = "sample:stlog.log", .label = "logs/app.stlog"});
-      (void)tree(c, nodes, {},
-                 [this](const std::string& key) {
-                   const std::string name = key.substr(7);
-                   if (name == "stlog.log") open_stlog();
-                   else open_by_name(name);
-                 },
-                 {.grow = true, .id = "sample-tree"});
+      (void)column(c, {.gap = 6.0f, .padding_x = 12.0f, .padding_y = 10.0f, .id = "explorer-empty"}, [&] {
+        (void)text(c, [] { return std::string("未打开文件夹"); },
+                   {.weight = FontWeight::Medium, .id = "explorer-empty-title"});
+        (void)text(c, [] { return std::string("文件 → 打开文件夹（Ctrl+K Ctrl+O）"); },
+                   {.color = Tone::Muted, .id = "explorer-empty-hint"});
+      });
       return;
     }
     (void)custom_container<ScrollView>(
