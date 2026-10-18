@@ -10,6 +10,7 @@
 #include <cmath>
 #include <format>
 
+#include "fx.hpp"
 #include "motion.hpp"
 #include "st/raster/path.hpp"
 #include "st/ui/text_port.hpp"
@@ -440,24 +441,50 @@ void Project::render_frame(Canvas& target, double time, const st::ui::TextPort* 
       bridge.clear(Color{0, 0, 0, 0});
       render_scene(bridge, *before, previous->local_time(previous->t_out), before->duration,
                    text_port, &assets_, asset_basis_);
-      // 转场不只透明度交叉（那看起来“平”）：交出的一幕同时**微缩 + 上移**，
-      // 叠在新的一幕上就有“镜头推进”的方向感。
+      // 转场不只透明度交叉（那看起来"平"）：交出的一幕同时**微缩 + 上移**，
+      // 叠在新的一幕上就有"镜头推进"的方向感。
       //
-      // 幅度很小（3% 缩放 / 1.5% 位移）：转场是“让观众不迷失”不是炫技；
+      // 幅度很小（3% 缩放 / 1.5% 位移）：转场是"让观众不迷失"不是炫技；
       // 幅度一大就变成 PPT 切换（廉价感的主要来源）。
       const float progress = static_cast<float>(
           std::clamp(into / std::max(0.001, script.transition), 0.0, 1.0));
-      const float shrink = 1.0f - 0.03f * progress;
-      const float shift =
-          static_cast<float>(target.physical_height()) * 0.015f * progress;
+      // 缓动：转场用 ease-out（快出慢收）——线性交叉会显得"匀速滑动"，
+      // 而真实的镜头切换是"一下到位然后稳住"。
+      const float eased = 1.0f - (1.0f - progress) * (1.0f - progress) * (1.0f - progress);
+      const float shrink = 1.0f - 0.035f * eased;
+      const float shift = static_cast<float>(target.physical_height()) * 0.016f * eased;
       const float box_w = static_cast<float>(target.physical_width()) * shrink;
       const float box_h = static_cast<float>(target.physical_height()) * shrink;
       const st::math::Rect box{(static_cast<float>(target.physical_width()) - box_w) * 0.5f,
                                (static_cast<float>(target.physical_height()) - box_h) * 0.5f - shift,
                                box_w, box_h};
       st::raster::DrawOptions options{};
-      options.opacity = 1.0f - progress;
+      options.opacity = 1.0f - eased;
       target.draw_canvas(bridge, box, options);
+
+      // ── 冲击闪白：转场前 30% 时间内叠一层高亮，纯黑场之间"撞击"用 ──
+      //
+      // 为何要有它：交叉溶解在任何两幕之间都"温和"，而预告片的节奏需要
+      // **明确的断点**。闪白提供了这个断点，且成本极低（一次全幅 fill_rect）。
+      if (progress < 0.30f) {
+        const float flash = 1.0f - progress / 0.30f;
+        const float alpha = flash * flash * 0.32f;
+        if (alpha > 0.003f) {
+          const auto a = static_cast<std::uint8_t>(std::clamp(alpha, 0.0f, 1.0f) * 255.0f);
+          target.fill_rect(st::math::Rect{0.0f, 0.0f,
+                                          static_cast<float>(target.physical_width()),
+                                          static_cast<float>(target.physical_height())},
+                           st::raster::Paint::solid(st::math::Color{210, 232, 255, a}));
+        }
+      }
+
+      // ── 光扫擦除：转场期间一道亮带扫过（"被光洗过"的换场感）──
+      if (progress > 0.02f && progress < 0.92f) {
+        const float sweep = (progress - 0.02f) / 0.90f;
+        caiyun::paint_light_sweep(target, sweep, 0.22f, scene->accent, 1.1f,
+                                  static_cast<float>(target.device_scale()));
+      }
+
     }
   }
 

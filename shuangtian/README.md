@@ -411,6 +411,15 @@ UI 只负责把控件置灰并告诉用户为什么。
 静止背景在视频里像幻灯片）。素材路径支持绝对路径 / 相对脚本目录（`media/x.png`）/ 素材库名字。
 **缺图时画「素材缺失」占位框而不是静默跳过**——静默会让"图没进来"看起来像"设计就是没图"。
 
+**影像特效**（发布会/预告片质感，全部默认关闭且零开销）：`dof`（景深虚化 0~1）、
+`particles`（浮尘粒子数）、`glow` + `glow_cx/cy/radius`（舞台光晕）、
+`god_ray`（体积光柱）、`light_sweep`（光扫）、`cam_zoom_from/to` / `cam_rotate` /
+`cam_pan_x/y` / `cam_shake`（运镜）。参考 `assets/gebai-cinematic.json`。
+
+> 三条实测约束：① 光晕**只能逐像素算**（多层同心圆会留下一圈圈可见的环）；
+> ② 运镜**不作用于包装层**（否则识标被放大、拉远时露黑边）；
+> ③ 推镜不超过 1.08 倍（版式安全边距 5%，再推就会裁到内容）。
+
 `--script <路径>` 启动即装载脚本；`--ai-control` 启动即进入 AI 控制态（人只能查看）；
 `--render <out.mp4>` 启动即渲染（`--render-frames N` 试渲前 N 帧、`--render-size WxH`
 改分辨率）；`--export-dir <dir>` 逐帧出 320×180 PNG + manifest（无 ffmpeg 时的兜底）；

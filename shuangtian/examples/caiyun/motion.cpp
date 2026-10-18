@@ -10,6 +10,7 @@
 
 #include "assets_lib.hpp"
 #include "brand.hpp"
+#include "fx.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -725,14 +726,20 @@ void paint_metrics(Painter& p, const Scene& scene, float local_time) {
 
   const std::size_t count =
       std::min<std::size_t>(3, std::max(scene.values.size(), scene.lines.size()));
-  const float slot = kDesignWidth / 3.0f;
+  // 三列落在**版心内**（不是铺满整幅画）：kDesignWidth / 3 会让最左/最右的数字
+  // 中心贴到画面边（大字一半在安全区外），叠加运镜放大后直接顶到边缘。
+  // 实测数据页的「100」「10」被裁到几乎贴边——那是"排版坏了"而不是"镜头推进"。
+  const LayoutSlots slots = make_slots();
+  const Grid& grid = slots.grid;
+  const float slot = grid.content_width() / 3.0f;
   for (std::size_t i = 0; i < count; ++i) {
     const float index = static_cast<float>(i);
     const float t = ease_out_expo(clamp01f((local_time - 0.30f - 0.12f * index) / 1.1f));
     const float target =
         i < scene.values.size() ? static_cast<float>(scene.values[i]) : index + 1.0f;
     const float shown = target * t;
-    const float cx = slot * (index + 0.5f);
+    // 补上版心左边距：否则整组内容仍然贴着画布边。
+    const float cx = grid.margin + slot * (index + 0.5f);
     const bool integral = std::abs(target - std::round(target)) < 1e-4f;
     std::string number =
         integral ? std::format("{:.0f}", shown) : std::format("{:.1f}", shown);
@@ -820,6 +827,45 @@ void render_scene(st::raster::Canvas& target, const Scene& scene, double local_t
   paint_backdrop(p, scene, time, duration);
   // 素材背景**叠在底色之上、文字之下**：底色仍是兜底（图缺失时有基调可用）。
   if (assets != nullptr) paint_background_image(p, scene, time, duration, *assets, asset_basis);
+  // ── 氛围层：背景之上、主体之下 ──
+  //
+  // 顺序有讲究：光晕/体积光要**压在背景上**才有"从背景里透出来"的感觉；
+  // 粒子要在主体之下（浮尘在前景会挡字）。景深作用于背景，
+  // 所以它在主体绘制**之前**——主体必须保持锐利（那是观众要读的东西）。
+  if (scene.dof > 0.001f) {
+    // 只对"背景"做失焦：先把当前画布（底色+素材）模糊，再整体贴回。
+    // 主体随后绘制，因此仍是锐的——这就是"景深"在本渲染器里的实现方式。
+    const auto blurred = depth_of_field(target, scene.dof);
+    target.clear(Color{0, 0, 0, 255});
+    st::raster::DrawOptions options{};
+    options.opacity = 1.0f;
+    target.draw_canvas(blurred,
+                       st::math::Rect{0.0f, 0.0f,
+                                      static_cast<float>(target.physical_width()),
+                                      static_cast<float>(target.physical_height())},
+                       options);
+  }
+  const float dscale = p.scale();
+  if (scene.glow > 0.001f) {
+    GlowSpec spec{};
+    spec.cx = scene.glow_cx;
+    spec.cy = scene.glow_cy;
+    spec.radius = scene.glow_radius;
+    spec.intensity = scene.glow;
+    spec.color = scene.accent;
+    paint_glow(target, spec, dscale);
+  }
+  if (scene.god_ray > 0.001f) {
+    paint_god_ray(target, scene.glow_cx, scene.glow_cy * 0.35f, scene.god_ray_angle, 0.30f,
+                  1.05f, scene.accent, scene.god_ray, dscale);
+  }
+  if (scene.particles > 0) {
+    ParticleField field{};
+    field.count = scene.particles;
+    field.alpha = scene.particle_alpha;
+    field.color = Color{210, 228, 255, 255};
+    paint_particles(target, field, static_cast<double>(time), dscale);
+  }
   const std::int64_t t1 = profile ? now() : 0;
   switch (scene.kind) {
     case SceneKind::Title: paint_title(p, scene, time); break;
@@ -833,6 +879,40 @@ void render_scene(st::raster::Canvas& target, const Scene& scene, double local_t
   // 放这里而不是各场景内各调一次，是因为包装必须**逐帧一致**——
   // 各写一遍必然漂移（实测：只有 title 有品牌角标、其余四个场景裸着，
   // 连起来看就是不统一）。
+  // 光扫在主体**之上**（它是"打过来的光"，要能扫过文字）
+  if (scene.light_sweep > 0.001f) {
+    // 每段内扫一次：进度按段内时间归一到 0~1（前 45% 时间完成扫过）。
+    const float sweep_t = clamp01f(time / std::max(0.2f, duration * 0.45f));
+    paint_light_sweep(target, sweep_t, 0.16f, scene.accent, scene.light_sweep, p.scale());
+  }
+  // ── 运镜层：只作用在**内容**上，包装层不参与 ──
+  //
+  // 为何包装层（识标/页脚/进度/四角标）不参与运镜：它们是"画面上的固定装置"，
+  // 就像电视转播里的台标——镜头推进时台标不会跟着放大。
+  // 实测把整幅画面一起变换后，识标被放大、页脚被推出画面、四周出现黑边
+  // （拉远类运镜尤其明显：边缘直接露底）。
+  //
+  // 所以顺序是：内容 → 运镜 → 把运镜结果贴回 → 包装层。
+  const bool camera_moves = scene.cam_zoom_from != scene.cam_zoom_to ||
+                            scene.cam_rotate != 0.0f || scene.cam_pan_x != 0.0f ||
+                            scene.cam_pan_y != 0.0f || scene.cam_shake > 0.0001f;
+  if (camera_moves) {
+    CameraMove move{};
+    move.zoom_from = scene.cam_zoom_from;
+    move.zoom_to = scene.cam_zoom_to;
+    move.rotate_deg = scene.cam_rotate;
+    move.pan_x = scene.cam_pan_x;
+    move.pan_y = scene.cam_pan_y;
+    move.shake = scene.cam_shake;
+    const float cam_progress = clamp01f(time / std::max(0.2f, duration));
+    const auto moved = apply_camera(target, move, cam_progress, static_cast<double>(time),
+                                    target.device_scale());
+    target.clear(Color{0, 0, 0, 255});
+    st::raster::DrawOptions cam_options{};
+    cam_options.opacity = 1.0f;
+    target.draw_canvas_at(moved, 0, 0, cam_options);
+  }
+  // 包装层在运镜**之后**画：它固定在画面上，不随镜头动。
   paint_wrap(p, scene, time, scene_index, scene_total);
   if (profile) {
     st::print("[profile] bg={:.1f}ms content={:.1f}ms\n",

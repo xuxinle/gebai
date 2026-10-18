@@ -1,0 +1,115 @@
+{
+  "name": "歌白 · 发布会版",
+  "fps": 30,
+  "size": [
+    1920,
+    1080
+  ],
+  "transition": 0.45,
+  "fade_in": 0.35,
+  "fade_out": 0.6,
+  "audio": {
+    "enabled": true,
+    "style": "uplift",
+    "bpm": 108,
+    "gain": 0.62
+  },
+  "scenes": [
+    {
+      "kind": "title",
+      "duration": 3.2,
+      "title": "歌白",
+      "subtitle": "GEBAI AGENT",
+      "image": "media/bg-deep.png",
+      "image_dim": 0.55,
+      "image_ken_burns": 0.05,
+      "accent": "#7ab4ff",
+      "dof": 0.42,
+      "glow": 0.85,
+      "glow_cx": 0.5,
+      "glow_cy": 0.34,
+      "glow_radius": 0.62,
+      "god_ray": 0.75,
+      "god_ray_angle": -1.15,
+      "particles": 90,
+      "particle_alpha": 0.62,
+      "light_sweep": 0.9,
+      "cam_zoom_from": 1,
+      "cam_zoom_to": 1.075,
+      "cam_shake": 0.006
+    },
+    {
+      "kind": "triptych",
+      "duration": 3,
+      "title": "以极致动态扩展",
+      "subtitle": "任意语言 · 任意进程 · 收编为工具",
+      "lines": [
+        "融合旧世界 IT",
+        "打造智能躯体",
+        "记忆长在智体"
+      ],
+      "image": "media/bg-mesh.png",
+      "image_dim": 0.5,
+      "image_card": "media/accent-glow.png",
+      "accent": "#7ab4ff",
+      "dof": 0.3,
+      "glow": 0.45,
+      "glow_cy": 0.2,
+      "glow_radius": 0.7,
+      "particles": 55,
+      "particle_alpha": 0.42,
+      "cam_zoom_from": 1,
+      "cam_zoom_to": 1.05,
+      "cam_rotate": 0.4
+    },
+    {
+      "kind": "metrics",
+      "duration": 2.8,
+      "title": "每一次调用都留痕",
+      "values": [
+        100,
+        4,
+        10
+      ],
+      "lines": [
+        "可审计",
+        "赛道",
+        "秒成片"
+      ],
+      "image": "media/bg-slate.png",
+      "image_dim": 0.45,
+      "accent": "#5ee0c0",
+      "dof": 0.22,
+      "glow": 0.55,
+      "glow_cx": 0.5,
+      "glow_cy": 0.25,
+      "glow_radius": 0.5,
+      "particles": 40,
+      "particle_alpha": 0.35,
+      "cam_zoom_from": 1,
+      "cam_zoom_to": 1.04,
+      "cam_pan_x": 0
+    },
+    {
+      "kind": "outro",
+      "duration": 3.2,
+      "title": "歌白",
+      "subtitle": "融合旧世界 IT 的所有技术 · 打造新世界智能的躯体",
+      "image": "media/bg-aurora.png",
+      "image_dim": 0.42,
+      "accent": "#7ab4ff",
+      "dof": 0.48,
+      "glow": 0.7,
+      "glow_cy": 0.42,
+      "glow_radius": 0.75,
+      "god_ray": 0.5,
+      "god_ray_angle": -1.35,
+      "particles": 70,
+      "particle_alpha": 0.5,
+      "light_sweep": 0.6,
+      "cam_zoom_from": 1.05,
+      "cam_zoom_to": 1,
+      "cam_shake": 0.004
+    }
+  ]
+}

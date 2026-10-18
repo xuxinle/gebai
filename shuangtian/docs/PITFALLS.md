@@ -209,6 +209,11 @@
 | **高频题材（星云/电路）不能做底板** | 细节密到压暗后叠字糊成一片；好看 ≠ 可用。底板只用渐变/雾光/单色纹理，并在提示词追加「低对比/大留白/柔和过渡」 | `tools/gen_gebai_assets.py` |
 | **卡片标题固定字号会溢出** | 卡片宽固定而文案是外部输入（AI 写的）：固定 50 号字遇长句直接压到卡外。必须先 `text_width` 量宽再按比例缩（下限 30 号） | `examples/caiyun/motion.cpp` paint_triptych |
 | **fp16 变体下载后加载器找不到** | 只下 `*.fp16.safetensors` 时 diffusers 按标准名 `diffusion_pytorch_model.safetensors` 找 → 报 no file named。用**硬链接**补标准名（同卷不占额外空间；Windows 非管理员可用 New-Item -ItemType HardLink） | `tools/fetch_diffusers_model.py` |
+| **多层同心圆叠不出径向渐变** | 每层圆的边缘都会留下可见的环，比不加光晕还难看（实测 14 层，画面像水波纹）。径向光晕只能逐像素算衰减，且限制在包围盒内（全幅逐像素 1080p 约 50ms/帧） | `examples/caiyun/fx.cpp` paint_glow |
+| **运镜不能作用于包装层** | 整幅一起变换会让识标被放大、页脚被推出画面、拉远时四周露黑边。包装层（台标/页脚/进度/角标）必须固定——顺序是：内容 → 运镜 → 贴回 → 包装 | `examples/caiyun/motion.cpp` render_scene |
+| **推镜会裁掉贴边内容** | 版式安全边距 5%（1080p=96px），推到 1.06 倍只剩 1%——实测数据页的 100/10 几乎顶到画面边，读起来像排版坏了。推镜不超过 1.08，且内容必须落在 `Grid::margin` 内 | `examples/caiyun/fx.hpp` CameraMove |
+| **单查单调性抓不住径向渐变里的环** | 半径量化造成的阶梯本身是单调不增的——回退成量化版后单调性判据仍全绿（假绿）。要查二阶差分：台阶处会出现 10+ 的尖峰，真渐变只差几个灰阶 | `tests/caiyun_fx_test.cpp` |
+| **examples 下的实现不能只 include 头** | 测试构建只编译 `tests/*_test.cpp` + 框架库源码，不链接 examples 的目标文件 → 直接 include 头会报 undefined symbol。要么 include 实现，要么把源加入测试目标 | `tests/caiyun_fx_test.cpp` |
 | **`Viewport::fit_to_view` 换文档后无效** | 它读子元素的 `content_size()`，而换了文档后子元素还没重新 `measure`（即使先 `mark_layout_dirty()`）——实测 view=876x662 / doc=1920x1080，调用后 zoom 纹丝不动。要让大图装进小视口，**改渲染尺寸**而不是改缩放 | `examples/louyue/main.cpp`；README §×镂月海报面 |
 
 ## 场景 9：下结论 / 归因（元层面，最贵的一类）

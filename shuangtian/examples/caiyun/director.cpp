@@ -78,6 +78,38 @@ using st::math::Color;
       std::clamp(st::json_get_double(node, "image_dim", scene.image_dim), 0.0, 1.0));
   scene.image_ken_burns = static_cast<float>(
       std::clamp(st::json_get_double(node, "image_ken_burns", scene.image_ken_burns), 0.0, 0.25));
+  // 影像特效（默认 0 = 关闭且零开销）
+  scene.dof = static_cast<float>(std::clamp(st::json_get_double(node, "dof", scene.dof), 0.0, 1.0));
+  scene.particles = static_cast<int>(
+      std::clamp(st::json_get_i64(node, "particles", scene.particles), 0LL, 600LL));
+  scene.particle_alpha = static_cast<float>(
+      std::clamp(st::json_get_double(node, "particle_alpha", scene.particle_alpha), 0.0, 1.0));
+  scene.glow = static_cast<float>(std::clamp(st::json_get_double(node, "glow", scene.glow), 0.0, 1.0));
+  scene.glow_cx = static_cast<float>(
+      std::clamp(st::json_get_double(node, "glow_cx", scene.glow_cx), 0.0, 1.0));
+  scene.glow_cy = static_cast<float>(
+      std::clamp(st::json_get_double(node, "glow_cy", scene.glow_cy), 0.0, 1.0));
+  scene.glow_radius = static_cast<float>(
+      std::clamp(st::json_get_double(node, "glow_radius", scene.glow_radius), 0.05, 1.5));
+  scene.god_ray = static_cast<float>(
+      std::clamp(st::json_get_double(node, "god_ray", scene.god_ray), 0.0, 1.0));
+  scene.god_ray_angle = static_cast<float>(
+      st::json_get_double(node, "god_ray_angle", scene.god_ray_angle));
+  scene.light_sweep = static_cast<float>(
+      std::clamp(st::json_get_double(node, "light_sweep", scene.light_sweep), 0.0, 1.0));
+  // 运镜
+  scene.cam_zoom_from = static_cast<float>(
+      std::clamp(st::json_get_double(node, "cam_zoom_from", scene.cam_zoom_from), 0.5, 2.0));
+  scene.cam_zoom_to = static_cast<float>(
+      std::clamp(st::json_get_double(node, "cam_zoom_to", scene.cam_zoom_to), 0.5, 2.0));
+  scene.cam_rotate = static_cast<float>(
+      std::clamp(st::json_get_double(node, "cam_rotate", scene.cam_rotate), -8.0, 8.0));
+  scene.cam_pan_x = static_cast<float>(
+      std::clamp(st::json_get_double(node, "cam_pan_x", scene.cam_pan_x), -0.5, 0.5));
+  scene.cam_pan_y = static_cast<float>(
+      std::clamp(st::json_get_double(node, "cam_pan_y", scene.cam_pan_y), -0.5, 0.5));
+  scene.cam_shake = static_cast<float>(
+      std::clamp(st::json_get_double(node, "cam_shake", scene.cam_shake), 0.0, 0.08));
   return scene;
 }
 
@@ -233,6 +265,35 @@ auto script_to_json(const Script& script) -> std::string {
     if (!scene.image.empty()) {
       node["image_dim"] = static_cast<double>(scene.image_dim);
       node["image_ken_burns"] = static_cast<double>(scene.image_ken_burns);
+    }
+    // 特效：只在开了时写（保持生成出来的脚本干净、可读）
+    if (scene.dof > 0.0001f) node["dof"] = static_cast<double>(scene.dof);
+    if (scene.particles > 0) {
+      node["particles"] = static_cast<std::int64_t>(scene.particles);
+      node["particle_alpha"] = static_cast<double>(scene.particle_alpha);
+    }
+    if (scene.glow > 0.0001f) {
+      node["glow"] = static_cast<double>(scene.glow);
+      node["glow_cx"] = static_cast<double>(scene.glow_cx);
+      node["glow_cy"] = static_cast<double>(scene.glow_cy);
+      node["glow_radius"] = static_cast<double>(scene.glow_radius);
+    }
+    if (scene.god_ray > 0.0001f) {
+      node["god_ray"] = static_cast<double>(scene.god_ray);
+      node["god_ray_angle"] = static_cast<double>(scene.god_ray_angle);
+    }
+    if (scene.light_sweep > 0.0001f) node["light_sweep"] = static_cast<double>(scene.light_sweep);
+    // 运镜：只在真会动时写（from==to 且无旋转平移 = 静止）
+    const bool camera_moves = scene.cam_zoom_from != scene.cam_zoom_to ||
+                              scene.cam_rotate != 0.0f || scene.cam_pan_x != 0.0f ||
+                              scene.cam_pan_y != 0.0f || scene.cam_shake > 0.0001f;
+    if (camera_moves) {
+      node["cam_zoom_from"] = static_cast<double>(scene.cam_zoom_from);
+      node["cam_zoom_to"] = static_cast<double>(scene.cam_zoom_to);
+      if (scene.cam_rotate != 0.0f) node["cam_rotate"] = static_cast<double>(scene.cam_rotate);
+      if (scene.cam_pan_x != 0.0f) node["cam_pan_x"] = static_cast<double>(scene.cam_pan_x);
+      if (scene.cam_pan_y != 0.0f) node["cam_pan_y"] = static_cast<double>(scene.cam_pan_y);
+      if (scene.cam_shake > 0.0001f) node["cam_shake"] = static_cast<double>(scene.cam_shake);
     }
     scenes.push_back(std::move(node));
   }
