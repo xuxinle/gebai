@@ -217,7 +217,73 @@ def main():
               f"画布 {cw}x{ch} 超过视口 {view['width']}x{view['height']}——会只显示一角")
         print(f"[7] 画布按视口渲染：{cw}x{ch} ≤ 视口 {view['width']}x{view['height']}")
 
-        print("\n[OK] 镂月海报闭环 + 双向控制权全部通过")
+        # —— 8. 素材：图片块能用，且缺图时画占位框（不静默跳过）——
+        #
+        # 「静默跳过」比占位框糟：它会让"图没进来"看起来像"设计就是没图"。
+        # 这条断言钉住的是那个占位行为本身。
+        media = os.path.join(shots, "media")
+        os.makedirs(media, exist_ok=True)
+        asset = os.path.join(media, "probe.png")
+        if not os.path.exists(asset):
+            # 造一张 4x4 纯色 PNG（最小合法图，不依赖外部素材）
+            import struct
+            import zlib
+
+            def chunk(kind, data):
+                body = kind + data
+                return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+            width = height = 4
+            raw = b"".join(b"\x00" + bytes([40, 90, 200]) * width for _ in range(height))
+            png = (b"\x89PNG\r\n\x1a\n"
+                   + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+                   + chunk(b"IDAT", zlib.compress(raw))
+                   + chunk(b"IEND", b""))
+            with open(asset, "wb") as handle:
+                handle.write(png)
+
+        poster_with_image = {
+            "name": "素材验证",
+            "width": 640,
+            "height": 360,
+            "background": "#0a0f1e",
+            "blocks": [
+                {"kind": "background", "color": "#0a0f1e"},
+                {"kind": "image", "image": asset, "x": 0.5, "y": 60,
+                 "width": 400, "height": 200, "radius": 12},
+                {"kind": "title", "text": "素材", "x": 0.5, "y": 280, "size": 40,
+                 "color": "#ffffff"},
+            ],
+        }
+        check(client.invoke("poster", "apply_poster", json.dumps(poster_with_image)),
+              "带 image 块的海报被拒")
+        time.sleep(0.3)
+        out3 = os.path.join(shots, "poster-with-image.png")
+        check(client.invoke("poster", "export_png", out3), "带素材的海报导出失败")
+        check(os.path.exists(out3), "带素材的海报文件不存在")
+        check(png_size(out3) == (640, 360), f"带素材导出尺寸不对：{png_size(out3)}")
+
+        # 缺图必须**画占位**（红色系），而不是画成正常底色 → 采样该区域看是否偏红
+        missing = dict(poster_with_image)
+        missing["blocks"] = [dict(poster_with_image["blocks"][0]),
+                             dict(poster_with_image["blocks"][1], image="不存在的素材"),
+                             dict(poster_with_image["blocks"][2])]
+        check(client.invoke("poster", "apply_poster", json.dumps(missing)), "缺图海报被拒")
+        time.sleep(0.3)
+        out4 = os.path.join(shots, "poster-missing.png")
+        check(client.invoke("poster", "export_png", out4), "缺图海报导出失败")
+        try:
+            from PIL import Image
+            img = Image.open(out4).convert("RGB")
+            # 图片块区域中心（设计坐标 640x360 → 同尺寸导出）
+            px = img.getpixel((320, 160))
+            reddish = px[0] > 40 and px[0] > px[2]
+            check(reddish, f"缺图处没画占位框（采样 {px}，红色分量不突出）")
+            print(f"[8] 素材：带图导出 {png_size(out3)}；缺图画占位（采样 {px}）")
+        except ImportError:
+            print(f"[8] 素材：带图导出 {png_size(out3)}（Pillow 缺失，跳过占位色采样）")
+
+        print("\n[OK] 镂月海报闭环 + 双向控制权 + 素材全部通过")
         return 0
     finally:
         try:

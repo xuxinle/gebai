@@ -70,6 +70,14 @@ using st::math::Color;
     }
   }
   scene.values = number_array(node, "values");
+  // 素材：三种写法都存原文，由渲染侧的 `AssetLibrary` 按基准目录解析
+  //（脚本不该知道自己被拷到哪，路径语义归素材库）。
+  scene.image = st::json_get_string(node, "image");
+  scene.image_card = st::json_get_string(node, "image_card");
+  scene.image_dim = static_cast<float>(
+      std::clamp(st::json_get_double(node, "image_dim", scene.image_dim), 0.0, 1.0));
+  scene.image_ken_burns = static_cast<float>(
+      std::clamp(st::json_get_double(node, "image_ken_burns", scene.image_ken_burns), 0.0, 0.25));
   return scene;
 }
 
@@ -219,6 +227,13 @@ auto script_to_json(const Script& script) -> std::string {
     node["accent"] = color_to_hex(scene.accent);
     node["background"] = st::Json::array({color_to_hex(scene.bg_top), color_to_hex(scene.bg_bottom)});
     if (!scene.values.empty()) node["values"] = scene.values;
+    // 素材字段只在非空时写回——空字符串会让保存出来的脚本充满噪声。
+    if (!scene.image.empty()) node["image"] = scene.image;
+    if (!scene.image_card.empty()) node["image_card"] = scene.image_card;
+    if (!scene.image.empty()) {
+      node["image_dim"] = static_cast<double>(scene.image_dim);
+      node["image_ken_burns"] = static_cast<double>(scene.image_ken_burns);
+    }
     scenes.push_back(std::move(node));
   }
   root["scenes"] = std::move(scenes);

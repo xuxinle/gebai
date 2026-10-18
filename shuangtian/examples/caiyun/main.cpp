@@ -194,7 +194,23 @@ class CaiyunPage final : public dsl::Component {
  public:
   explicit CaiyunPage(std::string script_path) : script_path_(std::move(script_path)) {
     project_.apply_script(load_initial_script(script_path_));
+    // ⚠ 素材基准目录**必须与 `load_script` 一致**（同一个 `set_asset_context`）。
+    // 本仓已因“同一件事写两条路径、其中一条漏一步”踩过一次（命令行出片 0/4 轨配音），
+    // 所以这里不再手写一遍。
+    set_asset_context(script_path_);
     project_.playhead = 1.2;
+  }
+
+  /// 设置素材基准目录与素材库根（脚本旁边的 `media/`）。
+  ///
+  /// 两个装载入口（构造 / `load_script`）都走它——**一处定义、两处调用**。
+  void set_asset_context(const std::string& script_path) {
+    project_.set_asset_basis(script_path.empty() ? std::string{} : st::fs::parent(script_path));
+    const std::string media = script_path.empty()
+                                  ? std::string("examples/caiyun/assets/media")
+                                  : st::fs::join(st::fs::parent(script_path), "media");
+    (void)project_.assets().set_root(media);
+    (void)project_.assets().refresh();
   }
 
   [[nodiscard]] auto project() noexcept -> Project& { return project_; }
@@ -231,6 +247,8 @@ class CaiyunPage final : public dsl::Component {
     if (!project_.apply_script(script)) {
       return st::unexpected(st::ErrorCode::Invalid, "脚本没有分镜（scenes 为空）");
     }
+    // 素材基准目录与素材库根（脚本旁边的 media/）：与构造路径**同一入口**。
+    set_asset_context(path);
     script_path_ = path;
     selected_scene_ = 0;
     if (monitor_ != nullptr) monitor_->refresh();

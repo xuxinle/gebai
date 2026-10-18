@@ -198,6 +198,12 @@
 | **验证“控件点不动”必须用真鼠标** | `invoke` 走的是“直接触发”通道（绕 enabled），拿它验 UI 层会假绿。真窗口 + `mouse_event` 才能验到 `set_enabled(false)`；无头模式下没有系统鼠标事件 | `tools/caiyun_lock_realwindow.py` |
 | **`set` 属性不会触发 `on_change`** | `Switch::set_property("checked", …)` 只改 `checked_`，不调 `on_change`（`activate()` 才调）——拿它验「人拨开关」会得到恒绿的假测试。验“动作”一律走 `invoke activate`；也说明开关类控件必须用 `activate` 路径才等价于点击 | `tools/caiyun_director_e2e.py` 第 6c 步 |
 | **算点击坐标不能用窗口矩形** | `GetWindowRect` 含标题栏/边框，而控制通道的逻辑坐标从**客户区**左上算。用窗口矩形会让点击整体下移一个标题栏高——实测开关在逻辑 y=402，却点到了 624，然后被误读成“框架的 on_change 没接上”（在框架里多查了一轮）。用 `ClientToScreen(0,0)` 拿客户区原点；DPI 倍率取 `metrics.device_scale`，**不要从窗口像素反推**（窗口逻辑宽随布局变） | `tools/control_switch_realwindow.py` |
+| **模型画文字 = 废图** | 让 sd-turbo 出「带标题的背景图」，得到的是扭曲字母（它没有排版能力）。素材只出背景/纹理，文字一律由渲染器画；提示词必须带 `no text` | `tools/imagegen.py`；README §imagegen |
+| **Windows PATH 的 python 是商店 stub** | 直接 `spawn("python")` 会打开微软商店、不跑脚本也不报错——于是工具"检查环境"得到空输出、误报不可用（比不报更费时间）。必须按已知安装位置显式解析真实解释器 | `packages/agents/src/agents/imagegen/imagegen.ts` |
+| **PyTorch 官方源单连接 0.2MB/s，国内镜像无 CUDA wheel** | 2.4GB 要 3.4 小时；清华/阿里/北外/中科大的 pytorch-wheels 实测全 404。唯一出路是**并行分段下载**（自带 `tools/pfetch.py`，12 路实测 17MB/s，快 85 倍），且必须带断点续传（后台命令会被生命周期超时杀掉） | `tools/pfetch.py`、`tools/fetch_sd_turbo.py` |
+| **反向验证要跑"回退后构建的那个档"** | 回退后构建 debug、却让 e2e 用它默认的 dev 二进制 → 测试仍在跑旧的 → **回退被测不出、得到假绿**（实测差点把有效断言当成无效）。反向验证必须把 binary 显式传给 e2e | `tools/caiyun_director_e2e.py` 头部说明 |
+| **素材块插到文字块之后会盖住标题** | 块数组自底向上（后画的在上），`push_back` 一张图就把标题盖没了——看着像"渲染坏了"，实际是叠放次序 | `examples/louyue/main.cpp` 素材插入处 |
+| **cover 算了裁切区却没用 = 拉伸变形** | `blit_cover` 算出了与目标同比例的源区域，却直接整幅 `draw_canvas` → 长宽比不一致时画面被拉变形（人脸/产品一眼假）。必须真的按 src 区域贴 | `examples/caiyun/assets_lib.cpp` |
 | **`Viewport::fit_to_view` 换文档后无效** | 它读子元素的 `content_size()`，而换了文档后子元素还没重新 `measure`（即使先 `mark_layout_dirty()`）——实测 view=876x662 / doc=1920x1080，调用后 zoom 纹丝不动。要让大图装进小视口，**改渲染尺寸**而不是改缩放 | `examples/louyue/main.cpp`；README §×镂月海报面 |
 
 ## 场景 9：下结论 / 归因（元层面，最贵的一类）

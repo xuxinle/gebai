@@ -31,6 +31,7 @@
 #include <string>
 #include <vector>
 
+#include "assets_lib.hpp"
 #include "director.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
@@ -201,6 +202,20 @@ struct Project {
   /// 而“少一段文字”比“整帧黑”诊断起来容易得多。
   void render_frame(Canvas& target, double time,
                     const st::ui::TextPort* text_port = nullptr) const;
+
+  /// —— 素材库（场景的 `image` / `image_card` 靠它解析与解码）——
+  ///
+  /// 放 Project 而不是调用方临时建：一帧里要贴多张图，重复建库 = 重复解码
+  ///（一张 768×512 的 PNG 解码 + 逐像素拷入约 3ms，1080p/300 帧下很可观）。
+  [[nodiscard]] auto assets() const -> const AssetLibrary& { return assets_; }
+  [[nodiscard]] auto assets() -> AssetLibrary& { return assets_; }
+  /// 素材相对路径的基准目录（**脚本所在目录**）；空则相对工作目录。
+  void set_asset_basis(std::string basis) { asset_basis_ = std::move(basis); }
+  [[nodiscard]] auto asset_basis() const -> const std::string& { return asset_basis_; }
+
+ private:
+  AssetLibrary assets_{};
+  std::string asset_basis_{};
 };
 
 /// 一段程序化画面的渲染（纯函数：只依赖 `local_time` 与 `size`）。

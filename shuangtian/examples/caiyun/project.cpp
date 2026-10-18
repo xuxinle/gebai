@@ -389,7 +389,8 @@ void Project::render_frame(Canvas& target, double time, const st::ui::TextPort* 
       }
       if (sole_opaque) {
         if (const Scene* scene = scene_of(clip); scene != nullptr) {
-          render_scene(target, *scene, clip.local_time(time), scene->duration, text_port);
+          render_scene(target, *scene, clip.local_time(time), scene->duration, text_port,
+                        &assets_, asset_basis_);
         } else {
           render_generator(target, clip.generator, clip.local_time(time), clip.tint, script.name,
                            text_port);
@@ -401,7 +402,8 @@ void Project::render_frame(Canvas& target, double time, const st::ui::TextPort* 
       layer.clear(Color{0, 0, 0, 0});
       if (const Scene* scene = scene_of(clip); scene != nullptr) {
         // 场景：`local_time` 已含素材入点与速度（修剪/调速都自动正确）。
-        render_scene(layer, *scene, clip.local_time(time), scene->duration, text_port);
+        render_scene(layer, *scene, clip.local_time(time), scene->duration, text_port,
+                     &assets_, asset_basis_);
       } else {
         render_generator(layer, clip.generator, clip.local_time(time), clip.tint,
                          script.name, text_port);
@@ -435,10 +437,25 @@ void Project::render_frame(Canvas& target, double time, const st::ui::TextPort* 
       Canvas bridge{target.physical_width(), target.physical_height(), 1.0f};
       bridge.clear(Color{0, 0, 0, 0});
       render_scene(bridge, *before, previous->local_time(previous->t_out), before->duration,
-                   text_port);
+                   text_port, &assets_, asset_basis_);
+      // 转场不只透明度交叉（那看起来“平”）：交出的一幕同时**微缩 + 上移**，
+      // 叠在新的一幕上就有“镜头推进”的方向感。
+      //
+      // 幅度很小（3% 缩放 / 1.5% 位移）：转场是“让观众不迷失”不是炫技；
+      // 幅度一大就变成 PPT 切换（廉价感的主要来源）。
+      const float progress = static_cast<float>(
+          std::clamp(into / std::max(0.001, script.transition), 0.0, 1.0));
+      const float shrink = 1.0f - 0.03f * progress;
+      const float shift =
+          static_cast<float>(target.physical_height()) * 0.015f * progress;
+      const float box_w = static_cast<float>(target.physical_width()) * shrink;
+      const float box_h = static_cast<float>(target.physical_height()) * shrink;
+      const st::math::Rect box{(static_cast<float>(target.physical_width()) - box_w) * 0.5f,
+                               (static_cast<float>(target.physical_height()) - box_h) * 0.5f - shift,
+                               box_w, box_h};
       st::raster::DrawOptions options{};
-      options.opacity = static_cast<float>(1.0 - into / script.transition);
-      target.draw_canvas_at(bridge, 0, 0, options);
+      options.opacity = 1.0f - progress;
+      target.draw_canvas(bridge, box, options);
     }
   }
 

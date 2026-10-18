@@ -7,6 +7,8 @@
 
 #include "poster.hpp"
 
+#include "assets_lib.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <format>
@@ -132,6 +134,7 @@ auto block_kind_name(BlockKind kind) -> const char* {
     case BlockKind::Rule: return "rule";
     case BlockKind::Badge: return "badge";
     case BlockKind::Body: return "body";
+    case BlockKind::Image: return "image";
   }
   return "title";
 }
@@ -143,6 +146,7 @@ auto parse_block_kind(std::string_view name) -> std::optional<BlockKind> {
   if (name == "rule") return BlockKind::Rule;
   if (name == "badge") return BlockKind::Badge;
   if (name == "body") return BlockKind::Body;
+  if (name == "image") return BlockKind::Image;
   return std::nullopt;
 }
 
@@ -191,6 +195,13 @@ auto parse_poster(std::string_view json) -> st::Result<PosterScript> {
     block.radius = static_cast<float>(std::clamp(st::json_get_double(node, "radius", 0.0), 0.0, 2000.0));
     block.color = color_field(node, "color", block.color);
     block.color_alt = color_field(node, "color_alt", block.color_alt);
+    // Image 块
+    block.image = st::json_get_string(node, "image");
+    block.contain = st::json_get_bool(node, "contain", block.contain);
+    block.height = static_cast<float>(
+        std::clamp(st::json_get_double(node, "height", block.height), 0.0, 8000.0));
+    block.tint_alpha = static_cast<float>(
+        std::clamp(st::json_get_double(node, "tint_alpha", block.tint_alpha), 0.0, 1.0));
     poster.blocks.push_back(std::move(block));
     ++index;
   }
@@ -221,6 +232,12 @@ auto poster_to_json(const PosterScript& poster) -> std::string {
     if (block.radius > 0.0f) node["radius"] = static_cast<double>(block.radius);
     node["color"] = color_to_hex(block.color);
     if (block.color_alt.a > 0) node["color_alt"] = color_to_hex(block.color_alt);
+    if (!block.image.empty()) {
+      node["image"] = block.image;
+      if (block.contain) node["contain"] = true;
+      if (block.height > 0.0f) node["height"] = static_cast<double>(block.height);
+      if (block.tint_alpha > 0.0f) node["tint_alpha"] = static_cast<double>(block.tint_alpha);
+    }
     blocks.push_back(std::move(node));
   }
   root["blocks"] = std::move(blocks);
@@ -285,8 +302,31 @@ auto builtin_gebai_poster() -> PosterScript {
   return poster;
 }
 
+/// 给**大字号**文字加一层柔和投影。
+///
+/// 为何只给大字：小字叠阴影会糊成一团（反而不可读）；而大标题在深色底上
+/// 加一层 120 alpha 的暗色偏移，能把它从背景里“拉”出来。
+void draw_text_with_shadow(const Frame& frame, Canvas& target, const st::ui::TextPort* port,
+                           const Block& block, Color color) {
+  if (port == nullptr || block.text.empty()) return;
+  const bool big = block.size >= 40.0f;
+  if (!big) {
+    draw_text(frame, target, port, block.text, block.x, block.y, block.size, block.tracking,
+              color, block.bold);
+    return;
+  }
+  // 阴影：同字再画一次，往下偏 2 物理像素、透明度按 block.alpha 缩。
+  const float off_design = 2.0f / std::max(0.01f, frame.scale);
+  const auto shadow_alpha = static_cast<std::uint8_t>(120.0f * block.alpha);
+  draw_text(frame, target, port, block.text, block.x, block.y + off_design, block.size,
+            block.tracking, Color{0, 0, 0, shadow_alpha}, block.bold);
+  draw_text(frame, target, port, block.text, block.x, block.y, block.size, block.tracking, color,
+            block.bold);
+}
+
 void render_poster(Canvas& target, const PosterScript& poster,
-                   const st::ui::TextPort* text_port) {
+                   const st::ui::TextPort* text_port, const AssetLibrary* assets,
+                   std::string_view asset_basis) {
   const Frame frame{.scale = static_cast<float>(poster.export_height()) /
                              static_cast<float>(std::max(1, poster.height)),
                     .width = poster.export_width(),
@@ -332,8 +372,59 @@ void render_poster(Canvas& target, const PosterScript& poster,
       case BlockKind::Title:
       case BlockKind::Subtitle:
       case BlockKind::Body: {
-        draw_text(frame, target, text_port, block.text, block.x, block.y, block.size,
-                  block.tracking, color, block.bold);
+        // 大标题带投影（深色底上把它从背景"拉"出来）；小字保持干净。
+        draw_text_with_shadow(frame, target, text_port, block, color);
+        break;
+      }
+      case BlockKind::Image: {
+        // 素材块：`width`/`height` 是两个尺寸（设计像素，随 frame.scale 缩放）。
+        // 未给高度时按 16:9 估（海报里图片块最常见的比例）。
+        const float w = (block.width > 0.0f ? block.width : 800.0f) * frame.scale;
+        const float h = (block.height > 0.0f ? block.height : w * 9.0f / 16.0f / frame.scale) *
+                        frame.scale;
+        const float x = block.x * static_cast<float>(frame.width) - w * 0.5f;
+        const float y = block.y * frame.scale;
+        const Rect area{x, y, w, h};
+        if (assets == nullptr || block.image.empty()) {
+          // 无素材库 / 未指定图片：画占位框（不静默——让人一眼看出"这里该有图"）。
+          target.fill_rect(area, Paint::solid(Color{30, 40, 60, 255}));
+          {
+            st::raster::Path border;
+            border.add_rect(area);
+            target.stroke_path(border, Paint::solid(with_alpha(color, 0.35f)),
+                               std::max(1.0f, 1.5f * frame.scale));
+          }
+          break;
+        }
+        const auto path = assets->resolve(block.image, asset_basis);
+        const auto image = path ? assets->image(*path) : std::shared_ptr<st::raster::Canvas>{};
+        if (!image) {
+          // **缺失要看得见**：静默跳过会让"图没进来"看起来像设计就是没图。
+          target.fill_rect(area, Paint::solid(Color{48, 24, 28, 255}));
+          {
+            st::raster::Path border;
+            border.add_rect(area);
+            target.stroke_path(border, Paint::solid(Color{220, 120, 120, 255}),
+                               std::max(1.0f, 2.0f * frame.scale));
+          }
+          break;
+        }
+        const float corner = block.radius * frame.scale;
+        // 图片投影：让素材块从底色里"浮"起来（海报层次感的主要来源）。
+        if (corner > 0.5f) {
+          target.draw_shadow(area, corner, 18.0f * frame.scale,
+                             Color{0, 0, 0, 110}, Point{0.0f, 6.0f * frame.scale});
+        }
+        if (block.contain) {
+          blit_contain(target, *image, area, with_alpha(Color{255, 255, 255, 255}, block.alpha).a /
+                                                              255.0f,
+                       corner);
+        } else {
+          blit_cover(target, *image, area,
+                     static_cast<float>(with_alpha(Color{255, 255, 255, 255}, block.alpha).a) /
+                         255.0f,
+                     corner, block.color, block.tint_alpha);
+        }
         break;
       }
     }

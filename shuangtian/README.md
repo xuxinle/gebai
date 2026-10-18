@@ -304,12 +304,36 @@ Photoshop 精简骨架：左工具栏（移动/画笔/橡皮/油漆桶/吸管/�
 > `content_size()` 在换文档后仍是旧值，调用无效果（实测 zoom 纹丝不动）——
 > 这条坑记在 `PITFALLS.md`。
 
+**素材块**：`{"kind":"image","image":"bg-mesh","width":640,"height":360,"radius":18,"contain":false}`。
+面板里有素材列表（点一下即插入），**插入位置在文字块之前**（块数组自底向上；若 push 到最后
+会盖住标题——实测踩到过）。
+
 导出：`invoke export_png <path>`（不带尺寸 = **作品设计尺寸** 1920×1080）或
 `invoke export_png <path> 1080x1080`（按该尺寸重渲染）。
 
 验收：`tools/louyue_poster_e2e.py`——控制面存在、人可拨开关、脚本即真值、
 坏脚本被拒且作品不变、导出尺寸正确、7 个写动作在接管态全被拒而查看仍可用、
 画布不大于视口。
+
+## 本地图像生成（imagegen）：素材的来源
+
+两个示例共用一条素材链路：**模型出图 → 落素材目录 → 脚本按名字引用**。
+
+- **模型**：`stabilityai/sd-turbo`（SD2.1-Turbo，蒸馏版，**1~4 步出图**）；落点在仓库根的资源子仓库里（约 2.5GB，与模型/运行时依赖同处——那是独立 git 仓库，不进主库）。
+- **推理栈**：torch 2.5.1+cu121 + diffusers 0.35.2 + transformers 4.49.0（版本是**耦合**的：
+  diffusers ≥0.36 要 torch≥2.6 的 `torch.accelerator`，transformers 5.x 缺 `MT5Tokenizer`）。
+- **出图脚本**：`tools/imagegen.py`（单张）、`tools/gen_gebai_assets.py`（批量）。
+  实测 512² 2 步 **1.2 秒**；768×512 2 步 **0.29 秒**（模型已加载）。
+- **工具面**（歌白子代理内）：`imagegen` / `imagegen_check` / `imagegen_assets`。
+
+> **两条硬约束**（都是实测）：
+> ① **别让模型画文字**——它会画出扭曲字母；文字一律由渲染器画（可读、可控）。
+> ② **提示词里写 `no text`**，否则背景图里常会出现伪文字，压暗后仍能看到。
+
+下载链路上还有两个坑：PyTorch 官方源单连接只有 0.2 MB/s 而国内镜像**没有** pytorch CUDA
+wheel（清华/阿里/北外/中科大实测全 404），所以自带 `tools/pfetch.py`（并行分段 + 断点续传，
+实测 17 MB/s）；以及 Windows PATH 里的 `python` 常是 **WindowsApps 商店 stub**，
+直接调用会静默不执行——工具侧必须显式解析真实解释器。
 
 ### `caiyun` — **AI 驱动的视频生成器**（**时间 / 动效应用面**）
 
@@ -373,6 +397,11 @@ UI 只负责把控件置灰并告诉用户为什么。
 
 交接时（`edit_lock` 开启）工程会**以脚本为准重建片段**：AI 改的是脚本，而片段还
 带着历史人工编辑；不重建就会出现“脚本早换了、时间轴还是手动剪过的样子”。
+
+**场景可以有素材**：`image`（背景图，cover 铺满）/ `image_card`（卡片插图，contain）/
+`image_dim`（压暗 0~1，有文字时 0.45~0.6，否则白字读不出来）/ `image_ken_burns`（缓慢推拉 0~0.25，
+静止背景在视频里像幻灯片）。素材路径支持绝对路径 / 相对脚本目录（`media/x.png`）/ 素材库名字。
+**缺图时画「素材缺失」占位框而不是静默跳过**——静默会让"图没进来"看起来像"设计就是没图"。
 
 `--script <路径>` 启动即装载脚本；`--ai-control` 启动即进入 AI 控制态（人只能查看）；
 `--render <out.mp4>` 启动即渲染（`--render-frames N` 试渲前 N 帧、`--render-size WxH`

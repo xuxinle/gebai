@@ -14,6 +14,10 @@
      之后检查器与时间轴同步变化（AI 与人的入口不分叉）。
 
 用法: python3 tools/caiyun_director_e2e.py [binary] [shots]
+
+⚠ 默认跑的是 **dev** 档二进制（build/dev/bin）。做反向验证时构建的是 debug 档，
+  却不传 binary 的话测试仍在跑**旧的 dev 二进制** → 回退被测不出、得到假绿
+  （实测踩到：回退"缺图静默跳过"后测试仍全绿，差点当成断言无效）。
 """
 import json
 import os
@@ -358,6 +362,66 @@ def main():
         check(t_out > t_in, f"片段 2 区间不自洽：{t_in} → {t_out}")
         print(f"[7] 共享真值可读：片段 2 opacity={opacity_2:.2f} speed={speed_2:.2f} "
               f"[{t_in:.2f},{t_out:.2f}]，{len(rows)} 行整表")
+
+        # —— 8. 素材：场景 image 能进画面；缺图**不被静默跳过** ——
+        #
+        # 判据不看"脚本里有没有 image 字段"（那只能证明字段被解析），
+        # 而是**比较渲染结果**：同一场景有图 vs 无图，画面必须不同。
+        # 缺图时同理——若画占位框，画面也与纯底色不同（这条防"静默跳过"）。
+        import struct
+        import zlib
+
+        def chunk(kind, data):
+            body = kind + data
+            return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+        def make_png(path, rgb, width=32, height=32):
+            raw = b"".join(b"\x00" + bytes(rgb) * width for _ in range(height))
+            data = (b"\x89PNG\r\n\x1a\n"
+                    + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+                    + chunk(b"IDAT", zlib.compress(raw))
+                    + chunk(b"IEND", b""))
+            with open(path, "wb") as handle:
+                handle.write(data)
+
+        media_dir = os.path.join(shots, "media")
+        os.makedirs(media_dir, exist_ok=True)
+        solid = os.path.join(media_dir, "solid.png")
+        make_png(solid, (220, 40, 40))
+
+        scene_plain = {"kind": "title", "duration": 1.5, "title": "素材", "subtitle": "X"}
+        scene_with = dict(scene_plain, image=solid, image_dim=0.0, image_ken_burns=0.0)
+        base_script = {
+            "name": "素材验证", "fps": 12, "size": [320, 180], "transition": 0.0,
+            "fade_in": 0.0, "fade_out": 0.0,
+            "audio": {"enabled": False, "style": "calm", "bpm": 90, "gain": 0.0},
+        }
+        check(client.invoke("director", "apply_script",
+                            json.dumps(dict(base_script, scenes=[scene_plain]))), "纯底色脚本被拒")
+        time.sleep(0.2)
+        # 用监视器帧哈希比较：有图 / 无图 / 缺图 三者必须两两不同
+        def frame_hash():
+            client.invoke("timeline", "seek", "0.4")
+            time.sleep(0.15)
+            return client.props("monitor")["frame_hash"]
+
+        hash_plain = frame_hash()
+        check(client.invoke("director", "apply_script",
+                            json.dumps(dict(base_script, scenes=[scene_with]))), "带素材脚本被拒")
+        time.sleep(0.2)
+        hash_image = frame_hash()
+        missing_scene = dict(scene_plain, image="不存在的素材.png")
+        check(client.invoke("director", "apply_script",
+                            json.dumps(dict(base_script, scenes=[missing_scene]))), "缺图脚本被拒")
+        time.sleep(0.2)
+        hash_missing = frame_hash()
+
+        check(hash_plain != hash_image,
+              f"有素材与无素材的画面相同（{hash_plain}）——素材根本没进画面")
+        check(hash_plain != hash_missing,
+              f"缺素材与无素材的画面相同——缺图被**静默跳过**了（应画占位框）")
+        check(hash_image != hash_missing, "有素材与缺素材的画面相同（占位没画出来？）")
+        print(f"[8] 素材：有图/无图/缺图 三种画面互不相同（哈希已比对）")
 
         print("\n[OK] 裁云 AI 导演闭环全部通过")
         return 0

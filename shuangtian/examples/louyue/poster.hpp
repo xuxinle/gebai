@@ -31,6 +31,8 @@
 
 namespace louyue {
 
+class AssetLibrary;   // 前向声明
+
 using st::math::Color;
 
 /// 海报块类型。
@@ -41,6 +43,7 @@ enum class BlockKind : std::uint8_t {
   Rule,         ///< 强调细线
   Badge,        ///< 圆环徽标（纯几何）
   Body,         ///< 正文/说明文字（多行）
+  Image,        ///< **素材图**（cover/contain，可选圆角/叠色）
 };
 
 [[nodiscard]] auto block_kind_name(BlockKind kind) -> const char*;
@@ -67,8 +70,20 @@ struct Block {
   Color color{255, 255, 255, 255};
   Color color_alt{0, 0, 0, 0};
 
-  float width{0.0f};         ///< Rule/Badge：几何宽度（0 = 按尺寸自动）
-  float radius{0.0f};        ///< Badge 半径
+  float width{0.0f};         ///< Rule/Badge/Image：几何宽度（0 = 按尺寸自动）
+  float radius{0.0f};        ///< Badge 半径 / Image 圆角
+
+  // —— Image 块（素材）——
+  //
+  // `image` 支持三种写法：绝对路径 / 相对脚本目录 / 素材库内名称（见 `assets_lib.hpp`）。
+  // 缺失时画“缺图”占位框——不静默跳过（静默会让“图没进来”看起来像设计就是没图）。
+  std::string image{};       ///< 素材引用
+  /// `cover`（填满+裁切）还是 `contain`（完整可见+留边）。
+  /// 海报里两者都常用：满幅背景图要 cover，产品图/截屏要 contain。
+  bool contain{false};
+  float height{0.0f};        ///< Image 块高度（设计像素）
+  /// 叠色（品牌色统一 / 压暗背景让文字可读）；`tint_alpha` 为 0 时不用。
+  float tint_alpha{0.0f};
 
   [[nodiscard]] auto display_name() const -> std::string {
     return name.empty() ? std::string(block_kind_name(kind)) : name;
@@ -109,6 +124,8 @@ struct PosterScript {
 ///
 /// `text_port` 为空时文字退化为几何占位（与裁云同策略：导出路径不依赖 UI 线程字体）。
 void render_poster(st::raster::Canvas& target, const PosterScript& poster,
-                   const st::ui::TextPort* text_port);
+                   const st::ui::TextPort* text_port,
+                   const AssetLibrary* assets = nullptr,
+                   std::string_view asset_basis = {});
 
 }  // namespace louyue

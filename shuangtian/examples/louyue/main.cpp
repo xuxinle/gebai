@@ -25,6 +25,7 @@
 
 #include "canvas_view.hpp"
 #include "document.hpp"
+#include "assets_lib.hpp"
 #include "poster.hpp"
 #include "poster_bridge.hpp"
 #include "battery/embed.hpp"   // 编译期资源嵌入（stpm 生成）
@@ -293,7 +294,7 @@ class LouyuePage final : public dsl::Component {
       sized.out_width = std::clamp(width, 64, 7680);
       sized.out_height = std::clamp(height, 64, 7680);
       st::raster::Canvas canvas{sized.export_width(), sized.export_height(), 1.0f};
-      louyue::render_poster(canvas, sized, text_port_);
+      louyue::render_poster(canvas, sized, text_port_, &assets_, asset_basis_);
       st::codec::PngImage image;
       image.width = static_cast<std::uint32_t>(canvas.physical_width());
       image.height = static_cast<std::uint32_t>(canvas.physical_height());
@@ -315,6 +316,13 @@ class LouyuePage final : public dsl::Component {
     document_->set_file_path(path);
     canvas_version_.set(canvas_version_.value() + 1U);
     return true;
+  }
+
+  /// 素材库根：与裁云共用生成的品牌素材（同一批图，两份用途）。
+  void set_asset_root(std::string root) {
+    assets_.set_root(std::move(root));
+    (void)assets_.refresh();
+    asset_basis_ = assets_.root();
   }
 
   void build(dsl::Composer& c) override {
@@ -748,7 +756,73 @@ class LouyuePage final : public dsl::Component {
               };
             },
             {.key = "poster-export"});
+        (void)dsl::custom<Button>(
+            c,
+            [this, editable](Button& b) {
+              b.set_id("poster-media-refresh");
+              b.set_label("刷新素材");
+              b.set_icon("refresh");
+              b.set_size(Button::Size::Small);
+              b.set_variant(Button::Variant::Ghost);
+              b.set_enabled(editable);
+              b.on_click = [this] {
+                const std::size_t count = assets_.refresh();
+                log(std::format("素材库：{} 项", count));
+                canvas_version_.set(canvas_version_.value() + 1U);
+              };
+            },
+            {.key = "poster-media-refresh"});
       });
+      // 素材列表：点一项 → 追加一个 cover 图片块（人也能直接用生成图）。
+      if (assets_.size() > 0U) {
+        dsl::text(c, [this] { return std::format("素材 {}", assets_.size()); },
+                  {.size = 11.0f, .id = "poster-media-title", .key = "media-title"});
+        std::vector<dsl::ListItemData> media_items;
+        const auto& entries = assets_.entries();
+        media_items.reserve(std::min<std::size_t>(entries.size(), 6U));
+        for (std::size_t i = 0; i < entries.size() && i < 6U; ++i) {
+          media_items.push_back(dsl::ListItemData{
+              .key = entries[i].name,
+              .label = entries[i].name,
+              .subtitle = std::format("{}x{}", entries[i].width, entries[i].height),
+          });
+        }
+        (void)dsl::list(
+            c, media_items,
+            [this](std::size_t index) {
+              if (!document_->can_edit()) return;
+              const auto& all = assets_.entries();
+              if (index >= all.size()) return;
+              louyue::Block block{};
+              block.kind = louyue::BlockKind::Image;
+              block.name = all[index].name;
+              block.image = all[index].name;
+              // **插到文字块之前**（图层语义：图片在下、文字在上）。
+              //
+              // 早期直接 push_back（画在最上层），结果插一张图就把主标题/副标题
+              // 盖住了——看着像"渲染坏了"，实际是叠放次序问题。
+              // 插在最后一个 Background 之后、第一个文字块之前 = 素材作背景层。
+              block.x = 0.5f;
+              block.y = static_cast<float>(poster_.height) * 0.30f;
+              block.width = static_cast<float>(poster_.width) * 0.40f;
+              block.height = static_cast<float>(poster_.height) * 0.26f;
+              block.radius = 16.0f;
+              block.alpha = 0.55f;   // 作背景层时压淡，文字才读得清
+              auto insert_at = poster_.blocks.begin();
+              for (auto it = poster_.blocks.begin(); it != poster_.blocks.end(); ++it) {
+                const bool is_text = it->kind == louyue::BlockKind::Title ||
+                                     it->kind == louyue::BlockKind::Subtitle ||
+                                     it->kind == louyue::BlockKind::Body ||
+                                     it->kind == louyue::BlockKind::Rule;
+                if (is_text) break;
+                insert_at = it + 1;
+              }
+              poster_.blocks.insert(insert_at, block);
+              apply_poster(poster_);
+            },
+            {.id = "poster-media-list",
+             .key = std::format("media-{}", canvas_version_.value())});
+      }
       // 日志（最近几条；AI 的动作也落在这里，两边看同一份历史）。
       for (const std::string& line : log_lines_) {
         dsl::text(c, [line] { return line; }, {.size = 11.0f});
@@ -834,6 +908,9 @@ class LouyuePage final : public dsl::Component {
 
  // —— 海报（AI 作品面；见 poster.hpp / poster_bridge.hpp）——
  louyue::PosterScript poster_{louyue::builtin_gebai_poster()};
+ /// 素材库（海报的 image 块靠它解析与解码）。
+ louyue::AssetLibrary assets_{};
+ std::string asset_basis_{};
  std::string poster_script_path_{};
  std::string last_export_{};
  const st::ui::TextPort* text_port_{nullptr};
@@ -909,7 +986,7 @@ class LouyuePage final : public dsl::Component {
    const int height = poster_.export_height();
    document_ = std::make_unique<Document>(width, height);
    st::raster::Canvas canvas{width, height, 1.0f};
-   louyue::render_poster(canvas, poster_, text_port_);
+   louyue::render_poster(canvas, poster_, text_port_, &assets_, asset_basis_);
    st::codec::PngImage image;
    image.width = static_cast<std::uint32_t>(width);
    image.height = static_cast<std::uint32_t>(height);
@@ -1044,6 +1121,16 @@ if (!dsl::register_element_type<louyue::PosterBridge>("LouyuePoster")) {
 }
 // **必须在 start() 之后**：`root().text_port()` 要等应用初始化完成才可用。
 // 没有这一步的后果不是报错，而是**海报里一个字都没有**——文字层静默跳过（实测）。
+// 素材根用**绝对路径**：相对路径按 cwd 解析，而无头/双击/CI 的 cwd 各不相同
+// （实测：相对路径导致素材列表为空，看着像"素材面板没做"）。
+// 从 argv[0] 推导：可执行文件在 <repo>/shuangtian/build/<档>/bin/，素材在 <repo>/shuangtian/examples/。
+if (argv[0] != nullptr) {
+  std::string asset_dir = st::fs::parent(std::string(argv[0]));
+  for (int i = 0; i < 3 && !asset_dir.empty(); ++i) asset_dir = st::fs::parent(asset_dir);
+  if (!asset_dir.empty()) {
+    page->set_asset_root(st::fs::join(asset_dir, "examples/caiyun/assets/media"));
+  }
+}
 page->set_text_port(app.root().text_port());
 
   // 主循环形态**承 gallery**：需要每帧显式推进声明式宿主

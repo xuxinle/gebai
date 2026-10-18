@@ -8,6 +8,8 @@
 
 #include "motion.hpp"
 
+#include "assets_lib.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -261,13 +263,82 @@ class Painter {
     band_fill(st::math::Rect{w - band, 0.0f, band, h}, st::math::Point{w, 0.0f},
               st::math::Point{w - band, 0.0f}, edge, clear);
   }
+ public:
+  /// 素材绘制用：`blit_cover`/`blit_contain` 是自由函数（在 Painter 外部），
+  /// 需要 `Canvas&`。不给 getter 就只能靠"再开一条绘制路径"——两条路径必漂移。
+  [[nodiscard]] auto canvas() -> Canvas& { return canvas_; }
+  [[nodiscard]] auto design_w() const noexcept -> float { return kDesignWidth; }
+  [[nodiscard]] auto design_h() const noexcept -> float { return kDesignHeight; }
+
  private:
   Canvas& canvas_;
   const TextPort* port_;
+
+
   float scale_;
   float width_;
   float height_;
 };
+
+/// 背景图（素材）：铺满全画面 + 压暗 + 缓慢推拉（Ken Burns）。
+///
+/// 为何用 cover 而非 stretch：素材长宽比与 16:9 几乎不会一致，拉伸会把
+/// 人脸/产品拉变形（一眼假）。cover 裁掉多余部分，永远是“填满且不变形”。
+///
+/// 为何要压暗（`image_dim`）：白字压在亮图上根本读不出来。压暗不是“滤镜”，
+/// 是**可读性前提**——所以它不是可选装饰，而是素材背景的默认行为。
+///
+/// 为何要 Ken Burns（`image_ken_burns`）：完全静止的图在视频里显得像幻灯片；
+/// 缓慢推（6% 幅度，整段线性）就足以让它“呼吸”起来，且不会引人注意。
+void paint_background_image(Painter& p, const Scene& scene, float local_time, float duration,
+                            const AssetLibrary& assets, std::string_view basis) {
+  if (scene.image.empty()) return;
+  const auto path = assets.resolve(scene.image, basis);
+  const float w = p.design_w();
+  const float h = p.design_h();
+  if (!path) {
+    // **占位框**：不静默跳过——否则"图没进来"看起来像设计就是没图。
+    p.fill(0.0f, 0.0f, w, h, Color{40, 20, 24, 255});
+    p.text("素材缺失", 48.0f, w * 0.5f, h * 0.5f, Color{255, 180, 180, 255});
+    return;
+  }
+  const auto image = assets.image(*path);   // shared_ptr
+  if (!image) {
+    p.fill(0.0f, 0.0f, w, h, Color{40, 20, 24, 255});
+    p.text("素材无法解码", 48.0f, w * 0.5f, h * 0.5f, Color{255, 180, 180, 255});
+    return;
+  }
+  // Ken Burns：整段内从 1.0 推到 (1 + ken_burns)，以画面中心为锚点。
+  const float phase = duration > 0.01f ? std::clamp(local_time / duration, 0.0f, 1.0f) : 0.0f;
+  const float grow = 1.0f + std::max(0.0f, scene.image_ken_burns) * phase;
+  const float draw_w = w * grow;
+  const float draw_h = h * grow;
+  const st::math::Rect area{(w - draw_w) * 0.5f, (h - draw_h) * 0.5f, draw_w, draw_h};
+  blit_cover(p.canvas(), *image, area, 1.0f, 0.0f);
+  // 压暗（纯色叠层；alpha 由 `image_dim` 控）。
+  const float dim = std::clamp(scene.image_dim, 0.0f, 1.0f);
+  if (dim > 0.001f) {
+    p.fill(area.x, area.y, area.width, area.height,
+           Color{6, 9, 18, static_cast<std::uint8_t>(dim * 255.0f)});
+  }
+}
+
+/// 卡片插图（素材）：在给定设计坐标框内 contain 贴图（完整可见，不裁）。
+void paint_card_image(Painter& p, const Scene& scene, st::math::Rect area,
+                      const AssetLibrary& assets, std::string_view basis) {
+  if (scene.image_card.empty()) return;
+  const auto path = assets.resolve(scene.image_card, basis);
+  if (!path) {
+    p.fill(area.x, area.y, area.width, area.height, Color{40, 20, 24, 255});
+    return;
+  }
+  const auto image = assets.image(*path);
+  if (!image) {
+    p.fill(area.x, area.y, area.width, area.height, Color{40, 20, 24, 255});
+    return;
+  }
+  blit_contain(p.canvas(), *image, area, 1.0f);
+}
 
 /// 背景：底色渐变 + 两束缓慢漂移的彩色铺光 + 暗角。
 ///
@@ -410,7 +481,10 @@ void paint_terminal(Painter& p, const Scene& scene, float local_time, float dura
 }
 
 /// 三联卡：三张卡错峰升入，每张有图标（几何画）+ 标签 + 一句说明。
-void paint_triptych(Painter& p, const Scene& scene, float local_time) {
+///
+/// 设了 `image_card` 时用**素材图**代替几何图标（图文卡片）；否则仍是圆环+内点。
+void paint_triptych(Painter& p, const Scene& scene, float local_time,
+                    const AssetLibrary* assets, std::string_view basis) {
   const float head = ease_out_cubic(clamp01f(local_time / 0.8f));
   p.text(scene.title, 78.0f, kDesignWidth * 0.5f, 250.0f + (1.0f - head) * 26.0f,
          with_alpha(Color{246, 249, 255, 255}, head), 0.5f, true);
@@ -430,11 +504,17 @@ void paint_triptych(Painter& p, const Scene& scene, float local_time) {
     const float y = 430.0f + (1.0f - t) * 70.0f;
     paint_card(p, x, y, card_w, card_h, 26.0f, with_alpha(Color{255, 255, 255, 255}, 0.055f * t),
                with_alpha(scene.accent, 0.30f * t), 0.5f * t);
-    // 图标：一个圆环 + 内点（几何语言统一，不引图标集）。
+    // 图标：有素材则贴图（图文卡片），否则几何语言（不引图标集）。
     const float icon_y = y + 120.0f;
-    p.stroke_circle(x + card_w * 0.5f, icon_y, 46.0f * t, with_alpha(scene.accent, 0.85f * t),
-                    3.0f);
-    p.circle(x + card_w * 0.5f, icon_y, 14.0f * t, with_alpha(scene.accent, 0.9f * t));
+    const bool has_img = assets != nullptr && !scene.image_card.empty();
+    if (has_img) {
+      const st::math::Rect box{x + 40.0f, icon_y - 90.0f, card_w - 80.0f, 180.0f};
+      paint_card_image(p, scene, box, *assets, basis);
+    } else {
+      p.stroke_circle(x + card_w * 0.5f, icon_y, 46.0f * t,
+                      with_alpha(scene.accent, 0.85f * t), 3.0f);
+      p.circle(x + card_w * 0.5f, icon_y, 14.0f * t, with_alpha(scene.accent, 0.9f * t));
+    }
     const std::string label =
         i < scene.lines.size() ? scene.lines[i] : std::format("要点 {}", i + 1);
     p.text(label, 50.0f, x + card_w * 0.5f, y + 268.0f,
@@ -534,7 +614,8 @@ auto ease_out_back(float t) -> float {
 }
 
 void render_scene(st::raster::Canvas& target, const Scene& scene, double local_time,
-                  double scene_duration, const st::ui::TextPort* text_port) {
+                  double scene_duration, const st::ui::TextPort* text_port,
+                  const AssetLibrary* assets, std::string_view asset_basis) {
   Painter p(target, text_port);
   const float duration = static_cast<float>(scene_duration > 0.01 ? scene_duration : 2.0);
   const float time = static_cast<float>(local_time < 0.0 ? 0.0 : local_time);
@@ -546,11 +627,13 @@ void render_scene(st::raster::Canvas& target, const Scene& scene, double local_t
   // 在本框架里是逐像素采样（实测 1080p 约 25 ns/px，一次全幅 ≈ 50ms），而纯色
   // fill_rect 走覆盖运行段 + SIMD 混合，同样的观感成本低一个数量级。
   paint_backdrop(p, scene, time, duration);
+  // 素材背景**叠在底色之上、文字之下**：底色仍是兜底（图缺失时有基调可用）。
+  if (assets != nullptr) paint_background_image(p, scene, time, duration, *assets, asset_basis);
   const std::int64_t t1 = profile ? now() : 0;
   switch (scene.kind) {
     case SceneKind::Title: paint_title(p, scene, time); break;
     case SceneKind::Terminal: paint_terminal(p, scene, time, duration); break;
-    case SceneKind::Triptych: paint_triptych(p, scene, time); break;
+    case SceneKind::Triptych: paint_triptych(p, scene, time, assets, asset_basis); break;
     case SceneKind::Metrics: paint_metrics(p, scene, time); break;
     case SceneKind::Outro: paint_outro(p, scene, time); break;
   }

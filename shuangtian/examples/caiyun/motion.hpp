@@ -31,6 +31,8 @@
 
 namespace caiyun {
 
+class AssetLibrary;   // 前向声明：motion.hpp 不把素材实现细节带进所有 includeer
+
 /// 设计坐标系尺寸（全部排版常数以此为单位）。
 inline constexpr float kDesignWidth = 1920.0f;
 inline constexpr float kDesignHeight = 1080.0f;
@@ -40,9 +42,13 @@ inline constexpr float kDesignHeight = 1080.0f;
 /// - `local_time`：场景内时间（秒）；**超出 `scene_duration` 时按最后一帧保持**
 ///   （片段被移动/修剪后仍能出画面，而不是黑屏）；
 /// - `scene_duration`：该场景的标称时长（用于把入场/打字节奏铺满）；
-/// - `text_port` 为空时只画几何、不画字（导出路径一定有端口，此分支只为兜底）。
+/// - `text_port` 为空时只画几何、不画字（导出路径一定有端口，此分支只为兜底）；
+/// - `assets` 非空时解析 `scene.image` / `scene.image_card` 并贴图（相对路径以
+///   `asset_basis`（脚本所在目录）为基准）；为空则素材字段被忽略。
 void render_scene(st::raster::Canvas& target, const Scene& scene, double local_time,
-                  double scene_duration, const st::ui::TextPort* text_port);
+                  double scene_duration, const st::ui::TextPort* text_port,
+                  const AssetLibrary* assets = nullptr,
+                  std::string_view asset_basis = {});
 
 // —— 缓动（集中在此：改一处即改全片手感）——
 [[nodiscard]] auto ease_out_expo(float t) -> float;
