@@ -479,6 +479,17 @@ class Win32Backend final : public Backend {
     title_ = std::string(title);
   }
 
+  /// 语义光标 → Win32 资源 ID → `SetCursor`。
+  ///
+  /// ⚠ **必须在 `WM_SETCURSOR` 里重新应用**（见该 case 的注释），
+  /// 只在这里设一次是不够的：Windows 在每次鼠标移动后都会用窗口类的
+  /// 默认光标（`hCursor`，标准箭头）覆盖回来。那是最容易踩的一处——
+  /// 表现正是“我明明设了光标，动一下就变回箭头了”。
+  void set_cursor(ui::MouseCursor cursor) override {
+    cursor_ = cursor;
+    apply_cursor();
+  }
+
   [[nodiscard]] auto supports_window_icon() const noexcept -> bool override {
     return window_ != nullptr;
   }
@@ -711,6 +722,36 @@ class Win32Backend final : public Backend {
   }
 
  private:
+  /// 把当前语义光标落到系统光标上。
+  ///
+  /// 用**数值型资源 ID** 而不是 `IDC_*` 宏：那批宏在 MinGW 下是 ANSI 资源
+  ///（`MAKEINTRESOURCEA`），与宽字符 API 的类型不匹配；而它们本身就是
+  /// 固定的整数序数，直接写数值更直白（与上面 `hCursor` 用 32512 同一理由）。
+  void apply_cursor() {
+    ::SetCursor(::LoadCursorW(nullptr, MAKEINTRESOURCEW(cursor_resource_id(cursor_))));
+  }
+
+  /// 语义光标 → Windows 标准光标资源号（`IDC_*` 的数值形式）。
+  ///
+  /// 对照表刻意**只映射有标准对应的那些**：Windows 没有“禁用”以外的
+  /// 更多语义，缺的就落到箭头（`NotAllowed` 用 `IDC_NO`，那是唯一有专属
+  /// 图标的禁止态）。自绘光标（如更细的双向箭头）留待将来。
+  [[nodiscard]] static auto cursor_resource_id(ui::MouseCursor cursor) noexcept -> int {
+    switch (cursor) {
+      case ui::MouseCursor::Arrow: return 32512;      // IDC_ARROW
+      case ui::MouseCursor::Hand: return 32649;       // IDC_HAND（Win2000+ 的手形）
+      case ui::MouseCursor::Text: return 32513;       // IDC_IBEAM
+      case ui::MouseCursor::ResizeH: return 32644;    // IDC_SIZEWE
+      case ui::MouseCursor::ResizeV: return 32645;    // IDC_SIZENS
+      case ui::MouseCursor::ResizeNWSE: return 32642; // IDC_SIZENWSE
+      case ui::MouseCursor::ResizeNESW: return 32643; // IDC_SIZENESW
+      case ui::MouseCursor::Move: return 32646;       // IDC_SIZEALL
+      case ui::MouseCursor::Crosshair: return 32515;  // IDC_CROSS
+      case ui::MouseCursor::NotAllowed: return 32648; // IDC_NO
+    }
+    return 32512;
+  }
+
   /// 窗口实际 DPI 缩放（优先 `GetDpiForWindow`，Win10 以下退回屏幕 DC 的 LOGPIXELSX）。
   [[nodiscard]] static auto query_window_scale(HWND window, float fallback) -> float {
 
@@ -1309,6 +1350,18 @@ class Win32Backend final : public Backend {
         return 0;
       }
 
+      // 光标必须在这里设：Windows 每次鼠标移动后都会用**窗口类默认光标**
+      // 覆盖掉 `SetCursor` 的效果，所以“只在别处设一次”等于没设。
+      // `WM_SETCURSOR` 是系统在真正绘制光标之前给的最后一个改口机会。
+      //
+      // 返回 TRUE 表示“我处理了光标，别再按默认来”——返回 FALSE 会让系统
+      // 接着用类光标（箭头）覆盖。
+      case WM_SETCURSOR:
+        if (LOWORD(lparam) == HTCLIENT) {
+          apply_cursor();
+          return TRUE;
+        }
+        break;
       case WM_MOUSEMOVE:
         push_mouse(ui::EventKind::MouseMove, lparam, 0, 1);
         return 0;
@@ -1435,6 +1488,8 @@ class Win32Backend final : public Backend {
   std::string renderer_note_{};
   std::deque<ui::Event> events_{};
   std::string title_{};
+  /// 当前语义光标（`WM_SETCURSOR` 每次都用它重设——见那个 case 的说明）。
+  ui::MouseCursor cursor_{ui::MouseCursor::Arrow};
   int logical_width_{1280};   ///< 逻辑尺寸（取整；用于"改窗口尺寸"时的换算与日志）
   int logical_height_{720};
   /// 精确逻辑尺寸 = 物理 / scale（供 `logical_size()` 汇报；布局按它排布）

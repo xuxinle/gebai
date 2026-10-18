@@ -205,6 +205,55 @@ enum class EventKind : std::uint8_t {
   HoverOut,
 };
 
+/// 鼠标指针形态（**语义名**，不是平台常量）。
+///
+/// 为何用语义而不是直接存 Win32 的 `IDC_*` / XCursor 名：同一个意图在三个平台上
+/// 是三个不同的 API（`IDC_SIZEWE` / `XC_sb_h_double_arrow` / `NSCursor.resizeLeftRight`），
+/// 元素层不该知道这些。语义名让“按钮该用手形指针”这件事只写一遍，
+/// 各后端自己映射。
+///
+/// 归类依据是**用户在那一块能做什么**，不是组件叫什么：
+/// - `Hand`：可点开/可激活（按钮、菜单项、树行、链接）
+/// - `Text`：可编辑/可选择文字（输入框、代码区、终端）
+/// - `ResizeH/V`：可拖动改变尺寸（分栏分隔线、可拖边框）
+/// - `Move`：可拖动移动（将来用于可拖浮层标题）
+/// - `Crosshair`：精确取点（取色器、画布绘制）
+/// - `NotAllowed`：当前禁止操作（只读区拖放、禁用控件）
+/// - `Arrow`：默认。**一切没声明的都落回它**。
+enum class MouseCursor : std::uint8_t {
+  Arrow,
+  Hand,
+  Text,
+  ResizeH,
+  ResizeV,
+  /// 对角缩放（窗口四角用）。单轴缩放用 `ResizeH`/`ResizeV`。
+  ResizeNWSE,
+  ResizeNESW,
+  Move,
+  Crosshair,
+  NotAllowed,
+};
+
+/// 语义名的稳定短串（控制通道属性面 / 日志 / 测试断言用）。
+///
+/// 为什么需要：光标是**系统级效果**，截图里看不见——没有这个名字，
+/// “hover 分隔线时光标变成了双向箭头”这件事就只能靠人眼看。
+[[nodiscard]] constexpr auto mouse_cursor_name(MouseCursor cursor) noexcept -> std::string_view {
+  switch (cursor) {
+    case MouseCursor::Arrow: return "arrow";
+    case MouseCursor::Hand: return "hand";
+    case MouseCursor::Text: return "text";
+    case MouseCursor::ResizeH: return "resize-h";
+    case MouseCursor::ResizeV: return "resize-v";
+    case MouseCursor::ResizeNWSE: return "resize-nwse";
+    case MouseCursor::ResizeNESW: return "resize-nesw";
+    case MouseCursor::Move: return "move";
+    case MouseCursor::Crosshair: return "crosshair";
+    case MouseCursor::NotAllowed: return "not-allowed";
+  }
+  return "arrow";
+}
+
 struct Event {
   EventKind kind{EventKind::MouseMove};
   math::Point position{};
@@ -406,6 +455,50 @@ class Element {
   /// 真正在自己的子元素上。
   [[nodiscard]] virtual auto hit_test_children(math::Point point) const noexcept -> bool;
 
+  /// 本元素是否要**在子元素之前**优先拿命中（默认 `false` = 子元素优先）。
+  ///
+  /// 存在理由（2026-10-18，实测踩到）：派发默认是“子元素优先”——递归整棵子树，
+  /// 最后才问自己。那对绝大多数容器是对的。但一类控件自己拥有一个
+  /// **与子元素几何重叠**的交互区：
+  ///
+  /// `SplitView` 的分隔手柄就是。让它占独立布局空间（旧实现 8px）会在两侧面板
+  /// 之间留下一条露出页面底色的缝（观感是“分割线有填充宽度 + 边框”）；
+  /// 改成贴边重叠后，手柄与两个子面板在几何上叠在一起——
+  /// 若仍按“子元素优先”，手柄永远收不到 `MouseDown`，拖拽直接失效。
+  ///
+  /// 语义：返回 `true` 且 `hit_test(point)` 为真时，本元素先拿命中。
+  /// 覆写者必须让 `hit_test` 只在自己的“独占区”上返回真（如手柄矩形），
+  /// 否则会把子元素的点击全吃掉。
+  [[nodiscard]] virtual auto claims_hit_before_children(math::Point) const noexcept -> bool {
+    return false;
+  }
+
+  // —— 鼠标指针 ——
+  /// 本元素在**默认情形**下要的指针形态（组件构造时声明一次）。
+  ///
+  /// 与 `cursor_at` 的分工：这里表达“这类控件整体上是什么交互意图”
+  ///（按钮 → Hand、编辑器 → Text），而 `cursor_at` 允许**按位置细分**——
+  /// 那才是真实的复杂控件的形状（编辑器正文是 Text，但行号栏/折叠箭头不是）。
+  void set_cursor(MouseCursor cursor) noexcept {
+    if (extras_ == nullptr) extras_ = std::make_unique<RenderExtras>();
+    extras_->cursor = cursor;
+  }
+  [[nodiscard]] auto cursor() const noexcept -> MouseCursor {
+    return extras_ != nullptr ? extras_->cursor : MouseCursor::Arrow;
+  }
+  /// 指针在 `point`（**本元素坐标系**里的绝对点）处该显示什么形态。
+  ///
+  /// 默认返回 `set_cursor` 声明的那个。**按位置细分**是留给需要分区的控件覆写的：
+  /// `CodeEditor` 正文给 Text、行号栏给 Arrow；`SplitView` 在分隔线上给 Resize。
+  ///
+  /// ⚠ 返回 `Arrow` 有两种含义：“我这里就要箭头”与“我没意见，交给上层”。
+  /// 区分它们靠调用方**逐级向上回退**：`UiRoot` 拿到 `Arrow` 时会去问父元素的
+  /// `cursor()`（而不是 `cursor_at`，因为父元素只知道自己整体是什么）。
+  [[nodiscard]] virtual auto cursor_at(math::Point point) const noexcept -> MouseCursor {
+    (void)point;
+    return cursor();
+  }
+
   // —— 交互状态 ——
   /// 悬浮"特效"的声明式开关（组件自己决定怎么用）。
   ///
@@ -555,6 +648,15 @@ class Element {
     Base,    ///< `colors.surface`（普通面板底）
     Alt,     ///< `colors.surface_alt`（外壳条带：标题栏/活动栏/状态栏）
     Sunken,  ///< `colors.surface_sunken`（凹槽、输入底、代码底）
+    /// `colors.surface_content`（**编辑内容区**：编辑器/终端/预览这类“我在这里读东西”的面）。
+    ///
+    /// 为何必须是独立一档而不是复用 `Sunken`（2026-10-18 配色重整，用户报
+    /// “编辑器背景不够下沉与 UI 没区分度”）：两个模式的“围白”方向相反——
+    ///   暗色：外壳亮 → 内容**更暗**（往里沉），`Sunken` 正好；
+    ///   亮色：白到顶了 → 内容**归白**、外壳压灰（VSCode Light / IDEA Light 都这样），
+    ///        此时“更暗”反而是错的（编辑器会显得脏、发灰）。
+    /// 一档值同时服务两个模式，但它**各自取不同层的 token**，由主题决定。
+    Content,
   };
 
   /// 设语义表面档位（`Surface::None` = 不画底色）。
@@ -577,6 +679,12 @@ class Element {
       case Surface::Base: style_.background = colors.surface; return;
       case Surface::Alt: style_.background = colors.surface_alt; return;
       case Surface::Sunken: style_.background = colors.surface_sunken; return;
+      // 内容区：两个模式取**不同的层**（理由见枚举处注释）——
+      // 这正是“只用一个 `Sunken` 做不到”的那件事。
+      case Surface::Content:
+        style_.background = theme.mode() == ThemeMode::Dark ? colors.surface_sunken
+                                                            : colors.surface_raised;
+        return;
     }
   }
 
@@ -857,6 +965,8 @@ class Element {
     std::optional<FontWeight> text_weight_override{};
     /// 语义表面档位（`Element::Surface`；`None` = 不画底色，与构造默认一致）。
     Surface surface{Surface::None};
+    /// 鼠标指针形态（`set_cursor` 声明的“这类控件整体用哪种”）。
+    MouseCursor cursor{MouseCursor::Arrow};
     /// 外观规则（`apply_appearance` 的意图存档；`apply_theme` 每帧回放——
     /// 主题切换后所有联动自动跟随，这是「CSS 控制元素样式」的落点）。
     /// `has_value()` 为假 = 未声明外观（组件自己的 apply_theme 说了算）。

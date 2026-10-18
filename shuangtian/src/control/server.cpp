@@ -1584,6 +1584,9 @@ result["text_renderer"] = metrics.text_renderer;
 // 它与 text_renderer 一起构成“这一帧的字是怎么画的”。
 result["text_fit"] = metrics.text_fit;
 result["headless"] = metrics.headless;
+// 当前指针形态（语义名）。光标是**系统级效果，截图里看不见**——不报出来，
+// “hover 分隔线时光标变成双向箭头”就只能靠人眼验收，自动化断言无从下手。
+result["cursor"] = std::string(ui::mouse_cursor_name(root.cursor()));
 // 字体加载方式（映射 / 回退整读）：字体原始字节是内存占用的头号单项（实测 ~86MB），
 // 而“映射不可用 → 回退整读”这件事必须可见——否则内存差异会变成谜案。
 // 无字体环境（不链字体）时 `faces_loaded == 0`，如实报零。

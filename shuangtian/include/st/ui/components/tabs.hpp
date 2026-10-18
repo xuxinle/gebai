@@ -105,6 +105,12 @@ class Tabs : public Element {
 
   /// 标签项矩形（命中/指示条锚定/测试用；未布局或越界时为空矩形）。
   [[nodiscard]] auto tab_rect(std::size_t index) const -> math::Rect;
+
+  /// 指针形态：落在**某个标签**上给手形，落在标签外的空白给箭头。
+  /// 标签自绘（无子 Element），所以必须在这一层按位置判。
+  [[nodiscard]] auto cursor_at(math::Point point) const noexcept -> MouseCursor override {
+    return tab_index_at(point).has_value() ? MouseCursor::Hand : MouseCursor::Arrow;
+  }
   /// 全部标签所需宽度（布局期缓存；未布局时为 0）。
   [[nodiscard]] auto tabs_width() const noexcept -> float { return total_width_; }
 

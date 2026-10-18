@@ -85,6 +85,11 @@ class Backend {
   /// 受益者：窗口后端把“整屏重排 + 整屏送显”缩到该区域（X11 实测：1080p 下
   /// 重排 0.96 → 0.05 ms、送显 2.3 → 0.85 ms）。无头写入离屏缓冲，默认忽略即可。
   virtual void set_present_region(math::IntRect region) { (void)region; }
+  /// 设置窗口指针形态（语义值，各后端自己映射到平台 API）。
+  ///
+  /// 默认**空实现**：无头后端与不关心的后端不必覆写，也不会因此编译失败。
+  /// 这与 `set_present_region` 同一姿态（可选能力，缺省无害）。
+  virtual void set_cursor(ui::MouseCursor cursor) { (void)cursor; }
   /// 提交一帧（headless 时写入离屏缓冲）。
   virtual void present() = 0;
   /// 取回输入事件（无则空）。headless 恒为空——输入由控制通道直接投递。

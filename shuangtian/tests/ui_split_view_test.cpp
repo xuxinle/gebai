@@ -18,6 +18,7 @@
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/test/test.hpp"
+#include "st/ui/components/basic.hpp"
 #include "st/ui/components/split_view.hpp"
 #include "st/ui/style.hpp"
 #include "st/ui/dsl.hpp"
@@ -164,11 +165,19 @@ ST_TEST(ui_split_view_children_get_bounded_width_inside_row) {
   const float expected_second = usable - expected_first;
 
   // ① 给子面板的 measure 约束 = 真实分栏几何（不是按视口宽算的偏大值）
-  ST_CHECK_NEAR(probe_first->seen_max_width, expected_first, 0.01f);
-  ST_CHECK_NEAR(probe_second->seen_max_width, expected_second, 0.01f);
+  //
+  // ⚠ 2026-10-18 几何语义变更：手柄**不再占布局空间**（改为贴边重叠），
+  // 所以现在是「首宽 + 次宽 = 总宽」，比例按**全宽**分。
+  const float expected_first_now = expected_split * kRatio;
+  const float expected_second_now = expected_split - expected_first_now;
+  ST_CHECK_NEAR(probe_first->seen_max_width, expected_first_now, 0.01f);
+  ST_CHECK_NEAR(probe_second->seen_max_width, expected_second_now, 0.01f);
   // ② arrange 给的 bounds 与之一致（排版口径 == 控件口径）
-  ST_CHECK_NEAR(first->bounds().width, expected_first, 0.01f);
-  ST_CHECK_NEAR(second->bounds().width, expected_second, 0.01f);
+  ST_CHECK_NEAR(first->bounds().width, expected_first_now, 0.01f);
+  ST_CHECK_NEAR(second->bounds().width, expected_second_now, 0.01f);
+  // 旧的 `usable/expected_first` 派生量已不适用，显式标出以免“看着还在用”
+  (void)expected_first;
+  (void)expected_second;
 
   root.set_content(nullptr);
 }
@@ -181,22 +190,24 @@ ST_TEST(ui_split_view_ratio_layout_and_clamp) {
   ST_REQUIRE(fixture.first != nullptr);
   ST_REQUIRE(fixture.second != nullptr);
 
-  // ① 初始几何：两侧不重叠、不漏缝（首宽 + 手柄 + 次宽 = 总宽）
+  // ① 初始几何：两侧**直接相邻**、不漏缝（首宽 + 次宽 = 总宽，手柄不占位）
   const Rect whole = split->bounds();
   const Rect a = fixture.first->bounds();
   const Rect b = fixture.second->bounds();
   const Rect handle = fixture.handle();
   ST_CHECK_NEAR(a.x, whole.x, 0.01f);
-  ST_CHECK_NEAR(a.width + handle.width + b.width, whole.width, 0.01f);
-  ST_CHECK_NEAR(b.x, a.right() + handle.width, 0.01f);
-  ST_CHECK_NEAR(handle.x, a.right(), 0.01f);
-  // 比例 0.3：首面板占（总宽 - 手柄）的 30%
-  const float usable = whole.width - handle.width;
+  ST_CHECK_NEAR(a.width + b.width, whole.width, 0.01f);
+  ST_CHECK_NEAR(b.x, a.right(), 0.01f);
+  // 比例 0.3：首面板占**总宽**的 30%（手柄不参与分量）
+  const float usable = whole.width;
   ST_CHECK_NEAR(a.width, usable * 0.3f, 0.01f);
   ST_CHECK_NEAR(b.width, usable * 0.7f, 0.01f);
 
-  // ② 手柄在分界线中心
-  ST_CHECK_NEAR(handle.center().x, a.right() + handle.width * 0.5f, 0.01f);
+  // ② 手柄**以分隔线为中轴重叠**（两侧各张一半）——这是“分割线只有一条线”的实现基础：
+  // 它不能占独立空间，否则两面板之间会留一条露出页面底色的缝（观感是
+  // “有填充宽度的条块 + 边框”）。
+  ST_CHECK_NEAR(handle.center().x, a.right(), 0.01f);
+  ST_CHECK_NEAR(handle.width, split->handle_size(), 0.01f);
 
   // ③ 夹取：超范围写比例被夹到 [min, 1-min]
   split->set_ratio(0.0f, false);
@@ -247,11 +258,11 @@ ST_TEST(ui_split_view_drag_moves_ratio_and_persists_out_of_handle) {
   (void)dispatch_kind(root, st::ui::EventKind::MouseMove, Point{100.0f, mid_y});
   ST_CHECK_NEAR(split->ratio(), frozen, 0.0001f);
 
-  // ④ 拖拽后几何一致（手柄仍在分界线中心）
+  // ④ 拖拽后几何一致（两侧仍相邻，手柄仍在分隔线上）
   const Rect a = fixture.first->bounds();
   const Rect now_handle = fixture.handle();
-  ST_CHECK_NEAR(a.width + now_handle.width + fixture.second->bounds().width, whole.width, 0.01f);
-  ST_CHECK_NEAR(now_handle.x, a.right(), 0.01f);
+  ST_CHECK_NEAR(a.width + fixture.second->bounds().width, whole.width, 0.01f);
+  ST_CHECK_NEAR(now_handle.center().x, a.right(), 0.01f);
 }
 
 ST_TEST(ui_split_view_drag_preserves_grab_offset) {
@@ -410,13 +421,15 @@ ST_TEST(ui_split_view_vertical_orientation_geometry) {
   const Rect a = fixture.first->bounds();
   const Rect b = fixture.second->bounds();
   const Rect handle = fixture.handle();
-  // 上下方向：高度按比例、宽度拉满；手柄横向拉满
-  const float usable = whole.height - handle.height;
+  // 上下方向：高度按**全高**比例分（手柄不占布局）、宽度拉满；手柄横向拉满
+  const float usable = whole.height;
   ST_CHECK_NEAR(a.height, usable * 0.4f, 0.01f);
-  ST_CHECK_NEAR(a.height + handle.height + b.height, whole.height, 0.01f);
+  ST_CHECK_NEAR(a.height + b.height, whole.height, 0.01f);
+  ST_CHECK_NEAR(b.y, a.bottom(), 0.01f);
   ST_CHECK_NEAR(a.width, whole.width, 0.01f);
   ST_CHECK_NEAR(handle.width, whole.width, 0.01f);
-  ST_CHECK_NEAR(handle.y, a.bottom(), 0.01f);
+  // 手柄以横向分隔线为中轴
+  ST_CHECK_NEAR(handle.center().y, a.bottom(), 0.01f);
 
   // 上下分栏的键盘语义：↓ 增、↑ 减
   split->set_ratio(0.5f, false);
@@ -591,7 +604,9 @@ ST_TEST(ui_split_view_measures_children_with_bounded_width) {
   const float full = split->bounds().width;
   ST_REQUIRE(full > 0.0f);
   const float handle = split->handle_rect().width;
-  const float usable = full - handle;
+  // 手柄不占布局（贴边重叠）→ 分栏按**全宽**分。
+  const float usable = full;
+  (void)handle;
 
   // ① 两侧都拿到**有限**约束（不再是 `kUnbounded`）。
   ST_CHECK(probe_first->seen_max_width < st::ui::kUnbounded);
@@ -630,6 +645,202 @@ ST_TEST(ui_split_view_child_constraints_follow_ratio) {
   const float after = probe_second->seen_max_width;
   // 首面板占比变大 → 次面板收到的约束宽**变小**。
   ST_CHECK(before > after);
-  ST_CHECK_NEAR(after, (split->bounds().width - split->handle_rect().width) * 0.4f, 1.0f);
+  ST_CHECK_NEAR(after, split->bounds().width * 0.4f, 1.0f);
+  root.set_content(nullptr);
+}
+
+/// **分割线就是一条线**（回归：用户报「分割线显示一条线就行，不要有填充宽度和边框」
+/// 以及「拖动区域太小了，不好点」）。
+///
+/// 缺陷形态（2026-10-18 实测）：`SplitView` 的手柄占 **8px 布局空间**，
+/// 而它自身 `background` 是全透明——于是那 8px 露出的是**页面底色**，
+/// 与两侧面板色都不同。屏幕上看到的是：
+///
+/// ```text
+/// 侧栏 (30,30,36) │ 4px (17,17,20) │ 1px 线 │ 4px (17,17,20) │ 编辑区 (13,13,16)
+/// ```
+///
+/// 合计约 13px 的「条块」，中间夹一条线 = 用户说的“有填充宽度和边框”。
+///
+/// 修法：手柄**不占布局空间**（两侧面板直接相邻），手柄矩形以分隔线为
+/// 中轴向两侧各张一半——纯命中区。于是：
+/// - 视觉：两面板紧贴，只剩那条 1px 线；
+/// - 手感：命中区可以给得很宽（12px）而**不影响观感**。
+///
+/// 这两件事必须同时成立，任何一边退化都会复发：
+/// ① 若手柄重新占布局 → 又出现填充缝；
+/// ② 若命中区缩到线宽（1px）→ 鼠标点不中（用户第二次报的就是这个）。
+ST_TEST(split_view_divider_is_a_line_and_handle_is_wide_enough) {
+  st::ui::UiRoot root;
+  root.set_viewport(st::math::Size{800.0f, 600.0f});
+  auto split = std::make_unique<SplitView>(SplitView::Orientation::Horizontal);
+  split->set_ratio(0.4f, false);
+  auto* first = split->add_child(std::make_unique<Element>());
+  auto* second = split->add_child(std::make_unique<Element>());
+  SplitView* split_ptr = split.get();
+  root.set_content(std::move(split));
+  root.layout(true);
+
+  const st::math::Rect whole = split_ptr->bounds();
+  const st::math::Rect a = first->bounds();
+  const st::math::Rect b = second->bounds();
+  const st::math::Rect handle = split_ptr->handle_rect();
+
+  // ① 两侧面板**直接相邻**——中间不留任何缝（这就是“没有填充宽度”）。
+  ST_CHECK_NEAR(a.width + b.width, whole.width, 0.01f);
+  ST_CHECK_NEAR(b.x, a.right(), 0.01f);
+
+  // ② 比例按**全宽**分（手柄不参与分量）。
+  ST_CHECK_NEAR(a.width, whole.width * 0.4f, 0.01f);
+
+  // ③ 命中区以分隔线为**中轴**重叠：中心恰好落在 `a.right()`。
+  ST_CHECK_NEAR(handle.center().x, a.right(), 0.01f);
+  // ④ 命中区要**明显宽于**视觉线（1px 发丝），否则点不中。
+  //    12px 是桌面拖拽把手的常规量级；这里锁下限 8px（宽到能抓）而不锁上限
+  //    ——它不占布局，放大不会让线变粗，所以宽一点是安全的。
+  ST_CHECK(handle.width >= 8.0f);
+
+  // ⑤ 手柄两侧各张一半（对称），不会偏向某一侧面板。
+  ST_CHECK_NEAR(handle.x, a.right() - handle.width * 0.5f, 0.01f);
+
+  // ⑥ 命中语义：落在手柄里归 SplitView，落在面板里**不归它**
+  //（否则 SplitView 会把里面所有按钮的点击吃掉）。
+  ST_CHECK(split_ptr->hit_test(st::math::Point{a.right(), whole.center().y}));
+  ST_CHECK(!split_ptr->hit_test(st::math::Point{a.right() - 40.0f, whole.center().y}));
+  ST_CHECK(!split_ptr->hit_test(st::math::Point{a.right() + 40.0f, whole.center().y}));
+}
+
+/// 手柄与子面板**几何重叠**，所以必须在子元素之前拿命中——否则拖拽永远收不到。
+///
+/// 这是 `Element::claims_hit_before_children` 存在的唯一理由（见那里注释）。
+/// 反向验证：把该钩子退回默认 false，本用例的拖拽断言立即变红
+///（实测现象是「侧栏完全拖不动」）。
+ST_TEST(split_view_handle_wins_hit_over_overlapping_children) {
+  st::ui::UiRoot root;
+  root.set_viewport(st::math::Size{800.0f, 600.0f});
+  auto split = std::make_unique<SplitView>(SplitView::Orientation::Horizontal);
+  split->set_ratio(0.5f, false);
+  // 子面板用**可命中**的元素（Element 默认 hit_test = 落在自己矩形内即命中），
+  // 这样“手柄赢了子元素”才有意义——否则子元素本来就不吃这个点。
+  auto* first = split->add_child(std::make_unique<Element>());
+  auto* second = split->add_child(std::make_unique<Element>());
+  first->set_id("first");
+  second->set_id("second");
+  SplitView* split_ptr = split.get();
+  root.set_content(std::move(split));
+  root.layout(true);
+
+  const st::math::Rect handle = split_ptr->handle_rect();
+  const st::math::Point on_line{handle.center().x, handle.center().y};
+
+  // 子面板确实覆盖了这个点（否则本用例是空转）。
+  ST_CHECK(first->bounds().contains(on_line) || second->bounds().contains(on_line));
+  // 但命中必须落在 SplitView 上。
+  ST_CHECK(split_ptr->claims_hit_before_children(on_line));
+  st::ui::Element* hit = root.hit_test(on_line);
+  ST_CHECK(hit == split_ptr);
+}
+
+namespace {
+
+/// 把一个 MouseMove 派发进 root（光标解析挂在 MouseMove 分支上）。
+auto move_to(st::ui::UiRoot& root, st::math::Point point) -> bool {
+  st::ui::Event event;
+  event.kind = st::ui::EventKind::MouseMove;
+  event.position = point;
+  return root.dispatch(event);
+}
+
+}  // namespace
+
+/// **鼠标指针随内容变化**（回归：用户报「鼠标指针要随内容变化」）。
+///
+/// 缺陷形态（2026-10-18）：框架**完全没有**光标机制——窗口类把光标设成
+/// 固定箭头（`IDC_ARROW`）后全程不再改动。任何位置（编辑器正文、分隔线、按钮）
+/// 指针都一样，用户无从判断“这块能不能点/能不能拖/能不能打字”。
+///
+/// ## 为什么这个用例必须存在
+///
+/// 光标是**系统级效果，截图里看不见**。没有断言，这个能力被改坏时
+/// （某个组件漏了 `set_cursor`、`UiRoot` 的回退逻辑被改掉）完全无人察觉——
+/// 它不会报错、不会让画面变样，只会让交互提示悄悄消失。
+///
+/// 这里测的是**语义解析**这一层（不依赖真窗口）：命中 → 逐级向上回退 → 结果。
+ST_TEST(cursor_resolves_per_element_and_falls_back_upward) {
+  st::ui::UiRoot root;
+  root.set_viewport(st::math::Size{800.0f, 600.0f});
+  auto column = std::make_unique<st::ui::Element>();
+  column->style().grow = true;
+  auto* column_raw = column.get();
+  auto button = std::make_unique<st::ui::Button>("ok");
+  auto* button_raw = button.get();
+  button->style().width = 100.0f;
+  button->style().height = 32.0f;
+  button->set_cursor(st::ui::MouseCursor::Hand);
+  column->add_child(std::move(button));
+  root.set_content(std::move(column));
+  root.layout(true);
+
+  const auto center_of = [](const st::math::Rect& rect) {
+    return st::math::Point{rect.center()};
+  };
+
+  // ① 按钮上 → Hand。
+  move_to(root, center_of(button_raw->bounds()));
+  ST_CHECK(root.cursor() == st::ui::MouseCursor::Hand);
+
+  // ② 空白容器上 → Arrow（容器没声明光标）。
+  move_to(root, st::math::Point{400.0f, 500.0f});
+  ST_CHECK(root.cursor() == st::ui::MouseCursor::Arrow);
+
+  // ③ **回退语义**：容器声明 Hand、其中按钮没声明 → 落在按钮上仍是 Hand。
+  //    这条锁的是“逐级向上回退”这个核心规则：若实现只看最内层元素，
+  //    一个没声明光标的控件会把它父级的意图盖成箭头。
+  column_raw->set_cursor(st::ui::MouseCursor::Hand);
+  button_raw->set_cursor(st::ui::MouseCursor::Arrow);
+  move_to(root, center_of(button_raw->bounds()));
+  ST_CHECK(root.cursor() == st::ui::MouseCursor::Hand);
+
+  root.set_content(nullptr);
+}
+
+/// 指针形态的**语义名**是控制通道与 e2e 的契约（光标截图看不见，只能读名字）。
+///
+/// 改名字会静默打断所有基于它的自动化断言——所以逐个钉住。
+ST_TEST(cursor_names_are_stable) {
+  ST_CHECK_EQ(st::ui::mouse_cursor_name(st::ui::MouseCursor::Arrow), std::string_view{"arrow"});
+  ST_CHECK_EQ(st::ui::mouse_cursor_name(st::ui::MouseCursor::Hand), std::string_view{"hand"});
+  ST_CHECK_EQ(st::ui::mouse_cursor_name(st::ui::MouseCursor::Text), std::string_view{"text"});
+  ST_CHECK_EQ(st::ui::mouse_cursor_name(st::ui::MouseCursor::ResizeH), std::string_view{"resize-h"});
+  ST_CHECK_EQ(st::ui::mouse_cursor_name(st::ui::MouseCursor::ResizeV), std::string_view{"resize-v"});
+  ST_CHECK_EQ(st::ui::mouse_cursor_name(st::ui::MouseCursor::NotAllowed),
+              std::string_view{"not-allowed"});
+}
+
+/// 分隔线 → 双向箭头；分隔线**之外**（面板里）不留意见，以便回退到面板内的控件。
+///
+/// 这条锁的是“分割线有空隙时不该把整块 SplitView 都变成 resize”：
+/// `cursor_at` 在非手柄区必须返回 Arrow（=没意见），否则面板里的按钮
+/// 会把光标丢掉。
+ST_TEST(split_view_cursor_is_resize_only_on_the_handle) {
+  st::ui::UiRoot root;
+  root.set_viewport(st::math::Size{800.0f, 600.0f});
+  auto split = std::make_unique<st::ui::SplitView>(st::ui::SplitView::Orientation::Horizontal);
+  split->set_ratio(0.5f, false);
+  auto* first = split->add_child(std::make_unique<st::ui::Element>());
+  split->add_child(std::make_unique<st::ui::Element>());
+  st::ui::SplitView* split_raw = split.get();
+  root.set_content(std::move(split));
+  root.layout(true);
+
+  const st::math::Rect handle = split_raw->handle_rect();
+  ST_REQUIRE(!handle.is_empty());
+  // 手柄正中 → resize-h
+  ST_CHECK(split_raw->cursor_at(st::math::Point{handle.center()}) ==
+           st::ui::MouseCursor::ResizeH);
+  // 面板内部 → arrow（没意见，交给子元素）
+  ST_CHECK(split_raw->cursor_at(st::math::Point{first->bounds().center()}) ==
+           st::ui::MouseCursor::Arrow);
+
   root.set_content(nullptr);
 }

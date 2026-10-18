@@ -663,6 +663,9 @@ auto IconView::set_property(std::string_view name, std::string_view value) -> bo
 Button::Button(std::string label, Variant variant, Size size)
     : label_(std::move(label)), variant_(variant), size_(size) {
   set_focusable(true);
+  // 按钮 = 可点开 → 手形指针。这是“这块能点”最省事的全局提示，
+  // 用户不必先悬停看有没有高亮才知道。
+  set_cursor(MouseCursor::Hand);
   // 悬浮/按下的**底色变化由基类通用层统一做**（`Element::paint_box`）：
   // 那里在同向提亮/压暗的幅度上做、而且**保持色相**（主按钮仍看得出是蓝的），
   // 按下比悬停再深一档。`Button::apply_theme` 只管各变体的**常态语气**。

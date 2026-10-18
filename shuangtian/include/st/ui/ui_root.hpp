@@ -316,6 +316,17 @@ class UiRoot : public Element::HostFocus {
   /// 树里是否有元素需要重新布局（根元素上的汇总标记；O(1)）。
   [[nodiscard]] auto tree_layout_dirty() const noexcept -> bool;
 
+  void refresh_cursor(math::Point point);
+  /// 当前生效的指针形态（控制通道只读属性 / 测试断言 / 拖拽锁定判断）。
+  [[nodiscard]] auto cursor() const noexcept -> MouseCursor { return cursor_; }
+  /// 指针变化时的出口（宿主注入为 `Backend::set_cursor` 的转发）。
+  ///
+  /// 为何用回调而不是让 UiRoot 持有 `shell::Backend*`：`ui` 层不依赖 `shell` 层
+  ///（依赖方向是 shell → ui）。用回调把这件事留在装配处（`app`），
+  /// UI 层只知道“光标变了要通知一声”。
+  ///
+  /// 不注入时（单测/无头）什么也不发生——与 `text_port_` 同一姿态。
+  std::function<void(MouseCursor)> cursor_sink{};
  private:
   void assign_ids(Element& element, const std::string& prefix);
   /// 回收"派发或绘制期间摘除的叠加层"（延迟析构的墓场）。
@@ -394,6 +405,20 @@ class UiRoot : public Element::HostFocus {
   void update_hint(double delta_ms);
   /// 收起提示（移开/点击/按键/切页都调）。
   void hide_hint();
+
+  /// 按 `point` 重新解析该显示的指针形态并下发给后端。
+  ///
+  /// 解析规则（**逐级向上回退**，这是本机制的核心）：
+  /// 1. `hit_test_pointer_move` 找到最内层命中的元素；
+  /// 2. 沿 `parent` 链向上，第一个 `cursor_at(point)` 返回非 Arrow 的就是它；
+  /// 3. 都没有 → Arrow。
+  ///
+  /// 为何要回退而不是只看命中元素：`cursor_at` 返回 Arrow 有两种含义——
+  /// “我这一块就要箭头”与“我这里没意见”。若不回退，一个没声明光标的容器
+  /// 会把它里面的按钮（Hand）盖成箭头。回退让**只有最具体的那层**说了算。
+  ///
+  /// 只在**变化时**才调后端：`SetCursor` 是每次鼠标移动都跑的路径，
+  /// 无脑调用会把消息泵的 CPU 白烧掉。
   /// 焦点环是否可见（**默认真**：没有过任何鼠标交互时按“该画”算）。
   ///
   /// 为何默认真：这与浏览器 `:focus-visible` 的启发式一致——**程序化聚焦**
@@ -403,6 +428,8 @@ class UiRoot : public Element::HostFocus {
   bool focus_ring_visible_{true};
   Element* hovered_{nullptr};
   Element* pressed_{nullptr};
+  /// 当前生效的指针形态（上次下发给后端的值）。
+  MouseCursor cursor_{MouseCursor::Arrow};
   /// 本次按下时的指针位置（与 `pressed_` 同生命周期）。
   ///
   /// 用途：区分「点击」与「拖动后的释放」——后端在 `LBUTTONUP` 后无条件补发 `Click`

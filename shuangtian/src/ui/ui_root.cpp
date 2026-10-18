@@ -93,8 +93,20 @@ auto UiRoot::render_context() const -> RenderContext {
 
 void UiRoot::layout(bool force) {
   if (content_ == nullptr) return;
-  if (!force && !dirty_ && !tree_layout_dirty()) return;
-  const RenderContext context = render_context();
+  // **主题传播放在早退之前**（2026-10-18）。
+  //
+  // 为何与重排解耦：`apply_theme_tree` 原本在 `dirty_/tree_layout_dirty()`
+  // 守卫**之内**，于是“主题下发”变成了“重排的副作用”——只要这一帧没人要求重排，
+  // 主题就不往下走。声明显式界面会**新建元素**（命令面板/对话框都是条件声明），
+  // 新元素本该在“上树后的第一次 layout”里拿到当前主题；它能不能拿到，
+  // 取决于当帧恰好有没有别的东西也在要求重排。这是隐式耦合，早晚出问题。
+  //
+  // ⚠ 诚实记录（反向验证的结果）：排查“命令面板配色不对”时我先怀疑这里，
+  // 但改完它并不足以修好那个缺陷，回退后实测面板颜色依旧正确——真正的原因是
+  // `CommandPalette::apply_theme` **没把色写回 style**（见那边注释）。
+  // 保留本修改的理由不是“它修了那个 bug”，而是它把一条隐式耦合改成了显式契约：
+  // 代价是每个元素一次颜色赋值 + `mark_dirty`（实测 90 节点树为微秒级），
+  // 换来的是“上树就一定拿到当前主题”不依赖 luck。
   const auto apply_theme_tree = [](auto&& self, Element& element, const Theme& theme) -> void {
     element.apply_theme(theme);
     for (std::size_t index = 0; index < element.children().size(); ++index) {
@@ -103,6 +115,9 @@ void UiRoot::layout(bool force) {
   };
   apply_theme_tree(apply_theme_tree, *content_, theme_);
   for (auto& overlay : overlays_) apply_theme_tree(apply_theme_tree, *overlay, theme_);
+
+  if (!force && !dirty_ && !tree_layout_dirty()) return;
+  const RenderContext context = render_context();
   Constraints constraints;
   constraints.max_width = viewport_.width;
   constraints.max_height = viewport_.height;
@@ -308,6 +323,17 @@ auto UiRoot::hit_test_subtree(Element& element, math::Point point) -> Element* {
   // 命中用包围矩形，比像素级圆角宽松一点点，与系统控件的命中语义一致）。
   const bool clip = element.style().clip_children;
   if (clip && !element.bounds().contains(point)) return nullptr;
+  // **子元素与自身的命中优先级可以倒置**（2026-10-18）。
+  //
+  // 默认语义是“子元素优先”（下面的循环先递归、最后才问自己）——那对绝大多数
+  // 容器是对的。但存在一类控件，它自己拥有一个**与子元素几何重叠**的交互区：
+  // `SplitView` 的分隔手柄就是（贴边重叠，两侧各张开半个手柄，否则会留一条
+  // 露出页面底色的缝）。这种重叠区如果仍按“子元素优先”，手柄永远收不到
+  // MouseDown——拖拽直接失效（实测：侧栏完全拖不动）。
+  //
+  // 所以给出一个显式钩子：`claims_hit_before_children(point)` 返回 true 的元素
+  // 在递归子元素**之前**先拿命中。默认 false，行为与既有一致。
+  if (element.claims_hit_before_children(point) && element.hit_test(point)) return &element;
   const auto children = element.children();
   for (auto iterator = children.rbegin(); iterator != children.rend(); ++iterator) {
     if (*iterator == nullptr || !(*iterator)->visible()) continue;
@@ -620,6 +646,24 @@ auto UiRoot::flush_coalesced_moves() -> std::size_t {
   return 1 + move->merged;
 }
 
+auto UiRoot::refresh_cursor(math::Point point) -> void {
+  MouseCursor wanted = MouseCursor::Arrow;
+  Element* hit = hit_test_pointer_move(point);
+  // 沿 parent 链向上找第一个“有自己意见”的那层。
+  for (Element* node = hit; node != nullptr; node = node->parent()) {
+    const MouseCursor candidate = node->cursor_at(point);
+    if (candidate != MouseCursor::Arrow) {
+      wanted = candidate;
+      break;
+    }
+  }
+  // 没有命中任何元素（点在窗口空白处）时保持 Arrow——上面的初值就是它。
+  if (wanted == cursor_) return;
+  cursor_ = wanted;
+  // 后端可能为空（测试里 UiRoot 单独使用）；空实现的后端在这里什么也不做。
+  if (cursor_sink) cursor_sink(cursor_);
+}
+
 auto UiRoot::dispatch(Event& event) -> bool {
   // 分发前先清悬垂指针：界面每帧都可能重建子树（列表刷新、页面替换），
   // 而焦点/悬停/按压指针可能正指着已被销毁的元素
@@ -645,9 +689,14 @@ auto UiRoot::dispatch(Event& event) -> bool {
       // 否则 CodeEditor 拖选、ScrollBar 拖滑块一出边界就断（事件按命中转发，
       // 而拖拽语义属于"按下的那个元素"，与 Web/Qt 的隐式捕获一致）。
       if (pressed_ != nullptr) {
+        // 拖拽中光标**锁住不动**：拉分隔线时指针很容易跑出那条 12px 的手柄，
+        // 若每帧重新解析，光标会在 Resize 与 Arrow 之间抳动——用户正在拖的东西
+        // 看起来“丢了”。这是原生拖拽的惯例（拖到哪都是拖拽光标）。
         handled = dispatch_to(*pressed_, event);
         break;
       }
+      // 光标解析放在**命中之前**（它只看位置、不改任何状态，先算不影响派发）。
+      refresh_cursor(event.position);
       // 指针移动走**移动专用命中**：屏障类元素只拦点击、放行移动，
       // 否则宿主（菜单栏/工具栏）收不到 hover（实测：面板开着时菜单栏无法悬停切换）。
       Element* target = hit_test_pointer_move(event.position);
@@ -1034,14 +1083,24 @@ void UiRoot::mark_dirty_all() {
   // 整树重排/主题切换等全局变化：整帧重绘（局部路径不适用）。
   pending_full_ = true;
   ++version_;
-  if (content_ != nullptr) {
-    const auto walk = [](auto&& self, Element& element) -> void {
-      element.mark_layout_dirty();
-      for (std::size_t index = 0; index < element.children().size(); ++index) {
-        self(self, *element.child_at(index));
-      }
-    };
-    walk(walk, *content_);
+  // **必须走全全部子树**：内容树 **+ 每个覆盖层**（2026-10-18 修，
+  // 用户报“Ctrl+P 面板配色不对”）。
+  //
+  // 旧实现只走了 `content_`。而 `layout()` 的进入条件是
+  // “`dirty_` 或 `tree_layout_dirty()`”，且 `apply_theme_tree`
+  // **只在 `layout()` 里**跑。于是只要内容树干净，切主题就会跳过整个 layout——
+  // 覆盖层的 `apply_theme` 永远不执行，配色停在它第一次被排出来时那个主题上。
+  // 实测症状：暗色界面里命令面板是白底（拿到的是浅色令牌），切到浅色反而变暗。
+  // 这类“某个子树收不到主题”的缺陷在内容树里看不出来（内容树自己是对的）。
+  const auto walk = [](auto&& self, Element& element) -> void {
+    element.mark_layout_dirty();
+    for (std::size_t index = 0; index < element.children().size(); ++index) {
+      self(self, *element.child_at(index));
+    }
+  };
+  if (content_ != nullptr) walk(walk, *content_);
+  for (const auto& overlay : overlays_) {
+    if (overlay != nullptr) walk(walk, *overlay);
   }
 }
 

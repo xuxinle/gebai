@@ -505,6 +505,17 @@ class CodeEditor : public Element {
   /// 当前已注册的语言名（含内置与运行时注册的自定义语言，升序）。
   [[nodiscard]] static auto available_languages() -> std::vector<std::string>;
 
+  // —— 内容尺寸（宿主需要；也是性能回归的观测口）——
+
+  /// 内容总宽（gutter + 最宽行 + 内边距）。
+  ///
+  /// ⚠ 调用它会**量所有行**（“最宽”这件事只能全量才知道），但结果按文本世代缓存：
+  /// 文本没变时白拿。绝大多数帧不需要它——绘制路径**不再**隐式调它
+  ///（2026-10-18：放进几何重建后 5465 行文件单帧 paint 从 4.5ms 涨到 90ms）。
+  [[nodiscard]] auto content_width(const RenderContext& context) const -> float;
+  /// 最宽行的宽度（惰性 + 按世代缓存，`content_width` 的底层）。
+  [[nodiscard]] auto max_line_width(const RenderContext& context) const -> float;
+
  private:
   /// 一行的 token 切片（偏移相对行起点）。
   using LineTokens = std::vector<text::Token>;
@@ -538,11 +549,12 @@ class CodeEditor : public Element {
   void transform_lines(std::size_t first_line, std::size_t last_line,
                        const std::function<std::string(std::string_view)>& transform);
   auto rebuild_line_geometry(const RenderContext& context) const -> void;
+  /// 指针形态按位置细分：正文 I-beam、行号栏（gutter）箭头。见 .cpp 说明。
+  [[nodiscard]] auto cursor_at(math::Point point) const noexcept -> MouseCursor override;
   [[nodiscard]] auto gutter_width(const RenderContext& context) const -> float;
   [[nodiscard]] auto line_height(const RenderContext& context) const -> float;
   [[nodiscard]] auto text_origin(const RenderContext& context) const -> math::Point;
   [[nodiscard]] auto content_height() const noexcept -> float;
-  [[nodiscard]] auto content_width(const RenderContext& context) const -> float;
   [[nodiscard]] auto visible_line_range(const RenderContext& context) const
       -> std::pair<std::size_t, std::size_t>;
   [[nodiscard]] auto index_at_point(const RenderContext& context, math::Point point) const
@@ -656,11 +668,20 @@ class CodeEditor : public Element {
   // 贵一个数量级。分开后"取行号/算列"这类高频操作不会触发高亮重算（否则批量编辑退化为 O(n²)）。
   mutable bool spans_dirty_{true};
   mutable bool tokens_dirty_{true};
-  mutable bool geometry_dirty_{true};  mutable std::vector<std::pair<std::size_t, std::size_t>> line_spans_{};
+  mutable bool geometry_dirty_{true};
+  /// 文本世代号（每次 `mark_highlight_dirty` 递增）。
+  ///
+  /// 用途：给**惰性重算的派生量**做缓存键（目前是 `max_line_width`）。
+  /// 用世代号而不是“内容 hash”——文本变更处已标脏，再算一遍 hash 等于
+  /// 又把全文件扫一次（那正是要避开的成本）。
+  mutable std::size_t span_generation_{0};
+  mutable std::vector<std::pair<std::size_t, std::size_t>> line_spans_{};
   mutable std::vector<LineTokens> line_tokens_{};
   mutable float line_height_cache_{0.0f};
   mutable float gutter_cache_{0.0f};
   mutable float max_line_width_cache_{0.0f};
+  /// `max_line_width_cache_` 对应的世代号（与 `span_generation_` 比较）。
+  mutable std::size_t max_width_generation_{static_cast<std::size_t>(-1)};
   /// 上一帧绘制的可见行范围（1 起闭区间；`{1,0}` = 还没画过）。
   ///
   /// 为何缓存而不是每次现算：宿主在**帧首**要它（`visible_line_range_now()`），
@@ -705,11 +726,22 @@ class CodeEditor : public Element {
   bool find_case_{false};
   bool find_word_{false};                       ///< 全词匹配（见 `FindOptions`）
   bool find_active_set_{false};                 ///< find_active_ 是否有效（空命中表也有"无选中"态）
-  std::vector<std::pair<std::size_t, std::size_t>> find_matches_{};  ///< 升序 [begin,end)
-  std::size_t find_active_{kNoFindMatch};
-  bool find_enabled_{false};                    ///< set_find 后为 true（clear_find 置 false）
+   std::vector<std::pair<std::size_t, std::size_t>> find_matches_{};  ///< 升序 [begin,end)
+ /// **行 → 该行范围内 `find_matches_` 的下标区间** `[first, second)`。
+ ///
+ /// 为何要它（实测）：绘制时曾是“每一可见行 × 全部命中”两层循环——
+ /// 命中数 100 万时编辑帧 paint 从 17.4ms 涨到 **74.2ms**（4.2×）。
+ /// 而屏幕外的命中完全不用看。有了这张表，每行只遍历自己那几条。
+ /// 与 `find_matches_` **同批重建**（`rebuild_find_matches`），两者一旦分家，
+ /// 高亮就会画到别的行上（而画面上不易察觉）。
+ std::vector<std::pair<std::size_t, std::size_t>> find_line_ranges_{};
+ std::size_t find_active_{kNoFindMatch};
+ bool find_enabled_{false};                    ///< set_find 后为 true（clear_find 置 false）
 
-  void rebuild_find_matches();
+ void rebuild_find_matches();
+ /// 本行的命中下标区间 `[first, last)`（见 `find_line_ranges_`）。
+ [[nodiscard]] auto find_range_of_line(std::size_t line) const
+     -> std::pair<std::size_t, std::size_t>;
   void select_find_match(std::size_t index);
   /// 文本被编辑后保持查找态：重建命中表、当前命中夹取。
   void refresh_find_after_edit();

@@ -127,9 +127,18 @@ class Tree : public Element {
   /// 失效契约（三条，缺一条就会“改了标签宽度却没变”）：
   /// 刷新行 / 清空行 / 主题字号或本组件字号变化 → 整表重算。
   /// 宽度只取决于 `(label, font_size)`，两者都被这三条覆盖。
-  mutable std::vector<float> row_label_widths_{};
-  /// 缓存对应的字号；与 `style_.font_size` 不符时整表重算。
-  mutable float label_widths_font_size_{-1.0F};
+   mutable std::vector<float> row_label_widths_{};
+ /// 缓存对应的字号；与 `style_.font_size` 不符时整表重算。
+ mutable float label_widths_font_size_{-1.0F};
+ /// 缓存对应的主题度量（缩进/箭头尺寸从中来，换主题要重算最大宽）。
+ mutable const void* cached_width_metrics_{nullptr};
+ /// 已缓存的“最宽行所需宽”（含缩进/箭头/内边距）。
+ ///
+ /// 为何单缓一个标量（2026-10-18，与 `CodeEditor` 同一种缺陷）：
+ /// 只缓存逐行宽的话，求最大值那一步仍要**每帧扫全部行**——
+ /// 于是“缓存生效”只省了 `measure_width`，总成本仍是 O(总行数)，
+ /// 而行数不变的稳态（滚动/悬停/焦点变化）本该是 O(1)。
+ mutable float cached_max_row_width_{0.0F};
 
   /// 上一帧**实际绘制过**的首/末可见行（半开区间 `[首, 末)`；从未绘制过为空区间）。
   ///
@@ -162,6 +171,14 @@ class Tree : public Element {
  private:
   /// 行命中（含展开指示区的整行判定）；返回行号。
   [[nodiscard]] auto row_index_at(math::Point point) const -> std::optional<std::size_t>;
+
+  /// 指针形态：落在**某一行**上给手形（可点选/可展开），落在行间的空白给箭头。
+  ///
+  /// 为何不整个 Tree 一律 Hand：树的下半部分常有空白区（行数不满一屏），
+  /// 那里什么都点不到，显示手形是误导。
+  [[nodiscard]] auto cursor_at(math::Point point) const noexcept -> MouseCursor override {
+    return row_index_at(point).has_value() ? MouseCursor::Hand : MouseCursor::Arrow;
+  }
   /// 使行宽缓存失效（行集变化时调用；见 `row_label_widths_` 的失效契约）。
   void invalidate_label_widths() const noexcept;
   /// 对某行执行「激活」语义（文件=选中、目录=toggle）——点击/Enter/invoke 共用。
