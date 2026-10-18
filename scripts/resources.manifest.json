@@ -1,5 +1,5 @@
 {
-  "$comment": "歌白资源目录下载清单（scripts/download-resources.ts 读取；目标目录 <仓库根>/resources，GEBAI_RESOURCES_DIR 可覆盖）。单个文件列多个来源，按顺序尝试（--source / GEBAI_RESOURCE_SOURCE 可指定 kind 优先级）；下载后按 size/sha256 校验。",
+  "$comment": "歌白资源目录下载清单（scripts/download-resources.ts 读取；目标目录 <仓库根>/resources，GEBAI_RESOURCES_DIR 可覆盖）。单个文件列多个来源，按顺序尝试（--source / GEBAI_RESOURCE_SOURCE 可指定 kind 优先级）；下载后按 size/sha256 校验。TTS 中文模型按「目录名 = 模型 id」铺进 models/tts/<id>/（模型扫描按文件齐全判定，无需登记硬编码清单）。",
   "version": 1,
   "entries": [
     {
@@ -94,6 +94,330 @@
         "command": "yolo export model=screenparser-best.pt format=onnx imgsz=1280",
         "note": "需 ultralytics 工具链；导出产物放回 models/cv/detect/ 即生效（GEBAI_CV_DETECT_MODEL 可显式指定其他模型）"
       }
+    },
+    {
+      "path": "models/tts/vits-melo-zh/model.onnx",
+      "size": 170429550,
+      "sha256": "bf30582eb1b012250a35b1a4a80e7dfbcf8485e7bb9de0d95efbbeef0e4ad86d",
+      "required": true,
+      "license": "MIT",
+      "description": "MeloTTS 中文（44.1kHz，单音色）——神经网络 TTS 的旁白首选，采样率高于 22.05kHz 系列 · model.onnx",
+      "sources": [
+        {
+          "kind": "hf-mirror",
+          "url": "https://hf-mirror.com/csukuangfj/vits-melo-tts-zh_en/resolve/main/model.onnx"
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/main/model.onnx"
+        }
+      ]
+    },
+    {
+      "path": "models/tts/vits-melo-zh/tokens.txt",
+      "size": 655,
+      "sha256": "d18664a7e12bd7ea1022ddaf951e534e136815016c5a809d6b64156bffb4369d",
+      "required": true,
+      "license": "MIT",
+      "description": "MeloTTS 中文（44.1kHz，单音色）——神经网络 TTS 的旁白首选，采样率高于 22.05kHz 系列 · tokens.txt",
+      "sources": [
+        {
+          "kind": "hf-mirror",
+          "url": "https://hf-mirror.com/csukuangfj/vits-melo-tts-zh_en/resolve/main/tokens.txt"
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/main/tokens.txt"
+        }
+      ]
+    },
+    {
+      "path": "models/tts/vits-melo-zh/lexicon.txt",
+      "size": 6837671,
+      "sha256": "7236884b02435ac5d10cf69b4be40a61b45aa676b5300f0e412f185748fee528",
+      "required": true,
+      "license": "MIT",
+      "description": "MeloTTS 中文（44.1kHz，单音色）——神经网络 TTS 的旁白首选，采样率高于 22.05kHz 系列 · lexicon.txt",
+      "sources": [
+        {
+          "kind": "hf-mirror",
+          "url": "https://hf-mirror.com/csukuangfj/vits-melo-tts-zh_en/resolve/main/lexicon.txt"
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/main/lexicon.txt"
+        }
+      ]
+    },
+    {
+      "path": "models/tts/vits-melo-zh/date.fst",
+      "size": 59154,
+      "sha256": "eb8aa079ae3cb81d8f4404992f39d61a0cb990947512b5b8d1e54d1f6980e718",
+      "required": false,
+      "license": "MIT",
+      "description": "MeloTTS 中文（44.1kHz，单音色）——神经网络 TTS 的旁白首选，采样率高于 22.05kHz 系列 · date.fst",
+      "sources": [
+        {
+          "kind": "hf-mirror",
+          "url": "https://hf-mirror.com/csukuangfj/vits-melo-tts-zh_en/resolve/main/date.fst"
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/main/date.fst"
+        }
+      ]
+    },
+    {
+      "path": "models/tts/vits-melo-zh/number.fst",
+      "size": 64482,
+      "sha256": "743f402181fcfebf76cc2f0546b71fa26476e626fbe4e460fb7b4c3a7a8bd5bd",
+      "required": false,
+      "license": "MIT",
+      "description": "MeloTTS 中文（44.1kHz，单音色）——神经网络 TTS 的旁白首选，采样率高于 22.05kHz 系列 · number.fst",
+      "sources": [
+        {
+          "kind": "hf-mirror",
+          "url": "https://hf-mirror.com/csukuangfj/vits-melo-tts-zh_en/resolve/main/number.fst"
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/main/number.fst"
+        }
+      ]
+    },
+    {
+      "path": "models/tts/vits-melo-zh/phone.fst",
+      "size": 88630,
+      "sha256": "1ac2b6fa56b1442320c4de7db08353bab8963a2b57f365eebcdd3a2d3562f8d7",
+      "required": false,
+      "license": "MIT",
+      "description": "MeloTTS 中文（44.1kHz，单音色）——神经网络 TTS 的旁白首选，采样率高于 22.05kHz 系列 · phone.fst",
+      "sources": [
+        {
+          "kind": "hf-mirror",
+          "url": "https://hf-mirror.com/csukuangfj/vits-melo-tts-zh_en/resolve/main/phone.fst"
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/main/phone.fst"
+        }
+      ]
+    },
+    {
+      "path": "models/tts/vits-melo-zh/new_heteronym.fst",
+      "size": 21974,
+      "sha256": "ca14b2127e27baa571664e4bb791e143e7425f56a6bc29db08d74f97e6aa4e29",
+      "required": false,
+      "license": "MIT",
+      "description": "MeloTTS 中文（44.1kHz，单音色）——神经网络 TTS 的旁白首选，采样率高于 22.05kHz 系列 · new_heteronym.fst",
+      "sources": [
+        {
+          "kind": "hf-mirror",
+          "url": "https://hf-mirror.com/csukuangfj/vits-melo-tts-zh_en/resolve/main/new_heteronym.fst"
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/main/new_heteronym.fst"
+        }
+      ]
+    },
+    {
+      "path": "models/tts/vits-zh-eula/eula.onnx",
+      "size": 121913906,
+      "sha256": "f13f78dcff98646de7c1a351d294a3b9aef56c8e9300803005e5e8b17cca434d",
+      "required": true,
+      "license": "Apache-2.0",
+      "description": "VITS 中文女声（22.05kHz，804 音色） · eula.onnx",
+      "sources": [
+        {
+          "kind": "hf-mirror",
+          "url": "https://hf-mirror.com/csukuangfj/vits-zh-hf-eula/resolve/main/eula.onnx"
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/csukuangfj/vits-zh-hf-eula/resolve/main/eula.onnx"
+        }
+      ]
+    },
+    {
+      "path": "models/tts/vits-zh-eula/tokens.txt",
+      "size": 268,
+      "sha256": "ca85bcef54e1cb549875df82f2e9f23259abf1c52a34e79c2bccba2511ef47d1",
+      "required": true,
+      "license": "Apache-2.0",
+      "description": "VITS 中文女声（22.05kHz，804 音色） · tokens.txt",
+      "sources": [
+        {
+          "kind": "hf-mirror",
+          "url": "https://hf-mirror.com/csukuangfj/vits-zh-hf-eula/resolve/main/tokens.txt"
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/csukuangfj/vits-zh-hf-eula/resolve/main/tokens.txt"
+        }
+      ]
+    },
+    {
+      "path": "models/tts/vits-zh-eula/lexicon.txt",
+      "size": 2764076,
+      "sha256": "735e35d1a79eb8152624488b264d5e784b3d73c79892c2d299087fe9198f0099",
+      "required": true,
+      "license": "Apache-2.0",
+      "description": "VITS 中文女声（22.05kHz，804 音色） · lexicon.txt",
+      "sources": [
+        {
+          "kind": "hf-mirror",
+          "url": "https://hf-mirror.com/csukuangfj/vits-zh-hf-eula/resolve/main/lexicon.txt"
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/csukuangfj/vits-zh-hf-eula/resolve/main/lexicon.txt"
+        }
+      ]
+    },
+    {
+      "path": "models/tts/vits-zh-eula/phone.fst",
+      "size": 88630,
+      "sha256": "1ac2b6fa56b1442320c4de7db08353bab8963a2b57f365eebcdd3a2d3562f8d7",
+      "required": false,
+      "license": "Apache-2.0",
+      "description": "VITS 中文女声（22.05kHz，804 音色） · phone.fst",
+      "sources": [
+        {
+          "kind": "hf-mirror",
+          "url": "https://hf-mirror.com/csukuangfj/vits-zh-hf-eula/resolve/main/phone.fst"
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/csukuangfj/vits-zh-hf-eula/resolve/main/phone.fst"
+        }
+      ]
+    },
+    {
+      "path": "models/tts/vits-zh-theresa/theresa.onnx",
+      "size": 121913906,
+      "sha256": "fc5dec60bff656f529096cb8fe18cfece8acb2802cbd8afc88c1a3fb0677c098",
+      "required": true,
+      "license": "Apache-2.0",
+      "description": "VITS 中文女声（22.05kHz，804 音色） · theresa.onnx",
+      "sources": [
+        {
+          "kind": "hf-mirror",
+          "url": "https://hf-mirror.com/csukuangfj/vits-zh-hf-theresa/resolve/main/theresa.onnx"
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/csukuangfj/vits-zh-hf-theresa/resolve/main/theresa.onnx"
+        }
+      ]
+    },
+    {
+      "path": "models/tts/vits-zh-theresa/tokens.txt",
+      "size": 268,
+      "sha256": "ca85bcef54e1cb549875df82f2e9f23259abf1c52a34e79c2bccba2511ef47d1",
+      "required": true,
+      "license": "Apache-2.0",
+      "description": "VITS 中文女声（22.05kHz，804 音色） · tokens.txt",
+      "sources": [
+        {
+          "kind": "hf-mirror",
+          "url": "https://hf-mirror.com/csukuangfj/vits-zh-hf-theresa/resolve/main/tokens.txt"
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/csukuangfj/vits-zh-hf-theresa/resolve/main/tokens.txt"
+        }
+      ]
+    },
+    {
+      "path": "models/tts/vits-zh-theresa/lexicon.txt",
+      "size": 2764076,
+      "sha256": "735e35d1a79eb8152624488b264d5e784b3d73c79892c2d299087fe9198f0099",
+      "required": true,
+      "license": "Apache-2.0",
+      "description": "VITS 中文女声（22.05kHz，804 音色） · lexicon.txt",
+      "sources": [
+        {
+          "kind": "hf-mirror",
+          "url": "https://hf-mirror.com/csukuangfj/vits-zh-hf-theresa/resolve/main/lexicon.txt"
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/csukuangfj/vits-zh-hf-theresa/resolve/main/lexicon.txt"
+        }
+      ]
+    },
+    {
+      "path": "models/tts/vits-zh-theresa/date.fst",
+      "size": 59154,
+      "sha256": "eb8aa079ae3cb81d8f4404992f39d61a0cb990947512b5b8d1e54d1f6980e718",
+      "required": false,
+      "license": "Apache-2.0",
+      "description": "VITS 中文女声（22.05kHz，804 音色） · date.fst",
+      "sources": [
+        {
+          "kind": "hf-mirror",
+          "url": "https://hf-mirror.com/csukuangfj/vits-zh-hf-theresa/resolve/main/date.fst"
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/csukuangfj/vits-zh-hf-theresa/resolve/main/date.fst"
+        }
+      ]
+    },
+    {
+      "path": "models/tts/vits-zh-theresa/number.fst",
+      "size": 64482,
+      "sha256": "743f402181fcfebf76cc2f0546b71fa26476e626fbe4e460fb7b4c3a7a8bd5bd",
+      "required": false,
+      "license": "Apache-2.0",
+      "description": "VITS 中文女声（22.05kHz，804 音色） · number.fst",
+      "sources": [
+        {
+          "kind": "hf-mirror",
+          "url": "https://hf-mirror.com/csukuangfj/vits-zh-hf-theresa/resolve/main/number.fst"
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/csukuangfj/vits-zh-hf-theresa/resolve/main/number.fst"
+        }
+      ]
+    },
+    {
+      "path": "models/tts/vits-zh-theresa/phone.fst",
+      "size": 88630,
+      "sha256": "1ac2b6fa56b1442320c4de7db08353bab8963a2b57f365eebcdd3a2d3562f8d7",
+      "required": false,
+      "license": "Apache-2.0",
+      "description": "VITS 中文女声（22.05kHz，804 音色） · phone.fst",
+      "sources": [
+        {
+          "kind": "hf-mirror",
+          "url": "https://hf-mirror.com/csukuangfj/vits-zh-hf-theresa/resolve/main/phone.fst"
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/csukuangfj/vits-zh-hf-theresa/resolve/main/phone.fst"
+        }
+      ]
+    },
+    {
+      "path": "models/tts/vits-zh-theresa/new_heteronym.fst",
+      "size": 21974,
+      "sha256": "ca14b2127e27baa571664e4bb791e143e7425f56a6bc29db08d74f97e6aa4e29",
+      "required": false,
+      "license": "Apache-2.0",
+      "description": "VITS 中文女声（22.05kHz，804 音色） · new_heteronym.fst",
+      "sources": [
+        {
+          "kind": "hf-mirror",
+          "url": "https://hf-mirror.com/csukuangfj/vits-zh-hf-theresa/resolve/main/new_heteronym.fst"
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/csukuangfj/vits-zh-hf-theresa/resolve/main/new_heteronym.fst"
+        }
+      ]
     },
     {
       "path": "src/llama.cpp-b11175.tar.gz",

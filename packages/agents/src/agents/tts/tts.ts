@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs"
+import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
 import type { ContentBlock, SubAgentDef, Tool, ToolContext } from "@gebai/sdk"
 import { schema } from "@gebai/sdk/node"
 import {
@@ -26,6 +27,17 @@ import {
   type TtsDeps,
   type TtsEngine,
 } from "../../core/tts/speech"
+import {
+  matchNeuralModel,
+  neuralFailureNote,
+  neuralTtsScript,
+  neuralTtsRoots,
+  pickNeuralModel,
+  pythonCandidates,
+  scanNeuralModels,
+  writeTempScript,
+} from "../../core/tts/neural"
+import { resolveGebaiHome } from "../../core/shared/config"
 // 系统提示词独立 md 维护（目录形式约定：{dir}/{dir}.md）。
 import systemPromptBase from "./tts.md" with { type: "text" }
 // 音效工具（合成/效果/混音）：纯本地计算，不依赖系统语音引擎。
@@ -48,6 +60,15 @@ function engineFromEnv(env: Record<string, string>): TtsEngine {
   return normalizeEngine(env.TTS_ENGINE)
 }
 
+/** 是否默认走神经引擎（TTS_ENGINE=neural）；与系统引擎取值空间分开，避免把它当下游 TtsEngine 传。 */
+function neuralPreferred(env: Record<string, string>): boolean {
+  return String(env.TTS_ENGINE ?? "").trim().toLowerCase() === "neural"
+}
+
+function modelFromEnv(env: Record<string, string>): string {
+  return String(env.TTS_MODEL ?? "").trim()
+}
+
 function voiceFromEnv(env: Record<string, string>): string | undefined {
   const v = String(env.TTS_VOICE ?? "").trim()
   return v || undefined
@@ -62,7 +83,16 @@ export const speakTool: Tool = {
   name: "speak",
   safeMode: false,
   description:
-    `把文本合成为音频文件（本机离线语音引擎：Windows 系统语音 WinRT OneCore 优先、SAPI5 回退——不联网、不耗配额、无需安装）。产物为 WAV，附在结果里可直接在聊天内播放，也可用 read/show 交付；play=true 时同时在运行 GEBAI 这台机器的扬声器上播报（后台播放、不阻塞；仅本地模式）。参数：text 待合成文本（必填，上限 ${TTS_MAX_TEXT} 字符）；voice 音色名（可写「慧慧」这类短名或完整名，缺省中文女声，不确定有哪些音色先用 tts_voices 查看，未匹配到会回落默认音色并在结果里说明）；rate 语速百分比（${TTS_RATE.min}~${TTS_RATE.max}，负慢正快，默认 0）；pitch 音调百分比（${TTS_PITCH.min}~${TTS_PITCH.max}，负低正高）；volume 音量百分比（${TTS_VOLUME.min}~${TTS_VOLUME.max}）；out 产物路径（缺省 tmp/tts/voice-<时间戳>.wav，重复合成同一路径会覆盖）；engine 引擎 auto/winrt/sapi（默认 auto）；play 播报到本机扬声器（默认 false）。`,
+    `把文本合成为音频文件。**两档离线引擎**：engine=neural 本地神经网络 TTS（sherpa-onnx + VITS 声学模型）——` +
+    `中文音质接近云端合成、单个模型可含几十到上百个音色、22.05kHz，推荐用于宣传片/口播/有声内容；` +
+    `engine=auto/winrt/sapi 是 Windows 系统语音（零安装、任意 Windows 可用，音色机械）作为兜底。` +
+    `两者都离线、不联网、不耗配额。参数：text 待合成文本（必填，上限 ${TTS_MAX_TEXT} 字符）；` +
+    `engine 引擎（neural / auto / winrt / sapi）；voice 系统语音的音色名（仅非 neural 生效）；` +
+    `model neural 用的模型 id（缺省取最优；先用 tts_models 查看可用模型）；` +
+    `speaker neural 的音色序号（0 起，越大不等于越好，试听确认；缺省 0）；` +
+    `rate 语速百分比（${TTS_RATE.min}~${TTS_RATE.max}）；pitch/volume 仅系统语音生效；` +
+    `out 产物路径（缺省 tmp/tts/voice-<时间戳>.wav）。产物为 WAV，可直接在聊天内播放；` +
+    `play=true 时同时在运行 GEBAI 这台机器的扬声器上播报（仅本地模式）。`,
   parameters: schema(
     {
       text: { type: "string", description: `要合成的文本（中英混排均可；上限 ${TTS_MAX_TEXT} 字符，超长请拆成多段分别合成，不要截断内容）` },
@@ -71,7 +101,13 @@ export const speakTool: Tool = {
       pitch: { type: "number", description: `音调百分比 ${TTS_PITCH.min}~${TTS_PITCH.max}（负低正高，默认 0）` },
       volume: { type: "number", description: `音量百分比 ${TTS_VOLUME.min}~${TTS_VOLUME.max}（默认 0）` },
       out: { type: "string", description: "产物音频路径（相对会话工作目录；缺省 tmp/tts/voice-<时间戳>.wav）" },
-      engine: { type: "string", enum: [...TTS_ENGINES], description: "语音引擎：auto（默认，WinRT 优先 SAPI 回退）/ winrt / sapi" },
+      engine: {
+        type: "string",
+        enum: ["neural", ...TTS_ENGINES],
+        description: "语音引擎：neural（本地神经 TTS，音质最好，需已装模型）/ auto（默认，WinRT 优先 SAPI 回退）/ winrt / sapi",
+      },
+      model: { type: "string", description: "neural 引擎的模型 id（如 vits-zh-theresa）；缺省自动选最优，先用 tts_models 查看" },
+      speaker: { type: "number", description: "neural 引擎的音色序号（0 起）；模型含几十~上百个音色，越陌生越要试听确认" },
       play: { type: "boolean", description: "合成后在运行 GEBAI 这台机器的扬声器上播报（后台播放，不阻塞返回；仅本地模式，服务端部署拒绝）" },
     },
     ["text"],
@@ -79,7 +115,7 @@ export const speakTool: Tool = {
   outputSchema: schema(
     {
       path: { type: "string", description: "产物路径（相对会话工作目录）" },
-      engine: { type: "string", description: "实际使用的引擎：winrt / sapi" },
+      engine: { type: "string", description: "实际使用的引擎：neural / winrt / sapi" },
       voice: { type: "string", description: "实际使用的音色名" },
       bytes: { type: "number", description: "产物字节数" },
       durationSec: { type: "number", description: "音频时长（秒）" },
@@ -92,16 +128,103 @@ export const speakTool: Tool = {
     const problem = validateText(args.text)
     if (problem) return { output: problem }
     const text = String(args.text)
-    const engine = normalizeEngine(args.engine, engineFromEnv(ctx.env))
-    const voice = String(args.voice ?? "").trim() || voiceFromEnv(ctx.env)
     const rate = clampPercent(args.rate, TTS_RATE)
-    const pitch = clampPercent(args.pitch, TTS_PITCH)
-    const volume = clampPercent(args.volume, TTS_VOLUME)
     const outRel = String(args.out ?? "").trim() || defaultOutPath(Date.now())
     const outAbs = ctx.resolvePath(outRel)
     // 覆盖提示按「写入前是否已存在」判定（合成后才查会永远为真）
     const existed = args.out ? existsSync(outAbs) : false
 
+    // —— 神经引擎（engine=neural）：本地 VITS + onnxruntime ——
+    const engineRaw = String(args.engine ?? "").trim().toLowerCase()
+    if (engineRaw === "neural" || (engineRaw === "" && neuralPreferred(ctx.env))) {
+      const models = scanNeuralModels()
+      if (models.length === 0) {
+        return {
+          output:
+            "神经语音暂不可用：未找到已安装的模型。\n" +
+            "用 tts_install（会从镜像拉取中文 VITS 模型约 120MB）或手动把 sherpa-onnx 兼容的 " +
+            "VITS 中文模型目录（*.onnx + tokens.txt + lexicon.txt）放到 " +
+            "`{GEBAI_HOME}/resources/models/tts/<模型名>/`。\n" +
+            "暂时可改用 engine=auto（Windows 系统语音，零安装，但音色机械）。",
+        }
+      }
+      const model = matchNeuralModel(models, String(args.model ?? "").trim() || modelFromEnv(ctx.env)) ?? pickNeuralModel(models)!
+      const requestedSpeaker = Math.max(0, Math.round(Number(args.speaker ?? 0) || 0))
+      const speed = Math.max(0.5, Math.min(2.0, 1 + rate / 100))
+      const modelDir = model.onnx.replace(/[\\/][^\\/]+$/, "")
+      let speaker = requestedSpeaker
+      let run = await runNeural(ctx, { modelDir, text, speaker, speed, outAbs })
+      // 音色序号越界：sherpa-onnx 只打日志、返回空样本（不抛错），于是报“空音频”。
+      // 音色总数只有模型加载后才知道，所以不能预先夹取——改为拿到报告后**回落 0 号重跑一次**，
+      // 并告知用户真实范围。绝不因越界而交付一个 0 秒的 WAV。
+      let clamped = false
+      if (!run.ok && String(run.report.error ?? "") === "empty-audio" && requestedSpeaker > 0) {
+        const guess = Number(run.report.numSpeakers ?? 0)
+        if (guess === 0 || requestedSpeaker >= guess) {
+          speaker = 0
+          clamped = true
+          run = await runNeural(ctx, { modelDir, text, speaker, speed, outAbs })
+        }
+      }
+      void clamped
+      if (!run.ok) {
+        return { output: neuralFailureNote(run.note || JSON.stringify(run.report)) }
+      }
+      const report = run.report
+      const bytes = existsSync(outAbs) ? statSync(outAbs).size : 0
+      const durationSec = Number(report.durationSec ?? 0)
+      const numSpeakers = Number(report.numSpeakers ?? 0)
+      const notes: string[] = []
+      if (existed) notes.push("目标路径已有同名文件，本次已覆盖。")
+      if (numSpeakers > 0 && requestedSpeaker >= numSpeakers) {
+        // sherpa-onnx 对越界 sid 不报错，而是落到 0 号并继续合成。
+        // 产物是好的，但**用错音色必须说出来**——否则用户以为 #9999 生效了。
+        notes.push(
+          `speaker=${requestedSpeaker} 超出该模型音色范围（0~${numSpeakers - 1}），` +
+            "实际用的是 0 号音色。音色序号与“好听”无关，建议试听后固定下来。",
+        )
+      }
+      const blocks: ContentBlock[] = [
+        { type: "file", path: outRel, name: baseName(outRel), mime: "audio/wav" },
+      ]
+      let played = false
+      if (args.play === true) {
+        const blocked = playbackBlockedReason(ctx)
+        if (blocked) notes.push(blocked)
+        else {
+          // 播报复用系统语音的播放通道（它只负责把 WAV 送到扬声器，与合成引擎无关）
+          const playRun = await runTtsScript(ttsDeps(ctx), { mode: "play", engine: "auto", wav: outAbs })
+          if (playRun.result?.ok) played = true
+          else notes.push(scriptFailureNote(playRun, "auto"))
+        }
+      }
+      return {
+        output: [
+          `已合成语音（神经引擎）：${outRel}`,
+          `模型 ${model.id} · 音色 #${speaker}${numSpeakers ? ` / 共 ${numSpeakers} 个` : ""} · ` +
+            `${Number(report.sampleRate ?? 0)}Hz · 时长 ${formatDuration(durationSec)} · 大小 ${formatBytes(bytes)}`,
+          rate !== 0 ? `语速 ${rate > 0 ? "+" : ""}${rate}%` : "",
+          played ? "已在运行 GEBAI 的这台机器的扬声器上开始播报。" : "",
+          notes.length ? `注意：${notes.join(" ")}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        data: {
+          path: outRel,
+          engine: "neural",
+          voice: `${model.id}#${speaker}`,
+          bytes,
+          durationSec,
+          played,
+        },
+        blocks,
+      }
+    }
+
+    const engine = normalizeEngine(args.engine, engineFromEnv(ctx.env))
+    const voice = String(args.voice ?? "").trim() || voiceFromEnv(ctx.env)
+    const pitch = clampPercent(args.pitch, TTS_PITCH)
+    const volume = clampPercent(args.volume, TTS_VOLUME)
     const run = await runTtsScript(ttsDeps(ctx), {
       mode: "synth",
       engine,
@@ -194,17 +317,251 @@ export const voicesTool: Tool = {
   },
 }
 
+/**
+ * 跑一次神经合成：逐个解释器候选尝试，返回首个成功的运行结果。
+ *
+ * 为何逐个试而不探测一次：失败原因多样（venv 不存在 / 该 python 没装 sherpa-onnx /
+ * 沙箱下不可达），逐候选实测比“猜哪个能用”可靠；代价是一次失败启动，可忽略。
+ * 失败时不报错而是返回最后一次报告 + 已试列表，由调用方统一转成可读说明。
+ */
+async function runNeural(
+  ctx: ToolContext,
+  opts: { modelDir: string; text: string; speaker: number; speed: number; outAbs: string },
+): Promise<{ ok: boolean; report: Record<string, unknown>; note: string; usedPython: string }> {
+  const script = neuralTtsScript({
+    modelDir: opts.modelDir,
+    textBase64: Buffer.from(opts.text, "utf8").toString("base64"),
+    speaker: opts.speaker,
+    speed: opts.speed,
+    outPath: opts.outAbs,
+  })
+  const candidates = pythonCandidates(resolveGebaiHome())
+  const tmpDir = ctx.resolvePath(TTS_OUT_DIR)
+  const file = writeTempScript(tmpDir, script, "synth")
+  let last: { report: Record<string, unknown>; note: string; python: string } | null = null
+  try {
+    for (const python of candidates) {
+      let stdout = ""
+      let spawnError = ""
+      try {
+        const run = await ctx.runCommand(`"${python}" -X utf8 "${file.path}"`, {
+          timeoutMs: 240_000,
+          signal: ctx.signal,
+        })
+        stdout = String(run.stdout ?? "")
+      } catch (err) {
+        spawnError = String((err as Error)?.message ?? err)
+      }
+      if (spawnError) {
+        last = { report: { error: "spawn-failed", detail: spawnError }, note: spawnError, python }
+        continue
+      }
+      // 脚本最后一行是 JSON 报告；前面可能有 numpy/ort 的无关输出，从后往前找第一行可解析的 JSON
+      let parsed: Record<string, unknown> | null = null
+      for (const line of stdout.trim().split("\n").reverse()) {
+        const trimmed = line.trim()
+        if (!trimmed.startsWith("{")) continue
+        try {
+          parsed = JSON.parse(trimmed) as Record<string, unknown>
+          break
+        } catch {
+          /* 不是报告行，继续往上找 */
+        }
+      }
+      if (parsed?.ok === true) {
+        return { ok: true, report: parsed, note: "", usedPython: python }
+      }
+      if (!parsed) {
+        // 没有报告行：python 没跑起来（找不到、被拦、崩溃）——记下 stdout 尾部供定位
+        last = {
+          report: { error: "no-report", detail: stdout.slice(-400) },
+          note: stdout.slice(-400) || "python 未返回报告",
+          python,
+        }
+        continue
+      }
+      last = { report: parsed, note: String(parsed.detail ?? parsed.error ?? ""), python }
+      // 缺依赖 → 换下一个解释器；其它错误（模型坏、文本错）再换也没用，直接停
+      const code = String(parsed.error ?? "")
+      if (code === "missing-dependency") continue
+      break
+    }
+  } finally {
+    file.cleanup()
+  }
+  return {
+    ok: false,
+    report: last?.report ?? { error: "no-python" },
+    note: last?.note ?? "未找到可用的 Python 解释器（需要 python3 + sherpa-onnx）",
+    usedPython: last?.python ?? "",
+  }
+}
+
+export const modelsTool: Tool = {
+  name: "models",
+  safeMode: false,
+  description:
+    "列出已安装的**神经语音模型**（本地 VITS + onnxruntime，中文音质接近云端合成）及其音色数量，" +
+    "并提示依赖（sherpa-onnx）是否就绪。合成时 `tts_speak` 传 engine=neural，`model` 取这里的 id、`speaker` 取音色序号。",
+  parameters: schema({}),
+  outputSchema: schema({
+    models: { type: "array", items: schema({ id: { type: "string" }, bytes: { type: "number" } }, ["id"]) },
+    root: { type: "string", description: "模型根目录" },
+  }),
+  async execute(_args, ctx) {
+    const models = scanNeuralModels()
+    const root = neuralTtsRoots()[0] ?? ""
+    const picked = pickNeuralModel(models)
+    const python = pythonCandidates(resolveGebaiHome())[0] ?? "python"
+    // 探一下依赖：只 import，不加载模型（毫秒级）
+    let dep = "未知"
+    try {
+      const r = await ctx.runCommand(`"${python}" -c "import sherpa_onnx; print(getattr(sherpa_onnx,'__version__','ok'))"`, {
+        timeoutMs: 30_000,
+        signal: ctx.signal,
+      })
+      dep = String(r.stdout ?? "").trim() || "未知"
+      if (!dep) dep = "未知"
+    } catch (err) {
+      dep = `不可用（${String((err as Error)?.message ?? err).slice(0, 120)}）`
+    }
+    const lines: string[] = []
+    if (models.length === 0) {
+      lines.push(
+        `未找到已安装的神经语音模型（模型根：${root || "未解析"}）。`,
+        "用 tts_install 下载（中文 VITS，约 120MB / 个），或手动把 sherpa-onnx 兼容的模型目录放进去：",
+        "  {GEBAI_HOME}/resources/models/tts/<模型名>/  ← 需含 *.onnx + tokens.txt + lexicon.txt",
+      )
+    } else {
+      lines.push(`已安装神经语音模型（${models.length} 个），模型根：${root}`)
+      for (const m of models) {
+        const mark = picked?.id === m.id ? "  ← 默认" : ""
+        lines.push(`· ${m.id}（${(m.bytes / 1048576).toFixed(0)}MB）${mark}`)
+      }
+      lines.push("", "用法：tts_speak(engine=\"neural\", model=\"<id>\", speaker=<序号>, text=\"...\"）")
+    }
+    lines.push("", `sherpa-onnx 依赖：${dep}（解释器 ${python}）`)
+    return {
+      output: lines.join("\n"),
+      data: { models: models.map((m) => ({ id: m.id, bytes: m.bytes })), root },
+    }
+  },
+}
+
+/** 可下载的官方中文模型（sherpa-onnx 发布，镜像可用、不需要 torch）。 */
+const DOWNLOADABLE_MODELS: Record<string, { repo: string; onnx: string; note: string }> = {
+  "vits-melo-zh": {
+    repo: "csukuangfj/vits-melo-tts-zh_en",
+    onnx: "model.onnx",
+    note: "MeloTTS 中文 · 44.1kHz · 单音色 —— 采样率最高，旁白首选",
+  },
+  "vits-zh-eula": {
+    repo: "csukuangfj/vits-zh-hf-eula",
+    onnx: "eula.onnx",
+    note: "女声 · 22.05kHz · 804 音色",
+  },
+  "vits-zh-theresa": {
+    repo: "csukuangfj/vits-zh-hf-theresa",
+    onnx: "theresa.onnx",
+    note: "女声 · 22.05kHz · 804 音色",
+  },
+  "vits-zh-fanchen-C": {
+    repo: "csukuangfj/vits-zh-hf-fanchen-C",
+    onnx: "vits-zh-hf-fanchen-C.onnx",
+    note: "女声 · 16kHz · 187 音色",
+  },
+}
+
+export const installTool: Tool = {
+  name: "install",
+  safeMode: false,
+  description:
+    "安装神经语音合成所需的东西：① pip 装 sherpa-onnx（Python 侧车 venv）；② 从镜像下载中文 VITS 模型到 " +
+    "{GEBAI_HOME}/resources/models/tts/。两者都可单独装（参数控制）。下载量约 120MB/模型，装完用 tts_models 核实。",
+  parameters: schema({
+    model: {
+      type: "string",
+      description: "要下载的模型 id（vits-zh-theresa / vits-zh-fanchen-C）；缺省只装依赖不下载模型",
+    },
+    skip_dependency: { type: "boolean", description: "true = 只下载模型，不装 pip 依赖" },
+  }),
+  async execute(args, ctx) {
+    const out: string[] = []
+    const python = pythonCandidates(resolveGebaiHome())[0] ?? "python"
+    if (args.skip_dependency !== true) {
+      try {
+        const r = await ctx.runCommand(`"${python}" -m pip install -q sherpa-onnx`, {
+          timeoutMs: 600_000,
+          signal: ctx.signal,
+        })
+        out.push(`sherpa-onnx 安装：${String(r.stdout ?? "").trim() ? "有输出" : "完成"}`)
+      } catch (err) {
+        out.push(`sherpa-onnx 安装失败：${String((err as Error)?.message ?? err).slice(0, 300)}`)
+      }
+    }
+    const wanted = String(args.model ?? "").trim()
+    if (wanted) {
+      const spec = DOWNLOADABLE_MODELS[wanted]
+      if (!spec) {
+        return {
+          output: `不认识的模型「${wanted}」。可下载：${Object.keys(DOWNLOADABLE_MODELS).join(" / ")}`,
+        }
+      }
+      const root = neuralTtsRoots()[0]!
+      const dir = join(root, wanted)
+      mkdirSync(dir, { recursive: true })
+      // 必需件（缺了模型就不完整）与可选件（部分仓库不带，缺了不影响合成）分开：
+      // 必需件下载失败要说清楚，可选件 404 属正常，不能拿它当失败。
+      const required = [spec.onnx, "tokens.txt", "lexicon.txt"]
+      const optional = ["date.fst", "number.fst", "phone.fst", "new_heteronym.fst"]
+      const files = [...required.map((f) => ({ f, must: true })), ...optional.map((f) => ({ f, must: false }))]
+      for (const { f: name, must } of files) {
+        const url = `https://hf-mirror.com/${spec.repo}/resolve/main/${name}`
+        try {
+          const resp = await fetch(url, { signal: AbortSignal.timeout(600_000) })
+          if (!resp.ok) {
+            out.push(`  ${name}: HTTP ${resp.status}${must ? "（必需件，安装不完整）" : "（可选件，跳过）"}`)
+            continue
+          }
+          writeFileSync(join(dir, name), Buffer.from(await resp.arrayBuffer()))
+        } catch (err) {
+          out.push(`  ${name}: ${String((err as Error)?.message ?? err).slice(0, 160)}`)
+        }
+      }
+      const got = scanNeuralModels().some((m) => m.id === wanted)
+      out.push(got ? `模型 ${wanted} 已就绪（${spec.note}）→ ${dir}` : `模型 ${wanted} 下载不完整，再试一次 tts_install`)
+    }
+    out.push("完成后用 tts_models 核实；合成：tts_speak(engine=\"neural\", ...)。")
+    return { output: out.join("\n") }
+  },
+}
+
 export const name = "tts"
 export const description =
-  "语音合成（文本转语音）与音效：文本合成可播放音频，本机离线完成（Windows 系统语音 WinRT OneCore 优先、SAPI5 回退——不联网、不耗配额、无需安装），支持音色选择与语速/音调/音量调节，可在运行 GEBAI 的机器扬声器播报（仅本地模式）；另含音效合成（提示音/转场音等预设与自定义波形）、音频效果处理（变速不变调/变调/回声/混响/滤波等）与多轨混音拼接。产物 WAV 直接在聊天内播放。输入：待合成文本 / 音效需求 / 音频处理需求。"
+  "语音合成（文本转语音）与音效。**两档离线语音**：神经 TTS（sherpa-onnx + VITS 中文模型，音质接近云端合成、可选上百音色、22.05kHz，推荐用于宣传片/口播/有声内容）与 Windows 系统语音（零安装、任意 Windows 可用，作为兜底）；均不联网、不耗配额。另含音效合成、音频效果处理与多轨混音。产物 WAV 可直接在聊天内播放。输入：待合成文本 / 音效需求 / 音频处理需求。"
 export const systemPrompt = systemPromptBase
 
-export const tools = { speak: speakTool, voices: voicesTool, sfx: sfxTool, effect: effectTool, mix: mixTool }
+export const tools = {
+  speak: speakTool,
+  voices: voicesTool,
+  models: modelsTool,
+  install: installTool,
+  sfx: sfxTool,
+  effect: effectTool,
+  mix: mixTool,
+}
 export const preload = false
 
 export const envVars = [
   { name: "TTS_VOICE", description: "默认音色名（tts_speak 未传 voice 时使用；可写完整名或关键词，如 慧慧）" },
-  { name: "TTS_ENGINE", description: "默认语音引擎：auto（WinRT 优先 SAPI 回退）/ winrt / sapi" },
+  {
+    name: "TTS_ENGINE",
+    description: "默认语音引擎：neural（神经 TTS，音质最好）/ auto（WinRT 优先 SAPI 回退）/ winrt / sapi",
+  },
+  {
+    name: "TTS_MODEL",
+    description: "默认神经模型 id（engine=neural 且未传 model 时使用；缺省自动选最优，见 tts_models）",
+  },
 ]
 
 export const def: SubAgentDef = { name, description, systemPrompt, tools, preload, envVars }

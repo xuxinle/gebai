@@ -461,10 +461,18 @@ describe("def 契约", () => {
     expect(def.name).toBe("tts")
     expect(def.description).toContain("语音合成")
     expect(def.description).toContain("离线")
-    expect(Object.keys(def.tools ?? {}).sort()).toEqual(["effect", "mix", "sfx", "speak", "voices"])
+    expect(Object.keys(def.tools ?? {}).sort()).toEqual([
+      "effect",
+      "install",
+      "mix",
+      "models",
+      "sfx",
+      "speak",
+      "voices",
+    ])
     expect(def.preload).toBe(false)
     expect(def.systemPrompt).toContain("tts_speak")
-    expect(def.envVars?.map((v) => v.name)).toEqual(["TTS_VOICE", "TTS_ENGINE"])
+    expect(def.envVars?.map((v) => v.name)).toEqual(["TTS_VOICE", "TTS_ENGINE", "TTS_MODEL"])
     for (const v of def.envVars ?? []) expect(v.name.startsWith("TTS_")).toBe(true)
   })
 

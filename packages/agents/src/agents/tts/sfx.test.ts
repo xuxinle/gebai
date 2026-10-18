@@ -282,8 +282,17 @@ describe("工具姿态与 def 契约", () => {
     expect(mixTool.parameters.required).toEqual(["tracks"])
   })
 
-  test("def 注册五个工具；提示词说明音效用法", () => {
-    expect(Object.keys(def.tools ?? {}).sort()).toEqual(["effect", "mix", "sfx", "speak", "voices"])
+  test("def 注册全部工具（语音 / 音色 / 神经模型 / 安装 + 音效三件）；提示词说明音效用法", () => {
+    // 工具集是**能力边界**：少一个就少一条能力路径，所以逐个点名而不是只数数量。
+    expect(Object.keys(def.tools ?? {}).sort()).toEqual([
+      "effect",
+      "install",
+      "mix",
+      "models",
+      "sfx",
+      "speak",
+      "voices",
+    ])
     expect(def.systemPrompt).toContain("tts_sfx")
     expect(def.systemPrompt).toContain("tts_mix")
     expect(def.description).toContain("音效")
