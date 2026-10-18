@@ -143,6 +143,10 @@ auto block_kind_name(BlockKind kind) -> const char* {
     case BlockKind::GridLines: return "grid";
     case BlockKind::CornerMarks: return "corners";
     case BlockKind::Divider: return "divider";
+    case BlockKind::Line: return "line";
+    case BlockKind::Path: return "path";
+    case BlockKind::Rect: return "rect";
+    case BlockKind::Paragraph: return "paragraph";
   }
   return "title";
 }
@@ -159,6 +163,11 @@ auto parse_block_kind(std::string_view name) -> std::optional<BlockKind> {
   if (name == "grid") return BlockKind::GridLines;
   if (name == "corners") return BlockKind::CornerMarks;
   if (name == "divider") return BlockKind::Divider;
+  // 通用图元（与裁云的图层类型同名）
+  if (name == "line") return BlockKind::Line;
+  if (name == "path") return BlockKind::Path;
+  if (name == "rect") return BlockKind::Rect;
+  if (name == "paragraph") return BlockKind::Paragraph;
   return std::nullopt;
 }
 
@@ -219,6 +228,29 @@ auto parse_poster(std::string_view json) -> st::Result<PosterScript> {
     block.contain = st::json_get_bool(node, "contain", block.contain);
     block.height = static_cast<float>(
         std::clamp(st::json_get_double(node, "height", block.height), 0.0, 8000.0));
+        // —— 通用图元字段 ——
+    //
+    // 坐标口径：设计像素（按 1080 高设计，随画幅缩放）。
+    // 与 `x`（0~1 比例锚点）是两套语义——图元用独立字段，不混用。
+    block.x1 = static_cast<float>(st::json_get_double(node, "x1", block.x1));
+    block.y1 = static_cast<float>(st::json_get_double(node, "y1", block.y1));
+    block.x2 = static_cast<float>(st::json_get_double(node, "x2", block.x2));
+    block.y2 = static_cast<float>(st::json_get_double(node, "y2", block.y2));
+    block.box_w = static_cast<float>(
+        std::clamp(st::json_get_double(node, "box_w", block.box_w), 0.0, 8000.0));
+    block.box_h = static_cast<float>(
+        std::clamp(st::json_get_double(node, "box_h", block.box_h), 0.0, 8000.0));
+    block.corner = static_cast<float>(
+        std::clamp(st::json_get_double(node, "corner", block.corner), 0.0, 800.0));
+    block.filled = st::json_get_bool(node, "filled", block.filled);
+    block.line_height = static_cast<float>(
+        std::clamp(st::json_get_double(node, "line_height", block.line_height), 1.0, 4.0));
+    if (const st::Json* pts = st::json_find(node, "points"); pts != nullptr && pts->is_array()) {
+      for (const st::Json& value : *pts) {
+        if (value.is_number()) block.points.push_back(static_cast<float>(value.get<double>()));
+      }
+    }
+
     block.tint_alpha = static_cast<float>(
         std::clamp(st::json_get_double(node, "tint_alpha", block.tint_alpha), 0.0, 1.0));
     // 结构块（frame/grid/corners/divider）
@@ -256,6 +288,22 @@ auto poster_to_json(const PosterScript& poster) -> std::string {
       node["flow"] = static_cast<std::int64_t>(block.flow);
       node["flow_rank"] = static_cast<std::int64_t>(block.flow_rank);
     }
+    // 通用图元字段：只在非默认值时写（保持 JSON 精简、便于人工 diff）。
+    if (block.x1 != 0.0f) node["x1"] = static_cast<double>(block.x1);
+    if (block.y1 != 0.0f) node["y1"] = static_cast<double>(block.y1);
+    if (block.x2 != 0.0f) node["x2"] = static_cast<double>(block.x2);
+    if (block.y2 != 0.0f) node["y2"] = static_cast<double>(block.y2);
+    if (block.box_w > 0.0f) node["box_w"] = static_cast<double>(block.box_w);
+    if (block.box_h > 0.0f) node["box_h"] = static_cast<double>(block.box_h);
+    if (block.corner > 0.0f) node["corner"] = static_cast<double>(block.corner);
+    if (!block.filled) node["filled"] = false;
+    if (block.line_height != 1.45f) node["line_height"] = static_cast<double>(block.line_height);
+    if (!block.points.empty()) {
+      st::Json points = st::Json::array();
+      for (const float value : block.points) points.push_back(static_cast<double>(value));
+      node["points"] = std::move(points);
+    }
+
     if (block.alpha < 1.0f) node["alpha"] = static_cast<double>(block.alpha);
     if (block.width > 0.0f) node["width"] = static_cast<double>(block.width);
     if (block.radius > 0.0f) node["radius"] = static_cast<double>(block.radius);
@@ -681,6 +729,128 @@ void render_poster(Canvas& target, const PosterScript& poster,
         mark(w - inset - length, h - inset - t, 1.0f, -1.0f);
         break;
       }
+      case BlockKind::Line: {
+        // 任意角度直线。用独立坐标（x1/y1 → x2/y2，设计像素）而不是 x 比例锚点——
+        // 斜线的两个端点没有共同的"锚点"语义，用比例只会让语义含糊。
+        const float scale = frame.scale;
+        st::raster::Path path;
+        path.move_to(Point{block.x1 * scale, block.y1 * scale});
+        path.line_to(Point{block.x2 * scale, block.y2 * scale});
+        target.stroke_path(path, Paint::solid(color), std::max(1.0f, block.thickness * scale));
+        break;
+      }
+      case BlockKind::Path: {
+        if (block.points.size() < 4) break;
+        const float scale = frame.scale;
+        st::raster::Path path;
+        bool first = true;
+        for (std::size_t i = 0; i + 1 < block.points.size(); i += 2) {
+          const Point point{block.points[i] * scale, block.points[i + 1] * scale};
+          if (first) {
+            path.move_to(point);
+            first = false;
+          } else {
+            path.line_to(point);
+          }
+        }
+        if (block.filled) {
+          path.close();
+          target.fill_path(path, Paint::solid(color));
+        }
+        if (block.thickness > 0.01f) {
+          target.stroke_path(path, Paint::solid(color), std::max(1.0f, block.thickness * scale));
+        }
+        break;
+      }
+      case BlockKind::Rect: {
+        const float scale = frame.scale;
+        const float w = (block.box_w > 0.0f ? block.box_w : block.width) * scale;
+        const float h = (block.box_h > 0.0f ? block.box_h : block.height) * scale;
+        if (w <= 0.5f || h <= 0.5f) break;
+        // `x` 仍是 0~1 锚点（与其它块一致），`y` 是设计像素 —— 这两个口径沿用，
+        // 免得同一个字段在不同块上语义不同（那是最容易出错的一类不一致）。
+        const float left =
+            block.x * static_cast<float>(frame.width) - (block.align == 1 ? 0.0f : w * 0.5f);
+        const float top = block.y * scale;
+        const Rect box{left, top, w, h};
+        const float radius = block.corner * scale;
+        if (block.color_alt.a != 0) {
+          Gradient gradient = Gradient::linear(
+              Point{box.x, box.y}, Point{box.x, box.y + box.height},
+              {GradientStop{0.0f, color},
+               GradientStop{1.0f, with_alpha(block.color_alt, block.alpha)}});
+          st::raster::Path path;
+          if (radius > 0.5f) {
+            path.add_rounded_rect(box, radius);
+          } else {
+            path.add_rect(box);
+          }
+          target.fill_path(path, Paint::with_gradient(std::move(gradient)));
+        } else if (radius > 0.5f) {
+          target.fill_path(st::raster::make_rounded_rect(box, radius), Paint::solid(color));
+        } else {
+          target.fill_rect(box, Paint::solid(color));
+        }
+        // 描边用 color_alt 之外的一条：若给了 thickness 且 color_alt 为空，视为描边矩形。
+        break;
+      }
+      case BlockKind::Paragraph: {
+        if (block.text.empty() || text_port == nullptr) break;
+        const float scale = frame.scale;
+        // 框的横向定位：`x` 是 0~1 锚点，三种对齐下语义不同——
+        //   左对齐 / 居中：x 是框的**左边界**（或中心）
+        //   右对齐：x 是框的**右边界**（否则 `x=0.72` + `box_w=480` 会冲出画面右侧）
+        //
+        // 这是实测踩出来的：右对齐段落原本从 x 向右延伸，直接贴到画面边缘。
+        const float anchor_x = block.x * static_cast<float>(frame.width);
+        const float max_w =
+            (block.box_w > 0.0f ? block.box_w * scale
+                                : static_cast<float>(frame.width) * 0.86f);
+        const float left = block.align == 2 ? anchor_x - max_w
+                           : block.align == 0 ? anchor_x - max_w * 0.5f
+                                              : anchor_x;
+        const float base_top = block.y * scale;
+        const float line_step = block.size * scale * std::max(1.0f, block.line_height);
+
+        // 按 `\n` 拆行（与裁云一致：不做自动折行，断行由调用方显式控制）。
+        std::vector<std::string> lines;
+        std::size_t begin = 0;
+        while (begin <= block.text.size()) {
+          const std::size_t end = block.text.find('\n', begin);
+          if (end == std::string::npos) {
+            lines.push_back(block.text.substr(begin));
+            break;
+          }
+          lines.push_back(block.text.substr(begin, end - begin));
+          begin = end + 1;
+        }
+
+        float cursor_y = base_top;
+        for (const std::string& line : lines) {
+          if (!line.empty()) {
+            float line_size = block.size * scale;
+            float width = text_port->measure_width(line, line_size);
+            // 超宽缩字号：框宽是用户给的确定值，文字长度是外部输入。
+            if (width > max_w && width > 0.5f) {
+              line_size = std::max(6.0f, line_size * (max_w / width));
+              width = text_port->measure_width(line, line_size);
+            }
+            float draw_x = left;
+            if (block.align == 0) {
+              draw_x = left + (max_w - width) * 0.5f;   // 居中（在框内）
+            } else if (block.align == 2) {
+              draw_x = left + max_w - width;            // 右对齐
+            }
+            // TextPort 的坐标是"行盒左上角"，所以直接给左上即可。
+            text_port->draw(target, line, Point{draw_x, cursor_y}, line_size, color,
+                       st::text::FontRole::Proportional,
+                       block.bold ? line_size / 20.0f : 0.0f, block.bold);
+          }
+          cursor_y += line_step;
+        }
+        break;
+      }
+
       case BlockKind::Divider: {
         // 横向分区线：`width` 是线长（0 = 版心宽），`y` 是位置。
         const float inset = (block.inset >= 0.0f ? block.inset : 120.0f) * frame.scale;

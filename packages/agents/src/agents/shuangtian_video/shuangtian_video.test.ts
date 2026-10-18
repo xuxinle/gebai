@@ -120,5 +120,10 @@ describe("shuangtian_video / shuangtian_poster", () => {
     // 海报子代理必须知道：图层顺序会盖住文字（实测踩过的坑）
     expect(poster.systemPrompt).toContain("盖住")
     expect(poster.systemPrompt).toContain("blocks")
+    // 图元能力：内置块不够时不能退回"改 C++"
+    for (const anchor of ["line", "path", "rect", "paragraph"]) {
+      expect(poster.systemPrompt).toContain(anchor)
+    }
+    expect(poster.systemPrompt).toContain("不要想着改 C++")
   })
 })

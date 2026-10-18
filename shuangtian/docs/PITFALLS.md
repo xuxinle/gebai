@@ -214,6 +214,7 @@
 | **推镜会裁掉贴边内容** | 版式安全边距 5%（1080p=96px），推到 1.06 倍只剩 1%——实测数据页的 100/10 几乎顶到画面边，读起来像排版坏了。推镜不超过 1.08，且内容必须落在 `Grid::margin` 内 | `examples/caiyun/fx.hpp` CameraMove |
 | **单查单调性抓不住径向渐变里的环** | 半径量化造成的阶梯本身是单调不增的——回退成量化版后单调性判据仍全绿（假绿）。要查二阶差分：台阶处会出现 10+ 的尖峰，真渐变只差几个灰阶 | `tests/caiyun_fx_test.cpp` |
 | **examples 下的实现不能只 include 头** | 测试构建只编译 `tests/*_test.cpp` + 框架库源码，不链接 examples 的目标文件 → 直接 include 头会报 undefined symbol。要么 include 实现，要么把源加入测试目标 | `tests/caiyun_fx_test.cpp` |
+| **e2e 默认二进制指向 `build/dev`，重建 `debug` 后测试仍跑旧产物** | `DEFAULT_BIN` 写死 `build/dev/bin/*.exe`，而回归规范档是 `debug`——于是"改代码 → 建 debug → 跑 e2e"全程测的是上一份 dev 二进制，**断言恒绿**。实测代价：删掉 `points` 序列化后 e2e 仍通过，差点把假绿当反向验证成功。判据：反向验证没红就先怀疑二进制，`ST_PROFILE=debug` 或显式传 `build/debug/bin/x.exe` | `tools/*_e2e.py` DEFAULT_BIN |
 | **`Viewport::fit_to_view` 换文档后无效** | 它读子元素的 `content_size()`，而换了文档后子元素还没重新 `measure`（即使先 `mark_layout_dirty()`）——实测 view=876x662 / doc=1920x1080，调用后 zoom 纹丝不动。要让大图装进小视口，**改渲染尺寸**而不是改缩放 | `examples/louyue/main.cpp`；README §×镂月海报面 |
 
 ## 场景 9：下结论 / 归因（元层面，最贵的一类）

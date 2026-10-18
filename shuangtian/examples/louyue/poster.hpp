@@ -54,6 +54,18 @@ enum class BlockKind : std::uint8_t {
   GridLines,    ///< 栅格参考线（竖向等分细线，用于"技术感"版式）
   CornerMarks,  ///< 四角对齐标记（印刷裁切标的视觉语言）
   Divider,      ///< 横向分隔线（版式分区，比 Rule 更"重"）
+
+  // —— 通用图元（2026-10-18）：让"任意版式"不再需要改 C++ ——
+  //
+  // 在此之前想做一条斜线、一个自定义形状、或一段左对齐的多行正文，
+  // 都得去改渲染代码。这几样补齐后，海报版式由**数据**决定而不是代码。
+  //
+  // 与裁云的 `LayerKind` 刻意同名同义（line/path/rect），
+  // 用户学一次就够，AI 也不必记两套画布语义。
+  Line,         ///< 任意直线（任意角度；用 x1/y1→x2/y2）
+  Path,         ///< 折线/多边形（点列表，可闭合填充）
+  Rect,         ///< 任意位置的矩形（可圆角/描边）
+  Paragraph,    ///< **多行左/中/右对齐段落**（Body 只能单行居中）
 };
 
 [[nodiscard]] auto block_kind_name(BlockKind kind) -> const char*;
@@ -118,6 +130,23 @@ struct Block {
   float height{0.0f};        ///< Image 块高度（设计像素）
   /// 叠色（品牌色统一 / 压暗背景让文字可读）；`tint_alpha` 为 0 时不用。
   float tint_alpha{0.0f};
+
+  // —— 通用图元字段（Line/Path/Rect/Paragraph）——
+  //
+  // 坐标口径与裁云一致：**设计像素**（按 1080 高设计，随画幅缩放）。
+  // 不用 `x`（那是 0~1 的比例锚点）——两者混用会算错，所以图元用独立字段。
+  float x1{0.0f};              ///< Line 起点 X（设计像素）
+  float y1{0.0f};              ///< Line 起点 Y
+  float x2{0.0f};              ///< Line 终点 X
+  float y2{0.0f};              ///< Line 终点 Y
+  float box_w{0.0f};           ///< Rect/Paragraph 宽度（设计像素；0 = 按内容/画面自动）
+  float box_h{0.0f};           ///< Rect/Paragraph 高度（0 = 按行数自动）
+  float corner{0.0f};          ///< Rect 圆角
+  bool filled{true};           ///< Path 是否填充（false = 只描边）
+  /// Path 的点列表，成对解释（x0,y0,x1,y1,...），设计像素。
+  std::vector<float> points{};
+  /// Paragraph 的行高倍数（1.0~2.5；1.45 是"舒展但不散"）
+  float line_height{1.45f};
 
   [[nodiscard]] auto display_name() const -> std::string {
     return name.empty() ? std::string(block_kind_name(kind)) : name;

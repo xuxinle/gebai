@@ -29,7 +29,11 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_BIN = os.path.join(ROOT, "build", "dev", "bin", "louyue.exe")
+# 默认用 **debug** 档：回归测试的规范档位是 debug（dev 是快速迭代档，
+# 两者混用会出现「代码改了、测试还在跑旧二进制」的假象——实测踩过）。
+# 需要其它档位时显式传参或设 ST_PROFILE。
+_PROFILE = os.environ.get("ST_PROFILE", "debug")
+DEFAULT_BIN = os.path.join(ROOT, "build", _PROFILE, "bin", "louyue.exe")
 
 # 一份小海报：3 块，640×360 设计尺寸（渲染快）。
 POSTER = {
@@ -352,7 +356,82 @@ def main():
         else:
             print("[9] 窄幅重排：Pillow 缺失，跳过墨迹带采样（导出成功已验）")
 
-        print("\n[OK] 镂月海报闭环 + 双向控制权 + 素材 + 窄幅重排 全部通过")
+        # —— 10. 通用图元：line/path/rect/paragraph 能落位且 JSON 往返不丢字段 ——
+        #
+        # 判据分两层：
+        #  ① 几何存在（导出图在这些位置真有墨迹）——防"字段解析了但没画"；
+        #  ② JSON 往返后字段还在——防"画出来了但序列化丢了"（用户存盘再打开就没了）。
+        prim_poster = {
+            "name": "图元验证", "width": 1920, "height": 1080, "background": "#070c18",
+            "blocks": [
+                {"kind": "background", "color": "#070c18"},
+                # 斜线：横跨画面中上部，端点明确
+                {"kind": "line", "x1": 300, "y1": 300, "x2": 900, "y2": 500,
+                 "color": "#5ee0c0", "thickness": 6},
+                # 实心多边形
+                {"kind": "path", "points": [1100, 300, 1300, 300, 1250, 480, 1150, 480],
+                 "color": "#e0a050", "filled": True},
+                # 只描边折线
+                {"kind": "path", "points": [300, 700, 500, 800, 700, 700],
+                 "color": "#7ab4ff", "filled": False, "thickness": 5},
+                # 圆角矩形
+                {"kind": "rect", "x": 0.5, "y": 200, "box_w": 300, "box_h": 160,
+                 "corner": 20, "color": "#1e3a5f"},
+                # 左对齐多行段落（Body 做不到的那个能力）
+                {"kind": "paragraph", "text": "段落第一行\n段落第二行",
+                 "x": 0.12, "y": 880, "size": 48, "color": "#ffffff", "align": 1,
+                 "line_height": 1.6},
+            ],
+        }
+        check(client.invoke("poster", "apply_poster", json.dumps(prim_poster)), "图元海报被拒")
+        time.sleep(0.3)
+        prim_info = client.props("poster")
+        prim_png = os.path.join(shots, "poster-primitives.png")
+        check(client.invoke("poster", "export_png", f"{prim_png} 1920x1080"), "图元导出失败")
+        check(os.path.exists(prim_png), "图元 PNG 不存在")
+
+        # ① 几何存在：在每种图元的预期位置采样，确认有非底色墨迹
+        try:
+            from PIL import Image
+            img = Image.open(prim_png).convert("RGB")
+            px = img.load()
+            bg = px[4, 4]
+
+            def inked(cx, cy, radius=14):
+                """(cx,cy) 周围是否有与底色明显不同的像素。"""
+                for y in range(max(0, cy - radius), min(img.size[1], cy + radius)):
+                    for x in range(max(0, cx - radius), min(img.size[0], cx + radius)):
+                        c = px[x, y]
+                        if abs(c[0] - bg[0]) + abs(c[1] - bg[1]) + abs(c[2] - bg[2]) > 40:
+                            return True
+                return False
+
+            check(inked(600, 400), "斜线位置没有墨迹（line 未生效）")
+            check(inked(1200, 390), "多边形内部没有墨迹（path 填充未生效）")
+            check(inked(500, 800), "折线顶点没有墨迹（path 描边未生效）")
+            check(inked(960, 280), "圆角矩形位置没有墨迹（rect 未生效）")
+            check(inked(400, 900), "左对齐段落位置没有墨迹（paragraph 未生效）")
+            # 段落两行都要有字（只画一行 = 换行没生效）
+            check(inked(400, 980, 18), "段落第二行没有墨迹（换行未生效）")
+            print("[10] 通用图元：line/path(填充+描边)/rect/paragraph 全部落位")
+        except ImportError:
+            print("[10] 通用图元：Pillow 缺失，跳过几何采样（导出成功已验）")
+
+        # ② JSON 往返：重新读回属性，确认图元字段还在（用户存盘再开不能丢）
+        roundtrip = json.loads(prim_info["poster"])
+        kinds = [b.get("kind") for b in roundtrip["blocks"]]
+        for needed in ("line", "path", "rect", "paragraph"):
+            check(needed in kinds, f"JSON 往返后丢了 {needed} 块（序列化不完整）")
+        line_block = next(b for b in roundtrip["blocks"] if b.get("kind") == "line")
+        check("x1" in line_block and "y2" in line_block, "line 的端点字段往返后丢失")
+        path_block = next(b for b in roundtrip["blocks"] if b.get("kind") == "path")
+        check("points" in path_block and len(path_block["points"]) >= 4,
+              "path 的 points 往返后丢失")
+        para_block = next(b for b in roundtrip["blocks"] if b.get("kind") == "paragraph")
+        check("line_height" in para_block, "paragraph 的 line_height 往返后丢失")
+        print("[10] 通用图元：JSON 往返字段完整（x1/y2/points/line_height）")
+
+        print("\n[OK] 镂月海报闭环 + 双向控制权 + 素材 + 窄幅重排 + 通用图元 全部通过")
         return 0
     finally:
         try:

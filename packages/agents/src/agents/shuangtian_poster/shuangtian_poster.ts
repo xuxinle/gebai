@@ -22,6 +22,18 @@ export const systemPrompt =
   "· 海报控制面是 `#poster` 元素：`invoke apply_poster <json>` / `export_png <path> [WxH]` / " +
   "`edit_lock` / `unlock_edit`；属性 `poster`（当前脚本）/`blocks`/`edit_locked`/`export_path`。\n" +
   "\n" +
+  "## 图元能力（内置块不够用时，**不要想着改 C++**）\n" +
+  "块列表共 15 种：background / title / subtitle / body / rule / badge / image / frame / grid /\n" +
+  "corners / divider，**外加四个通用图元**：line / path / rect / paragraph。\n" +
+  "· `line`：任意角度直线，`x1/y1` → `x2/y2`（设计像素）+ `thickness`——装饰斜线、连接线；\n" +
+  "· `path`：折线/多边形，`points: [x0,y0,x1,y1,...]` + `filled`——任意形状；\n" +
+  "· `rect`：任意位置矩形，`box_w/box_h/corner`——卡片底、色块、圆角容器；\n" +
+  "· `paragraph`：**多行左/中/右对齐段落**，`text` 用 `\\n` 换行 + `align`(0中1左2右)\n" +
+  "  + `line_height` + `box_w`（超宽自动缩字号）——`body` 只能单行居中，多行正文必须用它。\n" +
+  "\n" +
+  "坐标口径：图元用**设计像素**（按 1080 高设计，随画幅缩放）；`x` 仍是 0~1 比例锚点，\n" +
+  "两者是不同语义，别混用。`align=2`（右对齐段落）时 `box_w` 改从 `x` 向左延展。\n" +
+  "\n" +
   "## 工作流\n" +
   "0) **读现状**：读 `shuangtian/examples/louyue/poster.hpp`（字段与默认值）与 `poster.cpp` 的 " +
   "`builtin_gebai_poster()`（现成的歌白海报长什么样）。不要猜字段名。\n" +
