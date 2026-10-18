@@ -36,6 +36,14 @@ def default_model():
     env = os.environ.get("GEBAI_IMAGEGEN_MODEL")
     if env:
         return env
+    # 装了更大的模型就用它（质量优先）；只有小模型时退回去。
+    #
+    # 为何默认不是所有模型都列出：调用方（子代理/工具）只需要一个“当前该用哪个”，
+    # 选型是**部署决策**而不是每次出图时的选择——把选择权留给环境变量与目录现状。
+    base = os.path.join(repo_root(), "resources", "models", "imagegen")
+    for candidate in ("sdxl-turbo", "sd-turbo"):
+        if os.path.isdir(os.path.join(base, candidate)):
+            return os.path.join(base, candidate)
     return os.path.join(repo_root(), DEFAULT_MODEL_HINT)
 
 
@@ -72,19 +80,39 @@ def generate(prompt, out_path, size, steps, seed, model, guidance=0.0):
         model, torch_dtype=dtype, safety_checker=None, local_files_only=True
     )
     pipeline = pipeline.to(device)
-    # sd-turbo 是**蒸馏模型**：必须关闭 CFG（guidance=0）且只跑 1~4 步。
-    # 按普通 SD 的 30 步/7.5 guidance 跑会得到噪点（实测过）。
     if hasattr(pipeline, "set_progress_bar_config"):
         pipeline.set_progress_bar_config(disable=True)
+
+    # —— 两种模型的硬约束不同，且违反后不是“效果差一点”而是**坏掉** ——
+    #
+    # 1) 蒸馏 turbo 模型（sd-turbo / sdxl-turbo）：必须 `guidance_scale=0`（关 CFG）
+    #    且只跑 1~4 步。按普通 SD 的 30 步/7.5 跑会得到噪点（实测）。
+    # 2) SDXL 系列：
+    #    · 尺寸必须是 **64 的倍数**，且短边建议 >= 512（训练分辨率 1024²）；
+    #      给 500×500 这类值会直接抛错或出扭曲构图。
+    #    · 16GB 显存下 UNet（fp16 约 5GB）+ 双 text encoder 能装下，但再大尺寸需
+    #      切分注意力——这里不自动开（切分降低速度且对出图质量有影晌），
+    #      超过 1024² 时由调用方自己权衡。
+    is_sdxl = "sdxl" in os.path.basename(model.rstrip("/\\")).lower() or os.path.exists(
+        os.path.join(model, "text_encoder_2")
+    )
+    width, height = int(size[0]), int(size[1])
+    target_guidance = float(guidance)
+    if is_sdxl:
+        width = max(512, (width + 32) // 64 * 64)
+        height = max(512, (height + 32) // 64 * 64)
+        if "turbo" in os.path.basename(model.rstrip("/\\")).lower():
+            target_guidance = 0.0   # sdxl-turbo 同样是蒸馏模型
+
     generator = torch.Generator(device=device).manual_seed(int(seed))
     began = time.time()
     with torch.inference_mode():
         image = pipeline(
             prompt=prompt,
             num_inference_steps=int(steps),
-            guidance_scale=float(guidance),
-            width=int(size[0]),
-            height=int(size[1]),
+            guidance_scale=target_guidance,
+            width=width,
+            height=height,
             generator=generator,
         ).images[0]
     elapsed = time.time() - began

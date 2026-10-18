@@ -7,7 +7,7 @@
  */
 import { existsSync, readdirSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { basename, dirname, join } from "node:path"
+import { basename, dirname, isAbsolute, join } from "node:path"
 import type { SubAgentDef, Tool, ToolContext, ToolResult } from "@gebai/sdk"
 import { artifactBlocks, schema } from "@gebai/sdk/node"
 import {
@@ -182,7 +182,12 @@ function resolveShotPath(ctx: ToolContext, requested: string): string {
   const folded = (value: string): string => value.replace(/\\/g, "/")
   const inRuntime = folded(resolved).startsWith(`${folded(runtime)}/`)
   const inTemp = folded(resolved).startsWith(`${folded(tmpdir()).replace(/\/$/, "")}/`)
-  if (inRuntime || inTemp || !resolved.includes("/")) return resolved
+  // ⚠ “是否绝对路径”不能用 `resolved.includes("/")` 判：Windows 的 `C:\Users\x.png`
+  // 不含正斜杠，会被当成相对路径 → 原样返回、白名单重写整段被跳过
+  // （实测：Windows 上这条用例恒红，而 POSIX 下绿——只在 CI 跑 Linux 时看不见）。
+  // 用 isAbsolute 才是跨平台口径；它同时也覆盖 POSIX 的 `/…`。
+  const is_absolute = isAbsolute(resolved) || folded(resolved).startsWith("/")
+  if (inRuntime || inTemp || !is_absolute) return resolved
   return join(shots, basename(resolved))
 }
 

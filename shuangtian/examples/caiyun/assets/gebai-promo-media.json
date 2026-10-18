@@ -21,7 +21,7 @@
       "title": "歌白",
       "subtitle": "GEBAI AGENT",
       "image": "media/bg-aurora.png",
-      "image_dim": 0.55,
+      "image_dim": 0.25,
       "image_ken_burns": 0.08,
       "accent": "#7ab4ff"
     },
@@ -36,7 +36,7 @@
         "记忆与责任长在智体"
       ],
       "image": "media/bg-mesh.png",
-      "image_dim": 0.62,
+      "image_dim": 0.35,
       "image_card": "media/accent-glow.png",
       "accent": "#7ab4ff"
     },
@@ -55,7 +55,7 @@
         "秒成片"
       ],
       "image": "media/bg-grid.png",
-      "image_dim": 0.6,
+      "image_dim": 0.3,
       "accent": "#5ee0c0"
     },
     {
@@ -64,7 +64,7 @@
       "title": "歌白",
       "subtitle": "融合旧世界 IT 的所有技术 · 打造新世界智能的躯体",
       "image": "media/bg-nebula.png",
-      "image_dim": 0.58,
+      "image_dim": 0.22,
       "accent": "#7ab4ff"
     }
   ]

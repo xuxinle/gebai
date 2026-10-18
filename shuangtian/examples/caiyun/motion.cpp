@@ -517,7 +517,18 @@ void paint_triptych(Painter& p, const Scene& scene, float local_time,
     }
     const std::string label =
         i < scene.lines.size() ? scene.lines[i] : std::format("要点 {}", i + 1);
-    p.text(label, 50.0f, x + card_w * 0.5f, y + 268.0f,
+    // **自动缩字号**：卡片宽度固定，而文案长度是外部输入（AI 写的）。
+    // 固定 50 号字遇到「融合旧世界 IT」这类长句会直接溢出卡片边界
+    //（实测：文字压到卡片外，看着像排版坏了）。
+    // 先量宽度，超过可用宽就按比例缩——最小 30 号（再小就不是标题了，
+    // 干脆换行更难看，所以宁可变小）。
+    const float label_max_w = card_w - 48.0f;   // 左右各留 24 的内边距
+    float label_size = 50.0f;
+    const float measured = p.text_width(label, label_size, true);
+    if (measured > label_max_w && measured > 0.0f) {
+      label_size = std::max(30.0f, label_size * (label_max_w / measured));
+    }
+    p.text(label, label_size, x + card_w * 0.5f, y + 268.0f,
            with_alpha(Color{244, 247, 255, 255}, t), 0.5f, true);
     const char* note = i == 0 ? "声明即刻生效" : (i == 1 ? "统一裁决留痕" : "全程可回滚");
     p.text(note, 30.0f, x + card_w * 0.5f, y + 320.0f,

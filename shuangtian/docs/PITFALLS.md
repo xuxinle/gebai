@@ -204,6 +204,11 @@
 | **反向验证要跑"回退后构建的那个档"** | 回退后构建 debug、却让 e2e 用它默认的 dev 二进制 → 测试仍在跑旧的 → **回退被测不出、得到假绿**（实测差点把有效断言当成无效）。反向验证必须把 binary 显式传给 e2e | `tools/caiyun_director_e2e.py` 头部说明 |
 | **素材块插到文字块之后会盖住标题** | 块数组自底向上（后画的在上），`push_back` 一张图就把标题盖没了——看着像"渲染坏了"，实际是叠放次序 | `examples/louyue/main.cpp` 素材插入处 |
 | **cover 算了裁切区却没用 = 拉伸变形** | `blit_cover` 算出了与目标同比例的源区域，却直接整幅 `draw_canvas` → 长宽比不一致时画面被拉变形（人脸/产品一眼假）。必须真的按 src 区域贴 | `examples/caiyun/assets_lib.cpp` |
+| **`includes("/")` 判绝对路径在 Windows 上失效** | `C:\Users\x.png` 不含正斜杠 → 被当成相对路径原样返回，白名单重写整段被跳过。只在 Windows 红、CI 跑 Linux 时看不见。跨平台口径用 `isAbsolute()` | `packages/agents/src/agents/shuangtian/shuangtian_tools.ts` resolveShotPath |
+| **SDXL 尺寸必须是 64 的倍数且短边 ≥ 512** | 给 500×500 会抛错或出扭曲构图（训练分辨率 1024²）。提示词救不了，是硬约束 | `tools/imagegen.py` generate() |
+| **高频题材（星云/电路）不能做底板** | 细节密到压暗后叠字糊成一片；好看 ≠ 可用。底板只用渐变/雾光/单色纹理，并在提示词追加「低对比/大留白/柔和过渡」 | `tools/gen_gebai_assets.py` |
+| **卡片标题固定字号会溢出** | 卡片宽固定而文案是外部输入（AI 写的）：固定 50 号字遇长句直接压到卡外。必须先 `text_width` 量宽再按比例缩（下限 30 号） | `examples/caiyun/motion.cpp` paint_triptych |
+| **fp16 变体下载后加载器找不到** | 只下 `*.fp16.safetensors` 时 diffusers 按标准名 `diffusion_pytorch_model.safetensors` 找 → 报 no file named。用**硬链接**补标准名（同卷不占额外空间；Windows 非管理员可用 New-Item -ItemType HardLink） | `tools/fetch_diffusers_model.py` |
 | **`Viewport::fit_to_view` 换文档后无效** | 它读子元素的 `content_size()`，而换了文档后子元素还没重新 `measure`（即使先 `mark_layout_dirty()`）——实测 view=876x662 / doc=1920x1080，调用后 zoom 纹丝不动。要让大图装进小视口，**改渲染尺寸**而不是改缩放 | `examples/louyue/main.cpp`；README §×镂月海报面 |
 
 ## 场景 9：下结论 / 归因（元层面，最贵的一类）
