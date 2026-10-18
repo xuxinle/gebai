@@ -154,9 +154,9 @@ bun run lint                                  # Lint
 bun run --cwd packages/server test:coverage   # 覆盖率报告（核心引擎行覆盖率目标 ≥90%）
 ```
 
-仓库现有 **172 个测试文件、约 2650 个用例**（`packages/server` 77 个文件、`packages/agents` 45、`packages/web` 47、`packages/sdk` 2、`packages/desktop` 1）。`packages/server` 的 `test` 走分片并行（按文件字节数降序装箱，默认 `min(8, max(2, CPU 核数))` 片），分片失败会**单进程串行复验**以区分并行抖动与真失败。覆盖率门槛（核心引擎 ≥90%、工具函数 ≥80%、整体 ≥70%）是仓库的**人工约定目标**，无 CI 门禁。
+仓库现有 **284 个测试文件**（`packages/server` 101 个、`packages/web` 92、`packages/agents` 83、`packages/sdk` 5、`packages/desktop` 1，其余在 `scripts/` 根级）。`packages/server` 的 `test` 走分片并行（按文件字节数降序装箱，默认 `min(8, max(2, CPU 核数))` 片），分片失败会**单进程串行复验**以区分并行抖动与真失败。覆盖率门槛（核心引擎 ≥90%、工具函数 ≥80%、整体 ≥70%）是仓库的**人工约定目标**，无 CI 门禁。
 
-**English.** The repo currently ships **172 test files and ~2650 cases**. `packages/server`'s `test` script shards and runs in parallel (LPT bin-packing, default `min(8, max(2, cores))` shards) and re-verifies a failed shard serially to tell flakiness from a real failure. The coverage targets (core engine ≥90%, tool functions ≥80%, repo ≥70%) are hand-agreed goals, not enforced by CI.
+**English.** The repo currently ships **284 test files** (`packages/server` 101, `packages/web` 92, `packages/agents` 83, `packages/sdk` 5, `packages/desktop` 1, plus a few under `scripts/`). `packages/server`'s `test` script shards and runs in parallel (LPT bin-packing, default `min(8, max(2, cores))` shards) and re-verifies a failed shard serially to tell flakiness from a real failure. The coverage targets (core engine ≥90%, tool functions ≥80%, repo ≥70%) are hand-agreed goals, not enforced by CI.
 
 ---
 
@@ -316,7 +316,7 @@ Monorepo（Bun workspaces + Turborepo）；核心模块全部接口化 + 依赖�
 
 ## 全局工具 | Global Tools
 
-共 **19 个**全局工具（子 Agent 的独有工具以 `{agent}_{tool}` 命名空间另计）。文件/路径类工具统一带 `project` 参数（项目根路由：预置项目名 / 项目根路径 / `tmp` 会话工作区）。
+共 **20 个**全局工具（子 Agent 的独有工具以 `{agent}_{tool}` 命名空间另计）。文件/路径类工具统一带 `project` 参数（项目根路由：预置项目名 / 项目根路径 / `tmp` 会话工作区）。
 
 | 工具 | 能力 | 审批 |
 |------|------|------|
@@ -335,15 +335,16 @@ Monorepo（Bun workspaces + Turborepo）；核心模块全部接口化 + 依赖�
 | `agent_load` | 装载子 Agent（工具并入当前工具集 + 完整提示词注入会话） | 免审 |
 | `subsession_run` | 子会话运行（隔离 / 继承上下文，同步 / 异步，多路并行，模型路由） | 免审 |
 | `bg_task` | 统一管理后台异步任务（命令任务 `t…` 与子会话运行 `s…`：status/wait/stop/list） | 免审 |
+| `session` | 跨会话控制平面（与当前上下文无父子绑定）：create/list/status/send/stop/delete——适合驻留工作会话、多会话编排、对演进会话观察与干预 | 免审 |
 | `restart_server` | 重启服务进程（仅本地模式；可带续跑提示词；dev-reload 能力随重启继承） | 恒需审批 |
 
 `agent_list` 与 `subsession_merge` 不是全局工具——前者由引擎在「可委派」场景注入，后者仅异步子会话运行上下文可见。
 
-**English.** Nineteen global tools ship with the engine: file read/write/ls, ripgrep-backed grep and glob, a multi-action `file` manager, `edit`, the three script tools (`sh`/`py`/`js`), `fetch_url`, `show`, `ask`, `todo`, `tool_schemas`, `agent_load`, `subsession_run`, `bg_task` and `restart_server`. Approval posture: `py` and `restart_server` always require approval, `sh`/`js`/`file delete` decide per call, the rest are approval-free; file/path tools accept a `project` parameter for project-root routing.
+**English.** Twenty global tools ship with the engine: file read/write/ls, ripgrep-backed grep and glob, a multi-action `file` manager, `edit`, the three script tools (`sh`/`py`/`js`), `fetch_url`, `show`, `ask`, `todo`, `tool_schemas`, `agent_load`, `subsession_run`, `bg_task`, `session` and `restart_server`. Approval posture: `py` and `restart_server` always require approval, `sh`/`js`/`file delete` decide per call, the rest are approval-free; file/path tools accept a `project` parameter for project-root routing.
 
 ## 内置子 Agent | Built-in Sub-Agents
 
-`packages/agents/src/agents/` 下 15 个 TS 子 Agent，另在 `keqing/` 下 5 个客卿目录（其中 `vision` 与 TS 侧同名合并、`nsight`/`torch` 以同名合并贡献原生加速后端，`imgproc`/`disk` 仅客卿侧，运行时可见子 Agent 共 17 个）。全部**按需装载**（`preload=false`），`GEBAI_PRELOAD_SUB_AGENTS` 可指定启动预加载名单。
+`packages/agents/src/agents/` 下 **22 个** TS 子 Agent，另在 `keqing/` 下 5 个客卿项目（`cpp/imgproc`、`go/disk`、`python/vision`、`rust/nsight`、`rust/torch`）。其中 `vision`、`nsight`、`torch` 与 TS 侧**同名合并**（工具并集 + 提示词拼接，给同名子 Agent 贡献原生加速后端），只有 `imgproc`/`disk` 是仅客卿侧——故**运行时可见子 Agent 共 24 个**。全部**按需装载**（`preload=false`），`GEBAI_PRELOAD_SUB_AGENTS` 可指定启动预加载名单。
 
 **启动裁剪与领域专用模式**：全局提示词段落（`GEBAI_PROMPT_ENABLE`/`GEBAI_PROMPT_DISABLE`）、工具表（`GEBAI_TOOL_ENABLE`/`GEBAI_TOOL_DISABLE`）、子 Agent 可见面（`GEBAI_SUB_AGENTS_ENABLE`/`GEBAI_SUB_AGENTS_DISABLE`）与预载集合四组清单同口径（白名单非空仅保留名单内、黑名单移除名单内，先白后黑）；用 `GEBAI_PROFILE` 指向一份 `{GEBAI_HOME}/profiles/{名}.json` 档案即可把四组声明加领域补充提示词固化为一个开关（环境变量按字段覆盖档案）——启动即得到一个领域专用模式（详见 `DESIGN.md`「启动裁剪与领域专用模式」）。
 
@@ -360,12 +361,21 @@ Monorepo（Bun workspaces + Turborepo）；核心模块全部接口化 + 依赖�
 | `feishu_docs` | 飞书云文档：文档/表格/多维表格/知识库/云空间/权限 | 42 | **需飞书应用凭证**（`FEISHU_DOCS_APP_ID/SECRET` 或全局 `GEBAI_FEISHU_*`）；可选 `FEISHU_DOCS_FOLDER_URL`（用户文件夹 URL 或 folder token）让创建的资源落该文件夹下、用户自动有全部权限 |
 | `feishu_group` | 飞书群基础能力：群/成员查询、发消息、建群改群 | 10 | **需飞书应用凭证**（`FEISHU_GROUP_*` 或全局 `GEBAI_FEISHU_*`） |
 | `task` | 统一任务管理（定时/普通/闲时三类 + 排队执行） | 7：`add` `list` `update` `run` `cancel` `remove` `files` | 由 `GEBAI_TASKS_ENABLED` 统一开关（默认 true） |
-| `reel` | 产品视频制作（电影感宣传片 / demo reel / 动效复刻） | 3：`setup` `project` `render`（12 动作） | Remotion 运行时 + 浏览器 + ffmpeg/ffprobe（可配目录；有 GPU 自动硬件编码） |
-| `tts` | 语音合成（文本转语音：音色/语速/音调/音量 + 本机扬声器播报，纯本机离线） | 2：`speak` `voices` | 无（Windows 系统内置语音 WinRT/SAPI；非 Windows 平台不可用） |
+| `tts` | 语音合成（文本转语音）与音效 | 7：`speak` `models` `install` `voices` `sfx` `effect` `mix` | **两档离线引擎**：神经 TTS（sherpa-onnx + VITS/MeloTTS，需 Python + `sherpa-onnx` + 模型；44.1kHz/22.05kHz，音质接近云端）与 Windows 系统语音（零安装兜底）；均不联网不耗配额；音效/效果/混音是纯计算，不受平台限制 |
+| `imagegen` | 本地文生图（sd-turbo / sdxl-turbo） | 3：`imagegen` `assets` `check` | 需 torch + CUDA（可选）+ 模型权重 |
+| `shengsheng` | 驻留自主演进调度中枢（择种→派工→回收台账） | 4：`state` `dispatch` `collect` `divine` | 无（定时任务周期唤醒） |
+| `triage` | 大小模型协同：小模型粗筛 + 大模型兜底精审 | 2：`triage` `escalate` | 需推理目标（本机/局域网/云端） |
+| `llm_infer` | 本地推理引擎生命周期与统一调用 | 17：引擎矩阵/设备探测/安装、进程管理、推理目标、批量任务、结构化输出 | 引擎本身 + 模型权重（可选 GPU） |
+| `nsight` | Nsight Systems/Compute 报告分析与采集 | 12（客卿原生后端同名合并） | 需 NVIDIA Nsight 工具链 |
+| `torch` | PyTorch Profiler trace 分析 | 8（客卿原生后端同名合并） | 需 torch profiler trace |
+| `ai_native_eng` | AI 原生软件工程方法论（知识型，不接项目） | 0（纯提示词） | 无 |
+| `shuangtian` | 构建/运行/操控霜天原生桌面应用 | 18：run/tree/find/get/set/invoke/capture/click/type/key/wait/visual_diff/metrics 等 | 需 C++ 工具链 + 霜天框架源码 |
+| `shuangtian_video` | 裁云（Nimbus）AI 视频：导演脚本→出片 | 继承霜天全套 + `imagegen_*` + `tts_*` | 同 `shuangtian`；素材与配音额外依赖对应能力 |
+| `shuangtian_poster` | 镂月（Lunaris）海报：JSON 脚本→PNG | 继承霜天全套 + `imagegen_*` | 同 `shuangtian` |
 | `imgproc`（客卿） | 图像处理（尺寸/灰度/缩放/像素统计） | 4：`info` `grayscale` `resize` `stats` | 需 C++ 边车构建 |
 | `disk`（客卿） | 磁盘使用分析与清理（目录分析 + 容量总览 + 候选扫描 + 预览/隔离/删除 + 隔离区还原） | 8：`tree` `du` `top` `depth` `volumes` `scan` `clean` `trash` | 需 Go 边车构建 |
 
-**English.** Fifteen TS sub-agents live under `packages/agents/src/agents/`, plus five multi-language sidecar projects under `keqing/` (`vision` merges with its TS counterpart, `nsight`/`torch` contribute native acceleration backends through the same same-name merge, while `imgproc`/`disk` are sidecar-only — 17 visible at runtime). All are loaded on demand. `code`/`explore`/`self_optimize` are the engineering workhorses, `playwright`/`reverse_site`/`desktop` cover browser and desktop automation, `wps`/`reel`/`tts`/`imgproc`/`disk`/`vision` cover documents, video, speech and images, while `feishu_docs`/`feishu_group`/`cron` integrate Feishu and unattended scheduling.
+**English.** Twenty-two TS sub-agents live under `packages/agents/src/agents/`, plus five multi-language sidecar projects under `keqing/` (`vision`/`nsight`/`torch` merge with their TS counterparts, while `imgproc`/`disk` are sidecar-only — 24 visible at runtime). All are loaded on demand. `code`/`explore`/`self_optimize` are the engineering workhorses, `playwright`/`reverse_site`/`desktop` cover browser and desktop automation, `wps`/`tts`/`imagegen`/`imgproc`/`disk`/`vision` cover documents, speech and images, `shuangtian` (+`_video`/`_poster`) drives the native C++ UI/video/poster stack, while `feishu_docs`/`feishu_group`/`task`/`shengsheng` integrate Feishu, unattended scheduling and autonomous evolution.
 
 ## 通信协议与集成 | Protocols & Integration
 

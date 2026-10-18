@@ -2,7 +2,7 @@
 
 **哪份文档答哪个问题、它还跟不跟着代码变。**
 
-> 这份地图是**入口**：除了它自己，其余 24 份文档都在下表中。
+> 这份地图是**入口**：除了它自己，其余 25 份文档都在下表中。
 > 加新文档时同步改这里（见文末「新知识该写哪份」——地图烂掉的根因是只写读法不写写法）。
 
 ## 一句话：先按意图找，再按「寿命契约」决定信多少
@@ -36,6 +36,8 @@
 | [`EXAMPLES_E2E.md`](EXAMPLES_E2E.md) | 五示例 e2e 驱动入口表：哪个脚本验证哪个面、怎么跑全量 | 新增示例/e2e 脚本时同步登记；跑示例验收时查表 | 活 |
 | [`VERIFY-PLAYBOOK.md`](VERIFY-PLAYBOOK.md) | **收单前逐项勾的验收判据总表**：四类交付各要过哪些门、用什么命令、去哪看原文 | **收任何一单之前**（漏查的那道门，代价见它文末的真实案例） | 活·索引 |
 | [`../docs/README.md`](README.md) | 本文件 | —— | 活 |
+
+> 非文档形态的输出约定（裁云/镂月这类**生成器**的输入模板）在 [`script_design.md`](script_design.md)，归入下面 E 组。
 
 ## B. 待办台账（1 份）
 
@@ -73,12 +75,13 @@
 | [`MERGE_REVIEW.md`](MERGE_REVIEW.md) | `optimize/ui-viewport-2026` 分支的合并前复核（16 笔提交逐笔：改动/验证/风险/回滚点；2026-10-14）——分支合并前的复核范式 | 记录（一次性，分支已并入） |
 | [`BUILD_ISOLATION_PLAN.md`](BUILD_ISOLATION_PLAN.md) | **构建隔离方案（未落地）**：同域多 worker 互踩的四层机制（含两层静默）+ 量化实测、`--build-dir`/`ST_BUILD_DIR` vs 构建锁的改动面与代价、推荐顺序 | 方案（公共接口**只分析未落地**；现状与判据见 `CONVENTIONS.md` §9.0④） |
 
-## E. 专题设计（3 份）
+## E. 专题设计（4 份）
 
 | 文档 | 讲的是什么 | 契约 |
 |---|---|---|
 | [`independent_project.md`](independent_project.md) | 怎么用本框架建**自己的**应用工程（清单/构建/运行全流程） | 活 |
 | [`LOUYUE_CAIYUN.md`](LOUYUE_CAIYUN.md) | 「镂月裁云」两示例的设计规约 | 记录（**已实现**；权威现状见 README「示例」节） |
+| [`script_design.md`](script_design.md) | **剧本设计模板**（裁云/镂月通用）：先写剧本再写脚本的六部分模板（定位/内容结构/逐镜设计表/视觉规范/声音设计/确认点） | 活（与 `shuangtian_video`/`shuangtian_poster` 提示词同口径） |
 | [`xml-ui.md`](xml-ui.md) | 纯 XML + JS 通路（`examples/xmlapp`）：XML 描述界面 + `ScriptBridge` JS 驱动 | 记录（已落地，`DESIGN.md` §4.2.20–22） |
 
 ## F. 各目录里的文档
@@ -127,7 +130,7 @@
 
 知识不只在 `.md` 里。三类"活"的沉淀：
 
-**① 探针与脚本（`tools/`，160 个）**——用途见 [`../tools/README.md`](../tools/README.md)，按用途分：
+**① 探针与脚本（`tools/`，231 个）**——用途见 [`../tools/README.md`](../tools/README.md)，按用途分：
 - **e2e 驱动**（`*_e2e.py`）：控制通道端到端（`gbcode`/`gallery`/`louyue`/`caiyun`/`split_view`/`theme_file`/`input_action`/`visual_assert`/`events`/`framework_gaps`）
 - **逆向验证**（`*_reverse_verify.py`）：把修复回退、断言变红——证明测试**真能抓住**缺陷
 - **PTY 中止判据**（判 `terminal_pty_stop_interrupts_without_killing_the_shell` 那条「`Ctrl+C` 被吞」的竞态）：**主判据是 `tools/pty_timeline.py` 量出的 `t_fg − t_marker` 的符号**（标记字节到达 − 前台进程组易主，µs；`python3 tools/pty_timeline.py [每形态轮数]`）——**旧写法 `echo …; sleep 60` 为正**（标记先出、交接在后 ⇒ 窗口在，实测 +0.6 ms p50）、**新写法 `/bin/sh -c "…; exec sleep 60"` 为负**（交接在标记之前 ⇒ 窗口关，实测 −1.1 ms p50）；它不受负载扰动，比红率硬。辅助三件：`tools/pty_form_probe.cpp`（三臂形态对照：`st build pty_form_probe --profile dev` 后跑 `build/dev/bin/pty_form_probe <每臂轮数> [P\|A\|B\|all]`；它需在 `st.pkg` 的 `targets` 里声明，写法同相邻的 `pty_stop_probe` 一条）、`tools/pty_stop_ab.py`（失败形态分类：被吞还是僵住 + 负载相关性）、`tools/pty_form_reverse_verify.py`（把窗口固定放大到 300 ms 再回退的逆向验证；它自己会判「零红 = 本环境复现不出，没有判别力」）。红率只能作旁证且必须同时报轮数、对照条件与检出下限
@@ -135,7 +138,7 @@
 - **诊断探针**（`tools/*.cpp`）：`crash_probe`、`icon_metric_probe`、`icon_ascii_probe`、`make_sample_png` 等
 - **文档/结构核对**（`check_docs.py`、`check_selfcontained.py`）
 
-**② 测试即规格（`tests/`，116 个文件）**——每条 `ST_TEST` 的名字就是一条**不变量**。
+**② 测试即规格（`tests/`，173 个 .cpp）**——每条 `ST_TEST` 的名字就是一条**不变量**。
 想确认"某个行为是不是被保证的"，grep 用例名比读文档更准（文档会漂，测试会红）。
 
 **③ 源码注释里的成因**——最靠近代码、最不容易漂的一层。本仓约定：
