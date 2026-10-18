@@ -152,7 +152,7 @@ describe("音效合成", () => {
     }
     expect(Object.keys(SFX_PRESETS)).toContain("ding")
     expect(Object.keys(SFX_PRESETS)).toContain("explosion")
-    // 视频收尾句式 riser → impact → sparkle 所需的三件套必须齐备（reel 侧直接按名取用）
+    // 视频收尾句式 riser → impact → sparkle 所需的三件套必须齐备（视频子代理直接按名取用）
     expect(Object.keys(SFX_PRESETS)).toContain("riser")
     expect(Object.keys(SFX_PRESETS)).toContain("impact")
     expect(Object.keys(SFX_PRESETS)).toContain("sparkle")

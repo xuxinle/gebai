@@ -72,11 +72,37 @@ describe("shuangtian_video / shuangtian_poster", () => {
     }
   })
 
+  test("视频子代理带上了语音与音效工具（裁云不自合成音效，靠 tts_sfx 出 WAV）", async () => {
+    // 这条钉住一个**能力边界**：裁云渲染器只混音、不合成音效。
+    // 若有人把 tts 从工具面里去掉，子代理就再也做不出 riser→impact→sparkle 收尾，
+    // 而这种缺失在出片时只表现为"片子没声音"——很难从现象反推。
+    const mod = shuangtianVideo as unknown as { tools: Record<string, unknown> }
+    for (const required of ["speak", "sfx", "voices", "effect", "mix"]) {
+      expect(mod.tools).toHaveProperty(required)
+    }
+    expect(shuangtianVideo.systemPrompt).toContain("tts_sfx")
+    expect(shuangtianVideo.systemPrompt).toContain("riser")
+  })
+
   test("提示词里写清了关键事实（不是空壳）", async () => {
     const video = shuangtianVideo
     // 视频子代理必须知道：素材要压暗、渲染完要抽帧验片
     expect(video.systemPrompt).toContain("image_dim")
     expect(video.systemPrompt).toContain("抽帧")
+
+    // ── 创作方法论锚点：每一条都对应一类返工代价 ──
+    // 逻辑不复杂，但少了这些锚点，子代理会退回"排好版就出片"的旧行为。
+    for (const anchor of [
+      "C1", // 三处确认点（概要/每节主帧/成片关键帧）
+      "主帧", // 每节送审而不是一次渲完整片
+      "确定性", // 禁随机：两次出片必须同帧同像素
+      "呼吸", // 落定后留静止（节奏单向偏好：只会嫌快，不会嫌慢）
+      "推镜不超过 1.08", // 安全边距（实测踩过硬裁切）
+      "实测时长", // 配音定稿后重排场景窗口
+    ]) {
+      expect(video.systemPrompt).toContain(anchor)
+    }
+
     const poster = shuangtianPoster
     // 海报子代理必须知道：图层顺序会盖住文字（实测踩过的坑）
     expect(poster.systemPrompt).toContain("盖住")
