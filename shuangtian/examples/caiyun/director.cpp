@@ -438,7 +438,7 @@ auto builtin_sample_promo() -> Script {
   title.duration = 2.2;
   title.title = "标题";
   title.subtitle = "SUBTITLE";
-  title.lines = {"第一行说明文字", "第二行说明文字"};
+  title.lines = {"能力一", "能力二", "能力三"};
   title.accent = Color{120, 176, 255, 255};
   title.bg_top = Color{6, 10, 22, 255};
   title.bg_bottom = Color{20, 32, 62, 255};

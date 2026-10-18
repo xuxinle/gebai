@@ -275,9 +275,9 @@ auto poster_to_json(const PosterScript& poster) -> std::string {
   return st::json_dump(root, true, 2);
 }
 
-auto builtin_gebai_poster() -> PosterScript {
+auto builtin_sample_poster() -> PosterScript {
   PosterScript poster{};
-  poster.name = "歌白 · 宣传海报";
+  poster.name = "示例海报";
   poster.width = 1920;
   poster.height = 1080;
   poster.background = Color{6, 10, 22, 255};
@@ -316,7 +316,7 @@ auto builtin_gebai_poster() -> PosterScript {
       // 早期写 x=0 + 居中，结果完全在画布外/被裁，实测踩到）。
       Block{.kind = BlockKind::Body,
             .name = "品牌词",
-            .text = "歌白",
+            .text = "标题",
             .x = 0.052f,
             .y = 112.0f,
             .align = 1,
@@ -325,7 +325,7 @@ auto builtin_gebai_poster() -> PosterScript {
             .color = Color{246, 249, 255, 255}},
       Block{.kind = BlockKind::Body,
             .name = "品牌拉丁",
-            .text = "GEBAI AGENT",
+            .text = "BRAND",
             .x = 0.052f,
             .y = 160.0f,
             .align = 1,
@@ -335,7 +335,7 @@ auto builtin_gebai_poster() -> PosterScript {
       // 右上：右对齐（x 是右边界）
       Block{.kind = BlockKind::Body,
             .name = "版本",
-            .text = "PRODUCT SHEET · 2026",
+            .text = "SUBTITLE · 2026",
             .x = 0.948f,
             .y = 112.0f,
             .align = 2,
@@ -352,7 +352,7 @@ auto builtin_gebai_poster() -> PosterScript {
             .radius = 54.0f},
       Block{.kind = BlockKind::Title,
             .name = "主标题",
-            .text = "歌白",
+            .text = "主标题",
             .x = 0.5f,
             .y = 392.0f,
             .size = 196.0f,
@@ -367,7 +367,7 @@ auto builtin_gebai_poster() -> PosterScript {
             .width = 300.0f},
       Block{.kind = BlockKind::Subtitle,
             .name = "副标题",
-            .text = "GEBAI AGENT",
+            .text = "SUBTITLE",
             .x = 0.5f,
             .y = 668.0f,
             .size = 44.0f,
@@ -386,7 +386,7 @@ auto builtin_gebai_poster() -> PosterScript {
             .thickness = 1.2f},
       Block{.kind = BlockKind::Body,
             .name = "理念1",
-            .text = "任意语言",
+            .text = "特性一",
             .flow = 1,
             .flow_rank = 0,
             .x = 0.22f,
@@ -396,7 +396,7 @@ auto builtin_gebai_poster() -> PosterScript {
             .color = Color{214, 228, 248, 255}},
       Block{.kind = BlockKind::Body,
             .name = "理念2",
-            .text = "任意进程",
+            .text = "特性二",
             .flow = 1,
             .flow_rank = 1,
             .x = 0.5f,
@@ -406,7 +406,7 @@ auto builtin_gebai_poster() -> PosterScript {
             .color = Color{214, 228, 248, 255}},
       Block{.kind = BlockKind::Body,
             .name = "理念3",
-            .text = "收编为工具",
+            .text = "特性三",
             .flow = 1,
             .flow_rank = 2,
             .x = 0.78f,
@@ -418,7 +418,7 @@ auto builtin_gebai_poster() -> PosterScript {
       // —— 页脚：一句定位语 ——
       Block{.kind = BlockKind::Body,
             .name = "页脚",
-            .text = "融合旧世界 IT 的所有技术 · 打造新世界智能的躯体",
+            .text = "这里写一句定位说明 · 一句话讲清这是什么",
             .x = 0.5f,
             .y = 974.0f,
             .size = 24.0f,

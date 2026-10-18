@@ -1,5 +1,5 @@
 {
-  "name": "歌白 · 素材版宣传片",
+  "name": "示例宣传片 · 基础版",
   "fps": 30,
   "size": [
     1920,
@@ -18,8 +18,8 @@
     {
       "kind": "title",
       "duration": 2.4,
-      "title": "歌白",
-      "subtitle": "GEBAI AGENT",
+      "title": "标题",
+      "subtitle": "SUBTITLE",
       "image": "media/bg-aurora.png",
       "image_dim": 0.25,
       "image_ken_burns": 0.08,
@@ -28,12 +28,12 @@
     {
       "kind": "triptych",
       "duration": 2.6,
-      "title": "以极致动态扩展",
-      "subtitle": "任意语言 · 任意进程 · 收编为工具",
+      "title": "三栏卡片",
+      "subtitle": "这里写一段补充说明",
       "lines": [
-        "融合旧世界 IT",
-        "打造智能躯体",
-        "记忆与责任长在智体"
+        "特性一",
+        "特性二",
+        "特性三"
       ],
       "image": "media/bg-mesh.png",
       "image_dim": 0.35,
@@ -43,27 +43,27 @@
     {
       "kind": "metrics",
       "duration": 2.4,
-      "title": "每一次调用都留痕",
+      "title": "数据展示",
       "values": [
         100,
         4,
         10
       ],
       "lines": [
-        "可审计",
-        "赛道",
-        "秒成片"
+        "指标一",
+        "指标二",
+        "指标三"
       ],
-      "image": "media/bg-grid.png",
+      "image": "media/bg-deep.png",
       "image_dim": 0.3,
       "accent": "#5ee0c0"
     },
     {
       "kind": "outro",
       "duration": 2.6,
-      "title": "歌白",
-      "subtitle": "融合旧世界 IT 的所有技术 · 打造新世界智能的躯体",
-      "image": "media/bg-nebula.png",
+      "title": "结尾",
+      "subtitle": "这里写一句收尾的话",
+      "image": "media/bg-slate.png",
       "image_dim": 0.22,
       "accent": "#7ab4ff"
     }

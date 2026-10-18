@@ -729,13 +729,13 @@ class LouyuePage final : public dsl::Component {
             c,
             [this, editable](Button& b) {
               b.set_id("poster-apply");
-              b.set_label("歌白海报");
+              b.set_label("示例海报");
               b.set_icon("sparkles");
               b.set_size(Button::Size::Small);
               b.set_variant(Button::Variant::Soft);
               b.set_enabled(editable);
               b.on_click = [this] {
-                apply_poster(louyue::builtin_gebai_poster());
+                apply_poster(louyue::builtin_sample_poster());
                 poster_script_path_.clear();
               };
             },
@@ -907,7 +907,7 @@ class LouyuePage final : public dsl::Component {
  CanvasView* canvas_{nullptr};
 
  // —— 海报（AI 作品面；见 poster.hpp / poster_bridge.hpp）——
- louyue::PosterScript poster_{louyue::builtin_gebai_poster()};
+ louyue::PosterScript poster_{louyue::builtin_sample_poster()};
  /// 素材库（海报的 image 块靠它解析与解码）。
  louyue::AssetLibrary assets_{};
  std::string asset_basis_{};

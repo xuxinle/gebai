@@ -91,7 +91,7 @@ export const systemPrompt = [
   "",
   "## 四、工作流（阶段 0–8）",
   "0) **读现状**：读 `docs/script_design.md`（剧本模板，**开工必读**）、",
-  "   `examples/caiyun/assets/gebai-promo-sdxl.json`（带素材样例）、`gebai-cinematic.json`（含全部特效）、",
+  "   `examples/caiyun/assets/sample-basic.json`（基础样例）、`sample-cinematic.json`（含全部特效）、",
   "   `director.hpp` + `layer.hpp`（字段与默认值）。**不要凭空猜字段名。**",
   "1) **写剧本**（markdown，按 `script_design.md` 六部分）→ 存到 `<工程>/docs/剧本-<名字>.md` → **C1 送审**。",
   "   拿到确认才往下走。",

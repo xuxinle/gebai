@@ -429,7 +429,7 @@ UI 只负责把控件置灰并告诉用户为什么。
 **影像特效**（发布会/预告片质感，全部默认关闭且零开销）：`dof`（景深虚化 0~1）、
 `particles`（浮尘粒子数）、`glow` + `glow_cx/cy/radius`（舞台光晕）、
 `god_ray`（体积光柱）、`light_sweep`（光扫）、`cam_zoom_from/to` / `cam_rotate` /
-`cam_pan_x/y` / `cam_shake`（运镜）。参考 `assets/gebai-cinematic.json`。
+`cam_pan_x/y` / `cam_shake`（运镜）。参考 `assets/sample-cinematic.json`。
 
 > 三条实测约束：① 光晕**只能逐像素算**（多层同心圆会留下一圈圈可见的环）；
 > ② 运镜**不作用于包装层**（否则识标被放大、拉远时露黑边）；
@@ -456,7 +456,7 @@ UI 只负责把控件置灰并告诉用户为什么。
 - `tools/control_switch_realwindow.py`——真窗口下的人机切换（裁云/镂月共用）：真实鼠标
   拨开关 → 接管/交还、锁定态编辑被拒而查看可用。
 
-默认工程 `examples/caiyun/assets/gebai-promo.json` 就是**「歌白 10 秒宣传片」**
+默认工程（不传 `--script` 时的内置片）是**中性的五场景示例**
 （1080p / 30fps / 五段 / 自带配乐与四段旁白），启动即可预览、一键出成片。
 
 **旁白 WAV 不入仓**（`examples/caiyun/assets/vo/*.wav` 已被 `.gitignore` 忽略）：那是

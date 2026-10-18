@@ -52,7 +52,7 @@ SCRIPT = {
         {"kind": "triptych", "duration": 1.5, "title": "三段能力", "subtitle": "脚本 · 渲染 · 交付",
          "lines": ["脚本", "渲染", "交付"], "accent": "#6bd6ffff",
          "background": ["#04121aff", "#0a2230ff"]},
-        {"kind": "outro", "duration": 1.0, "title": "歌白", "subtitle": "GEBAI AGENT",
+        {"kind": "outro", "duration": 1.0, "title": "结尾", "subtitle": "OUTRO",
          "accent": "#ffd166ff", "background": ["#0a0812ff", "#181028ff"]},
     ],
 }
@@ -158,7 +158,7 @@ def main():
         # —— 1. 控制面 ——
         check(client.count("#director") == 1, "缺少（或重复）控制面元素 #director")
         base = client.props("director")
-        check(base["scene_count"] == "5", f"内置歌白宣传片应有 5 个场景，实为 {base['scene_count']}")
+        check(base["scene_count"] == "5", f"内置示例片应有 5 个场景，实为 {base['scene_count']}")
         check(base["size"] == "1920x1080", f"内置脚本分辨率异常：{base['size']}")
         print(f"[1] 控制面就绪：内置工程「{base['name']}」 {base['size']} @{base['fps']}fps")
 

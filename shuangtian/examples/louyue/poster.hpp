@@ -151,8 +151,10 @@ struct PosterScript {
 /// 序列化成 JSON（另存/往返用；键序与 `parse_poster` 对称）。
 [[nodiscard]] auto poster_to_json(const PosterScript& poster) -> std::string;
 
-/// 内置的**歌白宣传海报**（不依赖任何外部素材）。
-[[nodiscard]] auto builtin_gebai_poster() -> PosterScript;
+/// 内置的**示例海报**（不依赖任何外部素材）。
+///
+/// 文案是中性占位：这是通用工具，不预设任何产品名。
+[[nodiscard]] auto builtin_sample_poster() -> PosterScript;
 
 /// 把海报渲染成一块画布（尺寸 = `export_width/height`）。
 ///

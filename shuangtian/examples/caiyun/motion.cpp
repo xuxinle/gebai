@@ -809,9 +809,17 @@ void paint_title(Painter& p, const Scene& scene, float local_time) {
     // 分隔线：从中心向两侧展开，比标题线更细更淡（层级：主 > 次）。
     p.line(grid.margin, facts_y - 34.0f, grid.margin + grid.content_width() * facts_t,
            facts_y - 34.0f, with_alpha(scene.accent, facts_t * 0.18f), 1.2f);
-    const char* facts[3] = {"任意语言", "任意进程", "收编为工具"};
+    // 三条短语取自场景的 `lines`（空则该行不画）。
+    //
+    // 早先这里硬编码了三个词，等于把某个具体产品的内容烧进了模板——
+    // 这是"示例"而不是"工具"的典型症状。模板只负责版式，文案由脚本给。
+    std::vector<std::string> facts;
+    for (const std::string& line : scene.lines) {
+      if (!line.empty()) facts.push_back(line);
+      if (facts.size() >= 3) break;
+    }
     const float cell = grid.content_width() / 3.0f;
-    for (int i = 0; i < 3; ++i) {
+    for (std::size_t i = 0; i < facts.size(); ++i) {
       const float index = static_cast<float>(i);
       const float t = ease_out_cubic(clamp01f((local_time - 0.68f - 0.12f * index) / 0.85f));
       const float cx = grid.margin + cell * (index + 0.5f);

@@ -141,7 +141,7 @@ def main():
         # —— 1. 控制面与作品摘要 ——
         check(client.count("#poster") == 1, "#poster 控制面不存在")
         info = client.props("poster")
-        check(int(info["blocks"]) >= 3, f"内置歌白海报块数过少：{info['blocks']}")
+        check(int(info["blocks"]) >= 3, f"内置示例海报块数过少：{info['blocks']}")
         check(info["name"], "作品名为空")
         print(f"[1] 控制面：#poster · {info['name']} · {info['size']} · {info['blocks']} 块")
 

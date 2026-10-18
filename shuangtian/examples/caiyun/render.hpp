@@ -49,7 +49,7 @@ struct VoiceReport {
 /// 一次渲染作业的规格。
 struct RenderJob {
   std::string output_dir{};
-  /// 输出文件路径（`.../gebai-promo.mp4`）；空 = 只出帧序列与配乐。
+  /// 输出文件路径（`.../promo.mp4`）；空 = 只出帧序列与配乐。
   std::string output_file{};
   /// 成片分辨率（与工程脚本里的 `size` 独立：同一份工程可出 720p 预览与 1080p 成片）。
   int width{1920};
