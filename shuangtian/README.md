@@ -406,6 +406,21 @@ UI 只负责把控件置灰并告诉用户为什么。
 交接时（`edit_lock` 开启）工程会**以脚本为准重建片段**：AI 改的是脚本，而片段还
 带着历史人工编辑；不重建就会出现“脚本早换了、时间轴还是手动剪过的样子”。
 
+**自定义版式（不写 C++）**：内置的五种版式（title/terminal/triptych/metrics/outro）只是"快速出片"的捷径。
+任意版式用 `kind: "custom"` + `layers` 数组描述——矩形/椭圆/线/文字/图片/路径/光晕/粒子，
+用 `x/y/w/h` 定位（**设计像素**如 `640`，或**画面比例**如 `"50%"`），`enter` 控制入场动画
+（0=无 / 1=淡入 / 2=上浮 / 3=缩放）。字段见 `layer.hpp`。
+
+```json
+{"kind":"custom","duration":3.0,"layers":[
+  {"kind":"image","src":"media/bg.png","x":120,"y":240,"w":760,"h":600,"radius":24,"enter":3},
+  {"kind":"text","text":"第一行\n第二行","x":960,"y":300,"w":840,"h":400,"size":72,"align":1,"enter":2}
+]}
+```
+
+**品牌识标**：`brand_wordmark` / `brand_latin` / `footer_note`（顶层）。
+**默认空 = 不画**——这是通用工具，不预设任何产品名。
+
 **场景可以有素材**：`image`（背景图，cover 铺满）/ `image_card`（卡片插图，contain）/
 `image_dim`（压暗 0~1，有文字时 0.45~0.6，否则白字读不出来）/ `image_ken_burns`（缓慢推拉 0~0.25，
 静止背景在视频里像幻灯片）。素材路径支持绝对路径 / 相对脚本目录（`media/x.png`）/ 素材库名字。

@@ -11,6 +11,7 @@
 #include "assets_lib.hpp"
 #include "brand.hpp"
 #include "fx.hpp"
+#include "layer.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -470,6 +471,251 @@ void paint_card(Painter& p, float x, float y, float w, float h, float radius, Co
 }
 
 /// 片头：大标题升起 + 强调细线展开 + 副标题与两行说明错峰。
+/// 按图层参数画文字（支持多行、对齐、字距）。
+///
+/// 为什么要单独一个 helper：`Painter::text` 只画单行、且 x 是中心锚点。
+/// 图层需要**左/右对齐**与**换行**——这两个能力在通用版式里是必需项
+/// （左边图片、右边一段说明文字，是宣传片最常见的构图）。
+void draw_text_lines(Painter& p, const Layer& layer, float lx, float ly, float lw, float lh,
+                     float alpha, float scale, const st::ui::TextPort* port) {
+  const Color color = with_alpha(layer.color, alpha);
+  const float size = layer.size * scale;
+  const float tracking = layer.tracking * scale;
+  const float line_step = size * std::max(1.0f, layer.line_height);
+
+  // 按 `\n` 拆行（脚本里用 `\\n` 换行；不做自动折行——折行需要断词规则，
+  // 中文/英文/混排各不相同，让调用方显式断行更可控）。
+  std::vector<std::string> lines;
+  std::size_t begin = 0;
+  while (begin <= layer.text.size()) {
+    const std::size_t end = layer.text.find('\n', begin);
+    if (end == std::string::npos) {
+      lines.push_back(layer.text.substr(begin));
+      break;
+    }
+    lines.push_back(layer.text.substr(begin, end - begin));
+    begin = end + 1;
+  }
+
+  float cursor_y = ly;
+  for (const std::string& line : lines) {
+    if (!line.empty()) {
+      // 量宽用于对齐；**超出图层框就自动缩字号**。
+      //
+      // 为什么必须缩：图层框宽是用户给的确定值，而文字长度是外部输入。
+      // 不缩就会溢出到框外（实测右侧说明文字超出画面被裁掉一半）。
+      // 缩字号比换行安全：换行需要断词规则（中文/英文/混排各不同），
+      // 而脚本里的 `\n` 已经让用户显式控制换行——这里只保证"不溢出"。
+      float line_size = size;
+      float width = 0.0f;
+      const auto measure = [&](float candidate) {
+        const float base = port->measure_width(line, candidate);
+        return tracking <= 0.01f
+                   ? base
+                   : base + tracking * static_cast<float>(line.size() - 1) *
+                                (candidate / std::max(1.0f, size));
+      };
+      width = measure(line_size);
+      if (lw > 1.0f && width > lw) {
+        line_size = std::max(8.0f, size * (lw / width));
+        width = measure(line_size);
+      }
+      float draw_x = lx;
+      if (layer.align == 0) {
+        draw_x = lx + (lw - width) * 0.5f;   // 居中（在图层框内，而不是画面内）
+      } else if (layer.align == 2) {
+        draw_x = lx + lw - width;            // 右对齐
+      }
+      // ⚠ `Painter::text` 的 anchor 参数：0=左对齐（x 是左边界）、0.5=居中（x 是中心）。
+      //
+      // 早先这里传 0.0f 又把 x 算成 `draw_x + width*0.5`，等于"按中心算位置、
+      // 却按左边界画" —— 文字整体右移半个宽度，超出图层框后被裁（实测三栏卡片
+      // 的标题偏右 100px、右侧被切）。居中必须传 0.5f。
+      const float step_ratio = line_size / std::max(1.0f, size);
+      if (tracking <= 0.01f) {
+        // draw_x 是左边界；居中时传 0.5 让它以 (draw_x + width/2) 为中心画。
+        p.text(line, line_size / scale, draw_x + width * 0.5f, cursor_y, color, 0.5f,
+               layer.bold);
+      } else {
+        p.spaced_text(line, line_size / scale, draw_x, cursor_y, color,
+                      layer.tracking * step_ratio);
+      }
+    }
+    cursor_y += line_step;
+  }
+  (void)lh;
+}
+
+/// 画一组通用图层（`Scene::layers`）。
+///
+/// ## 为什么单独一个函数而不是塞进场景模板
+///
+/// 图层是**数据驱动**的：任何场景（包括五个内置模板）都可以在下面叠图层。
+/// 塞进模板会让"自定义版式"与"内置版式"变成两条代码路径，
+/// 而两条路径必然漂移（本项目在别的功能上付过这个代价）。
+///
+/// ## 绘制顺序
+///
+/// 按数组顺序（先列出的在下层）。这与镂月的块顺序语义一致——
+/// 用户学一次就够，不必记两套。
+void paint_layers(Painter& p, const Scene& scene, float local_time, const AssetLibrary* assets,
+                  std::string_view basis) {
+  if (scene.layers.empty()) return;
+  const float canvas_w = p.width();
+  const float canvas_h = p.height();
+  const float design_w = p.design_w();
+  const float design_h = p.design_h();
+  const float scale = p.scale();
+
+  for (const Layer& layer : scene.layers) {
+    const LayerState state =
+        evaluate_layer(layer, local_time, canvas_w, canvas_h, design_w, design_h);
+    if (state.alpha <= 0.004f) continue;
+
+    // 入场缩放以层中心为锚点。
+    float lx = state.x;
+    float ly = state.y + state.offset_y;
+    float lw = state.w;
+    float lh = state.h;
+    if (state.scale != 1.0f) {
+      const float cx = lx + lw * 0.5f;
+      const float cy = ly + lh * 0.5f;
+      lw *= state.scale;
+      lh *= state.scale;
+      lx = cx - lw * 0.5f;
+      ly = cy - lh * 0.5f;
+    }
+
+    switch (layer.kind) {
+      case LayerKind::Rect: {
+        if (layer.fill_alt.a == 0) {
+          p.fill(lx, ly, lw, lh, with_alpha(layer.fill, state.alpha), layer.radius * scale);
+        } else {
+          // 渐变填充：走 canvas 直接填（Painter 的 fill 只有纯色）。
+          st::raster::Gradient gradient =
+              layer.gradient_dir == 1
+                  ? st::raster::Gradient::linear(
+                        st::math::Point{lx, ly}, st::math::Point{lx + lw, ly},
+                        {st::raster::GradientStop{0.0f, with_alpha(layer.fill, state.alpha)},
+                         st::raster::GradientStop{1.0f, with_alpha(layer.fill_alt, state.alpha)}})
+                  : st::raster::Gradient::linear(
+                        st::math::Point{lx, ly}, st::math::Point{lx, ly + lh},
+                        {st::raster::GradientStop{0.0f, with_alpha(layer.fill, state.alpha)},
+                         st::raster::GradientStop{1.0f, with_alpha(layer.fill_alt, state.alpha)}});
+          st::raster::Path path;
+          const float r = layer.radius * scale;
+          if (r > 0.5f) {
+            path.add_rounded_rect(st::math::Rect{lx, ly, lw, lh}, r);
+          } else {
+            path.add_rect(st::math::Rect{lx, ly, lw, lh});
+          }
+          p.canvas().fill_path(path, Paint::with_gradient(std::move(gradient)));
+        }
+        if (layer.stroke.a != 0 && layer.stroke_width > 0.01f) {
+          p.border(lx, ly, lw, lh, layer.radius * scale, with_alpha(layer.stroke, state.alpha),
+                   layer.stroke_width * scale);
+        }
+        break;
+      }
+      case LayerKind::Ellipse: {
+        // 用 fill_path 画椭圆（Painter 只有正圆；椭圆需要 path）。
+        st::raster::Path path;
+        path.add_ellipse(st::math::Rect{lx, ly, lw, lh});
+        p.canvas().fill_path(path, Paint::solid(with_alpha(layer.fill, state.alpha)));
+        break;
+      }
+      case LayerKind::Line: {
+        // Line 用 x,y 作为起点、w,h 作为终点增量（而不是宽高）——
+        // 这是图层语义里唯一的特例，写进文档免得误用。
+        p.line(lx, ly, lx + lw, ly + lh, with_alpha(layer.stroke.a != 0 ? layer.stroke : layer.fill,
+                                                    state.alpha),
+               std::max(1.0f, layer.stroke_width * scale));
+        break;
+      }
+      case LayerKind::Text: {
+        if (layer.text.empty()) break;
+        const st::ui::TextPort* port = p.port();
+        if (port == nullptr) break;
+        draw_text_lines(p, layer, lx, ly, lw, lh, state.alpha, scale, port);
+        break;
+      }
+      case LayerKind::Image: {
+        if (assets == nullptr || layer.src.empty()) {
+          // 素材缺失：画占位框（不静默跳过——静默会让"图没进来"看起来像设计）。
+          p.fill(lx, ly, lw, lh, Color{40, 20, 24, static_cast<std::uint8_t>(state.alpha * 255.0f)});
+          break;
+        }
+        const auto path = assets->resolve(layer.src, basis);
+        if (!path) {
+          p.fill(lx, ly, lw, lh, Color{40, 20, 24, static_cast<std::uint8_t>(state.alpha * 255.0f)});
+          break;
+        }
+        const auto image = assets->image(*path);
+        if (!image) {
+          p.fill(lx, ly, lw, lh, Color{40, 20, 24, static_cast<std::uint8_t>(state.alpha * 255.0f)});
+          break;
+        }
+        const st::math::Rect box{lx, ly, lw, lh};
+        if (layer.contain) {
+          blit_contain(p.canvas(), *image, box, state.alpha);
+        } else {
+          blit_cover(p.canvas(), *image, box, state.alpha, layer.radius * scale);
+        }
+        // 压暗：叠一层半透明底色（cover 没有 tint 参数，独立叠一次更灵活——
+        // 用户的压暗意图与"圆角裁切"是两件事，能分开控制）。
+        const float dim = std::clamp(layer.dim, 0.0f, 1.0f);
+        if (dim > 0.004f) {
+          p.fill(lx, ly, lw, lh, Color{6, 9, 18, static_cast<std::uint8_t>(dim * 255.0f)},
+                 layer.radius * scale);
+        }
+        break;
+      }
+      case LayerKind::Path: {
+        if (layer.points.size() < 4) break;
+        st::raster::Path path;
+        bool first = true;
+        for (std::size_t i = 0; i + 1 < layer.points.size(); i += 2) {
+          const st::math::Point point{lx + layer.points[i] * scale,
+                                      ly + layer.points[i + 1] * scale};
+          if (first) {
+            path.move_to(point);
+            first = false;
+          } else {
+            path.line_to(point);
+          }
+        }
+        if (layer.closed) {
+          path.close();
+          p.canvas().fill_path(path, Paint::solid(with_alpha(layer.fill, state.alpha)));
+        }
+        if (layer.stroke.a != 0 && layer.stroke_width > 0.01f) {
+          p.canvas().stroke_path(path, Paint::solid(with_alpha(layer.stroke, state.alpha)),
+                                 layer.stroke_width * scale);
+        }
+        break;
+      }
+      case LayerKind::Glow: {
+        GlowSpec spec{};
+        spec.cx = canvas_w > 0.0f ? (lx + lw * 0.5f) / canvas_w : 0.5f;
+        spec.cy = canvas_h > 0.0f ? (ly + lh * 0.5f) / canvas_h : 0.5f;
+        spec.radius = layer.spread;
+        spec.intensity = layer.intensity;
+        spec.color = layer.fill;
+        paint_glow(p.canvas(), spec, scale, state.alpha);
+        break;
+      }
+      case LayerKind::Particles: {
+        ParticleField field{};
+        field.count = layer.count;
+        field.alpha = state.alpha * layer.intensity;
+        field.color = layer.fill;
+        paint_particles(p.canvas(), field, static_cast<double>(local_time), scale);
+        break;
+      }
+    }
+  }
+}
+
 /// 版式槽位（全片共用一套：换画幅时所有场景一起跟着变）。
 [[nodiscard]] auto make_slots() -> LayoutSlots {
   LayoutSlots slots{};
@@ -501,14 +747,18 @@ void paint_wrap(Painter& p, const Scene& scene, float local_time, int scene_inde
   if (t <= 0.004f) return;
 
   p.corner_ticks(grid.margin * 0.62f, 46.0f, 2.0f, scene.accent, t * 0.13f);
-  p.brand_lockup(grid.margin, grid.margin, slots.brand.glyph_radius, slots.brand.wordmark,
-                 slots.brand.latin, scene.accent, t * 0.9f);
+  // 识标：品牌名为空则**不画**。
+  //
+  // 这是通用工具，不该预设某个产品的名字。默认空串→不画，
+  // 比印一个占位品牌好：假品牌会被误认为"模板没改干净"。
+  if (!scene.brand_wordmark.empty() || !scene.brand_latin.empty()) {
+    p.brand_lockup(grid.margin, grid.margin, slots.brand.glyph_radius, scene.brand_wordmark,
+                   scene.brand_latin, scene.accent, t * 0.9f);
+  }
   p.progress_dots(grid.center_x(), grid.height - grid.margin * 1.55f, scene_total, scene_index,
                   26.0f, scene.accent, t * 0.85f);
-  // 页脚左字：场景没给就用片名（空着会让包装缺一块，画面读起来仍然"散"）。
-  const std::string note = scene.footer_note.empty() ? std::string("GEBAI · 智体")
-                                                     : scene.footer_note;
-  p.footer(grid.margin, grid.height - grid.margin * 0.92f, grid.width, note,
+  // 页脚：左下角小字同样**空则不画**（不塞默认品牌）。
+  p.footer(grid.margin, grid.height - grid.margin * 0.92f, grid.width, scene.footer_note,
            std::format("{:02d} / {:02d}", scene_index + 1, scene_total), scene.accent,
            t * 0.9f);
 }
@@ -873,7 +1123,10 @@ void render_scene(st::raster::Canvas& target, const Scene& scene, double local_t
     case SceneKind::Triptych: paint_triptych(p, scene, time, assets, asset_basis); break;
     case SceneKind::Metrics: paint_metrics(p, scene, time); break;
     case SceneKind::Outro: paint_outro(p, scene, time); break;
+    case SceneKind::Custom: break;   // 完全由以下图层绘制（无内置模板）
   }
+  // 通用图层：任何场景都可叠加（含 Custom）。
+  if (!scene.layers.empty()) paint_layers(p, scene, time, assets, asset_basis);
   // 包装层统一在这里加：所有场景共用同一套识标/结构/页脚。
   //
   // 放这里而不是各场景内各调一次，是因为包装必须**逐帧一致**——

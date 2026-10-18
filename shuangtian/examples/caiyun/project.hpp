@@ -135,7 +135,7 @@ struct Project {
 
   /// 导演脚本（场景真值）。`clips` 是它的**投影** + 人工编辑的结果：
   /// 应用脚本会按脚本重建片段；人工编辑只改片段（脚本保留，可另存）。
-  Script script{builtin_gebai_promo()};
+  Script script{builtin_sample_promo()};
 
   std::vector<Clip> clips{};
   int next_id{1};

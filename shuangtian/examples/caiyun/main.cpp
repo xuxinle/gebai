@@ -235,7 +235,7 @@ class CaiyunPage final : public dsl::Component {
 
   /// 装载脚本（路径为空则用内置歌白宣传片）。失败时**保留原工程**并返回错误。
   auto load_script(const std::string& path) -> st::Result<std::string> {
-    caiyun::Script script = caiyun::builtin_gebai_promo();
+    caiyun::Script script = caiyun::builtin_sample_promo();
     if (!path.empty()) {
       const auto text = st::fs::read_text(path);
       if (!text) return st::forward_error(text.error());
@@ -449,16 +449,16 @@ class CaiyunPage final : public dsl::Component {
   /// 旁白仍是 `vo/s1.wav`（相对 cwd），而 UI 按钮装载的却是绝对路径。结果
   /// 同一个脚本两条路径两种行为（实测：命令行出片 0/4 轨配音）。
   static auto load_initial_script(const std::string& path) -> caiyun::Script {
-    if (path.empty()) return caiyun::builtin_gebai_promo();
+    if (path.empty()) return caiyun::builtin_sample_promo();
     const auto text = st::fs::read_text(path);
     if (!text) {
       st::eprint("脚本读取失败：{}（改用内置歌白宣传片）\n", text.error().message);
-      return caiyun::builtin_gebai_promo();
+      return caiyun::builtin_sample_promo();
     }
     const auto parsed = caiyun::parse_script(text.value());
     if (!parsed) {
       st::eprint("脚本解析失败：{}（改用内置歌白宣传片）\n", parsed.error().message);
-      return caiyun::builtin_gebai_promo();
+      return caiyun::builtin_sample_promo();
     }
     caiyun::Script script = parsed.value();
     rebase_relative_paths(script, path);

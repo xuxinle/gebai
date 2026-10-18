@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "st/core/error.hpp"
+#include "layer.hpp"
 #include "st/math/color.hpp"
 
 namespace caiyun {
@@ -52,11 +53,16 @@ enum class SceneKind : std::uint8_t {
   Triptych,  ///< 三联卡：三条卖点并排升入
   Metrics,   ///< 数字：大数字滚动 + 说明
   Outro,     ///< 片尾：标志 + slogan + 淡出
+  /// **自定义布局**：画面完全由 `Scene::layers` 描述（不写 C++ 也能做任意版式）。
+  ///
+  /// 这是"工具"与"示例"的分界线：五个内置模板是**调味料**，Custom 才是主菜——
+  /// 用户/AI 用图层脚本画任何画面，模板只用于"想快速出个像样的片头"。
+  Custom,
 };
 
 inline constexpr SceneKind kSceneKinds[] = {SceneKind::Title, SceneKind::Terminal,
                                             SceneKind::Triptych, SceneKind::Metrics,
-                                            SceneKind::Outro};
+                                            SceneKind::Outro, SceneKind::Custom};
 inline constexpr std::size_t kSceneKindCount = std::size(kSceneKinds);
 
 [[nodiscard]] auto scene_kind_name(SceneKind kind) -> std::string_view;
@@ -127,11 +133,24 @@ struct Scene {
   float cam_pan_y{0.0f};
   float cam_shake{0.0f};      ///< 冲击震动幅度（相对短边比例）
 
-  /// 页脚左下角的小字（包装层用）。空则用片名。
+  /// **通用图层**（`kind=custom` 时生效；其他 kind 也可叠加，画在模板之上）。
+  ///
+  /// 有了它，加一种新版式**不需要改 C++**——写几个图层即可。
+  /// 字段语义见 `layer.hpp`。
+  std::vector<Layer> layers{};
+
+  /// 页脚左下角的小字（包装层用）。空则用 Script 级的 `footer_note`。
   ///
   /// 它不是"随便一句"：页脚要交代**这是什么片子**（片名/期号/机构），
   /// 空着会让包装层少一块结构，画面读起来仍然"散"。
   std::string footer_note{};
+
+  /// 品牌识标（由 `apply_script` 从 Script 复制，供渲染期使用）。
+  ///
+  /// 为何复制而不是渲染时回查 Script：渲染是**纯函数**（只依赖 Scene 与 time），
+  /// 回查 Script 会引入隐藏输入，破坏"同一时刻两次渲染逐像素相同"的判据。
+  std::string brand_wordmark{};
+  std::string brand_latin{};
 };
 
 /// 旁白/人声轨：一段外部 WAV 在成片里的位置。
@@ -171,13 +190,25 @@ struct Script {
   double fade_in{0.30};
   double fade_out{0.50};
   AudioSpec audio{};
+  /// **品牌标识**（包装层的识标与页脚文字）。
+  ///
+  /// 默认值刻意保持**中性空串**：这是通用工具，不该预设某个产品的名字。
+  /// 空串时包装层不画识标——比印一个假品牌好（假品牌会被误以为是模板残留）。
+  std::string brand_wordmark{};
+  std::string brand_latin{};
+  std::string footer_note{};
+  /// 识标是否显示（品牌名都为空时自动隐藏，这个开关用于"有名字但不想要识标"）
+  bool show_brand{true};
   std::vector<Scene> scenes{};
 
   [[nodiscard]] auto total_duration() const noexcept -> double;
 };
 
-/// 内置脚本：**歌白 10 秒宣传片**（`--script` 不传时的默认工程，也是 AI 的起点范本）。
-[[nodiscard]] auto builtin_gebai_promo() -> Script;
+/// 内置脚本：**通用示例片**（`--script` 不传时的默认工程，也是 AI 的起点范本）。
+///
+/// 内容是**中性的占位文案**，不是任何具体产品——它是"能跑起来的起点"，
+/// 用户/AI 把它改成自己的内容。
+[[nodiscard]] auto builtin_sample_promo() -> Script;
 
 /// 解析脚本文本（错误：`Parse`，消息带**行号无关**的字段路径，便于脚本作者定位）。
 [[nodiscard]] auto parse_script(std::string_view json) -> Result<Script>;

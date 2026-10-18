@@ -103,6 +103,19 @@ describe("shuangtian_video / shuangtian_poster", () => {
       expect(video.systemPrompt).toContain(anchor)
     }
 
+    // ── 「剧本先行」与「不写 C++」是工具化的两个支柱，单独钉 ──
+    //
+    // 剧本先行：跳过它 = 改一句话要重渲全片（返工代价最大的一步）。
+    expect(video.systemPrompt).toContain("先写剧本")
+    expect(video.systemPrompt).toContain("script_design.md")
+    expect(video.systemPrompt).toContain("逐字写出来")
+
+    // 不写 C++：内置版式不够时必须想到 custom + layers，而不是改源码。
+    // 缺了这条，子代理会退化成“只能从五种模板里挑”。
+    expect(video.systemPrompt).toContain("custom")
+    expect(video.systemPrompt).toContain("layers")
+    expect(video.systemPrompt).toContain("不写 C++")
+
     const poster = shuangtianPoster
     // 海报子代理必须知道：图层顺序会盖住文字（实测踩过的坑）
     expect(poster.systemPrompt).toContain("盖住")

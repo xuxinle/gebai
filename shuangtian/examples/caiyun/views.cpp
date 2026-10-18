@@ -65,6 +65,8 @@ constexpr float kTimelineHeight = st::ui::TimelineView::kRulerHeight +
     case SceneKind::Triptych: return st::math::Color{176, 124, 84, 255};
     case SceneKind::Metrics: return st::math::Color{112, 104, 196, 255};
     case SceneKind::Outro: return st::math::Color{132, 108, 168, 255};
+    // 自定义布局用中性灰：它不代表某种内容类型，只是"这段是自由排版"。
+    case SceneKind::Custom: return st::math::Color{110, 118, 130, 255};
   }
   return st::math::Color{90, 90, 90, 255};
 }

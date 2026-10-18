@@ -44,7 +44,105 @@ using st::math::Color;
   return out;
 }
 
-[[nodiscard]] auto scene_from(const st::Json& node, std::size_t index) -> Result<Scene> {
+[[nodiscard]] /// 解析图层数组（`Scene::layers`）。
+///
+/// ## 设计取舍：宽容解析
+///
+/// 未知 `kind` **跳过并告警**，而不是整份脚本报错。理由：脚本是外部输入
+/// （AI 写的、用户手改的），一个拼错的图层不该让整片无法渲染——
+/// 丢掉一层看得见（画面少东西），整片失败看不见（不知道为什么）。
+///
+/// 但**已识别的 kind 里的无效字段**要告警：那通常是"用户以为有这个能力"，
+/// 静默忽略会让他以为设置生效了。
+[[nodiscard]] auto parse_layers(const st::Json& array, std::vector<std::string>* warnings)
+    -> std::vector<Layer> {
+  std::vector<Layer> layers;
+  if (!array.is_array()) return layers;
+  for (const st::Json& node : array) {
+    if (!node.is_object()) continue;
+    Layer layer{};
+    const std::string kind_name = st::json_get_string(node, "kind");
+    const auto kind = layer_kind_from(kind_name);
+    if (!kind) {
+      if (warnings != nullptr) {
+        warnings->push_back(std::format("未知图层类型 '{}'（已跳过）——可用：rect/ellipse/line/text/image/path/glow/particles", kind_name));
+      }
+      continue;
+    }
+    layer.kind = *kind;
+    layer.name = st::json_get_string(node, "name");
+
+    // 位置/尺寸：可能是数字（设计像素）或字符串（带 % 的比例）——
+    // 两种写法都要支持，所以先按"能不能当字符串读"判定。
+    const auto dim_field = [&node](std::string_view key, std::string fallback) -> std::string {
+      const st::Json* field = st::json_find(node, key);
+      if (field == nullptr) return fallback;
+      if (field->is_string()) return field->get<std::string>();
+      if (field->is_number()) {
+        return std::format("{:.4f}", field->get<double>());
+      }
+      return fallback;
+    };
+    layer.x = dim_field("x", layer.x);
+    layer.y = dim_field("y", layer.y);
+    layer.w = dim_field("w", layer.w);
+    layer.h = dim_field("h", layer.h);
+
+    layer.fill = color_field(node, "fill", layer.fill);
+    layer.fill_alt = color_field(node, "fill_alt", layer.fill_alt);
+    layer.stroke = color_field(node, "stroke", layer.stroke);
+    layer.color = color_field(node, "color", layer.color);
+    layer.gradient_dir = static_cast<int>(
+        std::clamp(st::json_get_i64(node, "gradient_dir", layer.gradient_dir), 0LL, 1LL));
+    layer.stroke_width = static_cast<float>(
+        std::clamp(st::json_get_double(node, "stroke_width", layer.stroke_width), 0.0, 80.0));
+    layer.radius = static_cast<float>(
+        std::clamp(st::json_get_double(node, "radius", layer.radius), 0.0, 4000.0));
+    layer.opacity = static_cast<float>(
+        std::clamp(st::json_get_double(node, "opacity", layer.opacity), 0.0, 1.0));
+
+    layer.text = st::json_get_string(node, "text");
+    layer.size = static_cast<float>(
+        std::clamp(st::json_get_double(node, "size", layer.size), 4.0, 800.0));
+    layer.tracking = static_cast<float>(
+        std::clamp(st::json_get_double(node, "tracking", layer.tracking), 0.0, 200.0));
+    layer.line_height = static_cast<float>(
+        std::clamp(st::json_get_double(node, "line_height", layer.line_height), 1.0, 4.0));
+    layer.bold = st::json_get_bool(node, "bold", layer.bold);
+    layer.align = static_cast<int>(std::clamp(st::json_get_i64(node, "align", layer.align), 0LL, 3LL));
+
+    layer.src = st::json_get_string(node, "src");
+    layer.contain = st::json_get_bool(node, "contain", layer.contain);
+    layer.dim = static_cast<float>(
+        std::clamp(st::json_get_double(node, "dim", layer.dim), 0.0, 1.0));
+    if (const st::Json* pts = st::json_find(node, "points"); pts != nullptr && pts->is_array()) {
+      for (const st::Json& value : *pts) {
+        if (value.is_number()) {
+          layer.points.push_back(static_cast<float>(value.get<double>()));
+        }
+      }
+    }
+    layer.closed = st::json_get_bool(node, "closed", layer.closed);
+
+    layer.intensity = static_cast<float>(
+        std::clamp(st::json_get_double(node, "intensity", layer.intensity), 0.0, 1.0));
+    layer.count = static_cast<int>(
+        std::clamp(st::json_get_i64(node, "count", layer.count), 0LL, 600LL));
+    layer.spread = static_cast<float>(
+        std::clamp(st::json_get_double(node, "spread", layer.spread), 0.02, 2.0));
+
+    layer.enter = static_cast<int>(std::clamp(st::json_get_i64(node, "enter", layer.enter), 0LL, 3LL));
+    layer.enter_at = static_cast<float>(
+        std::clamp(st::json_get_double(node, "enter_at", layer.enter_at), 0.0, 600.0));
+    layer.enter_dur = static_cast<float>(
+        std::clamp(st::json_get_double(node, "enter_dur", layer.enter_dur), 0.05, 10.0));
+
+    layers.push_back(std::move(layer));
+  }
+  return layers;
+}
+
+auto scene_from(const st::Json& node, std::size_t index) -> Result<Scene> {
   const std::string kind_name = st::json_get_string(node, "kind");
   const auto kind = scene_kind_from(kind_name);
   if (!kind) {
@@ -70,6 +168,10 @@ using st::math::Color;
     }
   }
   scene.values = number_array(node, "values");
+  // 通用图层（kind=custom 时是主体，其他 kind 是叠加层）。
+  if (const st::Json* layers = st::json_find(node, "layers"); layers != nullptr) {
+    scene.layers = parse_layers(*layers, nullptr);
+  }
   // 素材：三种写法都存原文，由渲染侧的 `AssetLibrary` 按基准目录解析
   //（脚本不该知道自己被拷到哪，路径语义归素材库）。
   scene.image = st::json_get_string(node, "image");
@@ -122,6 +224,7 @@ auto scene_kind_name(SceneKind kind) -> std::string_view {
     case SceneKind::Triptych: return "triptych";
     case SceneKind::Metrics: return "metrics";
     case SceneKind::Outro: return "outro";
+    case SceneKind::Custom: return "custom";
   }
   return "title";
 }
@@ -174,6 +277,11 @@ auto parse_script(std::string_view json) -> Result<Script> {
   }
   Script script{};
   script.name = st::json_get_string(root, "name", script.name);
+  // 品牌识标（默认空 = 包装层不画识标，见 director.hpp 的注释）
+  script.brand_wordmark = st::json_get_string(root, "brand_wordmark", script.brand_wordmark);
+  script.brand_latin = st::json_get_string(root, "brand_latin", script.brand_latin);
+  script.footer_note = st::json_get_string(root, "footer_note", script.footer_note);
+  script.show_brand = st::json_get_bool(root, "show_brand", script.show_brand);
   script.fps = std::clamp(st::json_get_double(root, "fps", script.fps), 1.0, 120.0);
   const std::vector<double> size = number_array(root, "size");
   if (size.size() >= 2) {
@@ -226,6 +334,10 @@ auto parse_script(std::string_view json) -> Result<Script> {
 auto script_to_json(const Script& script) -> std::string {
   st::Json root = st::Json::object();
   root["name"] = script.name;
+  if (!script.brand_wordmark.empty()) root["brand_wordmark"] = script.brand_wordmark;
+  if (!script.brand_latin.empty()) root["brand_latin"] = script.brand_latin;
+  if (!script.footer_note.empty()) root["footer_note"] = script.footer_note;
+  if (!script.show_brand) root["show_brand"] = false;
   root["fps"] = script.fps;
   root["size"] = st::Json::array({script.width, script.height});
   root["transition"] = script.transition;
@@ -301,9 +413,17 @@ auto script_to_json(const Script& script) -> std::string {
   return st::json_dump(root, true, 2);
 }
 
-auto builtin_gebai_promo() -> Script {
+auto builtin_sample_promo() -> Script {
+  // 这是**通用示例片**：五个场景各展示一种内置版式，文案是中性占位。
+  //
+  // 设计意图（写在这里，免得下一个人以为是"没写完"）：
+  // - 它是「能跑起来的起点」——用户/AI 直接改文案与配色就能用，不用从空脚本开始；
+  // - 它**不带任何具体品牌**：品牌名默认空串，包装层不画识标
+  //   （印一个假品牌比不印更糟——会被误认为是模板残留）；
+  // - 五个场景覆盖 title/terminal/triptych/metrics/outro 五种版式，
+  //   相当于一份"能力目录"，看一遍就知道有哪些版式可用。
   Script script{};
-  script.name = "歌白宣传片 · 10 秒";
+  script.name = "示例宣传片 · 10 秒";
   script.fps = 30.0;
   script.width = 1920;
   script.height = 1080;
@@ -311,13 +431,14 @@ auto builtin_gebai_promo() -> Script {
   script.fade_in = 0.20;
   script.fade_out = 0.45;
   script.audio = AudioSpec{.enabled = true, .style = "uplift", .bpm = 112, .gain = 0.60f};
+  // 品牌留空：这是工具的内置示例，不该预设某个产品的名字。
 
   Scene title{};
   title.kind = SceneKind::Title;
   title.duration = 2.2;
-  title.title = "歌白";
-  title.subtitle = "GEBAI AGENT";
-  title.lines = {"融合旧世界 IT 的所有技术", "打造新世界智能的躯体"};
+  title.title = "标题";
+  title.subtitle = "SUBTITLE";
+  title.lines = {"第一行说明文字", "第二行说明文字"};
   title.accent = Color{120, 176, 255, 255};
   title.bg_top = Color{6, 10, 22, 255};
   title.bg_bottom = Color{20, 32, 62, 255};
@@ -326,10 +447,10 @@ auto builtin_gebai_promo() -> Script {
   Scene terminal{};
   terminal.kind = SceneKind::Terminal;
   terminal.duration = 2.3;
-  terminal.title = "一个 TS 文件 = 一个子 Agent";
-  terminal.subtitle = "声明的工具即刻并入当前会话 · 全程审批留痕";
-  terminal.lines = {"export default {", "  name: 'facts',", "  tools: { read, grep },",
-                    "};  // agent_load('facts')"};
+  terminal.title = "终端 / 代码版式";
+  terminal.subtitle = "逐字符敲出，适合演示命令与配置";
+  terminal.lines = {"$ ./program --flag value", "  output line 1", "  output line 2",
+                    "  done."};
   terminal.accent = Color{124, 226, 178, 255};
   terminal.bg_top = Color{8, 14, 20, 255};
   terminal.bg_bottom = Color{14, 30, 34, 255};
@@ -338,9 +459,9 @@ auto builtin_gebai_promo() -> Script {
   Scene triptych{};
   triptych.kind = SceneKind::Triptych;
   triptych.duration = 2.2;
-  triptych.title = "能力外置，权力内守";
-  triptych.subtitle = "任意语言、任意进程，统一裁决";
-  triptych.lines = {"子 Agent 扩展", "工具统一收编", "审批与留痕"};
+  triptych.title = "三联卡版式";
+  triptych.subtitle = "三条卖点并排升入";
+  triptych.lines = {"第一项", "第二项", "第三项"};
   triptych.accent = Color{255, 196, 120, 255};
   triptych.bg_top = Color{18, 12, 24, 255};
   triptych.bg_bottom = Color{40, 24, 40, 255};
@@ -349,10 +470,10 @@ auto builtin_gebai_promo() -> Script {
   Scene metrics{};
   metrics.kind = SceneKind::Metrics;
   metrics.duration = 1.9;
-  metrics.title = "一个二进制，三端合一";
-  metrics.subtitle = "桌面 · 浏览器 · 服务端";
-  metrics.lines = {"子 Agent", "工具", "测试"};
-  metrics.values = {26, 120, 2650};
+  metrics.title = "数字版式";
+  metrics.subtitle = "大数字滚动到目标值";
+  metrics.lines = {"指标一", "指标二", "指标三"};
+  metrics.values = {100, 24, 1899};
   metrics.accent = Color{150, 200, 255, 255};
   metrics.bg_top = Color{4, 10, 26, 255};
   metrics.bg_bottom = Color{10, 22, 46, 255};
@@ -361,8 +482,8 @@ auto builtin_gebai_promo() -> Script {
   Scene outro{};
   outro.kind = SceneKind::Outro;
   outro.duration = 1.4;
-  outro.title = "歌白";
-  outro.subtitle = "GEBAI AGENT · 新世界智能的躯体";
+  outro.title = "结尾";
+  outro.subtitle = "OUTRO";
   outro.accent = Color{120, 176, 255, 255};
   outro.bg_top = Color{6, 10, 22, 255};
   outro.bg_bottom = Color{14, 22, 44, 255};
