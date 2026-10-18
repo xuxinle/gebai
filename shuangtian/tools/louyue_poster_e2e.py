@@ -283,7 +283,76 @@ def main():
         except ImportError:
             print(f"[8] 素材：带图导出 {png_size(out3)}（Pillow 缺失，跳过占位色采样）")
 
-        print("\n[OK] 镂月海报闭环 + 双向控制权 + 素材全部通过")
+        # —— 9. 窄幅重排：并排的块在竖版/方版上必须改成堆叠，不能重叠 ——
+        #
+        # 判据是"文字区块之间不重叠"而不是"看起来对"：
+        # 早期三块按设计基准的 x 比例并排，竖版变窄后直接撞成一串
+        # （「任意语言任意进程收编为工具」），这是重排版问题，缩放救不了。
+        flow_poster = {
+            "name": "窄幅重排验证",
+            "width": 1920,
+            "height": 1080,
+            "background": "#0a0f1e",
+            "blocks": [
+                {"kind": "background", "color": "#0a0f1e"},
+                {"kind": "body", "text": "任意语言", "x": 0.22, "y": 700,
+                 "size": 60, "flow": 1, "flow_rank": 0, "color": "#ffffff"},
+                {"kind": "body", "text": "任意进程", "x": 0.50, "y": 700,
+                 "size": 60, "flow": 1, "flow_rank": 1, "color": "#ffffff"},
+                {"kind": "body", "text": "收编为工具", "x": 0.78, "y": 700,
+                 "size": 60, "flow": 1, "flow_rank": 2, "color": "#ffffff"},
+            ],
+        }
+        check(client.invoke("poster", "apply_poster", json.dumps(flow_poster)), "重排海报被拒")
+
+        def ink_bands(path):
+            """返回每段连续有墨迹的行区间（用极简的列扫描，不依赖连通域）。"""
+            try:
+                from PIL import Image
+            except ImportError:
+                return None
+            img = Image.open(path).convert("RGB")
+            w, h = img.size
+            px = img.load()
+            rows = []
+            for y in range(int(h * 0.55), h):
+                bg = px[4, y]
+                hit = 0
+                for x in range(20, w - 20, 2):
+                    c = px[x, y]
+                    if abs(c[0] - bg[0]) + abs(c[1] - bg[1]) + abs(c[2] - bg[2]) > 60:
+                        hit += 1
+                rows.append(hit > 3)
+            bands = []
+            start = None
+            for i, filled in enumerate(rows):
+                if filled and start is None:
+                    start = i
+                elif not filled and start is not None:
+                    bands.append((start, i - 1))
+                    start = None
+            if start is not None:
+                bands.append((start, len(rows) - 1))
+            return [b for b in bands if b[1] - b[0] >= 3]
+
+        # 横版：应在同一行（1 条墨迹带）
+        wide = os.path.join(shots, "flow-wide.png")
+        check(client.invoke("poster", "export_png", f"{wide} 1920x1080"), "横版重排导出失败")
+        # 竖版：应堆叠成 3 条（互不重叠）
+        tall = os.path.join(shots, "flow-tall.png")
+        check(client.invoke("poster", "export_png", f"{tall} 1080x1920"), "竖版重排导出失败")
+        wide_bands = ink_bands(wide)
+        tall_bands = ink_bands(tall)
+        if wide_bands is not None and tall_bands is not None:
+            check(len(wide_bands) == 1,
+                  f"横版三段应当并排成 1 条墨迹带，实测 {len(wide_bands)} 条 {wide_bands}")
+            check(len(tall_bands) >= 3,
+                  f"竖版三段应当堆叠成 ≥3 条墨迹带，实测 {len(tall_bands)} 条 {tall_bands}")
+            print(f"[9] 窄幅重排：横版 {len(wide_bands)} 条墨迹带 / 竖版 {len(tall_bands)} 条（无重叠）")
+        else:
+            print("[9] 窄幅重排：Pillow 缺失，跳过墨迹带采样（导出成功已验）")
+
+        print("\n[OK] 镂月海报闭环 + 双向控制权 + 素材 + 窄幅重排 全部通过")
         return 0
     finally:
         try:

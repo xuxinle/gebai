@@ -204,6 +204,11 @@ auto parse_poster(std::string_view json) -> st::Result<PosterScript> {
     block.bold = st::json_get_bool(node, "bold", false);
     block.align = static_cast<int>(
         std::clamp(st::json_get_i64(node, "align", block.align), 0LL, 2LL));
+    // 窄幅重排（见 poster.hpp 的 flow 注释）
+    block.flow = static_cast<int>(
+        std::clamp(st::json_get_i64(node, "flow", block.flow), 0LL, 9999LL));
+    block.flow_rank = static_cast<int>(
+        std::clamp(st::json_get_i64(node, "flow_rank", block.flow_rank), 0LL, 9999LL));
     block.alpha = static_cast<float>(std::clamp(st::json_get_double(node, "alpha", 1.0), 0.0, 1.0));
     block.width = static_cast<float>(std::clamp(st::json_get_double(node, "width", 0.0), 0.0, 8000.0));
     block.radius = static_cast<float>(std::clamp(st::json_get_double(node, "radius", 0.0), 0.0, 2000.0));
@@ -247,6 +252,10 @@ auto poster_to_json(const PosterScript& poster) -> std::string {
     if (block.tracking > 0.0f) node["tracking"] = static_cast<double>(block.tracking);
     if (block.bold) node["bold"] = true;
     if (block.align != 0) node["align"] = static_cast<std::int64_t>(block.align);
+    if (block.flow > 0) {
+      node["flow"] = static_cast<std::int64_t>(block.flow);
+      node["flow_rank"] = static_cast<std::int64_t>(block.flow_rank);
+    }
     if (block.alpha < 1.0f) node["alpha"] = static_cast<double>(block.alpha);
     if (block.width > 0.0f) node["width"] = static_cast<double>(block.width);
     if (block.radius > 0.0f) node["radius"] = static_cast<double>(block.radius);
@@ -378,6 +387,8 @@ auto builtin_gebai_poster() -> PosterScript {
       Block{.kind = BlockKind::Body,
             .name = "理念1",
             .text = "任意语言",
+            .flow = 1,
+            .flow_rank = 0,
             .x = 0.22f,
             .y = 806.0f,
             .size = 38.0f,
@@ -386,6 +397,8 @@ auto builtin_gebai_poster() -> PosterScript {
       Block{.kind = BlockKind::Body,
             .name = "理念2",
             .text = "任意进程",
+            .flow = 1,
+            .flow_rank = 1,
             .x = 0.5f,
             .y = 806.0f,
             .size = 38.0f,
@@ -394,6 +407,8 @@ auto builtin_gebai_poster() -> PosterScript {
       Block{.kind = BlockKind::Body,
             .name = "理念3",
             .text = "收编为工具",
+            .flow = 1,
+            .flow_rank = 2,
             .x = 0.78f,
             .y = 806.0f,
             .size = 38.0f,
@@ -443,7 +458,89 @@ void render_poster(Canvas& target, const PosterScript& poster,
                     .height = poster.export_height()};
   target.clear(poster.background);
 
-  for (const Block& block : poster.blocks) {
+  // —— 窄幅重排（flow）——
+  //
+  // 判定依据是**导出画幅的宽高比**，不是尺寸：横版 16:9 时四个块可以并排，
+  // 方版 1:1 勉强、竖版 9:16 必然撞（实测叠成一串不可读的字）。
+  //
+  // 这里先把"哪些块要改成堆叠、堆在哪"算成一张覆盖表，
+  // 渲染时按块的内存地址查表——不改 `poster`（它是真值源，不能被渲染污染）。
+  const float aspect = static_cast<float>(frame.width) / static_cast<float>(std::max(1, frame.height));
+  constexpr float kFlowBreakAspect = 1.25f;   // 宽高比低于此值就认为是"窄幅"
+  struct FlowSlot {
+    const Block* block{nullptr};
+    float x{0.5f};
+    float y{0.0f};
+  };
+  std::vector<FlowSlot> flow_slots;
+  if (aspect < kFlowBreakAspect) {
+    // 按组收集
+    std::vector<int> groups;
+    for (const Block& block : poster.blocks) {
+      if (block.flow <= 0) continue;
+      if (std::find(groups.begin(), groups.end(), block.flow) == groups.end()) {
+        groups.push_back(block.flow);
+      }
+    }
+    for (const int group : groups) {
+      std::vector<const Block*> members;
+      for (const Block& block : poster.blocks) {
+        if (block.flow == group) members.push_back(&block);
+      }
+      if (members.size() < 2) continue;
+      // 按 flow_rank 排序（同 rank 保持出现顺序，稳定排序）
+      std::stable_sort(members.begin(), members.end(),
+                       [](const Block* a, const Block* b) { return a->flow_rank < b->flow_rank; });
+      // 堆叠要**以原组中心为基准上下展开**，不是从最小 y 往下推。
+      //
+      // 为什么：从 top 往下排会让整组向**下**生长，竖版上直接撞到页脚那句定位语
+      //（实测：堆叠修好三词碰撞后，第三行「收编为工具」压在页脚上，
+      // 两行字叠成一团）。以中心展开则整组的视觉重心不变。
+      float top = members.front()->y;
+      float bottom = members.front()->y;
+      for (const Block* member : members) {
+        top = std::min(top, member->y);
+        bottom = std::max(bottom, member->y);
+      }
+      // 行距还要受**可用高度**约束：方版比竖版矮得多，固定 1.9 倍字号会让
+      // 整组向下溢出到页脚（实测方版第三行压在页脚定位语上）。
+      // 可用空间 = 从组顶到画幅底部留出 12% 边距；不够就按比例压行距（下限 1.25）。
+      const float group_top = std::min(top, bottom);
+      const float limit_y = static_cast<float>(frame.height) * 0.88f;
+      const float available = std::max(0.0f, limit_y - group_top * frame.scale);
+      const float wanted_step = members.front()->size * 1.9f * frame.scale;
+      const int gaps = static_cast<int>(members.size()) - 1;
+      const float max_step = gaps > 0 ? available / static_cast<float>(gaps + 1) : wanted_step;
+      const float min_step = members.front()->size * 1.25f * frame.scale;
+      // 回到设计坐标系（÷ frame.scale），因为 slot.y 是设计坐标
+      const float step = std::max(min_step, std::min(wanted_step, max_step)) / frame.scale;
+      const float span = step * static_cast<float>(members.size() - 1);
+      const float center = (top + bottom) * 0.5f;
+      for (std::size_t i = 0; i < members.size(); ++i) {
+        FlowSlot slot{};
+        slot.block = members[i];
+        slot.x = 0.5f;   // 堆叠时一律居中
+        slot.y = center - span * 0.5f + static_cast<float>(i) * step;
+        flow_slots.push_back(slot);
+      }
+    }
+  }
+
+  for (const Block& source_block : poster.blocks) {
+    // 查重排表：命中就**拷一份改位置**再用。
+    //
+    // 为什么不逐处替换 `block.x`：块有 12 处绘制点各自读 block.x/y，
+    // 逐处改既容易漏（漏一处就有一个元素留在旧位置），也把"重排"这件事
+    // 散进了十几个分支里。拷一份改两个字段，覆盖全部绘制点。
+    Block block = source_block;
+    for (const FlowSlot& slot : flow_slots) {
+      if (slot.block == &source_block) {
+        block.x = slot.x;
+        block.y = slot.y;
+        block.align = 0;   // 堆叠时一律居中（原来可能是左/右对齐）
+        break;
+      }
+    }
     const Color color = with_alpha(block.color, block.alpha);
     switch (block.kind) {
       case BlockKind::Background: {
