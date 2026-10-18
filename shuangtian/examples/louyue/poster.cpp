@@ -89,13 +89,17 @@ struct Frame {
 /// 按锚点画一段文字。`y` 在设计坐标里是**文字行盒顶部**（与裁云的 TextPort 口径一致）。
 void draw_text(const Frame& frame, Canvas& target, const st::ui::TextPort* port,
                std::string_view text, float x_ratio, float y_design, float size_design,
-               float tracking_design, Color color, bool bold) {
+               float tracking_design, Color color, bool bold, int align = 0) {
   if (port == nullptr || text.empty()) return;
   const float size = size_design * frame.scale;
   const float advance = port->measure_width(text, size);
   const float tracking = tracking_design * frame.scale;
   const float total = advance + tracking * static_cast<float>(text.size() - 1);
-  const float left = x_ratio * static_cast<float>(frame.width) - total * 0.5f;
+  // align: 0=居中（x 是文字中心，旧语义）、1=左对齐（x 是左边界）、2=右对齐（x 是右边界）。
+  const float anchor_x = x_ratio * static_cast<float>(frame.width);
+  const float left = align == 1 ? anchor_x
+                     : align == 2 ? anchor_x - total
+                                  : anchor_x - total * 0.5f;
   const float top = y_design * frame.scale;
   // `bold=true` = 该字重已由真粗体字面承担，合成加粗不该再叠（叠了会把字再撑开）；
   // embolden 半径按字号 1/20 给——与裁云 `Painter::text` 同口径。
@@ -135,6 +139,10 @@ auto block_kind_name(BlockKind kind) -> const char* {
     case BlockKind::Badge: return "badge";
     case BlockKind::Body: return "body";
     case BlockKind::Image: return "image";
+    case BlockKind::Frame: return "frame";
+    case BlockKind::GridLines: return "grid";
+    case BlockKind::CornerMarks: return "corners";
+    case BlockKind::Divider: return "divider";
   }
   return "title";
 }
@@ -147,6 +155,10 @@ auto parse_block_kind(std::string_view name) -> std::optional<BlockKind> {
   if (name == "badge") return BlockKind::Badge;
   if (name == "body") return BlockKind::Body;
   if (name == "image") return BlockKind::Image;
+  if (name == "frame") return BlockKind::Frame;
+  if (name == "grid") return BlockKind::GridLines;
+  if (name == "corners") return BlockKind::CornerMarks;
+  if (name == "divider") return BlockKind::Divider;
   return std::nullopt;
 }
 
@@ -190,6 +202,8 @@ auto parse_poster(std::string_view json) -> st::Result<PosterScript> {
     block.size = static_cast<float>(std::clamp(st::json_get_double(node, "size", block.size), 4.0, 800.0));
     block.tracking = static_cast<float>(std::clamp(st::json_get_double(node, "tracking", 0.0), 0.0, 200.0));
     block.bold = st::json_get_bool(node, "bold", false);
+    block.align = static_cast<int>(
+        std::clamp(st::json_get_i64(node, "align", block.align), 0LL, 2LL));
     block.alpha = static_cast<float>(std::clamp(st::json_get_double(node, "alpha", 1.0), 0.0, 1.0));
     block.width = static_cast<float>(std::clamp(st::json_get_double(node, "width", 0.0), 0.0, 8000.0));
     block.radius = static_cast<float>(std::clamp(st::json_get_double(node, "radius", 0.0), 0.0, 2000.0));
@@ -202,6 +216,11 @@ auto parse_poster(std::string_view json) -> st::Result<PosterScript> {
         std::clamp(st::json_get_double(node, "height", block.height), 0.0, 8000.0));
     block.tint_alpha = static_cast<float>(
         std::clamp(st::json_get_double(node, "tint_alpha", block.tint_alpha), 0.0, 1.0));
+    // 结构块（frame/grid/corners/divider）
+    block.inset = static_cast<float>(
+        std::clamp(st::json_get_double(node, "inset", block.inset), -1.0, 2000.0));
+    block.thickness = static_cast<float>(
+        std::clamp(st::json_get_double(node, "thickness", block.thickness), 0.1, 80.0));
     poster.blocks.push_back(std::move(block));
     ++index;
   }
@@ -227,11 +246,14 @@ auto poster_to_json(const PosterScript& poster) -> std::string {
     node["size"] = static_cast<double>(block.size);
     if (block.tracking > 0.0f) node["tracking"] = static_cast<double>(block.tracking);
     if (block.bold) node["bold"] = true;
+    if (block.align != 0) node["align"] = static_cast<std::int64_t>(block.align);
     if (block.alpha < 1.0f) node["alpha"] = static_cast<double>(block.alpha);
     if (block.width > 0.0f) node["width"] = static_cast<double>(block.width);
     if (block.radius > 0.0f) node["radius"] = static_cast<double>(block.radius);
     node["color"] = color_to_hex(block.color);
     if (block.color_alt.a > 0) node["color_alt"] = color_to_hex(block.color_alt);
+    if (block.inset >= 0.0f) node["inset"] = static_cast<double>(block.inset);
+    if (block.thickness != 1.5f) node["thickness"] = static_cast<double>(block.thickness);
     if (!block.image.empty()) {
       node["image"] = block.image;
       if (block.contain) node["contain"] = true;
@@ -250,54 +272,142 @@ auto builtin_gebai_poster() -> PosterScript {
   poster.width = 1920;
   poster.height = 1080;
   poster.background = Color{6, 10, 22, 255};
+  // 版式骨架（**结构在文字之下**）：块数组自底向上，越靠后越在上。
+  //
+  // 这张海报与"几个字"的差别主要在这几行——版心框 + 栅格 + 角标 + 分区线
+  // 给出的是"正式物料"的视觉语言；文字本身没变多少。
   poster.blocks = {
       Block{.kind = BlockKind::Background,
             .name = "底色",
             .color = Color{8, 14, 30, 255},
-            .color_alt = Color{22, 36, 72, 255}},
+            .color_alt = Color{20, 34, 68, 255}},
+      // 竖向栅格：技术感骨架。极淡（alpha 很低）——结构元素一显眼就变廉价装饰。
+      Block{.kind = BlockKind::GridLines,
+            .name = "栅格",
+            .color = Color{122, 180, 255, 15},
+            .width = 6.0f,
+            .inset = 96.0f,
+            .thickness = 1.0f},
+      // 版心框线
+      Block{.kind = BlockKind::Frame,
+            .name = "版心",
+            .color = Color{122, 180, 255, 34},
+            .inset = 64.0f,
+            .thickness = 1.5f},
+      // 四角裁切标（印刷语言）
+      Block{.kind = BlockKind::CornerMarks,
+            .name = "角标",
+            .size = 42.0f,
+            .color = Color{122, 180, 255, 110},
+            .inset = 40.0f,
+            .thickness = 2.0f},
+
+      // —— 信息区：左上品牌、右上版本 ——
+      // 左上：品牌（**左对齐**——x 是左边界，不是文字中心；
+      // 早期写 x=0 + 居中，结果完全在画布外/被裁，实测踩到）。
+      Block{.kind = BlockKind::Body,
+            .name = "品牌词",
+            .text = "歌白",
+            .x = 0.052f,
+            .y = 112.0f,
+            .align = 1,
+            .size = 34.0f,
+            .bold = true,
+            .color = Color{246, 249, 255, 255}},
+      Block{.kind = BlockKind::Body,
+            .name = "品牌拉丁",
+            .text = "GEBAI AGENT",
+            .x = 0.052f,
+            .y = 160.0f,
+            .align = 1,
+            .size = 19.0f,
+            .tracking = 6.0f,
+            .color = Color{132, 170, 225, 235}},
+      // 右上：右对齐（x 是右边界）
+      Block{.kind = BlockKind::Body,
+            .name = "版本",
+            .text = "PRODUCT SHEET · 2026",
+            .x = 0.948f,
+            .y = 112.0f,
+            .align = 2,
+            .size = 19.0f,
+            .tracking = 5.0f,
+            .color = Color{120, 158, 214, 220}},
+
+      // —— 中心主视觉 ——
       Block{.kind = BlockKind::Badge,
             .name = "徽标",
             .x = 0.5f,
-            .y = 236.0f,
+            .y = 296.0f,
             .color = Color{122, 180, 255, 255},
-            .radius = 62.0f},
+            .radius = 54.0f},
       Block{.kind = BlockKind::Title,
             .name = "主标题",
             .text = "歌白",
             .x = 0.5f,
-            .y = 400.0f,
-            .size = 210.0f,
-            .tracking = 26.0f,
+            .y = 392.0f,
+            .size = 196.0f,
+            .tracking = 30.0f,
             .bold = true,
             .color = Color{245, 248, 255, 255}},
       Block{.kind = BlockKind::Rule,
             .name = "强调线",
             .x = 0.5f,
-            .y = 672.0f,
-            .color = Color{122, 180, 255, 210},
-            .width = 340.0f},
+            .y = 640.0f,
+            .color = Color{122, 180, 255, 220},
+            .width = 300.0f},
       Block{.kind = BlockKind::Subtitle,
             .name = "副标题",
             .text = "GEBAI AGENT",
             .x = 0.5f,
-            .y = 700.0f,
-            .size = 46.0f,
-            .tracking = 14.0f,
-            .color = Color{170, 198, 240, 255}},
-      Block{.kind = BlockKind::Body,
-            .name = "理念",
-            .text = "融合旧世界 IT 的所有技术",
-            .x = 0.5f,
-            .y = 796.0f,
+            .y = 668.0f,
             .size = 44.0f,
-            .color = Color{206, 220, 244, 255}},
+            .tracking = 16.0f,
+            .color = Color{180, 206, 244, 255}},
+
+      // —— 分区线 + 三段式理念（横排，而不是竖着堆）——
+      //
+      // 竖着堆两行长句是"临时排版"的典型特征：没有分区、没有对齐参照。
+      // 横排三段 + 分隔线，读起来才是"产品信息架构"。
+      Block{.kind = BlockKind::Divider,
+            .name = "分区线",
+            .x = 0.5f,
+            .y = 780.0f,
+            .color = Color{122, 180, 255, 34},
+            .thickness = 1.2f},
+      Block{.kind = BlockKind::Body,
+            .name = "理念1",
+            .text = "任意语言",
+            .x = 0.22f,
+            .y = 806.0f,
+            .size = 38.0f,
+            .tracking = 4.0f,
+            .color = Color{214, 228, 248, 255}},
       Block{.kind = BlockKind::Body,
             .name = "理念2",
-            .text = "打造新世界智能的躯体",
+            .text = "任意进程",
             .x = 0.5f,
-            .y = 866.0f,
-            .size = 44.0f,
-            .color = Color{206, 220, 244, 255}},
+            .y = 806.0f,
+            .size = 38.0f,
+            .tracking = 4.0f,
+            .color = Color{214, 228, 248, 255}},
+      Block{.kind = BlockKind::Body,
+            .name = "理念3",
+            .text = "收编为工具",
+            .x = 0.78f,
+            .y = 806.0f,
+            .size = 38.0f,
+            .tracking = 4.0f,
+            .color = Color{214, 228, 248, 255}},
+
+      // —— 页脚：一句定位语 ——
+      Block{.kind = BlockKind::Body,
+            .name = "页脚",
+            .text = "融合旧世界 IT 的所有技术 · 打造新世界智能的躯体",
+            .x = 0.5f,
+            .y = 974.0f,
+            .size = 24.0f,
+            .color = Color{138, 168, 212, 230}},
   };
   return poster;
 }
@@ -312,16 +422,16 @@ void draw_text_with_shadow(const Frame& frame, Canvas& target, const st::ui::Tex
   const bool big = block.size >= 40.0f;
   if (!big) {
     draw_text(frame, target, port, block.text, block.x, block.y, block.size, block.tracking,
-              color, block.bold);
+              color, block.bold, block.align);
     return;
   }
   // 阴影：同字再画一次，往下偏 2 物理像素、透明度按 block.alpha 缩。
   const float off_design = 2.0f / std::max(0.01f, frame.scale);
   const auto shadow_alpha = static_cast<std::uint8_t>(120.0f * block.alpha);
   draw_text(frame, target, port, block.text, block.x, block.y + off_design, block.size,
-            block.tracking, Color{0, 0, 0, shadow_alpha}, block.bold);
+            block.tracking, Color{0, 0, 0, shadow_alpha}, block.bold, block.align);
   draw_text(frame, target, port, block.text, block.x, block.y, block.size, block.tracking, color,
-            block.bold);
+            block.bold, block.align);
 }
 
 void render_poster(Canvas& target, const PosterScript& poster,
@@ -425,6 +535,63 @@ void render_poster(Canvas& target, const PosterScript& poster,
                          255.0f,
                      corner, block.color, block.tint_alpha);
         }
+        break;
+      }
+      // —— 结构块（2026-10-17）——
+      //
+      // 这几样是"正式物料"的视觉语言来源：版心框线、栅格、裁切角标、分区线。
+      // 它们本身信息量很低，但没有它们的版面读起来像"临时做的"
+      // （对比：同样的文字 + 结构线，观感差别远大于把字号加大 30%）。
+      case BlockKind::Frame: {
+        const float inset = (block.inset >= 0.0f ? block.inset : 48.0f) * frame.scale;
+        const float t = std::max(1.0f, block.thickness * frame.scale);
+        const float w = static_cast<float>(frame.width);
+        const float h = static_cast<float>(frame.height);
+        // 四条边各画一次（不用 stroke_path：矩形描边的接角在自绘画布上会有缺口）
+        target.fill_rect(Rect{inset, inset, w - inset * 2.0f, t}, Paint::solid(color));
+        target.fill_rect(Rect{inset, h - inset - t, w - inset * 2.0f, t}, Paint::solid(color));
+        target.fill_rect(Rect{inset, inset, t, h - inset * 2.0f}, Paint::solid(color));
+        target.fill_rect(Rect{w - inset - t, inset, t, h - inset * 2.0f}, Paint::solid(color));
+        break;
+      }
+      case BlockKind::GridLines: {
+        // 竖向等分细线：`width` 复用为线数（0 = 6 列）。技术感版式的骨架。
+        const int count = block.width > 0.5f ? static_cast<int>(block.width) : 6;
+        const float t = std::max(0.6f, block.thickness * frame.scale);
+        const float inset = (block.inset >= 0.0f ? block.inset : 80.0f) * frame.scale;
+        const float w = static_cast<float>(frame.width);
+        const float h = static_cast<float>(frame.height);
+        for (int i = 1; i < count; ++i) {
+          const float x = inset + (w - inset * 2.0f) * static_cast<float>(i) /
+                                      static_cast<float>(count);
+          target.fill_rect(Rect{x, inset, t, h - inset * 2.0f}, Paint::solid(color));
+        }
+        break;
+      }
+      case BlockKind::CornerMarks: {
+        const float inset = (block.inset >= 0.0f ? block.inset : 40.0f) * frame.scale;
+        const float length = std::max(12.0f, block.size * frame.scale);
+        const float t = std::max(1.0f, block.thickness * frame.scale);
+        const float w = static_cast<float>(frame.width);
+        const float h = static_cast<float>(frame.height);
+        const auto mark = [&](float x, float y, float sx, float sy) {
+          target.fill_rect(Rect{x, y, length * sx, t}, Paint::solid(color));
+          target.fill_rect(Rect{x, y, t, length * sy}, Paint::solid(color));
+        };
+        mark(inset, inset, 1.0f, 1.0f);
+        mark(w - inset - length, inset, 1.0f, 1.0f);
+        mark(inset, h - inset - t, 1.0f, -1.0f);
+        mark(w - inset - length, h - inset - t, 1.0f, -1.0f);
+        break;
+      }
+      case BlockKind::Divider: {
+        // 横向分区线：`width` 是线长（0 = 版心宽），`y` 是位置。
+        const float inset = (block.inset >= 0.0f ? block.inset : 120.0f) * frame.scale;
+        const float w = block.width > 0.0f ? block.width * frame.scale
+                                           : static_cast<float>(frame.width) - inset * 2.0f;
+        const float t = std::max(0.8f, block.thickness * frame.scale);
+        const float cx = block.x * static_cast<float>(frame.width);
+        target.fill_rect(Rect{cx - w * 0.5f, block.y * frame.scale, w, t}, Paint::solid(color));
         break;
       }
     }

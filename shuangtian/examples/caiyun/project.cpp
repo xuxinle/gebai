@@ -390,7 +390,8 @@ void Project::render_frame(Canvas& target, double time, const st::ui::TextPort* 
       if (sole_opaque) {
         if (const Scene* scene = scene_of(clip); scene != nullptr) {
           render_scene(target, *scene, clip.local_time(time), scene->duration, text_port,
-                        &assets_, asset_basis_);
+                        &assets_, asset_basis_, clip.scene_index,
+                        static_cast<int>(script.scenes.size()));
         } else {
           render_generator(target, clip.generator, clip.local_time(time), clip.tint, script.name,
                            text_port);
@@ -403,7 +404,8 @@ void Project::render_frame(Canvas& target, double time, const st::ui::TextPort* 
       if (const Scene* scene = scene_of(clip); scene != nullptr) {
         // 场景：`local_time` 已含素材入点与速度（修剪/调速都自动正确）。
         render_scene(layer, *scene, clip.local_time(time), scene->duration, text_port,
-                     &assets_, asset_basis_);
+                     &assets_, asset_basis_, clip.scene_index,
+                     static_cast<int>(script.scenes.size()));
       } else {
         render_generator(layer, clip.generator, clip.local_time(time), clip.tint,
                          script.name, text_port);

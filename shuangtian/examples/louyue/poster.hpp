@@ -44,6 +44,16 @@ enum class BlockKind : std::uint8_t {
   Badge,        ///< 圆环徽标（纯几何）
   Body,         ///< 正文/说明文字（多行）
   Image,        ///< **素材图**（cover/contain，可选圆角/叠色）
+
+  // —— 结构块（2026-10-17）：让版面"被设计过"而不是文字浮在照片上 ——
+  //
+  // 为什么这几样是"产品化"的关键：单张海报里只有居中堆叠的文字时，
+  // 无论字号多大都读起来像"临时做的"。印刷/包装设计的**结构语言**
+  // （版心框线、栅格、角标、信息区）才是"这是正式物料"的暗示来源。
+  Frame,        ///< 版心框线（四周细线，可设内缩与线宽）
+  GridLines,    ///< 栅格参考线（竖向等分细线，用于"技术感"版式）
+  CornerMarks,  ///< 四角对齐标记（印刷裁切标的视觉语言）
+  Divider,      ///< 横向分隔线（版式分区，比 Rule 更"重"）
 };
 
 [[nodiscard]] auto block_kind_name(BlockKind kind) -> const char*;
@@ -61,6 +71,13 @@ struct Block {
   float x{0.5f};
   float y{0.5f};
 
+  /// 文字横向对齐：0=居中（默认，与 `x` 作为锚点的旧语义一致）、1=左对齐、2=右对齐。
+  ///
+  /// 为何需要它：`x` 是**文字中心**的比例位置，所以贴边写 `x=0` 会把一半字推到画布外
+  /// （实测：左上角品牌词只剩半个字）。左/右对齐时 `x` 改为"对齐边的位置"，
+  /// 于是"距版心 96px"这种意图可以直接表达。
+  int align{0};
+
   float size{48.0f};         ///< 字号（像素，按 1080 高设计）
   float tracking{0.0f};      ///< 字距（CJK 大标题用）
   bool bold{false};
@@ -72,6 +89,9 @@ struct Block {
 
   float width{0.0f};         ///< Rule/Badge/Image：几何宽度（0 = 按尺寸自动）
   float radius{0.0f};        ///< Badge 半径 / Image 圆角
+  /// Frame/CornerMarks 的**内缩**（距画幅边缘的像素）；GridLines 的线数用它除以 0 取默认。
+  float inset{-1.0f};
+  float thickness{1.5f};     ///< 线宽（Frame/GridLines/Divider/CornerMarks）
 
   // —— Image 块（素材）——
   //

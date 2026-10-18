@@ -9,6 +9,7 @@
 #include "motion.hpp"
 
 #include "assets_lib.hpp"
+#include "brand.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -264,8 +265,104 @@ class Painter {
               st::math::Point{w - band, 0.0f}, edge, clear);
   }
  public:
-  /// 素材绘制用：`blit_cover`/`blit_contain` 是自由函数（在 Painter 外部），
-  /// 需要 `Canvas&`。不给 getter 就只能靠"再开一条绘制路径"——两条路径必漂移。
+  // —— 品牌与结构原语 ——
+  //
+  // 产品的"产品感"主要来自**反复出现的结构元素**（识标、角标、页脚、进度），
+  // 而不是单帧的特效。这些方法全部接受 design 坐标，内部换算到物理像素。
+
+  /// 标志：同心环 + 中心点（几何画，任何 DPI 下都锐）。
+  void brand_glyph(float cx, float cy, float radius, Color color, float alpha) {
+    if (alpha <= 0.004f || radius <= 0.5f) return;
+    stroke_circle(cx, cy, radius, with_alpha(color, alpha * 0.9f),
+                  std::max(1.6f, radius * 0.085f));
+    stroke_circle(cx, cy, radius * 0.62f, with_alpha(color, alpha * 0.42f),
+                  std::max(1.0f, radius * 0.05f));
+    circle(cx, cy, radius * 0.24f, with_alpha(color, alpha));
+  }
+
+  /// 品牌角标（左上角：标志 + 字标 + 拉丁名）。
+  ///
+  /// 位置由调用方给（版式的 brand_origin），不在这里硬编码——
+  /// 版式常量集中在一处才能整体调。
+  void brand_lockup(float x, float y, float glyph_radius, std::string_view wordmark,
+                    std::string_view latin, Color color, float alpha) {
+    if (alpha <= 0.004f) return;
+    brand_glyph(x + glyph_radius, y + glyph_radius, glyph_radius, color, alpha);
+    const float text_x = x + glyph_radius * 2.0f + glyph_radius * 0.62f;
+    const float mark_size = glyph_radius * 0.92f;
+    if (!wordmark.empty()) {
+      text(wordmark, mark_size, text_x, y + glyph_radius - mark_size * 0.82f,
+           with_alpha(Color{246, 249, 255, 255}, alpha), 0.0f, true);
+    }
+    if (!latin.empty()) {
+      spaced_text(latin, mark_size * 0.36f, text_x, y + glyph_radius + mark_size * 0.82f,
+                  with_alpha(color, alpha * 0.72f), mark_size * 0.14f);
+    }
+  }
+
+  /// 页脚：细横线 + 一行小字 + 右侧页码。
+  ///
+  /// 单帧看不出作用，但**连续看下来**它提供了"这是一个完整作品"的暗示——
+  /// 没有页脚的片子读起来像"幻灯片拼接"。
+  void footer(float margin, float y, float width, std::string_view note,
+              std::string_view page, Color color, float alpha) {
+    if (alpha <= 0.004f) return;
+    fill(margin, y, width - margin * 2.0f, 1.2f, with_alpha(color, alpha * 0.20f));
+    const float text_size = 26.0f;
+    // 页脚文字的**对比度下限**：包装层在任意背景上都要能读出来。
+    // 早先 note 用 alpha*0.60，压在深色素材上直接消失了（实测）。
+    // 这里不用强调色，而用**近白**——强调色在深色底上饱和度不够，
+    // 小字会"糊"进背景。
+    const Color ink{214, 226, 244, 255};
+    if (!note.empty()) {
+      text(note, text_size, margin, y + text_size * 0.9f,
+           with_alpha(ink, alpha * 0.88f), 0.0f);
+    }
+    if (!page.empty()) {
+      const float w = text_width(page, text_size, true);
+      text(page, text_size, width - margin - w, y + text_size * 0.9f,
+           with_alpha(ink, alpha * 0.95f), 0.0f, true);
+    }
+  }
+
+  /// 进度指示：一排短段，已过的段高亮（比一条细进度条更有设计感，也更省绘制）。
+  void progress_dots(float cx, float y, int count, int active, float size, Color color,
+                     float alpha) {
+    if (count <= 0 || alpha <= 0.004f) return;
+    const float gap = size * 1.9f;
+    const float total = static_cast<float>(count - 1) * gap;
+    for (int i = 0; i < count; ++i) {
+      const float x = cx - total * 0.5f + static_cast<float>(i) * gap;
+      const bool on = i <= active;
+      fill(x - size * 0.5f, y, size, size * 0.28f,
+           with_alpha(color, alpha * (on ? 0.92f : 0.26f)));
+    }
+  }
+
+  /// 四角对齐角标（印刷/影视包装里最常见的结构元素）。
+  ///
+  /// 它让画面看起来**被设计过**，而不是元素随机浮在背景上。
+  void corner_ticks(float inset, float length, float thickness, Color color, float alpha) {
+    if (alpha <= 0.004f) return;
+    const float w = design_w();
+    const float h = design_h();
+    const Color c = with_alpha(color, alpha);
+    // 左上
+    fill(inset, inset, length, thickness, c);
+    fill(inset, inset, thickness, length, c);
+    // 右上
+    fill(w - inset - length, inset, length, thickness, c);
+    fill(w - inset - thickness, inset, thickness, length, c);
+    // 左下
+    fill(inset, h - inset - thickness, length, thickness, c);
+    fill(inset, h - inset - length, thickness, length, c);
+    // 右下
+    fill(w - inset - length, h - inset - thickness, length, thickness, c);
+    fill(w - inset - thickness, h - inset - length, thickness, length, c);
+  }
+
+  /// 素材绘制用：blit_cover/blit_contain 是自由函数（在 Painter 外部），
+  /// 需要 Canvas&。不给 getter 就只能靠"再开一条绘制路径"——两条路径必漂移。
   [[nodiscard]] auto canvas() -> Canvas& { return canvas_; }
   [[nodiscard]] auto design_w() const noexcept -> float { return kDesignWidth; }
   [[nodiscard]] auto design_h() const noexcept -> float { return kDesignHeight; }
@@ -372,39 +469,118 @@ void paint_card(Painter& p, float x, float y, float w, float h, float radius, Co
 }
 
 /// 片头：大标题升起 + 强调细线展开 + 副标题与两行说明错峰。
+/// 版式槽位（全片共用一套：换画幅时所有场景一起跟着变）。
+[[nodiscard]] auto make_slots() -> LayoutSlots {
+  LayoutSlots slots{};
+  slots.grid = Grid::make(kDesignWidth, kDesignHeight);
+  return slots;
+}
+
+/// 全片共用的一层「包装」：品牌角标 + 四角标 + 页脚 + 进度。
+///
+/// ## 为什么抽成一个函数
+///
+/// 包装元素必须**逐帧一致**（位置、透明度、字号完全一样），否则连续看下来
+/// 会"抖"——而人眼对"本该固定却每帧微动"的东西极其敏感。
+/// 各场景各写一遍必然漂移，所以只留一个入口。
+///
+/// ## 为什么这些元素能解决"太简单"
+///
+/// "简单"不是元素少，而是**没有系统**：单帧里几个大字看着没问题，
+/// 连起来看就觉得"随便摆的"。包装层提供三件产品物料必有的事：
+/// - 识标：观众知道这是谁做的；
+/// - 结构（四角标/页脚线）：画面"被设计过"的暗示；
+/// - 进度：观众知道自己在片子的哪里。
+void paint_wrap(Painter& p, const Scene& scene, float local_time, int scene_index,
+                int scene_total) {
+  const LayoutSlots slots = make_slots();
+  const Grid& grid = slots.grid;
+  // 入场稍微滞后于内容（0.15s）：包装先到会抢内容的第一印象。
+  const float t = ease_out_cubic(clamp01f((local_time - 0.12f) / 0.85f));
+  if (t <= 0.004f) return;
+
+  p.corner_ticks(grid.margin * 0.62f, 46.0f, 2.0f, scene.accent, t * 0.13f);
+  p.brand_lockup(grid.margin, grid.margin, slots.brand.glyph_radius, slots.brand.wordmark,
+                 slots.brand.latin, scene.accent, t * 0.9f);
+  p.progress_dots(grid.center_x(), grid.height - grid.margin * 1.55f, scene_total, scene_index,
+                  26.0f, scene.accent, t * 0.85f);
+  p.footer(grid.margin, grid.height - grid.margin * 0.92f, grid.width, scene.footer_note,
+           std::format("{:02d} / {:02d}", scene_index + 1, scene_total), scene.accent,
+           t * 0.9f);
+}
+
 void paint_title(Painter& p, const Scene& scene, float local_time) {
+  const LayoutSlots slots = make_slots();
+  const Grid& grid = slots.grid;
   const float enter = ease_out_expo(clamp01f(local_time / 0.9f));
   const float rise = (1.0f - enter) * 64.0f;
-  const float center_x = kDesignWidth * 0.5f;
+  const float center_x = grid.center_x();
   const float title_size = 188.0f;
 
-  // 标题：整块升起 + 逐字加距（字距是 CJK 大标题最省力的"高级感"来源）。
+  // 标题落点走版式槽位，不写死像素。
   const float tracking = title_size * 0.10f;
   const float spaced = p.spaced_width(scene.title, title_size, tracking);
-  const float title_baseline = 470.0f + rise;
-  p.spaced_text(scene.title, title_size, center_x - spaced * 0.5f, title_baseline,
+  const float title_top = slots.title_y() + rise;
+  p.spaced_text(scene.title, title_size, center_x - spaced * 0.5f, title_top,
                 with_alpha(Color{245, 248, 255, 255}, clamp01f(enter * 1.15f)), tracking);
 
-  // 强调线：从中心向两侧展开（入场后 0.35s 开始）。
+  const float rule_y = title_top + title_size * 0.78f;
   const float line_t = ease_out_expo(clamp01f((local_time - 0.35f) / 0.7f));
-  const float line_width = 420.0f * line_t;
+  const float line_width = grid.content_width() * 0.22f * line_t;
   if (line_width > 1.0f) {
-    p.line(center_x - line_width, 536.0f, center_x + line_width, 536.0f,
+    p.line(center_x - line_width, rule_y, center_x + line_width, rule_y,
            with_alpha(scene.accent, 0.85f), 3.0f);
   }
 
-  // 英文小标。
   const float sub_t = ease_out_cubic(clamp01f((local_time - 0.30f) / 0.8f));
-  p.text(scene.subtitle, 40.0f, center_x, 610.0f + (1.0f - sub_t) * 22.0f,
-         with_alpha(mix_color(scene.accent, Color{255, 255, 255, 255}, 0.55f), sub_t * 1.05f), 0.5f);
+  const float sub_size = 42.0f;
+  const float sub_y = rule_y + sub_size * 1.35f;
+  p.spaced_text(scene.subtitle, sub_size,
+                center_x - p.spaced_width(scene.subtitle, sub_size, 10.0f) * 0.5f,
+                sub_y + (1.0f - sub_t) * 22.0f,
+                with_alpha(mix_color(scene.accent, Color{255, 255, 255, 255}, 0.62f),
+                           sub_t * 1.05f),
+                10.0f);
 
-  // 两行说明：错峰上浮。
-  for (std::size_t i = 0; i < scene.lines.size() && i < 3; ++i) {
-    const float index = static_cast<float>(i);
-    const float t = ease_out_cubic(clamp01f((local_time - 0.55f - 0.16f * index) / 0.9f));
-    p.text(scene.lines[i], 46.0f, center_x, 720.0f + index * 68.0f + (1.0f - t) * 26.0f,
-           with_alpha(Color{196, 210, 236, 255}, t * 0.95f), 0.5f);
+  // ── 下半部信息结构 ──
+  //
+  // 早先画面下半 500px 是空的，整帧读起来像"标题 + 一大片背景"。
+  // 这里补三样**有信息量的**结构（不是装饰）：
+  //   ① 三条能力短语（分隔线 + 小字，横排）——给人"这是个什么东西"的抓手；
+  //   ② 一条细分隔线，把标题区与信息区分开（版式的"分隔"职责）；
+  //   ③ 页脚与进度（片子的连续性）。
+  const float facts_y = grid.height * 0.665f;
+  const float facts_t = ease_out_cubic(clamp01f((local_time - 0.62f) / 0.9f));
+  if (facts_t > 0.01f) {
+    // 分隔线：从中心向两侧展开，比标题线更细更淡（层级：主 > 次）。
+    p.line(grid.margin, facts_y - 34.0f, grid.margin + grid.content_width() * facts_t,
+           facts_y - 34.0f, with_alpha(scene.accent, facts_t * 0.18f), 1.2f);
+    const char* facts[3] = {"任意语言", "任意进程", "收编为工具"};
+    const float cell = grid.content_width() / 3.0f;
+    for (int i = 0; i < 3; ++i) {
+      const float index = static_cast<float>(i);
+      const float t = ease_out_cubic(clamp01f((local_time - 0.68f - 0.12f * index) / 0.85f));
+      const float cx = grid.margin + cell * (index + 0.5f);
+      // 小方块标记 + 文字（几何标记而不是项目符号——本项目没有图标集）。
+      //
+      // 纵向对齐：文字 y 是**行盒顶部**，行高约 1.25 倍字号；
+      // 方块要对的是行的视觉中心（顶部 + 行高*0.42），不是基线——
+      // 早先写 +8 让它挂在字的下沿外（一眼看出"没对齐"）。
+      const float mark_size = 8.0f;
+      const float row_mid = facts_y + 30.0f * 0.42f - mark_size * 0.5f;
+      const float label_left = cx - p.text_width(facts[i], 30.0f) * 0.5f;
+      p.fill(label_left - mark_size - 14.0f, row_mid, mark_size, mark_size,
+             with_alpha(scene.accent, t * 0.85f));
+      p.text(facts[i], 30.0f, cx, facts_y + (1.0f - t) * 14.0f,
+             with_alpha(Color{206, 220, 244, 255}, t * 0.88f), 0.5f);
+      // 列间细分隔（只在中间两列之间画，首尾不画）
+      if (i < 2) {
+        const float sep_x = grid.margin + cell * (index + 1.0f);
+        p.fill(sep_x, facts_y - 8.0f, 1.0f, 34.0f, with_alpha(scene.accent, t * 0.16f));
+      }
+    }
   }
+
 }
 
 /// 终端：深色代码卡 + 逐字符敲出 + 光标闪烁 + 标题条（三个圆点）。
@@ -626,7 +802,8 @@ auto ease_out_back(float t) -> float {
 
 void render_scene(st::raster::Canvas& target, const Scene& scene, double local_time,
                   double scene_duration, const st::ui::TextPort* text_port,
-                  const AssetLibrary* assets, std::string_view asset_basis) {
+                  const AssetLibrary* assets, std::string_view asset_basis, int scene_index,
+                  int scene_total) {
   Painter p(target, text_port);
   const float duration = static_cast<float>(scene_duration > 0.01 ? scene_duration : 2.0);
   const float time = static_cast<float>(local_time < 0.0 ? 0.0 : local_time);
@@ -648,6 +825,12 @@ void render_scene(st::raster::Canvas& target, const Scene& scene, double local_t
     case SceneKind::Metrics: paint_metrics(p, scene, time); break;
     case SceneKind::Outro: paint_outro(p, scene, time); break;
   }
+  // 包装层统一在这里加：所有场景共用同一套识标/结构/页脚。
+  //
+  // 放这里而不是各场景内各调一次，是因为包装必须**逐帧一致**——
+  // 各写一遍必然漂移（实测：只有 title 有品牌角标、其余四个场景裸着，
+  // 连起来看就是不统一）。
+  paint_wrap(p, scene, time, scene_index, scene_total);
   if (profile) {
     st::print("[profile] bg={:.1f}ms content={:.1f}ms\n",
               static_cast<double>(t1 - t0) / 1.0e6, static_cast<double>(now() - t1) / 1.0e6);

@@ -48,7 +48,8 @@ inline constexpr float kDesignHeight = 1080.0f;
 void render_scene(st::raster::Canvas& target, const Scene& scene, double local_time,
                   double scene_duration, const st::ui::TextPort* text_port,
                   const AssetLibrary* assets = nullptr,
-                  std::string_view asset_basis = {});
+                  std::string_view asset_basis = {}, int scene_index = 0,
+                  int scene_total = 1);
 
 // —— 缓动（集中在此：改一处即改全片手感）——
 [[nodiscard]] auto ease_out_expo(float t) -> float;
