@@ -234,6 +234,78 @@ describe("resolveTarget（直连与命名目标）", () => {
   })
 })
 
+// ── 缺省目标（GEBAI_LLM_INFER_DEFAULT_TARGET）───────────────────────────
+
+describe("resolveTarget（缺省目标 GEBAI_LLM_INFER_DEFAULT_TARGET）", () => {
+  const namedEnv = (home: string, extra: Record<string, string> = {}): Record<string, string> => ({
+    GEBAI_LLM_INFER_HOME: home,
+    GEBAI_LLM_INFER_PORT: "18080",
+    GEBAI_LLM_INFER_TARGETS: JSON.stringify([
+      { name: "lan", base_url: "http://192.168.1.20:8080", model: "qwen2.5", note: "备机" },
+    ]),
+    ...extra,
+  })
+
+  test("未配置 → 仍缺省 local（存量行为不变）", () => {
+    const t = expectTarget(resolveTarget(undefined, makeCtx(namedEnv(makeHome()))))
+    expect(t.kind).toBe("local")
+    expect(t.name).toBe("local")
+  })
+
+  test("配了命名目标名 → 未传 target 解析到该目标；显式 target 仍优先", () => {
+    const ctx = makeCtx(namedEnv(makeHome(), { GEBAI_LLM_INFER_DEFAULT_TARGET: "lan" }))
+    const t = expectTarget(resolveTarget(undefined, ctx))
+    expect(t).toMatchObject({ name: "lan", kind: "remote", baseUrl: "http://192.168.1.20:8080", model: "qwen2.5" })
+
+    const explicit = expectTarget(resolveTarget("local", ctx)) // 显式传参 > 缺省目标
+    expect(explicit.kind).toBe("local")
+  })
+
+  test("值为 local → 与未配置等价；空白视作未配置", () => {
+    const home = makeHome()
+    const asLocal = expectTarget(resolveTarget(undefined, makeCtx(namedEnv(home, { GEBAI_LLM_INFER_DEFAULT_TARGET: "local" }))))
+    expect(asLocal.kind).toBe("local")
+    expect(asLocal.baseUrl).toBe("http://127.0.0.1:18080")
+
+    const blank = expectTarget(resolveTarget(undefined, makeCtx(namedEnv(home, { GEBAI_LLM_INFER_DEFAULT_TARGET: "   " }))))
+    expect(blank.kind).toBe("local")
+  })
+
+  test("值为 URL → 未传 target 直连该端点（归一尾斜杠）", () => {
+    const t = expectTarget(resolveTarget(undefined, makeCtx(namedEnv(makeHome(), { GEBAI_LLM_INFER_DEFAULT_TARGET: "http://192.168.1.9:9000/" }))))
+    expect(t).toMatchObject({ kind: "remote", baseUrl: "http://192.168.1.9:9000" })
+  })
+
+  test("值指向不存在的命名目标 → 显式报错（点名来源），不静默回退 local", () => {
+    const r = resolveTarget(undefined, makeCtx(namedEnv(makeHome(), { GEBAI_LLM_INFER_DEFAULT_TARGET: "ghost" })))
+    expect("error" in r).toBe(true)
+    const msg = (r as { error: string }).error
+    expect(msg).toContain('未知推理目标 "ghost"')
+    expect(msg).toContain("GEBAI_LLM_INFER_DEFAULT_TARGET")
+    expect(msg).toContain("可用命名目标：lan")
+    expect(msg).toContain("显式传 target")
+
+    // 显式传了 target 的报错不点名缺省目标环境变量（与旧文案一致）
+    const explicit = resolveTarget("ghost", makeCtx(namedEnv(makeHome()))) as { error: string }
+    expect(explicit.error).not.toContain("GEBAI_LLM_INFER_DEFAULT_TARGET")
+  })
+
+  test("targets 工具：展示当前缺省目标；解析失败时给警告行", async () => {
+    const home = makeHome()
+    const ok = await tools.targets.execute({}, makeCtx(namedEnv(home, { GEBAI_LLM_INFER_DEFAULT_TARGET: "lan" })))
+    expect(ok.output).toContain("缺省 lan，由 GEBAI_LLM_INFER_DEFAULT_TARGET 指定")
+    expect((ok.data as { default_target: string }).default_target).toBe("lan")
+
+    const unconf = await tools.targets.execute({}, makeCtx(namedEnv(home)))
+    expect(unconf.output).toContain("缺省 local，即本机受管实例")
+    expect((unconf.data as { default_target: string }).default_target).toBe("local")
+
+    const broken = await tools.targets.execute({}, makeCtx(namedEnv(home, { GEBAI_LLM_INFER_DEFAULT_TARGET: "ghost" })))
+    expect(broken.output).toContain("缺省目标解析失败")
+    expect((broken.data as { default_target: string }).default_target).toBe("ghost")
+  })
+})
+
 // ── 鉴权头 / 掩码 / 结构判定 ──────────────────────────────────────────────
 
 describe("targetHeaders / targetSummary / isInferTarget", () => {

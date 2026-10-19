@@ -745,6 +745,26 @@ describe("推理目标（target）", () => {
     expect(String(readJob(home, "job-local-tgt").target_base_url)).toBe(`http://127.0.0.1:${port}`)
   })
 
+  test("GEBAI_LLM_INFER_DEFAULT_TARGET 改缺省：未传 target 打远端命名目标，显式 local 仍回本机", async () => {
+    const home = makeHome()
+    auths = []
+    requests = []
+    const ctx = makeCtx(lanEnv(home, { GEBAI_LLM_INFER_DEFAULT_TARGET: "lan" }))
+
+    const r = await tools.generate.execute({ prompt: "改缺省目标" }, ctx)
+    expect((r.data as GenerateData).ok).toBe(true)
+    expect(r.output).toContain("目标 lan ｜ 远端")
+    expect(auths.length).toBe(1) // 真的打了远端 mock（带命名目标密钥）
+    expect(requests.length).toBe(0) // 本机 mock 未被命中
+
+    await tools.batch.execute({ items: [{ id: "d1", prompt: "甲" }], job_id: "job-default-tgt" }, ctx)
+    expect(readJob(home, "job-default-tgt").target).toBe("lan")
+
+    // 显式 target 优先于缺省目标：仍可指回本机
+    const back = await tools.generate.execute({ prompt: "回本机", target: "local" }, ctx)
+    expect(back.output).toContain("目标 local ｜ 本机")
+  })
+
   test("jobs 显示目标名；换目标续跑给出提示但仍按本次目标执行", async () => {
     const home = makeHome()
     auths = []

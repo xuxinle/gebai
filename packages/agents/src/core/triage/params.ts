@@ -54,7 +54,7 @@ export const TRIAGE_PARAM_SPECS: TriageParamSpec[] = [
     type: "string",
     aliases: ["l1_target", "l1.target", "l1.base_url"],
     description:
-      '推理目标：缺省 local（本机受管推理服务，按服务状态文件定位端口）；也可为命名目标（GEBAI_LLM_INFER_TARGETS 里声明的 name）' +
+      '推理目标：缺省取 GEBAI_LLM_INFER_DEFAULT_TARGET（未配置时 local，本机受管推理服务，按服务状态文件定位端口）；也可为命名目标（GEBAI_LLM_INFER_TARGETS 里声明的 name）' +
       '或直连 URL（"http://192.168.1.20:8080"，任意 OpenAI 兼容端点）。',
   },
   {

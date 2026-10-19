@@ -5,7 +5,7 @@
  * `providers.ts` 负责「打哪个端点」（本机受管服务 / 直连 URL / 命名目标），本文件只做参数解析、产物落盘、
  * 人类可读摘要与结构化 data——保证无 GPU 环境可用 mock 端点全链路验证。
  *
- * 推理目标（target）：generate/batch 都接受 `target`（缺省 local = 本机受管服务）与 `api_key`，
+ * 推理目标（target）：generate/batch 都接受 `target`（缺省 local = 本机受管服务，可用 GEBAI_LLM_INFER_DEFAULT_TARGET 改缺省）与 `api_key`，
  * 于是同一套工具既能跑本机 CPU 引擎，也能跑局域网另一台机器或云端 OpenAI 兼容端点；
  * 目标解析失败一律转成可读输出（列出可用目标与配置指引），不抛异常。
  */
@@ -328,7 +328,7 @@ const generate: Tool = {
     target: {
       type: "string",
       description:
-        '推理目标：缺省 local（本机受管服务，端口取状态文件 / GEBAI_LLM_INFER_PORT）；也可给命名目标（GEBAI_LLM_INFER_TARGETS 里声明的 name）' +
+        '推理目标：缺省取 GEBAI_LLM_INFER_DEFAULT_TARGET（未配置时 local，本机受管服务，端口取状态文件 / GEBAI_LLM_INFER_PORT）；也可给命名目标（GEBAI_LLM_INFER_TARGETS 里声明的 name）' +
         '或直连 URL（target="http://192.168.1.20:8080" / "https://..."）。用 llm_infer_targets 查看可用目标。',
     },
     api_key: { type: "string", description: "端点鉴权密钥（仅对直连 URL / 命名目标有意义；不传时用命名目标的 api_key 字段或 GEBAI_LLM_INFER_REMOTE_API_KEY）" },
@@ -532,7 +532,7 @@ const batch: Tool = {
     target: {
       type: "string",
       description:
-        '推理目标：缺省 local（本机受管服务）；也可为命名目标（GEBAI_LLM_INFER_TARGETS 里声明的 name）或直连 URL（target="http://192.168.1.20:8080"）。' +
+        '推理目标：缺省取 GEBAI_LLM_INFER_DEFAULT_TARGET（未配置时 local，本机受管服务）；也可为命名目标（GEBAI_LLM_INFER_TARGETS 里声明的 name）或直连 URL（target="http://192.168.1.20:8080"）。' +
         "远端目标不受本机档位（profiles.json）约束，并发请勿超过服务端 slots（见 llm_infer_targets probe=true）。",
     },
     api_key: { type: "string", description: "端点鉴权密钥（仅对直连 URL / 命名目标有意义；不传时用命名目标的 api_key 字段或 GEBAI_LLM_INFER_REMOTE_API_KEY）" },

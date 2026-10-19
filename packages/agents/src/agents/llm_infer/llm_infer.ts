@@ -16,7 +16,7 @@ export const systemPrompt =
   "**工具**：\n" +
   "· 引擎供给：llm_infer_engines（列出引擎矩阵与设备探测——CPU 核数/CUDA/Vulkan/Metal 可用性与探测依据）、llm_infer_engine_fetch（按 id 下载安装 llama.cpp 引擎，需审批）、llm_infer_model_fetch（下载模型，含预置小模型，需审批）。缺引擎/缺模型时先走这三个，不要假定用户已装。\n" +
   "· **内网/离线编译**：llm_infer_sources（发现 {GEBAI_HOME}/resources/src/ 等目录里的源码，含归档预览与「是否自带 vendor 依赖」的离线可行性判定；action=toolchain 看工具链与各设备后端就绪）、llm_infer_source_build（把源码就地编译成引擎并安装到 vendor/<id>/，需审批；长编译用 background=true 走后台，action=status/log/cancel 管理）。**拿不到预编译包（无外网）时走这条**：源码 + 本机工具链即可产出引擎，产物与下载安装的引擎同一落点，后续 start/status 一视同仁。\n" +
-  "· 目标与调用：llm_infer_targets（列出可用推理目标：本机/命名远端，可探活看 n_ctx 与 slots）、llm_infer_generate（单条，含结构化输出）、llm_infer_batch（批量提交，可后台执行 + 断点续跑）、llm_infer_jobs（批次进度/存活/结果/真中止）。generate/batch 的 target 参数选目标（缺省 local=本机）；远端端点用 target=\"http://host:port\" 直连，或在 GEBAI_LLM_INFER_TARGETS 里配命名目标（含 api_key）。\n" +
+  "· 目标与调用：llm_infer_targets（列出可用推理目标：本机/命名远端，可探活看 n_ctx 与 slots；输出里标当前缺省目标）、llm_infer_generate（单条，含结构化输出）、llm_infer_batch（批量提交，可后台执行 + 断点续跑）、llm_infer_jobs（批次进度/存活/结果/真中止）。generate/batch 的 target 参数选目标（缺省 local=本机，GEBAI_LLM_INFER_DEFAULT_TARGET 可改缺省）；远端端点用 target=\"http://host:port\" 直连，或在 GEBAI_LLM_INFER_TARGETS 里配命名目标（含 api_key）。\n" +
   "· 进程管理：llm_infer_status（实例/PID 存活/端口/探测/显存/引擎）、llm_infer_start、llm_infer_stop、llm_infer_restart（换档位换模型必须重启，不支持热切换）、llm_infer_logs（日志尾部与错误特征）、llm_infer_models。\n" +
   "· 其他：llm_infer_bench（llama-bench 压测）、llm_infer_inspect（GGUF 结构与张量布局）。\n" +
   "**启动路径（跨平台）**：缺省走 TS 层的 launcher（detached 拉起 + 日志重定向 + /health 就绪轮询），Windows 上若既无已安装引擎又未显式要求 launcher，会自动回退 infer/scripts/run-server.ps1（GPU 档位的老路径）；GEBAI_LLM_INFER_LAUNCH=script 可强制脚本模式。启动失败先看 llm_infer_logs，不要靠猜。\n" +
@@ -47,19 +47,19 @@ export const requiresApproval: Record<string, boolean> = {
 }
 export const preload = false
 
-/** 可配置环境变量（`GEBAI_LLM_INFER_*` 前缀，汇总进前端环境变量面板白名单）。
- *  旧名 `LOCAL_INFER_*` 仍可读（见 env.ts 的双读实现）——面板只列推荐名，避免两套名字并存。 */
+/** 可配置环境变量（`GEBAI_LLM_INFER_*` 前缀，汇总进前端环境变量面板白名单）。 */
 export const envVars = [
-  { name: "GEBAI_LLM_INFER_HOME", description: "（兼容旧名 LOCAL_INFER_HOME）推理子项目根目录（缺省 dev 模式自动推导为仓库根下的 infer/）" },
-  { name: "GEBAI_LLM_INFER_PROFILE", description: "（兼容旧名 LOCAL_INFER_PROFILE）默认运行档位名（缺省取 config/profiles.json 的 default_profile；有 GPU 用 fast，无 GPU 用 cpu-small）" },
-  { name: "GEBAI_LLM_INFER_PORT", description: "（兼容旧名 LOCAL_INFER_PORT）推理服务端口（缺省 8080，OpenAI 兼容端点；start 的 port 参数可覆盖）" },
-  { name: "GEBAI_LLM_INFER_MODELS_DIR", description: "（兼容旧名 LOCAL_INFER_MODELS_DIR）模型权重目录（缺省 {GEBAI_HOME}/resources/models/infer）" },
-  { name: "GEBAI_LLM_INFER_TIMEOUT_MS", description: "（兼容旧名 LOCAL_INFER_TIMEOUT_MS）单条推理请求超时（缺省 600000 ms；本地模型慢，勿设过小）" },
-  { name: "GEBAI_LLM_INFER_BATCH_MAX_ITEMS", description: "（兼容旧名 LOCAL_INFER_BATCH_MAX_ITEMS）单次 batch 的条目处理上限（未配置=不限制）：批量同步执行会长时间占住会话，建议按机时预算设一个上限自动分片" },
-  { name: "GEBAI_LLM_INFER_TARGETS", description: '（兼容旧名 LOCAL_INFER_TARGETS）命名推理目标（JSON 数组，如 [{"name":"lan-4090","base_url":"http://192.168.1.9:8080","api_key":"sk-...","model":"qwen3-aw"}]）：generate/batch 的 target 参数即可选用，用于把任务派到局域网机器或云端 OpenAI 兼容端点' },
-  { name: "GEBAI_LLM_INFER_REMOTE_API_KEY", description: "（兼容旧名 LOCAL_INFER_REMOTE_API_KEY）远端推理端点的缺省 API Key（缺省鉴权头，target 里未单独配 key 时使用）" },
-  { name: "GEBAI_LLM_INFER_LAUNCH", description: "（兼容旧名 LOCAL_INFER_LAUNCH）启动方式：launcher（缺省，TS 跨平台直启）/ script（Windows 上走 infer/scripts/run-server.ps1）" },
-  { name: "GEBAI_LLM_INFER_SOURCE_DIRS", description: "（兼容旧名 LOCAL_INFER_SOURCE_DIRS）额外的源码发现根（内网编译用；路径分隔符分隔，可指向随包带入的源码目录），缺省已包含 {GEBAI_HOME}/resources/src 与 resources/engines、以及 infer/engine" },
+  { name: "GEBAI_LLM_INFER_HOME", description: "推理子项目根目录（缺省 dev 模式自动推导为仓库根下的 infer/）" },
+  { name: "GEBAI_LLM_INFER_PROFILE", description: "默认运行档位名（缺省取 config/profiles.json 的 default_profile；有 GPU 用 fast，无 GPU 用 cpu-small）" },
+  { name: "GEBAI_LLM_INFER_PORT", description: "推理服务端口（缺省 8080，OpenAI 兼容端点；start 的 port 参数可覆盖）" },
+  { name: "GEBAI_LLM_INFER_MODELS_DIR", description: "模型权重目录（缺省 {GEBAI_HOME}/resources/models/infer）" },
+  { name: "GEBAI_LLM_INFER_TIMEOUT_MS", description: "单条推理请求超时（缺省 600000 ms；本地模型慢，勿设过小）" },
+  { name: "GEBAI_LLM_INFER_BATCH_MAX_ITEMS", description: "单次 batch 的条目处理上限（未配置=不限制）：批量同步执行会长时间占住会话，建议按机时预算设一个上限自动分片" },
+  { name: "GEBAI_LLM_INFER_TARGETS", description: '命名推理目标（JSON 数组，如 [{"name":"lan-4090","base_url":"http://192.168.1.9:8080","api_key":"sk-...","model":"qwen3-aw"}]）：generate/batch 的 target 参数即可选用，用于把任务派到局域网机器或云端 OpenAI 兼容端点' },
+  { name: "GEBAI_LLM_INFER_DEFAULT_TARGET", description: "推理缺省目标：generate/batch 未传 target 时使用（值为 local / 命名目标名 / http(s) URL；缺省 local）。指向不存在的命名目标会显式报错，不会静默回退 local" },
+  { name: "GEBAI_LLM_INFER_REMOTE_API_KEY", description: "远端推理端点的缺省 API Key（缺省鉴权头，target 里未单独配 key 时使用）" },
+  { name: "GEBAI_LLM_INFER_LAUNCH", description: "启动方式：launcher（缺省，TS 跨平台直启）/ script（Windows 上走 infer/scripts/run-server.ps1）" },
+  { name: "GEBAI_LLM_INFER_SOURCE_DIRS", description: "额外的源码发现根（内网编译用；路径分隔符分隔，可指向随包带入的源码目录），缺省已包含 {GEBAI_HOME}/resources/src 与 resources/engines、以及 infer/engine" },
 ]
 
 // ── 兼容再导出 ────────────────────────────────────────────────────────────

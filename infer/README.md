@@ -334,7 +334,7 @@ llm_infer_jobs(action="cancel", job_id="kb-2026-09")                 # 真中止
 
 **并发怎么定**：`concurrency` 缺省 1（串行）；给定值会与档位 `parallel` 比对并夹取。依据是实测结论——**并发只在「slot 数匹配的短 prompt」且瓶颈在 GPU 时有效**（np=16 短 prompt 聚合 627.8 t/s = 4.30×）；长 prompt（如 GEBAI 会话的 15K 系统提示 + 工具定义）下预填充占主导、并发无增益（见 6.9/6.10）；**纯 CPU 上并发同样无增益**（0.5B 实测：单流 15.7 t/s，4 路各约 2.5 t/s、聚合持平——CPU 算力被 slot 平分）。所以：短 prompt 大批量用 `throughput` 档（np=16），长 prompt 用 `concurrent` 档（np=2/4），CPU 保持 1；并发上限就取 `llm_infer_status` 报出的 slot 数。
 
-**推理目标（不限于本机）**：`generate`/`batch` 的 `target` 参数选目标——缺省 `local`（本机受管实例，端口取状态文件 > `GEBAI_LLM_INFER_PORT` > 8080）；也可直连 `http://…` 或用在 `GEBAI_LLM_INFER_TARGETS` 里声明的命名目标（含 `api_key`）。`llm_infer_targets(probe=true)` 列出全部目标并探活（n_ctx/slot/模型名）。密钥在输出与 `job.json` 里一律只出现掩码，产物只记目标名与不含密钥的 base_url。
+**推理目标（不限于本机）**：`generate`/`batch` 的 `target` 参数选目标——缺省取 `GEBAI_LLM_INFER_DEFAULT_TARGET`（未配置即 `local`，本机受管实例，端口取状态文件 > `GEBAI_LLM_INFER_PORT` > 8080；值为命名目标名或 `http://…` URL 时未传 target 即打该目标）；也可直连 `http://…` 或用在 `GEBAI_LLM_INFER_TARGETS` 里声明的命名目标（含 `api_key`）。`llm_infer_targets(probe=true)` 列出全部目标并探活（n_ctx/slot/模型名），输出里标注当前缺省目标。密钥在输出与 `job.json` 里一律只出现掩码，产物只记目标名与不含密钥的 base_url。
 
 **结构化输出**：`schema`（JSON Schema）交给服务端转 GBNF 约束解码，工具侧再做「抽取 JSON + 轻量 Schema 校验（type/required/enum/嵌套）」，校验不过**把错误回灌给模型重试一次**（`retry_on_invalid=false` 可关）；`grammar` 为 GBNF 直传兜底（注意与 `-bs` 后端采样不兼容，引擎会自动回退 CPU 采样）；`json_object` 只要求合法 JSON，是最弱的降级手段（服务端不认识约束时工具会自动降级为它并给出预警）。结果同时给到 `content`/`reasoning_content`、`usage`、服务端 timings 换算的实测 t/s。
 

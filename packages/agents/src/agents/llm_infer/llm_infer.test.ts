@@ -48,7 +48,6 @@ describe("llm_infer 子Agent 定义", () => {
     // 所以单工具名里**不得自带前缀**（自带就会出现 llm_infer_llm_infer_xxx 这类双重前缀）
     for (const t of expected) {
       expect(t.startsWith("llm_infer_")).toBe(false)
-      expect(t.startsWith("local_infer_")).toBe(false)
     }
 
     // 改变服务状态、下载落盘与编译落盘的工具需审批；只读工具与推理调用免审批

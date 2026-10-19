@@ -31,7 +31,7 @@ import {
   waitReady,
   type LaunchResult,
 } from "./launcher"
-import { envDeprecationLines, envVar } from "./env"
+import { envVar } from "./env"
 import {
   type InferProfile,
   type InferProfiles,
@@ -368,10 +368,7 @@ const status: Tool = {
     port: { type: "number", description: "服务端口（缺省 GEBAI_LLM_INFER_PORT 或 8080）" },
   }),
   async execute(args, ctx) {
-    // 状态输出顺带提醒旧 env 名（改名迁移期，模型/用户在这里最容易看到）
-    const dep = envDeprecationLines(ctx.env)
-    const out = await doStatus(args, ctx)
-    return { output: dep.length ? `${out}\n\n${dep.join("\n")}` : out }
+    return { output: await doStatus(args, ctx) }
   },
 }
 
