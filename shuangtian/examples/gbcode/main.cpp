@@ -815,6 +815,26 @@ auto run_app(int argc, char** argv) -> int {
   (void)host->tick();
   app.render_frame();
 
+  // ── DPI 诊断（高 DPI 下“内容只占一角”取证用）──
+  //
+  // 为何直接打印到 stdout：遇到显示异常时，用户能说的只有“看着乱”与一张截图；
+  // 而这个问题需要的是**几个尺寸的对照**（逻辑 / 物理 / 工作区 / 最小值）。
+  // 把这一行复制过来就能判定是哪两个尺寸在打架，不必让用户去找日志文件。
+  {
+    const st::math::Size work = app.work_area_logical();
+    const st::math::Size mins = app.min_logical_size();
+    const auto live = app.metrics();
+    st::print("[DPI] scale={:.2f} logical={:.0f}x{:.0f} physical={:.0f}x{:.0f} "
+              "work_area={:.0f}x{:.0f} min={:.0f}x{:.0f} backend={}\n",
+              static_cast<double>(live.device_scale),
+              static_cast<double>(app.viewport().width),
+              static_cast<double>(app.viewport().height),
+              static_cast<double>(live.physical_width), static_cast<double>(live.physical_height),
+              static_cast<double>(work.width), static_cast<double>(work.height),
+              static_cast<double>(mins.width), static_cast<double>(mins.height),
+              app.backend_name());
+  }
+
   // 进程内脚本能力（`--enable-script`）：**能力保留，演示脚本已删除**。
   //
   // 旧实现启动时自动载入 `assets/logic.js`——那份脚本的作用是“证明脚本能跑”
