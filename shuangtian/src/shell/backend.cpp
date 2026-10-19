@@ -125,8 +125,9 @@ class HeadlessBackend final : public Backend {
     }
     const float limit_w = std::max(min_size.width, work.width * 0.92f);
     const float limit_h = std::max(min_size.height, work.height * 0.92f);
-    const int target_w = static_cast<int>(std::lround(std::min(static_cast<float>(width_), limit_w)));
-    const int target_h = static_cast<int>(std::lround(std::min(static_cast<float>(height_), limit_h)));
+    // 与 win32 同口径：**铺开到工作区**，不是“只夹上限”。
+    const int target_w = static_cast<int>(std::lround(limit_w));
+    const int target_h = static_cast<int>(std::lround(limit_h));
     if (target_w == width_ && target_h == height_) return ok();
     width_ = std::max(1, target_w);
     height_ = std::max(1, target_h);

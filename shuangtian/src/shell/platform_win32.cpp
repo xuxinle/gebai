@@ -750,8 +750,18 @@ class Win32Backend final : public Backend {
   [[nodiscard]] auto min_logical_size() const noexcept -> math::Size override {
     return math::Size{640.0f, 400.0f};
   }
-  /// 把窗口夹到工作区内：超出时按 **92% 工作区**缩放（留边距，窗口不贴死屏幕边），
-  /// 但不低于 `min_logical_size()`（宁可微超屏，也不把界面挤到不可用）。
+  /// 把窗口开到**屏幕工作区**（DPI 适配的主路径：不是“超屏才缩”，而是“按屏幕铺开”）。
+  ///
+  /// 为何不是“只夹上限”：实测用户场景——屏幕 3840×2160、DPI 1.5 ⇒ 工作区
+  /// 2560×1392 逻辑，而应用的期望尺寸是 1440×900。只夹上限时窗口就一直停在
+  /// 1440×900（占屏 56%×65%），**右边与下方全是桌面**，用户描述为“页面混乱、不可用”。
+  /// 桌面应用的正确行为是像 IDEA/VSCode 那样**按可用区域铺开**。
+  ///
+  /// 仍保留两个边界：不小于 `min_logical_size()`（否则三栏挤在一起），
+  /// 不大于工作区 92%（留边距，不贴死屏幕边）。
+  ///
+  /// `sizable = true` 时连**小**也放大；用于“首次打开”与“用户点了重置布局”。
+  /// `sizable = false` 时只缩不放大——用户手动调过窗口尺寸后不该被每帧抹回。
   auto fit_window_to_work_area() -> Status override {
     if (window_ == nullptr) return unexpected(ErrorCode::Invalid, "窗口未创建");
     const math::Size work = work_area_logical();
@@ -759,16 +769,14 @@ class Win32Backend final : public Backend {
     if (work.width <= 0.0f || work.height <= 0.0f) {
       return unexpected(ErrorCode::Unsupported, "拿不到工作区尺寸");
     }
+    // 目标 = 工作区 92%，但夹在 [最小可用, 工作区 92%] 之间。
+    const float target_w = std::max(min_size.width, work.width * 0.92f);
+    const float target_h = std::max(min_size.height, work.height * 0.92f);
     const math::Size current = logical_size();
-    // 目标：不超过工作区 92%；但也不小于最小可用尺寸。
-    const float limit_w = std::max(min_size.width, work.width * 0.92f);
-    const float limit_h = std::max(min_size.height, work.height * 0.92f);
-    if (current.width <= limit_w && current.height <= limit_h) {
-      return ok();   // 已经放得下，不动（不要反过来把窗口“放大”）
+    // 已经接近目标（±2px）就不动：避免每次启动都是“无意义的 SetWindowPos”。
+    if (std::abs(current.width - target_w) <= 2.0f && std::abs(current.height - target_h) <= 2.0f) {
+      return ok();
     }
-    const float target_w = std::min(current.width, limit_w);
-    const float target_h = std::min(current.height, limit_h);
-    // 物理尺寸 = 逻辑 × scale；客户区给了，窗口尺寸由系统 OS 加上边框。
     const float s = scale_ > 0.0f ? scale_ : 1.0f;
     const auto client_w = static_cast<int>(std::lround(target_w * s));
     const auto client_h = static_cast<int>(std::lround(target_h * s));
@@ -798,12 +806,14 @@ class Win32Backend final : public Backend {
     if (work_w <= 0.0f || work_h <= 0.0f) {
       return unexpected(ErrorCode::Unsupported, "工作区尺寸无效");
     }
-    // 留 8% 边距（窗口不贴死屏幕边），且不低于最小可用逻辑尺寸。
+    // 直接开到工作区 92%（低于最小可用尺寸时取最小值）——
+    // 与 `fit_window_to_work_area` 同一个口径：桌面应用该按可用区域铺开，
+    // 而不是“保持一个写死的期望尺寸”。
     const math::Size min_size = min_logical_size();
     const int limit_w = static_cast<int>(std::lround(std::max(min_size.width, work_w * 0.92f)));
     const int limit_h = static_cast<int>(std::lround(std::max(min_size.height, work_h * 0.92f)));
-    logical_width_ = std::clamp(logical_width_, 1, std::max(1, limit_w));
-    logical_height_ = std::clamp(logical_height_, 1, std::max(1, limit_h));
+    logical_width_ = std::max(1, limit_w);
+    logical_height_ = std::max(1, limit_h);
     logical_width_exact_ = static_cast<float>(logical_width_);
     logical_height_exact_ = static_cast<float>(logical_height_);
     return ok();

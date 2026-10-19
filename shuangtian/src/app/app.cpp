@@ -823,18 +823,25 @@ auto Application::start() -> Status {
   //
   // 两条路径：后端能改窗口就走后端（它才知道客户区/边框/DPI 换算）；
   // 无头/拿不到屏幕时用 **work_area_override** 自己夹（让“小屏高 DPI”可复现）。
-  {
+  // **把窗口开到屏幕工作区**（DPI 适配的主路径）。
+  //
+  // 为何在建窗之后：工作区尺寸（含任务栏扣除）与“窗口落在哪块屏”只有建窗之后
+  // 才拿得到（多显示器下每块屏的工作区不同）。
+  //
+  // 为何是“铺开”而不是“超屏才缩”：实测用户现场——屏幕 3840×2160、DPI 1.5
+  // ⇒ 工作区 2560×1392 逻辑，而应用期望 1440×900。旧实现只夹上限，于是窗口
+  // 就停在 1440×900（**占屏 56%×65%**），右边与下方全是桌面，用户描述为
+  // “页面混乱、不可用”。桌面应用该像 IDEA/VSCode 那样按可用区域铺开。
+  //
+  // 无条件调用（不再判断“是否超屏”）：尺寸收敛由后端负责
+  // `[min_logical_size, 工作区 × 0.92]`，这里不重复算口径。
+  if (const auto fitted = impl_->backend->fit_window_to_work_area(); !fitted) {
+    // 无头/拿不到屏幕不是错误：退回 `work_area_override` 的语义。
     const math::Size work = work_area_logical();
-    const math::Size min_size = min_logical_size();
     const math::Size current = impl_->backend->logical_size();
-    const bool have_work = work.width > 0.0f && work.height > 0.0f;
-    const float limit_w = std::max(min_size.width, work.width * 0.92f);
-    const float limit_h = std::max(min_size.height, work.height * 0.92f);
-    if (have_work && (current.width > limit_w || current.height > limit_h)) {
-      if (const auto fitted = impl_->backend->fit_window_to_work_area(); !fitted) {
-        ST_LOG_WARN("窗口未自适应（{}），期望 {}×{} 工作区 {}×{}", fitted.error().message,
-                    current.width, current.height, work.width, work.height);
-      }
+    if (work.width > 0.0f && work.height > 0.0f) {
+      ST_LOG_WARN("窗口未自适应（{}），当前 {}×{} 工作区 {}×{}", fitted.error().message,
+                  current.width, current.height, work.width, work.height);
     }
   }
 
