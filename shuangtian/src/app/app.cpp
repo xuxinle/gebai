@@ -629,7 +629,10 @@ auto Application::set_device_scale(float scale) -> Status {
   if (auto status = impl_->backend->set_device_scale(scale); !status) {
     return forward_error(status.error());
   }
-  impl_->device_scale = scale;
+  impl_->device_scale = impl_->backend->device_scale();
+  // **超采样也按实际值**：请求 2.0 但实际只给到 1.5 时，按 2.0 设超采样会把
+  // 字形位图画得比实际需要更密（白白多花内存与时间，且与实际观感不符）。
+  const float actual_scale = impl_->device_scale;
   // **字形超采样必须跟着 DPI 走**（与构造时同一个入口）。
   //
   // `TextRenderer` 的超采样在构造时由解析出的 DPI 决定（`make_unique<TextRenderer>(fonts,
@@ -637,11 +640,18 @@ auto Application::set_device_scale(float scale) -> Status {
   // （超采样 2）与“启动 1.0 再切到 2.0”（超采样停在 1）**渲染结果不同**：
   // 后者每像素只有一个采样点，大字号的斜向/弧形边缘出现可见阶梯（实测同一区域
   // 1524 个像素差 >32）。`set_supersample` 会同时清字形缓存，所以不会混用旧密度的位图。
-  if (impl_->renderer != nullptr) impl_->renderer->set_supersample(scale);
+  if (impl_->renderer != nullptr) impl_->renderer->set_supersample(actual_scale);
   root_.mark_dirty_all();
-  ST_LOG_INFO("DPI 缩放已切换为 {}（物理 {}×{}）", scale,
-            impl_->backend->framebuffer().physical_width(),
-            impl_->backend->framebuffer().physical_height());
+  if (std::abs(actual_scale - scale) > 0.01f) {
+    ST_LOG_WARN("DPI 缩放请求 {} 未能完全生效，实际 {}（物理 {}×{}）",
+                static_cast<double>(scale), static_cast<double>(actual_scale),
+                impl_->backend->framebuffer().physical_width(),
+                impl_->backend->framebuffer().physical_height());
+  } else {
+    ST_LOG_INFO("DPI 缩放已切换为 {}（物理 {}×{}）", static_cast<double>(actual_scale),
+                impl_->backend->framebuffer().physical_width(),
+                impl_->backend->framebuffer().physical_height());
+  }
   return ok();
 }
 

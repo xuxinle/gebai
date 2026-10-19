@@ -685,6 +685,26 @@ class Win32Backend final : public Backend {
   // 25.5% 像素与"同尺寸正确渲染"不同（内容整体被横向拉了 ~1.16 倍）。
   // 现在重建已经变便宜（见 `resize_buffers_in_place`），拖动期间必须真重建。
   [[nodiscard]] auto framebuffer() -> raster::Surface& override {
+    // **画布必须跟客户区一致**（不变式，每帧守卫一次）。
+    //
+    // 为何在这里兜底：窗口尺寸可能被**外部**改变而 `WM_SIZE` 没走到我们的
+    // 重建路径（系统夹窗口、最大化、DPI 迁移、窗口管理器干预……）。一旦画布大于
+    // 客户区，超出那部分**永远不会显示**，用户看到的就是“内容只占左上角”。
+    //
+    // 代价：每帧一次 `GetClientRect`（~百纳秒级），而它换来的是
+    // “无论哪条路径改了窗口，画布都不会与它脱节”。这是结构性防护，
+    // 不依赖任何一条路径记得调 `sync_buffers_to_client`。
+    if (window_ != nullptr && surface_ != nullptr) {
+      RECT client{};
+      if (::GetClientRect(window_, &client) != 0) {
+        const int cw = static_cast<int>(client.right);
+        const int ch = static_cast<int>(client.bottom);
+        if (cw > 0 && ch > 0 &&
+            (cw != surface_->physical_width() || ch != surface_->physical_height())) {
+          size_dirty_ = true;   // 与 `WM_SIZE` 同一条重建路径
+        }
+      }
+    }
     if (size_dirty_) {
       size_dirty_ = false;
       (void)sync_buffers_to_client(scale_);
@@ -792,24 +812,43 @@ class Win32Backend final : public Backend {
   auto set_device_scale(float scale) -> Status override {
     if (scale <= 0.0f) return unexpected(ErrorCode::Invalid, "DPI 缩放必须为正数");
     scale_ = scale;
-    // 改 DPI 要动两处，缺一就糊：
+    // 改 DPI 要动三件事：
     // ① 窗口客户区必须跟着变成「逻辑 × 新 scale」（只改缓冲会导致画布与客户区不符）；
     // ② 缓冲必须**以实际客户区为准**分配——`round(round(client/scale)*scale)` 在分数缩放下
     //    可能差 1 像素，而 1 像素就足以让 DXGI 拉伸整块纹理（整屏发糊，见
-    //    `logical_for_client` 的说明）。两步都由下面两个函数保证。
+    //    `logical_for_client` 的说明）；
+    // ③ **改完必须读回客户区校验**：`SetWindowPos` 可能被系统拒绝/夹小
+    //    （超出工作区、最大化态、窗口管理器限制），而我们**不能假设它成功**。
     //
-    // ⚠ **必须先夹到屏幕工作区**（2026-10-19 修的真实缺陷）：
-    // 旧序是直接 `resize_window_to_scale()` → 客户区 = 逻辑 × 新 scale。
-    // 在高 DPI 屏幕上把页面缩放调到 200% 时，这个尺寸**超出屏幕**，Windows 把窗口
-    // 限制在屏幕内；而接下来 `sync_buffers_to_client` 按“实际客户区”分配画布——
-    // 两者本应对得上……但窗口被夹小后逻辑尺寸也跟着变小，界面于是整体变窄。
-    // 用户现场（2880×1800 画布、内容只占左上 2160×1350）就是这个症状：
-    // 画布按 2.0 分配、窗口被屏幕卡在 1.5 倍的大小。
-    // 所以：**先按新 scale 重算“屏幕能容纳的逻辑尺寸”，再改窗口**。
+    // ③ 是 2026-10-19 实测补上的一步：用户在高 DPI 屏上把页面缩放到 200%，
+    // 窗口实际只拿到 1.5 倍的空间，但 `scale_` 被记成了 2.0 ⇒ 画布按 2.0 分配，
+    // 内容只占 75%（现场：2880×1800 画布、内容只到 2160×1350，比值 = 1.5/2.0）。
+    // 根因不是“没夹屏幕”，而是**把请求值当成了实际值**。
     if (auto fitted = clamp_logical_to_work_area(); !fitted) {
       // 拿不到工作区（无显示器）不是错误：照旧按原尺寸走。
     }
     if (auto status = resize_window_to_scale(); !status) return status;
+    // ── 读回校验：以**实际客户区**为准反算真实缩放 ──
+    RECT client{};
+    if (window_ != nullptr && ::GetClientRect(window_, &client) != 0) {
+      const int cw = static_cast<int>(client.right);
+      const int ch = static_cast<int>(client.bottom);
+      if (cw > 0 && ch > 0) {
+        // 两个轴各算出实际缩放；取**较小**那个（保守：宁可少分配不可多分配，
+        // 多分配就是“画布大于窗口”，内容只占一角）。
+        const float real_w = static_cast<float>(cw) / static_cast<float>(std::max(1, logical_width_));
+        const float real_h = static_cast<float>(ch) / static_cast<float>(std::max(1, logical_height_));
+        const float real_scale = std::min(real_w, real_h);
+        // 容差 0.01：`SetWindowPos` 与取整噪声不应触发“修正”。
+        if (std::abs(real_scale - scale_) > 0.01f) {
+          ST_LOG_WARN("DPI 改尺寸未能如愿：请求 {:.2f}，实际客户区给出 {:.2f}"
+                      "（{}×{} @ 逻辑 {}×{}）——按实际值重算",
+                      static_cast<double>(scale_), static_cast<double>(real_scale), cw, ch,
+                      logical_width_, logical_height_);
+          scale_ = std::max(0.1f, real_scale);
+        }
+      }
+    }
     return sync_buffers_to_client(scale_);
   }
 
