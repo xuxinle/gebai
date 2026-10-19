@@ -821,45 +821,23 @@ class Win32Backend final : public Backend {
 
   auto set_device_scale(float scale) -> Status override {
     if (scale <= 0.0f) return unexpected(ErrorCode::Invalid, "DPI 缩放必须为正数");
-    scale_ = scale;
-    // 改 DPI 要动三件事：
-    // ① 窗口客户区必须跟着变成「逻辑 × 新 scale」（只改缓冲会导致画布与客户区不符）；
-    // ② 缓冲必须**以实际客户区为准**分配——`round(round(client/scale)*scale)` 在分数缩放下
-    //    可能差 1 像素，而 1 像素就足以让 DXGI 拉伸整块纹理（整屏发糊，见
-    //    `logical_for_client` 的说明）；
-    // ③ **改完必须读回客户区校验**：`SetWindowPos` 可能被系统拒绝/夹小
-    //    （超出工作区、最大化态、窗口管理器限制），而我们**不能假设它成功**。
+    // **页面缩放不改窗口尺寸**（2026-10-20 修的真实缺陷）。
     //
-    // ③ 是 2026-10-19 实测补上的一步：用户在高 DPI 屏上把页面缩放到 200%，
-    // 窗口实际只拿到 1.5 倍的空间，但 `scale_` 被记成了 2.0 ⇒ 画布按 2.0 分配，
-    // 内容只占 75%（现场：2880×1800 画布、内容只到 2160×1350，比值 = 1.5/2.0）。
-    // 根因不是“没夹屏幕”，而是**把请求值当成了实际值**。
-    if (auto fitted = clamp_logical_to_work_area(); !fitted) {
-      // 拿不到工作区（无显示器）不是错误：照旧按原尺寸走。
-    }
-    if (auto status = resize_window_to_scale(); !status) return status;
-    // ── 读回校验：以**实际客户区**为准反算真实缩放 ──
-    RECT client{};
-    if (window_ != nullptr && ::GetClientRect(window_, &client) != 0) {
-      const int cw = static_cast<int>(client.right);
-      const int ch = static_cast<int>(client.bottom);
-      if (cw > 0 && ch > 0) {
-        // 两个轴各算出实际缩放；取**较小**那个（保守：宁可少分配不可多分配，
-        // 多分配就是“画布大于窗口”，内容只占一角）。
-        const float real_w = static_cast<float>(cw) / static_cast<float>(std::max(1, logical_width_));
-        const float real_h = static_cast<float>(ch) / static_cast<float>(std::max(1, logical_height_));
-        const float real_scale = std::min(real_w, real_h);
-        // 容差 0.01：`SetWindowPos` 与取整噪声不应触发“修正”。
-        if (std::abs(real_scale - scale_) > 0.01f) {
-          ST_LOG_WARN("DPI 改尺寸未能如愿：请求 {:.2f}，实际客户区给出 {:.2f}"
-                      "（{}×{} @ 逻辑 {}×{}）——按实际值重算",
-                      static_cast<double>(scale_), static_cast<double>(real_scale), cw, ch,
-                      logical_width_, logical_height_);
-          scale_ = std::max(0.1f, real_scale);
-        }
-      }
-    }
-    return sync_buffers_to_client(scale_);
+    // 旧序试图把客户区改成「逻辑 × 新 scale」——那在工作区放不下时会被系统卡住，
+    // 而 `scale_` 已改成新值 ⇒ 布局按「画布 / 新 scale」算逻辑尺寸，比真实可用空间小，
+    // 于是内容只占左上角（实测：窗口 3533×1921、scale=2.0 ⇒ 布局按 1766 逻辑宽，
+    // 实际内容只画到 2650 = 1766×1.5 像素处，**右边与下边各空 25%**）。
+    //
+    // 正确语义（与 IDEA/VSCode 的“放大页面”一致）：**窗口不动，视野变小**。
+    // 即：物理客户区不变，逻辑视口 = 客户区 / 新 scale——放大一档就少显示一些内容，
+    // 而不是把窗口撑到屏幕外面去。
+    //
+    // ⚠ **不要在这里先写 `scale_`**：`allocate_buffers` 靠“新旧 scale 是否不同”
+    // 来判定能否走“原地换缓冲”快路径（那条路不更新画布的缩放，会让绘制用旧缩放）。
+    // 提前赋值会让比较简化为 `|x - x| = 0` ⇒ 恒认定为“没改缩放” ⇒ 快路径照走 ⇒
+    // 布局按新逻辑尺寸、绘制却按旧缩放（实测就是这个 bug：1676 逻辑布局、1.5 绘制）。
+    // 因此把缩放变更交给 `sync_buffers_to_client` → `allocate_buffers` 一次性完成。
+    return sync_buffers_to_client(scale);
   }
 
  private:
@@ -915,7 +893,11 @@ class Win32Backend final : public Backend {
   /// DXGI 就会把整块纹理拉伸到客户区：**整屏发糊**（用户实测："切 DPI 后模糊、
   /// 重新缩放一下才好"）。把物理尺寸作为输入，这个偏差从根上消失。
   auto allocate_buffers(int physical_width, int physical_height, float scale) -> Status {
-    scale_ = scale > 0.0f ? scale : 1.0f;
+    const float incoming = scale > 0.0f ? scale : 1.0f;
+    // **在覆盖 `scale_` 之前**判定本次是否改了缩放（见快路径处的说明：
+    // `scale_` 被提前赋值后，“scale == scale_”恒真，无法用来判断）。
+    const bool scale_changed = std::abs(incoming - scale_) > 0.001f;
+    scale_ = incoming;
     const int clamped_width = std::max(1, physical_width);
     const int clamped_height = std::max(1, physical_height);
     // 逻辑尺寸只用于**报告**（`logical_size()`）与"改窗口尺寸"时的换算，取最接近的整数即可
@@ -942,10 +924,20 @@ class Win32Backend final : public Backend {
     // 它省掉的是：重建 D3D11 设备层资源、重传字形/路径遮罩缓存、重建 swapchain。
     // 失败（如实报 `Unsupported` / 重建目标失败）就**落到下面的全套重建**——
     // 快路径是优化而不是新的正确性前提。
-    if (!resolved_renderer_.empty() && surface_ != nullptr && scale == scale_) {
+    //
+    // ⚠ `scale_` 在函数开头已经被赋成本次的 `scale`，所以这里的 `scale == scale_`
+    // 恒为真——它实际表达的是“**本次调用是否改过缩放**”。改过就不能走快路径：
+    // 快路径只换缓冲尺寸，不会把新缩放告诉画布（`Canvas::set_device_scale`），
+    // 而画布拿旧缩放映射逻辑坐标 ⇒ 绘制范围 = 新逻辑尺寸 × 旧缩放，
+    // 于是内容只画到画布的一角（实测：客户区 3533×1921、scale 1.5→2.0 后
+    // 逻辑视口 1766×960，但内容仍绘到 2649×1440 = 1766×1.5，右侧与下方各空 25%）。
+    // 所以把“是否改过缩放”用独立变量记住，而不是靠 `scale == scale_` 自比较。
+    if (!resolved_renderer_.empty() && surface_ != nullptr && !scale_changed) {
       if (auto fast = resize_buffers_in_place(clamped_width, clamped_height); fast) {
         renderer_note_ = renderer_base_note_;
         if (presenter_ != nullptr) renderer_note_ += std::format(" · {}", presenter_->note());
+        ST_LOG_INFO("缓冲区原地换：{}x{}（缩放未变 {:.2f}）", clamped_width, clamped_height,
+                    static_cast<double>(scale_));
         return ok();
       }
     }
