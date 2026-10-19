@@ -44,27 +44,30 @@ auto Theme::light() -> Theme {
   // 凹槽（输入框底/代码块/进度槽）：**真凹进去**（比 `bg` 暗）——
   // 它不服务于编辑器（编辑器走 `Surface::Content`，见下）。
   palette.surface_sunken = hex(0xDCDCE5FFU);
-  // 编辑内容区（亮色）：**纯白**。亮色下“阅读面”就该是最亮的，
-  // 与外壳（`alt` 浅灰）拉开一层；`Surface::Content` 在亮色下取本值。
+  // 编辑内容区 / 抬升面（同一个 token 服务两个语义）：
+  //   · `Surface::Content`（编辑区阅读面）亮色下就是**纯白**——与外壳（`alt` 浅灰）拉开一层；
+  //   · 弹层/菜单（`surface_raised`）浅色下也是白系，抬升由**阴影**表达（见 `elevation`）。
+  // 两者取值相同是有意的：亮色下“最亮的面”只有一个候选值。
   palette.surface_raised = hex(0xFFFFFFFFU);
-  // 抬升面（弹层/菜单）：浅色下与 surface 同为白系——抬升由**阴影**表达。
-  palette.surface_raised = hex(0xFFFFFFFFU);
-  // 描边是**半透明白/黑光**叠在 surface 上的等效实色（歌白 `--border: rgba(0,0,0,.08)`）：
-  // 同一个半透明描边在 `bg` / `surface` / `surface_alt` 上会显出不同强度，
-  // 按主体底色合成一次即可（详见 `theme.hpp` 的亚克力口径 §1）。
-  palette.border = hex(0xD2D2D9FFU);
-  palette.border_strong = hex(0xB8B8C1FFU);
-  // 细分隔线：**比 `border` 更淡**（护栏：`subtle` 亮度 > `border`）——
+  // 描边是**半透明黑光**（`theme.hpp` 亚克力口径 §1）：叠在任意底色上强度一致。
+  //
+  // 为何不能用“按主体底色合成一次的等效实色”：那只能对**一种**底色正确。
+  // 实测等效实色 `#D2D2D9` 的强度在四个底色上是 1.10~1.44（**离散 0.339**），
+  // 正是 `theme.hpp` 说的“在卡片上清楚、在页底上糊掉”。
+  // 改成 `rgba(0,0,0,.11)` 后：1.27~1.28（**离散 0.006**），且平均强度不变。
+  palette.border = hex(0x0000001CU);         // rgba(0,0,0,28/255)  平均 1.27
+  palette.border_strong = hex(0x00000035U);  // rgba(0,0,0,53/255)  平均 1.62
+  // 细分隔线：**比 `border` 更淡**（护栏：`subtle` 强度 < `border`）——
   // 它的职责是“同组内”的弱分隔，不能抢过控件边界。
-  // 同时它对三档底色仍需 ≥ 1.10 才看得见——两个条件叠起来把可选区间压得很窄，
-  // `border` 与 `subtle` 只能成对调（差 8/255 是实测能同时满足两侧的最小档差）。
-  palette.border_subtle = hex(0xDADADFFFU);
+  // 半透明后两个条件同时满足：平均 1.16 < 1.27，且对每个底色都 ≥ 1.15。
+  palette.border_subtle = hex(0x00000011U);  // rgba(0,0,0,17/255)  平均 1.16
   palette.text = hex(0x141418FFU);
   palette.text_muted = hex(0x4E4E5AFFU);
   // `faint` 会被用在**编辑器内**（注释/行号）——而编辑器底是 `sunken`（阶梯最低点）。
-  // 它必须同时对 `bg`/`alt`/`surface`/`sunken` 达 4.5:1（WCAG AA 正文口径），
-  // 所以不能再跟着旧值停在 #6E6E7C（对 `sunken` 只有 3.68）。
-  palette.text_faint = hex(0x686876FFU);
+  // 它必须同时对 `bg`/`alt`/`surface`/`sunken` 达 4.5:1（WCAG AA 正文口径）。
+  // 四个底色的实测值（`sunken` 是最严的一条，它最亮、与文字差最小）：
+  //   bg 5.07 / surface 5.94 / alt 5.35 / **sunken 4.54**
+  palette.text_faint = hex(0x60606DFFU);
   palette.primary = hex(0x4655D8FFU);
   palette.primary_hover = hex(0x3A48C8FFU);
   palette.primary_active = hex(0x2E3AB4FFU);
@@ -177,10 +180,13 @@ auto Theme::dark() -> Theme {
   // 三档必须**同时**满足两组朝向相反的约束（`ui_theme_test` 锁着）：
   //   ● 各自对 `surface`/`alt` 看得见（≥ 1.10）——外壳条带抬高后旧值集体不够；
   //   ● 亮度顺序 `subtle < border < border_strong`——深色下“更淡 = 更暗”。
-  // 这组值是二分出来的可行解（旧 #313136/#2C2C34 在 #2A2A33 的 alt 上只有 1.02）。
-  palette.border = hex(0x4C4C54FFU);
-  palette.border_strong = hex(0x646470FFU);
-  palette.border_subtle = hex(0x36363CFFU);
+  //
+  // 与浅色同理：**用半透明白光**，不用不透明实色（`theme.hpp` 亚克力口径 §1）。
+  // 不透明实色在四个底色上的强度离散度实测 0.43~0.89，正是“一处清楚一处糊”。
+  // 半透明后离散度降到 0.06~0.10，且平均强度与原设计一致（2.05 / 2.84 / 1.37）。
+  palette.border = hex(0xFFFFFF3BU);         // rgba(255,255,255,58/255)  平均 2.05
+  palette.border_strong = hex(0xFFFFFF52U);  // rgba(255,255,255,81/255)  平均 2.84
+  palette.border_subtle = hex(0xFFFFFF1CU);  // rgba(255,255,255,28/255)  平均 1.37
   palette.text = hex(0xF2F2F5FFU);
   palette.text_muted = hex(0xB4B4BEFFU);
   // `faint` 会在**外壳条带（`alt`）上**用（状态栏提示/行号），而 `alt` 本次抬高了一档；

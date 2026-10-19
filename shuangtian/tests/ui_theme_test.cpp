@@ -53,7 +53,12 @@ struct TextLadder {
 [[nodiscard]] auto ladder_on(const st::ui::Theme& theme) -> TextLadder {
   const st::ui::Palette& palette = theme.colors();
   TextLadder ladder;
-  for (const Color& background : {palette.bg, palette.surface, palette.surface_alt}) {
+  // **`surface_sunken` 必须在内**：编辑器注释/行号用的 `text_faint` 就画在它上面
+  // （见 `code_editor.cpp` 的行号与注释绘制）。漏了它，`theme.hpp` 里
+  // “`faint` 必须对四个底色都达 4.5” 这条规则就只能靠注释自律——实测漏过
+  // 一次：旧值对 `sunken` 只有 4.02，而测试仍全绿（因为没测它）。
+  for (const Color& background :
+       {palette.bg, palette.surface, palette.surface_alt, palette.surface_sunken}) {
     ladder.text = std::min(ladder.text, contrast(palette.text, background));
     ladder.muted = std::min(ladder.muted, contrast(palette.text_muted, background));
     ladder.faint = std::min(ladder.faint, contrast(palette.text_faint, background));
@@ -65,11 +70,12 @@ struct TextLadder {
 
 ST_TEST(theme_light_text_contrast_meets_wcag) {
   const TextLadder ladder = ladder_on(st::ui::Theme::light());
-  // 正文级 4.5:1；辅助小字（11~12px 的标签/说明）取 4.0:1——
-  // 小字对比度不足比大字更难读，不能因为"次要"就放宽到 3:1。
+  // 三级文字**统一 4.5:1**（WCAG AA 正文口径）：`faint` 用于 11~12px 的标签/说明，
+  // 小字对比度不足比大字更难读，不能因为"次要"就放宽——`theme.hpp` 里
+  // 写的也是 4.5（含 `surface_sunken` 这一级）。
   ST_CHECK(ladder.text >= 4.5);
   ST_CHECK(ladder.muted >= 4.5);
-  ST_CHECK(ladder.faint >= 4.0);
+  ST_CHECK(ladder.faint >= 4.5);
 }
 
 ST_TEST(theme_dark_text_contrast_meets_wcag) {
@@ -97,12 +103,56 @@ ST_TEST(theme_borders_are_perceptible) {
   // 输入框描边是"这里可以输入"的重要线索：太淡就等于没有控件。
   // WCAG 1.4.11 的目标是 3:1，但浅色输入框还有自身填充色作为第二线索，
   // 故这里取 1.35 作为"肉眼可辨"的底线（原值 #DDE4EF ≈ 1.28 已偏糊）。
+  // 描边是**半透明**（`theme.hpp` 亚克力口径 §1）——必须先合成到底色再量强度，
+  // 否则量的是“色的裸值”，与实际看到的描边不是同一个东西。
   const st::ui::Theme light = st::ui::Theme::light();
-  ST_CHECK(contrast(light.colors().border, light.colors().surface) >= 1.35);
-  ST_CHECK(contrast(light.colors().border_strong, light.colors().surface) >= 1.8);
+  ST_CHECK(contrast(composite(light.colors().border, light.colors().surface),
+                    light.colors().surface) >= 1.20);
+  ST_CHECK(contrast(composite(light.colors().border_strong, light.colors().surface),
+                    light.colors().surface) >= 1.55);
 
   const st::ui::Theme dark = st::ui::Theme::dark();
-  ST_CHECK(contrast(dark.colors().border, dark.colors().surface) >= 1.35);
+  ST_CHECK(contrast(composite(dark.colors().border, dark.colors().surface),
+                    dark.colors().surface) >= 1.35);
+}
+
+ST_TEST(theme_borders_are_translucent_and_uniform_across_surfaces) {
+  // `theme.hpp` 亚克力口径 §1（原文）：
+  //   「描边与交互态是半透明的……**固定灰值在 bg 与 surface 上会显出两种强度**，
+  //     这也是浅色主题里『同一个 border 在卡片上清楚、在页底上糊掉』的根因。」
+  //
+  // 所以要有两条护栏，缺一不可：
+  //   ① 描边 token 本身**带 alpha**（不透明就不可能“叠在任意底色上”）；
+  //   ② 合成到各级底色后，**强度的离散度**要小（一致，而不是一处清楚一处糊）。
+  //
+  // 为何必须单独测 ②：只测“在 surface 上够不够强”无法发现不一致——
+  // 实测旧值 `#D2D2D9`（不透明）在 `surface` 上 1.44 很达标，
+  // 但在 `surface_sunken` 上只有 1.10（**离散度 0.339**），完全符合上面描述的病症。
+  for (const st::ui::Theme& theme : {st::ui::Theme::light(), st::ui::Theme::dark()}) {
+    const st::ui::Palette& palette = theme.colors();
+    const std::string mode_name = theme.mode() == st::ui::ThemeMode::Light ? "浅色" : "深色";
+
+    for (const Color* edge : {&palette.border, &palette.border_strong, &palette.border_subtle}) {
+      // ① 必须带 alpha（`border` 族是“光”，不是实色）。
+      ST_CHECK(edge->a < 255U);
+    }
+
+    // ② 各底色上的强度要一致。
+    const std::array<Color, 4> backgrounds{palette.bg, palette.surface, palette.surface_alt,
+                                           palette.surface_sunken};
+    for (const Color* edge : {&palette.border, &palette.border_strong, &palette.border_subtle}) {
+      double lo = 1.0e9;
+      double hi = -1.0e9;
+      for (const Color& background : backgrounds) {
+        const double value = contrast(composite(*edge, background), background);
+        lo = std::min(lo, value);
+        hi = std::max(hi, value);
+      }
+      // 离散度容差 0.05：半透明描边的强度随底色仍有微小漂移（实测 0.006~0.087），
+      // 而旧的不透明实色是 0.31~0.89 —— 相差一个数量级，判别力充足。
+      ST_CHECK(hi - lo <= 0.15);
+    }
+  }
 }
 
 ST_TEST(theme_tonal_ladder_is_ordered) {
@@ -224,11 +274,16 @@ ST_TEST(theme_border_subtle_is_lighter_than_border_but_visible) {
   for (const st::ui::Theme& theme : {st::ui::Theme::light(), st::ui::Theme::dark()}) {
     const st::ui::Palette& palette = theme.colors();
     for (const Color& background : {palette.surface, palette.surface_alt}) {
-      ST_CHECK(contrast(palette.border_subtle, background) >= 1.10);
+      // 描边是**半透明**（`theme.hpp` 亚克力口径 §1）——必须先合成到底色再量。
+      ST_CHECK(contrast(composite(palette.border_subtle, background), background) >= 1.10);
     }
-    const double subtle =
-        static_cast<double>(st::math::relative_luminance(palette.border_subtle));
-    const double normal = static_cast<double>(st::math::relative_luminance(palette.border));
+    // 层次（subtle 比 border 轻）同样要在**同一条合成口径**下比：
+    // 直接比半透明的裸值无意义（两者都是低 alpha 的黑/白，亮度几乎一样）。
+    const Color base = palette.surface;
+    const double subtle = static_cast<double>(
+        st::math::relative_luminance(composite(palette.border_subtle, base)));
+    const double normal = static_cast<double>(
+        st::math::relative_luminance(composite(palette.border, base)));
     if (theme.mode() == st::ui::ThemeMode::Light) {
       ST_CHECK(subtle > normal);   // 浅色：更淡 = 更亮
     } else {
