@@ -706,7 +706,7 @@ void register_element_type_by_token(const void* token, std::string name);
 
 /// 逃生舱：声明式创建任意组件 + 容器语义，构造后经配置回调接一等接口。
 ///
-/// 为什么需要它：48 个内置组件各有**构造参数与一等接口**（`Tabs::sync_tabs`、
+/// 为什么需要它：49 个内置组件各有**构造参数与一等接口**（`Tabs::sync_tabs`、
 /// `MenuBar::on_action`、`CodeEditor::on_change`…）——为每个都写专用包装是无穷尽的追尾
 /// （新组件就要新包装），而属性面（`apply_properties`）只覆盖可序列化值。
 /// `custom<T>` 给出**一个**通用入口：声明式创建 + 容器语义 + 强类型指针。

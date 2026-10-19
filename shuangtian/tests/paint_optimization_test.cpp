@@ -670,34 +670,51 @@ ST_TEST(layered_shadow_cache_eviction_stays_correct) {
 // ③ 性能护栏（归一化，抗机器差异）——守住"别把省下来的又花回去"
 // ————————————————————————————————————————————————————————————————————————————
 
-/// 环形填充必须**不慢于**描边（这台机器上实测 2.8×，这里只守住"不倒退"）。
+/// 环形填充必须**不慢于**描边（这台机器上实测 1.4~3.3×，这里只守住"不倒退"）。
+///
+/// ⚠ **必须关掉几何 sprite 缓存来量**。这两条路径画的是同一个圆角矩形轮廓，
+/// 而缓存一旦命中就只贴一张预烘坝的图——两者的后价都被抹成同一个数，比较结果变成
+/// 调度噪声。本用例要量的是“两种**光栅化方式**本身的成本”，所以两侧都必须走原管线。
+/// （同一纪律见 `CONVENTIONS.md` §7.2：“桩把差异抹平了”。）
+///
+/// ⚠ **单次测量太短会被噪声吞掉**。原来每轮只量一次绘制（~0.03 ms），400 轮共 12 ms——
+/// 分片里与其它用例共享进程/CPU 时，偶发一次抢占就能把某侧抬高到翻转结论（实测：
+/// 分片 5/16 连跑三次，两次绿一次红；单跑四次全绿）。按本仓既有纪律（“负载必须高于
+/// 计时噪声”，见 `raster_bench_test.cpp` 头注释）：**每轮的计时窗口里放多张**、
+/// 并把 400 轮取**最小值**（噪声只会抬高耗时）。
 ST_TEST(border_ring_is_not_slower_than_stroke) {
   const Color border = Color::rgb(0xD3, 0xDC, 0xE9);
   const st::math::Rect box{60.0f, 40.0f, 140.0f, 48.0f};
   constexpr int kRuns = 400;
+  // 每轮画 8 张（横向错开）：单轮窗口 ≈ 0.25 ms，噪声占比从 ~30% 降到 ~5%。
+  constexpr int kPerRun = 8;
 
   const auto measure = [&](bool ring) {
     Canvas canvas = make_canvas();
+    canvas.set_geometry_cache_enabled(false);
     double best = 1e9;
     for (int index = 0; index < kRuns; ++index) {
       canvas.clear(Color::rgb(0xF7, 0xF8, 0xFA));
       const auto start = std::chrono::steady_clock::now();
-      if (ring) {
-        draw_border_by_ring(canvas, box, 12.0f, border, 1.0f);
-      } else {
-        draw_border_by_stroke(canvas, box, 12.0f, border, 1.0f);
+      for (int repeat = 0; repeat < kPerRun; ++repeat) {
+        const st::math::Rect shifted = box.offset(static_cast<float>(repeat) * 150.0f, 0.0f);
+        if (ring) {
+          draw_border_by_ring(canvas, shifted, 12.0f, border, 1.0f);
+        } else {
+          draw_border_by_stroke(canvas, shifted, 12.0f, border, 1.0f);
+        }
       }
       best = std::min(best, std::chrono::duration<double, std::milli>(
                                 std::chrono::steady_clock::now() - start)
                                 .count());
     }
-    return best;
+    return best / static_cast<double>(kPerRun);
   };
   const double ring_ms = measure(true);
   const double stroke_ms = measure(false);
-  st::print("[border-cost] 环形 {:.4f} ms · 描边 {:.4f} ms · 提速 {:.2f}×\n", ring_ms, stroke_ms,
-            stroke_ms / std::max(ring_ms, 1e-9));
-  // 余量给足（本机实测 2~3×）：只要求"环形严格更快"是稳妥的回归方向。
+  st::print("[border-cost] 环形 {:.4f} ms · 描边 {:.4f} ms · 提速 {:.2f}×（每轮 {} 张，{} 轮取最小）\n",
+            ring_ms, stroke_ms, stroke_ms / std::max(ring_ms, 1e-9), kPerRun, kRuns);
+  // 余量给足（本机实测 1.4~3.3×）：只要求“环形严格更快”是稳妥的回归方向。
   ST_CHECK(ring_ms < stroke_ms);
 }
 

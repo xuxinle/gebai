@@ -530,6 +530,14 @@ auto Application::metrics() const -> control::Metrics {
     metrics.font_read_fallbacks = font_stats.read_fallbacks;
   }
   metrics.last_frame_ms = impl_->last_frame_ms;
+  // 几何 sprite 缓存命中率（软件光栅器专属；GPU 画布不实现，保持 0）。
+  if (auto* software = dynamic_cast<raster::Canvas*>(&impl_->backend->framebuffer())) {
+    const raster::Canvas::GeometryStats stats = software->geometry_stats();
+    metrics.sprite_hits = stats.hits;
+    metrics.sprite_misses = stats.misses;
+    metrics.sprite_rejected = stats.rejected;
+    metrics.sprite_entries = static_cast<std::uint64_t>(stats.entries);
+  }
   metrics.layout_ms = impl_->layout_ms;
   metrics.paint_ms = impl_->paint_ms;
   metrics.present_ms = impl_->present_ms;

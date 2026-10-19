@@ -139,6 +139,15 @@ struct Metrics {
   std::uint64_t font_read_fallbacks{0};  ///< 其中回退整读的次数（>0 = 该环境不支持映射）
   int physical_width{0};
   int physical_height{0};
+  /// 几何 sprite 缓存的命中/未命中/条目数（软件光栅器）。
+  ///
+  /// 为何要上报：它是“矢量图案的重复绘制到底有没有被免掉”的唯一可观测证据。
+  /// 实测踩过：缓存对一个像素都没命中（位图坐标系漏了平移），而**每帧都白跑
+  /// 一遍光栅化依然会算作“未命中后绘制”**——不看这个计数器就只看到“加了缓存反而更慢”。
+  std::uint64_t sprite_hits{0};
+  std::uint64_t sprite_misses{0};
+  std::uint64_t sprite_rejected{0};
+  std::uint64_t sprite_entries{0};
   std::size_t nodes{0};
   std::uint64_t requests{0};
 };

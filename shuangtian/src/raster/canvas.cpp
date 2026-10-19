@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <functional>
+#include <string_view>
 #include <utility>
 
 #include "rasterize_internal.hpp"
@@ -53,6 +56,28 @@ void PaintProfiler::clear() noexcept { ops.fill(PaintOpStat{}); }
 namespace {
 
 inline constexpr float kCoverageEpsilon = 0.0005f;
+
+/// 几何 sprite 缓存的尺寸/条数上限。
+///
+/// 为何要上限：缓存是**进程级常驻**（跟着画布走），而界面可能绘成千上万个不同的
+/// 小图案（如每次重算的波形）。上限按「界面里真实有多少种图标」定：
+/// 一帧 46 个描边里通常只有十几到几十种形状，512 条已宽裕。
+/// 面积上限 256×256 保证单条不会突然吃掉几 MB。
+inline constexpr int kGeometrySpriteMaxPixels = 256 * 256;
+inline constexpr std::size_t kGeometrySpriteLimit = 512;
+
+/// 几何 sprite 缓存是否启用（`ST_RASTER_SPRITE_CACHE=0` 可关）。
+///
+/// **它是回归测的必备开关**：缓存必须与“不走缓存”逐像素相同，而验证这件事的
+/// 唯一干净办法是同一份二进制里把两侧都跑一遍（换二进制比会引入其他改动）。
+[[nodiscard]] auto geometry_sprite_cache_enabled() noexcept -> bool {
+  static const bool enabled = [] {
+    const char* value = std::getenv("ST_RASTER_SPRITE_CACHE");
+    if (value == nullptr || *value == '\0') return true;
+    return std::string_view{value} != "0";
+  }();
+  return enabled;
+}
 
 /// 原语计时作用域（仅当画布挂了剖析器时记账）。
 struct OpScope {
@@ -190,6 +215,42 @@ struct OpScope {
     if (last > previous_last) previous_last = last;
   }
   return false;
+}
+
+/// 一行里"**确定被**圆角矩形完全覆盖"的像素范围（闭开区间 `[begin, end)`）。
+///
+/// 为何要这套而不是直接用矩形：`covered_region` 的语义是「这些像素随后会被不透明底
+/// **完全**替换」，而圆角矩形的四角**不在**矩形内——把整块矩形当覆盖会让卡片四角
+/// 丢掉阴影。同时抗锯齿会让几何边缘所在的**那一像素**只被部分覆盖，所以两侧还要
+/// 各让出 1 像素（调用方已向内缩过）。两道缩减只损失边缘几行/列像素，
+/// 但把「跳过是否等价」从「大概率」变成**确定**。
+struct CoveredSpan {
+  int begin{0};
+  int end{0};
+  [[nodiscard]] auto empty() const noexcept -> bool { return begin >= end; }
+};
+
+/// `rect`：**已缩进 1 像素**的矩形（物理像素）；`radius`：物理像素。
+[[nodiscard]] auto covered_span_at(math::IntRect rect, float radius, int y) noexcept -> CoveredSpan {
+  if (rect.is_empty() || y < rect.y || y >= rect.bottom()) return CoveredSpan{rect.x, rect.x};
+  float inset = 0.0f;
+  const float corner =
+      std::min(radius, static_cast<float>(std::min(rect.width, rect.height)) * 0.5f);
+  if (corner > 0.5f) {
+    // 行顶到矩形顶的距离（上圆角带）/ 到矩形底的距离（下圆角带）。
+    const float dy_top = static_cast<float>(y - rect.y);
+    const float dy_bottom = static_cast<float>(rect.bottom() - (y + 1));
+    const float dy = std::min(dy_top, dy_bottom);
+    if (dy < corner) {
+      const float straight = corner - dy;
+      const float square = corner * corner - straight * straight;
+      inset = corner - std::sqrt(square > 0.0f ? square : 0.0f);
+    }
+  }
+  // 向内取整到**整像素**（`ceil` 向上取到下一整像素，保证该像素被完全覆盖）。
+  const int left = rect.x + static_cast<int>(std::ceil(inset));
+  const int right = rect.right() - static_cast<int>(std::ceil(inset));
+  return CoveredSpan{left, std::max(left, right)};
 }
 
 /// 通用像素混合（`coverage` ∈ [0,1] 已含 opacity 与裁剪遮罩）。
@@ -957,11 +1018,22 @@ void Canvas::blend_coverage_runs(int y, std::span<const CoverageRun> runs, const
 
 void Canvas::fill_path(const Path& path, const Paint& paint, DrawOptions options) {
   OpScope scope(*this, PaintOp::FillPath);
-  if (scale_ == 1.0f) {
-    detail::fill_path_aa(*this, path, paint, options);
-    return;
+  const Path& physical = scale_ == 1.0f ? path : path.scaled(scale_);
+  // **缓存关闭时完全不算键**：算键要遍历两遍命令流（`path_control_origin` + `path_geometry_key`），
+  // 对“一条便宜的小路径”是可观的比例开销——实测它把“环形 vs 描边”的性能对照用例
+  // 从 1.35× 抬成噪声（两者都白付这两遍）。开启时这点代价只付一次、换来整块贴图。
+  if (geometry_cache_enabled_ && geometry_sprite_cache_enabled()) {
+    const float tolerance = options.antialias ? 0.25f : 0.5f;
+    const math::Point origin = path_control_origin(path, scale_);
+    const std::uint64_t key =
+        path_geometry_key(path, scale_, static_cast<std::uint64_t>(tolerance * 100000.0f), origin);
+    const auto build_sprite_path = [&physical, origin]() -> Path {
+      return physical.translated(-origin.x, -origin.y);
+    };
+    if (try_geometry_sprite(key, paint, options.opacity, options.blend, build_sprite_path, origin))
+      return;
   }
-  detail::fill_path_aa(*this, path.scaled(scale_), paint, options);
+  detail::fill_path_aa(*this, physical, paint, options);
 }
 
 void Canvas::fill_rect(math::Rect rect, const Paint& paint, float radius, DrawOptions options) {
@@ -1002,6 +1074,22 @@ void Canvas::fill_rect(math::Rect rect, const Paint& paint, float radius, DrawOp
   } else {
     path.add_rect(rect);
   }
+  // **圆角矩形也走几何 sprite 缓存**。
+  //
+  // 为何值得：实测它是界面里最贵的一项（gallery 1600×1000 一帧 32 次 / 2.34 ms / 40%），
+  // 而它的几何（宽/高/圆角半径）在帧间**完全不变**（卡片、面板、按钮就那几种尺寸）。
+  // 每帧重新 `flatten` 4 条贝塞尔 → 76 条边 → 4× 子采样 → merge_runs 是纯重生。
+  // 实测：1600×1000 整帧 5.78 → **5.15 ms**（round_rect 2.34 → 1.62 ms）。
+  //
+  // 为何只给 `radius > 0` 走：`radius == 0` 的直角矩形已有更快的整行 `blend_span` 快路径
+  // （上面那条 `simple` 分支），不需要贴图。
+  //
+  // 注意这不是“用贴图代替矢量”——是“同一个矢量形状重复画时只光栅化一次”，
+  // 任意缩放/DPI 仍由 `rect`/`radius` 进键区分（不同尺寸 = 不同条目）。
+  if (radius > 0.0f) {
+    fill_path(path, paint, options);
+    return;
+  }
   detail::fill_path_aa(*this, path, paint, options);
   (void)logical_rect;
 }
@@ -1024,13 +1112,35 @@ void Canvas::stroke_path(const Path& path, const Paint& paint, float width,
   OpScope scope(*this, PaintOp::Stroke);
   if (width <= 0.0f || path.is_empty()) return;
   // DPI：描边宽度同比例放大，1px 发丝线在 2x 屏上是 2 物理像素（视觉等宽且更锐利）
-  const Path& source = path;
   const float physical_width_value = width * scale_;
-  Path scaled_path = scale_ == 1.0f ? Path{} : source.scaled(scale_);
-  const Path& effective = scale_ == 1.0f ? source : scaled_path;
-  Path outline = detail::stroke_to_path(effective, physical_width_value,
-                                        options.antialias ? 0.25f : 0.5f, style);
-  detail::fill_path_aa(*this, outline, paint, options);
+  const float tolerance = options.antialias ? 0.25f : 0.5f;
+  const Path scaled = scale_ == 1.0f ? path : path.scaled(scale_);
+  // **缓存关闭时完全不算键**（同 `fill_path` 的理由）。
+  if (geometry_cache_enabled_ && geometry_sprite_cache_enabled()) {
+    // **键建在源路径上**（见 `try_geometry_sprite`）：描边最贵的
+    // `stroke_to_path`（扁平化 + 每段四边形 + 顶点补圆）因此也能被缓存跳过。
+    // 平移原点按**描边扩展量**向外留边（半宽 + 2px），否则贴图会切掉帽/圆角。
+    const float pad = physical_width_value * 0.5f + 2.0f;
+    const math::Point origin = path_control_origin(path, scale_, pad);
+    const std::uint64_t key = path_geometry_key(
+        path, scale_,
+        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(physical_width_value * 1000.0f))
+         << 8U) |
+            (static_cast<std::uint64_t>(static_cast<std::uint8_t>(style.cap)) |
+             (static_cast<std::uint64_t>(static_cast<std::uint8_t>(style.join)) << 2U)) |
+            static_cast<std::uint64_t>(tolerance * 100000.0f) << 32U,
+        origin);
+    const auto build_sprite_path = [&scaled, origin, physical_width_value, tolerance,
+                                    &style]() -> Path {
+      return detail::stroke_to_path(scaled, physical_width_value, tolerance, style)
+          .translated(-origin.x, -origin.y);
+    };
+    if (try_geometry_sprite(key, paint, options.opacity, options.blend, build_sprite_path, origin))
+      return;
+  }
+  detail::fill_path_aa(*this,
+                       detail::stroke_to_path(scaled, physical_width_value, tolerance, style),
+                       paint, options);
 }
 
 void Canvas::draw_shadow(math::Rect rect, float radius, float blur, math::Color color,
@@ -1325,6 +1435,25 @@ void Canvas::draw_shadow_layered(math::Rect rect, float radius, math::Color key_
   scope.set_pixels(static_cast<std::uint64_t>(sprite->width) *
                    static_cast<std::uint64_t>(sprite->height));
 
+  // **将被随后铺上的不透明区域**（`options.covered_region`）：落在其中的贴图像素
+  // 最终会被不透明底色完全盖住，先合成一遍是纯浪费。
+  //
+  // 为何这是硬保证而非近似（`src-over` 结合律）：设贴图贡献 U、底色 B（`B.a == 255`，
+  // 即不透明预乘），则 `over(B, over(D, U)) == B` 对任意 D、U 成立——
+  // 因为不透明源的 `over` 就是**完全替换**。所以「跳过」与「先画再盖」逐像素相等。
+  // 三个前提（任一不成立就**不能**跳，故条件全在 `plain` 分支上）：
+  //   ① `blend == SrcOver`（其他模式不是替换语义）；
+  //   ② `opacity >= 0.999`（半透明合成后底色仍半透明）；
+  //   ③ 调用方保证覆盖区**之后真的**会被不透明底填满（`DrawOptions::covered_region` 的契约）。
+  const math::IntRect covered_rect =
+      plain ? to_physical(options.covered_region).intersect(clip) : math::IntRect{};
+  // 向内缩 1 像素：几何边缘所在的那一像素只被抗锯齿**部分**覆盖，不能当成“确定被盖”。
+  const math::IntRect covered_inner =
+      covered_rect.is_empty() ? math::IntRect{}
+                              : covered_rect.inflate(-1).intersect(clip);
+  const float covered_radius =
+      plain ? options.covered_radius * (scale_ > 0.0f ? scale_ : 1.0f) : 0.0f;
+
   const auto* const pixels = sprite->pixels.get();
   const auto* const spans = sprite->spans.get();
   for (int row = 0; row < sprite->height; ++row) {
@@ -1337,15 +1466,33 @@ void Canvas::draw_shadow_layered(math::Rect rect, float radius, math::Color key_
     auto* dst = pixels_.data() + static_cast<std::size_t>(y) *
                                      static_cast<std::size_t>(physical_width_);
     // 行内非零跨度与裁剪区求交（一次算好，避免逐像素判边界）。
-    const int x_begin = std::max(origin_x + first, clip.x);
-    const int x_end = std::min(origin_x + last + 1, clip.right());
+    int x_begin = std::max(origin_x + first, clip.x);
+    int x_end = std::min(origin_x + last + 1, clip.right());
     if (x_begin >= x_end) continue;
     if (plain) {
-      for (int x = x_begin; x < x_end; ++x) {
-        const std::uint32_t source = src[x - origin_x];
-        if (source == 0U) continue;
-        dst[x] = over_premul(dst[x], source);
+      // 分段贴：把本行切成「确定不被覆盖」的若干段（最多三段：被盖区左/右），
+      // 段内走 SIMD 逐像素 `src-over`。覆盖区内的像素会被随后铺上的不透明底色替换，
+      // 跳过与不跳过逐像素等价（见上）。
+      if (!covered_inner.is_empty()) {
+        const CoveredSpan span = covered_span_at(covered_inner, covered_radius, y);
+        if (!span.empty()) {
+          const int cut_begin = std::max(x_begin, span.begin);
+          const int cut_end = std::min(x_end, span.end);
+          if (cut_end > cut_begin) {
+            if (cut_begin > x_begin) {
+              simd::over_row(dst + x_begin, src + (x_begin - origin_x),
+                             static_cast<std::size_t>(cut_begin - x_begin));
+            }
+            if (cut_end < x_end) {
+              simd::over_row(dst + cut_end, src + (cut_end - origin_x),
+                             static_cast<std::size_t>(x_end - cut_end));
+            }
+            continue;
+          }
+        }
       }
+      simd::over_row(dst + x_begin, src + (x_begin - origin_x),
+                     static_cast<std::size_t>(x_end - x_begin));
       continue;
     }
     for (int x = x_begin; x < x_end; ++x) {
@@ -1369,6 +1516,246 @@ void Canvas::draw_shadow_layered(math::Rect rect, float radius, math::Color key_
       dst[x] = blend_pixel_premul(dst[x], scaled, alpha, options.blend);
     }
   }
+}
+
+void Canvas::clear_geometry_sprites() { geometry_sprites_.clear(); }
+
+auto Canvas::geometry_stats() const noexcept -> GeometryStats {
+  GeometryStats stats = geometry_stats_;
+  stats.entries = geometry_sprites_.size();
+  return stats;
+}
+
+auto Canvas::path_control_origin(const Path& path, float scale, float pad) -> math::Point {
+  // 取**控制点**包围盒的左上角（不扁平化：扁平化就是被测成本的一部分），
+  // 向外留 `pad` 再**取整**（不是 floor）——
+  //
+  // 为何取整而不是 floor：`origin` 既是贴图的平移基准，也是“把图案搬到整像素网格上”的
+  // 那个位移。贴图只能做**整像素**平移，所以它必须存的是“图案落在整像素原点时的样子”；
+  // 若用 floor，贴图就会带着一个固定的 0~1 像素小数偏置，而那个偏置只对**首次**绘制点
+  // 正确——换个位置（小数部分不同）抗锯齿就不同了（实测：522 像素差，最大通道差 255）。
+  bool has = false;
+  float min_x = 0.0f;
+  float min_y = 0.0f;
+  for (const auto& command : path.commands()) {
+    const math::Point points[3] = {command.p1, command.p2, command.p3};
+    const int count = command.kind == PathCommand::Kind::CubicTo   ? 3
+                      : command.kind == PathCommand::Kind::QuadTo ? 2
+                      : command.kind == PathCommand::Kind::Close  ? 0
+                                                                  : 1;
+    for (int index = 0; index < count; ++index) {
+      if (!has) {
+        min_x = points[index].x;
+        min_y = points[index].y;
+        has = true;
+        continue;
+      }
+      min_x = std::min(min_x, points[index].x);
+      min_y = std::min(min_y, points[index].y);
+    }
+  }
+  if (!has) return math::Point{0.0f, 0.0f};
+  return math::Point{std::round(min_x * scale - pad), std::round(min_y * scale - pad)};
+}
+
+auto Canvas::path_geometry_key(const Path& path, float scale, std::uint64_t extra,
+                               math::Point origin) -> std::uint64_t {
+  // 取**命令流控制点**（不扁平化：扁平化本身就是被测成本的一部分），
+  // 且一律混入**相对 `origin` 的坐标**（不是绝对坐标）。
+  //
+  // 为何必须是相对坐标：贴图的全部意义就是“同一形状换个位置复用”。
+  // 若键里带绝对坐标，平移就会变成一个新条目——缓存退化成“同一位置重复画时才命中”，
+  // 而那恰恰是现实中最不可能发生的场景。
+  //
+  // ⚠ 先写的那版就是绝对的，后果很隐蔽：「换位置必须重新建图」那条判据会**恒为真**
+  // （平移就改变几何键），于是相位漏进键的缺陷也照样判绿。
+  std::uint64_t hash = 1469598103934665603ULL;
+  const auto mix64 = [&hash](std::uint64_t part) {
+    hash ^= part;
+    hash *= 1099511628211ULL;
+  };
+  const auto quantize = [&mix64, origin](float value, float offset) {
+    mix64(static_cast<std::uint64_t>(
+        static_cast<std::int64_t>(std::lround((value - offset) * 256.0f)) + 0x40000000));
+  };
+  mix64(extra);
+  mix64(static_cast<std::uint64_t>(static_cast<std::uint32_t>(scale * 100000.0f)));
+  const auto commands = path.commands();
+  mix64(commands.size());
+  for (const auto& command : commands) {
+    mix64(static_cast<std::uint64_t>(static_cast<std::uint8_t>(command.kind)));
+    quantize(command.p1.x, origin.x);
+    quantize(command.p1.y, origin.y);
+    // 只有曲线才有 p2/p3；直线/移动只混 p1——否则“同一线段但残留控制点不同”
+    // 会得到不同的键（同一条几何变成两个缓存条目）。
+    const bool has_p2 = command.kind == PathCommand::Kind::QuadTo ||
+                        command.kind == PathCommand::Kind::CubicTo;
+    if (has_p2) {
+      quantize(command.p2.x, origin.x);
+      quantize(command.p2.y, origin.y);
+    }
+    if (command.kind == PathCommand::Kind::CubicTo) {
+      quantize(command.p3.x, origin.x);
+      quantize(command.p3.y, origin.y);
+    }
+  }
+  return hash;
+}
+
+auto Canvas::try_geometry_sprite(std::uint64_t geometry_key, const Paint& paint, float opacity,
+                                 BlendMode blend, const std::function<Path()>& build,
+                                 math::Point draw_origin) -> bool {
+  // ① 硬条件（不满足就老实走光栅化）
+  if (!geometry_cache_enabled_ || !geometry_sprite_cache_enabled()) {
+    ++geometry_stats_.rejected;
+    return false;
+  }
+  if (!paint.is_solid() || (blend != BlendMode::SrcOver && blend != BlendMode::Src) ||
+      has_mask_clip() || paint.color().a == 0U || opacity <= 0.0f) {
+    ++geometry_stats_.rejected;
+    return false;
+  }
+  const math::Color color = paint.color();
+
+  // ② 完整键 = 几何 × 颜色 × 不透明度 × 混合模式
+  std::uint64_t hash = geometry_key;
+  const auto mix64 = [&hash](std::uint64_t part) {
+    hash ^= part;
+    hash *= 1099511628211ULL;
+  };
+  mix64(static_cast<std::uint64_t>(color.r) | (static_cast<std::uint64_t>(color.g) << 8U) |
+        (static_cast<std::uint64_t>(color.b) << 16U) | (static_cast<std::uint64_t>(color.a) << 24U));
+  mix64(static_cast<std::uint64_t>(static_cast<std::uint32_t>(math::clamp01(opacity) * 100000.0f)));
+  mix64(static_cast<std::uint64_t>(blend));
+
+  // ③ 查缓存（命中就贴到**本次**位置——贴图与位置无关）
+  for (const auto& entry : geometry_sprites_) {
+    if (entry.key == hash) {
+      ++geometry_stats_.hits;
+      return blit_geometry_sprite(entry.sprite, draw_origin);
+    }
+  }
+
+  // ④ 未命中：先建几何（`build` 可能是描边扩展或 DPI 缩放）
+  ++geometry_stats_.misses;
+  const Path physical = build();
+  if (physical.is_empty()) return false;
+  // 离屏画布的画笔：纯色、`opacity` 烘进**画布混合**（与其后真正的贴图合成同口径）。
+  //
+  // ⚠ 两个坑：
+  // 1. **不能**把 opacity 乘进颜色的 alpha：那会把 `style.opacity` 与颜色自身的 alpha
+  //    混为一谈，随后贴图时又乘一次——实测 523 像素差、最大通道差 166。
+  // 2. 必须用 **SrcOver**（不是 `Src`）——即使在透明底上二者结果相同。
+  //    原因在 `blend_coverage_runs`：只有 `SrcOver` 走“先按像素累加覆盖率、同一像素只混一次”
+  //    的路径；`Src` 是覆盖语义，同一像素被多段覆盖时只保留**最后一段**——
+  //    圆角弧段正是“一像素多段”的典型（实测覆盖率 48/109 vs 正确值 88/164）。
+  const raster::Paint sprite_paint = raster::Paint::solid(color);
+  const raster::DrawOptions options_for_sprite{.blend = raster::BlendMode::SrcOver,
+                                              .opacity = opacity};
+  const auto polylines = physical.flatten(0.25f);
+  if (polylines.empty()) return false;
+  bool has_point = false;
+  float min_x = 0.0f;
+  float min_y = 0.0f;
+  float max_x = 0.0f;
+  float max_y = 0.0f;
+  for (const auto& polyline : polylines) {
+    for (const math::Point& point : polyline.points) {
+      if (!has_point) {
+        min_x = max_x = point.x;
+        min_y = max_y = point.y;
+        has_point = true;
+        continue;
+      }
+      min_x = std::min(min_x, point.x);
+      min_y = std::min(min_y, point.y);
+      max_x = std::max(max_x, point.x);
+      max_y = std::max(max_y, point.y);
+    }
+  }
+  if (!has_point) return false;
+  const math::Rect bounds = math::Rect::from_ltrb(min_x, min_y, max_x, max_y);
+  if (bounds.is_empty()) return false;
+  const math::IntRect area = bounds.round_out().inflate(1);
+  if (area.is_empty()) return false;
+  const auto pixel_count = static_cast<long long>(area.width) * static_cast<long long>(area.height);
+  // 面积超限：不建贴图（大面积图案建图比画一次贵，且缓存会持续吃内存）。
+  if (pixel_count <= 0 || pixel_count > kGeometrySpriteMaxPixels) return false;
+
+  // **用原管线在离屏画布上画一遍**，而不是自己再实现一份像素交付：
+  //
+  // 两个方案都可行，但只有这个的等价性是**由构造保证**的：贴图内容就是
+  // `fill_path_aa` 在一张透明底画布上的输出，于是“贴图”与“直接画”是同一份代码画出的
+  // 同一批像素（后者只是多一层 `src-over` 到已有背景上，结合律）。
+  // 实测教训：先写的那版自己重算了覆盖率（`rasterize_path_alpha`），
+  // 结果在两套量化/坐标口径上悄悄漂了 238 个像素（一整块 18×20 错位）。
+  raster::Canvas scratch(area.width, area.height, 1.0f);
+  detail::fill_path_aa(scratch,
+                       physical.translated(-static_cast<float>(area.x),
+                                           -static_cast<float>(area.y)),
+                       sprite_paint, options_for_sprite);
+  const auto scratch_pixels = scratch.pixels();
+  std::vector<std::uint32_t> baked(scratch_pixels.begin(), scratch_pixels.end());
+  std::vector<std::pair<int, int>> spans(static_cast<std::size_t>(area.height), {-1, -1});
+  bool any = false;
+  for (int row = 0; row < area.height; ++row) {
+    const auto* line =
+        baked.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(area.width);
+    int first = -1;
+    int last = -1;
+    for (int x = 0; x < area.width; ++x) {
+      if ((line[x] & 0xFFU) == 0U) continue;
+      if (first < 0) first = x;
+      last = x;
+    }
+    if (first >= 0) {
+      spans[static_cast<std::size_t>(row)] = {first, last};
+      any = true;
+    }
+  }
+  if (!any) return false;
+
+  GeometrySprite sprite;
+  sprite.pixels = std::make_shared<const std::vector<std::uint32_t>>(std::move(baked));
+  sprite.spans = std::make_shared<const std::vector<std::pair<int, int>>>(std::move(spans));
+  // `build` 返回的已是**相对 origin 平移后的**路径，因此 `area` 就是相对绘制点的偏移。
+  sprite.x = area.x;
+  sprite.y = area.y;
+  sprite.width = area.width;
+  sprite.height = area.height;
+  if (geometry_sprites_.size() >= kGeometrySpriteLimit) {
+    geometry_sprites_.erase(geometry_sprites_.begin());
+  }
+  geometry_sprites_.push_back(GeometryCacheEntry{hash, std::move(sprite)});
+  return blit_geometry_sprite(geometry_sprites_.back().sprite, draw_origin);
+}
+
+auto Canvas::blit_geometry_sprite(const GeometrySprite& sprite, math::Point origin) -> bool {
+  // 颜色与不透明度已烘进贴图（键里含它们），这里只负责把预乘色按 `src-over` 贴上去。
+  const math::IntRect clip = clip_rect();
+  if (clip.is_empty() || sprite.pixels == nullptr || sprite.spans == nullptr) return true;
+  // `origin` 是**物理像素、整数**（由 `path_control_origin` 产出），
+  // 因此贴图与直接光栅化落在同一像素相位上。
+  const int origin_x = static_cast<int>(std::lround(origin.x)) + sprite.x;
+  const int origin_y = static_cast<int>(std::lround(origin.y)) + sprite.y;
+  const auto& pixels = *sprite.pixels;
+  const auto& spans = *sprite.spans;
+  for (int row = 0; row < sprite.height; ++row) {
+    const int y = origin_y + row;
+    if (y < clip.y || y >= clip.bottom()) continue;
+    const auto [first, last] = spans[static_cast<std::size_t>(row)];
+    if (first < 0) continue;
+    const int x_begin = std::max(origin_x + first, clip.x);
+    const int x_end = std::min(origin_x + last + 1, clip.right());
+    if (x_begin >= x_end) continue;
+    const auto* src = pixels.data() + static_cast<std::size_t>(row) *
+                                        static_cast<std::size_t>(sprite.width);
+    auto* dst = pixels_.data() + static_cast<std::size_t>(y) *
+                                     static_cast<std::size_t>(physical_width_);
+    simd::over_row(dst + x_begin, src + (x_begin - origin_x),
+                   static_cast<std::size_t>(x_end - x_begin));
+  }
+  return true;
 }
 
 void Canvas::draw_canvas(const Surface& source, math::Rect destination, DrawOptions options) {

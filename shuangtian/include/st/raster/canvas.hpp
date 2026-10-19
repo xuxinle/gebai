@@ -13,6 +13,7 @@
 ///   这样同一条绘制路径既能落到 CPU 也能落到显卡）。
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 #include <utility>
@@ -194,6 +195,28 @@ class Canvas final : public Surface {
   void blend_coverage_runs(int y, std::span<const CoverageRun> runs, const Paint& paint,
                            float opacity, BlendMode blend);
 
+  /// 几何 sprite 缓存的命中/未命中计数（进程内累计，供 `metrics` 回答
+  /// 「缓存到底有没有生效」——实测过“加了缓存反而更慢”时，第一步就是查命中率）。
+  struct GeometryStats {
+    std::uint64_t hits{0};
+    std::uint64_t misses{0};
+    std::uint64_t rejected{0};  ///< 因硬条件不满足而完全没进缓存路径
+    std::size_t entries{0};
+  };
+  [[nodiscard]] auto geometry_stats() const noexcept -> GeometryStats;
+  /// 运行时开关几何 sprite 缓存（默认开）。
+  ///
+  /// 为何要可运行时切换：验证“缓存不改像素”的唯一干净办法是**同一进程里把两侧都跑一遍**
+  /// （同一块画布、同一份代码、同一批路径），只差这个开关。
+  /// 换成“开/关两个进程各跑一次”会引入动画/时序/首次预热差异（实测：同配置两次截图
+  /// 本来就不一致），差异无法归因。
+  void set_geometry_cache_enabled(bool enabled) noexcept { geometry_cache_enabled_ = enabled; }
+  [[nodiscard]] auto geometry_cache_enabled() const noexcept -> bool {
+    return geometry_cache_enabled_;
+  }
+  /// 清空几何 sprite 缓存（`resize` / 帧循环重启时调）。
+  void clear_geometry_sprites();
+
  private:
   struct ClipFrame {
     math::IntRect rect{};  ///< 物理像素
@@ -237,6 +260,75 @@ class Canvas final : public Surface {
   [[nodiscard]] auto to_logical_point(float physical_x, float physical_y) const noexcept
       -> math::Point;
 
+  /// **几何 sprite 缓存**（单色图案的预烘坝贴图）。
+  ///
+  /// ## 为何要它（2026-10 性能轮的最大一项）
+  ///
+  /// 图标与环形边框这类图形有两个特征：① 尺寸小、次数多（gallery 一帧 46 次描边）；
+  /// ② **几何与颜色每帧完全相同**（同一批图标的位置变了又变，但形状/颜色/DPI 不变）。
+  /// 而 `fill_path`/`stroke_path` 每次都重走整条管线：
+  /// `flatten → 边表排序 → 4× 子采样 → 按行 merge_runs → 按像素混合`。
+  /// 实测一次 20×20 图标的描边是 **91 µs**，而它的逐像素混合不到 1 µs——
+  /// 也就是说 **>99% 的工作是重建已经知道的东西**。
+  ///
+  /// ## 何时命中（硬条件，全在 `try_geometry_sprite`）
+  ///
+  /// - 纯色画笔 + `SrcOver`/`Src` + `antialias` 开 + 无遮罩裁剪；
+  /// - 路径的扁平化点集与参数（颜色/DPI/描边样式）哈希一致；
+  /// - 绘制面积小于 `kGeometrySpriteMaxPixels`（大面积图案重建一次不算亏，而缓存
+  ///   会持续吃内存）。
+  ///
+  /// 注：性能门禁与探针都用**同一批流程**绘制，所以缓存对它们同样生效——
+  /// 那正是“用户实际感受到的每帧成本”。首次建贴图的一次性成本由 `fill_path`/
+  /// `stroke_path` 的剖析条目如实体现（它属于首帧，不属于稳态）。
+  ///
+  /// ## 与直接绘制等价
+  ///
+  /// 贴图存的是「该图案在**无背景**上、以 `Src` 写入的预乘色」，键包含颜色与
+  /// 不透明度；命中后按 `SrcOver` 贴到目标上。于是与“先用遮罩算出覆盖率、
+  /// 再 `scale_premul` + `over_premul`”**逐位相同**（覆盖率量化口径一致；
+  /// `src-over` 对 `Src` 预乘色成立）。线条绕向/孔洞由带符号覆盖率保留。
+  struct GeometrySprite {
+    std::shared_ptr<const std::vector<std::uint32_t>> pixels{};  ///< 预乘，行优先
+    /// 每行 [first, last] 的非零跨度（相对贴图原点）；`first < 0` = 该行全零。
+    std::shared_ptr<const std::vector<std::pair<int, int>>> spans{};
+    int x{0};
+    int y{0};
+    int width{0};
+    int height{0};
+  };
+  /// 尝试命中几何 sprite 并直接贴到画布（返回 true = 已交付）。
+  ///
+  /// ## 为何键建在**源路径**上而不是扁平化结果上
+  ///
+  /// 描边的最贵一步是 `stroke_to_path`（扁平化 + 每段四边形 + 顶点补圆）——
+  /// 如果只对“扩展后的轮廓”做键，这一步永远跑在最前面，缓存就只省了扫描线。
+  /// 所以键直接取**命令流的控制点**（不扁平化，O(命令数) 且无浮点开销），
+  /// 未命中时才调 `build`（= `stroke_to_path` 或 DPI 缩放）。
+  ///
+  /// `build` 只在未命中时被调用一次，它返回的路径既是贴图来源、也是本帧的交付物。
+  auto try_geometry_sprite(std::uint64_t geometry_key, const Paint& paint, float opacity,
+                           BlendMode blend, const std::function<Path()>& build,
+                           math::Point draw_origin) -> bool;
+  /// 把“源路径（**已平移到控制点包围盒原点**）+ 缩放”混成键（供 `fill_path` 用）。
+  ///
+  /// 为何要先平移：贴图必须与**绘制位置无关**，否则第一次画在 (100,50) 的图标
+  /// 被复用时会被贴回 (100,50)（实测踩过：两个簇 449 像素错位）。
+  /// 平移量取控制点包围盒的整数原点（O(命令数)，无需扁平化），因此同一条
+  /// 几何在任何位置都会得到**同一个键**。
+  [[nodiscard]] static auto path_geometry_key(const Path& path, float scale, std::uint64_t extra,
+                                             math::Point origin) -> std::uint64_t;
+  /// 控制点包围盒的**整数原点**（向外留 `pad`）：贴图的平移基准。
+  ///
+  /// 只取决于「形状 + 缩放 + pad」，与绘制位置无关——因此同一条几何在任何位置
+  /// 都得到同一个原点，贴图才能跨位置复用。
+  [[nodiscard]] static auto path_control_origin(const Path& path, float scale, float pad = 1.0f)
+      -> math::Point;
+
+  /// 把一张已建好的几何贴图贴到画布（`try_geometry_sprite` 的交付半步）。
+  /// `origin` 是本次绘制的位置（贴图内部坐标相对它）。
+  auto blit_geometry_sprite(const GeometrySprite& sprite, math::Point origin) -> bool;
+
   int physical_width_{0};
   int physical_height_{0};
   float scale_{1.0f};
@@ -247,6 +339,16 @@ class Canvas final : public Surface {
   std::vector<std::pair<std::uint64_t, std::shared_ptr<const Mask>>> shadow_masks_{};
   /// 两层合一阴影贴图缓存（键 → 贴图）。上限同 `shadow_mask`，超限丢弃最早一项。
   std::vector<std::pair<std::uint64_t, LayeredShadow>> layered_shadows_{};
+  /// 几何 sprite 缓存（键 → 贴图）。上限 `kGeometrySpriteLimit`，超限丢弃最早一项。
+  /// 为何用 FIFO 而不是 LRU：界面里的图标集合在**帧间**高度稳定（命中路径永不移到表尾），
+  /// 而在**页面切换**时成批更换——FIFO 天然匹配这个分布，且不需维护链表。
+  struct GeometryCacheEntry {
+    std::uint64_t key{0};
+    GeometrySprite sprite{};
+  };
+  std::vector<GeometryCacheEntry> geometry_sprites_{};
+  mutable GeometryStats geometry_stats_{};
+  bool geometry_cache_enabled_{true};
   /// 扫描线覆盖率的**逐像素累加缓冲**（`blend_coverage_runs` 用）。
   ///
   /// 复用同一个 buffer 而非每行分配：一段路径会对本函数调用几百次（每行一次），

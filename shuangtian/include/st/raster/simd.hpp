@@ -18,6 +18,22 @@ void blend_row(std::uint32_t* dst, std::size_t count, std::uint32_t premultiplie
 /// 当前编译单元启用的加速档位（"sse2" / "avx2" / "neon" / "scalar"）。
 [[nodiscard]] auto backend() noexcept -> const char*;
 
+/// 逐像素 `src-over`：`dst[i] = src[i] over dst[i]`（源与目标都是**预乘**）。
+///
+/// 与 `blend_row` 的分工：后者是「**一个**源色 × 常量覆盖率」贴一整行（覆盖率来自扫描线），
+/// 本函数是「**每像素各自的**源色」——图片/阴影贴图/几何 sprite 的合成都是这个形态。
+/// 旧实现对这些场景只能逐像素调 `over_premul`（4 次除法-移位 + 4 次解包/打包），
+/// 是阴影与图标合成的主要开销。
+///
+/// ## 语义契约（两条，缺一不可）
+///
+/// 1. **两侧都是预乘 RGBA8**（`0xRRGGBBAA`），且满足预乘不变量 `c ≤ a`；
+/// 2. 于是逐通道结果**不会超过 255**（`src_c + dst_c·(255−sa)/255 ≤ sa + (255−sa) = 255`），
+///    SIMD 侧的饱和打包与标量侧的普通打包**逐位一致**。传违反不变量的数据时
+///    标量路径会溢出串色、SIMD 路径饱和——那是调用方违约，不是两条路径不一致。
+/// 3. 源完全透明（`a == 0`）的像素**保持目标原值**（与 `over_premul` 的早退同义）。
+void over_row(std::uint32_t* dst, const std::uint32_t* src, std::size_t count) noexcept;
+
 /// 遮蔽（常量 alpha）整行（Src 模式用）。
 void erase_row(std::uint32_t* dst, std::size_t count, std::uint8_t alpha) noexcept;
 

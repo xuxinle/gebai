@@ -120,6 +120,20 @@ namespace {
               over(scale(channel(src, 8)), channel(dst, 8)), over(sa, channel(dst, 0)));
 }
 
+/// 逐像素预乘 `src-over` 的标量参考实现（`over_row` 的三路基准，语义即它的契约）。
+[[nodiscard]] auto over_scalar(std::uint32_t dst, std::uint32_t src) noexcept -> std::uint32_t {
+  const std::uint32_t source_alpha = src & 0xFFU;
+  if (source_alpha == 0U) return dst;
+  const std::uint32_t inverse = 255U - source_alpha;
+  const auto over = [inverse](std::uint32_t source, std::uint32_t destination) noexcept {
+    return source + (destination * inverse + 127U) / 255U;
+  };
+  return pack(over(channel(src, 24), channel(dst, 24)),
+              over(channel(src, 16), channel(dst, 16)),
+              over(channel(src, 8), channel(dst, 8)),
+              over(source_alpha, channel(dst, 0)));
+}
+
 }  // namespace
 
 auto backend() noexcept -> const char* {
@@ -237,6 +251,66 @@ void erase_row(std::uint32_t* dst, std::size_t count, std::uint8_t alpha) noexce
   if (count == 0 || alpha == 0) return;
   const auto value = static_cast<std::uint32_t>(alpha);
   fill_row(dst, count, value);
+}
+
+void over_row(std::uint32_t* dst, const std::uint32_t* src, std::size_t count) noexcept {
+  if (count == 0) return;
+#if ST_SIMD_AVX2
+  if (cpu_has_avx2()) {
+    const __m256i low_mask = _mm256_set1_epi16(0x00FF);
+    const __m256i alpha_mask = _mm256_set1_epi32(0x000000FF);
+    const __m256i full = _mm256_set1_epi32(255);
+    std::size_t index = 0;
+    for (; index + 8 <= count; index += 8) {
+      const __m256i source = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + index));
+      const __m256i destination = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(dst + index));
+      // 每像素的 `255 - a` 复制到两个 16 位 lane（低字节/高字节各一组通道）。
+      const __m256i inverse32 = _mm256_sub_epi32(
+          full, _mm256_and_si256(source, alpha_mask));
+      const __m256i inverse = _mm256_and_si256(
+          _mm256_or_si256(inverse32, _mm256_slli_epi32(inverse32, 16)), low_mask);
+      const __m256i source_low = _mm256_and_si256(source, low_mask);
+      const __m256i source_high = _mm256_and_si256(_mm256_srli_epi16(source, 8), low_mask);
+      const __m256i destination_low = _mm256_and_si256(destination, low_mask);
+      const __m256i destination_high =
+          _mm256_and_si256(_mm256_srli_epi16(destination, 8), low_mask);
+      const __m256i out_low =
+          _mm256_add_epi16(source_low, scale_255_avx(destination_low, inverse));
+      const __m256i out_high =
+          _mm256_add_epi16(source_high, scale_255_avx(destination_high, inverse));
+      const __m256i merged = _mm256_or_si256(
+          out_low, _mm256_slli_epi16(_mm256_and_si256(out_high, low_mask), 8));
+      _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + index), merged);
+    }
+    for (; index < count; ++index) dst[index] = over_scalar(dst[index], src[index]);
+    return;
+  }
+#endif
+#if ST_SIMD_X86
+  const __m128i low_mask = _mm_set1_epi16(0x00FF);
+  const __m128i alpha_mask = _mm_set1_epi32(0x000000FF);
+  const __m128i full = _mm_set1_epi32(255);
+  std::size_t index = 0;
+  for (; index + 4 <= count; index += 4) {
+    const __m128i source = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + index));
+    const __m128i destination = _mm_loadu_si128(reinterpret_cast<const __m128i*>(dst + index));
+    const __m128i inverse32 = _mm_sub_epi32(full, _mm_and_si128(source, alpha_mask));
+    const __m128i inverse =
+        _mm_and_si128(_mm_or_si128(inverse32, _mm_slli_epi32(inverse32, 16)), low_mask);
+    const __m128i source_low = _mm_and_si128(source, low_mask);
+    const __m128i source_high = _mm_and_si128(_mm_srli_epi16(source, 8), low_mask);
+    const __m128i destination_low = _mm_and_si128(destination, low_mask);
+    const __m128i destination_high = _mm_and_si128(_mm_srli_epi16(destination, 8), low_mask);
+    const __m128i out_low = _mm_add_epi16(source_low, scale_255(destination_low, inverse));
+    const __m128i out_high = _mm_add_epi16(source_high, scale_255(destination_high, inverse));
+    const __m128i merged =
+        _mm_or_si128(out_low, _mm_slli_epi16(_mm_and_si128(out_high, low_mask), 8));
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + index), merged);
+  }
+  for (; index < count; ++index) dst[index] = over_scalar(dst[index], src[index]);
+#else
+  for (std::size_t index = 0; index < count; ++index) dst[index] = over_scalar(dst[index], src[index]);
+#endif
 }
 
 void convert_rgba_to_xrgb_row(std::uint32_t* dst, const std::uint32_t* src,

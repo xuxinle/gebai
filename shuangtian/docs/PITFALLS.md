@@ -63,6 +63,11 @@
 | **按注册序取模的测试期望必须观察推导** | 分片（`--shard`）按**全局注册序**取模，而全局序由其它 TU 的用例数决定——早链接 TU 正常新增一例就把哨兵块整体平移，三处硬编码期望（块起点≡0 mod 4 / 落片号 / 空片选片）**全部误击**，现象像 flaky（同二进制忽绿忽红——其实是中途重建）。期望值只能**运行时观察**（无过滤 `--list` 行号即全局注册序），不能算术硬编码 | `tests/shard_parity_test.cpp` 的 `full_listing_lines` 注释；实测 2026-10-15 |
 | **多维下标放进断言宏 = 逗号被当成参数分隔符** | `ST_CHECK(view[y, x] == v)` 报的是 `macro 'ST_CHECK' passed 2 arguments, but takes just 1`（`ST_CHECK_EQ(view[y, x], v)` 则是 3 个）。**整体加一层括号**即可：`ST_CHECK((view[y, x] == v))` / `ST_CHECK_EQ((view[y, x]), v)`。同样适用于 `arr[i, j]` 这类自定义下标；一维下标不受影响，所以此坑只在第一次用 `mdspan` 时现形 | `tests/raster_pixel_view_test.cpp` 头部注释；实测 2026-10-17 |
 | **像素比对时“预乘打包值”不是颜色通道** | `pixels()` / `pixel_view()` 存的是 `math::premultiply` 的产物（预乘 + 打包，**alpha 在最低字节**），而 `pixel_at()` 返回非预乘色。拿 `pixels()[i]` 当红色通道去比，得到的是 570425599 这种数字，看上去像“实现错了”（实测先错了一轮）。要比就经 `unpremultiply` 走一圈，或直接与 `premultiply(...)` 的期望值比 | `tests/raster_pixel_view_test.cpp`；`include/st/math/color.hpp` 的 `premultiply` / `unpremultiply` |
+| **验证“缓存/快路径不改像素”时，不能比两张截图** | 换进程/换二进制比会同时引入动画（悬浮过渡、光标闪烁）、首次预热（字体/页缓存）与产物差异——实测同配置两次截图 `sha256` 就不同，差异**无法归因**。正解：在**同一进程、同一块画布**上跑同一批绘制，只切一个**运行时开关**（`Canvas::set_geometry_cache_enabled()`）。见 `tools/sprite_equiv_probe.cpp` | 实测 2026-10-19（本轮几何 sprite 缓存） |
+| **“换位置后必须未命中”不能当相位判据** | 若缓存键里几何是**绝对坐标**，平移就改变键 ⇒ “未命中”恒为真 ⇒ 相位漏进键的缺陷也判绿。该判据必须换成**比像素**（同一内容两种相位 vs 直接绘制）。本仓实测：这个空护栏让逆向验证连续两次红不了，才拓出“几何键要用相对坐标”这一层 | `src/raster/canvas.cpp` 的 `path_geometry_key` 注释；实测 2026-10-19 |
+| **建贴图的离屏画布不能用 `BlendMode::Src`** | `Src` 是**覆盖**语义，而 `blend_coverage_runs` 只有 `SrcOver` 走“同一像素多段覆盖率累加、只混一次”的路径——于是圆角弧段（一像素多段）在 `Src` 下只保留**最后一段**。实测：圆角内侧覆盖率 48/109，而正确值 88/164（226 像素差、最大通道差 240）。**即使在透明底上二者结果本该相同，也不能图省事用 `Src`** | `tools/sprite_equiv_probe.cpp` 的同位置用例（逆向验证可复现）；实测 2026-10-19 |
+| **`opacity` 只能烘一处** | 把它乘进颜色的 alpha、又在 `DrawOptions::opacity` 里再乘一次 = 乘两遍（实测 523 像素差、最大通道差 166）。贴图路径要把 opacity 交给**画布混合**（与真正的合成同口径），不要在颜色上动 | 同上；实测 2026-10-19 |
+| **性能对照用例会被新缓存抹平** | `border_ring_is_not_slower_than_stroke` 两侧都命中贴图后，比值变成调度噪声（实测分片内恒红、单跑却绿）。**量“两种实现本身”的用例必须关掉被测机制**（与 §7.2“桩把差异抹平了”同型） | `tests/paint_optimization_test.cpp` 的该用例注释；实测 2026-10-19 |
 
 ## 场景 3：改观感（字体/配色/动画/手感）
 

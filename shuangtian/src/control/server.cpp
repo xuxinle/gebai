@@ -1593,6 +1593,12 @@ result["cursor"] = std::string(ui::mouse_cursor_name(root.cursor()));
 result["font_faces_loaded"] = metrics.font_faces_loaded;
 result["font_mapped_loads"] = metrics.font_mapped_loads;
 result["font_read_fallbacks"] = metrics.font_read_fallbacks;
+// 几何 sprite 缓存（矢量图案的重复绘制是否真的被免掉）——实测踩过“缓存永不命中"
+// 只因位图坐标系漏了平移，而分析器里只看到“加了缓存反而更慢”。
+result["sprite_hits"] = metrics.sprite_hits;
+result["sprite_misses"] = metrics.sprite_misses;
+result["sprite_rejected"] = metrics.sprite_rejected;
+result["sprite_entries"] = metrics.sprite_entries;
 result["device_scale"] = static_cast<double>(metrics.device_scale);
 result["physical_width"] = static_cast<std::uint64_t>(metrics.physical_width);
 result["physical_height"] = static_cast<std::uint64_t>(metrics.physical_height);
