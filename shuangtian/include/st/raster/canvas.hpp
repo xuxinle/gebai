@@ -194,6 +194,13 @@ class Canvas final : public Surface {
   /// 与逐像素覆盖率数组语义一致（端点像素按小数分摊），但只会碰“真的有覆盖”的像素。
   void blend_coverage_runs(int y, std::span<const CoverageRun> runs, const Paint& paint,
                            float opacity, BlendMode blend);
+  /// 把路径覆盖率写入画布（`fill_path` / `fill_circle` / 描边等所有路径绘制的共同出口）。
+  ///
+  /// 为何包一层而不是各处直接调 `detail::fill_path_aa`：`clear` 后的“画布还没被碰过”
+  /// 标记必须**在任何一次像素写入时失效**，否则“跳过重复铺底”会把已画的内容当不存在。
+  /// 实测：`fill_circle` 曾经直接调内部函数、绕过 `fill_path`，于是“先画圆再铺同色底”
+  /// 两块输出差 **2040 像素**。
+  void rasterize_path_runs(const Path& path, const Paint& paint, DrawOptions options);
 
   /// 几何 sprite 缓存的命中/未命中计数（进程内累计，供 `metrics` 回答
   /// 「缓存到底有没有生效」——实测过“加了缓存反而更慢”时，第一步就是查命中率）。
@@ -213,6 +220,13 @@ class Canvas final : public Surface {
   void set_geometry_cache_enabled(bool enabled) noexcept { geometry_cache_enabled_ = enabled; }
   [[nodiscard]] auto geometry_cache_enabled() const noexcept -> bool {
     return geometry_cache_enabled_;
+  }
+  /// 运行时开关「清屏 + 首层同色不透明整屏底」的合并（默认开）。
+  ///
+  /// **验证必备**：这条快路径的正确性只能靠“开与不开逐像素相同”证明，
+  /// 而那必须同一份二进制、同一块画布上跑两遍（换进程比会被预热/时序污染）。
+  void set_skip_redundant_clear_fill_enabled(bool enabled) noexcept {
+    skip_redundant_clear_fill_ = enabled;
   }
   /// 清空几何 sprite 缓存（`resize` / 帧循环重启时调）。
   void clear_geometry_sprites();
@@ -354,6 +368,19 @@ class Canvas final : public Surface {
   /// 复用同一个 buffer 而非每行分配：一段路径会对本函数调用几百次（每行一次），
   /// 每次 `resize` 一个几十元素的 vector 不是可忽略的开销。
   std::vector<float> coverage_accum_{};
+
+  /// `clear()` 刚把整张画布变成 `cleared_color_`、且尚未被任何绘制碰过。
+  ///
+  /// 用于**消除“清屏 + 首层不透明底”的重复写**：`UIView::paint` 每帧 `clear(bg)`
+  /// 后第一件事往往是根容器用同一个颜色 `fill_rect` 铺满整屏——那一遍 `clear`
+  /// 纯属白写（1440p 上它单独就 **1.09 ms**，两项相加约 1.7 ms）。
+  ///
+  /// 仅在 `cleared_fresh_` 为真时才能跳；**任何一次绘制 / 推描裁剪 / resize 都会清掉它**
+  /// （跳过的前提就是“那些像素还没被别的东西碰过”）。
+  math::Color cleared_color_{};
+  bool cleared_fresh_{false};
+  /// 是否启用「清屏 + 首层同色整屏底」合并（默认开；关掉可供 A/B 验证）。
+  bool skip_redundant_clear_fill_{true};
   PaintProfiler* profiler_{nullptr};  ///< 空 = 不剖析
 };
 

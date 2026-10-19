@@ -153,6 +153,11 @@
       "sources": ["tools/sprite_equiv_probe.cpp"],
       "exclude_sources": ["src/pkg/*"]
     },
+    "clear_fill_merge_probe": {
+      "kind": "executable",
+      "sources": ["tools/clear_fill_merge_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
     "ink_spread_probe": { "kind": "executable", "sources": ["tools/ink_spread_probe.cpp"],
                           "exclude_sources": ["src/pkg/*"] },
     "weight_spread_probe": { "kind": "executable", "sources": ["tools/weight_spread_probe.cpp"],

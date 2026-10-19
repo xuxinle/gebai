@@ -421,6 +421,8 @@ auto Canvas::resize(int physical_width, int physical_height) -> Status {
   physical_width_ = width;
   physical_height_ = height;
   pixels_.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0U);
+  // 新像素全是透明的 0，“刚清过某颜色”的前提不复存在。
+  cleared_fresh_ = false;
   // 裁剪栈重置：旧栈顶的矩形是按旧尺寸算的，留着会让新画布的内容被裁到"旧的那块"。
   clip_stack_.clear();
   clip_stack_.push_back(ClipFrame{math::IntRect{0, 0, width, height}, nullptr, 0, 0});
@@ -484,9 +486,14 @@ void Canvas::clear(math::Color color) {
   const std::uint32_t value = math::premultiply(color);
   if (color.a == 255U) {
     std::ranges::fill(pixels_, value);
-    return;
+  } else {
+    for (auto& pixel : pixels_) pixel = value;
   }
-  for (auto& pixel : pixels_) pixel = value;
+  // 记下“刚清成什么颜色、且还没被任何绘制碰过”——供 `fill_rect` 跳过
+  // 紧随其后的“整屏同色不透明底”（那是纯重复写）。只记不透明色：
+  // 半透明清屏的最终结果取决于它下面的内容，不能当作可比的底。
+  cleared_color_ = color;
+  cleared_fresh_ = color.a == 255U;
 }
 
 auto Canvas::pixel_at(int x, int y) const -> math::Color {
@@ -1033,7 +1040,7 @@ void Canvas::fill_path(const Path& path, const Paint& paint, DrawOptions options
     if (try_geometry_sprite(key, paint, options.opacity, options.blend, build_sprite_path, origin))
       return;
   }
-  detail::fill_path_aa(*this, physical, paint, options);
+  rasterize_path_runs(physical, paint, options);
 }
 
 void Canvas::fill_rect(math::Rect rect, const Paint& paint, float radius, DrawOptions options) {
@@ -1051,6 +1058,33 @@ void Canvas::fill_rect(math::Rect rect, const Paint& paint, float radius, DrawOp
   const math::IntRect area = rect.round_out();
   const math::IntRect clipped = area.intersect(clip_rect());
   if (clipped.is_empty()) return;
+
+  // **跳过“清屏后重复铺同色整屏底”**。
+  //
+  // `UIView::paint` 的整帧路径是 `clear(bg)` → 画整树，而根容器几乎总会先用同一个
+  // `bg` 铺满整屏——那一遍 `clear` 于是白写了一次（1440p 上 clear 独自就要 1.09 ms，
+  // 首层 fill 再 0.67 ms，两项相加约 1.7 ms）。
+  //
+  // 等价性（为什么可以直接不画）：画布刚被 `clear` 填满**不透明**底色 `B`，此时
+  // `src-over` 一份同色不透明 `B` 得到的就是 `B` 本身（`over(B, B) == B`）。
+  // 四个前提缺一不可，全在这个条件里：
+  //   ① `cleared_fresh_`：清屏后**还没有任何绘制**碰过画布（否则那些像素已被改变）；
+  //   ② 纯色不透明、`opacity >= 0.999`、`SrcOver`（其他情形不是替换语义）；
+  //   ③ 颜色与 `clear` 的完全一致；
+  //   ④ 覆盖**整张画布**（按物理像素比，不是逻辑坐标）且无圆角、无遮罩裁剪。
+  const math::Color fill_color = paint.color();
+  const math::IntRect whole{0, 0, physical_width_, physical_height_};
+  if (cleared_fresh_ && skip_redundant_clear_fill_ && paint.is_solid() && fill_color.a == 255U &&
+      radius <= 0.0f && options.opacity >= 0.999f && options.blend == BlendMode::SrcOver &&
+      !has_mask_clip() && fill_color.r == cleared_color_.r &&
+      fill_color.g == cleared_color_.g && fill_color.b == cleared_color_.b &&
+      clipped.x <= whole.x && clipped.y <= whole.y && clipped.right() >= whole.right() &&
+      clipped.bottom() >= whole.bottom()) {
+    // 像素已经是目标值，不需再写；但“画布被碰过”的状态要跟着变（后续不能再跳）。
+    cleared_fresh_ = false;
+    return;
+  }
+  cleared_fresh_ = false;
 
   const bool aligned = rect.x == std::floor(rect.x) && rect.y == std::floor(rect.y) &&
                        rect.right() == std::floor(rect.right()) &&
@@ -1090,8 +1124,19 @@ void Canvas::fill_rect(math::Rect rect, const Paint& paint, float radius, DrawOp
     fill_path(path, paint, options);
     return;
   }
-  detail::fill_path_aa(*this, path, paint, options);
+  rasterize_path_runs(path, paint, options);
   (void)logical_rect;
+}
+
+/// 把路径覆盖率写入画布（`fill_path` / `fill_circle` / 描边等所有路径绘制的共同出口）。
+///
+/// 为何包一层而不是各自直接调 `detail::fill_path_aa`：
+/// `clear` 后的“画布还没被碰过”标记必须**在任何一次像素写入时失效**，否则
+/// “跳过重复铺底”会把已经画上去的内容当作不存在。实测：`fill_circle` 直接调
+/// 内部函数、绕过了 `fill_path`，于是“先画圆再铺同色底”两块输出差 **2040 像素**。
+void Canvas::rasterize_path_runs(const Path& path, const Paint& paint, DrawOptions options) {
+  cleared_fresh_ = false;
+  detail::fill_path_aa(*this, path, paint, options);
 }
 
 void Canvas::fill_circle(math::Point center, float radius, const Paint& paint,
@@ -1104,12 +1149,13 @@ void Canvas::fill_circle(math::Point center, float radius, const Paint& paint,
   }
   Path path;
   path.add_circle(center, radius);
-  detail::fill_path_aa(*this, path, paint, options);
+  rasterize_path_runs(path, paint, options);
 }
 
 void Canvas::stroke_path(const Path& path, const Paint& paint, float width,
                          const StrokeStyle& style, DrawOptions options) {
   OpScope scope(*this, PaintOp::Stroke);
+  cleared_fresh_ = false;
   if (width <= 0.0f || path.is_empty()) return;
   // DPI：描边宽度同比例放大，1px 发丝线在 2x 屏上是 2 物理像素（视觉等宽且更锐利）
   const float physical_width_value = width * scale_;
@@ -1138,9 +1184,8 @@ void Canvas::stroke_path(const Path& path, const Paint& paint, float width,
     if (try_geometry_sprite(key, paint, options.opacity, options.blend, build_sprite_path, origin))
       return;
   }
-  detail::fill_path_aa(*this,
-                       detail::stroke_to_path(scaled, physical_width_value, tolerance, style),
-                       paint, options);
+  rasterize_path_runs(detail::stroke_to_path(scaled, physical_width_value, tolerance, style),
+                      paint, options);
 }
 
 void Canvas::draw_shadow(math::Rect rect, float radius, float blur, math::Color color,
@@ -1732,6 +1777,7 @@ auto Canvas::try_geometry_sprite(std::uint64_t geometry_key, const Paint& paint,
 
 auto Canvas::blit_geometry_sprite(const GeometrySprite& sprite, math::Point origin) -> bool {
   // 颜色与不透明度已烘进贴图（键里含它们），这里只负责把预乘色按 `src-over` 贴上去。
+  cleared_fresh_ = false;
   const math::IntRect clip = clip_rect();
   if (clip.is_empty() || sprite.pixels == nullptr || sprite.spans == nullptr) return true;
   // `origin` 是**物理像素、整数**（由 `path_control_origin` 产出），
