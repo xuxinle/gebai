@@ -1883,20 +1883,32 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
 
     // —— 行尾注解（`LineDecoration::end_text`：blame 作者/日期这类灰字）——
     //
-    // 位置 = **本行文本之后**（不是窗口右端）：它是“这一行的元信息”，跟行一起滚动
-    // 才不会让人看错行。空间不够就不画（截一半比不画更难认）。
+    // 位置 = **本行文本之后**（跟行一起滚动，才不会让人看错行）。
+    //
+    // ⚠ 旧实现"装不下就整条不画"（要求 `ellipsize` 后长度不变），在**真实代码行**上
+    // 等于**永远不画**：一行的代码宽度通常已接近视口右边，`作者 日期` 那十几个字
+    // 根本没有空位——用户看到的就是"开了 blame 什么也没变"（实测：`read_blame`
+    // 返回 27 行、界面一条都没有）。短行的样例文件里它能画出来，所以既有 e2e
+    // （临时仓库里是 `int main() {` 这种短行）一直是绿的。
+    //
+    // 现在的取法：仍优先贴在文本之后；**若那里装不下完整注解，就把它右对齐到视口
+    // 右边缘**——只要那一带没有被本行文字占用，就能完整显示在"这一行"的右侧空白区。
+    // 两个位置都试过还装不下才不画（那种情况是真的没地方放，比如行文本本身已到边）。
     if (decoration != nullptr && !decoration->end_text.empty()) {
-      const float annotation_left = pen + kEndAnnotationGap;
-      const float available = bounds_.right() - kEndAnnotationRightPad - annotation_left;
-      if (available > 8.0f) {
-        const std::string clipped =
-            port.ellipsize(decoration->end_text, context.theme.metrics().font_sm, available);
-        // 只在能装下**完整**注解时画：截断的半句（`张三 2024-…`）比不画更让人困惑。
-        if (!clipped.empty() && clipped.size() == decoration->end_text.size()) {
-          port.draw(canvas, clipped,
-                    math::Point{annotation_left, row_top + text_offset},
-                    context.theme.metrics().font_sm, colors.text_faint);
-        }
+      const float font_sm = context.theme.metrics().font_sm;
+      const float text_right = pen;
+      const float hard_right = bounds_.right() - kEndAnnotationRightPad;
+      const float width = port.measure_width(decoration->end_text, font_sm);
+      float annotation_left = pen + kEndAnnotationGap;
+      if (annotation_left + width > hard_right) {
+        // 退一步：右对齐到视口右边缘（不与本行文字重叠才算可用）。
+        annotation_left = hard_right - width;
+      }
+      const bool fits = annotation_left >= text_right + kEndAnnotationGap * 0.5f &&
+                        annotation_left + width <= hard_right && annotation_left >= bounds_.x;
+      if (fits) {
+        port.draw(canvas, decoration->end_text, math::Point{annotation_left, row_top + text_offset},
+                  font_sm, colors.text_faint);
       }
     }
 
@@ -2576,6 +2588,20 @@ auto CodeEditor::get_property(std::string_view name) const -> std::optional<std:
     return std::to_string(begin) + ":" + std::to_string(end);
   }
   if (name == "selected_text") return selected_text();
+  // 行尾注解的**可观测面**（只读）：`行号:文本` 逗号分隔。
+  //
+  // 为何要暴露：注解是像素级产物，"有没有真进装饰表"在控制通道上否则只能靠截图
+  // 指纹（对内容变化不敏感，且需要 Pillow）。这个属性让 e2e 能断言
+  // 「哪一行有注解、文字是什么」——blame 只标光标行这条语义尤其需要它。
+  if (name == "end_annotations") {
+    std::string out;
+    for (const auto& mark : line_marks_) {
+      if (mark.end_text.empty()) continue;
+      if (!out.empty()) out += ",";
+      out += std::to_string(mark.line) + ":" + mark.end_text;
+    }
+    return out;
+  }
   if (name == "read_only") return read_only_ ? "true" : "false";
   if (name == "highlight") return highlight_enabled_ ? "true" : "false";
   if (name == "show_line_numbers") return show_line_numbers_ ? "true" : "false";
@@ -2770,7 +2796,7 @@ auto CodeEditor::property_names() const -> std::vector<std::string_view> {
           "first_visible_line", "visible_lines", "goto_line", "find_needle", "find_matches",
           "find_active", "find_case", "find_word", "line_height", "text_offset", "caret_top",
           "ink_height", "baseline", "diagnostics", "diagnostic_errors", "hover_diagnostic",
-          "hover_info"};
+          "hover_info", "end_annotations"};
 }
 
 // —— 查找与替换 ——

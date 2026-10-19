@@ -380,3 +380,20 @@ ST_TEST(tree_rows_are_readable_and_activatable_by_key) {
   }
 }
 
+
+ST_TEST(tree_hover_does_not_tint_whole_background) {
+  // 资源管理器悬浮时**不得整块变色**（2026-10-19 用户报："指针悬浮时不要改变
+  // 整个内容的背景色"）。
+  //
+  // 病因：`Tree` 构造时开了 `HoverEffect.background = true`——那是 `Element`
+  // 基类的"悬浮提亮整块"，而 Tree **本来就有行级高亮**（`paint_content` 里按
+  // `hover_index_` 画单行底色）。两层叠起来的效果是：鼠标一进树，整棵树底色变，
+  // 行高亮反而不显眼。
+  //
+  // 判据用组件声明的特效位而不是像素：像素只能证明"某一帧不同"，而这里要保证的是
+  // **不许再打开 background 这条路径**（有人图省事把它改回 true 就会红）。
+  st::ui::Tree tree;
+  const st::ui::Element::HoverEffect effect = tree.hover_effect();
+  ST_CHECK(effect.enabled);        // 仍要有悬浮反馈（鼠标形状）
+  ST_CHECK(!effect.background);    // 但不许整块提亮
+}

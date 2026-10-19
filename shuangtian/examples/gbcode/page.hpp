@@ -202,7 +202,11 @@ struct CodeEditorPage : Component {
   //
   // 为何按视口取而不是一次性拉整文件：`git blame` 是子进程，一个万行文件的整次 blame
   // 要几百毫秒——而用户每滚动一次都想要新的行。取视口那几十行的增量成本是可接受的。
-  bool blame_on_{false};
+  /// 行尾 blame 注解开关（`State`：状态栏那个图标按钮的激活态由它驱动，
+  /// 且点击本身要触发重组——普通 bool 改了没人重画，按钮看起来"点了没反应"）。
+  State<bool> blame_on_{false};
+  /// 当前被标注解的行（1 起；0 = 无）。用于避免光标在同一行内移动时重复设装饰。
+  std::size_t blame_decorated_line_{0};
 
   // —— 单文件历史弹窗（B6）——
   //
@@ -1368,6 +1372,8 @@ auto shutdown() -> void;
   /// 与诊断/差异共存时由调用方决定优先级——blame 只在开关打开时写，
   /// 而那个开关默认关，所以不会把别的装饰意外抹掉。
    void apply_blame_decorations();
+   /// 光标移动后刷新 blame 注解（只重画光标那一行）。
+   void refresh_blame_for_cursor();
 
 
   /// Git 工具窗的数据读取（帧首泵做——渲染期起子进程会崩，见 build_git_view 注释）。

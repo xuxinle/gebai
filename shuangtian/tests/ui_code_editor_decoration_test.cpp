@@ -440,3 +440,42 @@ ST_TEST(code_editor_end_text_too_wide_is_not_painted_at_all) {
   // 放不下 ⇒ 那一带**与不放注解时一致**（什么都没画）。
   ST_CHECK_EQ(region_hash(canvas, 2.0f, 22.0f, 60.0f, 138.0f), plain);
 }
+
+ST_TEST(code_editor_end_text_paints_right_of_long_code_line) {
+  // 长代码行上注解仍要画出来（2026-10-19）。
+  //
+  // 用户报「blame 开关没效果」的真根因就在这里：旧实现要求"完整装进
+  // `行尾 + 16px` 到视口右边缘之间的空隙"，而真实代码行的文字通常已经接近
+  // 右边——于是**一条注解都不画**（短行样例里能画，所以既有用例一直是绿的）。
+  // 现在的取法是把注解**右对齐到视口右边缘**（只要那一带没被文字占用）。
+  Fixture fx;
+  if (!fx.has_font()) return;
+  fx.editor.set_font_size(14.0f);
+  // 一行的文字**接近但不到**视口右边缘：行尾到右边只剩几十个像素，
+  // 放不下 `张三 2024-01-01`（约 90px），但视口里仍有空白可以放它。
+  // 这正是真实代码的常态（80 列左右就折行/被视口截断）。
+  // 数字全来自**实测**（编辑器自己的量宽口径，不另算一把尺子）：
+  // 代码行 14px 宽 **558.6px**；注解 `张三 2024-01-01` 12px 宽 **113.8px**；
+  // 右边界留白 12 ⇒ hardR = viewport - 12。
+  //
+  // 视口取 **696**，这一档恰好把两个实现的差别**分开**：
+  //  - 贴行尾：558.6 + 16 = 574.6 起放 113.8 ⇒ 到 688.4 > hardR(684) ⇒ **旧实现放弃**；
+  //  - 右对齐：hardR(684) - 113.8 = 570.2 ≥ 558.6 + 8 ⇒ **新实现画得出**。
+  // 所以这条用例在旧实现下必然红、新实现下必然绿——它测的是那条支路，不是"能画"。
+  fx.editor.set_text("auto compute_something(int a, int b) -> int { return a + b; }\n");
+  end_text_layout(fx, 696.0f, 120.0f);
+  st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(696, 120, 1.0f);
+  const st::math::Color white = st::math::Color::rgb(255, 255, 255);
+
+  canvas.clear(white);
+  fx.editor.paint(fx.context, canvas);
+  // 视口**右半**（长行文字已覆盖左半，注解若出现只可能在右半的空隙里）。
+  const std::size_t plain = region_hash(canvas, 2.0f, 22.0f, 565.0f, 694.0f);
+
+  fx.editor.set_line_decorations({CodeEditor::LineDecoration{
+      .line = 1, .mark = CodeEditor::LineMark::None, .end_text = "张三 2024-01-01"}});
+  canvas.clear(white);
+  fx.editor.paint(fx.context, canvas);
+  const std::size_t annotated = region_hash(canvas, 2.0f, 22.0f, 565.0f, 694.0f);
+  ST_CHECK(plain != annotated);   // 长行上注解也画出来了
+}

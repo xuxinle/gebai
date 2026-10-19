@@ -348,6 +348,10 @@ namespace gbcode_ui {
     const std::string picked = editor->selected_text();
     selection_text_.set(picked.empty() ? std::string{}
                                        : std::format("已选 {} 字符", st::utf8_length(picked)));
+    // 行尾 blame 注解跟着光标走：只标注光标那一行，所以每移动一次都要换装饰。
+    // 这里只换装饰（不取数）——数据按视口一次取够，光标在屏内移动永远命中缓存；
+    // 真正缺数据时由帧首 `ensure_blame` 补（它按"视口 ∪ 光标行"取）。
+    refresh_blame_for_cursor();
   }
 
 
@@ -1120,16 +1124,23 @@ void CodeEditorPage::load_active_text() {
 
   /// 开关切一下：开→下一帧取数；关→清掉装饰（界面立刻回到干净态）。
   void CodeEditorPage::toggle_blame() {
-    blame_on_ = !blame_on_;
-    if (!blame_on_) {
+    const bool next = !blame_on_.value();
+    blame_on_.set(next);   // State：驱动状态栏按钮的激活态 + 触发重组
+    if (!next) {
       blame_lines_.clear();
       blame_fetched_.clear();
       blame_path_.clear();
       if (editor != nullptr) editor->clear_line_decorations();
       status_.set("已关闭 blame 注解");
-    } else {
-      status_.set("已开启 blame 注解（显示当前视口的行）");
+      return;
     }
+    status_.set("已开启 blame 注解（显示当前视口的行）");
+    // **立即拉一次，不等下一个帧首**：`ensure_blame` 要读
+    // `editor->visible_line_range_now()`，那是**上一帧绘制**时记下的值；
+    // 刚点的这一刻读到的可能是旧值/空值，用户会觉得"点了没反应"。
+    // 这里先用既有的可见区间拉一遍（`ensure_blame` 内部对"已取过的段"早退，
+    // 所以紧接着的帧首泵不会重复取）。
+    ensure_blame();
   }
 
 
@@ -1178,7 +1189,7 @@ void CodeEditorPage::load_active_text() {
   /// **只问没问过的行段**：用户滚动时每帧都会想要新行，而 `git blame` 一次几百毫秒；
   /// 已取过的段记在 `blame_fetched_` 里，避免同一段反复起进程。
   void CodeEditorPage::ensure_blame() {
-    if (!blame_on_ || editor == nullptr) return;
+    if (!blame_on_.value() || editor == nullptr) return;
     const auto list = buffers_.value();
     if (list.empty()) return;
     const std::string path = list[active_.value()].path;
@@ -1189,7 +1200,19 @@ void CodeEditorPage::load_active_text() {
       blame_fetched_.clear();
       blame_path_ = path;
     }
-    const auto [first, last] = editor->visible_line_range_now();
+    // 取数区间 = **视口区间与光标行的并集**（光标几乎总在视口内，所以通常就是视口）。
+    //
+    // 为何仍按视口取而不是只取光标一行：`git blame -L` 要起子进程，一行一取会在
+    // 每次方向键都 fork 一次；按视口一次取够，光标在屏内移动就永远命中缓存。
+    // 光标行单独并进来，是为了兼容"视口还没画过、光标已在别处"的时序。
+    auto [first, last] = editor->visible_line_range_now();
+    const std::size_t cursor_line = editor->cursor_line() + 1;
+    if (last < first) {
+      first = last = cursor_line;
+    } else {
+      first = std::min(first, cursor_line);
+      last = std::max(last, cursor_line);
+    }
     if (last < first) return;
     for (const auto& [begin, end] : blame_fetched_) {
       if (begin <= first && last <= end) return;   // 这一段已经取过
@@ -1225,20 +1248,48 @@ void CodeEditorPage::load_active_text() {
   /// 装饰是**整体替换**语义，所以这里只回答“当前该长什么样”。
   /// 与诊断/差异共存时由调用方决定优先级——blame 只在开关打开时写，
   /// 而那个开关默认关，所以不会把别的装饰意外抹掉。
+  /// 把注解贴到**光标所在那一行**（2026-10-19 按用户要求："只有光标所在行才显示"）。
+  ///
+  /// 为什么不整屏都标：一列"作者 日期"铺满视口时，正文右侧全是灰字，读代码时
+  /// 视线会被反复拽走；而 blame 真正要回答的是"**这行**是谁写的"——给光标行标一条
+  /// 就够，且随光标移动自然更新，不需要来回扫一屏。
   void CodeEditorPage::apply_blame_decorations() {
     if (editor == nullptr) return;
-    if (!blame_on_) {
+    if (!blame_on_.value()) {
+      editor->clear_line_decorations();
+      blame_decorated_line_ = 0;
+      return;
+    }
+    // `cursor_line()` 是 **0 起**；`blame_lines_` 的键是 **1 起**的行号。
+    const std::size_t cursor_line = editor->cursor_line() + 1;
+    if (cursor_line != blame_decorated_line_) blame_decorated_line_ = cursor_line;
+    const auto found = blame_lines_.find(cursor_line);
+    if (found == blame_lines_.end()) {
       editor->clear_line_decorations();
       return;
     }
     std::vector<CodeEditor::LineDecoration> marks;
-    marks.reserve(blame_lines_.size());
-    for (const auto& [line, text] : blame_lines_) {
-      marks.push_back(CodeEditor::LineDecoration{
-          .line = line, .mark = CodeEditor::LineMark::None, .end_text = text});
-    }
+    marks.push_back(CodeEditor::LineDecoration{
+        .line = cursor_line, .mark = CodeEditor::LineMark::None, .end_text = found->second});
     editor->set_line_decorations(std::move(marks));
-    editor->mark_dirty();
+  }
+
+
+  /// 光标移动后刷新 blame 注解（只重画那一行，不重取数据）。
+  ///
+  /// 快路径：光标新行已经在 `blame_lines_` 里 ⇒ 只换装饰；不在 ⇒ 交给帧首
+  /// `ensure_blame`（它按视口区间取数，加一个缺口重试）。
+  void CodeEditorPage::refresh_blame_for_cursor() {
+    if (!blame_on_.value() || editor == nullptr) return;
+    const std::size_t cursor_line = editor->cursor_line() + 1;
+    const bool have = blame_lines_.find(cursor_line) != blame_lines_.end();
+    apply_blame_decorations();   // 有就换上，没有就清掉（不留上一行的旧注解）
+    if (!have) {
+      // 光标到了没取过的行（视口外的快速跳转、刚打开文件等）：
+      // 让帧首 `ensure_blame` 下一帧补——**这里不直接起子进程**，
+      // `git blame` 是同步 fork，按键途中做会明显卡手。
+      blame_fetched_.clear();   // 清掉"已取过"的记录，允许重新按新区间取
+    }
   }
 
 

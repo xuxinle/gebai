@@ -40,8 +40,14 @@ void Tree::invalidate_label_widths() const noexcept {
 Tree::Tree() {
   style_.radius = 0.0f;
   set_focusable(true);
+  // 悬浮**不要整块背景**：Tree 的行级高亮由 `paint_content` 自己画
+  //（见下方 `hover_index_` 那一支），`background = true` 会让整棵树的底
+  // 在鼠标进入时整体变色——资源管理器里表现为"鼠标一动，整个文件树底色变了"。
+  //
+  // 两层反馈各司其职：树级只管鼠标指针形状（"这区域可点"），
+  // 行级才管"现在指在哪一行"。`cursor` 保留，`background` 关掉。
   set_hover_effect(HoverEffect{.enabled = true,
-                               .background = true,
+                               .background = false,
                                .border = false,
                                .lift = false,
                                .glow = false,

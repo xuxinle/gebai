@@ -1214,13 +1214,26 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
         sidebar_visible_.set(true);
         mark_sidebar_visited(4);
       }, "当前语言 — 点一下打开语言列表");
-      // blame 行尾注解开关：放在状态栏（它影响“现在看到的正文”，而状态栏正是“当前显示什么”的位置）。
+      // blame 行尾注解开关：放在状态栏（它影响"现在看到的正文"，而状态栏正是
+      // "当前显示什么"的位置）。
+      //
+      // **纯图标激活按钮**（2026-10-19 按用户要求："做成一个激活按钮就行"）：
+      // 旧形态是 `图标 + "blame"/"blame 开"` 文字，在状态栏那一排格子里最占宽
+      // 且文字本身不提供额外信息（旁边全是图标格）。现在只留图标，
+      // **激活态靠 `Variant::Soft`**（与活动栏的选中态同一套语言）——
+      // 状态栏一眼扫过去就能看出它开没开，不必读字。
+      //
       // 做成可点元素还有一个实际好处：**它能被控制通道 `invoke` 触发**
       //（命令面板那条路要模拟键盘，e2e 里脆而慢）。
-      status_item(c, "status-blame", "git-branch",
-                  [this] { return blame_on_ ? std::string("blame 开") : std::string("blame"); },
-                  [this] { toggle_blame(); },
-                  "行尾 blame 注解 — 点一下开/关（显示当前视口行的作者与日期）");
+      (void)custom<Button>(c, [this](Button& b) {
+        b.set_id("status-blame");
+        b.set_icon("git-branch");
+        b.set_variant(blame_on_.value() ? Button::Variant::Soft : Button::Variant::Ghost);
+        b.set_size(Button::Size::Small);
+        b.set_hint(blame_on_.value() ? "行尾 blame 注解：已开启（点一下关闭）"
+                             : "行尾 blame 注解：已关闭（点一下开启，显示当前视口行的作者与日期）");
+        b.on_click = [this] { toggle_blame(); };
+      }, {.width = 28.0f, .height = 22.0f, .key = "status-blame"});
       (void)text(c, [this] { return status_.value(); }, {.id = "status"});
       (void)button(c, theme_is_dark() ? "亮色" : "暗色", [this] { toggle_theme(); },
                    {.id = "btn-theme"});
