@@ -17,6 +17,7 @@
 #include <string_view>
 #include <vector>
 
+#include "st/app/text_port.hpp"   // OffscreenTextPort（后台排版独立缓存域）
 #include "git_service.hpp"
 #include "lsp_bridge.hpp"
 #include "page_data.hpp"
@@ -137,6 +138,14 @@ struct CodeEditorPage : Component {
   /// 由声明式按 key 复用，帧间稳定；切文件时会被 setup 重指向）。
   struct MdLayoutTarget;
   std::shared_ptr<MdLayoutTarget> md_target_{};
+  /// 后台排版专用文本端口（**缓存与主线程隔离**，见 `st::app::OffscreenTextPort`）。
+  ///
+  /// 为何单独一份：后台排版 447KB 文档要写十万级宽度缓存条目，若复用主线程那个
+  /// `TextRenderer`，会把它 32k 条的 LRU 挤空——主线程随后每段文字都要重新整形，
+  /// 实测单帧 measure 1.4ms → 35ms。独立实例后主线程缓存始终热。
+  std::unique_ptr<st::app::OffscreenTextPort> offscreen_text_port_{};
+  /// 字体栈（只读，供上面的离屏端口共享）——`main.cpp` 装配时填。
+  const st::text::FontStack* font_stack_{nullptr};
   /// 输出面板按来源分栏（`St build` / `St test` / `终端`…）。
 
   static constexpr std::size_t kNoMenu{static_cast<std::size_t>(-1)};

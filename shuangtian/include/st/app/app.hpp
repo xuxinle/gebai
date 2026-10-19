@@ -14,6 +14,7 @@
 #include "st/ext/script.hpp"
 #include "st/core/error.hpp"
 #include "st/shell/shell.hpp"
+#include "st/text/text.hpp"   // font_stack() 的返回类型（只读字体栈）
 #include "st/ui/ui_root.hpp"
 #include "st/ui/window_control.hpp"
 
@@ -249,6 +250,11 @@ class Application final : public control::Host, public ui::WindowControl {
   [[nodiscard]] auto viewport() const -> math::Size override { return root_.viewport(); }
   [[nodiscard]] auto device_scale() const -> float override;
   auto set_device_scale(float scale) -> Status override;
+  /// 字体栈（只读）：给需要**独立缓存域**的离屏排版用
+  /// （见 `st::app::OffscreenTextPort`——后台排版若复用主线程的 `TextRenderer`，
+  /// 会把它 32k 条的宽度 LRU 刷爆，主线程随后每段文字都要重新整形）。
+  /// 字体数据本身不可变，多个 `TextRenderer` 共享同一个 `FontStack` 是安全的。
+  [[nodiscard]] auto font_stack() const -> const st::text::FontStack&;
   [[nodiscard]] auto metrics() const -> control::Metrics override;
   void set_theme_mode(ui::ThemeMode mode) override;
   /// 控制通道 `theme.set`：在当前主题上施加稀疏覆盖，成功即重绘。

@@ -129,7 +129,8 @@ class MarkdownView : public Element {
   /// 后台排版：在调用线程上用快照排出一份行模型（不碰本组件的任何状态）。
   /// 返回的快照携带行模型（不透明负载）与内容高；线程安全依赖 `TextPort`
   /// 的带锁缓存（并发压测见 tools/font_thread_safety_probe.cpp）。
-  [[nodiscard]] static auto layout_offscreen(const SlowLayoutSnapshot& input)
+  [[nodiscard]] static auto layout_offscreen(const SlowLayoutSnapshot& input,
+                                             const std::stop_token& token)
       -> SlowLayoutSnapshot;
   /// 采纳后台结果（主线程）：换入行模型并标脏。宽度/字号与快照不符时拒绝（返回 false）。
   auto adopt_layout(const SlowLayoutSnapshot& snapshot) -> bool;
@@ -141,6 +142,17 @@ class MarkdownView : public Element {
   ///（大文档几十毫秒，异步就白做了），随后还可能被 adopt 覆盖（宽度口径
   /// 不同时来回跳）。冻结期间宽度变化只记录，解冻或 adopt 后按最终宽度走。
   void freeze_offscreen(bool frozen) { offscreen_frozen_ = frozen; }
+
+  /// 冻结期间收到的待排宽（内容宽；0 = 无待排）。壳每帧据此判要不要重投。
+  [[nodiscard]] auto pending_layout_width() const noexcept -> float { return pending_width_; }
+
+  /// 确保语义块就绪（懒解析；异步采纳后首次读语义时调一次）。
+  /// 返回是否真的做了解析（诊断/量尺用）。
+  auto ensure_semantic_blocks() const -> bool;
+
+  /// 安装**排版取消信号**（后台排版用）：非空时 `append_blocks` 在块边界检查并早退。
+  /// 只在离屏 worker 值对象上装（树上实例不装，它本身不在后台跑）。
+  void set_layout_cancel(const std::stop_token* token) noexcept { layout_cancel_ = token; }
 
   /// 上一帧实际绘制的行区间（半开；从未绘制过时为空区间）。
   ///
@@ -326,6 +338,24 @@ class MarkdownView : public Element {
   bool needs_layout_{true};
   /// 离屏排版冻结（见 `freeze_offscreen`）：主线程壳持有排版权时置位。
   bool offscreen_frozen_{false};
+  /// 后台排版取消信号（仅离屏 worker 实例装；见 `set_layout_cancel`）。
+  const std::stop_token* layout_cancel_{nullptr};
+  /// **懒解析的语义源**（2026-10-19）：异步采纳只拷源、不解析。
+  ///
+  /// 为何不直接喂 `blocks_`：`MdStream::feed` 对 447KB 是一次完整解析（主线程
+  /// 实测 40~50ms），异步排版省下的时间会被它吃干净。而常见路径（纯看预览）
+  /// 根本不需要 `blocks_`——只需要 `rows_`（后台已排好）。
+  /// 真正要读语义（`markdown()`/选中文案/全文复制）时经 `ensure_semantic_blocks()`
+  /// 按需解析一次并缓存。
+  std::string semantic_source_{};
+  /// 语义块是否已就绪（false 且 `semantic_source_` 非空 = 待懒解析）。
+  mutable bool semantic_ready_{true};
+  /// 冻结期间收到的**待排宽**（内容宽，0 = 无）。
+  ///
+  /// 壳每帧经 `pending_layout_width()` 读它判「宽度变了没有」，变了就带着新宽重投；
+  /// adopt 后清。不混进 `layout_width_`：后者描述「当前 rows 是按多宽排的」
+  /// （见 `set_layout_width` 的说明——两者混用会让坐标口径分裂）。
+  float pending_width_{0.0f};
   bool want_bottom_{false};          ///< 追加时贴底，等排版完成后再落到实测高度
   bool stick_to_bottom_{true};
   bool selectable_{true};

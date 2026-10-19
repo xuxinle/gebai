@@ -3828,6 +3828,56 @@ Markdown。排版投 `Tasks::run_async` 后台线程，期间画骨架占位（�
 `tools/gbcode_md_async_e2e.py`（端到端五断言）；
 gallery 对账：`SlowContent` 为包装组件入豁免清单（`kGalleryExempt`）。
 
+##### 第二轮：用户报「还是会卡」后的实测复查（同日）
+
+第一轮只把**排版**搬走，复查发现主线程前仍有三处使它白费的口子
+（下面每条都有量化证据，不再靠“应该快了”下结论）：
+
+① **采纳后解冻导致主线程又排一次全文**（最大的一笔，**548ms**）。
+`adopt_layout` 里曾置 `offscreen_frozen_ = false`（“已拿到结果，之后可自己排”），
+而下一帧 `measure` 用**兑底宽 640** 量、与快照宽（956）不等 ⇒ `set_layout_width`
+走进同步 `rebuild_rows`。修法：**冻结持续到壳不管排版为止**，宽度变化改走
+`pending_width_` 记账、由壳 `arrange` 比对后重投。
+
+② **后台排版会刷爆主线程的文本宽度 LRU**。
+后台 worker 与主线程共用同一个 `TextRenderer`（32k 条宽度缓存）：排 447KB 要写
+十万级条目，把主线程正在用的全挤掉，主线程下一帧每段文字都要重新整形。
+实测（`tools/lock_contention_probe.cpp`）：主线程同工作量慢 **2.2~2.9×**。
+修法：新增 `st::app::OffscreenTextPort`（**自己的 TextRenderer + 共享只读字体栈**），
+并与 `Application::font_stack()` 配套；隔离有效性由 `tools/port_isolation_probe.cpp`
+盯住（灌 2 万条后主端口热态复测 1.58×，PASS）。
+
+③ **交付链路缺一个唤醒**（不改的话“排版完了但永远不显”）。
+`pending_` 是**后台线程**置 false 的，而“请求下一帧”写在 `paint_content` 的
+pending 分支里——于是最后一帧画完就再没帧，`pump_delivery` 等不到时机。
+修法：后台完成时经 `Tasks::post_ui` 向主线程“欠一帧”（无 `Tasks` 时退而标脏+请求动画）。
+同类掩坑：`adopt_layout` 里曾同步 `stream_.feed` 全文（又一次完整解析，主线程 40~50ms），
+改为**懒解析**（`ensure_semantic_blocks`，只存源；真读 `markdown()`/选中/复制时才算）。
+
+**同轮另修的正确性缺陷**（都不是性能）：
+- `refresh_params` 判据从「真值 vs 内存副本」改为「真值 vs **在途输入**」：
+  否则首帧拍的字号（14）在主题 apply 后变 15，每次排版结果都会被“变了”打新，
+  形成「排完→丢弃→重投」死循环（`layout_pending` 永远 false、`row_count` 永远 0）；
+- `rebuild_rows` 的 `width` 不能再记进 `layout_width_`：二者口径不同（一个“待排”一个
+  “已排”），混用会让坐标系分裂（rows 按 956 排、`layout_width_` 说 608）。
+
+**实测（gbcode + DESIGN.md，改动前后）**：
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| 切预览那帧（同步分档对照） | 213.7ms 帧 / **193ms layout** | — |
+| 切预览那帧（异步） | 548~557ms 帧 / **548ms layout** | 66ms 帧 / 58.8ms layout（一次性） |
+| 预览滚动 20 次 | — | 中位 7.6ms、最差 12.9ms（**稳 60fps**） |
+| 编辑器打字 20 次 | — | 最差 17.0ms（layout 0.0） |
+| 排版期主线程最差单帧（量尺） | 156.8ms | **0.39ms** |
+
+**诚实记录：首帧那 58ms 仍未根治**。已逐个排除（都是实测，非推测）：
+`SlowContent` 自身 measure 0.0ms、`MarkdownView::measure` 不慢、终端/Git 面板不在
+测量时（隐藏）、`apply_theme` 0.0ms、`TextRenderer`/`OffscreenTextPort` 构造 0.0ms、
+树只 298 节点无重建。**同帧再测只要 0.2ms**（差 226×），即它是首次遍历的
+**冷内存/缺页或后台抢 CPU** 效应，而非任何一处算法。日常交互（滚动/打字）已达标，
+此项留在 backlog（`docs/BACKLOG.md`）继续跟。
+
 ### 4.6 shell
 ```cpp
 namespace st::shell {

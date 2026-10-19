@@ -63,15 +63,19 @@ int main(int argc, char** argv) {
       snapshot.port = port_for_layout;     // 端口由适配器注入（MarkdownView 不知道壳的上下文）
       return snapshot;
     }
-    auto layout_offscreen(const st::ui::SlowLayoutSnapshot& input) const
+    auto layout_offscreen(const st::ui::SlowLayoutSnapshot& input,
+                          const std::stop_token& token) const
         -> st::ui::SlowLayoutSnapshot override {
       auto snapshot = make_snapshot(input);
-      auto done = st::ui::MarkdownView::layout_offscreen(snapshot);
+      auto done = st::ui::MarkdownView::layout_offscreen(snapshot, token);
       done.port = nullptr;  // 输出侧不携带端口（避免快照外泄持有）
       return done;
     }
     auto adopt_layout(const st::ui::SlowLayoutSnapshot& result) -> bool override {
       return view->adopt_layout(result);
+    }
+    [[nodiscard]] auto wanted_width() const -> float override {
+      return view != nullptr ? view->pending_layout_width() : 0.0f;
     }
   };
   auto target = std::make_shared<MdTarget>();
@@ -90,15 +94,24 @@ int main(int argc, char** argv) {
   }
   shell.set_source(*content);
 
-  // 帧循环模拟：主线程只做 paint（探测交付）。
+  // 帧循环模拟：完全照 `Application::tick` 的次序——① 泵 UI 队列（后台唤醒）
+  // ② 标脏则 paint（内部 pump_delivery）。少了任何一步都会「交付永远等不到」，
+  // 这正是 gbcode 实测踩到的坑，量尺必须复刻真实帧循环，否则量出来的不是真东西。
   const auto t1 = Clock::now();
   double worst_frame = 0.0;
   double elapsed = 0.0;
   int frames = 0;
-  while (shell.layout_pending() && elapsed < 5000.0) {
+  // 循环条件看**结果是否已落地**而不是 `layout_pending`：后者在后台线程
+  // 置 false 的那一刻就变假了，但结果还躺在交付槽里等主线程取——
+  // 用 pending 做条件会「提前退出、永远取不到」（真实帧循环里靠 post_ui 唤醒兜底，
+  // 这里没有 tick 管，得自己保证多跑几帧）。
+  while (md_ptr->row_count() == 0 && elapsed < 5000.0) {
     const auto f0 = Clock::now();
+    (void)tasks.pump();             // ① 后台唤醒（post_ui）在这里落地
     canvas.clear(st::math::Color{0xFF, 0xFF, 0xFF, 0xFF});
-    shell.paint(context, canvas);   // 内部 pump_delivery
+    shell.paint(context, canvas);   // ② 内部再 pump_delivery 一次（双保险）
+    (void)tasks.pump();             // 采纳里可能又 post（幂等）
+    shell.paint(context, canvas);   // 采纳后重画一帧（骨架 → 内容的真实切换成本）
     worst_frame = std::max(worst_frame, ms_since(f0));
     ++frames;
     std::this_thread::sleep_for(std::chrono::milliseconds(8));

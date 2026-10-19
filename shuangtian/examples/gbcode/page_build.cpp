@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "page.hpp"
+#include "st/app/text_port.hpp"   // OffscreenTextPort（后台排版的独立缓存域）
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
 #include "st/core/platform.hpp"
@@ -583,10 +584,14 @@ namespace gbcode_ui {
 /// 快照端口在每次 `set_source` 前由宿主同步（树上的 `layout_port_` 才是真值）。
 struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
   MarkdownView* view{nullptr};
+  /// 后台排版专用端口（缓存与主线程完全隔离，见上面的说明）。
+  /// 宿主在构造后填：`std::make_unique<st::app::OffscreenTextPort>(...)`。
+  st::app::OffscreenTextPort* offscreen_port{nullptr};
 
-  auto layout_offscreen(const st::ui::SlowLayoutSnapshot& input) const
+  auto layout_offscreen(const st::ui::SlowLayoutSnapshot& input,
+                        const std::stop_token& token) const
       -> st::ui::SlowLayoutSnapshot override {
-    auto done = MarkdownView::layout_offscreen(input);
+    auto done = MarkdownView::layout_offscreen(input, token);
     done.port = nullptr;  // 输出侧不携带端口（避免持有外泄）
     return done;
   }
@@ -598,7 +603,12 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
     // 字号/端口/宽度上限以树上视图当前值为准（主题落定后的真值）；
     // 宽不动（壳管宽）——只刷字号族与端口。
     auto now = view->snapshot_layout_input(params.width);
-    params.port = now.port;
+    // ⚠ 端口**必须**换成隔离缓存的那一个（2026-10-19，实测驱动的关键修）：
+    // 主线程端口的宽度 LRU（32k 条）会被 447KB 文档的后台排版灌爆、把主线程
+    // 正在用的条目全部挤出，导致下一帧每段文字重新整形——实测主线程单帧
+    // measure 从 1.4ms 涨到 35ms，正是「内容搬到后台、界面照样卡」的真根因。
+    params.port = offscreen_port != nullptr ? static_cast<const st::ui::TextPort*>(offscreen_port)
+                                            : now.port;
     params.base_size = now.base_size;
     params.code_size = now.code_size;
     params.table_size = now.table_size;
@@ -907,6 +917,13 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
             md_view_ptr->freeze_offscreen(true);   // 排版权交后台（壳生命周期内）
             md_target_ = std::make_shared<MdLayoutTarget>();
             md_target_->view = md_view_ptr;
+            // 后台排版的端口：**独立 TextRenderer + 共享只读字体栈**（缓存隔离）。
+            // supersample 传 1.0 与主线程一致——字形栅格化的缩放口径不同会让度量差。
+            if (font_stack_ != nullptr && offscreen_text_port_ == nullptr) {
+              offscreen_text_port_ =
+                  std::make_unique<st::app::OffscreenTextPort>(*font_stack_, 1.0f);
+            }
+            md_target_->offscreen_port = offscreen_text_port_.get();
             shell.setup(std::move(view), md_target_, layout_tasks_);
           } else {
             md_view_ptr = dynamic_cast<MarkdownView*>(shell.content_element());
@@ -916,19 +933,33 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
           if (has_content && shell.last_source() != buffers_now[index].text) {
             shell.remember_source(buffers_now[index].text);
             // 同步喂语义通道（控制通道 `markdown`/`selection`/Ctrl+C 全文复制用）：
-            // 壳路径下排版走后台，但 view 的 `stream_` 语义源仍需就位——
-            // `set_markdown` 会清滚动，这里只在没有旧内容时喂（排版落地前）。
-            if (md_view_ptr != nullptr && md_view_ptr->markdown().empty()) {
-              md_view_ptr->set_markdown(buffers_now[index].text);
-              md_view_ptr->scroll_to(0.0f);
-            }
+            // ⚠ **不要在主线程 `set_markdown` 全文**（2026-10-19 实测修正）。
+            //
+            // 旧写法在这里“语义喂”一次：`set_markdown` 内部要 `MdStream::feed`
+            // 解析整份 447KB（实测 **52.5ms** 全在主线程，正是切预览那一帧的
+            // `layout_ms` 大头）——目的只是让 `markdown()/selection` 语义通道有源，
+            // 而那个源**adopt_layout 时本来就会同步进去**（见那边的说明）。
+            // 所以：排版交给后台，主线程一个字都不解析。
+            //
+            // 代价：adopt 之前 `markdown()` 为空（骨架阶段），语义查询要等落地——
+            // 这是正确取舍：宁可 AI 侧晚 300ms 读到内容，也不要用户界面卡一帧。
             auto& params = shell.layout_params();
             if (md_view_ptr != nullptr) {
               // 排版参数整份从树上视图拍（apply_theme 后的度量才是真值；首帧未上树
               // 时拍构造默认，主题落地后宽度/字号变化会自动重排）。手写逐字段填
               // 漏一项（如 heading_sizes）就会被 adopt 核对静默拒绝——快照是唯一稳妥口径。
               auto snapshot = md_view_ptr->snapshot_layout_input(868.0f);
-              params.port = snapshot.port;
+              // ⚠ 端口必须是**隔离缓存**的那一个（2026-10-19，决定性修复）。
+              //
+              // 为什么在填快照处就要给对：`refresh_params` 要等**下一帧**才纠正端口，
+              // 而第一次 `set_source` 就在本帧把任务投进后台了——后台一旦用主线程端口
+              // 排 447KB，就把主线程 32k 条的宽度 LRU 全部挤空（十万级写入）。
+              // 于是主线程回到 measure 时每段文字都要重新整形：实测单帧
+              // `content->measure()` **35ms**（重复调用只需 0.17ms——差 200×，
+              // 正是"缓存被刷空 vs 缓存命中"的直接证据）。
+              params.port = (md_target_ != nullptr && md_target_->offscreen_port != nullptr)
+                                ? static_cast<const st::ui::TextPort*>(md_target_->offscreen_port)
+                                : snapshot.port;
               params.base_size = snapshot.base_size;
               params.code_size = snapshot.code_size;
               params.table_size = snapshot.table_size;

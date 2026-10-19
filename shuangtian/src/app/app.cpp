@@ -594,6 +594,8 @@ auto Application::metrics() const -> control::Metrics {
   return metrics;
 }
 
+auto Application::font_stack() const -> const st::text::FontStack& { return *impl_->fonts; }
+
 auto Application::device_scale() const -> float { return impl_->device_scale; }
 
 auto Application::set_device_scale(float scale) -> Status {

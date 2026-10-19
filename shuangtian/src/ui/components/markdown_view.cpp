@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
 #include <format>
 #include <string>
+#include <thread>
 #include <utility>
 
 #include "st/core/string.hpp"
@@ -309,7 +311,11 @@ void MarkdownView::append_chunk(std::string_view chunk) {
   if (stick) want_bottom_ = true;
 }
 
-auto MarkdownView::markdown() const -> std::string { return stream_.source(); }
+auto MarkdownView::markdown() const -> std::string {
+  // 异步采纳后 `stream_` 可能还没喂（懒解析）——源本身已存，直接给（零解析）。
+  if (!semantic_source_.empty()) return semantic_source_;
+  return stream_.source();
+}
 
 auto MarkdownView::block_count() const noexcept -> std::size_t { return blocks_.size(); }
 
@@ -663,7 +669,22 @@ void MarkdownView::append_blocks(const std::vector<st::md::Block>& blocks,
   };
 
   float pending_gap = 0.0f;
+  // 分片计数（后台排版主动让出 CPU，2026-10-19 二次修）。
+  //
+  // 为何不是“取消检查”就够：取消只处理“输入变了”的情形，而正常排版（~176ms）
+  // 全程都在与主线程抢 CPU。`nice(19)` 在 cgroup 限额环境下实测**时灵时不灵**
+  //（`tools/lock_contention_probe.cpp`：主线程放慢 1.2× 与 2.6× 双峰分布）。
+  // 所以改成**主动让出**：每排 `kYieldEveryBlocks` 块 `yield()` 一次，
+  // 让操作系统把 CPU 交给待跑的主线程绘制。
+  constexpr std::size_t kYieldEveryBlocks = 48;
+  const bool offscreen = layout_cancel_ != nullptr;   // 只离屏实例让出（主线程同步排不受影响）
+  std::size_t since_yield = 0;
   for (const st::md::Block& block : blocks) {
+    if (layout_cancel_ != nullptr && layout_cancel_->stop_requested()) return;
+    if (offscreen && ++since_yield >= kYieldEveryBlocks) {
+      since_yield = 0;
+      std::this_thread::yield();   // 把 CPU 让给主线程绘制（协作式调度）
+    }
     const float gap = std::max(pending_gap, leading_gap(block));
     if (y > 0.0f && gap > 0.0f) y += gap;
     pending_gap = 0.0f;
@@ -1313,8 +1334,10 @@ auto MarkdownView::snapshot_layout_input(float width) const -> SlowLayoutSnapsho
   return snapshot;
 }
 
-auto MarkdownView::layout_offscreen(const SlowLayoutSnapshot& input) -> SlowLayoutSnapshot {
+auto MarkdownView::layout_offscreen(const SlowLayoutSnapshot& input,
+                                    const std::stop_token& token) -> SlowLayoutSnapshot {
   SlowLayoutSnapshot snapshot = input;   // 输出在副本上填（输入侧原样带回，供采纳核对）
+  if (token.stop_requested()) return snapshot;   // 已取消：row_count 保持 0
   // 后台线程体：全部状态都在栈上，不碰任何 Element。
   //
   // 手法：构造一个**临时 `MarkdownView` 值对象**（不入树、不绘制）——`Element`
@@ -1329,6 +1352,7 @@ auto MarkdownView::layout_offscreen(const SlowLayoutSnapshot& input) -> SlowLayo
   const TextPort* port = snapshot.port != nullptr ? snapshot.port : &null_port;
   const RenderContext context{theme, port, 0.0};
   MarkdownView worker{};
+  worker.set_layout_cancel(&token);   // 块边界可取消（旧任务被重投打新时立即退出）
   worker.base_font_size_ = snapshot.base_size;
   worker.code_font_size_ = snapshot.code_size;
   worker.max_width_ = snapshot.max_width;
@@ -1348,10 +1372,21 @@ auto MarkdownView::layout_offscreen(const SlowLayoutSnapshot& input) -> SlowLayo
   worker.style_.padding = {};
   worker.set_layout_width(context, snapshot.width);
   // 内容高补回树上同款 padding（快照高度与树上 `content_height()` 同口径，采纳侧直接用）。
+  if (token.stop_requested()) return snapshot;   // 排版完但已被取消：不交回结果
   snapshot.content_height = worker.content_height_ + padding_snapshot.vertical();
   snapshot.row_count = worker.rows_.size();
   snapshot.payload = std::make_shared<std::vector<Row>>(std::move(worker.rows_));
   return snapshot;
+}
+
+auto MarkdownView::ensure_semantic_blocks() const -> bool {
+  if (semantic_ready_ || semantic_source_.empty()) return false;
+  auto& self = const_cast<MarkdownView&>(*this);
+  self.semantic_ready_ = true;
+  // 解析一次（O(n)，但只在真的要读语义时发生；纯看预览永远不来这里）。
+  self.stream_.reset();
+  self.blocks_ = self.stream_.feed(semantic_source_);
+  return true;
 }
 
 auto MarkdownView::adopt_layout(const SlowLayoutSnapshot& snapshot) -> bool {
@@ -1364,15 +1399,36 @@ auto MarkdownView::adopt_layout(const SlowLayoutSnapshot& snapshot) -> bool {
   auto rows = std::static_pointer_cast<std::vector<Row>>(snapshot.payload);
   if (rows == nullptr) return false;
   rows_ = std::move(*rows);
-  offscreen_frozen_ = false;   // 采纳即解冻：之后宽度变化走组件自身（源已同步）
+  // **采纳后不解冻**（2026-10-19 二次修，实测 548ms 卡顿的根因）。
+  //
+  // 旧实现这里置 `offscreen_frozen_ = false`（「已拿到结果，之后可以自己重排」），
+  // 而下一帧 `measure` 用兑底宽 640 来量、与快照宽（如 956）不等 ⇒
+  // `set_layout_width` 走进**同步**`rebuild_rows` ⇒ 主线程实测 **layout 548.8ms**
+  //（gbcode 切预览第一帧：`last=557ms layout=548.8ms paint=8.3ms`）。
+  // 冻结必须持续到壳不再管排版为止：宽度变化时**回给壳重投**（壳在 measure 里比对
+  // `params_.width` 并 schedule），排版权始终在后台。解冻的路径只留 `freeze_offscreen(false)`
+  // 显式调用（宿主放弃异步排版时）。
   // 源同步进 `stream_`（不重排、不清滚动）：宽度再变化时组件能拿**同一份源**
   // 同步重排（兜底），语义通道（markdown/selection/全文复制）也就位。
   // 不这么做的后果（实测）：壳路径下 view 的源恒空，任何一次宽度扰动
   //（measure 兜底宽 640 ≠ arrange 真宽）都会把采纳的行模型冲成「空文档 1 行」。
-  stream_.reset();
-  if (!snapshot.source.empty()) blocks_ = stream_.feed(snapshot.source);  // blocks 同步（重排的输入）
-  rebuild_plain_text();
+  // ⚠ **不要在这里 `stream_.feed` 全文**（2026-10-19 最终定位：这就是那 50ms）。
+  //
+  // 历史：这里曾同步源进 `stream_`/`blocks_`，为的是「之后组件自己重排时拿得到源」。
+  // 但 `MdStream::feed` 对 447KB 是一次**完整 Markdown 解析**，实测在主线程吃
+  // 40~50ms——异步排版省下的时间又被这一步全吃掉，正是「内容搬到后台、界面照样卡」
+  // 的真正来源（A/B 铁证：换隔离端口 49.8ms vs 共享端口 53.6ms，几乎无差 =>
+  //  瓶颈不在文本缓存，而在 adopt 这一下）。
+  //
+  // 现在 `offscreen_frozen_` 全程为真（壳持有排版权），组件**不会**自己重排，
+  // 所以不必提前准备 `blocks_`；语义通道（`markdown()`/选择/复制）改为
+  // **懒解析**：真有读取时按需解析一次（`ensure_semantic_source()`），
+  // 常见路径（纯看预览）一次都不解析。
+  semantic_source_ = snapshot.source;   // 只存源（O(n) 拷贝，不解析）
+  semantic_ready_ = semantic_source_.empty();
+  blocks_.clear();
   layout_width_ = snapshot.width;
+  pending_width_ = 0.0f;   // 新 rows 与 layout_width_ 已对齐
   needs_layout_ = false;
   content_height_ = snapshot.content_height;
   // 换入后滚动位置可能超出新内容高：夹取（不重置——用户滚到的位置尽量保留）。
@@ -1458,6 +1514,7 @@ auto MarkdownView::caret_at(math::Point content_point) const -> Caret {
 }
 
 auto MarkdownView::selected_text() const -> std::string {
+  (void)ensure_semantic_blocks();   // 选中/复制才需要 blocks_（懒解析）
   if (!has_selection_) return {};
   const auto [begin, end] = selection_ends();
   std::string out;
@@ -1621,18 +1678,24 @@ void MarkdownView::set_layout_width(const RenderContext& context, float width) {
   const float content_width = std::max(width - style_.padding.horizontal(), kMinTextWidth);
   if (needs_layout_ || content_width != layout_width_ || context.text != layout_port_) {
     if (offscreen_frozen_) {
-      // 冻结：宽度/端口变化只记账，重排留给后台（adopt 或解冻后）。
-      // 不冻结的后果（实测）：壳路径下主线程的一次同步重排会把后台成果冲掉，
-      // 或在大文档上白付几十毫秒——异步就白做了。
-      layout_width_ = content_width;
+      // 冻结（壳持有排版权）：**只记待排宽，不动 `layout_width_`**。
+      //
+      // 为何不动 `layout_width_`：它描述的是「当前 `rows_` 是按多宽排的」。
+      // 旧实现这里把它改成新宽，于是坐标口径分裂——rows 按 956 排、
+      // 而 `layout_width_` 说 608（行宽/裁剪/滚动范围全部错位），
+      // 而且下一次宽度变化又把差异遮住，表现是「偶发对不齐」这类难查的毛病。
+      // 正确做法：待排宽单独记（`pending_width_`），由壳下一帧比对并重投，
+      // 后台排完经 `adopt_layout` 一次性把 `layout_width_` 与 `rows_` 对齐。
+      pending_width_ = content_width;
       layout_port_ = context.text;
-      needs_layout_ = false;   // 宽度口径已记；adopt 会按快照宽校准
+      needs_layout_ = false;   // 不欠排：排版权在后台
       return;
     }
     rebuild_rows(context, content_width);
     layout_width_ = content_width;
     layout_port_ = context.text;
     needs_layout_ = false;
+    pending_width_ = 0.0f;
   }
 }
 

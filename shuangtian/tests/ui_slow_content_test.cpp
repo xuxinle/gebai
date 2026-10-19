@@ -18,6 +18,7 @@
 #include "st/test/test.hpp"
 
 #include <chrono>
+#include <stop_token>
 #include <cstdio>
 #include <string>
 #include <thread>
@@ -40,14 +41,17 @@ struct MdTarget final : SlowLayoutTarget {
   MarkdownView* view{};
   const st::ui::TextPort* port{nullptr};
 
-  auto layout_offscreen(const SlowLayoutSnapshot& input) const
+  auto layout_offscreen(const SlowLayoutSnapshot& input, const std::stop_token& token) const
       -> SlowLayoutSnapshot override {
-    auto done = MarkdownView::layout_offscreen(input);
+    auto done = MarkdownView::layout_offscreen(input, token);
     done.port = nullptr;
     return done;
   }
   auto adopt_layout(const SlowLayoutSnapshot& result) -> bool override {
     return view != nullptr && view->adopt_layout(result);
+  }
+  [[nodiscard]] auto wanted_width() const -> float override {
+    return view != nullptr ? view->pending_layout_width() : 0.0f;
   }
 };
 
@@ -139,9 +143,19 @@ ST_TEST(slow_content_async_does_not_block_and_matches) {
   ST_CHECK(call_ms < 10.0);
   ST_REQUIRE(shell.layout_pending());
 
-  // 帧循环驱动（pump 在 measure/paint 里；这里手动轮 measure）。
+  // 帧循环驱动：完全照 `Application::tick` 的次序 —— ① 泵 UI 队列（后台完成时
+  // 的唤醒走 `post_ui`）② measure/paint（内部 pump_delivery）。
+  //
+  // 为何循环条件看 `row_count` 而不是 `layout_pending`（实测踩过的坑）：
+  // `pending_` 是**后台线程**在结果入槽时就置 false 的，而结果还要等主线程下一次
+  // `pump_delivery` 才被取走——用 pending 做条件会在「已入槽、未取走」那一刻提前
+  // 退出，断言读到空 rows（实测 0 vs 4000）。真实帧循环靠 `post_ui` 唤醒兜底，
+  // 单测没有 tick 管理，必须自己保证多跑几帧。
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-  while (shell.layout_pending() && std::chrono::steady_clock::now() < deadline) {
+  while (md_ptr->row_count() == 0 && std::chrono::steady_clock::now() < deadline) {
+    (void)tasks.pump();            // ① 后台唤醒（post_ui）在这里落地
+    shell.measure(context, st::ui::Constraints{});
+    (void)tasks.pump();            // ② 采纳里可能又 post（幂等）
     shell.measure(context, st::ui::Constraints{});
     std::this_thread::sleep_for(std::chrono::milliseconds(4));
   }
