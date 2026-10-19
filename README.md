@@ -370,8 +370,8 @@ Monorepo（Bun workspaces + Turborepo）；核心模块全部接口化 + 依赖�
 | `torch` | PyTorch Profiler trace 分析 | 8（客卿原生后端同名合并） | 需 torch profiler trace |
 | `ai_native_eng` | AI 原生软件工程方法论（知识型，不接项目） | 0（纯提示词） | 无 |
 | `shuangtian` | 构建/运行/操控霜天原生桌面应用 | 18：run/tree/find/get/set/invoke/capture/click/type/key/wait/visual_diff/metrics 等 | 需 C++ 工具链 + 霜天框架源码 |
-| `shuangtian_video` | 裁云（Nimbus）AI 视频：导演脚本→出片 | 继承霜天全套 + `imagegen_*` + `tts_*` | 同 `shuangtian`；素材与配音额外依赖对应能力 |
-| `shuangtian_poster` | 镂月（Lunaris）海报：JSON 脚本→PNG | 继承霜天全套 + `imagegen_*` | 同 `shuangtian` |
+| `caiyun` | 裁云（Nimbus）AI 视频：导演脚本→出片 | 0（零自有工具，依赖 `shuangtian`+`imagegen`+`tts`） | 同 `shuangtian`；素材与配音额外依赖对应能力 |
+| `louyue` | 镂月（Lunaris）海报：JSON 脚本→PNG | 0（零自有工具，依赖 `shuangtian`+`imagegen`） | 同 `shuangtian` |
 | `imgproc`（客卿） | 图像处理（尺寸/灰度/缩放/像素统计） | 4：`info` `grayscale` `resize` `stats` | 需 C++ 边车构建 |
 | `disk`（客卿） | 磁盘使用分析与清理（目录分析 + 容量总览 + 候选扫描 + 预览/隔离/删除 + 隔离区还原） | 8：`tree` `du` `top` `depth` `volumes` `scan` `clean` `trash` | 需 Go 边车构建 |
 

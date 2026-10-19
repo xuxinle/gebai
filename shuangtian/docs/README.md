@@ -81,7 +81,7 @@
 |---|---|---|
 | [`independent_project.md`](independent_project.md) | 怎么用本框架建**自己的**应用工程（清单/构建/运行全流程） | 活 |
 | [`LOUYUE_CAIYUN.md`](LOUYUE_CAIYUN.md) | 「镂月裁云」两示例的设计规约 | 记录（**已实现**；权威现状见 README「示例」节） |
-| [`script_design.md`](script_design.md) | **剧本设计模板**（裁云/镂月通用）：先写剧本再写脚本的六部分模板（定位/内容结构/逐镜设计表/视觉规范/声音设计/确认点） | 活（与 `shuangtian_video`/`shuangtian_poster` 提示词同口径） |
+| [`script_design.md`](script_design.md) | **剧本设计模板**（裁云/镂月通用）：先写剧本再写脚本的六部分模板（定位/内容结构/逐镜设计表/视觉规范/声音设计/确认点） | 活（与 `caiyun`/`louyue` 子代理提示词同口径） |
 | [`xml-ui.md`](xml-ui.md) | 纯 XML + JS 通路（`examples/xmlapp`）：XML 描述界面 + `ScriptBridge` JS 驱动 | 记录（已落地，`DESIGN.md` §4.2.20–22） |
 
 ## F. 各目录里的文档

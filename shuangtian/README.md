@@ -327,7 +327,7 @@ Photoshop 精简骨架：左工具栏（移动/画笔/橡皮/油漆桶/吸管/�
   diffusers ≥0.36 要 torch≥2.6 的 `torch.accelerator`，transformers 5.x 缺 `MT5Tokenizer`）。
 - **出图脚本**：`tools/imagegen.py`（单张）、`tools/gen_gebai_assets.py`（批量）。
   实测 512² 2 步 **1.2 秒**；768×512 2 步 **0.29 秒**（模型已加载）。
-- **工具面**（歌白子代理内）：`imagegen` / `imagegen_check` / `imagegen_assets`。
+- **工具面**（歌白 `imagegen` 子代理内）：`imagegen` / `imagegen_check` / `imagegen_assets`。
 
 > **三条硬约束**（都是实测）：
 > ① **别让模型画文字**——它会画出扭曲字母；文字一律由渲染器画（可读、可控）。

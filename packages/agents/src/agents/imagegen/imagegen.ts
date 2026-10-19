@@ -1,5 +1,9 @@
 /**
- * 本地图像生成工具（sd-turbo / SD2.1-Turbo）。
+ * 本地图像生成子代理（sd-turbo / SDXL-Turbo）：工具集 + 系统提示词定义入口。
+ *
+ * 用法：主会话/子会话按需 `agent_load imagegen`；裁云与镂月子代理经 `dependencies: ["imagegen"]`
+ * 连带装载（工具以 `imagegen_` 命名空间注册，不再展开进自身 tools——重复注册同名能力会让审批
+ * 映射与提示词里的工具名分叉）。
  *
  * ## 为什么是"包一层 Python 脚本"而不是在 TS 里跑推理
  *
@@ -18,7 +22,9 @@ import { spawn } from "node:child_process"
 import { existsSync } from "node:fs"
 import { mkdir, readdir, stat } from "node:fs/promises"
 import { join, resolve } from "node:path"
-import type { Tool } from "@gebai/sdk"
+import type { SubAgentDef, Tool } from "@gebai/sdk"
+// 系统提示词独立 md 维护（目录形式约定：{dir}/{dir}.md）。
+import systemPromptBase from "./imagegen.md" with { type: "text" }
 
 function repoRoot(): string {
   // dev 模式路径：<repo>/packages/agents/src/agents/imagegen
@@ -257,3 +263,28 @@ export const requiresApproval: Record<string, boolean> = {
   imagegen_check: false,
   imagegen_assets: false,
 }
+
+export const name = "imagegen"
+export const description =
+  "本地文生图（sd-turbo / SDXL-Turbo，1~4 步出图，512² 约 1 秒，离线不耗配额）：" +
+  "生成的图直接落进素材库目录，供裁云（视频）/镂月（海报）按名字引用。" +
+  "适用于「给作品备素材 / 做主图与底板 / 造纹理与氛围图」。" +
+  "输入：画面描述（英文提示词效果更好）。" +
+  "工具：imagegen（出图）/ imagegen_check（查环境）/ imagegen_assets（列素材库）。"
+
+export const systemPrompt = systemPromptBase
+
+export const preload = false
+
+export const envVars = [
+  {
+    name: "GEBAI_IMAGEGEN_MODEL",
+    description: "图像生成模型目录（缺省 resources/models/imagegen/ 下自动选：有 sdxl-turbo 用它，否则用 sd-turbo）",
+  },
+  {
+    name: "GEBAI_IMAGEGEN_PYTHON",
+    description: "出图所用的 Python 解释器（缺省在常见安装位置找，再退回 PATH；Windows 上 PATH 里的 python 可能是应用商店占位程序）",
+  },
+]
+
+export const def: SubAgentDef = { name, description, systemPrompt, tools, requiresApproval, preload, envVars }

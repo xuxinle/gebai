@@ -564,7 +564,7 @@ export const systemPrompt = systemPromptBase
 - 工具的结构化输出契约写在各 `Tool` 上（`Tool.outputSchema?: ToolSchema`，JSON Schema），经 `tool_schemas` 工具批量暴露——**无 `toolSchemas()` 导出、无 `returns` 字段**
 - `subsession_run` 派生子会话：输入为 `agents`（子Agent 列表）+ `input`（任务文本），返回为 `output`（文本），隔离子会话（预加载子Agent）自行规划执行（默认阻塞执行返回；`async:true` 后台异步执行，`bg_task` 管理，见「子会话运行」）；继承形态则 fork 父上下文并把报告自动合入父会话
 - 子Agent 内无全局可变量，工具函数体为纯函数或依赖注入工厂，天然支持并发加载
-- **复用其他子Agent 的能力用 `dependencies` 声明**（装载/预加载自动连带，工具以依赖方 `{dep}_` 命名空间注册——如 reverse_site 依赖 playwright、self_optimize 依赖 code），不在 `tools` 中展开依赖方的工具实现（旧形态会产生重复注册与审批映射复刻）；机制上 `tools` 仍可直接引用全局工具实现（如 `read`/`write`/`sh`，以 `{agent}_` 前缀暴露），但按「子Agent 只声明独有工具」约定应直接用全局名，不重复声明
+ - **复用其他子Agent 的能力用 `dependencies` 声明**（装载/预加载自动连带，工具以依赖方 `{dep}_` 命名空间注册——如 reverse_site 依赖 playwright、self_optimize 依赖 code/vision、caiyun 依赖 shuangtian/imagegen/tts、louyue 依赖 shuangtian/imagegen），不在 `tools` 中展开依赖方的工具实现（旧形态会产生重复注册与审批映射复刻）；**命名前缀是硬约束**：子Agent 名不得与被依赖名互为前缀（否则注册期抛 prefix collision，只能退到内联），如某子代理名以 `shuangtian_` 开头、它又要依赖 `shuangtian`，两者就不兼容——详见 `02b-builtin-agents.md`「工具面的两种装配方式」；机制上 `tools` 仍可直接引用全局工具实现（如 `read`/`write`/`sh`，以 `{agent}_` 前缀暴露），但按「子Agent 只声明独有工具」约定应直接用全局名，不重复声明
 - 示例：内置 `desktop` 即目录形式（`packages/agents/src/agents/desktop/desktop.ts` + `desktop_tools.ts`）
 
 **纯提示词简化定义**（`packages/agents/src/agents/{name}/{name}.md` 单独存在，零 TS）：用于简单子Agent 与组合式子Agent
@@ -668,7 +668,7 @@ tree_sitter）由 `GEBAI_WEB_VENDOR` 控制，未包含组会被删除，前端�
 
 - **架构限制**：二进制内嵌的 `@resvg/resvg-js` 是平台原生模块，跨架构编译会嵌错平台——镜像仅支持「构建机架构 = 目标架构」。
 - **脚本文件系统隔离（bubblewrap）的容器前提已实测**：默认 seccomp 下容器内无法创建 user namespace（`unshare: Operation not permitted`），bwrap 不可用——此时自动降级为环境收敛（HOME/TEMP/XDG 仍在会话目录内）；`--cap-add SYS_ADMIN` **不够**（unshare 可用但 bwrap 卡在 `pivot_root: Operation not permitted`）；`--security-opt seccomp=unconfined` 实测可用（系统只读、仅会话目录可写、宿主家目录不可见）。
-- **能力边界**：`desktop`（宿主桌面操控）在服务模式一律不可用；`tts_speak` 的**系统语音档**仅 Windows（神经档需 Python 侧车 + 模型，不受平台限制）；客卿子Agent 在服务模式整体禁用；`shuangtian`/`shuangtian_video`/`shuangtian_poster` 需 C++ 工具链与霜天框架源码（未预装）；浏览器类子Agent 需 `--with-browser` 构建（且需容器内 node，见上方「离线供给」）；容器内重启用 `docker restart`（而非 `restart_server` 工具）。
+ - **能力边界**：`desktop`（宿主桌面操控）在服务模式一律不可用；`tts_speak` 的**系统语音档**仅 Windows（神经档需 Python 侧车 + 模型，不受平台限制）；客卿子Agent 在服务模式整体禁用；`shuangtian`/`caiyun`/`louyue` 需 C++ 工具链与霜天框架源码（未预装）；浏览器类子Agent 需 `--with-browser` 构建（且需容器内 node，见上方「离线供给」）；容器内重启用 `docker restart`（而非 `restart_server` 工具）。
 
 架构与体积：`linux/amd64` 全量构建实测镜像 867MB（二进制 244MB），构建耗时主要在前端构建与依赖安装（首次约数分钟，缓存后秒级）；裁剪档案按维度削减同一份产物（`minimal` 档案同时裁掉 Web UI 内嵌产物、本地 CV、后端 D2、语法集、playwright-core、内置 ripgrep 与多个系统包组）。
 

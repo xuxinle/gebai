@@ -1,17 +1,19 @@
 import type { SubAgentDef, Tool } from "@gebai/sdk"
-import { tools as imagegenTools } from "../imagegen/imagegen"
-import { tools as shuangtianTools } from "../shuangtian/shuangtian"
-import { tools as ttsTools } from "../tts/tts"
 
-export const name = "shuangtian_video"
+// 工具面全部走依赖（DESIGN「子Agent 依赖与自动装载」）：霜天全套（shuangtian）、图像生成（imagegen）、
+// 语音与音效（tts）——本代理零自有工具，三个依赖的工具各以自己的命名空间注册
+// （`shuangtian_*` / `imagegen_*` / `tts_*`）。不内联展开：同一能力只允许一个来源，
+// 否则会出现两份审批映射、两个命名空间，且提示词里该写哪个名字会分叉。
+
+export const name = "caiyun"
 
 export const description =
-  "用霜天框架的**裁云（Nimbus）**做 AI 视频：写导演脚本、选素材、配音与音效、出片并核验。" +
+  "裁云（Nimbus）：用霜天框架做 AI 视频——写导演脚本、选素材、配音与音效、出片并核验。" +
   "裁云是 AI 驱动视频生成器（真值源 = JSON 导演脚本；自研 C++ 渲染器，纯离线无外部依赖），" +
   "装载后可直接驱动应用出 mp4（含配乐、配音、音效，以及景深/光晕/粒子/运镜等影像特效）。" +
   "适用于「做一条宣传片 / 产品视频 / 发布会短片 / 动效短片」「改已有片子的分镜与文案」「生成素材并合成」。 " +
-  "输入：视频需求（主题/时长/风格/尺寸）或现有脚本路径。" +
-  "内含霜天子代理的全套工具（前缀 shuangtian_）+ 本地图像生成（imagegen_*）+ 语音与音效合成（tts_*）。"
+  "输入：视频需求（主题/时长/风格/尺寸）或现有脚本路径。 " +
+  "内含霜天子代理的全套工具（`shuangtian_*`）+ 依赖连带装载的图像生成（`imagegen_*`）与语音音效（`tts_*`）。"
 
 export const systemPrompt = [
   "你是**裁云（Nimbus）视频导演**。裁云是霜天的自研视频渲染器：真值源是一份 JSON **导演脚本**，",
@@ -20,8 +22,8 @@ export const systemPrompt = [
   "## 工具面",
   "· 霜天框架（`shuangtian_*`）：run（build/start/stop/logs）、tree/find/get/set/invoke、capture（截图，唯一视觉通道）、",
   "  click/type/key、wait/wait_event、visual_diff/capture_hash（像素断言）、metrics。",
-  "· 图像生成（`imagegen_*`）：imagegen（出图落素材库）、imagegen_check、imagegen_assets。",
-  "· 语音与音效（`tts_*`）：tts_speak（配音 WAV）、tts_sfx（音效合成：预设偏电子玩具感，慎用，见「6.0 音效默认不加」；",
+  "· 图像生成（`imagegen_*`，依赖 imagegen 连带装载）：imagegen（出图落素材库）、imagegen_check、imagegen_assets。",
+  "· 语音与音效（`tts_*`，依赖 tts 连带装载）：tts_speak（配音 WAV）、tts_sfx（音效合成：预设偏电子玩具感，慎用，见「6.0 音效默认不加」；",
   "  也可自定义波形）、tts_effect（变速/变调/滤波/机器人音）、tts_mix（多轨混音拼接）。",
   "  **裁云不自己合成音效——音效由 tts_sfx 出 WAV，写进脚本的 voice 轨。默认不用。**",
   "· 全局工具：read/write/edit/sh/py/js/subsession_run/todo/ask。",
@@ -215,10 +217,8 @@ export const systemPrompt = [
   "4. 失败时如实说卡在哪一步、错误原文是什么，**不要用「应该可以」结案**。",
 ].join("\n")
 
-export const tools: Record<string, Tool> = {
-  ...shuangtianTools,
-  ...imagegenTools,
-  ...ttsTools,
-}
+// 零自有工具：霜天 / imagegen / tts 全部经依赖连带装载
+export const tools: Record<string, Tool> = {}
 export const preload = false
-export const def: SubAgentDef = { name, description, systemPrompt, tools, preload }
+// 三个依赖名与 caiyun 均不构成前缀，工具各以自身命名空间注册
+export const def: SubAgentDef = { name, description, systemPrompt, tools, preload, dependencies: ["shuangtian", "imagegen", "tts"] }

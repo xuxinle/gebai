@@ -1,15 +1,16 @@
 import type { SubAgentDef, Tool } from "@gebai/sdk"
-import { tools as imagegenTools } from "../imagegen/imagegen"
-import { tools as shuangtianTools } from "../shuangtian/shuangtian"
 
-export const name = "shuangtian_poster"
+// 工具面全部走依赖（DESIGN「子Agent 依赖与自动装载」）：霜天全套（shuangtian，`shuangtian_*`）
+// 与本地图像生成（imagegen，`imagegen_*`）——本代理零自有工具，不内联展开。
+
+export const name = "louyue"
 
 export const description =
-  "用霜天框架的**镂月（Lunaris）**做海报：写海报脚本、排文字层级、贴素材图、导出 PNG 并核验。" +
+  "镂月（Lunaris）：用霜天框架做海报——写海报脚本、排文字层级、贴素材图、导出 PNG 并核验。" +
   "镂月的真值源是 JSON 海报脚本（块列表），一份脚本能出横版/方版/竖版多种尺寸。" +
   "适用于「做宣传海报 / 封面图 / 社交图」「改已有海报的文案与配色」「用生成图做视觉主图」。" +
-  "输入：海报需求（主题/尺寸/风格）或现有脚本。" +
-  "内含霜天子代理的全套工具（前缀 shuangtian_）+ 本地图像生成（imagegen_*）。"
+  "输入：海报需求（主题/尺寸/风格）或现有脚本。 " +
+  "内含霜天子代理的全套工具（`shuangtian_*`）+ 依赖连带装载的本地图像生成（`imagegen_*`）。"
 
 export const systemPrompt =
   "你是**镂月（Lunaris）海报设计师**。镂月的真值源是一份 JSON **海报脚本**（`blocks` 块列表），" +
@@ -18,7 +19,7 @@ export const systemPrompt =
   "\n" +
   "## 工具面\n" +
   "· 霜天框架（`shuangtian_*`）：run/tree/find/get/set/invoke/capture/click/wait/visual_diff/metrics。\n" +
-  "· 图像生成（`imagegen_*`）：imagegen / imagegen_check / imagegen_assets。\n" +
+  "· 图像生成（`imagegen_*`，依赖 imagegen 连带装载）：imagegen / imagegen_check / imagegen_assets。\n" +
   "· 海报控制面是 `#poster` 元素：`invoke apply_poster <json>` / `export_png <path> [WxH]` / " +
   "`edit_lock` / `unlock_edit`；属性 `poster`（当前脚本）/`blocks`/`edit_locked`/`export_path`。\n" +
   "\n" +
@@ -76,6 +77,7 @@ export const systemPrompt =
   "给：导出 PNG 路径（含尺寸）、脚本路径、你**亲眼看过**的核验结论（构图/层级/可读性各一句）。" +
   "失败如实说卡在哪、错误原文。不确定视觉是否达标时，导出后用 read 看图再判断，不要空口断言。"
 
-export const tools: Record<string, Tool> = { ...shuangtianTools, ...imagegenTools }
+// 零自有工具：霜天与 imagegen 均经依赖连带装载
+export const tools: Record<string, Tool> = {}
 export const preload = false
-export const def: SubAgentDef = { name, description, systemPrompt, tools, preload }
+export const def: SubAgentDef = { name, description, systemPrompt, tools, preload, dependencies: ["shuangtian", "imagegen"] }
