@@ -34,6 +34,14 @@ class ListItem : public Element {
 
   [[nodiscard]] auto label() const noexcept -> const std::string& { return label_; }
   void set_label(std::string label);
+  /// 前置图标（图标名，取内置图标集；空 = 不画）。
+  ///
+  /// 为何是项级而不是容器级：同一个列表里不同行的图标天然不同
+  ///（大纲的类/函数/变量各一个），放到容器上就得让调用方自己排版。
+  /// 图标宽度从文本区里**预先扣掉**（`kIconSlot`），所以带图标与不带图标的
+  /// 行文本起点不同——这是有意的：图标是行结构的一部分，不是浮在上面的装饰。
+  [[nodiscard]] auto icon() const noexcept -> const std::string& { return icon_; }
+  void set_icon(std::string icon);
   [[nodiscard]] auto subtitle() const noexcept -> const std::string& { return subtitle_; }
   void set_subtitle(std::string subtitle);
   [[nodiscard]] auto selected() const noexcept -> bool { return selected_; }
@@ -69,6 +77,7 @@ class ListItem : public Element {
  private:
   std::string label_{};
   std::string subtitle_{};
+  std::string icon_{};
   std::size_t index_{0};
   bool selected_{false};
   std::function<void(std::size_t)> on_activate_{};
@@ -125,6 +134,8 @@ class List : public Element {
     /// **没有落点、静默丢掉**（实测：文件历史的「作者 · 日期」一行都画不出来，
     /// 而数据面明明给了值）。
     std::string subtitle{};
+    /// 前置图标名（空 = 不画）。落点是 `ListItem::set_icon`。
+    std::string icon{};
     std::function<void()> on_activate{};  ///< 空则用 `set_on_select` 的默认行为
   };
 
@@ -161,6 +172,12 @@ class List : public Element {
   /// 字是 `ListItem` 画的，容器只记不画——不下放就是静默不生效。
   /// 在 `apply_theme` 末尾调：镜像完紧跟项的基类 apply_theme 回放进 style_。
   void apply_theme_to_items();
+  /// 把容器上的**显式高度**下放为各项行高（`List` 的 `height` 语义 = 单行高）。
+  ///
+  /// 为何需要：DSL 的 `.height` 应用在 **List 容器**上，而行的实际尺寸由
+  /// `ListItem::style_.height` 决定——不写这条下放，`.height` 是"设了没生效"
+  ///（实测：大纲想压到 22px，行高恒 40）。
+  void apply_row_height_override();
   void apply_theme(const Theme& theme) override;
 
   // —— 列表类通用视口契约（与 `Tree` 同口径，见 tree.hpp 的说明）——

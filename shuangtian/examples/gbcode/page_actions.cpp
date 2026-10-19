@@ -2123,6 +2123,52 @@ void CodeEditorPage::load_active_text() {
   }
 
 
+  /// 页面缩放（查看菜单 / Ctrl+= · Ctrl+- · Ctrl+0）。
+  ///
+  /// `direction`：+1 放大、-1 缩小、0 重置到 100%。
+  /// 实现就是 **DPI 缩放**——见 `device_scale_setter` 的说明：霜天全自绘，
+  /// `device_scale` 同时决定缓冲尺寸、文本超采样与逻辑像素的物理大小，
+  /// 它本身就是"页面缩放"，另造一个缩放因子只会得到两条并行链路。
+  void CodeEditorPage::zoom_page(int direction) {
+    if (!device_scale_setter || !device_scale_getter) {
+      status_.set("当前环境不支持页面缩放");
+      return;
+    }
+    const float current = device_scale_getter();
+    float target = current;
+    if (direction == 0) {
+      target = 1.0f;
+    } else {
+      // 在档位表里找到"当前值所在的位置"再前/后移一格：
+      // 连续缩放（×1.1 这种）在 DPI 下会让字形亚像素相位每档都不同，
+      // 观感在"糊/锐"之间来回跳；档位化后每档都是稳定的。
+      const auto& levels = kZoomLevels;
+      std::size_t index = 0;
+      float best = std::numeric_limits<float>::max();
+      for (std::size_t i = 0; i < std::size(levels); ++i) {
+        if (const float distance = std::abs(levels[i] - current); distance < best) {
+          best = distance;
+          index = i;
+        }
+      }
+      if (direction > 0) {
+        if (index + 1 < std::size(levels)) target = levels[index + 1];
+      } else if (index > 0) {
+        target = levels[index - 1];
+      }
+    }
+    if (std::abs(target - current) < 0.001f) {
+      status_.set(std::format("页面缩放已是 {:.0f}%", target * 100.0f));
+      return;
+    }
+    if (!device_scale_setter(target)) {
+      status_.set("页面缩放失败（当前后端不支持）");
+      return;
+    }
+    status_.set(std::format("页面缩放 {:.0f}%", target * 100.0f));
+  }
+
+
   /// 悬停（鼠标停留）：请求当前位置的信息。
   void CodeEditorPage::request_hover_at_cursor() {
     std::string path;
@@ -2136,12 +2182,46 @@ void CodeEditorPage::load_active_text() {
   /// 文档大纲：把符号列表放进 `symbols_`（供面板/命令面板显示）。
   void CodeEditorPage::refresh_document_symbols() {
     const auto list = buffers_.value();
-    if (active_.value() >= list.size() || list[active_.value()].path.empty() || !lsp_.active()) {
-      symbols_.clear();
+    if (active_.value() >= list.size() || list[active_.value()].path.empty()) {
+      symbols_.set({});
       symbols_path_.clear();
+      outline_fetch_pending_ = false;
       return;
     }
-    (void)lsp_.request_document_symbols(list[active_.value()].path);
+    // ⚠ LSP 可能还在握手中（`active()` = started && Ready）。旧写法在这里
+    // `symbols_.clear()` 后直接返回——于是「打开文件」那一刻拍的大纲请求被
+    // **静默吞掉**，而且再也没有人补发（要等用户手点「刷新大纲」）。
+    // 实测：打开 .cpp 后大纲恒空，点一次刷新才出来。
+    // 现在改成"挂起 + 每帧补试"：握手一完成就自动拉到。
+    outline_fetch_pending_ = true;
+    pump_outline_fetch();
+  }
+
+
+  /// LSP 就绪后补拉大纲（每帧泵调用；未就绪时什么也不做）。
+  void CodeEditorPage::pump_outline_fetch() {
+    if (!outline_fetch_pending_) return;
+    const auto list = buffers_.value();
+    if (active_.value() >= list.size() || list[active_.value()].path.empty()) {
+      outline_fetch_pending_ = false;
+      return;
+    }
+    if (!lsp_.active()) return;   // 还在握手：保持挂起，下一帧再看
+    outline_fetch_pending_ = false;
+    // ⚠ **必须先让 server 知道这个文档（didOpen），再请求符号**。
+    //
+    // 这条不是防御性冗余，而是本 bug 的最后一块：`sync_language_document` 里
+    // 的 `sync_document` 有 `if (!started) return;`——**首帧**调用时 server 刚被
+    // 拉起、还没就绪，于是 didOpen 根本没发出去。等握手完成后再请求 `documentSymbol`，
+    // clangd 对"没打开过的文件"如实回**空数组**（协议语义：documentSymbol 只对
+    // 已同步文档有效）。于是大纲恒空——而单独用标准 LSP 客户端先 didOpen 再请求，
+    // 同一个文件能返回 16 个符号（`tools/lsp_symbols_probe.cpp` 就是这个对照）。
+    //
+    // 这里补一次 `sync_document`（它按 path 去重，已同步过就是 no-op），
+    // 保证"请求符号时文档一定已打开"。
+    const auto& buffer = list[active_.value()];
+    lsp_.sync_document(buffer.path, buffer.text);
+    outline_request_ = lsp_.request_document_symbols(buffer.path);
   }
 
 
@@ -2223,14 +2303,12 @@ void CodeEditorPage::load_active_text() {
     if (locations.empty()) {
       status_.set(family == "references" ? "没有找到引用" : "没有找到结果");
       nav_results_.clear();
-      nav_results_open_.set(false);
       return;
     }
     if (locations.size() == 1) {
       jump_to_location(locations.front());
       status_.set("已跳转：" + st::lsp::LspClient::uri_to_path(locations.front().uri));
       nav_results_.clear();
-      nav_results_open_.set(false);
       return;
     }
     // 多处：列进 `nav_results_` 供结果面板用，先跳到第一处。
@@ -2263,20 +2341,29 @@ void CodeEditorPage::load_active_text() {
                                        .preview = std::move(preview),
                                        .location = item});
     }
-      nav_results_open_.set(true);
-  // 多处结果自动切到大纲视图（面板开着才有意义；用户可随时切走）。
-  // 大纲视图**不纳入保活**（它的内容一次查询即生成，没有“用户位置”可丢）——
+      // 多处结果自动切到**导航结果**视图（用户可随时切走）。
+  // 该视图不纳入保活（内容一次查找即生成，没有"用户位置"可丢）——
   // 这里只切下标，不进 `sidebar_visited_`。
-  if (activity_.value() != 5) activity_.set(5);
+  // 切到**导航结果**视图（不是大纲）：多处命中是搜索结果，与文件结构分栏。
+  if (activity_.value() != view_index(SidebarView::Nav)) {
+    activity_.set(view_index(SidebarView::Nav));
+  }
   jump_to_location(locations.front());
-  status_.set(std::format("找到 {} 处{}，已跳到第 1 处（Alt+← 返回；其余在「大纲」侧栏）",
+  status_.set(std::format("找到 {} 处{}，已跳到第 1 处（Alt+← 返回；其余在「导航结果」侧栏）",
                          locations.size(), family == "references" ? "引用" : ""));
   }
 
 
   /// 悬停响应：显示到编辑器的信息层（贴光标行下方）。
   void CodeEditorPage::on_hover_response(std::int64_t id, const std::optional<st::lsp::HoverInfo>& info) {
-    if (id != hover_request_ && !hover_dropped_) return;   // 旧响应丢弃
+    // 只认**最后发出的那个请求**：用户先悬停 A 再移到 B 时，A 的响应可能后到，
+    // 拿它显示会把卡片钉在 A 上（而鼠标在 B）。
+    //
+    // 旧写法是 `id != hover_request_ && !hover_dropped_`——"且"关系的两个条件里
+    // `hover_dropped_` 在每次发请求时都置真，于是整个判据退化成"永远放行"；
+    // 而且防抖路径根本没把 id 写进 `hover_request_`（直接 `(void)` 丢弃返回值），
+    // 两条路径的 id 口径从未对齐过。现在统一：谁发请求谁存 id，只认最后一个。
+    if (id != hover_request_) return;
     if (editor == nullptr) return;
     if (!info.has_value() || info->text.empty()) {
       editor->clear_hover_info();
@@ -2289,12 +2376,13 @@ void CodeEditorPage::load_active_text() {
 
 
   /// 大纲响应。
-  void CodeEditorPage::on_symbols_response(std::int64_t, const std::vector<st::lsp::DocumentSymbol>& symbols) {
-    symbols_ = symbols;
+  void CodeEditorPage::on_symbols_response(std::int64_t id, const std::vector<st::lsp::DocumentSymbol>& symbols) {
+    (void)id;   // 符号请求是"最后一条为准"的语义：旧响应覆盖新响应也无害（内容同源）
+    symbols_.set(symbols);
     const auto list = buffers_.value();
     symbols_path_ = active_.value() < list.size() ? list[active_.value()].path : std::string{};
-    // 大纲已加载：若面板开着，重组会把它画出来（`symbols_` 是普通成员，
-    // 但面板由 `State<bool>` 驱动可见性，所以这里不再需要额外标脏）。
+    // 大纲已加载：`symbols_` 是 `State`，`set` 本身就会触发重组
+    //（旧实现把它写成普通成员，异步响应到了也没人重画——大纲恒空）。
   }
 
 
@@ -2327,7 +2415,7 @@ void CodeEditorPage::load_active_text() {
         }
       }
     };
-    if (symbols_kind_.value() == SymbolKind::Document) flatten(symbols_, flatten, 0);
+    if (symbols_kind_.value() == SymbolKind::Document) flatten(symbols_.value(), flatten, 0);
     else {
       for (const auto& symbol : workspace_symbols_) {
         table.push_back(CommandPalette::Command{
@@ -2343,7 +2431,7 @@ void CodeEditorPage::load_active_text() {
   /// 打开「转到符号」面板（公开面：入口在快捷键/菜单，与本页其它入口一致）。
   void CodeEditorPage::open_symbols(bool document) {
     if (document) {
-      if (symbols_.empty()) {
+      if (symbols_.value().empty()) {
         status_.set("当前文件没有可用的符号（语言服务未就绪？）");
       }
       symbols_kind_.set(SymbolKind::Document);
@@ -2384,7 +2472,7 @@ void CodeEditorPage::load_active_text() {
         }
         return false;
       };
-      (void)walk(symbols_, walk);
+      (void)walk(symbols_.value(), walk);
       return;
     }
     if (index < workspace_symbols_.size()) {
@@ -2632,16 +2720,21 @@ void CodeEditorPage::load_active_text() {
       hover_word_pending_ = {0, 0};
       return;
     }
-    if (st::time::now_ms() - hover_word_changed_at_ < 400) return;   // 还在移动
+    // 防抖 250ms（原 400ms）：用户报「弹出慢」。
+    //
+    // 400ms 是"停住不动"才算悬停的旧口径，在真实操作里偏长——鼠标移到符号上、
+    // 看一眼、不等卡片出来就走了。250ms 仍能滤掉"扫过一行"的抖动
+    //（一行内相邻符号间距约 60~120px，正常移动速度下 <150ms 就划过去了），
+    // 而体感上它是"停下就出"。LSP 往返另有几十毫秒，所以总延迟约 300ms。
+    if (st::time::now_ms() - hover_word_changed_at_ < 250) return;   // 还在移动
     if (hover_word_pending_ == hover_word_sent_) return;             // 已请求过
     hover_word_sent_ = hover_word_pending_;
-    hover_dropped_ = true;   // 请求期间词又变了 → 响应作废
     std::string path;
     st::lsp::Position position{};
     if (!current_document(&path, &position)) return;
     hover_word_line_ = static_cast<std::uint32_t>(position.line);
-    (void)lsp_.request_hover(path, static_cast<std::uint32_t>(position.line),
-                             static_cast<std::uint32_t>(position.character));
+    hover_request_ = lsp_.request_hover(path, static_cast<std::uint32_t>(position.line),
+                                        static_cast<std::uint32_t>(position.character));
   }
 
 
@@ -2713,14 +2806,19 @@ void CodeEditorPage::load_active_text() {
      } else if (id == "nav.results") {
   // 多处导航结果列在大纲侧栏下段：切过去并展开（与 on_locations_response 同一套入口）。
   if (!nav_results_.empty()) {
-   nav_results_open_.set(true);
-   activity_.set(5);
+    activity_.set(view_index(SidebarView::Nav));
    sidebar_visible_.set(true);
   } else {
    status_.set("当前没有导航结果（F12/Shift+F12 多处命中时生成）");
   }
     } else if (id == "file.close-tab") {
       close_active();
+    } else if (id == "view.zoom-in") {
+      zoom_page(1);
+    } else if (id == "view.zoom-out") {
+      zoom_page(-1);
+    } else if (id == "view.zoom-reset") {
+      zoom_page(0);
     } else if (id == "view.toggle-sidebar") {
       sidebar_visible_.set(!sidebar_visible_.value());
     } else if (id == "view.toggle-theme") {
@@ -2771,6 +2869,9 @@ void CodeEditorPage::load_active_text() {
     // 否则“打开文件夹”只有记住快捷键的人找得到。
     add("file.open", "文件: 打开文件…", "Ctrl+O");
     add("file.open-folder", "文件: 打开文件夹…", "换工作区（Ctrl+Shift+O）");
+    add("view.zoom-in", "查看: 放大页面", "页面缩放 +（Ctrl+=）");
+    add("view.zoom-out", "查看: 缩小页面", "页面缩放 −（Ctrl+-）");
+    add("view.zoom-reset", "查看: 重置页面缩放", "回到 100%（Ctrl+0）");
     add("view.toggle-sidebar", "查看: 切换侧栏可见性", "显示/隐藏侧栏（活动栏常驻，Ctrl+B）");
     add("view.toggle-theme", "查看: 切换亮/暗主题", "主题令牌整体切换");
     add("view.toggle-indent-guides", "查看: 切换缩进参考线", "每级缩进一条竖线");

@@ -798,6 +798,8 @@ struct ListItemData {
   std::string key{};
   std::string label{};
   std::string subtitle{};
+  /// 前置图标名（内置图标集；空 = 不画）。落点是 `ListItem::set_icon`。
+  std::string icon{};
 };
 /// 列表（数据驱动；按 key 复用，语义同 List::sync_items）。
 auto list(Composer& c, const std::vector<ListItemData>& items,

@@ -135,6 +135,7 @@ class FrameReader {
 struct Position {
   std::size_t line{0};        ///< 0 基
   std::size_t character{0};   ///< 0 基，UTF-16 码元
+  [[nodiscard]] auto operator==(const Position&) const -> bool = default;
 };
 
 /// `Position` ↔ UTF-8 字节偏移（相对于整篇文档）。
@@ -154,6 +155,7 @@ struct Position {
 struct Range {
   Position start{};
   Position end{};
+  [[nodiscard]] auto operator==(const Range&) const -> bool = default;
 };
 
 /// 由 JSON `{"start":..,"end":..}` 解析 `Range`。

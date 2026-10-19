@@ -3878,6 +3878,79 @@ pending 分支里——于是最后一帧画完就再没帧，`pump_delivery` �
 **冷内存/缺页或后台抢 CPU** 效应，而非任何一处算法。日常交互（滚动/打字）已达标，
 此项留在 backlog（`docs/BACKLOG.md`）继续跟。
 
+#### 4.5.2.2 gbcode 本轮可用性修（2026-10-19，五条用户反馈）
+
+> 五条反馈逐条落地。每条都先定位真根因再改——其中三条的真根因与用户描述的现象
+> **不在同一层**（见各条的「以为是/实际是」）。
+
+**① 符号悬停提示：弹出慢 / 内容溢出背景 / 移开不消失**
+
+- *以为是 DPI 导致溢出，实际是测量与绘制用了不同的字体角色*：
+  背景框宽度按 `measure_width(text, font_sm)`（默认 **Proportional**）算，
+  而文字用 `port.draw(..., FontRole::Monospace)` 画——**等宽比比例宽**，
+  于是框永远偏窄、文字溢出。DPI 只是把差值放大。修：两侧统一 `Monospace`，
+  并对超宽行**折行**（按 `utf8_next` 取字符边界，不拆码点）。
+- *弹出慢*：防抖 400ms → **250ms**（250ms 仍能滤掉"扫过一行"，体感是"停下就出"）。
+- *移开不消失*：`on_hover_word` 回调里**词一变就立刻清掉旧卡片**。旧实现只更新时间戳，
+  旧卡片的文字要等新响应回来（或移到空白处）才消失——中间那段时间卡片挂在
+  **上一个**符号下面。
+- *顺带修的真 bug*：`on_hover_response` 的判据是
+  `id != hover_request_ && !hover_dropped_`——`hover_dropped_` 每次发请求都置真，
+  于是整个判据**退化成永远放行**；而防抖路径根本没把 id 写进 `hover_request_`
+  （直接 `(void)` 丢返回值），两条路径的 id 口径从未对齐。现在统一：
+  谁发请求谁存 id，响应只认最后一个。
+
+**② 大纲视图：行间隔太大 / 类型要用图标 / 导航结果不该混在里面**
+
+- *行高*：`List` 的 `.height` 应用在**容器**上，而行的尺寸由 `ListItem::style_.height`
+  决定——`.height = 22` 是"设了没生效"（实测行高恒 40）。修：`List` 新增
+  `apply_row_height_override()`，把容器的显式高度**下放为单行高**
+  （语义定死：List 的 height = 行高，不是容器总高；总高由行数累积）。
+- *图标*：`src/ui/icon.cpp` 新增 14 个 `sym-*` 图标（class/struct/interface/function/
+  method/constructor/variable/field/constant/enum/module/namespace/array/boolean），
+  `ListItem` 新增 `icon()`/`set_icon()`（图标槽固定 20px，含图标与不含图标的行
+  文本起点一致），DSL `ListItemData`/`List::Entry` 同步带上 `icon`。
+  大纲用 `SymbolKind → 图标` 映射表（`symbol_kind_icon`）。
+- *导航结果移出大纲*：新增独立侧栏视图 `SidebarView::Nav`（活动栏第 5 项）。
+  大纲回答"这个文件由什么组成"（稳定结构），导航结果回答"刚才那次查找命中了哪里"
+  （一次性）——混在一起会让人不敢在大纲里滚动。`nav_results_open_` 随之删除
+  （视图可见性已经表达了它）。
+- *顺带挖出的两个真 bug（不修则大纲永远是空的）*：
+  1. **异步响应不改 `State` 就不重画**：`symbols_` 是普通成员，LSP 响应到了没人重组，
+     日志里有 16 个符号、界面却写"没有符号大纲"。改 `State<vector<DocumentSymbol>>`
+     （为此给 `Position`/`Range`/`DocumentSymbol` 补了 `operator==`，`State` 用它判变化）。
+  2. **没 didOpen 就请求符号 → clangd 回空数组**：首帧 `sync_language_document` 里
+     `ensure_started` 刚拉起 server（`started == false`），`sync_document` 直接
+     `return`，文档从未打开；等握手完成再请求 `documentSymbol`，协议上只对已同步文档
+     有效，clangd 如实回空。修：`refresh_document_symbols` 改成**挂起 + 每帧补试**
+     （`pump_outline_fetch`），并在发请求前补一次 `sync_document`（按 path 去重，no-op 安全）。
+     对照探针 `tools/lsp_symbols_probe.cpp`：先 didOpen 再请求 → 16 个符号；
+     不 didOpen → 0 个。
+
+**③ 删掉活动栏「语言与扩展」「运行」两项**
+
+理由：前者枚举的是**内置**语言服务清单（用户既不能装也不能配——它回答"我们支持什么"，
+不是"你要做什么"）；后者只是把 `st build/test/lint` 做成按钮（同批动作在「运行」菜单
+与命令面板都有）。两者都是"有占位、没可操作性"的常驻视图。
+索引魔数同时收敛成 `SidebarView` 枚举（删视图时大纲索引从 5 变 3，
+散落的 `5` 全部改成 `view_index(SidebarView::Outline)`，并用 `static_assert` 把
+活动栏按钮顺序与枚举钉在一起）。
+
+**④ 查看菜单支持页面缩放（直接用 DPI 缩放）**
+
+- 「查看」菜单加三项：放大（`Ctrl+=`）/ 缩小（`Ctrl+-`）/ 重置（`Ctrl+0`），
+  命令面板与快捷键表（`shortcut_help.hpp`，单源）同步。
+- 实现就是 `Application::set_device_scale`——**不另造缩放因子**：霜天全自绘，
+  `device_scale` 同时决定缓冲尺寸、文本超采样与逻辑像素的物理大小，它本身就是"页面缩放"；
+  另造一个 `ui_zoom` 会得到两条并行缩放链（一条改缓冲、一条改字号），迟早分叉。
+- 档位化（0.75/0.9/1.0/1.25/1.5/2.0）而非连续缩放：非整数档在 DPI 下让字形
+  亚像素相位每档都不同，观感在"糊/锐"之间来回跳。
+
+**验证**：`st test` 全绿（404 passed；唯一 FAIL 是既有的 `platform_backends`
+环境敏感用例）。四项行为实测：活动栏 5 项视图（run/extensions 已消失）、
+缩放 1.0→1.25→1.0→1.0、大纲 16 行全部 22px 且大纲内无 `nav-results`、
+`sidebar-nav` 可独立打开。
+
 ### 4.6 shell
 ```cpp
 namespace st::shell {

@@ -484,6 +484,12 @@ auto run_app(int argc, char** argv) -> int {
   page->theme_setter = [&app](ThemeMode mode) { app.set_theme_mode(mode); };
   // 慢内容异步排版的调度器（Markdown 预览大文档不冻结主窗）。
   page->layout_tasks_ = &app.tasks();
+  // 页面缩放 = DPI 缩放（见 `CodeEditorPage::device_scale_setter` 的说明）：
+  // `set_device_scale` 会一并处理缓冲尺寸、文本超采样与全树重排/重绘。
+  page->device_scale_setter = [&app](float scale) {
+    return static_cast<bool>(app.set_device_scale(scale));
+  };
+  page->device_scale_getter = [&app] { return app.device_scale(); };
   // 后台排版的字体栈（只读共享）：离屏端口用它构造自己的 TextRenderer，
   // 缓存与主线程完全隔离——否则大文档排版会刷爆主线程的宽度 LRU。
   page->font_stack_ = &app.font_stack();
@@ -583,6 +589,9 @@ auto run_app(int argc, char** argv) -> int {
                                             std::function<bool()> action) {
       (void)register_shortcut_by_id(*root, id, std::move(action), overlay_open);
     };
+    bind("zoom-in", [page] { page->zoom_page(1); return true; });
+    bind("zoom-out", [page] { page->zoom_page(-1); return true; });
+    bind("zoom-reset", [page] { page->zoom_page(0); return true; });
     bind("save", [page] { page->save(); return true; });
     bind("save-as", [page] { page->save_as(); return true; });
     // 全部保存 Ctrl+Alt+S：为何不是 VSCode 的 Ctrl+K S（和弦）——本框架没有

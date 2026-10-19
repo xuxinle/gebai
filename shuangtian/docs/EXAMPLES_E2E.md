@@ -25,6 +25,7 @@
 | `gbcode_history_e2e.py` | gbcode | 单文件历史弹窗：真仓库 `git log --follow` → 弹窗列出提交 → 点开差异 | `py -3 tools/gbcode_history_e2e.py` |
 | `gbcode_blame_e2e.py` | gbcode | 行尾 blame 注解：真仓库 → 数据面 → 编辑器行装饰（断注解真进了渲染，不是只看 setter 被调） | `py -3 tools/gbcode_blame_e2e.py` |
 | `gbcode_hint_e2e.py` | gbcode | 悬停提示五断言：延时内不出现/超时出现/移开消失/点击消失/悬停子元素冒泡拿父提示 | `py -3 tools/gbcode_hint_e2e.py` |
+| `lsp_symbols_probe`（C++ 探针） | gbcode | LSP 链路分段验证：握手耗时 / **didOpen 前后 `documentSymbol` 的差别（0 vs 16 个符号）**——大纲恒空的根因探针，改 LSP 桥时先跑它 | `st build lsp_symbols_probe && ./build/dev/bin/lsp_symbols_probe <file>` |
 | `gbcode_focus_ring_e2e.py` | gbcode | 焦点环像素断言：点击不留环、键盘导航仍画环（同视图状态区域像素对照） | `py -3 tools/gbcode_focus_ring_e2e.py` |
 | `gbcode_sidebar_keepalive_e2e.py` | gbcode | 侧栏「常驻声明 + 隐藏保活」：切换后滚动偏移/输入文本不丢 + 帧耗时量级断言 | `py -3 tools/gbcode_sidebar_keepalive_e2e.py` |
 | `gbcode_sidebar_keepalive_bench.py` | gbcode | （bench 对照，非断言）常驻声明 vs 旧写法切换的帧耗时分段对照，不改任何代码 | `py -3 tools/gbcode_sidebar_keepalive_bench.py` |

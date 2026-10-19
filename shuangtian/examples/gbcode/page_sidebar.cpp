@@ -51,15 +51,15 @@ namespace gbcode_ui {
         b.on_click = on_click;
       }, {.width = 24.0f, .height = 24.0f, .key = id});
     };
-    switch (activity_.value()) {
-      case 0:
+    switch (static_cast<SidebarView>(activity_.value())) {
+      case SidebarView::Explorer:
         icon_button("explorer-refresh", "refresh", "刷新", [this] { refresh_tree(); });
         icon_button("explorer-new-file", "plus", "新建文件", [this] { explorer_create(false); });
         icon_button("explorer-new-folder", "folder", "新建文件夹",
                     [this] { explorer_create(true); });
         icon_button("explorer-save", "download", "保存当前", [this] { save(); });
         break;
-      case 1:
+      case SidebarView::Search:
         icon_button("search-go", "search", "重新搜索", [this] { run_search(last_query_); });
         icon_button("search-clear", "close", "清空结果", [this] {
           search_hits_.set({});
@@ -70,26 +70,19 @@ namespace gbcode_ui {
           search_summary_.set("");
         });
         break;
-      case 2:
+      case SidebarView::Scm:
         icon_button("scm-refresh", "refresh", "刷新状态", [this] { refresh_git(); });
         break;
-      case 3:
-        icon_button("run-build", "play", "构建", [this] { run_task("build"); });
-        icon_button("run-test", "check", "测试", [this] { run_task("test"); });
-        break;
-      case 5:
+      case SidebarView::Outline:
         icon_button("outline-refresh", "refresh", "刷新大纲", [this] {
           refresh_document_symbols();
         });
-        icon_button("nav-clear", "close", "收起导航结果", [this] {
-          // 清数据还是只收起：**只收起**（数据保留——用户可能马上还要看下一处，
-          // 清了就要重新 F12）。收起后再有多处命中会重新展开（on_navigation_results
-          // 会再次 set true）。
-          nav_results_open_.set(false);
-        });
         break;
-      default:
-        icon_button("ext-refresh", "refresh", "重新枚举", [this] { refresh_languages(); });
+      case SidebarView::Nav:
+        icon_button("nav-clear", "close", "清空导航结果", [this] {
+          nav_results_.clear();
+          nav_row_to_result_.clear();
+        });
         break;
     }
   }
@@ -129,10 +122,12 @@ namespace gbcode_ui {
       // ⚠ `static constexpr` 不能与成员函数指针类型一起推：`constexpr` 要求
       // 字面类型，而成员指针不是——写成 `static const`（初始化仍是编译期常量）。
       static const View kViews[] = {
-          {0, "sidebar-explorer", "sidebar-explorer", &CodeEditorPage::build_explorer},
-          {1, "sidebar-search", "sidebar-search", &CodeEditorPage::build_search_view},
-          {2, "sidebar-scm", "sidebar-scm", &CodeEditorPage::build_scm_view},
-          {3, "sidebar-run", "sidebar-run", &CodeEditorPage::build_run_view}};
+          {view_index(SidebarView::Explorer), "sidebar-explorer", "sidebar-explorer",
+           &CodeEditorPage::build_explorer},
+          {view_index(SidebarView::Search), "sidebar-search", "sidebar-search",
+           &CodeEditorPage::build_search_view},
+          {view_index(SidebarView::Scm), "sidebar-scm", "sidebar-scm",
+           &CodeEditorPage::build_scm_view}};
       const std::size_t current = activity_.value();
       // **首次访问才声明，之后保活**：
       // ① 没访问过的视图不参与构建——否则启动首帧要一次性把五棵子树全建出来
@@ -158,19 +153,18 @@ namespace gbcode_ui {
             },
             {.grow = true, .key = view.key});
       }
-      // 大纲与扩展两个视图仍按当前声明（它们的内容本就按一次查询/一次扫描即
-      // 生成，没有“用户位置”可丢）；与上面那几个分开写，是为了不让“保活”这条
-      // 规则被无差别地扩到没必要的地方。
-      if (current == 5) {
+      // 大纲与导航结果按当前声明（内容一次查询/一次查找即生成，没有"用户位置"可丢）；
+      // 与上面几个分开写，是为了不让"保活"这条规则被无差别地扩到没必要的地方。
+      if (current == view_index(SidebarView::Outline)) {
         (void)custom_container<Panel>(
             c, [this, &c] { build_outline_view(c); },
             [](Panel& panel) { panel.set_id("sidebar-outline"); },
             {.grow = true, .key = "sidebar-outline"});
-      } else if (current != 0 && current != 1 && current != 2 && current != 3) {
+      } else if (current == view_index(SidebarView::Nav)) {
         (void)custom_container<Panel>(
-            c, [this, &c] { build_extensions_view(c); },
-            [](Panel& panel) { panel.set_id("sidebar-extensions"); },
-            {.grow = true, .key = "sidebar-extensions"});
+            c, [this, &c] { build_nav_view(c); },
+            [](Panel& panel) { panel.set_id("sidebar-nav"); },
+            {.grow = true, .key = "sidebar-nav"});
       }
     });
   }
@@ -458,73 +452,117 @@ void CodeEditorPage::replace_in_workspace(std::string_view replacement) {
   // 主体是**当前文件的符号大纲**（LSP DocumentSymbol，嵌套缩进展示；切文件自动刷新，
   // 点击跳到符号处）。多处导航结果（F12/Shift+F12 的命中清单）附在下方——
   // 有命中才出现，与大纲主客分明（2026-10-13 由「导航结果」升级而来）。
+  /// LSP `SymbolKind`（协议枚举）→ 图标名 + 助记分类。
+  ///
+  /// 为何要这张表而不是"直接把数字当图标名"：SymbolKind 是 LSP 的**协议值**
+  /// （1=File … 26=TypeParameter），它只对协议有意义；界面上要的是"这是类还是函数"。
+  /// 表里没列到的 kind 回 `sym-field`（"其它成员"），不画空图标——
+  /// 一行有图标、下一行没有会比"图标略不准确"更难看。
+  auto CodeEditorPage::symbol_kind_icon(int kind) -> const char* {
+    switch (kind) {
+      case 2: case 3: return "sym-module";        // Module / Namespace
+      case 4: return "sym-package";               // Package（复用「包」图标）
+      case 5: return "sym-class";                 // Class
+      case 6: return "sym-method";                // Method
+      case 7: return "sym-field";                 // Property
+      case 8: return "sym-field";                 // Field
+      case 9: return "sym-constructor";           // Constructor
+      case 10: return "sym-enum";                 // Enum
+      case 11: return "sym-interface";            // Interface
+      case 12: return "sym-function";             // Function
+      case 13: return "sym-variable";             // Variable
+      case 14: return "sym-constant";             // Constant
+      case 15: return "sym-constant";             // String
+      case 16: return "sym-array";                // Number
+      case 17: return "sym-boolean";              // Boolean
+      case 18: return "sym-array";                // Array
+      case 22: return "sym-constant";             // EnumMember
+      case 23: return "sym-struct";               // Struct
+      case 24: return "sym-variable";             // Event
+      case 25: return "sym-field";                // Operator
+      case 26: return "sym-variable";             // TypeParameter
+      default: return "sym-field";
+    }
+  }
+
+
+  /// 大纲：当前文件符号树。
+  ///
+  /// 三条与旧版的差别（2026-10-19，按用户反馈）：
+  /// ① **行高紧凑**（`kOutlineRowHeight` 22px + 0 间距）：旧的用 `List` 默认 40px 行
+  ///    + 2px 间距，一个 60 符号的文件要滚两屏；大纲是**导航目录**，密排才对；
+  /// ② **类型用图标**：以前是「名字 + `[func]` 后缀」，后缀把名字挤窄且不可扫读；
+  /// 现在是前置图标（`symbol_kind_icon`），缩进仍表示层级；
+  /// ③ **导航结果不在这里**：多处定义/引用命中是「搜索结果」，与"文件结构"是
+  ///    两码事——混在同一栏里会让大纲随每次 F12 变形。它们有独立侧栏
+  ///    （`build_nav_view`）。
   void CodeEditorPage::build_outline_view(Composer& c) {
     build_sidebar_head(c, "大纲");
-    // —— 上：符号大纲 ——
-    if (symbols_.empty()) {
+    const auto& symbols = symbols_.value();
+    if (symbols.empty()) {
       (void)text(c, [] {
         return std::string("当前文件没有符号大纲\n（需要语言服务就绪，且文件在磁盘上）");
       }, {.id = "outline-empty"});
-    } else {
-      // 符号树拍平成缩进行：行 → 符号的映射（`outline_rows_`）在构建期同步维护，
-      // 点击回调里按下标反查（与导航结果的 `nav_row_to_result_` 同一套模式）。
-      std::vector<ListItemData> items;
-      outline_rows_.clear();
-      const auto flatten = [&](const auto& list, auto&& self, int depth) -> void {
-        for (const auto& symbol : list) {
-          const std::string indent(static_cast<std::size_t>(depth) * 2U, ' ');
-          // 行文案：缩进 + 名字 + kind（kind 后置小字，点击看符号名不被淹没）。
-          // kind 是协议枚举值（1=File…12=Function…），只对常用的几个给名字，
-          // 其余不后缀（数字本身对用户没有信息量）。
-          const char* kind_name = nullptr;
-          switch (symbol.kind) {
-            case 5: kind_name = "class"; break;
-            case 6: kind_name = "method"; break;
-            case 9: kind_name = "ctor"; break;
-            case 10: kind_name = "enum"; break;
-            case 11: kind_name = "interface"; break;
-            case 12: kind_name = "func"; break;
-            case 13: kind_name = "var"; break;
-            case 14: kind_name = "const"; break;
-            case 23: kind_name = "struct"; break;
-            default: break;
-          }
-          const std::string kind_suffix =
-              kind_name == nullptr ? std::string{} : std::format("  [{}]", kind_name);
-          items.push_back(ListItemData{.key = std::format("sym:{}:{}", depth, items.size()),
-                                       .label = indent + symbol.name + kind_suffix});
-          outline_rows_.push_back(OutlineRow{.symbol = &symbol, .depth = depth});
-          if constexpr (requires { symbol.children; }) {
-            self(symbol.children, self, depth + 1);
-          }
-        }
-      };
-      flatten(symbols_, flatten, 0);
-      (void)custom_container<ScrollView>(
-          c,
-          [&] {
-            (void)list(c, items, [this](std::size_t index) {
-              if (index >= outline_rows_.size()) return;
-              const st::lsp::DocumentSymbol* symbol = outline_rows_[index].symbol;
-              if (symbol == nullptr) return;
-              // 跳到符号（同一条 jump_to_location 路径，历史入栈可 Alt+← 回）。
-              jump_to_location(st::lsp::Location{
-                  .uri = st::lsp::LspClient::path_to_uri(current_buffer_path()),
-                  .range = symbol->range,
-                  .selection = std::nullopt});
-            },
-                     {.id = "outline-symbols", .key = "outline-symbols"});
-          },
-          [](ScrollView& scroll) { scroll.set_id("outline-scroll"); },
-          {.grow = true, .id = "outline-host"});
+      return;
     }
-    // —— 下：导航结果（有命中才出现）——
-    if (nav_results_.empty() || !nav_results_open_.value()) return;
-    (void)row(c, {.gap = 4.0f, .height = 26.0f, .id = "outline-nav-head"}, [&] {
-      (void)text(c, [this] {
-        return std::format("导航结果（{} 处）", nav_results_.size());
-      }, {.grow = true, .weight = FontWeight::Medium, .id = "outline-nav-title"});
-    });
+    // 符号树拍平成缩进行：行 → 符号的映射（`outline_rows_`）在构建期同步维护，
+    // 点击回调里按下标反查（与导航结果的 `nav_row_to_result_` 同一套模式）。
+    std::vector<ListItemData> items;
+    items.reserve(symbols.size() * 2);
+    outline_rows_.clear();
+    const auto flatten = [&](const auto& list, auto&& self, int depth) -> void {
+      for (const auto& symbol : list) {
+        // 缩进用**图标宽度**级进（每级 12px），不用空格字符：
+        // 空格宽度随字体变，缩进层级会在中英混排下抖动。
+        const std::string indent(static_cast<std::size_t>(depth) * 12U, ' ');
+        items.push_back(ListItemData{
+            .key = std::format("sym:{}:{}", depth, items.size()),
+            .label = indent + symbol.name,
+            .subtitle = {},
+            .icon = symbol_kind_icon(static_cast<int>(symbol.kind))});
+        outline_rows_.push_back(OutlineRow{.symbol = &symbol, .depth = depth});
+        if constexpr (requires { symbol.children; }) {
+          self(symbol.children, self, depth + 1);
+        }
+      }
+    };
+    flatten(symbols, flatten, 0);
+    (void)custom_container<ScrollView>(
+        c,
+        [&] {
+          (void)list(c, items, [this](std::size_t index) {
+            if (index >= outline_rows_.size()) return;
+            const st::lsp::DocumentSymbol* symbol = outline_rows_[index].symbol;
+            if (symbol == nullptr) return;
+            // 跳到符号（同一条 jump_to_location 路径，历史入栈可 Alt+← 回）。
+            jump_to_location(st::lsp::Location{
+                .uri = st::lsp::LspClient::path_to_uri(current_buffer_path()),
+                .range = symbol->range,
+                .selection = std::nullopt});
+          },
+                   // 行高 22（默认 40 太松，大纲是目录不是清单页）。
+                   {.gap = 0.0f, .height = 22.0f, .id = "outline-symbols",
+                    .key = "outline-symbols"});
+        },
+        [](ScrollView& scroll) { scroll.set_id("outline-scroll"); },
+        {.grow = true, .id = "outline-host"});
+  }
+
+
+  /// 导航结果侧栏（多处定义/引用命中）：与「大纲」分开的独立视图。
+  ///
+  /// 为何独立（用户反馈「导航结果不要放到大纲里面」）：
+  /// 大纲回答"这个文件由什么组成"（稳定、随时可看）；导航结果回答"刚才那次
+  /// 查找命中了哪里"（一次性、随每次 F12 整个换掉）。把后者塞进前者，
+  /// 会让人不敢在大纲里滚动——滚到的位置下一次 F12 就没了。
+  void CodeEditorPage::build_nav_view(Composer& c) {
+    build_sidebar_head(c, "导航结果");
+    if (nav_results_.empty()) {
+      (void)text(c, [] {
+        return std::string("还没有导航结果\n（F12 找定义 / Shift+F12 找引用后出现在这里）");
+      }, {.id = "nav-empty"});
+      return;
+    }
     // 按文件分组：前缀行是文件名，其后是该文件的命中行（与搜索结果同形态）。
     // `nav_row_to_result_`：面板行 → 结果下标的映射（分组行占位 -1）。
     std::vector<ListItemData> items;
@@ -538,33 +576,29 @@ void CodeEditorPage::replace_in_workspace(std::string_view replacement) {
       if (result.path != last_file) {
         last_file = result.path;
         items.push_back(ListItemData{.key = std::format("navfile:{}", index),
-                                     .label = file_name});
+                                     .label = file_name,
+                                     .icon = "file"});
         nav_row_to_result_.push_back(static_cast<std::size_t>(-1));
       }
-      items.push_back(ListItemData{.key = std::format("nav:{}:{}", index, result.line),
-                                   .label = std::format("  {}:{}  {}", result.line,
-                                                        result.column, result.preview)});
+      items.push_back(ListItemData{
+          .key = std::format("nav:{}:{}", index, result.line),
+          .label = std::format("  {}:{}  {}", result.line, result.column, result.preview),
+          .icon = "symbol"});
       nav_row_to_result_.push_back(index);
     }
     (void)custom_container<ScrollView>(
         c,
         [&] {
-        (void)list(c, items, [this](std::size_t index) {
-            // 点击行 → 反查它属于哪个结果（前缀行不可点——由 key 前缀区分）。
-            // `list` 的回调给的是**扁平序号**，与 `nav_results_` 下标差着分组行，
-            // 所以构建时同步记录「行 → 结果下标」的映射。
+          (void)list(c, items, [this](std::size_t index) {
+            // 点击行 → 反查它属于哪个结果（前缀行不可点——由 `-1` 哨兵挡住）。
             if (index < nav_row_to_result_.size()) open_nav_result(nav_row_to_result_[index]);
-          },
-                     {.id = "nav-results"});
+          }, {.gap = 0.0f, .height = 22.0f, .id = "nav-results", .key = "nav-results"});
         },
         [](ScrollView& scroll) { scroll.set_id("nav-scroll"); },
         {.grow = true, .id = "nav-host"});
   }
 
 
-  /// 开关胶囊（「Aa / ab / .*」这类选项）：按下态由 `active` 决定。
-  ///
-  /// 为什么不用 `Checkbox`：查找选项是**密集的一行小开关**（三个挤在 200px 宽里），
   /// 带文字的勾选框会把行撑到放不下——胶囊用固定 26px 宽，观感与 VSCode 一致。
   void CodeEditorPage::toggle_chip(Composer& c, const char* id, const char* label, bool active,
                    std::function<void()> on_click) {
@@ -897,69 +931,9 @@ b.set_label(std::format("{} {}", change.display_code(), change.display_path()));
   // 比较视图（编辑区清单形态）已随比较侧栏一起删除（2026-10-13）——
   // 旧版在编辑区渲染「A/B 端点栏 + 文件清单」，点文件开差异标签；活动栏入口
   // 移除后不可达。单文件差异仍从变更面板/提交详情/文件历史直达（open_diff）。
-  // —— 视图 3：运行与调试（真跑 st 子命令）——
-  void CodeEditorPage::build_run_view(Composer& c) {
-    build_sidebar_head(c, "运行");
-    struct Task {
-      const char* id;
-      const char* label;
-      const char* detail;
-    };
-    static constexpr Task kTasks[] = {{"build", "构建当前目标", "st build gallery --profile dev"},
-                                      {"test", "跑框架单测", "st test"},
-                                      {"lint", "禁令扫描", "st lint"}};
-    for (const Task& task : kTasks) {
-      (void)row(c, {.gap = 6.0f}, [&] {
-        (void)custom<Button>(c, [this, task](Button& b) {
-          b.set_id(std::string("task-") + task.id);
-          b.set_label(task.label);
-          b.set_icon("play");
-          b.set_variant(Button::Variant::Secondary);
-          b.set_size(Button::Size::Small);
-          b.on_click = [this, id = std::string(task.id)] { run_task(id); };
-        }, {.height = 28.0f, .grow = true, .key = task.id});
-      });
-      (void)text(c, [task] { return std::string("  ") + task.detail; });
-    }
-    (void)text(c, [] { return std::string("任务输出落在底部终端（实时回流）"); });
-    // “有没有活在干”问 **any_busy**：作业归属发起它的会话，用户此刻可能在别的标签上。
-    if (terminal_ptr != nullptr && terminal_ptr->any_busy()) {
-      (void)row(c, {.gap = 6.0f}, [&] {
-        (void)custom<Spinner>(c, [](Spinner& s) { s.set_id("task-spinner"); },
-                              {.width = 18.0f, .height = 18.0f, .key = "spinner"});
-        (void)text(c, [this] {
-          const std::string name = terminal_ptr != nullptr
-                                       ? terminal_ptr->get_property("running_name")
-                                             .value_or(std::string{})
-                                       : std::string{};
-          return name.empty() ? std::string("终端忙") : "终端忙：" + name;
-        }, {.id = "task-running"});
-      });
-    }
-  }
-
-
-  // —— 视图 4：扩展（运行时注册的语言清单）——
-  void CodeEditorPage::build_extensions_view(Composer& c) {
-    build_sidebar_head(c, "语言与扩展");
-    if (languages_.empty()) refresh_languages();
-    (void)text(c, [] { return std::string("已注册的语法（点一下切到该语言）"); });
-    // 同上：语言清单很长，必须在滚动容器里（否则窄侧栏装不下会溢出）。
-    (void)custom_container<ScrollView>(
-        c,
-        [&] {
-          for (const auto& name : languages_) {
-            (void)custom<Button>(c, [this, name](Button& b) {
-              b.set_label(name);
-              b.set_variant(language_.value() == name ? Button::Variant::Soft
-                                                     : Button::Variant::Ghost);
-              b.set_size(Button::Size::Small);
-              b.on_click = [this, name] { set_language(name); };
-            }, {.key = "lang:" + name});
-          }
-        },
-        [](ScrollView& scroll) { scroll.set_id("ext-scroll"); },
-        {.grow = true, .id = "ext-host"});
-  }
+  // 视图「运行」与「语言与扩展」已删除（2026-10-19，用户要求）：
+  // 前者只是把 st build/test/lint 三个动作做成按钮（同批动作在「运行」菜单与
+  // 命令面板里都有入口）；后者枚举的是内置语言服务清单，用户既不能装也不能配。
+  // 两者都是"有占位、没可操作性"的常驻视图。任务执行仍走 `run_task`（菜单/面板调用）。
 
 }  // namespace gbcode_ui

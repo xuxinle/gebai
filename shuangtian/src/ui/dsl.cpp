@@ -2018,6 +2018,7 @@ auto list(Composer& c, const std::vector<ListItemData>& items,
       // ⚠ 副行必须一并搬（否则 DSL 侧给了值也画不出来——`Entry` 曾经没这个字段，
       // 那是「数据模型有、转接不搬」的典型缺陷）。
       entry.subtitle = item.subtitle;
+      entry.icon = item.icon;
       entries.push_back(std::move(entry));
     }
     list_element->sync_items(entries);

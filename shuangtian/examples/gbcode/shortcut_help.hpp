@@ -98,7 +98,7 @@ struct ShortcutSpec {
 /// ⚠ 新增/改键位的**唯一入口**是这张表：改这里 = 注册 + 帮助卡 + 对账测试三处
 /// 同步变。在 main.cpp 里另行 `register_shortcut` 会绕过对账——启动时的
 /// `log_shortcut_drift` 会把它点名出来（表外注册进卡片「其他」节兜底可见）。
-inline constexpr std::array<ShortcutSpec, 41> kShortcutSpecs{
+inline constexpr std::array<ShortcutSpec, 44> kShortcutSpecs{
     // —— 文件 ——
     ShortcutSpec{.id = "save", .key = "s", .ctrl = true,
                  .label = "Ctrl+S", .description = "保存",
@@ -183,6 +183,20 @@ inline constexpr std::array<ShortcutSpec, 41> kShortcutSpecs{
     ShortcutSpec{.id = "toggle-sidebar", .key = "b", .ctrl = true,
                  .label = "Ctrl+B", .description = "切换侧栏",
                  .group = "导航"},
+    // —— 页面缩放（复用 DPI 缩放链路）——
+    //
+    // 键位取 VSCode/浏览器惯例：`Ctrl+=` 放大、`Ctrl+-` 缩小、`Ctrl+0` 重置。
+    // 注意 `Ctrl+=` 的 key 是 `equal`（等号键），不是 `plus`——后者要按 Shift，
+    // 而"放大"是高频动作，不该要求 Shift。`Ctrl+-` 同理用 `minus`。
+    ShortcutSpec{.id = "zoom-in", .key = "equal", .ctrl = true,
+                 .label = "Ctrl+=", .description = "放大页面",
+                 .group = "视图"},
+    ShortcutSpec{.id = "zoom-out", .key = "minus", .ctrl = true,
+                 .label = "Ctrl+-", .description = "缩小页面",
+                 .group = "视图"},
+    ShortcutSpec{.id = "zoom-reset", .key = "0", .ctrl = true,
+                 .label = "Ctrl+0", .description = "重置页面缩放",
+                 .group = "视图"},
     ShortcutSpec{.id = "next-problem", .key = "f8",
                  .label = "F8", .description = "下一处问题",
                  .group = "导航", .reg = ShortcutSpec::Reg::Consume},

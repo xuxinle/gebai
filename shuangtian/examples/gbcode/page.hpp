@@ -74,9 +74,38 @@ struct CodeEditorPage : Component {
   std::function<ThemeMode()> theme_mode{};
   /// 主题切换出口（`run_app` 注入为 `Application::set_theme_mode`）。
   std::function<void(ThemeMode)> theme_setter{};
+  /// 页面缩放出口（`run_app` 注入为 `Application::set_device_scale`）。
+  ///
+  /// 为什么"缩放页面"就是 DPI 缩放：霜天的**全自绘**意味着界面里没有第二套
+  /// 排版引擎——`device_scale` 同时决定缓冲尺寸、文本超采样与逻辑像素的物理大小，
+  /// 因此它本身就是"页面缩放"。另造一个 `ui_zoom` 因子会得到两条并行的缩放链
+  /// （一条改缓冲、一条改字号），迟早分叉。
+  /// 返回值：成功与否（无头/后端不支持时为 false——调用方据此如实报告）。
+  std::function<bool(float)> device_scale_setter{};
+  /// 当前页面缩放（读真值源：`Application::device_scale`）。
+  std::function<float()> device_scale_getter{};
+  /// 页面缩放档位（1.0 = 100%）。档位而非连续值：DPI 缩放下非整数档
+  /// 会让字形亚像素定位抖动（实测 1.15/1.25 的观感差于 1.0/1.25/1.5 这类
+  /// "能整除到像素子格"的值）。
+  static constexpr float kZoomLevels[] = {0.75f, 0.9f, 1.0f, 1.25f, 1.5f, 2.0f};
   /// 慢内容异步排版的调度器（`run_app` 注入为 `Application::tasks()`；
   /// Markdown 预览大文档的排版移出主线程，主窗不再冻结）。
   st::app::Tasks* layout_tasks_{nullptr};
+  /// 活动栏视图索引（**单一真值源**）：`build_activity_bar` 的按钮顺序与
+  /// `build_sidebar` 的分支都按它对齐。散落的魔数在删/加视图时会静默错位
+  ///（2026-10-19 删掉「运行」「语言与扩展」两项时，大纲索引从 5 变 3）。
+  enum class SidebarView : std::size_t {
+    Explorer = 0,
+    Search = 1,
+    Scm = 2,
+    Outline = 3,
+    /// 导航结果（多处定义/引用命中）。**与大纲分开**：前者是"刚才那次查找命中了哪里"
+    ///（一次性的，每次 F12 整个换），后者是"这个文件由什么组成"（稳定的结构）。
+    Nav = 4,
+  };
+  [[nodiscard]] static constexpr auto view_index(SidebarView view) noexcept -> std::size_t {
+    return static_cast<std::size_t>(view);
+  }
   /// 当前是否暗色——**从真值源读**，不缓存。
   [[nodiscard]] auto theme_is_dark() const -> bool {
     return theme_mode && theme_mode() == ThemeMode::Dark;
@@ -750,6 +779,10 @@ auto open_recent(const std::string& path) -> void;
   // 「导航结果侧栏改为大纲」后两者合在这一个视图里（大纲是主体，导航结果仅在
   // 有多处命中时出现在下方，命中清空后自动退回纯大纲）。
    void build_outline_view(Composer& c);
+   /// 导航结果侧栏（与大纲分开：多处命中是"搜索结果"，不是"文件结构"）。
+   void build_nav_view(Composer& c);
+   /// LSP `SymbolKind` → 图标名（大纲行的类型标识）。
+   [[nodiscard]] static auto symbol_kind_icon(int kind) -> const char*;
 
 
   /// 大纲列表的扁平行模型（符号树拍平成带缩进的行；行 → 符号的映射在构建期维护）。
@@ -796,11 +829,9 @@ auto open_recent(const std::string& path) -> void;
 
 
   // —— 视图 3：运行与调试（真跑 st 子命令）——
-   void build_run_view(Composer& c);
 
 
   // —— 视图 4：扩展（运行时注册的语言清单）——
-   void build_extensions_view(Composer& c);
 
 
     /// 切当前编辑器的高亮语言（也改写标签的语言字段，切回来时保持一致）。
@@ -1724,6 +1755,11 @@ auto shutdown() -> void;
 
   /// 防抖后的悬停处理（每帧调；停够 400ms 才发请求——移动中不闪跳）。
    void pump_hover_word();
+   /// 页面缩放（+1 放大 / -1 缩小 / 0 重置）。实现即 DPI 缩放，见实现处说明。
+   void zoom_page(int direction);
+   /// LSP 就绪后补拉大纲（见实现处：`refresh_document_symbols` 在启动握手完成前
+   /// 会被 `lsp_.active()` 挡掉，而"打开文件"那一刻几乎必然还在握手）。
+   void pump_outline_fetch();
 
 
   /// 编辑区按键：补全交互（Enter 接受 / Esc 关闭 / 上下选择）优先于编辑器默认。
@@ -1807,6 +1843,10 @@ auto shutdown() -> void;
             {.id = "paste", .label = "粘贴"}}},
           {"view", "查看",
            {{.id = "command-palette", .label = "命令面板…（Ctrl+Shift+P）"},
+            {.separator = true},
+            {.id = "zoom-in", .label = "放大页面（Ctrl+=）"},
+            {.id = "zoom-out", .label = "缩小页面（Ctrl+-）"},
+            {.id = "zoom-reset", .label = "重置页面缩放（Ctrl+0）"},
             {.separator = true},
             {.id = "toggle-sidebar", .label = "切换侧栏可见性（Ctrl+B）"},
             {.id = "find", .label = "查找（Ctrl+F）"},
@@ -1946,7 +1986,12 @@ auto shutdown() -> void;
   /// 语言服务回调是否已接线（只挂一次——重复挂会让回调互相覆盖）。
   bool language_callbacks_wired_{false};
   // —— 导航（阶段 5）的运行时状态 ——
-  /// 悬停请求 id（丢弃旧响应；鼠标移动会连发好几个）。
+  /// 悬停请求 id（**两条发起路径共用**：防抖路径 `pump_hover_word` 与
+  /// 手动路径 `request_hover_at_cursor`）。响应回来时只认最后发出的那一个。
+  ///
+  /// 为何必须统一记：旧实现只有手动路径把 id 写进这里，防抖路径直接 `(void)`
+  /// 丢掉返回值——于是 `id != hover_request_`（恒 0）恒真，响应能否显示全靠
+  /// `hover_dropped_` 这个布尔门（而它每次发请求都置真 ⇒ 判据实际失效）。
   std::int64_t hover_request_{0};
   /// 悬停防抖：词区间（0,0 = 无）与变化时间戳。
   std::pair<std::size_t, std::size_t> hover_word_pending_{0, 0};
@@ -1954,8 +1999,6 @@ auto shutdown() -> void;
   std::int64_t hover_word_changed_at_{0};
   /// 悬停请求时的行号（响应没给 range 时的兜底）。
   std::uint32_t hover_word_line_{0};
-  /// 本次响应是否可显示（词已变时丢弃）。
-  bool hover_dropped_{false};
   /// 最近一次"跳到定义/引用"的多处结果（结果面板用）。
   std::vector<st::lsp::Location> locations_{};
 
@@ -1968,11 +2011,13 @@ auto shutdown() -> void;
     std::string preview{};     ///< 目标行文本预览（120 字截断）
     st::lsp::Location location{};  ///< 原始位置（点击跳转用）
   };
-  /// 多处导航结果（定义/引用/实现共用；空 = 下段不显示）。
+  /// 大纲待拉取（LSP 就绪后才发得出请求；见 `pump_outline_fetch`）。
+  bool outline_fetch_pending_{false};
+  /// 大纲请求的在途 id（响应回来时对一下，避免旧响应覆盖新的）。
+  std::int64_t outline_request_{0};
+  /// 多处导航结果（定义/引用/实现共用；空 = 导航视图显示空态）。
   std::vector<NavResult> nav_results_{};
-  /// 导航结果段开合（State：变更要触发重组；大纲视图的下段由它驱动）。
-  State<bool> nav_results_open_{false};
-  /// 结果面板行 → `nav_results_` 下标（分组行占位 -1；`build_outline_view` 维护）。
+  /// 结果面板行 → `nav_results_` 下标（分组行占位 -1；`build_nav_view` 维护）。
   std::vector<std::size_t> nav_row_to_result_{};
   /// 跳转历史的一个点（Alt+← 返回）。
   struct NavPoint {
@@ -1982,8 +2027,14 @@ auto shutdown() -> void;
   };
   /// 跳转历史栈（有界 64；重复跳同一处不压栈）。
   std::vector<NavPoint> nav_history_{};
-  /// 当前文件的符号大纲。
-  std::vector<st::lsp::DocumentSymbol> symbols_{};
+  /// 当前文件的符号大纲（`State`：**异步响应到达时必须触发重组**）。
+  ///
+  /// 为何必须是 `State` 而不是普通成员（2026-10-19 实测）：声明式界面只在
+  /// `State` 变化时重组；LSP 响应是异步到达的，普通成员改了**没有人会重画**——
+  /// 于是 `symbols_` 里明明有 16 个符号（日志可见），大纲却一直是"没有符号大纲"。
+  /// 旧注释写着"面板由 State 驱动可见性，所以不需要标脏"，那是把
+  /// 「可见性变了」与「内容变了」混为一谈。
+  State<std::vector<st::lsp::DocumentSymbol>> symbols_{};
   /// 大纲对应的文件路径（切文件后作废）。
   std::string symbols_path_{};
   /// 工作区符号搜索结果。

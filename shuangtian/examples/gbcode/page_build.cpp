@@ -125,6 +125,8 @@ namespace gbcode_ui {
     // 单文件历史：同上（`git log --follow` 也是子进程）。
     ensure_file_history();
     (void)lsp_.pump();   // 诊断到达与否只影响 push_diagnostics_to_editor 内部的指纹
+    // 大纲补拉：握手完成前拍的请求被挂起，这里每帧补试一次（见 pump_outline_fetch）。
+    pump_outline_fetch();
     // 待落地的跳转（跨文件）：编辑器实例在新文件装载后才就位，所以在这里补做。
     apply_pending_navigation_jump();
     // 问题列表刷新：**无条件走到这里**（内部指纹早退）。
@@ -341,6 +343,8 @@ namespace gbcode_ui {
       open_find();
     } else if (menu == "view" && item == "toggle-theme") {
       toggle_theme();
+    } else if (menu == "view" && (item == "zoom-in" || item == "zoom-out" || item == "zoom-reset")) {
+      zoom_page(item == "zoom-in" ? 1 : (item == "zoom-out" ? -1 : 0));
     } else if (menu == "run" && (item == "run-task" || item == "run-test" || item == "run-lint")) {
       run_task(item == "run-task" ? "build" : (item == "run-test" ? "test" : "lint"));
     } else if (menu == "help" && item == "about") {
@@ -449,14 +453,23 @@ namespace gbcode_ui {
     };
     // 活动栏的按钮**只**有图标：没有提示就是一个凭记忆图的图标墙（用户报过
     // “按钮要有悬浮提示”）。`hint` 顺带把键位写进去——提示是“发现功能”的地方。
-    static constexpr Activity kActivities[] = {{"folder", "explorer", "资源管理器（Ctrl+Shift+E）"},
-                                               {"search", "search", "搜索（Ctrl+Shift+F）"},
-                                               {"diff", "scm", "变更（Ctrl+Shift+G）"},
-                                               {"play", "run", "运行"},
-                                               {"package", "extensions", "语言与扩展"},
-                                               // 「导航结果」升级为「大纲」：当前文件符号树为主体，
-                                               // 多处导航命中附在下方（2026-10-13）。
-                                               {"symbol", "outline", "大纲"}};
+    // 活动栏只留**导航类**视图（2026-10-19 按用户要求精简）：
+    // 删掉了「运行」与「语言与扩展」两项——
+    // ① 运行面板（`build_run_view`）只是一组"跑某个任务"的按钮，同一批动作在
+    //    「运行」菜单与命令面板里都有，多一个侧栏视图是重复入口；
+    // ② 语言与扩展面板（`build_extensions_view`）枚举的是**内置**语言服务，
+    //    用户既不能装也不能配——它回答的是"我们支持什么"，不是"你要做什么"，
+    //    放在常驻侧栏里占位而没有可操作性。
+    static constexpr Activity kActivities[] = {
+        {"folder", "explorer", "资源管理器（Ctrl+Shift+E）"},
+        {"search", "search", "搜索（Ctrl+Shift+F）"},
+        {"diff", "scm", "变更（Ctrl+Shift+G）"},
+        // 大纲：当前文件符号树（多处导航命中不再混进来，见 `build_outline_view`）。
+        {"symbol", "outline", "大纲"},
+        // 导航结果：F12/Shift+F12 的多处命中（与大纲分开的独立视图）。
+        {"arrow-right", "nav", "导航结果（F12 找定义 / Shift+F12 找引用）"}};
+    static_assert(std::size(kActivities) == view_index(SidebarView::Nav) + 1,
+                  "活动栏按钮顺序必须与 SidebarView 索引对齐（末项 = Nav）");
     const std::size_t current = activity_.value();
     // `surface = Alt`：与标题栏/状态栏**同色**——三者合起来是一圈“外壳”，
     // 色不一致会在拐角处露馅（见 `Element::Surface` 的说明）。
@@ -996,8 +1009,15 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
         // 悬停词变化 → 防抖后发 LSP hover（不做防抖的话每次像素移动都发请求，
         // server 没那么快，旧响应未到新请求又出——提示会闪跳）。
         ed.on_hover_word = [this](std::size_t begin, std::size_t end) {
+          // 词一变就**立刻撤掉旧提示**（用户报的「鼠标移动后消散不及时」）。
+          //
+          // 旧实现只更新 pending 时间戳，旧卡片的文字要等新响应回来（或移到空白处）
+          // 才消失——中间那 250ms+ 里卡片还挂在**上一个**符号下面，读起来像是
+          // "提示停在了错误的词上"。提示的语义是"当前悬停的这个符号"，词变了它就不成立了。
+          if (editor != nullptr && !editor->hover_info().empty()) editor->clear_hover_info();
           hover_word_pending_ = {begin, end};
           hover_word_changed_at_ = st::time::now_ms();
+
         };
         // 右键菜单走组件的一等回调（不是 `set_event_handler`——那个永远轮不到：
         // `CodeEditor::on_event` 对任何按钮的按下都返回 true）。

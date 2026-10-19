@@ -2014,10 +2014,48 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
       at = next + 1;
     }
     if (!source.empty()) lines.insert(lines.begin(), source);
+    // ⚠ 量宽必须用**与绘制同一个 role**（下面 `port.draw` 传的是 `Monospace`）。
+    //
+    // 旧写法 `measure_width(text, font_sm)` 走默认 `Proportional`，而等宽字体比比例
+    // 字体宽——背景框永远偏窄，文字溢出到框外（用户报的「内容溢出背景宽度」）。
+    // DPI 只是把差异放大，不是原因。
     float box_width = 0.0f;
     for (const auto& text : lines) {
-      box_width = std::max(box_width, port.measure_width(text, metrics.font_sm));
+      box_width = std::max(
+          box_width, port.measure_width(text, metrics.font_sm, text::FontRole::Monospace));
     }
+    // 长行折行而不是横向截断：诊断消息里的路径/符号名横向截掉就看不懂了。
+    // 上限不变（视口 90%），超宽的行按估算字符数硬折（等宽字体下估得准）。
+    const float max_text_width = std::max(80.0f, bounds_.width * 0.9f) - box_pad * 2.0f;
+    std::vector<std::string> wrapped;
+    wrapped.reserve(lines.size());
+    for (const auto& text : lines) {
+      if (text.empty() ||
+          port.measure_width(text, metrics.font_sm, text::FontRole::Monospace) <=
+              max_text_width) {
+        wrapped.push_back(text);
+        continue;
+      }
+      // 硬折（按显示宽度累加）：用 `utf8_next` 取字符边界，不拆码点。
+      std::string folded;
+      float used = 0.0f;
+      for (std::size_t at_char = 0; at_char < text.size();) {
+        const std::size_t next_char = st::utf8_next(text, at_char);
+        const std::string_view piece(text.data() + at_char, next_char - at_char);
+        const float piece_width =
+            port.measure_width(piece, metrics.font_sm, text::FontRole::Monospace);
+        if (used + piece_width > max_text_width && !folded.empty()) {
+          wrapped.push_back(folded);
+          folded.clear();
+          used = 0.0f;
+        }
+        folded.append(piece);
+        used += piece_width;
+        at_char = next_char;
+      }
+      if (!folded.empty()) wrapped.push_back(std::move(folded));
+    }
+    lines = std::move(wrapped);
     const float max_width = std::max(80.0f, bounds_.width * 0.9f);
     box_width = std::min(box_width + box_pad * 2.0f, max_width);
     const float box_height = static_cast<float>(lines.size()) * line_h + box_pad * 2.0f;

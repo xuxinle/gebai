@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "st/raster/paint.hpp"
+#include "st/ui/icon.hpp"
 
 #include "components_internal.hpp"
 
@@ -36,6 +37,8 @@ void draw_text(const RenderContext& context, raster::Surface& canvas, std::strin
 }
 
 constexpr float kTextInset{14.0f};  ///< 文本左边距 = space_md(12) + 指示条留白
+/// 图标槽宽（图标 16 + 间距 4）。固定值而非按图标量：见 `ListItem::icon()` 的说明。
+constexpr float kIconSlot{20.0f};
 
 }  // namespace
 
@@ -51,6 +54,12 @@ ListItem::ListItem(std::string label, std::string subtitle)
   // 组件只声明要哪几项——这样按钮/列表/表格的悬浮反馈不会各走一套。
   set_hover_effect(HoverEffect{.enabled = true, .background = true, .border = false, .lift = false, .glow = false, .cursor = true});
 
+}
+
+void ListItem::set_icon(std::string icon) {
+  if (icon_ == icon) return;
+  icon_ = std::move(icon);
+  mark_layout_dirty();
 }
 
 void ListItem::set_label(std::string label) {
@@ -105,6 +114,9 @@ void ListItem::measure(const RenderContext& context, const Constraints& constrai
     }
     width = std::max(width, subtitle_width_);
   }
+  // 图标槽：宽度固定（不是按图标名量），让"带图标/不带图标"两种行的文本起点
+  // 在同一列表里可预测（混排时不会一行偏左一行偏右）。
+  if (!icon_.empty()) width += kIconSlot;
   width += kTextInset * 2.0f;
   width = std::max(width, 80.0f);
   if (constraints.max_width < kUnbounded) width = std::min(width, constraints.max_width);
@@ -148,17 +160,29 @@ void ListItem::paint_content(const RenderContext& context, raster::Surface& canv
   }();
   const math::Rect text_area = bounds_.inset(math::Insets::symmetric(
       kTextInset, metrics.space_xs));
+  // 前置图标：垂直居中、与文本同一色调（选中态跟随标签色，视觉上是一行的）。
+  math::Rect icon_area = text_area;
+  if (!icon_.empty()) {
+    const float icon_size = std::min(kIconSlot - 4.0f, text_area.height);
+    icon_area = math::Rect{text_area.x, text_area.y + (text_area.height - icon_size) * 0.5f,
+                           icon_size, icon_size};
+    Icon::draw(canvas, icon_, icon_area, label_color, 0.0f);
+  }
   // 与 measure 同一口径：向意图侧问字号（不依赖 apply_theme 回放时机）。
   const float label_size =
       text_size_override() > 0.0f ? text_size_override() : metrics.font_base;
+  const math::Rect body_area =
+      icon_.empty() ? text_area
+                    : math::Rect{text_area.x + kIconSlot, text_area.y,
+                                 std::max(0.0f, text_area.width - kIconSlot), text_area.height};
   if (subtitle_.empty()) {
-    draw_text(context, canvas, label_, text_area, label_size, label_color, TextAlign::Start);
+    draw_text(context, canvas, label_, body_area, label_size, label_color, TextAlign::Start);
     return;
   }
   const float label_height = label_size * metrics.line_height_body;
-  const math::Rect label_box{text_area.x, text_area.y, text_area.width, label_height};
-  const math::Rect subtitle_box{text_area.x, label_box.bottom(), text_area.width,
-                                text_area.bottom() - label_box.bottom()};
+  const math::Rect label_box{body_area.x, body_area.y, body_area.width, label_height};
+  const math::Rect subtitle_box{body_area.x, label_box.bottom(), body_area.width,
+                                body_area.bottom() - label_box.bottom()};
   draw_text(context, canvas, label_, label_box, label_size, label_color, TextAlign::Start);
   draw_text(context, canvas, subtitle_, subtitle_box, label_size * 0.75f, colors.text_muted,
             TextAlign::Start);
@@ -215,6 +239,7 @@ void List::apply_theme(const Theme& theme) {
 }
 
 void List::apply_theme_to_items() {
+  apply_row_height_override();   // 容器 height = 行高（每帧镜像，见实现处说明）
   // DSL 的 list(...) 把 BoxProps 应用在 List 容器上，而字是 ListItem 画的——
   // 不下放就是"容器记了覆盖、项不认"的静默不生效。
   //
@@ -234,6 +259,28 @@ List::List() {
   style_.direction = FlexDirection::Column;
   style_.gap = 2.0f;
   set_focusable(true);
+}
+
+void List::apply_row_height_override() {
+  // 容器上设了显式高度 ⇒ 它是**行高**而不是"列表总高"（列表由内容撑开，
+  // 总高由行数决定；给容器钉一个高度在滚动容器里没有意义）。
+  //
+  // 为什么需要这条（2026-10-19，实测）：大纲要把行高压到 22px（默认 40 是清单页
+  // 的规格，目录用太松），调用方在 DSL 上写 `.height = 22`——但那个 BoxProps
+  // 应用在 **List 容器**上，而行的尺寸由 `ListItem` 自己的 `style_.height` 决定，
+  // 于是"设了没生效"，行高仍是 40。
+  //
+  // 语义定死：**List 的显式 height = 单行高**（不是容器高）。容器高由子项累积 +
+  // gap 得出，与"列表在滚动容器里自然铺开"一致。
+  if (!style_.has_explicit_height()) return;
+  for (std::size_t index = 0; index < children_.size(); ++index) {
+    Element* child = child_at(index);
+    if (child == nullptr || child->type() != "ListItem") continue;
+    Style& item_style = child->style();
+    if (item_style.height == style_.height) continue;   // 已是目标值：不重复标脏
+    item_style.height = style_.height;
+    child->mark_layout_dirty();
+  }
 }
 
 auto List::item_count() const noexcept -> std::size_t { return children_.size(); }
@@ -295,6 +342,7 @@ void List::sync_items(const std::vector<Entry>& entries) {
     } else {
       node->set_label(entry.label);  // 文案可能变了，元素不变
       node->set_subtitle(entry.subtitle);
+      node->set_icon(entry.icon);
     }
     // 无论是新建还是复用，都要接上激活链路（漏了就是"点了没反应"）；
     // 数据层给了 `on_activate` 就用它（否则用 `set_on_select` 的默认行为）。
@@ -328,6 +376,7 @@ void List::sync_items(const std::vector<Entry>& entries) {
     if (!selected_key.empty() && on_select_) on_select_(kNoSelection);
   }
   mark_layout_dirty();
+  apply_row_height_override();   // 容器 height = 行高（见实现处说明）
 }
 
 void List::clear_items() {

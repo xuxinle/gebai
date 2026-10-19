@@ -73,6 +73,11 @@ struct DocumentSymbol {
   std::vector<DocumentSymbol> children{};
   /// 缩进深度（扁平形态由调用方按容器算；本层对嵌套形态直接填）。
   std::size_t depth{0};
+
+  /// 相等比较（`State<T>` 用它做"值没变就不通知"的判定）。
+  /// 只比**可见语义**（名字/类型/位置/层级）：`detail` 是描述文字，
+  /// 变化不值得重排大纲。
+  [[nodiscard]] auto operator==(const DocumentSymbol&) const -> bool = default;
 };
 
 /// 解析 `textDocument/documentSymbol` 的响应。
