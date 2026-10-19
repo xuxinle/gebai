@@ -579,6 +579,34 @@ namespace gbcode_ui {
   }
 
 
+/// `CodeEditorPage::MdLayoutTarget`：MarkdownView ⇄ 异步排版的桥。
+/// 快照端口在每次 `set_source` 前由宿主同步（树上的 `layout_port_` 才是真值）。
+struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
+  MarkdownView* view{nullptr};
+
+  auto layout_offscreen(const st::ui::SlowLayoutSnapshot& input) const
+      -> st::ui::SlowLayoutSnapshot override {
+    auto done = MarkdownView::layout_offscreen(input);
+    done.port = nullptr;  // 输出侧不携带端口（避免持有外泄）
+    return done;
+  }
+  auto adopt_layout(const st::ui::SlowLayoutSnapshot& result) -> bool override {
+    return view != nullptr && view->adopt_layout(result);
+  }
+  void refresh_params(st::ui::SlowLayoutSnapshot& params) const override {
+    if (view == nullptr) return;
+    // 字号/端口/宽度上限以树上视图当前值为准（主题落定后的真值）；
+    // 宽不动（壳管宽）——只刷字号族与端口。
+    auto now = view->snapshot_layout_input(params.width);
+    params.port = now.port;
+    params.base_size = now.base_size;
+    params.code_size = now.code_size;
+    params.table_size = now.table_size;
+    params.heading_sizes = now.heading_sizes;
+    params.max_width = now.max_width;
+  }
+};
+
   /// 切当前编辑器的高亮语言（也改写标签的语言字段，切回来时保持一致）。
   void CodeEditorPage::set_language(const std::string& name) {
     language_.set(name);
@@ -847,32 +875,68 @@ namespace gbcode_ui {
       // 预览态下不声明 CodeEditor，`editor` 指针自然为空（所有编辑类动作都有空判，
       // 状态栏光标文本停在最后一次编辑的位置——预览是阅读形态，这是预期行为）。
       if (md_preview_active()) {
-        (void)custom<MarkdownView>(c, [this](MarkdownView& view) {
-          view.set_id("md-preview");   // 控制通道钩子（可 get/set/selectable）
-          // 内容只在真变了时写（set_markdown 会重置滚动；每帧重写会把用户滚到的
-          // 位置抹回顶部——与 MergeView set_sides 同一类坑）。
+        // —— 2026-10-19 性能轮：预览换成 SlowContent 异步排版 ——
+        //
+        // 大 .md（实测 shuangtian/DESIGN.md 447KB / 3553 行）同步排版 ~160ms，
+        // 主线程在 measure/arrange 里被整段占用——菜单、标签、滚动全部冻结
+        //（用户报「打开大 Markdown 整窗变卡」）。现在排版投后台线程
+        //（Tasks::run_async），期间画骨架占位，主线程单帧实测 < 1ms。
+        // 小文档（< 32KB）仍同步（异步调度不值得）；`layout_tasks_` 缺席时也同步兑底。
+        (void)custom<SlowContent>(c, [this](SlowContent& shell) {
+          shell.set_id("md-preview-shell");
           const auto& buffers_now = buffers_.value();
           const std::size_t index = active_.value();
-          if (index < buffers_now.size()) {
-            if (view.markdown() != buffers_now[index].text) {
-              view.set_markdown(buffers_now[index].text);
-            }
+          const bool has_content = index < buffers_now.size();
+          // 首帧装配（元素按 key 复用，后续帧 setup 幂等跳过）。
+          if (shell.content_element() == nullptr && has_content) {
+            auto view = std::make_unique<MarkdownView>();
+            view->set_id("md-preview");   // 控制通道钩子（可 get/set/selectable）
+            view->style().grow = true;      // 列容器里撑满编辑区（丢了会被剔成 0 高）
+            view->style().padding = st::math::Insets{12.0f, 16.0f, 12.0f, 16.0f};
+            // 链接是一等交互（2026-10-13）：点击把 URL 交给宿主打开。
+            view->on_link_click = [this](std::string_view url) {
+              st::log::info("[gbcode] 打开链接：{}", url);
+              status_.set(std::format("链接：{}", url));
+              (void)st::platform::open_external(url);
+            };
+            view->on_link_hover = [this](std::string_view url) {
+              // 悬停时状态栏给出 URL——与浏览器的底部提示同一体验。
+              if (!url.empty()) status_.set(std::format("链接：{}", url));
+            };
+            md_view_ptr = view.get();
+            md_view_ptr->freeze_offscreen(true);   // 排版权交后台（壳生命周期内）
+            md_target_ = std::make_shared<MdLayoutTarget>();
+            md_target_->view = md_view_ptr;
+            shell.setup(std::move(view), md_target_, layout_tasks_);
+          } else {
+            md_view_ptr = dynamic_cast<MarkdownView*>(shell.content_element());
+            if (md_target_ != nullptr && md_view_ptr != nullptr) md_target_->view = md_view_ptr;
           }
-          view.style().grow = true;
-          view.style().padding = st::math::Insets{12.0f, 16.0f, 12.0f, 16.0f};
-          // 链接是一等交互（2026-10-13）：点击把 URL 交给宿主打开。
-          // 框架只上报「点了哪个 URL」，打开浏览器是平台能力——
-          // 与剪贴板同一取向（组件不该知道平台后端长什么样）。
-          view.on_link_click = [this](std::string_view url) {
-            st::log::info("[gbcode] 打开链接：{}", url);
-            status_.set(std::format("链接：{}", url));
-            (void)st::platform::open_external(url);
-          };
-          view.on_link_hover = [this](std::string_view url) {
-            // 悬停时状态栏给出 URL——与浏览器的底部提示同一体验。
-            if (!url.empty()) status_.set(std::format("链接：{}", url));
-          };
-          md_view_ptr = &view;
+          // 内容只在真变了时写（重置滚动与 MergeView set_sides 同一类坑）。
+          if (has_content && shell.last_source() != buffers_now[index].text) {
+            shell.remember_source(buffers_now[index].text);
+            // 同步喂语义通道（控制通道 `markdown`/`selection`/Ctrl+C 全文复制用）：
+            // 壳路径下排版走后台，但 view 的 `stream_` 语义源仍需就位——
+            // `set_markdown` 会清滚动，这里只在没有旧内容时喂（排版落地前）。
+            if (md_view_ptr != nullptr && md_view_ptr->markdown().empty()) {
+              md_view_ptr->set_markdown(buffers_now[index].text);
+              md_view_ptr->scroll_to(0.0f);
+            }
+            auto& params = shell.layout_params();
+            if (md_view_ptr != nullptr) {
+              // 排版参数整份从树上视图拍（apply_theme 后的度量才是真值；首帧未上树
+              // 时拍构造默认，主题落地后宽度/字号变化会自动重排）。手写逐字段填
+              // 漏一项（如 heading_sizes）就会被 adopt 核对静默拒绝——快照是唯一稳妥口径。
+              auto snapshot = md_view_ptr->snapshot_layout_input(868.0f);
+              params.port = snapshot.port;
+              params.base_size = snapshot.base_size;
+              params.code_size = snapshot.code_size;
+              params.table_size = snapshot.table_size;
+              params.heading_sizes = snapshot.heading_sizes;
+              params.max_width = snapshot.max_width;
+            }
+            shell.set_source(buffers_now[index].text);
+          }
         }, {.grow = true, .id = "md-preview-host"});
         return;
       }

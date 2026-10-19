@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <format>
 #include <string>
@@ -34,9 +35,19 @@ namespace {
 ///
 /// 为何每码点都要算（而不是只记 Span 端点）：字符级选择的「鼠标 x → 字节偏移」
 /// 要在**字符**粒度上取最近边界；只存端点就只能整段选。
+///
+/// ⚠ 2026-10-19 性能轮：本函数从**排版期**移到**懒计算**（见 `Row::flat_ready`）——
+/// 逐码点 `measure_width` 在 447KB 的 DESIGN.md 上实测占整次重排的 ~27%
+///（97ms 里的 26ms），而选择/命中是罕见路径（用户不拖选就永远用不到）。
+/// 排版期只拼 `flat`（零测量），首次 `offset_to_x`/`caret_at` 时才补算前缀宽并缓存。
+template <typename SpanT>
+void markdown_append_flat_text(std::string& flat, const SpanT& span) {
+  flat += span.text;
+}
+
 template <typename SpanT, typename TextPortT>
-void markdown_append_flat_prefix(std::string& flat, std::vector<float>& prefix, float start_x,
-                                 const SpanT& span, const TextPortT* port) {
+void markdown_append_flat_prefix(const std::string& flat, std::vector<float>& prefix,
+                                 float start_x, const SpanT& span, const TextPortT* port) {
   if (port == nullptr) return;
   if (prefix.empty()) prefix.push_back(start_x);   // 首码点边界 = Span 起点
   const std::size_t count = st::utf8_length(span.text);
@@ -47,7 +58,8 @@ void markdown_append_flat_prefix(std::string& flat, std::vector<float>& prefix, 
     x += port->measure_width(one, span.size);
     prefix.push_back(x);
   }
-  flat += span.text;
+  // `flat` 在懒算路径下已由排版期拼好（零测量），这里只补前缀宽，不追加文本。
+  (void)flat;
 }
 
 // —— 版式常量（尺寸/间距；颜色一律来自主题 token，不在此出现）——
@@ -180,42 +192,48 @@ void fill_circle_shape(raster::Surface& canvas, math::Point center, float radius
 }
 
 /// 折行用的词元：ASCII 连续非空白为一个词、非 ASCII 逐码点、空白为分隔符、换行为硬断行。
+///
+/// 2026-10-19 性能轮：`text` 从 `std::string`（每词一次堆分配）改为
+/// **`string_view` 区间**（零拷贝）——`push_spans` 对 10 万级词元的构造曾是
+/// 排版期可测成本（实测 DESIGN.md：tokenize 本身 ~3ms + 下游 string 拷贝放大）。
+/// `begin==end==0` 且带 space/hard_break 标记的词元是分隔符（文本无意义）。
 struct WordToken {
-  std::string text{};
+  std::string_view text{};
   bool space{false};
   bool hard_break{false};
 };
 
 [[nodiscard]] auto tokenize(std::string_view text) -> std::vector<WordToken> {
   std::vector<WordToken> tokens;
-  std::string word;
-  const auto flush_word = [&tokens, &word]() {
-    if (word.empty()) return;
-    tokens.push_back(WordToken{word, false, false});
-    word.clear();
+  std::size_t word_begin = kNoGroupHead;  // 复用哨兵语义：无效下标表示当前无词
+  std::size_t word_end = 0;               // 当前 ASCII 词的尾后下标（闭区间右侧）
+  const auto flush_word = [&]() {
+    if (word_begin == kNoGroupHead) return;
+    tokens.push_back(WordToken{text.substr(word_begin, word_end - word_begin), false, false});
+    word_begin = kNoGroupHead;
   };
   std::size_t index = 0;
   while (index < text.size()) {
     const std::size_t start = index;
     const st::Codepoint codepoint = st::decode_utf8(text, index);
-    const std::string_view raw = text.substr(start, index - start);
     if (codepoint.value == U'\n' || codepoint.value == U'\r') {
       flush_word();
-      tokens.push_back(WordToken{std::string{}, false, true});
+      tokens.push_back(WordToken{std::string_view{}, false, true});
       continue;
     }
     if (st::is_space_codepoint(codepoint.value)) {
       flush_word();
-      tokens.push_back(WordToken{" ", true, false});
+      tokens.push_back(WordToken{std::string_view{" ", 1}, true, false});
       continue;
     }
     if (codepoint.value < 0x80U) {
-      word.append(raw);
+      if (word_begin == kNoGroupHead) word_begin = start;
+      word_end = index;
       continue;
     }
     // 非 ASCII（CJK/emoji/符号）：逐码点成词 ⇒ 任何位置可断行
     flush_word();
-    tokens.push_back(WordToken{std::string(raw), false, false});
+    tokens.push_back(WordToken{text.substr(start, index - start), false, false});
   }
   flush_word();
   return tokens;
@@ -594,6 +612,9 @@ auto MarkdownView::invoke_action(std::string_view action, std::string_view argum
 
 void MarkdownView::rebuild_rows(const RenderContext& context, float width) {
   rows_.clear();
+  // 预留行容量（块数 ×4 是段落/列表/代码行的经验比）：避免 4300 行文档上
+  // vector 反复倍增重搬（Row 含多个 string/vector，搬一次不便宜）。
+  rows_.reserve(blocks_.size() * 4U + 8U);
   const float avail = std::max(width, kMinTextWidth);
   if (blocks_.empty()) {
     // 空内容：占位一行（faint 的「（空）」），保证元素仍有可命中的高度
@@ -723,23 +744,19 @@ void MarkdownView::push_spans(std::vector<Span> spans, const RenderContext& cont
   std::vector<std::pair<float, float>> line_x{};
 
   const auto flush = [&rows = rows_, &line, &line_x, &line_width, &y, x, width, line_height,
-                      kind, &port]() {
+                      kind]() {
     Row row;
     row.kind = kind;
     row.box = math::Rect{x, y, width, line_height};
     row.line_height = line_height;
     row.text_x = x;
-    row.spans = line;
-    row.span_x = line_x;
-    // 行内**扁平文本 + 每码点前缀宽**（字符级选择用，见 `Row::flat` 的说明）。
-    // 在这里做而不是在选择时做：排版期已经知道每个 Span 的字号（代码块与正文不同），
-    // 选择期只拿得到 `Row`——重算会与折行结果脱钩。
-    float prefix_x = 0.0f;
-    for (const Span& span : row.spans) {
-      markdown_append_flat_prefix(row.flat, row.flat_prefix, prefix_x, span, &port);
-      if (!row.flat_prefix.empty()) prefix_x = row.flat_prefix.back();
-    }
-    if (row.flat_prefix.empty()) row.flat_prefix.push_back(0.0f);
+    row.spans = std::move(line);
+    row.span_x = std::move(line_x);
+    // 行内扁平文本（字符级选择的坐标系）：排版期只拼串（零测量）——
+    // 每码点前缀宽（`flat_prefix`）已改为懒计算（见 `Row::flat_ready` 的说明），
+    // 首次选择/命中时才补算。省掉的是大文档排版里逐码点 `measure_width` 的整块成本
+    //（实测 DESIGN.md 447KB：占重排 27%）；代价是首次拖选时单行补算（微秒级）。
+    for (const Span& span : row.spans) markdown_append_flat_text(row.flat, span);
     rows.push_back(std::move(row));
     line.clear();
     line_x.clear();
@@ -753,16 +770,20 @@ void MarkdownView::push_spans(std::vector<Span> spans, const RenderContext& cont
            left.inline_code == right.inline_code && left.link == right.link;
   };
 
-  const auto append_piece = [&port, &line, &line_x, &line_width, &same_style](const Span& style,
-                                                                    std::string text) {
+  // `text` 收 string_view（tokenize 已零拷贝）；同款续拼走 `+=`，新建 Span 才发生一次拷贝。
+  // `width_hint >= 0` 时直接用（词宽在折行判断里已量过——旧实现这里对同一段文本
+  // **再量一次**，纯浪费；2026-10-19 性能轮实测省掉后段落排版明显回落）。
+  const auto append_piece = [&port, &line, &line_x, &line_width, &same_style](
+                                const Span& style, std::string_view text,
+                                float width_hint = -1.0f) {
     if (text.empty()) return;
-    const float text_width = port.measure_width(text, style.size);
+    const float text_width = width_hint >= 0.0f ? width_hint : port.measure_width(text, style.size);
     if (!line.empty() && same_style(line.back(), style)) {
       line.back().text += text;
       if (!line_x.empty()) line_x.back().second += text_width;
     } else {
       Span next = style;
-      next.text = std::move(text);
+      next.text = std::string{text};
       line.push_back(std::move(next));
       // 新区间的起点 = 本行已累计的宽（与 `line_width` 同一坐标）。
       line_x.emplace_back(line_width, line_width + text_width);
@@ -779,7 +800,7 @@ void MarkdownView::push_spans(std::vector<Span> spans, const RenderContext& cont
       }
       if (word.space) {
         if (line.empty()) continue;  // 行首不留空格
-        append_piece(span, std::string{word.text});
+        append_piece(span, word.text);
         continue;
       }
       const float word_width = port.measure_width(word.text, span.size);
@@ -787,21 +808,24 @@ void MarkdownView::push_spans(std::vector<Span> spans, const RenderContext& cont
       if (word_width > width) {
         // 单词/URL 超宽：按码点硬拆，保证不越界也不丢内容
         std::string piece;
+        float piece_width = 0.0f;  // 拆行累计宽（避免每码点重量大段 piece）
         const std::size_t codepoints = st::utf8_length(word.text);
         for (std::size_t index = 0; index < codepoints; ++index) {
           const std::string_view one = st::utf8_slice(word.text, index, 1);
           const float one_width = port.measure_width(one, span.size);
-          if (!piece.empty() && port.measure_width(piece, span.size) + one_width > width) {
-            append_piece(span, piece);
+          if (!piece.empty() && piece_width + one_width > width) {
+            append_piece(span, piece, piece_width);
             flush();
             piece.clear();
+            piece_width = 0.0f;
           }
           piece.append(one);
+          piece_width += one_width;
         }
-        if (!piece.empty()) append_piece(span, piece);
+        if (!piece.empty()) append_piece(span, piece, piece_width);
         continue;
       }
-      append_piece(span, std::string{word.text});
+      append_piece(span, word.text, word_width);
     }
   }
   if (!line.empty()) flush();
@@ -866,6 +890,7 @@ auto MarkdownView::inline_spans(const std::vector<st::md::Inline>& inlines, Colo
 void MarkdownView::append_code_block(const st::md::Block& block, const RenderContext& context,
                                      const Frame& frame, float& y) {
   // 代码行也要能字符级选中（缩进/列对齐早就有，但复制以前只能整行）。
+  // `port_ptr` 不再进排版路径（前缀宽已懒算），仅保留给懒补算入口。
   const TextPort* port_ptr = &text_port_of(context);
   const float size = metrics_.code;
   const float line_height = size * kCodeLineHeight;
@@ -893,15 +918,9 @@ void MarkdownView::append_code_block(const st::md::Block& block, const RenderCon
       row.spans = code_line_spans(block.code, begin, end, tokens, token_index, size);
       // 代码块行全部走等宽（语法高亮的每个 token 片段都是代码）
       for (Span& span : row.spans) span.code = true;
-      // 字符级选择依赖 `flat`/`flat_prefix`——代码行以前**不填** `span_x`，
-      // 于是只能整行复制。这里与正文行同一套算法（代码的选择需求只会更强）。
-      float prefix_x = 0.0f;
-      for (const Span& span : row.spans) {
-        markdown_append_flat_prefix(row.flat, row.flat_prefix, prefix_x, span, port_ptr);
-        if (!row.flat_prefix.empty()) prefix_x = row.flat_prefix.back();
-      }
+      // 扁平文本与正文行同一口径：排版期只拼串，前缀宽懒算（`flat_ready`）。
+      for (const Span& span : row.spans) markdown_append_flat_text(row.flat, span);
     }
-    if (row.flat_prefix.empty()) row.flat_prefix.push_back(0.0f);
     rows_.push_back(std::move(row));
   };
 
@@ -1079,12 +1098,10 @@ void MarkdownView::append_table(const st::md::Block& block, const RenderContext&
     // 同 `word_floor_of` 的**逐码点累加**口径（见那里的说明）：
     // 用整串 `measure_width` 会因字距调整偏小，导致“算得出、装不下”。
     const auto text_width = [&](std::string_view text) -> float {
-      float sum = 0.0f;
-      const std::size_t count = st::utf8_length(text);
-      for (std::size_t i = 0; i < count; ++i) {
-        sum += port.measure_width(st::utf8_slice(text, i, 1), size);
-      }
-      return sum;
+      // 整串测量优先（命中宽度缓存，一次哈希）：字距调整会让它比逐字累加略小，
+      // 但 natural 只用于「列宽分配的权重」，几像素的偏差不影响分配公平性。
+      // 2026-10-19 性能轮：逐码点扫描在 853 表格行上占重排 ~22%，大头是缓存 miss。
+      return port.measure_width(text, size);
     };
     float width = text_width(block.header[column]) + padding * 2.0f + 1.0f;
     for (const std::vector<std::string>& row : block.rows) {
@@ -1138,13 +1155,17 @@ void MarkdownView::append_table(const st::md::Block& block, const RenderContext&
   std::vector<float> widths(columns, 0.0f);
   for (std::size_t column = 0; column < columns; ++column) {
     natural[column] = natural_of(column);
-    word_floor[column] = word_floor_of(column);
     widths[column] = natural[column];
   }
   float total = 0.0f;
   for (const float column_width : widths) total += column_width;
   const float avail = std::max(frame.avail, kMinTextWidth * static_cast<float>(columns));
   if (total > avail && total > 0.0f) {
+    // `word_floor`（逐码点扫描）只在**表格真的要压缩**时才算（2026-10-19 性能轮）：
+    // 自然宽装得下时它是死代码——而它是表格排版里最贵的一步（逐词逐码点测量）。
+    for (std::size_t column = 0; column < columns; ++column) {
+      word_floor[column] = word_floor_of(column);
+    }
     // **保底宽 = 最长不可断单元**（不是整列自然宽）：
     //
     // 旧实现一律 `min(natural, 48)`，两处都不对：
@@ -1277,6 +1298,89 @@ auto MarkdownView::code_block_at(math::Point content_point) const -> int {
   return first;
 }
 
+// —— 异步排版（SlowContent 对接面；2026-10-19 性能轮）——
+
+auto MarkdownView::snapshot_layout_input(float width) const -> SlowLayoutSnapshot {
+  SlowLayoutSnapshot snapshot;
+  snapshot.port = layout_port_;   // 排版端口随快照走（后台唯一度量来源）
+  snapshot.source = stream_.source();
+  snapshot.width = width;
+  snapshot.base_size = metrics_.base;
+  snapshot.code_size = metrics_.code;
+  snapshot.table_size = metrics_.table;
+  snapshot.max_width = max_width_;
+  snapshot.heading_sizes = metrics_.heading_sizes;
+  return snapshot;
+}
+
+auto MarkdownView::layout_offscreen(const SlowLayoutSnapshot& input) -> SlowLayoutSnapshot {
+  SlowLayoutSnapshot snapshot = input;   // 输出在副本上填（输入侧原样带回，供采纳核对）
+  // 后台线程体：全部状态都在栈上，不碰任何 Element。
+  //
+  // 手法：构造一个**临时 `MarkdownView` 值对象**（不入树、不绘制）——`Element`
+  // 构造零副作用（实测源码：`= default`），排版函数都是成员、只读写自身字段，
+  // 值对象上跑与树上的行为完全一致（同一份代码，不是第二套口径）。
+  //
+  // `RenderContext` 需要 `TextPort`：排版只满用 `measure_width`（带锁缓存，
+  // 并发安全已验证）；theme 引用只被排版路径读了 metrics ——这里传一个局部 Theme，
+  // 排版函数从不读颜色（颜色绘制时才解析）。
+  const Theme theme = Theme::light();
+  static const NullTextPort null_port{};   // 兑底端口（快照没带 port 时）
+  const TextPort* port = snapshot.port != nullptr ? snapshot.port : &null_port;
+  const RenderContext context{theme, port, 0.0};
+  MarkdownView worker{};
+  worker.base_font_size_ = snapshot.base_size;
+  worker.code_font_size_ = snapshot.code_size;
+  worker.max_width_ = snapshot.max_width;
+  worker.set_markdown(snapshot.source);
+  // 用快照的字号对齐 worker 的排版参数（apply_theme 会从主题取，这里盖回快照值）。
+  worker.metrics_.base = snapshot.base_size;
+  worker.metrics_.code = snapshot.code_size;
+  worker.metrics_.table = snapshot.table_size;
+  worker.metrics_.heading_sizes = snapshot.heading_sizes;
+  worker.needs_layout_ = true;
+  // 快照的 `width` 语义 = **内容宽**（已扣内边距，与 `layout_width_` 同口径）。
+  // `set_layout_width` 内部还会再减一次 padding——把 worker 的 padding 归零对齐，
+  // 避免同一份宽在两条路径上差一次 padding（实测 868/836 之差恰好 = 2×16，
+  // 行数差 80、高度差 2%）。`content_height_` 里的 padding.vertical 同理归零，
+  // 采纳侧用快照自己的高度（树上 view 的 padding 补偿在快照拍时就已包含）。
+  const math::Insets padding_snapshot = worker.style_.padding;  // set_markdown 前记下（树上默认 12/16）
+  worker.style_.padding = {};
+  worker.set_layout_width(context, snapshot.width);
+  // 内容高补回树上同款 padding（快照高度与树上 `content_height()` 同口径，采纳侧直接用）。
+  snapshot.content_height = worker.content_height_ + padding_snapshot.vertical();
+  snapshot.row_count = worker.rows_.size();
+  snapshot.payload = std::make_shared<std::vector<Row>>(std::move(worker.rows_));
+  return snapshot;
+}
+
+auto MarkdownView::adopt_layout(const SlowLayoutSnapshot& snapshot) -> bool {
+  // 核对：排版期间的字号/宽度没变才换入（变了就是过期结果，让壳重排）。
+  if (snapshot.base_size != metrics_.base || snapshot.code_size != metrics_.code ||
+      snapshot.table_size != metrics_.table || snapshot.max_width != max_width_ ||
+      snapshot.heading_sizes != metrics_.heading_sizes) {
+    return false;
+  }
+  auto rows = std::static_pointer_cast<std::vector<Row>>(snapshot.payload);
+  if (rows == nullptr) return false;
+  rows_ = std::move(*rows);
+  offscreen_frozen_ = false;   // 采纳即解冻：之后宽度变化走组件自身（源已同步）
+  // 源同步进 `stream_`（不重排、不清滚动）：宽度再变化时组件能拿**同一份源**
+  // 同步重排（兜底），语义通道（markdown/selection/全文复制）也就位。
+  // 不这么做的后果（实测）：壳路径下 view 的源恒空，任何一次宽度扰动
+  //（measure 兜底宽 640 ≠ arrange 真宽）都会把采纳的行模型冲成「空文档 1 行」。
+  stream_.reset();
+  if (!snapshot.source.empty()) blocks_ = stream_.feed(snapshot.source);  // blocks 同步（重排的输入）
+  rebuild_plain_text();
+  layout_width_ = snapshot.width;
+  needs_layout_ = false;
+  content_height_ = snapshot.content_height;
+  // 换入后滚动位置可能超出新内容高：夹取（不重置——用户滚到的位置尽量保留）。
+  scroll_offset_ = clamp_scroll(scroll_offset_);
+  mark_dirty();
+  return true;
+}
+
 // —— 滚动 ——
 
 auto MarkdownView::row_at_y(float content_y) const -> int {
@@ -1300,12 +1404,27 @@ auto MarkdownView::selection_ends() const -> std::pair<Caret, Caret> {
 auto MarkdownView::offset_to_x(const Row& row, std::size_t offset) const -> float {
   // `flat_prefix[i]` = 第 i 个码点起始处的 x（相对 `text_x`）。
   // 字节偏移→码点下标用 `utf8_length` 换算（选择只在行内扁平文本上做）。
+  if (row.flat.empty()) return 0.0f;
+  ensure_flat_prefix(row, layout_port_ != nullptr ? *layout_port_ : NullTextPort::instance());
   if (row.flat_prefix.empty()) return 0.0f;
   const std::size_t codepoints = row.flat_prefix.size() - 1U;
   const std::size_t clamped = std::min(offset, row.flat.size());
   std::size_t index = st::utf8_length(std::string_view(row.flat).substr(0, clamped));
   if (index > codepoints) index = codepoints;
   return row.flat_prefix[index];
+}
+
+void MarkdownView::ensure_flat_prefix(const Row& row, const TextPort& port) const {
+  if (row.flat_ready || row.flat.empty()) return;
+  // 与旧排版期实现同一份口径（见头文件说明）：逐码点累加、跨 Span 续传起点 x。
+  float prefix_x = 0.0f;
+  row.flat_prefix.clear();
+  for (const Span& span : row.spans) {
+    markdown_append_flat_prefix(row.flat, row.flat_prefix, prefix_x, span, &port);
+    if (!row.flat_prefix.empty()) prefix_x = row.flat_prefix.back();
+  }
+  if (row.flat_prefix.empty()) row.flat_prefix.push_back(0.0f);
+  row.flat_ready = true;
 }
 
 auto MarkdownView::caret_at(math::Point content_point) const -> Caret {
@@ -1321,6 +1440,7 @@ auto MarkdownView::caret_at(math::Point content_point) const -> Caret {
   // 行内按 x 找最近边界：落在 [i-1, i) 之间时靠哪端近就取哪端。
   // 不逐 span 算是因为各 span 的分段 x 可能与 `flat_prefix` 不同源——
   // 单一坐标系才不会出现「高亮到了、复制少一个字」这类错位。
+  ensure_flat_prefix(row, layout_port_ != nullptr ? *layout_port_ : NullTextPort::instance());
   const std::size_t codepoints = row.flat_prefix.size() - 1U;
   std::size_t best = 0;
   if (local_x > 0.0f) {
@@ -1500,6 +1620,15 @@ void MarkdownView::measure(const RenderContext& context, const Constraints& cons
 void MarkdownView::set_layout_width(const RenderContext& context, float width) {
   const float content_width = std::max(width - style_.padding.horizontal(), kMinTextWidth);
   if (needs_layout_ || content_width != layout_width_ || context.text != layout_port_) {
+    if (offscreen_frozen_) {
+      // 冻结：宽度/端口变化只记账，重排留给后台（adopt 或解冻后）。
+      // 不冻结的后果（实测）：壳路径下主线程的一次同步重排会把后台成果冲掉，
+      // 或在大文档上白付几十毫秒——异步就白做了。
+      layout_width_ = content_width;
+      layout_port_ = context.text;
+      needs_layout_ = false;   // 宽度口径已记；adopt 会按快照宽校准
+      return;
+    }
     rebuild_rows(context, content_width);
     layout_width_ = content_width;
     layout_port_ = context.text;

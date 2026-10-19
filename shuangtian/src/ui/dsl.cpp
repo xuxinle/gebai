@@ -26,6 +26,7 @@
 #include "st/ui/components/input.hpp"
 #include "st/ui/components/list.hpp"
 #include "st/ui/components/markdown_view.hpp"
+#include "st/ui/components/slow_content.hpp"
 #include "st/ui/components/terminal.hpp"
 #include "st/ui/components/menu.hpp"
 #include "st/ui/components/overlay.hpp"
@@ -1434,6 +1435,7 @@ auto Composer::root() noexcept -> UiRoot& { return impl_->root; }
   X(CommandPalette, "CommandPalette", std::make_unique<CommandPalette>()) \
   X(CompletionPopup, "CompletionPopup", std::make_unique<CompletionPopup>()) \
   X(MarkdownView, "MarkdownView", std::make_unique<MarkdownView>())       \
+  X(SlowContent, "SlowContent", std::make_unique<SlowContent>())          \
   X(TitleBar, "TitleBar", std::make_unique<TitleBar>())                   \
   X(WindowFrame, "WindowFrame", std::make_unique<WindowFrame>())
 

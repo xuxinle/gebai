@@ -891,6 +891,32 @@ A/B 的必要性：阈值只要还挂在「单点标定」上，无论标在哪�
 **属公共接口变更**（`include/st/raster/surface.hpp` + 全部后端）→ 只分析不落地，
 待人工审阅接口形态后再实施。
 
+## 已完成（2026-10-19：大 Markdown 预览不再冻结主窗 —— 排版提速 + 框架层慢内容异步化）
+
+> 用户报告「打开 shuangtian/DESIGN.md 预览整窗变卡」并问「框架层能不能让慢组件
+> 不影响主窗口」。两层都交了：
+>
+> ① **MarkdownView 排版提速**：懒 `flat_prefix`（逐码点前缀宽首次选择才算，
+> 重排省 27%）、`tokenize` 零拷贝、表格 `word_floor` 延迟到真要压缩列、
+> 折行词宽复用、`rows_.reserve`。实测 DESIGN.md（447KB/3553 行）：热态重排
+> 97→51ms、首帧 paint 60→16ms、滚动帧 10.7→7ms。
+>
+> ② **框架层 `ui::SlowContent`**（通用慢内容壳）：排版投 `Tasks::run_async`
+> 后台，骨架占位 + 估算高度不阻塞布局，`future` 非阻塞探测采纳，世代号丢
+> 过期结果；小文档同步兑底。配套：字体栈并发安全压测探针
+> （`tools/font_thread_safety_probe.cpp`，零畸变）、`MarkdownView` 的
+> `snapshot_layout_input`/`layout_offscreen`/`adopt_layout`/`freeze_offscreen`
+> 四接口。实测：同步 156.8ms 的排版移出后主线程最差单帧 0.40ms；
+> gbcode 打开 DESIGN.md 预览命令往返 1.3ms、排版完成 3509 行。
+>
+> ③ 踩坑实录（详见 DESIGN.md §4.5.2.1）：壳路径下组件的 `measure` 会用兑底宽
+> 触发同步重排，把后台成果冲掉——需 `freeze_offscreen` 冻结；`adopt_layout`
+> 必须同步源进 `stream_`/`blocks_`，否则后续任何自身重排都用空源把行模型冲成 1 行。
+>
+> 回归：`tests/ui_slow_content_test.cpp` 四用例 + `tools/md_async_bench.cpp` +
+> `tools/gbcode_md_async_e2e.py` 五断言；gallery 对账补 `SlowContent` 豁免（包装组件）。
+> 环境注：本轮在 Linux 侧需 g++-16（libstdc++ 的 `<mdspan>`），已自举重编全仓。
+
 ## 已完成（2026-10-16：UiRoot 快捷键枚举面 + gbcode 帮助卡单源化，原 P2 落地）
 
 > 原待做条（本文件 4009 行附近的「`UiRoot` 快捷键注册表无可枚举面」）已落地。

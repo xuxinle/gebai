@@ -3792,6 +3792,42 @@ if (palette_open_.value()) {          // 条件声明
 列表与条件裁剪 / key 身份跨插入保持）、
 `tests/control_protocol_test.cpp`（协议 `ui.create`/`ui.remove` 用例）。
 
+#### 4.5.2.1 慢内容异步排版（`ui::SlowContent`，2026-10-19 性能轮）
+
+> 病因：打开 447KB 的 `shuangtian/DESIGN.md` 预览，整窗交互变卡（用户报告）。
+> 量化：`rebuild_rows` 同步重排实测 ~160ms（主线程），期间菜单/标签/滚动全部冻结。
+
+**三层修复**（每层独立可验证）：
+
+① **排版提速**（`markdown_view.cpp`）：`flat_prefix` 改懒算（首次选择/命中才逐码点量宽，
+重排省 27%）；`tokenize` 零拷贝（`string_view` 区间代替逐词 `std::string`）；表格
+`word_floor` 只在真的要压缩列时才算；折行词宽复用（`append_piece` 不再重量）。
+实测：DESIGN.md 热态重排 97→51ms，首帧 paint 60→16ms，滚动帧 10.7→7ms。
+
+② **框架层 `ui::SlowContent`**（`slow_content.hpp/.cpp`）：通用慢内容壳，不只服务
+Markdown。排版投 `Tasks::run_async` 后台线程，期间画骨架占位（估算高度不阻塞布局），
+结果经 `future` 交回、帧循环里非阻塞探测采纳；**世代号**丢弃过期结果（输入再变时）。
+降级三档：小文档（<32KB）同步 / `Tasks` 缺席同步 / 流式追加退同步。
+实测：同步 156.8ms 的排版移出后，主线程最差单帧 **0.40ms**；gbcode 打开 DESIGN.md
+预览的命令往返 **1.3ms**，排版完成 3509 行、滚动正常。
+
+③ **冻结与源同步**（两个实测踩坑）：
+- `freeze_offscreen(true)`：壳持有排版权期间，组件的 `measure`/`arrange` 不再触发
+  同步重排——否则一次宽度扰动（measure 兑底宽 640 ≠ arrange 真宽）就把后台成果冲掉
+  或白付几十毫秒；
+- `adopt_layout` 同时把源同步进 `stream_`/`blocks_`：不同步的话，后续任何一次
+  组件自身重排都会用**空源**把行模型冲成「空文档 1 行」（表面看是采纳失败，
+  实则是采纳后被打扫——打印 `this` 指针与 `rows` 才定位到）。
+
+**线程安全依据**：`TextRenderer::measure_width`/`shape_cached` 缓存带锁；
+`FontData` 解析结果不可变，可变缓存（outlines/hints）各自带 mutex；kern 表 load 期构建。
+并发压测 `tools/font_thread_safety_probe.cpp`：3 线程 measure + 主线程 draw，零畸变。
+
+验证：`tests/ui_slow_content_test.cpp`（四用例：同步等价 / 异步不阻塞且逐项相等 /
+世代丢弃 / 懒 flat_prefix）；`tools/md_async_bench.cpp`（量化量尺）；
+`tools/gbcode_md_async_e2e.py`（端到端五断言）；
+gallery 对账：`SlowContent` 为包装组件入豁免清单（`kGalleryExempt`）。
+
 ### 4.6 shell
 ```cpp
 namespace st::shell {

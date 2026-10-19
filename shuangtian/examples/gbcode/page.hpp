@@ -21,6 +21,7 @@
 #include "lsp_bridge.hpp"
 #include "page_data.hpp"
 #include "session_store.hpp"
+#include "st/app/async.hpp"  // Tasks（慢内容异步排版的调度器）
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/code_editor.hpp"
 #include "st/ui/components/completion_popup.hpp"
@@ -32,6 +33,7 @@
 #include "st/ui/components/list.hpp"
 #include "st/ui/components/menu.hpp"
 #include "st/ui/components/markdown_view.hpp"
+#include "st/ui/components/slow_content.hpp"
 #include "st/ui/components/merge_view.hpp"
 #include "st/ui/components/overlay.hpp"
 #include "st/ui/components/scroll.hpp"
@@ -71,6 +73,9 @@ struct CodeEditorPage : Component {
   std::function<ThemeMode()> theme_mode{};
   /// 主题切换出口（`run_app` 注入为 `Application::set_theme_mode`）。
   std::function<void(ThemeMode)> theme_setter{};
+  /// 慢内容异步排版的调度器（`run_app` 注入为 `Application::tasks()`；
+  /// Markdown 预览大文档的排版移出主线程，主窗不再冻结）。
+  st::app::Tasks* layout_tasks_{nullptr};
   /// 当前是否暗色——**从真值源读**，不缓存。
   [[nodiscard]] auto theme_is_dark() const -> bool {
     return theme_mode && theme_mode() == ThemeMode::Dark;
@@ -126,6 +131,12 @@ struct CodeEditorPage : Component {
   State<bool> md_preview_{false};
   /// MarkdownView 实例（当前帧有效；渲染内容同步靠它，与 editor 指针同一套模式）。
   MarkdownView* md_view_ptr{nullptr};
+
+  /// MarkdownView ⇄ SlowLayoutTarget 适配器（异步排版的桥）。
+  /// 定义在 page_build.cpp（只在预览分支用）；持有 view 裸指针（树上元素，
+  /// 由声明式按 key 复用，帧间稳定；切文件时会被 setup 重指向）。
+  struct MdLayoutTarget;
+  std::shared_ptr<MdLayoutTarget> md_target_{};
   /// 输出面板按来源分栏（`St build` / `St test` / `终端`…）。
 
   static constexpr std::size_t kNoMenu{static_cast<std::size_t>(-1)};

@@ -33,6 +33,7 @@
 #include "st/md/markdown.hpp"
 #include "st/md/stream.hpp"
 #include "st/ui/element.hpp"
+#include "st/ui/components/slow_content.hpp"  // SlowLayoutSnapshot（异步排版快照）
 #include "st/ui/line_layout.hpp"
 #include "st/ui/theme.hpp"
 
@@ -119,6 +120,27 @@ class MarkdownView : public Element {
   [[nodiscard]] auto code_block_at(math::Point content_point) const -> int;
   /// 内容坐标处的**行盒**（空 = 越界）。
   [[nodiscard]] auto row_box_at(float content_y) const -> math::Rect;
+
+  // —— 异步排版（SlowContent 壳的对接面，2026-10-19 性能轮）——
+
+  /// 拍下当前排版的全部输入（源文本 + 字号 + 宽度）：后台排版的唯一事实来源。
+  /// 主线程调用；返回值自包含，可跨线程。
+  [[nodiscard]] auto snapshot_layout_input(float width) const -> st::ui::SlowLayoutSnapshot;
+  /// 后台排版：在调用线程上用快照排出一份行模型（不碰本组件的任何状态）。
+  /// 返回的快照携带行模型（不透明负载）与内容高；线程安全依赖 `TextPort`
+  /// 的带锁缓存（并发压测见 tools/font_thread_safety_probe.cpp）。
+  [[nodiscard]] static auto layout_offscreen(const SlowLayoutSnapshot& input)
+      -> SlowLayoutSnapshot;
+  /// 采纳后台结果（主线程）：换入行模型并标脏。宽度/字号与快照不符时拒绝（返回 false）。
+  auto adopt_layout(const SlowLayoutSnapshot& snapshot) -> bool;
+
+  /// 离屏排版冻结（壳路径用）：true 期间 `set_layout_width` 跳过重排。
+  ///
+  /// 为什么需要：壳路径下排版权在后台，但组件的 `measure`/`arrange` 仍会因
+  /// 宽度变化调 `set_layout_width`——若不拦，它会用当前源**同步重排**一次
+  ///（大文档几十毫秒，异步就白做了），随后还可能被 adopt 覆盖（宽度口径
+  /// 不同时来回跳）。冻结期间宽度变化只记录，解冻或 adopt 后按最终宽度走。
+  void freeze_offscreen(bool frozen) { offscreen_frozen_ = frozen; }
 
   /// 上一帧实际绘制的行区间（半开；从未绘制过时为空区间）。
   ///
@@ -216,7 +238,15 @@ class MarkdownView : public Element {
     /// 分工：选择与命中用 `flat`/`flat_prefix`，绘制仍用 `spans`（保留着色）。
     std::string flat{};
     /// `flat` 里每个**码点起始处**的 x（相对 `text_x`；长度 = 码点数 + 1）。
-    std::vector<float> flat_prefix{};
+    ///
+    /// **懒计算**（2026-10-19 性能轮）：`flat_ready` 为假时本向量尚未算出，
+    /// 首次 `offset_to_x`/`caret_at` 时经 `ensure_flat_prefix` 补算并置真。
+    /// 懒的理由：逐码点 `measure_width` 在大文档重排里占 ~27%（DESIGN.md 447KB
+    /// 实测 97ms 里的 26ms），而选择/命中只有用户拖选时才发生——
+    /// 排版是每帧路径、选择是罕见路径，重活该往罕见路径让。
+    /// `mutable`：补算发生在 const 的命中/绘制路径上（与 `last_visible_*` 同一手法）。
+    mutable std::vector<float> flat_prefix{};
+    mutable bool flat_ready{false};
   /// 每个 Span 的 x 区间（与 `spans` 一一对应，仅链接片段有意义）。
   ///
   /// 为何在**排版期**写：命中测试（`link_at`）需要“鼠标 x 落在哪个 Span 里”，
@@ -294,6 +324,8 @@ class MarkdownView : public Element {
   float base_font_size_{0.0f};
   float code_font_size_{0.0f};
   bool needs_layout_{true};
+  /// 离屏排版冻结（见 `freeze_offscreen`）：主线程壳持有排版权时置位。
+  bool offscreen_frozen_{false};
   bool want_bottom_{false};          ///< 追加时贴底，等排版完成后再落到实测高度
   bool stick_to_bottom_{true};
   bool selectable_{true};
@@ -325,6 +357,11 @@ class MarkdownView : public Element {
   [[nodiscard]] auto caret_at(math::Point point) const -> Caret;
   /// 行内字节偏移 → x（相对该行 `text_x`）；靠 `flat_prefix` 二分。
   [[nodiscard]] auto offset_to_x(const Row& row, std::size_t offset) const -> float;
+  /// 懒补算一行的 `flat_prefix`（首次选择/命中时调用；幂等）。
+  ///
+  /// 口径与旧排版期实现**同一份**（逐码点 `measure_width` 累加、跨 Span 续传起点 x）
+  /// ——两处口径分家会出现「高亮与选择错位」，那是比慢更难查的错。
+  void ensure_flat_prefix(const Row& row, const TextPort& port) const;
 
   // —— 排版 ——
   void rebuild_rows(const RenderContext& context, float width);

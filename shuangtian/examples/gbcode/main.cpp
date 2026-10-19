@@ -482,6 +482,8 @@ auto run_app(int argc, char** argv) -> int {
   // `--ui-font-scale` 调好的字号悄悄还原）。
   page->theme_mode = [&app] { return app.root().theme().mode(); };
   page->theme_setter = [&app](ThemeMode mode) { app.set_theme_mode(mode); };
+  // 慢内容异步排版的调度器（Markdown 预览大文档不冻结主窗）。
+  page->layout_tasks_ = &app.tasks();
   // 外壳：`WindowFrame`（与 gallery 同一形态：标题栏 + 内容槽 + 八向缩放边缘）。
   // 为什么由应用装配而不是写进 `build()`：窗框是**外壳**（也是窗口唯一的拖动/缩放区），
   // 应当先于声明式内容存在、且不随页面重组而重建；页面只把标题推给它。

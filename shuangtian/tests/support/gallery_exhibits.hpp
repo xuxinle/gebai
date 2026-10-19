@@ -85,12 +85,13 @@ inline constexpr std::array<std::string_view, 7> kGalleryLazy{
 /// 【待补卡】清单已随三包补卡全部清零：首包 Tree/Tooltip/ColorPicker/Viewport，
 /// 二包 CodeEditor/DiffView/CompletionPopup/CommandPalette，
 /// 三包 TimelineView/MergeView/MenuBar/ContextMenu/FileDialog/Terminal）。
-inline constexpr std::array<std::pair<std::string_view, std::string_view>, 4>
+inline constexpr std::array<std::pair<std::string_view, std::string_view>, 5>
     kGalleryExempt{
         std::pair{"Spacer", "布局占位：无可视内容，无展示价值"},
         std::pair{"ListItem", "父组件注入：List::add_item 内建创建（list.cpp:291），列表卡随之展示，不单独立卡"},
         std::pair{"ScrollBar", "父组件注入：ScrollView 构造内建（scroll.cpp:156），页面滚动随之展示，不单独立卡"},
         std::pair{"MenuPanel", "父组件注入：MenuBar::make_panel 内建创建（menu.cpp:386），有 MenuBar 卡即随之展示（菜单栏/右键菜单两卡的面板都是它）"},
+        std::pair{"SlowContent", "异步排版壳（2026-10-19）：无独立视觉形态，包裹内容组件用；骨架占位随包裹内容展示，不单独立卡"},
     };
 
 }  // namespace gallery
