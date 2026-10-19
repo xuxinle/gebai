@@ -87,6 +87,15 @@ void SplitView::set_min_ratio(float value) {
   set_ratio(ratio_, false);
 }
 
+void SplitView::set_min_first_size(float value) {
+  const float clamped = std::max(0.0f, value);
+  if (clamped == min_first_size_) return;
+  min_first_size_ = clamped;
+  // 最小宽只影响**布局时的生效比例**（见 `layout_children`），不改 `ratio_` 本身——
+  // 否则窗口放大后侧栏会停在“被抬过的比例”上，回不到用户设定的那个。
+  mark_layout_dirty();
+}
+
 void SplitView::set_default_ratio(float value) {
   // 只记目标，**不动当前比例**（见头文件：声明式每帧都走 configure）。
   default_ratio_ = clamp_ratio(value);
@@ -316,8 +325,21 @@ void SplitView::layout_children(const RenderContext& context) {
     if (only != nullptr) only->arrange(context, bounds_);
     return;
   }
-  const float first_main = main_extent() * ratio_;
-  const float second_main = main_extent() - first_main;
+  // 比例 → 主轴像素；再按**最小绝对宽度**抬一次（见 `set_min_first_size`）。
+  //
+  // 为何在布局时算而不是在 `set_ratio` 里算：比例是“占多大份额”，与窗口无关；
+  // 而“至少得放得下多少”依赖当前主轴像素——窗口被高 DPI 夹小时，同一个 0.2
+  // 算出的绝对宽会小到使侧栏标题变成“资…”。
+  float effective_ratio = ratio_;
+  const float total_main = main_extent();
+  if (min_first_size_ > 0.0f && total_main > 0.0f) {
+    const float low = std::clamp(min_ratio_, kMinRatioFloor, 0.5f);
+    const float max_first = total_main * (1.0f - low);   // 不能把第二面板挤没
+    const float wanted = std::min(min_first_size_, max_first);
+    if (total_main * effective_ratio < wanted) effective_ratio = wanted / total_main;
+  }
+  const float first_main = total_main * effective_ratio;
+  const float second_main = total_main - first_main;
 
   // **两侧面板直接相邻，不为手柄留缝**（2026-10-18）：
   // 手柄只存在于命中层（`handle_rect` 以边界为中轴张开），不参与布局。

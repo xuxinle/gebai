@@ -1590,6 +1590,13 @@ void apply_box(Element& element, const BoxProps& props) {
   if (props.width != kAuto) style.width = props.width;
   if (props.height != kAuto) style.height = props.height;
   style.grow = props.grow;
+  // 弹性对齐（主轴分布 / 交叉轴对齐 / 单项覆盖 / 文本内部对齐）。
+  // 直接写 `Style`：这几个字段不参与主题重算（不像颜色/字号会被 `apply_theme`
+  // 盖回），所以不需要像色调那样另记一份“显式覆盖”。
+  if (props.justify.has_value()) style.justify = *props.justify;
+  if (props.align_items.has_value()) style.align_items = *props.align_items;
+  if (props.align_self.has_value()) style.align_self = *props.align_self;
+  if (props.text_align.has_value()) style.text_align = *props.text_align;
   if (props.radius >= 0.0f) style.radius = props.radius;
   if (!props.key.empty()) element.set_key(props.key);
   if (!props.id.empty()) element.set_id(props.id);
@@ -2106,6 +2113,7 @@ auto tree(Composer& c, const std::vector<TreeNodeData>& nodes,
       entry.expanded = node.expanded;
       entry.is_dir = node.is_dir;
       entry.depth = node.depth;
+      entry.icon = node.icon;
       list.push_back(std::move(entry));
     }
     widget->sync_nodes(list);   // 按 key 对齐（同 `Tree::sync_nodes` 语义）

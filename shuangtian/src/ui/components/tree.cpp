@@ -296,6 +296,20 @@ void Tree::paint_content(const RenderContext& context, raster::Surface& canvas) 
       cursor_x += kChevronSize + metrics.space_xs;
     }
 
+    // 行首图标（`TreeNode::icon`；空 = 不画）。
+    //
+    // 尺寸跟着**行高**而不是写死：26px 行里 ≈15px 图标与 16px 字视觉重量相当；
+    // 行高改密（侧栏）或改松（设置面板）时图标自动跟着缩，不会出现
+    // “小行高配大图标把文字挤出去”。
+    if (!node.icon.empty()) {
+      const float icon_size = std::clamp(row.height * 0.62f, 13.0f, 19.0f);
+      const math::Rect icon_box{cursor_x, row.y + (row.height - icon_size) * 0.5f, icon_size,
+                                icon_size};
+      // 目录用弱化色、文件用更淡一档：一眼能分出“哪些是容器”，这是层级感的来源。
+      Icon::draw(canvas, node.icon, icon_box, node.is_dir ? colors.text_muted : colors.text_faint);
+      cursor_x += icon_size + metrics.space_xs;
+    }
+
     math::Color label_color = selected ? colors.primary : colors.text;
     // 显式文字色覆盖（DSL `BoxProps::color/hex_color`）盖过选中/常态色：
     // 设了就是"这棵树的字都是这个色"的显式意图（与 Badge 同口径）。

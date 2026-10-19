@@ -105,6 +105,13 @@ inline void apply_class_gammas(st::text::TextRenderer& renderer, const ClassGamm
 struct AppOptions {
   int width{1280};   ///< 逻辑宽（UI 坐标）
   int height{720};   ///< 逻辑高
+  /// 显示器工作区的逻辑尺寸覆盖（0 = 问后端）。
+  ///
+  /// 为何需要它：高 DPI + 小屏上“可用逻辑空间不够”是个**只在特定硬件组合下**
+  /// 出现的问题（13寸 1080p + 200% 缩放 ⇒ 960×540 逻辑）。没有这个覆盖值，
+  /// 无头模式永远模拟不出那个场景，回归测试只能靠猜。显式给出后，
+  /// `fit_window_to_work_area()` 就按它夹尺寸——于是“小屏高 DPI”可复现、可断言。
+  math::Size work_area_override{0.0f, 0.0f};
   float scale{0.0f}; ///< DPI 缩放：0 = 自动（ST_SCALE 环境变量 → 后端默认：win32 查窗口 DPI，
                     ///< headless 查系统显示缩放（Windows）/1.0（其它）；显式值不被覆盖）
   std::string title{"霜天应用"};
@@ -250,6 +257,14 @@ class Application final : public control::Host, public ui::WindowControl {
   [[nodiscard]] auto viewport() const -> math::Size override { return root_.viewport(); }
   [[nodiscard]] auto device_scale() const -> float override;
   auto set_device_scale(float scale) -> Status override;
+  /// 当前显示器**工作区**的逻辑尺寸（已扣任务栏/系统栏）。
+  ///
+  /// 应用用它把窗口初始尺寸**夹到屏幕范围内**——写死逻辑尺寸（如 1280×800）
+  /// 在小屏高 DPI 上会超屏：13寸 1080p 开 200% 缩放时可用逻辑区只有 960×540。
+  /// 无头/后端不支持时退回当前视口尺寸（语义：“窗口就是全部可用空间”）。
+  [[nodiscard]] auto work_area_logical() const -> math::Size;
+  /// 这台显示器能给的最小逻辑视口（低于它三栏布局会互相挤压）。
+  [[nodiscard]] auto min_logical_size() const -> math::Size;
   /// 字体栈（只读）：给需要**独立缓存域**的离屏排版用
   /// （见 `st::app::OffscreenTextPort`——后台排版若复用主线程的 `TextRenderer`，
   /// 会把它 32k 条的宽度 LRU 刷爆，主线程随后每段文字都要重新整形）。

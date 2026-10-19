@@ -430,6 +430,10 @@ namespace gbcode_ui {
           [this](SplitView& split) {
             split.set_id("sidebar-split");
             split.set_min_ratio(0.12f);
+            // 侧栏**最小绝对宽 200px**：低于它标题会变成“资…”、文件名全打省略号。
+            // 比例与最小宽是两件事：比例是“宽敞时占多少”，最小宽是“挤不挤得下”。
+            // 实测：小屏 + 200% DPI 时窗口被夹到 883px，纯比例的 19.3% 只剩 170px。
+            split.set_min_first_size(220.0f);
             // 比例存档在 `sidebar_ratio_`（非响应式）：拖动回调写它，重组时读它。
             // ⚠ 不能每帧写死默认值：声明式每帧都会跳这个 configure，写死等于
             // 把用户拖到的位置抹回默认（实测：拖到 0.5，一点任何按钮就弹回默认）。
@@ -756,14 +760,20 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
         }
       });
       if (!has_editor && tabs.empty()) {
-        column(c, {.padding = 24.0f, .grow = true,
-                    // 样式系统示范（styling.hpp）：一行声明 = 抬升卡片 + 大圆角，
-                    // 阴影/表面/高光随主题联动（换肤自动跟随，无需在此取色）。
-                    .elevation = Elevation::Raised, .radius_mode = RadiusMode::LG,
-                    .id = "empty-hint"}, [&] {
-          (void)icon(c, "code", 40.0f);
-          (void)text(c, [] {
-            return std::string("从左侧资源管理器打开一个文件，或 Ctrl+Shift+P 打开命令面板");
+        // 空状态：**居中三段式**（大图标 + 主文案 + 次级快捷键提示）。
+        //
+        // 为何改：旧版是 `column(padding=24, elevation=Raised, radius=LG)` 直接放在
+        // 编辑区——而 `column` 默认撑满可用宽度，于是那张“抬升卡片”铺满了整块编辑区，
+        // 变成一块**盖住文案的大灰块**（截图实测：文字被圆角块从中间切断）。
+        // 空状态要的是“留白里的一个安静提示”，不是一块面板。
+        row(c, {.grow = true, .justify = Justify::Center, .align_items = Align::Center,
+                .id = "empty-hint"}, [&] {
+          column(c, {.gap = 14.0f, .padding = 32.0f, .align_items = Align::Center}, [&] {
+            (void)icon(c, "code", 56.0f);
+            (void)text(c, [] { return std::string("从左侧资源管理器打开一个文件"); },
+                       {.color = Tone::Muted, .size = 15.0f, .text_align = TextAlign::Center});
+            (void)text(c, [] { return std::string("或按 Ctrl+Shift+P 打开命令面板"); },
+                       {.color = Tone::Faint, .size = 12.5f, .text_align = TextAlign::Center});
           });
         });
         return;

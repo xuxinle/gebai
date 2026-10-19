@@ -108,6 +108,9 @@ struct Options {
   bool headless{false};
   std::string backend{};
   float scale{0.0f};
+  /// 工作区逻辑尺寸覆盖（0 = 问后端）；`--work-area WxH`。
+  float work_area_w{0.0f};
+  float work_area_h{0.0f};
   std::string theme{"light"};
   std::string language{"cpp"};
   std::string text_lcd{"auto"};
@@ -262,6 +265,16 @@ auto print_usage(std::string_view program) -> void {
     else if (raw == "--scale") {
       options.scale = static_cast<float>(std::clamp(parse_double("--scale", 1.0), 0.1, 10.0));
     }
+    // 模拟“另一块屏幕的工作区”（逻辑像素，如 `960x540`）——用于复现“小屏 + 高 DPI”
+    // 下可用空间不够的场景（否则无头环境永远模拟不出来，DPI 适配只能靠猜）。
+    else if (raw == "--work-area") {
+      const std::string text_value = value("");
+      const auto sep = text_value.find('x');
+      if (sep != std::string::npos) {
+        options.work_area_w = static_cast<float>(std::atof(text_value.substr(0, sep).c_str()));
+        options.work_area_h = static_cast<float>(std::atof(text_value.substr(sep + 1).c_str()));
+      }
+    }
     else if (raw == "--theme") options.theme = value("light");
     else if (raw == "--language") options.language = value("cpp");
     else if (raw == "--text-lcd") options.text_lcd = value("auto");
@@ -331,8 +344,15 @@ auto run_app(int argc, char** argv) -> int {
   register_custom_language();
 
   st::app::AppOptions app_options;
-  app_options.width = 1280;
-  app_options.height = 800;
+  // 期望尺寸（逻辑像素）：**由 Application 夹到屏幕工作区内**（见下面的 `fit_window`）。
+  //
+  // 为何不能直接写死：逻辑尺寸与 DPI 无关，而**可用逻辑空间随 DPI 缩小**。
+  // 13 寸 1080p 屏开 200% 缩放时，工作区只有 ≈960×540 逻辑像素——写死
+  // 1280×800 会**超出屏幕**，窗口被系统裁切/挤压，界面于是“错乱且不可用”。
+  // 期望值只表达“在大屏上我希望能多宽敞”，能不能给到由屏幕决定。
+  app_options.width = 1440;
+  app_options.height = 900;
+  app_options.work_area_override = st::math::Size{options.work_area_w, options.work_area_h};
   app_options.scale = options.scale;
   app_options.title = "歌白代码 · 霜天";
   app_options.headless = options.headless;

@@ -709,6 +709,57 @@ class Win32Backend final : public Backend {
     return math::Size{logical_width_exact_, logical_height_exact_};
   }
 
+  /// 当前显示器**工作区**（已扣任务栏）的逻辑尺寸。
+  ///
+  /// 不用 `SystemParametersInfo(SPI_GETWORKAREA)`：它给的是**主屏**的物理工作区，
+  /// 多显示器下会把窗口放在副屏时的尺寸算错。`MonitorFromWindow` 拿窗口**所在**
+  /// 那块屏，`MONITORINFO.rcWork` 已扣掉该屏的任务栏，再除以本窗口 DPI 得到逻辑值。
+  [[nodiscard]] auto work_area_logical() const noexcept -> math::Size override {
+    MONITORINFO info{};
+    info.cbSize = sizeof(MONITORINFO);
+    const HMONITOR monitor = ::MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
+    if (monitor == nullptr || ::GetMonitorInfoW(monitor, &info) == 0) {
+      return logical_size();   // 拿不到就当作“窗口本身是全部可用空间”
+    }
+    const RECT& work = info.rcWork;
+    const float s = scale_ > 0.0f ? scale_ : 1.0f;
+    return math::Size{static_cast<float>(work.right - work.left) / s,
+                      static_cast<float>(work.bottom - work.top) / s};
+  }
+  /// 最小可用逻辑视口：低于这个尺寸界面会互相挤压（侧栏 + 编辑区 + 状态栏）。
+  [[nodiscard]] auto min_logical_size() const noexcept -> math::Size override {
+    return math::Size{640.0f, 400.0f};
+  }
+  /// 把窗口夹到工作区内：超出时按 **92% 工作区**缩放（留边距，窗口不贴死屏幕边），
+  /// 但不低于 `min_logical_size()`（宁可微超屏，也不把界面挤到不可用）。
+  auto fit_window_to_work_area() -> Status override {
+    if (window_ == nullptr) return unexpected(ErrorCode::Invalid, "窗口未创建");
+    const math::Size work = work_area_logical();
+    const math::Size min_size = min_logical_size();
+    if (work.width <= 0.0f || work.height <= 0.0f) {
+      return unexpected(ErrorCode::Unsupported, "拿不到工作区尺寸");
+    }
+    const math::Size current = logical_size();
+    // 目标：不超过工作区 92%；但也不小于最小可用尺寸。
+    const float limit_w = std::max(min_size.width, work.width * 0.92f);
+    const float limit_h = std::max(min_size.height, work.height * 0.92f);
+    if (current.width <= limit_w && current.height <= limit_h) {
+      return ok();   // 已经放得下，不动（不要反过来把窗口“放大”）
+    }
+    const float target_w = std::min(current.width, limit_w);
+    const float target_h = std::min(current.height, limit_h);
+    // 物理尺寸 = 逻辑 × scale；客户区给了，窗口尺寸由系统 OS 加上边框。
+    const float s = scale_ > 0.0f ? scale_ : 1.0f;
+    const auto client_w = static_cast<int>(std::lround(target_w * s));
+    const auto client_h = static_cast<int>(std::lround(target_h * s));
+    if (!::SetWindowPos(window_, nullptr, 0, 0, client_w, client_h,
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)) {
+      return unexpected(ErrorCode::Invalid, "SetWindowPos 失败");
+    }
+    // 改完必须重同步缓冲（与 WM_SIZE 同一条路径）。
+    return sync_buffers_to_client(scale_);
+  }
+
   auto set_device_scale(float scale) -> Status override {
     if (scale <= 0.0f) return unexpected(ErrorCode::Invalid, "DPI 缩放必须为正数");
     scale_ = scale;

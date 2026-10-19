@@ -257,6 +257,8 @@ struct Application::Impl {
   LogRing log_lines{};
   std::uint64_t frames{0};
   float device_scale{1.0f};
+  /// 工作区逻辑尺寸覆盖（`AppOptions::work_area_override`；0 = 问后端）。
+  math::Size work_area_override{0.0f, 0.0f};
   /// 界面字号缩放（构造时解析一次，切主题时复用）——见 `Metrics::scale_fonts`。
   float font_scale{1.0f};
   /// 主题文件的**原文**（含 `base`；合成时跳过 `base`，它由 `apply_theme_file` 消费）。
@@ -301,6 +303,7 @@ Application::Application(std::string name, std::string version, AppOptions optio
   impl_->wall_times.set_capacity(kFrameSampleCapacity);
   impl_->log_lines.set_capacity(kLogLineCapacity);
   impl_->font_scale = resolve_ui_font_scale(options_.ui_font_scale);
+  impl_->work_area_override = options_.work_area_override;
   root_.set_theme(scaled_theme(options_.theme, impl_->font_scale));
   // 绘制剖析默认关闭：挂了才计时（代价是每次绘制两次时钟读）。
   if (const auto flag = fs::read_env("ST_PAINT_PROFILE"); flag.has_value() && !flag->empty() &&
@@ -606,6 +609,20 @@ auto Application::font_stack() const -> const st::text::FontStack& { return *imp
 
 auto Application::device_scale() const -> float { return impl_->device_scale; }
 
+auto Application::work_area_logical() const -> math::Size {
+  // 覆盖值优先（见 `AppOptions::work_area_override`）：让“高 DPI + 小屏”可复现。
+  if (impl_->work_area_override.width > 0.0f && impl_->work_area_override.height > 0.0f) {
+    return impl_->work_area_override;
+  }
+  if (impl_->backend == nullptr) return root_.viewport();
+  return impl_->backend->work_area_logical();
+}
+
+auto Application::min_logical_size() const -> math::Size {
+  if (impl_->backend == nullptr) return math::Size{0.0f, 0.0f};
+  return impl_->backend->min_logical_size();
+}
+
 auto Application::set_device_scale(float scale) -> Status {
   if (impl_->backend == nullptr) return unexpected(ErrorCode::Invalid, "应用未启动");
   if (scale <= 0.0f) return unexpected(ErrorCode::Invalid, "DPI 缩放必须为正数");
@@ -747,6 +764,8 @@ auto Application::start() -> Status {
   shell::WindowOptions window;
   window.width = options_.width;
   window.height = options_.height;
+  window.work_area_width = static_cast<int>(options_.work_area_override.width);
+  window.work_area_height = static_cast<int>(options_.work_area_override.height);
   window.scale = options_.scale;
   window.title = options_.title;
   window.renderer = options_.renderer;
@@ -779,6 +798,33 @@ auto Application::start() -> Status {
   if (!options_.window_icon_png.empty()) {
     if (auto status = impl_->backend->set_window_icon(options_.window_icon_png); !status) {
       ST_LOG_WARN("窗口图标未设置：{}", status.error().message);
+    }
+  }
+
+  // **把窗口夹到屏幕工作区内**（DPI 适配的必需品）。
+  //
+  // 为何在建窗之后：工作区尺寸（含任务栏扣除）与“窗口落在哪块屏”只有建窗之后
+  // 才拿得到（多显示器下每块屏的工作区不同）。
+  //
+  // 为何必须夹：窗口尺寸若写死逻辑值，在高 DPI 的小屏上会**超屏**——
+  // 13 寸 1080p 开 200% 缩放时工作区只有 ≈960×540 逻辑像素，而应用要 1280×800，
+  // 窗口被系统裁切/挤压，界面看着“错乱且不可用”。这里把尺寸收敛到
+  // `[最小可用, 工作区 × 0.92]`：留一点边距让窗口不贴死屏幕边。
+  //
+  // 两条路径：后端能改窗口就走后端（它才知道客户区/边框/DPI 换算）；
+  // 无头/拿不到屏幕时用 **work_area_override** 自己夹（让“小屏高 DPI”可复现）。
+  {
+    const math::Size work = work_area_logical();
+    const math::Size min_size = min_logical_size();
+    const math::Size current = impl_->backend->logical_size();
+    const bool have_work = work.width > 0.0f && work.height > 0.0f;
+    const float limit_w = std::max(min_size.width, work.width * 0.92f);
+    const float limit_h = std::max(min_size.height, work.height * 0.92f);
+    if (have_work && (current.width > limit_w || current.height > limit_h)) {
+      if (const auto fitted = impl_->backend->fit_window_to_work_area(); !fitted) {
+        ST_LOG_WARN("窗口未自适应（{}），期望 {}×{} 工作区 {}×{}", fitted.error().message,
+                    current.width, current.height, work.width, work.height);
+      }
     }
   }
 

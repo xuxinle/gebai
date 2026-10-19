@@ -836,7 +836,8 @@ void CodeEditorPage::load_active_text() {
             if (entry.is_dir) {
               const bool open = std::find(expanded.begin(), expanded.end(), child_rel) != expanded.end();
               nodes.push_back(TreeNodeData{.key = "dir:" + child_rel, .label = entry.name,
-                                           .expanded = open, .is_dir = true, .depth = depth});
+                                           .expanded = open, .is_dir = true, .depth = depth,
+                                           .icon = open ? "folder-open" : "folder"});
               if (open) flatten(child_rel, depth + 1);   // 同源递归：key 与路径同一规则
             } else {
               // 文件行的 key 就是**绝对路径**（与目录行的 `dir:<相对路径>` 不同）。
@@ -844,12 +845,39 @@ void CodeEditorPage::load_active_text() {
               // 且控制通道/自动化也在按这个口径断言。要改成相对路径必须两处同时改，
               // 所以此处不改，只在应用侧做归一化（见 `tree_key_to_path`）。
               nodes.push_back(TreeNodeData{.key = workspace_ + "/" + child_rel, .label = entry.name,
-                                           .depth = depth});
+                                           .depth = depth, .icon = icon_for_file(entry.name)});
             }
           }
         };
     flatten(std::string{}, 0);
     return nodes;
+  }
+
+
+  /// 文件名 → 行首图标名。
+  ///
+  /// 映射克制：**只分到“需要一眼分出的粒度”**——代码 / 文档 / 配置 / 图片 /
+  /// 构建产物 / 其余。把每种扩展名都配一枚图标看着很丰富，实际上图标越多
+  /// 区分度越低（都变成“花的”），而且会增加维护面。
+  [[nodiscard]] auto CodeEditorPage::icon_for_file(const std::string& name) -> std::string {
+    const auto dot = name.rfind('.');
+    std::string ext = dot == std::string::npos ? std::string{} : name.substr(dot + 1);
+    std::ranges::transform(ext, ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (ext == "md" || ext == "markdown") return "markdown";
+    if (ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "gif" || ext == "webp" ||
+        ext == "svg" || ext == "ico")
+      return "image";
+    if (ext == "c" || ext == "cc" || ext == "cpp" || ext == "cxx" || ext == "h" || ext == "hpp" ||
+        ext == "rs" || ext == "go" || ext == "py" || ext == "js" || ext == "ts" || ext == "tsx" ||
+        ext == "java" || ext == "sh")
+      return "code";
+    if (ext == "json" || ext == "toml" || ext == "yaml" || ext == "yml" || ext == "ini" ||
+        ext == "pkg" || ext == "cfg")
+      return "settings";
+    if (ext == "exe" || ext == "dll" || ext == "so" || ext == "o" || ext == "a") return "package";
+    if (ext == "db" || ext == "sqlite") return "database";
+    if (ext == "ttf" || ext == "otf") return "file";
+    return "file";
   }
 
 

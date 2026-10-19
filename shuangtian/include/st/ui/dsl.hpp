@@ -571,6 +571,20 @@ struct BoxProps {
   std::optional<RadiusMode> radius_mode{}; ///< 圆角档（SM/MD/LG/Pill；缺省不动）
   std::optional<ControlSize> control_size{}; ///< 尺寸档（高度+字号+图标联动）
   std::optional<Density> density{};        ///< 密度（padding/gap 缩放）
+  // —— 弹性布局对齐（对应 `Style` 的 `justify`/`align_items`）——
+  //
+  // 为何要在 DSL 主路径暴露：声明式写法是框架的主力入口，而没有对齐时
+  // “把一块内容放在容器正中”这个最常见的一行布局写得出来——只能退到
+  // `custom<>` 逃生舱手取 `element.style()`，而那里拿不到声明式元素的生命周期
+  // 保证（重组会销毁重建）。实测代价：gbcode 空状态因为没法居中，只能用
+  // `elevation=Raised` 的铺满卡片来代替，结果变一块盖住文案的大灰块。
+  //
+  // 名字与 `Style` 对齐（`justify` = 主轴分布，`align_items` = 交叉轴对齐），
+  // 不用 CSS 之外的别名。
+  std::optional<Justify> justify{};            ///< 主轴分布（行=水平、列=垂直）
+  std::optional<Align> align_items{};          ///< 交叉轴对齐
+  std::optional<Align> align_self{};           ///< 单项覆盖父容器的交叉轴对齐
+  std::optional<TextAlign> text_align{};       ///< 文本内部对齐（对 text 生效）
   std::string id{};                       ///< 显式 id（空 = 自动）
   std::string key{};                      ///< 业务身份（自动 id 用 Type@key）
 };
@@ -849,6 +863,8 @@ struct TreeNodeData {
   bool expanded{false};
   bool is_dir{false};
   int depth{0};
+  /// 行首图标名（`ui::Icon` 的名字；空 = 不画）。见 `TreeNode::icon`。
+  std::string icon{};
 };
 /// 树（节点数组数据驱动；展开/选中回调）。
 auto tree(Composer& c, const std::vector<TreeNodeData>& nodes,

@@ -37,6 +37,15 @@ struct TreeNode {
   bool expanded{false};  ///< 目录当前是否展开（数据表达状态，组件不改写）
   bool is_dir{false};    ///< 目录行（有展开指示、点击 toggle）；文件行点击选中
   int depth{0};          ///< 缩进深度（每级 16px）
+  /// 行首图标（`ui::Icon` 的名字，空 = 不画）。
+  ///
+  /// 为何放在数据里而不是让宿主自己拼：行内容是**组件自绘**的（行矩形、缩进、
+  /// 悬停/选中底色都在 `paint_content` 里），宿主要插一个图标进去只能去改
+  /// 缩进常量——那会把“数据”揉进“样式”。把名字交给组件，图标宽度/位置/着色
+  /// 由组件按行高统一决定，文件树看着才整齐。
+  std::string icon{};
+  /// 图标着色档位（区分“文件夹”与“文件”的语气）；缺省 Muted。
+  std::optional<Tone> icon_tone{};
 };
 
 class Tree : public Element {

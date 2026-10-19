@@ -74,6 +74,17 @@ class SplitView : public Element {
   void set_min_ratio(float value);
   [[nodiscard]] auto min_ratio() const noexcept -> float { return min_ratio_; }
 
+  /// 第一面板的**最小绝对宽度**（逻辑像素；0 = 不限）。
+  ///
+  /// 为何需要它：纯比例在**小窗口下必然挤坏**——侧栏占 20% 在 1440px 宽时是 288px，
+  /// 在 883px 宽时只剩 170px，标题被截成“资…”、文件名全打省略号。比例是
+  /// “宽敞时想要多少”，而“至少得放得下多少”是个绝对量，两者不该用同一个旋钮。
+  ///
+  /// 夹取顺序：先按 `min_ratio` 夹比例，再按本值抬到最小宽度，
+  /// 最后保证第二面板不被挤没（仍受 `min_ratio` 保护）。
+  void set_min_first_size(float value);
+  [[nodiscard]] auto min_first_size() const noexcept -> float { return min_first_size_; }
+
   /// 归位目标比例（双击/单击分割线、`reset` 动作的落点；默认 0.5）。
   ///
   /// **不改变当前比例**（只记目标；当前值仍由 `set_ratio` 与拖拽决定）——
@@ -171,6 +182,8 @@ class SplitView : public Element {
   float ratio_{0.5f};
   float default_ratio_{0.5f};
   float min_ratio_{0.15f};
+  /// 第一面板最小绝对宽度（逻辑 px；0 = 不限）。见 `set_min_first_size`。
+  float min_first_size_{0.0f};
   float step_{0.05f};
   float handle_size_{12.0f};
   bool dragging_{false};

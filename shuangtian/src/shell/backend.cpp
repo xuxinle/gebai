@@ -31,6 +31,9 @@ class HeadlessBackend final : public Backend {
   auto create_window(const WindowOptions& options) -> Status override {
     width_ = options.width > 0 ? options.width : 1280;
     height_ = options.height > 0 ? options.height : 720;
+    // 工作区覆盖：只有无头需要它（真后端自己查显示器），见 `WindowOptions`。
+    work_area_w_ = options.work_area_width;
+    work_area_h_ = options.work_area_height;
     // 未显式指定 `scale` 时**跟随系统显示缩放**：内置通道（无头）与桌面窗口默认
     // 同一像素密度——这是“内置截图与实际运行效果一致”在 DPI 维度上的前提。
     // 显式值（`--scale`/`ST_SCALE`）完全接管，用于回归与复现。
@@ -103,6 +106,46 @@ class HeadlessBackend final : public Backend {
   [[nodiscard]] auto logical_size() const noexcept -> math::Size override {
     return math::Size{static_cast<float>(width_), static_cast<float>(height_)};
   }
+  /// 无头没有真显示器；但为了能**复现“小屏 + 高 DPI”**的场景，这里把逻辑尺寸
+  /// 当作工作区（于是 `work_area_override` 能驱动真正的夹取逻辑），
+  /// 而 `fit_window_to_work_area` 按需重建面大小。
+  [[nodiscard]] auto work_area_logical() const noexcept -> math::Size override {
+    // 未设覆盖 ⇒ “窗口就是全部可用空间”（不改变既有行为）。
+    if (work_area_w_ <= 0 || work_area_h_ <= 0) return logical_size();
+    return math::Size{static_cast<float>(work_area_w_), static_cast<float>(work_area_h_)};
+  }
+  [[nodiscard]] auto min_logical_size() const noexcept -> math::Size override {
+    return math::Size{640.0f, 400.0f};
+  }
+  auto fit_window_to_work_area() -> Status override {
+    const math::Size work = work_area_logical();
+    const math::Size min_size = min_logical_size();
+    if (work.width <= 0.0f || work.height <= 0.0f) {
+      return unexpected(ErrorCode::Unsupported, "未设置工作区");
+    }
+    const float limit_w = std::max(min_size.width, work.width * 0.92f);
+    const float limit_h = std::max(min_size.height, work.height * 0.92f);
+    const int target_w = static_cast<int>(std::lround(std::min(static_cast<float>(width_), limit_w)));
+    const int target_h = static_cast<int>(std::lround(std::min(static_cast<float>(height_), limit_h)));
+    if (target_w == width_ && target_h == height_) return ok();
+    width_ = std::max(1, target_w);
+    height_ = std::max(1, target_h);
+    // 重建面（与 set_device_scale 同一条路径）。
+    WindowOptions options;
+    options.width = width_;
+    options.height = height_;
+    options.scale = scale_;
+    options.renderer = renderer_name_;
+    detail::SurfaceChoice choice = detail::create_surface(options, renderer_name_);
+    if (choice.surface == nullptr) return unexpected(ErrorCode::Unsupported, "重建绘制面失败");
+    surface_ = std::move(choice.surface);
+    return ok();
+  }
+  /// 工作区尺寸（由 Application 通过 WindowOptions 传入；0 = 等同逻辑尺寸）。
+  void set_work_area(int w, int h) noexcept {
+    work_area_w_ = w > 0 ? w : width_;
+    work_area_h_ = h > 0 ? h : height_;
+  }
 
   auto set_device_scale(float scale) -> Status override {
     if (scale <= 0.0f) return unexpected(ErrorCode::Invalid, "DPI 缩放必须为正数");
@@ -125,6 +168,9 @@ class HeadlessBackend final : public Backend {
  private:
   int width_{1280};
   int height_{720};
+  /// 工作区尺寸（无头模拟“屏幕多大”；0 表未设）——见 `work_area_logical`。
+  int work_area_w_{0};
+  int work_area_h_{0};
   float scale_{1.0f};
   std::string title_{};
   std::string clipboard_{};

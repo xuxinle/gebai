@@ -1296,7 +1296,14 @@ auto shutdown() -> void;
   ///
   /// 扫描结果按相对路径进 `dir_cache_` 缓存（详见其注释）——本函数每帧被调，
   /// 不能每次都打真文件系统。
-   [[nodiscard]] auto workspace_nodes() -> std::vector<TreeNodeData>;
+       [[nodiscard]] auto workspace_nodes() -> std::vector<TreeNodeData>;
+
+    /// 文件名 → 行首图标名（`ui::Icon` 的名字）。文件树的“一眼分类”。
+    ///
+    /// 为何是应用侧映射而不是框架内置：哪些扩展名算“代码”/“文档”/“配置”
+    /// 是**领域知识**（框架不该替应用定义产品语义）；框架只提供
+    /// 「TreeNode 带图标」这个能力，名字由应用给。
+    [[nodiscard]] static auto icon_for_file(const std::string& name) -> std::string;
 
 
    void on_tree_toggle(const std::string& key, bool expanded);

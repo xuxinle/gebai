@@ -27,6 +27,12 @@ namespace st::shell {
 struct WindowOptions {
   int width{1280};      ///< 逻辑宽（UI 坐标单位）
   int height{720};      ///< 逻辑高
+  /// 显示器工作区逻辑尺寸覆盖（0 = 问后端/不知道）。
+  ///
+  /// 无头后端的唯一用途：**复现“小屏 + 高 DPI”**——那个场景下可用逻辑空间不够，
+  /// 窗口必须收缩。真显示器上无需设置（后端自己查）。
+  int work_area_width{0};
+  int work_area_height{0};
   float scale{1.0f};    ///< DPI 缩放（物理像素 = 逻辑 × scale；1.0 = 传统 96dpi）
   std::string title{"霜天应用"};
   bool headless{false};
@@ -139,6 +145,33 @@ class Backend {
   virtual auto set_device_scale(float scale) -> Status = 0;
   /// 逻辑视口尺寸（窗口尺寸，不含 DPI 放大）。
   [[nodiscard]] virtual auto logical_size() const noexcept -> math::Size = 0;
+  /// 当前显示器上**可用工作区的逻辑尺寸**（已扣除任务栏/系统栏）。
+  ///
+  /// 为何需要它（DPI 适配的基础）：窗口初始尺寸若写死逻辑值，在高 DPI 的小屏幕上
+  /// 会**超屏**——例如 13 寸 1080p 屏开 200% 缩放，可用逻辑区只有 960×540，
+  /// 而应用要 1280×800，于是窗口被系统裁切/挤压，界面看着“错乱且不可用”。
+  /// 应用拿这个值把初始尺寸**夹到屏幕范围内**，才是跨 DPI 可用的做法。
+  ///
+  /// 默认实现返回 `logical_size()`（= 当前窗口尺寸），语义是“不知道屏幕有多大，
+  /// 就当窗口本身是全部可用空间”——不改变既有后端的行为。
+  [[nodiscard]] virtual auto work_area_logical() const noexcept -> math::Size {
+    return logical_size();
+  }
+  /// 这台显示器能给的最小逻辑视口（低于它界面就挤不动了）。
+  /// 与 `work_area_logical` 配合：应用取 `min(期望尺寸, 工作区)` 且不低于它。
+  [[nodiscard]] virtual auto min_logical_size() const noexcept -> math::Size {
+    return math::Size{0.0f, 0.0f};
+  }
+  /// 把当前窗口**夹到屏幕工作区内**（超屏才缩，不超就不动）。
+  ///
+  /// 返回 `ok()` = 已经处理（可能未变动）；`Unsupported` = 后端不知道屏幕多大，
+  /// 调用方不该把它当错——无头模式就是这种情形。
+  ///
+  /// 为何是后端职责而非应用自己算：窗口客户区/边框/DPI 换算都在后端手里，
+  /// 应用只知道“我希望能有多宽”。把换算放在应用里会变成两套坐标系。
+  virtual auto fit_window_to_work_area() -> Status {
+    return unexpected(ErrorCode::Unsupported, "后端不支持窗口自适应");
+  }
   /// 窗口系统是否请求关闭（用户点关闭按钮）。
   ///
   /// 由平台后端实现；应用主循环据此收尾（不能直接 `exit`——进程内还有控制通道、
