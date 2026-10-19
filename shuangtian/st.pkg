@@ -158,6 +158,11 @@
       "sources": ["tools/clear_fill_merge_probe.cpp"],
       "exclude_sources": ["src/pkg/*"]
     },
+    "memory_bandwidth_probe": {
+      "kind": "executable",
+      "sources": ["tools/memory_bandwidth_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
     "ink_spread_probe": { "kind": "executable", "sources": ["tools/ink_spread_probe.cpp"],
                           "exclude_sources": ["src/pkg/*"] },
     "weight_spread_probe": { "kind": "executable", "sources": ["tools/weight_spread_probe.cpp"],
