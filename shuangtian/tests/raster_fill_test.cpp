@@ -28,6 +28,49 @@ namespace {
   return canvas.pixel_at(x, y).a;
 }
 
+/// 同一圆角矩形用两种画法逐像素比对：
+///   ·経 `fill_rect(radius)`（内部会拆成三带）
+///   · `fill_path(add_rounded_rect)`（整块光栅化，改造前的行为）
+/// 返回差异像素数与最大通道差。
+struct EquivResult {
+  int diff_pixels{0};
+  int max_channel{0};
+};
+
+[[nodiscard]] auto round_rect_equivalence(st::math::Rect rect, float radius,
+                                          st::math::Color color, float opacity) -> EquivResult {
+  using st::raster::Canvas;
+  const int w = 200, h = 160;
+
+  Canvas via_path = Canvas::for_logical_size(w, h, 1.0f);
+  via_path.clear(st::math::Color{250, 250, 252, 255});
+  st::raster::Path path;
+  path.add_rounded_rect(rect, radius);
+  via_path.fill_path(path, st::raster::Paint::solid(color), {.opacity = opacity});
+
+  Canvas via_rect = Canvas::for_logical_size(w, h, 1.0f);
+  via_rect.clear(st::math::Color{250, 250, 252, 255});
+  via_rect.fill_rect(rect, st::raster::Paint::solid(color), radius, {.opacity = opacity});
+
+  EquivResult result;
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      const auto a = via_path.pixel_at(x, y);
+      const auto b = via_rect.pixel_at(x, y);
+      int worst = 0;
+      worst = std::max(worst, std::abs(static_cast<int>(a.r) - static_cast<int>(b.r)));
+      worst = std::max(worst, std::abs(static_cast<int>(a.g) - static_cast<int>(b.g)));
+      worst = std::max(worst, std::abs(static_cast<int>(a.b) - static_cast<int>(b.b)));
+      worst = std::max(worst, std::abs(static_cast<int>(a.a) - static_cast<int>(b.a)));
+      if (worst > 0) {
+        ++result.diff_pixels;
+        result.max_channel = std::max(result.max_channel, worst);
+      }
+    }
+  }
+  return result;
+}
+
 }  // namespace
 
 // —— ① 未闭合子路径按填充语义隐式闭合 ——
@@ -170,5 +213,49 @@ ST_TEST(font_multi_contour_glyphs_keep_holes_across_scripts) {
     const double ratio = dark_ratio(text);
     ST_CHECK(ratio > 0.02);   // 确实画了
     ST_CHECK(ratio < 0.45);   // 但没糊成实心
+  }
+}
+
+// —— ④ 圆角矩形拆分绘制必须与整块光栅化**逐像素等价** ——
+//
+// `fill_rect(radius > 0)` 内部把矩形拆成「上带 + 中直角带 + 下带」三块绘制，
+// 中间带因此能走整行 `blend_span`（实测单次快 1.7~3.0 倍：
+// 1600x1000 0.562→0.333ms、800x600 0.199→0.100ms、400x300 0.079→0.027ms）。
+//
+// 拆分靠裁剪矩形切带，因此**分界必须对齐到整像素**——`push_clip_rect` 会对裁剪
+// 矩形向外取整，分界落在非整数上时相邻带会重叠一个像素行、半透明颜色变深。
+// 实测未对齐时：非整坐标 4 像素差（最大通道差 35）、非整尺寸 2 像素差（24）。
+//
+// 本用例零容差锁住这条边界。
+ST_TEST(fill_round_rect_split_matches_path_rasterization) {
+  using st::math::Color;
+  using st::math::Rect;
+
+  const Color ink = Color::rgb(60, 90, 160);
+  const Color translucent{200, 60, 60, 128};
+
+  struct Case {
+    const char* name;
+    Rect rect;
+    float radius;
+    Color color;
+    float opacity;
+  };
+  const Case cases[] = {
+    {"对齐整数坐标", Rect{20.0f, 20.0f, 120.0f, 80.0f}, 8.0f, ink, 1.0f},
+    {"非整坐标", Rect{20.4f, 20.7f, 120.0f, 80.0f}, 8.0f, ink, 1.0f},
+    {"非整尺寸", Rect{20.0f, 20.0f, 120.5f, 80.5f}, 8.0f, ink, 1.0f},
+    {"半透明色", Rect{20.0f, 20.0f, 120.0f, 80.0f}, 8.0f, translucent, 1.0f},
+    {"opacity 0.5", Rect{20.0f, 20.0f, 120.0f, 80.0f}, 8.0f, ink, 0.5f},
+    {"大圆角", Rect{20.0f, 20.0f, 120.0f, 80.0f}, 24.0f, ink, 1.0f},
+    {"胶囊半径", Rect{20.0f, 20.0f, 120.0f, 40.0f}, 20.0f, ink, 1.0f},
+    {"极扁", Rect{20.0f, 20.0f, 150.0f, 12.0f}, 4.0f, ink, 1.0f},
+  };
+
+  for (const auto& c : cases) {
+    const EquivResult r = round_rect_equivalence(c.rect, c.radius, c.color, c.opacity);
+    // 零容差：拆分与整块必须是同一批像素。
+    ST_CHECK(r.diff_pixels == 0);
+    ST_CHECK(r.max_channel == 0);
   }
 }

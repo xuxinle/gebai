@@ -1121,6 +1121,59 @@ void Canvas::fill_rect(math::Rect rect, const Paint& paint, float radius, DrawOp
   // 注意这不是“用贴图代替矢量”——是“同一个矢量形状重复画时只光栅化一次”，
   // 任意缩放/DPI 仍由 `rect`/`radius` 进键区分（不同尺寸 = 不同条目）。
   if (radius > 0.0f) {
+    // **大圆角矩形拆分**：中间一大块本质是直角矩形，不必走通用路径光栅化。
+    //
+    // 为何值：实测（2400×1600 画布、r=8）圆角矩形比直角慢 1.76~4.2×，
+    // 而拆分后单次快 1.69~2.96×：
+    //   1600×1000  0.562 → 0.333 ms
+    //    800×600   0.199 → 0.100 ms
+    //    400×300   0.079 → 0.027 ms
+    // 根因：`fill_path` 会把整个矩形（含中间大片直线区）当路径光栅化，
+    // 而 `radius == 0` 有整行 `blend_span` 快路径（见上面 `simple` 分支）却用不上。
+    //
+    // **等价性由裁剪保证**：三条带用 `push_clip_rect` 切成**互不重叠**的水平区，
+    // 每个像素只会被写一次。因此任意 alpha / opacity / blend 都逐像素等价——
+    // 重叠绘制会让半透明颜色变深，这是必须避开的（不能用“画完再盖”）。
+    //
+    // 只在圆角足够小、中间确有实块时拆分（`radius * 2 < 高`）；否则退回整块路径。
+    const float diameter = radius * 2.0f;
+    const bool splittable = diameter < rect.height && diameter < rect.width;
+    if (splittable) {
+      // **分界必须对齐到整像素**：`push_clip_rect` 内部会对裁剪矩形 `round_out()`（向外取整），
+      // 若分界落在非整数上（如 `y + radius = 28.7`），上带与中带的裁剪区会**重叠**
+      // 一个像素行，那一行被画两次（半透明变深）。
+      //
+      // 实测：不对齐时非整坐标/非整尺寸用例出现 2~4 像素差、最大通道差 24~35；
+      // 对齐后全部为 0。
+      //
+      // 取整方向：中带的上下界分别**向下/向上**取整（保证中带不超出矩形），
+      // 剩余的零头留给上带（上带完整覆盖 [rect.y, mid_top)）。
+      const auto mid_top = static_cast<float>(std::ceil(rect.y + radius));
+      const auto mid_bottom = static_cast<float>(std::floor(rect.bottom() - radius));
+      if (mid_bottom <= mid_top) {
+        fill_path(path, paint, options);
+        return;
+      }
+
+      // 中带：直角矩形（走整行 `blend_span`）；裁剪限制在 [mid_top, mid_bottom)
+      const math::Rect mid{rect.x, mid_top, rect.width, mid_bottom - mid_top};
+      push_clip_rect(mid);
+      Path mid_path;
+      mid_path.add_rect(mid);
+      rasterize_path_runs(mid_path, paint, options);
+      pop_clip();
+
+      // 上带：完整圆角路径，裁剪 [rect.y, mid_top)
+      push_clip_rect(math::Rect{rect.x, rect.y, rect.width, mid_top - rect.y});
+      fill_path(path, paint, options);
+      pop_clip();
+
+      // 下带：完整圆角路径，裁剪 [mid_bottom, rect.bottom)
+      push_clip_rect(math::Rect{rect.x, mid_bottom, rect.width, rect.bottom() - mid_bottom});
+      fill_path(path, paint, options);
+      pop_clip();
+      return;
+    }
     fill_path(path, paint, options);
     return;
   }
