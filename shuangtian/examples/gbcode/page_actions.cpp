@@ -413,9 +413,6 @@ namespace gbcode_ui {
     lsp_.on_locations = [this](std::int64_t id, const std::vector<st::lsp::Location>& locations) {
       on_locations_response(id, locations);
     };
-    lsp_.on_hover = [this](std::int64_t id, const std::optional<st::lsp::HoverInfo>& info) {
-      on_hover_response(id, info);
-    };
     lsp_.on_symbols = [this](std::int64_t id,
                              const std::vector<st::lsp::DocumentSymbol>& symbols) {
       on_symbols_response(id, symbols);
@@ -791,9 +788,6 @@ void CodeEditorPage::load_active_text() {
 
  /// 返回上一处跳转（入口快捷键 Alt+Left 用）。
  auto CodeEditorPage::navigate_back_request() -> void { navigate_back(); }
-
- /// 悬停信息（命令面板 nav.hover；鼠标悬停走编辑器回调）。Ctrl+K 是快捷键一览，不是它。
- auto CodeEditorPage::hover_request() -> void { request_hover_at_cursor(); }
 
  /// 格式化整篇（入口快捷键 Shift+Alt+F 用）。
  auto CodeEditorPage::format_request() -> void { format_selection(); }
@@ -2220,15 +2214,6 @@ void CodeEditorPage::load_active_text() {
   }
 
 
-  /// 悬停（鼠标停留）：请求当前位置的信息。
-  void CodeEditorPage::request_hover_at_cursor() {
-    std::string path;
-    st::lsp::Position position{};
-    if (!current_document(&path, &position)) return;
-    hover_request_ = lsp_.request_hover(path, static_cast<std::uint32_t>(position.line),
-                                        static_cast<std::uint32_t>(position.character));
-  }
-
 
   /// 文档大纲：把符号列表放进 `symbols_`（供面板/命令面板显示）。
   void CodeEditorPage::refresh_document_symbols() {
@@ -2402,27 +2387,6 @@ void CodeEditorPage::load_active_text() {
   jump_to_location(locations.front());
   status_.set(std::format("找到 {} 处{}，已跳到第 1 处（Alt+← 返回；其余在「导航结果」侧栏）",
                          locations.size(), family == "references" ? "引用" : ""));
-  }
-
-
-  /// 悬停响应：显示到编辑器的信息层（贴光标行下方）。
-  void CodeEditorPage::on_hover_response(std::int64_t id, const std::optional<st::lsp::HoverInfo>& info) {
-    // 只认**最后发出的那个请求**：用户先悬停 A 再移到 B 时，A 的响应可能后到，
-    // 拿它显示会把卡片钉在 A 上（而鼠标在 B）。
-    //
-    // 旧写法是 `id != hover_request_ && !hover_dropped_`——"且"关系的两个条件里
-    // `hover_dropped_` 在每次发请求时都置真，于是整个判据退化成"永远放行"；
-    // 而且防抖路径根本没把 id 写进 `hover_request_`（直接 `(void)` 丢弃返回值），
-    // 两条路径的 id 口径从未对齐过。现在统一：谁发请求谁存 id，只认最后一个。
-    if (id != hover_request_) return;
-    if (editor == nullptr) return;
-    if (!info.has_value() || info->text.empty()) {
-      editor->clear_hover_info();
-      return;
-    }
-    // 位置换行号：优先用 server 给的 range，退回请求时记的行。
-    const std::size_t line = info->range.has_value() ? info->range->start.line : hover_word_line_;
-    editor->set_hover_info(info->text, line);
   }
 
 
@@ -2760,35 +2724,6 @@ void CodeEditorPage::load_active_text() {
 
 
 
-  // —— 悬停信息（LSP hover）——
-
-
-  /// 防抖后的悬停处理（每帧调；停够 400ms 才发请求——移动中不闪跳）。
-  void CodeEditorPage::pump_hover_word() {
-    if (hover_word_pending_.first == 0 && hover_word_pending_.second == 0) {
-      // 移开了：清提示（之前显示着的话）。
-      if (editor != nullptr && !editor->hover_info().empty()) editor->clear_hover_info();
-      hover_word_pending_ = {0, 0};
-      return;
-    }
-    // 防抖 250ms（原 400ms）：用户报「弹出慢」。
-    //
-    // 400ms 是"停住不动"才算悬停的旧口径，在真实操作里偏长——鼠标移到符号上、
-    // 看一眼、不等卡片出来就走了。250ms 仍能滤掉"扫过一行"的抖动
-    //（一行内相邻符号间距约 60~120px，正常移动速度下 <150ms 就划过去了），
-    // 而体感上它是"停下就出"。LSP 往返另有几十毫秒，所以总延迟约 300ms。
-    if (st::time::now_ms() - hover_word_changed_at_ < 250) return;   // 还在移动
-    if (hover_word_pending_ == hover_word_sent_) return;             // 已请求过
-    hover_word_sent_ = hover_word_pending_;
-    std::string path;
-    st::lsp::Position position{};
-    if (!current_document(&path, &position)) return;
-    hover_word_line_ = static_cast<std::uint32_t>(position.line);
-    hover_request_ = lsp_.request_hover(path, static_cast<std::uint32_t>(position.line),
-                                        static_cast<std::uint32_t>(position.character));
-  }
-
-
   /// 编辑区按键：补全交互（Enter 接受 / Esc 关闭 / 上下选择）优先于编辑器默认。
   /// 返回 true = 已消费。
   auto CodeEditorPage::handle_completion_key(std::string_view key) -> bool {
@@ -2936,10 +2871,6 @@ void CodeEditorPage::load_active_text() {
     add("nav.implementation", "转到: 实现", "Ctrl+F12");
     add("nav.back", "转到: 返回上一处", "Alt+Left（跳转历史）");
     add("nav.results", "转到: 切换导航结果面板", "多处定义/引用的清单（多处时自动开）");
-    // 悬停信息：鼠标悬停有真实链路（on_hover_word 防抖后发 LSP 请求），
-    // 键盘入口补在这里——曾经声称绑在 Ctrl+K 上，而 Ctrl+K 实际是快捷键一览，
-    // 无人调用导致它成了死代码（BACKLOG P1「界面在说谎」条目）。
-    add("nav.hover", "转到: 悬停信息", "光标处的 LSP 信息（鼠标悬停同链路）");
     add("help.about", "帮助: 关于", "歌白代码");
     return table;
   }

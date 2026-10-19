@@ -222,12 +222,6 @@ LanguageService::LanguageService() : impl_(std::make_unique<Impl>()) {
       }
       return;
     }
-    if (method == "textDocument/hover") {
-      if (on_hover) {
-        on_hover(id, is_error ? std::nullopt : st::lsp::parse_hover(result));
-      }
-      return;
-    }
     if (method == "textDocument/documentSymbol") {
       if (on_symbols) {
         on_symbols(id, is_error ? std::vector<st::lsp::DocumentSymbol>{}
@@ -422,7 +416,7 @@ auto LanguageService::offset_to_position(std::string_view path, std::size_t offs
   if (found == impl_->synced.end()) return std::nullopt;
   // 行偏移表懒建（首次访问或文本变更后）：记录每行起始字节，之后二分定位。
   // 与直接调 `st::lsp::offset_to_position`（全文线性扫描）相比，热路径
-  //（光标移动 → hover/补全/跳转的位置换算）从 O(file) 降到 O(log lines + 行内字节)。
+  //（光标移动 → 补全/跳转的位置换算）从 O(file) 降到 O(log lines + 行内字节)。
   const auto index_found = impl_->line_index.find(std::string(path));
   if (index_found == impl_->line_index.end()) {
     std::vector<std::size_t> offsets;
@@ -565,11 +559,6 @@ auto LanguageService::request_references(std::string_view path, std::uint32_t li
   return impl_->client.request("textDocument/references", std::move(params));
 }
 
-auto LanguageService::request_hover(std::string_view path, std::uint32_t line,
-                                    std::uint32_t character) -> std::int64_t {
-  if (!impl_->started) return 0;
-  return impl_->client.request("textDocument/hover", position_params(path, line, character));
-}
 
 auto LanguageService::request_document_symbols(std::string_view path) -> std::int64_t {
   if (!impl_->started) return 0;

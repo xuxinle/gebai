@@ -61,7 +61,6 @@ namespace gbcode_ui {
     //（实测：请求 id 正常发出、clangd 也回了 100 项候选，弹层就是不出现）。
     // 正确写法：泵**总是执行**（它内部搬消息、派发回调），返回值只决定
     // 要不要刷新编辑器诊断。
-    pump_hover_word();
     flush_terminal_commands();
     // 终端里的 git 命令完成后的状态刷新（延迟落地：命令完成时机不可知）。
     //
@@ -1005,19 +1004,6 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
         ed.on_cursor_change = [this] {
           on_cursor_moved();
           if (completion_open_.value()) update_completion_anchor();
-        };
-        // 悬停词变化 → 防抖后发 LSP hover（不做防抖的话每次像素移动都发请求，
-        // server 没那么快，旧响应未到新请求又出——提示会闪跳）。
-        ed.on_hover_word = [this](std::size_t begin, std::size_t end) {
-          // 词一变就**立刻撤掉旧提示**（用户报的「鼠标移动后消散不及时」）。
-          //
-          // 旧实现只更新 pending 时间戳，旧卡片的文字要等新响应回来（或移到空白处）
-          // 才消失——中间那 250ms+ 里卡片还挂在**上一个**符号下面，读起来像是
-          // "提示停在了错误的词上"。提示的语义是"当前悬停的这个符号"，词变了它就不成立了。
-          if (editor != nullptr && !editor->hover_info().empty()) editor->clear_hover_info();
-          hover_word_pending_ = {begin, end};
-          hover_word_changed_at_ = st::time::now_ms();
-
         };
         // 右键菜单走组件的一等回调（不是 `set_event_handler`——那个永远轮不到：
         // `CodeEditor::on_event` 对任何按钮的按下都返回 true）。

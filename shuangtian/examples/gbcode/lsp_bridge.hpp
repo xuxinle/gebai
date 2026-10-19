@@ -112,7 +112,7 @@ class LanguageService {
   /// 最近一次失败原因（空 = 无）。
   [[nodiscard]] auto error() const -> std::string;
 
-  /// 文档字节偏移 ↔ LSP 位置换算（宿主请求 hover/定义时用）。
+  /// 文档字节偏移 ↔ LSP 位置换算（宿主请求定义/引用/补全时用）。
   /// `path` 必须是已同步的文档；未同步返回 nullopt。
   [[nodiscard]] auto offset_to_position(std::string_view path, std::size_t offset) const
       -> std::optional<st::lsp::Position>;
@@ -157,9 +157,6 @@ class LanguageService {
   /// 找引用（`textDocument/references`；`include_declaration` 决定是否含声明本身）。
   auto request_references(std::string_view path, std::uint32_t line, std::uint32_t character,
                           bool include_declaration) -> std::int64_t;
-  /// 悬停信息（`textDocument/hover`）。
-  auto request_hover(std::string_view path, std::uint32_t line, std::uint32_t character)
-      -> std::int64_t;
   /// 文档大纲（`textDocument/documentSymbol`）。
   auto request_document_symbols(std::string_view path) -> std::int64_t;
   /// 工作区符号搜索（`workspace/symbol`）。
@@ -171,8 +168,6 @@ class LanguageService {
   /// 与 `on_locations` 同一批回调参数里的 method 对齐——应用层不必自己记 id↔族映射。
   /// 请求未发出（server 未就绪）时回调不被调。
   [[nodiscard]] auto last_navigation_method() const -> const std::string&;
-  /// 悬停结果回调（`nullopt` = 该处无信息）。
-  std::function<void(std::int64_t, const std::optional<st::lsp::HoverInfo>&)> on_hover{};
   /// 文档大纲回调。
   std::function<void(std::int64_t, const std::vector<st::lsp::DocumentSymbol>&)> on_symbols{};
   /// 工作区符号回调。

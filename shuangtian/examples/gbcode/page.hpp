@@ -1264,9 +1264,6 @@ auto shutdown() -> void;
  /// 返回上一处跳转（入口快捷键 Alt+Left 用）。
    auto navigate_back_request() -> void;
 
- /// 悬停信息（命令面板 nav.hover；鼠标悬停走编辑器回调）。Ctrl+K 是快捷键一览，不是它。
-   auto hover_request() -> void;
-
  /// 格式化整篇（入口快捷键 Shift+Alt+F 用）。
    auto format_request() -> void;
 
@@ -1654,7 +1651,6 @@ auto shutdown() -> void;
 
 
   /// 悬停（鼠标停留）：请求当前位置的信息。
-   void request_hover_at_cursor();
 
 
   /// 文档大纲：把符号列表放进 `symbols_`（供面板/命令面板显示）。
@@ -1692,7 +1688,6 @@ auto shutdown() -> void;
 
 
   /// 悬停响应：显示到编辑器的信息层（贴光标行下方）。
-   void on_hover_response(std::int64_t id, const std::optional<st::lsp::HoverInfo>& info);
 
 
   /// 大纲响应。
@@ -1760,7 +1755,6 @@ auto shutdown() -> void;
 
 
   /// 防抖后的悬停处理（每帧调；停够 400ms 才发请求——移动中不闪跳）。
-   void pump_hover_word();
    /// 页面缩放（+1 放大 / -1 缩小 / 0 重置）。实现即 DPI 缩放，见实现处说明。
    void zoom_page(int direction);
    /// LSP 就绪后补拉大纲（见实现处：`refresh_document_symbols` 在启动握手完成前
@@ -1992,19 +1986,6 @@ auto shutdown() -> void;
   /// 语言服务回调是否已接线（只挂一次——重复挂会让回调互相覆盖）。
   bool language_callbacks_wired_{false};
   // —— 导航（阶段 5）的运行时状态 ——
-  /// 悬停请求 id（**两条发起路径共用**：防抖路径 `pump_hover_word` 与
-  /// 手动路径 `request_hover_at_cursor`）。响应回来时只认最后发出的那一个。
-  ///
-  /// 为何必须统一记：旧实现只有手动路径把 id 写进这里，防抖路径直接 `(void)`
-  /// 丢掉返回值——于是 `id != hover_request_`（恒 0）恒真，响应能否显示全靠
-  /// `hover_dropped_` 这个布尔门（而它每次发请求都置真 ⇒ 判据实际失效）。
-  std::int64_t hover_request_{0};
-  /// 悬停防抖：词区间（0,0 = 无）与变化时间戳。
-  std::pair<std::size_t, std::size_t> hover_word_pending_{0, 0};
-  std::pair<std::size_t, std::size_t> hover_word_sent_{0, 0};
-  std::int64_t hover_word_changed_at_{0};
-  /// 悬停请求时的行号（响应没给 range 时的兜底）。
-  std::uint32_t hover_word_line_{0};
   /// 最近一次"跳到定义/引用"的多处结果（结果面板用）。
   std::vector<st::lsp::Location> locations_{};
 

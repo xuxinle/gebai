@@ -3995,6 +3995,39 @@ pending 分支里——于是最后一帧画完就再没帧，`pump_delivery` �
   注解是像素级产物，没有这个属性时"哪一行有注解"只能靠截图指纹（对内容不敏感）。
   实测：`goto 9/20/3` → 注解分别只有 `9:` / `20:` / `3:` 一条。
 
+#### 4.5.2.4 删除 LSP 符号悬停卡片（2026-10-19 第三轮）
+
+> 用户：「直接删掉悬浮提示吧，太难用了」。**只删编辑区符号卡片**，
+> 控件提示气泡（`set_hint`，活动栏/状态栏那些）与诊断提示**都没动**。
+
+上一轮（§4.5.2.2）刚修过它的三个缺陷（测量/绘制 role 不一致导致框偏窄、
+防抖 400→250ms、词变即清），仍然难用——所以这次不是再调参数，是把整套去掉。
+判断依据不是"修不好"，而是**这个交互形态本身对需要它的场景（读代码）太聒噪**：
+卡片跟着鼠标走、每次移词都换内容、挡住正文，而真正高频的诉求"这行是谁写的"
+已经由行尾 blame 注解（§4.5.2.3）承担。
+
+**删除范围（三层 + 入口）**：
+
+| 层 | 删除内容 |
+|---|---|
+| 组件 `CodeEditor` | `set_hover_info`/`clear_hover_info`/`hover_info()`/`hover_info_line()`、`on_hover_word` 回调、`hover_info_`/`hover_info_line_`/`hover_word_begin_`/`hover_word_end_` 成员、`hover_info` 属性、鼠标移动里的"取词→报区间"分支 |
+| 应用 `gbcode` | `pump_hover_word`（防抖）、`request_hover_at_cursor`、`on_hover_response`、`hover_request()` 公开面、`hover_request_`/`hover_word_*` 成员、命令面板 `nav.hover` 条目（它**从来没有分发实现**，是个死条目） |
+| LSP 桥 | `LanguageService::request_hover`、`on_hover` 回调、`textDocument/hover` 响应分发 |
+
+**保留**：
+- `st::lsp::parse_hover` / `HoverInfo`（框架层通用 LSP 能力，有独立单测，
+  别的宿主仍可用）；
+- **诊断提示**（`set_hover_diagnostic`，鼠标指向波浪线出错误说明）——它与符号卡片
+  共用过同一段绘制，删除后那段收敛成只服务诊断，少一层分支；
+- 控件提示气泡 `set_hint`（另一套，与本次无关）。
+
+**顺带收益**：鼠标移动少了一条每像素都要走的分支（取词 `word_bounds` +
+区间比较），`CodeEditor::on_event` 的 MouseMove 路径更短。
+
+验证：编译通过；`st test` 404 passed / 0 failed（唯一 FAIL 是既有的
+`platform_backends` 环境敏感用例）；实测鼠标在代码上停留 2s **无卡片弹出**
+（截图核验），编辑器属性面已不含 `hover_info`，诊断标记仍为 23 条。
+
 ### 4.6 shell
 ```cpp
 namespace st::shell {
