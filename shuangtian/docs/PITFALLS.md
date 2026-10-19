@@ -94,6 +94,8 @@
 | **入口用 `ST_MAIN(fn)`** | Windows 的 `argv` 是 ANSI，中文参数会乱 | `CONVENTIONS.md` §10 |
 | **改了平台分支就要交叉编译** | 本机（Linux）看不出 Windows 分支的问题，`--toolchain=mingw` 是唯一发现途径——**但这条只在“宿主 ≠ 目标”时成立** | `CONVENTIONS.md` §10 第 6 条 |
 | **在 Windows 宿主上跑 `--toolchain=mingw` 是空转** | 本仓库开发机的原生工具链**本就是** mingw64（`g++ -dumpmachine` → `x86_64-w64-mingw32`），普通 `st build` 已在编 Windows 分支。实测：反复机械套用“改了平台分支就跑 mingw”三次，三次全是同一件事做第二遍。**判据：先问“除了宿主，还有哪个平台的分支我改过却没编过”** | `CONVENTIONS.md` §10 第 6 条；实测 2026-10-19 |
+| **DPI 改尺寸的路径必须同时夹屏幕** | `set_device_scale`（= 应用内的“页面缩放”）把客户区改成“逻辑 × 新 scale”，但**没检查是否超出屏幕**。高 DPI 屏幕上把页面缩放到 200% 时：窗口被系统卡在屏幕内，而画布按新 scale 分配 ⇒ **画布 > 客户区**，内容只占左上角（用户现场 2880×1800 画布 / 内容只到 2160×1350 = **1.5/2.0 的比例**，这个比值就是判据）。修法：改 DPI **前**先按新 scale 把逻辑尺寸夹到工作区 | `src/shell/platform_win32.cpp` 的 `clamp_logical_to_work_area`；实测 2026-10-19 |
+| **先用比例反推 DPI 因果，再查代码** | 看到“内容只占一部分、周边空白”时，先算 `内容/画布` 比值：若恰好等于两个 scale 之比（如 0.75 = 1.5/2.0），就是**两个 scale 打架**（尺寸与 DPI 不同步），不是绘制错误。这一步不花时间，却能把排查从“翻整个渲染器”缩到“查尺寸同步的一处” | 实测 2026-10-19 |
 | **同一份路径两种分隔符 = 静默丢数据** | `LspClient::uri_to_path` 在 `_WIN32` 下把 `/` 换 `\`，而应用侧 `active_path` 是 `st::fs` 的 `/` 形态——`map` 查不到 key 就返回空表，**不报错**。两侧的 key 必须过同一个归一化函数 | `examples/gbcode/lsp_bridge.cpp` 的 `normalize_path` 注释 |
 | **Win32 的鼠标消息不带修饰键** | `WM_LBUTTONDOWN` 的 `wParam` 只有 `MK_SHIFT`/`MK_CONTROL`（无 Alt），只读它会得到“Ctrl 有、Alt 恒无”的半吊子事实。鼠标事件一律走 `GetKeyState`（与键盘同一口径） | `src/shell/platform_win32.cpp` 的 `push_mouse` 注释 |
 | **`CreateIconFromResourceEx` 的错误码会骗人** | 手拼 `RT_ICON` 字节失败时它只回 `ERROR_FILE_NOT_FOUND(2)`——与“文件”毫无关系。改用 `CreateDIBSection` + `CreateIconIndirect`：输入是两个真位图句柄，不存在“字节布局对不对”这类无法定位的问题 | `src/shell/platform_win32.cpp` 的 `make_icon` 注释 |

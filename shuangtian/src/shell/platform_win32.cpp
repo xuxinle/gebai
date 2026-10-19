@@ -760,6 +760,35 @@ class Win32Backend final : public Backend {
     return sync_buffers_to_client(scale_);
   }
 
+  /// 按**当前 `scale_`** 把 `logical_width_/height_` 夹到屏幕能容纳的范围内。
+  ///
+  /// 为何是“逻辑尺寸”而不是“窗口像素”：`resize_window_to_scale()` 的输入是逻辑尺寸，
+  /// 它乘以 `scale_` 得客户区。屏幕容量是个**物理**量，所以先把工作区物理尺寸
+  /// 除回逻辑（按同一 `scale_`），再夹逻辑值。
+  [[nodiscard]] auto clamp_logical_to_work_area() -> Status {
+    MONITORINFO info{};
+    info.cbSize = sizeof(MONITORINFO);
+    const HMONITOR monitor = ::MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
+    if (monitor == nullptr || ::GetMonitorInfoW(monitor, &info) == 0) {
+      return unexpected(ErrorCode::Unsupported, "拿不到工作区");
+    }
+    const float s = scale_ > 0.0f ? scale_ : 1.0f;
+    const float work_w = static_cast<float>(info.rcWork.right - info.rcWork.left) / s;
+    const float work_h = static_cast<float>(info.rcWork.bottom - info.rcWork.top) / s;
+    if (work_w <= 0.0f || work_h <= 0.0f) {
+      return unexpected(ErrorCode::Unsupported, "工作区尺寸无效");
+    }
+    // 留 8% 边距（窗口不贴死屏幕边），且不低于最小可用逻辑尺寸。
+    const math::Size min_size = min_logical_size();
+    const int limit_w = static_cast<int>(std::lround(std::max(min_size.width, work_w * 0.92f)));
+    const int limit_h = static_cast<int>(std::lround(std::max(min_size.height, work_h * 0.92f)));
+    logical_width_ = std::clamp(logical_width_, 1, std::max(1, limit_w));
+    logical_height_ = std::clamp(logical_height_, 1, std::max(1, limit_h));
+    logical_width_exact_ = static_cast<float>(logical_width_);
+    logical_height_exact_ = static_cast<float>(logical_height_);
+    return ok();
+  }
+
   auto set_device_scale(float scale) -> Status override {
     if (scale <= 0.0f) return unexpected(ErrorCode::Invalid, "DPI 缩放必须为正数");
     scale_ = scale;
@@ -768,6 +797,18 @@ class Win32Backend final : public Backend {
     // ② 缓冲必须**以实际客户区为准**分配——`round(round(client/scale)*scale)` 在分数缩放下
     //    可能差 1 像素，而 1 像素就足以让 DXGI 拉伸整块纹理（整屏发糊，见
     //    `logical_for_client` 的说明）。两步都由下面两个函数保证。
+    //
+    // ⚠ **必须先夹到屏幕工作区**（2026-10-19 修的真实缺陷）：
+    // 旧序是直接 `resize_window_to_scale()` → 客户区 = 逻辑 × 新 scale。
+    // 在高 DPI 屏幕上把页面缩放调到 200% 时，这个尺寸**超出屏幕**，Windows 把窗口
+    // 限制在屏幕内；而接下来 `sync_buffers_to_client` 按“实际客户区”分配画布——
+    // 两者本应对得上……但窗口被夹小后逻辑尺寸也跟着变小，界面于是整体变窄。
+    // 用户现场（2880×1800 画布、内容只占左上 2160×1350）就是这个症状：
+    // 画布按 2.0 分配、窗口被屏幕卡在 1.5 倍的大小。
+    // 所以：**先按新 scale 重算“屏幕能容纳的逻辑尺寸”，再改窗口**。
+    if (auto fitted = clamp_logical_to_work_area(); !fitted) {
+      // 拿不到工作区（无显示器）不是错误：照旧按原尺寸走。
+    }
     if (auto status = resize_window_to_scale(); !status) return status;
     return sync_buffers_to_client(scale_);
   }
