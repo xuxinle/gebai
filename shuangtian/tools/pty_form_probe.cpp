@@ -87,7 +87,12 @@ struct Harness {
     root.set_viewport(st::math::Size{900.0f, 500.0f});
     auto owned = std::make_unique<Terminal>();
     terminal = owned.get();
+    // `setenv` 是 POSIX API：Windows 上没有这个函数（也没有 `/bin/bash` 可起）。
+    // 本探针在 Windows 上**能构建但跑不起来**（运行时靠 `PtySession::supported()` 早退），
+    // 所以这里只需让编译期过：平台差异包在 `#if` 里，不在业务代码里散落。
+#if !defined(_WIN32)
     (void)setenv("PS1", "st-test# ", 1);
+#endif
     terminal->set_shell("/bin/bash", {"--noprofile", "--norc", "-i"});
     root.set_content(std::move(owned));
     root.layout(true);
@@ -122,9 +127,9 @@ struct Harness {
 
 /// 一轮的结果。
 struct Outcome {
-  bool prompt_back{false};   ///< Ctrl+C 后回到提示符（本用例的被测语义）
-  long ms{-1};               ///< 发 Ctrl+C → 回到提示符
-  long recover_ms{-1};       ///< 失败现场再发一次 → 恢复（-1 = 没恢复/不需要）
+  bool prompt_back{false};      ///< Ctrl+C 后回到提示符（本用例的被测语义）
+  long long ms{-1};             ///< 发 Ctrl+C → 回到提示符
+  long long recover_ms{-1};     ///< 失败现场再发一次 → 恢复（-1 = 没恢复/不需要）
 };
 
 auto one_round(const Arm& arm) -> Outcome {
@@ -167,10 +172,10 @@ auto one_round(const Arm& arm) -> Outcome {
 struct Tally {
   int rounds{0};
   int red{0};
-  long green_sum{0};
-  long green_worst{0};
+  long long green_sum{0};
+  long long green_worst{0};
   int green_count{0};
-  std::vector<long> red_recover_ms{};
+  std::vector<long long> red_recover_ms{};
 };
 
 void print_tally(const Arm& arm, const Tally& tally, double load_before, double load_after) {
@@ -181,7 +186,7 @@ void print_tally(const Arm& arm, const Tally& tally, double load_before, double 
             load_before, load_after);
   if (!tally.red_recover_ms.empty()) {
     std::string detail;
-    for (const long ms : tally.red_recover_ms) {
+    for (const long long ms : tally.red_recover_ms) {
       detail += std::format(" {}ms", ms);
     }
     st::print("     红轮「再发一次 Ctrl+C 恢复」耗时：{}\n", detail);
@@ -201,6 +206,17 @@ int main(int argc, char** argv) {
 
   const int per_arm = argc > 1 ? std::atoi(argv[1]) : 20;
   const std::string only = argc > 2 ? argv[2] : "all";
+  // 本探针的**三臂全是为 POSIX shell 设计的**：硬编码 `/bin/bash`、`--noprofile/--norc`、
+  // 以及 `/proc/loadavg` 取负载。Windows 上 `PtySession::supported()` 会因 ConPTY 可用
+  // 而返回 **true**，于是探针会继续跑，然后卡在 `wait_until` 里无限等一个永远不出现的提示符
+  // （实测：进程 CPU 空转、永不退出）。所以必须在这里按**平台**早退，
+  // 而不能只靠 `supported()`（它回答的是“有没有 PTY”，不是“有没有目标 shell”）。
+#if defined(_WIN32)
+  st::print("本探针面向 POSIX shell（/bin/bash + /proc/loadavg）：Windows 上不适用\n");
+  (void)per_arm;
+  (void)only;
+  return 0;
+#endif
   if (!st::process::PtySession::supported()) {
     st::print("本环境不支持 PTY：探针不适用\n");
     return 0;

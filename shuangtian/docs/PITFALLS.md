@@ -92,7 +92,8 @@
 | **系统头只能在 `platform_*`** | 业务代码里不准出现平台宏/平台 API；lint L14 会拦（含 `::getpid` 等 POSIX 直调） | `CONVENTIONS.md` §10 第 1 条 |
 | **路径一律 UTF-8 且走 `st::fs`** | 不要手写 `base + "/" + leaf`、不要 `ifstream(std::string)`（Windows 按 ANSI 解释，中文必坏） | `CONVENTIONS.md` §10 第 2 条 |
 | **入口用 `ST_MAIN(fn)`** | Windows 的 `argv` 是 ANSI，中文参数会乱 | `CONVENTIONS.md` §10 |
-| **改了平台分支就要交叉编译** | 本机（Linux）看不出 Windows 分支的问题，`--toolchain=mingw` 是唯一发现途径 | `CONVENTIONS.md` §10 |
+| **改了平台分支就要交叉编译** | 本机（Linux）看不出 Windows 分支的问题，`--toolchain=mingw` 是唯一发现途径——**但这条只在“宿主 ≠ 目标”时成立** | `CONVENTIONS.md` §10 第 6 条 |
+| **在 Windows 宿主上跑 `--toolchain=mingw` 是空转** | 本仓库开发机的原生工具链**本就是** mingw64（`g++ -dumpmachine` → `x86_64-w64-mingw32`），普通 `st build` 已在编 Windows 分支。实测：反复机械套用“改了平台分支就跑 mingw”三次，三次全是同一件事做第二遍。**判据：先问“除了宿主，还有哪个平台的分支我改过却没编过”** | `CONVENTIONS.md` §10 第 6 条；实测 2026-10-19 |
 | **同一份路径两种分隔符 = 静默丢数据** | `LspClient::uri_to_path` 在 `_WIN32` 下把 `/` 换 `\`，而应用侧 `active_path` 是 `st::fs` 的 `/` 形态——`map` 查不到 key 就返回空表，**不报错**。两侧的 key 必须过同一个归一化函数 | `examples/gbcode/lsp_bridge.cpp` 的 `normalize_path` 注释 |
 | **Win32 的鼠标消息不带修饰键** | `WM_LBUTTONDOWN` 的 `wParam` 只有 `MK_SHIFT`/`MK_CONTROL`（无 Alt），只读它会得到“Ctrl 有、Alt 恒无”的半吊子事实。鼠标事件一律走 `GetKeyState`（与键盘同一口径） | `src/shell/platform_win32.cpp` 的 `push_mouse` 注释 |
 | **`CreateIconFromResourceEx` 的错误码会骗人** | 手拼 `RT_ICON` 字节失败时它只回 `ERROR_FILE_NOT_FOUND(2)`——与“文件”毫无关系。改用 `CreateDIBSection` + `CreateIconIndirect`：输入是两个真位图句柄，不存在“字节布局对不对”这类无法定位的问题 | `src/shell/platform_win32.cpp` 的 `make_icon` 注释 |

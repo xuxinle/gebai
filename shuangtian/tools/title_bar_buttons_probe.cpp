@@ -167,9 +167,9 @@ auto main(int argc, char** argv) -> int {
   const float pad = 12.0f;
   float max_bar_h = 0.0f;
   float max_group_w = 0.0f;
-  for (const auto& spec : specs) {
-    max_bar_h = std::max(max_bar_h, spec.bar_h);
-    max_group_w = std::max(max_group_w, spec.btn_w * 3.0f);
+  for (const auto& variant : specs) {
+    max_bar_h = std::max(max_bar_h, variant.bar_h);
+    max_group_w = std::max(max_group_w, variant.btn_w * 3.0f);
   }
   const float row_h = max_bar_h;
   const float cell_h = row_h * 2.0f + 6.0f;
@@ -183,25 +183,25 @@ auto main(int argc, char** argv) -> int {
 
   std::string report;
   float y = pad;
-  for (const auto& spec : specs) {
+  for (const auto& variant : specs) {
     const float right_x = pad + max_group_w + 10.0f;
     // 上行：静止 / 关闭悬停
-    draw_row(sheet, spec, pad, y, -1);
-    draw_row(sheet, spec, right_x, y, 2);
+    draw_row(sheet, variant, pad, y, -1);
+    draw_row(sheet, variant, right_x, y, 2);
     // 下行：静止 / 最大化悬停
-    draw_row(sheet, spec, pad, y + row_h + 6.0f, -1);
-    draw_row(sheet, spec, right_x, y + row_h + 6.0f, 1);
+    draw_row(sheet, variant, pad, y + row_h + 6.0f, -1);
+    draw_row(sheet, variant, right_x, y + row_h + 6.0f, 1);
     y += cell_h + gap;
 
     report += std::format(
         "{}: 栏高 {:.0f}  按钮 {:.0f}×{:.0f}（纵横比 {:.2f}）  字形盒 {:.0f}  "
         "悬停强度 {:.2f} {}  内缩 x{:.0f}/y{:.0f}  圆角 {:.1f}  关闭用 danger={}\n",
-        spec.name, static_cast<double>(spec.bar_h), static_cast<double>(spec.btn_w),
-        static_cast<double>(spec.bar_h), static_cast<double>(spec.btn_w / spec.bar_h),
-        static_cast<double>(spec.glyph_px), static_cast<double>(spec.hover_strength),
-        spec.opaque_hover_fill ? "不透明铺" : "半透明罩层（旧）",
-        static_cast<double>(spec.hover_inset_x), static_cast<double>(spec.hover_inset_y),
-        static_cast<double>(spec.radius_em), spec.close_danger ? "是" : "否");
+        variant.name, static_cast<double>(variant.bar_h), static_cast<double>(variant.btn_w),
+        static_cast<double>(variant.bar_h), static_cast<double>(variant.btn_w / variant.bar_h),
+        static_cast<double>(variant.glyph_px), static_cast<double>(variant.hover_strength),
+        variant.opaque_hover_fill ? "不透明铺" : "半透明罩层（旧）",
+        static_cast<double>(variant.hover_inset_x), static_cast<double>(variant.hover_inset_y),
+        static_cast<double>(variant.radius_em), variant.close_danger ? "是" : "否");
   }
 
   st::codec::PngImage image;
