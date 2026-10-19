@@ -120,16 +120,32 @@ def main():
         check("int main" in editor_value, "编辑器装的是仓库里的 sample.cpp（不是默认样例）")
 
         # ③ 开关在场，且初始是「关」。
+        #
+        # ⚠ 这个控件是**纯图标激活按钮**（page_build.cpp:1206 记着用户要求
+        # “做成一个激活按钮就行”）：`text` 恒为空，开关状态靠 **`variant`**（`ghost`/`soft`）
+        # 与 `hint` 表达。旧版断言 `text == "blame"`，在下线文字标签后就恒红了。
+        #
+        # 另：`find` 返回的匹配项**不带 `props`**（只有 text/bounds 等），要读控件属性
+        # 必须走 `get`（实测：用 find 里的 props 永远读到 None）。
         switch = find("#status-blame")
         check(bool(switch), "状态栏 blame 开关在场")
-        label_off = (switch[0].get("text") if switch else "") or ""
-        check(label_off == "blame", f"初始为关（标签 {label_off!r}）")
 
-        # ③ 点开：标签变「blame 开」。
+        def switch_props():
+            return client.ok("get", {"id": "status-blame"}).get("props") or {}
+
+        props_off = switch_props()
+        check(props_off.get("variant") == "ghost",
+              f"初始为关（variant {props_off.get('variant')!r}）")
+
+        # ③ 点开：`variant` 变 `soft`，提示语改成「已开启」。
         client.ok("invoke", {"id": "status-blame", "action": "click"})
-        on = wait_until(lambda: (find("#status-blame") or [{}])[0].get("text") == "blame 开",
-                        timeout=5.0, what="开关变开")
-        check(on, "点击后标签变「blame 开」")
+
+        def is_on():
+            props = switch_props()
+            return props.get("variant") == "soft" and "已开启" in (props.get("hint") or "")
+
+        on = wait_until(is_on, timeout=5.0, what="开关变开")
+        check(on, "点击后变激活态（variant soft + hint 已开启）")
 
         # ④ **界面面**：编辑器里真的出现了行尾注解。
         #
@@ -162,11 +178,11 @@ def main():
             else:
                 # 再切一次关→开，看画面是否变化（关闭态是基准）。
                 client.ok("invoke", {"id": "status-blame", "action": "click"})
-                wait_until(lambda: (find("#status-blame") or [{}])[0].get("text") == "blame",
+                wait_until(lambda: switch_props().get("variant") == "ghost",
                            timeout=5.0, what="开关变关")
                 off_digest = region_digest()
                 client.ok("invoke", {"id": "status-blame", "action": "click"})
-                wait_until(lambda: (find("#status-blame") or [{}])[0].get("text") == "blame 开",
+                wait_until(lambda: switch_props().get("variant") == "soft",
                            timeout=5.0, what="开关变开")
                 time.sleep(0.5)   # 给一帧取数 + 重绘
                 on_digest = region_digest()

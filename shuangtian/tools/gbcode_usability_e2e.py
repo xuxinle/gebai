@@ -353,14 +353,44 @@ def main() -> int:
             client.key("Escape")
             time.sleep(0.4)
 
-        # —— 7. 状态栏每个格子都有反应（不能"点了什么也不发生"）——
-        for element_id, hint in (("status-indent", "缩进宽度"), ("status-encoding", "编码说明"),
-                                 ("language-label", "语言"), ("status-blame", "blame 开关")):
+        # —— 7. 状态栏每个格子都有反应（不能“点了什么也不发生”）——
+        #
+        # ⚠ 不能用单一的“状态栏文本变没变”做判据：那只是其中一类的**副作用**。
+        # 三类格子的“反应”各不相同：
+        #   · `status-indent` / `status-encoding`：点一下把说明写进状态栏文本（文本变）；
+        #   · `language-label`：点一下切到侧栏视图（状态栏文本**本就不该变**，
+        #     它显示的是当前语言）；
+        #   · `status-blame`：纯图标激活按钮（`text` 恒为空），反应是 `variant` 变 `soft`。
+        # 旧版对四个格子一律比“status 文本”，后面两个注定为假——不是产品缺陷，是判据错位。
+        for element_id, hint in (("status-indent", "缩进宽度"), ("status-encoding", "编码说明")):
             before = client.text("status")
             client.invoke(element_id, "click")
             time.sleep(0.6)
             after = client.text("status")
             check(before != after, f"状态栏「{hint}」点击有可见反馈")
+
+        # 语言格：反应是**侧栏切到导航结果视图**（`SidebarView::Nav`），不是状态栏文本。
+        client.invoke("language-label", "click")
+        time.sleep(0.8)
+        check(client.count("#sidebar-nav") == 1,
+              "状态栏「语言」点击 → 侧栏切到语言/导航视图（有可见反馈）")
+        client.invoke("activity-explorer", "click")
+        time.sleep(0.5)
+
+        # blame 格：反应是 `variant` 从 ghost → soft（纯图标激活按钮的语义）。
+        # 注意：`find` 的匹配项不带 `props`，读属性必须走 `get`。
+        def blame_variant():
+            return (client.ok("get", {"id": "status-blame"}).get("props") or {}).get("variant")
+
+        blame_before = blame_variant()
+        client.invoke("status-blame", "click")
+        time.sleep(0.6)
+        blame_after = blame_variant()
+        check(blame_before != blame_after,
+              f"状态栏「blame 开关」点击有可见反馈（variant {blame_before!r} → {blame_after!r}）")
+        # 切回去，不影响后续用例的初始态。
+        client.invoke("status-blame", "click")
+        time.sleep(0.4)
 
         # —— 8. Git：真仓库的写操作链路 ——
         #

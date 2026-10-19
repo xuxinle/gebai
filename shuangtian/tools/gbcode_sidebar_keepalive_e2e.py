@@ -189,20 +189,22 @@ def main():
         check(client.count("#sidebar-scm") == 0,
               "未访问过的视图**不声明**（启动首帧不白建——这是保活与启动成本的平衡点）")
 
-        # ② 逐个访问四个视图：访问后它们就**常驻**了（此后只隐藏、不再销毁）。
+        # ② 逐个访问其余视图：访问后它们就**常驻**了（此后只隐藏、不再销毁）。
         # 比较视图已随 1014 提交下线（page.hpp：用户要求删除比较侧栏），
         # 保活验证改走 outline（大纲，同批改版的常驻视图）。
+        #
+        # 「运行」与「语言与扩展」也已下线（page.hpp:96 明确记着删掉这两项），
+        # 所以 `#activity-run` 根本不存在——旧版把它列在这里，导致本用例恒红。
+        # 现存视图的真值源是 `SidebarView`（Explorer/Search/Scm/Outline/Nav）。
         for name, selector in [("search", "#activity-search"), ("scm", "#activity-scm"),
-                               ("run", "#activity-run"), ("outline", "#activity-outline")]:
+                               ("outline", "#activity-outline")]:
             client.click(selector)
             wait_until(lambda n=name: client.visible(f"sidebar-{n}"), what=f"{name} 可见")
         check(client.count("#sidebar-explorer") == 1 and client.count("#sidebar-search") == 1 and
-              client.count("#sidebar-scm") == 1 and
-              client.count("#sidebar-run") == 1 and
-              client.count("#sidebar-outline") == 1,
-              "访问过的五个视图全部**常驻在场**")
+              client.count("#sidebar-scm") == 1 and client.count("#sidebar-outline") == 1,
+              "访问过的四个视图全部**常驻在场**")
         visible_now = [v for v in ["sidebar-explorer", "sidebar-search", "sidebar-scm",
-                                   "sidebar-run", "sidebar-outline"] if client.visible(v)]
+                                   "sidebar-outline"] if client.visible(v)]
         check(visible_now == ["sidebar-outline"], f"只有当前视图可见（实际 {visible_now}）")
 
         # ③ 切到「变更」，再切回「资源管理器」——两者都还在（没被销毁）。

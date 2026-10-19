@@ -686,22 +686,25 @@ auto run_app(int argc, char** argv) -> int {
       return true;
     });
     // Ctrl+Shift+E / F / G：切到三个主视图（与歌白文件工作台同一套键位）。
+    // 一律用枚举名而不是字面量：`SidebarView` 删/加视图时索引会整体前移，
+    // 字面量会**静默切到错误视图**（实测：状态栏语言格硬编码 4，删掉两项后
+    // 4 从「扩展」变成了「Nav」）。用枚举名后，重命名/重排编译期就能报错。
     bind("view-explorer", [page] {
-      page->activity_.set(0);
+      page->activity_.set(CodeEditorPage::view_index(CodeEditorPage::SidebarView::Explorer));
       page->sidebar_visible_.set(true);
-      page->mark_sidebar_visited(0);
+      page->mark_sidebar_visited(CodeEditorPage::view_index(CodeEditorPage::SidebarView::Explorer));
       return true;
     });
     bind("view-search", [page] {
-      page->activity_.set(1);
+      page->activity_.set(CodeEditorPage::view_index(CodeEditorPage::SidebarView::Search));
       page->sidebar_visible_.set(true);
-      page->mark_sidebar_visited(1);
+      page->mark_sidebar_visited(CodeEditorPage::view_index(CodeEditorPage::SidebarView::Search));
       return true;
     });
     bind("view-git", [page] {
-      page->activity_.set(2);
+      page->activity_.set(CodeEditorPage::view_index(CodeEditorPage::SidebarView::Scm));
       page->sidebar_visible_.set(true);
-      page->mark_sidebar_visited(2);
+      page->mark_sidebar_visited(CodeEditorPage::view_index(CodeEditorPage::SidebarView::Scm));
       page->refresh_git_request();
       return true;
     });

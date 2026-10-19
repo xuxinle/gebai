@@ -1091,9 +1091,9 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
           b.set_size(Button::Size::Small);
           b.on_click = [this, segment, last] {
             // 点目录段：切到资源管理器（树里高亮/展开由树自身管理）；点文件名段=无动作。
-            activity_.set(0);
+            activity_.set(view_index(SidebarView::Explorer));
             sidebar_visible_.set(true);
-            mark_sidebar_visited(0);
+            mark_sidebar_visited(view_index(SidebarView::Explorer));
             status_.set(last ? "当前文件：" + segment : "已切到资源管理器：" + segment);
           };
         }, {.height = 22.0f, .key = "crumb:" + segment});
@@ -1194,11 +1194,15 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
   status_item(c, "status-encoding", "", [] { return std::string("UTF-8"); }, [this] {
     status_.set("编码：UTF-8（本编辑器以 UTF-8 读写；非 UTF-8 文件不做自动转换）");
   }, "文件编码 — 点一下看说明");
-      // 语言：点一下切到「扩展」视图（那里列出全部可选语言）
+      // 语言：点一下切到「导航结果」视图（**曾经是「语言与扩展」**——那个视图
+      // 已下线，这里遗留的硬编码 `4` 于是指向了另一个完全无关的视图：
+      // `SidebarView` 删掉两项后索引整体前移，`Nav` 恰好占了 4。
+      // 类注释第 94~96 行就警告过“散落的魔数在删/加视图时会静默错位”，这里正是那个坑。
+      // 改用枚举名，今后再删/加视图时编译器会报错而不是静默切换错误视图。
       status_item(c, "language-label", "", [this] { return active_language(); }, [this] {
-        activity_.set(4);
+        activity_.set(view_index(SidebarView::Nav));
         sidebar_visible_.set(true);
-        mark_sidebar_visited(4);
+        mark_sidebar_visited(view_index(SidebarView::Nav));
       }, "当前语言 — 点一下打开语言列表");
       // blame 行尾注解开关：放在状态栏（它影响"现在看到的正文"，而状态栏正是
       // "当前显示什么"的位置）。

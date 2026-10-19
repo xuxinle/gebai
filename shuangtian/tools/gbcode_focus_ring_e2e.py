@@ -88,6 +88,13 @@ class Client:
         matches = self.ok("find", {"selector": selector}).get("matches") or []
         return matches[0]["bounds"] if matches else None
 
+    def click_at(self, x, y):
+        self.ok("input.mouse", {"kind": "click", "x": x, "y": y, "button": 1})
+        time.sleep(0.45)          # 等下一帧重组
+
+    def count(self, selector):
+        return len(self.ok("find", {"selector": selector}).get("matches") or [])
+
     def click(self, selector):
         box = self.bounds(selector)
         if box is None:
@@ -184,6 +191,17 @@ def main():
 
         # 基准：资源管理器视图 + 焦点在编辑器 + **指针在中性位**
         #（不把指针停在任何按钮上——否则 hover 高亮会混进对照）。
+        #
+        # 编辑器**必须先打开一个文件才会存在**（`#editor` 是惰性装配的；空启动时
+        # 全树里没有它——`gbcode_e2e.py` 第 201 行对此有显式断言）。
+        # 旧版这里直接 `invoke editor focus`，于是恒报「未找到元素: editor」。
+        # 走真实用户路径：点资源管理器树的第一行。
+        tree_box = client.bounds("#workspace-tree")
+        if tree_box is not None:
+            row_h = float(client.ok("get", {"id": "workspace-tree"})["props"].get("row_height") or 26)
+            client.click_at(tree_box["x"] + 60, tree_box["y"] + row_h * 0.5)
+            time.sleep(0.7)
+        check(client.count("#editor") == 1, "点资源管理器首行后应出现编辑器")
         client.ok("invoke", {"id": "editor", "action": "focus"})
         client.park_pointer()
         time.sleep(0.4)
