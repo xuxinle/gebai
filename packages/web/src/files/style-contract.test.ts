@@ -498,8 +498,10 @@ describe("样式契约：变更面板", () => {
     expect(ruleBody(".fw-change-dirrow")).toMatch(/padding-left:\s*calc\([^)]*var\(--fw-depth/)
   })
 
-  test("目录行的折叠箭头靠类名旋转（改了看不到折叠）", () => {
-    expect(ruleBody(".fw-change-dirrow.collapsed .fw-icon")).toMatch(/transform:\s*rotate\(-90deg\)/)
+  test("目录行与分组头的折叠箭头都靠折叠类旋转（改了看不到折叠）", () => {
+    // 选的是**直接子图标**（`> .fw-icon`）：行内按钮的图标也是 .fw-icon，后代选择器会把它们一起转
+    expect(ruleBody(".fw-change-dirrow.collapsed > .fw-icon")).toMatch(/transform:\s*rotate\(-90deg\)/)
+    expect(ruleBody(".fw-change-group-head.collapsed > .fw-icon")).toMatch(/transform:\s*rotate\(-90deg\)/)
   })
 
   test("提交框：选项组与动作组都不可压，动作组右对齐", () => {
@@ -508,6 +510,31 @@ describe("样式契约：变更面板", () => {
     expect(ruleBody(".fw-commit-actions .fw-commit-btns")).toMatch(/margin-left:\s*auto/)
     // 允许折行，但只应在两组之间（两个按钮不许被拆到两行）
     expect(ruleBody(".fw-commit-actions")).toMatch(/flex-wrap:\s*wrap/)
+  })
+})
+
+/**
+ * 样式契约：Git 工具窗**没有标题栏**，写操作在途与多步操作的提示落在底部状态栏。
+ *
+ * 守的理由：旧实现有一条按需亮出的标题带（`.fw-git-titlebar`），每次写操作把三栏上下推挤一下。
+ * 只要有人把这一行加回去（或把状态栏那格删了），**页面不会报错**——只是面板又开始跳、
+ * 或者写操作变成“点了没任何反馈”。两边各钉一条。
+ */
+describe("样式契约：Git 工具窗无标题栏（提示在状态栏）", () => {
+  test("面板与样式中都不再存在标题栏/状态带", () => {
+    const git = normalized(readFileSync(join(SRC, "files", "git.ts"), "utf8"))
+    expect(git).not.toContain("fw-git-titlebar")
+    expect(git).not.toContain("renderTitleBar")
+    expect(ruleBody(".fw-git-titlebar")).toBe("")
+    expect(ruleBody(".fw-git-opbar")).toBe("")
+  })
+
+  test("在途提示由状态栏那格承担（有样式、有动画、宿主确实渲染它）", () => {
+    expect(ruleBody(".fw-status-item.git-busy")).toMatch(/color:\s*var\(--accent\)/)
+    expect(ruleBody(".fw-status-item.git-busy .fw-icon")).toMatch(/animation:/)
+    const main = normalized(readFileSync(join(SRC, "files", "main.ts"), "utf8"))
+    expect(main).toContain("state.gitBusy")
+    expect(main).toContain("fw-status-item git-busy")
   })
 })
 

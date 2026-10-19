@@ -791,7 +791,10 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     for (const g of groups) {
       if (!g.items.length) continue
       const groupEl = h("div", { class: "fw-change-group" })
-      const head = h("div", { class: "fw-change-group-head" }, [
+      // 折叠态跨重绘保留（collapsedGroups），**箭头靠折叠类旋转**（转 → 向右）：图标节点不重建，
+      // 只切类才能让过渡动画成立，也免得再写一套「换图标」的同步逻辑。
+      const collapsed = collapsedGroups.has(g.key)
+      const head = h("div", { class: `fw-change-group-head${collapsed ? " collapsed" : ""}` }, [
         icon("chevronDown", 12),
         h("span", { text: `${g.label}（${g.items.length}）` }),
         h("span", { class: "fw-grow" }),
@@ -802,7 +805,7 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
       ])
       const inner = h(
         "div",
-        { class: `fw-change-group-body${collapsedGroups.has(g.key) ? " collapsed" : ""}` },
+        { class: `fw-change-group-body${collapsed ? " collapsed" : ""}` },
         view === "tree"
           ? (() => {
               // 目录行的一键动作用的是「这一支下的全部改动路径」：建树前先算一次（O(改动数 × 深度)），
@@ -818,7 +821,9 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
         if ((e.target as HTMLElement).closest("button")) return
         if (collapsedGroups.has(g.key)) collapsedGroups.delete(g.key)
         else collapsedGroups.add(g.key)
+        // 体与箭头同步切：只切 body 的话箭头一直是「展开」的样子（看不出组已收起）
         inner.classList.toggle("collapsed")
+        head.classList.toggle("collapsed")
       }
       groupEl.append(head, inner)
       list.appendChild(groupEl)

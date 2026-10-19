@@ -13,7 +13,7 @@
  * - 多步操作（merge/rebase/cherry-pick）的「继续 / 跳过 / 中止」在变更面板顶部（冲突属于工作区状态）。
  */
 import type { FsApi, GitBranchInfo, GitCommitInfo, GitFileDiff, GitStatusInfo } from "./api"
-import { h, icon, showMenu, toast, confirmDialog, promptDialog, clear, timeAgo, formatTime, formatSize, append } from "./ui"
+import { h, icon, showMenu, toast, confirmDialog, promptDialog, clear, timeAgo, formatTime, formatSize } from "./ui"
 import { btnIcon, createOpRunner, renderNotRepo as renderNotRepoShared } from "./git-shared"
 import { createDiffEditor, type DiffNav } from "./editor"
 import { createPartialPanel, type PartialPanelHandle } from "./partial"
@@ -100,7 +100,7 @@ function commitGraphSvg(row: GraphRow, geo: GraphGeometry & { width: number }): 
   return svg
 }
 
-/** 写操作动作 → 中文进度文案（标题栏在途提示用；未收录的动作直接显示动作名）。 */
+/** 写操作动作 → 中文进度文案（状态栏在途提示用；未收录的动作直接显示动作名）。 */
 const OP_LABELS: Record<string, string> = {
   fetch: "抓取远程",
   pull: "拉取",
@@ -141,7 +141,7 @@ export interface GitHooks {
   openCompare: (init?: { from?: string; to?: string; path?: string; mergeBase?: boolean }) => void
   /** 打开冲突合并标签（三窗格：我方 / 结果 / 对方）；入参为仓库相对路径 */
   openMerge: (repoRel: string) => void
-  /** 关闭工具窗（标题栏关闭按钮；由宿主收起面板） */
+  /** 关闭工具窗（面板右上角关闭按钮；由宿主收起面板） */
   close: () => void
   /** 是否可以写（GEBAI_FS_WRITE / GEBAI_GIT_WRITE） */
   writable: () => boolean
@@ -154,8 +154,8 @@ export interface GitHooks {
    * 与「不是仓库」是两回事：读失败时没有可信状态，面板必须说清是故障，而不是给出「初始化仓库」这种误导入口。
    */
   statusError?: () => string | null
-  /** 写操作在途通知（面板据此显示进行中并禁用并发入口）；缺省不通知。 */
-  onBusy?: (action: string | null) => void
+  /** 写操作在途通知（开始传动作名、结束传 null）：面板据此禁用并发入口，宿主据此在状态栏显示进度。 */
+  onBusy?: (action: string | null, label: string | null) => void
 }
 
 export interface GitPanel {
@@ -188,7 +188,7 @@ let logICase = false
   /** 上一次日志查询的过滤/范围条件（unchanged 短路只对「同一查询的刷新」成立：
    *  过滤变了结果集必然变，前缀相同不能当作未变——否则过滤后旧列表残留、过滤不生效）。 */
   let logQueryKey = ""
-  /** 写操作在途的动作名（null = 空闲）：标题栏据此显示进度，远程动作按钮据此禁用。 */
+  /** 写操作在途的动作名（null = 空闲）：远程动作按钮据此禁用。 */
   let busyAction: string | null = null
   let branches: GitBranchInfo[] = []
   let localTags: Array<{ name: string; hash: string; time?: number; subject?: string }> = []
@@ -196,13 +196,14 @@ let logICase = false
   let remotes: Array<{ name: string; fetchUrl: string; pushUrl: string }> = []
 
   /* ------------------------------ 工具窗骨架（IDEA 式） ------------------------------
-   * 底部工具窗 = 标题栏 + 三栏并排：变更内容 / 日志 / 分支。
+   * 底部工具窗 = 三栏并排：分支（引用） / 日志 / 提交内容。
+   * 没有标题栏：“面板身份”由活动栏高亮表达，关闭入口在最后一栏头部末端（panelClose）；
+   * 写操作在途与多步操作进行中这两件**别处说不了**的事，由页面底部状态栏承担（见 main.ts 的 renderStatus）。
    * 为什么拆三栏而不是标签页：面板在**底部横向**展开，横向空间足够——变更、日志、分支
    * 是提交前后最常互相参照的三块信息，能同屏看到比来回切标签有用（IDEA 工具窗同理）。
    * 标签/储存/远程收进「分支」栏内的小切换（同属「引用与远程」语义，用得不频繁）。
    * ------------------------------------------------------------------------------ */
 
-  const titleBar = h("div", { class: "fw-git-titlebar" })
   /**
    * 三栏并排：分支（引用） | 日志 | 提交内容——**从左到右是一条动线**：
    * 点分支 → 看它的日志 → 点某条提交 → 看这条提交改了什么。
@@ -234,9 +235,8 @@ let logICase = false
   /**
    * 面板右上角的关闭按钮。
    *
-   * Git 面板没有常驻标题栏（常驻标题栏已降为按需状态带，见 renderTitleBar），关闭入口就搁在
-   * **面板右上角**——即第三栏头部的末端（最后一栏的头部右缘就是面板的右上角），参与布局、不遮挡内容。
-   * 活动栏按钮与 Alt+G 仍在，这只是“就地关闭”的那个入口。
+   * 面板没有标题栏，关闭入口就搁在**面板右上角**——即第三栏头部的末端（最后一栏的头部右缘就是
+   * 面板的右上角），参与布局、不遮挡内容。活动栏按钮与 Alt+G 仍在，这只是“就地关闭”的那个入口。
    */
   const panelClose = btnIcon("close", "关闭 Git 面板（Alt+G）", () => hooks.close())
   const colCommitEl = h("div", { class: "fw-git-col", "data-col": "commit" }, [colHead("提交内容", [commitHint, commitActions, panelClose]), colCommit])
@@ -245,7 +245,7 @@ let logICase = false
   const sp1 = h("div", { class: "fw-col-resizer", title: "拖动调整栏宽（双击复位；聚焦后 ←/→ 微调）" })
   const sp2 = h("div", { class: "fw-col-resizer", title: "拖动调整栏宽（双击复位；聚焦后 ←/→ 微调）" })
   const colsHost = h("div", { class: "fw-git-cols" }, [colRefsEl, sp1, colLogEl, sp2, colCommitEl])
-  const el = h("div", { class: "fw-git-panel" }, [titleBar, colsHost])
+  const el = h("div", { class: "fw-git-panel" }, [colsHost])
 
   /**
    * 分界拖动：
@@ -427,36 +427,6 @@ function renderRefsTabs(): void {
   }
 
   /**
- * 面板标题栏：**只在有事要说时才出现**（无事则隐藏、不占一行）。
- *
- * 常驻标题栏里的每一件都有别的载体：面板身份＝活动栏高亮（「源代码管理」四字本身不是信息）、
- * 当前分支＝状态栏的分支项（以及分支列表的 ✓）、「比较」＝活动栏「更多」与 Ctrl+Shift+D、
- * 刷新＝各栏自己的刷新、关闭＝活动栏按钮 / Alt+G。**只有两件事别处说不了**：
- * 多步操作进行中（merge/rebase 与冲突数）与在途写操作（fetch/pull/push 耗时以秒计，无提示就只能靠猜）。
- * 于是这一行不再常驻，只在这两件事发生时亮出来。
- */
-/** 上次渲染的标题栏指纹（它在空闲时是隐藏的，但每次自动刷新都会被清空重建）。 */
-let titleBarKey = ""
-
-function renderTitleBar(): void {
-  const s = hooks.status()
-  const key = fingerprint([s?.operation ?? "", s?.counts.conflicted ?? 0, busyAction ?? ""])
-  if (key === titleBarKey) return
-  titleBarKey = key
-  clear(titleBar)
-  const op = s?.operation
-    ? h("span", { class: "fw-git-opbar" }, [h("span", { text: `${s.operation} 进行中${s.counts.conflicted ? `（${s.counts.conflicted} 个冲突）` : ""}` })])
-    : null
-  // 在途写操作：网络动作（fetch/pull/push）耗时以秒计，没有进度提示就只能靠猜
-  const busy = busyAction
-    ? h("span", { class: "fw-git-opbar busy", title: "正在执行 Git 操作" }, [icon("sync", 12), h("span", { text: `${OP_LABELS[busyAction] ?? busyAction}…` })])
-    : null
-  titleBar.hidden = !op && !busy
-  if (titleBar.hidden) return
-  append(titleBar, [icon("git", 14), op, busy, h("span", { class: "fw-grow" })])
-}
-
-  /**
    * 跳到某个视图：三栏并排常显，所以这里只切「分支栏内的小切换」并刷新。
    * 「日志」视图无需切栏（日志栏始终在位），只保证有一页数据。
    */
@@ -476,13 +446,17 @@ function renderTitleBar(): void {
     await loadLog(true)
   }
 
-  /** 写操作（共享实现：toast + 刷新状态 + 刷新本面板）；在途期间通知标题栏显示进度。 */
+  /**
+   * 写操作（共享实现：toast + 刷新状态 + 刷新本面板）。
+   * 在途回调由本面板接管：顺带禁用远程动作按钮，并把动作名与中文文案交给宿主（状态栏据此显示进度）。
+   */
+  const { onBusy: hostBusy, ...opHooks } = hooks
   const op = createOpRunner(
     {
-      ...hooks,
+      ...opHooks,
       onBusy: (action) => {
         busyAction = action
-        renderTitleBar()
+        hostBusy?.(action, action ? (OP_LABELS[action] ?? action) : null)
         applyRemoteBusy()
       },
     },
@@ -491,7 +465,7 @@ function renderTitleBar(): void {
     },
   )
 
-  const renderNotRepo = (): HTMLElement => renderNotRepoShared(hooks, op)
+  const renderNotRepo = (): HTMLElement => renderNotRepoShared({ ...opHooks, writable: hooks.writable }, op)
 
   /** 状态读取失败态（与「不是仓库」区分）：说明是故障，并给一个重试入口。 */
   function renderStatusError(msg: string): HTMLElement {
@@ -1749,7 +1723,6 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
   }
 
   async function doRefresh(): Promise<void> {
-    renderTitleBar()
     renderRefsTabs()
     applyCols()
     // 「状态读取失败」与「不是仓库」必须分开：前者没有可信状态，

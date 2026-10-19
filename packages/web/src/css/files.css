@@ -1384,30 +1384,6 @@ button.fw-status-item:hover {
   height: 100%;
 }
 
-/* 标题栏：**不常驻**，只在「多步操作进行中」或「在途写操作」时出现（见 git.ts 的 renderTitleBar）——
-   此时它上下两条线正好把这条状态带框出来；空闲时整行隐藏、零高度。 */
-.fw-git-titlebar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 8px;
-  border-bottom: 1px solid var(--fw-divider);
-  background: var(--bg-elev);
-  flex: none;
-  min-width: 0;
-}
-
-/* display:flex 会盖掉 [hidden] 的 UA 样式，必须显式重笔（空闲时整行隐藏、零高度） */
-.fw-git-titlebar[hidden] {
-  display: none;
-}
-
-.fw-git-opbar {
-  font-size: 11.5px;
-  color: var(--warning);
-  white-space: nowrap;
-}
-
 /* 三栏并排：分支 | 日志 | 提交内容（从左到右是一条动线：点分支 → 看日志 → 看提交内容） */
 .fw-git-cols {
   flex: 1;
@@ -1540,12 +1516,14 @@ button.fw-status-item:hover {
   color: var(--text);
 }
 
-.fw-change-dirrow .fw-icon {
+/* 折叠箭头：**只选首个直接子图标**——行内动作按钮（放弃 / 暂存）的图标也带 .fw-icon，
+   用后代选择器会让它们跟着折叠态一起转向（并且继承这里的时间函数）。 */
+.fw-change-dirrow > .fw-icon {
   flex: none;
   transition: transform 0.12s ease-out;
 }
 
-.fw-change-dirrow.collapsed .fw-icon {
+.fw-change-dirrow.collapsed > .fw-icon {
   transform: rotate(-90deg);
 }
 
@@ -1811,6 +1789,17 @@ button.fw-status-item:hover {
   background: var(--bg-inset);
   cursor: pointer;
   text-transform: none;
+}
+
+/* 分组头左侧的折叠箭头：与树视图的目录行同一套语言（展开＝向下，折叠＝向右）。
+   同样是**只选首个直接子图标**：组头右侧的「全部暂存 / 全部取消暂存」按钮也带 .fw-icon。 */
+.fw-change-group-head > .fw-icon {
+  flex: none;
+  transition: transform 0.12s ease-out;
+}
+
+.fw-change-group-head.collapsed > .fw-icon {
+  transform: rotate(-90deg);
 }
 
 .fw-change-group-body.collapsed {
@@ -3613,10 +3602,17 @@ button.fw-status-item:hover {
   padding: 16px 12px;
 }
 
-/* 在途写操作徽标（标题栏） */
-.fw-git-opbar.busy {
+/* 在途写操作：Git 面板里没有任何标题栏/状态条，进度落在状态栏这一格（同步图标转起来表示“正在做”） */
+.fw-status-item.git-busy {
   color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.fw-status-item.git-busy .fw-icon {
+  animation: fw-status-spin 1.1s linear infinite;
+}
+
+@keyframes fw-status-spin {
+  to { transform: rotate(360deg); }
 }
 
 .fw-log-row:focus-visible,

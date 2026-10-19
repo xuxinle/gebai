@@ -1985,6 +1985,55 @@ updateFocus() { ... this.viewItems[this.focusedItem] ... }   // ← 用 DOM 序�
 2 个未跟踪文件”各错一条；改用短词后又因两条悬停文案断言过时又红过一次——都是测试自己的毛病，
 不是产品问题），另含宽度断言（窄面板 620px 不溢出）。单测总 **958 pass**；typecheck 通过。
 
+### 5.49 变更面板分组头折叠时箭头不变（Bugfix：折叠态没传到箭头）
+
+**问题**：「变更面板折叠时图标没变，还是展开的图标」。
+
+**根因**：分组头的点击只给内容体加了 `.collapsed`（`inner.classList.toggle("collapsed")`），从未把折叠态交给箭头所在的头部；
+CSS 里也没有 `.fw-change-group-head.collapsed` 的旋转规则（只有树视图目录行那一套）。于是组确实收起了、箭头仍朝下。
+
+**顺带查出的同类隐患**：目录行/分组头的箭头规则原是后代选择器 `.fw-change-dirrow .fw-icon`，而**行内动作按钮
+（放弃 / 暂存）的图标也带 `.fw-icon`**——用后代选择器会让按钮图标跟着折叠态一起旋转。
+
+**修法**：
+
+- `files/changes.ts`：渲染时按 `collapsedGroups` 给分组头同步 `collapsed` 类（跨重绘保留，自动刷新不会把箭头弹回展开态）；
+  点击时 `head` / `inner` 两个类一起切。
+- `css/files.css`：目录行与分组头统一为 **`> .fw-icon`（只选首个直接子图标）** + `rotate(-90deg)` + `0.12s` 过渡——
+  图标节点不重建，靠类切旋转，动画自然成立。
+- `files/style-contract.test.ts`：样式契约由「目录行箭头」扩为「目录行与分组头都靠折叠类旋转」，并把 `> .fw-icon`
+  口径钉进断言（否则退回后代选择器时测试仍会全绿）。
+
+**验证**：样式契约 27 例通过、全量 `bun test` 与 `typecheck` 通过；真实页面（临时实例 + Playwright）实测：
+折叠后 `head.className` 含 `collapsed`、箭头 `transform = matrix(0, -1, 1, 0, 0, 0)`（-90deg）、`body` `display: none`，
+按钮内 `svg` 仍为 `none`（未被误旋转）。
+
+### 5.50 Git 面板彻底删除标题栏（在途进度与多步操作改由状态栏承载）
+
+**需求**：「git 面板操作时不要再弹出面板标题栏，在状态栏显示就行，彻底删除标题栏」。
+
+**为什么要删**：那行是“按需亮出来的状态带”（`.fw-git-titlebar`，只在写操作在途与多步操作进行中显示），
+代价是**每次写操作面板布局都跳一下**——三栏（分支 / 日志 / 提交内容）被一条忽隐忽现的 22px 横条
+上下推挤，正在看的日志行会移开一截。而它想说的两件事，状态栏本来就有位置。
+
+**改动**：
+
+| 处 | 改动 |
+|---|---|
+| `files/git.ts` | 删 `titleBar` 节点 / `titleBarKey` 指纹 / `renderTitleBar()` 与它的两处调用（`onBusy`、`doRefresh`）；`el` 只剩 `[colsHost]`；`onBusy` 签名扩为 `(action, label)`，中文文案由面板的 `OP_LABELS` 给（宿主不复制一份映射）；`renderNotRepoShared` 接收去掉在途回调的 hooks 副本（共享实现的签名只有动作名） |
+| `files/main.ts` | `state.gitBusy`（单一真值）；状态栏新增 pri1 在途格 `.fw-status-item.git-busy`（accent 色 + 旋转同步图标，title 带动作全称）；多步操作格补**冲突数**（`merge 进行中（2 个冲突）`）；`renderStatus` 的快照 `sig` 补入在途动作（不补则状态栏不因它重绘） |
+| `css/files.css` | 删 `.fw-git-titlebar` / `[hidden]` / `.fw-git-opbar` / `.fw-git-opbar.busy` 四条；新增 `.fw-status-item.git-busy` + `@keyframes fw-status-spin` |
+| `design/02-architecture-core.md` | 「Git 工具窗不设常驻标题栏」那条改写为「没有标题栏（一个都不留）」，并记下取舍 |
+
+**边界**：终端面板的标题栏**保留**（会话页签与六个主操作只在那里，删掉就无处置放）。
+
+**取舍**：在途提示离操作区远了一点（面板顶部 → 窗口底部）；换来面板高度恒定——这条正是反馈的由来。
+
+**验证**：全量 `bun test` / `typecheck` / `lint` 三件套；真实页面（临时实例 + Playwright）：
+面板内不存在 `.fw-git-titlebar` 与 `.fw-git-opbar` 节点；触发一次写操作时状态栏出现 `.fw-status-item.git-busy`
+并在结束后消失；merge 冲突仓库下状态栏显示「merge 进行中（N 个冲突）」；整个过程中 `.fw-git-cols` 的
+`getBoundingClientRect().top` 恒定（面板不再跳动）。
+
 ---
 
 ## 8. 已知边界与后续可选增强

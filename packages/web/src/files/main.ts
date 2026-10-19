@@ -188,6 +188,8 @@ const state = {
   gitStatus: null as GitStatusInfo | null,
   /** Git 状态读取失败原因（null = 正常）：与「不是仓库」分开，供面板与状态栏区分展示。 */
   gitStatusError: null as string | null,
+  /** 在途的 Git 写操作（null = 空闲；label 是中文文案）：Git 面板已无标题栏，进度提示落在底部状态栏。 */
+  gitBusy: null as { action: string; label: string } | null,
   repoPrefix: "",
   tabs: [] as Tab[],
   activeId: null as string | null,
@@ -380,8 +382,13 @@ function ensureGitPanel(): GitPanel {
     openFile: (root, path, line) => void openFile(root, path, { preview: false, line }),
     openCompare: (init) => void openCompare(init),
     openMerge: (repoRel) => void openMergeTab(repoRel),
-    // 关闭按钮在面板标题栏内：收起工具窗（不销毁实例，再开时状态保留）
+    // 关闭入口在面板右上角（最后一栏头部末端）：收起工具窗（不销毁实例，再开时状态保留）
     close: () => toggleGitPanel(false),
+    // 写操作在途：进度只落在状态栏（面板内没有任何标题栏/状态条），动作中文文案由面板给
+    onBusy: (action, label) => {
+      state.gitBusy = action && label ? { action, label } : null
+      renderStatus()
+    },
     writable: () => !!(state.rootsResp?.writable && state.rootsResp?.gitWrite),
     remoteEnabled: () => !!(state.rootsResp?.gitRemote && state.rootsResp?.writable),
     onFsChanged: () => void explorer.refresh(undefined, { keepSelection: true }),
@@ -2077,6 +2084,8 @@ function renderStatus(): void {
     explorer.getRoot(), root?.name ?? "", root?.path ?? "", root?.isRepo ? 1 : 0,
     g?.isRepo ? 1 : 0, g?.branch ?? "", g?.detached ? 1 : 0, g?.ahead ?? 0, g?.behind ?? 0,
     g?.counts ? `${g.counts.staged}/${g.counts.unstaged}/${g.counts.untracked}/${g.counts.conflicted}` : "",
+    state.gitBusy?.action ?? "",
+    state.gitBusy?.label ?? "",
     state.rootsResp?.writable ? 1 : 0,
     monacoLoadFailed() ? 1 : 0,
     attachedServerOf(tab?.editor?.model?.() ?? null),
@@ -2138,14 +2147,26 @@ function renderStatus(): void {
 
     // 多步操作（merge/rebase/cherry-pick/revert）进行中：继续/中止在左栏「变更」面板顶部，
     // 但状态栏也要能一眼看出“仓库正处在中间状态”——否则很容易在半途提交或切分支。
+    // 冲突数跟着一起说（Git 面板已无标题栏，这格是它的唯一载体）。
     if (s.operation) {
+      const conflicts = s.counts.conflicted
       const opItem = h("button", { class: "fw-status-item warn", title: "多步操作进行中：继续 / 跳过 / 中止在左栏「变更」面板顶部" }, [
         icon("sync", 12),
-        h("span", { text: `${s.operation} 进行中` }),
+        h("span", { text: `${s.operation} 进行中${conflicts ? `（${conflicts} 个冲突）` : ""}` }),
       ])
       opItem.onclick = () => toggleLeftView("changes")
       statusbar.appendChild(btn(opItem, 1))
     }
+  }
+
+  /* Git 写操作在途：网络动作（fetch/pull/push）耗时以秒计，没有提示就只能靠猜。
+     这格也是“Git 面板里发生了什么”的唯一可见处——那个面板没有标题栏，进度不往面板里塞。 */
+  if (state.gitBusy) {
+    const busy = h("span", { class: "fw-status-item git-busy", title: `正在执行 Git 操作：${state.gitBusy.label}` }, [
+      icon("sync", 12),
+      h("span", { text: `${state.gitBusy.label}…` }),
+    ])
+    statusbar.appendChild(btn(busy, 1))
   }
 
   statusbar.appendChild(h("span", { class: "fw-grow" }))
