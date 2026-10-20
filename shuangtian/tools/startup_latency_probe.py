@@ -1,7 +1,23 @@
-"""gbcode **真实窗口**启动耗时的分阶段测量。
+"""gbcode 启动耗时的分阶段测量——**测的是真窗口，不是 headless**。
 
-为什么要专门量：headless 启动日志看只有 ~313ms（从"日志落盘"到"控制通道已启动"），
-但用户体感是「卡顿 2 秒」。两者差的正是：
+## 口径（读数字前必看）
+
+| 启动模式 | 控制通道就绪 |
+|---|---|
+| headless | **271 ms** |
+| **本探针（真窗口）** | **644 ms** |
+
+两者差 **373 ms**，全部是窗口创建（其中 D3D11 建设备 **357.8 ms**）。
+两个数都对——错的是**拿本探针的数去当 headless 场景的成本**。需求 headless
+数字时用 `tools/startup_cwd_probe.py`。
+
+⚠ 已澄清的两个**不成立**的怀疑（别再重测）：
+- 工作区大小（485 MB 的 bin 目录）：**无影响**（266~294 ms）。目录树惰性扫描 + 按层缓存。
+- 会话标签数（1/4/8/16）：**无影响**（297~313 ms）。
+
+## 原来量什么
+
+以**窗口出现**为界，量三段：
   ① 窗口创建 + 首次上屏（headless 没有）；
   ② 会话恢复（4 个标签 × 读文件 + 语法高亮）；
   ③ 首帧绘制（含字体加载、字形光栅化）。
@@ -32,6 +48,9 @@ WORK = ROOT / "build" / "startup"
 sys.path.insert(0, str(ROOT / "tools"))
 import st_client_lib  # noqa: E402
 
+# : 隔离的 ST_HOME，避免读真实用户会话（否则会把“恢复真仓库”算进启动成本）。
+STARTUP_HOME = WORK / "probe-home"
+
 
 def one_run(rounds: int = 3, cold: bool = False) -> dict:
     exe = ROOT / "build" / "dev" / "bin" / "gbcode.exe"
@@ -53,12 +72,17 @@ def one_run(rounds: int = 3, cold: bool = False) -> dict:
             cold_home = WORK / f"home-{index}"
             cold_home.mkdir(parents=True, exist_ok=True)
             env["ST_HOME"] = str(cold_home)
+        else:
+            # 默认也用隔离 HOME：否则会读真实用户会话，把“恢复真仓库/真 git 状态”
+            # 算进启动成本（实测这一条曾把 250 ms 抬成 660 ms 的一部分）。
+            STARTUP_HOME.mkdir(parents=True, exist_ok=True)
+            env["ST_HOME"] = str(STARTUP_HOME)
 
         t0 = time.perf_counter()
         with log.open("wb") as err:
             process = subprocess.Popen(
                 [str(exe), "--control-port", "0", "--control-file", str(control)],
-                cwd=str(exe.parent),
+                cwd=str(ROOT),
                 stdout=subprocess.DEVNULL,
                 stderr=err,
                 env=env,
