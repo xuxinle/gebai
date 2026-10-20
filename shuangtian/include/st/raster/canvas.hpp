@@ -12,6 +12,7 @@
 /// - **软硬件共用接口**：绘制原语全部来自 `Surface`（UI 层只认接口，
 ///   这样同一条绘制路径既能落到 CPU 也能落到显卡）。
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -229,6 +230,14 @@ class Canvas final : public Surface {
     shadow_run_grouping_enabled_ = enabled;
   }
 
+  /// 运行时开关「`blend_coverage_row` 用查表代替逐像素 `scale_premul`」（默认开）。
+  ///
+  /// **验证必备**：表的量化口径必须与逐像素**逐字相同**。一旦把 opacity 也烧进表，
+  /// 量化就从一次变两次，实测（`tools/alpha_table_equiv_probe.cpp`）在
+  /// opacity=0.9/0.75/0.5 时有 **19~25%** 的覆盖率组合差 1 LSB。
+  /// 零容差的验证只能靠“开与不开逐像素相同”（同 `set_geometry_cache_enabled`）。
+  void set_alpha_table_enabled(bool enabled) noexcept { alpha_table_enabled_ = enabled; }
+
   [[nodiscard]] auto geometry_cache_enabled() const noexcept -> bool {
     return geometry_cache_enabled_;
   }
@@ -386,11 +395,26 @@ class Canvas final : public Surface {
   bool geometry_cache_enabled_{true};
   /// 阴影的“按同 α 游程分组”（`draw_shadow`）。见 `set_shadow_run_grouping_enabled`。
   bool shadow_run_grouping_enabled_{true};
+  /// `blend_coverage_row` 用查表代替逐像素 `scale_premul`。见 `set_alpha_table_enabled`。
+  bool alpha_table_enabled_{true};
   /// 扫描线覆盖率的**逐像素累加缓冲**（`blend_coverage_runs` 用）。
   ///
   /// 复用同一个 buffer 而非每行分配：一段路径会对本函数调用几百次（每行一次），
   /// 每次 `resize` 一个几十元素的 vector 不是可忽略的开销。
   std::vector<float> coverage_accum_{};
+
+  /// 「预乘色 × 覆盖度字节」的查表（256 项），按 `(premul, opacity)` 缓存。
+  ///
+  /// 为何要缓存而不是行内建：`blend_coverage_row` 是**逐行调用**的。
+  /// 把表建在行内时，小字形每行只画几个像素却要初始化 256×4 通道——
+  /// 实测整帧 `text` 0.68 → 0.67 ms（等于白改）。按颜色缓存后，
+  /// 同一段文字的几十个字形只建一次。
+  using AlphaTable = std::array<std::uint32_t, 256>;
+  [[nodiscard]] auto alpha_table(std::uint32_t premul) const -> const AlphaTable&;
+  /// 缓存槽：单槽足够（同一段文字内颜色不变；变了就重建，仍然划）。
+  /// `mutable` 是因为它在 `const` 的绘制路径上被惰性填充。
+  mutable AlphaTable alpha_table_{};
+  mutable std::uint32_t alpha_table_premul_{0xFFFFFFFFU};
 
   /// `clear()` 刚把整张画布变成 `cleared_color_`、且尚未被任何绘制碰过。
   ///

@@ -1,6 +1,7 @@
 #include "st/raster/canvas.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -650,9 +651,23 @@ void Canvas::blend_coverage_bitmap(int x, int y, std::span<const float> coverage
   }
 }
 
+auto Canvas::alpha_table(std::uint32_t premul) const -> const AlphaTable& {
+  // 单槽缓存：`table[k] = scale_premul(premul, k)`——**与 opacity 无关**，
+  // 所以同一颜色的几十个字形共用一份；颜色变了才重建。
+  //
+  // ⚠ **opacity 绝不能烧进表**：若表键是“覆盖率字节 × opacity 再量化”，
+  // 就与旧写法（`quantize(|cov| × opacity)`）形成**两步量化**。
+  // 实测（`tools/alpha_table_equiv_probe.cpp`）：opacity=0.9/0.75/0.5 时
+  // 有 **19~25%** 的覆盖率组合会差 1 LSB——而本项目对像素是零容差。
+  if (alpha_table_premul_ == premul) return alpha_table_;
+  for (std::size_t level = 0; level < alpha_table_.size(); ++level) {
+    alpha_table_[level] = scale_premul(premul, static_cast<std::uint32_t>(level));
+  }
+  alpha_table_premul_ = premul;
+  return alpha_table_;}
+
 void Canvas::blend_coverage_row(int y, int x_begin, std::span<const float> coverage,
-                                const Paint& paint, float opacity, BlendMode blend) {  if (y < 0 || y >= physical_height_) return;
-  const ClipFrame& clip = current_clip();
+                                const Paint& paint, float opacity, BlendMode blend) {  if (y < 0 || y >= physical_height_) return;  const ClipFrame& clip = current_clip();
   if (y < clip.rect.y || y >= clip.rect.bottom()) return;
   const int begin = std::max(x_begin, clip.rect.x);
   const int end = std::min(x_begin + static_cast<int>(coverage.size()), clip.rect.right());
@@ -672,12 +687,32 @@ void Canvas::blend_coverage_row(int y, int x_begin, std::span<const float> cover
     if (color.a == 0U) return;
     // 预乘颜色**一次**算好：原实现在逐像素里做 3 次整数除法。
     const std::uint32_t premul = math::premultiply(color);
-    if (!masked && blend == BlendMode::SrcOver) {
+    if (!masked && blend == BlendMode::SrcOver && alpha_table_enabled_) {
       const auto full_alpha = static_cast<std::uint8_t>(math::clamp01(opacity) * 255.0f + 0.5f);
+      // **查表代替逐像素的 `scale_premul`**，但表要**跨行复用**。
+      //
+      // ## 为何查表
+      // `scale_premul` 对每个像素算 4 个通道的 `fast_div255`（各一次乘法 + 移位），
+      // 而结果**只取决于量化后的 alpha 字节（256 种）**——与像素位置无关。
+      // 字形像素以“非满格边缘”为主：实测（`tools/glyph_coverage_distribution_probe.cpp`）
+      // 13px 小字只有 **7.9%** 满格、**80.4%** 落在 0.1~0.99，全走逐像素路径。
+      //
+      // ## ⚠ 两个实测踩过的坑
+      // **坑一：表不能在行内建**。本函数是**逐行调用**的，第一版把
+      // `std::array<uint32_t,256>` 建在行内，于是每个字形行都要初始化 256×4 通道
+      // ——小字形一行只画几个像素，这笔代价远大于它省下的。
+      // 实测整帧 `text` 0.68 → 0.67 ms（噪声内），等于白改。
+      //
+      // **坑二：opacity 绝不能烧进表**。若表键是“覆盖率字节 × opacity 再量化”，
+      // 就与旧写法 `quantize(|cov| × opacity)` 形成**两步量化**。
+      // 实测（`tools/alpha_table_equiv_probe.cpp`）：opacity=0.9/0.75/0.5 时
+      // 有 **19~25%** 的覆盖率组合差 1 LSB——而本项目像素是零容差。
+      // 因此表只能是 `table[k] = scale_premul(premul, k)`，量化仍在调用处做一次。
+      const AlphaTable& table = alpha_table(premul);
       int x = begin;
       while (x < end) {
-        // 覆盖率满格（≥ 0.999）的连续段——圆角矩形的内部、表格行、面板——整段交给 SIMD，
-        // 跳过整串逐像素浮点运算；这也是大面填充能快一个量级的关键。
+        // 覆盖率满格（≥ 0.999）的连续段——大字/粗笔画的内部——整段交给 SIMD，
+        // 跳过整串逐像素浮点运算。
         if (coverage_at(x) >= 0.999f) {
           const int run_begin = x;
           while (x < end && coverage_at(x) >= 0.999f) ++x;
@@ -685,10 +720,14 @@ void Canvas::blend_coverage_row(int y, int x_begin, std::span<const float> cover
                           full_alpha);
           continue;
         }
+        // 表的索引是**已乘 opacity 的量化字节**——这样量化只发生一次
+        //（与旧写法逐字相同）。表本身不烧 opacity：它只是 `scale_premul(premul, k)`
+        // 的 256 项展开，对任何 opacity 都成立。
         const float alpha = std::abs(coverage_at(x)) * opacity;
         if (alpha > kCoverageEpsilon) {
-          const auto alpha_byte = static_cast<std::uint32_t>(alpha * 255.0f + 0.5f);
-          row[x] = over_premul(row[x], scale_premul(premul, alpha_byte));
+          const auto alpha_byte =
+              static_cast<std::uint32_t>(math::clamp01(alpha) * 255.0f + 0.5f);
+          row[x] = over_premul(row[x], table[alpha_byte]);
         }
         ++x;
       }

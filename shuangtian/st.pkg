@@ -233,6 +233,26 @@
       "sources": ["tools/shadow_blend_route_probe.cpp"],
       "exclude_sources": ["src/pkg/*"]
     },
+    "glyph_coverage_distribution_probe": {
+      "kind": "executable",
+      "sources": ["tools/glyph_coverage_distribution_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "glyph_row_waste_probe": {
+      "kind": "executable",
+      "sources": ["tools/glyph_row_waste_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "text_cost_breakdown_probe": {
+      "kind": "executable",
+      "sources": ["tools/text_cost_breakdown_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "alpha_table_equiv_probe": {
+      "kind": "executable",
+      "sources": ["tools/alpha_table_equiv_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
     "simd_short_row_probe": {
       "kind": "executable",
       "sources": ["tools/simd_short_row_probe.cpp"],
