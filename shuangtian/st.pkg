@@ -293,6 +293,21 @@
       "sources": ["tools/geometry_hit_rate_probe.cpp"],
       "exclude_sources": ["src/pkg/*"]
     },
+    "layout_fixed_cost_probe": {
+      "kind": "executable",
+      "sources": ["tools/layout_fixed_cost_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "cold_memory_probe": {
+      "kind": "executable",
+      "sources": ["tools/cold_memory_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "cold_memory_scale_probe": {
+      "kind": "executable",
+      "sources": ["tools/cold_memory_scale_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
     "simd_short_row_probe": {
       "kind": "executable",
       "sources": ["tools/simd_short_row_probe.cpp"],
