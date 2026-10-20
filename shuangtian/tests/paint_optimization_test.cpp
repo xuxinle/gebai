@@ -615,6 +615,58 @@ ST_TEST(layered_shadow_single_layer_matches_draw) {
   ST_CHECK(result.differing == 0);
 }
 
+/// **`covered_region` 的等价性与判别力**。
+///
+/// `DrawOptions::covered_region` 让后端跳过「随后会被不透明底完全盖住」的阴影像素。
+/// 正确性是两个方向的，缺一条就是假护栏（`CONVENTIONS.md` §7.2）：
+///
+/// 1. **不透明底 + 跳过 → 逐像素相等**（硬保证）。由 `over(B, over(D, U)) == B`
+///    （不透明源的 `over` 即完全替换）保证，所以应该是 **Δ=0** 而不是“差不多”。
+/// 2. **半透明底 + 跳过 → 必须出现可见差异**。否则说明后端根本没跳（或跳错了），
+///    那么 ①里的“相等”就是恒真的——这条反向判据是 ① 成立的前提。
+///
+/// 两种几何都测：宽卡片（分段划算）与窄卡片（分段不划算，走整行贴）。
+ST_TEST(shadow_covered_region_is_exact_and_effective) {
+  const st::ui::Theme theme = st::ui::Theme::light();
+  const st::ui::Shadow shadow = st::ui::shadow_md(theme);
+  constexpr float kRadius = 8.0f;
+
+  // 三个宽度覆盖两种分段档：很窄（左右段都短 → 不该分段）、中等、很宽（该分段）。
+  for (const float width : {48.0f, 140.0f, 600.0f}) {
+    const st::math::Rect box{120.0f, 100.0f, width, 48.0f};
+    const auto render = [&](bool covered, Color background) {
+      Canvas canvas = Canvas::for_logical_size(kWidth, kHeight, 1.0f);
+      canvas.clear(Color::rgb(0xF0, 0xF0, 0xF4));
+      st::raster::DrawOptions options{};
+      if (covered) {
+        options.covered_region = box;
+        options.covered_radius = kRadius;
+      }
+      canvas.draw_shadow_layered(box, kRadius, shadow.color, shadow.blur,
+                                 st::math::Point{shadow.offset_x, shadow.offset_y}, shadow.color2,
+                                 shadow.blur2,
+                                 st::math::Point{shadow.offset2_x, shadow.offset2_y}, options);
+      // 调用方契约的一部分：随后**真的**铺不透明底（背景取 `background`）。
+      canvas.fill_rect(box, st::raster::Paint::solid(background), kRadius);
+      return canvas;
+    };
+
+    // ① 不透明底：跳过与不跳过必须逐像素相等。
+    const Color opaque_face = Color::rgb(0xFF, 0xFF, 0xFF);
+    const PixelDiff same = diff(render(true, opaque_face), render(false, opaque_face));
+    st::print("[covered] 宽 {:5.0f}px 不透明底：超差 {} px（要求 0）\n",
+              static_cast<double>(width), same.differing);
+    ST_CHECK_EQ(same.differing, 0U);
+
+    // ② 半透明底（alpha<255）：底色盖不严，跳过必须能看出来——否则 ① 是恒真的。
+    const Color translucent_face{0xFF, 0xFF, 0xFF, 128};
+    const PixelDiff visible = diff(render(true, translucent_face), render(false, translucent_face));
+    st::print("[covered] 宽 {:5.0f}px 半透明底：超差 {} px（要求 > 0）\n",
+              static_cast<double>(width), visible.differing);
+    ST_CHECK(visible.differing > 0U);
+  }
+}
+
 /// DPI：`draw_shadow_layered` 与 `draw_shadow` 同样按 `device_scale` 缩放几何。
 ST_TEST(layered_shadow_respects_device_scale) {
   const st::ui::Theme theme = st::ui::Theme::light();

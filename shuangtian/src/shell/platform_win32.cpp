@@ -973,8 +973,20 @@ class Win32Backend final : public Backend {
       }
     }
 
+    const auto surface_select_start = std::chrono::steady_clock::now();
     SurfaceChoice choice = create_surface_for(clamped_width, clamped_height, scale_, wanted);
     if (choice.surface == nullptr) return unexpected(ErrorCode::Io, "创建绘制面失败");
+    // **选型耗时进日志**（仅首次，因为 `resolved_renderer_` 会记住结论）。
+    //
+    // 为何要留住这个数：它直接在**窗口可见之前**的路径上，实测可达 ~500 ms
+    // （`gpu::available()` 建 D3D11 设备 ~330 ms + 着色器管线 ~55 ms + 缩尺基准）。
+    // 这是“双击后一秒多没反应”的可归因项；没有这条日志，下次只能靠重新插桩才能知道。
+    if (resolved_renderer_.empty()) {
+      const double select_ms = std::chrono::duration<double, std::milli>(
+                                   std::chrono::steady_clock::now() - surface_select_start)
+                                   .count();
+      ST_LOG_INFO("渲染器选型：{} · {:.1f} ms · {}", choice.name, select_ms, choice.note);
+    }
     if (resolved_renderer_.empty()) {
       resolved_renderer_ = choice.name;
       // 首次的选型理由（含 `auto 实测（…）` 那段）要留住：它是"为什么是这条"的答案，
@@ -1097,6 +1109,18 @@ class Win32Backend final : public Backend {
     std::string note{};
   };
 
+  /// 建绘制面：`auto` = **有 GPU 就用 GPU**，否则软件。
+  ///
+  /// 为何不再做「实测哪条更快」：那样选型的判据是**性能对比**，代价是
+  /// `gpu::available()`（建 D3D11 设备，本机 ~317ms）+ 着色器管线（~55ms）+
+  /// 缩尺基准——全部发生在**窗口可见之前**，用户看到的就是“双击后一秒多没反应”；
+  /// 而且两条路径性能接近时结论会**抖动**（实测同一机器两次启动分别选到 gpu/software）。
+  ///
+  /// 取「有就用」的理由：GPU 画得快是主流事实，而软件路径只在**没有可用 GPU**时
+  /// 才是正确选择。若真遇到“有 GPU 但更慢”的极端环境，用 `--renderer software` 显式指定
+  /// ——那是用户/开发者的一次性判断，不该让每次启动都去测。
+  ///
+  /// `--renderer gpu` 仍保留“不可用就回退软件”的语义（不能因为要不到就启不来）。
   [[nodiscard]] static auto create_surface_for(int physical_width, int physical_height, float scale,
                                                const std::string& renderer) -> SurfaceChoice {
     SurfaceChoice choice;
@@ -1110,65 +1134,31 @@ class Win32Backend final : public Backend {
       choice.surface = make_software();
       return choice;
     }
+    // "gpu" 与 "auto" 走同一条：尝试 GPU，拿不到就回退软件。
+    // 两者的区别只在**注释/日志措辞**，不在行为——`gpu` 是“我要 GPU”，
+    // `auto` 是“有就用”；两者在不具备时都该能启动。
     if (!raster::gpu::available()) {
-      if (renderer == "gpu") {
-        const auto probe = raster::gpu::probe();
-        choice.note = std::format("GPU 不可用（{}），已回退软件", probe.error().message);
-      } else {
-        choice.note = "auto：GPU 不可用，选软件";
-      }
+      const auto probe = raster::gpu::probe();
+      choice.note = renderer == "gpu"
+                        ? std::format("GPU 不可用（{}），已回退软件", probe.error().message)
+                        : "auto：GPU 不可用，选软件";
       choice.surface = make_software();
       return choice;
     }
-    auto gpu = raster::gpu::create_canvas(physical_width, physical_height, scale, {});
-    if (!gpu.has_value()) {
+    if (auto gpu = raster::gpu::create_canvas(physical_width, physical_height, scale, {});
+        gpu.has_value()) {
+      const auto info = raster::gpu::probe();
+      const std::string label = info.has_value() ? info->adapter : std::string("D3D11");
+      choice.surface = std::move(*gpu);
+      choice.name = "gpu";
+      choice.note = std::format("D3D11 · {} · {}", label,
+                                info.has_value() ? info->feature_level : std::string("-"));
+      return choice;
+    } else {
       choice.note = std::format("GPU 画布创建失败（{}），已回退软件", gpu.error().message);
       choice.surface = make_software();
       return choice;
     }
-    const auto info = raster::gpu::probe();
-    const std::string gpu_label = info.has_value() ? info->adapter : std::string("D3D11");
-    if (renderer == "gpu") {
-      choice.surface = std::move(*gpu);
-      choice.name = "gpu";
-      choice.note = std::format("D3D11 · {} · {}", gpu_label, info.has_value() ? info->feature_level
-                                                                               : std::string("-"));
-      return choice;
-    }
-    // `auto` = **实测**：两条都建出来跑同一负载（与 headless 同一份判据）。
-    // 注意这个数字**不含 present()**：GPU 画布走 DXGI swapchain（送显 ~0.03ms），
-    // 软件画布走 GDI blit（~1.4ms）——两者差异由 renderer_note 报出，不混进基准。
-    //
-    // **缩尺测量**：选型要的是序关系，不是绝对帧耗时。按真实尺寸（1920×1200）各跑
-    // 3 轮时软件光栅 86ms/轮，仅这一步 261ms，而它全在**窗口可见之前**——用户看到
-    // 的就是白底 + 黑框（实测启动延迟 680ms 的主体）。光栅耗时对面积近似线性，
-    // 缩小尺寸不改变两条的相对次序，代价却降到几毫秒。
-    constexpr int kProbeLongEdge = 320;
-    const double long_edge = static_cast<double>(std::max(physical_width, physical_height));
-    const double shrink =
-        long_edge > static_cast<double>(kProbeLongEdge)
-            ? static_cast<double>(kProbeLongEdge) / long_edge
-            : 1.0;
-    const int probe_width = std::max(32, static_cast<int>(std::lround(physical_width * shrink)));
-    const int probe_height = std::max(32, static_cast<int>(std::lround(physical_height * shrink)));
-    std::unique_ptr<raster::Surface> probe_software =
-        std::make_unique<raster::Canvas>(probe_width, probe_height, scale);
-    const double software_ms = shell::benchmark_surface(*probe_software, 3);
-    auto probe_gpu = raster::gpu::create_canvas(probe_width, probe_height, scale, {});
-    const double gpu_ms = probe_gpu.has_value() ? shell::benchmark_surface(**probe_gpu, 3) : 0.0;
-    const bool pick_gpu = probe_gpu.has_value() && gpu_ms > 0.0 && gpu_ms < software_ms;
-    // 测速画布丢弃，交付**真实尺寸**的那块（`gpu` 已在上面按真实尺寸建好）
-    if (pick_gpu) {
-      choice.surface = std::move(*gpu);
-      choice.name = "gpu";
-    } else {
-      choice.surface = make_software();
-      choice.name = "software";
-    }
-    choice.note = std::format(
-        "auto 实测（缩尺合成负载 {}x{}，不含呈现）：软件 {:.2f} ms vs GPU {} {:.2f} ms → 选{}",
-        probe_width, probe_height, software_ms, gpu_label, gpu_ms, pick_gpu ? "GPU" : "软件");
-    return choice;
   }
 
   /// 画布像素 → DIB 像素并交给窗口。

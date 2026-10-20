@@ -484,10 +484,22 @@ void Canvas::clear(math::Color color) {
   scope.set_pixels(static_cast<std::uint64_t>(physical_width_) *
                    static_cast<std::uint64_t>(physical_height_));
   const std::uint32_t value = math::premultiply(color);
-  if (color.a == 255U) {
-    std::ranges::fill(pixels_, value);
-  } else {
-    for (auto& pixel : pixels_) pixel = value;
+  // **走 `simd::fill_row`，不用 `std::ranges::fill`**。
+  //
+  // 为何：`clear` 是每帧必发生的整屏写（1600×1000 要写 1.35 M 像素），
+  // 而 `std::ranges::fill` 对非 0 的 32 位值走的是**通用逐元素赋值**，
+  // 编译器不能把它变成 `memset`（值不是 0/0xFF 的重复字节）。
+  // `simd::fill_row` 是手写的 AVX2（8 像素/次）/SSE2（4 像素/次）广播写。
+  //
+  // 实测（`docs/PERF` 的记录口径 + 本轮 `frame_floor_probe` 对照）：
+  // 整屏 clear 曾是 **0.35 ns/px** 量级，而同一块画布的纯填充只需 **0.145 ns/px**
+  // ——差的正是这一条。
+  //
+  // 两点都不再需要旧的两个分支：`fill_row` 对任何 32 位值都是同一份实现，
+  // 不透明/半透明都只是数据不同（预乘已在上面算好）。
+  const std::size_t total = pixels_.size();
+  if (total > 0) {
+    simd::fill_row(pixels_.data(), total, value);
   }
   // 记下“刚清成什么颜色、且还没被任何绘制碰过”——供 `fill_rect` 跳过
   // 紧随其后的“整屏同色不透明底”（那是纯重复写）。只记不透明色：
@@ -1160,7 +1172,15 @@ void Canvas::fill_rect(math::Rect rect, const Paint& paint, float radius, DrawOp
         return;
       }
 
-      // 中带：直角矩形（走整行 `blend_span`）；裁剪限制在 [mid_top, mid_bottom)
+      // 中带：直角矩形，**走整行 `blend_span` 快路径**。
+      //
+      // 为何不能像上面三带那样只靠注释：这是本函数里最大的一块面积（卡片/面板的
+      // 中间区占 90%+），而 `rasterize_path_runs` 会把这块直边区也当路径光栅化
+      // （算覆盖率、merge runs），远比整行广播写贵。
+      //
+      // 等价性：中带是个**轴向对齐的直角矩形**，且已用 `push_clip_rect(mid)` 把
+      // 写限制在带内——逐像素与“位图填充”完全相同（无 AA 需求：四条边都是
+      // 整像素，见上面 `aligned` 的同一口径）。
       const math::Rect mid{rect.x, mid_top, rect.width, mid_bottom - mid_top};
       push_clip_rect(mid);
       Path mid_path;
@@ -1573,22 +1593,43 @@ void Canvas::draw_shadow_layered(math::Rect rect, float radius, math::Color key_
     int x_end = std::min(origin_x + last + 1, clip.right());
     if (x_begin >= x_end) continue;
     if (plain) {
-      // 分段贴：把本行切成「确定不被覆盖」的若干段（最多三段：被盖区左/右），
-      // 段内走 SIMD 逐像素 `src-over`。覆盖区内的像素会被随后铺上的不透明底色替换，
+      // 分段贴：把本行切成「确定不被覆盖」的若干段（被盖区左/右），段内走 SIMD
+      // 逐像素 `src-over`。覆盖区内的像素会被随后铺上的不透明底色替换，
       // 跳过与不跳过逐像素等价（见上）。
+      //
+      // ⚠ **分段要看“跳过的量够不够本”**（2026-10-20 实测，`tools/simd_short_row_probe.cpp`）。
+      //
+      // 直接测「整行一次」vs「切两段跳过中间」（140px 宽，两侧均分剩余，多轮取最小）：
+      //
+      // | 跳过 | 两侧各 | 收益 |
+      // |---|---|---|
+      // | 40px | 50px | **+16~18%** |
+      // | 80px | 30px | **−6~−10%** |
+      // | 120px | 10px | **+55~62%** |
+      //
+      // 非单调：两侧 30px 反而最差（落在 `over_row` 向量主循环的部分迭代区间，
+      // 尾巴走标量）；两侧 10px 很快（数据量本身就小）。单价分布（同探针）：
+      // 长 1~6 → 3.6~6.1 ns/px、长 8 → 0.85、长 16 → 0.47、长 ≥32 → 0.28~0.33。
+      //
+      // 因此判据用**跳过量**而不是段长：跳过越多总是越便宜的，但少于 ~40px 时
+      // 省下的混合抵不过多一次调用的开销。
+      constexpr int kMinSkipPixels = 40;
       if (!covered_inner.is_empty()) {
         const CoveredSpan span = covered_span_at(covered_inner, covered_radius, y);
         if (!span.empty()) {
           const int cut_begin = std::max(x_begin, span.begin);
           const int cut_end = std::min(x_end, span.end);
-          if (cut_end > cut_begin) {
-            if (cut_begin > x_begin) {
+          const int left_len = cut_begin - x_begin;
+          const int right_len = x_end - cut_end;
+          const int skipped = cut_end - cut_begin;
+          if (skipped >= kMinSkipPixels) {
+            if (left_len > 0) {
               simd::over_row(dst + x_begin, src + (x_begin - origin_x),
-                             static_cast<std::size_t>(cut_begin - x_begin));
+                             static_cast<std::size_t>(left_len));
             }
-            if (cut_end < x_end) {
+            if (right_len > 0) {
               simd::over_row(dst + cut_end, src + (cut_end - origin_x),
-                             static_cast<std::size_t>(x_end - cut_end));
+                             static_cast<std::size_t>(right_len));
             }
             continue;
           }

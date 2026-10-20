@@ -317,6 +317,8 @@ struct CodeEditorPage : Component {
   State<std::size_t> bottom_tab_{0};
   /// 日志/分支已读（帧首泵读；git 操作后置 false 重读）。
   bool git_log_loaded_{false};
+  /// **正在后台读**（防止把同一个读任务每帧重复提交）。
+  bool git_log_loading_{false};
   /// 需要读日志（Git 标签可见或状态栏入口点过；泵里消费）。
   bool git_log_wanted_{false};
   std::vector<gbcode::LogEntry> git_log_{};
@@ -1381,7 +1383,16 @@ auto shutdown() -> void;
 
 
   /// Git 工具窗的数据读取（帧首泵做——渲染期起子进程会崩，见 build_git_view 注释）。
-   void ensure_git_log();
+  ///
+  /// **读操作在后台线程**（9 条 git 子进程，实测同步时阻塞主线程 3.3 秒），
+  /// 读完后经 `post_ui` 回主线程交给 `adopt_git_log`。
+  void ensure_git_log();
+
+  /// 把一批 git 快照落到成员上（**主线程**；由 `ensure_git_log` 的后台任务调回）。
+  void adopt_git_log(gbcode::LogSnapshot snapshot);
+
+  /// 同步读一遍（无调度器时的退路：单测/嵌入式）。
+  void load_git_log_sync();
 
 
   /// 比较视图的数据读取：已下线但函数体保留（见 page_actions.cpp；无泵调用）。

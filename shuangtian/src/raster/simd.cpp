@@ -121,12 +121,24 @@ namespace {
 }
 
 /// 逐像素预乘 `src-over` 的标量参考实现（`over_row` 的三路基准，语义即它的契约）。
+///
+/// **用无除法等价式**：`(x * n + 127) / 255` → `((x * n + 128) * 257) >> 16`。
+///
+/// 为何重要：本函数每像素本来要做 **4 次整数除法**，而 x86 整数除法是 20~40 周期/次。
+/// 在长行上这笔成本被带宽掩盖，但**短行摊不开**：实测长 1~6 时是长 512 的
+/// **11~20 倍 ns/px**（`tools/simd_short_row_probe.cpp`），而圆角控件每行只有几像素、
+/// 卡片类小形状（96×32 r6）整体就在这一档——那是界面里最常见的形状。
+///
+/// 等价性：`(x*n+127)/255 == ((x*n+128)*257)>>16` 对 `x∈[0,255]、n∈[0,255]`
+/// **穷举验证一致**（65536 组，`tools/mul255_equiv_probe.cpp`）。
+///
+/// 为何不是 `x*n/255` 后再补：那会把“向上取整”丢掉，半透明像素系统性偏暗。
 [[nodiscard]] auto over_scalar(std::uint32_t dst, std::uint32_t src) noexcept -> std::uint32_t {
   const std::uint32_t source_alpha = src & 0xFFU;
   if (source_alpha == 0U) return dst;
   const std::uint32_t inverse = 255U - source_alpha;
   const auto over = [inverse](std::uint32_t source, std::uint32_t destination) noexcept {
-    return source + (destination * inverse + 127U) / 255U;
+    return source + (((destination * inverse + 128U) * 257U) >> 16U);
   };
   return pack(over(channel(src, 24), channel(dst, 24)),
               over(channel(src, 16), channel(dst, 16)),
@@ -255,6 +267,25 @@ void erase_row(std::uint32_t* dst, std::size_t count, std::uint8_t alpha) noexce
 
 void over_row(std::uint32_t* dst, const std::uint32_t* src, std::size_t count) noexcept {
   if (count == 0) return;
+  // **短行直接走标量，不碰 SIMD 常量**。
+  //
+  // 为何：下面每条向量路径开头都要构造 3 个广播常量（`_mm256_set1_*`），
+  // 而 `count < 8`（AVX2）/ `< 4`（SSE2）时**一个向量迭代都不执行**——
+  // 纯白花。实测代价（`tools/simd_short_row_probe.cpp`，ns/px）：
+  //   长 1~6 → **3.79~5.98**（是长 512 的 **9~14 倍**）；长 8 → 0.89；长 ≥16 → 0.46。
+  //
+  // 为何短行很常见：贴图合成（`blit_geometry_sprite`）**逐行**调本函数，
+  // 而圆角控件的上下圆角带每行只有几个像素；卡片/按钮类小形状（
+  // 96×32 r6）整体就落在这一档——实测每像素成本是小面板的 13 倍。
+  //
+  // 阈值取 8：AVX2 宽度。`count < 8` 时向量主循环本来就一次都不跑，
+  // 只剩下“构造常量 + 进入标量尾巴”这两笔开销，直接跳过它们。
+  if (count < 8) {
+    for (std::size_t index = 0; index < count; ++index) {
+      dst[index] = over_scalar(dst[index], src[index]);
+    }
+    return;
+  }
 #if ST_SIMD_AVX2
   if (cpu_has_avx2()) {
     const __m256i low_mask = _mm256_set1_epi16(0x00FF);

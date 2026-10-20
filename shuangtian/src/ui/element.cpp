@@ -403,7 +403,16 @@ void Element::record_damage() const noexcept {
     top = current;
   }
   if (extras_if_any() == nullptr || extras().paint_margin_hint < 0.0f) {
-    // 从未绘制过 → 绘制外扩（阴影/发光）未知：保守要求整帧，不能只重画 bounds。
+    // **零几何元素不占像素：它的变更不可能造成可见损坏，不该要求整帧。**
+    //
+    // 为何这条单独成立（不依赖 margin 是否已知）：`bounds` 为空时，
+    // `bounds_.inflate(margin)` 也只会得到 margin 大小的包围盒——而它实际画不出任何东西
+    // （`Element::paint` 的 `paint_box` 第一行就是 `if (bounds_.is_empty()) return;`）。
+    //
+    // 实测代价：gbcode 稳态下一次改文字事件里有 **226 次**这样的 `needs_full`
+    // （git/终端面板隐藏时的 0×0 控件），于是每次交互都退化成整帧。
+    if (bounds_.is_empty()) return;
+    // 非零几何且从未绘制过 → 外扩量未知，保守要求整帧。
     top->extras().damage_needs_full = true;
     top->extras().damage_valid = true;
     return;
@@ -435,6 +444,13 @@ void Element::mark_layout_dirty() {
     current->layout_dirty_ = true;
     current->dirty_ = true;
   }
+  // **刻意不在这里 `record_damage()`**。
+  //
+  // 重排会挑动兄弟（挨着排的元素跟着位移），波及范围难界定——因此“需要重排”
+  // 在 `paint_frame` 里走的是**整帧**（`damage_empty` 或 `layout()` 的几何签名）。
+  // 若在这里上报一个“本元素 bounds”的窄脏区，会让布局变更也能通过 `use_full`
+  // 检查走局部重绘，**而那个窄区盖不住被挑动的兄弟**。
+  // 回归：`tests/ui_damage_test.cpp` 的 `damage_layout_change_falls_back_to_full_frame`。
 }
 
 void Element::clear_dirty() noexcept {
@@ -885,6 +901,15 @@ auto Element::paint_text(const RenderContext& context, raster::Surface& canvas, 
 }
 
 void Element::paint(const RenderContext& context, raster::Surface& canvas) const {
+  // **外扩量回填必须在 `visible_` 检查之前**。
+  //
+  // 为何：`paint_margin_hint` 是“元素标脏时能安全上报多大损坏区”的依据，
+  // 而它只能在绘制时拿到 `RenderContext`。旧位置在 visible 之后 ——
+  // 于是**隐藏元素永远回填不了**，margin 恒为初值 −1，它一标脏就退化成整帧。
+  //
+  // 回填本身只算一次浮点（`paint_margin` 只依赖主题，与元素无关），
+  // 放在这里对可见元素零额外开销。
+  extras().paint_margin_hint = paint_margin(context);
   if (!visible_) return;
   // **视口剔除**：与当前裁剪区无交集就整块不画。
   //
@@ -904,8 +929,7 @@ void Element::paint(const RenderContext& context, raster::Surface& canvas) const
                                   static_cast<float>(physical.width) * inv,
                                   static_cast<float>(physical.height) * inv};
     const float margin = paint_margin(context);
-    // 留存本次绘制的外扩量：元素后续标脏时据此算损坏区（增量重绘）。
-    extras().paint_margin_hint = margin;
+    // 外扩量已在函数入口回填（见那里的说明：隐藏元素也要回填）。
     if (!subtree_may_paint(*this, logical_clip, margin)) return;
   }
   if (context.painted_elements != nullptr) ++*context.painted_elements;

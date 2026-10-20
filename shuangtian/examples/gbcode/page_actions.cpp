@@ -1317,21 +1317,53 @@ void CodeEditorPage::load_active_text() {
 
   /// Git 工具窗的数据读取（帧首泵做——渲染期起子进程会崩，见 build_git_view 注释）。
   void CodeEditorPage::ensure_git_log() {
-    if (!git_log_wanted_ || git_log_loaded_) return;
+    if (!git_log_wanted_ || git_log_loaded_ || git_log_loading_) return;
     if (workspace_.empty()) return;
     git_log_wanted_ = false;
-    git_log_ = gbcode::read_log(workspace_, 200);
-    git_branches_ = gbcode::read_branches(workspace_);
-    // 标签 / 远程 / 暂存 / 引用 / 上游 / 多步操作状态 / 审计：与日志同一批读完
-    //（都是“回顾面”，一次读完最省进程数；分开读只会在切标签时卡一下）。
-    git_tags_ = gbcode::read_tags(workspace_);
-    git_remotes_ = gbcode::read_remotes(workspace_);
-    git_stashes_ = gbcode::read_stashes(workspace_);
-    git_refs_ = gbcode::read_refs(workspace_);
-    git_upstream_ = gbcode::read_upstream(workspace_);
-    git_operation_ = gbcode::read_operation_state(workspace_);
-    git_audit_ = gbcode::read_audit(workspace_, 20);
+    // **这批读操作放后台**。
+    //
+    // 为何必须：这里一口气跑 9 条 git 子进程（log/branches/tags/remotes/stashes/
+    // refs/upstream/operation/audit）。在主线程同步做时，实测 **3300 ms**
+    // （gbcode 打开 `D:/coding/modeltrain-be` 这类大仓库）——而它发生在**首帧之后的第一帧**，
+    // 用户看到的就是“界面出来了，但点不动、拖不动、两秒后才活”。
+    //
+    // 分离点：**读数据**（纯 git 子进程，不碰 UI 树）在 worker；
+    // **写 `git_*` 成员与 `State`**（会触发重组/标脏）必须回主线程——
+    // 从工作线程写 `State` 是数据竞争（见 `st/app/async.hpp` 的线程模型说明）。
+    //
+    // `git_log_loading_` 是关键：没有它，后台任务跑着的那几帧里
+    // `git_log_wanted_` 会被反复置真（渲染期会再要），于是**每帧都提交一个新任务**。
+    if (layout_tasks_ == nullptr) {
+      // 没有调度器（单测/嵌入式）：退回同步，行为与旧版一致。
+      load_git_log_sync();
+      return;
+    }
+    git_log_loading_ = true;
+    const std::string workspace = workspace_;
+    st::app::Tasks* tasks = layout_tasks_;
+    tasks->run_async([this, tasks, workspace](std::stop_token) {
+      // 后台只算数据（纯 git 子进程，不碰 UI 树）。
+      gbcode::LogSnapshot snapshot = gbcode::read_log_snapshot(workspace);
+      // 回主线程落地（`snapshot` 是局部变量，移动进去）。
+      tasks->post_ui([this, snapshot = std::move(snapshot)]() mutable {
+        adopt_git_log(std::move(snapshot));
+      });
+    });
+  }
+
+  /// 把一批 git 快照落到成员上（**主线程**；只有 `ensure_git_log` 与退路会调）。
+  void CodeEditorPage::adopt_git_log(gbcode::LogSnapshot snapshot) {
+    git_log_ = std::move(snapshot.log);
+    git_branches_ = std::move(snapshot.branches);
+    git_tags_ = std::move(snapshot.tags);
+    git_remotes_ = std::move(snapshot.remotes);
+    git_stashes_ = std::move(snapshot.stashes);
+    git_refs_ = std::move(snapshot.refs);
+    git_upstream_ = std::move(snapshot.upstream);
+    git_operation_ = std::move(snapshot.operation);
+    git_audit_ = std::move(snapshot.audit);
     git_log_loaded_ = true;
+    git_log_loading_ = false;
     // 读完了**要标脏**：`git_*` 全是普通成员，数据进来了界面不会自己重画（旧写法
     // 靠 `status_.set(...)` 的副作用触发重组——而当文案与上次**逐字相同时**
     // `State::set` 相等早退，于是“别的地方变了、这批数据也变了、但界面不动”）。
@@ -1341,6 +1373,11 @@ void CodeEditorPage::load_active_text() {
     if (git_operation_.active()) extra = std::format(" · {} 进行中", git_operation_.kind);
     status_.set(std::format("Git：{} 条提交 · {} 个分支 · {} 个标签{}", git_log_.size(),
                             git_branches_.size(), git_tags_.size(), extra));
+  }
+
+  /// 同步版（无调度器时的退路，行为与旧实现逐行一致）。
+  void CodeEditorPage::load_git_log_sync() {
+    adopt_git_log(gbcode::read_log_snapshot(workspace_));
   }
 
 

@@ -1143,4 +1143,20 @@ auto read_audit(const std::string& cwd, std::size_t limit) -> std::vector<std::s
   return {all.end() - static_cast<std::ptrdiff_t>(limit), all.end()};
 }
 
+auto read_log_snapshot(const std::string& cwd) -> LogSnapshot {
+  LogSnapshot snapshot;
+  snapshot.log = read_log(cwd, 200);
+  snapshot.branches = read_branches(cwd);
+  // 标签 / 远程 / 暂存 / 引用 / 上游 / 多步操作状态 / 审计：与日志同一批读完
+  //（都是“回顾面”，一次读完最省进程数；分开读只会在切标签时卡一下）。
+  snapshot.tags = read_tags(cwd);
+  snapshot.remotes = read_remotes(cwd);
+  snapshot.stashes = read_stashes(cwd);
+  snapshot.refs = read_refs(cwd);
+  snapshot.upstream = read_upstream(cwd);
+  snapshot.operation = read_operation_state(cwd);
+  snapshot.audit = read_audit(cwd, 20);
+  return snapshot;
+}
+
 }  // namespace gbcode

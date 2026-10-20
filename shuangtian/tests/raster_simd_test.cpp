@@ -11,6 +11,7 @@
 
 #include <format>
 
+#include "st/math/color.hpp"
 #include "st/raster/simd.hpp"
 #include "st/test/test.hpp"
 
@@ -159,4 +160,49 @@ ST_TEST(simd_convert_rgba_to_xrgb_matches_reference) {
   }
   // count=0 不得触碰指针（传 nullptr 是合法调用）。
   st::raster::simd::convert_rgba_to_xrgb_row(nullptr, nullptr, 0);
+}
+
+ST_TEST(simd_over_row_matches_reference_across_lengths) {
+  // `over_row` 在**全部长度**上与标量参考逐像素一致，特别是短行。
+  //
+  // 为何要锁住：`over_row` 里有一条 `count < 8 → 纯标量` 的提前返回，
+  // 它跳过了向量路径开头的 3 个广播常量构造。这条优化本身不改语义，
+  // 但它把短行引到了一条**独立代码路径**。
+  //
+  // 参考用 `blend_reference`（它内部是**经典除法** `(x*n+127)/255`），
+  // 而 `over_scalar` 已改为无除法等价式 `((x*n+128)*257)>>16`——
+  // 于是本用例同时充当「去除法等价性」的护栏。
+  //
+  // ⚠ **通道值必须覆盖到会分歧的那些对**：`(x*n+127)/255` 与
+  // `(x*n)/255`（少了取整偏置）在 x∈[0,255]×n∈[0,255] 里**有 31770 组不同**
+  // （近一半），但只取几个“好看的”颜色（如 0x102030）一个都碰不到——
+  // 实测曾用固定色跑 726 条断言全绿，而把偏置删掉也全绿（假护栏）。
+  // 所以这里让通道值与 alpha **交叉遍历**几个关键值。
+  constexpr std::uint32_t kChannels[] = {0U, 1U, 2U, 63U, 127U, 128U, 129U, 200U, 254U, 255U};
+  constexpr std::size_t kLengths[] = {1, 2, 3, 4, 6, 7, 8, 9, 15, 16, 17, 33};
+
+  for (const std::size_t count : kLengths) {
+    for (const std::uint32_t down : kChannels) {          // 目标像素通道值
+      for (const std::uint32_t channel : kChannels) {     // 源通道值
+        for (const std::uint32_t src_alpha : {0U, 1U, 64U, 128U, 200U, 254U, 255U}) {
+          // 预乘源：R/G/B 已乘 alpha（与 `over_row` 的契约一致）。
+          const std::uint32_t premul = static_cast<std::uint32_t>(
+              static_cast<double>(channel) * static_cast<double>(src_alpha) / 255.0 + 0.5);
+          const std::uint32_t source =
+              (premul << 24U) | (premul << 16U) | (premul << 8U) | src_alpha;
+          const std::uint32_t dest = (down << 24U) | (down << 16U) | (down << 8U) | down;
+
+          std::vector<std::uint32_t> src_row(count, source);
+          std::vector<std::uint32_t> actual(count, dest);
+          st::raster::simd::over_row(actual.data(), src_row.data(), count);
+
+          // 参考的 `alpha` 参数取 255（不再额外缩放），只用源像素自身的 alpha。
+          const std::uint32_t expected = blend_reference(dest, source, 255U);
+          for (std::size_t index = 0; index < count; ++index) {
+            ST_CHECK_EQ(actual[index], expected);
+          }
+        }
+      }
+    }
+  }
 }

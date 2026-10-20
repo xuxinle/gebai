@@ -153,6 +153,56 @@
       "sources": ["tools/sprite_equiv_probe.cpp"],
       "exclude_sources": ["src/pkg/*"]
     },
+    "shadow_covered_probe": {
+      "kind": "executable",
+      "sources": ["tools/shadow_covered_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "shadow_inside_ratio": {
+      "kind": "executable",
+      "sources": ["tools/shadow_inside_ratio.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "overdraw_probe": {
+      "kind": "executable",
+      "sources": ["tools/overdraw_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "round_rect_cost_probe": {
+      "kind": "executable",
+      "sources": ["tools/round_rect_cost_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "round_rect_fixed_cost_probe": {
+      "kind": "executable",
+      "sources": ["tools/round_rect_fixed_cost_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "mul255_equiv_probe": {
+      "kind": "executable",
+      "sources": ["tools/mul255_equiv_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "frame_floor_probe": {
+      "kind": "executable",
+      "sources": ["tools/frame_floor_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "round_rect_bucket_probe": {
+      "kind": "executable",
+      "sources": ["tools/round_rect_bucket_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "sprite_color_key_probe": {
+      "kind": "executable",
+      "sources": ["tools/sprite_color_key_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "simd_short_row_probe": {
+      "kind": "executable",
+      "sources": ["tools/simd_short_row_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
     "clear_fill_merge_probe": {
       "kind": "executable",
       "sources": ["tools/clear_fill_merge_probe.cpp"],

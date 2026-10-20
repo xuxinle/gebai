@@ -525,4 +525,25 @@ enum class Danger : std::uint8_t {
 [[nodiscard]] auto read_audit(const std::string& cwd, std::size_t limit = 100)
     -> std::vector<std::string>;
 
+/// 一批「回顾面」数据的快照（日志/分支/标签/远程/暂存/引用/上游/操作态/审计）。
+///
+/// 为何要一个结构：这批读取共 9 条 git 子进程，实测在真实仓库上要 **~3.3 秒**。
+/// 放在主线程同步做会让界面“出来了但点不动”。拆成「后台算数据 → 主线程落地」时，
+/// 后台不能直接写页面的成员与 `State`（重组单线程，并发写是数据竞争），
+/// 所以用这份纯数据整包过手。
+struct LogSnapshot {
+  std::vector<LogEntry> log;
+  std::vector<BranchInfo> branches;
+  std::vector<TagInfo> tags;
+  std::vector<RemoteInfo> remotes;
+  std::vector<StashEntry> stashes;
+  std::vector<RefInfo> refs;
+  std::string upstream;
+  OperationState operation;
+  std::vector<std::string> audit;
+};
+
+/// 一次读完以上全部（同步、阻塞；调用方负责别在主线程调）。
+[[nodiscard]] auto read_log_snapshot(const std::string& cwd) -> LogSnapshot;
+
 }  // namespace gbcode
