@@ -806,3 +806,60 @@ ST_TEST(layered_shadow_is_not_slower_than_two_draws) {
             twice_ms / std::max(merged_ms, 1e-9));
   ST_CHECK(merged_ms < twice_ms);
 }
+
+/// **阴影的“按同 α 游程分组”必须与逐像素混合逐像素相同**。
+///
+/// `draw_shadow` 的 SrcOver 快路径现在把行内**连续同遮罩值**的像素当作一段：
+/// 长段（≥ 8）走 `simd::blend_row`，短段逐像素。这条优化很容易写错游程边界
+/// （少一像素 / 多一像素 / 漏掉最后一段），而错误**只在半透明边缘可见**——
+/// 边界像素少画一次就是“阴影少一点”，肉眼几乎看不出。
+///
+/// 参照实现：把同一遮罩用**纯逐像素**方式再合一遍。两者必须 Δ=0。
+///
+/// ⚠ 为何不复用 `layered_shadow_*` 那几条：它们验的是 `draw_shadow_layered`
+/// （走 `covered_region` 的另一条分支），而本优化在 `draw_shadow` 的普通路径上。
+/// 实测：把游程起点错写成 `run_end = x`（长度归零、一声不响地不画）时，
+/// 那 6 条用例**全部仍然绿**——它们根本盖不到这段代码。
+ST_TEST(shadow_run_grouping_matches_per_pixel_blend) {
+  // 风参数取真实界面里的量级（模糊半径决定梯度的平缓度，而这直接影响
+  // “同 α 游程能有多长”——游程太短的话分组优势也就不存在，但**等价性不受影响**）。
+  struct Case {
+    const char* name;
+    st::math::Rect rect;
+    float radius;
+    float blur;
+    st::math::Color color;
+    float opacity;
+  };
+  const Case cases[] = {
+      {"小卡 blur16", st::math::Rect{40.0f, 40.0f, 120.0f, 64.0f}, 8.0f, 16.0f,
+       st::math::Color{0, 0, 0, 90}, 1.0f},
+      {"中卡 blur24", st::math::Rect{40.0f, 40.0f, 200.0f, 120.0f}, 12.0f, 24.0f,
+       st::math::Color{0, 0, 0, 90}, 1.0f},
+      {"半透明 opacity 0.35", st::math::Rect{40.0f, 40.0f, 200.0f, 120.0f}, 12.0f, 24.0f,
+       st::math::Color{0, 0, 0, 90}, 0.35f},
+      {"彩色阴影", st::math::Rect{40.0f, 40.0f, 200.0f, 120.0f}, 12.0f, 20.0f,
+       st::math::Color{0x20, 0x60, 0xC0, 120}, 1.0f},
+      {"直角 blur8", st::math::Rect{40.0f, 40.0f, 160.0f, 90.0f}, 0.0f, 8.0f,
+       st::math::Color{0, 0, 0, 90}, 1.0f},
+  };
+
+  for (const Case& item : cases) {
+    Canvas grouped = make_canvas();
+    grouped.set_shadow_run_grouping_enabled(true);
+    grouped.draw_shadow(item.rect, item.radius, item.blur, item.color,
+                        st::math::Point{0.0f, 4.0f}, {.opacity = item.opacity});
+
+    // 参照：**同一进程、同一块画布、同一份代码**，只关掉分组开关。
+    Canvas reference = make_canvas();
+    reference.set_shadow_run_grouping_enabled(false);
+    reference.draw_shadow(item.rect, item.radius, item.blur, item.color,
+                          st::math::Point{0.0f, 4.0f}, {.opacity = item.opacity});
+
+    const PixelDiff result = diff(grouped, reference);
+    st::print("[shadow-runs] {}：超差 {} px（Δ≤{}）\n", item.name, result.differing,
+              result.max_delta);
+    ST_CHECK(result.differing == 0);
+  }
+}
+

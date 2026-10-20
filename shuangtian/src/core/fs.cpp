@@ -349,6 +349,16 @@ auto modified_ns(std::string_view path) -> Result<std::int64_t> {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(since).count();
 }
 
+auto touch_now(std::string_view path) -> Status {
+  std::error_code ec;
+  // 用文件系统时钟（`file_time_type::clock`）而不是系统时钟：
+  // `last_write_time` 就在这个时基上，拿 `system_clock::now()` 赋值需额外转换
+  // 且容易在不同平台产生偏移。
+  sys::last_write_time(to_std_path(path), sys::file_time_type::clock::now(), ec);
+  if (ec) return unexpected(ErrorCode::NotFound, io_error("touch", path, ec).message);
+  return ok();
+}
+
 auto list_dir(std::string_view path) -> Result<std::vector<DirEntry>> {
   std::error_code ec;
   sys::directory_iterator iterator(to_std_path(path), ec);

@@ -90,6 +90,14 @@ struct DirEntry {
 [[nodiscard]] auto file_size(std::string_view path) -> Result<std::uint64_t>;
 /// 最后修改时间（Unix 纪元纳秒；不存在返回错误）。
 [[nodiscard]] auto modified_ns(std::string_view path) -> Result<std::int64_t>;
+/// 把最后修改时间置为“现在”（等价 `touch`）。
+///
+/// 为何需要：`std::filesystem::copy_file` 在 Windows 上（经 `CopyFile`）
+/// **保留源文件时间戳**。对象缓存的 restore 用它把缓存对象拷回来，于是
+/// “内容已是新的、mtime 还是旧条目那时的”——任何依赖 mtime 的后续判断
+/// （如“对象比产物新吗”）都会被误导。restore 后显式 touch 一次，
+/// 让“.o 是刚构建过的”这个语义在时间戳上也成立。
+[[nodiscard]] auto touch_now(std::string_view path) -> Status;
 
 [[nodiscard]] auto list_dir(std::string_view path) -> Result<std::vector<DirEntry>>;
 /// 递归遍历（`max_depth` 为 0 表示仅本层；结果按路径字典序）。

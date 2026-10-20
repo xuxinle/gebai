@@ -198,6 +198,41 @@
       "sources": ["tools/sprite_color_key_probe.cpp"],
       "exclude_sources": ["src/pkg/*"]
     },
+    "round_rect_route_probe": {
+      "kind": "executable",
+      "sources": ["tools/round_rect_route_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "round_rect_accuracy_probe": {
+      "kind": "executable",
+      "sources": ["tools/round_rect_accuracy_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "round_rect_diff_locate_probe": {
+      "kind": "executable",
+      "sources": ["tools/round_rect_diff_locate_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "shadow_mask_distribution_probe": {
+      "kind": "executable",
+      "sources": ["tools/shadow_mask_distribution_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "shadow_run_length_probe": {
+      "kind": "executable",
+      "sources": ["tools/shadow_run_length_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "shadow_cost_breakdown_probe": {
+      "kind": "executable",
+      "sources": ["tools/shadow_cost_breakdown_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "shadow_blend_route_probe": {
+      "kind": "executable",
+      "sources": ["tools/shadow_blend_route_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
     "simd_short_row_probe": {
       "kind": "executable",
       "sources": ["tools/simd_short_row_probe.cpp"],

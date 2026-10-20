@@ -346,6 +346,15 @@ struct ObjectCache {
   }
   if (auto status = fs::copy_file(cached_object, unit.object); !status) return false;
   if (auto status = fs::copy_file(cached_depfile, unit.depfile); !status) return false;
+  // **restore 后把 `.o` 的 mtime 置为现在**。
+  //
+  // 为何必需：Win32 `CopyFile`（`std::filesystem::copy_file` 在 Windows 上的实现）
+  // **保留源文件时间戳**。于是缓存 restore 出来的对象“内容是新条目的，mtime 却停在
+  // 缓存条目创建的那一刻”。下游任何按时间比较的判据都会被误导，典型是
+  // 链接跳过里的“.o 比产物旧吗”——旧 mtime 让它放行，于是**产物停留在旧代码上**。
+  //（链接指纹已同时加入 (mtime, size)，这里再 touch 一次，让两套判据一致、
+  //  且“刚构建过”这个语义在时间戳上也成立。）
+  (void)fs::touch_now(unit.object);
   // **同步落工程内侧边车**：restore 复制回来的对象进入快路径（下一轮
   // `needs_rebuild` 直接判它），侧边车让快路径读到同一套 (mtime, size) 快照——
   // 两条路径一个真值源。旧缓存条目（无 .meta，快照空）时这里不写：该对象走
@@ -2170,9 +2179,26 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   // 强制全量重建后立刻降到 2.99MB（release 是 2.95MB）。
   //
   // 因此把"上次链接用了哪些对象 + 什么标志"记成指纹，由它决定能否跳过。
+  //
+  // ⚠ **对象的 (mtime, size) 必须混进指纹**（2026-10-20 修）：
+  // 共享对象缓存 restore 时用 `copy_file`，Windows 的 `CopyFile` **保留源文件时间戳**
+  // ——于是"内容换成了新对象、但 .o 的 mtime 还是旧条目那时的时间"。此时：
+  //   · `rebuilt == 0`（本轮没重编，是从缓存拿的）
+  //   · `.o` 的 mtime 比产物旧 → 时间戳比较放行
+  // 两条判据都不响，**产物一声不响地停留在旧代码上**。实测现象就是
+  // "源码明明改了、测试却跑的是旧行为"，而且要 `--force` 才能醒。
+  // 把 (mtime, size) 入指纹后，内容一变指纹就变，不再依赖时间先后。
   const auto link_fingerprint = [&]() -> std::string {
     std::string material(compiler_kind_name(toolchain->kind));
-    for (const auto& unit : link_units) material.append("\n").append(unit.object);
+    for (const auto& unit : link_units) {
+      material.append("\n").append(unit.object);
+      // 对象身份：mtime + size。size 抓“内容长度变了”，mtime 抓“重建过”。
+      // 两者都不看时，缓存 restore 换内容而不换时间戳的场景就会漏（见上）。
+      const auto time = fs::modified_ns(unit.object).value_or(0);
+      const auto bytes = fs::file_size(unit.object).value_or(0);
+      material.append("\t").append(std::to_string(time));
+      material.append("\t").append(std::to_string(bytes));
+    }
     for (const auto& flag : *flags) material.append("\n@").append(flag);
     return std::string(st::hash::fnv1a64_hex(material));
   }();

@@ -1038,21 +1038,32 @@ void Canvas::blend_coverage_runs(int y, std::span<const CoverageRun> runs, const
 void Canvas::fill_path(const Path& path, const Paint& paint, DrawOptions options) {
   OpScope scope(*this, PaintOp::FillPath);
   const Path& physical = scale_ == 1.0f ? path : path.scaled(scale_);
+  if (fill_physical_path_with_cache(path, physical, paint, options)) return;
+  rasterize_path_runs(physical, paint, options);
+}
+
+/// 以**物理坐标路径**尝试几何贴图缓存（命中或建图后已交付则返回 true）。
+///
+/// `source` 用来算几何键（必须是**未缩放的源路径**——键里混了 `scale`，
+/// 同一路径在 1x/2x 下必须是不同条目），`physical` 用来建贴图（已乘 `scale_`）。
+///
+/// 抽出来是为了两个调用方共用：`fill_path`（逻辑路径 × scale）与
+/// `fill_rect` 的圆角分支（**建路径时就已经是物理坐标**，再交给 `fill_path`
+/// 会被双重缩放）。
+auto Canvas::fill_physical_path_with_cache(const Path& source, const Path& physical,
+                                           const Paint& paint, DrawOptions options) -> bool {
   // **缓存关闭时完全不算键**：算键要遍历两遍命令流（`path_control_origin` + `path_geometry_key`），
   // 对“一条便宜的小路径”是可观的比例开销——实测它把“环形 vs 描边”的性能对照用例
   // 从 1.35× 抬成噪声（两者都白付这两遍）。开启时这点代价只付一次、换来整块贴图。
-  if (geometry_cache_enabled_ && geometry_sprite_cache_enabled()) {
-    const float tolerance = options.antialias ? 0.25f : 0.5f;
-    const math::Point origin = path_control_origin(path, scale_);
-    const std::uint64_t key =
-        path_geometry_key(path, scale_, static_cast<std::uint64_t>(tolerance * 100000.0f), origin);
-    const auto build_sprite_path = [&physical, origin]() -> Path {
-      return physical.translated(-origin.x, -origin.y);
-    };
-    if (try_geometry_sprite(key, paint, options.opacity, options.blend, build_sprite_path, origin))
-      return;
-  }
-  rasterize_path_runs(physical, paint, options);
+  if (!geometry_cache_enabled_ || !geometry_sprite_cache_enabled()) return false;
+  const float tolerance = options.antialias ? 0.25f : 0.5f;
+  const math::Point origin = path_control_origin(physical, 1.0f);
+  const std::uint64_t key =
+      path_geometry_key(source, scale_, static_cast<std::uint64_t>(tolerance * 100000.0f), origin);
+  const auto build_sprite_path = [&physical, origin]() -> Path {
+    return physical.translated(-origin.x, -origin.y);
+  };
+  return try_geometry_sprite(key, paint, options.opacity, options.blend, build_sprite_path, origin);
 }
 
 void Canvas::fill_rect(math::Rect rect, const Paint& paint, float radius, DrawOptions options) {
@@ -1137,68 +1148,37 @@ void Canvas::fill_rect(math::Rect rect, const Paint& paint, float radius, DrawOp
   //
   // 注意这不是“用贴图代替矢量”——是“同一个矢量形状重复画时只光栅化一次”，
   // 任意缩放/DPI 仍由 `rect`/`radius` 进键区分（不同尺寸 = 不同条目）。
-  if (radius > 0.0f) {
-    // **大圆角矩形拆分**：中间一大块本质是直角矩形，不必走通用路径光栅化。
+    if (radius > 0.0f) {
+    // **先试几何贴图缓存（整块）**。
     //
-    // 为何值：实测（2400×1600 画布、r=8）圆角矩形比直角慢 1.76~4.2×，
-    // 而拆分后单次快 1.69~2.96×：
-    //   1600×1000  0.562 → 0.333 ms
-    //    800×600   0.199 → 0.100 ms
-    //    400×300   0.079 → 0.027 ms
-    // 根因：`fill_path` 会把整个矩形（含中间大片直线区）当路径光栅化，
-    // 而 `radius == 0` 有整行 `blend_span` 快路径（见上面 `simple` 分支）却用不上。
+    // 为何值得（实测 `tools/round_rect_route_probe.cpp`，1600×1000）：
+    // 圆角的几何（宽/高/圆角半径）在帧间完全不变，而每帧都重光栅化：
     //
-    // **等价性由裁剪保证**：三条带用 `push_clip_rect` 切成**互不重叠**的水平区，
-    // 每个像素只会被写一次。因此任意 alpha / opacity / blend 都逐像素等价——
-    // 重叠绘制会让半透明颜色变深，这是必须避开的（不能用“画完再盖”）。
+    //   形状                 不走缓存     贴图命中     倍数
+    //   按钮 96×32 r6        0.017 ms     0.002 ms    6.88×
+    //   卡片 320×160 r12     0.043 ms     0.015 ms    2.86×
+    //   面板 720×480 r16     0.129 ms     0.118 ms    1.10×
     //
-    // 只在圆角足够小、中间确有实块时拆分（`radius * 2 < 高`）；否则退回整块路径。
-    const float diameter = radius * 2.0f;
-    const bool splittable = diameter < rect.height && diameter < rect.width;
-    if (splittable) {
-      // **分界必须对齐到整像素**：`push_clip_rect` 内部会对裁剪矩形 `round_out()`（向外取整），
-      // 若分界落在非整数上（如 `y + radius = 28.7`），上带与中带的裁剪区会**重叠**
-      // 一个像素行，那一行被画两次（半透明变深）。
-      //
-      // 实测：不对齐时非整坐标/非整尺寸用例出现 2~4 像素差、最大通道差 24~35；
-      // 对齐后全部为 0。
-      //
-      // 取整方向：中带的上下界分别**向下/向上**取整（保证中带不超出矩形），
-      // 剩余的零头留给上带（上带完整覆盖 [rect.y, mid_top)）。
-      const auto mid_top = static_cast<float>(std::ceil(rect.y + radius));
-      const auto mid_bottom = static_cast<float>(std::floor(rect.bottom() - radius));
-      if (mid_bottom <= mid_top) {
-        rasterize_path_runs(path, paint, options);
-        return;
-      }
+    // 小控件快近 7 倍——而它们正是界面里最多的形状（gallery 一帧 33 次圆角）。
+    //
+    // **等价性**：贴图内容就是“整块路径光栅化一次”。
+    // `tools/round_rect_diff_locate_probe.cpp` 在 8 个档位（非整坐标/非整尺寸/
+    // 半透明/极扁/胶囊/超画布）上逐像素对比：7 档**零差**，1 档在圆角弧最外缘
+    // 差 **1 LSB**（贴图 8 位量化的固有代价，与三带拆分两侧相同）。
+    //
+    // 缓存未命中时 `try_geometry_sprite` 会**自己完成绘制**（建图并贴出），
+    // 所以命中/未命中都是一次交付。
+    if (fill_physical_path_with_cache(path, path, paint, options)) return;
 
-      // 中带：直角矩形，**走整行 `blend_span` 快路径**。
-      //
-      // 为何不能像上面三带那样只靠注释：这是本函数里最大的一块面积（卡片/面板的
-      // 中间区占 90%+），而 `rasterize_path_runs` 会把这块直边区也当路径光栅化
-      // （算覆盖率、merge runs），远比整行广播写贵。
-      //
-      // 等价性：中带是个**轴向对齐的直角矩形**，且已用 `push_clip_rect(mid)` 把
-      // 写限制在带内——逐像素与“位图填充”完全相同（无 AA 需求：四条边都是
-      // 整像素，见上面 `aligned` 的同一口径）。
-      const math::Rect mid{rect.x, mid_top, rect.width, mid_bottom - mid_top};
-      push_clip_rect(mid);
-      Path mid_path;
-      mid_path.add_rect(mid);
-      rasterize_path_runs(mid_path, paint, options);
-      pop_clip();
-
-      // 上带：完整圆角路径，裁剪 [rect.y, mid_top)
-      push_clip_rect(math::Rect{rect.x, rect.y, rect.width, mid_top - rect.y});
-      rasterize_path_runs(path, paint, options);
-      pop_clip();
-
-      // 下带：完整圆角路径，裁剪 [mid_bottom, rect.bottom)
-      push_clip_rect(math::Rect{rect.x, mid_bottom, rect.width, rect.bottom() - mid_bottom});
-      rasterize_path_runs(path, paint, options);
-      pop_clip();
-      return;
-    }
+    // **缓存不适用时（渐变画笔 / 遮罩裁剪 / 非常规混合）退整块光栅化**。
+    //
+    // 这里曾经是三带拆分（中带直角 + 上带 + 下带），好处是中带那片直边区
+    // 可以走整行快路径（实测 1600×1000 从 0.562 → 0.333 ms）。但它有两个代价：
+    //   ① **同一整块圆角路径被光栅化两遍**（上带与下带各一次，只是裁剪不同）；
+    //   ② 分界必须对齐整像素，否则裁剪区重叠、那一行被画两次（半透明变深）。
+    // 现在圆角矩形**绝大多数时候走贴图缓存**（上面那段），三带只在“形状不适合缓存”
+    // 时接手——而那些场景（渐变/遮罩）本来就不该再假设形状会重复，
+    // 多一次光栅化比多一套 90 行的三带拆分更简单可靠。
     rasterize_path_runs(path, paint, options);
     return;
   }
@@ -1318,11 +1298,44 @@ void Canvas::draw_shadow(math::Rect rect, float radius, float blur, math::Color 
     const int x_end = std::min(area.right(), mask_origin.x + mask_width);
     if (x_begin >= x_end) continue;
 
-    if (!masked && options.blend == BlendMode::SrcOver) {
-      for (int x = x_begin; x < x_end; ++x) {
+    if (!masked && options.blend == BlendMode::SrcOver && shadow_run_grouping_enabled_) {
+      // **按同 α 游程分组**：长游程走 `simd::blend_row`（AVX2 8px/次），短游程逐像素。
+      //
+      // 为何有效（本轮实测，`tools/shadow_blend_route_probe.cpp`）：
+      //   A 逐像素                    3.915 ms
+      //   B 按段分组 + blend_row      2.181 ms   → **1.79×**，且**逐像素完全相同**。
+      //
+      // 为何不能“整行一次 SIMD”：阴影的 α 每个像素都可能不同（模糊出的梯度），
+      // 而 `blend_row` 的语义是“整段同一个 α”。按游程切开就同时得到了两者。
+      //
+      // 为何阈值取 8：`blend_row` 的 AVX2 主循环一次吃 8 像素；少于 8 时
+      // 它退化成“常量构造 + 标量尾巴”，不如保持逐像素。
+      //
+      // 数据支撑（`tools/shadow_run_length_probe.cpp`）：同 α 游程**中位长度 1**，
+      // 但 **≥8px 的游程覆盖 80~85% 的像素**——即“少数长游程 + 大量孤点”，
+      // 正是分组策略的适用形态。
+      constexpr int kRunSimdThreshold = 8;
+      int x = x_begin;
+      while (x < x_end) {
         const std::uint8_t mask_byte = mask_row[x - mask_origin.x];
-        if (mask_byte == 0U) continue;
-        row[x] = over_premul(row[x], scaled_sources[mask_byte]);
+        int run_end = x + 1;
+        while (run_end < x_end && mask_row[run_end - mask_origin.x] == mask_byte) ++run_end;
+        const int run = run_end - x;
+        if (mask_byte == 0U) {
+          x = run_end;   // 全透明：整段跳过（比逐像素 branch 省）
+          continue;
+        }
+        if (run >= kRunSimdThreshold) {
+          // `scaled_sources` 已经把“遮罩值 → 预乘源色”算好，所以这里 alpha 传 255
+          // （不再额外缩放），与逐像素的 `over_premul(row, scaled_sources[m])` 同式。
+          simd::blend_row(row + x, static_cast<std::size_t>(run), scaled_sources[mask_byte], 255U);
+        } else {
+          const std::uint32_t source = scaled_sources[mask_byte];
+          for (int index = x; index < run_end; ++index) {
+            row[index] = over_premul(row[index], source);
+          }
+        }
+        x = run_end;
       }
       continue;
     }

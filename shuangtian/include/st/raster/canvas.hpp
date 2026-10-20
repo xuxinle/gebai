@@ -218,6 +218,17 @@ class Canvas final : public Surface {
   /// 换成“开/关两个进程各跑一次”会引入动画/时序/首次预热差异（实测：同配置两次截图
   /// 本来就不一致），差异无法归因。
   void set_geometry_cache_enabled(bool enabled) noexcept { geometry_cache_enabled_ = enabled; }
+
+  /// 运行时开关「阴影按同 α 游程分组」（默认开）。
+  ///
+  /// **验证必备**：这条优化把行内连续同遮罩值的像素当作一段，长段走 SIMD。
+  /// 它很容易写错游程边界（少一像素 / 多一像素 / 漏最后一段），而错误只在
+  /// 半透明边缘可见——少画一次只是“阴影淡一点”，肉眼几乎看不出。
+  /// 零容差的验证只能靠“开与不开逐像素相同”（同 `set_geometry_cache_enabled` 的理由）。
+  void set_shadow_run_grouping_enabled(bool enabled) noexcept {
+    shadow_run_grouping_enabled_ = enabled;
+  }
+
   [[nodiscard]] auto geometry_cache_enabled() const noexcept -> bool {
     return geometry_cache_enabled_;
   }
@@ -311,6 +322,16 @@ class Canvas final : public Surface {
     int width{0};
     int height{0};
   };
+  /// 以**物理坐标路径**尝试几何贴图缓存（命中或建图后已交付则返回 true）。
+  ///
+  /// `source` 用来算几何键（必须是**未缩放的源路径**——键里混了 `scale`，
+  /// 同一路径在 1x/2x 下必须是不同条目），`physical` 用来建贴图（已乘 `scale_`）。
+  ///
+  /// 抽出来的理由：`fill_rect` 的圆角分支建路径时**已经是物理坐标**（它开头已乘过
+  /// `scale_`），直接再交给 `fill_path` 会被再缩一次（双重缩放）。
+  auto fill_physical_path_with_cache(const Path& source, const Path& physical, const Paint& paint,
+                                     DrawOptions options) -> bool;
+
   /// 尝试命中几何 sprite 并直接贴到画布（返回 true = 已交付）。
   ///
   /// ## 为何键建在**源路径**上而不是扁平化结果上
@@ -363,6 +384,8 @@ class Canvas final : public Surface {
   std::vector<GeometryCacheEntry> geometry_sprites_{};
   mutable GeometryStats geometry_stats_{};
   bool geometry_cache_enabled_{true};
+  /// 阴影的“按同 α 游程分组”（`draw_shadow`）。见 `set_shadow_run_grouping_enabled`。
+  bool shadow_run_grouping_enabled_{true};
   /// 扫描线覆盖率的**逐像素累加缓冲**（`blend_coverage_runs` 用）。
   ///
   /// 复用同一个 buffer 而非每行分配：一段路径会对本函数调用几百次（每行一次），
