@@ -253,6 +253,46 @@
       "sources": ["tools/alpha_table_equiv_probe.cpp"],
       "exclude_sources": ["src/pkg/*"]
     },
+    "text_row_overhead_probe": {
+      "kind": "executable",
+      "sources": ["tools/text_row_overhead_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "text_run_cost_split_probe": {
+      "kind": "executable",
+      "sources": ["tools/text_run_cost_split_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "lcd_text_cost_probe": {
+      "kind": "executable",
+      "sources": ["tools/lcd_text_cost_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "text_subtract_probe": {
+      "kind": "executable",
+      "sources": ["tools/text_subtract_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "fill_path_cost_probe": {
+      "kind": "executable",
+      "sources": ["tools/fill_path_cost_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "fill_path_pixels_probe": {
+      "kind": "executable",
+      "sources": ["tools/fill_path_pixels_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "simd_row_cost_probe": {
+      "kind": "executable",
+      "sources": ["tools/simd_row_cost_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "geometry_hit_rate_probe": {
+      "kind": "executable",
+      "sources": ["tools/geometry_hit_rate_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
     "simd_short_row_probe": {
       "kind": "executable",
       "sources": ["tools/simd_short_row_probe.cpp"],

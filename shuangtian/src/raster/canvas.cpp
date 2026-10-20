@@ -152,10 +152,22 @@ struct OpScope {
                                              std::uint32_t a_r, std::uint32_t a_g,
                                              std::uint32_t a_b) noexcept -> std::uint32_t {
   const std::uint32_t source_alpha = channel(src, 0);
-  const auto blend = [source_alpha](std::uint32_t source, std::uint32_t destination,
-                                    std::uint32_t alpha) constexpr noexcept {
-    // 源项按 α_c 缩放；目标衰减按 a_s·α_c（源自身不透明时二者相同）
-    const std::uint32_t attenuation = fast_div255(source_alpha * alpha + 127U);
+  // **源色不透明时的快路径**（文字几乎总走这条：`Paint::solid(color)` 且色 α=255）。
+  //
+  // 为何能省：`attenuation = fast_div255(source_alpha * alpha + 127)`，当
+  // `source_alpha == 255` 时它恒等于 `alpha`（`(255*alpha+127)/255 == alpha`，
+  // 对 `alpha ∈ [0,255]` 逐一成立）——于是每个通道少一次整数乘+移位，
+  // 4 个通道共省 4 次。实测这个函数是 LCD 文字路径的主体（每像素 8 次
+  // `fast_div255`，其中 4 次是这个衰减）。
+  //
+  // 量化口径不变：`fast_div255(source * alpha + 127) + fast_div255(dst * (255-alpha) + 127)`
+  // 与通用式的 `attenuation == alpha` 分支**逐位相同**。
+  const bool opaque_source = source_alpha == 255U;
+  const auto blend = [source_alpha, opaque_source](std::uint32_t source,
+                                                   std::uint32_t destination,
+                                                   std::uint32_t alpha) constexpr noexcept {
+    const std::uint32_t attenuation =
+        opaque_source ? alpha : fast_div255(source_alpha * alpha + 127U);
     return fast_div255(source * alpha + 127U) +
            fast_div255(destination * (255U - attenuation) + 127U);
   };
@@ -801,6 +813,24 @@ void Canvas::blend_coverage_row_subpixel(int y, int x_begin, std::span<const flo
   }
 
   // 逐通道 α（含 opacity 与遮罩裁剪）
+  //
+  // **无遮罩时走 256 项查表**：`alpha_of` 每像素被调 3 次（R/G/B），
+  // 每次都要 `abs() → × opacity → clamp01 → ×255+0.5 量化`。
+  // 覆盖率本身是 `float`，但量化后的字节只有 256 种——而**实际进混合的只有量化值**。
+  // 于是把“覆盖率字节 → 乘 opacity 后的字节”预先算好。
+  //
+  // ⚠ **量化必须仍在同一步完成**：若把 `quantize(cov)` 后再乘 opacity 量化，
+  // 就变成两步量化（实测在 opacity=0.9/0.75/0.5 下 19~25% 的组合差 1 LSB，
+  // 见 `tools/alpha_table_equiv_probe.cpp`）。所以表的定义是：
+  //   `lcd_alpha[k] = quantize(quantize(k/255) × opacity)`  —— **不对**
+  //   `lcd_alpha[k] = quantize((k/255) × opacity)`         —— **不对**
+  // 正确做法不能预先把 cov 量化。因此这里**不改量化，只减少重复函数调用**：
+  // 把 `masked` 判断提到循环外（它本来就是行内常量），并在无遮罩时走无分支版本。
+  const auto alpha_plain = [&](int x, std::size_t channel) -> std::uint32_t {
+    const float alpha = std::abs(coverage_at(x, channel)) * opacity;
+    if (alpha <= 0.0f) return 0U;
+    return static_cast<std::uint32_t>(math::clamp01(alpha) * 255.0f + 0.5f);
+  };
   const auto alpha_of = [&](int x, std::size_t channel) -> std::uint32_t {
     float alpha = std::abs(coverage_at(x, channel)) * opacity;
     if (masked) alpha = effective_alpha(x, y, alpha);
@@ -812,6 +842,17 @@ void Canvas::blend_coverage_row_subpixel(int y, int x_begin, std::span<const flo
     const math::Color color = paint.color();
     if (color.a == 0U) return;
     const std::uint32_t premul = math::premultiply(color);
+    if (!masked) {
+      // 无遮罩：直接用无分支版本（省掉每像素 3 次的 `masked` 判断与闭包调用）。
+      for (int x = begin; x < end; ++x) {
+        const std::uint32_t a_r = alpha_plain(x, 0U);
+        const std::uint32_t a_g = alpha_plain(x, 1U);
+        const std::uint32_t a_b = alpha_plain(x, 2U);
+        if (a_r == 0U && a_g == 0U && a_b == 0U) continue;
+        row[x] = over_premul_lcd(row[x], premul, a_r, a_g, a_b);
+      }
+      return;
+    }
     for (int x = begin; x < end; ++x) {
       const std::uint32_t a_r = alpha_of(x, 0U);
       const std::uint32_t a_g = alpha_of(x, 1U);
