@@ -141,6 +141,8 @@ struct Options {
   std::string editor_line_spacing{"auto"};
   std::uint16_t control_port{0};
   std::string control_file{};
+  /// 渲染器选型（`--renderer`）：空 = 后端缺省（窗口后端为 `auto` 实测选优）。
+  std::string renderer{};
   std::string shots{};
   std::uint32_t frames{0};
   int max_ms{0};
@@ -164,6 +166,7 @@ auto print_usage(std::string_view program) -> void {
       "窗口/主题\n"
       "  --headless            无头模式（无窗口；控制通道照常可用）\n"
       "  --scale N             DPI 缩放（如 2.0）\n"
+      "  --renderer MODE       渲染器：auto / gpu / software（缺省 auto 实测选优）\n"
       "  --theme light|dark    主题\n"
       "  --decorations         用系统标题栏（默认自绘）\n"
       "\n"
@@ -297,6 +300,13 @@ auto print_usage(std::string_view program) -> void {
       options.control_port = static_cast<std::uint16_t>(port);
     }
     else if (raw == "--control-file") options.control_file = value({});
+    // 渲染器选型：`auto`（实测选优，缺省）/ `gpu` / `software`。
+    //
+    // 为何示例也要暴露它：这个开关是**复现窗口呈现类缺陷的唯一手段**——
+    // 两条路的呈现机制完全不同（GPU 走 swapchain 直接 return；软件走 GDI blit，
+    // 中间多一层惰性 DIB）。只能靠 `auto` 碰运气的话，`software` 分支在某些机器上
+    // （GPU 实测更快）永远走不到，那里的缺陷也就永远不发作、也永远测不到。
+    else if (raw == "--renderer") options.renderer = value("auto");
     else if (raw == "--shots") options.shots = value({});
     else if (raw == "--frames") {
       const long long frames = parse_int("--frames", 0);
@@ -361,6 +371,7 @@ auto run_app(int argc, char** argv) -> int {
   app_options.decorations = options.decorations;
   app_options.backend = !options.backend.empty() ? options.backend
                         : (options.headless ? std::string("headless") : std::string{});
+  app_options.renderer = options.renderer;
   // 脚本能力显式开启：默认关闭，控制通道的 `script` 方法仅在开启后可用
   app_options.enable_script = options.enable_script;
   app_options.text_lcd = options.text_lcd;

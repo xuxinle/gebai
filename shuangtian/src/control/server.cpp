@@ -1608,6 +1608,10 @@ result["last_frame_ms"] = metrics.last_frame_ms;
 result["layout_ms"] = metrics.layout_ms;
 result["paint_ms"] = metrics.paint_ms;
 result["present_ms"] = metrics.present_ms;
+  // “调了 present 但没送到屏幕”的帧数：>0 就是“窗口应该显示东西却空着”。
+  // 它必须与 `present_ms` 分开看——后者只度量调用耗时，提前返回也照样有值
+  // （2026-10-20 的软件路径空白窗口正是这样：present_ms 正常、屏幕全空）。
+  result["present_skipped"] = static_cast<std::uint64_t>(metrics.present_skipped);
 result["frame_p50_ms"] = metrics.frame_p50_ms;
   // 墙钟帧间隔（与帧内耗时对照见 `Metrics::wall_p50_ms` 的说明）：
   // “帧内小、墙钟大”是被限帧，“两个都大”才是真的重。

@@ -692,13 +692,17 @@ void Tabs::paint_content(const RenderContext& context, raster::Surface& canvas) 
   }
 
   // 选中指示条（2px primary）。
+  //
+  // 用**直角**（radius=0）而不是 `k_indicator_height * 0.5f` 的圆角：2px 高的条上
+  // 1px 圆角在视觉上不可见，却会把它送进 `fill_rect` 的圆角路径（三带拆分 + 几何贴图），
+  // 白白多付一笔开销。直角走 `blend_span` 整行快路径，位置精确且更快。
   const math::Rect active_tab = tab_rect(active_);
   const math::Rect indicator =
       resolve_indicator(context, math::Rect{active_tab.x, bounds_.bottom() - k_indicator_height,
                                             active_tab.width, k_indicator_height});
   const math::Color bar = enabled_ ? colors.primary : colors.border_strong;
   if (!indicator.is_empty()) {
-    canvas.fill_rect(indicator, raster::Paint::solid(bar), k_indicator_height * 0.5f);
+    canvas.fill_rect(indicator, raster::Paint::solid(bar), 0.0f);
   }
   // **动画中要续帧**：不 request_animation 的话，静置场景没有新帧，
   // 指示条冻在起步帧（与光标闪烁同一个坑——那边实测过"闪一下就定住"）。

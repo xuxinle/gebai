@@ -544,6 +544,9 @@ auto Application::metrics() const -> control::Metrics {
   metrics.layout_ms = impl_->layout_ms;
   metrics.paint_ms = impl_->paint_ms;
   metrics.present_ms = impl_->present_ms;
+  // “调了 present 但没送到屏幕”的帧数：软渲染路径曾有“早退后 DIB 永不重建”的缺陷，
+  // 而旧指标里它与“每帧都正常上屏”完全不可区分（`present_ms` 照样有值）。
+  metrics.present_skipped = impl_->backend->present_skipped();
   // p50/p95 从环形缓冲取副本后排序（两个 percentile 块合并成一处：
   // 原先两份代码除容器外逐字相同——那种重复在改口径时必偏一半）。
   const auto percentile_of = [](const std::vector<double>& sorted, double ratio) -> double {

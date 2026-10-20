@@ -148,6 +148,12 @@ struct Metrics {
   std::uint64_t sprite_misses{0};
   std::uint64_t sprite_rejected{0};
   std::uint64_t sprite_entries{0};
+  /// “本该上屏却没上屏”的帧数（后端上报；无头恒 0）。
+  ///
+  /// 为何要上报：`present_ms` 只度量“调用花了多久”，**不区分真送了还是提前返回**。
+  /// 实测踩过：软件路径下窗口一个像素都没上屏（DIB 被快路径丢掉后早退），
+  /// 而 `present_ms`、`frames`、`requests` 全部正常——不去看窗口 DC 就发现不了。
+  std::uint64_t present_skipped{0};
   std::size_t nodes{0};
   std::uint64_t requests{0};
 };

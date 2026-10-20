@@ -66,8 +66,34 @@ ST_TEST(dpi_rect_scales_to_physical) {
   ST_CHECK_EQ(canvas.pixel_at_point(Point{9.0f, 20.0f}).a, 0);
 }
 
-ST_TEST(dpi_aligned_edges_stay_crisp) {
-  Canvas canvas = Canvas::for_logical_size(40, 40, 2.0f);
+ST_TEST(dpi_rounded_rect_does_not_double_scale) {
+  // **回归**：圆角矩形曾在 DPI ≠ 1 时被缩放**两次**。
+  //
+  // `fill_rect` 开头已把 `rect`/`radius` 乘成物理像素，而它走圆角分支时又把路径
+  // 交给 `fill_path`——后者内部会 `path.scaled(scale_)`，于是 1.25 DPI 变成 1.5625 倍。
+  // 实测（gbcode 标签条选中指示条，2px 高）：y 从 72 漂到 89.6、宽 135→81、
+  // x 649→914，看上去就是“一条蓝线乱画在代码上”。
+  //
+  // 判据选**细长条**（高远小于宽，正是指示条/分隔线这类形状）：双重缩放在这种
+  // 长宽比下偏移最明显；方形用例根本看不出来（对称缩放仍居中）。
+  Canvas canvas = Canvas::for_logical_size(200, 40, 2.0f);
+  canvas.clear(Color{0, 0, 0, 0});
+  // 逻辑 y=10、高=1、x=20 宽=60 的细横条，圆角 0.5。
+  canvas.fill_rect(Rect{20.0f, 10.0f, 60.0f, 1.0f}, Paint::solid(Color::rgb(0, 0, 0)), 0.5f);
+
+  // 逻辑 (20,10)-(80,11) → 物理 (40,20)-(160,22)。
+  const st::math::IntRect bounds = canvas.content_bounds();
+  ST_CHECK_EQ(bounds.x, 40);
+  ST_CHECK_EQ(bounds.y, 20);
+  ST_CHECK_EQ(bounds.width, 120);
+  ST_CHECK_EQ(bounds.height, 2);
+  // 双重缩放会把它推到物理 y≈31（= 10 × 2 × 1.5625）且宽变窄，下面两条即抓住。
+  ST_CHECK_EQ(canvas.pixel_at(100, 20).a, 255);
+  ST_CHECK_EQ(canvas.pixel_at(100, 21).a, 255);
+  ST_CHECK_EQ(canvas.pixel_at(100, 30).a, 0);   // 双重缩放会在这里画出东西
+}
+
+ST_TEST(dpi_aligned_edges_stay_crisp) {  Canvas canvas = Canvas::for_logical_size(40, 40, 2.0f);
   canvas.clear(Color{0, 0, 0, 0});
   canvas.fill_rect(Rect{5.0f, 5.0f, 10.0f, 10.0f}, Paint::solid(Color::rgb(255, 0, 0)));
 

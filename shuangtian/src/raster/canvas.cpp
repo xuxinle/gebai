@@ -1108,6 +1108,11 @@ void Canvas::fill_rect(math::Rect rect, const Paint& paint, float radius, DrawOp
   } else {
     path.add_rect(rect);
   }
+  // ⚠ **从这里开始 `rect`/`radius`/`path` 都是物理像素**（本函数开头已乘过一次 `scale_`），
+  // 因此全部往后的光栅化入口必须是 `rasterize_path_runs`（接物理坐标路径），
+  // **不能是 `fill_path`**——后者内部还会 `path.scaled(scale_)`，会把已缩放的路径再缩一次。
+  // 圆角矩形同样遵循这条：只在半径>0 时才会走到这里，而双重缩放会在
+  // 细长条（高远小于宽）上把位置与宽度都算错。
   // **圆角矩形也走几何 sprite 缓存**。
   //
   // 为何值得：实测它是界面里最贵的一项（gallery 1600×1000 一帧 32 次 / 2.34 ms / 40%），
@@ -1151,7 +1156,7 @@ void Canvas::fill_rect(math::Rect rect, const Paint& paint, float radius, DrawOp
       const auto mid_top = static_cast<float>(std::ceil(rect.y + radius));
       const auto mid_bottom = static_cast<float>(std::floor(rect.bottom() - radius));
       if (mid_bottom <= mid_top) {
-        fill_path(path, paint, options);
+        rasterize_path_runs(path, paint, options);
         return;
       }
 
@@ -1165,16 +1170,16 @@ void Canvas::fill_rect(math::Rect rect, const Paint& paint, float radius, DrawOp
 
       // 上带：完整圆角路径，裁剪 [rect.y, mid_top)
       push_clip_rect(math::Rect{rect.x, rect.y, rect.width, mid_top - rect.y});
-      fill_path(path, paint, options);
+      rasterize_path_runs(path, paint, options);
       pop_clip();
 
       // 下带：完整圆角路径，裁剪 [mid_bottom, rect.bottom)
       push_clip_rect(math::Rect{rect.x, mid_bottom, rect.width, rect.bottom() - mid_bottom});
-      fill_path(path, paint, options);
+      rasterize_path_runs(path, paint, options);
       pop_clip();
       return;
     }
-    fill_path(path, paint, options);
+    rasterize_path_runs(path, paint, options);
     return;
   }
   rasterize_path_runs(path, paint, options);

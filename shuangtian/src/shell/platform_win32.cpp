@@ -430,10 +430,15 @@ class Win32Backend final : public Backend {
     // 内容贴好后再真正前置。
     ::ShowWindow(window_, SW_SHOWNOACTIVATE);
     // 把当前画布内容同步贴上去。`ShowWindow` 返回时窗口已被映射，此时呈现才有效。
+    //
+    // ⚠ **不要在这里判 `dib_ != nullptr`**：`blit()` 第一步就是 `ensure_dib()`，
+    // 它本来就是「需要就建」的语义。多加一道 `dib_` 非空守卫，等于要求调用方
+    // 先保证 DIB 存在——而 `resize_buffers_in_place()` 会**故意**把 DIB 丢掉
+    // （惰性重建），于是窗口从此再也不上屏（见 `present()` 处的完整说明）。
     if (presenter_ != nullptr) {
       (void)presenter_->present(*surface_, surface_->physical_width(), surface_->physical_height());
-    } else if (surface_ != nullptr && dib_ != nullptr) {
-      blit();
+    } else if (surface_ != nullptr) {
+      (void)blit();
     }
     ::UpdateWindow(window_);
     ::SetForegroundWindow(window_);
@@ -461,9 +466,27 @@ class Win32Backend final : public Backend {
         present_fallback_logged_ = true;
       }
     }
-    if (dib_ == nullptr) return;
-    blit();
-    ++frames_;
+    // ⚠ **这里不能是 `if (dib_ == nullptr) return;`**（2026-10-20 修的真实缺陷）。
+    //
+    // DIB 是**惰性**的：`resize_buffers_in_place()`（拖动/DPI 变化/启动自适应所走的
+    // 快路径）会 `release_dib()` 把它丢掉，理由是“GPU 路径的呈现根本不碰它，等下次
+    // `blit()` 再建”。而 `blit()` 自己第一步就是 `ensure_dib()`——重建责任在它身上。
+    //
+    // 早退一句把这个约定打断了：快路径丢掉 DIB → 本函数见到空 DIB 直接 return →
+    // `blit()` 永不执行 → DIB 永不重建 → **窗口从此一个像素都不上屏**。
+    // 实测（本机 NVIDIA L20-6Q，`auto` 实测选了软件路径 + 启动时的窗口自适应走了快路径）：
+    // 窗口可见、命中测试正常、按钮点击有回调，窗口 DC 里却全是 `0x00000000`
+    // （5 个采样点均为 0），屏幕上显示的是它下面的其它窗口。
+    //
+    // 为何有的机器没问题：GPU 路径走 `presenter_->present()` 直接 return，根本
+    // 到不了这一行。也就是“渲染器 autu 选型的机器差异”决定了这个缺陷是否发作。
+    if (blit()) {
+      ++frames_;
+    } else {
+      // 建 DIB 失败（内存不足等）：如实计入“没上屏”，而不是静默当作已呈现——
+      // 否则 `present_ms` 正常、`frames` 正常，而屏幕是空的（这正是本缺陷难查的原因）。
+      ++present_skipped_;
+    }
   }
 
   [[nodiscard]] auto poll_event() -> std::optional<ui::Event> override {
@@ -721,6 +744,14 @@ class Win32Backend final : public Backend {
     return renderer_name_;
   }
   [[nodiscard]] auto renderer_note() const -> std::string override { return renderer_note_; }
+  /// “本该上屏却没上屏”的帧数。
+  ///
+  /// 为何要单独立一个可观测项：`frame_count()` 只数“真的送出了”的帧，于是
+  /// “软件路径下一帧都没上屏”与“主循环根本没在跑”在计数器上长得一模一样，
+  /// 而两者要查的地方完全不同。>0 就是“调了 present、但没送到屏幕”。
+  [[nodiscard]] auto present_skipped() const noexcept -> std::uint64_t override {
+    return present_skipped_;
+  }
   [[nodiscard]] auto frame_count() const noexcept -> std::uint64_t override { return frames_; }
   [[nodiscard]] auto device_scale() const noexcept -> float override { return scale_; }
   [[nodiscard]] auto logical_size() const noexcept -> math::Size override {
@@ -1144,8 +1175,15 @@ class Win32Backend final : public Backend {
   ///
   /// 画布内部是 `0xRRGGBBAA`（预乘），而 GDI 的 32bpp DIB 是内存序 B,G,R,A
   /// （即小端 `0xAARRGGBB`）——**必须逐像素重排**，否则红蓝互换（截图看着像"色调不对"）。
-  void blit() {
-    if (!ensure_dib()) return;
+  ///
+  /// 返回 `false` = 本帧**没有**送到窗口（DIB 建不出来 / 拿不到窗口 DC）。
+  /// 为何要这个返回值：调用方需要把"没上屏"当成可观测事件。旧签名是 `void`，
+  /// 于是“每帧都调用、每帧都失败”与“每帧都成功”在上层完全不可区分。
+  ///
+  /// ⚠ **`ensure_dib()` 在这里，不能挪到调用方**：DIB 是惰性的
+  /// （`resize_buffers_in_place()` 会故意丢掉它），重建就该发生在“真正要画”的这一刻。
+  [[nodiscard]] auto blit() -> bool {
+    if (!ensure_dib()) return false;
     const std::span<const std::uint32_t> source = surface_->pixels();
     const std::size_t count =
         std::min(source.size(), static_cast<std::size_t>(surface_->physical_width()) *
@@ -1159,10 +1197,11 @@ class Win32Backend final : public Backend {
       dib_pixels_[index] = (alpha << 24U) | (red << 16U) | (green << 8U) | blue;
     }
     HDC window_dc = ::GetDC(window_);
-    if (window_dc == nullptr) return;
+    if (window_dc == nullptr) return false;
     ::BitBlt(window_dc, 0, 0, surface_->physical_width(), surface_->physical_height(), memory_dc_, 0, 0,
              SRCCOPY);
     ::ReleaseDC(window_, window_dc);
+    return true;
   }
 
   /// 拖动/缩放中：**同步重建缓冲 + 重绘一帧 + 送显**。
@@ -1281,8 +1320,10 @@ class Win32Backend final : public Backend {
         if (presenter_ != nullptr) {
           (void)presenter_->present(*surface_, surface_->physical_width(),
                                     surface_->physical_height());
-        } else if (surface_ != nullptr && dib_ != nullptr) {
-          blit();
+        } else if (surface_ != nullptr) {
+          // 同样**不判 `dib_`**：重建责任在 `ensure_dib()`，见 `present()` 处的说明。
+          // 这里不计数（系统重绘路径，不归入“本帧没上屏”的统计）。
+          (void)blit();
         }
         return 0;
       }
@@ -1609,6 +1650,13 @@ class Win32Backend final : public Backend {
   /// DXGI 呈现器（仅 GPU 画布 + 真实窗口时存在）；为空时走 GDI blit。
   std::unique_ptr<raster::gpu::Presenter> presenter_{};
   std::uint64_t present_frames_{0};
+  /// 本帧**应该上屏却没能上屏**的次数（DIB 建不出来 / 拿不到窗口 DC）。
+  ///
+  /// 为何要单独计数而不只看 `frames_`：`frames_` 旧口径只在真送显时自增，
+  /// 而“完全不上屏”与“根本没人调 present”在计数器上长得一模一样。
+  /// 本字段让“调了但没送出去”成为一个能看见的数（发布时间正常、屏幕却空着，
+  /// 正是 2026-10-20 那个软件路径空白窗口的典型形态）。
+  std::uint64_t present_skipped_{0};
   bool present_fallback_logged_{false};
   /// 请求的渲染器（来自 `--renderer`；`auto` 表示"首次建面时实测选优"）。
   std::string renderer_{"auto"};

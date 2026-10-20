@@ -141,6 +141,14 @@ class Backend {
   /// 服务端支不支持 MIT-SHM、远程 X 转发与否）。回退了就得能看见——
   /// 否则“这台机器为什么掉帧”会变成谜案（与 `font_read_fallbacks` 同一条理由）。
   [[nodiscard]] virtual auto present_note() const -> std::string { return {}; }
+  /// “本该上屏却没上屏”的帧数（DIB 建不出来 / 拿不到窗口 DC 等）。
+  ///
+  /// 为何需要它：**“调了 present 但没送到屏幕”**与“每帧都正常上屏”在上层
+  /// 完全不可区分——`present_ms` 照样有值、主循环照样在转，而用户看到的是空白窗口
+  /// （2026-10-20 的软件路径空白窗口就是这个形态）。>0 就是真问题，必须能看见。
+  ///
+  /// 无头后端无需实现（它本来就不“上屏”，默认 0 是对的语义）。
+  [[nodiscard]] virtual auto present_skipped() const noexcept -> std::uint64_t { return 0; }
   /// 运行时切换 DPI（重分配帧缓冲；无头与窗口模式一致）。
   virtual auto set_device_scale(float scale) -> Status = 0;
   /// 逻辑视口尺寸（窗口尺寸，不含 DPI 放大）。
