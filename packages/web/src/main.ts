@@ -30,7 +30,7 @@ import { initFileDisplay } from "./file-display"
 import { installMainKeys } from "./keymap-main"
 import { initFxPanels } from "./fx-panels"
 import { attachRunningIfNeeded, bindSessionActions, enterDraftView, exportSessionJson, hideEmptyState, loadMessages, markSessionRunning, maybeAutoTitle, refreshSessions, setRuntimeInfo, updateSessionCtx } from "./sessions"
-import { appendMsg, bindMessagesSessions, sealSegment } from "./messages"
+import { appendMsg, bindMessagesSessions, releaseMsgAttachments, renderMsgAttachments, sealSegment } from "./messages"
 import { sendPending } from "./attachments"
 import { loadToolCardMeta } from "./tool-cards"
 import { lockToBottom, refreshJumpBottom, scrollIfSticky } from "./jump-bottom"
@@ -48,8 +48,10 @@ import "./attach"
 // 模块级/初始化期读取 localStorage 的代码；初始化脚本的异步引导在 init 首行等待（awaitCustomBoot）
 applyWebConfig()
 
-/* ---------- 会话导出（轮盘按钮）：导出 JSON 往返文件 ---------- */
+/** 纯附图消息（无正文）的默认提示词（与服务端落盘正文同一字符串，刷新前后一致）。 */
+const DEFAULT_ATTACH_PROMPT = "请查看我发送的附件并处理。"
 
+/* ---------- 会话导出（轮盘按钮）：导出 JSON 往返文件 ---------- */
 // 轮盘「导出」= 导出 JSON（可再导入的往返格式，与右键菜单「导出会话」同格式）；
 // 人读版 Markdown 导出仍在会话行右键菜单（「导出 Markdown」）
 exportBtn.onclick = async () => {
@@ -115,7 +117,7 @@ composer.addEventListener("submit", async (e) => {
   if (runs.has(sessionId)) {
     const attachments = await sendPending(sessionId)
     // 纯附件消息补默认提示词，避免空 prompt 交给 LLM
-    const prompt = text || (attachments.length ? "请查看我发送的附件并处理。" : "")
+    const prompt = text || (attachments.length ? DEFAULT_ATTACH_PROMPT : "")
     if (!prompt) return
     const item: QueuedInput = { id: uuid(), text: prompt, files: attachments, messageId: msgId, createdAt: Date.now() }
     if (interrupt) enqueueFront(sessionId, item)
@@ -123,17 +125,36 @@ composer.addEventListener("submit", async (e) => {
     recordInput(sessionId, prompt)
     return
   }
-  if (text) {
-    userMsgEl = appendMsg({ id: msgId, role: "user", content: text, createdAt: Date.now() })
-    recordInput(sessionId, text)
+  // 用户消息立刻上屏（含本地上传前的附件原文件预览）：等上传结果回流再渲染会让附图消息“先发后消失”，
+  // 纯附件消息则完全不可见（历史回填只在刷新/切回时发生）。上传完成后原地换成服务端会话内引用
+  const localFiles = pendingFiles.map((f) => ({ name: f.name, mime: f.mime, size: f.size, blob: f.blob }))
+  // 纯附件消息的正文与服务端落盘一致（同一默认提示词），否则刷新前后同一条消息两种正文
+  const shownText = text || (localFiles.length ? DEFAULT_ATTACH_PROMPT : "")
+  if (shownText || localFiles.length) {
+    userMsgEl = appendMsg({ id: msgId, role: "user", content: shownText, createdAt: Date.now() })
+    if (localFiles.length) renderMsgAttachments(userMsgEl, sessionId, localFiles)
   }
+  if (text) recordInput(sessionId, text)
   // 用户消息上屏后再落底一次：发送即滚动到底立即可见（不依赖观察器 rAF 时序；此前滚走阅读历史时同样恢复跟随）
   lockToBottom()
   refreshJumpBottom()
   const attachments = await sendPending(sessionId)
+  // 上传完成：本地预览换为服务端引用（同容器原地重渲染，不重建消息；历史渲染走同一入口）——
+  // 上传全部失败时也重渲染（清掉不可送达的本地预览，不留一个“看起来已发出”的幻影）
+  if (userMsgEl && localFiles.length) {
+    renderMsgAttachments(userMsgEl, sessionId, attachments)
+    scrollIfSticky() // 图片解码后高度变化：跟随中保持贴底
+  }
   // 纯附件消息补默认提示词，避免空 prompt 交给 LLM
-  const prompt = text || (attachments.length ? "请查看我发送的附件并处理。" : "")
-  if (!prompt) return
+  const prompt = text || (attachments.length ? DEFAULT_ATTACH_PROMPT : "")
+  if (!prompt) {
+    // 无可发送内容（如纯附件消息的附件全部上传失败）：撤回幻影消息，不留在消息流里
+    if (userMsgEl) {
+      releaseMsgAttachments(userMsgEl)
+      userMsgEl.remove()
+    }
+    return
+  }
   // 发送即自动命名（不等首答完成）：长任务运行期间侧栏/标题栏即可见会话标题
   void maybeAutoTitle(sessionId)
   // env：浏览器本地环境变量（localStorage），随请求临时注入，仅本次任务生效
@@ -143,7 +164,10 @@ composer.addEventListener("submit", async (e) => {
     // 本页不知情的并行任务（其他标签页/飞书桥接/定时任务）在跑：本条输入服务端未受理——
     // 撤回幻影消息（已上屏但从未进存储/模型）、把内容放回输入框，并附加该会话的运行态（页面此前不知道它在跑）
     if ((err as Error & { code?: string }).code === "already_running") {
-      userMsgEl?.remove()
+      if (userMsgEl) {
+        releaseMsgAttachments(userMsgEl)
+        userMsgEl.remove()
+      }
       if (!input.value.trim()) {
         input.value = text
         autosize()

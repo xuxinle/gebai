@@ -231,7 +231,9 @@ namespace gbcode_ui {
     const std::array<std::size_t, 4> numbers{0, 2, 3, 4};
     const std::array<const char*, 4> ids{"git-tab-branches", "git-tab-tags", "git-tab-stashes",
                                          "git-tab-remotes"};
-    (void)row(c, {.gap = 2.0f, .height = 30.0f, .id = "git-tabs"}, [&] {
+    // 高 30 → **34**、距离 2 → **6**：与编辑器标签条和侧栏头部同高，
+    // 且选中块之间留缝（不留缝的圆角胶囊会粘成一条，IDEA 新 UI 也是分开的）。
+    (void)row(c, {.gap = 6.0f, .height = 34.0f, .id = "git-tabs"}, [&] {
       for (std::size_t index = 0; index < labels.size(); ++index) {
         (void)custom<Button>(c, [this, number = numbers[index], label = labels[index],
                                  id = ids[index]](Button& b) {

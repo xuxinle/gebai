@@ -634,6 +634,21 @@ void Tabs::paint_content(const RenderContext& context, raster::Surface& canvas) 
     const bool is_active = index == active_;
     const bool is_hovered = static_cast<int>(index) == hover_index_;
 
+    // **活动标签的圆角胶囊底块**（IDEA 新 UI 的核心视觉特征）。
+    //
+    // 旧实现下活动项只有一条底部指示条 + 亮色文字，其余全是背景色——
+    // 三四个标签排在一起时“哪个是当前的”只能靠那条 2px 的细线认，
+    // 新 UI 把它换成一整块面：与侧栏头部同色（`surface`，比标签条底 `surface_alt` 亮一档），
+    // 圆角 `radius_sm`，四周留出 `space_xs` 的缝——缝是必须的，
+    // 不留缝的相邻胶囊会粘成一条。
+    if (is_active && enabled_) {
+      const math::Rect backdrop = tab.inset(
+          math::Insets{0.0f, metrics.space_xs, 0.0f, metrics.space_xs + k_indicator_height});
+      if (!backdrop.is_empty()) {
+        canvas.fill_rect(backdrop, raster::Paint::solid(colors.surface), radius);
+      }
+    }
+
     if (is_hovered && !is_active && enabled_) {
       // hover 背景：上下留出呼吸，底部让开指示条。
       const math::Rect backdrop = tab.inset(

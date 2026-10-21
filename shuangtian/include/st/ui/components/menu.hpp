@@ -154,7 +154,12 @@ class MenuBar : public Element {
   static constexpr float kTitlePaddingX{12.0f};
   /// 悬浮/展开**高亮块**相对标题矩形的上下内缩（见 `highlight_rect`）。
   /// 非 0 才能与容器底边的分隔线共存——撑满会把线盖掉（实测断口 46 逻辑 px）。
-  static constexpr float kHighlightInsetY{4.0f};
+  ///
+  /// 4 → **2**（2026-10-21，按 IDEA 新 UI 调）：内缩 4 时块高 32、文字高约 15，
+  /// 块上下各多出 8px 空白——用户看到“文字偏上、块偏下”其实是块太高、上下留白过大。
+  /// 收窄到 2 后块更高（36）、几乎贴满菜单栏高度，文字在块里视觉居中。
+  /// 底边仍留 2（避让分隔线，断口问题见 `highlight_rect` 注释）。
+  static constexpr float kHighlightInsetY{2.0f};
 
   MenuBar();
 

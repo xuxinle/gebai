@@ -335,6 +335,53 @@ ST_TEST(ui_tabs_properties_and_metrics) {
   ST_CHECK(tabs->tab_rect(tabs->tab_count()).is_empty());  // 越界为空
 }
 
+/// 活动标签必须有**圆角胶囊底块**，非活动项没有。
+///
+/// 为何要这条护栏：改成“整块面”之前，活动标签与其余标签的差别**只有**
+/// 一条 2 px 的底部指示条与文本亮度——三四个标签排一起时几乎分不出当前是哪个。
+/// 改成与侧栏头部同色的圆角块之后辨识度才够（对齐 IDEA 新 UI）。
+///
+/// 判据选“**标签区中心那一列**是否出现 `colors.surface`”：
+///   · 活动标签：中心穿过底块 → 命中大量 surface 色像素；
+///   · 非活动标签：中心只有背景（`surface_alt`）→ 命中为 0。
+/// 用“多/零”而不是精确像素数：圆角与字形的抗锯齿会让边缘像素值漂移，
+/// 而这两者的差异是**量级**上的（上百 vs 0），不依赖精确值。
+ST_TEST(ui_tabs_active_tab_has_capsule_backdrop) {
+  TabsFixture fixture({"A", "B", "C"});
+  auto& root = fixture.harness.root;
+  auto* tabs = fixture.tabs;
+  ST_REQUIRE(tabs != nullptr);
+  ST_CHECK(tabs->set_property("active", "1"));   // 活动项 = 中间的 B
+  root.layout(true);
+
+  const int width = static_cast<int>(root.viewport().width);
+  const int height = static_cast<int>(root.viewport().height);
+  st::raster::Canvas canvas(width, height);
+  canvas.clear(root.theme().colors().bg);
+  root.paint(canvas);
+
+  const st::ui::Theme& theme = root.theme();
+  const auto capsule = theme.colors().surface;
+  const auto hit = [&](std::size_t index) -> int {
+    const Rect tab = tabs->tab_rect(index);
+    // 取标签**竖直中部**的窄条：上下都避开圆角与底部指示条。
+    const float center_y = tab.center().y - 2.0f;
+    int count = 0;
+    for (float offset = -4.0f; offset <= 4.0f; offset += 1.0f) {
+      const Point point{tab.center().x + offset, center_y};
+      const auto pixel = canvas.pixel_at_point(point);
+      if (pixel.r == capsule.r && pixel.g == capsule.g && pixel.b == capsule.b) ++count;
+    }
+    return count;
+  };
+
+  // 活动项：中心穿过胶囊底块（但中心也可能被文字遮住，所以取两侧的偏移点）
+  const int active_hits = hit(1);
+  const int idle_hits = hit(0) + hit(2);
+  ST_CHECK(active_hits > 0);   // 活动标签的中心列应出现胶囊底色
+  ST_CHECK(idle_hits == 0);    // 非活动标签不应出现胶囊底色
+}
+
 ST_TEST(ui_tabs_focus_and_visual_tree) {
   // 2026-10-13 起标签条**聚焦不再画环**（用户要求标签头不显示边框；选中态由
   // 指示条 + 文本色表达）。本用例改为反向断言：聚焦帧与未聚焦帧在标签条外缘

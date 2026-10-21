@@ -1,9 +1,8 @@
 #include "st/ui/components/menu.hpp"
-
 #include <algorithm>
 #include <format>
 #include <utility>
-
+#include "st/core/log.hpp"
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
 #include "st/ui/text_port.hpp"
@@ -462,8 +461,22 @@ void MenuBar::paint_content(const RenderContext& context, raster::Surface& canva
       fill_round_rect(canvas, highlight_rect(title), metrics.radius_sm,
                       raster::Paint::solid(colors.surface_alt));
     }
-    draw_line(context, canvas, menus_[index].label, title, metrics.font_base,
-              open ? colors.primary : colors.text);
+    // 文字**水平居中**在 title 矩形内（而不是贴左缘）。
+    //
+    // `title_widths_` 是「文字宽 + `kTitlePaddingX × 2`」——高亮块的宽度就按它画，
+    // 所以 padding 是**对称的**；而 `draw_line` 是左对齐，直接传 `title` 会让文字
+    // 贴左缘、右侧空出两份 padding，看上去就是“文字没在高亮块中央”（用户报的）。
+    //
+    // 不能靠给 `title` 缩进两侧来做：那样居中会变成“缩进后的左对齐”，
+    // 遇到省略号截断时仍会偏。这里显式按实测宽算居中偏移。
+    const TextPort& port = text_port_of(context);
+    const std::string_view label = menus_[index].label;
+    const float text_width = port.measure_width(label, metrics.font_base);
+    const float centered_x = title.x + std::max(kTitlePaddingX, (title.width - text_width) * 0.5f);
+    draw_line(context, canvas, label,
+              math::Rect{centered_x, title.y, std::max(0.0f, title.width - (centered_x - title.x)),
+                         title.height},
+              metrics.font_base, open ? colors.primary : colors.text);
   }
 }
 

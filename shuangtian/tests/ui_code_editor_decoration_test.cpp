@@ -265,8 +265,12 @@ ST_TEST(code_editor_scroll_callback_fires_on_change_only) {
 
 ST_TEST(code_editor_line_number_override_changes_drawn_text) {
   // 行号覆盖：并列差异两栏共用**同一份文本**（`set_text` 只能给一份），
-  // 右栏显示新侧行号靠的就是它。这里用「行号槽宽度/绘制文本」的代理量验证：
-  // 覆盖成 4 位数会让槽变宽（gutter 按最长行号算）。
+  // 右栏显示新侧行号靠的就是它。
+  //
+  // 两个断言（2026-10-21 重写，因行号槽背景改为与文本区同色）：
+  // ① **行号栏与文本区同背景**（新需求）：亮色下两者都是纯白——
+  //    若行号栏被改回 `surface_alt`（浅灰），行号栏区域会出现非白底，断言抓红；
+  // ② **4 位覆盖行号真的画出来了**：槽区出现行号数字墨迹。
   Fixture fx;
   if (!fx.has_font()) return;
   fx.editor.set_font_size(14.0f);
@@ -279,18 +283,29 @@ ST_TEST(code_editor_line_number_override_changes_drawn_text) {
   st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(600, 300, 1.0f);
   canvas.clear(st::math::Color::rgb(255, 255, 255));
   fx.editor.paint(fx.context, canvas);
-  // 行号槽底铺的是 `surface_alt`（非纯白）——量顶行“非纯白”的连续宽度即槽宽。
   const auto& pixels = canvas.pixels();
   const std::size_t width = static_cast<std::size_t>(canvas.width());
-  std::size_t gutter_width = 0;
-  for (std::size_t x = 0; x < width; ++x) {
-    if ((pixels[x] & 0xFFFFFFU) != 0xFFFFFFU) {
-      ++gutter_width;
-    } else {
-      break;   // 槽是**连续**一段（后面是文本区背景 = 纯白）
+
+  // ① 行号栏与文本区**同背景**（亮色 = 纯白）：
+  //    若行号栏被涂成 `surface_alt`（浅灰），60×80 区域几乎全部非白（≈4800）；
+  //    同白底时只有行号数字墨迹（两个 4 位数字，几百像素）。
+  //    阈值取区域一半（2400），能明确区分两种情形且不误伤数字。
+  std::size_t gutter_bg_stray = 0;
+  for (std::size_t y = 0; y < 60; ++y) {
+    for (std::size_t x = 0; x < 80; ++x) {   // 行号栏区
+      if ((pixels[y * width + x] & 0xFFFFFFU) != 0xFFFFFFU) ++gutter_bg_stray;
     }
   }
-  ST_CHECK(gutter_width > 30U);   // 4 位行号应撑出比 1 位更宽的槽
+  ST_CHECK(gutter_bg_stray < 2400U);
+
+  // ② 4 位覆盖行号在槽区留下明显墨迹（数字确实被画出来）。
+  std::size_t gutter_ink = 0;
+  for (std::size_t y = 0; y < 60; ++y) {
+    for (std::size_t x = 0; x < 80; ++x) {
+      if ((pixels[y * width + x] & 0xFFFFFFU) != 0xFFFFFFU) ++gutter_ink;
+    }
+  }
+  ST_CHECK(gutter_ink > 20U);
 }
 
 ST_TEST(code_editor_decorations_follow_text_edits) {

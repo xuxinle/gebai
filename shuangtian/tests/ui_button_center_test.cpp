@@ -84,13 +84,28 @@ class DrawingStubPort final : public TextPort {
   [[nodiscard]] auto line_height(float size) const -> float override { return size * box_em; }
   [[nodiscard]] auto ascent(float size) const -> float override { return size * 0.928f; }
   [[nodiscard]] auto descent(float size) const -> float override { return size * 0.236f; }
-  [[nodiscard]] auto shaped_ascent(std::string_view, float size, st::text::FontRole) const
+  [[nodiscard]] auto shaped_ascent(std::string_view text, float size, st::text::FontRole) const
       -> float override {
-    return size * shaped_em;
+    // ⚠ **必须随文本变化**（同一类“桩把差异抹平”的坑，见 `ink_below` 的注释）。
+    //
+    // 真字体下“本行文本”与“参考样本 `Ag(|)`”的 `shaped_ascent` 不同
+    //（实测同字号：拉丁 11.14 vs 中文 15.87）。而 `centered_line_top` 曾经
+    // 把本行文本当样本传，于是不同文字的基线各自漂移——这就是“标题栏按钮文字
+    // 没在背景中央”的成因。
+    // 如果桩对任何文本都返回同一个值，那个偏差**恒为零**，
+    // 回退修复后测试依旧全绿（本文件已因 `ink_below` 踩过一次，这里第二个同类）。
+    // 用“含非 ASCII 即抬高”模拟真实字体的中文回退面差异。
+    const bool has_wide = std::any_of(text.begin(), text.end(),
+                                     [](char c) { return static_cast<unsigned char>(c) >= 0x80U; });
+    return size * (has_wide ? shaped_em + 0.08f : shaped_em);
   }
-  [[nodiscard]] auto ink_metrics(std::string_view, float size, st::text::FontRole) const
+  [[nodiscard]] auto ink_metrics(std::string_view text, float size, st::text::FontRole) const
       -> std::optional<InkMetrics> override {
-    return InkMetrics{size * ink_above, size * ink_below};
+    // 同上：宽字符的墨迹上下界与拉丁不同（真字体里 `above` 差值可达 1px+）。
+    const bool has_wide = std::any_of(text.begin(), text.end(),
+                                     [](char c) { return static_cast<unsigned char>(c) >= 0x80U; });
+    const float lift = has_wide ? 0.02f : 0.0f;
+    return InkMetrics{size * (ink_above + lift), size * (ink_below - lift)};
   }
   /// 画一条与 `measure_width` 同宽的实心墨带，墨迹高度按 `ink_above`。
   ///

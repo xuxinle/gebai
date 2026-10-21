@@ -165,7 +165,7 @@ const doc = {
 }
 
 // 动态 import：mock 之后加载依赖 DOM 的模块
-const { sealSegment, subSessionBox, finishSubSession, sealSessionSegment, sealBlockResultSegment, bindSessionScroll, scrollSessionSticky, renderSubSessionArchive, renderLegacySubAgentArchive, renderBlock, appendAskUserRecord, appendPlanCard, appendToolResult, renderChoiceCard, appendMsg, addMetaActions, compactNoticeTitle } = await import("./messages")
+const { sealSegment, subSessionBox, finishSubSession, sealSessionSegment, sealBlockResultSegment, bindSessionScroll, scrollSessionSticky, renderSubSessionArchive, renderLegacySubAgentArchive, renderBlock, renderMsgAttachments, appendAskUserRecord, appendPlanCard, appendToolResult, renderChoiceCard, appendMsg, addMetaActions, compactNoticeTitle } = await import("./messages")
 const { runs, pendingTools, pendingToolsKey, approvalsEl, client, setCurrentSession } = await import("./state")
 const { isBlockOnly, toolBubbleFor, __setToolCardMetaForTest, buildPlanMarkdown, planResultHead, askUserResultHead, renderToolArgsDone } = await import("./tool-cards")
 const { clearTaskLabels, rememberTaskLabels } = await import("./task-labels")
@@ -502,6 +502,76 @@ describe("renderBlock image 块（点击进入全屏查看器）", () => {
     expect(img.src).toContain("files/preview?path=tmp%2Fflow.png")
     expect(typeof img.onclick).toBe("function")
     expect(img.dataset.tip).toBe("点击查看大图")
+  })
+})
+
+describe("附图消息的附件预览（发送即上屏与历史渲染同一入口）", () => {
+  test("历史/已上传：attachments 带服务端引用时渲染为图片块，取数经 files/preview", () => {
+    const w = appendMsg({
+      id: "u-att",
+      role: "user",
+      content: "看图",
+      attachments: [{ path: "tmp/a.png", name: "a.png", mime: "image/png", size: 10 }],
+      createdAt: 1,
+    }) as unknown as MockElWithQuery
+    const box = w.querySelector("div.msg-attach") as MockElWithQuery
+    expect(box).not.toBeNull()
+    const img = box.querySelector("img.block-img") as unknown as { src: string; className: string }
+    expect(img).not.toBeNull()
+    expect(img.src).toContain("files/preview?path=tmp%2Fa.png")
+    expect(img.className).not.toContain("uploading")
+  })
+
+  test("上传前：blob 原文件直显（对象 URL + 上传中标记），上传完成后原地换为服务端引用并回收对象 URL", () => {
+    const revoked: string[] = []
+    const origRevoke = URL.revokeObjectURL
+    URL.revokeObjectURL = (u: string) => void revoked.push(u)
+    try {
+      const blob = new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" })
+      const w = appendMsg({ id: "u-local", role: "user", content: "看图", createdAt: 1 }) as unknown as MockElWithQuery
+      renderMsgAttachments(w as unknown as HTMLElement, "s1", [{ name: "shot.png", mime: "image/png", size: 3, blob }])
+      const img = (w.querySelector("div.msg-attach") as MockElWithQuery).querySelector("img.block-img") as unknown as {
+        src: string
+        className: string
+        dataset: Record<string, string>
+      }
+      expect(img).not.toBeNull()
+      expect(img.src.startsWith("blob:")).toBe(true)
+      expect(img.className).toContain("uploading")
+      expect(img.dataset.tip).toBe("上传中…")
+      const localUrl = img.src
+      // 上传完成：同容器原地重渲染（不重建消息）
+      renderMsgAttachments(w as unknown as HTMLElement, "s1", [{ path: "tmp/shot.png", name: "shot.png", mime: "image/png", size: 3 }])
+      const img2 = (w.querySelector("div.msg-attach") as MockElWithQuery).querySelector("img.block-img") as unknown as {
+        src: string
+        className: string
+      }
+      expect(img2.src).toContain("files/preview?path=tmp%2Fshot.png")
+      expect(img2.className).not.toContain("uploading")
+      expect(revoked).toContain(localUrl)
+    } finally {
+      URL.revokeObjectURL = origRevoke
+    }
+  })
+
+  test("上传前的非图片附件：文件名 chip（不建对象 URL）", () => {
+    const w = appendMsg({ id: "u-doc", role: "user", content: "看文件", createdAt: 1 }) as unknown as MockElWithQuery
+    const blob = new Blob([new Uint8Array([1])], { type: "application/pdf" })
+    renderMsgAttachments(w as unknown as HTMLElement, "s1", [{ name: "spec.pdf", mime: "application/pdf", size: 1, blob }])
+    const chip = (w.querySelector("div.msg-attach") as MockElWithQuery).querySelector("div.msg-attach-file") as unknown as { textContent: string }
+    expect(chip).not.toBeNull()
+    expect(chip.textContent).toContain("spec.pdf")
+  })
+
+  test("只重渲染附件容器：消息正文不受影响；附件全部清空时容器移除", () => {
+    const w = appendMsg({ id: "u-mix", role: "user", content: "正文保留", createdAt: 1 }) as unknown as MockElWithQuery
+    const blob = new Blob([new Uint8Array([1, 2])], { type: "image/png" })
+    renderMsgAttachments(w as unknown as HTMLElement, "s1", [{ name: "a.png", mime: "image/png", size: 2, blob }])
+    expect(w.querySelector("div.msg-attach")).not.toBeNull()
+    expect(w.textContent).toContain("正文保留")
+    renderMsgAttachments(w as unknown as HTMLElement, "s1", [])
+    expect(w.querySelector("div.msg-attach")).toBeNull()
+    expect(w.textContent).toContain("正文保留")
   })
 })
 

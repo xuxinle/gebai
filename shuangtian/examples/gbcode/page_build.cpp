@@ -476,7 +476,13 @@ namespace gbcode_ui {
     const std::size_t current = activity_.value();
     // `surface = Alt`：与标题栏/状态栏**同色**——三者合起来是一圈“外壳”，
     // 色不一致会在拐角处露馅（见 `Element::Surface` 的说明）。
-    column(c, {.gap = 2.0f, .padding_y = 4.0f, .width = 44.0f,
+    //
+    // 几何按 IDEA 新 UI 调：
+    //   · 栏宽 44 → **48**（按钮块两侧各留 4 px 空白，否则选中态贴着栏边显得“顶格”）；
+    //   · 块间距 2 → **6**（新 UI 的图标是一颗颗独立胶囊，而不是一串紧贴的方块）；
+    //   · 按钮 40×36 → **40×40**（正方形胶囊：IDEA 的选中块是方的，竖长条会像“选中了一个单元格”）；
+    //   · 圆角由 `Button::Variant::Soft` 自带（`radius_sm`），不在这里硬写。
+    column(c, {.gap = 6.0f, .padding_y = 6.0f, .width = 48.0f,
                .surface = Element::Surface::Alt, .id = "activity-bar"}, [&] {
       for (std::size_t index = 0; index < std::size(kActivities); ++index) {
         // 图标按钮：`custom<Button>`（Button 的 icon 是一等接口，属性面没有）
@@ -501,7 +507,7 @@ namespace gbcode_ui {
             sidebar_visible_.set(true);
             mark_sidebar_visited(index);
           };
-        }, {.width = 40.0f, .height = 36.0f, .key = kActivities[index].id});
+        }, {.width = 40.0f, .height = 40.0f, .key = kActivities[index].id});
       }
       // —— 下组：终端 ——
       //
@@ -731,11 +737,38 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
       // 控制通道可 invoke）：开 = 编辑区换 MarkdownView（只读渲染），关 = 源码编辑。
       // 为什么放标签栏而不是编辑器内：它是**文档级**开关（跟当前标签走），
       // 放标签栏能一眼看到“这个文件现在处于哪种形态”；且非 md 文件时自动隐藏。
-      const bool is_md = active < buffers.size() &&
-                         (buffers[active].path.ends_with(".md") ||
-                          buffers[active].path.ends_with(".markdown") ||
-                          buffers[active].path.ends_with(".mdx"));
-      (void)row(c, {.gap = 0.0f, .height = 34.0f, .surface = Element::Surface::Alt,
+      // —— 标签栏右缘的**文档类型按钮** ——
+      //
+      // 原则：**按当前文档的类型给按钮，不需要的不放**（而不是堆一排常设工具）。
+      // 旧行为只有 Markdown 预览一个（见下面 `is_md`），本轮按同一原则补两类：
+      //
+      // · Markdown（.md/.markdown/.mdx）→ 预览开关（已有）
+      // · 表格 / 数据（.csv/.tsv）→ 列对齐提示（纯展示，与编辑器只读态一致）
+      // · 其他代码文件 → **不放**（保存/撤销/查找都在菜单与快捷键里，
+      //   常驻按钮只会占宽度）
+      //
+      // 为何不用一条工具栏：用户 2026-10-08 已定“头部只保留 tab 和内容”。
+      // 类型相关的入口放标签栏右缘，跟着“当前标签”走；无关的一律不占位。
+      const std::string_view active_path =
+          active < buffers.size() ? std::string_view{buffers[active].path} : std::string_view{};
+      const auto has_suffix = [active_path](std::initializer_list<std::string_view> suffixes) {
+        for (const std::string_view suffix : suffixes) {
+          if (active_path.ends_with(suffix)) return true;
+        }
+        return false;
+      };
+      const bool is_md = has_suffix({".md", ".markdown", ".mdx"});
+      const bool is_table = has_suffix({".csv", ".tsv"});
+      // **标签条与编辑器同色 + 底部细分隔线**（IDEA 新 UI 口径）。
+      //
+      // 旧实现标签条用 `Surface::Alt`（比编辑器亮一档），靠“色差”分隔两区。
+      // 新 UI 相反：两者**同色**（`Content`），分隔靠一条 1px 的 `border_subtle`
+      // ——色差分隔在深色主题下会让两条都显得发灰，
+      // 而同色 + 细线让“上方是标签、下方是内容”变成一条干净的横线。
+      //
+      // 为何高度 34 → 35：34 是标签条本体，多的 1px 是那条线。
+      // 不把线画在 `Tabs` 内部（它同时还服务终端标签，而那里不需要外框线）。
+      (void)row(c, {.gap = 0.0f, .height = 34.0f, .surface = Element::Surface::Content,
                     .id = "tabbar"}, [&] {
         Element& tabs_element = dsl::tabs(
             c, tabs, active_index, [this](std::size_t index) { switch_tab(index); },
@@ -749,6 +782,9 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
         // 点击 = 开/关预览（同一个按钮，不按状态换图标——用户要求只有一个预览钮）。
         if (auto* widget = dynamic_cast<Tabs*>(&tabs_element); widget != nullptr) {
           widget->begin_trailing_sync();
+          // **按文档类型放按钮**：不适用的类型什么都不放（尾部槽按目标态清空）。
+          // 每个按钮都走 `sync_trailing_button`（同一个 key 复用同一个槽位），
+          // 不会像 `add_trailing_button` 那样每帧追加。
           if (is_md) {
             (void)widget->sync_trailing_button(
                 "eye",
@@ -756,9 +792,18 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
                                     : "预览 Markdown（Ctrl+Shift+V）",
                 [this] { toggle_md_preview(); });
           }
-          widget->finish_trailing_sync();   // 非 md 时目标态为空 → 尾部清空（同一条路径）
+          if (is_table) {
+            // 表格：列对齐提示（纯展示）。当前编辑器不做列对齐，
+            // 所以它给的是“为什么看起来乱”的解释，而不是一个可切换的开关。
+            (void)widget->sync_trailing_button("align-left", "表格列对齐：等宽字体下按分隔符号对齐",
+                                              [] {});
+          }
+          widget->finish_trailing_sync();   // 不适用的类型 → 尾部清空（同一条路径）
         }
       });
+      // 标签条与编辑内容之间的 **1px 分割线**（标签条已与编辑器同色，靠这条线分隔）。
+      // 放这里而不是画在 `Tabs` 内部：`Tabs` 同时服务终端标签，那里不需要外框线。
+      (void)divider(c);
       if (!has_editor && tabs.empty()) {
         // 空状态：**居中三段式**（大图标 + 主文案 + 次级快捷键提示）。
         //
@@ -1168,8 +1213,8 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
   // 每一项尽量做成**可点**的：状态栏是 IDE 里“看一眼”的地方，而看一眼之后往往
   // 想知道更多（分支 → 变更面板、问题数 → 问题面板、语言 → 语言列表……）。
   void CodeEditorPage::build_status_bar(Composer& c) {
-    row(c, {.gap = 10.0f, .padding_x = 10.0f, .height = 26.0f,
-            .surface = Element::Surface::Alt, .id = "statusbar"}, [&] {
+          row(c, {.gap = 10.0f, .padding_x = 12.0f, .height = 28.0f,
+              .surface = Element::Surface::Alt, .id = "statusbar"}, [&] {
       status_item(c, "status-branch", "git-branch", [this] {
         return git_.branch.empty() ? std::string("main") : git_.branch;
       }, [this] {

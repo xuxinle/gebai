@@ -888,6 +888,12 @@
 
 /* ---------- 块级产物 ---------- */
 .block-img { max-width: 100%; max-height: 480px; border-radius: var(--radius-md); margin-top: 8px; background: var(--bg-inset); cursor: zoom-in; }
+/* 附图消息的附件预览（发送即上屏的本地预览与历史渲染共用）：与正文同属 .msg-body，竖排堆叠 */
+.msg-attach { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; }
+.msg.user .msg-attach { align-items: flex-end; }
+.msg-attach .msg-attach-file { margin-top: 8px; padding: 5px 9px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-inset); font-size: 12.5px; color: var(--text-muted); }
+/* 上传中的本地预览：降透明提示“尚未落盘”，上传完成后整体换成服务端引用（文件卡/图片块） */
+.block-img.uploading { opacity: 0.72; }
 /* ---------- 文件内容卡（code/file 内容块统一渲染，视觉语言同 .html-card） ---------- */
 .file-card {
   margin-top: 8px;

@@ -32,6 +32,65 @@ import { speak } from "./voice"
 import { rememberTaskLabels } from "./task-labels"
 import { makeCardFoldable, readCardFoldState, type CardFoldInit } from "./card-fold"
 
+/** 消息附件（用户附图消息）：path 为服务端会话内引用（历史/已上传），blob 为本地上传前的原文件。 */
+export type MsgAttachment = { path?: string; name: string; mime?: string; size?: number; blob?: Blob }
+
+/** 附件预览容器的对象 URL（重渲染/移除时回收，避免 blob 常驻内存）。 */
+const attachObjectUrls = new WeakMap<HTMLElement, string[]>()
+
+/**
+ * 渲染消息附件预览（`.msg-attach` 容器）：**发送即上屏与历史渲染共用同一入口**——
+ * 附图消息不必等到上传完成或页面刷新才看得见内容。
+ *
+ * - 带 `path`（服务端会话内引用）→ 与历史渲染同构（图片内联可全屏查看 / 其余走文件卡）；
+ * - 只有 `blob`（本地上传中）→ 图片用对象 URL 直显（标记上传中，完成后整体换成服务端引用），
+ *   其余类型给文件名 chip（无预览可谈，避免多留一份对象 URL）。
+ * 重渲染只清空该容器：消息正文与其它内容块不受影响。
+ */
+export function renderMsgAttachments(wrapper: HTMLElement, sessionId: string, atts: MsgAttachment[]): void {
+  const body = wrapper.querySelector<HTMLElement>(".msg-body")
+  if (!body) return
+  let box = body.querySelector<HTMLElement>(".msg-attach")
+  if (!box) {
+    box = el("div", "msg-attach")
+    body.appendChild(box)
+  }
+  for (const url of attachObjectUrls.get(box) ?? []) URL.revokeObjectURL(url)
+  attachObjectUrls.delete(box)
+  box.textContent = ""
+  const localUrls: string[] = []
+  for (const a of atts) {
+    if (a.path) {
+      renderBlock(box, { type: a.mime?.startsWith("image/") ? "image" : "file", path: a.path, name: a.name, mime: a.mime }, sessionId)
+      continue
+    }
+    const isImage = !!a.mime?.startsWith("image/") && !!a.blob
+    const url = isImage && typeof URL.createObjectURL === "function" ? URL.createObjectURL(a.blob!) : ""
+    if (!url) {
+      box.appendChild(el("div", "msg-attach-file", `📎 ${a.name}`))
+      continue
+    }
+    localUrls.push(url)
+    const img = document.createElement("img")
+    img.src = url
+    img.alt = a.name
+    img.className = "block-img uploading"
+    img.onclick = () => openImageViewer(url, a.name)
+    tip(img, "上传中…")
+    box.appendChild(img)
+  }
+  if (localUrls.length) attachObjectUrls.set(box, localUrls)
+  if (!box.childNodes.length) box.remove()
+}
+
+/** 回收该消息附件容器内的对象 URL（消息被撤回/丢弃前调用，不让 blob 留在 URL store 里）。 */
+export function releaseMsgAttachments(wrapper: HTMLElement): void {
+  const box = wrapper.querySelector<HTMLElement>(".msg-attach")
+  if (!box) return
+  for (const url of attachObjectUrls.get(box) ?? []) URL.revokeObjectURL(url)
+  attachObjectUrls.delete(box)
+}
+
 /** 渲染一组内容块：连续的 diagram 块收进 `.diagram-row` 横排展示（节省纵向空间），其余块逐个渲染。
  *  `asLink` 命中的 file 块收敛为文件链接 chip（「文件展示方式」设置的弹窗查看分支；判定见 tool-cards
  *  的 fileBlockAsLink——脚本桥透传的产物按块上的来源工具名判定，桥内调用文件工具与直接调用表现一致）。 */
@@ -400,11 +459,10 @@ export function appendMsg(msg: Message, stream = false, parent?: HTMLElement): H
   const cur = getCurrentSession()
   // 弹窗查看模式下文件工具产物 file 块收敛为文件链接 chip（其余块照常；参数区与输出不受影响）
   renderBlocks(body, msg.blocks ?? [], cur?.id || "", (b) => fileBlockAsLink(msg.name, b))
-  for (const a of msg.attachments ?? []) {
-    renderBlock(body, { type: a.mime?.startsWith("image/") ? "image" : "file", path: a.path, name: a.name, mime: a.mime }, cur?.id || "")
-  }
 
   wrapper.append(body)
+  // 附件预览（用户附图消息）：与发送即上屏的本地预览同一入口，上传完成后原地替换为服务端引用
+  renderMsgAttachments(wrapper, cur?.id || "", msg.attachments ?? [])
   // 容器内消息（子Agent 执行过程）：容器整体作为一个导航段/滚动单位，内部消息不单独处理；
   // parent 优先于 batchFrag（回放批量挂载时容器内消息直接进容器，容器本身已在 batchFrag 中）
   if (parent) parent.appendChild(wrapper)

@@ -1582,10 +1582,20 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
   const float origin_x = bounds_.x + gutter_cache_ + kGutterPadding - scroll_x_;
   const float origin_y = bounds_.y + kTopPadding - scroll_y_;
 
-  // 行号槽底
+  // 行号槽底：**与编辑区（内容区）同色**。
+  //
+  // 不能写死单一 token：编辑区是 `Surface::Content`，而它按主题取不同层
+  //（见 `Element::apply_surface`）：暗色 → `surface_sunken`（#0D0D10）、
+  // 亮色 → `surface_raised`（纯白）。若写死 `surface_sunken`，
+  // 暗色对了但亮色下行号栏会是一条深灰竖带（实测 #DCDCE5 vs 编辑区纯白）。
+  //
+  // 这里与 `apply_surface` 的 Content 分支**同一判定**，保证两主题下都与编辑区同底。
+  const auto content_bg = context.theme.mode() == st::ui::ThemeMode::Dark
+                              ? colors.surface_sunken
+                              : colors.surface_raised;
   if (show_line_numbers_ && gutter_cache_ > 0.0f) {
     canvas.fill_rect(math::Rect{bounds_.x, bounds_.y, gutter_cache_, bounds_.height},
-                     raster::Paint::solid(colors.surface_alt), 0.0f);
+                     raster::Paint::solid(content_bg), 0.0f);
   }
 
   const auto [first_line, last_line] = visible_line_range(context);

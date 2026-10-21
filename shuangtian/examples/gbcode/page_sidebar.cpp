@@ -29,7 +29,10 @@ namespace gbcode_ui {
 
 
   void CodeEditorPage::build_sidebar_head(Composer& c, std::string_view title) {
-    (void)row(c, {.gap = 4.0f, .height = 30.0f, .id = "sidebar-head"}, [&] {
+    // 几何对齐 IDEA 新 UI 的工具窗头部：高 30 → **34**（与编辑器标签条同高，
+    // 两条横向分栏线才不会差半个像素）、左右内边距 4（标题不贴边）、
+    // 字重 Medium（新 UI 的标题是“小一号但加重”，不靠字号撑）。
+    (void)row(c, {.gap = 6.0f, .padding_x = 4.0f, .height = 34.0f, .id = "sidebar-head"}, [&] {
       (void)text(c, [title] { return std::string(title); },
                  {.grow = true, .weight = FontWeight::Medium, .id = "sidebar-title"});
       build_sidebar_actions(c);

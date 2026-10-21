@@ -176,9 +176,21 @@ struct LineGeometry {
 ///
 /// 保留它是因为历史调用点多；**新代码优先用 `layout_line`** —— 一次拿到全部几何，
 /// 免得高亮带/光标各算一遍又各自漂移。
+///
+/// ⚠ **`text` 不参与度量**：垂直几何一律用 `kInkReferenceSample` 算。
+///
+/// 为什么（2026-10-21，实测）：本函数曾把 `text` 直接当 `sample` 传给 `layout_line`，
+/// 而 `layout_line` 的契约明确要求“`sample` 必须是固定参考样本”——
+/// 两边都跟着内容漂移，于是不同文字的垂直位置各算一套。
+/// 实测（gbcode 标题栏的菜单项，字号 14、盒高 40）：`文件` 两个汉字
+/// 与参考样本的 `shaped_ascent` 差 **0.8px**，墨迹带中心也差一截，
+/// 结果是菜单项文字**偏下 1 逻辑像素**（墨迹上留白 16px、下留白 14px）——
+/// 用户报的“标题栏的按钮文字没有在背景中央”就是它。
+/// 改用固定样本后，同一行无论写什么字，基线都落在同一个位置。
 [[nodiscard]] inline auto centered_line_top(const TextPort& port, std::string_view text, float size,
                                             float box_y, float box_height) -> float {
-  return box_y + layout_line(port, text, size, box_height).origin_y;
+  (void)text;   // 保留参数以兼容调用点；**故意不参与度量**（见上）
+  return box_y + layout_line(port, kInkReferenceSample, size, box_height).origin_y;
 }
 
 /// 多行文本的**行盒偏移**：给一个承载 `line_count` 行的盒子高，返回几何。

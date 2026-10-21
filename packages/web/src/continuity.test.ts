@@ -95,7 +95,34 @@ describe("断线/失效期间的用户动作不静默丢", () => {
     expect(src("composer.ts")).toContain("停止未送达")
     const s = src("main.ts")
     expect(s).toContain('code === "already_running"')
-    expect(s).toContain("userMsgEl?.remove()")
+    // 幻影消息必须被撕掉（先回收附件对象 URL 再移除元素，不然 blob 留在 URL store 里）
+    const branch = s.slice(s.indexOf('code === "already_running"'), s.indexOf('code === "already_running"') + 600)
+    expect(branch).toContain("releaseMsgAttachments(userMsgEl)")
+    expect(branch).toContain("userMsgEl.remove()")
+    expect(s).toContain("input.value = text") // 内容放回输入框
+  })
+})
+
+describe("附图消息发送即上屏（不等上传回流）", () => {
+  test("main.ts 先上屏（含本地附件预览）再上传，完成后原地换为服务端引用", () => {
+    const s = src("main.ts")
+    const onScreen = s.indexOf("renderMsgAttachments(userMsgEl, sessionId, localFiles)")
+    // 直接发送路径的上传点（运行中分支另有一个 sendPending，取最后一次出现）
+    const upload = s.lastIndexOf("await sendPending(sessionId)")
+    const replace = s.indexOf("renderMsgAttachments(userMsgEl, sessionId, attachments)")
+    expect(onScreen).toBeGreaterThan(-1)
+    // 上屏必须在上传之前（反了则附图消息“先发后消失”、纯附图消息完全不可见）
+    expect(onScreen).toBeLessThan(upload)
+    // 上传完成后原地重渲染（不重建消息，历史渲染同一入口）
+    expect(replace).toBeGreaterThan(upload)
+    expect(s).toContain("releaseMsgAttachments") // 幻影消息撕掉前回收对象 URL
+  })
+
+  test("队列消化（背景会话）的用户消息同样带附件引用渲染", () => {
+    const s = src("main.ts")
+    const at = s.lastIndexOf("setQueueExecutor(") // 模块尾部才是注册点（顶部是同名 import）
+    const fn = s.slice(at, at + 900)
+    expect(fn).toContain("attachments: item.files")
   })
 })
 
