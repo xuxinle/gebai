@@ -654,10 +654,11 @@ class TextRenderer {
   float subpixel_strength_{0.5f};
   /// **覆盖率对比度（S 曲线）强度**，γ 之后施加：`a' = a + (1−a)·c·a`（见 `set_coverage_contrast_strength`）。
   /// 0 = 关（历史行为）。它补的是 γ 补不了的那一段：幂函数抬不满黑像素。
-  /// **默认 0.9**：以 VS Code 实拍标定（暗色主题 15px，配合暗色类 γ 0.50/0.50/0.85）。
-  ///   汉字实心 37.7%（VS Code 38.2%）· 拉丁 49.4%（52.3%）· 数字 50.3%（51.4%）
+  /// **默认 0.6**：以 VS Code 实拍标定（**物理 19.5px**，配合暗色类 γ 0.58/0.50/0.85）。
+  ///   汉字实心 39.6%（VS Code 38.2%）· 拉丁 52.1%（52.3%）· 数字 52.1%（51.4%）
   /// 这一层是"γ 补不了的那一段"：γ 把中段压下去后，只有 S 曲线能把满黑像素推上来。
-  float coverage_contrast_strength_{0.9f};
+  /// （曾用过 0.9，那是在 15px 错配尺度下标定的；换到正确字号后 0.9 会推过头。）
+  float coverage_contrast_strength_{0.6f};
   /// 覆盖率 gamma 预校正指数（见 `set_coverage_gamma`）；1.0 = 关（旧行为）。
   float coverage_gamma_{kDefaultCoverageGamma};
   /// 按物理字号覆盖 gamma 的阈值（0 = 不覆盖）与取值，见 `set_fitted_gamma`。
