@@ -254,6 +254,10 @@ ST_TEST(text_coverage_gamma_changes_rendered_weight) {
     // 否则补偿会为了归一化墨量而重分布中间调，把 gamma 的方向淹掉
     //（补偿另有自己的用例 `text_ink_compensation_evens_out_glyph_weight`）。
     renderer.set_ink_compensation(false);
+    // 同理，**关掉对比度 S 曲线层**：它也是一个“整体抬墨”的映射（`a' = a+(1−a)·c·a`，
+    // 默认 c=0.8），会和墨量补偿一样把 gamma 的方向淹掉。
+    // 本用例只度量 gamma 本身，不是度量默认档的合成结果。
+    renderer.set_coverage_contrast_strength(0.0f);
     renderer.set_coverage_gamma(gamma);
     (void)renderer.draw(canvas, kText, st::math::Point{2.0f, 2.0f}, 13.5f,
                         st::math::Color{0, 0, 0, 0xFF});

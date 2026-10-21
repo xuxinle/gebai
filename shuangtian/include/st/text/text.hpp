@@ -262,6 +262,45 @@ class TextRenderer {
   void set_subpixel_filter(bool enabled) noexcept { subpixel_filter_ = enabled; }
   [[nodiscard]] auto subpixel_filter() const noexcept -> bool { return subpixel_filter_; }
 
+  /// **亚像素强度**：三通道 α 向像素均值收缩的比例，取值 `[0, 1]`。
+  ///
+  /// `α_c' = mean + (α_c − mean) · k`
+  ///   k = 1 → 原样（彩边最强，霜天的历史行为）
+  ///   k = 0 → 三通道全等于 mean（完全退化为灰度，无彩边）
+  ///
+  /// **为什么需要它**：三通道直接用几何覆盖率原样时，彩边强度完全由字形轮廓与像素
+  /// 网格的相对位置决定，**没有任何旋钮**。实测（浅底 15px，彩边 = 通道极差）：
+  ///   霜天原生 74.4（P90 166）  ·  VS Code 实拍 **43.7（P90 80）**  ·  系统 ClearType 75.0
+  /// 即 VS Code（Chromium）用的是**弱化版亚像素**。这个旋钮就是把它复刻过来的手段。
+  ///
+  /// **关键性质：逐像素三通道之和不变**（Σα' = Σα），所以墨量、笔画粗细、实心比
+  /// 全部不受影响——只改彩边强度。这也是它不能靠 γ 或滤波代替的原因。
+  ///
+  /// 缓存：强度进位图缓存键（不同 k = 不同位图）。
+  void set_subpixel_strength(float strength) noexcept;
+  [[nodiscard]] auto subpixel_strength() const noexcept -> float { return subpixel_strength_; }
+
+  /// **覆盖率对比度（S 曲线）强度**，在 γ 之后施加：`a' = a + (1−a)·c·a`，取值 `[0, 3]`。
+  ///
+  /// **为什么在 γ 之外还要这一层**：γ 是单调幂函数，只能把曲线往一个方向拉。
+  /// 实测（暗色主题 15px，VS Code 为参照的覆盖率分布）：
+  ///   gamma 0.30 → 满黑 30.5%，但中段(0.2~0.4) 5.0%（目标 9.8%）
+  ///   gamma 0.40 → 满黑 26.5%，中段 7.7%
+  /// 即 
+  /// **压低 γ 能把中段压死，却换不来足够的满黑像素**。VS Code 的分布是“两端抬、中段压”，
+  /// 幂函数做不出这个形状——需要 S 曲线。
+  ///
+  /// 与 `CoverageCorrect::Skia` 的关系：同一条 `apply_contrast` 公式，但**不分方向**。
+  /// Skia 那条用 `contrast·lin_dst` 选方向，浅字深底时 `lin_dst≈0` → 恒等失效
+  /// （实测 c=0~3 输出逐位相同）；这条直接施加，所以亮/暗主题都能用。
+  ///
+  /// 两者**不同时生效**：`coverage_correct_ == Skia` 时走 Skia 的 LUT，本层被跳过。
+  /// 缓存：强度进位图缓存键。
+  void set_coverage_contrast_strength(float strength) noexcept;
+  [[nodiscard]] auto coverage_contrast_strength() const noexcept -> float {
+    return coverage_contrast_strength_;
+  }
+
   /// **字形覆盖率的 gamma 预校正指数**（在**位图生成时**施加，不是贴图时）。
   ///
   /// 映射：`α' = 1 − (1−α)^(1/γ)`（黑字白底的码值即 `(1−α)^(1/γ)`）。
@@ -604,6 +643,21 @@ class TextRenderer {
   bool subpixel_{false};
   /// 亚像素 5-tap 低通滤波开关（见 `set_subpixel_filter`）。
   bool subpixel_filter_{true};
+  /// **亚像素强度**：三通道 α 向像素均值的收缩比例（见 `set_subpixel_strength`）。
+  /// 1 = 原样（彩边最强）；0 = 退化为灰度（无彩边）；VS Code 实测 ≈ 0.5。
+  /// **逐像素三通道之和不变**，所以不影响墨量与笔画粗细，只改彩边强度。
+  ///
+  /// **默认 0.5**：以**用户机器上 VS Code 的实拍**标定。浅底 15px 实测（彩边 = 通道极差）：
+  ///   k=1.00 → 70.6 / P90 145　　k=**0.50** → **41.0 / P90 79**　　k=0（灰度）→ 16.4 / 26
+  /// 而 VS Code 实拍是 **43.7 / P90 80** —— k=0.5 几乎完全吻合。
+  /// 这个值不是“调好看”，而是把 Chromium 的 `ClearTypeLevel ≈ 0.5` 复刻过来。
+  float subpixel_strength_{0.5f};
+  /// **覆盖率对比度（S 曲线）强度**，γ 之后施加：`a' = a + (1−a)·c·a`（见 `set_coverage_contrast_strength`）。
+  /// 0 = 关（历史行为）。它补的是 γ 补不了的那一段：幂函数抬不满黑像素。
+  /// **默认 0.9**：以 VS Code 实拍标定（暗色主题 15px，配合暗色类 γ 0.50/0.50/0.85）。
+  ///   汉字实心 37.7%（VS Code 38.2%）· 拉丁 49.4%（52.3%）· 数字 50.3%（51.4%）
+  /// 这一层是"γ 补不了的那一段"：γ 把中段压下去后，只有 S 曲线能把满黑像素推上来。
+  float coverage_contrast_strength_{0.9f};
   /// 覆盖率 gamma 预校正指数（见 `set_coverage_gamma`）；1.0 = 关（旧行为）。
   float coverage_gamma_{kDefaultCoverageGamma};
   /// 按物理字号覆盖 gamma 的阈值（0 = 不覆盖）与取值，见 `set_fitted_gamma`。

@@ -164,8 +164,12 @@ ST_TEST(grid_fit_keeps_ink_identity_for_large_glyphs) {
   for (const float pixel_size : {33.0f, 60.0f}) {
     TextRenderer off(*fixture.stack, 1.0f);
     off.set_coverage_gamma(1.0f);
+    // 与 `grid_fit_preserves_ink` 同一口径：量几何必须在恒等映射下，
+    // 对比度 S 曲线（默认 0.8）是非线性映射，不关掉会把几何形变混成“墨量变了”。
+    off.set_coverage_contrast_strength(0.0f);
     TextRenderer fitted(*fixture.stack, 1.0f);
     fitted.set_coverage_gamma(1.0f);
+    fitted.set_coverage_contrast_strength(0.0f);
     fitted.set_grid_fit(GridFitMode::Normal);
     for (const auto& [name, text] : {std::pair{"中文", kCjk}, std::pair{"拉丁", kLatin}}) {
       const Sharpness base = scan(off, text, pixel_size);

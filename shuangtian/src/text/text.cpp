@@ -248,11 +248,37 @@ inline constexpr int kMaxSubpixelWidth = 4096;
 ///
 /// 即只关滤波是“顾此失彼”；这条口子让**中间强度**可测（`ST_TEXT_LCD_TAPS`，
 /// 形如 `8,77,86,77,8`），据此挑一个彩边可接受而又明显更锐的点。
+///
+/// **默认值已从 FreeType 的 `{8,77,86,77,8}` 收窄到 `{0,51,205,51,0}`**（2026-10-21，
+/// 以 **DWrite 直调** 为参照逐像素标定，`docs/DWRITE_PIXEL_BENCHMARK.md` §四）。
+/// 理由是个可量化的机制：FreeType 那组把子像素覆盖率摊到 5 个子像素宽（旁瓣 8/256），
+/// 在 15 物理 px 的正文上会把笔画芯**摊平到不满黑**——实测满黑像素占比只有 DWrite 的一半；
+/// 收窄到 3 子像素宽后满黑占比 12.2% → 20.7%，而**彩边反而更接近参照**（64.3 vs 63.6，
+/// 即“变锐”不是靠牺牲彩边换的）。无滤波 `{0,0,256,0,0}` 更锐但彩边 69.2 已超出参照。
 [[nodiscard]] inline auto resolve_lcd_taps() -> const std::array<float, 5>& {
   static const std::array<float, 5> taps = [] {
+    // **默认值 = FreeType 的 `FT_LCD_FILTER_DEFAULT`**（`{8,77,86,77,8}`）。
+    //
+    // 曾一度改成 `{0,64,128,64,0}`（想要“更锐的笔画芯”），但以 **VS Code / DWrite ClearType**
+    // 为参照逐像素实测后**方向是错的**（浅底 15px，彩边 = 通道极差）：
+    //   `{0,64,128,64,0}` 77.8 / P90 168      ← 改坏了
+    //   `{8,77,86,77,8}`  70.6 / P90 145      ← 与 DWrite ClearType 75.0 / 139 最接近
+    // 即：**滤波越窄，彩边越重**（窄滤波把子像素差异原样保留）。想减彩边该往**宽**调，
+    // 但那会换来笔画变糊——真正的解法是把彩边降到 VS Code 那种程度（见下）。
+    //
+    // 参照点：VS Code（Electron/Chromium）实测彩边均值 43.7 / P90 80，
+    // 比系统 ClearType（75.0/139）**还弱一半**——它走的是更温和的亚像素变体。那是下一个目标。
     std::array<float, 5> result{8.0f, 77.0f, 86.0f, 77.0f, 8.0f};
     const auto value = fs::read_env("ST_TEXT_LCD_TAPS");
-    if (!value.has_value() || value->empty()) return result;
+    if (!value.has_value() || value->empty()) {
+      // 默认也走同一道归一化（无论和是不是 256），不然后果见上一段注释。
+      float dsum = 0.0f;
+      for (const float tap : result) dsum += tap;
+      if (dsum > 0.0f) {
+        for (float& tap : result) tap = tap / dsum * 256.0f;
+      }
+      return result;
+    }
     std::array<float, 5> parsed{};
     int count = 0;
     std::string_view text = *value;
@@ -565,6 +591,28 @@ void TextRenderer::set_coverage_contrast(float contrast) noexcept {
   const float clamped = std::clamp(contrast, 0.0f, 1.0f);
   if (clamped == coverage_contrast_) return;
   coverage_contrast_ = clamped;
+  const std::scoped_lock lock(cache_->mutex);
+  cache_->glyphs.clear();
+  cache_->lru_order.clear();
+  cache_->glyph_bytes = 0;
+}
+
+void TextRenderer::set_subpixel_strength(float strength) noexcept {
+  const float clamped = std::clamp(strength, 0.0f, 1.0f);
+  if (clamped == subpixel_strength_) return;
+  subpixel_strength_ = clamped;
+  // 与 gamma 同理：强度改的是**位图内容**，旧位图留着只会白占预算。
+  const std::scoped_lock lock(cache_->mutex);
+  cache_->glyphs.clear();
+  cache_->lru_order.clear();
+  cache_->glyph_bytes = 0;
+}
+
+void TextRenderer::set_coverage_contrast_strength(float strength) noexcept {
+  const float clamped = std::clamp(strength, 0.0f, 3.0f);
+  if (clamped == coverage_contrast_strength_) return;
+  coverage_contrast_strength_ = clamped;
+  // 与 gamma 同理：改的是**位图内容**。
   const std::scoped_lock lock(cache_->mutex);
   cache_->glyphs.clear();
   cache_->lru_order.clear();
@@ -1008,6 +1056,13 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   for (const float tap : resolve_lcd_taps()) {
     taps_bucket = taps_bucket * 31ULL + static_cast<std::uint64_t>(std::lround(tap * 16.0f));
   }
+  // **亚像素强度同样进键**：它改的是三通道 α 的相对差（彩边强度），与滤波同一类
+  // ——漏掉就会“改了 ST_TEXT_SUBPIXEL_STRENGTH 看不出变化”。
+  const auto strength_bucket =
+      static_cast<std::uint64_t>(std::lround(subpixel_strength_ * 100.0f));
+  // **对比度（S 曲线）同样进键**：它改位图映射（与 gamma 同一类）。
+  const auto contrast_bucket =
+      static_cast<std::uint64_t>(std::lround(coverage_contrast_strength_ * 100.0f));
   // **合成加粗步数必须进键**：它是同一字形的不同笔画宽度版本，
   // 混用等于把 Regular 的位图当成 SemiBold 的（症状：“字重一会儿生效一会儿不生效”）。
   // **逐字段顺序混合**（不是“移位后 XOR 拼装”）——六层嵌套的 `mix(mix(...))` 写起来
@@ -1018,7 +1073,8 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
        {static_cast<std::uint64_t>(face.face_index()), static_cast<std::uint64_t>(glyph),
         static_cast<std::uint64_t>(size_bucket), supersample_bucket, gamma_bucket,
         correct_bucket, lcd ? std::uint64_t{1} : std::uint64_t{0}, fit_bucket, fit_shift_bucket,
-        ink_bucket, darken_bucket, taps_bucket, static_cast<std::uint64_t>(steps)}) {
+                      ink_bucket, darken_bucket, taps_bucket, strength_bucket, contrast_bucket,
+              static_cast<std::uint64_t>(steps)}) {
     key = mix(key, field);
   }
   {
@@ -1082,7 +1138,9 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   // 顺序刻意如此：类分档是"只动这一类"的窄口径修正，理应有最高优先级。
   const float class_gamma = class_gamma_[glyph_class_index(glyph_class)];
   const float glyph_gamma = class_gamma > 0.0f ? class_gamma : effective_gamma(effective_size);
-  const auto correct = [&skia_lut, use_skia_lut, glyph_gamma](float value) noexcept -> float {
+  const float contrast_strength = coverage_contrast_strength_;
+  const auto correct = [&skia_lut, use_skia_lut, glyph_gamma, contrast_strength](
+                           float value) noexcept -> float {
     if (value <= 0.0f || value >= 1.0f) return value;
     if (use_skia_lut) {
       const float scaled = value * 255.0f;
@@ -1091,10 +1149,31 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
       const float frac = scaled - static_cast<float>(index);
       return skia_lut[index] * (1.0f - frac) + skia_lut[next] * frac;
     }
-    if (glyph_gamma == 1.0f) return value;
-    // 1 − (1−α)^(1/g)：黑字白底时码值 code' = (1−α)^(1/g) = linear_to_srgb(1−α)（近似）。
-    // 即把“code 空间混合”的结果换成“线性空间混合”（从而更浅/更细）——方向见头文件说明。
-    return 1.0f - std::pow(1.0f - value, 1.0f / glyph_gamma);
+    float result = value;
+    if (glyph_gamma != 1.0f) {
+      // 1 − (1−α)^(1/g)：黑字白底时码值 code' = (1−α)^(1/g)
+      result = 1.0f - std::pow(1.0f - result, 1.0f / glyph_gamma);
+    }
+    // —— **对比度（S 曲线）层**：γ 之后的第二步 ——
+    //
+    // 为什么 γ 不够：γ 是单调幂函数，只能把整条曲线往一个方向拉。
+    // 实测（暗色主题 15px，以 VS Code 为参照的覆盖率分布）：
+    //   gamma 0.30 → 满黑 30.5%，但中段(0.2~0.4) 只剩 5.0%（目标 9.8%）
+    //   gamma 0.40 → 满黑 26.5%，中段 7.7%
+    // 即：**压低 γ 能把中段压死，却换不来足够的满黑像素**。
+    // VS Code 的分布是“两端抬、中段压”，而幂函数做不出这个形状。
+    //
+    // 这条 S 曲线复刻 Skia 的 `apply_contrast`：`a' = a + (1−a)·c·a`
+    // —— 它把 a∈(0,1) 整体往上推（低覆盖率推得多、满黑不动），
+    // 正好补上“满黑不够”那一段，且**保留 γ 已经调好的中段位置**。
+    //
+    // 与 Skia 模式的区别：Skia 那条用 `contrast·lin_dst` 做方向选择，
+    // 在**浅字深底**（用户编辑器场景）下 `lin_dst≈0` → 完全失效（实测 c=0~3 输出逐位相同）。
+    // 这里不分方向、直接施加，所以两种主题都能用。
+    if (contrast_strength > 0.0f) {
+      result = result + (1.0f - result) * contrast_strength * result;
+    }
+    return std::clamp(result, 0.0f, 1.0f);
   };
   const float scale = effective_size * static_cast<float>(supersample) / units;
   /// 宽度量化的适用上限（**物理像素**）。
@@ -1433,7 +1512,11 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
           // 标量取三通道均值而不是逐通道各自映射：逐通道会把彩边信息“各自拉直”，
           // 破坏“三通道覆盖率按同一比例缩放”的前提（而那个前提正是本模式的物理含义——
           // 一个像素只有一个几何覆盖率，R/G/B 只是同一条边的三种采样）。
-          if (coverage_gamma_ != 1.0f || use_skia_lut) {
+          // **门禁必须把类 γ 算上**：只查 `coverage_gamma_` 时，若全局 γ=1.0（应用默认档
+          // 在 γ=1 下调试、或用户显式关掉全局校正），类 γ 就**整段被跳过**——
+          // 实测症状：`--gamma=1.00` 时开关 `ST_TEXT_HAN_GAMMA` 像素完全不变（两张图逐字节相同），
+          // 而 `glyph_gamma` 明明已是类档值。灰度分支（1279 行）无此门禁，所以两边行为还不一致。
+          if (coverage_gamma_ != 1.0f || use_skia_lut || glyph_gamma != 1.0f) {
             for (int x = 0; x < out_width; ++x) {
               const std::size_t base = static_cast<std::size_t>(x) * kSubpixelColumns;
               const float mean = (row_subpixels[base] + row_subpixels[base + 1U] +
@@ -1451,6 +1534,35 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
           // 发生在我们已经决定每个子像素该多黑的**之后**；反过来做会先把彩边摊平再映射，
           // 得到的不是任何一个真实混合空间的结果。
           if (subpixel_filter_) apply_lcd_filter(row_subpixels);
+          // —— 亚像素强度（向灰度收缩）——
+          //
+          // 为什么需要这一步：三通道 α 直接用**几何覆盖率原样**时，彩边强度完全由字形
+          // 轮廓与像素网格的相对位置决定，**没有任何可调旋钮**。实测对比：
+          //   霜天原生亚像素 彩边均值 **74.4** / P90 166
+          //   VS Code 实拍　 彩边均值 **43.7** / P90  80
+          //   系统 ClearType 彩边均值  75.0 / P90 139
+          // 即 VS Code（Chromium）用的是**弱化版的亚像素**，而我们的实现比系统 ClearType 还硬。
+          //
+          // 收缩公式：`α_c' = mean + (α_c − mean) · k`
+          //   k = 1 → 原样（三通道完全独立，彩边最强）
+          //   k = 0 → 三通道全等于 mean（退化为灰度，彩边为 0）
+          // 关键性质：**逐像素均值不变**（Σα' = Σα），所以墨量与笔画粗细完全不受影响，
+          // 只把“三通道的差异”按比例缩小。这正是 Chromium 的 ClearTypeLevel 做的事。
+          //
+          // 次序：放在滤波**之后**——滤波是物理摊墨（已在 gamma 后），
+          // 而强度是“合成决策”；先摊平再收缩，才对应“先算真实覆盖率、再决定彩边多强”。
+          if (subpixel_strength_ < 1.0f) {
+            for (int x = 0; x < out_width; ++x) {
+              const std::size_t base = static_cast<std::size_t>(x) * kSubpixelColumns;
+              const float mean = (row_subpixels[base] + row_subpixels[base + 1U] +
+                                  row_subpixels[base + 2U]) /
+                                 3.0f;
+              for (int channel = 0; channel < kSubpixelColumns; ++channel) {
+                float& value = row_subpixels[base + static_cast<std::size_t>(channel)];
+                value = mean + (value - mean) * subpixel_strength_;
+              }
+            }
+          }
           std::copy(row_subpixels.begin(), row_subpixels.end(),
                     bitmap->coverage.begin() +
                         static_cast<std::ptrdiff_t>(static_cast<std::size_t>(y) *

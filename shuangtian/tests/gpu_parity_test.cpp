@@ -345,8 +345,13 @@ ST_TEST(gpu_subpixel_text_matches_software) {
               result.max_delta, software_colored, gpu_colored);
     ST_CHECK(result.structural_ratio < 0.005);
     ST_CHECK(result.differing_ratio < 0.08);
-    // 两侧都必须真的有彩边（亚像素渲染的可见证据），且量级接近
-    ST_CHECK(software_colored > 40);
+    // 两侧都必须真的有彩边（亚像素渲染的可见证据），且量级接近。
+    //
+    // 阈值从 40 降到 30：亚像素强度默认改成 0.5（复刻 VS Code 的 ClearTypeLevel，
+    // 见 `subpixel_strength_` 的标定说明）后，三通道差异整体减半，
+    // 暗底场景的彩边像素从 ~100 降到 38——**仍远大于 0**（灰度是严格 0），
+    // 判据依旧能区分“亚像素在生效”与“退化成灰度”。真正要求的是两侧一致（下面两条）。
+    ST_CHECK(software_colored > 30);
     ST_CHECK(gpu_colored > static_cast<std::size_t>(software_colored) * 8U / 10U);
     ST_CHECK(gpu_colored < static_cast<std::size_t>(software_colored) * 12U / 10U);
   }

@@ -231,6 +231,10 @@ ST_TEST(grid_fit_preserves_ink) {
   TextRenderer normal(*fixture.stack, 1.0f);
   off.set_coverage_gamma(1.0f);
   normal.set_coverage_gamma(1.0f);
+  // 同理关掉**对比度 S 曲线层**：它也是非线性映射（`a' = a+(1−a)·c·a`，默认 0.8），
+  // 会把「拟合的几何形变」与「映射的残差」混在一起——正是上面那段注释说的同一个坑。
+  off.set_coverage_contrast_strength(0.0f);
+  normal.set_coverage_contrast_strength(0.0f);
   normal.set_grid_fit(GridFitMode::Normal);
 
   for (const auto& [name, text] : {std::pair{"中文", kCjk}, std::pair{"拉丁", kLatin}}) {

@@ -36,6 +36,7 @@ auto resolve_text_lcd(std::string_view mode) -> bool {
   if (const auto value = fs::read_env("ST_TEXT_LCD"); value.has_value() && !value->empty()) {
     if (const auto parsed = parse_bool_word(*value); parsed.has_value()) return *parsed;
   }
+  // **默认亚像素**（见 `resolve_text_lcd` 头注的实测依据）。
   return true;
 }
 
