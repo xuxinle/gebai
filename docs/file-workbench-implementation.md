@@ -245,7 +245,7 @@ g 的墨迹下降 = 3px                                  ← 需要 3px → 被�
 
 #### ④ 变更面板移到左栏
 
-原底部「变更内容」栏整体迁出为 `files/changes.ts`（左栏工具窗，与目录树、搜索**互斥**）：头部一行（仅当前目录 ⇄ 整仓库的范围芯片 + 列表/树视图切换 + 刷新）、分组列表（冲突/已暂存/未暂存/未跟踪；树视图按目录收拢、目录行可折叠）、行内 stage/unstage/丢弃（自动 stash 备份）、底部 sticky 提交框（修补 + 提交历史、推送 / 提交一行右对齐）、多步操作横幅（继续/跳过/中止）。rail「变更」按钮带改动数徽标。
+原底部「变更内容」栏整体迁出为 `files/changes.ts`（左栏工具窗，与目录树、搜索**互斥**）：头部一行（列表/树视图切换 + 刷新）、分组列表（冲突/已暂存/未暂存/未跟踪，**一律整仓库**）、行内 stage/unstage/丢弃（不建 stash 备份）、底部 sticky 提交框（修补 + 提交历史、推送 / 提交一行右对齐）、多步操作横幅（继续/跳过/中止）。rail「变更」按钮带改动数徽标。
 
 改动行的动作按钮 **hover 才显形**（列表保持干净）；`@media (hover: none)` 下常显——触屏没有 hover，否则按钮永远点不到。
 
@@ -2033,6 +2033,30 @@ CSS 里也没有 `.fw-change-group-head.collapsed` 的旋转规则（只有树�
 面板内不存在 `.fw-git-titlebar` 与 `.fw-git-opbar` 节点；触发一次写操作时状态栏出现 `.fw-status-item.git-busy`
 并在结束后消失；merge 冲突仓库下状态栏显示「merge 进行中（N 个冲突）」；整个过程中 `.fw-git-cols` 的
 `getBoundingClientRect().top` 恒定（面板不再跳动）。
+
+### 5.51 变更面板不再区分本目录 / 整仓库（一律整仓库）
+
+**需求**：「变更面板不区分本目录和整仓库，直接展示整仓库就行」。
+
+**为何删掉而不是改默认值**：那个范围开关（`showWholeRepo`）默认就只看当前根在仓库内的子目录
+（典型：会话工作区落在项目仓库内）。于是「我改了什么、要不要提交」这个问题的答案被静默截短了——
+仓库其他位置的改动**从列表里消失**，而面板不给任何提示，用户会以为工作区只改了这几个文件；
+更麻烦的是它只影响**列表**（提交动的是整个仓库），于是「看到 3 个改动」与「提交带走 7 个改动」能同时成立。
+保留一个只为了看全的开关，不如直接不给这个维度。
+
+**改动**：
+
+| 处 | 改动 |
+|---|---|
+| `files/changes.ts` | 删 `showWholeRepo` / 范围芯片 `scopeChip` / `renderScopeChip()`；`scopedChanges()` → `repoChanges()`（直接取 `status.changes`，不再按前缀过滤）；`panelKey()` 去掉前缀与范围项；头部只剩「（左留白）.fw-grow + 视图切换 + 刷新」 |
+| `files/changes.ts` / `files/git.ts` | 两个 hooks 接口删去 `repoPrefix`（面板不再需要知道根在仓库内的位置；路径坐标仍由 `openRepoFile` 换算） |
+| `files/main.ts` | 两处 `createChangesPanel` / `createGitPanel` 的 `repoPrefix` 传参随之删除（`state.repoPrefix` 本身保留：资源管理器的 Git 装饰与日志过滤仍靠它把根相对路径换成仓库相对） |
+| `css/files.css` | 删 `.fw-changes-head .fw-scope-chip`、`[hidden]`、`> span` 三条规则（功能没了样式不能留着） |
+| `files/style-contract.test.ts` | 「范围芯片可省略」一例换成「改动列表一律整仓库」：断言源码不含 `repoPrefix` / 不做前缀过滤、样式里不再有 `fw-scope-chip` |
+
+**验证**：`packages/web` 全量 `bun test` 1199 pass / 0 fail（含改写后的样式契约 29 例）；`packages/web` 的 `tsc --noEmit` 通过；真实页面（独立预览实例 + Playwright，夹具仓库以子目录 `sub` 为根）确认头部无范围芯片、只剩视图/刷新两钮，列表按整仓库列出 `other/f.txt`、`sub/a.txt`、`other/new.txt` 三条（分组「未暂存（2）/ 未跟踪（1）」），树视图与刷新按钮正常。
+
+**教训**：范围为“局部”的列表与范围为“全局”的动作（提交 / 推送）放在同一个面板里时，两者的差必须是**显式可见**的；靠一个默认关闭的开关来表达「还有别处的改动」等于没有——它不显示时没有任何东西提醒你去看它。
 
 ---
 

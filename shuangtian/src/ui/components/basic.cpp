@@ -1071,17 +1071,24 @@ void Card::apply_theme(const Theme& theme) {
 Divider::Divider(bool vertical) : vertical_(vertical) {}
 
 void Divider::apply_theme(const Theme& theme) {
-  style_.background = theme.colors().border;
-  style_.height = vertical_ ? kAuto : theme.metrics().border_width;
-  style_.width = vertical_ ? theme.metrics().border_width : kAuto;
+  // **用最淡的一档**（`border_subtle`）而不是 `border`：
+  // 分割线是“同组内的弱分隔”，职责是暗示分组，不应与控件边界争抢注意力
+  //（用户 2026-10-21：“分割线改细点”）。
+  // 主题里 `border_subtle` 的强度已被 `ui_theme_test` 锁在 `border` 之下。
+  style_.background = theme.colors().border_subtle;
+  // 线宽支持**亚像素**（< 1 逻辑 px）：`0.5f` 在 2 倍 DPI 下正好一个物理像素，
+  // 在 1 倍下会被光栅器按覆盖率画成一条淡线——两种 DPI 都比 1px 实线更轻。
+  style_.height = vertical_ ? kAuto : kLineThickness;
+  style_.width = vertical_ ? kLineThickness : kAuto;
 }
 
 void Divider::measure(const RenderContext& context, const Constraints& constraints) {
+  (void)context;
   if (vertical_) {
-    measured_ = math::Size{context.theme.metrics().border_width, constraints.max_height};
+    measured_ = math::Size{kLineThickness, constraints.max_height};
     return;
   }
-  measured_ = math::Size{constraints.max_width, context.theme.metrics().border_width};
+  measured_ = math::Size{constraints.max_width, kLineThickness};
 }
 
 void Divider::paint_content(const RenderContext& context, raster::Surface& canvas) const {

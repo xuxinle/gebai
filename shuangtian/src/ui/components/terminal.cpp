@@ -1140,16 +1140,27 @@ void Terminal::sync_header_actions() {
   stop_slot_ = -1;
   collapse_slot_ = -1;
   // 清屏（常驻）。
-  (void)tabs_->add_trailing_button("trash", "清屏", [this] { clear(); });
-  // 中止（忙时）。
+  //
+  // 图标用 `eraser` 而不是 `trash`：终端里“清空屏幕”不是“删除”，
+  // 垃圾桶会让人以为“丢掉历史/清掉内容”（且与右侧收起/关闭挨着，容易误点）。
+  // IDEA / VSCode 的终端清屏也是“擦拭屏”语义而非删除。
+  (void)tabs_->add_trailing_button("eraser", "清屏", [this] { clear(); });
+  // 中止（忙时）。`square` 是“停止”的通行图形（媒体播放器的 stop）。
   if (want_stop) {
     stop_slot_ = static_cast<int>(tabs_->add_trailing_button(
         "square", "中止（Ctrl+C）", [this] { send_stop(); }));
   }
   // 收起（宿主装了回调才有）。
+  //
+  // 图标用 `arrow-down` 而不是 `close`：`close` 与标签上的关闭 × 同形，
+  // 用户分不清“关掉这个终端”与“收起整个面板”（实测会被当成关标签）。
+  // 也不用 `chevron-down`：它的路径在 24 网格里只占 6 单位高（0.25），
+  // 20px 盒里实际只画出 ~7px 高——与旁边 12px/13px 的橡皮擦、+ 并排时
+  // 明显“矮一截”（用户报“大大小小不统一”）。`arrow-down` 占 15 单位（0.63），
+  // 与其它图标同一视觉重量，且“向下”就是收起方向。
   if (want_collapse) {
     collapse_slot_ = static_cast<int>(tabs_->add_trailing_button(
-        "close", "收起面板", [this] {
+        "arrow-down", "收起面板", [this] {
           if (on_request_collapse) on_request_collapse();
         }));
   }
@@ -1342,7 +1353,11 @@ void Terminal::arrange(const RenderContext& context, math::Rect rect) {
   refresh_cell_metrics(context);
   sync_tabs();
   const Metrics& metrics = context.theme.metrics();
-  const float tabs_h = tabs_visible_ ? metrics.control_height - 6.0f : 0.0f;
+  // 标签栏高度 = `control_height`（34），**与编辑器标签栏一致**。
+  //
+  // 之前是 `control_height - 6`（28）——终端标签比编辑器标签矮一截，
+  // 两者上下相邻时高度不齐（用户 2026-10-21：“tab 的大小也参照编辑器”）。
+  const float tabs_h = tabs_visible_ ? metrics.control_height : 0.0f;
   tabs_rect_ = math::Rect{rect.x, rect.y, rect.width, tabs_h};
   output_rect_ = math::Rect{rect.x, rect.y + tabs_h, rect.width,
                             std::max(0.0f, rect.height - tabs_h)};
@@ -1447,6 +1462,17 @@ void Terminal::paint_content(const RenderContext& context, raster::Surface& canv
   }
   // 屏幕底色（终端是"一屏文本"，底色把它与普通面板分开）。
   canvas.fill_rect(output_rect_, raster::Paint::solid(palette.bg));
+  // **标签栏下方的发丝分割线**（与编辑器标签栏下方那条同一厚度/颜色）。
+  //
+  // 为何需要：终端标签栏底色与输出区底色本来就不同（`surface_alt` vs 终端屏幕底），
+  // 但没有明确的分界线时两块颜色“渐变”得很模糊，看起来像标签浮在内容上方；
+  // 一条细线把“控制区”与“输出区”分开（用户 2026-10-21 要求）。
+  if (tabs_visible_ && tabs_rect_.height > 0.0f) {
+    const float thickness = Divider::kLineThickness;
+    const math::Rect line{tabs_rect_.x, tabs_rect_.bottom() - thickness, tabs_rect_.width,
+                          thickness};
+    canvas.fill_rect(line, raster::Paint::solid(context.theme.colors().border_subtle));
+  }
 
   const TerminalSession& session = current();
   if (session.screen == nullptr) {

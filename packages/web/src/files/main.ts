@@ -345,7 +345,6 @@ function ensureChangesPanel(): ChangesPanel {
   changesPanel = createChangesPanel({
     api,
     root: () => explorer.getRoot(),
-    repoPrefix: () => state.repoPrefix,
     status: () => state.gitStatus,
     refreshStatus: () => refreshGit(),
     openDiff: (spec) => void openDiff(spec),
@@ -374,7 +373,6 @@ function ensureGitPanel(): GitPanel {
   gitPanel = createGitPanel({
     api,
     root: () => explorer.getRoot(),
-    repoPrefix: () => state.repoPrefix,
     status: () => state.gitStatus,
     statusError: () => state.gitStatusError,
     refreshStatus: () => refreshGit(),

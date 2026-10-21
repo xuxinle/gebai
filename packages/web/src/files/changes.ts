@@ -5,12 +5,13 @@
  * 而"改了什么 / 提交"是编码时最频繁看的，放左侧随时可见；底部留给
  * 「分支 | 日志 | 提交内容」——那是**回顾历史**时才看的，两者节奏不同。
  *
- * 内容：头部一行（视野范围芯片 + 刷新）、按「冲突 / 已暂存 / 未暂存 / 未跟踪」分组的改动列表（行内动作
+ * 内容：头部一行（视图切换 + 刷新）、按「冲突 / 已暂存 / 未暂存 / 未跟踪」分组的改动列表（行内动作
  * 按 VSCode 的改动列表：打开文件 / 放弃更改 / 暂存更改；逐块暂存与三向暂存编辑器收在右键菜单），底部常驻提交框（消息 + 修补 + 提交 / 推送）——**提交框的动作全在一行**，
  * 选项在左、按钮在右；多步操作（merge/rebase/cherry-pick）进行中时顶部出现「继续 / 跳过 / 中止」条。
  *
- * 视野范围：root 可能只是仓库的子目录（典型：会话工作区在项目仓库内）——
- * 默认只看该子目录内的改动（IDEA 的 Commit 窗同理），可一键切整仓库。
+ * 范围：**一律整仓库**。root 可能只是仓库的子目录（典型：会话工作区落在项目仓库内），
+ * 但「我改了什么、要不要提交」问的是整个仓库——按当前子目录过滤会让别处的改动悄悄漏在待提交之外，
+ * 而漏掉的改动不会有任何提示。
  */
 import type { GitChange, GitStatusInfo } from "./api"
 import type { DiffSpec } from "./git"
@@ -21,8 +22,6 @@ import { buildChangeTree, collectDirPaths, treeRows, type TreeRow } from "./chan
 import { changesFingerprint, fingerprint } from "./refresh-guard"
 
 export interface ChangesHooks extends GitOpHooks {
-  /** 当前根在仓库内的相对前缀（root 指向仓库子目录时不为空） */
-  repoPrefix: () => string
   /** 状态快照（由 main.ts 统一拉取，面板只读用） */
   status: () => GitStatusInfo | null
   /** 在主区域打开差异标签 */
@@ -32,8 +31,8 @@ export interface ChangesHooks extends GitOpHooks {
   /**
    * 打开**仓库内任意位置**的文件（入参为仓库相对路径，即本面板全部条目的 `path` 坐标）。
    *
-   * 为什么不直接用 `openFile(root, prefixPath(path))`：根可能只是仓库的子目录，而「整仓库」范围下
-   * 的改动可能落在**根之外**——那种路径在根内根本无法表达（剥前缀 / 原样返回都会拼出一条 404 的路径）。
+   * 为什么不直接用 `openFile(root, prefixPath(path))`：根可能只是仓库的子目录，而条目的改动
+   * 可能落在**根之外**——那种路径在根内根本无法表达（剥前缀 / 原样返回都会拼出一条 404 的路径）。
    * 由宿主按仓库根与实际根清单换算出真正能打开它的根（见 `files/repo-paths.ts`）。
    */
   openRepoFile: (repoRel: string) => void
@@ -94,7 +93,6 @@ function saveView(v: ChangesView): void {
 }
 
 export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
-  let showWholeRepo = false
   /** 列表 / 树：缺省列表（逐条改动看状态与名字最直接），首次切换后记住选择。 */
   let view: ChangesView = readView()
   /** 树视图里已折叠的目录（键 = 分组 + 目录路径；不持久化，刷新即展开）。 */
@@ -149,16 +147,10 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
 
   /* ------------------------------ 头部（一行控件） ------------------------------
    * 头部行高 34px（与资源管理器头部、编辑器标签栏同高：左栏首行与标签栏本是同一条横线），
-   * 放三件东西：**视野范围**（当前目录 / 整仓库，是本面板唯一的范围开关）、
-   * **视图**（树 / 列表，两个图标按钮互斥）、**刷新**。
+   * 放两件东西：**视图**（树 / 列表，两个图标按钮互斥）、**刷新**。
    * 刷新是必需的：状态由宿主统一拉，但“我改完文件想立刻看结果”的预期落在面板自己的按钮上——
    * 它直接重取状态并重渲染（与 F5 同一条路），不依赖宿主的下一次刷新时机。
    * ---------------------------------------------------------------------------- */
-  const scopeChip = h("button", { class: "fw-chip fw-scope-chip", hidden: true })
-  scopeChip.onclick = () => {
-    showWholeRepo = !showWholeRepo
-    renderNow()
-  }
   /**
    * 视图切换：**一个按钮，点击在两个视图之间切**。
    *
@@ -179,7 +171,7 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
   const refreshBtn = h("button", { class: "fw-icon-btn sm", title: "刷新改动列表（F5）" })
   refreshBtn.appendChild(icon("refresh", 14))
   refreshBtn.onclick = () => void hooks.refreshStatus()
-  const headHost = h("div", { class: "fw-changes-head" }, [scopeChip, h("span", { class: "fw-grow" }), viewBtn, refreshBtn])
+  const headHost = h("div", { class: "fw-changes-head" }, [h("span", { class: "fw-grow" }), viewBtn, refreshBtn])
   el.appendChild(headHost)
 
   /**
@@ -198,27 +190,12 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     if (next) next.scrollTop = prevTop
   }
 
-  /** 同步头部里的范围芯片（无前缀 = 根就是仓库根，没有“当前目录”这回事，芯片整块不显示）。 */
-  function renderScopeChip(): void {
-    const prefix = hooks.repoPrefix()
-    scopeChip.hidden = !prefix
-    if (!prefix) {
-      scopeChip.replaceChildren()
-      return
-    }
-    scopeChip.title = `当前限定：${prefix}（点击${showWholeRepo ? "仅看当前目录" : "看整仓库"}）`
-    scopeChip.replaceChildren(
-      icon(showWholeRepo ? "git" : "folder", 12),
-      h("span", { text: showWholeRepo ? "整仓库" : `仅当前目录：${prefix.split("/").pop() ?? prefix}` }),
-    )
-  }
-
-  /** 当前目录范围内的改动（root 为仓库子目录时；showWholeRepo 开启后为整仓库）。 */
-  function scopedChanges(): { changes: GitChange[]; staged: number; unstaged: number; untracked: number; conflicted: number } {
-    const s = hooks.status()
-    const prefix = hooks.repoPrefix()
-    const all = s?.changes ?? []
-    const changes = prefix && !showWholeRepo ? all.filter((c) => c.path === prefix || c.path.startsWith(`${prefix}/`)) : all
+  /**
+   * 本面板列出的改动：**整仓库**（不按当前根在仓库内的前缀过滤）。
+   * root 只是仓库子目录时也不缩范围——提交动的是整个仓库，看不见的改动会被漏掉。
+   */
+  function repoChanges(): { changes: GitChange[]; staged: number; unstaged: number; untracked: number; conflicted: number } {
+    const changes = hooks.status()?.changes ?? []
     return {
       changes,
       staged: changes.filter((c) => c.staged).length,
@@ -583,7 +560,7 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     minWidthProbe = { box, actions }
     /* 与状态有关的那几处（其余都是固定结构）：刷新时就地更新，不重建节点、不动正在输入的内容。 */
     updateCommitBox = (): void => {
-      const stagedCount = scopedChanges().staged
+      const stagedCount = repoChanges().staged
       commitBtn.title = stagedCount ? `${stagedCount} 个文件已暂存` : "没有已暂存的变更（将提交工作区全部改动）"
       commitLabel.textContent = commitAmend ? "修补提交" : "提交"
       amendInput.checked = commitAmend
@@ -733,9 +710,7 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
           ]
         : null,
       changesFingerprint(s?.changes ?? []),
-      hooks.repoPrefix(),
       view,
-      showWholeRepo,
       [...collapsedDirs].sort(),
       [...collapsedGroups].sort(),
       historyPlan ? JSON.stringify(historyPlan) : "",
@@ -748,7 +723,7 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
   /**
    * 公开刷新入口（宿主在每次 Git 状态到达时调用）：**数据没变就不重绘**（自动刷新的静默）。
    *
-   * 面板自身状态变了（切视图 / 折叠分组 / 换范围 / 操作完成）走 `renderNow()` 直接重绘——
+   * 面板自身状态变了（切视图 / 折叠分组 / 操作完成）走 `renderNow()` 直接重绘——
    * 那些都是一次性的用户动作或已知的本地状态变更，不必绕指纹判断。
    */
   function render(): void {
@@ -765,29 +740,26 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
 
   function renderNow(): void {
     const s = hooks.status()
-    const cnt = scopedChanges()
+    const cnt = repoChanges()
     const dirty = cnt.staged + cnt.unstaged + cnt.untracked + cnt.conflicted
     hooks.onCount(dirty)
     // 提交框常驻：只定点更新与状态有关的那几处（绝不重建节点，见 createCommitBox）
     updateCommitBox()
     if (!s?.isRepo) {
-      // 非仓库时头部只剩刷新（范围芯片说的是“仓库内的当前目录”，此时无意义）
-      scopeChip.hidden = true
       listHost.replaceChildren(renderNotRepo(hooks, op))
       return
     }
-    const scoped = cnt.changes
+    const all = cnt.changes
     const groups: Array<{ key: "conflicted" | "staged" | "unstaged" | "untracked"; label: string; items: GitChange[] }> = [
-      { key: "conflicted", label: "冲突", items: scoped.filter((c) => c.conflicted) },
-      { key: "staged", label: "已暂存", items: scoped.filter((c) => c.staged) },
-      { key: "unstaged", label: "未暂存", items: scoped.filter((c) => c.unstaged && !c.conflicted) },
-      { key: "untracked", label: "未跟踪", items: scoped.filter((c) => c.untracked) },
+      { key: "conflicted", label: "冲突", items: all.filter((c) => c.conflicted) },
+      { key: "staged", label: "已暂存", items: all.filter((c) => c.staged) },
+      { key: "unstaged", label: "未暂存", items: all.filter((c) => c.unstaged && !c.conflicted) },
+      { key: "untracked", label: "未跟踪", items: all.filter((c) => c.untracked) },
     ]
     // 列表容器**常驻**（`.fw-git-list` 是滚动容器，也是 setView 记滚动位置的节点）：只换它的子节点
     const list = listEl
     const scrollTop = list.scrollTop
     list.replaceChildren()
-    renderScopeChip()
     for (const g of groups) {
       if (!g.items.length) continue
       const groupEl = h("div", { class: "fw-change-group" })

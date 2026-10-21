@@ -1986,24 +1986,8 @@ button.fw-status-item:hover {
   flex: none;
 }
 
-/* 头部里的范围芯片不许把刷新按钮挤出可视区（它是长文本，可省略） */
-.fw-changes-head .fw-scope-chip {
-  min-width: 0;
-  flex: 0 1 auto;
-  overflow: hidden;
-}
-
-/* hidden 属性会与 .fw-chip 的 display: inline-flex 打架（同优先级下后者更靠前也不一定赢，
-   干脆显式写死：隐藏时整块不显示、也不占位） */
-.fw-changes-head .fw-scope-chip[hidden] {
-  display: none;
-}
-
-.fw-changes-head .fw-scope-chip > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* 改动的规模由分组头的计数表达（N 个已暂存 / N 个未暂存），头部不放任何计数或范围开关——
+   只留视图切换与刷新，靠右对齐（左侧 .fw-grow 占位） */
 
 /* 日志 */
 .fw-log-row {

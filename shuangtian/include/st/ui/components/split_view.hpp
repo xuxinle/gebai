@@ -110,6 +110,15 @@ class SplitView : public Element {
   void set_handle_size(float size);
   [[nodiscard]] auto handle_size() const noexcept -> float { return handle_size_; }
 
+  /// 两侧面板之间的**缝宽**（默认 0 = 直接相邻，只靠 1px 分割线）。
+  ///
+  /// 非 0 时两侧面板各向内缩 `gap/2`，中间露出一条**外层底色**的缝——
+  /// 这是 IDEA 新 UI “圆角卡片浮在壳上”的关键：分隔不再靠线，而靠缝。
+  /// 与 `set_handle_size` 的关系：手柄命中区不动（仍在边界上，宽 12），
+  /// 所以“看起来 4px 缝、抓起来 12px”也成立。
+  void set_gap(float gap);
+  [[nodiscard]] auto gap() const noexcept -> float { return gap_; }
+
   // —— 命中 ——
   /// 手柄区域归自己（**不是整块矩形**）：只有落在手柄内才算“点到了分割线”，
   /// 其余一律 false 交给子面板——否则 SplitView 会把里面所有按钮的点击都吃掉。
@@ -186,6 +195,8 @@ class SplitView : public Element {
   float min_first_size_{0.0f};
   float step_{0.05f};
   float handle_size_{12.0f};
+  /// 两侧面板之间的缝宽（0 = 直接相邻；见 `set_gap`）。
+  float gap_{0.0f};
   bool dragging_{false};
   bool first_hidden_{false};
   bool second_hidden_{false};

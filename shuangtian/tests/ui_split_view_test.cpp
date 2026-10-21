@@ -715,6 +715,42 @@ ST_TEST(split_view_divider_is_a_line_and_handle_is_wide_enough) {
 /// 这是 `Element::claims_hit_before_children` 存在的唯一理由（见那里注释）。
 /// 反向验证：把该钩子退回默认 false，本用例的拖拽断言立即变红
 ///（实测现象是「侧栏完全拖不动」）。
+ST_TEST(split_view_gap_insets_only_between_panels) {
+  // `set_gap(n)` 的契约：**只缩两面板之间的缝，不缩外缘**。
+  //
+  // 为何这条必须锁：外缘留白由父容器 padding 负责（职责分开）。
+  // 曾经让 SplitView 也在两端各缩 `gap/2`，两层嵌套时外缘缩进累加——
+  // 上分区多一层、下分区少一层，屏幕上就是“编辑器右边框比终端厚”（实测）。
+  st::ui::UiRoot root;
+  root.set_viewport(st::math::Size{800.0f, 600.0f});
+  auto split = std::make_unique<SplitView>(SplitView::Orientation::Horizontal);
+  split->set_id("split");
+  split->set_ratio(0.5f, false);
+  split->set_gap(8.0f);
+  auto* first = split->add_child(std::make_unique<Element>());
+  auto* second = split->add_child(std::make_unique<Element>());
+  first->set_id("first");
+  second->set_id("second");
+  SplitView* split_ptr = split.get();
+  root.set_content(std::move(split));
+  root.layout(true);
+
+  const st::math::Rect box = split_ptr->bounds();
+  const st::math::Rect a = first->bounds();
+  const st::math::Rect b = second->bounds();
+
+  // ① 外缘**不缩**：第一个面板贴左缘、第二个面板贴右缘。
+  ST_CHECK_EQ(a.x, box.x);
+  ST_CHECK_EQ(b.right(), box.right());
+  // ② 面板之间**确实有缝**，且宽度等于 gap。
+  ST_CHECK_EQ(b.x - a.right(), 8.0f);
+  // ③ 两面板仍占满整行高度（gap 只在主轴方向生效）。
+  ST_CHECK_EQ(a.y, box.y);
+  ST_CHECK_EQ(a.height, box.height);
+
+  root.set_content(nullptr);
+}
+
 ST_TEST(split_view_handle_wins_hit_over_overlapping_children) {
   st::ui::UiRoot root;
   root.set_viewport(st::math::Size{800.0f, 600.0f});

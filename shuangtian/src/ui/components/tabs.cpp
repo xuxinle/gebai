@@ -24,7 +24,6 @@ using components_internal::text_port_of;
 namespace {
 
 // —— 几何常量（颜色/间距/字号一律取自 `context.theme` 的 token）——
-constexpr float k_indicator_height = 2.0f;  // 选中指示条厚度
 constexpr float k_min_tab_width = 36.0f;    // 标签项最小宽度（避免空标签塌陷）
 constexpr float k_close_zone = 20.0f;       // × 命中区边长（大于视觉 × 本体，好点）
 constexpr float k_close_glyph = 8.0f;       // × 视觉尺寸
@@ -33,12 +32,14 @@ constexpr float k_arrow_zone = 18.0f;       // 溢出箭头命中区宽
 constexpr float k_arrow_glyph = 6.0f;       // 箭头视觉尺寸
 constexpr float k_wheel_step = 48.0f;       // 滚轮一格的滚动步长（与编辑器行滚一致）
 constexpr float k_add_zone = 24.0f;         // 「+」命中区宽（终端/编辑器标签栏惯例）
-constexpr float k_add_glyph = 9.0f;         // 「+」视觉尺寸
 constexpr float k_trailing_zone = 30.0f;    // 尾部动作钮命中区宽
-// 图标盒径**不用常量**：取主题 `Metrics::icon_size_sm`——与活动栏的
-// `Button(Size::Small)` 是**同一个 token**（用户要求「参考活动栏的图标」）。
-// 命中区 30 让 20px 图标两侧各留 5px（活动栏 40 盒/20 图标留下 10px——
-// 垂直向都是同一档尺度，水平更紧凑是因为标签栏不像活动栏那样独占一列）。
+// 图标盒径**不用常量**：取主题 `Metrics::icon_size_sm`（20）——与活动栏的
+// `Button(Size::Small)` 是**同一个 token**。
+//
+// **「+」与尾部动作钮共用同一盒径与渲染通道**（`Icon::draw`）。
+// 旧实现两个差异：① 「+」是手画十字、尺寸 9px（而图标钮 20px）；
+// ② 两者命中区不同（24 vs 30）。摆在一起就是“大大小小不统一”（用户实测报的）。
+// 现在尺寸/笔画完全一致，命中区差异保留（「+」靠右侧，与标签区相邻，稍窄更自然）。
 
 // 指示条动画状态机：`idle` 无动画；`pending` 已切换但尚未读到推进的时间轴。
 constexpr double k_anim_idle = -1.0;
@@ -634,25 +635,28 @@ void Tabs::paint_content(const RenderContext& context, raster::Surface& canvas) 
     const bool is_active = index == active_;
     const bool is_hovered = static_cast<int>(index) == hover_index_;
 
-    // **活动标签的圆角胶囊底块**（IDEA 新 UI 的核心视觉特征）。
+    // **活动标签的胶囊底块**（选中态的主要表达）。
     //
-    // 旧实现下活动项只有一条底部指示条 + 亮色文字，其余全是背景色——
-    // 三四个标签排在一起时“哪个是当前的”只能靠那条 2px 的细线认，
-    // 新 UI 把它换成一整块面：与侧栏头部同色（`surface`，比标签条底 `surface_alt` 亮一档），
-    // 圆角 `radius_sm`，四周留出 `space_xs` 的缝——缝是必须的，
-    // 不留缝的相邻胶囊会粘成一条。
+    // 历史沿革：
+    //   · 最早：底部 2px `primary` 指示条（用户 2026-10-21 要求去掉下划线）；
+    //   · 中间：用 `surface`（比标签条底亮一档）——但现在标签条已与编辑器**同色**
+    //   （`Surface::Content`），`surface` 与它几乎无差别，选中态等于看不见；
+    //   · 现在：`primary_soft` 浅色底 + `primary` 主色文字（与菜单栏展开项同一套语言），
+    //     圆角用 `radius_md`（更圆润，胶囊感更强）。
+    //
+    // 四周留 `space_xs` 的缝：不留缝的相邻胶囊会粘成一条。
     if (is_active && enabled_) {
       const math::Rect backdrop = tab.inset(
-          math::Insets{0.0f, metrics.space_xs, 0.0f, metrics.space_xs + k_indicator_height});
+          math::Insets{0.0f, metrics.space_xs, 0.0f, metrics.space_xs});
       if (!backdrop.is_empty()) {
-        canvas.fill_rect(backdrop, raster::Paint::solid(colors.surface), radius);
+        canvas.fill_rect(backdrop, raster::Paint::solid(colors.primary_soft), metrics.radius_md);
       }
     }
 
     if (is_hovered && !is_active && enabled_) {
-      // hover 背景：上下留出呼吸，底部让开指示条。
+      // hover 背景：比胶囊更淡（`surface_alt`），同样是圆角块。
       const math::Rect backdrop = tab.inset(
-          math::Insets{0.0f, metrics.space_xs, 0.0f, metrics.space_xs + k_indicator_height});
+          math::Insets{0.0f, metrics.space_xs, 0.0f, metrics.space_xs});
       if (!backdrop.is_empty()) {
         canvas.fill_rect(backdrop, raster::Paint::solid(colors.surface_alt), radius);
       }
@@ -675,7 +679,9 @@ void Tabs::paint_content(const RenderContext& context, raster::Surface& canvas) 
       if (!enabled_) {
         color = colors.text_faint;
       } else if (is_active) {
-        color = colors.text;
+        // 活动标签用**主色**（配合 `primary_soft` 底块）：选中项的文字也参与表达，
+        // 否则浅色底块在深色主题里几乎看不出。
+        color = colors.primary;
       }
       // 显式文字色覆盖（DSL `BoxProps::color/hex_color`）盖过三态色：调用方
       // 设了就是"我不管激活态，这行字就是这个色"的显式意图（与 Badge 同口径）。
@@ -706,22 +712,15 @@ void Tabs::paint_content(const RenderContext& context, raster::Surface& canvas) 
     }
   }
 
-  // 选中指示条（2px primary）。
+  // —— 选中指示条已移除（2026-10-21，用户要求“下划线去掉”）——
   //
-  // 用**直角**（radius=0）而不是 `k_indicator_height * 0.5f` 的圆角：2px 高的条上
-  // 1px 圆角在视觉上不可见，却会把它送进 `fill_rect` 的圆角路径（三带拆分 + 几何贴图），
-  // 白白多付一笔开销。直角走 `blend_span` 整行快路径，位置精确且更快。
-  const math::Rect active_tab = tab_rect(active_);
-  const math::Rect indicator =
-      resolve_indicator(context, math::Rect{active_tab.x, bounds_.bottom() - k_indicator_height,
-                                            active_tab.width, k_indicator_height});
-  const math::Color bar = enabled_ ? colors.primary : colors.border_strong;
-  if (!indicator.is_empty()) {
-    canvas.fill_rect(indicator, raster::Paint::solid(bar), 0.0f);
-  }
-  // **动画中要续帧**：不 request_animation 的话，静置场景没有新帧，
-  // 指示条冻在起步帧（与光标闪烁同一个坑——那边实测过"闪一下就定住"）。
-  if (indicator_start_ != k_anim_idle && enabled_) request_animation();
+  // 旧实现：活动标签底部一条 2px `primary` 的横线。
+  // 去掉后选中态**完全由胶囊块表达**（见上面 `is_active` 那段）：
+  // 同色底块 + 主色文字，已足够辨认，再加一条亮线就是重复表达。
+  //
+  // 保留的动画：胶囊块本身不做过渡（用户要的是“好看”而不是“能动”）；
+  // `indicator_start_` 与 `resolve_indicator()` 仍保留在组件里（属性面/兼容），
+  // 但**不再驱动绘制**。
   if (clipped) canvas.pop_clip();
 
   // 尾部「+」（画在裁剪区外，常驻可见；与溢出箭头同一层）。
@@ -729,20 +728,21 @@ void Tabs::paint_content(const RenderContext& context, raster::Surface& canvas) 
     const Palette& colors2 = context.theme.colors();
     if (hover_add_ && enabled_) {
       const math::Rect backdrop = zone.inset(
-          math::Insets{2.0f, metrics.space_xs, 2.0f, metrics.space_xs + k_indicator_height});
+          math::Insets{2.0f, metrics.space_xs, 2.0f, metrics.space_xs});
       if (!backdrop.is_empty()) {
         canvas.fill_rect(backdrop, raster::Paint::solid(colors2.surface_alt), radius);
       }
     }
-    // 「+」字形：两笔直线，与 × 同一笔法。
-    raster::Path plus;
-    const math::Point center = zone.center();
-    const float half = k_add_glyph * 0.5f;
-    plus.move_to(math::Point{center.x - half, center.y});
-    plus.line_to(math::Point{center.x + half, center.y});
-    plus.move_to(math::Point{center.x, center.y - half});
-    plus.line_to(math::Point{center.x, center.y + half});
-    canvas.stroke_path(plus, raster::Paint::solid(colors2.text_muted), 1.5f);
+    // 「+」字形：**与尾部动作钮同一渲染通道**（`Icon::draw` + 同一盒径/线宽口径）。
+    //
+    // 旧实现是手画的十字（`k_add_glyph = 9`、固定 1.5px 线），而尾部钮走
+    // `Icon::draw`（`icon_size_sm = 20`、按 24 基准缩放）——两者摆在一起时
+    // “+” 小而胖、“×”/垃圾桶大而细，看起来不配套（用户报“大大小小不统一”）。
+    // 统一走 `Icon::draw` 后，尺寸/笔画与其它图标动作钮完全一致。
+    const float glyph = metrics.icon_size_sm;
+    const math::Rect glyph_box{zone.center().x - glyph * 0.5f, zone.center().y - glyph * 0.5f,
+                               glyph, glyph};
+    (void)Icon::draw(canvas, "plus", glyph_box, colors2.text_muted, 0.0f);
   }
 
   // 尾部动作钮（「+」左侧逐个排；自绘图标 + hover 提亮，禁用置灰）。
@@ -752,7 +752,7 @@ void Tabs::paint_content(const RenderContext& context, raster::Surface& canvas) 
     const TrailingButton& button = trailing_[slot];
     if (button.hovered && button.enabled) {
       const math::Rect backdrop = zone.inset(
-          math::Insets{1.0f, metrics.space_xs, 1.0f, metrics.space_xs + k_indicator_height});
+          math::Insets{1.0f, metrics.space_xs, 1.0f, metrics.space_xs});
       if (!backdrop.is_empty()) {
         canvas.fill_rect(backdrop, raster::Paint::solid(colors.surface_alt), radius);
       }

@@ -365,6 +365,14 @@ function readTool(
 // ————————————————————————————————————————————————————————————————————————————
 // run：构建 / 测试 / lint / 启动 / 停止 / 状态 / 日志（框架生命周期）
 // —————————————————————————————————————————————————————————————————————————————
+
+/// 启动命令的等待上限（**不是应用就绪的上限**，那个另有 30s 轮询）。
+///
+/// 为何要短：常驻子进程会把祖先的 stdout 管道一路继承下来（Windows 句柄继承是
+/// 传递的），`runCommand` 等 `close` 就永远等不到。3s 足够 PowerShell 完成 spawn
+/// （实测 `Start-Process` 本身 205ms），又不白等。超时后照常轮询控制文件即可。
+const kLaunchTimeoutMs = 3_000
+
 const runTool: Tool = {
   name: "run",
   description:
@@ -560,21 +568,41 @@ const runTool: Tool = {
       // 脱离当前进程组，父进程退出后仍存活（无头常驻应用）。
       // Windows：Start-Process -PassThru 拿 PID；stdout/stderr 必须分开重定向到不同文件
       // （PowerShell 不允许两者指向同一个文件），读日志时按先后拼接。
+      //
+      // ⚠ **启动命令超时是预期行为，不是失败**（`kLaunchTimeoutMs` 为什么必须短）：
+      // Windows 的句柄继承是**传递的**——常驻的 gbcode 会把祖先（PowerShell、cmd）
+      // 的 stdout 管道一路继承下来，而 `runCommand` 等的是 `child.on("close")`
+      // （stdout/stderr 都关）。于是命令永远不关闭，只能等到 `timeoutMs` 被杀。
+      //
+      // 实测（本机逐项验过）：
+      //   · `spawn(stdio:"ignore")` → spawn 返回 **100ms**、控制文件就绪 **307ms**；
+      //   · 经 shell 的任何写法（`cmd /c start /b` / `Start-Process` /
+      //     甚至 `Stop-Process -Id $PID -Force` 强退 PowerShell）→ 控制文件照样
+      //     300ms 就绪，但 `close` **15s 内不触发**——强退也治不了，因为句柄在孙子手里。
+      //
+      // 所以：启动命令**不 await**（它会挂到 `kLaunchTimeoutMs`），
+      // 拉起与等就绪**并行**；真正的就绪判据是下面的“控制文件 + 握手”。
+      // 旧值 20_000 就是用户看到的“启动要 20 来秒”的全部来源（现在约 300ms）。
       const err_file = `${log_file}.err`
-      let launch: { stdout: string; stderr: string }
-      if (IS_WINDOWS) {
-        launch = await ctx.runCommand(
-          `$process = Start-Process -FilePath "${binary}" -ArgumentList @(${powershellFlags}) -PassThru -WindowStyle Hidden -RedirectStandardOutput "${log_file}" -RedirectStandardError "${err_file}"; ` +
-            `$process.Id`,
-          { workdir: root, timeoutMs: 20_000 },
-        )
-      } else {
-        launch = await ctx.runCommand(
-          `setsid nohup "${binary}" ${posixFlags} > "${log_file}" 2>&1 < /dev/null & echo $!`,
-          { workdir: root, timeoutMs: 20_000 },
-        )
-      }
-      const pid = Number(launch.stdout.trim().split("\n").pop() ?? "0")
+      const launchPromise = (IS_WINDOWS
+        ? ctx.runCommand(
+            `$process = Start-Process -FilePath "${binary}" -ArgumentList @(${powershellFlags}) -PassThru -WindowStyle Hidden -RedirectStandardOutput "${log_file}" -RedirectStandardError "${err_file}"; ` +
+              `$process.Id`,
+            { workdir: root, timeoutMs: kLaunchTimeoutMs },
+          )
+        : ctx.runCommand(
+            `setsid nohup "${binary}" ${posixFlags} > "${log_file}" 2>&1 < /dev/null & echo $!`,
+            { workdir: root, timeoutMs: kLaunchTimeoutMs },
+          )
+      ).catch(() => ({ stdout: "", stderr: "" }))   // 超时是预期：子进程仍常驻
+
+      // PID 先给 0：POSIX 分支很快有 stdout（不阻塞地回填）；
+      // Windows 分支拿不到，由控制文件里应用自报的 pid 补齐。
+      let pid = 0
+      void launchPromise.then((l) => {
+        const parsed = Number(l.stdout.trim().split("\n").pop() ?? "0")
+        if (Number.isFinite(parsed) && parsed > 0 && pid <= 0) pid = parsed
+      })
 
       // 轮询控制文件（应用启动后写入 port；token 随文件下发，握手必须携带）。
       //
@@ -587,6 +615,8 @@ const runTool: Tool = {
       while (Date.now() < deadline) {
         const info = await readControlFile(control_file)
         if (info && info.port > 0) {
+          // 启动命令超时（拿不到 stdout）时，用应用自报的 pid 补齐，供 stop/回收使用。
+          if (pid <= 0 && info.pid > 0) pid = info.pid
           const fresh = pid <= 0 || info.pid === pid || mtimeMs(control_file) >= launched_at
           if (fresh) {
             try {
@@ -605,7 +635,10 @@ const runTool: Tool = {
             }
           }
         }
-        await Bun.sleep(200)
+        // 轮询间隔 200ms → **20ms**：应用实测 **321ms** 就写好控制文件，
+        // 而 200ms 的睡会把就绪探测量化到 200/400/600…上（首轮未命中的话
+        // 白付 200ms）。20ms 足够轻（只是读一个小 JSON 文件）且把量化误差压到小量级。
+        await Bun.sleep(20)
       }
       if (port === 0) {
         const log = existsSync(log_file) ? (await Bun.file(log_file).text()).slice(-1200) : "(无日志)"

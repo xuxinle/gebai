@@ -361,14 +361,18 @@ ST_TEST(ui_tabs_active_tab_has_capsule_backdrop) {
   root.paint(canvas);
 
   const st::ui::Theme& theme = root.theme();
-  const auto capsule = theme.colors().surface;
+  // 胶囊底色 = `primary_soft`（2026-10-21：从 `surface` 改成主色淡底，
+  // 因为标签条已与编辑器同色，`surface` 与它几乎无差别、选中态等于看不见）。
+  const auto capsule = theme.colors().primary_soft;
   const auto hit = [&](std::size_t index) -> int {
     const Rect tab = tabs->tab_rect(index);
-    // 取标签**竖直中部**的窄条：上下都避开圆角与底部指示条。
-    const float center_y = tab.center().y - 2.0f;
+    // 取样点选**靠左边缘的位置**（距左边界 3~6px）：
+    // 标签中心往往就是文字（标签名短时中心整块被字盖住），取中心会漏判。
+    // 竖直方向取**上三分之一**（避开中心文字与圆角）。
+    const float sample_y = tab.y + tab.height * 0.3f;
     int count = 0;
-    for (float offset = -4.0f; offset <= 4.0f; offset += 1.0f) {
-      const Point point{tab.center().x + offset, center_y};
+    for (float offset = 3.0f; offset <= 6.0f; offset += 1.0f) {
+      const Point point{tab.x + offset, sample_y};
       const auto pixel = canvas.pixel_at_point(point);
       if (pixel.r == capsule.r && pixel.g == capsule.g && pixel.b == capsule.b) ++count;
     }
@@ -404,19 +408,26 @@ ST_TEST(ui_tabs_focus_and_visual_tree) {
   root.paint(focused);
 
   const Rect bounds = tabs->bounds();
-  // 聚焦不应在外缘环带产生任何焦点环像素（环带 = 标签条四周 3px 外扩区）。
-  const Rect band = bounds.inflate(3.0f);
-  const int x0 = static_cast<int>(std::floor(band.x));
-  const int y0 = static_cast<int>(std::floor(band.y));
-  const int x1 = static_cast<int>(std::ceil(band.right()));
-  const int y1 = static_cast<int>(std::ceil(band.bottom()));
+  // 聚焦不应在外缘环带产生任何焦点环像素。
+  //
+  // ⚠ 环带 **只取组件外框那一圈**（`bounds` 向外 3px 且**不含 bounds 内部**）：
+  // 焦点环本来就画在组件外框，而标签条**内部**如今有活动标签的 `primary_soft`
+  // 胶囊块——它的色与环色合成色接近，把内部算进环带会误判（实测 7 个假阳性）。
   int ring_pixels = 0;
-  for (int y = y0; y < y1; ++y) {
-    for (int x = x0; x < x1; ++x) {
-      const Point point{static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f};
-      if (near_ring(focused.pixel_at_point(point), ring_composites(root.theme()))) {
-        ++ring_pixels;
-      }
+  const auto check = [&](float fx, float fy) {
+    const Point point{fx, fy};
+    if (near_ring(focused.pixel_at_point(point), ring_composites(root.theme()))) ++ring_pixels;
+  };
+  for (float d = -3.0f; d < 0.0f; d += 1.0f) {
+    // 上下两条（向左右各扩 3）
+    for (float x = bounds.x - 3.0f; x < bounds.right() + 3.0f; x += 1.0f) {
+      check(x + 0.5f, bounds.y + d + 0.5f);
+      check(x + 0.5f, bounds.bottom() - d - 0.5f);
+    }
+    // 左右两条（向上下各含 3）
+    for (float y = bounds.y - 3.0f; y < bounds.bottom() + 3.0f; y += 1.0f) {
+      check(bounds.x + d + 0.5f, y + 0.5f);
+      check(bounds.right() - d - 0.5f, y + 0.5f);
     }
   }
   ST_CHECK_EQ(ring_pixels, 0);

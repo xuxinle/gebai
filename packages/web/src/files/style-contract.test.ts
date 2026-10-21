@@ -482,10 +482,15 @@ describe("样式契约：变更面板", () => {
     expect(ruleBody(".fw-explorer-head")).toMatch(/height:\s*34px/)
   })
 
-  test("头部里的范围芯片可省略、且 hidden 时真的不显示", () => {
-    expect(ruleBody(".fw-changes-head .fw-scope-chip")).toMatch(/min-width:\s*0/)
-    // .fw-chip 自带 display:inline-flex，会压过 hidden 属性——必须有显式规则兜底
-    expect(ruleBody(".fw-changes-head .fw-scope-chip[hidden]")).toMatch(/display:\s*none/)
+  test("改动列表一律整仓库（不按仓库内前缀过滤）", () => {
+    /* 为何钉在源码层：本面板回答「我改了什么、要不要提交」，而提交动的是整个仓库——
+     * 若按当前根在仓库内的子目录前缀过滤，别处的改动会从列表里消失（且不留任何提示），
+     * 用户以为工作区只改了这几个文件。回归不会报错，只会静默少列。 */
+    const src = stripComments(readFileSync(join(SRC, "files", "changes.ts"), "utf8"))
+    expect(src).not.toContain("repoPrefix") // hooks 不再接收前缀
+    expect(src).not.toMatch(/\.startsWith\(`\$\{prefix\}/) // 不做前缀过滤
+    // 头部也不该再留范围开关（删功能就一并删样式，否则是“看不见的死代码”）
+    expect(allCss()).not.toContain("fw-scope-chip")
   })
 
   test("左栏下限读 CSS 变量（写死的数字在按钮文案/字体变化后会静默失效）", () => {

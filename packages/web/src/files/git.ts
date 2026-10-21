@@ -127,8 +127,6 @@ export interface GitHooks {
   api: FsApi
   /** 当前根（根切换时面板内容随之切换） */
   root: () => string
-  /** 当前根在仓库内的相对前缀（root 指向仓库子目录时不为空） */
-  repoPrefix: () => string
   /** 状态快照（由 main.ts 统一拉取，面板只读用） */
   status: () => GitStatusInfo | null
   /** 主动刷新状态（写操作后调用） */

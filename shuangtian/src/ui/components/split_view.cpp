@@ -11,7 +11,7 @@
 #include "st/core/string.hpp"
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
-
+#include "st/ui/components/basic.hpp"   // `Divider::kLineThickness`（分割线统一厚度）
 #include "components_internal.hpp"
 
 namespace st::ui {
@@ -111,6 +111,13 @@ void SplitView::set_handle_size(float size) {
   const float clamped = std::clamp(size, kMinHandleSize, kMaxHandleSize);
   if (clamped == handle_size_) return;
   handle_size_ = clamped;
+  mark_layout_dirty();
+}
+
+void SplitView::set_gap(float gap) {
+  const float clamped = std::max(0.0f, gap);
+  if (clamped == gap_) return;
+  gap_ = clamped;
   mark_layout_dirty();
 }
 
@@ -343,17 +350,30 @@ void SplitView::layout_children(const RenderContext& context) {
 
   // **两侧面板直接相邻，不为手柄留缝**（2026-10-18）：
   // 手柄只存在于命中层（`handle_rect` 以边界为中轴张开），不参与布局。
-  // 这样分割线在屏幕上就是“两个面板贴在一起 + 一条 1px 线”，而不是
-  // “面板 + 一条 8px 的页面底色缝 + 面板”。
+  //
+  // `gap_ > 0` 时**中间**留一条 `gap_` 的缝，两侧面板各向内缩 `gap_/2`——
+  // IDEA 新 UI 的圆角卡片就靠它分隔（而不是靠线）。手柄仍在原边界上，不受影响。
+  //
+  // ⚠ **本组件只负责“两个面板之间”的缝，不管外缘**：
+  // 外缘留白由**父容器的 padding** 负责。两者职责分开才能嵌套——
+  // 若这里也管外缘（曾试过两端各缩 `gap_/2`），两层 SplitView 嵌套时
+  // 外缘缩进会累加，而上分区多一层、下分区少一层，导致
+  // “编辑器右侧边比终端厚”（实测）。
+  const float half_gap = gap_ * 0.5f;
   if (horizontal) {
-    first->arrange(context, math::Rect{bounds_.x, bounds_.y, first_main, bounds_.height});
+    first->arrange(context,
+                   math::Rect{bounds_.x, bounds_.y, std::max(0.0f, first_main - half_gap),
+                              bounds_.height});
     second->arrange(context,
-                    math::Rect{bounds_.x + first_main, bounds_.y, second_main,
-                               bounds_.height});
+                    math::Rect{bounds_.x + first_main + half_gap, bounds_.y,
+                               std::max(0.0f, second_main - half_gap), bounds_.height});
   } else {
-    first->arrange(context, math::Rect{bounds_.x, bounds_.y, bounds_.width, first_main});
-    second->arrange(context, math::Rect{bounds_.x, bounds_.y + first_main,
-                                        bounds_.width, second_main});
+    first->arrange(context,
+                   math::Rect{bounds_.x, bounds_.y, bounds_.width,
+                              std::max(0.0f, first_main - half_gap)});
+    second->arrange(context,
+                    math::Rect{bounds_.x, bounds_.y + first_main + half_gap, bounds_.width,
+                               std::max(0.0f, second_main - half_gap)});
   }
 }
 
@@ -371,18 +391,26 @@ void SplitView::paint_content(const RenderContext& context, raster::Surface& can
   // 画一条悬空分隔线会让用户以为还能拖）。`handle_rect` 在隐藏侧时空矩形，
   // 下面的几何自然退化，但先退出省一笔。
   if (child_count() < 2 || first_hidden_ || second_hidden_) return;
+  // **有缝隙时不画线**（`gap_ > 0`）：缝本身就是分隔（透出外层壳色），
+  // 再在缝中间叠一条线会变成“缝里有一条脏线”。仅在悬停/拖拽时画——
+  // 那是“可以拖这里”的交互反馈，必须有。
+  const bool show_line = gap_ <= 0.0f || hovered_ || dragging_;
+  if (!show_line) return;
   const auto& colors = context.theme.colors();
   const float width = context.theme.metrics().border_width;
   const bool horizontal = orientation_ == Orientation::Horizontal;
   // 视觉线位置与命中区同一几何（handle_rect 以命中区中心定位；线画在中心）。
   const math::Rect handle = handle_rect();
   const float center = horizontal ? handle.center().x : handle.center().y;
-  // 视觉线宽三档：常态 1px 发丝（border）、悬停 2px（border_strong）、拖拽 2px 主色。
-  // 手柄命中区（handle_size_ 宽）比视觉线宽得多——看起来一条线、抓起来不费劲。
+  // 视觉线宽三档：常态**发丝**（与 `Divider` 同一常量 0.5px 亚像素——用户 2026-10-21
+  // 要求“分割线改细”，这里必须与其它分割线一致，否则一条细一条粗）、
+  // 悬停 2px（`border_strong`）、拖拽 2px 主色。
+  // 手柄命中区（`handle_size_` 宽）比视觉线宽得多——看起来一条细线、抓起来不费劲。
   const float line = dragging_ ? std::max(width * 2.0f, 2.0f)
-                               : (hovered_ ? std::max(width * 2.0f, 2.0f) : width);
-  const math::Color color =
-      dragging_ ? colors.primary : (hovered_ ? colors.border_strong : colors.border);
+                               : (hovered_ ? std::max(width * 2.0f, 2.0f)
+                                           : Divider::kLineThickness);
+  const math::Color color = dragging_ ? colors.primary
+                                      : (hovered_ ? colors.border_strong : colors.border_subtle);
   // ⚠ `center` 已经是**绝对坐标**（`handle_rect()` 返回的矩形已含 `bounds_.x/y`）。
   // 这里再写 `bounds_.x + center` 就是**加了两次**：分栏落在 x=44 时，线被画到
   // 361.66 而非 317.66——整整偏出一个 `bounds_.x`，**穿进编辑区的行号栏**，

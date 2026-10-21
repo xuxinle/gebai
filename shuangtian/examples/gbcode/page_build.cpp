@@ -384,10 +384,30 @@ namespace gbcode_ui {
   }
 
 
+  // IDEA 新 UI 的面板卡片几何：
+  //   · `kPanelRadius`：面板圆角（主题的 `radius_lg` 档；卡片特征就靠它）；
+  //   · `kPanelGap`：面板之间的**缝**（透出外层 `Surface::Alt` 外壳色）——
+  //     这是 IDEA 新 UI 的核心视觉：不是靠分割线分隔，而是“卡片之间露出壳色”。
+  //     缝宽 = 分割线厚度的 4 倍左右，太小会看成一圈脏边，太大浪费空间。
+  static constexpr float kPanelRadius = 14.0f;   // = metrics.radius_lg
+  static constexpr float kPanelGap = 4.0f;
+
+  /// 把面板改造成“IDEA 新 UI 卡片”：**圆角 + 裁剪子元素**。
+  ///
+  /// ⚠ `clip_children` 必须开：面板自身的背景按 `radius` 画，但**子元素的绘制
+  /// 不受它影响**——不开的话内容（尤其自绘的 `Terminal`/`CodeEditor`）
+  /// 会直接盖到圆角外，看起来“卡片没切圆”（实测就是这个现象）。
+  static void make_card(Panel& panel) {
+    panel.style().radius = kPanelRadius;
+    panel.style().clip_children = true;
+  }
+
   // —— 3. 主体三栏 ——
   void CodeEditorPage::build_main(Composer& c, const std::vector<OpenBuffer>& buffers, std::size_t active,
                   bool has_editor) {
-    row(c, {.grow = true, .id = "main-row"}, [&] {
+    // ⚠ **本行不加 padding**：卡片四周的缝由 `workbench-cards` 统一给
+    //（它是卡片的“画布”，见 `build_workbench`），这里只负责画壳色。
+    row(c, {.grow = true, .surface = Element::Surface::Alt, .id = "main-row"}, [&] {
       // ⚠ **活动栏不在这里**：它在 `build_workbench` 那一层（与底部面板并列、
       // 满高）。本函数只管“侧栏与编辑区”这一对横向分栏。
       //
@@ -412,6 +432,8 @@ namespace gbcode_ui {
                                             // 底色会透到页面 `bg` 上，与里面的 `Tree`（自己填 `surface`）
                                             // 形成“外暗内亮”的颠倒；而且与编辑器完全同色（对比度 1.000）。
                                             panel.set_surface(Element::Surface::Base);
+                                            // IDEA 新 UI：面板是**圆角卡片**。
+                                            make_card(panel);
                                           },
                                           {.key = "sidebar"});
             (void)custom_container<Panel>(
@@ -424,6 +446,8 @@ namespace gbcode_ui {
                   //   亮色：内容**归白**、外壳压浅灰（VSCode Light / IDEA Light 同构）。
                   // 一个档位表达语义，具体取哪层 token 由主题决定（见 `Surface::Content`）。
                   panel.set_surface(Element::Surface::Content);
+                  // IDEA 新 UI：面板是**圆角卡片**。
+                  make_card(panel);
                 },
                 {.grow = true, .key = "editor"});
           },
@@ -434,6 +458,8 @@ namespace gbcode_ui {
             // 比例与最小宽是两件事：比例是“宽敞时占多少”，最小宽是“挤不挤得下”。
             // 实测：小屏 + 200% DPI 时窗口被夹到 883px，纯比例的 19.3% 只剩 170px。
             split.set_min_first_size(220.0f);
+            // IDEA 新 UI：面板之间的缝（透出外层壳色）——见 `kPanelGap`。
+            split.set_gap(kPanelGap);
             // 比例存档在 `sidebar_ratio_`（非响应式）：拖动回调写它，重组时读它。
             // ⚠ 不能每帧写死默认值：声明式每帧都会跳这个 configure，写死等于
             // 把用户拖到的位置抹回默认（实测：拖到 0.5，一点任何按钮就弹回默认）。
@@ -1170,25 +1196,45 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
   /// 同一条水平分栏线；活动栏横跨**整个**下半区左侧。
   void CodeEditorPage::build_workbench(Composer& c, const std::vector<OpenBuffer>& buffers, std::size_t active,
                        bool has_editor) {
-    row(c, {.gap = 0.0f, .grow = true, .id = "workbench-row"}, [&] {
+    // 结构：`[活动栏][卡片画布]`，画布内是上下分栏。
+    //
+    // **四周的缝由这一行（画布）统一给 `padding = kPanelGap`**——
+    // 卡片与活动栏、标题栏、状态栏、窗口右缘的距离全部一致。
+    // 面板**之间**的缝由各自的 `SplitView::set_gap` 给（职责分开，见那里注释）。
+    // 活动栏在画布**之外**，所以它仍然贴左边缘（外壳的一部分，不该浮起来）。
+    row(c, {.gap = 0.0f, .grow = true, .surface = Element::Surface::Alt,
+            .id = "workbench-row"}, [&] {
       // 活动栏：**常驻**且**满高**（见上）。侧栏依旧不常驻（两者是独立的东西）。
       build_activity_bar(c);
+      column(c, {.padding = kPanelGap, .grow = true, .id = "workbench-cards"}, [&] {
       (void)custom_container<SplitView>(
           c,
           [&] {
             (void)custom_container<Panel>(
                 c, [&] { build_main(c, buffers, active, has_editor); },
-                [](Panel& panel) { panel.set_id("editor-upper"); }, {.grow = true, .key = "upper"});
+                [](Panel& panel) {
+                  panel.set_id("editor-upper");
+                  // IDEA 新 UI：上下两个面板也是圆角卡片。
+                  make_card(panel);
+                },
+                {.grow = true, .key = "upper"});
             // 终端面板**常驻声明、收起只隐藏**（`set_second_hidden`）：
             // `Terminal` 及其全部会话/回看留在树上——重开即恢复，不再重起 shell。
             // 代价是收起时多一棵隐藏子树，换来的是状态保留（VSCode 同款行为）。
             (void)custom_container<Panel>(
                 c, [&] { build_bottom(c); },
-                [](Panel& panel) { panel.set_id("editor-lower"); }, {.grow = true, .key = "lower"});
+                [](Panel& panel) {
+                  panel.set_id("editor-lower");
+                  // IDEA 新 UI：上下两个面板也是圆角卡片。
+                  make_card(panel);
+                },
+                {.grow = true, .key = "lower"});
           },
           [this](SplitView& split) {
             split.set_id("bottom-split");
             split.set_orientation(SplitView::Orientation::Vertical);
+            // IDEA 新 UI：上下两个面板之间也用缝分隔（与左右一致）。
+            split.set_gap(kPanelGap);
             split.set_min_ratio(0.05f);
             split.set_ratio(bottom_ratio_, false);
             // 归位目标 = 默认比例（编辑器 2/3 ⇒ 终端 1/3 高）。
@@ -1200,6 +1246,7 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
             split.on_change = [this](float ratio) { bottom_ratio_ = ratio; };
           },
           {.grow = true, .id = "bottom-split"});
+      });   // workbench-cards
     });
   }
 

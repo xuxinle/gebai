@@ -287,6 +287,11 @@ class Card : public Element {
 /// 水平分隔线。
 class Divider : public Element {
  public:
+  /// 线厚（逻辑 px）。**允许亚像素**：`0.5f` 在 2 倍 DPI 下正好一个物理像素，
+  /// 1 倍下会被光栅器按覆盖率画成一条淡线。比 `metrics.border_width`（1.0）轻一档，
+  /// 因为分割线是“同组内的弱分隔”，不该与控件边界同重（用户 2026-10-21 要求）。
+  static constexpr float kLineThickness{0.5f};
+
   explicit Divider(bool vertical = false);
   [[nodiscard]] auto type() const noexcept -> std::string_view override { return "Divider"; }
   [[nodiscard]] auto role() const noexcept -> Role override { return Role::Separator; }
