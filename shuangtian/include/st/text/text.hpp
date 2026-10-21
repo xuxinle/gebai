@@ -280,6 +280,13 @@ class TextRenderer {
   /// 缓存：强度进位图缓存键（不同 k = 不同位图）。
   void set_subpixel_strength(float strength) noexcept;
   [[nodiscard]] auto subpixel_strength() const noexcept -> float { return subpixel_strength_; }
+  /// **出厂默认值**（供应用层接线时引用，避免两处硬编码同一个数而漂移）。
+  [[nodiscard]] static constexpr auto subpixel_strength_default() noexcept -> float {
+    return 0.5f;
+  }
+  [[nodiscard]] static constexpr auto coverage_contrast_strength_default() noexcept -> float {
+    return 0.6f;
+  }
 
   /// **覆盖率对比度（S 曲线）强度**，在 γ 之后施加：`a' = a + (1−a)·c·a`，取值 `[0, 3]`。
   ///

@@ -965,6 +965,66 @@ auto Application::start() -> Status {
     }
     if (fit_max_size > 0.0f) impl_->renderer->set_grid_fit_max_size(fit_max_size);
     apply_class_gammas(*impl_->renderer, gammas);
+    // ── 下面三项此前**只接到探针上**，应用层漏接——实测后果：
+    //    gbcode 截图的彩边均值 89.6，而探针同条件只有 ~40（差一倍多），
+    //    即“探针调好的参数，真实应用根本没生效”。
+    // ──
+    // **亚像素强度**（向灰度收缩）：默认 0.5，复刻 Chromium 的 ClearTypeLevel。
+    // 环境变量 `ST_TEXT_SUBPIXEL_STRENGTH` 可覆盖（诊断用）。
+    {
+      float strength = st::text::TextRenderer::subpixel_strength_default();
+      if (const auto value = fs::read_env("ST_TEXT_SUBPIXEL_STRENGTH");
+          value.has_value() && !value->empty()) {
+        try {
+          strength = std::stof(*value);
+        } catch (const std::exception&) {
+          strength = st::text::TextRenderer::subpixel_strength_default();
+        }
+      }
+      impl_->renderer->set_subpixel_strength(strength);
+    }
+    // **对比度 S 曲线**：默认 0.6（见 `coverage_contrast_strength_` 的标定说明）。
+    {
+      float contrast = st::text::TextRenderer::coverage_contrast_strength_default();
+      if (const auto value = fs::read_env("ST_TEXT_CONTRAST_STRENGTH");
+          value.has_value() && !value->empty()) {
+        try {
+          contrast = std::stof(*value);
+        } catch (const std::exception&) {
+          contrast = st::text::TextRenderer::coverage_contrast_strength_default();
+        }
+      }
+      impl_->renderer->set_coverage_contrast_strength(contrast);
+    }
+    // **字重曲线**（跳字号连续映射）：从文件加载，默认 `resources/text_weight_curve.txt`。
+    // 优先级高于上面的全局 γ；改文件不必重编译（见 `docs/WEIGHT_CURVE.md`）。
+    {
+      st::text::WeightCurve curve;
+      std::size_t loaded = 0;
+      if (const auto env = fs::read_env("ST_TEXT_WEIGHT_CURVE");
+          env.has_value() && !env->empty()) {
+        loaded = curve.load_from_file(*env);
+      } else {
+        // **多个候选路径**：应用的工作目录不一定是仓库根（gbcode 可能从
+        // build/dev/bin 启动），单一路径 `resources/...` 会静默加载不到。
+        // 实测：只写相对路径时，gbcode 截图里的彩边 89.6 与探针 ~40
+        // 差一倍多——曲线根本没生效。
+        for (const char* candidate :
+             {"resources/text_weight_curve.txt",
+              "../resources/text_weight_curve.txt",
+              "../../resources/text_weight_curve.txt",
+              "../../../resources/text_weight_curve.txt"}) {
+          loaded = curve.load_from_file(candidate);
+          if (loaded > 0) break;
+        }
+      }
+      if (loaded > 0) {
+        impl_->renderer->set_weight_curve(std::move(curve));
+        if (fs::read_env("ST_TEXT_DEBUG").has_value()) {
+          st::print("[text] weight_curve={} 个采样点\n", loaded);
+        }
+      }
+    }
     // 生效值自检（`ST_TEXT_DEBUG=1`）：测"参数是否真的生效"的**唯一**可靠手段——
     // 实测踩到两次：补丁被回退后两份渲染出几乎一样的图、应用自带解析器把新参数静默吃掉。
     if (fs::read_env("ST_TEXT_DEBUG").has_value()) {
