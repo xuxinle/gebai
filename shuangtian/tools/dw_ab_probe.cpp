@@ -44,6 +44,8 @@ auto main(int argc, char** argv) -> int {
   float supersample_override = 0.0f;
   float strength_override = -1.0f;   // <0 = 不覆盖（用应用默认）
   float contrast_override = -1.0f;
+  bool use_curve = true;
+  std::string curve_path;
   bool skia_mode = false;
   float skia_contrast = 1.0f;
   float digit_g = 0.0f, letter_g = 0.0f, han_g = 0.0f;   // 0 = 用内置默认档
@@ -77,6 +79,8 @@ auto main(int argc, char** argv) -> int {
     else if (a.rfind("--supersample=", 0) == 0) supersample_override = std::stof(a.substr(14));
     else if (a.rfind("--strength=", 0) == 0) strength_override = std::stof(a.substr(11));
     else if (a.rfind("--cstrength=", 0) == 0) contrast_override = std::stof(a.substr(12));
+    else if (a == "--no-curve") use_curve = false;
+    else if (a.rfind("--curve=", 0) == 0) curve_path = a.substr(8);
     else if (a == "--skia") skia_mode = true;
     else if (a.rfind("--skia-contrast=", 0) == 0) {
       skia_mode = true;
@@ -122,6 +126,28 @@ auto main(int argc, char** argv) -> int {
   if (supersample_override > 0.0f) renderer.set_supersample(supersample_override);
   if (strength_override >= 0.0f) renderer.set_subpixel_strength(strength_override);
   if (contrast_override >= 0.0f) renderer.set_coverage_contrast_strength(contrast_override);
+  // 字重曲线：`--curve=<文件>` 或环境变量 `ST_TEXT_WEIGHT_CURVE`；
+  // `--no-curve` 显式关闭（对照实验用）。默认尝试内置路径。
+  if (use_curve) {
+    st::text::WeightCurve curve;
+    std::size_t loaded = 0;
+    if (!curve_path.empty()) {
+      loaded = curve.load_from_file(curve_path);
+    } else if (const auto env = st::fs::read_env("ST_TEXT_WEIGHT_CURVE");
+               env.has_value() && !env->empty()) {
+      loaded = curve.load_from_file(*env);
+    } else {
+      loaded = curve.load_from_file("resources/text_weight_curve.txt");
+    }
+    if (loaded > 0) {
+      st::print("  weight_curve: {} 个采样点  {}\n", loaded, curve.describe());
+      renderer.set_weight_curve(std::move(curve));
+    } else {
+      st::print("  weight_curve: 未加载（{}）\n", curve_path.empty() ? "默认路径不存在" : curve_path);
+    }
+  } else {
+    st::print("  weight_curve: 已禁用（--no-curve）\n");
+  }
   // Skia 式覆盖率校正（Chromium 在 DWrite 之上那一层）：实测 VS Code 比霜天「更实且彩边更少」
   // 的差距就在这里。contrast 越大，中间调越向两端推（→ 更实、彩边更少）。
   if (skia_mode) {

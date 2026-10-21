@@ -20,6 +20,7 @@
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/font.hpp"
+#include "st/text/weight_curve.hpp"
 #include "st/text/grid_fit.hpp"
 
 namespace st::text {
@@ -456,6 +457,17 @@ class TextRenderer {
   [[nodiscard]] auto fitted_gamma() const noexcept -> float { return fitted_gamma_size_; }
   [[nodiscard]] auto fitted_gamma_value() const noexcept -> float { return fitted_gamma_; }
 
+  /// **字重曲线**（跨字号连续映射，可选）。
+  ///
+  /// 设置后，每个字形按**实际物理字号**查表得出 γ 与对比度，覆盖全局
+  /// `coverage_gamma_` / `coverage_contrast_strength_`；同时**优先于** `set_fitted_gamma`
+  /// （后者是二档，会在边界跳变）。传空曲线 = 关闭（回到全局参数）。
+  ///
+  /// 为什么放在渲染器而不是应用层：字号→γ 的映射必须在**单个字形缓存键**里生效，
+  /// 否则同一字号的不同字形会取到不同参数。
+  void set_weight_curve(WeightCurve curve);
+  [[nodiscard]] auto weight_curve() const noexcept -> const WeightCurve& { return weight_curve_; }
+
   /// 把任意输入夹取到合法区间（`[0.3, 4]`；NaN 取默认值）。
   ///
   /// **区间双向都要用**：γ<1 是把字**压黑/加墨**（`α' = 1−(1−α)^(1/γ)`，γ<1 时 α' > α），
@@ -659,6 +671,8 @@ class TextRenderer {
   /// 这一层是"γ 补不了的那一段"：γ 把中段压下去后，只有 S 曲线能把满黑像素推上来。
   /// （曾用过 0.9，那是在 15px 错配尺度下标定的；换到正确字号后 0.9 会推过头。）
   float coverage_contrast_strength_{0.6f};
+  /// **字重曲线**（跨字号连续映射，见 `set_weight_curve`）。空 = 未启用。
+  WeightCurve weight_curve_{};
   /// 覆盖率 gamma 预校正指数（见 `set_coverage_gamma`）；1.0 = 关（旧行为）。
   float coverage_gamma_{kDefaultCoverageGamma};
   /// 按物理字号覆盖 gamma 的阈值（0 = 不覆盖）与取值，见 `set_fitted_gamma`。

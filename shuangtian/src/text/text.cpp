@@ -608,6 +608,15 @@ void TextRenderer::set_subpixel_strength(float strength) noexcept {
   cache_->glyph_bytes = 0;
 }
 
+void TextRenderer::set_weight_curve(WeightCurve curve) {
+  weight_curve_ = std::move(curve);
+  // 曲线改的是**位图内容**（每字号的 γ/对比度），旧位图必须作废。
+  const std::scoped_lock lock(cache_->mutex);
+  cache_->glyphs.clear();
+  cache_->lru_order.clear();
+  cache_->glyph_bytes = 0;
+}
+
 void TextRenderer::set_coverage_contrast_strength(float strength) noexcept {
   const float clamped = std::clamp(strength, 0.0f, 3.0f);
   if (clamped == coverage_contrast_strength_) return;
@@ -1063,6 +1072,17 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   // **对比度（S 曲线）同样进键**：它改位图映射（与 gamma 同一类）。
   const auto contrast_bucket =
       static_cast<std::uint64_t>(std::lround(coverage_contrast_strength_ * 100.0f));
+  // **字重曲线必须进键**：它按物理字号改每档的 γ/对比度，不进键会取到别的字号的位图。
+  // 用采样点数量 + 每点量化值拼一个摘要（曲线变更时几乎必然不同）。
+  std::uint64_t curve_bucket = static_cast<std::uint64_t>(weight_curve_.samples().size());
+  for (const auto& s : weight_curve_.samples()) {
+    curve_bucket = curve_bucket * 31ULL +
+                   static_cast<std::uint64_t>(std::lround(s.pixel_size * 4.0f));
+    curve_bucket = curve_bucket * 31ULL +
+                   static_cast<std::uint64_t>(std::lround(s.gamma * 100.0f));
+    curve_bucket = curve_bucket * 31ULL +
+                   static_cast<std::uint64_t>(std::lround(s.contrast * 100.0f));
+  }
   // **合成加粗步数必须进键**：它是同一字形的不同笔画宽度版本，
   // 混用等于把 Regular 的位图当成 SemiBold 的（症状：“字重一会儿生效一会儿不生效”）。
   // **逐字段顺序混合**（不是“移位后 XOR 拼装”）——六层嵌套的 `mix(mix(...))` 写起来
@@ -1074,7 +1094,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
         static_cast<std::uint64_t>(size_bucket), supersample_bucket, gamma_bucket,
         correct_bucket, lcd ? std::uint64_t{1} : std::uint64_t{0}, fit_bucket, fit_shift_bucket,
                       ink_bucket, darken_bucket, taps_bucket, strength_bucket, contrast_bucket,
-              static_cast<std::uint64_t>(steps)}) {
+              curve_bucket, static_cast<std::uint64_t>(steps)}) {
     key = mix(key, field);
   }
   {
@@ -1132,13 +1152,17 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
       coverage_correct_ == CoverageCorrect::Skia ? build_skia_lut(text_color_, coverage_contrast_)
                                                  : std::array<float, 256>{};
   const bool use_skia_lut = coverage_correct_ == CoverageCorrect::Skia;
-  // **按物理字号**取该字形实际生效的 gamma（见 `set_fitted_gamma`）：
-  // 小字号笔画细，单档压两端消不掉“小字偏重”，必须能分档。
-  // **生效 gamma = 字号分档，再被"字形类分档"覆盖**（见 `set_class_gamma`）。
-  // 顺序刻意如此：类分档是"只动这一类"的窄口径修正，理应有最高优先级。
+  // **生效 gamma 的优先级**（从高到低）：
+  //   1. 字形类分档（`set_class_gamma`）——“只动这一类”的窄口径修正
+  //   2. **字重曲线**（`set_weight_curve`）——按实际物理字号连续查表
+  //   3. 字号二档（`set_fitted_gamma`）——历史接口，已知会在边界跳变
+  //   4. 全局 `coverage_gamma_`
   const float class_gamma = class_gamma_[glyph_class_index(glyph_class)];
-  const float glyph_gamma = class_gamma > 0.0f ? class_gamma : effective_gamma(effective_size);
-  const float contrast_strength = coverage_contrast_strength_;
+  const WeightCurve::Value curve_value =
+      weight_curve_.evaluate(effective_size, effective_gamma(effective_size),
+                             coverage_contrast_strength_);
+  const float glyph_gamma = class_gamma > 0.0f ? class_gamma : curve_value.gamma;
+  const float contrast_strength = curve_value.contrast;
   const auto correct = [&skia_lut, use_skia_lut, glyph_gamma, contrast_strength](
                            float value) noexcept -> float {
     if (value <= 0.0f || value >= 1.0f) return value;
