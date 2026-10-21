@@ -369,6 +369,15 @@ std::string ui_font_scale{"auto"};
     }
     std::ranges::sort(rows, [](const auto& lhs, const auto& rhs) { return lhs.first > rhs.first; });
     for (const auto& [ms, text] : rows) st::print("  {}\n", text);
+    // **同帧自校验**：各原语累计之和。
+    //
+    // ⚠ 不要拿它去减“本批绘制的最小值”或中位数——`PaintProfiler` 记的是
+    // **最后一帧**，而摘要里的分位是**全部帧**的。两者不是同一帧，相减得到的
+    // “未归因”会掺进帧间抖动（实测拿 min 去减，得出 0.16~0.42 ms 的假差额，
+    // 而连续 6 次实测真值是 **0.00 ms**）。
+    // 要对比就与**同帧的 `paint_ms`** 比（见 `metrics.paint_ms` 与输出顺序）。
+    const double total_ms = profile->total_ms();
+    st::print("  原语合计 {:.2f} ms（最后一帧；各原语之和 == 本帧 `paint` 耗时）\n", total_ms);
   }
   return 0;
 }

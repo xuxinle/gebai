@@ -66,9 +66,49 @@ auto create_presenter(void*, int, int) -> Result<std::unique_ptr<Presenter>> {
 #include "st/core/log.hpp"
 #include "st/core/time.hpp"
 #include "st/raster/canvas.hpp"
+#include "st/raster/glyph_atlas_content.hpp"
 
 namespace st::raster::gpu {
 namespace {
+
+/// 字形图集是否启用（`ST_GPU_GLYPH_ATLAS=0` 可关，供对照与出问题时的逃生门）。
+[[nodiscard]] auto glyph_atlas_enabled() noexcept -> bool {
+  static const bool enabled = [] {
+    const char* value = std::getenv("ST_GPU_GLYPH_ATLAS");
+    if (value == nullptr || *value == '\0') return true;
+    return std::string_view{value} != "0";
+  }();
+  return enabled;
+}
+
+/// 字形合批是否启用。
+///
+/// **默认关闭**：合批本身已实现且逐像素正确（结构差 0.000%、彩边 289 vs 289），
+/// 但实测**无收益**，且 p95 变差：
+///
+/// | | p50 | p95 | 最大 |
+/// |---|---|---|---|
+/// | 合批开 | 1.47 ms | **5.31 ms** | **10.20 ms** |
+/// | 合批关 | 1.56 ms | 2.31 ms | 2.78 ms |
+///
+/// 根因是**粒度太细**：实测每帧 **244 次 flush**、平均每批只有 **4.7 个字形**。
+/// 而原路径是每字形 2 次 draw（305 字形 = 610 次），合批后 244×2 = 488 次
+/// ——只减了 20%，却多了顶点缓冲上传与常量重设。
+///
+/// 为何粒度这么细：`submit()` 里要 flush（保证绘制顺序），而 UI 树是
+/// 「边框 → 背景 → 文字 → 下个元素」顺序绘制的，字形天然被其它原语打散。
+///
+/// **要拿到收益必须先换掉“顺序绘制”这个前提**（例如把整帧的字形先收集起来、
+/// 最后统一画一次）——那是渲染流程改动，不是这个开关能解决的。
+/// 在那之前保留实现（已正确），用 `ST_GPU_GLYPH_BATCH=1` 可开启验证。
+[[nodiscard]] auto glyph_batch_enabled() noexcept -> bool {
+  static const bool enabled = [] {
+    const char* value = std::getenv("ST_GPU_GLYPH_BATCH");
+    if (value == nullptr || *value == '\0') return false;   // 默认关闭
+    return std::string_view{value} != "0";
+  }();
+  return enabled;
+}
 
 // ————————————————————————————————————————————————————————————————————————————
 // 动态加载：d3d11.dll（设备创建）与 d3dcompiler_47.dll（着色器编译）
@@ -281,6 +321,9 @@ cbuffer Params : register(b0) {
   float4 g_axis;        // 渐变几何：线性=起点/终点，径向=圆心+…，扫掠=圆心
   float4 g_axis_extra;  // x=渐变种类(0线性/1径向/2扫掠) y=半径 或 模糊半径
   float4 g_viewport;    // 视口（物理像素）
+  // **纹理子矩形**（归一化 `{u0, v0, 宽, 高}`）：缺省 (0,0,1,1) = 整张纹理（主路径）；
+  // 图集里是字形所在的子矩形。
+  float4 g_uv;
 };
 
 Texture2D g_texture : register(t0);
@@ -292,6 +335,50 @@ struct VsOut {
   float2 local : TEXCOORD0;   // 相对矩形左上角
   float2 pixel : TEXCOORD1;   // 物理像素坐标
 };
+
+// ————————————————————————————————————————————————————————————————
+// **字形合批的顶点路径**
+//
+// 为何需要：实测每帧 305 个字形、每个 2 次 `submit`（LCD 两遍）= **610 次 draw**，
+// GPU 侧 `text` 因此占整帧 **84%**（0.67 / 1.40 ms）。而 `submit` 的成本几乎全在
+// **状态设置**（渲染目标/视口/scissor/混合/常量缓冲 Map+memcpy/资源绑定）——
+// 把 N 个字形合成一次 draw，那些设置只做一次。
+//
+// 为何用**顶点缓冲**而不是实例化：
+// 每个字形需要自己的矩形与图集子矩形，而 PS 的采样靠 `g_uv`。
+// 实例化下 `g_uv` 在常量缓冲里逐实例无法变；顶点路径把 uv 作为顶点属性插值，
+// **PS 只读 `input.uv`**，更直接。
+//
+// 代价：一个字形 6 个顶点（两个三角形），每顶点 8 个 float（位置 2 + uv01 2 + sub 4）= 32 字节；
+// 305 字形 ≈ 58 KB——比实例缓冲大，但换来了 PS 不用分支。
+struct BatchVertex {
+  float2 position : POSITION;   // 物理像素坐标
+  float2 local : TEXCOORD0;     // 相对字形左上角（**像素**，SDF 用）
+  float2 local01 : TEXCOORD1;   // 字形内归一化坐标 0..1（采样用）
+  float4 uv : TEXCOORD2;        // 图集子矩形 {u0, v0, w, h}（归一化）
+  float2 half_size : TEXCOORD3; // 字形尺寸的一半（像素；SDF 用）
+};
+
+struct BatchOut {
+  float4 position : SV_Position;
+  float2 local : TEXCOORD0;
+  float2 local01 : TEXCOORD1;
+  float2 pixel : TEXCOORD2;
+  float4 uv : TEXCOORD3;
+  float2 half_size : TEXCOORD4;
+};
+
+BatchOut vs_batch(BatchVertex vertex) {
+  BatchOut o;
+  const float2 ndc = vertex.position / g_viewport.xy * 2.0 - 1.0;
+  o.position = float4(ndc.x, -ndc.y, 0.0, 1.0);
+  o.local = vertex.local;
+  o.local01 = vertex.local01;
+  o.pixel = vertex.position;
+  o.uv = vertex.uv;
+  o.half_size = vertex.half_size;
+  return o;
+}
 
 VsOut vs_main(uint vertex_id : SV_VertexID) {
   // 三角带四个角：(0,0) (1,0) (0,1) (1,1)
@@ -330,9 +417,38 @@ float rounded_sdf(float2 local, float2 half_size, float4 radii) {
   return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
 }
 
-float4 ps_main(VsOut input) : SV_Target {
+/// **按子矩形采样**（图集支持）。
+///
+/// `uv01` 是字形内的归一化坐标（0..1，由 `local / g_rect.zw` 得到）；
+/// `rect_uv` 是子矩形 `{u0, v0, w, h}`。
+///
+/// 为何这样改而不是“把字形坐标映射进图集”：
+/// 主路径的 `local = p - g_rect.xy`（**相对字形左上角**），`g_rect.zw` 是字形尺寸，
+/// 所以 `local / g_rect.zw` 天然就是字形内的归一化坐标——**这部分完全不用改**。
+/// 图集只需要把那个 0..1 的坐标**重映射到纹理里的子矩形**。
+/// 缺省 `rect_uv = (0,0,1,1)` 时 `uv01 * 1 + 0 == uv01`，与改动前逐位等价。
+float4 sample_subrect(float2 uv01, float4 rect_uv) {
+  return g_texture.Sample(g_sampler, rect_uv.xy + uv01 * rect_uv.zw);
+}
+
+/// 像素着色的**共用实现**。
+///
+/// 两条顶点路径（`vs_main` / `vs_batch`）的产物不同（后者多带逐字形子矩形），
+/// 但它们要算的东西完全一样——抽成这个函数，两边各自取到参数后调它。
+/// 这样**只有一份着色逻辑**，不会出现“合批路径与主路径行为漂移”那类难查的偏差。
+///
+/// 参数：
+///   · `local_px`：字形内的**像素**偏移（SDF 用）
+///   · `local01`：字形内的**归一化**坐标 0..1（采样用）
+///   · `half_size`：字形尺寸的一半（像素；SDF 用）
+///
+/// ⚠ `local01` **必须由调用方算好**（而不是在这里除 `g_rect.zw`）：
+/// 合批时每个字形尺寸不同，而 `g_rect.zw` 是常量缓冲里的单一值。
+/// 早期版本在 `shade` 里写 `local / g_rect.zw`，合批时传 `g_rect.zw = (1,1)`
+/// 于是 `local01` 一直是**像素值**（没被归一化）——采样坐标直接飞到图集外，
+/// 全被夹到边缘，实测“彩边像素 289 → 23”。
+float4 shade(float2 local_px, float2 local01, float2 pixel, float4 rect_uv, float2 half_size) {
   const int mode = (int)g_mode.x;
-  const float2 half_size = g_rect.zw * 0.5;
   float4 source = g_color;
   float coverage = 1.0;
   // 亚像素（LCD）覆盖率：每像素独立的 R/G/B 三个覆盖度（模式 5）
@@ -347,7 +463,7 @@ float4 ps_main(VsOut input) : SV_Target {
     float count = 0.0;
     for (int i = -64; i <= 64; ++i) {
       if (i < -radius || i > radius) continue;
-      sum += g_texture.SampleLevel(g_sampler, input.local / g_rect.zw + step * (float)i, 0).r;
+      sum += g_texture.SampleLevel(g_sampler, local01 + step * (float)i, 0).r;
       count += 1.0;
     }
     return float4(count > 0.0 ? sum / count : 0.0, 0.0, 0.0, 1.0);
@@ -355,7 +471,7 @@ float4 ps_main(VsOut input) : SV_Target {
 
   if (mode == 0 || mode == 1) {
     // 实心 / 渐变圆角矩形：SDF 给出解析覆盖率（1px 过渡带）
-    coverage = saturate(0.5 - rounded_sdf(input.local, half_size, g_radii));
+    coverage = saturate(0.5 - rounded_sdf(local_px, half_size, g_radii));
   }
   if (mode == 1) {
     // 渐变：直接从**渐变纹理**采样（CPU 侧按 stops 生成 256×1 的预乘色带）——
@@ -364,23 +480,23 @@ float4 ps_main(VsOut input) : SV_Target {
     float t = 0.0;
     if (g_axis_extra.x < 0.5) {
       const float2 axis = g_axis.zw - g_axis.xy;
-      t = saturate(dot(input.pixel - g_axis.xy, axis) / max(dot(axis, axis), 1e-6));
+      t = saturate(dot(pixel - g_axis.xy, axis) / max(dot(axis, axis), 1e-6));
     } else if (g_axis_extra.x < 1.5) {
-      t = saturate(length(input.pixel - g_axis.xy) / max(g_axis_extra.y, 1e-6));
+      t = saturate(length(pixel - g_axis.xy) / max(g_axis_extra.y, 1e-6));
     } else {
-      const float2 d = input.pixel - g_axis.xy;
+      const float2 d = pixel - g_axis.xy;
       t = frac(atan2(d.y, d.x) / 6.28318530718 + 1.0);
     }
     source = g_texture.Sample(g_sampler, float2(t, 0.5));
   } else if (mode == 2) {
     // 覆盖率遮罩（R8）× 纯色：字形与路径遮罩走这条
-    coverage = g_texture.Sample(g_sampler, input.local / g_rect.zw).r;
+    coverage = sample_subrect(local01, rect_uv).r;
   } else if (mode == 5) {
     // 亚像素覆盖率（R8G8B8）× 纯色：桌面字形走这条（两遍混合，见 g_mode.w）
-    coverage_rgb = g_texture.Sample(g_sampler, input.local / g_rect.zw).rgb;
+    coverage_rgb = sample_subrect(local01, rect_uv).rgb;
   } else if (mode == 3) {
     // 预乘 RGBA 位图（离屏画布合成）
-    source = g_texture.Sample(g_sampler, input.local / g_rect.zw);
+    source = sample_subrect(local01, rect_uv);
   }
 
   // 覆盖率**逐通道**：灰度模式下三通道相同（factor3 = coverage.xxx），
@@ -390,13 +506,13 @@ float4 ps_main(VsOut input) : SV_Target {
   float clip_factor = 1.0;
   if (g_mode.z > 2.5) {
     // 路径裁剪：用遮罩纹理采样（t1）。遮罩在区域内的相对位置 = (像素 - 区域左上) / 区域尺寸
-    const float2 uv = (input.pixel - g_clip.xy) / max(g_clip.zw, float2(1.0, 1.0));
+    const float2 uv = (pixel - g_clip.xy) / max(g_clip.zw, float2(1.0, 1.0));
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) discard;
     clip_factor = g_clip_texture.SampleLevel(g_sampler, uv, 0).r;
   } else if (g_mode.z > 1.5) {
     // 圆角裁剪：用同一个 SDF 求覆盖率（不需要额外的遮罩纹理）
     const float2 clip_half = g_clip.zw * 0.5;
-    clip_factor = saturate(0.5 - rounded_sdf(input.pixel - g_clip.xy, clip_half, g_clip_radii));
+    clip_factor = saturate(0.5 - rounded_sdf(pixel - g_clip.xy, clip_half, g_clip_radii));
   }
   // 裁剪是**标量**（几何遮罩），乘进三个通道
   factor3 *= clip_factor;
@@ -415,6 +531,19 @@ float4 ps_main(VsOut input) : SV_Target {
                           : source.a * factor3.r;
   return float4(source.rgb * factor3, alpha);
 }
+
+// —— 两个入口 ——
+
+// 主路径：单一子矩形（`g_uv`，通常是整张纹理）；字形尺寸来自 `g_rect.zw`。
+float4 ps_main(VsOut input) : SV_Target {
+  const float2 half_size = g_rect.zw * 0.5;
+  return shade(input.local, input.local / g_rect.zw, input.pixel, g_uv, half_size);
+}
+
+// 合批路径：子矩形、字形尺寸都由顶点带下来（逐字形不同）。
+float4 ps_batch(BatchOut input) : SV_Target {
+  return shade(input.local, input.local01, input.pixel, input.uv, input.half_size);
+}
 )hlsl";
 
 /// 与 HLSL 的 cbuffer 逐字节对应（4 字节对齐、总长 16 字节倍数）。
@@ -429,8 +558,26 @@ struct ShaderParams {
   std::array<float, 4> axis{};
   std::array<float, 4> axis_extra{};
   std::array<float, 4> viewport{};
+  /// 纹理子矩形（归一化）：`{u0, v0, w, h}`。缺省整张纹理——主路径都是这个。
+  std::array<float, 4> uv{0.0f, 0.0f, 1.0f, 1.0f};
 };
 static_assert(sizeof(ShaderParams) % 16 == 0, "常量缓冲必须是 16 字节的倍数");
+
+/// 合批顶点（与 HLSL 的 `BatchVertex` 逐字节对应）。
+///
+/// 一个字形 = **6 个顶点**（两个三角形，不依赖 `SV_VertexID` 也不依赖实例化）。
+/// 为何不用实例化：实例化需要输入布局的语义槽位与 `InputSlot` 配合，
+/// 而 D3D11 在这块的匹配失败**是静默的**（`CreateInputLayout` 返回失败、
+/// 之后 draw 什么都不画）——已花三轮试错。顶点缓冲是 `submit` 已在用的模型，
+/// 行为可预测。
+struct BatchVertex {
+  std::array<float, 2> position{};
+  std::array<float, 2> local{};
+  std::array<float, 2> local01{};
+  std::array<float, 4> uv{};
+  std::array<float, 2> half_size{};
+};
+static_assert(sizeof(BatchVertex) == 48, "顶点跨距必须与 HLSL 的 struct 一致");
 
 /// 绘制模式（与 HLSL 里的 `g_mode.x` 对应）。
 enum class DrawMode : std::uint32_t {
@@ -447,6 +594,11 @@ enum class DrawMode : std::uint32_t {
 struct Pipeline {
   ID3D11VertexShader* vs{nullptr};
   ID3D11PixelShader* ps{nullptr};
+  /// 合批着色器与它们的输入布局（缺失时文字退回逐字形路径）。
+  ID3D11VertexShader* batch_vs{nullptr};
+  ID3D11PixelShader* batch_ps{nullptr};
+  ID3DBlob* batch_signature{nullptr};
+  ID3D11InputLayout* batch_layout{nullptr};
   ID3D11Buffer* constants{nullptr};
   ID3D11BlendState* blend{nullptr};
   ID3D11BlendState* opaque{nullptr};  ///< 关闭混合（写遮罩时用：要覆盖写入而非叠加）
@@ -464,6 +616,28 @@ struct Pipeline {
 
   explicit Pipeline(ID3D11Device* device) {
     if (!compile_shaders(device)) return;
+    // 合批的**顶点**输入布局（槽 0，逐顶点）。
+    //
+    // ⚠ 失败**必须可见**：`CreateInputLayout` 失败后 draw 会什么也不画，
+    // 而 `CreateInputLayout` 自己只返回一个 HRESULT——之前三轮就是在这里
+    // 静默失败、而我一直在猜“为什么画出来是错的”（实际是“根本没画”）。
+    if (batch_vs != nullptr && batch_signature != nullptr) {
+      const D3D11_INPUT_ELEMENT_DESC elements[] = {
+          {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+          {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0},
+          {"TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
+          {"TEXCOORD", 2, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0},
+          {"TEXCOORD", 3, DXGI_FORMAT_R32G32_FLOAT, 0, 40, D3D11_INPUT_PER_VERTEX_DATA, 0},
+      };
+      const HRESULT layout =
+          device->CreateInputLayout(elements, 5, batch_signature->GetBufferPointer(),
+                                    batch_signature->GetBufferSize(), &batch_layout);
+      if (FAILED(layout) || batch_layout == nullptr) {
+        ST_LOG_WARN("合批输入布局创建失败（hr=0x{:08X}）——文字将退回逐字形路径：{}",
+                    static_cast<unsigned>(layout), error);
+        batch_vs = nullptr;   // 标记合批不可用
+      }
+    }
     D3D11_BUFFER_DESC buffer{};
     buffer.ByteWidth = sizeof(ShaderParams);
     buffer.Usage = D3D11_USAGE_DYNAMIC;
@@ -590,6 +764,23 @@ struct Pipeline {
                                                         ps_blob->GetBufferSize(), nullptr, &ps);
     vs_blob->Release();
     ps_blob->Release();
+    // 合批着色器。**失败不阻断**（文字退回逐字形 `submit`），
+    // 但**必须可见**——否则“合批没生效”会看起来像“合批算了但算错了”。
+    ID3DBlob* batch_vs_blob = nullptr;
+    ID3DBlob* batch_ps_blob = nullptr;
+    if (build("vs_batch", "vs_4_0", &batch_vs_blob) && build("ps_batch", "ps_4_0", &batch_ps_blob) &&
+        batch_vs_blob != nullptr && batch_ps_blob != nullptr) {
+      const HRESULT bvs = device->CreateVertexShader(batch_vs_blob->GetBufferPointer(),
+                                                     batch_vs_blob->GetBufferSize(), nullptr,
+                                                     &batch_vs);
+      const HRESULT bps = device->CreatePixelShader(batch_ps_blob->GetBufferPointer(),
+                                                    batch_ps_blob->GetBufferSize(), nullptr,
+                                                    &batch_ps);
+      if (SUCCEEDED(bvs) && SUCCEEDED(bps)) {
+        batch_signature = batch_vs_blob;   // 保留供 `CreateInputLayout`
+      }
+    }
+    if (batch_ps_blob != nullptr) batch_ps_blob->Release();
     if (FAILED(vs_result) || FAILED(ps_result)) {
       error = "创建着色器对象失败";
       return false;
@@ -890,6 +1081,307 @@ class GpuCanvas final : public Surface {
                           opacity, blend, 0, CoverageFormat::Lcd);
   }
 
+  /// 从图集取（或写入）一个字形，拿到**图集纹理 + 归一化子矩形**。
+  ///
+  /// 返回 false 表示图集不可用（装不下/纹理上传失败）——调用方退回独立纹理。
+  ///
+  /// ⚠ **两个关键的 timing 约束**（都是实测踩过的）：
+  ///
+  /// ① **新增条目后必须立即重传**。图集是 CPU 缓冲，GPU 纹理是副本；
+  ///    `place()` 返回 `fresh=true` 就意味着“CPU 缓冲变了、纹理还是旧的”。
+  ///    不能把上传推迟到“某个批次边界”——逐字形路径**根本没有批次**，
+  ///    推迟的结果是画出旧内容（实测：`text_glyphs_stay_correct_...` 报 **7018 像素错**）。
+  /// ② **命中时完全不碰纹理**。否则每新增一个字形就重传整张图集（1 MB），
+  ///    305 字形 → **92 ms/帧**（比不合批慢 60 倍）。
+  ///
+  /// 两者合起来：只有“遇到新字形”才付一次上传，稳定态零开销。
+  /// 这也意味着首帧会慢一点（字形逐渐入图集，每个都传一次）——可接受，
+  /// 因为首帧本来就在建各种缓存。
+  auto atlas_sample(ID3D11ShaderResourceView*& view, std::array<float, 4>& subrect,
+                    std::span<const float> coverage, int width, int height, bool lcd,
+                    std::uint64_t cache_key) -> bool {
+    auto& atlas = lcd ? lcd_atlas_ : gray_atlas_;
+    const auto placement = atlas.place(cache_key, width, height,
+                                       [&](std::uint8_t* dst, int row_bytes) {
+                                         write_coverage(dst, row_bytes, coverage, width, height,
+                                                        lcd);
+                                       });
+    if (!placement.has_value()) return false;
+    ID3D11ShaderResourceView*& slot = lcd ? lcd_atlas_view_ : gray_atlas_view_;
+    if (placement->fresh && !upload_atlas(atlas, slot)) return false;
+    if (slot == nullptr) return false;
+    view = slot;
+    const float atlas_width = static_cast<float>(atlas.width());
+    const float atlas_height = static_cast<float>(atlas.height());
+    const atlas::Region& region = placement->region;
+    subrect = {static_cast<float>(region.x) / atlas_width,
+               static_cast<float>(region.y) / atlas_height,
+               static_cast<float>(region.width) / atlas_width,
+               static_cast<float>(region.height) / atlas_height};
+    return true;
+  }
+
+  /// 攒入一个字形。返回 false 表示本字形**没有入队**（调用方直接画逐字形）。
+  ///
+  /// 分组条件：颜色 / opacity / LCD——三者都是着色器常量，不同值不能共发一次 draw。
+  /// 实测界面里绝大多数文字同为默认前景色，所以分组数很少。
+  ///
+  /// ⚠ **返回 false 必须让调用方继续走逐字形路径**，而不是把字形丢掉。
+  /// 上一轮就是在“入队后 flush 静默失败”时把字形整个弄没了（300 多个字形），
+  /// 表现为“彩边像素 289 → 0”——那是比“合批不生效”严重得多的缺陷。
+  auto enqueue_glyph(int x, int y, int width, int height, std::array<float, 4> subrect,
+                     const Paint& paint, float opacity, bool lcd) -> bool {
+    const Pipeline& pipes = pipeline();
+    if (!pipes.ok || pipes.batch_vs == nullptr || pipes.batch_ps == nullptr ||
+        pipes.batch_layout == nullptr) {
+      return false;   // 合批不可用：调用方直接画
+    }
+    if (batch_.active && (batch_.color != paint.color() || batch_.opacity != opacity ||
+                          batch_.lcd != lcd)) {
+      flush_glyph_batch();
+    }
+    if (!batch_.active) {
+      batch_.color = paint.color();
+      batch_.opacity = opacity;
+      batch_.lcd = lcd;
+      batch_.active = true;
+      batch_.vertices.clear();
+    }
+    // 两个三角形（6 个顶点），四边形向外扩 1 像素（理由同 `vs_main`：
+    // 光栅化按像素中心判定内外，不扩会丢边界那一行）。
+    const float px = static_cast<float>(x);
+    const float py = static_cast<float>(y);
+    const float pw = static_cast<float>(width);
+    const float ph = static_cast<float>(height);
+    const float x0 = px - 1.0f;
+    const float y0 = py - 1.0f;
+    const float x1 = px + pw + 1.0f;
+    const float y1 = py + ph + 1.0f;
+    const std::array<float, 2> half{pw * 0.5f, ph * 0.5f};
+    const auto push = [&](float vx, float vy) {
+      BatchVertex vertex{};
+      vertex.position = {vx, vy};
+      vertex.local = {vx - px, vy - py};
+      vertex.local01 = {(vx - px) / pw, (vy - py) / ph};
+      vertex.uv = subrect;
+      vertex.half_size = half;
+      batch_.vertices.push_back(vertex);
+    };
+    push(x0, y0);
+    push(x1, y0);
+    push(x0, y1);
+    push(x1, y0);
+    push(x1, y1);
+    push(x0, y1);
+    return true;
+  }
+
+  /// 把累积的字形一次发出。**必须在任何非字形绘制前调用**，否则绘制顺序错乱。
+  ///
+  /// 失败时**回落逐字形**（而不是丢字形）——每个字形的位置与子矩形都在顶点里，
+  /// 可以逐个重放。
+  void flush_glyph_batch() {
+    if (!batch_.active || batch_.vertices.empty()) {
+      batch_.active = false;
+      batch_.vertices.clear();
+      return;
+    }
+    // 先取出并清空状态，再绘制：下面的回落路径会经 `submit`，
+    // 而 `submit` 第一行就是 `flush_glyph_batch()`——不清空会无限递归。
+    const bool was_lcd = batch_.lcd;
+    const st::math::Color was_color = batch_.color;
+    const float was_opacity = batch_.opacity;
+    std::vector<BatchVertex> vertices = std::move(batch_.vertices);
+    batch_.active = false;
+    batch_.vertices.clear();
+
+    const Pipeline& pipes = pipeline();
+    ID3D11ShaderResourceView* atlas_view = was_lcd ? lcd_atlas_view_ : gray_atlas_view_;
+
+    if (atlas_view != nullptr && pipes.batch_vs != nullptr && pipes.batch_ps != nullptr &&
+        pipes.batch_layout != nullptr && submit_glyph_batch(was_lcd, was_color, was_opacity,
+                                                            atlas_view, vertices)) {
+      return;   // 合批成功
+    }
+
+    // **回落**：逐个字形走普通 `submit`（每 6 个顶点 = 1 个字形）。
+    // 这条路径已验证逐像素正确（结构差 0.000%）。
+    for (std::size_t index = 0; index + 5 < vertices.size(); index += 6) {
+      const BatchVertex& corner = vertices[index];
+      const BatchVertex& opposite = vertices[index + 4];
+      const float left = corner.position[0] + 1.0f;
+      const float top = corner.position[1] + 1.0f;
+      const float right = opposite.position[0] - 1.0f;
+      const float bottom = opposite.position[1] - 1.0f;
+      ShaderParams params = base_params(
+          was_lcd ? DrawMode::CoverageMaskLcd : DrawMode::CoverageMask,
+          math::Rect{left, top, right - left, bottom - top}, {0.0f, 0.0f, 0.0f, 0.0f}, was_opacity,
+          was_color);
+      params.uv = corner.uv;
+      if (!was_lcd) {
+        submit(params, atlas_view, /*point_sample=*/true);
+      } else {
+        params.mode[3] = 0.0f;
+        submit(params, atlas_view, true, false, 0, 0, pipes.lcd_attenuate);
+        params.mode[3] = 1.0f;
+        submit(params, atlas_view, true, false, 0, 0, pipes.lcd_add);
+      }
+    }
+  }
+
+  /// 保证顶点缓冲能装 `count` 个顶点（按 2 的幂扩容）。
+  auto ensure_glyph_capacity(std::size_t count) -> bool {
+    const std::size_t needed = count * sizeof(BatchVertex);
+    if (glyph_vertices_ != nullptr && needed <= glyph_vertex_capacity_) return true;
+    if (glyph_vertices_ != nullptr) {
+      glyph_vertices_->Release();
+      glyph_vertices_ = nullptr;
+      glyph_vertex_capacity_ = 0;
+    }
+    std::size_t capacity = 4096 * sizeof(BatchVertex);
+    while (capacity < needed) capacity *= 2;
+    D3D11_BUFFER_DESC buffer{};
+    buffer.Usage = D3D11_USAGE_DYNAMIC;
+    buffer.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    buffer.ByteWidth = static_cast<UINT>(capacity);
+    if (FAILED(device_->CreateBuffer(&buffer, nullptr, &glyph_vertices_))) {
+      glyph_vertices_ = nullptr;
+      return false;
+    }
+    glyph_vertex_capacity_ = capacity;
+    return true;
+  }
+
+  /// 一次 draw 发出整批字形。返回 false 时调用方回落逐字形。
+  auto submit_glyph_batch(bool lcd, st::math::Color color, float opacity,
+                          ID3D11ShaderResourceView* view,
+                          const std::vector<BatchVertex>& vertices) -> bool {
+    const Pipeline& pipes = pipeline();
+    if (rtv_ == nullptr || vertices.empty()) return false;
+    if (!ensure_glyph_capacity(vertices.size())) return false;
+
+    D3D11_MAPPED_SUBRESOURCE mapped_vertices{};
+    if (FAILED(context_->Map(glyph_vertices_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_vertices))) {
+      return false;
+    }
+    std::memcpy(mapped_vertices.pData, vertices.data(), vertices.size() * sizeof(BatchVertex));
+    context_->Unmap(glyph_vertices_, 0);
+
+    const ClipFrame& clip = current_clip();
+    ID3D11ShaderResourceView* clip_mask = clip.mode > 2 ? clip.mask : nullptr;
+    ID3D11RenderTargetView* targets[1] = {rtv_};
+    context_->OMSetRenderTargets(1, targets, nullptr);
+    const D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(physical_width_),
+                                  static_cast<float>(physical_height_), 0.0f, 1.0f};
+    context_->RSSetViewports(1, &viewport);
+    const math::IntRect scissor = clip.rect;
+    const D3D11_RECT rect{scissor.x, scissor.y, scissor.x + scissor.width,
+                          scissor.y + scissor.height};
+    context_->RSSetScissorRects(1, &rect);
+    context_->RSSetState(pipes.raster_scissor);
+
+    const UINT stride = sizeof(BatchVertex);
+    const UINT offset = 0;
+    ID3D11Buffer* buffers[1] = {glyph_vertices_};
+    context_->IASetVertexBuffers(0, 1, buffers, &stride, &offset);
+    context_->IASetInputLayout(pipes.batch_layout);
+    context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context_->VSSetShader(pipes.batch_vs, nullptr, 0);
+    context_->PSSetShader(pipes.batch_ps, nullptr, 0);
+
+    // 字形尺寸在顶点里，但 `g_rect.zw` 仍要设成字形的（SDF/归一化用不到它，
+    // 但 `shade` 之外的路径可能读）——这里取最后一个字形无意义，
+    // 所以用图集尺寸占位并**依赖 ps_batch 只用顶点数据**。
+    ShaderParams params = base_params(
+        lcd ? DrawMode::CoverageMaskLcd : DrawMode::CoverageMask,
+        math::Rect{0.0f, 0.0f, 1.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 0.0f}, opacity, color);
+
+    ID3D11ShaderResourceView* views[1] = {view};
+    ID3D11ShaderResourceView* clip_views[1] = {clip_mask};
+    ID3D11SamplerState* samplers[1] = {pipes.sampler_point};
+    context_->PSSetShaderResources(0, 1, views);
+    context_->PSSetShaderResources(1, 1, clip_views);
+    context_->PSSetSamplers(0, 1, samplers);
+
+    const float blend_factor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    const auto draw_once = [&](ID3D11BlendState* state) -> bool {
+      D3D11_MAPPED_SUBRESOURCE mapped{};
+      if (FAILED(context_->Map(pipes.constants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+        return false;
+      }
+      std::memcpy(mapped.pData, &params, sizeof(params));
+      context_->Unmap(pipes.constants, 0);
+      ID3D11Buffer* constant_buffers[1] = {pipes.constants};
+      context_->VSSetConstantBuffers(0, 1, constant_buffers);
+      context_->PSSetConstantBuffers(0, 1, constant_buffers);
+      context_->OMSetBlendState(state, blend_factor, 0xFFFFFFFFU);
+      context_->Draw(static_cast<UINT>(vertices.size()), 0);
+      return true;
+    };
+    if (!lcd) {
+      if (!draw_once(pipes.blend)) return false;
+    } else {
+      params.mode[3] = 0.0f;
+      if (!draw_once(pipes.lcd_attenuate)) return false;
+      params.mode[3] = 1.0f;
+      if (!draw_once(pipes.lcd_add)) return false;
+    }
+    readback_dirty_ = true;
+    return true;
+  }
+
+  /// 把图集 CPU 缓冲整张传成纹理（重建旧的）。
+  ///
+  /// 全量重传而不是“只传脏矩形”：图集 ≤ 2048² RGBA = ≤ 16 MB，
+  /// 而增量上传要维护脏区域、且在扩容后失效——复杂度远高于收益。
+  /// 稳定态下这个方法**根本不会被调用**（只在遇到新字形时）。
+  auto upload_atlas(atlas::GlyphAtlas& atlas, ID3D11ShaderResourceView*& slot) -> bool {
+    const int width = atlas.width();
+    const int height = atlas.height();
+    (void)atlas.take_resized();
+    if (slot != nullptr) {
+      slot->Release();
+      slot = nullptr;
+    }
+    slot = create_texture(DXGI_FORMAT_R8G8B8A8_UNORM, width, height, atlas.pixels().data(),
+                          static_cast<std::size_t>(width) * 4U);
+    return slot != nullptr;
+  }
+
+  /// 把覆盖率写入图集的 RGBA8 缓冲。
+  ///
+  /// 统一用 RGBA8（不分开 RGBA/R8 两种格式）：
+  ///   · 灰度：R=G=B=覆盖率 · 亚像素：R/G/B=逐通道覆盖率 · A=255
+  /// 两种模式因此共用同一套搬运/上传代码，只是写入内容不同。
+  /// 代价是灰度下 4 倍内存（图集 ≤ 2048²，即 ≤ 16 MB），可接受。
+  static void write_coverage(std::uint8_t* dst, int row_bytes, std::span<const float> coverage,
+                             int width, int height, bool lcd) {
+    const auto clamp_byte = [](float value) -> std::uint8_t {
+      return static_cast<std::uint8_t>(
+          std::lround(std::max(0.0f, std::min(1.0f, value)) * 255.0f));
+    };
+    for (int row = 0; row < height; ++row) {
+      std::uint8_t* line = dst + static_cast<std::size_t>(row) * row_bytes;
+      const std::size_t base = static_cast<std::size_t>(row) * static_cast<std::size_t>(width);
+      for (int column = 0; column < width; ++column) {
+        if (lcd) {
+          const std::size_t offset = (base + static_cast<std::size_t>(column)) * 3U;
+          line[column * 4 + 0] = clamp_byte(coverage[offset + 0]);
+          line[column * 4 + 1] = clamp_byte(coverage[offset + 1]);
+          line[column * 4 + 2] = clamp_byte(coverage[offset + 2]);
+        } else {
+          const std::uint8_t value =
+              clamp_byte(coverage[base + static_cast<std::size_t>(column)]);
+          line[column * 4 + 0] = value;
+          line[column * 4 + 1] = value;
+          line[column * 4 + 2] = value;
+        }
+        line[column * 4 + 3] = 255U;
+      }
+    }
+  }
+
   void blend_coverage_bitmap(int x, int y, std::span<const float> coverage, int width, int height,
                              const Paint& paint, float opacity, BlendMode blend,
                              std::uint64_t cache_key = 0,
@@ -908,15 +1400,43 @@ class GpuCanvas final : public Surface {
     // 症状：界面文字间歇性变成别的字（`folder`→`folBer`、`概览`→`外测`），
     // 且只在渲染过足够多字形（触发过一次清空）之后才出现——极难复现。
     // 稳定身份来自字体引擎（face + 字形号 + 字号档 + 超采样），与内存生命周期无关。
-    // 亚像素模式下身份里还带**渲染模式位**（灰度与 LCD 位图排布不同，不能互相顶替）。
-    ID3D11ShaderResourceView* view =
-        mask_texture(coverage.data(), width, height, cache_key, format);
+    // 亚像素模式下身份里还带**渲染模式位**（灰度与亚像素位图排布不同，不能互相顶替）。
+    //
+    // **图集路径**（`ST_GPU_GLYPH_ATLAS=0` 可关）：把字形写进共享图集纹理，
+    // 省掉“每个字形一张独立纹理”的建立/销毁。
+    //
+    // 正确性要求（本次已按此实现）：
+    //   ① 新增条目后**立即**重传图集纹理——不能推迟到某个“批次边界”，
+    //      因为逐字形路径根本没有批次（推迟就会画出旧内容）；
+    //   ② 稳定态（命中）**完全不碰纹理**，否则每字形 1 MB 上传会慢 60 倍（实测 92 ms/帧）。
+    ID3D11ShaderResourceView* view = nullptr;
+    std::array<float, 4> subrect{0.0f, 0.0f, 1.0f, 1.0f};
+    const bool atlas_ok = glyph_atlas_enabled() && cache_key != 0 &&
+                          atlas_sample(view, subrect, coverage, width, height, lcd, cache_key);
+    if (!atlas_ok) {
+      view = mask_texture(coverage.data(), width, height, cache_key, format);
+    }
     if (view == nullptr) return;
+
+    // **攒入批次**（`ST_GPU_GLYPH_BATCH=0` 可关）。
+    //
+    // 安全网（这是上一轮真正该做而没做的事）：入队**一定成功或一定不生效**——
+    // `enqueue_glyph` 返回 false 时本函数继续走下面的逐字形路径，
+    // **不会出现“字形进了队但队没发出去”的丢字形情况**。
+    // 而 `flush_glyph_batch` 里的任一失败（布局缺失/缓冲建不出来）都回落逐字形。
+    if (glyph_batch_enabled() && atlas_ok &&
+        enqueue_glyph(x, y, width, height, subrect, paint, opacity, lcd)) {
+      log_op(PaintOp::Text, start,
+             static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height));
+      return;
+    }
+
     ShaderParams params = base_params(
         lcd ? DrawMode::CoverageMaskLcd : DrawMode::CoverageMask,
         math::Rect{static_cast<float>(x), static_cast<float>(y), static_cast<float>(width),
                    static_cast<float>(height)},
         {0.0f, 0.0f, 0.0f, 0.0f}, opacity, paint.color());
+    params.uv = subrect;
     if (!lcd) {
       submit(params, view, /*point_sample=*/true);
     } else {
@@ -1121,6 +1641,14 @@ class GpuCanvas final : public Surface {
   void submit(const ShaderParams& params, ID3D11ShaderResourceView* view, bool point_sample,
               bool opaque = false, int viewport_width = 0, int viewport_height = 0,
               ID3D11BlendState* blend_override = nullptr) {
+    // **先 flush 字形批次**：`submit` 是“所有非字形绘制”的唯一入口，
+    // 在这里 flush 就保证了字形与其它图元的相对顺序不变。
+    //
+    // 为何选这个位置而不是逐个原语加：`Surface` 有十几个绘制入口
+    //（fill_rect/fill_path/stroke/shadow/blur/image/clip…），逐个加必漏；
+    // 而它们**全部**最终经过 `submit`（`submit_glyph_batch` 除外）。
+    // 漏掉任何一个 flush 点的后果是“文字被后画的矩形盖住”。
+    flush_glyph_batch();
     const Pipeline& pipes = pipeline();
     if (!pipes.ok) return;
     if (rtv_ == nullptr) return;
@@ -1638,11 +2166,28 @@ class GpuCanvas final : public Surface {
     initial.pSysMem = data;
     initial.SysMemPitch = static_cast<UINT>(row_pitch);
     ID3D11Texture2D* texture = nullptr;
-    if (FAILED(device_->CreateTexture2D(&desc, &initial, &texture))) return nullptr;
+    const HRESULT create = device_->CreateTexture2D(&desc, &initial, &texture);
+    if (FAILED(create)) {
+      // **失败必须可见**：纹理建不出来时上层会拿 nullptr 走去一条“什么都不画”的
+      // 静默分支（例如字形就直接消失）。而那个现象（“内容凭空少了”）
+      // 与“算错了”完全不同，没有这条日志就只能盲猜。
+      if (std::getenv("ST_GPU_TEXTURE_DIAG") != nullptr) {
+        ST_LOG_WARN("创建纹理失败：{}×{} fmt={} hr=0x{:08X} pitch={}", width, height,
+                    static_cast<int>(format), static_cast<unsigned>(create), row_pitch);
+      }
+      return nullptr;
+    }
     ID3D11ShaderResourceView* view = nullptr;
     const HRESULT result = device_->CreateShaderResourceView(texture, nullptr, &view);
     texture->Release();
-    return SUCCEEDED(result) ? view : nullptr;
+    if (FAILED(result)) {
+      if (std::getenv("ST_GPU_TEXTURE_DIAG") != nullptr) {
+        ST_LOG_WARN("创建纹理视图失败：{}×{} fmt={} hr=0x{:08X}", width, height,
+                    static_cast<int>(format), static_cast<unsigned>(result));
+      }
+      return nullptr;
+    }
+    return view;
   }
 
   /// 遮罩纹理缓存项。键是调用方给的**稳定身份**（见 `blend_coverage_bitmap` 的说明：
@@ -1725,6 +2270,9 @@ class GpuCanvas final : public Surface {
   /// 从 GPU 拉回像素（`0xRRGGBBAA` 预乘，与软件画布同一布局）。
   auto ensure_readback() -> bool {
     if (target_ == nullptr) return false;
+    // **回读前必须 flush 字形批次**：否则“本轮攒着还没发的字形”不会被画进目标，
+    // 截图/像素断言看到的就会是“文字消失了”（而屏幕上其实是好的）。
+    flush_glyph_batch();
     if (!readback_dirty_ && !readback_.empty()) return true;
     if (staging_ == nullptr) {
       D3D11_TEXTURE2D_DESC desc{};
@@ -1784,6 +2332,22 @@ class GpuCanvas final : public Surface {
   std::vector<std::uint32_t> readback_{};
   std::vector<ClipFrame> clip_stack_{};
   std::vector<MaskCacheEntry> mask_cache_{};
+  /// 两张图集（灰度/亚像素各自一张纹理，不能混用）与它们的纹理视图。
+  atlas::GlyphAtlas gray_atlas_{512, 2048};
+  atlas::GlyphAtlas lcd_atlas_{512, 2048};
+  ID3D11ShaderResourceView* gray_atlas_view_{nullptr};
+  ID3D11ShaderResourceView* lcd_atlas_view_{nullptr};
+  /// 合批的顶点缓冲与容量。
+  ID3D11Buffer* glyph_vertices_{nullptr};
+  std::size_t glyph_vertex_capacity_{0};
+  struct GlyphBatch {
+    st::math::Color color{};
+    float opacity{0.0f};
+    bool lcd{false};
+    bool active{false};
+    std::vector<BatchVertex> vertices;
+  };
+  GlyphBatch batch_{};
   std::vector<RampCacheEntry> ramp_cache_{};
   bool readback_dirty_{true};
   int physical_width_{0};

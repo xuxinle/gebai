@@ -368,10 +368,31 @@ auto list_dir(std::string_view path) -> Result<std::vector<DirEntry>> {
     DirEntry entry;
     entry.name = to_utf8(item.path().filename());
     entry.path = from_std_path(item.path());
-    entry.is_dir = item.is_directory(ec);
-    if (!entry.is_dir && item.is_regular_file(ec)) {
+    // **一次 `status()` 拿全部信息**。
+    //
+    // 为何要这么写：旧实现是 `is_directory()` + `is_regular_file()` + `file_size()`
+    // ——三次独立查询。而在 MinGW/libstdc++ 的 Win32 上，**每次查询都真落系统调用**
+    //（`directory_entry` 的 status 缓存没生效）。实测（`tools/list_dir_cost_probe.cpp`，
+    //  `src/raster` 9 个条目）：
+    //
+    // | 实现 | 耗时 | 每条目 |
+    // |---|---|---|
+    // | 只枚举（不查状态） | **351 µs** | 39 µs |
+    // | 旧：3 次查询/条目 | **3900 µs** | 433 µs |
+    //
+    // 即**91% 的时间花在逐条 stat 上**。`status()` 一次拿到类型，
+    // 目录项就**不再查 `file_size`**（目录不需要，文件才查）。
+    const sys::file_status status = item.status(ec);
+    if (ec) {
+      ec.clear();
+      entries.push_back(std::move(entry));
+      continue;
+    }
+    entry.is_dir = sys::is_directory(status);
+    if (!entry.is_dir && sys::is_regular_file(status)) {
       const auto size = item.file_size(ec);
       entry.size = ec ? 0U : static_cast<std::uint64_t>(size);
+      ec.clear();
     }
     entries.push_back(std::move(entry));
   }

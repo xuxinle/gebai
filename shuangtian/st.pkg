@@ -308,6 +308,86 @@
       "sources": ["tools/cold_memory_scale_probe.cpp"],
       "exclude_sources": ["src/pkg/*"]
     },
+    "paint_traverse_cost_probe": {
+      "kind": "executable",
+      "sources": ["tools/paint_traverse_cost_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "frame_epilogue_cost_probe": {
+      "kind": "executable",
+      "sources": ["tools/frame_epilogue_cost_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "partial_frame_limit_probe": {
+      "kind": "executable",
+      "sources": ["tools/partial_frame_limit_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "partial_frame_overhead_probe": {
+      "kind": "executable",
+      "sources": ["tools/partial_frame_overhead_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "cull_effectiveness_probe": {
+      "kind": "executable",
+      "sources": ["tools/cull_effectiveness_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "shadow_unit_cost_probe": {
+      "kind": "executable",
+      "sources": ["tools/shadow_unit_cost_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "shadow_amortized_probe": {
+      "kind": "executable",
+      "sources": ["tools/shadow_amortized_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "layout_duplicate_work_probe": {
+      "kind": "executable",
+      "sources": ["tools/layout_duplicate_work_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "frame_allocation_probe": {
+      "kind": "executable",
+      "sources": ["tools/frame_allocation_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "frame_variance_probe": {
+      "kind": "executable",
+      "sources": ["tools/frame_variance_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "covered_region_verify_probe": {
+      "kind": "executable",
+      "sources": ["tools/covered_region_verify_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "file_io_cost_probe": {
+      "kind": "executable",
+      "sources": ["tools/file_io_cost_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "list_dir_cost_probe": {
+      "kind": "executable",
+      "sources": ["tools/list_dir_cost_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "dir_size_cost_probe": {
+      "kind": "executable",
+      "sources": ["tools/dir_size_cost_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "gpu_mask_cache_probe": {
+      "kind": "executable",
+      "sources": ["tools/gpu_mask_cache_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
+    "text_cache_limit_probe": {
+      "kind": "executable",
+      "sources": ["tools/text_cache_limit_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"]
+    },
     "simd_short_row_probe": {
       "kind": "executable",
       "sources": ["tools/simd_short_row_probe.cpp"],

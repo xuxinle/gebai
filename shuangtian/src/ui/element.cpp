@@ -799,7 +799,24 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
   if (style_.shadow.visible()) {
     // 上浮时阴影跟着走（否则"抬起"会被阴影钉在原地，看着像两层错位）
     const math::Rect shadow_box = box.inset(style_.margin);
-    const auto options = raster::DrawOptions{.opacity = style_.opacity};
+    // **告诉后端“哪块随后会被不透明底盖掉”**（`covered_region`）。
+    //
+    // 语义：下文（第 820 行附近）会用 `background` 以同半径铺满 `box`。若它
+    // **不透明**（`a == 255`）、`opacity >= 0.999` 且 `SrcOver`，则阴影落在
+    // `box` 内的部分**必然被完全覆盖**——那部分先画一遍是纯浪费。
+    //
+    // 正确性是硬保证而非近似（`src-over` 结合律）：设贴图贡献 U、底色 B 不透明，
+    // 则 `over(B, over(D, U)) == B` 对任意 D、U 成立（不透明源的 `over` 就是替换）。
+    // 后端据此按行解析出精确跨度跳过（圆角处不能整矩形跳，否则四角丢阴影）。
+    //
+    // 为何要显式判 `opacity >= 0.999`：半透明合成后底色仍半透明，不能跳
+    //（契约第 1 条要求“完全覆盖”，而 `opacity < 1` 的底不满足）。
+    const bool can_skip_covered = background.a == 255U && style_.opacity >= 0.999f;
+    const auto options = raster::DrawOptions{
+        .opacity = style_.opacity,
+        .covered_region = can_skip_covered ? box : math::Rect{},
+        .covered_radius = can_skip_covered ? style_.radius : 0.0f,
+    };
     // **走 `draw_shadow_layered`，不是调两次 `draw_shadow`**：
     // 两层的遮罩都只取决于几何，后端可以把它们预合成成**一张**缓存贴图、只做一次
     // 逐像素合成（软件光栅器就是这样做的）。实测 96 张卡片：14.0 ms/帧 → 6.9 ms/帧
