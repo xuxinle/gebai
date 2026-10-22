@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <format>
 
+#include "st/core/print.hpp"
+
 namespace caiyun {
 
 auto layer_kind_name(LayerKind kind) -> std::string_view {
@@ -63,11 +65,85 @@ namespace {
   return 1.0f - inverse * inverse * inverse;
 }
 
+/// 路径缓动：0=线性 1=ease-out 2=ease-in-out 3=过冲。
+///
+/// ## 为何过冲要单独典开
+///
+/// `3` 的曲线在 t≈0.85 处冲到 1.06，然后回到 1.0——
+/// 这就是“物体冲过头再定住”，是**有质量**的关键；匀速到达看起来像幻灯片切换。
+[[nodiscard]] auto ease_path(float t, int kind) -> float {
+  const float clamped = std::clamp(t, 0.0f, 1.0f);
+  switch (kind) {
+    case 0:
+      return clamped;
+    case 2: {
+      // ease-in-out cubic：两端慢、中间快
+      return clamped < 0.5f ? 4.0f * clamped * clamped * clamped
+                            : 1.0f - std::pow(-2.0f * clamped + 2.0f, 3.0f) * 0.5f;
+    }
+    case 3: {
+      // 过冲：先推到 1.06 再回落（用 ease-out 做底，叠一个衰减正弦）
+      const float base = ease_out_cubic(clamped);
+      const float overshoot = 0.06f * std::sin(3.14159265358979f * clamped) *
+                              (1.0f - clamped);
+      return base + overshoot;
+    }
+    default:
+      return ease_out_cubic(clamped);
+  }
+}
+
 }  // namespace
 
 /// 阻尼弹跳的竖直位移（像素；正值 = 向下，与 `offset_y` 同向）。
 /// 定义在文件末尾（`evaluate_layer` 要用它）。
 [[nodiscard]] auto bounce_offset(const Layer& layer, float local_time) -> float;
+
+/// 路径位移（相对图层 x/y 的增量）。
+[[nodiscard]] auto evaluate_path(const Layer& layer, float local_time, float canvas_w,
+                                 float canvas_h, float design_w, float design_h) -> PathOffset;
+
+auto evaluate_path(const Layer& layer, float local_time, float canvas_w, float canvas_h,
+                   float design_w, float design_h) -> PathOffset {
+  PathOffset out{};
+  // 没写路径字段 → 零增量（老脚本行为完全不变）
+  if (layer.path_from_x.empty() && layer.path_from_y.empty() && layer.path_to_x.empty() &&
+      layer.path_to_y.empty()) {
+    return out;
+  }
+  const float elapsed = local_time - layer.path_at;
+  const float duration = std::max(0.01f, layer.path_dur);
+  const float t = std::clamp(elapsed / duration, 0.0f, 1.0f);
+
+  // 起点/终点：缺省一边时用图层自身位置（= “从这里出发”或“飞到这里”）。
+  const float layer_x = parse_dim(layer.x, canvas_w, design_w);
+  const float layer_y = parse_dim(layer.y, canvas_h, design_h);
+  const float from_x = layer.path_from_x.empty() ? layer_x
+                                                 : parse_dim(layer.path_from_x, canvas_w, design_w);
+  const float from_y = layer.path_from_y.empty() ? layer_y
+                                                 : parse_dim(layer.path_from_y, canvas_h, design_h);
+  const float to_x = layer.path_to_x.empty() ? layer_x
+                                             : parse_dim(layer.path_to_x, canvas_w, design_w);
+  const float to_y = layer.path_to_y.empty() ? layer_y
+                                             : parse_dim(layer.path_to_y, canvas_h, design_h);
+
+  const float eased = ease_path(t, layer.path_ease);
+  const float dx = (to_x - from_x) * eased;
+  const float dy = (to_y - from_y) * eased;
+  // 弧高：在直线上方拱起。用 `4s(1-s)`（s 为**未缓动**的进度）——
+  // 弧线形状应与时间进度一致，而不是与缓动后位置一致；
+  // 否则缓动会把弧也拉至两端（看起来像“沿着斜坡走”而不是“抛出去”）。
+  const float arc = 4.0f * t * (1.0f - t);
+  out.dx = dx;
+  out.dy = dy - layer.path_arc * arc;
+  if (std::getenv("CAIYUN_PATH_DEBUG") != nullptr) {
+    st::print("[path] t={:.3f} from=({:.1f},{:.1f}) to=({:.1f},{:.1f}) d=({:.1f},{:.1f})\n",
+              static_cast<double>(t), static_cast<double>(from_x), static_cast<double>(from_y),
+              static_cast<double>(to_x), static_cast<double>(to_y), static_cast<double>(dx),
+              static_cast<double>(dy));
+  }
+  return out;
+}
 
 auto evaluate_layer(const Layer& layer, float local_time, float canvas_w, float canvas_h,
                     float design_w, float design_h) -> LayerState {
@@ -77,6 +153,12 @@ auto evaluate_layer(const Layer& layer, float local_time, float canvas_w, float 
   state.w = parse_dim(layer.w, canvas_w, design_w);
   state.h = parse_dim(layer.h, canvas_h, design_h);
   state.alpha = std::clamp(layer.opacity, 0.0f, 1.0f);
+
+  // 路径位移：叠在图层基础位置上（没写 `path_*` 时增量恒为 0，
+  // 所以老脚本行为一字不变）。
+  const PathOffset path = evaluate_path(layer, local_time, canvas_w, canvas_h, design_w, design_h);
+  state.x += path.dx;
+  state.y += path.dy;
 
   // 入场动画：三种就够（fade / rise / scale）。
   //

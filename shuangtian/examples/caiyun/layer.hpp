@@ -277,7 +277,51 @@ struct Layer {
   std::string model_texture{};
   /// 纹理平铺次数（1 = 铺满整个面；>1 重复）。当前用于“墙面/地面”类底图。
   float model_texture_tile{1.0f};
+
+  // —— 路径动画（"从 A 飞到 B，走一条弧线"）——
+  //
+  // ## 为何需要它（能做与不能做的分界）
+  //
+  // `bounce` 只能做**原地竖直**弹跳。而“图标跳到任务栏并定住”、“卡片从左侧
+  // 飞入落在中位”这类动作都需要**水平位移 + 弧线**。
+  // Disney 12 原则的 **Arcs**：自然运动走弧线，直线只适合机械体。
+  //
+  // ## 与 `bounce` 的关系
+  //
+  // 两者**可叠加**：`path_*` 管“从哪飞到哪”，`bounce_*` 管“落地后弹几下”。
+  // 典型写法：`path_dur=0.9`（飞过去）+ `bounce_at=0.9`（到了开始弹）。
+  /// 起点（设计坐标；空 = 用图层自身的 `x/y`）。
+  std::string path_from_x{};
+  std::string path_from_y{};
+  /// 终点（设计坐标；空 = 用图层自身的 `x/y`）。
+  std::string path_to_x{};
+  std::string path_to_y{};
+  /// 弧高（像素，在直线上方拱起的高度）。0 = 直线。
+  ///
+  /// 取值建议：位移距离的 15~30%。太小看不出弧、太大变成“抛上天空”。
+  float path_arc{0.0f};
+  /// 飞行时长与起始时刻（秒）。
+  float path_dur{0.8f};
+  float path_at{0.0f};
+  /// 缓动：0=线性 1=ease-out（默认，落地减速）2=ease-in-out 3=落地过冲
+  ///
+  /// `3`（过冲）实现 Anticipation 的逆向：物体**冲过头再回来**，
+  /// 这是“有质量”的关键——匀速到达看起来就像幻灯片切换。
+  int path_ease{1};
 };
+
+/// 路径动画的求值结果（相对图层基础位置的增量）。
+struct PathOffset {
+  float dx{0.0f};
+  float dy{0.0f};   ///< 正值 = 向下（与画布 y 轴同向）
+};
+
+/// 求 `layer` 在 `local_time` 时刻的路径位移（纯函数，可单测）。
+///
+/// 返回的是**相对图层 `x/y` 的增量**，所以没写 `path_*` 字段时返回 `{0,0}`，
+/// 老脚本行为完全不变。
+[[nodiscard]] auto evaluate_path(const Layer& layer, float local_time, float canvas_w,
+                                 float canvas_h, float design_w, float design_h) -> PathOffset;
 
 /// 图层列表在某一时刻的绘制结果（由渲染器内部使用）。
 ///

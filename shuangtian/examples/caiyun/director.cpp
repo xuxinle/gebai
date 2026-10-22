@@ -178,7 +178,19 @@ using st::math::Color;
         std::clamp(st::json_get_double(node, "bounce_hz", layer.bounce_hz), 0.05, 8.0));
     layer.bounce_damping = static_cast<float>(
         std::clamp(st::json_get_double(node, "bounce_damping", layer.bounce_damping), 0.0, 20.0));
-    layer.bounce_at = static_cast<float>(st::json_get_double(node, "bounce_at", layer.bounce_at));
+          layer.bounce_at = static_cast<float>(st::json_get_double(node, "bounce_at", layer.bounce_at));
+      // 路径动画（“从 A 飞到 B，走一条弧线”）
+      layer.path_from_x = dim_field("path_from_x", layer.path_from_x);
+      layer.path_from_y = dim_field("path_from_y", layer.path_from_y);
+      layer.path_to_x = dim_field("path_to_x", layer.path_to_x);
+      layer.path_to_y = dim_field("path_to_y", layer.path_to_y);
+      layer.path_arc = static_cast<float>(
+          st::json_get_double(node, "path_arc", layer.path_arc));
+      layer.path_dur = static_cast<float>(
+          std::clamp(st::json_get_double(node, "path_dur", layer.path_dur), 0.02, 60.0));
+      layer.path_at = static_cast<float>(st::json_get_double(node, "path_at", layer.path_at));
+      layer.path_ease = static_cast<int>(
+          std::clamp(st::json_get_double(node, "path_ease", layer.path_ease), 0.0, 3.0));
 
     layer.cam_azimuth = static_cast<float>(
         std::clamp(st::json_get_double(node, "cam_azimuth", layer.cam_azimuth), -3600.0, 3600.0));

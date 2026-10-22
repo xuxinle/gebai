@@ -159,3 +159,120 @@ ST_TEST(layer_opacity_clamped) {
   state = caiyun::evaluate_layer(layer, 1.0f, kCanvasW, kCanvasH, kDesignW, kDesignH);
   ST_CHECK_NEAR(state.alpha, 0.0f, 0.001f);
 }
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 路径动画：从 A 飞到 B，走一条弧线
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// ## 为何要这组用例
+//
+// 路径动画是"跳到任务栏并定住"这类动作的地基，而它的正确性有三个互相
+// **独立**的方面，任何一项错都会让画面"看着别扭"却说不出哪里不对：
+//
+// ① **端点精确**：t=0 在起点、t=1 在终点（差 1 像素就"落不到位"）；
+// ② **弧线朝上且对称**：中点最高、两端贴地（Arcs 原则；写成朝下就是"往下陷"）；
+// ③ **缓动改变速度分布而不改变端点**：过冲档结束后必须回到终点。
+//
+// 这三条互不蕴含：端点对但弧线朝下、弧线对但缓动不回位——都能单独发生。
+
+namespace {
+
+/// "从 (100,800) 飞到 (900,200)、弧高 120、时长 1 秒"的标准夹具。
+[[nodiscard]] auto make_flying_layer() -> caiyun::Layer {
+  caiyun::Layer layer{};
+  layer.enter = 0;   // 不带入场动画，只看路径
+  layer.x = "100";
+  layer.y = "800";
+  layer.w = "200";
+  layer.h = "200";
+  layer.path_from_x = "100";
+  layer.path_from_y = "800";
+  layer.path_to_x = "900";
+  layer.path_to_y = "200";
+  layer.path_arc = 120.0f;
+  layer.path_dur = 1.0f;
+  layer.path_at = 0.0f;
+  layer.path_ease = 0;   // 线性，便于精确验算
+  return layer;
+}
+
+}  // namespace
+
+ST_TEST(path_starts_at_from_and_ends_at_to) {
+  const caiyun::Layer layer = make_flying_layer();
+  const auto at_start =
+      caiyun::evaluate_path(layer, 0.0f, kCanvasW, kCanvasH, kDesignW, kDesignH);
+  // 起点：位移增量必须为 0（图层 x/y 本身就是起点）
+  ST_CHECK(std::abs(at_start.dx) < 1e-3f);
+  ST_CHECK(std::abs(at_start.dy) < 1e-3f);
+
+  const auto at_end = caiyun::evaluate_path(layer, 1.0f, kCanvasW, kCanvasH, kDesignW, kDesignH);
+  // 终点：增量 = to - from = (800, -600)，弧在两端为 0，所以 dy 不带弧
+  ST_CHECK(std::abs(at_end.dx - 800.0f) < 1e-2f);
+  ST_CHECK(std::abs(at_end.dy + 600.0f) < 1e-2f);
+}
+
+ST_TEST(path_arc_bulges_upward_at_midpoint) {
+  const caiyun::Layer layer = make_flying_layer();
+  const auto mid = caiyun::evaluate_path(layer, 0.5f, kCanvasW, kCanvasH, kDesignW, kDesignH);
+  // 线性缓动下中点位移 = 一半直线位移
+  ST_CHECK(std::abs(mid.dx - 400.0f) < 1e-2f);
+  // 直线中点 dy = -300；叠上弧高 120（向上为负）→ -420
+  ST_CHECK(std::abs(mid.dy + 420.0f) < 1e-2f);
+  // 弧必须**向上**：dy 比纯直线更负
+  ST_CHECK(mid.dy < -300.0f);
+}
+
+ST_TEST(path_without_fields_is_a_noop) {
+  // 老脚本兼容：没写 path_* 的图层，增量必须恒为 0
+  caiyun::Layer layer{};
+  layer.enter = 0;
+  layer.x = "640";
+  layer.y = "360";
+  layer.w = "100";
+  layer.h = "100";
+  const auto offset = caiyun::evaluate_path(layer, 0.5f, kCanvasW, kCanvasH, kDesignW, kDesignH);
+  ST_CHECK(std::abs(offset.dx) < 1e-6f);
+  ST_CHECK(std::abs(offset.dy) < 1e-6f);
+}
+
+ST_TEST(path_overshoot_returns_to_the_endpoint) {
+  // 过冲档（path_ease=3）在中途会冲过头，但**结束时必须回到 1.0**，
+  // 否则物体永远停在差一点的位置——这类错肉眼极难发现。
+  caiyun::Layer layer = make_flying_layer();
+  layer.path_ease = 3;
+  const auto at_end = caiyun::evaluate_path(layer, 1.0f, kCanvasW, kCanvasH, kDesignW, kDesignH);
+  ST_CHECK(std::abs(at_end.dx - 800.0f) < 0.5f);
+  // 中途某点应当**超过**线性进度（这就是"冲过头"）
+  const auto at_mid = caiyun::evaluate_path(layer, 0.6f, kCanvasW, kCanvasH, kDesignW, kDesignH);
+  ST_CHECK(at_mid.dx > 800.0f * 0.6f);
+}
+
+ST_TEST(path_missing_to_keeps_layer_position) {
+  // 只写起点不写终点 = "从别处飞到这里"（终点就是图层自身位置）
+  caiyun::Layer layer{};
+  layer.enter = 0;
+  layer.x = "500";
+  layer.y = "400";
+  layer.w = "100";
+  layer.h = "100";
+  layer.path_from_x = "0";
+  layer.path_from_y = "400";
+  layer.path_dur = 1.0f;
+  layer.path_ease = 0;
+  const auto at_end = caiyun::evaluate_path(layer, 1.0f, kCanvasW, kCanvasH, kDesignW, kDesignH);
+  ST_CHECK(std::abs(at_end.dx - 500.0f) < 1e-2f);
+  ST_CHECK(std::abs(at_end.dy) < 1e-2f);
+}
+
+ST_TEST(path_zero_arc_is_a_straight_line) {
+  // 弧高为 0 时必须退化成直线（接口契约：path_arc=0 不应意外带弧）
+  caiyun::Layer layer = make_flying_layer();
+  layer.path_arc = 0.0f;
+  for (const float t : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+    const auto offset =
+        caiyun::evaluate_path(layer, t, kCanvasW, kCanvasH, kDesignW, kDesignH);
+    ST_CHECK(std::abs(offset.dy + 600.0f * t) < 1e-2f);
+  }
+}
