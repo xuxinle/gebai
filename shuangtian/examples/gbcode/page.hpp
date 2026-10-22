@@ -52,6 +52,14 @@ namespace gbcode_ui {
 using namespace st::ui;
 using namespace st::ui::dsl;
 
+// IDEA 新 UI 的面板卡片几何（`page_build.cpp` 与 `page_bottom.cpp` 共用）：
+//   · `kPanelRadius`：面板圆角（= `Metrics::radius_lg`）；
+//   · `kPanelGap`：面板之间的缝（透出外层 `Surface::Alt` 外壳色）。
+// 放在头文件里是必须的：终端/源码管理面板在 `page_bottom.cpp`，
+// 它们**自己也画实色背景**，因此必须用**同一个**半径（否则直角会盖住父级圆角）。
+inline constexpr float kPanelRadius = 14.0f;
+inline constexpr float kPanelGap = 4.0f;
+
 struct CodeEditorPage : Component {
  public:
   CodeEditorPage(std::string workspace, std::string tool_root,

@@ -229,8 +229,32 @@ ScriptHost::ScriptHost(UiRoot& root, ext::ScriptLimits limits)
         binding.selector = selector;
         binding.event = event;
         binding.handler = handler.size() > 120 ? handler.substr(0, 120) + "…" : handler;
-        impl_->bindings.push_back(binding);
-        return st::Json(binding.id);
+        // 选择器**在绑定时就解析一次**并缓存（dispatch 每帧要用，不能每次都 parse）。
+        // 解析失败不阻止绑定（保留原行为：非法选择器只是永不命中），
+        // 但缓存呈 nullptr 以免每次 dispatch 重试。
+        if (auto parsed = Selector::parse(binding.selector); parsed) {
+          binding.parsed = std::make_shared<const Selector>(std::move(*parsed));
+        }
+        impl_->bindings.push_back(std::move(binding));
+        // 注册时回收死绑定：重建式界面“先清元素再重建 + 重绑”，
+        // 在**增长点**清理比等事件触发更及时（事件可能很久才来一次）。
+        //
+        // 为何不做阈值门控：实测重建场景下总能项就十几到几十条，
+        // 任何阈值都可能“刚好不触发”；而重建时每条注册本就意味着一次结构变化，
+        // 同量级的全表扫（只查 `find`）代价可以忽略。
+        //
+        // 这是“对象生命周期”问题：元素被销毁后绑定必须跟着走，
+        // 不能依赖调用方记得 `off()`（那正是实测崩溃的来源）。
+        if (impl_->root != nullptr) {
+          UiRoot& tree = *impl_->root;   // 避开外层形参名 `root`（-Wshadow 会报错）
+          std::erase_if(impl_->bindings, [&tree](const ScriptBinding& b) {
+            if (b.parsed == nullptr) return true;
+            const std::string id = b.parsed->primary_id();
+            if (id.empty()) return false;   // 非 #id 选择器：不能当作失效
+            return tree.find(id) == nullptr;
+          });
+        }
+        return st::Json(impl_->bindings.back().id);
       });
   if (!status) return;
   status = impl_->engine->register_function(
@@ -354,9 +378,25 @@ auto ScriptHost::dispatch_event(const Event& event, Element& target) -> bool {
   std::vector<std::string> matching;
   for (const auto& binding : impl_->bindings) {
     if (binding.event != name) continue;
-    auto parsed = Selector::parse(binding.selector);
-    if (!parsed) continue;
-    if (parsed->matches(target)) matching.push_back(binding.id);
+    // 用绑定时缓存的选择器（未缓存 = 当初解析失败 → 这条绑定永远不会命中）
+    if (binding.parsed == nullptr) continue;
+    if (binding.parsed->matches(target)) matching.push_back(binding.id);
+  }
+
+  // 惰性回收死绑定（两个时机，缺一不可）：
+  //
+  // ① 本次**未命中任何绑定** → 很可能在点一个刚重建出来的新元素，
+  //    顺手把旧元素遗留的绑定清掉；
+  // ② 绑定表**超过阈值** → 即便每次都命中，也要不时清理。
+  //    只做①不够：重建后新元素总是命中自己那条，于是永远走不到①，
+  //    而死绑定会一直累积（实测：20 轮重建后 80 条，进程最终 `std::bad_alloc`）。
+  //
+  // 阈值取 32：实测 20 轮重建（每轮 4 条）总量在 16~80 之间波动，
+  // 阈值取 64 会让中小规模重建**根本不触发**清理（诊断实测：死绑定 12 条 / 总数 16 条）。
+  // 32 是“正常界面（手绑几十条）几乎不触发、重建式界面很快触发”的折中。
+  constexpr std::size_t kPruneThreshold = 32;
+  if (matching.empty() || impl_->bindings.size() > kPruneThreshold) {
+    (void)prune_dead_bindings();
   }
   if (matching.empty()) return false;
   // 高频事件合并：同一帧内多次触发只跑最后一次（脚本对鼠标移动通常只关心终态）
@@ -367,9 +407,24 @@ auto ScriptHost::dispatch_event(const Event& event, Element& target) -> bool {
   return dispatch_handlers(matching, event, target);
 }
 
+auto ScriptHost::prune_dead_bindings() -> std::size_t {
+  if (!valid() || impl_->root == nullptr) return 0;
+  UiRoot& root = *impl_->root;   // 捕获引用：lambda 里不能直接用 impl_->root
+  const auto before = impl_->bindings.size();
+  std::erase_if(impl_->bindings, [&root](const ScriptBinding& binding) {
+    // 当初就解析失败的绑定：永远不可能命中，直接回收
+    if (binding.parsed == nullptr) return true;
+    const std::string id = binding.parsed->primary_id();
+    // 非「单 #id」选择器：不动（重建后可能又有同类元素）
+    if (id.empty()) return false;
+    // 元素已不在树上 → 该绑定永不命中
+    return root.find(id) == nullptr;
+  });
+  return before - impl_->bindings.size();
+}
+
 auto ScriptHost::dispatch_handlers(const std::vector<std::string>& binding_ids, const Event& event,
-                                   Element& target) -> bool {
-  st::Json payload = event_to_json(event, target);
+                                   Element& target) -> bool {  st::Json payload = event_to_json(event, target);
   bool invoked = false;
   for (const auto& id : binding_ids) {
     auto outcome = impl_->run_entry([this, &id, &payload]() {

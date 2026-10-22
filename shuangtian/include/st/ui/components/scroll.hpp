@@ -112,7 +112,22 @@ class ScrollView : public Element {
   // —— 列表类通用视口契约（与 Tree/List 同口径）——
   // 滚动容器是**唯一真正持有视口**的组件，所以 `first_visible` 这类量的权威来源在这。
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
+  /// **可写**属性面：`offset`（夹取到 `[0, max_scroll]`）。
+  ///
+  /// 为何必须有（2026-10-22，相期实测）：`offset` 一直只在 `get_property` 里，
+  /// 于是控制通道 `set` 与脚本 `$('#x').set({offset: …})` 都**静默无效**——
+  /// 现象是“设了但没动”，而且不回错（属性名合法但无写路径）。
+  /// 应用要“新内容到了自动滚到底”就只能合成滚轮事件绕，那不是应用该干的事。
+  ///
+  /// 语义：超过 `max_scroll` 夹到底（不是拒绝）；负值夹到 0。
+  auto set_property(std::string_view name, std::string_view value) -> bool override;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  /// 动作面：`scroll_to`（参数 = 偏移）/ `scroll_by`（参数 = 增量）/ `scroll_to_end`。
+  ///
+  /// 为何除了 `set offset` 还要动作：一次性动作（"滚到底"）写成属性太隐。
+  /// 而 `scroll_by` 是相对量，属性面表达不了。
+  [[nodiscard]] auto invoke_action(std::string_view action, std::string_view argument)
+      -> bool override;
   /// 滚动到指定偏移（夹取到 `[0, max_scroll]`）；会重排子节点。
   void scroll_to(float offset);
   void scroll_by(float delta) { scroll_to(offset_ + delta); }

@@ -58,7 +58,14 @@ auto DirectorBridge::set_property(std::string_view name, std::string_view value)
 auto DirectorBridge::property_names() const -> std::vector<std::string_view> {
   return {"script", "last_action", "last_error", "edit_locked", "render_stage", "render_progress",
           "render_output", "render_error", "render_frames_done", "render_frames_total",
-          "render_log", "scene_count", "duration", "fps", "size", "name"};
+          "render_log", "render_elapsed",
+          // 画面质量（渲完帧后可用）：summary 给人看，quality_json 给程序取，
+          // 其余是拆开的单值——判据要能直接进断言，不必解析 JSON。
+          "render_quality", "render_quality_json", "render_quality_still_ratio",
+          "render_quality_bright_ratio", "render_quality_mean_luma",
+          "render_quality_change_density", "render_quality_worst_still_clip",
+          "render_quality_static_threshold", "render_quality_partial",
+          "scene_count", "duration", "fps", "size", "name"};
 }
 
 auto DirectorBridge::invoke_action(std::string_view action, std::string_view argument) -> bool {

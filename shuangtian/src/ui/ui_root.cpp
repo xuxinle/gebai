@@ -12,6 +12,7 @@
 
 #include "st/core/log.hpp"
 #include "st/core/print.hpp"
+#include "st/core/time.hpp"   // `now_ns`（悬停提示计时的单调钟）
 #include "st/ui/components/feedback.hpp"   // Tooltip（共享悬停提示气泡）
 
 namespace st::ui {
@@ -24,6 +25,56 @@ namespace st::ui {
 // 不参与任何业务判断——注入 Context 会让每个构造点都得传一对“只给调试看”的数。
 static std::uint64_t g_hint_update_calls = 0;
 static double g_hint_last_delta = -1.0;
+
+// lint-allow: L8 诊断计数器（同 `g_hint_update_calls` 的豁免理由）：
+// 只用于回答“`set_hint_target` 走到了哪个分支”——不给业务用。
+static std::uint64_t g_hint_target_calls = 0;   ///< 被调用次数
+static std::uint64_t g_hint_target_null = 0;    ///< owner==nullptr 次数
+static std::uint64_t g_hint_target_changed = 0; ///< 真的换了 owner 次数
+static std::uint64_t g_hint_bail_prune = 0;     ///< update_hint 里被 prune 清空
+static std::uint64_t g_hint_bail_start = 0;     ///< update_hint 里起点未立
+static std::uint64_t g_hint_bail_live = 0;      ///< 按 id 定位不到目标
+static std::uint64_t g_hint_bail_gone = 0;      ///< 按 id 找不到（真没了）
+auto UiRoot::hint_bail_gone_count() const noexcept -> std::uint64_t {
+  return g_hint_bail_gone;
+}
+auto UiRoot::hint_bail_live_count() const noexcept -> std::uint64_t {
+  return g_hint_bail_live;
+}
+
+auto UiRoot::hint_bail_prune_count() const noexcept -> std::uint64_t {
+  return g_hint_bail_prune;
+}
+auto UiRoot::hint_bail_start_count() const noexcept -> std::uint64_t {
+  return g_hint_bail_start;
+}
+
+auto UiRoot::hint_target_calls() const noexcept -> std::uint64_t { return g_hint_target_calls; }
+auto UiRoot::hint_target_null_count() const noexcept -> std::uint64_t {
+  return g_hint_target_null;
+}
+auto UiRoot::hint_target_changed_count() const noexcept -> std::uint64_t {
+  return g_hint_target_changed;
+}
+
+/// 提示的“离开宽限期”（毫秒）：指针离开控件后，**过这么久才收起气泡**。
+///
+/// 为何需要：云桌面/远程桌面的鼠标位置会挥手（实测指针在控件边缘 1~2px 抖动），
+/// 严格“离开即收”会让气泡闪得不能用；同理也不能“离开即清零计时”（那样提示
+/// 永远攒不够）。本宽限同时服务两边。
+///
+/// 取值：太短（<100ms）拦不住抖动；太长（>600ms）会觉得“鼠标移开了还赖着”。
+/// 250ms 与提示出现延时（280ms）同一量级，手感一致。
+constexpr double kHintLeaveGraceMs = 250.0;
+
+/// 气泡显示后的**最短保持期**（毫秒）：期内不因悬停变化而收起。
+///
+/// 为何需要：云桌面/远程桌面会持续回传**真实指针位置**（往往不在刚 hover 的
+/// 控件上），`hovered` 很快变 false。实测：脚本发完 move 后 100ms 内按钮的
+/// `hovered` 就回落、`hover_progress` 归 0——据此收起的话气泡“一闪就没”。
+///
+/// 900ms：够看清名称与快捷键（用户要的就是这两样），又不至于“黏住不放”。
+constexpr double kHintMinVisibleMs = 900.0;
 
 auto UiRoot::hint_update_calls() const noexcept -> std::uint64_t { return g_hint_update_calls; }
 auto UiRoot::hint_last_delta_ms() const noexcept -> double { return g_hint_last_delta; }
@@ -207,7 +258,9 @@ void UiRoot::collect_animation_requests() {
   // 为何必须在这里：提示是“悬停满 N 毫秒才弹”，而主循环在静止时不开帧
   //（`animation_pending_` 为假就等事件）。不在这里报“还要一帧”，计时就永远
   // 停在第一帧——现象是“鼠标停半天，提示怎么都不出现”（实测）。
-  if (hint_target_ != nullptr && !hint_visible_) animation_pending_ = true;
+  if ((hint_target_ != nullptr || !hint_target_id_.empty()) && !hint_visible_) {
+    animation_pending_ = true;
+  }
   const auto walk = [this](auto&& self, Element& element) -> void {
     if (element.animation_requested()) {
       animation_pending_ = true;
@@ -420,6 +473,30 @@ auto UiRoot::dispatch_to(Element& element, Event& event) -> bool {
 }
 
 void UiRoot::update_hover(Element* target) {
+  // ⚠ **失联/回来的判定必须在提前返回之前**：
+  //
+  // `hovered_ == target` 时下面会提前 return，于是 `set_hint_target` 不调——
+  // 而指针“冲出控件再回到同一点”恰恰是同一 target。若只在 `set_hint_target`
+  // 里清 `hint_lost_ns_`，冲出去的记时就永远消不掉，累积到宽限期把气泡收掉
+  //（实测：抖动 3 次×70ms 后气泡消失，而每次都在宽限内）。
+  //
+  // 判据用**沿父链找到的 owner 是否仍是当前目标**（而不是 target 非空）：
+  // 指针落在无 hint 的兄弟元素上时 target 非空、但 owner 为 null——那也是离开。
+  {
+    Element* owner = nullptr;
+    for (Element* node = target; node != nullptr; node = node->parent()) {
+      if (!node->hint().empty()) {
+        owner = node;
+        break;
+      }
+    }
+    // 比较用 **id** 而不是指针：声明式每帧重组会重建元素，指针换了个实例
+    // 但“还是同一个控件”（id 相同）——那种情况下指针比较会认不出来，
+    // 失联计时就消不掉。
+    if (owner != nullptr && !hint_target_id_.empty() && owner->id() == hint_target_id_) {
+      hint_lost_ns_ = 0;
+    }
+  }
   if (hovered_ == target) return;
   prune_stale_pointers();  // `hovered_` 可能已悬垂（子树被重建）
   // 悬停对象变了 → 提示重新计时（见 `update_hint`）。
@@ -474,7 +551,28 @@ void UiRoot::update_hover(Element* target) {
 //   点侧栏一行、点行里的图标、点行里的文本，三者得到同一个提示（与 Web 的
 //   `title` 冒泡语义一致）；否则调用方得在每一层都写一遍。
 
+auto UiRoot::live_hint_target() -> Element* {
+  // 没存 id = 没有目标
+  if (hint_target_id_.empty()) return nullptr;
+  // 原生指针仍在树上且 hint 没变 → 直接用（不走 id 查询，省一次遍历）
+  if (hint_target_ != nullptr && !hint_target_->hint().empty() &&
+      hint_target_->id() == hint_target_id_) {
+    return hint_target_;
+  }
+  // 声明式重建：按 id 重新找。
+  //
+  // ⚠ 找到了也要**校验 hint 非空**：重组初期新实例可能还没调到 `set_hint`，
+  // 拿一个“空 hint 的新实例”当目标会让下游 `text.empty()` 分支直接 hide，
+  // 把计时清零（实测：`bail_start` 上千次、气泡永不出现，而 `bail_live` 为 0
+  // ——因为 id 确实找得到，只是那个实例还没配好 hint）。
+  if (Element* found = find(hint_target_id_); found != nullptr && !found->hint().empty()) {
+    return found;
+  }
+  return nullptr;
+}
+
 void UiRoot::set_hint_target(Element* target) {
+  ++g_hint_target_calls;
   Element* owner = nullptr;
   for (Element* node = target; node != nullptr; node = node->parent()) {
     if (!node->hint().empty()) {
@@ -482,41 +580,143 @@ void UiRoot::set_hint_target(Element* target) {
       break;
     }
   }
-  if (owner == hint_target_) return;
+  // ⚠ **鼠标抖动不能影响提示**（云桌面场景实测：指针会在控件边缘/间隙里 1~2px 抖动）：
+  //
+  // `set_hint_target` 收到的是**悬停到的那个最内层元素**。抖动会导致两种误判：
+  //   ① 指针落进控件间隙（`owner == nullptr`）——旧实现直接 hide，气泡闪一下就没；
+  //   ② 抖出控件再回来——如果重置计时，提示永远攒不够。
+  //
+  // 对策（两道宽限，两者都用单调钟，不依赖帧）：
+  //   · **去隐藏**：`owner == nullptr` 时**这里什么都不做**——收起由 `update_hint`
+  //      逐帧按目标的 `hovered()` 判定（见那里：云桌面会持续重发 mouse move，
+  //      用命中结果判“离开”会误收）。
+  //   · **保计时**：未显示时保留目标与起点，不重启计时。
+  //
+  // 真移到另一个控件时 owner 会变成那个新控件，走重置——那才是“换了目标”。
+  if (owner == nullptr) {
+    ++g_hint_target_null;
+    return;
+  }
+  hint_lost_ns_ = 0;   // 回到控件上：取消宽限
+  // 比较用 **id**：声明式每帧重组会重建元素，`owner` 与 `hint_target_` 可能
+  // 是不同实例但属于**同一个控件**——指针比较会把它当成“换了目标”而重置计时，
+  // 于是计时永远攒不够（实测：`changed` 不断增长而 `start_ns` 总是 0）。
+  // id 为空（未命名控件）时退回指针比较。
+  const std::string& owner_id = owner->id();
+  const bool same_owner =
+      !owner_id.empty() ? owner_id == hint_target_id_ : owner == hint_target_;
+  if (same_owner) {
+    hint_target_ = owner;   // 跟上新实例（但计时不动）
+    return;
+  }
+  ++g_hint_target_changed;
   hide_hint();   // 新目标先收掉上一个的气泡（否则会挂在错误的位置上）
   hint_target_ = owner;
+  hint_target_id_ = owner->id();   // 声明式重建后靠 id 重新定位（指针会悬垂）
   hint_elapsed_ms_ = 0.0;
-  // 基准**不在这里立**，而是交给第一次 `update_hint`（`hint_base_pending_`）。
+  // 起点用**单调钟**（`st::time::now_ns`）而不是 `time_seconds_`
   //
-  // 本函数跑在**事件分发**期，而 `time_seconds_` 是上一帧帧首写入的
-  //——此刻读到的是**旧值**。拿它当基准的话，下一帧的 delta 就是“从上一个帧首到现在”，
-  // 鼠标在空白处停了一会儿再移上按钮时这个值可以很大（实测 **816ms**），
-  // 450ms 的延时被整帧跳过（现象：“一悬停就弹”）。
-  hint_base_pending_ = true;
+  // `time_seconds_` 是上一帧帧首写入的，事件分发期读到的是旧值；拿它做起点会让
+  // 已悬停时长偏大（实测 816ms，延时被整帧跳过）。单调钟在事件期就是“现在”。
+  hint_start_ns_ = st::time::now_ns();
+  hint_base_pending_ = false;
 }
 
 void UiRoot::update_hint(double delta_ms) {
-  if (hint_target_ == nullptr) {
+  // ⚠ 判据用 **id**，不是指针：`prune_stale_pointers()` 会在目标悬垂时把
+  // `hint_target_` 清成 nullptr，而声明式界面**每帧重组都会重建元素**。
+  // 若这里再拿指针判“没目标”，就再也走不到下面的按 id 重新定位——
+  // 一次 prune 之后计时永久停在 0（实测：`bail_start` 上百次、气泡永不出现，
+  // 而 `changed` 只有 1）。
+  if (hint_target_id_.empty() && hint_target_ == nullptr) {
     return;
   }
   ++g_hint_update_calls;
   g_hint_last_delta = delta_ms;
-  // **第一次推进只立基准**（见 `set_hint_target` 的说明）：
-  // 悬停刚发生的那一帧不知道“已经停了多久”，从这一帧起才算计时。
-  if (hint_base_pending_) {
-    hint_base_pending_ = false;
-    hint_time_seconds_ = time_seconds_;
+  // **声明式重建后指针会悬垂**：按 id 重新定位。
+  //
+  // 必须在 `prune_stale_pointers()` **之前**做：prune 会把不在树上的
+  // `hint_target_` 清成 nullptr（连同计时），而声明式界面**每帧重组都会重建元素**，
+  // 于是每帧都被当成“目标没了”——计时永远是 0（实测 `bail_start` 几百次）。
+  if (Element* live = live_hint_target(); live != nullptr) {
+    hint_target_ = live;
+  } else if (find(hint_target_id_) != nullptr) {
+    // **元素还在，但 hint 还是空**（声明式重组尚未调到 `set_hint`）：
+    // 这一帧跳过，保留目标与计时——不能当成“目标没了”把状态清掉。
+    ++g_hint_bail_live;
     return;
-  }
-  prune_stale_pointers();
-  if (hint_target_ == nullptr) {
+  } else {
+    ++g_hint_bail_gone;
     hint_target_ = nullptr;
+    hint_target_id_.clear();
     hide_hint();
     return;
   }
+  prune_stale_pointers();
+  // 气泡已显示时，**逐帧检查失联宽限**：判据用**目标元素自己的 `hovered()`**，
+  // 而不是指针命中了什么。
+  //
+  // 为何不用命中：云桌面/远程桌面会**持续重发 mouse move**（哪怕指针没动），
+  // 而重发的位置极易落在控件边缘外/兄弟节点上 → `owner` 频繁变 null，
+  // 失联计时累积到宽限就把气泡收掉（实测：静止悬停 700ms 后气泡自己没了，
+  // `set_hint_target` 里 null 分支命中 22 次）。
+  //
+  // `hovered()` 是元素自己的状态：指针在控件内它就一直为真，与“这帧的命中
+  // 结果是谁”无关——正好抹平抖动的干扰。
+  if (hint_visible_) {
+    // 收起判据：**当前悬停元素（`hovered_`）是否仍属于目标控件**（沿父链比 id）。
+    //
+    // 不能看 `hint_target_->hovered()`：声明式重建后 `hint_target_` 是**新实例**。
+    //
+    // ⚠ 云桌面下 `hovered_` 本身就不可靠：系统会持续回传**真实指针位置**
+    //（往往不在刚 hover 的控件上），于是 `hovered` 很快变 false。
+    // 实测：脚本发完 move 后 100ms 内按钮的 `hovered` 就回落到 false、
+    // `hover_progress` 归 0。若据此收起，气泡在云桌面上“一闪就没”。
+    //
+    // 因此：**气泡显示后 `kHintMinVisibleMs` 内不因悬停变化而收**（粘滞期）。
+    // 过了粘滞期再按“持续离开 `kHintLeaveGraceMs`”收——两者都用单调钟。
+    const double shown_ms =
+        static_cast<double>(st::time::now_ns() - hint_shown_ns_) / 1e6;
+    if (shown_ms >= kHintMinVisibleMs) {
+      bool still_inside = false;
+      for (Element* node = hovered_; node != nullptr; node = node->parent()) {
+        if (!hint_target_id_.empty() ? node->id() == hint_target_id_
+                                      : node == hint_target_) {
+          still_inside = true;
+          break;
+        }
+      }
+      if (still_inside) {
+        hint_lost_ns_ = 0;
+      } else if (hint_lost_ns_ <= 0) {
+        hint_lost_ns_ = st::time::now_ns();
+      } else {
+        const double lost_ms = static_cast<double>(st::time::now_ns() - hint_lost_ns_) / 1e6;
+        if (lost_ms >= kHintLeaveGraceMs) {
+          hide_hint();
+          return;
+        }
+      }
+    }
+  }
   if (!hint_visible_) {
-    hint_elapsed_ms_ += delta_ms;
-    if (hint_elapsed_ms_ < static_cast<double>(hint_delay_ms_)) return;
+    // ⚠ 用**时间戳差**而不是累加 `delta_ms`：
+    //
+    // 旧实现 `hint_elapsed_ms_ += delta_ms` 而 `delta_ms` 是“本帧与上帧的间隔”。
+    // 丢帧/卡顿（如切主题、后台构建）时这个间隔会被夹小或跳变，累加值就不再等于
+    // “真的悬停了多久”——实测同一按钮连续测三次得到 322 / 389 / 627ms 的漂移
+    //（用户报“不稳定”）。
+    //
+    // 直接算 `(now - hint_start_ns_)`，**两边都用单调钟**，与帧率无关。
+    // 这也顺带治好了“空闲不重绘→计时不走”（提示要么不出、要么碰巧有别的重绘才出）。
+    if (hint_start_ns_ <= 0) {
+      ++g_hint_bail_start;
+      return;
+    }
+    const double held_ms =
+        std::max(0.0, static_cast<double>(st::time::now_ns() - hint_start_ns_) / 1e6);
+    hint_elapsed_ms_ = held_ms;
+    if (held_ms < static_cast<double>(hint_delay_ms_)) return;
   }
   const std::string& text = hint_target_->hint();
   if (text.empty()) {
@@ -538,16 +738,21 @@ void UiRoot::update_hint(double delta_ms) {
   if (bubble == nullptr) return;
   bubble->set_text(text);
   bubble->set_target_rect(hint_target_->bounds());
+  bubble->set_viewport(viewport_);   // 夹在窗口内（否则贴边控件的气泡会溢出）
   bubble->set_active(true);
   hint_text_cache_ = text;
   if (!hint_visible_) {
     hint_visible_ = true;
+    hint_shown_ns_ = st::time::now_ns();   // 粘滞期的起点
     mark_dirty_all();
   }
 }
 
 void UiRoot::hide_hint() {
   hint_elapsed_ms_ = 0.0;
+  hint_start_ns_ = 0;
+  hint_lost_ns_ = 0;
+  hint_shown_ns_ = 0;
   if (!hint_visible_) return;
   hint_visible_ = false;
   hint_text_cache_.clear();
@@ -677,10 +882,16 @@ auto UiRoot::dispatch(Event& event) -> bool {
     ~DispatchGuard() { flag = false; }
   } guard{dispatching_};
   layout();
-  // 任何输入都先把提示收起来（见 `update_hint`）：
-  // 鼠标动/点击/按键之后还挂着上次的提示，是“黏在屏幕上”的感觉。
-  // 若这个事件又是“悬停在带提示的元素上”，下一帧的推进会把计时重新拉起。
-  hide_hint();
+  // 任何**非悬停类**输入都先把提示收起来：点击/按键/滚轮之后还挂着上次的提示，
+  // 是“黏在屏幕上”的感觉。
+  //
+  // ⚠ **MouseMove 不能收**：云桌面/远程桌面会**持续重发 mouse move**（哪怕指针
+  // 根本没动），若每条 move 都 hide，气泡刚显示就被下一条 move 收掉——
+  // 现象是“悬停提示时有时无/根本不出”（实测：`null` 计数持续增长，
+  // 本地鼠标复现不出来，因为本地不动就不发事件）。
+  //
+  // 鼠标离开的收起由 `update_hint` 的失联宽限负责（判据是 `hovered_`）。
+  if (event.kind != EventKind::MouseMove) hide_hint();
   bool handled = false;
 
   switch (event.kind) {
@@ -953,9 +1164,10 @@ void UiRoot::prune_stale_pointers() {
   // 也遍历 `overlays_`，所以同一条判据能用）。气泡被外部摘掉（`clear_overlays`）
   // 之后不能继续用，否则下一帧 `set_active` 就是 use-after-free。
   if (!on_tree(hint_target_)) {
+    // 只清**指针**，保留 id 与计时：声明式重建后新实例可由 id 找回，
+    // 而一旦把 id 也清了就永久失去目标；把计时也清了则每帧重组都会重新等延时
+    //（实测：气泡一直不出来）。
     hint_target_ = nullptr;
-    hint_elapsed_ms_ = 0.0;
-    hint_visible_ = false;
   }
   if (!on_tree(hint_bubble_raw_)) hint_bubble_raw_ = nullptr;
 }
@@ -1148,8 +1360,23 @@ auto UiRoot::tree_layout_dirty() const noexcept -> bool {
 }
 
 auto UiRoot::needs_frame() const noexcept -> bool {
+  // 悬停提示需要我们出帧的两种情况：
+  //   ① 气泡还没显示——**计时靠 `paint_frame` 推进**（虽然时戳改成了单调钟，
+  //      但判定仍在那里），不出帧就攒不够延时；
+  //   ② 气泡已显示但指针已**失联**——靠逐帧检查宽限期来收起（鼠标停住不动时
+  //      不会再有 MouseMove 事件，只靠事件侧检查就永远收不了）。
+  // 气泡正常展示中（未失联、粘滞期已过）不要求帧，因此不会常驻重绘。
+  const bool hint_counting =
+      (hint_target_ != nullptr || !hint_target_id_.empty()) && !hint_visible_;
+  const bool hint_leave_pending = hint_lost_ns_ > 0;
+  // 粘滞期内需要帧：过了 `kHintMinVisibleMs` 才能开始判“是否该收起”，
+  // 不出帧就不会有人去算这个时间点，气泡会永久挂在屏幕上。
+  const bool hint_sticky =
+      hint_visible_ && hint_shown_ns_ > 0 &&
+      (static_cast<double>(st::time::now_ns() - hint_shown_ns_) / 1e6) <
+          kHintMinVisibleMs;
   return dirty_ || followup_ || pending_full_ || !pending_damage_.is_empty() ||
-         tree_layout_dirty();
+         tree_layout_dirty() || hint_counting || hint_leave_pending || hint_sticky;
 }
 
 void UiRoot::collect_tree_damage() {

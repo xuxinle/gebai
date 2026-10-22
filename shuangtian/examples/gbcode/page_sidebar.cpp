@@ -30,11 +30,15 @@ namespace gbcode_ui {
 
   void CodeEditorPage::build_sidebar_head(Composer& c, std::string_view title) {
     // 几何对齐 IDEA 新 UI 的工具窗头部：高 30 → **34**（与编辑器标签条同高，
-    // 两条横向分栏线才不会差半个像素）、左右内边距 4（标题不贴边）、
-    // 字重 Medium（新 UI 的标题是“小一号但加重”，不靠字号撑）。
+    // 两条横向分栏线才不会差半个像素）、左右内边距 4（标题不贴边）。
+    //
+    // 字重 **Regular**（旧值为 Medium）：Medium 在本项目的字体链上走的是
+    // **合成加粗**（只加墨、不改字形），小字号（`font_sm`）下会糊成一团——
+    // 用户：“侧栏面板标题不要用黑体，看起来有点脏”。
+    // 标题的层级靠“位置 + 全大写/首字母大写外壳”与下方分组间隙建立，不靠加粗。
     (void)row(c, {.gap = 6.0f, .padding_x = 4.0f, .height = 34.0f, .id = "sidebar-head"}, [&] {
       (void)text(c, [title] { return std::string(title); },
-                 {.grow = true, .weight = FontWeight::Medium, .id = "sidebar-title"});
+                 {.grow = true, .weight = FontWeight::Regular, .id = "sidebar-title"});
       build_sidebar_actions(c);
     });
   }
@@ -182,7 +186,7 @@ namespace gbcode_ui {
     if (workspace_.empty()) {
       (void)column(c, {.gap = 6.0f, .padding_x = 12.0f, .padding_y = 10.0f, .id = "explorer-empty"}, [&] {
         (void)text(c, [] { return std::string("未打开文件夹"); },
-                   {.weight = FontWeight::Medium, .id = "explorer-empty-title"});
+                   {.weight = FontWeight::Regular, .id = "explorer-empty-title"});
         (void)text(c, [] { return std::string("文件 → 打开文件夹（Ctrl+K Ctrl+O）"); },
                    {.color = Tone::Muted, .id = "explorer-empty-hint"});
       });

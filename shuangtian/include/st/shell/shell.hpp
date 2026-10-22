@@ -118,6 +118,40 @@ class Backend {
   }
   /// 后端是否真能设置窗口图标（供宿主决定是否上报/提示）。
   [[nodiscard]] virtual auto supports_window_icon() const noexcept -> bool { return false; }
+
+  // ── 系统托盘（可选能力，默认不支持）──
+  //
+  // 设计姿态与 `set_window_icon` 一致：**未实现就如实返回 Unsupported**，
+  // 不假装成功（否则调用方以为托盘出来了，实际用户看不到任何东西）。
+  //
+  // 为何做成后端能力而不是应用自己调 Win32 API：
+  // 1. 托盘是**桌面环境概念**（Windows 通知区 / Linux StatusNotifier / macOS 菜单栏），
+  //    各平台机制完全不同；让每个应用自己写会把可移植性彻底丢掉。
+  // 2. 它需要跟窗口生命周期一起管理（窗口销毁前必须移除图标，否则会留下幽灵图标，
+  //    鼠标划过才消失）——这正是后端的职责。
+
+  /// 创建/更新托盘图标。`png` 为图标字节（空 span = 用当前图标）。
+  ///
+  /// **幂等**：重复调用只是更新提示文字/图标，不会创建第二个图标。
+  /// 默认实现返回 `Unsupported`。
+  [[nodiscard]] virtual auto set_tray_icon(std::span<const std::uint8_t> png,
+                                           std::string_view tooltip) -> Status {
+    (void)png;
+    (void)tooltip;
+    return unexpected(ErrorCode::Unsupported, "该后端不支持系统托盘");
+  }
+
+  /// 移除托盘图标（无图标时为空操作）。
+  virtual void remove_tray_icon() {}
+
+  /// 后端是否支持系统托盘。
+  [[nodiscard]] virtual auto supports_tray_icon() const noexcept -> bool { return false; }
+
+  /// 取回托盘图标被点击的次数（自上次调用以来的增量）。
+  ///
+  /// 为何用"计数"而不是事件流：托盘点击的语义极简（就是"把我叫回来"），
+  /// 没必要为它引入一套事件类型。宿主每帧取一次，>0 就做对应的窗口操作。
+  [[nodiscard]] virtual auto take_tray_clicks() noexcept -> std::uint32_t { return 0; }
   [[nodiscard]] virtual auto clipboard_text() -> Result<std::string> = 0;
   [[nodiscard]] virtual auto set_clipboard_text(std::string_view text) -> Status = 0;
   /// 目标帧缓冲（应用直接绘制到这里）。
@@ -230,6 +264,26 @@ class Backend {
   /// 最小化。
   [[nodiscard]] virtual auto minimize() -> Status {
     return unexpected(ErrorCode::Unsupported, "该后端不支持窗口控制");
+  }
+
+  /// 从最小化/后台恢复到前台并取得焦点。
+  ///
+  /// 常驻应用（托盘类）的核心交互就是这一个动作。默认拒绝（未实现的后端不假装成功）。
+  [[nodiscard]] virtual auto restore() -> Status {
+    return unexpected(ErrorCode::Unsupported, "该后端不支持恢复窗口");
+  }
+
+  /// 运行时改变窗口的逻辑尺寸（像素为逻辑坐标）。
+  ///
+  /// 为何需要：常驻面板要能“静默时缩成一条”、“有事时展开”——若尺寸只能建窗时定死，
+  /// 就只能开多个窗口，而多窗口在无头后端/截图验证里都不好办。
+  /// 它也是轻提示形态的基础：同一个窗口先缩到小尺寸贴屏幕角落，再展开就回到主界面。
+  ///
+  /// 默认拒绝；实现方需自行处理画布重建（已有 `WM_SIZE` 路径的后端几乎不需额外工作）。
+  [[nodiscard]] virtual auto set_size(int width_logical, int height_logical) -> Status {
+    (void)width_logical;
+    (void)height_logical;
+    return unexpected(ErrorCode::Unsupported, "该后端不支持运行时改变窗口尺寸");
   }
   /// 最大化/还原（切换）。
   [[nodiscard]] virtual auto toggle_maximize() -> Status {

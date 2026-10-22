@@ -31,9 +31,13 @@ describe("caiyun / louyue", () => {
     }
   })
 
-  test("工具面全部走依赖（零自有工具，不内联展开）", () => {
-    // 内联 = 把别家的工具对象摊进自己的 tools，会以本代理命名空间再注册一份，
+  test("依赖面不被内联（自有工具可以有，但别家的工具不许摊进自己命名空间）", () => {
+    // 「内联」= 把**别家的**工具对象摊进自己的 tools：会以本代理命名空间再注册一份，
     // 于是同一个能力有两个名字（提示词该写哪个会分叉）。
+    //
+    // 判据不能写成「tools 必须为空」——那会把**自有能力**一并禁掉，而有些能力
+    // 只能由本代理提供（裁云的 `verify` 读的是本应用渲染器在渲染循环里量好的
+    // 逐镜数据，旁挂子代理拿不到）。正确的判据是：**自有工具的键不得与依赖冲突**。
     expect((caiyun as unknown as { def: { dependencies?: string[] } }).def.dependencies).toEqual([
       "shuangtian",
       "imagegen",
@@ -43,8 +47,23 @@ describe("caiyun / louyue", () => {
       "shuangtian",
       "imagegen",
     ])
-    for (const { mod } of combos) {
-      expect(Object.keys((mod as unknown as { tools: Record<string, unknown> }).tools)).toEqual([])
+    for (const { name, mod } of combos) {
+      const deps = (mod as unknown as { def: { dependencies: string[] } }).def.dependencies
+      const own = Object.keys((mod as unknown as { tools: Record<string, unknown> }).tools)
+      for (const key of own) {
+        // 自有工具名不得是 `{dep}_xxx` 形态（那是依赖方的工具被内联进来的样子），
+        // 也不得恰好等于依赖名（同样会与 `{dep}_{tool}` 命名冲突）。
+        for (const dep of deps) {
+          expect(key.startsWith(`${dep}_`)).toBe(false)
+          expect(key).not.toBe(dep)
+        }
+      }
+      // 现存的自有工具只有裁云的 verify（成片质检）——写死一条，改动时逼人回看这里
+      if (name === "caiyun") {
+        expect(own).toEqual(["verify"])
+      } else {
+        expect(own).toEqual([])
+      }
     }
   })
 

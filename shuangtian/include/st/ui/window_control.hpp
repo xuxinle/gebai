@@ -70,6 +70,17 @@ class WindowControl {
   [[nodiscard]] virtual auto window_begin_resize(WindowEdge edge) -> bool = 0;
   /// 窗口当前是否最大化（标题栏据此切换"最大化/还原"按钮形态）。
   [[nodiscard]] virtual auto window_maximized() const -> bool = 0;
+
+  /// 把窗口**恢复到前台并取得焦点**（从最小化/后台恢复）。
+  ///
+  /// 为何这是一等能力而不是应用自己调平台 API：
+  /// 常驻类应用的典型交互就是"点托盘图标把我叫回来"，而那一步在各平台的
+  /// 做法完全不同（Win32 需 `ShowWindow(SW_RESTORE)` + 前台抢焦点，
+  /// 且系统有前台锁限制；X11 需 `_NET_ACTIVE_WINDOW`；Wayland 基本不允许）。
+  /// 把它收敛到后端，应用只写一句 `window_restore()`。
+  ///
+  /// 默认实现返回 `false`（未实现的后端如实拒绝，不假装成功）。
+  [[nodiscard]] virtual auto window_restore() -> bool { return false; }
 };
 
 }  // namespace st::ui

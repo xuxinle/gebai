@@ -75,7 +75,9 @@ void Slider::apply_theme(const Theme& theme) {
   const Palette& colors = theme.colors();
   const Metrics& metrics = theme.metrics();
   style_.font_size = metrics.font_sm;
-  style_.font_weight = FontWeight::Medium;
+  // 字重 **Regular**：滑块旁的数值是读数，不是标题（用户：“除了特别需要
+  // 突出的 UI 元素都不要用黑体”）。
+  style_.font_weight = FontWeight::Regular;
   style_.color = enabled_ ? colors.text : colors.text_faint;
   style_.radius = theme.metrics().radius_sm;
   style_.background = math::Color{0, 0, 0, 0};  // 轨道自绘，控件自身透明

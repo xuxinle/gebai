@@ -67,22 +67,35 @@ namespace st::app {
 /// `TextRenderer` 之外**（渲染器只提供机制）。曾经漏接过一次——字母档只写到渲染器与探针里、
 /// `app.cpp` 当时只接了数字，于是"探针测得好、实际应用没变"，接口层测试抓不到。
 /// 抽成常量后，回归用例可以直接断言它，改档位时测试与实现必须一起动。
+/// **亮色主题的对比度 S 曲线强度**（暗色用 `coverage_contrast_strength_default()` = 0.6）。
+///
+/// 为何分主题：这一层管“满黑像素占比”，而亮/暗底下同一强度的效果不同
+/// （与 `ClassGammas` / `DarkClassGammas` 同一理由）。
+/// 亮色重标后（类 γ 统一到 1.60）配 1.0 让四个字形类的平均覆盖率最接近参照：
+///
+/// | 分类 | 参照 mean | c=0.6 | **c=1.0** |
+/// |---|---|---|---|
+/// | han | 0.5958 | 0.5675 | **0.6087** |
+/// | latin | 0.6003 | 0.5767 | **0.6071** |
+/// | mixed | 0.5885 | 0.5651 | **0.6026** |
+inline constexpr float kLightContrastStrength = 1.0f;
+
+/// 亮色主题的字形类 gamma。
 struct ClassGammas {
-  /// ASCII 数字。**2551 标定**（`docs/DWRITE_PIXEL_BENCHMARK.md`）：以 DWrite 直调为参照、
-  /// 15 物理 px 实测最佳 0.84（与拉丁同档）。数字在本行表里占比小，仍建议真机复标。
-  float digit{0.84f};
-  /// 拉丁字母。**0.70**：灰度模式下按「四类总误差最小」标定。
-  /// （拉丁实心 1.32 是**回退面**问题——拉丁行落到了别的字族，γ 改不动它；
-  /// 这个值主要服务混排行的整体平衡）
-  float letter{0.70f};
-  /// 汉字。**0.62**：以**用户机器上 VS Code 的实拍**为参照标定（暗色主题 15px）。
+  /// ASCII 数字。**亮色 1.60**（2026-10-22 重标）。
   ///
-  /// 标定方式变了，值也跟着变：早期只比"实心比"，现在比**覆盖率分布的六个分档**
-  /// （0.05-0.2 / 0.2-0.4 / 0.4-0.6 / 0.6-0.8 / 0.8-0.95 / 0.95-1.0）。
-  /// 实测（配合 `coverage_contrast_strength=0.8`）：
-  ///   满黑 27.3%（VS Code 35.5%）· 实心 50.1%（VS Code 51.4%）· 平均覆盖 0.723（VS Code 0.697）
-  /// 单位置最优是 0.62；单靠 γ 无论怎么调都达不到——那正是需要 S 曲线层的原因。
-  float han{0.62f};
+  /// 三类统一到 1.60 是量尺的结论：以 `--theme light` 的 DWrite natural 为参照，
+  /// 按**字形类分带统计平均覆盖率**，三类的最优 γ 都落在 1.60 附近。
+  /// 旧值（0.84/0.70/0.62）是错位标定——它们让亮色整体偏黑（han +0.092、latin +0.048）。
+  float digit{1.60f};
+  /// 拉丁字母。**亮色 1.60**：latin `mean` 0.5999 vs 参照 0.6003（差 0.0004）。
+  float letter{1.60f};
+  /// 汉字。**亮色 1.60**：han `mean` 0.6087 vs 参照 0.5958（配 `kLightContrastStrength`）。
+  ///
+  /// 旧 `han` 是 0.62，而它的注释写着“暗色主题 15px”——暗色本就另有一套
+  /// `DarkClassGammas`，这个值是从暗色档混进来的。后果：亮色汉字**偏黑 0.092**
+  /// （平均覆盖率 0.688 vs 参照 0.596），笔画显得比拉丁重、发腻。
+  float han{1.60f};
 };
 
 /// **暗色主题**的类 gamma——与亮色**不是同一组值**，必须分开标定。
@@ -245,6 +258,15 @@ struct AppOptions {
   /// 而应用已经是单文件交付——它用 `b::embed<>` 把 PNG 嵌进来，这里只收字节。
   /// 空 = 不设（保持系统默认图标）。后端不支持时只记告警，不阻止启动。
   std::vector<std::uint8_t> window_icon_png{};
+  /// 启用系统托盘（常驻类应用的形态）。
+  ///
+  /// 默认关：只有“想常驻”的应用才要托盘，普通应用多一个孤立图标只是噪音。
+  /// 后端不支持时（无头/未实现平台）只告警，不阻止启动。
+  bool tray_enabled{false};
+  /// 托盘图标 PNG（空 = 用 `window_icon_png`）。
+  std::vector<std::uint8_t> tray_icon_png{};
+  /// 托盘悬停提示（空 = 用窗口标题）。
+  std::string tray_tooltip{};
   std::string theme_file{};
   std::string log_level{"info"};
   std::uint32_t max_frames{0};        ///< >0 时跑满即退出（无头冒烟/CI 用）
@@ -334,6 +356,14 @@ class Application final : public control::Host, public ui::WindowControl {
   [[nodiscard]] auto window_begin_move() -> bool override;
   [[nodiscard]] auto window_begin_resize(ui::WindowEdge edge) -> bool override;
   [[nodiscard]] auto window_maximized() const -> bool override;
+  /// 从最小化/后台恢复到前台（常驻类应用的“点托盘把我叫回来”）。
+  [[nodiscard]] auto window_restore() -> bool override;
+
+  /// 运行时改窗口逻辑尺寸（常驻面板的“缩成一角 / 展开主界面”）。
+  ///
+  /// 为何不用多个窗口：多窗口在无头后端与截图验证里都要额外路径，
+  /// 而“同一个窗口换尺寸 + overlay 换内容”就能满足轻提示/主界面两种形态。
+  [[nodiscard]] auto set_window_size(int width_logical, int height_logical) -> Status;
 
   /// 单帧推进（自检与外部驱动用）：布局 → 绘制 → present。
   void render_frame();
@@ -359,6 +389,28 @@ class Application final : public control::Host, public ui::WindowControl {
   [[nodiscard]] auto tasks() -> app::Tasks&;
   /// 是否收到退出请求（控制通道 `app.quit` / 自检终止条件）。
   [[nodiscard]] auto quit_requested() const noexcept -> bool;
+
+  // ── 系统托盘（常驻形态）──
+  //
+  // 语义：托盘图标在 `start()` 时按 `AppOptions::tray_enabled` 创建；
+  // 点击事件由应用在主循环里主动取（不引入事件类型：托盘点击只是一句“把我叫回来”）。
+
+  /// 托盘是否真启用（后端不支持时为 false——如实反映，不假装）。
+  [[nodiscard]] auto tray_ready() const noexcept -> bool;
+
+  /// 取走自上次调用以来的托盘点击次数（取后归零）。
+  ///
+  /// 典型用法（主循环里一行）：
+  /// ```cpp
+  /// if (app.take_tray_clicks() > 0) app.window_restore();
+  /// ```
+  [[nodiscard]] auto take_tray_clicks() noexcept -> std::uint32_t;
+
+  /// 更新托盘提示文字（空串 = 用窗口标题）。
+  ///
+  /// 为何单独开这个：常驻应用常把“待处理几件”写在提示里，
+  /// 而那是一个会变的数字——不必为改一个字符串重建图标。
+  [[nodiscard]] auto set_tray_tooltip(std::string_view tooltip) -> Status;
 
   /// 主循环节拍（自定义主循环在每轮末尾调用；`run_loop` 用同一实现）：
   ///

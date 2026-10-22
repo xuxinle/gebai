@@ -218,6 +218,41 @@ ST_TEST(title_bar_lays_out_controls_at_right_edge) {
   ST_CHECK(fixture.bar->hits_caption(Point{bounds.x + 2.0f, 20.0f}));
 }
 
+/// `add_after_title`：紧跟标题文字右缘、从左往右排。
+///
+/// 为何需要这个槽（2026-10-22，相期实测）：原有两个槽都做不到这个位置——
+/// `leading` 在标题**之前**；`trailing` 从控制按钮左侧**往左**排、靠右堆。
+/// “标题旁边跟一个小状态图标”（已连接绿灯、文件未保存点）于是只能绕：
+/// 把标题改成品牌名、或自己摆坐标（后者会与拖动带/双击最大化/窗口按钮相撞）。
+ST_TEST(title_bar_after_title_slots_follow_the_title) {
+  BarFixture fixture;
+  auto& bar = *fixture.bar;
+  const Rect caption = bar.caption_rect();
+
+  auto first = std::make_unique<st::ui::Text>("●");
+  first->set_id("dot");
+  auto* dot = bar.add_after_title(std::move(first));
+  ST_REQUIRE(dot != nullptr);
+  fixture.root.layout(true);
+
+  // 起点必须**越过标题文字左缘**（不是压在标题上，也不是在标题之前）。
+  ST_CHECK(dot->bounds().x > caption.x);
+  // 且仍在标题带范围内（没被推到尾部槽那边去）
+  ST_CHECK(dot->bounds().x < fixture.bar->controls_rect().x);
+
+  // 第二个槽从左往右接着排
+  auto second = std::make_unique<st::ui::Text>("★");
+  second->set_id("star");
+  auto* star = bar.add_after_title(std::move(second));
+  ST_REQUIRE(star != nullptr);
+  fixture.root.layout(true);
+  ST_CHECK(star->bounds().x > dot->bounds().x);
+
+  // 不参与拖动（与另两个槽一致）：槽上的双击不该触发最大化
+  const Point inside{dot->bounds().center().x, dot->bounds().center().y};
+  ST_CHECK(!bar.hits_caption(inside));
+}
+
 ST_TEST(title_bar_control_buttons_do_not_drag_window) {
   BarFixture fixture;
   // 按钮上的按下必须**只**记按压，不能顺带开始拖动窗口——

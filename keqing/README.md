@@ -195,6 +195,8 @@ Python 语言目录只保留 `vision` 一个项目：基础能力（REPL/pip/sta
 
 语言目录共享驱动：协议 + REPL 引擎（末行表达式求值 repr 回显、session 命名空间保持）+ pip 工具（venv/requirements 落语言目录）。子代理项目可选携带 `tools.py`（导出 `AGENT_NAME` + `TOOLS` + `TOOL_IMPLS`），启动时自动加载与基础工具合并（同名覆盖）——`vision` 即此模式（项目工具 + 基础 run/pip/status 共存于一个子代理）。
 
+**子进程编码坑**：Windows 上 `subprocess.run(..., text=True)` 默认按 GBK 解码，而驱动按 UTF-8 输出 JSON——不显式 `encoding="utf-8"` 会在第一个中文字节上令读线程抛 `UnicodeDecodeError`，表现为 `proc.stdout is None`，报错成「'NoneType' object has no attribute 'splitlines'」，与根因相距极远。`driver_protocol_test.py` 已修正并注明。
+
 ### C++（keqing/cpp/framework.hpp）
 
 头文件式框架：手写迷你 JSON（解析/序列化，含 `\uXXXX` 与代理对）、NDJSON 行循环、工具注册表。子代理项目 `#include "../framework.hpp"`，工具写普通函数后 `main()` 前集中注册（`REGISTER_TOOL` 宏对含逗号的 schema/lambda 有预处理器拆参陷阱，集中注册最稳）。构建：Windows 用 `build.bat`（vswhere 定位 MSVC）/ unix 用 `build.sh`（g++/clang++）——两者均带 `stb` 头文件 include 路径（`cpp/stb/`，`imgproc` 的单头库依赖）。

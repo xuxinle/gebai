@@ -18,18 +18,28 @@ DRIVER = os.path.join(LANG_DIR, "driver.py")
 
 
 def _call(requests):
-    """起一个 driver 子进程，按顺序收发每个请求，返回 (响应列表, stderr 文本)。"""
+    """起一个 driver 子进程，按顺序收发每个请求，返回 (响应列表, stderr 文本, 退出码)。
+
+    **必须显式 encoding="utf-8"**：`text=True` 在中文 Windows 上默认按 GBK 解码，
+    而驱动按 UTF-8 输出 JSON（协议要求，且工具描述/错误信息全是中文）。
+    不指定时解码会在第一个中文字节上抛 UnicodeDecodeError，被 subprocess 的读线程吃掉——
+    表现为 stdout 变成 None，测试报「'NoneType' object has no attribute 'splitlines'」，
+    根因与现象相距极远（实测就这么误了很久）。加了 `errors="replace"`，
+    使得罕见乱码不会把整个用例变成一条无关的 AttributeError。
+    """
     payload = "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in requests)
     proc = subprocess.run(
         [sys.executable, DRIVER],
         input=payload,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=60,
         cwd=LANG_DIR,
     )
     responses = []
-    for line in proc.stdout.splitlines():
+    for line in (proc.stdout or "").splitlines():
         line = line.strip()
         if not line:
             continue
@@ -80,6 +90,8 @@ def test_stdin_eof_exits_process():
         input="",
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
         cwd=LANG_DIR,
     )

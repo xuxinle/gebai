@@ -100,7 +100,9 @@ void sync_style(Element& element, const RenderContext& context, float radius) {
   const Palette& colors = context.theme.colors();
   Style& style = element.style();
   style.font_size = context.theme.metrics().font_base;
-  style.font_weight = FontWeight::Medium;
+  // 字重 **Regular**：开关旁边的标签是常规控件文案（用户：“除了特别需要
+  // 突出的 UI 元素都不要用黑体”）。
+  style.font_weight = FontWeight::Regular;
   style.color = element.enabled() ? colors.text : colors.text_faint;
   style.radius = radius;
   style.background = math::Color{0, 0, 0, 0};  // 指示器自绘，控件自身透明

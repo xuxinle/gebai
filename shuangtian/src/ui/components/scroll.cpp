@@ -396,6 +396,68 @@ auto ScrollView::get_property(std::string_view name) const -> std::optional<std:
   return Element::get_property(name);
 }
 
+auto ScrollView::set_property(std::string_view name, std::string_view value) -> bool {
+  if (name == "scroll" || name == "offset") {
+    // 解析失败**返回 false**（不是静默当 0）：拼错或传了非数字时，
+    // “设了但跳到顶部”比“没生效”难查得多。
+    //
+    // 用 `std::stof` + 全额消费校验（与 `color_picker` 同做法）：
+    // 只看 prefix 会把 `"12px"` 当 12 收下，调用方以为单位生效了。
+    float parsed = 0.0f;
+    std::size_t used = 0;
+    try {
+      parsed = std::stof(std::string(value), &used);
+    } catch (...) {
+      return false;
+    }
+    if (used != value.size() || !std::isfinite(parsed)) return false;
+    // 超出范围**夹取**而不是拒绝：调用方写 `1e9` 表达“滚到底”是合理用法，
+    // `scroll_to_end()` 本身就是这个语义。
+    scroll_to(parsed);
+    return true;
+  }
+  return Element::set_property(name, value);
+}
+
+auto ScrollView::invoke_action(std::string_view action, std::string_view argument) -> bool {
+  // 解析参数（允许空 = 默认值）：全额消费校验，避免 `"12px"` 被当成 12。
+  const auto number = [](std::string_view text, float& out) -> bool {
+    if (text.empty()) {
+      out = 0.0f;
+      return true;
+    }
+    std::size_t used = 0;
+    try {
+      out = std::stof(std::string(text), &used);
+    } catch (...) {
+      return false;
+    }
+    return used == text.size() && std::isfinite(out);
+  };
+
+  if (action == "scroll_to") {
+    float target = 0.0f;
+    if (!number(argument, target)) return false;
+    scroll_to(target);
+    return true;
+  }
+  if (action == "scroll_by") {
+    float delta = 0.0f;
+    if (!number(argument, delta)) return false;
+    scroll_by(delta);
+    return true;
+  }
+  if (action == "scroll_to_end") {
+    scroll_to_end();
+    return true;
+  }
+  if (action == "scroll_to_top") {
+    scroll_to(0.0f);
+    return true;
+  }
+  return Element::invoke_action(action, argument);
+}
+
 auto ScrollView::property_names() const -> std::vector<std::string_view> {
   auto names = Element::property_names();
   names.push_back("scroll");

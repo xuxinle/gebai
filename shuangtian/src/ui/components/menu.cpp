@@ -206,9 +206,31 @@ void MenuPanel::paint_content(const RenderContext& context, raster::Surface& can
   // 深色主题下阴影几乎不可见，层次只能靠底色本身拉开（歌白 `--bg-elev-2` 同理）。
   paint_raised_surface(context, canvas, bounds_, metrics.radius_md, shadow_md(context.theme));
 
+  // **可见区间**（视口剔除）。
+  //
+  // 为何不用 `bounds_.bottom()` 做判据：面板挂了锚点时 `bounds_` 高度是
+  // `measured_.height`——**完整内容高**（与 `Table` 置入 `ScrollView` 时的情形同理）。
+  // 拿它当底边的话，`row.y >= bounds_.bottom()` 一次都不会触发，仍然逐项全画。
+  //
+  // 正确口径与 `Element::paint` / `Table::visible_row_range` 一致：
+  // 用画布的 `clip_rect()`（当前可见区），按 `device_scale` 折回逻辑坐标。
+  const math::IntRect physical = canvas.clip_rect();
+  const float scale = canvas.device_scale();
+  const float inv = scale > 0.0f ? 1.0f / scale : 1.0f;
+  const float clip_top = static_cast<float>(physical.y) * inv;
+  const float clip_bottom = static_cast<float>(physical.y + physical.height) * inv;
+  // 画布未设裁剪（高到容下全部内容）时退化为全量——与旧行为一致。
+  const bool clip_valid = clip_bottom > clip_top;
+
   for (std::size_t index = 0; index < items_.size(); ++index) {
     const MenuItem& item = items_[index];
     const math::Rect row = item_rect(index);
+    // `item_rect` 的 y 随 index 单调递增 → 完全落在可见区下方时可以**提前退出**。
+    // 屏上只能看见面板高度内那几行，而逐项画勾选/文字/箭头是 O(N)。
+    // 实测（scale_gate）：5 项 → 0.112ms，100 项 → 0.730ms（6.5×，上限 5×）。
+    if (clip_valid && row.y >= clip_bottom) break;
+    // 完全在可见区上方：跳过（不画），但不退出（后面的行可能进入可见区）。
+    if (clip_valid && row.bottom() <= clip_top) continue;
     if (item.separator) {
       const math::Rect line{row.x + kItemPaddingX,
                             row.y + row.height * 0.5f - 0.5f,
@@ -458,8 +480,19 @@ void MenuBar::paint_content(const RenderContext& context, raster::Surface& canva
       fill_round_rect(canvas, highlight_rect(title), metrics.radius_sm,
                       raster::Paint::solid(colors.primary_soft));
     } else if (hovered) {
+      // ⚠ 悬浮块**不能用 `surface_alt`**：菜单栏自身的底色就是 `surface_alt`
+      //（它与标题栏同属“外壳”），同色 = 悬停时**完全看不出变化**。
+      // 用户反馈：“菜单栏和活动栏的悬浮响应太慢，效果也不好”——“没变化”被
+      // 读成“没响应”，于是觉得慢。
+      //
+      // 用**半透明白光**（暗色）/ 黑光（亮色）：它在任何底色上都能拉开亮度，
+      // 强度与描边/分割线同一口径；且比展开态的 `primary_soft` 弱一档——
+      // 悬浮是“路过”，展开是“选中”，两者不该一样重。
+      const bool dark = colors.surface_alt.r < 128U;
+      const std::uint8_t channel = dark ? 255U : 0U;
+      const auto alpha = static_cast<std::uint8_t>(dark ? 26U : 20U);
       fill_round_rect(canvas, highlight_rect(title), metrics.radius_sm,
-                      raster::Paint::solid(colors.surface_alt));
+                      raster::Paint::solid(math::Color{channel, channel, channel, alpha}));
     }
     // 文字**水平居中**在 title 矩形内（而不是贴左缘）。
     //

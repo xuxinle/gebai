@@ -1111,7 +1111,11 @@ auto CodeEditor::max_line_width(const RenderContext& context) const -> float {
 
 auto CodeEditor::text_origin(const RenderContext& context) const -> math::Point {
   rebuild_line_geometry(context);
-  return math::Point{bounds_.x + gutter_cache_ + kGutterPadding, bounds_.y + kTopPadding - scroll_y_};
+  // ⚠ **必须含 `- scroll_x_`**：这是全部 x 坐标的量尺（`x_for_index` → 光标 /
+  // 选区 / 查找高亮 / 缩进线 / 命中测试）。漏掉它的话正文会滚、而上述元素不滚
+  //——用户报的“横向滚动光标偏移了”就是这个（文字滚了 384px，光标还停在原位）。
+  return math::Point{bounds_.x + gutter_cache_ + kGutterPadding - scroll_x_,
+                     bounds_.y + kTopPadding - scroll_y_};
 }
 
 auto CodeEditor::content_height() const noexcept -> float {
@@ -1365,12 +1369,18 @@ void CodeEditor::ensure_cursor_visible(const RenderContext& context) {
     scroll_y_ = cursor_y + height - view_height + kTopPadding;
   }
   // 水平方向：保证光标可见
-  const float cursor_x = x_for_index(context, cursor_) - (bounds_.x + gutter_cache_ + kGutterPadding);
+  //
+  // ⚠ `x_for_index` 已经含 `- scroll_x_`（走 `text_origin`），所以这里要把它
+  // **加回去**得到“无滚动时的列位置”。旧写法直接减基准点，而 `x_for_index`
+  // 那时不含滚动——两边改一处就会变成 `width - 2*scroll_x` 的错值，
+  // 表现为“横向滚完后光标突然跑掉/消失”。
+  const float gutter_right_now = show_line_numbers_ ? gutter_cache_ : 0.0f;
+  const float caret_view_x = x_for_index(context, cursor_) - (bounds_.x + gutter_right_now + kGutterPadding);
   const float view_width = std::max(0.0f, bounds_.width - gutter_cache_ - kGutterPadding * 2.0f);
-  if (cursor_x - scroll_x_ < 0.0f) {
-    scroll_x_ = std::max(0.0f, cursor_x - 8.0f);
-  } else if (cursor_x - scroll_x_ > view_width) {
-    scroll_x_ = cursor_x - view_width + 8.0f;
+  if (caret_view_x < 0.0f) {
+    scroll_x_ = std::max(0.0f, scroll_x_ + caret_view_x - 8.0f);
+  } else if (caret_view_x > view_width) {
+    scroll_x_ = scroll_x_ + caret_view_x - view_width + 8.0f;
   }
   // 统一夹取：光标在文末时 `scroll_y_` 不得把视口推过内容底（否则最后几行全白）
   clamp_scroll(context);
@@ -1446,6 +1456,9 @@ auto CodeEditor::caret_screen_rect() const noexcept -> math::Rect {
   // 拿它算单列会偏差很大）。等宽字体下"一个字符约 0.6 个字号"是稳定近似——
   // 弹层定位差几像素无妨（它本来就贴在光标下方，不是精确锚定到字符）。
   const float char_width = std::max(4.0f, font_size() * 0.6f);
+  // 本函数无 `RenderContext`（`noexcept`、供宿主在任意时点调），
+  // 不能走 `text_origin(context)`，只能就地算——
+  // 公式必须与 `text_origin` 一致（含 `- scroll_x_`），否则横向滚动后会偏。
   const float x = bounds_.x + gutter_cache_ + kGutterPadding - scroll_x_ +
                   static_cast<float>(column) * char_width;
   return math::Rect{x, row_top, std::max(1.0f, char_width), line_height_cache_};
@@ -1579,8 +1592,17 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
   if (height <= 0.0f) return;
 
   canvas.push_clip_rect(bounds_);
-  const float origin_x = bounds_.x + gutter_cache_ + kGutterPadding - scroll_x_;
-  const float origin_y = bounds_.y + kTopPadding - scroll_y_;
+  // 正文绘制的**左边界**（行号栏右缘）：横向滚动时正文不能滑到行号下面。
+  //
+  // `origin_x` 含 `- scroll_x_`，滚到后面时文字会跑到行号栏区域。
+  // 按需求：“编辑器滚动横向时不要滚动到行号下”。
+  // 实际裁剪在 `draw_span` 里（只包正文，不包行号）——见那里的说明。
+  const float gutter_right = show_line_numbers_ ? bounds_.x + gutter_cache_ : bounds_.x;
+  // **与 `x_for_index` 同一量尺**：绘制与光标/选区/命中都读 `text_origin`，
+  // 两边各写一份公式就会漂（历史上“光标偏了 7.7px”就是这么来的）。
+  const math::Point text_start = text_origin(context);
+  const float origin_x = text_start.x;
+  const float origin_y = text_start.y;
 
   // 行号槽底：**与编辑区（内容区）同色**。
   //
@@ -1599,6 +1621,9 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
   }
 
   const auto [first_line, last_line] = visible_line_range(context);
+  // 横向滚动的裁剪在**正文绘制处**（`draw_span`）做，不在这一层：
+  // 行号 / 当前行底色 / gutter 竖条与正文在同一个 for 循环里交织，
+  // 在这一层一刀切会把行号也裁掉（实测：行号整列消失）。
   // 记下本帧的可见行范围（1 起）供宿主在帧首取用（`visible_line_range_now()`）。
   last_visible_first_ = first_line + 1;
   last_visible_last_ = last_line + 1;
@@ -1865,8 +1890,20 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
       if (mapped_to <= mapped_from) return;
       const std::string_view slice =
           std::string_view(expanded.text).substr(mapped_from, mapped_to - mapped_from);
+      // **正文只画在行号栏右侧**：横向滚动时文字不能滑到行号下面。
+      //
+      // 为何在这层设子裁剪（而不是整个 `paint_content` 一层）：行号、当前行底色、
+      // gutter 竖条与本循环里的装饰是**交织绘制**的（同一个 for），一刀切会把
+      // 行号也裁掉（实测：裁剪放在外层后行号整列消失）。这里只包住正文，
+      // 代价是每段一次 push/pop（每行 token 数级别，十几项）。
+      const bool clip_text = gutter_right > bounds_.x;
+      if (clip_text) {
+        canvas.push_clip_rect(math::Rect{gutter_right, bounds_.y,
+                                         bounds_.right() - gutter_right, bounds_.height});
+      }
       port.draw(canvas, slice, math::Point{pen, row_top + text_offset}, font_size(), color,
                 text::FontRole::Monospace);
+      if (clip_text) canvas.pop_clip();
       pen += port.measure_width(slice, font_size(), text::FontRole::Monospace);
     };
     if (tokens.empty()) {
@@ -1991,8 +2028,16 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
       // 光标**严格等于行带**（同顶同高）——它标记当前行，不该超出背景。
       // 原先写作 `band_top - 1` / `band_height + 2`（想让它“看起来到底”），
       // 那是**应用层乱调**：光标上下各伸出带外 1px，一眼就看出“超出背景”。
-      canvas.fill_rect(math::Rect{x, row_top + band_top, kCursorWidth, band_height},
-                       raster::Paint::solid(syntax.cursor), 0.0f);
+      //
+      // ⚠ 横向滚动后光标 x 可能落到**行号栏区域内**（甚至负值）——
+      // 它与正文用同一量尺（`x_for_index` → `text_origin` 含 `- scroll_x_`）。
+      // 此时不该把光标画到行号栏上（行号栏的底色在它之后画，会把光标盖掉一半，
+      // 看着像“光标不见了”）。判断：完全越过左缘就不画。
+      const bool inside = x + kCursorWidth > gutter_right;
+      if (inside) {
+        canvas.fill_rect(math::Rect{x, row_top + band_top, kCursorWidth, band_height},
+                         raster::Paint::solid(syntax.cursor), 0.0f);
+      }
     }
   }
 

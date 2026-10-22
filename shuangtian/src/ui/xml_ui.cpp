@@ -35,6 +35,10 @@ struct Alias {
 constexpr Alias kAliases[] = {
     {"Row", "Panel"},     {"Column", "Panel"},    {"Separator", "Divider"},
     {"Progress", "ProgressBar"}, {"Toolbar", "Panel"}, {"Group", "Panel"},
+    // `Scroll` 是 `ScrollView` 的常见叫法（XML 里写 `<Scroll>` 比 `<ScrollView>` 自然）。
+    // 注册名是 `ScrollView`（见 dsl.cpp 的 X 宏表），不加这条别名就会
+    // **静默"认不出标签"**——子树整块丢掉，现象是卡片的容器选择器都找不到。
+    {"Scroll", "ScrollView"},
 };
 
 /// 需要构造参数的类型：XML 里用属性给（`<Table columns="a,b">`）。

@@ -758,9 +758,21 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
                        static_cast<float>(colors.surface_pressed.r);
     if (background.a == 0U) {
       // 无底（Ghost）平铺一层半透明中性色：它的"语气"本就不在底色上。
-      background = math::Color{colors.surface_hover.r, colors.surface_hover.g,
-                               colors.surface_hover.b,
-                               static_cast<std::uint8_t>(colors.surface_hover.a * hover_t)};
+      //
+      // ⚠ 这里**不能用 `surface_hover`**：Ghost 按钮的宿主底色通常就是
+      // `surface_alt`（活动栏/标题栏/标签栏），而 `surface_hover` 与它几乎同色——
+      // 实测暗色下 hover 后底色仅从 `(42,46,69)` 变 `(52,56,78)`（Δ≈10/255，
+      // 约 4%），用户直接读成“没反应”（反馈：菜单栏/活动栏悬浮响应又慢又不好）。
+      //
+      // 改用**白/黑半透光**：在任意底色上都能拉开亮度，强度与 `border` 同一口径
+      // （`theme.hpp` 亚克力口径：描边用半透光而不是合成实色，才能在四种底色上强度一致）。
+      // 暗色提亮、亮色压暗——跟随 `surface_hover` 相对 `surface` 的方向，
+      // 不是写死“提亮”（亮色主题里提亮会直接消失）。
+      const bool host_is_dark = colors.surface_alt.r < 128U;
+      const float strength = 0.10f * hover_t;   // 稳定后 10% 白/黑光
+      const std::uint8_t channel = host_is_dark ? 255U : 0U;
+      background = math::Color{channel, channel, channel,
+                               static_cast<std::uint8_t>(strength * 255.0f)};
     } else {
       const bool dark_base = static_cast<float>(background.r) < 128.0f;
       const float delta = dark_base ? up : -down;

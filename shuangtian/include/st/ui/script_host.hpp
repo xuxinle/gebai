@@ -37,6 +37,7 @@
 #include <optional>
 #include <utility>
 #include <string>
+#include <memory>
 #include <string_view>
 #include <vector>
 
@@ -53,8 +54,16 @@ namespace st::ui {
 struct ScriptBinding {
   std::string id{};        ///< 绑定 id（脚本侧与协议侧共用）
   std::string selector{};  ///< 监听的选择器
-  std::string event{};     ///< 事件类型（`click`/`change`/`submit`/…）
+  std::string event{};     ///< 事件类型（`click`/`input`/`keydown`/…）
   std::string handler{};   ///< 处理器源码片段（截断显示用）
+
+  /// 选择器解析缓存（`nullptr` = 已尝试且非法，不必重试）。
+  ///
+  /// 为何缓存：`dispatch_event` 在每个事件上遍历全部绑定并**逐个 parse 选择器**。
+  /// 重建式界面（每轮 `clear()` + 重建）会积累大量绑定，于是每次点击都变成
+  /// 上百次选择器解析——CPU 与内存一起涨，实测能把进程压到 `std::bad_alloc`。
+  /// 选择器在绑定时已确定，解析结果自然可以复用。
+  std::shared_ptr<const Selector> parsed{};
 };
 
 /// 脚本宿主（一个 `UiRoot` 配一个；非线程安全，随应用主循环驱动）。
@@ -87,6 +96,19 @@ class ScriptHost {
 
   /// 清空全部绑定（连同脚本侧处理器表）。
   void clear_bindings();
+
+  /// 回收"指向已销毁元素"的绑定，返回回收条数。
+  ///
+  /// 为何需要：重建式界面（每轮 `clear()` + 重建）会为新建元素重新 `on()`，
+  /// 旧元素被销毁后其绑定**再也不会命中**——却会永久留在表里，
+  /// 使后续每个事件都多扫一批（实测：连续重建后进程 `std::bad_alloc` 崩掉）。
+  ///
+  /// 只回收「单个 `#id` 选择器」且该 id 已不在树上的绑定：
+  /// 类型/角色/属性选择器可能在重建后又有同类元素出现，不能当作失效。
+  ///
+  /// 调用时机：`dispatch_event` 在"本次事件没命中任何绑定"时自动调用一次；
+  /// 应用层也可在整片重建后主动调用。
+  auto prune_dead_bindings() -> std::size_t;
 
   [[nodiscard]] auto bindings() const -> std::vector<ScriptBinding>;
 

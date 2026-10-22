@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "director.hpp"
+#include "frame_stats.hpp"
 #include "project.hpp"
 #include "st/app/async.hpp"
 #include "st/ui/text_port.hpp"
@@ -91,6 +92,11 @@ struct RenderStatus {
   std::string error{};
   /// 最近若干条日志（UI 面板里显示，e2e 用来断言阶段推进）。
   std::vector<std::string> log{};
+  /// **画面质量度量**（渲完帧阶段后填）。逐镜静止占比 / 过亮帧 / 平均亮度。
+  ///
+  /// 为什么放进状态而不是只写日志：日志是给人扫的，`get` 是给**智能体与 e2e**读的。
+  /// 判据要能进断言、能前后对比，就不能只存在于一行文本里。
+  QualityReport quality{};
   double elapsed_s{0.0};
 
   [[nodiscard]] auto progress() const -> float {

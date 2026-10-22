@@ -175,6 +175,47 @@ class Win32Backend final : public Backend {
     return ok();
   }
 
+  /// 从最小化/后台恢复到前台并取得焦点。
+  ///
+  /// 两步都必须做，且顺序有讲究：
+  /// - `SW_RESTORE` 先解除最小化（否则 `SetForegroundWindow` 对最小化窗口无效）；
+  /// - `SetForegroundWindow` 才是把焦点拿过来。
+  ///
+  /// ⚠ Windows 有**前台锁**（foreground lock）：后台进程不能无条件抢焦点，
+  /// 未经用户输入的调用可能仅闪烁任务栏。本函数对此**不吞掉失败**——
+  /// 调用方（托盘点击）本身就是用户输入，实际总能成功；
+  /// 若真被拒，应让调用方知道而不是假装“已经叫回来了”。
+  [[nodiscard]] auto restore() -> Status override {
+    if (window_ == nullptr) return unexpected(ErrorCode::Io, "窗口未创建");
+    if (::IsIconic(window_) != 0) ::ShowWindow(window_, SW_RESTORE);
+    if (::SetForegroundWindow(window_) == 0) {
+      // 不视为硬错误：窗口已经解除最小化（用户能看到它），只是没抢到焦点。
+      // 但要让上层能观测到（日志），而不是静默。
+      return unexpected(ErrorCode::Io, "窗口已恢复但未能取得前台焦点（系统前台锁）");
+    }
+    return ok();
+  }
+
+  /// 运行时改窗口尺寸（逻辑坐标；物理像素由 DPI 决定）。
+  ///
+  /// 画布重建不在这里做：`WM_SIZE` 会把 `size_dirty_` 置位，
+  /// 下一帧 `framebuffer()` 里统一走 `sync_buffers_to_client`——
+  /// 这正是“所有影响尺寸的路径必须汇到一处”的那一处。
+  [[nodiscard]] auto set_size(int width_logical, int height_logical) -> Status override {
+    if (window_ == nullptr) return unexpected(ErrorCode::Io, "窗口未创建");
+    if (width_logical <= 0 || height_logical <= 0) {
+      return unexpected(ErrorCode::Invalid, "窗口尺寸必须为正");
+    }
+    const float scale = scale_ > 0.0f ? scale_ : 1.0f;
+    const int physical_w = static_cast<int>(static_cast<float>(width_logical) * scale + 0.5f);
+    const int physical_h = static_cast<int>(static_cast<float>(height_logical) * scale + 0.5f);
+    if (::SetWindowPos(window_, nullptr, 0, 0, physical_w, physical_h,
+                       SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) == 0) {
+      return unexpected(ErrorCode::Io, "SetWindowPos 失败");
+    }
+    return ok();
+  }
+
   [[nodiscard]] auto toggle_maximize() -> Status override {
     if (window_ == nullptr) return unexpected(ErrorCode::Io, "窗口未创建");
     ::ShowWindow(window_, ::IsZoomed(window_) != 0 ? SW_RESTORE : SW_MAXIMIZE);
@@ -561,6 +602,101 @@ class Win32Backend final : public Backend {
     icon_large_ = large;
     icon_small_ = small;
     return ok();
+  }
+
+  // ── 系统托盘 ──
+
+  [[nodiscard]] auto supports_tray_icon() const noexcept -> bool override {
+    return window_ != nullptr;
+  }
+
+  /// 创建/更新托盘图标（`Shell_NotifyIconW`）。
+  ///
+  /// ## 为何自己维护 `NOTIFYICONDATAW` 而不是每次重建
+  ///
+  /// 托盘图标是**系统侧资源**：重复 `NIM_ADD` 会得到多个图标（或直接失败），
+  /// 而 `NIM_MODIFY` 才是更新已有个图的正确调用。所以这里区分"首次"与"后续"。
+  ///
+  /// ## 回调消息
+  ///
+  /// 用 `WM_APP + 1`（自定义消息区间）而不是注册 `RegisterWindowMessage`：
+  /// 后者是跨进程广播消息，本场景不需要，且多一个全局名字会增加冲突面。
+  ///
+  /// ## 销毁责任
+  ///
+  /// 图标必须在窗口销毁**之前**移除，否则通知区会留下殫尸图标（鼠标划过才消失）。
+  /// 因此 `WM_DESTROY` 里调 `remove_tray_icon()`。
+  [[nodiscard]] auto set_tray_icon(std::span<const std::uint8_t> png,
+                                   std::string_view tooltip) -> Status override {
+    if (window_ == nullptr) return unexpected(ErrorCode::Io, "窗口未创建");
+
+    // 图标：空 span = 沿用当前图标（只改提示文字）
+    if (!png.empty()) {
+      const auto decoded = codec::png_decode(png);
+      if (!decoded) {
+        return unexpected(ErrorCode::Parse, "托盘图标不是有效 PNG：" + decoded.error().message);
+      }
+      // 托盘用小图标（通知区按 16px 逻辑尺寸显示；高 DPI 由系统缩放）
+      HICON fresh = nullptr;
+      if (auto status = make_icon(decoded->rgba, static_cast<int>(decoded->width),
+                                  static_cast<int>(decoded->height), 16, &fresh);
+          !status) {
+        return status;
+      }
+      if (tray_icon_ != nullptr && tray_icon_ != fresh) ::DestroyIcon(tray_icon_);
+      tray_icon_ = fresh;
+    }
+    if (tray_icon_ == nullptr) {
+      return unexpected(ErrorCode::Invalid, "托盘图标未设置（先传 PNG 字节）");
+    }
+
+    NOTIFYICONDATAW data{};
+    data.cbSize = sizeof(data);
+    data.hWnd = window_;
+    data.uID = kTrayIconId;
+    data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    data.uCallbackMessage = kTrayMessage;
+    data.hIcon = tray_icon_;
+    // 提示文字上限 128 个宽字符（含结尾 0）；超出会被系统截断——这里显式截，
+    // 避免“超长提示导致整条 NIM_MODIFY 失败”这种难查的问题。
+    const int max_tip = static_cast<int>(std::size(data.szTip)) - 1;
+    const int len = MultiByteToWideChar(CP_UTF8, 0, tooltip.data(), static_cast<int>(tooltip.size()),
+                                        data.szTip, max_tip);
+    data.szTip[len > 0 ? len : 0] = L'\0';
+
+    const DWORD action = tray_added_ ? NIM_MODIFY : NIM_ADD;
+    if (::Shell_NotifyIconW(action, &data) == FALSE) {
+      // 关型失败不影响其它功能，但必须如实报（“图标没出来”不该靠猜）
+      return unexpected(ErrorCode::Io, "Shell_NotifyIconW 失败（通知区不可用？）");
+    }
+    tray_added_ = true;
+    return ok();
+  }
+
+  void remove_tray_icon() override {
+    if (!tray_added_ || window_ == nullptr) {
+      if (tray_icon_ != nullptr) {
+        ::DestroyIcon(tray_icon_);
+        tray_icon_ = nullptr;
+      }
+      return;
+    }
+    NOTIFYICONDATAW data{};
+    data.cbSize = sizeof(data);
+    data.hWnd = window_;
+    data.uID = kTrayIconId;
+    (void)::Shell_NotifyIconW(NIM_DELETE, &data);
+    tray_added_ = false;
+    if (tray_icon_ != nullptr) {
+      ::DestroyIcon(tray_icon_);
+      tray_icon_ = nullptr;
+    }
+  }
+
+  [[nodiscard]] auto take_tray_clicks() noexcept -> std::uint32_t override {
+    const std::uint32_t count = tray_clicks_;
+    tray_clicks_ = 0;
+    return count;
   }
 
   /// 把 RGBA8 图像缩放到 `size×size` 并建成 `HICON`（32 位带 alpha）。
@@ -1291,12 +1427,26 @@ class Win32Backend final : public Backend {
   }
 
   auto handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lparam) -> LRESULT {
+    // 托盘图标事件（自定义消息）：只计双击/左键单击，其它忽略。
+    //
+    // 为何只计这两类：托盘图标对用户心理模型就是"点一下把我叫回来"，
+    // 右键菜单另属一套（本框架不提供菜单，应用可自行用 overlay 做）。
+    if (message == kTrayMessage) {
+      const auto event = static_cast<UINT>(lparam);
+      if (event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK) {
+        ++tray_clicks_;
+      }
+      return 0;
+    }
     switch (message) {
       case WM_CLOSE:
         // 关窗即请求退出：交由应用主循环收尾（进程内还有控制通道等资源要停）
         close_requested_ = true;
         return 0;
       case WM_DESTROY:
+        // 托盘图标必须在窗口销毁**之前**移除：否则通知区会留下殫尸图标
+        // （鼠标划过才消失）。
+        remove_tray_icon();
         ::PostQuitMessage(0);
         return 0;
 
@@ -1674,6 +1824,17 @@ class Win32Backend final : public Backend {
   /// 它们是本进程创建的内核对象，不随窗口销毁释放。
   HICON icon_large_{nullptr};
   HICON icon_small_{nullptr};
+
+  /// 托盘图标自定义消息（`WM_APP + 1`；见 `set_tray_icon` 说明）。
+  static constexpr UINT kTrayMessage = WM_APP + 1;
+  /// 托盘图标 id（一个窗口一个图标）。
+  static constexpr UINT kTrayIconId = 1;
+  /// 当前托盘图标句柄（通知区显示的那一个）。
+  HICON tray_icon_{nullptr};
+  /// 是否已 `NIM_ADD`（决定下次是 ADD 还是 MODIFY）。
+  bool tray_added_{false};
+  /// 托盘点击累计（`take_tray_clicks` 取走后归零）。
+  std::uint32_t tray_clicks_{0};
   /// 拖动/缩放期间"尺寸已变、需要重画"时由后端调用的钩子（见接口声明）。
   std::function<void()> repaint_{};
   /// 拖放重绘的重入保护（见 `repaint_for_resize`）。

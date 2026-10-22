@@ -118,11 +118,20 @@ auto WeightCurve::evaluate(float pixel_size, float global_gamma,
     return Value{global_gamma, global_contrast, false};
   }
   // 超出范围：**端点值**（不外推斜率——极字号上外推会得到荒谬的 γ）
+  //
+  // ⚠ contrast 是**乘法修正**（曲线的对比度 × 全局强度），不是覆盖：
+  // 全局 `coverage_contrast_strength` 是“基底强度”（亮/暗各自标定，见
+  // `DarkClassGammas` 旁边的说明），曲线里的 contrast 表达的是“该字号相对基底
+  // 要打几折”。旧实现直接返回曲线值，使得一旦加载曲线，全局 contrast 就**完全失效**
+  // （实测：`--cstrength` 从 0 到 3.0 输出逐位相同）。
+  const auto scale_contrast = [global_contrast](float curve_contrast) noexcept -> float {
+    return curve_contrast * global_contrast;
+  };
   if (pixel_size <= samples_.front().pixel_size) {
-    return Value{samples_.front().gamma, samples_.front().contrast, true};
+    return Value{samples_.front().gamma, scale_contrast(samples_.front().contrast), true};
   }
   if (pixel_size >= samples_.back().pixel_size) {
-    return Value{samples_.back().gamma, samples_.back().contrast, true};
+    return Value{samples_.back().gamma, scale_contrast(samples_.back().contrast), true};
   }
   // 二分找右端点
   std::size_t lo = 0;
@@ -140,7 +149,7 @@ auto WeightCurve::evaluate(float pixel_size, float global_gamma,
   const float span = b.pixel_size - a.pixel_size;
   const float t = span > 1e-6f ? (pixel_size - a.pixel_size) / span : 0.0f;
   return Value{a.gamma + (b.gamma - a.gamma) * t,
-               a.contrast + (b.contrast - a.contrast) * t, true};
+               scale_contrast(a.contrast + (b.contrast - a.contrast) * t), true};
 }
 
 auto WeightCurve::describe() const -> std::string {

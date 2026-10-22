@@ -209,6 +209,18 @@ auto Selector::exact_id(std::string_view id) -> Selector {
   return selector;
 }
 
+auto Selector::primary_id() const -> std::string {
+  // 判据：**单 compound × 单 term × Id 类型**。
+  // 多 compound（带后代/子组合器）或多 term（`#a.b`）都不算——
+  // 那种选择器说的是"某个 id 且满足其它条件"，元素不在树上不足以判定它失效。
+  if (compounds_.size() != 1) return {};
+  const Compound& compound = compounds_.front();
+  if (compound.terms.size() != 1) return {};
+  const Term& term = compound.terms.front();
+  if (term.kind != Term::Kind::Id) return {};
+  return term.value;
+}
+
 auto Selector::matches(const Element& element) const -> bool {
   if (compounds_.empty()) return false;
   const Compound& compound = compounds_.back();

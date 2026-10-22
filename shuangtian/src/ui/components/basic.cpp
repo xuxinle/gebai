@@ -718,7 +718,10 @@ void Button::apply_theme(const Theme& theme) {
   // 图标盒径：三档取自 `Metrics::icon_size*`（独立令牌，不从字号推——见其定义处）。
   icon_size_ = size_ == Size::Small ? metrics.icon_size_sm
                                     : (size_ == Size::Large ? metrics.icon_size_lg : metrics.icon_size);
-  style_.font_weight = FontWeight::Medium;
+  // 字重 **Regular**：按钮标签是“控件文案”，不是标题。加重会让整排按钮看着
+  // 挤、发脏（尤其小字号 + 合成加粗同时存在时）。需要突出的按钮靠变体色
+  // （`Primary`/`Soft`/`Danger`）表达，不靠字重。
+  style_.font_weight = FontWeight::Regular;
   style_.border_width = 0.0f;
   style_.align_items = Align::Center;
   style_.justify = Justify::Center;

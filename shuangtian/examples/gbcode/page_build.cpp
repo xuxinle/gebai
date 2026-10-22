@@ -384,13 +384,12 @@ namespace gbcode_ui {
   }
 
 
-  // IDEA 新 UI 的面板卡片几何：
-  //   · `kPanelRadius`：面板圆角（主题的 `radius_lg` 档；卡片特征就靠它）；
-  //   · `kPanelGap`：面板之间的**缝**（透出外层 `Surface::Alt` 外壳色）——
+  // IDEA 新 UI 的面板卡片几何（`kPanelRadius` / `kPanelGap` 定义在 `page.hpp`，
+  // 因为 `page_bottom.cpp` 里的终端/源码管理面板也要用同一组值）：
+  //   · 圆角就是卡片的身份；
+  //   · `kPanelGap` 是面板之间的**缝**（透出外层 `Surface::Alt` 外壳色）——
   //     这是 IDEA 新 UI 的核心视觉：不是靠分割线分隔，而是“卡片之间露出壳色”。
   //     缝宽 = 分割线厚度的 4 倍左右，太小会看成一圈脏边，太大浪费空间。
-  static constexpr float kPanelRadius = 14.0f;   // = metrics.radius_lg
-  static constexpr float kPanelGap = 4.0f;
 
   /// 把面板改造成“IDEA 新 UI 卡片”：**圆角 + 裁剪子元素**。
   ///
@@ -415,10 +414,15 @@ namespace gbcode_ui {
       //（切视图的唯一途径），侧栏是“当前视图的内容”。曾经把两者绑在一个
       // `sidebar_visible_` 上，于是关掉侧栏连入口一起没了（实测：Ctrl+B 之后
       // 活动栏消失、无从点回去）。
-      if (!sidebar_visible_.value()) {
-        build_editor_area(c, buffers, active, has_editor);
-        return;
-      }
+      //
+      // ⚠ **不要用 `if (!visible) { 直接建编辑器; return; }` 这种分支**：
+      // 声明式的树形状就变了（有/无 SplitView 两层结构），框架会**销毁重建**
+      // 编辑器——`CodeEditor` 里的文本是运行时状态，重建后就成空白了。
+      // 实测（用户报的）：打开 README → Ctrl+B 收起侧栏 → 编辑器内容变空。
+      //
+      // 正确做法：**始终建 SplitView**，只用 `set_first_hidden` 翻侧栏的可见位
+      //（与底部终端用 `set_second_hidden` 同一套路，那处早就这么写）。
+      // 侧栏隐藏时布局自动退化为“编辑器占满”（`layout_children` 的单面板分支）。
       // 侧栏与编辑区之间用 SplitView（宽度可拖）——**两个子面板就是它的两个子位**，
       // 声明式里用 `custom_container<SplitView>` 让两次子声明分别落到 first/second。
       (void)custom_container<SplitView>(
@@ -460,6 +464,8 @@ namespace gbcode_ui {
             split.set_min_first_size(220.0f);
             // IDEA 新 UI：面板之间的缝（透出外层壳色）——见 `kPanelGap`。
             split.set_gap(kPanelGap);
+            // 侧栏可见性：**只翻隐藏位**，不重建树（见上方注释）。
+            split.set_first_hidden(!sidebar_visible_.value());
             // 比例存档在 `sidebar_ratio_`（非响应式）：拖动回调写它，重组时读它。
             // ⚠ 不能每帧写死默认值：声明式每帧都会跳这个 configure，写死等于
             // 把用户拖到的位置抹回默认（实测：拖到 0.5，一点任何按钮就弹回默认）。
@@ -503,12 +509,17 @@ namespace gbcode_ui {
     // `surface = Alt`：与标题栏/状态栏**同色**——三者合起来是一圈“外壳”，
     // 色不一致会在拐角处露馅（见 `Element::Surface` 的说明）。
     //
-    // 几何按 IDEA 新 UI 调：
-    //   · 栏宽 44 → **48**（按钮块两侧各留 4 px 空白，否则选中态贴着栏边显得“顶格”）；
-    //   · 块间距 2 → **6**（新 UI 的图标是一颗颗独立胶囊，而不是一串紧贴的方块）；
-    //   · 按钮 40×36 → **40×40**（正方形胶囊：IDEA 的选中块是方的，竖长条会像“选中了一个单元格”）；
+    // 几何：
+    //   · 栏宽 **40**（按钮 32 + 两侧各 4 空白）；
+    //   · 块间距 6（新 UI 的图标是一颗颗独立胶囊，而不是一串紧贴的方块）；
+    //   · 按钮 **32×32**（正方形胶囊：IDEA 的选中块是方的，竖长条会像“选中了一个单元格”）；
     //   · 圆角由 `Button::Variant::Soft` 自带（`radius_sm`），不在这里硬写。
-    column(c, {.gap = 6.0f, .padding_y = 6.0f, .width = 48.0f,
+    //
+    // 尺寸沿革：48/40 → **40/32**（用户 2026-10-22：“把活动栏调窄点”）。
+    // 按钮与栏宽必须**同步缩**：只缩栏宽会把按钮挤成溢出/裁剪。
+    // `padding_x` 必须跟着给：不给的话 32px 按钮会被 flex 拉伸填满 40px 栏宽，
+    // 选中胶囊紧贴栏边（实测：变窄后图标左侧无边距，看着“顶格”）。
+    column(c, {.gap = 6.0f, .padding_x = 4.0f, .padding_y = 6.0f, .width = 40.0f,
                .surface = Element::Surface::Alt, .id = "activity-bar"}, [&] {
       for (std::size_t index = 0; index < std::size(kActivities); ++index) {
         // 图标按钮：`custom<Button>`（Button 的 icon 是一等接口，属性面没有）
@@ -533,7 +544,7 @@ namespace gbcode_ui {
             sidebar_visible_.set(true);
             mark_sidebar_visited(index);
           };
-        }, {.width = 40.0f, .height = 40.0f, .key = kActivities[index].id});
+        }, {.width = 32.0f, .height = 32.0f, .key = kActivities[index].id});
       }
       // —— 下组：终端 ——
       //
@@ -556,7 +567,7 @@ namespace gbcode_ui {
         b.set_variant(on ? Button::Variant::Soft : Button::Variant::Ghost);
         b.set_size(Button::Size::Small);
         b.on_click = [this] { toggle_git_panel(); };
-      }, {.width = 40.0f, .height = 36.0f, .key = "activity-git"});
+      }, {.width = 32.0f, .height = 32.0f, .key = "activity-git"});
       (void)custom<Button>(c, [this](Button& b) {
         b.set_id("activity-terminal");
         b.set_icon("terminal");
@@ -566,7 +577,7 @@ namespace gbcode_ui {
         b.set_variant(on ? Button::Variant::Soft : Button::Variant::Ghost);
         b.set_size(Button::Size::Small);
         b.on_click = [this] { toggle_terminal_panel(); };
-      }, {.width = 40.0f, .height = 36.0f, .key = "terminal"});
+      }, {.width = 32.0f, .height = 32.0f, .key = "terminal"});
     });
   }
 
@@ -1214,8 +1225,12 @@ struct CodeEditorPage::MdLayoutTarget final : st::ui::SlowLayoutTarget {
                 c, [&] { build_main(c, buffers, active, has_editor); },
                 [](Panel& panel) {
                   panel.set_id("editor-upper");
-                  // IDEA 新 UI：上下两个面板也是圆角卡片。
-                  make_card(panel);
+                  // ⚠ **这一层不是卡片**：它只是“上半区的容器”，真正的卡片是
+                  // 它里面的侧栏与编辑区（各自 radius + clip_children）。
+                  // 曾经给它也调 `make_card` → 两层圆角重叠，内层卡片的圆角
+                  // 落在外层圆角的弧线外侧，被外层裁成**直角**（实测：编辑器
+                  // 左下角是方的，而顶部四角正常）。
+                  // 保持透明（不画底），让 `main-row` 的外壳色透出来。
                 },
                 {.grow = true, .key = "upper"});
             // 终端面板**常驻声明、收起只隐藏**（`set_second_hidden`）：

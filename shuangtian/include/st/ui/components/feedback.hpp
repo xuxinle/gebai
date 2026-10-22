@@ -224,6 +224,12 @@ class Tooltip : public Element {
   /// 目标矩形（屏幕坐标）：arrange 时据此把气泡放到上方居中（空间不足则放下方）。
   void set_target_rect(math::Rect rect);
   [[nodiscard]] auto target_rect() const noexcept -> math::Rect { return target_; }
+  /// **视口尺寸**（用于把气泡夹在屏幕内）。
+  ///
+  /// 为何不能从 `arrange` 的入参推：`OverlayLayout::Stack` 传的是气泡自身尺寸的矩形，
+  /// 不是窗口——拿它当视口会把 x 钉死在 0（气泡跑到窗口左缘，看着像“没显示”）。
+  void set_viewport(math::Size size);
+  [[nodiscard]] auto viewport() const noexcept -> math::Size { return viewport_; }
   void set_active(bool active);
   [[nodiscard]] auto active() const noexcept -> bool { return active_; }
 
@@ -242,6 +248,8 @@ class Tooltip : public Element {
  private:
   std::string text_{};
   math::Rect target_{};
+  /// 视口尺寸（0 = 未知，退化为只夹左上）。见 `set_viewport`。
+  math::Size viewport_{};
   bool active_{false};
 };
 

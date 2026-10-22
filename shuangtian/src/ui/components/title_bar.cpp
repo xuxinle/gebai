@@ -48,6 +48,12 @@ constexpr float k_icon_size = 14.0f;
 constexpr float k_title_icon_size = 16.0f;
 /// 标题栏内边距（左右）。
 constexpr float k_padding_x = 12.0f;
+/// `after_title` 槽的最小占位。
+///
+/// 为何不用 0：无 `TextPort` 时（测试/无头刚启动）量宽得 0，槽位会被彻底省略——
+/// 那会让“挂上去但看不见”变成完全无痕迹的一件事。留一个最小宽度，
+/// 位置仍然是对的，选择器与断言都能看到它。
+constexpr float kMinSlotWidth = 12.0f;
 /// 图标与标题之间的间距。
 constexpr float k_icon_gap = 8.0f;
 
@@ -227,6 +233,9 @@ auto TitleBar::hits_caption(math::Point point) const -> bool {
   for (const Element* slot : leading_) {
     if (slot != nullptr && slot->bounds().contains(point)) return false;
   }
+  for (const Element* slot : after_title_) {
+    if (slot != nullptr && slot->bounds().contains(point)) return false;
+  }
   for (const Element* slot : trailing_) {
     if (slot != nullptr && slot->bounds().contains(point)) return false;
   }
@@ -246,6 +255,15 @@ auto TitleBar::add_leading(std::unique_ptr<Element> child) -> Element* {
   // leading 排在自持部件之前（它就在标题前），位置 = 当前 leading 数
   Element* raw = Element::insert_child(leading_.size(), std::move(child));
   leading_.push_back(raw);
+  mark_layout_dirty();
+  return raw;
+}
+
+auto TitleBar::add_after_title(std::unique_ptr<Element> child) -> Element* {
+  if (child == nullptr) return nullptr;
+  // 物理位置：`leading` 之后、`trailing` 之前。
+  Element* raw = Element::insert_child(leading_.size() + after_title_.size(), std::move(child));
+  after_title_.push_back(raw);
   mark_layout_dirty();
   return raw;
 }
@@ -314,6 +332,37 @@ void TitleBar::arrange(const RenderContext& context, math::Rect rect) {
   // ⚠ 右界不能取"前部槽的右缘"：那样有前部槽时标题会被算成零宽（实测：标题直接不显示）。
   // 无前部槽时标题从**品牌区之后**起（而不是从 `brand_right_` 之前，那样会叠在品牌名上）。
   title_left_ = leading_.empty() ? brand_right_ : head_cursor;
+
+  // 标题**之后**的槽：从标题文字右缘开始，从左往右排。
+  //
+  // 宽度用与品牌区同一把尺（`estimate_text_width`）——两者都不能依赖 `TextPort`：
+  // 无头/未就绪时量什么都得 0，槽会直接压在文字上。
+  // 估宽“宁大勿小”，给多了只是多一段空白，不会叠字。
+  //
+  // 上限用 `slots_left`（尾部槽左缘）：空间不够时宁可变窄，也不堆到尾部槽上。
+  if (!after_title_.empty()) {
+    float cursor = title_left_;
+    if (!title_.empty()) {
+      cursor += estimate_text_width(title_, style_.font_size) + k_icon_gap;
+    }
+    for (Element* slot : after_title_) {
+      if (slot == nullptr) continue;
+      const float limit = slots_left;
+      // 量不出宽度时（如无 `TextPort` 的测试环境——`NullTextPort` 量什么都得 0）
+      // 按下**最小占位**排，而不是直接 `break` 掉。
+      //
+      // 为何：直接丢掉会让“挂上去但看不见”变成完全无痕迹的一件事，
+      // 而实测它很容易被误判成布局代码没跑。留一个最小宽度，
+      // 至少位置是对的、能被选择器/断言看到。
+      const float measured = slot->measured_size().width;
+      const float wanted = std::min(std::max(kMinSlotWidth, measured),
+                                    std::max(0.0f, limit - cursor));
+      if (wanted <= 0.0f) break;   // 真的没空间了：后面的也别排
+      slot->arrange(context, math::Rect{cursor, bounds_.y, wanted, bounds_.height});
+      cursor += wanted + k_icon_gap;
+    }
+  }
+
   // `slots_left_` 用 **0 作"无尾部槽"哨兵**：有尾部槽时它是真实边界（通常 > 0），
   // 无尾部槽时靠 `controls_left()` 现算——否则关掉控制按钮后它仍是旧值（实测撞到）。
   slots_left_ = trailing_.empty() ? 0.0f : slots_left;
@@ -361,7 +410,9 @@ void TitleBar::apply_theme(const Theme& theme) {
   style_.radius = 0.0f;
   style_.padding = math::Insets{0.0f, k_padding_x, 0.0f, k_padding_x};
   style_.font_size = metrics.font_sm;
-  style_.font_weight = FontWeight::Medium;
+  // 字重 **Regular**：标题栏文字是“窗口标题”，靠位置（居中/最左）与
+  // 整块条带区分，不靠字重（用户：“除了特别需要突出的 UI 元素都不要用黑体”）。
+  style_.font_weight = FontWeight::Regular;
   style_.color = enabled_ ? colors.text : colors.text_faint;
 }
 
@@ -377,6 +428,9 @@ void TitleBar::measure(const RenderContext& context, const Constraints& constrai
   // 一个个都看不到"（子元素必须在父的 measure 里被测量，这是本框架的布局契约）。
   const Constraints slot_constraints{kUnbounded, measured_.height, kUnbounded, measured_.height};
   for (Element* slot : leading_) {
+    if (slot != nullptr) slot->measure(context, slot_constraints);
+  }
+  for (Element* slot : after_title_) {
     if (slot != nullptr) slot->measure(context, slot_constraints);
   }
   for (Element* slot : trailing_) {

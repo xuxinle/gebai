@@ -520,7 +520,7 @@ b.set_label(log_line_label(entry));
                        const char* action_id) {
     (void)row(c, {.gap = 4.0f, .height = 26.0f, .id = id}, [&] {
       (void)text(c, [title = std::move(title)] { return title(); },
-                 {.grow = true, .weight = FontWeight::Medium, .id = std::string(id) + "-title"});
+                 {.grow = true, .weight = FontWeight::Regular, .id = std::string(id) + "-title"});
       if (action_id != nullptr) {
         scm_icon_button(c, action_id, "refresh", "重新读取", [this] { git_log_loaded_ = false; });
       }

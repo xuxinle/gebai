@@ -245,6 +245,8 @@ inline constexpr std::size_t kLogLineCapacity = 512;
 struct Application::Impl {
   shell::Backend* backend{nullptr};
   std::unique_ptr<shell::Backend> backend_holder{};
+  /// 托盘是否真启用（后端不支持时保持 false——如实反映，不假装）。
+  bool tray_ready{false};
   std::unique_ptr<st::text::FontStack> fonts{};
   std::unique_ptr<st::text::TextRenderer> renderer{};
   std::unique_ptr<RendererTextPort> text_port{};
@@ -461,6 +463,30 @@ auto Application::script() -> ui::ScriptHost* { return impl_->script.get(); }
   return impl_->backend != nullptr && impl_->backend->maximized();
 }
 
+[[nodiscard]] auto Application::window_restore() -> bool {
+  if (impl_->backend == nullptr) return false;
+  const auto status = impl_->backend->restore();
+  if (!status) {
+    // 不当作硬失败：窗口通常已经解除最小化，只是可能没抢到前台焦点。
+    // 但必须能看见——否则“点了托盘没反应”会变成谜案。
+    ST_LOG_WARN("恢复窗口：{}", status.error().message);
+  }
+  return status.has_value();
+}
+
+auto Application::set_window_size(int width_logical, int height_logical) -> Status {
+  if (impl_->backend == nullptr) return unexpected(ErrorCode::Unsupported, "后端未就绪");
+  if (auto status = impl_->backend->set_size(width_logical, height_logical); !status) {
+    return status;
+  }
+  // 后端改的是物理窗口，逻辑视口也要跟着改——否则布局仍按旧尺寸算，
+  // 现象是“窗口变小了但内容还是老宽高”（裁掉一大半）。
+  root_.set_viewport(
+      math::Size{static_cast<float>(width_logical), static_cast<float>(height_logical)});
+  root_.mark_dirty_all();
+  return ok();
+}
+
 auto Application::control_port() const noexcept -> std::uint16_t {
   return impl_->server != nullptr ? impl_->server->port() : 0;
 }
@@ -517,6 +543,22 @@ auto Application::apply_theme_overrides(const st::Json& overrides) -> Status {
 auto Application::theme_snapshot() const -> st::Json { return ui::theme_to_json(root_.theme()); }
 
 auto Application::quit_requested() const noexcept -> bool { return impl_->quit; }
+
+auto Application::tray_ready() const noexcept -> bool { return impl_->tray_ready; }
+
+auto Application::take_tray_clicks() noexcept -> std::uint32_t {
+  if (!impl_->tray_ready || impl_->backend == nullptr) return 0;
+  return impl_->backend->take_tray_clicks();
+}
+
+auto Application::set_tray_tooltip(std::string_view tooltip) -> Status {
+  if (!impl_->tray_ready || impl_->backend == nullptr) {
+    return unexpected(ErrorCode::Unsupported, "托盘未启用（后端不支持，或启动时 tray_enabled 为 false）");
+  }
+  // 空串 = 用窗口标题（与启动时的口径一致）
+  const std::string text = tooltip.empty() ? options_.title : std::string(tooltip);
+  return impl_->backend->set_tray_icon({}, text);
+}
 
 auto Application::log_lines(std::size_t limit) const -> std::vector<std::string> {
   return impl_->log_lines.tail(limit);
@@ -815,6 +857,25 @@ auto Application::start() -> Status {
     }
   }
 
+  // 系统托盘（可选）：常驻类应用的核心形态。
+  //
+  // 为何不失败就退出：与窗口图标同理——托盘是形态能力，不是运行前提。
+  // 后端不支持（无头/未实现的平台）时只告警，应用照常跑（降级为普通窗口）。
+  if (options_.tray_enabled) {
+    const auto icon = options_.tray_icon_png.empty() ? options_.window_icon_png
+                                                     : options_.tray_icon_png;
+    const std::string tooltip =
+        options_.tray_tooltip.empty() ? options_.title : options_.tray_tooltip;
+    if (icon.empty()) {
+      ST_LOG_WARN("托盘未启用：缺少图标 PNG（tray_icon_png / window_icon_png 都为空）");
+    } else if (auto status = impl_->backend->set_tray_icon(icon, tooltip); !status) {
+      // 如实告知降级：应用照常跑（当普通窗口用），但“为什么没图标”要能找到原因
+      ST_LOG_WARN("系统托盘未启用（降级为普通窗口）：{}", status.error().message);
+    } else {
+      impl_->tray_ready = true;
+    }
+  }
+
   // **把窗口夹到屏幕工作区内**（DPI 适配的必需品）。
   //
   // 为何在建窗之后：工作区尺寸（含任务栏扣除）与“窗口落在哪块屏”只有建窗之后
@@ -983,22 +1044,42 @@ auto Application::start() -> Status {
       }
       impl_->renderer->set_subpixel_strength(strength);
     }
-    // **对比度 S 曲线**：默认 0.6（见 `coverage_contrast_strength_` 的标定说明）。
+    // **对比度 S 曲线**：**按主题分档**（亮 2.0 / 暗 0.6）。
+    //
+    // 为何必须分开：这一层管“满黑像素占比”，而亮/暗底下同一个强度的效果不同
+    //（与 `ClassGammas` / `DarkClassGammas` 同样的理由）。亮色重新标定后
+    //（汉字 γ 0.62→2.20，见 `ClassGammas::han` 的表）需要 2.0 才能把满黑
+    // 拉到参照的 23.9%/48.3%；暗色一直是 0.6 且已按 VS Code 实拍验收过。
     {
-      float contrast = st::text::TextRenderer::coverage_contrast_strength_default();
+      const bool dark_theme = impl_->renderer->coverage_gamma() < 1.0f;
+      float contrast = dark_theme
+                           ? st::text::TextRenderer::coverage_contrast_strength_default()
+                           : st::app::kLightContrastStrength;
       if (const auto value = fs::read_env("ST_TEXT_CONTRAST_STRENGTH");
           value.has_value() && !value->empty()) {
         try {
           contrast = std::stof(*value);
         } catch (const std::exception&) {
-          contrast = st::text::TextRenderer::coverage_contrast_strength_default();
+          contrast = dark_theme
+                         ? st::text::TextRenderer::coverage_contrast_strength_default()
+                         : st::app::kLightContrastStrength;
         }
       }
       impl_->renderer->set_coverage_contrast_strength(contrast);
     }
-    // **字重曲线**（跳字号连续映射）：从文件加载，默认 `resources/text_weight_curve.txt`。
-    // 优先级高于上面的全局 γ；改文件不必重编译（见 `docs/WEIGHT_CURVE.md`）。
+    // **字重曲线**（跨字号连续映射）：从文件加载。
+    //
+    // ⚠ **曲线表是主题相关的**：`text_weight_curve.txt` 是在**暗色**（浅字深底）上
+    // 标定的（表里 15px = γ1.12/c0.22）。亮色用同一张表会把亮色的类 γ / contrast 盖掉
+    //——它是“全字号覆盖”，比类 γ 更强势（contrast 直接取曲线的值）。
+    //
+    // 因此按主题选文件：暗色用原表；亮色**默认不加载**（回落到 `ClassGammas` +
+    // `kLightContrastStrength` 这组已按亮色参照重标的参数）。
+    // 亮色如需曲线，把对应的表放成 `text_weight_curve_light.txt` 即会自动生效。
     {
+      const bool dark_theme = impl_->renderer->coverage_gamma() < 1.0f;
+      const std::string curve_name =
+          dark_theme ? "text_weight_curve.txt" : "text_weight_curve_light.txt";
       st::text::WeightCurve curve;
       std::size_t loaded = 0;
       if (const auto env = fs::read_env("ST_TEXT_WEIGHT_CURVE");
@@ -1009,20 +1090,19 @@ auto Application::start() -> Status {
         // build/dev/bin 启动），单一路径 `resources/...` 会静默加载不到。
         // 实测：只写相对路径时，gbcode 截图里的彩边 89.6 与探针 ~40
         // 差一倍多——曲线根本没生效。
-        for (const char* candidate :
-             {"resources/text_weight_curve.txt",
-              "../resources/text_weight_curve.txt",
-              "../../resources/text_weight_curve.txt",
-              "../../../resources/text_weight_curve.txt"}) {
-          loaded = curve.load_from_file(candidate);
+        for (const auto& prefix :
+             {"resources/", "../resources/", "../../resources/", "../../../resources/"}) {
+          loaded = curve.load_from_file(std::string(prefix) + curve_name);
           if (loaded > 0) break;
         }
       }
       if (loaded > 0) {
         impl_->renderer->set_weight_curve(std::move(curve));
         if (fs::read_env("ST_TEXT_DEBUG").has_value()) {
-          st::print("[text] weight_curve={} 个采样点\n", loaded);
+          st::print("[text] weight_curve={} ({})\n", loaded, curve_name);
         }
+      } else if (fs::read_env("ST_TEXT_DEBUG").has_value()) {
+        st::print("[text] weight_curve=未加载（{}）\n", curve_name);
       }
     }
     // 生效值自检（`ST_TEXT_DEBUG=1`）：测"参数是否真的生效"的**唯一**可靠手段——

@@ -1631,6 +1631,22 @@ result["nodes"] = static_cast<std::uint64_t>(metrics.nodes);
       static_cast<std::uint64_t>(host.root().hint_update_calls());
   result["hint_last_delta_ms"] = host.root().hint_last_delta_ms();
   result["hint_elapsed_ms"] = host.root().hint_elapsed_ms();
+  result["hint_target_calls"] =
+      static_cast<std::uint64_t>(host.root().hint_target_calls());
+  result["hint_target_null"] =
+      static_cast<std::uint64_t>(host.root().hint_target_null_count());
+  result["hint_target_changed"] =
+      static_cast<std::uint64_t>(host.root().hint_target_changed_count());
+  result["hint_bail_prune"] =
+      static_cast<std::uint64_t>(host.root().hint_bail_prune_count());
+  result["hint_bail_start"] =
+      static_cast<std::uint64_t>(host.root().hint_bail_start_count());
+  result["hint_start_ns"] = host.root().hint_start_ns();
+  result["hint_bail_live"] =
+      static_cast<std::uint64_t>(host.root().hint_bail_live_count());
+  result["hint_bail_gone"] =
+      static_cast<std::uint64_t>(host.root().hint_bail_gone_count());
+  result["now_ns"] = st::time::now_ns();
   {
 const math::IntRect painted = host.root().dirty_rect();
 Json rect = Json::object();

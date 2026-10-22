@@ -211,6 +211,18 @@ class UiRoot : public Element::HostFocus {
   /// “推进了几次、每次多少毫秒”，而“气泡什么时候出现”是间接观测量）。
   [[nodiscard]] auto hint_update_calls() const noexcept -> std::uint64_t;
   [[nodiscard]] auto hint_last_delta_ms() const noexcept -> double;
+  /// 诊断：`set_hint_target` 的调用/失联/换目标次数（定位“提示不出”用）。
+  [[nodiscard]] auto hint_target_calls() const noexcept -> std::uint64_t;
+  [[nodiscard]] auto hint_target_null_count() const noexcept -> std::uint64_t;
+  [[nodiscard]] auto hint_target_changed_count() const noexcept -> std::uint64_t;
+  /// 诊断：`update_hint` 的两个早退分支命中次数（定位“计时不走”用）。
+  [[nodiscard]] auto hint_bail_prune_count() const noexcept -> std::uint64_t;
+  [[nodiscard]] auto hint_bail_start_count() const noexcept -> std::uint64_t;
+  /// 诊断：当前提示起点的单调钟值（0 = 未立）。
+  [[nodiscard]] auto hint_start_ns() const noexcept -> std::int64_t { return hint_start_ns_; }
+  [[nodiscard]] auto hint_bail_live_count() const noexcept -> std::uint64_t;
+  /// 诊断：按 id 也找不到目标（真没了）的次数。
+  [[nodiscard]] auto hint_bail_gone_count() const noexcept -> std::uint64_t;
   /// 当前已累计的悬停毫秒数（诊断面：与延时对比即知“等够没有”）。
   [[nodiscard]] auto hint_elapsed_ms() const noexcept -> double { return hint_elapsed_ms_; }
   [[nodiscard]] auto hint_delay_ms() const noexcept -> int { return hint_delay_ms_; }
@@ -390,10 +402,37 @@ class UiRoot : public Element::HostFocus {
   /// 而它只承担“显示/隐藏、给文本与目标矩形”这几个动作。
   Element* hint_bubble_raw_{nullptr};
   Element* hint_target_{nullptr};       ///< 当前悬停的、带提示的元素
+  /// 目标的 **id**：声明式界面每帧重组会**销毁重建**元素，裸指针随时可能悬垂
+  ///（`hint_target_->hint()` 读到空串 → 当成“没提示”直接 hide，计时跟着清零）。
+  /// 存 id 就能在需要时从树上重新定位——id 是声明式稳定不变量，指针不是。
+  std::string hint_target_id_{};
+  /// 按 id 取当前目标（悬垂时返回 nullptr）。
+  [[nodiscard]] auto live_hint_target() -> Element*;
   std::string hint_text_cache_{};       ///< 当前气泡文本（可断言面）
   double hint_elapsed_ms_{0.0};         ///< 悬停已持续多久（与延时比）
   bool hint_visible_{false};
-  int hint_delay_ms_{450};
+  /// 悬停提示的出现延时（毫秒）。
+  /// 450 → **280**（用户 2026-10-22：“悬浮提示出来的太慢了”）：
+  /// 450ms 是桌面平台的“保险值”（防止扫过一排图标时连弹），但实测本应用的
+  /// 提示是**共享气泡**（同时只会有一个）+ 鼠标真停在控件上才计时，
+  /// 所以不需要那么保守。280ms 仍在“不是一碰就弹”的区间，但明显地跟手。
+  /// 调低到 <150ms 会开始出现“划过就闪”的干扰。
+  int hint_delay_ms_{280};
+  /// 悬停开始的**单调钟**时间戳（纳秒，`st::time::now_ns` 同源）。
+  ///
+  /// 用它**直接算已悬停时长**，而不是每帧累加间隔——后者在丢帧/卡顿时会漂移
+  ///（实测同一控件三次 322/389/627ms），且空闲不重绘时根本不走。见 `update_hint`。
+  std::int64_t hint_start_ns_{0};
+  /// 指针“失联”（落在无 hint 节点上）的起始时刻；0 = 未失联。
+  ///
+  /// 用于**去抖**：云桌面指针会在控件间隙里抖动，严格“离开即收”会让气泡闪。
+  /// 只有持续失联 ≥ `kHintLeaveGraceMs` 才真收起。见 `set_hint_target`。
+  std::int64_t hint_lost_ns_{0};
+  /// 气泡**刚显示**的时刻（秒，单调钟）；0 = 未显示。
+  ///
+  /// 用于“最短保持期”（见 `kHintMinVisibleMs`）：云桌面下 `hovered` 很快回落，
+  /// 不粘滞一下气泡根本看不清。
+  std::int64_t hint_shown_ns_{0};
   /// 上一次推进提示时看到的 `time_seconds_`（算帧间隔；不引入新时钟）。
   double hint_time_seconds_{0.0};
   /// 悬停刚发生、下一帧**先立基准再计时**（见 `set_hint_target`）。

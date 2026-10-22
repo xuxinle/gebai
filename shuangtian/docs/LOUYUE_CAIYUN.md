@@ -139,6 +139,54 @@ Generator{ render(canvas, local_time, size) —— 纯函数式画一帧 }
 `invoke` 动作面：`play` / `pause` / `stop` / `seek <秒>` / `split` / `select <clip_id>` /
 `add_clip <generator> <track> <t_in> <t_out>`。
 
+### 4.3.1 画面质量度量（渲在渲染循环里，不在事后抽帧）
+
+**问题**：以前验片靠「渲完抽 4~6 帧用眼睛看」。这既不可复核（下次谁看都算一遍），
+也看不见「慢」——实测全片静止 48% 掩盖了引导页 **81%** 的真相，改时长改了半天没用，
+因为问题在**镜内**。
+
+**做法**：`frame_stats.hpp/cpp` 接在 `render.cpp` 的帧循环里。每帧刚渲进 `Canvas`、
+像素就在手边，所以：
+
+- **精确**：不经过 h264 有损压缩，不吃码率噪声（降码率会让「静止」变得"在动"）；
+- **免费**：每帧一次降采样遍历（1080p 约 1~2ms，相对 15ms/帧渲染可忽略），不必再解码一遍全片；
+- **天然逐镜**：循环里拿得到 `Clip`/`scene_index`，能给**每一镜**的静止占比。
+
+| 量 | 口径 | 默认判据 |
+|---|---|---|
+| `still_ratio` | 帧差 <1.2 的帧对 / 帧对数（帧差 = 降采样到宽 64 的灰度图的平均绝对差） | <40% |
+| 逐镜 `still_ratio` | 同上，按片段区间聚合 | 单镜 <70% |
+| `bright_ratio` | 平均亮度 >180 的帧占比 | <20% |
+| `change_density` | 在动的帧对 / 秒 | >0.5/s |
+| `mean_luma` | 降采样灰度均值 | 供参考 |
+
+**判据随数走**：阈值（1.2 / 180 / 探针宽 64）连同读数一起在 `summary` 与
+`quality_json` 里给出。阈值一动，48% 能变 25% 也能变 60%——不给阈值的百分比无法复核。
+
+**暴露面**：`#director` 的 `get` 上新增 `render_quality`（一行摘要）、
+`render_quality_json`（给程序取）、以及 `render_quality_still_ratio` /
+`_bright_ratio` / `_mean_luma` / `_change_density` / `_worst_still_clip` /
+`_static_threshold` / `_partial` 七个单值（判据要能直接进断言，不必解析 JSON）。
+`RenderStatus::quality` 同步保存，UI 面板与 e2e 读同一份。
+
+**局部渲染**会标 `partial=true`：只渲一段确认动效时，结论只覆盖那段，
+不能被当成全片质检结论。
+
+**两个实测踩过的缺陷**（都已固化成 `tests/caiyun_frame_stats_test.cpp` 的用例）：
+
+1. **像素通道顺序读反**。`Canvas::pixels()` 是 `0xRRGGBBAA`（写 R=0x11 G=0x22 B=0x33
+   A=0xFF 后 `raw=0x112233FF`，字节序 `FF 33 22 11`），而 `to_rgba8()` 导出的是
+   R,G,B,A——两者**正好相反**。按 `0xAARRGGBB` 读会把 alpha 当红：全不透明画面
+   被算成纯红、灰度恒 76；而静止占比仍能算对（两边同样错），**只有亮度判据偏**，
+   数值看起来完全"正常"。布局由 `frame_stats_luma_reads_the_right_channels` 钉住。
+2. **首帧被算成静止**。`FrameStats::diff_prev` 默认 0.0，首帧没有前一帧可比，
+   但 0.0 会通过 `>=0` 检查被计入静止——10 帧运动序列得到 11% 静止占比。
+   修法：无相邻前帧一律标 `-1`。
+
+**子代理侧**：`caiyun_verify` 工具读这些属性，可选再量配音 WAV
+（辅音占比 / 底噪 / 削波 / 段连贯，走 `core/tts/audio.ts` 的 `decodeWav`，不依赖 ffmpeg），
+输出带「该往哪查」的违规清单。工具在 `packages/agents/src/agents/caiyun/verify.ts`。
+
 ### 4.4 非目标（v1 明确不做）
 
 真实视频解码（显式记缺口）、音频轨、关键帧曲线编辑（v2 候选：片段属性关键帧 + 迷你曲线

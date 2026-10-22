@@ -111,6 +111,21 @@ class TitleBar : public Element {
   /// 标题前（图标与标题之间）的附属内容。
   auto add_leading(std::unique_ptr<Element> child) -> Element*;
 
+  /// 紧跟在**标题文字之后**、从左往右排的附属内容。
+  ///
+  /// 为何需要第三个槽（2026-10-22，相期实测）：已有两个槽都不了这个位置——
+  /// - `leading` 在标题**之前**（图标与标题文字之间）；
+  /// - `trailing` 从控制按钮左侧**往左**排，靠右堆。
+  ///
+  /// 于是「标题旁边跟一个小状态图标」（如“已连接”绿灯、文件修改标记）这类
+  /// 最常见的需求只能绕：要么把标题改成品牌名（`set_brand`）——那只是把同一
+  /// 个字符串换个显示位，妨碍真正需要品牌 + 标题分开的宿主；要么自己摆坐标
+  /// ——那会与拖动带、双击最大化、窗口按钮全撞。
+  ///
+  /// 本槽的语义：**紧跟标题文字右缘、从左往右排**，与标题视觉上是一组。
+  /// 不参与拖动（与另两个槽一致）。
+  auto add_after_title(std::unique_ptr<Element> child) -> Element*;
+
   // —— 几何（命中、绘制、单测共用同一份；避免"测试复刻布局公式"的假绿）——
   /// 三个控制按钮的边长（逻辑像素）。
   [[nodiscard]] static constexpr auto control_button_size() noexcept -> float { return 46.0f; }
@@ -140,7 +155,7 @@ class TitleBar : public Element {
   /// 载体子元素：**附属槽在前，自持的标题/图标/按钮在后**（与 `ScrollView` 同约定）。
   /// 它们由本组件自己排版（横排一行、标题带居首），不进入调用方的列布局。
   [[nodiscard]] auto content_child_count() const noexcept -> std::size_t override {
-    return trailing_.size() + leading_.size();
+    return trailing_.size() + leading_.size() + after_title_.size();
   }
   /// 附属槽插到自持部件**之前**（自持部件恒在末尾；见 `content_child_count`）。
   auto add_child(std::unique_ptr<Element> child) -> Element* override;
@@ -184,6 +199,8 @@ class TitleBar : public Element {
   std::function<void()> on_double_click_{};
   /// 附属槽（非拥有；同时作为 `Element::children()` 的一部分，见 `content_child_count`）。
   std::vector<Element*> leading_{};
+  /// 紧跟在标题文字之后的槽（从左往右排）。
+  std::vector<Element*> after_title_{};
   /// 右侧尾部槽（`leading` 之后的宿主控件）
   std::vector<Element*> trailing_{};
   /// 槽位边界（`arrange` 时算定）：标题**文字**起始 x 与 `trailing` 槽区左缘。

@@ -605,6 +605,12 @@ void Tooltip::set_target_rect(math::Rect rect) {
   mark_layout_dirty();
 }
 
+void Tooltip::set_viewport(math::Size size) {
+  if (viewport_.width == size.width && viewport_.height == size.height) return;
+  viewport_ = size;
+  mark_layout_dirty();
+}
+
 void Tooltip::set_active(bool active) {
   if (active_ == active) return;
   active_ = active;
@@ -620,7 +626,10 @@ void Tooltip::apply_theme(const Theme& theme) {
   style_.radius = kRadius;
   style_.shadow = shadow_md(theme);
   style_.font_size = metrics.font_xs;
-  style_.font_weight = FontWeight::Medium;
+  // **Regular，不用 Medium**：提示气泡是一小块实色底，Medium 的合成加粗在它上面
+  // 会压得发脏（用户：“活动栏按钮提示和侧栏面板标题不要用黑体，看起来有点脏”）。
+  // 气泡只需“看得清”，不需要“加重”——轻一点反而更干净。
+  style_.font_weight = FontWeight::Regular;
   style_.text_align = TextAlign::Center;
   style_.padding = math::Insets::symmetric(kPaddingX, kPaddingY);
   // 显式排版覆盖最后回放（与 Text/Button 同口径）：气泡文本走 paint_text（读 style_）。
@@ -648,10 +657,67 @@ void Tooltip::arrange(const RenderContext& context, math::Rect rect) {
   if (!target_.is_empty()) {
     const float width = measured_.width > 0.0f ? measured_.width : rect.width;
     const float height = measured_.height > 0.0f ? measured_.height : rect.height;
-    float x = target_.center().x - width * 0.5f;
-    float y = target_.y - height - kGap;
-    if (y < 0.0f) y = target_.bottom() + kGap;  // 上方空间不足 → 放到目标下方
-    if (x < 0.0f) x = 0.0f;
+    const bool has_viewport = viewport_.width > 0.0f && viewport_.height > 0.0f;
+    const float limit_w = has_viewport ? viewport_.width : 0.0f;
+    const float limit_h = has_viewport ? viewport_.height : 0.0f;
+
+    // —— 水平定位：优先**向外展开到目标右/左侧**，而不是居中 ——
+    //
+    // 居中适合工具栏图标（上下都有空间），但活动栏是**贴左缘的竖条**：
+    // 居中后气泡会盖住它上方/下方的其他按钮（用户明确要求：“提示要放到右侧，
+    // 不要遮挡活动栏的其他按钮”）。
+    //
+    // 规则：
+    //   · 目标中心在左半屏 → 放它**右侧**（`target.right + kGap`）；
+    //   · 在右半屏 → 放**左侧**（`target.x - width - kGap`）；
+    //   · 居中（±kCenterBand 内，如标题栏中间的菜单）→ 仍用居中。
+    // 垂直方向对侧向气泡**与目标垂直居中**（贴边栏时气泡对着那一行，指向最清楚）。
+    constexpr float kCenterBand = 60.0f;   // 目标中心距中线多少以内算“居中”
+    const float center_x = has_viewport ? limit_w * 0.5f : target_.center().x;
+    const float off = target_.center().x - center_x;
+    float x = 0.0f;
+    float y = 0.0f;
+    bool sideways = false;
+    if (has_viewport && std::abs(off) > kCenterBand) {
+      sideways = true;
+      if (off < 0.0f) {
+        x = target_.right() + kGap;          // 左半屏：向右展开
+        if (x + width > limit_w) x = target_.x - width - kGap;   // 右边放不下 → 反过来
+      } else {
+        x = target_.x - width - kGap;        // 右半屏：向左展开
+        if (x < 0.0f) x = target_.right() + kGap;                // 左边放不下 → 反过来
+      }
+      y = target_.center().y - height * 0.5f;   // 侧向：与目标垂直居中
+    } else {
+      // 居中风格：上方放，放不下则放下方
+      x = target_.center().x - width * 0.5f;
+      y = target_.y - height - kGap;
+      if (y < 0.0f) y = target_.bottom() + kGap;
+    }
+
+    // 夹到**视口内**（`viewport_` 由调用方给）。
+    //
+    // ⚠ 不能用 `arrange` 收到的 `rect` 当视口：`OverlayLayout::Stack` 传的是
+    // **气泡自身尺寸**的矩形，拿它算 `right()-width` 恒为 0，x 会被钉在 0。
+    //
+    // 未设视口（`viewport_` 为零，如单测/离屏）时**不做钳制**。
+    if (has_viewport) {
+      const float max_x = std::max(0.0f, limit_w - width);
+      const float max_y = std::max(0.0f, limit_h - height);
+      if (!sideways) {
+        // 居中风格才需要“贴边时改为靠边对齐”，侧向放置已经向外展开了
+        const float centered_x = x;
+        x = std::clamp(x, 0.0f, max_x);
+        if (x - centered_x > 0.5f) {
+          x = std::clamp(target_.x, 0.0f, max_x);
+        } else if (centered_x > max_x) {
+          x = std::clamp(target_.right() - width, 0.0f, max_x);
+        }
+      } else {
+        x = std::clamp(x, 0.0f, max_x);
+      }
+      y = std::clamp(y, 0.0f, max_y);
+    }
     bounds_ = math::Rect{x, y, width, height};
   }
   layout_dirty_ = false;

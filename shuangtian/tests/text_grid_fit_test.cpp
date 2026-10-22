@@ -800,9 +800,24 @@ ST_TEST(app_default_sets_all_three_class_gammas) {
               static_cast<int>(std::lround(kHanGamma * 100.0f)));
   // 默认类不设档
   ST_CHECK_EQ(static_cast<int>(std::lround(renderer.class_gamma(GlyphClass::Default) * 100.0f)), 0);
-  // 四个类互不串（数组下标必须按枚举值走）
-  ST_CHECK(renderer.class_gamma(GlyphClass::Digit) != renderer.class_gamma(GlyphClass::Han));
-  ST_CHECK(renderer.class_gamma(GlyphClass::Letter) != renderer.class_gamma(GlyphClass::Han));
+  // 四个类**下标互不串**（数组下标必须按枚举值走）。
+  //
+  // ⚠ 不能用"`Digit` ≠ `Han`"作为判据：2026-10-22 重标后三个类的默认值
+  // **有意统一成 1.60**（量尺结论：以亮色 DWrite natural 为参照，三类最优 γ
+  // 都落在 1.60；旧值 0.84/0.70/0.62 是错位标定，会让亮色整体偏黑）。
+  // 那类"值不相等"断言会随着标定值变化而假红，而它想抓的其实是**下标错位**。
+  // 所以改成：给三类设**互不相同**的值，验证它们各归各位。
+  {
+    TextRenderer probe(*fixture.stack, 1.5f);
+    probe.set_class_gamma(GlyphClass::Digit, 1.11f);
+    probe.set_class_gamma(GlyphClass::Letter, 2.22f);
+    probe.set_class_gamma(GlyphClass::Han, 3.33f);
+    ST_CHECK_NEAR(probe.class_gamma(GlyphClass::Digit), 1.11f, 1e-5f);
+    ST_CHECK_NEAR(probe.class_gamma(GlyphClass::Letter), 2.22f, 1e-5f);
+    ST_CHECK_NEAR(probe.class_gamma(GlyphClass::Han), 3.33f, 1e-5f);
+    // 默认类不受影响（下标没溢出到别的格）
+    ST_CHECK_NEAR(probe.class_gamma(GlyphClass::Default), 0.0f, 1e-6f);
+  }
 
   // 码点 → 类：三条边界各自钉一个代表
   ST_CHECK(GlyphClass::Digit == st::text::glyph_class_of(U'7'));

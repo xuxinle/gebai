@@ -1456,9 +1456,17 @@ class GpuCanvas final : public Surface {
 
   // —— 裁剪 ——
   void push_clip_rect(math::Rect rect) override {
-    ClipFrame frame;
-    frame.rect = to_physical(rect).intersect(current_clip().rect);
-    frame.mode = 1;
+    // ⚠ **必须继承父帧的形状**（与软件光栅器的 `Canvas::push_clip_rect` 同口径）：
+    // 嵌套时外层可能是**圆角裁剪**（卡片 radius），内层再加一个矩形裁剪
+    //（例如 `CodeEditor::paint_content` 开头就 `push_clip_rect(bounds_)`）。
+    // 若这里新建一个只带 `rect` 的帧，栈顶就变成 `mode=1`、圆角信息全丢——
+    // 而 `submit` 只读**栈顶**一帧（`current_clip()`），于是圆角被降级成直角。
+    // 实测症状：整个应用走软件渲染时卡片四角正常，走 GPU（D3D11）时
+    // **编辑器卡片左下角/右下角是方的**（用户报的那条）。
+    ClipFrame frame = current_clip();
+    frame.rect = to_physical(rect).intersect(frame.rect);
+    // 如果父帧已有形状（圆角/路径遮罩），保留它；否则降为纯矩形裁剪。
+    if (frame.mode == 0) frame.mode = 1;
     clip_stack_.push_back(frame);
   }
   void push_clip_rounded_rect(math::Rect rect, float radius) override {

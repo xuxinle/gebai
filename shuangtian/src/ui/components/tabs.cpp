@@ -505,7 +505,10 @@ void Tabs::apply_theme(const Theme& theme) {
   const Palette& colors = theme.colors();
   const Metrics& metrics = theme.metrics();
   style_.font_size = metrics.font_base;
-  style_.font_weight = FontWeight::Medium;
+  // 字重 **Regular**：标签页文字是“导航标签”，不是标题。一排标签全加重会显得
+  // 发黑、发脏（用户：“除了特别需要突出的 UI 元素都不要用黑体”）。
+  // **激活态**靠胶囊底（`primary_soft`）+ 主色文字表达，不靠字重。
+  style_.font_weight = FontWeight::Regular;
   style_.color = enabled_ ? colors.text : colors.text_faint;
   style_.radius = metrics.radius_sm;
   style_.background = math::Color{0, 0, 0, 0};  // 标签条透明，仅 hover/指示条着色

@@ -406,6 +406,21 @@ class CaiyunPage final : public dsl::Component {
         }
         return joined;
       }
+      // —— 画面质量（渲完帧后可用）——
+      // 暴露成属性而不是只写日志：`get` 是给智能体与 e2e 读的，判据要能进断言、
+      // 能前后对比。summary 给人扫一眼，其余给程序按需取。
+      if (key == "quality") return status.quality.summary;
+      if (key == "quality_json") return quality_to_json(status.quality);
+      if (key == "quality_still_ratio") return std::format("{:.2f}", status.quality.still_ratio);
+      if (key == "quality_bright_ratio") return std::format("{:.2f}", status.quality.bright_ratio);
+      if (key == "quality_mean_luma") return std::format("{:.2f}", status.quality.mean_luma);
+      if (key == "quality_change_density")
+        return std::format("{:.3f}", status.quality.change_density);
+      if (key == "quality_worst_still_clip")
+        return std::to_string(status.quality.worst_still_clip_id);
+      if (key == "quality_static_threshold")
+        return std::format("{:.3f}", status.quality.static_threshold);
+      if (key == "quality_partial") return status.quality.partial ? "true" : "false";
       return {};
     };
     return hooks;

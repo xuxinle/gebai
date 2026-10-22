@@ -39,6 +39,13 @@ class Selector {
   [[nodiscard]] auto text() const -> const std::string& { return text_; }
   [[nodiscard]] auto compounds() const noexcept -> const std::vector<Compound>& { return compounds_; }
 
+  /// 若选择器是「单个 `#id` 精确匹配」（如 `#card-3`），返回该 id；否则返回空串。
+  ///
+  /// 用途：宿主回收失效绑定时需要判断"这条绑定指向的元素还在不在"。
+  /// 只有 id 选择器能这样判——类型/角色/属性选择器在重建后可能**又有同类元素**
+  /// 出现，不能因为当前无命中就当作失效。
+  [[nodiscard]] auto primary_id() const -> std::string;
+
  private:
   std::string text_{};
   std::vector<Compound> compounds_{};

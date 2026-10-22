@@ -14,6 +14,7 @@
 #include <thread>
 #include <vector>
 
+#include "frame_stats.hpp"
 #include "motion.hpp"
 #include "st/app/async.hpp"
 #include "st/codec/png.hpp"
@@ -418,6 +419,23 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
   const int first = std::max(0, job.first_frame);
   const int last = job.last_frame > 0 ? std::min(job.last_frame, total_frames) : total_frames;
   st::raster::Canvas canvas{job.width, job.height, 1.0f};
+  // —— 画面质量度量：逐镜区间先备好（按片段区间聚合，见 frame_stats.hpp）——
+  // 为什么在循环前算：span 只依赖工程快照，循环里每帧都要用，算一次省 N 次。
+  std::vector<StatsAccumulator::ShotSpan> shot_spans{};
+  shot_spans.reserve(project.clips.size());
+  for (const Clip& clip : project.clips) {
+    StatsAccumulator::ShotSpan span{};
+    span.clip_id = clip.id;
+    span.scene_index = clip.scene_index;
+    span.t_in = clip.t_in;
+    span.t_out = clip.t_out;
+    if (const Scene* scene = project.scene_of(clip); scene != nullptr && !scene->title.empty()) {
+      span.label = scene->title;
+    } else {
+      span.label = std::format("片段 #{}", clip.id);
+    }
+    shot_spans.push_back(std::move(span));
+  }
   int written = 0;
   std::int64_t render_ns_sum = 0;
   std::int64_t encode_ns_sum = 0;
@@ -431,6 +449,9 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
   std::vector<std::int64_t> worker_render_ns(workers, 0);
   std::vector<std::int64_t> worker_encode_ns(workers, 0);
   std::vector<int> worker_written(workers, 0);
+  // 每 worker 一份度量累加器：每帧都要写，共享加锁会成热点；几十字节的状态，
+  // 每线程一份再归并的代价可忽略（与上面 render/encode 计时同一套做法）。
+  std::vector<StatsAccumulator> worker_stats(workers);
   std::atomic<int> next_index{first};
   std::atomic<bool> write_failed{false};
   for (std::size_t i = 0; i < workers; ++i) {
@@ -451,6 +472,9 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
         return;
       }
       const std::int64_t encode_end = st::time::now_ns();
+      // 画面度量：在 PNG 编码**之后**做（不占渲染计时、不影响写盘），
+      // 此时 canvas 里的像素仍是这一帧（下一个循环才覆盖）。
+      worker_stats[slot].push(local, index, frame_time(index, job.fps));
       worker_render_ns[slot] += render_end - render_start;
       worker_encode_ns[slot] += encode_end - render_end;
       ++worker_written[slot];
@@ -500,6 +524,45 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
                        written, static_cast<double>(render_ns_sum) / 1.0e6 / written,
                        static_cast<double>(encode_ns_sum) / 1.0e6 / written, workers),
            on_update);
+
+  // —— 画面质量报告（逐镜静止占比 / 过亮帧 / 平均亮度）——
+  // 这一步替代"渲完再抽几帧用眼睛看"：结论是数，可复核、可对比、能指出哪一镜最静。
+  {
+    StatsAccumulator merged{};
+    for (auto& acc : worker_stats) merged.merge(acc);
+    merged.attach_spans(shot_spans);
+    const double covered = static_cast<double>(written) / std::max(1.0, job.fps);
+    const bool is_partial = job.first_frame > 0 || (job.last_frame > 0 && job.last_frame < total_frames);
+    const QualityReport quality = merged.report(covered, is_partial);
+    {
+      const std::scoped_lock lock(mutex_);
+      status_.quality = quality;
+    }
+    log_line(std::format("画面质量：{}", quality.summary), on_update);
+    // 逐镜明细进日志（只记最静的三镜——全列会把日志淹掉，明细在 status_ 里）
+    std::vector<ShotStats> ranked = quality.shots;
+    std::sort(ranked.begin(), ranked.end(), [](const ShotStats& a, const ShotStats& b) {
+      return a.still_ratio() > b.still_ratio();
+    });
+    int shown = 0;
+    for (const ShotStats& shot : ranked) {
+      if (shown >= 3 || shot.frames <= 1) break;
+      log_line(std::format("  最静镜头 {:.1f}% 静止｜{}（{:.2f}–{:.2f}s，{} 帧，亮度 {:.0f}）",
+                           shot.still_ratio(), shot.label, shot.t_in, shot.t_out, shot.frames,
+                           shot.mean_luma),
+               on_update);
+      ++shown;
+    }
+    if (quality.still_ratio > 40.0) {
+      log_line("  提示：全片静止占比超过 40% —— 「慢」通常是镜内大量时间静止，"
+               "先缩短时长或落定后加持续微动，不要先减镜头数",
+               on_update);
+    }
+    if (quality.bright_ratio > 20.0) {
+      log_line("  提示：过亮帧超过 20% —— 暗场片里嵌了白底素材？需要降亮/压色/暗角融合",
+               on_update);
+    }
+  }
 
   // —— 阶段 2：配乐 ——
   std::string audio_path{};
