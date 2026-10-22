@@ -346,6 +346,13 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "本机 GPU 腿可用性（无头模式下 st doctor 有意不探测 GPU，这里显式探一次）"
     },
+    "caiyun_js_probe": {
+      "kind": "executable",
+      "sources": ["tools/caiyun_js_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "link": ["st_ext"],
+      "//note": "JS 编排能否替代 JSON 描述：C++ 函数可调 / 一遍 eval 产出图层表 / 配额 / 报错定位"
+    },
     "scene3d_texture_probe": {
       "kind": "executable",
       "sources": ["tools/scene3d_texture_probe.cpp"],
