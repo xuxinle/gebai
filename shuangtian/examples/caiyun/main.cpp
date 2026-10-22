@@ -89,6 +89,8 @@ struct Options {
   /// 运动模糊子采样数（1 = 关）与快门比例（0.5 = 180°）。
   int motion_samples{1};
   double shutter{0.5};
+  /// 导出元素轨迹（供连贯性验收）。
+  bool trajectory{false};
   std::string export_dir{};   ///< `--export-dir <dir>`：启动即导出 PNG 帧序列（旧口径，保留）
   int bench_seconds{0};       ///< `--bench <秒>`：播放压测时长
 };
@@ -186,6 +188,9 @@ auto parse_options(int argc, char** argv) -> Options {
     } else if (raw == "--shutter-angle") {
       // 快门角度（度）：180 = 电影常用；0 或 360 以外的值按比例换算。
       options.shutter = std::clamp(static_cast<double>(parse_int("--shutter-angle", 180)) / 360.0, 0.0, 1.0);
+    } else if (raw == "--track-elements") {
+      // 导出元素轨迹（trajectory.tsv）：供连贯性验收做“按元素追踪”。
+      options.trajectory = true;
     } else if (raw == "--bench") {
       options.bench_seconds = static_cast<int>(std::clamp(parse_int("--bench", 0), 0LL, 3600LL));
     } else if (raw == "-h" || raw == "--help") {
@@ -1053,6 +1058,7 @@ auto run_app(int argc, char** argv) -> int {
     job.last_frame = options.render_frames;
     job.motion_samples = options.motion_samples;
     job.shutter = options.shutter;
+    job.trajectory = options.trajectory;
     render_launched = page->start_render(job);
     st::print("渲染启动：{}x{} → {}\n", job.width, job.height, job.output_file);
   }

@@ -79,6 +79,11 @@ struct RenderJob {
   int motion_samples{1};
   /// 快门开启时长 / 帧间隔。0.5 = 180°（电影常用），0 = 关闭。
   double shutter{0.5};
+  /// 是否导出**元素轨迹**（`trajectory.tsv`）。
+  ///
+  /// 连贯性验收需要它：光看画面只能知道“亮块没留下”，
+  /// 不知道“留下的是不是同一个元素”。
+  bool trajectory{false};
 };
 
 /// 作业状态（UI 与 e2e 都读它）。

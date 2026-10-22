@@ -24,6 +24,8 @@
 /// 背景缓漂 + 暗角。**不追求"元素多"，追求节奏与层次**。
 
 #include <cstdint>
+#include <string>
+#include <vector>
 
 #include "director.hpp"
 #include "st/raster/canvas.hpp"
@@ -32,6 +34,26 @@
 namespace caiyun {
 
 class AssetLibrary;   // 前向声明：motion.hpp 不把素材实现细节带进所有 includeer
+
+/// 一个元素在某一帧的屏幕状态（连贯性验收用）。
+///
+/// 只记**名字与矩形**，不记指针/地址：导出后要能写成文本留档，
+/// 也要能跟下一帧按名字配对。
+struct ElementTrack {
+  std::string name{};
+  float x{0.0f};
+  float y{0.0f};
+  float w{0.0f};
+  float h{0.0f};
+  float alpha{1.0f};
+};
+
+/// 挂上“本帧轨迹写入目标”（线程局部；空 = 不采集）。
+///
+/// 定义在 `motion.cpp`。用这条通道而不是逐层传参：`render_frame` 的调用链
+/// 有快/慢两条路径 + 运动模糊的多次采样，逐层传参要改四处签名，
+/// 漏一处就是“某些帧没轨迹”，极难发现。
+void set_trajectory_sink(std::vector<ElementTrack>* sink);
 
 /// 设计坐标系尺寸（全部排版常数以此为单位）。
 inline constexpr float kDesignWidth = 1920.0f;
@@ -49,7 +71,8 @@ void render_scene(st::raster::Canvas& target, const Scene& scene, double local_t
                   double scene_duration, const st::ui::TextPort* text_port,
                   const AssetLibrary* assets = nullptr,
                   std::string_view asset_basis = {}, int scene_index = 0,
-                  int scene_total = 1);
+                  int scene_total = 1,
+                  std::vector<ElementTrack>* trajectory = nullptr);
 
 // —— 缓动（集中在此：改一处即改全片手感）——
 [[nodiscard]] auto ease_out_expo(float t) -> float;

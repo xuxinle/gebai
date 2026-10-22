@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <format>
 #include <string>
+#include <functional>
 #include <string_view>
 #include <vector>
 
@@ -574,8 +575,33 @@ void draw_text_lines(Painter& p, const Layer& layer, float lx, float ly, float l
 ///
 /// 按数组顺序（先列出的在下层）。这与镂月的块顺序语义一致——
 /// 用户学一次就够，不必记两套。
+/// 轨迹采集开关：由环境变量 `CAIYUN_TRACK` 控制。
+///
+/// ## 为何用全局缓冲而不是逐层传参
+///
+/// `render_frame` 的调用链是 `render.cpp → project.cpp → motion.cpp → paint_layers`，
+/// 中间还有快/慢两条路径与运动模糊的多次采样。要让轨迹一路传下去，
+/// 得改四处签名 + 每条路径都记得带上——而漏一处就是“某些帧没轨迹”，
+/// 极难发现。
+///
+/// 轨迹只是一份诊断输出（默认关闭，零开销），用线程局部的全局缓冲更稳：
+/// 每线程一份（导出并行安全），由 `dump_trajectory()` 一次性写出。
+struct TrajectoryCell {
+  std::vector<ElementTrack>* sink{nullptr};
+};
+
+[[nodiscard]] auto trajectory_cell() -> TrajectoryCell& {
+  static thread_local TrajectoryCell cell{};
+  return cell;
+}
+
+/// 本帧要写入的轨迹目标（空 = 不采集）。
+[[nodiscard]] auto trajectory_sink() -> std::vector<ElementTrack>* {
+  return trajectory_cell().sink;
+}
+
 void paint_layers(Painter& p, const Scene& scene, float local_time, const AssetLibrary* assets,
-                  std::string_view basis) {
+                  std::string_view basis, std::vector<ElementTrack>* trajectory = nullptr) {
   if (scene.layers.empty()) return;
   const float canvas_w = p.width();
   const float canvas_h = p.height();
@@ -608,10 +634,15 @@ void paint_layers(Painter& p, const Scene& scene, float local_time, const AssetL
   // 所以选中间：**降级 + 累计失败计数**，导出结束时汇总报告。
   LayoutEngine& engine = layout_engine();
   if (!scene.layout.empty()) {
-    // 本线程上次装的是不是这个脚本？（用源长度 + 文件名当廉价指纹）
+    // 本线程上次装的是不是这个脚本？
+    //
+    // ⚠ **必须用内容哈希**，不能用「文件名 + 长度」。
+    // 实测踩过：“改脚本内容不改长度”时指纹不变 → 引擎不会重装 →
+    // 渲染用的是**旧脚本**，而所有输出看起来“完全正常”（只是没变）。
+    // 那个现象极难查：帧字节完全一致、有效变化率一模一样、零报错。
     static thread_local std::string loaded_fingerprint{};
-    const std::string fingerprint =
-        std::format("{}#{}", scene.layout.filename, scene.layout.source.size());
+    const std::string fingerprint = std::format(
+        "{}#{}", scene.layout.filename, std::hash<std::string>{}(scene.layout.source));
     if (loaded_fingerprint != fingerprint) {
       const auto loaded = engine.load(scene.layout);
       if (!loaded) {
@@ -642,6 +673,28 @@ void paint_layers(Painter& p, const Scene& scene, float local_time, const AssetL
     }
     if (state.alpha <= 0.004f) continue;
 
+    // 元素位置上报：供连贯性验收做“按元素追踪”。
+    //
+    // ## 为何需要它（画面级量尺的盲区）
+    //
+    // 只比“亮块有没有留下”无法区分两种情况：
+    // · 同一个点从左上滑到右下（真连贯）；
+    // · 左上换了一个新东西、右下也换了一个（幻灯片），
+    // 两者在网格亮度上可能完全一样。
+    // 要分开必须知道“这个元素是谁、它去哪了”——只有渲染器知道。
+    //
+    // 只记 alpha>0 的（看不见的元素不应影响判定），
+    // 并只记名字（不记地址），导出后就是一份纯文本轨迹。
+    if (state.alpha > 0.004f) {
+      if (std::vector<ElementTrack>* sink = trajectory_sink(); sink != nullptr) {
+        sink->push_back(ElementTrack{std::string(layer.name), state.x, state.y, state.w,
+                                     state.h, state.alpha});
+      }
+      if (trajectory != nullptr) {
+        trajectory->push_back(ElementTrack{std::string(layer.name), state.x, state.y, state.w,
+                                           state.h, state.alpha});
+      }
+    }
     // 三维组：首层负责把**整组**画进一个共享世界（同一相机/光照/纹理）。
     // 判定“首层”看它是不是组内第一个出现的——组内顺序就是绘制顺序（先画桌面、再画图标）。
     bool is_group_head = false;
@@ -1192,12 +1245,20 @@ auto ease_out_back(float t) -> float {
   return 1.0f + c3 * inverse * inverse * inverse + c1 * inverse * inverse;
 }
 
+void set_trajectory_sink(std::vector<ElementTrack>* sink) { trajectory_cell().sink = sink; }
+
 void paint_script_shapes(Painter& p) {
   const LayoutEngine& engine = layout_engine();
   if (!engine.loaded()) return;
   const auto& shapes = engine.shapes();
   if (std::getenv("CAIYUN_SHAPES_DEBUG") != nullptr) {
     st::print("[shapes] loaded={} count={}\n", engine.loaded(), shapes.size());
+    if (!shapes.empty()) {
+      const auto& s = shapes[0];
+      st::print("[shapes] #0 kind={} x={:.1f} y={:.1f} w={:.1f} rgba=({},{},{},{})\n", s.kind,
+                static_cast<double>(s.x), static_cast<double>(s.y),
+                static_cast<double>(s.w), s.color.r, s.color.g, s.color.b, s.color.a);
+    }
   }
   if (shapes.empty()) return;
   const float scale = p.scale();
@@ -1231,7 +1292,7 @@ void paint_script_shapes(Painter& p) {
 void render_scene(st::raster::Canvas& target, const Scene& scene, double local_time,
                   double scene_duration, const st::ui::TextPort* text_port,
                   const AssetLibrary* assets, std::string_view asset_basis, int scene_index,
-                  int scene_total) {
+                  int scene_total, std::vector<ElementTrack>* trajectory) {
   Painter p(target, text_port);
   const float duration = static_cast<float>(scene_duration > 0.01 ? scene_duration : 2.0);
   const float time = static_cast<float>(local_time < 0.0 ? 0.0 : local_time);
@@ -1242,6 +1303,18 @@ void render_scene(st::raster::Canvas& target, const Scene& scene, double local_t
   // 背景全用**纯色填充**拼（底色条带 + 二维格子铺光 + 渐变暗角带）：整幅渐变填充
   // 在本框架里是逐像素采样（实测 1080p 约 25 ns/px，一次全幅 ≈ 50ms），而纯色
   // fill_rect 走覆盖运行段 + SIMD 混合，同样的观感成本低一个数量级。
+  // 轨迹采集：把本幕的轨迹缓冲挂上（外部传了才采）。
+  //
+  // 为何在这里挂而不往下传参：调用链是 render.cpp → project.cpp → motion.cpp，
+  // 中间还有快/慢两条路径与运动模糊的多次采样，逐层传参要改四处签名，
+  // 而漏一处就是“某些帧没轨迹”——极难发现。线程局部缓冲更稳。
+  //
+  // ⚠ 不覆盖已有的 sink：`render.cpp` 会在更外层设置（它知道帧号与 worker），
+  // 而 `project.cpp` 调 `render_scene` 时不会转传 trajectory，
+  // 所以这里如果写成“无条件赋值”，外层的设置会被 nullptr 抹掉（已踩过）。
+  if (trajectory != nullptr) {
+    trajectory_cell().sink = trajectory;
+  }
   paint_backdrop(p, scene, time, duration);
   // 素材背景**叠在底色之上、文字之下**：底色仍是兜底（图缺失时有基调可用）。
   if (assets != nullptr) paint_background_image(p, scene, time, duration, *assets, asset_basis);
@@ -1294,7 +1367,7 @@ void render_scene(st::raster::Canvas& target, const Scene& scene, double local_t
     case SceneKind::Custom: break;   // 完全由以下图层绘制（无内置模板）
   }
   // 通用图层：任何场景都可叠加（含 Custom）。
-  if (!scene.layers.empty()) paint_layers(p, scene, time, assets, asset_basis);
+  if (!scene.layers.empty()) paint_layers(p, scene, time, assets, asset_basis, trajectory);
   // ── 脚本临时图元（本帧才存在的形状）──
   //
   // 这是“结构变化”的唯一通道（见 `ScriptShape` 的说明）：

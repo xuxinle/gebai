@@ -152,9 +152,14 @@ void accumulate_linear(const st::raster::Canvas& canvas, std::vector<float>& acc
 void render_frame_with_motion_blur(Project& project, st::raster::Canvas& target,
                                    const RenderJob& job, int index,
                                    const st::ui::TextPort* text_port,
-                                   st::raster::Canvas& scratch) {
+                                   st::raster::Canvas& scratch,
+                                   std::vector<ElementTrack>* trajectory = nullptr) {
   const double center = frame_time(index, job.fps);
-  const int samples = std::clamp(job.motion_samples, 1, 16);
+  // 轨迹与运动模糊**不兼容**：模糊会在快门区间内多次渲染，
+  // 每渲一次都会往 sink 里压一份，结果是同一帧好几份重复记录。
+  // 所以采集轨迹时强制单采样（轨迹是诊断输出，不需要模糊）。
+  set_trajectory_sink(trajectory);
+  const int samples = trajectory != nullptr ? 1 : std::clamp(job.motion_samples, 1, 16);
   if (samples <= 1 || job.shutter <= 0.0) {
     project.render_frame(target, center, text_port);
     return;
@@ -580,6 +585,13 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
   // 每 worker 一份度量累加器：每帧都要写，共享加锁会成热点；几十字节的状态，
   // 每线程一份再归并的代价可忽略（与上面 render/encode 计时同一套做法）。
   std::vector<StatsAccumulator> worker_stats(workers);
+  // 轨迹记录（只在 job.trajectory 时填；每 worker 一份再归并）
+  struct TrajectoryRecord {
+    int frame{0};
+    ElementTrack track{};
+  };
+  std::vector<TrajectoryRecord> trajectory_records{};
+  std::vector<std::vector<TrajectoryRecord>> worker_trajectory(workers);
   std::atomic<int> next_index{first};
   std::atomic<bool> write_failed{false};
   for (std::size_t i = 0; i < workers; ++i) {
@@ -593,8 +605,16 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
       const int index = next_index.fetch_add(1);
       if (index >= last) return;
       const std::int64_t render_start = st::time::now_ns();
+      // 轨迹采集：每 worker 一份本地缓冲（不共享，无锁）
+      std::vector<ElementTrack> frame_track{};
       render_frame_with_motion_blur(project, local, job, index, text_port,
-                                    *worker_scratch[slot]);
+                                    *worker_scratch[slot],
+                                    job.trajectory ? &frame_track : nullptr);
+      if (job.trajectory && !frame_track.empty()) {
+        for (auto& track : frame_track) {
+          worker_trajectory[slot].push_back(TrajectoryRecord{index, std::move(track)});
+        }
+      }
       const std::int64_t render_end = st::time::now_ns();
       const std::string path = st::fs::join(frames_dir, std::format("frame_{:05}.png", index + 1));
       if (!write_frame_png(local, path)) {
@@ -624,6 +644,19 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
     // `jthread` 析构会自动 join（本仓纪律：不 detach）。
   } else {
     worker_body(0);
+  }
+  // 归并各 worker 的轨迹（按帧号排序，保证输出稳定可 diff）
+  if (job.trajectory) {
+    for (auto& per_worker : worker_trajectory) {
+      for (auto& record : per_worker) {
+        trajectory_records.push_back(std::move(record));
+      }
+      per_worker.clear();
+    }
+    std::sort(trajectory_records.begin(), trajectory_records.end(),
+              [](const TrajectoryRecord& a, const TrajectoryRecord& b) {
+                return a.frame != b.frame ? a.frame < b.frame : a.track.name < b.track.name;
+              });
   }
   if (cancel_.load()) {
     {
@@ -691,6 +724,26 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
     if (quality.bright_ratio > 20.0) {
       log_line("  提示：过亮帧超过 20% —— 暗场片里嵌了白底素材？需要降亮/压色/暗角融合",
                on_update);
+    }
+  }
+
+  // —— 阶段 1 收尾：导出元素轨迹（供连贯性验收做“按元素追踪”）——
+  //
+  // 为何要写文件而不是当场判定：验收器是独立工具（`caiyun_carry_check`），
+  // 它需要与帧图分开的两份证据：画面（看元素还在不在）+ 轨迹（看元素是谁、去哪了）。
+  // 两者结合才能区分“同一个东西滑过去”与“同一个位置换了一个新东西”。
+  if (job.trajectory && !trajectory_records.empty()) {
+    const std::string path = st::fs::join(job.output_dir, "trajectory.tsv");
+    std::string text = "frame\tname\tx\ty\tw\th\talpha\n";
+    for (const auto& record : trajectory_records) {
+      text += std::format("{}\t{}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.3f}\n", record.frame,
+                          record.track.name, static_cast<double>(record.track.x),
+                          static_cast<double>(record.track.y), static_cast<double>(record.track.w),
+                          static_cast<double>(record.track.h),
+                          static_cast<double>(record.track.alpha));
+    }
+    if (const auto saved = st::fs::write_text(path, text); saved.has_value()) {
+      log_line(std::format("元素轨迹：{} 条 → {}", trajectory_records.size(), path), on_update);
     }
   }
 
