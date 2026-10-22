@@ -90,7 +90,7 @@ function layout(t, duration, canvas, layers) {
 
   // 点的主轨迹（也用作各场所的"锚"）
   const dotX = keys(t, [
-    [0.0, CX], [0.9, CX], [1.6, CX - 210, "in_out"],
+    [0.0, CX], [0.9, CX], [1.75, CX - 210, "in_out"],
     [3.0, CX - 210], [3.4, CX - 190, "in_out"],
     [4.4, CX - 190], [5.0, CX - 60, "in_out"],
     [6.0, CX - 40, "in_out"], [6.8, CX, "in_out"],
@@ -126,12 +126,12 @@ function layout(t, duration, canvas, layers) {
     for (let i = 0; i < rows; i++) {
       const rowAppear = Math.min(1, Math.max(0, (appear * rows) - i));
       if (rowAppear <= 0.01) continue;
-      const rx = CX - 550;
-      const ry = CY - 200 + i * 110;
+      const rx = CX - 640;
+      const ry = CY - 230 + i * 122;
       const isHi = Math.abs(i - highlight) < 0.5;
       // 行背景（选中行微亮）
       push({
-        kind: 1, x: rx, y: ry - 30 + (1 - rowAppear) * 34, w: 1100, h: 86,
+        kind: 1, x: rx, y: ry - 34 + (1 - rowAppear) * 34, w: 1280, h: 96,
         radius: 14, color: isHi ? "#2A3350" : "#171C2A",
         alpha: rowAppear * (isHi ? 0.95 : 0.75),
       });
@@ -185,7 +185,7 @@ function layout(t, duration, canvas, layers) {
     const zoomT = keys(t, [[4.4, 0.72], [5.1, 1.0, "out"], [5.9, 1.0], [6.3, 1.16, "in"]]);
     setCamera(0, 0, zoomT);
     const cardT = spring(Math.max(0, t - 4.45), 0.62, 17);
-    const cardW = 1160, cardH = 660;
+    const cardW = 1320, cardH = 740;
     const cardX = CX - cardW * 0.5;
     const cardY = CY - cardH * 0.5 - 30 * cardT;
     // 卡片本体
@@ -218,7 +218,7 @@ function layout(t, duration, canvas, layers) {
     const zoomT = keys(t, [[6.0, 0.78], [6.7, 1.02, "out"], [7.2, 1.02], [7.6, 1.22, "in"]]);
     setCamera(0, 0, zoomT);
     const spin = ringSpin * Math.PI / 180.0;
-    const radius = 190;
+    const radius = 240;
     const count = 26;
     const sweep = keys(t, [[6.15, 0], [7.1, 1, "in_out"]]);
     for (let i = 0; i < count; i++) {
@@ -243,12 +243,17 @@ function layout(t, duration, canvas, layers) {
       const u = i / (count - 1);
       if (u > drawIn) break;
       const amp = 320 * Math.exp(-1.6 * u);
+      // 亮度沿曲线波动（相位随时间推进）——"能量在曲线上流动"，
+      // 这让每帧的亮度分布都在变，而不只是珠子在动。
+      const wave = 0.55 + 0.45 * Math.sin((u * 7.0 - t * 4.5) * Math.PI);
       push({
         kind: 0, x: 180 + u * 1560, y: 540 - amp * Math.sin(u * Math.PI * 2.6),
-        w: 13, color: SOFT, alpha: 0.92,
+        w: 16 + wave * 14, color: wave > 0.6 ? ACCENT : SOFT, alpha: 0.35 + wave * 0.62,
       });
     }
     // 珠子 + 4 段拖尾（比首版更粗更长，肉眼可见）
+    // 珠子跑得快（1.6 秒跑完全程）+ 曲线本身持续"重绘"（用 phase 让点的亮度波动），
+    // 这样即使点的位置不变，每帧的亮度分布也在变（提升变化强度）。
     const beadT = Math.min(1, Math.max(0, (t - 7.6) / 1.6));
     const beadA = keys(t, [[7.55, 0], [7.9, 1, "out"], [9.3, 1], [9.7, 0, "in"]]);
     if (beadA > 0.01) {
@@ -294,7 +299,9 @@ function layout(t, duration, canvas, layers) {
   const subA = keys(t, [[13.2, 0], [13.5, 1, "out"], [15.0, 1]]);
   // 字标下方一条"下划线扫过"（避免末段完全静止）
   if (t > 12.6 && t < 15.0) {
-    // 末段也不能静止：持续缓推 + 轻微横移（onetake 末段是"缓慢推向名字"）。
+    // 末段：持续缓推 + 横移 + **一道扫光持续扫过**。
+    // 实测：只做"缓推 + 横移"时，14-15 秒的 Δ 只有 0.05（几乎静止）。
+    // 加扫光后每帧都有大范围亮度变化。
     const rise = keys(t, [[12.6, 40], [13.4, 0, "out"], [15.0, -26, "in_out"]]);
     const pushIn = keys(t, [[12.6, 0.88], [15.0, 1.06, "in_out"]]);
     const drift = keys(t, [[12.6, 40], [15.0, -40, "in_out"]]);
@@ -304,6 +311,21 @@ function layout(t, duration, canvas, layers) {
       kind: 1, x: CX - 190, y: CY + 118, w: 380 * sweep, h: 2.4, radius: 1.2,
       color: ACCENT, alpha: 0.55,
     });
+    // 扫光：一道竖直亮带从右向左反复扫过（每 1.2 秒一轮）
+    const sweepPos = ((t - 12.6) / 1.2) % 1.0;
+    const sx = CX + 520 - sweepPos * 1040;
+    // 扫光：**极淡的大面积柔光**，不是亮柱。
+    // 首版做成 120×380 的亮蓝柱，直接挡住"歌白"右侧——很丑。
+    // 改成 3 层同心、低 alpha 的宽幅光，扫过时只是"掠过一层亮"。
+    const glowA = 0.22 * Math.sin(sweepPos * Math.PI);
+    if (glowA > 0.01) {
+      for (let layer = 3; layer >= 1; layer--) {
+        push({
+          kind: 1, x: sx - layer * 80, y: CY - 260, w: 260 + layer * 160, h: 620,
+          radius: 200, color: "#3E4E82", alpha: glowA / layer,
+        });
+      }
+    }
   }
 
   // ═══════ 点本体 ═══════
