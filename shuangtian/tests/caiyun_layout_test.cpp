@@ -240,3 +240,89 @@ ST_TEST(layout_engine_is_deterministic) {
     ST_CHECK(first[index].scale == second[index].scale);
   }
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 宿主函数（脚本可调的 C++ 能力）
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// 开放 C++ 能力给脚本是"能力强大"的关键一步，但它也是**最容易失控**的一步。
+// 这组用例守两条：
+// ① 白名单函数真的能用、结果正确；
+// ② **确定性**没被破坏（`noise` 同种子同结果，没有 `Math.random` 可调）。
+
+ST_TEST(host_functions_are_callable_from_script) {
+  caiyun::LayoutEngine engine;
+  const caiyun::LayoutScript script{
+      .source = R"js(
+        function layout(t, duration, canvas, layers) {
+          const e = ease("out", 0.5);        // 缓动
+          const mid = lerp(0, 100, 0.25);    // 插值 = 25
+          const bounded = clamp(999, 0, 10); // 限幅 = 10
+          const snapped = snap(0.37, 30);    // 吸附 = 0.3666..
+          return [{ dx: e * 100, dy: mid + bounded, alpha: snapped }];
+        }
+      )js",
+      .filename = "<host-fn-test>",
+      .timeout_ms = 400,
+  };
+  ST_CHECK(engine.load(script).has_value());
+
+  std::vector<caiyun::LayerDelta> deltas;
+  std::vector<caiyun::LayerState> states(1);
+  ST_CHECK(engine.evaluate(0.0f, 1.0f, 1920.0f, 1080.0f, states, deltas).has_value());
+  // ease("out", 0.5) = 1-0.5^3 = 0.875 → dx = 87.5
+  ST_CHECK(std::abs(deltas[0].dx - 87.5f) < 0.5f);
+  // lerp = 25, clamp = 10 → dy = 35
+  ST_CHECK(std::abs(deltas[0].dy - 35.0f) < 0.01f);
+  // snap(0.37,30) = round(11.1)/30 = 11/30 ≈ 0.3667
+  ST_CHECK(std::abs(deltas[0].alpha - 0.3667f) < 0.01f);
+}
+
+ST_TEST(host_noise_is_deterministic) {
+  // `noise` 必须同种子同结果——这是"用伪随机做偶发抖动但仍可复现"的前提。
+  // 若它变成真随机，同一帧渲两次会不同，回归比对全部失效。
+  caiyun::LayoutEngine engine;
+  const caiyun::LayoutScript script{
+      .source = R"js(
+        function layout(t, duration, canvas, layers) {
+          return [{ dx: noise(42) * 1000, dy: noise(42) * 1000 }];
+        }
+      )js",
+      .filename = "<noise-test>",
+      .timeout_ms = 400,
+  };
+  ST_CHECK(engine.load(script).has_value());
+
+  std::vector<caiyun::LayerDelta> first;
+  std::vector<caiyun::LayerDelta> second;
+  std::vector<caiyun::LayerState> states(1);
+  ST_CHECK(engine.evaluate(0.0f, 1.0f, 1920.0f, 1080.0f, states, first).has_value());
+  ST_CHECK(engine.evaluate(0.0f, 1.0f, 1920.0f, 1080.0f, states, second).has_value());
+  ST_CHECK(first[0].dx == second[0].dx);
+  ST_CHECK(first[0].dy == second[0].dy);
+  // 同种子两次调用也必须一致（不是"每帧变一次"）
+  ST_CHECK(std::abs(first[0].dx - first[0].dy) < 1e-4f);
+}
+
+ST_TEST(host_ease_rejects_unknown_name) {
+  // 写错缓动名要给**可行动的错误**（列出可用值），而不是静默返回 0。
+  caiyun::LayoutEngine engine;
+  const caiyun::LayoutScript script{
+      .source = R"js(
+        function layout(t, duration, canvas, layers) {
+          return [{ dx: ease("easy-out", 0.5) }];
+        }
+      )js",
+      .filename = "<bad-ease>",
+      .timeout_ms = 400,
+  };
+  ST_CHECK(engine.load(script).has_value());
+
+  std::vector<caiyun::LayerDelta> deltas;
+  std::vector<caiyun::LayerState> states(1);
+  const auto status = engine.evaluate(0.0f, 1.0f, 1920.0f, 1080.0f, states, deltas);
+  ST_CHECK(!status.has_value());
+  ST_CHECK(engine.last_error().find("easy-out") != std::string::npos);
+  // 且降级：零增量（不毁整帧）
+  ST_CHECK(deltas[0].dx == 0.0f);
+}

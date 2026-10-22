@@ -276,3 +276,113 @@ ST_TEST(path_zero_arc_is_a_straight_line) {
     ST_CHECK(std::abs(offset.dy + 600.0f * t) < 1e-2f);
   }
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 关键帧时间线（`tracks`）
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// ## 它守的是什么
+//
+// `path_*` 只能表达**一次**位移，`bounce_*` 只能表达**一次**弹跳。
+// 而真实动画常需要多段（先飞过来、停一拍、再缩一下、再淡出）——
+// 这就是关键帧存在的理由。
+//
+// 用例集中在四条**互不蕴含**的边界上：
+// ① 首末帧之外**不外插**（外插会让物体从奇怪的位置进场）；
+// ② 区间内**线性/缓动**正确；
+// ③ 单帧轨道恒为常量；
+// ④ 未驱动的属性**保持基准值**（不归零）。
+
+namespace {
+
+[[nodiscard]] auto make_track(std::string property, std::vector<caiyun::KeyFrame> keys)
+    -> caiyun::KeyTrack {
+  caiyun::KeyTrack track{};
+  track.property = std::move(property);
+  track.keys = std::move(keys);
+  return track;
+}
+
+}  // namespace
+
+ST_TEST(track_holds_before_first_and_after_last_key) {
+  // 不外插：早于首帧取首帧、晚于末帧取末帧。
+  // 若外插，物体在首帧之前会从画面外很远处飞过来——那是错的。
+  caiyun::KeyTrack track = make_track(
+      "y", {caiyun::KeyFrame{1.0f, 400.0f, 0}, caiyun::KeyFrame{2.0f, 200.0f, 0}});
+  ST_CHECK(std::abs(caiyun::evaluate_track(track, 0.0f) - 400.0f) < 1e-3f);
+  ST_CHECK(std::abs(caiyun::evaluate_track(track, -5.0f) - 400.0f) < 1e-3f);
+  ST_CHECK(std::abs(caiyun::evaluate_track(track, 3.0f) - 200.0f) < 1e-3f);
+  ST_CHECK(std::abs(caiyun::evaluate_track(track, 99.0f) - 200.0f) < 1e-3f);
+}
+
+ST_TEST(track_interpolates_linearly_with_linear_ease) {
+  caiyun::KeyTrack track = make_track(
+      "x", {caiyun::KeyFrame{0.0f, 100.0f, 0}, caiyun::KeyFrame{1.0f, 300.0f, 0}});
+  ST_CHECK(std::abs(caiyun::evaluate_track(track, 0.0f) - 100.0f) < 1e-3f);
+  ST_CHECK(std::abs(caiyun::evaluate_track(track, 0.5f) - 200.0f) < 1e-3f);
+  ST_CHECK(std::abs(caiyun::evaluate_track(track, 1.0f) - 300.0f) < 1e-3f);
+}
+
+ST_TEST(track_ease_out_reaches_target_smoothly) {
+  // ease-out：前半程走得快（中点已过半），但两端精确落在关键帧上。
+  caiyun::KeyTrack track = make_track(
+      "x", {caiyun::KeyFrame{0.0f, 0.0f, 1}, caiyun::KeyFrame{1.0f, 100.0f, 1}});
+  ST_CHECK(std::abs(caiyun::evaluate_track(track, 0.0f) - 0.0f) < 1e-3f);
+  ST_CHECK(std::abs(caiyun::evaluate_track(track, 1.0f) - 100.0f) < 1e-3f);
+  // 中点必须**超过**线性的一半（这就是 ease-out 的特征）
+  ST_CHECK(caiyun::evaluate_track(track, 0.5f) > 50.0f);
+}
+
+ST_TEST(track_single_key_is_constant) {
+  caiyun::KeyTrack track = make_track("alpha", {caiyun::KeyFrame{0.5f, 0.7f, 1}});
+  for (const float time : {0.0f, 0.5f, 2.0f}) {
+    ST_CHECK(std::abs(caiyun::evaluate_track(track, time) - 0.7f) < 1e-3f);
+  }
+}
+
+ST_TEST(track_multi_segment_passes_through_middle_key) {
+  // 三段：0→1 上升、1→2 回落。中段关键帧必须被**精确经过**，
+  // 否则“先升后降”会变成一条近似直线（AI 最常写错的形态之一）。
+  caiyun::KeyTrack track = make_track(
+      "y", {caiyun::KeyFrame{0.0f, 100.0f, 0}, caiyun::KeyFrame{1.0f, 300.0f, 0},
+            caiyun::KeyFrame{2.0f, 150.0f, 0}});
+  ST_CHECK(std::abs(caiyun::evaluate_track(track, 1.0f) - 300.0f) < 1e-3f);
+  ST_CHECK(std::abs(caiyun::evaluate_track(track, 0.5f) - 200.0f) < 1e-3f);
+  ST_CHECK(std::abs(caiyun::evaluate_track(track, 1.5f) - 225.0f) < 1e-3f);
+}
+
+ST_TEST(track_undriven_properties_keep_baseline) {
+  // 只驱动 `y` 时，`x`/`alpha` 必须**保持 JSON 基准值**，而不是归零。
+  // 这条是"轨道与基准可以混用"的前提。
+  caiyun::Layer layer{};
+  layer.enter = 0;
+  layer.x = "500";
+  layer.y = "300";
+  layer.w = "100";
+  layer.h = "80";
+  layer.opacity = 0.8f;
+  layer.tracks.push_back(make_track(
+      "y", {caiyun::KeyFrame{0.0f, 100.0f, 0}, caiyun::KeyFrame{1.0f, 400.0f, 0}}));
+
+  const auto state = caiyun::evaluate_layer(layer, 0.5f, kCanvasW, kCanvasH, kDesignW, kDesignH);
+  // y 被轨道驱动：中点 250
+  ST_CHECK(std::abs(state.y - 250.0f) < 1e-2f);
+  // 其余保持基准
+  ST_CHECK(std::abs(state.x - 500.0f) < 1e-2f);
+  ST_CHECK(std::abs(state.w - 100.0f) < 1e-2f);
+  ST_CHECK(std::abs(state.alpha - 0.8f) < 1e-3f);
+}
+
+ST_TEST(track_alpha_is_clamped) {
+  // 关键帧写超范围（如 1.5）要夹取，否则渲染会出现越界透明度。
+  caiyun::Layer layer{};
+  layer.enter = 0;
+  layer.tracks.push_back(make_track("alpha", {caiyun::KeyFrame{0.0f, 1.5f, 0}}));
+  const auto state = caiyun::evaluate_layer(layer, 0.0f, kCanvasW, kCanvasH, kDesignW, kDesignH);
+  ST_CHECK(state.alpha <= 1.0f);
+  ST_CHECK(state.alpha >= 0.0f);
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════════
