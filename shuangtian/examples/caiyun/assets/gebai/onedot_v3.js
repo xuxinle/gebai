@@ -127,7 +127,7 @@ function layout(t, duration, canvas, layers) {
       const rowAppear = Math.min(1, Math.max(0, (appear * rows) - i));
       if (rowAppear <= 0.01) continue;
       const rx = CX - 640;
-      const ry = CY - 230 + i * 122;
+      const ry = CY - 260 + i * 126;
       const isHi = Math.abs(i - highlight) < 0.5;
       // 行背景（选中行微亮）
       push({
@@ -140,11 +140,18 @@ function layout(t, duration, canvas, layers) {
         kind: 1, x: rx + 30, y: ry - 12 + (1 - rowAppear) * 34, w: 44, h: 44,
         radius: 10, color: isHi ? ACCENT : SOFT, alpha: rowAppear * 0.95,
       });
-      // 行文字条（用短线示意，避免依赖字体度量）
-      const textLen = [150, 190, 130, 170][i];
+      // 行文字：**真实文字**（之前是色条占位，内容密度低得多）
+      const labels = ["video", "poster", "music", "code"];
       push({
-        kind: 1, x: rx + 42, y: ry + 1 + (1 - rowAppear) * 14, w: textLen, h: 9,
-        radius: 4, color: isHi ? WHITE : DIM, alpha: rowAppear * (isHi ? 0.9 : 0.65),
+        kind: 3, text: labels[i],
+        x: rx + 105, y: ry + 2 + (1 - rowAppear) * 14, h: 34,
+        color: isHi ? WHITE : "#7A85A0", alpha: rowAppear * (isHi ? 0.98 : 0.8),
+      });
+      // 右侧中文描述：让列表看起来是真界面，不是示意
+      push({
+        kind: 3, text: ["一镜到底", "版式层级", "配乐音效", "自绘渲染"][i],
+        x: rx + 400, y: ry + 6 + (1 - rowAppear) * 14, h: 24,
+        color: isHi ? "#AEB8D8" : "#4E566E", alpha: rowAppear * 0.9,
       });
     }
   }
@@ -154,29 +161,30 @@ function layout(t, duration, canvas, layers) {
     const enter = keys(t, [[3.0, 1], [3.5, 0, "out"]]);
     const exit = keys(t, [[4.3, 0], [4.7, 1, "in"]]);
     setCamera(enter * 320 - exit * 260, 0, 1.0);
-    const lineY = CY - 40;
-    const lineX = CX - 620;
+    const lineY = CY + 250;
+    const lineX = CX - 560;
     // 光标（呼吸）
     const caretOn = Math.sin(t * 12.0) > -0.3;
     const typed = Math.min(1, Math.max(0, (t - 3.1) / 1.1));
-    const chars = Math.floor(typed * 22);
-    // 已输入的文字条（用递增宽度模拟逐字）
+    const full = "做一个 15 秒的歌白短片";
+    const chars = Math.floor(typed * full.length);
+    // 已输入的文字：**真实文字逐字显示**（不是色条占位）
     if (chars > 0) {
       push({
-        kind: 1, x: lineX, y: lineY - 4, w: chars * 34, h: 30, radius: 12,
-        color: WHITE, alpha: 0.92,
+        kind: 3, text: full.slice(0, chars),
+        x: lineX, y: lineY - 24, h: 48, color: WHITE, alpha: 0.96,
       });
     }
     if (caretOn) {
       push({
-        kind: 1, x: lineX + chars * 34 + 8, y: lineY - 34, w: 7, h: 68,
-        radius: 1, color: ACCENT, alpha: 1.0,
+        kind: 1, x: lineX + chars * 48 + 10, y: lineY - 30, w: 7, h: 60,
+        radius: 2, color: ACCENT, alpha: 1.0,
       });
     }
-    // 上方标题条
+    // 上方标题：真实文字
     push({
-      kind: 1, x: lineX, y: lineY - 110, w: 330, h: 22, radius: 10,
-      color: SOFT, alpha: keys(t, [[3.0, 0], [3.4, 0.8, "out"]]),
+      kind: 3, text: "prompt", x: lineX, y: lineY - 100, h: 30,
+      color: SOFT, alpha: keys(t, [[3.0, 0], [3.4, 0.85, "out"]]),
     });
   }
 
@@ -193,20 +201,27 @@ function layout(t, duration, canvas, layers) {
       kind: 1, x: cardX, y: cardY, w: cardW, h: cardH, radius: 14,
       color: "#161B2A", alpha: 0.96 * Math.min(1, cardT * 1.6),
     });
-    // 卡片标题条
+    // 卡片标题：真实文字
     push({
-      kind: 1, x: cardX + 70, y: cardY + 60, w: 420, h: 30, radius: 12,
-      color: WHITE, alpha: 0.9 * Math.min(1, cardT * 1.4),
+      kind: 3, text: "渲染完成", x: cardX + 70, y: cardY + 46, h: 46,
+      color: WHITE, alpha: 0.95 * Math.min(1, cardT * 1.4),
     });
-    // 内部三条数据条，逐条"填满"（宽度增长 = 持续变化）
+    // 内部三条：进度条 + 真实文字标签与数值
     for (let i = 0; i < 3; i++) {
       const fill = Math.min(1, Math.max(0, (t - 4.75 - i * 0.18) / 0.55));
       if (fill <= 0.01) continue;
-      const barY = cardY + 170 + i * 130;
-      push({ kind: 1, x: cardX + 70, y: barY, w: cardW - 140, h: 30, radius: 12,
+      const barY = cardY + 140 + i * 165;
+      const labels = ["画面", "配乐", "音效"];
+      const values = ["1080p 30fps", "120 BPM", "-14 LUFS"];
+      push({ kind: 1, x: cardX + 70, y: barY, w: cardW - 140, h: 24, radius: 12,
              color: "#20263A", alpha: 0.9 });
-      push({ kind: 1, x: cardX + 70, y: barY, w: (cardW - 140) * fill, h: 30, radius: 12,
+      push({ kind: 1, x: cardX + 70, y: barY, w: (cardW - 140) * fill, h: 24, radius: 12,
              color: i === 0 ? ACCENT : (i === 1 ? "#6B78A8" : SOFT), alpha: 0.95 });
+      // 标签与数值放在**进度条下方**（首版放在 +38 处，正好被条压住）
+      push({ kind: 3, text: labels[i], x: cardX + 70, y: barY + 44, h: 30,
+             color: "#8A94B0", alpha: fill * 0.95 });
+      push({ kind: 3, text: values[i], x: cardX + cardW - 380, y: barY + 44, h: 30,
+             color: WHITE, alpha: fill * 0.95 });
     }
   }
 
