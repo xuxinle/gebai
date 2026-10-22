@@ -15,9 +15,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <string>
 #include <vector>
 
+#include "st/core/fs.hpp"
 #include "st/core/log.hpp"
+#include "st/core/time.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/surface.hpp"
 
@@ -40,11 +43,15 @@ struct Vec4 {
               m.value(3, 0) * p.x + m.value(3, 1) * p.y + m.value(3, 2) * p.z + m.value(3, 3) * w};
 }
 
-/// 变换后的顶点：裁剪空间位置 + 世界法线 + 顶点色。
+/// 变换后的顶点：裁剪空间位置 + 世界法线 + 顶点色 + UV。
 struct Vertex {
   Vec4 clip{};
   math::Vec3 normal{};
   math::Vec3 color{};
+  float u{0.0f};
+  float v{0.0f};
+  /// 本三角形是否带 UV（纹理采样开关，避免“无 UV 网格误用残留纹理”）。
+  bool has_uv{false};
   [[nodiscard]] auto position() const noexcept -> math::Vec3 { return {clip.x, clip.y, clip.z}; }
 };
 
@@ -58,6 +65,10 @@ constexpr float kNearEpsilon = 1e-4f;
                   a.clip.z + (b.clip.z - a.clip.z) * t, a.clip.w + (b.clip.w - a.clip.w) * t};
   out.normal = a.normal + (b.normal - a.normal) * t;
   out.color = a.color + (b.color - a.color) * t;
+  // 裁剪产生的顶点也要插值 UV（否则裁过的面会采样到错误位置）
+  out.u = a.u + (b.u - a.u) * t;
+  out.v = a.v + (b.v - a.v) * t;
+  out.has_uv = a.has_uv;
   return out;
 }
 
@@ -92,37 +103,81 @@ constexpr float kNearEpsilon = 1e-4f;
   for (int i = 0; i < produced; ++i) out[i] = buffer[i];
   return produced;
 }
+}  // namespace
 
 /// 与 GPU 路径**同一套光照公式**（Lambert + 环境 + 边缘光）。
 ///
 /// 两条腿（软件/GPU）必须在同一场景上给出接近的画面，否则"软件保底"
-/// 就只是"另一种长相"。公式写在这里与 GPU 侧着色器（`platform_d3d11.cpp`）保持一致。
-[[nodiscard]] auto shade(math::Vec3 normal, math::Vec3 color) noexcept -> math::Vec3 {
+/// 就只是"另一种长相"。**公式只在这里定义一次**：GPU 侧的 HLSL（`scene3d_d3d11.cpp`
+/// 的 `ps_scene3d`）是这段的逐字翻译，改动必须两处同时改。
+/// 能逐字节对齐靠的是：两侧都只做乘加、不调 `pow`/`smoothstep` 这类
+/// 实现自由度大的函数（见下方“为何把幂改成乘法”）。
+///
+/// ## 为何把 `pow(rim, 2)` 换成乘法
+///
+/// 原先写 `std::pow(1 - nz, 2.0f)`——那是**逐像素**调用（1080p 一次 200 万次）。
+/// `pow` 的浮点版本在多数工具链上走 `exp/log` 路径，而这里底数是 `1-nz`、
+/// 指数恒为 2，直接 `r*r` 在语义上**逐位等价**（乘法比幂函数精确）。
+/// 实测收益见 `tools/scene3d_cost_probe.cpp` 的对照数据。
+auto shade_terms(math::Vec3 normal, math::Vec3 color, const Lighting& lighting) -> math::Vec3 {
   const math::Vec3 n = normal.normalized();
-  const math::Vec3 light = math::Vec3{0.4f, 0.8f, 0.6f}.normalized();
+  const math::Vec3 light = lighting.key_direction.normalized();
   const float diffuse = std::max(n.dot(light), 0.0f);
-  const float ambient = 0.35f;
-  const float rim = std::pow(1.0f - std::max(n.z, 0.0f), 2.0f) * 0.25f;
-  const float scale = ambient + diffuse * 0.75f;
-  return math::Vec3{std::min(std::max(color.x * scale + rim, 0.0f), 1.0f),
-                    std::min(std::max(color.y * scale + rim, 0.0f), 1.0f),
-                    std::min(std::max(color.z * scale + rim, 0.0f), 1.0f)};
+  // 边缘光：视线沿 -Z（相机朝 -Z 看），所以 `1 - n.z` 就是“偏离正对相机”的程度。
+  const float rim_base = 1.0f - std::max(n.z, 0.0f);
+  const float rim = rim_base * rim_base * lighting.rim;
+  // ⚠ 边缘光 **乘在固有色上**，不是加到最终色上。
+  //
+  // 实测踩过（用户一眼就看出来的“边缘锯启”其实是这个）：早先写 `color*scale + rim`，
+  // 于是盒子的**侧壁**（n.z=0）拿到 rim 满值，亮度被抬到 0.905——**比顶面 0.969
+  // 只暗一点点**，而它本该是最暗的面之一。观感上就是“盒子上贴了一片白边”，
+  // 那片假面的两条硬边被误认为是抗锯齿失败。
+  //
+  // 改成乘法后：侧壁 = color × 1.115、顶面 = color × 1.35（自身受光多），
+  // 明暗关系（顶 > 侧 > 正）得以保持，且不会出现“比亮面还亮”的反相。
+  const float scale = lighting.ambient + diffuse * lighting.diffuse + rim;
+  const auto clamp01 = [](float value) noexcept -> float {
+    return value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
+  };
+  const float gain = scale * lighting.exposure;
+  return math::Vec3{clamp01(color.x * gain), clamp01(color.y * gain), clamp01(color.z * gain)};
 }
+
+namespace {
 
 class SoftwareScene final : public Scene3D {
  public:
   SoftwareScene(int width, int height)
       : width_(std::max(1, width)), height_(std::max(1, height)),
-        canvas_(width_, height_), depth_(static_cast<std::size_t>(width_) *
-                                         static_cast<std::size_t>(height_), 0.0f) {}
+        // **超采样缓冲**：每个像素 `S²` 个样本，解析（resolve）后才是真正的抗锯齿。
+        //
+        // 为何需要它（实测）：单点采样下三维模型的斜边是一排排像素阶梯（成片上
+        // 非常明显，用户一眼就看到了）。二维那边本来就抗锯齿（扫描线覆盖率），
+        // 所以反差更刺眼：文字平滑、模型崩齿。
+        //
+        // 为何用**超采样**而不是“覆盖率估算”：三维的锯齿主要在**轮廓边**，
+        // 而区分轮廓边与内部边的代价并不比干脆多画几个样本低；而超采样对
+        // “细长三角形”、“边缘光rim”这些情形都是天然正确的。
+        //
+        // 代价：光栅像素数 ×S²（S=2 是 4 倍）。实测三维光栅本身很便宜
+        //（720p 千面软件腿 ~60ms 中的大头在像素），所以 S=2 是本轮选的档位；
+        // 要更高质量把 `kBake` 调到 3/4（成本 S²）。
+        canvas_(width_ * kBake, height_ * kBake),
+        depth_(static_cast<std::size_t>(width_) * kBake *
+                   static_cast<std::size_t>(height_) * kBake,
+               0.0f) {}
 
   void begin_frame(math::Color clear_color) override {
     canvas_.clear(clear_color);
     std::fill(depth_.begin(), depth_.end(), 1.0f);   // 1.0 = 远平面
     draw_calls_ = 0;
+    lighting_ = Lighting{};   // 每帧回到默认：不调 `set_lighting` 的调用方行为完全不变
   }
 
   void set_camera(const Camera& camera) override {
+    // ⚠ 纵横比用**逻辑尺寸**，不是超采样缓冲尺寸。
+    // 两者比例相同，但直接写 `kWidth*kBake / kHeight*kBake` 在 kBake 改变时
+    // 容易漏改一处，而纵横比错了会让模型整体变形（很难一眼看出是哪里的错）。
     const float aspect = height_ > 0 ? static_cast<float>(width_) / static_cast<float>(height_)
                                      : 1.0f;
     const float fov = camera.fov_y_degrees * 3.14159265358979f / 180.0f;
@@ -131,9 +186,36 @@ class SoftwareScene final : public Scene3D {
     mvp_ready_ = true;
   }
 
+  void set_lighting(const Lighting& lighting) override { lighting_ = lighting; }
+
+  /// 纹理（RGBA8 非预乘，行优先）。空 span / 非法尺寸 = 清除纹理（回到顶点色）。
+  void set_texture(std::span<const std::uint8_t> pixels, int width, int height) override {
+    const auto clear = [this] {
+      texture_.clear();
+      texture_width_ = 0;
+      texture_height_ = 0;
+    };
+    if (pixels.empty() || width <= 0 || height <= 0) {
+      clear();
+      return;
+    }
+    const std::size_t needed =
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4U;
+    if (pixels.size() < needed) {
+      clear();
+      return;
+    }
+    texture_.assign(pixels.begin(), pixels.begin() + static_cast<std::ptrdiff_t>(needed));
+    texture_width_ = width;
+    texture_height_ = height;
+  }
+
   void draw_mesh(const Mesh& mesh, const math::Mat4& model) override {
     if (mesh.is_empty() || !mvp_ready_) return;
     const math::Mat4 mvp = projection_ * view_ * model;
+    // 本网格是否有可用 UV；有且已设纹理时才采样
+    const bool mesh_has_uv = mesh.has_uvs();
+    use_texture_ = mesh_has_uv && !texture_.empty() && texture_width_ > 0;
     for (std::size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
       Vertex tri[3];
       bool ok = true;
@@ -151,6 +233,10 @@ class SoftwareScene final : public Scene3D {
             model.value(2, 0) * normal.x + model.value(2, 1) * normal.y + model.value(2, 2) * normal.z};
         tri[k].normal = world_normal;
         tri[k].color = math::Vec3{vertex[6], vertex[7], vertex[8]};
+        const auto uv = mesh.uv_at(index);
+        tri[k].u = uv.first;
+        tri[k].v = uv.second;
+        tri[k].has_uv = mesh_has_uv;
       }
       if (!ok) continue;
 
@@ -166,23 +252,37 @@ class SoftwareScene final : public Scene3D {
 
   void end_frame(Surface& target, math::Rect destination, float opacity = 1.0f) override {
     // 结果作为**一张图**交给目标画布（与 2D 原语同一条合成路径）。
-    // 相比原先 GL 路径的 `glReadPixels` + 逐像素转换，这里没有跨 API 往返。
-    (void)opacity;
-    target.draw_canvas(canvas_, destination);
+    //
+    // 交付前必须先 **resolve**（超采样缓冲 → 逻辑分辨率）：直接 `draw_canvas`
+    // 也能缩对，但那会把“平均”交给双线性采样，而 alpha 的平场需要预乘空间
+    // 里的加权平均才能与“其它二维图元”一致。所以自己平均一次。
+    const Canvas resolved = resolve_to_logical();
+    st::raster::DrawOptions options{};
+    options.opacity = opacity;
+    target.draw_canvas(resolved, destination, options);
   }
 
   [[nodiscard]] auto width() const noexcept -> int override { return width_; }
   [[nodiscard]] auto height() const noexcept -> int override { return height_; }
   [[nodiscard]] auto draw_calls() const noexcept -> std::uint64_t override { return draw_calls_; }
+  [[nodiscard]] auto backend() const -> std::string override { return "software"; }
+  /// 软件腿是同步的：`draw_mesh` 返回时像素已经写完了，没什么可等。
+  void flush() override {}
 
  private:
   /// 屏幕空间三角形光栅化：重心坐标 + z-buffer + 透视校正插值 + 逐像素光照。
+  ///
+  /// 坐标系是**超采样缓冲**（`width_*kBake` × `height_*kBake`）：透视映射、
+  /// 包围盒、深度缓冲都按它算。这样“一个逻辑像素的 `S²` 个子样本”自然落在
+  /// 同一块缓冲上，resolve 时平均即得抗锯齿。
   void rasterize(const Vertex& a, const Vertex& b, const Vertex& c) {
+    const int bake_width = width_ * kBake;
+    const int bake_height = height_ * kBake;
     // 透视除法 → NDC → 屏幕（y 向下，与画布一致）
     const auto to_screen = [&](const Vertex& v) {
       const float inv_w = 1.0f / v.clip.w;
-      return Vec4{(v.clip.x * inv_w * 0.5f + 0.5f) * static_cast<float>(width_),
-                  (0.5f - v.clip.y * inv_w * 0.5f) * static_cast<float>(height_),
+      return Vec4{(v.clip.x * inv_w * 0.5f + 0.5f) * static_cast<float>(bake_width),
+                  (0.5f - v.clip.y * inv_w * 0.5f) * static_cast<float>(bake_height),
                   v.clip.z * inv_w, inv_w};
     };
     const Vec4 p0 = to_screen(a);
@@ -195,9 +295,9 @@ class SoftwareScene final : public Scene3D {
 
     // 包围盒与画布求交（这一步就是 3D 的"视口剔除"：屏幕外的像素一个都不碰）
     const int min_x = std::max(0, static_cast<int>(std::floor(std::min({p0.x, p1.x, p2.x}))));
-    const int max_x = std::min(width_ - 1, static_cast<int>(std::ceil(std::max({p0.x, p1.x, p2.x}))));
+    const int max_x = std::min(bake_width - 1, static_cast<int>(std::ceil(std::max({p0.x, p1.x, p2.x}))));
     const int min_y = std::max(0, static_cast<int>(std::floor(std::min({p0.y, p1.y, p2.y}))));
-    const int max_y = std::min(height_ - 1, static_cast<int>(std::ceil(std::max({p0.y, p1.y, p2.y}))));
+    const int max_y = std::min(bake_height - 1, static_cast<int>(std::ceil(std::max({p0.y, p1.y, p2.y}))));
     if (min_x > max_x || min_y > max_y) return;
 
     for (int y = min_y; y <= max_y; ++y) {
@@ -214,7 +314,10 @@ class SoftwareScene final : public Scene3D {
         // 深度：用 NDC z 线性插值（已含透视除法，插值即正确）
         const float z = w0 * p0.z + w1 * p1.z + w2 * p2.z;
         if (z < 0.0f || z > 1.0f) continue;   // 近/远裁剪面之外
-        const std::size_t offset = static_cast<std::size_t>(y) * static_cast<std::size_t>(width_) +
+        // ⚠ 深度索引按**超采样宽**算（不是 `width_`）：两者相差 `kBake` 倍，
+        // 用错会把深度写入别的像素行——症状是“模型局部穿帮”，极难定位。
+        const std::size_t offset = static_cast<std::size_t>(y) *
+                                       static_cast<std::size_t>(bake_width) +
                                    static_cast<std::size_t>(x);
         if (z >= depth_[offset]) continue;    // z-buffer：比已画的更远 → 丢弃
         depth_[offset] = z;
@@ -225,8 +328,19 @@ class SoftwareScene final : public Scene3D {
         const float i1 = (sum > 1e-9f) ? (w1 * p1.w) / sum : w1;
         const float i2 = 1.0f - i0 - i1;
         const math::Vec3 normal = a.normal * i0 + b.normal * i1 + c.normal * i2;
-        const math::Vec3 color = a.color * i0 + b.color * i1 + c.color * i2;
-        const math::Vec3 lit = shade(normal, color);
+        math::Vec3 color = a.color * i0 + b.color * i1 + c.color * i2;
+        // 有 UV 且已设纹理 → 采样（**双线性**，与纹理坐标一起透视校正）。
+        //
+        // 为何必须双线性：三维里一个纹理像素常被映射到多个屏幕像素的**斜向**区域，
+        // 点采样会让图标边缘重新出现硬眍齿（把刚修好的抗锯齿又抵消掉）。
+        if (use_texture_ && a.has_uv) {
+          const float u = a.u * i0 + b.u * i1 + c.u * i2;
+          const float v = a.v * i0 + b.v * i1 + c.v * i2;
+          const math::Vec3 texel = sample_texture(u, v);
+          // 纹理与顶点色**相乘**：顶点色充当“基础色/染色”，纹理提供图案。
+          color = math::Vec3{color.x * texel.x, color.y * texel.y, color.z * texel.z};
+        }
+        const math::Vec3 lit = shade_terms(normal, color, lighting_);
         canvas_.set_pixel(x, y, math::Color{static_cast<std::uint8_t>(std::lround(lit.x * 255.0f)),
                                             static_cast<std::uint8_t>(std::lround(lit.y * 255.0f)),
                                             static_cast<std::uint8_t>(std::lround(lit.z * 255.0f)),
@@ -235,6 +349,94 @@ class SoftwareScene final : public Scene3D {
     }
   }
 
+  /// 双线性采样纹理（UV 已 clamp 到 [0,1]）。
+  [[nodiscard]] auto sample_texture(float u, float v) const noexcept -> math::Vec3 {
+    // clamp：UV 超出 0..1 时取边缘色（比 repeat 安全——图标边缘不应循环）
+    const float cu = u < 0.0f ? 0.0f : (u > 1.0f ? 1.0f : u);
+    const float cv = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+    // 纹理坐标→像素：减去半个像素才能让采样中心对得上像素中心
+    const float fx = cu * static_cast<float>(texture_width_) - 0.5f;
+    const float fy = cv * static_cast<float>(texture_height_) - 0.5f;
+    const int x0 = static_cast<int>(std::floor(fx));
+    const int y0 = static_cast<int>(std::floor(fy));
+    const float tx = fx - static_cast<float>(x0);
+    const float ty = fy - static_cast<float>(y0);
+    const auto texel = [this](int x, int y) noexcept -> math::Vec3 {
+      const int cx = x < 0 ? 0 : (x >= texture_width_ ? texture_width_ - 1 : x);
+      const int cy = y < 0 ? 0 : (y >= texture_height_ ? texture_height_ - 1 : y);
+      const std::size_t offset =
+          (static_cast<std::size_t>(cy) * static_cast<std::size_t>(texture_width_) +
+           static_cast<std::size_t>(cx)) *
+          4U;
+      return math::Vec3{static_cast<float>(texture_[offset + 0U]) / 255.0f,
+                        static_cast<float>(texture_[offset + 1U]) / 255.0f,
+                        static_cast<float>(texture_[offset + 2U]) / 255.0f};
+    };
+    const math::Vec3 top = texel(x0, y0) * (1.0f - tx) + texel(x0 + 1, y0) * tx;
+    const math::Vec3 bottom = texel(x0, y0 + 1) * (1.0f - tx) + texel(x0 + 1, y0 + 1) * tx;
+    return top * (1.0f - ty) + bottom * ty;
+  }
+
+  /// 超采样缓冲 → 逻辑分辨率（**均值 resolve**）。
+  ///
+  /// 为何要自己 average 而不是交给 `draw_canvas` 的双线性缩放：
+  /// 画布内部是**预乘**色，而正确的降采样必须在预乘空间里平均（否则透明区
+  /// 的边缘会发黑）。同时这里只用原分辨率画布，不给目标增加额外缩放误差。
+  [[nodiscard]] auto resolve_to_logical() const -> Canvas {
+    Canvas out{width_, height_, 1.0f};
+    if (kBake == 1) {
+      const std::span<std::uint32_t> pixels = out.pixels();
+      const std::span<const std::uint32_t> source = canvas_.pixels();
+      std::copy(source.begin(), source.end(), pixels.begin());
+      return out;
+    }
+    const int bake_width = width_ * kBake;
+    const int samples = kBake * kBake;
+    const std::span<const std::uint32_t> source = canvas_.pixels();
+    std::span<std::uint32_t> pixels = out.pixels();
+    if (source.empty() || pixels.empty()) return out;
+    for (int y = 0; y < height_; ++y) {
+      for (int x = 0; x < width_; ++x) {
+        // 逐通道累加（预乘值：R/G/B 已乘 alpha，直接平均即正确的面积平均）
+        std::uint32_t r = 0;
+        std::uint32_t g = 0;
+        std::uint32_t b = 0;
+        std::uint32_t a = 0;
+        for (int sy = 0; sy < kBake; ++sy) {
+          const std::size_t row = static_cast<std::size_t>(y) * kBake + sy;
+          const std::size_t base = row * static_cast<std::size_t>(bake_width) +
+                                   static_cast<std::size_t>(x) * kBake;
+          for (int sx = 0; sx < kBake; ++sx) {
+            const std::uint32_t pixel = source[base + static_cast<std::size_t>(sx)];
+            a += pixel & 0xFFU;
+            b += (pixel >> 8U) & 0xFFU;
+            g += (pixel >> 16U) & 0xFFU;
+            r += (pixel >> 24U) & 0xFFU;
+          }
+        }
+        // 四舍五入而不是截断：截断会让整体系统性偏暗（S²个样本各偏 0.5）
+        const auto average = [samples](std::uint32_t sum) -> std::uint32_t {
+          return (sum + static_cast<std::uint32_t>(samples) / 2U) /
+                 static_cast<std::uint32_t>(samples);
+        };
+        const auto to_byte = [](std::uint32_t value) -> std::uint32_t {
+          return value > 255U ? 255U : value;
+        };
+        pixels[static_cast<std::size_t>(y) * static_cast<std::size_t>(width_) +
+               static_cast<std::size_t>(x)] =
+            (to_byte(average(r)) << 24U) | (to_byte(average(g)) << 16U) |
+            (to_byte(average(b)) << 8U) | to_byte(average(a));
+      }
+    }
+    return out;
+  }
+
+  /// 超采样倍数（每个逻辑像素每轴 `kBake` 个样本，共 `kBake²`）。
+  ///
+  /// 档位选择：2 = 4 样本（成本 4× 像素）。实测软件腿 720p 千面模型
+  /// 光栅本身只要几十毫秒，而**轮廓锯齿**是成片上一眼可见的缺陷，这笔钱值得付。
+  /// 3/4 可进一步平滑，但成本是 9/16 倍，且 2× 已经让阶梯基本看不出来。
+  static constexpr int kBake = 3;
   int width_{1};
   int height_{1};
   Canvas canvas_;
@@ -242,8 +444,75 @@ class SoftwareScene final : public Scene3D {
   math::Mat4 view_{math::Mat4::identity()};
   math::Mat4 projection_{math::Mat4::identity()};
   bool mvp_ready_{false};
+  Lighting lighting_{};
+  /// 纹理（RGBA8 非预乘，行优先）：空 = 无纹理。
+  std::vector<std::uint8_t> texture_{};
+  int texture_width_{0};
+  int texture_height_{0};
+  /// 本网格是否正在采样纹理（无 UV / 无纹理时为 false）。
+  bool use_texture_{false};
   std::uint64_t draw_calls_{0};
 };
+
+}  // namespace
+
+/// GPU 三维腿（平台实现提供；非 Windows / 无显卡时返错误）。
+/// 声明在这里而不在公共头：它返回 D3D 无关的 `Scene3D`，**调用方不需要知道
+/// 它背后是哪条腿**——这正是「平台中立接口」的含义。
+[[nodiscard]] auto gpu_scene3d_available() -> bool;
+[[nodiscard]] auto create_gpu_scene3d(int width, int height)
+    -> Result<std::unique_ptr<Scene3D>>;
+
+/// 建一个软件三维场景（始终可用）。
+[[nodiscard]] auto create_software_scene3d(int width, int height)
+    -> Result<std::unique_ptr<Scene3D>> {
+  if (width <= 0 || height <= 0) return unexpected(ErrorCode::Invalid, "渲染尺寸必须为正");
+  return std::unique_ptr<Scene3D>(std::make_unique<SoftwareScene>(width, height));
+}
+
+}  // namespace st::raster
+
+// ————————————————————————————————————————————————————————————————————————————
+// 两条腿的选择（**唯一的决策点**）
+// ————————————————————————————————————————————————————————————————————————————
+//
+// 为何不直接“有 GPU 就用 GPU”：小尺寸（界面里一块 960×200 的卡片）下，GPU 腿
+// 每帧多出一次纹理回读 + 上传（`end_frame` 要把结果交回一张 `Surface`），
+// 而软件腿在那个面积下只逐个像素算被三角形覆盖的那一小块。二维已经踩过
+// 这个坑（`backend_util.cpp` 的 `create_surface` 因此是**实测取快的那条**，
+// 而不是硬编码 GPU 优先）。三维沿用同一条立场。
+//
+// 实测的代价：两条腿各建一次、各画一帧。三维场景建设（深度纹理 + 网格上传）
+// 是毫秒级，而 `Scene3D` 的生命周期通常是整部片子（不是每帧），所以只付一次。
+namespace st::raster {
+namespace {
+
+/// 用同一网格 + 同一相机量一次单帧耗时（纳秒，best-of-N）。
+[[nodiscard]] auto probe_leg_ms(Scene3D& scene) -> double {
+  Canvas canvas{scene.width(), scene.height(), 1.0f};
+  Camera camera;
+  camera.eye = math::Vec3{0.0f, 0.0f, 3.0f};
+  camera.target = math::Vec3{0.0f, 0.0f, 0.0f};
+  camera.fov_y_degrees = 42.0f;
+  const Mesh mesh = Mesh::sphere(0.9f, 24);   // ~1000 面：与真实产品模型的量级相当
+  const math::Rect destination{0.0f, 0.0f, static_cast<float>(scene.width()),
+                               static_cast<float>(scene.height())};
+  const auto run = [&] {
+    scene.begin_frame(math::Color{0, 0, 0, 255});
+    scene.set_camera(camera);
+    scene.draw_mesh(mesh, math::Mat4::identity());
+    scene.end_frame(canvas, destination);
+  };
+  run();   // 预热：第一次要建着色器/上传网格/分配暂存纹理，那不算稳态成本
+  double best = 1e18;
+  for (int round = 0; round < 5; ++round) {
+    const std::int64_t start = st::time::now_ns();
+    run();
+    const double ns = static_cast<double>(st::time::now_ns() - start);
+    if (ns < best) best = ns;
+  }
+  return best / 1.0e6;
+}
 
 }  // namespace
 
@@ -251,7 +520,49 @@ auto Scene3D::available() noexcept -> bool { return true; }   // 软件腿：永
 
 auto Scene3D::create(int width, int height) -> Result<std::unique_ptr<Scene3D>> {
   if (width <= 0 || height <= 0) return unexpected(ErrorCode::Invalid, "渲染尺寸必须为正");
-  return std::unique_ptr<Scene3D>(std::make_unique<SoftwareScene>(width, height));
+  // 强制指定腿：供探针做对照与出问题时的逃生门（与 `ST_GPU_FORCE_WARP` 同一套惯例）。
+  // 值：`gpu` / `software`；未设或非法值 = 走实测决策。
+  if (const auto forced = st::fs::read_env("ST_SCENE3D_BACKEND"); forced.has_value()) {
+    if (*forced == "gpu") {
+      if (auto gpu = create_gpu_scene3d(width, height); gpu.has_value()) return gpu;
+      if (auto software = create_software_scene3d(width, height); software.has_value()) {
+        return software;
+      }
+    } else if (*forced == "software") {
+      return create_software_scene3d(width, height);
+    }
+  }
+  // 先试 GPU（只要平台实现了这条腿且着色器真建起来了）
+  if (gpu_scene3d_available()) {
+    auto gpu = create_gpu_scene3d(width, height);
+    if (gpu.has_value()) {
+      // **实测取快的那条**：两条腿各画一帧，软件明显更快就用软件。
+      //
+      // 为何不硬编码“有显卡就用显卡”：GPU 腿每帧多出一次**纹理回读 + 上传**
+      // （`end_frame` 要把结果交回一张 `Surface`），而软件腿在那个面积下只逐像素
+      // 算被三角形覆盖的那一小块。小面积（界面里一块卡片）上后者可能真更快，
+      // 二维已经踩过这个坑（`backend_util.cpp` 的 `create_surface` 因此也是实测）。
+      //
+      // 阈值 1.25：GPU 略快但差不多时不折腾（见上方隐藏成本）。反过来说，
+      // **正是这一条让“界面小卡片”自然继续走软件腿，而裁云的半屏/全屏三维
+      // 走 GPU 腿**——不需要调用方写任何分支。
+      if (auto software = create_software_scene3d(width, height); software.has_value()) {
+        const double gpu_ms = probe_leg_ms(**gpu);
+        const double software_ms = probe_leg_ms(**software);
+        if (software_ms > 0.0 && gpu_ms > software_ms * 1.25) {
+          ST_LOG_INFO("三维：{}×{} 实测软件 {:.2f} ms vs GPU {:.2f} ms → 选软件腿", width,
+                      height, software_ms, gpu_ms);
+          return software;
+        }
+        ST_LOG_DEBUG("三维：{}×{} 实测软件 {:.2f} ms vs GPU {:.2f} ms → 选 GPU 腿", width,
+                     height, software_ms, gpu_ms);
+      }
+      return gpu;
+    }
+    // GPU 腿建不出来（着色器/深度目标失败）：如实记原因再落软件
+    ST_LOG_WARN("三维：GPU 腿不可用（{}），已回退软件光栅器", gpu.error().message);
+  }
+  return create_software_scene3d(width, height);
 }
 
 }  // namespace st::raster

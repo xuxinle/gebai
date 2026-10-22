@@ -41,6 +41,7 @@
 | **字符串搜到 ≠ 新二进制** | 验证工具链是否含新逻辑，别在 exe 里搜字符串（新加的规则描述文本可能来自其它段/旧对象）；**决定性判据是行为**——如 lint 用 `--rules` 列表能不能列出新增规则（实测 2026-10-15：`Select-String st.exe "L16"` 命中但 `--rules` 没有——跑的是旧二进制） | `tools/stpm/main.cpp` 的 `--rules` 分支 |
 | **`st build st` 不能自举** | 用 `st.exe` 构建它自己时，链接器要覆写正在运行的 exe → `permission denied`。**用另一份构建器**（如 `build/bin/st.exe` 构建 dev 档，或反之）——两套产物路径在这里恰好成为优势 | `st.pkg` targets.st；实测 2026-10-15 |
 | **逆向验证用 `copy2` 恢复 = 假绿** | `copy2` 把**旧 mtime** 一起搬回来（比回退版编出的 `.o` 还旧）→ 跑的是上一份二进制。恢复要**删旧文件再写** | `CONVENTIONS.md` §7.3 表格 |
+| **“工具不在 PATH”先查清再断言** | 用一条被重定向吞掉输出的命令（`where ffmpeg 2>&1 \| Select-Object`）判定“没装”，然后把这个错误结论写进交付报告（实测 2026-10-22：ffmpeg 8.1.1 一直在 `~/program/ffmpeg.exe` 且在 PATH 里，我误报“本机没有 ffmpeg”）→ 判据应该是**三条都能证实**：`shutil.which` / 直接调 `-version` / **产物本身**（mp4 都有 2.7MB 了，"没编码器"就自相矛盾）。**“工具缺失”这类结论直接影响交付定性，必须至少两种独立方式复核** | 实测 2026-10-22；`docs/VERIFY-PLAYBOOK.md` |
 | **测试结论与代码矛盾时** | 先查二进制是不是新的，**不要**先怀疑代码 | `CONVENTIONS.md` §7.4 |
 | **`st build <target>` 不链测试二进制** | 只建指定目标（示例/库），**不重链 `st_tests.exe`**——改共享头（尤其 `inline constexpr` 变量改尺寸）后只跑 `st build xxx`，旧测试二进制里按旧尺寸编译的符号照常链接，**运行期 bad_alloc/0xC0000005、编译期零告警**（实测六跳：disjoint 稳定崩+片 9 收尾崩，`st test` 重链后同时自愈）。改共享头后用 `st test`（无条件重链）验证 | 实测 2026-10-16；`.evolve/troubleshooting.md` |
 

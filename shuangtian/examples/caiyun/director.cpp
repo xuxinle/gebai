@@ -65,7 +65,7 @@ using st::math::Color;
     const auto kind = layer_kind_from(kind_name);
     if (!kind) {
       if (warnings != nullptr) {
-        warnings->push_back(std::format("未知图层类型 '{}'（已跳过）——可用：rect/ellipse/line/text/image/path/glow/particles", kind_name));
+        warnings->push_back(std::format("未知图层类型 '{}'（已跳过）——可用：rect/ellipse/line/text/image/path/glow/particles/model3d", kind_name));
       }
       continue;
     }
@@ -137,9 +137,168 @@ using st::math::Color;
     layer.enter_dur = static_cast<float>(
         std::clamp(st::json_get_double(node, "enter_dur", layer.enter_dur), 0.05, 10.0));
 
+    // —— 三维模型（`kind=model3d`）——
+    //
+    // 宽容解析：形状名不认识不报错（`mesh_for_layer` 会落盒子并告警），
+    // 因为“写错一个形状名”不该让整部片子打不开。
+    // 角度不夹取到 0~360：`model_spin` 是角速度，负值就是反向转（合法且常用）；
+    // 而相机方位角允许 >360 连续累加（设 380 与 20 等价，但便于表达“多转一圈”）。
+    layer.model_shape = st::json_get_string(node, "model_shape");
+    if (layer.model_shape.empty()) layer.model_shape = "box";
+    layer.model_color = color_field(node, "model_color", layer.model_color);
+    layer.model_color_alt = color_field(node, "model_color_alt", layer.model_color_alt);
+    layer.model_segments = static_cast<int>(
+        std::clamp(st::json_get_i64(node, "model_segments", layer.model_segments), 3LL, 96LL));
+    layer.model_scale = static_cast<float>(
+        std::clamp(st::json_get_double(node, "model_scale", layer.model_scale), 0.05, 8.0));
+    layer.model_spin = static_cast<float>(
+        std::clamp(st::json_get_double(node, "model_spin", layer.model_spin), -720.0, 720.0));
+    layer.model_yaw = static_cast<float>(
+        std::clamp(st::json_get_double(node, "model_yaw", layer.model_yaw), -3600.0, 3600.0));
+    layer.model_tilt = static_cast<float>(
+        std::clamp(st::json_get_double(node, "model_tilt", layer.model_tilt), -89.0, 89.0));
+    layer.model_bob = static_cast<float>(
+        std::clamp(st::json_get_double(node, "model_bob", layer.model_bob), 0.0, 0.5));
+    layer.model_bob_hz = static_cast<float>(
+        std::clamp(st::json_get_double(node, "model_bob_hz", layer.model_bob_hz), 0.01, 5.0));
+    layer.model_backdrop = st::json_get_bool(node, "model_backdrop", layer.model_backdrop);
+          layer.model_texture = st::json_get_string(node, "model_texture", layer.model_texture);
+      layer.model_group = st::json_get_string(node, "model_group", layer.model_group);
+      layer.model_shadow = static_cast<float>(
+          std::clamp(st::json_get_double(node, "model_shadow", layer.model_shadow), 0.0, 1.0));
+      layer.model_bounce_squash = static_cast<float>(
+          std::clamp(st::json_get_double(node, "model_bounce_squash", layer.model_bounce_squash),
+                     0.0, 1.0));
+      layer.model_shadow_color =
+          color_field(node, "model_shadow_color", layer.model_shadow_color);
+    // 阻尼弹跳（层通用，不限于三维）
+    layer.bounce = static_cast<float>(
+        std::clamp(st::json_get_double(node, "bounce", layer.bounce), 0.0, 400.0));
+    layer.bounce_hz = static_cast<float>(
+        std::clamp(st::json_get_double(node, "bounce_hz", layer.bounce_hz), 0.05, 8.0));
+    layer.bounce_damping = static_cast<float>(
+        std::clamp(st::json_get_double(node, "bounce_damping", layer.bounce_damping), 0.0, 20.0));
+    layer.bounce_at = static_cast<float>(st::json_get_double(node, "bounce_at", layer.bounce_at));
+
+    layer.cam_azimuth = static_cast<float>(
+        std::clamp(st::json_get_double(node, "cam_azimuth", layer.cam_azimuth), -3600.0, 3600.0));
+    layer.cam_elevation = static_cast<float>(std::clamp(
+        st::json_get_double(node, "cam_elevation", layer.cam_elevation), -85.0, 85.0));
+    layer.cam_distance = static_cast<float>(
+        std::clamp(st::json_get_double(node, "cam_distance", layer.cam_distance), 0.6, 30.0));
+    layer.cam_fov = static_cast<float>(
+        std::clamp(st::json_get_double(node, "cam_fov", layer.cam_fov), 8.0, 110.0));
+    layer.cam_dolly_from = static_cast<float>(
+        std::clamp(st::json_get_double(node, "cam_dolly_from", layer.cam_dolly_from), 0.3, 4.0));
+    layer.cam_dolly_to = static_cast<float>(
+        std::clamp(st::json_get_double(node, "cam_dolly_to", layer.cam_dolly_to), 0.3, 4.0));
+
+    layer.light_azimuth = static_cast<float>(std::clamp(
+        st::json_get_double(node, "light_azimuth", layer.light_azimuth), -3600.0, 3600.0));
+    layer.light_elevation = static_cast<float>(std::clamp(
+        st::json_get_double(node, "light_elevation", layer.light_elevation), -89.0, 89.0));
+    layer.light_ambient = static_cast<float>(
+        std::clamp(st::json_get_double(node, "light_ambient", layer.light_ambient), 0.0, 1.0));
+    layer.light_rim = static_cast<float>(
+        std::clamp(st::json_get_double(node, "light_rim", layer.light_rim), 0.0, 1.0));
+
     layers.push_back(std::move(layer));
   }
   return layers;
+}
+
+/// 图层 → JSON（`parse_layers` 的**逆运算**）。
+///
+/// 为何必须存在：只有解析没有序列化，等于“脚本读进来能用、存下去就丢”。
+/// 早先 `script_to_json` 漏了 `layers`，于是用 `kind=custom` 拼的画面
+/// 保存一次就全没（而界面上看不出来：时间轴片段还在，只是重开变空）。
+///
+/// 序列化策略与场景一致：**只在非默认时写**。否则存出来的脚本充满噪声，
+/// 人改不动、diff 也读不了。
+[[nodiscard]] auto layer_to_json(const Layer& layer) -> st::Json {
+  st::Json node = st::Json::object();
+  node["kind"] = std::string(layer_kind_name(layer.kind));
+  if (!layer.name.empty()) node["name"] = layer.name;
+  node["x"] = layer.x;
+  node["y"] = layer.y;
+  node["w"] = layer.w;
+  node["h"] = layer.h;
+  // 颜色：只在与默认不同时写（默认白/无描边/无次色）
+  if (layer.fill.r != 255 || layer.fill.g != 255 || layer.fill.b != 255 || layer.fill.a != 255) {
+    node["fill"] = color_to_hex(layer.fill);
+  }
+  if (layer.fill_alt.a != 0) node["fill_alt"] = color_to_hex(layer.fill_alt);
+  if (layer.gradient_dir != 0) node["gradient_dir"] = static_cast<std::int64_t>(layer.gradient_dir);
+  if (layer.stroke.a != 0) node["stroke"] = color_to_hex(layer.stroke);
+  if (layer.stroke_width > 0.0f) node["stroke_width"] = static_cast<double>(layer.stroke_width);
+  if (layer.radius > 0.0f) node["radius"] = static_cast<double>(layer.radius);
+  if (layer.opacity < 0.999f) node["opacity"] = static_cast<double>(layer.opacity);
+
+  if (!layer.text.empty()) node["text"] = layer.text;
+  if (layer.size != 48.0f) node["size"] = static_cast<double>(layer.size);
+  if (layer.tracking > 0.0f) node["tracking"] = static_cast<double>(layer.tracking);
+  if (layer.line_height != 1.45f) node["line_height"] = static_cast<double>(layer.line_height);
+  if (layer.bold) node["bold"] = true;
+  if (layer.align != 0) node["align"] = static_cast<std::int64_t>(layer.align);
+  if (layer.color.r != 255 || layer.color.g != 255 || layer.color.b != 255) {
+    node["color"] = color_to_hex(layer.color);
+  }
+
+  if (!layer.src.empty()) node["src"] = layer.src;
+  if (layer.contain) node["contain"] = true;
+  if (layer.dim > 0.0f) node["dim"] = static_cast<double>(layer.dim);
+  if (!layer.points.empty()) node["points"] = layer.points;
+  if (layer.closed) node["closed"] = true;
+
+  if (layer.intensity != 0.5f) node["intensity"] = static_cast<double>(layer.intensity);
+  if (layer.count != 60) node["count"] = static_cast<std::int64_t>(layer.count);
+  if (layer.spread != 0.4f) node["spread"] = static_cast<double>(layer.spread);
+
+  // 三维：只在 `model3d` 里写，且只写与默认不同的项
+  if (layer.kind == LayerKind::Model3d) {
+    node["model_shape"] = layer.model_shape;
+    node["model_color"] = color_to_hex(layer.model_color);
+    if (layer.model_color_alt.a != 0) node["model_color_alt"] = color_to_hex(layer.model_color_alt);
+    if (layer.model_segments != 24) {
+      node["model_segments"] = static_cast<std::int64_t>(layer.model_segments);
+    }
+    if (layer.model_scale != 1.0f) node["model_scale"] = static_cast<double>(layer.model_scale);
+    if (layer.model_spin != 0.0f) node["model_spin"] = static_cast<double>(layer.model_spin);
+    if (layer.model_yaw != 0.0f) node["model_yaw"] = static_cast<double>(layer.model_yaw);
+    if (layer.model_tilt != 12.0f) node["model_tilt"] = static_cast<double>(layer.model_tilt);
+    if (layer.model_bob > 0.0f) node["model_bob"] = static_cast<double>(layer.model_bob);
+    if (layer.model_bob > 0.0f) {
+      node["model_bob_hz"] = static_cast<double>(layer.model_bob_hz);
+    }
+    if (layer.model_backdrop) node["model_backdrop"] = true;
+    if (!layer.model_texture.empty()) node["model_texture"] = layer.model_texture;
+    if (layer.cam_azimuth != 35.0f) node["cam_azimuth"] = static_cast<double>(layer.cam_azimuth);
+    if (layer.cam_elevation != 18.0f) {
+      node["cam_elevation"] = static_cast<double>(layer.cam_elevation);
+    }
+    if (layer.cam_distance != 3.0f) node["cam_distance"] = static_cast<double>(layer.cam_distance);
+    if (layer.cam_fov != 38.0f) node["cam_fov"] = static_cast<double>(layer.cam_fov);
+    if (layer.cam_dolly_from != 1.0f || layer.cam_dolly_to != 1.0f) {
+      node["cam_dolly_from"] = static_cast<double>(layer.cam_dolly_from);
+      node["cam_dolly_to"] = static_cast<double>(layer.cam_dolly_to);
+    }
+    if (layer.light_azimuth != 40.0f) {
+      node["light_azimuth"] = static_cast<double>(layer.light_azimuth);
+    }
+    if (layer.light_elevation != 45.0f) {
+      node["light_elevation"] = static_cast<double>(layer.light_elevation);
+    }
+    if (layer.light_ambient != 0.35f) {
+      node["light_ambient"] = static_cast<double>(layer.light_ambient);
+    }
+    if (layer.light_rim != 0.25f) node["light_rim"] = static_cast<double>(layer.light_rim);
+  }
+
+  // 入场动画：默认是 rise/0/0.6，只在不同时写
+  if (layer.enter != 2) node["enter"] = static_cast<std::int64_t>(layer.enter);
+  if (layer.enter_at > 0.0f) node["enter_at"] = static_cast<double>(layer.enter_at);
+  if (layer.enter_dur != 0.6f) node["enter_dur"] = static_cast<double>(layer.enter_dur);
+  return node;
 }
 
 auto scene_from(const st::Json& node, std::size_t index) -> Result<Scene> {
@@ -186,6 +345,7 @@ auto scene_from(const st::Json& node, std::size_t index) -> Result<Scene> {
       std::clamp(st::json_get_i64(node, "particles", scene.particles), 0LL, 600LL));
   scene.particle_alpha = static_cast<float>(
       std::clamp(st::json_get_double(node, "particle_alpha", scene.particle_alpha), 0.0, 1.0));
+  scene.wrap = st::json_get_bool(node, "wrap", scene.wrap);
   scene.glow = static_cast<float>(std::clamp(st::json_get_double(node, "glow", scene.glow), 0.0, 1.0));
   scene.glow_cx = static_cast<float>(
       std::clamp(st::json_get_double(node, "glow_cx", scene.glow_cx), 0.0, 1.0));
@@ -406,6 +566,18 @@ auto script_to_json(const Script& script) -> std::string {
       if (scene.cam_pan_x != 0.0f) node["cam_pan_x"] = static_cast<double>(scene.cam_pan_x);
       if (scene.cam_pan_y != 0.0f) node["cam_pan_y"] = static_cast<double>(scene.cam_pan_y);
       if (scene.cam_shake > 0.0001f) node["cam_shake"] = static_cast<double>(scene.cam_shake);
+    }
+    // 图层：**必须写回**。
+    //
+    // 早先这里漏了 `layers`（只读了不写），于是“保存脚本”会把用 `kind=custom`
+    // 拼出来的画面**全部丢掉**，而界面上看不出来（时间轴片段还在，只是重开就空了）。
+    // 三维图层也是图层，所以它跟着这条一起修。
+    if (!scene.layers.empty()) {
+      st::Json layers = st::Json::array();
+      for (const Layer& layer : scene.layers) {
+        layers.push_back(layer_to_json(layer));
+      }
+      node["layers"] = std::move(layers);
     }
     scenes.push_back(std::move(node));
   }

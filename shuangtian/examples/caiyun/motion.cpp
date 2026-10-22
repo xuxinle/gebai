@@ -12,6 +12,7 @@
 #include "brand.hpp"
 #include "fx.hpp"
 #include "layer.hpp"
+#include "model3d.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -532,12 +533,24 @@ void draw_text_lines(Painter& p, const Layer& layer, float lx, float ly, float l
       // 却按左边界画" —— 文字整体右移半个宽度，超出图层框后被裁（实测三栏卡片
       // 的标题偏右 100px、右侧被切）。居中必须传 0.5f。
       const float step_ratio = line_size / std::max(1.0f, size);
+      // ⚠ **坐标必须换回设计坐标再交给 `Painter`**。
+      //
+      // 本函数里的 `lx/ly/lw/lh`、`width`、`cursor_y` 都是**物理像素**
+      //（它们由 `evaluate_layer` 按画布尺寸算出来）；而 `Painter::text` /
+      // `spaced_text` 的入参是**设计坐标**（内部会乘 `scale_`）。
+      // 直接把物理像素传进去会**再乘一次**，于是文字位置与字号都被缩 `scale` 倍：
+      // 1080p 导出（scale=1）下看不出来，而预览（960×540，scale=0.5）与
+      // 导出帧序列（320×180，scale=0.167）下文字全部堆到左上角。
+      //
+      // 实测症状：三幕文字全挤在左上角、且字号小到读不出——但 1080p 成片是对的，
+      // 所以这个缺陷只在“用低分辨率抽帧验收”时才暴露（而那正是推荐的自检方式）。
+      const float design_x = (draw_x + width * 0.5f) / scale;
+      const float design_y = cursor_y / scale;
       if (tracking <= 0.01f) {
         // draw_x 是左边界；居中时传 0.5 让它以 (draw_x + width/2) 为中心画。
-        p.text(line, line_size / scale, draw_x + width * 0.5f, cursor_y, color, 0.5f,
-               layer.bold);
+        p.text(line, line_size / scale, design_x, design_y, color, 0.5f, layer.bold);
       } else {
-        p.spaced_text(line, line_size / scale, draw_x, cursor_y, color,
+        p.spaced_text(line, line_size / scale, draw_x / scale, design_y, color,
                       layer.tracking * step_ratio);
       }
     }
@@ -570,7 +583,38 @@ void paint_layers(Painter& p, const Scene& scene, float local_time, const AssetL
   for (const Layer& layer : scene.layers) {
     const LayerState state =
         evaluate_layer(layer, local_time, canvas_w, canvas_h, design_w, design_h);
+    if (std::getenv("CAIYUN_LAYER_DEBUG") != nullptr) {
+      st::print("[layer] kind={} x={} y={} w={} h={} (raw x={} y={}) alpha={:.2f}\n",
+                layer_kind_name(layer.kind), state.x, state.y, state.w, state.h, layer.x,
+                layer.y, state.alpha);
+    }
     if (state.alpha <= 0.004f) continue;
+
+    // 三维组：首层负责把**整组**画进一个共享世界（同一相机/光照/纹理）。
+    // 判定“首层”看它是不是组内第一个出现的——组内顺序就是绘制顺序（先画桌面、再画图标）。
+    bool is_group_head = false;
+    if (!layer.model_group.empty()) {
+      is_group_head = true;
+      for (const Layer& previous : scene.layers) {
+        if (&previous == &layer) break;
+        if (previous.model_group == layer.model_group) {
+          is_group_head = false;
+          break;
+        }
+      }
+      if (is_group_head) {
+        // 收集组内成员（含 head 自己），交给组渲染器一次画完。
+        std::vector<const Layer*> members;
+        for (const Layer& candidate : scene.layers) {
+          if (candidate.model_group == layer.model_group) members.push_back(&candidate);
+        }
+        const LayerState head_state = state;   // head 的动画状态（决定画面框）
+        paint_model3d_group(p.canvas(), layer, members, local_time,
+                            static_cast<float>(scene.duration), basis, head_state,
+                            canvas_w, canvas_h, design_w, design_h);
+        continue;   // 组内成员已一并画完
+      }
+    }
 
     // 入场缩放以层中心为锚点。
     float lx = state.x;
@@ -710,6 +754,21 @@ void paint_layers(Painter& p, const Scene& scene, float local_time, const AssetL
         field.alpha = state.alpha * layer.intensity;
         field.color = layer.fill;
         paint_particles(p.canvas(), field, static_cast<double>(local_time), scale);
+        break;
+      }
+      case LayerKind::Model3d: {
+        // 三维图层：矩形与入场动画（位移/缩放/透明度）由上面的通用逻辑算好，
+        // 这里只负责把“这一块矩形里该画什么”交给 `model3d.cpp`。
+        //
+        // 为何传 `box` 而不是让 model3d 自己算坐标：设计像素→物理像素的换算
+        // 只在 `Painter` 里做一次（否则两处换算必然漂移，而它只在导出时现形）。
+        //
+        // **组内的非首层跳过**：它们由首层统一画（见下方 `paint_model3d_group`）。
+        // 不跳会画两遍：一遍在共享世界里（对）、一遍孤立（错，而且能看见）。
+        if (layer.model_group.empty() || is_group_head) {
+          paint_model3d(p.canvas(), layer, st::math::Rect{lx, ly, lw, lh}, local_time,
+                        static_cast<float>(scene.duration), state.alpha, basis);
+        }
         break;
       }
     }
@@ -1179,7 +1238,11 @@ void render_scene(st::raster::Canvas& target, const Scene& scene, double local_t
     target.draw_canvas_at(moved, 0, 0, cam_options);
   }
   // 包装层在运镜**之后**画：它固定在画面上，不随镜头动。
-  paint_wrap(p, scene, time, scene_index, scene_total);
+  //
+  // `scene.wrap` 可关掉它：包装层（识标/四角标/页脚/进度）是“宣传片”的语言，
+  // 而有些片要的是**纯画面**（例如“桌面上一块扁平块”这种模拟界面的镜头）——
+  // 那时四角标记与 `01 / 03` 反而跳戏。默认 true 保持旧行为不变。
+  if (scene.wrap) paint_wrap(p, scene, time, scene_index, scene_total);
   if (profile) {
     st::print("[profile] bg={:.1f}ms content={:.1f}ms\n",
               static_cast<double>(t1 - t0) / 1.0e6, static_cast<double>(now() - t1) / 1.0e6);

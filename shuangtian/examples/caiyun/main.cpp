@@ -1024,6 +1024,13 @@ auto run_app(int argc, char** argv) -> int {
   if (!options.export_dir.empty()) {
     const int written = page->export_frames(options.export_dir, app.root().text_port());
     st::print("已导出 {} 帧到 {}\n", written, options.export_dir);
+    // 导出是一次性动作：完成后**直接退出**。
+    //
+    // 早先这里导完就落进事件循环，进程不退出——`--export-dir` 的语义是
+    // “出完就走”（脚本/CI 用），留着一个不出帧的空窗口只会让调用方等超时
+    // （实测：探针与批处理都卡在这里）。
+    // `--render` 不在此列：它有自己的完成回调（渲染完才退）。
+    if (options.render_output.empty()) return 0;
   }
   bool render_launched = false;
   if (!options.render_output.empty()) {

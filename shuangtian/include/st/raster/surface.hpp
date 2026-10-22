@@ -210,6 +210,43 @@ class Surface {
                            DrawOptions options = {}) = 0;
   virtual void draw_canvas_at(const Surface& source, int x, int y, DrawOptions options = {}) = 0;
 
+  /// **不透明纹理句柄**：把“本 Surface 的像素”以不透明句柄交给同后端的上层合成。
+  ///
+  /// 存在的理由（实测数据说话）：三维 GPU 腿的光栅只要 **0.06 ms**，而把它交回一张
+  /// 软件画布要 **100 ms**（1080p）——那不是计算成本，是“显卡→内存”的一次往返。
+  /// 只要上层也是 GPU 画布，这次往返完全可以不发生（纹理直接当 shader 资源采样）。
+  ///
+  /// 为何不把它设计成 `ID3D11ShaderResourceView*`：`Surface` 是**平台中立**的公共面，
+  /// 所有后端与测试都依赖它。把 D3D 类型写进接口等于让整树依赖一个平台。
+  /// 所以句柄是 `const void*` + 一个**后端标签**，由“同一后端的两方”自己解释；
+  /// 标签不匹配或返回空 = 没有零拷贝路径，调用方走普通 `draw_canvas`。
+  ///
+  /// 默认返回空（软件画布、未来别的后端都是这个答案）——**不实现就没有这条快路**，
+  /// 而不是逼每个后端都去实现一套它用不上的机制。
+  struct NativeTexture {
+    const void* handle{nullptr};   ///< 后端自有对象（D3D11 上是 `ID3D11ShaderResourceView*`）
+    const char* backend{nullptr};  ///< 后端标签（如 `"d3d11"`）；不匹配即不可用
+    int width{0};
+    int height{0};
+
+    [[nodiscard]] auto valid() const noexcept -> bool { return handle != nullptr; }
+  };
+  [[nodiscard]] virtual auto native_texture() const noexcept -> NativeTexture { return {}; }
+
+  /// 用**同后端的原生纹理**做合成（零拷贝快路）。
+  ///
+  /// 默认返回 `false` = “我不支持/这条纹理不是我的后端”，调用方据此回退到
+  /// `draw_canvas`（要先把对方的内容取成像素，那就贵了）。
+  /// 返回 `true` 时**必须真的画上了**（而不是“接受但忽略”）。
+  [[nodiscard]] virtual auto composite_native_texture(const NativeTexture& texture,
+                                                     math::Rect destination,
+                                                     DrawOptions options = {}) -> bool {
+    (void)texture;
+    (void)destination;
+    (void)options;
+    return false;
+  };
+
   /// **覆盖率位图混合**：把一张 8 位覆盖率的图（每项 0..1）以 `paint` 混到物理坐标 `(x, y)`。
   ///
   /// 为什么它是接口的一部分（而不是让文字去调软件内部的"按行混合"）：

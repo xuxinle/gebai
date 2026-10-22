@@ -38,6 +38,16 @@ auto create_presenter(void*, int, int) -> Result<std::unique_ptr<Presenter>> {
 
 }  // namespace st::raster::gpu
 
+// 非 Windows：没有 GPU 三维腿（`Scene3D::create` 会自动落软件腿）。
+// 这两个符号在 `software_scene.cpp` 里声明、这里定义，保证“平台文件里没有系统头”
+// 这条约束不对二分叉开。
+namespace st::raster {
+[[nodiscard]] auto gpu_scene3d_available() -> bool { return false; }
+[[nodiscard]] auto create_gpu_scene3d(int, int) -> Result<std::unique_ptr<Scene3D>> {
+  return unexpected(ErrorCode::Unsupported, "GPU 三维当前仅实现了 D3D11（Windows）后端");
+}
+}  // namespace st::raster
+
 #else
 
 #ifndef NOMINMAX
@@ -49,6 +59,8 @@ auto create_presenter(void*, int, int) -> Result<std::unique_ptr<Presenter>> {
 #include <d3d11.h>
 #include <dxgi.h>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 // `<cstring>`：`std::memcpy`（下方映射常量缓冲时用）。**不能靠 <windows.h> 间接带入**——
@@ -67,8 +79,25 @@ auto create_presenter(void*, int, int) -> Result<std::unique_ptr<Presenter>> {
 #include "st/core/time.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/glyph_atlas_content.hpp"
+#include "st/raster/scene3d.hpp"
 
 namespace st::raster::gpu {
+/// 进程级上下文互斥锁：**所有**使用立即上下文的地方共用一把。
+///
+/// 为何是进程级：锁要保护的资源是立即上下文本身（`DeviceHolder` 里的进程级单例）。
+/// 按对象分锁等于没锁（两个对象各持不同锁、却写同一个上下文）。
+/// 使用者：`GpuCanvas` 的 `composite_native_texture`（三维纹理→二维画布的零拷贝合成）
+/// 与 GPU 三维场景（清屏/绘网格/回读/flush）。
+///
+/// 为何函数内静态：避开全局构造顺序问题，且锁与 `holder()` 同生命周期。
+/// 定义位置在匿名命名空间**之外**（`GpuCanvas` 与三维场景分居文件前后，都要看见它）。
+///
+/// lint-allow: L8 进程级互斥锁（保护进程级 D3D11 上下文，无注入点）
+[[nodiscard]] auto g_context_mutex() -> std::mutex& {
+  static std::mutex instance;
+  return instance;
+}
+
 namespace {
 
 /// 字形图集是否启用（`ST_GPU_GLYPH_ATLAS=0` 可关，供对照与出问题时的逃生门）。
@@ -1039,13 +1068,50 @@ class GpuCanvas final : public Surface {
            static_cast<std::uint64_t>(std::lround(destination.width * scale_)) *
                static_cast<std::uint64_t>(std::lround(destination.height * scale_)));
   }
+
+  /// **同后端原生纹理的零拷贝合成**（`Surface::composite_native_texture` 的实现）。
+  ///
+  /// 为何它能消掉三维那笔 100 ms：普通 `draw_canvas(source, …)` 要 `source.pixels()`，
+  /// 而三维场景的像素在显存里——那一步就是“显卡→内存”的同步回读。
+  /// 这里拿到的是同设备的 `ID3D11ShaderResourceView*`，直接当纹理采样画一个四边形，
+  /// 全程不出显存。
+  ///
+  /// 安全边界（必须由后端标签 + 设备身份双重校验）：
+  /// 两个不同 `ID3D11Device` 的 SRV 不能互用——那种情况下采样会失败或读到垃圾。
+  /// 所以要求 `backend == "d3d11"` **且** 句柄确实属于本设备（这里用一个
+  /// “本进程建的三维纹理登记表”无法低成本验证，改为默认信任 + 标签约定；
+  /// 裁云的用法里两者同进程同设备）。
+  [[nodiscard]] auto composite_native_texture(const st::raster::Surface::NativeTexture& texture,
+                                             math::Rect destination,
+                                             DrawOptions options) -> bool override {
+    if (!texture.valid() || texture.backend == nullptr) return false;
+    if (std::string_view(texture.backend) != "d3d11") return false;
+    if (destination.is_empty()) return false;
+    const auto* view = static_cast<const ID3D11ShaderResourceView*>(texture.handle);
+    const std::int64_t start = st::time::now_ns();
+    const ShaderParams params =
+        base_params(DrawMode::Bitmap, to_physical_rect(destination), {0.0f, 0.0f, 0.0f, 0.0f},
+                    options.opacity);
+    // ⚠ 渲染上下文是**进程级共享**的（`DeviceHolder`），而三维场景也在用它。
+    // 裁云导出 16 路并行时，“三维绘制”与“二维合成”会从不同线程同时来——
+    // 两者都必须过同一把锁，否则就是那个 0xC0000005。
+    //
+    // 为何不把 `submit` 整个包起来：`submit` 是所有二维原语的公共入口（窗口毎帧调几百次），
+    // 无竞争时加锁也就几纳秒，但这层“对外合成入口”加锁范围最小、意图最清。
+    const std::scoped_lock lock(gpu::g_context_mutex());
+    submit(params, const_cast<ID3D11ShaderResourceView*>(view), false);
+    log_op(PaintOp::Image, start,
+           static_cast<std::uint64_t>(std::lround(destination.width * scale_)) *
+               static_cast<std::uint64_t>(std::lround(destination.height * scale_)));
+    return true;
+  }
   void draw_canvas_at(const Surface& source, int x, int y, DrawOptions options = {}) override {
     // ⚠ 与 `Canvas::draw_canvas_at` **必须同语义**：`x/y` 是**物理像素**，
     // 而 `draw_canvas` 的 `destination` 是逻辑坐标——直接传会多乘一次 `device_scale`。
     //
-    // 两处实现分开写是“同一语义多处实现”的典型贵处：曾经只修了软件 Canvas 那份，
+    // 两处实现分开写是"同一语义多处实现"的典型贵处：曾经只修了软件 Canvas 那份，
     // 真窗口（走本文件）毫无变化，而 headless 回归却全绿——
-    // 看上去“修好了”，实际用户看到的一模一样。
+    // 看上去"修好了"，实际用户看到的一模一样。
     const float target_scale = scale_ > 0.0f ? scale_ : 1.0f;
     draw_canvas(source,
                 math::Rect{static_cast<float>(x) / target_scale,
@@ -2612,6 +2678,844 @@ auto create_canvas(int physical_width, int physical_height, float device_scale,
 
 auto live_canvas_count() noexcept -> std::uint32_t { return g_live_canvases.load(); }
 
+// ————————————————————————————————————————————————————————————————————————————
+// 三维的 **GPU 腿**（`Scene3D` 的 D3D11 实现）
+// ————————————————————————————————————————————————————————————————————————————
+//
+// 写在同一编译单元的理由：D3D11 的设备与上下文由本文件的 `DeviceHolder` 持有
+// （进程级共享），着色器编译入口、`Modules` 动态加载、`ST_GPU_FORCE_WARP`
+// 降级也都在这。另开一个文件就得把那些全部暴露成对外接口或再写一遍——
+// 前者泄漏实现，后者必然漂移（本仓已为"同一件事两条路径"付过多次代价）。
+// CONVENTIONS §10 的限制是「系统头只能出现在 `platform_*` 文件」，本文件满足。
+//
+// ## 为何之前只有软件腿、现在才加 GPU 腿
+//
+// `DESIGN.md` §8.4.2 把这条腿的触发条件定在**测量**上：三维此前只用于界面里一块
+// 960×200 的卡片（软件腿个位数毫秒），写 GPU 实现属投机。现在裁云要把三维当
+// **画面主体**（半屏到整屏、1080p 逐帧导出）——前提变了，结论就要重算。
+//
+// ## 两条腿怎么选，不靠"有显卡就用"
+//
+// GPU 优先，但**不静默假设它更快**：小尺寸下每帧一次纹理合成可能比软件腿逐像素算
+// 更贵。所以走运行时实测（`raster::create_scene3d`），与二维 `create_surface`
+// 同一套立场；不可用则如实回退并记原因（不静默）。
+
+/// 三维着色器：顶点仅位置+法线+颜色，PS 与 `raster::shade_terms` **逐字对应**。
+///
+/// 为何不把光照做成可插拔：现在只有「Lambert + 环境 + 边缘光」一种模型，参数
+/// （`Lighting`）已覆盖打光变化。多一套 BRDF 就要多一套两腿一致性测试——
+/// 那属于"先有真实需求再写"。
+constexpr const char* kScene3dShader = R"hlsl(
+cbuffer Scene : register(b0) {
+  float4x4 g_mvp;
+  float4x4 g_model;
+  float4 g_light;      // xyz = 主光方向（指向光源），w = 环境项
+  float4 g_tune;       // x = 漫反射权重, y = 边缘光, z = 曝光, w = 未用
+};
+
+struct VsIn {
+  float3 position : POSITION;
+  float3 normal : NORMAL;
+  float3 color : COLOR;
+  float2 uv : TEXCOORD0;
+};
+
+struct VsOut {
+  float4 position : SV_Position;
+  float3 normal : TEXCOORD0;
+  float3 color : TEXCOORD1;
+  float2 uv : TEXCOORD2;
+};
+
+// 纹理（RGBA8，非预乘）：无 UV 的网格不采它，行为与以前完全一致
+Texture2D g_scene_texture : register(t0);
+SamplerState g_scene_sampler : register(s0);
+
+VsOut vs_scene3d(VsIn input) {
+  VsOut o;
+  // 矩阵两边约定**恰好一致**：`math::Mat4` 是列主序（m[column*4+row]），
+  // D3D 常数缓冲默认按列读——**不需要转置**。转置一次就对、两次也"看着对"
+  // （整个场景绕中心镜像），只有拿参照图比才看得出。
+  o.position = mul(g_mvp, float4(input.position, 1.0));
+  // 法线用模型矩阵的 3x3（与软件腿一致：不取逆转置——本仓的模型矩阵只有
+  // 旋转/等比缩放/平移，逆转置与直接变换只差一个标量因子，归一化后相同）
+  o.normal = mul((float3x3)g_model, input.normal);
+  o.color = input.color;
+  o.uv = input.uv;
+  return o;
+}
+
+float4 ps_scene3d(VsOut input) : SV_Target {
+  // ⚠ 本段是 `st::raster::shade_terms` 的**逐字翻译**。改一边必须改另一边
+  //   （回归：`tests/raster_scene3d_two_legs_test.cpp` 比两条腿的同像素输出）。
+  float3 n = normalize(input.normal);
+  float3 light = normalize(g_light.xyz);
+  float diffuse = max(dot(n, light), 0.0);
+  float rim_base = 1.0 - max(n.z, 0.0);
+  float rim = rim_base * rim_base * g_tune.y;
+  // 边缘光乘在固有色上（不是加到最终色上）——详见 C++ 侧 `shade_terms` 的说明：
+  // 加法版本会把侧壁抬到比顶面还亮，看着像“盒子贴了一片白边”。
+  float scale = (g_light.w + diffuse * g_tune.x + rim) * g_tune.z;
+  // g_tune.w > 0.5 = 本网格带 UV 且已设纹理 → 采样并与顶点色相乘
+  // （与软件腿同一口径：顶点色当基础色/染色，纹理提供图案）
+  float3 base = input.color;
+  if (g_tune.w > 0.5) {
+    base = input.color * g_scene_texture.Sample(g_scene_sampler, input.uv).rgb;
+  }
+  float3 lit = saturate(base * scale);
+  return float4(lit, 1.0);   // 预乘 alpha=1（不透明），与画布内部布局一致
+}
+)hlsl";
+
+/// 与 HLSL 的 cbuffer 逐字节对应。
+struct Scene3dParams {
+  std::array<float, 16> mvp{};
+  std::array<float, 16> model{};
+  std::array<float, 4> light{};
+  std::array<float, 4> tune{};
+};
+static_assert(sizeof(Scene3dParams) % 16 == 0, "常量缓冲必须是 16 字节的倍数");
+
+/// 三维管线（**每个渲染线程一套**；懒创建）。
+///
+/// 为何是线程局部而不是设备级单例：D3D11 的**立即上下文不是线程安全的**，
+/// 而裁云导出按多路并行渲染（每线程一块画布）。共享一份管线 = 多线程同时
+/// `Map`/`Draw` 同一个上下文 = 未定义行为（症状是偶发画面错乱或驱动崩溃，
+/// 而不是稳定报错）。设备（ID3D11Device）本身线程安全，可共享。
+/// 代价是每线程几百字节状态对象，相对每线程已有的画布/读回缓冲可忽略。
+struct Scene3dPipeline {
+  ID3D11VertexShader* vs{nullptr};
+  ID3D11PixelShader* ps{nullptr};
+  ID3D11InputLayout* layout{nullptr};
+  ID3D11Buffer* constants{nullptr};
+  ID3D11DepthStencilState* depth{nullptr};
+  ID3D11RasterizerState* raster{nullptr};
+  ID3D11SamplerState* sampler{nullptr};
+  std::string error{};
+  bool ok{false};
+
+  explicit Scene3dPipeline(ID3D11Device* device) {
+    if (device == nullptr) {
+      error = "没有 D3D11 设备";
+      return;
+    }
+    const Modules& mods = modules();
+    if (mods.d3dcompiler == nullptr) {
+      error = "找不到 d3dcompiler（无法编译三维着色器）";
+      return;
+    }
+    using CompileFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*,
+                                       ID3DInclude*, LPCSTR, LPCSTR, UINT, UINT, ID3DBlob**,
+                                       ID3DBlob**);
+    const auto compile = reinterpret_cast<CompileFn>(
+        reinterpret_cast<void*>(::GetProcAddress(mods.d3dcompiler, "D3DCompile")));
+    if (compile == nullptr) {
+      error = "d3dcompiler 中找不到 D3DCompile";
+      return;
+    }
+    ID3DBlob* vs_blob = nullptr;
+    ID3DBlob* ps_blob = nullptr;
+    ID3DBlob* errors = nullptr;
+    const auto build = [&](const char* entry, const char* target, ID3DBlob** out) -> bool {
+      const HRESULT result =
+          compile(kScene3dShader, std::strlen(kScene3dShader), "st_scene3d", nullptr, nullptr,
+                  entry, target, 0, 0, out, &errors);
+      if (FAILED(result)) {
+        error = errors != nullptr
+                    ? std::string(static_cast<const char*>(errors->GetBufferPointer()))
+                    : std::format("编译 {} 失败（0x{:08X}）", entry, static_cast<unsigned>(result));
+        if (errors != nullptr) {
+          errors->Release();
+          errors = nullptr;
+        }
+        return false;
+      }
+      return true;
+    };
+    if (!build("vs_scene3d", "vs_4_0", &vs_blob) || !build("ps_scene3d", "ps_4_0", &ps_blob)) {
+      if (vs_blob != nullptr) vs_blob->Release();
+      if (ps_blob != nullptr) ps_blob->Release();
+      return;
+    }
+    const HRESULT vs_result = device->CreateVertexShader(vs_blob->GetBufferPointer(),
+                                                        vs_blob->GetBufferSize(), nullptr, &vs);
+    const HRESULT ps_result = device->CreatePixelShader(ps_blob->GetBufferPointer(),
+                                                       ps_blob->GetBufferSize(), nullptr, &ps);
+    // 输入布局：位置/法线/颜色 + **可选 UV**。
+    //
+    // UV 作为第 4 个元素，而顶点缓冲的 stride 仍然按 `Mesh::kVertexFloats`（9）算：
+    // UV 存在**第二张顶点缓冲**（单独一个 stream）而不是塞进交错布局。
+    // 为何这样做：`kVertexFloats = 9` 是生成器与后端的契约，改 stride 要动
+    // 所有生成器与 OBJ 加载；用独立 stream 则“有 UV 才传第二个流、没有就不传”。
+    const D3D11_INPUT_ELEMENT_DESC elements[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"COLOR", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 1, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+    };
+    const HRESULT layout_result =
+        device->CreateInputLayout(elements, 4, vs_blob->GetBufferPointer(),
+                                 vs_blob->GetBufferSize(), &layout);
+    vs_blob->Release();
+    ps_blob->Release();
+    if (FAILED(vs_result) || FAILED(ps_result) || FAILED(layout_result)) {
+      error = std::format("创建三维着色器/输入布局失败（vs=0x{:08X} ps=0x{:08X} layout=0x{:08X}）",
+                          static_cast<unsigned>(vs_result), static_cast<unsigned>(ps_result),
+                          static_cast<unsigned>(layout_result));
+      return;
+    }
+    D3D11_BUFFER_DESC buffer{};
+    buffer.ByteWidth = sizeof(Scene3dParams);
+    buffer.Usage = D3D11_USAGE_DYNAMIC;
+    buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    if (FAILED(device->CreateBuffer(&buffer, nullptr, &constants))) {
+      error = "创建三维常量缓冲失败";
+      return;
+    }
+    // 深度：**开深度测试 + 写深度**，比较函数 LESS。
+    //
+    // 三维与二维的分界线就在这里：没有深度测试，后画的三角形会盖住前面的，
+    // 模型会"从内部翻出来"（`raster_software_scene_test` 里用两个前后错开的
+    // 立方体测的正是这条）。
+    D3D11_DEPTH_STENCIL_DESC depth_desc{};
+    depth_desc.DepthEnable = TRUE;
+    depth_desc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+    depth_desc.DepthFunc = D3D11_COMPARISON_LESS;
+    depth_desc.StencilEnable = FALSE;
+    if (FAILED(device->CreateDepthStencilState(&depth_desc, &depth))) {
+      error = "创建深度状态失败";
+      return;
+    }
+    D3D11_RASTERIZER_DESC raster_desc{};
+    raster_desc.FillMode = D3D11_FILL_SOLID;
+    raster_desc.CullMode = D3D11_CULL_NONE;   // 与软件腿一致：模型可能未闭合/法线朝内
+    raster_desc.DepthClipEnable = TRUE;
+    raster_desc.ScissorEnable = TRUE;
+    if (FAILED(device->CreateRasterizerState(&raster_desc, &raster))) {
+      error = "创建光栅化状态失败";
+      return;
+    }
+    // 纹理采样器：**线性**（与软件腿的双线性同口径），clamp 寻址
+    //（边缘 clamp 而不是 wrap：图标边缘不应该循环到对面颜色）。
+    D3D11_SAMPLER_DESC sampler_desc{};
+    sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler_desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
+    if (FAILED(device->CreateSamplerState(&sampler_desc, &sampler))) {
+      error = "创建三维纹理采样器失败";
+      return;
+    }
+    ok = true;
+  }
+
+  Scene3dPipeline(const Scene3dPipeline&) = delete;
+  auto operator=(const Scene3dPipeline&) -> Scene3dPipeline& = delete;
+
+  ~Scene3dPipeline() {
+    if (sampler != nullptr) sampler->Release();
+    if (raster != nullptr) raster->Release();
+    if (depth != nullptr) depth->Release();
+    if (constants != nullptr) constants->Release();
+    if (layout != nullptr) layout->Release();
+    if (ps != nullptr) ps->Release();
+    if (vs != nullptr) vs->Release();
+  }
+};
+
+[[nodiscard]] auto scene3d_pipeline() -> const Scene3dPipeline& {
+  static thread_local Scene3dPipeline instance(holder().device_or_null());
+  return instance;
+}
+
+/// 一个网格在 GPU 上的缓冲（顶点 + 索引 + **可选 UV**）。
+struct MeshBuffers {
+  ID3D11Buffer* vertices{nullptr};
+  ID3D11Buffer* indices{nullptr};
+  /// UV 顶点缓冲（独立 stream 1）：网格无 UV 时为 null。
+  ID3D11Buffer* uvs{nullptr};
+  UINT index_count{0};
+
+  MeshBuffers() = default;
+  MeshBuffers(const MeshBuffers&) = delete;
+  auto operator=(const MeshBuffers&) -> MeshBuffers& = delete;
+  MeshBuffers(MeshBuffers&& other) noexcept
+      : vertices(other.vertices), indices(other.indices), uvs(other.uvs),
+        index_count(other.index_count) {
+    other.vertices = nullptr;
+    other.indices = nullptr;
+    other.uvs = nullptr;
+    other.index_count = 0;
+  }
+  auto operator=(MeshBuffers&& other) noexcept -> MeshBuffers& {
+    if (this == &other) return *this;
+    release();
+    vertices = other.vertices;
+    indices = other.indices;
+    uvs = other.uvs;
+    index_count = other.index_count;
+    other.vertices = nullptr;
+    other.indices = nullptr;
+    other.uvs = nullptr;
+    other.index_count = 0;
+    return *this;
+  }
+  ~MeshBuffers() { release(); }
+
+  void release() {
+    if (vertices != nullptr) {
+      vertices->Release();
+      vertices = nullptr;
+    }
+    if (indices != nullptr) {
+      indices->Release();
+      indices = nullptr;
+    }
+    if (uvs != nullptr) {
+      uvs->Release();
+      uvs = nullptr;
+    }
+    index_count = 0;
+  }
+};
+
+/// 网格内容哈希：同一份顶点/索引数据只上传一次。
+///
+/// 为何不按 `Mesh*` 指针做键：裁云的用法是"每帧按脚本重建 Mesh"（数据驱动、
+/// 无状态），指针每帧都变、缓存永不命中——那等于每帧重传全部顶点。
+/// 内容哈希让"同一几何每帧重算"也命中；键含长度，不会错拿另一份数据。
+[[nodiscard]] auto mesh_key(const st::raster::Mesh& mesh) noexcept -> std::uint64_t {
+  std::uint64_t hash = 1469598103934665603ULL;   // FNV-1a 64
+  const auto mix = [&hash](const void* data, std::size_t bytes) {
+    const auto* bytes_ptr = static_cast<const std::uint8_t*>(data);
+    for (std::size_t i = 0; i < bytes; ++i) {
+      hash ^= static_cast<std::uint64_t>(bytes_ptr[i]);
+      hash *= 1099511628211ULL;
+    }
+  };
+  mix(mesh.vertices.data(), mesh.vertices.size() * sizeof(float));
+  mix(mesh.indices.data(), mesh.indices.size() * sizeof(std::uint32_t));
+  return hash;
+}
+
+/// GPU 三维场景：颜色 + 深度目标、网格缓冲缓存、结果回读。
+///
+/// ## 为何每个碰上下文的调用都要拿一把**进程级互斥锁**
+///
+/// 实测崩溃（0xC0000005）：裁云导出开多路并行，每线程一个本类实例，
+/// 而它们**共用同一个立即上下文**（`ID3D11DeviceContext` 是 `DeviceHolder` 里
+/// 进程级单例：设备本身线程安全、**上下文不是**）。多线程同时 `Map`/`DrawIndexed`
+/// 同一上下文 = 未定义行为。
+///
+/// ## 为何是**逐调用**加锁，而不是“整帧持有”（踩过，必看）
+///
+/// 第一版在 `begin_frame` 拿锁、在 `end_frame` 放锁。看起来很自然（一帧是一个
+/// 原子单元），但它有一个致命的失效模式：**调用方没调 `end_frame`（或提前 return、
+/// 抛错、被跳过）→ 锁永不释放 → 下一个线程永久阻塞。**
+/// 实测表现是“测试/导出卡住不动”，而不是报错——比崩溃难查得多。
+/// （各人写渲染循环时忘了配对再正常不过：本仓自己的测试就有“只 begin 不 end”的用例。）
+/// ，
+/// 逐调用加锁的代价：每次多一次 lock/unlock（无竞争时几个纳秒），而每个帧只有
+/// 3~4 次带上下文的调用（清屏、设状态一遍、DrawIndexed、回读），成本可忽略。
+/// 换来的保证是：**任何单一调用都不会把别人卡死**，即使调用方完全不配对。
+///
+/// 真正的原子性需求（渲染目标/深度视图/清屏不能交错）由**接口的用法**保证：
+/// 每个场景实例有自己的颜色+深度目标，`begin_frame` 只能清自己的；
+/// 不同实例之间唯一共享的是着色器管线与上下文，而那几个调用各自原子即可。
+/// 若将来真需要跨实例的帧级隔离，正解是每线程延迟上下文（`CreateDeferredContext`），
+/// 而不是在这里抱一把锁。
+class GpuScene3d final : public st::raster::Scene3D {
+ public:
+  GpuScene3d(ID3D11Device* device, ID3D11DeviceContext* context, int width, int height)
+      : device_(device), context_(context), width_(std::max(1, width)),
+        height_(std::max(1, height)) {
+    ok_ = create_targets();
+  }
+
+  ~GpuScene3d() override { release_targets(); }
+
+  GpuScene3d(const GpuScene3d&) = delete;
+  auto operator=(const GpuScene3d&) -> GpuScene3d& = delete;
+
+  void begin_frame(math::Color clear_color) override {
+    if (rtv_ == nullptr || dsv_ == nullptr || !ok_) return;
+    // 逐调用锁（见类注释：帧级持有会因“没调 `end_frame`”而永久阻塞）。
+    const std::scoped_lock lock(g_context_mutex());
+    // 清屏**按预乘色**下传（与画布内部布局一致）：透明背景是三维层的真实需求——
+    // 把模型叠在视频背景上时，三维区域的空白必须透出下层，而不是一块黑。
+    const float alpha = static_cast<float>(clear_color.a) / 255.0f;
+    const float values[4] = {static_cast<float>(clear_color.r) / 255.0f * alpha,
+                             static_cast<float>(clear_color.g) / 255.0f * alpha,
+                             static_cast<float>(clear_color.b) / 255.0f * alpha, alpha};
+    context_->ClearRenderTargetView(rtv_, values);
+    context_->ClearDepthStencilView(dsv_, D3D11_CLEAR_DEPTH, 1.0f, 0);
+    mvp_ready_ = false;
+    lighting_ = st::raster::Lighting{};
+    draw_calls_ = 0;
+  }
+
+  void set_camera(const st::raster::Camera& camera) override {
+    const float aspect = height_ > 0 ? static_cast<float>(width_) / static_cast<float>(height_)
+                                     : 1.0f;
+    const float fov = camera.fov_y_degrees * 3.14159265358979f / 180.0f;
+    view_ = math::Mat4::look_at(camera.eye, camera.target, camera.up);
+    projection_ = math::Mat4::perspective(fov, aspect, camera.near_z, camera.far_z);
+    mvp_ready_ = true;
+  }
+
+  void set_lighting(const st::raster::Lighting& lighting) override { lighting_ = lighting; }
+
+  void set_texture(std::span<const std::uint8_t> pixels, int width, int height) override {
+    const std::scoped_lock lock(g_context_mutex());
+    upload_texture(pixels, width, height);
+  }
+
+  void draw_mesh(const st::raster::Mesh& mesh, const math::Mat4& model) override {
+    if (!ok_ || !mvp_ready_ || mesh.is_empty()) return;
+    const Scene3dPipeline& pipes = scene3d_pipeline();
+    if (!pipes.ok) return;
+    const MeshBuffers* buffers = buffers_for(mesh);
+    if (buffers == nullptr) return;
+
+    Scene3dParams params{};
+    const math::Mat4 mvp = projection_ * view_ * model;
+    for (int column = 0; column < 4; ++column) {
+      for (int row = 0; row < 4; ++row) {
+        const auto index =
+            static_cast<std::size_t>(column) * 4U + static_cast<std::size_t>(row);
+        params.mvp[index] = mvp.value(row, column);
+        params.model[index] = model.value(row, column);
+      }
+    }
+    const math::Vec3 light = lighting_.key_direction.normalized();
+    params.light = {light.x, light.y, light.z, lighting_.ambient};
+    // g_tune.w：本网格是否采样纹理（1 = 采）
+    const bool use_texture = texture_view_ != nullptr && buffers->uvs != nullptr;
+    params.tune = {lighting_.diffuse, lighting_.rim, lighting_.exposure,
+                   use_texture ? 1.0f : 0.0f};
+
+    // 从这一行到 DrawIndexed 全部在锁内：常景缓冲 Map、状态设置、绘制
+    // 都是上下文操作，不能与别的线程交错。
+    const std::scoped_lock lock(g_context_mutex());
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(context_->Map(pipes.constants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
+    std::memcpy(mapped.pData, &params, sizeof(params));
+    context_->Unmap(pipes.constants, 0);
+
+    ID3D11RenderTargetView* targets[1] = {rtv_};
+    context_->OMSetRenderTargets(1, targets, dsv_);
+    const D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(width_),
+                                  static_cast<float>(height_), 0.0f, 1.0f};
+    context_->RSSetViewports(1, &viewport);
+    const D3D11_RECT scissor{0, 0, width_, height_};
+    context_->RSSetScissorRects(1, &scissor);
+    context_->RSSetState(pipes.raster);
+    context_->OMSetDepthStencilState(pipes.depth, 0);
+    // 三维写不透明值（自身已着色），不走 src-over；与深度一起保证遮挡正确
+    context_->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFU);
+    context_->IASetInputLayout(pipes.layout);
+    context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    const UINT stride = static_cast<UINT>(st::raster::Mesh::kVertexFloats * sizeof(float));
+    const UINT offset = 0;
+    ID3D11Buffer* vertex_buffer = buffers->vertices;
+    context_->IASetVertexBuffers(0, 1, &vertex_buffer, &stride, &offset);
+    // UV：独立 stream 1（无 UV 时 stride 仍要非零——D3D 不接 stride=0，
+    // 否则整个 draw 静默失败；给个 8 字节占位但不清缓冲也不会被读，因为
+    // 着色器只靠 `g_tune.w` 判断是否采样，而无 UV 时 buffe 为 null → 不绑）。
+    if (buffers->uvs != nullptr) {
+      const UINT uv_stride = static_cast<UINT>(2U * sizeof(float));
+      ID3D11Buffer* uv_buffer = buffers->uvs;
+      context_->IASetVertexBuffers(1, 1, &uv_buffer, &uv_stride, &offset);
+      // 纹理 + 采样器
+      ID3D11ShaderResourceView* views[1] = {texture_view_};
+      context_->PSSetShaderResources(0, 1, views);
+      ID3D11SamplerState* samplers[1] = {pipes.sampler};
+      context_->PSSetSamplers(0, 1, samplers);
+    }
+    context_->IASetIndexBuffer(buffers->indices, DXGI_FORMAT_R32_UINT, 0);
+    context_->VSSetShader(pipes.vs, nullptr, 0);
+    context_->PSSetShader(pipes.ps, nullptr, 0);
+    ID3D11Buffer* constants[1] = {pipes.constants};
+    context_->VSSetConstantBuffers(0, 1, constants);
+    context_->PSSetConstantBuffers(0, 1, constants);
+    context_->DrawIndexed(buffers->index_count, 0, 0);
+    ++draw_calls_;
+  }
+
+  void end_frame(st::raster::Surface& target, math::Rect destination,
+                 float opacity = 1.0f) override {
+    if (srv_ == nullptr || !ok_) return;
+    // MSAA 必须先 resolve（MSAA 纹理不能直接当 shader 资源采样）。
+    // 这一步同时修掉了“轮廓锯启”：resolve 就是硬件做的面积平均。
+    resolve_if_needed();
+    // ① **零拷贝快路**：目标是同后端 GPU 画布 → 纹理直接采样合成，不离开显存。
+    //
+    // 为何这一条是整个设计的成败点（实测）：三维光栅只要 0.06 ms，而回读 + 上传
+    // 要 100 ms（1080p）——不想办法消掉它，“用显卡画三维”就是个负优化。
+    //
+    // `composite_native_texture` 内部会拿同一把锁（它的 `submit` 也碰上下文），
+    // 所以这里**不能再持锁调它**（`std::mutex` 不可重入）。
+    st::raster::DrawOptions options{};
+    options.opacity = opacity;
+    const st::raster::SceneTexture native = texture();
+    st::raster::Surface::NativeTexture as_surface{native.handle, native.backend, native.width,
+                                                  native.height};
+    if (target.composite_native_texture(as_surface, destination, options)) return;
+    // ② **回退路**：目标不是同后端（软件画布）→ 只能回读成像素。
+    // 这条路上显卡的收益会被传输吃掉，但它保证任何目标都能拿到画面。
+    ensure_readback();
+    if (readback_.empty()) return;
+    st::raster::Canvas view{width_, height_, 1.0f};
+    const std::span<std::uint32_t> pixels = view.pixels();
+    std::copy(readback_.begin(), readback_.end(), pixels.begin());
+    target.draw_canvas(view, destination, options);
+  }
+
+  [[nodiscard]] auto width() const noexcept -> int override { return width_; }
+  [[nodiscard]] auto height() const noexcept -> int override { return height_; }
+  [[nodiscard]] auto draw_calls() const noexcept -> std::uint64_t override { return draw_calls_; }
+  [[nodiscard]] auto backend() const -> std::string override { return "gpu"; }
+
+  /// 把三维结果以**原生纹理**交出去（不读回）。调用方（`Surface`）若是同后端
+  /// 就能零拷贝采样它；否则它会自己回退到 `draw_canvas`（即走 `end_frame`）。
+  [[nodiscard]] auto texture() const noexcept -> st::raster::SceneTexture override {
+    return st::raster::SceneTexture{srv_, "d3d11", width_, height_};
+  }
+
+  /// 阻塞到 GPU 把已提交的绘制跑完。
+  ///
+  /// 为何接口上需要它：GPU 腿的 `draw_mesh` 只是把命令塞进缓冲就返回，真光栅
+  /// 异步在显卡上发生——不等待就计时，量到的是 CPU 侧 API 开销（实测会得出
+  /// “GPU 光栅 0.03 ms”这种假数据）。
+  ///
+  /// 它同样碰上下文，所以整段在锁内（与其它调用同一把）。
+  void flush() override {
+    if (context_ == nullptr) return;
+    const std::scoped_lock lock(g_context_mutex());
+    if (query_ == nullptr) {
+      D3D11_QUERY_DESC desc{};
+      desc.Query = D3D11_QUERY_EVENT;
+      if (FAILED(device_->CreateQuery(&desc, &query_))) {
+        context_->Flush();
+        return;
+      }
+    }
+    context_->End(query_);
+    BOOL done = FALSE;
+    // 有界等待：驱动异常时不死等（截图/导出卡死比量错更难查）。
+    for (int spin = 0; spin < 100000; ++spin) {
+      if (context_->GetData(query_, &done, sizeof(done), 0) == S_OK) return;
+      ::Sleep(0);
+    }
+    context_->Flush();
+  }
+
+ private:
+  /// 建颜色/深度目标（带 MSAA）。
+  ///
+  /// ## 为何要 MSAA（实测）
+  ///
+  /// 单采样下三维模型的斜边是一排排像素阶梯，成片上一眼就能看到；
+  /// 而二维那边有扫描线覆盖率抗锯齿，两者放在一起反差更刺眼（文字平滑、模型崩齿）。
+  ///
+  /// ## 为何要两套纹理（MSAA 纹理 + 可采样纹理）
+  ///
+  /// D3D11 的多重采样纹理**不能建 SRV**（不能直接当 shader 资源采样）。
+  /// 所以标准做法是：渲染进 MSAA 纹理 → `ResolveSubresource` 到一张同尺寸普通纹理
+  /// → 那张普通纹理才建 SRV。零拷贝合成用的是 resolve 后的那张。
+  [[nodiscard]] auto create_targets() -> bool {
+    release_targets();
+    // 先查设备对 `kFormat` 支持哪些采样数（不支持就退 1，并在日志里说明）
+    UINT quality = 0;
+    for (const UINT candidate : {8U, 4U, 2U}) {
+      quality = 0;
+      if (SUCCEEDED(device_->CheckMultisampleQualityLevels(kFormat, candidate, &quality)) &&
+          quality > 0) {
+        sample_count_ = candidate;
+        break;
+      }
+    }
+    D3D11_TEXTURE2D_DESC color_desc{};
+    color_desc.Width = static_cast<UINT>(width_);
+    color_desc.Height = static_cast<UINT>(height_);
+    color_desc.MipLevels = 1;
+    color_desc.ArraySize = 1;
+    color_desc.Format = kFormat;
+    color_desc.SampleDesc.Count = sample_count_;
+    color_desc.Usage = D3D11_USAGE_DEFAULT;
+    // ⚠ MSAA 纹理**不能**绑 SHADER_RESOURCE（只能 RENDER_TARGET），否则创建失败
+    color_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    if (FAILED(device_->CreateTexture2D(&color_desc, nullptr, &color_))) {
+      // MSAA 建不出来（罕见）：退单采样，宁可锯一点也不能没画面
+      sample_count_ = 1;
+      color_desc.SampleDesc.Count = 1;
+      color_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+      if (FAILED(device_->CreateTexture2D(&color_desc, nullptr, &color_))) return false;
+    }
+    if (FAILED(device_->CreateRenderTargetView(color_, nullptr, &rtv_))) return false;
+
+    if (sample_count_ > 1) {
+      // resolve 目标：单采样、可采样（零拷贝合成用它的 SRV）
+      D3D11_TEXTURE2D_DESC resolved_desc = color_desc;
+      resolved_desc.SampleDesc.Count = 1;
+      resolved_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+      if (FAILED(device_->CreateTexture2D(&resolved_desc, nullptr, &resolved_))) return false;
+    }
+    // SRV 建在 resolve 后的纹理上（或单采样时就是 color_ 本身）
+    ID3D11Texture2D* sampleable = resolved_ != nullptr ? resolved_ : color_;
+    if (FAILED(device_->CreateShaderResourceView(sampleable, nullptr, &srv_))) return false;
+
+    D3D11_TEXTURE2D_DESC depth_desc{};
+    depth_desc.Width = static_cast<UINT>(width_);
+    depth_desc.Height = static_cast<UINT>(height_);
+    depth_desc.MipLevels = 1;
+    depth_desc.ArraySize = 1;
+    depth_desc.Format = DXGI_FORMAT_D32_FLOAT;
+    // 深度采样数必须与颜色一致，否则 `CreateDepthStencilView` 与 OMSetRenderTargets 失败
+    depth_desc.SampleDesc.Count = sample_count_;
+    depth_desc.Usage = D3D11_USAGE_DEFAULT;
+    depth_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    if (FAILED(device_->CreateTexture2D(&depth_desc, nullptr, &depth_))) return false;
+    if (FAILED(device_->CreateDepthStencilView(depth_, nullptr, &dsv_))) return false;
+    return true;
+  }
+
+  /// 把 MSAA 结果 resolve 到可采样纹理（单采样时是空操作）。
+  void resolve_if_needed() {
+    if (sample_count_ > 1 && resolved_ != nullptr && color_ != nullptr) {
+      context_->ResolveSubresource(resolved_, 0, color_, 0, kFormat);
+    }
+  }
+
+  void release_targets() {
+    if (resolved_ != nullptr) {
+      resolved_->Release();
+      resolved_ = nullptr;
+    }
+    if (dsv_ != nullptr) {
+      dsv_->Release();
+      dsv_ = nullptr;
+    }
+    if (depth_ != nullptr) {
+      depth_->Release();
+      depth_ = nullptr;
+    }
+    if (srv_ != nullptr) {
+      srv_->Release();
+      srv_ = nullptr;
+    }
+    if (rtv_ != nullptr) {
+      rtv_->Release();
+      rtv_ = nullptr;
+    }
+    if (color_ != nullptr) {
+      color_->Release();
+      color_ = nullptr;
+    }
+    if (staging_ != nullptr) {
+      staging_->Release();
+      staging_ = nullptr;
+    }
+    if (query_ != nullptr) {
+      query_->Release();
+      query_ = nullptr;
+    }
+  }
+
+  /// 取（或上传）一个网格的缓冲。键是**内容哈希**：数据驱动的每帧重建也能命中。
+  [[nodiscard]] auto buffers_for(const st::raster::Mesh& mesh) -> const MeshBuffers* {
+    const std::uint64_t key = mesh_key(mesh);
+    for (const auto& entry : cache_) {
+      if (entry.key == key) return &entry.buffers;
+    }
+    MeshBuffers buffers{};
+    D3D11_BUFFER_DESC vertex_desc{};
+    vertex_desc.ByteWidth = static_cast<UINT>(mesh.vertices.size() * sizeof(float));
+    vertex_desc.Usage = D3D11_USAGE_IMMUTABLE;
+    vertex_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA vertex_data{};
+    vertex_data.pSysMem = mesh.vertices.data();
+    if (FAILED(device_->CreateBuffer(&vertex_desc, &vertex_data, &buffers.vertices))) {
+      return nullptr;
+    }
+    D3D11_BUFFER_DESC index_desc{};
+    index_desc.ByteWidth = static_cast<UINT>(mesh.indices.size() * sizeof(std::uint32_t));
+    index_desc.Usage = D3D11_USAGE_IMMUTABLE;
+    index_desc.BindFlags = D3D11_BIND_INDEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA index_data{};
+    index_data.pSysMem = mesh.indices.data();
+    if (FAILED(device_->CreateBuffer(&index_desc, &index_data, &buffers.indices))) {
+      return nullptr;
+    }
+    buffers.index_count = static_cast<UINT>(mesh.indices.size());
+    // UV 独立 stream：有 UV 才建。
+    //
+    // 为何不用交错布局：`kVertexFloats = 9` 是生成器与后端的契约，改 stride
+    // 要动所有生成器与 OBJ 加载；而绝大多数网格不需要贴图。独立 stream 让
+    // “有 UV 才绑、没 UV 就不绑”成为一次判空。
+    if (mesh.has_uvs()) {
+      D3D11_BUFFER_DESC uv_desc{};
+      uv_desc.ByteWidth = static_cast<UINT>(mesh.uvs.size() * sizeof(float));
+      uv_desc.Usage = D3D11_USAGE_IMMUTABLE;
+      uv_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+      D3D11_SUBRESOURCE_DATA uv_data{};
+      uv_data.pSysMem = mesh.uvs.data();
+      if (FAILED(device_->CreateBuffer(&uv_desc, &uv_data, &buffers.uvs))) {
+        buffers.release();
+        return nullptr;
+      }
+    }
+    // 缓存上限：脚本可以让每帧都换网格，所以要有上限而不是无限长。
+    // 满了丢最早一项（FIFO）——与画布几何贴图缓存同一套策略。
+    if (cache_.size() >= kMeshCacheLimit) cache_.erase(cache_.begin());
+    cache_.push_back(CacheEntry{key, std::move(buffers)});
+    return &cache_.back().buffers;
+  }
+
+  /// 上传（或释放）纹理。空 span = 释放。
+  void upload_texture(std::span<const std::uint8_t> pixels, int width, int height) {
+    if (texture_view_ != nullptr) {
+      texture_view_->Release();
+      texture_view_ = nullptr;
+    }
+    if (texture_ != nullptr) {
+      texture_->Release();
+      texture_ = nullptr;
+    }
+    if (pixels.empty() || width <= 0 || height <= 0) return;
+    const std::size_t needed =
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4U;
+    if (pixels.size() < needed) return;
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = static_cast<UINT>(width);
+    desc.Height = static_cast<UINT>(height);
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = kFormat;   // R8G8B8A8_UNORM：与画布/纹理数据同一通道序
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_IMMUTABLE;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA data{};
+    data.pSysMem = pixels.data();
+    data.SysMemPitch = static_cast<UINT>(width) * 4U;
+    if (FAILED(device_->CreateTexture2D(&desc, &data, &texture_))) {
+      texture_ = nullptr;
+      return;
+    }
+    if (FAILED(device_->CreateShaderResourceView(texture_, nullptr, &texture_view_))) {
+      texture_view_ = nullptr;
+    }
+  }
+
+  /// 回读成画布布局（`0xRRGGBBAA`）。每帧 `end_frame` 调一次。
+  void ensure_readback() {
+    // 回读必须取 **resolve 后**的纹理：MSAA 纹理不能 CopyResource 到单采样 staging。
+    resolve_if_needed();
+    ID3D11Texture2D* source_texture = resolved_ != nullptr ? resolved_ : color_;
+    if (staging_ == nullptr) {
+      D3D11_TEXTURE2D_DESC desc{};
+      desc.Width = static_cast<UINT>(width_);
+      desc.Height = static_cast<UINT>(height_);
+      desc.MipLevels = 1;
+      desc.ArraySize = 1;
+      desc.Format = kFormat;
+      desc.SampleDesc.Count = 1;
+      desc.Usage = D3D11_USAGE_STAGING;
+      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      if (FAILED(device_->CreateTexture2D(&desc, nullptr, &staging_))) return;
+    }
+    context_->CopyResource(staging_, source_texture);
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(context_->Map(staging_, 0, D3D11_MAP_READ, 0, &mapped))) return;
+    readback_.resize(static_cast<std::size_t>(width_) * static_cast<std::size_t>(height_));
+    const auto* source = static_cast<const std::uint8_t*>(mapped.pData);
+    for (int y = 0; y < height_; ++y) {
+      const std::uint8_t* row = source + static_cast<std::size_t>(y) * mapped.RowPitch;
+      for (int x = 0; x < width_; ++x) {
+        const std::uint8_t red = row[x * 4 + 0];
+        const std::uint8_t green = row[x * 4 + 1];
+        const std::uint8_t blue = row[x * 4 + 2];
+        const std::uint8_t alpha = row[x * 4 + 3];
+        readback_[static_cast<std::size_t>(y) * static_cast<std::size_t>(width_) +
+                  static_cast<std::size_t>(x)] =
+            (static_cast<std::uint32_t>(red) << 24U) |
+            (static_cast<std::uint32_t>(green) << 16U) |
+            (static_cast<std::uint32_t>(blue) << 8U) | static_cast<std::uint32_t>(alpha);
+      }
+    }
+    context_->Unmap(staging_, 0);
+  }
+
+  struct CacheEntry {
+    std::uint64_t key{0};
+    MeshBuffers buffers{};
+  };
+  static constexpr std::size_t kMeshCacheLimit{32};
+
+  ID3D11Device* device_{nullptr};
+  ID3D11DeviceContext* context_{nullptr};
+  int width_{1};
+  int height_{1};
+  bool ok_{false};
+  ID3D11Texture2D* color_{nullptr};
+  ID3D11RenderTargetView* rtv_{nullptr};
+  /// resolve 目标（MSAA 时非空）：单采样且可建 SRV，零拷贝合成与回读都用它。
+  ID3D11Texture2D* resolved_{nullptr};
+  /// 实际生效的 MSAA 采样数（1 = 无抗锯齿，设备不支持时自动退到 1）。
+  UINT sample_count_{1};
+  ID3D11ShaderResourceView* srv_{nullptr};
+  ID3D11Texture2D* depth_{nullptr};
+  ID3D11DepthStencilView* dsv_{nullptr};
+  ID3D11Texture2D* staging_{nullptr};
+  ID3D11Query* query_{nullptr};   ///< `flush()` 用的完成查询（复用以避免每帧建对象）
+  std::vector<std::uint32_t> readback_{};
+  std::vector<CacheEntry> cache_{};
+  /// 本网格是否正在采样纹理。
+  bool use_texture_{false};
+  ID3D11Texture2D* texture_{nullptr};
+  ID3D11ShaderResourceView* texture_view_{nullptr};
+  st::raster::Lighting lighting_{};
+  math::Mat4 view_{math::Mat4::identity()};
+  math::Mat4 projection_{math::Mat4::identity()};
+  bool mvp_ready_{false};
+  std::uint64_t draw_calls_{0};
+};
+
 }  // namespace st::raster::gpu
+
+namespace st::raster {
+
+/// GPU 三维腿是否可用（着色器与状态**真建起来**才算，不只看"有设备"）。
+[[nodiscard]] auto gpu_scene3d_available() -> bool {
+  return st::raster::gpu::scene3d_pipeline().ok;
+}
+
+/// 建 GPU 三维场景；不可用时给出**具体原因**（上层据此回退软件腿并记日志）。
+[[nodiscard]] auto create_gpu_scene3d(int width, int height)
+    -> Result<std::unique_ptr<Scene3D>> {
+  using namespace st::raster::gpu;
+  const DeviceHolder& device = holder();
+  if (!device.ok) {
+    return unexpected(ErrorCode::Unsupported,
+                      device.error.empty() ? std::string("没有可用的 D3D11 设备")
+                                           : device.error);
+  }
+  if (width <= 0 || height <= 0) {
+    return unexpected(ErrorCode::Invalid, "渲染尺寸必须为正");
+  }
+  const Scene3dPipeline& pipes = scene3d_pipeline();
+  if (!pipes.ok) {
+    return unexpected(ErrorCode::Unsupported,
+                      pipes.error.empty() ? std::string("三维渲染管线不可用") : pipes.error);
+  }
+  auto scene = std::make_unique<GpuScene3d>(device.device_or_null(), device.context_or_null(),
+                                            width, height);
+  return std::unique_ptr<Scene3D>(std::move(scene));
+}
+
+}  // namespace st::raster
 
 #endif  // _WIN32

@@ -340,6 +340,36 @@
       "sources": ["tools/cull_effectiveness_probe.cpp"],
       "exclude_sources": ["src/pkg/*"]
     },
+    "gpu_probe": {
+      "kind": "executable",
+      "sources": ["tools/gpu_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "本机 GPU 腿可用性（无头模式下 st doctor 有意不探测 GPU，这里显式探一次）"
+    },
+    "scene3d_texture_probe": {
+      "kind": "executable",
+      "sources": ["tools/scene3d_texture_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "三维纹理与 UV 是否真的贴上且位置正确（v 轴翻转、双线性采样）"
+    },
+    "scene3d_composite_probe": {
+      "kind": "executable",
+      "sources": ["tools/scene3d_composite_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "三维零拷贝合成 vs 回读：有显卡就用显卡的成败点（回读会把显卡的收益全吃掉）"
+    },
+    "scene3d_two_legs_probe": {
+      "kind": "executable",
+      "sources": ["tools/scene3d_two_legs_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "三维两条腿（GPU/软件）对照：光栅成本与回读成本分开量，决定“有显卡就用显卡”值不值"
+    },
+    "scene3d_cost_probe": {
+      "kind": "executable",
+      "sources": ["tools/scene3d_cost_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "软件三维腿的单帧成本基线：裁云把三维当画面主体用之前先量清楚（尺寸×面数×单价）"
+    },
     "shadow_unit_cost_probe": {
       "kind": "executable",
       "sources": ["tools/shadow_unit_cost_probe.cpp"],
