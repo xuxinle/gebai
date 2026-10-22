@@ -90,9 +90,9 @@ function layout(t, duration, canvas, layers) {
 
   // 点的主轨迹（也用作各场所的"锚"）
   const dotX = keys(t, [
-    [0.0, CX], [0.9, CX], [1.75, CX - 210, "in_out"],
-    [3.0, CX - 210], [3.4, CX - 190, "in_out"],
-    [4.4, CX - 190], [5.0, CX - 60, "in_out"],
+    [0.0, CX], [0.9, CX], [1.75, CX - 380, "in_out"],
+    [3.0, CX - 380], [3.4, CX - 300, "in_out"],
+    [4.4, CX - 300], [5.0, CX - 80, "in_out"],
     [6.0, CX - 40, "in_out"], [6.8, CX, "in_out"],
     [9.4, CX], [10.2, CX - 30, "out"], [11.0, CX],
     [12.2, CX], [14.8, CX + 6, "in_out"],
@@ -119,7 +119,9 @@ function layout(t, duration, canvas, layers) {
     // 这样即使行内容不变，画面也有大范围像素变化。
     const enter = keys(t, [[1.55, 1], [2.15, 0, "out"]]);
     const exit = keys(t, [[3.05, 0], [3.6, 1, "in"]]);
-    setCamera(0, enter * 220 - exit * 180, 1.0);
+    // 滑入/滑出幅度加大到 420/380（原来 220/180）：单帧变化强度只有 onetake 一半，
+    // 最有效的补偿就是**更大的位移**。
+    setCamera(0, enter * 420 - exit * 380, 1.0);
     const rows = 4;
     const appear = keys(t, [[1.6, 0], [2.5, 1, "out"]]);
     const highlight = keys(t, [[2.0, 0], [2.5, 1, "out"], [2.9, 2, "out"], [3.2, 3, "out"]]);
@@ -160,7 +162,7 @@ function layout(t, duration, canvas, layers) {
   if (t > 3.0 && t < 4.7) {
     const enter = keys(t, [[3.0, 1], [3.5, 0, "out"]]);
     const exit = keys(t, [[4.3, 0], [4.7, 1, "in"]]);
-    setCamera(enter * 320 - exit * 260, 0, 1.0);
+    setCamera(enter * 620 - exit * 500, 0, 1.0);
     const lineY = CY + 250;
     const lineX = CX - 560;
     // 光标（呼吸）
@@ -190,7 +192,7 @@ function layout(t, duration, canvas, layers) {
 
   // ═══════ 场所 4｜4.4–6.0 **结果卡片**（卡片升起 + 内部条逐条填充）═══════
   if (t > 4.4 && t < 6.3) {
-    const zoomT = keys(t, [[4.4, 0.72], [5.1, 1.0, "out"], [5.9, 1.0], [6.3, 1.16, "in"]]);
+    const zoomT = keys(t, [[4.4, 0.58], [5.1, 1.02, "out"], [5.9, 1.02], [6.3, 1.26, "in"]]);
     setCamera(0, 0, zoomT);
     const cardT = spring(Math.max(0, t - 4.45), 0.62, 17);
     const cardW = 1320, cardH = 740;
@@ -230,10 +232,10 @@ function layout(t, duration, canvas, layers) {
   const ringSpin = keys(t, [[6.1, 0], [7.5, 340, "in_out"]]);
   // 环用密集小点画（比 stroke 更有"扫描"感，且角度变化每帧可见）
   if (t > 6.0 && t < 7.6) {
-    const zoomT = keys(t, [[6.0, 0.78], [6.7, 1.02, "out"], [7.2, 1.02], [7.6, 1.22, "in"]]);
+    const zoomT = keys(t, [[6.0, 0.62], [6.7, 1.04, "out"], [7.2, 1.04], [7.6, 1.34, "in"]]);
     setCamera(0, 0, zoomT);
     const spin = ringSpin * Math.PI / 180.0;
-    const radius = 240;
+    const radius = 300;
     const count = 26;
     const sweep = keys(t, [[6.15, 0], [7.1, 1, "in_out"]]);
     for (let i = 0; i < count; i++) {
@@ -250,7 +252,7 @@ function layout(t, duration, canvas, layers) {
   if (t > 7.3 && t < 9.8) {
     // 横移幅度 380px：这一段之前几乎静止（实测差异 0.2%），
     // 加上大位移后才有可见变化。
-    const pan = keys(t, [[7.3, 300], [8.5, -60, "in_out"], [9.1, -60], [9.8, -380, "in_out"]]);
+    const pan = keys(t, [[7.3, 520], [8.5, -80, "in_out"], [9.1, -80], [9.8, -620, "in_out"]]);
     setCamera(pan, 0, 1.0);
     const drawIn = keys(t, [[7.35, 0], [8.3, 1, "out"]]);
     const count = 64;
@@ -263,7 +265,7 @@ function layout(t, duration, canvas, layers) {
       const wave = 0.55 + 0.45 * Math.sin((u * 7.0 - t * 4.5) * Math.PI);
       push({
         kind: 0, x: 180 + u * 1560, y: 540 - amp * Math.sin(u * Math.PI * 2.6),
-        w: 16 + wave * 14, color: wave > 0.6 ? ACCENT : SOFT, alpha: 0.35 + wave * 0.62,
+        w: 22 + wave * 20, color: wave > 0.6 ? ACCENT : SOFT, alpha: 0.30 + wave * 0.68,
       });
     }
     // 珠子 + 4 段拖尾（比首版更粗更长，肉眼可见）
@@ -283,7 +285,7 @@ function layout(t, duration, canvas, layers) {
       const bamp = 320 * Math.exp(-1.6 * beadT);
       push({
         kind: 0, x: 180 + beadT * 1560, y: 540 - bamp * Math.sin(beadT * Math.PI * 2.6),
-        w: 58, color: "#D2DBFF", alpha: beadA,
+        w: 76, color: "#D2DBFF", alpha: beadA,
       });
     }
   }
@@ -292,7 +294,7 @@ function layout(t, duration, canvas, layers) {
   if (t > 9.4 && t < 11.6) {
     // 这一段之前几乎不动（实测 0.2%）：粒子扩散太慢、太小。
     // 改成快速大范围扩散 + 持续缩放，保证每分钟都有显著变化。
-    const zoomT = keys(t, [[9.4, 1.30], [10.2, 0.90, "in_out"], [11.6, 1.02]]);
+    const zoomT = keys(t, [[9.4, 1.55], [10.2, 0.78, "in_out"], [11.6, 1.02]]);
     setCamera(0, 0, zoomT);
     const bt = Math.max(0, t - 9.45);
     const spread = spring(bt, 0.55, 13);
@@ -303,7 +305,7 @@ function layout(t, duration, canvas, layers) {
       const dist = 520 * spread * (0.65 + 0.35 * (((i * 7) % 5) / 5));
       push({
         kind: 0, x: CX + Math.cos(angle) * dist, y: CY + 20 + Math.sin(angle) * dist * 0.62,
-        w: 26 * Math.max(0.2, 1 - bt * 0.3), color: ACCENT, alpha: fade,
+        w: 40 * Math.max(0.2, 1 - bt * 0.28), color: ACCENT, alpha: fade,
       });
     }
   }

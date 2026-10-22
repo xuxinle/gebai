@@ -241,6 +241,7 @@ auto main(int argc, char** argv) -> int {
   int step = 1;
   float threshold = 0.5f;
   std::string trajectory_path{};
+  float fps = 30.0f;
   for (int index = 1; index < argc; ++index) {
     const std::string arg = argv[index];
     if (arg == "--dir" && index + 1 < argc) {
@@ -255,6 +256,9 @@ auto main(int argc, char** argv) -> int {
       threshold = static_cast<float>(std::atof(argv[++index]));
     } else if (arg == "--traj" && index + 1 < argc) {
       trajectory_path = argv[++index];
+    } else if (arg == "--fps" && index + 1 < argc) {
+      fps = static_cast<float>(std::atof(argv[++index]));
+      if (fps < 1.0f) fps = 30.0f;
     } else if (arg == "--help" || arg == "-h") {
       st::print("用法: carry_check --dir <帧目录> [--cols 32] [--rows 18] [--step 1] "
                 "[--threshold 0.5]\n");
@@ -279,7 +283,16 @@ auto main(int argc, char** argv) -> int {
     return 2;
   }
 
-  st::print("连贯性验收：{} 帧，网格 {}×{}，步长 {}\n", files.size(), cols, rows, step);
+  // ⚠ **必须报告采样间隔**：这个数字决定了「单帧变化强度」的量级。
+  //
+  // 实测栽过：拿 10 fps 抽的参考片（间隔 0.1s）与 30 fps 抽的自己的片（间隔 0.033s）
+  // 比 `mean_abs_delta`，得出「差 5.3 倍」的结论——而间隔差 3 倍，
+  // 运动量本来就该差 3 倍。**两个不同 fps 的帧目录不可比**。
+  const float interval_ms = 1000.0f / fps * static_cast<float>(step);
+  st::print("连贯性验收：{} 帧，网格 {}×{}，步长 {}（采样间隔 {:.1f} ms，fps={:.0f}）\n",
+            files.size(), cols, rows, step, static_cast<double>(interval_ms),
+            static_cast<double>(fps));
+  st::print("  ⚠ 与他片对比时必须用**同一采样间隔**，否则单帧变化强度不可比。\n");
 
   FrameGrid previous{};
   int index = 0;
