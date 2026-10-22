@@ -107,6 +107,15 @@ const elementBindings: KeyBinding[] = [
     run: () => {},
   },
   {
+    id: "main.session.multiselect",
+    keys: "Ctrl+Click",
+    label: "会话列表：Ctrl+点击 追加选中 / Shift+点击 选中区间；分类行勾选框或 Ctrl+点击分类名 = 选中该分类下全部会话",
+    group: "main.session",
+    note: "会话行上（sessions.ts；也可用右键「选中」进入多选）",
+    owned: false,
+    run: () => {},
+  },
+  {
     id: "main.session.renameSave",
     keys: "Enter",
     label: "会话重命名：保存",

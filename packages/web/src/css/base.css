@@ -613,7 +613,8 @@ aside {
 .session-ctx-menu .ctx-item:hover { background: var(--bg-hover); color: var(--accent); }
 .session-ctx-menu .ctx-item.danger { color: var(--danger); }
 .session-ctx-menu .ctx-item.danger:hover { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
-/* 会话分组头（今天/昨天/近7天/更早）：点击折叠/展开组；批量模式下点击切换全组选中 */
+/* 会话分组头（今天/昨天/近7天/更早）：点击折叠/展开组；行尾勾选框与普通会话行同一套（默认隐藏、
+   批量模式下常驻），点它或 Ctrl+点击分类名 = 选中该分类下全部会话 */
 #session-list li.session-group {
   display: flex;
   align-items: center;
@@ -624,9 +625,10 @@ aside {
   font-weight: 600;
   letter-spacing: 0.5px;
   color: var(--text-faint);
+  cursor: pointer;
   user-select: none;
 }
-#session-list li.session-group:hover { background: transparent; }
+#session-list li.session-group:hover { background: var(--bg-hover); }
 #session-list li.session-group .sg-chevron {
   font-size: 10px;
   color: var(--text-faint);
@@ -635,6 +637,20 @@ aside {
 #session-list li.session-group.collapsed .sg-chevron { transform: rotate(-90deg); }
 #session-list li.session-group .sg-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #session-list li.session-group .sg-count { font-weight: 500; }
+/* 半选（该分类下部分会话已选）：横线代替勾选对勾 */
+#session-list li.session-group .session-check:indeterminate {
+  background-color: var(--accent);
+  border-color: var(--accent);
+  background-image: none;
+}
+#session-list li.session-group .session-check:indeterminate::after {
+  content: "";
+  display: block;
+  width: 7px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--on-accent);
+}
 /* 会话内联重命名输入框 */
 .session-rename {
   width: 100%;

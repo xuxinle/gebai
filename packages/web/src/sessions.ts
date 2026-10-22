@@ -49,6 +49,7 @@ import { msgWindow, setBlockRenderer } from "./msg-window"
 import { renderAttachments } from "./attachments"
 import { clearQueue, renderQueue } from "./queue"
 import { rememberTaskLabels } from "./task-labels"
+import { rangeSelection, selectionState } from "./session-select-core"
 
 export type LoadMessagesFn = (sessionId: string) => Promise<void>
 
@@ -479,22 +480,79 @@ export function attachRunningIfNeeded(sessionId: string): void {
 /* ---------- 批量选择删除 ---------- */
 
 let batchMode = false
+/** 选中集（按会话 id）：批量模式下每个可见行按它落选中态，重渲染后选中不丢。 */
 const selected = new Set<string>()
 const selectedNames = new Map<string, string>()
+/** Shift 区间的锚点：上一次选中点击落在哪一行（退出批量模式即清空）。 */
+let selectAnchor: string | null = null
 
-function toggleSelect(id: string, li: HTMLElement) {
-  if (selected.has(id)) {
-    selected.delete(id)
-    li.classList.remove("selected")
-  } else {
-    selected.add(id)
-    li.classList.add("selected")
+/** 当前渲染出的会话行 id，按列表展示顺序（分组展开与搜索平铺同一口径）。 */
+function renderedSids(): string[] {
+  return [...sessionList.querySelectorAll<HTMLElement>("li[data-sid]")].map((x) => x.dataset.sid!)
+}
+
+/** 分类头的选中反映（渲染与选中变更共用同一口径）：勾选框状态 + 整组选中时的行高亮，
+ *  与普通会话行完全同一个勾选框元素与同一套选中样式。 */
+function syncGroupCheck(head: HTMLElement): void {
+  const box = head.querySelector<HTMLInputElement>(".session-check")
+  const st = selectionState(sidsOfGroup(head.dataset.group!), selected)
+  if (box) {
+    box.checked = st === "all"
+    // 部分选中：半选态（indeterminate 只能经 JS 设置，无法从 HTML 属性表达）
+    box.indeterminate = st === "some"
   }
-  const box = li.querySelector<HTMLInputElement>(".session-check")
-  if (box) box.checked = selected.has(id)
+  head.classList.toggle("selected", st === "all")
+}
+
+/** 一个分类下的全部会话 id（按数据算，不读 DOM）：折叠分组没有渲染出成员行，但勾选它仍要选中里面的会话。 */
+function sidsOfGroup(key: string): string[] {
+  const all = lastSessions ?? []
+  const shown = searchQuery ? all.filter((s) => s.name.toLowerCase().includes(searchQuery)) : all
+  return shown.filter((s) => (s.pinned ? "pinned" : sessionGroup(s.updatedAt)) === key).map((s) => s.id)
+}
+
+/** 把选中集落到当前 DOM（不重建列表）：行高亮 + 勾选框 + 分类头三态 + 操作条计数。 */
+function paintSelection(): void {
+  for (const li of sessionList.querySelectorAll<HTMLElement>("li[data-sid]")) {
+    const on = selected.has(li.dataset.sid!)
+    li.classList.toggle("selected", on)
+    const box = li.querySelector<HTMLInputElement>(".session-check")
+    if (box) box.checked = on
+  }
+  for (const head of sessionList.querySelectorAll<HTMLElement>("li.session-group[data-group]")) syncGroupCheck(head)
   updateBatchCount()
-  // 全部取消 → 退出批量模式
-  if (batchMode && selected.size === 0) exitBatch()
+}
+
+/** 落一次选中结果：选中非空即进入批量模式（修饰键多选也是它的入口），全部取消则退出。 */
+function commitSelection(): void {
+  if (selected.size === 0) {
+    if (batchMode) exitBatch()
+    else paintSelection()
+    return
+  }
+  if (!batchMode) enterBatch()
+  paintSelection()
+}
+
+/** 切换一行的选中态（勾选框 / Ctrl 单击 / 批量模式下单击）。 */
+function toggleSelect(id: string): void {
+  if (selected.has(id)) selected.delete(id)
+  else selected.add(id)
+  selectAnchor = id
+  commitSelection()
+}
+
+/**
+ * 区间选中（Shift 单击）：从锚点到该行的连续区段，`additive` 为真时并入现有选中（Ctrl+Shift）、
+ * 否则替换。锚点只在无锚点/锚点已不在列表（被删、被搜索过滤、所在分组未渲染）时前移到该行，
+ * 连续 Shift 单击因此始终以同一起点为基准延伸（与文件管理器同口径）。
+ */
+function selectRange(sid: string, additive: boolean): void {
+  const ids = rangeSelection(renderedSids(), selectAnchor, sid)
+  if (!additive) selected.clear()
+  for (const id of ids) selected.add(id)
+  if (ids.length === 1) selectAnchor = sid
+  commitSelection()
 }
 
 function updateBatchCount() {
@@ -520,10 +578,9 @@ function enterBatch() {
   batchBar.hidden = false
   searchInputEl.disabled = true
   newSessionBtn.disabled = true
-  selected.clear()
   updateBatchCount()
-  // 延迟重渲染展开全部折叠分组：先让触发勾选的 toggleSelect 在旧 DOM 上完成选中（同步重渲染会
-  // 摘除当前 li，toggleSelect 会因 selected 为空误触发 exitBatch 取消批量模式）
+  // 延迟重渲染展开全部折叠分组：选中集与落选中（paintSelection）都已完成，同步重建不影响结果，
+  // 延后只是避免在同一次点击里摘掉刚被点击的行
   scheduleBatchRender()
 }
 
@@ -534,6 +591,8 @@ function exitBatch() {
   searchInputEl.disabled = false
   newSessionBtn.disabled = false
   selected.clear()
+  selectAnchor = null
+  paintSelection() // 选中集清空后立即同步行高亮与分类头（不依赖随后的重渲染时序）
   scheduleBatchRender() // 恢复折叠状态
 }
 
@@ -639,36 +698,40 @@ function persistCollapsedGroups(): void {
   }
 }
 
-/** 组头：点击折叠/展开（折叠分组不渲染成员）；批量模式下点击切换全组选中。 */
+/** 组头：点击折叠/展开（折叠分组不渲染成员）；行尾勾选框与普通会话行同一套——
+ *  点勾选或 Ctrl+点击分类名 = 选中该分类下全部会话，批量模式下点击分类名也是整组切换。 */
 function appendGroupHeader(key: GroupKey, count: number): void {
   const li = el("li", "session-group")
   li.dataset.group = key
   const collapsed = !batchMode && collapsedGroups.has(key)
   if (collapsed) li.classList.add("collapsed")
   const chevron = el("span", "sg-chevron", "▾")
-  li.append(chevron, el("span", "sg-label", GROUP_LABEL[key]), el("span", "sg-count", String(count)))
+  // 勾选框：与普通会话行的 .session-check 同一个类、同一套可见性（默认隐藏、批量模式常驻）
+  const box = el("input", "session-check") as HTMLInputElement
+  box.type = "checkbox"
+  box.dataset.tip = "选中该分类下的全部会话（Ctrl+点击分类名同效果）"
+  li.append(chevron, el("span", "sg-label", GROUP_LABEL[key]), el("span", "sg-count", String(count)), box)
   sessionList.appendChild(li)
+  // 重渲染后跟着选中集恢复（批量模式下的展开/折叠重渲染不能把分类头的勾选态弄丢）
+  syncGroupCheck(li)
 }
 
-/** 组头点击（列表委托分发）：批量模式切换全组选中，否则折叠/展开该组。 */
-function toggleGroupHeader(key: GroupKey): void {
-  if (batchMode) {
-    // 全组选中/取消（含组头所在行外的成员 li，data-group 匹配）
-    const lis = sessionList.querySelectorAll<HTMLElement>(`li[data-sid][data-group="${key}"]`)
-    const all = [...lis].every((x) => selected.has(x.dataset.sid!))
-    for (const x of lis) {
-      const sid = x.dataset.sid!
-      if (all) {
-        selected.delete(sid)
-        x.classList.remove("selected")
-      } else {
-        selected.add(sid)
-        x.classList.add("selected")
-      }
-      const box = x.querySelector<HTMLInputElement>(".session-check")
-      if (box) box.checked = selected.has(sid)
-    }
-    updateBatchCount()
+/** 勾选一个分类下全部会话（已在批量模式或由它进入）；分类全选时变成全取消。 */
+function toggleGroupSelection(key: string): void {
+  const ids = sidsOfGroup(key)
+  const all = selectionState(ids, selected) === "all"
+  for (const id of ids) {
+    if (all) selected.delete(id)
+    else selected.add(id)
+  }
+  selectAnchor = null
+  commitSelection()
+}
+
+/** 组头点击（列表委托分发）：批量模式 / Ctrl(+⌘) 点击切换全组选中，否则折叠/展开该组。 */
+function toggleGroupHeader(key: GroupKey, forceSelect = false): void {
+  if (batchMode || forceSelect) {
+    toggleGroupSelection(key)
     return
   }
   if (collapsedGroups.has(key)) collapsedGroups.delete(key)
@@ -691,7 +754,7 @@ function appendSessionLi(s: SessionInfo, groupKey = ""): void {
   const body = el("div", "session-body")
   // 重命名：双击/右键菜单触发 → 内联编辑（回车/失焦保存，Esc 取消）
   const nameEl = el("span", "session-name", s.name) as HTMLElement
-  // 选中按钮（多选勾选）：hover 显示、批量模式常驻；未进入批量模式时点击即进入并勾选
+  // 选中按钮（多选勾选）：默认隐藏、批量模式常驻；点击切换该行选中（与行的 Ctrl/Shift 点击同一套选中集）
   const box = el("input", "session-check") as HTMLInputElement
   box.type = "checkbox"
   box.checked = batchMode && selected.has(s.id)
@@ -718,9 +781,9 @@ function liOf(target: EventTarget | null): HTMLElement | null {
 }
 
 /** 切换会话（列表委托分发；原逐行 click 主体）。 */
-async function activateSession(sid: string, li: HTMLElement): Promise<void> {
+async function activateSession(sid: string): Promise<void> {
   if (batchMode) {
-    toggleSelect(sid, li)
+    toggleSelect(sid)
     return
   }
   // 点了就把抽屉收起（窄屏）：已激活的那一条也要收——否则用户点自己所在的会话行后
@@ -748,28 +811,39 @@ async function activateSession(sid: string, li: HTMLElement): Promise<void> {
   }
 }
 
-/** 勾选会话行（列表委托分发；原复选框 click 主体）。 */
-function checkRow(sid: string, li: HTMLElement): void {
-  if (!batchMode) enterBatch()
-  toggleSelect(sid, li)
-}
-
 /** 触屏长按判定阈值（毫秒）：触发后与右键菜单同效。 */
 const LONG_PRESS_MS = 480
 
 /** 会话列表事件委托：click/dblclick/contextmenu 各绑一个，行数增长不再线性增加监听器。 */
 function bindSessionListDelegation(): void {
+  // Shift 单击防拉选：不拦 mousedown 的默认行为，浏览器会把上一次点击到这次点击之间的文字拉成选区
+  sessionList.addEventListener("mousedown", (e) => {
+    if (e.shiftKey && liOf(e.target)?.dataset.sid) e.preventDefault()
+  })
   sessionList.addEventListener("click", (e) => {
     const li = liOf(e.target)
     if (!li) return
     if (li.classList.contains("session-group")) {
-      toggleGroupHeader(li.dataset.group as GroupKey)
+      // 分类行：点勾选框或带 Ctrl/Cmd（Ctrl+点击分类名）都是选中该分类下全部会话；
+      // 普通点击仍是折叠/展开（批量模式下则全选/全取消该分类）
+      const byBox = !!(e.target as HTMLElement).closest(".session-check")
+      toggleGroupHeader(li.dataset.group as GroupKey, byBox || e.ctrlKey || e.metaKey)
       return
     }
     const sid = li.dataset.sid
     if (!sid) return
-    if ((e.target as HTMLElement).closest(".session-check")) checkRow(sid, li)
-    else void activateSession(sid, li)
+    // 修饰键多选：Shift = 从锚点到该行的区间（Ctrl/Cmd+Shift 并入现有选中），
+    // Ctrl/Cmd = 切换该行选中态；勾选框与不带修饰键的点击都落到切换。
+    if (e.shiftKey) {
+      selectRange(sid, e.ctrlKey || e.metaKey)
+      return
+    }
+    if (e.ctrlKey || e.metaKey) {
+      toggleSelect(sid)
+      return
+    }
+    if ((e.target as HTMLElement).closest(".session-check")) toggleSelect(sid)
+    else void activateSession(sid)
   })
   sessionList.addEventListener("dblclick", (e) => {
     const li = liOf(e.target)
@@ -1038,9 +1112,9 @@ function openSessionMenu(e: { clientX: number; clientY: number }, s: SessionInfo
   const menu = el("div", "session-ctx-menu") as HTMLDivElement
   const items: Array<{ label: string; danger?: boolean; action: () => void }> = []
   if (batchMode) {
-    items.push({ label: selected.has(s.id) ? "取消选择" : "选择", action: () => toggleSelect(s.id, li) })
+    items.push({ label: selected.has(s.id) ? "取消选择" : "选择", action: () => toggleSelect(s.id) })
   } else {
-    items.push({ label: "选中", action: () => { enterBatch(); toggleSelect(s.id, li) } })
+    items.push({ label: "选中", action: () => toggleSelect(s.id) })
   }
   items.push(
     // 复制会话 ID（定位问题/反馈用）：任意条目可复制，不限于当前会话
