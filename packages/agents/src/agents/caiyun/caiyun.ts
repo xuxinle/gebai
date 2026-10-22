@@ -14,7 +14,8 @@ export const name = "caiyun"
 export const description =
   "裁云（Nimbus）：用霜天框架做 AI 视频——写导演脚本、选素材、配音与音效、出片并核验。" +
   "裁云是 AI 驱动视频生成器（真值源 = JSON 导演脚本；自研 C++ 渲染器，纯离线无外部依赖），" +
-  "装载后可直接驱动应用出 mp4（含配乐、配音、音效，以及景深/光晕/粒子/运镜等影像特效）。" +
+  "装载后可直接驱动应用出 mp4（含配乐、配音、音效，以及景深/光晕/粒子/运镜等影像特效；" +
+  "**支持真三维模型图层**——盒子/球/圆环/圆柱/平面/OBJ，有显卡走显卡、无显卡自动降级）。" +
   "适用于「做一条宣传片 / 产品视频 / 发布会短片 / 动效短片」「改已有片子的分镜与文案」「生成素材并合成」。 " +
   "输入：视频需求（主题/时长/风格/尺寸）或现有脚本路径。 " +
   "内含霜天子代理的全套工具（`shuangtian_*`）+ 依赖连带装载的图像生成（`imagegen_*`）与语音音效（`tts_*`）。"
@@ -153,6 +154,24 @@ export const systemPrompt = [
   "| `path` | `points`[x0,y0,x1,y1,...]/`closed`（闭合则填充）/`stroke` |",
   "| `glow` | `fill`（光色）/`intensity`/`spread`（半径比例）/`x`/`y`/`w`/`h`（定中心） |",
   "| `particles` | `count`/`intensity`/`fill` |",
+  "| `model3d` | **三维模型**：`model_shape`(box/sphere/torus/cylinder/plane/`obj:<路径>`) / `model_color`+`model_color_alt` / `model_segments` / `model_scale` / `model_spin`(度/秒) / `model_tilt` / `model_bob`+`model_bob_hz` / `cam_azimuth`+`cam_elevation`+`cam_distance`+`cam_fov` / `cam_dolly_from`+`cam_dolly_to` / `light_azimuth`+`light_elevation`+`light_ambient`+`light_rim` / `model_backdrop` |",
+  "",
+  "### 三维图层（`model3d`）——当买点时用它",
+  "",
+  "**能用，但要知道边界**（框架层 `raster::Scene3D`，有显卡走显卡、无显卡自动降级；你不需要判断）：",
+  "· **能**：纯色+竖向渐变实体、真实透视与遮挡、多面光照（主光/环境/边缘光）、自转/倾斜/浮动、推拉。",
+  "· **不能**（写进剧本就是返工）：**贴图/UV**（模型贴不了 logo——logo 用 `image` 图层叠在上面）、",
+  "  **阴影/反射/环境贴图**、**三维文字**（文字仍由渲染器画二维）、**OBJ 只取几何**（忽略材质与纹理坐标）。",
+  "· **一个图层一个模型**：同一矩形放多个模型就要多个图层（各自相机与光照）。",
+  "",
+  "三条纪律（实测）：",
+  "1. **自转宁慢勿快**：8~15 度/秒是“缓慢自转”，20 以上变“陀螺”，30 以上让人晕。",
+  "2. **光照就是构图**：正面平光读起来平；侧逆光（`light_azimuth` 120~150 + `light_rim` 0.45）才有体积感。",
+  "3. **矩形给足留白**：模型约占矩形 62%；`x` 与 `w` 相加不要超 100%（超了会被裁）。",
+  "细节与完整字段表看 `docs/script_design.md` 附录 B。",
+  "",
+  "**性能实测（1080p）**：三维图层 + 文字 + 特效的成片大约 **178 ms/帧**（16 路并行下 390 帧约 10 秒）。",
+  "别为“验证一个动效”渲全片——这个数不变，改用抽帧/单节试渲。",
   "",
   "公共字段：`x`/`y`/`w`/`h`（**设计像素**，如 `640`；或**画面比例**，如 `\"50%\"`）、",
   "`opacity`、入场动画 `enter`（0=无 1=fade 2=rise 3=scale）/ `enter_at`（起始秒）/ `enter_dur`。",
