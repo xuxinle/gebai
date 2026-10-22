@@ -65,6 +65,35 @@ namespace {
   return true;
 }
 
+/// 解析 `#RRGGBB` / `#RRGGBBAA`。失败返回白色（宽容：脚本是外部输入）。
+[[nodiscard]] auto parse_hex_color(std::string_view text) -> st::math::Color {
+  st::math::Color color{255, 255, 255, 255};
+  if (text.size() < 7 || text.front() != '#') return color;
+  const auto hex = [](char ch) -> int {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+  };
+  const auto pair = [&hex, text](std::size_t offset) -> int {
+    const int high = hex(text[offset]);
+    const int low = hex(text[offset + 1]);
+    return (high < 0 || low < 0) ? -1 : high * 16 + low;
+  };
+  const int r = pair(1);
+  const int g = pair(3);
+  const int b = pair(5);
+  if (r < 0 || g < 0 || b < 0) return color;
+  color.r = static_cast<std::uint8_t>(r);
+  color.g = static_cast<std::uint8_t>(g);
+  color.b = static_cast<std::uint8_t>(b);
+  if (text.size() >= 9) {
+    const int a = pair(7);
+    if (a >= 0) color.a = static_cast<std::uint8_t>(a);
+  }
+  return color;
+};
+
 }  // namespace
 
 struct LayoutEngine::Impl {
@@ -72,6 +101,7 @@ struct LayoutEngine::Impl {
   bool loaded{false};
   std::uint64_t failures{0};
   std::string last_error{};
+  std::vector<ScriptShape> shapes{};
 };
 
 LayoutEngine::LayoutEngine() : impl_(std::make_unique<Impl>()) {}
@@ -85,6 +115,13 @@ auto LayoutEngine::failure_count() const noexcept -> std::uint64_t {
 }
 auto LayoutEngine::last_error() const -> const std::string& { return impl_->last_error; }
 
+auto LayoutEngine::shapes() const -> const std::vector<ScriptShape>& { return impl_->shapes; }
+
+auto LayoutEngine::register_function(std::string name, st::ext::ScriptHostFunction function)
+    -> st::Status {
+  return impl_->engine.register_function(std::move(name), std::move(function));
+}
+
 auto LayoutEngine::load(const LayoutScript& script) -> st::Status {
   impl_->loaded = false;
   if (script.empty()) return st::Status{};   // 空脚本 = 不启用（不是错误）
@@ -92,6 +129,9 @@ auto LayoutEngine::load(const LayoutScript& script) -> st::Status {
   st::ext::ScriptLimits limits{};
   limits.timeout = std::chrono::milliseconds{std::clamp(script.timeout_ms, 10, 30'000)};
   impl_->engine = st::ext::ScriptEngine{limits};
+  // 注册宿主函数（白名单，逐个显式）。必须在执行脚本**之前**——
+  // 否则脚本顶层就可能调不到它们。
+  register_host_functions(*this);
 
   // ① 语法校验：**加载期**就拦住语法错（AI 最常犯的错之一，必须当场报）
   if (const auto syntax = impl_->engine.check_syntax(script.source); !syntax) {
@@ -140,14 +180,22 @@ auto LayoutEngine::load(const LayoutScript& script) -> st::Status {
   const std::string wrapper =
       "globalThis.__caiyun_layout_safe = function (t, duration, canvas, layers) {"
       "  const clean = (v) => (typeof v === 'number' && !Number.isFinite(v)) ? undefined : v;"
-      "  const result = layout(t, duration, canvas, layers);"
-      "  if (!Array.isArray(result)) return result;"
-      "  return result.map((item) => {"
+      "  const cleanItem = (item) => {"
       "    if (item === null || typeof item !== 'object') return item;"
       "    const out = {};"
       "    for (const key of Object.keys(item)) out[key] = clean(item[key]);"
       "    return out;"
-      "  });"
+      "  };"
+      "  const result = layout(t, duration, canvas, layers);"
+      "  if (Array.isArray(result)) return result.map(cleanItem);"
+      // 新形态：{ states, shapes } —— 两边都要清洗（shapes 里同样可能出 NaN）
+      "  if (result && typeof result === 'object') {"
+      "    return {"
+      "      states: Array.isArray(result.states) ? result.states.map(cleanItem) : [],"
+      "      shapes: Array.isArray(result.shapes) ? result.shapes.map(cleanItem) : [],"
+      "    };"
+      "  }"
+      "  return result;"
       "};"
       // ⚠ 末尾必须有 `void 0`：赋值表达式的值是**函数本身**，
       // 而函数没有 JSON 表示 → `eval` 会报“函数没有 JSON 表示”。
@@ -194,18 +242,66 @@ auto LayoutEngine::evaluate(float time, float duration, float canvas_w, float ca
     return st::unexpected(produced.error().code, produced.error().message);
   }
   const st::Json& result = produced.value();
-  if (!result.is_array()) {
+  // 两种返回形态都支持：
+  //   · `return [ {...}, ... ]`            —— 纯状态数组（旧写法）
+  //   · `return { states: [...], shapes: [...] }` —— 带临时图元
+  //
+  // 为何不强制新写法：已有剧本用旧形态，改契约会让它们全失效。
+  const st::Json* states_json = &result;
+  impl_->shapes.clear();
+  if (result.is_object()) {
+    if (const st::Json* nested = st::json_find(result, "states"); nested != nullptr) {
+      states_json = nested;
+    }
+    if (const st::Json* shapes = st::json_find(result, "shapes");
+        shapes != nullptr && shapes->is_array()) {
+      impl_->shapes.reserve(shapes->size());
+      for (const st::Json& entry : *shapes) {
+        if (!entry.is_object()) continue;
+        ScriptShape shape{};
+        const auto number = [&entry](std::string_view key, float fallback) -> float {
+          const st::Json* field = st::json_find(entry, key);
+          if (field == nullptr || !field->is_number()) return fallback;
+          const double value = field->get<double>();
+          return std::isfinite(value) ? static_cast<float>(value) : fallback;
+        };
+        shape.kind = static_cast<int>(std::clamp(number("kind", 0.0f), 0.0f, 3.0f));
+        shape.x = number("x", 0.0f);
+        shape.y = number("y", 0.0f);
+        shape.w = number("w", 0.0f);
+        shape.h = number("h", 0.0f);
+        shape.x2 = number("x2", 0.0f);
+        shape.y2 = number("y2", 0.0f);
+        shape.radius = number("radius", 0.0f);
+        shape.stroke = number("stroke", 0.0f);
+        shape.rotate = number("rotate", 0.0f);
+        shape.text = st::json_get_string(entry, "text");
+        const float alpha = std::clamp(number("alpha", 1.0f), 0.0f, 1.0f);
+        const std::string color_text = st::json_get_string(entry, "color", "#ffffff");
+        shape.color = parse_hex_color(color_text);
+        shape.color.a = static_cast<std::uint8_t>(std::lround(alpha * 255.0f));
+        impl_->shapes.push_back(std::move(shape));
+      }
+    }
+  }
+  if (!states_json->is_array()) {
     ++impl_->failures;
     impl_->last_error = "layout 没有返回数组";
     return st::unexpected(st::ErrorCode::Invalid,
                           "layout 必须返回一个状态数组（与传入的图层等长）");
   }
+  if (std::getenv("CAIYUN_SHAPES_DEBUG") != nullptr) {
+    std::printf("[layout] t=%.3f duration=%.2f canvas=%.0fx%.0f layers=%zu shapes=%zu\n",
+                static_cast<double>(time), static_cast<double>(duration),
+                static_cast<double>(canvas_w), static_cast<double>(canvas_h), layers.size(),
+                impl_->shapes.size());
+  }
 
   // 长度不符时按较短者填：缺失项保持零增量（= 不改基准值），
   // 多出来的忽略。**不当作错误**——一处疏漏不该毁掉整帧。
-  const std::size_t count = std::min(result.size(), out.size());
+  const std::size_t count = std::min(states_json->size(), out.size());
   for (std::size_t index = 0; index < count; ++index) {
-    if (!read_delta(result[index], out[index])) {
+    if (!read_delta((*states_json)[index], out[index])) {
       ++impl_->failures;
       impl_->last_error = std::format("layout 返回的第 {} 项不是对象", index);
       // 单项结构错误：保持该项零增量，继续处理其余项
@@ -215,13 +311,112 @@ auto LayoutEngine::evaluate(float time, float duration, float canvas_w, float ca
   return st::Status{};
 }
 /// 取本线程的编排引擎（`thread_local` 池）。
-///
-/// 导出是 16 路并行：每线程一个实例，各自编译一次脚本。
-/// 换来的是**无锁**——QuickJS 运行时非线程安全，共享就得全程加锁，
-/// 而每帧每图层都要过一遍锁，那比多编译几次贵得多。
 auto layout_engine() -> LayoutEngine& {
   static thread_local LayoutEngine engine;
   return engine;
+}
+
+void register_host_functions(LayoutEngine& engine) {
+  // ## 为何全部是“纯函数”
+  //
+  // 注册进引擎的函数是脚本唯一的宿主能力面。这里刻意只给
+  // **无副作用、无 IO、无状态**的：拿到同样输入就得到同样输出。
+  // 一旦开放“读时钟/随机数/文件”，确定性就没了，
+  // 而确定性是“同一帧渲两次逐像素相同”的前提（批量导出靠它）。
+
+  // ease(name, t)：标准缓动曲线。
+  // 脚本里算缓动是极高频需求，而写对 easeOutBack 这种需要经验。
+  (void)engine.register_function(
+      "ease", [](const std::vector<st::Json>& args) -> st::Result<st::Json> {
+        if (args.size() < 2 || !args[0].is_string() || !args[1].is_number()) {
+          return st::unexpected(st::ErrorCode::Invalid, "ease(name, t) 需要 (字符串, 数字)");
+        }
+        const std::string name = args[0].get<std::string>();
+        const float t = std::clamp(static_cast<float>(args[1].get<double>()), 0.0f, 1.0f);
+        if (name == "linear") return st::Json(static_cast<double>(t));
+        if (name == "in") return st::Json(static_cast<double>(t * t * t));
+        if (name == "out") {
+          const float inverse = 1.0f - t;
+          return st::Json(static_cast<double>(1.0f - inverse * inverse * inverse));
+        }
+        if (name == "in_out") {
+          const float value = t < 0.5f
+                                  ? 4.0f * t * t * t
+                                  : 1.0f - std::pow(-2.0f * t + 2.0f, 3.0f) * 0.5f;
+          return st::Json(static_cast<double>(value));
+        }
+        if (name == "back") {
+          // easeOutBack：先越过再回弹（“有质量”的关键曲线）
+          const float c1 = 1.70158f;
+          const float c3 = c1 + 1.0f;
+          const float inverse = t - 1.0f;
+          return st::Json(static_cast<double>(1.0f + c3 * inverse * inverse * inverse +
+                                              c1 * inverse * inverse));
+        }
+        if (name == "elastic") {
+          if (t <= 0.0f) return st::Json(0.0);
+          if (t >= 1.0f) return st::Json(1.0);
+          constexpr float kTwoPi = 6.283185307179586f;
+          const float c4 = kTwoPi / 3.0f;
+          return st::Json(static_cast<double>(std::pow(2.0f, -10.0f * t) *
+                                                  std::sin((t * 10.0f - 0.75f) * c4) +
+                                              1.0f));
+        }
+        return st::unexpected(st::ErrorCode::Invalid,
+                              "未知缓动：" + name + "（可用：linear/in/out/in_out/back/elastic）");
+      });
+
+  // lerp(a, b, t)：线性插值
+  (void)engine.register_function(
+      "lerp", [](const std::vector<st::Json>& args) -> st::Result<st::Json> {
+        if (args.size() < 3 || !args[0].is_number() || !args[1].is_number() ||
+            !args[2].is_number()) {
+          return st::unexpected(st::ErrorCode::Invalid, "lerp(a, b, t) 需要 3 个数字");
+        }
+        const double a = args[0].get<double>();
+        const double b = args[1].get<double>();
+        const double t = args[2].get<double>();
+        return st::Json(a + (b - a) * t);
+      });
+
+  // clamp(v, lo, hi)：限幅
+  (void)engine.register_function(
+      "clamp", [](const std::vector<st::Json>& args) -> st::Result<st::Json> {
+        if (args.size() < 3 || !args[0].is_number() || !args[1].is_number() ||
+            !args[2].is_number()) {
+          return st::unexpected(st::ErrorCode::Invalid, "clamp(v, lo, hi) 需要 3 个数字");
+        }
+        return st::Json(std::clamp(args[0].get<double>(), args[1].get<double>(),
+                                   args[2].get<double>()));
+      });
+
+  // snap(t, fps)：吸附到帧。
+  //
+  // 为何需要它：手工写帧精度动画时，“让一个动作恰好落在第 N 帧”
+  // 是常见需求；脚本自己算会因为浮点误差差一帧。
+  (void)engine.register_function(
+      "snap", [](const std::vector<st::Json>& args) -> st::Result<st::Json> {
+        if (args.size() < 2 || !args[0].is_number() || !args[1].is_number()) {
+          return st::unexpected(st::ErrorCode::Invalid, "snap(t, fps) 需要 2 个数字");
+        }
+        const double fps = args[1].get<double>();
+        if (fps <= 0.0) return st::Json(args[0].get<double>());
+        const double time = args[0].get<double>();
+        return st::Json(std::round(time * fps) / fps);
+      });
+
+  // noise(seed)：**确定性**伪随机（同种子同结果）。
+  //
+  // 为何不给 Math.random：那会破坏“同帧两次渲逐像素相同”。
+  // 给确定性版本就能做“每个图标偶发抖动”这类效果而仍可复现。
+  (void)engine.register_function(
+      "noise", [](const std::vector<st::Json>& args) -> st::Result<st::Json> {
+        const double seed =
+            (args.empty() || !args[0].is_number()) ? 0.0 : args[0].get<double>();
+        // 经典 sin-hash：确定、无状态、分布够用
+        const double value = std::sin(seed * 12.9898) * 43758.5453;
+        return st::Json(value - std::floor(value));
+      });
 }
 
 auto parse_layout_script(const st::Json& node, std::string_view asset_basis)
@@ -231,12 +426,28 @@ auto parse_layout_script(const st::Json& node, std::string_view asset_basis)
   if (field == nullptr) return script;   // 不写 = 不启用
 
   if (field->is_string()) {
-    // 文件形式：相对脚本目录解析
+    // 文件形式。路径解析顺序：
+    // ① 绝对路径 → 直接用；
+    // ② 给定 `asset_basis`（脚本目录）→ 拼起来；
+    // ③ 都失败就按当前工作目录试一次（兼容“在脚本目录下运行”的用法）。
+    //
+    // ⚠ 实测踩过：只按工作目录解析会让“写在一个子目录里的脚本”永远载入失败，
+    // 而错误又被 `value_or` 吞掉——表现是“脚本完全没生效但没有任何报错”。
     const std::string reference = field->get<std::string>();
     std::string path = reference;
-    if (!st::fs::is_absolute(path) && !asset_basis.empty()) {
-      const std::string joined = st::fs::join(std::string(asset_basis), reference);
-      if (st::fs::exists(joined)) path = joined;
+    if (!st::fs::is_absolute(path)) {
+      bool resolved = false;
+      if (!asset_basis.empty()) {
+        const std::string joined = st::fs::join(std::string(asset_basis), reference);
+        if (st::fs::exists(joined)) {
+          path = joined;
+          resolved = true;
+        }
+      }
+      if (!resolved && !st::fs::exists(path)) {
+        return st::unexpected(st::ErrorCode::NotFound,
+                              std::format("脚本编排层文件读不到：{}", reference));
+      }
     }
     auto text = st::fs::read_text(path);
     if (!text.has_value()) {

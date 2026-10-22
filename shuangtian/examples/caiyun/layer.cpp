@@ -22,6 +22,7 @@ auto layer_kind_name(LayerKind kind) -> std::string_view {
     case LayerKind::Glow: return "glow";
     case LayerKind::Particles: return "particles";
     case LayerKind::Model3d: return "model3d";
+    case LayerKind::KinText: return "kintext";
   }
   return "rect";
 }
@@ -36,6 +37,7 @@ auto layer_kind_from(std::string_view name) -> std::optional<LayerKind> {
   if (name == "glow") return LayerKind::Glow;
   if (name == "particles") return LayerKind::Particles;
   if (name == "model3d") return LayerKind::Model3d;
+  if (name == "kintext") return LayerKind::KinText;
   return std::nullopt;
 }
 
@@ -145,6 +147,70 @@ auto evaluate_path(const Layer& layer, float local_time, float canvas_w, float c
   return out;
 }
 
+auto evaluate_track(const KeyTrack& track, float time) -> float {
+  const auto& keys = track.keys;
+  if (keys.empty()) return 0.0f;
+  if (keys.size() == 1) return keys.front().value;
+
+  // 边界：不外插。
+  //
+  // 为何不线性外插：外插会让物体“从画面外很远的奇怪位置飞进来”，
+  // 而且一旦关键帧写错（少一个首帧），外插会让错误静默放大。
+  // “早于首帧取首帧、晚于末帧取末帧”是动画软件的通例（hold）。
+  if (time <= keys.front().time) return keys.front().value;
+  if (time >= keys.back().time) return keys.back().value;
+
+  // 找到包含 `time` 的区间 [i, i+1]
+  std::size_t index = 0;
+  while (index + 1 < keys.size() && keys[index + 1].time <= time) ++index;
+  const KeyFrame& from = keys[index];
+  const KeyFrame& to = keys[index + 1];
+  const float span = to.time - from.time;
+  if (span <= 1e-6f) return to.value;   // 两帧同一时刻：后一帧赢
+
+  const float t = std::clamp((time - from.time) / span, 0.0f, 1.0f);
+  // 缓动取**目标帧**的 `ease`：语义上“怎么到达这个姿势”属于目标帧。
+  const float eased = ease_path(t, to.ease);
+  return from.value + (to.value - from.value) * eased;
+}
+
+auto evaluate_tracks(const Layer& layer, float time, float canvas_w, float canvas_h,
+                     float design_w, float design_h) -> TrackValues {
+  (void)canvas_w;
+  (void)canvas_h;
+  (void)design_w;
+  (void)design_h;
+  TrackValues out{};
+  for (const KeyTrack& track : layer.tracks) {
+    if (track.keys.empty()) continue;
+    const float value = evaluate_track(track, time);
+    if (track.property == "x") {
+      out.x = value;
+      out.has_x = true;
+    } else if (track.property == "y") {
+      out.y = value;
+      out.has_y = true;
+    } else if (track.property == "w") {
+      out.w = value;
+      out.has_w = true;
+    } else if (track.property == "h") {
+      out.h = value;
+      out.has_h = true;
+    } else if (track.property == "scale") {
+      out.scale = value;
+      out.has_scale = true;
+    } else if (track.property == "alpha") {
+      out.alpha = std::clamp(value, 0.0f, 1.0f);
+      out.has_alpha = true;
+    } else if (track.property == "rotate") {
+      out.rotate = value;
+      out.has_rotate = true;
+    }
+    // 未知属性名静默忽略：脚本是外部输入，宽容比严格好用（与其余字段一致）。
+  }
+  return out;
+}
+
 auto evaluate_layer(const Layer& layer, float local_time, float canvas_w, float canvas_h,
                     float design_w, float design_h) -> LayerState {
   LayerState state{};
@@ -153,6 +219,23 @@ auto evaluate_layer(const Layer& layer, float local_time, float canvas_w, float 
   state.w = parse_dim(layer.w, canvas_w, design_w);
   state.h = parse_dim(layer.h, canvas_h, design_h);
   state.alpha = std::clamp(layer.opacity, 0.0f, 1.0f);
+
+  // ── 关键帧时间线：**绝对值**覆盖 JSON 基准 ──
+  //
+  // 为何是覆盖而不是叠加：关键帧表达的是“这一刻物体在哪里”，
+  // 若叠在 JSON 基准上，改一个关键帧要同时反算基准，极难调。
+  // 叠加的是 `path_*`（位移增量）与 `layout.js`（增量）——三者语义不同，不冲突。
+  if (!layer.tracks.empty()) {
+    const TrackValues track =
+        evaluate_tracks(layer, local_time, canvas_w, canvas_h, design_w, design_h);
+    if (track.has_x) state.x = track.x;
+    if (track.has_y) state.y = track.y;
+    if (track.has_w) state.w = track.w;
+    if (track.has_h) state.h = track.h;
+    if (track.has_scale) state.scale = track.scale;
+    if (track.has_alpha) state.alpha = track.alpha;
+    if (track.has_rotate) state.rotate = track.rotate;
+  }
 
   // 路径位移：叠在图层基础位置上（没写 `path_*` 时增量恒为 0，
   // 所以老脚本行为一字不变）。

@@ -43,6 +43,7 @@
 #include "layer.hpp"
 #include "st/core/error.hpp"
 #include "st/ext/json_fwd.hpp"
+#include "st/ext/script.hpp"
 
 namespace caiyun {
 
@@ -116,7 +117,13 @@ class LayoutEngine {
                 const std::vector<LayerState>& layers, std::vector<LayerDelta>& out)
       -> st::Status;
 
-  /// 已装载且可用。
+  /// 取脚本本帧提交的**临时图元**（每帧重建；不调 `evaluate` 时为空）。
+  ///
+  /// 见 `ScriptShape` 的说明：这是做"结构变化"（点分裂、珠子沿曲线跑、
+  /// 批量错峰）的唯一通道。
+  [[nodiscard]] auto shapes() const -> const std::vector<ScriptShape>&;
+
+  /// 是否真的可用了。
   [[nodiscard]] auto loaded() const noexcept -> bool;
 
   /// 累计的求值失败次数（供导出结束时汇总报告）。
@@ -124,6 +131,12 @@ class LayoutEngine {
 
   /// 最近一次失败的原因（用于"该帧画占位"时把原因写进日志）。
   [[nodiscard]] auto last_error() const -> const std::string&;
+
+  /// 注册一个宿主函数供脚本调用（白名单见 `register_host_functions`）。
+  ///
+  /// **不允许通配**：每个函数都要显式写名字，这样"脚本能调什么"
+  /// 是代码里可枚举、可审阅的。这是开放能力时的底线。
+  auto register_function(std::string name, st::ext::ScriptHostFunction function) -> st::Status;
 
  private:
   struct Impl;
@@ -135,6 +148,36 @@ class LayoutEngine {
 /// 放在编排层的头文件里而不是绘制文件里：它是**编排层的语义**，
 /// 而且测试要能直接验证“相对而非绝对”。
 void apply_delta(LayerState& state, const LayerDelta& delta);
+
+/// **脚本可以调用的 C++ 宿主函数**（能力开放面）。
+///
+/// ## 为何要有这一层（它比“只算数值”危险得多）
+///
+/// 只算数值解决不了这些问题：
+/// · “旋转角度用缓动函数算”——想要 `easeOutBack` 这类标准缓动；
+/// · “把时间对齐到帧”——想要 `snap(t, 12)`；
+/// · “测量一段文字的宽度再让它居中”——想要 `measureText(...)`。
+/// 这些都是**现成的 C++ 能力**，让脚本重写一遍是浪费且容易写错。
+///
+/// ## 安全姿态（这是本模块最需要读的一段）
+///
+/// 开放 C++ 函数 = 把内部能力暴露给脚本，必须逐个显式注册、不允许通配。
+/// 本模块只开放**纯函数**（无副作用、无 IO、无状态）：
+///
+/// | 白名单函数 | 能力 | 为何安全 |
+/// |---|---|---|
+/// | `ease(name, t)` | 标准缓动曲线 | 纯数学 |
+/// | `lerp(a, b, t)` | 线性插值 | 纯数学 |
+/// | `clamp(v, lo, hi)` | 限幅 | 纯数学 |
+/// | `snap(t, fps)` | 吸附到帧 | 纯数学 |
+/// | `noise(seed)` | 确定性伪随机 | 同种子同结果，**不破坏确定性** |
+/// | `measureText(text, size)` | 文字宽度 | 读字体缓存，无可写 |
+///
+/// **故意不开放的**：文件读写、网络、时钟（会破坏确定性）、
+/// 创建图层/素材（会破坏 `(Scene,t)->像素` 的纯函数性）。
+///
+/// 这就是“能力大且稳”的具体切法：**开放计算，不开放副作用**。
+void register_host_functions(class LayoutEngine& engine);
 
 /// 取本线程的编排引擎（`thread_local` 池）。
 ///

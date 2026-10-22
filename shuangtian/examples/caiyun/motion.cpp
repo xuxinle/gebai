@@ -12,6 +12,7 @@
 #include "brand.hpp"
 #include "fx.hpp"
 #include "layer.hpp"
+#include "kin_text.hpp"
 #include "layout.hpp"
 #include "model3d.hpp"
 #include "st/core/log.hpp"
@@ -734,6 +735,14 @@ void paint_layers(Painter& p, const Scene& scene, float local_time, const AssetL
         draw_text_lines(p, layer, lx, ly, lw, lh, state.alpha, scale, port);
         break;
       }
+      case LayerKind::KinText: {
+        // 逐字排版：自己负责排版，每个字独立驱动（见 `kin_text.cpp`）。
+        if (layer.text.empty()) break;
+        const st::ui::TextPort* port = p.port();
+        if (port == nullptr) break;
+        paint_kin_text(p, layer, state, scale, port, local_time);
+        break;
+      }
       case LayerKind::Image: {
         if (assets == nullptr || layer.src.empty()) {
           // 素材缺失：画占位框（不静默跳过——静默会让"图没进来"看起来像设计）。
@@ -1183,6 +1192,42 @@ auto ease_out_back(float t) -> float {
   return 1.0f + c3 * inverse * inverse * inverse + c1 * inverse * inverse;
 }
 
+void paint_script_shapes(Painter& p) {
+  const LayoutEngine& engine = layout_engine();
+  if (!engine.loaded()) return;
+  const auto& shapes = engine.shapes();
+  if (std::getenv("CAIYUN_SHAPES_DEBUG") != nullptr) {
+    st::print("[shapes] loaded={} count={}\n", engine.loaded(), shapes.size());
+  }
+  if (shapes.empty()) return;
+  const float scale = p.scale();
+  for (const ScriptShape& shape : shapes) {
+    const float alpha = static_cast<float>(shape.color.a) / 255.0f;
+    if (alpha <= 0.004f) continue;
+    const Color color{shape.color.r, shape.color.g, shape.color.b,
+                      static_cast<std::uint8_t>(std::lround(alpha * 255.0f))};
+    switch (shape.kind) {
+      case 0:
+        p.circle(shape.x * scale, shape.y * scale, shape.w * 0.5f * scale, color);
+        break;
+      case 2:
+        p.line(shape.x * scale, shape.y * scale, shape.x2 * scale, shape.y2 * scale, color,
+               std::max(0.5f, shape.stroke * scale));
+        break;
+      case 3:
+        if (!shape.text.empty()) {
+          p.text(shape.text, std::max(1.0f, shape.h * scale), shape.x * scale, shape.y * scale,
+                 color);
+        }
+        break;
+      default:
+        p.fill(shape.x * scale, shape.y * scale, shape.w * scale, shape.h * scale, color,
+               shape.radius * scale);
+        break;
+    }
+  }
+}
+
 void render_scene(st::raster::Canvas& target, const Scene& scene, double local_time,
                   double scene_duration, const st::ui::TextPort* text_port,
                   const AssetLibrary* assets, std::string_view asset_basis, int scene_index,
@@ -1250,6 +1295,14 @@ void render_scene(st::raster::Canvas& target, const Scene& scene, double local_t
   }
   // 通用图层：任何场景都可叠加（含 Custom）。
   if (!scene.layers.empty()) paint_layers(p, scene, time, assets, asset_basis);
+  // ── 脚本临时图元（本帧才存在的形状）──
+  //
+  // 这是“结构变化”的唯一通道（见 `ScriptShape` 的说明）：
+  // 点分裂成四个、珠子沿曲线跑、批量错峰——都靠它。
+  //
+  // 画在图层**之上**：脚本图元通常是前景装饰（珠子、分裂出的点、连线），
+  // 盖在上面才对；要盖在下面就把它们写成背景图层的 `shapes`。
+  paint_script_shapes(p);
   // 包装层统一在这里加：所有场景共用同一套识标/结构/页脚。
   //
   // 放这里而不是各场景内各调一次，是因为包装必须**逐帧一致**——

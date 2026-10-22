@@ -347,6 +347,12 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "本机 GPU 腿可用性（无头模式下 st doctor 有意不探测 GPU，这里显式探一次）"
     },
+    "caiyun_carry_check": {
+      "kind": "executable",
+      "sources": ["tools/caiyun_carry_check.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "连贯性验收（carry score）：相邻帧内容沿用率，抓\"像 PPT\"的断点"
+    },
     "caiyun_js_probe": {
       "kind": "executable",
       "sources": ["tools/caiyun_js_probe.cpp"],

@@ -161,6 +161,9 @@ struct Scene {
   ///
   /// 只存**源文本**，不存已编译的引擎——因为每个渲染线程要各自的实例。
   LayoutScript layout{};
+
+  /// **JS 返回的临时图元**（每帧重建，定义见 `layer.hpp` 的 `ScriptShape`）。
+  std::vector<ScriptShape> shapes{};
 };
 
 /// 旁白/人声轨：一段外部 WAV 在成片里的位置。
@@ -221,7 +224,12 @@ struct Script {
 [[nodiscard]] auto builtin_sample_promo() -> Script;
 
 /// 解析脚本文本（错误：`Parse`，消息带**行号无关**的字段路径，便于脚本作者定位）。
-[[nodiscard]] auto parse_script(std::string_view json) -> Result<Script>;
+/// 解析脚本 JSON。
+///
+/// `asset_basis`：脚本所在目录。它用于解析**相对路径**的外部件
+/// （`layout` 的 JS 文件、素材图等）。不传则相对路径按当前工作目录解析。
+[[nodiscard]] auto parse_script(std::string_view json,
+                                std::string_view asset_basis = {}) -> Result<Script>;
 /// 序列化（美化 2 空格；键序固定，便于人工 diff）。
 [[nodiscard]] auto script_to_json(const Script& script) -> std::string;
 

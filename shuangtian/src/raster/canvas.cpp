@@ -547,6 +547,25 @@ auto Canvas::to_rgba8() const -> std::vector<std::uint8_t> {
   return out;
 }
 
+auto Canvas::replace_rgba8(std::span<const std::uint8_t> bytes, int width, int height) -> bool {
+  // 尺寸必须与**物理**尺寸一致：后处理结果是整帧，不做缩放。
+  // 若允许不同尺寸，调用方就得猜“到底该把哪个尺寸当谁”，
+  // 而猜错的表现是“画面突然缩在左上角”——很难查。
+  if (width != physical_width_ || height != physical_height_) return false;
+  const auto expected = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4U;
+  if (bytes.size() < expected) return false;
+  for (std::size_t index = 0; index < pixels_.size(); ++index) {
+    const std::size_t offset = index * 4U;
+    const std::uint8_t alpha = bytes[offset + 3U];
+    // 内部缓冲是**预乘**的：直通值乘 alpha 再存（与 `to_rgba8` 的
+    // `unpremultiply` 对称）。
+    const math::Color straight{bytes[offset + 0U], bytes[offset + 1U], bytes[offset + 2U],
+                               alpha};
+    pixels_[index] = math::premultiply(straight);
+  }
+  return true;
+}
+
 auto Canvas::content_bounds() const noexcept -> math::IntRect {
   int min_x = physical_width_;
   int min_y = physical_height_;

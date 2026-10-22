@@ -73,10 +73,83 @@ enum class LayerKind : std::uint8_t {
   /// 实现走框架的 `raster::Scene3D`（平台中立），因此**有显卡走显卡、
   /// 无显卡自动降级**，调用方不需要判断（见 `model3d.hpp`）。
   Model3d,
+
+  /// **逐字排版**（kinetic type）：每个字符是独立元素，可各自错峰入场/位移/缩放。
+  ///
+  /// ## 为何要单独立一个图层类型（而不是给 `Text` 加开关）
+  ///
+  /// `Text` 是**整段**绘制的：一次 `draw` 把整个字符串交给字体引擎排版。
+  /// 那个路径上不存在“第 3 个字现在偏移了多少”这个概念。
+  /// 要在那里加逐字控制，得把已有的行布局/换行/对齐全部重写
+  /// （而那段代码有大量实测过的对齐修正，动它风险极高）。
+  ///
+  /// 于是另开一条路：**每个字符自己算位置与样式，逐个 `draw`**。
+  /// 代价是自己管排版（字宽靠 `TextPort::measure_width` 量，而不是靠字体引擎）；
+  /// 好处是每个字完全可独立驱动——这正是这类片子的主语言。
+  KinText,
 };
 
 [[nodiscard]] auto layer_kind_name(LayerKind kind) -> std::string_view;
 [[nodiscard]] auto layer_kind_from(std::string_view name) -> std::optional<LayerKind>;
+
+/// 一个关键帧。
+struct KeyFrame {
+  float time{0.0f};
+  float value{0.0f};
+  /// 到达本帧的缓动：0=线性 1=ease-out 2=ease-in-out 3=过冲
+  int ease{1};
+};
+
+/// **脚本提交的临时图元**（每帧重建，不进入图层集合）。
+///
+/// ## 为何需要它（“像 PPT”的真正技术根因）
+///
+/// JSON 图层是**静态集合**：写几个就是几个。于是“一个点分裂成四个”、
+/// “一排珠子沿曲线跑”、“20 个图标错峰入场”都做不了——
+/// 而这类**结构变化**正是高端动效片的主体。
+///
+/// 给 JS 开一个出口：`layout()` 额外返回 `shapes` 数组，即“这一帧额外要画的东西”。
+/// 它们**不参与场景结构**（不增加图层数、不影响关键帧、不需在 JSON 声明）。
+///
+/// ## 边界（故意画死）
+///
+/// · 只能画基本形状与文字（不能加载素材、不能开子场景）；
+/// · 每帧重建（不跨帧保存状态）——这保证确定性；
+/// · 只能在所在场景的矩形内画。
+struct ScriptShape {
+  /// 0=圆 1=短形 2=线 3=文字
+  int kind{0};
+  float x{0.0f};
+  float y{0.0f};
+  float w{0.0f};
+  float h{0.0f};
+  /// 线专用：终点
+  float x2{0.0f};
+  float y2{0.0f};
+  /// 文字专用
+  std::string text{};
+  Color color{255, 255, 255, 255};
+  /// 短形圆角（像素）
+  float radius{0.0f};
+  /// 线宽（0 = 填充）
+  float stroke{0.0f};
+  /// 旋转角度（度，绕自身中心；0 = 不转）
+  float rotate{0.0f};
+};
+
+/// 一条属性曲线（关键帧列表）。
+///
+/// 设计取舍：**一个轨道只驱动一个属性**（`x`/`y`/`scale`/`alpha`/`rotate`），
+/// 而不是“一个时刻一张全属性表”。
+/// 为何：真实动画里各属性变化节奏不同（位置先动、透明度后跟），
+/// 按属性分轨能各自用不同缓动与不同关键帧数；
+/// 按时刻合并则每个时刻都得写全属性，改一个值要改很多行。
+struct KeyTrack {
+  /// 属性名：`x` / `y` / `w` / `h` / `scale` / `alpha` / `rotate`。
+  std::string property{};
+  /// 关键帧：按 `time` 升序（解析时排序，保证乱序输入也能用）。
+  std::vector<KeyFrame> keys{};
+};
 
 /// 一个图层。**按需字段**：不同 kind 只用其中一部分。
 ///
@@ -308,7 +381,89 @@ struct Layer {
   /// `3`（过冲）实现 Anticipation 的逆向：物体**冲过头再回来**，
   /// 这是“有质量”的关键——匀速到达看起来就像幻灯片切换。
   int path_ease{1};
+
+  // —— 关键帧时间线（`tracks`）——
+  //
+  // ## 它与 `path_*` / `bounce_*` / `layout.js` 的分工
+  //
+  // · `path_*`：**一次**位移（A → B，走弧线）。一个图层只能有一段。
+  // · `bounce_*`：落地后弹几下。也是单段。
+  // · `tracks`：**多段**任意属性变化（就是传统动画的“关键帧”）。
+  //   想“先飞过来、停一拍、再缩一下、再淡出”，用 `tracks`。
+  // · `layout.js`：任意代码（互相牵引、循环生成、自定义曲线）。
+  //
+  // 优先级：三者**可叠加**（先 `tracks` 再 `path` 再 `layout`），
+  // 因为它们是不同量：`tracks` 给绝对值，`path` 给位移增量，
+  // `layout` 给最终增量。叠加顺序固定，结果确定。
+  /// 关键帧轨道：每个轨道是一条属性曲线。
+  std::vector<KeyTrack> tracks{};
+
+  // —— 逐字排版（`KinText`）——
+  //
+  // ## 为何这些参数在图层上而不是交给 JS
+  //
+  // 它们描述的是“这一行字长什么样”（字距、逐字节秦延迟、逐字起伏幅度），
+  // 属于**静态风格**；而“这一刻轮到第几个字了”是动态的，由时间算。
+  // 把风格写在 JSON 里（可读、可 diff），把时间演化交给渲染器算。
+  /// 逐字入场延迟（秒/字）。0 = 同时出现。建议 0.02~0.06（太快像闪现）。
+  float kin_stagger{0.035f};
+  /// 逐字入场时长（每个字自己的动画时长）。
+  float kin_dur{0.42f};
+  /// 入场方式：0=上浮淡入 1=微缩放 2=模糊上浮（近似）
+  int kin_enter{0};
+  /// 逐字上浮距离（像素）。
+  float kin_rise{22.0f};
+  /// 逐字起伏幅度（像素）：入场后持续呼吸，0 = 不动。
+  ///
+  /// 为何需要：全静止的字看起来像贴图；极小的持续起伏（2~6px）
+  /// 让画面“活着”而不抢戏。
+  float kin_float{0.0f};
+  /// 逐字起伏频率（Hz）。
+  float kin_float_hz{0.6f};
+  /// 光标：0=无 1=在末尾闪烁的竖线（打字机感）
+  int kin_caret{0};
+  /// 光标宽度与高度比例（高 = 字号 × 本值）
+  float kin_caret_scale{0.92f};
+  /// 逐字显示上限：只显示前 N 个字符（打字机效果）；<0 = 全部显示。
+  /// 由渲染器根据时间自动推进（`kin_type_cps`），也可由 JS 覆盖。
+  float kin_type_cps{0.0f};
 };
+
+
+/// 求一条轨道在 `time` 时刻的值。
+///
+/// 边界行为（三条都有用例守）：
+/// · `time` 早于首帧 → 取首帧值（**不外插**：外插会让物体从奇怪的地方进场）；
+/// · `time` 晚于末帧 → 取末帧值（停在最后一个姿势）；
+/// · 只有一帧 → 恒为该值。
+[[nodiscard]] auto evaluate_track(const KeyTrack& track, float time) -> float;
+
+/// 关键帧求值结果（**绝对值**，不是增量）。
+struct TrackValues {
+  /// 位掩码：哪些属性真的被轨道驱动了（未驱动的保持 JSON 基准值）。
+  bool has_x{false};
+  bool has_y{false};
+  bool has_w{false};
+  bool has_h{false};
+  bool has_scale{false};
+  bool has_alpha{false};
+  bool has_rotate{false};
+  float x{0.0f};
+  float y{0.0f};
+  float w{0.0f};
+  float h{0.0f};
+  float scale{1.0f};
+  float alpha{1.0f};
+  float rotate{0.0f};
+};
+
+/// 求一个图层全部轨道的值（纯函数，可单测）。
+///
+/// 轨道里的 `x`/`y`/`w`/`h` 支持与图层字段同样的写法（**设计像素**或**画面比例**），
+/// 所以 `"50%"` 也能当关键帧值用。
+[[nodiscard]] auto evaluate_tracks(const Layer& layer, float time, float canvas_w,
+                                   float canvas_h, float design_w, float design_h)
+    -> TrackValues;
 
 /// 路径动画的求值结果（相对图层基础位置的增量）。
 struct PathOffset {

@@ -1,0 +1,109 @@
+{
+  "name": "GEBAI · one dot",
+  "fps": 30,
+  "size": [
+    1920,
+    1080
+  ],
+  "fade_out": 0.45,
+  "brand_wordmark": "",
+  "footer_note": "",
+  "audio": {
+    "enabled": true,
+    "style": "uplift",
+    "bpm": 120,
+    "gain": 0.34
+  },
+  "scenes": [
+    {
+      "kind": "custom",
+      "duration": 15.0,
+      "wrap": false,
+      "background": [
+        "#0a0b10",
+        "#11141e"
+      ],
+      "layout": "onedot_v2.js",
+      "layers": [
+        {
+          "kind": "rect",
+          "name": "bg",
+          "x": "0%",
+          "y": "0%",
+          "w": "100%",
+          "h": "100%",
+          "fill": "#0b0d14",
+          "enter": 0
+        },
+        {
+          "kind": "glow",
+          "name": "glow",
+          "x": "44%",
+          "y": "42%",
+          "w": "12%",
+          "h": "12%",
+          "fill": "#6B84FF",
+          "intensity": 0.42,
+          "spread": 0.55,
+          "enter": 0
+        },
+        {
+          "kind": "ellipse",
+          "name": "ring",
+          "x": "47%",
+          "y": "45%",
+          "w": "4%",
+          "h": "7%",
+          "stroke": "#7D96FF",
+          "stroke_width": 3,
+          "fill": "#00000000",
+          "enter": 0
+        },
+        {
+          "kind": "ellipse",
+          "name": "dot",
+          "x": "49.6%",
+          "y": "49%",
+          "w": "18",
+          "h": "18",
+          "fill": "#8E9EFF",
+          "enter": 0
+        },
+        {
+          "kind": "kintext",
+          "name": "word",
+          "text": "歌白",
+          "x": "0%",
+          "y": "58%",
+          "w": "100%",
+          "h": "16%",
+          "size": 128,
+          "color": "#F6F8FF",
+          "align": 0,
+          "tracking": 18,
+          "kin_stagger": 0.09,
+          "kin_dur": 0.62,
+          "kin_rise": 26,
+          "enter": 0
+        },
+        {
+          "kind": "kintext",
+          "name": "sub",
+          "text": "autonomous agent",
+          "x": "0%",
+          "y": "75%",
+          "w": "100%",
+          "h": "6%",
+          "size": 26,
+          "color": "#7C87A8",
+          "align": 0,
+          "tracking": 5,
+          "kin_stagger": 0.025,
+          "kin_dur": 0.4,
+          "kin_rise": 12,
+          "enter": 0
+        }
+      ]
+    }
+  ]
+}

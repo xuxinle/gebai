@@ -13,6 +13,7 @@
 #include <format>
 
 #include "st/ext/json.hpp"
+#include "st/core/log.hpp"
 
 namespace caiyun {
 
@@ -108,6 +109,25 @@ using st::math::Color;
         std::clamp(st::json_get_double(node, "tracking", layer.tracking), 0.0, 200.0));
     layer.line_height = static_cast<float>(
         std::clamp(st::json_get_double(node, "line_height", layer.line_height), 1.0, 4.0));
+    // 逐字排版（`kintext`）：风格参数写在 JSON，时间演化交给渲染器。
+    layer.kin_stagger = static_cast<float>(
+        std::clamp(st::json_get_double(node, "kin_stagger", layer.kin_stagger), 0.0, 2.0));
+    layer.kin_dur = static_cast<float>(
+        std::clamp(st::json_get_double(node, "kin_dur", layer.kin_dur), 0.01, 10.0));
+    layer.kin_enter = static_cast<int>(
+        std::clamp(st::json_get_double(node, "kin_enter", layer.kin_enter), 0.0, 2.0));
+    layer.kin_rise = static_cast<float>(
+        std::clamp(st::json_get_double(node, "kin_rise", layer.kin_rise), 0.0, 400.0));
+    layer.kin_float = static_cast<float>(
+        std::clamp(st::json_get_double(node, "kin_float", layer.kin_float), 0.0, 80.0));
+    layer.kin_float_hz = static_cast<float>(
+        std::clamp(st::json_get_double(node, "kin_float_hz", layer.kin_float_hz), 0.01, 8.0));
+    layer.kin_caret = static_cast<int>(
+        std::clamp(st::json_get_double(node, "kin_caret", layer.kin_caret), 0.0, 1.0));
+    layer.kin_caret_scale = static_cast<float>(
+        std::clamp(st::json_get_double(node, "kin_caret_scale", layer.kin_caret_scale), 0.2, 2.0));
+    layer.kin_type_cps = static_cast<float>(
+        std::clamp(st::json_get_double(node, "kin_type_cps", layer.kin_type_cps), 0.0, 200.0));
     layer.bold = st::json_get_bool(node, "bold", layer.bold);
     layer.align = static_cast<int>(std::clamp(st::json_get_i64(node, "align", layer.align), 0LL, 3LL));
 
@@ -191,6 +211,49 @@ using st::math::Color;
       layer.path_at = static_cast<float>(st::json_get_double(node, "path_at", layer.path_at));
       layer.path_ease = static_cast<int>(
           std::clamp(st::json_get_double(node, "path_ease", layer.path_ease), 0.0, 3.0));
+      // 关键帧时间线（`tracks`）：每个轨道一条属性曲线。
+      //
+      // 两种写法都支持：
+      //   "tracks": { "y": [{"t":0,"v":400}, {"t":1,"v":200}] }         // 按属性名分组（推荐）
+      //   "tracks": [{"property":"y", "keys":[...]}]                      // 显式数组
+      // 前者更短（属性名就是键），后者便于程序生成。
+      if (const st::Json* tracks = st::json_find(node, "tracks"); tracks != nullptr) {
+        const auto parse_keys = [](const st::Json& list) -> std::vector<KeyFrame> {
+          std::vector<KeyFrame> keys;
+          if (!list.is_array()) return keys;
+          for (const st::Json& entry : list) {
+            KeyFrame key{};
+            key.time = static_cast<float>(st::json_get_double(entry, "t", 0.0));
+            key.value = static_cast<float>(st::json_get_double(entry, "v", 0.0));
+            key.ease = static_cast<int>(
+                std::clamp(st::json_get_double(entry, "ease", 1.0), 0.0, 3.0));
+            keys.push_back(key);
+          }
+          // 排序：乱序输入也能用（AI 写关键帧时顺序很不可靠）
+          std::sort(keys.begin(), keys.end(),
+                    [](const KeyFrame& a, const KeyFrame& b) { return a.time < b.time; });
+          return keys;
+        };
+        if (tracks->is_object()) {
+          for (const auto& [property, list] : tracks->items()) {
+            KeyTrack track{};
+            track.property = property;
+            track.keys = parse_keys(list);
+            if (!track.keys.empty()) layer.tracks.push_back(std::move(track));
+          }
+        } else if (tracks->is_array()) {
+          for (const st::Json& entry : *tracks) {
+            KeyTrack track{};
+            track.property = st::json_get_string(entry, "property");
+            if (const st::Json* keys = st::json_find(entry, "keys"); keys != nullptr) {
+              track.keys = parse_keys(*keys);
+            }
+            if (!track.property.empty() && !track.keys.empty()) {
+              layer.tracks.push_back(std::move(track));
+            }
+          }
+        }
+      }
 
     layer.cam_azimuth = static_cast<float>(
         std::clamp(st::json_get_double(node, "cam_azimuth", layer.cam_azimuth), -3600.0, 3600.0));
@@ -313,7 +376,8 @@ using st::math::Color;
   return node;
 }
 
-auto scene_from(const st::Json& node, std::size_t index) -> Result<Scene> {
+auto scene_from(const st::Json& node, std::size_t index, std::string_view asset_basis)
+    -> Result<Scene> {
   const std::string kind_name = st::json_get_string(node, "kind");
   const auto kind = scene_kind_from(kind_name);
   if (!kind) {
@@ -347,7 +411,19 @@ auto scene_from(const st::Json& node, std::size_t index) -> Result<Scene> {
   //
   // **这里不编译**：QuickJS 运行时非线程安全，而导出开 16 路并行。
   // 编译发生在各自的渲染线程（`layout_engine()` 是 thread_local）。
-  scene.layout = parse_layout_script(node, std::string{}).value_or(LayoutScript{});
+  // 相对路径按 `asset_basis`（脚本所在目录）解析。
+  const auto layout_script = parse_layout_script(node, asset_basis);
+  scene.layout = layout_script.value_or(LayoutScript{});
+  if (scene.layout.empty()) {
+    // 解析失败（如相对路径读不到）——**不能静默**：
+    // 静默会让“写了 layout 但完全没效果”变成一个极难查的现象
+    // （实测：文件路径相对 JSON 解析失败，值被 value_or 吞掉，
+    //  表现为“脚本完全没生效”，而无任何报错）。
+    if (const st::Json* field = st::json_find(node, "layout"); field != nullptr) {
+      ST_LOG_WARN("layout 字段存在但解析失败：{}（basis='{}'）", layout_script.error().message,
+                  asset_basis);
+    }
+  }
   // 素材：三种写法都存原文，由渲染侧的 `AssetLibrary` 按基准目录解析
   //（脚本不该知道自己被拷到哪，路径语义归素材库）。
   scene.image = st::json_get_string(node, "image");
@@ -445,7 +521,7 @@ auto color_to_hex(Color color) -> std::string {
   return std::format("#{:02x}{:02x}{:02x}{:02x}", color.r, color.g, color.b, color.a);
 }
 
-auto parse_script(std::string_view json) -> Result<Script> {
+auto parse_script(std::string_view json, std::string_view asset_basis) -> Result<Script> {
   const auto parsed = st::json_parse(json);
   if (!parsed) return st::forward_error(parsed.error());
   const st::Json& root = parsed.value();
@@ -500,7 +576,7 @@ auto parse_script(std::string_view json) -> Result<Script> {
     if (!node.is_object()) {
       return st::unexpected(st::ErrorCode::Parse, std::format("scenes[{}] 不是对象", index));
     }
-    const auto scene = scene_from(node, index);
+          const auto scene = scene_from(node, index, asset_basis);
     if (!scene) return st::forward_error(scene.error());
     script.scenes.push_back(scene.value());
     ++index;

@@ -169,6 +169,15 @@ class Canvas final : public Surface {
   [[nodiscard]] auto pixels() noexcept -> std::span<std::uint32_t> override { return pixels_; }
   /// 导出为直通 RGBA8 字节流（PNG 编码/截图用；物理分辨率）。
   [[nodiscard]] auto to_rgba8() const -> std::vector<std::uint8_t> override;
+  /// **回写整体像素**（直通 RGBA8、非预乘、行优先，尺寸必须与画布一致）。
+  ///
+  /// 用途：后处理类操作把“已经算好的整帧”放回画布。
+  /// 典型场景是**运动模糊**：把快门区间多个子帧在线性光里平均之后，
+  /// 结果已经是一整帧，需要有地方“放回去”（不能把每个子帧再画一遍——那又变回多层叠了）。
+  ///
+  /// 预乘约定：内部缓冲是预乘的，所以这里会把直通值乘上 alpha 再存。
+  /// 运动模糊只处理不透明画面（alpha=255），乘不乘都一样，但保持语义一致。
+  auto replace_rgba8(std::span<const std::uint8_t> bytes, int width, int height) -> bool;
   /// 非全透明像素的最小包围盒（**物理**像素；测试与截图裁剪用）。
   [[nodiscard]] auto content_bounds() const noexcept -> math::IntRect override;
   /// 同上，但换算到逻辑像素。

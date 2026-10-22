@@ -76,6 +76,131 @@ void put_u32(std::string& out, std::uint32_t value) {
 
 }  // namespace
 
+// ══════════════════════════════ 运动模糊（快门超采样）══════════════════════════════
+//
+// ## 为何需要它（这是"看起来像成品"与"像幻灯片"的分界之一）
+//
+// 快动作（>80 px/帧）不模糊会"一格一格地闪"（频闪），人眼立刻会判"这是动画"。
+// 真实摄影机有 180° 快门：在一帧的曝光时间里，运动物体在每个瞬时位置都留痕。
+//
+// ## 做法：时间超采样 + 线性光平均
+//
+// 不是"对成品帧做高斯模糊"（那是错的：会连静止部分一起糊），
+// 而是在**快门开启区间**内多次渲染真实画面，再平均：
+// 静止的东西多次采样结果一样 → 平均后仍然锐利；
+// 运动的东西每次位置不同 → 自然拖出残影。
+
+namespace {
+
+/// sRGB 字节 → 线性 float（0..1）。
+///
+/// 为何不能直接对 sRGB 字节平均：两个都很亮的像素平均出来会变暗，
+/// 拖影中间会发灰——真实的运动模糊没有这个"中间变暗"的伪影。
+[[nodiscard]] auto srgb_to_linear(std::uint8_t value) -> float {
+  const float srgb = static_cast<float>(value) / 255.0f;
+  return srgb <= 0.04045f ? srgb / 12.92f : std::pow((srgb + 0.055f) / 1.055f, 2.4f);
+}
+
+[[nodiscard]] auto linear_to_srgb(float value) -> std::uint8_t {
+  const float clamped = std::clamp(value, 0.0f, 1.0f);
+  const float srgb = clamped <= 0.0031308f ? clamped * 12.92f
+                                           : 1.055f * std::pow(clamped, 1.0f / 2.4f) - 0.055f;
+  return static_cast<std::uint8_t>(std::lround(std::clamp(srgb, 0.0f, 1.0f) * 255.0f));
+}
+
+/// 把一帧累加到线性光缓存（只取 RGB；运动模糊不需要 alpha）。
+void accumulate_linear(const st::raster::Canvas& canvas, std::vector<float>& accum) {
+  const int width = canvas.width();
+  const int height = canvas.height();
+  const auto pixels = canvas.to_rgba8();   // R,G,B,A 字节序
+  for (int y = 0; y < height; ++y) {
+    for (int x = 0; x < width; ++x) {
+      const std::size_t pixel =
+          static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+          static_cast<std::size_t>(x);
+      accum[pixel * 3U + 0U] += srgb_to_linear(pixels[pixel * 4U + 0U]);
+      accum[pixel * 3U + 1U] += srgb_to_linear(pixels[pixel * 4U + 1U]);
+      accum[pixel * 3U + 2U] += srgb_to_linear(pixels[pixel * 4U + 2U]);
+    }
+  }
+}
+
+/// 两帧是否"几乎一样"（用于跳过静止帧的多采样）。
+///
+/// 阈值 8/255：低于此人眼看不出来，但能让静止帧直接省掉 N 倍渲染成本。
+/// 稀疏采样（每 7 个像素取一个）：够用且几乎不占时间。
+[[nodiscard]] auto frames_are_nearly_identical(const st::raster::Canvas& a,
+                                               const st::raster::Canvas& b) -> bool {
+  if (a.width() != b.width() || a.height() != b.height()) return false;
+  const auto left = a.to_rgba8();
+  const auto right = b.to_rgba8();
+  constexpr std::size_t kStep = 7U * 4U;
+  for (std::size_t index = 0; index + 3U < left.size(); index += kStep) {
+    for (std::size_t channel = 0; channel < 3U; ++channel) {
+      if (std::abs(static_cast<int>(left[index + channel]) -
+                   static_cast<int>(right[index + channel])) > 8) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+/// **带运动模糊地渲染一帧**（快门超采样）。
+///
+/// `scratch` 是每 worker 的临时画布，用于采样子帧（不能与 `target` 同一块）。
+void render_frame_with_motion_blur(Project& project, st::raster::Canvas& target,
+                                   const RenderJob& job, int index,
+                                   const st::ui::TextPort* text_port,
+                                   st::raster::Canvas& scratch) {
+  const double center = frame_time(index, job.fps);
+  const int samples = std::clamp(job.motion_samples, 1, 16);
+  if (samples <= 1 || job.shutter <= 0.0) {
+    project.render_frame(target, center, text_port);
+    return;
+  }
+
+  // 180° 快门 = 半个帧间隔。`shutter` 是"快门开启时间 / 帧间隔"（0.5 = 180°）。
+  const double exposure = (1.0 / std::max(1.0, static_cast<double>(job.fps))) * job.shutter;
+
+  // ① 先用两个端点估"这一帧到底动了多少"。
+  //    静止帧直接退回单采样——大多数帧几乎不动，这一步省掉大量无谓成本。
+  project.render_frame(target, center - exposure * 0.5, text_port);
+  project.render_frame(scratch, center + exposure * 0.5, text_port);
+  if (frames_are_nearly_identical(target, scratch)) {
+    project.render_frame(target, center, text_port);
+    return;
+  }
+
+  // ② 真正采样：从快门开到快门关，等间隔采 `samples` 次，在线性光里平均。
+  std::vector<float> accum(
+      static_cast<std::size_t>(target.width()) * static_cast<std::size_t>(target.height()) * 3U,
+      0.0f);
+  for (int sample = 0; sample < samples; ++sample) {
+    // 采样点取每个子区间的**中点**：端点会让最先/最后的瞬间权重偏高，拖影两端发虚。
+    const double t = center - exposure * 0.5 +
+                     exposure * ((static_cast<double>(sample) + 0.5) /
+                                 static_cast<double>(samples));
+    project.render_frame(scratch, t, text_port);
+    accumulate_linear(scratch, accum);
+  }
+  // resolve：线性光平均 → sRGB
+  const int width = target.width();
+  const int height = target.height();
+  std::vector<std::uint8_t> pixels(
+      static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4U, 255U);
+  const float inverse = 1.0f / static_cast<float>(samples);
+  for (std::size_t pixel = 0;
+       pixel < static_cast<std::size_t>(width) * static_cast<std::size_t>(height); ++pixel) {
+    pixels[pixel * 4U + 0U] = linear_to_srgb(accum[pixel * 3U + 0U] * inverse);
+    pixels[pixel * 4U + 1U] = linear_to_srgb(accum[pixel * 3U + 1U] * inverse);
+    pixels[pixel * 4U + 2U] = linear_to_srgb(accum[pixel * 3U + 2U] * inverse);
+  }
+  target.replace_rgba8(pixels, width, height);
+}
+
+}  // namespace
+
 auto Renderer::find_ffmpeg(const std::string& override_path) -> std::string {
   if (!override_path.empty()) {
     return st::fs::exists(override_path) ? override_path : std::string{};
@@ -418,8 +543,7 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
   const int total_frames = static_cast<int>(std::ceil(project.duration * job.fps));
   const int first = std::max(0, job.first_frame);
   const int last = job.last_frame > 0 ? std::min(job.last_frame, total_frames) : total_frames;
-  st::raster::Canvas canvas{job.width, job.height, 1.0f};
-  // —— 画面质量度量：逐镜区间先备好（按片段区间聚合，见 frame_stats.hpp）——
+  st::raster::Canvas canvas{job.width, job.height, 1.0f};  // —— 画面质量度量：逐镜区间先备好（按片段区间聚合，见 frame_stats.hpp）——
   // 为什么在循环前算：span 只依赖工程快照，循环里每帧都要用，算一次省 N 次。
   std::vector<StatsAccumulator::ShotSpan> shot_spans{};
   shot_spans.reserve(project.clips.size());
@@ -446,6 +570,10 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
       static_cast<int>(std::thread::hardware_concurrency()), 1, 16));
   std::vector<std::unique_ptr<st::raster::Canvas>> worker_canvases{};
   worker_canvases.reserve(workers);
+  // 运动模糊的采样子帧画布（每 worker 一块，与成品画布分开）：
+  // 若复用同一块，采样子帧会覆盖正在累加的结果。
+  std::vector<std::unique_ptr<st::raster::Canvas>> worker_scratch{};
+  worker_scratch.reserve(workers);
   std::vector<std::int64_t> worker_render_ns(workers, 0);
   std::vector<std::int64_t> worker_encode_ns(workers, 0);
   std::vector<int> worker_written(workers, 0);
@@ -456,6 +584,7 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
   std::atomic<bool> write_failed{false};
   for (std::size_t i = 0; i < workers; ++i) {
     worker_canvases.push_back(std::make_unique<st::raster::Canvas>(job.width, job.height, 1.0f));
+    worker_scratch.push_back(std::make_unique<st::raster::Canvas>(job.width, job.height, 1.0f));
   }
   const auto worker_body = [&](std::size_t slot) {
     st::raster::Canvas& local = *worker_canvases[slot];
@@ -464,7 +593,8 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
       const int index = next_index.fetch_add(1);
       if (index >= last) return;
       const std::int64_t render_start = st::time::now_ns();
-      project.render_frame(local, frame_time(index, job.fps), text_port);
+      render_frame_with_motion_blur(project, local, job, index, text_port,
+                                    *worker_scratch[slot]);
       const std::int64_t render_end = st::time::now_ns();
       const std::string path = st::fs::join(frames_dir, std::format("frame_{:05}.png", index + 1));
       if (!write_frame_png(local, path)) {

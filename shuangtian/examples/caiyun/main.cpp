@@ -86,6 +86,9 @@ struct Options {
   int render_width{1920};
   int render_height{1080};
   int render_frames{0};
+  /// 运动模糊子采样数（1 = 关）与快门比例（0.5 = 180°）。
+  int motion_samples{1};
+  double shutter{0.5};
   std::string export_dir{};   ///< `--export-dir <dir>`：启动即导出 PNG 帧序列（旧口径，保留）
   int bench_seconds{0};       ///< `--bench <秒>`：播放压测时长
 };
@@ -177,6 +180,12 @@ auto parse_options(int argc, char** argv) -> Options {
       }
     } else if (raw == "--render-frames") {
       options.render_frames = static_cast<int>(std::clamp(parse_int("--render-frames", 0), 0LL, 100000LL));
+    } else if (raw == "--motion-blur") {
+      // 子采样数：1 = 关闭（默认）；建议草稿 4~6、成片 8~12。
+      options.motion_samples = static_cast<int>(std::clamp(parse_int("--motion-blur", 1), 1LL, 16LL));
+    } else if (raw == "--shutter-angle") {
+      // 快门角度（度）：180 = 电影常用；0 或 360 以外的值按比例换算。
+      options.shutter = std::clamp(static_cast<double>(parse_int("--shutter-angle", 180)) / 360.0, 0.0, 1.0);
     } else if (raw == "--bench") {
       options.bench_seconds = static_cast<int>(std::clamp(parse_int("--bench", 0), 0LL, 3600LL));
     } else if (raw == "-h" || raw == "--help") {
@@ -239,7 +248,7 @@ class CaiyunPage final : public dsl::Component {
     if (!path.empty()) {
       const auto text = st::fs::read_text(path);
       if (!text) return st::forward_error(text.error());
-      const auto parsed = caiyun::parse_script(text.value());
+      const auto parsed = caiyun::parse_script(text.value(), st::fs::parent(path));
       if (!parsed) return st::forward_error(parsed.error());
       script = parsed.value();
       rebase_relative_paths(script, path);
@@ -470,7 +479,7 @@ class CaiyunPage final : public dsl::Component {
       st::eprint("脚本读取失败：{}（改用内置歌白宣传片）\n", text.error().message);
       return caiyun::builtin_sample_promo();
     }
-    const auto parsed = caiyun::parse_script(text.value());
+    const auto parsed = caiyun::parse_script(text.value(), st::fs::parent(path));
     if (!parsed) {
       st::eprint("脚本解析失败：{}（改用内置歌白宣传片）\n", parsed.error().message);
       return caiyun::builtin_sample_promo();
@@ -1042,6 +1051,8 @@ auto run_app(int argc, char** argv) -> int {
     job.fps = page->project().fps;
     job.audio = page->project().script.audio.enabled;
     job.last_frame = options.render_frames;
+    job.motion_samples = options.motion_samples;
+    job.shutter = options.shutter;
     render_launched = page->start_render(job);
     st::print("渲染启动：{}x{} → {}\n", job.width, job.height, job.output_file);
   }
