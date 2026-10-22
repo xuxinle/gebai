@@ -343,6 +343,11 @@ auto scene_from(const st::Json& node, std::size_t index) -> Result<Scene> {
   if (const st::Json* layers = st::json_find(node, "layers"); layers != nullptr) {
     scene.layers = parse_layers(*layers, nullptr);
   }
+  // 脚本编排层（可选）：`layout` 是脚本源文本。
+  //
+  // **这里不编译**：QuickJS 运行时非线程安全，而导出开 16 路并行。
+  // 编译发生在各自的渲染线程（`layout_engine()` 是 thread_local）。
+  scene.layout = parse_layout_script(node, std::string{}).value_or(LayoutScript{});
   // 素材：三种写法都存原文，由渲染侧的 `AssetLibrary` 按基准目录解析
   //（脚本不该知道自己被拷到哪，路径语义归素材库）。
   scene.image = st::json_get_string(node, "image");

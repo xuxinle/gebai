@@ -38,6 +38,7 @@
 
 #include "st/core/error.hpp"
 #include "layer.hpp"
+#include "layout.hpp"
 #include "st/math/color.hpp"
 
 namespace caiyun {
@@ -151,11 +152,15 @@ struct Scene {
   std::string footer_note{};
 
   /// 品牌识标（由 `apply_script` 从 Script 复制，供渲染期使用）。
-  ///
   /// 为何复制而不是渲染时回查 Script：渲染是**纯函数**（只依赖 Scene 与 time），
   /// 回查 Script 会引入隐藏输入，破坏"同一时刻两次渲染逐像素相同"的判据。
   std::string brand_wordmark{};
   std::string brand_latin{};
+
+  /// 脚本编排层（可选）：空 = 纯 JSON 行为。
+  ///
+  /// 只存**源文本**，不存已编译的引擎——因为每个渲染线程要各自的实例。
+  LayoutScript layout{};
 };
 
 /// 旁白/人声轨：一段外部 WAV 在成片里的位置。

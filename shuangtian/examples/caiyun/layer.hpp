@@ -335,6 +335,10 @@ struct LayerState {
   float alpha{1.0f};
   float scale{1.0f};
   float offset_y{0.0f};
+  /// 额外旋转（度）。目前只有 `model3d` 图层会用；其余图层忽略。
+  float rotate{0.0f};
+  /// 颜色覆盖（`a=0` = 不覆盖）。目前只有部分图层支持。
+  Color tint{0, 0, 0, 0};
 };
 
 /// 求某图层在 `local_time` 时刻的动画状态（纯函数，可单测）。

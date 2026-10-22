@@ -12,7 +12,9 @@
 #include "brand.hpp"
 #include "fx.hpp"
 #include "layer.hpp"
+#include "layout.hpp"
 #include "model3d.hpp"
+#include "st/core/log.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -580,9 +582,58 @@ void paint_layers(Painter& p, const Scene& scene, float local_time, const AssetL
   const float design_h = p.design_h();
   const float scale = p.scale();
 
+  // ── 先把**所有**图层的基准状态算出来 ──
+  //
+  // 为何先算一遍、而不是在绘制循环里边算边画：
+  // 脚本编排层是**整帧一次求值**（`layout(t, duration, canvas, layers)` 拿到
+  // 全部图层、返回全部增量）。每图层一次跨界会把导出拖慢几个量级
+  // （342 帧 × 20 图层 × 几十微秒 ≈ 十几秒纯开销）。
+  std::vector<LayerState> states;
+  states.reserve(scene.layers.size());
   for (const Layer& layer : scene.layers) {
-    const LayerState state =
-        evaluate_layer(layer, local_time, canvas_w, canvas_h, design_w, design_h);
+    states.push_back(evaluate_layer(layer, local_time, canvas_w, canvas_h, design_w, design_h));
+  }
+
+  // ── 脚本编排层（可选）：一次调用算出整帧增量 ──
+  //
+  // **没写 `layout` 时这条分支完全跳过**（零开销），老脚本行为一字不变。
+  //
+  // 装载时机：首次遇到带脚本的场景时编一次（每线程一个实例）。
+  // 为何不在 `parse_script` 里编：QuickJS 运行时非线程安全，
+  // 而导出开 16 路并行——共享就得全程加锁，那比多编几次贵得多。
+  //
+  // 失败时**降级而不报错**：脚本抛异常/超时 ⇒ 本帧零增量（= 纯 JSON 行为）。
+  // 让它崩，等于“一处脚本错误毁掉整片”；让它静默空白，等于“坏了不知道”。
+  // 所以选中间：**降级 + 累计失败计数**，导出结束时汇总报告。
+  LayoutEngine& engine = layout_engine();
+  if (!scene.layout.empty()) {
+    // 本线程上次装的是不是这个脚本？（用源长度 + 文件名当廉价指纹）
+    static thread_local std::string loaded_fingerprint{};
+    const std::string fingerprint =
+        std::format("{}#{}", scene.layout.filename, scene.layout.source.size());
+    if (loaded_fingerprint != fingerprint) {
+      const auto loaded = engine.load(scene.layout);
+      if (!loaded) {
+        ST_LOG_WARN("脚本编排层装载失败，已降级为纯 JSON：{}", loaded.error().message);
+        loaded_fingerprint.clear();
+      } else {
+        loaded_fingerprint = fingerprint;
+      }
+    }
+    if (engine.loaded()) {
+      std::vector<LayerDelta> deltas;
+      if (engine.evaluate(local_time, static_cast<float>(scene.duration), canvas_w, canvas_h,
+                          states, deltas)) {
+        for (std::size_t index = 0; index < states.size() && index < deltas.size(); ++index) {
+          apply_delta(states[index], deltas[index]);
+        }
+      }
+    }
+  }
+
+  std::size_t layer_index = 0;
+  for (const Layer& layer : scene.layers) {
+    const LayerState state = states[layer_index++];
     if (std::getenv("CAIYUN_LAYER_DEBUG") != nullptr) {
       st::print("[layer] kind={} x={} y={} w={} h={} (raw x={} y={}) alpha={:.2f}\n",
                 layer_kind_name(layer.kind), state.x, state.y, state.w, state.h, layer.x,
