@@ -729,7 +729,7 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
 
   // —— 阶段 1 收尾：导出元素轨迹（供连贯性验收做“按元素追踪”）——
   //
-  // 为何要写文件而不是当场判定：验收器是独立工具（`caiyun_carry_check`），
+  // 为何要写文件而不是当场判定：验收器是独立工具（`motion_qa`），
   // 它需要与帧图分开的两份证据：画面（看元素还在不在）+ 轨迹（看元素是谁、去哪了）。
   // 两者结合才能区分“同一个东西滑过去”与“同一个位置换了一个新东西”。
   if (job.trajectory && !trajectory_records.empty()) {

@@ -290,12 +290,6 @@ auto LayoutEngine::evaluate(float time, float duration, float canvas_w, float ca
     return st::unexpected(st::ErrorCode::Invalid,
                           "layout 必须返回一个状态数组（与传入的图层等长）");
   }
-  if (std::getenv("CAIYUN_SHAPES_DEBUG") != nullptr) {
-    std::printf("[layout] t=%.3f duration=%.2f canvas=%.0fx%.0f layers=%zu shapes=%zu\n",
-                static_cast<double>(time), static_cast<double>(duration),
-                static_cast<double>(canvas_w), static_cast<double>(canvas_h), layers.size(),
-                impl_->shapes.size());
-  }
 
   // 长度不符时按较短者填：缺失项保持零增量（= 不改基准值），
   // 多出来的忽略。**不当作错误**——一处疏漏不该毁掉整帧。

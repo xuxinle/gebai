@@ -20,34 +20,11 @@
       "duration": 15.0,
       "wrap": false,
       "background": [
-        "#04050a",
-        "#04050a"
+        "#030308",
+        "#050408"
       ],
       "layout": "onedot_v5.js",
       "layers": [
-        {
-          "kind": "rect",
-          "name": "bg",
-          "x": "0%",
-          "y": "0%",
-          "w": "100%",
-          "h": "100%",
-          "fill": "#04050a",
-          "enter": 0,
-          "alpha": 1.0
-        },
-        {
-          "kind": "glow",
-          "name": "glow",
-          "x": "44%",
-          "y": "42%",
-          "w": "12%",
-          "h": "12%",
-          "fill": "#6B84FF",
-          "intensity": 0.06,
-          "spread": 0.7,
-          "enter": 0
-        },
         {
           "kind": "ellipse",
           "name": "ring",
@@ -104,7 +81,10 @@
           "kin_rise": 12,
           "enter": 0
         }
-      ]
+      ],
+      "grain": 6000,
+      "grain_alpha": 0.85,
+      "accent": "#0a0a14"
     }
   ]
 }

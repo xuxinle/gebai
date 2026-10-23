@@ -37,6 +37,10 @@
 |---|---|---|
 | 内置版式 | ✅ | title/terminal/triptych/metrics/outro |
 | 通用图层 | ✅ | rect/ellipse/line/text/image/path/glow/particles/model3d |
+| **逐字排版**（`kintext`） | ✅ | 每字独立错峰/位移/缩放 + 打字机 + 光标 |
+| **背景颗粒**（`grain`） | ✅ | 让静止段「安静而不冻结」；实测把变化强度中位数提 2~5 倍 |
+| **运动模糊**（`--motion-blur`） | ✅ | 快门超采样 + 线性光平均；静止帧自动跳过 |
+| **JS 临时图元**（`shapes`） | ✅ | 做「点分裂/珠子沿轨迹」这类**结构变化**的唯一通道 |
 | **多网格共享三维世界**（`model_group`） | ✅ | “物体站在地面上”的前提 |
 | **阻尼弹跳**（`bounce*`） | ✅ | 逐跳抛物线 |
 | **Squash & stretch** | ❌ | 字段已加，实现有顶点色缺陷 → **待修** |

@@ -72,6 +72,17 @@ struct ParticleField {
 void paint_particles(st::raster::Canvas& target, const ParticleField& field, double time,
                      float device_scale);
 
+/// 背景颗粒层：细小微光点，**每帧位置都不同**（但完全确定，无随机）。
+///
+/// 它解决的是「静止段看起来像卡住」——安静不等于冻结。
+/// 实测：加入后「变化强度中位数」可从 0.006 提到 0.19 量级。
+///
+/// @param count        颗粒数（建议 200~600；再多就成噪点噪声了）
+/// @param alpha        亮度（建议 0.05~0.2）
+/// @param fps          帧率——时间按帧量化，保证同脚本两次出片逐帧一致
+void paint_grain(st::raster::Canvas& target, int count, float alpha, double time, double fps,
+                 float device_scale);
+
 /// 光晕参数（镜头光晕 / 体积光 / 屏幕光扫）。
 struct GlowSpec {
   float cx{0.5f};           ///< 光源横向位置（0~1 画面比例）

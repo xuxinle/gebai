@@ -353,12 +353,6 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "动效验收（通用）：画面沿用率 + 变化强度 + 元素身份；支持 --ref 同口径对照"
     },
-    "caiyun_carry_check": {
-      "kind": "executable",
-      "sources": ["tools/caiyun_carry_check.cpp"],
-      "exclude_sources": ["src/pkg/*"],
-      "//note": "旧版（保留兼容）：建议改用 motion_qa，它多报告中位数/峰值并支持参考片对照"
-    },
     "caiyun_js_probe": {
       "kind": "executable",
       "sources": ["tools/caiyun_js_probe.cpp"],

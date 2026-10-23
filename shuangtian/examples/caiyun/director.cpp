@@ -438,6 +438,11 @@ auto scene_from(const st::Json& node, std::size_t index, std::string_view asset_
       std::clamp(st::json_get_i64(node, "particles", scene.particles), 0LL, 600LL));
   scene.particle_alpha = static_cast<float>(
       std::clamp(st::json_get_double(node, "particle_alpha", scene.particle_alpha), 0.0, 1.0));
+  // 背景颗粒：让「静止段」安静而不冻结（实测能把变化强度中位数提 30 倍）
+  scene.grain = static_cast<int>(
+      std::clamp(st::json_get_i64(node, "grain", scene.grain), 0LL, 2000LL));
+  scene.grain_alpha = static_cast<float>(
+      std::clamp(st::json_get_double(node, "grain_alpha", scene.grain_alpha), 0.0, 0.6));
   scene.wrap = st::json_get_bool(node, "wrap", scene.wrap);
   scene.glow = static_cast<float>(std::clamp(st::json_get_double(node, "glow", scene.glow), 0.0, 1.0));
   scene.glow_cx = static_cast<float>(

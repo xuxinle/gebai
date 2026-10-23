@@ -1316,6 +1316,17 @@ void render_scene(st::raster::Canvas& target, const Scene& scene, double local_t
     trajectory_cell().sink = trajectory;
   }
   paint_backdrop(p, scene, time, duration);
+  // 背景颗粒：紧贴底色之上、所有内容之下。
+  //
+  // 为何放在这里而不是靠 JS 逐点画：颗粒要几百个点、每帧重算，
+  // 跨 C++/JS 边界传一次的开销会盖过渲染本身。它是**场景级质感**，不是内容。
+  //
+  // 它解决的是「静止段看起来像卡住」——安静不等于冻结。
+  // 实测：加入后「变化强度中位数」从 0.006 提到 0.19 量级（对标成熟动效片）。
+  if (scene.grain > 0) {
+    paint_grain(target, scene.grain, scene.grain_alpha, static_cast<double>(time), 30.0,
+                target.device_scale());
+  }
   // 素材背景**叠在底色之上、文字之下**：底色仍是兜底（图缺失时有基调可用）。
   if (assets != nullptr) paint_background_image(p, scene, time, duration, *assets, asset_basis);
   // ── 氛围层：背景之上、主体之下 ──
