@@ -1,10 +1,12 @@
 /**
- * 两层队列 + 轮次插入：人格级并发额度 + 会话级串行 + **运行中插入**。
+ * 两层队列 + 轮次插入：driver 级并发额度 + 会话级串行 + **运行中插入**。
  *
  * ## 三个不变量
  *
  * 1. **同一会话同时最多一个轮次在跑**（引擎硬约束：同 session 并发 run 直接抛错）。
  * 2. **同时运行的会话数 ≤ `maxConcurrent`**（资源约束）。
+ *    注：本调度器实例是 **per-driver** 的，而一个 driver 只对应一个常驻会话——额度大于 1
+ *    在日常路由下不会生效（会话级串行先把它锁死）。
  * 3. **事件 FIFO 且不丢**（人的话不能被静默丢弃）。
  *
  * ## 插入（本轮的核心机制）
@@ -101,6 +103,13 @@ export interface PersonaSchedulerOptions {
   maxConcurrent: number
   /** 全局待跑队列上限（超额丢弃最旧并记日志）。 */
   queueLimit?: number
+  /**
+   * 单会话插话信箱上限（默认与 `queueLimit` 同值，即 64）。
+   *
+   * 满了之后新插话**降级到队列**（而不是丢弃）：插话是尽力而为的高优先路径，
+   * 可靠投递仍由队列保证。
+   */
+  mailboxCapacity?: number
   /** 实际执行一轮（由 runtime 提供：整编事件 + 调引擎跑）。 */
   execute: (input: RoundInput) => Promise<void>
   /**
@@ -126,6 +135,7 @@ export class PersonaScheduler {
   private maxConcurrent: number
   private readonly queueLimit: number
   private readonly maxRounds: number
+  private readonly mailboxCapacity: number
   private readonly execute: PersonaSchedulerOptions["execute"]
   private readonly log?: PersonaLogger
 
@@ -156,6 +166,7 @@ export class PersonaScheduler {
     }
     this.maxConcurrent = opts.maxConcurrent
     this.queueLimit = opts.queueLimit ?? DEFAULT_QUEUE_LIMIT
+    this.mailboxCapacity = opts.mailboxCapacity ?? this.queueLimit
     this.maxRounds = Math.max(1, opts.maxRounds ?? DEFAULT_MAX_ROUNDS)
     this.execute = opts.execute
     this.log = opts.log
@@ -188,11 +199,16 @@ export class PersonaScheduler {
           out.push(0)
           continue
         }
-        mailbox.push(item.event)
-        const st = this.stats.get(item.sessionId)
-        if (st) st.interjections++
-        out.push(0)
-        continue
+        // 信箱有界：满了就降级到队列（事件仍会被处理，只是晚一轮——绝不静默丢）
+        if (mailbox.push(item.event)) {
+          const st = this.stats.get(item.sessionId)
+          if (st) st.interjections++
+          out.push(0)
+          continue
+        }
+        this.log?.warn(
+          `[persona:${this.personaId}] 会话 ${item.sessionId} 插话信箱已满，事件 ${item.event.id} 降级到队列`,
+        )
       }
       // ② 队列路径（容量、去重、FIFO）
       out.push(this.enqueueQueued(item))
@@ -206,7 +222,7 @@ export class PersonaScheduler {
     this.strategies.set(sessionId, strategy)
   }
 
-  /** 调整并发额度（人格热加载）。 */
+  /** 调整并发额度（driver 配置热加载）。 */
   setMaxConcurrent(n: number): void {
     if (!Number.isInteger(n) || n < 1) return
     this.maxConcurrent = n
@@ -380,7 +396,7 @@ export class PersonaScheduler {
     if (!list.length) this.sessionQueues.delete(sessionId)
 
     const ctl = new AbortController()
-    const mailbox = new InterjectionMailbox()
+    const mailbox = new InterjectionMailbox(this.mailboxCapacity)
     this.running.set(sessionId, ctl)
     this.mailboxes.set(sessionId, mailbox)
     this.runningEventIds.set(sessionId, new Set(batch.map((b) => b.event.id)))

@@ -29,7 +29,7 @@ function ev(id: string, at = Date.now()): PersonaEvent {
 }
 
 /** 可控执行器：每轮挂起，手动放行。 */
-function makeHarness(opts: { maxRounds?: number } = {}) {
+function makeHarness(opts: { maxRounds?: number; mailboxCapacity?: number } = {}) {
   /** 每轮记录：{ round, ids } */
   const rounds: Array<{ round: number; ids: string[] }> = []
   const pending: Array<{ ids: string[]; resolve: () => void; reject: (e: Error) => void }> = []
@@ -39,6 +39,7 @@ function makeHarness(opts: { maxRounds?: number } = {}) {
     personaId: "p1",
     maxConcurrent: 1,
     ...(opts.maxRounds !== undefined ? { maxRounds: opts.maxRounds } : {}),
+    ...(opts.mailboxCapacity !== undefined ? { mailboxCapacity: opts.mailboxCapacity } : {}),
     execute: ({ events, round }) => {
       rounds.push({ round, ids: events.map((e) => e.id) })
       return new Promise<void>((resolve, reject) => pending.push({ ids: events.map((e) => e.id), resolve, reject }))
@@ -88,6 +89,79 @@ describe("mailbox：插话信箱", () => {
     expect(mb.stats()).toMatchObject({ pending: 1, pushed: 1, drained: 0 })
     mb.drain()
     expect(mb.stats()).toMatchObject({ pending: 0, pushed: 1, drained: 1 })
+  })
+
+  /**
+   * 信箱必须有界：`maxRounds` 只封顶**轮次数**，不封顶**每轮吸收多少条**。
+   * 没上限时事件洪峰会把整批插话拼进同一份输入（单次上下文可爆）。
+   *
+   * 满了的行为是**拒收**（返回 false）而不是丢最旧——拒收后由调度器降级到
+   * 有界队列，事件仍会被处理（只是晚一轮）；在这里丢就是静默丢事件。
+   */
+  test("有界：达上限后拒收（返回 false），且不丢已收下的", () => {
+    const mb = new InterjectionMailbox(3)
+    expect(mb.push(ev("a"))).toBe(true)
+    expect(mb.push(ev("b"))).toBe(true)
+    expect(mb.push(ev("c"))).toBe(true)
+    expect(mb.isFull()).toBe(true)
+    expect(mb.push(ev("d"))).toBe(false) // 拒收，而不是把 a 挤掉
+    expect(mb.size()).toBe(3)
+    expect(mb.drain().map((e) => e.id)).toEqual(["a", "b", "c"])
+    // 拒收计数可观测
+    expect(mb.stats()).toMatchObject({ rejected: 1, capacity: 3 })
+  })
+
+  test("满后 drain 释放空间，可继续收", () => {
+    const mb = new InterjectionMailbox(2)
+    mb.push(ev("a"))
+    mb.push(ev("b"))
+    expect(mb.push(ev("c"))).toBe(false)
+    mb.drain()
+    expect(mb.push(ev("c"))).toBe(true)
+  })
+
+  test("同 id 重复入箱即使已满也返回 true（幂等不算拒收）", () => {
+    const mb = new InterjectionMailbox(1)
+    mb.push(ev("a"))
+    expect(mb.push(ev("a"))).toBe(true)
+    expect(mb.stats().rejected).toBe(0)
+  })
+
+  test("非法 capacity 抛错（不静默降级）", () => {
+    expect(() => new InterjectionMailbox(0)).toThrow()
+    expect(() => new InterjectionMailbox(-1)).toThrow()
+    expect(() => new InterjectionMailbox(1.5)).toThrow()
+  })
+
+  /**
+   * 调度器层：信箱满 → 降级到**队列**（事件仍会被处理，只是晚一轮）。
+   *
+   * 这是「插话绝不退化成丢事件」的又一道防线：上限只限制「同时吸收多少条」，
+   * 不限制「能不能收」。
+   */
+  test("调度器：信箱满后的新事件降级到队列（不丢）", async () => {
+    const h = makeHarness({ mailboxCapacity: 2 })
+    h.scheduler.enqueue({ event: ev("A"), sessionId: "s1", user: "u", threadKey: "t" })
+    await h.settle()
+    // 额度 2：B、C 进信箱（满）
+    h.scheduler.enqueue({ event: ev("B"), sessionId: "s1", user: "u", threadKey: "t" })
+    h.scheduler.enqueue({ event: ev("C"), sessionId: "s1", user: "u", threadKey: "t" })
+    await h.settle()
+    // D 进不了信箱 → 降级到队列
+    const ahead = h.scheduler.enqueue({ event: ev("D"), sessionId: "s1", user: "u", threadKey: "t" })
+    await h.settle()
+    expect(ahead).toBeGreaterThanOrEqual(0) // 被队列收下（不是 -1 溢出）
+    const st = h.scheduler.state()
+    expect(st.sessions[0]!.pendingInterjections).toBe(2) // B+C 在信箱
+    expect(st.queued).toBe(1) // D 在队列
+
+    // 第 1 轮结束 → 吸收 B+C（第 2 轮）
+    await h.finishRound()
+    expect(h.rounds[1]).toEqual({ round: 2, ids: ["B", "C"] })
+    await h.finishRound()
+    // D 作为新一次运行的第 1 轮执行（没丢）
+    expect(h.rounds.at(-1)).toEqual({ round: 1, ids: ["D"] })
+    await h.finishRound()
   })
 })
 
@@ -218,7 +292,10 @@ describe("renderBatch：整编成会话", () => {
 
   test("多事件附出站回法（告诉模型回到哪）", () => {
     const out = renderBatch([ev("a"), ev("b")])
-    expect(out).toContain("send_message")
+    // 出站走统一的 act 动作面（旧版的 send_message 工具已不存在）；
+    // 有原消息 id 时给 reply（可引用回复），无则给 send
+    expect(out).toContain("act(")
+    expect(out).toMatch(/verb="(send|reply)"/)
     expect(out).toContain("oc_1")
   })
 

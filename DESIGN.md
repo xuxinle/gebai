@@ -13,6 +13,7 @@
 | 项目定位、GEBAI_HOME、技术栈、包结构 | [`design/01-overview.md`](design/01-overview.md) |
 | 核心不变式、运行形态、核心模块接口、子Agent 扩展机制、子会话运行 | [`design/02-architecture-core.md`](design/02-architecture-core.md) |
 | 某个内置子 Agent 具体怎么工作（工具表/审批/适用场景） | [`design/02b-builtin-agents.md`](design/02b-builtin-agents.md) |
+| 对外动作怎么抽象到渠道（发消息/提工单/写记忆同一入口） | [`design/02-architecture-core.md`](design/02-architecture-core.md)「对外动作：渠道抽象」 |
 | 功能列表、桌面端、构建发布、实施路线、测试策略、常量参考 | [`design/03-features.md`](design/03-features.md) |
 | 快速上手与命令 | [`README.md`](README.md) |
 | 编码约定与提交要求 | [`AGENTS.md`](AGENTS.md) |

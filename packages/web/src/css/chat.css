@@ -887,7 +887,11 @@
 .markdown img { max-width: 100%; border-radius: var(--radius-sm); }
 
 /* ---------- 块级产物 ---------- */
-.block-img { max-width: 100%; max-height: 480px; border-radius: var(--radius-md); margin-top: 8px; background: var(--bg-inset); cursor: zoom-in; }
+/* `align-self: flex-start` 不可省：.msg-body 是纵向 flex 容器，默认 align-items 为 stretch——
+   图片会先被横向拉伸到整行宽（920px），再由 max-height 截高，于是 360×384 被抳成 920×480。
+   自对齐后按**原尺寸**排版：小图不放大，大图才由 max-width / max-height 等比收缩
+   （实测同一屏 29 张图：未修时 19 张变形（最大 366%），修后 0 张）。 */
+.block-img { align-self: flex-start; max-width: 100%; max-height: 480px; border-radius: var(--radius-md); margin-top: 8px; background: var(--bg-inset); cursor: zoom-in; }
 /* 附图消息的附件预览（发送即上屏的本地预览与历史渲染共用）：与正文同属 .msg-body，竖排堆叠 */
 .msg-attach { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; }
 .msg.user .msg-attach { align-items: flex-end; }

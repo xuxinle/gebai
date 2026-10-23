@@ -36,7 +36,7 @@ src/
 ├── event.ts           PersonaEvent 形态 + threadKey 推导（路由键，不含渠道身份）
 ├── events.ts          buildEvent / 每源幂等键推导 / renderEventContext（出站纪律注入）
 ├── dedupe.ts          EventDedupe：有界幂等环（重复事件 = 重复副作用）
-├── scheduler.ts       PersonaScheduler：两层队列（会话级串行 + 人格级并发额度）
+├── scheduler.ts       PersonaScheduler：两层队列（会话级串行 + driver 级并发额度）
 ├── runtime.ts         PersonaRuntime：幂等 → 路由 → 会话解析 → 入队 → 调度 → 交引擎
 ├── ports.ts           Port 接口（PersonaRunner / SessionResolver / PersonaLookup）
 ├── source.ts          事件源扩展契约（EventSourceDef / IngressEvent / ctx）
@@ -51,7 +51,7 @@ src/
 | # | 不变量 | 破坏后果 |
 |---|---|---|
 | 1 | **同一会话同时最多一个任务** | 引擎会抛 `已有任务在运行`；消息交错落盘、TaskState 互相覆盖 |
-| 2 | **同时运行的会话数 ≤ `maxConcurrent`** | 资源失控（token / API 限流 / CPU） |
+| 2 | **同一 driver 同时运行的会话数 ≤ `maxConcurrent`** | 资源失控（token / API 限流 / CPU） |
 | 3 | **FIFO 且不丢**（人的话不能被静默丢弃） | 先到的会话被新会话无限饿死 |
 
 第 3 条的排序键是**单调递增序号**（`QueueItem.seq`），不是时间戳——`Date.now()` 毫秒精度下
@@ -61,9 +61,22 @@ src/
 ## 两层队列：为什么要两层
 
 - **会话级必须串行**（引擎硬约束）。
-- **人格级才有并发**：人格同时处理多件事，一个群卡在审批不该让其它群停摆。
+- **driver 级才有并发**：一个 driver 卡在审批，不该让同角色的其它 driver 停摆。
 
-若只有「每人格串行队列」，人格就退化成单线程——这是早期方案犯过的错，靠结构杜绝。
+若只有「每角色一条串行队列」，角色就退化成单线程——这是早期方案犯过的错，靠结构杜绝。
+
+### 额度的真实作用面（容易配错的地方）
+
+调度器是 **per-driver** 的，而一个 driver 只对应**一个常驻会话**（`SessionResolver.resolveDriver`
+幂等），因此：
+
+| 配置 | 实际效果 |
+|---|---|
+| `driver.maxConcurrent > 1` | **不生效**：该 driver 的全部事件都路由到同一会话，会话级串行先把它锁死 |
+| `PersonaLookup.maxConcurrent(personaId)` | 只是 driver 未单独配置时的**继承默认值**，**不是**该角色的并发上限 |
+
+真实的并发度 = **同时有事的 driver 个数**（每个各 1 个会话）。要给某个角色做总额限制，
+得在宿主侧（或新增跨 driver 闸门）实现，不能靠这两个字段。
 
 ## 幂等：每源必有一条
 
@@ -105,7 +118,7 @@ src/
 ## 验证
 
 ```bash
-cd packages/persona && bun test        # 85 用例
+cd packages/persona && bun test        # 209 用例
 bun x tsc --noEmit                     # 类型检查
 ```
 
@@ -115,6 +128,8 @@ bun x tsc --noEmit                     # 类型检查
 |---|---|
 | 会话串行失效 / 并发额度失效 / 在跑去重失效 | ✓ 杀 |
 | 位次不计在跑 / FIFO 反序 / FIFO 退化为时间戳 | ✓ 杀 |
+| FIFO 排序键改为事件时间（迟到重推的旧消息插队） | ✓ 杀 |
+| FIFO 排序键改为入队毫秒（系统时钟回拨后插队） | ✓ 杀 |
 | 取消不清队列 / stop 不中止在跑 / 队列上限失效 | ✓ 杀 |
 | 淘汰函数空操作 / launch 不递归 pump | ✓ 杀 |
 | 淘汰时不删空会话槽 | 等价存活（`pickNext` 会清理，行为不变） |
@@ -123,20 +138,39 @@ bun x tsc --noEmit                     # 类型检查
 （跨会话插队）与死代码（不可达分支），已修。这类「测试绿但没守住」的情形是反向验证的唯一
 判据来源。
 
+### 取消接口的入参链（改这里时注意）
+
+`PersonaScheduler` 的表按 **sessionId** 建（`Map<sessionId, AbortController>`），而对外接口按
+`(personaId, driverId)` 说话。`PersonaRuntime` 内部维护 `driverKey → sessionId` 映射把两者
+接起来——少了它，`cancelRunning` / `cancelWaiting` 永远查不到东西（形同死代码，
+表现为「人格卡在长任务上无法取消」）。两个接口都有专项用例看 `signal` 是否真的 abort。
+
+### 幂等记账的时机（改这里时注意）
+
+投递链路是「先 `dedupe.admit` 记账，后入队」，入队可能失败（存储瞬时不可达 / 队列已满）。
+**失败必须 `revoke` 撤回**：否则该事件 id 被永久占位，源按规范重投会被判 `duplicate`
+静默丢弃——违反「FIFO 且不丢」。
+
+### 两条路径都有界（插话信箱与待跑队列）
+
+插话信箱默认容量 = `queueLimit`（64）。**满了之后新插话降级到队列**（而不是丢弃）：
+插话是尽力而为的高优先路径，可靠投递仍由队列保证。`maxRounds` 只封顶轮次数，
+不封顶每轮吸收多少条——所以信箱本身必须有界，否则事件洪峰会一次性拼成超大输入。
+
 ## 接入服务端（尚未做，属后续阶段）
 
 服务端需实现三个 Port：
 
 ```ts
 new PersonaRuntime({
-  lookup:   /* PersonaLookup：人格注册表 + 渠道绑定 + 并发额度 */,
-  sessions: /* SessionResolver：threadKey → 会话（含 anchor / fork） */,
+  lookup:   /* PersonaLookup：角色与 driver 注册表 + 订阅匹配 */,
+  sessions: /* SessionResolver：driver → 常驻会话 */,
   runner:   /* PersonaRunner：engine.run 包装，signal 透传 */,
 })
 ```
 
-**零配置向后兼容**：`lookup.route()` 返回 `null` 时 `dispatch` 返回 `unrouted`，
-调用方走自己原有的路径——未配置人格时行为与今天逐字节相同。
+**零配置向后兼容**：`lookup.subscribers()` 返回空数组时 `dispatch` 返回 `unrouted`，
+调用方走自己原有的路径——未配置任何订阅者时行为与今天逐字节相同。
 
 ## 后续阶段（不在本轮范围）
 

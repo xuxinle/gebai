@@ -73,6 +73,7 @@
 #include "st/core/entry.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/net.hpp"
+#include "st/core/platform.hpp"
 #include "st/core/print.hpp"
 #include "st/core/time.hpp"
 #include "st/ext/json.hpp"
@@ -542,6 +543,28 @@ struct CardStore {
 
     (void)bridge.expose("cards.dismiss_all", [this](const std::vector<Json>&) -> st::Result<Json> {
       return dismiss_all();
+    });
+
+    // 用系统默认程序打开 URL（授权/登录类卡片要"把人送到浏览器"）。
+    //
+    // 为何由 C++ 提供而不是 JS 自己做：JS 没有启动外部程序的能力，而
+    // `window.open` 在原生窗口里不存在。框架已有 `st::platform::open_external`
+    // （各平台走系统 API，不经 shell，URL 不会被解释成命令）。
+    //
+    // 为何返回 bool 而不是抛错：打不开浏览器不是"请求非法"，而是环境限制
+    //（无桌面环境/无默认浏览器）——JS 据此提示用户手动复制链接。
+    (void)bridge.expose("platform.open_url", [](const std::vector<Json>& args) -> st::Result<Json> {
+      if (args.empty()) return st::unexpected(st::ErrorCode::Invalid, "platform.open_url 需要 URL");
+      const std::string url = st::json_as_string(args[0]);
+      if (url.empty()) return st::unexpected(st::ErrorCode::Invalid, "URL 不能为空");
+      // 只接受 http(s)：其它协议（file:// / javascript: / 自定义 scheme）
+      // 不应由"点卡片按钮"这条路径启动——那是任意程序启动面。
+      if (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0) {
+        return st::unexpected(st::ErrorCode::Invalid, "只允许打开 http(s) 链接");
+      }
+      const bool ok = st::platform::open_external(url);
+      st::print("[相期] 打开外部链接（{}）：{}\n", ok ? "成功" : "失败", url);
+      return Json{{{"ok", ok}, {"url", url}}};
     });
 
     (void)bridge.expose("link.status", [this](const std::vector<Json>&) -> st::Result<Json> {

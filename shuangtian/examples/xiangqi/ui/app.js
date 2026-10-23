@@ -287,12 +287,24 @@
         const bid = actId + '-opt-' + oi;
         $('#' + actId).append('Button', {
           id: bid,
-          label: opt.label,
+          // 链接项带外链标识：让人一眼看出"按下去会离开相期"
+          label: opt.url ? opt.label + ' ↗' : opt.label,
           variant: oi === 0 ? 'primary' : 'soft',
           size: 'small',
-          hint: opt.hint || '',
+          hint: opt.url ? '在浏览器中打开' : (opt.hint || ''),
         });
         $('#' + bid).on('click', function () {
+          // 链接项不是「选项」：它的作用是把人送到浏览器去办事（授权/登录），
+          // 点它**不能**提交 {choice:…} —— 那等于替用户宣称"我选了这个"，
+          // 而外部系统才真正知道成没成功（授权完成与否由回调告知，不在这里）。
+          //
+          // 卡片在浏览器完成后由 agent 自己撤（agent 收到外部状态变更 → dismiss），
+          // 所以这里不产生 answer，也不把卡从列表里拿掉——用户回来时仍能看到
+          // 「去授权」直到 agent 确认完成。
+          if (opt.url) {
+            openExternal(opt.url);
+            return;
+          }
           submit(card.id, { choice: opt.value });
         });
       });
@@ -322,6 +334,41 @@
   }
 
   // ── 动作 ────────────────────────────────────────────────────────────────
+
+  /**
+   * 用系统默认浏览器打开链接（授权/登录类卡片用）。
+   *
+   * 为何要单独一个函数：链接项与普通选项的行为完全不同——
+   * 选项是「回答」，链接是「把人送出去办事」。混淆这两者会替用户
+   * 声称一个他并未做出的选择。
+   *
+   * 打不开时**不弹错就完事**：把 URL 显示出来让用户自己复制，
+   * 比一句"打开失败"有用。
+   */
+  function openExternal(url) {
+    if (!url) return;
+    try {
+      const res = app.platform.open_url(url);
+      if (res && res.ok) {
+        log('相期：已在浏览器中打开 ' + url);
+        return;
+      }
+      log('相期：打开链接失败，请手动复制：' + url);
+      copyToClipboard(url);
+    } catch (e) {
+      log('相期：打开链接异常（' + e + '），请手动复制：' + url);
+      copyToClipboard(url);
+    }
+  }
+
+  /** 尽力把链接放进剪贴板（没有桥能力时静默——不能因为辅助动作弄挂主流程）。 */
+  function copyToClipboard(text) {
+    try {
+      if (app.clipboard && app.clipboard.set) app.clipboard.set(text);
+    } catch (e) {
+      void e;
+    }
+  }
 
   /** 把答复送回 C++（它会写入答复通道），然后标脏等下一次 tick 渲染。 */
   function submit(id, answer) {

@@ -42,6 +42,17 @@ export class EventDedupe {
     return this.seen.size
   }
 
+  /**
+   * 撤回一次登记（把 id 归还为「未处理」）。
+   *
+   * 用途：投递链路「先记账、后入队」时，入队失败必须撤回——否则一次瞬时故障
+   * （存储不可达、队列已满）会把该 id 永久占位，源按规范重投会被判 duplicate 静默丢弃，
+   * 表现为「用户那条消息永远没人处理」。撤回是幂等的：不存在也不算错。
+   */
+  revoke(id: string): void {
+    this.seen.delete(id)
+  }
+
   /** 清空（测试/人格重载用）。 */
   clear(): void {
     this.seen.clear()

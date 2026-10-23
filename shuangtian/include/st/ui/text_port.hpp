@@ -138,22 +138,32 @@ class NullTextPort final : public TextPort {
 
 /// 合成加粗（fake bold）在**物理像素**下的笔画外扩半径。
 ///
-/// 与 Skia `SkFont::setEmbolden` / FreeType `FT_GlyphSlot_Embolden` 同一取向：
-/// 按**字号**给比例值，而不是固定像素——固定像素在 11px 上会把字糊死、
-/// 在 48px 上又完全看不出来。
+/// ## 本框架已**禁用**合成加粗，此函数恒返回 0
 ///
-/// 三档比例经实测校准（`tools/text_weight_probe.cpp`）：以 20.25px 中英混排为例，
-/// 墨量增幅 Medium ≈ +17%、SemiBold ≈ +30%、Bold ≈ +42%（**峰值覆盖率不变**，
-/// 即“变粗”而不是“变糊”）；作为对照，Chrome 在同一字体上切**真 Bold 字体面**
-/// 的墨量增幅是 +55%~+79%——那背后是另一套字形轮廓，合成加粗不该去追那个数，
-/// 否则 CJK 小字的笔画会粘在一起。
+/// 保留函数而不删（且保留签名）是为了：① 叫所有现有调用点无需改动就能退到
+/// “不加粗”；② 以后若真的要恢复，只需改这一处。
+///
+/// ## 为何禁用（不是口味问题，是画质问题）
+///
+/// 合成加粗的本质是“把同一份轮廓沿水平方向平移后重复填充”，与真粗体面
+/// （另一套字形轮廓）相比有结构性差异，实测（下方 `prefers_real_bold` 的表）：
+///
+/// · 中文过渡带占比 0.246 vs **0.155**（锐 37%）
+/// · 英文字间离散 **14.1% → 0.0%**
+/// · 字面宽只 +3px（247 vs 258）——**只增墨、不改骨架**，所以看起来“胖而糊”
+///
+/// 对**大字号**（海报、动效片标题）尤其致命：过渡带被放大到整屏可见，
+/// 观感就是“糊、脏”。实测裁云把 `design(size)/20` 硬编码进 `Painter::text`，
+/// 使大标题走了合成加粗——用户直接报“粗体很糊很脏”。
+///
+/// ## 代价（已知且接受）
+///
+/// 系统没有对应字重面时（如 `Medium`，多数系统无 Medium 面），该档位会
+/// **退化成 Regular**——看起来“没那么粗了”。这是有意的取舍：
+/// **宁可不粗，不要脏**。需要视觉层次时改用字号/颜色/间距，而不是假加粗。
 [[nodiscard]] inline auto embolden_radius(float pixel_size, FontWeight weight) noexcept -> float {
-  switch (weight) {
-    case FontWeight::Medium: return pixel_size / 48.0f;
-    case FontWeight::SemiBold: return pixel_size / 28.0f;
-    case FontWeight::Bold: return pixel_size / 18.0f;
-    case FontWeight::Regular: break;
-  }
+  (void)pixel_size;
+  (void)weight;
   return 0.0f;
 }
 
@@ -184,7 +194,9 @@ class NullTextPort final : public TextPort {
 /// ② 合成加粗只加墨、**不改字面宽**（247 vs 参照 258），所以字看着「胖而糊」
 /// （过渡带 0.250 比参照宽，实心率仍低 6%），而真粗体面的三个量同时朝参照靠。
 ///
-/// 探不到真粗体面时 `find_face` 自动回退常规面，此时仍可叠加合成加粗补足。
+/// 探不到真粗体面时 `find_face` 自动回退常规面，**此时不再用合成加粗补足**：
+/// 该字重退化为 Regular。这是有意的取舍（见 `embolden_radius` 的注释）：
+/// **宁可不粗，不要脏**。
 [[nodiscard]] inline auto prefers_real_bold(FontWeight weight) noexcept -> bool {
   return weight == FontWeight::Bold || weight == FontWeight::SemiBold;
 }

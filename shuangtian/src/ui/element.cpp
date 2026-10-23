@@ -371,6 +371,15 @@ auto Element::readonly_property_names() const -> std::vector<std::string_view> {
   return {};
 }
 
+auto Element::property_schema() const -> std::span<const PropertyDesc> {
+  // 默认空表：**未声明的组件零成本**。
+  //
+  // 为何不在这里“根据 `property_names()` 自动合成一份描述”：
+  // 那只能猜出 `Text` 类型与无范围，而错误的范围比没有范围更危险
+  // （面板会生成一个拖到底也不动的控件）。宁缺毋滥。
+  return {};
+}
+
 auto Element::invoke_action(std::string_view action, std::string_view argument) -> bool {
   (void)argument;
   if (action == "click" || action == "activate") {

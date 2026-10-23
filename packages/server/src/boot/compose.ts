@@ -2,7 +2,7 @@
  *  webhooks/tasks/todos/gc/feishuBot/externalAuth/state/app/devReload）→ Composed。网络监听见 serve.ts，
  *  进程入口见 cli.ts / index.ts。自原单文件 index.ts 的 startServer 装配段拆分，行为不变。 */
 import { existsSync } from "node:fs"
-import { rename } from "node:fs/promises"
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { ServerWebSocket } from "bun"
 import { isolationConfigConflict, loadConfig } from "../core/base/config"
@@ -43,7 +43,159 @@ import { EngineBotAdapter } from "../feishu-bot/adapter"
 import { createFeishuApi } from "../feishu-bot/api"
 import { makeWsSink } from "./serve"
 import { installBrowserFetchProxy } from "../core/browser/fetch-proxy"
+import { ensureCorporateTrust } from "../core/trust/corporate"
 import { log, setLogLevel } from "@gebai/sdk/node"
+import { FeishuConn } from "../feishu-bot/conn"
+import { ChannelRegistry, ChannelInputBridge, defaultChannelScanDirs } from "@gebai/channels"
+import type { InputCounters, PersonaDispatchPort } from "@gebai/channels"
+import type { DriverPersistence as PersonaDriverPersistence, DriverRecord as PersonaDriverRecord } from "@gebai/persona"
+
+/**
+ * 未装配人格运行时的输入面落点：把入站事件记入日志并计数。
+ *
+ * 为何不直接丢弃：渠道能收事件是**可独立验证的能力**（`local` 的 drop/inbox 是联调入口），
+ * 不该因为人格层未装配就静默失败。日志 + 统计让「收到了什么」可见，
+ * 且接口上就是 `PersonaDispatchPort`——将来接上真运行时时零改动。
+ */
+class LogOnlyDispatcher implements PersonaDispatchPort {
+  private readonly counters = new Map<string, InputCounters>()
+  constructor(private readonly opts: { log: { info(msg: string): void; warn(msg: string): void } }) {}
+
+  /** 注册表约定的入口（与 `ChannelInputBridge.deliver` 同形）。 */
+  async deliver(
+    channel: string,
+    _defaultKind: unknown,
+    ev: { summary: string; body: string; id?: string; kind?: string; source?: string },
+  ): Promise<{ status: "unrouted"; reason: string }> {
+    return this.dispatch({
+      id: ev.id ?? "",
+      kind: ev.kind ?? "message",
+      channel,
+      body: ev.body,
+      context: { source: ev.source ?? channel, summary: ev.summary },
+    }) as Promise<{ status: "unrouted"; reason: string }>
+  }
+
+  async dispatch(event: {
+    id: string
+    kind: string
+    channel: string
+    body: string
+    context: { source: string; summary: string }
+  }): Promise<{ status: string; reason?: string }> {
+    const c = this.counters.get(event.channel) ?? {
+      emitted: 0,
+      accepted: 0,
+      unrouted: 0,
+      duplicate: 0,
+      overflow: 0,
+      unavailable: 0,
+    }
+    c.emitted++
+    c.unrouted++
+    this.counters.set(event.channel, c)
+    this.opts.log.info(
+      `[gebai] 渠道事件（无人格运行时，仅记录）：channel=${event.channel} kind=${event.kind} ` +
+        `source=${event.context.source} summary=${event.context.summary}`,
+    )
+    return { status: "unrouted", reason: "人格运行时尚未装配（GEBAI_PERSONA 未启用），事件已记入日志" }
+  }
+}
+
+/**
+ * 动态 driver 持久化：模型自建的分身落盘到 `{GEBAI_HOME}/persona/drivers.json`。
+ *
+ * 为何单独一个文件而不是写进会话：driver 是**人格级**的（跨会话生效），
+ * 跟某个对话无关。写进会话会导致「换个会话就丢分工」。
+ *
+ * 写入串行化：并发创建（模型同时造两个分身）时整文件覆写会丢记录。
+ */
+class PersonaDriverStore implements PersonaDriverPersistence {
+  private readonly path: string
+  private chain: Promise<unknown> = Promise.resolve()
+
+  constructor(home: string) {
+    this.path = join(home, "persona", "drivers.json")
+  }
+
+  private serialize<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.chain.then(fn, fn)
+    this.chain = next.then(
+      () => undefined,
+      () => undefined,
+    )
+    return next
+  }
+
+  private async readAll(): Promise<Record<string, PersonaDriverRecord>> {
+    const text = await readFile(this.path, "utf8").catch(() => null)
+    if (!text) return {}
+    try {
+      return JSON.parse(text) as Record<string, PersonaDriverRecord>
+    } catch {
+      return {} // 坏文件不阻断启动（下次写入会重建）
+    }
+  }
+
+  async load(): Promise<Array<{ personaId: string; record: PersonaDriverRecord }>> {
+    const all = await this.readAll()
+    return Object.entries(all).map(([key, record]) => ({
+      // 键格式：`{personaId}\u0000{driverId}`
+      personaId: key.split("\u0000")[0] ?? "",
+      record,
+    }))
+  }
+
+  async save(personaId: string, record: PersonaDriverRecord): Promise<void> {
+    return this.serialize(async () => {
+      const all = await this.readAll()
+      all[`${personaId}\u0000${record.def.id}`] = record
+      await mkdir(join(this.path, ".."), { recursive: true })
+      await writeFile(this.path, JSON.stringify(all, null, 2), "utf8")
+    })
+  }
+
+  async remove(personaId: string, driverId: string): Promise<void> {
+    return this.serialize(async () => {
+      const all = await this.readAll()
+      delete all[`${personaId}\u0000${driverId}`]
+      await mkdir(join(this.path, ".."), { recursive: true })
+      await writeFile(this.path, JSON.stringify(all, null, 2), "utf8")
+    })
+  }
+}
+
+/**
+ * 解析 `@gebai/channels` 包根（供 `defaultChannelScanDirs` 推内置域与二开域）。
+ *
+ * 为何不直接 `import.meta.dirname` 推导：包会被打包进 dist / 单文件二进制，
+ * 那时路径与源码树无关——以内置渠道文件的实际存在与否作为判据，都不存在时
+ * 返回一个不存在的路径（扫描域不存在 = 正常跳过，不是错误）。
+ */
+async function resolveChannelsPackageRoot(): Promise<string> {
+  for (const candidate of [join(import.meta.dirname, "..", "..", "..", "channels"), join(import.meta.dirname, "..", "..", "..", "..", "packages", "channels")]) {
+    if (existsSync(join(candidate, "src", "index.ts"))) return candidate
+  }
+  // 二进制形态：内置渠道已内联进 bundle，目录扫描不适用（显式注册由 bundle 负责）
+  return join(import.meta.dirname, "__no_channels__")
+}
+
+/** 解析 `@gebai/persona` 包根（供 `defaultPersonaScanDirs` 推内置域与二开域）。 */
+async function resolvePersonaPackageRoot(): Promise<string> {
+  for (const candidate of [join(import.meta.dirname, "..", "..", "..", "persona"), join(import.meta.dirname, "..", "..", "..", "..", "packages", "persona")]) {
+    if (existsSync(join(candidate, "src", "index.ts"))) return candidate
+  }
+  return join(import.meta.dirname, "__no_personas__")
+}
+
+/** 逗号/空白分隔的名单解析（与既有 `GEBAI_*_ENABLE/DISABLE` 同口径）。 */
+function splitList(raw: string | undefined): string[] {
+  if (!raw) return []
+  return raw
+    .split(/[,\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
 
 /** 组合产物：全部组件实例 + 监听所需的依赖包（serve.ts 消费）。 */
 export interface Composed {
@@ -52,6 +204,8 @@ export interface Composed {
   registry: ToolRegistry
   engine: AgentEngine
   subAgents: SubAgentManager
+  /** 对外动作渠道注册表（act/observe 工具）。 */
+  channels: ChannelRegistry
   auth: AuthService
   events: EventBus
   sandbox: Sandbox
@@ -93,6 +247,22 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   // 透明浏览器代理（GEBAI_BROWSER_PROXY=1，重启生效）：服务启动即安装 fetch 垫片——平台级
   // 能力，不依赖任何子Agent 的装载/裁剪（桥接基建在 core/browser，见 DESIGN「透明浏览器代理」）
   installBrowserFetchProxy()
+
+  // 企业内网 TLS 出口检查的根证书发现（**必须在任何 HTTPS 请求之前**）：
+  //
+  // Bun/Node 的 fetch 不读 Windows 证书库。公司网里 TLS 被出口设备改写后
+  //（本机实测：飞书 accounts 域的证书链被换成 TENANT-RESTRICTION-CA 签发），
+  // 浏览器能访问而服务端报 `unable to verify the first certificate`——
+  // 表现为「授权页能开、扫码也成功、回调到了服务端才失败」，极难归因。
+  //
+  // 本探针只在实际需要时才导出（能通就一行日志都不用打）。
+  {
+    const trust = await ensureCorporateTrust({
+      home: config.gebaiHome,
+      log: (level, msg) => log[level](msg),
+    })
+    if (trust.applied) log.warn(`[gebai] ${trust.message}`)
+  }
 
   const store = new SessionStore({ home: config.gebaiHome })
 
@@ -189,6 +359,170 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   const env = new EnvManager(store)
   const events = new EventBus()
   const subAgents = new SubAgentManager({ registry, preloadOverride: config.preloadSubAgents })
+
+  // ── 拟人模式的飞书用户凭据（进程级，跨会话常驻）──
+  //
+  // 必须建在渠道之前：渠道发消息时要用它（`as_user=true` 以用户本人名义发）。
+  // 只依赖 config 与环境变量，不依赖 engine，所以可以提前建。
+  //
+  // **仅 GEBAI_PERSONA=true 时创建**：关闭时连读盘都不做（行为零影响）。
+  //
+  // 授权提醒走**相期卡片**（用户桌面上的常驻窗口）：需要授权时推一张带链接的卡，
+  // 授权完成后自动撤掉。不阻塞启动，也不靠“用户恰好打开网页”才看得到。
+  let personaCredentials: import("@gebai/persona").PersonaCredentials | null = null
+  /** 已推出去的授权卡 id（授权完成后用它撤卡；未推为 null）。 */
+  let personaAuthCardId: string | null = null
+  /** 启动后（子Agent 已发现）再推卡：凭据创建时相期还可能没被发现。 */
+  let personaAuthCardSync: ((status: import("@gebai/persona").PersonaCredentialStatus) => Promise<void>) | null = null
+  if (config.personaEnabled) {
+    const { PersonaTokenStore, PersonaOAuth, PersonaCredentials, scopesFromEnv } = await import("@gebai/persona")
+    const personaAppId = () => process.env.GEBAI_CHANNELS_FEISHU_APP_ID || process.env.GEBAI_FEISHU_APP_ID
+    const personaAppSecret = () => process.env.GEBAI_CHANNELS_FEISHU_APP_SECRET || process.env.GEBAI_FEISHU_APP_SECRET
+
+    /**
+     * 按凭据状态维护相期上的授权卡（推/撤）。
+     *
+     * 写成函数而不是在两处各写一遍：状态变化的入口有多个（启动、授权完成、撤销），
+     * 分散判断必然出现“一个地方推了卡、另一个地方忘了撒”。
+     *
+     * 走**子Agent 定义取工具**（与模型 `agent_load` 同一来源），不直接 import 相期源码——
+     * 内置子Agent 是构建期打包的，源码路径不属于 server 的可引用面。
+     */
+    const syncAuthCard = async (status: import("@gebai/persona").PersonaCredentialStatus): Promise<void> => {
+      const def = subAgents.defOf("xiangqi")
+      const authorize = def?.tools?.card_authorize
+      const dismiss = def?.tools?.card_dismiss
+      if (!authorize || !dismiss) return // 相期未注册（被禁或发现失败）：不报错，网页横幅仍会提示
+      try {
+        if (status.ready) {
+          if (personaAuthCardId !== null) {
+            await dismiss.execute({ id: personaAuthCardId }, {} as never)
+            personaAuthCardId = null
+          }
+          return
+        }
+        if (!status.authorizeUrl) return // 未配应用凭据：推了也是废链接
+        if (personaAuthCardId !== null) return // 已有卡在，不重复推
+        const res = await authorize.execute(
+          {
+            title: "需要飞书授权",
+            url: status.authorizeUrl,
+            from: "歌白",
+            body:
+              `${status.message}\n\n` +
+              "授权后我才能以**你本人**的名义在飞书群里回消息（而不是机器人）。\n" +
+              "点下面按钮完成授权；完成后这张卡会自动消失。",
+            // 链接 10 分钟过期：过期后卡片自动消失，不留一个点不开的按钮
+            ttl_ms: 10 * 60 * 1000,
+          },
+          {} as never,
+        )
+        const data = res.data as { id?: string } | undefined
+        if (data?.id) personaAuthCardId = data.id
+      } catch (err) {
+        // 相期没在运行/装载失败不能影响启动：日志提示就够了（用户也可从网页顶部横幅看到）
+        log.warn(`[gebai] 推送授权卡到相期失败：${String((err as Error)?.message || err)}`)
+      }
+    }
+    personaAuthCardSync = syncAuthCard
+
+    personaCredentials = new PersonaCredentials({
+      store: new PersonaTokenStore({
+        home: config.gebaiHome,
+        appId: personaAppId,
+        appSecret: personaAppSecret,
+        log: (level, msg) => log[level](msg),
+      }),
+      oauth: new PersonaOAuth(),
+      appId: personaAppId,
+      appSecret: personaAppSecret,
+      // 申请哪些 scopes：默认是「能跑起来的最小集」（不含 offline_access——
+      // 它需应用在飞书后台开通，未开通时授权页报 20027 把人挡在外面）。
+      // 部署方在后台开通后可经 GEBAI_PERSONA_SCOPES 追加。
+      scopes: scopesFromEnv(),
+      // 回调走拟人专用端点（与会话级 /api/v1/oauth/feishu/callback 分开）
+      redirectUri: () => {
+        const base = (process.env.GEBAI_PUBLIC_URL ?? "").replace(/\/+$/, "")
+        return `${base || `http://localhost:${config.port}`}/api/v1/persona/feishu/callback`
+      },
+      log: (level, msg) => log[level](msg),
+      // 授权完成/撤销 → 同步相期上的卡
+      onChange: (status) => void syncAuthCard(status),
+    })
+    // 启动检查（不吐令牌明文，只报状态）
+    const cred = await personaCredentials.status()
+    if (cred.ready) {
+      log.info(`[gebai] 飞书凭据就绪：${cred.message}${cred.remainingMs ? `（剩 ${Math.round(cred.remainingMs / 60000)} 分钟）` : ""}`)
+    } else if (cred.authorizeUrl) {
+      log.warn(`[gebai] 飞书凭据不可用：${cred.message}`)
+      log.warn(`[gebai] 授权链接：${cred.authorizeUrl}`)
+      log.warn(`[gebai] 回调地址需已在飞书后台登记：${process.env.GEBAI_PUBLIC_URL || `http://localhost:${config.port}`}/api/v1/persona/feishu/callback`)
+    } else {
+      log.warn(`[gebai] 飞书凭据不可用：${cred.message}（未配置 GEBAI_CHANNELS_FEISHU_APP_ID / _APP_SECRET，无法发起授权）`)
+    }
+    // 启动即尝试推卡：相期若已连上立刻可见；没开着也无妨（卡片会缓存，它启动后重推）
+    // 这里只尝试一次；子Agent 发现是异步的，若此时还没就绪，下面 discover 之后会再补推。
+    void syncAuthCard(cred)
+
+    /**
+     * 临近到期主动提醒（常驻检查）。
+     *
+     * 不这样做的话，可刷新的凭据没什么问题（临期会自动续），但**不可刷新的**
+     *（缺 refresh_token —— 例如应用没开 offline_access）到期后就只能重新授权，
+     * 而如果只在「下一次要用时」才发现，人格就变成了「在别人等它回话的那一刻
+     * 才告诉人它需要授权」——对常驻人格是错的时机。
+     *
+     * 提前量取 10 分钟：足够用户看到卡、拉起手机扫码，又不至于早到“看着还早就不管了”。
+     */
+    const WARN_BEFORE_MS = 10 * 60_000
+    const personaExpiryTimer = setInterval(
+      () => {
+        void (async () => {
+          try {
+            const st = await personaCredentials!.status() // status() 会顺带尝试刷新
+            if (st.ready && (st.remainingMs ?? Number.POSITIVE_INFINITY) <= WARN_BEFORE_MS) {
+              log.warn(`[gebai] 飞书凭据将在 ${Math.max(1, Math.round((st.remainingMs ?? 0) / 60000))} 分钟后失效`)
+            }
+            // 状态变了（就绪→需授权）时推卡；syncAuthCard 自身幂等（已推就不重推）
+            await syncAuthCard(st)
+          } catch {
+            // 提醒本身出错不能影响服务（unref 的定时器不持连接）
+          }
+        })()
+      },
+      5 * 60_000,
+    )
+    // unref：只做后台提醒，不该阻止进程退出（测试/短命令跑完就该退）
+    personaExpiryTimer.unref?.()
+  }
+  // 对外动作渠道（act/observe 工具，DESIGN「对外动作：渠道抽象」）：与子Agent/事件源同款
+  // 「丢文件即注册」——内置 packages/channels/src/channels/ + 二开 custom/channels/。
+  // 发现/启动失败只记 loadErrors 不阻断启动（单渠道坏不能连带整个服务起不来）。
+  const channels = new ChannelRegistry({
+    scanDirs: defaultChannelScanDirs({ packageRoot: await resolveChannelsPackageRoot() }),
+    home: config.gebaiHome,
+    enable: splitList(process.env.GEBAI_CHANNELS_ENABLE),
+    disable: splitList(process.env.GEBAI_CHANNELS_DISABLE),
+    // 宿主注入的能力（channels 包零依赖，不 import 本包）：
+    // - feishuLongConn：飞书长连接工厂（渠道自建**独立**连接，与会话机器人互不干扰）
+    // - feishuSessionAppId：会话机器人 AppID——渠道据此检测「与自己的 AppID 撞车」并拒绝启动
+    //   （同一飞书应用只能一条长连接，同时用会互踢，表现为其中一边偶发收不到消息）
+    deps: {
+      feishuLongConn: (o: { appId: string; appSecret: string; onEvent: (ev: Record<string, unknown>) => void }) =>
+        new FeishuConn({
+          appId: o.appId,
+          appSecret: o.appSecret,
+          onEvent: (ev) => o.onEvent(ev as Record<string, unknown>),
+          log: (m) => log.info(`[channels:feishu] ${m}`),
+        }),
+      ...(config.feishuAppId ? { feishuSessionAppId: config.feishuAppId } : {}),
+      // 拟人凭据（feishu 渠道的 `as_user=true` 用它以用户本人名义发消息）；未启用时为 null
+      ...(personaCredentials ? { personaCredentials } : {}),
+    },
+    log: { info: log.info, warn: log.warn, error: log.error },
+  })
+  // 注：`channels.init()` 在 engine 创建之后调用（见下）——输入面需要把事件投给引擎，
+  // 若在此处 init，`startListen` 拿不到可用的 dispatcher，事件会全部落到 unavailable。
   // 客卿（DESIGN「客卿」）：仅本地形态启用——沙箱启用（服务端部署）时注入 null
   // 显式禁用；GEBAI_KEQING=off 同效。发现失败不阻断启动（逐项记 loadErrors）。
   subAgents.setKeqingOpts(sandbox.enabled ? null : {})
@@ -196,6 +530,10 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   // go 下载 toolchain 的 TCP 超时能把启动拉长 30s），不该让服务启动等它；TS 域扫描（本地）仍同步。
   // 就绪后自动合并进定义视图，需完整清单的操作（agent_load）由 SubAgentManager 内部等它。
   await subAgents.discover({ deferNative: true })
+  // 子Agent 已发现 → 补推一次授权卡（上面建凭据时相期可能还未被发现）
+  if (personaCredentials && personaAuthCardSync) {
+    void personaAuthCardSync(await personaCredentials.status())
+  }
   // 任务能力开关（GEBAI_TASKS_ENABLED，默认 true）：关闭时 task 子Agent 不注册（agent_list/agent_load/
   // subsession_run 均不可见，task_* 工具不进工具表/schema，与调度器一致完全隐藏）；开启时按需装载、REST /api/v1/tasks 可管
   if (!config.tasksEnabled) subAgents.unregister("task")
@@ -232,6 +570,8 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     events,
     config,
     subAgents,
+    // 对外动作渠道（act/observe）：进程级单例，父子会话/子代理共用
+    channels,
     authMode: config.auth,
     // 任务级主模型解析：会话/前端 env 配置 GEBAI_LLM_* 时按任务重建 Provider（模型/地址/密钥/类型/上下文预算/多模态声明覆盖启动配置），
     // 无覆盖返回 undefined（引擎沿用 opts.provider 实例）
@@ -246,6 +586,82 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     // 独立端点/模型，字面模型名按主配置基准覆盖——多分支多路并行分摊单路限流
     resolveModelProvider: (env, name) => resolveModelRouteProvider(mainConfig, env, name),
   })
+  // 拟人模式装配（GEBAI_PERSONA=true）：**开关关闭时以下代码一行不执行**。
+  //
+  // 「关闭时行为逐字节不变」的具体保证：
+  // 1. `PersonaRuntime` / `Catalog` / `Resolver` / `Runner` 均不被实例化（无副作用、无扫描、无文件读写）
+  // 2. `engine` 不加任何入参分支（人格身份走已有的 `channelNote` 注记，不新增引擎逻辑）
+  // 3. 渠道输入面接 `LogOnlyDispatcher`——只记日志，与实际部署完全一致
+  // 4. config 多两个字段（默认 false/true），不参与任何既有分支
+  let personaRuntime: import("@gebai/persona").PersonaRuntime | null = null
+  let personaCatalog: import("@gebai/persona").PersonaCatalog | null = null
+  let personaSessions: import("../core/session/persona-sessions").PersonaSessionResolver | null = null
+  if (config.personaEnabled) {
+    const { PersonaRuntime, PersonaCatalog, DriverRegistry, defaultPersonaScanDirs, discoverPersonas } = await import("@gebai/persona")
+    const { PersonaSessionResolver } = await import("../core/session/persona-sessions")
+    const { EnginePersonaRunner } = await import("../core/session/persona-runner")
+
+    const personaDirs = defaultPersonaScanDirs({ packageRoot: await resolvePersonaPackageRoot() })
+    const found = await discoverPersonas(personaDirs)
+    if (found.personas.size === 0) {
+      log.warn(
+        `[gebai] GEBAI_PERSONA 已开启但未发现任何人格定义（内置 ${personaDirs.builtin} / 二开 ${personaDirs.custom}）` +
+          `——入站事件将无人处理（记日志）。放一个 \`export const persona: PersonaDef\` 文件即可。`,
+      )
+    } else {
+      log.info(`[gebai] 拟人模式已启用，${found.personas.size} 个人格：${[...found.personas.keys()].join("、")}`)
+    }
+    for (const [id, err] of found.errors) log.warn(`[gebai] 人格 ${id} 加载失败 [${err.domain}]: ${err.error}`)
+
+    // 动态 driver 持久化：模型自建的分身落盘到 {GEBAI_HOME}/persona/drivers.json
+    const driverStore = new PersonaDriverStore(config.gebaiHome)
+    const driverRegistry = new DriverRegistry({
+      statics: [...found.personas.values()].flatMap((p) => (p.drivers ?? []).map((def) => ({ personaId: p.id, def }))),
+      persistence: driverStore,
+      log: { info: log.info, warn: log.warn },
+    })
+    await driverRegistry.init()
+
+    personaCatalog = new PersonaCatalog({ personas: found.personas, drivers: driverRegistry })
+    personaSessions = new PersonaSessionResolver({ store, log: { info: log.info, warn: log.warn } })
+    // 会话名用「人格显示名·分身 id」：侧栏里一眼能认出来
+    personaSessions.nameOf = (id) => personaCatalog!.get(id)?.name ?? id
+
+    personaRuntime = new PersonaRuntime({
+      lookup: personaCatalog,
+      sessions: personaSessions,
+      runner: new EnginePersonaRunner({
+        engine,
+        autoApprove: config.personaAutoApprove,
+        log: { info: log.info, warn: log.warn },
+      }),
+      log: { info: log.info, warn: log.warn },
+    })
+    personaRuntime.start()
+
+    // 预热会话绑定（重启后第一条事件不必等扫盘）
+    void personaSessions.warm("admin").then((n) => {
+      if (n > 0) log.info(`[gebai] 已恢复 ${n} 个人格会话绑定`)
+    })
+  }
+
+  // 渠道初始化（写/读/收三面一起起）+ 输入面桥接。
+  //
+  // **输入面的落点**：渠道推上来的事件需要一个「归谁、进哪个会话」的裁决者。
+  // 拟人模式未开启时退化为**事件日志消费**——这样「渠道能收」可独立验证，
+  // 且不会静默吞掉事件（没有人格时至少日志里看得到）。
+  channels.attachDispatcher(
+    personaRuntime
+      ? new ChannelInputBridge({ dispatch: personaRuntime, log: { info: log.info, warn: log.warn } })
+      : new LogOnlyDispatcher({ log }),
+  )
+  await channels.init()
+  {
+    const chErrors = channels.loadErrors()
+    if (Object.keys(chErrors).length) {
+      for (const [name, err] of Object.entries(chErrors)) log.warn(`[gebai] 渠道 ${name} 不可用: ${err}`)
+    }
+  }
   // 服务中断留痕（见 core/session/run-marker）：上一进程在任务中途退出时，会话里只有用户消息、
   // 没有任何助手回应——启动时对残留的在途标记补一条可见说明（历史与界面都能看出那次任务被打断）
   const interrupted = await reportInterruptedRuns(config.gebaiHome, (sessionId, owner, content) =>
@@ -432,7 +848,7 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   lsp: new LspService({ overrides: config.lspServers, idleMs: config.lspIdleMs, maxSessions: config.lspMaxSessions }),
 }
   const state = new WsStateService(config.gebaiHome, baseDeps)
-  const deps: AppDeps = { ...baseDeps, state }
+  const deps: AppDeps = { ...baseDeps, state, personaCredentials }
   const app = createApp(deps)
 
   // 开发模式热刷新（bun run dev --reload / GEBAI_DEV_RELOAD=1）：
@@ -448,5 +864,5 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     devReload.start()
   }
 
-  return { config, store, registry, engine, subAgents, auth, events, sandbox, webhooks, tasks, todos, gc, feishuBot, deps, state, app, devReload, devReloadClients }
+  return { config, store, registry, engine, subAgents, channels, auth, events, sandbox, webhooks, tasks, todos, gc, feishuBot, deps, state, app, devReload, devReloadClients }
 }

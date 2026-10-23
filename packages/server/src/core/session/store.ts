@@ -61,6 +61,24 @@ export interface SessionData {
    *  loadHistory 据此在历史最前注入「历史裁剪」提示——模型于是知道更早内容已不在上下文中，
    *  而不是把「历史从中间开始」当作完整历史（截断本身不生成摘要，是上下文保护的最后一道兜底）。 */
   trimmed?: { count: number; at: number }
+  /**
+   * 人格会话绑定（chat.json 持久化）：该会话是谁的哪个分身。
+   *
+   * **为何挂在会话自身而不是外部索引**：
+   * - 会话本身就是唯一真相源——重启、迁移、导入导出都不会丢；删除会话时映射
+   *   随之消失，不会留下指向不存在的会话的“幽灵索引”（外部索引最难维护的就是这点）。
+   * - 与 `loadedSubAgents` / `dynamicTools` / `pinned` 同款“可选字段”做派：旧格式天然兼容。
+   *
+   * 未定义 = 普通会话（不论是历史遗留还是新建）。
+   */
+  persona?: {
+    /** 人格 id（对应 `PersonaDef.id`）。 */
+    personaId: string
+    /** 该人格下的 driver id（一个 driver 一个常驻会话）。 */
+    driverId: string
+    /** 绑定建立时间（ms）：同 (personaId, driverId) 有多个会话时取最早的（见 `SessionResolver`）。 */
+    boundAt: number
+  }
 }
 
 /** 会话公开信息（列表/详情接口统一序列化，REST 与 WS 共用）。

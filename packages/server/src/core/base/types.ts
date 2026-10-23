@@ -34,6 +34,10 @@ export type ToolContext = ContractToolContext & {
  *  结构化服务视图（store/engine 双柄 + 脱管 run），工具层不直接引用引擎内部类型；
  *  子代理上下文缺省不注入（子代理不见引擎服务）。会话 env 为内存态（store.setEnv，零落盘）。 */
   sessions?: SessionControlService
+  /** 对外动作渠道注册表（act/observe 工具用，与子Agent/事件源同款「丢文件即注册」）。
+   *  进程级服务（渠道连接不该每会话一份），引擎与工具层共用同一实例。
+   *  未装配时 act/observe 返回明确的装配说明（不假装成功，也不抛栈）。 */
+  channels?: import("@gebai/channels").ChannelRegistry
   /** 子会话向父会话合入/拉取（subsession_merge 工具；仅异步子会话运行上下文注入）。 */
   subSessionMerge?: (content?: string) => Promise<string>
   /** 后端渲染图表源码为 PNG 字节（show 图表分支 render=backend 时用）。 */

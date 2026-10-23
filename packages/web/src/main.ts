@@ -1,9 +1,11 @@
 import { uuid } from "./uuid"
 import { blockNativeContextMenu } from "./native-menu"
+import { startPersonaAuthBanner, onPersonaCredentialsEvent } from "./persona-banner"
 import type { ContentBlock, SessionInfo, SubAgentInfo, TodoItem } from "@gebai/sdk"
 import "./css/base.css"
 import "./css/chat.css"
 import "./css/composer.css"
+import "./css/persona-banner.css"
 import "./css/overlays.css"
 import "./css/wheel.css"
 import "./css/files-split.css"
@@ -266,6 +268,9 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
       onChoiceRequest({ sessionId: ev.sessionId, prompt: String(ev.payload.prompt ?? ""), options: (Array.isArray(ev.payload.options) ? ev.payload.options : []) as Array<string | Record<string, unknown>>, choiceId: String(ev.payload.choiceId ?? ""), multi: ev.payload.multi === true, plan: ev.payload.plan as { title?: unknown; content?: unknown; path?: unknown } | undefined })
     } else if (ev.type === "event.env.request") {
       onEnvRequest({ sessionId: ev.sessionId, envId: String(ev.payload.envId ?? ""), name: String(ev.payload.name ?? ""), description: String(ev.payload.description ?? ""), secret: ev.payload.secret === true })
+    } else if (ev.type === "event.persona.credentials") {
+      // 拟人凭据变化（授权完成/失败/撤销）：立即刷新顶部横幅，不等轮询
+      onPersonaCredentialsEvent()
     } else if (ev.type === "event.draw.render") {
       onDrawRender({ sessionId: ev.sessionId, renderId: String(ev.payload.renderId ?? ""), code: String(ev.payload.code ?? ""), format: String(ev.payload.format ?? "") })
     } else if (ev.type === "event.capture.request") {
@@ -443,4 +448,8 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
 
 init()
   .catch((err) => setConn(`连接失败: ${(err as Error).message}`, false))
-  .finally(hideSplash)
+  .finally(() => {
+    hideSplash()
+    // 拟人模式授权横幅：未启用时 `/status` 返回 404，本函数什么都不做
+    startPersonaAuthBanner()
+  })

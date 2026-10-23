@@ -1483,16 +1483,41 @@ button.fw-status-item:hover {
   .fw-hover-only { opacity: 0.7; }
 }
 
-/* 变更面板里的改动行比底部工具窗略高：更像"待办清单"，便于点选与暂存 */
+/* 变更面板里的改动行按 VSCode 的改动列表密度：**一行 22px**（原先 26px，同样高度一屏多看 5~6 行）。
+   行自身左右内缩 4px 带圆角：hover 底色是一块「卡片」而不是一条通栏色带（VSCode 同手法）。 */
 .fw-changes-panel .fw-change-row {
-  height: 26px;
+  height: 22px;
+  margin: 0 4px;
+  border-radius: 5px;
 }
 
 /* 缩进：**只按层级调左内边距**（`--fw-depth` 由 JS 写在行上，树视图才有）——
-   用 padding 而不是 margin/空元素：行背景 hover 时仍铺满整行，缩进部分不会被切出一块空白。 */
-.fw-changes-panel .fw-change-row,
+   用 padding 而不是 margin/空元素：行背景 hover 时仍铺满整行，缩进部分不会被切出一块空白。
+   文件行自带 4px 外边距，所以基值比目录行少 4px（两者在树里的层级增量相同）。 */
+.fw-changes-panel .fw-change-row {
+  padding-left: calc(8px + var(--fw-depth, 0) * 14px);
+}
+
 .fw-change-dirrow {
   padding-left: calc(12px + var(--fw-depth, 0) * 14px);
+}
+
+/* 行内按钮的密度跟随行高（22px 行里放 24px 按钮会把行撑开，左栏每行还白吃 12px 宽度）。
+   只在精确指针下收窄：触屏那档的高度由 `@media (pointer: coarse)` 统一放大到 32px。 */
+@media (pointer: fine) {
+  .fw-changes-panel .fw-change-row .fw-icon-btn,
+  .fw-change-dirrow .fw-icon-btn {
+    width: 20px;
+    height: 20px;
+  }
+
+  /* 指向具体按钮时给一档更实的底色：行 hover 已是 --bg-hover，按钮再用同一个色就分不出
+     「行被指着」与「按钮被指着」（VSCode 同款处理）。 */
+  .fw-changes-panel .fw-change-row .fw-icon-btn:hover,
+  .fw-change-dirrow .fw-icon-btn:hover {
+    background: var(--bg-active);
+    color: var(--text);
+  }
 }
 
 /* 树视图的目录行：箭头 + 目录名 + 改动数。底色比文件行略浅一档（同一面墙的“分组头”语义，
@@ -1838,20 +1863,11 @@ button.fw-status-item:hover {
 .fw-change-mark.R { color: var(--accent); }
 .fw-change-mark.conflict { color: var(--danger); }
 
-/* 路径区（目录 + 文件名）= 这一行里**唯一可收缩**的部分。
-   为什么必须显式写：`.fw-change-path` 是普通 span，它在 flex 行里作为 flex item 的
-   `min-width` 默认是 auto（= 内容宽度），于是整行总宽由「路径全宽 + 按钮」决定——
+/* 路径区 = 这一行里**唯一可收缩**的部分：顺序固定为「文件名 → 目录」，**先收缩的是目录**。
+   为什么必须显式写：这些是普通 span，在 flex 行里作为 flex item 的 `min-width`
+   默认是 auto（= 内容宽度），于是整行总宽由「路径全宽 + 按钮」决定——
    栏一拖窄，多出来的宽度只能溢出：按钮被挤出容器、或被父级裁掉半个（点不到）。
-   现在的分工是：**按钮组 flex:none 永远完整，路径区可缩到 0**，缩的时候先让出目录、
-   再让文件名出省略号（顺序见下面两条）。 */
-.fw-change-path {
-  display: flex;
-  align-items: baseline;
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-}
-
+   现在的分工是：**按钮组 flex:none 永远完整，文件名与目录可缩到 0**。 */
 .fw-change-name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1867,12 +1883,14 @@ button.fw-status-item:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  /* 目录先让位（shrink 权重远大于文件名）：同一行里「叫什么」比「在哪个目录下」重要得多，
-     窄栏下目录整段消失、文件名仍尽量可读；本条与 .fw-change-name 的默认权重（1）配合生效。
+  /* 目录后置且先让位（shrink 权重远大于文件名）：同一行里「叫什么」比「在哪个目录下」重要得多，
+     窄栏下目录整段消失、文件名仍完整；本条与 .fw-change-name 的默认权重（1）配合生效。
      权重取 1000 而不是“比 1 大一点”：收缩量按「权重 × 基准宽度」分配，目录的基准宽度本就小
      （11px 字），权重不够大时会留下几像素的目录省略号碎片——那点宽度还给文件名更值。 */
   flex: 0 1000 auto;
   min-width: 0;
+  /* 目录与文件名不是一个颜色层次，略矮半档更不抢眼 */
+  line-height: 1.4;
 }
 
 .fw-change-orig {
@@ -1885,13 +1903,24 @@ button.fw-status-item:hover {
   align-items: center;
   gap: 2px;
   opacity: 0;
-  /* 按钮组是**不可压缩的整体**：栏拖窄时被牺牲的是文件名，不是按钮（配合 .fw-change-path 的收缩）。
-     按钮自身 `.fw-icon-btn` 已是 flex:none（24px 定宽），这里再钉一层是防它被当成普通子项压缩。 */
+  /* 按钮组是**不可压缩的整体**：栏拖窄时被牺牲的是目录与文件名，不是按钮。
+     按钮自身 `.fw-icon-btn` 已是 flex:none，这里再钉一层是防它被当成普通子项压缩。 */
   flex: none;
 }
 
-.fw-change-row:hover .fw-change-actions {
-  opacity: 1;
+/* 改动行里常态不占宽度（VSCode 同手法）：`opacity` 只藏了像素，按钮仍占 60~70px 的行宽，
+   而左栏只有 286px——路径就被一排永远不想看的按钮持续挤压。改成 `width:0 + overflow:hidden`，
+   悬停/聚焦时才把宽度让回来（此时文件名才出省略号，且是本行被指着的时候，可接受）。
+   目录行不适用：它的动作按钮本就少（≤ 2 个），且树视图的路径已由目录行分开。 */
+.fw-changes-panel .fw-change-row .fw-change-actions {
+  width: 0;
+  overflow: hidden;
+  transition: opacity 0.12s;
+}
+
+.fw-changes-panel .fw-change-row:hover .fw-change-actions,
+.fw-changes-panel .fw-change-row:focus-within .fw-change-actions {
+  width: auto;
 }
 
 /* 行内按钮在聚焦（键盘 Tab 到行内）时也要显形，否则按 Tab 只能聚焦到看不见的按钮。
@@ -1904,7 +1933,10 @@ button.fw-status-item:hover {
 }
 
 @media (hover: none) {
-  /* 触屏没有 hover：常显（否则按钮永远点不到） */
+  /* 触屏没有 hover：常显且占用宽度（否则按钮永远点不到） */
+  .fw-changes-panel .fw-change-row .fw-change-actions {
+    width: auto;
+  }
   .fw-change-actions { opacity: 0.85; }
 }
 
@@ -1976,7 +2008,8 @@ button.fw-status-item:hover {
   margin-left: auto;
 }
 
-/* 改动面板头部：与资源管理器头部、编辑器标签栏同行高（34px） */
+/* 改动面板头部：与资源管理器头部、编辑器标签栏同行高（34px）。
+   左侧是标题（名称 + 待提交改动数），右侧两个图标按钮靠右缘。 */
 .fw-changes-head {
   display: flex;
   align-items: center;
@@ -1986,8 +2019,41 @@ button.fw-status-item:hover {
   flex: none;
 }
 
-/* 改动的规模由分组头的计数表达（N 个已暂存 / N 个未暂存），头部不放任何计数或范围开关——
-   只留视图切换与刷新，靠右对齐（左侧 .fw-grow 占位） */
+/* 面板标题：字号/字重与底部工具窗的栏标题（.fw-git-col-title）同一套语言，
+   但**不做 uppercase**——中文标题上大写变换无意义，只让字距变得奇怪。 */
+.fw-changes-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* 计数胶囊：**标题的改动数与分组头的分组数共用这一条**（两处是同一个东西的两个粒度，
+   样式一旦各写一份就会漂移）。柔和底色 + 强调色，与 rail 徽标同色系——它是本面板里
+   需要一眼看到的数字，但不该像报错那样抢眼。
+   `min-width` 保证“1”也是圆形胶囊，不会缩成一窄条。 */
+.fw-changes-count,
+.fw-change-group-count {
+  flex: none;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 16px;
+  text-align: center;
+}
+
+/* 工作区干净时标题后的计数整个隐去（`hidden` 属性）：显示一个「0」只会让人以为有东西没看 */
 
 /* 日志 */
 .fw-log-row {

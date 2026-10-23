@@ -149,6 +149,76 @@ describe("PersonaScheduler：会话级串行", () => {
     await h.finishFirst()
     expect(h.starts).toEqual(["blocker", "a1", "b1", "c1"])
   })
+
+  /**
+   * FIFO 的排序键必须是**入队序号**，不能是事件时间（`receivedAt`）。
+   *
+   * 这条用例存在的理由：单靠「依次入队三个会话」区分不了两种实现——那时入队顺序与
+   * 事件时间天然同向（都单调递增），换成时间戳排序照样通过。必须让两者**相反**：
+   *
+   * > 一条**迟到重投的旧事件**（`receivedAt` 很早）晚于新事件入队，
+   * > 它绝不能因为「事件时间早」而插队。
+   *
+   * 真实形态：飞书 ACK 前断连把旧消息重推回来、webhook 按自身策略重试、
+   * 调度器重启重新触发同一时刻的任务。若按事件时间排序，新消息会被旧消息无限散死。
+   */
+  test("FIFO：迟到重投的旧事件不插队（排序键是入队序号，不是事件时间）", async () => {
+    const h = makeHarness(1)
+    // 屏障占满唯一额度
+    h.scheduler.enqueue({ event: ev("blocker"), sessionId: "sx", user: "u", threadKey: "tx" })
+    await h.settle()
+    expect(h.starts).toEqual(["blocker"])
+
+    const now = Date.now()
+    // 新事件先入队（刚发生）
+    h.scheduler.enqueue({ event: ev("fresh", now), sessionId: "sA", user: "u", threadKey: "ta" })
+    // 旧事件后入队，但它的 receivedAt 很早（= 迟到重推）
+    h.scheduler.enqueue({ event: ev("stale-redelivery", now - 60_000), sessionId: "sB", user: "u", threadKey: "tb" })
+    await h.settle()
+    expect(h.scheduler.state().queued).toBe(2)
+
+    await h.finishFirst()
+    // 先入队的 fresh 先跑——而不是因为 stale 的事件时间更早而插队
+    expect(h.starts).toEqual(["blocker", "fresh"])
+    await h.finishFirst()
+    expect(h.starts).toEqual(["blocker", "fresh", "stale-redelivery"])
+  })
+
+  /**
+   * 排序键也不能是**入队时刻的毫秒值**（`enqueuedAt`）——系统时钟会被回拨。
+   *
+   * 真实触发面：NTP 校时、虚拟机/容器迁移、手动改系统时间。时钟回拨后，
+   * 后入队的事件 `enqueuedAt` 反而更小 → 它会插到先入队者前面，先到的会话被无限散死。
+   *
+   * 这就是为什么要用**单调递增序号**而不是任何时间戳：序号不受系统时钟影响。
+   * （实测：这个变异体在时钟正常时与 seq 行为等价，只有回拨场景能暴露。）
+   */
+  test("FIFO：系统时钟回拨后仍按入队序（序号不受时钟影响）", async () => {
+    const h = makeHarness(1)
+    const origNow = Date.now
+    try {
+      h.scheduler.enqueue({ event: ev("blocker"), sessionId: "sx", user: "u", threadKey: "tx" })
+      await h.settle()
+
+      let clock = 1_000_000
+      Date.now = () => clock
+      // 先入队 first
+      h.scheduler.enqueue({ event: ev("first", clock), sessionId: "sA", user: "u", threadKey: "ta" })
+      // ★ 时钟回拨 1 小时，再入队 second
+      clock = 1_000_000 - 3_600_000
+      h.scheduler.enqueue({ event: ev("second", clock), sessionId: "sB", user: "u", threadKey: "tb" })
+      await h.settle()
+      expect(h.scheduler.state().queued).toBe(2)
+
+      await h.finishFirst()
+      // first 先入队 → first 先跑；若按 enqueuedAt 排序，second 会因时钟回拨而插队
+      expect(h.starts).toEqual(["blocker", "first"])
+      await h.finishFirst()
+      expect(h.starts).toEqual(["blocker", "first", "second"])
+    } finally {
+      Date.now = origNow
+    }
+  })
 })
 
 describe("PersonaScheduler：人格级并发额度", () => {

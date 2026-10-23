@@ -22,6 +22,24 @@ auto hash01(std::uint32_t a, std::uint32_t b) -> float {
   return static_cast<float>(h & 0x00FFFFFFu) / 16777216.0f;
 }
 
+auto backdrop_is_light(st::math::Color top, st::math::Color bottom) -> bool {
+  // 阈值 0.72（而不是 WCAG 的 0.5）：小片深色背景里带一点亮色的情况很常见
+  // （如 #0B1220 → #2A3550）。取 0.5 会把那类深底误判为浅色，于是
+  // 它们该有的铺光与暗角被默默关掉————而且是看不出来原因的那种。
+  constexpr float kLightThreshold = 0.72f;
+  // 用**感知亮度**（0.299/0.587/0.114，与图像处理惯例一致），
+  // 不用 `st::math::relative_luminance`：后者是 WCAG 的**线性化**亮度，
+  // 它给 #C8C0B0 算出 0.53——而人眼看上去那是明显的浅米色。
+  // 两者口径不同，混用会让阈值失去意义（实测：拿 WCAG 值配 0.72
+  // 会把中浅米色误判成深色，暗角又回来了）。
+  const auto luma = [](const st::math::Color& color) -> float {
+    return (0.299f * static_cast<float>(color.r) + 0.587f * static_cast<float>(color.g) +
+            0.114f * static_cast<float>(color.b)) /
+           255.0f;
+  };
+  return std::max(luma(top), luma(bottom)) >= kLightThreshold;
+}
+
 auto depth_of_field(const st::raster::Canvas& source, float strength) -> st::raster::Canvas {
   const int width = source.physical_width();
   const int height = source.physical_height();
@@ -250,6 +268,15 @@ void paint_light_sweep(st::raster::Canvas& target, float progress, float width_r
   }
 }
 
+// 相机进度（声明与理由见 `fx.hpp`）——它是“钻到位就静止”的全部实现。
+auto camera_progress(float time, float duration, float window_start, float window_end) -> float {
+  if (window_end <= window_start) {
+    return std::clamp(time / std::max(0.2f, duration), 0.0f, 1.0f);
+  }
+  const float span = window_end - window_start;
+  return std::clamp((time - window_start) / std::max(0.05f, span), 0.0f, 1.0f);
+}
+
 auto apply_camera(const st::raster::Canvas& source, const CameraMove& move, float progress,
                   double time, float device_scale) -> st::raster::Canvas {
   const int width = source.physical_width();
@@ -259,9 +286,33 @@ auto apply_camera(const st::raster::Canvas& source, const CameraMove& move, floa
   const float t = std::clamp(progress, 0.0f, 1.0f);
   (void)device_scale;
 
-  // 缩放/平移/旋转按**整段进度**线性推进；只有震动按时间衰减。
-  // 用缓动会让"镜头运动"变成"动画"——镜头是匀速的（这是摄影与动画的区别）。
-  const float zoom = move.zoom_from + (move.zoom_to - move.zoom_from) * t;
+  // 缩放/平移/旋转按**整段进度**推进。
+  //
+  // ## 为何缩放曲线可选（`zoom_curve`）
+  //
+  // 线性缩放做不出“钻穿尺度”（参考片 clearing：1× → 300×）：
+  // 线性的前 2/3 时间都在 1~100 之间平推，观感是“缓缓放大”；
+  // 而后 1/3 才猛地冲入——但那时已经看完了。
+  //
+  // 指数曲线（`expo_in`）则把绝大部分**视觉变化**挤在末尾，
+  // 中段一直是“还很大”，最后一口气吸进去。这是“从这一格里钻出去”的根源。
+  //
+  // `scale` 模式：`zoom_from * (zoom_to/zoom_from)^t`（等比，1→300 与 300→1 对称）
+  // `linear` 模式：旧行为，逐字不变。
+  float t_zoom = t;
+  if (move.zoom_curve == ZoomCurve::ExpoIn) {
+    // expo_in：2^(10(t-1))，t=0 → 0.00098、t=1 → 1。
+    // 做归一化（减去起点再除）才能保证 t=0 时恰好是 0、t=1 恰好是 1——
+    // 不归一化的话起点有个 0.001 的偏差，301 倍时就是 0.3 的画面偏位。
+    constexpr float kBase = 1024.0f;   // 2^10
+    const float raw = std::pow(kBase, t - 1.0f) - 1.0f / kBase;
+    t_zoom = raw / (1.0f - 1.0f / kBase);
+  } else if (move.zoom_curve == ZoomCurve::ExpoOut) {
+    t_zoom = 1.0f - std::pow(1024.0f, -t);
+  }
+  t_zoom = std::clamp(t_zoom, 0.0f, 1.0f);
+  const float zoom =
+      move.zoom_from + (move.zoom_to - move.zoom_from) * t_zoom;
   const float pan_x = move.pan_x * t * static_cast<float>(width);
   const float pan_y = move.pan_y * t * static_cast<float>(height);
   const float rotate = move.rotate_deg * t * 3.14159265f / 180.0f;
@@ -281,8 +332,27 @@ auto apply_camera(const st::raster::Canvas& source, const CameraMove& move, floa
     }
   }
 
-  const float cx = static_cast<float>(width) * 0.5f + pan_x + shake_x;
-  const float cy = static_cast<float>(height) * 0.5f + pan_y + shake_y;
+  // ## 销点：缩放围绕哪里
+  //
+  // 默认绕画面中心（旧行为）。给了销点就绕销点——这是“从这一格里钻出去”
+  // 与“整幅等比放大”的全部区别：参考片 clearing 的前 2/3 秒里，
+  // 那个日期格子**在屏幕上纹丝不动**，变大的只有它周围的一切。
+  //
+  // ## 为何销点用归一化坐标（0~1）而不是像素
+  //
+  // 像素坐标会把相机绑在“设计尺寸”上，而同一份脚本要能出 1080p/4K/竖版。
+  // 归一化坐标在每种画幅下指向“同一个相对位置”。
+  //
+  // ## 为何不把销点写进 `pan`
+  //
+  // pan 是“整段平移总量”，它随 `t` 线性增长；而销点是**恒定约束**
+  // （用另一个变量），两者语义不同。混在一起会在 300× 时把销点推出画面。
+  const float anchor_x = move.anchor_x >= 0.0f ? move.anchor_x * static_cast<float>(width)
+                                                : static_cast<float>(width) * 0.5f;
+  const float anchor_y = move.anchor_y >= 0.0f ? move.anchor_y * static_cast<float>(height)
+                                                : static_cast<float>(height) * 0.5f;
+  const float cx = anchor_x + pan_x + shake_x;
+  const float cy = anchor_y + pan_y + shake_y;
 
   // ⚠ 为什么"逐像素逆映射"而不是"画一个旋转四边形再填充"：
   //
@@ -300,13 +370,44 @@ auto apply_camera(const st::raster::Canvas& source, const CameraMove& move, floa
   const float src_w = static_cast<float>(source.physical_width());
   const float src_h = static_cast<float>(source.physical_height());
 
+  // 源侧的销点（与输出侧的 `anchor_x/anchor_y` 是**同一个点**，只是坐标空间不同）。
+  //
+  // ## 为何不能只用输出侧销点
+  //
+  // 逆映射是“输出像素 → 源像素”。旧写法把源原点硬编码在 `src_w*0.5`（画面中心），
+  // 于是“输出绕销点、源绕中心”——两者不是同一个点，缩放时销点会**漂移**。
+  // 300× 时每像素误差被放大 300 倍，直接飞出去。
+  //
+  // 实测现象：销点设 40%/37%，1× 时对，10× 时偏 300px，30× 时整幅空白（
+  // 因为销点早飞出采样范围）。而所有断言都不报错——它只是“画得不对”。
+  //
+  // ## −0.5：连续坐标 → 像素索引坐标（**只对销点路径**）
+  //
+  // `u*W` 是**连续坐标**（画面左边缘 = 0），而采样用的 `sx` 是**像素索引**
+  // （`sx = 72.0` 指像素 72 的中心）。两者差半像素。
+  //
+  // 不扣这 0.5 的后果：销点在 1× 时偏半像素（看不出），
+  // 到 30× 时放大成 **15px**（实测：这正是一条断言变红的原因）。
+  //
+  // ⚠ **旧路径（不填销点）仍然保留 `-0.5f`**（在 `sx/sy` 的那两行里）。
+  // 那条路径已逐像素锁定（`fx_camera_static_is_identity`），
+  // 改它会让静态相机不再恒等——实测直接变红。
+  // 所以两个分支的补偿位置不同，但结果都对齐像素中心。
+  const bool has_anchor = move.anchor_x >= 0.0f || move.anchor_y >= 0.0f;
+  const float src_anchor_x =
+      move.anchor_x >= 0.0f ? move.anchor_x * src_w - 0.5f : src_w * 0.5f;
+  const float src_anchor_y =
+      move.anchor_y >= 0.0f ? move.anchor_y * src_h - 0.5f : src_h * 0.5f;
+  // 旧路径需要在采样行里再减 0.5，销点路径已经在上面扣过了。
+  const float centre_bias = has_anchor ? 0.0f : -0.5f;
+
   for (int y = 0; y < height; ++y) {
     const float dy = static_cast<float>(y) + 0.5f - cy;
     for (int x = 0; x < width; ++x) {
       const float dx = static_cast<float>(x) + 0.5f - cx;
-      // 逆旋转 + 逆缩放 → 源坐标（以画面中心为原点）
-      const float sx = (dx * cos_r + dy * sin_r) * inv_zoom + src_w * 0.5f - 0.5f;
-      const float sy = (-dx * sin_r + dy * cos_r) * inv_zoom + src_h * 0.5f - 0.5f;
+      // 逆旋转 + 逆缩放 → 源坐标（绕**同一个销点**）
+      const float sx = (dx * cos_r + dy * sin_r) * inv_zoom + src_anchor_x + centre_bias;
+      const float sy = (-dx * sin_r + dy * cos_r) * inv_zoom + src_anchor_y + centre_bias;
       if (sx < -0.5f || sy < -0.5f || sx >= src_w || sy >= src_h) continue;   // 画面外留空
 
       // 双线性采样（4 邻域加权）。

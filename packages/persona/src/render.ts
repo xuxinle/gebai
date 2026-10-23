@@ -81,8 +81,10 @@ export function renderBatch(events: PersonaEvent[], opts: RenderOptions = {}): s
 export function replyHint(e: PersonaEvent): string | null {
   const refs = e.context.refs
   if (!refs?.chatId) return null
-  const target = refs.messageId ? `chat_id="${refs.chatId}", reply_to="${refs.messageId}"` : `chat_id="${refs.chatId}"`
-  return `要回复这一件：send_message(${target}, text="...")`
+  const target = refs.messageId
+    ? `to="${e.channel}:${refs.chatId}", verb="reply", args={text:"…", reply_to:"${refs.messageId}"}`
+    : `to="${e.channel}:${refs.chatId}", verb="send", args={text:"…"}`
+  return `要回复这一件：act(${target})`
 }
 
 /** 一句话摘要（状态展示用）。 */

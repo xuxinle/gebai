@@ -71,6 +71,14 @@ export class PersonaRuntime {
   private readonly counters = new Map<string, { accepted: number; deduped: number; overflowed: number; failed: number }>()
   /** driverKey → 会话解析结果（Promise 缓存：并发也只解析一次）。 */
   private readonly sessionCache = new Map<string, Promise<{ sessionId: string | null; error?: string }>>()
+  /**
+   * driverKey → 已解析到的 sessionId。
+   *
+   * 为何要单独存：调度器的表按 **sessionId** 建（`Map<sessionId, AbortController>`），
+   * 而对外接口按 `(personaId, driverId)` 说话。少了这张映射，取消接口就无从把
+   * driver 翻译成会话，只能永远查不到（形同死代码）。
+   */
+  private readonly driverSessions = new Map<string, string>()
   private readonly log?: PersonaLogger
   private readonly now: () => number
   private readonly fanoutConcurrency: number
@@ -118,16 +126,19 @@ export class PersonaRuntime {
     if (!this.started) return { status: "unavailable", reason: "人格运行时未启动" }
 
     // 聚到 driver 维度（同一事件可以同时命中同角色的多个 driver）
-    const perDriver = new Map<string, { target: Target; events: PersonaEvent[] }>()
+    // 记录每个 (event, driver) 的幂等键：入队失败时要逐条撤回（见下方 deliverTo 同一条纪律）。
+    const perDriver = new Map<string, { target: Target; events: PersonaEvent[]; dedupeIds: string[] }>()
     for (const event of events) {
       for (const t of this.resolveTargets(event)) {
         const key = driverKey(t.personaId, t.driver.id)
-        if (!this.dedupe.admit(`${event.id}\u0000${key}`)) {
+        const dedupeId = `${event.id}\u0000${key}`
+        if (!this.dedupe.admit(dedupeId)) {
           this.bump(key, "deduped")
           continue
         }
-        const entry = perDriver.get(key) ?? { target: t, events: [] }
+        const entry = perDriver.get(key) ?? { target: t, events: [], dedupeIds: [] }
         entry.events.push({ ...event, personaId: t.personaId })
+        entry.dedupeIds.push(dedupeId)
         perDriver.set(key, entry)
       }
     }
@@ -136,6 +147,8 @@ export class PersonaRuntime {
     const deliveries: PersonaDelivery[] = []
     for (const [key, entry] of perDriver) {
       const d = await this.enqueueRound(key, entry.target, entry.events)
+      // 整批同轮入队：一个没接管就全批撤回（否则下次重投只回来一半事件，上下文不完整）
+      if (d.status !== "accepted") for (const id of entry.dedupeIds) this.dedupe.revoke(id)
       deliveries.push(d)
     }
     return this.summarize(events[0], deliveries)
@@ -176,12 +189,30 @@ export class PersonaRuntime {
     return out
   }
 
+  /**
+   * 取消某 driver 下**正在跑**的那一轮。
+   *
+   * 返回是否确有在跑。语义：长任务卡住（等审批/等接口/死循环）时的唯一出口——
+   * 与 `cancelWaiting`（只清排队）、`stop()`（整角色停）都不同。
+   */
   cancelRunning(personaId: string, driverId: string): boolean {
-    return this.schedulers.get(driverKey(personaId, driverId))?.cancelRunning(driverKey(personaId, driverId)) ?? false
+    const key = driverKey(personaId, driverId)
+    const scheduler = this.schedulers.get(key)
+    if (!scheduler) return false
+    // 调度器的表按 sessionId 建：必须把 driver 先翻译成它的常驻会话。
+    const sessionId = this.driverSessions.get(key)
+    if (!sessionId) return false
+    return scheduler.cancelRunning(sessionId)
   }
 
+  /** 取消某 driver 下**待跑**的事件（不影响正在跑的那一轮）。 */
   cancelWaiting(personaId: string, driverId: string): number {
-    return this.schedulers.get(driverKey(personaId, driverId))?.cancelWaiting(driverKey(personaId, driverId)) ?? 0
+    const key = driverKey(personaId, driverId)
+    const scheduler = this.schedulers.get(key)
+    if (!scheduler) return 0
+    const sessionId = this.driverSessions.get(key)
+    if (!sessionId) return 0
+    return scheduler.cancelWaiting(sessionId)
   }
 
   /** 角色/驱动配置热加载后同步额度。 */
@@ -206,6 +237,7 @@ export class PersonaRuntime {
       this.schedulers.delete(key)
       this.counters.delete(key)
       this.sessionCache.delete(key)
+      this.driverSessions.delete(key)
       return
     }
     // 上线：确保调度器存在（schedulerFor 惰性创建即可，这里显式触发一次）
@@ -243,14 +275,25 @@ export class PersonaRuntime {
     return out
   }
 
-  /** 投递给单个 driver。 */
+  /**
+   * 投递给单个 driver。
+   *
+   * **记账时机**：先 admit（幂等）再入队，但入队没成功时必须 `revoke` 撤回。
+   * 若只 admit 不撤回，一次瞬时故障（存储不可达、队列已满）就把该 id 永久占位，
+   * 源按规范重投同一事件会被判 duplicate 静默丢弃——违反「FIFO 且不丢」。
+   */
   private async deliverTo(event: PersonaEvent, t: Target): Promise<PersonaDelivery> {
     const key = driverKey(t.personaId, t.driver.id)
-    if (!this.dedupe.admit(`${event.id}\u0000${key}`)) {
+    const dedupeId = `${event.id}\u0000${key}`
+    if (!this.dedupe.admit(dedupeId)) {
       this.bump(key, "deduped")
       return { personaId: t.personaId, driverId: t.driver.id, status: "duplicate", reason: `driver ${key} 已处理过事件 ${event.id}` }
     }
-    return this.enqueueRound(key, t, [{ ...event, personaId: t.personaId }])
+    const delivery = await this.enqueueRound(key, t, [{ ...event, personaId: t.personaId }])
+    // 只有「确实已接管」才算处理过；其余（队列满 / 会话解析失败 / driver 已停）一律撤回，
+    // 让源的重投能真正被接住。
+    if (delivery.status !== "accepted") this.dedupe.revoke(dedupeId)
+    return delivery
   }
 
   /** 把一批事件投进某个 driver（同一轮）。 */
@@ -299,6 +342,8 @@ export class PersonaRuntime {
     const p = (async () => {
       try {
         const r = await this.opts.sessions.resolveDriver({ personaId, driverId, user, event })
+        // 记下 driverKey → sessionId：取消接口靠它把 driver 翻译成调度器认的会话
+        this.driverSessions.set(key, r.sessionId)
         return { sessionId: r.sessionId }
       } catch (err) {
         const error = String((err as Error)?.message || err)

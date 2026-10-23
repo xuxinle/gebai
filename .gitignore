@@ -21,6 +21,11 @@
 # ③ verify_guard 的并发锁（陈旧时按 pid 存活 + boot_id 自清，但自清只在下次拿锁时触发，所以会长期留在盘上）
 .reverse_verify.lock
 
+# 相期（Xiāngqī）的运行期数据目录：inbox/outbox/seen.txt 是卡片投递与答复的**本地状态**，
+# 不是项目文件。缺省落在 {GEBAI_HOME}/相期，未设时回退 <cwd>/相期（测试、临时实例、
+# 直接跑二进制都会在 cwd 下长出来）——故用无路径前缀的裸模式。
+相期/
+
 # deps
 node_modules/
 
@@ -178,6 +183,17 @@ go.zip
 # 生成媒体目录里的成品：用「排除全部 + 显式放行必需项」而不是排除整个目录——
 # 目录级排除会让下面的 ! 放行全部失效（git 无法对“父目录已排除”的内容重新包含），实测踩到。
 shuangtian/examples/*/assets/media/*.png
+# 示例资产里的**生成物**：仓库只沉淀能力，不沉淀产物。
+#
+# 判据不是大小而是来源：手写的小示例（图层数个位数~几十）入库；
+# 由脚本批量生成的大 JSON（上千图层、上万顶点坐标）不入库——
+# 它们随时可重造，入库只会让 diff/克隆变重。
+# 实测：4 个这样的文件合计 1.2 MB，夹在能力提交里很难被注意到。
+#
+# 用「按文件名忽略」而不是排除目录：目录级排除会让其它 ! 放行失效（同上面的坑）。
+shuangtian/examples/caiyun/assets/loss-descent.json
+shuangtian/examples/caiyun/assets/scale-carry.json
+shuangtian/examples/caiyun/assets/cam-compare-*.json
 shuangtian/examples/*/assets/vo/*.wav
 
 # 放行：应用与示例运行所必需的图标（删了 manifest 或示例脚本会失效）

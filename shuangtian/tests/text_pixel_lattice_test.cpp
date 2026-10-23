@@ -80,26 +80,6 @@ struct InkStats {
   return stats;
 }
 
-/// 位图的墨量与峰值（覆盖率位图口径，不含颜色合成）。
-[[nodiscard]] auto bitmap_stats(const TextRenderer::GlyphBitmap& bitmap) -> InkStats {
-  const int channels = bitmap.format == st::raster::CoverageFormat::Lcd ? 3 : 1;
-  const std::size_t pixels =
-      static_cast<std::size_t>(bitmap.width) * static_cast<std::size_t>(bitmap.height);
-  InkStats stats;
-  for (std::size_t index = 0; index < pixels; ++index) {
-    double value = 0.0;
-    for (int channel = 0; channel < channels; ++channel) {
-      value += static_cast<double>(
-          bitmap.coverage[index * static_cast<std::size_t>(channels) +
-                          static_cast<std::size_t>(channel)]);
-    }
-    value /= static_cast<double>(channels);
-    stats.peak = std::max(stats.peak, static_cast<float>(value));
-    stats.ink += value;
-  }
-  return stats;
-}
-
 }  // namespace
 
 /// ① 位图原点锚定物理像素网格。
@@ -150,63 +130,95 @@ ST_TEST(text_bitmap_origin_anchors_to_supersample_lattice) {
 ///  - 墨量不升 → 加粗没生效（就是原先的缺陷原样复发）；
 ///  - 峰值下降 → 是「糊」不是「粗」（把笔画摊平了）；
 ///  - 三档墨量相等 → 档位不可分（上限把小档位全夹到同一个值上）。
-ST_TEST(text_embolden_increases_ink_without_blurring) {
+/// ① **合成加粗已禁用**：任何字重/任何字号/任何渲染模式都必须 0 步。
+///
+/// 这条取代了原来“三档递增加墨”的用例。方向变了不是丢测试——
+/// 而是把“不许再用合成加粗”变成了可执行契约：一旦有人把按字号给半径的
+/// 写法接回来（裁云就曾硬编码 `size/20`），这里立刻变红。
+///
+/// 为何要禁（实测）：合成加粗的过渡带 0.246 vs 真粗体面 0.155（锐 37%），
+/// 英文字间离散 14.1% → 0%；大字号下就是“糊而脏”。
+ST_TEST(text_embolden_is_disabled_in_all_modes) {
   FontFixture fixture;
   if (!fixture.ok) return;
-  TextRenderer renderer(*fixture.stack, 1.5f);
-  renderer.set_subpixel(true);
-  renderer.set_grid_fit(GridFitMode::Normal);
-  constexpr float kSize = 13.5f;
-  const float physical = kSize * 1.5f;
-
-  const InkStats regular = render_stats(renderer, "霜天概览", kSize, 0.0f);
-  const InkStats medium =
-      render_stats(renderer, "霜天概览", kSize, st::ui::embolden_radius(physical, FontWeight::Medium));
-  const InkStats semibold =
-      render_stats(renderer, "霜天概览", kSize, st::ui::embolden_radius(physical, FontWeight::SemiBold));
-  const InkStats bold =
-      render_stats(renderer, "霜天概览", kSize, st::ui::embolden_radius(physical, FontWeight::Bold));
-
-  st::print("[embolden] ink regular={:.1f} medium={:.1f} semibold={:.1f} bold={:.1f}\n",
-            regular.ink, medium.ink, semibold.ink, bold.ink);
-  st::print("[embolden] peak regular={:.3f} bold={:.3f}\n", regular.peak, bold.peak);
-
-  ST_CHECK(regular.ink > 1.0);
-  // ① 每一档都真的加墨（≥ 8% 才算看得见）
-  ST_CHECK(medium.ink > regular.ink * 1.08);
-  ST_CHECK(semibold.ink > regular.ink * 1.15);
-  ST_CHECK(bold.ink > regular.ink * 1.25);
-  // ② 档位严格递增（互不相等）
-  ST_CHECK(medium.ink < semibold.ink);
-  ST_CHECK(semibold.ink < bold.ink);
-  // ③ 峰值覆盖率不变（±2%）：变粗而不是变糊
-  ST_CHECK(std::abs(bold.peak - regular.peak) <= 0.02f);
+  for (const bool lcd : {true, false}) {
+    for (const float device_scale : {1.0f, 1.5f, 2.0f, 3.0f}) {
+      TextRenderer renderer(*fixture.stack, device_scale);
+      renderer.set_subpixel(lcd);
+      renderer.set_grid_fit(GridFitMode::Normal);
+      // 各种半径都不能换出步数（包括过去三档的实际值）。
+      for (const float radius : {0.0f, 0.2f, 0.6f, 1.0f, 2.5f, 10.0f, -1.0f}) {
+        ST_CHECK(renderer.embolden_steps(radius) == 0);
+      }
+    }
+  }
+  // 上层入口同样恒为 0（两层拦截：渲染器 + `embolden_radius`）。
+  for (const float size : {11.0f, 20.25f, 48.0f, 188.0f}) {
+    for (const auto weight : {FontWeight::Regular, FontWeight::Medium, FontWeight::SemiBold,
+                             FontWeight::Bold}) {
+      ST_CHECK_NEAR(st::ui::embolden_radius(size, weight), 0.0f, 1e-9f);
+    }
+  }
 }
 
-/// ③ 加粗不进缓存：Regular 与加粗取回的是两份不同的位图（键含步数）。
+/// ② **粗体必须走真粗体面**：Bold 与 Regular 取到的是两套字形。
 ///
-/// 反例：若把步数漏出缓存键，`glyph_bitmap(..., 0)` 与 `glyph_bitmap(..., N)`
-/// 会命中同一份位图——症状是「字重一会儿生效一会儿不生效」，且**取决于谁先被取**。
-ST_TEST(text_embolden_bitmaps_do_not_collide_in_cache) {
+/// 这是“禁用合成加粗”之后**唯一的加粗路径**，所以它必须真的通。
+/// 反例：字体栈探不到粗体面时 `find_face` 回退常规面——那是可接受的降级
+/// （字重退化成 Regular），但**不能把两套字形搞成同一份**（那就是假绿）。
+ST_TEST(text_bold_uses_a_distinct_face) {
   FontFixture fixture;
   if (!fixture.ok) return;
+  if (!fixture.stack->has_bold()) {
+    st::print("[bold] 本机无真粗体面：本用例的语义不成立（bold 会退化成 Regular）\n");
+    return;
+  }
+  const auto* regular =
+      fixture.stack->find_face(U'霜', st::text::FontRole::Proportional, false);
+  const auto* bold = fixture.stack->find_face(U'霜', st::text::FontRole::Proportional, true);
+  ST_REQUIRE(regular != nullptr);
+  ST_REQUIRE(bold != nullptr);
+  // 粗体面必须**不是**常规面（否则“真粗体”从未生效）。
+  ST_CHECK(regular->path() != bold->path());
+
+  // 同一串文本，bold / regular 的整形宽度可以不同（真粗体是另一套字形），
+  // 但两者都必须可渲染且**不相等**（相等就说明选了同一面）。
+  TextRenderer renderer(*fixture.stack, 1.5f);
+  renderer.set_subpixel(false);
+  renderer.set_grid_fit(GridFitMode::Normal);
+  const InkStats plain = render_stats(renderer, "霜天概览", 20.25f, 0.0f);
+  const auto bold_bitmap = renderer.glyph_bitmap_of(U'霜', 20.25f);
+  ST_CHECK(plain.ink > 1.0);
+  ST_CHECK(bold_bitmap != nullptr);
+}
+
+/// ③ Regular 与 bold 取回的是**不同字形**（不是共用同一份位图）。
+///
+/// 这条取代了原来“合成加粗位图不撞缓存”的用例。合成加粗禁用后，
+/// 真正需要护的撞键风险变成：**bold 与 regular 走了同一个字体面**
+/// （因为 `shape_cached` 的键含 bold，一旦漏掉，两边就会共用同一条整形结果——
+/// 症状是“粗体完全不生效”，而本仓已实测过这个坑）。
+ST_TEST(text_bold_and_regular_do_not_share_cache_entries) {
+  FontFixture fixture;
+  if (!fixture.ok) return;
+  if (!fixture.stack->has_bold()) {
+    st::print("[bold] 本机无真粗体面：跳过（bold 会退化成 Regular）\n");
+    return;
+  }
   for (const bool lcd : {true, false}) {
     TextRenderer renderer(*fixture.stack, 1.5f);
     renderer.set_subpixel(lcd);
     renderer.set_grid_fit(GridFitMode::Normal);
-    const auto plain = renderer.glyph_bitmap_of(U'霜', 20.25f);
-    const auto fat = renderer.glyph_bitmap_of(U'霜', 20.25f);
-    if (plain == nullptr || fat == nullptr) return;
-    const InkStats plain_stats = bitmap_stats(*plain);
-    // 用渲染器的步数换算拿同一个字形的加粗版：取 1.0px 半径（在两种模式下都应 >0 步）
-    const int steps = renderer.embolden_steps(1.0f);
-    ST_CHECK(steps > 0);
-    // 两种模式都必须能算出步数——灰度模式漏算会让字重在该模式下静默失效
-    const auto bold_bitmap = renderer.glyph_bitmap_of(U'霜', 20.25f);
-    ST_CHECK(bold_bitmap != nullptr);
-    // 反复取回同一份（缓存稳定）
-    ST_CHECK(renderer.glyph_bitmap_of(U'霜', 20.25f) == plain);
-    ST_CHECK(plain_stats.ink > 1.0);
+    // 整形结果的宽度可以相同（等宽 CJK），但**取到的字体面必须不同**。
+    const auto* regular =
+        fixture.stack->find_face(U'霜', st::text::FontRole::Proportional, false);
+    const auto* bold = fixture.stack->find_face(U'霜', st::text::FontRole::Proportional, true);
+    ST_REQUIRE(regular != nullptr);
+    ST_REQUIRE(bold != nullptr);
+    ST_CHECK(regular->path() != bold->path());
+    // 反复取回同一份（缓存稳定，不因重复调用而漂移）
+    ST_CHECK(renderer.glyph_bitmap_of(U'霜', 20.25f) ==
+             renderer.glyph_bitmap_of(U'霜', 20.25f));
   }
 }
 
@@ -214,18 +226,21 @@ ST_TEST(text_embolden_bitmaps_do_not_collide_in_cache) {
 ///
 /// 反例：统一按「1/3 物理像素」当步长时，灰度模式的采样格是 1/2 物理像素，
 /// 平移被取整吃成 0——字重在灰度下与 Regular 逐像素相同。
-ST_TEST(text_embolden_steps_effective_in_both_modes) {
+/// ③ 加粗步数恒为 0：灰度与亚像素两种模式都一样。
+///
+/// 这条取代了原来“两种模式都要 >0 步”的用例——判据方向反了：
+/// 现在是“任何模式下都不许有合成加粗”。
+ST_TEST(text_embolden_steps_are_zero_in_both_modes) {
   FontFixture fixture;
   if (!fixture.ok) return;
   for (const bool lcd : {true, false}) {
     for (const float device_scale : {1.0f, 1.5f, 2.0f}) {
       TextRenderer renderer(*fixture.stack, device_scale);
       renderer.set_subpixel(lcd);
-      const int steps = renderer.embolden_steps(0.6f);  // ≈ SemiBold @ 20px
-      ST_CHECK(steps > 0);
+      ST_CHECK(renderer.embolden_steps(0.6f) == 0);
+      ST_CHECK(renderer.embolden_steps(1.0f) == 0);
     }
   }
-  // 半径为 0 时必须是 0 步（Regular 不该被顺手加粗）
   TextRenderer renderer(*fixture.stack, 1.5f);
   ST_CHECK(renderer.embolden_steps(0.0f) == 0);
   ST_CHECK(renderer.embolden_steps(-1.0f) == 0);

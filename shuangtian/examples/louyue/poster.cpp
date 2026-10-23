@@ -101,12 +101,16 @@ void draw_text(const Frame& frame, Canvas& target, const st::ui::TextPort* port,
                      : align == 2 ? anchor_x - total
                                   : anchor_x - total * 0.5f;
   const float top = y_design * frame.scale;
-  // `bold=true` = 该字重已由真粗体字面承担，合成加粗不该再叠（叠了会把字再撑开）；
-  // embolden 半径按字号 1/20 给——与裁云 `Painter::text` 同口径。
-  const float embolden = bold ? 0.0f : size / 20.0f;
+  // 粗体**只走真粗体面**，不做合成加粗（与裁云 `Painter::text` 同一取向）。
+  //
+  // 这里原来写的是 `bold ? 0.0f : size / 20.0f`——逻辑是**反的**：
+  // `bold=true` 的字不加粗，反而给常规字叠了合成加粗。两种错同时存在：
+  // 标题（bold）没变粗，正文（非 bold）却被撑胖、糊了。
+  // 合成加粗的过渡带是 0.246 vs 真粗体面 0.155（见 `prefers_real_bold`），
+  // 海报是静态大字号，这种“脏”会被放大到整张图可见。
   const auto put = [&](std::string_view glyph, float x) {
     port->draw(target, glyph, Point{x, top}, size, color, st::text::FontRole::Proportional,
-               embolden, bold);
+               0.0f, bold);
   };
   if (tracking <= 0.01f) {
     put(text, left);

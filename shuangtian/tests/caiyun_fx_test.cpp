@@ -261,3 +261,54 @@ ST_TEST(fx_camera_shake_decays_to_zero) {
   const auto before = snapshot(source);
   ST_CHECK(diff_pixels(before, snapshot(still)) == 0);
 }
+
+ST_TEST(fx_camera_window_clamps_outside_and_advances_inside) {
+  // 窗口语义：窗口外夹在 0/1，窗口内线性。
+  //
+  // 调的是**真实实现**（caiyun::camera_progress），不在测试里复算公式——
+  // 复算只能证明“我抄的公式对”，实现写错也不红（本仓踩过的“恒绿测试”）。
+  using caiyun::camera_progress;
+  // 窗口 [3, 8]（5 秒）
+  ST_CHECK_NEAR(camera_progress(0.0f, 12.0f, 3.0f, 8.0f), 0.0f, 1e-5f);
+  ST_CHECK_NEAR(camera_progress(2.99f, 12.0f, 3.0f, 8.0f), 0.0f, 1e-5f);
+  ST_CHECK_NEAR(camera_progress(5.5f, 12.0f, 3.0f, 8.0f), 0.5f, 1e-5f);
+  ST_CHECK_NEAR(camera_progress(8.0f, 12.0f, 3.0f, 8.0f), 1.0f, 1e-5f);
+  // 窗口之后必须**稳稳停在 1**：这是"钻到位就静止让观众读"的全部含义。
+  ST_CHECK_NEAR(camera_progress(10.0f, 12.0f, 3.0f, 8.0f), 1.0f, 1e-5f);
+  ST_CHECK_NEAR(camera_progress(12.0f, 12.0f, 3.0f, 8.0f), 1.0f, 1e-5f);
+}
+
+ST_TEST(fx_camera_window_disabled_matches_whole_span) {
+  // 不填窗口（end <= start）时必须退回整段线性——老脚本逐像素不变。
+  using caiyun::camera_progress;
+  for (const float t : {0.0f, 3.0f, 6.0f, 12.0f}) {
+    for (const float end : {0.0f, -1.0f}) {
+      ST_CHECK_NEAR(camera_progress(t, 12.0f, 0.0f, end), t / 12.0f, 1e-5f);
+    }
+  }
+}
+
+ST_TEST(fx_camera_window_zero_span_is_finite) {
+  // start == end 是"未启用"，但若有人写 [5,5] 也不能除零。
+  const float value = caiyun::camera_progress(5.0f, 12.0f, 5.0f, 5.0f);
+  ST_CHECK(std::isfinite(value));
+  ST_CHECK(value >= 0.0f && value <= 1.0f);
+}
+
+ST_TEST(fx_camera_window_keeps_last_frames_identical) {
+  // 端到端判据：窗口 [0,8] + 12s 幕 ⇒ 第 8s 与第 12s 的画面必须**逐像素相同**。
+  // 这是"落定后静止"能被量出来的形态（而不是靠肉眼说"好像停了"）。
+  auto source = make_canvas();
+  CameraMove move{};
+  move.zoom_from = 1.0f;
+  move.zoom_to = 6.0f;
+  move.anchor_x = 0.5f;
+  move.anchor_y = 0.5f;
+  move.zoom_curve = caiyun::ZoomCurve::ExpoIn;
+
+  const float p8 = caiyun::camera_progress(8.0f, 12.0f, 0.0f, 8.0f);
+  const float p12 = caiyun::camera_progress(12.0f, 12.0f, 0.0f, 8.0f);
+  const auto a = caiyun::apply_camera(source, move, p8, 8.0, 1.0f);
+  const auto b = caiyun::apply_camera(source, move, p12, 12.0, 1.0f);
+  ST_CHECK(diff_pixels(snapshot(a), snapshot(b)) == 0);
+}

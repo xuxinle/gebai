@@ -121,6 +121,11 @@ export interface ServerConfig {
   devReload: boolean
   /** 飞书机器人对话桥接（GEBAI_FEISHU_BOT_ENABLED=true 时启用长连接事件订阅）。 */
   feishuBotEnabled: boolean
+  /** 拟人模式（GEBAI_PERSONA=true）：渠道收到的入站事件交给人格分身处理。
+   *  关闭时 persona 运行时**根本不实例化**，事件只记日志——既有行为零影响。 */
+  personaEnabled: boolean
+  /** 人格运行自动通过审批（GEBAI_PERSONA_AUTO_APPROVE，默认 true）：无人值守时没人守审批卡。 */
+  personaAutoApprove: boolean
   /** 飞书机器人行为配置（GEBAI_FEISHU_BOT_*）：工具调用过程推送（滚动状态消息）。 */
   feishuBotNotifyTools: boolean
   /** 助手中间轮文本推送（预览消息；引擎 notifyIntermediate 事件）。 */
@@ -358,6 +363,12 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     devReload: process.argv.includes("--reload") || env("GEBAI_DEV_RELOAD") === "1",
     // 飞书机器人对话桥接（长连接模式）：需同时配置 GEBAI_FEISHU_APP_ID / GEBAI_FEISHU_APP_SECRET
     feishuBotEnabled: bool("GEBAI_FEISHU_BOT_ENABLED", false),
+    // 拟人模式（事件驱动：渠道收到的事件 → 人格分身跑一轮）：**默认关**。
+    // 关闭时 persona 运行时根本不实例化，输入面接到日志消费者——所有既有行为逐字节不变。
+    personaEnabled: bool("GEBAI_PERSONA", false),
+    // 人格运行是否自动通过审批（默认 true：无人值守场景没有人守着审批卡；
+    // 与 GEBAI_FEISHU_BOT_AUTO_APPROVE 同一姿态——部署方整体担责）
+    personaAutoApprove: bool("GEBAI_PERSONA_AUTO_APPROVE", true),
     // 飞书机器人行为配置（均默认 false 保持现状）：过程推送两类 + 自动审批
     feishuBotNotifyTools: bool("GEBAI_FEISHU_BOT_NOTIFY_TOOLS", false),
     feishuBotNotifyAssistant: bool("GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT", false),

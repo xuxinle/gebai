@@ -3394,8 +3394,69 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
 - **控制通道**：`capture` 落盘白名单默认含**控制文件所在目录**（智能体会话目录直落
   截图，免二次搬运）。
 
-### 4.5.1 交互元素与元素身份（每条都由实际缺陷换来）
+### 4.5.0 属性描述契约（`st/ui/property_schema.hpp`）：一份元数据驱动三件事
 
+`Element::property_names()` 只回答「**名字**是什么」。它足以支撑控制通道的
+`get`/`set`，但回答不了生成界面的三个问题：**类型**（数字还是布尔）、
+**范围**（写 500 与写 5 是否等价）、**怎么显示**（该用滑块还是开关）。
+
+于是参数被写了两遍：一次在组件的 `get/set_property` 里，一次在某个面板的
+`build()` 里。加参数要改两处，漏一处就是「能设但界面上没有」或
+「界面上有但设了不生效」——两者都只表现为「这个控件好像没什么用」。
+
+**契约**：组件可选覆写 `property_schema()` 返回一张 `PropertyDesc` 表
+（名/类型/范围/步进/说明/候选项/只读/折叠）。同一张表同时供给：
+
+| 用途 | 入口 |
+|---|---|
+| 程序读写 | 组件的 `get_property` / `set_property`（描述与实现**同源**）|
+| 面板生成 | `property_schema_to_json()` 导出后由任意前端消费 |
+| 外部自省 | 控制通道导出（智能体不读源码就能知道有哪些参数、范围多少）|
+
+**三条约束**：
+
+1. **不改进 `Element` 的虚函数面**——默认返回空表，存量组件零改动、零开销
+   （渐进采用）。
+2. **夹取只能有一份**：`clamp_property_value()` 是唯一入口，组件实现与面板都调它；
+   `min_value`/`max_value`/`step` 必须真的用于夹取，不是写在描述里另夹一套。
+3. **描述必须自洽且可校验**：`validate_property_schema()` 拦下重名、
+   反向区间、`step` 大于整个区间、`choice` 无候选项、非 `choice` 给了候选项。
+   这些错误**不会崩、不会报错**，只会生成一个“拖到底也不动”的控件。
+
+> 模型的出处：成熟三维/影视工具（Blender RNA、Houdini parameter template、
+> Nuke knob）都是“一份元数据同时驱动读写、面板生成、脚本自省”——
+> 本契约把这层自省能力作为框架的**公共设施**提供，而不是让每个应用自建一套。
+
+#### 4.5.0.1 从表生成面板（`st/ui/property_panel.hpp`）
+
+`PropertyDesc` 只描述数据；`build_property_panel()` 把它变成控件。
+**这是契约真正落地的那一步**：不做它，“一份元数据三用”就只是口号。
+
+```cpp
+// 裁云检查器：不再手写每个 slider，遍历表即可
+st::ui::PropertyPanelHooks hooks{};
+hooks.id_prefix = "inspector-layer";
+hooks.read  = [..](std::string_view name) { return caiyun::get_layer_property(*layer, name); };
+hooks.write = [..](std::string_view name, std::string_view value) {
+  return caiyun::set_layer_property(*layer, name, value);
+};
+(void)st::ui::build_property_panel(c, caiyun::layer_property_schema(), hooks);
+```
+
+**量程映射抽成两个纯函数**（`property_to_unit` / `property_from_unit`）：
+`Slider` 的值域是固定的 `[0,1]`（公共组件契约，不因一个面板而改），
+而属性区间是真实量程（`-360..360`）。换算错一个方向，面板就变成
+“拖到底把值写到 0”而控件看起来完全正常——所以它必须可被测试直接验证，
+而不是埋在某段 UI 回调里。
+
+**四类控件由 `PropertyType` 决定**（不由调用方逐个指定，否则“描述说 Number、
+面板给输入框”这类不一致又会回来）：Number/Integer → 滑杆（带量程映射）、
+Boolean → 开关、Choice → 下拉（候选来自描述）、Text/Color → 单行输入。
+
+**`readonly` 默认生成禁用控件**（而不是不生成）：看见了但点不动，
+比看不见更容易理解——用户不会以为功能缺失。`advanced` 默认折叠。
+
+### 4.5.1 交互元素与元素身份（每条都由实际缺陷换来）
 | 约定 | 为什么 |
 |---|---|
 | **动作一律放在 `virtual void activate()`** | 它是所有激活路径的唯一汇聚点：鼠标点击（`on_event`）、协议 `invoke(click)`（`invoke_action`）、脚本 `ui_invoke`。写在 `on_event` 里 → 真实点击有效、`invoke(click)` 静默无效（列表项踩过），而自动化只能走 `invoke` |

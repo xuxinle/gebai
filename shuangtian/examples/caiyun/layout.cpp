@@ -356,8 +356,151 @@ void register_host_functions(LayoutEngine& engine) {
                                                   std::sin((t * 10.0f - 0.75f) * c4) +
                                               1.0f));
         }
-        return st::unexpected(st::ErrorCode::Invalid,
-                              "未知缓动：" + name + "（可用：linear/in/out/in_out/back/elastic）");
+        // expo_out：前段极快、后段几乎不动（t80 ≈ 0.23）。
+        //
+        // 用途：**硬切点/抢拍**。与 `out`（三次）相比它“几乎瞬到”，
+        // 但又不像线性那样结尾硬停——“一下就到位然后稳住”是专业动效的常规语感。
+        if (name == "expo_out") {
+          if (t <= 0.0f) return st::Json(0.0);
+          if (t >= 1.0f) return st::Json(1.0);
+          constexpr float kRoof = 1.0f - 0.0009765625f;  // 1 - 2^-10
+          return st::Json(static_cast<double>((1.0f - std::pow(2.0f, -10.0f * t)) / kRoof));
+        }
+        // expo_in_out：前一半加速、后一半减速，两端都很缓。
+        //
+        // 用途：**长距离运镜**（推拉/横移）。中段快、两端缓，看起来像有人推着走，
+        // 而不是匀速传送带。
+        if (name == "expo_in_out") {
+          if (t <= 0.0f) return st::Json(0.0);
+          if (t >= 1.0f) return st::Json(1.0);
+          const auto expo_in = [](float v) -> float {
+            return (std::pow(2.0f, 10.0f * v) - 1.0f) / 1023.0f;
+          };
+          const float value =
+              t < 0.5f ? expo_in(2.0f * t) * 0.5f : 1.0f - expo_in(2.0f - 2.0f * t) * 0.5f;
+          return st::Json(static_cast<double>(value));
+        }
+        // smoother（smootherstep）：五次多项式，两阶导数在端点都为 0。
+        //
+        // 与 `in_out`（三次）的差别：**起步与收尾更“沉”**。
+        // 三次曲线在端点仍有加速度突变，大距离位移时能看出“忽然启动”；
+        // 五次没有，所以它是“物体自己动起来”而不是“被谁推了一下”。
+        if (name == "smoother") {
+          const float value = t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+          return st::Json(static_cast<double>(value));
+        }
+                return st::unexpected(st::ErrorCode::Invalid,
+                              "未知缓动：" + name +
+                                  "（可用：linear/in/out/in_out/back/elastic/expo_out/"
+                                  "expo_in_out/smoother）");
+      });
+
+  // ── 弹簧族：运动质量的本体 ──
+  //
+  // ## 为何单开一个函数，而不把它当成一种 ease
+  //
+  // `ease(name, t)` 的 `t` 是**归一化进度**（0~1），它描述“走到终点了吗”。
+  // 而弹簧的自变量是**时间**：它没有预设终点时刻，靠 ζ/ω 自己决定何时停。
+  // 把弹簧压成 `ease` 会丢掉这件事（“到 1 之后就不动了”），也就丢掉了
+  // 超调后的二次回弹——而那正是“有质量”的来源。
+  //
+  // ## 参数的意义（写脚本时只需要记住这两个数）
+  //
+  // · `zeta`（阻尼比）< 1 会过冲：0.4 很跳，0.6 舒服，0.8 稳重，1 临界（不回头）
+  // · `omega`（角频率）越大越快：14 慢，20 中，26 快，32 很急
+  //
+  // 返回值恒从 0 起、趋于 1（阶跃响应），所以能直接当“入场进度”用：
+  //
+  // ```js
+  // const k = spring(t - 0.4, 0.62, 20);   // 0.4s 起跳，舒服的过冲
+  // return [{ dx: (1 - k) * -60, alpha: k }];
+  // ```
+  (void)engine.register_function(
+      "spring", [](const std::vector<st::Json>& args) -> st::Result<st::Json> {
+        if (args.empty() || !args[0].is_number()) {
+          return st::unexpected(st::ErrorCode::Invalid,
+                                "spring(tau, [zeta], [omega]) 需要至少 1 个数字");
+        }
+        // 负数 tau = 还没开始 ⇒ 返回 0（静止在原位），而不是让它振荡回头。
+        const double tau = args[0].get<double>();
+        if (tau <= 0.0) return st::Json(0.0);
+        const double zeta = args.size() > 1 && args[1].is_number() ? args[1].get<double>() : 0.6;
+        const double omega = args.size() > 2 && args[2].is_number() ? args[2].get<double>() : 20.0;
+        // 参数护栏：ζ <= 0 会变成永不衰减的振荡（画面永远在抖），
+        // ω <= 0 永远不动。夹到合理区间，而不是返回错误——
+        // 动效脚本里“参数写夸张了”比“逻辑错”常见得多，直接失效更影响创作。
+        const double z = std::clamp(zeta, 0.05, 2.0);
+        const double w = std::clamp(omega, 1.0, 80.0);
+        double value = 0.0;
+        if (z < 1.0) {
+          // 欠阻尼：衰减余弦 + 正弦（经典二阶阶跃响应）
+          const double wd = w * std::sqrt(1.0 - z * z);
+          value = 1.0 - std::exp(-z * w * tau) *
+                            (std::cos(wd * tau) + (z * w / wd) * std::sin(wd * tau));
+        } else if (z == 1.0) {
+          value = 1.0 - std::exp(-w * tau) * (1.0 + w * tau);
+        } else {
+          // 过阻尼：两个实根，不振荡但很滞
+          const double q = w * std::sqrt(z * z - 1.0);
+          const double r1 = -z * w + q;
+          const double r2 = -z * w - q;
+          value = 1.0 - (r2 * std::exp(r1 * tau) - r1 * std::exp(r2 * tau)) / (r2 - r1);
+        }
+        // 非有限值（极端参数下的数值意外）归 1：宁可“已到位”，不可让 NaN 传进布局
+        // （NaN 会让元素直接消失，而且不报错）。
+        if (!std::isfinite(value)) return st::Json(1.0);
+        return st::Json(value);
+      });
+
+  // spring_vel(tau, zeta, omega)：弹簧响应的**导数**（每秒进度）。
+  //
+  // 用在哪里：**由速度驱动的形变**（squash & stretch）。落地瞬间进度最快，
+  // 此时沿运动方向拉长、垂直方向压薄；停稳后速度归零，形变也归零。
+  // 没它就只能“固定幅度地压一下”，看起来像预设动画而不是碰撞。
+  (void)engine.register_function(
+      "spring_vel", [](const std::vector<st::Json>& args) -> st::Result<st::Json> {
+        if (args.empty() || !args[0].is_number()) {
+          return st::unexpected(st::ErrorCode::Invalid,
+                                "spring_vel(tau, [zeta], [omega]) 需要至少 1 个数字");
+        }
+        const double tau = args[0].get<double>();
+        if (tau <= 0.0) return st::Json(0.0);
+        const double zeta = args.size() > 1 && args[1].is_number() ? args[1].get<double>() : 0.6;
+        const double omega = args.size() > 2 && args[2].is_number() ? args[2].get<double>() : 20.0;
+        const double z = std::clamp(zeta, 0.05, 2.0);
+        const double w = std::clamp(omega, 1.0, 80.0);
+        double value = 0.0;
+        if (z < 1.0) {
+          const double s = std::sqrt(1.0 - z * z);
+          value = (w / s) * std::exp(-z * w * tau) * std::sin(w * s * tau);
+        } else if (z == 1.0) {
+          value = w * w * tau * std::exp(-w * tau);
+        } else {
+          const double q = w * std::sqrt(z * z - 1.0);
+          const double r1 = -z * w + q;
+          const double r2 = -z * w - q;
+          value = w * w * (std::exp(r1 * tau) - std::exp(r2 * tau)) / (r1 - r2);
+        }
+        if (!std::isfinite(value)) return st::Json(0.0);
+        return st::Json(value);
+      });
+
+  // settle(zeta, omega, eps)：弹簧**多久之后稳定**（秒）。
+  //
+  // 为何需要它：写“跳→落定→停留”的节奏时，必须知道这一弹要占多久，
+  // 否则要么提前切镜（动作被砍断）、要么留太多空白（节奏散了）。
+  // 手算临界阻尼的 4/ω 只对 ζ=1 成立，欠阻尼的衰减时间与 ζ、ω 都相关。
+  (void)engine.register_function(
+      "settle", [](const std::vector<st::Json>& args) -> st::Result<st::Json> {
+        const double zeta = args.size() > 0 && args[0].is_number() ? args[0].get<double>() : 0.6;
+        const double omega = args.size() > 1 && args[1].is_number() ? args[1].get<double>() : 20.0;
+        const double eps = args.size() > 2 && args[2].is_number() ? args[2].get<double>() : 0.02;
+        const double z = std::clamp(zeta, 0.05, 2.0);
+        const double w = std::clamp(omega, 1.0, 80.0);
+        // 解析上界：包络 e^{-zωt} 衰减到 eps 即可保证 |响应-1| < eps。
+        // 取 ln(1/eps)/(zω) 再留 20% 余量（包络是保守估计，但不是等价）。
+        const double envelope = std::log(1.0 / std::clamp(eps, 0.001, 0.5)) / (z * w);
+        return st::Json(envelope * 1.2);
       });
 
   // lerp(a, b, t)：线性插值
@@ -450,6 +593,8 @@ auto parse_layout_script(const st::Json& node, std::string_view asset_basis)
     }
     script.source = std::move(text.value());
     script.filename = path;
+    script.raw_field = reference;
+    script.from_file = true;
     return script;
   }
 
@@ -458,6 +603,8 @@ auto parse_layout_script(const st::Json& node, std::string_view asset_basis)
     script.filename = st::json_get_string(*field, "filename", "<inline>");
     const double timeout = st::json_get_double(*field, "timeout_ms", 400.0);
     script.timeout_ms = static_cast<int>(std::clamp(timeout, 10.0, 30'000.0));
+    script.raw_field = script.source;
+    script.from_file = false;
     return script;
   }
 

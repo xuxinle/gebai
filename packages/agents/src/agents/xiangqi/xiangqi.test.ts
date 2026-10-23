@@ -520,3 +520,227 @@ describe("单例：连接必须宿主唯一", () => {
     resetControllerForTest()
   })
 })
+
+
+describe("单卡撤回：授权完成后让那张卡自动消失", () => {
+  it("只撤指定的一张，不影响其他还在等的卡", async () => {
+    const ctl = fresh()
+    await ctl.listen()
+    // 先推再连：连上的瞬间会整批重推 `live` 里已有的卡
+    const auth = ctl.push({ kind: "notice", title: "去授权" })
+    const other = ctl.push({ kind: "todo", title: "跟进磁盘告警" })
+    const peer = await FakeXiangqi.connect(ctl.url())
+    await until(() => peer.lastCards().length === 2, 2000, "两张都在")
+
+    const ok = ctl.dismiss(auth.id)
+    expect(ok).toBe(true)
+    await until(() => peer.lastCards().length === 1, 2000, "撤掉一张")
+    // 关键：另一张仍在（不能因为撤一张把别人的也清了）
+    console.log("    实测剩余:", peer.lastCards().map((c) => (c as { title?: string }).title).join(","))
+    expect(peer.lastCards()[0]!.id).toBe(other.id)
+    peer.close()
+  })
+
+  it("撤不存在的 id 返回 false（不抛）", () => {
+    const ctl = fresh()
+    expect(ctl.dismiss("card-nope")).toBe(false)
+  })
+
+  it("撤回仍在等待的卡 → 唤醒等待者（返回 null，不白等到超时）", async () => {
+    const ctl = fresh()
+    await ctl.listen()
+    const { id } = ctl.push({ kind: "choice", title: "等答复", options: [{ label: "A", value: "a" }] })
+    const peer = await FakeXiangqi.connect(ctl.url())
+    await until(() => peer.lastCards().length === 1, 2000, "卡片到达")
+
+    const startedAt = Date.now()
+    const waiting = ctl.waitForAnswer(id, 30_000)
+    await new Promise((r) => setTimeout(r, 30)) // 让 waitForAnswer 真正进入等待
+    ctl.dismiss(id)
+    const answer = await waiting
+    const elapsed = Date.now() - startedAt
+    console.log(`    实测: 撤回后 ${elapsed}ms 返回 ${answer === null ? "null" : "答复"}`)
+    expect(answer).toBeNull()
+    expect(elapsed).toBeLessThan(5000) // 被唤醒而不是等满 30 秒
+    peer.close()
+  })
+})
+
+describe("链接按钮：授权卡要能把用户送到浏览器", () => {
+  it("带 url 的选项原样下发（相期渲染为可点击链接）", async () => {
+    const ctl = fresh()
+    await ctl.listen()
+    const url = "https://accounts.feishu.cn/open-apis/authen/v1/authorize?client_id=x"
+    ctl.push({
+      kind: "choice",
+      title: "需要飞书授权",
+      options: [{ label: "去授权", value: "open", url }],
+    })
+    const peer = await FakeXiangqi.connect(ctl.url())
+    await until(() => peer.lastCards().length === 1, 2000, "授权卡到达")
+
+    const card = peer.lastCards()[0] as unknown as { options?: Array<{ label: string; value: string; url?: string }> }
+    console.log("    实测下发选项:", JSON.stringify(card?.options))
+    expect(card?.options?.[0]?.url).toBe(url)
+    expect(card?.options?.[0]?.label).toBe("去授权")
+    peer.close()
+  })
+})
+
+describe("TTL：过期卡片自动消失（链接已失效就别留着误导用户）", () => {
+  it("expiresAtMs 到期后下次下发不再包含该卡", async () => {
+    const ctl = fresh()
+    await ctl.listen()
+    const shortLived = ctl.push({ kind: "notice", title: "10 分钟有效的链接", expiresAtMs: Date.now() + 60 })
+    const peer = await FakeXiangqi.connect(ctl.url())
+    await until(() => peer.lastCards().some((c) => c.id === shortLived.id), 2000, "卡片到达")
+
+    await new Promise((r) => setTimeout(r, 120)) // 等它过期
+    ctl.push({ kind: "notice", title: "新卡" }) // 触发一次下发（顺带做过期剔除）
+    await until(() => !peer.lastCards().some((c) => c.id === shortLived.id), 2000, "过期卡被剔除")
+    console.log("    实测过期后剩余:", peer.lastCards().map((c) => (c as { title?: string }).title).join(","))
+    expect(peer.lastCards().some((c) => c.id === shortLived.id)).toBe(false)
+    peer.close()
+  })
+
+  it("不设 expiresAtMs 的卡永不过期（普通待办不该自己消失）", async () => {
+    const ctl = fresh()
+    await ctl.listen()
+    const forever = ctl.push({ kind: "todo", title: "一直要记着的事" })
+    const peer = await FakeXiangqi.connect(ctl.url())
+    await until(() => peer.lastCards().length === 1, 2000, "卡片到达")
+
+    await new Promise((r) => setTimeout(r, 120))
+    ctl.push({ kind: "notice", title: "新卡" })
+    await until(() => peer.lastCards().length >= 2, 2000, "两张都在")
+    expect(peer.lastCards().some((c) => c.id === forever.id)).toBe(true)
+    peer.close()
+  })
+})
+
+describe("card_authorize 工具：授权卡不阻塞", () => {
+  it("推完立即返回（不等授权结果），并给出 card id 供完成后撤卡", async () => {
+    const ctl = fresh()
+    const tools = createTools({ controller: ctl })
+    await ctl.listen()
+    const peer = await FakeXiangqi.connect(ctl.url())
+
+    const started = Date.now()
+    const res = await tools.card_authorize.execute!(
+      { title: "需要飞书授权", url: "https://accounts.feishu.cn/x", body: "人格要回消息就得先授权" },
+      {} as never,
+    )
+    const elapsed = Date.now() - started
+    console.log(`    实测: 耗时=${elapsed}ms`)
+    expect(elapsed).toBeLessThan(1000) // 不阻塞
+    expect(String(res.output)).toContain("card_dismiss") // 告诉模型完成后要撤卡
+    const data = res.data as { id?: string; url?: string }
+    expect(data.url).toBe("https://accounts.feishu.cn/x")
+    expect(typeof data.id).toBe("string")
+    peer.close()
+  })
+
+  it("相期未连接 → 如实告知送不到，并把链接直接给出来", async () => {
+    const ctl = fresh() // 不 listen、不连 peer
+    const tools = createTools({ controller: ctl })
+    const res = await tools.card_authorize.execute!({ title: "需要授权", url: "https://x.test/a" }, {} as never)
+    const out = String(res.output)
+    console.log(`    实测: ${out.slice(0, 70)}`)
+    expect(out).toContain("看不到")
+    expect(out).toContain("https://x.test/a") // 链接必须给出来，否则用户没法自救
+  })
+
+  it("拒绝非法 url（http(s) 之外一律拒）", async () => {
+    const ctl = fresh()
+    const tools = createTools({ controller: ctl })
+    await expect(tools.card_authorize.execute!({ title: "t", url: "javascript:alert(1)" }, {} as never)).rejects.toThrow(/http/)
+  })
+})
+
+describe("card_dismiss 支持单卡撤回", () => {
+  it("传 id 只撤那张", async () => {
+    const ctl = fresh()
+    const tools = createTools({ controller: ctl })
+    await ctl.listen()
+    const a = ctl.push({ kind: "notice", title: "A" })
+    const b = ctl.push({ kind: "notice", title: "B" })
+    const peer = await FakeXiangqi.connect(ctl.url())
+    await until(() => peer.lastCards().length === 2, 2000, "两张都在")
+
+    const res = await tools.card_dismiss.execute!({ id: a.id }, {} as never)
+    expect(String(res.output)).toContain(a.id)
+    await until(() => peer.lastCards().length === 1, 2000, "撤掉 A")
+    expect(peer.lastCards()[0]!.id).toBe(b.id)
+    peer.close()
+  })
+
+  it("不传 id 仍清全部（向后兼容）", async () => {
+    const ctl = fresh()
+    const tools = createTools({ controller: ctl })
+    await ctl.listen()
+    ctl.push({ kind: "notice", title: "A" })
+    ctl.push({ kind: "notice", title: "B" })
+    const peer = await FakeXiangqi.connect(ctl.url())
+    await until(() => peer.lastCards().length === 2, 2000, "两张都在")
+    await tools.card_dismiss.execute!({}, {} as never)
+    await until(() => peer.lastCards().length === 0, 2000, "全清")
+    expect(peer.lastCards().length).toBe(0)
+    peer.close()
+  })
+})
+
+describe("数据根：缺省不写到 cwd（防污染仓库）", () => {
+  it("设了 GEBAI_HOME 时，箱件落在 {GEBAI_HOME}/相期", async () => {
+    const home = mkdtempSync(join(tmpdir(), "xq-gh-"))
+    const prev = process.env.GEBAI_HOME
+    process.env.GEBAI_HOME = home
+    try {
+      // 不给 homeDir：走环境的缺省解析
+      const ctl = createController({ port: 0 })
+      await ctl.listen()
+      const peer = await FakeXiangqi.connect(ctl.url())
+      // 先断开再推，道破 WS 通路使卡走文件兼底
+      ctl.dropPeerForTest()
+      ctl.push({ kind: "notice", title: "需要写盘的卡" })
+      void peer
+      await new Promise((r) => setTimeout(r, 150))
+      const wroteToGebaiHome = existsSync(join(home, "相期", "inbox"))
+      const wroteToCwd = existsSync(join(process.cwd(), "相期"))
+      console.log(`    实测: GEBAI_HOME下=${wroteToGebaiHome} cwd下=${wroteToCwd}`)
+      expect(wroteToGebaiHome).toBe(true)
+      expect(wroteToCwd).toBe(false)
+      ctl.close()
+    } finally {
+      if (prev === undefined) delete process.env.GEBAI_HOME
+      else process.env.GEBAI_HOME = prev
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it("XIANGQI_HOME 优先于 GEBAI_HOME（显式指定的最优先）", async () => {
+    const explicit = mkdtempSync(join(tmpdir(), "xq-exp-"))
+    const home = mkdtempSync(join(tmpdir(), "xq-gh2-"))
+    const prevHome = process.env.GEBAI_HOME
+    const prevX = process.env.XIANGQI_HOME
+    process.env.GEBAI_HOME = home
+    process.env.XIANGQI_HOME = explicit
+    try {
+      const ctl = createController({ port: 0 })
+      await ctl.listen()
+      ctl.dropPeerForTest()
+      ctl.push({ kind: "notice", title: "落显式目录" })
+      await new Promise((r) => setTimeout(r, 150))
+      console.log(`    实测: 显式下=${existsSync(join(explicit, "inbox"))} GEBAI_HOME下=${existsSync(join(home, "相期", "inbox"))}`)
+      expect(existsSync(join(explicit, "inbox"))).toBe(true)
+      expect(existsSync(join(home, "相期", "inbox"))).toBe(false)
+      ctl.close()
+    } finally {
+      if (prevHome === undefined) delete process.env.GEBAI_HOME
+      else process.env.GEBAI_HOME = prevHome
+      if (prevX === undefined) delete process.env.XIANGQI_HOME
+      else process.env.XIANGQI_HOME = prevX
+      rmSync(explicit, { recursive: true, force: true })
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+})

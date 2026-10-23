@@ -128,7 +128,12 @@ const ICONS: Record<string, string> = {
   copy: '<rect x="5" y="5" width="8" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M3 10.5V3.8A1.3 1.3 0 014.3 2.5h5" fill="none" stroke="currentColor" stroke-width="1.4"/>',
   // 粘贴（剪贴板板身 + 顶部夹子）：与「复制」成对出现（右键菜单与 Ctrl+V）
   paste: '<path d="M6.4 2.6h3.2v2.2H6.4z" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="3.4" y="4" width="9.2" height="9.6" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M5.8 7.6h4.4M5.8 10.4h3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>',
-  undo: '<path d="M3.5 8a5 5 0 115 5H6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M6 4.5L3 7.6l3 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>',
+  /* 撤销/放弃（discard）：与 VSCode codicon 的 `discard`（U+EAE2）同形——
+     右上一个环 + 一条从左下斜下去的尾，左侧一个直角箭头钩（钩身朝上、钩臂朝右）。
+     旧写法是一个闭口圆环加一个左侧尖角，在 13px 上读起来与「刷新」分不开。
+     几何取官方字形 × 0.82（墨迹 11×11）：官方图形在 16 格 viewBox 里基本满格，
+     直接摆进 13px 的行内按钮会比同伴按钮（文档 8×13、加号 9×9）大一整圈。 */
+  undo: '<path d="M2.51 2.01V7.92H8.66" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.51 7.92L7.34 2.92" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M7.34 2.92A3.77 3.77 0 0 1 12.26 8.98L6.36 14.23" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>',
   // 自动换行：一条长线 + 折返的一笔 + 指回左侧的箭头（长行不再横向滚，而是折回来）
   // 转到符号（大纲）：缩进的短横线 + 名字条，形状与编辑器大纲一致
   symbols: '<path d="M2.6 4h2.2M7 4h6.4M5 8h2.2M9.4 8h4M5 12h2.2M9.4 12h3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>',

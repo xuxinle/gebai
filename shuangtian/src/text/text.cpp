@@ -972,12 +972,14 @@ auto TextRenderer::glyph_bitmap_of(char32_t codepoint, float pixel_size, FontRol
 /// （每物理像素三个子像素）。按采样格取整才能保证位移真的生效
 /// （否则会被栅格化取整吃成 0——症状是「字重档位看起来没有任何区别」）。
 auto TextRenderer::embolden_steps(float pixel_radius) const noexcept -> int {
-  if (pixel_radius <= 0.0f) return 0;
-  const int supersample = std::max(1, static_cast<int>(std::lround(supersample_)));
-  const int cells_per_pixel = supersample * (subpixel_ ? kSubpixelColumns : 1);
-  const int steps =
-      static_cast<int>(std::lround(pixel_radius * static_cast<float>(cells_per_pixel)));
-  return std::clamp(steps, 0, TextRenderer::kMaxEmboldenSteps);
+  // **合成加粗已禁用**（本框架的硬性取向，见 `st/ui/text_port.hpp` 的 `embolden_radius`）。
+  //
+  // 在**渲染器这一层**再拦一次，而不是只靠上层的 `embolden_radius` 返回 0：
+  // 上层是可以被绕过的（裁云/镂月就曾各自硬编码 `size/20.0f` 直接传给端口）。
+  // 一旦有人再绕开，这里会静默地不加粗——症状是“粗体没生效”，
+  // 而不是“粗体很糊”——前者好查，后者会被当成字体问题查很久。
+  (void)pixel_radius;
+  return 0;
 }
 
 auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel_size,

@@ -1,0 +1,158 @@
+/**
+ * 拟人模式授权横幅样式。
+ *
+ * 视觉取向：**可见但不抢眼**。
+ * - 用琥珀色（warning 语义）而非红色：缺授权不影响服务运行，只是某项能力不可用
+ * - 单行高度、紧贴 header 下方：不挤压聊天区，不产生"页面在报错"的错觉
+ * - 「去授权」是主按钮、「忽略」弱化为 ghost：引导而不催促
+ */
+
+.persona-auth-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: #7a4a00;
+  background: linear-gradient(180deg, #fff8e6 0%, #fff4dc 100%);
+  border-bottom: 1px solid #f0d9a8;
+  /* 不参与页面滚动定位：横幅始终贴在 header 下方 */
+  flex: 0 0 auto;
+}
+
+/* 窄屏：文案与按钮换行堆叠，避免挤压 */
+@media (max-width: 720px) {
+  .persona-auth-banner {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .persona-auth-text {
+    flex-basis: 100%;
+  }
+}
+
+.persona-auth-icon {
+  font-size: 15px;
+  line-height: 1;
+  flex: 0 0 auto;
+}
+
+.persona-auth-text {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.persona-auth-text strong {
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+
+.persona-auth-msg {
+  color: #8a6320;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.persona-auth-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.persona-auth-btn {
+  appearance: none;
+  border: 1px solid #e0c288;
+  background: #fffdf7;
+  color: #7a4a00;
+  font-size: 12.5px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.persona-auth-btn:hover {
+  background: #fff3d6;
+  border-color: #d4ae6a;
+}
+
+.persona-auth-btn:focus-visible {
+  outline: 2px solid #d4ae6a;
+  outline-offset: 1px;
+}
+
+/* 主按钮：去授权 */
+.persona-auth-btn.primary {
+  background: #f5a623;
+  border-color: #e0951a;
+  color: #fff;
+  font-weight: 500;
+}
+
+.persona-auth-btn.primary:hover {
+  background: #e89a12;
+  border-color: #cf8a10;
+}
+
+/* 弱化：忽略 */
+.persona-auth-btn.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: #a08050;
+}
+
+.persona-auth-btn.ghost:hover {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: transparent;
+}
+
+/* 无法发起授权时的说明（未配置应用凭据） */
+.persona-auth-hint {
+  font-size: 12.5px;
+  color: #a08050;
+  white-space: nowrap;
+}
+
+/* 深色主题：保持琥珀语义但降低亮度，避免刺眼 */
+@media (prefers-color-scheme: dark) {
+  .persona-auth-banner {
+    color: #f0d9a8;
+    background: linear-gradient(180deg, #3a2f18 0%, #332a15 100%);
+    border-bottom-color: #55431f;
+  }
+  .persona-auth-msg,
+  .persona-auth-hint {
+    color: #c9a86a;
+  }
+  .persona-auth-btn {
+    background: #2b2413;
+    border-color: #55431f;
+    color: #f0d9a8;
+  }
+  .persona-auth-btn:hover {
+    background: #3a3019;
+    border-color: #6b5427;
+  }
+  .persona-auth-btn.primary {
+    background: #c9871a;
+    border-color: #b57815;
+    color: #fff;
+  }
+  .persona-auth-btn.ghost {
+    background: transparent;
+    border-color: transparent;
+    color: #b09060;
+  }
+  .persona-auth-btn.ghost:hover {
+    background: rgba(255, 255, 255, 0.06);
+  }
+}

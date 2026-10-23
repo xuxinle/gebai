@@ -14,6 +14,7 @@
 
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
+#include "st/ui/property_schema.hpp"
 #include "st/ui/style.hpp"
 #include "st/ui/styling.hpp"
 #include "st/ui/text_port.hpp"
@@ -843,6 +844,20 @@ class Element {
   /// string_properties` 变红）；而不入表又会让 `get` 读不到（快照只遍历
   /// `property_names()`）。两份表把这两个需求拆开。
   [[nodiscard]] virtual auto readonly_property_names() const -> std::vector<std::string_view>;
+  /// 属性**完整描述**（可选覆写；默认空表）。
+  ///
+  /// ## 它与上面三个接口的关系
+  ///
+  /// `property_names()` / `readonly_property_names()` 只回答**名字**，
+  /// 足以支撑控制通道的 `get`/`set`，但回答不了生成面板需要的类型/范围/步进。
+  /// 本接口补上那一层，**不取代**它们：两者同时存在时，
+  /// `validate_property_name_consistency()` 可核对两份描述不矛盾（避免
+  /// “名字表说可写、描述说只读”这类静默不一致）。
+  ///
+  /// **默认空表 = 零回落成本**：存量组件一行不改就继续工作，
+  /// 面板只对声明了描述的元素生成控件（渐进采用，而不是一次性改造全部控件）。
+  [[nodiscard]] virtual auto property_schema() const
+      -> std::span<const PropertyDesc>;
   /// 动作触发（`invoke`；返回是否已处理）。
   [[nodiscard]] virtual auto invoke_action(std::string_view action, std::string_view argument)
       -> bool;

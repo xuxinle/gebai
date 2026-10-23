@@ -26,6 +26,18 @@ void DirectorBridge::paint_content(const st::ui::RenderContext& context,
 
 auto DirectorBridge::get_property(std::string_view name) const -> std::optional<std::string> {
   if (name == "script") return hooks_.script_json ? hooks_.script_json() : std::string{};
+  // ——— 自省面（智能体不读源码也能知道全部字段）———
+  //
+  // `schema_json` 返回字段总表（名/类型/范围/说明）；`schema_diagnostics` 返回
+  // 上一次脚本解析产生的诊断（未知字段/越界）；`diagnostic_count` 是它的条数
+  // （供“一秒判断这次改动有没有写错字段”的快速断言）。
+  if (name == "schema_json") return schema_to_json();
+  if (name == "schema_diagnostics") {
+    return hooks_.schema_diagnostics ? hooks_.schema_diagnostics() : std::string{};
+  }
+  if (name == "diagnostic_count") {
+    return hooks_.diagnostic_count ? hooks_.diagnostic_count() : std::string{};
+  }
   if (name == "edit_locked") {
     return hooks_.edit_locked && hooks_.edit_locked() ? "true" : "false";
   }
@@ -65,6 +77,8 @@ auto DirectorBridge::property_names() const -> std::vector<std::string_view> {
           "render_quality_bright_ratio", "render_quality_mean_luma",
           "render_quality_change_density", "render_quality_worst_still_clip",
           "render_quality_static_threshold", "render_quality_partial",
+          // 字段自省与诊断（AI 原生的核心面，见 `schema.hpp`）
+          "schema_json", "schema_diagnostics", "diagnostic_count",
           "scene_count", "duration", "fps", "size", "name"};
 }
 

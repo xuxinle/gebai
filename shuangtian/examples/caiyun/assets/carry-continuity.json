@@ -1,0 +1,193 @@
+{
+  "name": "裁云 · 每个画面从上一个里长出来（一镜到底）",
+  "fps": 30,
+  "size": [1920, 1080],
+  "transition": 0.30,
+  "fade_in": 0.25,
+  "fade_out": 0.45,
+  "show_brand": false,
+  "brand_wordmark": "",
+  "brand_latin": "",
+  "footer_note": "裁云 · 跨场承接",
+  "audio": {
+    "enabled": true,
+    "style": "calm",
+    "bpm": 92,
+    "gain": 0.35
+  },
+  "scenes": [
+    {
+      "kind": "custom",
+      "duration": 2.4,
+      "wrap": false,
+      "background": ["#05070f", "#0b1220"],
+      "accent": "#0a0d16",
+      "grain": 5000,
+      "grain_alpha": 0.34,
+      "glow": 0.35,
+      "glow_cx": 0.5,
+      "glow_cy": 0.5,
+      "glow_radius": 0.42,
+      "layers": [
+        { "kind": "ellipse", "name": "起点", "x": "47.2%", "y": "47.2%", "w": "5.6%", "h": "10%",
+          "fill": "#4d6bfe", "enter": 3, "enter_at": 0.10, "enter_dur": 0.85 },
+        { "kind": "text", "name": "起点字", "text": "材料", "x": "52%", "y": "47.6%", "w": "30%", "h": "8%",
+          "size": 34, "color": "#8fa6cc", "align": 1, "enter": 1, "enter_at": 0.75, "enter_dur": 0.7 }
+      ],
+      "carry_out": {
+        "name": "承接·生长",
+        "into": 1,
+        "at": 2.05,
+        "dur": 0.70,
+        "from": { "x": "47.2%", "y": "46.0%", "w": "5.6%", "h": "8.0%", "radius": 4 },
+        "to": { "x": "32%", "y": "32%", "w": "36%", "h": "36%", "radius": 16 },
+        "fill": "#152238",
+        "stroke": "#4d6bfe",
+        "stroke_width": 3,
+        "text_color": "#9ec4ff",
+        "text_size": 44,
+        "curve": "expo_out"
+      }
+    },
+    {
+      "kind": "custom",
+      "duration": 2.6,
+      "wrap": false,
+      "background": ["#05070f", "#0b1220"],
+      "accent": "#0a0d16",
+      "grain": 5000,
+      "grain_alpha": 0.34,
+      "glow": 0.30,
+      "glow_cx": 0.5,
+      "glow_cy": 0.5,
+      "glow_radius": 0.40,
+      "layers": [
+        { "kind": "text", "name": "卡片标题", "text": "一镜到底", "x": "32%", "y": "44%", "w": "36%", "h": "12%",
+          "size": 62, "color": "#e8f1ff", "bold": true, "align": 0, "enter": 2, "enter_at": 0.35, "enter_dur": 0.75 },
+        { "kind": "text", "name": "卡片副文", "text": "不是切换，是长出来", "x": "32%", "y": "56%", "w": "36%", "h": "8%",
+          "size": 30, "color": "#7f97bd", "align": 0, "enter": 2, "enter_at": 0.55, "enter_dur": 0.7 }
+      ],
+      "carry_out": {
+        "name": "承接·生长",
+        "into": 2,
+        "at": 4.65,
+        "dur": 0.70,
+        "from": { "x": "32%", "y": "32%", "w": "36%", "h": "36%", "radius": 16 },
+        "to": { "x": "0%", "y": "0%", "w": "100%", "h": "100%", "radius": 0 },
+        "fill": "#152238",
+        "fade_out": 0.45,
+        "stroke": "#4d6bfe",
+        "stroke_width": 0,
+        "text_color": "#9ec4ff",
+        "text_size": 44,
+        "curve": "expo_in_out"
+      }
+    },
+    {
+      "kind": "custom",
+      "duration": 3.0,
+      "wrap": false,
+      "background": ["#070b16", "#101a30"],
+      "accent": "#0a0d16",
+      "grain": 6000,
+      "grain_alpha": 0.36,
+      "glow": 0.34,
+      "glow_cx": 0.5,
+      "glow_cy": 0.42,
+      "glow_radius": 0.50,
+      "layers": [
+        { "kind": "text", "name": "页标题", "text": "每个画面\n从上一个里长出来", "x": "18%", "y": "34%", "w": "64%", "h": "26%",
+          "size": 92, "color": "#eef4ff", "bold": true, "align": 0, "line_height": 1.35,
+          "enter": 2, "enter_at": 0.05, "enter_dur": 0.85 },
+        { "kind": "text", "name": "页副文", "text": "CARRIED · 跨场承接层", "x": "18%", "y": "62%", "w": "64%", "h": "7%",
+          "size": 30, "color": "#6d86ad", "align": 0, "tracking": 3,
+          "enter": 1, "enter_at": 0.40, "enter_dur": 0.7 }
+      ],
+      "carry_out": {
+        "name": "承接·生长",
+        "into": 3,
+        "at": 7.65,
+        "dur": 0.70,
+        "from": { "x": "50%", "y": "49.4%", "w": "0.5%", "h": "1.2%", "radius": 2 },
+        "to": { "x": "9%", "y": "49.4%", "w": "82%", "h": "1.2%", "radius": 2 },
+        "fill": "#4d6bfe",
+        "stroke_width": 0,
+        "curve": "expo_in_out"
+      }
+    },
+    {
+      "kind": "custom",
+      "duration": 2.8,
+      "wrap": false,
+      "background": ["#06080f", "#0d1628"],
+      "accent": "#0a0d16",
+      "grain": 5000,
+      "grain_alpha": 0.34,
+      "glow": 0.32,
+      "glow_cx": 0.5,
+      "glow_cy": 0.5,
+      "glow_radius": 0.46,
+      "layers": [
+        { "kind": "text", "name": "线上字", "text": "不 是 切 换", "x": "0%", "y": "36%", "w": "100%", "h": "10%",
+          "size": 58, "color": "#c6d8f5", "align": 0, "tracking": 6,
+          "enter": 1, "enter_at": 0.55, "enter_dur": 0.8 }
+      ],
+      "carry_out": {
+        "name": "承接·生长",
+        "into": 4,
+        "at": 10.45,
+        "dur": 0.70,
+        "from": { "x": "9%", "y": "49.4%", "w": "82%", "h": "1.2%", "radius": 2 },
+        "to": { "x": "22%", "y": "40%", "w": "56%", "h": "16%", "radius": 8 },
+        "fill": "#152238",
+        "stroke": "#4d6bfe",
+        "stroke_width": 3,
+        "curve": "expo_out",
+        "fade_out": 0.55
+      }
+    },
+    {
+      "kind": "custom",
+      "duration": 3.0,
+      "wrap": false,
+      "background": ["#05070f", "#0b1220"],
+      "accent": "#0a0d16",
+      "grain": 5500,
+      "grain_alpha": 0.36,
+      "glow": 0.50,
+      "glow_cx": 0.5,
+      "glow_cy": 0.46,
+      "glow_radius": 0.52,
+      "god_ray": 0.22,
+      "god_ray_angle": -1.2,
+      "layout": "carry-spring.js",
+      "layers": [
+        { "kind": "text", "name": "字标", "text": "长出来", "x": "20%", "y": "38%", "w": "60%", "h": "22%",
+          "size": 108, "color": "#ffffff", "bold": true, "align": 0, "tracking": 2,
+          "enter": 0 },
+        { "kind": "rect", "name": "落定线", "x": "37%", "y": "63.5%", "w": "26%", "h": "3",
+          "fill": "#4d6bfe", "enter": 0 }
+      ]
+    },
+    {
+      "kind": "custom",
+      "duration": 2.2,
+      "wrap": false,
+      "background": ["#04060c", "#0a1020"],
+      "accent": "#0a0d16",
+      "grain": 4500,
+      "grain_alpha": 0.32,
+      "glow": 0.42,
+      "glow_cx": 0.5,
+      "glow_cy": 0.44,
+      "glow_radius": 0.50,
+      "layers": [
+        { "kind": "text", "name": "终幕字标", "text": "长出来", "x": "20%", "y": "40%", "w": "60%", "h": "20%",
+          "size": 108, "color": "#ffffff", "bold": true, "align": 0, "tracking": 2, "enter": 0 },
+        { "kind": "text", "name": "终幕副标", "text": "NIMBUS · 跨场承接", "x": "24%", "y": "58%", "w": "52%", "h": "7%",
+          "size": 30, "color": "#7c93b8", "align": 0, "tracking": 4,
+          "enter": 1, "enter_at": 0.35, "enter_dur": 0.85 }
+      ]
+    }
+  ]
+}

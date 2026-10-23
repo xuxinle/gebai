@@ -482,6 +482,40 @@ describe("样式契约：变更面板", () => {
     expect(ruleBody(".fw-explorer-head")).toMatch(/height:\s*34px/)
   })
 
+  test("头部有标题与改动数（只有两个图标按钮时左上角是一大片空白）", () => {
+    /* 为何钉在源码层：标题与计数都是“删了不会报错、界面上只是少东西”的那类元素——
+     * 而左栏首行没有标题时，用户看不出这是哪一块面板（与资源管理器头部有根名按钮不对称）。 */
+    const src = stripComments(readFileSync(join(SRC, "files", "changes.ts"), "utf8"))
+    expect(src).toContain('class: "fw-changes-title"')
+    expect(src).toContain('class: "fw-changes-count"')
+    // 标题必须在头部里，且**排在前面**（放右侧就变成“靠右的小字”，不再是标题）
+    const head = src.slice(src.indexOf('class: "fw-changes-head"'), src.indexOf('class: "fw-changes-head"') + 200)
+    expect(head.indexOf("headTitle")).toBeGreaterThan(0)
+    // 计数随状态更新（且干净时隐去）
+    expect(src).toContain("headCount.textContent")
+    expect(src).toContain("headCount.hidden")
+    // 样式存在（缺失时标题会变成一个裸 span，字号字重都不对）
+    expect(ruleBody(".fw-changes-title")).toMatch(/font-size:/)
+    expect(ruleBody(".fw-changes-count")).toMatch(/border-radius:/)
+  })
+
+  test("分组头的计数与标题计数是同一种胶囊（两处各写一份样式必然漂移）", () => {
+    /* 为何钉住：分组头原先把数字写在组名里（「未暂存（2）」），与标题的胶囊
+     * 是两种视觉语言；统一后若某天有人只改一边（或把样式拆成两份），
+     * 两处会看着像两个不相干的面板。这里要求两选择器**共用同一条声明块**。 */
+    const src = stripComments(readFileSync(join(SRC, "files", "changes.ts"), "utf8"))
+    expect(src).toContain('class: "fw-change-group-count"')
+    // 组名与计数是两个节点（再写回「名（N）」就没有胶囊了）
+    expect(src).not.toContain("（${g.items.length}）")
+    // 同一条规则里同时含两个选择器：取两边的声明体逐字比（相等 = 共用一份样式）
+    const title = ruleBody(".fw-changes-count")
+    const group = ruleBody(".fw-change-group-count")
+    expect(title.length).toBeGreaterThan(0)
+    expect(group).toBe(title)
+    // 目录行的计数走的是另一套（灰字、无底）——不能被胶囊规则误伤
+    expect(ruleBody(".fw-change-count")).not.toMatch(/border-radius:/)
+  })
+
   test("改动列表一律整仓库（不按仓库内前缀过滤）", () => {
     /* 为何钉在源码层：本面板回答「我改了什么、要不要提交」，而提交动的是整个仓库——
      * 若按当前根在仓库内的子目录前缀过滤，别处的改动会从列表里消失（且不留任何提示），
@@ -507,6 +541,36 @@ describe("样式契约：变更面板", () => {
     // 选的是**直接子图标**（`> .fw-icon`）：行内按钮的图标也是 .fw-icon，后代选择器会把它们一起转
     expect(ruleBody(".fw-change-dirrow.collapsed > .fw-icon")).toMatch(/transform:\s*rotate\(-90deg\)/)
     expect(ruleBody(".fw-change-group-head.collapsed > .fw-icon")).toMatch(/transform:\s*rotate\(-90deg\)/)
+  })
+
+  test("改动行：行内动作常不占宽度（只藏 opacity 的话按钮仍吃掉 60~70px）", () => {
+    /* 为何钉在样式层：左栏 286px，三个 20px 按钮 + 间距就是一行宽度的四分之一。
+     * 用 `opacity: 0` 藏按钮时 DOM/截图里都“看不到它”，但它仍在 flex 行里占位——
+     * 于是路径被持续挤压（实测同批 10 行里 8 行目录被截），而肉眼只能归因于“栏太窄”。 */
+    const idle = ruleBody(".fw-changes-panel .fw-change-row .fw-change-actions")
+    expect(idle).toMatch(/width:\s*0/)
+    expect(idle).toMatch(/overflow:\s*hidden/)
+    // 悬停/聚焦时必须把宽度让回来，否则按钮点了没反应（看得见、点不到）
+    const shown =
+      ruleBody(".fw-changes-panel .fw-change-row:hover .fw-change-actions") +
+      ruleBody(".fw-changes-panel .fw-change-row:focus-within .fw-change-actions")
+    expect(shown).toMatch(/width:\s*auto/)
+  })
+
+  test("改动行：目录写在文件名之后（顺序反了窄栏下目录先占据宽度、文件名被挤）", () => {
+    const src = stripComments(readFileSync(join(SRC, "files", "changes.ts"), "utf8"))
+    const name = src.indexOf('class: "fw-change-name"')
+    const dir = src.indexOf('class: "fw-change-dir"')
+    expect(name).toBeGreaterThan(0)
+    expect(dir).toBeGreaterThan(name)
+    // 目录不再带尾斜杠（它是后缀，不是前缀）
+    expect(src).not.toContain('text: `${dir}/`')
+  })
+
+  test("改动行：容器不再包一层 .fw-change-path（那会把目录与文件名捆成同一个不可分的 flex item）", () => {
+    const src = stripComments(readFileSync(join(SRC, "files", "changes.ts"), "utf8"))
+    expect(src).not.toContain("fw-change-path")
+    expect(allCss()).not.toContain(".fw-change-path")
   })
 
   test("提交框：选项组与动作组都不可压，动作组右对齐", () => {

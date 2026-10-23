@@ -14,6 +14,7 @@
 #include <thread>
 #include <vector>
 
+#include "carry.hpp"
 #include "frame_stats.hpp"
 #include "motion.hpp"
 #include "st/app/async.hpp"
@@ -610,6 +611,18 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
       render_frame_with_motion_blur(project, local, job, index, text_port,
                                     *worker_scratch[slot],
                                     job.trajectory ? &frame_track : nullptr);
+      // 承接图元的轨迹：它不属于任何一幕，所以 `render_scene` 的图层收集器
+      // 看不到它。不补这一条，验收器就不知道“这个身份活过边界”——
+      // 那么我们做的承接在自动化验收里等于不存在（画面上又确实画了）。
+      if (job.trajectory) {
+        const Script& script = project.script;
+        const double t = frame_time(index, job.fps);
+        for (const CarryTrack& carry : collect_active_carries(
+                 script, t, static_cast<float>(kDesignWidth),
+                 static_cast<float>(kDesignHeight))) {
+          frame_track.push_back(ElementTrack{carry.name, carry.x, carry.y, carry.w, carry.h, 1.0f});
+        }
+      }
       if (job.trajectory && !frame_track.empty()) {
         for (auto& track : frame_track) {
           worker_trajectory[slot].push_back(TrajectoryRecord{index, std::move(track)});

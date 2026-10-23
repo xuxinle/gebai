@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 
+#include "schema.hpp"
 #include "st/ui/element.hpp"
 
 namespace caiyun {
@@ -57,6 +58,13 @@ class DirectorBridge final : public st::ui::Element {
     std::function<std::string(const std::string& key)> project_value{};
     /// 渲染状态里的一项。
     std::function<std::string(const std::string& key)> render_value{};
+    /// 上一次脚本解析的诊断（JSON 数组，每条含 path/key/message/suggestion）。
+    ///
+    /// 为何做成钩子而不是由桥自己去查：诊断住在 `Project` 的当前脚本里，
+    /// 而桥刻意不持有工程状态（它只转发，业务判断只有一份实现）。
+    std::function<std::string()> schema_diagnostics{};
+    /// 诊断条数（快速断言用；“这次改动有没有写错字段”只需读一个数字）。
+    std::function<std::string()> diagnostic_count{};
   };
 
   void set_hooks(Hooks hooks) { hooks_ = std::move(hooks); }

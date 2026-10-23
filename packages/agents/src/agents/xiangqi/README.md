@@ -6,8 +6,39 @@
 会话 A ─┐
 会话 B ─┼─▶ 控制器（进程级单例，WS 服务端）◀──ws── 相期窗口（桌面）
 会话 C ─┘         │
-                  └─ card_notice / card_ask / card_list / card_dismiss
+                  └─ card_notice / card_ask / card_authorize / card_list / card_dismiss
 ```
+
+## 定位：内置域（`packages/agents/src/agents/xiangqi/`）
+
+相期是**核心能力**而非二开扩展：它是歌白对外的第二个界面（桌面提醒面），
+与网页、飞书群同级。所以它住在内置域，随歌白一起构建/发布，而不是放在
+`custom/`（那层是「不碰上游、可整体迁移」的客制层）。
+
+对宿主内代码的含意：需要直接推卡的地方（如拟人模式推授权卡）**不经源码 import**，
+而是取子Agent 定义上的工具（`subAgents.defOf("xiangqi")` —— 与模型 `agent_load`
+同一来源）——内置子Agent 是构建期打包的，源码路径不属于 server 的可引用面。
+
+## 五个工具
+
+| 工具 | 阻塞 | 用途 |
+|---|---|---|
+| `card_notice` | 否 | 纯告知 |
+| `card_ask` | 是（可超时） | 需要用户定夺（choice/todo） |
+| `card_authorize` | 否 | **送用户去浏览器办事**（授权/登录）——带链接，完成后主动撤卡 |
+| `card_list` | 否 | 看谁还在等 |
+| `card_dismiss` | 否 | 传 `id` 只撤那张；不传清全部 |
+
+### 为何 `card_authorize` 不复用 `card_ask`
+
+| | `card_ask` | `card_authorize` |
+|---|---|---|
+| 用户要做的 | 在卡片上选一个 | **离开去浏览器完成** |
+| 答案从哪来 | 卡片上的点击 | 外部系统回调（不是卡片） |
+| 阻塞姿态 | 等答复（可超时） | **不阻塞** |
+| 完成后 | 用户点选 → 返回 | 外部状态变了 → **调用方主动撤卡** |
+
+硬塞进 `card_ask` 会让「阻塞等待」这个语义失真——授权完成不会有 `answer` 回来。
 
 ## 为什么是子Agent，不是全局工具
 

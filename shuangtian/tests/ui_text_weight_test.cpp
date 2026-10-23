@@ -119,22 +119,25 @@ ST_TEST(ui_text_weight_reaches_pixels) {
   ST_CHECK(spy.last_bold);
 
   ST_CHECK(regular.ink > 1.0);
-  // ① 三个非 Regular 档都比 Regular 更重（字重真的落像素）。
+  // ① 字重落像素的**现契约**（2026-10-23 起）：
   //
-  //    **不再断言 bold > semibold**：2026-10-07 起 **SemiBold 与 Bold 同走真粗体面**
-  //    （以真窗口浏览器为参照——它的 `font-weight:600` 与 `700` 逐像素相同，
-  //    与 400/500 明显不同），所以两者本就是同一条路，比“谁更黑”无意义。
-  //    Medium 仍走**合成加粗**（系统里没有对应字重面）。
-  //    真粗体面的收益在**锐度与一致性**（同一口径实测，tools/ui_text_probe.cpp）：
-  //    中文过渡带 0.246→0.155（锐 37%）、英文字间离散 14.1%→**0.0%**、
-  //    英文过渡带 0.204→0.131（锐 36%）。
-  ST_CHECK(medium.ink > regular.ink * 1.05);
-  ST_CHECK(semibold.ink > medium.ink);
-  // `bold` 的断言在**契约层**（下一条）：它走的是**真粗体字体面**，
-  // 而“墨量是否更大”取决于字体设计（真 Bold 面的字干更粗但字面可能更收），
-  // 不是本框架的契约——实测同一串在中文字上 bold 墨量 > regular，
-  // 而混排样本上两者接近。用“走了哪条路”当契约，比用“谁更黑”稳定。
-  // ② 峰值覆盖率不变（±3%）：变粗而不是变糊
+  //    只有走**真粗体面**的档位（SemiBold / Bold）才比 Regular 重；
+  //    Medium 在系统里**没有对应字重面**，而合成加粗已禁用 ⇒
+  //    它必须与 Regular **逐像素相同**。
+  //
+  //    为何这是对的而不是缺陷：合成加粗的过渡带 0.246 vs 真粗体面 0.155
+  //    （锐 37%）、英文字间离散 14.1%→0%，大字号下就是“糊而脏”。
+  //    需要视觉层次时改用字号/颜色/间距，不用假加粗。
+  //
+  //    这条断言是**双向护栏**：若有人日后又把合成加粗接回来（或绕过
+  //    `embolden_radius` 直传半径），Medium 就会变重 → 这里会红。
+  ST_CHECK_NEAR(medium.ink, regular.ink, 0.5);
+  ST_CHECK(semibold.ink > regular.ink * 1.05);
+  // ② 所有档位**都没有叠加合成加粗**（这是禁令的可执行判据）。
+  //
+  //    比“谁更黑”稳定：无论字体怎么换，链路都必须恒为 embolden=0。
+  ST_CHECK_NEAR(spy.last_embolden, 0.0f, 1e-6f);
+  // ③ 峰值覆盖率不变（±3%）：变粗而不是变糊
   ST_CHECK(std::abs(bold.peak - regular.peak) <= 0.03f);
 }
 
@@ -161,9 +164,21 @@ ST_TEST(ui_semibold_uses_the_real_bold_face) {
   // 直接问端口：SemiBold 会不会走真粗体面。
   ST_CHECK(st::ui::prefers_real_bold(st::ui::FontWeight::SemiBold));
   ST_CHECK(st::ui::prefers_real_bold(st::ui::FontWeight::Bold));
-  // 对偶：Medium 走合成加粗（系统里没有对应字重面），不能被一并归入。
+  // 对偶：Medium 没有真粗体面可走（系统里没有 Medium 字重面），
+  // 而合成加粗已禁用 ⇒ 它会退化成 Regular（见 `embolden_radius`）。
   ST_CHECK(!st::ui::prefers_real_bold(st::ui::FontWeight::Medium));
   ST_CHECK(!st::ui::prefers_real_bold(st::ui::FontWeight::Regular));
+  // 禁令的可执行判据：任何字重求半径都必须是 0。
+  //
+  // 用字号跑一变（小/中/大）：若哪一天有人把“按字号给半径”的写法接回来，
+  // 这里会红，而不是等到用户报“字很糊”才发现。
+  for (const float size : {11.0f, 20.25f, 48.0f, 96.0f}) {
+    for (const st::ui::FontWeight weight :
+         {st::ui::FontWeight::Regular, st::ui::FontWeight::Medium,
+          st::ui::FontWeight::SemiBold, st::ui::FontWeight::Bold}) {
+      ST_CHECK_NEAR(st::ui::embolden_radius(size, weight), 0.0f, 1e-9f);
+    }
+  }
 
   // 墨量：SemiBold 必须**真的比 Regular 重**（不能因走真粗体面而变轻）。
   Theme theme = Theme::light();

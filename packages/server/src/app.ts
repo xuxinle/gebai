@@ -17,6 +17,7 @@ import type { ServerConfig } from "./core/base/config"
 import { BOOT_ID } from "./core/base/boot-id"
 import type { RouteCtx } from "./routes/context"
 import { registerAuthRoutes } from "./routes/auth"
+import { registerPersonaRoutes } from "./routes/persona"
 import { registerUserRoutes } from "./routes/users"
 import { registerSessionRoutes } from "./routes/sessions"
 import { registerSessionFileRoutes } from "./routes/session-files"
@@ -61,6 +62,8 @@ export interface AppDeps {
   credentialSources?: readonly CredentialSource[]
   /** WS 状态服务（MVC 模型层：事件日志/连接状态/快照）；由 startServer 注入。 */
   state?: import("./ws-state").WsStateService
+  /** 拟人模式飞书凭据（未启用时为 null；控制授权流程与状态查询）。 */
+  personaCredentials?: import("@gebai/persona").PersonaCredentials | null
   /** 文件工作台：写操作审计（组合根注入；缺省不审计）。 */
   fsAudit?: import("./core/fs/audit").FsAudit
   /** 文件工作台：Git 服务（组合根注入；缺省时 git 端点返回 503「Git 能力未启用」）。 */
@@ -188,6 +191,15 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
 
   // 各域路由（装配顺序：sessions 的 :id 白名单中间件须先于 session-files 注册）
   registerAuthRoutes(rc)
+  // 拟人模式凭据路由（状态/授权/回调/撤销）：未启用时端点返回 404，不影响其他功能
+  registerPersonaRoutes(app, {
+    credentials: d.personaCredentials ?? null,
+    publish: (type, payload) => d.events.publish({ type, sessionId: "", payload, timestamp: Date.now() }),
+    publicBase: () => {
+      const base = (process.env.GEBAI_PUBLIC_URL ?? "").replace(/\/+$/, "")
+      return base || `http://localhost:${d.config.port}`
+    },
+  })
   registerUserRoutes(rc)
   registerSessionRoutes(rc)
   registerSessionFileRoutes(rc)

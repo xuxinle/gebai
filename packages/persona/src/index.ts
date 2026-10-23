@@ -98,3 +98,17 @@ export {
 } from "./discovery"
 export type { EventSourceManagerOptions, EventSourceState } from "./source-manager"
 export { EventSourceManager } from "./source-manager"
+
+// ── 人格定义扩展规范（与事件源、子 Agent、渠道同款「丢文件即注册」）──
+export type { PersonaCatalogOptions } from "./catalog"
+export { PersonaCatalog } from "./catalog"
+export type { PersonaDef, PersonaDiscoveryResult, PersonaLoadError, PersonaScanDirs } from "./persona"
+export { defaultPersonaScanDirs, discoverPersonas, readPersonaFile, validatePersonaDef } from "./persona"
+
+// ── 飞书凭据（进程级用户令牌 + 授权流程）──
+export type { PersonaTokenStoreOptions, PersonaUserToken, TokenState } from "./user-token"
+export { PersonaTokenStore } from "./user-token"
+export type { AuthorizeOptions, AuthorizeTicket, ExchangeOptions, PendingAuthorize } from "./oauth"
+export { extractCode, OFFLINE_ACCESS_SCOPE, PERSONA_SCOPES, PersonaOAuth, scopesFromEnv } from "./oauth"
+export type { PersonaCredentialStatus, PersonaCredentialsOptions } from "./credentials"
+export { PersonaCredentials } from "./credentials"

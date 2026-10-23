@@ -34,6 +34,7 @@
 
 #include "director.hpp"
 #include "director_bridge.hpp"
+#include "layer_schema.hpp"
 #include "project.hpp"
 #include "render.hpp"
 #include "views.hpp"
@@ -43,9 +44,11 @@
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
 #include "st/core/time.hpp"
+#include "st/ext/json.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/scroll.hpp"
 #include "st/ui/components/slider.hpp"
+#include "st/ui/property_panel.hpp"
 #include "st/ui/components/title_bar.hpp"
 #include "st/ui/components/window_frame.hpp"
 #include "st/ui/dsl.hpp"
@@ -62,11 +65,11 @@ using caiyun::Project;
 using caiyun::RenderJob;
 using caiyun::Renderer;
 using caiyun::RenderStatus;
+using caiyun::Diagnostic;
 using caiyun::TimelineView;
 using st::ui::Button;
 using st::ui::ScrollView;
 namespace dsl = st::ui::dsl;
-
 struct Options {
   bool headless{false};
   std::string backend{};
@@ -402,6 +405,26 @@ class CaiyunPage final : public dsl::Component {
       if (key == "name") return project_.script.name;
       if (key == "clip_count") return std::to_string(project_.clips.size());
       return {};
+    };
+    // 字段自省与诊断的出口（见 `schema.hpp` / `director_bridge.hpp`）。
+    //
+    // 诊断以 **JSON 数组** 返回而不是一大段文本：智能体可以逐条取
+    // `path`/`key`/`suggestion` 去改，而不必用正则去拆日志。
+    hooks.schema_diagnostics = [this]() -> std::string {
+      st::Json list = st::Json::array();
+      for (const Diagnostic& diag : project_.script.diagnostics) {
+        st::Json item = st::Json::object();
+        item["severity"] = diag.is_error ? "error" : "warning";
+        item["path"] = diag.path;
+        item["key"] = diag.key;
+        item["message"] = diag.message;
+        if (!diag.suggestion.empty()) item["suggestion"] = diag.suggestion;
+        list.push_back(std::move(item));
+      }
+      return st::json_dump(list, false);
+    };
+    hooks.diagnostic_count = [this]() -> std::string {
+      return std::to_string(project_.script.diagnostics.size());
     };
     hooks.render_value = [this](const std::string& key) -> std::string {
       const RenderStatus status = renderer_.status();
@@ -826,6 +849,49 @@ class CaiyunPage final : public dsl::Component {
             {.id = "inspector-subtitle-input", .key = "scene-subtitle"})
             .set_enabled(editable);
       }
+      // ── 图层可调参数（**由 `PropertyDesc` 表生成**，不手写控件）──
+      //
+      // 这一段是“属性描述契约”的真实落点：加一个参数只改
+      // `layer_schema.cpp` 的表 + `get/set_layer_property` 各一条分支，
+      // 面板自动多一个控件；范围也必然与写入时的夹取同源。
+      //
+      // 为何放在最后而不是前面：它列出的是“图层级参数”（十几项），
+      // 而人会先看片段时间与文案——把长列表放底部符合阅读顺序。
+      if (scene != nullptr && clip->scene_index >= 0 &&
+          static_cast<std::size_t>(clip->scene_index) < project_.script.scenes.size()) {
+        const caiyun::Scene& target_scene =
+            project_.script.scenes[static_cast<std::size_t>(clip->scene_index)];
+        if (!target_scene.layers.empty()) {
+          (void)dsl::divider(c);
+          dsl::text(
+              c, [] { return std::string("图层参数"); },
+              {.size = 12.0f, .id = "inspector-layer-title"});
+          // 首版：面板作用于该幕**第一个图层**（多图层选择属于选择器，
+          // 而选择器本身应该复用同一套描述去列属性——那是下一步）。
+          const std::size_t layer_index = 0;
+          const int scene_index = clip->scene_index;
+          st::ui::PropertyPanelHooks hooks{};
+          hooks.id_prefix = "inspector-layer";
+          hooks.read = [this, scene_index, layer_index](std::string_view name)
+              -> std::optional<std::string> {
+            const caiyun::Layer* layer = this->layer_at(scene_index, layer_index);
+            if (layer == nullptr) return std::nullopt;
+            return caiyun::get_layer_property(*layer, name);
+          };
+          hooks.write = [this, scene_index, layer_index](std::string_view name,
+                                                        std::string_view value) {
+            caiyun::Layer* layer = this->layer_at(scene_index, layer_index);
+            if (layer == nullptr) return false;
+            if (!caiyun::set_layer_property(*layer, name, value)) return false;
+            if (monitor_ != nullptr) monitor_->refresh();
+            bump();
+            return true;
+          };
+          (void)st::ui::build_property_panel(
+              c, caiyun::layer_property_schema(), hooks,
+              {.show_advanced = false, .editable = editable, .label_width = 0.0f});
+        }
+      }
     });
         },
         [](ScrollView& view) { view.set_id("inspector-scroll"); },
@@ -883,6 +949,25 @@ class CaiyunPage final : public dsl::Component {
       return timeline_->selected_clip();
     }
     return project_.selected;
+  }
+
+  /// 取某幕第 `index` 个图层的可写指针（越界给 `nullptr`）。
+  ///
+  /// 为何不直接暴露 `project_.script` 给面板：面板只能经这个函数拿图层，
+  /// 于是“幕/图层下标越界”只在本处判定一次；若让调用方自己 `[]`，
+  /// 每处都要写一次边界判断，而漏一处就是越界读。
+  [[nodiscard]] auto layer_at(int scene_index, std::size_t index) -> caiyun::Layer* {
+    if (scene_index < 0 ||
+        static_cast<std::size_t>(scene_index) >= project_.script.scenes.size()) {
+      return nullptr;
+    }
+    auto& layers = project_.script.scenes[static_cast<std::size_t>(scene_index)].layers;
+    if (index >= layers.size()) return nullptr;
+    return &layers[index];
+  }
+  [[nodiscard]] auto layer_at(int scene_index, std::size_t index) const
+      -> const caiyun::Layer* {
+    return const_cast<CaiyunPage*>(this)->layer_at(scene_index, index);
   }
 
   /// 切换控制权的**唯一实现**（人拨开关 / AI 发 `edit_lock` / 启动参数都走它）。

@@ -240,19 +240,95 @@ export function createTools(deps: { controller?: ReturnType<typeof controller> }
   const dismiss: Tool = {
     name: "card_dismiss",
     description:
-      "把相期窗口上的卡片全部清掉。\n" +
-      "⚠ 只用于「这批都过时了」——不要用它清掉还在等用户定夺的 choice/todo" +
-      "（那等于替用户做了「不处理」的决定）。",
-    parameters: { type: "object", properties: {} },
-    async execute() {
-      resolve().dismissAll()
-      return textResult("已清空相期上的全部卡片。")
+      "把相期窗口上的卡片清掉。\n" +
+      "传 `id` = 只撤那一张（已处理完的事）；不传 = 清全部。\n" +
+      "⚠ 不要用清全部去抹掉还在等用户定夺的 choice/todo（那等于替用户做了「不处理」的决定）。",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "要撤的卡片 id（省略 = 清全部）" },
+      },
+    },
+    async execute(args) {
+      const id = args.id === undefined ? "" : String(args.id).trim()
+      if (!id) {
+        resolve().dismissAll()
+        return textResult("已清空相期上的全部卡片。")
+      }
+      const ok = resolve().dismiss(id)
+      return textResult(ok ? `已撤回卡片 ${id}。` : `相期上没有 id=${id} 的卡片（可能已处理或已过期）。`, {
+        id,
+        dismissed: ok,
+      })
+    },
+  }
+
+  /**
+   * 授权卡：把一个**外部链接**送到用户桌面上，并跟踪他什么时候完成。
+   *
+   * 为何不复用 `card_ask`：
+   *
+   * | | `card_ask` | `card_authorize` |
+   * |---|---|---|
+   * | 用户要做的 | 在卡片上选一个 | **离开去浏览器完成** |
+   * | 答案从哪来 | 卡片上的点击 | 外部系统回调（不是卡片） |
+   * | 阻塞姿态 | 等答复（可超时） | **不阻塞**（授权可能很久，且可能是别的设备上完成） |
+   * | 完成后 | 用户点选 → 返回 | 外部状态变了 → **主动撤卡** |
+   *
+   * 硬塞进 `card_ask` 会让「阻塞等待」这个语义失真——授权完成不会有 `answer` 回来。
+   */
+  const authorize: Tool = {
+    name: "card_authorize",
+    description:
+      "在相期窗口推一张「去授权」卡：带一个可点击的外部链接，并告知授权完成前什么功能不可用。\n" +
+      "**不阻塞等待**（授权可能很久，也可能在手机等其他设备完成）。\n" +
+      "授权完成后用 `card_dismiss(id=…)` 把卡撤掉——不要留着让用户以为还没好。",
+    parameters: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "一句话说清要授权什么" },
+        url: { type: "string", description: "授权链接（点击打开浏览器）" },
+        body: { type: "string", description: "补充说明，markdown（如：为什么需要、完成后会怎样）" },
+        from: { type: "string", description: "来源标签" },
+        ttl_ms: { type: "number", description: "卡片有效期（毫秒）；链接过期后卡片自动消失。缺省 10 分钟" },
+      },
+      required: ["title", "url"],
+    },
+    async execute(args) {
+      const url = String(args.url ?? "").trim()
+      if (!/^https?:\/\//i.test(url)) throw new Error("url 必须是 http(s) 链接")
+      const ttl = typeof args.ttl_ms === "number" && args.ttl_ms > 0 ? args.ttl_ms : 10 * 60 * 1000
+      const spec: CardSpec = {
+        // `choice` + 带 url 的选项 = 链接按钮（相期渲染为可点击）
+        kind: "choice",
+        title: String(args.title ?? ""),
+        body: args.body === undefined ? undefined : String(args.body),
+        from: args.from === undefined ? undefined : String(args.from),
+        options: [{ label: "去授权", value: "open", url }],
+        expiresAtMs: Date.now() + ttl,
+      }
+      const { id, delivered } = resolve().push(spec)
+      if (!delivered) {
+        return textResult(
+          `⚠ 相期未连接——**用户看不到这张授权卡**（id=${id}，已缓存，相期启动后会重推）。\n` +
+            `授权链接：${url}\n` +
+            `如果相期没在运行，请通过其他方式把链接发给用户。`,
+          { id, delivered: false, url },
+        )
+      }
+      return textResult(`已在相期推送授权卡（id=${id}），用户点击链接即可完成授权。授权完成后请用 card_dismiss 撤卡。`, {
+        id,
+        delivered: true,
+        url,
+        expiresAtMs: spec.expiresAtMs,
+      })
     },
   }
 
   return {
     card_notice: notice,
     card_ask: ask,
+    card_authorize: authorize,
     card_list: list,
     card_dismiss: dismiss,
   }

@@ -5,22 +5,21 @@
  * 不是独立会话。弹一张卡片不需要起一个 LLM 循环。
  */
 
-import { readFileSync } from "node:fs"
-
 import type { SubAgentDef, ToolSet } from "@gebai/sdk"
 
 import { createTools } from "./tools"
 
-// 提示词以纯 Markdown 维护（便于阅读/评审）；`with { type: "file" }`
-// 让 bun build --compile 把资源内联进单文件二进制。
-import promptPath from "./xiangqi.md" with { type: "file" }
+// 提示词以纯 Markdown 维护（便于阅读/评审）；用 `with { type: "text" }` 直接取原文——
+// 不能靠 Bun 对 .md 的缺省 loader（会包 <p> 把提示词变成 HTML 串）。
+import systemPromptRaw from "./xiangqi.md" with { type: "text" }
 
-export const systemPrompt = readFileSync(promptPath, "utf-8").trim()
+export const systemPrompt = String(systemPromptRaw).trim()
 
 export const name = "xiangqi"
 export const description =
-  "相期（Xiāngqī）：在用户桌面上弹常驻卡片——提示他、请他选择、让他待办等待。" +
-  "需要用户在任务中途介入（确认、选择、去动手）时装载。工具：card_notice / card_ask / card_list / card_dismiss。"
+  "相期（Xiāngqī）：在用户桌面上弹常驻卡片——提示他、请他选择、让他待办等待、送他一个去授权的链接。" +
+  "需要用户在任务中途介入（确认、选择、去动手、去授权）时装载。" +
+  "工具：card_notice / card_ask / card_authorize / card_list / card_dismiss。"
 
 /** 工具集（依赖注入控制器便于测试）。 */
 export const tools = createTools() as unknown as ToolSet
@@ -38,6 +37,7 @@ export const tools = createTools() as unknown as ToolSet
 export const requiresApproval: Record<string, boolean> = {
   card_notice: false,
   card_ask: false,
+  card_authorize: false,
   card_list: false,
   card_dismiss: false,
 }

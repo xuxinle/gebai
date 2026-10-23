@@ -10,6 +10,7 @@
 #include <cmath>
 #include <format>
 
+#include "carry.hpp"
 #include "fx.hpp"
 #include "motion.hpp"
 #include "st/raster/path.hpp"
@@ -502,6 +503,26 @@ void Project::render_frame(Canvas& target, double time, const st::ui::TextPort* 
                                   static_cast<float>(target.device_scale()));
       }
 
+    }
+  }
+
+  // ── 跨场承接层 ──
+  //
+  // 为何放在“幕合成之后、全片淡入淡出之前”：承接必须盖在两幕之上
+  // （它是合成之上的一层），但又必须受全片淡入淡出影响（否则片头/片尾
+  // 会出现一块不受黑场包边的矩形）。
+  //
+  // 只有声明了 `carry_out` 的场景才会进这里；没声明时本段**一笔不画**——
+  // 这是“不推翻现有架构”的具体含义：旧脚本成片逐像素不变。
+  if (!script.scenes.empty()) {
+    const float design_w = static_cast<float>(kDesignWidth);
+    const float design_h = static_cast<float>(kDesignHeight);
+    for (const Scene& scene : script.scenes) {
+      if (scene.carry.name.empty()) continue;
+      const CarryPose pose = evaluate_carry(scene.carry, time, design_w, design_h);
+      if (!pose.active) continue;
+      // `pose.alpha`：承接末段淡出（`fade_out`），让位给下一幕的真实内容。
+      paint_carry(target, scene.carry, pose, text_port, pose.alpha);
     }
   }
 

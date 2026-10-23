@@ -10,6 +10,7 @@
 
 #include "assets_lib.hpp"
 #include "brand.hpp"
+#include "carry.hpp"
 #include "fx.hpp"
 #include "layer.hpp"
 #include "kin_text.hpp"
@@ -102,19 +103,54 @@ class Painter {
         width_(static_cast<float>(canvas.physical_width())),
         height_(static_cast<float>(canvas.physical_height())) {}
 
+  /// 设置矢量相机（缺省 zoom=1 = 完全不变，老路径零成本）。
+  void set_camera(const VectorCamera& camera) {
+    camera_ = camera;
+    // 锚点缺省值随画布尺寸走——`kDesignWidth/2` 在竖版画幅下不是画面中心。
+    if (camera.anchor_x < 0.0f) camera_.anchor_x = kDesignWidth * 0.5f;
+    if (camera.anchor_y < 0.0f) camera_.anchor_y = kDesignHeight * 0.5f;
+  }
+  [[nodiscard]] auto camera() const noexcept -> const VectorCamera& { return camera_; }
+
   [[nodiscard]] auto scale() const noexcept -> float { return scale_; }
   [[nodiscard]] auto width() const noexcept -> float { return width_; }
   [[nodiscard]] auto height() const noexcept -> float { return height_; }
   [[nodiscard]] auto port() const noexcept -> const TextPort* { return port_; }
 
   [[nodiscard]] auto rect(float x, float y, float w, float h) const -> st::math::Rect {
-    return st::math::Rect{x * scale_, y * scale_, w * scale_, h * scale_};
+    const auto [px, py] = camera_.apply(x, y);
+    // 宽高按**缩放倍数**变换（不做旋转时就是等比）——旋转不影响轴对齐矩形尺寸，
+    // 本框架的图元只支持轴对齐，旋转的矩形会被当成包围盒（可接受：相机旋转
+    // 建议 ≤1 度，包围盒误差在该量级下不可见）。
+    const auto [px2, py2] = camera_.apply(x + w, y + h);
+    return st::math::Rect{px * scale_, py * scale_, (px2 - px) * scale_, (py2 - py) * scale_};
   }
   [[nodiscard]] auto point(float x, float y) const -> st::math::Point {
-    return st::math::Point{x * scale_, y * scale_};
+    const auto [px, py] = camera_.apply(x, y);
+    return st::math::Point{px * scale_, py * scale_};
   }
-  [[nodiscard]] auto design(float value) const noexcept -> float { return value * scale_; }
-
+  /// 物理像素坐标 → 物理像素（只过相机，不再乘 scale）。
+  ///
+  /// ## 为何需要这个入口
+  ///
+  /// `path` 图元的点存的是**设计像素**，但绘制时要先变到物理像素再交给 canvas。
+  /// 早先那里自己写 `lx + points[i] * scale`，**绕开了相机**——于是矢量相机
+  /// 对路径图元无效（实测：一条 loss 曲线在 240× 时完全不动，而同一画面的
+  /// rect/text 都在正常放大，很难看出是哪类图元漏了）。
+  ///
+  /// 这个入口把“已到物理像素的坐标”再过一次相机，避免在业务代码里
+  /// 先除再乘（除乘往返会引入浮点误差，且看代码的人很难确认对不对）。
+  [[nodiscard]] auto point_physical(float px, float py) const -> st::math::Point {
+    const auto [x, y] = camera_.apply_physical(px, py, scale_);
+    return st::math::Point{x, y};
+  }
+  /// 标量（半径/线宽/字号/圆角）按相机的**缩放倍数**变换。
+  ///
+  /// 这是矢量重绘的关键：字号也跟着变，文字才会按新尺寸重新光栅化（锐利），
+  /// 而不是把旧位图拉大（糊）。
+  [[nodiscard]] auto design(float value) const noexcept -> float {
+    return value * scale_ * camera_.zoom;
+  }
   void clear(Color color) { canvas_.clear(color); }
   void fill(float x, float y, float w, float h, Color color, float radius = 0.0f) {
     canvas_.fill_rect(rect(x, y, w, h), Paint::solid(color), design(radius));
@@ -139,14 +175,18 @@ class Painter {
     canvas_.fill_path(ring, Paint::solid(color));
   }
 
-  /// 排版：按**设计字号**量宽（返回设计坐标下的宽度）。
+  /// 排版：量宽并返回**世界坐标**下的宽度。
+  ///
+  /// 两处除以必须一致：`measure_width` 用的是**已乘 zoom 的字号**，
+  /// 所以除回去时要除 `scale * zoom`。只除 `scale` 会让返回值虚肿 zoom 倍，
+  /// 而调用方拿它去算居中/换行——**字越多偏得越远**，且小倍率下看不出来。
   [[nodiscard]] auto text_width(std::string_view text, float size, bool mono = false) const
       -> float {
     if (port_ == nullptr || text.empty()) return 0.0f;
     const float width = port_->measure_width(text, design(size),
                                              mono ? st::text::FontRole::Monospace
                                                   : st::text::FontRole::Proportional);
-    return width / scale_;
+    return width / (scale_ * camera_.zoom);
   }
 
   /// 画一行文字：`anchor` 0=左 0.5=居中 1=右；`y` 是**基线**的 y（设计坐标）。
@@ -154,15 +194,27 @@ class Painter {
   /// 为什么要做基线换算：`TextPort::draw` 的 `origin` 是**行盒左上角**，而排版
   /// 位置几乎总是按基线想的（"标题坐在 y=470 这条线上"）。不换算的话每处都会
   /// 系统性偏低一个 `ascent`（≈0.93×字号）——大标题上就是 100+px 的错位。
+  ///
+  /// ## 粗体：只走真粗体面，**不做合成加粗**（本框架的硬性取向）
+  ///
+  /// 合成加粗是“把同一份轮廓水平平移后重复填充”，与真粗体面相比：
+  /// 中文过渡带 0.246 vs **0.155**、英文字间离散 14.1% vs **0.0%**
+  /// （实测见 `st/ui/text_port.hpp` 的 `prefers_real_bold`）。
+  /// 对动效片尤其致命：大字号下“糊而脏”的过渡带会被放大到整屏可见。
+  ///
+  /// 所以这里**恒传 `embolden = 0`**，粗体完全由 `bold=true` 交给字体栈
+  /// 去选粗体面。探不到粗体面的环境里，`find_face` 会自动回退常规面——
+  /// 此时字重退化成 Regular（可接受：**宁可不粗，不要脏**）。
   void text(std::string_view content, float size, float x, float y, Color color,
             float anchor = 0.0f, bool bold = false, bool mono = false) {
     if (port_ == nullptr || content.empty()) return;
     const float advance = text_width(content, size, mono);
     const float left = x - advance * anchor;
-    const float top = y - port_->ascent(design(size)) / scale_;
+    // ascent 也是“已乘 zoom 的像素量 → 世界坐标”，与 text_width 同口径
+    const float top = y - port_->ascent(design(size)) / (scale_ * camera_.zoom);
     port_->draw(canvas_, content, point(left, top), design(size), color,
                 mono ? st::text::FontRole::Monospace : st::text::FontRole::Proportional,
-                bold ? design(size) / 20.0f : 0.0f, bold);
+                0.0f, bold);
   }
 
   /// 带字距的文本总宽（与 `spaced_text` 同一口径——两者分开写必然漂移）。
@@ -179,15 +231,24 @@ class Painter {
 
   /// 带**字距**的文字（大标题用；CJK 逐字加距是"高级感"最省力的一招）。
   /// 返回总宽（设计坐标）。
+  ///
+  /// ## `bold` 必须透传（这是一个真实缺陷的修复）
+  ///
+  /// 早先这里只传 5 个参数，**漏了 `bold`**——于是所有带字距的文本都退回
+  /// Regular。而字距恰恰是**大标题**才会用的（`tracking` 在版式里就配给标题），
+  /// 所以症状是“标题该粗却不粗”，看起来像字重设置没生效。
+  ///
+  /// 与 `text()` 同一取向：`embolden` 恒传 0，粗体只走真粗体面。
   auto spaced_text(std::string_view content, float size, float x, float baseline, Color color,
-                   float tracking) -> float {
+                   float tracking, bool bold = false) -> float {
     if (port_ == nullptr || content.empty()) return 0.0f;
     const auto glyphs = split_utf8(content);
     const float top = baseline - port_->ascent(design(size)) / scale_;
     float cursor = x;
     float total = 0.0f;
     for (std::size_t i = 0; i < glyphs.size(); ++i) {
-      port_->draw(canvas_, glyphs[i], point(cursor, top), design(size), color);
+      port_->draw(canvas_, glyphs[i], point(cursor, top), design(size), color,
+                  st::text::FontRole::Proportional, 0.0f, bold);
       const float advance = text_width(glyphs[i], size);
       const float gap = (i + 1 < glyphs.size()) ? tracking : 0.0f;
       cursor += advance + gap;
@@ -382,6 +443,8 @@ class Painter {
   float scale_;
   float width_;
   float height_;
+  /// 矢量相机（缺省 zoom=1：`apply` 早退，老路径零成本）。
+  VectorCamera camera_{};
 };
 
 /// 背景图（素材）：铺满全画面 + 压暗 + 缓慢推拉（Ken Burns）。
@@ -453,17 +516,34 @@ void paint_backdrop(Painter& p, const Scene& scene, float local_time, float dura
   p.vertical_gradient(scene.bg_top, scene.bg_bottom);
   const float phase = duration > 0.01f ? local_time / duration : 0.0f;
   const float drift = 0.5f - 0.5f * std::cos(phase * kPi);   // 0 → 1 → 0
+
+    // 背景亮度（两色取亮者）——决定铺光与暗角要不要上。
+  //
+  // 为何按亮度自适应而不是给脚本加开关：**“浅底不该有铺光/暗角”是普适的**，
+  // 而让每个写米白片的人都记得关掉它是又一处“必然漏”的开关。
+  // 实测代价：米白日历场景四角被暗角刷成四个大黑角、中间被铺光揩成脏灰，
+  // 而所有数字（亮度/变化强度/静止占比）都毫无异常——根本看不出是哪一层画的。
+  const bool light = backdrop_is_light(scene.bg_top, scene.bg_bottom);
+
   // 两束**竖向铺光**：一束自上压下、一束自下而上，强弱跟着相位呼吸。
+  //
   // 只用竖向（原因见 `wash_vertical`）——斜向/径向在本框架里都是逐像素慢路径。
-  p.wash_vertical(with_alpha(scene.accent, 0.26f + 0.08f * (1.0f - drift)),
-                  with_alpha(scene.accent, 0.0f));
-  p.wash_vertical(with_alpha(scene.accent, 0.0f),
-                  with_alpha(mix_color(scene.accent, Color{255, 255, 255, 255}, 0.5f),
-                             0.14f + 0.05f * (1.0f - drift)));
+  // 铺光是“光从哪来”，它在深色底上给出体积感；浅底上只会把白揩成脏灰。
+  if (!light) {
+    p.wash_vertical(with_alpha(scene.accent, 0.26f + 0.08f * (1.0f - drift)),
+                    with_alpha(scene.accent, 0.0f));
+    p.wash_vertical(with_alpha(scene.accent, 0.0f),
+                    with_alpha(mix_color(scene.accent, Color{255, 255, 255, 255}, 0.5f),
+                               0.14f + 0.05f * (1.0f - drift)));
+  }
   // **不加全幅径向光斑**：实测它的包裹盒（直径 1340px）单帧就要 84ms——径向渐变
   // 在本框架里是逐像素算距离（47 ns/px，见 `tools/gradient_fill_probe.cpp`）。
   // 光斑留给小半径场合（片尾标志），背景层只用竖向渐变。
-  p.vignette(0.9f);
+  //
+  // 暗角把视线收到中心，对深色底是加分；浅底上就是四个大黑角。
+  if (!light) {
+    p.vignette(0.9f);
+  }
 }
 /// 卡片（三联卡/终端共用）：半透明底 + 低透明描边 + 柔和投影。
 void paint_card(Painter& p, float x, float y, float w, float h, float radius, Color fill_color,
@@ -554,8 +634,8 @@ void draw_text_lines(Painter& p, const Layer& layer, float lx, float ly, float l
         // draw_x 是左边界；居中时传 0.5 让它以 (draw_x + width/2) 为中心画。
         p.text(line, line_size / scale, design_x, design_y, color, 0.5f, layer.bold);
       } else {
-        p.spaced_text(line, line_size / scale, draw_x / scale, design_y, color,
-                      layer.tracking * step_ratio);
+            p.spaced_text(line, line_size / scale, draw_x / scale, design_y, color,
+                  layer.tracking * step_ratio, layer.bold);
       }
     }
     cursor_y += line_step;
@@ -735,6 +815,10 @@ void paint_layers(Painter& p, const Scene& scene, float local_time, const AssetL
       ly = cy - lh * 0.5f;
     }
 
+    // （矢量相机的处理见各图元：`p.fill()`/`p.line()`/`p.text()` 这些
+    //  已经在 `Painter` 内部过相机；直画 `p.canvas()` 的则由各 case 调
+    //  `p.point_physical()` 自行过。）
+
     switch (layer.kind) {
       case LayerKind::Rect: {
         if (layer.fill_alt.a == 0) {
@@ -751,12 +835,16 @@ void paint_layers(Painter& p, const Scene& scene, float local_time, const AssetL
                         st::math::Point{lx, ly}, st::math::Point{lx, ly + lh},
                         {st::raster::GradientStop{0.0f, with_alpha(layer.fill, state.alpha)},
                          st::raster::GradientStop{1.0f, with_alpha(layer.fill_alt, state.alpha)}});
+          // `p.canvas().fill_path()` **不过相机**，所以这里手动过一次。
+          // （早先完全没过——矢量相机对路径图元无效，实测 240× 时曲线不动。）
+          const auto tl = p.point_physical(lx, ly);
+          const auto br = p.point_physical(lx + lw, ly + lh);
           st::raster::Path path;
-          const float r = layer.radius * scale;
+          const float r = layer.radius * scale * (1.0f + std::log(p.camera().zoom));
           if (r > 0.5f) {
-            path.add_rounded_rect(st::math::Rect{lx, ly, lw, lh}, r);
+            path.add_rounded_rect(st::math::Rect{tl.x, tl.y, br.x - tl.x, br.y - tl.y}, r);
           } else {
-            path.add_rect(st::math::Rect{lx, ly, lw, lh});
+            path.add_rect(st::math::Rect{tl.x, tl.y, br.x - tl.x, br.y - tl.y});
           }
           p.canvas().fill_path(path, Paint::with_gradient(std::move(gradient)));
         }
@@ -768,8 +856,11 @@ void paint_layers(Painter& p, const Scene& scene, float local_time, const AssetL
       }
       case LayerKind::Ellipse: {
         // 用 fill_path 画椭圆（Painter 只有正圆；椭圆需要 path）。
+        // path 直画 canvas ⇒ 手动过相机。
+        const auto tl = p.point_physical(lx, ly);
+        const auto br = p.point_physical(lx + lw, ly + lh);
         st::raster::Path path;
-        path.add_ellipse(st::math::Rect{lx, ly, lw, lh});
+        path.add_ellipse(st::math::Rect{tl.x, tl.y, br.x - tl.x, br.y - tl.y});
         p.canvas().fill_path(path, Paint::solid(with_alpha(layer.fill, state.alpha)));
         break;
       }
@@ -832,8 +923,12 @@ void paint_layers(Painter& p, const Scene& scene, float local_time, const AssetL
         st::raster::Path path;
         bool first = true;
         for (std::size_t i = 0; i + 1 < layer.points.size(); i += 2) {
-          const st::math::Point point{lx + layer.points[i] * scale,
-                                      ly + layer.points[i + 1] * scale};
+          // path 直画 canvas ⇒ 手动过相机（点与线宽都要）。
+          // 早先绕过了相机，实测：一条 loss 曲线在 240× 时完全不动，
+          // 而同一画面的 rect/text 都在正常放大，很难看出是哪类图元漏了。
+          const auto pt = p.point_physical(lx + layer.points[i] * scale,
+                                          ly + layer.points[i + 1] * scale);
+          const st::math::Point point{pt.x, pt.y};
           if (first) {
             path.move_to(point);
             first = false;
@@ -846,8 +941,21 @@ void paint_layers(Painter& p, const Scene& scene, float local_time, const AssetL
           p.canvas().fill_path(path, Paint::solid(with_alpha(layer.fill, state.alpha)));
         }
         if (layer.stroke.a != 0 && layer.stroke_width > 0.01f) {
+          // 线宽随缩放**亚线性**增长，用 `1 + ln(zoom)` 而不是 `zoom` 或 `√zoom`。
+          //
+          // ## 为何不是线性 `* zoom`
+          // 实测：240× 时 `* zoom` 让一条 2.6px 的曲线变成 624px 的**粗带子**，
+          // 完全读不出“这是条曲线”。
+          //
+          // ## 为何也不是 `√zoom`
+          // 实测：28× 时 `√zoom` 是 5.3 倍 ⇒ 2.2px 变 11.6px。而深层的
+          // 微步抖动 @28× 只有 5px——线宽比抖动还宽，**细节被自己的线盖住**。
+          //
+          // `1 + ln(zoom)`：28× 时 4.3 倍（9.5px），且增长越来越慢，
+          // 既看得出“变近了”，又不会吃掉深层细节。
+          const float growth = 1.0f + std::log(p.camera().zoom);
           p.canvas().stroke_path(path, Paint::solid(with_alpha(layer.stroke, state.alpha)),
-                                 layer.stroke_width * scale);
+                                 layer.stroke_width * scale * growth);
         }
         break;
       }
@@ -1219,6 +1327,52 @@ void paint_outro(Painter& p, const Scene& scene, float local_time) {
 
 }  // namespace
 
+/// 跨场承接图元的绘制（声明在 `carry.hpp`）。
+///
+/// 放在这里而不是 `carry.cpp`：它需要使用本文件的 `Painter`（设计坐标入、
+/// 内部乘 `scale_`）。若在 `carry.cpp` 里另写一套坐标换算，两处必然漂移——
+/// 而漂移在 1080p 导出（scale=1）下看不出来，只在预览与帧序列里现形。
+void paint_carry(st::raster::Canvas& target, const CarryOut& carry, const CarryPose& pose,
+                 const st::ui::TextPort* text_port, float alpha) {
+  if (!pose.active || alpha <= 0.004f) return;
+  if (pose.w < 1.0f || pose.h < 1.0f) return;
+  Painter p(target, text_port);
+
+  const auto with_alpha = [alpha](Color color) -> Color {
+    const auto a = static_cast<std::uint8_t>(
+        std::clamp(static_cast<float>(color.a) * alpha, 0.0f, 255.0f));
+    return Color{color.r, color.g, color.b, a};
+  };
+
+  // 底色：承接图元必须**不透明**才有“同一块东西”的实体感。
+  // 半透明的承接会被读成“一层渐变的蒙版”，carry 的意图就丢了。
+  if (carry.fill.a != 0) {
+    p.fill(pose.x, pose.y, pose.w, pose.h, with_alpha(carry.fill), pose.radius);
+  }
+  if (carry.stroke.a != 0 && carry.stroke_width > 0.01f) {
+    p.border(pose.x, pose.y, pose.w, pose.h, pose.radius, with_alpha(carry.stroke),
+             carry.stroke_width);
+  }
+
+  // 文字：字号按**短边**缩放，让“同一块东西长开”时字的相对占比稳定。
+  //
+  // 为何不固定字号：承接的本质是这个矩形的**尺寸在变**；若字号不动，
+  // 从小卡长到整页时字会变成角落里的小字，读起来像两个画面叠在一起。
+  if (!carry.text.empty() && carry.text_size > 0.5f) {
+    const float from_h = resolve_carry_dim(carry.from.h, 1.0f, 1.0f);
+    const float from_w = resolve_carry_dim(carry.from.w, 1.0f, 1.0f);
+    const float base_short = std::max(1.0f, std::min(from_w, from_h));
+    const float now_short = std::max(1.0f, std::min(pose.w, pose.h));
+    const float font = std::clamp(carry.text_size * (now_short / base_short), 6.0f,
+                                  std::max(8.0f, pose.h * 0.9f));
+    // `Painter::text` 的 `anchor` 0.5 = x 是中心；y 是**基线**。
+    // 基线取盒中心 + 0.34 倍字号（cap-height 的一半的近似），大字不会偏低。
+    const float baseline = pose.y + pose.h * 0.5f + font * 0.34f;
+    p.text(carry.text, font, pose.x + pose.w * 0.5f, baseline, with_alpha(carry.text_color),
+           0.5f);
+  }
+}
+
 auto ease_out_expo(float t) -> float {
   const float value = clamp01f(t);
   return value >= 1.0f ? 1.0f : 1.0f - std::pow(2.0f, -10.0f * value);
@@ -1244,6 +1398,9 @@ auto ease_out_back(float t) -> float {
   const float inverse = value - 1.0f;
   return 1.0f + c3 * inverse * inverse * inverse + c1 * inverse * inverse;
 }
+
+// 相机进度的实现见 `fx.cpp`（跟 `apply_camera` 同一个单元）：
+// 那边不依赖资源库/文本排版，测试可以直接把 `.cpp` 拉进去验证真实实现。
 
 void set_trajectory_sink(std::vector<ElementTrack>* sink) { trajectory_cell().sink = sink; }
 
@@ -1369,6 +1526,49 @@ void render_scene(st::raster::Canvas& target, const Scene& scene, double local_t
     paint_particles(target, field, static_cast<double>(time), dscale);
   }
   const std::int64_t t1 = profile ? now() : 0;
+
+  // ── 矢量相机：在**绘制期**施加缩放（而非画完再重采样）──
+  //
+  // ## 为何需要两条相机路径
+  //
+  // `apply_camera`（整幅重采样）适合**小幅度运镜**：一次重采样、
+  // 所有图元（含文字、三维、粒子）一起动，语义一致，代价 8~12ms/帧。
+  //
+  // 但它的**细节天花板就是源分辨率**：放大 200× 时一个源像素变成 200px
+  // 方块，双线性插值把这个方块抹匀 ⇒ 必糊。
+  // 参考片 clearing 的 300× 钻穿**完全不糊**（实测抽帧：深钻阶段
+  // 月份标签、格子边缘都锐利）——因为它每帧按当前尺度**重新绘制**。
+  //
+  // 所以给了 `cam_vector: true` 就走矢量路径：`Painter` 的坐标入口
+  // 直接乘上相机变换，图元（含文字）按放大后的尺寸**重新光栅化**。
+  //
+  // ## 矢量路径的代价（为何不让它当默认）
+  //
+  // · 粒子/三维/辉光这些**屏幕空间效果**不经过 Painter 坐标，不会跟着缩放；
+  // · 大幅缩放时超大字号的文字光栅化成本上升；
+  // · 旋转与震动的包围盒只能是近似。
+  // 所以它是**“钻穿镜头”的专用模式**，而不是运镜的通用替代。
+  const bool camera_moves = scene.cam_zoom_from != scene.cam_zoom_to ||
+                            scene.cam_rotate != 0.0f || scene.cam_pan_x != 0.0f ||
+                            scene.cam_pan_y != 0.0f || scene.cam_shake > 0.0001f ||
+                            scene.cam_anchor_x >= 0.0f || scene.cam_anchor_y >= 0.0f;
+  const bool vector_camera = camera_moves && scene.cam_vector &&
+                             scene.cam_rotate == 0.0f && scene.cam_shake <= 0.0001f;
+  if (vector_camera) {
+    const float cam_progress =
+        camera_progress(time, duration, scene.cam_window_start, scene.cam_window_end);
+    const float base_zoom =
+        scene.cam_zoom_from + (scene.cam_zoom_to - scene.cam_zoom_from) * cam_progress;
+    VectorCamera vcam{};
+    vcam.zoom = std::max(0.02f, base_zoom);
+    // 锚点从归一化坐标换到设计坐标（`cam_anchor` 是 0~1，负值 = 画面中心）。
+    vcam.anchor_x = scene.cam_anchor_x >= 0.0f ? scene.cam_anchor_x * kDesignWidth
+                                               : kDesignWidth * 0.5f;
+    vcam.anchor_y = scene.cam_anchor_y >= 0.0f ? scene.cam_anchor_y * kDesignHeight
+                                               : kDesignHeight * 0.5f;
+    p.set_camera(vcam);
+  }
+
   switch (scene.kind) {
     case SceneKind::Title: paint_title(p, scene, time); break;
     case SceneKind::Terminal: paint_terminal(p, scene, time, duration); break;
@@ -1406,10 +1606,10 @@ void render_scene(st::raster::Canvas& target, const Scene& scene, double local_t
   // （拉远类运镜尤其明显：边缘直接露底）。
   //
   // 所以顺序是：内容 → 运镜 → 把运镜结果贴回 → 包装层。
-  const bool camera_moves = scene.cam_zoom_from != scene.cam_zoom_to ||
-                            scene.cam_rotate != 0.0f || scene.cam_pan_x != 0.0f ||
-                            scene.cam_pan_y != 0.0f || scene.cam_shake > 0.0001f;
-  if (camera_moves) {
+  //
+  // 矢量路径（`cam_vector`）下**不做这一步**：缩放已经在绘制期施加了，
+  // 再做一次整幅重采样等于把刚重绘出来的锐利细节又抹一遍。
+  if (camera_moves && !vector_camera) {
     CameraMove move{};
     move.zoom_from = scene.cam_zoom_from;
     move.zoom_to = scene.cam_zoom_to;
@@ -1417,7 +1617,16 @@ void render_scene(st::raster::Canvas& target, const Scene& scene, double local_t
     move.pan_x = scene.cam_pan_x;
     move.pan_y = scene.cam_pan_y;
     move.shake = scene.cam_shake;
-    const float cam_progress = clamp01f(time / std::max(0.2f, duration));
+    move.anchor_x = scene.cam_anchor_x;
+    move.anchor_y = scene.cam_anchor_y;
+    if (scene.cam_zoom_curve == "expo_in") {
+      move.zoom_curve = ZoomCurve::ExpoIn;
+    } else if (scene.cam_zoom_curve == "expo_out") {
+      move.zoom_curve = ZoomCurve::ExpoOut;
+    }
+    // 相机进度：默认整段线性；给了窗口就只为窗口那段推进（窗口外夹在 0/1）。
+    const float cam_progress =
+        camera_progress(time, duration, scene.cam_window_start, scene.cam_window_end);
     const auto moved = apply_camera(target, move, cam_progress, static_cast<double>(time),
                                     target.device_scale());
     target.clear(Color{0, 0, 0, 255});

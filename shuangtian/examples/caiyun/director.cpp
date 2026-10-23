@@ -45,9 +45,79 @@ using st::math::Color;
   return out;
 }
 
-[[nodiscard]] /// 解析图层数组（`Scene::layers`）。
+/// 校验 `tracks` 里的属性名（轨道只能驱动 x/y/w/h/scale/alpha/rotate）。
 ///
-/// ## 设计取舍：宽容解析
+/// 为何需要单独一条：`tracks` 是对象时，它的**子键就是属性名**，而属性名
+/// 不是图层字段（不在 `SchemaScope::Layer` 里），所以顶层字段名校验会
+/// 把整个 `tracks` 当成已知键放过去，而内部的错写一个都抓不到。
+/// 实测意义：`"tracks": {"scae": [...]}`（scale 少写一个 l）完全静默不生效。
+/// 把一个数值字段“直取 + 夹取”并**报告实际发生的夹取**。
+///
+/// ## 为何不能只直夹取
+///
+/// 夹取是失败安全（脚本写错不该让整片失败），但**静默夹取会误导写脚本的人**：
+/// 写 `"model_segments": 200` 得到 96 段，画面上看不出来，会以为是“200 也不更圆”。
+/// 所以这里把“写了多少 / 生效多少”一并记进诊断，既保住宽容，又不隐短。
+///
+/// ## 为何是“后置校验”而不是逐字段包一层
+///
+/// 逐字段包一层要在解析里写四十多道 `report_clamp(...)`，既碟又容易漏——
+/// 而漏掉的那个字段会变成“夹取不报告”，比全不报告更难发现（因为其余都正常）。
+/// 这里改成：解析照旧（一行不改），然后**拿 schema 遍历节点**比“写了什么”与
+/// “实际生效什么”。新增字段只需登记进表，校验自动生效。
+auto collect_range_diagnostics(const st::Json& node, SchemaScope scope, const std::string& path,
+                              std::vector<Diagnostic>& diagnostics) -> void {
+  for (const auto& [key, value] : node.items()) {
+    const FieldSpec* spec = find_field_schema(scope, key);
+    if (spec == nullptr || !spec->has_range || !spec->clamped) continue;
+    if (!value.is_number()) continue;
+    const double written = value.get<double>();
+    const double applied = std::clamp(written, spec->min_value, spec->max_value);
+    if (written < spec->min_value - 1e-9 || written > spec->max_value + 1e-9) {
+      diagnostics.push_back(out_of_range_diagnostic(*spec, written, applied, path));
+    }
+  }
+}
+
+auto collect_track_diagnostics(const st::Json& node, const std::string& path,
+                               std::vector<Diagnostic>& diagnostics) -> void {
+  const auto supported = [](std::string_view property) {
+    return property == "x" || property == "y" || property == "w" || property == "h" ||
+           property == "scale" || property == "alpha" || property == "rotate";
+  };
+  const st::Json* tracks = st::json_find(node, "tracks");
+  if (tracks == nullptr) return;
+  if (tracks->is_object()) {
+    for (const auto& [property, keys] : tracks->items()) {
+      (void)keys;
+      if (supported(property)) continue;
+      Diagnostic diag{};
+      diag.path = path + ".tracks";
+      diag.key = property;
+      // 属性名集合很小，直接给出正确清单比给单个建议更有用。
+      diag.message = std::format("tracks 不支持属性 '{}'（已忽略）——可用："
+                                 "x/y/w/h/scale/alpha/rotate",
+                                 property);
+      diagnostics.push_back(std::move(diag));
+    }
+  } else if (tracks->is_array()) {
+    for (const st::Json& entry : *tracks) {
+      if (!entry.is_object()) continue;
+      const std::string property = st::json_get_string(entry, "property");
+      if (!property.empty() && !supported(property)) {
+        Diagnostic diag{};
+        diag.path = path + ".tracks";
+        diag.key = property;
+        diag.message = std::format("tracks 不支持属性 '{}'（已忽略）——可用："
+                                   "x/y/w/h/scale/alpha/rotate",
+                                   property);
+        diagnostics.push_back(std::move(diag));
+      }
+    }
+  }
+}
+
+[[nodiscard]] /// 解析图层数组（`Scene::layers`）。
 ///
 /// 未知 `kind` **跳过并告警**，而不是整份脚本报错。理由：脚本是外部输入
 /// （AI 写的、用户手改的），一个拼错的图层不该让整片无法渲染——
@@ -55,7 +125,15 @@ using st::math::Color;
 ///
 /// 但**已识别的 kind 里的无效字段**要告警：那通常是"用户以为有这个能力"，
 /// 静默忽略会让他以为设置生效了。
-[[nodiscard]] auto parse_layers(const st::Json& array, std::vector<std::string>* warnings)
+///
+/// ## 为何字段名校验要走 schema（而不是在这里手写白名单）
+///
+/// 图层有七十九个可写键。手写白名单就是第二份真相：加字段时忘了改它就变成
+/// "字段能用但不被承认"，而两份都只报"未知字段"，很难定位。
+/// `schema.hpp` 那份表才是唯一真相，这里只做一件事：把节点里"表里没有的键"
+/// 交给它生成诊断（它知道该建议什么）。
+[[nodiscard]] auto parse_layers(const st::Json& array, std::vector<std::string>* warnings,
+                                std::vector<Diagnostic>* diagnostics, std::string_view path_prefix)
     -> std::vector<Layer> {
   std::vector<Layer> layers;
   if (!array.is_array()) return layers;
@@ -63,7 +141,45 @@ using st::math::Color;
     if (!node.is_object()) continue;
     Layer layer{};
     const std::string kind_name = st::json_get_string(node, "kind");
+    // 诊断路径：`scenes[0].layers[2]`——智能体拿到就能直接定位到编辑位置。
+    const std::string path = std::format("{}.layers[{}]", path_prefix, layers.size());
     const auto kind = layer_kind_from(kind_name);
+    // **非法色值要报出来**（而不是静默回退）。
+    //
+    // `parse_color` 只接受 `#rrggbb` / `#rrggbbaa`；写 `rgb(30,40,50)`、
+    // `#ff` 或 `red` 都会**静默退回默认色**（通常是白）。
+    // 实测代价：一份 480 个格子的脚本全用了 `rgb(...)`，
+    // 结果整屏是白色方阵，而**没有任何报错**——花了很久才找到是颜色格式问题。
+    //
+    // 色值字段名很少（fill/fill_alt/stroke/color/background），直接枚举。
+    if (diagnostics != nullptr) {
+      for (const char* key : {"fill", "fill_alt", "stroke", "color"}) {
+        const st::Json* value = st::json_find(node, key);
+        if (value == nullptr || !value->is_string()) continue;
+        const std::string text = value->get<std::string>();
+        if (text.empty() || text.front() != '#') {
+          Diagnostic diag{};
+          diag.path = path;
+          diag.key = key;
+          diag.is_error = true;
+          diag.message = std::format(
+              "色值 '{}' 不可识别（已回退默认色）——只接受 #rrggbb 或 #rrggbbaa 十六进制；"
+              "不要写 rgb()/rgba()/颜色名",
+              text);
+          diagnostics->push_back(std::move(diag));
+          continue;
+        }
+        const std::size_t digits = text.size() - 1;
+        if (digits != 6 && digits != 8) {
+          Diagnostic diag{};
+          diag.path = path;
+          diag.key = key;
+          diag.is_error = true;
+          diag.message = std::format("色值 '{}' 位数不对（需 6 或 8 位十六进制）", text);
+          diagnostics->push_back(std::move(diag));
+        }
+      }
+    }
     if (!kind) {
       if (warnings != nullptr) {
         warnings->push_back(std::format("未知图层类型 '{}'（已跳过）——可用：rect/ellipse/line/text/image/path/glow/particles/model3d", kind_name));
@@ -277,6 +393,29 @@ using st::math::Color;
     layer.light_rim = static_cast<float>(
         std::clamp(st::json_get_double(node, "light_rim", layer.light_rim), 0.0, 1.0));
 
+    // —— 字段名校验与范围校验（schema 驱动）——
+    //
+    // 放在解析**之后**：先让合法字段生效，再报剩下那些没人认领的键与越界值。
+    // 这样即使一份脚本同时有五个拼写错误，画面仍然是“能看的部分都对”，
+    // 而诊断把五个全部列出来（而不是遇到第一个就停）。
+    if (diagnostics != nullptr) {
+      collect_range_diagnostics(node, SchemaScope::Layer, path, *diagnostics);
+      // `tracks` 的子键（属性名）不是图层字段，它自己在表里（合法），
+      // 但内部属性名必须单独校验——所以这条必须在“已知键就跳过”**之前**。
+      // 实测踩过：先写 `find_field_schema != nullptr → continue`，
+      // 于是 `tracks` 被当成合法键放行，内部错写的属性名一个都抓不到。
+      collect_track_diagnostics(node, path, *diagnostics);
+      for (const auto& [key, ignored] : node.items()) {
+        (void)ignored;
+        if (find_field_schema(SchemaScope::Layer, key) != nullptr) continue;
+        diagnostics->push_back(unknown_key_diagnostic(SchemaScope::Layer, key, path));
+        // 旧的 `warnings` 通道保留：渲染侧与旧调用方还在看它。
+        if (warnings != nullptr) {
+          warnings->push_back(diagnostics->back().to_string());
+        }
+      }
+    }
+
     layers.push_back(std::move(layer));
   }
   return layers;
@@ -319,6 +458,29 @@ using st::math::Color;
     node["color"] = color_to_hex(layer.color);
   }
 
+  // —— 逐字排版 ——
+  //
+  // ## 为何这几个字段必须写回（而不是“反正是默认值”）
+  //
+  // 序列化的消费者不只是人：智能体会 `get script` 读回当前脚本、改一处、再
+  // `apply_script` 写回。任何“能读不能写”的字段都会在那一次往返里**静默消失**——
+  // 实测：早先 `kin_*` 九个字段、`bounce*` 四个、`path_*` 八个、`tracks`、
+  // `model_group`/`model_shadow`/`model_bounce_squash` 全都不写回，
+  // 于是“让文字逐字入场”这类改动会在下一轮读回时集体丢失。
+  //
+  // 策略仍是“只在非默认时写”（保持脚本干净），但**默认值必须与字段声明一致**。
+  if (layer.kin_stagger != 0.035f) node["kin_stagger"] = static_cast<double>(layer.kin_stagger);
+  if (layer.kin_dur != 0.42f) node["kin_dur"] = static_cast<double>(layer.kin_dur);
+  if (layer.kin_enter != 0) node["kin_enter"] = static_cast<std::int64_t>(layer.kin_enter);
+  if (layer.kin_rise != 22.0f) node["kin_rise"] = static_cast<double>(layer.kin_rise);
+  if (layer.kin_float > 0.0f) node["kin_float"] = static_cast<double>(layer.kin_float);
+  if (layer.kin_float > 0.0f) node["kin_float_hz"] = static_cast<double>(layer.kin_float_hz);
+  if (layer.kin_caret != 0) node["kin_caret"] = static_cast<std::int64_t>(layer.kin_caret);
+  if (layer.kin_caret != 0) {
+    node["kin_caret_scale"] = static_cast<double>(layer.kin_caret_scale);
+  }
+  if (layer.kin_type_cps > 0.0f) node["kin_type_cps"] = static_cast<double>(layer.kin_type_cps);
+
   if (!layer.src.empty()) node["src"] = layer.src;
   if (layer.contain) node["contain"] = true;
   if (layer.dim > 0.0f) node["dim"] = static_cast<double>(layer.dim);
@@ -328,6 +490,44 @@ using st::math::Color;
   if (layer.intensity != 0.5f) node["intensity"] = static_cast<double>(layer.intensity);
   if (layer.count != 60) node["count"] = static_cast<std::int64_t>(layer.count);
   if (layer.spread != 0.4f) node["spread"] = static_cast<double>(layer.spread);
+
+  // —— 阻尼弹跳（层通用）——
+  if (layer.bounce > 0.0f) node["bounce"] = static_cast<double>(layer.bounce);
+  if (layer.bounce > 0.0f) {
+    node["bounce_hz"] = static_cast<double>(layer.bounce_hz);
+    node["bounce_damping"] = static_cast<double>(layer.bounce_damping);
+  }
+  if (layer.bounce_at > 0.0f) node["bounce_at"] = static_cast<double>(layer.bounce_at);
+
+  // —— 路径动画 ——
+  if (!layer.path_from_x.empty()) node["path_from_x"] = layer.path_from_x;
+  if (!layer.path_from_y.empty()) node["path_from_y"] = layer.path_from_y;
+  if (!layer.path_to_x.empty()) node["path_to_x"] = layer.path_to_x;
+  if (!layer.path_to_y.empty()) node["path_to_y"] = layer.path_to_y;
+  if (layer.path_arc != 0.0f) node["path_arc"] = static_cast<double>(layer.path_arc);
+  if (!layer.path_to_x.empty() || !layer.path_to_y.empty()) {
+    node["path_dur"] = static_cast<double>(layer.path_dur);
+    node["path_at"] = static_cast<double>(layer.path_at);
+    node["path_ease"] = static_cast<std::int64_t>(layer.path_ease);
+  }
+
+  // —— 关键帧时间线（统一写成“按属性名分组”的短形式）——
+  if (!layer.tracks.empty()) {
+    st::Json tracks = st::Json::object();
+    for (const KeyTrack& track : layer.tracks) {
+      if (track.property.empty()) continue;
+      st::Json keys = st::Json::array();
+      for (const KeyFrame& key : track.keys) {
+        st::Json item = st::Json::object();
+        item["t"] = static_cast<double>(key.time);
+        item["v"] = static_cast<double>(key.value);
+        if (key.ease != 1) item["ease"] = static_cast<std::int64_t>(key.ease);
+        keys.push_back(std::move(item));
+      }
+      if (!keys.empty()) tracks[track.property] = std::move(keys);
+    }
+    if (!tracks.empty()) node["tracks"] = std::move(tracks);
+  }
 
   // 三维：只在 `model3d` 里写，且只写与默认不同的项
   if (layer.kind == LayerKind::Model3d) {
@@ -347,6 +547,15 @@ using st::math::Color;
     }
     if (layer.model_backdrop) node["model_backdrop"] = true;
     if (!layer.model_texture.empty()) node["model_texture"] = layer.model_texture;
+    // 世界组与接触阴影：不写回的话，读一次脚本就“物体散到各自独立世界里”了。
+    if (!layer.model_group.empty()) node["model_group"] = layer.model_group;
+    if (layer.model_shadow > 0.0f) {
+      node["model_shadow"] = static_cast<double>(layer.model_shadow);
+      node["model_shadow_color"] = color_to_hex(layer.model_shadow_color);
+    }
+    if (layer.model_bounce_squash > 0.0f) {
+      node["model_bounce_squash"] = static_cast<double>(layer.model_bounce_squash);
+    }
     if (layer.cam_azimuth != 35.0f) node["cam_azimuth"] = static_cast<double>(layer.cam_azimuth);
     if (layer.cam_elevation != 18.0f) {
       node["cam_elevation"] = static_cast<double>(layer.cam_elevation);
@@ -376,8 +585,8 @@ using st::math::Color;
   return node;
 }
 
-auto scene_from(const st::Json& node, std::size_t index, std::string_view asset_basis)
-    -> Result<Scene> {
+auto scene_from(const st::Json& node, std::size_t index, std::string_view asset_basis,
+                std::vector<Diagnostic>* diagnostics) -> Result<Scene> {
   const std::string kind_name = st::json_get_string(node, "kind");
   const auto kind = scene_kind_from(kind_name);
   if (!kind) {
@@ -405,7 +614,8 @@ auto scene_from(const st::Json& node, std::size_t index, std::string_view asset_
   scene.values = number_array(node, "values");
   // 通用图层（kind=custom 时是主体，其他 kind 是叠加层）。
   if (const st::Json* layers = st::json_find(node, "layers"); layers != nullptr) {
-    scene.layers = parse_layers(*layers, nullptr);
+    scene.layers = parse_layers(*layers, nullptr, diagnostics,
+                                std::format("scenes[{}]", index));
   }
   // 脚本编排层（可选）：`layout` 是脚本源文本。
   //
@@ -439,8 +649,8 @@ auto scene_from(const st::Json& node, std::size_t index, std::string_view asset_
   scene.particle_alpha = static_cast<float>(
       std::clamp(st::json_get_double(node, "particle_alpha", scene.particle_alpha), 0.0, 1.0));
   // 背景颗粒：让「静止段」安静而不冻结（实测能把变化强度中位数提 30 倍）
-  scene.grain = static_cast<int>(
-      std::clamp(st::json_get_i64(node, "grain", scene.grain), 0LL, 2000LL));
+      scene.grain = static_cast<int>(
+        std::clamp(st::json_get_i64(node, "grain", scene.grain), 0LL, 12000LL));
   scene.grain_alpha = static_cast<float>(
       std::clamp(st::json_get_double(node, "grain_alpha", scene.grain_alpha), 0.0, 0.6));
   scene.wrap = st::json_get_bool(node, "wrap", scene.wrap);
@@ -458,10 +668,27 @@ auto scene_from(const st::Json& node, std::size_t index, std::string_view asset_
   scene.light_sweep = static_cast<float>(
       std::clamp(st::json_get_double(node, "light_sweep", scene.light_sweep), 0.0, 1.0));
   // 运镜
+  //
+  // 缩放范围上下界差得很大（0.02 ~ 400）是故意的：
+  // · 小幅度（0.95~1.08）是**镜头呼吸**，观众意识不到有运镜；
+  // · 大幅度（1 → 300）是**钻穿尺度**，参考片 clearing 的整个概念靠它。
+  //
+  // 早先夹在 0.5~2.0，把尺度承接直接堵死（写 300 静默变成 2，画面只是
+  // “稍微放大了一点”，看不出哪里错了）。上下界要能盖住两种用法。
   scene.cam_zoom_from = static_cast<float>(
-      std::clamp(st::json_get_double(node, "cam_zoom_from", scene.cam_zoom_from), 0.5, 2.0));
+      std::clamp(st::json_get_double(node, "cam_zoom_from", scene.cam_zoom_from), 0.02, 400.0));
   scene.cam_zoom_to = static_cast<float>(
-      std::clamp(st::json_get_double(node, "cam_zoom_to", scene.cam_zoom_to), 0.5, 2.0));
+      std::clamp(st::json_get_double(node, "cam_zoom_to", scene.cam_zoom_to), 0.02, 400.0));
+  scene.cam_anchor_x = static_cast<float>(
+      std::clamp(st::json_get_double(node, "cam_anchor_x", scene.cam_anchor_x), -1.0, 1.0));
+  scene.cam_anchor_y = static_cast<float>(
+      std::clamp(st::json_get_double(node, "cam_anchor_y", scene.cam_anchor_y), -1.0, 1.0));
+  scene.cam_zoom_curve = st::json_get_string(node, "cam_zoom_curve", scene.cam_zoom_curve);
+  scene.cam_window_start = static_cast<float>(st::json_get_double(
+      node, "cam_window_start", scene.cam_window_start));
+  scene.cam_window_end = static_cast<float>(
+      st::json_get_double(node, "cam_window_end", scene.cam_window_end));
+  scene.cam_vector = st::json_get_bool(node, "cam_vector", scene.cam_vector);
   scene.cam_rotate = static_cast<float>(
       std::clamp(st::json_get_double(node, "cam_rotate", scene.cam_rotate), -8.0, 8.0));
   scene.cam_pan_x = static_cast<float>(
@@ -470,6 +697,66 @@ auto scene_from(const st::Json& node, std::size_t index, std::string_view asset_
       std::clamp(st::json_get_double(node, "cam_pan_y", scene.cam_pan_y), -0.5, 0.5));
   scene.cam_shake = static_cast<float>(
       std::clamp(st::json_get_double(node, "cam_shake", scene.cam_shake), 0.0, 0.08));
+
+  // —— 跨场承接（`carry_out`）——
+  //
+  // 宽松解析：读不懂就不承接（而不是报错）——承接是增强，不是必需。
+  // 但**名字为空时不算承接**：验收器靠名字认身份，没名字的承接在自动化验收里
+  // 等于不存在（而画面上又确实画了）——这种“看上去做了、实际没算”最难查。
+  if (const st::Json* carry = st::json_find(node, "carry_out");
+      carry != nullptr && carry->is_object()) {
+    CarryOut out{};
+    out.name = st::json_get_string(*carry, "name");
+    out.into = static_cast<int>(
+        st::json_get_i64(*carry, "into", static_cast<std::int64_t>(index + 1)));
+    out.at = st::json_get_double(*carry, "at", 0.0);
+    out.dur = std::clamp(st::json_get_double(*carry, "dur", 0.5), 0.01, 10.0);
+    out.curve = st::json_get_string(*carry, "curve", out.curve);
+    out.rotate = static_cast<float>(st::json_get_double(*carry, "rotate", 0.0));
+    out.fade_out =
+        static_cast<float>(std::clamp(st::json_get_double(*carry, "fade_out", 0.0), 0.0, 1.0));
+    out.fill = color_field(*carry, "fill", out.fill);
+    out.stroke = color_field(*carry, "stroke", out.stroke);
+    out.stroke_width = static_cast<float>(
+        std::clamp(st::json_get_double(*carry, "stroke_width", 0.0), 0.0, 40.0));
+    out.text = st::json_get_string(*carry, "text");
+    out.text_color = color_field(*carry, "text_color", out.text_color);
+    out.text_size = static_cast<float>(
+        std::clamp(st::json_get_double(*carry, "text_size", 48.0), 4.0, 400.0));
+    // 矩形：`x/y/w/h` 与图层同一口径（数字 = 设计像素，字符串 = 画面比例）。
+    const auto read_rect = [](const st::Json* rect, CarryRect fallback) -> CarryRect {
+      if (rect == nullptr || !rect->is_object()) return fallback;
+      const auto dim = [rect](std::string_view key, std::string fallback_value) -> std::string {
+        const st::Json* field = st::json_find(*rect, key);
+        if (field == nullptr) return fallback_value;
+        if (field->is_string()) return field->get<std::string>();
+        if (field->is_number()) return std::format("{:.4f}", field->get<double>());
+        return fallback_value;
+      };
+      CarryRect box{};
+      box.x = dim("x", fallback.x);
+      box.y = dim("y", fallback.y);
+      box.w = dim("w", fallback.w);
+      box.h = dim("h", fallback.h);
+      box.radius = static_cast<float>(
+          std::clamp(st::json_get_double(*rect, "radius", fallback.radius), 0.0, 4000.0));
+      return box;
+    };
+    out.from = read_rect(st::json_find(*carry, "from"), out.from);
+    out.to = read_rect(st::json_find(*carry, "to"), out.to);
+    if (!out.name.empty()) scene.carry = std::move(out);
+  }
+
+  // 场景层字段名校验与范围校验（与图层同一套机制：表驱动，不在多处手写白名单）。
+  if (diagnostics != nullptr) {
+    const std::string path = std::format("scenes[{}]", index);
+    collect_range_diagnostics(node, SchemaScope::Scene, path, *diagnostics);
+    for (const auto& [key, ignored] : node.items()) {
+      (void)ignored;
+      if (find_field_schema(SchemaScope::Scene, key) != nullptr) continue;
+      diagnostics->push_back(unknown_key_diagnostic(SchemaScope::Scene, key, path));
+    }
+  }
   return scene;
 }
 
@@ -498,6 +785,13 @@ auto Script::total_duration() const noexcept -> double {
   double total = 0.0;
   for (const Scene& scene : scenes) total += scene.duration;
   return total;
+}
+
+auto Script::has_errors() const -> bool {
+  for (const Diagnostic& diag : diagnostics) {
+    if (diag.is_error) return true;
+  }
+  return false;
 }
 
 auto parse_color(std::string_view text, Color fallback) -> Color {
@@ -576,12 +870,28 @@ auto parse_script(std::string_view json, std::string_view asset_basis) -> Result
   if (scenes == nullptr || !scenes->is_array() || scenes->empty()) {
     return st::unexpected(st::ErrorCode::Parse, "脚本缺少 scenes（至少一个分镜）");
   }
+  // 脚本顶层：先在解析前校验字段名（顶层没有“夹取”语义，所以只查未知键）。
+  for (const auto& [key, ignored] : root.items()) {
+    (void)ignored;
+    if (find_field_schema(SchemaScope::Script, key) != nullptr) continue;
+    if (key == "audio") continue;
+    script.diagnostics.push_back(unknown_key_diagnostic(SchemaScope::Script, key, "（顶层）"));
+  }
+  if (const st::Json* audio = st::json_find(root, "audio");
+      audio != nullptr && audio->is_object()) {
+    for (const auto& [key, ignored] : audio->items()) {
+      (void)ignored;
+      if (find_field_schema(SchemaScope::Audio, key) != nullptr) continue;
+      script.diagnostics.push_back(unknown_key_diagnostic(SchemaScope::Audio, key, "audio"));
+    }
+    collect_range_diagnostics(*audio, SchemaScope::Audio, "audio", script.diagnostics);
+  }
   std::size_t index = 0;
   for (const st::Json& node : *scenes) {
     if (!node.is_object()) {
       return st::unexpected(st::ErrorCode::Parse, std::format("scenes[{}] 不是对象", index));
     }
-          const auto scene = scene_from(node, index, asset_basis);
+    const auto scene = scene_from(node, index, asset_basis, &script.diagnostics);
     if (!scene) return st::forward_error(scene.error());
     script.scenes.push_back(scene.value());
     ++index;
@@ -642,6 +952,13 @@ auto script_to_json(const Script& script) -> std::string {
       node["particles"] = static_cast<std::int64_t>(scene.particles);
       node["particle_alpha"] = static_cast<double>(scene.particle_alpha);
     }
+    // 背景颗粒：让静止段“安静而不冻结”——不写回等于每轮读回都变回纯色背景。
+    if (scene.grain > 0) {
+      node["grain"] = static_cast<std::int64_t>(scene.grain);
+      node["grain_alpha"] = static_cast<double>(scene.grain_alpha);
+    }
+    // `wrap` 默认 true，只在关闭时写（纯画面镜头会关掉它）。
+    if (!scene.wrap) node["wrap"] = false;
     if (scene.glow > 0.0001f) {
       node["glow"] = static_cast<double>(scene.glow);
       node["glow_cx"] = static_cast<double>(scene.glow_cx);
@@ -654,17 +971,26 @@ auto script_to_json(const Script& script) -> std::string {
     }
     if (scene.light_sweep > 0.0001f) node["light_sweep"] = static_cast<double>(scene.light_sweep);
     // 运镜：只在真会动时写（from==to 且无旋转平移 = 静止）
-    const bool camera_moves = scene.cam_zoom_from != scene.cam_zoom_to ||
-                              scene.cam_rotate != 0.0f || scene.cam_pan_x != 0.0f ||
-                              scene.cam_pan_y != 0.0f || scene.cam_shake > 0.0001f;
-    if (camera_moves) {
-      node["cam_zoom_from"] = static_cast<double>(scene.cam_zoom_from);
-      node["cam_zoom_to"] = static_cast<double>(scene.cam_zoom_to);
-      if (scene.cam_rotate != 0.0f) node["cam_rotate"] = static_cast<double>(scene.cam_rotate);
-      if (scene.cam_pan_x != 0.0f) node["cam_pan_x"] = static_cast<double>(scene.cam_pan_x);
-      if (scene.cam_pan_y != 0.0f) node["cam_pan_y"] = static_cast<double>(scene.cam_pan_y);
-      if (scene.cam_shake > 0.0001f) node["cam_shake"] = static_cast<double>(scene.cam_shake);
+      const bool camera_moves = scene.cam_zoom_from != scene.cam_zoom_to ||
+                            scene.cam_rotate != 0.0f || scene.cam_pan_x != 0.0f ||
+                            scene.cam_pan_y != 0.0f || scene.cam_shake > 0.0001f ||
+                            scene.cam_anchor_x >= 0.0f || scene.cam_anchor_y >= 0.0f;
+  if (camera_moves) {
+    node["cam_zoom_from"] = static_cast<double>(scene.cam_zoom_from);
+    node["cam_zoom_to"] = static_cast<double>(scene.cam_zoom_to);
+    if (scene.cam_anchor_x >= 0.0f) node["cam_anchor_x"] = static_cast<double>(scene.cam_anchor_x);
+    if (scene.cam_anchor_y >= 0.0f) node["cam_anchor_y"] = static_cast<double>(scene.cam_anchor_y);
+    if (scene.cam_zoom_curve != "linear") node["cam_zoom_curve"] = scene.cam_zoom_curve;
+    if (scene.cam_window_end > scene.cam_window_start) {
+      node["cam_window_start"] = static_cast<double>(scene.cam_window_start);
+      node["cam_window_end"] = static_cast<double>(scene.cam_window_end);
     }
+    if (scene.cam_vector) node["cam_vector"] = true;
+    if (scene.cam_rotate != 0.0f) node["cam_rotate"] = static_cast<double>(scene.cam_rotate);
+    if (scene.cam_pan_x != 0.0f) node["cam_pan_x"] = static_cast<double>(scene.cam_pan_x);
+    if (scene.cam_pan_y != 0.0f) node["cam_pan_y"] = static_cast<double>(scene.cam_pan_y);
+    if (scene.cam_shake > 0.0001f) node["cam_shake"] = static_cast<double>(scene.cam_shake);
+  }
     // 图层：**必须写回**。
     //
     // 早先这里漏了 `layers`（只读了不写），于是“保存脚本”会把用 `kind=custom`
@@ -676,6 +1002,58 @@ auto script_to_json(const Script& script) -> std::string {
         layers.push_back(layer_to_json(layer));
       }
       node["layers"] = std::move(layers);
+    }
+    // 本镜页脚（空则用脚本级）。
+    if (!scene.footer_note.empty()) node["footer_note"] = scene.footer_note;
+    // 跨场承接：不写回的话，读一次脚本承接就丢了。
+    //
+    // 而丢承接的后果与丢图层不同：画面仍能出（只是退化成幻灯片），
+    // 所以“看起来正常”——靠肉眼几乎发现不了。
+    if (!scene.carry.name.empty()) {
+      const CarryOut& carry = scene.carry;
+      st::Json out = st::Json::object();
+      out["name"] = carry.name;
+      out["into"] = static_cast<std::int64_t>(carry.into);
+      out["at"] = carry.at;
+      out["dur"] = carry.dur;
+      const auto write_rect = [](const CarryRect& rect) -> st::Json {
+        st::Json box = st::Json::object();
+        box["x"] = rect.x;
+        box["y"] = rect.y;
+        box["w"] = rect.w;
+        box["h"] = rect.h;
+        if (rect.radius > 0.0f) box["radius"] = static_cast<double>(rect.radius);
+        return box;
+      };
+      out["from"] = write_rect(carry.from);
+      out["to"] = write_rect(carry.to);
+      if (carry.fill.a != 0) out["fill"] = color_to_hex(carry.fill);
+      if (carry.stroke.a != 0) {
+        out["stroke"] = color_to_hex(carry.stroke);
+        out["stroke_width"] = static_cast<double>(carry.stroke_width);
+      }
+      if (!carry.text.empty()) {
+        out["text"] = carry.text;
+        out["text_color"] = color_to_hex(carry.text_color);
+        if (carry.text_size != 48.0f) out["text_size"] = static_cast<double>(carry.text_size);
+      }
+      if (!carry.curve.empty()) out["curve"] = carry.curve;
+          if (carry.rotate != 0.0f) out["rotate"] = static_cast<double>(carry.rotate);
+    if (carry.fade_out > 0.0f) out["fade_out"] = static_cast<double>(carry.fade_out);
+    node["carry_out"] = std::move(out);
+    }
+    // JS 编排层：写回**原写法**（文件路径字符串，或内联 `{source, filename, timeout_ms}`）。
+    //
+    // 不写回的话，读一次脚本就会把“每帧自己算的动作”整段丢掉，而静态帧看不出来。
+    if (!scene.layout.source.empty()) {
+      if (scene.layout.from_file) {
+        node["layout"] = scene.layout.raw_field;
+      } else {
+        st::Json inline_layout = st::Json::object();
+        inline_layout["source"] = scene.layout.raw_field;
+        if (scene.layout.timeout_ms != 400) inline_layout["timeout_ms"] = scene.layout.timeout_ms;
+        node["layout"] = std::move(inline_layout);
+      }
     }
     scenes.push_back(std::move(node));
   }

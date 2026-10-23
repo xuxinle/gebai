@@ -147,7 +147,9 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
 
   /* ------------------------------ 头部（一行控件） ------------------------------
    * 头部行高 34px（与资源管理器头部、编辑器标签栏同高：左栏首行与标签栏本是同一条横线），
-   * 放两件东西：**视图**（树 / 列表，两个图标按钮互斥）、**刷新**。
+   * 从左到右：**标题**（待提交的改动数）+ **视图切换**（树 / 列表）+ **刷新**。
+   * 标题是必需的：左栏首行只有两个图标按钮时，左上角是一大片空白，看不出这是哪一块面板；
+   * 它附带本面板最关心那个数字（待提交改动数），比“变更”两字更有信息量。
    * 刷新是必需的：状态由宿主统一拉，但“我改完文件想立刻看结果”的预期落在面板自己的按钮上——
    * 它直接重取状态并重渲染（与 F5 同一条路），不依赖宿主的下一次刷新时机。
    * ---------------------------------------------------------------------------- */
@@ -171,7 +173,10 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
   const refreshBtn = h("button", { class: "fw-icon-btn sm", title: "刷新改动列表（F5）" })
   refreshBtn.appendChild(icon("refresh", 14))
   refreshBtn.onclick = () => void hooks.refreshStatus()
-  const headHost = h("div", { class: "fw-changes-head" }, [h("span", { class: "fw-grow" }), viewBtn, refreshBtn])
+  /** 标题里的改动数（分组头里已有按状态拆分的计数，这里只给总数：它是 rail 徽标的同一份数据）。 */
+  const headCount = h("span", { class: "fw-changes-count" })
+  const headTitle = h("div", { class: "fw-changes-title" }, [h("span", { text: "更改" }), headCount])
+  const headHost = h("div", { class: "fw-changes-head" }, [headTitle, h("span", { class: "fw-grow" }), viewBtn, refreshBtn])
   el.appendChild(headHost)
 
   /**
@@ -243,13 +248,25 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
   }
 
   /**
-   * 一行改动。`depth`/`hideDir` 只对**树视图**有意义：
+   * 一行改动。列次序按 VSCode 的改动列表：**文件名在前、目录作为灰字后缀跟在后**（空间不足时先让出
+   * 目录、文件名最后才出省略号），状态字母靠右；只有「冲突 / 未跟踪」这两种要动手的状态把字母留在行首。
+   *
+   * 为何文件名在前：窄栏（左栏 ~286px）下目录路径动辄 20~30 字符，排在前面会把文件名挤到中途才
+   * 开始、且目录自己被截成 `packages/ser…` 这种认不出的碎片——**「叫什么」永远比「在哪个目录下」重要**。
+   *
+   * `depth`/`hideDir` 只对**树视图**有意义：
    * 树里目录已由目录行表达，行内不再重复写一遍目录前缀，宽度全留给文件名（缩进由 depth）。
    */
   function changeRow(c: GitChange, group: "staged" | "unstaged" | "untracked" | "conflicted", opts: { depth?: number; hideDir?: boolean } = {}): HTMLElement {
     const name = c.path.split("/").pop() ?? c.path
     const dir = c.path.slice(0, Math.max(0, c.path.length - name.length - 1))
     const mark = c.conflicted ? "!" : c.untracked ? "U" : c.kind === "added" ? "A" : c.kind === "deleted" ? "D" : c.kind === "renamed" ? "R" : c.staged && !c.unstaged ? "S" : "M"
+    /**
+     * 字母的位置由语义决定：**要动手的**（冲突 `!` / 未跟踪 `U`）留在行首——一眼看出「这批还没进版本库」；
+     * **读出来的**（M/A/D/R/S）靠右，行首让给文件名。
+     */
+    const markFirst = c.conflicted || c.untracked
+    const markEl = h("span", { class: `fw-change-mark ${mark}`, text: mark })
     /** 文件是否还在工作区：已删除的条目没有文件可开（「打开文件」按钮与右键项都不给）。 */
     const canOpenFile = c.kind !== "deleted"
     /**
@@ -268,11 +285,10 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     /** 单击行的动作：未跟踪文件没有可比较的另一侧，退化为打开文件。 */
     const openTarget = (): void => (c.untracked ? openFileNow() : openDiffNow())
     const row = h("div", { class: `fw-change-row${c.conflicted ? " conflict" : ""}`, title: c.path }, [
-      h("span", { class: `fw-change-mark ${mark}`, text: mark }),
-      h("span", { class: "fw-change-path" }, [
-        dir && !opts.hideDir ? h("span", { class: "fw-change-dir", text: `${dir}/` }) : null,
-        h("span", { class: "fw-change-name", text: name }),
-      ]),
+      markFirst ? markEl : null,
+      h("span", { class: "fw-change-name", text: name }),
+      // 目录写在文件名之后（不带尾斜杠：它不再是「前缀」，而是这条路径的定位后缀）
+      dir && !opts.hideDir ? h("span", { class: "fw-change-dir", text: dir }) : null,
       h("span", { class: "fw-grow" }),
       // 行内动作按 VSCode 的改动列表**从左到右**：打开文件 → 放弃更改 → 暂存更改（hover 才显形）。
       // **第一个按钮是「打开文件」（开文件本身），不是「打开差异」**——看改动是点整行的事（见 row.onclick），
@@ -281,7 +297,7 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
       // 摆到行上既撑宽度又多一个误点，统一收进右键菜单。
       //
       // 按钮包在 .fw-change-actions 这一个 flex:none 的整体里：间距 2px（比行内 gap 的 5px 省一半），
-      // 且栏拖到最窄时被牺牲的是文件名（省略号）而不是按钮（见 files.css 的 .fw-change-path 一节）。
+      // 且栏拖到最窄时被牺牲的是目录与文件名（省略号）而不是按钮（见 files.css 的「路径区」一节）。
       h("span", { class: "fw-change-actions" }, [
         canOpenFile ? btnIcon("file", "打开文件", openFileNow) : null,
         group === "conflicted" ? btnIcon("git", "打开冲突解决（三窗格合并）", () => hooks.openMerge(c.path)) : null,
@@ -293,6 +309,8 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
           ? btnIcon("minus", "取消暂存", () => void op("unstage", { paths: [c.path] }, undefined, { silent: true }))
           : btnIcon("plus", "暂存更改", () => void op("stage", { paths: [c.path] }, undefined, { silent: true })),
       ]),
+      // 读出来的状态字母靠右（VSCode 同位置）：行首留给文件名与「要动手」的标记
+      markFirst ? null : markEl,
     ])
     row.onclick = (e) => {
       if ((e.target as HTMLElement).closest("button")) return
@@ -743,6 +761,9 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     const cnt = repoChanges()
     const dirty = cnt.staged + cnt.unstaged + cnt.untracked + cnt.conflicted
     hooks.onCount(dirty)
+    // 头部标题的计数与 rail 徽标同源：不随重绘重建节点，只改文本（见头部那一节）
+    headCount.textContent = String(dirty)
+    headCount.hidden = !dirty
     // 提交框常驻：只定点更新与状态有关的那几处（绝不重建节点，见 createCommitBox）
     updateCommitBox()
     if (!s?.isRepo) {
@@ -768,7 +789,9 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
       const collapsed = collapsedGroups.has(g.key)
       const head = h("div", { class: `fw-change-group-head${collapsed ? " collapsed" : ""}` }, [
         icon("chevronDown", 12),
-        h("span", { text: `${g.label}（${g.items.length}）` }),
+        // 组名与计数分两个节点：计数用与面板标题同一种胶囊样式（见 .fw-changes-count 那一节）
+        h("span", { text: g.label }),
+        h("span", { class: "fw-change-group-count", text: String(g.items.length) }),
         h("span", { class: "fw-grow" }),
         g.key !== "staged" && g.key !== "conflicted"
           ? btnIcon("check", "全部暂存", () => void op("stage", { paths: g.items.map((c) => c.path) }, "已全部暂存", { silent: true }))

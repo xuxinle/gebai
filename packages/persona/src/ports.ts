@@ -50,7 +50,12 @@ export interface DriverDef {
    * 都关注定时任务）——各自独立处理，不是二选一。
    */
   subscriptions: string[]
-  /** 该 driver 的并发额度（同时最多跑几个 worker/轮次）。缺省继承角色级。 */
+  /**
+   * 该 driver 的并发额度（同时最多跑几个轮次），缺省继承 `PersonaLookup.maxConcurrent()`。
+   *
+   * 实际作用面：一个 driver 只对应一个常驻会话，会话级串行先把它锁死——
+   * 所以大于 1 在当前路由下不会生效。真正的并发来自「同时有事的 driver 个数」。
+   */
   maxConcurrent?: number
 }
 
@@ -163,7 +168,13 @@ export interface PersonaLookup {
   subscribers(
     event: Pick<PersonaEvent, "kind" | "channel" | "context">,
   ): Array<{ personaId: string; user: string; driverIds: string[] }>
-  /** 角色级并发额度（driver 未单独配置时继承）。 */
+  /**
+   * 角色级并发额度的默认值（driver 未单独配置时继承）。
+   *
+   * 注意语义：这**不是**「该角色同时运行会话数」的上限——调度器是 per-driver 的，
+   * 每个 driver 各自受限，真实并发度 = 同时有事的 driver 个数。要做角色总额限制
+   * 得靠宿主侧或新增跨 driver 闸门。
+   */
   maxConcurrent(personaId: string): number
 }
 

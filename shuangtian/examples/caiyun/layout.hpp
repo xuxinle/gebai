@@ -53,6 +53,18 @@ struct LayoutScript {
   std::string source{};
   /// 源文件名（报错定位用；内联时写 `<layout>`）。
   std::string filename{"<layout>"};
+  /// **JSON 里的原写法**（路径字符串，或内联源文本）——序列化就写回它。
+  ///
+  /// ## 为何要单独存原写法（而不是从 source 反推）
+  ///
+  /// `source` 是“装载后的内容”，两种写法都会填进它：写文件路径时它是**整份 JS 文件**，
+  /// 写内联对象时它是**那段源码**。序列化如果照 source 写回，文件引用就会变成
+  /// 把整份 JS 内联进 JSON——脚本从“一行路径”胖成几百行，而且靠“短且无换行”
+  /// 这类启发式去猜两种写法**必然误判**（短 JS 文件会被当内联、内联源里带换行
+  /// 会被当文件）。原写法是唯一可靠的信息，所以直接存下来。
+  std::string raw_field{};
+  /// `raw_field` 是文件路径（true）还是内联源码（false）。
+  bool from_file{false};
   /// 单次求值时限（毫秒）。默认 400：整帧所有图层一次算完，这个量级很宽裕。
   int timeout_ms{400};
   [[nodiscard]] auto empty() const noexcept -> bool { return source.empty(); }

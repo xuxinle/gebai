@@ -503,6 +503,21 @@ describe("renderBlock image 块（点击进入全屏查看器）", () => {
     expect(typeof img.onclick).toBe("function")
     expect(img.dataset.tip).toBe("点击查看大图")
   })
+
+  test("样式契约：.block-img 自对齐 flex-start（否则纵向 flex 会先拉满宽度再截高，图被拉形）", async () => {
+    /* 为何钉在样式层：.msg-body 是 flex-direction: column 且 align-items 默认 stretch——
+     * 图片会被横向拉满整行宽（920px），再由 max-height 截高，360×384 就变成 920×480。
+     * 这类变形在 DOM/位移断言里完全看不出来（宽高都是“合法”数字），只能靠真实观感发现。
+     * `align-self: flex-start` 让图片按自身尺寸排版：小图不放大，大图才由 max-W/H 等比收缩。 */
+    const css = await Bun.file(new URL("./css/chat.css", import.meta.url)).text()
+    const i = css.indexOf(".block-img {")
+    expect(i).toBeGreaterThan(0)
+    const body = css.slice(i, css.indexOf("}", i))
+    expect(body).toMatch(/align-self:\s*flex-start/)
+    // 等比约束不能丢（靠它收缩，而不是靠拉宽拉高）
+    expect(body).toMatch(/max-width:\s*100%/)
+    expect(body).toMatch(/max-height:/)
+  })
 })
 
 describe("附图消息的附件预览（发送即上屏与历史渲染同一入口）", () => {

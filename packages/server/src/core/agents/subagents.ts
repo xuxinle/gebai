@@ -717,6 +717,16 @@ export class SubAgentManager {
     return [...this.loaded].map((n) => this.defs.get(n)!).filter(Boolean)
   }
 
+  /**
+   * 按名字取一个子Agent 定义（未发现/未注册时 undefined）。
+   *
+   * 供需要**直接调用某个子Agent 工具**的宿主内代码用（如授权提醒经相期卡片下发）：
+   * 走子Agent 定义取工具，与模型的 `agent_load` 同一来源，不另开一条引用源码的路。
+   */
+  defOf(name: string): SubAgentDef | undefined {
+    return this.defs.get(name)
+  }
+
   list(): SubAgentInfo[] {
     return [...this.defs.values()].map((d) => ({
       name: d.name,

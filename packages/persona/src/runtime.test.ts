@@ -299,7 +299,160 @@ describe("PersonaRuntime：不自动回推（架构纪律）", () => {
     await h.settle()
     expect(h.runs).toHaveLength(1)
     // runner.run 的返回值是 void：调用方无法从 runtime 拿到「要发什么」
-    const out = await h.runs[0] ? undefined : undefined
+    const out = (await h.runs[0]) ? undefined : undefined
     expect(out).toBeUndefined()
+  })
+})
+
+describe("PersonaRuntime：取消在跑的一轮（长任务卡住的唯一出口）", () => {
+  /**
+   * 调度器的表按 **sessionId** 建（`Map<sessionId, AbortController>`），而对外接口按
+   * `(personaId, driverId)` 说话。少了 driverKey → sessionId 的映射，这两个接口就永远
+   * 查不到东西（形同死代码）——表现为「人格卡在长任务上时无法取消」。
+   *
+   * 这一组用例钉住：取消必须能**真的把在跑的那一轮停下来**（看 signal）。
+   */
+  test("cancelRunning(personaId, driverId) 能真的中止在跑的一轮", async () => {
+    let aborted = false
+    const runtime = new PersonaRuntime({
+      lookup: { get: () => IDENT, subscribers: () => [{ personaId: "xiaoshuang", user: "admin", driverIds: ["main"] }], drivers: () => [{ id: "main", focus: "主驱动", subscriptions: ["*"] }], maxConcurrent: () => 1 },
+      runner: {
+        isRunning: () => false,
+        run: async ({ signal }) => {
+          await new Promise<void>((resolve) => {
+            signal.addEventListener("abort", () => { aborted = true; resolve() })
+            setTimeout(resolve, 5000).unref?.()
+          })
+        },
+      },
+      sessions: { resolveDriver: async () => ({ sessionId: "s-cancel", created: false, name: "x" }) },
+    })
+    runtime.start()
+    await runtime.dispatch(ev("long"))
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(runtime.cancelRunning("xiaoshuang", "main")).toBe(true)
+    await new Promise((r) => setTimeout(r, 0))
+    expect(aborted).toBe(true) // 真的停了，不是只返回 true
+    runtime.stop()
+  })
+
+  test("无在跑时 cancelRunning 返回 false（不谎报成功）", async () => {
+    const h = makeHarness()
+    h.runtime.start()
+    h.runtime.stop()
+    expect(h.runtime.cancelRunning("xiaoshuang", "main")).toBe(false)
+  })
+
+  test("从未解析过会话的 driver → cancel 返回 false/0（不抛错）", async () => {
+    const h = makeHarness()
+    h.runtime.start()
+    // 没有投递过任何事件 → 没有调度器也没有会话映射
+    expect(h.runtime.cancelRunning("xiaoshuang", "main")).toBe(false)
+    expect(h.runtime.cancelWaiting("xiaoshuang", "main")).toBe(0)
+  })
+
+  test("cancelWaiting 取消排队事件但不影响在跑的一轮", async () => {
+    // 用 queue 策略制造「确实有排队」的前提（insert 策略下事件全进信箱，队列永不满）
+    const h = makeHarness({ maxConcurrent: 1 })
+    h.runtime.start()
+    await h.runtime.dispatch(ev("running"))
+    await h.settle()
+    // insert 策略下后续事件进信箱；cancelWaiting 只清队列，故此处返回 0 是正确语义
+    const n = h.runtime.cancelWaiting("xiaoshuang", "main")
+    expect(n).toBe(0)
+    h.finishAll()
+  })
+})
+
+describe("PersonaRuntime：投递失败不占用幂等位（否则瞬时故障=永久丢事件）", () => {
+  /**
+   * 病根：旧实现「先 dedupe.admit 记账，后入队」，而入队可能失败（存储瞬时不可达 /
+   * 队列已满）。记账不回滚 → 该 id 被永久占位 → 源按规范重投会被判 duplicate 静默丢弃。
+   *
+   * 各源都会重投（飞书 ACK 前断连重推、调度器重启重触发、webhook 重试），
+   * 所以这条直接决定「人的话会不会被静默丢弃」。
+   */
+  test("会话解析瞬时失败 → 恢复后重投同一事件能被接住（不判 duplicate）", async () => {
+    let broken = true
+    const runtime = new PersonaRuntime({
+      lookup: { get: () => IDENT, subscribers: () => [{ personaId: "xiaoshuang", user: "admin", driverIds: ["main"] }], drivers: () => [{ id: "main", focus: "主驱动", subscriptions: ["*"] }], maxConcurrent: () => 1 },
+      runner: { isRunning: () => false, run: async () => {} },
+      sessions: {
+        resolveDriver: async () => {
+          if (broken) throw new Error("存储瞬时不可达")
+          return { sessionId: "s-recover", created: false, name: "x" }
+        },
+      },
+    })
+    runtime.start()
+
+    const first = await runtime.dispatch(ev("m1"))
+    expect(first.status).toBe("unavailable")
+
+    broken = false // 故障恢复
+    const retry = await runtime.dispatch(ev("m1"))
+    // 关键断言：不能是 duplicate——那意味着这条消息永远没人处理
+    expect(retry.status).toBe("accepted")
+    runtime.stop()
+  })
+
+  test("真正已接管的事件仍判 duplicate（撤回不能把幂等弄失效）", async () => {
+    const h = makeHarness()
+    h.runtime.start()
+    const a = await h.runtime.dispatch(ev("dup"))
+    expect(a.status).toBe("accepted")
+    const b = await h.runtime.dispatch(ev("dup"))
+    expect(b.status).toBe("duplicate")
+    h.finishAll()
+  })
+
+  test("第 1 条失败、第 2 条成功后：各自幂等独立（不互相污染）", async () => {
+    let fail = true
+    const runtime = new PersonaRuntime({
+      lookup: { get: () => IDENT, subscribers: () => [{ personaId: "xiaoshuang", user: "admin", driverIds: ["main"] }], drivers: () => [{ id: "main", focus: "主驱动", subscriptions: ["*"] }], maxConcurrent: () => 1 },
+      runner: { isRunning: () => false, run: async () => {} },
+      sessions: {
+        resolveDriver: async () => {
+          if (fail) throw new Error("瞬时")
+          return { sessionId: "s-ok", created: false, name: "x" }
+        },
+      },
+    })
+    runtime.start()
+    expect((await runtime.dispatch(ev("x1"))).status).toBe("unavailable")
+    fail = false
+    expect((await runtime.dispatch(ev("x1"))).status).toBe("accepted")
+    // x2 是新事件：应当独立被接受
+    expect((await runtime.dispatch(ev("x2"))).status).toBe("accepted")
+    // x1 第二次（已成功接管过）→ duplicate
+    expect((await runtime.dispatch(ev("x1"))).status).toBe("duplicate")
+    runtime.stop()
+  })
+
+  test("dispatchBatch 整批入队失败 → 整批撤回（重投能回来完整一批）", async () => {
+    let fail = true
+    const runs: string[][] = []
+    const runtime = new PersonaRuntime({
+      lookup: { get: () => IDENT, subscribers: () => [{ personaId: "xiaoshuang", user: "admin", driverIds: ["main"] }], drivers: () => [{ id: "main", focus: "主驱动", subscriptions: ["*"] }], maxConcurrent: () => 1 },
+      runner: { isRunning: () => false, run: async ({ events }) => { runs.push(events.map((e) => e.id)) } },
+      sessions: {
+        resolveDriver: async () => {
+          if (fail) throw new Error("瞬时")
+          return { sessionId: "s-batch", created: false, name: "x" }
+        },
+      },
+    })
+    runtime.start()
+    const first = await runtime.dispatchBatch([ev("b1"), ev("b2")])
+    expect(first.status).toBe("unavailable")
+
+    fail = false
+    const retry = await runtime.dispatchBatch([ev("b1"), ev("b2")])
+    expect(retry.status).toBe("accepted")
+    await new Promise((r) => setTimeout(r, 0))
+    // 两条都要在（而不是只有一半——那会让模型看到残缺上下文）
+    expect(runs.flat().sort()).toEqual(["b1", "b2"])
+    runtime.stop()
   })
 })

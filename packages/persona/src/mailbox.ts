@@ -50,7 +50,8 @@ export interface PersonaMailbox {
 
 /** 插话信箱的写入端（调度器持有，不外暴露给 runner）。 */
 export interface MailboxWriter {
-  push(event: PersonaEvent): void
+  /** 投一条；返回 `false` = 信箱已满未收下（调用方需降级到排队，**不可丢**）。 */
+  push(event: PersonaEvent): boolean
 }
 
 /** 信箱实现（写入端与读取端一体；调度器只把 `PersonaMailbox` 部分交给 runner）。 */
@@ -60,13 +61,43 @@ export class InterjectionMailbox implements PersonaMailbox, MailboxWriter {
   private totalPushed = 0
   /** 累计取走数。 */
   private totalDrained = 0
+  /** 因超容而被丢弃的条数（诊断）。 */
+  private totalDropped = 0
 
-  push(event: PersonaEvent): void {
+  /**
+   * @param capacity 待取插话上限。
+   *
+   * 为何必须有上限：`maxRounds` 只封顶**轮次数**，不封顶**每轮吸收多少条**。
+   * 没有这个上限时，一次运行期间涌入的插话会全部攒到下一轮，被 `renderBatch`
+   * 一次性拼进同一份输入（事件洪峰时单次上下文可爆）。上限与调度器 `queueLimit`
+   * 同量级，保证两条路径对「忙不过来」的处理口径一致。
+   */
+  constructor(private readonly capacity = 64) {
+    if (!Number.isInteger(capacity) || capacity < 1) {
+      throw new Error(`InterjectionMailbox capacity 必须是正整数: ${capacity}`)
+    }
+  }
+
+  /**
+   * 投一条插话。
+   *
+   * @returns `true` = 已收下；`false` = 信箱已满，**未收下**。
+   *
+   * 为何是「拒收」而不是「丢最旧」：插话是尽力而为的高优先路径，不是可靠投递的
+   * 替代品。拒收后调用方（调度器）会把它降级到有界队列（`queueLimit` 保护）——
+   * 事件仍然会被处理，只是晚一轮。若在这里丢最旧，就是静默丢事件，比不插话严重。
+   */
+  push(event: PersonaEvent): boolean {
     // 同 id 不重复入箱（幂等兜底；runtime 层已按「事件×人格」判过，这里防同一事件
     // 在"插话 + 排队"两条路径上各走一次）
-    if (this.items.some((e) => e.id === event.id)) return
+    if (this.items.some((e) => e.id === event.id)) return true
+    if (this.items.length >= this.capacity) {
+      this.totalDropped++
+      return false
+    }
     this.items.push(event)
     this.totalPushed++
+    return true
   }
 
   drain(): PersonaEvent[] {
@@ -85,9 +116,20 @@ export class InterjectionMailbox implements PersonaMailbox, MailboxWriter {
     return this.items.length > 0
   }
 
+  /** 是否已满（满了之后 push 会拒收，由调用方降级到排队）。 */
+  isFull(): boolean {
+    return this.items.length >= this.capacity
+  }
+
   /** 诊断快照（调度器状态展示用）。 */
-  stats(): { pending: number; pushed: number; drained: number } {
-    return { pending: this.items.length, pushed: this.totalPushed, drained: this.totalDrained }
+  stats(): { pending: number; pushed: number; drained: number; rejected: number; capacity: number } {
+    return {
+      pending: this.items.length,
+      pushed: this.totalPushed,
+      drained: this.totalDrained,
+      rejected: this.totalDropped,
+      capacity: this.capacity,
+    }
   }
 
   /** 取回尚未被 drain 的插话（run 结束时调用：这些要重新入队，绝不能丢）。 */

@@ -64,10 +64,22 @@ export interface CardSpec {
   body?: string
   /** 来源标签（谁发的）。 */
   from?: string
-  /** `choice` 必填：选项列表。 */
-  options?: Array<{ label: string; value: string; hint?: string }>
+  /**
+   * `choice` 选填：选项列表。
+   *
+   * `url` 不为空时该选项渲染为**链接按钮**（点击打开浏览器）——
+   * 适用「去授权」「看详情」这类需要用户离开去别处操作的事。
+   * 带 url 的选项不会被「选中」，它只负责把用户送到目标页面。
+   */
+  options?: Array<{ label: string; value: string; hint?: string; url?: string }>
   /** `todo` 可选：截止说明（自由文本，如「今天」「2026-10-25」）。 */
   due?: string
+  /**
+   * 卡片的新鲜度：`null`/缺省 = 一直显示到用户处理或撤回。
+   *
+   * 授权类卡片应当带 TTL：链接 10 分钟就过期了，卡片一直挂着只会引导用户点开一个废链接。
+   */
+  expiresAtMs?: number
 }
 
 /** 用户对某张卡的答复。 */
@@ -105,9 +117,8 @@ export interface ControllerOptions {
   /**
    * 相期的数据根（里面是 `inbox/` / `outbox/`）。
    *
-   * 缺省从 `XIANGQI_HOME` 读；再缺省 `<cwd>/相期`（与相期自己的
-   * `resolve_home()` 一致）。握手不成时靠这目录做文件兼底。
-   * 传空串 = **禁用文件通路**（只走 WS）。
+   * 缺省顺序：`XIANGQI_HOME` → `{GEBAI_HOME}/相期` → `<cwd>/相期`。
+   * 握手不成时靠这目录做文件兼底。传空串 = **禁用文件通路**（只走 WS）。
    */
   homeDir?: string
   /** outbox 轮询间隔（毫秒）。缺省 500。0 = 不轮询（只靠 WS）。 */
@@ -146,6 +157,8 @@ export interface XiangqiController {
   pending(): Array<{ id: string; title: string; kind: CardKind; sentAtMs: number }>
   /** 撤回全部卡片。 */
   dismissAll(): void
+  /** 撤回单张卡片（授权完成/失效后让那张卡自动消失）；返回是否真的撤了。 */
+  dismiss(id: string): boolean
   /** 关掉监听并释放端口（宿主退出 / 测试收尾）。 */
   close(): void
 }
@@ -162,10 +175,18 @@ function portFromEnv(): number {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_PORT
 }
 
-/** 从环境读数据根（`XIANGQI_HOME`）；缺省 `<cwd>/相期`（与相期自己一致）。 */
+/**
+ * 从环境读数据根：`XIANGQI_HOME` → `{GEBAI_HOME}/相期` → `<cwd>/相期`。
+ *
+ * 为何要认 `GEBAI_HOME`：宿主进程的 cwd 可能是仓库目录或任意工作目录，
+ * 直接往 cwd 写会在那里凭空长出 `相期/`（实测：跑一次测试仓库里多了一个目录）。
+ * 歌白的数据本来就在 `GEBAI_HOME` 下，把相期的箱件放那里才符合“一份部署一份数据”。
+ */
 function homeFromEnv(): string {
   const raw = process.env.XIANGQI_HOME
   if (raw !== undefined && raw.trim() !== "") return raw.trim()
+  const home = process.env.GEBAI_HOME
+  if (home !== undefined && home.trim() !== "") return join(home.trim(), "相期")
   return join(process.cwd(), "相期")
 }
 
@@ -223,13 +244,21 @@ export function createController(options: ControllerOptions = {}): XiangqiContro
   }
 
   function sendCards(): void {
-    if (peer === null) return
-    try {
-      peer.send(JSON.stringify({ type: "cards", cards: [...live.values()] }))
-    } catch {
-      // 发送失败：连接已坏，等它 close。卡片仍在 `live` 里，重连后会重推。
+  if (peer === null) return
+  // 顺带剔除已过期的卡（TTL 到期的链接已失效，留着只会引导用户去点一个废链接）
+  const nowMs = now()
+  for (const [id, card] of live) {
+    if (card.expiresAtMs !== undefined && card.expiresAtMs <= nowMs) {
+      live.delete(id)
+      // 过期卡不唤醒等待者：等待者自己会超时，语义上「卡片过期」≠「用户答了」
     }
   }
+  try {
+    peer.send(JSON.stringify({ type: "cards", cards: [...live.values()] }))
+  } catch {
+    // 发送失败：连接已坏，等它 close。卡片仍在 `live` 里，重连后会重推。
+  }
+}
 
   function handleMessage(raw: unknown): void {
     if (typeof raw !== "string") return
@@ -511,6 +540,27 @@ export function createController(options: ControllerOptions = {}): XiangqiContro
     if (isConnected()) sendCards()
   }
 
+  /**
+   * 只撤一张卡（授权完成后让那张「去授权」卡自动消失）。
+   *
+   * 为何不能拿 `dismissAll()` 代替：那会把**其他还在等用户处理的**卡片一起清掉——
+   * 等于替用户做了「不处理」的决定。单卡撤回是「这件事已经有结果了」的表达，
+   * 与「这批都过时了」是两种语义。
+   *
+   * 已撤回但仍有人等待的卡：唤醒等待者（返回 null），避免它白等到超时。
+   */
+  function dismiss(id: string): boolean {
+    const had = live.delete(id)
+    arrivedEarly.delete(id)
+    const waiter = waiting.get(id)
+    if (waiter) {
+      waiting.delete(id)
+      waiter.cancel()
+    }
+    if (had && isConnected()) sendCards()
+    return had
+  }
+
   function close(): void {
     closed = true
     if (pollTimer !== null) {
@@ -556,6 +606,7 @@ export function createController(options: ControllerOptions = {}): XiangqiContro
     waitForAnswer,
     pending,
     dismissAll,
+    dismiss,
     close,
   }
 }
