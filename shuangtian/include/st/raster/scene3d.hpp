@@ -56,6 +56,47 @@ struct Material {
   /// 是否写入深度。透明物体必须关（否则后面的透明面会被它挡住）。
   /// 一般不需要手动改：`opacity < 1` 时自动为 false。
   bool depth_write{true};
+
+  // ── Principled 材质（对标 Blender Principled BSDF 的子集）──
+  //
+  // ## 为何是这五个参数
+  //
+  // Blender 的 Principled BSDF 有二十多个输入，但其中真正**决定材质类别**的是：
+  //   metallic（金属/非金属）、roughness（光滑/粗糙）、
+  //   base_color（固有色）、emission（自发光）、opacity（透明）。
+  // 这五个就能把塑料 / 金属 / 陶瓷 / 橡胶 / 发光体分开，其余（sheen、
+  // clearcoat、subsurface）属于细节修饰，等有真实需求再加。
+  //
+  // ## 默认值 = 现有外观（渐进采用的底线）
+  //
+  // `metallic=0` + `roughness=1` + `specular=0` 时，光照公式退化为
+  // 原来的「Lambert + 环境 + 边缘光」——老场景逐像素不变。
+
+  /// 金属度（0 = 绝缘体如塑料/陶瓷，1 = 纯金属如金/铁）。
+  ///
+  /// 物理含义：金属**没有漫反射**（自由电子吸收透射光），
+  /// 反射光被固有色染色；非金属有漫反射，反射光保持白色。
+  float metallic{0.0f};
+  /// 粗糙度（0 = 镜面，1 = 完全漫反射）。
+  ///
+  /// 直接作为 GGX 的 `alpha` 用（Blender 也是这么做的：
+  /// `rbsdf->alpha_x = roughness`，不再平方）。
+  float roughness{1.0f};
+  /// 高光强度（0 = 无高光，1 = 物理量）。
+  ///
+  /// 默认为 0 而不是 1：高光是**新增能力**，默认开启会改变所有已出片子的外观。
+  /// 要用时显式设 1。
+  float specular{0.0f};
+  /// 自发光强度（0 = 不自发光）。
+  ///
+  /// 乘在固有色上：`emission=2` 表示“以两倍固有色亮度自发光”，
+  /// 超过 1 时会被色调映射滚降（这正是 ACES 存在的意义）。
+  float emission{0.0f};
+  /// 高光颜色（非金属时通常为白；金属时应当跟随固有色）。
+  /// 留空（默认）时按 metallic 自动选：金属用固有色，非金属用白。
+  math::Vec3 specular_tint{0.0f, 0.0f, 0.0f};
+  /// `specular_tint` 是否已显式设定（全零 + 本标记 = 自动）。
+  bool specular_tint_set{false};
 };
 
 /// 相机（右手系，视线朝 -Z）。
@@ -124,6 +165,51 @@ struct Lighting {
 /// （`raster_scene3d_lighting_test` 用同一组输入比两边输出）。
 [[nodiscard]] auto shade_terms(math::Vec3 normal, math::Vec3 color, const Lighting& lighting)
     -> math::Vec3;
+
+/// GGX 法线分布函数 D（微表面法线指向半角向量的概率密度）。
+///
+/// ## 为何用 GGX 而不是 Blinn-Phong
+///
+/// Blinn-Phong 的高光公式是 `(n·h)^shininess`——它是**经验模型**：
+/// 高光形状不随角度变化，掠射角下会崩（高光变成一束硬边）。
+/// GGX 是**微表面模型**：粗糙度直接决定高光的宽度与拖尾形状，
+/// 掠射时自然拉长——这就是金属看起来“像金属”的原因。
+///
+/// ## 公式（与 Blender `bsdf_D<GGX>` 一致）
+///
+/// ```
+/// D = alpha² / (π · ((n·h)² · (alpha² - 1) + 1)²)
+/// ```
+/// 其中 `alpha = roughness`（Blender 不再对 roughness 平方）。
+///
+/// `roughness → 0` 时 D 退化成一个冲击函数——此时解析式会溢出，
+/// 所以 `alpha` 走下限夹取（见 `kMinAlpha`）。
+[[nodiscard]] auto ggx_distribution(float n_dot_h, float roughness) noexcept -> float;
+
+/// GGX 的几何遮蔽项 G（Smith 近似 + Schlick 的 k）。
+///
+/// 物理含义：微表面互相遮蔽，掠射角下可见面积变小。
+/// 缺了它，物体的**边缘会发亮**（能量不守恒）——高光恰好在边缘最明显，
+/// 所以漏掉 G 的破绻一眼就看得出。
+[[nodiscard]] auto ggx_geometry(float n_dot_v, float n_dot_l, float roughness) noexcept -> float;
+
+/// 完整的高光项（已含 Fresnel、D、G 与分母）。
+///
+/// 返回**辐照度量级**的标量：调用方乘固有色/高光色即可。
+/// 系数已归一化到“白底白高光 = 1”附近（与 Blender 的量级可比）。
+[[nodiscard]] auto ggx_specular(math::Vec3 normal, math::Vec3 view_dir, math::Vec3 light_dir,
+                                float roughness, float metallic, math::Vec3 base_color,
+                                math::Vec3 specular_tint) noexcept -> math::Vec3;
+
+/// 材质的最终着色（含 Principaled 参数）。
+///
+/// 与 `shade_terms` 的关系：后者是**只含漫反射**的旧版（保留给老路径与
+/// 两腿一致性测试）；本函数是完整版，`specular == 0 && emission == 0` 时
+/// 退化为与 `shade_terms` **逐像素相同**的结果（渐进采用）。
+[[nodiscard]] auto shade_surface(math::Vec3 normal, math::Vec3 base_color,
+                                 math::Vec3 view_dir, const Lighting& lighting,
+                                 float metallic, float roughness, float specular,
+                                 float emission, math::Vec3 specular_tint) -> math::Vec3;
 
 /// 三维场景交出的**原生纹理句柄**（供同后端的上层零拷贝合成）。
 ///

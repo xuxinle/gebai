@@ -379,6 +379,18 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "颜色管线接入后的视觉对照：同一场景新旧两条输出链各落一张 PNG + 亮度/过曝统计"
     },
+    "scene3d_shade_equiv_probe": {
+      "kind": "executable",
+      "sources": ["tools/scene3d_shade_equiv_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "渐进采用底线：默认材质（specular/emission/metallic = 0）必须与旧 shade_terms 逐位等价"
+    },
+    "scene3d_material_probe": {
+      "kind": "executable",
+      "sources": ["tools/scene3d_material_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "Principled 材质对照：五种参数（塑料/金属/自发光）各落一张 PNG + 均值/峰值/高光占比"
+    },
     "scene3d_cull_probe": {
       "kind": "executable",
       "sources": ["tools/scene3d_cull_probe.cpp"],

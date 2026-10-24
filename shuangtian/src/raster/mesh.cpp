@@ -413,7 +413,15 @@ auto Mesh::sphere(float radius, int segments) -> Mesh {
     for (int slice = 0; slice < slices; ++slice) {
       const auto a = static_cast<std::uint32_t>(ring * (slices + 1) + slice);
       const auto b = static_cast<std::uint32_t>(a + static_cast<std::uint32_t>(slices) + 1U);
-      mesh.indices.insert(mesh.indices.end(), {a, b, a + 1U, a + 1U, b, b + 1U});
+      // ## 绕序必须与法线一致（逆时针 = 正面）
+      //
+      // 这里曾经是 `{a, b, a+1, a+1, b, b+1}`——几何法线与顶点法线**全部相反**
+      // （实测 224/224 反向）。这个缺陷在引入背面剔除前完全看不出来：
+      // 两面都画，深度测试会自己挑出对的那一面。
+      //
+      // 加上 `CullMode::Back` 后它立刻现形：球只画出**背面**（实测画面里
+      // `n.z>0.5` 的像素 0 个、`n.z<-0.5` 的 25 万个），内外翻转、完全不对。
+      mesh.indices.insert(mesh.indices.end(), {a, a + 1U, b, a + 1U, b + 1U, b});
     }
   }
   return mesh;

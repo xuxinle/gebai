@@ -48,6 +48,11 @@ struct Vertex {
   Vec4 clip{};
   math::Vec3 normal{};
   math::Vec3 color{};
+  /// **世界空间**位置：算逐像素视向用（`eye - world`）。
+  ///
+  /// 存世界位置而不是相机空间：插值后算 `eye - world` 最直接，与模型变换无关
+  /// （物体自转时视向自动跟对）。
+  math::Vec3 world{};
   float u{0.0f};
   float v{0.0f};
   /// 本三角形是否带 UV（纹理采样开关，避免“无 UV 网格误用残留纹理”）。
@@ -65,6 +70,7 @@ constexpr float kNearEpsilon = 1e-4f;
                   a.clip.z + (b.clip.z - a.clip.z) * t, a.clip.w + (b.clip.w - a.clip.w) * t};
   out.normal = a.normal + (b.normal - a.normal) * t;
   out.color = a.color + (b.color - a.color) * t;
+  out.world = a.world + (b.world - a.world) * t;
   // 裁剪产生的顶点也要插值 UV（否则裁过的面会采样到错误位置）
   out.u = a.u + (b.u - a.u) * t;
   out.v = a.v + (b.v - a.v) * t;
@@ -143,6 +149,123 @@ auto shade_terms(math::Vec3 normal, math::Vec3 color, const Lighting& lighting) 
   return math::Vec3{clamp01(color.x * gain), clamp01(color.y * gain), clamp01(color.z * gain)};
 }
 
+// ── GGX 高光与 Principled 着色 ──
+
+/// `alpha` 的下限。
+///
+/// 为何要夹：`roughness → 0` 时 GGX 的 D 项分母趋于 0，解析式会溢出成 inf/NaN。
+/// 实测：不夹时 `roughness=0` 会输出 NaN，整幅变黑（NaN 在色调映射里传插）。
+constexpr float kMinAlpha = 1e-3f;
+
+auto ggx_distribution(float n_dot_h, float roughness) noexcept -> float {
+  const float alpha = std::max(roughness, kMinAlpha);
+  const float a2 = alpha * alpha;
+  const float nh = std::max(n_dot_h, 0.0f);
+  const float nh2 = nh * nh;
+  const float denom = nh2 * (a2 - 1.0f) + 1.0f;
+  if (denom <= 1e-12f) return 0.0f;
+  return a2 / (3.14159265358979f * denom * denom);
+}
+
+auto ggx_geometry(float n_dot_v, float n_dot_l, float roughness) noexcept -> float {
+  // Smith 的 Schlick-GGX 近似：k = (alpha+1)²/8（直接光照用这个，IBL 用 alpha²/2）
+  const float alpha = std::max(roughness, kMinAlpha);
+  const float k = (alpha + 1.0f) * (alpha + 1.0f) * 0.125f;
+  const float nv = std::max(n_dot_v, 0.0f);
+  const float nl = std::max(n_dot_l, 0.0f);
+  const float gv = nv / (nv * (1.0f - k) + k);
+  const float gl = nl / (nl * (1.0f - k) + k);
+  return gv * gl;
+}
+
+auto ggx_specular(math::Vec3 normal, math::Vec3 view_dir, math::Vec3 light_dir,
+                  float roughness, float metallic, math::Vec3 base_color,
+                  math::Vec3 specular_tint) noexcept -> math::Vec3 {
+  const math::Vec3 n = normal.normalized();
+  const math::Vec3 v = view_dir.normalized();
+  const math::Vec3 l = light_dir.normalized();
+  const math::Vec3 h = (v + l).normalized();
+
+  const float n_dot_v = std::max(n.dot(v), 0.0f);
+  const float n_dot_l = std::max(n.dot(l), 0.0f);
+  if (n_dot_v <= 0.0f || n_dot_l <= 0.0f) return math::Vec3{0.0f, 0.0f, 0.0f};
+  const float n_dot_h = std::max(n.dot(h), 0.0f);
+  const float v_dot_h = std::max(v.dot(h), 0.0f);
+
+  // Fresnel（Schlick）：掠射角下反射率趋于 1
+  // 非金属的 F0 = 0.04（常见绝缘体的平均值）；金属的 F0 = 固有色。
+  const math::Vec3 f0 = math::Vec3{0.04f + (base_color.x - 0.04f) * metallic,
+                                   0.04f + (base_color.y - 0.04f) * metallic,
+                                   0.04f + (base_color.z - 0.04f) * metallic};
+  const float one_minus_vh = 1.0f - v_dot_h;
+  const float fresnel_scalar = one_minus_vh * one_minus_vh * one_minus_vh * one_minus_vh *
+                               one_minus_vh;   // ^5，写成乘法避开 pow
+
+  const float d = ggx_distribution(n_dot_h, roughness);
+  const float g = ggx_geometry(n_dot_v, n_dot_l, roughness);
+  // 分母 4·(n·v)·(n·l)：能量守恒的归一化因子
+  const float denom = 4.0f * n_dot_v * n_dot_l;
+  if (denom <= 1e-9f) return math::Vec3{0.0f, 0.0f, 0.0f};
+
+  // ## 为何要乘 `n·l`
+  //
+  // BRDF 是“出射辐亮度 / 入射辐照度”的比值，而真正进入着色方程的是
+  // `BRDF · 辐照度`，其中辐照度含 `n·l`（余弦因子）。
+  //
+  // 漏掉它的后果很具体：实测 `spec` 只有 **0.0003~0.0067**——比漫反射
+  // （0.5 量级）小两个数量级，高光在画面上完全看不见，而这不会报任何错。
+  const float cosine = n_dot_l;
+  const auto channel = [&](float f0_c, float tint_c) -> float {
+    const float f = f0_c + (1.0f - f0_c) * fresnel_scalar;
+    return d * g * f / denom * tint_c * cosine;
+  };
+  return math::Vec3{channel(f0.x, specular_tint.x), channel(f0.y, specular_tint.y),
+                    channel(f0.z, specular_tint.z)};
+}
+
+math::Vec3 shade_surface(math::Vec3 normal, math::Vec3 base_color, math::Vec3 view_dir,
+                         const Lighting& lighting, float metallic, float roughness,
+                         float specular, float emission, math::Vec3 specular_tint) {
+  const math::Vec3 n = normal.normalized();
+  const math::Vec3 l = lighting.key_direction.normalized();
+
+  // ## 渐进采用：高光为 0 时必须与旧 `shade_terms` 逐位相同
+  if (specular <= 0.0f && emission <= 0.0f && metallic <= 0.0f) {
+    return shade_terms(normal, base_color, lighting);
+  }
+
+  const float n_dot_l = std::max(n.dot(l), 0.0f);
+  const float rim_base = 1.0f - std::max(n.z, 0.0f);
+  const float rim = rim_base * rim_base * lighting.rim;
+
+  // 金属没有漫反射（自由电子吸收透射光）——这是金属与非金属的物理分界线。
+  // 漏掉它时，金色球会显得像“黄色塑料”，一眼就假。
+  const float diffuse_weight = 1.0f - metallic;
+  const float diffuse_scale =
+      lighting.ambient * diffuse_weight + n_dot_l * lighting.diffuse * diffuse_weight + rim;
+
+  math::Vec3 result{base_color.x * diffuse_scale, base_color.y * diffuse_scale,
+                    base_color.z * diffuse_scale};
+
+  if (specular > 0.0f) {
+    const math::Vec3 spike =
+        ggx_specular(n, view_dir, l, roughness, metallic, base_color, specular_tint);
+    result.x += spike.x * specular;
+    result.y += spike.y * specular;
+    result.z += spike.z * specular;
+  }
+
+  // 自发光：加在**色调映射之前**（线性 HDR 域），这样才能被 ACES 滚降。
+  if (emission > 0.0f) {
+    result.x += base_color.x * emission;
+    result.y += base_color.y * emission;
+    result.z += base_color.z * emission;
+  }
+
+  return math::Vec3{result.x * lighting.exposure, result.y * lighting.exposure,
+                    result.z * lighting.exposure};
+}
+
 namespace {
 
 class SoftwareScene final : public Scene3D {
@@ -177,6 +300,9 @@ class SoftwareScene final : public Scene3D {
     cull_mode_ = CullMode::Back;     // 同上：不重置会让上一帧的设置泄漏
     material_ = Material{};
     transparent_.clear();
+    cull_mode_ = CullMode::Back;     // 同上：不重置会让上一帧的设置泄漏
+    material_ = Material{};
+    transparent_.clear();
     // ## 清屏色也必须走**同一条输出链**
     //
     // 实测踩到：原先这里直接 `canvas_.clear(clear_color)`，于是 background
@@ -200,6 +326,7 @@ class SoftwareScene final : public Scene3D {
     const float aspect = height_ > 0 ? static_cast<float>(width_) / static_cast<float>(height_)
                                      : 1.0f;
     const float fov = camera.fov_y_degrees * 3.14159265358979f / 180.0f;
+    eye_ = camera.eye;
     view_ = math::Mat4::look_at(camera.eye, camera.target, camera.up);
     projection_ = math::Mat4::perspective(fov, aspect, camera.near_z, camera.far_z);
     mvp_ready_ = true;
@@ -210,12 +337,11 @@ class SoftwareScene final : public Scene3D {
     tone_map_ = lighting.tone_map;
   }
 
- void set_cull_mode(CullMode mode) override { cull_mode_ = mode; }
+  void set_cull_mode(CullMode mode) override { cull_mode_ = mode; }
 
- void set_material(const Material& material) override {
+  void set_material(const Material& material) override {
     material_ = material;
-    // opacity < 1 时必须关深度写：否则后面的透明面会被它挡住，
-    // 表现为“里面的东西全消失”（而且只在透明物体上出错，很难联想到深度写）。
+    // opacity < 1 时必须关深度写：否则后面的透明面会被它挡住。
     if (material_.opacity < 0.999f) material_.depth_write = false;
     material_.opacity = std::clamp(material_.opacity, 0.0f, 1.0f);
   }
@@ -258,6 +384,14 @@ class SoftwareScene final : public Scene3D {
         const math::Vec3 position{vertex[0], vertex[1], vertex[2]};
         const math::Vec3 normal = math::Vec3{vertex[3], vertex[4], vertex[5]};
         tri[k].clip = transform(mvp, position, 1.0f);
+        // 世界位置（含模型变换）：算逐像素视向用
+        tri[k].world = math::Vec3{
+            model.value(0, 0) * position.x + model.value(0, 1) * position.y +
+                model.value(0, 2) * position.z + model.value(0, 3),
+            model.value(1, 0) * position.x + model.value(1, 1) * position.y +
+                model.value(1, 2) * position.z + model.value(1, 3),
+            model.value(2, 0) * position.x + model.value(2, 1) * position.y +
+                model.value(2, 2) * position.z + model.value(2, 3)};
         // 法线用模型矩阵变换（与 GPU 侧一致：`mat3(u_model) * in_normal`）
         const math::Vec3 world_normal{
             model.value(0, 0) * normal.x + model.value(0, 1) * normal.y + model.value(0, 2) * normal.z,
@@ -428,6 +562,12 @@ class SoftwareScene final : public Scene3D {
         const float i1 = (sum > 1e-9f) ? (w1 * p1.w) / sum : w1;
         const float i2 = 1.0f - i0 - i1;
         const math::Vec3 normal = a.normal * i0 + b.normal * i1 + c.normal * i2;
+        // 逐像素视向：`eye - world`。
+        //
+        // 固定方向近似时只有画面正中是对的，越往边缘偏差越大——掠射角高光不拉长，
+        // 金属看起来像塑料。而这里插值出的世界位置本来就是逐像素的，只多一次减法。
+        const math::Vec3 world = a.world * i0 + b.world * i1 + c.world * i2;
+        const math::Vec3 pixel_view{eye_.x - world.x, eye_.y - world.y, eye_.z - world.z};
         math::Vec3 color = a.color * i0 + b.color * i1 + c.color * i2;
         // 有 UV 且已设纹理 → 采样（**双线性**，与纹理坐标一起透视校正）。
         //
@@ -440,7 +580,11 @@ class SoftwareScene final : public Scene3D {
           // 纹理与顶点色**相乘**：顶点色充当“基础色/染色”，纹理提供图案。
           color = math::Vec3{color.x * texel.x, color.y * texel.y, color.z * texel.z};
         }
-        const math::Vec3 lit = shade_terms(normal, color, lighting_);
+        const math::Vec3 lit =
+            shade_surface(normal, color, pixel_view, lighting_, material_.metallic,
+                          material_.roughness, material_.specular, material_.emission,
+                          material_.specular_tint_set ? material_.specular_tint
+                                                       : math::Vec3{1.0f, 1.0f, 1.0f});
         // ## 输出链：线性 → 曝光 → 色调映射 → sRGB → 8bit
         //
         // 修之前这里直接 `lit.x * 255`，两处错（都“看不出哪里错、只觉得不对”）：
@@ -576,27 +720,30 @@ class SoftwareScene final : public Scene3D {
   std::vector<float> depth_{};
   math::Mat4 view_{math::Mat4::identity()};
   math::Mat4 projection_{math::Mat4::identity()};
+  /// 相机位置（算逐像素视向用）。
+  ///
+  /// GGX 的 Fresnel 依赖**视线与半角的夹角**，固定方向近似时只有画面正中是对的。
+  math::Vec3 eye_{0.0f, 0.0f, 4.0f};
   bool mvp_ready_{false};
   Lighting lighting_{};
- /// 色调映射算子（从 `Lighting::tone_map` 同步过来）。
- ///
- /// 为何单独存一份：每帧重置为默认光照时（`begin_frame`），码里会
- /// 重建 `lighting_`；把它放在同一个结构里就只靠 `set_lighting` 传递，
- /// 不会两处不同步。默认值必须与 `Lighting::tone_map` 一致。
- ToneMap tone_map_{ToneMap::Aces};
- /// 面朝向剔除（默认剔除背向面）。
- CullMode cull_mode_{CullMode::Back};
- /// 当前材质（opacity < 1 → 三角形进透明队列）。
- Material material_{};
- /// 透明三角形延迟队列：`begin_frame` 清、`draw_mesh` 收集、`end_frame` 前排序并绘制。
- ///
- /// 为何要延迟：正确的透明混合要求**远→近**绘制，而 `draw_mesh` 是按调用顺序
- /// 提交的（与远近无关）。收集后统一排序是唯一能保证正确顺序的做法。
- struct TransparentTri {
-   Vertex v[3];
-   float depth{0.0f};   ///< 排序键（相机空间距离，越大越远）
- };
- std::vector<TransparentTri> transparent_{};
+  /// 色调映射算子（从 `Lighting::tone_map` 同步过来）。
+  ///
+  /// 为何单独存一份：每帧重置为默认光照时（`begin_frame`）会重建 `lighting_`，
+  /// 把它放在同一个结构里就只靠 `set_lighting` 传递，不会两处不同步。
+  ToneMap tone_map_{ToneMap::Aces};
+  /// 面朝向剔除（默认剔除背向面）。
+  CullMode cull_mode_{CullMode::Back};
+  /// 当前材质。
+  Material material_{};
+  /// 透明三角形延迟队列：`begin_frame` 清、`draw_mesh` 收集、 `end_frame` 前排序并绘制。
+  ///
+  /// 为何要延迟：正确的透明混合要求**远→近**绘制，而 `draw_mesh` 是按调用
+  /// 顺序提交的（与远近无关）。收集后统一排序是唯一能保证正确顺序的做法。
+  struct TransparentTri {
+    Vertex v[3];
+    float depth{0.0f};   ///< 排序键（相机空间距离，越大越远）
+  };
+  std::vector<TransparentTri> transparent_{};
   /// 纹理（RGBA8 非预乘，行优先）：空 = 无纹理。
   std::vector<std::uint8_t> texture_{};
   int texture_width_{0};
