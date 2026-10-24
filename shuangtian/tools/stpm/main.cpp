@@ -7,6 +7,7 @@
 #include <format>
 #include <functional>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -247,6 +248,26 @@ auto command_build(const Arguments& arguments) -> int {
                 stats->workers_large);
   }
   if (!stats->artifact.empty()) st::print("产物: {}\n", stats->artifact);
+
+  // ## 测试目标不在 `build` 的范围内——这必须说出来，但不做精确判定
+  //
+  // `st.pkg` 把 `tests/*_test.cpp` 声明成独立目标，由 `st test` 负责构建 + 运行。
+  // 于是改了测试文件后跑 `st build` 报「构建完成」，而 `st_tests` 还是旧的：
+  // 接着直接跑那个二进制，验的是**上一版代码**。
+  //
+  // 实测代价：这条线上反复假绿——改了断言却看到旧结果，然后去查被测代码半天。
+  //
+  // ## 为什么是"固定提示"而不是"检测过期"
+  //
+  // 试过两种精确判据，都会误判：
+  // ① 比 `st_tests` 的 mtime——它只在链接指纹变化时才更新，只改一行断言时原地不动；
+  // ② 比测试单元的 `.o`——`tests/*` 里有大量被 `#include` 进别的单元的文件，
+  //    它们不单独产出 `.o`，且对象命名随调用方式（绝对/相对路径）变化。
+  //
+  // 恒真的一行提示成本几乎为零（一个 `print`），而误报会训练人忽略它。
+  if (!manifest->tests.empty()) {
+    st::print("  提示: `st build` 不构建测试目标——跑测试请用 `st test`\n");
+  }
   return 0;
 }
 

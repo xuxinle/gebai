@@ -663,7 +663,29 @@ GPU (118,121,53)。两者都对（前者物理更准，后者是标准做法）�
 避免"一边有一边没有、而测试跑在默认后端所以看不出来"（那正是这条线上
 反复出问题的形态）。要补时按软件腿 `PlanarShadow` 的四边形遮罩算法翻译。
 
-### 三维：GPU 腿的透明测试在**并行全跑时偶发失败**（2026-10-23）
+### 三维：`scene3d_transparent_...` 在 GPU 腿上**没有后端守卫**（2026-10-23，未修）
+
+**实测（2026-10-23 复核，比原来那条更准确）**：
+
+```
+单跑（不设后端）           → PASS
+ST_SCENE3D_BACKEND=gpu 单跑 → FAIL
+ST_SCENE3D_BACKEND=software → PASS
+```
+
+所以这不是「并行偶发」，而是**它在 GPU 腿上本来就不成立**——
+GPU 只有一套固定写深度的状态（透明物体会被自己挡住，见本段上一条），
+而这条用例测的正是「透过近处半透明看到远处」。**它缺一个
+`backend_lacks_transparency()` 守卫**，与 `scene3d_shadow_takes_effect`
+那条已有守卫的用例对照即可确认。
+
+**影响**：`ST_SCENE3D_BACKEND=gpu st test` 全量跑会稳定红一条。
+默认（不设该变量）与软件腿全绿。
+
+**另**：`scale_gate_select_panel_frame_is_independent_of_option_count`
+在并行全跑时偶发失败，与三维无关，已单独记录。
+
+### 三维：GPU 腿的透明测试在**并行全跑时偶发失败**（2026-10-23，**上一条已修正此判断**）
 
 **现象**：`scene3d_transparent_shows_the_far_surface_through_the_near_one`
 在 `ST_SCENE3D_BACKEND=gpu` 下：

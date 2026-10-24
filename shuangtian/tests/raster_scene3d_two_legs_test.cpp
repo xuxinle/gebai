@@ -27,6 +27,7 @@
 // 引入反而会与 PCH 里已定义的 `NOMINMAX` 撞车（-Werror 直接拦下）。
 #include <cstdlib>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -55,9 +56,24 @@ constexpr int kHeight = 240;
 /// ⚠ 用 `_putenv_s` 而不是 `SetEnvironmentVariableA`：`st::fs::read_env` 走
 /// `std::getenv`，MinGW 的 `getenv` 读的是 CRT 自己的环境块副本——只改进程环境块
 /// 改不动它（实测踩过：两段“强制不同腿”量出一模一样的结果）。
+/// 进程级互斥：`ST_SCENE3D_BACKEND` 是**进程环境**，不是线程局部的。
+///
+/// ## 为什么必须有它（实测：全量并行跑偶发失败）
+///
+/// 测试运行器**每个用例开一个 `std::thread`** 执行。而本类的用法是
+/// 「设环境变量 → 建场景 → 还原」，若两个用例同时进行：
+///   用例 A 设 software → 用例 B 设 gpu → A 建场景时读到 gpu
+/// → A 量到的是另一条腿的画面，判据随机失败。
+///
+/// 实测症状：`scene3d_transparent_...` 与 `scale_gate_select_panel...`
+/// 在全量并行跑时偶发红，**单跑必定绿**。这是并发写环境变量的数据竞争，
+/// 不是被测代码的缺陷。
+///
+/// 修法：整个临界区（从设变量到还原）持锁。锁是**进程级**
+/// （函数内 static），所以跨用例互斥；持有时间是一次渲染，代价可接受。
 class ForcedBackend {
  public:
-  explicit ForcedBackend(const char* value) {
+  explicit ForcedBackend(const char* value) : lock_(Scene3D::backend_mutex()) {
     const char* previous = std::getenv("ST_SCENE3D_BACKEND");
     if (previous != nullptr) {
       previous_ = previous;
@@ -72,6 +88,9 @@ class ForcedBackend {
   auto operator=(const ForcedBackend&) -> ForcedBackend& = delete;
 
  private:
+  /// 声明顺序很重要：先拿锁、后改环境变量；析构时先还原、后放锁
+  /// （成员逆序析构，所以锁放最后）。
+  std::unique_lock<std::mutex> lock_;
   std::string previous_{};
   bool had_previous_{false};
 };

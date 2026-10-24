@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 
@@ -311,6 +312,22 @@ class Scene3D {
 
   /// 建离屏场景（尺寸为**物理像素**）。失败给出具体原因（无设备/资源创建失败/着色器编译错误）。
   [[nodiscard]] static auto create(int width, int height) -> Result<std::unique_ptr<Scene3D>>;
+
+  /// 后端选择用的**进程级互斥**（`ST_SCENE3D_BACKEND` 是进程环境，不是线程局部）。
+  ///
+  /// ## 用它保护什么
+  ///
+  /// 「临时设 `ST_SCENE3D_BACKEND` → `create` → 还原」这段必须原子。
+  /// 否则两个线程同时改这个变量时，A 建出来的场景可能用的是 B 设的后端。
+  ///
+  /// ## 为什么放在框架侧而不是各测试自己定义
+  ///
+  /// 锁必须是**同一把**才有互斥效果。测试分散在多个翻译单元里，
+  /// 各自定义一把 static 锁互不相干——实测：只给一个测试文件加锁后，
+  /// 另一个不持锁的用例仍然会读到中间值（全量并行跑时偶发失败）。
+  ///
+  /// 返回值是进程内唯一的同一把锁（函数内 static）。
+  [[nodiscard]] static auto backend_mutex() -> std::mutex&;
 
   /// 开始一帧：设视口、清色与深度。
   virtual void begin_frame(math::Color clear_color) = 0;

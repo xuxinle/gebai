@@ -1048,6 +1048,16 @@ namespace {
 
 auto Scene3D::available() noexcept -> bool { return true; }   // 软件腿：永远可用
 
+auto Scene3D::backend_mutex() -> std::mutex& {
+  // 进程内唯一：函数内 static，与 `available()` 一样是「整个进程共享一个」的语义。
+  //
+  // 这里**必须**是进程级可变状态：互斥锁的作用就是让多个线程共享同一把锁，
+  // 注入 Context 无处可注（调用方是整个进程，且它恰好就是用来保护
+  // `ST_SCENE3D_BACKEND` 这个进程环境变量的）。
+  static std::mutex mutex;   // lint-allow: L8 进程级互斥本身就是共享状态，正是它的用途
+  return mutex;
+}
+
 auto Scene3D::create(int width, int height) -> Result<std::unique_ptr<Scene3D>> {
   if (width <= 0 || height <= 0) return unexpected(ErrorCode::Invalid, "渲染尺寸必须为正");
   // 强制指定腿：供探针做对照与出问题时的逃生门（与 `ST_GPU_FORCE_WARP` 同一套惯例）。
