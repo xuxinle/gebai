@@ -312,3 +312,147 @@ ST_TEST(fx_camera_window_keeps_last_frames_identical) {
   const auto b = caiyun::apply_camera(source, move, p12, 12.0, 1.0f);
   ST_CHECK(diff_pixels(snapshot(a), snapshot(b)) == 0);
 }
+
+// ═══ ScriptShape.rotate / 多边形的几何 ═══
+//
+// ## 这组钉的是什么
+//
+// 两个能力之前都是**画了但不生效**、且都不报错：
+//   · `rotate` 有字段、`layout.cpp` 也解析了，但 `paint_script_shapes` 的
+//     switch 一个分支都不读它（脚本里写了不报错，只是画面是正的）；
+//   · 没有多边形图元（kind 只到 3），倾斜/透视只能拿多个轴对齐矩形错位拼。
+//
+// 算术提到 `fx` 就是为了能在这里对着**真实实现**断言——`motion.cpp`
+// 拖一整条依赖（scene/carry/kin_text/model3d），include 不进测试。
+
+namespace {
+
+using Point = st::math::Point;
+
+/// 轴对齐包围盒：{min_x, max_x, min_y, max_y}
+[[nodiscard]] auto bbox(const std::vector<Point>& pts) -> std::array<float, 4> {
+  float min_x = pts[0].x, max_x = pts[0].x;
+  float min_y = pts[0].y, max_y = pts[0].y;
+  for (const Point& p : pts) {
+    min_x = std::min(min_x, p.x);
+    max_x = std::max(max_x, p.x);
+    min_y = std::min(min_y, p.y);
+    max_y = std::max(max_y, p.y);
+  }
+  return {min_x, max_x, min_y, max_y};
+}
+
+/// 多边形面积（鞋带公式）。
+[[nodiscard]] auto polygon_area(const std::vector<Point>& pts) -> float {
+  float sum = 0.0f;
+  for (std::size_t i = 0; i < pts.size(); ++i) {
+    const Point& a = pts[i];
+    const Point& b = pts[(i + 1) % pts.size()];
+    sum += a.x * b.y - b.x * a.y;
+  }
+  return std::abs(sum) * 0.5f;
+}
+
+[[nodiscard]] auto square(float x, float y, float size) -> std::vector<Point> {
+  return {Point{x, y}, Point{x + size, y}, Point{x + size, y + size}, Point{x, y + size}};
+}
+
+}  // namespace
+
+ST_TEST(fx_rotate_point_is_identity_at_zero_degrees) {
+  const Point p{123.5f, 456.25f};
+  const Point out = caiyun::rotate_point_deg(p, Point{100.0f, 400.0f}, 0.0f);
+  ST_CHECK(out.x == p.x);
+  ST_CHECK(out.y == p.y);
+}
+
+ST_TEST(fx_rotate_point_keeps_distance_to_center) {
+  // 旋转的必要条件：到中心距离不变（这条错，图元会边走边缩）。
+  const Point c{960.0f, 540.0f};
+  const Point p{1100.0f, 700.0f};
+  const float r0 = std::hypot(p.x - c.x, p.y - c.y);
+  for (const float deg : {15.0f, 35.0f, 90.0f, 180.0f, -47.0f}) {
+    const Point out = caiyun::rotate_point_deg(p, c, deg);
+    ST_CHECK(std::abs(r0 - std::hypot(out.x - c.x, out.y - c.y)) < 0.01f);
+  }
+}
+
+ST_TEST(fx_rotate_quarter_turn_is_clockwise) {
+  // ## 为何不用 90°（本轮踩到的真漏洞）
+  //
+  // 原来这条用 90° 断言 `|x|≈0 && |y-100|≈0`，**方向反了也成立**：
+  // cos(90°)≈0 使两种符号都得到 (0, ±100)，取绝对值后完全不可区分
+  // （逆向验证实测：把 `-dy*s` 改成 `+dy*s` 后这条仍然绿）。
+  //
+  // 改用 30°：顺时针（y 向下）下 (100,0) 应到 (86.6, 50)；
+  // 逆时针则到 (86.6, -50)——y 的符号把两者分开。
+  constexpr float kDeg30 = 30.0f;
+  const Point out = caiyun::rotate_point_deg(Point{100.0f, 0.0f}, Point{0.0f, 0.0f}, kDeg30);
+  ST_CHECK(std::abs(out.x - 86.6025f) < 0.01f);
+  ST_CHECK(out.y > 0.0f);                      // 顺时针：y 为正（向下）
+  ST_CHECK(std::abs(out.y - 50.0f) < 0.01f);
+}
+
+ST_TEST(fx_rotated_square_bbox_grows_and_area_is_conserved) {
+  // 200×200 正方旋转 35°：包围盒 = 200·(cos35+sin35) ≈ 278，面积不变。
+  // 两条判据必须同时：只有包围盒变胖时，“宽高一起乘 cos”的错误实现能蒙过；
+  // 只有面积守恒时，“根本没转”也守恒。
+  auto pts = square(560.0f, 340.0f, 200.0f);
+  const float area_before = polygon_area(pts);
+  caiyun::rotate_points_about_bounds(pts.data(), pts.size(), 35.0f);
+  const auto b = bbox(pts);
+  const float rad = 35.0f * 3.14159265358979f / 180.0f;
+  const float expect = 200.0f * (std::cos(rad) + std::sin(rad));
+  ST_CHECK(std::abs((b[1] - b[0]) - expect) < 1.0f);  ST_CHECK(std::abs((b[3] - b[2]) - expect) < 1.0f);
+  ST_CHECK((b[1] - b[0]) > 255.0f);
+  ST_CHECK(std::abs(polygon_area(pts) - area_before) < 1.0f);
+}
+
+ST_TEST(fx_rotate_about_bounds_keeps_bbox_center_fixed) {
+  // 旋转中心必须是**包围盒中心**：对手画的不均匀多边形，用顶点均值会让
+  // 图元“转的同时整体飘一下”，而脚本作者不会预期位置会变。
+  //
+  // 判据要小心：旋转后**包围盒**中心本来就会变（转了之后外包框换了），
+  // 不变的是**旋转中心**。所以这里验两条:
+  //   ① 顶点到“原包围盒中心”的距离在旋转后不变（中心真的就是它）；
+  //   ② 包围盒中心的新位置，恰好等于“原中心绕自身旋转”（即不动）——
+  //      用 180° 验证：此时包围盒必定围绕原中心对称，中心不变。
+  std::vector<Point> pts{Point{100.0f, 100.0f}, Point{300.0f, 140.0f},
+                         Point{180.0f, 260.0f}};
+  const auto before = bbox(pts);
+  const Point center{(before[0] + before[1]) * 0.5f, (before[2] + before[3]) * 0.5f};
+
+  // ① 每个顶点到中心的距离守恒
+  std::vector<float> dist_before;
+  for (const Point& p : pts) dist_before.push_back(std::hypot(p.x - center.x, p.y - center.y));
+  caiyun::rotate_points_about_bounds(pts.data(), pts.size(), 40.0f);
+  for (std::size_t i = 0; i < pts.size(); ++i) {
+    const float d = std::hypot(pts[i].x - center.x, pts[i].y - center.y);
+    ST_CHECK(std::abs(d - dist_before[i]) < 0.01f);
+  }
+
+  // ② 180° 后包围盒中心回到原处
+  std::vector<Point> half{Point{100.0f, 100.0f}, Point{300.0f, 140.0f},
+                          Point{180.0f, 260.0f}};
+  caiyun::rotate_points_about_bounds(half.data(), half.size(), 180.0f);
+  const auto turned = bbox(half);
+  ST_CHECK(std::abs((turned[0] + turned[1]) * 0.5f - center.x) < 0.01f);
+  ST_CHECK(std::abs((turned[2] + turned[3]) * 0.5f - center.y) < 0.01f);
+}
+
+ST_TEST(fx_rotate_zero_is_noop_and_null_is_safe) {
+  auto pts = square(540.0f, 260.0f, 200.0f);
+  const auto copy = pts;
+  caiyun::rotate_points_about_bounds(pts.data(), pts.size(), 0.0f);
+  for (std::size_t i = 0; i < pts.size(); ++i) {
+    ST_CHECK(pts[i].x == copy[i].x);
+    ST_CHECK(pts[i].y == copy[i].y);
+  }
+  // 不足 3 个顶点的多边形不会被绘制，但旋转函数也不该越界。
+  caiyun::rotate_points_about_bounds(nullptr, 0, 30.0f);
+  std::vector<Point> one{Point{10.0f, 20.0f}};
+  caiyun::rotate_points_about_bounds(one.data(), one.size(), 30.0f);
+  ST_CHECK(one[0].x == 10.0f);
+  ST_CHECK(one[0].y == 20.0f);
+}
+

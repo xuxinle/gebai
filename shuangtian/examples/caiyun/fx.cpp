@@ -497,4 +497,37 @@ void paint_god_ray(st::raster::Canvas& target, float origin_x, float origin_y, f
   }
 }
 
+auto rotate_point_deg(st::math::Point point, st::math::Point center, float degrees)
+    -> st::math::Point {
+  if (degrees == 0.0f) return point;
+  const float r = degrees * 3.14159265358979f / 180.0f;
+  const float s = std::sin(r);
+  const float c = std::cos(r);
+  const float dx = point.x - center.x;
+  const float dy = point.y - center.y;
+  return st::math::Point{center.x + dx * c - dy * s, center.y + dx * s + dy * c};
+}
+
+auto rotate_points_about_bounds(st::math::Point* points, std::size_t count, float degrees)
+    -> void {
+  if (points == nullptr || count == 0 || degrees == 0.0f) return;
+  // 中心取**包围盒中心**，不是顶点均值。
+  //
+  // 对矩形/正多边形两者相同，但对手画的不均匀多边形（比如三角形）
+  // 顶点均值会偏向点密的那一侧，结果是“转的同时整体飘一下”——
+  // 而脚本作者不会预期位置会变。
+  float min_x = points[0].x, max_x = min_x;
+  float min_y = points[0].y, max_y = min_y;
+  for (std::size_t i = 1; i < count; ++i) {
+    min_x = std::min(min_x, points[i].x);
+    max_x = std::max(max_x, points[i].x);
+    min_y = std::min(min_y, points[i].y);
+    max_y = std::max(max_y, points[i].y);
+  }
+  const st::math::Point center{(min_x + max_x) * 0.5f, (min_y + max_y) * 0.5f};
+  for (std::size_t i = 0; i < count; ++i) {
+    points[i] = rotate_point_deg(points[i], center, degrees);
+  }
+}
+
 }  // namespace caiyun

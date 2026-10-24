@@ -265,7 +265,7 @@ auto LayoutEngine::evaluate(float time, float duration, float canvas_w, float ca
           const double value = field->get<double>();
           return std::isfinite(value) ? static_cast<float>(value) : fallback;
         };
-        shape.kind = static_cast<int>(std::clamp(number("kind", 0.0f), 0.0f, 3.0f));
+        shape.kind = static_cast<int>(std::clamp(number("kind", 0.0f), 0.0f, 4.0f));
         shape.x = number("x", 0.0f);
         shape.y = number("y", 0.0f);
         shape.w = number("w", 0.0f);
@@ -276,6 +276,29 @@ auto LayoutEngine::evaluate(float time, float duration, float canvas_w, float ca
         shape.stroke = number("stroke", 0.0f);
         shape.rotate = number("rotate", 0.0f);
         shape.text = st::json_get_string(entry, "text");
+        // 多边形顶点：接受扁平数组 [x0,y0,x1,y1,…] 或 [[x,y],…] 两种写法。
+        //
+        // 两种都接受的理由：扁平数组是 JS 里算出来的自然形式（循环 push），
+        // 而 `[[x,y],…]` 是手写脚本时的自然形式。只支持一种会让另一边写得很别扭，
+        // 而脚本层出错是静默的（渲染器只降级不报错，见 docs/BACKLOG.md G8）。
+        if (const st::Json* pts = st::json_find(entry, "points");
+            pts != nullptr && pts->is_array()) {
+          shape.points.reserve(pts->size() * 2);
+          for (const st::Json& item : *pts) {
+            if (item.is_number()) {
+              const double v = item.get<double>();
+              if (std::isfinite(v)) shape.points.push_back(static_cast<float>(v));
+            } else if (item.is_array()) {
+              for (const st::Json& sub : item) {
+                if (!sub.is_number()) continue;
+                const double v = sub.get<double>();
+                if (std::isfinite(v)) shape.points.push_back(static_cast<float>(v));
+              }
+            }
+          }
+          // 顶点数为奇数时丢掉末项（否则后面的线段会配错点）
+          if (shape.points.size() % 2 != 0) shape.points.pop_back();
+        }
         const float alpha = std::clamp(number("alpha", 1.0f), 0.0f, 1.0f);
         const std::string color_text = st::json_get_string(entry, "color", "#ffffff");
         shape.color = parse_hex_color(color_text);

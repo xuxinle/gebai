@@ -306,4 +306,23 @@ void paint_god_ray(st::raster::Canvas& target, float origin_x, float origin_y, f
                    float width_ratio, float length_ratio, Color color, float intensity,
                    float device_scale);
 
+/// 绕 `(cx, cy)` 旋转一点（度，顺时针为正）。
+///
+/// ## 为何单独提出来
+///
+/// 它是 `ScriptShape.rotate` 的全部几何内容。而 `rotate` 曾经**有字段、
+/// 解析过、绘制分支却不读它**——静默不生效，比缺字段更贵。
+/// 把这个算术放进 `fx`（不拖别处的依赖）才能给它写单测：
+/// 断言"35° 后轴对齐包围盒变胖 1.39 倍且面积守恒"。
+[[nodiscard]] auto rotate_point_deg(st::math::Point point, st::math::Point center,
+                                    float degrees) -> st::math::Point;
+
+/// 一组点绕自身包围盒中心旋转（多边形与旋转矩形共用）。
+///
+/// 与 `rotate_point_deg` 分开的理由：旋转中心得从**点集**推出来，
+/// 而"用哪个中心"恰好是这类图元最容易写错的地方（按顶点平均会让
+/// 不均匀分布的多边形整体偏移）。
+auto rotate_points_about_bounds(st::math::Point* points, std::size_t count,
+                                float degrees) -> void;
+
 }  // namespace caiyun

@@ -38,6 +38,7 @@ namespace caiyun {
 namespace {
 
 using st::math::Color;
+using st::math::Point;
 using st::raster::Canvas;
 using st::raster::Paint;
 using st::raster::Path;
@@ -154,6 +155,14 @@ class Painter {
   void clear(Color color) { canvas_.clear(color); }
   void fill(float x, float y, float w, float h, Color color, float radius = 0.0f) {
     canvas_.fill_rect(rect(x, y, w, h), Paint::solid(color), design(radius));
+  }
+  /// 任意路径填充（路径点必须**已过相机**——用 `point()` 建路径）。
+  ///
+  /// 多边形/旋转矩形只能走这条路：`fill_rect` 只能画轴对齐矩形，
+  /// 无论怎么调参数都画不出斜的。
+  void fill_path(const Path& path, Color color) {
+    if (path.is_empty()) return;
+    canvas_.fill_path(path, Paint::solid(color));
   }
   void circle(float cx, float cy, float r, Color color) {
     canvas_.fill_circle(point(cx, cy), design(r), Paint::solid(color));
@@ -1418,7 +1427,34 @@ void paint_script_shapes(Painter& p) {
     }
   }
   if (shapes.empty()) return;
-  const float scale = p.scale();
+  // ## 坐标系契约（实测踩过一次，两种错法）
+  //
+  // `shape.x/y/w/h/stroke/h` 全是**设计像素**（kDesignWidth=1920 的坐标系）。
+  // 渲染时画布的 `device_scale` 恒为 1（`render.cpp` 用 `Canvas{w,h,1.0f}` 建），
+  // 所以 `p.scale()` 也是 1——**它不能当“设计→物理”的换算因子**。
+  // 真正的换算是 `物理/设计 = 画布宽 / kDesignWidth`。
+  //
+  // 两种错法都踩过：
+  //   ① 直接传 `shape.x`（设计值当物理值）⇒ 1280×720 下圆心落在 (960,540)
+  //      而不是 (640,360)，画面偏右下、图元偏大（实测直径 179 应为 267）。
+  //   ② 用 `p.point()`：它按 `device_scale` 乘，而那是 1，结果同①。
+  //
+  // 所以自己算换算率。正文下面统一用它。
+  const float s = p.width() / kDesignWidth;
+  const auto S = [s](float v) { return v * s; };
+
+  // 旋转与多边形顶点的几何在 `fx` 里（那里可以写单测，这里只能靠渲帧）。
+  const auto polygon_path = [S](const std::vector<Point>& pts) -> Path {
+    Path path;
+    if (pts.empty()) return path;
+    path.move_to(Point{S(pts[0].x), S(pts[0].y)});
+    for (std::size_t i = 1; i < pts.size(); i++) {
+      path.line_to(Point{S(pts[i].x), S(pts[i].y)});
+    }
+    path.close();
+    return path;
+  };
+
   for (const ScriptShape& shape : shapes) {
     const float alpha = static_cast<float>(shape.color.a) / 255.0f;
     if (alpha <= 0.004f) continue;
@@ -1426,21 +1462,79 @@ void paint_script_shapes(Painter& p) {
                       static_cast<std::uint8_t>(std::lround(alpha * 255.0f))};
     switch (shape.kind) {
       case 0:
-        p.circle(shape.x * scale, shape.y * scale, shape.w * 0.5f * scale, color);
+        p.circle(S(shape.x), S(shape.y), S(shape.w * 0.5f), color);
         break;
       case 2:
-        p.line(shape.x * scale, shape.y * scale, shape.x2 * scale, shape.y2 * scale, color,
-               std::max(0.5f, shape.stroke * scale));
+        p.line(S(shape.x), S(shape.y), S(shape.x2), S(shape.y2), color,
+               std::max(0.5f, S(shape.stroke)));
         break;
       case 3:
         if (!shape.text.empty()) {
-          p.text(shape.text, std::max(1.0f, shape.h * scale), shape.x * scale, shape.y * scale,
-                 color);
+          // ## 文字与几何图元的坐标契约**不一样**（实测踩两次）
+          //
+          // · `p.circle` / `p.fill` / `p.fill_path` / `p.line` 收**物理像素**
+          //   （它们不再过相机）；
+          // · `p.text` 收**设计坐标**——它内部自己 `point(left, top)`，
+          //   而过相机时会乘 `scale_`。
+          //
+          // 于是“一律乘 s”会让文字**双重缩小**（实测：导出帧里所有标签全消失，
+          // 因为 56px × 0.5 × 0.5 = 14px 再叠加位置偏移）。
+          // 在 1920×1080 下 `scale_ == 1`，两者恰好相同，所以这个差异只在
+          // 非设计分辨率下才现形。
+          if (shape.rotate != 0.0f) {
+            // 文字旋转只能逐字画（一个字符串是一个绘制单元，转不了单字）。
+            // 字宽按 0.58 em 估算（与 `spaced_text` 同一口径），够用于倾斜的标签/水印。
+            const float font = std::max(1.0f, shape.h);
+            const float cx = shape.x;
+            const float cy = shape.y + font * 0.5f;
+            float advance = 0.0f;
+            for (const char ch : shape.text) {
+              const Point pt = rotate_point_deg(Point{cx + advance, shape.y},
+                                                Point{cx, cy}, shape.rotate);
+              p.text(std::string(1, ch), font, pt.x, pt.y, color);
+              advance += font * (ch == ' ' ? 0.30f : 0.58f);
+            }
+          } else {
+            p.text(shape.text, std::max(1.0f, shape.h), shape.x, shape.y, color);
+          }
         }
         break;
+      case 4: {
+        // 多边形：点已在设计坐标里。少于 3 个顶点**不画**（而不是退化成一个点/一条线）。
+        const std::size_t n = shape.points.size() / 2;
+        if (n < 3) break;
+        std::vector<Point> pts;
+        pts.reserve(n);
+        float minx = shape.points[0], maxx = minx;
+        float miny = shape.points[1], maxy = miny;
+        for (std::size_t i = 0; i < n; i++) {
+          const float px = shape.points[i * 2], py = shape.points[i * 2 + 1];
+          pts.push_back(Point{px, py});
+          minx = std::min(minx, px); maxx = std::max(maxx, px);
+          miny = std::min(miny, py); maxy = std::max(maxy, py);
+        }
+        if (shape.rotate != 0.0f) {
+          rotate_points_about_bounds(pts.data(), pts.size(), shape.rotate);
+        }
+        p.fill_path(polygon_path(pts), color);
+        break;
+      }
       default:
-        p.fill(shape.x * scale, shape.y * scale, shape.w * scale, shape.h * scale, color,
-               shape.radius * scale);
+        if (shape.rotate != 0.0f) {
+          // 矩形旋转：四个角各转一次再用多边形填——轴对齐的 `p.fill()`
+          // 无论怎么调都画不出斜的矩形。
+          std::vector<Point> pts{
+              Point{shape.x, shape.y},
+              Point{shape.x + shape.w, shape.y},
+              Point{shape.x + shape.w, shape.y + shape.h},
+              Point{shape.x, shape.y + shape.h},
+          };
+          rotate_points_about_bounds(pts.data(), pts.size(), shape.rotate);
+          p.fill_path(polygon_path(pts), color);
+        } else {
+          // 矩形：`p.fill` 收物理像素。
+          p.fill(S(shape.x), S(shape.y), S(shape.w), S(shape.h), color, S(shape.radius));
+        }
         break;
     }
   }
