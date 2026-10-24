@@ -26,3 +26,5 @@ core.[0-9]*
 
 # 裁云工程的配音轨：TTS/录音生成的外部产物（二进制、可重新生成），只留脚本引用
 examples/caiyun/assets/vo/*.wav
+examples/caiyun/_build/
+examples/caiyun/kit/_build/
