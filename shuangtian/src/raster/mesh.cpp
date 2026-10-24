@@ -6,10 +6,29 @@
 
 #include "st/core/fs.hpp"
 #include "st/core/string.hpp"
+#include "st/raster/color_pipeline.hpp"
 
 namespace st::raster {
 
 namespace {
+
+/// `math::Color`（**sRGB 字节**）→ 0~1 的**线性**色（光照计算的工作空间）。
+///
+/// ## 为何必须解码（实测）
+///
+/// `math::Color` 是无标签字节（直接用十六进制写，如 `Color{0x8C,0xAA,0xFF}`），
+/// 而绝大多数字节值都是**按 sRGB 选出来的**（设计工具里看到的那个色）。
+/// 早先这里只做 `/255`，等于“把 sRGB 当线性用”——在中调偏差 1.6 倍：
+///   sRGB 0.55 → 线性 0.26（而不是 0.55）
+/// 再叠上 ACES 的抬亮，中灰材质直接接白（实测球面亮度 216/255）。
+///
+/// 像素管线里“线性工作空间”的前提就是**输入端先把显示编码解掉**，
+/// 这一句就是那个输入端。
+[[nodiscard]] auto to_unit(math::Color color) noexcept -> math::Vec3 {
+  return srgb_to_linear(
+      math::Vec3{static_cast<float>(color.r) / 255.0f, static_cast<float>(color.g) / 255.0f,
+                 static_cast<float>(color.b) / 255.0f});
+}
 
 /// 解析一个 `f` 顶点引用：返回 (位置索引, 法线索引)，均为 **0 基**；法线缺失时 -1。
 /// 支持 `v` / `v/vt` / `v//vn` / `v/vt/vn` 四种写法与负索引（相对当前顶点数）。
@@ -106,9 +125,7 @@ auto Mesh::load_obj(std::string_view text, math::Color base_color) -> Result<Mes
 
   Mesh mesh;
   mesh.vertices.reserve(face_corners.size() * 9U);
-  const math::Vec3 color{static_cast<float>(base_color.r) / 255.0f,
-                         static_cast<float>(base_color.g) / 255.0f,
-                         static_cast<float>(base_color.b) / 255.0f};
+  const math::Vec3 color = to_unit(base_color);
 
   std::size_t corner = 0;
   for (const std::size_t size : face_sizes) {
@@ -200,12 +217,6 @@ auto Mesh::box(float x, float y, float z) -> Mesh {
 auto Mesh::cube(float size) -> Mesh { return box(size, size, size); }
 
 namespace {
-
-/// `math::Color` → 0~1 的线性色（光照计算的工作空间）。
-[[nodiscard]] auto to_unit(math::Color color) noexcept -> math::Vec3 {
-  return math::Vec3{static_cast<float>(color.r) / 255.0f, static_cast<float>(color.g) / 255.0f,
-                    static_cast<float>(color.b) / 255.0f};
-}
 
 /// 按竖直位置（-1..1）做一个**很小的**亮度渐变。
 ///
@@ -718,9 +729,7 @@ auto Mesh::textured_icon_box(float x, float y, float z, math::Color side_color) 
        {{-hx, -hy, hz}, kSideU, kSideV}},
   };
   const math::Vec3 side_normals[5] = {{0, 0, -1}, {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}};
-  const math::Vec3 side_tint{static_cast<float>(side_color.r) / 255.0f,
-                             static_cast<float>(side_color.g) / 255.0f,
-                             static_cast<float>(side_color.b) / 255.0f};
+  const math::Vec3 side_tint = to_unit(side_color);
   for (int face = 0; face < 5; ++face) {
     const auto base = static_cast<std::uint32_t>(mesh.vertex_count());
     for (const QuadCorner& corner : sides[face]) {

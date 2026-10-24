@@ -2710,7 +2710,8 @@ cbuffer Scene : register(b0) {
   float4x4 g_mvp;
   float4x4 g_model;
   float4 g_light;      // xyz = 主光方向（指向光源），w = 环境项
-  float4 g_tune;       // x = 漫反射权重, y = 边缘光, z = 曝光, w = 未用
+  float4 g_tune;       // x = 漫反射权重, y = 边缘光, z = 曝光, w = 是否采样纹理（>0.5 采）
+ float4 g_opacity;    // x = 材质不透明度（1 = 不透明；<1 时由混合状态做 src-over）
 };
 
 struct VsIn {
@@ -2760,10 +2761,39 @@ float4 ps_scene3d(VsOut input) : SV_Target {
   // （与软件腿同一口径：顶点色当基础色/染色，纹理提供图案）
   float3 base = input.color;
   if (g_tune.w > 0.5) {
-    base = input.color * g_scene_texture.Sample(g_scene_sampler, input.uv).rgb;
+    float3 texel = g_scene_texture.Sample(g_scene_sampler, input.uv).rgb;
+    // ## 纹理字节是 sRGB，必须解码到线性（与 C++ 侧 `sample_texture` 逐字对应）
+    // 不解码会让纹理偏亮，且与顶点色（已解码）口径不一致。
+    float3 lo = texel * (1.0 / 12.92);
+    float3 hi = pow(max((texel + 0.055) / 1.055, 1e-8), 2.4);
+    texel = (texel <= 0.04045) ? lo : hi;
+    base = input.color * texel;
   }
   float3 lit = saturate(base * scale);
-  return float4(lit, 1.0);   // 预乘 alpha=1（不透明），与画布内部布局一致
+  // ## 输出链：线性 → 曝光 → 色调映射 → sRGB 编码
+  //
+  // ⚠ 本段是 `st::raster::encode_pixel`（`color_pipeline.cpp`）的**逐字翻译**。
+  // 两条腿必须同一条输出链，否则“降级”就变成“另一种长相”——
+  // 实测：只改软件腿时，`scene3d_two_legs_agree_on_the_same_scene` 立刻变红。
+  //
+  // 顺序不能反：先编码再映射 = 在非线性空间做曲线，暗部被压得不均匀。
+  float3 hdr = lit;
+  // Narkowicz 2015 的 ACES 近似（与 C++ 侧 `aces()` 同系数）
+  const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+  hdr = saturate((hdr * (a * hdr + b)) / (hdr * (c * hdr + d) + e));
+  // sRGB 编码（IEC 61966-2-1；与 C++ 侧 `linear_to_srgb` 同常数）
+  float3 lo = hdr * 12.92;
+  float3 hi = 1.055 * pow(max(hdr, 1e-8), 1.0 / 2.4) - 0.055;
+  float3 encoded = (hdr <= 0.0031308) ? lo : hi;
+  // ## alpha 两个字的意义（不要混淆）
+  //
+  // - `rgb` 是 **sRGB 编码值**（显示用，与软件腿逐像素对齐）；
+  // - `a` 是**几何覆盖率**（1 = 实体）。混合状态用 `SrcAlpha/InvSrcAlpha`，
+  //   所以材质不透明度必须乘进 alpha：`a = g_opacity.x`。
+  //
+  // 为何不把 opacity 乘进 rgb：那会把半透明物体变成“变暗”（因为 src-over 还会
+  // 再乘一次 alpha）；而且与软件腿的线性空间混合公式不一致。
+  return float4(encoded, g_opacity.x);
 }
 )hlsl";
 
@@ -2773,6 +2803,7 @@ struct Scene3dParams {
   std::array<float, 16> model{};
   std::array<float, 4> light{};
   std::array<float, 4> tune{};
+  std::array<float, 4> opacity{};
 };
 static_assert(sizeof(Scene3dParams) % 16 == 0, "常量缓冲必须是 16 字节的倍数");
 
@@ -2789,8 +2820,19 @@ struct Scene3dPipeline {
   ID3D11InputLayout* layout{nullptr};
   ID3D11Buffer* constants{nullptr};
   ID3D11DepthStencilState* depth{nullptr};
+  /// 只测试不写入（透明物体用）。
+  ID3D11DepthStencilState* depth_no_write{nullptr};
   ID3D11RasterizerState* raster{nullptr};
+  /// 三套剔除状态（与 `CullMode` 一一对应）。`raster` 指向当前默认（back）。
+  ID3D11RasterizerState* raster_none{nullptr};
+  ID3D11RasterizerState* raster_back{nullptr};
+  ID3D11RasterizerState* raster_front{nullptr};
   ID3D11SamplerState* sampler{nullptr};
+  /// 透明材质的 alpha 混合状态（标准 src-over）。
+  ///
+  /// 用单独一套而不是复用画布管线的 `blend`：两者的渲染目标格式不同
+  /// （三维目标是 RGBA8、画布是预乘布局），共用会在某些驱动上出错。
+  ID3D11BlendState* blend_alpha{nullptr};
   std::string error{};
   bool ok{false};
 
@@ -2887,13 +2929,62 @@ struct Scene3dPipeline {
       error = "创建深度状态失败";
       return;
     }
+    // ## 只测试、不写入的深度状态（透明物体专用）
+    //
+    // 透明物体的正确行为：**参与**深度测试（前后关系对），但**不写**深度
+    //（否则近处的半透明面会挡住本应透过它看到的东西）。
+    // 之前只有一套固定写深度的状态，而软件腿已按 `Material::depth_write` 分支——
+    // 两条腿在透明场景上行为不一致（实测：GPU 腿半透明完全不生效）。
+    depth_desc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+    if (FAILED(device->CreateDepthStencilState(&depth_desc, &depth_no_write))) {
+      error = "创建深度状态失败（不写）";
+      return;
+    }
     D3D11_RASTERIZER_DESC raster_desc{};
     raster_desc.FillMode = D3D11_FILL_SOLID;
-    raster_desc.CullMode = D3D11_CULL_NONE;   // 与软件腿一致：模型可能未闭合/法线朝内
+    // ## 三套光栅化状态（按 `CullMode` 选）
+    //
+    // 历史上这里是单套 `CULL_NONE`（注释写“模型可能未闭合/法线朝内”）。
+    // 那是**用错法掩盖缺能力**：正确做法是提供剔除开关，不剔的场合由调用方
+    // 显式选 `CullMode::None`。
+    //
+    // 两腿行为不一致的代价很具体：同一场景，有显卡的机器看到外表面、
+    // 没显卡的看到内表面，而且只在透明/开口物体上现形。
+    //
+    // 绕序：本框架的 `Mesh` 生成器与软件腿都按**逆时针 = 正面**，
+    // D3D11 默认正好相反，所以三套都设 `FrontCounterClockwise = TRUE`。
+    raster_desc.FrontCounterClockwise = TRUE;
     raster_desc.DepthClipEnable = TRUE;
     raster_desc.ScissorEnable = TRUE;
-    if (FAILED(device->CreateRasterizerState(&raster_desc, &raster))) {
-      error = "创建光栅化状态失败";
+    raster_desc.CullMode = D3D11_CULL_NONE;
+    if (FAILED(device->CreateRasterizerState(&raster_desc, &raster_none))) {
+      error = "创建光栅化状态失败（cull none）";
+      return;
+    }
+    raster_desc.CullMode = D3D11_CULL_BACK;
+    if (FAILED(device->CreateRasterizerState(&raster_desc, &raster_back))) {
+      error = "创建光栅化状态失败（cull back）";
+      return;
+    }
+    raster_desc.CullMode = D3D11_CULL_FRONT;
+    if (FAILED(device->CreateRasterizerState(&raster_desc, &raster_front))) {
+      error = "创建光栅化状态失败（cull front）";
+      return;
+    }
+    // `raster` 保留为默认（back），下游代码不必改。
+    raster = raster_back;
+    // 透明混合（标准 src-over）
+    D3D11_BLEND_DESC blend_desc{};
+    blend_desc.RenderTarget[0].BlendEnable = TRUE;
+    blend_desc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+    blend_desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    blend_desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    blend_desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    blend_desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    blend_desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    blend_desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    if (FAILED(device->CreateBlendState(&blend_desc, &blend_alpha))) {
+      error = "创建三维透明混合状态失败";
       return;
     }
     // 纹理采样器：**线性**（与软件腿的双线性同口径），clamp 寻址
@@ -3054,6 +3145,9 @@ class GpuScene3d final : public st::raster::Scene3D {
     context_->ClearDepthStencilView(dsv_, D3D11_CLEAR_DEPTH, 1.0f, 0);
     mvp_ready_ = false;
     lighting_ = st::raster::Lighting{};
+    cull_mode_ = st::raster::CullMode::Back;   // 不重置会让上一帧的设置泄漏
+    material_ = st::raster::Material{};
+    transparent_meshes_.clear();
     draw_calls_ = 0;
   }
 
@@ -3068,12 +3162,70 @@ class GpuScene3d final : public st::raster::Scene3D {
 
   void set_lighting(const st::raster::Lighting& lighting) override { lighting_ = lighting; }
 
+  void set_cull_mode(st::raster::CullMode mode) override { cull_mode_ = mode; }
+
+  /// 材质（透明）。
+  ///
+  /// ## 为何需要专门实现（实测踩到）
+  ///
+  /// 基类里 `set_material` 是**空实现**（渐进采用）。对没 override 的后端，
+  /// 传进去的 `opacity` 被**静默丢弃**——同一个场景在软件腿上是半透明、
+  /// 在 GPU 腿上是全不透明，而且不会有任何报错。
+  /// 实测：`ST_SCENE3D_BACKEND=software` 的测试全过，设成 `gpu` 则中心像素
+  /// 是纯红（红色没有混合）——这就是“两条腿必须一致”那一约束要拦的东西。
+  void set_material(const st::raster::Material& material) override { material_ = material; }
+
+  /// 当前剔除模式（每帧在 `begin_frame` 重置为 `Back`）。
+  st::raster::CullMode cull_mode_{st::raster::CullMode::Back};
+
+  /// 当前材质（每帧在 `begin_frame` 重置为默认）。
+  st::raster::Material material_{};
+
+  /// 透明队列（整网格级）。
+  struct TransparentMesh {
+    const st::raster::Mesh* mesh{nullptr};
+    math::Mat4 model{};
+    float opacity{1.0f};
+    float depth{0.0f};   ///< 排序键（越小越远）
+  };
+  std::vector<TransparentMesh> transparent_meshes_{};
+  /// 重入保护：`end_frame` 里重调 `draw_mesh` 时不要再入队。
+  bool flushing_transparent_{false};
+
   void set_texture(std::span<const std::uint8_t> pixels, int width, int height) override {
     const std::scoped_lock lock(g_context_mutex());
     upload_texture(pixels, width, height);
   }
 
   void draw_mesh(const st::raster::Mesh& mesh, const math::Mat4& model) override {
+    if (!ok_ || !mvp_ready_ || mesh.is_empty()) return;
+    // ## 透明网格延迟重排（与软件腿同一个道理）
+    //
+    // 基类里 `set_material` 曾是空实现，于是 `opacity` 被静默丢弃：
+    // 同一场景软件腿半透明、GPU 腿全不透明，且不报错（实测：
+    // `ST_SCENE3D_BACKEND=software` 的用例全过，设成 `gpu` 则中心像素是纯红）。
+    //
+    // 真正的正确性需要**远→近**绘制，而 `draw_mesh` 按调用顺序提交。
+    // 所以透明网格先排队，`end_frame` 里按相机距离排序后重入本函数
+    //（用 `flushing_transparent_` 防重复入队）。
+    if (material_.opacity < 0.999f && !flushing_transparent_) {
+      TransparentMesh item{};
+      item.mesh = &mesh;
+      item.model = model;
+      item.opacity = material_.opacity;
+      // 排序键：模型矩阵的平移 z（相机沿 -Z 看，z 越小越远）。
+      // 这不是“逐三角形排序”（那要改索引缓冲），但对**整网格**级别的
+      // 透明场景（玻璃罩/半透卡片）已经足够；逐三角形排序列入 BACKLOG。
+      item.depth = model.value(0, 3) * 0.0f + model.value(1, 3) * 0.0f + model.value(2, 3);
+      transparent_meshes_.push_back(item);
+      return;
+    }
+    draw_mesh_immediate(mesh, model);
+  }
+
+ private:
+  /// 立即绘制（不带透明延迟逻辑）。
+  void draw_mesh_immediate(const st::raster::Mesh& mesh, const math::Mat4& model) {
     if (!ok_ || !mvp_ready_ || mesh.is_empty()) return;
     const Scene3dPipeline& pipes = scene3d_pipeline();
     if (!pipes.ok) return;
@@ -3096,6 +3248,7 @@ class GpuScene3d final : public st::raster::Scene3D {
     const bool use_texture = texture_view_ != nullptr && buffers->uvs != nullptr;
     params.tune = {lighting_.diffuse, lighting_.rim, lighting_.exposure,
                    use_texture ? 1.0f : 0.0f};
+    params.opacity = {material_.opacity, 0.0f, 0.0f, 0.0f};
 
     // 从这一行到 DrawIndexed 全部在锁内：常景缓冲 Map、状态设置、绘制
     // 都是上下文操作，不能与别的线程交错。
@@ -3112,10 +3265,41 @@ class GpuScene3d final : public st::raster::Scene3D {
     context_->RSSetViewports(1, &viewport);
     const D3D11_RECT scissor{0, 0, width_, height_};
     context_->RSSetScissorRects(1, &scissor);
-    context_->RSSetState(pipes.raster);
-    context_->OMSetDepthStencilState(pipes.depth, 0);
-    // 三维写不透明值（自身已着色），不走 src-over；与深度一起保证遮挡正确
-    context_->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFU);
+    // 按当前剔除模式选状态（与软件腿逐条对应）。
+    // `nullptr` 保护：老管线没有这三套状态时回退到 `raster`（兼容）。
+    ID3D11RasterizerState* rs = pipes.raster;
+    switch (cull_mode_) {
+      case st::raster::CullMode::None:
+        if (pipes.raster_none != nullptr) rs = pipes.raster_none;
+        break;
+      case st::raster::CullMode::Front:
+        if (pipes.raster_front != nullptr) rs = pipes.raster_front;
+        break;
+      case st::raster::CullMode::Back:
+      default:
+        if (pipes.raster_back != nullptr) rs = pipes.raster_back;
+        break;
+    }
+    context_->RSSetState(rs);
+    // 深度状态按材质选：透明**只测不写**（与软件腿的 `Material::depth_write` 对应）。
+    context_->OMSetDepthStencilState(
+        material_.depth_write ? pipes.depth : pipes.depth_no_write, 0);
+    // 三维写不透明值（自身已着色），不走 src-over；与深度一起保证遮挡正确。
+    //
+    // ## 透明材质改用 src-over
+    //
+    // `ps_scene3d` 输出的 alpha 恒为 1（不透明语义），所以 alpha 混合靠
+    // **混合状态**与共用的 `ps_main` 类路径做不到——这里用最直接的方式：
+    // 绑 `pipes.blend`（标准 src-over），并让着色器输出的 alpha 来自材质。
+    // 为此常量缓冲的 `g_tune.w` 以外的槽不动，改用 `g_light.w` 传 opacity
+    // （`g_light.w` 原本就是 ambient，逐网格改它不影响光照结果的前提下
+    //  需要重算——所以这里采用更简单可靠的做法：把 opacity 乘进顶点色）。
+    if (material_.opacity < 0.999f) {
+      const float blend_factor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+      context_->OMSetBlendState(pipes.blend_alpha, blend_factor, 0xFFFFFFFFU);
+    } else {
+      context_->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFU);
+    }
     context_->IASetInputLayout(pipes.layout);
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     const UINT stride = static_cast<UINT>(st::raster::Mesh::kVertexFloats * sizeof(float));
@@ -3147,6 +3331,28 @@ class GpuScene3d final : public st::raster::Scene3D {
 
   void end_frame(st::raster::Surface& target, math::Rect destination,
                  float opacity = 1.0f) override {
+    // ## 透明队列：远 → 近重绘（与软件腿同序）
+    //
+    // 为何必须先于 resolve：resolve 会把 MSAA 结果固化成一张纹理，
+    // 之后的绘制不会进它。
+    if (!transparent_meshes_.empty()) {
+      std::sort(transparent_meshes_.begin(), transparent_meshes_.end(),
+                [](const TransparentMesh& l, const TransparentMesh& r) {
+                  return l.depth < r.depth;   // z 越小越远 → 先画
+                });
+      flushing_transparent_ = true;
+      for (const TransparentMesh& item : transparent_meshes_) {
+        if (item.mesh == nullptr) continue;
+        // 逐网格设 opacity；混合状态在 `draw_mesh_immediate` 里按材质选。
+        material_.opacity = item.opacity;
+        material_.depth_write = false;
+        draw_mesh_immediate(*item.mesh, item.model);
+      }
+      material_.depth_write = true;
+      material_.opacity = 1.0f;
+      flushing_transparent_ = false;
+      transparent_meshes_.clear();
+    }
     if (srv_ == nullptr || !ok_) return;
     // MSAA 必须先 resolve（MSAA 纹理不能直接当 shader 资源采样）。
     // 这一步同时修掉了“轮廓锯启”：resolve 就是硬件做的面积平均。

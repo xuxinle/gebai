@@ -19,11 +19,44 @@
 #include "st/core/error.hpp"
 #include "st/math/color.hpp"
 #include "st/math/matrix.hpp"
+#include "st/raster/color_pipeline.hpp"
 #include "st/raster/mesh.hpp"
 
 namespace st::raster {
 
 class Surface;
+
+/// 面朝向剔除模式。
+///
+/// ## 为何需要（实测）
+///
+/// 不加剔除时，闭合物体的**背向面也会画**。对不透明封闭体它们会被深度测试
+/// 挡掉（结果碰巧正确），但两种场合会直接穿帮：
+/// - 相机钻进物体内部时，看到的是内壁（本应一片黑）；
+/// - **透明物体**：背面不剔除时，后面与前面两个面都会被混合，
+///   颜色叠加两次——“玻璃变浓”就是这么来的。
+///
+/// 默认值 `Back` 与 Blender/游戏引擎一致。
+/// 单面物体（如 `Mesh::plane`）从背面看会消失，这也是标准行为。
+enum class CullMode : std::uint8_t {
+  None = 0,   ///< 不剔除（双面可见；给“薄片双面”场景用）
+  Back = 1,   ///< 剔除背向面（**默认**，封闭物体的正确行为）
+  Front = 2,  ///< 剔除正向面（看内壁时用；不常见）
+};
+
+/// 材质参数。与 `set_texture` 同一设计：**材质是场景的一个状态**，
+/// 不是网格的一部分（原因见 `set_texture` 的说明——换材质不应重建网格缓存）。
+struct Material {
+  /// 不透明度（1 = 完全不透明，0 = 完全透明）。
+  ///
+  /// 小于 1 时，网格的三角形会被推到**透明队列**：
+  /// 先画完全部不透明物体，再按“远→近”排序后混合。
+  /// 这是在没有完整 BSP 排序的前提下能做到的正确做法。
+  float opacity{1.0f};
+  /// 是否写入深度。透明物体必须关（否则后面的透明面会被它挡住）。
+  /// 一般不需要手动改：`opacity < 1` 时自动为 false。
+  bool depth_write{true};
+};
 
 /// 相机（右手系，视线朝 -Z）。
 struct Camera {
@@ -34,6 +67,22 @@ struct Camera {
   float near_z{0.1f};
   float far_z{100.0f};
 };
+
+/// ## 色彩空间口径（**读一次能省一堆调试**）
+///
+/// 三维管线默认在**线性空间**算光照、最后经色调映射 + sRGB 编码输出。
+/// 于是不同入口的输入口径**不一样**，传错就会“画面亮一档但看不出原因”：
+///
+/// | 入口 | 该传什么 | 为什么 |
+/// |---|---|---|
+/// | `Mesh::colored_sphere` / `colored_box` / `plane` / `textured_*` 的 `color` | **sRGB 字节** | 与设计工具里看到的色一致；内部解码 |
+/// | `Mesh::vertices` 直接写 | **线性值** | 那是已经解码后的工作空间 |
+/// | `set_texture()` 的 RGBA8 | **sRGB 字节** | 那是 PNG/图片文件里的字节 |
+/// | `begin_frame(clear_color)` | **线性值** | 与 `Lighting` 同一口径 |
+/// | `Lighting` 里的颜色（隐含于 `key_direction` 等） | **线性值** | — |
+/// | `Lighting::exposure` / `tone_map` | 曝光 / 算子 | 作用于**线性** HDR 值 |
+///
+/// 一句话：**从图片/设计工具来的 → sRGB；在代码里手算的 → 线性**。
 
 /// 光照参数。**默认值就是历史行为**（键光方向、环境 0.35、边缘光 0.25、漫反射 0.75）。
 ///
@@ -54,6 +103,18 @@ struct Lighting {
   float rim{0.25f};
   /// 整体曝光乘子（1 = 不调）。批量出片时统一压/提亮比逐个改顶点色省事。
   float exposure{1.0f};
+  /// 色调映射算子（见 `color_pipeline.hpp`）。
+  ///
+  /// **默认 `Aces`**：它是“正确”的那一档（HDR 滚降、高光不糊），
+  /// 而且现有场景全部在 [0,1] 内，ACES 对中调的影响是“略提亮”——
+  /// 实测 0.5 → 0.616，画面变得更接近预期。
+  ///
+  /// 要逐像素回到旧行为（无映射、线性值直接当 sRGB），把它设成 `None`；
+  /// 但**不推荐**——那是把“线性当 sRGB”的错误固化下来。
+  ///
+  /// 注：`color_pipeline.hpp` 里的 `ToneMap` 定义在 `st::raster`，
+  /// 本结构也在同一命名空间，所以这里直接写类型名。
+  ToneMap tone_map{ToneMap::Aces};
 };
 
 /// 一像素的光照结果（两条腿共用同一套算式的**唯一**定义处）。
@@ -100,6 +161,17 @@ class Scene3D {
   virtual void set_camera(const Camera& camera) = 0;
   /// 设光照（**不调也可**：`Lighting` 的默认值就是历史行为）。每帧重置为默认。
   virtual void set_lighting(const Lighting& lighting) = 0;
+
+  /// 设面朝向剔除模式（**不调也可**：默认就是 `CullMode::Back`）。每帧重置为默认。
+  ///
+  /// 为何要每帧重置：与 `Lighting` 同理——不重置会让上一帧的设置泄漏到下一帧，
+  /// 而那种“某个场景之后全都错了”的 bug 极难定位。
+  virtual void set_cull_mode(CullMode /*mode*/) {}
+
+  /// 设材质（**不调也可**：默认完全不透明、写深度）。每帧重置为默认。
+  ///
+  /// `opacity < 1` 时网格进入**透明队列**（先画不透明、再远→近混合）。
+  virtual void set_material(const Material& /*material*/) {}
   /// 设当前纹理（**可选**）：设了之后，带 UV 的网格会采样它。
   ///
   /// ## 为什么纹理是“场景的一个状态”而不是“网格的一部分”

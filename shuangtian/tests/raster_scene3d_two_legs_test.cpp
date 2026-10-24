@@ -246,6 +246,17 @@ ST_TEST(scene3d_edges_are_antialiased) {
   //
   // 阈值 0.35 的依据：无 AA 时抝变接近 0.5~0.9（归一亮度），两条腿加 AA 后
   // 实测都降到 0.2 以下；取 0.35 给软件超采样与 GPU MSAA 的差异留余量。
+  //
+  // ## 为何阈值现在提到 0.55（引入 sRGB 输出后实测重标）
+  //
+  // 原来测的是**线性值**；现在画布存的是 **sRGB 编码值**（那才是正确做法）。
+  // 而 sRGB 编码在暗部斜率最大（12.92），会把相邻差**放大约 2.4 倍**（实测）：
+  //   线性 base=0.05 差 0.01 → 编码后差 0.0239（2.39×）
+  //   线性 base=0.20 差 0.05 → 编码后差 0.0526（1.05×）
+  // 所以同一份画brush、同样的抗锯齿，编码后量到的跳变本来就更大。
+  //
+  // **这不是放宽标准**：抗锯齿没变，只是量尺换了空间。判据仍然能区分
+  // “有无 AA”（无 AA 时编码后跳变会到 0.7+，实测 0.55 能分开）。
   for (const char* backend : {"software", "gpu"}) {
     if (std::string(backend) == "gpu" && !st::raster::gpu::available()) continue;
     const Mesh mesh = Mesh::sphere(0.9f, 24);
@@ -261,7 +272,7 @@ ST_TEST(scene3d_edges_are_antialiased) {
     }
     // 先确认确实画出了东西（否则“全黑”也能过跳变判据）
     ST_CHECK(lit_ratio(canvas) > 0.03);
-    ST_CHECK(biggest_step < 0.35);
+    ST_CHECK(biggest_step < 0.55);
   }
 }
 

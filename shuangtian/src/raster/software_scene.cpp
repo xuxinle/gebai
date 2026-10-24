@@ -168,10 +168,29 @@ class SoftwareScene final : public Scene3D {
                0.0f) {}
 
   void begin_frame(math::Color clear_color) override {
-    canvas_.clear(clear_color);
+    // ## 顺序：先重置算子，再编码清屏色
+    //
+    // 若先清屏再重置，用的是**上一帧**的 `tone_map_`（首帧用默认值）——
+    // 表现是“切了色调映射后背景慢一帧才跟上”。这类延迟在批量出片里很难查。
+    lighting_ = Lighting{};          // 每帧回到默认：不调 `set_lighting` 的调用方行为完全不变
+    tone_map_ = lighting_.tone_map;
+    cull_mode_ = CullMode::Back;     // 同上：不重置会让上一帧的设置泄漏
+    material_ = Material{};
+    transparent_.clear();
+    // ## 清屏色也必须走**同一条输出链**
+    //
+    // 实测踩到：原先这里直接 `canvas_.clear(clear_color)`，于是 background
+    // 是“线性值当 sRGB 存”（旧行为），而实体走新链（ACES+sRGB）。
+    // 结果是深灰底渲染出来一片白——两种色彩空间混在一帧里。
+    //
+    // 输入约定：`clear_color` 是**线性**值（与 `Lighting`/顶点色同一口径），
+    // 输出到画布前统一经 `encode_pixel`。
+    const math::Vec3 bg_linear{static_cast<float>(clear_color.r) / 255.0f,
+                               static_cast<float>(clear_color.g) / 255.0f,
+                               static_cast<float>(clear_color.b) / 255.0f};
+    canvas_.clear(encode_pixel(bg_linear, 1.0f, tone_map_));
     std::fill(depth_.begin(), depth_.end(), 1.0f);   // 1.0 = 远平面
     draw_calls_ = 0;
-    lighting_ = Lighting{};   // 每帧回到默认：不调 `set_lighting` 的调用方行为完全不变
   }
 
   void set_camera(const Camera& camera) override {
@@ -186,7 +205,20 @@ class SoftwareScene final : public Scene3D {
     mvp_ready_ = true;
   }
 
-  void set_lighting(const Lighting& lighting) override { lighting_ = lighting; }
+  void set_lighting(const Lighting& lighting) override {
+    lighting_ = lighting;
+    tone_map_ = lighting.tone_map;
+  }
+
+ void set_cull_mode(CullMode mode) override { cull_mode_ = mode; }
+
+ void set_material(const Material& material) override {
+    material_ = material;
+    // opacity < 1 时必须关深度写：否则后面的透明面会被它挡住，
+    // 表现为“里面的东西全消失”（而且只在透明物体上出错，很难联想到深度写）。
+    if (material_.opacity < 0.999f) material_.depth_write = false;
+    material_.opacity = std::clamp(material_.opacity, 0.0f, 1.0f);
+  }
 
   /// 纹理（RGBA8 非预乘，行优先）。空 span / 非法尺寸 = 清除纹理（回到顶点色）。
   void set_texture(std::span<const std::uint8_t> pixels, int width, int height) override {
@@ -244,13 +276,76 @@ class SoftwareScene final : public Scene3D {
       const int produced = clip_near(tri[0], tri[1], tri[2], clipped);
       // 裁剪后是凸多边形，按扇形拆回三角形
       for (int k = 1; k + 1 < produced; ++k) {
-        rasterize(clipped[0], clipped[k], clipped[k + 1]);
+        // ## 面朝向剔除（在**裁剪后**做）
+        //
+        // 为何在裁剪后：裁剪会改变顶点，面朝向必须按最终几何判。
+        // 而且裁剪前判一次会漏掉“部分在相机后”的情形。
+        if (!face_passes_cull(clipped[0], clipped[k], clipped[k + 1])) continue;
+        if (material_.opacity < 0.999f) {
+          // 透明：先收集，`end_frame` 前按远→近排序再画
+          TransparentTri item{};
+          item.v[0] = clipped[0];
+          item.v[1] = clipped[k];
+          item.v[2] = clipped[k + 1];
+          item.depth = (clipped[0].clip.w + clipped[k].clip.w + clipped[k + 1].clip.w) / 3.0f;
+          transparent_.push_back(item);
+        } else {
+          rasterize(clipped[0], clipped[k], clipped[k + 1], 1.0f);
+        }
       }
     }
     ++draw_calls_;
   }
 
+  /// 面朝向剔除判定（屏幕空间符号面积）。
+  ///
+  /// ## 为何用屏幕空间而不是世界空间叉积
+  ///
+  /// 世界空间叉积需要“顶点绕序约定”（顺时针/逆时针）加模型矩阵行列式符号，
+  /// 两个都要对；而屏幕空间符号面积**已经包含**了两者（投影 + 所有变换），
+  /// 只看结果符号就行——少一个错源。
+  ///
+  /// 符号方向：本渲染器 y 向下（`to_screen` 里 `0.5 - y*0.5`），
+  /// 所以**逆时针绕序在屏幕上表现为负面积**。正向面 = 面积为负。
+  [[nodiscard]] auto face_passes_cull(const Vertex& a, const Vertex& b,
+                                       const Vertex& c) const noexcept -> bool {
+    if (cull_mode_ == CullMode::None) return true;
+    const auto to_xy = [](const Vertex& v) {
+      const float inv_w = 1.0f / (v.clip.w > 1e-9f ? v.clip.w : 1e-9f);
+      return std::pair<float, float>{v.clip.x * inv_w, v.clip.y * inv_w};
+    };
+    const auto [ax, ay] = to_xy(a);
+    const auto [bx, by] = to_xy(b);
+    const auto [cx, cy] = to_xy(c);
+    // NDC 下 y 向上（`to_screen` 才翻转），所以面积 > 0 = 逆时针 = 正向面。
+    const float area = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+    if (cull_mode_ == CullMode::Back) return area > 0.0f;
+    return area <= 0.0f;   // CullMode::Front
+  }
+
   void end_frame(Surface& target, math::Rect destination, float opacity = 1.0f) override {
+    // ## 透明队列：远 → 近排序后绘制
+    //
+    // 为何在 `end_frame` 才算：`draw_mesh` 按调用顺序提交，与远近无关。
+    // 透明混合的正确性**依赖绘制顺序**（后画的一层覆盖前面），
+    // 所以必须收集后统一排序。
+    //
+    // 排序键用 `clip.w` 的平均值——透视投影里 `w = -z_view`（相机空间距离），
+    // 所以 w 越大越远。降序排 = 远先画。
+    if (!transparent_.empty()) {
+      std::sort(transparent_.begin(), transparent_.end(),
+                [](const TransparentTri& l, const TransparentTri& r) {
+                  return l.depth > r.depth;   // 远（w 大）在前
+                });
+      // 透明绘制期间不写深度
+      const bool saved_write = material_.depth_write;
+      material_.depth_write = false;
+      for (const TransparentTri& item : transparent_) {
+        rasterize(item.v[0], item.v[1], item.v[2], material_.opacity);
+      }
+      material_.depth_write = saved_write;
+      transparent_.clear();
+    }
     // 结果作为**一张图**交给目标画布（与 2D 原语同一条合成路径）。
     //
     // 交付前必须先 **resolve**（超采样缓冲 → 逻辑分辨率）：直接 `draw_canvas`
@@ -275,7 +370,7 @@ class SoftwareScene final : public Scene3D {
   /// 坐标系是**超采样缓冲**（`width_*kBake` × `height_*kBake`）：透视映射、
   /// 包围盒、深度缓冲都按它算。这样“一个逻辑像素的 `S²` 个子样本”自然落在
   /// 同一块缓冲上，resolve 时平均即得抗锯齿。
-  void rasterize(const Vertex& a, const Vertex& b, const Vertex& c) {
+  void rasterize(const Vertex& a, const Vertex& b, const Vertex& c, float opacity) {
     const int bake_width = width_ * kBake;
     const int bake_height = height_ * kBake;
     // 透视除法 → NDC → 屏幕（y 向下，与画布一致）
@@ -320,7 +415,12 @@ class SoftwareScene final : public Scene3D {
                                        static_cast<std::size_t>(bake_width) +
                                    static_cast<std::size_t>(x);
         if (z >= depth_[offset]) continue;    // z-buffer：比已画的更远 → 丢弃
-        depth_[offset] = z;
+        // ## 透明物体**不写深度**
+        //
+        // 不透明物体写（默认）；透明不写——否则近处的透明面会挡住后面
+        // 本应透过它看到的东西，表现为“玻璃后面的物体全消失”。
+        // （深度**测试**仍要做：透明面之间的前后关系靠它排。）
+        if (material_.depth_write) depth_[offset] = z;
 
         // 透视校正：顶点属性按 1/w 加权插值（不做校正会让纹理/光照在斜面上"歪"）
         const float sum = w0 * p0.w + w1 * p1.w + w2 * p2.w;
@@ -341,10 +441,37 @@ class SoftwareScene final : public Scene3D {
           color = math::Vec3{color.x * texel.x, color.y * texel.y, color.z * texel.z};
         }
         const math::Vec3 lit = shade_terms(normal, color, lighting_);
-        canvas_.set_pixel(x, y, math::Color{static_cast<std::uint8_t>(std::lround(lit.x * 255.0f)),
-                                            static_cast<std::uint8_t>(std::lround(lit.y * 255.0f)),
-                                            static_cast<std::uint8_t>(std::lround(lit.z * 255.0f)),
-                                            255});
+        // ## 输出链：线性 → 曝光 → 色调映射 → sRGB → 8bit
+        //
+        // 修之前这里直接 `lit.x * 255`，两处错（都“看不出哪里错、只觉得不对”）：
+        //   1. **线性值当 sRGB 存**：0.5 线性 ≈ 0.735 sRGB，整幅系统性偏暗；
+        //   2. **先 clamp 再存**：HDR 被截断在 1，高光/日光糊成一片白。
+        //
+        // `shade_terms` 仍返回**线性值**（两条腿共用的公式不变），
+        // 颜色变换集中在这里——顺序写错很难定位（看起来像“配色不对”）。
+        if (opacity >= 0.999f) {
+          canvas_.set_pixel(x, y, st::raster::encode_pixel(lit, 1.0f, tone_map_));
+        } else {
+          // ## 透明混合必须在**线性空间**做（实测很重要）
+          //
+          // 在 sRGB 编码后混合是错的：sRGB 是非线性的，
+          // 不透明度的物理意义是“光量比例”，只在��性域成立。
+          // 不过这里有一层实际约束：画布存的是**已编码**的 8bit sRGB 值，
+          // 拿不到“已画像素的线性值”除非重新解码。所以分两步：
+          //   ① 解码已有像素回线性；
+          //   ② 线性混合后再编码回去。
+          // 成本比直接混 abgr 高，但正确；透明物体通常只占少部分像素。
+          const math::Color dst_encoded = canvas_.pixel_at(x, y);
+          const float inv = 1.0f / 255.0f;
+          const math::Vec3 dst_linear =
+              srgb_to_linear(math::Vec3{static_cast<float>(dst_encoded.r) * inv,
+                                        static_cast<float>(dst_encoded.g) * inv,
+                                        static_cast<float>(dst_encoded.b) * inv});
+          const math::Vec3 mixed{dst_linear.x + (lit.x - dst_linear.x) * opacity,
+                                 dst_linear.y + (lit.y - dst_linear.y) * opacity,
+                                 dst_linear.z + (lit.z - dst_linear.z) * opacity};
+          canvas_.set_pixel(x, y, st::raster::encode_pixel(mixed, 1.0f, tone_map_));
+        }
       }
     }
   }
@@ -368,9 +495,15 @@ class SoftwareScene final : public Scene3D {
           (static_cast<std::size_t>(cy) * static_cast<std::size_t>(texture_width_) +
            static_cast<std::size_t>(cx)) *
           4U;
-      return math::Vec3{static_cast<float>(texture_[offset + 0U]) / 255.0f,
-                        static_cast<float>(texture_[offset + 1U]) / 255.0f,
-                        static_cast<float>(texture_[offset + 2U]) / 255.0f};
+      // ## 纹理字节是 sRGB，必须解码到线性后才能参与光照
+      //
+      // `set_texture` 的契约是“RGBA8 非预乘”——那是 PNG/图片文件里的字节，
+      // 也就是**显示编码**（sRGB）。直接 /255 当线性用会让纹理整体偏亮，
+      // 且与顶点色（已改为解码）口径不一致。
+      return srgb_to_linear(
+          math::Vec3{static_cast<float>(texture_[offset + 0U]) / 255.0f,
+                     static_cast<float>(texture_[offset + 1U]) / 255.0f,
+                     static_cast<float>(texture_[offset + 2U]) / 255.0f});
     };
     const math::Vec3 top = texel(x0, y0) * (1.0f - tx) + texel(x0 + 1, y0) * tx;
     const math::Vec3 bottom = texel(x0, y0 + 1) * (1.0f - tx) + texel(x0 + 1, y0 + 1) * tx;
@@ -445,6 +578,25 @@ class SoftwareScene final : public Scene3D {
   math::Mat4 projection_{math::Mat4::identity()};
   bool mvp_ready_{false};
   Lighting lighting_{};
+ /// 色调映射算子（从 `Lighting::tone_map` 同步过来）。
+ ///
+ /// 为何单独存一份：每帧重置为默认光照时（`begin_frame`），码里会
+ /// 重建 `lighting_`；把它放在同一个结构里就只靠 `set_lighting` 传递，
+ /// 不会两处不同步。默认值必须与 `Lighting::tone_map` 一致。
+ ToneMap tone_map_{ToneMap::Aces};
+ /// 面朝向剔除（默认剔除背向面）。
+ CullMode cull_mode_{CullMode::Back};
+ /// 当前材质（opacity < 1 → 三角形进透明队列）。
+ Material material_{};
+ /// 透明三角形延迟队列：`begin_frame` 清、`draw_mesh` 收集、`end_frame` 前排序并绘制。
+ ///
+ /// 为何要延迟：正确的透明混合要求**远→近**绘制，而 `draw_mesh` 是按调用顺序
+ /// 提交的（与远近无关）。收集后统一排序是唯一能保证正确顺序的做法。
+ struct TransparentTri {
+   Vertex v[3];
+   float depth{0.0f};   ///< 排序键（相机空间距离，越大越远）
+ };
+ std::vector<TransparentTri> transparent_{};
   /// 纹理（RGBA8 非预乘，行优先）：空 = 无纹理。
   std::vector<std::uint8_t> texture_{};
   int texture_width_{0};

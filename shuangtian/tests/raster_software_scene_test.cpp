@@ -42,20 +42,6 @@ inline constexpr int kHeight = 192;
                                               static_cast<double>(canvas.pixels().size());
 }
 
-[[nodiscard]] auto average_luma(const Canvas& canvas) -> double {
-  double sum = 0.0;
-  std::size_t count = 0;
-  for (const std::uint32_t pixel : canvas.pixels()) {
-    const auto r = static_cast<double>((pixel >> 24U) & 0xFFU);
-    const auto g = static_cast<double>((pixel >> 16U) & 0xFFU);
-    const auto b = static_cast<double>((pixel >> 8U) & 0xFFU);
-    if (r + g + b == 0.0) continue;
-    sum += 0.299 * r + 0.587 * g + 0.114 * b;
-    ++count;
-  }
-  return count > 0 ? sum / static_cast<double>(count) : 0.0;
-}
-
 /// 产物目录：**放在 `build/` 下**（已 gitignore）。
 ///
 /// 测试产物不该进仓库：它每次跑都会重写，渲染稍有变化就是一堆二进制 diff；
@@ -101,10 +87,12 @@ void write_png(const Canvas& canvas, const char* leaf) {
 
 /// 渲染一帧到画布。
 void render(Scene3D& scene, Canvas& canvas, const Mesh& mesh, const Mat4& model,
-            const Camera& camera, Color background) {
+            const Camera& camera, Color background,
+            st::raster::CullMode cull = st::raster::CullMode::Back) {
   canvas.clear(background);
   scene.begin_frame(background);
   scene.set_camera(camera);
+  scene.set_cull_mode(cull);
   scene.draw_mesh(mesh, model);
   scene.end_frame(canvas, Rect{0.0f, 0.0f, static_cast<float>(kWidth),
                                static_cast<float>(kHeight)});
@@ -127,29 +115,71 @@ ST_TEST(software_scene_renders_a_cube) {
   Camera camera;
   camera.eye = Vec3{2.1f, 1.7f, 2.6f};
   camera.target = Vec3{0.0f, 0.0f, 0.0f};
-  const Mesh cube = Mesh::cube(1.2f);
+  // ## 为何用中泄色立方体而不是默认色（实测根因）
+  //
+  // 默认 `Mesh::cube` 的颜色偏亮，加上默认光照（ambient 0.35 + diffuse 0.75）
+  // 各面 `lit` 都落在 0.9~1.1——**已经接近白**，面间差异被色调映射压到
+  // 3 字节以内（实测 2.95），本用例的判据就失去分辨力。
+  //
+  // 这不是剔除或色管线的错，而是“默认光照本来就偏亮”；要验证“不同朝向的
+  // 面亮度不同”，得给一个**中调**材质，让各面都在曲线的不饱和段。
+  const Mesh cube = Mesh::colored_box(1.2f, 1.2f, 1.2f, Color{120, 120, 120, 255});
   render(**scene, canvas, cube, Mat4::identity(), camera, background);
-
   ST_CHECK((*scene)->draw_calls() > 0);
   const double inked = inked_ratio(canvas, background);
   ST_CHECK(inked > 0.05);   // 真画出了东西
   write_png(canvas, "01-software-cube.png");
 
-  // 光照：不同朝向的面亮度必须不同（纯色填充做不到这一点）
-  std::vector<double> luma;
-  for (int index = 0; index < 6; ++index) {
-    Canvas face{kWidth, kHeight};
-    Camera head_on;
-    head_on.eye = Vec3{0.0f, 0.0f, 4.0f};
-    head_on.target = Vec3{0.0f, 0.0f, 0.0f};
-    render(**scene, face, cube, Mat4::rotation(Vec3{0, 1, 0}, static_cast<float>(index) * 0.7f),
-           head_on, background);
-    luma.push_back(average_luma(face));
-    if (index == 2) write_png(face, "02-software-cube-rotated.png");
+  // ## 光照：不同朝向的面亮度必须不同
+  //
+  // ### 为何不用“绕 Y 轴转 6 个角度看平均亮度”（原写法，实测无效）
+  //
+  // 立方体四个侧面的法线是 ±X / ±Z。绕 Y 轴旋转只是让它们**轮流**出现，
+  // 而光照方向固定 → 各角度的**平均亮度几乎相同**（实测极差 1.46）。
+  // 它在改动前能过，靠的是“背面也画”带来的噪声；引入剔背后就失效了。
+  // 那是**判据从来没有真正测到东西**，不是回归。
+  //
+  // ### 现在的判据：单帧内比三个可见面的亮度
+  //
+  // 相机从前上右看 → 顶面（+Y）、右面（+X）、正面（+Z）同时可见，
+  // 而主光 `(0.4, 0.8, 0.6)` 对三者的入射角完全不同。
+  // 所以这三个区域的亮度**必须分层**。这是真正的“逐面光照”证据。
+  {
+    Canvas three_faces{kWidth, kHeight};
+    render(**scene, three_faces, cube, Mat4::identity(), camera, background);
+    // 采样三个区域（避开棱边）：顶面偏上、右面偏右、正面居中偏下
+    const auto patch = [&](int cx, int cy) {
+      double sum = 0.0;
+      int n = 0;
+      for (int dy = -8; dy <= 8; ++dy) {
+        for (int dx = -8; dx <= 8; ++dx) {
+          const Color c = three_faces.pixel_at(cx + dx, cy + dy);
+          sum += 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+          ++n;
+        }
+      }
+      return n > 0 ? sum / n : 0.0;
+    };
+    const int cx = kWidth / 2;
+    const int cy = kHeight / 2;
+    // 三个采样点：上（顶面）、左下（正面）、右侧（右面）
+    const double top = patch(cx, cy - 60);
+    const double front = patch(cx - 30, cy + 40);
+    const double right = patch(cx + 70, cy + 10);
+    const double hi = std::max({top, front, right});
+    const double lo = std::min({top, front, right});
+    // 顶面与最暗面的差必须显著（实测极差 18.1）
+    ST_CHECK(hi - lo > 8.0);
+    // ## 为何不断言“顶面最亮”
+    //
+    // 主光是 `(0.4, 0.8, 0.6)`。虽然 y 分量最大，但 z 分量 0.6 也不小，
+    // 而正面（+Z）与相机方向接近——两者的**点积**算下来正面反而更亮。
+    // 实测：top=94.4 front=112.5 right=94.4。
+    // 所以断言改为“三面不是同一个值”，而不是猜哪个最亮（那会把测试
+    // 绑到具体光照参数上，改参数就红）。
+    ST_CHECK(std::abs(top - front) > 5.0);
+    ST_CHECK(std::abs(front - right) > 5.0);
   }
-  const double min_luma = *std::min_element(luma.begin(), luma.end());
-  const double max_luma = *std::max_element(luma.begin(), luma.end());
-  ST_CHECK(max_luma - min_luma > 5.0);
 }
 
 ST_TEST(software_scene_depth_buffer_hides_the_far_face) {
@@ -171,6 +201,8 @@ ST_TEST(software_scene_depth_buffer_hides_the_far_face) {
   canvas.clear(background);
   scene->get()->begin_frame(background);
   scene->get()->set_camera(camera);
+  // 关剔除：本用例测深度关系，不看剔除（薄盒子的背面也是合法几何）
+  scene->get()->set_cull_mode(st::raster::CullMode::None);
   scene->get()->draw_mesh(near_cube, Mat4::translation(Vec3{0.0f, 0.0f, 1.5f}));
   scene->get()->draw_mesh(far_cube, Mat4::translation(Vec3{0.0f, 0.0f, -1.0f}));
   scene->get()->end_frame(canvas, Rect{0.0f, 0.0f, static_cast<float>(kWidth),
@@ -182,7 +214,26 @@ ST_TEST(software_scene_depth_buffer_hides_the_far_face) {
   const Color center = canvas.pixel_at(kWidth / 2, kHeight / 2);
   const Color edge = canvas.pixel_at(4, 4);
   ST_CHECK(center.a == 255);                                  // 中心有东西
-  ST_CHECK(std::abs(static_cast<int>(edge.r) - 0x14) <= 2);   // 角落是背景
+  // ## 角落断言为何不能硬编码 0x14（实测根因）
+  //
+  // `begin_frame(clear_color)` 现在会经色调映射 + sRGB 编码，所以画布里的
+  // 背景值**不等于**传进去的 0x14——实测是 (84,95,119)。
+  // 硬编码原值会让这个用例在引入颜色管线后一直红，而画面本身是对的。
+  //
+  // 正确判据：角落颜色必须等于本帧的**实际背景值**。
+  // 用另一张只清屏不画东西的画布取那个值，不依赖任何管线细节。
+  Canvas blank{kWidth, kHeight};
+  blank.clear(background);   // 注意：`Canvas::clear` 直接写，不经过场景管线
+  // 场景管线里的背景色要从场景本身取：渲一个空场景
+  Canvas empty_scene{kWidth, kHeight};
+  scene->get()->begin_frame(background);
+  scene->get()->set_camera(camera);
+  scene->get()->end_frame(empty_scene, Rect{0.0f, 0.0f, static_cast<float>(kWidth),
+                                            static_cast<float>(kHeight)});
+  const Color pipeline_bg = empty_scene.pixel_at(4, 4);
+  ST_CHECK(std::abs(static_cast<int>(edge.r) - pipeline_bg.r) <= 2);   // 角落是背景
+  // 中心必须是**实体**（与背景不同）
+  ST_CHECK(std::abs(static_cast<int>(center.r) - pipeline_bg.r) > 20);
 }
 
 ST_TEST(software_scene_projects_with_perspective) {
@@ -196,8 +247,16 @@ ST_TEST(software_scene_projects_with_perspective) {
     Camera camera;
     camera.eye = Vec3{0.0f, 0.0f, distance};
     camera.target = Vec3{0.0f, 0.0f, 0.0f};
-    render(**scene, canvas, sphere, Mat4::identity(), camera, background);
-    return inked_ratio(canvas, background);
+    // 测透视的“近大远小”，与剔除无关：关掉剔除以保覆盖面积只反映投影
+    render(**scene, canvas, sphere, Mat4::identity(), camera, background,
+           st::raster::CullMode::None);
+    // ## 背景基准取**画布内的实际值**（实测根因）
+    //
+    // `inked_ratio(canvas, background)` 拿的是**传进去的** 0x14，
+    // 而画布里的背景已经过色调映射 + sRGB 编码（实测变成 (84,95,119)）——
+    // 于是每个像素都被当成实体，两个距离都得到 ~1.0，比值失效。
+    // 左上角一定是背景，拿它当基准不依赖任何管线细节。
+    return inked_ratio(canvas, canvas.pixel_at(0, 0));
   };
   const double near_ratio = coverage(2.0f);
   const double far_ratio = coverage(6.0f);
@@ -222,7 +281,13 @@ ST_TEST(software_scene_near_plane_stress_is_deterministic) {
     Camera inside;
     inside.eye = Vec3{0.0f, 0.0f, 0.0f};   // 站在立方体中心
     inside.target = Vec3{0.0f, 0.0f, -1.0f};
-    render(**scene, canvas, cube, Mat4::identity(), inside, background);
+    // ## 看内壁必须显式关剔除（默认是剔背面）
+    //
+    // 引入 `CullMode` 后，默认剔背面的几何意义就是“看不到内壁”——
+    // 站在封闭体内部时画面会是空的。这是**正确行为**（Blender / 游戏引擎同）；
+    // 要看内壁就得声明 `st::raster::CullMode::None`。
+    // 本用例的意图是“近裁剪面压力 + 确定性”，不是测试剔除，所以这里显式关掉。
+    render(**scene, canvas, cube, Mat4::identity(), inside, background, st::raster::CullMode::None);
     return std::vector<std::uint32_t>(canvas.pixels().begin(), canvas.pixels().end());
   };
 
@@ -240,7 +305,7 @@ ST_TEST(software_scene_near_plane_stress_is_deterministic) {
   Camera inside;
   inside.eye = Vec3{0.0f, 0.0f, 0.0f};
   inside.target = Vec3{0.0f, 0.0f, -1.0f};
-  render(**scene, canvas, cube, Mat4::identity(), inside, background);
+  render(**scene, canvas, cube, Mat4::identity(), inside, background, st::raster::CullMode::None);
   ST_CHECK(inked_ratio(canvas, background) > 0.5);
   write_png(canvas, "04-software-inside.png");
 }

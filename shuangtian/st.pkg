@@ -373,6 +373,18 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "三维纹理与 UV 是否真的贴上且位置正确（v 轴翻转、双线性采样）"
     },
+    "scene3d_color_probe": {
+      "kind": "executable",
+      "sources": ["tools/scene3d_color_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "颜色管线接入后的视觉对照：同一场景新旧两条输出链各落一张 PNG + 亮度/过曝统计"
+    },
+    "scene3d_cull_probe": {
+      "kind": "executable",
+      "sources": ["tools/scene3d_cull_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "背面剔除的**方向**（单面平面 + 两个相机位置；封闭体分辨不出方向对错）"
+    },
     "scene3d_composite_probe": {
       "kind": "executable",
       "sources": ["tools/scene3d_composite_probe.cpp"],
