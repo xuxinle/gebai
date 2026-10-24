@@ -90,6 +90,46 @@ def check_binary() -> None:
         )
 
 
+def check_layout(*candidates: str) -> None:
+    """渲染前把 layout 逐帧跑一遍，抓运行期错误。
+
+    ## 为什么要前置这一道（实测代价）
+
+    裁云的 layout 按设计**静默降级**：脚本抛错时渲染器不报错、继续出片，
+    画面只剩背景。于是"出片成功 + 指标能过"完全可能与"内容是空的"同时成立。
+
+    c06-pith 因此白改 3 轮：它的 `keys()` 每帧都抛错，而我一直在改相机关键帧，
+    逐秒数据始终 `mean=0.00`（降级特征），没有任何报错提示。
+
+    检查器在 `scripts/check_layout.py`（会注入与宿主白名单一致的桩）。
+    """
+    script = next((c for c in candidates if c and os.path.isfile(c)), None)
+    if script is None:
+        return
+    probe = os.path.join(ROOT, "scripts", "check_layout.py")
+    if not os.path.isfile(probe):
+        return   # 没有检查器就跳过（不阻断老流程）
+    try:
+        data = json.load(open(script, encoding="utf-8"))
+    except Exception:
+        return
+    scenes = data.get("scenes", [])
+    if not scenes:
+        return
+    layout = scenes[0].get("layout")
+    if not layout or not isinstance(layout, str):
+        return
+    js = layout if os.path.isabs(layout) else os.path.join(os.path.dirname(script), layout)
+    if not os.path.isfile(js):
+        sys.exit(f"layout 文件不存在：{js}")
+    dur = str(float(scenes[0].get("duration", 15)))
+    r = run([PY, probe, js, "--duration", dur], cwd=ROOT)
+    out = (r.stdout or "") + (r.stderr or "")
+    print(out.rstrip())
+    if r.returncode != 0:
+        sys.exit("layout 检查未通过：先修复再渲染（否则画面会静默降级为背景）")
+
+
 def run(cmd, **kw):
     # Windows 控制台默认 GBK，工具输出里的中文会变成 U+FFFD；后续抓指标/回写报告都会二次出错。
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
@@ -342,6 +382,16 @@ def main() -> int:
     args = ap.parse_args()
 
     check_binary()
+    # ## 渲染**之前**先跑一遍 layout（2026-10-24 加入，本仓库最贵的教训之一）
+    #
+    # 裁云的 layout 抛错时会**静默降级为纯 JSON**：渲染不报错、照常出片、
+    # 报告也有数字——但画面只剩背景。实测代价：c06-pith 的 `keys()` 调了
+    # 一个与宿主注入冲突/缺失的符号，**每一帧都抛错**，我为此白改了 3 轮相机
+    # 关键帧（逐秒数据一直是 mean=0.00，那是降级的特征，没有任何报错）。
+    #
+    # 这一步 10 秒，省的是几十分钟渲染 + 一轮误判。
+    check_layout(args.script)
+
     os.makedirs(args.out, exist_ok=True)
     mp4 = os.path.join(args.out, "film.mp4")
     # 记下本次渲染的**唯一标识**：脚本目录里所有 js/json 的最新 mtime。

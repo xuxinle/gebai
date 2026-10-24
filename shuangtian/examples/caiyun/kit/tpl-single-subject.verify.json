@@ -1,0 +1,60 @@
+{
+  "name": "tpl-single-subject",
+  "fps": 30,
+  "size": [
+    1920,
+    1080
+  ],
+  "transition": 0.3,
+  "fade_in": 0.3,
+  "fade_out": 0.4,
+  "brand_wordmark": "",
+  "brand_latin": "",
+  "footer_note": "",
+  "audio": {
+    "enabled": false
+  },
+  "scenes": [
+    {
+      "kind": "custom",
+      "duration": 12.0,
+      "layout": "_build/tpl-single-subject.bundle.js",
+      "accent": "#D2553C",
+      "background": [
+        "#0B0B0D",
+        "#0B0B0D"
+      ],
+      "layers": [
+        {
+          "kind": "text",
+          "name": "名字",
+          "text": "ONE THING",
+          "x": "460",
+          "y": "470",
+          "w": "1000",
+          "h": "110",
+          "size": 96,
+          "color": "#E8E4DA",
+          "align": 0,
+          "tracking": 3,
+          "bold": true,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "副标",
+          "text": "a single subject, one take",
+          "x": "462",
+          "y": "580",
+          "w": "1000",
+          "h": "44",
+          "size": 30,
+          "color": "#8B8375",
+          "align": 0,
+          "tracking": 2,
+          "enter": 0
+        }
+      ]
+    }
+  ]
+}

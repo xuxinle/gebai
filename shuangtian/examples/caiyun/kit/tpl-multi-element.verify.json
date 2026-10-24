@@ -1,0 +1,60 @@
+{
+  "name": "tpl-multi-element",
+  "fps": 30,
+  "size": [
+    1920,
+    1080
+  ],
+  "transition": 0.3,
+  "fade_in": 0.3,
+  "fade_out": 0.4,
+  "brand_wordmark": "",
+  "brand_latin": "",
+  "footer_note": "",
+  "audio": {
+    "enabled": false
+  },
+  "scenes": [
+    {
+      "kind": "custom",
+      "duration": 14.0,
+      "layout": "_build/tpl-multi-element.bundle.js",
+      "accent": "#D2553C",
+      "background": [
+        "#0B0B0D",
+        "#0B0B0D"
+      ],
+      "layers": [
+        {
+          "kind": "text",
+          "name": "标题",
+          "text": "THE TOOLKIT",
+          "x": "560",
+          "y": "120",
+          "w": "900",
+          "h": "86",
+          "size": 72,
+          "color": "#EDEAE3",
+          "align": 1,
+          "tracking": 3,
+          "bold": true,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "副标",
+          "text": "eight things it does",
+          "x": "562",
+          "y": "930",
+          "w": "900",
+          "h": "40",
+          "size": 28,
+          "color": "#7E8577",
+          "align": 1,
+          "tracking": 2,
+          "enter": 0
+        }
+      ]
+    }
+  ]
+}
