@@ -13,6 +13,7 @@
 #include "st/raster/scene3d.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -485,6 +486,155 @@ class SoftwareScene final : public Scene3D {
 
   void set_cull_mode(CullMode mode) override { cull_mode_ = mode; }
 
+  void set_shadow_map(const ShadowMap& shadow) override { shadow_map_ = shadow; }
+
+  /// 构阴影贴图：用**光源视角**把世界三角形光栅化到一张深度图。
+  ///
+  /// ## 为何用正交投影
+  ///
+  /// 平行光没有“原点”，只能用正交。聚光理论上可用透视（锥体就是视锥），
+  /// 但正交在小锥角下差别很小，而两套路径的代码量与出错面会翻倍。
+  /// 所以统一用正交，`extent` 给包络半径。
+  ///
+  /// 这个取舍的代价写在文档里：大锥角聚光的阴影会偏小。
+  void build_shadow_map() {
+    shadow_ready_ = false;
+    if (shadow_map_.strength <= 0.0f) return;
+    if (shadow_geometry_.empty()) return;
+
+    const int index = std::clamp(shadow_map_.light_index, 0, kMaxExtraLights - 1);
+    const Light& light = lighting_.extra_lights[static_cast<std::size_t>(index)];
+    if (light.intensity <= 0.0f) return;
+    // 点光不能用单张阴影贴图（需要立方体贴图），静默跳过。
+    if (light.kind == LightKind::Point) return;
+
+    const int res = std::clamp(shadow_map_.resolution, 64, 4096);
+    shadow_depth_.assign(static_cast<std::size_t>(res) * static_cast<std::size_t>(res), 1.0f);
+
+    // 光源朝向：平行光用 `direction`，聚光同。`direction` 是**照射方向**。
+    math::Vec3 dir = light.direction;
+    const float dir_len = dir.length();
+    if (dir_len <= 1e-6f) return;
+    dir = math::Vec3{dir.x / dir_len, dir.y / dir_len, dir.z / dir_len};
+
+    // 光源相机：从“逆向远处”看向原点（平行光无位置）。
+    // 聚光有位置，但从它的位置看与从远处看（同方向）在小锥角下几乎一致。
+    const float dist = std::max(shadow_map_.extent * 2.0f, 4.0f);
+    const math::Vec3 eye{light.kind == LightKind::Spot ? light.position.x - dir.x * dist
+                                                      : -dir.x * dist,
+                         light.kind == LightKind::Spot ? light.position.y - dir.y * dist
+                                                      : -dir.y * dist,
+                         light.kind == LightKind::Spot ? light.position.z - dir.z * dist
+                                                      : -dir.z * dist};
+    const math::Vec3 target{eye.x + dir.x, eye.y + dir.y, eye.z + dir.z};
+    // up 不能与 dir 平行：|dir.y| 接近 1 时改用 X 轴做 up
+    const math::Vec3 up = std::abs(dir.y) > 0.99f ? math::Vec3{1.0f, 0.0f, 0.0f}
+                                                 : math::Vec3{0.0f, 1.0f, 0.0f};
+    const math::Mat4 view = math::Mat4::look_at(eye, target, up);
+    const math::Mat4 proj =
+        math::Mat4::orthographic(shadow_map_.extent * 2.0f, 1.0f, 0.01f, dist * 2.0f);
+    shadow_vp_ = proj * view;
+
+    // 光栅化：每个三角形投到贴图上，写最小深度
+    const float half = static_cast<float>(res) * 0.5f;
+    for (const ShadowTriangle& tri : shadow_geometry_) {
+      Vec4 clip[3];
+      float sx[3];
+      float sy[3];
+      float sz[3];
+      bool ok = true;
+      for (int k = 0; k < 3; ++k) {
+        clip[k] = transform(shadow_vp_, tri.v[k], 1.0f);
+        if (clip[k].w == 0.0f) {
+          ok = false;
+          break;
+        }
+        sx[k] = (clip[k].x / clip[k].w * 0.5f + 0.5f) * static_cast<float>(res);
+        sy[k] = (0.5f - clip[k].y / clip[k].w * 0.5f) * static_cast<float>(res);
+        sz[k] = clip[k].z / clip[k].w;
+      }
+      if (!ok) continue;
+      // 包围盒（夹到贴图内）
+      const float min_x = std::max(std::min({sx[0], sx[1], sx[2]}), 0.0f);
+      const float max_x = std::min(std::max({sx[0], sx[1], sx[2]}), static_cast<float>(res - 1));
+      const float min_y = std::max(std::min({sy[0], sy[1], sy[2]}), 0.0f);
+      const float max_y = std::min(std::max({sy[0], sy[1], sy[2]}), static_cast<float>(res - 1));
+      if (min_x > max_x || min_y > max_y) continue;
+
+      const float area = (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sx[2] - sx[0]) * (sy[1] - sy[0]);
+      if (std::abs(area) < 1e-9f) continue;
+      // ## 两面都要写（裁剪后的面积可能为负）
+      //
+      // 阴影贴图不关心面朝向（背向光源的面也会投影），而地面网格的两个三角面
+      // 绕序相反。若直接用 `1/area` 归一，一半三角形的重心坐标符号会翻转，
+      // 于是被 `w0 < 0` 判成“外部”而跳过——实测覆盖率只有 0.77%，
+      // 大片地面根本没进贴图，表现为“阴影只在极小区域生效”或整片发黑。
+      //
+      // 取 `abs` 归一后，两种绕序的内部判定一致。
+      const float inv_area = 1.0f / std::abs(area);
+      const bool flipped = area < 0.0f;
+      for (int y = static_cast<int>(min_y); y <= static_cast<int>(max_y); ++y) {
+        for (int x = static_cast<int>(min_x); x <= static_cast<int>(max_x); ++x) {
+          const float px = static_cast<float>(x) + 0.5f;
+          const float py = static_cast<float>(y) + 0.5f;
+          float w0 = ((sx[1] - px) * (sy[2] - py) - (sx[2] - px) * (sy[1] - py)) * inv_area;
+          float w1 = ((sx[2] - px) * (sy[0] - py) - (sx[0] - px) * (sy[2] - py)) * inv_area;
+          if (flipped) {
+            w0 = -w0;
+            w1 = -w1;
+          }
+          const float w2 = 1.0f - w0 - w1;
+          if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) continue;
+          const float z = w0 * sz[0] + w1 * sz[1] + w2 * sz[2];
+          const std::size_t offset =
+              static_cast<std::size_t>(y) * static_cast<std::size_t>(res) +
+              static_cast<std::size_t>(x);
+          if (z < shadow_depth_[offset]) shadow_depth_[offset] = z;
+        }
+      }
+    }
+    (void)half;
+    shadow_ready_ = true;
+  }
+
+  /// 某世界点是否在阴影里（PCF 柔化）。
+  ///
+  /// 返回 0（全亮）~ 1（全在阴影）。`soft_radius` 是纹素单位的采样半径。
+  [[nodiscard]] auto shadow_factor_at(math::Vec3 world) const -> float {
+    if (!shadow_ready_) return 0.0f;
+    const int res = std::clamp(shadow_map_.resolution, 64, 4096);
+    const Vec4 clip = transform(shadow_vp_, world, 1.0f);
+    if (clip.w == 0.0f) return 0.0f;
+    const float nx = clip.x / clip.w * 0.5f + 0.5f;
+    const float ny = 0.5f - clip.y / clip.w * 0.5f;
+    const float nz = clip.z / clip.w;
+    // 贴图外 → 无阴影（否则投影相机外的区域会整片变黑）
+    if (nx < 0.0f || nx > 1.0f || ny < 0.0f || ny > 1.0f || nz < 0.0f || nz > 1.0f) {
+      return 0.0f;
+    }
+
+    const float bias = shadow_map_.bias;
+    const int center_x = static_cast<int>(nx * static_cast<float>(res));
+    const int center_y = static_cast<int>(ny * static_cast<float>(res));
+    const int radius = static_cast<int>(std::ceil(std::max(shadow_map_.soft_radius, 0.0f)));
+    int lit = 0;
+    int total = 0;
+    for (int dy = -radius; dy <= radius; ++dy) {
+      for (int dx = -radius; dx <= radius; ++dx) {
+        const int sx = std::clamp(center_x + dx, 0, res - 1);
+        const int sy = std::clamp(center_y + dy, 0, res - 1);
+        const float stored =
+            shadow_depth_[static_cast<std::size_t>(sy) * static_cast<std::size_t>(res) +
+                          static_cast<std::size_t>(sx)];
+        ++total;
+        // 存的是“最近表面深度”；比它更远 → 在阴影里
+        if (nz - bias <= stored) ++lit;
+      }
+    }
+    if (total == 0) return 0.0f;
+    return 1.0f - static_cast<float>(lit) / static_cast<float>(total);
+  }
+
   void set_material(const Material& material) override {
     material_ = material;
     // opacity < 1 时必须关深度写：否则后面的透明面会被它挡住。
@@ -683,6 +833,24 @@ class SoftwareScene final : public Scene3D {
 
   void draw_mesh(const Mesh& mesh, const math::Mat4& model) override {
     if (mesh.is_empty() || !mvp_ready_) return;
+    // ## 阴影贴图开启时：延迟到 `end_frame` 统一绘制
+    //
+    // 为何必须延迟：阴影贴图要**先知道全部几何**（先渲染一次光源视角的深度图），
+    // 而像素着色在 `draw_mesh` 里就发生了。先画的网格看不到后画的网格的影子。
+    //
+    // 这个延迟只在 `shadow_map_.strength > 0` 时启用：关闭时走原来的即时路径，
+    // 行为与之前**逐位相同**（老场景不受影响）。
+    if (shadow_map_.strength > 0.0f) {
+      deferred_.push_back(DeferredMesh{&mesh, model, material_});
+      ++draw_calls_;
+      return;
+    }
+    draw_mesh_now(mesh, model);
+    ++draw_calls_;
+  }
+
+  /// 即时绘制（原有路径，行为不变）。
+  void draw_mesh_now(const Mesh& mesh, const math::Mat4& model) {
     const math::Mat4 mvp = projection_ * view_ * model;
     // 本网格是否有可用 UV；有且已设纹理时才采样
     const bool mesh_has_uv = mesh.has_uvs();
@@ -726,6 +894,17 @@ class SoftwareScene final : public Scene3D {
       // 表现为阴影边缘缺一块。
       if (shadow_.strength > 0.0f) collect_shadow_triangle(tri[0], tri[1], tri[2]);
 
+      // ## 阴影贴图：收集世界空间三角形
+      //
+      // 为何也在裁剪**之前**：阴影贴图的相机是**光源**，与摄像机无关。
+      // 用裁剪后的顶点会漏掉“在相机外、但在光照里”的三角形——它们的影子
+      // 本该投到可见区域。
+      //
+      // 为何只在**不透明**时收：透明物体不投实阴影（否则玻璃后面会多一团黑影）。
+      if (shadow_map_.strength > 0.0f && material_.opacity >= 0.999f) {
+        shadow_geometry_.push_back(ShadowTriangle{tri[0].world, tri[1].world, tri[2].world});
+      }
+
       Vertex clipped[4];
       const int produced = clip_near(tri[0], tri[1], tri[2], clipped);
       // 裁剪后是凸多边形，按扇形拆回三角形
@@ -748,7 +927,6 @@ class SoftwareScene final : public Scene3D {
         }
       }
     }
-    ++draw_calls_;
   }
 
   /// 面朝向剔除判定（屏幕空间符号面积）。
@@ -778,6 +956,55 @@ class SoftwareScene final : public Scene3D {
   }
 
   void end_frame(Surface& target, math::Rect destination, float opacity = 1.0f) override {
+    // ## 阴影贴图：先构贴图，再把延迟的网格画出来
+    //
+    // 顺序至关重要：贴图必须在任何像素着色**之前**就绪（着色时要查它），
+    // 而几何收集在 `draw_mesh` 时完成。所以这里分两遍：
+    //   ① 遍历 `deferred_`，收集世界三角形 → 构光源视角深度图；
+    //   ② 再遍历 `deferred_`，真正光栅化（着色时查贴图）。
+    //
+    // 只在 `shadow_map_.strength > 0` 时走这条；关闭时 `deferred_` 为空，
+    // 下面两遍都是空循环，行为与之前逐位相同。
+    if (!deferred_.empty()) {
+      // ① 收集几何（要带着各自的模型矩阵求世界坐标）
+      shadow_geometry_.clear();
+      for (const DeferredMesh& item : deferred_) {
+        if (item.mesh == nullptr || item.material.opacity < 0.999f) continue;
+        const math::Mat4& m = item.model;
+        for (std::size_t i = 0; i + 2 < item.mesh->indices.size(); i += 3) {
+          math::Vec3 world[3];
+          bool ok = true;
+          for (int k = 0; k < 3; ++k) {
+            const auto vertex = (*item.mesh)[item.mesh->indices[i + static_cast<std::size_t>(k)]];
+            if (vertex.size() < Mesh::kVertexFloats) {
+              ok = false;
+              break;
+            }
+            const float px = vertex[0];
+            const float py = vertex[1];
+            const float pz = vertex[2];
+            world[k] = math::Vec3{
+                m.value(0, 0) * px + m.value(0, 1) * py + m.value(0, 2) * pz + m.value(0, 3),
+                m.value(1, 0) * px + m.value(1, 1) * py + m.value(1, 2) * pz + m.value(1, 3),
+                m.value(2, 0) * px + m.value(2, 1) * py + m.value(2, 2) * pz + m.value(2, 3)};
+          }
+          if (!ok) continue;
+          shadow_geometry_.push_back(ShadowTriangle{world[0], world[1], world[2]});
+        }
+      }
+      build_shadow_map();
+      // ② 真正绘制（逐个网格恢复它自己的材质）
+      for (const DeferredMesh& item : deferred_) {
+        if (item.mesh == nullptr) continue;
+        const Material saved = material_;
+        material_ = item.material;
+        draw_mesh_now(*item.mesh, item.model);
+        material_ = saved;
+      }
+      deferred_.clear();
+      shadow_geometry_.clear();
+    }
+
     // ## 平面投影阴影：先画（它在实体**下方**，被实体遮住的部分本就该被遮）
     //
     // 为何先于透明队列：阴影是“地面上的暗层”，它应该压在背景上、
@@ -923,6 +1150,22 @@ class SoftwareScene final : public Scene3D {
                           world,
                           material_.emissive_color_set ? material_.emissive_color : color,
                           material_.emission_unlit);
+        // ## 阴影贴图：把受光部分按遮挡因子压暗
+        //
+        // 为何乘在 `lit` 上而不是在着色公式里：阴影是**几何遮挡**，与材质/BRDF
+        // 无关。乘在结果上是把所有光照项统一按遮挡比例衰减——这正是物理上的
+        // “这部分表面看不到光源”。
+        //
+        // 自发光不受影响：`emission_unlit` 的物体（霓虹灯管）不该因为被挡住就变暗
+        //（它自己发光，不需要外部光）。
+        math::Vec3 shaded = lit;
+        if (shadow_ready_ && !material_.emission_unlit) {
+          const float occl = shadow_factor_at(world);
+          if (occl > 0.0f) {
+            const float keep = 1.0f - occl * std::clamp(shadow_map_.strength, 0.0f, 1.0f);
+            shaded = math::Vec3{lit.x * keep, lit.y * keep, lit.z * keep};
+          }
+        }
         // ## 输出链：线性 → 曝光 → 色调映射 → sRGB → 8bit
         //
         // 修之前这里直接 `lit.x * 255`，两处错（都“看不出哪里错、只觉得不对”）：
@@ -932,7 +1175,7 @@ class SoftwareScene final : public Scene3D {
         // `shade_terms` 仍返回**线性值**（两条腿共用的公式不变），
         // 颜色变换集中在这里——顺序写错很难定位（看起来像“配色不对”）。
         if (opacity >= 0.999f) {
-          canvas_.set_pixel(x, y, st::raster::encode_pixel(lit, 1.0f, tone_map_));
+          canvas_.set_pixel(x, y, st::raster::encode_pixel(shaded, 1.0f, tone_map_));
         } else {
           // ## 透明混合必须在**线性空间**做（实测很重要）
           //
@@ -1085,6 +1328,35 @@ class SoftwareScene final : public Scene3D {
   /// 为何需要它：阴影与地面共面，深度比较分不开“地面”与“实体”，
   /// 而语义上要排除的是**实体**。一个独立遮罩比调深度偏置可靠得多。
   std::vector<std::uint8_t> entity_mask_{};
+
+  // ── 阴影贴图（shadow mapping，2026-10-24）──
+
+  /// 世界空间三角形（阴影贴图的几何源）。
+  struct ShadowTriangle {
+    math::Vec3 v[3];
+  };
+
+  /// 延迟绘制的网格（阴影贴图开启时）。
+  ///
+  /// 存**网格指针 + 模型矩阵 + 材质快照**：网格指针的生命周期由调用方保证
+  /// （`draw_mesh` 的契约就是“调用期间有效”，而延迟到 `end_frame` 仍在同一次
+  /// 帧内，所以安全）。材质必须快照，否则后一个网格的 `set_material` 会
+  /// 覆盖前一个的。
+  struct DeferredMesh {
+    const Mesh* mesh{nullptr};
+    math::Mat4 model{math::Mat4::identity()};
+    Material material{};
+  };
+  std::vector<DeferredMesh> deferred_{};
+  std::vector<ShadowTriangle> shadow_geometry_{};
+  /// 阴影贴图配置（`strength = 0` = 关闭）。
+  ShadowMap shadow_map_{};
+  /// 光源视角的深度图（`resolution²` 个 float；1.0 = 最远/空）。
+  std::vector<float> shadow_depth_{};
+  /// 光源视角的 view-projection（世界 → 阴影贴图 NDC）。
+  math::Mat4 shadow_vp_{math::Mat4::identity()};
+  /// 本帧是否已构好阴影贴图。
+  bool shadow_ready_{false};
   /// 是否标记实体遮罩（`set_planar_shadow` 之后才为真）。
   bool mask_entities_{false};
   /// 透明三角形延迟队列：`begin_frame` 清、`draw_mesh` 收集、 `end_frame` 前排序并绘制。
