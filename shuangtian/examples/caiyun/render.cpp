@@ -570,10 +570,45 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
   std::int64_t render_ns_sum = 0;
   std::int64_t encode_ns_sum = 0;
   // 并行预算：每帧独立（`project` 是快照、画布是局部的），所以**每线程一块画布**
-  // 就能安全并行。渲然是纯 CPU 的逐像素工作，多核近线性加速（实测 1080p
-  // 从 ~110ms/帧降到 ~15ms/帧）。
-  const std::size_t workers = static_cast<std::size_t>(std::clamp(
-      static_cast<int>(std::thread::hardware_concurrency()), 1, 16));
+  // 就能安全并行。渲然是纯 CPU 的逐像素工作。
+  //
+  // ## 实测加速曲线（1080p / 450 帧 / 28 逻辑核，2026-10-24）
+  //
+  // | 路数 | 总时长 | 每帧渲染 | 每帧编码 | 理论 | 效率 |
+  // |---|---|---|---|---|---|
+  // | 4  | 17.74s |  54.4ms |  66.4ms | 13.59s | 77% |
+  // | 8  | 12.78s |  86.3ms |  70.0ms |  8.79s | 69% |
+  // | 16 | 11.34s | 178.8ms |  80.2ms |  7.28s | 64% |
+  // | 26 | 11.35s | 281.6ms | 138.5ms |  7.27s | 64% |
+  //
+  // ## 两个已排除的假设
+  //
+  // ① **磁盘 I/O**：实测写 450×8MB 得 2474 MB/s，不是瓶颈。
+  // ② **ffmpeg 封装串行**：墙钟 11.5s vs 内部报 11.20s，封装只占 0.3s。
+  //
+  // ## 真因：每帧成本随并行数上升
+  //
+  // 4 路时 121ms/帧，26 路时 420ms/帧（渲染+编码）—— **单帧变慢了 3.5 倍**。
+  // 每个 worker 两块 1080p 画布（约 16MB），26 路共 416MB，
+  // 逐像素随机访问打穿 CPU 缓存（L2/L3 装不下），同时争抢内存带宽。
+  // 所以总时长在 16 路之后不再下降，**不是并行的错，是工作集的错**。
+  //
+  // ## 因此默认值的选择
+  //
+  // 取 `min(hw, 16)`：16 路已经拿到几乎全部收益（11.34s vs 26 路的 11.35s），
+  // 而更多线程只会增加内存压力与上下文切换。
+  // 机器核心少时（<8）按实际核心数；`CAIYUN_WORKERS` 可显式覆盖（调试与压测用）。
+  //
+  // 真正的加速要靠**降低每帧内存占用**（如按条带渲染、复用缓冲），
+  // 那是渲染器层面的重构，不在本轮范围内。
+  const unsigned hw = std::thread::hardware_concurrency();
+  unsigned default_workers = hw == 0 ? 4 : std::min(hw, 16u);
+  if (const char* override_workers = std::getenv("CAIYUN_WORKERS")) {
+    const int v = std::atoi(override_workers);
+    if (v > 0) default_workers = static_cast<unsigned>(v);
+  }
+  const std::size_t workers = static_cast<std::size_t>(
+      std::clamp(static_cast<int>(default_workers), 1, 64));
   std::vector<std::unique_ptr<st::raster::Canvas>> worker_canvases{};
   worker_canvases.reserve(workers);
   // 运动模糊的采样子帧画布（每 worker 一块，与成品画布分开）：
