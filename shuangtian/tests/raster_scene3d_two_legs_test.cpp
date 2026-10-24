@@ -395,3 +395,85 @@ ST_TEST(scene3d_draw_without_camera_is_a_noop_not_crash) {
     (*created)->flush();
   }
 }
+
+/// 带材质渲染一帧（与 `render_with` 同一套相机/光照，只是多传材质）。
+[[nodiscard]] auto render_material(const char* backend, const Mesh& mesh, const Lighting& lighting,
+                                   const st::raster::Material& material, float yaw) -> Canvas {
+  Canvas canvas{kWidth, kHeight, 1.0f};
+  canvas.clear(Color{0, 0, 0, 255});
+  const ForcedBackend force(backend);
+  auto created = Scene3D::create(kWidth, kHeight);
+  if (!created.has_value()) return canvas;
+  Scene3D& scene = **created;
+  Camera camera;
+  camera.eye = Vec3{0.0f, 0.0f, 3.2f};
+  camera.target = Vec3{0.0f, 0.0f, 0.0f};
+  camera.fov_y_degrees = 42.0f;
+  scene.begin_frame(Color{0, 0, 0, 255});
+  scene.set_camera(camera);
+  scene.set_lighting(lighting);
+  scene.set_material(material);
+  scene.draw_mesh(mesh, Mat4::rotation(Vec3{0.0f, 1.0f, 0.0f}, yaw));
+  scene.end_frame(canvas, Rect{0.0f, 0.0f, static_cast<float>(kWidth),
+                               static_cast<float>(kHeight)});
+  scene.flush();
+  return canvas;
+}
+
+ST_TEST(scene3d_metallic_takes_effect_on_both_legs) {
+  // ## 这条用例为什么必须存在
+  //
+  // `metallic` 在 GPU 腿曾经**完全没接**：常量缓冲里只传了 `opacity`，
+  // GPU 的像素着色器根本不知道金属是什么,于是同一个 `Material` 在两条腿上
+  // 渲出两种东西（软件腿是金属、GPU 腿是塑料）。
+  //
+  // 而那时的全部测试都是绿的——因为「能渲出图」「两腿像素接近」这两类判据
+  // 在**两边都没实现**或**只有一边实现**时都可能通过。
+  //
+  // 判据：① 每条腿自身「塑料 vs 金属」必须有显著差异；② 两条腿的**差异量**
+  // 接近（说明是同一种材质模型，而不是各画各的）。
+  if (!st::raster::gpu::available()) return;
+  const Mesh mesh = Mesh::colored_sphere(0.9f, 24, Color{205, 170, 130, 255});
+  Lighting lighting{};
+  lighting.ambient = 0.10f;
+  lighting.diffuse = 0.70f;
+  lighting.key_direction = Vec3{0.4f, 0.5f, 0.75f};
+
+  st::raster::Material plastic{};
+  plastic.roughness = 0.9f;
+  plastic.specular = 0.0f;
+
+  st::raster::Material metal{};
+  metal.metallic = 1.0f;
+  metal.roughness = 0.25f;
+  metal.specular = 1.0f;
+
+  const Canvas sw_plastic = render_material("software", mesh, lighting, plastic, 0.0f);
+  const Canvas sw_metal = render_material("software", mesh, lighting, metal, 0.0f);
+  const Canvas gpu_plastic = render_material("gpu", mesh, lighting, plastic, 0.0f);
+  const Canvas gpu_metal = render_material("gpu", mesh, lighting, metal, 0.0f);
+
+  const auto luma = [](const Canvas& c) {
+    double sum = 0.0;
+    int n = 0;
+    for (int y = 0; y < c.physical_height(); ++y) {
+      for (int x = 0; x < c.physical_width(); ++x) {
+        const Color p = c.pixel_at(x, y);
+        sum += 0.299 * p.r + 0.587 * p.g + 0.114 * p.b;
+        ++n;
+      }
+    }
+    return n > 0 ? sum / n : 0.0;
+  };
+
+  const double sw_delta = std::abs(luma(sw_plastic) - luma(sw_metal));
+  const double gpu_delta = std::abs(luma(gpu_plastic) - luma(gpu_metal));
+
+  // ① 每条腿都得有变化（否则那条腿根本没接 metallic）
+  ST_CHECK(sw_delta > 2.0);
+  ST_CHECK(gpu_delta > 2.0);
+  // ② 差异量同量级（差超过 3 倍说明两条腿的材质模型不一致）
+  const double ratio = sw_delta > 0.0 ? gpu_delta / sw_delta : 0.0;
+  ST_CHECK(ratio > 0.33);
+  ST_CHECK(ratio < 3.0);
+}

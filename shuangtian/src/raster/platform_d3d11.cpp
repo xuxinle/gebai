@@ -2711,7 +2711,8 @@ cbuffer Scene : register(b0) {
   float4x4 g_model;
   float4 g_light;      // xyz = 主光方向（指向光源），w = 环境项
   float4 g_tune;       // x = 漫反射权重, y = 边缘光, z = 曝光, w = 是否采样纹理（>0.5 采）
- float4 g_opacity;    // x = 材质不透明度（1 = 不透明；<1 时由混合状态做 src-over）
+ float4 g_opacity;    // x=不透明度 y=metallic z=roughness w=specular
+ float4 g_eye;        // xyz = 相机世界位置（算逐像素视向）
 };
 
 struct VsIn {
@@ -2726,6 +2727,7 @@ struct VsOut {
   float3 normal : TEXCOORD0;
   float3 color : TEXCOORD1;
   float2 uv : TEXCOORD2;
+  float3 world : TEXCOORD3;   // 世界位置：算逐像素视向（GGX 的 Fresnel 依赖它）
 };
 
 // 纹理（RGBA8，非预乘）：无 UV 的网格不采它，行为与以前完全一致
@@ -2741,6 +2743,8 @@ VsOut vs_scene3d(VsIn input) {
   // 法线用模型矩阵的 3x3（与软件腿一致：不取逆转置——本仓的模型矩阵只有
   // 旋转/等比缩放/平移，逆转置与直接变换只差一个标量因子，归一化后相同）
   o.normal = mul((float3x3)g_model, input.normal);
+  // 世界位置：`model * position`（含平移，所以用 4x4）
+  o.world = mul(g_model, float4(input.position, 1.0)).xyz;
   o.color = input.color;
   o.uv = input.uv;
   return o;
@@ -2756,7 +2760,15 @@ float4 ps_scene3d(VsOut input) : SV_Target {
   float rim = rim_base * rim_base * g_tune.y;
   // 边缘光乘在固有色上（不是加到最终色上）——详见 C++ 侧 `shade_terms` 的说明：
   // 加法版本会把侧壁抬到比顶面还亮，看着像“盒子贴了一片白边”。
-  float scale = (g_light.w + diffuse * g_tune.x + rim) * g_tune.z;
+  // ## Principled 材质（与 C++ 侧 `shade_surface` 逐字对应）
+ //
+ // 金属没有漫反射（自由电子吸收透射光）——这是金属与塑料的物理分界线。
+ // 漏掉它时金色球会显得像"黄色塑料"，一眼就假。
+ float metallic = g_opacity.y;
+ float roughness = g_opacity.z;
+ float specular_w = g_opacity.w;
+ float diffuse_weight = 1.0 - metallic;
+ float scale = (g_light.w * diffuse_weight + diffuse * g_tune.x * diffuse_weight + rim) * g_tune.z;
   // g_tune.w > 0.5 = 本网格带 UV 且已设纹理 → 采样并与顶点色相乘
   // （与软件腿同一口径：顶点色当基础色/染色，纹理提供图案）
   float3 base = input.color;
@@ -2769,7 +2781,34 @@ float4 ps_scene3d(VsOut input) : SV_Target {
     texel = (texel <= 0.04045) ? lo : hi;
     base = input.color * texel;
   }
-  float3 lit = saturate(base * scale);
+  // ## GGX 高光（与 C++ 侧 `ggx_specular` 逐字对应）
+  //
+  // 为何用 GGX 而不是 Blinn-Phong：后者的高光形状不随角度变化，掠射角下会崩
+  // 成一束硬边；GGX 是微表面模型，粗糙度直接决定高光宽度与拖尾形状。
+  float3 lit = base * scale;
+  if (specular_w > 0.0) {
+    float3 view_dir = normalize(g_eye.xyz - input.world);
+    float3 h = normalize(view_dir + light);
+    float n_dot_v = max(dot(n, view_dir), 0.0);
+    float n_dot_l = max(dot(n, light), 0.0);
+    float n_dot_h = max(dot(n, h), 0.0);
+    float v_dot_h = max(dot(view_dir, h), 0.0);
+    if (n_dot_v > 0.0 && n_dot_l > 0.0) {
+      float alpha = max(roughness, 1e-3);
+      float a2 = alpha * alpha;
+      float denom_d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+      float D = a2 / (3.14159265 * denom_d * denom_d);
+      float k = (alpha + 1.0) * (alpha + 1.0) * 0.125;
+      float G = (n_dot_v / (n_dot_v * (1.0 - k) + k)) * (n_dot_l / (n_dot_l * (1.0 - k) + k));
+      // Fresnel（Schlick）：非金属 F0 = 0.04，金属 F0 = 固有色
+      float3 f0 = float3(0.04, 0.04, 0.04) + (base - 0.04) * metallic;
+      float fres = pow(1.0 - v_dot_h, 5.0);
+      float3 F = f0 + (1.0 - f0) * fres;
+      float denom = 4.0 * n_dot_v * n_dot_l;
+      lit += D * G * F / denom * n_dot_l * specular_w;
+    }
+  }
+  lit = saturate(lit);
   // ## 输出链：线性 → 曝光 → 色调映射 → sRGB 编码
   //
   // ⚠ 本段是 `st::raster::encode_pixel`（`color_pipeline.cpp`）的**逐字翻译**。
@@ -2804,6 +2843,7 @@ struct Scene3dParams {
   std::array<float, 4> light{};
   std::array<float, 4> tune{};
   std::array<float, 4> opacity{};
+  std::array<float, 4> eye{};
 };
 static_assert(sizeof(Scene3dParams) % 16 == 0, "常量缓冲必须是 16 字节的倍数");
 
@@ -3159,6 +3199,7 @@ class GpuScene3d final : public st::raster::Scene3D {
     const float fov = camera.fov_y_degrees * 3.14159265358979f / 180.0f;
     view_ = math::Mat4::look_at(camera.eye, camera.target, camera.up);
     projection_ = math::Mat4::perspective(fov, aspect, camera.near_z, camera.far_z);
+    eye_ = camera.eye;
     mvp_ready_ = true;
   }
 
@@ -3196,6 +3237,8 @@ class GpuScene3d final : public st::raster::Scene3D {
 
   /// 当前剔除模式（每帧在 `begin_frame` 重置为 `Back`）。
   st::raster::CullMode cull_mode_{st::raster::CullMode::Back};
+  /// 相机世界位置（算逐像素视向用；GGX 的 Fresnel 依赖它）。
+  math::Vec3 eye_{0.0f, 0.0f, 4.0f};
   /// 平面投影阴影（`strength = 0` = 关闭）。
   st::raster::PlanarShadow shadow_{};
   /// 阴影是否已在本帧绘制（避免重复）。
@@ -3271,7 +3314,9 @@ class GpuScene3d final : public st::raster::Scene3D {
     const bool use_texture = texture_view_ != nullptr && buffers->uvs != nullptr;
     params.tune = {lighting_.diffuse, lighting_.rim, lighting_.exposure,
                    use_texture ? 1.0f : 0.0f};
-    params.opacity = {material_.opacity, 0.0f, 0.0f, 0.0f};
+    params.opacity = {material_.opacity, material_.metallic, material_.roughness,
+                      material_.specular};
+    params.eye = {eye_.x, eye_.y, eye_.z, 0.0f};
 
     // 从这一行到 DrawIndexed 全部在锁内：常景缓冲 Map、状态设置、绘制
     // 都是上下文操作，不能与别的线程交错。

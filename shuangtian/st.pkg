@@ -385,6 +385,12 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "用一份 JSON 描述整个三维场景：解析/报错指路/渲染/参数生效/确定性"
     },
+    "scene3d_capability_matrix": {
+      "kind": "executable",
+      "sources": ["tools/scene3d_capability_matrix.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "三维能力矩阵：逐项核对软件腿/GPU腿是否都真的支持（阴影/透明/金属高光）"
+    },
     "scene3d_shadow_probe": {      "kind": "executable",
       "sources": ["tools/scene3d_shadow_probe.cpp"],
       "exclude_sources": ["src/pkg/*"],
