@@ -379,8 +379,13 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "颜色管线接入后的视觉对照：同一场景新旧两条输出链各落一张 PNG + 亮度/过曝统计"
     },
-    "scene3d_shadow_probe": {
+    "scene3d_script_probe": {
       "kind": "executable",
+      "sources": ["tools/scene3d_script_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "用一份 JSON 描述整个三维场景：解析/报错指路/渲染/参数生效/确定性"
+    },
+    "scene3d_shadow_probe": {      "kind": "executable",
       "sources": ["tools/scene3d_shadow_probe.cpp"],
       "exclude_sources": ["src/pkg/*"],
       "//note": "平面投影阴影：强度四档各落一张 PNG + 地面/球体/阴影区亮度对比"
