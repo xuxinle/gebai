@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <deque>
 #include <array>
+#include <chrono>
 #include <thread>
 #include <vector>
 
@@ -23,6 +24,7 @@
 #include "st/app/async.hpp"
 #include "st/codec/png.hpp"
 #include "st/core/fs.hpp"
+#include "st/core/log.hpp"
 #include "st/core/process.hpp"
 #include "st/core/time.hpp"
 #include "st/raster/canvas.hpp"
