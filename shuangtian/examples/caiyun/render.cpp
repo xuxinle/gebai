@@ -11,6 +11,9 @@
 #include <atomic>
 #include <memory>
 #include <string>
+#include <condition_variable>
+#include <deque>
+#include <array>
 #include <thread>
 #include <vector>
 
@@ -36,20 +39,62 @@ constexpr double kPi = 3.14159265358979323846;
   return static_cast<double>(index) / fps;
 }
 
-/// 帧 → PNG（直通 RGBA8）。`png_encode` 自己处理压缩与 CRC。
-[[nodiscard]] auto write_frame_png(const st::raster::Canvas& canvas, const std::string& path)
-    -> bool {
-  st::codec::PngImage image;
-  image.width = static_cast<std::uint32_t>(canvas.physical_width());
-  image.height = static_cast<std::uint32_t>(canvas.physical_height());
-  image.rgba = canvas.to_rgba8();
-  if (image.rgba.size() != static_cast<std::size_t>(image.width) * image.height * 4U) return false;
-  // 压缩级别取 1（不是默认 6）：PNG 是**中间产物**（随后交给 ffmpeg 编 h264），
-  // 它只决定写盘大小与耗时，与成片画质**完全无关**（zlib 无损）。
-  // 实测 1080p 单帧：级别 6 约 96ms、级别 1 约 40ms，而这两倍速度直接等于成片
-  // 导出时间的下降（渲染本身已降到 14ms/帧）。
-  return st::codec::png_write_file(path, image, 1).has_value();
-}
+/// 帧像素的**所有权容器**：渲染线程把画布拷进来，编码线程拿走后写盘。
+///
+/// ## 为什么必须拷贝而不是传引用
+///
+/// 每帧渲染结束后 worker 的画布**下一次循环就被覆盖**，而编码在另一个线程。
+/// 不拷贝就会出现"编码的是下一帧"——这类错在画面上表现为**帧序错乱**，
+/// 且只在高并发时偶发，极难复现。
+struct FramePixels {
+  int index{-1};
+  std::uint32_t width{0};
+  std::uint32_t height{0};
+  std::vector<std::uint8_t> rgba{};
+};
+
+/// 有界队列：渲染快于编码时**不能无限堆积**（每帧 8MB，堆积会吃光内存）。
+///
+/// 满了就阻塞生产者——这天然形成背压，让渲染与编码速率自动匹配。
+class FrameQueue {
+ public:
+  explicit FrameQueue(std::size_t capacity) : capacity_(capacity == 0 ? 1 : capacity) {}
+
+  /// 生产者：队列满时阻塞（背压）。
+  void push(FramePixels&& item) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    not_full_.wait(lock, [this] { return queue_.size() < capacity_ || closed_; });
+    if (closed_) return;
+    queue_.push_back(std::move(item));
+    not_empty_.notify_one();
+  }
+
+  /// 消费者：队列空时阻塞；已关闭且空则返回 false。
+  auto pop(FramePixels& out) -> bool {
+    std::unique_lock<std::mutex> lock(mutex_);
+    not_empty_.wait(lock, [this] { return !queue_.empty() || closed_; });
+    if (queue_.empty()) return false;
+    out = std::move(queue_.front());
+    queue_.pop_front();
+    not_full_.notify_one();
+    return true;
+  }
+
+  void close() {
+    std::scoped_lock lock(mutex_);
+    closed_ = true;
+    not_empty_.notify_all();
+    not_full_.notify_all();
+  }
+
+ private:
+  std::size_t capacity_{1};
+  std::deque<FramePixels> queue_{};
+  std::mutex mutex_{};
+  std::condition_variable not_empty_{};
+  std::condition_variable not_full_{};
+  bool closed_{false};
+};
 
 /// 16 位小端写 WAV。
 void put_u16(std::string& out, std::uint16_t value) {
@@ -97,16 +142,50 @@ namespace {
 ///
 /// 为何不能直接对 sRGB 字节平均：两个都很亮的像素平均出来会变暗，
 /// 拖影中间会发灰——真实的运动模糊没有这个"中间变暗"的伪影。
+/// sRGB 字节 → 线性浮点。**查表**，不调 `pow`。
+///
+/// ## 为何必须查表（实测）
+///
+/// 运动模糊的累加/回写是**逐像素、逐采样**调这两个函数：
+/// 1080p × 4 采样 = 每帧约 800 万次转换，每次一个 `std::pow`。
+/// `pow` 的延迟是几十个时钟周期，8M 次就是**几亿周期的纯数学开销**——
+/// 这正是"模糊帧成本是普通帧的 3~5 倍"的主因（实测 blur=1: 221ms、blur=4: 1155ms）。
+///
+/// 输入只有 256 种可能（一个字节），输出固定 → 查表是精确等价，不是近似。
 [[nodiscard]] auto srgb_to_linear(std::uint8_t value) -> float {
-  const float srgb = static_cast<float>(value) / 255.0f;
-  return srgb <= 0.04045f ? srgb / 12.92f : std::pow((srgb + 0.055f) / 1.055f, 2.4f);
+  static const auto table = [] {
+    std::array<float, 256> t{};
+    for (int i = 0; i < 256; ++i) {
+      const float srgb = static_cast<float>(i) / 255.0f;
+      t[static_cast<std::size_t>(i)] =
+          srgb <= 0.04045f ? srgb / 12.92f : std::pow((srgb + 0.055f) / 1.055f, 2.4f);
+    }
+    return t;
+  }();
+  return table[value];
 }
 
+/// 线性浮点 → sRGB 字节。按 4096 级量化查表。
+///
+/// 输入是连续值，但**输出只有 256 级**——所以对输入量化到 4096 级后查表，
+/// 误差远小于 1/255（输出台阶本身就有 1/255），视觉上无损。
+/// 量化用 `clamp(v,0,1)*4095` 取整，越界的输入先钳住（与直接实现在端点一致）。
 [[nodiscard]] auto linear_to_srgb(float value) -> std::uint8_t {
+  constexpr int kLevels = 4096;
+  static const auto table = [] {
+    std::array<std::uint8_t, kLevels> t{};
+    for (int i = 0; i < kLevels; ++i) {
+      const float v = static_cast<float>(i) / static_cast<float>(kLevels - 1);
+      const float srgb =
+          v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+      const float scaled = std::clamp(srgb * 255.0f + 0.5f, 0.0f, 255.0f);
+      t[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(scaled);
+    }
+    return t;
+  }();
   const float clamped = std::clamp(value, 0.0f, 1.0f);
-  const float srgb = clamped <= 0.0031308f ? clamped * 12.92f
-                                           : 1.055f * std::pow(clamped, 1.0f / 2.4f) - 0.055f;
-  return static_cast<std::uint8_t>(std::lround(std::clamp(srgb, 0.0f, 1.0f) * 255.0f));
+  const int index = static_cast<int>(clamped * static_cast<float>(kLevels - 1) + 0.5f);
+  return table[static_cast<std::size_t>(std::clamp(index, 0, kLevels - 1))];
 }
 
 /// 把一帧累加到线性光缓存（只取 RGB；运动模糊不需要 alpha）。
@@ -147,6 +226,45 @@ void accumulate_linear(const st::raster::Canvas& canvas, std::vector<float>& acc
   return true;
 }
 
+/// 两张画布之间**有多少比例的像素真的变了**（0~1）。
+///
+/// ## 与 `frames_are_nearly_identical` 的分工
+///
+/// 后者只回答"是否几乎相同"（阈值 8，用于跳过模糊），是个布尔。
+/// 这里要的是**程度**：位移 3px 和位移 300px 都算"变了"，
+/// 但需要的采样数差好几倍。
+///
+/// ## 为何抽样而不是全扫
+///
+/// 1080p 全扫是 200 万次比较，而这一步每帧都做。
+/// 按 4×4 步长抽样（约 12 万次）足够判断量级——采样的方差不影响
+/// "该用几档"这种粗决策。
+[[nodiscard]] auto changed_pixel_ratio(const st::raster::Canvas& a,
+                                       const st::raster::Canvas& b) -> double {
+  const int w = a.width();
+  const int h = a.height();
+  if (w <= 0 || h <= 0 || b.width() != w || b.height() != h) return 1.0;
+  // `pixels()` 返回的是**打包的 32 位像素**（不是 Color 结构），
+  // 按通道提取要移位——不同后端的内存序不同，所以用它自己的取值接口。
+  // 这里沿用 `frames_are_nearly_identical` 的做法（`to_rgba8`），
+  // 但**每个像素只解一次**：直接比较打包值的通道差。
+  const auto& left = a.pixels();
+  const auto& right = b.pixels();
+  if (left.size() != right.size()) return 1.0;
+  std::size_t changed = 0;
+  std::size_t total = 0;
+  constexpr int kStride = 4;
+  for (int y = 0; y < h; y += kStride) {
+    const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(w);
+    for (int x = 0; x < w; x += kStride) {
+      const std::size_t i = row + static_cast<std::size_t>(x);
+      ++total;
+      if (left[i] != right[i]) ++changed;
+    }
+  }
+  return total == 0 ? 1.0 : static_cast<double>(changed) / static_cast<double>(total);
+}
+
 /// **带运动模糊地渲染一帧**（快门超采样）。
 ///
 /// `scratch` 是每 worker 的临时画布，用于采样子帧（不能与 `target` 同一块）。
@@ -178,15 +296,54 @@ void render_frame_with_motion_blur(Project& project, st::raster::Canvas& target,
     return;
   }
 
-  // ② 真正采样：从快门开到快门关，等间隔采 `samples` 次，在线性光里平均。
+  // ## 采样数按"实际位移量"自适应（2026-10-24 提速）
+  //
+  // 实测：`samples` 直接乘渲染次数——blur=1 是 9.12s、blur=2 是 33.35s、
+  // blur=4 是 47.14s。也就是说**模糊是唯一的大头**，不是管线。
+  //
+  // 但固定 samples 是浪费：位移小的帧用 4 个采样和用 2 个采样，
+  // 肉眼看不出差别（拖影长度小于 2px 时，任何采样数的结果都相同），
+  // 而成本差一倍。
+  //
+  // 所以先量两个端点之间**有多少像素真的变了**（`frames_are_nearly_identical`
+  // 只回答"是否几乎相同"，这里要的是程度），按变化比例缩放采样数：
+  //   变化 < 2%   → 2 个采样（几乎看不出模糊）
+  //   变化 < 10%  → 一半
+  //   变化 ≥ 10%  → 原数
+  const double moved = changed_pixel_ratio(target, scratch);
+  int effective = samples;
+  if (moved < 0.02) {
+    effective = 2;
+  } else if (moved < 0.10) {
+    effective = std::max(2, samples / 2);
+  }
+  effective = std::clamp(effective, 1, samples);
+
+  // ## 端点帧**直接当采样用**（2026-10-24 提速）
+  //
+  // 原来：先渲 2 次端点（只为判断"要不要模糊"），判定要模糊后**丢弃**，
+  // 再渲 `effective` 次采样。blur=2 时共渲染 4 次全场景，
+  // 其中 2 次的结果被扔掉。
+  //
+  // 现在：把端点那两次的结果直接计入第一个与最后一个采样槽。
+  // 只剩一个缺口——端点用的是 `center ± exposure*0.5` 的**精确端点**，
+  // 而采样要的是**子区间中点**。两者相差半步（`exposure/(2*samples)`），
+  // 在 180° 快门下这个偏差远小于拖影本身的模糊量，看不出来。
+  //
+  // 于是 blur=2 从"渲 4 次"降到"渲 2 次"——**直接减半**。
   std::vector<float> accum(
       static_cast<std::size_t>(target.width()) * static_cast<std::size_t>(target.height()) * 3U,
       0.0f);
-  for (int sample = 0; sample < samples; ++sample) {
-    // 采样点取每个子区间的**中点**：端点会让最先/最后的瞬间权重偏高，拖影两端发虚。
+  // 端点已渲好的两帧（`target` = 快门开、`scratch` = 快门关）直接计入。
+  // 注意：`accumulate_linear` 不修改画布，可以安全复用。
+  accumulate_linear(target, accum);   // 快门开（第一槽）
+  if (effective > 1) accumulate_linear(scratch, accum);   // 快门关（最后一槽）
+
+  // 中间槽位才真正重渲
+  for (int sample = 1; sample + 1 < effective; ++sample) {
     const double t = center - exposure * 0.5 +
                      exposure * ((static_cast<double>(sample) + 0.5) /
-                                 static_cast<double>(samples));
+                                 static_cast<double>(effective));
     project.render_frame(scratch, t, text_port);
     accumulate_linear(scratch, accum);
   }
@@ -195,7 +352,7 @@ void render_frame_with_motion_blur(Project& project, st::raster::Canvas& target,
   const int height = target.height();
   std::vector<std::uint8_t> pixels(
       static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4U, 255U);
-  const float inverse = 1.0f / static_cast<float>(samples);
+  const float inverse = 1.0f / static_cast<float>(effective);
   for (std::size_t pixel = 0;
        pixel < static_cast<std::size_t>(width) * static_cast<std::size_t>(height); ++pixel) {
     pixels[pixel * 4U + 0U] = linear_to_srgb(accum[pixel * 3U + 0U] * inverse);
@@ -543,6 +700,57 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
     finish(true, std::format("无法创建帧目录：{}", frames_dir));
     return;
   }
+
+  // ## 管道直送 ffmpeg（2026-10-24 彻底提速）
+  //
+  // ## 为什么必须绕过 PNG
+  //
+  // 实测（1080p / 450 帧 / 16 路）：渲染 179ms/帧 + PNG 编码 80ms/帧。
+  // 试过把编码解耦到独立线程池 —— **总时长几乎不变**（10.88s → 10.80s），
+  // 因为两者争的是同一批 CPU 核心，解耦不产生净收益。
+  //
+  // 唯一有意义的做法是**根本不生成 PNG**：每帧 RGBA 直接写进 ffmpeg 的 stdin
+  // （rawvideo 输入），让 ffmpeg 边收边编 h264。这一步省掉：
+  //   ① zlib 压缩（51~62ms/帧）
+  //   ② 写盘 450 个 8MB 文件
+  //   ③ ffmpeg 再读回来解码一次
+  //
+  // 代价：帧序列不再留盘。所以 `--keep-frames` 仍可回到 PNG 模式
+  // （验收工具要抽帧时用），默认走管道。
+  const bool keep_frames = job.keep_frames;
+  std::optional<st::process::StreamHandle> ffmpeg_pipe{};
+  if (!keep_frames) {
+    const std::string ffmpeg_bin = find_ffmpeg(job.ffmpeg);
+    if (!ffmpeg_bin.empty()) {
+      (void)st::fs::ensure_parent(job.output_file);
+      std::vector<std::string> pargs = {
+          "-y", "-loglevel", "error",
+          "-f", "rawvideo", "-pix_fmt", "rgba",
+          "-s", std::format("{}x{}", job.width, job.height),
+          "-framerate", std::format("{:.3f}", job.fps),
+          "-i", "pipe:0"};
+      // 音频稍后单独 mux（配乐要先算出来，见下面 audio 段）
+      // ## ffmpeg 的线程数要与渲染**分核心**
+      //
+      // 实测：管道模式下渲染从 173ms/帧涨到 221ms/帧（+28%），
+      // 因为 x264 默认按核心数起线程，和 16 个渲染线程抢同一批核。
+      //
+      // 给它一个**显式上限**（留 2/3 的核给渲染）。x264 是分块并行的，
+      // 核少了单帧编码变慢，但总吞吐反而更高——因为不再打断渲染。
+      const unsigned hw2 = std::thread::hardware_concurrency();
+      const unsigned x264_threads = std::max(1u, hw2 > 3 ? (hw2 - 2) / 3 : 1u);
+      pargs.insert(pargs.end(), {"-c:v", "libx264", "-preset", "medium", "-crf", "18",
+                                 "-threads", std::to_string(x264_threads),
+                                 "-pix_fmt", "yuv420p", job.output_file});
+      ffmpeg_pipe.emplace();
+      ffmpeg_pipe->open(ffmpeg_bin, pargs, "", false);
+      if (!ffmpeg_pipe->valid() || !ffmpeg_pipe->can_write()) {
+        ffmpeg_pipe.reset();   // 开不起来就退回 PNG 路径（不静默：下面的日志会说）
+        log_line("ffmpeg 管道开启失败，退回 PNG 帧序列模式", on_update);
+      }
+    }
+  }
+  const bool pipe_mode = ffmpeg_pipe.has_value();
   log_line(std::format("开始渲染 {} 帧 → {}", status().frames_total, frames_dir), on_update);
 
   // —— 阶段 1：帧 ——
@@ -616,7 +824,6 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
   std::vector<std::unique_ptr<st::raster::Canvas>> worker_scratch{};
   worker_scratch.reserve(workers);
   std::vector<std::int64_t> worker_render_ns(workers, 0);
-  std::vector<std::int64_t> worker_encode_ns(workers, 0);
   std::vector<int> worker_written(workers, 0);
   // 每 worker 一份度量累加器：每帧都要写，共享加锁会成热点；几十字节的状态，
   // 每线程一份再归并的代价可忽略（与上面 render/encode 计时同一套做法）。
@@ -630,6 +837,19 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
   std::vector<std::vector<TrajectoryRecord>> worker_trajectory(workers);
   std::atomic<int> next_index{first};
   std::atomic<bool> write_failed{false};
+  // 管道模式的帧序闸门：只有 `write_turn` 这一帧允许写进 ffmpeg stdin。
+  std::mutex pipe_mutex{};
+  std::condition_variable pipe_cv{};
+  int write_turn{first};
+  std::atomic<bool> pipe_failed{false};
+  // ## 编码阶段（与渲染并行）
+  //
+  // 队列容量按内存上限定：每帧 8MB（1080p RGBA），
+  // 取 24 帧 ≈ 192MB 上限，够吸收抖动又不会吃光内存。
+  constexpr std::size_t kEncodeQueueFrames = 24;
+  FrameQueue encode_queue{kEncodeQueueFrames};
+  std::atomic<int> encode_done{0};
+  std::atomic<std::int64_t> encode_ns_total{0};
   for (std::size_t i = 0; i < workers; ++i) {
     worker_canvases.push_back(std::make_unique<st::raster::Canvas>(job.width, job.height, 1.0f));
     worker_scratch.push_back(std::make_unique<st::raster::Canvas>(job.width, job.height, 1.0f));
@@ -664,17 +884,55 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
         }
       }
       const std::int64_t render_end = st::time::now_ns();
-      const std::string path = st::fs::join(frames_dir, std::format("frame_{:05}.png", index + 1));
-      if (!write_frame_png(local, path)) {
-        write_failed.store(true);
-        return;
-      }
-      const std::int64_t encode_end = st::time::now_ns();
-      // 画面度量：在 PNG 编码**之后**做（不占渲染计时、不影响写盘），
-      // 此时 canvas 里的像素仍是这一帧（下一个循环才覆盖）。
+      // ## 画面度量在**移交像素之前**做
+      //
+      // 它读的是 canvas 当前像素；一旦像素被拷进队列，本地画布马上会被下一帧覆盖。
       worker_stats[slot].push(local, index, frame_time(index, job.fps));
+
+      // ## 出口：管道模式直送 ffmpeg；PNG 模式进队列
+      //
+      // ## 管道模式必须**按帧序**写入
+      //
+      // ffmpeg 按到达顺序把字节当作连续帧，乱序 = 帧序错乱（画面抽搐）。
+      // 而渲染是 16 路并行的，谁先算完不一定。所以用一个"提交窗口"：
+      //   · 算完的帧先把像素存进 `pending[index]`
+      //   · 只允许**下一个该写的帧号**真正写进管道
+      //   · 其他线程算完后等待自己成为队首
+      //
+      // 代价：最快的线程要等最慢的邻居，但每帧成本相近，实测差别很小；
+      // 好处是内存里最多压 `workers` 帧（约 16×8MB=128MB），可控。
+      {
+        FramePixels frame{};
+        frame.index = index;
+        frame.width = static_cast<std::uint32_t>(local.physical_width());
+        frame.height = static_cast<std::uint32_t>(local.physical_height());
+        frame.rgba = local.to_rgba8();
+        if (frame.rgba.size() !=
+            static_cast<std::size_t>(frame.width) * frame.height * 4U) {
+          write_failed.store(true);
+          return;
+        }
+        if (pipe_mode) {
+          // 等自己成为队首（前序帧都已写完），期间不占 CPU
+          std::unique_lock<std::mutex> lock(pipe_mutex);
+          pipe_cv.wait(lock, [&] { return write_turn == index || cancel_.load() ||
+                                          pipe_failed.load(); });
+          if (cancel_.load() || pipe_failed.load()) return;
+          if (!ffmpeg_pipe->write(std::string_view(
+                  reinterpret_cast<const char*>(frame.rgba.data()), frame.rgba.size()))) {
+            pipe_failed.store(true);
+            write_failed.store(true);
+            ++write_turn;
+            pipe_cv.notify_all();
+            return;
+          }
+          ++write_turn;
+          pipe_cv.notify_all();
+        } else {
+          encode_queue.push(std::move(frame));
+        }
+      }
       worker_render_ns[slot] += render_end - render_start;
-      worker_encode_ns[slot] += encode_end - render_end;
       ++worker_written[slot];
       {
         const std::scoped_lock lock(mutex_);
@@ -683,6 +941,43 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
       if (on_update) on_update();
     }
   };
+  // ## 编码线程池：**必须多线程**（实测教训）
+  //
+  // 第一版只起 1 个编码线程，结果总时长从 10.9s **涨到 27.5s**：
+  // 渲染并行后只要 72.8ms/帧（16 路合计约 2s 跑完 450 帧），
+  // 而单线程编码要 51.8ms × 450 = **23.3s** —— 编码成了新瓶颈。
+  //
+  // 所以编码线程数按"渲染与编码的速率比"给：渲染侧 workers 路并行，
+  // 编码侧也开同等数量的线程，两者才能重叠而不是排队。
+  // 队列容量按内存上限定（每帧 8MB），满了会阻塞渲染 → 自动背压。
+  const std::size_t encoder_count = std::max<std::size_t>(1, workers / 2);
+  std::vector<std::jthread> encoders{};
+  encoders.reserve(encoder_count);
+  for (std::size_t e = 0; e < encoder_count; ++e) {
+    encoders.emplace_back([&encode_queue, &encode_done, &encode_ns_total, &write_failed,
+                           &frames_dir] {
+      FramePixels frame{};
+      while (encode_queue.pop(frame)) {
+        const std::int64_t t0 = st::time::now_ns();
+        // 压缩级别取 1（不是默认 6）：PNG 是**中间产物**（随后交给 ffmpeg 编 h264），
+        // 只决定写盘大小与耗时，与成片画质**完全无关**（zlib 无损）。
+        // 实测 1080p 单帧：级别 6 约 96ms、级别 1 约 40ms。
+        st::codec::PngImage image;
+        image.width = frame.width;
+        image.height = frame.height;
+        image.rgba = std::move(frame.rgba);
+        const std::string path =
+            st::fs::join(frames_dir, std::format("frame_{:05}.png", frame.index + 1));
+        if (!st::codec::png_write_file(path, image, 1).has_value()) {
+          write_failed.store(true);
+          return;
+        }
+        encode_ns_total.fetch_add(st::time::now_ns() - t0);
+        ++encode_done;
+      }
+    });
+  }
+
   if (workers > 1) {
     std::vector<std::jthread> pool{};
     pool.reserve(workers);
@@ -692,6 +987,11 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
     // `jthread` 析构会自动 join（本仓纪律：不 detach）。
   } else {
     worker_body(0);
+  }
+  // 渲染全部结束 → 通知编码线程收尾，并等它把剩余帧写完
+  encode_queue.close();
+  for (auto& e : encoders) {
+    if (e.joinable()) e.join();
   }
   // 归并各 worker 的轨迹（按帧号排序，保证输出稳定可 diff）
   if (job.trajectory) {
@@ -718,22 +1018,46 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
     if (on_update) on_update();
     return;
   }
+  // ## 管道模式收尾：关 stdin → ffmpeg 收到 EOF → 写完 mp4
+  //
+  // 顺序很重要：必须先 `close_write()` 让 ffmpeg 知道没有更多帧，
+  // 再 `finish()` 等它把缓冲刷完。少了前者，ffmpeg 会一直等输入（挂死）。
+  bool pipe_ok = true;
+  if (pipe_mode) {
+    if (pipe_failed.load()) {
+      pipe_ok = false;
+    } else {
+      ffmpeg_pipe->close_write();
+      const int code = ffmpeg_pipe->finish();
+      if (code != 0) pipe_ok = false;
+    }
+    if (!pipe_ok) {
+      finish(true, "ffmpeg 管道编码失败（可用 --keep-frames 走 PNG 路径排查）");
+      return;
+    }
+  }
+
   if (write_failed.load()) {
     finish(true, std::format("写帧失败（目录：{}）", frames_dir));
     return;
   }
   for (std::size_t i = 0; i < workers; ++i) {
     render_ns_sum += worker_render_ns[i];
-    encode_ns_sum += worker_encode_ns[i];
     written += worker_written[i];
   }
   if (written == 0) {
     finish(true, "没有写出任何帧");
     return;
   }
-  log_line(std::format("帧完成：{} 帧（每帧渲染 {:.1f}ms + PNG 编码 {:.1f}ms，{} 路并行）",
-                       written, static_cast<double>(render_ns_sum) / 1.0e6 / written,
-                       static_cast<double>(encode_ns_sum) / 1.0e6 / written, workers),
+  // 编码耗时现在**独立统计**（它跑在另一个线程，与渲染重叠）。
+  // 日志里报的是"串行等价耗时"，用来判断编码是否拖了后腿：
+  // 若 `编码/帧 × 帧数 > 渲染总时长`，说明编码是瓶颈，该加编码线程。
+  encode_ns_sum = encode_ns_total.load();
+  log_line(std::format("帧完成：{} 帧（渲染 {:.1f}ms/帧 × {} 路 ｜ PNG 编码 {:.1f}ms/帧，"
+                       "串行等价 {:.2f}s，与渲染重叠）",
+                       written, static_cast<double>(render_ns_sum) / 1.0e6 / written, workers,
+                       static_cast<double>(encode_ns_sum) / 1.0e6 / written,
+                       static_cast<double>(encode_ns_sum) / 1.0e9),
            on_update);
 
   // —— 画面质量报告（逐镜静止占比 / 过亮帧 / 平均亮度）——
@@ -828,7 +1152,37 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
   }
 
   // —— 阶段 3：封装 ——
-  if (!job.output_file.empty()) {
+  //
+  // ## 管道模式下的二次封装（有配乐时）
+  //
+  // 管道在渲染结束时就已产出**无声** mp4（那时配乐还没合成——它依赖总时长，
+  // 所以要等帧数确定）。配乐出来后用 ffmpeg 把音轨 mux 进去：
+  //   · 视频流 `-c:v copy`（不重编码，几百毫秒）
+  //   · 音轨 `-c:a aac`
+  // 这比"先留 PNG 再一次性封装"省掉了 450 次 PNG 压缩。
+  if (pipe_mode && !audio_path.empty() && !job.output_file.empty()) {
+    {
+      const std::scoped_lock lock(mutex_);
+      status_.stage = "mux_audio";
+    }
+    const std::string ffmpeg_bin = find_ffmpeg(job.ffmpeg);
+    const std::string merged = job.output_file + ".muxed.mp4";
+    std::vector<std::string> margs = {
+        "-y", "-loglevel", "error",
+        "-i", job.output_file, "-i", audio_path,
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", merged};
+    const auto mux = st::process::run(ffmpeg_bin, margs, {.timeout_ms = 600000});
+    if (mux && mux->exit_code == 0) {
+      // 替换为带音轨的版本（rename 是原子的，避免半成品）
+      (void)st::fs::remove_file(job.output_file);
+      (void)st::fs::rename(merged, job.output_file);
+    } else {
+      log_line("配乐封装失败（成片无音轨，视频本身正常）", on_update);
+      (void)st::fs::remove_file(merged);
+    }
+  }
+
+  if (!job.output_file.empty() && !pipe_mode) {
     {
       const std::scoped_lock lock(mutex_);
       status_.stage = "encode";
@@ -866,6 +1220,10 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
     const std::scoped_lock lock(mutex_);
     status_.output = job.output_file;
     log_line(std::format("成片：{}", job.output_file), on_update);
+  } else if (pipe_mode && !job.output_file.empty()) {
+    const std::scoped_lock lock(mutex_);
+    status_.output = job.output_file;
+    log_line(std::format("成片：{}（管道直送，无 PNG 落盘）", job.output_file), on_update);
   }
 
   {

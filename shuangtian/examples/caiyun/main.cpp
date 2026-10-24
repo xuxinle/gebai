@@ -94,6 +94,8 @@ struct Options {
   double shutter{0.5};
   /// 导出元素轨迹（供连贯性验收）。
   bool trajectory{false};
+  /// `--keep-frames`：保留 PNG 帧序列（默认走管道直送 ffmpeg，不落盘）。
+  bool keep_frames{false};
   std::string export_dir{};   ///< `--export-dir <dir>`：启动即导出 PNG 帧序列（旧口径，保留）
   int bench_seconds{0};       ///< `--bench <秒>`：播放压测时长
 };
@@ -114,6 +116,7 @@ auto print_usage(std::string_view program) -> void {
       "  --render-size WxH     成片分辨率（缺省 1920x1080）\n"
       "  --render-frames N     只渲染前 N 帧（快速试渲）\n"
       "  --export-dir DIR      启动即导出 PNG 帧序列（320x180，无 ffmpeg 时的兜底）\n"
+      "  --keep-frames         保留 1080p PNG 帧序列（默认走管道直送 ffmpeg，不落盘）\n"
       "  --bench N             真开播放压测 N 秒后退出\n"
       "  --control-port N      控制通道端口（0 = 自动）\n"
       "  --control-file PATH   控制信息落盘路径\n"
@@ -194,6 +197,10 @@ auto parse_options(int argc, char** argv) -> Options {
     } else if (raw == "--track-elements") {
       // 导出元素轨迹（trajectory.tsv）：供连贯性验收做“按元素追踪”。
       options.trajectory = true;
+    } else if (raw == "--keep-frames") {
+      // 保留 PNG 帧序列。默认走管道（RGBA 直送 ffmpeg），不落盘——
+      // 需要逐帧抽样的验收工具（ot_bench / carry_qa）必须显式打开它。
+      options.keep_frames = true;
     } else if (raw == "--bench") {
       options.bench_seconds = static_cast<int>(std::clamp(parse_int("--bench", 0), 0LL, 3600LL));
     } else if (raw == "-h" || raw == "--help") {
@@ -1144,6 +1151,7 @@ auto run_app(int argc, char** argv) -> int {
     job.motion_samples = options.motion_samples;
     job.shutter = options.shutter;
     job.trajectory = options.trajectory;
+    job.keep_frames = options.keep_frames;
     render_launched = page->start_render(job);
     st::print("渲染启动：{}x{} → {}\n", job.width, job.height, job.output_file);
   }
