@@ -177,6 +177,8 @@ ST_TEST(frame_stats_per_shot_separates_still_and_moving) {
   const auto& b = report.shots[1];
   ST_CHECK(a.frames > 0);
   ST_CHECK(b.frames > 0);
+  ST_CHECK(a.frame_pairs >= 8);
+  ST_CHECK(b.frame_pairs >= 8);
   ST_CHECK(a.still_ratio() > 85.0);   // 静止镜
   ST_CHECK(b.still_ratio() < 60.0);   // 运动镜明显更低
   // 最静一镜必须指向静止镜（这就是「慢在哪」的答案）
@@ -196,6 +198,7 @@ ST_TEST(frame_stats_single_frame_shot_reports_zero_not_hundred) {
   const QualityReport report = acc.report(0.1, false);
   ST_CHECK(report.shots.size() == 1);
   ST_CHECK(report.shots[0].frames == 1);
+  ST_CHECK(report.shots[0].frame_pairs == 0);
   ST_CHECK(report.shots[0].still_ratio() < 1e-9);
 }
 
@@ -255,6 +258,55 @@ ST_TEST(frame_stats_partial_flag_is_reported) {
   ST_CHECK(report.summary.find("局部渲染") != std::string::npos);
 }
 
+ST_TEST(frame_stats_parallel_workers_still_have_adjacent_pairs) {
+  // 导出是 16 路并行，每路 `fetch_add` 抢帧号：同一路拿到的是 0、16、32…，
+  // **相邻帧永远在不同 worker 上**。若帧差只在「本路上一帧」之间算，
+  // 归并后有效帧对数恒为 0——实测一次 16 秒导出报「静止 0.0%（帧差 <1.2，**0 对**）」，
+  // 指标恒为 0 而摘要毫无异常。这条用例造两个工人抢奇偶帧号，
+  // 断言归并后帧对数 = 帧数-1 且能分辨已知的「动」与「不动」。
+  st::raster::Canvas canvas{kWidth, kHeight, 1.0f};
+  StatsAccumulator even{};
+  StatsAccumulator odd{};
+  for (int i = 0; i < 10; ++i) {
+    fill(canvas, 16, 24, 32);
+    block(canvas, 20 + i * 20, 40, 224, 224, 224);
+    (i % 2 == 0 ? even : odd).push(canvas, i, static_cast<double>(i) / 10.0);
+  }
+  even.merge(odd);
+  const QualityReport moving = even.report(1.0, false);
+  ST_CHECK(moving.frames == 10);
+  // 分母必须凑得出来（9 对）——这正是旧实现丢失的东西
+  ST_CHECK(moving.frame_pairs == 9);
+  ST_CHECK(moving.still_ratio < 1.0);
+  ST_CHECK(moving.change_density > 5.0);
+
+  // 对照组：同样交错喂入，但画面逐帧完全一致 → 必须判 100% 静止。
+  // 没有这一组，「帧对数对了」可以靠「随便把差算得很大」蒙过去。
+  StatsAccumulator still_even{};
+  StatsAccumulator still_odd{};
+  for (int i = 0; i < 10; ++i) {
+    fill(canvas, 16, 24, 32);
+    block(canvas, 20, 40, 224, 224, 224);
+    (i % 2 == 0 ? still_even : still_odd).push(canvas, i, static_cast<double>(i) / 10.0);
+  }
+  still_even.merge(still_odd);
+  const QualityReport still = still_even.report(1.0, false);
+  ST_CHECK(still.frame_pairs == 9);
+  ST_CHECK(still.still_ratio > 99.0);
+}
+
+ST_TEST(frame_stats_zero_pairs_is_flagged) {
+  // 分母为 0 时不能闷不吱声：只渲了一帧就出报告，必须明说不可信。
+  st::raster::Canvas canvas{kWidth, kHeight, 1.0f};
+  StatsAccumulator acc{};
+  fill(canvas, 16, 24, 32);
+  acc.push(canvas, 0, 0.0);
+  const QualityReport report = acc.report(0.033, false);
+  ST_CHECK(report.frames == 1);
+  ST_CHECK(report.frame_pairs == 0);
+  ST_CHECK(report.summary.find("无有效相邻帧对") != std::string::npos);
+}
+
 ST_TEST(frame_stats_definition_is_in_summary) {
   // 阈值必须随数一起给出：换阈值就换答案，不给阈值的百分比无法复核。
   st::raster::Canvas canvas{kWidth, kHeight, 1.0f};
@@ -284,7 +336,8 @@ ST_TEST(frame_stats_json_roundtrip_shape) {
   const std::string json = caiyun::quality_to_json(report);
   for (const char* key : {"\"still_ratio\"", "\"bright_ratio\"", "\"mean_luma\"",
                           "\"change_density\"", "\"static_threshold\"", "\"shots\"",
-                          "\"worst_still_clip_id\"", "\"partial\"", "\"summary\""}) {
+                          "\"worst_still_clip_id\"", "\"partial\"", "\"summary\"",
+                          "\"frame_pairs\""}) {
     ST_CHECK(json.find(key) != std::string::npos);
   }
   // 必须能解析回来（自研 Json 的往返）

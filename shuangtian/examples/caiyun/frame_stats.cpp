@@ -14,6 +14,17 @@ constexpr int kLumaR = 77;   // 0.299 * 256
 constexpr int kLumaG = 150;  // 0.587 * 256
 constexpr int kLumaB = 29;   // 0.114 * 256
 
+/// 两张同尺寸降采样灰度图的平均绍对差（0–255）；尺寸不同返回 -1（不可比）。
+[[nodiscard]] auto mean_abs_diff(const std::vector<std::uint8_t>& a,
+                                 const std::vector<std::uint8_t>& b) -> double {
+  if (a.empty() || a.size() != b.size()) return -1.0;
+  double acc = 0.0;
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    acc += std::abs(static_cast<double>(a[i]) - static_cast<double>(b[i]));
+  }
+  return acc / static_cast<double>(a.size());
+}
+
 }  // namespace
 
 auto StatsAccumulator::downscale_luma(const st::raster::Canvas& canvas) -> std::vector<std::uint8_t> {
@@ -71,7 +82,7 @@ auto StatsAccumulator::downscale_luma(const st::raster::Canvas& canvas) -> std::
 }
 
 auto StatsAccumulator::push(const st::raster::Canvas& canvas, int index, double time_s) -> FrameStats {
-  const std::vector<std::uint8_t> luma = downscale_luma(canvas);
+  std::vector<std::uint8_t> luma = downscale_luma(canvas);
   FrameStats stats{};
   stats.index = index;
   stats.time_s = time_s;
@@ -81,35 +92,30 @@ auto StatsAccumulator::push(const st::raster::Canvas& canvas, int index, double 
   for (const std::uint8_t v : luma) sum += static_cast<double>(v);
   stats.mean_luma = sum / static_cast<double>(luma.size());
 
-  // 帧差只在**同一 worker 的相邻帧**之间有意义。并行渲染时 index 不连续，
-  // 若拿"上一个 push 的帧"去比，会把两个不相邻的帧相减得到伪运动。
-  // 因此这里要求调用方按 index 顺序喂（render.cpp 里每个 worker 严格递增），
-  // 且只接受 index 恰为 prev+1 的情况；否则标记为"无相邻前帧"。
-  //
-  // **首帧也必须标记为 -1**：`FrameStats::diff_prev` 的默认值是 0.0，而 0.0 在
-  // report() 里会通过 `>= 0` 检查并被判成「静止」。于是任何序列的第一帧都被算作
-  // 静止帧——10 帧运动序列会得到 1/9 ≈ 11% 的静止占比（实测就是这么错的）。
-  // 第一帧没有前一帧可比，它**不是**静止。
-  if (has_prev_ && index == prev_.index + 1 && prev_luma_.size() == luma.size()) {
-    double acc = 0.0;
-    for (std::size_t i = 0; i < luma.size(); ++i) {
-      acc += std::abs(static_cast<double>(luma[i]) - static_cast<double>(prev_luma_[i]));
-    }
-    stats.diff_prev = acc / static_cast<double>(luma.size());
+  // 返回值里的帧差只给「本路相邻帧」——并行时这几乎总是非相邻帧，
+  // 因而**不作为任何判据的依据**（判据在 report() 里按归并后的帧号算）。
+  // 保留它是因为 worker 侧日志/诊断会用，且单线程场景下它就是真值。
+  if (has_prev_ && index == prev_.index + 1) {
+    stats.diff_prev = mean_abs_diff(prev_luma_, luma);
   } else {
-    stats.diff_prev = -1.0;  // -1 = 无相邻前帧（报告据此不计入静止判据）
+    stats.diff_prev = -1.0;  // -1 = 无相邻前帧
   }
-
-  prev_luma_ = luma;
+  prev_luma_ = std::move(luma);
   prev_ = stats;
   has_prev_ = true;
-  frames_.push_back(stats);
+
+  Sample sample{};
+  sample.index = index;
+  sample.time_s = time_s;
+  sample.mean_luma = stats.mean_luma;
+  sample.luma = prev_luma_;
+  samples_.push_back(std::move(sample));
   return stats;
 }
 
 void StatsAccumulator::merge(const StatsAccumulator& other) {
-  frames_.insert(frames_.end(), other.frames_.begin(), other.frames_.end());
-  // prev_ 不并（归并后帧序未必连续，差分已各自算好）
+  samples_.insert(samples_.end(), other.samples_.begin(), other.samples_.end());
+  // prev_ 不并（归并后帧序未必连续，帧差一律在 report() 里重算）
 }
 
 void StatsAccumulator::attach_spans(std::vector<ShotSpan> spans) { spans_ = std::move(spans); }
@@ -117,30 +123,40 @@ void StatsAccumulator::attach_spans(std::vector<ShotSpan> spans) { spans_ = std:
 auto StatsAccumulator::report(double duration_s, bool partial) const -> QualityReport {
   QualityReport out{};
   out.partial = partial;
-  out.frames = static_cast<int>(frames_.size());
-  if (frames_.empty()) {
+  out.frames = static_cast<int>(samples_.size());
+  if (samples_.empty()) {
     out.summary = "无帧（未渲染）";
     return out;
   }
 
   // 按 index 排序后统计：并行归并进来的顺序是"按 worker 拼接"的，不是时间序。
-  std::vector<const FrameStats*> ordered{};
-  ordered.reserve(frames_.size());
-  for (const auto& f : frames_) ordered.push_back(&f);
+  std::vector<const Sample*> ordered{};
+  ordered.reserve(samples_.size());
+  for (const auto& f : samples_) ordered.push_back(&f);
   std::sort(ordered.begin(), ordered.end(),
-            [](const FrameStats* a, const FrameStats* b) { return a->index < b->index; });
+            [](const Sample* a, const Sample* b) { return a->index < b->index; });
+
+  // 帧差：排序后按**帧号相邻**算（不从喂入时的 diff_prev 取——并行时那是 0/16/32…）。
+  // `diff` 与 `ordered` 对齐：`diff[i]` = 帧 `ordered[i]` 与其前一张（帧号恰为 -1）的差；
+  // -1 = 无相邻前帧（首帧或前面丢了一帧），不计入分母。
+  std::vector<double> diff(ordered.size(), -1.0);
+  for (std::size_t i = 1; i < ordered.size(); ++i) {
+    if (ordered[i]->index == ordered[i - 1]->index + 1) {
+      diff[i] = mean_abs_diff(ordered[i - 1]->luma, ordered[i]->luma);
+    }
+  }
 
   double luma_sum = 0.0;
   int pairs = 0;
   int still = 0;
   int moving = 0;
   int bright = 0;
-  for (const FrameStats* f : ordered) {
-    luma_sum += f->mean_luma;
-    if (f->mean_luma > out.bright_luma) ++bright;
-    if (f->diff_prev >= 0.0) {
+  for (std::size_t i = 0; i < ordered.size(); ++i) {
+    luma_sum += ordered[i]->mean_luma;
+    if (ordered[i]->mean_luma > out.bright_luma) ++bright;
+    if (diff[i] >= 0.0) {
       ++pairs;
-      if (f->diff_prev < out.static_threshold) {
+      if (diff[i] < out.static_threshold) {
         ++still;
       } else {
         ++moving;
@@ -153,6 +169,7 @@ auto StatsAccumulator::report(double duration_s, bool partial) const -> QualityR
   out.still_ratio = pairs > 0 ? 100.0 * static_cast<double>(still) / static_cast<double>(pairs) : 0.0;
   out.bright_ratio = 100.0 * static_cast<double>(bright) / static_cast<double>(ordered.size());
   out.change_density = duration_s > 0.0 ? static_cast<double>(moving) / duration_s : 0.0;
+  out.frame_pairs = pairs;
 
   // —— 逐镜 ——
   out.shots.clear();
@@ -164,12 +181,18 @@ auto StatsAccumulator::report(double duration_s, bool partial) const -> QualityR
     shot.t_in = span.t_in;
     shot.t_out = span.t_out;
     double shot_luma = 0.0;
-    for (const FrameStats* f : ordered) {
+    int shot_pairs = 0;
+    for (std::size_t i = 0; i < ordered.size(); ++i) {
+      const Sample* f = ordered[i];
       if (f->time_s < span.t_in || f->time_s >= span.t_out) continue;
       ++shot.frames;
       shot_luma += f->mean_luma;
-      if (f->diff_prev >= 0.0 && f->diff_prev < out.static_threshold) ++shot.still_frames;
+      if (diff[i] >= 0.0) {
+        ++shot_pairs;
+        if (diff[i] < out.static_threshold) ++shot.still_frames;
+      }
     }
+    shot.frame_pairs = shot_pairs;
     shot.mean_luma = shot.frames > 0 ? shot_luma / static_cast<double>(shot.frames) : 0.0;
     out.shots.push_back(shot);
   }
@@ -196,6 +219,8 @@ auto StatsAccumulator::report(double duration_s, bool partial) const -> QualityR
       "｜平均亮度 {:.1f}｜变化 {:.2f}/s{}",
       out.frames, out.still_ratio, out.static_threshold, pairs, out.bright_ratio,
       out.bright_luma, out.mean_luma, out.change_density, worst_line);
+  // 分母为 0 时必须明说：否则「0 对 / 0.0%」会被读成一个有效的「不静」结论。
+  if (pairs == 0) out.summary += "｜⚠ 无有效相邻帧对（只渲了 1 帧或帧号不连续）：静止占比不可信";
   if (partial) out.summary += "（局部渲染，结论只覆盖该区间）";
   return out;
 }
@@ -206,6 +231,7 @@ auto quality_to_json(const QualityReport& report) -> std::string {
   root["bright_luma"] = report.bright_luma;
   root["probe_width"] = report.probe_width;
   root["frames"] = report.frames;
+  root["frame_pairs"] = report.frame_pairs;
   root["still_frames"] = report.still_frames;
   root["bright_frames"] = report.bright_frames;
   root["still_ratio"] = report.still_ratio;
@@ -224,6 +250,7 @@ auto quality_to_json(const QualityReport& report) -> std::string {
     item["t_in"] = shot.t_in;
     item["t_out"] = shot.t_out;
     item["frames"] = shot.frames;
+    item["frame_pairs"] = shot.frame_pairs;
     item["still_frames"] = shot.still_frames;
     item["still_ratio"] = shot.still_ratio();
     item["mean_luma"] = shot.mean_luma;

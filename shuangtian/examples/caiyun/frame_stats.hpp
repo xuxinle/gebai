@@ -32,6 +32,19 @@
 /// - 只统计**渲染到的帧**；`first_frame/last_frame` 局部渲染时结论只覆盖那段区间
 ///   （报告里带 `partial` 标记）。
 /// - 不做主观判断（好不好看）。它只回答「有没有在动、亮了还是暗了、哪一镜最静」。
+///
+/// ## 帧差在**归并后**按帧号算，不在喂入时算
+///
+/// 导出是 16 路并行，每路用 `fetch_add` 抢帧号，于是同一路拿到的是 0、16、32…——
+/// **相邻帧永远在不同 worker 上**。若帧差只在「本路上一帧」之间算，相邻对照永远凑不出来：
+/// 实测一次 16 秒的导出报「静止 0.0%（帧差 <1.2，**0 对**）」——分母是 0，指标恒为 0，
+/// 而它看起来完全正常（百分比有值、摘要没报错）。这正是本类工具最坏的失效方式：
+/// **静默且被信任**。
+///
+/// 所以每帧的降采样灰度图**留到归并之后**：按帧号排序，再对每对相邻帧号算差。
+/// 代价是每帧多存 `kStatsWidth × (h/ratio)` 字节（1080p 约 2.2 KB，900 帧约 2 MB），
+/// 换来的是「并行不影响口径」。`push()` 的返回值仍给本路相邻帧的差（供调用方诊断），
+/// 但**报告不读它**。
 
 #include <cstdint>
 #include <string>
@@ -61,10 +74,12 @@ struct ShotStats {
   double t_out{0.0};
   int frames{0};
   int still_frames{0};       ///< 与上一帧相比判为静止的帧数
+  /// 该镜内有效的相邻帧对数（分母）；与 `frames-1` 不等说明区间边界丢帧。
+  int frame_pairs{0};
   double mean_luma{0.0};
-  /// 静止占比（%）；`frames <= 1` 时为 0（单帧无法判动静，不该报 100%）
+  /// 静止占比（%）；无有效帧对时为 0（无法判动静，不该报 100%）
   [[nodiscard]] auto still_ratio() const -> double {
-    return frames > 1 ? 100.0 * static_cast<double>(still_frames) / static_cast<double>(frames - 1) : 0.0;
+    return frame_pairs > 0 ? 100.0 * static_cast<double>(still_frames) / static_cast<double>(frame_pairs) : 0.0;
   }
 };
 
@@ -78,6 +93,9 @@ struct QualityReport {
   int frames{0};
   int still_frames{0};
   int bright_frames{0};
+  /// 有效的**相邻帧对**数（分母）。为 0 时静止占比不可信（渲染只出了 1 帧、或帧号不连续），
+  /// 必须随数一起报——否则「0 对 / 0.0%」会被当成「一点也不静」。
+  int frame_pairs{0};
   double mean_luma{0.0};
   /// 全片静止占比（%）：静止帧对数 / 帧对数。
   double still_ratio{0.0};
@@ -103,6 +121,16 @@ struct QualityReport {
 /// 智能体/e2e 拿到的形状才有唯一来源（否则每多一个消费者就多一份易漂移的拼装）。
 [[nodiscard]] auto quality_to_json(const QualityReport& report) -> std::string;
 
+/// 一个帧的采样（归并后算帧差要用的都留着）。
+///
+/// **为什么把灰度图存到归并后**：见文件头「帧差在归并后按帧号算」。
+struct Sample {
+  int index{0};
+  double time_s{0.0};
+  double mean_luma{0.0};
+  std::vector<std::uint8_t> luma{};
+};
+
 /// 增量累加器（渲染循环里逐帧喂；并行时**每线程一份**，最后归并）。
 ///
 /// 为什么每线程一份而不是加锁共享：每帧都要写，锁会成为热点；而这里的状态
@@ -113,6 +141,9 @@ class StatsAccumulator {
   /// 喂一帧。`frame` 必须带好 index/time_s；`mean_luma`/`diff_prev` 由本方法算。
   /// `prev` 由调用方持有（并行时同一 worker 的上一帧）。
   /// 返回本帧的度量（供 worker 保存"自己的上一帧"）。
+  ///
+  /// ⚠ 返回的 `diff_prev` 只是**本路相邻帧**的差（并行时这是 0/16/32… 的间隔），
+  /// 仅用于诊断；判定与时序口径的差一律来自 `report()`（它按归并后的帧号算）。
   auto push(const st::raster::Canvas& canvas, int index, double time_s) -> FrameStats;
 
   /// 把**另**一个累加器的内容并入自己（并行归并）。
@@ -131,15 +162,15 @@ class StatsAccumulator {
   /// 出报告。`duration_s` 用于变化密度；`partial` 标记局部渲染。
   [[nodiscard]] auto report(double duration_s, bool partial) const -> QualityReport;
 
-  [[nodiscard]] auto empty() const -> bool { return frames_.empty(); }
+  [[nodiscard]] auto empty() const -> bool { return samples_.empty(); }
 
  private:
-  std::vector<FrameStats> frames_{};
+  std::vector<Sample> samples_{};
   std::vector<ShotSpan> spans_{};
+  /// 本路上一帧（只用于 `push()` 的返回值；判据不用它）。
   bool has_prev_{false};
   FrameStats prev_{};
-  /// 上一帧的降采样灰度图（差分用）。必须留到这里：只存 `FrameStats` 不够——
-  /// 算帧差要比对像素，不能只比标量均值（两块均值相同的画面可能完全不同）。
+  /// 本路上一帧的降采样灰度图（与 `prev_` 配套，同原因：只给 push 的返回值用）。
   std::vector<std::uint8_t> prev_luma_{};
 
   static auto downscale_luma(const st::raster::Canvas& canvas) -> std::vector<std::uint8_t>;
