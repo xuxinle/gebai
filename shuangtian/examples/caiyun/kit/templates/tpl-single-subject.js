@@ -29,6 +29,7 @@ const PALETTE = {
   ink: "#E8E4DA",
   dim: "#8B8375",
   accent: "#D2553C",
+  accentHi: "#F08A5D",   // 主体高光侧（orb 的内圈用）
   // 背景点阵：低对比，只提供"可测参照"，不抢主体
   texture: "#3E4650",
 };
@@ -99,7 +100,17 @@ function layout(t, duration, canvas, layers) {
   // 主体的"呼吸"：纯位移，不改变结构。幅度按「跨得过 60px 格」定。
   const br = breathe(t, 22, 0.42);
 
-  shapes.push(mkCircle(px + br * 0.4, py + br, pr, PALETTE.accent, pa));
+  // ## 主体用 orb 而不是纯色圆（2026-10-24 质感层）
+  //
+  // 纯色圆在有缩放的镜头里读作"贴上去的色块"；orb 的径向渐变让它有体积。
+  // 外圈再叠一层更淡更大的 orb 当光晕 —— 两层就够，不需要更多。
+  if (pr > 1 && pa > 0.01) {
+    orb((sh) => shapes.push(sh), px + br * 0.4, py + br, pr * 2.6,
+        (k) => PALETTE.accent, { rings: 24, peak: 0.30, alpha: 0.55 * pa });
+    orb((sh) => shapes.push(sh), px + br * 0.4, py + br, pr,
+        (k) => k > 0.75 ? PALETTE.accent : PALETTE.accentHi,
+        { rings: 32, peak: 0.95, alpha: pa });
+  }
 
   // ── ③-c 相机：默认带 creep，不留平台 ──────────────────────────────────
   //

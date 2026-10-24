@@ -266,6 +266,78 @@ check(codeOnly.indexOf("Date.now") < 0, "kit 代码不含 Date.now（可复现�
 check(codeOnly.indexOf("require(") < 0 && !/^\s*import\s/m.test(codeOnly),
       "kit 代码不含 require/import（脚本引擎无模块系统）");
 
+// ── 9.5 质感层：orb / card / stroke / label ────────────────────────────
+//
+// 教训来源：用户反馈「细节不够精致，指标应该度量不了」。
+// 抽帧对比后发现：看着高级的片子，基础元素本身有材质；看着廉价的都是纯色平涂。
+// 这一层的每个函数都要能证明"它真的产生了层次"。
+
+// orb：径向渐变必须连续衰减（这是 infra 三次失败换来的）
+{
+  const layers = [];
+  K.orb(s => layers.push(s), 0, 0, 280, k => "#FFFFFF", { rings: 32 });
+  check(layers.length > 10, "orb: 层数足够（≥10，少了会有台阶）");
+  const at = probe => {
+    let inv = 1;
+    for (const L of layers) if (L.w / 2 >= probe) inv *= (1 - L.alpha);
+    return 1 - inv;
+  };
+  const c0 = at(0), c1 = at(80), c2 = at(160), c3 = at(260);
+  check(c0 > 0.8, "orb: 中心够亮（>0.8）");
+  check(c0 > c1 && c1 > c2 && c2 > c3, "orb: 从中心向外单调递减（无环带）");
+  check(c3 < 0.06, "orb: 边缘落到接近 0（不出现硬边）");
+  // 连续性：相邻采样点的落差不能跳变（跳变 = 可见环带）
+  let maxJump = 0;
+  let prev = at(0);
+  for (let r = 4; r <= 280; r += 4) {
+    const v = at(r);
+    maxJump = Math.max(maxJump, Math.abs(v - prev));
+    prev = v;
+  }
+  check(maxJump < 0.12, "orb: 相邻半径的落差 <0.12（连续、无台阶）");
+}
+
+// card：投影 + 主体 + 高光 + 描边，且在"太小"时不画多余层
+{
+  const parts = [];
+  K.card(s => parts.push(s), 100, 100, 300, 160, { stroke: "#FFFFFF" });
+  check(parts.length >= 4, "card: 至少 4 层（投影/主体/高光/描边）");
+  const shadow = parts.find(p => p.color === "#000000");
+  check(!!shadow && shadow.y > 100, "card: 投影在下方（y 偏移）");
+  const hi = parts.find(p => p.color === "#FFFFFF" && p.h < 160 * 0.3);
+  check(!!hi, "card: 有顶部高光条");
+  // 小卡片不应浪费图元
+  const tiny = [];
+  K.card(s => tiny.push(s), 0, 0, 8, 8, {});
+  check(tiny.length < parts.length, "card: 过小时省略投影（省图元）");
+}
+
+// stroke：分段收细 + 透明度衰减（牙签 → 蒸汽）
+{
+  const segs = [];
+  K.stroke(s => segs.push(s), 0, 0, 300, 0.3, { segs: 5 });
+  const lines = segs.filter(s => s.kind === 2);
+  check(lines.length === 5, "stroke: 分成 5 段");
+  check(lines[0].stroke > lines[lines.length - 1].stroke, "stroke: 粗细递细（尾端消散）");
+  check(lines[0].alpha > lines[lines.length - 1].alpha, "stroke: 透明度递减（不硬截断）");
+}
+
+// label：两层（影 + 主体），且影有偏移
+{
+  const parts = [];
+  K.label(s => parts.push(s), 10, 20, 24, "hi", "#EEE", {});
+  check(parts.length === 2, "label: 两层（影 + 主体）");
+  check(parts[0].y > parts[1].y, "label: 影在下方（有偏移）");
+  check(parts[1].text === "hi" && parts[1].color === "#EEE", "label: 主体是原色");
+}
+
+// 质感层也不许与宿主重名
+{
+  const h = ["ease", "spring", "spring_vel", "settle", "lerp", "clamp", "snap"];
+  const collide = ["orb", "card", "stroke", "label"].filter(n => h.indexOf(n) >= 0);
+  check(collide.length === 0, "质感层函数名不与宿主冲突");
+}
+
 // ── 10. 绝不能与宿主函数重名（本仓库最贵的坑之一）─────────────────────
 //
 // 宿主注入的名字（layout.cpp 的 register_function 白名单）：

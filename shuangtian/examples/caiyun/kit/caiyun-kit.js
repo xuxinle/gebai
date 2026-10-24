@@ -245,6 +245,140 @@ const shapes = {
                                            color: color, alpha: alpha === undefined ? 1 : alpha }),
 };
 
+// ── ⑤-b 有质感的基础图元（2026-10-24 精致度层）────────────────────────
+//
+// ## 为什么需要这一层
+//
+// 用户的反馈是「大方向没问题，细节不够精致，指标应该度量不了」——这句是对的。
+// 现有评测只量运动量与亮度，回答不了"好不好看"。抽帧对比 13 条片子后发现：
+//
+//   看着高级的（clawd）＝ 基础元素**本身有材质**（投影/圆角/毛玻璃/透视）
+//   看着廉价的（infra/domino/clearing）＝ 纯色几何体平涂
+//
+// 所以把"质感"做进图元工厂，一次改、全片受益，而不是逐个 case 打补丁。
+//
+// ## 每个函数的质感配方（都有明确依据）
+//
+// | 图元 | 层数 | 组成 |
+// |---|---|---|
+// | card（卡片/面板） | 4 | 投影 → 主体 → 顶部高光 → 内描边 |
+// | orb（光球/光源） | N | 增量法径向渐变（见 infra 的三次失败记录） |
+// | stroke（丝/线） | n | 分段收细 + 透明度衰减 + 圆头端点 |
+// | label（文字衬底） | 2 | 主体 + 偏移暗影（暗底上提亮） |
+//
+// 全部遵守 `flow`/`t` 同样的确定性约束：纯函数、无随机。
+
+/// 径向渐变圆（**增量法**）。
+///
+/// ## 三次失败的记录（别再试前两种）
+///
+/// ① 3 层（w/2.4w/4.2w，alpha .95/.30/.12）→ 三道硬边色阶
+/// ② 8~12 层等比（半径 ×1.32、alpha ×0.62）→ 一圈圈可见环带，像靶子
+/// ③ **增量法**（本实现）→ 连续，验算：r=0→.88、r=.18R→.58、r=.36R→.34
+///
+/// 真因：半径等比时相邻层的**面积增量越来越小**，而 alpha 降得更快，
+/// 每层外沿留一条亮度台阶。增量法让叠加结果**精确等于**目标曲线。
+///
+/// `push(shapes)` 是往数组里加图元的回调，避免本函数依赖全局。
+function orb(push, x, y, radius, colorFn, opts) {
+  const o = opts || {};
+  const rings = o.rings || 32;
+  const peak = o.peak === undefined ? 0.88 : o.peak;
+  const alpha = o.alpha === undefined ? 1 : o.alpha;
+  if (radius <= 0.5 || alpha <= 0.004) return;
+  let prevT = 0;
+  for (let i = rings; i >= 0; i--) {
+    const rr = radius * (i / rings);
+    const tgt = peak * Math.pow(1 - i / rings, 2);
+    const ai = 1 - (1 - tgt) / (1 - prevT);
+    prevT = tgt;
+    if (ai <= 0.0015) continue;
+    const k = 1 - i / rings;                       // 0 外 → 1 内
+    push({ kind: 0, x: x, y: y, w: rr * 2,
+           color: typeof colorFn === "function" ? colorFn(k) : colorFn,
+           alpha: Math.min(1, ai) * alpha });
+  }
+}
+
+/// 有质感的卡片/面板：投影 + 主体 + 顶部高光 + 内描边。
+///
+/// 参数 `shade` 是亮度系数（0~1）：背景暗时用 0.06~0.12（投影淡），
+/// 背景亮时用 0.14~0.22（投影重）。**这个值必须配背景，不能到处一样。**
+function card(push, x, y, w, h, opts) {
+  const o = opts || {};
+  const r = o.radius === undefined ? 10 : o.radius;
+  const fill = o.fill || "#1B1F26";
+  const alpha = o.alpha === undefined ? 1 : o.alpha;
+  const shade = o.shade === undefined ? 0.10 : o.shade;
+  const hi = o.highlight === undefined ? 0.10 : o.highlight;
+  if (w < 1 || h < 1 || alpha <= 0.004) return;
+  // ① 投影：向下偏移、更大、更淡（只在够大时画）
+  if (h > 12 && w > 12) {
+    const off = Math.min(10, h * 0.10);
+    push({ kind: 1, x: x, y: y + off, w: w, h: h, radius: r,
+           color: "#000000", alpha: shade * alpha });
+  }
+  // ② 主体
+  push({ kind: 1, x: x, y: y, w: w, h: h, radius: r, color: fill, alpha: alpha });
+  // ③ 顶部高光：上沿 14% 高，白、很淡 —— 有"受光面"
+  if (h > 10) {
+    push({ kind: 1, x: x + w * 0.02, y: y + h * 0.02, w: w * 0.96, h: h * 0.14,
+           radius: Math.max(1, r * 0.7), color: "#FFFFFF", alpha: hi * alpha });
+  }
+  // ④ 内描边：一圈比主体略亮的细边（用 4 条矩形拼，成本低）
+  if (o.stroke) {
+    const t = o.strokeWidth === undefined ? 1 : o.strokeWidth;
+    push({ kind: 1, x: x, y: y, w: w, h: t, radius: 0, color: o.stroke, alpha: 0.55 * alpha });
+    push({ kind: 1, x: x, y: y, w: t, h: h, radius: 0, color: o.stroke, alpha: 0.35 * alpha });
+  }
+}
+
+/// 有质感的"丝/线"：分段收细 + 透明度衰减 + 弯曲。
+///
+/// 参数 `sway` 控制弯曲量（相对长度）；`taper` 是每段收细比例（0.8 = 每段 -20%）。
+function stroke(push, x0, y0, len, angle, opts) {
+  const o = opts || {};
+  const segs = o.segs || 5;
+  const lw = o.width === undefined ? 6 : o.width;
+  const color = o.color || "#FFF4DB";
+  const alpha = o.alpha === undefined ? 0.62 : o.alpha;
+  const sway = o.sway === undefined ? 0.55 : o.sway;
+  const taper = o.taper === undefined ? 0.80 : o.taper;
+  if (len <= 1 || alpha <= 0.004) return;
+  let cx = x0, cy = y0, cw = lw, ca = alpha;
+  for (let k = 0; k < segs; k++) {
+    const u = (k + 1) / segs;
+    const ang = angle + Math.sin(u * 2.6 + (o.phase || 0)) * sway;
+    const segLen = (len / segs) * (1 - u * 0.25);
+    const nx = cx + Math.sin(ang) * segLen;
+    const ny = cy - Math.cos(ang) * segLen;
+    push({ kind: 2, x: cx, y: cy, x2: nx, y2: ny,
+           stroke: Math.max(0.6, cw), color: color, alpha: ca });
+    // 端点圆头：只在第一段时补，让根部不出现方形切口
+    if (k === 0 && cw > 2) {
+      push({ kind: 0, x: cx, y: cy, w: cw, color: color, alpha: ca });
+    }
+    cx = nx; cy = ny;
+    cw *= taper;
+    ca *= 0.86;
+  }
+}
+
+/// 文字衬底：暗底上给一层更暗的偏移影，亮底上给一层更亮的偏移高光。
+///
+/// 只对**图元文字**（kind 3）有效；图层文字不需要（它有排版器）。
+function label(push, x, y, h, text, color, opts) {
+  const o = opts || {};
+  const alpha = o.alpha === undefined ? 1 : o.alpha;
+  if (alpha <= 0.004) return;
+  const onDark = o.onDark === undefined ? true : o.onDark;
+  const off = Math.max(1, h * 0.045);
+  push({ kind: 3, text: text, x: x, y: y + off, h: h,
+         color: onDark ? "#000000" : "#FFFFFF",
+         alpha: (onDark ? 0.45 : 0.28) * alpha });
+  push({ kind: 3, text: text, x: x, y: y, h: h, color: color, alpha: alpha });
+}
+
 // ── ⑥ 常见动效（每个都是纯函数，返回可直接用的数值）────────────────────
 
 /// 打字机：返回前 n 个字符（按 cps 速度）。
@@ -279,6 +413,7 @@ var KIT = {
   kClamp: kClamp, kLerp: kLerp, seg: seg, sstep: sstep, ssstep: ssstep,
   kEase: kEase, keys: keys, hash01: hash01,
   camera: camera, lattice: lattice, shapes: shapes,
+  orb: orb, card: card, stroke: stroke, label: label,
   typeOn: typeOn, wordRise: wordRise, stagger: stagger, breathe: breathe,
 };
 if (typeof module === "object" && module.exports) module.exports = KIT;
