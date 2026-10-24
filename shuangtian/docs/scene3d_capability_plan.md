@@ -319,3 +319,53 @@ set ST_SCENE3D_BACKEND=software && build\dev\bin\scene3d_color_probe.exe out\sce
    “变大但不到两倍”，两种实现都满足。最终改成钉**输出字节等于正确顺序的值**，
    并额外断言两种顺序的差 >0.01。
 
+#### 3.4 接入裁云 `model3d`：`model_script` 字段（2026-10-23 第五轮）
+
+图层加了一个字段 `model_script`：值是**一整个场景 JSON**（`scene3d_script.hpp` 的格式）。
+非空时整幅图层由它描述，与原有的 `model_shape` + `model_*` **互斥**
+（原路径是"一个网格 + 图层相机/光照"，场景脚本自带相机与光照，混在一起
+会变成"到底用谁的相机"）。
+
+端到端实测（`examples/caiyun/assets/scene-script-demo.json`，1280×720 / 30fps / 6s）：
+
+```
+H.264 · 1280×720 · 30fps · 6.000s · 162 KB
+```
+
+画面含地面 + 金色球体（高光）+ 粉色金属环（自遮挡）+ 蓝色金属方块 + 三个投影。
+
+#### 3.4 踩到的最贵的一个坑：**导出卡死**
+
+第一版接完，画面看着完全正常（截图对），但**导出卡在 33/180 帧、控制通道完全超时**
+（进程还在，什么都不响应）。
+
+根因是两层 `Scene3D::create` 打架：
+
+| 层 | 对 `ST_SCENE3D_BACKEND` 的操作 |
+|---|---|
+| 裁云 `scene_slot::acquire` | 为了强制软件腿，**临时 `_putenv_s`，用完还原** |
+| 我的 `render_scene` | 每次都 `Scene3D::create`，而 `create` **读写同一个变量** |
+
+两者叠加破坏了宿主的保存/恢复。
+
+**修法**：新增 `render_scene_into(spec, scene, canvas, bg)`——复用调用方已有的
+实例，不新建、不碰环境变量。`render_scene` 改成"create 之后转发给它"，
+两条路径共用同一份渲染逻辑。
+
+**判据也跟着改**：只比两次渲染的像素**抓不到**这个缺陷（内部偷偷 create，
+像素照样一样）。改用**标记法**——先在外部实例上画一帧，再调 `render_scene_into`，
+断言"外部实例的状态被推进了"。手工把 `render_scene_into` 改回"内部新建"
+验证过：`changed > 0` 立刻失败。
+
+#### 3.4 schema 两处必须同改
+
+`model_script` 加进 `Layer` 后，还必须同时改：
+
+- `examples/caiyun/schema.cpp` 的字段表（否则报"未知字段 'model_script'（已忽略）"）；
+- `examples/caiyun/layer_schema.cpp` 的属性表（否则界面看不到这个字段）。
+
+`tests/caiyun_layer_schema_test.cpp` 有一条断言"每个 schema 字段都能读写"，
+它当场抓到了我第一版的过错：我把 setter 写成"非法 JSON 就拒绝写入"，
+而这条不变式要求任意探测值都能写。改法是**setter 原样存**，
+把校验推到渲染前（失败画醒目占位 + `ST_LOG_WARN`）——用户编到一半的 JSON
+不该被界面拒绝。

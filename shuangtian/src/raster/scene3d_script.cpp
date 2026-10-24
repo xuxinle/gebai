@@ -359,15 +359,20 @@ auto render_scene(const SceneSpec& spec, Canvas& canvas, math::Color background)
   if (!scene.has_value()) {
     return st::unexpected(ErrorCode::Unsupported, "无法创建三维场景（后端不可用）");
   }
+  return render_scene_into(spec, **scene, canvas, background);
+}
+
+auto render_scene_into(const SceneSpec& spec, Scene3D& scene, Canvas& canvas,
+                       math::Color background) -> Result<void> {
   canvas.clear(background);
 
   // ## 顺序在这里被钉死
   //
   // 这正是本模块存在的理由：调用方无法把 `set_material` 排到 `begin_frame` 前。
-  (*scene)->begin_frame(background);
-  (*scene)->set_camera(spec.camera);
-  (*scene)->set_lighting(spec.lighting);
-  (*scene)->set_cull_mode(spec.cull_mode);
+  scene.begin_frame(background);
+  scene.set_camera(spec.camera);
+  scene.set_lighting(spec.lighting);
+  scene.set_cull_mode(spec.cull_mode);
 
   // ## 顺序：地面 → 阴影开关 → 其余物体
   //
@@ -386,7 +391,7 @@ auto render_scene(const SceneSpec& spec, Canvas& canvas, math::Color background)
     material.specular = obj.specular;
     material.emission = obj.emission;
     material.opacity = obj.opacity;
-    (*scene)->set_material(material);
+    scene.set_material(material);
 
     // 变换顺序：缩放 → 绕 X → 绕 Y → 绕 Z → 平移。
     //
@@ -402,7 +407,7 @@ auto render_scene(const SceneSpec& spec, Canvas& canvas, math::Color background)
       model = model * math::Mat4::rotation(math::Vec3{1.0f, 0.0f, 0.0f}, obj.rotate.x);
     }
     model = model * math::Mat4::scaling(obj.scale);
-    (*scene)->draw_mesh(*mesh, model);
+    scene.draw_mesh(*mesh, model);
     return {};
   };
 
@@ -411,17 +416,17 @@ auto render_scene(const SceneSpec& spec, Canvas& canvas, math::Color background)
     const auto status = draw_one(obj);
     if (!status) return st::forward_error(status.error());
   }
-  (*scene)->set_planar_shadow(spec.shadow);
+  scene.set_planar_shadow(spec.shadow);
   for (const SceneObjectSpec& obj : spec.objects) {
     if (obj.ground) continue;
     const auto status = draw_one(obj);
     if (!status) return st::forward_error(status.error());
   }
 
-  (*scene)->end_frame(canvas,
+  scene.end_frame(canvas,
                       math::Rect{0.0f, 0.0f, static_cast<float>(canvas.physical_width()),
                                  static_cast<float>(canvas.physical_height())});
-  (*scene)->flush();
+  scene.flush();
   return {};
 }
 

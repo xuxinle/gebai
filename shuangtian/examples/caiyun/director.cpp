@@ -299,6 +299,20 @@ auto collect_track_diagnostics(const st::Json& node, const std::string& path,
         std::clamp(st::json_get_double(node, "model_bob_hz", layer.model_bob_hz), 0.01, 5.0));
     layer.model_backdrop = st::json_get_bool(node, "model_backdrop", layer.model_backdrop);
           layer.model_texture = st::json_get_string(node, "model_texture", layer.model_texture);
+      // 场景脚本（字面 JSON）。
+      //
+      // `json_get_string` 只能读**字符串**，而模型生成时很容易直接把对象
+      // 写进来（`"model_script": { ... }`）。两种都收：若是对象，就序列化成
+      // 紧凑 JSON 字符串——调用方的两种直觉写法都能用。
+      if (const st::Json* script = st::json_find(node, "model_script"); script != nullptr) {
+        if (script->is_string()) {
+          layer.model_script = script->get<std::string>();
+        } else if (script->is_object() || script->is_array()) {
+          layer.model_script = script->dump();
+        } else {
+          ST_LOG_WARN("裁云：model_script 需要字符串或对象，已忽略");
+        }
+      }
       layer.model_group = st::json_get_string(node, "model_group", layer.model_group);
       layer.model_shadow = static_cast<float>(
           std::clamp(st::json_get_double(node, "model_shadow", layer.model_shadow), 0.0, 1.0));
@@ -544,6 +558,19 @@ auto collect_track_diagnostics(const st::Json& node, const std::string& path,
     if (layer.model_bob > 0.0f) node["model_bob"] = static_cast<double>(layer.model_bob);
     if (layer.model_bob > 0.0f) {
       node["model_bob_hz"] = static_cast<double>(layer.model_bob_hz);
+    }
+    // 场景脚本写回：用**解析后的对象**而不是原字符串。
+    //
+    // 为何：写回字符串会变成“双重转义”的嵌套 JSON，人看不到得。
+    // 解析成功就写对象，解析失败则原样保留（宁可保留一份没法解析的，
+    // 也不能默默丢掉用户的配置）。
+    if (!layer.model_script.empty()) {
+      const auto parsed = st::json_parse(layer.model_script);
+      if (parsed) {
+        node["model_script"] = *parsed;
+      } else {
+        node["model_script"] = layer.model_script;
+      }
     }
     if (layer.model_backdrop) node["model_backdrop"] = true;
     if (!layer.model_texture.empty()) node["model_texture"] = layer.model_texture;

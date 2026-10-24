@@ -125,6 +125,20 @@ struct SceneSpec {
 [[nodiscard]] auto render_scene(const SceneSpec& spec, Canvas& canvas,
                                 math::Color background) -> Result<void>;
 
+/// 用**调用方提供的场景实例**渲染（不新建、不碰环境变量）。
+///
+/// ## 何时必须用它（实测踩到死锁）
+///
+/// `render_scene` 每次都 `Scene3D::create`，而 `create` 会**读写环境变量**
+/// `ST_SCENE3D_BACKEND` 来选后端。若宿主（如裁云）自己也在改这个变量
+/// （它的 `scene_slot` 为了强制软件腿会 `_putenv_s`），再嵌一层 `create`
+/// 就会破坏宿主的保存/恢复逻辑——实测现象：**渲染到 33/180 帧卡死，
+/// 控制通道完全超时**。
+///
+/// 宿主已有场景实例时用本函数；场景实例的尺寸要与 `canvas` 一致。
+[[nodiscard]] auto render_scene_into(const SceneSpec& spec, Scene3D& scene, Canvas& canvas,
+                                     math::Color background) -> Result<void>;
+
 /// 生成一个对象的网格（`shape` + 形状参数）。
 ///
 /// 暴露出来是为了让调用方能单独检查"我的参数生成了什么网格"，

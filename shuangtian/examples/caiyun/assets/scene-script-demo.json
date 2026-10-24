@@ -1,0 +1,59 @@
+{
+  "name": "裁云 · 场景脚本演示（6 秒）",
+  "fps": 30,
+  "size": [1280, 720],
+  "transition": 0.3,
+  "fade_in": 0.2,
+  "fade_out": 0.4,
+  "brand_wordmark": "NIMBUS",
+  "brand_latin": "SCENE SCRIPT",
+  "footer_note": "一份 JSON 描述整幅三维场景",
+  "audio": { "enabled": false },
+  "scenes": [
+    {
+      "kind": "custom",
+      "duration": 6.0,
+      "background": ["#05070f", "#111a30"],
+      "glow": 0.35,
+      "glow_cx": 0.5,
+      "glow_cy": 0.45,
+      "glow_radius": 0.55,
+      "layers": [
+        {
+          "kind": "model3d",
+          "name": "场景脚本：地面 + 球 + 金属块",
+          "x": "0%",
+          "y": "0%",
+          "w": "100%",
+          "h": "100%",
+          "model_script": {
+            "camera": { "eye": [0, 0.55, 3.2], "target": [0, 0.08, 0], "fov": 46 },
+            "lighting": {
+              "key_direction": [0.4, 0.8, 0.6],
+              "ambient": 0.16,
+              "diffuse": 0.6,
+              "rim": 0.22,
+              "extra_lights": [
+                { "direction": [-0.7, 0.25, 0.5], "color": "#ffd9b0", "intensity": 0.55 }
+              ]
+            },
+            "shadow": { "strength": 0.42, "ground_y": -0.55 },
+            "cull": "back",
+            "objects": [
+              { "shape": "plane", "width": 100, "height": 100, "color": "#3c4358",
+                "rotate": [-1.5707963, 0, 0], "translate": [0, -0.55, 0], "ground": true },
+              { "shape": "sphere", "radius": 0.62, "color": "#c8a07a", "segments": 36,
+                "roughness": 0.16, "specular": 1.0, "translate": [-0.05, 0.1, 0] },
+              { "shape": "box", "width": 0.52, "height": 0.52, "depth": 0.52,
+                "color": "#8fa8d8", "metallic": 1.0, "roughness": 0.28, "specular": 1.0,
+                "translate": [0.95, -0.28, 0.1], "rotate": [0, 0.65, 0] },
+              { "shape": "torus", "radius": 0.26, "segments": 28, "color": "#d88fa8",
+                "metallic": 1.0, "roughness": 0.12, "specular": 1.0,
+                "translate": [-0.92, -0.34, 0.25], "rotate": [1.1, 0.4, 0] }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

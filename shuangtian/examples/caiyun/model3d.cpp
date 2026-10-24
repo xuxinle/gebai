@@ -14,6 +14,7 @@
 #include "st/core/fs.hpp"
 #include "st/core/log.hpp"
 #include "st/core/print.hpp"
+#include "st/raster/scene3d_script.hpp"
 #include "st/ui/svg.hpp"
 
 namespace caiyun {
@@ -722,6 +723,21 @@ void paint_model3d(st::raster::Canvas& canvas, const Layer& layer, st::math::Rec
                    std::string_view asset_basis) {
   if (alpha <= 0.004f || box.width < 2.0f || box.height < 2.0f) return;
 
+
+  // ## 场景脚本路径（优先于单网格）
+  //
+  // 它自带相机/光照/多物体，与图层的 `model_*` 语义互斥（见 `Layer::model_script`）。
+  //
+  // ## 为何用 `render_scene_into` 而不是 `render_scene`（实测死锁）
+  //
+  // `render_scene` 内部每次 `Scene3D::create`，而 `create` 会读写环境变量
+  // `ST_SCENE3D_BACKEND`；本函数下方的 `slot.acquire` 为了让结果能回读到
+  // 软件画布，也在这个变量上做了「临时设 software、用完还原」。
+  // 两者叠加会**破坏宿主的保存/恢复**——实测：导出卡在 33/180 帧，
+  // 控制通道完全超时（进程还在，什么都不响应）。
+  //
+  // 所以这里复用槽位里已有的实例，不新建。
+
   const int width = std::max(2, static_cast<int>(std::lround(box.width)));
   const int height = std::max(2, static_cast<int>(std::lround(box.height)));
   // “目标能不能零拷贝接住纹理”：只有 GPU 画布能。
@@ -741,6 +757,28 @@ void paint_model3d(st::raster::Canvas& canvas, const Layer& layer, st::math::Rec
     // 场景建不起来（极端情况：内存/驱动）：画一块醒目占位而不是静默空白，
     // 否则“三维图层没东西”会被当成设计。
     canvas.fill_rect(box, st::raster::Paint::solid(st::math::Color{48, 20, 26, 255}));
+    return;
+  }
+
+  // 场景脚本分支：槽位实例已就绪，直接复用。
+  if (!layer.model_script.empty()) {
+    const auto spec = st::raster::parse_scene_spec_text(layer.model_script);
+    if (!spec) {
+      canvas.fill_rect(box, st::raster::Paint::solid(st::math::Color{48, 20, 26, 255}));
+      ST_LOG_WARN("裁云三维：model_script 解析失败：{}", spec.error().message);
+      return;
+    }
+    st::raster::Canvas offscreen{width, height, 1.0f};
+    const auto status =
+        st::raster::render_scene_into(*spec, *scene, offscreen, st::math::Color{0, 0, 0, 0});
+    if (!status) {
+      canvas.fill_rect(box, st::raster::Paint::solid(st::math::Color{48, 20, 26, 255}));
+      ST_LOG_WARN("裁云三维：model_script 渲染失败：{}", status.error().message);
+      return;
+    }
+    st::raster::DrawOptions options{};
+    options.opacity = std::clamp(alpha, 0.0f, 1.0f);
+    canvas.draw_canvas(offscreen, box, options);
     return;
   }
 

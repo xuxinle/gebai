@@ -22,7 +22,11 @@
 #include "st/test/test.hpp"
 
 using st::math::Color;
+using st::math::Mat4;
+using st::math::Vec3;
+using st::raster::Camera;
 using st::raster::Canvas;
+using st::raster::Mesh;
 
 namespace {
 constexpr int kW = 240;
@@ -176,6 +180,80 @@ ST_TEST(scene_script_is_deterministic) {
   const Canvas b = render_text(kScene);
   const auto pa = a.pixels();
   const auto pb = b.pixels();
+  ST_CHECK_EQ(pa.size(), pb.size());
+  std::size_t differing = 0;
+  for (std::size_t i = 0; i < pa.size() && i < pb.size(); ++i) {
+    if (pa[i] != pb[i]) ++differing;
+  }
+  ST_CHECK_EQ(static_cast<int>(differing), 0);
+}
+
+ST_TEST(scene_script_render_into_reuses_the_given_scene) {
+  // `render_scene_into` 是给**宿主已有场景实例**用的（裁云就是这种）。
+  //
+  // ## 为何必须证明「真的复用」而不是「结果一样」
+  //
+  // 只比两次渲染的像素是**抓不到**这个缺陷的：内部偷偷 `create` 一个新实例，
+  // 渲出来的像素照样一样。而真实后果在别处——`Scene3D::create` 会读写环境变量
+  // `ST_SCENE3D_BACKEND`，宿主（裁云为强制软件腿会 `_putenv_s`）的保存/恢复
+  // 因此被破坏，实测**导出卡在 33/180 帧、控制通道完全超时**。
+  //
+  // 所以这里用**标记法**：先在外部实例上画一帧并记下像素，再调
+  // `render_scene_into`；如果它真的复用了这个实例，`begin_frame` 会清屏、
+  // 接着画场景——说明这个实例确实被驱动了。判据是「外部实例被改变」。
+  const auto spec = st::raster::parse_scene_spec_text(kScene);
+  ST_CHECK(spec.has_value());
+  if (!spec) return;
+
+  const Color bg{22, 24, 32, 255};
+  auto existing = st::raster::Scene3D::create(kW, kH);
+  ST_CHECK(existing.has_value());
+  if (!existing) return;
+
+  // ① 先用一个**明显不同**的场景把外部实例画一遍（暗红底 + 大球）
+  Canvas marker{kW, kH, 1.0f};
+  marker.clear(Color{90, 10, 10, 255});
+  (*existing)->begin_frame(Color{90, 10, 10, 255});
+  Camera cam{};
+  cam.eye = st::math::Vec3{0.0f, 0.0f, 3.0f};
+  cam.target = st::math::Vec3{0.0f, 0.0f, 0.0f};
+  (*existing)->set_camera(cam);
+  (*existing)->draw_mesh(
+      st::raster::Mesh::colored_sphere(1.2f, 20, Color{255, 60, 60, 255}),
+      st::math::Mat4::identity());
+  (*existing)->end_frame(
+      marker, st::math::Rect{0.0f, 0.0f, static_cast<float>(kW), static_cast<float>(kH)});
+  (*existing)->flush();
+  const auto marker_pixels = marker.pixels();
+  ST_CHECK(!marker_pixels.empty());
+
+  // ② 调 `render_scene_into`：它会 `begin_frame` 清屏并画场景
+  Canvas out{kW, kH, 1.0f};
+  const auto status = st::raster::render_scene_into(*spec, **existing, out, bg);
+  ST_CHECK(status.has_value());
+
+  // ③ 外部实例的**状态**被推进了：把它再渲到一张新画布，应当得到场景而不是
+  //    之前那个红球（`begin_frame` 已经清屏 + 重画）。
+  Canvas after{kW, kH, 1.0f};
+  (*existing)->end_frame(
+      after, st::math::Rect{0.0f, 0.0f, static_cast<float>(kW), static_cast<float>(kH)});
+  (*existing)->flush();
+  const auto after_pixels = after.pixels();
+
+  // 判据一：外部实例确实被驱动过（结果与"还没调 render_scene_into 之前"不同）
+  std::size_t changed = 0;
+  for (std::size_t i = 0; i < marker_pixels.size() && i < after_pixels.size(); ++i) {
+    if (marker_pixels[i] != after_pixels[i]) ++changed;
+  }
+  ST_CHECK(changed > 0);
+
+  // 判据二：`render_scene_into` 的输出与 `render_scene`（内部 create）**一致**
+  // ——同一条渲染路径、同一份描述，不该因为复用实例而变样。
+  Canvas via_create{kW, kH, 1.0f};
+  const auto s1 = st::raster::render_scene(*spec, via_create, bg);
+  ST_CHECK(s1.has_value());
+  const auto pa = via_create.pixels();
+  const auto pb = out.pixels();
   ST_CHECK_EQ(pa.size(), pb.size());
   std::size_t differing = 0;
   for (std::size_t i = 0; i < pa.size() && i < pb.size(); ++i) {

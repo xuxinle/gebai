@@ -197,6 +197,14 @@ constexpr auto kLayerFields = std::array{
     FieldSpec{"model_group", SchemaScope::Layer, SchemaType::String, false, 0, 0, false,
               "场景组名：同名图层共用一个三维世界（同一相机/光照/正确遮挡）", true,
               Aliases("group", "world")},
+    // 场景脚本：整幅三维场景的声明式描述（见 `scene3d_script.hpp`）。
+    //
+    // 为何类型是 `Object`：它的值是**一整个 JSON 对象**（相机/光照/阴影/物体列表），
+    // 不是标量。用 Object 才能让校验器认得它，而不会报“未知字段”。
+    FieldSpec{"model_script", SchemaScope::Layer, SchemaType::Object, false, 0, 0, false,
+              "场景脚本：整幅三维场景（camera/lighting/shadow/objects）；"
+              "设了就接管整幅图层（自带相机与光照，与 model_shape 互斥）",
+              true},
     FieldSpec{"model_shadow", SchemaScope::Layer, SchemaType::Number, true, 0.0, 1.0, true,
               "接触阴影强度 0~1（仅组内生效，0.45~0.65 建议）", true,
               Aliases("shadow", "contact_shadow")},
