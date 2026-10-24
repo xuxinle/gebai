@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "st/core/error.hpp"
+#include "st/core/fs.hpp"
 #include "st/pkg/manifest.hpp"
 
 namespace st::pkg {
@@ -30,6 +31,12 @@ struct BuildOptions {
   /// N > 1 时测试可执行被启动 N 次、每次带 `--shard i/N` 各跑一段用例（见 `st/test/test.hpp`）。
   /// 只对 `run_tests` 生效（`build` 忽略它）。
   std::size_t test_jobs{1};
+  /// 构建结束时不顺带刷新过期的测试二进制（`st build --no-tests`）。
+  ///
+  /// 默认 `false`：`st build` 会在测试目标过期时把它**只构建、不运行**地更新一遍，
+  /// 避免「改了测试 → 构建 → 直接跑 st_tests → 验的是旧代码」。
+  /// 只想快速跑应用的人可以关掉它换取更短的构建时间。
+  bool no_tests{false};
   bool verbose{false};                ///< 打印每条编译命令
   bool force{false};                  ///< 忽略增量判定，全量重编
   /// **只检查不产出**（`st check`）：编译单元全部换成 `-fsyntax-only`。
@@ -61,6 +68,11 @@ struct BuildOptions {
 
 struct BuildStats {
   std::string artifact{};
+  /// 本次是否顺手重建了过期的测试二进制。
+  ///
+  /// 单独记一个字段，是为了让 CLI 能**明确告诉用户「你刚才看到的构建包含测试」**——
+  /// 这件事必须可见：它的整个价值就在于消除「以为验了新代码，其实跑的是旧的」。
+  bool tests_rebuilt{false};
   std::size_t units_total{0};
   std::size_t units_rebuilt{0};
   std::size_t units_cached{0};
@@ -127,5 +139,34 @@ struct BuildStats {
 /// 返回 true = 链接失败类（产物没出来或子进程起不来，用例根本没跑）。
 /// 纯函数，供 `pkg_test_link_split_test` 断言分类边界。
 [[nodiscard]] bool is_link_failure(const st::Error& error);
+
+/// 测试二进制是否**过期**（需要重建）。
+///
+/// ## 为什么把判定单独抽出来
+///
+/// 它是这条逻辑唯一容易错的部分，而「重建」那半段要真编译（慢、还依赖工具链)。
+/// 拆开之后可以**零成本地穷举边界**：没构建过、刚构建过、只改了测试、
+/// 改了但测试二进制更新……这些判错都会让 AI 拿到旧结果，
+/// 而错误的代价是"白烧几轮排查被测代码"。
+///
+/// ## 判据
+///
+/// - 二进制不存在 → `false`（从没跑过测试是**正常状态**，不该每次构建都白编一遍）
+/// - 任一测试源比二进制新 → `true`
+/// - 否则 → `false`
+///
+/// 「比二进制新」而非「比对象新」：`st test` 会重编重链，二进制时间戳就是
+/// 该次构建的完成时刻；而测试单元的对象文件在两次构建间的粒度更细，
+/// 拿它比会在"只改了被 #include 的头"这类情形上判漏。
+[[nodiscard]] inline auto test_binary_is_stale(const std::vector<std::string>& test_files,
+                                        const std::string& binary) -> bool {
+  const auto bin_time = fs::modified_ns(binary);
+  if (!bin_time.has_value()) return false;
+  for (const auto& path : test_files) {
+    const auto src_time = fs::modified_ns(path);
+    if (src_time.has_value() && *src_time > *bin_time) return true;
+  }
+  return false;
+}
 
 }  // namespace st::pkg

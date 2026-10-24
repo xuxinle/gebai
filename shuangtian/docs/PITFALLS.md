@@ -438,6 +438,17 @@
 | **加字段要改三处，漏一处就「静默忽略」**〔schema〕 | `Layer` 加字段后，`examples/caiyun/schema.cpp`（字段表，缺了就报「未知字段（已忽略）」）与 `layer_schema.cpp`（属性表，缺了界面看不到）必须同改；`tests/caiyun_layer_schema_test.cpp` 有「每个字段都能读写」的不变式会当场抓到 | 同上 |
 | **setter 别做「聪明」的校验**〔接口〕 | 我给 `model_script` 的 setter 加了「非法 JSON 就拒绝写入」，结果撞上 `layer_schema_every_name_is_readable_and_writable`——界面多行框本来就会编到一半。正解：setter **原样存**，校验推到使用处（渲染前解析失败 → 醒目占位 + 告警） | 同上 |
 
+## 场景 20：判断「谁更新」（mtime / 增量构建 / 产物是否过期）
+
+> **总判据：`modified_ns` 这个名字承诺纳秒，但它在 Windows 上曾经只到整秒。**
+
+| 坑 | 一句话 | 出处 |
+|---|---|---|
+| **MinGW 的 `last_write_time` 截断到整秒**〔mtime〕 | 实测同一秒内先后写两个文件，两边返回值 `% 1e9` 都是 **0**，连"谁先写的"都分不出来。代价是**所有按 mtime 的增量判断粒度退到秒**：同一秒内改源码再构建被判成"没变"→ 拿旧产物当新结果。修法：Windows 走 `GetFileTime`（原生 100ns），已在 `platform_fs_time.cpp` 单点封装 | `platform_fs_time.cpp` |
+| **`st build` 不构建测试目标**〔构建〕 | `st.pkg` 把 `tests/*_test.cpp` 声明成独立目标，只有 `st test` 构建它们。所以「改测试 → `st build` → 直接跑 `st_tests`」验的是**上一版代码**，而 `st build` 会报「构建完成」。现在 `st build` 检测到过期会**只构建不运行**地同步一次，并在输出里说明；`--no-tests` 可关 | `BuildOptions::no_tests` |
+| **别用「比二进制 mtime」判测试是否过期**〔判据〕 | `st_tests` 只在**链接指纹变化**时更新，只改一行断言时可能原地不动 → 漏报。反过来拿 `tests/*` 里被 `#include` 的文件比又会恒报（它们不单独产出 `.o`）。判据要钉在「源文件 vs 二进制」且允许"二进制不存在 = 正常状态、不重建" | `test_binary_is_stale` |
+| **时间戳测试要留够间隔**〔测试〕 | 判 mtime 的用例若只 `sleep` 几毫秒，在秒级截断的平台上必然失败、在真实精度平台上必然通过——**它测的其实是平台精度**。要显式断言"两次写入的时间戳必须不同"，这才是钉子 | `tests/pkg_test_staleness_test.cpp` |
+
 ## 怎么用这份速查
 
 **开工前**：扫一眼你**当前场景**那一节（30 秒）。

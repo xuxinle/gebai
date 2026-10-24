@@ -151,8 +151,10 @@ void print_usage() {
 命令:
   build [target]        构建工程或指定目标（--profile=quick|dev|debug|release|san，默认 dev；
                         -j N，--verbose，--force）
-                        --no-strip 保留产物内调试信息（默认链接后分离到 <产物>.debug，
+                                                --no-strip 保留产物内调试信息（默认链接后分离到 <产物>.debug，
                         产物本体可小 ~94%；gdb 会自动找分离符号）
+                        --no-tests 不刷新过期的测试二进制（默认会**只构建不运行**地
+                        同步一次，避免「改了断言→st build→直跑 st_tests→验旧代码」）
                         并发默认按**内存预算**推导（读 cgroup 上限，不再默认吃满核数）；
                         --jobs-large N 限超大单元并发（默认 1）；--max-memory MiB 覆盖预算
                         交叉编译：--toolchain=<名>（工具链在 st.pkg 的 toolchains 段声明）
@@ -226,6 +228,9 @@ auto command_build(const Arguments& arguments) -> int {
   // 调试信息分离默认开（`--no-strip` 关）：不分离的代价是“每个产物白胖 ~70MB”
   //（实测 dev 档 st.exe 76.96MB，其中 89% 是 `.debug_*`），而分离的代价是零。
   options.strip_debug = !arguments.has("no-strip");
+  // 默认会顺带刷新过期的测试二进制（只构建、不运行）；`--no-tests` 关掉它。
+  // 理由见 `BuildOptions::no_tests`：拿旧测试二进制做结论是 AI 迭代链上最贵的失误。
+  options.no_tests = arguments.has("no-tests");
 
   const std::int64_t start = st::time::now_ns();
   auto stats = st::pkg::build(*manifest, options);
@@ -248,26 +253,12 @@ auto command_build(const Arguments& arguments) -> int {
                 stats->workers_large);
   }
   if (!stats->artifact.empty()) st::print("产物: {}\n", stats->artifact);
-
-  // ## 测试目标不在 `build` 的范围内——这必须说出来，但不做精确判定
-  //
-  // `st.pkg` 把 `tests/*_test.cpp` 声明成独立目标，由 `st test` 负责构建 + 运行。
-  // 于是改了测试文件后跑 `st build` 报「构建完成」，而 `st_tests` 还是旧的：
-  // 接着直接跑那个二进制，验的是**上一版代码**。
-  //
-  // 实测代价：这条线上反复假绿——改了断言却看到旧结果，然后去查被测代码半天。
-  //
-  // ## 为什么是"固定提示"而不是"检测过期"
-  //
-  // 试过两种精确判据，都会误判：
-  // ① 比 `st_tests` 的 mtime——它只在链接指纹变化时才更新，只改一行断言时原地不动；
-  // ② 比测试单元的 `.o`——`tests/*` 里有大量被 `#include` 进别的单元的文件，
-  //    它们不单独产出 `.o`，且对象命名随调用方式（绝对/相对路径）变化。
-  //
-  // 恒真的一行提示成本几乎为零（一个 `print`），而误报会训练人忽略它。
-  if (!manifest->tests.empty()) {
-    st::print("  提示: `st build` 不构建测试目标——跑测试请用 `st test`\n");
+  // 测试二进制被顺带重建时必须说一声——这个动作的全部价值就在于消除
+  // 「以为验了新代码，其实跑的是旧的」。静默重建等于把功劳埋了。
+  if (stats->tests_rebuilt) {
+    st::print("  测试: 目标已过期 → 已同步重建（只构建，未运行；跑测试用 `st test`）\n");
   }
+
   return 0;
 }
 

@@ -1,4 +1,5 @@
 #include "st/core/fs.hpp"
+#include "st/core/fs_time.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -341,12 +342,16 @@ auto file_size(std::string_view path) -> Result<std::uint64_t> {
   return static_cast<std::uint64_t>(size);
 }
 
+/// 文件最后写时刻（纳秒）。实现在 `platform_fs_time.cpp`（按平台取到 100ns/ns 精度）。
+///
+/// ## 为什么不能直接用 `std::filesystem::last_write_time`
+///
+/// MinGW 的实现把 Win32 的 100ns 时间戳**截断到整秒**：实测同一秒内先后写两个
+/// 文件，两边返回值 `% 1e9` 都是 0，连"谁先写的"都分不出来。
+/// 代价是**所有按 mtime 的增量判断粒度退到秒**——同一秒内改源码再构建会判成
+/// "没变"，拿旧产物当新结果。所以精度这件事必须由平台层保证。
 auto modified_ns(std::string_view path) -> Result<std::int64_t> {
-  std::error_code ec;
-  const auto stamp = sys::last_write_time(to_std_path(path), ec);
-  if (ec) return unexpected(ErrorCode::NotFound, io_error("mtime", path, ec).message);
-  const auto since = stamp.time_since_epoch();
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(since).count();
+  return platform_modified_ns(std::string(path));
 }
 
 auto touch_now(std::string_view path) -> Status {

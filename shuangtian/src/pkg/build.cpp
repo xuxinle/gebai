@@ -1898,6 +1898,64 @@ auto profile_flags(std::string_view profile) -> Result<std::vector<std::string>>
 
 
 
+/// 构建测试可执行（只构建、不运行）。定义在 `run_tests` 附近，先声明供 `build()` 用。
+[[nodiscard]] auto build_test_binary(const Manifest& manifest, const BuildOptions& options)
+    -> Result<std::string>;
+
+/// `st build` 末尾的收尾：**测试二进制过期就把它编出来**。
+///
+/// ## 为什么 `st build` 要管这件事
+///
+/// `st.pkg` 把 `tests/*_test.cpp` 声明成独立目标，`st build` 历来不碰它。
+/// 于是「改了测试断言 → 跑 st build → 直接执行 st_tests」这条路上，
+/// 验的是**上一版代码**——而 `st build` 会报「构建完成」，看不出任何异常。
+///
+/// 对 AI 尤其致命：它的整套迭代是「改 → 构建 → 跑 → 看结果」，
+/// 而**拿旧结果做结论**是这条链上最贵的失误（会去查被测代码，白烧几轮）。
+///
+/// ## 为什么是"只构建不运行"
+///
+/// 「能不能构建」与「断言是否通过」是两个语义，混在一起会让 `st build`
+/// 的成败同时表达两件事；而且很多人只想跑应用、不关心测试。
+/// 所以这里**只保证磁盘上的二进制是最新的**，跑不跑由 `st test` 决定。
+///
+/// ## 何时跳过
+///
+/// - 没有 `tests` 声明；或
+/// - 测试二进制**尚不存在**（从没跑过测试——这是正常状态，不该每次构建都白编一遍）；
+/// - 或 `options.no_tests`（显式关掉）。
+///
+/// 返回值只用于日志，失败**不**让 `st build` 失败：测试编不过不该挡住产物
+/// 已经成功这件事（那是 `st test` 的报错范围）。
+/// @return 是否真的重建了（用于在汇总里告诉用户「本次构建包含测试」）
+[[nodiscard]] auto refresh_stale_test_binary(const Manifest& manifest, const BuildOptions& options)
+    -> bool {
+  if (options.no_tests) return false;
+  if (!options.target.empty()) return false;   // 只对库目标做（应用目标语义是"出那个产物"）
+  auto tests = manifest.test_files();
+  if (!tests || tests->empty()) return false;
+
+  const auto toolchain = resolve_toolchain(manifest, options.toolchain);
+  if (!toolchain) return false;
+  const std::string bin_dir = fs::join(
+      options.root.empty() ? manifest.directory : options.root,
+      std::format("build/{}/bin", profile_directory(options.profile, *toolchain)));
+  const std::string binary = fs::join(bin_dir, "st_tests" + toolchain->executable_suffix);
+  const auto bin_time = fs::modified_ns(binary);
+  if (!bin_time.has_value()) return false;   // 从没构建过测试 → 不是"过期"，是"没开始"
+
+  if (!test_binary_is_stale(*tests, binary)) return false;
+
+  ST_LOG_INFO("测试目标已过期 → 同步重建（不运行）");
+  auto built = build_test_binary(manifest, options);
+  if (!built) {
+    // 不让构建失败：产物本身是好的。但必须让人看见，否则下次又会拿旧二进制。
+    ST_LOG_WARN("测试目标重建失败（不影响本次产物）：{}", built.error().message);
+    return false;
+  }
+  return true;
+}
+
 auto build(const Manifest& manifest, const BuildOptions& options) -> Result<BuildStats> {
   const std::int64_t start_ns = time::now_ns();
   const std::string root = options.root.empty() ? manifest.directory : options.root;
@@ -2102,7 +2160,10 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   stats.pch_used = options.use_pch;
   stats.elapsed_ms = (time::now_ns() - start_ns) / 1'000'000;
 
-  if (options.target.empty()) return stats;
+  if (options.target.empty()) {
+    stats.tests_rebuilt = refresh_stale_test_binary(manifest, options);
+    return stats;
+  }
 
   const TargetSpec* target = manifest.find_target(options.target);
   if (target == nullptr) {
@@ -2220,6 +2281,7 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
     stats.artifact = output;
     stats.runs_on_host = toolchain->runs_on_host();
     stats.elapsed_ms = (time::now_ns() - start_ns) / 1'000'000;
+    stats.tests_rebuilt = refresh_stale_test_binary(manifest, options);
     return stats;
   }
 
@@ -2392,8 +2454,15 @@ namespace {
 
 }  // namespace
 
-auto run_tests(const Manifest& manifest, const BuildOptions& options, std::string_view filter,
-               bool list_only, std::string_view junit_path, bool include_slow) -> Result<int> {
+/// 构建测试可执行（**只构建，不运行**），返回产物路径。
+///
+/// ## 为什么单独抽出来
+///
+/// `st test` = 构建 + 运行；而 `st build` 在测试过期时也需要**只构建**这一段
+/// （见 `build()` 末尾）。两处共用同一份构建逻辑，避免"改一处忘另一处"——
+/// 那条分叉会让 `st test` 与 `st build` 对同一个工程得出不同的编译结果。
+[[nodiscard]] auto build_test_binary(const Manifest& manifest, const BuildOptions& options)
+    -> Result<std::string> {
   const std::string root = options.root.empty() ? manifest.directory : options.root;
   auto flags = profile_flags(options.profile);
   if (!flags) return forward_error(flags.error());
@@ -2541,6 +2610,17 @@ auto run_tests(const Manifest& manifest, const BuildOptions& options, std::strin
       ST_LOG_WARN("分离调试信息失败（测试产物仍可用）：{}", stripped.error().message);
     }
   }
+
+  return output;
+}
+
+auto run_tests(const Manifest& manifest, const BuildOptions& options, std::string_view filter,
+               bool list_only, std::string_view junit_path, bool include_slow) -> Result<int> {
+  auto test_binary = build_test_binary(manifest, options);
+  if (!test_binary) return forward_error(test_binary.error());
+  const std::string& output = *test_binary;
+  auto toolchain = resolve_toolchain(manifest, options.toolchain);
+  if (!toolchain) return forward_error(toolchain.error());
 
   std::vector<std::string> args = test_args(filter, list_only, include_slow);
   // 交叉产物仅在与宿主平台不同时拒绝执行（目标==宿主则照常跑，见 runs_on_host）
