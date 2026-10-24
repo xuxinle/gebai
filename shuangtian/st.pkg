@@ -385,6 +385,12 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "用一份 JSON 描述整个三维场景：解析/报错指路/渲染/参数生效/确定性"
     },
+    "scene3d_blender_probe": {
+      "kind": "executable",
+      "sources": ["tools/scene3d_blender_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "2026-10-24 新增能力探针：材质基色/自发光/点光/聚光/AgX/正交，逐项证明真的生效"
+    },
     "scene3d_capability_matrix": {
       "kind": "executable",
       "sources": ["tools/scene3d_capability_matrix.cpp"],

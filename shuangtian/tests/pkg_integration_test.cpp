@@ -137,8 +137,24 @@ ST_TEST_WITH_TIMEOUT(independent_project_builds_links_and_runs, 60'000) {
   (void)st::fs::remove_all(root);
   ST_REQUIRE(st::fs::create_directories(st::fs::join(root, "src")).has_value());
 
+  // ## 路径写进 JSON 之前必须转义反斜杠
+  //
+  // Windows 路径形如 `C:\Users\...`，直接塞进 JSON 后 `\U` 是**非法转义**，
+  // `Manifest::load` 会整个失败——而失败信息只说“解析失败”，看不到根因。
+  // 实测：这条用例在 Windows 上稳定红，而 Linux 上永远绿（路径没有反斜杠），
+  // 所以只在某个平台上暴露。
+  std::string framework_json = framework;
+  {
+    std::string escaped;
+    escaped.reserve(framework_json.size() * 2);
+    for (const char c : framework_json) {
+      if (c == '\\' || c == '"') escaped.push_back('\\');
+      escaped.push_back(c);
+    }
+    framework_json = escaped;
+  }
   const std::string manifest_text =
-      st::replace_all(kManifestTemplate, "@FRAMEWORK@", framework);
+      st::replace_all(kManifestTemplate, "@FRAMEWORK@", framework_json);
   ST_REQUIRE(st::fs::write_text(st::fs::join(root, "st.pkg"), manifest_text).has_value());
   ST_REQUIRE(st::fs::write_text(st::fs::join(root, "src/main.cpp"), std::string(kMainSource))
                  .has_value());

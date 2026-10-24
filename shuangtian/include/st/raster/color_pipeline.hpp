@@ -54,6 +54,11 @@ enum class ToneMap : std::uint8_t {
   Reinhard = 1,
   Aces = 2,
   Filmic = 3,
+  /// AgX（Blender 4.x 默认 view transform）。
+  ///
+  /// 与上面三个的本质差别：它们是**逐色道**的 S 曲线，高饱和亮部会冲成纯色；
+  /// AgX 先转到宽色度空间、在三维里压亮度，能保住高光色相与层次。
+  Agx = 4,
 };
 
 /// sRGB 编码：[0,1] 线性 → [0,1] 非线性（用于存进 8bit 缓冲）。

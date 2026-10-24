@@ -125,7 +125,83 @@ constexpr float kNearEpsilon = 1e-4f;
 /// `pow` 的浮点版本在多数工具链上走 `exp/log` 路径，而这里底数是 `1-nz`、
 /// 指数恒为 2，直接 `r*r` 在语义上**逐位等价**（乘法比幂函数精确）。
 /// 实测收益见 `tools/scene3d_cost_probe.cpp` 的对照数据。
-auto shade_terms(math::Vec3 normal, math::Vec3 color, const Lighting& lighting) -> math::Vec3 {
+/// 一个光源在某点产生的**方向与强度**（世界空间，方向是「从表面指向光源」）。
+///
+/// 三种类型的统一表示：着色端只需要「方向 + 强度」，不必关心类型。
+/// 这样新增类型只改这一个函数，`shade_surface` 保持单一路径。
+struct LightSample {
+  math::Vec3 direction{0.0f, 1.0f, 0.0f};   ///< 从表面指向光源（单位向量）
+  float intensity{0.0f};                    ///< 已含距离衰减与锥形
+};
+
+/// 把任意类型的光源采样成「方向 + 强度」。
+///
+/// ## 距离衰减为何是 `1/d²` 而不是 `1/d`
+///
+/// 辐照度按平方反比衰减（能量摊在球面上）。用 `1/d` 会让近处不够亮、
+/// 远处过亮——观感上像“整个房间被均匀照”，正是点光要解决的那个问题。
+///
+/// ## `radius` 的处理
+///
+/// 纯 `1/d²` 在远处永远有微小贡献，几盏灯加起来会让暗部永远不够暗。
+/// 给有限半径后，超出即归零（真实灯泡也有有效范围），
+/// “关掉远处那盏灯”才可预测。
+[[nodiscard]] auto sample_light(const Light& light, math::Vec3 world_position) -> LightSample {
+  LightSample out{};
+  if (light.intensity <= 0.0f) return out;
+
+  if (light.kind == LightKind::Directional) {
+    out.direction = light.direction.normalized();
+    out.intensity = light.intensity;
+    return out;
+  }
+
+  // 点光 / 聚光：方向由位置决定
+  const math::Vec3 delta = light.position - world_position;
+  const float distance = delta.length();
+  if (distance <= 1e-6f) return out;   // 退化：点在光源上
+  const float inv = 1.0f / distance;
+  out.direction = math::Vec3{delta.x * inv, delta.y * inv, delta.z * inv};
+
+  // 平方反比；`+1` 避免极近距离爆炸（真实灯泡也有灯丝尺寸）
+  float attenuation = 1.0f / (1.0f + distance * distance);
+
+  if (light.radius > 0.0f) {
+    // 平滑截断：半径处归零，避免“硬边界”（照出一圈可见的圆）
+    const float t = distance / light.radius;
+    if (t >= 1.0f) return out;
+    const float fade = 1.0f - t * t;
+    attenuation *= fade * fade;
+  }
+
+  if (light.kind == LightKind::Spot) {
+    // 锥形。
+    //
+    // ## 方向约定（这里踩过一次，代价是把整块画面变黑）
+    //
+    // `out.direction` 是「从表面指向光源」。所以「从光源指向表面」是它的反向，
+    // 而聚光的锥轴就是后者——两者**同向**时点积接近 1（表面在锥内）。
+    //
+    // 因此：`cos_angle = (-out.direction) · axis_hat`。
+    // 踩过的写法是只把轴取反、没把表面方向也取反（或反之），点积恒为 -1，
+    // 锥外判定永远成立 → 聚光照不出任何东西（全黑，看起来像“功能没生效”）。
+    const math::Vec3 axis_raw = light.direction;
+    const math::Vec3 axis = math::Vec3{axis_raw.x, axis_raw.y, axis_raw.z}.normalized();
+    const float cos_angle = -(axis.dot(out.direction));
+    const float inner = std::cos(light.spot_inner_degrees * 0.017453292519943295f);
+    const float outer = std::cos(light.spot_outer_degrees * 0.017453292519943295f);
+    if (cos_angle <= outer) return out;
+    if (cos_angle < inner && inner > outer) {
+      attenuation *= (cos_angle - outer) / (inner - outer);
+    }
+  }
+
+  out.intensity = light.intensity * attenuation;
+  return out;
+}
+
+auto shade_terms_at(math::Vec3 normal, math::Vec3 color, const Lighting& lighting,
+                    math::Vec3 world_position) -> math::Vec3 {
   const math::Vec3 n = normal.normalized();
   const math::Vec3 light = lighting.key_direction.normalized();
   const float diffuse = std::max(n.dot(light), 0.0f);
@@ -156,12 +232,20 @@ auto shade_terms(math::Vec3 normal, math::Vec3 color, const Lighting& lighting) 
   // 为何不在 `shade_surface` 里做：`shade_terms` 是两条腿的唯一参考实现，
   // 主光 + 环境 + 边缘光的语义已经在它里面钉住了。附加光源作为**后加的
   // 漫反射项**追加，两边都好维护。
+  // 附加光源：走 `sample_light`，把平行光/点光/聚光统一折算成「方向 + 强度」。
+  //
+  // ## 为何两条路径（本函数与 `shade_surface`）都必须用 `sample_light`
+  //
+  // 材质默认值（`specular=0, emission=0, metallic=0`）时走的就是**本函数**。
+  // 只改 `shade_surface` 会让“没设材质的场景里点光完全不生效”——
+  // 实测踩过：探针里点光/聚光四项全红，数值一字不变。
   for (const Light& extra_light : lighting.extra_lights) {
     if (extra_light.intensity <= 0.0f) continue;
-    const math::Vec3 extra = extra_light.direction.normalized();
-    const float lambert = std::max(n.dot(extra), 0.0f);
+    const LightSample sample = sample_light(extra_light, world_position);
+    if (sample.intensity <= 0.0f) continue;
+    const float lambert = std::max(n.dot(sample.direction), 0.0f);
     if (lambert <= 0.0f) continue;
-    const float weight = lambert * extra_light.intensity;
+    const float weight = lambert * sample.intensity;
     result.x += color.x * extra_light.color.x * weight;
     result.y += color.y * extra_light.color.y * weight;
     result.z += color.z * extra_light.color.z * weight;
@@ -246,13 +330,16 @@ auto ggx_specular(math::Vec3 normal, math::Vec3 view_dir, math::Vec3 light_dir,
 
 math::Vec3 shade_surface(math::Vec3 normal, math::Vec3 base_color, math::Vec3 view_dir,
                          const Lighting& lighting, float metallic, float roughness,
-                         float specular, float emission, math::Vec3 specular_tint) {
+                         float specular, float emission,                          math::Vec3 specular_tint,
+                         math::Vec3 world_position = math::Vec3{0.0f, 0.0f, 0.0f},
+                         math::Vec3 emissive_color = math::Vec3{1.0f, 1.0f, 1.0f},
+                         bool emission_unlit = false) {
   const math::Vec3 n = normal.normalized();
   const math::Vec3 l = lighting.key_direction.normalized();
 
   // ## 渐进采用：高光为 0 时必须与旧 `shade_terms` 逐位相同
   if (specular <= 0.0f && emission <= 0.0f && metallic <= 0.0f) {
-    return shade_terms(normal, base_color, lighting);
+    return shade_terms_at(normal, base_color, lighting, world_position);
   }
 
   const float n_dot_l = std::max(n.dot(l), 0.0f);
@@ -272,13 +359,24 @@ math::Vec3 shade_surface(math::Vec3 normal, math::Vec3 base_color, math::Vec3 vi
   // 材质路径不能漏这一步，否则“设了材质就少了几盏灯”。
   for (const Light& extra_light : lighting.extra_lights) {
     if (extra_light.intensity <= 0.0f) continue;
-    const math::Vec3 extra = extra_light.direction.normalized();
-    const float lambert = std::max(n.dot(extra), 0.0f);
+    const LightSample sample = sample_light(extra_light, world_position);
+    if (sample.intensity <= 0.0f) continue;
+    const float lambert = std::max(n.dot(sample.direction), 0.0f);
     if (lambert <= 0.0f) continue;
-    const float weight = lambert * extra_light.intensity * diffuse_weight;
+    const float weight = lambert * sample.intensity * diffuse_weight;
     result.x += base_color.x * extra_light.color.x * weight;
     result.y += base_color.y * extra_light.color.y * weight;
     result.z += base_color.z * extra_light.color.z * weight;
+    // 点光/聚光也产生高光——这才是「灯泡在金属上留下亮点」的关键。
+    // 平行光那条走下面的主光路径（保持旧数值不变）。
+    if (specular > 0.0f && extra_light.kind != LightKind::Directional) {
+      const math::Vec3 spike =
+          ggx_specular(n, view_dir, sample.direction, roughness, metallic, base_color,
+                       specular_tint);
+      result.x += spike.x * specular * sample.intensity;
+      result.y += spike.y * specular * sample.intensity;
+      result.z += spike.z * specular * sample.intensity;
+    }
   }
 
   if (specular > 0.0f) {
@@ -289,13 +387,22 @@ math::Vec3 shade_surface(math::Vec3 normal, math::Vec3 base_color, math::Vec3 vi
     result.z += spike.z * specular;
   }
 
-  // 自发光：加在**色调映射之前**（线性 HDR 域），这样才能被 ACES 滚降。
+  // 自发光：加在**色调映射之前**（线性 HDR 域），这样才能被色调映射滚降。
+  //
+  // ## `emission_unlit` 的意义（2026-10-24）
+  //
+  // Blender 的 Emission 项**不受光照影响**；而本管线旧实现是“加在受光结果上”。
+  // 两者在暗场景里差别很大：霓虹灯管应当自己亮着（哪怕环境全黑），
+  // 而不是“被环境照亮后再亮一点”。
+  // 所以 `emission_unlit = true` 时把前面的受光项**整体丢掉**，只留自发光。
   if (emission > 0.0f) {
-    result.x += base_color.x * emission;
-    result.y += base_color.y * emission;
-    result.z += base_color.z * emission;
+    if (emission_unlit) {
+      result = math::Vec3{0.0f, 0.0f, 0.0f};
+    }
+    result.x += emissive_color.x * emission;
+    result.y += emissive_color.y * emission;
+    result.z += emissive_color.z * emission;
   }
-
   return math::Vec3{result.x * lighting.exposure, result.y * lighting.exposure,
                     result.z * lighting.exposure};
 }
@@ -363,7 +470,11 @@ class SoftwareScene final : public Scene3D {
     const float fov = camera.fov_y_degrees * 3.14159265358979f / 180.0f;
     eye_ = camera.eye;
     view_ = math::Mat4::look_at(camera.eye, camera.target, camera.up);
-    projection_ = math::Mat4::perspective(fov, aspect, camera.near_z, camera.far_z);
+    // 投影：透视/正交由相机决定。正交下 `fov` 无效，由 `ortho_scale`（垂直可视高度）决定。
+    projection_ = camera.projection == ProjectionKind::Orthographic
+                      ? math::Mat4::orthographic(camera.ortho_scale, aspect, camera.near_z,
+                                                 camera.far_z)
+                      : math::Mat4::perspective(fov, aspect, camera.near_z, camera.far_z);
     mvp_ready_ = true;
   }
 
@@ -786,7 +897,14 @@ class SoftwareScene final : public Scene3D {
         const math::Vec3 world = a.world * i0 + b.world * i1 + c.world * i2;
         const math::Vec3 pixel_view{eye_.x - world.x, eye_.y - world.y, eye_.z - world.z};
         math::Vec3 color = a.color * i0 + b.color * i1 + c.color * i2;
-        // 有 UV 且已设纹理 → 采样（**双线性**，与纹理坐标一起透视校正）。
+        // ## 材质基色（2026-10-24）
+        //
+        // 设了 `base_color` 就用它**取代**顶点色。这是“网格只描述形状、材质描述外观”
+        // 的必要条件：同一份网格能用不同材质渲出不同颜色，不必重建网格。
+        //
+        // 与纹理的关系：纹理仍然**乘**在基色上（基色当“染色”，纹理提供图案）——
+        // 这与 Blender 的 Base Color 接图片节点后仍可用 Mix 调色是同一思路。
+        if (material_.base_color_set) color = material_.base_color;        // 有 UV 且已设纹理 → 采样（**双线性**，与纹理坐标一起透视校正）。
         //
         // 为何必须双线性：三维里一个纹理像素常被映射到多个屏幕像素的**斜向**区域，
         // 点采样会让图标边缘重新出现硬眍齿（把刚修好的抗锯齿又抵消掉）。
@@ -801,7 +919,10 @@ class SoftwareScene final : public Scene3D {
             shade_surface(normal, color, pixel_view, lighting_, material_.metallic,
                           material_.roughness, material_.specular, material_.emission,
                           material_.specular_tint_set ? material_.specular_tint
-                                                       : math::Vec3{1.0f, 1.0f, 1.0f});
+                                                       : math::Vec3{1.0f, 1.0f, 1.0f},
+                          world,
+                          material_.emissive_color_set ? material_.emissive_color : color,
+                          material_.emission_unlit);
         // ## 输出链：线性 → 曝光 → 色调映射 → sRGB → 8bit
         //
         // 修之前这里直接 `lit.x * 255`，两处错（都“看不出哪里错、只觉得不对”）：

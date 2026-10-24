@@ -129,6 +129,29 @@ struct Mat4 {
     return result;
   }
 
+  /// 正交投影（平行投影）：远处与近处同尺寸。
+  ///
+  /// `height` 是**垂直可视高度**（世界单位），宽度由 `aspect` 推出。
+  /// 与 `perspective` 同一套深度映射（近平面→0、远平面→1），
+  /// 所以两条路径的深度测试与排序语义一致。
+  ///
+  /// 为何需要：透视投影下近大远小，所以等距展示一组物体、工程图、
+  /// UI 里的三维预览都会变形。参数非法时返回单位阵（同 `perspective` 的取舍）。
+  [[nodiscard]] static auto orthographic(float height, float aspect, float near_z,
+                                          float far_z) noexcept -> Mat4 {
+    if (aspect <= 0.0f || height <= 0.0f || near_z <= 0.0f || far_z <= near_z) return identity();
+    const float half_h = height * 0.5f;
+    const float half_w = half_h * aspect;
+    Mat4 result;
+    result.set(0, 0, 1.0f / half_w);
+    result.set(1, 1, 1.0f / half_h);
+    // 与 `perspective` 同口径：近→0、远→1（右手系，视线朝 -Z，所以 z 先取反）
+    result.set(2, 2, -1.0f / (far_z - near_z));
+    result.set(2, 3, -near_z / (far_z - near_z));
+    result.set(3, 3, 1.0f);
+    return result;
+  }
+
   /// 视图矩阵：相机在 `eye`，看向 `target`，`up` 为上方向。
   /// `eye == target` 或 `up` 与视线平行时返回单位阵（退化输入不该产出 NaN）。
   [[nodiscard]] static auto look_at(Vec3 eye, Vec3 target, Vec3 up) noexcept -> Mat4 {

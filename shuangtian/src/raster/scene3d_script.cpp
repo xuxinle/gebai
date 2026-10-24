@@ -139,9 +139,13 @@ auto read_lighting(const Json& json) -> Result<Lighting> {
     lit.tone_map = ToneMap::Aces;
   } else if (tone == "filmic") {
     lit.tone_map = ToneMap::Filmic;
+  } else if (tone == "agx") {
+    // Blender 4.x 的默认 view transform。高光不发彩、中间调略去饱和。
+    lit.tone_map = ToneMap::Agx;
   } else {
-    return st::unexpected(ErrorCode::Parse,
-                          "lighting.tone_map：只接受 none/reinhard/aces/filmic，收到 " + tone);
+    return st::unexpected(
+        ErrorCode::Parse,
+        "lighting.tone_map：只接受 none/reinhard/aces/filmic/agx，收到 " + tone);
   }
 
   const Json* extras = json_find(*node, "extra_lights");
@@ -168,6 +172,34 @@ auto read_lighting(const Json& json) -> Result<Lighting> {
       lit.extra_lights[i].color = math::Vec3{static_cast<float>(color->r) / 255.0f,
                                        static_cast<float>(color->g) / 255.0f,
                                        static_cast<float>(color->b) / 255.0f};
+
+      // ── 光源类型与位置（2026-10-24）──
+      const std::string kind = json_get_string(arr[i], "type", "directional");
+      if (kind == "directional" || kind == "sun") {
+        lit.extra_lights[i].kind = LightKind::Directional;
+      } else if (kind == "point") {
+        lit.extra_lights[i].kind = LightKind::Point;
+      } else if (kind == "spot") {
+        lit.extra_lights[i].kind = LightKind::Spot;
+      } else {
+        return st::unexpected(ErrorCode::Parse,
+                              path + ".type：只接受 directional/point/spot，收到 " + kind);
+      }
+      if (lit.extra_lights[i].kind != LightKind::Directional) {
+        const auto pos = read_vec3(arr[i], "position", math::Vec3{0.0f, 2.0f, 2.0f}, path);
+        if (!pos) return st::forward_error(pos.error());
+        lit.extra_lights[i].position = *pos;
+        lit.extra_lights[i].radius =
+            static_cast<float>(json_get_double(arr[i], "radius", 0.0));
+        lit.extra_lights[i].spot_inner_degrees =
+            static_cast<float>(json_get_double(arr[i], "spot_inner", 20.0));
+        lit.extra_lights[i].spot_outer_degrees =
+            static_cast<float>(json_get_double(arr[i], "spot_outer", 30.0));
+        if (lit.extra_lights[i].spot_outer_degrees <= lit.extra_lights[i].spot_inner_degrees) {
+          return st::unexpected(ErrorCode::Parse,
+                                path + ".spot_outer：必须大于 spot_inner（否则锥形无过渡区）");
+        }
+      }
     }
   }
   return lit;
@@ -228,6 +260,16 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
   obj.specular = read_unit(node, "specular", 0.0f);
   obj.emission = static_cast<float>(json_get_double(node, "emission", 0.0));
   obj.opacity = read_unit(node, "opacity", 1.0f);
+  // 自发光色与“不受光”开关（对齐 Blender 的 Emission Color / Strength 分离）
+  if (const Json* emissive = json_find(node, "emission_color"); emissive != nullptr) {
+    const auto c = read_color(node, "emission_color", math::Color{255, 255, 255, 255}, path);
+    if (!c) return st::forward_error(c.error());
+    obj.emissive_color =
+        math::Vec3{static_cast<float>(c->r) / 255.0f, static_cast<float>(c->g) / 255.0f,
+                   static_cast<float>(c->b) / 255.0f};
+    obj.emissive_color_set = true;
+  }
+  obj.emission_unlit = json_get_bool(node, "emission_unlit", false);
 
   // ## 形状名要在这里校验，而不是等到 build_mesh
   //
@@ -280,6 +322,23 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
         static_cast<float>(json_get_double(*camera, "near", spec.camera.near_z));
     spec.camera.far_z =
         static_cast<float>(json_get_double(*camera, "far", spec.camera.far_z));
+    // 投影类型：perspective（默认）/ orthographic。
+    //
+    // 正交下 `fov` 失效，由 `ortho_scale`（垂直可视高度，世界单位）决定。
+    const std::string proj = json_get_string(*camera, "projection", "perspective");
+    if (proj == "perspective") {
+      spec.camera.projection = ProjectionKind::Perspective;
+    } else if (proj == "orthographic" || proj == "ortho") {
+      spec.camera.projection = ProjectionKind::Orthographic;
+    } else {
+      return st::unexpected(ErrorCode::Parse,
+                            "camera.projection：只接受 perspective/orthographic，收到 " + proj);
+    }
+    spec.camera.ortho_scale =
+        static_cast<float>(json_get_double(*camera, "ortho_scale", spec.camera.ortho_scale));
+    if (spec.camera.ortho_scale <= 0.0f) {
+      return st::unexpected(ErrorCode::Parse, "camera.ortho_scale：必须为正（垂直可视高度）");
+    }
     // 相机退化检查：eye == target 时 look_at 会产生 NaN 基向量，
   // 整幅画面变黑且没有任何报错（实测过这类问题）。
     const math::Vec3 eye_delta = spec.camera.eye - spec.camera.target;
@@ -391,6 +450,14 @@ auto render_scene_into(const SceneSpec& spec, Scene3D& scene, Canvas& canvas,
     material.specular = obj.specular;
     material.emission = obj.emission;
     material.opacity = obj.opacity;
+    // 自发光色与“纯发光体”开关。
+    //
+    // 为何 `emission_unlit` 要把漫反射项**清零**：Blender 的 Emission 不受光照影响，
+    // 而本管线的 `emission` 是“加在受光结果上”的。两者差异在暗场景里很明显：
+    // 霓虹灯管应当自己亮着，而不是“被环境照亮后再亮一点”。
+    material.emissive_color = obj.emissive_color;
+    material.emissive_color_set = obj.emissive_color_set;
+    material.emission_unlit = obj.emission_unlit;
     scene.set_material(material);
 
     // 变换顺序：缩放 → 绕 X → 绕 Y → 绕 Z → 平移。

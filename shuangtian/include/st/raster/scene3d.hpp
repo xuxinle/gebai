@@ -98,6 +98,48 @@ struct Material {
   math::Vec3 specular_tint{0.0f, 0.0f, 0.0f};
   /// `specular_tint` 是否已显式设定（全零 + 本标记 = 自动）。
   bool specular_tint_set{false};
+
+  // ── 固有色与自发光色（2026-10-24，对齐 Blender Principled 的 Base/Emissive）──
+  //
+  // ## 为什么必须有（此前是个硬限制）
+  //
+  // 之前颜色**只能来自网格顶点色**：同一份 `Mesh` 想换颜色就得重建网格，
+  // 且多个物体共用同一份网格时无法各自上色。
+  //
+  // 有了 `base_color` 之后：网格只描述**形状与 UV**，颜色由材质决定。
+  // 这与 Blender 的行为一致（物体数据 vs 材质数据分离），也让
+  // 「同一个盒子演示十种材质」零成本——不用生成十份网格。
+  //
+  // ## 默认值怎么定的（渐进采用）
+  //
+  // `base_color_set = false` 时**完全沿用顶点色**（老场景逐像素不变）。
+  // 与 `specular` 默认 0 同一个理由：新能力默认不改变既有外观。
+
+  /// 固有色（线性空间）。仅在 `base_color_set` 为真时生效。
+  math::Vec3 base_color{1.0f, 1.0f, 1.0f};
+  /// `base_color` 是否已显式设定；false = 用网格顶点色。
+  bool base_color_set{false};
+
+  /// 自发光颜色（线性空间）。仅在 `emissive_color_set` 为真时生效。
+  math::Vec3 emissive_color{1.0f, 1.0f, 1.0f};
+  /// `emissive_color` 是否已显式设定；false = 用固有色（旧行为）。
+  bool emissive_color_set{false};
+
+  /// 自发光是否**不受光照影响**（true = 纯发光体，如霓虹灯管/屏幕）。
+  ///
+  /// Blender 的 Emission 项本身不受光照影响。旧实现里 `emission` 乘的是
+  /// 固有色、且与光照项相加，语义更接近“被打亮的表面”。
+  /// 这个开关让两种都能表达。
+  bool emission_unlit{false};
+};
+
+/// 相机投影类型。
+///
+/// 放在 `raster` 而不是 `math`：`Mat4` 只关心矩阵形状（已经有了两个构造函数），
+/// “相机用哪种”是场景语义。
+enum class ProjectionKind : std::uint8_t {
+  Perspective = 0,   ///< 透视：近大远小（默认，历史行为）。
+  Orthographic = 1,  ///< 正交：远近同尺寸（工程图 / 等距展示）。
 };
 
 /// 相机（右手系，视线朝 -Z）。
@@ -108,6 +150,23 @@ struct Camera {
   float fov_y_degrees{45.0f};
   float near_z{0.1f};
   float far_z{100.0f};
+
+  // ── 正交投影（2026-10-24）──
+  //
+  // ## 为什么需要
+  //
+  // 透视投影下近大远小，所以「等距展示一组物体」「工程图/技术插图」
+  // 「UI 里的小图标三维预览」都会变形（离相机远的那个显得小）。
+  // 正交投影让远处与近处同尺寸，这两类用途才能做对。
+  //
+  // Blender 的相机也有 Perspective/Orthographic 两种类型，语义相同：
+  // 正交时 `fov_y_degrees` **失效**，由 `ortho_scale` 决定可视宽度。
+  ProjectionKind projection{ProjectionKind::Perspective};
+  /// 正交视图的**垂直可视高度**（世界单位）；`projection = Orthographic` 时生效。
+  ///
+  /// 为何用“垂直高度”而不是“视野角”：正交没有投影中心，角度无意义；
+  /// 直接用场景尺度（如 2.0 = 屏幕高度对应 2 个世界单位）最直观。
+  float ortho_scale{2.0f};
 };
 
 /// ## 色彩空间口径（**读一次能省一堆调试**）
@@ -144,13 +203,54 @@ struct Camera {
 ///
 /// 所以多光源做成**可选的附加项**：`extra_lights` 为空时，光照公式与现在
 /// **逐位相同**（渐进采用的同一条底线）。
+/// 光源类型（对齐 Blender 的 Light Type；面积光未做，理由见 `Light`）。
+enum class LightKind : std::uint8_t {
+  Directional = 0,  ///< 平行光（太阳）：无距离衰减，只有方向。
+  Point = 1,        ///< 点光（灯泡）：向四周发射，1/d² 衰减。
+  Spot = 2,         ///< 聚光（追光）：点光 × 锥形限制。
+};
+
 struct Light {
   /// 方向（世界空间，**指向光源**；不需要预先归一化）。这是**平行光**语义。
+  ///
+  /// `kind != Directional` 时本字段**不用**（点光没有方向，由 `position` 决定）。
   math::Vec3 direction{0.0f, 1.0f, 0.0f};
   /// 颜色（线性空间）。乘在光强上：暖色补光用 `{1.0, 0.85, 0.7}`。
   math::Vec3 color{1.0f, 1.0f, 1.0f};
   /// 强度（乘在漫反射项上；0 = 关闭）。
   float intensity{0.0f};
+
+  // ── 光源类型与位置（2026-10-24，对齐 Blender 的 Light 类型）──
+  //
+  // ## 为什么要有类型
+  //
+  // 只有平行光时，一个场景里所有光都是“太阳”：**没有距离衰减**，
+  // 于是「台灯照亮桌面一角」「房间角落的暖光」这类效果根本表达不了。
+  // 平行光会把整个场景均匀照亮——这是观感上最容易被指出的一处“假”。
+  //
+  // ## 三种类型
+  //
+  // | 类型 | 衰减 | 用途 |
+  // |---|---|---|
+  // | Directional | 无 | 太阳/主光（现状，默认） |
+  // | Point | 1/d² + 可选半径 | 灯泡、烛光、局部补光 |
+  // | Spot | 1/d² × 锥形 | 舞台追光、手电、聚光强调 |
+  //
+  // 面积光（Area）**没做**：它要求对光源采样（每次着色 N 个样本），
+  // 软件腿每像素成本会乘 N；而柔和观感可以用「点光 + 较大半径」近似。
+  LightKind kind{LightKind::Directional};
+  /// 光源世界位置（`Point` / `Spot` 用；`Directional` 忽略）。
+  math::Vec3 position{0.0f, 2.0f, 2.0f};
+  /// 作用半径（>0 时超出距离衰减到 0）。
+  ///
+  /// 为何需要：纯 1/d² 在远距离仍有微小贡献，几盏灯加起来会让
+  /// “暗部永远不够暗”。给一个有限半径既有物理性（真实灯泡也有有效范围），
+  /// 也让“关掉远处那盏灯”可预测。
+  float radius{0.0f};
+  /// 聚光内锥半角（度）。锥内为全强度。
+  float spot_inner_degrees{20.0f};
+  /// 聚光外锥半角（度）。内外之间平滑衰减，之外为 0。
+  float spot_outer_degrees{30.0f};
 };
 
 /// 光源上限。
