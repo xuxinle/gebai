@@ -276,9 +276,12 @@ export class GitService {
       }, timeout)
     })
     if (opts.input !== undefined) {
+      // FileSink 的写入在管道已断时返回被拒的 Promise：吞掉，否则未捕获 rejection 会打死宿主进程
       try {
-        proc.stdin?.write(opts.input)
-        proc.stdin?.end()
+        const w1 = proc.stdin?.write(opts.input) as unknown
+        if (w1 && typeof (w1 as Promise<unknown>).catch === "function") (w1 as Promise<unknown>).catch(() => {})
+        const w2 = proc.stdin?.end() as unknown
+        if (w2 && typeof (w2 as Promise<unknown>).catch === "function") (w2 as Promise<unknown>).catch(() => {})
       } catch {
         /* 进程已退出 */
       }

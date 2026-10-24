@@ -591,6 +591,8 @@ async function runJsScript(
     child.stderr.on("data", (d: string) => {
       stderrTail = `${stderrTail}${d}`.slice(-4000)
     })
+    // stdin 的错误（EPIPE：脚本进程提前退出）必须有监听者，否则流上的 error 事件会抛到进程级
+    child.stdin.on("error", () => {})
     child.on("error", (err) => {
       out.spawnError = String(err)
       finish()

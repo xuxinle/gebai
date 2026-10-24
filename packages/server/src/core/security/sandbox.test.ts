@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import { spawn } from "node:child_process"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { createWriteStream, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { _resetPosixShellCache, _resetWinShellCache, bwrapArgs, decodeOutput, posixShellPlan, resolvePosixShell, resolveWinShell, Sandbox, scriptEnvDirs, scriptEnvOverride, winShellPlan, wrapPowerShellCommand } from "./sandbox"
+import { Readable } from "node:stream"
+import { _resetPosixShellCache, _resetWinShellCache, bwrapArgs, decodeOutput, pipeToSharedLog, posixShellPlan, resolvePosixShell, resolveWinShell, Sandbox, scriptEnvDirs, scriptEnvOverride, winShellPlan, wrapPowerShellCommand } from "./sandbox"
 import { sessionPath } from "../base/paths"
 import { which } from "../exec/which"
 
@@ -419,6 +420,116 @@ describe("脚本运行根与会话隔离（服务模式：脚本环境收敛到�
       expect(w.code).toBe(0)
       expect(w.stdout).toContain("WRITABLE")
       expect(w.stdout).toContain("HOME-DIR-HIDDEN")
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("pipeToSharedLog（子进程输出汇入共享日志流）", () => {
+  /** 收集目的流的异步错误：任一未被处理的错误都会成为进程级异常。 */
+  const withLog = (path: string) => {
+    const logStream = createWriteStream(path, { flags: "a" })
+    const errors: NodeJS.ErrnoException[] = []
+    return { logStream, errors }
+  }
+
+  test("任一源先 EOF 不会关掉共享日志流（否则另一条源的数据会 write after end）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-logpipe-"))
+    try {
+      const { logStream } = withLog(join(dir, "a.log"))
+      const early = new Readable({ read() {} })
+      const late = new Readable({ read() {} })
+      pipeToSharedLog([early, late], logStream)
+      early.push("early-eof\n")
+      early.push(null) // 先 EOF
+      await new Promise((r) => setTimeout(r, 30))
+      // 关键不变式：源 EOF 不传导到共享日志流
+      expect(logStream.writableEnded).toBe(false)
+      expect(logStream.destroyed).toBe(false)
+      // 后到的源照常写入（修复前就是在这里抛 ERR_STREAM_WRITE_AFTER_END 打崩进程）
+      late.push("late-data\n")
+      late.push(null)
+      await new Promise((r) => setTimeout(r, 30))
+      logStream.end()
+      await new Promise((r) => setTimeout(r, 60))
+      expect(readFileSync(join(dir, "a.log"), "utf8")).toContain("late-data")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("日志流写入失败只走 onError 回调，不成为进程级异常", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-logpipe-"))
+    try {
+      // 只读目录下建日志：createWriteStream 异步报 EACCES/EPERM
+      const readonlyDir = join(dir, "ro")
+      mkdirSync(readonlyDir)
+      const logStream = createWriteStream(join(readonlyDir, "x.log"), { flags: "a" })
+      const seen: string[] = []
+      let resolveErr: (v: string) => void = () => {}
+      const reported = new Promise<string>((r) => (resolveErr = r))
+      pipeToSharedLog([], logStream, {
+        onError: (err) => {
+          seen.push(String(err?.code ?? err?.message))
+          resolveErr("reported")
+        },
+      })
+      // 人为制造写入失败：目录被移走后 flush 报错（与真实盘满/无权限同一路径）
+      rmSync(readonlyDir, { recursive: true, force: true })
+      logStream.write("payload")
+      await Promise.race([reported, new Promise((r) => setTimeout(r, 1500))])
+      // 断言只针对「错误被 onError 接住」这一点；具体 code 随平台而异（ENOENT/EPERM/EACCES）
+      expect(seen.length).toBeGreaterThan(0)
+      try {
+        logStream.destroy()
+      } catch {
+        /* 已销毁 */
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("Sandbox.spawnBackground 输出落盘", () => {
+  test("stdout 先 EOF、stderr 后到：尾部输出不丢，进程事件流不抛异常", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-bg-log-"))
+    const sb = new Sandbox({ home, enabled: false })
+    const logPath = join(home, "sh-tasks", "bg.log")
+    // 子进程：先关掉 stdout（父侧 stdout 立即 EOF），稍后才往 stderr 写
+    const script = [
+      'const fs=require("node:fs")',
+      'fs.writeSync(1,"stdout-only\\n")',
+      "fs.closeSync(1)",
+      'setTimeout(()=>{ fs.writeSync(2,"stderr-late\\n"); setTimeout(()=>process.exit(0),150) }, 300)',
+    ].join("\n")
+    const scriptPath = join(home, "child.cjs")
+    writeFileSync(scriptPath, script)
+    try {
+      const h = sb.spawnBackground(`& ${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)}`, { cwd: home, logPath })
+      // 修复前：stdout 先 EOF 会把共享日志流关掉，stderr 迟到数据触发 write after end 打崩宿主进程
+      await h.exited
+      await new Promise((r) => setTimeout(r, 200))
+      const text = readFileSync(logPath, "utf8")
+      // 不变量：先 EOF 的管道不影响另一条的落盘——迟到输出不丢
+      expect(text).toContain("stdout-only")
+      expect(text).toContain("stderr-late")
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test("日志目录不可写：任务照常退出，宿主进程不受影响（落盘失败只降级）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-bg-logfail-"))
+    const sb = new Sandbox({ home, enabled: false })
+    // 日志路径指向一个已存在的目录：open 必然失败（跨平台稳定的失败路径）
+    const dirAsFile = join(home, "not-a-file")
+    mkdirSync(dirAsFile, { recursive: true })
+    try {
+      const h = sb.spawnBackground("echo hi", { cwd: home, logPath: dirAsFile })
+      // 进程本身正常退出（日志流错误被 onError 接住，不升级为进程级异常）
+      await expect(h.exited).resolves.toBeTypeOf("number")
     } finally {
       rmSync(home, { recursive: true, force: true })
     }

@@ -193,9 +193,21 @@ export class CvSidecar {
       const bytes = tensor ? new Uint8Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.byteLength) : null
       const header: Record<string, unknown> = { id, op, args }
       if (bytes) header.tensorBytes = bytes.length
-      this.stdin?.write(JSON.stringify(header) + "\n")
-      if (bytes) this.stdin?.write(bytes)
-      this.stdin?.flush?.()
+      // Bun FileSink 在管道已断时写入返回被拒的 Promise：吞掉转为该请求拒绝，
+      // 不让未捕获 rejection 打死宿主进程（onExit 的自愈重启照常进行）
+      try {
+        const w1 = this.stdin?.write(JSON.stringify(header) + "\n") as unknown
+        if (w1 && typeof (w1 as Promise<unknown>).catch === "function") (w1 as Promise<unknown>).catch(() => {})
+        if (bytes) {
+          const w2 = this.stdin?.write(bytes) as unknown
+          if (w2 && typeof (w2 as Promise<unknown>).catch === "function") (w2 as Promise<unknown>).catch(() => {})
+        }
+        this.stdin?.flush?.()
+      } catch {
+        this.pending.delete(id)
+        clearTimeout(timer)
+        reject(new Error("CV sidecar 写入失败（进程已退出；下次请求将自动重启）"))
+      }
     })
   }
 

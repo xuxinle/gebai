@@ -83,6 +83,8 @@ export async function runRegexMatcher(req: {
     }
   }
   const timer = setTimeout(kill, REGEX_MATCHER_TIMEOUT_MS)
+  // stdin 的错误（EPIPE：子进程提前退出）必须有监听者，否则流上的 error 事件会抛到进程级
+  child.stdin!.on("error", () => {})
   try {
     child.stdin!.end(JSON.stringify(req))
     const stdout = await new Promise<string>((resolve, reject) => {

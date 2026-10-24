@@ -98,6 +98,8 @@ const commandDeps = (tmpDir: string): TtsDeps => ({
       }, opts?.timeoutMs ?? 120_000)
       child.stdout?.on("data", (d) => out.push(Buffer.from(d)))
       child.stderr?.on("data", (d) => err.push(Buffer.from(d)))
+      // stdin 的错误（EPIPE：子进程提前退出）必须有监听者，否则流上的 error 事件会抛到进程级
+      child.stdin?.on("error", () => {})
       child.on("error", (e) => {
         err.push(Buffer.from(String(e)))
         finish(1)

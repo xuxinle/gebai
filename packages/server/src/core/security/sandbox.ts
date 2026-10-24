@@ -1,5 +1,7 @@
 import { spawn, spawnSync } from "node:child_process"
 import { createWriteStream, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import type { WriteStream } from "node:fs"
+import type { Readable } from "node:stream"
 import { tmpdir } from "node:os"
 import { dirname, join, relative, resolve } from "node:path"
 import { sessionPath } from "../base/paths"
@@ -76,6 +78,22 @@ export function bwrapArgs(opts: { sessionDir: string; cwd: string; exists?: (p: 
 
 /** ANSI 控制序列（CSI：颜色/光标/擦除）；工具输出面向模型上下文，控制码是噪声。 */
 const ANSI_ESCAPE = /[\u001B\u009B]\[[0-9;?]*[ -/]*[@-~]/g
+
+/** 把多条子进程输出流接进同一个共享日志流（stdout+stderr 合并落盘）。
+ *  两个约束缺一都会打崩整个服务进程：
+ *  - **`end: false`**：pipe 默认 `end:true`，先 EOF 的那条流会把**共享日志流**关掉，另一条仍在途的
+ *    数据随即 `write after end`；日志流生命周期必须由调用方在进程退出时统一收尾。
+ *  - **错误监听只挂一次**：`pipe` 内部 `ondata` 的写入错误无人接就是未捕获异常（日志盘满/无权限
+ *    同样触发）；放这里统一挂能同时兜住 `write()` 返回的错误与异步 flush 失败。 */
+export function pipeToSharedLog(srcs: Readable[], log: WriteStream, opts: { onError?: (err: NodeJS.ErrnoException) => void } = {}): void {
+  const { onError } = opts
+  log.on("error", (err: NodeJS.ErrnoException) => onError?.(err))
+  for (const src of srcs) {
+    // 源流自身的错误（管道异常）只做下游传导
+    src.on("error", () => {})
+    src.pipe(log, { end: false })
+  }
+}
 
 /** 输出解码：优先 UTF-8；含替换字符（U+FFFD）时按 GBK 回退（Windows 老程序仍按 GBK 输出时兜底）；
  *  末尾剥离 ANSI 控制序列。 */
@@ -441,10 +459,16 @@ export class Sandbox {
       }, timeoutMs)
       child.stdout.on("data", (d) => stdoutChunks.push(Buffer.isBuffer(d) ? d : Buffer.from(d)))
       child.stderr.on("data", (d) => stderrChunks.push(Buffer.isBuffer(d) ? d : Buffer.from(d)))
-      if (opts.input != null) {
-        child.stdin.write(opts.input)
+      // stdin 的错误（EPIPE：子进程提前退出）必须有监听者，否则流上的 error 事件会抛到进程级
+      child.stdin.on("error", () => {})
+      try {
+        if (opts.input != null) {
+          child.stdin.write(opts.input)
+        }
+        child.stdin.end()
+      } catch {
+        /* 子进程已退出 */
       }
-      child.stdin.end()
       child.on("error", (err) => {
         if (settled) return
         settled = true
@@ -503,23 +527,48 @@ export class Sandbox {
     const child = plan
       ? spawn(plan.file, plan.args, { cwd: opts.cwd, env, stdio: ["pipe", "pipe", "pipe"], detached: !isWin })
       : spawn(shellCmd, { cwd: opts.cwd, env, shell: true, stdio: ["pipe", "pipe", "pipe"], detached: !isWin })
-    const log = createWriteStream(opts.logPath, { flags: "a" })
-    child.stdout?.pipe(log)
-    child.stderr?.pipe(log)
+    const logStream = createWriteStream(opts.logPath, { flags: "a" })
+    // 收尾幂等：退出事件与日志流错误都可能先到，end/destroy 只做一次
+    let logClosed = false
+    const endLog = (err?: NodeJS.ErrnoException): void => {
+      if (logClosed) return
+      logClosed = true
+      try {
+        if (err) logStream.destroy()
+        else logStream.end()
+      } catch {
+        /* 已结束/已销毁 */
+      }
+    }
+    const logSources = [child.stdout, child.stderr].filter((s): s is Readable => s != null)
+    pipeToSharedLog(logSources, logStream, {
+      onError: (err) => {
+        // 日志落盘失败只降级（该任务输出不可查），宿主进程照常运行
+        log.warn(`[sandbox] 后台任务日志写入失败（${opts.logPath}）：${String(err?.message ?? err)}`)
+        endLog(err)
+      },
+    })
     if (opts.onChunk) {
       const onChunk = opts.onChunk
       child.stdout?.on("data", (d: Buffer | string) => onChunk("stdout", Buffer.isBuffer(d) ? d : Buffer.from(d)))
       child.stderr?.on("data", (d: Buffer | string) => onChunk("stderr", Buffer.isBuffer(d) ? d : Buffer.from(d)))
     }
-    if (opts.input != null) child.stdin?.write(opts.input)
-    child.stdin?.end()
+    // stdin 的错误（EPIPE：子进程提前退出）必须有监听者，否则流上的 error 事件会抛到进程级
+    child.stdin?.on("error", () => {})
+    try {
+      if (opts.input != null) child.stdin?.write(opts.input)
+      child.stdin?.end()
+    } catch {
+      /* 子进程已退出 */
+    }
     const exited = new Promise<number>((resolveExit, rejectExit) => {
       child.once("error", (err) => {
-        log.end()
+        endLog()
         rejectExit(err)
       })
+      // close：两条输出流已全部读完（Node 在 stdio 全关闭后才发 close），此时收尾日志不丢尾
       child.once("close", (code) => {
-        log.end()
+        endLog()
         resolveExit(code ?? 1)
       })
     })

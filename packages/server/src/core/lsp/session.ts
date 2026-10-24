@@ -71,6 +71,8 @@ export const defaultLspSpawner: LspSpawner = (input) => {
   const errDec = new TextDecoder("utf-8")
   child.stdout?.on("data", (b: Buffer) => input.onStdout(outDec.decode(b, { stream: true })))
   child.stderr?.on("data", (b: Buffer) => input.onStderr(errDec.decode(b, { stream: true })))
+  // stdin 的错误（EPIPE：语言服务器提前退出）必须有监听者，否则流上的 error 事件会抛到进程级
+  child.stdin?.on("error", () => {})
   let exited = false
   child.on("exit", (code) => {
     if (exited) return

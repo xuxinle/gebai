@@ -171,7 +171,16 @@ export class Bridge implements BridgeLike {
         reject: (e) => { clearTimeout(timer); reject(e) },
       })
       const line = JSON.stringify({ id, op, args }) + "\n"
-      this.stdin?.write(line)
+      // Bun FileSink 在管道已断时写入返回被拒的 Promise：吞掉转为该请求拒绝，
+      // 不让未捕获 rejection 打死宿主进程（onExit 的自愈重启照常进行）
+      try {
+        const w = this.stdin?.write(line) as unknown
+        if (w && typeof (w as Promise<unknown>).catch === "function") (w as Promise<unknown>).catch(() => {})
+      } catch {
+        this.pending.delete(id)
+        clearTimeout(timer)
+        reject(new Error("playwright 桥接写入失败（驱动进程已退出；下次请求将自动重启）"))
+      }
     })
   }
 
