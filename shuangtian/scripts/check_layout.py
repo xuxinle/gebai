@@ -90,21 +90,43 @@ try {
 }
 
 let bad = 0, first = null, maxShapes = 0, zeroFrames = 0, total = 0;
+let offscreen = 0, offscreenFirst = null;
+const W = 1920, H = 1080;
 for (let t = 0; t <= duration + 1e-9; t += step) {
   total++;
   try {
-    const r = fn(t, duration, { width: 1920, height: 1080 }, frameLayers,
+    const r = fn(t, duration, { width: W, height: H }, frameLayers,
                   ease, spring, spring_vel, settle, lerpHost, clampHost, snap, rand);
-    const n = (r && r.shapes) ? r.shapes.length : 0;
+    const shapes = (r && r.shapes) ? r.shapes : [];
+    const n = shapes.length;
     if (n > maxShapes) maxShapes = n;
     if (n === 0) zeroFrames++;
+
+    // ## 检查图元是否**整体跑出画布**
+    //
+    // 实测代价：pith 的工具清单用了页面坐标 1480，而页面宽只有 1240，
+    // 在 zoom=9 时右对齐的数值整片跑到屏幕外 —— 画面里只剩左半截文字
+    // （"grep" 显示成 "rep"）。渲染器不报错，指标也照算。
+    //
+    // 判据：图元中心落在 [-W, 2W] × [-H, 2H] 之外算跑飞（留一屏容差，
+    // 因为设计上允许"从画外滑入"这类入场）。
+    for (let i = 0; i < n; i++) {
+      const s = shapes[i];
+      const cx = (s.x === undefined) ? 0 : s.x;
+      const cy = (s.y === undefined) ? 0 : s.y;
+      if (cx < -2 * W || cx > 3 * W || cy < -2 * H || cy > 3 * H) {
+        offscreen++;
+        if (!offscreenFirst) offscreenFirst = { t: Math.round(t * 100) / 100, x: Math.round(cx), y: Math.round(cy) };
+      }
+    }
   } catch (e) {
     if (!first) first = { t: Math.round(t * 100) / 100, msg: String(e && e.message || e) };
     bad++;
   }
 }
 console.log(JSON.stringify({ bad: bad, first: first, maxShapes: maxShapes,
-                             zeroFrames: zeroFrames, total: total }));
+                             zeroFrames: zeroFrames, total: total,
+                             offscreen: offscreen, offscreenFirst: offscreenFirst }));
 """
 
 
@@ -144,8 +166,14 @@ def report(name: str, res: dict) -> bool:
     note = ""
     if res["zeroFrames"] > 0:
         note = f"（{res['zeroFrames']} 帧 shapes=0，可能是空白段）"
+    ok = True
+    if res.get("offscreen", 0) > 0:
+        f = res.get("offscreenFirst") or {}
+        print(f"  [!] {name:22s} {res['offscreen']} 个图元跑出画布；"
+              f"首个 @{f.get('t')}s (x={f.get('x')}, y={f.get('y')})")
+        note += "（有图元跑出画布，见上行）"
     print(f"  [OK] {name:22s} {res['total']} 帧无错，shapes 峰值 {res['maxShapes']}{note}")
-    return True
+    return ok
 
 
 def scan(out_dir: str) -> int:
