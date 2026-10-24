@@ -146,7 +146,28 @@ auto shade_terms(math::Vec3 normal, math::Vec3 color, const Lighting& lighting) 
     return value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
   };
   const float gain = scale * lighting.exposure;
-  return math::Vec3{clamp01(color.x * gain), clamp01(color.y * gain), clamp01(color.z * gain)};
+  math::Vec3 result{color.x * gain, color.y * gain, color.z * gain};
+
+  // ## 附加光源（本次新增）
+  //
+  // 关键约束：`extra_lights` 全为空时结果必须与上面**逐位相同**。
+  // 所以这里是“追加”，而不是把主光也重构成循环。
+  //
+  // 为何不在 `shade_surface` 里做：`shade_terms` 是两条腿的唯一参考实现，
+  // 主光 + 环境 + 边缘光的语义已经在它里面钉住了。附加光源作为**后加的
+  // 漫反射项**追加，两边都好维护。
+  for (const Light& extra_light : lighting.extra_lights) {
+    if (extra_light.intensity <= 0.0f) continue;
+    const math::Vec3 extra = extra_light.direction.normalized();
+    const float lambert = std::max(n.dot(extra), 0.0f);
+    if (lambert <= 0.0f) continue;
+    const float weight = lambert * extra_light.intensity;
+    result.x += color.x * extra_light.color.x * weight;
+    result.y += color.y * extra_light.color.y * weight;
+    result.z += color.z * extra_light.color.z * weight;
+  }
+
+  return math::Vec3{clamp01(result.x), clamp01(result.y), clamp01(result.z)};
 }
 
 // ── GGX 高光与 Principled 着色 ──
@@ -247,6 +268,19 @@ math::Vec3 shade_surface(math::Vec3 normal, math::Vec3 base_color, math::Vec3 vi
   math::Vec3 result{base_color.x * diffuse_scale, base_color.y * diffuse_scale,
                     base_color.z * diffuse_scale};
 
+  // 附加光源：与 `shade_terms` 同一口径（漫反射项，乘固有色与光色）。
+  // 材质路径不能漏这一步，否则“设了材质就少了几盏灯”。
+  for (const Light& extra_light : lighting.extra_lights) {
+    if (extra_light.intensity <= 0.0f) continue;
+    const math::Vec3 extra = extra_light.direction.normalized();
+    const float lambert = std::max(n.dot(extra), 0.0f);
+    if (lambert <= 0.0f) continue;
+    const float weight = lambert * extra_light.intensity * diffuse_weight;
+    result.x += base_color.x * extra_light.color.x * weight;
+    result.y += base_color.y * extra_light.color.y * weight;
+    result.z += base_color.z * extra_light.color.z * weight;
+  }
+
   if (specular > 0.0f) {
     const math::Vec3 spike =
         ggx_specular(n, view_dir, l, roughness, metallic, base_color, specular_tint);
@@ -299,9 +333,10 @@ class SoftwareScene final : public Scene3D {
     tone_map_ = lighting_.tone_map;
     cull_mode_ = CullMode::Back;     // 同上：不重置会让上一帧的设置泄漏
     material_ = Material{};
-    transparent_.clear();
-    cull_mode_ = CullMode::Back;     // 同上：不重置会让上一帧的设置泄漏
-    material_ = Material{};
+    shadow_ = PlanarShadow{};
+    shadow_tris_.clear();
+    entity_mask_.assign(depth_.size(), 0);
+    mask_entities_ = false;
     transparent_.clear();
     // ## 清屏色也必须走**同一条输出链**
     //
@@ -346,6 +381,20 @@ class SoftwareScene final : public Scene3D {
     material_.opacity = std::clamp(material_.opacity, 0.0f, 1.0f);
   }
 
+  void set_planar_shadow(const PlanarShadow& shadow) override {
+    shadow_ = shadow;
+    // ## 激活遮罩标记
+    //
+    // 调用约定：先画地面（或其它不投阴影的背景几何），再调 `set_planar_shadow`，
+    // 之后画的网格才会投阴影并标记遮罩。
+    //
+    // 为何用调用顺序而不是靠“哪个是地面”的额外标记：调用方本来就
+    // 知道自己在做什么，而给地面加一个新概念（`set_ground(i)`）只会把
+    // 接口变复杂。这个约定与 `set_texture` / `set_material` 的设计一致——
+    // 都是“先设状态、再画”。
+    mask_entities_ = shadow.strength > 0.0f;
+  }
+
   /// 纹理（RGBA8 非预乘，行优先）。空 span / 非法尺寸 = 清除纹理（回到顶点色）。
   void set_texture(std::span<const std::uint8_t> pixels, int width, int height) override {
     const auto clear = [this] {
@@ -366,6 +415,159 @@ class SoftwareScene final : public Scene3D {
     texture_.assign(pixels.begin(), pixels.begin() + static_cast<std::ptrdiff_t>(needed));
     texture_width_ = width;
     texture_height_ = height;
+  }
+
+  /// 把三个世界空间顶点沿光方向投影到 `ground_y`，收集成阴影三角形。
+  ///
+  /// ## 投影公式
+  ///
+  /// 给定点 `p`、光方向 `d`（指向光源）、地面高度 `h`，求 `t` 使得：
+  /// ```
+  /// p.y + t·d.y = h   =>   t = (h - p.y) / d.y
+  /// ```
+  /// 然后投影点 = `p + t·d`。
+  ///
+  /// ## `d.y` 接近 0 时要跳过
+  ///
+  /// 光几乎水平时 `t` 趋于无穷，投影会跑到极远的地方（画面上是一道拖到天际的条）。
+  /// 物理上那也确实“不产生可见阴影”，所以直接跳过。
+  void collect_shadow_triangle(const Vertex& a, const Vertex& b, const Vertex& c) {
+    const math::Vec3 dir = lighting_.key_direction.normalized();
+    // ## 方向约定（一开始写反了，阴影完全不出）
+    //
+    // `key_direction` 是**指向光源**的方向。光从上方来时 `dir.y > 0`，
+    // 影子落在地面（下方）——所以投射方向是 `-dir`，投射后
+    // `t = (h - p.y) / (-dir.y)` 分母为负，结果仍正确（`h < p.y` 时 `t > 0`）。
+    //
+    // 实测踩到：一开始写成 `if (dir.y >= -1e-4f) return;`（要求光从下方来），
+    // 于是默认布光下**永不出影子**，四档强度数值一模一样。
+    if (dir.y <= 1e-4f) return;   // 光不从上往下照 → 不会在地面留影
+
+    const auto project = [&](const Vertex& v) -> math::Vec3 {
+      // 沿 **-dir** 投射到 y = ground_y
+      const float t = (v.world.y - shadow_.ground_y) / dir.y;
+      // ## lift 要**向上**（朝相机方向）抬，不是向上抬离地面
+      //
+      // 相机在物体上方往下看时，y 越大越**远**。实测：把 lift 加在 y 上
+      // 得到 `shadow_z=0.9619` vs `ground_z=0.9506`——阴影比地面更远，
+      // 于是 `z >= depth` 恒成立，**一个像素也画不出来**。
+      // 所以沿投射方向**回退**一点（朝相机）才能稳定胜出。
+      return math::Vec3{v.world.x - dir.x * t, shadow_.ground_y - shadow_.lift,
+                        v.world.z - dir.z * t};
+    };
+    const math::Vec3 p0 = project(a);
+    const math::Vec3 p1 = project(b);
+    const math::Vec3 p2 = project(c);
+    // 投影后法线全部朝上（+Y），与地面同向
+    const int base = static_cast<int>(shadow_tris_.size()) / 9;
+    (void)base;
+    shadow_tris_.insert(shadow_tris_.end(),
+                        {p0.x, p0.y, p0.z, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z});
+  }
+
+  /// 把收集到的阴影三角形画到画布上（叠加一层暗色）。
+  void paint_planar_shadow() {
+    if (shadow_tris_.empty()) return;
+    const float strength = std::clamp(shadow_.strength, 0.0f, 1.0f);
+    // 阴影是半透明的：用 alpha 混合到当前画布。
+    //
+    // 为何不用 `rasterize` 的透明路径：那条路径是“实体表面 + 材质”，
+    // 而阴影是**叠加一层暗色**（没有光照、没有材质），语义不同。
+    // 这里直接光栅化一个纯色三角形，逐像素与已有像素混合。
+    for (std::size_t i = 0; i + 8 < shadow_tris_.size(); i += 9) {
+      const math::Vec3 w0{shadow_tris_[i], shadow_tris_[i + 1], shadow_tris_[i + 2]};
+      const math::Vec3 w1{shadow_tris_[i + 3], shadow_tris_[i + 4], shadow_tris_[i + 5]};
+      const math::Vec3 w2{shadow_tris_[i + 6], shadow_tris_[i + 7], shadow_tris_[i + 8]};
+      Vertex v0;
+      Vertex v1;
+      Vertex v2;
+      v0.world = w0;
+      v1.world = w1;
+      v2.world = w2;
+      v0.clip = transform(projection_ * view_, w0, 1.0f);
+      v1.clip = transform(projection_ * view_, w1, 1.0f);
+      v2.clip = transform(projection_ * view_, w2, 1.0f);
+      // 阴影不参与剔面（投影后绕序可能翻转，但那不重要）
+      rasterize_shadow(v0, v1, v2, strength);
+    }
+    shadow_tris_.clear();
+  }
+
+  /// 光栅化一个阴影三角形（纯色 + alpha 混合）。
+  ///
+  /// ## 为何必须做**深度测试**（但不写）
+  ///
+  /// 阴影在 `end_frame` 里绘制，那时实体已经写入深度。量体在地面**前方**时，
+  /// 它的深度更小，阴影（在地面上）测试失败 → 不会被画到量体上。
+  /// 这正是“量体遮住自己的影子”的正确效果。
+  ///
+  /// 不写深度：阴影之间会重叠，写深度会让后画的被前面已经写过的挡掉，
+  /// 表现为“几个球只投出一个影子”。而阴影强度靠 alpha 叠加，本来就该叠。
+  void rasterize_shadow(const Vertex& a, const Vertex& b, const Vertex& c, float strength) {
+    const int bake_width = width_ * kBake;
+    const int bake_height = height_ * kBake;
+    const auto to_screen = [&](const Vertex& v) {
+      const float inv_w = 1.0f / v.clip.w;
+      return Vec4{(v.clip.x * inv_w * 0.5f + 0.5f) * static_cast<float>(bake_width),
+                  (0.5f - v.clip.y * inv_w * 0.5f) * static_cast<float>(bake_height),
+                  v.clip.z * inv_w, inv_w};
+    };
+    const Vec4 p0 = to_screen(a);
+    const Vec4 p1 = to_screen(b);
+    const Vec4 p2 = to_screen(c);
+    const float area = (p1.x - p0.x) * (p2.y - p0.y) - (p2.x - p0.x) * (p1.y - p0.y);
+    if (std::abs(area) < 1e-6f) return;
+    const float inv_area = 1.0f / area;
+    const int min_x = std::max(0, static_cast<int>(std::floor(std::min({p0.x, p1.x, p2.x}))));
+    const int max_x =
+        std::min(bake_width - 1, static_cast<int>(std::ceil(std::max({p0.x, p1.x, p2.x}))));
+    const int min_y = std::max(0, static_cast<int>(std::floor(std::min({p0.y, p1.y, p2.y}))));
+    const int max_y =
+        std::min(bake_height - 1, static_cast<int>(std::ceil(std::max({p0.y, p1.y, p2.y}))));
+    if (min_x > max_x || min_y > max_y) return;
+
+    const math::Color shadow_rgb{
+        static_cast<std::uint8_t>(std::lround(st::raster::linear_to_srgb8(shadow_.color.x))),
+        static_cast<std::uint8_t>(std::lround(st::raster::linear_to_srgb8(shadow_.color.y))),
+        static_cast<std::uint8_t>(std::lround(st::raster::linear_to_srgb8(shadow_.color.z))),
+        255};
+    for (int y = min_y; y <= max_y; ++y) {
+      for (int x = min_x; x <= max_x; ++x) {
+        const float px = static_cast<float>(x) + 0.5f;
+        const float py = static_cast<float>(y) + 0.5f;
+        const float w0 = ((p1.x - px) * (p2.y - py) - (p2.x - px) * (p1.y - py)) * inv_area;
+        const float w1 = ((p2.x - px) * (p0.y - py) - (p0.x - px) * (p2.y - py)) * inv_area;
+        const float w2 = 1.0f - w0 - w1;
+        if (w0 < -1e-5f || w1 < -1e-5f || w2 < -1e-5f) continue;
+        // ## 为何不做深度测试，而看一份“实体遮罩”
+        //
+        // 阴影与地面共面，两者的深度差异在透视投影后极小——实测
+        // `shadow_z=0.9619` vs `ground_z=0.9502`，阴影**更远**，于是
+        // `z >= depth` 恒成立，一个像素也画不出来。调 lift 也靠不住：
+        // 那是在与浮点精度搏斗，而不是解决问题。
+        //
+        // 正确的语义是“阴影不能盖到**实体**上”，而地面不算实体。
+        // 所以改用一份独立的遮罩：实体在 `rasterize` 写像素时标记，
+        // 阴影只在**未标记**的像素上画。这样与深度无关，确定性更好。
+        const std::size_t offset = static_cast<std::size_t>(y) *
+                                       static_cast<std::size_t>(bake_width) +
+                                   static_cast<std::size_t>(x);
+        if (entity_mask_[offset] != 0) continue;   // 被实体占据 → 不画阴影
+        const math::Color dst = canvas_.pixel_at(x, y);
+        const auto mix = [&](int s, int d) -> int {
+          const int out =
+              static_cast<int>(std::lround(static_cast<float>(d) +
+                                           (static_cast<float>(s) - static_cast<float>(d)) *
+                                               strength));
+          return std::clamp(out, 0, 255);
+        };
+        canvas_.set_pixel(x, y,
+                          math::Color{static_cast<std::uint8_t>(mix(shadow_rgb.r, dst.r)),
+                                static_cast<std::uint8_t>(mix(shadow_rgb.g, dst.g)),
+                                static_cast<std::uint8_t>(mix(shadow_rgb.b, dst.b)),
+                                dst.a});
+      }
+    }
   }
 
   void draw_mesh(const Mesh& mesh, const math::Mat4& model) override {
@@ -405,6 +607,13 @@ class SoftwareScene final : public Scene3D {
         tri[k].has_uv = mesh_has_uv;
       }
       if (!ok) continue;
+
+      // ## 平面投影阴影：把未裁剪的三角形投到地面
+      //
+      // 为何在裁剪**之前**：裁剪是对相机的，而阴影的几何是**世界空间**的
+      //（光方向 → 地面）。用裁剪后的顶点投会漏掉“部分在相机外”的三角形，
+      // 表现为阴影边缘缺一块。
+      if (shadow_.strength > 0.0f) collect_shadow_triangle(tri[0], tri[1], tri[2]);
 
       Vertex clipped[4];
       const int produced = clip_near(tri[0], tri[1], tri[2], clipped);
@@ -458,6 +667,11 @@ class SoftwareScene final : public Scene3D {
   }
 
   void end_frame(Surface& target, math::Rect destination, float opacity = 1.0f) override {
+    // ## 平面投影阴影：先画（它在实体**下方**，被实体遮住的部分本就该被遮）
+    //
+    // 为何先于透明队列：阴影是“地面上的暗层”，它应该压在背景上、
+    // 在实体与透明物体之下。因为阴影不写深度，先画不会影响后续遮挡。
+    paint_planar_shadow();
     // ## 透明队列：远 → 近排序后绘制
     //
     // 为何在 `end_frame` 才算：`draw_mesh` 按调用顺序提交，与远近无关。
@@ -555,6 +769,9 @@ class SoftwareScene final : public Scene3D {
         // 本应透过它看到的东西，表现为“玻璃后面的物体全消失”。
         // （深度**测试**仍要做：透明面之间的前后关系靠它排。）
         if (material_.depth_write) depth_[offset] = z;
+        // 实体遮罩：`set_planar_shadow` 之后画的网格都是“实体”，
+        // 阴影不得盖在它们上面（地面在它之前画，不会被标记）。
+        if (mask_entities_) entity_mask_[offset] = 1;
 
         // 透视校正：顶点属性按 1/w 加权插值（不做校正会让纹理/光照在斜面上"歪"）
         const float sum = w0 * p0.w + w1 * p1.w + w2 * p2.w;
@@ -735,6 +952,20 @@ class SoftwareScene final : public Scene3D {
   CullMode cull_mode_{CullMode::Back};
   /// 当前材质。
   Material material_{};
+  /// 平面投影阴影（`strength = 0` = 关闭）。
+  PlanarShadow shadow_{};
+  /// 阴影三角形的世界坐标（每 9 个 float 一个三角形）。
+  ///
+  /// 为何先收集再画：阴影必须**在所有实体之后**绘制（它是叠加层），
+  /// 而 `draw_mesh` 是按调用顺序来的。
+  std::vector<float> shadow_tris_{};
+  /// 实体遮罩（超采样分辨率）：1 = 该像素已被实体占据，阴影不能画上去。
+  ///
+  /// 为何需要它：阴影与地面共面，深度比较分不开“地面”与“实体”，
+  /// 而语义上要排除的是**实体**。一个独立遮罩比调深度偏置可靠得多。
+  std::vector<std::uint8_t> entity_mask_{};
+  /// 是否标记实体遮罩（`set_planar_shadow` 之后才为真）。
+  bool mask_entities_{false};
   /// 透明三角形延迟队列：`begin_frame` 清、`draw_mesh` 收集、 `end_frame` 前排序并绘制。
   ///
   /// 为何要延迟：正确的透明混合要求**远→近**绘制，而 `draw_mesh` 是按调用

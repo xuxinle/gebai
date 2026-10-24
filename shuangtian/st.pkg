@@ -379,8 +379,18 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "颜色管线接入后的视觉对照：同一场景新旧两条输出链各落一张 PNG + 亮度/过曝统计"
     },
-    "scene3d_shade_equiv_probe": {
+    "scene3d_shadow_probe": {
       "kind": "executable",
+      "sources": ["tools/scene3d_shadow_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "平面投影阴影：强度四档各落一张 PNG + 地面/球体/阴影区亮度对比"
+    },
+    "scene3d_lights_probe": {      "kind": "executable",
+      "sources": ["tools/scene3d_lights_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "多光源对照：主光/补光/轮廓光/暖色补光各落一张 PNG + 亮面与暗面亮度"
+    },
+    "scene3d_shade_equiv_probe": {      "kind": "executable",
       "sources": ["tools/scene3d_shade_equiv_probe.cpp"],
       "exclude_sources": ["src/pkg/*"],
       "//note": "渐进采用底线：默认材质（specular/emission/metallic = 0）必须与旧 shade_terms 逐位等价"

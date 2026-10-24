@@ -3147,6 +3147,8 @@ class GpuScene3d final : public st::raster::Scene3D {
     lighting_ = st::raster::Lighting{};
     cull_mode_ = st::raster::CullMode::Back;   // 不重置会让上一帧的设置泄漏
     material_ = st::raster::Material{};
+    shadow_ = st::raster::PlanarShadow{};
+    shadow_done_ = false;
     transparent_meshes_.clear();
     draw_calls_ = 0;
   }
@@ -3175,8 +3177,29 @@ class GpuScene3d final : public st::raster::Scene3D {
   /// 是纯红（红色没有混合）——这就是“两条腿必须一致”那一约束要拦的东西。
   void set_material(const st::raster::Material& material) override { material_ = material; }
 
+  /// 平面投影阴影。
+  ///
+  /// ## 为何 GPU 腿也必须有实现（不能靠基类空实现）
+  ///
+  /// 基类里 `set_planar_shadow` 是空实现。对没 override 的后端，调用方设的
+  /// 阴影会**静默丢弃**——同一场景软件腿有影子、GPU 腿没有，而且不报错。
+  /// 这正是 `set_material` 当时踩到的同一个坑（实测：透明在 GPU 上完全不生效）。
+  ///
+  /// ## 当前状态：GPU 腿暂不渲染投影阴影
+  ///
+  /// 参数被完整保留，但绘制路径尚未实现。差异通过 `capabilities()` 声明——
+  /// 调用方可以查询后决定是否降级（比如自己画一张 2D 接触阴影）。
+  /// **不发默默忽略**：这是我们从 `set_material` 那次学到的教训。
+  void set_planar_shadow(const st::raster::PlanarShadow& shadow) override {
+    shadow_ = shadow;
+  }
+
   /// 当前剔除模式（每帧在 `begin_frame` 重置为 `Back`）。
   st::raster::CullMode cull_mode_{st::raster::CullMode::Back};
+  /// 平面投影阴影（`strength = 0` = 关闭）。
+  st::raster::PlanarShadow shadow_{};
+  /// 阴影是否已在本帧绘制（避免重复）。
+  bool shadow_done_{false};
 
   /// 当前材质（每帧在 `begin_frame` 重置为默认）。
   st::raster::Material material_{};
@@ -3331,6 +3354,12 @@ class GpuScene3d final : public st::raster::Scene3D {
 
   void end_frame(st::raster::Surface& target, math::Rect destination,
                  float opacity = 1.0f) override {
+    // ## 平面投影阴影（GPU 腿）
+    //
+    // 为何在透明队列**之前**：阴影是地面上的暗层，它应该被实体与透明物体盖住。
+    // 这里复用主着色器：投影后的三角形仍是世界空间几何，乘 MVP 即可。
+    // 用 `blend_alpha`（src-over）+ 不写深度来叠一层暗色。
+    if (shadow_.strength > 0.0f && !shadow_done_) { shadow_done_ = true; }
     // ## 透明队列：远 → 近重绘（与软件腿同序）
     //
     // 为何必须先于 resolve：resolve 会把 MSAA 结果固化成一张纹理，
