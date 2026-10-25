@@ -559,6 +559,12 @@ struct Options {
   /// 调用方拿不到就没法握手（实测踩过：--control-file 没接，e2e 一直报 token 校验失败）。
   std::string control_file{};
   std::string shots{};
+  /// 渲染器：auto（按实测帧耗时选）/ gpu / software。空 = 框架默认。
+  ///
+  /// 保留这个开关是因为**呈现故障要能二分**：应用内截图走软件缓冲、真实窗口走
+  /// 交换链，所以"截图有内容但窗口黑"必须能切到 software 复现与定位
+  /// （实测踩过：GPU 呈现异常时截图全对、屏幕全黑，没有这个开关只能盲猜）。
+  std::string renderer{};
 };
 
 auto parse_options(int argc, char** argv) -> Options {
@@ -577,6 +583,8 @@ auto parse_options(int argc, char** argv) -> Options {
       o.control_port = std::atoi(argv[++i]);
     } else if (flag == "--control-file" && i + 1 < argc) {
       o.control_file = argv[++i];
+    } else if (flag == "--renderer" && i + 1 < argc) {
+      o.renderer = argv[++i];
     } else if (flag == "--shots" && i + 1 < argc) {
       o.shots = argv[++i];
     }
@@ -617,6 +625,7 @@ auto run_app(int argc, char** argv) -> int {
   app_options.backend = options.headless ? "headless" : std::string{};
   app_options.control_port = static_cast<std::uint16_t>(options.control_port);
   app_options.control_file = options.control_file;
+  if (!options.renderer.empty()) app_options.renderer = options.renderer;
   app_options.screenshot_dir = options.shots;
   // 脚本宿主只在需要时创建：本示例的界面逻辑全在 JS 里，必须打开
   app_options.enable_script = true;

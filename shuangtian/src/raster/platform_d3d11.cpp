@@ -2748,6 +2748,22 @@ class D3dPresenter final : public Presenter {
     }
     ID3D11DeviceContext* context = holder().context_or_null();
     if (context == nullptr) return unexpected(ErrorCode::Io, "没有 D3D11 上下文");
+    // ## 上屏前**必须先把 deferred 里录制的命令提交掉**（2026-10-25 黑屏的真因）
+    //
+    // 自从`每画布一个 deferred context`（commit 4de2bcbe）之后，所有绘制命令都先录进
+    // **命令列表**，只有 `FinishCommandList` + `ExecuteCommandList` 之后才真正落到
+    // 
+    // `target_` 纹理上。而 `present()` 原先直接 `CopyResource(backbuffer_, target())` ——
+    // 拷到的是**还没执行**的空纹理，于是屏幕全黑。
+    //
+    // 为什么截图/导出看不出这个问题：它们走 `ensure_readback()`，而那里**开头就是**
+    // `submit_deferred_locked()`。于是形成了一条极难认的错位：
+    // **截图正常、屏幕全黑**。排查时"应用内截图正常"反而会成为误导证据。
+    //
+    // 锁：`submit_deferred_locked` 内部注释要求调用方持有 `g_context_mutex()`；
+    // `CopyResource` + `Present` 也碰立即上下文，所以整段一起进锁。
+    const std::scoped_lock present_lock(g_context_mutex());
+    gpu_canvas->submit_deferred_locked();
     // 关键一步：GPU → GPU 拷贝，**不经过 CPU**（这就是 M5 的全部价值）
     context->CopyResource(backbuffer_, gpu_canvas->target());
     const HRESULT result = swapchain_->Present(0, 0);
