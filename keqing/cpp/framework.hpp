@@ -508,6 +508,11 @@ inline Json toolCall(const ToolRegistry& reg, const std::string& tool, const Jso
     Json result = Json::makeObj();
     result.set("output", Json::makeStr(r.output));
     if (r.ok && !r.data.isNull()) result.set("data", r.data);
+    // **工具级失败必须让上层看见**：ToolResult::ok=false 表示"工具跑了但判定为失败"
+    // （查重拒绝、缺必填字段等）。原先这里丢了 ok，于是协议层永远回 ok:true，
+    // 调用方（模型）以为成功——它会拿错误文本当正常输出读，再基于失败的写入继续推理。
+    // 用 error 字段承载：protocol::run 见到 result.error 就把外层置 ok:false。
+    if (!r.ok) result.set("error", Json::makeStr(r.output));
     return result;
 }
 

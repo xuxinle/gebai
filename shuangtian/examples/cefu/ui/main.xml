@@ -1,0 +1,62 @@
+<!--
+  册府（CeFu）界面（声明式）。改这个文件保存即生效，不必重编重启。
+
+  布局取向：**书的三栏**，而不是"搜索框 + 结果列表"。
+
+  ┌──────────┬────────────────┬──────────────────────────┐
+  │ 分类（册） │ 词条（页）      │ 正文（当前词条）          │
+  └──────────┴────────────────┴──────────────────────────┘
+
+  为什么第三节是"正文"而不是"详情弹窗"：
+  工具书的使用方式是**反复对照**——看步骤的同时要能看到现象与命令。
+  弹窗会遮住列表，来回关开是主要时间浪费。
+
+  属性名以框架 `box_prop_names()` 的白名单为准（**写错会被如实报出来，不静默**）：
+  字号 `font_size`、字重 `font_weight`、文字色 `text_color`、背景 `background`/`surface`、
+  对齐 `align_items`（`align` 也认，走归一化）。曾把字重写成 `weight`、颜色写成 `fg`——被报为
+  "未生效的属性"，所以这里按白名单写。
+-->
+<Column id="root" gap="0" grow="true" surface="base">
+  <!-- 顶栏：检索 + 整理入口 -->
+  <Row gap="8" padding="10" align_items="center" surface="alt">
+    <Text id="brand" font_size="16" font_weight="semibold">册府</Text>
+    <Input id="search" placeholder="检索（症状 / 别名 / 命令 / 负责人…）" grow="true"/>
+    <Button id="do-search" label="检索" icon="search" variant="primary"/>
+    <Button id="clear-search" label="清空" variant="ghost"/>
+    <!-- 竖直分隔线用 1px 面板：框架没有 vertical 这个属性（`Separator` 也只有横向） -->
+    <Panel width="1" height="22" background="#3a3f47"/>
+    <Button id="review" label="整理" icon="check"/>
+    <Text id="stats" font_size="12" text_color="#8a8f98">——</Text>
+  </Row>
+
+  <!-- 主体三栏 -->
+  <Row gap="0" grow="true">
+    <!-- ① 分类：成册 -->
+    <Column id="cat-pane" width="200" padding="8" gap="2" surface="sunken">
+      <Text font_size="12" font_weight="semibold" text_color="#8a8f98" padding_x="4">分类</Text>
+      <Column id="cat-list" gap="1"/>
+    </Column>
+
+    <!-- ② 词条列表 -->
+    <Column id="list-pane" width="340" padding="8" gap="6" surface="none">
+      <Text id="list-title" font_size="13" font_weight="semibold">全部词条</Text>
+      <Input id="filter" placeholder="在本册内过滤…"/>
+      <Column id="entry-list" gap="4" grow="true"/>
+    </Column>
+
+    <Panel width="1" background="#3a3f47"/>
+
+    <!-- ③ 正文：当前词条全文 -->
+    <Column id="detail-pane" grow="true" padding="14" gap="10">
+      <Text id="detail-title" font_size="18" font_weight="bold">从左边选一个词条</Text>
+      <Text id="detail-meta" font_size="12" text_color="#8a8f98"/>
+      <Column id="detail-body" gap="10" grow="true"/>
+    </Column>
+  </Row>
+
+  <!-- 底栏：整理提示 / 操作反馈 -->
+  <Row gap="8" padding="8" align_items="center" surface="alt">
+    <Text id="status" font_size="12" text_color="#8a8f98" grow="true">就绪</Text>
+    <Button id="confirm" label="标为已确认" variant="ghost"/>
+  </Row>
+</Column>

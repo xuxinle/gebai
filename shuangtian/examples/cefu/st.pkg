@@ -1,0 +1,16 @@
+{
+  "name": "cefu",
+  "version": "0.1.0",
+  "kind": "executable",
+  "cxx_standard": 23,
+  "framework": { "path": "../.." },
+  "sources": [],
+  "targets": {
+    "cefu": {
+      "kind": "executable",
+      "sources": ["src/*.cpp"],
+      "embed": ["ui/*.js", "ui/*.xml"],
+      "executable": "cefu{exe}"
+    }
+  }
+}
