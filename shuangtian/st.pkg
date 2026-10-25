@@ -380,6 +380,11 @@
     "frame_stats_diff_probe": {
       "kind": "executable",
       "sources": ["tools/frame_stats_diff_probe.cpp", "examples/caiyun/frame_stats.cpp"],
+      "//": "vignette 四条渐变带的代价（横向 vs 竖向 vs 纯色）"
+    },
+    "vignette_cost_probe": {
+      "kind": "executable",
+      "sources": ["tools/vignette_cost_probe.cpp"],
       "include_dirs": ["examples/caiyun"],
       "exclude_sources": ["src/pkg/*"],
       "//note": "本机 GPU 腿可用性（无头模式下 st doctor 有意不探测 GPU，这里显式探一次）"
