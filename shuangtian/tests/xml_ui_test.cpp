@@ -96,6 +96,28 @@ ST_TEST(xml_ui_style_properties_land_on_style) {
   ST_CHECK(tree->surface() == st::ui::Element::Surface::Alt);
 }
 
+ST_TEST(xml_ui_short_names_take_their_own_value) {
+  // 缺陷回归（2026-10-25，热重载轮）：`align` / `bg` / `fg` / `valign` 这几个**短名**
+  // 经 `normalize_property` 改名（`align` → `align_items`），而取值曾按**改名后**的名字
+  // 去读 `attr_or`——XML 里当然没有那个键，于是拿到空串、`parse_align("")` 必失败。
+  // 现象：**每一个短名属性都被报成“值没被接受”**，而界面就是“对齐/背景色写了不生效”。
+  //
+  // 夹具要推到**非默认值**上：默认 `align_items` 是 `Start`，拿 `start` 去断言恒绿。
+  st::ui::XmlBuildReport report;
+  auto tree = st::ui::build_from_xml(
+      R"(<Row align="center" bg="#112233" fg="#ffffff"><Text fg="#ff0000">x</Text></Row>)",
+      &report);
+  ST_REQUIRE(tree != nullptr);
+  if (!report.clean()) st::print("[xml-ui] 报告：{}\n", describe(report));
+  ST_CHECK(report.clean());
+  ST_CHECK(tree->style().align_items == st::ui::Align::Center);
+  // 字面色取值：`bg` → `background`，落成具体的 `math::Color`（不是默认的全透明）。
+  const st::math::Color background = tree->style().background;
+  ST_CHECK_EQ(background.r, std::uint8_t{0x11});
+  ST_CHECK_EQ(background.g, std::uint8_t{0x22});
+  ST_CHECK_EQ(background.b, std::uint8_t{0x33});
+}
+
 ST_TEST(xml_ui_row_and_column_map_to_panel_direction) {
   st::ui::XmlBuildReport report;
   auto row = st::ui::build_from_xml("<Row/>", &report);

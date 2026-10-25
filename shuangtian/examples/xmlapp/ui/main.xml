@@ -38,7 +38,7 @@
     <Button id="filter-open" label="未完成" variant="ghost" size="small"/>
     <Button id="filter-done" label="已完成" variant="ghost" size="small"/>
     <Spacer grow="true"/>
-    <Progress id="progress" value="0" size="120"/>
+    <Progress id="progress" value="0" width="120"/>
     <Button id="clear-done" label="清除已完成" variant="ghost" size="small"
             hint="移除所有已完成的任务"/>
   </Row>

@@ -93,8 +93,14 @@ auto to_json(std::string_view text) -> st::Json {
 }
 
 /// 把一条属性写进元素：先 `BoxProps` 字段，再落到属性面（走 `apply_properties`）。
-auto apply_one(UiRoot& root, Element& element, const std::string& name, const st::xml::Node& node)
-    -> bool {
+///
+/// `source_name` 与 `name` **必须分开传**：`normalize_property` 会改名
+///（`align` → `align_items`、`bg` → `background`），而**取值只能按 XML 里原来那个名字读**。
+/// 曾经只传归一后的名字，于是 `attr_or("align_items")` 拿到空串（XML 里写的是 `align`），
+/// `parse_align("")` 必失败——**每一个短名属性都被报成"值没被接受"**，
+/// 而症状是"对齐/背景色写了不生效"（本轮热重载的建树报告里一次暴出 2 处）。
+auto apply_one(UiRoot& root, Element& element, const std::string& name,
+               const std::string& source_name, const st::xml::Node& node) -> bool {
   if (name == "id") {
     element.set_id(std::string(node.attr_or("id", "")));
     return true;
@@ -108,7 +114,7 @@ auto apply_one(UiRoot& root, Element& element, const std::string& name, const st
     return true;
   }
   st::Json props = st::Json::object();
-  props[name] = to_json(node.attr_or(name, ""));
+  props[name] = to_json(node.attr_or(source_name, ""));
   const st::Json changed = ui::apply_properties(root, element, props);
   return !changed.empty();
 }
@@ -178,7 +184,7 @@ void build_node(UiRoot& root, Element& parent, const st::xml::Node& node, XmlBui
     // 报告里写**原文属性名**（`align` 而非 `align_items`）——用户对着 XML 排查。
     const std::string target = normalize_property(name);
     const bool known = box_prop_names().contains(target);
-    const bool applied = apply_one(root, *element, target, node);
+    const bool applied = apply_one(root, *element, target, name, node);
     if (!applied && !known) {
       report.unknown_attributes.push_back(
           std::format("{}.{}（第 {} 行）", node.name, name, node.line));
@@ -238,7 +244,7 @@ auto build_from_xml_node(const st::xml::Node& node, XmlBuildReport* report,
     (void)value;
     const std::string target = normalize_property(name);
     const bool known = box_prop_names().contains(target);
-    const bool applied = apply_one(scratch, *element, target, node);
+    const bool applied = apply_one(scratch, *element, target, name, node);
     if (!applied && !known) {
       out.unknown_attributes.push_back(
           std::format("{}.{}（第 {} 行）", node.name, name, node.line));
