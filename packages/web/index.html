@@ -106,8 +106,9 @@
             </svg>
             <div id="conn" class="conn"></div>
           </div>
-          <!-- 子会话观察面板入口：本会话的 subsession_run 运行数/运行中数（点开右侧抽屉看过程与报告） -->
-          <button id="subsessions-btn" class="icon-btn subsessions-btn" data-tip="子会话（运行过程与报告）" aria-label="子会话观察面板">
+          <!-- 子会话观察面板入口：只在当前会话有子会话时显示（无子会话的会话里它没有内容可看，
+               占着标题栏只是噪声）。默认隐藏，由 subsessions.ts 的 syncButton 按当前会话决定显隐。 -->
+          <button id="subsessions-btn" class="icon-btn subsessions-btn" data-tip="子会话（运行过程与报告）" aria-label="子会话观察面板" hidden>
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21c4 0 6-3 6-6 0-4-3-6-6-9-3 3-6 5-6 9 0 3 2 6 6 6z"/><path d="M12 21v-8"/></svg>
             <span class="subsessions-badge" hidden>0</span>
           </button>

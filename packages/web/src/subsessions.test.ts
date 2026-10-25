@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test"
-import { finishRun, mergeFromMessage, noteMerge, noteRound, noteToolCall, registerArchive, startRun } from "./subsessions"
+import { setCurrentSession } from "./state"
+import { finishRun, mergeFromMessage, noteMerge, noteRound, noteToolCall, refreshSubSessions, registerArchive, startRun } from "./subsessions"
 
 /**
  * 面板记录层（DOM 由测试基线 scripts/test-preload.ts 提供最小桩）：
@@ -97,5 +98,35 @@ describe("子会话观察：运行记录（subsessions）", () => {
     const rec = registerArchive("s2", { runId: "hist-1", agents: [], input: "x", output: "", messages: [] })
     expect(rec.merges).toBe(1) // 最终合入不重复计数
     expect(rec.status).toBe("done")
+  })
+
+  test("标题栏入口只在有子会话的会话显示；运行开始即显、结束后角标回归", () => {
+    const btn = document.getElementById("subsessions-btn") as unknown as { hidden: boolean }
+
+    // 当前会话无子会话：入口隐藏
+    setCurrentSession({ id: "s-none", name: "空" } as never)
+    refreshSubSessions()
+    expect(btn.hidden).toBe(true)
+
+    // 另一会话的子会话不得让本会话的按钮亮起来
+    startRun({ sessionId: "s-other", runId: "o1", agents: [], input: "x" })
+    refreshSubSessions()
+    expect(btn.hidden).toBe(true)
+
+    // 当前会话的子会话开始运行：即时显示（startRun 内部已刷）
+    setCurrentSession({ id: "s-live", name: "活" } as never)
+    refreshSubSessions()
+    expect(btn.hidden).toBe(true)
+    startRun({ sessionId: "s-live", runId: "l1", agents: [], input: "x" })
+    expect(btn.hidden).toBe(false)
+
+    // 结束后仍显示（有历史记录可查）
+    finishRun("s-live", "l1", "报告")
+    expect(btn.hidden).toBe(false)
+
+    // 切回其他会话：再次隐藏
+    setCurrentSession({ id: "s-none", name: "空" } as never)
+    refreshSubSessions()
+    expect(btn.hidden).toBe(true)
   })
 })

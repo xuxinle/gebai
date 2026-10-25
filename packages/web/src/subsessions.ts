@@ -207,6 +207,8 @@ export function finishRun(sessionId: string, runId: string, output: string): voi
     renderList()
     if (selected === runId) renderDetail()
   }
+  // 角标：运行数→总数、has-running 高亮退去（少了这步，跑完后标题栏还显示“运行中”）
+  syncButton()
 }
 
 /**
@@ -505,17 +507,26 @@ function nestedEntryRow(sessionId: string, rec: RunRecord): HTMLElement {
 
 /* ---------- 入口与事件装配 ---------- */
 
-/** 当前会话运行数角标（标题栏按钮）。 */
+/** 当前会话运行数角标（标题栏按钮）。
+ *  按钮**只在当前会话有子会话时显示**（无子会话会话里它没有可展示的内容，占着标题栏只是噪声）；
+ *  有运行中的子会话时高亮并显示运行数，仅历史记录时显示总数。 */
 function syncButton(): void {
   const btn = buttonEl()
   if (!btn) return
-  const running = currentRuns().filter((r) => r.status === "running").length
-  const total = currentRuns().length
+  const runs = currentRuns()
+  const running = runs.filter((r) => r.status === "running").length
+  const total = runs.length
+  // 无子会话：整个入口隐藏，面板若开着则一并收起（已无当前会话的内容可展示）
+  btn.hidden = total === 0
+  if (total === 0) {
+    if (open) closeSubSessions() // 它会再调一次 syncButton：此时 open 已为 false，不再进本分支
+    return
+  }
   btn.classList.toggle("has-running", running > 0)
   btn.classList.toggle("active", open)
   const badge = btn.querySelector<HTMLElement>(".subsessions-badge")
   if (badge) {
-    badge.hidden = total === 0
+    badge.hidden = false
     badge.textContent = running > 0 ? String(running) : String(total)
   }
 }
