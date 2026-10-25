@@ -121,6 +121,46 @@ describe("personaNote：注入注记的必备内容", () => {
     const siblingSection = withSiblings.slice(withSiblings.indexOf("其它分身"))
     expect(siblingSection).not.toContain("`support`")
   })
+
+  test("未声明 agents 时**不写**记忆段（不给没装工具的人格凭空提要求）", () => {
+    // 两半必须同源：写了纪律却没装工具 → 它会去调不存在的工具；
+    // 装了工具却不写纪律 → 想不起来用。这里钉住“没声明就一个字都不提”。
+    expect(note).not.toContain("册府")
+    expect(note).not.toContain("cefu_search")
+  })
+
+  describe("声明了 cefu 时写记忆纪律", () => {
+    const withMemory = personaNote({ ...runInput(), agents: ["cefu"], now: 0 } as never)
+
+    test("写明「答之前先查」（否则它凭印象答运维问题）", () => {
+      expect(withMemory).toContain("册府")
+      expect(withMemory).toContain("cefu_search")
+      expect(withMemory).toContain("答之前先查")
+    })
+
+    test("写明三个写入时机（用户纠正 / 实测结论 / 问第二遍）", () => {
+      // 不写清“什么时候该写”时，模型要么什么都不写，要么把闲聊也写成词条
+      expect(withMemory).toContain("用户纠正")
+      expect(withMemory).toContain("实测")
+      expect(withMemory).toContain("问第二遍")
+    })
+
+    test("写明三条硬约束：title / category / source_ref", () => {
+      // source_ref 尤其关键：没有出处的知识事后无法判断该不该信
+      for (const k of ["title", "category", "source_ref"]) expect(withMemory).toContain(k)
+      expect(withMemory).toContain("出处")
+    })
+
+    test("写明「能 diff 成代码的写代码，不进的册府」（防知识库变垃圾场）", () => {
+      expect(withMemory).toContain("写代码")
+    })
+
+    test("只声明其它子代理时不写记忆段（cid 不匹配就不提）", () => {
+      const other = personaNote({ ...runInput(), agents: ["imgproc"], now: 0 } as never)
+      expect(other).not.toContain("册府")
+      expect(other).not.toContain("cefu_search")
+    })
+  })
 })
 
 describe("EnginePersonaRunner：只经既有 channelNote 注入", () => {

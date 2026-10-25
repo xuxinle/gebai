@@ -56,6 +56,26 @@ export interface PersonaDef extends PersonaIdentity {
   description?: string
   /** 本定义需要的环境变量（声明式白名单，与渠道/事件源同口径）。 */
   envVars?: Array<{ name: string; description: string; secret?: boolean }>
+  /**
+   * 这个人格的会话默认装载哪些**子代理工具包**（如 `["cefu"]`）。
+   *
+   * ## 为何是声明式而不是默认全装
+   *
+   * 装载一份工具包 = 多一层工具面（每个工具的名称+描述+schema 都要进上下文）。
+   * 默认全装等于“不告诉部署方就改了他的人格行为与 token 开销”，那是悄悄改契约。
+   * 而写在这里的好处是：**人格需要什么能力是人格定义的一部分**，与 `drivers`、
+   * `envVars` 同一层语义，看得见、可审计。
+   *
+   * ## 写进提示词的那一半
+   *
+   * 光有工具不够——模型面对一排工具常常“不知道什么时候该用”（工具在表里但不会被想起来）。
+   * 所以声明了 `agents` 的人格，提示词里会多一段「记忆纪律」，告诉它何时查、何时写。
+   * 两半合起来才叫“有了记忆”；只装工具不告诉它，等于给了本子但不说要记。
+   *
+   * 名字必须是已注册的子代理名（与 `custom/agents/` 目录名、内置子代理名一致）；
+   * 写错不会静默失效，会在装载时如实报错（一个装不上的工具包等于不存在，最难查）。
+   */
+  agents?: string[]
 }
 
 /** 扫描域（内置 + 二开）。 */
@@ -99,7 +119,7 @@ const ID_RE = /^[a-z0-9_]+$/
 export function validatePersonaDef(raw: unknown, expectedId: string): string | null {
   if (!raw || typeof raw !== "object") return "persona 必须是对象"
   const o = raw as Record<string, unknown>
-  const allowed = new Set(["id", "name", "identity", "role", "drivers", "description", "envVars"])
+  const allowed = new Set(["id", "name", "identity", "role", "drivers", "description", "envVars", "agents"])
   for (const k of Object.keys(o)) {
     if (!allowed.has(k)) return `含未知字段「${k}」（可用：${[...allowed].join(" / ")}）`
   }
@@ -138,6 +158,18 @@ export function validatePersonaDef(raw: unknown, expectedId: string): string | n
       const item = v as Record<string, unknown>
       if (typeof item.name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(item.name)) return `envVars.name 非法：${String(item.name)}`
       if (typeof item.description !== "string") return `envVars「${item.name}」缺少 description`
+    }
+  }
+  if (o.agents !== undefined) {
+    if (!Array.isArray(o.agents)) return "agents 必须是数组"
+    const seenAgents = new Set<string>()
+    for (const a of o.agents) {
+      if (typeof a !== "string" || !a.trim()) return "agents 每项必须是非空字符串"
+      // 子代理名与事件源的 name 同口径（[a-z0-9_]+）：写中文/大写/短横线会在装载时失败，
+      // 而“装不上的工具包”表现为“模型没这个能力”，最难查——所以在这里就拦住。
+      if (!ID_RE.test(a)) return `agents「${a}」必须是 [a-z0-9_]+（与子代理目录名一致）`
+      if (seenAgents.has(a)) return `agents「${a}」重复`
+      seenAgents.add(a)
     }
   }
   return null

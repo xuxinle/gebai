@@ -74,8 +74,28 @@ export const persona: PersonaDef = {
     { id: "support", focus: "答支持群", subscriptions: ["message"] },
     { id: "alerts",  focus: "盯告警",   subscriptions: ["webhook", "schedule"] },
   ],
+  agents: ["cefu"],            // 可选：会话默认装载的子代理工具包
 }
 ```
+
+### `agents`：给这名角色接上记忆
+
+不写 `agents` 时，人格只靠**会话历史**记事：每轮都从零开始，今天判断过的明天还要重新判断，
+用户纠正过的下次还会错。写成 `agents: ["cefu"]` 后两件事同时发生：
+
+| 半边 | 宿主要做什么 | 效果 |
+|---|---|---|
+| 工具面 | 建会话时写进 `loadedSubAgents` | 它能用 `cefu_search / cefu_get / cefu_put / cefu_review` 等 |
+| 提示词 | 人格注记多一段「你的记忆」 | 它**知道何时查、何时写**、写时必给 `title/category/source_ref` |
+
+**两半必须同源**：只装工具不写纪律，模型面对一排工具想不起来用；只写纪律不装工具，
+它会去调不存在的工具然后失败。两种错配都不报错，表现都是「配了但没效果」。
+
+默认**不装**：装载一份工具包 = 多一层工具面进上下文（每个工具的名称+描述+schema 都算 token）。
+不替已有部署偷偷加开销。
+
+> 写 `agents` 的人应当同时在 `identity` 里写清“哪些知识该从记忆里查、哪些靠你自己判断”——
+> 框架负责接通，**分工得部署方定**。`packages/persona/src/personas/xiaoshuang.ts` 是个例子。
 
 `subscriptions` 是**封闭集合**（`*` / `kind` / `channel` / `channel:kind`），不支持正则与通配前缀；
 写错会在加载期报错而不是静默失效（一个永不响应的分身最难排查）。

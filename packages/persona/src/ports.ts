@@ -78,6 +78,16 @@ export interface DriverTarget {
   identity: PersonaIdentity
   /** 会话归属用户。 */
   user: string
+  /**
+   * 这个人格声明的子代理工具包（`PersonaDef.agents` 透传）。
+   *
+   * 为何要传到 runner 而不只交给会话层：**提示词得跟着变**。
+   * 声明了工具包的人格，提示词里要多一段「何时查、何时写」——
+   * 光把工具放进表里，模型面对一排工具常常想不起来用。
+   * 两半（工具面 + 提示词）必须由同一个来源驱动，否则会出现
+   * 「没装工具却提示它有」与「装了工具但不告诉它」两种错配。
+   */
+  agents?: string[]
 }
 
 /**
@@ -183,6 +193,19 @@ export interface PersonaLookup {
    * 得靠宿主侧或新增跨 driver 闸门。
    */
   maxConcurrent(personaId: string): number
+  /**
+   * 该人格声明的子代理工具包（`PersonaDef.agents`；无声明时返回空数组）。
+   *
+   * ## 为何单独一个方法，而不是塞进 `get()`
+   *
+   * `get()` 刻意只返回身份三件套（`id/name/identity/role`），它进的是**系统提示词**，
+   * 调用方不该在那里看到 drivers / description 这类内部字段。把 agents 塞进 `get()`
+   * 会让那条边界模糊。而 agents 确实需要流到两个地方（会话层装工具、提示词写纪律），
+   * 所以给它一条**显式的窄接口**：要的人主动取，不想知道的人看不见。
+   *
+   * 可选：未实现的旧 `PersonaLookup` 实现可缺省它（返回 undefined = 无工具包）。
+   */
+  agents?(personaId: string): string[]
 }
 
 /** 日志接口（避免本包依赖具体日志实现）。 */

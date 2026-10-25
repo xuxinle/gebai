@@ -35,6 +35,16 @@ export interface PersonaSessionStore {
 export interface PersonaSessionResolverOptions {
   store: SessionStore | PersonaSessionStore
   log?: { info(msg: string): void; warn(msg: string): void }
+  /**
+   * 取该人格声明的子代理工具包（`PersonaDef.agents`）。
+   *
+   * 为何要传进来而不是在建会话后再装：`loadedSubAgents` 是**会话持久化字段**——
+   * 建会话那一刻写进去，重启/恢复时引擎据此重新注册工具。事后补装就必须另有
+   * 一条路径把它写盘，否则“重载后工具不见了”。写在这里等于用一次写盘拿到这两个保证。
+   *
+   * 缺省不装（返回空数组）：工具包是可选能力，默认不改动任一部署的工具面与 token 开销。
+   */
+  agentsFor?: (personaId: string) => string[]
 }
 
 /** 会话绑定键（`personaId\0driverId`）——用 NUL 分隔避免 id 里出现冒号时的歧义。 */
@@ -55,6 +65,8 @@ function defaultName(personaName: string, driverId: string): string {
 export class PersonaSessionResolver implements SessionResolver {
   private readonly store: PersonaSessionStore
   private readonly log?: PersonaSessionResolverOptions["log"]
+  /** 该人格声明的子代理工具包（见 `PersonaSessionResolverOptions.agentsFor`）。 */
+  private readonly agentsFor?: (personaId: string) => string[]
   /** 已解析的绑定（避免每次事件都扫全部会话）。 */
   private readonly memo = new Map<string, string>()
   /** 同名并发保护：同一 key 的并发解析只建一个会话。 */
@@ -65,6 +77,7 @@ export class PersonaSessionResolver implements SessionResolver {
   constructor(opts: PersonaSessionResolverOptions) {
     this.store = opts.store
     this.log = opts.log
+    this.agentsFor = opts.agentsFor
   }
 
   /**
@@ -142,9 +155,16 @@ export class PersonaSessionResolver implements SessionResolver {
     const name = this.nameFor(personaId, driverId)
     const session = await this.store.createSession(user, name)
     session.persona = { personaId, driverId, boundAt: Date.now() }
+    // 工具包在建会话时一次写进持久化字段（`loadedSubAgents`）——引擎重载后据此重注册。
+    // 不写的话：新会话当时能用（内存里有），重启后就“工具不见了”，且不报错。
+    const agents = this.agentsFor?.(personaId) ?? []
+    if (agents.length) session.loadedSubAgents = [...agents]
     await this.store.save(session, { touch: false })
     this.memo.set(key, session.id)
-    this.log?.info(`[persona:sessions] 为 ${personaId}/${driverId} 新建会话 ${session.id}（${name}）`)
+    this.log?.info(
+      `[persona:sessions] 为 ${personaId}/${driverId} 新建会话 ${session.id}（${name}）` +
+        (agents.length ? `，装载工具包 ${agents.join(",")}` : ""),
+    )
     return { sessionId: session.id, created: true, name }
   }
 

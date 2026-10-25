@@ -152,6 +152,16 @@ export class PersonaCatalog implements PersonaLookup {
   }
 
   /**
+   * 该人格声明的子代理工具包。
+   *
+   * 与 `get()` 分开：`get()` 刻意只给身份三件套（它进系统提示词），
+   * 而工具包要流到会话装工具与提示词写纪律两个地方——走一条显式的窄接口更清楚。
+   */
+  agents(personaId: string): string[] {
+    return this.personas.get(personaId)?.agents ?? []
+  }
+
+  /**
    * 该人格的全部 driver（静态优先、动态在后；同 id 静态胜出）。
    *
    * 静态胜出为什么重要：模型可以通过 `driver_create` 工具造分身。若允许它用同名

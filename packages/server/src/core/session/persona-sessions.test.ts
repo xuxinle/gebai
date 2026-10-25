@@ -33,6 +33,27 @@ describe("PersonaSessionResolver：稳定映射", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
+  test("人格声明了 agents → 建会话时写进 loadedSubAgents（重启后工具还在）", async () => {
+    // 为何钉住的是“写进持久化字段”而不是“当时能用”：新会话建好后内存里本来就有，
+    // 真正的坑是重启/重载——`loadedSubAgents` 是引擎重建工具面的依据。
+    // 没写它 = 当场正常、重载后“工具不见了”，而且不报错。
+    const { home, store } = await makeStore()
+    const r = new PersonaSessionResolver({ store, agentsFor: (id) => (id === "xiaoshuang" ? ["cefu"] : []) })
+    const got = await r.resolveDriver({ personaId: "xiaoshuang", driverId: "support", user: "admin", event: {} })
+    const saved = await store.load(got.sessionId, "admin")
+    expect(saved?.loadedSubAgents).toEqual(["cefu"])
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("未声明 agents → 不写 loadedSubAgents（不偷偷改旧部署的工具面）", async () => {
+    const { home, store } = await makeStore()
+    const r = new PersonaSessionResolver({ store, agentsFor: () => [] })
+    const got = await r.resolveDriver({ personaId: "p", driverId: "d", user: "admin", event: {} })
+    const saved = await store.load(got.sessionId, "admin")
+    expect(saved?.loadedSubAgents).toBeUndefined()
+    rmSync(home, { recursive: true, force: true })
+  })
+
   test("幂等：同 key 多次调用返回同一 sessionId", async () => {
     const { home, store } = await makeStore()
     const r = new PersonaSessionResolver({ store })

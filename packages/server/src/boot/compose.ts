@@ -662,7 +662,14 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     await driverRegistry.init()
 
     personaCatalog = new PersonaCatalog({ personas: found.personas, drivers: driverRegistry })
-    personaSessions = new PersonaSessionResolver({ store, log: { info: log.info, warn: log.warn } })
+    personaSessions = new PersonaSessionResolver({
+      store,
+      log: { info: log.info, warn: log.warn },
+      // 人格声明的子代理工具包（`PersonaDef.agents`）→ 建会话时写进 `loadedSubAgents`。
+      // 用箭头函数取 catalog 而不是传值：catalog 在热加载时会被**整体替换**，
+      // 传值会拿到旧实例，于是“改了 agents 却要重启才生效”（与热加载的承诺相抵）。
+      agentsFor: (personaId) => personaCatalog?.agents(personaId) ?? [],
+    })
     // 会话名用「人格显示名·分身 id」：侧栏里一眼能认出来
     personaSessions.nameOf = (id) => personaCatalog!.get(id)?.name ?? id
 

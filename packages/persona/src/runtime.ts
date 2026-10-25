@@ -401,6 +401,10 @@ export class PersonaRuntime {
         // 兄弟分身（除自己）：runner 据此告知「同一个我」还有哪些分工在跑。
         // 为何在快照时算而不是在 runner 里取：runner 只认得自己这一位，拿不到全角色视图。
         const siblings = this.opts.lookup.drivers(personaId).filter((d) => d.id !== driver.id)
+        // 该人格声明的子代理工具包：**同一个来源**同时驱动"会话装工具"与"提示词写纪律"。
+        // 两半必须同源（见 `DriverTarget.agents` 的注释）：一分离就会出现
+        // “装了工具不告诉它”或“提示它有却没装”两种错配，而且都不报错。
+        const agents = this.opts.lookup.agents?.(personaId) ?? []
         await this.opts.runner.run({
           personaId,
           identity,
@@ -413,6 +417,7 @@ export class PersonaRuntime {
           signal,
           mailbox,
           ...(siblings.length ? { siblings } : {}),
+          ...(agents.length ? { agents } : {}),
           ...(attachments ? { attachments } : {}),
         })
       },
