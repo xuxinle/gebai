@@ -1,0 +1,48 @@
+{
+  "name": "slot-robot-example · 机器人启动（可复用示例）",
+  "fps": 30,
+  "size": [
+    1920,
+    1080
+  ],
+  "transition": 0.0,
+  "fade_in": 0.4,
+  "fade_out": 0.6,
+  "brand_wordmark": "",
+  "brand_latin": "",
+  "footer_note": "",
+  "audio": {
+    "enabled": false,
+    "style": "calm",
+    "bpm": 100,
+    "gain": 0.3,
+    "voice": []
+  },
+  "scenes": [
+    {
+      "kind": "custom",
+      "duration": 9.0,
+      "layout": "slot-robot-example.js",
+      "accent": "#E8452D",
+      "background": [
+        "#FFFFFF",
+        "#E8DCD6"
+      ],
+      "title": "",
+      "subtitle": "",
+      "wrap": false,
+      "layers": [
+        {
+          "kind": "rect",
+          "x": "0",
+          "y": "0",
+          "w": "2",
+          "h": "2",
+          "fill": "#000000",
+          "opacity": 0.01,
+          "enter": 0
+        }
+      ]
+    }
+  ]
+}
