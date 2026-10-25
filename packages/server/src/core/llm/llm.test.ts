@@ -938,3 +938,52 @@ describe("大文件生成截断防护（输出上限截断与参数抢救）", (
     expect(body.max_output_tokens).toBe(9000)
   })
 })
+
+describe("出站工具定义瘦身（空 required / 空 properties 不发给模型）", () => {
+  /** 捕获本次请求发出的 tools 数组（三种 apiKind 序列化形状不同，取值统一）。 */
+  async function sentTools(tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }>, apiKind: ProviderConfig["apiKind"]) {
+    let body: Record<string, unknown> = {}
+    const stream = apiKind === "anthropic"
+      ? 'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n'
+      : apiKind === "responses"
+        ? 'data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n'
+        : OK_STREAM
+    await withFetch(async (_u, init) => {
+      body = JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>
+      return new Response(stream, { status: 200 })
+    }, async () => {
+      for await (const _ of createProvider({ ...BASE_CFG, apiKind }).chat([{ role: "user", content: "x" }], { tools })) void _
+    })
+    const list = body.tools as Array<Record<string, unknown>>
+    // openai 包一层 function；responses 与 anthropic 扁形（名称与参数键不同）
+    return list.map((t) => (t.function as Record<string, unknown> | undefined) ?? t)
+  }
+
+  const paramKey = (apiKind: ProviderConfig["apiKind"]) => (apiKind === "anthropic" ? "input_schema" : "parameters")
+
+  for (const apiKind of ["openai", "responses", "anthropic"] as const) {
+    test(`${apiKind}：required:[] 与 properties:{} 被剔除，非空声明原样保留`, async () => {
+      const sent = await sentTools(
+        [
+          // 无参工具：空 required + 空 properties
+          { name: "no_args", description: "无参工具", parameters: { type: "object", properties: {}, required: [] } },
+          // 全可选但有参数：只有空 required 可剔，properties 必须保留
+          { name: "all_optional", description: "全可选", parameters: { type: "object", properties: { tail: { type: "number" } }, required: [] } },
+          // 有必填：两者都不可动
+          { name: "with_required", description: "有必填", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
+        ],
+        apiKind,
+      )
+      const key = paramKey(apiKind)
+      const params = (name: string) => sent.find((t) => t.name === name)![key] as Record<string, unknown>
+      // 无参工具：两个空声明都被剔除，只剩 type
+      expect(params("no_args")).toEqual({ type: "object" })
+      expect(params("no_args")).not.toHaveProperty("required")
+      expect(params("no_args")).not.toHaveProperty("properties")
+      // 有参数则 properties 保留，只剔空 required
+      expect(params("all_optional")).toEqual({ type: "object", properties: { tail: { type: "number" } } })
+      // 非空 required 与 properties 原样保留
+      expect(params("with_required")).toEqual({ type: "object", properties: { id: { type: "string" } }, required: ["id"] })
+    })
+  }
+})

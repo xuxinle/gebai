@@ -5,6 +5,7 @@ import { jsTool } from "../exec/js-tool"
 import { pyTool } from "../exec/py-tool"
 import { shApprovalFreeAllowed, validateShCommandSafeMode } from "../security/safety"
 import { shWaitMs } from "../support/exec-opts"
+import { cleanScriptOutput } from "../support/script-output"
 import { shTaskLifetimeMs } from "../exec/sh-tasks"
 import { truncate } from "../support/truncate"
 import { schema, type GlobalToolEntry } from "./shared"
@@ -86,7 +87,7 @@ export const shTool: Tool = {
     const workdir = args.workdir ? ctx.resolvePath(String(args.workdir)) : ctx.workdir
     // 工作目录注记：执行目录非会话默认目录（workdir 参数 / project 参数路由 / 项目绑定会话）时标注——
     // 「命令在哪个目录执行」一目了然（bun test 等按 cwd 发现目标的工具，目录不对是最常见根因）
-    const cwdNote = workdir !== (ctx.sessionWorkdir ?? workdir) ? `\n（工作目录: ${workdir}）` : ""
+    const cwdNote = workdir !== (ctx.sessionWorkdir ?? workdir) ? `\n（cwd: ${workdir}）` : ""
     // 安全模式：只读命令白名单 + 输出重定向限用户目录（降级而非禁用；解析 fail-closed）
     if (ctx.safeMode) {
       const deny = validateShCommandSafeMode(command, ctx)
@@ -110,7 +111,7 @@ export const shTool: Tool = {
       if (r.started) {
         if (r.aborted) {
           const stderr = r.stderr ? `${r.stderr}\n[interrupted by user]` : "[interrupted by user]"
-          return { ...(await truncate(`${r.stdout}\n${stderr}\n[exit 124]` + cwdNote, "sh", ctx)), data: scriptData(r.stdout, stderr, 124) }
+          return { ...(await truncate(cleanScriptOutput(`${r.stdout}\n${stderr}\n[exit 124]`) + cwdNote, "sh", ctx)), data: scriptData(r.stderr, stderr, 124) }
         }
         if (!r.finished) {
           const truncNote = r.truncated ? `\n（输出超过捕获上限，完整输出见日志 sh-tasks/${r.record.id}.log）` : ""
@@ -130,7 +131,7 @@ export const shTool: Tool = {
         const out = code === 0 ? r.stdout : `${r.stdout}\n${r.stderr}\n[exit ${code}]`
         // 成功但无输出：明确提示（区分「命令成功无输出」与「输出捕获失败/静默吞掉」）
         const final = code === 0 && !r.stdout.trim() ? "（命令执行成功，无输出）" : out
-        return { ...(await truncate(final + cwdNote, "sh", ctx)), data: scriptData(r.stdout, r.stderr, code) }
+        return { ...(await truncate(cleanScriptOutput(final) + cwdNote, "sh", ctx)), data: scriptData(r.stdout, r.stderr, code) }
       }
       // 后台启动失败（并发超限等）：回退下面的同步执行，命令照旧能跑
     }
@@ -143,7 +144,7 @@ export const shTool: Tool = {
     const out = code === 0 ? stdout : `${stdout}\n${stderr}\n[exit ${code}]`
     // 成功但无输出：明确提示（区分「命令成功无输出」与「输出捕获失败/静默吞掉」）
     const final = code === 0 && !stdout.trim() ? "（命令执行成功，无输出）" : out
-    return { ...(await truncate(final + cwdNote, "sh", ctx)), data: scriptData(stdout, stderr, code) }
+    return { ...(await truncate(cleanScriptOutput(final) + cwdNote, "sh", ctx)), data: scriptData(stdout, stderr, code) }
   },
 }
 

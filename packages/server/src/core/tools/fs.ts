@@ -979,7 +979,7 @@ async function searchWithBuiltin(opts: {
 export const grepTool: Tool = {
   name: "grep",
   description:
-    "按正则表达式在会话工作目录（tmp/）中递归搜索文本内容，返回 文件:行号: 匹配行（路径带 tmp/ 前缀，可直接用于 read 等文件工具）。宽泛摸底优先 output=files。node_modules/.git/dist 等大型目录默认跳过（显式 include 点名除外）。搜索含正则元字符的代码片段（如 foo.bar(）传 literal:true 按字面匹配。include/exclude 支持逗号分隔多模式与花括号（如 *.{ts,tsx}、tests/**,*.md）。匹配上限 200 处。文件大小上限：目录递归跳过超过 1MB 的文件，**显式指定单个文件时放宽到 8MB**。内置 ripgrep 优先，rg 不可用或其正则语法不支持该 pattern 时自动回退内置遍历引擎。",
+    "按正则表达式在会话工作目录（tmp/）中递归搜索文本内容，返回命中按文件分组（路径独占一行、其下 `行号: 匹配行`；路径带 tmp/ 前缀可直接用于 read 等文件工具）。宽泛摸底优先 output=files。node_modules/.git/dist 等大型目录默认跳过（显式 include 点名除外）。搜索含正则元字符的代码片段（如 foo.bar(）传 literal:true 按字面匹配。include/exclude 支持逗号分隔多模式与花括号（如 *.{ts,tsx}、tests/**,*.md）。匹配上限 200 处。文件大小上限：目录递归跳过超过 1MB 的文件，**显式指定单个文件时放宽到 8MB**。内置 ripgrep 优先，rg 不可用或其正则语法不支持该 pattern 时自动回退内置遍历引擎。",
   card: { titleParams: ["pattern"] },
   parameters: schema(
     {
@@ -988,7 +988,7 @@ export const grepTool: Tool = {
       ignore_case: { type: "boolean", description: "true 时大小写不敏感" },
       literal: { type: "boolean", description: "true 时按字面字符串匹配（正则元字符自动转义；默认 false 正则）" },
       output: { enum: ["content", "files", "count"], description: "结果形态（默认 content；大范围定位优先 files，只看命中文件不刷内容）" },
-      context: { type: "integer", description: "匹配行前后各附上下文行数（0-10，默认 0；仅 content 模式；行前缀 文件:行号: / 文件-行号-，组间 -- 分隔，同 grep -n -C）" },
+      context: { type: "integer", description: "匹配行前后各附上下文行数（0-10，默认 0；仅 content 模式；行前缀 `行号: ` / `行号- `，不连续处 -- 分隔，同 grep -n -C）" },
       context_before: { type: "integer", description: "匹配行**前**附上下文行数（0-10，同 grep -B）" },
       context_after: { type: "integer", description: "匹配行**后**附上下文行数（0-10，同 grep -A——看定义后的实现体常用）" },
       include: { type: "string", description: "文件路径 glob 过滤（如 *.ts、src/**、*.{ts,tsx}，逗号分隔多模式；** 跨目录、* 任意、? 单字符、{a,b} 交替）" },
@@ -1089,7 +1089,7 @@ export const grepTool: Tool = {
     })
     const sizeNote =
       skippedLarge > 0
-        ? `\n注：另有 ${skippedLarge} 个文件超过大小上限（${Math.round(sizeLimit / 1024)}KB）未参与搜索——需搜这些文件时直接指定其路径（单文件内搜上限 ${Math.round(READ_MAX_FILE_BYTES / 1024 / 1024)}MB）或缩小 include 范围`
+        ? `\n注：另有 ${skippedLarge} 个 >${Math.round(sizeLimit / 1024)}KB 文件未搜（要搜请直接指定其路径，单文件上限 ${Math.round(READ_MAX_FILE_BYTES / 1024 / 1024)}MB）`
         : ""
     if (!files.length) return { output: `（无匹配文件）${sizeNote}`, data: { mode, matches: [], files: [], counts: [], engine: engineLabel } }
     // 引擎调度：rg 优先（rg 视野 ⊇ 过滤结果，回填时按 allowlist 收敛）；运行失败则回退内置遍历，
@@ -1149,24 +1149,25 @@ export const grepTool: Tool = {
       for (const e of f.events) {
         if (e.hit) matches.push({ file: f.display, line: e.line, text: e.text.trim().slice(0, 200) })
       }
-      if (mode !== "content") continue
-      if (before > 0 || after > 0) {
-        // 上下文模式：事件流已按行升序，连续行归组、组间 -- 分隔（匹配行 : 前缀、上下文行 - 前缀；可非对称）
-        let prev = -2
-        for (const e of f.events) {
+      if (mode !== "content" || !f.events.length) continue
+      // heading 分组（同 ripgrep --heading）：文件路径独占一行（可直接用于 read 等文件工具），
+      // 其下按行渲染「行号: 命中行」/「行号- 上下文行」——逐行重复完整路径是纯冗余
+      // （实测历史会话中匹配行的路径前缀占其字符数的 49%）。
+      blocks.push(f.display)
+      let prev = -2
+      for (const e of f.events) {
+        if (before > 0 || after > 0) {
+          // 上下文模式：事件流已按行升序，不连续处 -- 分隔（同 grep -C 的组语义；可非对称）
           if (prev !== -2 && e.line !== prev + 1) blocks.push("--")
-          blocks.push(`${f.display}${e.hit ? ":" : "-"}${e.line}${e.hit ? ": " : "- "}${e.text.trim().slice(0, 200)}`)
-          prev = e.line
         }
-        if (f.events.length) blocks.push("--")
-      } else {
-        blocks.push(...f.events.map((e) => `${f.display}:${e.line}: ${e.text.trim().slice(0, 200)}`))
+        blocks.push(`${e.line}${e.hit ? ": " : "- "}${e.text.trim().slice(0, 200)}`)
+        prev = e.line
       }
     }
     // 三键齐备：任何模式都同时给出 matches（行级）/ files（文件清单）/ counts（每文件命中数）——
     // 此前各模式只给主键（content→matches / files→files / count→counts），调用方（js 编排/子 agent）
     // 统一按 `data.matches` 读取时，files/count 模式会静默得到空数组，把「未找到」误判为「不存在」。
-    const capNote = (capped ? "\n…（已达匹配上限，结果可能不完整；可缩小 pattern/path/include 范围）" : "") + sizeNote
+    const capNote = (capped ? "\n…（已达匹配上限，结果不完整；可缩 pattern/path/include 或提 head_limit）" : "") + sizeNote
     const sortCounts = (list: Array<{ file: string; count: number }>) => [...list].sort((a, b) => b.count - a.count || a.file.localeCompare(b.file))
     const counts = sortCounts(fileCounts)
     const fl = counts.map((c) => c.file)

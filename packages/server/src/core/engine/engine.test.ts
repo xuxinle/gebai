@@ -3910,7 +3910,7 @@ describe("context compaction", () => {
     })
     await s.engine.run(session.id, "default", "search code")
     // project 模式下 grep 递归扫描项目根（相对路径输出）
-    const grepChat = s.provider.seenChats.find((msgs) => msgs.some((m) => m.role === "tool" && typeof m.content === "string" && m.content.includes("src/main.ts:1")))
+    const grepChat = s.provider.seenChats.find((msgs) => msgs.some((m) => m.role === "tool" && typeof m.content === "string" && m.content.includes("src/main.ts\n1: ")))
     expect(grepChat).toBeDefined()
     const content = String(grepChat!.find((m) => m.role === "tool")!.content)
     // 大型/生成目录被跳过

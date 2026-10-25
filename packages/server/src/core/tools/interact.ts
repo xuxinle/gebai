@@ -13,10 +13,20 @@ export function todoLine(t: TodoItem): string {
   return `[${t.status}] ${t.title}${progress}${eta}（id: ${t.id}）`
 }
 
-/** 完整清单文本（操作后随结果返回，让模型一次掌握最新状态，无需再查）。 */
-export function todoSnapshot(todos: TodoItem[]): string {
+/** 完整清单文本（操作后随结果返回，让模型一次掌握最新状态，无需再查）。
+ *  **已完成/已取消项限量展示**：这些终态项仅作进度透视，逐轮全量重发会让清单随任务长度无界膨胀；
+ *  保留最近 COMPLETED_TAIL 条，其余压成一行计数（模型侧重整条清单时可显式 action=list 展开）。
+ *  进行中与待办项一律全量展示——它们是后续决策依据。 */
+export const TODO_COMPLETED_TAIL = 3
+
+export function todoSnapshot(todos: TodoItem[], opts: { expandCompleted?: boolean } = {}): string {
   if (!todos.length) return "当前全部待办（0 项）：（无）"
-  return `当前全部待办（${todos.length} 项）：\n${todos.map(todoLine).join("\n")}`
+  const done = (t: TodoItem) => t.status === "completed" || t.status === "cancelled" || t.status === "failed"
+  const doneList = todos.filter(done)
+  const hidden = opts.expandCompleted ? 0 : Math.max(0, doneList.length - TODO_COMPLETED_TAIL)
+  const shown = hidden ? todos.filter((t) => !done(t) || doneList.slice(hidden).includes(t)) : todos
+  const hiddenNote = hidden ? `\n…（另 ${hidden} 项已完成/已取消）` : ""
+  return `当前全部待办（${todos.length} 项）：\n${shown.map(todoLine).join("\n")}${hiddenNote}`
 }
 
 export function makeTodoTool(): Tool {
@@ -72,8 +82,8 @@ export function makeTodoTool(): Tool {
     async execute(args, ctx) {
       const todos = await ctx.getTodos()
       const entries = Array.isArray(args.entries) ? (args.entries as Array<Record<string, unknown>>) : []
-      // 空列表 = 查询：不落盘不发布事件
-      if (!entries.length) return { output: `查询待办：\n${todoSnapshot(todos)}`, data: { todos } }
+      // 空列表 = 查询：不落盘不发布事件（查询是模型的显式「看全部」意图，终态项不折叠）
+      if (!entries.length) return { output: `查询待办：\n${todoSnapshot(todos, { expandCompleted: true })}`, data: { todos } }
       const results: string[] = []
       const failures: string[] = []
       for (const raw of entries) {

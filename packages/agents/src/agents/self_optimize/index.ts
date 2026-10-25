@@ -1,6 +1,7 @@
 import { isAbsolute, relative, resolve, sep } from "node:path"
 import type { SubAgentDef } from "@gebai/sdk"
 import { truncate } from "@gebai/sdk/node"
+import { summarizePassedCheck, tailForFailure } from "./check-output"
 import { readFeedbackTool } from "../../core/shared/feedback"
 import { pageCaptureTool } from "../../core/shared/page-capture"
 import { isBinaryMode } from "../../core/shared/config"
@@ -130,6 +131,9 @@ function testInvocation(root: string, files: string[]): { workdir: string; args:
   return { workdir: root, args: files.map((f) => `"${f}"`).join(" ") }
 }
 
+/** run_tests 输出体积：通过的检查项只留判定信号（用例计数、耗时、失败/跳过用例名），
+ *  逐条 `(pass)` 明细、turbo 任务流水与构建脚本日志不进上下文（失败时看全文就够）。 */
+
 const runTestsTool: import("@gebai/sdk").Tool = {
   name: "run_tests",
   description:
@@ -167,10 +171,12 @@ const runTestsTool: import("@gebai/sdk").Tool = {
             ? "bun run typecheck"
             : "bun run lint"
       const { stdout, stderr, code } = await ctx.runCommand(cmd, { workdir: inv.workdir, timeoutMs: 10 * 60 * 1000 })
-      // 始终合并 stderr：bun test 在 Windows 把用例明细/汇总写 stderr（exit 0 亦然），只取 stdout 会让
-      // 用户看不到「跑了哪些用例、几个 pass」——准入判定看 exit code，明细供人核验
+      // 始终合并 stderr：bun test 在 Windows 把用例明细/汇总写 stderr（exit 0 亦然）。
+      // 先取「用例明细 + 汇总」两段：通过的逐个 `(pass)` 行只在需要看明细时有用（准入判定看 exit code），
+      // 成功时压成汇总 + 失败/跳过明细；失败时保留全文尾部（错误上下文在那里）。
       const text = [stdout, stderr].filter(Boolean).join("\n")
-      sections.push(`—— ${check}（${cmd}）${code === 0 ? " ✅" : ` ❌ exit ${code}`} ——\n${code === 0 ? text : `${text}\n[exit ${code}]`}`)
+      const body = code === 0 ? summarizePassedCheck(text) : tailForFailure(text)
+      sections.push(`—— ${check}（${cmd}）${code === 0 ? " ✅" : ` ❌ exit ${code}`} ——\n${body}${code === 0 ? "" : `\n[exit ${code}]`}`)
       if (code !== 0) break // 首项失败即停：后续检查基于未通过代码无意义
     }
     return truncate(sections.join("\n\n"), "run_tests", ctx)

@@ -41,6 +41,7 @@ import {
   type BridgeCallCounter,
 } from "./tool-bridge"
 import { truncate } from "../support/truncate"
+import { cleanScriptOutput } from "../support/script-output"
 import { scriptTimeoutMs } from "../support/exec-opts"
 
 /** 单次脚本执行内工具调用总数上限（分发层 BRIDGE_TOOL_MAX_CALLS 的 js 侧别名，唯一真源在 tool-bridge）。 */
@@ -682,7 +683,9 @@ export const jsTool: Tool = {
       const run = await runJsScript(scriptPath, ctx, { timeoutMs: scriptTimeoutMs(args.timeout), approvalFree: args.approval === false })
       const success = !run.error && !run.timedOut && !run.interrupted && !run.spawnError && run.exitCode === 0
       const parts: string[] = []
-      if (run.logs.length) parts.push(run.logs.join("\n"))
+      // 脚本输出：console 日志与控制符清洗后入正文；失败时尾部附错误摘要
+      const logsText = cleanScriptOutput(run.logs.join("\n"))
+      if (logsText.trim()) parts.push(logsText)
       if (success && run.result != null) {
         const preview = JSON.stringify(run.result)
         parts.push(`[返回值] ${preview.length > JS_RESULT_PREVIEW_CHARS ? `${preview.slice(0, JS_RESULT_PREVIEW_CHARS)}…（已截断，完整值在 data.result）` : preview}`)
@@ -694,10 +697,10 @@ export const jsTool: Tool = {
         if (run.timedOut) notes.push(`[timed out after ${Math.round(scriptTimeoutMs(args.timeout) / 1000)}s]`)
         if (run.interrupted) notes.push("[interrupted]")
         if (run.exitCode !== 0 && !run.error) notes.push(`[exit ${run.exitCode}]`)
-        parts.push(`${parts.length ? "\n" : ""}[脚本失败] ${notes.join("\n")}`)
+        parts.push(`[脚本失败] ${notes.join("\n")}`)
       }
       let output = parts.join("\n")
-      if (success && !run.logs.length && run.result == null) output = "（脚本执行成功，无输出）"
+      if (success && !logsText.trim() && run.result == null) output = "（脚本执行成功，无输出）"
       const capData = (v: unknown): unknown => {
         const s = typeof v === "string" ? v : JSON.stringify(v ?? null)
         return s.length > JS_DATA_TEXT_CAP ? `${s.slice(0, JS_DATA_TEXT_CAP)}…` : v

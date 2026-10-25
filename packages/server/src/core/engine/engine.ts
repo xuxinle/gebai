@@ -61,6 +61,15 @@ import {
   type PromptDeps,
 } from "./prompt"
 
+/** 参数解析失败回传的模型原始片段上限：片段只用于让模型定位自己写错的位置（首个语法破绽），
+ *  全量回吐会让一次失败吃掉上千字符上下文（且下一轮模型会重写整段）。 */
+const ARGS_ERROR_CLIP = 300
+function clipArgsError(s: string | undefined): string {
+  const t = (s ?? "").replace(/\s+/g, " ").trim()
+  if (!t) return "（无）"
+  return t.length > ARGS_ERROR_CLIP ? `${t.slice(0, ARGS_ERROR_CLIP)}…（共 ${t.length} 字符）` : t
+}
+
 /** 文件内容指纹（fileGuard 防陈旧覆盖）：BOM 无关（去 \uFEFF 前缀后哈希——read 登记去 BOM 正文、
  *  write 比对含 BOM 原文，边界归一后一致），sha256 十六进制前 16 位（非加密用途，防撞足够）。 */
 function fingerprint(content: string): string {
@@ -2239,7 +2248,7 @@ private activeSchemas(sessionId: string) {
     if (truncated) {
       return `工具参数 JSON 解析失败：本次模型输出达到输出上限被截断，重新整体输出仍会被截断。请把内容拆分为更小的多次操作（大文件用 write 分段写入：首段普通 write，后续段以 append:true 续写，每段约 200~300 行）。`
     }
-    return `工具参数 JSON 解析失败：模型输出的参数不是合法 JSON。原始片段: ${tc.argsError}。请重新调用 ${tc.name} 并输出合法的 JSON 参数。`
+    return `工具参数 JSON 解析失败：模型输出的参数不是合法 JSON。原始片段: ${clipArgsError(tc.argsError)}。请重新调用 ${tc.name} 并输出合法的 JSON 参数。`
   }
 
   private async runLoop(params: {

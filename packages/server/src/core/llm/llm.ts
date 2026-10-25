@@ -171,11 +171,35 @@ function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
 }
 
 function openaiTool(t: LLMToolDef): Record<string, unknown> {
-  return { type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }
+  return { type: "function", function: { name: t.name, description: t.description, parameters: outboundParameters(t.parameters) } }
 }
 
 function anthropicTool(t: LLMToolDef): Record<string, unknown> {
-  return { name: t.name, description: t.description, input_schema: t.parameters }
+  return { name: t.name, description: t.description, input_schema: outboundParameters(t.parameters) }
+}
+
+/**
+ * 出站参数 schema 瘦身（工具定义每轮请求重发，是上下文里最大的固定成本）。
+ *
+ * 两处删除都**不携带语义**：
+ * - `required: []` —— 空必填表等价于不声明（接口侧与引擎/桥的必填校验都按「未声明 = 无必填」处理）；
+ * - `properties: {}` —— 无参工具的空属性表，模型只看名字与描述即可调用。
+ *
+ * 非空情况一律原样返回（必填声明与参数定义是工具契约）。工具注册表内的 schema 不动——引擎的
+ * 必填校验、`tool_schemas` 查询、动态工具源码生成仍看到完整声明，只有发往模型的副本被瘦身。
+ */
+export function outboundParameters(parameters: unknown): unknown {
+  if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)) return parameters
+  const src = parameters as Record<string, unknown>
+  const required = src.required
+  const props = src.properties
+  const dropRequired = Array.isArray(required) && required.length === 0
+  const dropProps = !!props && typeof props === "object" && !Array.isArray(props) && Object.keys(props).length === 0
+  if (!dropRequired && !dropProps) return parameters
+  const out: Record<string, unknown> = { ...src }
+  if (dropRequired) delete out.required
+  if (dropProps) delete out.properties
+  return out
 }
 
 /**
@@ -397,7 +421,7 @@ function toResponsesInput(msgs: MessageLike[]): Array<Record<string, unknown>> {
 }
 
 function responsesTool(t: LLMToolDef): Record<string, unknown> {
-  return { type: "function", name: t.name, description: t.description, parameters: t.parameters }
+  return { type: "function", name: t.name, description: t.description, parameters: outboundParameters(t.parameters) }
 }
 
 export function createProvider(config: ProviderConfig): LLMProvider {

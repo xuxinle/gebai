@@ -158,12 +158,12 @@ describe("global tools", () => {
     mkdirSync(join(c.workdir, "sub"), { recursive: true })
     const r2 = await shTool.execute({ command: "echo hi", workdir: "sub" }, base)
     expect(r2.output).toContain("ok")
-    expect(r2.output).toContain(`（工作目录: ${join(c.workdir, "sub")}）`)
+    expect(r2.output).toContain(`（cwd: ${join(c.workdir, "sub")}）`)
     // project 参数路由（全局注册形态）：cwd 切到项目根并标注
     const proj = join(home, "proj")
     mkdirSync(proj, { recursive: true })
     const r3 = await createGlobalTools().sh.execute({ command: "echo hi", project: proj }, base)
-    expect(r3.output).toContain(`（工作目录: ${proj}）`)
+    expect(r3.output).toContain(`（cwd: ${proj}）`)
     rmSync(home, { recursive: true, force: true })
   })
 
@@ -2171,6 +2171,37 @@ describe("global tools", () => {
     const miss = await tools.todo.execute({ entries: [{ op: "update", title: "不存在", status: "completed" }] }, c)
     expect(miss.output).toContain("1 失败")
     expect(miss.output).toContain("更新未匹配 标题「不存在」")
+  })
+
+  test("todo 终态项折叠：操作后只留最近 3 条已完成，查询时全量展开", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-todos-fold-"))
+    const todos: import("@gebai/sdk").TodoItem[] = []
+    const c: ToolContext = {
+      ...ctx(home),
+      getTodos: async () => todos,
+      setTodos: async (t) => {
+        todos.splice(0, todos.length, ...t)
+      },
+    }
+    const tools = createGlobalTools()
+    const adds = Array.from({ length: 6 }, (_, i) => ({ op: "add" as const, title: `t${i}` }))
+    await tools.todo.execute({ entries: adds }, c)
+    await tools.todo.execute({ entries: todos.map((t) => ({ op: "update" as const, id: t.id, status: "completed" as const })) }, c)
+    todos.push({ id: "pending1", title: "未完成项", status: "pending", priority: "medium" })
+    // 操作后的快照：终态只留最近 3 条，其余计数提示；未完成项完整展示
+    const r = await tools.todo.execute({ entries: [{ op: "add", title: "t-extra" }] }, c)
+    expect(r.output).toContain("当前全部待办（8 项）")
+    expect(r.output).toContain("未完成项")
+    expect(r.output).toContain("另 3 项已完成/已取消")
+    // 最新 3 条已完成仍在（t3/t4/t5）
+    expect(r.output).toContain("[completed] t5")
+    expect(r.output).toContain("[completed] t4")
+    expect(r.output).toContain("[completed] t3")
+    expect(r.output).not.toContain("[completed] t0")
+    // 显式查询：全量展开（模型要看全貌时不被折叠）
+    const full = await tools.todo.execute({}, c)
+    expect(full.output).toContain("[completed] t0")
+    expect(full.output).not.toContain("项已完成/已取消")
     // 同名多条 → 提示用 id，不误改
     await tools.todo.execute({ entries: [{ op: "add", title: "重复项" }, { op: "add", title: "重复项" }] }, c)
     const dup = await tools.todo.execute({ entries: [{ op: "update", title: "重复项", status: "completed" }] }, c)
@@ -2324,7 +2355,7 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     ]
     c.readFile = async (p) => (p.endsWith("a.ts") ? "const x = 1\ntodo: fix this\n" : "no match here")
     const r = await createGlobalTools().grep.execute({ pattern: "todo" }, c)
-    expect(r.output).toContain("src/a.ts:2: todo: fix this")
+    expect(r.output).toContain("src/a.ts\n2: todo: fix this")
     // 无效正则
     const bad = await createGlobalTools().grep.execute({ pattern: "(" }, c)
     expect(bad.output).toContain("无效正则")
@@ -2428,10 +2459,10 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     // 目录搜索：big.md 超限被跳过（命中只来自 small.txt），输出注明跳过数——「被跳过」与「确实无命中」可区分
     const dir = await tools.grep.execute({ pattern: "NEEDLE_BIG_HIT" }, c)
     expect((dir.data as { files: string[] }).files).toEqual(["small.txt"])
-    expect(dir.output).toContain("另有 1 个文件超过大小上限")
+    expect(dir.output).toContain("另有 1 个 >1024KB 文件未搜")
     // 显式指定单文件路径：上限放宽到 read 同口径（rg 的 --max-filesize 同步放宽），1MB+ 文件可搜到
     const one = await tools.grep.execute({ pattern: "NEEDLE_BIG_HIT", path: "big.md" }, c)
-    expect(one.output).toContain("big.md:701: NEEDLE_BIG_HIT")
+    expect(one.output).toContain("big.md\n701: NEEDLE_BIG_HIT")
     // rg 可用时确认走的正是 rg 引擎（宽度放宽须同时作用于 rg 侧参数，否则真实环境仍无命中）
     if (await ripgrepAvailable()) {
       expect((dir.data as { engine: string }).engine).toBe("rg")
@@ -2441,7 +2472,7 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     c.listFiles = async () => [{ path: "big.md", size: bigSize, modifiedAt: 0, isDir: false }]
     const onlyBig = await tools.grep.execute({ pattern: "NEEDLE_BIG_HIT" }, c)
     expect(onlyBig.output).toContain("（无匹配文件）")
-    expect(onlyBig.output).toContain("未参与搜索")
+    expect(onlyBig.output).toContain(">1024KB 文件未搜")
     // 显式指定仍超单文件上限（>8MB）的文件：明确报错引导分段读取，不再静默「无匹配」
     c.listFiles = async () => [{ path: "huge.bin", size: 9 * 1024 * 1024, modifiedAt: 0, isDir: false }]
     const tooBig = await tools.grep.execute({ pattern: "NEEDLE_BIG_HIT", path: "huge.bin" }, c)
@@ -2460,11 +2491,11 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     const tools = createGlobalTools()
     // 正则模式：foo.bar( 的 . 与 ( 会被解释（fooXbar 不含括号不命中，foo.bar( 命中）
     const re = await tools.grep.execute({ pattern: "foo\\.bar\\(", path: "a.ts" }, c)
-    expect(re.output).toContain("a.ts:1: foo.bar(x)")
+    expect(re.output).toContain("a.ts\n1: foo.bar(x)")
     // literal:true：按字面匹配（无需转义），fooXbar 因缺括号不命中
     const lit = await tools.grep.execute({ pattern: "foo.bar(", path: "a.ts", literal: true }, c)
-    expect(lit.output).toContain("a.ts:1: foo.bar(x)")
-    expect(lit.output).toContain("a.ts:2: call foo.bar(y)")
+    expect(lit.output).toContain("a.ts\n1: foo.bar(x)")
+    expect(lit.output).toContain("\n2: call foo.bar(y)")
     expect(lit.output).not.toContain("fooXbar")
     // literal 下非法正则形态（如裸 ( ）不再报无效正则（已转义）
     const litParen = await tools.grep.execute({ pattern: "(", path: "a.ts", literal: true }, c)
@@ -2519,19 +2550,19 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     const tools = createGlobalTools()
     // context_after=2（-A）：命中行后 2 行、前 0 行（l1 不出现）
     const after = await tools.grep.execute({ pattern: "todo", context_after: 2 }, c)
-    expect(after.output).toContain("a.ts:2: l2 todo")
-    expect(after.output).toContain("a.ts-3- l3")
-    expect(after.output).toContain("a.ts-4- l4")
-    expect(after.output).not.toContain("a.ts-1-")
+    expect(after.output).toContain("a.ts\n2: l2 todo")
+    expect(after.output).toContain("\n3- l3")
+    expect(after.output).toContain("\n4- l4")
+    expect(after.output).not.toContain("1- l1")
     // context_before=1（-B）：命中行前 1 行、后 0 行（l3/l4 不出现）
     const before = await tools.grep.execute({ pattern: "todo", context_before: 1 }, c)
-    expect(before.output).toContain("a.ts-1- l1")
-    expect(before.output).toContain("a.ts:2: l2 todo")
-    expect(before.output).not.toContain("a.ts-3-")
+    expect(before.output).toContain("\n1- l1")
+    expect(before.output).toContain("\n2: l2 todo")
+    expect(before.output).not.toContain("\n3- l3")
     // context + 单侧覆盖：context=1 但 after=0
     const mixed = await tools.grep.execute({ pattern: "todo", context: 1, context_after: 0 }, c)
-    expect(mixed.output).toContain("a.ts-1- l1")
-    expect(mixed.output).not.toContain("a.ts-3-")
+    expect(mixed.output).toContain("\n1- l1")
+    expect(mixed.output).not.toContain("\n3- l3")
     cleanup(home)
   })
 
@@ -2580,7 +2611,7 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
       // literal：进程内匹配（转义后无回溯形态）——不应创建 runner 文件
       rmSync(runnerFile, { force: true })
       const lit = await tools.grep.execute({ pattern: "todo", literal: true }, c)
-      expect(lit.output).toContain("src/a.ts:1: todo: one")
+      expect(lit.output).toContain("src/a.ts\n1: todo: one")
       expect((lit.data as { engine: string }).engine).toBe("builtin")
       expect(existsSync(runnerFile), "literal 路径仍启动了匹配子进程").toBe(false)
       // 正则：仍走子进程隔离（灾难性回溯防护）——创建 runner 文件（且 runner 被删后可自愈重建）
@@ -2624,14 +2655,13 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     c.listFiles = async () => [{ path: "a.ts", size: 10, modifiedAt: 0, isDir: false }]
     c.readFile = async () => "l1\nl2 todo\nl3\nl4\nl5\nl6 todo\nl7\n"
     const r = await createGlobalTools().grep.execute({ pattern: "todo", context: 1 }, c)
-    expect(r.output).toContain("a.ts:2: l2 todo")
-    expect(r.output).toContain("a.ts-1- l1")
-    expect(r.output).toContain("a.ts-3- l3")
-    expect(r.output).toContain("a.ts:6: l6 todo")
+    expect(r.output).toContain("a.ts\n1- l1\n2: l2 todo")
+    expect(r.output).toContain("\n3- l3")
+    expect(r.output).toContain("\n5- l5\n6: l6 todo\n7- l7")
     expect(r.output).toContain("--")
-    // content 模式默认无上下文（保持 文件:行号: 匹配行）
+    // content 模式默认无上下文（只有 `行号: 匹配行`，没有上下文行前缀）
     const plain = await createGlobalTools().grep.execute({ pattern: "todo" }, c)
-    expect(plain.output).not.toContain("a.ts-1-")
+    expect(plain.output).not.toContain("\n1- ")
     cleanup(home)
   })
 
@@ -2776,7 +2806,7 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     expect(subPrefixed.output).toContain("tmp/src/a.ts")
     // grep：path 裸子目录过滤 + include 裸相对路径过滤均可命中（旧实现须传 tmp/src）
     const g = await tools.grep.execute({ pattern: "todo", path: "src", include: "*.ts" }, c)
-    expect(g.output).toContain("tmp/src/a.ts:1: todo: x")
+    expect(g.output).toContain("tmp/src/a.ts\n1: todo: x")
     cleanup(home)
   })
 
@@ -2792,15 +2822,15 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     // 显式 "."（旧实现拼 ./ 前缀匹配不到任何列表坐标，误报无匹配）与省略等价：全树搜索
     for (const dot of [".", "./"]) {
       const r = await tools.grep.execute({ pattern: "todo", path: dot }, c)
-      expect(r.output).toContain("tmp/src/a.ts:1: todo: in-a")
-      expect(r.output).toContain("tmp/src/b.js:1: todo: in-b")
+      expect(r.output).toContain("tmp/src/a.ts\n1: todo: in-a")
+      expect(r.output).toContain("tmp/src/b.js\n1: todo: in-b")
     }
     // path 精确命中单文件（tmp/ 前缀可省略）：仅内搜该文件，不再按目录前缀过滤（旧实现拼 文件名/ 前缀必空）
     const file = await tools.grep.execute({ pattern: "todo", path: "src/a.ts" }, c)
-    expect(file.output).toContain("tmp/src/a.ts:1: todo: in-a")
+    expect(file.output).toContain("tmp/src/a.ts\n1: todo: in-a")
     expect(file.output).not.toContain("b.js")
     const filePrefixed = await tools.grep.execute({ pattern: "todo", path: "tmp/src/b.js" }, c)
-    expect(filePrefixed.output).toContain("tmp/src/b.js:1: todo: in-b")
+    expect(filePrefixed.output).toContain("tmp/src/b.js\n1: todo: in-b")
     expect(filePrefixed.output).not.toContain("a.ts")
     // 单文件 + include 不匹配 → 无匹配
     const filtered = await tools.grep.execute({ pattern: "todo", path: "src/a.ts", include: "*.js" }, c)
@@ -2823,8 +2853,8 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     const projPath = proj.replace(/\\/g, "/")
     // 目录：递归命中，路径带给定前缀（read 可直接消费）；二进制内容（NUL 字节）跳过；跳过目录不进结果
     const dir = await tools.grep.execute({ pattern: "todo", path: projPath }, c)
-    expect(dir.output).toContain(`${projPath}/src/a.ts:1: todo: out-a`)
-    expect(dir.output).toContain(`${projPath}/b.md:1: todo: out-b`)
+    expect(dir.output).toContain(`${projPath}/src/a.ts\n1: todo: out-a`)
+    expect(dir.output).toContain(`${projPath}/b.md\n1: todo: out-b`)
     expect(dir.output).not.toContain("bin.dat")
     expect(dir.output).not.toContain("node_modules")
     // include 过滤范围外结果同样生效
@@ -2833,7 +2863,7 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     expect(inc.output).not.toContain("b.md")
     // 单文件（范围外绝对路径）
     const file = await tools.grep.execute({ pattern: "todo", path: `${projPath}/b.md` }, c)
-    expect(file.output).toBe(`${projPath}/b.md:1: todo: out-b`)
+    expect(file.output).toBe(`${projPath}/b.md\n1: todo: out-b`)
     // 路径不存在：明确报错（不再静默无匹配）
     const missing = await tools.grep.execute({ pattern: "todo", path: `${projPath}/nope` }, c)
     expect(missing.output).toContain("路径不存在或无可搜文件")
@@ -2922,12 +2952,12 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
       // 环视：Rust 正则（rg）不支持 → 自动回退内置引擎，结果仍正确（engine 如实为 builtin）
       process.env.GEBAI_GREP_ENGINE = "auto"
       const lookahead = await tools.grep.execute({ pattern: "foo(?= =)" }, c)
-      expect(lookahead.output).toContain("a.ts:1: const foo = 1")
+      expect(lookahead.output).toContain("a.ts\n1: const foo = 1")
       expect((lookahead.data as { engine: string }).engine).toBe("builtin")
       // 强制内置：走内置引擎（rg 在位时的逃生口）
       process.env.GEBAI_GREP_ENGINE = "builtin"
       const forced = await tools.grep.execute({ pattern: "foo" }, c)
-      expect(forced.output).toContain("a.ts:1: const foo = 1")
+      expect(forced.output).toContain("a.ts\n1: const foo = 1")
       expect((forced.data as { engine: string }).engine).toBe("builtin")
       // 强制 rg 但 rg 不可用（GEBAI_RG_PATH 指向不存在）：明确报错而非静默降级
       process.env.GEBAI_GREP_ENGINE = "rg"
@@ -2939,7 +2969,7 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
       // 同环境下 auto：静默回退内置（功能不降级、只降速）
       process.env.GEBAI_GREP_ENGINE = "auto"
       const auto = await tools.grep.execute({ pattern: "foo" }, c)
-      expect(auto.output).toContain("a.ts:1: const foo = 1")
+      expect(auto.output).toContain("a.ts\n1: const foo = 1")
       expect((auto.data as { engine: string }).engine).toBe("builtin")
     } finally {
       if (prevEngine === undefined) delete process.env.GEBAI_GREP_ENGINE

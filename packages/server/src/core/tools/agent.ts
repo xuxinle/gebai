@@ -12,6 +12,7 @@ import {
 import { shTaskStatus, type ShTaskRecord } from "../exec/sh-tasks"
 import type { BgJobRecord } from "../session/jobs"
 import { truncate, TRUNCATE_THRESHOLD } from "../support/truncate"
+import { cleanScriptOutput } from "../support/script-output"
 import { schema, type GlobalToolEntry } from "./shared"
 
 /** bg_task 命令任务（sh 的后台任务）输出尾部默认/上限（字符）：后台任务输出可能持续增长，status/wait 仅取尾部。 */
@@ -405,11 +406,11 @@ export const bgTaskTool: Tool = {
       if (!rec) return { output: `未找到命令后台任务: ${id}（taskId 以 sh 的返回为准——async:true 启动或同步等待超时转后台；查现有任务用 action=list）。` }
       if (action === "wait" && !rec.endedAt) {
         const out = await ctx.shTasks.readLog(id, tail)
-        const text = `${shTaskLine(rec, "")}\n（等待超时仍在运行；可再次 wait、用 status 查询，或 stop 终止）\n已产出输出（尾部 ${Math.min(out.length, tail)} 字符）:\n${out || "（暂无输出）"}`
+        const text = `${shTaskLine(rec, "")}\n（等待超时仍在运行；可再次 wait、用 status 查询，或 stop 终止）\n已产出输出（尾部 ${Math.min(out.length, tail)} 字符）:\n${out ? cleanScriptOutput(out) : "（暂无输出）"}`
         return { ...(await truncate(text, "bg_task", ctx)), data: { id, kind: "sh", status: shTaskStatus(rec), exitCode: null, output: out } }
       }
       const out = await ctx.shTasks.readLog(id, tail)
-      const text = `${shTaskLine(rec)}${out ? `\n输出（尾部 ${Math.min(out.length, tail)} 字符，完整日志 sh-tasks/${id}.log，相对会话工作目录）:\n${out}` : "\n（无输出）"}`
+      const text = `${shTaskLine(rec)}${out ? `\n输出（尾部 ${Math.min(out.length, tail)} 字符，全量见 sh-tasks/${id}.log）:\n${cleanScriptOutput(out)}` : "\n（无输出）"}`
       return { ...(await truncate(text, "bg_task", ctx)), data: { id, kind: "sh", status: shTaskStatus(rec), exitCode: rec.exitCode ?? null, output: out } }
     }
 

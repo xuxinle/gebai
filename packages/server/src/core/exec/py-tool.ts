@@ -42,8 +42,9 @@ import { rm, writeFile } from "node:fs/promises"
 import type { ContentBlock, SubSessionArchive } from "@gebai/sdk"
 import type { Tool, ToolContext, ToolResult } from "../base/types"
 import { PY_SAFE_BOOTSTRAP } from "../security/safety"
-import { scriptTimeoutMs } from "../support/exec-opts"
+import { cleanScriptOutput } from "../support/script-output"
 import { truncate } from "../support/truncate"
+import { scriptTimeoutMs } from "../support/exec-opts"
 import { scriptChildEnv, scriptSessionContext } from "./js-tool"
 import {
   BRIDGE_FIELD_CAP,
@@ -275,7 +276,7 @@ interface PyRunResult {
 }
 
 function pyCwdNote(ctx: ToolContext): string {
-  return ctx.workdir !== (ctx.sessionWorkdir ?? ctx.workdir) ? `\n（工作目录: ${ctx.workdir}）` : ""
+  return ctx.workdir !== (ctx.sessionWorkdir ?? ctx.workdir) ? `\n（cwd: ${ctx.workdir}）` : ""
 }
 
 function capText(s: string): string {
@@ -300,7 +301,7 @@ async function runLegacyPy(code: string, input: string | undefined, timeoutMs: n
     })
     const out = exit === 0 ? stdout : `${stdout}\n${stderr}\n[exit ${exit}]`
     const cwdNote = pyCwdNote(ctx)
-    const final = exit === 0 && !stdout.trim() ? `（程序执行成功，无输出）${cwdNote}` : out + cwdNote
+    const final = exit === 0 && !stdout.trim() ? `（程序执行成功，无输出）${cwdNote}` : cleanScriptOutput(out) + cwdNote
     return { ...(await truncate(final, "py", ctx)), data: { stdout: capText(stdout), stderr: capText(stderr), exitCode: exit } }
   } finally {
     await rm(scriptPath, { force: true }).catch(() => {})
@@ -595,7 +596,7 @@ async function formatBridgeRun(run: PyRunResult, timeoutMs: number, ctx: ToolCon
     parts.push(`[stderr] ${run.stderr.trim()}`)
   }
   let output = parts.length ? parts.join("\n") : "（脚本执行成功，无输出）"
-  output += pyCwdNote(ctx)
+  output = cleanScriptOutput(output) + pyCwdNote(ctx)
   return {
     ...(await truncate(output, "py", ctx)),
     data: {
