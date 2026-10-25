@@ -361,6 +361,11 @@
     "deps_hash_cost_probe": {
       "kind": "executable",
       "sources": ["tools/deps_hash_cost_probe.cpp"],
+      "//": "deferred context 可行性（并行录制 vs 串行回放）"
+    },
+    "deferred_ctx_probe": {
+      "kind": "executable",
+      "sources": ["tools/deferred_ctx_probe.cpp"],
       "exclude_sources": ["src/pkg/*"],
       "//note": "本机 GPU 腿可用性（无头模式下 st doctor 有意不探测 GPU，这里显式探一次）"
     },
