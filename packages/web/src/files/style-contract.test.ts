@@ -686,4 +686,22 @@ describe("样式契约：差异视图导航在头部不在标签栏", () => {
     // 头部容器进的是 viewer-bar（不是任意位置：布局由该栏承担）
     expect((git.match(/class: "fw-diff-nav"/g) ?? []).length).toBe(2)
   })
+
+  test("打开差异视图后自动定位到第一处差异（不要求用户再点一下）", () => {
+    const editor = readFileSync(join(SRC, "files", "editor.ts"), "utf8")
+    const at = editor.indexOf("export async function createDiffEditor")
+    expect(at).toBeGreaterThan(-1)
+    const end = editor.indexOf("\n/* -", at + 1)
+    const body = editor.slice(at, end > at ? end : undefined)
+    // 首跳标志 + 跳一次即清（否则每次差异重算都把视口拽回第一块）
+    expect(body).toContain("autoJumpPending")
+    expect(body).toMatch(/autoJumpPending\s*=\s*false/)
+    // 自动跳不抢焦点（用户刚点开标签，焦点不应被拽进编辑器）
+    expect(body).toContain("reveal(0, false)")
+    // 用户已自己滚过则不抢（大文件差异算得慢，算完时他可能已在看别处）
+    expect(body).toContain("userScrolled")
+    expect(body).toContain("!userScrolled")
+    // 无差异不跳
+    expect(body).toMatch(/list\(\)\.length\s*\)\s*reveal\(0, false\)/)
+  })
 })

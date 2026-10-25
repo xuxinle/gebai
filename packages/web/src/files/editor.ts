@@ -1448,6 +1448,8 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
    *     两侧滚动是同步的（diff editor 自带同步滚动），露一边两边都会跟。
    */
   let idx = -1
+  /** 首次差异计算完成后是否自动跳到第一处（打开视图时置为 true，跳一次即清）。 */
+  let autoJumpPending = true
   const navCbs = new Set<(s: { index: number; total: number }) => void>()
   const changes = (): Array<{ originalStartLineNumber: number; originalEndLineNumber: number; modifiedStartLineNumber: number; modifiedEndLineNumber: number }> =>
     (ed.getLineChanges() ?? []) as never
@@ -1477,7 +1479,12 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
     for (const cb of navCbs) cb(s)
   }
 
-  function reveal(i: number): void {
+  /**
+   * 定位到第 i 处差异：选中整块并滚动到可见。
+   * @param focus 是否把键盘焦点交给编辑器。自动定位（打开视图时）传 false——
+   *   用户刚点开标签，焦点不应被拽进编辑器（他可能接着点别的按钮）。
+   */
+  function reveal(i: number, focus = true): void {
     const cs = list()
     const c = cs[i]
     if (!c) return
@@ -1496,9 +1503,11 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
     target.revealLineInCenterIfOutsideViewport(start)
     // Monaco 只在**获焦**时画强选区高亮；顺便让后续按键（方向键、Ctrl+F）落到差异视图上。
     // 不抢表单焦点：在提交框/搜索框里打字时按 F7/Shift+F7，不应把光标拽走。
-    const active = document.activeElement as HTMLElement | null
-    const inField = !!active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)
-    if (!inField) target.focus()
+    if (focus) {
+      const active = document.activeElement as HTMLElement | null
+      const inField = !!active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)
+      if (!inField) target.focus()
+    }
     emit()
   }
 
@@ -1513,7 +1522,10 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
 
   // 滚动 / 差异重算后刷新计数（滚动事件每帧都会回调：合并到一帧再算，计数 DOM 也随之少刷）
   let scrollRaf = 0
+  /** 用户已自己动过视口：首次自动定位作废（大文件差异算得慢，算完时他可能已在看别处）。 */
+  let userScrolled = false
   const sub = ed.getModifiedEditor().onDidScrollChange(() => {
+    userScrolled = true
     if (scrollRaf) return
     scrollRaf = requestAnimationFrame(() => {
       scrollRaf = 0
@@ -1525,8 +1537,22 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
     changeList = null
     idx = -1
     emit()
+    // 首次差异算完就定位到第一处差异：打开差异视图时用户要看的就是“哪里改了”，
+    // 落在文件开头再让他点一下「下一处」是多余的一步。只做一次（之后的差异重算不跳，
+    // 否则编辑时会被反复拽回）；没有差异时不跳；用户已自己滚过则不抢（慢算完的差异
+    // 不能让视口突然飞走）。
+    if (autoJumpPending) {
+      autoJumpPending = false
+      if (!userScrolled && list().length) reveal(0, false) // 不抢焦点：用户刚点开标签
+    }
   })
   emit()
+  // 差异可能在监听器挂上之前就算完（小文件 Monaco 同步完成）：
+  // 没有后续回调可等，这里直接补一次首跳。
+  if (autoJumpPending && list().length) {
+    autoJumpPending = false
+    reveal(0, false)
+  }
 
   const nav: DiffNav = {
     next: () => step(1),
