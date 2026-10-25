@@ -326,6 +326,22 @@ def judge(quality: dict, motion: dict, ref: dict | None,
         # 没给参考片时只能给一个宽红线（并以“可能本身是高调片”提醒）
         bad.append({"leg": "bright", "value": ours_bright, "rule": "未给参考片时过亮 <40%",
                     "hint": "如果这片本来就是亮调（白纸/日光），用 --ref-baseline 给参照片再判"})
+    # ## 指标缺失要**明确报错**，不能静默变成某条违规（2026-10-24）
+    #
+    # 实际踩过：裁云默认改成管道直送后，`frames/` 变空，motion_qa 报"帧数不足（0）"，
+    # 于是 change_median / change_p95 全是 None。旧代码把它读成
+    # "中位数 0.0 < 参考的 0.3×" → 报 `density` 不达标。
+    # 三条片子同时"不达标"，而它们其实完全正常——错误信息离真因很远。
+    if ref and motion:
+        missing = [k for k in ("change_median", "change_p95") if motion.get(k) is None]
+        if missing:
+            bad.append({"leg": "measurement",
+                        "value": ",".join(missing),
+                        "rule": "所有运动指标都必须量到",
+                        "hint": "motion_qa 没读到帧。检查帧目录是否为空——"
+                                "裁云默认走管道不落 PNG，评测必须传 --keep-frames。"
+                                "这不是片子的缺陷。"})
+            return bad
     if motion:
         mean = motion.get("change_mean")
         median = motion.get("change_median")
@@ -409,6 +425,16 @@ def main() -> int:
     cmd = [CAIYUN, "--headless", "--script", args.script, "--render", mp4]
     if args.motion_blur > 1:
         cmd += ["--motion-blur", str(args.motion_blur)]
+    # ## 必须显式要帧序列（2026-10-24）
+    #
+    # 裁云的导出默认已改为**管道直送 ffmpeg**（RGBA 直写 stdin，不落 PNG），
+    # 因为那能把 blur=4 的导出从 47s 压到 20s。但本评测的全部指标
+    # （静止占比 / 变化强度 / 逐镜静止）都是**从 PNG 帧序列量的**。
+    #
+    # 不加这个开关，`frames/` 会是空目录，motion_qa 报"帧数不足（0）"，
+    # 于是 change_median / change_p95 全部变成 None —— 判据报 density 不达标，
+    # 而片子其实完全正常。**这个坑实际踩过一次**（三条片子同时"不达标"）。
+    cmd += ["--keep-frames"]
     if args.track_elements:
         cmd += ["--track-elements"]
     rendered = run(cmd, cwd=ROOT, timeout=3600)
