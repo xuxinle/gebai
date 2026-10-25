@@ -64,6 +64,12 @@ shapes.push({ kind: 1, x: 0, y: 0, w: w, h: h,
 一层覆盖全屏的半透明色，alpha 随时间起伏。深底（luma ~13）上
 alpha 0.03 约产生 dL≈7。周期 0.3~0.4 秒是"轻微呼吸"，不是频闪。
 
+**为何它有效（定量依据）**：验收量的是 32×18 网格的逐格均值差，
+而**整屏亮度变化 `dL` 与网格差是 1:1** —— 压暗 3 级就是 3.0 的变化。
+这是所有手法里最省的：不用堆图元、不改构图、不碰布局。
+另两条数值规律（位移=周期整数倍时差为 0、低 alpha 在深底上约等于 `bg×a`）
+见 `docs/caiyun_layout_script.md` §6.1.8。
+
 **实测**：歌白片静止占比 88.1% → **62.8%**，一次到位。
 而在此之前调了 5 轮淡纹理点阵（alpha/尺寸/速度），只从 88.3% 到 87.0%。
 
@@ -95,6 +101,39 @@ py scripts/probe_scene.py --script x.json --scene 2
 
 实测对比：全片 955 帧 ≈ 70s；单场景 160 帧 ≈ **5s**。
 
+## 一次完整操作（改 → 验执行 → 量变化 → 看观感）
+
+这是**最小闭环**，四条命令。改 layout 时按这个顺序，每步都有失败时的判据。
+
+```powershell
+cd shuangtian
+examples\caiyun\assets\x.json       # 要改的片子（下面的 x.json 换成它）
+
+# ── ① 改完先确认**代码真的执行了**（不看过数字先看这一条）
+$env:CAIYUN_SHAPES_DEBUG="1"
+.\build\dev\bin\caiyun.exe --headless --script x.json --render %TEMP%\diag.mp4
+# 看输出：loaded=true ? count 够不够 ? in_view 占多少 ?
+#   loaded=false        → 脚本没装上（看 st 日志「装载失败，已降级为纯 JSON」）
+#   in_view 远小于 count → 坐标不在画布内（忘了用屏幕像素）
+#   打“⚠ 没有任何图元落在画布内” → 同上
+#   屏幕上却看不见 → 被后面的图元盖住了（后 push 的在上）
+
+# ── ② 量这一段变化了多少（**5 秒**，不是全片 70 秒）
+$env:PYTHONIOENCODING="utf-8"
+py scripts\probe_scene.py --script x.json --scene 2
+# 看：静止占比（要 <=69）、p95（要 >=5.51）、逐秒 mean（找最静那段）
+
+# ── ③ 数字过了再看观感（抽帧，不要只看数字）
+ffmpeg -y -ss 3 -i %TEMP%\diag.mp4 -frames:v 1 %TEMP%\f.png
+# 肉眼看：主体挡没挡字、颜色脏不脏、边缘硬不硬
+
+# ── ④ 都过了才渲全片
+.\build\dev\bin\caiyun.exe --headless --script x.json --render out\films\x.mp4
+```
+
+**为何是这个顺序**：反过来（先渲全片）的话，一次试错就是 70 秒；
+而 ①② 合计不到 10 秒。本轮两个子会话共花约 2000 秒，主要就差在这里。
+
 ## 出片与验片
 
 ```powershell
@@ -113,7 +152,7 @@ py scripts/ot_bench.py --script x.json --out out/otbench/x
 
 | 片子 | 特点 | 位置 |
 |---|---|---|
-| 歌白 30s | 信息型（卡片 + 环流），静止 88% 是结构性的 | `out/films/gebai-31s.mp4` |
+| 歌白 30s | 信息型（卡片 + 环流）；静止占比 88%→**63%** 是靠「整屏亮度脉动」一刀下来的 | `out/films/gebai-31s.mp4` |
 | c13-clawd | 单主角完整动作弧，p95 达标 | `out/otbench/c13-clawd/` |
 | c11-infra | 满屏块阵每帧全换（p95 3× 参考） | `out/otbench/c11-infra/` |
 | c10-ebb | 单状态量驱动全片 | `out/otbench/c10-ebb/` |
