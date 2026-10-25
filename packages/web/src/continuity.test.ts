@@ -86,6 +86,22 @@ describe("运行态可见性与列表角标", () => {
     expect(s).toContain("markSessionRunning(ev.sessionId, true)")
     expect(s).toContain("markSessionRunning(ev.sessionId, false)")
   })
+
+  test("本页自己发起的任务也写角标（不能只靠服务端事件与快照）", () => {
+    // 实测缺陷：本页发起的任务只在本地 runs 里，服务端 task.start 事件到达更晚或被视为
+    // 已有运行态，列表角标一直不显示——刷新后才靠快照 runtime 补上（标记“刷新才没了”的反向现象）。
+    const stream = src("stream.ts")
+    const at = stream.indexOf("export async function consumeTaskStream")
+    // 取到下一个顶层函数定义为止（不用固定长度：函数很长时会截掉末尾的结束标记）
+    const nextFn = stream.indexOf("\nexport function ", at + 1)
+    const body = stream.slice(at, nextFn > at ? nextFn : stream.length)
+    expect(at).toBeGreaterThan(-1)
+    // 开始运行与结束两侧都要标记，否则结束不移除
+    expect(body).toContain("markSessionRunning(sessionId, true)")
+    expect(body).toContain("markSessionRunning(sessionId, false)")
+    // 导入不是循环依赖（sessions 不导入 stream）
+    expect(src("sessions.ts")).not.toContain('from "./stream"')
+  })
 })
 
 describe("断线/失效期间的用户动作不静默丢", () => {

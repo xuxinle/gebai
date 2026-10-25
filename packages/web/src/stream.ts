@@ -9,7 +9,7 @@ import { createModelErrorNotice, modelErrorText } from "./model-error"
 import { createStreamRenderer } from "./stream-render"
 import { clearApprovals, hasPendingInteraction } from "./approvals"
 import { clearPendingTools, focusInput } from "./state"
-import { loadMessages, maybeAutoTitle } from "./sessions"
+import { loadMessages, markSessionRunning, maybeAutoTitle } from "./sessions"
 import { resyncPendingInteractions } from "./pending-interactions"
 import { drainQueue } from "./queue"
 import { scrollReasoningSticky } from "./reasoning-scroll"
@@ -276,6 +276,11 @@ export async function consumeTaskStream(sessionId: string, makeSource: (run: Run
   // 否则消息区空白（内容都渲染进隐藏容器），用户以为没发出去
   if (!activePane() && getCurrentSession()?.id === sessionId) activatePane(sessionId)
   setPaneRunning(sessionId, true)
+  // 会话列表角标：本页自己发起的任务也要标上。
+  // 原先只有服务端事件（event.task.start）会写 runningSeen，而自己在当前页发送时那条事件
+  // 到达得比本地状态晚（或干脆被视为本页已有运行态而不再处理），列表就一直不显示“在跑”——
+  // 刷新页面后才靠快照 runtime 补上（用户看到的就是「标记刷新就没了」）。
+  markSessionRunning(sessionId, true)
   startTurnTimer(run) // 单轮计时器：本轮耗时实时显示（外观 tab 可关）
   syncConnThinking() // 运行开始：信号灯闪烁
   syncSendButton() // 不禁用按钮：运行中点击 = 停止（stopping 拦截）
@@ -374,6 +379,8 @@ export async function consumeTaskStream(sessionId: string, makeSource: (run: Run
     runs.delete(sessionId)
     // 运行结束：容器降为可回收（已切走则下一次回收时释放，仍在看则保留到切走）
     setPaneRunning(sessionId, false)
+  // 会话列表角标：本页任务的结束同样要收敛（与服务端 task.done 一致）
+  markSessionRunning(sessionId, false)
     clearApprovals(sessionId) // 任务结束：该会话残留审批卡片随任务终止失效并解除输入锁定
     clearInteractionCards(sessionId) // 任务结束：选择/环境变量填值卡片随任务终止失效
     clearPendingTools(sessionId) // 任务结束：工具调用配对清理（结果已落盘历史）
