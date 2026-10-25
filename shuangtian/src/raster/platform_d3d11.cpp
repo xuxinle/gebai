@@ -879,9 +879,37 @@ class GpuCanvas final : public Surface {
   //
   // ## 何时提交
   //
-  // **不每条指令都提交**（那样等于没并行）。只在两个时刻：
-  //   · `flush()` —— 显式要求落地（导出路径每帧一次）
-  //   · `ensure_readback()` —— 要读像素了（回读前必须先把命令跑完）
+  // **不每条指令都提交**（那样等于没并行）。只在**要读 `target_` 的那一刻**之前：
+  //
+  // | 读 target_ 的路径 | 提交点 |
+  // |---|---|
+  // | `present()`（上屏） | ✅ 在 `CopyResource` 之前 |
+  // | `ensure_readback()`（截图/导出） | ✅ 函数开头 |
+  // | `flush()` | ✅ |
+  //
+  // ⚠ **这条清单曾漏了 `present()`**：录制的命令永不执行，而上屏拷到的是空纹理 →
+  // **窗口全黑**。更阴的是截图/导出正常（它们自己会补提交），于是症状变成
+  // “截图对、屏幕黑”，排查时那条“截图正常”反而成了误导证据。
+  //
+  // ## 不变量（写代码时照这个查）
+  //
+  // **凡在 `active_context()` 上发绘制的地方，必须同一函数内调 `note_deferred_draw()`。**
+  // 现有 6 处（改动时用 grep `active_context()->(Draw|ClearRenderTargetView)` 全覆盖）：
+  //
+  //   1. `clear()` —— 清屏幕
+  //   2. `submit()` —— 所有逐图元绘制的唯一入口
+  //   3. `submit_glyph_batch()` —— 字形合批（**唯一绕过 `submit` 的批量绘制**）
+  //   4. `submit_to()` —— 离屏绘制（阴影遮罩 / 盒式模糊 / 图像处理）
+  //   5. `shadow_mask()` 里的两个离屏 `ClearRenderTargetView`
+  //
+  // 漏了它的症状各不相同，但都难查：
+  //   · `present` 漏 → 全黑（本条）
+  //   · `submit_glyph_batch` 漏 → **文字整体消失**，矩形/背景都在
+  //   · `submit_to` 漏 → 阴影/模糊“画了但看不见”（离屏结果没产出）
+  //   · 离屏 clear 漏 → 阴影出现**上一帧的残影**（RT 是池化复用的）
+  //
+  // 注：`GpuScene3d` 是另一套——它全程用立即上下文（不做 deferred 录制），
+  // 所以不在本不变量范围内。
   ID3D11DeviceContext* deferred_{nullptr};
   /// 已录制但尚未提交的绘制数（0 = 无待提交内容）。
   std::size_t deferred_pending_{0};
@@ -1425,6 +1453,20 @@ class GpuCanvas final : public Surface {
     const Pipeline& pipes = pipeline();
     if (rtv_ == nullptr || vertices.empty()) return false;
     if (!ensure_glyph_capacity(vertices.size())) return false;
+
+    // 记一笔待提交（走 deferred 时才有意义）。
+    //
+    // **这条路径很容易漏**：字形合批是 `Surface` 里唯一**绕过 `submit()`**
+    // 直接往 `active_context()` 发 draw 的路径（会批是为了“几十个字形一次 draw”，
+    // 走不了 `submit` 的逐图元参数体系）。而 `submit()` 开头那条
+    // `note_deferred_draw()` 就保不了它 —— 结果是：
+    //   字形合批成功 → pending 没增 → 命令永不提交 → **文字整体消失**，
+    //   而矩形/背景都在（它们走 submit），症状看起来像“字体丢了”。
+    //
+    // 位置选在 Map 之前：后面的每条提前 return 都已发生过一次 draw 准备，
+    // 且 `FinishCommandList` 对空列表也无害（宁可多提交一次，不要漏）。
+    (void)active_context();
+    note_deferred_draw();
 
     D3D11_MAPPED_SUBRESOURCE mapped_vertices{};
     if (FAILED(active_context()->Map(glyph_vertices_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_vertices))) {
@@ -2084,6 +2126,11 @@ class GpuCanvas final : public Surface {
     ShadowTargets targets;
     if (!acquire_shadow_targets(area.width, area.height, targets)) return {};
     const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    // 离屏清空也是**要提交的命令**（同 `clear()` 的教训）：
+    // 它不走 `submit_to`，所以得自己标。漏了它 → 遮罩保留上一轮的内容
+    // （RT 是池化复用的），阴影会出现“上一帧的残影”。
+    (void)active_context();
+    note_deferred_draw();
     active_context()->ClearRenderTargetView(targets.rtv_a, zero);
     const float zero_b[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     active_context()->ClearRenderTargetView(targets.rtv_b, zero_b);
@@ -2142,6 +2189,16 @@ class GpuCanvas final : public Surface {
                  int viewport_height) {
     const Pipeline& pipes = pipeline();
     if (!pipes.ok || target == nullptr) return;
+    // 记一笔待提交（走 deferred 时才有意义）。
+    //
+    // `submit_to` 是**离屏绘制**的入口（阴影遮罩、盒式模糊的 ping-pong、
+    // 图像处理），它绕过 `submit()` 直接往 `active_context()` 发 draw ——
+    // 所以 `submit()` 里的那条 `note_deferred_draw()` 盖不到它。
+    //
+    // 漏了它的后果比“画面空”更阴：离屏结果不会被产出，而**使用它的那条绘制**
+    // 仍会照常提交——于是阴影/模糊“画了但看不见”，看起来像参数没生效。
+    (void)active_context();
+    note_deferred_draw();
     ID3D11RenderTargetView* targets[1] = {target};
     active_context()->OMSetRenderTargets(1, targets, nullptr);
     const D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(viewport_width),
