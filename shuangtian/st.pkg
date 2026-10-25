@@ -48,8 +48,11 @@
   "lint": {
     "//": "规则豁免：规则 id → 路径 glob。成片/基于位置的边界走这里（单点破例走行内 // lint-allow）。两通道都需在 CONVENTIONS.md §8 登记，且各自计数、不静默。",
     "exempt": {
-      "L14": ["src/core/entry.cpp"],
-      "L3": ["src/net/platform_tls_openssl.cpp", "tests/shard_parity_test.cpp"]
+      "L14": ["src/core/entry.cpp", "tools/*_probe.cpp"],
+      "L3": ["src/net/platform_tls_openssl.cpp", "tests/shard_parity_test.cpp"],
+      "//probe": "量测探针（tools/*_probe.cpp）是**一次性量尺**、不是交付物：用 std::printf 输出数字、直接 include 系统头拿 ABI。它们不进任何 target 产物、不被应用包含，按 CONVENTIONS §8 做成片豁免。",
+      "L7": ["tools/*_probe.cpp"],
+      "L6": ["tools/*_probe.cpp"]
     }
   },
   "//system_libs": "本机（非交叉）链接用的库。注意与 `toolchains.<名>.system_libs` 的分工：后者在**交叉编译**时**整体接管**（见 `resolve_system_libraries`），本机构建根本不看它。所以 Win32 相关的系统库（dbghelp 供崩溃调用栈符号化）两处都要写。",
@@ -366,6 +369,18 @@
     "deferred_ctx_probe": {
       "kind": "executable",
       "sources": ["tools/deferred_ctx_probe.cpp"],
+      "//": "GPU 导出的时间去向（回读 / 转换 / 拷贝各占多少）"
+    },
+    "gpu_export_cost_probe": {
+      "kind": "executable",
+      "sources": ["tools/gpu_export_cost_probe.cpp"],
+      "//": "frame_stats 降采样是否真的看到帧间差异（验证 still_ratio 恒 100% 的根因）",
+      "include_dirs": ["examples/caiyun"]
+    },
+    "frame_stats_diff_probe": {
+      "kind": "executable",
+      "sources": ["tools/frame_stats_diff_probe.cpp", "examples/caiyun/frame_stats.cpp"],
+      "include_dirs": ["examples/caiyun"],
       "exclude_sources": ["src/pkg/*"],
       "//note": "本机 GPU 腿可用性（无头模式下 st doctor 有意不探测 GPU，这里显式探一次）"
     },

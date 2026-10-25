@@ -17,7 +17,7 @@
 // 但它在**本项目的负载**（大量小矩形 + 多次 OMSetRenderTargets）上值不值，
 // 只能量出来。
 #include <chrono>
-#include <cstdio>
+#include <cstdio>   // lint-allow: L7 探针输出（量测工具，不产出交付物）
 #include <thread>
 #include <vector>
 

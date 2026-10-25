@@ -1066,6 +1066,8 @@ class GpuCanvas final : public Surface {
         static_cast<float>(color.r) / 255.0f * alpha, static_cast<float>(color.g) / 255.0f * alpha,
         static_cast<float>(color.b) / 255.0f * alpha, alpha};
     const std::int64_t start = st::time::now_ns();
+    (void)active_context();          // 确保 deferred 已创建（它懒创建）
+    note_deferred_draw();            // 清屏也是一条要提交的命令
     active_context()->ClearRenderTargetView(rtv_, values);
     readback_dirty_ = true;
     if (profiler_ != nullptr) {
@@ -1693,25 +1695,30 @@ class GpuCanvas final : public Surface {
     return pixel_at(static_cast<int>(physical.x), static_cast<int>(physical.y));
   }
   [[nodiscard]] auto pixels() const noexcept -> std::span<const std::uint32_t> override {
-    // 只读访问也要确保回读发生过（否则返回空 span 会静默变成"全黑"）
+    // 回读时**两份视图一起生成**（`ensure_readback` 里做），这里只返回。
+    //
+    // 曾经把打包视图做成"按需惰性生成"（省 5.32ms 的位运算），
+    // 结果 `pixels()` 在首次调用时返回空 span、第二次才正常 ——
+    // 这种"第一次为空"的形态在导出路径上表现为**首帧全黑**，
+    // 在测试上是"同一断言时红时绿"，极难查。一次 5ms 换掉这类不确定性不值。
     (void)const_cast<GpuCanvas*>(this)->ensure_readback();
     return {readback_.data(), readback_.size()};
   }
+
   [[nodiscard]] auto pixels() noexcept -> std::span<std::uint32_t> override {
     (void)ensure_readback();
     return {readback_.data(), readback_.size()};
   }
+  /// 导出路径的取像素入口：**直接返回回读缓存的 RGBA 字节**，零转换。
+  ///
+  /// 之前这里先 `pixels()`（拿到打包的 uint32）、再逐像素拆回 4 个字节 ——
+  /// 1080p 每帧 200 万次位运算，实测 **5.32ms/帧**（`tools/gpu_export_cost_probe`：
+  /// `pixels()` 4.06ms vs `to_rgba8()` 9.38ms）。
+  ///
+  /// 而 staging 纹理本来就是 RGBA 字节序，回读时按行 memcpy 下来即可。
   [[nodiscard]] auto to_rgba8() const -> std::vector<std::uint8_t> override {
-    const std::span<const std::uint32_t> data = pixels();
-    std::vector<std::uint8_t> out(data.size() * 4U);
-    for (std::size_t index = 0; index < data.size(); ++index) {
-      const std::uint32_t pixel = data[index];
-      out[index * 4U + 0U] = static_cast<std::uint8_t>((pixel >> 24U) & 0xFFU);
-      out[index * 4U + 1U] = static_cast<std::uint8_t>((pixel >> 16U) & 0xFFU);
-      out[index * 4U + 2U] = static_cast<std::uint8_t>((pixel >> 8U) & 0xFFU);
-      out[index * 4U + 3U] = static_cast<std::uint8_t>(pixel & 0xFFU);
-    }
-    return out;
+    (void)const_cast<GpuCanvas*>(this)->ensure_readback();
+    return readback_rgba_;
   }
   [[nodiscard]] auto content_bounds() const noexcept -> math::IntRect override {
     const std::span<const std::uint32_t> data = pixels();
@@ -2440,6 +2447,11 @@ class GpuCanvas final : public Surface {
       staging_->Release();
       staging_ = nullptr;
     }
+    // 两个视图一起清：只清 uint32 那份会让 `ensure_readback` 的判据与
+    // 实际可用的数据不一致（`readback_rgba_` 有值却被当成"没回读过"）。
+    readback_.clear();
+    readback_rgba_.clear();
+    readback_ready_ = false;
   }
 
   /// 丢掉阴影缓存（目标纹理按尺寸分配，改尺寸后旧目标尺寸不对）。
@@ -2468,7 +2480,22 @@ class GpuCanvas final : public Surface {
     // **回读前必须 flush 字形批次**：否则“本轮攒着还没发的字形”不会被画进目标，
     // 截图/像素断言看到的就会是“文字消失了”（而屏幕上其实是好的）。
     flush_glyph_batch();
-    if (!readback_dirty_ && !readback_.empty()) return true;
+    // 判"已有有效回读"看的是 **`readback_rgba_`**（导出路径的权威副本）。
+    // 之前判 `readback_`（uint32 视图），而它现在是**惰性生成**的 ——
+    // 初值为空，于是条件永假、每帧重复回读；更糟的是某些路径下
+    // `readback_` 空而 `readback_rgba_` 有效，早期 return 后调用方拿到空 vector
+    // （实测症状：`gpu_clear_matches_software_canvas_exactly` 报 `0 != 768`）。
+    // ## 判"已有有效回读"用**尺寸**，不用 `readback_dirty_`
+    //
+    // `readback_dirty_` 只在绘制时置 true、回读后置 false。但一块画布可能：
+    //   · 刚建好（dirty=false，readback_rgba_ 为空）
+    //   · 被 release_readback 清过（dirty 仍为 false）
+    // 这两种情况下"不脏"不等于"有数据"。实测症状：首次 `pixels()` 返回空 span，
+    // 而紧接着的第二次调用正常（第一次把回读补上了）——这种"第一次为空"
+    // 在导出路径上表现为**首帧全黑**，极难查。
+    const std::size_t expected =
+        static_cast<std::size_t>(physical_width_) * static_cast<std::size_t>(physical_height_) * 4U;
+    if (!readback_dirty_ && readback_rgba_.size() == expected) return true;
     if (staging_ == nullptr) {
       D3D11_TEXTURE2D_DESC desc{};
       desc.Width = static_cast<UINT>(physical_width_);
@@ -2499,24 +2526,44 @@ class GpuCanvas final : public Surface {
       ST_LOG_ERROR("GPU 渲染：回读映射失败");
       return false;
     }
-    readback_.assign(static_cast<std::size_t>(physical_width_) *
-                         static_cast<std::size_t>(physical_height_),
-                     0U);
+    // ## 两个视图，按需取用（2026-10-25 性能）
+    //
+    // staging 纹理的内存布局**本来就是 R,G,B,A 字节序**（`kFormat = R8G8B8A8_UNORM`），
+    // 而导出路径要的 `to_rgba8()` 也正好是这个顺序 —— 所以这里存两份：
+    //
+    //   · `readback_rgba_`：**按行 memcpy** 的原始字节，给导出用（零转换）
+    //   · `readback_`：打包成 0xRRGGBBAA 的 uint32，给 `pixels()` 用（软件画布口径）
+    //
+    // 之前只存后者，于是 `to_rgba8()` 要先把 uint32 拆回字节 —— 实测那次拆分
+    // **5.32ms/帧**（1080p 200 万像素，纯位运算）。导出每帧都要走这条路，
+    // 而导出的瓶颈恰恰在这里。
+    const auto row_bytes = static_cast<std::size_t>(physical_width_) * 4U;
+    const auto total_pixels = static_cast<std::size_t>(physical_width_) *
+                              static_cast<std::size_t>(physical_height_);
+    readback_rgba_.resize(total_pixels * 4U);
     const auto* source = static_cast<const std::uint8_t*>(mapped.pData);
     for (int y = 0; y < physical_height_; ++y) {
       const std::uint8_t* row = source + static_cast<std::size_t>(y) * mapped.RowPitch;
-      for (int x = 0; x < physical_width_; ++x) {
-        // 纹理内存序 R,G,B,A → 画布布局 0xRRGGBBAA（预乘值直接搬，不做反预乘）
-        const std::uint8_t red = row[x * 4 + 0];
-        const std::uint8_t green = row[x * 4 + 1];
-        const std::uint8_t blue = row[x * 4 + 2];
-        const std::uint8_t alpha = row[x * 4 + 3];
-        readback_[static_cast<std::size_t>(y) * static_cast<std::size_t>(physical_width_) +
-                  static_cast<std::size_t>(x)] =
-            (static_cast<std::uint32_t>(red) << 24U) | (static_cast<std::uint32_t>(green) << 16U) |
-            (static_cast<std::uint32_t>(blue) << 8U) | static_cast<std::uint32_t>(alpha);
-      }
+      std::memcpy(readback_rgba_.data() + static_cast<std::size_t>(y) * row_bytes, row, row_bytes);
     }
+    // ## 两份视图一起生成
+    //
+    // `readback_rgba_` 给导出（零转换，直接返回）；`readback_` 给 `pixels()` 口径。
+    // 后者要多一遍位运算（1080p 约 5.3ms），但它只在"要看像素"的路径上被读到 ——
+    // 而导出路径（`to_rgba8`）根本不碰它。做成惰性生成会引入"首次为空"的不确定性，
+    // 所以这里**一并算好**，代价是导出每帧多 5.3ms（占 34ms 的 15%）。
+    //
+    // 这条取舍是明确的：正确性 > 那 5.3ms。真要省，应该让导出路径**永不**生成它
+    //（用一个独立的"只取 RGBA"入口），而不是让它"有时有、有时没有"。
+    readback_.resize(total_pixels);
+    for (std::size_t index = 0; index < total_pixels; ++index) {
+      const std::uint8_t* src = readback_rgba_.data() + index * 4U;
+      readback_[index] = (static_cast<std::uint32_t>(src[0]) << 24U) |
+                         (static_cast<std::uint32_t>(src[1]) << 16U) |
+                         (static_cast<std::uint32_t>(src[2]) << 8U) |
+                         static_cast<std::uint32_t>(src[3]);
+    }
+    readback_ready_ = true;
     context_->Unmap(staging_, 0);
     readback_dirty_ = false;
     return true;
@@ -2530,6 +2577,10 @@ class GpuCanvas final : public Surface {
 
   ID3D11Device* device_{nullptr};
   ID3D11DeviceContext* context_{nullptr};
+  /// 回读的**原始 RGBA 字节**（staging 的布局，按行 memcpy）。
+  std::vector<std::uint8_t> readback_rgba_{};
+  /// `readback_`（uint32 打包视图）是否与 `readback_rgba_` 同步。
+  bool readback_ready_{false};
   ID3D11Texture2D* target_{nullptr};
   ID3D11RenderTargetView* rtv_{nullptr};
   ID3D11Texture2D* staging_{nullptr};

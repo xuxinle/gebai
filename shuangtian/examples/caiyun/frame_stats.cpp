@@ -65,12 +65,21 @@ auto StatsAccumulator::downscale_luma(std::span<const std::uint8_t> rgba, int wi
       for (int y = y0; y < y1; ++y) {
         const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(w);
         for (int x = x0; x < x1; ++x) {
-          // 从 RGBA 字节重构出与 Canvas 同布局的 0xRRGGBBAA
+          // ## `to_rgba8()` 的字节序是 **A,B,G,R**，不是 R,G,B,A（2026-10-25 实测）
+          //
+          // 探针 `tools/frame_stats_diff_probe` 打出来的实证：
+          // 写 `(255<<24)|(b<<16)|(g<<8)|r`（0xAABBGGRR）后，`to_rgba8()[0..3]`
+          // 是 `(255, 255, 255, 16)` —— 而期望的 r=16 在**最后一个**字节。
+          // 所以顺序是 A,B,G,R（`Canvas` 内部是 0xAABBGGRR 的预乘值，直接按字节吐出来）。
+          //
+          // 之前按 R,G,B,A 读，读到的"红"其实是 **alpha（恒 255）**：
+          // 每帧亮度都是 255 → 帧间差恒 0 → `still_ratio` 恒 100%、
+          // `change_density` 恒 0。症状是"两帧明明不同却判成静止"。
           const std::size_t base = (row + static_cast<std::size_t>(x)) * 4U;
-          const std::uint32_t argb = (static_cast<std::uint32_t>(px[base]) << 24U) |
-                                     (static_cast<std::uint32_t>(px[base + 1U]) << 16U) |
-                                     (static_cast<std::uint32_t>(px[base + 2U]) << 8U) |
-                                     static_cast<std::uint32_t>(px[base + 3U]);
+          const std::uint32_t argb = (static_cast<std::uint32_t>(px[base + 3U]) << 24U) |
+                                     (static_cast<std::uint32_t>(px[base + 2U]) << 16U) |
+                                     (static_cast<std::uint32_t>(px[base + 1U]) << 8U) |
+                                     static_cast<std::uint32_t>(px[base]);
           // **Canvas 的像素是 0xRRGGBBAA**（实测：写 R=0x11 G=0x22 B=0x33 A=0xFF
           // 后 raw=0x112233FF，即 R 在最高字节、A 在最低字节）。
           //

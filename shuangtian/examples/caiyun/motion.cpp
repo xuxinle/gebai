@@ -1680,7 +1680,14 @@ void render_scene(st::raster::Surface& target, const Scene& scene, double local_
   //
   // 画在图层**之上**：脚本图元通常是前景装饰（珠子、分裂出的点、连线），
   // 盖在上面才对；要盖在下面就把它们写成背景图层的 `shapes`。
-  paint_script_shapes(p);
+  {
+    const auto t_shapes0 = now();
+    paint_script_shapes(p);
+    if (profile) {
+      st::print("[profile] shapes={:.1f}ms\n",
+                static_cast<double>(now() - t_shapes0) / 1.0e6);
+    }
+  }
   // 包装层统一在这里加：所有场景共用同一套识标/结构/页脚。
   //
   // 放这里而不是各场景内各调一次，是因为包装必须**逐帧一致**——
