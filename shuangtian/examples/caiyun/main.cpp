@@ -1152,9 +1152,8 @@ auto run_app(int argc, char** argv) -> int {
     job.shutter = options.shutter;
     job.trajectory = options.trajectory;
     job.keep_frames = options.keep_frames;
-    // GPU 画布开关：默认用（实测 1080p 导出快 1.3×、像素一致，见 `RenderJob::use_gpu`）。
-    // `CAIYUN_GPU=0` 显式关掉 —— 排查"是不是 GPU 的问题"时用，
-    // 也给没有可用设备的机器留一条明确的手动出口。
+    // GPU 画布开关：默认**关**（软件腿更快，理由与实测数据见 `RenderJob::use_gpu`）。
+    // `CAIYUN_GPU=1` 显式打开：重负载（大量大面板 / 模糊 / 三维）时 GPU 会反超。
     if (const char* gpu_env = std::getenv("CAIYUN_GPU"); gpu_env != nullptr) {
       job.use_gpu = std::string(gpu_env) != "0";
     }

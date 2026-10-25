@@ -385,6 +385,11 @@
     "vignette_cost_probe": {
       "kind": "executable",
       "sources": ["tools/vignette_cost_probe.cpp"],
+      "//": "grain（4200 个 1px 小圆）的代价与替代实现对照"
+    },
+    "grain_cost_probe": {
+      "kind": "executable",
+      "sources": ["tools/grain_cost_probe.cpp"],
       "include_dirs": ["examples/caiyun"],
       "exclude_sources": ["src/pkg/*"],
       "//note": "本机 GPU 腿可用性（无头模式下 st doctor 有意不探测 GPU，这里显式探一次）"

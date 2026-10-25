@@ -129,7 +129,7 @@ struct RenderJob {
   ///      `Map(D3D11_MAP_READ)` 会死等（进程 83 秒只耗 1 秒 CPU）
   ///   ③ 从 `CopyResource` 到 `Unmap` 必须在**同一把锁**内 —— 多线程各持一半
   ///      上下文使用权互相等，同样是死锁（1 路正常、2 路必卡）
-  bool use_gpu{true};
+  bool use_gpu{false};
 };
 
 /// 作业状态（UI 与 e2e 都读它）。
