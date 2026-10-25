@@ -10,6 +10,12 @@ import { toast } from "./ui"
 /** 每会话待审批卡片数：同一会话全部处理完才解除输入锁定。 */
 const pendingBySession = new Map<string, number>()
 
+/** 待决卡片增减通知：会话列表的运行角标要据此变成「⌛ 等待你的输入」（它直接数 DOM 里的卡）。
+ *  用事件而不是直接调 sessions（sessions 已导入本模块，反向导入会成环）。 */
+function notifyPendingChange(): void {
+  document.dispatchEvent(new CustomEvent("gebai:pending-change"))
+}
+
 /** 输入锁定：当前会话有待审批卡片时禁止输入/发送/附件，全部处理后恢复焦点。 */
 function syncLock() {
   const cur = getCurrentSession()
@@ -78,6 +84,7 @@ export function addApproval(sessionId: string, toolCallId: string, tool: string)
     if (left > 0) pendingBySession.set(sessionId, left)
     else pendingBySession.delete(sessionId)
     syncLock()
+    notifyPendingChange()
   }
   let submitting = false
   // 决策送达才收卡：断线/请求失败时保留卡片并提示——此前无条件移除且吞掉错误，
@@ -119,6 +126,7 @@ export function addApproval(sessionId: string, toolCallId: string, tool: string)
   pendingBySession.set(sessionId, (pendingBySession.get(sessionId) ?? 0) + 1)
   applyApprovalVisibility()
   syncLock()
+  notifyPendingChange()
   // 当前会话弹出审批：锁定页面并聚焦到卡片（键盘焦点落到审批，输入已禁用）
   if (getCurrentSession()?.id === sessionId) {
     box.tabIndex = -1

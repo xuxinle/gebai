@@ -880,6 +880,7 @@ export function renderChoiceCard(
   // 先入文档再装折叠：卡片需要先完成布局，折叠控件才能按真实内容高度决定是否出现
   approvalsEl.appendChild(wrapper)
   applyInteractionVisibility()
+  notifyPendingChange()
   makeCardFoldable(wrapper, body, foldInit)
   // 计划审批（服务端 plan 工具提示词前缀「请审核计划」）：计划全文已在卡内可见；消息流底部的
   // 展示卡可能仍在视口外（用户上翻阅读历史）——滚动到底把审批卡带进视野再作决策
@@ -909,7 +910,14 @@ export function renderEnvRequestCard(name: string, description: string, secret: 
   wrapper.appendChild(body)
   approvalsEl.appendChild(wrapper)
   applyInteractionVisibility()
+  notifyPendingChange()
   makeCardFoldable(wrapper, body, foldInit)
+}
+
+/** 待决卡片增减通知（与 approvals.ts 同口径，见 gebai:pending-change）。
+ *  会话列表的运行角标据此从「运行中」变为「⌛ 等待你的输入」。 */
+function notifyPendingChange(): void {
+  document.dispatchEvent(new CustomEvent("gebai:pending-change"))
 }
 
 /** 交互卡片（选择/环境变量填值）随会话显示：仅当前会话的卡片可见，其余隐藏（切回恢复）。 */
@@ -922,9 +930,14 @@ export function applyInteractionVisibility(): void {
 
 /** 任务结束清理：移除该会话的交互卡片（选择/环境变量请求随任务终止失效）。 */
 export function clearInteractionCards(sessionId: string): void {
+  let removed = 0
   for (const card of approvalsEl.querySelectorAll<HTMLElement>(".interaction-card")) {
-    if (card.dataset.session === sessionId) card.remove()
+    if (card.dataset.session === sessionId) {
+      card.remove()
+      removed += 1
+    }
   }
+  if (removed) notifyPendingChange()
 }
 
 /** 工具输出：短内容放带框代码块，长内容折叠。与参数区块同框样式。 */

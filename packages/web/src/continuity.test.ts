@@ -102,6 +102,29 @@ describe("运行态可见性与列表角标", () => {
     // 导入不是循环依赖（sessions 不导入 stream）
     expect(src("sessions.ts")).not.toContain('from "./stream"')
   })
+
+  test("本页会话等审批时角标为⌛：待决卡计数不看 hidden（背景会话也要算）", () => {
+    const s = src("sessions.ts")
+    const at = s.indexOf("function localWaitingCount")
+    expect(at).toBeGreaterThan(-1)
+    const fn = s.slice(at, at + 500)
+    // 非当前会话的卡会被 applyApprovalVisibility 置 hidden，但它仍在等用户作答——
+    // 用 :not([hidden]) 会把背景会话全漏掉（多会话并行时恰恰最需要这个信号）。
+    expect(fn).not.toContain(":not([hidden])")
+    expect(fn).toContain('querySelectorAll<HTMLElement>(".approval, .interaction-card")')
+    expect(fn).toContain("node.dataset.session === sessionId")
+    // 本地运行态分支要把 waiting 算进去（不能固定 0）
+    const mark = s.slice(s.indexOf("function runMarkOf"), s.indexOf("function runMarkOf") + 700)
+    expect(mark).toContain("localWaitingCount(sessionId)")
+  })
+
+  test("待决卡增减要通知列表刷新（否则角标不跟着变）", () => {
+    // 卡片增删发生在 approvals / messages，而列表在 sessions——它们已被 sessions 导入，
+    // 不能反向导入，所以用事件解耦。两侧都要发，sessions 侧要听。
+    expect(src("approvals.ts")).toContain('new CustomEvent("gebai:pending-change")')
+    expect(src("messages.ts")).toContain('new CustomEvent("gebai:pending-change")')
+    expect(src("sessions.ts")).toContain('addEventListener("gebai:pending-change"')
+  })
 })
 
 describe("断线/失效期间的用户动作不静默丢", () => {

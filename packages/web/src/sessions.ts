@@ -4,6 +4,7 @@ import { nextScopeId, popKeyScope, pushKeyScope, FOCUS_WITH_INPUT } from "./keym
 import { activatePane, activePane, deactivatePane, paneOf, reapIdlePanes, type MsgPane, type PaneChunks } from "./msg-panes"
 import type { ContentBlock, RuntimeSessionInfo, SessionDetail, SessionInfo } from "@gebai/sdk"
 import {
+  approvalsEl,
   aside,
   autoNamed,
   client,
@@ -647,11 +648,38 @@ export function markSessionRunning(sessionId: string, running: boolean): void {
   void refreshSessions()
 }
 
-/** 会话行运行态（无运行态返回 null）：运行中/等待用户输入/在途工具/后台任务数，列表角标与悬浮说明用。 */
+/** 待决卡片增减（审批/交互卡接）：列表角标要从「运行中」变为「⌛ 等待你的输入」再变回去。
+ *  事件由 approvals.ts / messages.ts 派发（它们已被本模块导入，不能反向导入）。
+ *  只重算角标而不重建整列：结构签名含运行态，签名未变时 refreshSessions 自己会走轻量同步。 */
+document.addEventListener("gebai:pending-change", () => {
+  void refreshSessions()
+})
+
+/** 本页待决卡片数：审批卡（.approval）与交互卡（.interaction-card）都挂在 #approvals 下、带 data-session。
+ *  DOM 是它们的**唯一**存放处（审批计数与卡片生命周期同生共死），直接数它比另维一份计数可靠——
+ *  不会出现「卡已处理但计数没减」那种不一致。
+ *
+ *   **不看 hidden**：非当前会话的卡片会被 applyApprovalVisibility 隐藏，但它仍然在等用户作答——
+ *   多会话并行时「哪个会话卡在我这里」正是列表角标要回答的问题，用 :not([hidden]) 会把背景会话全漏掉。 */
+function localWaitingCount(sessionId: string): number {
+  let n = 0
+  for (const node of approvalsEl.querySelectorAll<HTMLElement>(".approval, .interaction-card")) {
+    if (node.dataset.session === sessionId) n += 1
+  }
+  return n
+}
+
+/** 会话行运行态（无运行态返回 null）：运行中/等待用户输入/在途工具/后台任务数，列表角标与悬浮说明用。
+ *
+ * 优先用快照 runtime（服务端权威，含后台任务与子会话）；本页自己发起的会话只有本地状态时，
+ * 至少把「是否在等用户作答」算准——否则后台任务在等审批时角标只显示「任务运行中」，
+ * 用户看不出它正卡在自己这里（多会话并行时这恰是最需要一眼看到的信号）。
+ */
 function runMarkOf(sessionId: string): { waiting: number; tools: number; bg: number; subs: number } | null {
   const rt = runtimeInfo[sessionId]
   if (rt) return { waiting: rt.pending.length, tools: rt.toolCalls ?? 0, bg: rt.bgTasks.filter((t) => t.status === "running").length, subs: rt.subRuns.length }
-  return runningSeen.has(sessionId) ? { waiting: 0, tools: 0, bg: 0, subs: 0 } : null
+  if (!runningSeen.has(sessionId)) return null
+  return { waiting: localWaitingCount(sessionId), tools: 0, bg: 0, subs: 0 }
 }
 
 /** 结构签名：搜索/批量/折叠态 + 会话行展示字段——任一变化才需要重建列表 DOM。 */
