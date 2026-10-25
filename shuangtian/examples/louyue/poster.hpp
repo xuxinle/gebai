@@ -165,6 +165,28 @@ struct PosterScript {
   Color background{6, 10, 22, 255};   ///< 兜底底色（Background 块缺失时用）
   std::vector<Block> blocks{};
 
+  // —— 影像质感（全部默认 0 = 关闭且零开销；实现来自框架 `st/raster/texture.hpp`）——
+  //
+  // 海报与视频的差别往往就在这几层：光从哪来、底上有没有尘、四角要不要收。
+  // 它们都是**背景层**（画在块之下），不会盖住文字。
+
+  /// 径向光晕强度 0~1（0 = 不画）。
+  float glow{0.0f};
+  float glow_cx{0.5f};      ///< 光源横向位置（0~1 画面比例）
+  float glow_cy{0.32f};     ///< 光源纵向位置
+  float glow_radius{0.46f}; ///< 光晕半径（相对画面**短边**）
+  /// 光晕色；alpha 为 0 时按背景亮度自动取（深底取冷白，浅底取暖白）。
+  Color glow_color{0, 0, 0, 0};
+
+  /// 背景颗粒数（0 = 不画）。建议 200~900；它让大面积平涂不发死。
+  int grain{0};
+  float grain_alpha{0.08f};
+
+  /// 暗角强度 0~1（0 = 不画）。把视线收到中心。
+  ///
+  /// **浅色底会自动跳过**（四角刷黑是灾难）——判据在框架的 `backdrop_is_light`。
+  float vignette{0.0f};
+
   [[nodiscard]] auto export_width() const noexcept -> int {
     return out_width > 0 ? out_width : width;
   }

@@ -1,11 +1,17 @@
+// 影像质感层的实现。设计约束与坐标约定见 include/st/raster/texture.hpp。
+//
+// 实现上的两个关键取舍（都不要随手改）：
+//  · 粒子/颗粒用哈希而非随机引擎 —— 渲染是纯函数，同一时刻两次必须逐像素相同；
+//  · 径向光晕用多层同心圆、景深用降采样 —— 不假设存在整幅高斯模糊原语。
+
 /// 裁云 · 影像特效层实现（见 `fx.hpp`）。
 
-#include "fx.hpp"
+#include "st/raster/texture.hpp"
 
 #include <algorithm>
 #include <cmath>
 
-namespace caiyun {
+namespace st::raster {
 
 auto hash01(std::uint32_t a, std::uint32_t b) -> float {
   // 32 位整数哈希（Wang hash 的变体）→ 取低位做 [0,1)。
@@ -555,4 +561,4 @@ auto rotate_points_about_bounds(st::math::Point* points, std::size_t count, floa
   }
 }
 
-}  // namespace caiyun
+}  // namespace st::raster

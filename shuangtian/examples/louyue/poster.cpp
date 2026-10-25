@@ -17,6 +17,8 @@
 #include "st/ext/json.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/paint.hpp"
+// 影像质感（光晕/颗粒/暗角）来自框架层，与视频等其他应用共用同一套原语。
+#include "st/raster/texture.hpp"
 #include "st/ui/text_port.hpp"
 
 namespace louyue {
@@ -191,6 +193,22 @@ auto parse_poster(std::string_view json) -> st::Result<PosterScript> {
   poster.out_height = static_cast<int>(st::json_get_i64(root, "out_height", 0));
   poster.background = color_field(root, "background", poster.background);
 
+  // —— 影像质感（全部默认 0 = 关）——
+  // 用 `json_get_double` 读而不要求整数：脚本里写 `0.3` 与 `0.30` 都应被接受。
+  poster.glow = static_cast<float>(std::clamp(st::json_get_double(root, "glow", 0.0), 0.0, 1.0));
+  poster.glow_cx =
+      static_cast<float>(std::clamp(st::json_get_double(root, "glow_cx", poster.glow_cx), 0.0, 1.0));
+  poster.glow_cy =
+      static_cast<float>(std::clamp(st::json_get_double(root, "glow_cy", poster.glow_cy), 0.0, 1.0));
+  poster.glow_radius = static_cast<float>(
+      std::clamp(st::json_get_double(root, "glow_radius", poster.glow_radius), 0.05, 2.0));
+  poster.glow_color = color_field(root, "glow_color", poster.glow_color);
+  poster.grain = static_cast<int>(std::clamp(st::json_get_i64(root, "grain", 0), 0LL, 20000LL));
+  poster.grain_alpha = static_cast<float>(
+      std::clamp(st::json_get_double(root, "grain_alpha", poster.grain_alpha), 0.0, 1.0));
+  poster.vignette =
+      static_cast<float>(std::clamp(st::json_get_double(root, "vignette", 0.0), 0.0, 1.0));
+
   const st::Json* blocks = st::json_find(root, "blocks");
   if (blocks == nullptr || !blocks->is_array() || blocks->empty()) {
     return st::unexpected(st::ErrorCode::Parse, "海报脚本缺少 blocks（至少一块）");
@@ -276,6 +294,19 @@ auto poster_to_json(const PosterScript& poster) -> std::string {
   root["out_width"] = poster.out_width;
   root["out_height"] = poster.out_height;
   root["background"] = color_to_hex(poster.background);
+  // 质感字段（只在非默认时写，保持旧脚本序列化结果不变）
+  if (poster.glow > 0.0f) {
+    root["glow"] = static_cast<double>(poster.glow);
+    root["glow_cx"] = static_cast<double>(poster.glow_cx);
+    root["glow_cy"] = static_cast<double>(poster.glow_cy);
+    root["glow_radius"] = static_cast<double>(poster.glow_radius);
+    if (poster.glow_color.a != 0) root["glow_color"] = color_to_hex(poster.glow_color);
+  }
+  if (poster.grain > 0) {
+    root["grain"] = static_cast<std::int64_t>(poster.grain);
+    root["grain_alpha"] = static_cast<double>(poster.grain_alpha);
+  }
+  if (poster.vignette > 0.0f) root["vignette"] = static_cast<double>(poster.vignette);
   st::Json blocks = st::Json::array();
   for (const Block& block : poster.blocks) {
     st::Json node = st::Json::object();
@@ -499,6 +530,98 @@ void draw_text_with_shadow(const Frame& frame, Canvas& target, const st::ui::Tex
             block.tracking, Color{0, 0, 0, shadow_alpha}, block.bold, block.align);
   draw_text(frame, target, port, block.text, block.x, block.y, block.size, block.tracking, color,
             block.bold, block.align);
+}
+
+/// 给最终画面叠**影像质感**（光晕/暗角/颗粒）。
+///
+/// ## 为何必须在块循环**之后**画（实测代价：一整轮查错）
+///
+/// 直觉位置是 `clear()` 之后（“背景层”），但海报脚本几乎总有 `background` 块，
+/// 它整幅填充会把先画的东西**整片盖掉**。表现是：字段解析正确、接口全部成功、
+/// 导出的 PNG 与关闭质感时**逐像素相同**——没有任何错误可查。
+///
+/// 氛围必须作用于**最终画面**，所以它压在最上层；三道强度都很低且默认关闭，
+/// 不会盖住文字。
+///
+/// ## 为何暗角/铺光按底色自动跳
+///
+/// 浅色/米白底上刷暗角会在四角留下四个大黑角、铺光把白底揩成脏灰；
+/// 而“每个写浅色海报的人都记得关掉它”是必然漏的开关。
+/// 判据用框架的 `backdrop_is_light`（取上下两色中较亮的一侧）。
+void paint_texture(Canvas& target, const PosterScript& poster) {
+  if (poster.glow <= 0.0f && poster.grain <= 0 && poster.vignette <= 0.0f) return;
+
+  const auto canvas_w = static_cast<float>(poster.export_width());
+  const auto canvas_h = static_cast<float>(poster.export_height());
+  const auto device_scale = canvas_w / static_cast<float>(std::max(1, poster.width));
+
+  // 底色：优先 Background 块的渐变，否则用海报兜底色。
+  Color bg_top = poster.background;
+  Color bg_bottom = poster.background;
+  for (const Block& b : poster.blocks) {
+    if (b.kind != BlockKind::Background) continue;
+    bg_top = b.color;
+    bg_bottom = (b.color_alt.a != 0) ? b.color_alt : b.color;
+    break;
+  }
+  const bool light_bg = st::raster::backdrop_is_light(bg_top, bg_bottom);
+
+  if (poster.glow > 0.0f && !light_bg) {
+    st::raster::GlowSpec spec{};
+    spec.cx = poster.glow_cx;
+    spec.cy = poster.glow_cy;
+    spec.radius = poster.glow_radius;
+    spec.intensity = poster.glow;
+    // 光色缺省时取冷白：看不清“品牌色”时，冷白最不会错。
+    spec.color = (poster.glow_color.a != 0) ? poster.glow_color : Color{130, 170, 235, 255};
+    st::raster::paint_glow(target, spec, device_scale);
+  }
+
+  if (poster.vignette > 0.0f && !light_bg) {
+    // 暗角 = **四角暗、中心亮**。
+    //
+    // ## 为何不能用「从外向内叠实心圆」（实测：画反了）
+    //
+    // 第一版写了 `for i: 半径由大到小 + 实心圆 + alpha 递减`。直观上“外层淡、内层浓”，
+    // 但实心圆是**整盘填充**：中心被所有 10 层叠中（最暗），四角只被最外一层碰到。
+    // 导出后是一个**聚光洞**（中心发黑、四角发亮），与暗角完全相反——而平均亮度、
+    // 变化强度这些指标全部正常，只有眼睛能看出来。
+    //
+    // 正解：把暗角看成「四角矩形减一个中心亮盘的补集」——用 4 个叠在画面外沿的
+    // 半透明矩形比环带更便宜，也更不容易写反。这里用**四边渐变带**近似：
+    // 每条边向内侧逐条叠一条窄带（越靠边越浓），中心区域完全不受影响。
+    const float cx = canvas_w * 0.5f;
+    const float cy = canvas_h * 0.5f;
+    const float max_r = std::sqrt(cx * cx + cy * cy);
+    constexpr int kSteps = 12;
+    for (int i = 0; i < kSteps; ++i) {
+      const float t = static_cast<float>(i) / static_cast<float>(kSteps);
+      // 内缩距离：从边往中心走 t 比例（只在靠外的一半区域内画）
+      const float inset = 0.16f * t;
+      const float w = canvas_w * (1.0f - inset * 2.0f);
+      const float h = canvas_h * (1.0f - inset * 2.0f);
+      const float x = (canvas_w - w) * 0.5f;
+      const float y = (canvas_h - h) * 0.5f;
+      // 越往外越浓：t=0 在边沿（最浓），t→1 靠近内圈（最淡）
+      const float strength = poster.vignette * 0.09f * (1.0f - t) * (1.0f - t);
+      const auto a = static_cast<std::uint8_t>(std::clamp(255.0f * strength, 0.0f, 255.0f));
+      if (a == 0) continue;
+      // 只画「环带」：外矩形减内矩形 = 4 条边带。用 4 个矩形而不是整个填充，
+      // 否则内部又被叠暗了（同一个错误的另一形态）。
+      const float band = static_cast<float>(max_r) * 0.012f + 2.0f;
+      const Color c{0, 0, 0, a};
+      target.fill_rect(Rect{x, y, w, band}, Paint::solid(c));
+      target.fill_rect(Rect{x, y + h - band, w, band}, Paint::solid(c));
+      target.fill_rect(Rect{x, y, band, h}, Paint::solid(c));
+      target.fill_rect(Rect{x + w - band, y, band, h}, Paint::solid(c));
+    }
+    (void)max_r;
+  }
+
+  if (poster.grain > 0) {
+    // 海报是静态图：用固定的 time 与 fps，保证同一份脚本每次导出逐像素相同。
+    st::raster::paint_grain(target, poster.grain, poster.grain_alpha, 0.0, 1.0, device_scale);
+  }
 }
 
 void render_poster(Canvas& target, const PosterScript& poster,
@@ -867,6 +990,9 @@ void render_poster(Canvas& target, const PosterScript& poster,
       }
     }
   }
+
+  // 影像质感放在**所有块之后**（在最上层）：详见 `paint_texture` 的注释。
+  paint_texture(target, poster);
 }
 
 }  // namespace louyue

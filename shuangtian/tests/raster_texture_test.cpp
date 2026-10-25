@@ -1,4 +1,7 @@
-/// 裁云特效层单测：确定性、零开销、边界。
+/// 影像质感层（光晕/颗粒/粒子/运镜）单测：确定性、零开销、边界。
+///
+/// 这一层已从应用下沉到框架（`st/raster/texture.hpp`），所以测试也随之迁到框架层——
+/// 它是**共用能力**，不是某个应用的私有实现。
 ///
 /// ## 为什么这几条值得钉住
 ///
@@ -15,21 +18,17 @@
 #include <cstdint>
 #include <vector>
 
-// ⚠ 直接包含**实现**而不是只包含头：fx.cpp 在 examples/ 下，而测试构建只编译
-// tests/*_test.cpp + 框架库源码，不会链接 examples 的目标文件。
-//
-// 这么做的前提是 fx.cpp 自身只依赖框架库（它没有别的 examples 依赖），
-// 否则会在测试里牵出一串缺少符号。
-#include "examples/caiyun/fx.cpp"
+// 能力在框架库里（`src/raster/texture.cpp` 参与框架库构建），只含头即可。
+#include "st/raster/texture.hpp"
 
 #include "st/test/test.hpp"
 #include "st/raster/canvas.hpp"
 
 namespace {
 
-using caiyun::CameraMove;
-using caiyun::GlowSpec;
-using caiyun::ParticleField;
+using st::raster::CameraMove;
+using st::raster::GlowSpec;
+using st::raster::ParticleField;
 using st::math::Color;
 
 /// 把画布像素拷成可比较的向量（`Canvas` 不可拷贝）。
@@ -65,11 +64,11 @@ using st::math::Color;
 ST_TEST(fx_hash01_is_deterministic_and_well_distributed) {
   // 同一个 (a,b) 永远同一个值——粒子的不确定性全靠它。
   for (std::uint32_t i = 0; i < 64; ++i) {
-    ST_CHECK(caiyun::hash01(i, 7u) == caiyun::hash01(i, 7u));
+    ST_CHECK(st::raster::hash01(i, 7u) == st::raster::hash01(i, 7u));
   }
   // 取值范围必须是 [0,1)（越界会让透明度/尺寸算出负数）。
   for (std::uint32_t i = 0; i < 256; ++i) {
-    const float value = caiyun::hash01(i, 3u);
+    const float value = st::raster::hash01(i, 3u);
     ST_CHECK(value >= 0.0f);
     ST_CHECK(value < 1.0f);
   }
@@ -77,7 +76,7 @@ ST_TEST(fx_hash01_is_deterministic_and_well_distributed) {
   // 判据：相邻差值的均值应当接近 1/3（均匀分布的期望），而不是接近 0。
   float sum_gap = 0.0f;
   for (std::uint32_t i = 0; i < 200; ++i) {
-    sum_gap += std::fabs(caiyun::hash01(i + 1, 1u) - caiyun::hash01(i, 1u));
+    sum_gap += std::fabs(st::raster::hash01(i + 1, 1u) - st::raster::hash01(i, 1u));
   }
   const float mean_gap = sum_gap / 200.0f;
   ST_CHECK(mean_gap > 0.22f);
@@ -91,8 +90,8 @@ ST_TEST(fx_particles_are_deterministic_at_same_time) {
   field.count = 40;
   auto canvas_a = make_canvas();
   auto canvas_b = make_canvas();
-  caiyun::paint_particles(canvas_a, field, 1.234, 1.0f);
-  caiyun::paint_particles(canvas_b, field, 1.234, 1.0f);
+  st::raster::paint_particles(canvas_a, field, 1.234, 1.0f);
+  st::raster::paint_particles(canvas_b, field, 1.234, 1.0f);
   // 同一时刻两次渲染必须逐像素相同（全仓 e2e 判据）。
   ST_CHECK(diff_pixels(snapshot(canvas_a), snapshot(canvas_b)) == 0);
 }
@@ -103,8 +102,8 @@ ST_TEST(fx_particles_change_with_time) {
   field.drift_x = 40.0f;   // 放大漂移，让"时间不同 → 位置不同"可判
   auto canvas_a = make_canvas();
   auto canvas_b = make_canvas();
-  caiyun::paint_particles(canvas_a, field, 0.0, 1.0f);
-  caiyun::paint_particles(canvas_b, field, 2.5, 1.0f);
+  st::raster::paint_particles(canvas_a, field, 0.0, 1.0f);
+  st::raster::paint_particles(canvas_b, field, 2.5, 1.0f);
   // 时间推进后画面必须变化（否则"粒子"是贴图而不是尘）。
   ST_CHECK(diff_pixels(snapshot(canvas_a), snapshot(canvas_b)) > 0);
 }
@@ -115,11 +114,11 @@ ST_TEST(fx_particles_off_has_zero_cost) {
   const auto before = snapshot(canvas);
   ParticleField off_count{};
   off_count.count = 0;
-  caiyun::paint_particles(canvas, off_count, 1.0, 1.0f);
+  st::raster::paint_particles(canvas, off_count, 1.0, 1.0f);
   ParticleField off_alpha{};
   off_alpha.count = 50;
   off_alpha.alpha = 0.0f;
-  caiyun::paint_particles(canvas, off_alpha, 1.0, 1.0f);
+  st::raster::paint_particles(canvas, off_alpha, 1.0, 1.0f);
   ST_CHECK(diff_pixels(before, snapshot(canvas)) == 0);
 }
 
@@ -137,7 +136,7 @@ ST_TEST(fx_glow_has_no_visible_rings) {
   spec.radius = 0.45f;
   spec.intensity = 0.9f;
   spec.color = Color{255, 255, 255, 255};
-  caiyun::paint_glow(canvas, spec, 1.0f);
+  st::raster::paint_glow(canvas, spec, 1.0f);
 
   // 判据一：沿半径方向亮度**单调不增**。
   int previous = 255;
@@ -174,7 +173,7 @@ ST_TEST(fx_glow_off_changes_nothing) {
   const auto before = snapshot(canvas);
   GlowSpec spec{};
   spec.intensity = 0.0f;
-  caiyun::paint_glow(canvas, spec, 1.0f);
+  st::raster::paint_glow(canvas, spec, 1.0f);
   ST_CHECK(diff_pixels(before, snapshot(canvas)) == 0);
 }
 
@@ -183,7 +182,7 @@ ST_TEST(fx_glow_off_changes_nothing) {
 ST_TEST(fx_dof_off_is_identity) {
   auto source = make_canvas();
   const auto before = snapshot(source);
-  const auto result = caiyun::depth_of_field(source, 0.0f);
+  const auto result = st::raster::depth_of_field(source, 0.0f);
   ST_CHECK(result.physical_width() == source.physical_width());
   ST_CHECK(result.physical_height() == source.physical_height());
   // 强度 0 = 不处理：与原图逐像素相同。
@@ -202,8 +201,8 @@ ST_TEST(fx_dof_blurs_details) {
       }
     }
   }
-  const auto sharp = caiyun::depth_of_field(source, 0.0f);
-  const auto blurred = caiyun::depth_of_field(source, 1.0f);
+  const auto sharp = st::raster::depth_of_field(source, 0.0f);
+  const auto blurred = st::raster::depth_of_field(source, 1.0f);
   const auto local_contrast = [](const st::raster::Canvas& canvas) {
     int total = 0;
     int count = 0;
@@ -227,7 +226,7 @@ ST_TEST(fx_camera_static_is_identity) {
   auto source = make_canvas();
   const auto before = snapshot(source);
   CameraMove move{};   // 全部默认：无缩放/旋转/平移/震动
-  const auto result = caiyun::apply_camera(source, move, 0.5f, 0.0, 1.0f);
+  const auto result = st::raster::apply_camera(source, move, 0.5f, 0.0, 1.0f);
   ST_CHECK(diff_pixels(before, snapshot(result)) == 0);
 }
 
@@ -247,7 +246,7 @@ ST_TEST(fx_camera_zoom_in_enlarges_content) {
   CameraMove move{};
   move.zoom_from = 1.0f;
   move.zoom_to = 1.5f;
-  const auto zoomed = caiyun::apply_camera(source, move, 1.0f, 0.0, 1.0f);
+  const auto zoomed = st::raster::apply_camera(source, move, 1.0f, 0.0, 1.0f);
   ST_CHECK(count_bright(zoomed) > before);
 }
 
@@ -257,7 +256,7 @@ ST_TEST(fx_camera_shake_decays_to_zero) {
   CameraMove move{};
   move.shake = 0.02f;
   move.shake_decay = 8.0f;
-  const auto still = caiyun::apply_camera(source, move, 0.0f, 100.0, 1.0f);
+  const auto still = st::raster::apply_camera(source, move, 0.0f, 100.0, 1.0f);
   const auto before = snapshot(source);
   ST_CHECK(diff_pixels(before, snapshot(still)) == 0);
 }
@@ -265,9 +264,9 @@ ST_TEST(fx_camera_shake_decays_to_zero) {
 ST_TEST(fx_camera_window_clamps_outside_and_advances_inside) {
   // 窗口语义：窗口外夹在 0/1，窗口内线性。
   //
-  // 调的是**真实实现**（caiyun::camera_progress），不在测试里复算公式——
+  // 调的是**真实实现**（st::raster::camera_progress），不在测试里复算公式——
   // 复算只能证明“我抄的公式对”，实现写错也不红（本仓踩过的“恒绿测试”）。
-  using caiyun::camera_progress;
+  using st::raster::camera_progress;
   // 窗口 [3, 8]（5 秒）
   ST_CHECK_NEAR(camera_progress(0.0f, 12.0f, 3.0f, 8.0f), 0.0f, 1e-5f);
   ST_CHECK_NEAR(camera_progress(2.99f, 12.0f, 3.0f, 8.0f), 0.0f, 1e-5f);
@@ -280,7 +279,7 @@ ST_TEST(fx_camera_window_clamps_outside_and_advances_inside) {
 
 ST_TEST(fx_camera_window_disabled_matches_whole_span) {
   // 不填窗口（end <= start）时必须退回整段线性——老脚本逐像素不变。
-  using caiyun::camera_progress;
+  using st::raster::camera_progress;
   for (const float t : {0.0f, 3.0f, 6.0f, 12.0f}) {
     for (const float end : {0.0f, -1.0f}) {
       ST_CHECK_NEAR(camera_progress(t, 12.0f, 0.0f, end), t / 12.0f, 1e-5f);
@@ -290,7 +289,7 @@ ST_TEST(fx_camera_window_disabled_matches_whole_span) {
 
 ST_TEST(fx_camera_window_zero_span_is_finite) {
   // start == end 是"未启用"，但若有人写 [5,5] 也不能除零。
-  const float value = caiyun::camera_progress(5.0f, 12.0f, 5.0f, 5.0f);
+  const float value = st::raster::camera_progress(5.0f, 12.0f, 5.0f, 5.0f);
   ST_CHECK(std::isfinite(value));
   ST_CHECK(value >= 0.0f && value <= 1.0f);
 }
@@ -304,12 +303,12 @@ ST_TEST(fx_camera_window_keeps_last_frames_identical) {
   move.zoom_to = 6.0f;
   move.anchor_x = 0.5f;
   move.anchor_y = 0.5f;
-  move.zoom_curve = caiyun::ZoomCurve::ExpoIn;
+  move.zoom_curve = st::raster::ZoomCurve::ExpoIn;
 
-  const float p8 = caiyun::camera_progress(8.0f, 12.0f, 0.0f, 8.0f);
-  const float p12 = caiyun::camera_progress(12.0f, 12.0f, 0.0f, 8.0f);
-  const auto a = caiyun::apply_camera(source, move, p8, 8.0, 1.0f);
-  const auto b = caiyun::apply_camera(source, move, p12, 12.0, 1.0f);
+  const float p8 = st::raster::camera_progress(8.0f, 12.0f, 0.0f, 8.0f);
+  const float p12 = st::raster::camera_progress(12.0f, 12.0f, 0.0f, 8.0f);
+  const auto a = st::raster::apply_camera(source, move, p8, 8.0, 1.0f);
+  const auto b = st::raster::apply_camera(source, move, p12, 12.0, 1.0f);
   ST_CHECK(diff_pixels(snapshot(a), snapshot(b)) == 0);
 }
 
@@ -361,7 +360,7 @@ using Point = st::math::Point;
 
 ST_TEST(fx_rotate_point_is_identity_at_zero_degrees) {
   const Point p{123.5f, 456.25f};
-  const Point out = caiyun::rotate_point_deg(p, Point{100.0f, 400.0f}, 0.0f);
+  const Point out = st::raster::rotate_point_deg(p, Point{100.0f, 400.0f}, 0.0f);
   ST_CHECK(out.x == p.x);
   ST_CHECK(out.y == p.y);
 }
@@ -372,7 +371,7 @@ ST_TEST(fx_rotate_point_keeps_distance_to_center) {
   const Point p{1100.0f, 700.0f};
   const float r0 = std::hypot(p.x - c.x, p.y - c.y);
   for (const float deg : {15.0f, 35.0f, 90.0f, 180.0f, -47.0f}) {
-    const Point out = caiyun::rotate_point_deg(p, c, deg);
+    const Point out = st::raster::rotate_point_deg(p, c, deg);
     ST_CHECK(std::abs(r0 - std::hypot(out.x - c.x, out.y - c.y)) < 0.01f);
   }
 }
@@ -387,7 +386,7 @@ ST_TEST(fx_rotate_quarter_turn_is_clockwise) {
   // 改用 30°：顺时针（y 向下）下 (100,0) 应到 (86.6, 50)；
   // 逆时针则到 (86.6, -50)——y 的符号把两者分开。
   constexpr float kDeg30 = 30.0f;
-  const Point out = caiyun::rotate_point_deg(Point{100.0f, 0.0f}, Point{0.0f, 0.0f}, kDeg30);
+  const Point out = st::raster::rotate_point_deg(Point{100.0f, 0.0f}, Point{0.0f, 0.0f}, kDeg30);
   ST_CHECK(std::abs(out.x - 86.6025f) < 0.01f);
   ST_CHECK(out.y > 0.0f);                      // 顺时针：y 为正（向下）
   ST_CHECK(std::abs(out.y - 50.0f) < 0.01f);
@@ -399,7 +398,7 @@ ST_TEST(fx_rotated_square_bbox_grows_and_area_is_conserved) {
   // 只有面积守恒时，“根本没转”也守恒。
   auto pts = square(560.0f, 340.0f, 200.0f);
   const float area_before = polygon_area(pts);
-  caiyun::rotate_points_about_bounds(pts.data(), pts.size(), 35.0f);
+  st::raster::rotate_points_about_bounds(pts.data(), pts.size(), 35.0f);
   const auto b = bbox(pts);
   const float rad = 35.0f * 3.14159265358979f / 180.0f;
   const float expect = 200.0f * (std::cos(rad) + std::sin(rad));
@@ -425,7 +424,7 @@ ST_TEST(fx_rotate_about_bounds_keeps_bbox_center_fixed) {
   // ① 每个顶点到中心的距离守恒
   std::vector<float> dist_before;
   for (const Point& p : pts) dist_before.push_back(std::hypot(p.x - center.x, p.y - center.y));
-  caiyun::rotate_points_about_bounds(pts.data(), pts.size(), 40.0f);
+  st::raster::rotate_points_about_bounds(pts.data(), pts.size(), 40.0f);
   for (std::size_t i = 0; i < pts.size(); ++i) {
     const float d = std::hypot(pts[i].x - center.x, pts[i].y - center.y);
     ST_CHECK(std::abs(d - dist_before[i]) < 0.01f);
@@ -434,7 +433,7 @@ ST_TEST(fx_rotate_about_bounds_keeps_bbox_center_fixed) {
   // ② 180° 后包围盒中心回到原处
   std::vector<Point> half{Point{100.0f, 100.0f}, Point{300.0f, 140.0f},
                           Point{180.0f, 260.0f}};
-  caiyun::rotate_points_about_bounds(half.data(), half.size(), 180.0f);
+  st::raster::rotate_points_about_bounds(half.data(), half.size(), 180.0f);
   const auto turned = bbox(half);
   ST_CHECK(std::abs((turned[0] + turned[1]) * 0.5f - center.x) < 0.01f);
   ST_CHECK(std::abs((turned[2] + turned[3]) * 0.5f - center.y) < 0.01f);
@@ -443,15 +442,15 @@ ST_TEST(fx_rotate_about_bounds_keeps_bbox_center_fixed) {
 ST_TEST(fx_rotate_zero_is_noop_and_null_is_safe) {
   auto pts = square(540.0f, 260.0f, 200.0f);
   const auto copy = pts;
-  caiyun::rotate_points_about_bounds(pts.data(), pts.size(), 0.0f);
+  st::raster::rotate_points_about_bounds(pts.data(), pts.size(), 0.0f);
   for (std::size_t i = 0; i < pts.size(); ++i) {
     ST_CHECK(pts[i].x == copy[i].x);
     ST_CHECK(pts[i].y == copy[i].y);
   }
   // 不足 3 个顶点的多边形不会被绘制，但旋转函数也不该越界。
-  caiyun::rotate_points_about_bounds(nullptr, 0, 30.0f);
+  st::raster::rotate_points_about_bounds(nullptr, 0, 30.0f);
   std::vector<Point> one{Point{10.0f, 20.0f}};
-  caiyun::rotate_points_about_bounds(one.data(), one.size(), 30.0f);
+  st::raster::rotate_points_about_bounds(one.data(), one.size(), 30.0f);
   ST_CHECK(one[0].x == 10.0f);
   ST_CHECK(one[0].y == 20.0f);
 }

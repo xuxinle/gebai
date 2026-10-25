@@ -441,9 +441,9 @@
 **这比缺字段更贵**：schema 自省能看到 `rotate`、脚本里写了不报错，而画面就是正的——
 两个子会话都以为是自己的写法问题。
 
-**已修**：矩形/文字/多边形三类图元绕**包围盒中心**旋转（几何提到 `examples/caiyun/fx.cpp`
+**已修**：矩形/文字/多边形三类图元绕**包围盒中心**旋转（几何提到 `src/raster/texture.cpp`
 的 `rotate_point_deg` / `rotate_points_about_bounds`，那里才写得了单测）。
-回归测试 6 条在 `tests/caiyun_fx_test.cpp`，逆向验证 4 条全拦住
+回归测试 6 条在 `tests/raster_texture_test.cpp`，逆向验证 4 条全拦住
 （`scripts/verify_rotate_reverse.py`）。
 
 ### 裁云：缺多边形/四边形填充图元（2026-10-23，**已修**）
