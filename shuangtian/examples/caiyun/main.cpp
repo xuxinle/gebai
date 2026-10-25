@@ -135,9 +135,9 @@ auto parse_options(int argc, char** argv) -> Options {
     };
     // 数值参数统一走带校验的解析（承 gbcode 的纪律）：非法值必须与未知参数
     // 同一条路径（报错可读、退出码稳定），不能"一快一崩"。
-    const auto parse_int = [&](const char* flag, long long fallback) -> long long {
+    const auto parse_int = [&](const char* flag, std::int64_t fallback) -> std::int64_t {
       const std::string text = value(std::format("{}", fallback).c_str());
-      long long parsed = 0;
+      std::int64_t parsed = 0;
       std::size_t consumed = 0;
       bool ok = false;
       try {

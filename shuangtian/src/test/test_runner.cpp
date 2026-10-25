@@ -345,7 +345,7 @@ auto run_all(std::string_view filter) -> int {
     if (time::now_ns() - start_ns > case_timeout_ms * 1'000'000LL &&
         !timed_out.exchange(true)) {
       std::fprintf(stdout, "  \x1b[33mTIME\x1b[0m %-44s 超过 %lld ms 仍在运行（软超时标记 FAIL，继续等待）\n",
-                   item.name.c_str(), static_cast<long long>(case_timeout_ms));
+                   item.name.c_str(), static_cast<std::int64_t>(case_timeout_ms));
       std::fflush(stdout);
     }
     }
@@ -399,7 +399,7 @@ auto run_all(std::string_view filter) -> int {
     std::fprintf(stdout, "  单条复现：st test <用例名>\n");
   }
   std::fprintf(stdout, "\n  %d passed, %d failed, %llu assertions", passed_cases, failed_cases,
-               static_cast<unsigned long long>(checks));
+               static_cast<std::uint64_t>(checks));
   if (skipped_env > 0) {
     // 运行中跳过必须在汇总里可见：CI 门禁看到"跳过 N"才能发现"环境没配好，
     // 这一条其实没验"（静默时它藏在 PASS 计数里，BACKLOG 3903）。

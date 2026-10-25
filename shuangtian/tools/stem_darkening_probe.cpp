@@ -60,10 +60,10 @@ double lcd_ink(const FT_Bitmap& bm) {
 }
 
 /// 解码 UTF-8 → 码点序列（不依赖 locale）。
-std::vector<unsigned long> decode(const char* text) {
-  std::vector<unsigned long> out;
+std::vector<std::uint32_t> decode(const char* text) {
+  std::vector<std::uint32_t> out;
   for (const char* p = text; *p != '\0';) {
-    unsigned long cp = static_cast<unsigned char>(*p);
+    std::uint32_t cp = static_cast<unsigned char>(*p);
     int len = 1;
     if (cp >= 0xF0U) { cp &= 0x07U; len = 4; }
     else if (cp >= 0xE0U) { cp &= 0x0FU; len = 3; }
@@ -83,7 +83,7 @@ Ink render(FT_Face face, const char* text, double ppem, bool subpixel) {
   const FT_Int32 flags = FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT |
                          (subpixel ? FT_LOAD_TARGET_LCD : 0);
   Ink out;
-  for (unsigned long cp : decode(text)) {
+  for (std::uint32_t cp : decode(text)) {
     if (FT_Load_Char(face, cp, flags) != 0) continue;
     FT_Render_Glyph(face->glyph, subpixel ? FT_RENDER_MODE_LCD : FT_RENDER_MODE_NORMAL);
     out.ink += lcd_ink(face->glyph->bitmap);
@@ -109,7 +109,7 @@ int main(int argc, char** argv) {
   st::probe::result verdict{};
 
   std::string path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
-  long face_index = 2;
+  std::int64_t face_index = 2;
   std::vector<double> ppems;
   std::vector<std::string> samples;
   for (int i = 1; i < argc; ++i) {

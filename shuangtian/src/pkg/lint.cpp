@@ -20,7 +20,7 @@ struct RuleSpec {
 };
 
 /// 规则表（与 `CONVENTIONS.md` §8 一一对应）。
-constexpr std::array<RuleSpec, 16> kRules{{
+constexpr std::array<RuleSpec, 17> kRules{{
     {"L1", "禁止裸 new/delete/malloc/free（用 unique_ptr/RAII/容器）",
      R"(\bnew\s|\bdelete\s|\bmalloc\s*\(|\bfree\s*\(|\brealloc\s*\()"},
     {"L2", "禁止 C 风格强制转换（用 static_cast/bit_cast）",
@@ -109,6 +109,26 @@ constexpr std::array<RuleSpec, 16> kRules{{
     // 把这道检查补上。命中方向：**core → 任何 ui 头**（将来可扩展到 core→shell 等）。
     // 走专用检查（同 L13/L15）：方向判定需要文件路径，单行正则表达不了。
     {"L16", "core 层不得 include ui 层头（依赖方向：ui 可用 core，core 不认识 ui）", ""},
+    // L17：**禁止用 `long` / `long long` 表达数据**——一律用定宽类型。
+    //
+    // 为什么这条值得单独成规则（本会话实测踩到）：
+    // `long` 在 LP64（Linux/macOS）是 64 位、在 LLP64（Windows）是 32 位。
+    // 用它表达字节数/毫秒/计数，会在**跨平台时才暴露**：Windows 上静默截断或溢出，
+    // 而本地开发（Windows + MinGW 恰好 32 位 long）测不出来。
+    // 更阴的一层：`std::int64_t` 在 LP64 下**就是** `long`、在 LLP64 下**就是** `long long`，
+    // 所以 `std::format("{}", int64值)` 会因平台而报不同的歧义错——用 `long long`
+    // "绕过"这个错误等于把差异固化进代码（`src/ext/video.cpp` 曾这么干过）。
+    //
+    // 判据：把代码行里的**类型位置**上的 `long` / `long long` 抛出来，但排除三类：
+    //   ① `long double`（浮点，与宽度无关）；
+    //   ② 平台 ABI 边界（`platform_*.cpp` 里的 `LONG`/`long` 是对系统类型的如实声明，
+    //      改了反而错——白名单见 `rule_exempt`）；
+    //   ③ 注释与字符串（`scan_text` 会先剔掉）。
+    //
+    // 提示级还是阻断级：**阻断**。理由：它没有"这次恰好安全"的情形——
+    // 用 `std::int64_t` 永远同样简洁，而收益是确定的。
+    {"L17", "禁止 long / long long 表达数据（用 std::intN_t / std::uintN_t / std::size_t）",
+     R"((?:^|[\s(+,*<:])(?:(?:unsigned|signed)\s+)?long(?:\s+long)?(?![\s]*double)\b)"},
 }};
 
 /// 去掉行注释与块注释状态（保留字符串内容，简单启发式）。
@@ -172,6 +192,18 @@ constexpr std::array<RuleSpec, 16> kRules{{
     // 这是单点例外（一个文件、一组相关变量），与 L8 的意图（禁"随手写的全局状态"）
     // 不冲突：这些变量的生命周期与整个进程一致，且**只被本文件读写**。
     return file_name == "state_trace.cpp";
+  }
+  if (rule == "L17") {
+    // 平台 ABI 边界：这些地方的 `long` / `LONG` 是对**系统类型**的如实声明，
+    // 不是我们选择的数据宽度。改成 `int32_t` 反而会错：
+    //   - `platform_x11.cpp` 里的 `XEvent`/`XWindowAttributes` 布局由 Xlib 定，
+    //     `long` 换了 `int64_t` 在 32 位平台上就与真实结构对不上（XEvent 尺寸有 static_assert 钉）；
+    //   - `platform_tls_openssl.cpp` 的函数指针签名必须与 OpenSSL 导出符号逐位一致；
+    //   - `platform_crash.cpp` / `platform_process.cpp` 接的是 Win32 `LONG`/`DWORD`；
+    //   - `platform_net.cpp` / `platform_http.cpp` 的 `FIONBIO` 展开经系统头做 size_t→long 转换。
+    // 判据用文件名而不是清单：这类文件**按定义**就是平台层，漏登记一个就会
+    // 逼着人去"改错"真正的系统签名。
+    return file_name.find("platform_") != std::string_view::npos;
   }
   return false;
 }

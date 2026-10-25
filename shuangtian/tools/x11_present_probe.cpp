@@ -63,7 +63,7 @@ void out(std::format_string<Args...> fmt, Args&&... args) {
 }
 
 using XDisplay = void;
-using XId = unsigned long;
+using XId = unsigned long;  // lint-allow: L17 Xlib ABI（类型由 X11 协议定）
 
 struct XEvent { int type; std::int64_t pad[23]; };
 
@@ -72,7 +72,7 @@ struct XImage {
   char* data;
   int byte_order, bitmap_unit, bitmap_bit_order, bitmap_pad, depth, bytes_per_line,
       bits_per_pixel;
-  unsigned long red_mask, green_mask, blue_mask;
+  unsigned long red_mask, green_mask, blue_mask;  // lint-allow: L17 Xlib ABI（类型由 X11 协议定）
   void* obdata;
   struct { void *create_image, *destroy_image, *get_pixel, *put_pixel, *sub_image, *add_pixel; } f;
 };
@@ -84,15 +84,15 @@ struct XShmSegmentInfo { XId shmseg; int shmid; char* shmaddr; int read_only; };
 /// （静默退化，不崩不报错），而那正是探针要避免的盲区。
 struct XShmCompletionEvent {
   int type;
-  unsigned long serial;
+  unsigned long serial;  // lint-allow: L17 Xlib ABI（类型由 X11 协议定）
   int send_event;
   XDisplay* display;
   XId drawable;
   int major_code;
   int minor_code;
   XId shmseg;
-  unsigned long offset;
-  unsigned long data;
+  unsigned long offset;  // lint-allow: L17 Xlib ABI（类型由 X11 协议定）
+  unsigned long data;  // lint-allow: L17 Xlib ABI（类型由 X11 协议定）
 };
 static_assert(offsetof(XShmCompletionEvent, shmseg) == 48, "shmseg 偏移必须是 48");
 
@@ -109,10 +109,10 @@ struct Xlib {
   void* (*default_visual)(XDisplay*, int);
   int (*default_depth)(XDisplay*, int);
   XId (*create_window)(XDisplay*, XId, int, int, unsigned int, unsigned int, unsigned int, int,
-                       unsigned int, void*, unsigned long, void*);
+                       unsigned int, void*, unsigned long, void*);  // lint-allow: L17 Xlib ABI（类型由 X11 协议定）
   int (*map_window)(XDisplay*, XId);
   int (*flush)(XDisplay*);
-  void* (*create_gc)(XDisplay*, XId, unsigned long, void*);
+  void* (*create_gc)(XDisplay*, XId, unsigned long, void*);  // lint-allow: L17 Xlib ABI（类型由 X11 协议定）
   XImage* (*create_image)(XDisplay*, void*, unsigned int, int, int, char*, unsigned int,
                           unsigned int, int, int);
   int (*put_image)(XDisplay*, XId, void*, XImage*, int, int, int, int, unsigned int, unsigned int,

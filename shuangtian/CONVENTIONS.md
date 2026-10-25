@@ -43,10 +43,20 @@
 | R20 | `std::endl`（无谓 flush）、C 风格 `\n` 拼接大字符串 | `'\n'` + `std::format` | lint |
 | R21 | 悬垂引用：`string_view` / `span` 指向临时对象 | 生命周期规则：`string_view` 只能指向具名存储或字符串字面量；`span` 只在同表达式/同函数内使用 | 审阅 + ASan |
 | R22 | 无 `virtual` 的基类析构（经基类指针删除） | 多态基类 `virtual ~T() = default;` | `-Wnon-virtual-dtor` |
+| R23 | `long` / `long long` 表达**数据**（字节数、毫秒、计数、偏移） | `std::int32_t` / `std::int64_t` / `std::uint64_t` / `std::size_t`（按语义选宽度）；接 C 标准库 API（`ftell`/`fseek`/`sscanf`）时**必须**接它声明的类型，随即显式转换并 `// lint-allow: L17` 说明 | lint（L17） |
 
 ## 3. 必须使用的现代特性（正向规定）
 
 ### 3.1 类型与所有权
+- **整数一律定宽**：数据用 `std::intN_t` / `std::uintN_t`，尺寸用 `std::size_t`，**禁止用 `long` / `long long` 承载数据**。
+  `long` 在 LP64（Linux/macOS）是 64 位、LLP64（Windows）是 32 位——用它表达字节数/毫秒/计数，
+  失败形态是**只在另一个平台上才暴露**的静默截断，本地开发（Windows + MinGW 恰好 32 位 long）测不出来。
+  更隐蔽的一层：`std::int64_t` 在 LP64 下**就是** `long`、LLP64 下**就是** `long long`，
+  于是 `std::format("{}", int64值)` 会因平台报不同的歧义错——用 `long long` "绕过"这个错，
+  等于把平台差异固化进代码（`src/ext/video.cpp` 曾这么写过）。
+  接 C 标准库时**不适用本禁令**：`std::ftell` 返回 `long`、`std::fseek` 第二个参数是 `long`、
+  `std::sscanf` 的 `%lld` 只认 `long long`——这些地方要（也应当）接它声明的类型，
+  随即显式转换到定宽类型，并用 `// lint-allow: L17 <原因>` 就地说明。格式化 64 位用 `SCNd64`/`PRIi64`。
 - 值语义优先；所有权用 `std::unique_ptr`（唯一）/ `std::shared_ptr`（共享，且只在真正共享处用）。
 - 多态接口：`class Backend { virtual ~Backend() = default; ... };` + `std::unique_ptr<Backend>`。
 - 非拥有视图：`std::string_view`、`std::span<const T>`。
@@ -503,6 +513,7 @@ PowerShell 的 PSReadLine 会画一段**只有显示、不是输入**的内联�
 | L14 | `#include <windows.h>`/`<unistd.h>`/`<dlfcn.h>`/`<shellapi.h>`/`<winsock2.h>`/`<arpa/inet.h>`/`<netinet/in.h>`/`<sys/socket.h>`/`<poll.h>`/`<fcntl.h>`，以及直接用 `dlopen`/`dlsym`（§10 第 1 条：平台差异只能出现在 `platform_*`） | `platform_*.cpp`（单点封装）；`shell/backend.cpp`（需 `dlopen` 做**运行时后端探测**本身）；清单 `lint.exempt.L14` 登记的 `core/entry.cpp`（见下表） |
 | L15 | raw string 无定界符（`R"(`）——内容里的 `)"` 会提前终结（提示级） | 无（改用 `R"x(…)x"`；本仓实测踩过两次） |
 | L16 | **层方向**：文件在 `src/core/`、`include/st/core/` 下且 `#include "st/ui/…"`（core 不得依赖 ui——BACKLOG P1 根因①的防护栏；`check_layer_includes` 专用检查，方向判定需文件路径，单行正则表达不了） | 无（core→ui 没有合法形态；将来若真需要，走清单豁免并在此登记） |
+| L17 | **禁止 `long` / `long long` 表达数据**（`-Werror` 的 `-Wconversion` 抓不到它——`long` 本身就是合法类型，错在**宽度随平台变**）。排除 `long double`、注释与字符串 | ①	extbf{平台 ABI 边界}：`platform_*` 文件按定义就是对系统类型的如实声明（X11 的 `XEvent` 布局、OpenSSL 函数指针签名、Win32 `LONG`、`FIONBIO` 宏），换了反而错——按文件名豁免；② C 标准库调用点（`ftell`/`fseek`/`sscanf`）用行内 `// lint-allow: L17` 就地说明 |
 
 **扫描语义（重要）**：匹配前先做两层净化——① **注释**不参与任何规则；② **字符串字面量内容**不参与任何规则
 （关键字表、规则表自身的正则字符串都不是代码，否则 linter 会对着自己的关键词表报几十条"违规"）。

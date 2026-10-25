@@ -228,9 +228,9 @@ auto print_usage(std::string_view program) -> void {
       }
       return parsed;
     };
-    const auto parse_int = [&](const char* flag, long long fallback) -> long long {
+    const auto parse_int = [&](const char* flag, std::int64_t fallback) -> std::int64_t {
       const std::string text = value(std::format("{}", fallback));
-      long long parsed = 0;
+      std::int64_t parsed = 0;
       std::size_t consumed = 0;
       const bool ok = !text.empty() && [&] {
         try {
@@ -292,7 +292,7 @@ auto print_usage(std::string_view program) -> void {
     else if (raw == "--editor-font-scale") options.editor_font_scale = value("auto");
     else if (raw == "--editor-line-spacing") options.editor_line_spacing = value("auto");
     else if (raw == "--control-port") {
-      const long long port = parse_int("--control-port", 0);
+      const std::int64_t port = parse_int("--control-port", 0);
       if (port < 0 || port > 65535) {
         st::eprint("参数 --control-port 超出端口范围：{}\n", port);
         std::exit(2);
@@ -309,7 +309,7 @@ auto print_usage(std::string_view program) -> void {
     else if (raw == "--renderer") options.renderer = value("auto");
     else if (raw == "--shots") options.shots = value({});
     else if (raw == "--frames") {
-      const long long frames = parse_int("--frames", 0);
+      const std::int64_t frames = parse_int("--frames", 0);
       if (frames < 0) {
         st::eprint("参数 --frames 不能为负：{}\n", frames);
         std::exit(2);
@@ -317,7 +317,7 @@ auto print_usage(std::string_view program) -> void {
       options.frames = static_cast<std::uint32_t>(frames);
     }
     else if (raw == "--ms") {
-      const long long ms = parse_int("--ms", 0);
+      const std::int64_t ms = parse_int("--ms", 0);
       if (ms < 0) {
         st::eprint("参数 --ms 不能为负：{}\n", ms);
         std::exit(2);

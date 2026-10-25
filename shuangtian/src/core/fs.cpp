@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <cstdlib>
 #include <filesystem>
 #include <array>
@@ -224,7 +225,9 @@ auto read_bytes(std::string_view path) -> Result<Bytes> {
   if (std::fseek(file->raw(), 0, SEEK_END) != 0) {
     return unexpected(ErrorCode::Io, std::string("seek failed '").append(path).append("'"));
   }
-  const long size = std::ftell(file->raw());
+  // ftell 的返回类型就是 long（C 标准签名）：这里接的是**系统 API 的值**，不是我们选的数据
+  // 宽度；随即升到 int64_t 并检查负值（>2GB 在 32 位 long 上返回 -1，而不是静默截断）。
+  const long size = std::ftell(file->raw());  // lint-allow: L17 接 C 标准库返回类型
   if (size < 0) return unexpected(ErrorCode::Io, std::string("size failed '").append(path).append("'"));
   if (std::fseek(file->raw(), 0, SEEK_SET) != 0) {
     return unexpected(ErrorCode::Io, std::string("seek failed '").append(path).append("'"));
@@ -309,7 +312,15 @@ auto MappedFile::span() const noexcept -> std::span<const std::uint8_t> {
 auto read_span(std::string_view path, std::uint64_t offset, std::size_t length) -> Result<Bytes> {
   auto file = FileHandle::open(path, "rb");
   if (!file) return forward_error(file.error());
-  if (std::fseek(file->raw(), static_cast<long>(offset), SEEK_SET) != 0) {
+  // `std::fseek` 的偏移量参数是 `long`：>2GB 偏移在 32 位 long 平台上会**静默截断**
+  // （转成一个看起来合法的位置）。所以先判上界再转，宁可报错也不读错位置。
+  // 判上界必须知道 fseek 的偏移量类型宽度（long），无法避开这个类型名。
+  if (offset > static_cast<std::uint64_t>(std::numeric_limits<long>::max())) {  // lint-allow: L17 需 long 宽度
+    return unexpected(ErrorCode::Io,
+                      std::string("offset exceeds long range '").append(path).append("'"));
+  }
+  // fseek 的第二个参数就是 long（C 标准签名），必须转成它才能调用。
+  if (std::fseek(file->raw(), static_cast<long>(offset), SEEK_SET) != 0) {  // lint-allow: L17 接 C 标准库参数类型
     return unexpected(ErrorCode::Io, std::string("seek failed '").append(path).append("'"));
   }
   Bytes bytes(length);

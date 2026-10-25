@@ -27,6 +27,7 @@
 #error "霜天源码要求 C++23（-std=c++23）。构建请经 `st build`（标准取自清单 st.pkg 的 cxx_standard）；手工编译请显式加 -std=c++23。"
 #endif
 
+#include <cstdint>
 #include <version>
 
 namespace st {
@@ -35,7 +36,7 @@ namespace st {
 ///
 /// 与 `cxx_standard_in_use()` 一样用函数而非 `inline constexpr` 变量：
 /// lint L8 只看声明形态，`constexpr` 变量与可变全局在它眼里是同一类。
-[[nodiscard]] consteval auto cxx_standard() noexcept -> long { return 23; }
+[[nodiscard]] consteval auto cxx_standard() noexcept -> std::int32_t { return 23; }
 
 /// `<print>` / `<println>`：**宏在 ≠ 能链接**。
 ///
@@ -93,7 +94,7 @@ namespace st {
 }
 
 /// 本翻译单元实际使用的标准年号（`__cplusplus` 的标准化形态：202302L → 23）。
-[[nodiscard]] constexpr auto cxx_standard_in_use() noexcept -> long {
+[[nodiscard]] constexpr auto cxx_standard_in_use() noexcept -> std::int32_t {
   if constexpr (__cplusplus >= 202302L) return 23;
   if constexpr (__cplusplus >= 202002L) return 20;
   return 0;

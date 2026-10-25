@@ -48,7 +48,7 @@ namespace {
 
 int main() {
 #if defined(__cpp_lib_stacktrace)
-  st::print("__cpp_lib_stacktrace = {}\n", static_cast<long>(__cpp_lib_stacktrace));
+  st::print("__cpp_lib_stacktrace = {}\n", static_cast<std::int64_t>(__cpp_lib_stacktrace));
   const auto frames = deepest();
   for (std::size_t index = 0; index < frames.size(); ++index) {
     st::print("  #{} {}\n", index, frames[index]);

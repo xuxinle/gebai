@@ -112,7 +112,7 @@ void set_crash_extra_provider(std::string (*provider)());
 /// （测“替换后能用”是假测试：那样测的是测试自己）。
 ///
 /// 参数 `pid` 显式传入（而非内部取）——让测试能固定它。
-[[nodiscard]] auto crash_report_file_name(std::int64_t unix_millis, unsigned long pid)
+[[nodiscard]] auto crash_report_file_name(std::int64_t unix_millis, std::uint32_t pid)
     -> std::string;
 
 /// 正常退出时调用：删除从未被写过的崩溃报告文件。

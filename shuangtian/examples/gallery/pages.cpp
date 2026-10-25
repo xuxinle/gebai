@@ -1720,7 +1720,7 @@ namespace {
         "播放头 {:02}:{:02}.{:03} · 缩放 {:.0f}px/s",
         static_cast<int>(playhead / 60000), static_cast<int>((playhead / 1000) % 60),
         static_cast<int>(playhead % 1000), timeline_ptr->model().pixels_per_second()));
-    hooks.set_status(std::format("时间轴：播放头 {}ms", static_cast<long long>(playhead)));
+    hooks.set_status(std::format("时间轴：播放头 {}ms", static_cast<std::int64_t>(playhead)));
   };
   timeline_ptr->on_playhead_changed = [refresh_timeline_state](Millis) { refresh_timeline_state(); };
   timeline_ptr->on_clip_moved = [timeline_state_ptr, hooks](std::size_t track, std::size_t clip) {

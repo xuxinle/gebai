@@ -102,7 +102,7 @@ auto main(int argc, char** argv) -> int {
 
   st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(kWidth, kHeight, 1.0f);
   const auto start = std::chrono::steady_clock::now();
-  long long frames = 0;
+  std::int64_t frames = 0;
   for (;;) {
     root.mark_dirty_all();
     root.layout(true);

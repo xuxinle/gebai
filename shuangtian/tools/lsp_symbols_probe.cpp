@@ -4,6 +4,7 @@
 /// 请求能返回 10KB 结果——必须把这层拆开看：是握手没完成、请求没发出，还是响应没解析。
 #include <chrono>
 #include "st/core/fs.hpp"
+#include <cinttypes>
 #include <cstdio>
 #include <string>
 #include <thread>
@@ -15,11 +16,11 @@ auto main(int argc, char** argv) -> int {
   gbcode::LanguageService service;
   int symbols_seen = 0;
   service.on_symbols = [&](std::int64_t id, const std::vector<st::lsp::DocumentSymbol>& symbols) {
-    std::printf("  [回调] id=%lld 符号数=%zu\n", static_cast<long long>(id), symbols.size());
+    std::printf("  [回调] id=%" PRIi64 " 符号数=%zu\n", static_cast<std::int64_t>(id), symbols.size());  // lint-allow: L14 探针一次性输出
     symbols_seen = static_cast<int>(symbols.size());
     for (std::size_t i = 0; i < symbols.size() && i < 5; ++i) {
       std::printf("    - %s (kind=%lld depth=%zu)\n", symbols[i].name.c_str(),
-                  static_cast<long long>(symbols[i].kind), symbols[i].depth);
+                  static_cast<std::int64_t>(symbols[i].kind), symbols[i].depth);
     }
   };
 
@@ -55,7 +56,7 @@ auto main(int argc, char** argv) -> int {
 
   std::printf("④ 发送 documentSymbol 请求…\n");
   const auto id = service.request_document_symbols(path);
-  std::printf("  请求 id=%lld\n", static_cast<long long>(id));
+  std::printf("  请求 id=%" PRIi64 "\n", static_cast<std::int64_t>(id));  // lint-allow: L14 探针一次性输出
   for (int i = 0; i < 100; ++i) {
     (void)service.pump();
     if (symbols_seen > 0) break;

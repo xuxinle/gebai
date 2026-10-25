@@ -71,8 +71,8 @@ constexpr Color kForeground{0x1A, 0x1A, 0x1E, 0xFF};
 struct Stats {
   double bg{0.0};
   double darkest{0.0};   ///< 最黑像素的覆盖率
-  long long solid{0};
-  long long mid{0};
+  std::int64_t solid{0};
+  std::int64_t mid{0};
   double ink{0.0};
   double mid_ratio{0.0};  ///< mid / solid
 };

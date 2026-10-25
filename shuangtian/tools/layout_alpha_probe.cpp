@@ -35,7 +35,7 @@ std::vector<double> grid_of(const st::raster::Canvas& c) {
       const int x0 = gx * w / COLS, x1 = std::max(x0 + 1, (gx + 1) * w / COLS);
       const int y0 = gy * h / ROWS, y1 = std::max(y0 + 1, (gy + 1) * h / ROWS);
       double sum = 0.0;
-      long count = 0;
+      std::int64_t count = 0;
       for (int y = y0; y < y1; ++y) {
         for (int x = x0; x < x1; ++x) {
           const std::size_t i = (static_cast<std::size_t>(y) * w + x) * 4U;

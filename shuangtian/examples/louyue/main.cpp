@@ -101,9 +101,9 @@ auto parse_options(int argc, char** argv) -> Options {
     // 屏幕上一行 what(): stoi）——用户看不懂、脚本拿不到码。而同一命令行里的
     // `--bogus-flag` 走的是「报错 + exit 2」的干净路径。**非法值必须与未知参数
     // 同一条路径**（报错可读、退出码稳定），不能一快一崩。
-    const auto parse_int = [&](const char* flag, long long fallback) -> long long {
+    const auto parse_int = [&](const char* flag, std::int64_t fallback) -> std::int64_t {
       const std::string text = value(std::format("{}", fallback).c_str());
-      long long parsed = 0;
+      std::int64_t parsed = 0;
       std::size_t consumed = 0;
       const bool ok = !text.empty() && [&] {
         try {
@@ -131,7 +131,7 @@ auto parse_options(int argc, char** argv) -> Options {
     else if (raw == "--backend") options.backend = value("");
     else if (raw == "--theme") options.theme = value("light");
     else if (raw == "--control-port") {
-      const long long port = parse_int("--control-port", 0);
+      const std::int64_t port = parse_int("--control-port", 0);
       if (port < 0 || port > 65535) {
         st::eprint("参数 --control-port 超出端口范围：{}\n", port);
         std::exit(2);

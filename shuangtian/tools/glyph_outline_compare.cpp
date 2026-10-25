@@ -181,7 +181,7 @@ auto main(int argc, char** argv) -> int {
   // 默认查一批**有代表性**的字形（简单/复杂汉字 + 拉丁 + 数字）；
   // 命令行可给码点覆盖：`--cp 0x30 0x31`（本探针是"比几何"的通用工具，
   // 不同调查要看不同字形——2026-10-06 查数字/字母时就是这么用的）。
-  std::vector<unsigned long> codepoints{0x4E2DUL, 0x56FDUL, 0x4E00UL, 0x971CUL,
+  std::vector<std::uint32_t> codepoints{0x4E2DUL, 0x56FDUL, 0x4E00UL, 0x971CUL,
                                         0x9F98UL, 0x8C61UL, 0x0041UL, 0x0067UL};
   for (int i = 3; i < argc; ++i) {
     const std::string a = argv[i];
@@ -204,7 +204,7 @@ auto main(int argc, char** argv) -> int {
   st::print("字体 {} face={}  units_per_em={:.0f}\n", path, face_index, upem);
   st::print("{:<8}{:>12}{:>22}{:>20}{:>10}{:>18}{:>18}\n", "码点", "子路径 霜/FT", "面积 霜/FT(em2)",
             "周长 霜/FT(em)", "面积比", "宽 霜/FT", "高 霜/FT");
-  for (unsigned long cp : codepoints) {
+  for (std::uint32_t cp : codepoints) {
     const auto gid = face->glyph_index(static_cast<char32_t>(cp));
     if (!gid.has_value()) continue;
     const auto outline = face->glyph_outline(*gid);

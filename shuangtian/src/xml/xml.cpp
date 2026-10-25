@@ -49,7 +49,7 @@ void append_decoded(std::string& out, std::string_view raw) {
       const bool hex = body.size() > 2 && (body[1] == 'x' || body[1] == 'X');
       const std::string digits(body.substr(hex ? 2 : 1));
       char* end = nullptr;
-      const unsigned long code = std::strtoul(digits.c_str(), &end, hex ? 16 : 10);
+      const auto code = static_cast<std::uint32_t>(std::strtoul(digits.c_str(), &end, hex ? 16 : 10));
       if (end == digits.c_str() + digits.size() && code != 0 && code <= 0x10FFFFUL) {
         // UTF-8 编码（1~4 字节）。
         const auto value = static_cast<std::uint32_t>(code);

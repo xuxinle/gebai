@@ -35,7 +35,7 @@ namespace {
 
 
 struct Row {
-  unsigned long cp;
+  std::uint32_t cp;
   double ft_hint_dark;
   double ft_hint_nodark;
   double ft_nohint_dark;
@@ -43,7 +43,7 @@ struct Row {
   double st_ink;
 };
 
-double ft_ink(FT_Library lib, FT_Face face, unsigned long cp, double ppem, bool hint, bool dark) {
+double ft_ink(FT_Library lib, FT_Face face, std::uint32_t cp, double ppem, bool hint, bool dark) {
   FT_Bool disable = dark ? 0 : 1;
   (void)FT_Property_Set(lib, "cff", "no-stem-darkening", &disable);
   (void)FT_Property_Set(lib, "autofitter", "no-stem-darkening", &disable);
@@ -82,7 +82,7 @@ double st_ink(const st::text::TextRenderer& renderer, const std::string& utf8, f
   return ink;
 }
 
-std::string utf8_of(unsigned long cp) {
+std::string utf8_of(std::uint32_t cp) {
   std::string s;
   if (cp < 0x80) s += static_cast<char>(cp);
   else if (cp < 0x800) {
@@ -113,7 +113,7 @@ int main(int argc, char** argv) {
   // 其余数字一律是物理字号，两种参数可在命令行任意顺序混写。
   std::string path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
   int face_index = 2;
-  std::vector<unsigned long> cps;
+  std::vector<std::uint32_t> cps;
   std::vector<double> ppems;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -151,7 +151,7 @@ int main(int argc, char** argv) {
 
     st::print("{:<8}{:>10}{:>10}{:>10}{:>10}{:>10}{:>12}{:>12}{:>12}\n", "码点", "FT默档",
               "FT关加墨", "FT关hint", "FT都关", "霜天", "hint贡献", "加墨贡献", "霜天/FT默档");
-    for (unsigned long cp : cps) {
+    for (std::uint32_t cp : cps) {
       const std::string u = utf8_of(cp);
       const double hd = ft_ink(library, ft, cp, ppem, true, true);
       const double hn = ft_ink(library, ft, cp, ppem, true, false);

@@ -416,7 +416,7 @@ void Tree::activate() {
 }
 
 auto Tree::semantics_text() const -> std::string {
-  return std::format("{} 行", static_cast<unsigned long long>(rows_.size()));
+  return std::format("{} 行", static_cast<std::uint64_t>(rows_.size()));
 }
 
 auto Tree::semantics_value() const -> std::string {

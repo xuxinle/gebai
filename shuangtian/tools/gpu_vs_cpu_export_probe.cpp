@@ -175,14 +175,14 @@ int main() {
       draw_all(**g, shapes);
       const auto pg = (*g)->to_rgba8();
       std::size_t diff = 0, maxdiff = 0;
-      long long sum = 0;
+      std::int64_t sum = 0;
       if (pc.size() == pg.size()) {
         for (std::size_t i = 0; i < pc.size(); ++i) {
           const auto d = static_cast<std::size_t>(
               std::abs(static_cast<int>(pc[i]) - static_cast<int>(pg[i])));
           if (d > 2) ++diff;
           if (d > maxdiff) maxdiff = d;
-          sum += static_cast<long long>(d);
+          sum += static_cast<std::int64_t>(d);
         }
       }
       std::printf("[对齐] 软件 vs GPU：差>2 的字节 %zu / %zu（最大差 %zu，平均差 %.3f）\n",

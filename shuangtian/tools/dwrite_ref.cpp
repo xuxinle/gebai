@@ -272,7 +272,10 @@ int main(int argc, char** argv) {
           brush->Release();
         }
         const HRESULT ended = dcrt->EndDraw();
-        if (ended != S_OK) std::printf("EndDraw hr=0x%08lX\n", (unsigned long)ended);
+        if (ended != S_OK) {
+          const auto code = static_cast<std::uint32_t>(ended);
+          std::printf("EndDraw hr=0x%08X\n", code);  // lint-allow: L14 探针一次性输出
+        }
         // GDI 透明位图双写问题：D2D ClearType 写入的是预乘 alpha，但 DC 目标 alpha=IGNORE，
         // RGB 已是最终色。直接按 BGRA→RGB 读出。
         std::vector<unsigned char> rgb((size_t)phys_w * phys_h * 3);

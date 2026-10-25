@@ -128,8 +128,8 @@ struct Harness {
 /// 一轮的结果。
 struct Outcome {
   bool prompt_back{false};      ///< Ctrl+C 后回到提示符（本用例的被测语义）
-  long long ms{-1};             ///< 发 Ctrl+C → 回到提示符
-  long long recover_ms{-1};     ///< 失败现场再发一次 → 恢复（-1 = 没恢复/不需要）
+  std::int64_t ms{-1};             ///< 发 Ctrl+C → 回到提示符
+  std::int64_t recover_ms{-1};     ///< 失败现场再发一次 → 恢复（-1 = 没恢复/不需要）
 };
 
 auto one_round(const Arm& arm) -> Outcome {
@@ -172,10 +172,10 @@ auto one_round(const Arm& arm) -> Outcome {
 struct Tally {
   int rounds{0};
   int red{0};
-  long long green_sum{0};
-  long long green_worst{0};
+  std::int64_t green_sum{0};
+  std::int64_t green_worst{0};
   int green_count{0};
-  std::vector<long long> red_recover_ms{};
+  std::vector<std::int64_t> red_recover_ms{};
 };
 
 void print_tally(const Arm& arm, const Tally& tally, double load_before, double load_after) {
@@ -186,7 +186,7 @@ void print_tally(const Arm& arm, const Tally& tally, double load_before, double 
             load_before, load_after);
   if (!tally.red_recover_ms.empty()) {
     std::string detail;
-    for (const long long ms : tally.red_recover_ms) {
+    for (const std::int64_t ms : tally.red_recover_ms) {
       detail += std::format(" {}ms", ms);
     }
     st::print("     红轮「再发一次 Ctrl+C 恢复」耗时：{}\n", detail);

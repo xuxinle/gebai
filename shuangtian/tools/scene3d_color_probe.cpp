@@ -102,7 +102,7 @@ auto reconstruct_legacy(const Canvas& none_canvas) -> Canvas {
       const Color c = none_canvas.pixel_at(x, y);
       const auto back = [](std::uint8_t v) -> std::uint8_t {
         const float lin = st::raster::srgb_to_linear(static_cast<float>(v) / 255.0f);
-        const long q = std::lround(lin * 255.0f);
+        const std::int64_t q = std::lround(lin * 255.0f);
         return static_cast<std::uint8_t>(q < 0 ? 0 : (q > 255 ? 255 : q));
       };
       out.set_pixel(x, y, Color{back(c.r), back(c.g), back(c.b), c.a});

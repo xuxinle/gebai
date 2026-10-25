@@ -168,11 +168,11 @@ auto parse_options(int argc, char** argv) -> Options {
     // 屏幕上一行 what(): stoi）——用户看不懂、脚本拿不到码。而同一命令行里的
     // `--bogus-flag` 走的是「报错 + exit 2」的干净路径。**非法值必须与未知参数
     // 同一条路径**（报错可读、退出码稳定），不能一快一崩。
-    const auto parse_int = [&](const char* flag) -> long long {
+    const auto parse_int = [&](const char* flag) -> std::int64_t {
       // ⚠ 与 gbcode 版的差别：本示例的 `next()` 无 fallback 形参（缺值返空串），
       // 于是缺值在此也走报错路径（gbcode 会静默用 fallback）——对"必填端口"更诚实。
       const std::string text = next();
-      long long parsed = 0;
+      std::int64_t parsed = 0;
       std::size_t consumed = 0;
       const bool ok = !text.empty() && [&] {
         try {
@@ -202,7 +202,7 @@ auto parse_options(int argc, char** argv) -> Options {
     } else if (arg == "--theme") {
       options.theme = next();
     } else if (arg == "--control-port") {
-      const long long port = parse_int("--control-port");
+      const std::int64_t port = parse_int("--control-port");
       if (port < 0 || port > 65535) {
         st::eprint("参数 --control-port 超出端口范围：{}\n", port);
         std::exit(2);

@@ -73,7 +73,7 @@ int main() {
       }
     }
     const double ms = ms_since(t0) / kIter;
-    const auto px = static_cast<long long>(c.box.width * c.box.height);
+    const auto px = static_cast<std::int64_t>(c.box.width) * static_cast<std::int64_t>(c.box.height);
     std::printf("%-26s %8.2f ms %12lld\n", c.name, ms, px);
     if (c.horizontal) {
       horizontal_total += ms;

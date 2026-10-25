@@ -247,3 +247,33 @@ ST_TEST(fs_read_text_strips_utf8_bom) {
   std::error_code ignored;
   std::filesystem::remove(path, ignored);
 }
+
+ST_TEST(fs_read_bytes_and_span_roundtrip_through_ftell_fseek) {
+  // 覆盖 read_bytes / read_span 的实现路径：它们经 `std::ftell` / `std::fseek` 取尺寸与定位，
+  // 而这两个 C 标准函数的参数/返回值类型是平台相关的 `long`（LP64 64 位 / LLP64 32 位）。
+  // 本用例钉住三件事：
+  //   ① 尺寸正确传递（ftell 的 long → int64_t → size_t 链路不丢）；
+  //   ② 偏移定位正确（fseek 的 offset → long 转换不截断非零偏移）；
+  //   ③ 内容逐字节一致。
+  const std::string path = st::fs::join(st::fs::temp_dir(), "st_fs_roundtrip_probe.bin");
+  std::string payload;
+  payload.reserve(5000);
+  for (int index = 0; index < 5000; ++index) {
+    payload.push_back(static_cast<char>('a' + (index % 26)));
+  }
+  const auto written = st::fs::write_text(path, payload);
+  ST_REQUIRE(written.has_value());
+
+  const auto whole = st::fs::read_bytes(path);
+  ST_REQUIRE(whole.has_value());
+  ST_CHECK(whole->size() == payload.size());
+  ST_CHECK(std::string(whole->begin(), whole->end()) == payload);
+
+  // 非零偏移是关键：offset=0 时 long 截断不可见
+  const auto slice = st::fs::read_span(path, 100, 50);
+  ST_REQUIRE(slice.has_value());
+  ST_CHECK(slice->size() == 50);
+  ST_CHECK(std::string(slice->begin(), slice->end()) == payload.substr(100, 50));
+
+  (void)st::fs::remove_file(path);
+}

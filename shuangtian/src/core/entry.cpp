@@ -147,7 +147,7 @@ namespace {
 
 }  // namespace
 
-auto crash_report_file_name(std::int64_t unix_millis, unsigned long pid) -> std::string {
+auto crash_report_file_name(std::int64_t unix_millis, std::uint32_t pid) -> std::string {
   // 时间戳里的 `:` 换成 `-`（见头文件里那条契约）。
   std::string stamp = st::time::iso8601_utc(unix_millis);
   for (char& ch : stamp) {
@@ -208,7 +208,7 @@ void startup_configure_diagnostics(int argc, char** argv) {
     // 文件名交给 `crash_report_file_name`——那里有一条只能靠回归测试钉住的契约
     // （文件名不得含 `:`，否则 Windows 上 open 失败、报告静默不生成）。
     const std::string name =
-        crash_report_file_name(st::time::unix_ms(), static_cast<unsigned long>(st::process::current_id()));
+        crash_report_file_name(st::time::unix_ms(), static_cast<std::uint32_t>(st::process::current_id()));
     if (!set_crash_report_path(st::fs::join(crash_dir, name))) {
       ST_LOG_WARN("崩溃报告路径设置失败（崩溃时将只有 stderr）");
     }

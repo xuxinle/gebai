@@ -45,9 +45,9 @@ auto parse_rows(const std::string& path) -> std::vector<Line> {
   std::string content;
   {
     std::fseek(file, 0, SEEK_END);
-    const long size = std::ftell(file);
+    const auto size = static_cast<std::int64_t>(std::ftell(file));  // lint-allow: L17 ftell 返回 long
     std::fseek(file, 0, SEEK_SET);
-    content.resize(static_cast<std::size_t>(std::max(0L, size)));
+    content.resize(static_cast<std::size_t>(std::max<std::int64_t>(0, size)));
     if (!content.empty()) {
       const std::size_t read = std::fread(content.data(), 1, content.size(), file);
       content.resize(read);
@@ -83,10 +83,10 @@ auto parse_rows(const std::string& path) -> std::vector<Line> {
   return out;
 }
 
-std::vector<unsigned long> decode(const std::string& text) {
-  std::vector<unsigned long> out;
+std::vector<std::uint32_t> decode(const std::string& text) {
+  std::vector<std::uint32_t> out;
   for (std::size_t i = 0; i < text.size();) {
-    unsigned long cp = static_cast<unsigned char>(text[i]);
+    std::uint32_t cp = static_cast<unsigned char>(text[i]);
     int len = 1;
     if (cp >= 0xF0U) { cp &= 0x07U; len = 4; }
     else if (cp >= 0xE0U) { cp &= 0x0FU; len = 3; }
@@ -152,7 +152,7 @@ void render(FT_Library library, FT_Face face, const std::vector<Line>& rows, int
     const float ascent = static_cast<float>(face->size->metrics.ascender) / 64.0f;
     float pen_x = 4.0f * scale;
     const float baseline = (row.top + ascent) * scale;
-    for (unsigned long cp : decode(row.text)) {
+    for (std::uint32_t cp : decode(row.text)) {
       if (FT_Load_Char(face, cp, flags) != 0) continue;
       FT_Render_Glyph(face->glyph, FT_RENDER_MODE_LCD);
       const FT_Bitmap& bm = face->glyph->bitmap;

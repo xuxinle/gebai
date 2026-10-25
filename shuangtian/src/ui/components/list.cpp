@@ -434,7 +434,7 @@ auto List::on_event(const RenderContext& context, Event& event) -> bool {
 
 auto List::semantics_value() const -> std::string {
   if (selected_ == kNoSelection) return "selected=none";
-  return std::format("selected={}", static_cast<unsigned long long>(selected_));
+  return std::format("selected={}", static_cast<std::uint64_t>(selected_));
 }
 
 auto List::semantics_flags() const -> SemanticsFlags {

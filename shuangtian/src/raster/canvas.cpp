@@ -1990,7 +1990,7 @@ auto Canvas::try_geometry_sprite(std::uint64_t geometry_key, const Paint& paint,
   if (bounds.is_empty()) return false;
   const math::IntRect area = bounds.round_out().inflate(1);
   if (area.is_empty()) return false;
-  const auto pixel_count = static_cast<long long>(area.width) * static_cast<long long>(area.height);
+  const auto pixel_count = static_cast<std::int64_t>(area.width) * static_cast<std::int64_t>(area.height);
   // 面积超限：不建贴图（大面积图案建图比画一次贵，且缓存会持续吃内存）。
   if (pixel_count <= 0 || pixel_count > kGeometrySpriteMaxPixels) return false;
 

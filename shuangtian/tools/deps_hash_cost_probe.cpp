@@ -49,7 +49,7 @@ int main(int argc, char** argv) {
   }
   const double stat_ms = ms_since(t0);
   std::printf("① 只 stat（现状）      %7.2f ms/次   （校验和 %llu）\n", stat_ms,
-              static_cast<unsigned long long>(acc & 0xFFFF));
+              static_cast<std::uint64_t>(acc & 0xFFFF));
 
   // ② 读全部 + fnv1a64
   t0 = Clock::now();
@@ -62,7 +62,7 @@ int main(int argc, char** argv) {
   }
   const double fnv_ms = ms_since(t0);
   std::printf("② 读全部 + fnv1a64     %7.2f ms/次   （校验和 %llu）\n", fnv_ms,
-              static_cast<unsigned long long>(fnv_acc & 0xFFFF));
+              static_cast<std::uint64_t>(fnv_acc & 0xFFFF));
 
   // ③ 读全部 + sha256（含文件 I/O，与 ② 同口径可比）
   t0 = Clock::now();
@@ -74,7 +74,7 @@ int main(int argc, char** argv) {
   }
   const double sha_ms = ms_since(t0);
   std::printf("③ 读全部 + sha256      %7.2f ms/次   （校验和 %llu）\n", sha_ms,
-              static_cast<unsigned long long>(sha_acc & 0xFFFF));
+              static_cast<std::uint64_t>(sha_acc & 0xFFFF));
 
   std::printf("\n相对只 stat 的倍数：fnv %.1f×、sha256 %.1f×\n", fnv_ms / stat_ms,
               sha_ms / stat_ms);
