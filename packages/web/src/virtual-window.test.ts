@@ -119,8 +119,19 @@ describe("窗口化坐标核（virtual-window）", () => {
     m.setSlots(Array.from({ length: ESTIMATE_SAMPLES + 5 }, (_, i) => ({ key: `b${i}`, weight: 1 })))
     for (let i = 0; i < ESTIMATE_SAMPLES; i++) m.measure(i, 100)
     for (let i = ESTIMATE_SAMPLES; i < ESTIMATE_SAMPLES + 5; i++) m.measure(i, 400)
-    // 窗口只留最近 20 个样本：15 个 100 + 5 个 400 → 175（旧样本已滑出）
+    // 窗口只留最近 20 个样本：15 个 100 + 5 个 400 → 均值 175（旧样本已滑出）
     expect(m.perMsg()).toBe(175)
+  })
+
+  test("估高用均值不用中位数（流式追加时更平滑）", () => {
+    // 实测两个长会话、20 样本滑窗逐条推进：中位数相邻抖动 5.4%/5.8%、最大跳变 76%，
+    // 均值 4.6%/3.6%、最大 59%——少数超大值被中位数推开后，下一次滑出窗口时估值突变。
+    const m = createVzModel()
+    m.setSlots(Array.from({ length: ESTIMATE_SAMPLES }, (_, i) => ({ key: `b${i}`, weight: 1 })))
+    // 19 个 100 + 1 个 1000：中位数会是 100，均值是 145
+    for (let i = 0; i < ESTIMATE_SAMPLES - 1; i++) m.measure(i, 100)
+    m.measure(ESTIMATE_SAMPLES - 1, 1000)
+    expect(m.perMsg()).toBe(145)
   })
 
   test("状态标记：渲染 / 挂载 / 卸载", () => {
@@ -183,5 +194,30 @@ describe("窗口化坐标核（virtual-window）", () => {
     const m = createVzModel()
     m.setSlots([{ key: "b0", weight: 0 }])
     expect(m.slots[0].weight).toBe(1)
+  })
+
+  test("批次内多次实测只重建一次（避免 O(块数²)，长会话切回不再抖）", () => {
+    // 造一个长会话：200 块（典型 800+ 消息会话的块量级）
+    const m = model(Array.from({ length: 200 }, () => 6))
+    const before = m.totalHeight()
+    // 一次窗口变更会挂载多块：旧实现每块都重建一次（200 块 × 每次 O(200)）
+    m.beginBatch()
+    for (let i = 100; i < 108; i++) m.measure(i, 120 + i)
+    // 批次未结束：高度表尚未重建，总高还是一个整体（不是中间态）
+    m.endBatch()
+    const after = m.totalHeight()
+    expect(after).not.toBe(before) // 实测生效（8 块换成真实高度）
+    // 批次结束后位置一致：块 100 的起点 = 前 100 块高度之和（实测块已计入）
+    const pos = m.pos(100)
+    expect(pos).toBeGreaterThan(0)
+    expect(Number.isFinite(pos)).toBe(true)
+  })
+
+  test("批次外单块实测即时生效（不依赖 begin/end）", () => {
+    const m = model([6, 6, 6])
+    const before = m.heightAt(0)
+    m.measure(0, 999)
+    expect(m.heightAt(0)).toBe(999)
+    expect(m.heightAt(0)).not.toBe(before)
   })
 })

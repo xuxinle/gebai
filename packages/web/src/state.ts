@@ -23,6 +23,8 @@ export function isCoarsePointer(): boolean {
 }
 
 export const msgEl = document.getElementById("messages")!
+/** 会话消息视图宿主（`#messages`）：本身不滚动，子容器 `.messages` 才是滚动区（见 msg-panes）。 */
+export const msgHost = msgEl
 export const sessionList = document.getElementById("session-list")!
 export const composer = document.getElementById("composer") as HTMLFormElement
 export const input = document.getElementById("input") as HTMLTextAreaElement
@@ -133,20 +135,16 @@ export function getEmptyState(): HTMLElement | null {
   return emptyState
 }
 
-/** 子会话运行折叠容器状态（subsession_run 执行过程）：同 runId 事件共享，执行中展开、结束后折叠只显示输入与最终返回。 */
+/** 子会话运行的在途状态（subsession_run）：过程渲染进观察面板（subsessions.ts），消息流只留一行入口。 */
 export interface SubSessionState {
   runId: string
   /** 预加载进子会话的子Agent 列表。 */
   agents: string[]
   input: string
-  /** 子会话标识：容器标题「🌿 子会话 · name(model)」用。 */
+  /** 子会话标识：入口行与面板标题「🌿 子会话 · name(model)」用。 */
   subsession?: { name: string; model?: string }
-  /** details.subsession-run 折叠容器（summary=标题+输入/返回摘要，body=执行过程消息区）。 */
-  container: HTMLDetailsElement
-  /** 容器内消息追加区（.subsession-body）。 */
+  /** 观察面板内的过程区（推理/工具卡/回复追加到这里；常驻 DOM，切换选中不销毁）。 */
   body: HTMLElement
-  /** 折叠摘要行「返回」区（.subsession-output）：执行中显示占位，结束后显示最终返回。 */
-  outputEl: HTMLElement
   /** 当前流式文本累积（本轮）。 */
   acc: string
   /** 当前文本气泡（容器内惰性创建）。 */

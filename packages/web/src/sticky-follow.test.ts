@@ -392,6 +392,29 @@ describe("sticky-follow 粘底跟随（意图识别）", () => {
     }
   })
 
+  test("内容高度无变化时对齐循环提前停转（不占满帧预算，不影响后续交互）", async () => {
+    const origRaf = globalThis.requestAnimationFrame
+    let frames = 0
+    ;(globalThis as Record<string, unknown>).requestAnimationFrame = (cb: () => void) => {
+      frames++
+      setTimeout(() => cb(), 0)
+      return 0
+    }
+    try {
+      const el = makeEl()
+      const h = createStickyFollow(el as unknown as HTMLElement, { keepFrames: 240 })
+      h.follow() // 切会话 / 点发送时的「落底」路径
+      // 高度始终不变：高度稳定帧数达上限即停，不会无意义跑满 240 帧
+      await Bun.sleep(60)
+      const used = frames
+      await Bun.sleep(60)
+      expect(frames - used).toBe(0) // 已停转：不再排新帧
+      expect(used).toBeLessThan(240) // 未跑满预算
+    } finally {
+      ;(globalThis as Record<string, unknown>).requestAnimationFrame = origRaf
+    }
+  })
+
   test("stopFollowing：显式解除（消息导航跳转）", () => {
     const { el, h } = setup()
     h.follow()

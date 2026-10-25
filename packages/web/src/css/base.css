@@ -468,10 +468,8 @@ aside {
    后台会话同样标出，不必切过去才知道在跑/在等人 */
 .session-run { flex: none; font-size: 9px; line-height: 1; color: var(--text-faint); }
 .session-run.waiting { font-size: 11px; color: var(--accent); }
-/* 会话列表条目正文（名称容器）。作用域限定 #session-list：messages.ts 的 subsession_run
-   折叠容器正文是同名类 .session-body（.subsession-run .session-body）——此前全局规则把
-   display:flex 意外供给它（其内部消息对齐实际依赖 flex 列，chat.css 中已显式声明），
-   两个不相干模块靠同名类意外耦合，任何一侧改动都会悄悄影响另一侧，故收窄隔离 */
+/* 会话列表条目正文（名称容器）。作用域限定 #session-list：面板/工具栏等模块也有同名类
+ .session-body，全局规则会靠同名类意外耦合，任何一侧改动都会静默影响另一侧 */
 #session-list .session-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .session-name {
   overflow: hidden;
@@ -669,6 +667,15 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
 .chat-wrap { position: relative; flex: 1; min-height: 0; display: flex; container-type: size; /* 会话区域尺寸容器：HTML 预览卡片高度按 cqh 取它的 2/3 */ }
 #messages {
   flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden; /* 宿主不滚动：滚动区在子容器上 */
+}
+/* 单会话的消息滚动容器（样式与历史单容器同口径：#messages 曾是唯一的滚动区） */
+#messages > .messages {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   /* 滚到头不把滚动链交给根滚动器（下拉刷新/橡皮筋），卡片内部滚动同理 */
   overscroll-behavior: contain;
@@ -685,26 +692,25 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
 }
 /* 消息子项禁止 flex 收缩（滚动正确性的关键）：flex 列滚动容器中，子项的自动最小高度
    （min-height: auto）仅在 overflow 可见时等于内容高度；overflow ≠ visible 的子项
-   （subsession_run 执行容器 .subsession-run 圆角裁剪用 overflow: hidden）自动最小高度为 0——
+   （如带圆角裁剪的卡片容器）自动最小高度为 0——
    会话内容超过一屏后 flex 收缩把这些子项压到近 0 高（实测 1px），正文整段被裁剪不可见、
-   scrollHeight 塌缩至视口（滚动条近乎满比例、长内容滚不到，「生成中滚动卡死」；
-   历史回放渲染为折叠态不触发，故刷新后现象消失）。flex-shrink: 0 令所有子项保持
-   内容高度，溢出全部进入滚动区。 */
-#messages > * { flex-shrink: 0; }
-#messages:hover,
-#messages.scrolling {
+   scrollHeight 塌缩至视口（滚动条近乎满比例、长内容滚不到，「生成中滚动卡死」）。
+   flex-shrink: 0 令所有子项保持内容高度，溢出全部进入滚动区。 */
+#messages > .messages > * { flex-shrink: 0; }
+#messages > .messages:hover,
+#messages > .messages.scrolling {
   scrollbar-color: var(--border-strong) transparent;
 }
-#messages::-webkit-scrollbar { width: 8px; height: 8px; }
-#messages::-webkit-scrollbar-track { background: transparent; }
-#messages::-webkit-scrollbar-thumb { background: transparent; border: 0; }
-#messages:hover::-webkit-scrollbar-thumb,
-#messages.scrolling::-webkit-scrollbar-thumb {
+#messages > .messages::-webkit-scrollbar { width: 8px; height: 8px; }
+#messages > .messages::-webkit-scrollbar-track { background: transparent; }
+#messages > .messages::-webkit-scrollbar-thumb { background: transparent; border: 0; }
+#messages > .messages:hover::-webkit-scrollbar-thumb,
+#messages > .messages.scrolling::-webkit-scrollbar-thumb {
   background: var(--border-strong);
   border: 2px solid transparent;
   background-clip: content-box;
 }
-#messages.drag-over { outline: 2px dashed var(--accent); outline-offset: -6px; background: var(--accent-soft); }
+#messages > .messages.drag-over { outline: 2px dashed var(--accent); outline-offset: -6px; background: var(--accent-soft); }
 
 /* 会话抽屉遮罩（窄屏抽屉展开时的点击收起区，见 sessions.ts）：默认不显示，
    仅窄屏且未 hidden 时铺开 */
@@ -774,7 +780,7 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
   /* 窄屏：发送/附件按钮略放大（触屏设备的 44px 档在 composer.css 的 pointer:coarse 里） */
   #send, #attach-btn { width: 40px; height: 40px; }
   /* 消息间距更紧凑 */
-  #messages { padding: 14px clamp(12px, 4vw, 20px); gap: 14px; }
+  #messages > .messages { padding: 14px clamp(12px, 4vw, 20px); gap: 14px; }
   .bubble { padding: 9px 12px; }
   /* 设置抽屉全屏化 */
   .settings-panel { width: 100vw; }
@@ -791,7 +797,7 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
   :root { --font-size: 13.5px; --msg-gap: 12px; }
   header { padding: 0 max(10px, var(--safe-l)) 0 max(10px, var(--safe-r)); gap: 8px; }
   .icon-btn { font-size: 14px; }
-  #messages { padding: 12px; }
+  #messages > .messages { padding: 12px; }
   .msg-name { font-size: 11px; }
   .msg-time { font-size: 10.5px; }
   .markdown pre { font-size: 13px; padding: 10px 12px; }
@@ -908,22 +914,22 @@ html[data-low-power="on"] .msg.tool .tool-head .tool-ico.running .tool-dot {
    粘底跟随由应用自管，底部追加内容不影响已上翻的阅读位置。
    注：消息区另做 DOM 窗口化（见 `virtualize.ts`）——视口外的块整体移出 DOM，高度由 spacer 按实测记忆
 承担，滚动正确性由 virtual-window 的坐标用例与浏览器实测守护。 */
-#messages,
+#messages > .messages,
 .session-body,
 .reasoning .reasoning-body {
   overflow-anchor: none;
 }
 
 /* 消息区窗口化（DOM 编排见 virtualize.ts）：DOM 只保留视口附近的块，上下以 spacer 占位。
-块内消息按列排布并沿用消息间距（#messages 的 gap 只作用于块之间）。 */
-#messages > .vz-block {
+块内消息按列排布并沿用消息间距（滚动容器的 gap 只作用于块之间）。 */
+#messages > .messages > .vz-block {
   display: flex;
   flex-direction: column;
   gap: var(--msg-gap);
   flex-shrink: 0;
 }
-#messages > .vz-block > * { flex-shrink: 0; }
-#messages > .vz-spacer { flex: 0 0 auto; }
+#messages > .messages > .vz-block > * { flex-shrink: 0; }
+#messages > .messages > .vz-spacer { flex: 0 0 auto; }
 
 /* 实底面板形态（可选，见 fx-panels.ts）：特效主题下大面积常驻面板隔着持续变化的特效画布做
 backdrop-filter，模糊结果无法缓存、每帧全量重光栅化（面板约占视口 1/4）——去掉模糊并加实底色

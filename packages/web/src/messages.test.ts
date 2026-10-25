@@ -165,7 +165,7 @@ const doc = {
 }
 
 // 动态 import：mock 之后加载依赖 DOM 的模块
-const { sealSegment, subSessionBox, finishSubSession, sealSessionSegment, sealBlockResultSegment, bindSessionScroll, scrollSessionSticky, renderSubSessionArchive, renderLegacySubAgentArchive, renderBlock, renderMsgAttachments, appendAskUserRecord, appendPlanCard, appendToolResult, renderChoiceCard, appendMsg, addMetaActions, compactNoticeTitle } = await import("./messages")
+const { sealSegment, subSessionEntry, sealSessionSegment, sealBlockResultSegment, bindSessionScroll, scrollSessionSticky, renderBlock, renderMsgAttachments, appendAskUserRecord, appendPlanCard, appendToolResult, renderChoiceCard, appendMsg, addMetaActions, compactNoticeTitle } = await import("./messages")
 const { runs, pendingTools, pendingToolsKey, approvalsEl, client, setCurrentSession } = await import("./state")
 const { isBlockOnly, toolBubbleFor, __setToolCardMetaForTest, buildPlanMarkdown, planResultHead, askUserResultHead, renderToolArgsDone } = await import("./tool-cards")
 const { clearTaskLabels, rememberTaskLabels } = await import("./task-labels")
@@ -452,9 +452,7 @@ describe("sealBlockResultSegment（块级工具结果封段：图表卡片独立
       runId: "r1",
       agents: [],
       input: "",
-      container: makeMockEl("details") as unknown as HTMLElement,
       body: makeMockEl("div") as unknown as HTMLElement,
-      outputEl: makeMockEl("span") as unknown as HTMLElement,
       acc: "容器内文本",
       el: null,
       messageId: "",
@@ -734,43 +732,32 @@ describe("文件内容卡（code/file 块统一渲染：按类型分派 + 工具
   })
 })
 
-describe("subSessionBox / finishSubSession / sealSessionSegment（子会话运行折叠容器）", () => {
-  test("container renders input as param block, stays open while running, collapses with output summary when done", () => {
-    const box = subSessionBox({ runId: "r1", agents: ["code"], input: "改个文件" })
-    expect(box.container.className).toContain("subsession-run")
-    expect(box.container.dataset.runId).toBe("r1")
-    // 执行中：展开 + 输出区占位
-    expect((box.container as HTMLDetailsElement).open).toBe(true)
-    expect(box.outputEl.textContent).toContain("执行中")
-    // 输入以参数块渲染在容器顶部，标题无「输入: …」提示
-    const inputBlock = box.body.querySelector("div.subsession-input")
-    expect(inputBlock?.textContent).toBe("改个文件")
-    expect(box.container.querySelector("summary .subsession-input")).toBeNull()
-    expect(box.container.querySelector(".subsession-title")?.textContent).not.toContain("输入:")
-    // 结束后：自动折叠，只显示最终返回（summary 内）
-    finishSubSession(box.container, box.outputEl, "已完成修改")
-    expect((box.container as HTMLDetailsElement).open).toBe(false)
-    expect(box.outputEl.textContent).toContain("已完成修改")
-    expect(box.container.classList.contains("done")).toBe(true)
-  })
-
-  test("多 Agent 预加载：标题列出全部预加载子Agent", () => {
-    const box = subSessionBox({ runId: "r4", agents: ["code", "playwright"], input: "改个文件" })
-    expect(box.container.querySelector(".subsession-title")?.textContent).toContain("code")
-    expect(box.container.querySelector(".subsession-title")?.textContent).toContain("playwright")
-  })
-
-  test("finishSubSession: undefined keeps running state, empty string collapses with 无返回 (失败/取消不误导)", () => {
-    const box = subSessionBox({ runId: "r2", agents: ["code"], input: "x" })
-    // undefined/null：run 未收尾 → 保持执行中态（不折叠）
-    finishSubSession(box.container, box.outputEl, undefined)
-    expect((box.container as HTMLDetailsElement).open).toBe(true)
-    expect(box.outputEl.textContent).toContain("执行中")
-    // 空串：已结束但无返回（失败/取消/风暴终止）→ 折叠并显示无返回，不再误导为执行中
-    const box2 = subSessionBox({ runId: "r3", agents: ["code"], input: "x" })
-    finishSubSession(box2.container, box2.outputEl, "")
-    expect((box2.container as HTMLDetailsElement).open).toBe(false)
-    expect(box2.outputEl.textContent).toContain("无返回")
+describe("subSessionEntry / sealSessionSegment（子会话消息流入口与过程分段）", () => {
+  test("入口只占一行：名称 + 子Agent + 状态摘要 + 查看过程，点击发打开面板事件", () => {
+    const events: unknown[] = []
+    const doc = document as unknown as { dispatchEvent?: (e: unknown) => boolean }
+    const prev = doc.dispatchEvent
+    doc.dispatchEvent = (e: unknown) => {
+      const ev = e as { type?: string; detail?: unknown }
+      if (ev.type === "gebai:open-subsession") events.push(ev.detail)
+      return true
+    }
+    try {
+      const entry = subSessionEntry({ sessionId: "s1", runId: "r1", name: "左路", model: "fast", agents: ["code", "playwright"], state: "运行中 · 2 轮", status: "running" })
+      expect(entry.className).toContain("subsession-entry")
+      expect(entry.dataset.runId).toBe("r1")
+      expect(entry.dataset.sessionId).toBe("s1")
+      expect(entry.dataset.state).toBe("running")
+      expect(entry.querySelector(".subsession-entry-name")?.textContent).toBe("🌿 子会话 · 左路（fast） · ⚙ code + playwright")
+      expect(entry.querySelector(".subsession-entry-state")?.textContent).toBe("运行中 · 2 轮")
+      expect(entry.querySelector(".subsession-entry-open")?.textContent).toContain("查看过程")
+      // 入口不含过程区（过程在观察面板）：不得出现消息/工具卡节点
+      expect(entry.querySelector(".msg")).toBeNull()
+      ;(entry as unknown as { onclick: () => void }).onclick()
+      expect(events).toEqual([{ sessionId: "s1", runId: "r1" }])
+    } finally {
+      doc.dispatchEvent = prev
+    }
   })
 
   test("sealSessionSegment seals text/reasoning state like sealSegment", () => {
@@ -779,9 +766,7 @@ describe("subSessionBox / finishSubSession / sealSessionSegment（子会话运�
       runId: "r1",
       agents: ["code"],
       input: "",
-      container: base as unknown as HTMLDetailsElement,
       body: base as unknown as HTMLElement,
-      outputEl: base as unknown as HTMLElement,
       acc: "text",
       el: { isConnected: true, classList: { remove() {} } } as unknown as HTMLElement,
       messageId: "m1",
@@ -866,65 +851,6 @@ describe("subSessionBox / finishSubSession / sealSessionSegment（子会话运�
     expect(scrollTop).toBe(100) // 不再跟随
   })
 
-  test("renderSubSessionArchive renders archive container with full process and nested runs (历史回放)", () => {
-    const box = renderSubSessionArchive({
-      runId: "run1",
-      agents: ["code"],
-      input: "改个文件",
-      output: "**已完成**",
-      messages: [
-        { role: "user", content: "改个文件" },
-        { role: "assistant", content: "先看一下", toolCalls: [{ id: "c1", name: "code_read", arguments: { path: "a.ts" } }] },
-        { role: "tool", name: "code_read", content: "文件内容", toolCallId: "c1", arguments: { path: "a.ts" } },
-        { role: "assistant", content: "**已完成**" },
-      ],
-    })
-    // 已结束存档：默认折叠，摘要含最终返回，body 渲染完整过程消息
-    expect(box.container.className).toContain("subsession-run")
-    expect((box.container as HTMLDetailsElement).open).toBe(false)
-    expect(box.outputEl.textContent).toContain("→ 返回")
-    expect(box.body.querySelector(".msg")).toBeTruthy()
-    // 嵌套执行存档：子会话内再派生 → 递归渲染进外层容器 body
-    const combo = renderSubSessionArchive({
-      runId: "run2",
-      agents: ["combo"],
-      input: "组合调用",
-      output: "ok",
-      messages: [
-        { role: "user", content: "组合调用" },
-        { role: "assistant", content: "委托给 code", toolCalls: [{ id: "c2", name: "subsession_run", arguments: { agents: ["code"], input: "x" } }] },
-        {
-          role: "tool",
-          name: "subsession_run",
-          content: "ok",
-          toolCallId: "c2",
-          subSessionArchive: {
-            runId: "inner",
-            agents: ["code"],
-            input: "x",
-            output: "内部结果",
-            messages: [{ role: "user", content: "x" }, { role: "assistant", content: "内部结果" }],
-          },
-        },
-      ],
-    })
-    const inner = combo.body.querySelector("details.subsession-run")
-    expect(inner).toBeTruthy()
-    expect(inner?.querySelector(".subsession-output")?.textContent).toContain("内部结果")
-  })
-
-  test("renderLegacySubAgentArchive renders old-format archive (agent 单值兼容回放)", () => {
-    const box = renderLegacySubAgentArchive({
-      runId: "old1",
-      agent: "code",
-      input: "x",
-      output: "旧结果",
-      messages: [{ role: "user", content: "x" }, { role: "assistant", content: "旧结果" }],
-    })
-    expect(box.container.className).toContain("subsession-run")
-    expect(box.outputEl.textContent).toContain("旧结果")
-    expect(box.body.querySelector(".msg")).toBeTruthy()
-  })
 })
 
 describe("ask 问答记录卡（等待期消息流不预览问题，结果到达落记录卡）", () => {

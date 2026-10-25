@@ -106,6 +106,11 @@
             </svg>
             <div id="conn" class="conn"></div>
           </div>
+          <!-- 子会话观察面板入口：本会话的 subsession_run 运行数/运行中数（点开右侧抽屉看过程与报告） -->
+          <button id="subsessions-btn" class="icon-btn subsessions-btn" data-tip="子会话（运行过程与报告）" aria-label="子会话观察面板">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21c4 0 6-3 6-6 0-4-3-6-6-9-3 3-6 5-6 9 0 3 2 6 6 6z"/><path d="M12 21v-8"/></svg>
+            <span class="subsessions-badge" hidden>0</span>
+          </button>
           <button id="wheel-btn" class="icon-btn" aria-label="快捷操作" aria-expanded="false"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M4 8h4V4H4v4zm6 12h4v-4h-4v4zm-6 0h4v-4H4v4zm0-6h4v-4H4v4zm6 0h4v-4h-4v4zm6-10v4h4V4h-4zm-6 4h4V4h-4v4zm6 6h4v-4h-4v4zm0 6h4v-4h-4v4z"/></svg></button>
         </div>
       </header>
@@ -195,6 +200,23 @@
         </div>
         <div class="settings-body" id="settings-body"></div>
         <div class="settings-foot" id="settings-foot" hidden></div>
+      </div>
+    </div>
+    <!-- 子会话观察面板（右侧抽屉）：本次会话全部 subsession_run 运行的过程与报告；
+         消息流里只有一行入口（.subsession-entry），点它或合入通知的「查看子会话过程」都开这里。
+         左列运行清单，右列详情（任务指令/最终报告/阶段合入/执行过程）。 -->
+    <div id="subsessions-overlay" class="settings-overlay subsessions-overlay" hidden>
+      <div class="settings-panel subsessions-panel">
+        <div class="settings-head">
+          <span class="settings-title">子会话</span>
+          <button id="subsessions-close" class="icon-btn" aria-label="关闭子会话面板">✕</button>
+        </div>
+        <div class="subsessions-body">
+          <div id="subsessions-list" class="subsessions-list"></div>
+          <div id="subsessions-detail" class="subsessions-detail"></div>
+        </div>
+        <!-- 未选中的运行，其过程区驻留在这里（保持 isConnected，后台 run 的工具卡/流式渲染照常落 DOM） -->
+        <div id="subsessions-stage" class="subsessions-stage" aria-hidden="true"></div>
       </div>
     </div>
     <!-- 任务管理抽屉（定时 / 普通 / 闲时任务与统一队列） -->

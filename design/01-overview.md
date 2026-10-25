@@ -311,9 +311,9 @@ class GebaiClient {
 > - **列表只读元信息**：会话列表经 `store.listSessionInfos()`（`meta.json` 缓存，见「会话管理」）——列表不再为拿标题解析全部会话正文。
 > - **消息窗口化（按需渲染）**：消息列按「块」切分（`history-chunk.ts` 的 `planMessageChunks`，块大小按约一屏高度估算、3~12 条并夹取——消息高度差异极大，固定条数会让单块高达数屏），**只保留视口附近的块在 DOM 中**（上下各一屏半余量），其余块整体卸载、高度由 `#messages` 内的 `.vz-spacer` 承担（坐标算术见 `virtual-window.ts`，DOM 编排见 `virtualize.ts`）。首屏只渲染尾部块——长历史不再有「把全部节点建出来」的成本，主线程阻塞与 DOM 规模不随会话长度增长；向上读到哪就渲染哪，内容不丢（导航条由消息清单建立，与渲染进度无关）。
 > - **会话加载单次拉取**：`loadMessages` 只调一次 `session.get`——正文渲染与「已配对工具 id」集合（在途工具卡片补渲染的去重依据）共用同一次会话快照，不再为后者二次全量拉取正文。
-> - **块划分与滚动锚定**：切分点由 `planMessageChunks`（纯函数，可单测）计算并**向后吞并执行过程容器（`subSessionId`）分组**——同一次 `subsession_run` 的过程消息必须整组落在同一块，否则会被拆成两个折叠容器。滚动时以「视口顶部块 + 块内偏移」为锚点：DOM 变更（新块渲染实测、卸载、spacer 更新）后同帧把 `scrollTop` 修正回锚点位置——向下滚动时卸载的都是刚测过的真实高度（零补偿、零跳动），向上滚动时新挂载块由估高变实测、差值由锚点补齐。未渲染块的高度取已实测块的平均「每消息高度」，并在**加载期首批渲染后定稿**（`settleEstimates`）、滚动期不再重算——布局随滚动反复变动是位置漂移的主因。
+> - **块划分与滚动锚定**：切分点由 `planMessageChunks`（纯函数，可单测）计算并**向后吞并执行过程容器（`subSessionId`）分组**——同一次 `subsession_run` 的过程消息必须整组落在同一块（它们现在共享消息流里的一行入口）。滚动时以「视口顶部块 + 块内偏移」为锚点：DOM 变更（新块渲染实测、卸载、spacer 更新）后同帧把 `scrollTop` 修正回锚点位置——向下滚动时卸载的都是刚测过的真实高度（零补偿、零跳动），向上滚动时新挂载块由估高变实测、差值由锚点补齐。未渲染块的高度取已实测块的平均「每消息高度」，并在**加载期首批渲染后定稿**（`settleEstimates`）、滚动期不再重算——布局随滚动反复变动是位置漂移的主因。
 > - **阅读位置跨会话恢复**：离开时未贴底则记「块 key + 块内偏移」锚点（绝对 `scrollTop` 在含估高的高度表下不可复现），切回时经 `msgWindow.scrollToAnchor` 落位——目标块按需挂载并实测后再修正一次，一步到位（不再需要等后台补齐完成，也没有「用户接管即放弃恢复」的窗口）。
-> - **折叠容器回放**：历史容器不重建在途流引用（`liveRun` 只传给末尾块）——流式累积与 `subSessionArchives` 引用只属于当前运行，更早块的渲染不得覆盖它。
+> - **子会话入口与观察面板**：消息流里子会话只留单行入口（不承载过程 DOM，窗口化卸载/重建可反复创建）；过程、报告、阶段性合入集中在右侧观察面板（`subsessions.ts`，过程区常驻 DOM、未选中时驻隐藏 staging），历史存档与旧版过程消息登记进面板记录。
 
 > **构建性能**：图表渲染引擎全部**不参与 vite/rollup 打包**——构建/开发前由 `packages/web/scripts/build-vendor.ts` 原样拷贝到 `public/vendor/`（gitignore），运行时 `diagram.ts` 以**稳定文件名**按需加载：PlantUML 引擎 `@plantuml/core`（上游 TeaVM 编译单文件 `plantuml.js`，实测约 6.8MB，若走打包链路会占 web 构建绝大头，此方式将构建降至秒级）、`viz-global.js`（Graphviz 布局，classic script 注入）、Mermaid 官方 `dist/mermaid.min.js`（约 3.5MB 自包含 UMD，含全部图型）、ECharts 官方 `dist/echarts.min.js`（约 1MB 自包含 UMD，含 SVG 渲染器，SSR 模式直接输出 SVG 字符串）、D2 官方浏览器构建目录（`d2js/`：index.js + worker + wasm，内部相对路径引用）。**稳定文件名（无内容 hash）+ 静态伺服**：开发模式重建后 URL 不变，旧页面引用旧 hash 动态分块导致的 404（「Failed to fetch dynamically imported module」）**从根上消除**（`diagram.ts` 仍保留整页刷新一次兜底，覆盖极端缓存竞态）。产物随 `dist/` 一并分发。 同一机制还负责两类内核：**Monaco Editor**（`monaco/vs/`，约 24MB，编辑器与差异视图的 AMD 构建；`editor.ts` 按需注入 loader）与 **xterm.js**（`xterm/xterm.mjs` + `addon-fit.mjs` / `addon-search.mjs` / `addon-web-links.mjs` + `xterm.css`，终端面板**运行时 ESM 动态 import**（`files/terminal-pty.ts`）——xterm 6 的 UMD 构建靠 `for (var s in exports)` 挂全局而导出不可枚举，全局取不到 `Terminal`，故走 ESM）。
 
@@ -333,7 +333,7 @@ class GebaiClient {
 - **启动动画画面**：页面加载（外部 CSS/JS 就绪前）即显示全屏启动动画——深黑底 + 极光呼吸光球 + 旋转光环 + 歌白品牌辉光文字（样式内联于 `index.html`，不依赖外部样式，避免主题样式未就位时空白窗口闪现）；`init()` 完成（含服务模式未登录转登录层）或失败后淡出移除，另以 12s 内联脚本兜底防残留
 | 反馈页（管理员） | 反馈查询/导出——并入设置面板 |
 
-> **前端模块结构**：聊天页入口 `main.ts`（初始化与装配）+ 领域模块拆分——`events.ts`（WS 事件处理器）、`stream.ts`（流式消费与渲染）、`turn-view.ts`（回合计时器视图）、`token-rate.ts` + `token-rate-core.ts`（输出速率展示与路况分级）、`attach.ts`（运行中会话附加恢复），其余按既有单职责文件（sessions/messages/tool-cards/diagram/…）。
+> **前端模块结构**：聊天页入口 `main.ts`（初始化与装配）+ 领域模块拆分——`events.ts`（WS 事件处理器）、`stream.ts`（流式消费与渲染）、`msg-panes.ts`（会话消息视图：每会话一份独立滚动容器 + 几何实例）、`turn-view.ts`（回合计时器视图）、`token-rate.ts` + `token-rate-core.ts`（输出速率展示与路况分级）、`attach.ts`（运行中会话附加恢复），其余按既有单职责文件（sessions/messages/tool-cards/diagram/…）。
 
 > **实现**：登录页与设置面板已落地；环境变量/用户/反馈三页统一收敛为设置抽屉（标题栏轮盘 ⚙️），管理员身份自动显示用户/反馈 tab。工具启停、子Agent 装载与 Webhook 管理原设置面板 tab 已移除（对使用者无实际意义：启停/装载由模型经 `agent_load` 等自主完成、Webhook 属服务端集成配置），对应能力保留在服务端 API 与 SDK 方法中。
 

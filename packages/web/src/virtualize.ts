@@ -13,8 +13,11 @@
  * - 滚动位置稳定：以「视口顶部块 + 块内偏移」为锚点，DOM 变更（渲染实测、卸载、spacer 更新）
  *   后同帧把 `scrollTop` 修正回锚点位置——向下滚动时卸载的都是刚测过的真实高度（零补偿），
  *   向上滚动时新挂载块由估高变实测，差值由锚点补齐。
- * - 安全阀：视口不可测（`clientHeight <= 0`，测试替身 / 容器隐藏）时区间取全部块——退化为
- *   「不窗口化」，语义与窗口化前一致。
+ * - 视口不可测（`clientHeight <= 0`，测试替身 / 容器隐藏）：区间计算**沿用最近一次可测高度**
+ *   （从未测过时用假定屏高），不退化取全部块。后台会话的 pane 恒为 `hidden`，若按“不可测→
+ *   全量”处理，长会话在后台期间会把整篇消息全挂上 DOM，切回时同步布局上百节点就是明显的卡顿；
+ *   保持窗口化则后台只维护视口附近的块，切回是纯显隐。spacer 仍按模型高度更新（切回布局是新的），
+ *   只是不做需要真实几何的“拽到底部 / 锚点补偿”。
  */
 
 import { createVzModel, type VzModel, type VzRange, type VzSlotSeed } from "./virtual-window"
@@ -86,10 +89,17 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
   const roBlocks = typeof ResizeObserver !== "undefined"
     ? new ResizeObserver((entries) => {
         let changed = false
-        for (const entry of entries) {
-          const index = blockIndexOf.get(entry.target)
-          if (index === undefined || !model.slots[index]?.mounted) continue
-          if (measureBlock(index)) changed = true
+        // 批次：一次尺寸变更常涉多块（流式输出每 120ms 重解析、图片/图表批量长高），
+        // 每块单独 rebuild 会把高度表重算多次（上百块时就是刷屏式抖动）。
+        model.beginBatch()
+        try {
+          for (const entry of entries) {
+            const index = blockIndexOf.get(entry.target)
+            if (index === undefined || !model.slots[index]?.mounted) continue
+            if (measureBlock(index)) changed = true
+          }
+        } finally {
+          model.endBatch()
         }
         // 异步长高（图片/图表/懒渲染）：按锚点补回布局位移（跟随时钉底）；只重算 spacer 与位置，
         // 不改挂载集合（避免与本次尺寸变化互相触发）
@@ -216,12 +226,15 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
   }
 
   /** 落定一次布局变更（spacer + 锚定补偿）并重建基线：粘底跟随时钉底（内容增长不把视口推离
-   *  底部，并交跟随核心接手后续对齐），否则只补布局位移。 */
+   *  底部，并交跟随核心接手后续对齐），否则只补布局位移。
+   *  容器隐藏（后台 pane）时 clientHeight 为 0：spacer 仍要按模型高度更新（切回时布局才是新的），
+   *  只是跳过“把视口拽到底部/按锚点补偿”——不可测的几何上算出的偏移会错。 */
   function applyLayout(range: VzRange, keepBottom: boolean) {
-    if (!(container.clientHeight > 0)) return
+    const measurable = container.clientHeight > 0
     const pad = model.padHeight(range)
     applyPad(padTop, pad.top)
     applyPad(padBottom, pad.bottom)
+    if (!measurable) return
     if (keepBottom) {
       const target = pinTarget()
       if (Math.abs(target - container.scrollTop) > 0.5) {
@@ -287,7 +300,10 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
   let lastRange: VzRange = { start: 0, end: 0 }
   let hasRange = false
 
-  /** 取挂载区间并施加滞回：扩窗随视口即时生效，**缩窗**要超出更紧的边距才生效。 */
+  /** 视口高度兜底（px）：容器不可测且从未测过时（隐藏/未布局）的假定屏高。 */
+const FALLBACK_VIEWPORT_H = 720
+
+/** 取挂载区间并施加滞回：扩窗随视口即时生效，**缩窗**要超出更紧的边距才生效。 */
   function computeRange(scrollTop: number, viewportH: number, keepBottom: boolean): VzRange {
     const r = model.rangeFor(scrollTop, viewportH, MARGIN_ABOVE, MARGIN_BELOW)
     if (!hasRange) {
@@ -307,27 +323,65 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
     return r
   }
 
+  /** 最近一次可测的视口高度（px）：容器隐藏时为 0，据此回退而不是把 0 交给区间计算。 */
+  let lastViewportH = 0
+
+  /** 区间计算用的视口高度：可测则刷新缓存，不可测则用上次值，最后兜底假定屏高。 */
+  function viewportHeight(): number {
+    const h = container.clientHeight
+    if (h > 0) lastViewportH = h
+    return lastViewportH > 0 ? lastViewportH : FALLBACK_VIEWPORT_H
+  }
+
+  /** 贴底取窗：末尾往前覆盖视口 + 上方余量（不依赖当前 scrollTop，缓存页切回不会取错窗）。 */
+  function bottomRange(viewportH: number): VzRange {
+    const n = model.count()
+    if (!n) return { start: 0, end: 0 }
+    const span = viewportH * (1 + MARGIN_ABOVE)
+    let start = n - 1
+    let covered = 0
+    while (start > 0 && covered < span) {
+      start -= 1
+      covered += model.heightAt(start)
+    }
+    return { start, end: n }
+  }
+
   function sync() {
     if (syncing) return
     const n = model.count()
     if (!n) return
     syncing = true
     try {
-      const viewportH = container.clientHeight
+      // 视口高度：容器隐藏（后台会话 pane 为 hidden）时 clientHeight 为 0——直接用 0 会让
+      // 区间退化为「全部块」（见文件头安全阀），长会话在后台期间就把整篇消息全挂上 DOM，
+      // 切回时要同步布局上百节点（卡顿的真正来源）。改用**最近一次可测的高度**（没有则用
+      // 兜底屏高）：后台只维护视口附近的块，切回才是纯显隐。
+      const viewportH = viewportHeight()
       const scrollTop = Math.max(0, container.scrollTop - origin)
       const keepBottom = resetting || wantKeepBottom()
-      const range = computeRange(scrollTop, viewportH, keepBottom)
+      // 取窗：贴底时不能拿旧 scrollTop 算（缓存页切回时它还是上次离开的值，且旧值可能
+      // 大于当前总高）——直接按「末尾往前一屏」取，与紧接着的 range.end = n 一致。
+      // 否则窗口先开在错误位置、spacer 反复改写，位置被掰动（切回时抖几下）。
+      const range = keepBottom ? bottomRange(viewportH) : computeRange(scrollTop, viewportH, keepBottom)
       // 贴底：窗口锚定到末尾块（滚动位置即将落到底部，底部不留在估高空白侧）
       if (keepBottom) range.end = n
       let mutated = false
       // 变更顺序很关键：**先挂载 → 再落 spacer → 最后卸载**。若先摘 DOM 再更新 spacer，
       // 布局会出现瞬时「变短」，浏览器把 scrollTop 钳到临时上限（每次回退一个滚轮步长，
       // 并让区间来回翻转 → 同一块反复挂载/卸载）；本顺序下布局只会瞬时「变长」（无害）。
-      for (let i = range.start; i < range.end; i++) {
-        if (!model.slots[i].mounted) {
-          mountBlock(i)
-          mutated = true
+      // 批次：一次窗口变更会挂载多块，每块实测都重建高度表是 O(块数²)——先攒起来，
+      // 结束时重建一次（长会话切回时总高不再反复跳，消除视觉抖动）。
+      model.beginBatch()
+      try {
+        for (let i = range.start; i < range.end; i++) {
+          if (!model.slots[i].mounted) {
+            mountBlock(i)
+            mutated = true
+          }
         }
+      } finally {
+        model.endBatch()
       }
       const pad = model.padHeight(range)
       applyPad(padTop, pad.top)
@@ -426,6 +480,9 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
       const index = model.slots.findIndex((s) => s.key === key)
       if (index < 0) return null
       const want = Math.max(0, offset)
+      // 目标块的坐标**在挂载前不稳定**（未实测块用估高）；先按当前坐标粗定位让 sync 把
+      // 目标块挂上去，实测后再精确修正一次——两写一读是必要的（否则未挂载则无法测量），
+      // 但不能再反复：修正值按**同一块**的实测高度算，不重算总高。
       container.scrollTop = origin + model.pos(index) + want
       sync() // 目标块可能未挂载：先挂载（实测高度替换估高）
       const refined = origin + model.pos(index) + Math.min(want, model.heightAt(index))

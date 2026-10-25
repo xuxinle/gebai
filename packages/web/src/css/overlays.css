@@ -964,3 +964,131 @@
   .tasks-row { flex-direction: column; align-items: stretch; }
   .tasks-row-actions { max-width: none; justify-content: flex-start; }
 }
+
+/* ---------- 子会话观察面板（右侧抽屉） ---------- */
+/* 比设置抽屉宽：左列运行清单 + 右列过程与报告，一屏能同时看到「哪几个在跑」与「这个跑到哪」 */
+.subsessions-panel { width: min(920px, 96vw); }
+.subsessions-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr);
+}
+/* 左列：运行清单（运行中在前，按结束时间倒序） */
+.subsessions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  background: var(--bg-inset);
+}
+.subsessions-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 8px 10px;
+  text-align: left;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: border-color var(--transition), background var(--transition);
+}
+.subsessions-row:hover { border-color: var(--border-strong); }
+.subsessions-row.active { border-color: var(--accent); background: var(--accent-soft); }
+.subsessions-row-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.subsessions-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+.subsessions-row[data-state="running"] .subsessions-dot { background: var(--accent); animation: subsessions-pulse 1.4s ease-in-out infinite; }
+.subsessions-row[data-state="done"] .subsessions-dot { background: var(--success, #3fb950); }
+@keyframes subsessions-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+.subsessions-row-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subsessions-tag {
+  flex: none;
+  padding: 0 5px;
+  font-size: 10.5px;
+  line-height: 15px;
+  color: var(--accent);
+  border: 1px solid currentColor;
+  border-radius: 999px;
+}
+.subsessions-tag.merges { color: var(--text-muted); }
+.subsessions-row-state {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.subsessions-row-agents { font-size: 11px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 右列：详情（任务指令 / 最终报告 / 阶段合入 / 执行过程） */
+.subsessions-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 16px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.subsessions-detail-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.subsessions-detail-name { font-weight: 700; font-size: 14px; }
+.subsessions-status { font-size: 12px; color: var(--text-muted); }
+.subsessions-status.running { color: var(--accent); }
+.subsessions-status.done { color: var(--success, #3fb950); }
+.subsessions-detail-agents { font-size: 11.5px; color: var(--text-faint); }
+.subsessions-section { display: flex; flex-direction: column; gap: 6px; }
+.subsessions-section-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.subsessions-md { font-size: 13.5px; }
+.subsessions-muted { font-size: 12.5px; color: var(--text-faint); }
+.subsessions-merge {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev-2);
+  font-size: 13px;
+}
+.subsessions-merge-head { font-size: 11.5px; color: var(--text-faint); margin-bottom: 5px; }
+/* 过程区宿主：固定高度内滚动（面板不随过程长度无限拉长） */
+.subsessions-process-host { min-height: 120px; }
+.subsessions-process-host .subsession-process { max-height: 46vh; padding-right: 4px; }
+/* 未选中运行的过程区驻留区（不占布局：保持节点在文档中，isConnected 为真） */
+.subsessions-stage { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
+/* 标题栏入口角标（运行中高亮） */
+.subsessions-btn { position: relative; }
+.subsessions-btn.has-running { color: var(--accent); }
+.subsessions-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 13px;
+  padding: 0 3px;
+  font-size: 9.5px;
+  line-height: 13px;
+  text-align: center;
+  color: var(--on-accent);
+  background: var(--text-faint);
+  border-radius: 999px;
+}
+.subsessions-btn.has-running .subsessions-badge { background: var(--accent); }
+@media (max-width: 720px) {
+  .subsessions-body { grid-template-columns: minmax(0, 1fr); }
+  .subsessions-list { max-height: 30vh; border-right: none; border-bottom: 1px solid var(--border); }
+}

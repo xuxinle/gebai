@@ -39,7 +39,10 @@ export interface StickyScrollHandle {
   refresh(): void
 }
 
-export function createStickyScroll(el: HTMLElement, btn: HTMLElement): StickyScrollHandle {
+export function createStickyScroll(el: HTMLElement, btn: HTMLElement, opts?: { isActive?: () => boolean }): StickyScrollHandle {
+  // 按钮全局唯一（固定在聊天区右下角）：只有活动会话的实例能驱动它的显隐与点击——
+  // 否则后台会话的内容增长会在用户当前会话里点亮/熄灭按钮（多 pane 并存后的必然问题）
+  const isActive = opts?.isActive ?? (() => true)
   const core = createStickyFollow(el, {
     threshold: BOTTOM_THRESHOLD,
     keepFrames: KEEP_ALIGN_FRAMES,
@@ -54,11 +57,14 @@ export function createStickyScroll(el: HTMLElement, btn: HTMLElement): StickyScr
   // 按钮显隐 = 不在追最新，或用户已把视口拉开（上翻位移，确认期内）：
   // 用户一滚开就有回到最新的入口；追最新期间的跟随瞬态（内容增长的一帧）不闪出按钮
   function refresh() {
+    if (!isActive()) return
     btn.hidden = !core.shouldShowJump()
   }
 
   // 点击滚动到底并重新锁定
-  btn.onclick = () => core.follow()
+  btn.onclick = () => {
+    if (isActive()) core.follow()
+  }
 
   // 图片异步加载改变高度（含 markdown 内嵌 <img>，无独立 onload 处理）：跟随中滚动到底
   el.addEventListener(

@@ -1,5 +1,5 @@
 import { uuid } from "./uuid"
-import type { ContentBlock, Message, SubSessionArchive } from "@gebai/sdk"
+import type { ContentBlock, Message } from "@gebai/sdk"
 import {
   ROLE_NAME,
   client,
@@ -25,12 +25,48 @@ import { renderDiffBlock } from "./diff"
 import { renderHtmlBlock } from "./html-view"
 import { lockToBottom, scrollIfSticky } from "./jump-bottom"
 import { createStickyFollow, type StickyFollowHandle } from "./sticky-follow"
-import { appendTail } from "./msg-window"
+import { activePane, type MsgPane } from "./msg-panes"
 import { autosize } from "./composer"
 import { confirmDialog, copyText, tip, toast } from "./ui"
 import { speak } from "./voice"
 import { rememberTaskLabels } from "./task-labels"
 import { makeCardFoldable, readCardFoldState, type CardFoldInit } from "./card-fold"
+
+/**
+ * 消息渲染目标（pane）：默认挂到当前活动会话的容器；后台会话的事件渲染期间由
+ * `withPane` 临时指向它自己的容器——这样 appendMsg / appendToolResult 内部所有
+ * 挂载点（尾部活动区、滚动跟进）自动跟随，不必给每个调用点加参数。
+ */
+let renderPane: MsgPane | null = null
+
+/** 在指定会话容器的作用域内执行渲染（后台会话的 DOM 维护路径）。 */
+export function withPane<T>(pane: MsgPane | null, fn: () => T): T {
+  const prev = renderPane
+  renderPane = pane
+  try {
+    return fn()
+  } finally {
+    renderPane = prev
+  }
+}
+
+/** 消息节点的挂载：parent（子容器）> batchFrag（批量回放）> 渲染目标 pane 的尾部活动区。
+ *  `pane` 显式指定时优先于模块级渲染目标（异步渲染路径用：定时器回调时同步作用域已失效）。
+ *  返回是否挂到了**活动** pane 的尾部区（决定要不要做滚动跟进）。 */
+function mountMsg(wrapper: HTMLElement, parent?: HTMLElement, pane?: MsgPane | null): boolean {
+  if (parent) {
+    parent.appendChild(wrapper)
+    return false
+  }
+  if (batchFrag) {
+    batchFrag.appendChild(wrapper)
+    return false
+  }
+  const target = pane ?? renderPane ?? activePane()
+  if (!target) return false
+  target.virtualizer.appendTail(wrapper)
+  return target === activePane()
+}
 
 /** 消息附件（用户附图消息）：path 为服务端会话内引用（历史/已上传），blob 为本地上传前的原文件。 */
 export type MsgAttachment = { path?: string; name: string; mime?: string; size?: number; blob?: Blob }
@@ -348,8 +384,11 @@ export function flushMsgBatch(): void {
   const frag = batchFrag
   batchFrag = null
   if (frag) {
-    appendTail(frag)
-    scrollIfSticky()
+    const pane = renderPane ?? activePane()
+    if (pane) {
+      pane.virtualizer.appendTail(frag)
+      if (pane === activePane()) scrollIfSticky()
+    }
   }
 }
 
@@ -382,9 +421,8 @@ export function isEngineNoteMsg(m: { role?: string; engineNote?: string; content
   return engineNoteOf(m) !== undefined
 }
 
-export function appendMsg(msg: Message, stream = false, parent?: HTMLElement): HTMLElement {
-  // 引擎提示（待办续做/收尾验证/任务结果写回/子会话合入，role=user + engineNote）：与用户自己发的输入
-  // 同角色落盘，但展示形态区分——弱化通知条（非右对齐用户气泡，不提供撤回）；
+export function appendMsg(msg: Message, stream = false, parent?: HTMLElement, pane?: MsgPane | null): HTMLElement {
+  // 引擎提示（待办续做/收尾验证/任务结果写回/子会话合入，role=user + engineNote）：与用户自己发的输入  // 同角色落盘，但展示形态区分——弱化通知条（非右对齐用户气泡，不提供撤回）；
   // 存量数据（标记上线前的 assistant 形态提醒）按内容前缀兜底识别
   const noteKind = msg.role === "user" || msg.role === "assistant" ? engineNoteOf(msg) : undefined
   const wrapper = el("div", `msg ${noteKind ? "engine-note" : msg.role}${stream ? " streaming" : ""}`)
@@ -402,10 +440,8 @@ export function appendMsg(msg: Message, stream = false, parent?: HTMLElement): H
     bubble.appendChild(el("div", "load-title", `📦 已装载子Agent：${msg.loadedAgent}`))
     body.appendChild(bubble)
     wrapper.append(body)
-    if (parent) parent.appendChild(wrapper)
-    else if (batchFrag) batchFrag.appendChild(wrapper)
-    else appendTail(wrapper)
-    if (!batchFrag && !parent) scrollIfSticky()
+    if (!mountMsg(wrapper, parent, pane)) return wrapper
+    scrollIfSticky()
     return wrapper
   }
 
@@ -417,10 +453,8 @@ export function appendMsg(msg: Message, stream = false, parent?: HTMLElement): H
     bubble.appendChild(el("div", "compact-summary", msg.content))
     body.appendChild(bubble)
     wrapper.append(body)
-    if (parent) parent.appendChild(wrapper)
-    else if (batchFrag) batchFrag.appendChild(wrapper)
-    else appendTail(wrapper)
-    if (!batchFrag && !parent) scrollIfSticky()
+    if (!mountMsg(wrapper, parent, pane)) return wrapper
+    scrollIfSticky()
     return wrapper
   }
 
@@ -439,14 +473,27 @@ export function appendMsg(msg: Message, stream = false, parent?: HTMLElement): H
   }
   if ((msg.content || msg.reasoning) && msg.role !== "tool") {
     bubble!.appendChild(
-      noteKind
-        ? blockText(msg.content)
-        : msg.role === "assistant"
-          ? msg.reasoning
-            ? assistantWithReasoning(msg.reasoning, msg.content)
-            : assistantContent(msg.content)
-          : blockText(msg.content),
+      // 子会话合入（报告/阶段性成果）按 markdown 渲染：内容本就是模型产出的 markdown
+      // （标题、列表、表格、代码块），按纯文本展示会把结构全压平；其余引擎提示仍为纯文本
+      noteKind === "subsession"
+        ? markdownBlock(msg.content)
+        : noteKind
+          ? blockText(msg.content)
+          : msg.role === "assistant"
+            ? msg.reasoning
+              ? assistantWithReasoning(msg.reasoning, msg.content)
+              : assistantContent(msg.content)
+            : blockText(msg.content),
     )
+  }
+  // 合入通知附「查看过程」：直接打开观察面板并选中来源运行（报告全文与执行过程都在那里）
+  if (noteKind === "subsession" && msg.subSessionMerged?.runId) {
+    const sess = getCurrentSession()?.id ?? ""
+    const runId = msg.subSessionMerged.runId
+    const jump = el("button", "subsession-merge-open", "查看子会话过程 ›")
+    jump.type = "button"
+    jump.onclick = () => document.dispatchEvent(new CustomEvent("gebai:open-subsession", { detail: { sessionId: sess, runId } }))
+    bubble!.appendChild(jump)
   }
   // assistant 流式消息需要空 bubble 占位
   const hasBody = (msg.role === "assistant" && stream) || (bubble?.childNodes.length ?? 0) > 0 || msg.blocks?.length || msg.attachments?.length
@@ -465,10 +512,7 @@ export function appendMsg(msg: Message, stream = false, parent?: HTMLElement): H
   renderMsgAttachments(wrapper, cur?.id || "", msg.attachments ?? [])
   // 容器内消息（子Agent 执行过程）：容器整体作为一个导航段/滚动单位，内部消息不单独处理；
   // parent 优先于 batchFrag（回放批量挂载时容器内消息直接进容器，容器本身已在 batchFrag 中）
-  if (parent) parent.appendChild(wrapper)
-  else if (batchFrag) batchFrag.appendChild(wrapper)
-  else appendTail(wrapper)
-  if (!batchFrag && !parent) scrollIfSticky()
+  if (mountMsg(wrapper, parent, pane)) scrollIfSticky()
   return wrapper
 }
 
@@ -490,8 +534,7 @@ export function appendCompactNotice(title: string, summary: string) {
   if (summary) bubble.appendChild(el("div", "compact-summary", summary))
   body.appendChild(bubble)
   wrapper.appendChild(body)
-  appendTail(wrapper)
-  scrollIfSticky()
+  if (mountMsg(wrapper)) scrollIfSticky()
 }
 
 /** 冲刷节流窗口内未上屏的流式内容（封段前调用）：作废排期并把累积文本/推理同步渲染进气泡，
@@ -548,8 +591,15 @@ export function sealSessionSegment(sub: SubSessionState): void {
   sealTextState(sub)
 }
 
+/** 子会话过程区的文本段封存（工具卡/交互卡插入前调用）：按 run 的在途状态截断当前文本段。
+ *  在途状态缺失（切走后重建、历史回放）时无段可封——过程区里的历史消息各自成卡。 */
+export function sealRunSegment(sessionId: string, runId: string): void {
+  const sub = runs.get(sessionId)?.subSessions?.get(runId)
+  if (sub) sealSessionSegment(sub)
+}
+
 /** 块级工具结果（show/diff 等 card.args="block" 工具）封段：工具结果卡片追加前封存当前文本段
- *  （含子会话运行容器内），使图表等块卡片独立展示、画图后的输出另起新卡片——防输出继续追加到图上方同一张卡片。 */
+ *  （含子会话过程区），使图表等块卡片独立展示、画图后的输出另起新卡片——防输出继续追加到图上方同一张卡片。 */
 export function sealBlockResultSegment(sessionId: string, runId?: string): void {
   if (runId) {
     const sub = runs.get(sessionId)?.subSessions?.get(runId)
@@ -559,96 +609,52 @@ export function sealBlockResultSegment(sessionId: string, runId?: string): void 
   sealSegment(sessionId)
 }
 
-/** 单行截断摘要（折叠容器标题用）：保留头尾、省略号收尾，单行展示不换行。 */
-function inlineSnippet(text: string, max = 60): string {
-  const flat = text.replace(/\s+/g, " ").trim()
-  if (flat.length <= max) return flat
-  return `${flat.slice(0, Math.floor(max * 0.6))}…${flat.slice(-Math.floor(max * 0.3))}`
-}
-
 /**
- * 子会话运行折叠容器（details.subsession-run）：summary 显示「🌿 子会话 · name(model) · ⚙ 子Agent …」，
- * body 渲染完整执行过程（输入块/推理/工具卡片/回复）。
- * - 执行中（output 未提供）：默认展开（过程实时可见，main.ts 配合滚动）
- * - 已结束（output 提供，可为空串表示无返回）：默认折叠，只显示最终返回（点 summary 展开看过程，输入以块展示）
+ * 子会话单行入口（消息流中替代原折叠容器）：`🌿 子会话 · 名（模型）· ⚙ 子Agent` + 状态摘要 + 「查看过程 ›」。
+ *
+ * 过程不进消息流：一次运行是「推理 + 工具卡 + 多轮回复」，展开后数屏长，插在流里会把父会话
+ * 自己的叙述顶散、并发多个 run 时几条流互相交错。入口只占一行，点击打开右侧「子会话」观察面板
+ * （subsessions.ts）看全过程与报告。入口行是**纯展示 + 跳转**，不持有过程 DOM，因此窗口化
+ * 卸载/重建、历史回放都可以反复创建。
  */
-export function subSessionBox(opts: { runId: string; agents: string[]; input: string; output?: string; subsession?: { name: string; model?: string } }, parent?: HTMLElement): { container: HTMLDetailsElement; body: HTMLElement; outputEl: HTMLElement } {
-  const container = document.createElement("details")
-  container.className = "subsession-run"
-  container.dataset.runId = opts.runId
-  const summary = el("summary", "session-summary")
-  summary.append(
-    el(
-      "span",
-      "subsession-title",
-      `🌿 子会话${opts.subsession ? ` · ${opts.subsession.name}${opts.subsession.model ? `（${opts.subsession.model}）` : ""}` : ""}${opts.agents.length ? ` · ⚙ ${opts.agents.join(" + ")}` : ""}`,
-    ),
-  )
-  const outputEl = el("span", "subsession-output")
-  summary.appendChild(outputEl)
-  const body = el("div", "subsession-body")
-  container.append(summary, body)
-  // 执行中默认展开（过程实时可见；完成后 finishSubSession 自动折叠）
-  if (opts.output === undefined || opts.output === null) container.open = true
-  // 输入以参数块渲染在容器顶部（与工具参数块同款样式，不带「输入」提示）
-  if (opts.input) body.appendChild(el("div", "subsession-input", opts.input))
-  finishSubSession(container, outputEl, opts.output)
-  if (parent) parent.appendChild(container)
-  else if (batchFrag) batchFrag.appendChild(container)
-  else appendTail(container)
-  bindSessionScroll(body)
-  if (!batchFrag) scrollIfSticky()
-  return { container, body, outputEl }
-}
-
-/**
- * 历史回放：从 subsession_run 工具调用记录的扩展字段（subSessionArchive 存档）渲染子会话折叠容器。
- * 递归渲染嵌套子会话（子会话内再派生的存档挂在工具消息上）；parent 指定时嵌套进外层容器 body。
- */
-export function renderSubSessionArchive(archive: SubSessionArchive, parent?: HTMLElement): { container: HTMLDetailsElement; body: HTMLElement; outputEl: HTMLElement } {
-  const box = subSessionBox({ runId: archive.runId, agents: archive.agents, input: archive.input, output: archive.output, subsession: archive.subsession }, parent)
-  for (const am of archive.messages) {
-    if (am.subSessionArchive) {
-      renderSubSessionArchive(am.subSessionArchive, box.body)
-      continue
-    }
-    appendMsg(
-      { id: uuid(), role: am.role, name: am.name, content: am.content, toolCalls: am.toolCalls, arguments: am.arguments, createdAt: Date.now() },
-      false,
-      box.body,
-    )
+export function subSessionEntry(opts: { sessionId: string; runId: string; name?: string; model?: string; agents?: string[]; state?: string; status?: "running" | "done" }, parent?: HTMLElement): HTMLElement {
+  const btn = document.createElement("button")
+  btn.type = "button"
+  btn.className = "subsession-entry"
+  btn.dataset.subsessionEntry = ""
+  btn.dataset.runId = opts.runId
+  btn.dataset.sessionId = opts.sessionId
+  btn.dataset.state = opts.status ?? "running"
+  const agents = opts.agents ?? []
+  const label = [
+    "🌿 子会话",
+    opts.name ? `· ${opts.name}${opts.model ? `（${opts.model}）` : ""}` : "",
+    agents.length ? `· ⚙ ${agents.join(" + ")}` : "",
+  ]
+    .filter(Boolean)
+    .join(" ")
+  btn.append(el("span", "subsession-entry-name", label), el("span", "subsession-entry-state", opts.state ?? "运行中"), el("span", "subsession-entry-open", "查看过程 ›"))
+  btn.onclick = () => {
+    document.dispatchEvent(new CustomEvent("gebai:open-subsession", { detail: { sessionId: opts.sessionId, runId: opts.runId } }))
   }
-  return box
-}
-
-/**
- * 历史回放（旧版兼容）：agent_call 时代子Agent run 存档（LegacySubAgentRunArchive，agent 单值）渲染折叠容器。
- */
-export function renderLegacySubAgentArchive(archive: import("@gebai/sdk").LegacySubAgentRunArchive, parent?: HTMLElement): { container: HTMLDetailsElement; body: HTMLElement; outputEl: HTMLElement } {
-  const box = subSessionBox({ runId: archive.runId, agents: [archive.agent], input: archive.input, output: archive.output }, parent)
-  for (const am of archive.messages) {
-    if (am.subAgentRun) {
-      renderLegacySubAgentArchive(am.subAgentRun, box.body)
-      continue
-    }
-    appendMsg(
-      { id: uuid(), role: am.role, name: am.name, content: am.content, toolCalls: am.toolCalls, arguments: am.arguments, createdAt: Date.now() },
-      false,
-      box.body,
-    )
+  if (parent) parent.appendChild(btn)
+  else if (batchFrag) batchFrag.appendChild(btn)
+  else {
+    const pane = renderPane ?? activePane()
+    pane?.virtualizer.appendTail(btn)
   }
-  return box
+  // 通知观察面板按记录补一次状态（记录可能先于入口创建，如历史回放）
+  document.dispatchEvent(new CustomEvent("gebai:subsession-entry", { detail: { sessionId: opts.sessionId, runId: opts.runId } }))
+  if (!batchFrag && !parent) scrollIfSticky()
+  return btn
 }
 
-/**
- * 新会话容器内粘底滚动：内容追加后若用户未在容器内上翻则跟随滚动到底（与主聊天区粘底语义一致，
- * 用户上翻历史过程时停止跟随，回到底部后恢复）。核心机制见 sticky-follow.ts（意图驱动）——
- * 容器内流式高频更新同样存在「程序滚动事件迟到 + 内容增长被误判为用户滚动」的失效窗口。 */
+/** 子会话过程区粘底滚动：内容追加后若用户未在过程区内上翻则跟随滚动到底（与主聊天区粘底语义一致）。 */
 
-/** 容器贴底判定阈值（距底部 < 8px 视为贴底）。 */
+/** 过程区贴底判定阈值（距底部 < 8px 视为贴底）。 */
 const SESSION_STICKY_THRESHOLD = 8
 
-/** 每个容器 body 的跟随核心（subSessionBox 创建时绑定）。 */
+/** 过程区跟随核心（subsessions.ts 建过程区时绑定，机制见 sticky-follow.ts 的意图驱动跟随）。 */
 const sessionFollowers = new WeakMap<HTMLElement, StickyFollowHandle>()
 
 export function scrollSessionSticky(body: HTMLElement): void {
@@ -659,24 +665,6 @@ export function bindSessionScroll(body: HTMLElement): void {
   if (!sessionFollowers.has(body)) {
     sessionFollowers.set(body, createStickyFollow(body, { threshold: SESSION_STICKY_THRESHOLD, keepFrames: 120 }))
   }
-}
-
-/**
- * 新会话 run 收尾：写入最终返回摘要并折叠容器（只显示输入与最终返回，点 summary 展开看过程）。
- * - output 为 undefined/null：run 仍在执行（或未收到收尾），显示「执行中…」不折叠
- * - output 为空串：已结束但无返回（失败/取消/风暴终止），折叠并显示「（无返回）」
- * - output 非空：已结束，折叠并显示返回摘要
- */
-export function finishSubSession(container: HTMLDetailsElement, outputEl: HTMLElement, output: string | undefined | null): void {
-  if (output === undefined || output === null) {
-    outputEl.textContent = "执行中…"
-    container.classList.remove("done")
-    return
-  }
-  const text = inlineSnippet(output.replace(/<think>[\s\S]*?<\/think>/g, "").trim()) || "（无返回）"
-  outputEl.textContent = output ? `→ 返回: ${text}` : "（无返回）"
-  if (container.open) container.open = false
-  container.classList.add("done")
 }
 
 /** 推理块：assistant 消息内可折叠暗色「推理」卡片。流式推理过程中默认展开（推理内容实时可见），
@@ -809,10 +797,7 @@ export function appendAskUserRecord(args: { prompt: string; options: Array<strin
   body.appendChild(askUserBubble(args.prompt, args.options, args.multi === true, output))
   wrapper.appendChild(body)
   if (parent) parent.appendChild(wrapper)
-  else {
-    appendTail(wrapper)
-    scrollIfSticky()
-  }
+  else if (mountMsg(wrapper)) scrollIfSticky()
   return wrapper
 }
 
@@ -829,10 +814,7 @@ export function appendPlanCard(args: { title?: unknown; steps?: unknown; content
   )
   wrapper.appendChild(body)
   if (parent) parent.appendChild(wrapper)
-  else {
-    appendTail(wrapper)
-    scrollIfSticky()
-  }
+  else if (mountMsg(wrapper)) scrollIfSticky()
   return wrapper
 }
 
@@ -850,10 +832,7 @@ export function appendTodoCard(sessionId: string, parent?: HTMLElement): HTMLEle
   addMetaActions(meta, wrapper, bubble, { role: "tool", content: "", id: "" })
   wrapper.appendChild(body)
   if (parent) parent.appendChild(wrapper)
-  else {
-    appendTail(wrapper)
-    scrollIfSticky()
-  }
+  else if (mountMsg(wrapper)) scrollIfSticky()
   return wrapper
 }
 

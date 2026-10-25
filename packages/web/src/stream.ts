@@ -3,7 +3,7 @@ import type { ChatChunk } from "@gebai/sdk"
 import { cnyCatTurnEnd } from "./cny-cat"
 import { syncSendButton } from "./composer"
 import { refreshJumpBottom, scrollIfSticky } from "./jump-bottom"
-import { addMetaActions, appendMsg, assistantContent, clearInteractionCards, finishSubSession, reasoningBlock, scrollSessionSticky, sealSegment, sealSessionSegment, subSessionBox } from "./messages"
+import { addMetaActions, appendMsg, assistantContent, clearInteractionCards, reasoningBlock, scrollSessionSticky, sealSegment, sealSessionSegment, subSessionEntry } from "./messages"
 import { blockText, markdownBlock } from "./markdown"
 import { createModelErrorNotice, modelErrorText } from "./model-error"
 import { createStreamRenderer } from "./stream-render"
@@ -15,8 +15,14 @@ import { drainQueue } from "./queue"
 import { scrollReasoningSticky } from "./reasoning-scroll"
 import { client, el, getCurrentSession, runs, syncConnThinking, type RunState, type SubSessionState } from "./state"
 import { appendTail } from "./msg-window"
+import { finishRun, noteRound, startRun } from "./subsessions"
+import { activatePane, activePane, ensurePane, paneOf, setPaneRunning } from "./msg-panes"
+import { effectiveIdleMs, initPageIdle, isPageHidden } from "./page-idle"
 import { uuid } from "./uuid"
 import { IDLE_TIMEOUT_MS, startTurnTimer, stopTurnTimer } from "./turn-view"
+
+// 页面不可见时段登记（后台标签页/手机切 App/锁屏）：空闲看门狗据此把后台时长从「无数据」里扣除
+initPageIdle()
 
 /** 历史重载后重建在途渲染（缺口重同步专用）：重载清空了消息容器（在途气泡一并被移除），而重载期间的
  *  增量只做了累积——按累积内容重新起气泡，避免「重载完成后正文不再显示」。 */
@@ -24,10 +30,10 @@ function rehydrateRunView(run: RunState, sessionId: string): void {
   if (run.abort.signal.aborted) return
   run.el = null
   run.reasoningEl = null
-  // 切走的会话只靠累积（切回由 loadMessages 恢复渲染），此处不碰 DOM
-  if (getCurrentSession()?.id !== sessionId) return
+  // 只为本会话自己的容器重建（后台会话的容器仍在，无需放弃渲染）；无容器（已结束/未接管）不碰 DOM
+  if (!paneOf(sessionId)) return
   if (!run.acc.trim() && !run.reasoningAcc.trim()) return
-  run.el = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true)
+  run.el = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true, undefined, paneOf(sessionId))
   const bubble = run.el.querySelector<HTMLElement>(".msg-body .bubble")
   if (run.reasoningAcc.trim() && bubble) {
     run.reasoningEl = reasoningBlock()
@@ -39,6 +45,17 @@ function rehydrateRunView(run: RunState, sessionId: string): void {
 }
 
 function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): void {
+  // 子会话在途状态：容器缺失（重连重置了 subSessions，或 start 事件已在断线前投递）时惰性重建——
+  // 观察面板的记录与过程区常驻，重建只补在途渲染引用，不丢已渲染内容
+  const subStateOf = (runId: string): SubSessionState => {
+    run.subSessions ??= new Map()
+    const existing = run.subSessions.get(runId)
+    if (existing) return existing
+    const rec = startRun({ sessionId, runId, agents: [], input: "" })
+    const created: SubSessionState = { runId, agents: [], input: "", body: rec.body, acc: "", el: null, messageId: "", reasoningAcc: "", reasoningEl: null }
+    run.subSessions.set(runId, created)
+    return created
+  }
   if (chunk.kind === "resume") {
     // 断线重连后的全量重同步：重置本轮回累积并重建消息元素，防止内容重复渲染
     run.acc = ""
@@ -78,27 +95,14 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
     if (chunk.messageId) run.messageId = chunk.messageId
     const runId = chunk.subSessionId
     if (runId) {
-      // 子会话运行过程文本：渲染进该 run 的折叠容器（执行中展开，与主回复同流显示）
-      let sub = run.subSessions?.get(runId)
-      if (!sub) {
-        // 容器缺失（重连全量重同步清空 subSessions 后服务端不重推 start——事件已在断线前投递）：
-        // 惰性重建容器兜底，否则该 run 后续输出静默丢弃、容器永久停留旧状态（分支标题等元信息
-        // 随 subSessions 一并丢失，下一轮 start 重推时容器已存在会被忽略——可接受的降级）
-        run.subSessions ??= new Map()
-        const box = subSessionBox({ runId, agents: [], input: "" })
-        sub = { runId, agents: [], input: "", container: box.container, body: box.body, outputEl: box.outputEl, acc: "", el: null, messageId: "", reasoningAcc: "", reasoningEl: null }
-        run.subSessions.set(runId, sub)
-        scrollIfSticky()
-        refreshJumpBottom()
-      }
-      // 切走/重载中（容器脱离 DOM）：先累积文本（切回由 loadMessages 恢复渲染），与主循环累积语义一致
-      if (!sub.container.isConnected) {
-        sub.acc += chunk.text ?? ""
-        return
-      }
-      // 新会话新一轮回复（messageId 变化）：封存上一段
+      // 子会话运行过程文本：渲染进观察面板的过程区（进程区常驻 DOM，切走/未展开都不丢）
+      const sub = subStateOf(runId)
+      // 新一轮回复（messageId 变化）：封存上一段，并计入轮次
       if (chunk.messageId && sub.messageId && chunk.messageId !== sub.messageId) sealSessionSegment(sub)
-      if (chunk.messageId) sub.messageId = chunk.messageId
+      if (chunk.messageId) {
+        sub.messageId = chunk.messageId
+        noteRound(sessionId, runId, chunk.messageId)
+      }
       sub.acc += chunk.text ?? ""
       // 空白内容不渲染：工具调用之间的空文本段不产生空气泡
       if (!sub.acc.trim()) return
@@ -133,24 +137,18 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
     // 空白内容不渲染：工具调用之间的空文本段不产生空气泡
     if (!run.acc.trim()) return
     if (run.reloading) return // 历史重载中：只累积（重载完成后由 rehydrateRunView 重建气泡）
-    // 会话守卫：切到其他会话时只累积不触碰 DOM（切回时由 loadMessages 从 run.acc 恢复渲染）
-    if (getCurrentSession()?.id !== sessionId) return
+    // 容器守卫：该会话没有自己的容器（未运行/已释放）时才只累积；运行中会话（含后台）照常建 DOM
+    if (!paneOf(sessionId)) return
     // 工具调用已封段后（run.el 为 null）或元素脱离 DOM：惰性重建消息元素
     if (!run.el?.isConnected) {
-      run.el = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true)
+      run.el = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true, undefined, paneOf(sessionId))
     }
     scheduleStreamRender(run)
   } else if (chunk.kind === "reasoning") {
     const runId = chunk.subSessionId
     if (runId) {
-      // 子会话运行过程推理：渲染进容器内气泡（与主循环同构的折叠推理块）
-      const sub = run.subSessions?.get(runId)
-      if (!sub) return
-      if (!sub.container.isConnected) {
-        // 切走/重载中：只累积推理（切回由 loadMessages 恢复），与主循环累积语义一致
-        sub.reasoningAcc += chunk.text ?? ""
-        return
-      }
+      // 子会话运行过程推理：渲染进观察面板过程区（与主循环同构的折叠推理块）
+      const sub = subStateOf(runId)
       sub.reasoningAcc += chunk.text ?? ""
       if (!sub.reasoningAcc.trim()) return
       if (!sub.el?.isConnected) {
@@ -163,8 +161,7 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
           bubble.prepend(sub.reasoningEl)
         }
         scheduleSessionRender(sub)
-        scrollIfSticky()
-        refreshJumpBottom()
+        scrollSessionSticky(sub.body)
       }
       return
     }
@@ -172,10 +169,10 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
     // 空白推理内容不展示（不创建折叠块）
     if (!run.reasoningAcc.trim()) return
     if (run.reloading) return // 历史重载中：只累积（重载完成后由 rehydrateRunView 重建）
-    // 会话守卫：切走时只累积（推理内容不持久化，切回由正文恢复；再流式时重建折叠块）
-    if (getCurrentSession()?.id !== sessionId) return
+    // 容器守卫（同正文路径）：无自己容器的会话才只累积
+    if (!paneOf(sessionId)) return
     if (!run.el?.isConnected) {
-      run.el = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true)
+      run.el = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true, undefined, paneOf(sessionId))
     }
     const bubble = run.el.querySelector(".msg-body .bubble")
     if (bubble && run.el.isConnected) {
@@ -191,23 +188,22 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
       }
     }
   } else if (chunk.kind === "subsession_start") {
-    // 子会话 run 开始：创建折叠容器（执行中展开并滚动到可见；服务端每轮重推同 runId start，已存在则忽略）
-    // 容器标题带子会话名/模型路由（subSessionMeta.subsession/model）
+    // 子会话 run 开始：在消息流里留一行入口（点击开观察面板），过程进面板；服务端每轮重推同 runId start
     const runId = chunk.subSessionId ?? ""
-    if (!runId || getCurrentSession()?.id !== sessionId) return
+    if (!runId || !paneOf(sessionId)) return
     sealSegment(sessionId) // 子会话开始：父会话文本段在此分段
     run.subSessions ??= new Map()
-    if (run.subSessions.get(runId)?.container.isConnected) return
-    const subsession = chunk.subSessionMeta?.subsession ? { name: chunk.subSessionMeta.subsession, model: chunk.subSessionMeta.model } : undefined
-    const box = subSessionBox({ runId, agents: chunk.subSessionMeta?.agents ?? [], input: chunk.subSessionMeta?.input ?? "", subsession })
+    if (run.subSessions.get(runId)) return
+    const meta = chunk.subSessionMeta
+    const name = meta?.subsession
+    const rec = startRun({ sessionId, runId, name, model: meta?.model, agents: meta?.agents ?? [], input: meta?.input ?? "" })
+    subSessionEntry({ sessionId, runId, name, model: meta?.model, agents: meta?.agents ?? [], state: rec.stateText, status: "running" })
     run.subSessions.set(runId, {
       runId,
-      agents: chunk.subSessionMeta?.agents ?? [],
-      input: chunk.subSessionMeta?.input ?? "",
-      subsession,
-      container: box.container,
-      body: box.body,
-      outputEl: box.outputEl,
+      agents: meta?.agents ?? [],
+      input: meta?.input ?? "",
+      subsession: name ? { name, model: meta?.model } : undefined,
+      body: rec.body,
       acc: "",
       el: null,
       messageId: "",
@@ -217,7 +213,7 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
     scrollIfSticky()
     refreshJumpBottom()
   } else if (chunk.kind === "subsession_done") {
-    // 子会话 run 结束：封存流式文本段，写入最终返回摘要并自动折叠容器（只显示输入与最终返回）
+    // 子会话 run 结束：过程区文本段封存，输出与耗时定稿（消息流入口行与面板行同步刷新）
     const runId = chunk.subSessionId ?? ""
     const sub = run.subSessions?.get(runId)
     if (sub) {
@@ -227,9 +223,9 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
         if (bubble) addMetaActions(sub.el.querySelector<HTMLElement>(".msg-meta") ?? sub.el, sub.el, bubble, { role: "assistant", content: sub.acc, id: sub.messageId }, { noRevoke: true })
       }
       sealSessionSegment(sub)
-      finishSubSession(sub.container, sub.outputEl, chunk.subSessionMeta?.output ?? "")
       run.subSessions?.delete(runId)
     }
+    finishRun(sessionId, runId, chunk.subSessionMeta?.output ?? "")
   } else if (chunk.kind === "model_error") {
     // 模型服务异常（引擎自动重试中）：消息流内常驻记录，非终态
     showModelErrorNotice(run, sessionId, chunk)
@@ -241,7 +237,7 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
  * ——单一记录块、断线重放不堆叠，也不随恢复输出/任务结束消失。
  */
 function showModelErrorNotice(run: RunState, sessionId: string, chunk: ChatChunk): void {
-  if (getCurrentSession()?.id !== sessionId) return
+  if (!paneOf(sessionId)) return
   if (!run.modelError) {
     run.modelError = createModelErrorNotice()
     appendTail(run.modelError.el)
@@ -255,7 +251,7 @@ function showModelErrorNotice(run: RunState, sessionId: string, chunk: ChatChunk
 /** 单轮耗时展示格式：<1m 整秒；<1h 分+秒；以上时+分。 */
 
 function appendFinalNotice(sessionId: string, text: string): void {
-  if (getCurrentSession()?.id !== sessionId) return
+  if (!paneOf(sessionId)) return
   const wrapper = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() })
   const bubble = wrapper.querySelector<HTMLElement>(".msg-body .bubble")
   if (bubble) {
@@ -273,18 +269,30 @@ function appendFinalNotice(sessionId: string, text: string): void {
 export async function consumeTaskStream(sessionId: string, makeSource: (run: RunState) => AsyncIterable<ChatChunk>, opts?: { startedAt?: number }): Promise<void> {
   const run: RunState = { sessionId, acc: "", el: null, reasoningAcc: "", reasoningEl: null, messageId: "", lastActivity: Date.now(), startedAt: opts?.startedAt ?? Date.now(), abort: new AbortController() }
   runs.set(sessionId, run)
+  // 为运行中的会话确保自己的容器并标记运行态：后台期间也照常建 DOM（工具卡/正文/子容器），
+  // 切回只是显隐切换（不用等网络往返与全量重建）
+  ensurePane(sessionId)
+  // 草稿态首条消息（会话刚创建、从未经 loadMessages）：pane 建出来是隐藏的，必须就地激活——
+  // 否则消息区空白（内容都渲染进隐藏容器），用户以为没发出去
+  if (!activePane() && getCurrentSession()?.id === sessionId) activatePane(sessionId)
+  setPaneRunning(sessionId, true)
   startTurnTimer(run) // 单轮计时器：本轮耗时实时显示（外观 tab 可关）
   syncConnThinking() // 运行开始：信号灯闪烁
   syncSendButton() // 不禁用按钮：运行中点击 = 停止（stopping 拦截）
   const source = makeSource(run)
-  // 空闲超时兜底：流 IDLE_TIMEOUT_MS 无任何数据视为挂起（服务端/网络异常），中断并清理，
-  // 防止运行态/信号灯残留。两种「无数据」不算挂起，不得据此取消：
+  // 空闲超时兜底：流有效空闲（可见时长）超 IDLE_TIMEOUT_MS 无任何数据视为挂起（服务端/网络异常），
+  // 中断并清理，防止运行态/信号灯残留。三种「无数据」不算挂起，不得据此取消：
   // ① 连接断开——断线期间无从判定服务端死活，且取消请求会随重连送达而杀掉仍在跑的后台任务
   //    （连接恢复由 SDK 自动重连 + 事件重放收敛，是否真跑完交由快照核对判定）；
-  // ② 等待用户作答（审批/选择/填值/画图/捕获）——服务端等待期有心跳（event.interaction.alive），
+  // ② 页面不可见（后台标签页/手机切 App/锁屏）——定时器被冻结或节流，lastActivity 停在切走前，
+  //    而本地连接标志仍为 true（close 事件尚未处理），恢复后补触发就会把整段后台当挂起杀掉
+  //    正在跑的脚本；后台时长同样不计入有效空闲（关闭浏览器页面销毁反而不受影响）
+  // ③ 等待用户作答（审批/选择/填值/画图/捕获）——服务端等待期有心跳（event.interaction.alive），
   //    超时也会推来结果事件刷新活跃时间
   const idleTimer = setInterval(() => {
-    if (run.abort.signal.aborted || Date.now() - run.lastActivity <= IDLE_TIMEOUT_MS) return
+    if (run.abort.signal.aborted) return
+    if (isPageHidden()) return
+    if (effectiveIdleMs(run.lastActivity) <= IDLE_TIMEOUT_MS) return
     if (!client.isConnected()) return
     if (hasPendingInteraction(sessionId)) return
     run.idleTimedOut = true // 标记：收尾时给出显式提示（此前静默取消，用户无从得知原因）
@@ -364,6 +372,8 @@ export async function consumeTaskStream(sessionId: string, makeSource: (run: Run
       renderStreamText(run)
     }
     runs.delete(sessionId)
+    // 运行结束：容器降为可回收（已切走则下一次回收时释放，仍在看则保留到切走）
+    setPaneRunning(sessionId, false)
     clearApprovals(sessionId) // 任务结束：该会话残留审批卡片随任务终止失效并解除输入锁定
     clearInteractionCards(sessionId) // 任务结束：选择/环境变量填值卡片随任务终止失效
     clearPendingTools(sessionId) // 任务结束：工具调用配对清理（结果已落盘历史）

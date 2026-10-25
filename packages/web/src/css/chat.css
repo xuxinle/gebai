@@ -432,9 +432,9 @@
   word-break: break-word;
 }
 
-/* subsession_run 输入参数块：工具卡片参数区与新会话折叠容器顶部共用（不带「输入」提示） */
+/* subsession_run 输入参数块：工具卡片参数区与观察面板的任务指令区共用（不带「输入」提示） */
 .msg.tool .bubble .subsession-input,
-.subsession-run .subsession-body .subsession-input {
+.subsessions-input {
   background: var(--bg-inset);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -447,7 +447,7 @@
   overflow-wrap: anywhere;
   word-break: break-word;
 }
-.subsession-run .subsession-body .subsession-input {
+.subsessions-input {
   margin: 6px 0 8px;
 }
 
@@ -713,80 +713,72 @@
   overflow-y: auto;
 }
 
-/* 子会话运行过程折叠容器：执行中展开显示完整过程（推理/工具/回复），结束后自动折叠只显示最终返回 */
-.subsession-run {
-  margin: 8px 0;
-  background: var(--bg-inset);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-}
-.subsession-run > summary {
-  cursor: pointer;
-  user-select: none;
+/* ---------- 子会话：消息流单行入口 ---------- */
+/* 过程不进消息流（一次运行是「推理 + 工具卡 + 多轮回复」，展开后数屏长、并发时几条流互相交错），
+   流里只占一行：名称 + 状态摘要 + 「查看过程」，点击开右侧观察面板 */
+.subsession-entry {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 2px 10px;
-  padding: 8px 12px;
-  font-size: 13px;
-  list-style: none;
-}
-.subsession-run > summary::-webkit-details-marker {
-  display: none;
-}
-.subsession-run > summary::before {
-  content: "▸";
-  color: var(--text-faint);
-  font-size: 11px;
-  transition: transform var(--transition);
-}
-.subsession-run[open] > summary::before {
-  transform: rotate(90deg);
-}
-.subsession-run .subsession-title {
-  font-weight: 600;
+  width: 100%;
+  margin: 6px 0;
+  padding: 7px 11px;
+  box-sizing: border-box;
+  text-align: left;
+  font: inherit;
+  font-size: 12.5px;
   color: var(--text);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--text-faint);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: border-color var(--transition), background var(--transition);
 }
-.subsession-run .subsession-output {
+.subsession-entry:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+.subsession-entry[data-state="running"] { border-left-color: var(--accent); }
+.subsession-entry[data-state="done"] { border-left-color: var(--success, #3fb950); }
+.subsession-entry-name { font-weight: 600; flex: 0 1 auto; min-width: 0; }
+.subsession-entry-state {
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--text-muted);
+  font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 45%;
 }
-.subsession-run.done .subsession-output {
-  color: var(--success, #3fb950);
+.subsession-entry.open-state .subsession-entry-state,
+.subsession-entry[data-state="done"] .subsession-entry-state { color: var(--text-muted); }
+.subsession-entry-open { flex: none; color: var(--accent); font-size: 12px; }
+.subsession-entry.nested { margin: 4px 0; padding: 5px 9px; }
+/* 合入通知（报告按 markdown 渲染）后的「查看子会话过程」入口 */
+.subsession-merge-open {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 3px 9px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
 }
-.subsession-run[open] > summary {
-  border-bottom: 1px solid var(--border);
-}
-.subsession-run .subsession-body {
-  padding: 4px 12px 10px;
-  max-height: 45vh;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  /* flex 列：内部消息（.msg.user align-self: flex-end 右对齐等）依赖 flex 布局；
-     此前靠 base.css 会话列表 .subsession-body 同名类的全局规则意外供 flex，
-     该规则已收窄作用域，此处显式声明（同名类职责分离） */
+.subsession-merge-open:hover { background: var(--bg-hover); }
+
+/* 过程区（观察面板内的消息列）：meta 紧凑展示（隐藏重复时间），气泡间距收紧 */
+.subsession-process {
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
-/* 容器内消息（执行过程）：meta 紧凑展示（隐藏重复时间），气泡间距收紧 */
-.subsession-run .msg {
-  padding: 0;
-}
-.subsession-run .msg .msg-meta {
-  padding: 6px 0 2px;
-  font-size: 11px;
-  opacity: 0.75;
-}
-.subsession-run .msg .msg-meta .msg-time {
-  display: none;
-}
-.subsession-run .msg .bubble {
-  margin-top: 0;
-}
+.subsession-process .msg { padding: 0; }
+.subsession-process .msg .msg-meta { padding: 6px 0 2px; font-size: 11px; opacity: 0.75; }
+.subsession-process .msg .msg-meta .msg-time { display: none; }
+.subsession-process .msg .bubble { margin-top: 0; }
 
 /* 流式光标 */
 .msg.streaming .bubble::after {

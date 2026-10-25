@@ -1,4 +1,14 @@
 import { msgEl, msgNav } from "./state"
+import { activePane, onPaneActivate } from "./msg-panes"
+
+/**
+ * 导航几何的容器访问器：消息列按会话分成独立滚动容器（msg-panes），所有几何量
+ * （scrollHeight / clientHeight / scrollTop / 屏幕坐标）都应以**当前活动容器**为准。
+ * 无活动 pane（草稿页）时回退到宿主（其 scrollHeight 为 0，导航自动隐藏）。
+ */
+function scrollEl(): HTMLElement {
+  return activePane()?.container ?? msgEl
+}
 import { stopFollowing } from "./jump-bottom"
 import { createPressGesture } from "./press-gesture"
 
@@ -162,14 +172,15 @@ export function updateMsgNav() {
 }
 
 function runUpdate() {
-  if (!segs.length || !msgEl.scrollHeight) {
+  const el = scrollEl()
+  if (!segs.length || !el.scrollHeight) {
     msgNav.hidden = true
     updateActiveSeg()
     return
   }
-  const total = msgEl.scrollHeight
+  const total = el.scrollHeight
   // 滚动区高度 < 视口：没有可滚动空间，导航无意义
-  const scrollable = total - msgEl.clientHeight > 1
+  const scrollable = total - el.clientHeight > 1
   msgNav.hidden = !scrollable
   if (msgNav.hidden) return
   const navH = msgNav.clientHeight - NAV_PAD * 2
@@ -214,7 +225,8 @@ function updateActiveSeg() {
     return
   }
   // 屏幕坐标（与段定位同一坐标系）
-  const center = msgEl.getBoundingClientRect().top + msgEl.clientHeight / 2
+  const el = scrollEl()
+  const center = el.getBoundingClientRect().top + el.clientHeight / 2
   let best = activeIdx >= 0 && activeIdx < segs.length ? activeIdx : 0
   let guard = 0
   while (best < segs.length - 1 && guard++ < 2000) {
@@ -375,32 +387,28 @@ export function bindMsgNav() {
   msgNav.addEventListener("pointerup", onPointerUp)
   msgNav.addEventListener("pointercancel", onPointerCancel)
   msgNav.addEventListener("scroll", onScroll) // 自带滚动条时同步活动条
-  msgEl.addEventListener("scroll", onScroll, { passive: true })
   // 短横线命中带（::before 扩展成 40×18 连续竖带）悬停时滚轮转发给消息列：
-  // msg-nav 是 #messages 的兄弟元素、不在其滚动链上，默认滚轮在此无任何滚动目标
-  // （「滚轮失灵」根因）；上滚同步解除粘底跟随——与 #messages 自身 wheel 监听同语义，
+  // msg-nav 是消息列的兄弟元素、不在其滚动链上，默认滚轮在此无任何滚动目标
+  // （「滚轮失灵」根因）；上滚同步解除粘底跟随——与消息列自身 wheel 监听同语义，
   // 否则流式静默窗口会把手动落位归因为内部动作而拽回底部。
   msgNav.addEventListener(
     "wheel",
     (e) => {
       const ev = e as WheelEvent
+      const el = scrollEl()
       let dy = ev.deltaY
       if (ev.deltaMode === 1) dy *= 16 // 行
-      else if (ev.deltaMode === 2) dy *= msgEl.clientHeight // 页
+      else if (ev.deltaMode === 2) dy *= el.clientHeight // 页
       if (!dy) return
       if (dy < 0) stopFollowing()
-      msgEl.scrollTop += dy
+      el.scrollTop += dy
     },
     { passive: true },
   )
-  // 容器尺寸 / 消息内容变化时重算位置
-  if (typeof ResizeObserver !== "undefined") {
-    const ro = new ResizeObserver(() => updateMsgNav())
-    ro.observe(msgEl)
-    ro.observe(msgNav)
-  } else {
-    window.addEventListener("resize", updateMsgNav)
-  }
+  // 容器尺寸 / 消息内容变化时重算位置（导航按钮自身尺寸与窗口缩放与会话无关，全局观察）
+  const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => updateMsgNav()) : null
+  if (ro) ro.observe(msgNav)
+  else window.addEventListener("resize", updateMsgNav)
   // 消息增删 / 流式内容更新 → 重算；运行期新增的顶层用户消息补登导航段——
   // 历史段由会话加载时按消息清单全量建立（含尚未渲染的块），此处只兜运行期新增
   const mo = new MutationObserver((records) => {
@@ -413,7 +421,25 @@ export function bindMsgNav() {
     }
     updateMsgNav()
   })
-  mo.observe(msgEl, { childList: true, subtree: true, characterData: true })
+  // 滚动 / 尺寸 / 内容三类监听都是**容器级**的：按活动 pane 重绑（切会话即换容器）
+  let bound: HTMLElement | null = null
+  const bindContainer = (el: HTMLElement | null) => {
+    if (bound === el || !el) return
+    if (bound) {
+      bound.removeEventListener("scroll", onScroll)
+      ro?.unobserve(bound)
+      mo.disconnect()
+    }
+    bound = el
+    el.addEventListener("scroll", onScroll, { passive: true })
+    ro?.observe(el)
+    mo.observe(el, { childList: true, subtree: true, characterData: true })
+  }
+  bindContainer(scrollEl())
+  onPaneActivate((pane) => {
+    bindContainer(pane?.container ?? null)
+    updateMsgNav()
+  })
   bindBars()
   updateMsgNav()
 }

@@ -17,6 +17,7 @@ import { bindWheel } from "./wheel"
 import { bindShortcutSheet } from "./shortcut-sheet"
 import { bindTodoPop } from "./todo-pop"
 import { bindTasks } from "./tasks"
+import { bindSubSessions } from "./subsessions"
 import { bindFilesSplit } from "./files-split"
 import { loadLocalEnv } from "./env-local"
 import { applyWebConfig, awaitCustomBoot, urlPromptAllowed } from "./boot-config"
@@ -35,6 +36,7 @@ import { attachRunningIfNeeded, bindSessionActions, enterDraftView, exportSessio
 import { appendMsg, bindMessagesSessions, releaseMsgAttachments, renderMsgAttachments, sealSegment } from "./messages"
 import { sendPending } from "./attachments"
 import { loadToolCardMeta } from "./tool-cards"
+import { noteMerge } from "./subsessions"
 import { lockToBottom, refreshJumpBottom, scrollIfSticky } from "./jump-bottom"
 import { bindMsgNav } from "./msg-nav"
 import { enqueueFront, enqueueInput, setQueueExecutor, type QueuedInput } from "./queue"
@@ -238,6 +240,7 @@ async function init() {
 bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快捷键一览
   bindTodoPop() // 轮盘「待办」按钮 → 可拖动待办弹窗（用户级待办 + 闲时任务）
   bindTasks() // 轮盘「任务」按钮 → 任务管理抽屉（定时 / 普通 / 闲时任务与统一队列）
+bindSubSessions() // 标题栏「子会话」按钮 → 子会话观察面板（消息流里只留一行入口）
   bindFilesSplit() // 文件工作台入口：主按钮 = 分屏并列，副按钮 = 全屏打开文件工作台（见 files-split.ts）
   restoreToken()
   // 工具卡片元数据（titleParams/args 模式，须先于历史消息渲染就绪）与外部身份兑换（同源集成，本地无令牌
@@ -307,7 +310,9 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
     } else if (ev.type === "event.subsession.merged") {
       // 子会话报告合入（DESIGN「子会话运行」）：消息落盘为 **user + engineNote: "subsession"**
       // （与其余引擎注入同口径——assistant 形态会被思考类模型 400 拒绝），此处实时渲染为
-      // 「子会话合入」通知条；子会话执行过程在折叠容器（非最终合入不带存档），历史回放由存储消息承担
+      // 「子会话合入」通知条（内容按 markdown 渲染，并附「查看子会话过程」直达观察面板）；
+      // 合入内容同时记进面板的阶段合入记录（一个 run 可多次交出阶段性成果）
+      noteMerge(ev.sessionId, String(ev.payload.runId ?? ""), String(ev.payload.text ?? ""))
       if (getCurrentSession()?.id !== ev.sessionId) return
       sealSegment(ev.sessionId) // 合并消息独立成段（不并入在途流式文本）
       appendMsg({

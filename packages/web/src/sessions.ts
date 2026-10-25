@@ -1,6 +1,7 @@
 import { uuid } from "./uuid"
 import { mainKeymap } from "./keymap-main"
 import { nextScopeId, popKeyScope, pushKeyScope, FOCUS_WITH_INPUT } from "./keymap"
+import { activatePane, activePane, deactivatePane, paneOf, reapIdlePanes, type MsgPane, type PaneChunks } from "./msg-panes"
 import type { ContentBlock, RuntimeSessionInfo, SessionDetail, SessionInfo } from "@gebai/sdk"
 import {
   aside,
@@ -34,10 +35,12 @@ import {
 } from "./state"
 import { markdownBlock } from "./markdown"
 import { batchExportFileName, buildExportFile, detailToImportData, downloadJson, parseImportText, singleExportFileName } from "./session-io"
-import { appendMsg, appendTodoCard, beginMsgBatch, engineNoteOf, finishSubSession, isEngineNoteMsg, reasoningBlock, renderLegacySubAgentArchive, renderSubSessionArchive, subSessionBox, takeMsgBatch } from "./messages"
+import { appendMsg, appendTodoCard, beginMsgBatch, engineNoteOf, isEngineNoteMsg, reasoningBlock, subSessionEntry, takeMsgBatch } from "./messages"
 import { clearUnread, isFollowing, lockToBottom, restoreScroll, stopFollowing } from "./jump-bottom"
 import { applyApprovalSkip } from "./approval-skip"
 import { applyApprovalVisibility } from "./approvals"
+import { applyInteractionVisibility } from "./messages"
+import { appendArchiveMessage, mergeFromMessage, refreshSubSessions, registerArchive } from "./subsessions"
 import { autosize, firstInputOf, resetHistoryNav, syncSendButton } from "./composer"
 import { autoHideScrollbar, confirmDialog, desktopDownloadHint, toast } from "./ui"
 import { renderShortcutButtons } from "./shortcuts"
@@ -119,8 +122,36 @@ function rememberHistoryTaskLabels(msgs: TaskLabelScanMsg[], depth = 0): void {
   }
 }
 
+/* ---------- 会话联动：切换/加载都必须调用的一份清单 ---------- */
+
+/**
+ * 使「随当前会话变化」的 UI 跟随当前会话。
+ *
+ * 切换会话有两条路径（已缓存容器的快速路径 `activatePaneFast`、未缓存的完整加载 `loadMessages`），
+ * 以前它们各自手写一份刷新清单，结果是两条路径各漏一半（切换后列表高亮停在旧会话、子会话角标
+ * 停在旧会话……）。所以把清单收在**这一个函数**里：任何随会话变化的 UI 刷新都加到这里，
+ * 两条路径都调它，不再各写一份。
+ *
+ * 判定标准：该项显示的如果是「当前会话」的数据，且在新会话里会呈现不同值，就必须进本清单。
+ * 事件驱动型的局部刷新（某会话新到审批/附件、按 sessionId 判定的）不在此列——它们自行处理。
+ */
+function syncSessionScopedUi(): void {
+  syncActiveRow(getCurrentSession()?.id ?? null) // 会话列表高亮
+  lastActiveId = getCurrentSession()?.id ?? null
+  updateTitle() // 标题栏标题
+  syncSendButton() // 发送/停止（运行中会话显示停止）
+  renderQueue() // 排队条（队列按会话隔离）
+  applyApprovalVisibility() // 待审批卡片（仅显示当前会话的）
+  applyInteractionVisibility() // 待作答交互卡（同上）
+  updateMsgNav() // 消息导航列（段表就位后重算位置）
+  refreshSubSessions() // 标题栏子会话按钮与面板（按当前会话过滤/角标）
+}
+
 export async function loadMessages(sessionId: string) {
   const seq = ++loadSeq
+  // 会话消息视图（pane）：每个会话一份独立滚动容器——切会话只切显隐，后台会话的
+  // DOM 与在途引用不丢（容器级几何：粘底跟随/窗口化/消息导航各自成立）
+  activatePane(sessionId)
   applyApprovalVisibility() // 审批卡片跟随会话：仅显示当前会话的待审批，切回恢复
   const session = await client.getSession(sessionId)
   if (seq !== loadSeq) return // 已有更新的加载请求：本次结果作废
@@ -147,8 +178,8 @@ export async function loadMessages(sessionId: string) {
   const run = runs.get(sessionId)
   // 窗口化：消息切成块（未渲染块只有估高），容器重置后落底——首屏只渲染尾部块，
   // 更早历史在滚动到附近时按需渲染（见 renderChunk）。空状态在重置后追加（重置会清空容器）
-  const bounds = planMessageChunks(visible, chunkSize(msgEl.clientHeight))
-  chunks = { msgs: visible, bounds, sessionId, index: buildMsgIndex(visible) }
+  const bounds = planMessageChunks(visible, chunkSize(scrollBox().clientHeight))
+  setChunks({ msgs: visible, bounds, sessionId, index: buildMsgIndex(visible) })
   msgWindow.reset(chunkSeeds(bounds))
   buildMsgNav(visible)
   if (visible.length === 0) showEmptyState()
@@ -163,10 +194,11 @@ export async function loadMessages(sessionId: string) {
       if (bubble) {
         // 推理恢复：切走期间的推理累积在切回时重建（与正文恢复同构，不丢失）
         if (run.reasoningAcc.trim()) {
-          run.reasoningEl = reasoningBlock()
-          const rb = run.reasoningEl.querySelector<HTMLElement>(".reasoning-body")
+          const think = reasoningBlock()
+          run.reasoningEl = think
+          const rb = think.querySelector<HTMLElement>(".reasoning-body")
           if (rb) rb.appendChild(markdownBlock(run.reasoningAcc.trim()))
-          bubble.prepend(run.reasoningEl)
+          bubble.prepend(think)
         } else {
           run.reasoningEl = null
         }
@@ -205,11 +237,7 @@ export async function loadMessages(sessionId: string) {
   }
   updateTitle()
   focusInput()
-  syncSendButton() // 按钮跟随当前会话：切到运行中的会话显示「停止」，空闲会话显示「发送」
-  // 排队条跟随当前会话重渲染（队列数据本就按会话隔离，缺此重渲时排队条停留旧会话内容、
-  // 后台队列事件触发重渲后又整体消失——切回会话的排队项不可见）
-  renderQueue()
-  updateMsgNav() // 段表就位后重算导航列
+  syncSessionScopedUi()
   // 滚动位置：离开时在阅读历史 → 按锚点恢复（窗口化按需挂载目标块后精确落位）；否则落底。
   // restoreScroll 同步按落位刷新锁定状态并使未决跟随回调（reset 排期的 rAF / lockToBottom
   // 启动的对齐保持循环）失效——直接赋值 scrollTop 会留下 following=true 的旧状态。
@@ -236,107 +264,74 @@ function chunkSize(viewportH: number): number {
 }
 
 /**
- * 渲染 [from, to) 区间的消息：普通消息、工具结果卡片、新会话折叠容器（按 runId 分组）、
- * subSession 存档（含嵌套）。liveRun 传入时恢复该运行的流式累积引用与容器——仅首批渲染传：
- * 在途内容只属于当前运行，历史补齐的旧运行不得覆盖 liveRun.subSessions（会顶掉在途流引用）。
+ * 渲染 [from, to) 区间的消息：普通消息、工具结果卡片、子会话入口行（过程与报告在观察面板）。
+ *
+ * 子会话相关消息在消息流里只产生一行入口：`subSession` 过程消息（旧版数据逐条落盘）与
+ * `subSessionArchive` 存档（新版挂在工具调用记录上）都登记进观察面板（subsessions.ts），
+ * 流里只留 `/🌿 子会话 · 名` 一行——历史回放与实时渲染同一形态，不因刷新就变成满屏过程。
  */
 function renderMessageRange(
   msgs: Array<import("@gebai/sdk").Message>,
   from: number,
   to: number,
   sessionId: string,
-  liveRun: ReturnType<typeof runs.get>,
+  _liveRun: ReturnType<typeof runs.get>,
 ): void {
-  // 子会话运行过程消息（subSession 标记）：按 runId 分组渲染进折叠容器（默认折叠，只显示输入与最终返回）。
-  // 旧版（agent_call 时代）独立存档消息为 subAgent/subAgentRunId/subAgentMeta 字段，兼容回放
-  let subRun: { runId: string; container: HTMLDetailsElement; body: HTMLElement; outputEl: HTMLElement; lastMsg?: import("@gebai/sdk").Message } | null = null
-  const closeSubRun = () => {
-    if (!subRun) return
-    // 结束判定：最后一条消息为无 toolCalls 的 assistant（有最终回复）→ 折叠显示返回；
-    // 无最终回复（中断/风暴终止）：任务仍在运行 → 保持执行中态；任务已结束 → 折叠显示「（无返回）」
-    const last = subRun.lastMsg
-    const hasFinal = last?.role === "assistant" && !last.toolCalls?.length
-    if (hasFinal) finishSubSession(subRun.container, subRun.outputEl, last!.content)
-    else if (runs.has(sessionId)) finishSubSession(subRun.container, subRun.outputEl, undefined)
-    else finishSubSession(subRun.container, subRun.outputEl, "")
-    subRun = null
+  // 同一区间内同一 runId 的入口只出一行：旧版数据的过程消息会连续多条
+  const shown = new Set<string>()
+  const entryFor = (runId: string, meta: { name?: string; model?: string; agents: string[]; state: string; status: "running" | "done" }) => {
+    if (shown.has(runId)) return
+    shown.add(runId)
+    subSessionEntry({ sessionId, runId, ...meta })
   }
   for (let i = from; i < to; i++) {
     const m = msgs[i]
     const isLegacy = (m as import("@gebai/sdk").Message).subAgent === true
     if (m.subSession || isLegacy) {
-      const runId = runIdOfMessage(m)
-      const agents = m.subSessionMeta?.agents ?? ((m as import("@gebai/sdk").Message).subAgentMeta?.agent ? [(m as import("@gebai/sdk").Message).subAgentMeta!.agent] : [])
-      const input = m.subSessionMeta?.input ?? (m as import("@gebai/sdk").Message).subAgentMeta?.input ?? (m.role === "user" ? m.content : "")
-      if (!subRun || runId !== subRun.runId) {
-        closeSubRun()
-        if (runId) {
-          // 任务运行中切回：重建容器并恢复 liveRun.subSessions 引用与切走期间累积的流式文本
-          const existing = liveRun?.subSessions?.get(runId)
-          const box = subSessionBox({ runId, agents, input })
-          if (liveRun) {
-            const reasoningAcc = existing?.reasoningAcc ?? ""
-            const acc = existing?.acc ?? ""
-            let streamEl: HTMLElement | null = null
-            let reasoningEl: HTMLElement | null = null
-            if (acc.trim() || reasoningAcc.trim()) {
-              streamEl = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true, box.body)
-              const bubble = streamEl.querySelector<HTMLElement>(".msg-body .bubble")
-              if (bubble) {
-                if (reasoningAcc.trim()) {
-                  reasoningEl = reasoningBlock()
-                  const rb = reasoningEl.querySelector<HTMLElement>(".reasoning-body")
-                  if (rb) rb.appendChild(markdownBlock(reasoningAcc.trim()))
-                  bubble.prepend(reasoningEl)
-                }
-                const textWrap = el("div", "msg-text")
-                textWrap.appendChild(markdownBlock(acc))
-                bubble.appendChild(textWrap)
-              }
-            }
-            liveRun.subSessions ??= new Map()
-            liveRun.subSessions.set(runId, {
-              runId,
-              agents,
-              input,
-              container: box.container,
-              body: box.body,
-              outputEl: box.outputEl,
-              acc,
-              el: streamEl,
-              messageId: existing?.messageId ?? "",
-              reasoningAcc,
-              reasoningEl,
-            })
-          }
-          subRun = { runId, container: box.container, body: box.body, outputEl: box.outputEl }
-        }
-      }
-      if (!subRun) continue
-      if (m.role === "user" && m.subSessionMeta) continue // 输入已随容器创建渲染（subSessionBox）
-      if (m.role === "user" && isLegacy && (m as import("@gebai/sdk").Message).subAgentMeta) continue
-      subRun.lastMsg = m
-      appendMsg(m, false, subRun.body)
-    } else {
-      closeSubRun()
-      // 子会话存档：subsession_run 工具调用记录扩展字段（subSessionArchive）→ 先渲染折叠容器（含嵌套递归），
-      // 再渲染工具结果卡片（subsession_run 输出为 markdown）；旧版 subAgentRun 字段兼容回放
-      if (m.subSessionArchive) renderSubSessionArchive(m.subSessionArchive)
-      else if ((m as import("@gebai/sdk").Message).subAgentRun) renderLegacySubAgentArchive((m as import("@gebai/sdk").Message).subAgentRun!)
-      appendMsg(m)
+      // 旧版数据：过程消息逐条落盘，登记进面板的过程区（懒渲染）
+      const runId = runIdOfMessage(m) ?? ""
+      if (!runId) continue
+      const legacyMeta = (m as import("@gebai/sdk").Message).subAgentMeta
+      const rec = appendArchiveMessage(sessionId, runId, {
+        name: legacyMeta?.agent,
+        agents: m.subSessionMeta?.agents ?? (legacyMeta?.agent ? [legacyMeta.agent] : []),
+        input: m.subSessionMeta?.input ?? legacyMeta?.input,
+      }, { role: m.role as "user" | "assistant" | "tool", name: m.name, content: m.content, toolCalls: m.toolCalls, arguments: m.arguments })
+      if (m.role === "user" && (m.subSessionMeta || legacyMeta)) continue // 输入已在面板标题区展示
+      entryFor(runId, { name: rec.name, model: rec.model, agents: rec.agents, state: rec.stateText, status: rec.status })
+      continue
     }
+    // 子会话合入消息（role=user + engineNote=subsession + subSessionMerged）：把阶段性合入认回面板记录，
+    // 否则刷新后面板就只剩「最终报告」（合入次数与各阶段全文只在实时路径里）
+    if (m.subSessionMerged) mergeFromMessage(sessionId, m.subSessionMerged, String(m.content ?? ""))
+    // 存档（新版：subsession_run 工具调用记录扩展字段；旧版：subAgentRun）→ 登记进面板 + 一行入口
+    const archive = m.subSessionArchive ?? (m as import("@gebai/sdk").Message).subAgentRun
+    if (archive) {
+      const rec = registerArchive(sessionId, archive as import("@gebai/sdk").SubSessionArchive)
+      entryFor(rec.runId, { name: rec.name, model: rec.model, agents: rec.agents, state: rec.stateText, status: rec.status })
+    }
+    // 工具结果卡片（subsession_run 的输出为 markdown）照常渲染
+    if (!(archive && m.role === "tool")) appendMsg(m)
   }
-  closeSubRun()
 }
 
 /* ---------- 窗口化块表与导航装配 ---------- */
 
-/** 当前会话的消息清单与块表（块渲染与导航定位的依据；加载会话时重建）。 */
-let chunks: { msgs: Array<import("@gebai/sdk").Message>; bounds: number[]; sessionId: string; index: Map<string, number> } | null = null
+/** 当前会话的消息清单与块表：存在**活动 pane 上**（不只存一份全局）——缓存的容器切回时
+ *  靠它重建历史块，否则窗口化拿不到属于该会话的消息（表现为“切回去是空白”）。 */
+function chunksOf(pane: MsgPane | null = activePane()): PaneChunks | null {
+  return pane?.chunks ?? null
+}
+
+/** 写入当前会话的块表（加载完成后调用）。 */
+function setChunks(next: PaneChunks | null): void {
+  const pane = activePane()
+  if (pane) pane.chunks = next
+}
 
 /** 清空消息列并丢弃块表（会话切换 / 空白页 / 登出）。 */
 export function resetMsgWindow(): void {
-  chunks = null
+  setChunks(null)
   msgWindow.reset([])
 }
 
@@ -379,7 +374,8 @@ function chunkOfMsg(bounds: number[], index: number): number {
 /** 渲染一块消息到 host（窗口化按需调用）。只有末尾块承载在途运行的流式引用——切走期间累积的
  *  文本在切回时重建；历史块不得覆盖 liveRun 的在途引用。 */
 function renderChunk(index: number, host: HTMLElement): void {
-  const t = chunks
+  const pane = activePane()
+  const t = chunksOf(pane)
   if (!t) return
   const from = t.bounds[index]
   const to = t.bounds[index + 1]
@@ -418,13 +414,20 @@ function buildMsgNav(msgs: Array<import("@gebai/sdk").Message>): void {
   setMsgNavSegs(segs)
 }
 
+/** 活动会话的滚动容器（pane）：消息列几何一律以它为准（宿主 #messages 本身不滚动）。
+ *  无 pane（草稿页）时回退宿主——其 scrollHeight 为 0，各几何计算自然空转。 */
+function scrollBox(): HTMLElement {
+  return activePane()?.container ?? msgEl
+}
+
 /** 段位置（屏幕坐标）：已挂载消息取实时几何，未挂载的按块坐标 + 块内比例估算——导航列只作示意，
  *  跳转落位仍按目标元素精确对齐（见 jumpToMsg）。 */
 function locateMsg(key: string): number | null {
   const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(key) : key
-  const node = msgEl.querySelector<HTMLElement>(`[data-msg-id="${escaped}"]`)
+  const box = scrollBox()
+  const node = box.querySelector<HTMLElement>(`[data-msg-id="${escaped}"]`)
   if (node && node.isConnected) return node.getBoundingClientRect().top
-  const t = chunks
+  const t = chunksOf()
   if (!t) return null
   const i = t.index.get(key)
   if (i === undefined) return null
@@ -434,20 +437,21 @@ function locateMsg(key: string): number | null {
   const height = msgWindow.heightOfKey(blockKey)
   if (top === null || height === null) return null
   const ratio = (i - t.bounds[b]) / Math.max(1, t.bounds[b + 1] - t.bounds[b])
-  return msgEl.getBoundingClientRect().top + msgWindow.contentTop() + top + ratio * height - msgEl.scrollTop
+  return box.getBoundingClientRect().top + msgWindow.contentTop() + top + ratio * height - box.scrollTop
 }
 
 /** 跳转到某条消息：窗口化把其所在块就位（按需挂载），元素挂载后按真实几何精确对齐。
  *  运行期新增的消息（在本会话加载之后到达，挂在尾部活动区、不在块表内）直接对已挂载节点落位。 */
 function jumpToMsg(key: string): void {
   const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(key) : key
-  const mounted = msgEl.querySelector<HTMLElement>(`[data-msg-id="${escaped}"]`)
-  const t = chunks
+  const box = scrollBox()
+  const mounted = box.querySelector<HTMLElement>(`[data-msg-id="${escaped}"]`)
+  const t = chunksOf()
   const i = t?.index.get(key)
   if (i === undefined || !t) {
     if (mounted && mounted.isConnected) {
-      const delta = mounted.getBoundingClientRect().top - msgEl.getBoundingClientRect().top
-      msgEl.scrollTop = Math.max(0, msgEl.scrollTop + delta - 12)
+      const delta = mounted.getBoundingClientRect().top - box.getBoundingClientRect().top
+      box.scrollTop = Math.max(0, box.scrollTop + delta - 12)
     }
     return
   }
@@ -455,12 +459,16 @@ function jumpToMsg(key: string): void {
   const ratio = (i - t.bounds[b]) / Math.max(1, t.bounds[b + 1] - t.bounds[b])
   msgWindow.scrollToAnchor(chunkKey(b), (msgWindow.heightOfKey(chunkKey(b)) ?? 0) * ratio)
   if (mounted && mounted.isConnected) {
-    const delta = mounted.getBoundingClientRect().top - msgEl.getBoundingClientRect().top
-    msgEl.scrollTop = Math.max(0, msgEl.scrollTop + delta - 12)
+    const delta = mounted.getBoundingClientRect().top - box.getBoundingClientRect().top
+    box.scrollTop = Math.max(0, box.scrollTop + delta - 12)
   }
 }
 
-setBlockRenderer(renderChunk)
+setBlockRenderer((pane, index, host) => {
+  // 块渲染用**该 pane 自己的**块表：缓存过的容器重新显示时，历史块要靠它重建
+  if (!pane.chunks || pane.chunks.sessionId !== pane.sessionId) return
+  renderChunk(index, host)
+})
 setMsgNavLocator(locateMsg)
 setMsgNavJumper(jumpToMsg)
 
@@ -780,6 +788,45 @@ function liOf(target: EventTarget | null): HTMLElement | null {
   return ((target as HTMLElement | null)?.closest?.("li[data-sid], li.session-group") ?? null) as HTMLElement | null
 }
 
+/**
+ * 切到已持有容器的会话：**纯显隐切换**（不重拉、不重建 DOM）。
+ * 容器里已是这个会话的完整内容（含后台期间到达的工具卡与正文），切回只需：激活显隐 →
+ * 恢复该会话的块表与导航段 → 按锚点恢复阅读位置 → 刷新标题/按钮/队列等跟会话联动的 UI。
+ * 返回是否走了快速路径（false = 调用方照旧走 loadMessages）。
+ */
+async function activatePaneFast(sid: string): Promise<boolean> {
+  const pane = paneOf(sid)
+  if (!pane) return false
+  activatePane(sid) // 显隐 + 几何重绑，并成为活动 pane（下面所有转发都指向它）
+  restoreSessionViewState(sid)
+  // 导航段表是本会话专属的：切走时已被其他会话重建，这里按该 pane 的消息清单重立
+  //（没有它则导航列停在上一个会话的位置或不显示）
+  const t = pane.chunks
+  if (t) buildMsgNav(t.msgs)
+  else clearMsgNav()
+  const mem = scrollMemory.get(sid)
+  if (mem) {
+    stopFollowing()
+    const top = pane.virtualizer.scrollToAnchor(mem.key, mem.offset)
+    if (top !== null) restoreScroll(top)
+  } else {
+    // 先声明「追最新」意图，再由 sync 完成落底：sync 在 keepBottom 时会把窗口开在末尾、
+    // 更新 spacer，并用实测高度把 scrollTop 钉到底（只需一步，不来回掰）。
+    // 反过来先 sync 再锁底会把窗口开在旧 scrollTop 上（缓存页残留位置），
+    // 随后重挂一轮 spacer 变动→位置被掰动，这就是切回时抖几下的来源。
+    lockToBottom()
+    pane.virtualizer.sync()
+  }
+  // 随会话变化的 UI（标题/按钮/排队条/审批卡/导航列/子会话角标/列表高亮）
+  // 统一走这一入口：不再每处各自手写一遍（手写就会漏）
+  syncSessionScopedUi()
+  focusInput()
+  // 运行中的会话：容器里已有实时流（本页发起的），无需重新附加；
+  // 若本页未接管（别处发起/刷新后）则由 runningAttachHook 补接管
+  void runningAttachHook?.(sid)
+  return true
+}
+
 /** 切换会话（列表委托分发；原逐行 click 主体）。 */
 async function activateSession(sid: string): Promise<void> {
   if (batchMode) {
@@ -795,12 +842,21 @@ async function activateSession(sid: string): Promise<void> {
   const s = (lastSessions ?? []).find((x) => x.id === sid)
   if (!s) return
   const prev = getCurrentSession()
+  // 切走：记下离场时的视图状态与滚动锚点（下次切回同位置）
   if (prev) saveSessionViewState(prev.id)
   setCurrentSession(s)
   try {
+    // 快速路径：目标会话已持有容器（后台运行中，或已停止但在 LRU 缓存里）——直接显隐切换
+    if (await activatePaneFast(sid)) {
+      // 切换完成后再回收：保留最近用过的若干个已停止容器，超出上限的才释放
+      reapIdlePanes()
+      return
+    }
+    // 常规路径（从没打开过、已被 LRU 挤出）：从服务端加载一次
     await refreshSessions()
     await loadMessages(sid)
     restoreSessionViewState(sid)
+    reapIdlePanes()
   } catch (err) {
     // 切换失败（网络抖动等）：回滚当前会话标记并提示，视图保持旧会话，避免状态不一致
     toast(`切换失败: ${(err as Error).message}`, "error")
@@ -1158,6 +1214,7 @@ export function enterDraftView(): void {
   setCurrentSession(null)
   aside.classList.remove("open")
   sidebarBackdropEl.hidden = true
+  deactivatePane() // 草稿页不属于任何会话：隐藏全部会话视图（容器与后台内容保留）
   resetMsgWindow()
   clearMsgNav()
   clearUnread()
@@ -1167,9 +1224,8 @@ export function enterDraftView(): void {
   autosize()
   setPendingFiles([])
   renderAttachments()
-  renderQueue() // 排队条随会话视图隐藏
-  updateTitle()
-  syncSendButton()
+  // 随会话变化的 UI（无当前会话→各项回到空态）统一走同一入口
+  syncSessionScopedUi()
   focusInput()
 }
 

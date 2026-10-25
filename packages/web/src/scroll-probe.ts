@@ -12,6 +12,16 @@
  */
 
 import { msgEl } from "./state"
+import { activePane, onPaneActivate } from "./msg-panes"
+
+/**
+ * 被探的滚动容器：消息列按会话分容器后，**滚动的是活动 pane 的容器**，不是宿主 #messages。
+ * 探针必须在活动容器上拦 scrollTop 写入与 scroll 事件，否则装在宿主上什么都采不到
+ * （宿主 overflow:hidden，scrollTop 恒为 0）。pane 切换时自动改挂。
+ */
+function targetEl(): HTMLElement {
+  return activePane()?.container ?? msgEl
+}
 
 const KEY = "gebai.ui.scrollProbe"
 /** 记录条数上限（滚动事件密集，超出丢最旧）。 */
@@ -51,7 +61,7 @@ interface ProbeEntry {
 }
 
 /** 采集一次现场快照（不含写入，公开供测试与手动取样）。 */
-export function probeSnapshot(c: HTMLElement = msgEl): ProbeEntry {
+export function probeSnapshot(c: HTMLElement = targetEl()): ProbeEntry {
   const kids = Array.from(c.children)
   const spacer = kids.filter((n) => n.classList.contains("vz-spacer"))
   const rect = c.getBoundingClientRect()
@@ -75,20 +85,21 @@ let installed = false
 let entries: ProbeEntry[] = []
 let timer: ReturnType<typeof setInterval> | null = null
 let patched: { el: HTMLElement; set: (v: number) => void; original: PropertyDescriptor } | null = null
+/** 已挂监听器的容器（pane 切换时要摘旧挂新）。 */
+let listenEl: HTMLElement | null = null
 
-/** 安装探针（幂等；调用方按 isScrollProbeEnabled 决定是否调用）。 */
-export function installScrollProbe(): boolean {
-  if (installed) return false
-  const c = msgEl
-  if (!c) return false
-  installed = true
-  entries = []
-
-  const push = (e: ProbeEntry) => {
-    entries.push(e)
-    if (entries.length > SCROLL_PROBE_MAX) entries.shift()
+/** 把拦截与监听挂到指定容器（幂等：已是它则 no-op）。 */
+function attachTo(c: HTMLElement): void {
+  if (patched?.el === c) return
+  // 先摘旧
+  if (patched) {
+    Object.defineProperty(patched.el, "scrollTop", patched.original)
+    patched = null
   }
-
+  if (listenEl && listenEl !== c) {
+    listenEl.removeEventListener("scroll", onScrollEvent)
+    listenEl = null
+  }
   const desc = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop")
   if (desc?.get && desc.set) {
     Object.defineProperty(c, "scrollTop", {
@@ -105,15 +116,38 @@ export function installScrollProbe(): boolean {
         } catch {
           /* 栈不可用：只记数值 */
         }
-        push({ t: Math.round(performance.now()), why: "WRITE", v: Math.round(v), src })
+        pushEntry({ t: Math.round(performance.now()), why: "WRITE", v: Math.round(v), src })
         return desc.set!.call(c, v)
       },
     })
     patched = { el: c, set: desc.set as (v: number) => void, original: desc }
   }
+  if (listenEl !== c) {
+    c.addEventListener("scroll", onScrollEvent, { passive: true })
+    listenEl = c
+  }
+}
 
-  c.addEventListener("scroll", () => push({ ...probeSnapshot(c), why: "scroll" }), { passive: true })
-  timer = setInterval(() => push(probeSnapshot(c)), SCROLL_PROBE_TICK_MS)
+function pushEntry(e: ProbeEntry): void {
+  entries.push(e)
+  if (entries.length > SCROLL_PROBE_MAX) entries.shift()
+}
+
+function onScrollEvent(): void {
+  pushEntry({ ...probeSnapshot(targetEl()), why: "scroll" })
+}
+
+/** 安装探针（幂等；调用方按 isScrollProbeEnabled 决定是否调用）。 */
+export function installScrollProbe(): boolean {
+  if (installed) return false
+  installed = true
+  entries = []
+  const push = pushEntry
+  attachTo(targetEl())
+  onPaneActivate(() => {
+    if (installed) attachTo(targetEl())
+  })
+  timer = setInterval(() => push(probeSnapshot()), SCROLL_PROBE_TICK_MS)
 
   const w = window as unknown as Record<string, unknown>
   w.__gbScrollProbe = () => {
@@ -150,6 +184,10 @@ export function uninstallScrollProbe(): void {
   if (patched) {
     Object.defineProperty(patched.el, "scrollTop", patched.original)
     patched = null
+  }
+  if (listenEl) {
+    listenEl.removeEventListener("scroll", onScrollEvent)
+    listenEl = null
   }
   const w = window as unknown as Record<string, unknown>
   delete w.__gbScrollProbe

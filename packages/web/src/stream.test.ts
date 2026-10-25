@@ -12,7 +12,9 @@ mock.module("dompurify", () => ({ default: { sanitize: (s: unknown) => s } }))
 // mock 就位后动态加载被测模块
 const { consumeTaskStream } = await import("./stream")
 const stateMod = await import("./state")
+const panesMod = await import("./msg-panes")
 const { runs, setCurrentSession } = stateMod
+const { paneCount, paneOf, resetPanes } = panesMod
 // 合跑时其他测试文件先加载 state.ts（模块单例）：其 mock 的共享 base 对象可能缺表单字段，
 // 防御性补齐 consumeTaskStream 收尾链路（composer.syncSendButton）读取的 value——
 // 不补时 input.value.trim() 报 TypeError（本文件后于 markdown/messages.test.ts 加载时）
@@ -42,6 +44,7 @@ async function runChunks(sessionId: string, chunks: ChatChunk[]): Promise<{ acc:
 afterEach(() => {
   runs.clear()
   setCurrentSession(null)
+  resetPanes()
 })
 
 describe("consumeTaskStream 主循环轮界（后台会话多轮回复不并入同一累积）", () => {
@@ -82,5 +85,38 @@ describe("consumeTaskStream 主循环轮界（后台会话多轮回复不并入�
       { kind: "done" },
     ])
     expect(snap.acc).toBe("重放文本")
+  })
+})
+
+describe("后台会话的 DOM 维护（切回即所见即所得）", () => {
+  test("后台运行的会话同样建容器并渲染正文（不再只累积）", async () => {
+    setCurrentSession({ id: "other" } as never) // 目标会话 s1 在后台
+    let paneDuringRun: unknown = null
+    await consumeTaskStream("s1", () =>
+      (async function* () {
+        yield text("后台回答", "m1")
+        paneDuringRun = paneOf("s1")
+        yield { kind: "done" }
+      })(),
+    )
+    // 运行期间就有自己的容器（不是只累积待切回重建）
+    expect(paneDuringRun).toBeTruthy()
+  })
+
+  test("任务结束容器降为可回收（仍在看则保留、切走后可释放）", async () => {
+    setCurrentSession({ id: "other" } as never)
+    await runChunks("s1", [text("回答", "m1"), { kind: "done" }])
+    const pane = paneOf("s1")
+    expect(pane).toBeTruthy()
+    expect(pane!.running).toBe(false) // 已降为可回收（不再是运行态锁定）
+  })
+
+  test("两个会话可同时持有各自己的容器（互不顶掉）", async () => {
+    setCurrentSession({ id: "other" } as never)
+    await runChunks("s1", [text("甲", "m1"), { kind: "done" }])
+    await runChunks("s2", [text("乙", "m2"), { kind: "done" }])
+    expect(paneOf("s1")).toBeTruthy()
+    expect(paneOf("s2")).toBeTruthy()
+    expect(paneCount()).toBeGreaterThanOrEqual(2)
   })
 })

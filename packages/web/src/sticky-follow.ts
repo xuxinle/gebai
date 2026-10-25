@@ -25,6 +25,13 @@ const UP_INTENT_GRACE_MS = 120
 const TOUCH_SLOP = 8
 /** 明确向上的滚动键（立即解除跟随；向下键不解除，由「向下滚到底」恢复）。 */
 const UP_KEYS = new Set(["ArrowUp", "PageUp", "Home"])
+/** 无高度变化的连续帧数上限：内容高度连续这么多帧没变就认为已稳定，停止续查。
+ *  对齐保持预算（keepFrames）本为「异步长高后继续滚回底部」准备，而每帧都要读
+ *  scrollHeight/clientHeight——布局 dirty 时这些读取就是强制重排。无条件跑满预算会在
+ *  切换会话 / 点击发送后占着主线程几秒，后续滚动与点击抢不到帧（体感：不跟手）。
+ *  真正长高时 ResizeObserver / MutationObserver 会再次触发 contentChanged 重开循环，
+ *  提前停不会漏掉图片/图表的异步修正。 */
+const KEEP_IDLE_FRAMES = 4
 
 export type { FollowState }
 
@@ -148,6 +155,9 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
 
   let keepAligning = false
   let keepFrames = 0
+  /** 上一帧的内容高度：连续 KEEP_IDLE_FRAMES 帧不变即判稳定停转（防空转占主线程）。 */
+  let lastKeepHeight = -1
+  let idleFrames = 0
   function noteActivity() {
     keepFrames = 0
     if (keepAligning || !keepBudget) return
@@ -158,13 +168,23 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
     keepAligning = false
     if (!canPin()) return
     // 几何不可用（NaN：未布局元素/测试替身）无从对齐，停转防死循环
-    const distance = el.scrollHeight - el.scrollTop - el.clientHeight
+    const height = el.scrollHeight
+    const distance = height - el.scrollTop - el.clientHeight
     if (!Number.isFinite(distance)) return
     // 距底超过容忍区且超出用户自己留下的位移 → 异步高度修正把它推远了，按偏移续滚回位
     if (distance > threshold && distance > followOffset + 1) {
       pin()
       keepFrames = 0
+      idleFrames = 0
+    } else if (height === lastKeepHeight && distance <= threshold) {
+      // 高度未变 **且已在容忍区内**才算真正稳定：切回会话时 spacer 逐帧修正，
+      // 只看「高度没变」会在两次修正之间误判稳定而提前停转，之后高度再变就没人续滚
+      // （位置被钳开→跟随核心再拉回，来回几下就是切换时的抖动）
+      if (++idleFrames >= KEEP_IDLE_FRAMES) return
+    } else {
+      idleFrames = 0
     }
+    lastKeepHeight = height
     keepFrames++
     if (keepFrames < keepBudget) {
       keepAligning = true

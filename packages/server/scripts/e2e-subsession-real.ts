@@ -97,10 +97,10 @@ try {
   const root = await fetch(`${base}/`).catch(() => null)
   const html = root ? await root.text() : ""
   check("前端页面可访问（UI 验证前置）", !!root?.ok && html.includes("<html"), `status=${root?.status ?? "ERR"}`)
-  // 前端产物为新版（子会话容器类名/dist 已重建）——避免“后端新版 + 前端旧版”的错位验证
+  // 前端产物为新版（子会话单行入口 / 观察面板类名已进 dist）——避免“后端新版 + 前端旧版”的错位验证
   const mainAsset = html.match(/assets\/(main-[^"]+\.js)/)?.[1]
   const bundle = mainAsset ? await (await fetch(`${base}/assets/${mainAsset}`)).text().catch(() => "") : ""
-  check("前端产物含子会话容器（subsession-run）", bundle.includes("subsession-run"), mainAsset ?? "未匹配到主产物")
+  check("前端产物含子会话入口与观察面板类名", bundle.includes("subsession-entry") && bundle.includes("subsessions-panel"), mainAsset ?? "未匹配到主产物")
 
   // 会话消息经协议读取（REST/WS），不依赖实例的 GEBAI_HOME 布局——自起与外部两种模式通用
   const loadMsgs = async (sid: string): Promise<StoredMsg[]> => {

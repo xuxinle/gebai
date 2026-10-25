@@ -3,12 +3,25 @@ import type { ContentBlock, DiagramFormat, TodoItem } from "@gebai/sdk"
 import { addApproval } from "./approvals"
 import { capturePage } from "./capture"
 import { noteIncoming } from "./jump-bottom"
-import { appendCompactNotice, compactNoticeTitle, appendMsg, appendToolResult, appendTodoCard, renderChoiceCard, renderEnvRequestCard, scrollSessionSticky, sealBlockResultSegment, sealSegment, sealSessionSegment } from "./messages"
+import { appendCompactNotice, compactNoticeTitle, appendMsg, appendToolResult, appendTodoCard, renderChoiceCard, renderEnvRequestCard, scrollSessionSticky, sealBlockResultSegment, sealRunSegment, sealSegment, withPane } from "./messages"
 import { isBlockOnly, shortToolName } from "./tool-cards"
 import { renderDiagramSvg } from "./diagram"
 import { client, getCurrentSession, pendingTools, pendingToolsKey, runs, todoState } from "./state"
+import { ensureProcessArea, noteToolCall } from "./subsessions"
+import { paneOf, type MsgPane } from "./msg-panes"
 import { uuid } from "./uuid"
 
+/**
+ * 事件该渲染到哪个会话容器：
+ * - `undefined`：不渲染（会话未运行且已切走——它没有容器，切回时由 loadMessages 从历史重建）
+ * - `MsgPane`：该会话自己的容器（运行中会话，含后台的那个）
+ * - `null`：当前会话但容器尚未建立（极短的启动竞态）——按默认路径渲染
+ */
+function paneForRender(sessionId: string): MsgPane | null | undefined {
+  const pane = paneOf(sessionId)
+  if (pane) return pane
+  return getCurrentSession()?.id === sessionId ? null : undefined
+}
 
 /** 交互等待（选择/填值/画图/捕获）期间刷新流活跃时间：这类事件不产生 ChatChunk，
  *  空闲超时兜底只应按「无任何数据」判定，不应误杀等待用户回应的挂起。 */
@@ -76,9 +89,14 @@ export function onCaptureRequest(ev: { sessionId: string; captureId: string; ful
   })()
 }
 export function onToolCall(ev: { sessionId: string; toolCallId: string; name: string; arguments?: Record<string, unknown>; subSessionId?: string }) {
-  // 工具事件只渲染当前显示的会话；切走的会话由 loadMessages 兜底（服务端已持久化）
-  const cur = getCurrentSession()
-  if (ev.sessionId !== cur?.id) return
+  // 工具体事件渲染到该会话**自己的**容器（pane）：运行中会话（包括已切走的）都持续维护 DOM，
+  // 切回即所见即所得；非运行会话无 pane（paneForRender 返回 null），保持旧行为（由 loadMessages 兜底）
+  const pane = paneForRender(ev.sessionId)
+  if (pane === undefined) return
+  return withPane(pane ?? null, () => renderToolCall(ev))
+}
+
+function renderToolCall(ev: { sessionId: string; toolCallId: string; name: string; arguments?: Record<string, unknown>; subSessionId?: string }) {
   const runId = ev.subSessionId
   const short = shortToolName(String(ev.name ?? ""))
   const argsObj = ev.arguments as Record<string, unknown> | undefined
@@ -94,13 +112,12 @@ export function onToolCall(ev: { sessionId: string; toolCallId: string; name: st
     if (!prompt && !options.length) return
     noteIncoming()
     const askArgs = { prompt, options, multi }
-    // 子会话运行过程内的调用：记录卡渲染进该 run 的折叠容器
+    // 子会话运行过程内的调用：记录卡渲染进该 run 的过程区（观察面板）
     if (runId) {
-      const sub = runs.get(ev.sessionId)?.subSessions?.get(runId)
-      if (!sub?.container.isConnected) return
-      sealSessionSegment(sub) // 容器内文本分段：问答记录卡处截断当前文本段
+      const area = ensureProcessArea(ev.sessionId, runId)
+      sealRunSegment(ev.sessionId, runId)
       pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId, runId), { session: ev.sessionId, kind: "ask_choice", runId, askArgs })
-      scrollSessionSticky(sub.body)
+      scrollSessionSticky(area)
       return
     }
     sealSegment(ev.sessionId) // 文本分段：问答记录卡处截断当前文本段
@@ -116,11 +133,10 @@ export function onToolCall(ev: { sessionId: string; toolCallId: string; name: st
     if (!title) return
     noteIncoming()
     if (runId) {
-      const sub = runs.get(ev.sessionId)?.subSessions?.get(runId)
-      if (!sub?.container.isConnected) return
-      sealSessionSegment(sub) // 容器内文本分段：后续计划卡处截断当前文本段
+      const area = ensureProcessArea(ev.sessionId, runId)
+      sealRunSegment(ev.sessionId, runId)
       pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId, runId), { session: ev.sessionId, kind: "ask_plan", runId, planArgs: args })
-      scrollSessionSticky(sub.body)
+      scrollSessionSticky(area)
       return
     }
     sealSegment(ev.sessionId) // 文本分段：后续计划卡处截断当前文本段
@@ -129,24 +145,24 @@ export function onToolCall(ev: { sessionId: string; toolCallId: string; name: st
   }
   if (isBlockOnly(String(ev.name ?? ""))) return
   noteIncoming()
-  // 子会话运行过程内的工具调用：渲染进该 run 的折叠容器（容器缺失=切走场景，由 loadMessages 兜底）
+  // 子会话运行过程内的工具调用：渲染进该 run 的过程区（观察面板）
   if (runId) {
-    const sub = runs.get(ev.sessionId)?.subSessions?.get(runId)
-    if (!sub?.container.isConnected) return
-    sealSessionSegment(sub) // 容器内文本分段：工具调用处截断当前文本段
+    const area = ensureProcessArea(ev.sessionId, runId)
+    sealRunSegment(ev.sessionId, runId)
+    noteToolCall(ev.sessionId, runId)
     if (short === "todo") {
-      const wrapper = appendTodoCard(ev.sessionId, sub.body)
+      const wrapper = appendTodoCard(ev.sessionId, area)
       const body = wrapper.querySelector<HTMLElement>(".msg-body")
       if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId, runId), { wrapper, body, session: ev.sessionId, kind: "todo", runId })
-      scrollSessionSticky(sub.body)
+      scrollSessionSticky(area)
       return
     }
     // 调用即建卡（无参数仅头部）：参数先展示、结果到达后追加，不在执行完成后一并出现
     const args = argsObj && Object.keys(argsObj).length > 0 ? JSON.stringify(argsObj, null, 2) : ""
-    const wrapper = appendMsg({ id: uuid(), role: "tool", content: args ? `→ ${ev.name} ${args}` : `→ ${ev.name}`, createdAt: Date.now() }, false, sub.body)
+    const wrapper = appendMsg({ id: uuid(), role: "tool", content: args ? `→ ${ev.name} ${args}` : `→ ${ev.name}`, createdAt: Date.now() }, false, area)
     const body = wrapper.querySelector<HTMLElement>(".msg-body")
     if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId, runId), { wrapper, body, session: ev.sessionId, kind: "tool", name: String(ev.name ?? ""), argsText: args, runId })
-    scrollSessionSticky(sub.body)
+    scrollSessionSticky(area)
     return
   }
   sealSegment(ev.sessionId) // 文本分段：工具调用处截断当前文本段
@@ -164,13 +180,17 @@ export function onToolCall(ev: { sessionId: string; toolCallId: string; name: st
   if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId), { wrapper, body, session: ev.sessionId, kind: "tool", name: String(ev.name ?? ""), argsText: args })
 }
 export function onToolResult(ev: { sessionId: string; toolCallId: string; name: string; output: string; blocks?: ContentBlock[]; subSessionId?: string }) {
-  const cur = getCurrentSession()
-  if (ev.sessionId !== cur?.id) {
-    // 切走会话时结果不渲染，但配对必须清理：残留会让切回时 loadMessages 按「未完成配对」
-    // 重建等待卡，与历史渲染的已完成工具卡重复且永不更新
+  const pane = paneForRender(ev.sessionId)
+  if (pane === undefined) {
+    // 无容器的会话（未运行且已切走）：不渲染，但配对必须清理：残留会让下次 loadMessages
+    // 按「未完成配对」重建等待卡，与历史渲染的已完成工具卡重复且永不更新
     if (ev.toolCallId) pendingTools.delete(pendingToolsKey(ev.sessionId, ev.toolCallId, ev.subSessionId))
     return
   }
+  return withPane(pane ?? null, () => renderToolResult(ev))
+}
+
+function renderToolResult(ev: { sessionId: string; toolCallId: string; name: string; output: string; blocks?: ContentBlock[]; subSessionId?: string }) {
   const name = String(ev.name ?? "tool")
   noteIncoming()
   const blocks = ev.blocks as ContentBlock[] | undefined
@@ -178,17 +198,16 @@ export function onToolResult(ev: { sessionId: string; toolCallId: string; name: 
     // show/diff 等（card.args="block"）：不显示工具卡片，appendMsg 只渲染内容块（渲染失败/能力受限时显示输出文本）；
     // 追加前封存当前文本段——图表卡片独立展示，画图后的输出另起新卡片（防输出追加到图上方同一张卡片）
     const runId = ev.subSessionId
-    const parent = runId ? runs.get(ev.sessionId)?.subSessions?.get(runId)?.body : undefined
+    const parent = runId ? ensureProcessArea(ev.sessionId, runId) : undefined
     sealBlockResultSegment(ev.sessionId, runId)
     appendMsg({ id: uuid(), role: "tool", name, content: String(ev.output ?? ""), blocks, createdAt: Date.now() }, false, parent)
     return
   }
   const runId = ev.subSessionId
-  const sub = runId ? runs.get(ev.sessionId)?.subSessions?.get(runId) : undefined
-  const parent = sub?.body
+  const area = runId ? ensureProcessArea(ev.sessionId, runId) : undefined
   // ask 选项询问分支：更新消息流中的问答卡片（头部完成态 + 回答；无配对时兜底独立结果消息）
-  appendToolResult(ev.sessionId, ev.toolCallId, name, String(ev.output ?? ""), blocks, runId, parent)
-  if (sub) scrollSessionSticky(sub.body)
+  appendToolResult(ev.sessionId, ev.toolCallId, name, String(ev.output ?? ""), blocks, runId, area)
+  if (area) scrollSessionSticky(area)
 }
 export function onMessageCompact(ev: { sessionId: string; count: number; summary: string; degraded?: string }) {
   // 上下文压缩 / 溢出护栏降级通知（自动/主动压缩与护栏降级共用本事件；degraded 标识护栏降级类型）
