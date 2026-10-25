@@ -1413,18 +1413,68 @@ auto ease_out_back(float t) -> float {
 
 void set_trajectory_sink(std::vector<ElementTrack>* sink) { trajectory_cell().sink = sink; }
 
+/// 把 `layout` 产出的 `shapes` 汇总成一句可判断的结论（`CAIYUN_SHAPES_DEBUG=1`）。
+///
+/// ## 为什么需要它
+///
+/// 「改了 layout 脚本，画面一字不变」是这一类片最容易撞的坑，而它的可能原因
+/// **有四种、症状完全相同**（都不报错）：
+///   ① 脚本没装载（`engine.loaded()==false`）；
+///   ② 装载了但 `shapes` 为空（layout 里某个分支没进）；
+///   ③ 有图元，但**坐标在画布外**（相机把它推出去了，实测 `x=-1019040`）；
+///   ④ 有图元、也在画布内，但**被后 push 的图元整片盖住**。
+///
+/// 只看「画面对不对」分不出是哪一种；只有把 `shapes` 的**包围盒、越界数、
+/// 按 kind 的分布**同时打出来，才能一眼定位。实测：靠这份输出从五轮试错
+/// 收敛到一次定位。
+///
+/// ## 判定口径
+///
+/// `in_view` 用 0..960/0..540 的**物理像素**范围（`paint_script_shapes` 收的就是
+/// 屏幕像素，见那里的坐标系契约），给的是中心点落在画布内的图元数。
+void report_script_shapes(bool loaded, const std::vector<ScriptShape>& shapes) {
+  st::print("[shapes] loaded={} count={}\n", loaded, shapes.size());
+  if (shapes.empty()) return;
+
+  double min_x = 1e18, min_y = 1e18, max_x = -1e18, max_y = -1e18;
+  std::size_t in_view = 0;
+  std::size_t invisible = 0;              // alpha 太低，画了也看不见
+  std::array<std::size_t, 8> by_kind{};
+  for (const ScriptShape& s : shapes) {
+    min_x = std::min(min_x, static_cast<double>(s.x));
+    min_y = std::min(min_y, static_cast<double>(s.y));
+    max_x = std::max(max_x, static_cast<double>(s.x) + static_cast<double>(s.w));
+    max_y = std::max(max_y, static_cast<double>(s.y) + static_cast<double>(s.h));
+    const double cx = static_cast<double>(s.x) + static_cast<double>(s.w) * 0.5;
+    const double cy = static_cast<double>(s.y) + static_cast<double>(s.h) * 0.5;
+    if (cx >= 0.0 && cx <= 960.0 * 2.0 && cy >= 0.0 && cy <= 540.0 * 2.0) ++in_view;
+    if (s.color.a <= 3U) ++invisible;
+    if (s.kind >= 0 && static_cast<std::size_t>(s.kind) < by_kind.size()) {
+      ++by_kind[static_cast<std::size_t>(s.kind)];
+    }
+  }
+  st::print("[shapes] bbox=({:.0f},{:.0f})-({:.0f},{:.0f})  in_view={}/{}  alpha~0={}\n",
+            min_x, min_y, max_x, max_y, in_view, shapes.size(), invisible);
+  st::print("[shapes] kind 分布: circle={} rect={} line={} text={}\n", by_kind[0],
+            by_kind[1], by_kind[2], by_kind[3]);
+  for (std::size_t i = 0; i < shapes.size() && i < 3; ++i) {
+    const auto& s = shapes[i];
+    st::print("[shapes] #{:<2} kind={} ({:.0f},{:.0f}) {:.0f}x{:.0f} rgba=({},{},{},{})\n", i,
+              s.kind, static_cast<double>(s.x), static_cast<double>(s.y),
+              static_cast<double>(s.w), static_cast<double>(s.h), s.color.r, s.color.g,
+              s.color.b, s.color.a);
+  }
+  if (in_view == 0) {
+    st::print("[shapes] ⚠ 没有任何图元落在画布内 —— 检查坐标是否忘了按屏幕像素给\n");
+  }
+}
+
 void paint_script_shapes(Painter& p) {
   const LayoutEngine& engine = layout_engine();
   if (!engine.loaded()) return;
   const auto& shapes = engine.shapes();
   if (std::getenv("CAIYUN_SHAPES_DEBUG") != nullptr) {
-    st::print("[shapes] loaded={} count={}\n", engine.loaded(), shapes.size());
-    if (!shapes.empty()) {
-      const auto& s = shapes[0];
-      st::print("[shapes] #0 kind={} x={:.1f} y={:.1f} w={:.1f} rgba=({},{},{},{})\n", s.kind,
-                static_cast<double>(s.x), static_cast<double>(s.y),
-                static_cast<double>(s.w), s.color.r, s.color.g, s.color.b, s.color.a);
-    }
+    report_script_shapes(engine.loaded(), shapes);
   }
   if (shapes.empty()) return;
   // ## 坐标系契约（实测踩过一次，两种错法）
