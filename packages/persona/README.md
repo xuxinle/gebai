@@ -31,20 +31,42 @@ webhook / 桌面     （无副作用）        （无外部动作）      （0~N
 
 ## 目录
 
+`src/` 内核（零依赖，不认识引擎）：
+
 ```
-src/
-├── event.ts           PersonaEvent 形态 + threadKey 推导（路由键，不含渠道身份）
-├── events.ts          buildEvent / 每源幂等键推导 / renderEventContext（出站纪律注入）
-├── dedupe.ts          EventDedupe：有界幂等环（重复事件 = 重复副作用）
-├── scheduler.ts       PersonaScheduler：两层队列（会话级串行 + driver 级并发额度）
-├── runtime.ts         PersonaRuntime：幂等 → 路由 → 会话解析 → 入队 → 调度 → 交引擎
-├── ports.ts           Port 接口（PersonaRunner / SessionResolver / PersonaLookup）
-├── source.ts          事件源扩展契约（EventSourceDef / IngressEvent / ctx）
-├── discovery.ts       发现：双域扫描 + 目录签名 + 字段校验 + 失败隔离
-├── source-manager.ts  EventSourceManager：启停 / 热加载 / emit 桥接 / 诊断
-├── sources/file_drop.ts  参考实现（文件投递，也是联调入口）
-└── index.ts           对外导出
+event.ts           PersonaEvent 形态 + threadKey 推导（路由键，不含渠道身份）
+events.ts          buildEvent / 每源幂等键推导 / renderEventContext（出站纪律注入）
+dedupe.ts          EventDedupe：有界幂等环（重复事件 = 重复副作用）
+scheduler.ts       PersonaScheduler：两层队列（会话级串行 + driver 级并发额度）
+runtime.ts         PersonaRuntime：幂等 → 路由 → 会话解析 → 入队 → 调度 → 交引擎
+ports.ts           Port 接口（PersonaRunner / SessionResolver / PersonaLookup）
+source.ts          事件源扩展契约（EventSourceDef / IngressEvent / ctx）
+discovery.ts       发现：双域扫描 + 目录签名 + 字段校验 + 失败隔离
+source-manager.ts  EventSourceManager：启停 / 热加载 / emit 桥接 / 诊断
+persona.ts         人格定义发现与严格校验
+catalog.ts         PersonaCatalog：静态定义 + 动态 driver 合流（含 replace 供热加载）
+driver.ts          DriverRegistry：静态 + 模型运行时自建的分身（落盘）
+worker.ts          driver/worker 模型的契约（WorkerSpawner / workerReportEvent）
+mailbox.ts         插话信箱（运行中到达的事件） 
+render.ts          多事件合批渲染
+credentials.ts / oauth.ts / user-token.ts   飞书进程级用户凭据
 ```
+
+扩展域（丢文件即注册）：
+
+```
+├─ 内置
+│  ├─ packages/persona/src/sources/         # 随包分发（file_drop 参考实现 + feishu）
+│  └─ packages/persona/src/personas/        # 内置人格（xiaoshuang 示例）
+└─ 二开（recommended）
+   └─ custom/persona/                       # 两类定义混放，靠导出名区分
+      ├─ my_source.ts   → export const source: EventSourceDef
+      └─ my_persona.ts  → export const persona: PersonaDef
+```
+
+> 混放是**刻意的**：两者都是「拟人模式的二开物」，分两个目录只会让人记「人格放 A、源放 B」。
+> 两套发现逻辑各自只看自己那个导出（`source` / `persona`）：看到对方导出就**安静跳过**，
+> 不报「未导出 xxx」。不这样做的话，两边的 `loadErrors` 会互相刷噪声，把真正的错误淹没。
 
 ## 三条核心不变量（都有反向验证覆盖）
 
@@ -118,7 +140,7 @@ src/
 ## 验证
 
 ```bash
-cd packages/persona && bun test        # 218 用例
+cd packages/persona && bun test        # 245 用例
 bun x tsc --noEmit                     # 类型检查
 ```
 
@@ -180,7 +202,7 @@ new PersonaRuntime({
 **零配置向后兼容**：`lookup.subscribers()` 返回空数组时 `dispatch` 返回 `unrouted`，
 调用方走自己原有的路径——未配置任何订阅者时行为与今天逐字节相同。
 
-### 启用后同时装配的三面
+### 启用后同时装配的五面
 
 只接渠道是不够的——「人格只对聊天有反应，定时/webhook 永远不触发」就是把驱动面漏了：
 
@@ -189,7 +211,47 @@ new PersonaRuntime({
 | 入站（消息） | `ChannelInputBridge` → 渠道长连接 | `boot/compose.ts`（`channels.attachDispatcher`） |
 | 入站（驱动） | `EventSourceManager` | `boot/compose.ts`（`channels.init()` 之后启动，失败各自隔离） |
 | 自我组织 | `driver_list/create/retire` | `core/session/persona-driver-tools.ts`（身份从 `SessionData.persona` 读，不按模型自报） |
+| **派活** | `worker_dispatch/list/cancel` | `core/session/worker-{spawner,tools}.ts`（独立会话，跑完即删，结论走事件） |
 | 运行态 | `collectPersonaState` | `core/session/persona-status.ts` → `GET /api/v1/persona/state` → 设置→拟人面板 |
+
+### 派活（driver + worker）：一个人格同时办多件事
+
+```
+事件 ──▶ driver 会话（串行，可被新事件插入）
+              │  worker_dispatch（异步，立刻返回 runId）
+              ├──▶ worker A（独立会话，隔离上下文）──┐
+              └──▶ worker B ───────────────────────┤
+                                                    ▼
+                      workerReportEvent（定向回到派它的那个 driver）
+```
+
+**为何 worker 不是 `subsession_run`**（两者都能隔离上下文，差别在「谁拥有它」）：
+
+| | subsession | worker |
+|---|---|---|
+| 归属 | 挂在某个父任务的 `ToolContext` 里，随 run 生命周期 | 独立会话，不依附于 driver 这一轮 |
+| 父轮结束 | 连带取消 | **继续干完**（它本该如此） |
+| 退出后 | 存档留在父会话 | 会话删除（结论已进 driver 事件） |
+
+四条实作约定（都是真实事故形态，见 `worker.test.ts`）：
+
+1. **结论必带 `verify`**：没有验收标准的活回来是「我看了一下，大概是……」——工具直接拒绝。
+2. **跑完无文本结论 → `failed`**，不能当 `done`：否则 driver 会以为「查完了，没发现问题」而漏报。
+3. **异步派活的 runId 由工具预分配**：否则结论回来前 `worker_list`/`worker_cancel` 找不到它。
+4. **叫停后不改回 done**：模型已经决定不要这个结果了，反过来标成功就是谎报。
+
+### 热加载：人格定义与事件源都改完即生效
+
+两者**各自节流 5s**（目录不同，合并节流会让其中一个等另一个），挂在 runner 每轮之前——
+不放定时器：空闲进程不该白跑目录遍历。
+
+人格定义热加载必须同时做三件（缺一件就是「改了好像没生效」）：
+
+1. `catalog.replace()` 整体替换——下一次读身份/订阅就是新的
+2. **新增 driver → `syncDriver(online)`**，删掉的 → `offline`（不调则新分身从不响应）
+3. 订阅/并发改过的 → `syncConcurrency`（调度器要知道新额度）
+
+**重扫结果为空时不清空现有的人格**（目录暂不可读 ≠ 人格被删）：把全部人格下线比“配置暂不可读”严重得多。
 
 ### 两个宿主侧的坑（本包已按此实现，改装配时别拆）
 
@@ -201,8 +263,7 @@ new PersonaRuntime({
 
 ## 后续阶段（不在本轮范围）
 
-人格定义热加载（目前重启生效）、会话按 kind 分级 GC、审批规则谓词、
-桌面弹窗源、霜天框架 4 项增强。
+会话按 kind 分级 GC（worker 会话已跑完即删，无需 GC）、审批规则谓词、桌面弹窗源。
 
 ## 源扩展层的反向验证（15 变异体 / 14 杀）
 

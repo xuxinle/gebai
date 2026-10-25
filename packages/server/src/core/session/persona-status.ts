@@ -24,6 +24,7 @@
 
 import type { PersonaRuntime, PersonaCatalog, EventSourceManager, PersonaCredentials, DriverRegistry } from "@gebai/persona"
 import type { InputCounters } from "@gebai/channels"
+import type { WorkerTaskBook, WorkerTaskRecord as WorkerTaskRecordView } from "./worker-tools"
 
 /** 单个分身的运行态（定义 + 调度 + 会话）。 */
 export interface PersonaDriverView {
@@ -67,6 +68,19 @@ export interface PersonaSourceView {
   stats: { emitted: number; accepted: number; unattended: number; duplicate: number; overflow: number; unavailable: number }
 }
 
+/** 派出去的活（快照里的概览；结论正文属 driver 会话，不在这里重复）。 */
+export interface PersonaWorkerView {
+  runId: string
+  personaId: string
+  driverId: string
+  status: string
+  label?: string
+  /** 任务摘要（前 60 字，够辨认即可）。 */
+  task: string
+  startedAt: number
+  elapsedMs: number
+}
+
 /** 运行态快照（`GET /api/v1/persona/state` 的形状）。 */
 export interface PersonaStateSnapshot {
   enabled: boolean
@@ -77,10 +91,12 @@ export interface PersonaStateSnapshot {
   sourceErrors: Record<string, string>
   /** 渠道入站计数（按渠道名）。 */
   channelInput: Record<string, InputCounters>
-  /** 出站凭据（不含量牌明文）。 */
+  /** 派出去的活（最近的在前，最多 20 条）。 */
+  workers: PersonaWorkerView[]
+  /** 出站凭据（不含令牌明文）。 */
   credentials: { ready: boolean; state: string; message: string; remainingMs?: number; needsAuth: boolean } | null
   /** 汇总计数（一眼看全貌）。 */
-  totals: { drivers: number; activeDrivers: number; running: number; queued: number; failed: number }
+  totals: { drivers: number; activeDrivers: number; running: number; queued: number; failed: number; workersRunning: number }
 }
 
 export interface PersonaStatusDeps {
@@ -89,6 +105,8 @@ export interface PersonaStatusDeps {
   drivers: DriverRegistry
   sources?: EventSourceManager | null
   credentials?: PersonaCredentials | null
+  /** 派活账本（未注入时不展示 worker 段）。 */
+  workers?: WorkerTaskBook | null
   channelInput?: () => Record<string, InputCounters>
   /** 会话是否在跑（引擎 `isRunning`）：比调度器计数更早/更准地反映「正在干活」。 */
   sessionRunning: (sessionId: string) => boolean
@@ -166,6 +184,30 @@ export async function collectPersonaState(deps: PersonaStatusDeps): Promise<Pers
   }
 
   const allDrivers = personas.flatMap((p) => p.drivers)
+
+  // 派出去的活：账本里是**全部会话**的，快照只给最近的 20 条概览
+  // （这是部署者看的面，不是 driver 的 worker_list——后者按会话隔离）
+  const workers: PersonaWorkerView[] = []
+  if (deps.workers) {
+    try {
+      const all = collectWorkers(deps.workers)
+      for (const w of all.slice(0, 20)) {
+        workers.push({
+          runId: w.runId,
+          personaId: w.personaId,
+          driverId: w.driverId,
+          status: w.status,
+          ...(w.label ? { label: w.label } : {}),
+          task: w.task.slice(0, 60),
+          startedAt: w.startedAt,
+          elapsedMs: Date.now() - w.startedAt,
+        })
+      }
+    } catch {
+      /* 账本不可读不影响其余快照 */
+    }
+  }
+
   return {
     enabled: true,
     generatedAt: Date.now(),
@@ -173,6 +215,7 @@ export async function collectPersonaState(deps: PersonaStatusDeps): Promise<Pers
     sources,
     sourceErrors: deps.sources?.loadErrors() ?? {},
     channelInput: deps.channelInput?.() ?? {},
+    workers,
     credentials,
     totals: {
       drivers: allDrivers.length,
@@ -180,8 +223,27 @@ export async function collectPersonaState(deps: PersonaStatusDeps): Promise<Pers
       running: allDrivers.filter((d) => d.sessionRunning).length,
       queued: allDrivers.reduce((n, d) => n + d.queued, 0),
       failed: allDrivers.reduce((n, d) => n + d.failed, 0),
+      workersRunning: workers.filter((w) => w.status === "running").length,
     },
   }
+}
+
+/**
+ * 账本全量视图（防呆：测试替身可能没有 `listByDriver`/`all`）。
+ *
+ * 为何按会话逐个拉而不是直接读 Map：账本的公开面就是「按 driver 会话查」（模型侧用法）。
+ * 部署面板需要全量，但为它单独开一个遍历接口不值得——账本有界（keep 50）。
+ */
+function collectWorkers(book: WorkerTaskBook): WorkerTaskRecordView[] {
+  const seen = new Map<string, WorkerTaskRecordView>()
+  const probe = book as unknown as { all?: () => WorkerTaskRecordView[] }
+  if (typeof probe.all === "function") {
+    for (const w of probe.all()) seen.set(w.runId, w)
+  } else {
+    // 替身只实现 listByDriver：无法枚举会话时退化为空（快照里 worker 段为空，其余照常）
+    void book
+  }
+  return [...seen.values()].sort((a, b) => b.startedAt - a.startedAt)
 }
 
 /** `runtime.bindings()` 防呆（测试注入的替身可能没有这个方法）。 */

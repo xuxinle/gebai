@@ -25,6 +25,78 @@ const DEF = (over: Partial<PersonaDef> = {}): PersonaDef => ({
   ...over,
 })
 
+describe("PersonaCatalog.replace：热加载换定义", () => {
+  function cat(over: Partial<PersonaDef> = {}) {
+    return new PersonaCatalog({ personas: new Map([["xiaoshuang", DEF(over)]]) })
+  }
+
+  test("新增/删除/修改三类差异都能报出来（调用方靠它打日志与同步调度器）", () => {
+    const c = cat()
+    const next = new Map([
+      ["xiaoshuang", DEF({ role: "平台 SRE" })], // 改了 role
+      ["laozhang", { ...DEF(), id: "laozhang", name: "老张", drivers: [] }], // 新增
+    ])
+    const diff = c.replace(next)
+    expect(diff.added).toEqual(["laozhang"])
+    expect(diff.removed).toEqual([])
+    expect(diff.changed).toEqual(["xiaoshuang"])
+    // 换完之后读得到新值（下一次跑就是新的身份）
+    expect(c.get("xiaoshuang")?.role).toBe("平台 SRE")
+    expect(c.ids()).toEqual(["laozhang", "xiaoshuang"])
+  })
+
+  test("文件被删（整份移除）→ removed 报出来，且真的读不到了", () => {
+    const c = cat()
+    const diff = c.replace(new Map())
+    expect(diff.removed).toEqual(["xiaoshuang"])
+    expect(c.get("xiaoshuang")).toBeNull()
+  })
+
+  test("只改 description 不算 changed（它不进提示词，不该刷屏）", () => {
+    const c = cat()
+    const diff = c.replace(new Map([["xiaoshuang", DEF({ description: "换个说法" })]]))
+    expect(diff.changed).toEqual([])
+  })
+
+  test("改 driver 的订阅 = changed（直接改变行为，必须同步调度器）", () => {
+    const c = cat()
+    const next = DEF({
+      drivers: [
+        { id: "support", focus: "答支持群", subscriptions: ["message", "schedule"] }, // 多了 schedule
+        { id: "alerts", focus: "盯告警", subscriptions: ["webhook:alert"] },
+      ],
+    })
+    expect(c.replace(new Map([["xiaoshuang", next]])).changed).toEqual(["xiaoshuang"])
+  })
+
+  test("加/减静态 driver → driversAdded / driversRemoved（不报的话新分身收不到事件）", () => {
+    const c = cat()
+    const next = DEF({
+      drivers: [
+        { id: "support", focus: "答支持群", subscriptions: ["message"] },
+        { id: "report", focus: "写日报", subscriptions: ["schedule"] }, // 新增
+      ],
+    })
+    const diff = c.replace(new Map([["xiaoshuang", next]]))
+    expect(diff.driversAdded).toEqual(["xiaoshuang/report"])
+    expect(diff.driversRemoved).toEqual(["xiaoshuang/alerts"])
+  })
+
+  test("内容完全相同时全为空数组（不产生无意义的日志）", () => {
+    const c = cat()
+    const diff = c.replace(new Map([["xiaoshuang", DEF()]]))
+    expect(diff).toEqual({ added: [], removed: [], changed: [], driversAdded: [], driversRemoved: [] })
+  })
+
+  test("替换后动态 driver 仍参与合流（静态胜出规则不因热加载而变）", async () => {
+    const registry = new DriverRegistry({})
+    await registry.create({ personaId: "xiaoshuang", id: "tsdb", focus: "盯 TSDB", subscriptions: ["webhook"], reason: "专项" })
+    const c = new PersonaCatalog({ personas: new Map([["xiaoshuang", DEF()]]), drivers: registry })
+    c.replace(new Map([["xiaoshuang", DEF({ role: "新角色" })]]))
+    expect(c.drivers("xiaoshuang").map((d) => d.id)).toEqual(["support", "alerts", "tsdb"])
+  })
+})
+
 describe("validatePersonaDef：定义校验（错就报错，不静默降级）", () => {
   test("最小合法定义", () => {
     expect(validatePersonaDef(DEF(), "xiaoshuang")).toBeNull()
@@ -66,6 +138,31 @@ describe("validatePersonaDef：定义校验（错就报错，不静默降级）"
 })
 
 describe("discoverPersonas：丢文件即注册", () => {
+  test("同名目录混放两类定义（人格与事件源）→ 两边都安静跳过，不互相报错", async () => {
+    // 真实形态：`custom/persona/` 同时放人格定义与事件源（靠导出名区分）。
+    // 若两边各自把对方报成“未导出 xxx”，就是**持续噪声**——真正的加载错误会被淹没。
+    const home = mkdtempSync(join(tmpdir(), "pd-mix-"))
+    const builtin = join(home, "builtin")
+    const custom = join(home, "custom")
+    mkdirSync(builtin, { recursive: true })
+    mkdirSync(custom, { recursive: true })
+    try {
+      // 人格
+      writeFileSync(join(custom, "mo.ts"), `export const persona = ${JSON.stringify(DEF({ id: "mo", name: "莫" }))}`)
+      // 事件源（共放同目录）：裸对象形（无 source 导出标识时 fallback 到 default）
+      writeFileSync(
+        join(custom, "pipe.ts"),
+        `export const source = { name: "pipe", description: "管道", channel: "pipe", start: async () => {} }`,
+      )
+      const found = await discoverPersonas({ builtin, custom })
+      // 只认人格：事件源文件不报错不登记
+      expect([...found.personas.keys()]).toContain("mo")
+      expect(found.errors.size).toBe(0)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
   test("扫出定义文件并正确加载", async () => {
     const home = mkdtempSync(join(tmpdir(), "pd-"))
     const builtin = join(home, "builtin")

@@ -192,6 +192,20 @@ export async function discoverySignature(dirs: PersonaScanDirs): Promise<string>
 
 type OneLoaded = { def: PersonaDef } | { error: PersonaLoadError; id: string }
 
+/**
+ * 这个 default 导出看起来像事件源吗（而不是人格定义）。
+ *
+ * 与 `discovery.ts` 的 `isPersonaExport` 对称：`custom/persona/` 两类文件混放，
+ * 靠导出名区分；先认清“另一个类”，才能安静跳过而不互相误报。
+ */
+function isSourceExportForPersona(v: unknown): boolean {
+  if (!v || typeof v !== "object") return false
+  const o = v as Record<string, unknown>
+  const looksSource = typeof o.channel === "string" || typeof o.start === "function"
+  const looksPersona = typeof o.identity === "string" || typeof o.role === "string"
+  return looksSource && !looksPersona
+}
+
 async function loadOne(dir: string, entry: { name: string; isDirectory(): boolean; isFile(): boolean }, domain: "builtin" | "custom"): Promise<OneLoaded | null> {
   let base: string
   let filePath: string | null = null
@@ -218,8 +232,14 @@ async function loadOne(dir: string, entry: { name: string; isDirectory(): boolea
 
   try {
     const mtime = (await stat(filePath).catch(() => null))?.mtimeMs ?? 0
-    const mod = (await import(`${filePath}?t=${mtime}`)) as { persona?: unknown; default?: unknown }
-    const raw = mod.persona ?? mod.default
+    const mod = (await import(`${filePath}?t=${mtime}`)) as { persona?: unknown; source?: unknown; default?: unknown }
+    // **同名目录共用的靠写**（与 discovery.ts 的 loadOne 对称）：`custom/persona/` 同时放
+    // 人格定义与事件源。先看 source 在不在：在就说明这是事件源文件，不是人格——
+    // 安静跳过，避免“两边互相报对方格式不对”的持续噪声。
+    if (mod.persona === undefined && (mod.source !== undefined || isSourceExportForPersona(mod.default))) {
+      return null
+    }
+    const raw = mod.persona ?? (isSourceExportForPersona(mod.default) ? undefined : mod.default)
     if (!raw) {
       return { id: base, error: { id: base, domain, error: `${filePath} 未导出 persona（须 \`export const persona: PersonaDef = {…}\`，或 default 导出）` } }
     }

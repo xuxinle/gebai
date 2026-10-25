@@ -188,6 +188,27 @@ async function resolvePersonaPackageRoot(): Promise<string> {
   return join(import.meta.dirname, "__no_personas__")
 }
 
+/**
+ * 取飞书 tenant_access_token（应用身份）。
+ *
+ * 为何在本文件里再写一遍而不复用 `feishu-bot/api.ts` 的缓存版：
+ * 那里返回的是一个封装对象（发送消息用），令牌藏在闭包里拿不到；
+ * 而这里只需要“拿一个令牌去 GET 群历史”。为一次读多开一个公开接口不值得。
+ * 调用频率也低（只在没用户授权时才走到）。
+ */
+async function feishuTenantToken(appId: string, appSecret: string): Promise<string> {
+  const res = await fetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
+  })
+  const json = (await res.json()) as { code?: number; msg?: string; tenant_access_token?: string }
+  if (!res.ok || json.code !== 0 || !json.tenant_access_token) {
+    throw new Error(`获取 tenant_access_token 失败：code=${json.code} msg=${json.msg ?? res.status}`)
+  }
+  return json.tenant_access_token
+}
+
 /** 逗号/空白分隔的名单解析（与既有 `GEBAI_*_ENABLE/DISABLE` 同口径）。 */
 function splitList(raw: string | undefined): string[] {
   if (!raw) return []
@@ -616,6 +637,8 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     const { EnginePersonaRunner } = await import("../core/session/persona-runner")
     const { toEngineTools: adaptDriverTools, personaContextResolver } = await import("../core/session/persona-driver-tools")
     const { collectPersonaState } = await import("../core/session/persona-status")
+    const { SessionWorkerSpawner } = await import("../core/session/worker-spawner")
+    const { createWorkerTools, createWorkerTaskBook } = await import("../core/session/worker-tools")
 
     const personaDirs = defaultPersonaScanDirs({ packageRoot: await resolvePersonaPackageRoot() })
     const found = await discoverPersonas(personaDirs)
@@ -643,6 +666,54 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     // 会话名用「人格显示名·分身 id」：侧栏里一眼能认出来
     personaSessions.nameOf = (id) => personaCatalog!.get(id)?.name ?? id
 
+    /**
+     * 人格定义热加载：重扫目录 → 整体替换 → 同步调度器。
+     *
+     * 为何热加载对人格比对事件源更要紧：改一句 `identity` 是**最常做的事**
+     * （语气不对、规则补一句），而重启会中断正在跑的人格任务、丢掉未跑完的队列。
+     *
+     * 三件必须一起做的事（缺一件就会出现“改了好像没生效”）：
+     * 1. `catalog.replace()`——下一次读身份/订阅就是新的
+     * 2. **新增/driver 下线时 syncDriver**——不调它，新 driver 收不到事件（“加了分身但不响应”）
+     * 3. **删除的人格要下线它的全部 driver**——否则已删的人继续回消息
+     *
+     * 失败隔离：重扫失败（目录不可读/定义写错）**保留旧可用版本**，不把当前人格清空。
+     */
+    const syncPersonaDefs = async (): Promise<void> => {
+      if (!personaCatalog || !personaRuntime) return
+      const res = await discoverPersonas(personaDirs)
+      if (res.personas.size === 0) {
+        // 一个都读不到：多半是目录暂时不可读 / 文件全写坏了。不清空——
+        // 把现有全部人格下线比“配置暂不可读”严重得多
+        log.warn(`[gebai] 人格目录重扫为一个都未找到（保留当前 ${personaCatalog.ids().length} 个人格）：${personaDirs.custom}`)
+        return
+      }
+      const diff = personaCatalog.replace(res.personas)
+      for (const [id, err] of res.errors) log.warn(`[gebai] 人格 ${id} 重加载失败 [${err.domain}]: ${err.error}`)
+      if (!diff.added.length && !diff.removed.length && !diff.changed.length && !diff.driversAdded.length && !diff.driversRemoved.length) {
+        return // 内容无变化（只是 mtime 变了/别的文件动了）：不打日志不刷屏
+      }
+      log.info(
+        `[gebai] 人格定义已重加载：` +
+          `新增 ${diff.added.join("、") || "-"}；删除 ${diff.removed.join("、") || "-"}；` +
+          `修改 ${diff.changed.join("、") || "-"}；` +
+          `新增分发 ${diff.driversAdded.join("、") || "-"}；下线分发 ${diff.driversRemoved.join("、") || "-"}`,
+      )
+      // 分身上线/下线同步（下线先做：被删的人格腾出资源再上线新的）
+      for (const key of diff.driversRemoved) {
+        const [pid, did] = key.split("/") as [string, string]
+        personaRuntime.syncDriver(pid, did, "offline")
+      }
+      for (const key of diff.driversAdded) {
+        const [pid, did] = key.split("/") as [string, string]
+        personaRuntime.syncDriver(pid, did, "online")
+      }
+      // 订阅/并发改过的现有分身：调度器要知道新额度
+      for (const id of diff.changed) personaRuntime.syncConcurrency(id)
+    }
+    /** 人格定义重扫节流（与事件源分开计数：两者目录不同，合并会让其中一个等另一个）。 */
+    const PERSONA_REFRESH_MS = 5_000
+
     // 事件源热加载的节流（距上次重扫不足 5s 则跳过）：目录遍历便宜但不是免费，
     // 事件密集时（几十条/秒）每轮都扫会把主线程拖成锯齿。5s 对人改文件的节奏已足够敏感。
     const SOURCE_REFRESH_MS = 5_000
@@ -655,18 +726,47 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       await personaSources.refreshIfChanged()
     }
 
+    // 人格定义热加载：与事件源分开节流（两者目录不同，合并节流会让其中一个等另一个）
+    let lastPersonaRefresh = 0
+    const refreshPersonas = async (): Promise<void> => {
+      const now = Date.now()
+      if (now - lastPersonaRefresh < PERSONA_REFRESH_MS) return
+      lastPersonaRefresh = now
+      await syncPersonaDefs()
+    }
+
+    // ── 派活：worker 宿主实现 + 账本 ──
+    // worker 是独立会话（不依附于 driver 这一轮）——见 worker-spawner.ts 文件头的对照表。
+    // 结论走 workerReportEvent 回到**派出它的那个** driver（定向，不惊动同角色其它分身）。
+    const workerBook = createWorkerTaskBook({ keep: 50 })
+    const workerSpawner = new SessionWorkerSpawner({
+      engine,
+      store,
+      autoApprove: config.personaAutoApprove,
+      log: { info: log.info, warn: log.warn },
+    })
+
     personaRuntime = new PersonaRuntime({
       lookup: personaCatalog,
       sessions: personaSessions,
       runner: new EnginePersonaRunner({
         engine,
         autoApprove: config.personaAutoApprove,
-        refreshBeforeRun: refreshSources,
+        // 每轮之前两项重扫：源（驱动面）与人格定义（身份/订阅）——
+        // 两者各自节流。不放定时器：空闲进程不该白跑目录遍历。
+        refreshBeforeRun: async () => {
+          await refreshSources()
+          await refreshPersonas()
+        },
         log: { info: log.info, warn: log.warn },
       }),
       log: { info: log.info, warn: log.warn },
     })
     personaRuntime.start()
+
+    // 启动时先主动同步一次（热加载节流计数从此刻起算，避免第一个事件就触发重扫）
+    lastPersonaRefresh = Date.now()
+    lastSourceRefresh = Date.now()
 
     // 预热会话绑定（重启后第一条事件不必等扫盘）
     void personaSessions.warm("admin").then((n) => {
@@ -712,6 +812,38 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       log.info(`[gebai] 人格自组织工具已注册：${personaTools.map((t) => t.name).join("、")}`)
     }
 
+    // ── 派活：worker_dispatch / worker_list / worker_cancel ──
+    //
+    // 为何这组工具是「一个人格能同时办多件事」的前提：driver 会话是串行的，
+    // 它自己在查东西的时候群里的新消息全堵在队列里。派出去之后 driver 立刻能继续响应。
+    //
+    // 回报走**事件**回到派出它的那个 driver（`workerReportEvent`）：
+    // 与用户消息同一类东西——“有新信息到了”，driver 才能用同一套逻辑定优先级。
+    {
+      const workerTools = createWorkerTools({
+        spawner: workerSpawner,
+        book: workerBook,
+        store,
+        identity: (id) => personaCatalog!.get(id),
+        report: async (record, outcome) => {
+          // 结论作为新事件投给派活的 driver（定向：不惊动同角色其它分身）
+          const { workerReportEvent } = await import("@gebai/persona")
+          const event = workerReportEvent({
+            personaId: record.personaId,
+            driverId: record.driverId,
+            driverSessionId: record.driverSessionId,
+            outcome,
+            task: record.task,
+          })
+          await personaRuntime!.reportWorkerDone(event)
+          log.info(`[gebai] 派活回报已投递：${outcome.runId} → ${record.personaId}/${record.driverId}（${outcome.status}）`)
+        },
+        log: { info: log.info, warn: log.warn },
+      })
+      for (const t of workerTools) registry.register(t)
+      log.info(`[gebai] 派活工具已注册：${workerTools.map((t) => t.name).join("、")}`)
+    }
+
     // ── 运行态快照 ──
     // 事件源与渠道桥接要到下面才建，所以取**惰性函数**（此处不读它们的值，只在请求时读）
     personaState = () =>
@@ -721,6 +853,7 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
         drivers: driverRegistry,
         sources: personaSources,
         credentials: personaCredentials,
+        workers: workerBook,
         channelInput: () => personaChannelBridge?.allStats() ?? {},
         sessionRunning: (id) => {
           try {
@@ -759,12 +892,37 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   // 渠道坏了不该连带事件源也不启动（两边失败各自隔离，日志各自清楚）。
   if (personaRuntime) {
     const { EventSourceManager, defaultEventSourceScanDirs } = await import("@gebai/persona")
+    // 宿主能力注入（长连接 + 读历史）：两处都是“配错时错得很难查”的地方，
+    // 所以集中在 persona-feishu-deps.ts 里判定并在启动期如实报错。
+    const { createFeishuSourceDeps } = await import("../core/session/persona-feishu-deps")
+    const feishuDeps = createFeishuSourceDeps({
+      appId: () => process.env.FEISHU_BOT_APP_ID || process.env.GEBAI_FEISHU_APP_ID,
+      appSecret: () => process.env.FEISHU_BOT_APP_SECRET || process.env.GEBAI_FEISHU_APP_SECRET,
+      sessionBot: () => ({ enabled: config.feishuBotEnabled, ...(config.feishuAppId ? { appId: config.feishuAppId } : {}) }),
+      makeConn: (o) =>
+        new FeishuConn({
+          appId: o.appId,
+          appSecret: o.appSecret,
+          onEvent: o.onEvent,
+          log: (m) => log.info(`[persona:sources:feishu] ${m}`),
+        }),
+      ...(personaCredentials ? { userToken: () => personaCredentials!.token() } : {}),
+      appToken: async () => {
+        // 应用身份读历史：同一应用、同一凭据（只在无用户授权时才走到）
+        const id = process.env.FEISHU_BOT_APP_ID || process.env.GEBAI_FEISHU_APP_ID
+        const secret = process.env.FEISHU_BOT_APP_SECRET || process.env.GEBAI_FEISHU_APP_SECRET
+        if (!id || !secret) throw new Error("缺少飞书应用凭据（应用身份读历史不可用）")
+        return await feishuTenantToken(id, secret)
+      },
+      log: { info: log.info, warn: log.warn },
+    })
     personaSources = new EventSourceManager({
       scanDirs: defaultEventSourceScanDirs({ packageRoot: await resolvePersonaPackageRoot() }),
       runtime: personaRuntime,
       home: config.gebaiHome,
       enable: config.eventSourcesEnable,
       disable: config.eventSourcesDisable,
+      deps: feishuDeps,
       log: { info: log.info, warn: log.warn, error: log.error },
     })
     await personaSources.start()

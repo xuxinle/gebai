@@ -46,6 +46,42 @@ export interface PersonaCatalogOptions {
   log?: { info(msg: string): void; warn(msg: string): void }
 }
 
+/** 人格定义替换的差异（热加载日志与调度器同步用）。 */
+export interface PersonaCatalogDiff {
+  /** 新出现的人格 id。 */
+  added: string[]
+  /** 被删掉（定义文件已不存在）的人格 id。 */
+  removed: string[]
+  /** 定义内容有变化的人格 id（身份/关注面/订阅改过）。 */
+  changed: string[]
+  /** 新增的 `personaId/driverId`（静态 driver）。 */
+  driversAdded: string[]
+  /** 消失的 `personaId/driverId`。 */
+  driversRemoved: string[]
+}
+
+/**
+ * 两份人格定义是否相同（只比较**影响行为的字段**）。
+ *
+ * 不比 `description`：它只进面板不进提示词——改一句说明不该被当成“行为变了”而刷屏。
+ */
+function samePersona(a: PersonaDef, b: PersonaDef): boolean {
+  if (a.name !== b.name || a.role !== b.role || a.identity !== b.identity) return false
+  const da = a.drivers ?? []
+  const db = b.drivers ?? []
+  if (da.length !== db.length) return false
+  const mapB = new Map(db.map((d) => [d.id, d]))
+  for (const d of da) {
+    const o = mapB.get(d.id)
+    if (!o) return false
+    if (d.focus !== o.focus) return false
+    if (d.maxConcurrent !== o.maxConcurrent) return false
+    if (d.subscriptions.length !== o.subscriptions.length) return false
+    if (d.subscriptions.some((s, i) => s !== o.subscriptions[i])) return false
+  }
+  return true
+}
+
 /**
  * 人格目录：`PersonaLookup` 的默认实现。
  *
@@ -53,7 +89,7 @@ export interface PersonaCatalogOptions {
  * driver 的增删走 `DriverRegistry`。把写能力放这里会让「谁是权威」变模糊。
  */
 export class PersonaCatalog implements PersonaLookup {
-  private readonly personas: ReadonlyMap<string, PersonaDef>
+  private personas: ReadonlyMap<string, PersonaDef>
   private readonly registry?: DriverRegistry
   private readonly defaultMaxConcurrent: number
 
@@ -61,6 +97,41 @@ export class PersonaCatalog implements PersonaLookup {
     this.personas = opts.personas
     this.registry = opts.drivers
     this.defaultMaxConcurrent = Math.max(1, opts.defaultMaxConcurrent ?? 2)
+  }
+
+  /**
+   * 整体替换人格定义（**热加载専用**：由宿主的目录签名监测调用）。
+   *
+   * 为何是「整体替换」而不是 `set(id, def)`：热加载看到的是**一次扫描的完整快照**，
+   * 逐条增删会让「文件被删」这种情形永远漏掉（没人去调 `delete`），于是删了的人格
+   * 依旧活着——那是最难排查的一类“配置怎么改都不生效”。
+   *
+   * 为何不开放给模型：它是**写入**。人格定义是部署方的权威（与 `drivers[].subscriptions`
+   * 同一信任面），运行时改写它等于让模型能改自己的身份与关注范围。
+   *
+   * 返回差异（供调用方打日志/同步调度器）：调用方靠它知道「哪些 driver 是新出现的」。
+   */
+  replace(personas: ReadonlyMap<string, PersonaDef>): PersonaCatalogDiff {
+    const before = this.personas
+    this.personas = personas
+    const added: string[] = []
+    const removed: string[] = []
+    const changed: string[] = []
+    for (const id of personas.keys()) if (!before.has(id)) added.push(id)
+    for (const id of before.keys()) if (!personas.has(id)) removed.push(id)
+    for (const [id, def] of personas) {
+      const prev = before.get(id)
+      if (prev && !samePersona(prev, def)) changed.push(id)
+    }
+    const driversBefore = new Set([...before.values()].flatMap((p) => (p.drivers ?? []).map((d) => `${p.id}/${d.id}`)))
+    const driversAfter = new Set([...personas.values()].flatMap((p) => (p.drivers ?? []).map((d) => `${p.id}/${d.id}`)))
+    return {
+      added,
+      removed,
+      changed,
+      driversAdded: [...driversAfter].filter((k) => !driversBefore.has(k)),
+      driversRemoved: [...driversBefore].filter((k) => !driversAfter.has(k)),
+    }
   }
 
   /** 全部人格 id（诊断/面板用）。 */

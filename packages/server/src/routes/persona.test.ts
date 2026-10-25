@@ -45,7 +45,8 @@ const SNAPSHOT: PersonaStateSnapshot = {
   sourceErrors: {},
   channelInput: {},
   credentials: { ready: true, state: "ok", message: "已授权", needsAuth: false },
-  totals: { drivers: 1, activeDrivers: 1, running: 0, queued: 2, failed: 0 },
+  workers: [],
+  totals: { drivers: 1, activeDrivers: 1, running: 0, queued: 2, failed: 0, workersRunning: 0 },
 }
 
 function makeApp(deps: {

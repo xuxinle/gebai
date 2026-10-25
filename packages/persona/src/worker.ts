@@ -59,6 +59,16 @@ export interface WorkerSpawner {
 export interface WorkerSpawnInput {
   /** 所属人格（日志/计费/权限归属）。 */
   personaId: string
+  /** 派出它的 driver（日志/诊断；回报路由以 `driverSessionId` 为准）。 */
+  driverId?: string
+  /**
+   * 可选的运行标识（缺省由 spawner 生成）。
+   *
+   * 为何要让调用方给：派活**异步**时，工具必须在 `spawn()` 返回 promise 之前就把
+   * runId 告诉模型（否则 `worker_list`/`worker_cancel` 在结论回来前找不到这个活）。
+   * 由调用方预分配，两边的账本从第一刻就是同一套键。
+   */
+  runId?: string
   user: string
   identity: PersonaIdentity
   /** **driver 给的活**（自然语言指令；driver 自己决定怎么拆、怎么描述）。 */

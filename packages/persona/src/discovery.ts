@@ -156,6 +156,21 @@ type OneLoaded =
   | { def: EventSourceDef }
   | { error: EventSourceLoadError; name: string }
 
+/**
+ * 这个 default 导出看起来像人格定义吗（而不是事件源）。
+ *
+ * 用途：`custom/persona/` 两类文件混放，靠导出名区分。若一个文件 `export default` 的是
+ * 人格定义（有 identity/role 但没有 channel/start），事件源扫描要**安静跳过**它——
+ * 报「未导出 source」只会制造噪声，并把真正的加载错误淹没。
+ */
+function isPersonaExport(v: unknown): boolean {
+  if (!v || typeof v !== "object") return false
+  const o = v as Record<string, unknown>
+  const looksPersona = typeof o.identity === "string" || typeof o.role === "string"
+  const looksSource = typeof o.channel === "string" || typeof o.start === "function"
+  return looksPersona && !looksSource
+}
+
 /** 加载单个定义（文件或目录形态）。 */
 async function loadOne(dir: string, entry: { name: string; isDirectory(): boolean; isFile(): boolean }, domain: "builtin" | "custom"): Promise<OneLoaded | null> {
   let base: string
@@ -184,8 +199,15 @@ async function loadOne(dir: string, entry: { name: string; isDirectory(): boolea
   try {
     // mtime 查询参数绕过模块缓存（Bun 对 file:// URL 的查询参数不生效，故用绝对路径 + query）
     const mtime = (await stat(filePath).catch(() => null))?.mtimeMs ?? 0
-    const mod = (await import(`${filePath}?t=${mtime}`)) as { source?: unknown; default?: unknown }
-    const raw = mod.source ?? mod.default
+    const mod = (await import(`${filePath}?t=${mtime}`)) as { source?: unknown; persona?: unknown; default?: unknown }
+    // **同名目录共用的靠写**：`custom/persona/` 同时放人格定义与事件源（同一个二开域，
+    // 靠导出名区分）。发现人格时会把事件源文件当成“无 persona 导出”报错，反之亦然——
+    // 两边都报就是持续噪声，且会把真实错误淹掉。所以这里先看**另一个导出**在不在：
+    // 在就说明这个文件属于另一类，安静跳过（不是本类的源）。
+    if (mod.source === undefined && (mod.persona !== undefined || isPersonaExport(mod.default))) {
+      return null
+    }
+    const raw = mod.source ?? (isPersonaExport(mod.default) ? undefined : mod.default)
     if (!raw) {
       return {
         name: base,

@@ -100,7 +100,7 @@ export type { EventSourceManagerOptions, EventSourceState } from "./source-manag
 export { EventSourceManager } from "./source-manager"
 
 // ── 人格定义扩展规范（与事件源、子 Agent、渠道同款「丢文件即注册」）──
-export type { PersonaCatalogOptions } from "./catalog"
+export type { PersonaCatalogOptions, PersonaCatalogDiff } from "./catalog"
 export { PersonaCatalog } from "./catalog"
 export type { PersonaDef, PersonaDiscoveryResult, PersonaLoadError, PersonaScanDirs } from "./persona"
 export { defaultPersonaScanDirs, discoverPersonas, readPersonaFile, validatePersonaDef } from "./persona"

@@ -78,7 +78,7 @@ describe("collectPersonaState：基本形状", () => {
       expect(d.accepted).toBe(0)
       expect(d.queued).toBe(0)
     }
-    expect(snap.totals).toEqual({ drivers: 2, activeDrivers: 0, running: 0, queued: 0, failed: 0 })
+    expect(snap.totals).toEqual({ drivers: 2, activeDrivers: 0, running: 0, queued: 0, failed: 0, workersRunning: 0 })
   })
 })
 
@@ -105,7 +105,7 @@ describe("collectPersonaState：调度与引擎的口径", () => {
     // 关键：两个来源给的是同一件事的两个视角，快照不把它们混成一个字段
     expect(support.running).toBe(1)
     expect(support.sessionRunning).toBe(false)
-    expect(snap.totals).toEqual({ drivers: 2, activeDrivers: 1, running: 0, queued: 3, failed: 2 })
+    expect(snap.totals).toEqual({ drivers: 2, activeDrivers: 1, running: 0, queued: 3, failed: 2, workersRunning: 0 })
   })
 
   test("引擎判定抛错 → 当 false（快照本身不能因为一个探测失败而整份挂掉）", async () => {

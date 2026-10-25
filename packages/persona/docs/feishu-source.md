@@ -1,20 +1,19 @@
 # 飞书消息事件源
 
-> **状态：本文是设计稿，尚未实现。**
+> **状态：已实现**（`packages/persona/src/sources/feishu.ts`）。启用需在 `GEBAI_EVENT_SOURCES_ENABLE` 里列出 `feishu`。
 >
-> 服务端当前的飞书入站走的是**渠道**（`packages/channels/src/channels/feishu.ts` 的
-> `startListen` → `ChannelInputBridge` → `PersonaRuntime.dispatch`），不是本文描述的
-> `src/sources/feishu.ts` 插件。两者不冲突（可以并存）：
+> 与**渠道**（`packages/channels/src/channels/feishu.ts`）的分工：两者不重复，**本源的全部附加价值是
+> 「读历史」**——群里有人说「还是不行」时，只有一条正文模型只能猜。
 >
-> | | 渠道（已实现） | 本文的事件源（未实现） |
+> | | 渠道（出站主路径） | 本源（入站增强） |
 > |---|---|---|
-> | 收消息 | 应用身份长连接 | 应用身份长连接 |
-> | 读上下文/历史 | **不支持**（只用消息正文） | 用户身份回看（机器人不在的群也能读） |
-> | 出站 | `act` 工具经渠道 `send`/`reply` | 同 |
-> | 配置 | `GEBAI_CHANNELS_FEISHU_*` | `FEISHU_BOT_*` |
+> | 收消息 | 应用身份长连接 | 应用身份长连接（**复用宿主连接，不自己建**） |
+> | 读群历史 | 只能读机器人所在群（且要模型显式 `observe`） | **用户身份回看，自动附在正文尾部** |
+> | 出站 | `act(verb:"send"/"reply")` | 不提供 |
+> | 配置 | `GEBAI_CHANNELS_FEISHU_*`（独立机器人） | `FEISHU_BOT_*`（回落 `GEBAI_FEISHU_*`） |
 >
-> 何时值得把它做出来：需要**读群历史 / 读机器人不在的群**的时候。只答群里的问题，渠道已经够了。
-> 在那之前，本文的价值是记下“身份模型”这三条协议事实（尤其是写入本节的那条）。
+> 两者**可以同时启用**（一个管发、一个管带着上下文收）。但**同一应用只能有一条长连接**：
+> 若拟人源与会话机器人同 AppID，宿主会在启动期拒绝注入并告警（自建 = 互踢 = 两边都偶发收不到消息）。
 
 把飞书消息变成统一 `PersonaEvent`。**收消息用应用身份（协议所限），读上下文与发言优先用用户身份。**
 
@@ -37,15 +36,20 @@
 ## 启用
 
 ```bash
-# 必需
-FEISHU_BOT_APP_ID=cli_xxx            # 缺省回落 GEBAI_FEISHU_APP_ID
-FEISHU_BOT_APP_SECRET=xxx            # 缺省回落 GEBAI_FEISHU_APP_SECRET
+# 必需（也接受 GEBAI_FEISHU_APP_ID / _APP_SECRET）
+FEISHU_BOT_APP_ID=cli_xxx
+FEISHU_BOT_APP_SECRET=xxx
+# 在事件源名单里启用本源源（不列则仅存在不启动）
+GEBAI_EVENT_SOURCES_ENABLE=feishu,file_drop
 
 # 可选
 GEBAI_PERSONA_FEISHU_CHATS=oc_a,oc_b # 仅处理这些群（空=全部）
 GEBAI_PERSONA_FEISHU_USE_USER=on     # 默认 on（用户身份优先）；off = 一律应用身份
 GEBAI_PERSONA_FEISHU_HISTORY=5       # 用户身份回看历史条数（默认 0 = 不回查）
 ```
+
+**`GEBAI_PERSONA_FEISHU_HISTORY=0`（默认）时本源与渠道的入站能力等价**——那时开它没有意义。
+它的价值就在那几个历史条数上。
 
 ## 用户 token 从哪来
 
@@ -108,12 +112,12 @@ await manager.start()
 
 ## 协议要点（为什么这么写）
 
-1. **先 ACK 再处理**：飞书要求 3 秒内回 ACK，超时会重推。ACK 与业务处理顺序反了会造成
-   无谓重推与消息乱序。重推由幂等键（`feishu:{messageId}`）兜住。
-2. **单条消息处理失败不断流**：`onMessage` 抛错只记日志，连接继续（否则一条坏消息会让整个源停摆）。
-3. **分片合包**：超长事件会拆多帧，由 `FrameAssembler` 按 `message_id` 拼齐（5 秒过期）。
-4. **协议层是复制的**：`wsproto/` 与 `packages/server/src/feishu-bot/{pb,protocol}.ts` 同源，
-   复制而非 import 是为守住依赖单向（persona 不依赖 server）。**改协议要两处同步**。
+1. **本源不自己建连**：同一飞书应用只允许一条长连接。本源经 `ctx.deps.feishuLongConn`
+   拿宿主已有的连接注册面；自建 = 与应用互踢 = 两边都偶发收不到消息。
+   宿主侧的撞车判定见 `packages/server/src/core/session/persona-feishu-deps.ts`。
+2. **单条消息处理失败不断流**：投递抛错只记日志，连接继续（否则一条坏消息会让整个源停摆）。
+3. **读历史失败不阻断本条投递**：上下文是附加价值，拿不到就该没有，不能因此丢消息。
+4. **幂等键 = `feishu:{messageId}`**：飞书会重投同一消息，重复事件 = 重复副作用。
 
 ## 诊断
 
@@ -122,13 +126,15 @@ manager.state()   // stats.unattended 持续涨 = channel 没被任何人格认�
 manager.loadErrors()
 ```
 
-日志里关注三类：
-- `回退到应用身份：<原因>` — 用户 token 有问题（未授权/刷新失败）
-- `未注入用户令牌存储` — 装配漏了 `deps`
+日志里关注四类：
+- `回退到应用身份读历史：<原因>` — 用户令牌有问题（未授权/刷新失败）；**会写进正文让模型知道**
+- `未注入 deps.feishuLongConn` — 装配漏了，或与会话机器人同应用被拒绝
+- `GEBAI_PERSONA_FEISHU_HISTORY=N 但宿主未注入 deps.feishuHistory` — 想要上下文但没给能力
 - `未被接管（unattended）` — 人格配置里没有认领 `feishu` 这个 channel
 
 ## 已知边界
 
-- **只处理文本消息**：其它类型降级为说明文字（不做 OCR/附件下载）。
+- **只处理文本（含富文本）消息**：图片/文件/语音降级为可读占位（不做 OCR/附件下载）。
 - **不做卡片回调**：人格模式的审批走交互通道（引擎推送），不依赖飞书卡片按钮。
 - **不自动回复**：出站一律是模型显式调用动作工具（架构纪律，避免第二条绕过治理的通道）。
+- **不自己建连**（见上）：本源只提供「入站增强」，不提供出站。
