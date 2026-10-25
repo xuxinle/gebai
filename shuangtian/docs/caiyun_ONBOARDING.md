@@ -160,13 +160,14 @@ py scripts/ot_bench.py --script x.json --out out/otbench/x
 `ot_bench` 的口径：32×18 网格、逐帧差 <1.2 算静止、`>=5.51` 是 p95 门槛。
 **注意过亮判据已改为相对参考片比较**（绝对阈值会把亮调片全部判红）。
 
-## 本仓库里可参考的片子
+## 可参考的东西
 
-| 片子 | 特点 | 位置 |
-|---|---|---|
-| 歌白 30s | 信息型（卡片 + 环流）；静止占比 88%→**63%** 是靠「整屏亮度脉动」一刀下来的 | `out/films/gebai-31s.mp4` |
-| c13-clawd | 单主角完整动作弧，p95 达标 | `out/otbench/c13-clawd/` |
-| c11-infra | 满屏块阵每帧全换（p95 3× 参考） | `out/otbench/c11-infra/` |
-| c10-ebb | 单状态量驱动全片 | `out/otbench/c10-ebb/` |
+| 要看什么 | 去哪 |
+|---|---|
+| 一个完整的、能跑的示例 | `examples/caiyun/assets/slot-robot-example.js` + `.json` |
+| 13 种视觉风格的做法 | `examples/caiyun/assets/STYLES.md` |
+| 弹簧/样条/实体绘制 | `examples/caiyun/assets/_kit.js` |
+| 其它片子的制作过程 | `out/otbench/<case>/NOTES.md`（含轮次演进与失败记录，比读代码快） |
 
-每个目录里的 `NOTES.md` 有**完整的轮次演进与失败记录**——比读代码快。
+> **片子产物本身不入库**。`out/` 下只有 `otbench/*/NOTES.md` 这类过程记录值得看，
+> mp4 与逐帧 PNG 都是可重生成的中间物。
