@@ -86,6 +86,12 @@ class ScriptHost {
   [[nodiscard]] auto call(std::string_view function, const std::vector<st::Json>& arguments)
       -> Result<st::Json>;
 
+  /// 检查脚本语法而不执行（**不**触发快照重建/变更提交）。
+  ///
+  /// 热重载的"原子替换"靠它：先把全部页都过一遍语法，任一页写错就原地返回，
+  /// 旧逻辑原封不动（先清后装会让一次手滑把正在跑的逻辑清空）。
+  [[nodiscard]] auto check_syntax(std::string_view source) -> Status;
+
   /// 注册事件绑定。`handler` 是 JS 箭头函数/函数表达式源码，如 `() => log('hi')`。
   /// 返回绑定 id（可交给 `unbind`）。错误：`Parse`（处理器语法错）、`Invalid`（事件名非法）。
   [[nodiscard]] auto bind(std::string_view selector, std::string_view event,

@@ -82,6 +82,7 @@
 #include "st/ui/components/scroll.hpp"
 #include "st/ui/components/title_bar.hpp"
 #include "st/ui/components/window_frame.hpp"
+#include "st/ui/hot_reload.hpp"
 #include "st/ui/script_bridge.hpp"
 #include "st/ui/script_host.hpp"
 #include "st/ui/xml_ui.hpp"
@@ -591,6 +592,7 @@ struct CardStore {
 
 struct Options {
   bool headless{false};
+  bool watch{false};   ///< 改 XML/JS 即重载（常驻应用默认关：不每帧扫文件）
   std::string theme{"light"};
   std::string ui_dir{"examples/xiangqi/ui"};
   std::uint16_t control_port{0};
@@ -611,6 +613,10 @@ auto parse_options(int argc, char** argv) -> Options {
     auto next = [&]() -> std::string { return (i + 1 < argc) ? std::string{argv[++i]} : std::string{}; };
     if (arg == "--headless") {
       options.headless = true;
+    } else if (arg == "--watch") {
+      options.watch = true;
+    } else if (arg == "--no-watch") {
+      options.watch = false;
     } else if (arg == "--theme") {
       options.theme = next();
     } else if (arg == "--ui") {
@@ -737,22 +743,7 @@ auto run_app(int argc, char** argv) -> int {
 
   st::app::Application app("xiangqi", "0.1.0", app_options);
 
-  // ① 建界面：整棵树来自 XML
-  st::ui::XmlBuildReport report;
-  auto tree = st::ui::build_from_xml_file(st::fs::join(ui_dir, "main.xml"), &report);
-  if (tree == nullptr) {
-    std::fprintf(stderr, "建界面失败：%s\n", report.parse_warning.c_str());
-    for (const auto& tag : report.unknown_tags) std::fprintf(stderr, "  认不出的标签：%s\n", tag.c_str());
-    return 1;
-  }
-  for (const auto& attr : report.unknown_attributes) {
-    std::fprintf(stderr, "[相期] 属性未生效：%s\n", attr.c_str());
-  }
-  if (!report.parse_warning.empty()) {
-    std::fprintf(stderr, "[相期] XML 提示：%s\n", report.parse_warning.c_str());
-  }
-
-  // ② 外壳
+  // ① 外壳（**先壳后树**）：热重载换根的落点是 XML 根当前的父元素。
   auto frame = std::make_unique<st::ui::WindowFrame>("相期");
   frame->set_id("window-frame");
   frame->set_window_control(&app);
@@ -799,7 +790,6 @@ auto run_app(int argc, char** argv) -> int {
     dismiss->set_hint("把所有提示清掉（选择类与待办类不会被忽略——那两类必须给出结果）");
     frame->title_bar()->add_trailing(std::move(dismiss));
   }
-  frame->content()->add_child(std::move(tree));
   app.set_content(std::move(frame));
 
   // ③ 起服务（脚本宿主在 start() 里创建——桥必须在它之后建）
@@ -833,13 +823,32 @@ auto run_app(int argc, char** argv) -> int {
 
   st::ui::ScriptBridge bridge(*script, &app.root());
   store.install(bridge);
-  const std::string script_path = st::fs::join(ui_dir, "app.js");
-  if (auto status = bridge.load(script_path); !status) {
-    std::fprintf(stderr, "装载 %s 失败：%s\n", script_path.c_str(), status.error().message.c_str());
+
+  // ⑤.5 **改文件即生效**（改 XML/JS 保存即可，不重编不重启）
+  //
+  // 对相期这类常驻面板意义更大：它常年挂在屏幕上，为调一个间距就重启一次会把
+  // “agent 投过来的卡片”与连接状态一起重来（重启会重新处理 inbox）。
+  // 默认**不**扫文件（常驻形态不为一一个调试便利每帧 stat）：`--watch` 打开。
+  st::ui::HotReload::Options hot_options;
+  hot_options.ui_dir = ui_dir;
+  hot_options.watch = options.watch;
+  st::ui::HotReload hot(app.root(), *script, bridge, hot_options);
+  // 标题栏里那些元素是壳层自己的（不在 XML 里），热重载换根不会碰它们。
+  (void)bridge.expose("hot.reload", [&hot](const std::vector<Json>&) -> st::Result<Json> {
+    auto status = hot.refresh_all();
+    if (!status) return st::unexpected(status.error().code, status.error().message);
+    return Json(true);
+  });
+  (void)bridge.expose("hot.status", [&hot](const std::vector<Json>&) -> st::Result<Json> {
+    return hot.status();
+  });
+  if (auto status = hot.refresh_all(); !status) {
+    std::fprintf(stderr, "装载失败：%s\n", status.error().message.c_str());
     return 1;
   }
-  st::print("相期就绪：界面 {} · 逻辑 {} · 桥 {} 个函数 · 数据 {}\n", ui_dir, script_path,
-            bridge.exposed().size(), home);
+  st::print("相期就绪：界面 {} · 逻辑 {} · 桥 {} 个函数 · 数据 {} · 热重载 {}\n", ui_dir,
+            st::fs::join(ui_dir, "app.js"), bridge.exposed().size(), home,
+            options.watch ? "开" : "关（--watch 打开）");
 
   // ⑥ 主循环：每帧顺手把 agent 下发的消息吃掉。
   //

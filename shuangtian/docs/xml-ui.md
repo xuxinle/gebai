@@ -41,18 +41,25 @@ $('#go').on('click', () => {
 `main.cpp` 里只有三件事（完整模板见 `examples/xmlapp/main.cpp`）：
 
 ```cpp
-// ① 建界面：整棵树来自 XML
-st::ui::XmlBuildReport report;
-auto tree = st::ui::build_from_xml_file("ui/main.xml", &report);
+// ① 壳层先挂（窗框/标题栏）：XML 树由 HotReload 换根，落点是它当前的父元素
+app.set_content(std::move(frame));
+app.start();
 
 // ② 暴露 C++ 能力：脚本里就是 `app.search.run(…)`
 bridge.expose("search.run", [](const std::vector<st::Json>& args) -> st::Result<st::Json> {
   return st::Json(do_search(st::json_as_string(args[0])));
 });
 
-// ③ 装载逻辑
-bridge.load("ui/app.js");
+// ③ 装载 XML 树 + JS 逻辑（并**改文件即生效**，见下）
+st::ui::HotReload::Options options;
+options.ui_dir = "ui";
+options.watch = true;
+st::ui::HotReload hot(app.root(), *app.script(), bridge, options);
+hot.refresh_all();      // 主循环里再加一句 `if (hot.poll() > 0) app.request_repaint();`
 ```
+
+> **调界面不必重启**：`HotReload` 让改 `main.xml` / `app.js` 后保存即生效（换树 /
+> 重装逻辑，原子替换、写错不清界面）。完整说明见 [`hot-reload.md`](hot-reload.md)。
 
 ## XML 里能写什么
 
@@ -157,6 +164,7 @@ bridge.expose("fs.read", [](const std::vector<st::Json>& args) -> st::Result<st:
 ## 参考
 
 - 完整可运行示例：`examples/xmlapp/`（任务清单，零 C++ UI 代码）
-- 端到端回归：`tools/xmlapp_e2e.py`
+- **改文件即生效**：`docs/hot-reload.md`（`ui::HotReload`，`DESIGN.md` §4.2.28）
+- 端到端回归：`tools/xmlapp_e2e.py`、`tools/hot_reload_e2e.py`
 - 设计说明：`DESIGN.md` §4.2.20（XML 建树）与 §4.2.21（脚本桥）
 - C++ 声明式（不需要 XML 时的另一条路）：`docs/declarative.md`

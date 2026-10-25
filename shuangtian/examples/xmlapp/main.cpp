@@ -10,14 +10,15 @@
 /// 2. **暴露能力**：把 C++ 侧的真实能力（这里是内存里的任务表）经
 ///    `ScriptBridge::expose` 交给脚本——`app.tasks.add(…)` 那一族；
 ///    换成读文件/跑命令/查数据库，形状完全一样；
-/// 3. **装载**：`build_from_xml_file` 建界面树 → `bridge.load(app.js)` 跑逻辑。
+/// 3. **装载**：交给 `ui::HotReload`（建树 + 跑逻辑 + **改文件即生效**）。
 ///
 /// ## 与 gallery / gbcode / louyue 的分工
 ///
 /// 那三个示例演示的是"用 C++（或 C++ + 声明式）写应用"的能力面；
-/// 本示例演示的是**另一种开发形态**：不动 C++、只改资源文件就能改应用。
-/// 它同时是 XML 通路与 JS 桥这两块框架能力的端到端回归——
-/// 出问题时最先坏的就是"XML 建不出树"或"JS 调不到 C++"。
+/// 本示例演示的是**另一种开发形态**：不动 C++、只改资源文件就能改应用，
+/// 而且 **改完保存就生效**（不重编不重启，见 `docs/hot-reload.md`）。
+/// 它同时是 XML 通路、JS 桥、热重载这三块框架能力的端到端回归——
+/// 出问题时最先坏的就是"XML 建不出树"或"JS 调不到 C++"或"改了文件不生效"。
 
 #include <cstdint>
 #include <cstdio>
@@ -35,6 +36,7 @@
 #include "st/ext/json.hpp"
 #include "st/ui/components/title_bar.hpp"
 #include "st/ui/components/window_frame.hpp"
+#include "st/ui/hot_reload.hpp"
 #include "st/ui/script_bridge.hpp"
 #include "st/ui/script_host.hpp"
 #include "st/ui/xml_ui.hpp"
@@ -124,6 +126,7 @@ struct TaskStore {
 /// 命令行：**承 `st::app::CommonOptions` 的形态**（本示例只多一个 `--ui` 目录）。
 struct Options {
   bool headless{false};
+  bool watch{true};   ///< 改 XML/JS 就重新装载（默认开：示例的用途就是给人调界面）
   std::string theme{"light"};
   std::uint16_t control_port{0};
   std::string control_file{};
@@ -143,6 +146,7 @@ auto print_usage(std::string_view program) -> void {
       "\n"
       "内容/自动化\n"
       "  --ui DIR              资源目录（main.xml 与 app.js 所在处，默认 ui）\n"
+      "  --watch / --no-watch  改 XML/JS 即生效（默认开；关掉验证生产形态）\n"
       "  --control-port N      控制通道端口（0 = 自动）\n"
       "  --control-file PATH   控制信息落盘路径\n"
       "  --shots DIR           无头截图目录\n"
@@ -191,6 +195,10 @@ auto parse_options(int argc, char** argv) -> Options {
     }
     if (arg == "--headless") {
       options.headless = true;
+    } else if (arg == "--watch") {
+      options.watch = true;
+    } else if (arg == "--no-watch") {
+      options.watch = false;
     } else if (arg == "--theme") {
       options.theme = next();
     } else if (arg == "--control-port") {
@@ -247,26 +255,11 @@ auto run_app(int argc, char** argv) -> int {
 
   st::app::Application app("xmlapp", "0.1.0", app_options);
 
-  // ① 建界面：**整棵树来自 XML**，这里没有一行 UI 代码。
-  st::ui::XmlBuildReport report;
-  auto tree = st::ui::build_from_xml_file(st::fs::join(ui_dir, "main.xml"), &report);
-  if (tree == nullptr) {
-    std::fprintf(stderr, "建界面失败：%s\n", report.parse_warning.c_str());
-    for (const auto& tag : report.unknown_tags) {
-      std::fprintf(stderr, "  认不出的标签：%s\n", tag.c_str());
-    }
-    return 1;
-  }
-  // 报告要**打印出来**：认不出的属性是"界面少了点东西"的常见原因，
-  // 而静默跳过会让排查从"看日志"变成"读源码"。
-  for (const auto& attr : report.unknown_attributes) {
-    std::fprintf(stderr, "[xmlapp] 属性未生效：%s\n", attr.c_str());
-  }
-  if (!report.parse_warning.empty()) {
-    std::fprintf(stderr, "[xmlapp] XML 提示：%s\n", report.parse_warning.c_str());
-  }
-
-  // ② 外壳：标题栏 + 内容槽（与其他示例同形态）。
+  // ① 外壳：标题栏 + 内容槽（与其他示例同形态）。
+  //
+  // ⚠ **先挂壳、后挂 XML 树**：热重载要"换根"，而换根的落点是 XML 根当前的父元素。
+  // 壳层先 `set_content` 到位，`HotReload::refresh_ui()` 就能把新树挂在同一位置；
+  // 反过来（XML 先挂、壳层后包）则每一轮重载都得重新包一次窗框——那是重复而不是重建。
   auto frame = std::make_unique<st::ui::WindowFrame>("xmlapp · 霜天");
   frame->set_id("window-frame");
   frame->set_window_control(&app);
@@ -274,10 +267,9 @@ auto run_app(int argc, char** argv) -> int {
     frame->title_bar()->set_id("titlebar");
     frame->title_bar()->set_icon("list");
   }
-  frame->content()->add_child(std::move(tree));
   app.set_content(std::move(frame));
 
-  // ③ 起服务（脚本宿主在 `start()` 里创建——所以桥必须在它之后建）。
+  // ② 起服务（脚本宿主在 `start()` 里创建——所以桥必须在它之后建）。
   if (auto status = app.start(); !status) {
     std::fprintf(stderr, "启动失败：%s\n", status.error().message.c_str());
     return 1;
@@ -288,28 +280,51 @@ auto run_app(int argc, char** argv) -> int {
     return 1;
   }
 
-  // ④ 暴露 C++ 能力 + 装载 JS 逻辑。
+  // ③ 暴露 C++ 能力。
   TaskStore store;
   st::ui::ScriptBridge bridge(*script, &app.root());
   store.install(bridge);
-  const std::string script_path = st::fs::join(ui_dir, "app.js");
-  if (auto status = bridge.load(script_path); !status) {
-    std::fprintf(stderr, "装载 %s 失败：%s\n", script_path.c_str(), status.error().message.c_str());
+
+  // ④ **改文件即生效**：XML 建树、JS 重装都由 `HotReload` 管，不再在启动时。
+  st::ui::HotReload::Options hot_options;
+  hot_options.ui_dir = ui_dir;
+  hot_options.watch = options.watch;
+  st::ui::HotReload hot(app.root(), *script, bridge, hot_options);
+  // 开发便利：脚本里 `hot_reload()` 一句话重载（改完在窗口里点一下就能看）。
+  (void)bridge.expose("hot.reload", [&hot](const std::vector<Json>&) -> st::Result<Json> {
+    auto status = hot.refresh_all();
+    if (!status) return st::unexpected(status.error().code, status.error().message);
+    return Json(true);
+  });
+  (void)bridge.expose("hot.status", [&hot](const std::vector<Json>&) -> st::Result<Json> {
+    return hot.status();
+  });
+
+  // 开局装载一次（与原先"手工 build + load"等价，但错误语义统一在 HotReload 里）。
+  if (auto status = hot.refresh_all(); !status) {
+    std::fprintf(stderr, "装载失败：%s\n", status.error().message.c_str());
     return 1;
   }
-  st::print("xmlapp 就绪：界面 {}（{} 个元素）· 逻辑 {} · 桥 {} 个函数\n", ui_dir, report.elements,
-            script_path, bridge.exposed().size());
+  st::print("xmlapp 就绪：界面 {} · 逻辑 {} · 桥 {} 个函数 · 热重载 {}\n", ui_dir,
+            st::fs::join(ui_dir, "app.js"), bridge.exposed().size(),
+            options.watch ? "开（改文件即生效）" : "关（--watch 打开）");
+  st::print("  {}\n", hot.last_summary());
 
   // 主循环：**承 gallery/louyue 形态**（需要每帧显式推进声明式宿主）。
+  // 每帧的 `hot.poll()` 没开 watch 时是常数级判断，不影响帧时间。
   std::uint64_t frames = 0;
   while (!app.quit_requested()) {
     const std::int64_t frame_start_ms = st::time::now_ms();
+    if (hot.poll() > 0) app.request_repaint();
     if (app.root().tick_declarative_hosts() > 0U) app.request_repaint();
     app.tick();
     ++frames;
     app.pace_loop(frame_start_ms);
   }
-  st::print("xmlapp 退出：{} 帧\n", frames);
+  const Json final_status = hot.status();
+  st::print("xmlapp 退出：{} 帧（界面重建 {} 次 / 逻辑重装 {} 次）\n", frames,
+            st::json_as_i64(final_status["ui_refreshes"], 0),
+            st::json_as_i64(final_status["script_refreshes"], 0));
   return 0;
 }
 

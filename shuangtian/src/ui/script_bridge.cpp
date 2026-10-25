@@ -71,7 +71,8 @@ struct ScriptBridge::Impl {
   std::string last_error{};
   std::size_t sequence{0};
 
-  /// 把一段 JS 求值为 `Result`：引擎错误 → 带文件名的失败。
+  /// 把一份脚本"检查 → 清场 → 重放"（热重载的内部件）。
+  /// 与 `load` 的差别：不清场时旧闭包会继续被 handlers/timers 表强引用（见 `ui::HotReload`）。
   auto run_source(const std::string& source, const std::string& filename) -> Status {
     if (script == nullptr || !script->valid()) {
       return st::unexpected(st::ErrorCode::Unsupported, "脚本宿主未就绪");
@@ -252,6 +253,7 @@ ScriptBridge::ScriptBridge(ScriptHost& script, UiRoot* root) : impl_(std::make_u
 ScriptBridge::~ScriptBridge() = default;
 ScriptBridge::ScriptBridge(ScriptBridge&&) noexcept = default;
 auto ScriptBridge::operator=(ScriptBridge&&) noexcept -> ScriptBridge& = default;
+
 
 auto ScriptBridge::expose(std::string name, ScriptBridgeFn function) -> bool {
   if (impl_ == nullptr || impl_->script == nullptr) return false;

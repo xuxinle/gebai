@@ -1708,6 +1708,50 @@ Model 层零改动。
 用例；只关入口→恰好红两个入口用例（消费语义差异同时被钉住）——测试对每道
 防线都有独立判别力，不是恒绿护栏。
 
+### 4.2.28 改文件即生效（`st::ui::HotReload`，2026-10-25）
+
+**缺口**：`docs/xml-ui.md` 那条通路（XML 写界面 + JS 写逻辑）本来就把两份文件放在
+**运行期读**，但改完仍要重开进程：XML 只在启动时建一次树、JS 只在启动时 `bridge.load`
+一次。于是"调一个间距"的一轮是：改文件 → 切终端 → 起进程 → 看窗口。而这套框架的
+定位是"智能体开发、人验收"——这条回路每慢一轮，返工代价就高一次。
+
+同名缺口在**构建侧**：`st run` 无条件先 `build`，编辑一个 `gap` 要等一次链接
+（实测 dev 档 6~8 s），而且产物被在跑的实例占用时直接报"结束实例再重编"。
+
+**两层各负其责**：
+
+| 层 | 做什么 | 判据 |
+|---|---|---|
+| `st run` | 壳层源码没改就**跳过构建**，直接用现有产物并**明说**"未重编" | 目标第一条 `sources`（壳层 .cpp）的 mtime 全部早于产物 |
+| `HotReload` | 改 XML/JS 保存即生效：换树 / 重装逻辑，进程不重启 | 文件**内容哈希**（FNV-1a）而非 mtime |
+
+**换根的落点**：新树挂在"旧 XML 根当前的父元素"下（首次挂 `UiRoot::content()`）。
+因此应用必须**先 `set_content` 壳层、再让 HotReload 装载树**——反过来（树先挂、壳层后包）
+每轮重载都要重新包一次窗框，那是重复而不是重建。
+
+**三条硬约束**：
+
+1. **原子**：XML 语法错/认不出标签 → 界面保持旧版；JS 语法错 → 全部页先
+   `check_syntax` 再动手，任一失败旧逻辑继续跑。判据是"写文件的人正在看窗口"：
+   一次手滑变成白屏比一次报错难查得多。认不出的**属性**只告警（丢一个属性值，元素还在），
+   与"丢整棵子树"的标签错**处置不同**。
+2. **内容指纹判变**：`CONVENTIONS.md` §7.4 已记过 mtime 判不掉改动的账
+   （`git checkout`/`copy2` 恢复后 mtime 更旧）；这条通路里判错的症状是
+   "保存了却看不到变化"——唯一会让人放弃它的症状。
+3. **清场而不是叠装**：JS 在同一引擎里重装，旧闭包仍被 `handlers`/`timers`
+   两张 append-only 表强引用。不清的后果都是实测级：一次点击跑两遍处理器（`toggle`
+   两次 = 看起来"点了没反应"）、定时器被装出第二份。清的是 `script_api.js` 的两张表 +
+   `boundKeys` + `state`；**不清 `app.*`**（那层是桥挂的宿主函数，清掉就 `not a function`）。
+
+**不做**：不热重载 C++（那是编译器/构建系统的事）、不保存界面运行期状态
+（不是状态迁移，是重新建；要保留的属于脚本层，由脚本自己写出）。
+
+**回归**：`tests/ui_hot_reload_test.cpp`（换树指针变化 / 坏 XML 不清界面 / 坏 JS 不清绑定 /
+内容相同不重载 / status 诊断面，5 例 53 断言）、`tools/hot_reload_e2e.py`
+（真进程：改文件 → 控制通道问界面变没变，四条通路各 1~3 条断言）。
+实跑：xmlapp / xiangqi 两个示例已改吃这条通路，e2e（`xmlapp_e2e.py` /
+`xiangqi_e2e.py`）全绿。文档：`docs/hot-reload.md`。
+
 ### 4.3 text
 ```cpp
 namespace st::text {
@@ -5107,7 +5151,7 @@ stpm 另提供依赖获取能力（版本求解 + SHA-256 校验 + 缓存 + vend
 |---|---|
 | `st init <name>` | 生成工程骨架 |
 | `st build [target] [--profile dev\|quick\|debug\|release\|san] [--locked] [-j N] [--jobs-large N] [--max-memory MiB]` | 构建 |
-| `st run <target> [args…]` | 构建并运行 |
+| `st run <target> [args…]` | 构建并运行。**壳层源码未改时跳过构建**（XML/JS 是运行期读的，改它们不用编；判据：目标第一条 `sources` 比产物新不新，`--force` 强制重建）——改文件即生效见 §4.2.28 |
 | `st test [filter] [--san] [--slow] [--test-jobs N]` | 构建并运行单测（含 sanitizer 档）；`--list` 只列用例不跑；`--format junit [--junit-out 路径]` 写逐用例 XML 报告（CI 消费）；**`--slow` 额外跑慢/环境敏感用例**（默认跳过，见 §8.5）；**`--test-jobs N` 把用例分给 N 个测试进程并行跑**（默认 = 硬件并发/2、上限 16；JUnit 报告由父进程合并） |
 | `st lint [--explain <rule>]` | 禁令静态扫描（`CONVENTIONS.md` §8） |
 | `st check [--toolchain <名>]` | **只检查不产出**（`-fsyntax-only`）：不写 `.o`/`.d`、不读 PCH、不用共享对象缓存、不链接。与 `build` 走**同一段**单元枚举与标志组装（`options.check_only`），所以"检查过了"就是"编得过"。主要用途是**跨编译器门禁**（`--toolchain=clang`），见 `docs/BUILD_CHECK.md` |

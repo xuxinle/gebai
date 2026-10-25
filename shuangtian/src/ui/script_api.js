@@ -270,6 +270,44 @@
   // 变更集提交：宿主在阶段末调用一次，取走队列。
   globalThis.__take_changes = function () { return pending.splice(0, pending.length); };
 
+  // ── 重载支持（宿主驱动；应用脚本不要自己调）─────────────────────────
+  //
+  // 为什么需要 `__reset_script_state`：引擎是**同一个**，页面脚本每次装载都在新
+  // 作用域里重建闭包，而旧闭包仍被 `handlers`/`timers` 两张表强引用（append-only）。
+  // 不清的后果都是实测级：① 一次点击跑两遍旧处理器（表现为“点了没反应/值又弹回去”）；
+  // ② 每个定时器被装出第二份，重载几次后 CPU 与内存一起涨。
+  //
+  // 清理顺序按**谁引用谁**排：定时器 → 处理器 → 绑定键 → 状态 → 快照。
+  //
+  // ⚠ 不清 `app.*`：那些是**宿主函数**（`expose` 时由桥挂上去的 C++ 回调），
+  // 桥只在启动时挂一次——删了就没有谁再挂回来（实测：重载后第一行 `app.tasks.list()`
+  // 就报 `TypeError: not a function`，而源头是“清得太干净”）。会泄漏的是**应用自己的
+  // 闭包**（handlers/timers 两张表强引用的），上面已经清完。
+  globalThis.__reset_script_state = function () {
+    for (const id of Object.keys(timers)) delete timers[id];
+    for (const id of Object.keys(handlers)) delete handlers[id];
+    for (const key of Object.keys(boundKeys)) delete boundKeys[key];
+    for (const key of Object.keys(state)) delete state[key];
+    pending.length = 0;
+    snapshot = null;
+    return true;
+  };
+
+  // `hot_reload()`：脚本里的**一句话重载**（开发时“改完在窗口里点一下”）。
+  //
+  // 必须由宿主 expose（`app.hot.reload`）而不是这里自己读文件：脚本层没有
+  // 文件/进程能力（见 `st/ext/script.hpp` 的安全姿态），读文件、重建树、重装脚本
+  // 全是宿主的事。这里只负责“叫一声”，并在宿主没装时**说清楚**（不静默 false）。
+  globalThis.hot_reload = function () {
+    if (typeof globalThis.app !== 'object' || globalThis.app === null ||
+        typeof globalThis.app.hot === 'undefined' ||
+        typeof globalThis.app.hot.reload !== 'function') {
+      logFn('[警告] hot_reload() 不可用：宿主未装载 HotReload（或未 expose app.hot.reload）');
+      return false;
+    }
+    return globalThis.app.hot.reload() === true;
+  };
+
   // 宿主注入点（保留给宿主与测试）
   globalThis.__st = { snapshot: ensure, query, pending, handlers, timers, state };
 })();

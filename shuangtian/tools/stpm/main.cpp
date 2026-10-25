@@ -160,6 +160,9 @@ void print_usage() {
                         --jobs-large N 限超大单元并发（默认 1）；--max-memory MiB 覆盖预算
                         交叉编译：--toolchain=<名>（工具链在 st.pkg 的 toolchains 段声明）
   run <target> [args]   构建并运行目标（无头演示：run gallery -- --headless --frames 3）
+                        ⚠ 壳层源码未改的目标**跳过构建**（XML/JS 是运行期读的，改它们不用编）：
+                        判据是目标第一条 sources 比产物新不新；要强制重建加 `--force`
+                        XML/JS 应用的改文件即生效（热重载）见 docs/hot-reload.md
   test [filter]         构建并运行单元测试（--san 开 ASan/UBSan 档，-j N 控并发；同支持 --jobs-large/--max-memory）
                         --slow 额外跑“慢/环境敏感”用例（量帧耗时/吞吐的性能门禁、
                         真编译的集成用例）——它们默认跳过：占测试壁钟近三分之一，
@@ -325,11 +328,91 @@ auto command_build(const Arguments& arguments) -> int {
   return 0;
 }
 
+/// 产物后缀：**按宿主平台**取（本机档与宿主同平台）。
+///
+/// 为何不写成常量的 `.exe`：那会把"在 Linux 上干活"变成“永远找不到产物→永远重编”，
+/// 即"不重编"这条优化在 Linux 上完全不生效（而 Linux 正是本框架的主战场之一）。
+/// 带 `--toolchain` 时**不走**快路径（那条是交叉档，跑的可能是别的平台的产物），
+/// 所以这里只需要宿主的口径。
+[[nodiscard]] auto host_executable_suffix() -> std::string {
+#if defined(_WIN32)
+  return ".exe";
+#else
+  return {};
+#endif
+}
+
+/// 「资源文件是运行期读的」目标：壳层源码没改就直接跑现有产物。
+///
+/// 返回 `nullopt` = 走正常构建路径（因为 `--force`/`--toolchain`/无清单/无目标/
+/// 无产物/壳层源码更新）；返回带退出码的值 = 已经跑完。
+///
+/// 判据只有一条：**壳层源文件是否比产物新**（比 `st::pkg` 的增量判定更严：任何一壳层
+/// 源比产物新就重建）。此外它**必须自己报告**“没重编”——那是让人以为构建过了的陷阱。
+[[nodiscard]] auto run_without_build(const Arguments& arguments, const std::string& target,
+                                     const std::vector<std::string>& app_args)
+    -> std::optional<int> {
+  if (arguments.has("force") || !arguments.get("toolchain", "").empty()) return std::nullopt;
+  auto manifest = load_manifest(arguments);
+  if (!manifest.has_value()) return std::nullopt;
+  const st::pkg::TargetSpec* spec = manifest->find_target(target);
+  if (spec == nullptr || spec->sources.empty()) return std::nullopt;
+  auto shell_sources = st::fs::expand_glob(manifest->directory, spec->sources.front());
+  if (!shell_sources.has_value()) return std::nullopt;
+  const std::string profile = arguments.get("profile", "release");
+  const std::string artifact = st::fs::join(
+      manifest->directory,
+      st::fs::join(std::format("build/{}/bin", profile), target + host_executable_suffix()));
+  if (!st::fs::is_regular_file(artifact)) return std::nullopt;
+  const auto artifact_time = st::fs::modified_ns(artifact);
+  if (!artifact_time.has_value()) return std::nullopt;
+  std::string newest_source{};
+  std::int64_t newest_stamp = 0;
+  for (const auto& source : *shell_sources) {
+    const auto stamp = st::fs::modified_ns(source);
+    if (stamp.has_value() && *stamp > newest_stamp) {
+      newest_stamp = *stamp;
+      newest_source = source;
+    }
+  }
+  if (newest_stamp > *artifact_time) return std::nullopt;
+
+  st::print("未重编：资源文件（XML/JS）是运行期读的——产物较壳层源码新，直接用。\n");
+  st::print("  （改了 C++ 才需要构建；要强制重建加 build 或 --force）\n");
+  st::print("运行: {}\n", artifact);
+  std::fflush(stdout);
+  st::process::Options run_options;
+  run_options.capture_output = false;
+  auto result = st::process::run(artifact, app_args, run_options);
+  if (!result) {
+    std::fprintf(stderr, "错误: %s\n", result.error().to_string().c_str());
+    return 1;
+  }
+  return result->exit_code;
+}
+
 auto command_run(const Arguments& arguments) -> int {
   if (arguments.positional.empty()) {
     std::fprintf(stderr, "错误: run 需要目标名（如 st run gallery --headless）\n");
     return 1;
   }
+  const std::string target = arguments.positional.front();
+  std::vector<std::string> app_args;
+  for (std::size_t index = 1; index < arguments.positional.size(); ++index) {
+    app_args.push_back(arguments.positional[index]);
+  }
+
+  // ## 「XML + JS 应用」（xmlapp / xiangqi 这类）的**不重编**通路
+  //
+  // 这类应用的界面与逻辑都在**运行期读**的文件里（`ui/*.xml` / `ui/*.js`），
+  // 改它们**不需要构建**：产物的源码边界只是 `examples/xmlapp/*.cpp` 那几百行壳层。
+  // 但旧行为是无条件先 `build`（编辑一个 `gap` → 等 6~8 秒链接，而且产物被在跑的
+  // 实例占用时直接报「结束实例再重编」）——把"调一个间距"变成一次编译。
+  if (const auto reused = run_without_build(arguments, target, app_args);
+      reused.has_value()) {
+    return *reused;
+  }
+
   auto manifest = load_manifest(arguments);
   if (!manifest) {
     std::fprintf(stderr, "错误: %s\n", manifest.error().to_string().c_str());
@@ -337,17 +420,13 @@ auto command_run(const Arguments& arguments) -> int {
   }
   st::pkg::BuildOptions options;
   options.profile = arguments.get("profile", "release");
-  options.target = arguments.positional.front();
+  options.target = target;
   // 交叉编译：`--toolchain=<名>`（与 build/test 同一口径）——不带此参数才走本机档
   options.toolchain = arguments.get("toolchain", "");
   auto stats = st::pkg::build(*manifest, options);
   if (!stats) {
     std::fprintf(stderr, "%s\n", stats.error().message.c_str());
     return 1;
-  }
-  std::vector<std::string> app_args;
-  for (std::size_t index = 1; index < arguments.positional.size(); ++index) {
-    app_args.push_back(arguments.positional[index]);
   }
   st::print("运行: {}\n", stats->artifact);
   std::fflush(stdout);

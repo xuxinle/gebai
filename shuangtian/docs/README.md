@@ -83,6 +83,7 @@
 | [`LOUYUE_CAIYUN.md`](LOUYUE_CAIYUN.md) | 「镂月裁云」两示例的设计规约 | 记录（**已实现**；权威现状见 README「示例」节） |
 | [`script_design.md`](script_design.md) | **剧本设计模板**（裁云/镂月通用）：先写剧本再写脚本的六部分模板（定位/内容结构/逐镜设计表/视觉规范/声音设计/确认点） | 活（与 `caiyun`/`louyue` 子代理提示词同口径） |
 | [`xml-ui.md`](xml-ui.md) | 纯 XML + JS 通路（`examples/xmlapp`）：XML 描述界面 + `ScriptBridge` JS 驱动 | 记录（已落地，`DESIGN.md` §4.2.20–22） |
+| [`hot-reload.md`](hot-reload.md) | **改文件即生效**（`st::ui::HotReload`）：改 XML/JS 保存就见效，不重编不重启；原子替换、内容指纹判变、清场语义 | 活（`DESIGN.md` §4.2.28） |
 
 ## F. 各目录里的文档
 

@@ -59,6 +59,8 @@ SEQUENCE = [
     "louyue_e2e.py",
     "caiyun_e2e.py",
     "xmlapp_e2e.py",
+    # 同一二进制的另一面：**改文件即生效**（改 XML/JS 保存就重载，写错不清界面）
+    "hot_reload_e2e.py",
 ]
 BENCH = ["gbcode_sidebar_keepalive_bench.py"]  # 无断言的对照测量，--with-bench 才跑
 

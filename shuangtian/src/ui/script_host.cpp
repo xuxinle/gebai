@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <functional>
 #include <cstdint>
 #include <format>
@@ -313,6 +314,11 @@ auto ScriptHost::call(std::string_view function, const std::vector<st::Json>& ar
   return impl_->run_entry([this, function, &arguments]() {
     return impl_->engine->call(function, arguments);
   });
+}
+
+auto ScriptHost::check_syntax(std::string_view source) -> Status {
+  if (!valid()) return st::unexpected(st::ErrorCode::Unsupported, "脚本宿主未就绪");
+  return impl_->engine->check_syntax(source);
 }
 
 auto ScriptHost::bind(std::string_view selector, std::string_view event, std::string_view handler)

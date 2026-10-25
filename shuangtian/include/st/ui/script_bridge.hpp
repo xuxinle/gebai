@@ -89,7 +89,10 @@ class ScriptBridge {
   /// 必须是"哪一步错了"，而不是一句"脚本出错"）。
   auto load(const std::string& path) -> Status;
 
-  /// 执行一段脚本源码（测试/内联逻辑用；`filename` 出现在出错信息里）。
+  /// 装载并执行一段脚本源码（与 `load` 同一份实现，只是不读文件）。
+  ///
+  /// 热重载用它把"已经读进内存 + 已做过语法检查"的内容重放进来：先检查全部、
+  /// 通过后才落地，任何一页写错都不会让旧逻辑半途消失（见 `ui::HotReload`）。
   auto run(std::string_view source, std::string_view filename = "<inline>") -> Status;
 
   /// 已暴露的名字（诊断/测试面：**能用什么**应当可查）。
