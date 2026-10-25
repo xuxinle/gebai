@@ -701,6 +701,17 @@ describe("样式契约：差异视图导航在头部不在标签栏", () => {
     // 用户已自己滚过则不抢（大文件差异算得慢，算完时他可能已在看别处）
     expect(body).toContain("userScrolled")
     expect(body).toContain("!userScrolled")
+    // 「用户已滚过」只能用真实 DOM 输入判定：不能拿 onDidScrollChange 当用户滚动——
+    // Monaco 实例化/换模型自己会写 scrollTop（实测会误杀首跳：差异视图停在第一行，
+    // 导航显示 1/1 却还在开头）。
+    expect(body).toContain('host.addEventListener("wheel", markUser')
+    expect(body).toContain('host.addEventListener("pointerdown", markUser')
+    expect(body).toContain('host.addEventListener("touchmove", markUser')
+    // onDidScrollChange 的回调体内不得出现赋值（靠 markUser 手动置位）
+    const cbStart = body.indexOf("onDidScrollChange(() => {")
+    expect(cbStart).toBeGreaterThan(-1)
+    const cbBody = body.slice(cbStart, body.indexOf("})", body.indexOf("emit()", cbStart)))
+    expect(cbBody).not.toContain("userScrolled = true")
     // 无差异不跳
     expect(body).toMatch(/list\(\)\.length\s*\)\s*reveal\(0, false\)/)
   })

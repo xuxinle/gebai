@@ -1522,10 +1522,23 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
 
   // 滚动 / 差异重算后刷新计数（滚动事件每帧都会回调：合并到一帧再算，计数 DOM 也随之少刷）
   let scrollRaf = 0
-  /** 用户已自己动过视口：首次自动定位作废（大文件差异算得慢，算完时他可能已在看别处）。 */
+  /**
+   * 用户是否已**主动**动过视口：首次自动定位作废。
+   *
+   * 不能用 onDidScrollChange 判定——Monaco 实例化/换模型时自己会布局并写 scrollTop，
+   * 那个事件与用户滚动无法区分（实测：注册监听后先来两次程序滚动，首跳被误杀，
+   * 差异视图停在第一行）。所以只听 DOM 上的真实输入：滚轮、触摸、按下鼠标（拖滚动条/滑块）、
+   * 按键。DOM 监听不依赖 Monaco 版本间的 API 差异，也不会漏掉内层编辑器冒泡上来的事件。
+   */
   let userScrolled = false
-  const sub = ed.getModifiedEditor().onDidScrollChange(() => {
+  const markUser = () => {
     userScrolled = true
+  }
+  host.addEventListener("wheel", markUser, { passive: true })
+  host.addEventListener("touchmove", markUser, { passive: true })
+  host.addEventListener("pointerdown", markUser, { passive: true })
+  host.addEventListener("keydown", markUser, { passive: true })
+  const sub = ed.getModifiedEditor().onDidScrollChange(() => {
     if (scrollRaf) return
     scrollRaf = requestAnimationFrame(() => {
       scrollRaf = 0
