@@ -306,14 +306,24 @@ function analyzeAudio(samples: Float32Array, sampleRate: number): AudioMetric[] 
 // ---------------------------------------------------------------- 读取属性
 
 async function readProps(ctx: ToolContext, id: string): Promise<DirectorProps> {
-  // 优先用已装载的 shuangtian 工具（复用装载门控/审批/ctx 组装，不绕过治理层）
-  const registry = (ctx as unknown as { registry?: { has(n: string): boolean; call(n: string, a: unknown): Promise<unknown> } }).registry
-  if (!registry?.has("shuangtian_get")) {
+  // 用已注册的 shuangtian_get（复用装载门控/审批/ctx 组装，不绕过治理层）。
+  //
+  // ## 为何走 `registry.resolve` + `tool.execute`（而不是 `has` / `call`）
+  //
+  // 真实契约（`sdk/agent-contract.ts` 的 `ToolContext.registry`）只有三个成员：
+  // `schemas()` / `resolve(name)` / `getAgentNames()`。早先这里按 `has(n)` + `call(n,a)` 调用，
+  // 而那两个方法**从不存在**，于是工具一调就报 `registry?.has is not a function`——
+  // 而错误信息指向的 `ctx.registry` 看着完全正常，真因（接口形状写错）很难看出来。
+  //
+  // 正确入口：`resolve(name)` 回 `{ name, tool }`，然后 `tool.execute(args, ctx)`——
+  // 与直接调用工具同一路径（同样的 args 形状、同样的 ToolResult 形状）。
+  const entry = ctx.registry.resolve("shuangtian_get")
+  if (!entry) {
     throw new Error(
       "需要 shuangtian 子代理的 get 工具（读取渲染质检属性）。本工具按依赖装载，出现此提示说明依赖未装载",
     )
   }
-  const raw = (await registry.call("shuangtian_get", { id })) as { output?: string; data?: unknown }
+  const raw = (await entry.tool.execute({ id }, ctx)) as { output?: string; data?: unknown }
   const data = raw?.data as { props?: DirectorProps } | undefined
   if (data?.props) return data.props
   // 退路：从 output 的文本里取（某些形态只回文本）
@@ -597,7 +607,7 @@ function worstShot(shots: QualityShot[]): QualityShot | null {
 }
 
 /** 供测试直接验证纯函数（不经控制通道）。 */
-export const _internal = { analyzeAudio, parseQuality, worstShot, DEFAULTS }
+export const _internal = { analyzeAudio, parseQuality, worstShot, DEFAULTS, readProps }
 
 /** 从路径取扩展名（测试用；导出避免未使用告警）。 */
 export const _ext = (p: string) => extname(p)

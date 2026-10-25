@@ -167,9 +167,21 @@ export const speakTool: Tool = {
         }
       }
       void clamped
-      if (!run.ok) {
-        return { output: neuralFailureNote(run.note || JSON.stringify(run.report)) }
-      }
+        if (!run.ok) {
+    // ## 失败时把 `report` 一起交给说明函数（不只是 note）
+    //
+    // 旧写法是 `run.note || JSON.stringify(run.report)`——只要 note 有值，
+    // **report 就被丢掉**，而 report 里才是结构化的 `{error, detail:{stdout,stderr}}`。
+    // 后果：可见文案永远是「python 未返回报告」，而真的 stderr 一行都看不到。
+    // 现在把两者合并后一起传：`error` 码保证分支命中，`detail` 提供原文。
+    return {
+      output: neuralFailureNote({
+        error: String((run.report as Record<string, unknown>)?.error ?? "unknown"),
+        note: run.note,
+        detail: (run.report as Record<string, unknown>)?.detail,
+      }),
+    }
+  }
       const report = run.report
       const bytes = existsSync(outAbs) ? statSync(outAbs).size : 0
       const durationSec = Number(report.durationSec ?? 0)
@@ -342,6 +354,7 @@ async function runNeural(
   try {
     for (const python of candidates) {
       let stdout = ""
+      let stderr = ""
       let spawnError = ""
       try {
         const run = await ctx.runCommand(`"${python}" -X utf8 "${file.path}"`, {
@@ -349,6 +362,14 @@ async function runNeural(
           signal: ctx.signal,
         })
         stdout = String(run.stdout ?? "")
+        // ## stderr 必须收集（实测代价：一轮无法定位的失败）
+        //
+        // 原先只看 stdout。而 python 的 **ImportError / 运行时异常全在 stderr**——
+        // 脚本在打印报告行之前就死了（比如 venv 里 import sherpa_onnx 失败、
+        // 或依赖 DLL 加载不到），stdout 就是空的，于是工具只能报
+        // 「python 未返回报告」——而真正的 traceback 已丢。
+        // 实测：同一模型手搓脚本正常，但工具恒报 no-report，无法查因。
+        stderr = String(run.stderr ?? "")
       } catch (err) {
         spawnError = String((err as Error)?.message ?? err)
       }
@@ -372,10 +393,16 @@ async function runNeural(
         return { ok: true, report: parsed, note: "", usedPython: python }
       }
       if (!parsed) {
-        // 没有报告行：python 没跑起来（找不到、被拦、崩溃）——记下 stdout 尾部供定位
+        // 没有报告行：python 没跑起来，或跑到一半就抛了。
+        // **把 stderr 尾部一起带上**——那才是真因（Traceback / ImportError）。
+        // 只报“python 未返回报告”等于把唯一的线索丢掉。
+        const tail = stderr.trim().split("\n").slice(-6).join("\n")
         last = {
-          report: { error: "no-report", detail: stdout.slice(-400) },
-          note: stdout.slice(-400) || "python 未返回报告",
+          report: {
+            error: "no-report",
+            detail: { stdout: stdout.slice(-400), stderr: tail },
+          },
+          note: tail || stdout.slice(-400) || "python 未返回报告",
           python,
         }
         continue

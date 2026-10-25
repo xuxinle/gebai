@@ -57,8 +57,8 @@ function scene_field(t, duration, canvas, layers) {
   }
 
   envStream(sh, W, H, t, '#7FB2FF', 52, 220, 0.24);
-  // 覆盖层必须在**所有内容之后**（呼吸作用于整帧，才与验收格差 1:1）
-  envOverlay(sh, W, H, t, 2);
+  // 本幕 336 个点阵有波前扫过 + 整块旋转 + 尺度揭示，**自身就是全片最活的镜头**。
+  // 不再叠环境层（叠上去只会把点阵的强弱对比抹平）。
 
   return { states: layers.map(() => ({})), shapes: sh };
 }

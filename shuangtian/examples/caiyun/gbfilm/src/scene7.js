@@ -67,25 +67,20 @@ function scene_wordmark(t, duration, canvas, layers) {
   const footP = EASE.expoOut(seg(t, 3.90, 4.60));
   if (footP > 0.01) pushText(sh, 'GEBAI AGENT · 能力演示', 150, 972, 19, '#4E6A8C', 0.85 * footP);
 
-  // 落定后的"活着"：一条**有宽度、对比明确**的亮带，在字标周围缓慢滑过。
+  // 落定后的"活着"：只留极轻的呼吸环，**不加横向扫光**。
   //
-  // 为何不是"极淡的细光"：实测同口径下极淡细光只带 0.2~0.3 的帧差，
-  // 而阈值是 1.2。亮度波必须足够宽（跨格）且 alpha 足够高（0.04 量级）。
-  const sweepP = (((t - 2.6) / 2.9) % 1 + 1) % 1;
-  const lightX = -700 + (W + 1400) * sweepP;
-  for (let g = 0; g < 4; g++) {
-    pushRect(sh, lightX + g * 190, 0, 190, H, '#9EC4FF', 0.030 - g * 0.006);
-  }
-
-  // 字标周围的一圈"呼吸环"：半径缓慢增减（存在感在变，且不抢字）
-  const hal = 0.5 + 0.5 * Math.sin(t * (Math.PI * 2 / 2.4));
+  // 这里曾经为了把静止占比压到硬指标以下，加了一道每 2.9s 扫过全屏的亮带。
+  // 数字确实从 75% 降到了 39%，但**收尾镜头本来就不该这样动**——
+  // 字标落定后观众的注意力在名字上，一道定时扫过的光只会把它读成片头广告。
+  // 静止占比是参考量；这一幕宁可"静"。
+  const hal = 0.5 + 0.5 * Math.sin(t * (Math.PI * 2 / 3.4));
   for (let i = 3; i >= 1; i--) {
-    pushCircle(sh, CX, CY + 40, 210 + i * 46 + hal * 26, '#3B82F6', 0.020 * (4 - i) * 0.6);
+    pushCircle(sh, CX, CY + 40, 232 + i * 46 + hal * 14, '#3B82F6', 0.014 * (4 - i) * 0.5);
   }
 
   envStream(sh, W, H, t, '#7FB2FF', 34, 170, 0.20);
-  // 覆盖层必须在**所有内容之后**（呼吸作用于整帧，才与验收格差 1:1）
-  envOverlay(sh, W, H, t, 0);
+  // 呼吸只到"不冻结"的程度（不开快扫）：收尾要能静得住。
+  envOverlay(sh, W, H, t, 0, { sweep: false });
 
   return { states: layers.map(() => ({})), shapes: sh };
 }

@@ -37,8 +37,8 @@ function scene_body(t, duration, canvas, layers) {
   pushText(sh, '23 SUB-AGENTS   ·   ORDERS: 80+ TOOLS', 152, 268, 18, '#5E7A99', 0.72);
 
   envStream(sh, W, H, t, '#6FA8FF', 44, 160, 0.24);
-  // 覆盖层必须在**所有内容之后**（呼吸作用于整帧，才与验收格差 1:1）
-  envOverlay(sh, W, H, t, 1);
+  // 本幕主体是三维实物（自转 + 浮动）+ 逐字入场，自身就在动——不再叠环境层。
+  // 三维镜头叠上横向扫描线会读成"泡在带扫描线的玻璃缸里"，反而摄镜头。
 
   return { states: layers.map(() => ({})), shapes: sh };
 }

@@ -172,3 +172,47 @@ describe("判据默认值", () => {
     expect(DEFAULTS.noiseFloorMax).toBe(-50)
   })
 })
+
+describe("readProps：取导演属性面的调用入口", () => {
+  // ## 为何要钉这一条
+  //
+  // 早先 `readProps` 按 `ctx.registry.has(n)` + `ctx.registry.call(n, a)` 调用，
+  // 而**真实契约里没有这两个方法**（`ToolContext.registry` 只有
+  // `schemas` / `resolve` / `getAgentNames`）。于是工具一调就报
+  // `registry?.has is not a function`，整条验片路径完全不可用——
+  // 而报错信息看着像"依赖未装载"，把人往装载配置上带。
+  //
+  // 所以这里钉的不是"能取到值"，而是**走了哪个入口**：只有 `resolve`+`execute`
+  // 才是合规调用；写错形状必须当场红，而不是等到跑片时才现形。
+
+  const mkCtx = (tool: { execute: (a: Record<string, unknown>, c: unknown) => Promise<unknown> } | null) =>
+    ({
+      registry: {
+        schemas: () => [],
+        getAgentNames: () => [],
+        resolve: (name: string) => (tool && name === "shuangtian_get" ? { name, tool } : undefined),
+      },
+    }) as never
+
+  test("通过 registry.resolve 拿到工具，再用 tool.execute 调用", async () => {
+    let calledWith: Record<string, unknown> | null = null
+    const ctx = mkCtx({
+      execute: async (args) => {
+        calledWith = args
+        return { output: "ok", data: { props: { render_quality_json: '{"still_ratio":1}' } } }
+      },
+    })
+    const props = await _internal.readProps(ctx, "director")
+    expect(calledWith as Record<string, unknown> | null).toEqual({ id: "director" })
+    expect(props.render_quality_json).toBe('{"still_ratio":1}')
+  })
+
+  test("依赖未装载时给出可操作的提示（而不是 TypeError）", async () => {
+    await expect(_internal.readProps(mkCtx(null), "director")).rejects.toThrow(/依赖未装载/)
+  })
+
+  test("工具返回但无 props 时如实报错，不编造数字", async () => {
+    const ctx = mkCtx({ execute: async () => ({ output: "没有这个属性" }) })
+    await expect(_internal.readProps(ctx, "director")).rejects.toThrow(/无法从 shuangtian_get 取到属性面/)
+  })
+})

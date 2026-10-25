@@ -157,6 +157,33 @@ describe("失败说明：区分真因，不把所有错误都说成缺依赖", (
     expect(neuralFailureNote("no-model-file")).toContain("tokens.txt")
     expect(neuralFailureNote("invalid-config")).toContain("lexicon.txt")
   })
+
+  // ## 为何要钉对象形态（实测代价：一整轮查不下去）
+  //
+  // `runNeural` 的 no-report 分支把真因放在 `detail: { stdout, stderr }` 里，
+  // 而旧代码只 `String(raw)` → `[object Object]`，**连 `no-report` 都匹配不上**，
+  // 落到兜底文案「神经语音合成失败。原文：[object Object]」。
+  // 后果：本机真的报错时，stderr 里的 `ImportError: DLL load failed` 一行都看不到。
+  test("detail 是对象时，必须展开 stderr/stdout，而不是变成 [object Object]", () => {
+    const note = neuralFailureNote({
+      error: "no-report",
+      note: "python 未返回报告",
+      detail: {
+        stdout: "",
+        stderr: "Traceback (most recent call last):\nImportError: DLL load failed while importing sherpa_onnx",
+      },
+    })
+    expect(note).not.toContain("[object Object]")
+    // 分支必须命中「启动」那一档（有 error 码）
+    expect(note).toContain("启动")
+    // 真因必须原样保留
+    expect(note).toContain("ImportError: DLL load failed")
+  })
+
+  test("字符串形态仍然可用（不破坏既有调用）", () => {
+    expect(neuralFailureNote("runtime-error: InvalidProtobuf")).toContain("InvalidProtobuf")
+    expect(neuralFailureNote("")).toContain("失败")
+  })
 })
 
 describe("临时脚本：必须落成真文件（不用 -c，避免换行被 shell 拆开）", () => {

@@ -61,9 +61,9 @@ function scene_converge(t, duration, canvas, layers) {
   const ruleP = EASE.expoOut(seg(t, tIn + 0.95, tIn + 1.60));
   if (ruleP > 0.01) pushRect(sh, CX - 210 * ruleP, CY + 96, 420 * ruleP, 2, '#3B82F6', 0.75);
 
+  // 本幕主体（210 个字块塌缩 + 中心核 + 标题）在 0.1~2.5s 持续剧变，
+  // 2.5s 后只留标题——那一段本来就该定住让观众读，不加额外环境层。
   envStream(sh, W, H, t, '#6FA8FF', 40, 170, 0.26);
-  // 覆盖层必须在**所有内容之后**（呼吸作用于整帧，才与验收格差 1:1）
-  envOverlay(sh, W, H, t, 1);
 
   return { states: layers.map(() => ({})), shapes: sh };
 }

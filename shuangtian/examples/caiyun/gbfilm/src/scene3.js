@@ -83,8 +83,8 @@ function scene_tools(t, duration, canvas, layers) {
   }
 
   envStream(sh, W, H, t, '#6FA8FF', 38, 185, 0.22);
-  // 覆盖层必须在**所有内容之后**（呼吸作用于整帧，才与验收格差 1:1）
-  envOverlay(sh, W, H, t, 1);
+  // 本幕的 23 张卡各自弹簧入场 + 落定后逐卡微起伏 + 亮度波，主体本身就在动。
+  // 不需要额外环境层（叠上去只会让“卡片感”变脏）。
 
   return { states: layers.map(() => ({})), shapes: sh };
 }

@@ -498,6 +498,12 @@ clawd 同类），都是靠“抽帧发现画面空了”才定位。
 
 ### `tts_speak` 的神经引擎在本机无法通过工具调用（2026-10-25）
 
+> **部分已修（同一轮内）**：失败路径原本会**丢掉真因**——现在会把 `error` 码与
+> `detail.{stdout,stderr}` 一起带上（旧代码 `run.note || JSON.stringify(run.report)` 只要 note 有值就把
+> report 丢掉；`neuralFailureNote` 又只 `String()` 一个对象 → `[object Object]`，
+> 连 `no-report` 都匹配不上，落到兵底文案）。回归：`neural.test.ts` 两条，回退后 6 条变红。
+> **剩下的是真因**：为什么工具调起的 python 拿不到 `sherpa_onnx`（手动 shell 能）。
+
 **现象**：`tts_speak(engine="neural", ...)` 恒返「神经语音合成失败。原文：python 未返回报告」，
 而**同一个 venv、同一套 sherpa-onnx 调用手搓脚本能正常合成**（同一模型 `vits-zh-theresa`，
 `cfg.validate()` 为 true、804 个音色、3.18s 音频）。
@@ -508,9 +514,10 @@ clawd 同类），都是靠“抽帧发现画面空了”才定位。
 - 工具报的是 `neural.ts::neuralFailureNote` 的 `no-report` 分支——即 **python 进程没吐出报告行**，
   而不是模型/配置错误。
 
-**方向**：把 `writeTempScript` 写出的临时脚本与其 stderr 落盘保留（当前 stdout 尾部只留 400 字符，
-而真因可能在 stderr），并检查 `pythonCandidates()` 选中的解释器在**工具执行环境**下
-是否与手动 shell 一致（PATH/env 差异）。
+**方向**：stderr 已补上收集（见上）。剩下要查的是**工具执行环境**与手动 shell 的差异：
+`ctx.runCommand` 的 env / cwd / 沙箱策略是否让子进程看不到 venv 的 DLL 目录
+（`ImportError: DLL load failed` 是最常见的形态，而它在 stderr 里）。
+下一步：把临时脚本与 stderr 落盘保留（现在是随时删的），再用同一份 venv 对比两边 env。
 
 **本轮绕过**：`examples/caiyun/gbfilm/vo/synth_vo.py`（同一条 sherpa 调用，直接落 WAV）。
 
@@ -576,7 +583,16 @@ overlap 的“双色叠印”是**印刷工艺专用**技法（两半CMYK 网屏
 **另**：矢量模式不支持旋转/震动（`cam_rotate`/`cam_shake` 会被忽略，
 只有 `cam_zoom` 生效）。这是当前实现的明确限制，不是遗漏。
 
-### `caiyun_verify` 不可用：它按不存在的 `ctx.registry.has()` 查工具
+### `caiyun_verify` 不可用：它按不存在的 `ctx.registry.has()` 查工具（**已修**）
+
+> **已修（2026-10-25）**：`readProps` 改用契约里真实存在的
+> `ctx.registry.resolve(name)` → `entry.tool.execute(args, ctx)`。
+> 回归：`verify.test.ts` 三条（走哪个入口 / 依赖未装载的可操作提示 / 无 props 时不编数字），
+> 回退后 3 条全红。**不再依赖另建一套判据绕开它。**
+>
+> 教训：把“契约里不存在的接口”写成可选链（`registry?.has`），
+> 报错变成 `xxx is not a function`，而**调用点看着完全正常**——比直接 TS 报错难查得多。
+> 这类地方应用包层的真实类型，不用 `as unknown as { ... }` 自己堆一个。
 
 **现象**：调用 `caiyun_verify` 直接报
 `读渲染状态失败：registry?.has is not a function. (In 'registry?.has("shuangtian_get")', 'registry?.has' is undefined)`。
@@ -593,6 +609,8 @@ overlap 的“双色叠印”是**印刷工艺专用**技法（两半CMYK 网屏
 调用走 `resolve(...)?.tool`。同时补一条单测：用一个**只实现真实契约三个方法**的桩
 调 `readProps`，能直接拓住这个不匹配（现有桩如果带了 `has`，那就是“桩把差异抹平了”——
 参见 CONVENTIONS §7.2）。
+
+> ↑ 上述方向已于 2026-10-25 落地（见本节顶部）。以下原文保留供回溯。
 
 ### 裁云深钻示例片：数据只有三层嵌套，不够“每层都是新世界”
 

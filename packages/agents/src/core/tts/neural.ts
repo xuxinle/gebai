@@ -278,8 +278,42 @@ export function pythonCandidates(home: string | null): string[] {
 
 /** 脚本回报的可读失败说明（面向模型/用户，含下一步动作）。 */
 export function neuralFailureNote(raw: unknown): string {
-  const text = String(raw ?? "").trim()
-  const tail = text ? `\n原文：${text.slice(-600)}` : ""
+  // ## `detail` 可能是对象，必须展开（实测代价：一整轮无法定位）
+  //
+  // `runNeural` 的 no-report 分支把 `detail` 写成 `{ stdout, stderr }` —— 那正是
+  // 最需要看的两段线索。而旧代码只 `String(raw)`，对象就变成 `[object Object]`：
+  // 正则匹配不到任何分支（连 `no-report` 都匹配不上），最后落到兵底文案
+  // 「神经语音合成失败。原文：[object Object]」——**真因彻底消失**。
+  const normalized = (() => {
+    if (raw == null) return ""
+    if (typeof raw === "string") return raw
+    try {
+      return JSON.stringify(raw)
+    } catch {
+      return String(raw)
+    }
+  })().trim()
+  // 可读尾段：对象里的 stdout/stderr 分别标出来（不要塞一坨 JSON 给模型）
+  const readable = (() => {
+    if (raw != null && typeof raw === "object") {
+      const o = raw as Record<string, unknown>
+      const parts: string[] = []
+      if (typeof o.error === "string") parts.push(o.error)
+      // note 是“人能读的那一句”（如 python 的 traceback 尾部），优先级高于 detail
+      if (typeof o.note === "string" && o.note.trim()) parts.push(o.note.trim())
+      const d = o.detail
+      if (typeof d === "string") parts.push(d)
+      else if (d && typeof d === "object") {
+        const dd = d as Record<string, unknown>
+        if (dd.stderr) parts.push(`stderr:\n${String(dd.stderr)}`)
+        if (dd.stdout) parts.push(`stdout:\n${String(dd.stdout)}`)
+      }
+      if (parts.length > 0) return parts.join("\n")
+    }
+    return normalized
+  })()
+  const text = normalized
+  const tail = readable ? `\n原文：${readable.slice(-600)}` : ""
   if (/missing-dependency|No module named 'sherpa_onnx'/.test(text)) {
     return (
       "神经语音合成不可用：Python 侧车缺少 `sherpa-onnx`。安装：`tts_install` 或 " +

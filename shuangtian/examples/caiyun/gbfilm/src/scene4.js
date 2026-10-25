@@ -90,8 +90,10 @@ function scene_terminal(t, duration, canvas, layers) {
 
   pushText(sh, 'headless backend · 无显示服务也能构建 / 运行 / 验证', 150, 972, 20, '#5E7A99', 0.78);
   envStream(sh, W, H, t, '#6FA8FF', 36, 210, 0.20);
-  // 覆盖层必须在**所有内容之后**（呼吸作用于整帧，才与验收格差 1:1）
-  envOverlay(sh, W, H, t, 1);
+  // 本幕是**这一部里唯一真需要环境层的镜头**：终端窗口是个大块静止内容，
+  // 推镜只在前 3.1s 推进，之后必须靠呼吸带住“它还在跑”。
+  // 但**不开横向快扫**——终端里已有扫描线与实时指标条，再横扫就是噪声。
+  envOverlay(sh, W, H, t, 1, { sweep: false });
 
   return { states: layers.map(() => ({})), shapes: sh };
 }

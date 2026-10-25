@@ -70,7 +70,7 @@ function scene_loop(t, duration, canvas, layers) {
   }
 
   envStream(sh, W, H, t, '#7FB2FF', 42, 175, 0.22);
-  envOverlay(sh, W, H, t, 1);
+  // 30 个节点沿双环反向流动 + 环流向 + 推近，主体自身就在持续运动——不叠环境层。
 
   return { states: layers.map(() => ({})), shapes: sh };
 }
