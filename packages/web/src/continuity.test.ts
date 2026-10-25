@@ -207,6 +207,24 @@ describe("后台会话 DOM 维护与无缝切换", () => {
     expect(draft).toContain("syncSessionScopedUi()")
   })
 
+  test("空白页在无 pane 时挂到宿主（否则「歌未竟 东方白」不显示）", () => {
+    const s = src("sessions.ts")
+    // 消息列按会话分容器后，草稿页没有任何 pane；直接 appendTail 会被转发到空 pane 而丢弃
+    const at = s.indexOf("function mountEmptyState")
+    expect(at).toBeGreaterThan(-1)
+    const fn = s.slice(at, at + 400)
+    expect(fn).toContain("activePane()")
+    expect(fn).toContain("msgEl.appendChild(node)") // 回退到宿主
+    // 空状态必须单例复用：反复进出草稿页不能堆出多份
+    expect(s).toContain("function emptyStateNode()")
+    expect(s).toContain("if (emptyStateEl) return emptyStateEl")
+    // 有内容的会话必须清掉宿主上的空白页（否则与 pane 并存）
+    const hub = s.slice(s.indexOf("function syncSessionScopedUi("), s.indexOf("export async function loadMessages"))
+    expect(hub).toContain("hideEmptyState()")
+    // 判据取容器里有无消息节点（不读 chunks：快速路径下可能未就绪）
+    expect(hub).toContain('querySelector(".msg")')
+  })
+
   test("随会话变化的 UI 不得在切换路径里散落手写（漏项根因）", () => {
     const s = src("sessions.ts")
     const fast = s.slice(s.indexOf("async function activatePaneFast"), s.indexOf("/** 切换会话（列表委托分发"))

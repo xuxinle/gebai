@@ -145,6 +145,11 @@ function syncSessionScopedUi(): void {
   applyInteractionVisibility() // 待作答交互卡（同上）
   updateMsgNav() // 消息导航列（段表就位后重算位置）
   refreshSubSessions() // 标题栏子会话按钮与面板（按当前会话过滤/角标）
+  // 空白页：它挂在宿主 #messages 上（草稿页形态），而宿主是容器栈——切到
+  // 有内容的会话时不清就会与 pane 并存（上方多出一条空白区）。
+  // 判据用「活动 pane 里是否已有消息」而不是「有无 pane」：打开一个空会话仍需显示空白页。
+  // 不读 chunks——快速路径下它可能尚未就绪；直接看容器里有无消息节点最可靠。
+  if (activePane()?.container.querySelector(".msg")) hideEmptyState()
 }
 
 export async function loadMessages(sessionId: string) {
@@ -1218,7 +1223,6 @@ export function enterDraftView(): void {
   resetMsgWindow()
   clearMsgNav()
   clearUnread()
-  setEmptyState(null)
   showEmptyState()
   input.value = ""
   autosize()
@@ -1229,23 +1233,49 @@ export function enterDraftView(): void {
   focusInput()
 }
 
+/**
+ * 显示空白页（「歌未竟 东方白」+ 快捷按钮）。
+ *
+ * 挂载位置按当前视图分两种：
+ * - 活动 pane 存在且该会话无消息：挂到该会话的滚动容器尾部（窗口化的尾部活动区）；
+ * - 无 pane（草稿页、登出）：**挂到宿主 #messages**——消息列按会话分容器后，草稿页没有任何
+ *   容器，appendTail 会转发到空 pane 而静默丢弃，空状态于是整个不显示（歌未竟 东方白消失就是这么来的）。
+ *
+ * 始终只维护**一个**空状态节点（见 emptyStateNode）：反复进出草稿页不能堆出多份。
+ */
 function showEmptyState() {
-  if (getEmptyState()) {
-    getEmptyState()!.hidden = false
-    return
-  }
-  const emptyState = el("div", "empty-state")
-  setEmptyState(emptyState)
-  emptyState.append(el("div", "es-slogan", "歌未竟 东方白"))
+  const node = emptyStateNode()
+  node.hidden = false
+  mountEmptyState(node)
+}
+
+/** 空状态的单例节点（首次创建时建好内容；不依赖 state 里的引用，避免被置空后重复创建）。 */
+let emptyStateEl: HTMLElement | null = null
+function emptyStateNode(): HTMLElement {
+  if (emptyStateEl) return emptyStateEl
+  const node = el("div", "empty-state")
+  node.append(el("div", "es-slogan", "歌未竟 东方白"))
   const tips = el("div", "es-suggestions")
   renderShortcutButtons(tips)
-  emptyState.appendChild(tips)
-  msgWindow.appendTail(emptyState)
+  node.appendChild(tips)
+  emptyStateEl = node
+  setEmptyState(node)
+  return node
+}
+
+/** 把空状态放到当前视图该在的位置（切会话/进草稿页时重放）。 */
+function mountEmptyState(node: HTMLElement): void {
+  if (activePane()) msgWindow.appendTail(node)
+  else if (node.parentElement !== msgEl) msgEl.appendChild(node)
 }
 
 function hideEmptyState() {
-  const e = getEmptyState()
-  if (e) e.hidden = true
+  const e = emptyStateEl ?? getEmptyState()
+  if (!e) return
+  e.hidden = true
+  // 挂在宿主 #messages 上时（草稿页形态）还得多一步移出：宿主是容器栈，
+  // 残留的隐藏子元素与 pane 共存时会让布局与滚动几何多算一份。
+  if (e.parentElement === msgEl) e.remove()
 }
 /** 设置面板增删快捷按钮后，空白页即时刷新按钮（仅影响快捷按钮，保留其他入口）。 */
 document.addEventListener("gebai:shortcuts-change", () => {
