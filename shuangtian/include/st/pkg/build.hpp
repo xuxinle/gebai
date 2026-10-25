@@ -18,6 +18,18 @@ struct BuildOptions {
   std::string root{};                 ///< 工程根（空=清单目录）
   std::string profile{"debug"};       ///< debug / release / san
   std::string target{};               ///< 目标名（空=库目标：只编译不链接）
+  /// 产物路径覆盖（空 = 用 `build/bin/<目标><后缀>`）。
+  ///
+  /// ## 唯一用途：重建构建工具自身
+  ///
+  /// `st` 是自举产物。重建它时默认落点 `build/bin/st.exe` **正是正在运行的文件**
+  /// ——Windows 上链接器会报 `failed to write output … permission denied`。
+  ///
+  /// 所以 `st rebuild` 先编到临时路径（本字段），再 `MoveFile` 换上去
+  /// （实测：对运行中的 exe 做重命名是允许的，直接覆盖不行）。
+  ///
+  /// Linux 上可以直接覆盖，本字段同样可用 —— 两平台走同一条代码路径。
+  std::string output_override{};
   std::size_t jobs{0};                ///< 并行编译单元数（0=按**内存预算**与硬件并发推导，见 `pkg/memory.hpp`）
   /// 超大翻译单元的并发上限（0=自动：1）。超大单元按源文件字节数判定。
   std::size_t jobs_large{0};
@@ -112,6 +124,33 @@ struct BuildStats {
 
 /// 检测编译器（`ST_CXX`/`CXX` 环境变量 → g++ → clang++ → c++）。
 /// 探测 C++ 编译器（`ST_CXX`/`CXX` 环境变量优先，其次 g++/clang++/c++）。
+/// 判断一份依赖记录是否与文件当前状态一致（**含内容哈希**）。
+///
+/// ## 为什么要有它，且为什么是公开的
+///
+/// 增量构建原来只比 `(mtime, size)`，于是**同长度改动 + 保留 mtime** 必然判"没变"：
+/// 实测把 `render.hpp` 改成 `rendEr.hpp`（等长）+ `os.utime` 回原值后，
+/// `st build` 报「编译 111ms / 链接已跳过」，产物仍是旧代码；`git status`
+/// 同时显示无改动（它也用 stat 缓存）。三方一起被骗，排查代价极高。
+///
+/// 现在记录里多一列内容哈希，且**只在 `(mtime, size)` 都匹配时才现算**——
+/// 所以日常"文件真的改了"的路径不付这笔成本。
+///
+/// 公开它是因为这条判定必须有**能钉住的回归测试**：它错的方向有两种
+/// （漏报 = 拿旧产物当新结果；误报 = 每次全量重编），而两者都只在
+/// 特定的 mtime/size 组合下才显形，跑一遍真实构建看不出来。
+///
+/// `expected` 为 `nullopt` 时表示"记录没带哈希"（旧格式），退回 mtime+size 判定。
+[[nodiscard]] auto deps_entry_matches(std::string_view path, std::int64_t recorded_mtime,
+                                      std::uint64_t recorded_size,
+                                      std::optional<std::uint64_t> recorded_hash) -> bool;
+
+/// 文件内容的 fnv1a64（读不到 → `nullopt`）。
+///
+/// 选 fnv1a64 而不是 sha256：这里要的是"内容变了没有"，不是抗碰撞证明
+/// （攻击者不参与构建）。实测 151 文件/3.9MB：fnv 18.43ms、sha256 30.51ms。
+[[nodiscard]] auto file_content_hash(std::string_view path) -> std::optional<std::uint64_t>;
+
 /// `override_compiler` 非空时直接用它（交叉编译工具链走这条路）。
 [[nodiscard]] auto detect_compiler(std::string_view override_compiler = {}) -> Result<std::string>;
 

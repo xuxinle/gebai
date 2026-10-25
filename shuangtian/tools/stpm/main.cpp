@@ -2,6 +2,7 @@
 /// 自举：`bootstrap.sh` 用编译器直接产出本程序，之后一切构建都走这里（不经 CMake/Make）。
 
 #include <algorithm>
+#include <set>
 #include <cstdio>
 #include <cstdlib>
 #include <format>
@@ -201,6 +202,68 @@ void print_usage() {
 }
 
 // —— 命令实现 ——
+
+/// `st rebuild`：手工触发重建（与自动重建**同一份实现**）。
+///
+/// 与自动路径的差别只有一点：手工重建**不重跑命令**（人只是想更新工具），
+/// 自动重建**必须重跑**（否则本次命令还在旧逻辑上跑，等于白重建）。
+auto command_rebuild(const Arguments& arguments) -> int {
+  auto manifest = load_manifest(arguments);
+  if (!manifest) {
+    std::fprintf(stderr, "错误: %s\n", manifest.error().to_string().c_str());
+    return 1;
+  }
+  const auto exe_result = st::process::executable_path();
+  if (!exe_result.has_value()) return 1;
+  const std::string self = st::fs::normalize(*exe_result);
+  const std::string staging = self + std::format(".new-{}", st::process::current_id());
+
+  st::pkg::BuildOptions options;
+  options.profile = arguments.get("profile", "dev");   // 与 bootstrap 默认一致
+  options.target = "st";
+  options.force = true;        // 自举重来：产物路径变了，增量缓存也对不上
+  options.no_tests = true;     // 只重建工具本身
+  options.strip_debug = !arguments.has("no-strip");
+  options.verbose = arguments.has("verbose") || arguments.has("v");
+  options.output_override = staging;
+
+  st::print("重建构建工具（目标 st，档位 {}）…\n", options.profile);
+  const std::int64_t start = st::time::now_ns();
+  auto stats = st::pkg::build(*manifest, options);
+  if (!stats) {
+    std::fprintf(stderr, "%s\n", stats.error().message.c_str());
+    (void)st::fs::remove_file(staging);
+    return 1;
+  }
+  const std::string built = stats->artifact.empty() ? staging : stats->artifact;
+  if (!st::fs::is_regular_file(built)) {
+    std::fprintf(stderr, "重建失败：产物不存在（%s）\n", built.c_str());
+    return 1;
+  }
+  const std::string elapsed = st::time::format_duration_ns(st::time::now_ns() - start);
+
+  // 旧文件改名而不是删除：Windows 上删不掉正在运行的 exe，但改名可以；
+  // 留着它还能在"新版起不来"时立刻换回去。
+  const std::string backup = self + ".old";
+  (void)st::fs::remove_file(backup);
+  if (auto moved = st::fs::rename(self, backup); !moved) {
+    std::fprintf(stderr,
+                 "无法替换正在运行的 %s（改名失败：%s）\n"
+                 "  新产物已保留：%s\n",
+                 self.c_str(), moved.error().message.c_str(), built.c_str());
+    return 1;
+  }
+  if (auto placed = st::fs::rename(built, self); !placed) {
+    std::fprintf(stderr, "新产物就位失败：%s\n", placed.error().message.c_str());
+    (void)st::fs::rename(backup, self);
+    return 1;
+  }
+
+  st::print("已重建 → {}（{}）\n", self, elapsed);
+  st::print("  旧版本备份在 {}\n", backup);
+  st::print("  **当前进程仍跑旧逻辑；下次运行 st 即为新版。**\n");
+  return 0;
+}
 
 auto command_build(const Arguments& arguments) -> int {
   auto manifest = load_manifest(arguments);
@@ -1013,6 +1076,194 @@ ST_MAIN(run_app)
   return 0;
 }
 
+/// 自检结果：构建工具自身的源码是否比可执行文件新。
+struct SelfStaleness {
+  bool stale{false};
+  std::size_t newer_count{0};
+  std::string newest_path{};
+};
+
+/// 构建工具**自检**：`st` 自己的源码是否比 `st.exe` 新。
+///
+/// ## 为什么必须有这一步
+///
+/// `st` 是**自举**产物。改 `src/pkg/build.cpp`（构建逻辑本身）之后，
+/// `st build <目标>` 只编目标、**永远不重编 `st`** —— 新逻辑不生效，
+/// 而它照样报"构建完成"。实测代价：5 轮实验（含逆向验证）全跑在旧二进制上。
+///
+/// ## 判据为什么不用 bootstrap 的 `.d`
+///
+/// 第一版拿 `build/obj/bootstrap/*.d` 当权威清单，**实测失效**：
+/// bootstrap 在 `$objDir` 里编译，gcc 的 `-MMD` 把路径写成 basename
+/// （`build.cpp`、`src_pkg_build.cpp.o:`），拼上仓库根后**全部不存在** →
+/// 一个"更新"都找不到 → 自检永不触发（touch 了源文件也没提示）。
+///
+/// 第二版只取 `st` target 的 `sources`（`tools/stpm/*.cpp`）——**又一次失明**：
+/// `src/pkg/*.cpp` 来自**顶层** `sources`（经 target 的 `exclude_sources` 过滤
+/// 后并入），而那正是构建逻辑所在。候选数从 220 涨到 319 才对。
+///
+/// 现在按清单的真实规则算：顶层 `sources` 减去 `exclude_sources` 的前缀，
+/// 再并上 target 自己的 `sources`。
+///
+/// 只比 **mtime**：这一步每次运行都跑，读 3.9MB 内容只为"判断要不要重建"
+/// 不值得。构建**产物**那条路才用内容哈希（`deps_entry_matches`）。
+[[nodiscard]] auto check_self_staleness() -> SelfStaleness {
+  SelfStaleness result{};
+  const auto exe_result = st::process::executable_path();
+  if (!exe_result.has_value()) return result;
+  const std::string exe = st::fs::normalize(*exe_result);
+  const auto exe_time = st::fs::modified_ns(exe);
+  if (!exe_time.has_value()) return result;
+
+  // exe 在 <root>/build/bin/st → root 是上三级
+  const std::string root = st::fs::parent(st::fs::parent(st::fs::parent(exe)));
+  if (root.empty()) return result;
+  const std::string manifest_path = st::fs::join(root, "st.pkg");
+  if (!st::fs::is_regular_file(manifest_path)) return result;
+
+  const auto manifest = st::pkg::Manifest::load(manifest_path);
+  if (!manifest.has_value()) return result;
+  const st::pkg::TargetSpec* st_target = nullptr;
+  for (const auto& spec : manifest->targets) {
+    if (spec.name == "st") {
+      st_target = &spec;
+      break;
+    }
+  }
+  if (st_target == nullptr) return result;
+
+  std::set<std::string> candidates{};
+  const auto add_tree = [&](const std::string& dir) {
+    const auto walked = st::fs::walk(dir, 8);
+    if (!walked.has_value()) return;
+    for (const auto& entry : *walked) {
+      if (entry.is_dir) continue;
+      if (!entry.path.ends_with(".cpp") && !entry.path.ends_with(".hpp") &&
+          !entry.path.ends_with(".c")) {
+        continue;
+      }
+      candidates.insert(st::fs::join(dir, entry.path));
+    }
+  };
+
+  // 候选源 = 顶层 sources（减去 exclude_sources 的前缀）+ target 自己的 sources
+  std::set<std::string> exclude_prefixes{};
+  for (const auto& pattern : st_target->exclude_sources) {
+    const std::size_t star = pattern.find('*');
+    exclude_prefixes.insert(st::fs::normalize(pattern.substr(0, star)));
+  }
+  for (const auto& pattern : manifest->sources) {
+    const std::size_t slash = pattern.find_last_of("/\\");
+    if (slash == std::string::npos) continue;
+    const std::string dir = st::fs::normalize(st::fs::join(root, pattern.substr(0, slash)));
+    bool excluded = false;
+    for (const auto& prefix : exclude_prefixes) {
+      if (dir.size() >= prefix.size() && dir.compare(0, prefix.size(), prefix) == 0) {
+        excluded = true;
+        break;
+      }
+    }
+    if (!excluded) add_tree(dir);
+  }
+  for (const auto& pattern : st_target->sources) {
+    const std::size_t slash = pattern.find_last_of("/\\");
+    if (slash == std::string::npos) continue;
+    add_tree(st::fs::join(root, pattern.substr(0, slash)));
+  }
+  for (const auto& inc : manifest->include_dirs) add_tree(st::fs::join(root, inc));
+
+  std::int64_t newest_time = 0;
+  for (const auto& path : candidates) {
+    const auto time = st::fs::modified_ns(path);
+    if (!time.has_value() || *time <= *exe_time) continue;
+    ++result.newer_count;
+    if (*time > newest_time) {
+      newest_time = *time;
+      result.newest_path = path;
+    }
+  }
+  result.stale = result.newer_count > 0;
+  return result;
+}
+
+/// 重建构建工具自身，并**用新工具重跑本次命令**。
+///
+/// ## 为什么是"自动"而不是"提示"
+///
+/// 提示会被人忽略（我自己就会），而"改了构建逻辑却在跑旧逻辑"是**静默失效**——
+/// 它让"我改了、也验证了"这句话整个不成立。所以默认自动重建。
+///
+/// ## 为什么要"用新工具重跑本次命令"
+///
+/// 重建后当前进程仍是**旧的代码映像**（Windows 上旧 exe 只是被改名，映射还在）。
+/// 若在这里继续执行本次命令，用的还是旧逻辑 —— 等于重建白做。
+/// 所以：重建 → 起一个新进程把自己重新执行一遍（`capture_output = false`
+/// 让子进程直通终端）→ 把它的退出码原样返回。
+///
+/// `--no-self-rebuild` 可关掉这条（CI 里想固定用某个二进制时有用）。
+[[nodiscard]] auto rebuild_self_and_reexec(const std::vector<std::string>& argv,
+                                           const std::string& profile) -> int {
+  const auto manifest_result = st::pkg::Manifest::load("st.pkg");
+  if (!manifest_result.has_value()) {
+    std::fprintf(stderr, "自动重建失败：读不到 st.pkg\n");
+    return 1;
+  }
+  const auto exe_result = st::process::executable_path();
+  if (!exe_result.has_value()) return 1;
+  const std::string self = st::fs::normalize(*exe_result);
+  const std::string staging = self + std::format(".new-{}", st::process::current_id());
+
+  st::print("检测到构建工具源码有更新 → 自动重建（档位 {}）…\n", profile);
+
+  st::pkg::BuildOptions options;
+  options.profile = profile;
+  options.target = "st";
+  options.force = true;
+  options.no_tests = true;
+  options.strip_debug = true;
+  options.output_override = staging;
+
+  const std::int64_t start = st::time::now_ns();
+  auto stats = st::pkg::build(*manifest_result, options);
+  if (!stats) {
+    std::fprintf(stderr, "自动重建失败：%s\n  请修好后重试，或加 --no-self-rebuild 跳过。\n",
+                 stats.error().message.c_str());
+    (void)st::fs::remove_file(staging);
+    return 1;
+  }
+  const std::string built = stats->artifact.empty() ? staging : stats->artifact;
+  const std::string elapsed = st::time::format_duration_ns(st::time::now_ns() - start);
+
+  // 替换：旧文件改名（Windows 上删不掉正在运行的 exe，但改名可以）
+  const std::string backup = self + ".old";
+  (void)st::fs::remove_file(backup);
+  if (auto moved = st::fs::rename(self, backup); !moved) {
+    // 改名失败：如实报并保留新产物，让用户手动处理
+    std::fprintf(stderr,
+                 "自动重建的产物已生成（%s），但无法替换正在运行的 %s：%s\n"
+                 "  请关闭其他 st 进程后重跑。\n",
+                 built.c_str(), self.c_str(), moved.error().message.c_str());
+    return 1;
+  }
+  if (auto placed = st::fs::rename(built, self); !placed) {
+    (void)st::fs::rename(backup, self);   // 尽力回滚
+    std::fprintf(stderr, "新产物就位失败：%s\n", placed.error().message.c_str());
+    return 1;
+  }
+  st::print("已重建（{}），用新工具重跑本次命令…\n", elapsed);
+
+  // 用新二进制重跑同一条命令（不含程序名）
+  st::process::Options run_options{};
+  run_options.capture_output = false;   // 子进程直通终端，不要再套一层捕获
+  auto rerun = st::process::run(self, argv, run_options);
+  if (!rerun.has_value()) {
+    std::fprintf(stderr, "重跑失败：%s\n  新工具已就位，请手动重跑原命令。\n",
+                 rerun.error().message.c_str());
+    return 1;
+  }
+  return rerun->exit_code;
+}
+
 }  // namespace
 
 auto run_app(int argc, char** argv) -> int {
@@ -1024,12 +1275,34 @@ auto run_app(int argc, char** argv) -> int {
   }
   if (arguments.has("verbose") || arguments.has("v")) st::log::set_level(st::log::Level::Info);
 
+  // ## 自检 + **自动重建**（每次运行都查）
+  //
+  // 只在**会受构建逻辑影响**的命令上做：`version`/`help` 之类纯查询不重建，
+  // 免得"看一眼版本号"要等 40 秒。`rebuild` 自己也不走这条（它本来就是重建）。
+  //
+  // 重建后**用新工具重跑本次命令**——当前进程是旧映像，在这里继续执行
+  // 用的还是旧逻辑，等于白重建。
+  static const char* const kSelfAware[] = {"build", "run", "test", "lint", "check",
+                                           "stats", "tree", "deps", "doctor"};
+  const bool self_aware = std::any_of(std::begin(kSelfAware), std::end(kSelfAware),
+                                      [&](const char* name) { return arguments.command == name; });
+  if (self_aware && !arguments.has("no-self-rebuild")) {
+    const SelfStaleness stale = check_self_staleness();
+    if (stale.stale) {
+      std::vector<std::string> rerun_args{};
+      rerun_args.reserve(static_cast<std::size_t>(argc));
+      for (int i = 1; i < argc; ++i) rerun_args.emplace_back(argv[i]);
+      return rebuild_self_and_reexec(rerun_args, arguments.get("profile", "dev"));
+    }
+  }
+
   if (arguments.command == "version") {
     st::print("st (霜天工具链) {}\n", kStpmVersion);
     const auto compiler = st::pkg::detect_compiler();
     st::print("编译器: {}\n", compiler ? compiler->c_str() : "未找到");
     return 0;
   }
+  if (arguments.command == "rebuild") return command_rebuild(arguments);
   if (arguments.command == "build") return command_build(arguments);
   if (arguments.command == "run") return command_run(arguments);
   if (arguments.command == "test") return command_test(arguments);

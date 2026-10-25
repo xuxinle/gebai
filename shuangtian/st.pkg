@@ -356,6 +356,11 @@
     "gpu_vs_cpu_export_probe": {
       "kind": "executable",
       "sources": ["tools/gpu_vs_cpu_export_probe.cpp"],
+      "//": "构建增量判定加内容哈希的成本（对比 stat / fnv / sha256）"
+    },
+    "deps_hash_cost_probe": {
+      "kind": "executable",
+      "sources": ["tools/deps_hash_cost_probe.cpp"],
       "exclude_sources": ["src/pkg/*"],
       "//note": "本机 GPU 腿可用性（无头模式下 st doctor 有意不探测 GPU，这里显式探一次）"
     },

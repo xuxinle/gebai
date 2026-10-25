@@ -454,6 +454,7 @@
 | **`st build` 不构建测试目标**〔构建〕 | `st.pkg` 把 `tests/*_test.cpp` 声明成独立目标，只有 `st test` 构建它们。所以「改测试 → `st build` → 直接跑 `st_tests`」验的是**上一版代码**，而 `st build` 会报「构建完成」。现在 `st build` 检测到过期会**只构建不运行**地同步一次，并在输出里说明；`--no-tests` 可关 | `BuildOptions::no_tests` |
 | **别用「比二进制 mtime」判测试是否过期**〔判据〕 | `st_tests` 只在**链接指纹变化**时更新，只改一行断言时可能原地不动 → 漏报。反过来拿 `tests/*` 里被 `#include` 的文件比又会恒报（它们不单独产出 `.o`）。判据要钉在「源文件 vs 二进制」且允许"二进制不存在 = 正常状态、不重建" | `test_binary_is_stale` |
 | **时间戳测试要留够间隔**〔测试〕 | 判 mtime 的用例若只 `sleep` 几毫秒，在秒级截断的平台上必然失败、在真实精度平台上必然通过——**它测的其实是平台精度**。要显式断言"两次写入的时间戳必须不同"，这才是钉子 | `tests/pkg_test_staleness_test.cpp` |
+| **改构建逻辑后 `st build` 不会重编 `st` 自己**〔构建〕 | `st` 是**自举**产物（`bootstrap.ps1` 编出），`st build <目标>` 只编目标。于是改 `src/pkg/build.cpp` 后新逻辑**永不生效**，而它照样报"构建完成"。实测代价：5 轮实验（含逆向验证）全跑在旧二进制上，直到发现 `st.exe` 比 `build.cpp` 旧 18 小时。**现在已修**：`st` 每次运行会自检（按清单算候选源，比 mtime），有更新就**自动重建并用新工具重跑本次命令**；`--no-self-rebuild` 可关，`st rebuild` 可手工触发 | `tools/stpm/main.cpp::check_self_staleness` |
 | **mtime+size 都不变时，构建与 git 会一起被绕过**〔mtime〕 | 构建的 `.meta` 侧车只记 `(mtime, size)`，**没有内容哈希**。所以"同长度改动 + 保留 mtime"（`copy2`、`cp -p`、某些编辑器的"保留时间戳"、`os.utime` 回写）会让 `st build` 报**编译 111ms / 链接已跳过**，而源文件里已经是改过的代码；`git status` 同时显示**无改动**（它也用 stat 缓存）。**实证**（2026-10-25）：把 `render.hpp` 改成 `rendEr.hpp`（等长）+ `os.utime` 回原值 → 构建空跑、git 干净、产物仍是旧的。判别：`git show HEAD:<path>` 与磁盘字节直接比，或 `st build --force` | 本节实证 |
 
 ## 怎么用这份速查
