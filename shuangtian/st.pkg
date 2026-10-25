@@ -390,6 +390,11 @@
     "grain_cost_probe": {
       "kind": "executable",
       "sources": ["tools/grain_cost_probe.cpp"],
+      "//": "layout 图元要多大 alpha/尺寸才能让 32x18 网格逐帧差达标"
+    },
+    "layout_alpha_probe": {
+      "kind": "executable",
+      "sources": ["tools/layout_alpha_probe.cpp"],
       "include_dirs": ["examples/caiyun"],
       "exclude_sources": ["src/pkg/*"],
       "//note": "本机 GPU 腿可用性（无头模式下 st doctor 有意不探测 GPU，这里显式探一次）"
