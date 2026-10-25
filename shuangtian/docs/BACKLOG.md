@@ -496,6 +496,24 @@ clawd 同类），都是靠“抽帧发现画面空了”才定位。
 
 ## P1
 
+### `tts_speak` 的神经引擎在本机无法通过工具调用（2026-10-25）
+
+**现象**：`tts_speak(engine="neural", ...)` 恒返「神经语音合成失败。原文：python 未返回报告」，
+而**同一个 venv、同一套 sherpa-onnx 调用手搓脚本能正常合成**（同一模型 `vits-zh-theresa`，
+`cfg.validate()` 为 true、804 个音色、3.18s 音频）。
+
+**已确认的事实**（缩小范围用）：
+- `keqing/python/venv/Scripts/python.exe` 里 `import sherpa_onnx` 正常（1.13.8）；
+- 手搓脚本（同样用 `OfflineTtsConfig` + `date/number/phone/new_heteronym.fst`）出音频正常；
+- 工具报的是 `neural.ts::neuralFailureNote` 的 `no-report` 分支——即 **python 进程没吐出报告行**，
+  而不是模型/配置错误。
+
+**方向**：把 `writeTempScript` 写出的临时脚本与其 stderr 落盘保留（当前 stdout 尾部只留 400 字符，
+而真因可能在 stderr），并检查 `pythonCandidates()` 选中的解释器在**工具执行环境**下
+是否与手动 shell 一致（PATH/env 差异）。
+
+**本轮绕过**：`examples/caiyun/gbfilm/vo/synth_vo.py`（同一条 sherpa 调用，直接落 WAV）。
+
 ### 裁云：承接机制做了 3/6 层（2026-10-23，对标 13 条片后的能力矩阵）
 
 > 13 条的完整对标结果与逐条归因：`docs/onetake_13case_benchmark.md`。

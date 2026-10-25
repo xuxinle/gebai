@@ -9,7 +9,10 @@
 #include "st/test/test.hpp"
 
 #include <cmath>
+#include <cstdlib>
 #include <memory>
+#include <mutex>
+#include <string>
 #include <vector>
 
 #include "st/codec/png.hpp"
@@ -180,6 +183,57 @@ ST_TEST(software_scene_renders_a_cube) {
     ST_CHECK(std::abs(top - front) > 5.0);
     ST_CHECK(std::abs(front - right) > 5.0);
   }
+}
+
+ST_TEST(software_scene_transparent_clear_keeps_alpha_zero_in_empty_area) {
+  // ## 为什么钉这一条
+  //
+  // 三维图层要把模型叠在**已有画面**上（裁云的 `model_backdrop: false`、
+  // 任何“三维元素飘在视频上”的用法）。那条路的前提是 `begin_frame({0,0,0,0})`
+  // 清出的背景**真的透明**——否则模型周围是整块黑，而不是透出下层。
+  //
+  // 实测症状：软件腿把背景清成了不透明白（`encode_pixel` 的 alpha 恒为 255），
+  // 于是“三维图层 = 一个黑方框”，而 GPU 腿是对的——两条腿行为不一致，
+  // 且只在软件路径（= 所有非 Windows/无显卡环境）现形。
+  //
+  // ## 为何必须**强制软件腿**（否则测试是假绿，已实测）
+  //
+  // 本机有显卡时 `Scene3D::create` 默认走 GPU 腿，而 GPU 腿本来就对了——
+  // 于是把修复回退后测试**依旧绿**（一条恒绿的护栏）。所以这里用 `ST_SCENE3D_BACKEND`
+  // 把腿锁成 software（与 `raster_scene3d_two_legs_test.cpp` 的 `ForcedBackend`
+  // 同一手法），并用 `Scene3D::backend_mutex()` 做进程级互斥——那个环境变量是
+  // **进程级**的，测试运行器每用例开一个线程，不持锁会互相踩。
+  const std::lock_guard<std::mutex> guard(Scene3D::backend_mutex());
+  const char* previous = std::getenv("ST_SCENE3D_BACKEND");
+  std::string saved = previous != nullptr ? previous : "";
+  const bool had_previous = previous != nullptr;
+  (void)::_putenv_s("ST_SCENE3D_BACKEND", "software");
+  auto software_only = Scene3D::create(kWidth, kHeight);
+  (void)::_putenv_s("ST_SCENE3D_BACKEND", had_previous ? saved.c_str() : "");
+  if (!software_only.has_value() || (*software_only)->backend() != "software") return;
+  Canvas canvas{kWidth, kHeight};
+  canvas.clear(Color{0x20, 0x30, 0x40, 0xFF});   // 下层画面（不透明）
+  Camera camera;
+  camera.eye = Vec3{0.0f, 0.0f, 4.0f};
+  camera.target = Vec3{0.0f, 0.0f, 0.0f};
+
+  (*software_only)->begin_frame(Color{0, 0, 0, 0});   // 透明清屏 = “叠上去”模式
+  (*software_only)->set_camera(camera);
+  (*software_only)->draw_mesh(Mesh::cube(1.0f), Mat4::identity());
+  (*software_only)->end_frame(canvas, Rect{0.0f, 0.0f, static_cast<float>(kWidth),
+                                           static_cast<float>(kHeight)});
+
+  // 四角必须仍是下层画面**原样**（alpha 255、色值未被黑盖住）。
+  // 判据不能用“alpha == 0”：`end_frame` 是把三维图**合成**到目标上，
+  // 透明区合成后应当**看不见变化**——所以看“目标是否被改动”才是真行为。
+  const Color corner = canvas.pixel_at(2, 2);
+  ST_CHECK(corner.a == 255);
+  ST_CHECK(std::abs(static_cast<int>(corner.r) - 0x20) <= 3);
+  ST_CHECK(std::abs(static_cast<int>(corner.g) - 0x30) <= 3);
+  ST_CHECK(std::abs(static_cast<int>(corner.b) - 0x40) <= 3);
+  // 中心必须是**实体**（模型画上了，没被透明清屏连带抹掉）
+  const Color center = canvas.pixel_at(kWidth / 2, kHeight / 2);
+  ST_CHECK(std::abs(static_cast<int>(center.r) - 0x20) + std::abs(static_cast<int>(center.g) - 0x30) > 20);
 }
 
 ST_TEST(software_scene_depth_buffer_hides_the_far_face) {

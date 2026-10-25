@@ -457,7 +457,18 @@ class SoftwareScene final : public Scene3D {
     const math::Vec3 bg_linear{static_cast<float>(clear_color.r) / 255.0f,
                                static_cast<float>(clear_color.g) / 255.0f,
                                static_cast<float>(clear_color.b) / 255.0f};
-    canvas_.clear(encode_pixel(bg_linear, 1.0f, tone_map_));
+    // ## 清屏 alpha 必须**透传**（与 GPU 腿一致）
+    //
+    // `encode_pixel` 只处理颜色链，返回的 alpha 恒为 255；直接用它清屏会让
+    // `begin_frame({0,0,0,0})`（透明背景 —— 把模型叠在视频/画面上时的那条路）
+    // 变成**一整块不透明白黑**：三维图层的矩形四角把下层画面盖死。
+    // 实测症状：脚本里 `model_backdrop` 为 false 的三维块在成片上是一个黑方框，
+    // 而文档承诺的是“带透明通道，可叠在视频背景上”。
+    //
+    // 只覆盖 alpha：颜色仍走同一条色调映射 + sRGB 链（混用两套空间会让深底发白）。
+    math::Color cleared = encode_pixel(bg_linear, 1.0f, tone_map_);
+    cleared.a = clear_color.a;
+    canvas_.clear(cleared);
     std::fill(depth_.begin(), depth_.end(), 1.0f);   // 1.0 = 远平面
     draw_calls_ = 0;
   }

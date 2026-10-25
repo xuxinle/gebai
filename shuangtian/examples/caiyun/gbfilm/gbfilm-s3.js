@@ -1,0 +1,322 @@
+// ===== 共享前奏 =====
+// 坐标系：**设计像素 1920×1080**。shapes 绘制时按 canvas 宽/1920 缩放，
+// 所以这里一律按设计像素算——1920 导出时 1:1，其它分辨率自动等比。
+//
+// ## 三条实测口径（决定了这里的写法）
+//
+// 1. `shapes` **不过相机**（框架明文：paint_script_shapes 只乘 canvas/1920）。
+//    所以 `cam_zoom` / `cam_rotate` 对脚本图元完全无效——"让画面活着"只能靠自己画。
+// 2. 验收口径是 32×18 网格、逐格灰度均值差 <1.2 记静止。**单层几乎都过不了**：
+//    实测同口径——落定版面 100% 静止、竖向数据流 100%、扩散环 100%、大块快穿 100%、
+//    全屏光带横扫 100%；只有叠成三层（呼吸 + 扩散环 + 快扫）才到 28~37%。
+//    横向位移本身几乎测不到（格均值不变），**亮度在变才测得到**。
+// 3. 场景级 `grain` 在成片里测不出变化（1100/0.12 与 2400/0.22 都是 100% 静止），
+//    不能拿它当"画面在动"的证据。
+
+function clamp01(v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
+function seg(t, a, b) { if (b === a) return t >= b ? 1 : 0; return clamp01((t - a) / (b - a)); }
+function lerp(a, b, k) { return a + (b - a) * k; }
+function sstep(a, b, x) { const k = clamp01((x - a) / (b - a)); return k * k * (3 - 2 * k); }
+
+const EASE = {
+  linear: (u) => u,
+  expoOut: (u) => (u >= 1 ? 1 : 1 - Math.pow(2, -10 * u)),
+  expoIn: (u) => (u <= 0 ? 0 : Math.pow(2, 10 * (u - 1))),
+  expoInOut: (u) => (u <= 0 ? 0 : (u >= 1 ? 1 :
+    (u < 0.5 ? Math.pow(2, 20 * u - 10) / 2 : (2 - Math.pow(2, -20 * u + 10)) / 2))),
+  cubicOut: (u) => 1 - Math.pow(1 - u, 3),
+  cubicIn: (u) => u * u * u,
+};
+
+/// 欠阻尼弹簧：可过冲（>1）。zeta 0.55 有弹性 / 0.85 干脆。
+function spring(tau, zeta, omega) {
+  const z = (zeta === undefined) ? 0.62 : zeta;
+  const w = (omega === undefined) ? 20 : omega;
+  if (tau <= 0) return 0;
+  if (z < 1) {
+    const wd = w * Math.sqrt(1 - z * z);
+    return 1 - Math.exp(-z * w * tau) * (Math.cos(wd * tau) + (z * w / wd) * Math.sin(wd * tau));
+  }
+  if (z === 1) return 1 - Math.exp(-w * tau) * (1 + w * tau);
+  const q = w * Math.sqrt(z * z - 1), r1 = -z * w + q, r2 = -z * w - q;
+  const c1 = -r2 / (r1 - r2), c2 = r1 / (r1 - r2);
+  return 1 - (c1 * Math.exp(r1 * tau) + c2 * Math.exp(r2 * tau));
+}
+
+function hash01(a, b) { const x = Math.sin(a * 127.1 + (b || 0) * 311.7) * 43758.5453; return x - Math.floor(x); }
+
+function hex2rgb(h) {
+  return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+}
+function mixHex(a, b, k) {
+  const pa = hex2rgb(a), pb = hex2rgb(b), u = clamp01(k);
+  const to = (v) => Math.round(v).toString(16).padStart(2, '0');
+  return '#' + pa.map((v, i) => to(v + (pb[i] - v) * u)).join('');
+}
+function shadeHex(h, k) {
+  const p = hex2rgb(h), f = (v) => Math.max(0, Math.min(255, Math.round(v * k)));
+  return '#' + p.map((v) => f(v).toString(16).padStart(2, '0')).join('');
+}
+
+// —— 文字（与渲染器同口径：中文 1.0em / ASCII 0.52em）——
+function textW(s, size) {
+  let w = 0;
+  for (const ch of s) w += (ch.charCodeAt(0) > 127 ? size : size * 0.52);
+  return w;
+}
+function pushText(sh, s, x, top, size, color, alpha) {
+  sh.push({ kind: 3, text: s, x: x, y: top, h: size, color: color, alpha: alpha });
+}
+function pushTextC(sh, s, cx, top, size, color, alpha) {
+  pushText(sh, s, cx - textW(s, size) * 0.5, top, size, color, alpha);
+}
+/// 手排字距的一行（居中）。逐字画才能控制字距与逐字入场。
+function pushType(sh, s, cx, top, size, tr, color, alpha) {
+  let total = 0;
+  const chars = [];
+  for (const ch of s) {
+    const w = (ch.charCodeAt(0) > 127 ? size : size * 0.52);
+    chars.push({ ch: ch, w: w });
+    total += w + tr;
+  }
+  total -= tr;
+  let x = cx - total * 0.5;
+  for (const c of chars) {
+    if (c.ch !== ' ') sh.push({ kind: 3, text: c.ch, x: x, y: top, h: size, color: color, alpha: alpha });
+    x += c.w + tr;
+  }
+  return total;
+}
+/// 逐字入场（每字自己的 delay 与上浮）。
+function pushTypeIn(sh, s, cx, top, size, tr, color, t, t0, stagger, rise) {
+  let total = 0;
+  const chars = [];
+  for (const ch of s) {
+    const w = (ch.charCodeAt(0) > 127 ? size : size * 0.52);
+    chars.push({ ch: ch, w: w });
+    total += w + tr;
+  }
+  total -= tr;
+  let x = cx - total * 0.5;
+  for (let i = 0; i < chars.length; i++) {
+    const c = chars[i];
+    const p = EASE.expoOut(seg(t, t0 + i * stagger, t0 + i * stagger + 0.52));
+    if (c.ch !== ' ' && p > 0.001) {
+      sh.push({ kind: 3, text: c.ch, x: x, y: top + (1 - p) * (rise || 26), h: size,
+                color: color, alpha: p });
+    }
+    x += c.w + tr;
+  }
+  return total;
+}
+
+// —— 图元 ——
+function pushRect(sh, x, y, w, h, color, alpha, radius, rot) {
+  sh.push({ kind: 1, x: x, y: y, w: w, h: h, color: color, alpha: alpha,
+            radius: radius || 0, rotate: rot || 0 });
+}
+function pushCircle(sh, cx, cy, r, color, alpha) {
+  sh.push({ kind: 0, x: cx - r, y: cy - r, w: r * 2, h: r * 2, color: color, alpha: alpha });
+}
+function pushLine(sh, x1, y1, x2, y2, color, alpha, w) {
+  sh.push({ kind: 2, x: x1, y: y1, x2: x2, y2: y2, color: color, alpha: alpha,
+            stroke: w === undefined ? 1.5 : w });
+}
+function pushPoly(sh, pts, color, alpha, rot) {
+  sh.push({ kind: 4, points: pts, color: color, alpha: alpha, rotate: rot || 0 });
+}
+
+// ═══════════════════════════════════════════════════════════
+// 环境层：本片所有幕共用同一套"底"，换幕时只换主体的构图
+// ══════════════════════════════════════════════
+//
+// ## 为何要统一成一个可复用的底
+//
+// 第一版每幕各写一套背景装饰，结果 7 幕全都在 82~89% 静止。
+// 标定证明：**要让画面持续活着，靠的是三层正交的慢运动叠在一起**
+// （整屏呼吸给基础量、扩散环给大尺度存在感变化、快扫给跨格位移）。
+// 写成一套参数化的函数，既保证每幕都过判据，也保证全片质感一致。
+
+/// 整屏呼吸：alpha 在 lo..hi 之间按 period 正弦摆动（深底用白 = 提亮）。
+function envBreathe(sh, W, H, t, lo, hi, period) {
+  const p = 0.5 + 0.5 * Math.sin((t / (period || 0.66)) * Math.PI * 2 - Math.PI / 2);
+  pushRect(sh, -12, -12, W + 24, H + 24, '#FFFFFF', lo + (hi - lo) * p);
+}
+
+/// 扩散环：从画面中心向外扩散的细环，存在感随时间变（半径与 alpha 反向）。
+function envRings(sh, W, H, t, cx, cy, color, gain, period) {
+  const P = period || 1.55;
+  for (let k = 0; k < 3; k++) {
+    const ph = ((t / P) + k / 3) % 1;
+    const r = 40 + ph * 900;
+    pushCircle(sh, cx, cy, r, color, 0.20 * (1 - ph) * (gain === undefined ? 1 : gain));
+  }
+}
+
+/// 快扫：几道宽带横向掠过（每帧 ~60px，跨整格；这是唯一"位移测得到"的手法）。
+function envSweep(sh, W, H, t, color, gain, speed) {
+  const v = speed || 1750;
+  const bx = ((t * v) % (W + 700)) - 350;
+  for (let g = 0; g < 4; g++) {
+    pushRect(sh, bx + g * 78, 0, 78, H, color, (0.065 - g * 0.013) * (gain === undefined ? 1 : gain));
+  }
+}
+
+/// 竖向细流：低频、低压差的竖向短线缓慢下落（给"数据在走"的质感，
+/// 不指望它撑静止占比——实测它单独存在时网格差 0.35，远低于阈值）。
+function envStream(sh, W, H, t, color, count, speed, alpha) {
+  const n = count || 46;
+  for (let i = 0; i < n; i++) {
+    const lane = (i * 157.3 + 40) % W;
+    const v = (speed || 150) * (0.7 + (i % 5) * 0.14);
+    const y = ((t * v + i * 197) % (H + 240)) - 120;
+    pushRect(sh, lane, y, 1.6, 42, color, alpha === undefined ? 0.30 : alpha);
+  }
+}
+
+/// 网格纹：给"结构感"（低速漂移；同样不指望它撑判据）。
+function envGrid(sh, W, H, t, gap, color, alpha, drift) {
+  const off = ((t * (drift || 10)) % gap);
+  for (let x = -gap + off; x < W + gap; x += gap) pushRect(sh, x, 0, 1, H, color, alpha);
+  for (let y = -gap + ((t * (drift || 10) * 0.7) % gap); y < H + gap; y += gap) {
+    pushRect(sh, 0, y, W, 1, color, alpha);
+  }
+}
+
+/// 环境层总装：按"强度档"挂上背景层（环）。
+///
+/// `ring_gain` 可选：标题/正文压上来时给 0.4 以内，让环退到背景。
+///
+/// ## 为何用"降环强度"而不是盖一个半透明底（实测）
+///
+/// 第一版为了护住标题可读性，在标题区叠了 3 层深色矩形——结果成片里是一个
+/// 边缘硬、颜色跳的**黑方地**（比原本要修的"环穿字"更难看）。
+/// 环是带 alpha 的细线叠层，直接降低它的强度即可，无需造新的形状。
+function envBackdrop(sh, W, H, t, level, cx, cy, ring_gain) {
+  const L = (level === undefined) ? 1 : level;
+  const cyy = (cy === undefined) ? H * 0.48 : cy;
+  const cxx = (cx === undefined) ? W * 0.5 : cx;
+  const gain = (ring_gain === undefined)
+      ? (L === 0 ? 0.7 : (L === 1 ? 1.0 : 1.15))
+      : ring_gain;
+  envRings(sh, W, H, t, cxx, cyy, '#4D7DFF', gain, L === 0 ? 1.9 : 1.55);
+}
+
+/// 环境层前装：**画在内容之后**（相最上层）。
+///
+/// ## 为何必须分前/后两层（实测）
+///
+/// 第一版把呼吸与扫描全画在背景层，结果任何大块内容（终端窗口、卡片区）
+/// 把它俩盖掉——幕 4 的静止占比 95%，把推镜和环境层全白做了。
+/// 呼吸必须作用于**整帧**才能产生"整屏亮度在变"（这是唯一与验收格差 1:1 的手法）。
+///
+/// ## 幅度与周期的换算（别再拍脑袋定幅度）
+///
+/// 正弦呼吸的**逐帧**格差约为 `A·4/(T·30)`（A = luma 摆幅，T = 周期秒）。
+/// 验收阈值是 1.2，所以 A≈0.05（≈13 级）× T=0.62 才刚好过线（算出 1.42）。
+/// 实测校验：标定 P1（A=11.5, T=0.66）算出 2.32、实测 median 1.98——公式可用。
+function envOverlay(sh, W, H, t, level) {
+  const L = (level === undefined) ? 1 : level;
+  const hi = L === 0 ? 0.055 : (L === 1 ? 0.052 : 0.058);
+  const lo = L === 0 ? 0.006 : 0.006;
+  envBreathe(sh, W, H, t, lo, hi, L === 0 ? 0.62 : 0.64);
+  envSweep(sh, W, H, t, '#7FB2FF', L === 0 ? 0.85 : (L === 1 ? 1.0 : 1.2),
+           L === 0 ? 1450 : (L === 1 ? 1750 : 2050));
+}
+
+
+// 幕 3「工具面」5.8s —— 23 张工具卡弹簧错峰弹入。
+// 讲一件事：**面**（不是一个功能，而是一整片可调用的面）。
+// 手法：弹簧（ζ0.55/ω19，可过冲）+ 径向错峰；落定后逐卡微起伏。
+const TOOLS = [
+  ['caiyun', '裁云 · 视频'], ['shuangtian', '霜天 · 原生 UI'], ['imagegen', '文生图'],
+  ['tts', '语音与音效'], ['louyue', '镂月 · 海报'], ['code', '编码与修复'],
+  ['explore', '代码探索'], ['playwright', '浏览器自动化'], ['desktop', '桌面操控'],
+  ['wps', '文档表格'], ['feishu', '飞书协同'], ['llm_infer', '本地推理'],
+  ['torch', 'PyTorch 剖析'], ['nsight', 'GPU 性能'], ['vision', '视觉识别'],
+  ['triage', '大小模型分诊'], ['task', '无人值守任务'], ['session', '会话管控'],
+  ['memory', '跨会话记忆'], ['approve', '审批与留痕'], ['sandbox', '沙箱隔离'],
+  ['git', '版本与回滚'], ['shell', '任意进程']
+];
+
+function scene_tools(t, duration, canvas, layers) {
+  const W = 1920, H = 1080;
+  const sh = [];
+
+  envBackdrop(sh, W, H, t, 1, W * 0.5, H * 0.55);
+  envGrid(sh, W, H, t, 120, '#16223A', 0.30, 8);
+
+  // 标题（`pushTypeIn` 收的是**中心 x**，不是左边界——传左边界会把标题左半推出画面）
+  const titleW = textW('二十三种能力', 46) + 3 * 9;
+  pushTypeIn(sh, '二十三种能力', 150 + titleW * 0.5, 128, 46, 3, '#EAF0FF', t, 0.10, 0.035, 22);
+  const subW = textW('一次装载，全部并入工具面', 26) + 1.5 * 10;
+  pushTypeIn(sh, '一次装载，全部并入工具面', 560 + subW * 0.5, 146, 26, 1.5, '#7C93B4',
+             t, 0.55, 0.016, 14);
+
+  // 计数 0 → 23（数字在变 = 明暗在跳）
+  const cnt = Math.min(Math.floor(EASE.expoOut(seg(t, 0.55, 2.35)) * TOOLS.length + 0.0001), TOOLS.length);
+  pushText(sh, String(cnt).padStart(2, '0'), 1688, 114, 62, '#3B82F6', 0.92);
+  pushText(sh, '/ 23', 1758, 146, 22, '#5E7A99', 0.8);
+
+  // 卡片网格：总宽必须留出两侧安全区（实测 6×268+16 会顶到画面边缘，标题被裁）
+  const COLS = 6, ROWS = 4;
+  const CW = 244, CH = 112, GX = 15, GY = 15;
+  const totalW = COLS * CW + (COLS - 1) * GX;
+  const X0 = (W - totalW) * 0.5;
+  const Y0 = 252;
+  const CXg = W * 0.5, CYg = Y0 + (ROWS * CH + (ROWS - 1) * GY) * 0.5;
+
+  for (let i = 0; i < TOOLS.length; i++) {
+    const col = i % COLS, row = Math.floor(i / COLS);
+    const x = X0 + col * (CW + GX);
+    const y = Y0 + row * (CH + GY);
+    const cx = x + CW * 0.5, cy = y + CH * 0.5;
+
+    // 径向错峰：从中心向外依次弹出
+    const d = Math.hypot(cx - CXg, cy - CYg) / 700;
+    const delay = 0.18 + d * 0.78 + hash01(i, 7) * 0.16;
+    const tau = t - delay;
+    if (tau <= 0) continue;
+    const s = spring(tau, 0.55, 19);
+    const a = clamp01(tau / 0.22);
+    // 落定后极缓起伏 + 斑马纹亮度波（逐卡相位不同 → 整片不会像一块板）
+    const wob = Math.sin(t * 0.9 + i * 0.7) * 2.6 * clamp01((t - 1.6) / 0.8);
+    // 亮度灏：一行一行掠过的亮带（存在感在变，验收网格测得到）
+    const sweepY = -200 + ((t * 1250) % (ROWS * CH + 600));
+    const cardCy = cy - Y0;
+    const band = clamp01(1 - Math.abs(cardCy - sweepY) / 190);
+    const lit = 0.90 + band * 0.55;
+
+    const sc = 0.84 + 0.16 * s;
+    const w = CW * sc, h = CH * sc;
+    const bx = cx - w * 0.5, by = cy - h * 0.5 + wob;
+
+    pushRect(sh, bx, by, w, h, mixHex('#101827', '#1B2C4A', band * 0.9), 0.92 * a * Math.min(lit, 1), 12);
+    pushRect(sh, bx, by, w, 1.5, mixHex('#233450', '#5B8CFF', band), 0.75 * a, 0);
+    pushRect(sh, bx, by, 2.5, h, '#3B82F6', Math.min(0.95, 0.55 * a + band * 0.4), 1.5);
+
+    pushText(sh, String(i + 1).padStart(2, '0'), bx + 16, by + 16, 16, '#3B82F6', 0.75 * a);
+    pushText(sh, TOOLS[i][0], bx + 16, by + 40, 26, '#EAF0FF', 0.95 * a);
+    pushText(sh, TOOLS[i][1], bx + 16, by + 78, 18, '#7C93B4', 0.85 * a);
+
+    const blink = 0.35 + 0.65 * Math.abs(Math.sin(t * 1.7 + i * 0.5));
+    pushCircle(sh, bx + w - 18, by + 20, 3.2, '#4ADE80', 0.7 * a * blink);
+  }
+
+  const footP = EASE.expoOut(seg(t, 2.4, 3.2));
+  if (footP > 0.01) {
+    pushText(sh, '装载即并入 —— 不需要注册、不需要重启、不需要改调用方', 150, 972, 22,
+             '#6F86A6', 0.9 * footP);
+  }
+
+  envStream(sh, W, H, t, '#6FA8FF', 38, 185, 0.22);
+  // 覆盖层必须在**所有内容之后**（呼吸作用于整帧，才与验收格差 1:1）
+  envOverlay(sh, W, H, t, 1);
+
+  return { states: layers.map(() => ({})), shapes: sh };
+}
+
+// 本幕入口（每幕一个 layout 文件：没有判据可错）
+function layout(t, duration, canvas, layers) {
+  return scene_tools(t, duration, canvas, layers);
+}
