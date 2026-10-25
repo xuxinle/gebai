@@ -1336,13 +1336,81 @@ export const persona: PersonaDef = {
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `GEBAI_PERSONA` | false | 拟人模式总开关 |
+| `GEBAI_PERSONA` | false | 拟人模式总开关（关闭时 persona 组件**完全实例化**） |
 | `GEBAI_PERSONA_AUTO_APPROVE` | true | 人格运行自动通过审批 |
-| `GEBAI_CHANNELS_FEISHU_APP_ID` / `_APP_SECRET` | — | 飞书应用凭据（回落到 `GEBAI_FEISHU_*`） |
+| `GEBAI_PERSONA_DRIVER_TOOLS_APPROVAL` | false | `driver_create`/`driver_retire` 是否需审批 |
+| `GEBAI_EVENT_SOURCES_ENABLE` / `_DISABLE` | — | 事件源启停名单（先白后黑，同名机制同子 Agent） |
+| `GEBAI_PERSONA_SCOPES` | 基础集 | 授权 scopes 追加（**并集**，非替换） |
+| `GEBAI_CHANNELS_FEISHU_APP_ID` / `_APP_SECRET` | — | 拟人专用机器人凭据（**不回落** `GEBAI_FEISHU_*`） |
 | `GEBAI_PUBLIC_URL` | — | 公网基址（拼授权回调地址；缺省 `http://localhost:{port}`） |
 
 回调地址需在飞书开放平台「安全设置 → 重定向 URL」中登记：
 `{GEBAI_PUBLIC_URL}/api/v1/persona/feishu/callback`
+
+#### 三面通电：只接渠道是不够的
+
+拟人模式启用后**同时**装配三样东西。只看其中一面就会得出错误结论：
+
+| 面 | 组件 | 盖住什么 | 漏了它时的现象 |
+|---|---|---|---|
+| 入站（消息） | `ChannelInputBridge` → 渠道长连接 | 人群里推上来的消息 | 什么都不会发生 |
+| 入站（驱动） | `EventSourceManager` | 定时 / webhook / 文件投递 / 桌面… | `kind:schedule|webhook` 的订阅**永远没有事件到达**（人格看起来「只对聊天有反应」） |
+| 自我组织 | `driver_list/create/retire` 工具 | 模型给自己开/撤分工 | 新情况只能等人改配置重启 |
+
+三面的失败**各自隔离**：事件源在渠道之后启动，一方坏不连带另一方（“飞书源配错导致定时任务也不跑了”
+是最难排查的耦合）。
+
+#### 事件的驱动面：`EventSourceManager`
+
+插件只回答「发生了什么」（`IngressEvent`）；「归谁、进哪个会话、什么时候跑」全由 `PersonaRuntime` 裁决。
+扫描域：内置 `packages/persona/src/sources/` + 二开 `custom/persona/`（同名二开胜出）——与子 Agent
+同款的四套机制：目录签名热加载 · 单源失败隔离 · 二开覆盖 · 严格字段校验。
+
+写新源只看 [`packages/persona/docs/event-sources.md`](../../packages/persona/docs/event-sources.md)，
+不必碰任何核心代码。
+
+#### 自我组织：`driver_*` 工具的身份从哪来
+
+`driver_create` 是**写操作**（新增常驻分身 + 落盘 + 参与订阅匹配），所以身份不能由模型自报：
+
+```
+SessionData.persona  ──▶  personaOwnerOf(sessionId)  ──▶  { personaId, driverId }
+（会话自身即真相源）            （服务端适配层）              （注入内核工具的 resolveContext）
+```
+
+| 情形 | 行为 |
+|---|---|
+| 人格会话（`SessionData.persona` 有值） | 身份取自会话归属；模型传的任何 personaId 都被忽略 |
+| 普通会话 | 返回「当前会话不属于任何人格」+ 该去哪做，**不落任何写** |
+| 会话不存在 / 读取抛错 | 同上（宁可少给能力，不给错身份） |
+| `driver_create` 成功 | `onChange` → `runtime.syncDriver(online)`：不调它新建的分身**从不响应**（调度器没条目，工具却说「已创建」） |
+
+工具是**全局注册 + 执行时自检**（而不是会话级注册/注销）：注册是进程级的，按会话注册要把
+「会话删除 / 重建 / 人格热加载」三件事都维护一遍，多一处状态就多一处不一致。代价是普通会话
+也看得见这三个工具——所以描述统一带「【仅人格会话可用】」前缀，并在拒绝时给出该怎么做。
+
+默认不弹审批：创建/下线都**写盘留痕 + 可随时回滚**，风险由「可见 + 可回滚」承担；逐次审批会让
+「自我组织」退化成「每步问人」。要收紧就设 `GEBAI_PERSONA_DRIVER_TOOLS_APPROVAL=true`。
+
+#### 运行态：一个接口，五项事实
+
+`GET /api/v1/persona/state` 把五个来源汇成一份快照（未启用时 404——**不返回全零的假快照**，
+否则「没开」会被误读成「开了但什么都没发生」）：
+
+| 快照字段 | 来自 | 单看它会漏掉什么 |
+|---|---|---|
+| `personas[].drivers[]` | `PersonaCatalog`（静态 + 动态 driver） | 定义在 ≠ 跑过 |
+| `drivers[].queued/running/accepted/failed` | `PersonaRuntime.personaStates()` | 调度器惰性创建，没事件就没条目 |
+| `drivers[].sessionId` / `sessionRunning` | `runtime.bindings()` + `engine.isRunning()` | 两者并列：调度计数会滞后，引擎判定更准 |
+| `sources[]` / `sourceErrors` | `EventSourceManager.state()/loadErrors()` | 源未启动时计数全 0，看着像「没收到」 |
+| `channelInput` | `ChannelInputBridge.allStats()` | `unrouted` 持续涨 = **订阅配错**，不是渠道坏了 |
+| `credentials` | `PersonaCredentials.status()` | 无凭据时人格不回消息而日志全绿（不含令牌明文） |
+
+同形状直接给设置面板「拟人」页签用（凭据 → 事件源 → 渠道入站 → 人格与分身 四段，
+与「排查时该先看哪个」的顺序一致）。
+
+诊断用的手动启停：`POST /api/v1/persona/sources/{name}/{start|stop}`——临时打开一个源看它能不能
+收到东西，不必改环境变量重启（那会中断正在跑的人格任务）；**不改变启停名单**。
 
 ### 对外动作：渠道抽象（`@gebai/channels`）
 

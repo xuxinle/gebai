@@ -111,6 +111,13 @@ export interface PersonaRunInput extends DriverTarget {
   /** 插话信箱：可在任意时刻 drain 提前取走新事件（不 drain 也不会丢）。 */
   mailbox: import("./mailbox").PersonaMailbox
   attachments?: PersonaAttachment[]
+  /**
+   * 同人格的其它 driver（不含自己）。
+   *
+   * 为何要传给 runner：不告诉它有哪些兄弟分身时，同一个问题会被几个分身重复答一遍——
+   * 每个都在自己的会话里把它当「第一次看见」。这是“多分身”模型特有的失效模式。
+   */
+  siblings?: DriverDef[]
 }
 
 /**

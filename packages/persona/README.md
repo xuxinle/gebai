@@ -118,8 +118,16 @@ src/
 ## 验证
 
 ```bash
-cd packages/persona && bun test        # 209 用例
+cd packages/persona && bun test        # 218 用例
 bun x tsc --noEmit                     # 类型检查
+```
+
+服务端侧的装配验证（身份边界 / 运行态快照 / 路由契约）：
+
+```bash
+cd packages/server && bun test src/core/session/persona-driver-tools.test.ts \
+                                 src/core/session/persona-status.test.ts \
+                                 src/routes/persona.test.ts
 ```
 
 **反向验证（改坏实现看测试是否杀掉）** —— 核心层 12 个变异体 / 源扩展层 15 个：
@@ -157,25 +165,44 @@ bun x tsc --noEmit                     # 类型检查
 插话是尽力而为的高优先路径，可靠投递仍由队列保证。`maxRounds` 只封顶轮次数，
 不封顶每轮吸收多少条——所以信箱本身必须有界，否则事件洪峰会一次性拼成超大输入。
 
-## 接入服务端（尚未做，属后续阶段）
+## 接入服务端
 
-服务端需实现三个 Port：
+服务端实现三个 Port（`packages/server/src/boot/compose.ts`）：
 
 ```ts
 new PersonaRuntime({
-  lookup:   /* PersonaLookup：角色与 driver 注册表 + 订阅匹配 */,
-  sessions: /* SessionResolver：driver → 常驻会话 */,
-  runner:   /* PersonaRunner：engine.run 包装，signal 透传 */,
+  lookup:   PersonaCatalog      // 静态定义 + DriverRegistry（模型自建分身）
+  sessions: PersonaSessionResolver  // (人格, 分身) → 常驻会话
+  runner:   EnginePersonaRunner // 事件 → prompt → engine.run（engine 零改动：身份走 channelNote）
 })
 ```
 
 **零配置向后兼容**：`lookup.subscribers()` 返回空数组时 `dispatch` 返回 `unrouted`，
 调用方走自己原有的路径——未配置任何订阅者时行为与今天逐字节相同。
 
+### 启用后同时装配的三面
+
+只接渠道是不够的——「人格只对聊天有反应，定时/webhook 永远不触发」就是把驱动面漏了：
+
+| 面 | 组件 | 服务端位置 |
+|---|---|---|
+| 入站（消息） | `ChannelInputBridge` → 渠道长连接 | `boot/compose.ts`（`channels.attachDispatcher`） |
+| 入站（驱动） | `EventSourceManager` | `boot/compose.ts`（`channels.init()` 之后启动，失败各自隔离） |
+| 自我组织 | `driver_list/create/retire` | `core/session/persona-driver-tools.ts`（身份从 `SessionData.persona` 读，不按模型自报） |
+| 运行态 | `collectPersonaState` | `core/session/persona-status.ts` → `GET /api/v1/persona/state` → 设置→拟人面板 |
+
+### 两个宿主侧的坑（本包已按此实现，改装配时别拆）
+
+1. **`onChange` 必须调 `runtime.syncDriver`**：不调则新建的分身只在盘上/注册表里，
+   调度器没条目——工具回「已创建」而那个分身**从不响应**（现象极像订阅配错）。
+2. **身份不能由模型传**：`driver_*` 工具的 `personaId` 由宿主从**会话归属**算出后注入
+   （`personaContextResolver`），模型传什么都被忽略；写成 `resolveContext: () => null`
+   会让所有人格会话里这三个工具都恒返回「当前通道不支持」。
+
 ## 后续阶段（不在本轮范围）
 
-人格定义与严格校验、会话映射与按 kind 分级 GC、审批规则谓词、动作工具族（发送/提交）、
-桌面弹窗、霜天框架 4 项增强。
+人格定义热加载（目前重启生效）、会话按 kind 分级 GC、审批规则谓词、
+桌面弹窗源、霜天框架 4 项增强。
 
 ## 源扩展层的反向验证（15 变异体 / 14 杀）
 

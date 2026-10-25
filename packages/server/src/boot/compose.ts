@@ -596,10 +596,26 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   let personaRuntime: import("@gebai/persona").PersonaRuntime | null = null
   let personaCatalog: import("@gebai/persona").PersonaCatalog | null = null
   let personaSessions: import("../core/session/persona-sessions").PersonaSessionResolver | null = null
+  /** 事件源管理器（拟人模式的驱动面）：未启用时为 null。 */
+  let personaSources: import("@gebai/persona").EventSourceManager | null = null
+  /** 渠道入站桥接（诊断计数；未启用时为 null）。 */
+  let personaChannelBridge: ChannelInputBridge | null = null
+  /** 运行态快照（REST /api/v1/persona/state 与前端面板共用）。 */
+  let personaState: (() => Promise<import("../core/session/persona-status").PersonaStateSnapshot>) | null = null
   if (config.personaEnabled) {
-    const { PersonaRuntime, PersonaCatalog, DriverRegistry, defaultPersonaScanDirs, discoverPersonas } = await import("@gebai/persona")
+    const {
+      PersonaRuntime,
+      PersonaCatalog,
+      DriverRegistry,
+      defaultPersonaScanDirs,
+      discoverPersonas,
+      createDriverTools,
+      createDriverListTool,
+    } = await import("@gebai/persona")
     const { PersonaSessionResolver } = await import("../core/session/persona-sessions")
     const { EnginePersonaRunner } = await import("../core/session/persona-runner")
+    const { toEngineTools: adaptDriverTools, personaContextResolver } = await import("../core/session/persona-driver-tools")
+    const { collectPersonaState } = await import("../core/session/persona-status")
 
     const personaDirs = defaultPersonaScanDirs({ packageRoot: await resolvePersonaPackageRoot() })
     const found = await discoverPersonas(personaDirs)
@@ -627,12 +643,25 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     // 会话名用「人格显示名·分身 id」：侧栏里一眼能认出来
     personaSessions.nameOf = (id) => personaCatalog!.get(id)?.name ?? id
 
+    // 事件源热加载的节流（距上次重扫不足 5s 则跳过）：目录遍历便宜但不是免费，
+    // 事件密集时（几十条/秒）每轮都扫会把主线程拖成锯齿。5s 对人改文件的节奏已足够敏感。
+    const SOURCE_REFRESH_MS = 5_000
+    let lastSourceRefresh = 0
+    const refreshSources = async (): Promise<void> => {
+      if (!personaSources) return // 事件源在渠道之后才装配（见下）：之前无需也无从检查
+      const now = Date.now()
+      if (now - lastSourceRefresh < SOURCE_REFRESH_MS) return
+      lastSourceRefresh = now
+      await personaSources.refreshIfChanged()
+    }
+
     personaRuntime = new PersonaRuntime({
       lookup: personaCatalog,
       sessions: personaSessions,
       runner: new EnginePersonaRunner({
         engine,
         autoApprove: config.personaAutoApprove,
+        refreshBeforeRun: refreshSources,
         log: { info: log.info, warn: log.warn },
       }),
       log: { info: log.info, warn: log.warn },
@@ -643,6 +672,64 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     void personaSessions.warm("admin").then((n) => {
       if (n > 0) log.info(`[gebai] 已恢复 ${n} 个人格会话绑定`)
     })
+
+    // ── 自我组织：把 driver_list / driver_create / driver_retire 交给模型 ──
+    //
+    // **全局注册 + 运行时自检**（而不是会话级注册）：注册是进程级的，可见面在调用时判定。
+    // 为什么：按会话注册/注销要把「会话删除/重建/人格热加载」三件事都同步维护一遍，
+    // 多一处状态就多一处不一致；而身份本来就从 `SessionData.persona` 读得到。
+    //
+    // `onChange` 里的 `syncDriver` 不能省：少了它，新建的分身只在盘上/注册表里，
+    // 调度器没条目——工具回「已创建」，而那个分身**从不响应**（现象极像订阅配错）。
+    {
+      const wantApproval = process.env.GEBAI_PERSONA_DRIVER_TOOLS_APPROVAL === "true"
+      const deps = {
+        registry: driverRegistry,
+        store,
+        runtime: personaRuntime,
+        log: { info: log.info, warn: log.warn },
+      }
+      const personaTools = [
+        createDriverListTool({ registry: driverRegistry, resolveContext: personaContextResolver }),
+        ...createDriverTools({
+          registry: driverRegistry,
+          resolveContext: personaContextResolver, // 身份由适配层从会话归属注入（内核拿不到宿主会话）
+          requireApproval: wantApproval,
+          onChange: (c) => {
+            try {
+              personaRuntime!.syncDriver(c.personaId, c.driverId, c.action === "created" ? "online" : "offline")
+              log.info(`[gebai] 人格分工已同步运行时：${c.personaId}/${c.driverId}（${c.action}）`)
+            } catch (err) {
+              log.warn(
+                `[gebai] 同步人格运行时失败 ${c.personaId}/${c.driverId}: ${String((err as Error)?.message || err)}` +
+                  "——注册表与磁盘已写入，重启后仍会生效",
+              )
+            }
+          },
+        }),
+      ]
+      for (const t of adaptDriverTools(personaTools, deps, { requireApproval: wantApproval })) registry.register(t)
+      log.info(`[gebai] 人格自组织工具已注册：${personaTools.map((t) => t.name).join("、")}`)
+    }
+
+    // ── 运行态快照 ──
+    // 事件源与渠道桥接要到下面才建，所以取**惰性函数**（此处不读它们的值，只在请求时读）
+    personaState = () =>
+      collectPersonaState({
+        catalog: personaCatalog!,
+        runtime: personaRuntime!,
+        drivers: driverRegistry,
+        sources: personaSources,
+        credentials: personaCredentials,
+        channelInput: () => personaChannelBridge?.allStats() ?? {},
+        sessionRunning: (id) => {
+          try {
+            return engine.isRunning(id)
+          } catch {
+            return false
+          }
+        },
+      })
   }
 
   // 渠道初始化（写/读/收三面一起起）+ 输入面桥接。
@@ -650,17 +737,44 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   // **输入面的落点**：渠道推上来的事件需要一个「归谁、进哪个会话」的裁决者。
   // 拟人模式未开启时退化为**事件日志消费**——这样「渠道能收」可独立验证，
   // 且不会静默吞掉事件（没有人格时至少日志里看得到）。
-  channels.attachDispatcher(
-    personaRuntime
-      ? new ChannelInputBridge({ dispatch: personaRuntime, log: { info: log.info, warn: log.warn } })
-      : new LogOnlyDispatcher({ log }),
-  )
+  personaChannelBridge = personaRuntime
+    ? new ChannelInputBridge({ dispatch: personaRuntime, log: { info: log.info, warn: log.warn } })
+    : null
+  channels.attachDispatcher(personaChannelBridge ?? new LogOnlyDispatcher({ log }))
   await channels.init()
   {
     const chErrors = channels.loadErrors()
     if (Object.keys(chErrors).length) {
       for (const [name, err] of Object.entries(chErrors)) log.warn(`[gebai] 渠道 ${name} 不可用: ${err}`)
     }
+  }
+
+  // ── 拟人模式的事件源（驱动面）：**多源通电的关键一步** ──
+  //
+  // 渠道长连接只盖住「渠道推上来的消息」；定时/ webhook / 文件投递/ 桌面等其它驱动源
+  // 全由事件源插件提供（丢文件即注册，与子 Agent 同款）。不接这一步，拟人模式就只能
+  // 响应渠道消息，`kind: "schedule"/"webhook"` 的那些订阅永远不会有事件到达。
+  //
+  // 位置刻意在 `channels.init()` 之后：启动顺序上事件源比渠道「低一级」——
+  // 渠道坏了不该连带事件源也不启动（两边失败各自隔离，日志各自清楚）。
+  if (personaRuntime) {
+    const { EventSourceManager, defaultEventSourceScanDirs } = await import("@gebai/persona")
+    personaSources = new EventSourceManager({
+      scanDirs: defaultEventSourceScanDirs({ packageRoot: await resolvePersonaPackageRoot() }),
+      runtime: personaRuntime,
+      home: config.gebaiHome,
+      enable: config.eventSourcesEnable,
+      disable: config.eventSourcesDisable,
+      log: { info: log.info, warn: log.warn, error: log.error },
+    })
+    await personaSources.start()
+    const srcErrs = personaSources.loadErrors()
+    for (const [name, err] of Object.entries(srcErrs)) log.warn(`[gebai] 事件源 ${name} 不可用: ${err}`)
+    const running = personaSources.state().filter((s) => s.started)
+    log.info(
+      `[gebai] 拟人事件源已启动 ${running.length} 个` +
+        (running.length ? `：${running.map((s) => `${s.name}(${s.channel})`).join("、")}` : "（无——只靠渠道入站；放一个源文件到 custom/persona/ 即生效）"),
+    )
   }
   // 服务中断留痕（见 core/session/run-marker）：上一进程在任务中途退出时，会话里只有用户消息、
   // 没有任何助手回应——启动时对残留的在途标记补一条可见说明（历史与界面都能看出那次任务被打断）
@@ -827,6 +941,16 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     credentialSources,
     tasks,
     todos,
+    // 拟人模式运行态（未启用时 undefined → REST 端点 404）
+    ...(personaState ? { personaState } : {}),
+    ...(personaSources
+      ? {
+          personaSourceControl: {
+            start: (name: string) => personaSources!.startOne(name),
+            stop: (name: string) => personaSources!.stopOne(name),
+          },
+        }
+      : {}),
     // 文件工作台（DESIGN「文件工作台」）：Git 服务（宿主 git CLI，写/远程分别受开关约束）
     // 与写操作审计（用户直操文件系统的留痕；与工具审批的事前拦截互补）
     git: new GitService({
@@ -862,6 +986,15 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       }
     })
     devReload.start()
+  }
+
+  // 拟人事件源的生命周期收口：进程退出时停订阅（连接/定时器）——
+  // 用 `exit` 而非信号处理：本文件不拥有信号策略（cli/serve 都已处理），这里只做“顺手清干净”。
+  if (personaSources) {
+    const sources = personaSources
+    process.on("exit", () => {
+      void sources.stop().catch(() => {})
+    })
   }
 
   return { config, store, registry, engine, subAgents, channels, auth, events, sandbox, webhooks, tasks, todos, gc, feishuBot, deps, state, app, devReload, devReloadClients }

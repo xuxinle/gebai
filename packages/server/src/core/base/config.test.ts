@@ -110,6 +110,31 @@ describe("loadConfig 模式与密钥解析", () => {
     }
   })
 
+  test("事件源启停名单环境变量解析（GEBAI_EVENT_SOURCES_ENABLE / GEBAI_EVENT_SOURCES_DISABLE）", () => {
+    const keys = ["GEBAI_EVENT_SOURCES_ENABLE", "GEBAI_EVENT_SOURCES_DISABLE"] as const
+    const prev = keys.map((k) => [k, process.env[k]] as const)
+    try {
+      // 置空串而非删除：loadConfig 内 loadDotEnv 会在未定义时从仓库根 .env 回填
+      for (const k of keys) process.env[k] = ""
+      const off = loadConfig()
+      // 缺省为空数组（不是 undefined）：两个空名单 = 「不启用任何名单过滤」，与子Agent 同口径
+      expect(off.eventSourcesEnable).toEqual([])
+      expect(off.eventSourcesDisable).toEqual([])
+
+      process.env.GEBAI_EVENT_SOURCES_ENABLE = "file_drop, feishu"
+      process.env.GEBAI_EVENT_SOURCES_DISABLE = "feishu,"
+      const on = loadConfig()
+      expect(on.eventSourcesEnable).toEqual(["file_drop", "feishu"])
+      // 末尾逗号不产生空串条目（空串会被当成一个名字，在“未知名告警”里制造噪音）
+      expect(on.eventSourcesDisable).toEqual(["feishu"])
+    } finally {
+      for (const [k, v] of prev) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  })
+
   test("运行形态：默认 local，GEBAI_MODE=server 开启服务模式，兼容旧 GEBAI_AUTH", () => {
     const saved = { ...process.env }
     delete process.env.GEBAI_MODE

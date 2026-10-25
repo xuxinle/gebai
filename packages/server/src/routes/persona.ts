@@ -23,6 +23,7 @@
 import type { Context, Hono } from "hono"
 import type { AppEnv } from "../app"
 import type { PersonaCredentials } from "@gebai/persona"
+import type { PersonaStateSnapshot } from "../core/session/persona-status"
 
 export interface PersonaRouteDeps {
   /** 凭据编排（拟人模式未启用时为 null → 全部端点返回「未启用」）。 */
@@ -31,6 +32,18 @@ export interface PersonaRouteDeps {
   publish: (type: string, payload: Record<string, unknown>) => void
   /** 用于拼默认回调地址（`GEBAI_PUBLIC_URL` → `http://localhost:{GEBAI_PORT}`）。 */
   publicBase: () => string
+  /**
+   * 运行态快照（人格/分身/事件源/入站计数/凭据汇总）。
+   *
+   * 未启用拟人模式时为缺省（端点 404）——与 `credentials` 同一开关语义：
+   * 关闭时**不实例化任何 persona 组件**，所以这里也不该给定一个假快照。
+   */
+  state?: () => Promise<PersonaStateSnapshot>
+  /** 单个事件源的启停（诊断用：临时打开一个源看它能不能收到东西，不必改配置重启）。 */
+  sourceControl?: {
+    start(name: string): Promise<boolean>
+    stop(name: string): Promise<boolean>
+  }
 }
 
 /** HTML 转义（反射型 XSS 防护：错误消息可能含外部可控内容）。 */
@@ -144,5 +157,53 @@ export function registerPersonaRoutes(app: Hono<AppEnv>, deps: PersonaRouteDeps)
     if (!deps.credentials) return notEnabled(c)
     const url = `${deps.publicBase()}/api/v1/persona/feishu/callback`
     return c.json({ url })
+  })
+
+  /**
+   * 运行态快照：人格 / 分身 / 事件源 / 入站计数 / 凭据。
+   *
+   * 为什么合成一个端点而不是拆四个：这四项要**一起看**才成立——
+   * 「人格已配置但事件源没启动」和「事件源在收但没人订阅（unrouted）」是两种完全不同的故障，
+   * 分四次请求拿数据后在前端拼，必然出现判对一处漏一处。
+   */
+  app.get("/api/v1/persona/state", async (c) => {
+    if (!deps.credentials || !deps.state) return notEnabled(c)
+    try {
+      return c.json(await deps.state())
+    } catch (err) {
+      return c.json({ error: `运行态快照生成失败：${String((err as Error)?.message || err)}` }, 500)
+    }
+  })
+
+  /**
+   * 手动启停单个事件源（诊断）。
+   *
+   * 典型用途：新写了一个源，想确认它能不能连上、事件能不能进——
+   * 不必改环境变量重启整个服务（那会中断正在跑的人格任务）。
+   * **不改变启停名单**：下次热加载/重启仍按 `GEBAI_EVENT_SOURCES_*` 决定。
+   */
+  app.post("/api/v1/persona/sources/:name/:action", async (c) => {
+    if (!deps.sourceControl) return c.json({ error: "拟人模式未启用（GEBAI_PERSONA=true 后可用）" }, 404)
+    const name = c.req.param("name")
+    const action = c.req.param("action")
+    if (action !== "start" && action !== "stop") {
+      return c.json({ error: `不支持的动作 ${action}（可用：start / stop）` }, 400)
+    }
+    // 源名来自 URL：只做精确匹配（不拼路径、不做通配），未知名字由管理器返回 false
+    if (!/^[a-z0-9_]+$/.test(name)) return c.json({ error: `非法的源名 ${name}` }, 400)
+    const ok = action === "start" ? await deps.sourceControl.start(name) : await deps.sourceControl.stop(name)
+    if (!ok) {
+      return c.json(
+        {
+          ok: false,
+          error:
+            action === "start"
+              ? `源 ${name} 未启动（不存在 / 已在运行 / 启动失败——具体原因看 /api/v1/persona/state 的 sourceErrors）`
+              : `源 ${name} 未停止（不存在 / 本来就没在运行）`,
+        },
+        404,
+      )
+    }
+    return c.json({ ok: true, name, action })
   })
 }

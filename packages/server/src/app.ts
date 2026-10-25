@@ -64,6 +64,10 @@ export interface AppDeps {
   state?: import("./ws-state").WsStateService
   /** 拟人模式飞书凭据（未启用时为 null；控制授权流程与状态查询）。 */
   personaCredentials?: import("@gebai/persona").PersonaCredentials | null
+  /** 拟人模式运行态快照源（未启用时为 undefined——端点 404，与 credentials 同一开关语义）。 */
+  personaState?: (() => Promise<import("./core/session/persona-status").PersonaStateSnapshot>) | undefined
+  /** 拟人事件源手动启停（诊断用；未启用时 undefined）。 */
+  personaSourceControl?: { start(name: string): Promise<boolean>; stop(name: string): Promise<boolean> } | undefined
   /** 文件工作台：写操作审计（组合根注入；缺省不审计）。 */
   fsAudit?: import("./core/fs/audit").FsAudit
   /** 文件工作台：Git 服务（组合根注入；缺省时 git 端点返回 503「Git 能力未启用」）。 */
@@ -199,6 +203,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
       const base = (process.env.GEBAI_PUBLIC_URL ?? "").replace(/\/+$/, "")
       return base || `http://localhost:${d.config.port}`
     },
+    ...(d.personaState ? { state: d.personaState } : {}),
+    ...(d.personaSourceControl ? { sourceControl: d.personaSourceControl } : {}),
   })
   registerUserRoutes(rc)
   registerSessionRoutes(rc)

@@ -49,6 +49,40 @@ const cleanups: Array<() => void> = []
 
 也支持目录形态：`custom/persona/{name}/{name}.ts`（或 `index.ts`）。
 
+## 这两类东西都放本目录
+
+同一个目录承载两种二开物（**导出名不同**，文件名不冲突即可）：
+
+| 导出 | 是什么 | 文件形态 |
+|---|---|---|
+| `export const source: EventSourceDef` | 事件源（定时 / webhook / 文件投递 / 桌面…） | 本文下半部分 |
+| `export const persona: PersonaDef` | **人格定义**（这是谁、盯什么、有哪些分身） | 见下方「写一个人格」 |
+
+为何不分两个目录：它们都是「拟人模式的二开物」。分开放只会让人记「人格放 A、源放 B」，
+而文件名不冲突这件事本来就能靠导出名区分。
+
+## 写一个人格
+
+```ts
+// custom/persona/xiaoshuang.ts —— 文件名必须与 id 一致
+export const persona: PersonaDef = {
+  id: "xiaoshuang",
+  name: "小霜",
+  role: "训练平台值班工程师",
+  identity: "你是小霜……",      // 原样进系统提示词，框架不改写
+  drivers: [
+    { id: "support", focus: "答支持群", subscriptions: ["message"] },
+    { id: "alerts",  focus: "盯告警",   subscriptions: ["webhook", "schedule"] },
+  ],
+}
+```
+
+`subscriptions` 是**封闭集合**（`*` / `kind` / `channel` / `channel:kind`），不支持正则与通配前缀；
+写错会在加载期报错而不是静默失效（一个永不响应的分身最难排查）。
+
+写完不用重启：事件源与人格都按目录签名热加载。改完在「设置 → 拟人」面板里看它是否出现在
+「人格与分身」下——出现了但“未通电”，就去看事件源/渠道入站两项。
+
 ## 四条必须知道的约定
 
 1. **`name` 须与文件名一致**、`channel` 是稳定的 `[a-z0-9_]+`。
@@ -69,6 +103,24 @@ const cleanups: Array<() => void> = []
 | 热加载 | 目录签名（`路径:mtime`）变化即重扫重启，无需重启服务 |
 | 失败隔离 | 单源 import/启动抛错只记 `loadErrors`，其它源照常运行 |
 | 严格校验 | 未知字段 / 类型不符 / 命名非法 → 拒绝并报错（不静默降级） |
+
+## 排查顺序（配了但没反应时）
+
+「设置 → 拟人」面板的四段就是排查顺序：
+
+1. **出站凭据**不通 → 人格能想、但发不出话（所有计数都正常，最容易误判）
+2. **事件源**未启动 → 定时/webhook 类订阅永远没事件（`kind: schedule` 的分身永不醒）
+3. **渠道入站**的「无人订阅」持续涨 → 该 `channel` 没被任何人格认领（改订阅，不是渠道坏了）
+4. **分身**显示「未通电」→ 还没发生过投递；长期如此就看回第 2、3 项
+
+手动启停单个源（不必重启服务）：
+
+```bash
+curl -X POST http://localhost:3000/api/v1/persona/sources/file_drop/start
+curl -X POST http://localhost:3000/api/v1/persona/sources/file_drop/stop
+```
+
+它是诊断口，**不改变启停名单**（重启后仍按 `GEBAI_EVENT_SOURCES_*` 决定）。
 
 ## 完整规范
 

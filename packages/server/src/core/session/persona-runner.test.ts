@@ -92,9 +92,65 @@ describe("personaNote：注入注记的必备内容", () => {
   test("写明不确定要问人（不要自己猜测执行）", () => {
     expect(note).toContain("先")
   })
+
+  test("写明自组织：三个 driver_* 工具与「临时的事不要建分身」的取舍", () => {
+    // 不写进去时模型根本不知道自己能开/撤分工——工具在表里，但它只会“这次先顶着”
+    for (const t of ["driver_list", "driver_create", "driver_retire"]) expect(note).toContain(t)
+    expect(note).toContain("reason") // 审计必需项要强调
+    expect(note).toContain("静态定义的撤不掉") // 否则模型会反复试一个注定失败的调用
+    expect(note).toContain("一时的事不要建分身") // 反方向的纪律（防分身泛滥）
+  })
+
+  test("未给兄弟分身时不出多分身段（不拿空表制造无用提示）", () => {
+    expect(note).not.toContain("其它分身")
+  })
+
+  test("给了兄弟分身：逐个列出并排除自己", () => {
+    const withSiblings = personaNote({
+      ...runInput(),
+      siblings: [
+        { id: "support", focus: "答支持群的问题", subscriptions: ["message"] },
+        { id: "alerts", focus: "盯告警并判断是否升级", subscriptions: ["webhook"] },
+      ],
+      now: 0,
+    } as never)
+    expect(withSiblings).toContain("其它分身")
+    expect(withSiblings).toContain("alerts")
+    expect(withSiblings).toContain("盯告警并判断是否升级")
+    // 自己不出现在兄弟列表里（否则它会以为“还有一个我”在干同样的事）
+    const siblingSection = withSiblings.slice(withSiblings.indexOf("其它分身"))
+    expect(siblingSection).not.toContain("`support`")
+  })
 })
 
 describe("EnginePersonaRunner：只经既有 channelNote 注入", () => {
+  test("每轮开始前调一次热加载检查（否则「放文件即注册」只是一句文档）", async () => {
+    const { engine } = makeEngine()
+    let refreshes = 0
+    const r = new EnginePersonaRunner({ engine, refreshBeforeRun: async () => void refreshes++ })
+    await r.run(runInput())
+    expect(refreshes).toBe(1)
+  })
+
+  test("热加载检查抛错不阻断本轮（目录不可读不该让已到达的事件丢掉）", async () => {
+    const { engine, calls } = makeEngine()
+    const r = new EnginePersonaRunner({
+      engine,
+      refreshBeforeRun: async () => {
+        throw new Error("源目录不可读")
+      },
+    })
+    await r.run(runInput())
+    expect(calls.length).toBe(1) // 引擎照跑
+    expect(calls[0]!.prompt).toContain("pending")
+  })
+
+  test("不传 refreshBeforeRun 时不报错（旧调用方可直接用）", async () => {
+    const { engine, calls } = makeEngine()
+    await new EnginePersonaRunner({ engine }).run(runInput())
+    expect(calls.length).toBe(1)
+  })
+
   test("跑一轮 → engine.run 收到 prompt 与 channelNote（无其他新增入参）", async () => {
     const { engine, calls } = makeEngine()
     const r = new EnginePersonaRunner({ engine })

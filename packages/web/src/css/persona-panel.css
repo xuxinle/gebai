@@ -1,0 +1,105 @@
+/**
+ * 拟人面板（设置 → 拟人）样式。
+ *
+ * 视觉取向：**信息密度优先，扫读友好**。
+ *
+ * 这个面板是运维视图，用户来一次要同时看「凭据 / 源 / 渠道 / 分身」四组数。
+ * 所以不用卡片堆叠（那会让四组等权重地占满屏），而是：
+ *
+ * - 分组标题 + 紧凑 `k v · k v` 计数行：一眼扫完一行数字
+ * - 状态徽标固定在行尾（右对齐）：眼睛沿右缘下滑就能看完健康度
+ * - 错误文本单独占一行且用警示色：不与正常描述混排
+ *
+ * 沿用 `settings-*` 既有类名承载布局，本文件只补拟人特有的几个构件。
+ */
+
+.persona-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  /* 面板内允许横向滚动：计数行在窄屏下会被压缩得难读，宁可让它溢出 */
+  overflow-x: auto;
+}
+
+/* 计数行：等宽字体让数字对齐，`.persona-counters` 之间的分隔靠中点 */
+.persona-counters {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  margin-top: 2px;
+}
+
+/* 状态徽标：固定在行尾 */
+.persona-badge {
+  flex: none;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+
+.persona-badge-ok {
+  color: #1f7a3f;
+  background: rgba(31, 122, 63, 0.1);
+  border-color: rgba(31, 122, 63, 0.25);
+}
+
+/* 琥珀色（warn）而非红色：这些状态是「能跑但配得不对」，不是故障 */
+.persona-badge-warn {
+  color: #8a5a00;
+  background: rgba(201, 135, 26, 0.12);
+  border-color: rgba(201, 135, 26, 0.3);
+}
+
+.persona-badge-bad {
+  color: #a12b20;
+  background: rgba(161, 43, 32, 0.1);
+  border-color: rgba(161, 43, 32, 0.28);
+}
+
+/* 错误文本：允许多行（错误信息被截断是排查时最恨的事） */
+.persona-error {
+  color: #a12b20;
+  white-space: pre-wrap;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+/* 说明块（未启用时的引导语等）：保留换行 */
+.persona-block {
+  white-space: pre-wrap;
+  overflow: visible;
+  text-overflow: clip;
+  line-height: 1.7;
+  padding: 6px 0;
+}
+
+/* 分身行：缩进一级，视觉上归到人格之下 */
+.persona-driver .settings-row-name {
+  font-weight: 500;
+}
+
+@media (prefers-color-scheme: dark) {
+  .persona-badge-ok {
+    color: #6dd58c;
+    background: rgba(109, 213, 140, 0.12);
+    border-color: rgba(109, 213, 140, 0.3);
+  }
+  .persona-badge-warn {
+    color: #e0b062;
+    background: rgba(224, 176, 98, 0.12);
+    border-color: rgba(224, 176, 98, 0.3);
+  }
+  .persona-badge-bad {
+    color: #f08a7f;
+    background: rgba(240, 138, 127, 0.12);
+    border-color: rgba(240, 138, 127, 0.3);
+  }
+  .persona-error {
+    color: #f08a7f;
+  }
+}

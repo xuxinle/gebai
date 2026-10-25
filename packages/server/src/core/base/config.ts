@@ -126,6 +126,11 @@ export interface ServerConfig {
   personaEnabled: boolean
   /** 人格运行自动通过审批（GEBAI_PERSONA_AUTO_APPROVE，默认 true）：无人值守时没人守审批卡。 */
   personaAutoApprove: boolean
+  /** 事件源白名单（GEBAI_EVENT_SOURCES_ENABLE，逗号分隔）：非空时仅启用名单内的事件源。
+   *  与 `GEBAI_TOOL_*` / `GEBAI_SUB_AGENTS_*` 同口径（先白后黑）；仅在 GEBAI_PERSONA=true 时生效。 */
+  eventSourcesEnable: string[]
+  /** 事件源黑名单（GEBAI_EVENT_SOURCES_DISABLE，逗号分隔）：名单内的源不启动（黑名单最终生效）。 */
+  eventSourcesDisable: string[]
   /** 飞书机器人行为配置（GEBAI_FEISHU_BOT_*）：工具调用过程推送（滚动状态消息）。 */
   feishuBotNotifyTools: boolean
   /** 助手中间轮文本推送（预览消息；引擎 notifyIntermediate 事件）。 */
@@ -369,6 +374,10 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     // 人格运行是否自动通过审批（默认 true：无人值守场景没有人守着审批卡；
     // 与 GEBAI_FEISHU_BOT_AUTO_APPROVE 同一姿态——部署方整体担责）
     personaAutoApprove: bool("GEBAI_PERSONA_AUTO_APPROVE", true),
+    // 事件源启停名单（GEBAI_EVENT_SOURCES_ENABLE / DISABLE）：与子Agent 同名机制同口径——
+    // 白名单非空仅启用名单内，黑名单移除名单内（先白后黑）。只在拟人模式启用时才有意义。
+    eventSourcesEnable: splitList(env("GEBAI_EVENT_SOURCES_ENABLE")),
+    eventSourcesDisable: splitList(env("GEBAI_EVENT_SOURCES_DISABLE")),
     // 飞书机器人行为配置（均默认 false 保持现状）：过程推送两类 + 自动审批
     feishuBotNotifyTools: bool("GEBAI_FEISHU_BOT_NOTIFY_TOOLS", false),
     feishuBotNotifyAssistant: bool("GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT", false),
