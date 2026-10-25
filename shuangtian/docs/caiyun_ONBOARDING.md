@@ -164,10 +164,15 @@ py scripts/ot_bench.py --script x.json --out out/otbench/x
 
 | 要看什么 | 去哪 |
 |---|---|
+| **十三个对标案例的索引**（按“我要做什么效果”查） | **`out/otbench/INDEX.md`** |
 | 一个完整的、能跑的示例 | `examples/caiyun/assets/slot-robot-example.js` + `.json` |
 | 13 种视觉风格的做法 | `examples/caiyun/assets/STYLES.md` |
 | 弹簧/样条/实体绘制 | `examples/caiyun/assets/_kit.js` |
-| 其它片子的制作过程 | `out/otbench/<case>/NOTES.md`（含轮次演进与失败记录，比读代码快） |
+| 具体某个效果的制作过程与坑 | `out/otbench/<case>/NOTES.md`（轮次演进 + 实测数字） |
 
 > **片子产物本身不入库**。`out/` 下只有 `otbench/*/NOTES.md` 这类过程记录值得看，
 > mp4 与逐帧 PNG 都是可重生成的中间物。
+>
+> `INDEX.md` 里标了哪些 case 有完整记录（七个）、哪些只有风格配方（六个）。
+> 做类似效果前先查它 —— 里面有几条“指标全绿但画面错了”的实测教训，
+> 只靠自己调是发现不了的。
