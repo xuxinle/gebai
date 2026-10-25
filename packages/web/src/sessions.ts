@@ -582,7 +582,7 @@ function scheduleBatchRender(): void {
   if (batchRenderTimer) clearTimeout(batchRenderTimer)
   batchRenderTimer = setTimeout(() => {
     batchRenderTimer = null
-    void refreshSessions(lastSessions ?? undefined)
+    rerenderSessionList() // 纯 UI 重渲染（折叠/批量态）：不发请求
   }, 0)
 }
 
@@ -642,17 +642,21 @@ export function markSessionRunning(sessionId: string, running: boolean): void {
     delete runtimeInfo[sessionId]
     if (!had) return
   }
-  // 刷新必须拉新数据，不得用 lastSessions 陈旧数组重流：任务结束刷新与自动命名刷新
-  // （maybeAutoTitle rename 后的 refreshSessions）并发时，preloaded 路径不发请求、seq 更大，
-  // 会把在途的新名列表用 seq 守卫丢弃——列表停留旧名（如「新会话」）直到手动刷新才恢复。
-  void refreshSessions()
+  // 运行态只影响列表角标，会话清单本身没变：本地重渲染即可，不必发一次 session.list。
+  // （原先无参 refreshSessions = 一次网络往返，刷新首屏时 attach 到运行中会话会多一次请求，
+  //   正好落在首屏关键路径上。）
+  rerenderSessionList()
 }
 
 /** 待决卡片增减（审批/交互卡接）：列表角标要从「运行中」变为「⌛ 等待你的输入」再变回去。
  *  事件由 approvals.ts / messages.ts 派发（它们已被本模块导入，不能反向导入）。
- *  只重算角标而不重建整列：结构签名含运行态，签名未变时 refreshSessions 自己会走轻量同步。 */
+ *
+ *  **不拉网络**：角标只由本地状态变化（待决卡增减），会话清单本身没变——
+ *  走 preloaded 路径用现有快照重算签名，避免每张卡的增/减都发作一次 listSessions。
+ *  （原先无参调用 = 每次卡片变化都拉一次列表，审批频繁时刷新明显变慢。） */
 document.addEventListener("gebai:pending-change", () => {
-  void refreshSessions()
+  // 只影响角标：本地重渲染，不发请求也不占 seq
+  rerenderSessionList()
 })
 
 /** 本页待决卡片数：审批卡（.approval）与交互卡（.interaction-card）都挂在 #approvals 下、带 data-session。
@@ -660,13 +664,18 @@ document.addEventListener("gebai:pending-change", () => {
  *  不会出现「卡已处理但计数没减」那种不一致。
  *
  *   **不看 hidden**：非当前会话的卡片会被 applyApprovalVisibility 隐藏，但它仍然在等用户作答——
- *   多会话并行时「哪个会话卡在我这里」正是列表角标要回答的问题，用 :not([hidden]) 会把背景会话全漏掉。 */
-function localWaitingCount(sessionId: string): number {
-  let n = 0
+ *   多会话并行时「哪个会话卡在我这里」正是列表角标要回答的问题，用 :not([hidden]) 会把背景会话全漏掉。
+ *
+ *   **必须整批算（不能按会话逐个查）**：它在 runMarkOf 里被调用，而 runMarkOf 被 listSignature
+ *   对**每个会话行**调一次——逐个 querySelectorAll 等于「会话数 × 卡数」次 DOM 扫描，
+ *   会话多/卡多时列表刷新明显变慢（写签名也要等它）。一次遍历出 Map，再按 id 查即可。 */
+function collectLocalWaiting(): Map<string, number> {
+  const out = new Map<string, number>()
   for (const node of approvalsEl.querySelectorAll<HTMLElement>(".approval, .interaction-card")) {
-    if (node.dataset.session === sessionId) n += 1
+    const sid = node.dataset.session
+    if (sid) out.set(sid, (out.get(sid) ?? 0) + 1)
   }
-  return n
+  return out
 }
 
 /** 会话行运行态（无运行态返回 null）：运行中/等待用户输入/在途工具/后台任务数，列表角标与悬浮说明用。
@@ -674,17 +683,26 @@ function localWaitingCount(sessionId: string): number {
  * 优先用快照 runtime（服务端权威，含后台任务与子会话）；本页自己发起的会话只有本地状态时，
  * 至少把「是否在等用户作答」算准——否则后台任务在等审批时角标只显示「任务运行中」，
  * 用户看不出它正卡在自己这里（多会话并行时这恰是最需要一眼看到的信号）。
+ *
+ * @param localWaiting 本页待决卡计数（一次性算好的整批结果）；省略时现算一份——
+ *   批量路径（listSignature / 列表渲染）必须传入，否则会退化成「会话数 × 卡数」次 DOM 扫描。
  */
-function runMarkOf(sessionId: string): { waiting: number; tools: number; bg: number; subs: number } | null {
+function runMarkOf(
+  sessionId: string,
+  localWaiting?: Map<string, number>,
+): { waiting: number; tools: number; bg: number; subs: number } | null {
   const rt = runtimeInfo[sessionId]
   if (rt) return { waiting: rt.pending.length, tools: rt.toolCalls ?? 0, bg: rt.bgTasks.filter((t) => t.status === "running").length, subs: rt.subRuns.length }
   if (!runningSeen.has(sessionId)) return null
-  return { waiting: localWaitingCount(sessionId), tools: 0, bg: 0, subs: 0 }
+  const waiting = (localWaiting ?? collectLocalWaiting()).get(sessionId) ?? 0
+  return { waiting, tools: 0, bg: 0, subs: 0 }
 }
 
 /** 结构签名：搜索/批量/折叠态 + 会话行展示字段——任一变化才需要重建列表 DOM。 */
 function listSignature(shown: SessionInfo[]): string {
-  const rows = shown.map((s) => `${s.id}\u0001${s.name}\u0001${s.pinned ? 1 : 0}\u0001${s.updatedAt}\u0001${signatureOfRun(runMarkOf(s.id))}`).join("\u0002")
+  // 待决卡计数整批算一次（runMarkOf 逐会话调用，不预取就会每个会话扫一遍 DOM）
+  const waiting = collectLocalWaiting()
+  const rows = shown.map((s) => `${s.id}\u0001${s.name}\u0001${s.pinned ? 1 : 0}\u0001${s.updatedAt}\u0001${signatureOfRun(runMarkOf(s.id, waiting))}`).join("\u0002")
   return `${searchQuery}\u0003${batchMode ? 1 : 0}\u0003${[...collapsedGroups].sort().join(",")}\u0003${rows}`
 }
 
@@ -778,12 +796,14 @@ function toggleGroupHeader(key: GroupKey, forceSelect = false): void {
   if (collapsedGroups.has(key)) collapsedGroups.delete(key)
   else collapsedGroups.add(key)
   persistCollapsedGroups()
-  void refreshSessions(lastSessions ?? undefined)
+  rerenderSessionList() // 纯 UI 重渲染（折叠态）：不发请求
 }
 
 /** 会话行渲染（组折叠时仅被折叠的组不调用；搜索态平铺调用，groupKey 为空）。
- *  无行内按钮：右键菜单（多选/重命名/删除）+ 双击重命名。 */
-function appendSessionLi(s: SessionInfo, groupKey = ""): void {
+ *  无行内按钮：右键菜单（多选/重命名/删除）+ 双击重命名。
+ *  @param localWaiting 本页待决卡计数（整批一次算好）；省略时现算——列表重建时由调用方传入，
+ *    避免每行扫一遍 DOM。 */
+function appendSessionLi(s: SessionInfo, groupKey = "", localWaiting?: Map<string, number>): void {
   selectedNames.set(s.id, s.name)
   const li = document.createElement("li")
   const cur = getCurrentSession()
@@ -803,7 +823,7 @@ function appendSessionLi(s: SessionInfo, groupKey = ""): void {
   // 置顶标识（独立于 .session-name，不受重命名内联编辑替换影响；session-ico 为隐藏的 💬 占位）
   if (s.pinned) li.append(el("span", "session-pin", "📌"))
   // 运行态角标：后台会话也在跑/在等人（快照 runtime 基线 + 事件增量）——不标出则「哪个会话在等我」无从看出
-  const mark = runMarkOf(s.id)
+  const mark = runMarkOf(s.id, localWaiting)
   if (mark) {
     const dot = el("span", `session-run${mark.waiting ? " waiting" : ""}`, mark.waiting ? "⌛" : "●")
     dot.title = [mark.waiting ? `等待你的输入（${mark.waiting} 项）` : "任务运行中", mark.tools ? `在途工具 ${mark.tools} 个` : "", mark.bg ? `后台任务 ${mark.bg} 个` : "", mark.subs ? `子会话 ${mark.subs} 个` : ""]
@@ -1023,6 +1043,25 @@ export async function refreshSessions(preloaded?: SessionInfo[]) {
   const sessions = preloaded ?? (await client.listSessions())
   if (seq !== refreshSeq) return // 已有更新的刷新请求：本次结果作废
   lastSessions = sessions
+  renderSessionList(sessions)
+}
+
+/**
+ * 仅用现有数据重渲染会话列表（**不发请求、不碰 refreshSeq**）。
+ *
+ * 运行态/待决卡这类「只改角标」的变化走这里：会话清单本身没变，为此发一次
+ * session.list 是白花钱——首屏最忙的时候多一个往返，体感就是“刷新变慢”。
+ * 也不能复用 refreshSessions 的 preloaded 路径：它会 +1 refreshSeq，把在途的
+ * 真实网络刷新（如自动命名后的列表刷新）用 seq 守卫挤掉（注释见 markSessionRunning）。
+ */
+function rerenderSessionList(): void {
+  // typeof 守卫：首次渲染前（模块初始化期间）可能被调用，那时 lastSessions 还未初始化（TDZ）
+  if (typeof lastSessions === "undefined" || !lastSessions) return
+  renderSessionList(lastSessions)
+}
+
+/** 列表渲染（签名未变时只同步高亮）。 */
+function renderSessionList(sessions: SessionInfo[]): void {
   const shown = searchQuery ? sessions.filter((s) => s.name.toLowerCase().includes(searchQuery)) : sessions
   const activeId = getCurrentSession()?.id ?? null
   const sig = listSignature(shown)
@@ -1038,9 +1077,11 @@ export async function refreshSessions(preloaded?: SessionInfo[]) {
   lastActiveId = activeId
   const scrollTop = sessionList.scrollTop // 重渲染保留滚动位置（组折叠切换不跳顶）
   sessionList.innerHTML = ""
+  // 待决卡计数整批算一次：行渲染逐行查 runMarkOf，每行单独扫 DOM 就是 O(行数 × 卡数)
+  const waiting = collectLocalWaiting()
   if (searchQuery) {
     // 搜索态：平铺列表（不分组，聚焦过滤结果；置顶项仍置前）
-    for (const s of [...shown].sort(byPinnedThenUpdated)) appendSessionLi(s)
+    for (const s of [...shown].sort(byPinnedThenUpdated)) appendSessionLi(s, "", waiting)
   } else {
     // 置顶项脱离时间分组单列「置顶」组；其余按更新时间倒序分组（今天/昨天/近7天/更早）；
     // 折叠组不渲染成员，批量模式强制全展开
@@ -1057,7 +1098,7 @@ export async function refreshSessions(preloaded?: SessionInfo[]) {
       if (!gs || gs.length === 0) continue
       appendGroupHeader(key, gs.length)
       if (batchMode || !collapsedGroups.has(key)) {
-        for (const s of gs) appendSessionLi(s, key)
+        for (const s of gs) appendSessionLi(s, key, waiting)
       }
     }
   }

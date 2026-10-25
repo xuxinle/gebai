@@ -78,7 +78,7 @@ describe("运行态可见性与列表角标", () => {
     expect(s).toContain("export function setRuntimeInfo")
     expect(s).toContain("export function markSessionRunning")
     expect(s).toContain("session-run") // 行内角标元素
-    expect(s).toContain("signatureOfRun(runMarkOf(s.id))") // 运行态变化触发列表重建
+    expect(s).toContain("runMarkOf(s.id, waiting)") // 运行态变化触发列表重建（待决卡整批传入）
   })
 
   test("任务开始/结束事件即时收敛角标（不必等下一次快照）", () => {
@@ -105,17 +105,34 @@ describe("运行态可见性与列表角标", () => {
 
   test("本页会话等审批时角标为⌛：待决卡计数不看 hidden（背景会话也要算）", () => {
     const s = src("sessions.ts")
-    const at = s.indexOf("function localWaitingCount")
+    const at = s.indexOf("function collectLocalWaiting")
     expect(at).toBeGreaterThan(-1)
     const fn = s.slice(at, at + 500)
     // 非当前会话的卡会被 applyApprovalVisibility 置 hidden，但它仍在等用户作答——
     // 用 :not([hidden]) 会把背景会话全漏掉（多会话并行时恰恰最需要这个信号）。
     expect(fn).not.toContain(":not([hidden])")
     expect(fn).toContain('querySelectorAll<HTMLElement>(".approval, .interaction-card")')
-    expect(fn).toContain("node.dataset.session === sessionId")
+    // 整批一次算成 Map（逐个按会话扫 DOM = 会话数 × 卡数）
+    expect(fn).toContain("Map<string, number>")
+    expect(fn).toContain(".get(sid)")
     // 本地运行态分支要把 waiting 算进去（不能固定 0）
-    const mark = s.slice(s.indexOf("function runMarkOf"), s.indexOf("function runMarkOf") + 700)
-    expect(mark).toContain("localWaitingCount(sessionId)")
+    const mark = s.slice(s.indexOf("function runMarkOf"), s.indexOf("function runMarkOf") + 900)
+    expect(mark).toContain("(localWaiting ?? collectLocalWaiting()).get(sessionId)")
+  })
+
+  test("只改角标的刷新不发网络请求（刷新变慢的根因）", () => {
+    const s = src("sessions.ts")
+    // 运行态/待决卡只影响角标，会话清单没变——走本地重渲染，不得无参 refreshSessions
+    // （无参 = client.listSessions() 一次网络往返，刷新首屏时多这一下就是明显的慢）。
+    const markFn = s.slice(s.indexOf("export function markSessionRunning"), s.indexOf("export function markSessionRunning") + 900)
+    expect(markFn).toContain("rerenderSessionList()")
+    expect(markFn).not.toContain("void refreshSessions()")
+    const pend = s.slice(s.indexOf('addEventListener("gebai:pending-change"'), s.indexOf('addEventListener("gebai:pending-change"') + 300)
+    expect(pend).toContain("rerenderSessionList()")
+    expect(pend).not.toContain("void refreshSessions()")
+    // 本地重渲染不得推进 refreshSeq：否则会把在途的真实网络刷新用 seq 守卫挤掉
+    const rr = s.slice(s.indexOf("function rerenderSessionList"), s.indexOf("function rerenderSessionList") + 400)
+    expect(rr).not.toContain("refreshSeq")
   })
 
   test("待决卡增减要通知列表刷新（否则角标不跟着变）", () => {
@@ -344,11 +361,15 @@ describe("后台会话 DOM 维护与无缝切换", () => {
 })
 
 describe("会话列表刷新不得回退数据", () => {
-  test("任务开始/结束的列表刷新拉新数据，不用 lastSessions 陈旧数组重流（否则自动命名的新标题被 seq 守卫丢弃）", () => {
+  test("角标刷新走本地重渲染：不发请求、不推进 refreshSeq（不挤掉在途刷新）", () => {
     const s = src("sessions.ts")
-    const fn = s.slice(s.indexOf("export function markSessionRunning"), s.indexOf("export function markSessionRunning") + 800)
-    // 刷新必须是不带 preloaded 的拉新调用；带 lastSessions 的旧写法会把在途自动命名刷新挤掉
-    expect(fn).toContain("void refreshSessions()")
+    const fn = s.slice(s.indexOf("export function markSessionRunning"), s.indexOf("export function markSessionRunning") + 900)
+    // 运行态只改变角标：本地重渲染即可。两条历史约束同时要守：
+    // ① 不发网络：无参 refreshSessions 会 listSessions（刷新首屏多一个往返 → 体感慢）
+    // ② 不占 seq：preloaded 路径会 +1 refreshSeq，把在途的真实刷新（自动命名后的新名）
+    //    用 seq 守卫挤掉，列表停在旧名。rerenderSessionList 两件都不做。
+    expect(fn).toContain("rerenderSessionList()")
+    expect(fn).not.toContain("void refreshSessions()")
     expect(fn).not.toContain("refreshSessions(lastSessions)")
   })
 
