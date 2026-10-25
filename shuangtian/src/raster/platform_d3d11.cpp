@@ -934,6 +934,64 @@ class GpuCanvas final : public Surface {
     deferred_pending_ = 0;
   }
 
+
+  /// 发绘制的**唯一入口**：构造即记账，`->` 取上下文发命令。
+  ///
+  /// ## 为何要有它（2026-10-25 全黑 bug 的根治）
+  ///
+  /// 原来每个绘制函数都得自己记得先 `(void)active_context(); note_deferred_draw();`，
+  /// 共 5 个入口 6 处（`clear` / `submit` / `submit_glyph_batch` / `submit_to` /
+  /// 离屏 clear ×2）。**靠注释提醒记不住**——同一天就漏了 4 处：
+  ///
+  ///   · `present()` 漏 → 全黑
+  ///   · `submit_glyph_batch()` 漏 → 文字整体消失
+  ///   · `submit_to()` 漏 → 阴影/模糊画了看不见
+  ///   · 离屏 clear 漏 → 阴影上一帧残影
+  ///
+  /// 改成 RAII 后**结构上不可能漏**：没有其它办法拿到上下文发绘制，而构造
+  /// `DrawScope` 就必然记了账。这是把纪律从"人的注意力"换成"类型系统"。
+  ///
+  /// 用法：
+  /// ```cpp
+  /// const DrawScope gfx = draw_scope();
+  /// gfx->Draw(...);
+  /// ```
+  class DrawScope {
+   public:
+    explicit DrawScope(GpuCanvas& owner) : context_(owner.active_context()) {
+      owner.note_deferred_draw();
+    }
+    [[nodiscard]] auto operator->() const noexcept -> ID3D11DeviceContext* { return context_; }
+    [[nodiscard]] auto get() const noexcept -> ID3D11DeviceContext* { return context_; }
+
+   private:
+    ID3D11DeviceContext* context_{nullptr};
+  };
+
+  [[nodiscard]] auto draw_scope() -> DrawScope { return DrawScope{*this}; }
+
+
+  /// 是否还有**录了但未提交**的绘制命令。
+  ///
+  /// 给上屏/回读路径做前置断言用：为真却去读 `target_`，读到的是“上一轮的内容”。
+  /// 正常路径下调用方总先 `submit_deferred_locked()`，所以它应为假；
+  /// 为真即意味着“有人新增了绘制入口但没经 `draw_scope()`”——那是需要立刻暴露的缺陷，
+  /// 而不是默默上一张旧画面。
+  [[nodiscard]] auto has_uncommitted_draws() const noexcept -> bool {
+    return deferred_ != nullptr && deferred_pending_ != 0;
+  }
+
+ private:
+  // ——————————————————————————————————————————————————————————————————————————
+  // 以下两个是 `draw_scope()` 的内部实现，**不对外**。
+  //
+  // 为何改成 private：2026-10-25 的教训是“靠注释提醒记不住”——只要上下文能
+  // 随便拿到，就总有人直接拿它发绘制、然后忘了记账。提到 private 后，唯一的
+  // 绘制通道就是 `draw_scope()`，而它构造即记账——**漏标记在类型系统上就不可能**。
+  //
+  // `DrawScope` 是嵌套类（能访外部类私有），`draw_scope()` 是唯一的口子。
+  // ——————————————————————————————————————————————————————————————————————————
+
   /// 当前应当把绘制指令录进哪个上下文。
   ///
   /// 默认走 deferred（并行安全）；建不出来时退回立即上下文（单线程也对，
@@ -947,6 +1005,8 @@ class GpuCanvas final : public Surface {
   void note_deferred_draw() {
     if (deferred_ != nullptr) ++deferred_pending_;
   }
+
+ public:
 
   /// 把已录制的命令在**立即上下文**上执行掉。必须在持有 `g_context_mutex()` 时调用。
   ///
@@ -973,6 +1033,20 @@ class GpuCanvas final : public Surface {
       context_->Flush();
     }
     deferred_pending_ = 0;
+  }
+
+  /// 自己拿锁的提交（给“绘制过程中就要落地”的场合用）。
+  ///
+  /// 为什么要它：`shadow_mask` 的盒式模糊是多 pass ping-pong——**下一 pass 要采样
+  /// 上一 pass 的输出**，而 deferred 下那份输出还没执行（D3D11 不允许同资源兼作
+  /// RT 与 SRV，驱动会先解绑 SRV，于是采到空白）。所以必须中途提交。
+  ///
+  /// 而那种场合外面并没有持锁（它在 `draw_shadow` 里、单帧内同步完成），
+  /// 所以这个版本自己取锁——避免把“必须持锁”的契约扩散到调用链上层。
+  void submit_deferred_now() {
+    if (deferred_ == nullptr || deferred_pending_ == 0) return;
+    const std::scoped_lock lock(g_context_mutex());
+    submit_deferred_locked();
   }
 
   GpuCanvas(ID3D11Device* device, ID3D11DeviceContext* context, int physical_width,
@@ -1094,9 +1168,8 @@ class GpuCanvas final : public Surface {
         static_cast<float>(color.r) / 255.0f * alpha, static_cast<float>(color.g) / 255.0f * alpha,
         static_cast<float>(color.b) / 255.0f * alpha, alpha};
     const std::int64_t start = st::time::now_ns();
-    (void)active_context();          // 确保 deferred 已创建（它懒创建）
-    note_deferred_draw();            // 清屏也是一条要提交的命令
-    active_context()->ClearRenderTargetView(rtv_, values);
+    const DrawScope gfx = draw_scope();          // 确保 deferred 已创建（它懒创建）
+    gfx->ClearRenderTargetView(rtv_, values);
     readback_dirty_ = true;
     if (profiler_ != nullptr) {
       profiler_->add(PaintOp::Clear,
@@ -1465,37 +1538,36 @@ class GpuCanvas final : public Surface {
     //
     // 位置选在 Map 之前：后面的每条提前 return 都已发生过一次 draw 准备，
     // 且 `FinishCommandList` 对空列表也无害（宁可多提交一次，不要漏）。
-    (void)active_context();
-    note_deferred_draw();
+    const DrawScope gfx = draw_scope();
 
     D3D11_MAPPED_SUBRESOURCE mapped_vertices{};
-    if (FAILED(active_context()->Map(glyph_vertices_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_vertices))) {
+    if (FAILED(gfx->Map(glyph_vertices_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_vertices))) {
       return false;
     }
     std::memcpy(mapped_vertices.pData, vertices.data(), vertices.size() * sizeof(BatchVertex));
-    active_context()->Unmap(glyph_vertices_, 0);
+    gfx->Unmap(glyph_vertices_, 0);
 
     const ClipFrame& clip = current_clip();
     ID3D11ShaderResourceView* clip_mask = clip.mode > 2 ? clip.mask : nullptr;
     ID3D11RenderTargetView* targets[1] = {rtv_};
-    active_context()->OMSetRenderTargets(1, targets, nullptr);
+    gfx->OMSetRenderTargets(1, targets, nullptr);
     const D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(physical_width_),
                                   static_cast<float>(physical_height_), 0.0f, 1.0f};
-    active_context()->RSSetViewports(1, &viewport);
+    gfx->RSSetViewports(1, &viewport);
     const math::IntRect scissor = clip.rect;
     const D3D11_RECT rect{scissor.x, scissor.y, scissor.x + scissor.width,
                           scissor.y + scissor.height};
-    active_context()->RSSetScissorRects(1, &rect);
-    active_context()->RSSetState(pipes.raster_scissor);
+    gfx->RSSetScissorRects(1, &rect);
+    gfx->RSSetState(pipes.raster_scissor);
 
     const UINT stride = sizeof(BatchVertex);
     const UINT offset = 0;
     ID3D11Buffer* buffers[1] = {glyph_vertices_};
-    active_context()->IASetVertexBuffers(0, 1, buffers, &stride, &offset);
-    active_context()->IASetInputLayout(pipes.batch_layout);
-    active_context()->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    active_context()->VSSetShader(pipes.batch_vs, nullptr, 0);
-    active_context()->PSSetShader(pipes.batch_ps, nullptr, 0);
+    gfx->IASetVertexBuffers(0, 1, buffers, &stride, &offset);
+    gfx->IASetInputLayout(pipes.batch_layout);
+    gfx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    gfx->VSSetShader(pipes.batch_vs, nullptr, 0);
+    gfx->PSSetShader(pipes.batch_ps, nullptr, 0);
 
     // 字形尺寸在顶点里，但 `g_rect.zw` 仍要设成字形的（SDF/归一化用不到它，
     // 但 `shade` 之外的路径可能读）——这里取最后一个字形无意义，
@@ -1507,23 +1579,23 @@ class GpuCanvas final : public Surface {
     ID3D11ShaderResourceView* views[1] = {view};
     ID3D11ShaderResourceView* clip_views[1] = {clip_mask};
     ID3D11SamplerState* samplers[1] = {pipes.sampler_point};
-    active_context()->PSSetShaderResources(0, 1, views);
-    active_context()->PSSetShaderResources(1, 1, clip_views);
-    active_context()->PSSetSamplers(0, 1, samplers);
+    gfx->PSSetShaderResources(0, 1, views);
+    gfx->PSSetShaderResources(1, 1, clip_views);
+    gfx->PSSetSamplers(0, 1, samplers);
 
     const float blend_factor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     const auto draw_once = [&](ID3D11BlendState* state) -> bool {
       D3D11_MAPPED_SUBRESOURCE mapped{};
-      if (FAILED(active_context()->Map(pipes.constants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+      if (FAILED(gfx->Map(pipes.constants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
         return false;
       }
       std::memcpy(mapped.pData, &params, sizeof(params));
-      active_context()->Unmap(pipes.constants, 0);
+      gfx->Unmap(pipes.constants, 0);
       ID3D11Buffer* constant_buffers[1] = {pipes.constants};
-      active_context()->VSSetConstantBuffers(0, 1, constant_buffers);
-      active_context()->PSSetConstantBuffers(0, 1, constant_buffers);
-      active_context()->OMSetBlendState(state, blend_factor, 0xFFFFFFFFU);
-      active_context()->Draw(static_cast<UINT>(vertices.size()), 0);
+      gfx->VSSetConstantBuffers(0, 1, constant_buffers);
+      gfx->PSSetConstantBuffers(0, 1, constant_buffers);
+      gfx->OMSetBlendState(state, blend_factor, 0xFFFFFFFFU);
+      gfx->Draw(static_cast<UINT>(vertices.size()), 0);
       return true;
     };
     if (!lcd) {
@@ -1869,8 +1941,7 @@ class GpuCanvas final : public Surface {
     // 少了这一句，第一帧的绘制（以及"从未取过 active_context 的首次调用"）
     // 会计 0 —— 实测症状：`pending` 恒为 0，命令永不提交，画面空，且
     // `Map(D3D11_MAP_READ)` 死等（进程 126 秒只耗 2 秒 CPU）。
-    (void)active_context();
-    note_deferred_draw();
+    const DrawScope gfx = draw_scope();
     // **先 flush 字形批次**：`submit` 是“所有非字形绘制”的唯一入口，
     // 在这里 flush 就保证了字形与其它图元的相对顺序不变。
     //
@@ -1888,43 +1959,43 @@ class GpuCanvas final : public Surface {
     const int view_h = viewport_height > 0 ? viewport_height : physical_height_;
 
     ID3D11RenderTargetView* targets[1] = {rtv_};
-    active_context()->OMSetRenderTargets(1, targets, nullptr);
+    gfx->OMSetRenderTargets(1, targets, nullptr);
     const D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(view_w),
                                   static_cast<float>(view_h), 0.0f, 1.0f};
-    active_context()->RSSetViewports(1, &viewport);
+    gfx->RSSetViewports(1, &viewport);
     // 矩形裁剪走剪裁矩形（零着色器成本）：圆角裁剪交给 SDF
     const math::IntRect scissor = current_clip().rect;
     const D3D11_RECT rect{scissor.x, scissor.y, scissor.x + scissor.width,
                           scissor.y + scissor.height};
-    active_context()->RSSetScissorRects(1, &rect);
-    active_context()->RSSetState(pipes.raster_scissor);
+    gfx->RSSetScissorRects(1, &rect);
+    gfx->RSSetState(pipes.raster_scissor);
     const float blend_factor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     // 亚像素文字的两遍混合需要**换混合状态**（一次绘制内唯一的变量，其余状态相同；
     // 第二处同名调用在 mask 绘制路径上，不接这个开关）。
     ID3D11BlendState* blend_state = opaque ? pipes.opaque : pipes.blend;
     if (blend_override != nullptr) blend_state = blend_override;
-    active_context()->OMSetBlendState(blend_state, blend_factor, 0xFFFFFFFFU);
-    active_context()->IASetInputLayout(nullptr);
-    active_context()->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-    active_context()->VSSetShader(pipes.vs, nullptr, 0);
-    active_context()->PSSetShader(pipes.ps, nullptr, 0);
+    gfx->OMSetBlendState(blend_state, blend_factor, 0xFFFFFFFFU);
+    gfx->IASetInputLayout(nullptr);
+    gfx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    gfx->VSSetShader(pipes.vs, nullptr, 0);
+    gfx->PSSetShader(pipes.ps, nullptr, 0);
 
     D3D11_MAPPED_SUBRESOURCE mapped{};
-    if (FAILED(active_context()->Map(pipes.constants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
+    if (FAILED(gfx->Map(pipes.constants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
     std::memcpy(mapped.pData, &params, sizeof(params));
-    active_context()->Unmap(pipes.constants, 0);
+    gfx->Unmap(pipes.constants, 0);
     ID3D11Buffer* buffers[1] = {pipes.constants};
-    active_context()->VSSetConstantBuffers(0, 1, buffers);
-    active_context()->PSSetConstantBuffers(0, 1, buffers);
+    gfx->VSSetConstantBuffers(0, 1, buffers);
+    gfx->PSSetConstantBuffers(0, 1, buffers);
 
     ID3D11ShaderResourceView* views[1] = {view};
-    active_context()->PSSetShaderResources(0, 1, views);
+    gfx->PSSetShaderResources(0, 1, views);
     // 路径裁剪的遮罩绑到 t1（未用时绑 null：不绑就会残留上一个 draw 的绑定）
     ID3D11ShaderResourceView* clip_views[1] = {clip_mask};
-    active_context()->PSSetShaderResources(1, 1, clip_views);
+    gfx->PSSetShaderResources(1, 1, clip_views);
     ID3D11SamplerState* samplers[1] = {point_sample ? pipes.sampler_point : pipes.sampler_linear};
-    active_context()->PSSetSamplers(0, 1, samplers);
-    active_context()->Draw(4, 0);
+    gfx->PSSetSamplers(0, 1, samplers);
+    gfx->Draw(4, 0);
     readback_dirty_ = true;
   }
 
@@ -2129,11 +2200,10 @@ class GpuCanvas final : public Surface {
     // 离屏清空也是**要提交的命令**（同 `clear()` 的教训）：
     // 它不走 `submit_to`，所以得自己标。漏了它 → 遮罩保留上一轮的内容
     // （RT 是池化复用的），阴影会出现“上一帧的残影”。
-    (void)active_context();
-    note_deferred_draw();
-    active_context()->ClearRenderTargetView(targets.rtv_a, zero);
+    const DrawScope gfx = draw_scope();
+    gfx->ClearRenderTargetView(targets.rtv_a, zero);
     const float zero_b[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    active_context()->ClearRenderTargetView(targets.rtv_b, zero_b);
+    gfx->ClearRenderTargetView(targets.rtv_b, zero_b);
     // 画圆角矩形（白色 → R 通道就是覆盖率）
     const math::Rect local{offset.x - static_cast<float>(area.x),
                            offset.y - static_cast<float>(area.y), width, height};
@@ -2161,11 +2231,26 @@ class GpuCanvas final : public Surface {
         blur_params.axis[1] = along_x ? 0.0f : 1.0f;
         blur_params.axis_extra[0] = static_cast<float>(box_radius);
         apply_shadow_viewport(blur_params, area);
+        // ## 每个 pass 前必须把上一 pass **真正执行掉**（2026-10-25 实测）
+        //
+        // deferred 下 `submit_to` 只是**录制**：命令排在队列里，目标纹理里还是空的。
+        // 而下一 pass 要拿它的输出当**采样源**（`read_srv`）—— D3D11 不允许同一资源
+        // 同时被绑为 RT 与 SRV，驱动会先把 SRV 解绑，采样时读到的就是**空白**。
+        //
+        // 实测症状：`draw_shadow` 在 GPU 画布上**一个像素都出不来**
+        // （软件画布同一参数出 1468 个），而屏幕上全靠阴影凹造型的卡片就“扁了”。
+        //
+        // 代价：每个 pass 一次 `FinishCommandList + ExecuteCommandList + Flush`。
+        // 阴影是缓存过的（同尺寸同模糊只算一次），这份代价可接受；而“算对了”是底线。
+        submit_deferred_now();
         submit_to(write_rtv, blur_params, read_srv, false, true, area.width, area.height);
         read_rtv = write_rtv;
         read_srv = reading_a ? targets.srv_b : targets.srv_a;
       }
     }
+    // 最后一个 pass 也必须落地：下面返回的 `srv_a` 会被调用方拿去作**采样源**，
+    // 同样不能在“还没执行”的状态下交出去。
+    submit_deferred_now();
     // 3 pass × 2 遍后结果回到 A（半径为 0 时也直接在 A）
     const ShadowMask result{targets.srv_a, area};
     if (shadow_cache_.size() >= kShadowCacheLimit) {
@@ -2197,34 +2282,33 @@ class GpuCanvas final : public Surface {
     //
     // 漏了它的后果比“画面空”更阴：离屏结果不会被产出，而**使用它的那条绘制**
     // 仍会照常提交——于是阴影/模糊“画了但看不见”，看起来像参数没生效。
-    (void)active_context();
-    note_deferred_draw();
+    const DrawScope gfx = draw_scope();
     ID3D11RenderTargetView* targets[1] = {target};
-    active_context()->OMSetRenderTargets(1, targets, nullptr);
+    gfx->OMSetRenderTargets(1, targets, nullptr);
     const D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(viewport_width),
                                   static_cast<float>(viewport_height), 0.0f, 1.0f};
-    active_context()->RSSetViewports(1, &viewport);
+    gfx->RSSetViewports(1, &viewport);
     const D3D11_RECT scissor{0, 0, viewport_width, viewport_height};
-    active_context()->RSSetScissorRects(1, &scissor);
-    active_context()->RSSetState(pipes.raster_scissor);
+    gfx->RSSetScissorRects(1, &scissor);
+    gfx->RSSetState(pipes.raster_scissor);
     const float blend_factor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    active_context()->OMSetBlendState(opaque ? pipes.opaque : pipes.blend, blend_factor, 0xFFFFFFFFU);
-    active_context()->IASetInputLayout(nullptr);
-    active_context()->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-    active_context()->VSSetShader(pipes.vs, nullptr, 0);
-    active_context()->PSSetShader(pipes.ps, nullptr, 0);
+    gfx->OMSetBlendState(opaque ? pipes.opaque : pipes.blend, blend_factor, 0xFFFFFFFFU);
+    gfx->IASetInputLayout(nullptr);
+    gfx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    gfx->VSSetShader(pipes.vs, nullptr, 0);
+    gfx->PSSetShader(pipes.ps, nullptr, 0);
     D3D11_MAPPED_SUBRESOURCE mapped{};
-    if (FAILED(active_context()->Map(pipes.constants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
+    if (FAILED(gfx->Map(pipes.constants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
     std::memcpy(mapped.pData, &params, sizeof(params));
-    active_context()->Unmap(pipes.constants, 0);
+    gfx->Unmap(pipes.constants, 0);
     ID3D11Buffer* buffers[1] = {pipes.constants};
-    active_context()->VSSetConstantBuffers(0, 1, buffers);
-    active_context()->PSSetConstantBuffers(0, 1, buffers);
+    gfx->VSSetConstantBuffers(0, 1, buffers);
+    gfx->PSSetConstantBuffers(0, 1, buffers);
     ID3D11ShaderResourceView* views[1] = {view};
-    active_context()->PSSetShaderResources(0, 1, views);
+    gfx->PSSetShaderResources(0, 1, views);
     ID3D11SamplerState* samplers[1] = {point_sample ? pipes.sampler_point : pipes.sampler_linear};
-    active_context()->PSSetSamplers(0, 1, samplers);
-    active_context()->Draw(4, 0);
+    gfx->PSSetSamplers(0, 1, samplers);
+    gfx->Draw(4, 0);
   }
 
   auto acquire_shadow_targets(int width, int height, ShadowTargets& targets) -> bool {
@@ -2532,11 +2616,20 @@ class GpuCanvas final : public Surface {
     // 锁范围取"整段回读"而不是逐条：中间还有 `flush_glyph_batch` 与
     // `CreateTexture2D` 也碰上下文，分段加锁会留下更窄的死锁窗口。
     const std::scoped_lock readback_lock(g_context_mutex());
-    submit_deferred_locked();
     if (target_ == nullptr) return false;
     // **回读前必须 flush 字形批次**：否则“本轮攒着还没发的字形”不会被画进目标，
     // 截图/像素断言看到的就会是“文字消失了”（而屏幕上其实是好的）。
+    //
+    // ⚠ **顺序曾经是反的**（2026-10-25 二次排查）：`submit_deferred_locked()` 写在
+    // `flush_glyph_batch()` **之前**，于是：先提交了（那时字形还没录进去）→ 再录字形 →
+    // 字形落在**未提交**状态里。于是回读到的画面**文字全部缺失**。
+    //
+    // 这个错不容易看出来，因为屏幕上的文字是对的（上屏时 `present` 会再提交一次）——
+    // 只有“截图/导出”会缺字。它能让像素断言假阳/假阴，而单看屏幕无法发现。
+    //
+    // 教训：提交点必须在“本轮所有绘制都录完”之后，包括那些**攒批的**。
     flush_glyph_batch();
+    submit_deferred_locked();
     // 判"已有有效回读"看的是 **`readback_rgba_`**（导出路径的权威副本）。
     // 之前判 `readback_`（uint32 视图），而它现在是**惰性生成**的 ——
     // 初值为空，于是条件永假、每帧重复回读；更糟的是某些路径下
@@ -2820,7 +2913,30 @@ class D3dPresenter final : public Presenter {
     // 锁：`submit_deferred_locked` 内部注释要求调用方持有 `g_context_mutex()`；
     // `CopyResource` + `Present` 也碰立即上下文，所以整段一起进锁。
     const std::scoped_lock present_lock(g_context_mutex());
+    // ## 运行期断言（2026-10-25，防复发）
+    //
+    // `submit_deferred_locked` 在“没记账”时会静默返回（`pending == 0` 视为无事可做）。
+    // 那条分支一旦是因为**新加的绘制路径忘了记账**，就会默默拷一张空纹理上屏 ——
+    // 症状又是“全黑、无报错”，和本 bug 一模一样。
+    //
+    // `has_uncommitted_draws()` 检查的正是“有未提交的录制命令”：为真却走到这里，
+    // 说明有人漏了提交。此时宁可报错也不要静默上屏：
+    //   · 报错会被日志记下、被调用方看到，排查从“猜”变成“看”；
+    //   · 静默上屏只能等肉眼发现“窗口黑了”。
+    //
+    // 注：这不是替代 RAII（`draw_scope` 才是根治），而是**兵弟弟一道**：
+    // 万一将来有人新增绘制路径却绕过了类型系统（比如直接拿 `context_`），它能接住。
+    if (gpu_canvas->has_uncommitted_draws()) {
+      ST_LOG_ERROR("GPU 呈现：画布有未提交的绘制命令（漏了 submit_deferred_locked）");
+      return unexpected(ErrorCode::Invalid,
+                        "present 被跳过了：画布还有未提交的绘制命令——重复用例："
+                        "若有新绘制路径没经 draw_scope() 记账，它会永远不提交");
+    }
     gpu_canvas->submit_deferred_locked();
+    if (gpu_canvas->has_uncommitted_draws()) {
+      // 提交完之后仍然有：说明 FinishCommandList 失败（设备丢失等）——同样不能静默上屏
+      return unexpected(ErrorCode::Io, "命令列表提交失败（设备可能丢失），本帧跳过上屏");
+    }
     // 关键一步：GPU → GPU 拷贝，**不经过 CPU**（这就是 M5 的全部价值）
     context->CopyResource(backbuffer_, gpu_canvas->target());
     const HRESULT result = swapchain_->Present(0, 0);
@@ -3729,13 +3845,16 @@ class GpuScene3d final : public st::raster::Scene3D {
   void flush() override {
     if (context_ == nullptr) return;
     const std::scoped_lock lock(g_context_mutex());
-    // ## 必须先把命令落地，再等 GPU（2026-10-25 实测踩到的死等）
+    // ## 本类**不使用 deferred**，所以这里没有“先提交命令列表”这一步
     //
-    // deferred context 里的绘制是**录制态**，不 `ExecuteCommandList` 就不会执行。
-    // 少了这一句，`End(query)` 排在一个空队列后面、然后 `GetData` 永远拿不到结果
-    // —— 实测症状：进程跑 170 秒只消耗 **2 秒 CPU**（在 `Sleep(0)` 自旋等 GPU），
-    // 看起来像"卡死"，而 `flush` 自己的有界自旋上限（10 万次）在 4 路并行下
-    // 被反复重置，所以不会退出。
+    // 本类全程在立即上下文（`context_`）上直接发绘制，命令即时执行；
+    // `End(query)` 插在这个队列里就是真实绘制的末尾，`GetData` 能拿到正确信号。
+    //
+    // （2026-10-25 排查时这里曾误加过一句 `submit_deferred_locked()` —— 那是
+    //  `GpuCanvas` 的契约，本类没有那个方法。两类并存时很容易把一类的纪律
+    //  套到另一类头上，这是“两套策略”的真实代价。）
+    //
+    // 有界等待：驱动异常时不死等（截图/导出卡死比量错更难查）。
     if (query_ == nullptr) {
       D3D11_QUERY_DESC desc{};
       desc.Query = D3D11_QUERY_EVENT;
