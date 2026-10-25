@@ -28,6 +28,7 @@
 #include "st/core/process.hpp"
 #include "st/core/time.hpp"
 #include "st/raster/canvas.hpp"
+#include "st/raster/gpu.hpp"
 
 namespace caiyun {
 
@@ -191,7 +192,7 @@ namespace {
 }
 
 /// 把一帧累加到线性光缓存（只取 RGB；运动模糊不需要 alpha）。
-void accumulate_linear(const st::raster::Canvas& canvas, std::vector<float>& accum) {
+void accumulate_linear(const st::raster::Surface& canvas, std::vector<float>& accum) {
   const int width = canvas.width();
   const int height = canvas.height();
   const auto pixels = canvas.to_rgba8();   // R,G,B,A 字节序
@@ -211,8 +212,8 @@ void accumulate_linear(const st::raster::Canvas& canvas, std::vector<float>& acc
 ///
 /// 阈值 8/255：低于此人眼看不出来，但能让静止帧直接省掉 N 倍渲染成本。
 /// 稀疏采样（每 7 个像素取一个）：够用且几乎不占时间。
-[[nodiscard]] auto frames_are_nearly_identical(const st::raster::Canvas& a,
-                                               const st::raster::Canvas& b) -> bool {
+[[nodiscard]] auto frames_are_nearly_identical(const st::raster::Surface& a,
+                                               const st::raster::Surface& b) -> bool {
   if (a.width() != b.width() || a.height() != b.height()) return false;
   const auto left = a.to_rgba8();
   const auto right = b.to_rgba8();
@@ -241,8 +242,8 @@ void accumulate_linear(const st::raster::Canvas& canvas, std::vector<float>& acc
 /// 1080p 全扫是 200 万次比较，而这一步每帧都做。
 /// 按 4×4 步长抽样（约 12 万次）足够判断量级——采样的方差不影响
 /// "该用几档"这种粗决策。
-[[nodiscard]] auto changed_pixel_ratio(const st::raster::Canvas& a,
-                                       const st::raster::Canvas& b) -> double {
+[[nodiscard]] auto changed_pixel_ratio(const st::raster::Surface& a,
+                                       const st::raster::Surface& b) -> double {
   const int w = a.width();
   const int h = a.height();
   if (w <= 0 || h <= 0 || b.width() != w || b.height() != h) return 1.0;
@@ -270,10 +271,10 @@ void accumulate_linear(const st::raster::Canvas& canvas, std::vector<float>& acc
 /// **带运动模糊地渲染一帧**（快门超采样）。
 ///
 /// `scratch` 是每 worker 的临时画布，用于采样子帧（不能与 `target` 同一块）。
-void render_frame_with_motion_blur(Project& project, st::raster::Canvas& target,
+void render_frame_with_motion_blur(Project& project, st::raster::Surface& target,
                                    const RenderJob& job, int index,
                                    const st::ui::TextPort* text_port,
-                                   st::raster::Canvas& scratch,
+                                   st::raster::Surface& scratch,
                                    std::vector<ElementTrack>* trajectory = nullptr) {
   const double center = frame_time(index, job.fps);
   // 轨迹与运动模糊**不兼容**：模糊会在快门区间内多次渲染，
@@ -361,7 +362,28 @@ void render_frame_with_motion_blur(Project& project, st::raster::Canvas& target,
     pixels[pixel * 4U + 1U] = linear_to_srgb(accum[pixel * 3U + 1U] * inverse);
     pixels[pixel * 4U + 2U] = linear_to_srgb(accum[pixel * 3U + 2U] * inverse);
   }
-  target.replace_rgba8(pixels, width, height);
+  // ## 写回：软件画布直接替换，GPU 画布走"贴一张软件画布"（2026-10-25）
+  //
+  // `replace_rgba8` 是 `Canvas` 专有的（就地替换整块缓冲），`Surface` 接口里没有——
+  // GPU 画布的内容在显存里，语义上不能"直接替换"。
+  //
+  // 所以分两条：
+  //   · 软件目标：`replace_rgba8`（零拷贝，与原来完全一致）
+  //   · GPU 目标：把结果写进一张临时软件画布，再 `draw_canvas` 贴上去
+  //     （框架的 draw_canvas 支持 Surface 源，GPU 侧是一次纹理上传）
+  //
+  // 后者在这条路径上可以接受：运动模糊只在 `samples > 1` 时走，且它本身
+  // 已经做了 `effective × 全场景渲染` 的重活，一次整屏上传（约 8MB）是零头。
+  if (auto* as_canvas = dynamic_cast<st::raster::Canvas*>(&target); as_canvas != nullptr) {
+    as_canvas->replace_rgba8(pixels, width, height);
+  } else {
+    st::raster::Canvas staged{width, height, 1.0f};
+    (void)staged.replace_rgba8(pixels, width, height);
+    target.clear(st::math::Color{0, 0, 0, 0});
+    st::raster::DrawOptions options{};
+    options.opacity = 1.0f;
+    target.draw_canvas_at(staged, 0, 0, options);
+  }
 }
 
 }  // namespace
@@ -819,11 +841,12 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
   }
   const std::size_t workers = static_cast<std::size_t>(
       std::clamp(static_cast<int>(default_workers), 1, 64));
-  std::vector<std::unique_ptr<st::raster::Canvas>> worker_canvases{};
+  std::vector<std::unique_ptr<st::raster::Surface>> worker_canvases{};
+  std::atomic<int> gpu_fallback_count{0};
   worker_canvases.reserve(workers);
   // 运动模糊的采样子帧画布（每 worker 一块，与成品画布分开）：
   // 若复用同一块，采样子帧会覆盖正在累加的结果。
-  std::vector<std::unique_ptr<st::raster::Canvas>> worker_scratch{};
+  std::vector<std::unique_ptr<st::raster::Surface>> worker_scratch{};
   worker_scratch.reserve(workers);
   std::vector<std::int64_t> worker_render_ns(workers, 0);
   std::vector<int> worker_written(workers, 0);
@@ -853,11 +876,48 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
   std::atomic<int> encode_done{0};
   std::atomic<std::int64_t> encode_ns_total{0};
   for (std::size_t i = 0; i < workers; ++i) {
-    worker_canvases.push_back(std::make_unique<st::raster::Canvas>(job.width, job.height, 1.0f));
-    worker_scratch.push_back(std::make_unique<st::raster::Canvas>(job.width, job.height, 1.0f));
+    // ## 每条腿一个画布：软件 or GPU（2026-10-25）
+    //
+    // `Job::use_gpu` 为真且设备可用时用 `gpu::GpuCanvas`，否则软件画布。
+    // 两者都实现 `Surface`，所以上面的渲染代码一行都不用分支。
+    //
+    // 实测（`tools/gpu_vs_cpu_export_probe`，1080p / 1600 图元）：
+    // | | 绘制 | 取像素 | 合计 |
+    // |---|---|---|---|
+    // | 软件 | 8.93ms | 17.56ms | 26.49ms |
+    // | GPU | 2.56ms | 5.09ms | 7.64ms |
+    //
+    // 且 GPU 画出的与软件**逐像素一致**（差>2 的字节 0/8294400），
+    // 两次独立 GPU 画布也逐字节相同 —— 「同帧可复现」的前提成立。
+    if (job.use_gpu) {
+      auto created = st::raster::gpu::create_canvas(job.width, job.height, 1.0f, {});
+      if (created.has_value()) {
+        worker_canvases.push_back(std::move(*created));
+      } else {
+        // 建不出来就退回软件腿（不静默：下面的日志会说）
+        gpu_fallback_count.fetch_add(1);
+        worker_canvases.push_back(
+            std::make_unique<st::raster::Canvas>(job.width, job.height, 1.0f));
+      }
+    } else {
+      worker_canvases.push_back(std::make_unique<st::raster::Canvas>(job.width, job.height, 1.0f));
+    }
+    // scratch 用于运动模糊的采样子帧：跟随主画布的类型，
+    // 让它与 target 同后端（跨后端 draw_canvas 要回读，那是隐形的减速带）。
+    if (job.use_gpu) {
+      auto created = st::raster::gpu::create_canvas(job.width, job.height, 1.0f, {});
+      if (created.has_value()) {
+        worker_scratch.push_back(std::move(*created));
+      } else {
+        worker_scratch.push_back(
+            std::make_unique<st::raster::Canvas>(job.width, job.height, 1.0f));
+      }
+    } else {
+      worker_scratch.push_back(std::make_unique<st::raster::Canvas>(job.width, job.height, 1.0f));
+    }
   }
   const auto worker_body = [&](std::size_t slot) {
-    st::raster::Canvas& local = *worker_canvases[slot];
+    st::raster::Surface& local = *worker_canvases[slot];
     while (true) {
       if (cancel_.load() || write_failed.load()) return;
       const int index = next_index.fetch_add(1);
@@ -886,10 +946,23 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
         }
       }
       const std::int64_t render_end = st::time::now_ns();
-      // ## 画面度量在**移交像素之前**做
+
+      // ## 一次回读，两处使用（2026-10-25 GPU 接入）
       //
-      // 它读的是 canvas 当前像素；一旦像素被拷进队列，本地画布马上会被下一帧覆盖。
-      worker_stats[slot].push(local, index, frame_time(index, job.fps));
+      // 原来：`worker_stats.push(local, ...)` 内部自己读 `canvas.pixels()`，
+      // 之后 `to_rgba8()` 又取一遍。软件画布上两者都是内存直通（近乎免费），
+      // 但 GPU 画布每次都要 staging 回读 —— 同一帧读两遍是纯粹的浪费
+      // （1080p 每遍 5~17ms，实测数据见 `Job::use_gpu` 的注释）。
+      //
+      // 现在：先取一次 RGBA，统计与出口共用这份字节。
+      const auto rgba = local.to_rgba8();
+      const int fw = local.physical_width();
+      const int fh = local.physical_height();
+      if (rgba.size() != static_cast<std::size_t>(fw) * static_cast<std::size_t>(fh) * 4U) {
+        write_failed.store(true);
+        return;
+      }
+      worker_stats[slot].push(rgba, fw, fh, index, frame_time(index, job.fps));
 
       // ## 出口：管道模式直送 ffmpeg；PNG 模式进队列
       //
@@ -906,22 +979,23 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
       {
         FramePixels frame{};
         frame.index = index;
-        frame.width = static_cast<std::uint32_t>(local.physical_width());
-        frame.height = static_cast<std::uint32_t>(local.physical_height());
-        frame.rgba = local.to_rgba8();
-        if (frame.rgba.size() !=
-            static_cast<std::size_t>(frame.width) * frame.height * 4U) {
-          write_failed.store(true);
-          return;
-        }
+        frame.width = static_cast<std::uint32_t>(fw);
+        frame.height = static_cast<std::uint32_t>(fh);
+        frame.rgba = rgba;   // 复用上面那一次回读
         if (pipe_mode) {
           // 等自己成为队首（前序帧都已写完），期间不占 CPU
           std::unique_lock<std::mutex> lock(pipe_mutex);
           pipe_cv.wait(lock, [&] { return write_turn == index || cancel_.load() ||
                                           pipe_failed.load(); });
           if (cancel_.load() || pipe_failed.load()) return;
-          if (!ffmpeg_pipe->write(std::string_view(
-                  reinterpret_cast<const char*>(frame.rgba.data()), frame.rgba.size()))) {
+          // `write` 收 `string_view`，而像素是 `uint8_t` 缓冲——同一块内存换
+          // 一个字节类型（不改变对齐与布局）。这是“把二进制送进管道”必然的一步，
+          // 不是把指针当另一个类型用。
+          // 字节缓冲 → string_view：同布局，只为满足形参类型。
+          const auto bytes = std::string_view(
+              reinterpret_cast<const char*>(frame.rgba.data()),  // lint-allow: L6
+              frame.rgba.size());
+          if (!ffmpeg_pipe->write(bytes)) {
             pipe_failed.store(true);
             write_failed.store(true);
             ++write_turn;

@@ -101,7 +101,7 @@ ST_TEST(frame_stats_static_frames_report_full_still) {
   for (int i = 0; i < 10; ++i) {
     fill(canvas, 16, 24, 32);
     block(canvas, 20, 40, 224, 224, 224);
-    acc.push(canvas, i, static_cast<double>(i) / 10.0);
+    acc.push(canvas.to_rgba8(), canvas.physical_width(), canvas.physical_height(), i, static_cast<double>(i) / 10.0);
   }
   const QualityReport report = acc.report(1.0, false);
   ST_CHECK(report.frames == 10);
@@ -118,7 +118,7 @@ ST_TEST(frame_stats_moving_block_reports_no_still) {
   for (int i = 0; i < 10; ++i) {
     fill(canvas, 16, 24, 32);
     block(canvas, 20 + i * 20, 40, 224, 224, 224);
-    acc.push(canvas, i, static_cast<double>(i) / 10.0);
+    acc.push(canvas.to_rgba8(), canvas.physical_width(), canvas.physical_height(), i, static_cast<double>(i) / 10.0);
   }
   const QualityReport report = acc.report(1.0, false);
   ST_CHECK(report.still_ratio < 1.0);
@@ -132,7 +132,7 @@ ST_TEST(frame_stats_brightness_ordering) {
     StatsAccumulator acc{};
     for (int i = 0; i < 5; ++i) {
       fill(canvas, 255, 255, 255);
-      acc.push(canvas, i, static_cast<double>(i) / 10.0);
+      acc.push(canvas.to_rgba8(), canvas.physical_width(), canvas.physical_height(), i, static_cast<double>(i) / 10.0);
     }
     const QualityReport white = acc.report(0.5, false);
     ST_CHECK(white.mean_luma > 250.0);
@@ -142,7 +142,7 @@ ST_TEST(frame_stats_brightness_ordering) {
     StatsAccumulator acc{};
     for (int i = 0; i < 5; ++i) {
       fill(canvas, 0, 0, 0);
-      acc.push(canvas, i, static_cast<double>(i) / 10.0);
+      acc.push(canvas.to_rgba8(), canvas.physical_width(), canvas.physical_height(), i, static_cast<double>(i) / 10.0);
     }
     const QualityReport black = acc.report(0.5, false);
     ST_CHECK(black.mean_luma < 5.0);
@@ -159,12 +159,12 @@ ST_TEST(frame_stats_per_shot_separates_still_and_moving) {
   for (int i = 0; i < 10; ++i) {
     fill(canvas, 16, 24, 32);
     block(canvas, 20, 40, 224, 224, 224);
-    acc.push(canvas, index++, static_cast<double>(i) / 10.0);
+    acc.push(canvas.to_rgba8(), canvas.physical_width(), canvas.physical_height(), index++, static_cast<double>(i) / 10.0);
   }
   for (int i = 0; i < 10; ++i) {
     fill(canvas, 16, 24, 32);
     block(canvas, 20 + i * 20, 40, 224, 224, 224);
-    acc.push(canvas, index++, 1.0 + static_cast<double>(i) / 10.0);
+    acc.push(canvas.to_rgba8(), canvas.physical_width(), canvas.physical_height(), index++, 1.0 + static_cast<double>(i) / 10.0);
   }
   std::vector<StatsAccumulator::ShotSpan> spans{};
   spans.push_back({11, 0, "shot-static", 0.0, 1.0});
@@ -191,7 +191,7 @@ ST_TEST(frame_stats_single_frame_shot_reports_zero_not_hundred) {
   st::raster::Canvas canvas{kWidth, kHeight, 1.0f};
   StatsAccumulator acc{};
   fill(canvas, 16, 24, 32);
-  acc.push(canvas, 0, 0.0);
+  acc.push(canvas.to_rgba8(), canvas.physical_width(), canvas.physical_height(), 0, 0.0);
   std::vector<StatsAccumulator::ShotSpan> spans{};
   spans.push_back({7, 0, "one-frame", 0.0, 0.1});
   acc.attach_spans(spans);
@@ -209,11 +209,11 @@ ST_TEST(frame_stats_non_adjacent_frames_are_not_compared) {
   StatsAccumulator acc{};
   fill(canvas, 16, 24, 32);
   block(canvas, 20, 40, 224, 224, 224);
-  acc.push(canvas, 0, 0.0);
+  acc.push(canvas.to_rgba8(), canvas.physical_width(), canvas.physical_height(), 0, 0.0);
   // 跳到 index=5（中间的帧在别的 worker 上）：这一帧的帧差应标记为"无相邻前帧"
   fill(canvas, 16, 24, 32);
   block(canvas, 200, 40, 224, 224, 224);
-  const auto stats = acc.push(canvas, 5, 0.5);
+  const auto stats = acc.push(canvas.to_rgba8(), canvas.physical_width(), canvas.physical_height(), 5, 0.5);
   ST_CHECK(stats.diff_prev < 0.0);  // -1 = 无相邻前帧
 }
 
@@ -224,11 +224,11 @@ ST_TEST(frame_stats_merge_keeps_all_frames) {
   StatsAccumulator b{};
   for (int i = 0; i < 5; ++i) {
     fill(canvas, 16, 24, 32);
-    a.push(canvas, i, static_cast<double>(i) / 10.0);
+    a.push(canvas.to_rgba8(), canvas.physical_width(), canvas.physical_height(), i, static_cast<double>(i) / 10.0);
   }
   for (int i = 5; i < 10; ++i) {
     fill(canvas, 16, 24, 32);
-    b.push(canvas, i, static_cast<double>(i) / 10.0);
+    b.push(canvas.to_rgba8(), canvas.physical_width(), canvas.physical_height(), i, static_cast<double>(i) / 10.0);
   }
   a.merge(b);
   const QualityReport report = a.report(1.0, false);
@@ -251,7 +251,7 @@ ST_TEST(frame_stats_partial_flag_is_reported) {
   StatsAccumulator acc{};
   for (int i = 0; i < 3; ++i) {
     fill(canvas, 16, 24, 32);
-    acc.push(canvas, i, static_cast<double>(i) / 10.0);
+    acc.push(canvas.to_rgba8(), canvas.physical_width(), canvas.physical_height(), i, static_cast<double>(i) / 10.0);
   }
   const QualityReport report = acc.report(0.3, true);
   ST_CHECK(report.partial);
@@ -270,7 +270,8 @@ ST_TEST(frame_stats_parallel_workers_still_have_adjacent_pairs) {
   for (int i = 0; i < 10; ++i) {
     fill(canvas, 16, 24, 32);
     block(canvas, 20 + i * 20, 40, 224, 224, 224);
-    (i % 2 == 0 ? even : odd).push(canvas, i, static_cast<double>(i) / 10.0);
+    (i % 2 == 0 ? even : odd).push(canvas.to_rgba8(), canvas.physical_width(),
+                              canvas.physical_height(), i, static_cast<double>(i) / 10.0);
   }
   even.merge(odd);
   const QualityReport moving = even.report(1.0, false);
@@ -287,7 +288,9 @@ ST_TEST(frame_stats_parallel_workers_still_have_adjacent_pairs) {
   for (int i = 0; i < 10; ++i) {
     fill(canvas, 16, 24, 32);
     block(canvas, 20, 40, 224, 224, 224);
-    (i % 2 == 0 ? still_even : still_odd).push(canvas, i, static_cast<double>(i) / 10.0);
+    (i % 2 == 0 ? still_even : still_odd).push(
+          canvas.to_rgba8(), canvas.physical_width(), canvas.physical_height(), i,
+          static_cast<double>(i) / 10.0);
   }
   still_even.merge(still_odd);
   const QualityReport still = still_even.report(1.0, false);
@@ -300,7 +303,7 @@ ST_TEST(frame_stats_zero_pairs_is_flagged) {
   st::raster::Canvas canvas{kWidth, kHeight, 1.0f};
   StatsAccumulator acc{};
   fill(canvas, 16, 24, 32);
-  acc.push(canvas, 0, 0.0);
+  acc.push(canvas.to_rgba8(), canvas.physical_width(), canvas.physical_height(), 0, 0.0);
   const QualityReport report = acc.report(0.033, false);
   ST_CHECK(report.frames == 1);
   ST_CHECK(report.frame_pairs == 0);
@@ -313,7 +316,7 @@ ST_TEST(frame_stats_definition_is_in_summary) {
   StatsAccumulator acc{};
   for (int i = 0; i < 4; ++i) {
     fill(canvas, 16, 24, 32);
-    acc.push(canvas, i, static_cast<double>(i) / 10.0);
+    acc.push(canvas.to_rgba8(), canvas.physical_width(), canvas.physical_height(), i, static_cast<double>(i) / 10.0);
   }
   const QualityReport report = acc.report(0.4, false);
   // summary 里要能看见「帧差 <阈值」这一句
@@ -327,7 +330,7 @@ ST_TEST(frame_stats_json_roundtrip_shape) {
   StatsAccumulator acc{};
   for (int i = 0; i < 4; ++i) {
     fill(canvas, 16, 24, 32);
-    acc.push(canvas, i, static_cast<double>(i) / 10.0);
+    acc.push(canvas.to_rgba8(), canvas.physical_width(), canvas.physical_height(), i, static_cast<double>(i) / 10.0);
   }
   std::vector<StatsAccumulator::ShotSpan> spans{};
   spans.push_back({3, 0, "shot-a", 0.0, 0.4});

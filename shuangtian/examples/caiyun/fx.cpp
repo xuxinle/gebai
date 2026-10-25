@@ -40,7 +40,13 @@ auto backdrop_is_light(st::math::Color top, st::math::Color bottom) -> bool {
   return std::max(luma(top), luma(bottom)) >= kLightThreshold;
 }
 
-auto depth_of_field(const st::raster::Canvas& source, float strength) -> st::raster::Canvas {
+/// ## 源是 `Surface`，产物仍是软件 `Canvas`（2026-10-25 GPU 接入）
+///
+/// 景深要逐像素做盒式模糊，那是一段 CPU 专用的算法（多遍均值）。
+/// 让它也上 GPU 需要写 shader，而这条路只在 `dof > 0` 时才走——
+/// 本片单里 13 个 case 全部没开景深。所以这里接受 `Surface` 源（GPU 画布可直接贴进来），
+/// 产物仍是软件画布，语义不变、零风险。
+auto depth_of_field(const st::raster::Surface& source, float strength) -> st::raster::Canvas {
   const int width = source.physical_width();
   const int height = source.physical_height();
   st::raster::Canvas out{width, height, source.device_scale()};
@@ -76,7 +82,7 @@ auto depth_of_field(const st::raster::Canvas& source, float strength) -> st::ras
   return out;
 }
 
-void paint_particles(st::raster::Canvas& target, const ParticleField& field, double time,
+void paint_particles(st::raster::Surface& target, const ParticleField& field, double time,
                      float device_scale) {
   if (field.count <= 0 || field.alpha <= 0.004f) return;
   const float width = static_cast<float>(target.physical_width());
@@ -152,7 +158,7 @@ void paint_particles(st::raster::Canvas& target, const ParticleField& field, dou
 /// 位置来自 `hash01(粒子序号, 时间量化)`——时间只以「帧序号」进入哈希，
 /// 所以同一脚本两次出片**逐帧逐像素一致**。
 /// 若用 `std::rand` 或时钟，同一脚本两次出片会不同，裁云就无法复现。
-void paint_grain(st::raster::Canvas& target, int count, float alpha, double time,
+void paint_grain(st::raster::Surface& target, int count, float alpha, double time,
                  double fps, float device_scale) {
   if (count <= 0 || alpha <= 0.002f) return;
   const float width = static_cast<float>(target.physical_width());
@@ -191,7 +197,7 @@ void paint_grain(st::raster::Canvas& target, int count, float alpha, double time
   }
 }
 
-void paint_glow(st::raster::Canvas& target, const GlowSpec& spec, float device_scale,
+void paint_glow(st::raster::Surface& target, const GlowSpec& spec, float device_scale,
                 float alpha_mul) {
   if (spec.intensity <= 0.004f || alpha_mul <= 0.004f) return;
   (void)device_scale;
@@ -237,7 +243,7 @@ void paint_glow(st::raster::Canvas& target, const GlowSpec& spec, float device_s
   }
 }
 
-void paint_light_sweep(st::raster::Canvas& target, float progress, float width_ratio,
+void paint_light_sweep(st::raster::Surface& target, float progress, float width_ratio,
                        Color color, float intensity, float device_scale) {
   if (progress <= 0.0f || progress >= 1.0f || intensity <= 0.004f) return;
   const float width = static_cast<float>(target.physical_width());
@@ -277,7 +283,10 @@ auto camera_progress(float time, float duration, float window_start, float windo
   return std::clamp((time - window_start) / std::max(0.05f, span), 0.0f, 1.0f);
 }
 
-auto apply_camera(const st::raster::Canvas& source, const CameraMove& move, float progress,
+/// 与 `depth_of_field` 同理：源可以是 GPU 画布，产物是软件画布。
+/// 相机变换是一次重采样，`draw_canvas_at` 的 GPU 路径本身就能吃 Surface 源，
+/// 所以这里不需要改算法。
+auto apply_camera(const st::raster::Surface& source, const CameraMove& move, float progress,
                   double time, float device_scale) -> st::raster::Canvas {
   const int width = source.physical_width();
   const int height = source.physical_height();
@@ -451,7 +460,7 @@ auto apply_camera(const st::raster::Canvas& source, const CameraMove& move, floa
   return out;
 }
 
-void paint_god_ray(st::raster::Canvas& target, float origin_x, float origin_y, float angle,
+void paint_god_ray(st::raster::Surface& target, float origin_x, float origin_y, float angle,
                    float width_ratio, float length_ratio, Color color, float intensity,
                    float device_scale) {
   if (intensity <= 0.004f) return;

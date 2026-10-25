@@ -29,6 +29,7 @@
 
 #include "director.hpp"
 #include "st/raster/canvas.hpp"
+#include "st/raster/surface.hpp"
 #include "st/ui/text_port.hpp"
 
 namespace caiyun {
@@ -67,7 +68,7 @@ inline constexpr float kDesignHeight = 1080.0f;
 /// - `text_port` 为空时只画几何、不画字（导出路径一定有端口，此分支只为兜底）；
 /// - `assets` 非空时解析 `scene.image` / `scene.image_card` 并贴图（相对路径以
 ///   `asset_basis`（脚本所在目录）为基准）；为空则素材字段被忽略。
-void render_scene(st::raster::Canvas& target, const Scene& scene, double local_time,
+void render_scene(st::raster::Surface& target, const Scene& scene, double local_time,
                   double scene_duration, const st::ui::TextPort* text_port,
                   const AssetLibrary* assets = nullptr,
                   std::string_view asset_basis = {}, int scene_index = 0,

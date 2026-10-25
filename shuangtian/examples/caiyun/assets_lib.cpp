@@ -187,7 +187,7 @@ auto AssetLibrary::manifest() const -> std::string {
   return out;
 }
 
-void blit_cover(Canvas& target, const Canvas& source, Rect area, float alpha,
+void blit_cover(st::raster::Surface& target, const Canvas& source, Rect area, float alpha,
                 float corner_radius) {
   if (source.width() <= 0 || source.height() <= 0) return;
   if (area.width <= 0.0f || area.height <= 0.0f) return;
@@ -244,7 +244,7 @@ void blit_cover(Canvas& target, const Canvas& source, Rect area, float alpha,
   canvas.pop_clip();
 }
 
-void blit_contain(Canvas& target, const Canvas& source, Rect area, float alpha) {
+void blit_contain(st::raster::Surface& target, const Canvas& source, Rect area, float alpha) {
   if (source.width() <= 0 || source.height() <= 0) return;
   if (area.width <= 0.0f || area.height <= 0.0f) return;
   const float scale = std::min(area.width / static_cast<float>(source.width()),

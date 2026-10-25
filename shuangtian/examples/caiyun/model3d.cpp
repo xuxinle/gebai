@@ -718,7 +718,7 @@ void upload_layer_texture(st::raster::Scene3D& scene, const Layer& layer,
 
 }  // namespace
 
-void paint_model3d(st::raster::Canvas& canvas, const Layer& layer, st::math::Rect box,
+void paint_model3d(st::raster::Surface& canvas, const Layer& layer, st::math::Rect box,
                    float local_time, float scene_duration, float alpha,
                    std::string_view asset_basis) {
   if (alpha <= 0.004f || box.width < 2.0f || box.height < 2.0f) return;
@@ -847,7 +847,7 @@ void paint_model3d(st::raster::Canvas& canvas, const Layer& layer, st::math::Rec
   scene->end_frame(canvas, box, options.opacity);
 }
 
-void paint_model3d_group(st::raster::Canvas& canvas, const Layer& head,
+void paint_model3d_group(st::raster::Surface& canvas, const Layer& head,
                          const std::vector<const Layer*>& members, float local_time,
                          float scene_duration, std::string_view asset_basis,
                          const LayerState& head_state, float canvas_w, float canvas_h,

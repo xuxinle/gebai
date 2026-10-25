@@ -47,6 +47,7 @@
 /// 但**报告不读它**。
 
 #include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -144,7 +145,13 @@ class StatsAccumulator {
   ///
   /// ⚠ 返回的 `diff_prev` 只是**本路相邻帧**的差（并行时这是 0/16/32… 的间隔），
   /// 仅用于诊断；判定与时序口径的差一律来自 `report()`（它按归并后的帧号算）。
-  auto push(const st::raster::Canvas& canvas, int index, double time_s) -> FrameStats;
+  /// 推入一帧的画面统计。
+  ///
+  /// `rgba` 是这一帧的像素（`to_rgba8()` 的输出）。**由调用方传入而不是自己回读**：
+  /// 导出路径本来就要把像素送给 ffmpeg，重用同一份字节能省掉一次 GPU staging 回读
+  /// （1080p 每遍 5~17ms）。
+  auto push(std::span<const std::uint8_t> rgba, int width, int height, int index,
+            double time_s) -> FrameStats;
 
   /// 把**另**一个累加器的内容并入自己（并行归并）。
   void merge(const StatsAccumulator& other);
@@ -173,7 +180,8 @@ class StatsAccumulator {
   /// 本路上一帧的降采样灰度图（与 `prev_` 配套，同原因：只给 push 的返回值用）。
   std::vector<std::uint8_t> prev_luma_{};
 
-  static auto downscale_luma(const st::raster::Canvas& canvas) -> std::vector<std::uint8_t>;
+  static auto downscale_luma(std::span<const std::uint8_t> rgba, int width, int height)
+      -> std::vector<std::uint8_t>;
 };
 
 }  // namespace caiyun

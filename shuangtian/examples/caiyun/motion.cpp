@@ -98,7 +98,7 @@ thread_local st::raster::Canvas backdrop_canvas{2, 2, 1.0f};
 /// "预览对、成片错位"这类最难查的差异（且只在导出时才现形）。
 class Painter {
  public:
-  Painter(Canvas& canvas, const TextPort* port)
+  Painter(st::raster::Surface& canvas, const TextPort* port)
       : canvas_(canvas), port_(port),
         scale_(static_cast<float>(canvas.physical_width()) / kDesignWidth),
         width_(static_cast<float>(canvas.physical_width())),
@@ -440,12 +440,12 @@ class Painter {
 
   /// 素材绘制用：blit_cover/blit_contain 是自由函数（在 Painter 外部），
   /// 需要 Canvas&。不给 getter 就只能靠"再开一条绘制路径"——两条路径必漂移。
-  [[nodiscard]] auto canvas() -> Canvas& { return canvas_; }
+  [[nodiscard]] auto canvas() -> st::raster::Surface& { return canvas_; }
   [[nodiscard]] auto design_w() const noexcept -> float { return kDesignWidth; }
   [[nodiscard]] auto design_h() const noexcept -> float { return kDesignHeight; }
 
  private:
-  Canvas& canvas_;
+  st::raster::Surface& canvas_;
   const TextPort* port_;
 
 
@@ -1341,7 +1341,7 @@ void paint_outro(Painter& p, const Scene& scene, float local_time) {
 /// 放在这里而不是 `carry.cpp`：它需要使用本文件的 `Painter`（设计坐标入、
 /// 内部乘 `scale_`）。若在 `carry.cpp` 里另写一套坐标换算，两处必然漂移——
 /// 而漂移在 1080p 导出（scale=1）下看不出来，只在预览与帧序列里现形。
-void paint_carry(st::raster::Canvas& target, const CarryOut& carry, const CarryPose& pose,
+void paint_carry(st::raster::Surface& target, const CarryOut& carry, const CarryPose& pose,
                  const st::ui::TextPort* text_port, float alpha) {
   if (!pose.active || alpha <= 0.004f) return;
   if (pose.w < 1.0f || pose.h < 1.0f) return;
@@ -1540,7 +1540,7 @@ void paint_script_shapes(Painter& p) {
   }
 }
 
-void render_scene(st::raster::Canvas& target, const Scene& scene, double local_time,
+void render_scene(st::raster::Surface& target, const Scene& scene, double local_time,
                   double scene_duration, const st::ui::TextPort* text_port,
                   const AssetLibrary* assets, std::string_view asset_basis, int scene_index,
                   int scene_total, std::vector<ElementTrack>* trajectory) {

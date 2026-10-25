@@ -36,6 +36,7 @@
 
 #include "director.hpp"
 #include "st/raster/canvas.hpp"
+#include "st/raster/surface.hpp"
 #include "st/ui/text_port.hpp"
 
 namespace caiyun {
@@ -82,7 +83,7 @@ using CarryCurve = float (*)(float);
 /// 幕内图层**同一口径**（设计坐标入、内部乘 `scale`）。若在 `carry.cpp` 里另起
 /// 一套坐标换算，两处必然漂移——而漂移在 1080p 导出（scale=1）下看不出来，
 /// 只在预览与帧序列里现形。
-void paint_carry(st::raster::Canvas& target, const CarryOut& carry, const CarryPose& pose,
+void paint_carry(st::raster::Surface& target, const CarryOut& carry, const CarryPose& pose,
                  const st::ui::TextPort* text_port, float alpha);
 
 /// 一帧里所有承接图元的轨迹记录（供 `--track-elements` 导出）。

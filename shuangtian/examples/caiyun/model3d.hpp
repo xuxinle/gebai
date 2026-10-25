@@ -40,6 +40,7 @@
 
 #include "layer.hpp"
 #include "st/raster/canvas.hpp"
+#include "st/raster/surface.hpp"
 #include "st/raster/mesh.hpp"
 #include "st/raster/scene3d.hpp"
 
@@ -94,7 +95,7 @@ struct Model3dPose {
 /// 设计坐标缩放，因为它同时被预览与导出调用，两者的 scale 不同。
 ///
 /// `alpha` 是整体不透明度（入场动画用），0 直接跳过。
-void paint_model3d(st::raster::Canvas& canvas, const Layer& layer, st::math::Rect box,
+void paint_model3d(st::raster::Surface& canvas, const Layer& layer, st::math::Rect box,
                    float local_time, float scene_duration, float alpha,
                    std::string_view asset_basis);
 
@@ -115,7 +116,7 @@ void paint_model3d(st::raster::Canvas& canvas, const Layer& layer, st::math::Rec
 /// · `cam_*` / `light_*` 取 **head 的**（一个世界只有一台相机、一个主光）。
 ///
 /// 这样写脚本时的心智模型很直：“桌面铺满整块，图标放在它右半边、抬高一点”。
-void paint_model3d_group(st::raster::Canvas& canvas, const Layer& head,
+void paint_model3d_group(st::raster::Surface& canvas, const Layer& head,
                          const std::vector<const Layer*>& members, float local_time,
                          float scene_duration, std::string_view asset_basis,
                          const LayerState& head_state, float canvas_w, float canvas_h,

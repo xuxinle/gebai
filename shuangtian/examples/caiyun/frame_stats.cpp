@@ -27,9 +27,18 @@ constexpr int kLumaB = 29;   // 0.114 * 256
 
 }  // namespace
 
-auto StatsAccumulator::downscale_luma(const st::raster::Canvas& canvas) -> std::vector<std::uint8_t> {
-  const int w = canvas.physical_width();
-  const int h = canvas.physical_height();
+/// ## 从**已回读的 RGBA 字节**降采样（2026-10-25 GPU 接入）
+///
+/// 原来直接读 `canvas.pixels()`——那是软件画布的内存直通，零成本。
+/// 但 GPU 画布没有可直读的内存，每次 `pixels()` 都要 staging 回读一次。
+///
+/// 而导出路径**本来就要** `to_rgba8()` 把像素送给 ffmpeg。
+/// 所以改成让调用方把那份字节传进来：**一次回读，两处使用**。
+/// 这不是优化取舍，而是避免同一帧回读两遍（1080p 每遍约 5~17ms）。
+auto StatsAccumulator::downscale_luma(std::span<const std::uint8_t> rgba, int width,
+                                      int height) -> std::vector<std::uint8_t> {
+  const int w = width;
+  const int h = height;
   if (w <= 0 || h <= 0) return {};
 
   // 目标高度按比例取偶（避免奇数行让块均值偏移）；至少 2 行。
@@ -37,8 +46,10 @@ auto StatsAccumulator::downscale_luma(const st::raster::Canvas& canvas) -> std::
   const int ratio = std::max(1, w / out_w);
   const int out_h = std::max(2, ((h / ratio) / 2) * 2);
 
-  const std::span<const std::uint32_t> px = canvas.pixels();
-  if (px.size() < static_cast<std::size_t>(w) * static_cast<std::size_t>(h)) return {};
+  // 入参是 **RGBA 字节序**（`to_rgba8()` 的输出，每像素 4 字节）。
+  // 校验要按 4 字节算，否则末尾会读越界。
+  const std::span<const std::uint8_t> px = rgba;
+  if (px.size() < static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4U) return {};
 
   std::vector<std::uint8_t> out(static_cast<std::size_t>(out_w) * static_cast<std::size_t>(out_h), 0);
   for (int oy = 0; oy < out_h; ++oy) {
@@ -54,7 +65,12 @@ auto StatsAccumulator::downscale_luma(const st::raster::Canvas& canvas) -> std::
       for (int y = y0; y < y1; ++y) {
         const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(w);
         for (int x = x0; x < x1; ++x) {
-          const std::uint32_t argb = px[row + static_cast<std::size_t>(x)];
+          // 从 RGBA 字节重构出与 Canvas 同布局的 0xRRGGBBAA
+          const std::size_t base = (row + static_cast<std::size_t>(x)) * 4U;
+          const std::uint32_t argb = (static_cast<std::uint32_t>(px[base]) << 24U) |
+                                     (static_cast<std::uint32_t>(px[base + 1U]) << 16U) |
+                                     (static_cast<std::uint32_t>(px[base + 2U]) << 8U) |
+                                     static_cast<std::uint32_t>(px[base + 3U]);
           // **Canvas 的像素是 0xRRGGBBAA**（实测：写 R=0x11 G=0x22 B=0x33 A=0xFF
           // 后 raw=0x112233FF，即 R 在最高字节、A 在最低字节）。
           //
@@ -81,8 +97,9 @@ auto StatsAccumulator::downscale_luma(const st::raster::Canvas& canvas) -> std::
   return out;
 }
 
-auto StatsAccumulator::push(const st::raster::Canvas& canvas, int index, double time_s) -> FrameStats {
-  std::vector<std::uint8_t> luma = downscale_luma(canvas);
+auto StatsAccumulator::push(std::span<const std::uint8_t> rgba, int width, int height, int index,
+                            double time_s) -> FrameStats {
+  std::vector<std::uint8_t> luma = downscale_luma(rgba, width, height);
   FrameStats stats{};
   stats.index = index;
   stats.time_s = time_s;

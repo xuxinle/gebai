@@ -351,6 +351,11 @@
     "gpu_probe": {
       "kind": "executable",
       "sources": ["tools/gpu_probe.cpp"],
+      "//": "软件画布 vs GPU 画布的导出实测（1080p / 无头 / 裁云负载）"
+    },
+    "gpu_vs_cpu_export_probe": {
+      "kind": "executable",
+      "sources": ["tools/gpu_vs_cpu_export_probe.cpp"],
       "exclude_sources": ["src/pkg/*"],
       "//note": "本机 GPU 腿可用性（无头模式下 st doctor 有意不探测 GPU，这里显式探一次）"
     },

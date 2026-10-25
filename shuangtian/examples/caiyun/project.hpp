@@ -200,7 +200,20 @@ struct Project {
   /// `text_port` 为空时文字类内容退化为几何占位块（见 `render_generator`）。
   /// 逐帧导出时传 nullptr 是有意的：导出路径不依赖 UI 线程的字体状态，
   /// 而“少一段文字”比“整帧黑”诊断起来容易得多。
-  void render_frame(Canvas& target, double time,
+  /// ## 参数是 `Surface&` 而不是 `Canvas&`（2026-10-25 GPU 接入）
+  ///
+  /// `Canvas` 是软件光栅器，`gpu::GpuCanvas` 是 D3D11 实现，**两者都实现 `Surface`**。
+  /// 用接口类型就能让同一份渲染代码落到任一实现上，调用方决定用哪条腿。
+  ///
+  /// 实测（`tools/gpu_vs_cpu_export_probe`，1080p / 1600 图元）：
+  /// | | 绘制 | 取像素 | 合计 |
+  /// |---|---|---|---|
+  /// | 软件 | 8.93ms | 17.56ms | **26.49ms** |
+  /// | GPU | 2.56ms | 5.09ms | **7.64ms** |
+  ///
+  /// 且 GPU 画的与软件**逐像素一致**（差>2 的字节 0/8294400，最大差 0），
+  /// 两次独立 GPU 画布也**逐字节相同**——裁云"同帧可复现"的前提成立。
+  void render_frame(st::raster::Surface& target, double time,
                     const st::ui::TextPort* text_port = nullptr) const;
 
   /// —— 素材库（场景的 `image` / `image_card` 靠它解析与解码）——
@@ -219,8 +232,9 @@ struct Project {
 };
 
 /// 一段程序化画面的渲染（纯函数：只依赖 `local_time` 与 `size`）。
-void render_generator(Canvas& target, GeneratorKind kind, double local_time, Color tint,
-                      const std::string& caption, const st::ui::TextPort* text_port);
+void render_generator(st::raster::Surface& target, GeneratorKind kind, double local_time,
+                      Color tint, const std::string& caption,
+                      const st::ui::TextPort* text_port);
 
 /// 时间码格式化（`hh:mm:ss.mmm`）——设计文档 §8 列的"小件"。
 [[nodiscard]] auto format_timecode(double seconds) -> std::string;

@@ -29,6 +29,7 @@
 
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
+#include "st/raster/surface.hpp"
 
 namespace caiyun {
 
@@ -62,7 +63,7 @@ using st::math::Color;
 ///
 /// `strength` 0~1：0 = 不处理（零开销），1 = 最大虚化（约等于 1/6 降采样）。
 /// 返回处理后的新画布（原画布不改）。
-[[nodiscard]] auto depth_of_field(const st::raster::Canvas& source, float strength)
+[[nodiscard]] auto depth_of_field(const st::raster::Surface& source, float strength)
     -> st::raster::Canvas;
 
 /// 粒子场参数（光尘 / 星点 / 浮尘）。
@@ -86,7 +87,7 @@ struct ParticleField {
 /// 画粒子场（在给定画布上叠加）。
 ///
 /// `time` 用于漂移与闪烁；同一 `time` 渲染两次结果完全相同。
-void paint_particles(st::raster::Canvas& target, const ParticleField& field, double time,
+void paint_particles(st::raster::Surface& target, const ParticleField& field, double time,
                      float device_scale);
 
 /// 背景颗粒层：细小微光点，**每帧位置都不同**（但完全确定，无随机）。
@@ -97,7 +98,7 @@ void paint_particles(st::raster::Canvas& target, const ParticleField& field, dou
 /// @param count        颗粒数（建议 200~600；再多就成噪点噪声了）
 /// @param alpha        亮度（建议 0.05~0.2）
 /// @param fps          帧率——时间按帧量化，保证同脚本两次出片逐帧一致
-void paint_grain(st::raster::Canvas& target, int count, float alpha, double time, double fps,
+void paint_grain(st::raster::Surface& target, int count, float alpha, double time, double fps,
                  float device_scale);
 
 /// 光晕参数（镜头光晕 / 体积光 / 屏幕光扫）。
@@ -116,13 +117,13 @@ struct GlowSpec {
 /// 为什么不用真径向渐变：本框架的 `Gradient::linear` 是竖向/线性快速路径，
 /// 径向要逐像素采样（1080p 一次约 25ns/px ≈ 50ms/帧，导出时会拖垮）。
 /// 用 12~16 层同心圆叠出来的径向感在观感上与真径向几乎无差，成本低一到两个数量级。
-void paint_glow(st::raster::Canvas& target, const GlowSpec& spec, float device_scale,
+void paint_glow(st::raster::Surface& target, const GlowSpec& spec, float device_scale,
                 float alpha_mul = 1.0f);
 
 /// 横向光扫（一道亮带扫过画面，发布会转场/强调常用）。
 ///
 /// `progress` 0~1：光带从左扫到右；超出范围时不画（零开销）。
-void paint_light_sweep(st::raster::Canvas& target, float progress, float width_ratio,
+void paint_light_sweep(st::raster::Surface& target, float progress, float width_ratio,
                        Color color, float intensity, float device_scale);
 
 /// **矢量相机**：在绘制期施加的缩放（而非画完再重采样）。
@@ -269,7 +270,7 @@ ZoomCurve zoom_curve{ZoomCurve::Linear};
 ///
 /// 代价是一次全画布重采样（1080p 约 8~12ms/帧）——比逐图元变换贵，
 /// 但换来的是"任何场景都能免费获得运镜"，这个取舍值得。
-[[nodiscard]] auto apply_camera(const st::raster::Canvas& source, const CameraMove& move,
+[[nodiscard]] auto apply_camera(const st::raster::Surface& source, const CameraMove& move,
                                 float progress, double time, float device_scale)
     -> st::raster::Canvas;
 
@@ -302,7 +303,7 @@ ZoomCurve zoom_curve{ZoomCurve::Linear};
 /// 体积光（一束斜向的光柱，像从窗口/舞台打下来）。
 ///
 /// `angle` 是光柱方向（弧度）；用若干条半透明平行四边形叠出"边缘柔和"的效果。
-void paint_god_ray(st::raster::Canvas& target, float origin_x, float origin_y, float angle,
+void paint_god_ray(st::raster::Surface& target, float origin_x, float origin_y, float angle,
                    float width_ratio, float length_ratio, Color color, float intensity,
                    float device_scale);
 

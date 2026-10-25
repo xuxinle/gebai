@@ -37,6 +37,7 @@
 #include "st/math/color.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
+#include "st/raster/surface.hpp"
 
 namespace caiyun {
 
@@ -101,11 +102,11 @@ class AssetLibrary {
 ///
 /// 为何是 cover 而不是 stretch：素材长宽比与目标框几乎不会一致，stretch 会把
 /// 人脸/产品拉变形（一眼假）。cover 裁掉多余部分，视觉上永远"填满且不变形"。
-void blit_cover(st::raster::Canvas& target, const st::raster::Canvas& source,
+void blit_cover(st::raster::Surface& target, const st::raster::Canvas& source,
                 st::math::Rect area, float alpha, float corner_radius);
 
 /// 把 source 按 contain（完整可见、留边）贴进 area。
-void blit_contain(st::raster::Canvas& target, const st::raster::Canvas& source,
+void blit_contain(st::raster::Surface& target, const st::raster::Canvas& source,
                   st::math::Rect area, float alpha);
 
 }  // namespace caiyun

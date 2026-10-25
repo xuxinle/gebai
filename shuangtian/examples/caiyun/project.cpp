@@ -38,7 +38,7 @@ constexpr double kMinClipDuration = 0.1;
 }
 
 /// 色板：四条竖色带 + 一条横向扫描的柔光带（"在动"的可见证据）。
-void render_color_bars(Canvas& canvas, double time, Color tint) {
+void render_color_bars(st::raster::Surface& canvas, double time, Color tint) {
   const float w = static_cast<float>(canvas.physical_width());
   const float h = static_cast<float>(canvas.physical_height());
   const Color palette[] = {Color{232, 88, 88, 255}, Color{240, 196, 96, 255},
@@ -59,7 +59,7 @@ void render_color_bars(Canvas& canvas, double time, Color tint) {
 /// V1 的画面——铺满不透明底会把整条下层轨道盖掉（实测：预览里 V1 完全看不见，
 /// 看起来像“多层合成没生效”）。字幕的职责只是“加一行字”，不是“换一屏”。
 /// 可读性由文字后面的**深色底衬条**保证（那才是该不透明的地方）。
-void render_subtitle(Canvas& canvas, double time, Color tint, const std::string& caption,
+void render_subtitle(st::raster::Surface& canvas, double time, Color tint, const std::string& caption,
                      const st::ui::TextPort* text_port) {
   (void)tint;
   const float w = static_cast<float>(canvas.physical_width());
@@ -90,7 +90,7 @@ void render_subtitle(Canvas& canvas, double time, Color tint, const std::string&
 }
 
 /// 图形运动：三个形状按不同 easing 轨迹移动（各自相位不同，画面"活"）。
-void render_shapes(Canvas& canvas, double time, Color tint) {
+void render_shapes(st::raster::Surface& canvas, double time, Color tint) {
   const float w = static_cast<float>(canvas.physical_width());
   const float h = static_cast<float>(canvas.physical_height());
   canvas.fill_rect(Rect{0.0f, 0.0f, w, h}, Paint::solid(mix(Color{24, 26, 34, 255}, tint, 0.22f)));
@@ -115,7 +115,7 @@ void render_shapes(Canvas& canvas, double time, Color tint) {
 }
 
 /// 测试图：色条 + 网格 + 时码刻度（风格自定，不抄 SMPTE 布局）。
-void render_test_chart(Canvas& canvas, double time, Color tint, const st::ui::TextPort* text_port) {
+void render_test_chart(st::raster::Surface& canvas, double time, Color tint, const st::ui::TextPort* text_port) {
   const float w = static_cast<float>(canvas.physical_width());
   const float h = static_cast<float>(canvas.physical_height());
   canvas.fill_rect(Rect{0.0f, 0.0f, w, h}, Paint::solid(Color{16, 16, 16, 255}));
@@ -385,7 +385,7 @@ auto Project::set_ai_control(bool on) -> bool {
   return true;
 }
 
-void Project::render_frame(Canvas& target, double time, const st::ui::TextPort* text_port) const {
+void Project::render_frame(st::raster::Surface& target, double time, const st::ui::TextPort* text_port) const {
   target.clear(Color{0, 0, 0, 255});
   // 自底向上：轨道 V1（track 0）在下、V2（track 1）在上。
   for (int track = 0; track <= 1; ++track) {
@@ -543,7 +543,7 @@ void Project::render_frame(Canvas& target, double time, const st::ui::TextPort* 
   }
 }
 
-void render_generator(Canvas& target, GeneratorKind kind, double local_time, Color tint,
+void render_generator(st::raster::Surface& target, GeneratorKind kind, double local_time, Color tint,
                       const std::string& caption, const st::ui::TextPort* text_port) {
   switch (kind) {
     case GeneratorKind::ColorBars: render_color_bars(target, local_time, tint); break;
