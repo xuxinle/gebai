@@ -23,10 +23,13 @@
 /// 被测的是"文件的 mtime/size/内容三者组合"。桩掉文件系统就把**被测的那件事**
 /// 本身抽掉了（桩回一个恒等值 → 错实现也判绿，本仓库踩过这种假绿）。
 /// 所以这里用真实文件、真实写入，并且**显式把 mtime 改回原值**来构造那个窗口。
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <format>
 #include <string>
 #include <thread>
+#include <vector>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -186,4 +189,47 @@ ST_TEST(file_content_hash_distinguishes_content) {
   const auto hb2 = st::pkg::file_content_hash(b.path);
   ST_CHECK(hb2.has_value());
   ST_CHECK_EQ(*ha, *hb2);
+}
+
+/// `.d` 解析：**Windows 盘符冒号不能被当成目标/依赖分隔符**。
+///
+/// 这是 2026-10-26 真实事故的回归。原实现里 `if (raw == ':')` 无条件切分，
+/// `C:/Users/...` 的盘符冒号被吃掉 → 依赖路径变 `/Users/...`（读不到）→
+/// `.meta` 第 4 列哈希恒对不上 → **改了源文件不重编，连 `--force` 也治不好**
+/// （重编后又写回同样的坏记录）。
+///
+/// 两个断言缺一不可：
+/// - 第一个依赖（源文件）必须**保留盘符**且能真读到（后半句才是真正有用的判据：
+///   光字符串相等不够，路径得**能用**）；
+/// - 目标行（第一行以 `:` 结尾）里的那个冒号仍必须被正确剔除——
+///   否则修过头会把 `目标:` 整行当成一个依赖混进列表。
+ST_TEST(depfile_parse_preserves_windows_drive_letter) {
+  // 构造两个真实文件，让 `.d` 里写的是实际存在的路径（这样才能断言“读得到”）。
+  TempFile source("dep_source.cpp");
+  source.write("// a\n");
+  TempFile header("dep_header.hpp");
+  header.write("#pragma once\n");
+  TempFile depfile("unit.d");
+
+  // 模拟 GCC 的 `-MMD` 输出：**首行是 `目标:` 后紧跟反斜杠续行**，依赖逐个换行。
+  // 注意反斜杠与换行之间**不能有空格**：GCC 的输出是 `...: \\<LF>`，
+  // 写了空格就变成“反斜杠续行 + 前导空格”，解析器会把空格后的内容当新 token。
+  const std::string target = st::fs::normalize(source.path);
+  const std::string dep1 = st::fs::normalize(source.path);
+  const std::string dep2 = st::fs::normalize(header.path);
+  depfile.write(std::format("{}.tmp: \\\n{} \\\n{}\n", target, dep1, dep2));
+
+  const std::vector<std::string> deps = st::pkg::parse_depfile(depfile.path);
+  // 1) 数量：目标行不算依赖，两个依赖都在
+  ST_CHECK_EQ(deps.size(), 2U);
+  // 2) 关键断言：盘符保留（字符串层面）
+  for (const auto& dep : deps) {
+    ST_CHECK(dep.find(':') == std::string::npos || dep.substr(0, 2) != "/U");
+  }
+  // 3) **更硬的判据**：解析出的路径必须真能读到（这才是增量判定实际要做的事）
+  for (const auto& dep : deps) {
+    ST_CHECK(st::fs::is_regular_file(dep));
+  }
+  // 4) 源文件确实在列表里（不是被盘符损坏后的某个变体）
+  ST_CHECK(std::ranges::find(deps, dep1) != deps.end());
 }

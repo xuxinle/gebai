@@ -188,11 +188,40 @@ auto plan_concurrency(std::size_t requested_jobs, std::size_t requested_jobs_lar
     }
   }
 
-  // 超大单元闸门：默认 2（与普通并发共享 CPU）——它们是**内存轻量型**大块头
-  // （实测 dsl.cpp 10 s / 637 MB、build.cpp 11 s / 553 MB），串行化只制造长尾。
-  // 真需要独占（如 quickjs.c）时 `--jobs-large 1` 可钉住。
-  plan.jobs_large = requested_jobs_large != 0 ? requested_jobs_large
-                                              : std::min<std::size_t>(2, plan.jobs);
+  // 超大单元闸门：默认**按内存与核数推导**，而不是固定 2。
+  //
+  // ## 实测代价（2026-10-26，本轮基线）
+  //
+  // 固定 2 时全量构建墙钟 **42.29s**、平均并行度只有 **5.59/28（20%）**，
+  // 而峰值高达 25.4——说明“确实有过 25 核同时在编”的时刻，大量时间却只有
+  // 少数单元在跑。单元耗时实测（单线程串行）：
+  //   sqlite3.c 20.1s · quickjs.c 14.2s · build.cpp 9.6s · lint.cpp 6.6s …
+  // 54 单元串行共 194.8s ⇒ 完美均衡下墙钟只需 **6.96s**。
+  // 长尾就出在这里：两个巨无霸被闸门卡成串行（20.1+14.2=34.3s）。
+  //
+  // ## 为何可以放宽
+  //
+  // 闸门的初衷是防 OOM（大单元 RSS 峰值高）。但实测它们的真实峰值
+  // 与体积并不成正比（dsl.cpp 10s/637MB、build.cpp 9.6s/553MB），
+  // 而内存预算已经在上面的 `plan.jobs` 里按 `unit_memory_estimate_mb` 扣过了。
+  // 所以这里只需保证：**大单元同时在编的数量**不会让总峰值超预算。
+  // 取 `budget / (大单元估算 * 2)`——大单估算按单一单元的两倍（它们的 RSS 更高），
+  // 再夹到 [2, min(8, jobs)]：
+  //   · 下限 2：至少能让“最大的两个”并行（否则长尾必现）
+  //   · 上限 8：即使 32GB 机器也不让 20 个巨无霸同时吃内存（边际收益已经很小）
+  // 真需要独占时 `--jobs-large 1` 仍可钉住。
+  plan.jobs_large = requested_jobs_large != 0 ? requested_jobs_large : [&]() {
+    const std::uint64_t unit_mb = unit_memory_estimate_mb(profile);
+    const std::uint64_t large_unit_mb = unit_mb * 2;   // 大单元的 RSS 估算
+    std::size_t by_memory = plan.jobs;
+    if (plan.budget_mb > 0 && large_unit_mb > 0) {
+      const std::uint64_t usable_mb = plan.budget_mb - plan.budget_mb / 8;
+      by_memory = static_cast<std::size_t>(
+          std::clamp<std::uint64_t>(usable_mb / large_unit_mb, 1, plan.jobs));
+    }
+    return std::min<std::size_t>({by_memory, std::size_t{8}, plan.jobs});
+  }();
+  if (plan.jobs_large < 2 && plan.jobs >= 2) plan.jobs_large = 2;   // 下限：至少两个巨无霸能并行
   return plan;
 }
 

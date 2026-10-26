@@ -21,6 +21,15 @@ core.[0-9]*
 *.link
 *.log.err
 
+# 构建/测试日志（`st build|test|lint` 每次自动落盘，见 `tools/stpm/cli_log.hpp`）
+# 它们每次运行都会生成，属于**事后查证材料**而不是源码：不入库，但也不要删
+# （用户可能还要回溯）。目录固定 `.st/logs/`，已被上一条 `.st/` 覆盖；
+# 这里显式重复一次是为了让“为什么这些文件不入库”在 gitignore 里可读。
+.st/logs/
+
+# 手工/脚本产生的临时测量输出（重定向到文件是测量纪律，见 docs/BUILD_TEST_PERF.md §0）
+tmp/logs/
+
 # 演进台账（auto_evolve 会话内部工作文件，不进仓库/交付）
 .evolve/
 

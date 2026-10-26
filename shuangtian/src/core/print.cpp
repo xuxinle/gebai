@@ -2,6 +2,8 @@
 
 #include <cstdio>
 
+#include "st/core/console_log.hpp"
+
 namespace st {
 namespace {
 
@@ -15,8 +17,16 @@ void write_all(std::FILE* stream, std::string_view text) noexcept {
 
 }  // namespace
 
-void write_stdout(std::string_view text) noexcept { write_all(stdout, text); }
+void write_stdout(std::string_view text) noexcept {
+  write_all(stdout, text);
+  // 文件镜像（未开启时是空操作）：stdout 与 stderr **共用一个文件**，
+  // 靠 console_log 内部的锁串行化——不依赖调用方的 `2>&1` shell 拼法。
+  console_log::mirror(text);
+}
 
-void write_stderr(std::string_view text) noexcept { write_all(stderr, text); }
+void write_stderr(std::string_view text) noexcept {
+  write_all(stderr, text);
+  console_log::mirror(text);
+}
 
 }  // namespace st

@@ -79,12 +79,37 @@ ST_TEST(concurrency_derives_from_memory_not_cores) {
   const auto plan = st::pkg::plan_concurrency(0, 0, 8192, "san", 28, 28);
   ST_CHECK(plan.jobs < 28);
   ST_CHECK(plan.jobs >= 1);
-  ST_CHECK_EQ(plan.jobs_large, 2U);  // 超大单元默认 2 路（内存轻量型大块头无需完全串行）
+  // 超大单元闸门**按内存推导**（2026-10-26 改动）：不再固定 2。
+  // 旧断言是 `== 2`，而固定 2 把两个巨无霸（sqlite3.c 20.1 s + quickjs.c 14.2 s）
+  // 卡成串行，实测全量构建并行度只有 5.59/28（20%）。新公式：
+  //   usable = 预算 - 预算/8 = 8192 - 1024 = 7168 MiB
+  //   大单元估算 = 单单元 × 2 = 768 × 2 = 1536 MiB（san 档）
+  //   jobs_large = clamp(7168 / 1536, 1, jobs) = 4，再夹到 [2, min(8, jobs)] → **4**
+  ST_CHECK(plan.jobs_large >= 2);            // 下限：至少两个巨无霸能并行
+  ST_CHECK(plan.jobs_large <= std::min<std::size_t>(8, plan.jobs));
+  ST_CHECK_EQ(plan.jobs_large, 4U);          // 8 GiB 预算下的具体值（钉住公式）
   ST_CHECK(plan.reason.find("8192MiB") != std::string::npos);
   // 预算越小，并发越低（单调性）
   const auto tighter = st::pkg::plan_concurrency(0, 0, 2048, "san", 28, 28);
   ST_CHECK(tighter.jobs <= plan.jobs);
   ST_CHECK(tighter.jobs >= 1);
+  // 预算收紧时大单元闸门也跟着收紧（否则窄预算下会同时跑太多大块头）
+  ST_CHECK(tighter.jobs_large <= plan.jobs_large);
+}
+
+// 大单元闸门的关键意图：**内存充裕时不能把它钉在 2**。
+// 这条是逆着旧行为写的（旧行为恒返回 2）——若有人改回固定值，它会变红。
+ST_TEST(large_unit_gate_scales_with_memory) {
+  // 32 GiB、dev 档（512 MiB/单元）：预算远大于两个巨无霸的需求 → 应放宽到上限 8
+  const auto roomy = st::pkg::plan_concurrency(0, 0, 32ULL * 1024ULL, "dev", 28, 28);
+  ST_CHECK_EQ(roomy.jobs_large, 8U);         // 上限：即使内存很大也不无限放大
+  // 预算很紧（4 GiB）时，大单元闸门必须 <= 普通并发，而不是反而更大
+  const auto tight = st::pkg::plan_concurrency(0, 0, 4096, "dev", 28, 28);
+  ST_CHECK(tight.jobs_large >= 2);           // 下限仍为 2
+  ST_CHECK(tight.jobs_large <= tight.jobs);  // 不超普通并发
+  // 只有 1 路并发时大单元闸门不能超过它
+  const auto single = st::pkg::plan_concurrency(1, 0, 0, "dev", 28, 28);
+  ST_CHECK(single.jobs_large <= single.jobs);
 }
 
 // CPU 配额是并发的第二个上界：内存允许再多，超出配额的 worker 只会互相抢 CPU。

@@ -65,8 +65,21 @@ if ($base -like '*clang*') { $CXX_FAMILY = 'clang' }
 Write-Host "[bootstrap] 编译器: $CXX（$CXX_FAMILY）"
 
 $binDir = Join-Path $Root 'build\bin'
-$objDir = Join-Path $Root 'build\obj\bootstrap'
-New-Item -ItemType Directory -Force -Path $binDir, $objDir | Out-Null
+# ## 自举的对象目录必须与 `st build` **完全相同**（2026-10-26 实测，代价 45 单元重编）
+#
+# 这两套曾各写一份：bootstrap 用 `build/obj/bootstrap` + `src_pkg_semver.cpp.o`，
+# 而 `st build` 用 `build/dev/obj` + `C__Users_…_src_pkg_semver.cpp.o`
+#（路径全量归一化后的名字）。后果是**两份缓存互不命中**：
+# 每次 bootstrap 重建 `st` 之后，第一次 `st build` 都报“重编 45 / 命中 8”，
+# 白烧 31.66s —— 而它本可以只重编真正改过的那一两个单元。
+#
+# 对齐口径：目录 `build/<档位>/obj`（档位取自 -Profile），对象名 = `-replace '[:\\/]', '_'`。
+# 注意 `st` 的 `sanitize_name` 只换 `/` `\` `:`，**不转小写**也不做其他归一，
+# 而相对路径已由 `Expand-Pattern` 归一成 `src/pkg/x.cpp` 形式——所以两边名字会一致。
+$objDir = Join-Path $Root "build\$Profile\obj"
+# 与 `st build` 同口径的 PCH 目录（否则 bootstrap 不用 PCH，每次多付 ~4.3s 头解析）
+$pchDir = Join-Path $Root "build\$Profile\pch"
+New-Item -ItemType Directory -Force -Path $binDir, $objDir, $pchDir | Out-Null
 
 # —— 单元集：**从 st.pkg 推导**，与 `st build st` 同一份声明 ——
 #
@@ -142,16 +155,33 @@ if ($null -eq $targetSpec) {
   Write-Error "st.pkg 里没有 targets.st（自举无法推导单元集）"
 }
 $excludePatterns = if ($targetSpec.exclude_sources) { @($targetSpec.exclude_sources) } else { @() }
+$includePatterns = if ($targetSpec.include_sources) { @($targetSpec.include_sources) } else { @() }
 $extraPatterns = if ($targetSpec.sources) { @($targetSpec.sources) } else { @() }
 
 $units = @()
 foreach ($pattern in @($pkg.sources)) { $units += @(Expand-Pattern $Root $pattern) }
+# **白名单优先**（与 `src/pkg/build.cpp` 同口径）：`include_sources` 非空时，
+# 库源只保留与它匹配的那部分，`exclude_sources` 不再参与。
+#
+# 为何两边都必须认：清单新增字段时只改构建驱动、不改自举脚本，症状是
+# **旧 st 无法重建自己**——自举会把整个 `src/**` 编进来（包括需要构建期生成的
+# `battery/embed.hpp` 的 `src/ui`/`src/app`），报 `fatal error: No such file`；
+# 而唯一能修它的办法就是自举（旧 st 又不认识新字段）⇒ 死锁。
+# 实测：2026-10-26 从 `exclude_sources` 换成 `include_sources` 时撞上（
+# 先报的是 `duplicate symbol`：旧 st 按黑名单口径编了全库，
+# 目标源里那条 `window_control.cpp` 又编了一次）。
+if ($includePatterns.Count -gt 0) {
+  $before = $units.Count
+  $units = @($units | Where-Object { $unit = $_; @($includePatterns | Where-Object { Test-GlobMatch $_ $unit }).Count -gt 0 })
+  Write-Host "[bootstrap] 白名单: 库源 $before → $($units.Count) 个（include_sources $($includePatterns.Count) 条）"
+} else {
 foreach ($pattern in $excludePatterns) {
   $before = $units.Count
   $units = @($units | Where-Object { -not (Test-GlobMatch $pattern $_) })
   if ($units.Count -eq $before) {
     Write-Host "[bootstrap] 排除模式未命中任何源文件: $pattern" -ForegroundColor Yellow
   }
+}
 }
 foreach ($pattern in $extraPatterns) { $units += @(Expand-Pattern $Root $pattern) }
 $relUnits = @($units | Sort-Object -Unique)
@@ -179,17 +209,56 @@ $cFlags = $cFlags + $profileFlags
 
 Write-Host "[bootstrap] 编译 $($sources.Count) 个 C++ 单元 + $($thirdPartySources.Count) 个 C 单元（并行 $Jobs，档位 $Profile）"
 $started = Get-Date
-$results = @($relUnits | ForEach-Object -ThrottleLimit $Jobs -Parallel {
-    $rel = $_; $Root = $using:Root; $objDir = $using:objDir; $flags = $using:cxxFlags; $CXX = $using:CXX
-    $src = Join-Path $Root $rel
-    $name = ($rel -replace '[:\\/]', '_')
-    $output = & $CXX @flags '-MMD' '-MF' (Join-Path $objDir ($name + '.d')) '-c' $src ('-o' + (Join-Path $objDir ($name + '.o'))) 2>&1
-    [pscustomobject]@{ source = $src; code = $LASTEXITCODE; output = ($output | Out-String) }
-}) + @($thirdPartySources | ForEach-Object -ThrottleLimit $Jobs -Parallel {
-    $src = $_; $Root = $using:Root; $objDir = $using:objDir; $flags = $using:cFlags; $CXX = $using:CXX
-    $name = ($src.Substring($Root.Length).TrimStart('\', '/') -replace '[:\\/]', '_')
-    $output = & $CXX @flags '-c' $src ('-o' + (Join-Path $objDir ($name + '.o'))) 2>&1
-    [pscustomobject]@{ source = $src; code = $LASTEXITCODE; output = ($output | Out-String) }
+# ## 对象名规则必须与 `st build` 逐字一致
+#
+# `st` 侧：`unit.source` 是**绝对路径**，`sanitize_name()` 把 `/ \\ :` 都换成 `_`，
+# 所以 `C:/…/src/pkg/semver.cpp` → `C__Users_…_src_pkg_semver.cpp.o`。
+# 这里必须用同一份算法（含绝对路径！）：用相对路径会得到 `src_pkg_semver.cpp.o`，
+# 两套名字就又是两份缓存。
+function Get-UnitObjectName([string]$AbsoluteSource) {
+  return ($AbsoluteSource -replace '[:\\/]', '_') + '.o'
+}
+# 预计算（避免在并行区里重复拼字符串）
+$unitPlan = @($relUnits | ForEach-Object {
+  $abs = Join-Path $Root $_
+  [pscustomobject]@{ rel = $_; abs = $abs; obj = (Get-UnitObjectName $abs) }
+})
+$cPlan = @($thirdPartySources | ForEach-Object {
+  [pscustomobject]@{ abs = $_; obj = (Get-UnitObjectName $_) }
+})
+
+# ## PCH：与 `st build` 共用同一个 `.gch`
+#
+# 不自建 PCH 的话，每个单元要重新解析全部标准库头——实测单单元 15.1s（带 PCH）
+# vs 20s+（不带），43 单元累计差一个量级。而 `st build` 已经把 PCH 建在
+# `build/<档位>/pch/prefix.hpp.gch`，这里直接复用。
+#
+# 为何不自建：两边标志必须**完全一致**才能共用（`target_triple`/宏/优化档），
+# 而 bootstrap 的标志集是手写的一份（与 `build_language_flags` 平行）——
+# 自建很容易造出一份标志略异的 `.gch`，后果是编译器**静默忽略**（不报错、只是变慢）。
+# 复用构建器产出的那一份，则两边天然同源。
+$pchHeader = Join-Path $pchDir 'prefix.hpp'
+$pchGch = "$pchHeader.gch"
+if (-not (Test-Path $pchGch)) {
+  Write-Host "[bootstrap] 无可用 PCH（$pchGch）——本次不带 PCH 编译（慢一点）" -ForegroundColor Yellow
+  $pchArgs = @()
+} else {
+  Write-Host "[bootstrap] 复用 PCH：$pchGch"
+  $pchArgs = @('-include', $pchHeader, "-I$pchDir")
+}
+$cxxFlags = $cxxFlags + $pchArgs
+$results = @($unitPlan | ForEach-Object -ThrottleLimit $Jobs -Parallel {
+    $plan = $_; $objDir = $using:objDir; $flags = $using:cxxFlags; $CXX = $using:CXX
+    # 对象名与依赖清单名走**同一份预计算结果**（`Get-UnitObjectName`），
+    # 避免“编到这里用绝对路径名、链接那里用相对路径名”这种两套名字的老问题。
+    $depFile = $plan.obj + '.d'
+    $object = $plan.obj
+    $output = & $CXX @flags '-MMD' '-MF' (Join-Path $objDir $depFile) '-c' $plan.abs ('-o' + (Join-Path $objDir $object)) 2>&1
+    [pscustomobject]@{ source = $plan.abs; code = $LASTEXITCODE; output = ($output | Out-String) }
+}) + @($cPlan | ForEach-Object -ThrottleLimit $Jobs -Parallel {
+    $plan = $_; $objDir = $using:objDir; $flags = $using:cFlags; $CXX = $using:CXX
+    $output = & $CXX @flags '-c' $plan.abs ('-o' + (Join-Path $objDir $plan.obj)) 2>&1
+    [pscustomobject]@{ source = $plan.abs; code = $LASTEXITCODE; output = ($output | Out-String) }
 })
 $failed = @($results | Where-Object { $_.code -ne 0 })
 if ($failed.Count -gt 0) {
@@ -199,12 +268,8 @@ if ($failed.Count -gt 0) {
   }
   Write-Error "$($failed.Count) 个翻译单元编译失败"
 }
-$objects = @($relUnits | ForEach-Object {
-    Join-Path $objDir (($_ -replace '[:\\/]', '_') + '.o')
-}) + @($thirdPartySources | ForEach-Object {
-    $name = ($_.Substring($Root.Length).TrimStart('\', '/') -replace '[:\\/]', '_')
-    Join-Path $objDir ($name + '.o')
-})
+$objects = @($unitPlan | ForEach-Object { Join-Path $objDir $_.obj }) +
+          @($cPlan | ForEach-Object { Join-Path $objDir $_.obj })
 $exe = Join-Path $binDir 'st.exe'
 # 链接库：读仓库根的 link-libs.txt（单一数据源；`st.pkg`/`build.cpp`/两个自举脚本共用）。
 # 历史教训（曾在本文件手写清单，漏过三次：dbghelp×2、secur32×1，每次都是

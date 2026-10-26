@@ -154,6 +154,21 @@ struct BuildStats {
 /// `override_compiler` 非空时直接用它（交叉编译工具链走这条路）。
 [[nodiscard]] auto detect_compiler(std::string_view override_compiler = {}) -> Result<std::string>;
 
+/// 解析 GCC/Clang 的 `.d` 依赖文件（`目标: 依赖…`，反斜杠续行；支持转义空格）。
+///
+/// ## 为何导出它（原本是内部函数）
+///
+/// 它是**增量判定的第二半**：`.d` 吐出依赖路径 → `serialize_deps_meta` 写入 `.meta`
+/// → `deps_entry_matches` 拿这些路径去校验。第一步解析错，后面两步全错，
+/// 而且**症状完全静默**（改了源码不重编 / 头文件改动检测失效）。
+///
+/// 实测事故（2026-10-26）：原实现无条件把 `:` 当分隔符，Windows 盘符 `C:` 被吃掉，
+/// 所有依赖路径变成 `/Users/...`（无盘符）⇒ `tests/pkg_memory_test.cpp` 改了不重编，
+/// **连 `--force` 都治不好**（`.meta` 反复写回同样的坏记录）。
+/// 只有能拿到真实 `.d` 内容直接断言，才能钉住这种“解析层”缺陷——
+/// 跑一遍完整构建看不出来（它只是“不重编”，不报错）。
+[[nodiscard]] auto parse_depfile(std::string_view path) -> std::vector<std::string>;
+
 /// 构建库对象与目标产物（`options.target` 为空时只编译库对象）。
 [[nodiscard]] auto build(const Manifest& manifest, const BuildOptions& options) -> Result<BuildStats>;
 

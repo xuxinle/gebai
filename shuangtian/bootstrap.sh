@@ -93,11 +93,21 @@ if "st" not in (data.get("targets") or {}):
     sys.exit("错误: st.pkg 里没有 targets.st（自举无法推导单元集）")
 # **排除先于并入目标源**：所以"在被排除目录里、但工具确实需要"的单元
 # （如 src/ui/window_control.cpp——shell 后端的窗口边缘命中契约）写在 targets.st.sources 即可。
-for pattern in target.get("exclude_sources", []):
+# **白名单优先**（与 `src/pkg/build.cpp`、`bootstrap.ps1` 同口径）：`include_sources` 非空时，
+# 库源只保留与它匹配的那部分，`exclude_sources` 不再参与。
+# 只改构建驱动、不改自举脚本的症状是**旧 st 无法重建自己**（它会按黑名单口径编全库，
+# 包括需要构建期生成头的 `src/ui`/`src/app`），而唯一能修它的办法就是自举 ⇒ 死锁。
+include_patterns = target.get("include_sources", [])
+if include_patterns:
     before = len(units)
-    units = [u for u in units if not match(pattern, u)]
-    if len(units) == before:
-        print(f"[bootstrap] 排除模式未命中任何源文件: {pattern}", file=sys.stderr)
+    units = [u for u in units if any(match(p, u) for p in include_patterns)]
+    print(f"[bootstrap] 白名单: 库源 {before} → {len(units)} 个（include_sources {len(include_patterns)} 条）", file=sys.stderr)
+else:
+    for pattern in target.get("exclude_sources", []):
+        before = len(units)
+        units = [u for u in units if not match(pattern, u)]
+        if len(units) == before:
+            print(f"[bootstrap] 排除模式未命中任何源文件: {pattern}", file=sys.stderr)
 for pattern in target.get("sources", []):
     units += expand(pattern)
 for unit in sorted(set(units)):

@@ -76,6 +76,21 @@ struct CompileUnit {
 }
 
 /// 解析 GCC/Clang 的 `.d` 文件（`目标: 依赖…`，反斜杠续行；支持转义空格）。
+///
+/// ## ⚠ 冒号的判定必须限在「首个目标行」（2026-10-26 修，Windows 上的静默失效）
+///
+/// 原实现里 `if (raw == ':') { token.clear(); seen_colon = true; }` **无条件触发**，
+/// 而 Windows 路径 `C:/Users/...` 的**盘符冒号**会命中它 —— 于是 `C:` 被当成
+/// “目标/依赖分隔符”被丢掉，路径变成 `/Users/...`。
+///
+/// 后果是**静默且严重**的（实测：改了 `tests/pkg_memory_test.cpp` 而 `.o` 不重编）：
+/// `serialize_deps_meta` 把这个坏路径写进 `.meta`，`deps_entry_matches` 读不到它
+/// ⇒ 每条依赖每次都判“变了”（白重编）或恒判“没变”（漏重编），且**头文件改动检测一并失效**。
+///
+/// 定义在匿名命名空间**之外**：它是头文件里的公开 API（回归测试要直接调——
+/// “解析层”缺陷跑一遍完整构建看不出来，只是“不重编”、不报错）。
+}
+
 [[nodiscard]] auto parse_depfile(std::string_view path) -> std::vector<std::string> {
   auto text = fs::read_text(path);
   if (!text) return {};
@@ -87,7 +102,23 @@ struct CompileUnit {
     if (!token.empty()) deps.push_back(token);
     token.clear();
   };
-  bool seen_colon = false;
+  bool seen_colon = false;   // 已越过“目标:”分隔符
+  // 盘符冒号（`C:`）不能当分隔符。
+  //
+  // GCC 的 `-MMD` 输出形如（行尾反斜杠续行）：
+  //     `<obj>.tmp:` 续行  `<源文件路径>` 续行  `<头文件路径>`
+  // 首行里出现**两个**冒号：盘符 `C:` 与目标分隔符。
+  // 判据：分隔符后面一定跟空白或行尾；盘符冒号后面紧跟路径内容。
+  // （旧实现不分青红蟹一律把冒号当分隔符，靠“顺手把目标行也吞掉”蒙对了个数，
+  //   而代价是**所有依赖路径丢盘符**——那才是真正的缺陷。）
+  // 注释里不写反斜杠+换行：`-Wcomment` 会把行尾的反斜杠当成续行，
+  // 把下一行也卷进注释（编译报 `multi-line comment [-Werror=comment]`）。
+  const auto is_target_separator = [&text](std::size_t at) {
+    const std::size_t next = at + 1;
+    if (next >= text->size()) return true;
+    const char ch = (*text)[next];
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\\';
+  };
   for (std::size_t index = 0; index < text->size(); ++index) {
     const char raw = (*text)[index];
     if (raw == '\\' && index + 1 < text->size()) {
@@ -108,7 +139,9 @@ struct CompileUnit {
       flush();
       continue;
     }
-    if (raw == ':') {
+    // 只在**还没越过目标分隔符**、且该冒号后面是空白/行尾/续行时，才把它当分隔符。
+    // 盘符里的 `C:` 后面是路径字符 → 不是分隔符，照常规进 token。
+    if (raw == ':' && !seen_colon && is_target_separator(index)) {
       token.clear();
       seen_colon = true;
       continue;
@@ -122,6 +155,8 @@ struct CompileUnit {
   flush();
   return deps;
 }
+
+namespace {
 
 /// 有效编译标志的指纹：**含档位标志与 PCH 身份**。
 ///
@@ -1196,9 +1231,42 @@ struct LanguageFlags {
   std::vector<std::string> failed_sources;
   std::atomic<std::size_t> done{0};
 
-  // 超大单元排到最后提交：小单元先跑满并发，大块头收尾时独占闸门
-  std::stable_partition(pending.begin(), pending.end(),
-                        [](const CompileUnit* unit) { return !is_large_unit(unit->source); });
+  // ## 提交顺序：**大的先发**（LPT，Longest Processing Time first）
+  //
+  // 原先写的是 `stable_partition` 把小单元放前、大单元放后，理由写的是
+  // “小单元先跑满并发，大块头收尾时独占闸门”。**那句话的后果正好相反**：
+  // 大块头被挤到队尾，前面 50 个小单元 2s 内跑完，剩下 26 个核只能看
+  // 一两个巨无霸（sqlite3.c 20.1s、quickjs.c 14.2s）单独吃一个核——
+  // 实测平均并行度 5.59/28、全量墙钟 42.29s，而串行总和只 194.8s（÷28 = 6.96s）。
+  //
+  // 正解是经典多机调度结论（LPT）：**按预计耗时降序提交**。大块头一开头就开跑，
+  // 它们的耗时长尾被后续小单元填满；末尾只剩小单元，尾巴短。
+  //
+  // 预计耗时用**源文件字节数**作代理（编译时间与字节数强相关：
+  // 实测 20.1s 的 sqlite3.c 是 8MB 级、9.6s 的 build.cpp 是 108KB）。
+  // 不用真实计时：首轮没有历史，先试编一遍得不偿失。
+  if (pending.size() > 1) {
+    // 预计算大小与「是否大单元」：排序比较器会被调 O(n log n) 次，
+    // 在里现查 file_size / is_large_unit 等于把 syscall 放进排序内循环。
+    struct Rank {
+      const CompileUnit* unit{nullptr};
+      bool large{false};
+      std::uintmax_t bytes{0};
+    };
+    std::vector<Rank> ranked;
+    ranked.reserve(pending.size());
+    for (auto* unit : pending) {
+      const auto bytes = fs::file_size(unit->source).value_or(0);
+      ranked.push_back(Rank{unit, bytes >= kLargeUnitBytes, bytes});
+    }
+    std::stable_sort(ranked.begin(), ranked.end(), [](const Rank& left, const Rank& right) {
+      // 超大单元**恒**排最前：它们既是耗时最长的一批，又受闸门限制
+      // （晚提交 = 晚排队 = 尾巴更长）。同类按体积降序（LPT）。
+      if (left.large != right.large) return left.large;
+      return left.bytes > right.bytes;
+    });
+    for (std::size_t index = 0; index < ranked.size(); ++index) pending[index] = ranked[index].unit;
+  }
 
   for (const auto* unit : pending) {
     pool.submit([&, unit, pch_ptr]() {
@@ -2414,6 +2482,20 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
     std::ranges::sort(target_sources);
     target_sources.erase(std::unique(target_sources.begin(), target_sources.end()),
                          target_sources.end());
+    // ## 路径形态归一：同一文件可能以「相对清单目录」与「绝对路径」两种形态进来
+    //
+    // `expand_glob` 的返回口径是**相对 root**，但清单里也允许写绝对路径
+    // （`src/ui/window_control.cpp` 这类）；框架源那条路则一律是绝对路径。
+    // 两种形态在 `std::unique` 看来是两个不同串，于是**同一文件编两遍**，
+    // 对象名也按不同形态生成（`src_ui_x.cpp.o` 与 `C__…_src_ui_x.cpp.o`），
+    // 链接期报 `duplicate symbol`。
+    //
+    // 实测（2026-10-26）：`st.pkg` 的 `targets.st` 从 `exclude_sources` 换成
+    // `include_sources` 白名单后，`window_control.cpp` 同时出现在库源（白名单命中）
+    // 与目标源（`sources` 显式列出）→ 自举链接失败、且旧 `st` 无法重建自己＝死锁。
+    //
+    // 归一成「相对清单目录、正斜杠」再比——这也是 `include_sources` / `exclude_sources`
+    // 的匹配口径，三者必须一致。
     // ## 去重：`sources` 与 `include_sources` 的交集只能编一次
     //
     // 两者是**两条独立的源收集路径**（`library_sources` 从顶层 sources 来，
@@ -2427,18 +2509,21 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
     // 以 `library_sources` 为准剔除（它们已经代表“顶层口径”）；这样白名单里的文件
     // 若同时写了 `sources` 也不会重复。
     if (!target_sources.empty()) {
-      const auto relative_set = [&manifest](const std::vector<std::string>& paths) {
-        std::vector<std::string> out;
-        out.reserve(paths.size());
-        for (const auto& p : paths) out.push_back(fs::normalize(fs::relative_to(p, manifest.directory)));
-        return out;
-      };
-      const std::vector<std::string> library_relatives = relative_set(library_sources);
+      // 两边都先归一到「相对清单目录 + 正斜杠」，再比集合成员。
+      // 用 `std::set` 而不是 vector+find：单元数上千时这是 O(n²) → O(n log n)，
+      // 而这段在每个 `st build` 都跑。
+      std::set<std::string> library_relatives{};
+      for (const auto& path : library_sources) {
+        library_relatives.insert(fs::normalize(fs::relative_to(path, manifest.directory)));
+      }
+      const auto before_dedupe = target_sources.size();
       std::erase_if(target_sources, [&](const std::string& path) {
-        const std::string relative = fs::normalize(fs::relative_to(path, manifest.directory));
-        return std::find(library_relatives.begin(), library_relatives.end(), relative) !=
-               library_relatives.end();
+        return library_relatives.contains(fs::normalize(fs::relative_to(path, manifest.directory)));
       });
+      if (target_sources.size() != before_dedupe) {
+        ST_LOG_INFO("目标 {}：{} 个源同时出现在库源与 targets.sources，按库源去重", options.target,
+                    before_dedupe - target_sources.size());
+      }
     }
     target_units =
         make_units(effective, target_sources, object_dir, target_third_party, unit_includes);

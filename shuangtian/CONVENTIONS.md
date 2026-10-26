@@ -528,6 +528,8 @@ PowerShell 的 PSReadLine 会画一段**只有显示、不是输入**的内联�
 | L3 | `include/st/core/log.hpp`（`ST_LOG_*`）| 日志开关需在**调用点把参数一起丢掉**：空函数模板里参数仍被求值，字符串字面量照样编进产物（实测裁不掉体积）。与 `test.hpp` 断言宏同一类——只能在调用点展开 | 内置 |
 | L10 | 逐行 `// lint-allow: L10 …` | `Result`/`Value` 的隐式值构造是刻意设计（与 `std::expected` 一致） | 行内 |
 | L8 | `src/core/log.cpp`（日志级别/sink/listener）、`src/test/test_runner.cpp`（测试注册表） | 二者是**进程级基础设施**：日志 sink 与测试注册表按设计全局唯一，注入 Context 无处可注（调用方是整个进程）。已在命名空间开括号前用前置作用域豁免整块登记 | 行内（前置） |
+| L8 | `src/core/console_log.cpp` 的 `state` | 控制台镜像的文件句柄与计数：`st::print` 是**全局输出出口**，调用方是整个进程的每一处 print，同样无 Context 可注 | 行内（前置） |
+| L8 | `tools/stpm/cli_log.cpp` 的 `g_path` / `g_start_ns` | CLI 运行日志的路径与起点：要被**分发层**（`run_app` 的收尾）与**写入方**（`begin`）共享，而它们属于整个 CLI 进程而非某个业务对象（与上面 `st::log` 的 sink 同一类） | 行内（前置） |
 | L8 | `src/raster/platform_d3d11.cpp` 的 `g_live_canvases` | 进程级诊断计数器（跨设备/跨线程的 GPU 画布存活数），已用 `atomic` | 行内 |
 | L8 | `src/ui/dsl.cpp` 的 `active_composers` | State 写在重组之外时靠它定位订阅者，**必须跨 Composer 实例可见**；已加锁并快照遍历（见 A2 修复） | 行内 |
 | L8 | `src/ui/components/code_editor.cpp` 的 `editor_clipboard` | 进程级剪贴板是**刻意的跨实例共享语义**（同一应用内复制到另一处粘贴）；访问点已收敛到单一函数 | 行内 |

@@ -123,13 +123,42 @@ export interface WinShell {
 const PS_ARGS = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]
 
 /** PowerShell 引导段（在用户命令之前）：
- *  - 输出编码切 UTF-8：解释器自身输出与原生命令输出的解码入口（与 decodeOutput 的 UTF-8 优先 + GBK 兜底口径一致）；
- *    无控制台环境下赋值会失败——try/catch 兜底不阻断命令（cmd 分支的 `chcp 65001 && …` 在 chcp 失败时会连命令一起吞掉）；
- *  - `$OutputEncoding`：管道传给原生命令的数据编码（默认 ASCII，中文会丢）；
- *  - `$ProgressPreference`：管道下进度记录会当文本写进 stdout，关掉防污染输出。 */
+ *
+ *  分三层，因为它们是**三条独立的编码通道**（只修一条另两条照样乱码）：
+ *
+ *  ① **控制台输出** `[Console]::OutputEncoding`：原生命令（g++/st.exe/git）打到控制台的字节
+ *     按什么编码解——这是 `decodeOutput` 的 UTF-8 优先口径的前提。
+ *     无控制台环境下赋值会失败——try/catch 兜底不阻断命令（cmd 分支的 `chcp 65001 && …`
+ *     在 chcp 失败时会连命令一起吞掉）。
+ *  ② **管道数据** `$OutputEncoding`：PowerShell 管道传给原生命令 stdin 的数据编码（默认 ASCII）。
+ *  ③ **文件读写** `$PSDefaultParameterValues`：`Get-Content` / `Set-Content` / `Out-File` /
+ *     `Select-String` / `Import-Csv` / `Export-Csv` 的默认 `-Encoding`。
+ *     **这一条与 ①② 完全无关**——实测（Windows 11 + PowerShell 5.1，2026-10-26）：
+ *     只设 ①② 时 `Get-Content` 读一个合法的 UTF-8 文件仍然得到
+ *     `鏋勫缓瀹屾垚`（UTF-8 字节被按 ANSI 代码页解码）；设了 ③ 之后同一命令得到
+ *     `构建完成`。pwsh 7 默认是 UTF-8 所以看不出来，**win10/11 自带的
+ *     Windows PowerShell 5.1 是 ANSI**——它恰恰是没装 pwsh 的机器上的回落路径。
+ *     代价实测：读 `st` 的构建日志（UTF-8）得到乱码，于是“日志里到底报了什么错”
+ *     完全读不出来——而查日志正是它的唯一用途。
+ *  ④ `$ProgressPreference`：管道下进度记录会当文本写进 stdout，关掉防污染输出。
+ *
+ *  为什么用 `$PSDefaultParameterValues` 而不是给每条命令加 `-Encoding utf8`：
+ *  用户敲的是任意命令串（`Get-Content a.log; Select-String -Path b.log`），
+ *  我们无法给他每一条都补参数；默认参数表是**唯一能覆盖未写参数调用的机制**。
+ *  它是会话级的，`-Command` 跑完即终止，不污染宿主。
+ *
+ *  ⚠ **值只能写字符串 `'utf8'`，不能写 `[Text.UTF8Encoding]::new($false)`**：
+ *  PS 5.1 的 `Out-File -Encoding` 是 `ValidateSet(unknown,string,unicode,…,utf8,…)`
+ *  ——传对象会**绑定失败并静默回落到默认 UTF-16**（实测写出 `ff fe` 开头）。
+ *  代价是 PS 5.1 下 `'utf8'` 会**带 BOM**（`ef bb bf`），而 pwsh 7 下 `'utf8'` 无 BOM。
+ *  两者取了“编码对”而不是“无 BOM”：读侧（`st::fs::read_text`）已剥 BOM，
+ *  而乱码是不可接受的（前者只是丑一拍，后者是根本读不出来）。 */
 const PS_PREAMBLE = [
   "try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }",
+  "try { [Console]::InputEncoding = [Text.Encoding]::UTF8 } catch { }",
   "$OutputEncoding = [Text.Encoding]::UTF8",
+  // ③ 文件读写默认 UTF-8（PS 5.1 默认 ANSI，与 ①② 无关的另一条通道）
+  "foreach ($__p in 'Get-Content','Set-Content','Add-Content','Out-File','Select-String','Import-Csv','Export-Csv') { $PSDefaultParameterValues[\"${__p}:Encoding\"] = 'utf8' }",
   "$ProgressPreference = 'SilentlyContinue'",
 ].join("\n")
 

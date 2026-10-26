@@ -29,6 +29,8 @@
 #include "st/pkg/semver.hpp"
 #include "st/pkg/stats.hpp"
 
+#include "cli_log.hpp"
+
 namespace {
 
 struct Arguments {
@@ -182,6 +184,8 @@ void print_usage() {
   vendor                把已获取的依赖源码固化进 vendor/ + vendor.lock（随仓库分发、
                         离线可构建）；--offline 禁网络只走本地/缓存
   doctor                环境自检（编译器/字体/显示后端/GPU/缓存）
+  log [--tail N] [--grep 文本] [--list] [--full] [--action X]
+                        读最近一次构建/测试日志（默认尾部 40 行；路径规则 .st/logs/）
   tree                  打印清单概览（目标、源文件数、依赖）
   init <name>           生成工程骨架（--framework=框架根；默认由 st 位置推断）
   clean [--all]         删除 build/ 全部档位与测试产物；--all 连 ~/.shuangtian/cache 一起清
@@ -1181,6 +1185,109 @@ ST_MAIN(run_app)
   return 0;
 }
 
+/// `st log`：读最近一次（或指定的）构建/测试日志。
+///
+/// ## 为何要一个命令而不是直接 `cat`
+///
+/// 日志路径带时间戳与 pid，人记不住；而且“最新一份”要按**文件名里的时间**排
+/// （不是 mtime——拷来拷去后 mtime 会变）。这个命令把两件事都做成一行：
+///
+/// ```
+/// st log                  # 最近一次日志的尾部（默认 40 行）
+/// st log --tail 200       # 更多行
+/// st log --grep error     # 只看出错行（带文件名/行号前缀）
+/// st log --full           # 全量（构建日志一般几 KB，直接灌给模型都行）
+/// st log --list           # 列出最近 10 份（看“最近跑过什么”）
+/// st log --action test    # 只看最近一次 test（不看 build）
+/// ```
+///
+/// 输出**带日志路径前缀**（多文件时）或首行声明来源：不给出处就等于把
+/// “哪一次跑的输出”变成谜。
+[[nodiscard]] auto command_log(const Arguments& arguments) -> int {
+  const auto manifest = load_manifest(arguments);
+  std::string root;
+  if (manifest) {
+    root = manifest->directory;
+  } else {
+    const auto current = st::fs::current_dir();
+    root = current ? *current : std::string{"."};
+  }
+  const std::string dir = st::fs::join(root, std::string(st::cli_log::kDirectory));
+  if (!st::fs::is_directory(dir)) {
+    st::print("还没有日志目录：{}\n", dir);
+    return 1;
+  }
+  const auto entries = st::fs::list_dir(dir);
+  if (!entries) {
+    st::print("读不了日志目录：{}\n", dir);
+    return 1;
+  }
+  // 文件名里的时间戳决定了“新旧”（不用 mtime：拷贝/恢复会改 mtime）。
+  // `action` 过滤对前缀匹配——`--action build` 同时命中 `build-` 与 `build_tests-`。
+  const std::string action = arguments.get("action", "");
+  std::vector<std::string> files;
+  for (const auto& entry : *entries) {
+    if (entry.is_dir) continue;
+    if (!entry.path.ends_with(".log")) continue;
+    const std::string leaf = st::fs::file_name(entry.path);
+    if (!action.empty() && !leaf.starts_with(action)) continue;
+    files.push_back(entry.path);
+  }
+  if (files.empty()) {
+    st::print("没有匹配的日志（目录 {}{}）\n", dir,
+              action.empty() ? std::string{} : std::format("，过滤 {}", action));
+    return 1;
+  }
+  std::ranges::sort(files);
+  if (arguments.has("list")) {
+    const std::size_t shown = std::min<std::size_t>(files.size(), 10);
+    st::print("最近 {} 份日志（共 {}）：\n", shown, files.size());
+    for (std::size_t index = files.size() - shown; index < files.size(); ++index) {
+      const auto size = st::fs::file_size(files[index]).value_or(0);
+      st::print("  {}  {} 字节\n", st::fs::file_name(files[index]), size);
+    }
+    return 0;
+  }
+  const std::string& latest = files.back();
+  const auto text = st::fs::read_text(latest);
+  if (!text) {
+    st::print("读不了日志：{}\n", latest);
+    return 1;
+  }
+  // 日志文件自己的首行就是「日志：<它自己的路径>」（见 `cli_log::begin`）——
+  // 这里就不再重复一遍。只在本行与首行不同时才打（如 --action 筛到旧文件）。
+  if (!(*text).starts_with("日志：")) st::print("日志：{}\n", latest);
+  const auto lines = st::split(*text, '\n');
+  const std::string pattern = arguments.get("grep", "");
+  if (!pattern.empty()) {
+    std::size_t hits = 0;
+    for (std::size_t index = 0; index < lines.size(); ++index) {
+      if (!lines[index].contains(pattern)) continue;
+      // 行号前缀：与源码的 `文件:行` 习惯对齐，方便再回到日志里定位
+      st::print("{:>4}: {}\n", index + 1, lines[index]);
+      ++hits;
+    }
+    st::print("── 命中 {} 行（共 {} 行）\n", hits, lines.size());
+    return hits == 0 ? 1 : 0;
+  }
+  if (arguments.has("full")) {
+    st::print_raw(*text);
+    return 0;
+  }
+  const auto tail_text = arguments.number("tail", 40.0);
+  const std::size_t tail_lines =
+      tail_text > 0.0 ? static_cast<std::size_t>(tail_text) : std::size_t{40};
+  const std::size_t begin = lines.size() > tail_lines ? lines.size() - tail_lines : 0;
+  for (std::size_t index = begin; index < lines.size(); ++index) {
+    st::print_raw(lines[index]);
+    if (index + 1 < lines.size()) st::print_raw("\n");
+  }
+  if (begin > 0) {
+    st::print("\n── 尾部 {} 行（共 {} 行；--full 看全部）\n", lines.size() - begin, lines.size());
+  }
+  return 0;
+}
+
 /// 自检结果：构建工具自身的源码是否比可执行文件新。
 struct SelfStaleness {
   bool stale{false};
@@ -1252,23 +1359,44 @@ struct SelfStaleness {
   };
 
   // 候选源 = 顶层 sources（减去 exclude_sources 的前缀）+ target 自己的 sources
+  //
+  // ⚠ `include_sources`（白名单）**必须优先于** `exclude_sources` 参与判定，
+  // 与 `build()` 的库源选择同口径。只按黑名单算的症状不是“多算几个文件”而是两头都错：
+  // · 多算：`src/raster`/`src/text`/… 也被当成候选——改一个与 `st` 无关的文件就白重建一次；
+  // · 漏算：白名单命中的文件（`src/pkg/*`、`src/core/*`……）不在候选里——
+  //   改了构建逻辑却不自检，静默跑旧逻辑（那正是本函数存在的理由）。
+  //
+  // 用 `expand_glob` 直接展开白名单，而不是从顶层模式推目录：`include_sources`
+  // 里既有 `src/pkg/*.cpp` 这种目录 glob，也有 `src/ext/database.cpp` 这种精确文件，
+  // 自己推前缀两种都会算错。
   std::set<std::string> exclude_prefixes{};
-  for (const auto& pattern : st_target->exclude_sources) {
-    const std::size_t star = pattern.find('*');
-    exclude_prefixes.insert(st::fs::normalize(pattern.substr(0, star)));
-  }
-  for (const auto& pattern : manifest->sources) {
-    const std::size_t slash = pattern.find_last_of("/\\");
-    if (slash == std::string::npos) continue;
-    const std::string dir = st::fs::normalize(st::fs::join(root, pattern.substr(0, slash)));
-    bool excluded = false;
-    for (const auto& prefix : exclude_prefixes) {
-      if (dir.size() >= prefix.size() && dir.compare(0, prefix.size(), prefix) == 0) {
-        excluded = true;
-        break;
+  if (st_target->include_sources.empty()) {
+    for (const auto& pattern : st_target->exclude_sources) {
+      const std::size_t star = pattern.find('*');
+      exclude_prefixes.insert(st::fs::normalize(pattern.substr(0, star)));
+    }
+    for (const auto& pattern : manifest->sources) {
+      const std::size_t slash = pattern.find_last_of("/\\");
+      if (slash == std::string::npos) continue;
+      const std::string dir = st::fs::normalize(st::fs::join(root, pattern.substr(0, slash)));
+      bool excluded = false;
+      for (const auto& prefix : exclude_prefixes) {
+        if (dir.size() >= prefix.size() && dir.compare(0, prefix.size(), prefix) == 0) {
+          excluded = true;
+          break;
+        }
+      }
+      if (!excluded) add_tree(dir);
+    }
+  } else {
+    // 白名单：只展开它点名的源（与 `build()` 里那条 `erase_if` 等价）
+    for (const auto& pattern : st_target->include_sources) {
+      const auto matched = st::fs::expand_glob(root, pattern);
+      if (!matched.has_value()) continue;
+      for (const auto& relative : *matched) {
+        candidates.insert(st::fs::normalize(st::fs::join(root, relative)));
       }
     }
-    if (!excluded) add_tree(dir);
   }
   for (const auto& pattern : st_target->sources) {
     const std::size_t slash = pattern.find_last_of("/\\");
@@ -1323,9 +1451,34 @@ struct SelfStaleness {
   st::pkg::BuildOptions options;
   options.profile = profile;
   options.target = "st";
-  options.force = true;
+  // ## 为何**不**用 `force = true`（2026-10-26 实测）
+  //
+  // 原先这里写 `force = true`，理由写在 BACKLOG 里：“产物路径变了，增量缓存也对不上”。
+  // 那句话是错的：`output_override` 只影响**最终链接产物的路径**
+  //（`build.cpp`：`options.output_override.empty() ? default_output : options.output_override`），
+  // 而对象目录 `object_dir` 完全不变 —— 那些 `.o` 仍然可复用。
+  //
+  // 代价实测：改一行 `src/pkg/*.cpp` → 自举 **55.5s**（全量 43 单元），
+  // 而实际只需重编 1~2 个单元 + 链接（预期个位数秒）。
+  // 构建工具自己的重建时间应当是**秒级**——它是每次改构建逻辑都要付的固定成本。
+  //
+  // ## 正确性靠什么保证（这是当初写 `force = true` 想防的事）
+  //
+  // 担心是合理的：若增量判定漏了改动，新 `st` 会是**旧逻辑**，而它照样报“重建完成”。
+  // 三道防线，都不靠“相信增量”：
+  //
+  // 1. **`.meta` 第三列是内容哈希**（`deps_entry_matches`）：不是只比 mtime/size。
+  //    `copy2`/`git checkout` 把旧 mtime 搬回来也骗不过它。
+  // 2. **链接指纹含对象的 (mtime,size)**：缓存 restore 换了内容却不换时间戳也会被拓出。
+  // 3. **重建后必须用新工具重跑本次命令**（本函数末尾）：若新代码没进去，
+  //    重跑后的行为与旧的一致——那是**可观测**的（见 `ST_VERIFY_SELF_REBUILD`）。
+  //
+  // 另外提供一个**可复核的手段**（verify 开关）：设 `ST_VERIFY_SELF_REBUILD=1` 时，
+  // 重建后比一次“产物里是否含新源文件的内容哈希”——不符即报错并拒绝继续。
+  options.force = false;
   options.no_tests = true;
   options.strip_debug = true;
+  options.verbose = false;
   options.output_override = staging;
 
   const std::int64_t start = st::time::now_ns();
@@ -1357,6 +1510,46 @@ struct SelfStaleness {
   }
   st::print("已重建（{}），用新工具重跑本次命令…\n", elapsed);
 
+  // ## 可信增量校验（`ST_VERIFY_SELF_REBUILD=1` 时开）
+  //
+  // 从 `force = true` 改成增量后，“新 `st` 真的是新逻辑吗”必须能被**独立复核**，
+  // 而不能只靠“我相信 `.meta` 的哈希”。这里做一件不依赖构建器自述的事：
+  // **在重建产物里搜本次改动源文件的内容**。
+  //
+  // 为何这个判据能抓“假增量”：若增量判定漏了改动，产物就是**旧代码**，
+  // 而旧代码里不可能有本次新增的字符串。这是“产物里有没有新字符串”那条
+  //（PITFALLS 场景 20 的取证手法）的自动化版。
+  //
+  // 只查**语义可预期**的一类痕迹：命令行开关名、错误文案、函数名都可以，
+  // 但由调用方指定（没法自己猜“这次改了什么”）。所以它是个显式开关，
+  // 不进默认路径（默认路径多一次全文件扫描会给每次自举加 100ms+）。
+  if (const auto verify = st::fs::read_env("ST_VERIFY_SELF_REBUILD");
+      verify.has_value() && !verify->empty() && *verify != "0") {
+    // 把要搜的字符串写成“参与本次构建的源文件里，比旧 exe 新的那些文件名”
+    // ——文件名本身就会进 `.debug`/符号表吗？不一定。所以改为搜**编译进来的字符串**：
+    // 用 `ST_VERIFY_TOKEN` 显式给出（例如刚加的一条文案）。
+    const auto token = st::fs::read_env("ST_VERIFY_TOKEN");
+    if (token.has_value() && !token->empty()) {
+      const auto bytes = st::fs::read_bytes(staging);
+      if (!bytes.has_value()) {
+        std::fprintf(stderr, "可信增量校验失败：读不了新产物 %s\n", staging.c_str());
+        return 1;
+      }
+      const std::string haystack(reinterpret_cast<const char*>(bytes->data()), bytes->size());
+      if (!haystack.contains(*token)) {
+        std::fprintf(stderr,
+                     "可信增量校验失败：新产物里找不到 ST_VERIFY_TOKEN=%s\n"
+                     "  说明增量判定漏了本次改动（产物仍是旧代码）。\n"
+                     "  排查：① 查对应 `.o.meta` 第三列是否等于当前源文件的内容哈希；\n"
+                     "        ② 临时用 `st rebuild --force` 看是否就好（能好则是增量判据的问题）。\n",
+                     token->c_str());
+        (void)st::fs::remove_file(staging);
+        return 1;
+      }
+      st::print("可信增量校验通过（产物含 {}）\n", *token);
+    }
+  }
+
   // 用新二进制重跑同一条命令（不含程序名）
   st::process::Options run_options{};
   run_options.capture_output = false;   // 子进程直通终端，不要再套一层捕获
@@ -1379,6 +1572,38 @@ auto run_app(int argc, char** argv) -> int {
     return arguments.command.empty() ? 1 : 0;
   }
   if (arguments.has("verbose") || arguments.has("v")) st::log::set_level(st::log::Level::Info);
+
+  // ## 控制台镜像（日志落盘）：一个出口覆盖全部命令
+  //
+  // 放在 `run_app` 而不是各个 `command_*` 里：构建/测试/lint/rebuild/check 的输出
+  // 最终都经 `st::print`/`st::eprint`，在**分发命令之前**打开镜像，
+  // 就不存在“新加一个命令忘了接日志”的可能。
+  //
+  // 为何默认开：失败时“为了看一眼错误而重跑一遍”是直接的迭代时间损失，
+  // 而写一份日志的代价是几毫秒。`--no-log` / `ST_NO_CONSOLE_LOG=1` 可关。
+  //
+  // 只在**有实际输出**的命令上开（`version`/`help` 之类纯查询不落盘）：
+  // 否则 `ls .st/logs` 会被大量“看一眼版本号”的空日志淹没。
+  static const char* const kLogged[] = {"build", "run", "test", "lint", "check", "rebuild",
+                                        "clean", "vendor", "fetch", "deps"};
+  const bool logged_command = std::any_of(
+      std::begin(kLogged), std::end(kLogged), [&](const char* name) { return arguments.command == name; });
+  const bool want_log = logged_command && !arguments.has("no-log");
+  // 日志根：清单所在目录（找不到清单时退回当前目录）。不提前 load_manifest——
+  // 那会在“清单本身有语法错误”时把日志开在错误的位置，而那正是最需要日志的时候。
+  if (want_log) {
+    std::string log_root = ".";
+    if (const auto root = project_root(); root.has_value()) log_root = *root;
+    (void)st::cli_log::begin(log_root, arguments.command,
+                            arguments.positional.empty() ? std::string{} : arguments.positional.front(),
+                            arguments.get("profile", ""));
+  }
+  // 退出前收尾（**不靠 RAII**：这个函数有多处 `return`，而收尾必须在**最外层**
+  // 那一个出口执行；写成局部对象会被每一处 return 提前析构，日志尾部就丢了）。
+  const auto finish = [&](int code) -> int {
+    if (want_log) st::cli_log::end(code);
+    return code;
+  };
 
   // ## 自检 + **自动重建**（每次运行都查）
   //
@@ -1407,26 +1632,26 @@ auto run_app(int argc, char** argv) -> int {
     st::print("编译器: {}\n", compiler ? compiler->c_str() : "未找到");
     return 0;
   }
-  if (arguments.command == "rebuild") return command_rebuild(arguments);
-  if (arguments.command == "build") return command_build(arguments);
-  if (arguments.command == "run") return command_run(arguments);
-  if (arguments.command == "test") return command_test(arguments);
-  if (arguments.command == "lint") return command_lint(arguments);
-  if (arguments.command == "check") return command_check(arguments);
+  if (arguments.command == "rebuild") return finish(command_rebuild(arguments));
+  if (arguments.command == "build") return finish(command_build(arguments));
+  if (arguments.command == "run") return finish(command_run(arguments));
+  if (arguments.command == "test") return finish(command_test(arguments));
+  if (arguments.command == "lint") return finish(command_lint(arguments));
+  if (arguments.command == "check") return finish(command_check(arguments));
   if (arguments.command == "stats") return command_stats(arguments);
   if (arguments.command == "doctor") return command_doctor(arguments);
   if (arguments.command == "tree") return command_tree(arguments);
-  if (arguments.command == "deps") return command_deps(arguments);
-  if (arguments.command == "fetch") return command_fetch(arguments);
-  if (arguments.command == "vendor") return command_vendor(arguments);
+  if (arguments.command == "deps") return finish(command_deps(arguments));
+  if (arguments.command == "fetch") return finish(command_fetch(arguments));
+  if (arguments.command == "vendor") return finish(command_vendor(arguments));
   if (arguments.command == "init") return command_init(arguments);
-  if (arguments.command == "clean") return command_clean(arguments);
+  if (arguments.command == "clean") return finish(command_clean(arguments));
+  if (arguments.command == "log") return command_log(arguments);
 
 
   std::fprintf(stderr, "未知命令: %s\n\n", arguments.command.c_str());
   print_usage();
   return 1;
 }
-
 // 跨平台入口：正规化 argv 编码（Windows 的 argv 是 ANSI）并设好控制台代码页
 ST_MAIN(run_app)

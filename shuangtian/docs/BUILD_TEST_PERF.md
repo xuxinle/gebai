@@ -195,6 +195,9 @@ Visual Studio 上（要它的头、库、CRT），而本框架在 Windows 上的
 
 ## 6. 复现命令
 
+> **迭代速度（改一行 → 看到结果）的基线、四类改动与口径**见 `docs/ITERATION_SPEED.md`。
+> 那份记的是日志落盘、自举增量、并行度、UTF-8，与本文件的编译器对比/分片调参互补。
+
 ```powershell
 # 基线（必须重定向到文件，否则终端重绘会污染数字）
 cmd /c "build\dev\bin\st.exe build > tmp\b.txt 2>&1"

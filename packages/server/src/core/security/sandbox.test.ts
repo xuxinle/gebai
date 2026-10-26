@@ -180,6 +180,30 @@ describe("Windows 命令解释器（PowerShell）", () => {
     expect(lines[lines.indexOf("echo hi") + 1]).toBe("if ($?) { exit 0 }")
   })
 
+  // UTF-8 引导段是**四条独立通道**，每条都要单独钉住——只测一条会让另三条静默退化。
+  // 实测（2026-10-26）：只设 ①② 时 `Get-Content` 读 UTF-8 文件仍得到 `鏋勫缓瀹屾垚`
+  // （UTF-8 字节被按 ANSI 代码页解码），而查日志正是它的唯一用途。
+  test("wrapPowerShellCommand：UTF-8 引导段覆盖四条独立通道（输出/输入/管道/文件）", () => {
+    const wrapped = wrapPowerShellCommand("echo hi")
+    // ① 控制台输出编码（原生命令 stdout 的解码入口）
+    expect(wrapped).toContain("[Console]::OutputEncoding = [Text.Encoding]::UTF8")
+    // ② 控制台输入编码（交互/管道 stdin）
+    expect(wrapped).toContain("[Console]::InputEncoding = [Text.Encoding]::UTF8")
+    // ③ 管道给原生命令的数据编码（默认 ASCII，中文会丢）
+    expect(wrapped).toContain("$OutputEncoding = [Text.Encoding]::UTF8")
+    // ④ 文件读写默认编码：这一条与 ①②③ **毫无关系**（PS 5.1 的 Get-Content
+    //    默认是 ANSI 代码页），必须走 $PSDefaultParameterValues 才能覆盖未写 -Encoding 的调用
+    expect(wrapped).toContain("$PSDefaultParameterValues[")
+    for (const cmd of ["Get-Content", "Set-Content", "Add-Content", "Out-File", "Select-String", "Import-Csv", "Export-Csv"]) {
+      expect(wrapped).toContain(`'${cmd}'`)
+    }
+    // ⚠ 值**只能**是字符串 `'utf8'`：PS 5.1 的 Out-File -Encoding 是 ValidateSet，
+    // 传 [Text.UTF8Encoding]::new($false) 对象会绑定失败并**静默回落到 UTF-16**
+    // （实测写出 `ff fe` 开头）。这一条是对那个坑的钉子。
+    expect(wrapped).toContain("= 'utf8'")
+    expect(wrapped).not.toContain("UTF8Encoding]::new")
+  })
+
   test("winShellPlan：PowerShell 形态以 -Command 承载包装后的完整命令；cmd 回落返回 null", () => {
     try {
       // 不存在的解释器名：which 探测不命中即原样使用（形态判定不依赖 PATH 内容）
@@ -239,6 +263,72 @@ describe("Windows 命令解释器（PowerShell）", () => {
     expect(ok.code).toBe(0)
     expect(ok.stdout).toContain("中文 ok")
   })
+
+  // 端到端：**真实进程读真实 UTF-8 文件**。
+  //
+  // 为何单靠「preamble 里有那行」不够：它只能证明“写了”，证明不了“生效”。
+  // 实测（2026-10-26）就有一层没想到的差异：`[Console]::OutputEncoding` 与
+  // `Get-Content` 的默认编码是**两条独立通道**——前者设了，后者照样按 ANSI 代码页读，
+  // 于是 UTF-8 日志被读成 `鏋勫缓瀹屾垚`（构建通过/失败完全看不出来）。
+  //
+  // ⚠ **必须同时覆盖 Windows PowerShell 5.1**：`resolveWinShell` 优先 pwsh 7，
+  // 而 pwsh 7 的默认编码本来就是 UTF-8——只测它会恒绿，把缺陷（只在 5.1 上现形）
+  // 完全掩住。而 5.1 恰恰是没装 pwsh 的机器上的回落路径，即**大多数用户**。
+  // ⚠ **必须同时覆盖 Windows PowerShell 5.1 与 pwsh 7**：两者默认编码不同
+  // （5.1 = ANSI 代码页，7 = UTF-8），只测一条就会把另一条上的缺陷完全掩住。
+  //
+  // 为何不只用 `resolveWinShell().file`：它优先 pwsh，而 `which("pwsh.exe")` 对
+  // Microsoft Store 版（WindowsApps 的 App Execution Alias）返回 null —— 那台机器上
+  // 它就落到 5.1 了。所以这里**按可执行名各自探测**，两条都跑。
+  const candidates: Array<[string, string | null]> = [
+    ["Windows PowerShell 5.1", which("powershell.exe")],
+    ["pwsh 7", which("pwsh") ?? which("pwsh.exe")],
+  ]
+  const seen = new Set<string>()
+  const runs: Array<[string, string]> = []
+  for (const [label, file] of candidates) {
+    if (!file || seen.has(file)) continue
+    seen.add(file)
+    runs.push([label, file])
+  }
+  for (const [label, shellFile] of runs) {
+    test(`真实执行（${label}）：Get-Content 读 UTF-8 文件不乱码、Out-File 写的是 UTF-8`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), "gebai-utf8-read-"))
+      try {
+        const file = join(dir, "utf8.txt")
+        const expected = "构建完成 [dev] 单元 53（重编 53 / 命中缓存 0）"
+        writeFileSync(file, `${expected}\n`, "utf8")
+        const runShell = async (command: string) => {
+          const child = spawn(
+            shellFile,
+            ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", wrapPowerShellCommand(command)],
+            { stdio: ["pipe", "pipe", "pipe"] },
+          )
+          const stdout: Buffer[] = []
+          child.stdout.on("data", (d) => stdout.push(Buffer.isBuffer(d) ? d : Buffer.from(d)))
+          const code = await new Promise<number>((res) => child.on("close", (c) => res(c ?? 1)))
+          return { text: decodeOutput(Buffer.concat(stdout)), code }
+        }
+        const quote = (s: string) => `'${s.replace(/'/g, "''")}'`
+        // ① 读：默认 -Encoding 必须已是 UTF-8（不传 -Encoding）
+        const read = await runShell(`Get-Content -LiteralPath ${quote(file)} -TotalCount 1`)
+        expect(read.code).toBe(0)
+        expect(read.text.includes("\uFFFD")).toBe(false)
+        expect(read.text.replace(/\r?\n/g, "")).toBe(expected)
+        // ② 写：必须是 **UTF-8**（PS 5.1 的 `'utf8'` 带 BOM、pwsh 7 不带——两者都接受；
+        //    不可接受的是 UTF-16，那是“设了参数却绑定失败”的静默回落症状）
+        const written = join(dir, "written.txt")
+        await runShell(`${quote(expected)} | Out-File -LiteralPath ${quote(written)}`)
+        const bytes = readFileSync(written)
+        expect(bytes[0] === 0xff && bytes[1] === 0xfe).toBe(false) // 不是 UTF-16LE
+        expect(bytes[0] === 0xfe && bytes[1] === 0xff).toBe(false) // 不是 UTF-16BE
+        // UTF-8 字节序列（可带可不带 BOM）：解码后必须逐字相等
+        expect(bytes.toString("utf8").replace(/^\uFEFF/, "").replace(/\r?\n/g, "")).toBe(expected)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  }
 })
 
 describe("POSIX 命令解释器（bash）", () => {
