@@ -19,6 +19,9 @@
 #include <algorithm>
 #include <cstdlib>
 #include <format>
+#include <mutex>
+#include <stop_token>
+#include <thread>
 #include <utility>
 
 #include "st/core/channel.hpp"

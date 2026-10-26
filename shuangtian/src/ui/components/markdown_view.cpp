@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <format>
+#include <stop_token>
 #include <string>
 #include <thread>
 #include <utility>

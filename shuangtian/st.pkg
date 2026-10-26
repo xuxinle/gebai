@@ -1,4 +1,4 @@
-{
+﻿{
   "name": "shuangtian",
   "version": "0.1.0",
   "kind": "static_library",
@@ -87,6 +87,14 @@
     }
   },
   "targets": {
+    "st_core": { "kind": "library",
+                 "include_sources": ["src/core/*.cpp", "src/codec/*.cpp", "src/math/*.cpp",
+                                     "src/net/*.cpp", "src/xml/*.cpp", "src/test/*.cpp",
+                                     "src/edit/*.cpp"],
+                 "//include_sources": "**通用层**：这七个模块的 .cpp 实测**不（传递地）触及 `st/ui/` 或 `st/raster/`**（逐个模块做头文件传递闭包算出来的），所以可以单独成库给非 GUI 程序用。改这几个模块以外的代码不会触发本库重建。",
+                 "inherit_project_embed": false,
+                 "//inherit_project_embed": "工程级 embed 是 UI 的 `script_api.js`/`declarative.js`——通用库不该带它们（实测 `ar t` 里能看到 `ui_declarative_js.cpp.o` 混进来）。",
+                 "system_libs": ["dl"] },
     "st": { "kind": "executable",
             "sources": ["tools/stpm/*.cpp", "src/ui/window_control.cpp"],
             "include_sources": ["src/pkg/*.cpp",

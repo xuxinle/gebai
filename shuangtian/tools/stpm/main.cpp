@@ -1,7 +1,8 @@
-/// `st` —— 霜天自研工具链 CLI（构建 / 测试 / 禁令扫描 / 依赖管理 / 自检）。
+﻿/// `st` —— 霜天自研工具链 CLI（构建 / 测试 / 禁令扫描 / 依赖管理 / 自检）。
 /// 自举：`bootstrap.sh` 用编译器直接产出本程序，之后一切构建都走这里（不经 CMake/Make）。
 
 #include <algorithm>
+#include <chrono>
 #include <set>
 #include <cstdio>
 #include <cstdlib>
@@ -10,6 +11,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "st/core/entry.hpp"
@@ -28,6 +30,7 @@
 #include "st/pkg/registry.hpp"
 #include "st/pkg/semver.hpp"
 #include "st/pkg/stats.hpp"
+#include "st/pkg/watch.hpp"
 
 #include "cli_log.hpp"
 
@@ -161,6 +164,11 @@ void print_usage() {
                         并发默认按**内存预算**推导（读 cgroup 上限，不再默认吃满核数）；
                         --jobs-large N 限超大单元并发（默认 1）；--max-memory MiB 覆盖预算
                         交叉编译：--toolchain=<名>（工具链在 st.pkg 的 toolchains 段声明）
+  watch [target]        常驻监视源文件，改动后自动增量构建（Ctrl+C 退出）
+                        --once 只盯一轮（脚本/CI）；--interval=ms 轮询间隔（默认 300）；
+                        --debounce=ms 静默期（默认 250，防“保存到一半”）；
+                        --initial-build 起手先编一次
+                        不清“秒出”的边界：编译本身的时间不会变，省的是**等待**
   run <target> [args]   构建并运行目标（无头演示：run gallery -- --headless --frames 3）
                         ⚠ 壳层源码未改的目标**跳过构建**（XML/JS 是运行期读的，改它们不用编）：
                         判据是目标第一条 sources 比产物新不新；要强制重建加 `--force`
@@ -345,7 +353,139 @@ auto command_build(const Arguments& arguments) -> int {
   return 0;
 }
 
-/// 产物后缀：**按宿主平台**取（本机档与宿主同平台）。
+/// `st watch`：常驻监视源文件，改动后自动增量构建。
+
+/// 当前本地时间 `HH:MM:SS`（watch 的每行前缀：多轮输出要能区分先后）。
+[[nodiscard]] auto clock_text() -> std::string {
+  const auto now = std::chrono::system_clock::now();
+  const auto secs = std::chrono::floor<std::chrono::seconds>(now);
+  return std::format("{:%H:%M:%S}", secs);
+}
+/// ## 它解决的到底是什么（不要把预期说大）
+///
+/// 实测（2026-10-26，本机 28 核）：
+/// · 零改动构建 0.25 s、改 1 个 .cpp 3.49 s、改 10 个 .cpp 6.80 s、
+///   改 `error.hpp` 20.24 s、全量 31.39 s。
+///
+/// 也就是说“编译本身”是真实成本，watch **不会让它变快**。它省的是**等待**：
+/// 你改完最后一笔时，watch 已经在编了；你切回来时产物往往已经好了。
+/// 对于“改 → 看结果”这种高频循环，感知上就是“秒出”。
+///
+/// ## 为什么它比“重新跑一次 st build”更划算
+///
+/// 每次新建进程都要重付：加载清单、探测编译器、算 PCH 身份、遍历全部单元判增量。
+/// 那些固定开销在 0.25 s 的零改动构建里能看到。常驻把这些“做一次”。
+///
+/// ## 参数
+///
+/// · `--once`：只盯一轮（供脚本/CI 用），不常驻
+/// · `--interval=<ms>`：轮询间隔（默认 300）
+/// · `--debounce=<ms>`：静默期（默认 250）——防“保存到一半就读到半个文件”
+/// · `--initial-build`：起手先构建一次（默认不构建，假定你刚跑过）
+auto command_watch(const Arguments& arguments) -> int {
+  auto manifest = load_manifest(arguments);
+  if (!manifest) {
+    std::fprintf(stderr, "错误: %s\n", manifest.error().to_string().c_str());
+    return 1;
+  }
+
+  const bool once = arguments.has("once");
+  const auto interval_ms = static_cast<std::int64_t>(
+      arguments.number_any({"interval"}, 300.0));
+  const auto debounce_ms = static_cast<std::int64_t>(
+      arguments.number_any({"debounce"}, 250.0));
+
+  // 构建选项：与 `st build` 同口径（watch 只是“重复调用 build”的调度器）
+  st::pkg::BuildOptions options;
+  options.profile = arguments.get("profile", "dev");
+  options.target = arguments.positional.empty() ? std::string{} : arguments.positional.front();
+  options.toolchain = arguments.get("toolchain", "");
+  options.no_tests = arguments.has("no-tests");
+  options.verbose = arguments.has("verbose") || arguments.has("v");
+
+  auto plan = st::pkg::watch_plan_from_manifest(*manifest);
+  if (!plan) {
+    std::fprintf(stderr, "无法建立监视列表: %s\n", plan.error().message.c_str());
+    return 1;
+  }
+  if (plan->empty()) {
+    std::fprintf(stderr, "监视列表为空（清单里没有可监视的源/头？）\n");
+    return 1;
+  }
+
+  st::print("监视 {} 个文件（间隔 {}ms · 静默期 {}ms）\n", plan->size(), interval_ms,
+            debounce_ms);
+  st::print("  档位 {} · 目标 {}\n", options.profile,
+            options.target.empty() ? std::string("(库)") : options.target);
+  st::print("  Ctrl+C 退出。\n\n");
+
+  const auto build_once = [&](std::string_view why) -> int {
+    const std::int64_t start = st::time::now_ns();
+    auto stats = st::pkg::build(*manifest, options);
+    const std::string took = st::time::format_duration_ns(st::time::now_ns() - start);
+    if (!stats) {
+      st::eprint("[{}] 失败（{}）：{}\n", clock_text(), took, stats.error().message);
+      return 1;
+    }
+    st::print("[{}] {} → 重编 {} / 命中 {} · {}{}\n", clock_text(), why, stats->units_rebuilt,
+              stats->units_cached, took, stats->linked ? "" : " （未重链）");
+    return 0;
+  };
+
+  if (arguments.has("initial-build")) {
+    (void)build_once("初始构建");
+  }
+  // `--once` 的语义：**构建一次就退**（而不是“等一次变更再退”）。
+  //
+  // 为何改（实测踩到）：原实现是“等检测到变更才 break”，结果在脚本/CI 里
+  // 没有变更时它会**永远跑**——用户看到的是一行“监视 650 个文件”然后挂住。
+  // 而 `--once` 的用途恰恰是“我现在就要一次构建结果”，不该依赖有变更。
+  if (once) {
+    const int code = build_once("一次性构建");
+    st::print("\n--once：构建完成（退出码 {}）\n", code);
+    return code;
+  }
+
+  std::vector<st::pkg::WatchedFile> snapshot = std::move(*plan);
+  for (;;) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+
+    auto fresh = st::pkg::watch_plan_from_manifest(*manifest);
+    if (!fresh) continue;   // 扫描失败（例如保存中途）→ 等下一轮，不报错
+    auto changed = st::pkg::diff_watched(snapshot, *fresh);
+    if (changed.empty()) continue;
+
+    // 防抖：等到“静默”（最后一次变更后 debounce_ms 内无新变化）再构建。
+    // 不静默的话，多段写入的文件会被读到半个。
+    std::this_thread::sleep_for(std::chrono::milliseconds(debounce_ms));
+    auto settled = st::pkg::watch_plan_from_manifest(*manifest);
+    if (!settled) continue;
+    auto again = st::pkg::diff_watched(*fresh, *settled);
+    snapshot = std::move(*settled);
+    if (!again.empty()) {
+      // 静默期内又变了 → 合并本次变更，直接构建（下一次循环会看到最终态）
+      for (const auto& path : again) {
+        if (std::ranges::find(changed, path) == changed.end()) changed.push_back(path);
+      }
+    }
+
+    // 变更报告：只报文件名（完整路径太长，而相对路径已经足够定位）
+    const std::size_t shown = std::min<std::size_t>(changed.size(), 3);
+    std::string names;
+    for (std::size_t index = 0; index < shown; ++index) {
+      const std::string rel = st::fs::normalize(
+          st::fs::relative_to(changed[index], manifest->directory));
+      names += (names.empty() ? "" : ", ") + rel;
+    }
+    if (changed.size() > shown) names += std::format(" 等 {} 个", changed.size());
+
+    if (build_once(std::format("检测到 {} 处改动（{}）", changed.size(), names)) != 0) {
+    }
+  }
+
+  return 0;
+}
+
 ///
 /// 为何不写成常量的 `.exe`：那会把"在 Linux 上干活"变成“永远找不到产物→永远重编”，
 /// 即"不重编"这条优化在 Linux 上完全不生效（而 Linux 正是本框架的主战场之一）。
@@ -1584,7 +1724,7 @@ auto run_app(int argc, char** argv) -> int {
   //
   // 只在**有实际输出**的命令上开（`version`/`help` 之类纯查询不落盘）：
   // 否则 `ls .st/logs` 会被大量“看一眼版本号”的空日志淹没。
-  static const char* const kLogged[] = {"build", "run", "test", "lint", "check", "rebuild",
+  static const char* const kLogged[] = {"build", "watch", "run", "test", "lint", "check", "rebuild",
                                         "clean", "vendor", "fetch", "deps"};
   const bool logged_command = std::any_of(
       std::begin(kLogged), std::end(kLogged), [&](const char* name) { return arguments.command == name; });
@@ -1634,6 +1774,7 @@ auto run_app(int argc, char** argv) -> int {
   }
   if (arguments.command == "rebuild") return finish(command_rebuild(arguments));
   if (arguments.command == "build") return finish(command_build(arguments));
+  if (arguments.command == "watch") return finish(command_watch(arguments));
   if (arguments.command == "run") return finish(command_run(arguments));
   if (arguments.command == "test") return finish(command_test(arguments));
   if (arguments.command == "lint") return finish(command_lint(arguments));

@@ -13,6 +13,7 @@
 #include <set>
 #include <format>
 #include <mutex>
+#include <thread>
 #include <unordered_set>
 
 #include "st/core/fs.hpp"
@@ -1622,6 +1623,18 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
   return object_path;
 }
 
+/// 产物后缀：可执行文件按目标平台（Windows 必须 `.exe`，否则系统不认为它是
+/// 可执行程序）；静态库一律 `.a`。
+///
+/// 为何库不用 `toolchain.executable_suffix`：那是 **exe** 后缀（Windows 为 `.exe`），
+/// 而归档必须叫 `.a`——它是 GNU 格式的静态库，与 MSVC 的 `.lib` 不兼容。
+/// 用 `.exe` 给库命名会让链接器把它当成可执行文件处理。
+[[nodiscard]] auto artifact_suffix(const TargetSpec& target, const ResolvedToolchain& toolchain)
+    -> std::string {
+  if (target.kind == "library") return ".a";
+  return toolchain.executable_suffix;
+}
+
 [[nodiscard]] auto link(const Manifest& manifest, const BuildOptions& options,
                         const std::vector<CompileUnit>& units, const std::string& output,
                         const std::vector<std::string>& profile_flags_list,
@@ -1631,6 +1644,61 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
     return unexpected(ErrorCode::Unsupported, "未解析出链接器（见 resolve_toolchain）");
   }
   if (auto status = fs::ensure_parent(output); !status) return forward_error(status.error());
+
+  // 目标声明（库分支与 Windows GUI/图标都要用，所以在函数入口就找到）
+  const TargetSpec* link_target = nullptr;
+  if (!options.target.empty()) {
+    // `targets` 是 **vector**（保持清单声明顺序，便于确定性输出）——线性找。
+    for (const auto& candidate : manifest.targets) {
+      if (candidate.name == options.target) {
+        link_target = &candidate;
+        break;
+      }
+    }
+  }
+
+  // ## 静态库分支：不走编译器驱动，走 `ar`
+  //
+  // `kind = "library"` 的产物是静态库（`.a`），而 `g++ ... -o x.a` 会当成
+  // “链接一个叫 x.a 的可执行文件”——产物是 PE/ELF 可执行，不是归档。
+  // 静态库必须用 `ar rcs`。
+  //
+  // 为何 `ar` 也从编译器路径推：交叉工具链的 `ar` 与宿主的 `ar` 目标格式不同
+  // （mingw 的 `ar` 能写 PE 归档，宿主 GNU ar 也行，但 MSVC 风格目标不行）。
+  // 取编译器同目录下的 `ar`（`g++` 旁边那个），找不到再回退 PATH。
+  if (link_target != nullptr && link_target->kind == "library") {
+    std::string archiver;
+    if (const auto sibling = fs::join(fs::parent(toolchain.compiler_path), "ar");
+        fs::is_regular_file(sibling + toolchain.executable_suffix)) {
+      archiver = sibling + toolchain.executable_suffix;
+    } else if (const auto found = process::which("ar"); found.has_value()) {
+      archiver = *found;
+    } else {
+      return unexpected(ErrorCode::NotFound,
+                        "未找到静态库归档工具 `ar`（静态库目标需要它；"
+                        "请安装 binutils，或确认它与 C++ 编译器在同一目录）");
+    }
+    if (units.empty()) {
+      return unexpected(ErrorCode::Invalid,
+                        std::format("静态库目标 {} 没有任何对象文件（检查 sources/白名单）",
+                                    link_target->name));
+    }
+    // 先删旧库：`ar rcs` 是**追加/更新**语义，不先删会把已移除源文件的旧成员留在库里
+    // ——与“链接跳过”那个缺陷同一类（删源后产物仍带旧代码）。
+    (void)fs::remove_file(output);
+    std::vector<std::string> ar_args{"rcs"};
+    ar_args.push_back(output);
+    for (const auto& unit : units) ar_args.push_back(unit.object);
+    auto archived = process::run(archiver, ar_args,
+                                 process::Options{.cwd = manifest.directory, .env = toolchain.env});
+    if (!archived) return forward_error(archived.error());
+    if (archived->exit_code != 0) {
+      return unexpected(ErrorCode::Invalid,
+                        std::format("静态库归档失败: {}\n{}{}", output, archived->stdout_text,
+                                    archived->stderr_text));
+    }
+    return output;
+  }
 
   const std::vector<std::string> libraries = resolve_system_libraries(manifest, toolchain);
 
@@ -1700,16 +1768,6 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
   // 所以现有 `main()` 在 GUI 子系统下照常工作。
   // （反例：很多项目为转 GUI 手写一层 `WinMain` 转发——多一套入口就多一处
   //   不一致的可能，而这里根本不需要。）
-  const TargetSpec* link_target = nullptr;
-  if (!options.target.empty()) {
-    // `targets` 是 **vector**（保持清单声明顺序，便于确定性输出）——线性找。
-    for (const auto& candidate : manifest.targets) {
-      if (candidate.name == options.target) {
-        link_target = &candidate;
-        break;
-      }
-    }
-  }
   if (toolchain.platform == "windows" && link_target != nullptr &&
       link_target->system == "gui") {
     args.emplace_back("-mwindows");
@@ -1731,6 +1789,46 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
   // `tail` = `-o 产物` + 库 + 工具链附加旗标（**库必须在对象之后**，链接器单趟解析）。
   tail.push_back("-o");
   tail.push_back(output);
+  // ## 先链本工程内的库目标（`libraries` 字段）
+  //
+  // 必须排在系统库**之前**：静态库的链接顺序是单趟解析——若 `-lst` 排在
+  // `-lstdc++` 后面，st 里用到的 libstdc++ 符号可能在那时还没被引入。
+  // 路径用 `-L<目录> -l<名字>`（而不是直写 `.a` 路径）：
+  // · 与系统库同一语义，链接器自己选静态/动态；
+  // · 带 `-L` 后名字与产物文件名解耦（将来产物改版不用动命令）。
+  if (link_target != nullptr && !link_target->libraries.empty()) {
+    std::vector<std::string> lib_dirs;
+    for (const auto& lib_name : link_target->libraries) {
+      const TargetSpec* dep = nullptr;
+      for (const auto& candidate : manifest.targets) {
+        if (candidate.name == lib_name) {
+          dep = &candidate;
+          break;
+        }
+      }
+      if (dep == nullptr) {
+        return unexpected(ErrorCode::Invalid,
+                          std::format("目标 {} 声明了 libraries 里的 '{}'，但清单里没有这个目标",
+                                      link_target->name, lib_name));
+      }
+      if (dep->kind != "library") {
+        // 只报不阻：允许引用可执行目标在语义上没意义（`.exe` 不能当库链），
+        // 但用错的人应当看到一句明确的话，而不是链接器抛一堆 undefined reference。
+        return unexpected(ErrorCode::Invalid,
+                          std::format("目标 {} 的 libraries 里的 '{}' 是 {} 而不是 library",
+                                      link_target->name, lib_name, dep->kind));
+      }
+      // 直接给**库文件完整路径**，不用 `-L` + `-l`。
+      //
+      // 为何不用 `-L`：实测 lld 在这个位置对 `-L` 的处理不可靠（`-L` 与 `-l`
+      // 顺序变了就找不到，而手工命令行同样的顺序却能找到——差异在驱动拼参数的方式）。
+      // 直写路径没有歧义：链接器拿到什么就链什么，不依赖搜索路径语义。
+      // 代价是库改名/改名位置时要同步改命令——而这是构建器自己算的，不是人写的。
+      const std::string lib_file = fs::join(fs::parent(output), lib_name + ".a");
+      tail.push_back(lib_file);
+      (void)dep;
+    }
+  }
   const auto link_arguments = link_library_arguments(toolchain.platform, libraries);
   for (const auto& item : link_arguments) tail.push_back(item);
   for (const auto& flag : toolchain.extra_flags) tail.push_back(flag);
@@ -2259,6 +2357,8 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   const std::string object_dir = fs::join(root, std::format("build/{}/obj", subdir));
   const std::string bin_dir = fs::join(
       root, std::format("build/{}/bin", profile_directory(options.profile, *toolchain)));
+  // 嵌入产物目录（`<root>/build/<档位>/embed_lib`）：识别“哪些单元是嵌入生成的”。
+  const std::string build_dir = fs::join(root, std::format("build/{}", subdir));
   if (auto status = fs::create_directories(object_dir); !status) return forward_error(status.error());
   if (auto status = fs::create_directories(bin_dir); !status) return forward_error(status.error());
 
@@ -2438,9 +2538,51 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   }
 
   const TargetSpec* target = manifest.find_target(options.target);
-  if (target == nullptr) {
-    return unexpected(ErrorCode::NotFound, std::format("目标不存在: {}", options.target));
+if (target == nullptr) {
+  return unexpected(ErrorCode::NotFound, std::format("目标不存在: {}", options.target));
+}
+
+// ## 先递归构建本目标依赖的库目标
+//
+// 为何必须在编译本目标**之前**：链接期需要 `.a` 存在，而 `-l` 只告诉链接器去哪找。
+// 若等到链接才发现库没建，就得到一句 `cannot find -lst`——看不出“该先建库”。
+//
+// 递归而不是单层：库也可能依赖另一个库（核心库 / 扩展库）。`visited` 防环
+// （A 依赖 B、B 依赖 A 是清单错误，但不应造成栈溢出）。
+{
+  std::set<std::string> visiting{};
+  const auto build_libraries_of = [&](const TargetSpec& spec, auto&& self) -> Status {
+    for (const auto& lib_name : spec.libraries) {
+      const TargetSpec* dep = manifest.find_target(lib_name);
+      if (dep == nullptr) {
+        return unexpected(ErrorCode::Invalid,
+                          std::format("目标 {} 的 libraries 里 '{}' 不存在", spec.name, lib_name));
+      }
+      if (dep->kind != "library") {
+        return unexpected(ErrorCode::Invalid,
+                          std::format("目标 {} 的 libraries 里 '{}' 是 {}，只能是 library",
+                                      spec.name, lib_name, dep->kind));
+      }
+      if (!visiting.insert(lib_name).second) {
+        return unexpected(ErrorCode::Invalid,
+                          std::format("目标依赖成环：{} → {}", spec.name, lib_name));
+      }
+      if (auto nested = self(*dep, self); !nested) return nested;
+      // 子目标构建（把 target/output_override 改到库上，其余选项不变）
+      BuildOptions lib_options = options;
+      lib_options.target = lib_name;
+      lib_options.output_override.clear();   // 库产物路径由它自己算
+      auto lib_stats = build(manifest, lib_options);
+      if (!lib_stats) return forward_error(lib_stats.error());
+      visiting.erase(lib_name);
+    }
+    return {};
+  };
+  if (auto ready = build_libraries_of(*target, build_libraries_of); !ready) {
+    return forward_error(ready.error());
   }
+}
+
   std::vector<CompileUnit> target_units;
   if (!target->sources.empty() || !target->embed.empty()) {
     std::vector<std::string> target_sources;
@@ -2448,6 +2590,26 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
       auto matches = fs::expand_glob(manifest.directory, pattern);
       if (!matches) return forward_error(matches.error());
       for (const auto& item : *matches) target_sources.push_back(item);
+    }
+    // ## `inherit_project_embed = false`：把工程级嵌入从本目标里剔出去
+    //
+    // 工程级 `embed`（如本仓的 `src/ui/script_api.js`）原本会**无条件**并入每个目标；
+    // 于是 `st_core`（通用库）里会多出 UI 的 JS 字节数组——声明是“不依赖 UI 的通用层”，
+    // 实现里却带着 UI 的产物。实测：`ar t st_core.a` 里能看到 `ui_declarative_js.cpp.o`。
+    //
+    // 做法：库级嵌入的生成源已经进了 `library_sources`（所有目标共享），这里把它们
+    // 从 `target_sources` 里剔除。判据是“路径在 `library_includes` 里且不是第三方源码”
+    // ——`attach_embeds` 给每个生成源都登记了包含目录，正好可用作标记。
+    if (target->inherit_project_embed.has_value() && !*target->inherit_project_embed) {
+      const std::string embed_marker = fs::normalize(fs::join(build_dir, "embed_lib"));
+      const auto before = target_sources.size();
+      std::erase_if(target_sources, [&](const std::string& path) {
+        return fs::normalize(path).starts_with(embed_marker);
+      });
+      if (target_sources.size() != before) {
+        ST_LOG_INFO("目标 {}：不继承工程级嵌入，已剔除 {} 个生成的嵌入单元", target->name,
+                    before - target_sources.size());
+      }
     }
     // 编译期嵌入：生成字节数组与声明头，并把它们纳入本目标的编译单元。
     // 生成的源与上游运行时都按"第三方"对待（`-w`、不插桩）——它们不是本工程的手写代码。
@@ -2540,13 +2702,39 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
     stats.units_cached = stats.units_total - stats.units_rebuilt;
   }
 
-  // 产物后缀按目标平台：Windows 必须是 `.exe`（否则系统不认为它是可执行程序）
+  // 产物后缀：Windows 可执行文件必须 `.exe`（否则系统不认为它是可执行程序）；
+  // 静态库一律 `.a`（GCC 风格驱动 + `ar` 归档；与 MSVC 的 `.lib` 不兼容）。
   const std::string default_output =
-      fs::join(bin_dir, target->name + toolchain->executable_suffix);
+      fs::join(bin_dir, target->name + artifact_suffix(*target, *toolchain));
   const std::string output =
       options.output_override.empty() ? default_output : options.output_override;
   std::vector<CompileUnit> link_units = units;
   link_units.insert(link_units.end(), target_units.begin(), target_units.end());
+  // ## `inherit_project_embed = false`：把工程级嵌入的**对象**从链接集合里剔除
+  //
+  // 光在 `target_sources` 上剔除不够：工程级嵌入的生成源已经进了 `library_sources`
+  // （→ `units`），那是**所有目标共享**的库级源。所以要在最终的 `link_units`
+  // （库级 + 目标级）上再按 `library_includes` 剔除一次。
+  //
+  // 实测（2026-10-26）：只改 `target_sources` 时，`ar t st_core.a` 里仍有两个嵌入成员
+  // （`ui_declarative_js.cpp.o` / `ui_script_api_js.cpp.o`）——库声明是“不依赖 UI 的通用层”，
+  // 产物里却带着 UI 的 JS 字节数组。
+  if (target->inherit_project_embed.has_value() && !*target->inherit_project_embed) {
+    // 剔除判据：路径在**嵌入产物目录**下（`build/<档位>/embed_lib/`）。
+    //
+    // ⚠ 不能用 `library_includes.contains(source)`：那个表登记的是**所有**库级单元的
+    // 包含目录（包括普通源），用它剔除会把整个库剔空（实测：44 个成员→剩 5 个，且只剩第三方）。
+    // 嵌入产物的路径特征是统一的：`attach_embeds` 把它们放在 `build/<subdir>/embed_lib/` 下。
+    const std::string embed_marker = fs::normalize(fs::join(build_dir, "embed_lib"));
+    const auto before = link_units.size();
+    std::erase_if(link_units, [&](const CompileUnit& unit) {
+      return fs::normalize(unit.source).starts_with(embed_marker);
+    });
+    if (link_units.size() != before) {
+      ST_LOG_INFO("目标 {}：不继承工程级嵌入，链接集合剔除 {} 个嵌入单元", target->name,
+                  before - link_units.size());
+    }
+  }
 
   // 链接跳过：0 个单元重编 + 产物已存在且比全部目标文件新 → 不重链（无改动构建近乎瞬时）
   //
@@ -2606,11 +2794,14 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   const std::int64_t link_start = time::now_ns();
   auto linked = link(manifest, options, link_units, output, *flags, *toolchain, {});
   if (!linked) return forward_error(linked.error());
-  if (options.strip_debug) {
+  if (options.strip_debug && target->kind != "library") {
     // 分离调试信息（默认；`--no-strip` 关）。失败**不算构建失败**——产物已经能跑，
     // 只是胖了点（分离是交付体验项，不是正确性项）。
+    // 静态库不分离：`objcopy --only-keep-debug` 对归档是逐成员的，语义与“产出一份
+    // 独立 .debug”不同（会把每个 .o 各搞一遍），而库的调试信息本来就由使用方
+    // 链接后再分离。
     if (auto stripped = separate_debug_info(output, toolchain->compiler_path,
-                                           toolchain->executable_suffix, options.verbose);
+                                            toolchain->executable_suffix, options.verbose);
         !stripped) {
       ST_LOG_WARN("分离调试信息失败（产物仍可用，仅体积偏大）：{}", stripped.error().message);
     }

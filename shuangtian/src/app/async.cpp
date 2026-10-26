@@ -3,6 +3,9 @@
 #include "st/app/async.hpp"
 
 #include <algorithm>
+#include <mutex>
+#include <stop_token>
+#include <thread>
 #include <utility>
 
 namespace st::app {

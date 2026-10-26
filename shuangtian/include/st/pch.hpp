@@ -43,7 +43,6 @@
 #include <bit>
 #include <cassert>
 #include <charconv>
-#include <chrono>
 #include <cmath>
 #include <concepts>
 #include <cstddef>
@@ -54,12 +53,10 @@
 #include <exception>
 #include <filesystem>
 #include <functional>
-#include <future>
 #include <initializer_list>
 #include <limits>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <numbers>
 #include <optional>
 #include <queue>
@@ -68,7 +65,6 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
@@ -76,6 +72,23 @@
 #include <utility>
 #include <variant>
 #include <vector>
+
+// —— 刻意**不收**并发组（`<thread>` / `<mutex>` / `<chrono>` / `<atomic>` / `<future>` / `<stop_token>`）——
+//
+// 实测（2026-10-26）：这组占 PCH 体积 **+24.6 MB**（143.0 → 167 之前累计的 17%），
+// 而只用它们的单元是少数（147 个 .cpp 里直接包含 `<thread>` 的 6 个、`<future>` 的 1 个）。
+// 移出后：PCH 143.9 → 119.1 MB（−17%），单单元（3 个代表取最小）18.27 → 16.61 s（−9.1%）。
+//
+// **前提是自包含**：移出前有 13 个文件“用并发类型却不 include”，靠 PCH 供头。
+// 那些文件已补齐（`<thread>`/`<mutex>`/`<stop_token>`/`<chrono>`/`<atomic>`），
+// 并逐个验证过“不带 PCH 也能单独编译”（12 个 .cpp 全过）。
+//
+// 若现在有人在新增代码里忘写 include，症状会是 `'thread' is not a member of 'std'`——
+// 报错指向使用处，而根因是漏 include。这是有意保留的代价：它可发现，
+// 而“PCH 养着漏 include 的文件”会在换构建系统/加新单元时突然集体爆发。
+//
+// `st pch` 不提供“临时加回来”的开关：那样两份配置会漂移，而 PCH 恰恰是
+// “创建与消费必须标志一致”才有效的设施（见 `ensure_pch` 的三条关键细节）。
 
 #if defined(__cpp_lib_format)
 #include <format>

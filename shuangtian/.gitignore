@@ -57,3 +57,11 @@ examples/cefu/cefu.db
 examples/caiyun/mtfilm/qa/*.mp4
 examples/caiyun/mtfilm/qa/*.png
 examples/caiyun/mtfilm/qa/*.log
+
+# 逆向验证脚本的备份文件（`tools/*_reverse_verify*` 与临时脚本会产生）：
+# 它们是“回退前的源码快照”，只在验证过程中存在。若不忽略，
+# 一次 `git add -A` 就会把整份源文件当成新文件提交（实测发生过：3 个 `.revert-bak`）。
+*.revert-bak
+*.rv-bak
+*.revert-backup
+*.rv-bak.*

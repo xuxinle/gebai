@@ -2,9 +2,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <format>
+#include <mutex>
+#include <stop_token>
+#include <thread>
 #include <utility>
 
 #include "st/core/fs.hpp"

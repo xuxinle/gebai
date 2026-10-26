@@ -1,6 +1,7 @@
 #include "st/core/time.hpp"
 
 #include <array>
+#include <chrono>
 #include <ctime>
 
 namespace st::time {

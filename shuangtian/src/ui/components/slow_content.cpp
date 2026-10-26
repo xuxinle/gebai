@@ -1,9 +1,14 @@
 #include "st/ui/components/slow_content.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <format>
 #include <future>
+#include <mutex>
+#include <stop_token>
+#include <thread>
 #include <utility>
 
 #include "st/raster/paint.hpp"

@@ -46,11 +46,23 @@ inline constexpr std::array<std::string_view, 22> known_keys{
   TargetSpec target;
   target.name = name;
   target.kind = json_get_string(json, "kind", "executable");
+  // kind 必须显式合法：拼错（如 "lib" / "static-library"）不能静默当 executable——
+  // 那会得到一个名叫 `xxx` 的可执行文件，而清单里写的是“库”，排查时看不出。
+  if (target.kind != "executable" && target.kind != "library") {
+    return unexpected(ErrorCode::Parse,
+                      std::format("目标 {} 的 kind 非法：{}（只能是 executable 或 library）", name,
+                                  target.kind));
+  }
   target.sources = json_get_string_array(json, "sources");
   target.flags = json_get_string_array(json, "flags");
   target.exclude_sources = json_get_string_array(json, "exclude_sources");
   target.include_sources = json_get_string_array(json, "include_sources");
   target.embed = json_get_string_array(json, "embed");
+  target.libraries = json_get_string_array(json, "libraries");
+  if (const st::Json* flag = st::json_find(json, "inherit_project_embed");
+      flag != nullptr && flag->is_boolean()) {
+    target.inherit_project_embed = flag->get<bool>();
+  }
   // `log`：目标级覆盖（缺省吃工程级）。
   // 用 `st::json_find` 判“键在不在”——否则无法区分“未指定”与“显式 false”。
   if (const st::Json* log_value = st::json_find(json, "log"); log_value != nullptr && log_value->is_boolean()) {
@@ -447,6 +459,10 @@ auto Manifest::to_json() const -> st::Json {
     if (!target.exclude_sources.empty()) entry["exclude_sources"] = to_array(target.exclude_sources);
     if (!target.include_sources.empty()) entry["include_sources"] = to_array(target.include_sources);
     if (!target.embed.empty()) entry["embed"] = to_array(target.embed);
+    if (!target.libraries.empty()) entry["libraries"] = to_array(target.libraries);
+    if (target.inherit_project_embed.has_value()) {
+      entry["inherit_project_embed"] = *target.inherit_project_embed;
+    }
     target_map[target.name] = entry;
   }
   json["targets"] = target_map;
