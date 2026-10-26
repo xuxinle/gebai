@@ -1073,7 +1073,8 @@ class GpuCanvas final : public Surface {
   void submit_deferred_locked() {
     if (deferred_ == nullptr || deferred_pending_ == 0) return;
     ID3D11CommandList* list = nullptr;
-    if (SUCCEEDED(deferred_->FinishCommandList(FALSE, &list)) && list != nullptr) {
+    const HRESULT finish = deferred_->FinishCommandList(FALSE, &list);
+    if (SUCCEEDED(finish) && list != nullptr) {
       // **必须在立即上下文上执行**（`context_`），不能走 `active_context()`
       // —— 后者返回的是 deferred 自己，等于"把命令列表交给录制者自己执行"，
       // 什么都不会发生（实测症状：pending 清成 0，但画面永远是空的/旧的，
@@ -1090,6 +1091,19 @@ class GpuCanvas final : public Surface {
       // 实测症状：进程 126 秒只消耗 2 秒 CPU（纯等），日志停在"准备 Map"。
       // 这一步的代价很小（本就要同步），但少了它整条 GPU 路径不可用。
       context_->Flush();
+    } else {
+      // ## 失败必须报（2026-10-27 补）
+      //
+      // 旧实现把这个分支写成“静默跳过，反正下面会清零”——那是错的：
+      // `FinishCommandList` 失败（设备丢失 / 驱动重置 / 内存不足）时
+      // 命令**根本没执行**，而 `deferred_pending_ = 0` 又把“有未提交命令”
+      // 这件事抹掉了。后果是**画面停在上一次的内容，日志里一个字都没有**，
+      // 而且会让 `present()` 的 `has_uncommitted_draws()` 断言失效
+      //（它看到的是“已清零”，于是以为一切正常）。
+      //
+      // 这正是“静默降级”类缺陷的典型形状：不是崩，是变旧。记为 error 让它可见。
+      ST_LOG_ERROR("GPU：FinishCommandList 失败（0x{:08X}）—— 本轮 {} 条绘制命令已丢弃",
+                   static_cast<unsigned>(finish), deferred_pending_);
     }
     deferred_pending_ = 0;
   }

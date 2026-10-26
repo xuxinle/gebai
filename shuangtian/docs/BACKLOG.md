@@ -369,16 +369,14 @@
 
 ## 待做（2026-10-09 起）
 
-### `present` 时出现「画布有未提交的绘制命令」（2026-10-26 发现，**未追完**）
+### `present` 时出现「画布有未提交的绘制命令」（2026-10-26 发现，方向已修正）
 
-**现象**：真窗口跑 gallery 时，日志里连续出现：
+**现象**：真窗口跑 gallery 时，日志里出现过：
 
 ```
 error GPU 呈现：画布有未提交的绘制命令（漏了 submit_deferred_locked）
 warn  swapchain 呈现失败（present 被跳过了）→ 回退 GDI blit
 ```
-
-持续多帧，但**画面仍然正常**（回退到 GDI blit）。
 
 **触发条件（实测）**：不是稳定复现。同一个二进制：
 
@@ -388,22 +386,43 @@ warn  swapchain 呈现失败（present 被跳过了）→ 回退 GDI blit
 | `--width 1100 --height 720`，重复 3 次 | 0 |
 | `--scale 1.5` | 0 |
 | 长观察 15 s + 点击 3 个导航页 | 0 |
-| **首次观测到错误的那一次** | 数十次（连续） |
+| **首次观测到的那一次** | 数十次（连续） |
 
-那次的环境差异：前面还有一个 PowerShell 控制台窗口抢焦点，
+那次的环境差异：前面有一个 PowerShell 控制台窗口抢焦点，
 并且**同时有其他后台构建任务在跑**（多进程争 GPU）。
-推测是「窗口尺寸变更 / 设备状态变化时某条绘制路径未提交」，
-但**没有证据**——仅凭环境差异不能下这个结论。
 
-**为何值得跟**：这个断言是 `71398b29`（把 deferred 记账从“靠注释”改成
-“靠类型系统”）时加的**兵弟弟**，注释写明“万一将来有人新增绘制路径
-却绕过了类型系统……它能接住”。它报错就是真的有人漏了。
-而且它会**默默地降级到 GDI blit**（慢路径）——从“全黑”变成了“变慢”，
-更难被发现。
+### ⚠ 排查方向已修正（2026-10-27）
 
-**下一步**：用 `--backend win32` 反复启动 + 录像日志，抓 `has_uncommitted_draws()`
-为真时的调用栈（临时在该函数里打 `std::backtrace`），定位是哪条路径。
-另：确认它与 `71398b29` 加入之前的行为差异（那时是否也在静默降级）。
+本文最初写的是“抓是哪条绘制路径忘了 `draw_scope()`”——**这个方向是错的**。
+`71398b29` 已经把 `active_context()` / `note_deferred_draw()` **移到 private**，
+`draw_scope()` 是唯一口子，**漏标记在类型系统上不可能发生**。
+再去抓“哪条路径忘记账”只会白跑。
+
+**真正未排除的可能**（按可能性排序）：
+
+1. **提交失败但仍清零**。`submit_deferred_locked()` 里：
+   ```cpp
+   if (SUCCEEDED(deferred_->FinishCommandList(FALSE, &list)) && list != nullptr) {
+     context_->ExecuteCommandList(list, FALSE);
+     ...
+   }
+   deferred_pending_ = 0;   // ← 无论 Finish 成功与否都清零
+   ```
+   `FinishCommandList` 失败（设备丢失、驱动重置）时 `list` 为 null，
+   命令**没有执行**却把 `pending` 清了——画面停在上一次内容，而日志无报错。
+   这与观察到的“降级到 GDI blit + 画面仍正常”吻合（blit 拿的是旧 backbuffer）。
+2. **多画布共用 / 锁竞争**下的交错。`g_context_mutex()` 是全局串行点，
+   若某条路径在未持锁时调 `submit_deferred_locked`（它要求调用方持锁），
+   `pending` 的读/写可能与其他线程交错。
+3. 设备丢失/重置路径未处理（D3D11 的 `DXGI_ERROR_DEVICE_REMOVED`）。
+
+**下一步**（换方向）：
+· 在 `submit_deferred_locked` 里给 `FinishCommandList` **失败分支加日志**
+  （当前是静默跳过）——这本身就是一个应该补的缺陷
+· 确认 `present()` 调 `submit_deferred_locked` 时是否**确实持锁**（注释要求持锁）
+· 用 `--backend win32` 多进程并行压测复现（首次观测时正是多进程环境）
+
+### `st buildd` 守护进程：已评估，**不做**（2026-10-26）
 
 ### `st buildd` 守护进程：已评估，**不做**（2026-10-26）
 
