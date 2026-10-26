@@ -416,7 +416,7 @@ class SwatchCell : public Element {
 inline constexpr std::string_view kAboutMarkdown = R"md(
 ## 霜天是什么
 
-原生桌面应用框架：**全自绘**、无系统控件、软硬件渲染兼容，并可在**没有桌面的服务器上**开发。
+通用 C++ 应用框架：主体是**全自绘**的原生界面（无系统控件、软硬件渲染兼容，并可在**没有桌面的服务器上**开发），底座是不依赖界面的通用层（文件系统、错误模型、JSON、PNG、TCP、LSP…），可给无界面的程序单独链。
 
 - 渲染：自研软件光栅器（扫描线覆盖抗锯齿），硬件后端可选加速
 - 文本：TTF/OTF/CFF/CID 解析 + 整形，CJK 回退，字形按物理分辨率栅格化
@@ -2090,7 +2090,7 @@ namespace {
 
 [[nodiscard]] auto build_about(const PageHooks& hooks) -> std::unique_ptr<Panel> {
   (void)hooks;
-  auto page = make_page("about", "关于", "霜天（Shuangtian）· 原生桌面应用框架 · 全自绘");
+  auto page = make_page("about", "关于", "霜天（Shuangtian）· 通用 C++ 应用框架 · 全自绘");
 
   auto version_card = make_card("card-version", "版本");
   version_card->add_child(std::make_unique<KeyValueRow>("名称", "霜天 Shuangtian"));

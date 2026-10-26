@@ -737,14 +737,20 @@ AI 能自主选择「做哪一件」，但两个前提必须由人掌握：**它
   不另存状态文件（多一份状态就多一处不一致）。
 
 
-#### `shuangtian`（霜天原生桌面框架与智能体操控）
+#### `shuangtian`（霜天通用 C++ 应用框架与智能体操控）
 
-霜天（`shuangtian/`，与 `keqing/` 平级）是歌白**内置的原生桌面应用框架**，也是"智能体躯体的原生形态"：
-C++20、全自绘（软硬件渲染兼容）、**支持无头模式**，并对外提供 TCP 控制通道。
+霜天（`shuangtian/`，与 `keqing/` 平级）是歌白**内置的通用 C++ 应用框架**，也是"智能体躯体的原生形态"：
+C++23、全自绘（软硬件渲染兼容）、**支持无头模式**，并对外提供 TCP 控制通道。
 它的存在意义是让智能体在**没有桌面的 Linux 服务器上**也能完整地开发、观察、操作原生界面。
 
-> **外部依赖只有两个**（均登记在 `shuangtian/third_party/SOURCES.md`，含版本/来源/许可与改动面）：
-> nlohmann/json 3.12.0（JSON，必需）与 quickjs-ng 0.17.0（应用内脚本层，**默认关闭**）。
+**主体是界面，但底座不止于界面**：`st_core` 库目标（`"kind": "library"`）装载与 UI 无关的
+九个模块（core / codec / math / net / xml / test / edit / lsp / pkg），可给无界面的程序单独链。
+哪些能独立、怎么引入、有什么代价，见 `shuangtian/docs/AS_LIBRARY.md`。
+
+> **外部依赖四个**（均登记在 `shuangtian/third_party/SOURCES.md`，含版本/来源/许可/SHA-256 与改动面）：
+> nlohmann/json 3.12.0（JSON，必需）、quickjs-ng 0.17.0（应用内脚本层，**默认关闭**）、
+> batterycenter/embed 1.2.19（嵌入资源运行时）、SQLite 3.50.2（数据库）。
+> `third_party/wayland` 是 Linux 平台后端的协议头，不属应用层依赖。
 > 渲染、字体解析与整形、文本布局、Markdown、组件库、包管理器、构建驱动**全部自研**。
 
 - **框架本体**（`shuangtian/`）：分层 `core → math/codec → raster → text → md → ui → app`，`shell` 提供窗口后端，`control` 提供远控，`pkg` 提供自研工具链（`stpm`，`st build/test/lint`）
