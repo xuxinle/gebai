@@ -66,7 +66,7 @@
 
 #include "st/core/error.hpp"
 // `Json` 只出现在签名里 → 用**前向头**（不拉入 nlohmann 的 25,526 行）。
-#include "st/ext/json_fwd.hpp"
+#include "st/core/json_fwd.hpp"
 #include "st/ui/xml_ui.hpp"
 
 namespace st::ui {

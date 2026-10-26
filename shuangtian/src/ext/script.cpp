@@ -16,7 +16,7 @@
 
 #include "quickjs/quickjs.h"
 
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 
 namespace st::ext {
 

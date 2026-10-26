@@ -33,7 +33,7 @@
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
 #include "st/core/time.hpp"
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/ui/components/title_bar.hpp"
 #include "st/ui/components/window_frame.hpp"
 #include "st/ui/hot_reload.hpp"

@@ -49,7 +49,7 @@ constexpr std::array<RuleSpec, 17> kRules{{
     //
     // 规则只收 `.at(`：`.value()` 虽然是 nlohmann 的同类抛异常接口，但 `value()` 是**极常见的
     // 自有 getter 名**（本框架 `Slider::value()` 等），文本级规则无法区分接收者类型，
-    // 收了就会天天误报。Json 上的 `.value()` 由 `st/ext/json.hpp` 的文档与评审把关。
+    // 收了就会天天误报。Json 上的 `.value()` 由 `st/core/json.hpp` 的文档与评审把关。
     {"L12", "禁止 .at() 取值（键缺失即抛异常；用 json_at/find 或显式检查）", R"(\.at\s*\()"},
     // L13 需要作用域判断（「当前类是否继承 Element」「这行是否在 semantics_flags 覆写
     // 体内」都表达不成单行正则），由 `check_element_state()` 单独实现。

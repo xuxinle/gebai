@@ -31,7 +31,7 @@
 #include "director.hpp"
 #include "frame_stats.hpp"
 #include "project.hpp"
-#include "st/app/async.hpp"
+#include "st/core/async.hpp"
 #include "st/ui/text_port.hpp"
 
 namespace caiyun {

@@ -82,7 +82,7 @@ inline constexpr Result<Unit> ok();          // 无值成功
 - 互斥：`std::mutex` + `std::scoped_lock`/`lock_guard`（RAII）；禁手动 `lock()`/`unlock()`。
 - 共享数据封装在自带锁的类型里（`class Counter { std::mutex m_; int v_; ... }`），不裸露共享变量。
 
-**线程契约（主线程只渲染；`st/app/async.hpp` 是实现）**：
+**线程契约（主线程只渲染；`st/core/async.hpp` 是实现）**：
 
 | 线程 | 允许 | 禁止 |
 |---|---|---|
@@ -106,7 +106,7 @@ inline constexpr Result<Unit> ok();          // 无值成功
 
 ### 3.8 JSON 与外部依赖
 
-**JSON 一律走 `st/ext/json.hpp` 的封装面**，不直接调用 nlohmann 的原生接口：
+**JSON 一律走 `st/core/json.hpp` 的封装面**，不直接调用 nlohmann 的原生接口：
 
 | 场景 | 允许 | 禁止（会抛异常或语义不保真） |
 |---|---|---|

@@ -26,7 +26,7 @@
 #include <string>
 #include <vector>
 
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/script_bridge.hpp"
 #include "st/ui/script_host.hpp"

@@ -46,7 +46,7 @@
 #include "st/ui/components/tree.hpp"
 #include "st/ui/components/window_frame.hpp"
 
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 
 namespace st::ui::dsl {
 

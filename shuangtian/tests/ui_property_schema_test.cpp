@@ -14,7 +14,7 @@
 
 #include "st/ui/property_schema.hpp"
 
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/test/test.hpp"
 
 namespace {

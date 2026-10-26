@@ -1,4 +1,4 @@
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -14,7 +14,7 @@
 
 namespace st {
 
-/// 见 `st/ext/json_fwd.hpp` 的声明（为何返回引用而非按值，那里有完整理由）。
+/// 见 `st/core/json_fwd.hpp` 的声明（为何返回引用而非按值，那里有完整理由）。
 /// 与下面的 `null_node()` 同一模式：函数内 `static const`，常量、线程安全初始化。
 auto empty_json_object() -> const Json& {
   static const Json instance = Json::object();

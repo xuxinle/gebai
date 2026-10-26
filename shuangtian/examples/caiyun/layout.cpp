@@ -8,7 +8,7 @@
 
 #include "st/core/fs.hpp"
 #include "st/core/log.hpp"
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/ext/script.hpp"
 
 namespace caiyun {

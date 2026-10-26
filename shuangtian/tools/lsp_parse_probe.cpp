@@ -1,5 +1,5 @@
 #include <cstdio>
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/lsp/navigation.hpp"
 auto main() -> int {
   // clangd 真实返回的形态（SymbolInformation 扁平数组）

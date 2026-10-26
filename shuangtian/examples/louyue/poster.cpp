@@ -1,6 +1,6 @@
 /// 海报作品模型的实现（见 `poster.hpp`）。
 ///
-/// 解析一律走 `st/ext/json.hpp` 的安全读取面：缺字段取默认、类型不符取默认——
+/// 解析一律走 `st/core/json.hpp` 的安全读取面：缺字段取默认、类型不符取默认——
 /// 海报脚本是外部输入（AI 生成的），写错一个字段不该让整个作品打不开。
 /// 只有「顶层不是对象」「不认识 block kind」如实报错（否则会得到一张空海报，
 /// 而空海报看起来像"渲染坏了"，离真因很远）。
@@ -14,7 +14,7 @@
 #include <format>
 
 #include "st/core/error.hpp"
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/paint.hpp"
 // 影像质感（光晕/颗粒/暗角）来自框架层，与视频等其他应用共用同一套原语。

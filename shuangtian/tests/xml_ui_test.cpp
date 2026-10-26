@@ -6,8 +6,8 @@
 /// ② 属性走 `ui::apply_properties`（**与协议 `set` 同一条路**，不另立第二套属性名）；
 /// ③ 认不出的标签/属性**如实报告**（静默会让"少了一个按钮"无从排查）。
 
-#include "st/ext/json.hpp"
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
+#include "st/core/json.hpp"
 #include "st/ui/xml_ui.hpp"
 
 #include <format>

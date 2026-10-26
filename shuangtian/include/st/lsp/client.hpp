@@ -56,7 +56,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/lsp/protocol.hpp"
 
 namespace st::lsp {

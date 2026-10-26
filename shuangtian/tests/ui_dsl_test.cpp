@@ -26,7 +26,7 @@
 #include <thread>
 #include <vector>
 
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 
 namespace {
 

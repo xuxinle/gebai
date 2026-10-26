@@ -13,8 +13,8 @@
 #include <vector>
 
 // `Json` 只出现在签名里 → 用**前向头**（不拉入 nlohmann 的 25,526 行）。
-// 需要构造/访问 Json 的 .cpp 自行包含 `st/ext/json.hpp`。见 `st/ext/json_fwd.hpp`。
-#include "st/ext/json_fwd.hpp"
+// 需要构造/访问 Json 的 .cpp 自行包含 `st/core/json.hpp`。见 `st/core/json_fwd.hpp`。
+#include "st/core/json_fwd.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/ui_root.hpp"
 

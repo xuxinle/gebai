@@ -21,8 +21,8 @@
 // ⚠ 这里**必须**是完整头（不是前向头）：`Manifest` 的成员 `extra_fields` 是 `st::Json`，
 // 而**类成员不能是不完整类型**（语言限制，`empty_json_object()` 也救不了）。
 // 代价：任何包含本头的编译单元都要真解析 nlohmann（约 13.8 万预处理行）。
-// 实测结论见 `st/ext/json_fwd.hpp` 的表格。
-#include "st/ext/json.hpp"
+// 实测结论见 `st/core/json_fwd.hpp` 的表格。
+#include "st/core/json.hpp"
 
 namespace st::pkg {
 

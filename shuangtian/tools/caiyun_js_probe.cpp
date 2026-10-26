@@ -13,7 +13,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/ext/script.hpp"
 #include "st/probe/probe.hpp"
 

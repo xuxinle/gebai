@@ -33,19 +33,19 @@
 #include <utility>
 #include <vector>
 
-// 本头对 `Json` 只用**前向声明**（见 `st/ext/json_fwd.hpp`），收益是砍掉每个 TU
+// 本头对 `Json` 只用**前向声明**（见 `st/core/json_fwd.hpp`），收益是砍掉每个 TU
 // 无条件解析 nlohmann 的代价（实测 -23% 预处理行数）。
 //
 // ✅ **本头所有声明与模板体都只在前向声明下成立**——`custom<T>` 也不例外：
 // 它把 `empty_json_object()`（返回 `const Json&`）直传给 `create_element(const Json&)`，
 // 全链都是引用，不需要 `Json` 完整类型。**因此使用 `custom<T>` 的 .cpp 无需额外包含
-// `st/ext/json.hpp`**（历史上需要过，是因为 `empty_json_object()` 曾按值返回；
-// 改为返回引用后该需求从根上消失——理由与实测见 `st/ext/json_fwd.hpp` 该函数的注释）。
+// `st/core/json.hpp`**（历史上需要过，是因为 `empty_json_object()` 曾按值返回；
+// 改为返回引用后该需求从根上消失——理由与实测见 `st/core/json_fwd.hpp` 该函数的注释）。
 //
 // ⚠ 若将来有人把 `empty_json_object()` 改回按值返回，这里会重新变成硬需求：
 // 使用方将在一个塔的模板栈里报 “invalid use of incomplete type … basic_json”，
-// 很难反推到本头。详见 `st/ext/json_fwd.hpp` 的里注释。
-#include "st/ext/json_fwd.hpp"
+// 很难反推到本头。详见 `st/core/json_fwd.hpp` 的里注释。
+#include "st/core/json_fwd.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/styling.hpp"
 #include "st/ui/ui_root.hpp"

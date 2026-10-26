@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/script_host.hpp"
 #include "st/ui/ui_root.hpp"

@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-#include "st/app/async.hpp"
+#include "st/core/async.hpp"
 #include "st/control/control.hpp"
 #include "st/ext/script.hpp"
 #include "st/core/error.hpp"
@@ -378,7 +378,7 @@ class Application final : public control::Host, public ui::WindowControl {
   [[nodiscard]] auto started() const noexcept -> bool { return started_; }
   /// 主循环单步（自检用）。
   void tick();
-  /// 应用级异步任务系统（`st/app/async.hpp`）：
+  /// 应用级异步任务系统（`st/core/async.hpp`）：
   ///
   /// - `tasks().run_async(fn)`：独立线程（长任务/IO；返回 future + 可取消句柄）
   /// - `tasks().submit(fn)`：共享线程池（短任务/`parallel_for`）

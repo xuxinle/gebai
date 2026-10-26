@@ -8,7 +8,7 @@
 /// 注：不测试 nlohmann 自身（那是上游的事），只测**我们这层适配的语义承诺**。
 
 #include "st/core/fs.hpp"
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/test/test.hpp"
 
 #include <cstdint>

@@ -23,7 +23,7 @@
 #include <string>
 #include <thread>
 
-#include "st/app/async.hpp"
+#include "st/core/async.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/components/markdown_view.hpp"
 #include "st/ui/components/slow_content.hpp"

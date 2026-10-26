@@ -26,7 +26,7 @@
 | `dsl.cpp` 中组件类型身份的位置 | **4 套**（`type()` / `ST_DSL_TYPE` 40 条 / `make_element` 40+ if / `c.xxx()` 入口 dynamic_cast） | 见评审 A1 |
 | `dynamic_cast` 总数 | 25 | `grep -rc dynamic_cast src include` |
 | 传递闭包重编面 | `element.hpp` → **76** 个 .cpp；`surface.hpp` → **100** 个 .cpp | JS 传递包含闭包统计 |
-| 公共头泄漏 nlohmann/json（25,526 行） | **8 个公共头** | `grep -rl 'st/ext/json.hpp' include/st` |
+| 公共头泄漏 nlohmann/json（25,526 行） | **8 个公共头** | `grep -rl 'st/core/json.hpp' include/st` |
 
 ## 3. 巨型函数（>200 行）
 

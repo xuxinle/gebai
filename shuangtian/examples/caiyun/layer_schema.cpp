@@ -9,7 +9,7 @@
 
 #include "layer.hpp"
 #include "st/core/log.hpp"
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/ui/property_schema.hpp"
 
 namespace caiyun {

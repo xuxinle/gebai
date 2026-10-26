@@ -4888,7 +4888,7 @@ state      := visible | hidden | focused | enabled | disabled | checked | select
 `ext` 是**外部基础设施的适配层**，与自研的 `core/raster/text/ui` 分层明确：这里放的是
 “不值得自己写、但必须控住边界”的能力。两个模块，两种姿态：
 
-**`st/ext/json.hpp`（必需）**——基于 nlohmann/json 的**薄封装**，不是重新实现 JSON。
+**`st/core/json.hpp`（必需）**——基于 nlohmann/json 的**薄封装**，不是重新实现 JSON。
 封装存在的唯一理由是**把 nlohmann 的抛异常接口收敛成 `Result` 风格**
 （本框架不设通用异常边界，抛出去就是 `std::terminate`）：
 

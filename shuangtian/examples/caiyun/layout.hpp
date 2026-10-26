@@ -42,7 +42,7 @@
 
 #include "layer.hpp"
 #include "st/core/error.hpp"
-#include "st/ext/json_fwd.hpp"
+#include "st/core/json_fwd.hpp"
 #include "st/ext/script.hpp"
 
 namespace caiyun {

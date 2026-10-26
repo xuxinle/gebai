@@ -6,7 +6,7 @@
 #include <unordered_set>
 
 #include "st/core/fs.hpp"
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/ui/actions.hpp"
 #include "st/ui/dsl.hpp"
 #include "st/ui/element.hpp"

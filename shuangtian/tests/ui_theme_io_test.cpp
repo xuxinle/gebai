@@ -14,7 +14,7 @@
 #include <string_view>
 #include <vector>
 
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/core/print.hpp"
 #include "st/math/color.hpp"
 #include "st/ui/theme.hpp"

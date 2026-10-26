@@ -17,7 +17,7 @@
 #include "st/core/log.hpp"
 #include "st/ui/actions.hpp"
 
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 
 namespace st::ui {
 namespace {

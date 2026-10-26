@@ -34,7 +34,7 @@
 #include <string_view>
 #include <vector>
 
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/lsp/edit.hpp"
 #include "st/lsp/protocol.hpp"
 

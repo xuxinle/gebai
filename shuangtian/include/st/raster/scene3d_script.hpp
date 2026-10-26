@@ -51,7 +51,7 @@
 #include <vector>
 
 #include "st/core/error.hpp"
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/scene3d.hpp"

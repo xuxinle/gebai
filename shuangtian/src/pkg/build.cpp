@@ -2638,16 +2638,24 @@ if (target == nullptr) {
     //
     // 工程级 `embed`（如本仓的 `src/ui/script_api.js`）原本会**无条件**并入每个目标；
     // 于是 `st_core`（通用库）里会多出 UI 的 JS 字节数组——声明是“不依赖 UI 的通用层”，
-    // 实现里却带着 UI 的产物。实测：`ar t st_core.a` 里能看到 `ui_declarative_js.cpp.o`。
+    // 实现里却带着 UI 的产物。
     //
-    // 做法：库级嵌入的生成源已经进了 `library_sources`（所有目标共享），这里把它们
-    // 从 `target_sources` 里剔除。判据是“路径在 `library_includes` 里且不是第三方源码”
-    // ——`attach_embeds` 给每个生成源都登记了包含目录，正好可用作标记。
+    // ## ⚠ 判据必须是 `build/<档位>/embed/lib`，不是 `embed_lib`
+    //
+    // 上一版的判据是 `fs::join(build_dir, "embed_lib")`，**一直是错的**：
+    // 实际路径是 `build/dev/embed/lib/src/…/x.cpp`（`embed` 目录下再一层 `lib`）。
+    // 两者对不上 ⇒ 剔除永远命中 0 个，而**回归测试没能发现**：
+    // 测试用的是临时目录里的小工程，它的嵌入路径恰好匹配了那个错判据。
+    // 实测（2026-10-26）：`ar t st_core.a` 里看得到 `ui_declarative_js.cpp.o`。
+    // 教训：这类“路径前缀”判据必须用**真实仓库**验证一次，不能只靠单测。
     if (target->inherit_project_embed.has_value() && !*target->inherit_project_embed) {
-      const std::string embed_marker = fs::normalize(fs::join(build_dir, "embed_lib"));
+      const std::string embed_marker = fs::normalize(fs::join(build_dir, "embed"));
       const auto before = target_sources.size();
       std::erase_if(target_sources, [&](const std::string& path) {
-        return fs::normalize(path).starts_with(embed_marker);
+        // 只剔 `build/<档位>/embed/` 下的（不是整个 build 目录）
+        const std::string normalized = fs::normalize(path);
+        return normalized.starts_with(embed_marker) &&
+               normalized.find("/embed/") != std::string::npos;
       });
       if (target_sources.size() != before) {
         ST_LOG_INFO("目标 {}：不继承工程级嵌入，已剔除 {} 个生成的嵌入单元", target->name,
@@ -2763,12 +2771,12 @@ if (target == nullptr) {
   // （`ui_declarative_js.cpp.o` / `ui_script_api_js.cpp.o`）——库声明是“不依赖 UI 的通用层”，
   // 产物里却带着 UI 的 JS 字节数组。
   if (target->inherit_project_embed.has_value() && !*target->inherit_project_embed) {
-    // 剔除判据：路径在**嵌入产物目录**下（`build/<档位>/embed_lib/`）。
+    // 剔除判据：路径在**嵌入产物目录**下（`build/<档位>/embed/`）。
     //
     // ⚠ 不能用 `library_includes.contains(source)`：那个表登记的是**所有**库级单元的
     // 包含目录（包括普通源），用它剔除会把整个库剔空（实测：44 个成员→剩 5 个，且只剩第三方）。
-    // 嵌入产物的路径特征是统一的：`attach_embeds` 把它们放在 `build/<subdir>/embed_lib/` 下。
-    const std::string embed_marker = fs::normalize(fs::join(build_dir, "embed_lib"));
+    // 嵌入产物的路径特征是统一的：在 `build/<subdir>/embed/` 下（含再一层 `lib/`）。
+    const std::string embed_marker = fs::normalize(fs::join(build_dir, "embed"));
     const auto before = link_units.size();
     std::erase_if(link_units, [&](const CompileUnit& unit) {
       return fs::normalize(unit.source).starts_with(embed_marker);

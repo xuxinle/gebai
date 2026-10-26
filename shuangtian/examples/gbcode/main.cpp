@@ -63,7 +63,7 @@
 #include "st/core/process.hpp"
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
-#include "st/ext/json.hpp"   // dsl::custom<T> 实例化需要 Json 完整类型（模板体里按值传 Json）
+#include "st/core/json.hpp"   // dsl::custom<T> 实例化需要 Json 完整类型（模板体里按值传 Json）
 #include "st/text/diff.hpp"
 #include "st/text/highlight.hpp"
 #include "st/ui/components/basic.hpp"

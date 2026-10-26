@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "st/core/fs.hpp"
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 
 namespace st::ui {
 namespace {

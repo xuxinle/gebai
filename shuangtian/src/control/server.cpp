@@ -20,7 +20,7 @@
 #include "st/ui/dsl.hpp"
 #include "st/ui/selector.hpp"
 
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 
 namespace st::control {
 namespace {
@@ -1847,7 +1847,7 @@ return result;
 
 Server::Server(Host& host) : impl_(std::make_unique<Impl>(host)) {}
 
-// 定义在**本翻译单元**（`server.cpp` 已含完整 `st/ext/json.hpp`）：
+// 定义在**本翻译单元**（`server.cpp` 已含完整 `st/core/json.hpp`）：
 // `control.hpp` 只前向声明了 `Json`（不拉入 nlohmann 的 2.5 万行），
 // 而按值返回需要完整类型——把定义放在这里两边都成立。
 auto Host::theme_snapshot() const -> st::Json { return st::Json::object(); }

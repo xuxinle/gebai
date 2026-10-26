@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "st/core/fs.hpp"
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/ext/script.hpp"
 #include "st/ui/actions.hpp"
 #include "st/ui/dsl.hpp"

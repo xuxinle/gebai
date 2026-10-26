@@ -76,7 +76,7 @@
 #include "st/core/platform.hpp"
 #include "st/core/print.hpp"
 #include "st/core/time.hpp"
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/net/ws.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/scroll.hpp"

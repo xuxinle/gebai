@@ -12,7 +12,7 @@
 #include "st/ui/selector.hpp"
 #include "st/ui/svg.hpp"   // parse_color（色值解析：与 DSL 的 hex_color 同一份）
 
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 
 namespace st::ui {
 namespace {

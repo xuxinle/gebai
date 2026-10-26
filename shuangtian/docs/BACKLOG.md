@@ -1684,7 +1684,7 @@ upstream/operation/audit），全在主线程同步阻塞。大仓库（如
 - `git_service` 新增 `LogSnapshot`（纯数据）与 `read_log_snapshot()`；
 - `ensure_git_log()` → `run_async` 跑读，完成后 `post_ui(adopt_git_log)`；
 - **写成员与 `State` 必须留主线程**（工作线程写 `State` 是数据竞争，
-  见 `st/app/async.hpp` 的线程模型）；
+  见 `st/core/async.hpp` 的线程模型）；
 - 新增 `git_log_loading_` 防止重复提交任务：没有它，后台跑着的那几帧里
   `git_log_wanted_` 会被渲染期反复置真，于是**每帧提交一个新任务**（从卡一次变成持续卡）；
 - 无调度器时（单测/嵌入式）退回 `load_git_log_sync()`，行为与旧实现逐行一致。
@@ -7180,7 +7180,7 @@ release 档**，文档还记着它在本容器余量踩线 0.66 倍 < 下限 1.3
   却没包含 `<algorithm>`；测试组在无 PCH 口径下报 `'is_sorted' is not a member of 'std::ranges'`。
   它一直没暴露，是因为 `st test` 走 PCH 口径——**测试自己也该被这条门禁覆盖**。
 - [x] **修 `build gbcode` 编不过（Json 前向头漏补 `examples/`）**：
-  `88ba665`（Json 前向头解耦）把 `dsl.hpp` 的 `#include "st/ext/json.hpp"` 换成前向声明，
+  `88ba665`（Json 前向头解耦）把 `dsl.hpp` 的 `#include "st/core/json.hpp"` 换成前向声明，
   给 `src/*`+`tests/*` 的 18 个 .cpp 补了 `json.hpp`——**却漏了整个 `examples/`**。
   而 `dsl::custom<T>` 是**模板**，实例化时需要 `Json` 完整类型（模板体调
   `create_element(…, empty_json_object(), …)`），于是 `examples/gbcode/main.cpp` 报
@@ -7192,7 +7192,7 @@ release 档**，文档还记着它在本容器余量踩线 0.66 倍 < 下限 1.3
   它自己的提交信息写着「需要完整类型的 .cpp（**含测试/示例**）自行包含 json.hpp」：
   **说明了但没做到**，且无任何机械检查会因“examples 编不过”而变红。
 
-    修复（**最终形态**）：① `examples/gbcode/main.cpp` 补显式 `st/ext/json.hpp`；
+    修复（**最终形态**）：① `examples/gbcode/main.cpp` 补显式 `st/core/json.hpp`；
   ② 把 `dsl.hpp` 那句**错误的**注释「`Json` 只出现在签名里」改成事实；
   ③ **根治：把 `empty_json_object()` 从「按值返回 `Json`」改为「返回 `const Json&`」**——
   这是需求本身的来源：`custom<T>` 只因要按值传 `empty_json_object()` 的返回值才需要完整类型，

@@ -21,7 +21,7 @@
 #include "carry.hpp"
 #include "frame_stats.hpp"
 #include "motion.hpp"
-#include "st/app/async.hpp"
+#include "st/core/async.hpp"
 #include "st/codec/png.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/log.hpp"

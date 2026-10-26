@@ -7,7 +7,7 @@
 #include <chrono>
 #include <cstdio>
 #include <thread>
-#include "st/app/async.hpp"
+#include "st/core/async.hpp"
 #include "st/app/text_port.hpp"
 #include "st/core/fs.hpp"
 #include "st/raster/canvas.hpp"

@@ -6,7 +6,7 @@
 #include <cmath>
 #include <format>
 
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 
 namespace st::ui {
 

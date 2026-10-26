@@ -38,7 +38,7 @@
 #include <string_view>
 
 #include "st/core/error.hpp"
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/ui/theme.hpp"
 
 namespace st::ui {

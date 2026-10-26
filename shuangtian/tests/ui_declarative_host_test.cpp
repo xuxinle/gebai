@@ -18,7 +18,7 @@
 #include "st/ui/text_port.hpp"
 #include "st/ui/ui_root.hpp"
 
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "tests/support/text_port_fixtures.hpp"
 
 // 测试在匿名命名空间内，`st::test::X` 得写全；用具名别名让用例读起来干净。

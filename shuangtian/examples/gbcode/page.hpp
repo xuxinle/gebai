@@ -22,7 +22,7 @@
 #include "lsp_bridge.hpp"
 #include "page_data.hpp"
 #include "session_store.hpp"
-#include "st/app/async.hpp"  // Tasks（慢内容异步排版的调度器）
+#include "st/core/async.hpp"  // Tasks（慢内容异步排版的调度器）
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/code_editor.hpp"
 #include "st/ui/components/completion_popup.hpp"

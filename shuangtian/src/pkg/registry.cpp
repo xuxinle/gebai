@@ -16,7 +16,7 @@
 #include "st/core/error.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/hash.hpp"
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/core/string.hpp"
 #include "st/pkg/manifest.hpp"
 #include "st/pkg/semver.hpp"

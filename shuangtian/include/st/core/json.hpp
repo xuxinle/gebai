@@ -28,10 +28,10 @@
 #include <vector>
 
 // 完整实现（含 nlohmann 全量头）；同时**再导出**轻量前向头的内容，
-// 于是 `st/ext/json.hpp` 的使用方不必关心到底包含哪一个。
+// 于是 `st/core/json.hpp` 的使用方不必关心到底包含哪一个。
 #include "nlohmann/json.hpp"
 #include "st/core/error.hpp"
-#include "st/ext/json_fwd.hpp"
+#include "st/core/json_fwd.hpp"
 
 namespace st {
 
@@ -40,7 +40,7 @@ namespace st {
 /// 用 **`ordered_json`**（保留键的插入顺序）而非默认 `json`（按字典序排序）：
 /// 清单与 lock 文件是要**被人读、被 git diff** 的产物，键序稳定比排序更重要——
 /// 排序会让一次无关的读取-回写产生满屏 diff。
-// `st::Json` 的定义在前向头 `st/ext/json_fwd.hpp` 里（同一条 using），
+// `st::Json` 的定义在前向头 `st/core/json_fwd.hpp` 里（同一条 using），
 // 由上面那个 include 带进来——**不在这里重复声明**，避免两处定义分叉。
 
 /// 解析嵌套深度上限（防栈溢出：递归下降解析器遇到极深嵌套会爆栈）。

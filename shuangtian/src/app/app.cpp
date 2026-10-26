@@ -15,7 +15,7 @@
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
 #include "st/core/wait.hpp"
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/text/text.hpp"
 #include "st/ui/theme_io.hpp"
 

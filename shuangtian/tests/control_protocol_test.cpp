@@ -35,7 +35,7 @@
 #include "st/ui/components/menu.hpp"
 #include "st/ui/ui_root.hpp"
 
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 
 namespace {
 

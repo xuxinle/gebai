@@ -47,7 +47,7 @@
 #include "st/ui/theme.hpp"
 #include "st/ui/ui_root.hpp"
 
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 
 namespace {
 

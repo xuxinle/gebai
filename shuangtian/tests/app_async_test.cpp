@@ -10,7 +10,7 @@
 #include <thread>
 #include <vector>
 
-#include "st/app/async.hpp"
+#include "st/core/async.hpp"
 #include "st/test/test.hpp"
 
 namespace {

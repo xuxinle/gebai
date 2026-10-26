@@ -4,7 +4,7 @@
 ///
 /// ## 为什么需要它
 ///
-/// `st/ext/json.hpp` 会 `#include "nlohmann/json.hpp"`（**25,526 行**，预处理展开
+/// `st/core/json.hpp` 会 `#include "nlohmann/json.hpp"`（**25,526 行**，预处理展开
 /// 到 13.8 万行）。而 `st::Json` 被 8 个公共头用在**纯签名**位置（参数与返回值）上：
 /// `pkg/manifest.hpp`、`pkg/registry.hpp`、`ui/actions.hpp`、`ui/dsl.hpp`、
 /// `ui/script_host.hpp`、`ui/declarative_host.hpp`、`control/control.hpp`、`ext/script.hpp`。
@@ -25,7 +25,7 @@
 ///
 /// - **只需要 `Json` 出现在签名里**（声明、成员、返回类型）→ 包含本头；
 /// - **需要构造/访问 Json**（`Json::object()`、`json_get_*`、`obj["k"]`…）→ 包含
-///   `st/ext/json.hpp`（它同时提供本头的内容）。
+///   `st/core/json.hpp`（它同时提供本头的内容）。
 ///
 /// ## 为什么自己写而不是用 nlohmann 的 `json_fwd.hpp`
 ///
@@ -100,7 +100,7 @@ using ordered_json = basic_json<nlohmann::ordered_map>;
 namespace st {
 
 /// 本框架统一使用的 JSON 类型 = nlohmann 的**保序** JSON。
-/// 与 `st/ext/json.hpp` 里的定义是同一条 `using`（那个头包含本头，不是重复定义）。
+/// 与 `st/core/json.hpp` 里的定义是同一条 `using`（那个头包含本头，不是重复定义）。
 using Json = nlohmann::ordered_json;
 
 /// 空的 JSON 对象（`{}`）——**在只含前向声明的头里取得 `Json` 实参的唯一正道**。
@@ -114,7 +114,7 @@ using Json = nlohmann::ordered_json;
 /// `dsl.hpp` 的 `custom<T>` 里传 `empty_json_object()`，
 /// 按值返回时**实例化即报 incomplete type**，改返回引用后**零错误**。
 /// 后果就是 `custom<T>` 的使用方（如 `examples/gbcode/main.cpp`）
-/// 被迫额外包含 `st/ext/json.hpp`——而 `dsl.hpp` 切前向头的收益正是为了免掉这个代价，
+/// 被迫额外包含 `st/core/json.hpp`——而 `dsl.hpp` 切前向头的收益正是为了免掉这个代价，
 /// `88ba665` 就是因此漏补了 examples/ 而编不过。返回引用从根上消除该需求。
 ///
 /// 典型用法：`st::Json extra_fields = empty_json_object();`（拷贝一份成员，语义不变）。

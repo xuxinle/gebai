@@ -1,6 +1,6 @@
 /// 导演脚本的模型实现（见 `director.hpp`）。
 ///
-/// 解析一律走 `st/ext/json.hpp` 的安全读取面（`json_find` / `json_get_*`）：
+/// 解析一律走 `st/core/json.hpp` 的安全读取面（`json_find` / `json_get_*`）：
 /// 缺字段取默认值、类型不符取默认值——**脚本是外部输入**（AI 生成的），一个写错的
 /// 字段不该让整个工程打不开。真正"无法继续"的情形只有：顶层不是对象 / `scenes` 为空 /
 /// 某个场景的 `kind` 不认识——这三种都如实报错（否则会得到一部空片，而空片看起来
@@ -12,7 +12,7 @@
 #include <cmath>
 #include <format>
 
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/core/log.hpp"
 
 namespace caiyun {

@@ -34,7 +34,7 @@
 #include "st/app/app.hpp"
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
-#include "st/ext/json.hpp"  // ScriptHost::eval 返回 Result<Json>（完整类型，json_fwd 不够）
+#include "st/core/json.hpp"  // ScriptHost::eval 返回 Result<Json>（完整类型，json_fwd 不够）
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/test/test.hpp"

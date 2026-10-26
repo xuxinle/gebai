@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/lsp/navigation.hpp"
 #include "st/test/test.hpp"
 

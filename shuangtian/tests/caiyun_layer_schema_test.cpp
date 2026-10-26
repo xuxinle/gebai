@@ -15,7 +15,7 @@
 #include "examples/caiyun/layer_schema.cpp"
 
 #include "st/core/print.hpp"
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/test/test.hpp"
 
 namespace {

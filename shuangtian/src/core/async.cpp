@@ -1,6 +1,6 @@
-/// 应用级异步任务系统实现（`st/app/async.hpp`；DESIGN §8「主线程只渲染」契约）。
+/// 应用级异步任务系统实现（`st/core/async.hpp`；DESIGN §8「主线程只渲染」契约）。
 
-#include "st/app/async.hpp"
+#include "st/core/async.hpp"
 
 #include <algorithm>
 #include <mutex>

@@ -14,7 +14,7 @@
 #include <optional>
 #include <string>
 
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/pkg/manifest.hpp"
 #include "st/test/test.hpp"
 

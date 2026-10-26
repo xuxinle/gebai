@@ -16,8 +16,8 @@
 
 #include "st/core/error.hpp"
 // `Json` 只出现在签名里 → 用**前向头**（不拉入 nlohmann 的 25,526 行）。
-// 需要构造/访问 Json 的 .cpp 自行包含 `st/ext/json.hpp`。见 `st/ext/json_fwd.hpp`。
-#include "st/ext/json_fwd.hpp"
+// 需要构造/访问 Json 的 .cpp 自行包含 `st/core/json.hpp`。见 `st/core/json_fwd.hpp`。
+#include "st/core/json_fwd.hpp"
 #include "st/ext/script.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/script_host.hpp"
@@ -195,7 +195,7 @@ class Host {
   /// 当前生效主题的完整 token 快照（控制通道 `theme` 的 `tokens` 分支）。
   ///
   /// 声明在这里、定义在 `server.cpp`：返回类型 `Json` 在 `control.hpp` 里只有前向声明
-  /// （本头刻意不拉入 nlohmann 的 25,526 行，见 `st/ext/json_fwd.hpp`），而
+  /// （本头刻意不拉入 nlohmann 的 25,526 行，见 `st/core/json_fwd.hpp`），而
   /// **按值返回**需要完整类型。改为返回 `const Json&` 可以避开，但那会把生命周期
   /// 绑到 `Host` 身上——快照是「当下这一刻」的值，不该让外部持着引用。
   [[nodiscard]] virtual auto theme_snapshot() const -> st::Json;

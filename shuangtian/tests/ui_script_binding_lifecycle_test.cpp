@@ -33,7 +33,7 @@
 #include "st/ui/theme.hpp"
 #include "st/ui/ui_root.hpp"
 
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 
 #include "tests/support/text_port_fixtures.hpp"
 

@@ -44,7 +44,7 @@
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
 #include "st/core/time.hpp"
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/scroll.hpp"
 #include "st/ui/components/slider.hpp"

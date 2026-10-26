@@ -47,7 +47,7 @@
 #include <vector>
 
 #include "st/core/error.hpp"
-#include "st/ext/json.hpp"
+#include "st/core/json.hpp"
 
 namespace cefu {
 

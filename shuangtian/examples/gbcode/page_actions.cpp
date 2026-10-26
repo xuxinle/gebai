@@ -1329,7 +1329,7 @@ void CodeEditorPage::load_active_text() {
     //
     // 分离点：**读数据**（纯 git 子进程，不碰 UI 树）在 worker；
     // **写 `git_*` 成员与 `State`**（会触发重组/标脏）必须回主线程——
-    // 从工作线程写 `State` 是数据竞争（见 `st/app/async.hpp` 的线程模型说明）。
+    // 从工作线程写 `State` 是数据竞争（见 `st/core/async.hpp` 的线程模型说明）。
     //
     // `git_log_loading_` 是关键：没有它，后台任务跑着的那几帧里
     // `git_log_wanted_` 会被反复置真（渲染期会再要），于是**每帧都提交一个新任务**。

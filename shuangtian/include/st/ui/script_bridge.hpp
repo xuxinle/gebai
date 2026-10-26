@@ -44,7 +44,7 @@
 #include <vector>
 
 #include "st/core/error.hpp"
-#include "st/ext/json_fwd.hpp"
+#include "st/core/json_fwd.hpp"
 
 namespace st::ui {
 
