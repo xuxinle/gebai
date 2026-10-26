@@ -125,6 +125,11 @@ ST_TEST(deps_hash_detects_equal_length_change_with_preserved_mtime) {
 ///
 /// 这条与上一条成对：只有"变了能发现"而没有"没变别乱动"，
 /// 一个恒返回 false 的实现也能过 —— 那会让每次构建全量重编。
+///
+/// ## 2026-10-26 口径变更后这条仍然成立，且**更关键**
+///
+/// 现在内容哈希是唯一真相源（不先比 mtime），所以“没变却判变”
+/// 会直接导致**每次构建全量重编**。这条是那个方向的主要护栏。
 ST_TEST(deps_hash_accepts_unchanged_content) {
   TempFile file("stable.txt");
   file.write("hello world");
@@ -153,10 +158,40 @@ ST_TEST(deps_hash_legacy_entry_falls_back_to_mtime_and_size) {
   ST_CHECK(!st::pkg::deps_entry_matches(file.path, time + 1'000'000'000, size, std::nullopt));
 }
 
-/// size 变了就必须判"变了"，**且不必去读内容**。
+/// **元数据变了但内容没变 → 判“未变”**（2026-10-26 新增，防 touch 白编）。
 ///
-/// 这一条同时钉住性能前提：日常改动（改了文件 → size 或 mtime 变）走快速路径，
-/// 不触发内容哈希。所以"加哈希"不会让正常构建变慢。
+/// 这是`touch` / `git checkout` / 批量刷 mtime 的场景。
+/// 旧实现（mtime 变即判变）下实测：仅 touch 一个被 33 个单元依赖的头
+/// （内容一字未改）⇒ **重编 34 个单元、发 20.3 s**。
+///
+/// 反之，若实现改成“快路径：mtime+size 一致就判未变”
+/// （那是另一个错误方向），就会被 `deps_hash_detects_equal_length_change_with_preserved_mtime`
+/// 抓住。两条用例合起来把两个方向都钉住。
+ST_TEST(deps_hash_accepts_timestamp_change_without_content_change) {
+  TempFile file("touched.txt");
+  file.write("stable content");
+  const auto time = *st::fs::modified_ns(file.path);
+  const auto size = *st::fs::file_size(file.path);
+  const auto hash = st::pkg::file_content_hash(file.path);
+  ST_REQUIRE(hash.has_value());
+
+  // 内容不变，但 mtime 被改动（模拟 touch）
+  force_mtime_ns(file.path, time + 5'000'000'000);
+  ST_CHECK_EQ(*st::fs::file_size(file.path), size);   // size 真没变
+
+  // 被测：内容没变 ⇒ 必须判“未变”（不因 mtime 变了就重编）
+  ST_CHECK(st::pkg::deps_entry_matches(file.path, time, size, hash));
+}
+
+/// size 变了必须判"变了"（内容哈希自然能抓到）。
+///
+/// ## 为何仍然保留这条（尽管“快路径”已不存在）
+///
+/// 2026-10-26 口径变更为“内容哈希是唯一真相源”后，不再有“size 变 → 短路”的快路径。
+/// 但这条仍有价值：它钉住“size 变化必须重编”这个**语义**，
+/// 与下面新增的 `touch` 用例一起构成两个方向：
+/// · 元数据变了 + 内容变了 ⇒ 重编；
+/// · 元数据变了 + 内容没变 ⇒ **不**重编（下面是新增的）。
 ST_TEST(deps_hash_size_change_short_circuits) {
   TempFile file("grow.txt");
   file.write("short");

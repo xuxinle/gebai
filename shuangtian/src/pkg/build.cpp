@@ -309,11 +309,27 @@ using DepsMeta = std::map<std::string, DepsEntry>;
   }
   const auto source_time = fs::modified_ns(unit.source);
   if (!source_time) return true;
-  if (*source_time > *object_time) return true;
-  for (const auto& dep : parse_depfile(unit.depfile)) {
-    const auto dep_time = fs::modified_ns(dep);
-    if (dep_time && *dep_time > *object_time) return true;
-    if (!dep_time && !fs::exists(dep)) return true;  // 头被删除 → 重编
+  // ## 为何不在这里“mtime 比 .o 新 ⇒ 直接重建”
+  //
+  // 原实现是这么写的，代价实测（2026-10-26）：
+  // 仅 `touch` 一个被 33 个单元依赖的头（内容一字未改）⇒ **重编 34 个单元、发 20.3 s**。
+  // 而“元数据变了但内容没变”在真实工作流里很常见：
+  // · `git checkout` / `stash pop` 切分支（mtime 常被整批刷新）
+  // · `touch` / 构建脚本批量更新时间戳
+  // · 编辑器原子保存（写临时文件再 rename）
+  // 这 20 秒是**纯浪费**：编出来的对象与已有的逐字节相同。
+  //
+  // 所以 mtime 不再参与“是否重建”的判定——**内容哈希是唯一真相源**。
+  // 唯一例外：`.meta` 侧边车缺失（本改动前构建的旧对象）时没有内容可依，
+  // 那时退回 mtime-only（与改动前一致），否则那些对象的依赖会被全量重算一遍。
+  if (!fs::is_regular_file(deps_meta_path(unit.object))) {
+    if (*source_time > *object_time) return true;
+    for (const auto& dep : parse_depfile(unit.depfile)) {
+      const auto dep_time = fs::modified_ns(dep);
+      if (dep_time && *dep_time > *object_time) return true;
+      if (!dep_time && !fs::exists(dep)) return true;  // 头被删除 → 重编
+    }
+    return false;
   }
   // **mtime+size 双校验（快路径）**：上面纯 mtime 判定抓不住「内容变了但 mtime
   // 没变」的窗口（同秒改+建、拷贝保留旧 mtime、时钟回拨）——旧对象一声不响地
@@ -344,6 +360,13 @@ using DepsMeta = std::map<std::string, DepsEntry>;
     for (const auto& dep : parse_depfile(unit.depfile)) {
       if (changed(dep)) return true;
     }
+    // ## 依赖文件被删除 ⇒ 必须重编
+    //
+    // `deps_entry_matches` 对“读不到”会返回 false（判“变了”）——那条路径已经覆盖了。
+    // 但**源文件被删**（而不是头）时 `changed()` 同样返回 true（读不到），也对。
+    // 这里额外显式检查一次：`.meta` 里有记录、而文件已经不存在 —— 这是
+    // “删了头但没重编”的典型场景（旧实现靠 `!dep_time && !fs::exists(dep)` 抓）。
+    if (!fs::is_regular_file(unit.source)) return true;
   }
   return false;
 }
@@ -1949,18 +1972,38 @@ auto file_content_hash(std::string_view path) -> std::optional<std::uint64_t> {
 
 /// 判定一份依赖记录是否仍与文件一致。**增量快路径与缓存复用共用这一份**——
 /// 两处各写一遍必然在边界条件上给出不同答案（这正是 `.meta` 当初设计成共用的理由）。
+///
+/// ## 口径：内容哈希是**唯一的真相源**（2026-10-26 定稿）
+///
+/// 两个历史版本都各自错一半：
+///
+/// | 实现 | 行为 | 错在哪 |
+/// |---|---|---|
+/// | v1（mtime 变即判变） | mtime 不等 → 直接判变 | `touch` / `checkout` 时**白编**（实测 touch 一个头 → 重编 34 单元、20.3 s） |
+/// | v2（快路径 mtime+size 一致即判未变） | 一致 → 直接判未变 | **等长修改 + mtime 还原**时漏报（本文件那条用例抓到的） |
+/// | v3（当前：**全比内容**） | 一律算哈希定论 | 代价：每次构建读一遍依赖（去重后 43.6 MB，~0.2 s） |
+///
+/// 选 v3 的理由：两个方向都错过的实现，无论哪个方向都不可接受——
+/// 一个导致“白等 20 秒”，一个导致“拿旧产物当新结果”。
+/// 而 0.2 s 的代价在 `st watch`（保存即构建）下几乎无感。
+///
+/// 对**读不到**的情形仍然保守：判“变了”（宁可多编一次，不交付旧代码）。
 auto deps_entry_matches(std::string_view path, std::int64_t recorded_mtime,
                         std::uint64_t recorded_size,
                         std::optional<std::uint64_t> recorded_hash) -> bool {
   const std::string owned(path);
-  const auto time = fs::modified_ns(owned);
-  // mtime 严格相等：`>` 抓不住时钟回拨（回拨后改的文件比记录还旧，看起来"更不新"）。
-  if (time.has_value() && *time != recorded_mtime) return false;
-  if (fs::file_size(owned).value_or(recorded_size) != recorded_size) return false;
-  // 前两项都一致 —— 只有这时才读内容（日常改动走不到这里）。
-  if (!recorded_hash.has_value()) return true;   // 旧格式记录：退回 (mtime, size)
+  (void)recorded_mtime;   // 保留参数：`.meta` 仍记录它们，便于人工排查与旧格式识别
+  (void)recorded_size;
+  if (!recorded_hash.has_value()) {
+    // 旧格式记录（无哈希）：没有内容可依，只能退回元数据比对。
+    // 两侧都一致才认为“未变”——保守方向。
+    const auto time = fs::modified_ns(owned);
+    const auto size_now = fs::file_size(owned);
+    return time.has_value() && *time == recorded_mtime && size_now.has_value() &&
+           *size_now == recorded_size;
+  }
   const auto digest = content_hash_cached(owned);
-  if (!digest.has_value()) return true;          // 读不到不因此判"变了"
+  if (!digest.has_value()) return false;   // 读不到：保守判“变了”
   return *digest == *recorded_hash;
 }
 
