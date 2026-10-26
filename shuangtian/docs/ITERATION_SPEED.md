@@ -317,6 +317,9 @@ st watch --interval 500 --debounce 400
 | `st lint` 并行化 | 18~23 s 单线程（3.5% 利用率），759 文件 | 部分规则**跨文件**（L16 层方向、清单豁免），分片需重新设计语义 |
 | `sqlite3.c` / `quickjs.c` 拆分 | 20.1 s / 14.2 s，合计占串行总量 17.6% | 第三方源码，改动风险高于收益 |
 | 15 处 `#include "examples/*.cpp"` | 改一个实现连带重编多个测试单元 | 需改 `st.pkg` 的 target 划分 |
+| **为 `text` 抽光栅化接口（A2）** | 实测发现**那个抽象早就在了**：`TextRenderer::draw` 收的是 `raster::Surface&`（接口），而 `Surface::blend_coverage_bitmap` **本来就是 `virtual`**，软件 Canvas 与 GPU GpuCanvas 各一份实现 | 不存在“新增虚调用”的风险（那次虚调用早就在热路径上）；真正的问题只是**类型定义在 `raster` 命名空间里**。纯归属问题，无性能收益——按“性能优先”不做 |
+| **`text → raster` 的 2 处违规** | 一处是 `Canvas scratch`（字形位图生成，**有 LRU 缓存，只冷启动某字形才走**），一处是 `Surface`（虚接口） | 都不是热路径问题，也不影响正确性；仅模块归属 |
+| **`control → ui`（5 处）** | 控制通道要操作 `ui::actions` / `ui::dsl` / `ui::selector` | 见 `docs/STRUCTURE.md` 的论证：抽出接口会让控制通道失去直接操作能力（UI 元素是自绘的，没有稳定 DOM 可依）|
 
 ## 7. 复现命令
 
