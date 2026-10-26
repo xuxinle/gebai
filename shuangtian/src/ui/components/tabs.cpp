@@ -11,7 +11,7 @@
 #include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/ui/icon.hpp"
 #include "st/ui/text_port.hpp"
 
@@ -53,7 +53,7 @@ constexpr double k_anim_pending = -2.0;
 /// 画 ×（两条对角线，stroke_path 走线条；颜色由调用方给）。
 void draw_cross(raster::Surface& canvas, math::Point center, float size, math::Color color) {
   const float half = size * 0.5f;
-  raster::Path cross;
+  math::Path cross;
   cross.move_to(math::Point{center.x - half, center.y - half});
   cross.line_to(math::Point{center.x + half, center.y + half});
   cross.move_to(math::Point{center.x + half, center.y - half});
@@ -69,7 +69,7 @@ void draw_triangle(raster::Surface& canvas, math::Point tip, float size, float d
   const float dy = static_cast<float>(std::sin(radians));
   const float px = -dy;
   const float py = dx;
-  raster::Path triangle;
+  math::Path triangle;
   triangle.move_to(tip);
   triangle.line_to(math::Point{tip.x - dx * size + px * size * 0.5f,
                                tip.y - dy * size + py * size * 0.5f});

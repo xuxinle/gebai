@@ -330,7 +330,7 @@ void apply_lcd_filter(std::span<float> subpixels) {
 /// 抽出来的理由：它是「同一字形、不同轮廓 → 两份位图」的那一步，而**墨量补偿**
 /// 需要对同一字形栅格化两次（基准 + 拟合后）后比墨量（见 `TextRenderer::glyph_bitmap`）。
 /// 复刻两份会把"两模式各做一次加粗"这类细节漏在副本里。
-[[nodiscard]] auto rasterize_grayscale(const raster::Path& local, int width, int height,
+[[nodiscard]] auto rasterize_grayscale(const math::Path& local, int width, int height,
                                        int out_width, int out_height, int supersample,
                                        int steps) -> std::vector<float> {
   raster::Canvas scratch(width, height);
@@ -1245,32 +1245,32 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
     // 字体单位（y 向上）→ 物理像素（y 向下，笔位为原点）。
     // `horizontal`：亚像素模式下水平坐标再乘 3——同一份几何、两种采样密度。
     const auto build_path = [&outline, scale](float horizontal) {
-      raster::Path path;
+      math::Path path;
       const auto map_point = [scale, horizontal](math::Point point) noexcept -> math::Point {
         return math::Point{point.x * scale * horizontal, -point.y * scale};
       };
       for (const auto& command : outline->commands()) {
         switch (command.kind) {
-          case raster::PathCommand::Kind::MoveTo:
+          case math::PathCommand::Kind::MoveTo:
             path.move_to(map_point(command.p1));
             break;
-          case raster::PathCommand::Kind::LineTo:
+          case math::PathCommand::Kind::LineTo:
             path.line_to(map_point(command.p1));
             break;
-          case raster::PathCommand::Kind::QuadTo:
+          case math::PathCommand::Kind::QuadTo:
             path.quad_to(map_point(command.p1), map_point(command.p2));
             break;
-          case raster::PathCommand::Kind::CubicTo:
+          case math::PathCommand::Kind::CubicTo:
             path.cubic_to(map_point(command.p1), map_point(command.p2), map_point(command.p3));
             break;
-          case raster::PathCommand::Kind::Close:
+          case math::PathCommand::Kind::Close:
             path.close();
             break;
         }
       }
       return path;
     };
-    const raster::Path transformed = build_path(1.0f);
+    const math::Path transformed = build_path(1.0f);
 
     // 包围盒**必须在拟合之前算**：拟合会把墨迹边界推到新的整数位置，
     // 于是 `floor`/`ceil` 的结果可能差 1px——位图尺寸随“拟合开关”跳变，
@@ -1312,7 +1312,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
     // 在**输出位图局部坐标**里拟合（先平移 `-min_x/-min_y`）：吸附格点因此锚定在
     // **位图自己的物理像素边界**上。直接在轮廓坐标里用整数格点会错位——
     // 位图原点是 `floor(bounds)-1`，与轮廓坐标的整数格点相差一个任意小数部分。
-    const raster::Path local_unfitted =
+    const math::Path local_unfitted =
         transformed.translated(static_cast<float>(-min_x), static_cast<float>(-min_y));
     // **该字号下实际生效的拟合模式**（见 `set_grid_fit_max_size`）：拟合在 UI 字号段
     // 对覆盖墨量是正收益、大字号转为轻微负收益；本变量是所有拟合路径的**唯一入口**，
@@ -1345,7 +1345,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
     //    “该空间的 1 物理像素 = 3 子像素”口径冲突（`stems_from_hints` 按 `options.grid`
     //    把 hint 乘到空间单位里）；而亚像素分支会重建 3× 空间及其提示。
     const st::text::GridFitResult fit_result = st::text::grid_fit(local_unfitted, effective_options);
-    const raster::Path& fitted = fit_result.path;
+    const math::Path& fitted = fit_result.path;
     // 把“本可以对齐却没对”的漏网报出来（见 `GlyphBitmap::fit_rejected_stems`）：
     // 被拒笔画多的字形就是“同一字里粗细不一”的现场。
     bitmap->fit_rejected_stems = fit_result.rejected_stems;
@@ -1398,7 +1398,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
         // 于是字形被纵向拉到 3 倍高、只有上半部分落在画布里
         // （症状：文字像被切成两半。实测就踩到了，靠 1:1 截图对比定位）。
         // 只因为“反正是同一个轮廓”而换成 scaled 是错的：那两个函数的语义不同。
-        raster::Path local = build_path(static_cast<float>(kSubpixelColumns));
+        math::Path local = build_path(static_cast<float>(kSubpixelColumns));
         // **亚像素空间里用字体自带的笔画提示重跑一次拟合**（方案 B 的落点）。
         //
         // 为什么必须在这里重跑而不是沿用上面那次：上面那次拟合跑在 `horizontal=1`
@@ -1461,7 +1461,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
             lcd_options.max_shift = 1.0f;
             lcd_options.max_drift = 0.75f;
           }
-          const raster::Path local_lcd = local.translated(static_cast<float>(-min_x * kSubpixelColumns),
+          const math::Path local_lcd = local.translated(static_cast<float>(-min_x * kSubpixelColumns),
                                                           static_cast<float>(-min_y));
           lcd_fit = st::text::grid_fit(local_lcd, lcd_options);
           bitmap->fit_hint_stems = lcd_fit->hint_stems;

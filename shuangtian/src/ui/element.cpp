@@ -6,7 +6,7 @@
 
 #include "st/core/log.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/ui/line_layout.hpp"
 
 namespace st::ui {
@@ -897,7 +897,7 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
         std::max(0.0f, std::round(box.right()) - std::round(box.x)),
         std::max(0.0f, std::round(box.bottom()) - std::round(box.y))};
     canvas.fill_path(
-        raster::make_rounded_border_ring(snapped, style_.radius, style_.border_width),
+        math::make_rounded_border_ring(snapped, style_.radius, style_.border_width),
         raster::Paint::solid(border),
         raster::DrawOptions{.opacity = style_.opacity});
   }

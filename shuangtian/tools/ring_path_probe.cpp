@@ -12,12 +12,12 @@
 
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 
 namespace {
 
-using st::raster::Path;
-using st::raster::PathCommand;
+using st::math::Path;
+using st::math::PathCommand;
 
 [[nodiscard]] auto kind_name(PathCommand::Kind kind) -> std::string_view {
   switch (kind) {
@@ -181,14 +181,14 @@ auto main(int argc, char** argv) -> int {
   st::probe::result verdict{};
 
   const st::math::Rect box{0.0f, 0.0f, 100.0f, 60.0f};
-  const Path ring = st::raster::make_rounded_border_ring(box, 14.0f, 1.0f);
+  const Path ring = st::math::make_rounded_border_ring(box, 14.0f, 1.0f);
   st::print("=== 环路径（100x60, r=14, w=1）===\n");
   dump_commands(ring);
   dump_polylines(ring, 0.25f);
   check_inner_arc_geometry(ring, box, 14.0f, 1.0f);
   check_wall_thickness(ring, 14.0f, 1.0f);
   // 同一组几何在 2x 下的形态（内圈半径应恰好 = (14-1)*2 = 26 物理px）
-  const Path ring2 = st::raster::make_rounded_border_ring(
+  const Path ring2 = st::math::make_rounded_border_ring(
       st::math::Rect{0.0f, 0.0f, 200.0f, 120.0f}, 28.0f, 2.0f);
   check_inner_arc_geometry(ring2, st::math::Rect{0.0f, 0.0f, 200.0f, 120.0f}, 28.0f, 2.0f);
   check_wall_thickness(ring2, 28.0f, 2.0f);

@@ -25,7 +25,7 @@
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/ui/icon.hpp"
 #include "st/ui/theme.hpp"
 
@@ -90,7 +90,7 @@ constexpr Color kSunken = Color::rgb(0xDD, 0xDD, 0xE4);       ///< surface_sunke
 
 void fill_rounded(Canvas& canvas, Rect rect, float radius, Color color) {
   if (rect.is_empty() || color.a == 0U) return;
-  st::raster::Path path;
+  st::math::Path path;
   path.add_rounded_rect(rect, std::min(radius, std::min(rect.width, rect.height) * 0.5f));
   canvas.fill_path(path, st::raster::Paint::solid(color));
 }

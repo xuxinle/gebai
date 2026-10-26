@@ -89,22 +89,22 @@ struct Tally {
     if (!outline || outline->is_empty()) continue;
 
     // 1) 字体单位（y 向上）→ 物理像素（y 向下），与 text.cpp 的 build_path 同口径
-    st::raster::Path pixel;
+    st::math::Path pixel;
     const auto map = [scale](st::math::Point point) {
       return st::math::Point{static_cast<float>(point.x * scale),
                              static_cast<float>(-point.y * scale)};
     };
     for (const auto& command : outline->commands()) {
       switch (command.kind) {
-        case st::raster::PathCommand::Kind::MoveTo: pixel.move_to(map(command.p1)); break;
-        case st::raster::PathCommand::Kind::LineTo: pixel.line_to(map(command.p1)); break;
-        case st::raster::PathCommand::Kind::QuadTo:
+        case st::math::PathCommand::Kind::MoveTo: pixel.move_to(map(command.p1)); break;
+        case st::math::PathCommand::Kind::LineTo: pixel.line_to(map(command.p1)); break;
+        case st::math::PathCommand::Kind::QuadTo:
           pixel.quad_to(map(command.p1), map(command.p2));
           break;
-        case st::raster::PathCommand::Kind::CubicTo:
+        case st::math::PathCommand::Kind::CubicTo:
           pixel.cubic_to(map(command.p1), map(command.p2), map(command.p3));
           break;
-        case st::raster::PathCommand::Kind::Close: pixel.close(); break;
+        case st::math::PathCommand::Kind::Close: pixel.close(); break;
       }
     }
     // 2) 可选：网格拟合（与 TextRenderer 的接入点一致：像素空间、栅格化之前）
@@ -134,26 +134,26 @@ struct Tally {
     };
     for (const auto& command : commands) {
       switch (command.kind) {
-        case st::raster::PathCommand::Kind::MoveTo:
+        case st::math::PathCommand::Kind::MoveTo:
           subpath = cursor;
           last = cursor;
           has = true;
           cursor += 1;
           break;
-        case st::raster::PathCommand::Kind::LineTo:
+        case st::math::PathCommand::Kind::LineTo:
           if (has) check_edge(last, cursor);
           last = cursor;
           cursor += 1;
           break;
-        case st::raster::PathCommand::Kind::QuadTo:
+        case st::math::PathCommand::Kind::QuadTo:
           cursor += 2;
           last = cursor - 1;
           break;
-        case st::raster::PathCommand::Kind::CubicTo:
+        case st::math::PathCommand::Kind::CubicTo:
           cursor += 3;
           last = cursor - 1;
           break;
-        case st::raster::PathCommand::Kind::Close:
+        case st::math::PathCommand::Kind::Close:
           if (has && last != subpath) check_edge(last, subpath);
           last = subpath;
           break;
@@ -161,7 +161,7 @@ struct Tally {
     }
 
     // 4) 过渡带统计（竖笔画宽度 → 部分覆盖像素数）：用拟合后的**扁平化折线**做
-    st::raster::Path probe = mode == GridFitMode::Off
+    st::math::Path probe = mode == GridFitMode::Off
                                  ? pixel
                                  : st::text::grid_fit(pixel, {.mode = mode}).path;
     (void)probe;

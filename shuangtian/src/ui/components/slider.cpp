@@ -11,7 +11,7 @@
 #include "st/core/string.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/ui/text_port.hpp"
 
 #include "components_internal.hpp"
@@ -179,7 +179,7 @@ void Slider::paint_content(const RenderContext& context, raster::Surface& canvas
                      math::Point{shadow.offset_x, shadow.offset_y});
   canvas.fill_circle(center, knob_radius, raster::Paint::solid(colors.on_primary));
   // 发丝描边：白色滑块压在浅色轨道/深色主题下都有轮廓。
-  raster::Path edge;
+  math::Path edge;
   edge.add_circle(center, std::max(knob_radius - metrics.border_width * 0.5f, 0.0f));
   canvas.stroke_path(edge, raster::Paint::solid(colors.border_strong), metrics.border_width);
   if (focused_) {

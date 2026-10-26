@@ -2164,7 +2164,7 @@ class GpuCanvas final : public Surface {
     mix(static_cast<std::uint64_t>(area.y));
     mix(static_cast<std::uint64_t>(area.width));
     mix(static_cast<std::uint64_t>(area.height));
-    for (const st::raster::PathCommand& command : path.commands()) {
+    for (const st::math::PathCommand& command : path.commands()) {
       mix(static_cast<std::uint64_t>(command.kind));
       for (const st::math::Point& point : {command.p1, command.p2, command.p3}) {
         mix(quantize(point.x));

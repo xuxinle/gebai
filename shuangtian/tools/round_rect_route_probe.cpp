@@ -86,7 +86,7 @@ auto main(int argc, char** argv) -> int {
 
     // B) 候选：等价路径 = `fill_path(圆角路径)`，它**走几何贴图缓存**。
     //    预热一次让缓存建好后，后续都是命中。
-    st::raster::Path path;
+    st::math::Path path;
     path.add_rounded_rect(box, shape.radius);
     Canvas canvas_b(kWidth, kHeight, 1.0f);
     canvas_b.clear(Color::rgb(0xF0, 0xF0, 0xF4));

@@ -16,14 +16,14 @@
 
 #include "motion.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 
 namespace caiyun {
 
 namespace {
 
 using st::raster::Paint;
-using st::raster::Path;
+using st::math::Path;
 using st::ui::Event;
 using st::ui::EventKind;
 
@@ -590,7 +590,7 @@ void MonitorView::paint_content(const st::ui::RenderContext& context,
   canvas.draw_canvas(frame_, fitted);
   // 边框：让“预览区到哪里为止”在浅底主题下也清楚——贴紧**实际画面**（不是面板
   // 区域），否则边框会把留白也算进去，看起来像画面没对齐。
-  const Path outline = st::raster::make_rounded_rect(fitted, 2.0f);
+  const Path outline = st::math::make_rounded_rect(fitted, 2.0f);
   canvas.stroke_path(outline, Paint::solid(border_), 1.0f);
   (void)context;
 }

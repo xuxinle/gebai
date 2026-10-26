@@ -21,7 +21,7 @@
 #include "st/core/print.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/test/test.hpp"
 #include "st/ui/icon.hpp"
 #include "st/ui/components/basic.hpp"

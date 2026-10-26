@@ -37,40 +37,40 @@ Stats stats_from_ft(FT_Outline& outline) {
   return stats;
 }
 
-Stats stats_from_path(const st::raster::Path& path) {
+Stats stats_from_path(const st::math::Path& path) {
   Stats stats;
   st::math::Point previous{0.0f, 0.0f};
   st::math::Point start{0.0f, 0.0f};
   for (const auto& command : path.commands()) {
     switch (command.kind) {
-      case st::raster::PathCommand::Kind::MoveTo:
+      case st::math::PathCommand::Kind::MoveTo:
         ++stats.contours;
         previous = command.p1;
         start = command.p1;
         break;
-      case st::raster::PathCommand::Kind::LineTo:
+      case st::math::PathCommand::Kind::LineTo:
         stats.area += static_cast<double>(previous.x) * command.p1.y - static_cast<double>(command.p1.x) * previous.y;
         previous = command.p1;
         ++stats.points;
         break;
-      case st::raster::PathCommand::Kind::QuadTo:
-      case st::raster::PathCommand::Kind::CubicTo: {
-        const st::math::Point end = command.kind == st::raster::PathCommand::Kind::QuadTo ? command.p2 : command.p3;
+      case st::math::PathCommand::Kind::QuadTo:
+      case st::math::PathCommand::Kind::CubicTo: {
+        const st::math::Point end = command.kind == st::math::PathCommand::Kind::QuadTo ? command.p2 : command.p3;
         stats.area += static_cast<double>(previous.x) * end.y - static_cast<double>(end.x) * previous.y;
         previous = end;
-        stats.points += command.kind == st::raster::PathCommand::Kind::QuadTo ? 2 : 3;
+        stats.points += command.kind == st::math::PathCommand::Kind::QuadTo ? 2 : 3;
         break;
       }
-      case st::raster::PathCommand::Kind::Close:
+      case st::math::PathCommand::Kind::Close:
         stats.area += static_cast<double>(previous.x) * start.y - static_cast<double>(start.x) * previous.y;
         previous = start;
         break;
     }
-    if (command.kind != st::raster::PathCommand::Kind::Close) {
-      const st::math::Point p = command.kind == st::raster::PathCommand::Kind::MoveTo ? command.p1
-                                : command.kind == st::raster::PathCommand::Kind::LineTo ? command.p1
+    if (command.kind != st::math::PathCommand::Kind::Close) {
+      const st::math::Point p = command.kind == st::math::PathCommand::Kind::MoveTo ? command.p1
+                                : command.kind == st::math::PathCommand::Kind::LineTo ? command.p1
                                                                                         : command.p3;
-      if (command.kind != st::raster::PathCommand::Kind::MoveTo) {
+      if (command.kind != st::math::PathCommand::Kind::MoveTo) {
         stats.min_x = std::min(stats.min_x, static_cast<double>(p.x));
         stats.max_x = std::max(stats.max_x, static_cast<double>(p.x));
         stats.min_y = std::min(stats.min_y, static_cast<double>(p.y));

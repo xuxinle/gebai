@@ -23,7 +23,7 @@
 #include "st/math/color.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/raster/surface.hpp"
 
 namespace st::raster {

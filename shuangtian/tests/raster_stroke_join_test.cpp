@@ -22,7 +22,7 @@
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/test/test.hpp"
 
 using st::math::Color;
@@ -30,7 +30,7 @@ using st::math::Point;
 using st::raster::Canvas;
 using st::raster::DrawOptions;
 using st::raster::Paint;
-using st::raster::Path;
+using st::math::Path;
 
 namespace {
 

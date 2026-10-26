@@ -23,7 +23,7 @@
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/text/text.hpp"
 #include "st/ui/theme.hpp"
 
@@ -71,10 +71,10 @@ auto clear_canvas(st::raster::Canvas& canvas) -> void {
 /// 环形边框路径：外圈圆角矩形（正向）+ 内圈（反向）——同一路径里两条子路径，
 /// 非零环绕规则自然挖出内洞。替代「描边」的候选实现。
 [[nodiscard]] auto make_border_ring(st::math::Rect outer, float radius, float width)
-    -> st::raster::Path {
-  st::raster::Path path;
+    -> st::math::Path {
+  st::math::Path path;
   path.add_rounded_rect(outer, radius);
-  st::raster::Path inner;
+  st::math::Path inner;
   const st::math::Rect box = outer.inset(st::math::Insets::all(width));
   inner.add_rounded_rect(box, radius > width ? radius - width : 0.0f);
   inner.reverse();
@@ -161,26 +161,26 @@ auto main(int argc, char** argv) -> int {
   // —— 边框：描边（现状） vs 环形填充（候选） ——
   add("边框 描边 1px r=12（现状）", measure(repeat, [&](int index) {
         if (config.clear_each) clear_canvas(canvas);
-        st::raster::Path outline;
+        st::math::Path outline;
         outline.add_rounded_rect(box.inset(st::math::Insets::all(0.5f)), kRadius - 0.5f);
         canvas.stroke_path(outline, border, 1.0f);
       }));
   add("边框 环形填充 1px r=12（候选）", measure(repeat, [&](int index) {
         if (config.clear_each) clear_canvas(canvas);
-        const st::raster::Path ring = make_border_ring(box, kRadius, 1.0f);
+        const st::math::Path ring = make_border_ring(box, kRadius, 1.0f);
         canvas.fill_path(ring, border);
       }));
   add("边框 描边 1px 直角（对照）", measure(repeat, [&](int index) {
         if (config.clear_each) clear_canvas(canvas);
-        st::raster::Path outline;
+        st::math::Path outline;
         outline.add_rect(box.inset(st::math::Insets::all(0.5f)));
         canvas.stroke_path(outline, border, 1.0f);
       }));
   add("边框 环形填充 1px 直角（对照）", measure(repeat, [&](int index) {
         if (config.clear_each) clear_canvas(canvas);
-        st::raster::Path ring;
+        st::math::Path ring;
         ring.add_rect(box);
-        st::raster::Path inner;
+        st::math::Path inner;
         inner.add_rect(box.inset(st::math::Insets::all(1.0f)));
         inner.reverse();
         ring.add_path(inner);
@@ -211,7 +211,7 @@ auto main(int argc, char** argv) -> int {
         canvas.draw_shadow(target, kRadius, md.blur, md.color,
                            st::math::Point{md.offset_x, md.offset_y});
         canvas.fill_rect(target, white, kRadius);
-        st::raster::Path outline;
+        st::math::Path outline;
         outline.add_rounded_rect(target.inset(st::math::Insets::all(0.5f)), kRadius - 0.5f);
         canvas.stroke_path(outline, border, 1.0f);
         if (renderer.has_value()) {

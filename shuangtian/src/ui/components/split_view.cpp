@@ -10,7 +10,7 @@
 
 #include "st/core/string.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/ui/components/basic.hpp"   // `Divider::kLineThickness`（分割线统一厚度）
 #include "components_internal.hpp"
 

@@ -519,8 +519,8 @@ auto Icon::ink_size(std::string_view name, math::Size box) -> math::Size {
                     ink.height * scale * fit + stroke_extent};
 }
 
-auto Icon::path(std::string_view name, math::Rect box, float stroke_width) -> raster::Path {
-  raster::Path path;
+auto Icon::path(std::string_view name, math::Rect box, float stroke_width) -> math::Path {
+  math::Path path;
   const IconGlyph* glyph = find(name);
   if (glyph == nullptr || box.is_empty()) return path;
   (void)stroke_width;
@@ -642,7 +642,7 @@ auto Icon::effective_stroke(std::string_view name, float box_size, float stroke_
 void Icon::draw_filled(raster::Surface& canvas, std::string_view name, math::Rect box,
                        math::Color color) {
   if (box.is_empty() || color.a == 0U) return;
-  raster::Path path = Icon::path(name, box, 0.0f);
+  math::Path path = Icon::path(name, box, 0.0f);
   if (path.is_empty()) return;
   canvas.fill_path(path, raster::Paint::solid(color));
 }
@@ -726,7 +726,7 @@ void Icon::draw(raster::Surface& canvas, std::string_view name, math::Rect box, 
   // 线宽走 `effective_stroke`（**单一事实源**）：声明值 × 盒径/24，且 ≥ 1.0 逻辑 px
   // 下限（小盒图标不「细弱发灰」，见该函数的说明）；显式传值的调用方不受影响。
   const float width = Icon::effective_stroke(name, std::min(box.width, box.height), stroke_width);
-  raster::Path path = Icon::path(name, box, width);
+  math::Path path = Icon::path(name, box, width);
   if (path.is_empty()) return;
   if (glyph->filled) {
     canvas.fill_path(path, raster::Paint::solid(color));

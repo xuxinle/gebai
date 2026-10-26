@@ -10,7 +10,7 @@
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "components_internal.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/icon.hpp"

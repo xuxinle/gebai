@@ -224,7 +224,7 @@ inline constexpr float kMaxQuantizeErrorPx = 0.2f;
 
 /// 收集全部**边**（直线段与曲线段，`Close` 也构成一条），并标出每边涉及的点。
 /// 索引均为 `raw_points()` 空间。
-[[nodiscard]] auto collect_edges(const raster::Path& path, const std::vector<std::size_t>& offsets,
+[[nodiscard]] auto collect_edges(const math::Path& path, const std::vector<std::size_t>& offsets,
                                  int axis) -> std::vector<Edge> {
   std::vector<Edge> edges;
   const auto commands = path.commands();
@@ -264,24 +264,24 @@ inline constexpr float kMaxQuantizeErrorPx = 0.2f;
   for (std::size_t index = 0; index < commands.size(); ++index) {
     const std::size_t offset = offsets[index];
     switch (commands[index].kind) {
-      case raster::PathCommand::Kind::MoveTo:
+      case math::PathCommand::Kind::MoveTo:
         subpath_start = offset;
         has_subpath = true;
         last = offset;
         break;
-      case raster::PathCommand::Kind::LineTo:
+      case math::PathCommand::Kind::LineTo:
         if (has_subpath) push(last, offset, {});
         last = offset;
         break;
-      case raster::PathCommand::Kind::QuadTo:
+      case math::PathCommand::Kind::QuadTo:
         if (has_subpath) push(last, offset + 1U, {offset});
         last = offset + 1U;
         break;
-      case raster::PathCommand::Kind::CubicTo:
+      case math::PathCommand::Kind::CubicTo:
         if (has_subpath) push(last, offset + 2U, {offset, offset + 1U});
         last = offset + 2U;
         break;
-      case raster::PathCommand::Kind::Close:
+      case math::PathCommand::Kind::Close:
         if (has_subpath && last != subpath_start) push(last, subpath_start, {});
         last = subpath_start;
         break;
@@ -361,7 +361,7 @@ auto bind_hint_points(const std::vector<math::Point>& points, int axis, float ed
 
 }  // namespace
 
-auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFitResult {
+auto grid_fit(const math::Path& path, const GridFitOptions& options) -> GridFitResult {
   GridFitResult result;
   result.path = path;
   if (options.mode == GridFitMode::Off || path.is_empty() || options.max_stem_width <= 0.0f) {
@@ -383,11 +383,11 @@ auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFi
       offsets[index] = cursor;
       std::size_t count = 0;
       switch (commands[index].kind) {
-        case raster::PathCommand::Kind::MoveTo:
-        case raster::PathCommand::Kind::LineTo: count = 1; break;
-        case raster::PathCommand::Kind::QuadTo: count = 2; break;
-        case raster::PathCommand::Kind::CubicTo: count = 3; break;
-        case raster::PathCommand::Kind::Close: count = 0; break;
+        case math::PathCommand::Kind::MoveTo:
+        case math::PathCommand::Kind::LineTo: count = 1; break;
+        case math::PathCommand::Kind::QuadTo: count = 2; break;
+        case math::PathCommand::Kind::CubicTo: count = 3; break;
+        case math::PathCommand::Kind::Close: count = 0; break;
       }
       counts[index] = count;
       cursor += count;
@@ -675,7 +675,7 @@ auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFi
     };
     for (std::size_t index = 0; index < commands.size(); ++index) {
       const auto kind = commands[index].kind;
-      if (kind != raster::PathCommand::Kind::QuadTo && kind != raster::PathCommand::Kind::CubicTo) {
+      if (kind != math::PathCommand::Kind::QuadTo && kind != math::PathCommand::Kind::CubicTo) {
         continue;
       }
       const std::size_t offset = offsets[index];

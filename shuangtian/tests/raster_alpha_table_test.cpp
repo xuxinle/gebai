@@ -76,7 +76,7 @@ ST_TEST(alpha_table_matches_per_pixel_scaling) {
     with_table.fill_circle(st::math::Point{60.0f, 50.0f}, 34.0f, paint, {.opacity = item.opacity});
     with_table.fill_path(
         [] {
-          st::raster::Path path;
+          st::math::Path path;
           path.add_rounded_rect(st::math::Rect{80.0f, 60.0f, 60.0f, 40.0f}, 12.0f);
           return path;
         }(),
@@ -87,7 +87,7 @@ ST_TEST(alpha_table_matches_per_pixel_scaling) {
     per_pixel.fill_circle(st::math::Point{60.0f, 50.0f}, 34.0f, paint, {.opacity = item.opacity});
     per_pixel.fill_path(
         [] {
-          st::raster::Path path;
+          st::math::Path path;
           path.add_rounded_rect(st::math::Rect{80.0f, 60.0f, 60.0f, 40.0f}, 12.0f);
           return path;
         }(),

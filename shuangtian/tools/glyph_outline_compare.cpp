@@ -31,7 +31,7 @@
 
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/text/font.hpp"
 
 namespace {
@@ -98,30 +98,30 @@ void sample_quad(Contour& c, double x0, double y0, double x1, double y1, double 
   }
 }
 
-/// 霜天侧：`raster::Path` 命令流 → 折线（字体单位）。
-std::vector<Contour> contours_st(const st::raster::Path& path) {
+/// 霜天侧：`math::Path` 命令流 → 折线（字体单位）。
+std::vector<Contour> contours_st(const st::math::Path& path) {
   std::vector<Contour> out;
-  for (const st::raster::PathCommand& cmd : path.commands()) {
+  for (const st::math::PathCommand& cmd : path.commands()) {
     switch (cmd.kind) {
-      case st::raster::PathCommand::Kind::MoveTo:
+      case st::math::PathCommand::Kind::MoveTo:
         out.push_back(Contour{});
         out.back().points.push_back(cmd.p1);
         break;
-      case st::raster::PathCommand::Kind::LineTo:
+      case st::math::PathCommand::Kind::LineTo:
         if (out.empty()) out.push_back(Contour{});
         out.back().points.push_back(cmd.p1);
         break;
-      case st::raster::PathCommand::Kind::QuadTo:
+      case st::math::PathCommand::Kind::QuadTo:
         if (out.empty()) out.push_back(Contour{});
         sample_quad(out.back(), out.back().points.back().x, out.back().points.back().y, cmd.p1.x,
                     cmd.p1.y, cmd.p2.x, cmd.p2.y);
         break;
-      case st::raster::PathCommand::Kind::CubicTo:
+      case st::math::PathCommand::Kind::CubicTo:
         if (out.empty()) out.push_back(Contour{});
         sample_cubic(out.back(), out.back().points.back().x, out.back().points.back().y, cmd.p1.x,
                      cmd.p1.y, cmd.p2.x, cmd.p2.y, cmd.p3.x, cmd.p3.y);
         break;
-      case st::raster::PathCommand::Kind::Close:
+      case st::math::PathCommand::Kind::Close:
         break;   // 隐式闭合由 analyze 处理
     }
   }

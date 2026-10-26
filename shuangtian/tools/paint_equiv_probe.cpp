@@ -26,7 +26,7 @@
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/ui/theme.hpp"
 
 namespace {
@@ -68,7 +68,7 @@ auto diff(const st::raster::Canvas& left, const st::raster::Canvas& right) -> Di
 
 /// 把一条路径按「点序倒序」重发（绕向翻转；曲线先扁平化）。
 /// 与 `src/ui/svg.cpp` 的孔洞构造同一手法——`Path::reverse()` 不能用（那会拆散子路径）。
-[[nodiscard]] auto append_reversed(st::raster::Path& out, const st::raster::Path& source,
+[[nodiscard]] auto append_reversed(st::math::Path& out, const st::math::Path& source,
                                    float tolerance = 0.2f) -> void {
   for (const auto& polyline : source.flatten(tolerance)) {
     if (polyline.points.size() < 2) continue;
@@ -82,10 +82,10 @@ auto diff(const st::raster::Canvas& left, const st::raster::Canvas& right) -> Di
 
 /// 环形边框（外圈 + 倒序内圈）。`outer` 为**外边缘**矩形，`width` 为边框厚度。
 [[nodiscard]] auto make_border_ring(st::math::Rect outer, float radius, float width)
-    -> st::raster::Path {
-  st::raster::Path path;
+    -> st::math::Path {
+  st::math::Path path;
   path.add_rounded_rect(outer, radius);
-  st::raster::Path inner;
+  st::math::Path inner;
   const st::math::Rect box = outer.inset(st::math::Insets::all(width));
   inner.add_rounded_rect(box, radius > width ? radius - width : 0.0f);
   append_reversed(path, inner);
@@ -148,7 +148,7 @@ auto main(int argc, char** argv) -> int {
     stroke_canvas.clear(st::math::Color::rgb(0xF7, 0xF8, 0xFA));
     stroke_canvas.fill_rect(box, white, item.radius);
     {
-      st::raster::Path outline;
+      st::math::Path outline;
       outline.add_rounded_rect(box.inset(st::math::Insets::all(half)),
                                item.radius > half ? item.radius - half : 0.0f);
       stroke_canvas.stroke_path(outline, border, item.border_width);
@@ -170,15 +170,15 @@ auto main(int argc, char** argv) -> int {
     st::raster::Canvas stroke_canvas = st::raster::Canvas::for_logical_size(kWidth, kHeight, 1.0f);
     stroke_canvas.clear(st::math::Color::rgb(0xF7, 0xF8, 0xFA));
     stroke_canvas.fill_rect(box, white, 0.0f);
-    st::raster::Path outline;
+    st::math::Path outline;
     outline.add_rect(box.inset(st::math::Insets::all(0.5f)));
     stroke_canvas.stroke_path(outline, border, 1.0f);
     st::raster::Canvas ring_canvas = st::raster::Canvas::for_logical_size(kWidth, kHeight, 1.0f);
     ring_canvas.clear(st::math::Color::rgb(0xF7, 0xF8, 0xFA));
     ring_canvas.fill_rect(box, white, 0.0f);
-    st::raster::Path ring;
+    st::math::Path ring;
     ring.add_rect(box);
-    st::raster::Path inner;
+    st::math::Path inner;
     inner.add_rect(box.inset(st::math::Insets::all(1.0f)));
     append_reversed(ring, inner);
     ring_canvas.fill_path(ring, border);
@@ -189,12 +189,12 @@ auto main(int argc, char** argv) -> int {
   st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(1280, 800, 1.0f);
   canvas.clear(st::math::Color::rgb(0xF7, 0xF8, 0xFA));
   const st::math::Rect box{100.0f, 100.0f, 140.0f, 48.0f};
-  const st::raster::Path outline = [&] {
-    st::raster::Path p;
+  const st::math::Path outline = [&] {
+    st::math::Path p;
     p.add_rounded_rect(box.inset(st::math::Insets::all(0.5f)), 11.5f);
     return p;
   }();
-  const st::raster::Path ring = make_border_ring(box, 12.0f, 1.0f);
+  const st::math::Path ring = make_border_ring(box, 12.0f, 1.0f);
   st::print("  描边 stroke_path        {:.4} ms\n",
             best_ms(repeat, [&] { canvas.stroke_path(outline, border, 1.0f); }));
   st::print("  环形 fill_path          {:.4} ms\n",

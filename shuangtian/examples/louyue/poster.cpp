@@ -746,7 +746,7 @@ void render_poster(Canvas& target, const PosterScript& poster,
         const float cx = block.x * static_cast<float>(frame.width);
         const float cy = block.y * frame.scale;
         target.fill_circle(Point{cx, cy}, radius, Paint::solid(with_alpha(color, 0.16f)));
-        target.stroke_path(st::raster::make_circle(Point{cx, cy}, radius),
+        target.stroke_path(st::math::make_circle(Point{cx, cy}, radius),
                            Paint::solid(color), std::max(1.5f, 3.0f * frame.scale));
         target.fill_circle(Point{cx, cy}, radius * 0.34f, Paint::solid(color));
         break;
@@ -771,7 +771,7 @@ void render_poster(Canvas& target, const PosterScript& poster,
           // 无素材库 / 未指定图片：画占位框（不静默——让人一眼看出"这里该有图"）。
           target.fill_rect(area, Paint::solid(Color{30, 40, 60, 255}));
           {
-            st::raster::Path border;
+            st::math::Path border;
             border.add_rect(area);
             target.stroke_path(border, Paint::solid(with_alpha(color, 0.35f)),
                                std::max(1.0f, 1.5f * frame.scale));
@@ -784,7 +784,7 @@ void render_poster(Canvas& target, const PosterScript& poster,
           // **缺失要看得见**：静默跳过会让"图没进来"看起来像设计就是没图。
           target.fill_rect(area, Paint::solid(Color{48, 24, 28, 255}));
           {
-            st::raster::Path border;
+            st::math::Path border;
             border.add_rect(area);
             target.stroke_path(border, Paint::solid(Color{220, 120, 120, 255}),
                                std::max(1.0f, 2.0f * frame.scale));
@@ -860,7 +860,7 @@ void render_poster(Canvas& target, const PosterScript& poster,
         // 任意角度直线。用独立坐标（x1/y1 → x2/y2，设计像素）而不是 x 比例锚点——
         // 斜线的两个端点没有共同的"锚点"语义，用比例只会让语义含糊。
         const float scale = frame.scale;
-        st::raster::Path path;
+        st::math::Path path;
         path.move_to(Point{block.x1 * scale, block.y1 * scale});
         path.line_to(Point{block.x2 * scale, block.y2 * scale});
         target.stroke_path(path, Paint::solid(color), std::max(1.0f, block.thickness * scale));
@@ -869,7 +869,7 @@ void render_poster(Canvas& target, const PosterScript& poster,
       case BlockKind::Path: {
         if (block.points.size() < 4) break;
         const float scale = frame.scale;
-        st::raster::Path path;
+        st::math::Path path;
         bool first = true;
         for (std::size_t i = 0; i + 1 < block.points.size(); i += 2) {
           const Point point{block.points[i] * scale, block.points[i + 1] * scale};
@@ -906,7 +906,7 @@ void render_poster(Canvas& target, const PosterScript& poster,
               Point{box.x, box.y}, Point{box.x, box.y + box.height},
               {GradientStop{0.0f, color},
                GradientStop{1.0f, with_alpha(block.color_alt, block.alpha)}});
-          st::raster::Path path;
+          st::math::Path path;
           if (radius > 0.5f) {
             path.add_rounded_rect(box, radius);
           } else {
@@ -914,7 +914,7 @@ void render_poster(Canvas& target, const PosterScript& poster,
           }
           target.fill_path(path, Paint::with_gradient(std::move(gradient)));
         } else if (radius > 0.5f) {
-          target.fill_path(st::raster::make_rounded_rect(box, radius), Paint::solid(color));
+          target.fill_path(st::math::make_rounded_rect(box, radius), Paint::solid(color));
         } else {
           target.fill_rect(box, Paint::solid(color));
         }

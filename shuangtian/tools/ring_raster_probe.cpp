@@ -13,12 +13,12 @@
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 
 namespace {
 
 using st::raster::Canvas;
-using st::raster::Path;
+using st::math::Path;
 
 constexpr int kLogicalW = 260;
 constexpr int kLogicalH = 200;
@@ -97,7 +97,7 @@ auto main(int argc, char** argv) -> int {
                        static_cast<double>(kRadius) - static_cast<double>(kWidth)),
          scale);
 
-  report("环(工厂)", st::raster::make_rounded_border_ring(box, kRadius, kWidth),
+  report("环(工厂)", st::math::make_rounded_border_ring(box, kRadius, kWidth),
          analytic_ring(w, h, static_cast<double>(kRadius), static_cast<double>(kWidth)), scale);
 
   // —— 决定性对照：竖带 vs 斜带（几何完全已知，面积都是 w × len）——

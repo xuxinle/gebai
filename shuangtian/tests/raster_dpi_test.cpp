@@ -2,7 +2,7 @@
 
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/test/test.hpp"
 #include "st/text/text.hpp"
 #include "st/ui/element.hpp"
@@ -106,7 +106,7 @@ ST_TEST(dpi_aligned_edges_stay_crisp) {  Canvas canvas = Canvas::for_logical_siz
 
 ST_TEST(dpi_stroke_width_scales) {
   const auto draw_hline = [](Canvas& canvas) {
-    st::raster::Path line;
+    st::math::Path line;
     line.move_to(Point{2.0f, 5.0f});
     line.line_to(Point{38.0f, 5.0f});
     canvas.stroke_path(line, Paint::solid(Color::rgb(0, 0, 255)), 1.0f);

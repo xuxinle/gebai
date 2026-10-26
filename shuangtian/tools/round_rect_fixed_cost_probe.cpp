@@ -27,7 +27,7 @@
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 
 namespace {
 
@@ -35,7 +35,7 @@ using st::math::Color;
 using st::math::Rect;
 using st::raster::Canvas;
 using st::raster::Paint;
-using st::raster::Path;
+using st::math::Path;
 
 constexpr int kRounds = 200;
 
@@ -94,9 +94,9 @@ auto main(int argc, char** argv) -> int {
       float min_y = 0.0f;
       for (const auto& command : p.commands()) {
         const st::math::Point points[3] = {command.p1, command.p2, command.p3};
-        const int count = command.kind == st::raster::PathCommand::Kind::CubicTo   ? 3
-                          : command.kind == st::raster::PathCommand::Kind::QuadTo ? 2
-                          : command.kind == st::raster::PathCommand::Kind::Close  ? 0
+        const int count = command.kind == st::math::PathCommand::Kind::CubicTo   ? 3
+                          : command.kind == st::math::PathCommand::Kind::QuadTo ? 2
+                          : command.kind == st::math::PathCommand::Kind::Close  ? 0
                                                                                   : 1;
         for (int index = 0; index < count; ++index) {
           if (!has) {
@@ -137,13 +137,13 @@ auto main(int argc, char** argv) -> int {
         mix64(static_cast<std::uint64_t>(static_cast<std::uint8_t>(command.kind)));
         quantize(command.p1.x, origin.x);
         quantize(command.p1.y, origin.y);
-        const bool has_p2 = command.kind == st::raster::PathCommand::Kind::QuadTo ||
-                            command.kind == st::raster::PathCommand::Kind::CubicTo;
+        const bool has_p2 = command.kind == st::math::PathCommand::Kind::QuadTo ||
+                            command.kind == st::math::PathCommand::Kind::CubicTo;
         if (has_p2) {
           quantize(command.p2.x, origin.x);
           quantize(command.p2.y, origin.y);
         }
-        if (command.kind == st::raster::PathCommand::Kind::CubicTo) {
+        if (command.kind == st::math::PathCommand::Kind::CubicTo) {
           quantize(command.p3.x, origin.x);
           quantize(command.p3.y, origin.y);
         }

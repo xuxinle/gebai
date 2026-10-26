@@ -488,7 +488,7 @@ ST_TEST(gpu_huge_path_mask_is_bounded_by_canvas) {
   Surface& target = **gpu;
 
   // 左右两条竖边穿过画布，上下边远在 ±1e9（模拟无界高度元素的边框）
-  st::raster::Path huge;
+  st::math::Path huge;
   huge.move_to(st::math::Point{30.0f, -1.0e9f});
   huge.line_to(st::math::Point{98.0f, -1.0e9f});
   huge.line_to(st::math::Point{98.0f, 1.0e9f});

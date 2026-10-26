@@ -388,7 +388,7 @@ class SwatchCell : public Element {
     const Rect chip{bounds_.x + (bounds_.width - swatch) * 0.5f, bounds_.y + 6.0f, swatch, swatch};
     canvas.fill_rect(chip, st::raster::Paint::solid(color_), 6.0f);
     // 描边保证浅色块在浅底上也有边界（同"输入框描边"的道理）
-    st::raster::Path outline;
+    st::math::Path outline;
     outline.add_rounded_rect(chip, 6.0f);
     canvas.stroke_path(outline, st::raster::Paint::solid(context.theme.colors().border), 1.0f);
     if (context.text != nullptr) {

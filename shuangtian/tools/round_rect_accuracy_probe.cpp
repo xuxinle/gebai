@@ -18,7 +18,7 @@
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 
 namespace {
 
@@ -37,7 +37,7 @@ using st::raster::Paint;
   const int big_h = height * kSuper;
   Canvas big(big_w, big_h, 1.0f);
   big.clear(Color{0, 0, 0, 0});
-  st::raster::Path path;
+  st::math::Path path;
   path.add_rounded_rect(Rect{rect.x * static_cast<float>(kSuper),
                              rect.y * static_cast<float>(kSuper),
                              rect.width * static_cast<float>(kSuper),
@@ -138,7 +138,7 @@ auto main(int argc, char** argv) -> int {
     Canvas via_whole(kWidth, kHeight, 1.0f);
     via_whole.clear(background);
     via_whole.set_geometry_cache_enabled(false);
-    st::raster::Path path;
+    st::math::Path path;
     path.add_rounded_rect(item.rect, item.radius);
     via_whole.fill_path(path, Paint::solid(ink));
     const double whole_error =

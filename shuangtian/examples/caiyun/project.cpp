@@ -13,7 +13,7 @@
 #include "carry.hpp"
 #include "fx.hpp"
 #include "motion.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/ui/text_port.hpp"
 #include "st/ui/timeline.hpp"  // format_timecode 收口（拆解方案步骤 1）
 
@@ -22,7 +22,7 @@ namespace caiyun {
 namespace {
 
 using st::raster::Paint;
-using st::raster::Path;
+using st::math::Path;
 
 /// 最小片段时长（秒）——修剪/分割的护栏。
 /// 为什么需要：允许零长片段会让时间轴上出现"看不见的块"，之后**再也选不中、
@@ -109,7 +109,7 @@ void render_shapes(st::raster::Surface& canvas, double time, Color tint) {
   canvas.fill_rect(Rect{w * 0.2f, ry, rect_w, rect_h}, Paint::solid(Color{88, 200, 120, 255}), 8.0f);
   // 描边圆环：从中心向外扩散（半径随时间增长并循环）。
   const float ring_t = static_cast<float>(std::fmod(time * 0.4, 1.0));
-  const Path ring = st::raster::make_circle(st::math::Point{w * 0.72f, h * 0.62f},
+  const Path ring = st::math::make_circle(st::math::Point{w * 0.72f, h * 0.62f},
                                             h * 0.08f + ring_t * h * 0.28f);
   canvas.stroke_path(ring, Paint::solid(Color{255, 255, 255, 90}), 3.0f);
 }

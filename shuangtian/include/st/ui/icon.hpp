@@ -11,7 +11,7 @@
 #include "st/math/color.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/ui/svg.hpp"
 
 namespace st::ui {
@@ -31,7 +31,7 @@ class Icon {
 
   /// 构造缩放到 `box` 的路径（`stroke_width` 为画布像素宽，用于描边式图标）。
   [[nodiscard]] static auto path(std::string_view name, math::Rect box,
-                                 float stroke_width = 2.0f) -> raster::Path;
+                                 float stroke_width = 2.0f) -> math::Path;
   /// 按 `color` 绘制到画布（描边式；`stroke_width` 默认 2px）。
   static void draw(raster::Surface& canvas, std::string_view name, math::Rect box, math::Color color,
                    float stroke_width = 2.0f);

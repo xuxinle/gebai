@@ -30,7 +30,7 @@
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
 #include "st/raster/canvas.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/text/grid_fit.hpp"
 #include "st/app/app.hpp"
 #include "st/text/text.hpp"
@@ -281,7 +281,7 @@ ST_TEST(grid_fit_guard_refuses_excessive_shift) {
   // 造一条**真实尺度**的竖笔画：宽 1.5px（小字笔画就在 1.2~1.7px），
   // 边缘落在 .5 相位上——吸附需要 0.5px，正好压在护栏上。
   const auto build = []() {
-    st::raster::Path path;
+    st::math::Path path;
     path.move_to(Point{0.5f, 0.0f});
     path.line_to(Point{2.0f, 0.0f});
     path.line_to(Point{2.0f, 10.0f});
@@ -289,7 +289,7 @@ ST_TEST(grid_fit_guard_refuses_excessive_shift) {
     path.close();
     return path;
   };
-  const st::raster::Path original = build();
+  const st::math::Path original = build();
 
   // 默认护栏（max_shift 0.5）应当**允许**这次吸附（位移 0.5）
   const auto accepted = st::text::grid_fit(original, {.mode = GridFitMode::Normal});
@@ -421,7 +421,7 @@ ST_TEST(grid_fit_combines_with_subpixel_without_distortion) {
 ST_TEST(grid_fit_moves_curve_controls_with_endpoints) {
   // 形状：左右两条**直线竖边**（构成竖笔画，宽 1.5px）+ 底部一段**曲线**。
   // 曲线控制点若不动、端点却动了，这段弧就会被拉变形。
-  st::raster::Path path;
+  st::math::Path path;
   path.move_to(Point{0.4f, 0.0f});
   path.line_to(Point{1.9f, 0.0f});          // 顶边（横）
   path.line_to(Point{1.9f, 10.0f});         // 右边的竖边（直线）
@@ -469,7 +469,7 @@ ST_TEST(grid_fit_snaps_to_physical_pixel_lattice_at_any_supersample) {
     // 一条竖笔画：宽 1.6 物理像素，两边缘落在 .42/.02 相位上
     const float left = 4.42f * grid;
     const float right = left + 1.6f * grid;
-    st::raster::Path path;
+    st::math::Path path;
     path.move_to(Point{left, 0.0f});
     path.line_to(Point{right, 0.0f});
     path.line_to(Point{right, 12.0f * grid});
@@ -506,7 +506,7 @@ ST_TEST(grid_fit_snaps_to_physical_pixel_lattice_at_any_supersample) {
   //    在 2 倍采样下必须能被识别出来。旧口径（阈值不乘 grid）有效阈值只剩 1.3px，
   //    会漏掉它——实测就靠这条定位了“2 倍采样下笔画几乎全漏”。
   const auto wide = [](float grid) {
-    st::raster::Path path;
+    st::math::Path path;
     const float left = 3.2f * grid;
     const float right = left + 2.4f * grid;
     path.move_to(Point{left, 0.0f});

@@ -31,7 +31,7 @@
 #include "st/math/color.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/raster/surface.hpp"
 #include "st/raster/canvas.hpp"
 
@@ -82,7 +82,7 @@ struct Transform {
 
 /// 解析后的一个绘制节点（一个 `path`/`rect`/… 元素）。
 struct Node {
-  raster::Path path{};      ///< 已是绝对坐标、目标文档空间的路径
+  math::Path path{};      ///< 已是绝对坐标、目标文档空间的路径
   Style style{};            ///< 合并继承后的最终样式
   float stroke_width_viewbox{1.0f};  ///< viewBox 空间下的描边宽（渲染时随缩放换算）
 };
@@ -185,7 +185,7 @@ class IconSetPainter {
 };
 
 /// 解析单个 `d` 属性为路径（独立入口：测试与 `Icon` 私有表迁移用）。
-[[nodiscard]] auto parse_path(std::string_view d) -> std::optional<raster::Path>;
+[[nodiscard]] auto parse_path(std::string_view d) -> std::optional<math::Path>;
 
 /// 解析颜色（`#rgb #rgba #rrggbb #rrggbbaa` 与 17 个 CSS 基本色名；`currentColor`
 /// 返回 nullopt——语义是"取环境色"，由调用方决定）。

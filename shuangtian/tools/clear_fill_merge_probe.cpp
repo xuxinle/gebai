@@ -168,7 +168,7 @@ auto main(int argc, char** argv) -> int {
     item.frame = [](st::raster::Canvas& canvas) {
       // 路径走 `blend_coverage_runs`——那条入口也必须把 `cleared_fresh_` 清掉，
       // 否则“路径已经画了内容”却还当成“干净画布”，会把内容盖掉。
-      st::raster::Path path;
+      st::math::Path path;
       path.add_circle(st::math::Point{60.0f, 60.0f}, 25.0f);
       canvas.fill_path(path, st::raster::Paint::solid(kOther));
       fill_whole(canvas, kBg);

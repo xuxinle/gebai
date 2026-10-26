@@ -1639,11 +1639,11 @@ void Terminal::paint_content(const RenderContext& context, raster::Surface& canv
     const math::Color bg = hover_to_end_ ? colors.surface_alt : colors.surface;
     canvas.fill_rect(zone, raster::Paint::solid(bg),
                       context.theme.metrics().radius_pill);
-    raster::Path ring;
+    math::Path ring;
     ring.add_rounded_rect(zone, context.theme.metrics().radius_pill);
     canvas.stroke_path(ring, raster::Paint::solid(colors.border), 1.0f);
     // 向下箭头（两笔折线，与 `Tabs` 溢出箭头同一笔法）。
-    raster::Path arrow;
+    math::Path arrow;
     const math::Point center = zone.center();
     const float size = 4.0f;
     arrow.move_to(math::Point{center.x - size, center.y - size * 0.4f});

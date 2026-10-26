@@ -49,7 +49,7 @@ ST_TEST(draw_canvas_at_places_scaled_source_exactly) {
   st::raster::Canvas source{24, 24, kScale};
   source.clear(st::math::Color{0, 0, 0, 0});
   // 在源里填满整张（不留边），贴回后墨迹应正好覆盖目标框。
-  source.fill_path(st::raster::Path{}.add_rect(st::math::Rect{0.0f, 0.0f, 16.0f, 16.0f}),
+  source.fill_path(st::math::Path{}.add_rect(st::math::Rect{0.0f, 0.0f, 16.0f, 16.0f}),
                    st::raster::Paint::solid(st::math::Color{255, 0, 0, 255}));
 
   // 贴到逻辑 (12,12)：物理落点 = round(12*1.5) = 18，覆盖物理 18..41（24 物理）。

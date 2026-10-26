@@ -67,7 +67,7 @@ ST_TEST(gpu_fill_path_scale_matches_software) {
 
   // 逻辑坐标的圆角矩形（非整数 DPI 下正是缩放最容易丢的地方）
   const Rect logical{40.0f, 30.0f, 120.0f, 80.0f};
-  st::raster::Path path;
+  st::math::Path path;
   path.add_rounded_rect(logical, 10.0f);
   const Color fill{Color::rgb(30, 64, 175)};
 
@@ -105,7 +105,7 @@ ST_TEST(gpu_fill_path_position_at_scale_matches_logical) {
 
   // 锚点探针：路径画在逻辑 (60,40)，物理 (90,60) 处必须有填充；而"缩成 2/3"时
   // 最近的填充像素会出现在 (60,40)——直接把缺陷定位到坐标而非笼统的大小。
-  st::raster::Path path;
+  st::math::Path path;
   path.add_rounded_rect(Rect{60.0f, 40.0f, 80.0f, 60.0f}, 8.0f);
   gpu->fill_path(path, st::raster::Paint::solid(Color::rgb(200, 30, 30)));
 

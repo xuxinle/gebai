@@ -31,7 +31,7 @@
 #include "st/core/print.hpp"
 #include "st/core/time.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 
 namespace caiyun {
 
@@ -41,7 +41,7 @@ using st::math::Color;
 using st::math::Point;
 using st::raster::Canvas;
 using st::raster::Paint;
-using st::raster::Path;
+using st::math::Path;
 using st::ui::TextPort;
 
 constexpr float kPi = 3.14159265f;
@@ -168,11 +168,11 @@ class Painter {
     canvas_.fill_circle(point(cx, cy), design(r), Paint::solid(color));
   }
   void stroke_circle(float cx, float cy, float r, Color color, float width) {
-    const Path ring = st::raster::make_circle(point(cx, cy), design(r));
+    const Path ring = st::math::make_circle(point(cx, cy), design(r));
     canvas_.stroke_path(ring, Paint::solid(color), design(width));
   }
   void line(float x1, float y1, float x2, float y2, Color color, float width) {
-    const Path path = st::raster::make_line(point(x1, y1), point(x2, y2));
+    const Path path = st::math::make_line(point(x1, y1), point(x2, y2));
     const st::raster::StrokeStyle style{.cap = st::raster::LineCap::Round,
                                         .join = st::raster::LineJoin::Round};
     canvas_.stroke_path(path, Paint::solid(color), design(width), style);
@@ -180,7 +180,7 @@ class Painter {
   /// 圆角矩形描边环（`make_rounded_border_ring`：比 `stroke_path` 几何量少一半）。
   void border(float x, float y, float w, float h, float radius, Color color, float width) {
     const Path ring =
-        st::raster::make_rounded_border_ring(rect(x, y, w, h), design(radius), design(width));
+        st::math::make_rounded_border_ring(rect(x, y, w, h), design(radius), design(width));
     canvas_.fill_path(ring, Paint::solid(color));
   }
 
@@ -862,7 +862,7 @@ void paint_layers(Painter& p, const Scene& scene, float local_time, const AssetL
           // （早先完全没过——矢量相机对路径图元无效，实测 240× 时曲线不动。）
           const auto tl = p.point_physical(lx, ly);
           const auto br = p.point_physical(lx + lw, ly + lh);
-          st::raster::Path path;
+          st::math::Path path;
           const float r = layer.radius * scale * (1.0f + std::log(p.camera().zoom));
           if (r > 0.5f) {
             path.add_rounded_rect(st::math::Rect{tl.x, tl.y, br.x - tl.x, br.y - tl.y}, r);
@@ -882,7 +882,7 @@ void paint_layers(Painter& p, const Scene& scene, float local_time, const AssetL
         // path 直画 canvas ⇒ 手动过相机。
         const auto tl = p.point_physical(lx, ly);
         const auto br = p.point_physical(lx + lw, ly + lh);
-        st::raster::Path path;
+        st::math::Path path;
         path.add_ellipse(st::math::Rect{tl.x, tl.y, br.x - tl.x, br.y - tl.y});
         p.canvas().fill_path(path, Paint::solid(with_alpha(layer.fill, state.alpha)));
         break;
@@ -943,7 +943,7 @@ void paint_layers(Painter& p, const Scene& scene, float local_time, const AssetL
       }
       case LayerKind::Path: {
         if (layer.points.size() < 4) break;
-        st::raster::Path path;
+        st::math::Path path;
         bool first = true;
         for (std::size_t i = 0; i + 1 < layer.points.size(); i += 2) {
           // path 直画 canvas ⇒ 手动过相机（点与线宽都要）。

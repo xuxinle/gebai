@@ -51,7 +51,7 @@
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 
 namespace {
 
@@ -71,18 +71,18 @@ inline constexpr std::size_t kAllowedDiffPixels = 4;
 inline constexpr int kAllowedDiffChannel = 2;
 
 /// 一组“界面里真实出现”的矢量图案：圆角环（边框）、描边图标（折线 + 圆帽）、曲线。
-[[nodiscard]] auto sample_shapes() -> std::vector<st::raster::Path> {
-  std::vector<st::raster::Path> shapes;
-  shapes.push_back(st::raster::make_rounded_border_ring(st::math::Rect{0.0f, 0.0f, 96.0f, 40.0f},
+[[nodiscard]] auto sample_shapes() -> std::vector<st::math::Path> {
+  std::vector<st::math::Path> shapes;
+  shapes.push_back(st::math::make_rounded_border_ring(st::math::Rect{0.0f, 0.0f, 96.0f, 40.0f},
                                                        10.0f, 1.0f));
-  st::raster::Path stroke;
+  st::math::Path stroke;
   stroke.move_to(st::math::Point{2.0f, 14.0f});
   stroke.line_to(st::math::Point{9.0f, 5.0f});
   stroke.line_to(st::math::Point{16.0f, 14.0f});
   stroke.line_to(st::math::Point{9.0f, 21.0f});
   stroke.close();
   shapes.push_back(stroke);
-  st::raster::Path curve;
+  st::math::Path curve;
   curve.move_to(st::math::Point{1.0f, 18.0f});
   curve.cubic_to(st::math::Point{6.0f, 2.0f}, st::math::Point{13.0f, 34.0f},
                  st::math::Point{18.0f, 16.0f});
@@ -181,7 +181,7 @@ void draw_shapes(st::raster::Canvas& canvas, st::math::Point origin, float opaci
   for (std::size_t index = 0; index < shapes.size(); ++index) {
     const float dx = origin.x + static_cast<float>(index) * 150.0f;
     const float dy = origin.y + phase_y;
-    const st::raster::Path moved = shapes[index].translated(dx, dy);
+    const st::math::Path moved = shapes[index].translated(dx, dy);
     if (index == 1 && stroke_icons) {
       canvas.stroke_path(moved, paint, 2.0f,
                          st::raster::StrokeStyle{st::raster::LineCap::Round,

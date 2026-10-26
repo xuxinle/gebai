@@ -259,7 +259,7 @@ void CompletionPopup::paint_content(const RenderContext& context, raster::Surfac
   canvas.draw_shadow(bounds_, metrics.radius_md, shadow.blur, shadow.color,
                      math::Point{shadow.offset_x, shadow.offset_y});
   fill_round_rect(canvas, bounds_, metrics.radius_md, colors.surface);
-  raster::Path border;
+  math::Path border;
   border.add_rounded_rect(bounds_, metrics.radius_md);
   canvas.stroke_path(border, raster::Paint::solid(colors.border_strong), metrics.border_width);
 

@@ -6,7 +6,7 @@
 
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/ui/icon.hpp"
 #include "st/ui/text_port.hpp"
 
@@ -105,7 +105,7 @@ constexpr float k_control_hover_radius = 4.0f;
 /// 圆角填充（按钮底色的统一画法；半径取 `min(radius_sm, 矩形短边一半)`）。
 void fill_rounded(raster::Surface& canvas, math::Rect rect, float radius, math::Color color) {
   if (rect.is_empty() || color.a == 0U) return;
-  raster::Path path;
+  math::Path path;
   const float limit = std::min(rect.width, rect.height) * 0.5f;
   path.add_rounded_rect(rect, std::min(radius, limit));
   canvas.fill_path(path, raster::Paint::solid(color));

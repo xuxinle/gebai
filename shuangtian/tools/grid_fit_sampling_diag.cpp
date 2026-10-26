@@ -17,12 +17,12 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/text/font.hpp"
 #include "st/text/grid_fit.hpp"
 #include "st/text/text.hpp"
 
-using st::raster::Path;
+using st::math::Path;
 using st::text::FontFace;
 using st::text::FontStack;
 using st::text::GridFitMode;
@@ -40,15 +40,15 @@ namespace {
   };
   for (const auto& command : outline->commands()) {
     switch (command.kind) {
-      case st::raster::PathCommand::Kind::MoveTo: path.move_to(map_point(command.p1)); break;
-      case st::raster::PathCommand::Kind::LineTo: path.line_to(map_point(command.p1)); break;
-      case st::raster::PathCommand::Kind::QuadTo:
+      case st::math::PathCommand::Kind::MoveTo: path.move_to(map_point(command.p1)); break;
+      case st::math::PathCommand::Kind::LineTo: path.line_to(map_point(command.p1)); break;
+      case st::math::PathCommand::Kind::QuadTo:
         path.quad_to(map_point(command.p1), map_point(command.p2));
         break;
-      case st::raster::PathCommand::Kind::CubicTo:
+      case st::math::PathCommand::Kind::CubicTo:
         path.cubic_to(map_point(command.p1), map_point(command.p2), map_point(command.p3));
         break;
-      case st::raster::PathCommand::Kind::Close: path.close(); break;
+      case st::math::PathCommand::Kind::Close: path.close(); break;
     }
   }
   return path;
@@ -65,27 +65,27 @@ namespace {
   for (std::size_t index = 0; index < commands.size(); ++index) {
     offsets[index] = cursor;
     switch (commands[index].kind) {
-      case st::raster::PathCommand::Kind::MoveTo:
-      case st::raster::PathCommand::Kind::LineTo: cursor += 1; break;
-      case st::raster::PathCommand::Kind::QuadTo: cursor += 2; break;
-      case st::raster::PathCommand::Kind::CubicTo: cursor += 3; break;
-      case st::raster::PathCommand::Kind::Close: break;
+      case st::math::PathCommand::Kind::MoveTo:
+      case st::math::PathCommand::Kind::LineTo: cursor += 1; break;
+      case st::math::PathCommand::Kind::QuadTo: cursor += 2; break;
+      case st::math::PathCommand::Kind::CubicTo: cursor += 3; break;
+      case st::math::PathCommand::Kind::Close: break;
     }
   }
   std::size_t start = 0;
   bool has = false;
   for (std::size_t index = 0; index < commands.size(); ++index) {
     const auto kind = commands[index].kind;
-    if (kind == st::raster::PathCommand::Kind::MoveTo) {
+    if (kind == st::math::PathCommand::Kind::MoveTo) {
       start = offsets[index];
       has = true;
       continue;
     }
-    if (kind == st::raster::PathCommand::Kind::Close) continue;
+    if (kind == st::math::PathCommand::Kind::Close) continue;
     std::size_t end = offsets[index];
-    if (kind == st::raster::PathCommand::Kind::QuadTo) end += 1;
-    if (kind == st::raster::PathCommand::Kind::CubicTo) end += 2;
-    if (has && kind == st::raster::PathCommand::Kind::LineTo) {
+    if (kind == st::math::PathCommand::Kind::QuadTo) end += 1;
+    if (kind == st::math::PathCommand::Kind::CubicTo) end += 2;
+    if (has && kind == st::math::PathCommand::Kind::LineTo) {
       const auto& a = points[start];
       const auto& b = points[end];
       if (std::abs(b.y - a.y) > 2.0f && std::abs(b.x - a.x) < 0.5f) {

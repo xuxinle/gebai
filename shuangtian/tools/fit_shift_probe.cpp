@@ -62,26 +62,26 @@ struct Stat {
   const float scale = pixel_size * static_cast<float>(ss) / units;
 
   const auto build = [&outline, scale](float horizontal) {
-    st::raster::Path path;
+    st::math::Path path;
     const auto map = [scale, horizontal](Point p) noexcept -> Point {
       return Point{p.x * scale * horizontal, -p.y * scale};
     };
     for (const auto& command : outline->commands()) {
       switch (command.kind) {
-        case st::raster::PathCommand::Kind::MoveTo: path.move_to(map(command.p1)); break;
-        case st::raster::PathCommand::Kind::LineTo: path.line_to(map(command.p1)); break;
-        case st::raster::PathCommand::Kind::QuadTo:
+        case st::math::PathCommand::Kind::MoveTo: path.move_to(map(command.p1)); break;
+        case st::math::PathCommand::Kind::LineTo: path.line_to(map(command.p1)); break;
+        case st::math::PathCommand::Kind::QuadTo:
           path.quad_to(map(command.p1), map(command.p2));
           break;
-        case st::raster::PathCommand::Kind::CubicTo:
+        case st::math::PathCommand::Kind::CubicTo:
           path.cubic_to(map(command.p1), map(command.p2), map(command.p3));
           break;
-        case st::raster::PathCommand::Kind::Close: path.close(); break;
+        case st::math::PathCommand::Kind::Close: path.close(); break;
       }
     }
     return path;
   };
-  const st::raster::Path transformed = build(1.0f);
+  const st::math::Path transformed = build(1.0f);
   const auto bounds = transformed.flattened_bounds(0.2f);
   const int pad = 1 * ss;
   const auto align_down = [ss](int v) {

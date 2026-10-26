@@ -54,7 +54,7 @@
 #include <vector>
 
 #include "st/math/geometry.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/text/font.hpp"
 
 namespace st::text {
@@ -171,7 +171,7 @@ struct GridFitOptions {
 
 /// 拟合结果（供测试与诊断；调用方通常只用 `path`）。
 struct GridFitResult {
-  raster::Path path{};      ///< 拟合后的轮廓（未生效时与入参相同）
+  math::Path path{};      ///< 拟合后的轮廓（未生效时与入参相同）
   bool applied{false};      ///< 是否真的做了拟合（护栏触发时为 false）
   int vertical_stems{0};    ///< 参与拟合的竖笔画数
   int horizontal_stems{0};  ///< 参与拟合的横笔画数
@@ -220,7 +220,7 @@ struct GridFitResult {
 /// `path` 既可以是物理像素坐标（`grid = 1`，旧口径），也可以是超采样空间坐标
 /// （`grid = supersample`，`TextRenderer` 在 DPI 缩放下的实际口径）；
 /// `grid` 负责把“物理像素”的语义换算到入参所在的空间。
-[[nodiscard]] auto grid_fit(const raster::Path& path, const GridFitOptions& options = {})
+[[nodiscard]] auto grid_fit(const math::Path& path, const GridFitOptions& options = {})
     -> GridFitResult;
 
 }  // namespace st::text

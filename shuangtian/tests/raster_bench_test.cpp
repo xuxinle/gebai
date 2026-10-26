@@ -29,7 +29,7 @@
 #include "st/core/print.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/test/test.hpp"
 #include "st/text/text.hpp"
 

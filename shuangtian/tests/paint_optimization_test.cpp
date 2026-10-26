@@ -35,7 +35,7 @@
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/raster/surface.hpp"
 #include "st/test/test.hpp"
 #include "st/ui/components/basic.hpp"
@@ -47,7 +47,7 @@ namespace {
 using st::math::Color;
 using st::raster::Canvas;
 using st::raster::Paint;
-using st::raster::Path;
+using st::math::Path;
 
 inline constexpr int kWidth = 320;
 inline constexpr int kHeight = 240;
@@ -104,7 +104,7 @@ void draw_border_by_stroke(Canvas& canvas, st::math::Rect rect, float radius, Co
 
 void draw_border_by_ring(Canvas& canvas, st::math::Rect rect, float radius, Color color,
                          float width) {
-  canvas.fill_path(st::raster::make_rounded_border_ring(rect, radius, width),
+  canvas.fill_path(st::math::make_rounded_border_ring(rect, radius, width),
                    Paint::solid(color));
 }
 
@@ -177,7 +177,7 @@ ST_TEST(border_ring_inner_contour_is_closed) {
   const st::math::Rect box{0.0f, 0.0f, 100.0f, 60.0f};
   constexpr float kRadius = 14.0f;
   constexpr float kBorderWidth = 1.0f;
-  const Path ring = st::raster::make_rounded_border_ring(box, kRadius, kBorderWidth);
+  const Path ring = st::math::make_rounded_border_ring(box, kRadius, kBorderWidth);
 
   const auto polylines = ring.flatten(0.25f);
   ST_CHECK(polylines.size() == 2);
@@ -307,7 +307,7 @@ ST_TEST(border_ring_total_ink_matches_perimeter_times_width) {
   constexpr float kRadius = 14.0f;
   constexpr float kBorderWidth = 1.0f;
   Canvas canvas = make_canvas();
-  canvas.fill_path(st::raster::make_rounded_border_ring(box, kRadius, kBorderWidth),
+  canvas.fill_path(st::math::make_rounded_border_ring(box, kRadius, kBorderWidth),
                    Paint::solid(border));
   const double measured = border_ink(canvas, background);
   // 周长取**中心线**（半径 = r − 宽/2）：平行带的面积 = 宽 × 中心线周长。
@@ -346,7 +346,7 @@ ST_TEST(clip_mask_coverage_accumulates_instead_of_maxing) {
   const Color background = Color::rgb(0xF7, 0xF8, 0xFA);
   const Color ink = Color::rgb(0x10, 0x14, 0x1A);
   // 填充面积（逻辑 px²）= 对全屏填色，但被裁剪路径限住的部分。
-  const auto clipped_area = [&](const st::raster::Path& clip) -> double {
+  const auto clipped_area = [&](const st::math::Path& clip) -> double {
     Canvas canvas = make_canvas();
     canvas.clear(background);
     canvas.push_clip_path(clip);
@@ -370,13 +370,13 @@ ST_TEST(clip_mask_coverage_accumulates_instead_of_maxing) {
   constexpr float kWidthPx = 1.0f;
 
   // 量尺自检：直角满矩形应当精确等于长×宽。
-  st::raster::Path square_clip;
+  st::math::Path square_clip;
   square_clip.add_rect(box);
   const double square_area = clipped_area(square_clip);
   ST_CHECK_NEAR(square_area, 120.0 * 90.0, 120.0 * 90.0 * 0.005);
 
   // 圆角环 = 外圈正向 + 内圈反向（与卡片边框同一个工厂）。
-  st::raster::Path ring = st::raster::make_rounded_border_ring(box, kRadius, kWidthPx);
+  st::math::Path ring = st::math::make_rounded_border_ring(box, kRadius, kWidthPx);
   const double ring_area = clipped_area(ring);
   const double mid_radius = static_cast<double>(kRadius) - static_cast<double>(kWidthPx) * 0.5;
   const double analytic = (2.0 * (120.0 - 2.0 * static_cast<double>(kRadius)) +

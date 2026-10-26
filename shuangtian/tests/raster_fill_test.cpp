@@ -9,7 +9,7 @@
 
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/test/test.hpp"
 #include "st/text/text.hpp"
 
@@ -44,7 +44,7 @@ struct EquivResult {
 
   Canvas via_path = Canvas::for_logical_size(w, h, 1.0f);
   via_path.clear(st::math::Color{250, 250, 252, 255});
-  st::raster::Path path;
+  st::math::Path path;
   path.add_rounded_rect(rect, radius);
   via_path.fill_path(path, st::raster::Paint::solid(color), {.opacity = opacity});
 
@@ -76,7 +76,7 @@ struct EquivResult {
 // —— ① 未闭合子路径按填充语义隐式闭合 ——
 ST_TEST(fill_closes_open_subpath_implicitly) {
   // 一个"开口"的三角形（缺最后一条边）：填充必须补上闭合边，面积等于闭合三角形
-  st::raster::Path open_triangle;
+  st::math::Path open_triangle;
   open_triangle.move_to({20.0f, 10.0f});
   open_triangle.line_to({60.0f, 10.0f});
   open_triangle.line_to({60.0f, 50.0f});
@@ -99,7 +99,7 @@ ST_TEST(fill_closes_open_subpath_implicitly) {
 
 ST_TEST(fill_nested_contours_leave_hole) {
   // 外方框（顺时针）+ 内方框（逆时针）→ 中间镂空（非零环绕规则）
-  st::raster::Path path;
+  st::math::Path path;
   path.move_to({10.0f, 10.0f});
   path.line_to({70.0f, 10.0f});
   path.line_to({70.0f, 70.0f});
@@ -123,7 +123,7 @@ ST_TEST(fill_nested_contours_leave_hole) {
 // —— ② 带符号覆盖率不能整片丢弃 ——
 ST_TEST(fill_counter_clockwise_contour_is_visible) {
   // 只画一个**逆时针**方框（覆盖率为负）：取绝对值后仍须正常填充
-  st::raster::Path ccw;
+  st::math::Path ccw;
   ccw.move_to({10.0f, 10.0f});
   ccw.line_to({10.0f, 50.0f});
   ccw.line_to({50.0f, 50.0f});

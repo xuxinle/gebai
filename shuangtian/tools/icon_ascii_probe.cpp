@@ -14,7 +14,7 @@
 #include "st/probe/probe.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/ui/icon.hpp"
 
 namespace {
@@ -57,7 +57,7 @@ auto main(int argc, char** argv) -> int {
       st::print("|{}|\n", line);
     }
   } else {
-    const st::raster::Path path = st::ui::Icon::path(name, box, 0.0f);
+    const st::math::Path path = st::ui::Icon::path(name, box, 0.0f);
     st::raster::Canvas canvas{size, size, 1.0f};
     canvas.clear(background);
     if (mode == "filled") {

@@ -126,7 +126,7 @@ void CanvasView::paint_content(const st::ui::RenderContext& context,
 
   // 画布边框（100% 时帮用户判断“图到哪里为止”）。
   {
-    st::raster::Path frame;
+    st::math::Path frame;
     frame.move_to(st::math::Point{area.x, area.y});
     frame.move_to(st::math::Point{area.right(), area.y});
     frame.move_to(st::math::Point{area.right(), area.bottom()});
@@ -149,7 +149,7 @@ void CanvasView::paint_content(const st::ui::RenderContext& context,
       const float radius = brush_radius_ * view->zoom();
       if (radius > 1.0f) {
         // 双色描边（外白内黑）：单色圆在浅底/深底上总有一侧看不见。
-        const st::raster::Path ring = st::raster::make_circle(center, radius);
+        const st::math::Path ring = st::math::make_circle(center, radius);
         canvas.stroke_path(ring, Paint::solid(st::math::Color{255, 255, 255, 200}), 1.5f);
         canvas.stroke_path(ring, Paint::solid(st::math::Color{0, 0, 0, 120}), 0.5f);
       }

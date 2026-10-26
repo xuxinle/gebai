@@ -34,9 +34,22 @@
 #include "st/math/color.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 
 namespace st::raster {
+
+/// 路径类型来自 `st::math`（矢量的几何描述：命令流 + 贝塞尔扁平化 + 包围盒）。
+///
+/// 为何搁在 `raster`：它原本就在本命名空间，被绘制层大量裸用
+///（`fill_path(const Path&)` 这类签名有几十处）。`Path` 本身不含任何绘制符号
+///（只依赖 `math/geometry.hpp`），归 `math` 才是正确的层——但把调用点全改成
+/// `math::Path` 只会制造噪声。这行 `using` 既让绘制层继续裸写 `Path`，
+/// 又让非绘制代码可以直接 `#include "st/math/path.hpp"` 而不牵进光栅器。
+using math::Path;
+/// 同上（`PathCommand` 也被绘制层裸用：`for (const PathCommand& c : path.commands())`）。
+using math::PathCommand;
+/// 扁平化折线：光栅化器直接拿它填扫描线。
+using math::Polyline;
 
 /// 绘制原语分类（绘制剖析用）。
 ///

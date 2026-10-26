@@ -28,7 +28,7 @@ using st::math::Color;
 using st::math::Rect;
 using st::raster::Canvas;
 using st::raster::Paint;
-using st::raster::Path;
+using st::math::Path;
 
 constexpr int kWidth = 900;
 constexpr int kHeight = 700;

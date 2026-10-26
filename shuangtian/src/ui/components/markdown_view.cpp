@@ -15,7 +15,7 @@
 #include "st/core/string.hpp"
 #include "st/md/highlight.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/ui/line_layout.hpp"
 #include "st/ui/text_port.hpp"
 
@@ -124,10 +124,10 @@ constexpr double kTwoPi{2.0 * kPi};
 }
 
 /// 正向绕向的圆角矩形路径（`radius <= 0` 退化为直角矩形）。
-[[nodiscard]] auto rounded_rect_path(math::Rect rect, float radius) -> raster::Path {
+[[nodiscard]] auto rounded_rect_path(math::Rect rect, float radius) -> math::Path {
   const float limit = std::min(rect.width, rect.height) * 0.5f;
   const float r = radius > limit ? limit : (radius > 0.0f ? radius : 0.0f);
-  raster::Path path;
+  math::Path path;
   if (r <= 0.0f) {
     path.move_to(math::Point{rect.x, rect.y});
     path.line_to(math::Point{rect.x, rect.bottom()});
@@ -176,7 +176,7 @@ void fill_circle_shape(raster::Surface& canvas, math::Point center, float radius
                        math::Color color) {
   if (radius <= 0.0f || color.a == 0U) return;
   constexpr int segments = 24;
-  raster::Path path;
+  math::Path path;
   for (int index = 0; index <= segments; ++index) {
     const double angle =
         kPi * 1.25 - kTwoPi * static_cast<double>(index) / static_cast<double>(segments);
@@ -1831,7 +1831,7 @@ void MarkdownView::draw_spans(const RenderContext& context, raster::Surface& can
       const float chip_y = start.y + std::max(0.0f, (line_height - chip_height) * 0.5f);
       const math::Rect chip{x - kInlineCodePad, chip_y, width + kInlineCodePad * 2.0f, chip_height};
       fill_rect_shape(canvas, chip, colors.code_bg, kInlineCodeRadius);
-      raster::Path outline;
+      math::Path outline;
       outline.add_rounded_rect(chip.inset(math::Insets::all(0.5f)), kInlineCodeRadius - 0.5f);
       canvas.stroke_path(outline, raster::Paint::solid(colors.code_border), 1.0f);
     }
@@ -1856,7 +1856,7 @@ void MarkdownView::paint_group(const RenderContext& context, raster::Surface& ca
   if (rect.is_empty()) return;
   if (row.group == GroupKind::Code) {
     fill_rect_shape(canvas, rect, colors.code_bg, metrics.radius_md);
-    raster::Path outline;
+    math::Path outline;
     outline.add_rounded_rect(rect.inset(math::Insets::all(0.5f)),
                              std::max(metrics.radius_md - 0.5f, 0.0f));
     canvas.stroke_path(outline, raster::Paint::solid(colors.code_border), metrics.border_width);
@@ -1883,13 +1883,13 @@ void MarkdownView::paint_marker(const RenderContext& context, raster::Surface& c
     const math::Rect box{marker.x, marker.y, kTaskBoxSize, kTaskBoxSize};
     if (row.checked) {
       fill_rect_shape(canvas, box, colors.primary, 4.0f);
-      raster::Path check;
+      math::Path check;
       check.move_to(math::Point{box.x + 3.6f, box.y + 7.4f});
       check.line_to(math::Point{box.x + 6.0f, box.y + 9.8f});
       check.line_to(math::Point{box.x + 10.6f, box.y + 4.6f});
       canvas.stroke_path(check, raster::Paint::solid(colors.on_primary), 1.8f);
     } else {
-      raster::Path outline;
+      math::Path outline;
       outline.add_rounded_rect(box.inset(math::Insets::all(0.5f)), 3.5f);
       canvas.stroke_path(outline, raster::Paint::solid(colors.border_strong), 1.4f);
     }

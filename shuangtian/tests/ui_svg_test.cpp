@@ -77,17 +77,17 @@ ST_TEST(svg_parse_path_arc_endpoints) {
   Point last{};
   for (const auto& command : path->commands()) {
     switch (command.kind) {
-      case st::raster::PathCommand::Kind::MoveTo:
-      case st::raster::PathCommand::Kind::LineTo:
+      case st::math::PathCommand::Kind::MoveTo:
+      case st::math::PathCommand::Kind::LineTo:
         last = command.p1;
         break;
-      case st::raster::PathCommand::Kind::QuadTo:
+      case st::math::PathCommand::Kind::QuadTo:
         last = command.p2;
         break;
-      case st::raster::PathCommand::Kind::CubicTo:
+      case st::math::PathCommand::Kind::CubicTo:
         last = command.p3;
         break;
-      case st::raster::PathCommand::Kind::Close:
+      case st::math::PathCommand::Kind::Close:
         break;
     }
   }

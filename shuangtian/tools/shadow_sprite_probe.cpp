@@ -33,7 +33,7 @@
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/ui/theme.hpp"
 
 namespace {
@@ -87,7 +87,7 @@ struct Layer {
   const st::math::Rect local{offset.x - static_cast<float>(region_int.x) + box.x,
                              offset.y - static_cast<float>(region_int.y) + box.y, box.width,
                              box.height};
-  st::raster::detail::rasterize_mask(*mask, st::raster::make_rounded_rect(local, radius), 0.0f,
+  st::raster::detail::rasterize_mask(*mask, st::math::make_rounded_rect(local, radius), 0.0f,
                                      0.0f);
   st::raster::blur_mask(*mask, blur);
   return Layer{mask, region_int, color, 1.0f};

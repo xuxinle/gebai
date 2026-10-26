@@ -11,7 +11,7 @@
 #include "st/text/grid_fit.hpp"
 #include "st/text/text.hpp"
 
-using st::raster::Path;
+using st::math::Path;
 using st::text::FontFace;
 using st::text::FontStack;
 using st::text::GridFitMode;
@@ -28,15 +28,15 @@ namespace {
   };
   for (const auto& command : outline->commands()) {
     switch (command.kind) {
-      case st::raster::PathCommand::Kind::MoveTo: path.move_to(map_point(command.p1)); break;
-      case st::raster::PathCommand::Kind::LineTo: path.line_to(map_point(command.p1)); break;
-      case st::raster::PathCommand::Kind::QuadTo:
+      case st::math::PathCommand::Kind::MoveTo: path.move_to(map_point(command.p1)); break;
+      case st::math::PathCommand::Kind::LineTo: path.line_to(map_point(command.p1)); break;
+      case st::math::PathCommand::Kind::QuadTo:
         path.quad_to(map_point(command.p1), map_point(command.p2));
         break;
-      case st::raster::PathCommand::Kind::CubicTo:
+      case st::math::PathCommand::Kind::CubicTo:
         path.cubic_to(map_point(command.p1), map_point(command.p2), map_point(command.p3));
         break;
-      case st::raster::PathCommand::Kind::Close: path.close(); break;
+      case st::math::PathCommand::Kind::Close: path.close(); break;
     }
   }
   return path;

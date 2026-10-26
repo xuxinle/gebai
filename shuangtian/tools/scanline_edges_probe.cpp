@@ -26,7 +26,7 @@
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 
 namespace {
 
@@ -52,7 +52,7 @@ struct Stats {
   std::size_t peak_active{0};
 };
 
-auto collect_edges(const std::vector<st::raster::Polyline>& polylines) -> std::vector<Edge> {
+auto collect_edges(const std::vector<st::math::Polyline>& polylines) -> std::vector<Edge> {
   std::vector<Edge> edges;
   for (std::size_t source = 0; source < polylines.size(); ++source) {
     const auto& points = polylines[source].points;
@@ -82,7 +82,7 @@ auto collect_edges(const std::vector<st::raster::Polyline>& polylines) -> std::v
   return edges;
 }
 
-auto analyse(const std::vector<st::raster::Polyline>& polylines, int first_y, int last_y)
+auto analyse(const std::vector<st::math::Polyline>& polylines, int first_y, int last_y)
     -> Stats {
   std::vector<Edge> edges = collect_edges(polylines);
   Stats stats;
@@ -140,7 +140,7 @@ auto analyse(const std::vector<st::raster::Polyline>& polylines, int first_y, in
   return stats;
 }
 
-auto report(const char* name, const std::vector<st::raster::Polyline>& polylines) -> void {
+auto report(const char* name, const std::vector<st::math::Polyline>& polylines) -> void {
   const st::math::Rect bounds = [&] {
     bool first = true;
     float minx = 0.0f, miny = 0.0f, maxx = 0.0f, maxy = 0.0f;
@@ -183,21 +183,21 @@ auto main(int argc, char** argv) -> int {
   const st::math::Rect box{100.0f, 100.0f, 140.0f, 48.0f};
   constexpr float kRadius = 12.0f;
 
-  st::raster::Path rounded;
+  st::math::Path rounded;
   rounded.add_rounded_rect(box, kRadius);
 
-  st::raster::Path outline;
+  st::math::Path outline;
   outline.add_rounded_rect(box.inset(st::math::Insets::all(0.5f)), kRadius - 0.5f);
-  const st::raster::Path expanded = st::raster::detail::stroke_to_path(outline, 1.0f, 0.25f);
+  const st::math::Path expanded = st::raster::detail::stroke_to_path(outline, 1.0f, 0.25f);
 
   st::print("扫描线边扫描量（同一份几何，两种方案）：\n");
   report("圆角矩形填充（单子路径）", rounded.flatten(0.25f));
   report("1px 边框 描边（现状实现）", expanded.flatten(0.25f));
   report("1px 边框 环形（候选实现）",
          [&] {
-           st::raster::Path ring;
+           st::math::Path ring;
            ring.add_rounded_rect(box, kRadius);
-           st::raster::Path inner;
+           st::math::Path inner;
            inner.add_rounded_rect(box.inset(st::math::Insets::all(1.0f)), kRadius - 1.0f);
            for (const auto& line : inner.flatten(0.2f)) {
              if (line.points.size() < 2) continue;
@@ -211,7 +211,7 @@ auto main(int argc, char** argv) -> int {
          }());
 
   // 曲线多的形态：圆形（图标场景）
-  st::raster::Path circle;
+  st::math::Path circle;
   circle.add_circle(st::math::Point{200.0f, 200.0f}, 40.0f);
   report("圆形填充 r=40", circle.flatten(0.25f));
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）

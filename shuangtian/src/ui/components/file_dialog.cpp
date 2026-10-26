@@ -10,7 +10,7 @@
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/ui/icon.hpp"
 #include "st/ui/text_port.hpp"
 
@@ -673,7 +673,7 @@ void FileDialog::paint_content(const RenderContext& context, raster::Surface& ca
       Icon::draw(canvas, "folder", box, colors.text, 1.7f);
       // 右上角 `+`（只给文件夹图标会让"新建"的含义靠用户猜）。
       const math::Point tip{box.right() - 1.0f, box.y + 1.0f};
-      raster::Path plus;
+      math::Path plus;
       plus.move_to(math::Point{tip.x - 4.0f, tip.y});
       plus.line_to(math::Point{tip.x + 4.0f, tip.y});
       plus.move_to(math::Point{tip.x, tip.y - 4.0f});
@@ -794,7 +794,7 @@ void FileDialog::paint_content(const RenderContext& context, raster::Surface& ca
   if (!input_.is_empty()) {
     const bool focused_row = input_focused_;
     fill_round_rect(canvas, input_, metrics.radius_md, colors.surface);
-    raster::Path border;
+    math::Path border;
     border.add_rounded_rect(input_, metrics.radius_md);
     canvas.stroke_path(border,
                        raster::Paint::solid(focused_row ? colors.primary : colors.border),

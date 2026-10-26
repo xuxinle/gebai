@@ -285,7 +285,7 @@ void paint_light_sweep(st::raster::Surface& target, float progress, float width_
     const auto a = static_cast<std::uint8_t>(std::clamp(alpha, 0.0f, 1.0f) * 255.0f);
     const float x = cx + (k - 0.5f) * band_w;
     // 斜切：用平行四边形（两端错开）表现"扫过"的方向感。
-    st::raster::Path path;
+    st::math::Path path;
     path.move_to(st::math::Point{x - band_w * 0.06f, 0.0f});
     path.line_to(st::math::Point{x + band_w * 0.06f, 0.0f});
     path.line_to(st::math::Point{x + band_w * 0.06f + band_w * 0.22f, height});
@@ -513,7 +513,7 @@ void paint_god_ray(st::raster::Surface& target, float origin_x, float origin_y, 
     if (alpha <= 0.003f) continue;
     const auto a = static_cast<std::uint8_t>(std::clamp(alpha, 0.0f, 1.0f) * 255.0f);
     const float band = beam_w / static_cast<float>(kSteps) * 1.6f;
-    st::raster::Path path;
+    st::math::Path path;
     path.move_to(st::math::Point{ox + px * (offset - band * 0.5f),
                                  oy + py * (offset - band * 0.5f)});
     path.line_to(st::math::Point{ox + px * (offset + band * 0.5f),

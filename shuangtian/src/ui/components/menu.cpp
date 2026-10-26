@@ -4,7 +4,7 @@
 #include <utility>
 #include "st/core/log.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/ui/text_port.hpp"
 
 #include "components_internal.hpp"
@@ -23,7 +23,7 @@ void draw_check(raster::Surface& canvas, math::Rect box, float size, math::Color
   const float arm = size * 0.28f;
   const math::Point center{box.x + box.width * 0.5f - arm * 0.2f,
                            box.y + box.height * 0.5f + arm * 0.1f};
-  raster::Path check;
+  math::Path check;
   check.move_to(math::Point{center.x - arm, center.y - arm * 0.1f});
   check.line_to(math::Point{center.x - arm * 0.25f, center.y + arm * 0.7f});
   check.line_to(math::Point{center.x + arm, center.y - arm * 0.8f});
@@ -34,7 +34,7 @@ void draw_check(raster::Surface& canvas, math::Rect box, float size, math::Color
 void draw_submenu_arrow(raster::Surface& canvas, math::Rect box, math::Color color) {
   const float size = 8.0f;
   const math::Point center{box.right() - size, box.y + box.height * 0.5f};
-  raster::Path arrow;
+  math::Path arrow;
   arrow.move_to(math::Point{center.x - size * 0.5f, center.y - size * 0.5f});
   arrow.line_to(math::Point{center.x + size * 0.5f, center.y});
   arrow.line_to(math::Point{center.x - size * 0.5f, center.y + size * 0.5f});

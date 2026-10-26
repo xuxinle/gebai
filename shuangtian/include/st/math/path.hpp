@@ -9,7 +9,7 @@
 
 #include "st/math/geometry.hpp"
 
-namespace st::raster {
+namespace st::math {
 
 struct PathCommand {
   enum class Kind : std::uint8_t { MoveTo, LineTo, QuadTo, CubicTo, Close };
@@ -109,4 +109,4 @@ class Path {
 /// `width ≤ 0` 时返回实心圆角矩形；`width` 大到放不下内圈时同样退化为实心。
 [[nodiscard]] auto make_rounded_border_ring(math::Rect rect, float radius, float width) -> Path;
 
-}  // namespace st::raster
+}  // namespace st::math

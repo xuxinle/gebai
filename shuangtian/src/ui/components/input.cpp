@@ -10,7 +10,7 @@
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/ui/icon.hpp"
 
 #include "components_internal.hpp"
@@ -70,7 +70,7 @@ void paint_border(raster::Surface& canvas, math::Rect rect, float radius, math::
   if (width <= 0.0f || color.a == 0U) return;
   // 走「环形填充」而不是描边：描边把每一段扩展成独立四边形，几何量是环形的两倍
   // （见 `make_rounded_border_ring` 的注释与实测）。
-  canvas.fill_path(raster::make_rounded_border_ring(rect, radius, width),
+  canvas.fill_path(math::make_rounded_border_ring(rect, radius, width),
                    raster::Paint::solid(color));
 }
 

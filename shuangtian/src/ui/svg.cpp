@@ -271,7 +271,7 @@ auto arc_center_form(math::Point from, math::Point to, float rx, float ry, float
   return ArcParams{math::Point{cx, cy}, rx, ry, rotation_deg, theta1, theta1 + delta, delta};
 }
 
-auto arc_to_bezier(math::Point from, const ArcParams& arc, raster::Path& out) -> void {
+auto arc_to_bezier(math::Point from, const ArcParams& arc, math::Path& out) -> void {
   // 端点参数 → 中心参数后按 90° 一段转三次贝塞尔（F.6.4）
   const float phi = arc.rotation_deg * std::numbers::pi_v<float> / 180.0f;
   const float cos_phi = std::cos(phi);
@@ -450,9 +450,9 @@ auto Transform::scalar_factor() const noexcept -> float {
   return std::sqrt(std::abs(a * d - b * c));
 }
 
-auto parse_path(std::string_view d) -> std::optional<raster::Path> {
+auto parse_path(std::string_view d) -> std::optional<math::Path> {
   if (d.empty()) return std::nullopt;
-  raster::Path path;
+  math::Path path;
   NumberCursor cursor{d, 0};
   math::Point current{0.0f, 0.0f};
   math::Point subpath_start{0.0f, 0.0f};
@@ -717,26 +717,26 @@ auto parse_transform(std::string_view text) -> Transform {
 }
 
 /// 累计 transform 应用于路径（逐控制点）。
-auto apply_transform(const raster::Path& path, const Transform& transform) -> raster::Path {
-  raster::Path out;
+auto apply_transform(const math::Path& path, const Transform& transform) -> math::Path {
+  math::Path out;
   const auto points = path.raw_points();
   (void)points;
   for (const auto& command : path.commands()) {
     switch (command.kind) {
-      case raster::PathCommand::Kind::MoveTo:
+      case math::PathCommand::Kind::MoveTo:
         out.move_to(transform.apply(command.p1));
         break;
-      case raster::PathCommand::Kind::LineTo:
+      case math::PathCommand::Kind::LineTo:
         out.line_to(transform.apply(command.p1));
         break;
-      case raster::PathCommand::Kind::QuadTo:
+      case math::PathCommand::Kind::QuadTo:
         out.quad_to(transform.apply(command.p1), transform.apply(command.p2));
         break;
-      case raster::PathCommand::Kind::CubicTo:
+      case math::PathCommand::Kind::CubicTo:
         out.cubic_to(transform.apply(command.p1), transform.apply(command.p2),
                      transform.apply(command.p3));
         break;
-      case raster::PathCommand::Kind::Close:
+      case math::PathCommand::Kind::Close:
         out.close();
         break;
     }
@@ -783,7 +783,7 @@ auto apply_shape(const XmlToken& token, const StyleContext& context, float view_
     parse_length_percent(attr(token, "rx"), w, rx);
     parse_length_percent(attr(token, "ry"), h, ry);
     if (w > 0.0f && h > 0.0f) {
-      raster::Path path;
+      math::Path path;
       const float radius = std::max(rx, ry) > 0.0f ? std::max(rx, ry) : 0.0f;
       path.add_rounded_rect(math::Rect{x, y, w, h}, radius);
       node.path = apply_transform(path, transform);
@@ -794,7 +794,7 @@ auto apply_shape(const XmlToken& token, const StyleContext& context, float view_
     parse_length_percent(attr(token, "cy"), view_h, cy);
     parse_length_percent(attr(token, "r"), std::max(view_w, view_h), r);
     if (r > 0.0f) {
-      raster::Path path;
+      math::Path path;
       path.add_circle(math::Point{cx, cy}, r);
       node.path = apply_transform(path, transform);
     }
@@ -805,7 +805,7 @@ auto apply_shape(const XmlToken& token, const StyleContext& context, float view_
     parse_length_percent(attr(token, "rx"), view_w, rx);
     parse_length_percent(attr(token, "ry"), view_h, ry);
     if (rx > 0.0f && ry > 0.0f) {
-      raster::Path path;
+      math::Path path;
       path.add_ellipse(math::Rect{cx - rx, cy - ry, rx * 2.0f, ry * 2.0f});
       node.path = apply_transform(path, transform);
     }
@@ -815,7 +815,7 @@ auto apply_shape(const XmlToken& token, const StyleContext& context, float view_
     parse_length_percent(attr(token, "y1"), view_h, y1);
     parse_length_percent(attr(token, "x2"), view_w, x2);
     parse_length_percent(attr(token, "y2"), view_h, y2);
-    raster::Path path;
+    math::Path path;
     path.move_to(math::Point{x1, y1});
     path.line_to(math::Point{x2, y2});
     node.path = apply_transform(path, transform);
@@ -823,7 +823,7 @@ auto apply_shape(const XmlToken& token, const StyleContext& context, float view_
     NumberCursor numbers{attr(token, "points"), 0};
     double x = 0.0;
     double y = 0.0;
-    raster::Path path;
+    math::Path path;
     bool first = true;
     while (numbers.next(x) && numbers.next(y)) {
       const math::Point point{static_cast<float>(x), static_cast<float>(y)};
@@ -1261,36 +1261,36 @@ namespace {
 /// （齿轮、字母形、环形），把**每条闭合子路径按包围盒包含关系**重排：外环正向、
 /// 其直接子环反向——环数通常 ≤ 8，代价可忽略。这是子集降级：嵌套奇偶层多于两层时
 /// 退化为 nonzero 视觉（不崩溃、不变形，只孔的嵌套层数可能失真）。
-auto make_even_odd_path(const raster::Path& path) -> raster::Path {
+auto make_even_odd_path(const math::Path& path) -> math::Path {
   // 按子路径拆分
   struct SubPath {
-    raster::Path path{};
+    math::Path path{};
     math::Rect bounds{};
   };
   std::vector<SubPath> subs;
-  raster::Path current;
+  math::Path current;
   const auto flush = [&]() {
     if (!current.is_empty()) {
       subs.push_back(SubPath{current, current.flattened_bounds(0.2f)});
-      current = raster::Path{};
+      current = math::Path{};
     }
   };
   for (const auto& command : path.commands()) {
     switch (command.kind) {
-      case raster::PathCommand::Kind::MoveTo:
+      case math::PathCommand::Kind::MoveTo:
         flush();
         current.move_to(command.p1);
         break;
-      case raster::PathCommand::Kind::LineTo:
+      case math::PathCommand::Kind::LineTo:
         current.line_to(command.p1);
         break;
-      case raster::PathCommand::Kind::QuadTo:
+      case math::PathCommand::Kind::QuadTo:
         current.quad_to(command.p1, command.p2);
         break;
-      case raster::PathCommand::Kind::CubicTo:
+      case math::PathCommand::Kind::CubicTo:
         current.cubic_to(command.p1, command.p2, command.p3);
         break;
-      case raster::PathCommand::Kind::Close:
+      case math::PathCommand::Kind::Close:
         current.close();
         flush();
         break;
@@ -1328,13 +1328,13 @@ auto make_even_odd_path(const raster::Path& path) -> raster::Path {
     }
     depth[i] = level;
   }
-  raster::Path result;
+  math::Path result;
   for (std::size_t i = 0; i < subs.size(); ++i) {
     if (depth[static_cast<std::size_t>(i)] % 2 == 1) {
       // 反绕向 = 点序反转（flatten 成折线后倒序；填充几何不变、绕向翻转）。
       // 注意不能用 `Path::reverse()`——它把段拆成独立 MoveTo（语义是"断开"，
       // 用在这里会把孔打散成散点）。
-      raster::Path reversed;
+      math::Path reversed;
       const auto polylines = subs[i].path.flatten(0.2f);
       for (const auto& polyline : polylines) {
         if (polyline.points.empty()) continue;
@@ -1366,7 +1366,7 @@ void draw(raster::Surface& canvas, const Document& doc, math::Rect box,
                             (node.style.stroke.has_value() || node.style.stroke_current) &&
                             node.style.stroke_width > 0.0f;
     if (!has_fill && !has_stroke) continue;
-    raster::Path path = apply_transform(node.path, transform);
+    math::Path path = apply_transform(node.path, transform);
     if (path.is_empty()) continue;
     // 颜色解析次序：显式色 > override（仅覆盖 currentColor/未指定——多色图标不被主题色破坏）
     // > SVG 缺省黑。
@@ -1378,7 +1378,7 @@ void draw(raster::Surface& canvas, const Document& doc, math::Rect box,
     };
     const float fill_alpha = node.style.opacity * node.style.fill_opacity;
     if (has_fill && fill_alpha > 0.0f) {
-      raster::Path fill_path = node.style.fill_rule == FillRule::EvenOdd
+      math::Path fill_path = node.style.fill_rule == FillRule::EvenOdd
                                    ? make_even_odd_path(path)
                                    : path;
       math::Color color = resolve(node.style.fill, node.style.fill_current);

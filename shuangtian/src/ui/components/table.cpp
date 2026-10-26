@@ -8,7 +8,7 @@
 
 #include "st/core/string.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/raster/surface.hpp"
 #include "st/ui/text_port.hpp"
 

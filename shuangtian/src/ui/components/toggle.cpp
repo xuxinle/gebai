@@ -9,7 +9,7 @@
 #include "st/core/string.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/ui/text_port.hpp"
 
 #include "components_internal.hpp"
@@ -181,7 +181,7 @@ void Checkbox::paint_content(const RenderContext& context, raster::Surface& canv
 
   if (checked_) {
     // 两段线对勾（描边式，圆角连接/端帽由光栅器保证）。
-    raster::Path tick;
+    math::Path tick;
     tick.move_to(math::Point{box.x + box.width * 0.27f, box.y + box.height * 0.53f});
     tick.line_to(math::Point{box.x + box.width * 0.44f, box.y + box.height * 0.71f});
     tick.line_to(math::Point{box.x + box.width * 0.74f, box.y + box.height * 0.31f});
@@ -325,7 +325,7 @@ void Radio::paint_content(const RenderContext& context, raster::Surface& canvas)
   }
 
   canvas.fill_circle(box.center(), radius, raster::Paint::solid(face));
-  raster::Path circle;
+  math::Path circle;
   circle.add_circle(box.center(), std::max(radius - k_ring_stroke * 0.5f, 0.0f));
   canvas.stroke_path(circle, raster::Paint::solid(border), k_ring_stroke);
   if (checked_) {
@@ -518,7 +518,7 @@ void Switch::paint_content(const RenderContext& context, raster::Surface& canvas
                      math::Point{shadow.offset_x, shadow.offset_y});
   canvas.fill_circle(slider.center(), knob_radius, raster::Paint::solid(colors.on_primary));
   // 发丝描边：深色主题下滑块与轨道同调时仍可辨识轮廓。
-  raster::Path knob_edge;
+  math::Path knob_edge;
   knob_edge.add_circle(slider.center(),
                        std::max(knob_radius - metrics.border_width * 0.5f, 0.0f));
   canvas.stroke_path(knob_edge, raster::Paint::solid(colors.border_strong), metrics.border_width);

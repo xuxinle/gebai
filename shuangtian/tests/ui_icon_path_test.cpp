@@ -22,19 +22,19 @@
 
 #include "st/core/print.hpp"
 #include "st/math/geometry.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/ui/icon.hpp"
 
 namespace {
 
 using st::math::Point;
 using st::math::Rect;
-using st::raster::Path;
+using st::math::Path;
 using st::ui::Icon;
 
 inline constexpr float kTolerance = 0.05f;
 
-[[nodiscard]] auto flatten(std::string_view name) -> std::vector<st::raster::Polyline> {
+[[nodiscard]] auto flatten(std::string_view name) -> std::vector<st::math::Polyline> {
   const Path path = Icon::path(name, Rect{0.0f, 0.0f, 24.0f, 24.0f}, 2.0f);
   return path.flatten(0.25f);
 }
@@ -42,7 +42,7 @@ inline constexpr float kTolerance = 0.05f;
 /// 第 `index` 条折线的第 `point` 个点。
 /// 用 `operator[]` 而非 `.at()`：这是 `L12` 的硬红线（且测试里越界直接崩，
 /// 比抛异常更好定位）。
-[[nodiscard]] auto point_at(const std::vector<st::raster::Polyline>& polylines,
+[[nodiscard]] auto point_at(const std::vector<st::math::Polyline>& polylines,
                             std::size_t index, std::size_t point) -> Point {
   return polylines[index].points[point];
 }

@@ -1,8 +1,8 @@
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 
 #include <cmath>
 
-namespace st::raster {
+namespace st::math {
 namespace {
 
 inline constexpr float kPi = 3.14159265358979323846f;
@@ -582,4 +582,4 @@ auto make_rounded_border_ring(math::Rect rect, float radius, float width) -> Pat
   return path;
 }
 
-}  // namespace st::raster
+}  // namespace st::math

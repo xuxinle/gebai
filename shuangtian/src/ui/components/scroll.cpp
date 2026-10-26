@@ -5,7 +5,7 @@
 #include <format>
 
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 
 namespace st::ui {
 namespace {

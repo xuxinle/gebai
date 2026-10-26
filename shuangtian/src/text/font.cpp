@@ -241,7 +241,7 @@ struct FontData {
   std::unordered_map<std::uint32_t, std::int16_t> kern{};
   std::mutex cff_mutex{};
   std::mutex outline_mutex{};
-  std::unordered_map<GlyphId, std::shared_ptr<const raster::Path>> outlines{};
+  std::unordered_map<GlyphId, std::shared_ptr<const math::Path>> outlines{};
   std::mutex hints_mutex{};
   std::unordered_map<GlyphId, std::vector<StemHint>> hints{};
 
@@ -659,7 +659,7 @@ struct GlyphPoint {
 }
 
 /// 把 TrueType 闭合轮廓（on/off 点混合、隐含中点）转成二次贝塞尔路径。
-auto emit_contour(raster::Path& path, std::span<const GlyphPoint> contour) -> void {
+auto emit_contour(math::Path& path, std::span<const GlyphPoint> contour) -> void {
   const std::size_t count = contour.size();
   if (count == 0) return;
   std::size_t index = 0;
@@ -691,20 +691,20 @@ auto emit_contour(raster::Path& path, std::span<const GlyphPoint> contour) -> vo
 }
 
 /// 按仿射矩阵（a b c d / dx dy）变换并追加路径。
-auto append_transformed(raster::Path& out, const raster::Path& source, float a, float b, float c,
+auto append_transformed(math::Path& out, const math::Path& source, float a, float b, float c,
                         float d, float dx, float dy) -> void {
   const auto map = [a, b, c, d, dx, dy](math::Point point) noexcept -> math::Point {
     return math::Point{a * point.x + c * point.y + dx, b * point.x + d * point.y + dy};
   };
-  for (const raster::PathCommand& command : source.commands()) {
+  for (const math::PathCommand& command : source.commands()) {
     switch (command.kind) {
-      case raster::PathCommand::Kind::MoveTo: out.move_to(map(command.p1)); break;
-      case raster::PathCommand::Kind::LineTo: out.line_to(map(command.p1)); break;
-      case raster::PathCommand::Kind::QuadTo: out.quad_to(map(command.p1), map(command.p2)); break;
-      case raster::PathCommand::Kind::CubicTo:
+      case math::PathCommand::Kind::MoveTo: out.move_to(map(command.p1)); break;
+      case math::PathCommand::Kind::LineTo: out.line_to(map(command.p1)); break;
+      case math::PathCommand::Kind::QuadTo: out.quad_to(map(command.p1), map(command.p2)); break;
+      case math::PathCommand::Kind::CubicTo:
         out.cubic_to(map(command.p1), map(command.p2), map(command.p3));
         break;
-      case raster::PathCommand::Kind::Close: out.close(); break;
+      case math::PathCommand::Kind::Close: out.close(); break;
     }
   }
 }
@@ -733,13 +733,13 @@ auto append_transformed(raster::Path& out, const raster::Path& source, float a, 
   return ok();
 }
 
-[[nodiscard]] auto outline_glyf(const FontData& data, GlyphId id, raster::Path& out,
+[[nodiscard]] auto outline_glyf(const FontData& data, GlyphId id, math::Path& out,
                                 int depth) -> Status;
 
 /// TrueType 简单字形（直线 + 二次曲线）。
 [[nodiscard]] auto outline_glyf_simple(std::size_t base, std::size_t limit,
                                        std::span<const std::uint8_t> bytes,
-                                       std::int16_t contour_count, raster::Path& out) -> Status {
+                                       std::int16_t contour_count, math::Path& out) -> Status {
   const std::size_t contours = static_cast<std::size_t>(contour_count);
   if (!in_range(bytes, base + 10, contours * 2 + 2)) {
     return unexpected(ErrorCode::Parse, "glyf 轮廓端点数组截断");
@@ -828,7 +828,7 @@ auto append_transformed(raster::Path& out, const raster::Path& source, float a, 
 /// TrueType 复合字形（组件 + 2x2 变换）。
 [[nodiscard]] auto outline_glyf_composite(const FontData& data, std::size_t base,
                                           std::size_t limit, std::span<const std::uint8_t> bytes,
-                                          raster::Path& out, int depth) -> Status {
+                                          math::Path& out, int depth) -> Status {
   std::size_t cursor = base + 10;
   std::size_t components = 0;
   for (;;) {
@@ -881,7 +881,7 @@ auto append_transformed(raster::Path& out, const raster::Path& source, float a, 
       cursor += 8;
     }
     if (xy_values) {
-      raster::Path component{};
+      math::Path component{};
       const Status status = outline_glyf(data, component_glyph, component, depth + 1);
       if (!status) return status;
       append_transformed(out, component, a, b, c, d, dx, dy);
@@ -892,7 +892,7 @@ auto append_transformed(raster::Path& out, const raster::Path& source, float a, 
   return ok();
 }
 
-[[nodiscard]] auto outline_glyf(const FontData& data, GlyphId id, raster::Path& out,
+[[nodiscard]] auto outline_glyf(const FontData& data, GlyphId id, math::Path& out,
                                 int depth) -> Status {
   if (depth > k_max_composite_depth) {
     return unexpected(ErrorCode::Parse, "glyf 复合字形嵌套过深");
@@ -1304,7 +1304,7 @@ struct Type2State {
   std::size_t global_bias{0};
   std::array<float, 32> transient{};
   std::vector<float> stack{};
-  raster::Path path{};
+  math::Path path{};
   float x{0.0f};
   float y{0.0f};
   float width{0.0f};
@@ -1848,7 +1848,7 @@ auto type2_curve(Type2State& state, float dx1, float dy1, float dx2, float dy2, 
   return ok();
 }
 
-[[nodiscard]] auto outline_cff(FontData& data, GlyphId id, raster::Path& out,
+[[nodiscard]] auto outline_cff(FontData& data, GlyphId id, math::Path& out,
                                std::vector<StemHint>* hints = nullptr) -> Status {
   const Status ready = ensure_cff(data);
   if (!ready) return ready;
@@ -2109,7 +2109,7 @@ auto FontFace::face_index() const noexcept -> int {
   return data_ == nullptr ? 0 : data_->value.face_index;
 }
 
-auto FontFace::glyph_outline(GlyphId id) const -> Result<raster::Path> {
+auto FontFace::glyph_outline(GlyphId id) const -> Result<math::Path> {
   if (data_ == nullptr) return unexpected(ErrorCode::Invalid, "FontFace 未加载");
   FontData& data = data_->value;
   {
@@ -2117,7 +2117,7 @@ auto FontFace::glyph_outline(GlyphId id) const -> Result<raster::Path> {
     const auto it = data.outlines.find(id);
     if (it != data.outlines.end()) return *it->second;
   }
-  raster::Path path{};
+  math::Path path{};
   Status status = ok();
   if (data.glyf.present) {
     status = outline_glyf(data, id, path, 0);
@@ -2127,7 +2127,7 @@ auto FontFace::glyph_outline(GlyphId id) const -> Result<raster::Path> {
     return unexpected(ErrorCode::Unsupported, "字体无可解析的轮廓表（glyf/CFF）");
   }
   if (!status) return st::forward_error(status.error());
-  auto cached = std::make_shared<const raster::Path>(std::move(path));
+  auto cached = std::make_shared<const math::Path>(std::move(path));
   {
     const std::scoped_lock lock(data.outline_mutex);
     data.outlines.insert_or_assign(id, cached);
@@ -2155,7 +2155,7 @@ auto FontFace::stem_hints(GlyphId id) const -> const std::vector<StemHint>& {
   // 只在 CFF 字上有提示（`glyf` 真型字体走另一条 hinting 路线，本引擎不实现）。
   std::vector<StemHint> collected{};
   if (!data.glyf.present && data.table(tag_of('C', 'F', 'F', ' ')) != nullptr) {
-    raster::Path ignored{};
+    math::Path ignored{};
     (void)outline_cff(data, id, ignored, &collected);
   }
   const std::scoped_lock lock(data.hints_mutex);

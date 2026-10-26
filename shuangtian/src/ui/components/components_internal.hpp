@@ -24,7 +24,7 @@
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/line_layout.hpp"
 #include "st/ui/text_port.hpp"
@@ -65,7 +65,7 @@ inline void fill_round_rect(raster::Surface& canvas, math::Rect rect, float top_
                             float top_right, float bottom_right, float bottom_left,
                             const raster::Paint& paint) {
   if (rect.is_empty()) return;
-  raster::Path path;
+  math::Path path;
   path.add_rounded_rect(rect, top_left, top_right, bottom_right, bottom_left);
   canvas.fill_path(path, paint);
 }
@@ -147,7 +147,7 @@ inline void draw_line(const RenderContext& context, raster::Surface& canvas, std
 /// 展开三角（目录行前导；`expanded` 时旋转 90°）。
 inline void draw_triangle(raster::Surface& canvas, math::Point center, float radius,
                           math::Color color, bool expanded) {
-  raster::Path path;
+  math::Path path;
   const float r = radius;
   if (expanded) {
     // 向下：顶点在下
@@ -191,7 +191,7 @@ inline void paint_focus_ring(const RenderContext& context, raster::Surface& canv
   const math::Rect outer = rect.inflate(offset);
   if (outer.width <= 0.0f || outer.height <= 0.0f) return;
   const float limit = std::max(std::min(outer.width, outer.height) * 0.5f - 2.0f, 0.0f);
-  raster::Path ring;
+  math::Path ring;
   ring.add_rounded_rect(outer, std::min(std::max(radius + offset, 0.0f), limit));
   canvas.stroke_path(ring, raster::Paint::solid(context.theme.colors().focus_ring), width);
 }
@@ -206,7 +206,7 @@ inline void paint_focus_ring(const RenderContext& context, raster::Surface& canv
 inline void paint_outline(raster::Surface& canvas, math::Rect rect, float radius, math::Color color,
                           float width) {
   if (width <= 0.0f || color.a == 0U || rect.is_empty()) return;
-  canvas.fill_path(raster::make_rounded_border_ring(rect, radius, width),
+  canvas.fill_path(math::make_rounded_border_ring(rect, radius, width),
                    raster::Paint::solid(color));
 }
 

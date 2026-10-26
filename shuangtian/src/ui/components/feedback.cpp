@@ -8,7 +8,7 @@
 
 #include "st/core/string.hpp"
 #include "st/raster/paint.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 #include "st/ui/icon.hpp"
 #include "st/ui/text_port.hpp"
 
@@ -37,13 +37,13 @@ namespace {
 }
 
 
-/// 圆弧采样点（几何用 `raster::Path::add_arc` 求，再取折线点用于环形填充）。
+/// 圆弧采样点（几何用 `math::Path::add_arc` 求，再取折线点用于环形填充）。
 [[nodiscard]] auto arc_points(math::Point center, float radius, float start_degrees,
                              float end_degrees) -> std::vector<math::Point> {
-  raster::Path arc;
+  math::Path arc;
   arc.add_arc(center, radius, start_degrees, end_degrees);
   std::vector<math::Point> points;
-  for (const raster::Polyline& polyline : arc.flatten(0.25f)) {
+  for (const math::Polyline& polyline : arc.flatten(0.25f)) {
     points.insert(points.end(), polyline.points.begin(), polyline.points.end());
   }
   return points;
@@ -217,7 +217,7 @@ void Spinner::paint_content(const RenderContext& context, raster::Surface& canva
       arc_points(center, std::max(0.5f, radius - thickness * 0.5f), end, start);
   if (outer_points.size() < 2U || inner_points.size() < 2U) return;
 
-  raster::Path ring;
+  math::Path ring;
   ring.move_to(outer_points.front());
   for (std::size_t index = 1; index < outer_points.size(); ++index) {
     ring.line_to(outer_points[index]);

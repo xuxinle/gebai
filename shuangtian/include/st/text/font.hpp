@@ -18,7 +18,7 @@
 #include <string_view>
 
 #include "st/core/error.hpp"
-#include "st/raster/path.hpp"
+#include "st/math/path.hpp"
 
 namespace st::text {
 
@@ -115,7 +115,7 @@ class FontFace {
   /// 字形轮廓（**字体单位、y 向上、原点在基线笔位**）。
   /// @return 失败：`NotFound` 索引越界、`Parse` 轮廓数据损坏、`Unsupported` 不支持的轮廓字符
   ///         串操作（如 Type2 `seac` 组合字形）。
-  [[nodiscard]] auto glyph_outline(GlyphId id) const -> Result<raster::Path>;
+  [[nodiscard]] auto glyph_outline(GlyphId id) const -> Result<math::Path>;
 
   /// `kern` 表（格式 0）字距调整，**字体单位**；无该对返回 0（`noexcept`，不报错）。
   [[nodiscard]] auto kerning(GlyphId left, GlyphId right) const noexcept -> float;
