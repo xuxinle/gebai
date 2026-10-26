@@ -29,5 +29,22 @@ examples/caiyun/assets/vo/*.wav
 examples/caiyun/_build/
 examples/caiyun/kit/_build/
 
+# 裁云示例工程的渲染产物（可随时重建，不入库）
+#
+# 风格模板示例（examples/caiyun/styles/<编号>-<名字>/）**只入库脚本**：
+# film.json / layout.js / 各驱动脚本。`_build/` 里是 kit 拼接产物与 resolved json，
+# 都是跑一次就有的中间物，入库只会互相覆盖。
+#
+# 成片与抽帧**一律落会话目录**（不落代码目录）：代码目录的产物会被入仓检查弄丢，
+# 且多个片子并行时同名文件互相覆盖——历史消息里按路径引用的产物会变成别的内容。
+examples/caiyun/styles/*/_build/
+examples/caiyun/styles/**/*.mp4
+examples/caiyun/styles/**/*.wav
+examples/caiyun/styles/**/frames/
+
 # 示例应用自己落盘的本地数据（示例内置库的可重建产物，不是源码）
 examples/cefu/cefu.db
+
+examples/caiyun/mtfilm/qa/*.mp4
+examples/caiyun/mtfilm/qa/*.png
+examples/caiyun/mtfilm/qa/*.log

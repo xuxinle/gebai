@@ -8,7 +8,6 @@ import { isFilePopup, setFileDisplaySetting } from "./file-display"
 import { getFxPanelsSetting, setFxPanelsSetting } from "./fx-panels"
 import { loadLocalEnv, saveLocalEnv, filterEnvToCatalog, type EnvCatalogGroup } from "./env-local"
 import { confirmDialog, customSelect, toast } from "./ui"
-import { fetchPersonaState, renderPersonaPanel, type PersonaStateView } from "./persona-panel"
 
 /* ---------- 设置面板（环境变量 / 外观 / 用户 / 反馈；工具启停、子Agent 装载与 Webhook 管理经 API 使用） ---------- */
 
@@ -58,20 +57,8 @@ async function renderSettingsTab(tab: string) {
   } catch {
     /* 非服务模式：保持默认隐藏 */
   }
-  // 拟人 tab 的显示条件与管理员 tab 不同：看**服务端是否启用拟人模式**（`/api/v1/persona/state` 不返回 404），
-  // 不看用户角色——它描述的是部署形态而不是权限。未启用时隐藏：点开一个永远说「未启用」的页只会浪费一次往返。
-  try {
-    const personaTab = settingsTabs.querySelector<HTMLButtonElement>("button[data-tab='persona']")
-    if (personaTab) {
-      const enabled = (await fetchPersonaState().then((s) => s !== null)) === true
-      personaTab.hidden = !enabled
-    }
-  } catch {
-    /* 服务端未提供该端点（旧版）：保持隐藏 */
-  }
   if (tab === "env") return void renderSettingsEnv()
   if (tab === "appearance") return void renderSettingsAppearance()
-  if (tab === "persona") return void renderSettingsPersona()
   if (tab === "users") return void renderSettingsUsers()
   if (tab === "feedback") return void renderSettingsFeedback()
 }
@@ -246,44 +233,6 @@ async function renderSettingsEnv() {
   }
   settingsFoot.append(el("div", "settings-foot-desc", "仅保存在本浏览器，对所有会话生效"), saveBtn)
   settingsFoot.hidden = false
-}
-
-/**
- * 拟人面板：渲染运行态 + 手动启停事件源后的**局部重绘**。
- *
- * 为何是局部：点完「启动」就整页刷新会把当前 tab、滚动位置、展开状态全抹掉，
- * 用户会以为“点了没反应”。只重画面板内容（外层的遮罩与 tab 不动）就够。
- */
-async function renderSettingsPersona() {
-  const box = el("div", "persona-panel")
-  const redraw = async () => {
-    box.innerHTML = ""
-    box.appendChild(el("div", "settings-row-desc", "正在读取运行态…"))
-    let snapshot: PersonaStateView | null = null
-    try {
-      snapshot = await fetchPersonaState()
-    } catch (err) {
-      box.innerHTML = ""
-      box.appendChild(blockText(`运行态读取失败：${(err as Error).message}`))
-      return
-    }
-    box.innerHTML = ""
-    if (!snapshot) {
-      box.appendChild(
-        blockText(
-          "拟人模式未启用。\n\n" +
-            "设置 `GEBAI_PERSONA=true` 后重启歌白，人格就会开始响应渠道与事件源推送的事件" +
-            "（以你自己的名义发言，而不是机器人）。\n\n" +
-            "开关关闭时，报入站事件只记日志（日志里搜「无人格运行时」）——这是刻意的：" +
-            "关闭态不能有任何新行为。",
-        ),
-      )
-      return
-    }
-    renderPersonaPanel(box, snapshot, () => void redraw())
-  }
-  settingsBody.appendChild(box)
-  await redraw()
 }
 
 async function renderSettingsUsers() {

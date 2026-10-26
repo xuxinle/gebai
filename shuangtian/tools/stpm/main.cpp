@@ -224,7 +224,20 @@ auto command_rebuild(const Arguments& arguments) -> int {
   st::pkg::BuildOptions options;
   options.profile = arguments.get("profile", "dev");   // 与 bootstrap 默认一致
   options.target = "st";
-  options.force = true;        // 自举重来：产物路径变了，增量缓存也对不上
+  // ## 为何**不**设 `force = true`（2026-10-26 实测）
+  //
+  // 原先这里写 `force = true`，理由是“产物路径变了，增量缓存也对不上”。
+  // 那句话是错的：`output_override` 只影响**最终链接产物的路径**
+  // （见 `build.cpp`：`options.output_override.empty() ? default_output : options.output_override`），
+  // 而对象目录 `object_dir` 完全不变 —— 那些 `.o` 仍然可复用。
+  //
+  // 代价实测：`st rebuild` 热态（无任何源码改动）**48.2s**，而它实际只需链接。
+  // 构建工具自己的构建时间应当是**秒级**：改一行 `src/pkg/*.cpp` 只该重编它一个。
+  //
+  // 正确性：交付物是否正确取决于 `.o` 是不是新代码，而那由 `needs_rebuild`（含内容哈希）
+  // 保证，与最终产物叫什么无关。自举后**用新工具重跑本次命令**（`rebuild_self_and_reexec`）
+  // 也保证“新逻辑真的生效”——若新代码没进去，重跑后行为不会变，那是可观测的。
+  options.force = false;
   options.no_tests = true;     // 只重建工具本身
   options.strip_debug = !arguments.has("no-strip");
   options.verbose = arguments.has("verbose") || arguments.has("v");
@@ -485,10 +498,23 @@ auto command_test(const Arguments& arguments) -> int {
   constexpr std::size_t kTestShardsCap = 16;
   const st::pkg::ShardPlan shard_plan = st::pkg::plan_test_shards(0, st::hardware_concurrency(),
                                                                   0, 0, kTestShardsCap);
-  const auto test_jobs = arguments.number_any({"test-jobs", "test_jobs"},
-                                              static_cast<double>(shard_plan.shards));
-  options.test_jobs = test_jobs > 0.0 ? static_cast<std::size_t>(test_jobs) : 1;
+  // ## 带过滤词时不分片（2026-10-26 实测）
+  //
+  // 分片是为**全量套件**设计的：每片一个独立进程，各自加载 27MB 的 st_tests.exe
+  // 并枚举全部用例，所以片数越多固定成本越高。
+  //
+  // 实测（`st test caiyun`，命中 27 条用例）：
+  //   单分片 **5.5s**　｜　4 片 5.9s　｜　16 片 **7.6s**
+  // 也就是说“并行”在少量用例上是净亏损——多出的 8 个进程启动（约 2.1s）
+  // 远超它们并行省下的执行时间（27 条用例一共才 0.44s）。
+  //
+  // 判据：有过滤词 = 只跑一小批 ⇒ 单进程直跑。
+  // 全量（无过滤词）仍然分片——那时单进程要跑几分钟。
   const std::string filter = arguments.positional.empty() ? std::string{} : arguments.positional.front();
+  const std::size_t default_shards = filter.empty() ? shard_plan.shards : 1;
+  const auto test_jobs = arguments.number_any({"test-jobs", "test_jobs"},
+                                              static_cast<double>(default_shards));
+  options.test_jobs = test_jobs > 0.0 ? static_cast<std::size_t>(test_jobs) : 1;
   // `--list`：只列用例不跑（交测试框架入口）；`--format junit`：经 ST_JUNIT_XML 写逐用例报告
   const bool list_only = arguments.has("list");
   std::string junit_path;

@@ -30,6 +30,7 @@
 
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import { feishuFetch } from "./tls"
 
 /** 与 `@gebai/agents` 的 `UserTokenEntry` 同形（结构化兼容，无需适配器）。 */
 export interface PersonaUserToken {
@@ -91,7 +92,9 @@ export class PersonaTokenStore {
 
   constructor(private readonly opts: PersonaTokenStoreOptions) {
     this.path = join(opts.home, "persona", TOKEN_FILE)
-    this.fetchImpl = opts.fetchImpl ?? fetch
+    // 缺省走 feishuFetch：刷新令牌同样打 accounts.feishu.cn，与兑换同一条 TLS 路径
+    //（GEBAI_FEISHU_INSECURE_TLS 只对 feishuFetch 生效，用原生 fetch 会让开关静默失效）
+    this.fetchImpl = opts.fetchImpl ?? feishuFetch
     this.now = opts.now ?? Date.now
   }
 

@@ -153,6 +153,21 @@ function syncSessionScopedUi(): void {
   if (activePane()?.container.querySelector(".msg")) hideEmptyState()
 }
 
+/**
+ * 进入会话视图（该会话尚无消息时的就位）：建立并激活它的消息容器。
+ *
+ * 消息只挂到**当前会话的活动容器**上（见 msg-panes / messages 的挂载规则）。草稿页把全部容器
+ * 隐藏（deactivatePane），首条消息发出时会话才刚创建——此处不先就位，那条消息会挂到空目标而
+ * 静默丢弃：服务端已落盘、页面上看不见，直到刷新由历史回放才出现。
+ *
+ * 只做「把本会话的容器摆到台前」，**不动容器内容**：已有历史或在途流的会话调它无副作用。
+ */
+export function enterSessionView(sessionId: string): void {
+  activatePane(sessionId)
+  syncSessionScopedUi()
+  focusInput()
+}
+
 export async function loadMessages(sessionId: string) {
   const seq = ++loadSeq
   // 会话消息视图（pane）：每个会话一份独立滚动容器——切会话只切显隐，后台会话的
@@ -678,11 +693,22 @@ function collectLocalWaiting(): Map<string, number> {
   return out
 }
 
+/** 角标的等待项数（纯函数，便于单测固定规则）：
+ *
+ * - 本页接管着这次运行（`runs` 有它，`pageOwned`）：待决卡的**出卡→作答→揭卡都在本页发生**，DOM 是实时真值。
+ * - 本页没接管（别处发起的运行）：DOM 恒为空，快照 `pending` 是唯一信号——那时它可能就是别处的卡，
+ *   而「哪个会话卡在等人」正是列表角标要回答的问题。
+ *
+ * 快照 `runtime` 只在建连/登录时推送一次、运行期不再更新（`ws-state.ts` 的 `pushSnapshot` 仅这三个入口）：
+ * 先信它的话，建连时正在等审批的会话在本页批完后会一直显示 ⌛（卡已没了，角标却停在「等你」）；
+ * 反之快照里为 0 时新来的卡也看不到。两条都是错的，所以按「本页是否接管」分流。 */
+export function resolveWaitingCount(opts: { pageOwned: boolean; local: number; snapshotPending: number }): number {
+  return opts.pageOwned ? opts.local : opts.snapshotPending
+}
+
 /** 会话行运行态（无运行态返回 null）：运行中/等待用户输入/在途工具/后台任务数，列表角标与悬浮说明用。
  *
- * 优先用快照 runtime（服务端权威，含后台任务与子会话）；本页自己发起的会话只有本地状态时，
- * 至少把「是否在等用户作答」算准——否则后台任务在等审批时角标只显示「任务运行中」，
- * 用户看不出它正卡在自己这里（多会话并行时这恰是最需要一眼看到的信号）。
+ * 等待项按 `resolveWaitingCount` 的规则分流；其余字段用快照（服务端权威，含后台任务与子会话，本地无从得知）。
  *
  * @param localWaiting 本页待决卡计数（一次性算好的整批结果）；省略时现算一份——
  *   批量路径（listSignature / 列表渲染）必须传入，否则会退化成「会话数 × 卡数」次 DOM 扫描。
@@ -691,11 +717,14 @@ function runMarkOf(
   sessionId: string,
   localWaiting?: Map<string, number>,
 ): { waiting: number; tools: number; bg: number; subs: number } | null {
+  const local = (localWaiting ?? collectLocalWaiting()).get(sessionId) ?? 0
   const rt = runtimeInfo[sessionId]
-  if (rt) return { waiting: rt.pending.length, tools: rt.toolCalls ?? 0, bg: rt.bgTasks.filter((t) => t.status === "running").length, subs: rt.subRuns.length }
+  if (rt) {
+    const waiting = resolveWaitingCount({ pageOwned: runs.has(sessionId), local, snapshotPending: rt.pending.length })
+    return { waiting, tools: rt.toolCalls ?? 0, bg: rt.bgTasks.filter((t) => t.status === "running").length, subs: rt.subRuns.length }
+  }
   if (!runningSeen.has(sessionId)) return null
-  const waiting = (localWaiting ?? collectLocalWaiting()).get(sessionId) ?? 0
-  return { waiting, tools: 0, bg: 0, subs: 0 }
+  return { waiting: local, tools: 0, bg: 0, subs: 0 }
 }
 
 /** 结构签名：搜索/批量/折叠态 + 会话行展示字段——任一变化才需要重建列表 DOM。 */

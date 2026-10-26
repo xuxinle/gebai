@@ -57,6 +57,10 @@ users/
 tmp/
 audit-fs.jsonl
 feishu/
+# 拟人模式运行时数据（{GEBAI_HOME}/persona/：feishu-user-token.json 是**用户令牌凭据**、
+# drivers.json、memory.md、outbox/）。以 GEBAI_HOME=仓库根 运行时落在根下——
+# 里面是明文 access/refresh token，与 .env 同级敏感，绝不能入库。
+/persona/
 # 运行期缓存（{GEBAI_HOME}/cache/：子Agent 报告解析缓存等，以 GEBAI_HOME=仓库根 运行时在根下生成）
 /cache/
 # 二进制形态运行时物化点（{GEBAI_HOME}/vendor/：playwright driver 与 pwcore、d2js、ripgrep、

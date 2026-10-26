@@ -437,6 +437,16 @@ void Project::render_frame(st::raster::Surface& target, double time, const st::u
 
   // 转场：相邻场景在边界处交叉淡入（**在合成之后**按片段时间做，
   // 与片段怎么排布无关——所以人工移动/修剪后转场仍然跟着边界走）。
+  //
+  // ## 交叉淡入必须「旧的不动、新的淡上来」（实测）
+  //
+  // 旧实现是：目标层已经画好了**新一幕**（不透明），再把**旧一幕**
+  // 以 `opacity = 1 - eased` 叠上去。两侧同时半透明，于是中段整屏发黑：
+  // 实测边界后 0.12s 的一帧只有标题的淡彩、内容几乎全黑（均值亮度从 31 跌到 10）。
+  //
+  // 正确关系：转场期间**先画旧一幕作为底**（不透明），再把新一幕以
+  // `opacity = eased` 叠上去。这样任何时刻都有一个是“满”的，只会在两幕
+  // 内容重叠时出现短暂的“双影”——那正是交叉溶解该有的样子。
   if (script.transition > 0.001) {
     for (const auto& clip : clips) {
       const Scene* scene = scene_of(clip);
@@ -445,63 +455,64 @@ void Project::render_frame(st::raster::Surface& target, double time, const st::u
       const double into = time - clip.t_in;
       if (into < 0.0 || into >= script.transition) continue;
       const Clip* previous = nullptr;
-          for (const auto& other : clips) {
-      if (other.id == clip.id || !other.is_scene()) continue;
-      if (other.t_out <= clip.t_in + 1e-6 &&
-          (previous == nullptr || other.t_out > previous->t_out)) {
-        previous = &other;
+      for (const auto& other : clips) {
+        if (other.id == clip.id || !other.is_scene()) continue;
+        if (other.t_out <= clip.t_in + 1e-6 &&
+            (previous == nullptr || other.t_out > previous->t_out)) {
+          previous = &other;
+        }
       }
-    }
       if (previous == nullptr) continue;
       const Scene* before = scene_of(*previous);
       if (before == nullptr) continue;
-      Canvas bridge{target.physical_width(), target.physical_height(), 1.0f};
-      bridge.clear(Color{0, 0, 0, 0});
-      render_scene(bridge, *before, previous->local_time(previous->t_out), before->duration,
-                   text_port, &assets_, asset_basis_);
-      // 转场不只透明度交叉（那看起来"平"）：交出的一幕同时**微缩 + 上移**，
-      // 叠在新的一幕上就有"镜头推进"的方向感。
-      //
-      // 幅度很小（3% 缩放 / 1.5% 位移）：转场是"让观众不迷失"不是炫技；
-      // 幅度一大就变成 PPT 切换（廉价感的主要来源）。
       const float progress = static_cast<float>(
           std::clamp(into / std::max(0.001, script.transition), 0.0, 1.0));
       // 缓动：转场用 ease-out（快出慢收）——线性交叉会显得"匀速滑动"，
       // 而真实的镜头切换是"一下到位然后稳住"。
       const float eased = 1.0f - (1.0f - progress) * (1.0f - progress) * (1.0f - progress);
-      const float shrink = 1.0f - 0.035f * eased;
-      const float shift = static_cast<float>(target.physical_height()) * 0.016f * eased;
+
+      // ① 旧一幕作为**底**：不透明画进目标（它此时是满亮的）
+      render_scene(target, *before, previous->local_time(previous->t_out), before->duration,
+                   text_port, &assets_, asset_basis_);
+      // ② 新一幕画进独立画布，再以 eased 叠上去。
+      // 交出的那一幕同时**微缩 + 上移**，叠在新幕上就有"镜头推进"的方向感。
+      // 幅度很小（3% 缩放 / 1.6% 位移）：转场是"让观众不迷失"不是炫技。
+      Canvas bridge{target.physical_width(), target.physical_height(), 1.0f};
+      bridge.clear(Color{0, 0, 0, 0});
+      render_scene(bridge, *scene, clip.local_time(time), scene->duration, text_port,
+                   &assets_, asset_basis_, clip.scene_index,
+                   static_cast<int>(script.scenes.size()));
+      const float shrink = 1.0f - 0.030f * (1.0f - eased);
+      const float shift = static_cast<float>(target.physical_height()) * 0.012f * (1.0f - eased);
       const float box_w = static_cast<float>(target.physical_width()) * shrink;
       const float box_h = static_cast<float>(target.physical_height()) * shrink;
       const st::math::Rect box{(static_cast<float>(target.physical_width()) - box_w) * 0.5f,
                                (static_cast<float>(target.physical_height()) - box_h) * 0.5f - shift,
                                box_w, box_h};
       st::raster::DrawOptions options{};
-      options.opacity = 1.0f - eased;
+      options.opacity = eased;
       target.draw_canvas(bridge, box, options);
 
-      // ── 冲击闪白：转场前 30% 时间内叠一层高亮，纯黑场之间"撞击"用 ──
+      // ── 不再有闪白，也不再叠压暗台阶 ──
       //
-      // 为何要有它：交叉溶解在任何两幕之间都"温和"，而预告片的节奏需要
-      // **明确的断点**。闪白提供了这个断点，且成本极低（一次全幅 fill_rect）。
-      if (progress < 0.30f) {
-        const float flash = 1.0f - progress / 0.30f;
-        const float alpha = flash * flash * 0.32f;
-        if (alpha > 0.003f) {
-          const auto a = static_cast<std::uint8_t>(std::clamp(alpha, 0.0f, 1.0f) * 255.0f);
-          target.fill_rect(st::math::Rect{0.0f, 0.0f,
-                                          static_cast<float>(target.physical_width()),
-                                          static_cast<float>(target.physical_height())},
-                           st::raster::Paint::solid(st::math::Color{210, 232, 255, a}));
-        }
-      }
+      // 旧实现在转场前 30% 叠一层强度 0.32 的全幅**高亮**。在本片这种整屏低亮
+      // 构图里，它使全局平均亮度在**一帧内**从 31.0 跳到 52.9（+71%），
+      // 读起来不是“撞击”而是“闪白”。闪白是预告片的手段，
+      // 与“安静、留白、静止是内容”的语汇相矛。
+      //
+      // 闪白去掉后一度用“向下压暗”顶替，但交叉淡入修正为
+      // 「旧幕作底 + 新幕淡上」之后，两幕自身已能完成交接，
+      // 再叠一层全幅压暗只会把新幕也压黑（实测中段亮度跌到 10）。
+      // 所以这里什么都不画：转场只由交叉淡入本身表达。
 
-      // ── 光扫擦除：转场期间一道亮带扫过（"被光洗过"的换场感）──
-      if (progress > 0.02f && progress < 0.92f) {
-        const float sweep = (progress - 0.02f) / 0.90f;
-        caiyun::paint_light_sweep(target, sweep, 0.22f, scene->accent, 1.1f,
-                                  static_cast<float>(target.device_scale()));
-      }
+      // ── 不再有“光扫擦除” ──
+      //
+      // 旧实现在**每一处**幕边界都扫一道 22% 强度的亮带。它的本意是“换场感”，
+      // 但对本片是双重错误：
+      // ① **同样的手法重复 8 次**——一种手法全片只能当一次主角，重复即廉价；
+      // ② 它是运镜/降景手段，与“安静、留白、静止是内容”的调性相矛。
+      // 需要降景时应该由镜头自己（`cam_*`）或场景图元表达，
+      // 而不是在转场层里全局播一个特效。
 
     }
   }

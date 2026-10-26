@@ -115,9 +115,14 @@ describe("运行态可见性与列表角标", () => {
     // 整批一次算成 Map（逐个按会话扫 DOM = 会话数 × 卡数）
     expect(fn).toContain("Map<string, number>")
     expect(fn).toContain(".get(sid)")
-    // 本地运行态分支要把 waiting 算进去（不能固定 0）
-    const mark = s.slice(s.indexOf("function runMarkOf"), s.indexOf("function runMarkOf") + 900)
-    expect(mark).toContain("(localWaiting ?? collectLocalWaiting()).get(sessionId)")
+    // 本页接管着该会话时，waiting 一律取本地卡计数（不能再用快照 pending：它只在建连时推送，
+    // 批完后不会更新 → 角标卡在 ⌛）。分流规则集中在 resolveWaitingCount，由 session-badge.test.ts 逐例钉住。
+    const mark = s.slice(s.indexOf("function runMarkOf"), s.indexOf("function runMarkOf") + 1400)
+    expect(mark).toContain('(localWaiting ?? collectLocalWaiting()).get(sessionId)')
+    expect(mark).toContain("resolveWaitingCount({")
+    expect(mark).toContain("pageOwned: runs.has(sessionId)")
+    // 快照的 pending 只能作为「本页没接管」时的回落，不能无条件优先
+    expect(mark).not.toContain("if (rt) return { waiting: rt.pending.length")
   })
 
   test("只改角标的刷新不发网络请求（刷新变慢的根因）", () => {
@@ -136,11 +141,17 @@ describe("运行态可见性与列表角标", () => {
   })
 
   test("待决卡增减要通知列表刷新（否则角标不跟着变）", () => {
-    // 卡片增删发生在 approvals / messages，而列表在 sessions——它们已被 sessions 导入，
+    // 卡片增删发生在 approvals / messages / tool-cards，而列表在 sessions——它们已被 sessions 导入，
     // 不能反向导入，所以用事件解耦。两侧都要发，sessions 侧要听。
     expect(src("approvals.ts")).toContain('new CustomEvent("gebai:pending-change")')
     expect(src("messages.ts")).toContain('new CustomEvent("gebai:pending-change")')
+    expect(src("tool-cards.ts")).toContain('new CustomEvent("gebai:pending-change")')
     expect(src("sessions.ts")).toContain('addEventListener("gebai:pending-change"')
+    // 选择/填值卡在提交成功与失效后由 tool-cards 就地揭掉：揭卡必须走 dropCard（揭卡 = 不再等你作答，
+    // 角标要回运行图标）——直接 .remove() 会绕过通知，角标停在 ⌛。
+    const tc = src("tool-cards.ts")
+    expect(tc).not.toContain('closest<HTMLElement>(".interaction-card")?.remove()')
+    expect(tc).toContain('dropCard(bubble.closest(".interaction-card"))')
   })
 })
 
@@ -191,6 +202,34 @@ describe("附图消息发送即上屏（不等上传回流）", () => {
     const at = s.lastIndexOf("setQueueExecutor(") // 模块尾部才是注册点（顶部是同名 import）
     const fn = s.slice(at, at + 900)
     expect(fn).toContain("attachments: item.files")
+  })
+})
+
+describe("草稿页首条消息上屏（消息视图必须先于上屏就位）", () => {
+  test("main.ts 创建会话后立即建并激活消息容器，才能容纳随后 appendMsg 的上屏", () => {
+    const s = src("main.ts")
+    // 草稿态首条消息：会话刚由 createSession 建出，页面上还没有任何消息容器
+    const create = s.indexOf("s = await client.createSession()")
+    const view = s.indexOf("enterSessionView(sessionId)")
+    // 首个上屏点（渲染目标必须是当前会话的活动容器）
+    const onScreen = s.indexOf("userMsgEl = appendMsg(")
+    expect(create).toBeGreaterThan(-1)
+    expect(view).toBeGreaterThan(create) // 会话已建出（要拿到它的 id）
+    expect(onScreen).toBeGreaterThan(view) // 容器就位早于上屏：否则挂到空目标而静默丢弃
+    // 已经过了 setCurrentSession(s)：就位操作按当前会话建容器，不依赖调用方再传一遍
+    expect(s.indexOf("setCurrentSession(s)", create)).toBeLessThan(view)
+  })
+
+  test("enterSessionView 只动显隐与随会话 UI，不重建容器内容", () => {
+    const s = src("sessions.ts")
+    const at = s.indexOf("export function enterSessionView")
+    expect(at).toBeGreaterThan(-1)
+    const fn = s.slice(at, s.indexOf("export async function loadMessages", at))
+    expect(fn).toContain("activatePane(sessionId)")
+    expect(fn).toContain("syncSessionScopedUi()")
+    // 不得清空块表/重建窗口：已有历史或在途流的会话调它必须无副作用
+    expect(fn).not.toContain("resetMsgWindow(")
+    expect(fn).not.toContain("msgWindow.reset(")
   })
 })
 

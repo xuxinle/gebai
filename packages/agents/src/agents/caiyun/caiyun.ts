@@ -7,6 +7,10 @@ import systemPromptBase from "./caiyun.md" with { type: "text" }
 // 度量能力属于剪辑软件自己（它在渲染时就知道每镜边界与每帧时刻），
 // 不是旁挂子代理——见 verify.ts 顶部说明。
 import { verifyTool } from "./verify"
+// 风格模板库：七种叙事模板的方法论（含「用裁云怎么落地」）。
+// 放在本目录的 `styles/`：它是**裁云的知识**（讲具体图层与 layout 写法），
+// 跟着 Agent 走才不会与框架文档各自漂移；霜天仓库只放可运行的示例脚本。
+import { styleGuideTool } from "./style_guide"
 
 // 工具面全部走依赖（DESIGN「子Agent 依赖与自动装载」）：霜天全套（shuangtian）、图像生成（imagegen）、
 // 语音与音效（tts）——本代理零自有工具，三个依赖的工具各以自己的命名空间注册
@@ -32,11 +36,15 @@ export const description =
 // 归一成 `\n`：**提示词的字符内容应当等于文件内容**。
 export const systemPrompt = systemPromptBase.replace(/\r\n/g, "\n")
 
-// 唯一自有工具是 `verify`（成片质检）：其余能力仍走依赖（霜天 / imagegen / tts），
-// 不内联展开——同一能力只允许一个来源。
+// 自有工具：`verify`（成片质检）+ `style_guide`（风格模板读取）。
+// 其余能力仍走依赖（霜天 / imagegen / tts），不内联展开——同一能力只允许一个来源。
+//
 // `verify` 必须自有：它读的是本应用渲染器在**渲染循环里量好的**数据（逐镜边界、每帧时刻），
 // 旁挂子代理只能事后解码 mp4 再抽帧，既过一遍有损压缩又拿不到逐镜区间。
-export const tools: Record<string, Tool> = { verify: verifyTool }
+//
+// `style_guide` 必须自有：模板讲的是「用裁云怎么落地」——具体图层字段与 `layout`
+// 写法，只有裁云自己知道。放成纯文档则会与框架文档各自漂移。
+export const tools: Record<string, Tool> = { verify: verifyTool, style_guide: styleGuideTool }
 export const preload = false
 // 三个依赖名与 caiyun 均不构成前缀，工具各以自身命名空间注册
 export const def: SubAgentDef = { name, description, systemPrompt, tools, preload, dependencies: ["shuangtian", "imagegen", "tts"] }

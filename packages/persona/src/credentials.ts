@@ -33,8 +33,17 @@ import type { PersonaTokenStore, PersonaUserToken } from "./user-token"
 export interface PersonaCredentialStatus {
   /** 是否可正常对外动作。 */
   ready: boolean
-  /** 状态标签。 */
-  state: "ok" | "missing" | "expired" | "error"
+  /**
+   * 状态标签。
+   *
+   * - `ok`：可用
+   * - `missing`：从未授权
+   * - `expired`：已过期（**人格此刻已不能以用户名义发言**）
+   * - `error`：读盘/解析出错
+   * - `expiring`：仍可用但**即将失效**（仍在前置提醒窗口内）——
+   *   没有 `offline_access` 时令牌不可续，必须提前叫人，不能等过期才叫。
+   */
+  state: "ok" | "missing" | "expired" | "error" | "expiring"
   /** 人类可读说明（直接展示给用户）。 */
   message: string
   /** 授权人（`ok` 时有值）。 */

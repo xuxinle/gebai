@@ -1179,9 +1179,24 @@ auto run_app(int argc, char** argv) -> int {
     app.tick();
     ++frames;
     // 一次性渲染作业：完成后收尾退出（CI/CLI 用）。
+    //
+    // ## 为何必须同时看 `elapsed_s` 与 `frames_done`（实测挂死）
+    //
+    // 判据曾只有 `!running && (finished||failed||cancelled)`。渲染线程在
+    // `finish()` 里先置 `status_.running=false`，**之后**才关 ffmpeg 管道
+    // 并等它写完 mp4（`ffmpeg_pipe->finish()`）。于是主线程会在“已经
+    // 认为完成了”而渲染线程还没收尾的那一瞬 `break`，跳出循环 → 局部对象
+    // 开始析构 → 与仍在跑的 `jthread`/管道发生竞态：实测 `--render` 在
+    // 10 帧的小脚本上 mp4 已落盘，进程却定在 `CPU=0.6s` 空转几十秒到几分钟。
+    //
+    // `stage` 在一次渲染里会被写成 `done`/`failed`（finish）或 `cancelled`，
+    // 只有真正收尾完才会变成 `done`；所以以 `stage` 为准备态判据更安全。
     if (render_launched) {
       const RenderStatus status = page->renderer().status();
-      if (!status.running && (status.finished || status.failed || status.cancelled)) {
+      const bool settled = !status.running && status.stage != "rendering" &&
+                           status.stage != "queued" &&
+                           (status.finished || status.failed || status.cancelled);
+      if (settled) {
         for (const std::string& line : status.log) {
           // 逐帧进度只显示尾部（40 条环形缓冲里大半是它，会把"每帧耗时"这类
           // 真正有用的汇总行挤掉）。

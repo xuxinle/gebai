@@ -616,8 +616,11 @@ export function sealBlockResultSegment(sessionId: string, runId?: string): void 
  * 自己的叙述顶散、并发多个 run 时几条流互相交错。入口只占一行，点击打开右侧「子会话」观察面板
  * （subsessions.ts）看全过程与报告。入口行是**纯展示 + 跳转**，不持有过程 DOM，因此窗口化
  * 卸载/重建、历史回放都可以反复创建。
+ *
+ * `pane` 显式给出入口行的宿主容器（后台会话传它自己的容器）：缺省时挂到当前活动容器——
+ * 非当前会话的入口行落到别人容器里，就会出现「切走后仍看到上个会话的子会话」。
  */
-export function subSessionEntry(opts: { sessionId: string; runId: string; name?: string; model?: string; agents?: string[]; state?: string; status?: "running" | "done" }, parent?: HTMLElement): HTMLElement {
+export function subSessionEntry(opts: { sessionId: string; runId: string; name?: string; model?: string; agents?: string[]; state?: string; status?: "running" | "done" }, parent?: HTMLElement, pane?: MsgPane | null): HTMLElement {
   const btn = document.createElement("button")
   btn.type = "button"
   btn.className = "subsession-entry"
@@ -640,12 +643,14 @@ export function subSessionEntry(opts: { sessionId: string; runId: string; name?:
   if (parent) parent.appendChild(btn)
   else if (batchFrag) batchFrag.appendChild(btn)
   else {
-    const pane = renderPane ?? activePane()
-    pane?.virtualizer.appendTail(btn)
+    const target = pane ?? renderPane ?? activePane()
+    target?.virtualizer.appendTail(btn)
   }
   // 通知观察面板按记录补一次状态（记录可能先于入口创建，如历史回放）
   document.dispatchEvent(new CustomEvent("gebai:subsession-entry", { detail: { sessionId: opts.sessionId, runId: opts.runId } }))
-  if (!batchFrag && !parent) scrollIfSticky()
+  // 滚动跟进只在入口行落进当前视图时才有意义（后台容器没人看）
+  const host = pane ?? renderPane ?? activePane()
+  if (!batchFrag && !parent && host === activePane()) scrollIfSticky()
   return btn
 }
 

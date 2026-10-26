@@ -58,6 +58,16 @@ export interface WheelItem {
   el: HTMLElement
   /** 内弧（主组）还是外弧（次组），缺省外弧 */
   group?: "inner" | "outer"
+  /**
+   * 显式指定落在第几圈（0 = 首圈/最内）。省略 = 按分组与容量自动分圈。
+   *
+   * 为何需要这个字段：`group` 只表达「主组/次组」，组内具体落第几圈由
+   * 容量与均衡算法算出。想让某个按钮**固定**出现在某一圈时，
+   * 靠调数组顺序或换分组都是碰运气——容量一变、圈数一变它就去别的圈了。
+   *
+   * 超出已开出的圈数时钳到最后一圈（不为它单独开圈：新圈的半径与可用角度未经验算）。
+   */
+  ring?: number
 }
 
 export interface WheelOptions {
@@ -446,6 +456,30 @@ export function createWheel(opts: WheelOptions): WheelHandle {
       }
       // 兜底：圈数撞上 MAX_RINGS 而还有剩余时，并进最后一圈（极端项数下的降级）
       if (seg.length && rings.length) rings[rings.length - 1]!.list = rings[rings.length - 1]!.list.concat(seg.splice(0))
+    }
+
+    /* ---------- 第一步半：显式指定圈号（`WheelItem.ring`） ----------
+     * 在自动分圈之后调整，而不是掺进分段算法：自动分圈保证了「圈之间连续、不出孤项圈」这些
+     * 整体性质，强行在里面开洞很容易把均衡算坏。这里只做一件事：把声明了 ring 的项
+     * 从它当前那圈搬到目标圈。
+     *
+     * 目标圈号超出已开圈数时**钳到最后一圈**——不为了单个项再开一圈：
+     * 新圈的半径可能已越过 maxR（会出屏/压入口行），且它的角窗口没参与过容量校验。
+     */
+    const wanted = visible.filter((it) => typeof it.ring === "number")
+    if (wanted.length && rings.length) {
+      const lastIdx = rings.length - 1
+      for (const it of wanted) {
+        const target = Math.max(0, Math.min(lastIdx, Math.floor(it.ring!)))
+        const from = rings.findIndex((rg) => rg.list.includes(it))
+        if (from < 0 || from === target) continue
+        rings[from]!.list = rings[from]!.list.filter((x) => x !== it)
+        rings[target]!.list.push(it)
+      }
+      // 搬空了的圈要拿掉，否则中间留一个空圈（弧线仍会画一条、按钮间距也被它撑着）
+      for (let i = rings.length - 1; i >= 0; i--) {
+        if (rings[i]!.list.length === 0) rings.splice(i, 1)
+      }
     }
 
     /* ---------- 第二步：逐圈定角（各自角窗口内均布 + 避让已落位的圈） ---------- */

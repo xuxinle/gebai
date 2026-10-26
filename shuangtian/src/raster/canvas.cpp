@@ -1128,8 +1128,15 @@ void Canvas::blend_coverage_runs(int y, std::span<const CoverageRun> runs, const
         const float step = inverse_scale_;
         const float t_step = gdx * step / length_squared;
         const float dy_term = (logical_y - from.y) * gdy / length_squared;
+        // 横向渐变的位置参数必须扣掉**起点**的 x（与上方竖向路径的
+        // `(logical_y - from.y)` 同一口径）。漏掉它时 t 恒为
+        // `x*gdx/len²`，对一条从 `(w,0)` 到 `(w-band,0)` 的暗角带
+        // （from.x = 画布宽）意味着 t ≥ 1 ⇒ 整条带恒为**端点色**：
+        // 实测右侧出现一道 112px 宽、亮度恒为 16.7 的硬边，而左侧正常。
+        const float dx_term = -from.x * gdx / length_squared;
         const auto position_at = [&](int x) {
-          return (static_cast<float>(x) + 0.5f) * inverse_scale_ * gdx / length_squared + dy_term;
+          return (static_cast<float>(x) + 0.5f) * inverse_scale_ * gdx / length_squared +
+                 dx_term + dy_term;
         };
         const bool can_batch = !masked && blend == BlendMode::SrcOver &&
                                opacity >= 0.999f && weight >= 0.999f;

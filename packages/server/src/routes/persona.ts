@@ -44,6 +44,24 @@ export interface PersonaRouteDeps {
     start(name: string): Promise<boolean>
     stop(name: string): Promise<boolean>
   }
+  /**
+   * 拟人装配失败原因（未失败时 undefined）。
+   *
+   * 装配失败**不阻断启动**（见 compose）：代价是失败被“藏”起来了——用户只看到“人格没反应”。
+   * 把真实原因回给前端，才不用去翻启动日志猜。
+   */
+  setupError?: string
+  /**
+   * 把授权卡推到相期桌面窗口（令牌请求的主通路）。
+   *
+   * 为何需要这个端点：相期推送原先只在启动时和 5 分钟定时器里做，
+   * 用户“现在就想让它弹出来”时没有任何入口。授权是个需要人动手的动作，
+   * 而相期是**常驻桌面窗口**——它比任何网页面板都难被忽略。
+   *
+   * 返回 delivered=false 时说明相期没连（卡已缓存，它启动后会重推），
+   * 同时**把链接一并给前端**，让面板能降级提供一个可点的链接。
+   */
+  pushAuthCard?: () => Promise<{ ok: boolean; delivered: boolean; url?: string; error?: string }>
 }
 
 /** HTML 转义（反射型 XSS 防护：错误消息可能含外部可控内容）。 */
@@ -67,7 +85,22 @@ body{font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:cen
 }
 
 export function registerPersonaRoutes(app: Hono<AppEnv>, deps: PersonaRouteDeps): void {
-  const notEnabled = (c: Context) => c.json({ error: "拟人模式未启用（GEBAI_PERSONA=true 后可用）" }, 404)
+  // 未启用/装配失败：把**真实原因**一并返回。
+  //
+  // 装配失败已被隔离成「服务照常启动」，但这意味着用户看到的只是「人格不回消息」——
+  // 如果没有这一行，他就只能去翻启动日志。两种情形语义不同，不能混为一谈：
+  //   · 未启用（GEBAI_PERSONA 未设）——开关没开，不关心
+  //   · 装配失败——开关开了但坏了，**这就是用户最需要看到的那句话**
+  const notEnabled = (c: Context) =>
+    c.json(
+      {
+        error: deps.setupError
+          ? `拟人模式装配失败：${deps.setupError}`
+          : "拟人模式未启用（GEBAI_PERSONA=true 后可用）",
+        ...(deps.setupError ? { setupError: deps.setupError } : {}),
+      },
+      404,
+    )
 
   /**
    * 当前凭据状态（前端横幅据此决定是否提示授权）。
@@ -85,7 +118,24 @@ export function registerPersonaRoutes(app: Hono<AppEnv>, deps: PersonaRouteDeps)
     if (!deps.credentials) return notEnabled(c)
     try {
       const ticket = deps.credentials.startAuthorize()
-      return c.json({ ok: true, url: ticket.url, scopes: ticket.scopes, expiresInMs: ticket.expiresInMs })
+      // 生成新链接后**顺手推一张相期卡**：用户意图很明确（“我要授权”），
+      // 不该让他再去桌面上找。推送失败不影响返回链接（前端仍有兵底入口）。
+      let card: { delivered: boolean; error?: string } | null = null
+      if (deps.pushAuthCard) {
+        try {
+          const r = await deps.pushAuthCard()
+          card = { delivered: r.delivered, ...(r.error ? { error: r.error } : {}) }
+        } catch (err) {
+          card = { delivered: false, error: String((err as Error)?.message || err) }
+        }
+      }
+      return c.json({
+        ok: true,
+        url: ticket.url,
+        scopes: ticket.scopes,
+        expiresInMs: ticket.expiresInMs,
+        ...(card ? { card } : {}),
+      })
     } catch (err) {
       return c.json({ ok: false, error: String((err as Error)?.message || err) }, 400)
     }

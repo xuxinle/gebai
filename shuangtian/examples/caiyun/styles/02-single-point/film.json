@@ -1,0 +1,146 @@
+{
+  "fps": 30,
+  "size": [
+    1920,
+    1080
+  ],
+  "transition": 0,
+  "fade_in": 0.3,
+  "fade_out": 0.3,
+  "brand_wordmark": "",
+  "brand_latin": "",
+  "footer_note": "",
+  "audio": {
+    "enabled": false
+  },
+  "name": "style-02-single-point",
+  "scenes": [
+    {
+      "kind": "custom",
+      "duration": 5.6,
+      "layout": "layout.js",
+      "accent": "#4B8CF5",
+      "background": [
+        "#080B12",
+        "#0E1521"
+      ],
+      "wrap": false,
+      "footer_note": "",
+      "layers": [
+        {
+          "kind": "rect",
+          "name": "being",
+          "x": 940,
+          "y": 400,
+          "w": 40,
+          "h": 40,
+          "fill": "#221C3E",
+          "radius": 22,
+          "opacity": 1,
+          "enter": 0,
+          "stroke": "#6A5AD6",
+          "stroke_width": 2
+        },
+        {
+          "kind": "glow",
+          "name": "halo",
+          "x": 890,
+          "y": 430,
+          "w": 140,
+          "h": 140,
+          "fill": "#7C6CFF",
+          "intensity": 0.55,
+          "spread": 1,
+          "opacity": 1,
+          "enter": 0
+        },
+        {
+          "kind": "line",
+          "name": "thread",
+          "x": 960,
+          "y": 420,
+          "w": 0,
+          "h": 0,
+          "stroke": "#9A8CFF",
+          "stroke_width": 6,
+          "opacity": 1,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "trail",
+          "x": 940,
+          "y": 412,
+          "w": 40,
+          "h": 16,
+          "fill": "#3A3355",
+          "radius": 8,
+          "opacity": 1,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "label",
+          "x": 600,
+          "y": 430,
+          "w": 720,
+          "h": 58,
+          "text": "一个智能体",
+          "size": 46,
+          "color": "#E8F0FC",
+          "bold": true,
+          "align": 0,
+          "opacity": 1,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "sub",
+          "x": 600,
+          "y": 505,
+          "w": 720,
+          "h": 44,
+          "text": "工具、记忆、责任都在它身上",
+          "size": 24,
+          "color": "#8FA3C4",
+          "align": 0,
+          "opacity": 1,
+          "enter": 0
+        },
+        {
+          "kind": "ellipse",
+          "name": "s0",
+          "x": 900,
+          "y": 640,
+          "w": 14,
+          "h": 14,
+          "fill": "#9A8CFF",
+          "opacity": 1,
+          "enter": 0
+        },
+        {
+          "kind": "ellipse",
+          "name": "s1",
+          "x": 955,
+          "y": 640,
+          "w": 14,
+          "h": 14,
+          "fill": "#9A8CFF",
+          "opacity": 1,
+          "enter": 0
+        },
+        {
+          "kind": "ellipse",
+          "name": "s2",
+          "x": 1010,
+          "y": 640,
+          "w": 14,
+          "h": 14,
+          "fill": "#9A8CFF",
+          "opacity": 1,
+          "enter": 0
+        }
+      ]
+    }
+  ]
+}

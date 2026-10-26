@@ -66,6 +66,18 @@ struct TargetSpec {
   std::vector<std::string> flags{};
   /// 从库源中排除的 glob（如工具链专属的 `src/pkg/*`——应用不需要，排除后少编译若干翻译单元）。
   std::vector<std::string> exclude_sources{};
+  /// **白名单**：本目标只编译这些 glob（而不是「顶层全部源减去黑名单」）。
+  ///
+  /// ## 为何需要它（黑名单失效时是静默的）
+  ///
+  /// `exclude_sources` 是黑名单：漏掉一条，就多编几个无关单元，而构建照常成功、
+  /// 看不出任何异常——只能靠人去把每条间接依赖都推一遍。实测代价：`st` 目标
+  /// 逐项排了 13 条，仍因 `src/ui/window_control.cpp` 间接依赖 `math/geometry.hpp`
+  /// 把 math 拉了回来。
+  ///
+  /// 白名单相反：**漏写会链接报错**（可发现），不会静默变胖。
+  /// 语义：非空时只编这些 glob，`exclude_sources` 不再参与。
+  std::vector<std::string> include_sources{};
   /// 编译期嵌入的资源文件 glob（`battery/embed.hpp`，见 `third_party/battery/UPSTREAM.md`）。
   ///
   /// 写在**目标**上而不是工程级：嵌入集合决定生成的声明头内容，而声明头是按目标隔离的

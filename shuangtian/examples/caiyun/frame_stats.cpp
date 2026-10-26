@@ -35,14 +35,14 @@ constexpr int kLumaB = 29;   // 0.114 * 256
 /// 而导出路径**本来就要** `to_rgba8()` 把像素送给 ffmpeg。
 /// 所以改成让调用方把那份字节传进来：**一次回读，两处使用**。
 /// 这不是优化取舍，而是避免同一帧回读两遍（1080p 每遍约 5~17ms）。
-auto StatsAccumulator::downscale_luma(std::span<const std::uint8_t> rgba, int width,
-                                      int height) -> std::vector<std::uint8_t> {
+auto StatsAccumulator::downscale_luma(std::span<const std::uint8_t> rgba, int width, int height,
+                                      int target_width) -> std::vector<std::uint8_t> {
   const int w = width;
   const int h = height;
   if (w <= 0 || h <= 0) return {};
 
   // 目标高度按比例取偶（避免奇数行让块均值偏移）；至少 2 行。
-  const int out_w = kStatsWidth;
+  const int out_w = std::clamp(target_width, 2, w);
   const int ratio = std::max(1, w / out_w);
   const int out_h = std::max(2, ((h / ratio) / 2) * 2);
 
@@ -108,7 +108,8 @@ auto StatsAccumulator::downscale_luma(std::span<const std::uint8_t> rgba, int wi
 
 auto StatsAccumulator::push(std::span<const std::uint8_t> rgba, int width, int height, int index,
                             double time_s) -> FrameStats {
-  std::vector<std::uint8_t> luma = downscale_luma(rgba, width, height);
+  std::vector<std::uint8_t> luma = downscale_luma(rgba, width, height, kStatsWidth);
+  std::vector<std::uint8_t> luma_hi = downscale_luma(rgba, width, height, kHiStatsWidth);
   FrameStats stats{};
   stats.index = index;
   stats.time_s = time_s;
@@ -126,7 +127,7 @@ auto StatsAccumulator::push(std::span<const std::uint8_t> rgba, int width, int h
   } else {
     stats.diff_prev = -1.0;  // -1 = 无相邻前帧
   }
-  prev_luma_ = std::move(luma);
+  prev_luma_ = luma;
   prev_ = stats;
   has_prev_ = true;
 
@@ -134,7 +135,8 @@ auto StatsAccumulator::push(std::span<const std::uint8_t> rgba, int width, int h
   sample.index = index;
   sample.time_s = time_s;
   sample.mean_luma = stats.mean_luma;
-  sample.luma = prev_luma_;
+  sample.luma = std::move(luma);
+  sample.luma_hi = std::move(luma_hi);
   samples_.push_back(std::move(sample));
   return stats;
 }
@@ -166,10 +168,24 @@ auto StatsAccumulator::report(double duration_s, bool partial) const -> QualityR
   // `diff` 与 `ordered` 对齐：`diff[i]` = 帧 `ordered[i]` 与其前一张（帧号恰为 -1）的差；
   // -1 = 无相邻前帧（首帧或前面丢了一帧），不计入分母。
   std::vector<double> diff(ordered.size(), -1.0);
+  // 主口径的两个量（见 header 的说明：它们不被元素尺寸稀释）
+  std::vector<double> changed_pct(ordered.size(), -1.0);
+  std::vector<double> max_delta(ordered.size(), -1.0);
   for (std::size_t i = 1; i < ordered.size(); ++i) {
-    if (ordered[i]->index == ordered[i - 1]->index + 1) {
-      diff[i] = mean_abs_diff(ordered[i - 1]->luma, ordered[i]->luma);
+    if (ordered[i]->index != ordered[i - 1]->index + 1) continue;
+    diff[i] = mean_abs_diff(ordered[i - 1]->luma, ordered[i]->luma);
+    const auto& a = ordered[i - 1]->luma_hi;
+    const auto& b = ordered[i]->luma_hi;
+    if (a.size() != b.size() || a.empty()) continue;
+    std::size_t changed = 0;
+    int peak = 0;
+    for (std::size_t k = 0; k < a.size(); ++k) {
+      const int d = std::abs(static_cast<int>(a[k]) - static_cast<int>(b[k]));
+      if (d > peak) peak = d;
+      if (d > kChangePixelDelta) ++changed;
     }
+    changed_pct[i] = 100.0 * static_cast<double>(changed) / static_cast<double>(a.size());
+    max_delta[i] = static_cast<double>(peak);
   }
 
   double luma_sum = 0.0;
@@ -177,6 +193,11 @@ auto StatsAccumulator::report(double duration_s, bool partial) const -> QualityR
   int still = 0;
   int moving = 0;
   int bright = 0;
+  double changed_sum = 0.0;
+  int changed_pairs = 0;
+  int moving_by_pixels = 0;
+  std::vector<double> max_deltas{};
+  max_deltas.reserve(ordered.size());
   for (std::size_t i = 0; i < ordered.size(); ++i) {
     luma_sum += ordered[i]->mean_luma;
     if (ordered[i]->mean_luma > out.bright_luma) ++bright;
@@ -188,6 +209,15 @@ auto StatsAccumulator::report(double duration_s, bool partial) const -> QualityR
         ++moving;
       }
     }
+    if (changed_pct[i] >= 0.0) {
+      ++changed_pairs;
+      changed_sum += changed_pct[i];
+      // “在动”的像素级判据：变化像素 > 1%。为何 1%：一个 200×200 元素
+      // 占 1080p 的 4%，移动它自身尺寸量级的距离就会让 >1% 的格子变化——
+      // 而纯噪点在 192 宽降采样+阈值 6 下几乎不会超过 0.5%。
+      if (changed_pct[i] > 1.0) ++moving_by_pixels;
+    }
+    if (max_delta[i] >= 0.0) max_deltas.push_back(max_delta[i]);
   }
   out.mean_luma = luma_sum / static_cast<double>(ordered.size());
   out.still_frames = still;
@@ -196,6 +226,19 @@ auto StatsAccumulator::report(double duration_s, bool partial) const -> QualityR
   out.bright_ratio = 100.0 * static_cast<double>(bright) / static_cast<double>(ordered.size());
   out.change_density = duration_s > 0.0 ? static_cast<double>(moving) / duration_s : 0.0;
   out.frame_pairs = pairs;
+  if (changed_pairs > 0) {
+    out.changed_pixels_pct = changed_sum / static_cast<double>(changed_pairs);
+    out.moving_pair_ratio = 100.0 * static_cast<double>(moving_by_pixels) / static_cast<double>(changed_pairs);
+  }
+  if (!max_deltas.empty()) {
+    std::sort(max_deltas.begin(), max_deltas.end());
+    // 中位数而不是均值：单帧一个像素的尖尖（切换、过渡闪白）会把均值拉高，
+    // 而我们要的是“通常有多大差异”。
+    const std::size_t mid = max_deltas.size() / 2;
+    out.max_pixel_delta = max_deltas.size() % 2 == 0
+                              ? 0.5 * (max_deltas[mid - 1] + max_deltas[mid])
+                              : max_deltas[mid];
+  }
 
   // —— 逐镜 ——
   out.shots.clear();
@@ -208,6 +251,9 @@ auto StatsAccumulator::report(double duration_s, bool partial) const -> QualityR
     shot.t_out = span.t_out;
     double shot_luma = 0.0;
     int shot_pairs = 0;
+    double shot_changed = 0.0;
+    int shot_changed_pairs = 0;
+    std::vector<double> shot_max{};
     for (std::size_t i = 0; i < ordered.size(); ++i) {
       const Sample* f = ordered[i];
       if (f->time_s < span.t_in || f->time_s >= span.t_out) continue;
@@ -217,9 +263,23 @@ auto StatsAccumulator::report(double duration_s, bool partial) const -> QualityR
         ++shot_pairs;
         if (diff[i] < out.static_threshold) ++shot.still_frames;
       }
+      if (changed_pct[i] >= 0.0) {
+        ++shot_changed_pairs;
+        shot_changed += changed_pct[i];
+        shot_max.push_back(max_delta[i]);
+      }
     }
     shot.frame_pairs = shot_pairs;
     shot.mean_luma = shot.frames > 0 ? shot_luma / static_cast<double>(shot.frames) : 0.0;
+    if (shot_changed_pairs > 0) {
+      shot.changed_pixels_pct = shot_changed / static_cast<double>(shot_changed_pairs);
+    }
+    if (!shot_max.empty()) {
+      std::sort(shot_max.begin(), shot_max.end());
+      const std::size_t mid = shot_max.size() / 2;
+      shot.max_pixel_delta = shot_max.size() % 2 == 0 ? 0.5 * (shot_max[mid - 1] + shot_max[mid])
+                                                      : shot_max[mid];
+    }
     out.shots.push_back(shot);
   }
   // 静止占比最高的一镜：这就是「慢在哪」的答案
@@ -235,16 +295,19 @@ auto StatsAccumulator::report(double duration_s, bool partial) const -> QualityR
   std::string worst_line{};
   for (const ShotStats& s : out.shots) {
     if (s.clip_id == out.worst_still_clip_id && s.frames > 1) {
-      worst_line = std::format("；最静一镜「{}」{}%（{:.2f}–{:.2f}s）", s.label,
-                               std::format("{:.1f}", s.still_ratio()), s.t_in, s.t_out);
+      worst_line = std::format("；最静一镜「{}」{}%（{:.2f}–{:.2f}s，变化像素 {:.2f}%）",
+                               s.label, std::format("{:.1f}", s.still_ratio()), s.t_in,
+                               s.t_out, s.changed_pixels_pct);
       break;
     }
   }
   out.summary = std::format(
-      "{} 帧｜静止 {:.1f}%（帧差 <{:.1f}，{} 对）｜过亮 {:.1f}%（>{:.0f}）"
+      "{} 帧｜参考量 变化像素 {:.2f}% / 格均差峰值 {:.0f}（无及格线，仅供定位）"
+      "｜静止 {:.1f}%（帧差 <{:.1f}，{} 对）｜过亮 {:.1f}%（>{:.0f}）"
       "｜平均亮度 {:.1f}｜变化 {:.2f}/s{}",
-      out.frames, out.still_ratio, out.static_threshold, pairs, out.bright_ratio,
-      out.bright_luma, out.mean_luma, out.change_density, worst_line);
+      out.frames, out.changed_pixels_pct, out.max_pixel_delta,
+      out.still_ratio, out.static_threshold, pairs, out.bright_ratio, out.bright_luma,
+      out.mean_luma, out.change_density, worst_line);
   // 分母为 0 时必须明说：否则「0 对 / 0.0%」会被读成一个有效的「不静」结论。
   if (pairs == 0) out.summary += "｜⚠ 无有效相邻帧对（只渲了 1 帧或帧号不连续）：静止占比不可信";
   if (partial) out.summary += "（局部渲染，结论只覆盖该区间）";
@@ -264,6 +327,9 @@ auto quality_to_json(const QualityReport& report) -> std::string {
   root["bright_ratio"] = report.bright_ratio;
   root["mean_luma"] = report.mean_luma;
   root["change_density"] = report.change_density;
+  root["changed_pixels_pct"] = report.changed_pixels_pct;
+  root["max_pixel_delta"] = report.max_pixel_delta;
+  root["moving_pair_ratio"] = report.moving_pair_ratio;
   root["worst_still_clip_id"] = report.worst_still_clip_id;
   root["partial"] = report.partial;
   root["summary"] = report.summary;
@@ -279,6 +345,8 @@ auto quality_to_json(const QualityReport& report) -> std::string {
     item["frame_pairs"] = shot.frame_pairs;
     item["still_frames"] = shot.still_frames;
     item["still_ratio"] = shot.still_ratio();
+    item["changed_pixels_pct"] = shot.changed_pixels_pct;
+    item["max_pixel_delta"] = shot.max_pixel_delta;
     item["mean_luma"] = shot.mean_luma;
     shots.push_back(std::move(item));
   }

@@ -472,8 +472,13 @@ describe("def 契约", () => {
     ])
     expect(def.preload).toBe(false)
     expect(def.systemPrompt).toContain("tts_speak")
-    expect(def.envVars?.map((v) => v.name)).toEqual(["TTS_VOICE", "TTS_ENGINE", "TTS_MODEL"])
-    for (const v of def.envVars ?? []) expect(v.name.startsWith("TTS_")).toBe(true)
+    expect(def.envVars?.map((v) => v.name)).toEqual(["TTS_VOICE", "TTS_ENGINE", "TTS_MODEL", "HF_ENDPOINT"])
+    // 变量分两类：TTS_ 前缀是本代理自有；HF_ENDPOINT 是**全局通用名**
+    // （HuggingFace 官方约定，直接读它才能复用用户已有配置），因此不能一律要求 TTS_ 前缀。
+    for (const v of def.envVars ?? []) {
+      expect(v.name === "HF_ENDPOINT" || v.name.startsWith("TTS_")).toBe(true)
+      expect((v.description ?? "").length).toBeGreaterThan(8)
+    }
   })
 
   test("安全模式姿态：两工具都会写产物，显式不提供（safeMode:false）", () => {

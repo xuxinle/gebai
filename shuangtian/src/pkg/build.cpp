@@ -1106,15 +1106,59 @@ struct LanguageFlags {
   std::atomic<std::size_t> cache_stores{0};
   std::vector<const CompileUnit*> pending;
   pending.reserve(units.size());
-  for (const auto& unit : units) {
+
+  // ## 增量判定并行化（2026-10-26）
+  //
+  // ## 为何必须并行
+  //
+  // `needs_rebuild` 是**纯读**的判定（看 `.flags` / `.meta` / 依赖头 mtime+size，
+  // 必要时读内容算哈希），但原先是在一个串行 for 里逐个调。
+  // 实测代价：`st build --no-tests` 2.0s，而 `st test <filter>` 10.2s——
+  // 差的 8s 就在“多出 75 个测试单元的增量判定”上（每单元读 `.d` + 几个依赖头，
+  // 看起来没变时还要读 42.6MB 内容算 FNV 哈希）。
+  //
+  // 判定之间**没有依赖**（每个单元只看自己的 `.o`/`.d`/`.meta`），
+  // 所以可以并发。这不改任何语义，只是把串行的读盘扇开。
+  //
+  // `needs_rebuild` 内部无共享可写状态（`content_hash_cached` 自带 mutex），
+  // 因此并行安全；并发度沿用本函数的 `workers` 口径。
+  std::vector<std::uint8_t> needs(units.size(), 0);
+  {
+    std::atomic<std::size_t> next{0};
+    const std::size_t lane_count = std::max<std::size_t>(1, units.size());
+    const std::size_t lanes = std::min<std::size_t>({lane_count, 16, std::thread::hardware_concurrency() == 0
+                                                                          ? std::size_t{4}
+                                                                          : static_cast<std::size_t>(std::thread::hardware_concurrency())});
+    std::vector<std::thread> workers{};
+    workers.reserve(lanes);
+    for (std::size_t lane = 0; lane < lanes; ++lane) {
+      workers.emplace_back([&]() {
+        while (true) {
+          const std::size_t index = next.fetch_add(1);
+          if (index >= units.size()) return;
+          const CompileUnit& unit = units[index];
+          if (options.check_only || options.force) {
+            needs[index] = 1;   // 检查/强制模式：全部要做
+            continue;
+          }
+          needs[index] = needs_rebuild(unit, unit_flags_for(unit), profile_flags_list,
+                                       toolchain.kind, pch_token_for(unit))
+                             ? 1
+                             : 0;
+        }
+      });
+    }
+    for (std::thread& worker : workers) worker.join();
+  }
+
+  for (std::size_t unit_index = 0; unit_index < units.size(); ++unit_index) {
+    const CompileUnit& unit = units[unit_index];
     // 检查模式：**全部单元都查**——不做增量判定，也不查共享对象缓存。
     // 理由：这里的两个跳过机制判的都是“`.o` 是不是还要重编”，而检查模式根本不产出 `.o`。
     // 若沿用它们，一个“已构建过、源码未变”的仓库会**一个单元都不查**，
     // 于是 `st check` 直接报成功——一个恒绿的检查比没有检查更糟。
     const bool must_check = options.check_only;
-    if (!must_check && !options.force &&
-        !needs_rebuild(unit, unit_flags_for(unit), profile_flags_list, toolchain.kind,
-                       pch_token_for(unit))) {
+    if (!must_check && !options.force && needs[unit_index] == 0) {
       continue;
     }
     // 工程内已过期 → 先问共享缓存：命中就不必真编译（跨工程复用框架对象的主要路径）
@@ -2150,7 +2194,15 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   if (auto status = fs::create_directories(object_dir); !status) return forward_error(status.error());
   if (auto status = fs::create_directories(bin_dir); !status) return forward_error(status.error());
 
-  // 目标级源排除：应用不需要工具链模块（pkg 等）时跳过其编译（少若干翻译单元）
+  // 目标级源选择：两种语义二选一（`only_sources` 非空时走白名单）。
+  //
+  // ## 为何要有白名单
+  //
+  // `exclude_sources` 是黑名单：漏一条就多编几个无关单元，而构建照常成功，
+  // **静默变胖**——只能靠人去把每条间接依赖都推一遍。实测：`st` 目标逐项排了 13 条，
+  // 仍因 `src/ui/window_control.cpp` 间接依赖 `math/geometry.hpp` 把 math 拉了回来。
+  //
+  // 白名单相反：漏写会链接报错（可发现），不可能静默多编。
   std::vector<std::string> library_sources = *sources;
   if (!options.target.empty()) {
     if (const TargetSpec* spec = manifest.find_target(options.target); spec != nullptr) {
@@ -2160,14 +2212,37 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
         std::erase(effective.defines, std::string("ST_LOG_DISABLED=1"));
         if (!*spec->log_enabled) effective.defines.push_back("ST_LOG_DISABLED=1");
       }
-      for (const auto& pattern : spec->exclude_sources) {
-        const auto before = library_sources.size();
-        std::erase_if(library_sources, [&pattern, &manifest](const std::string& path) {
-          // 源文件列表是绝对路径：按「相对清单目录」匹配，模式才符合直觉（如 src/pkg/*）
-          return fs::match_glob(pattern, fs::relative_to(path, manifest.directory));
+      if (!spec->include_sources.empty()) {
+        // 白名单生效时必须可见：否则“字段写了但没生效”与“生效了”在输出上一模一样。
+        // 实测教训：这个分支曾因跑的是旧二进制而从未进入，而构建报告只说
+        // “单元 N”，看不出白名单到底管没管用——多花了几个小时。
+        const std::size_t before = library_sources.size();
+        // 白名单：库源**整体丢弃**，只保留与白名单匹配的那部分。
+        // 不用“先清空再按 glob 加”是因为 `*sources` 是已展开的绝对路径列表，
+        // 按 glob 重新展开会远程依赖清单解析顺序（两处展开结果可能不一致）。
+        std::erase_if(library_sources, [&spec, &manifest](const std::string& path) {
+          const std::string relative = fs::relative_to(path, manifest.directory);
+          return std::none_of(spec->include_sources.begin(), spec->include_sources.end(),
+                              [&](const std::string& pattern) {
+                                return fs::match_glob(pattern, relative);
+                              });
         });
-        if (before == library_sources.size()) {
-          ST_LOG_WARN("排除模式未命中任何源文件: {}", pattern);
+        if (library_sources.empty()) {
+          ST_LOG_WARN("目标 {} 的 include_sources 未命中任何库级源文件", options.target);
+        } else {
+          ST_LOG_INFO("白名单：目标 {} 库源 {} → {} 个（include_sources {} 条）", options.target, before,
+                      library_sources.size(), spec->include_sources.size());
+        }
+      } else {
+        for (const auto& pattern : spec->exclude_sources) {
+          const auto before = library_sources.size();
+          std::erase_if(library_sources, [&pattern, &manifest](const std::string& path) {
+            // 源文件列表是绝对路径：按「相对清单目录」匹配，模式才符合直觉（如 src/pkg/*）
+            return fs::match_glob(pattern, fs::relative_to(path, manifest.directory));
+          });
+          if (before == library_sources.size()) {
+            ST_LOG_WARN("排除模式未命中任何源文件: {}", pattern);
+          }
         }
       }
     }
@@ -2339,6 +2414,32 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
     std::ranges::sort(target_sources);
     target_sources.erase(std::unique(target_sources.begin(), target_sources.end()),
                          target_sources.end());
+    // ## 去重：`sources` 与 `include_sources` 的交集只能编一次
+    //
+    // 两者是**两条独立的源收集路径**（`library_sources` 从顶层 sources 来，
+    // `target_sources` 从 target 的 sources 来），各自的 glob 可能命中同一个文件。
+    // 同一个 `.cpp` 编两遍 → 两份 `.o`（对象名由路径规则生成，两条路径命名不同）
+    // → 链接期 `multiple definition`。
+    //
+    // 实测：`st` 的 `sources` 含 `src/ui/window_control.cpp`，而顶层 `sources` 的
+    // `src/ui/*.cpp` 也含它，于是报 `window_control.cpp:7` 重复定义。
+    //
+    // 以 `library_sources` 为准剔除（它们已经代表“顶层口径”）；这样白名单里的文件
+    // 若同时写了 `sources` 也不会重复。
+    if (!target_sources.empty()) {
+      const auto relative_set = [&manifest](const std::vector<std::string>& paths) {
+        std::vector<std::string> out;
+        out.reserve(paths.size());
+        for (const auto& p : paths) out.push_back(fs::normalize(fs::relative_to(p, manifest.directory)));
+        return out;
+      };
+      const std::vector<std::string> library_relatives = relative_set(library_sources);
+      std::erase_if(target_sources, [&](const std::string& path) {
+        const std::string relative = fs::normalize(fs::relative_to(path, manifest.directory));
+        return std::find(library_relatives.begin(), library_relatives.end(), relative) !=
+               library_relatives.end();
+      });
+    }
     target_units =
         make_units(effective, target_sources, object_dir, target_third_party, unit_includes);
     std::size_t target_rebuilt = 0;
@@ -2748,11 +2849,34 @@ namespace {
 
 auto run_tests(const Manifest& manifest, const BuildOptions& options, std::string_view filter,
                bool list_only, std::string_view junit_path, bool include_slow) -> Result<int> {
-  auto test_binary = build_test_binary(manifest, options);
-  if (!test_binary) return forward_error(test_binary.error());
-  const std::string& output = *test_binary;
+  // ## `--list` 直接复用已有二进制，不走构建
+  //
+  // 实测（2026-10-26）：`st test --list` 壁钟 **7.6s**，而直接跑
+  // `st_tests.exe --list` 只需 **0.5s**。差的 7s 全在 `build_test_binary` 的
+  // 增量判定：`needs_rebuild` 对每个单元的每个依赖头调 `deps_entry_matches`，
+  // 而后者在 mtime+size 未变时**会读内容算哈希**——75 个测试单元 × 数百个
+  // 依赖头，就是那几秒。
+  //
+  // 而 `--list` 只枚举用例名、**不运行任何用例**，二进制是不是最新无关紧要
+  // （最坏也只是列出旧用例名，下一次真跑自然重建）。所以二进制存在就直接用。
+  // 产物不存在时仍然构建——否则“首次 --list”会失败。
   auto toolchain = resolve_toolchain(manifest, options.toolchain);
   if (!toolchain) return forward_error(toolchain.error());
+
+  std::string output{};
+  if (list_only) {
+    const std::string root = options.root.empty() ? manifest.directory : options.root;
+    const std::string candidate = fs::join(
+        fs::join(fs::join(root, "build"), profile_directory(options.profile, *toolchain)),
+        fs::join("bin", "st_tests" + toolchain->executable_suffix));
+    if (fs::is_regular_file(candidate)) output = candidate;
+  }
+
+  if (output.empty()) {
+    auto test_binary = build_test_binary(manifest, options);
+    if (!test_binary) return forward_error(test_binary.error());
+    output = *test_binary;
+  }
 
   std::vector<std::string> args = test_args(filter, list_only, include_slow);
   // 交叉产物仅在与宿主平台不同时拒绝执行（目标==宿主则照常跑，见 runs_on_host）

@@ -77,6 +77,44 @@ ST_TEST(layout_engine_rejects_non_function_layout) {
   ST_CHECK(!engine.loaded());
 }
 
+ST_TEST(layout_engine_reports_undefined_name_in_body_at_load_time) {
+  // ## 为何这条必须有（实测代价）
+  //
+  // 前面三条只能证明：语法对、顶层能跑、`layout` 是函数。它们**拦不住**
+  // 函数体里引用了不存在的名字——那种错会让**每一帧** `evaluate` 失败，
+  // 于是 `shapes` 恒空、画面只剩背景，而渲染照常退出码 0、一条 warn 都没有。
+  // 实测：一个漏定义的缓动函数就让整片二十多个图元全部消失。
+  //
+  // 探针帧把这一步提到**装载期**。注意：**不拒绝装载**——运行期抛错仍走
+  // “报错+零增量+继续出片”的既有契约（见 throwing/timeout 两个用例），
+  // 所以这里断言的是：装载成功 + `last_error` 已经带着原文（= 不再静默）。
+  LayoutEngine engine;
+  const auto status = engine.load(script_of(R"js(
+    function layout(t, duration, canvas, layers) {
+      const k = undefinedHelper_xyz(0.5);
+      return { states: [], shapes: [] };
+    }
+    void 0;
+  )js"));
+  ST_CHECK(status.has_value());
+  ST_CHECK(engine.loaded());
+  // 关键：错在装载时就已可见，而不是“渲完才发现画面空”。
+  ST_CHECK(engine.last_error().find("undefinedHelper_xyz") != std::string::npos);
+}
+
+ST_TEST(layout_engine_rejects_invalid_return_shape_at_load_time) {
+  // layout 返回既不是数组也不是 { states, shapes }：真实渲染会把它当成
+  // “没有增量”而静默无效（画面上就是“没动画”）。这一类不会随时间变好，
+  // 所以探针帧直接拒绝装载（与“运行期抛错”区分开）。
+  LayoutEngine engine;
+  const auto status = engine.load(script_of(R"js(
+    function layout(t, duration, canvas, layers) { return 42; }
+    void 0;
+  )js"));
+  ST_CHECK(!status.has_value());
+  ST_CHECK(!engine.loaded());
+}
+
 ST_TEST(layout_engine_empty_script_is_disabled_not_error) {
   // 不写脚本 = 不启用（不是错误）。这是老脚本零改动的关键。
   LayoutEngine engine;

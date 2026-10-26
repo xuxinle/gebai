@@ -703,14 +703,27 @@ void Renderer::cancel() { cancel_.store(true); }
 void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_port,
                    std::function<void()> on_update) {
   const std::int64_t started_ms = st::time::now_ms();
+  // ## `mutex_` 是**非递归**锁：持锁期间不得调用 `log_line` / `on_update`（实测挂死）
+  //
+  // `log_line` 自己会加 `mutex_`，`on_update` 的回调会去读 `status()`（也加同一把锁）。
+  // 在持有 `mutex_` 时调它们 = 同一个线程重复加非递归 mutex = **自死锁**。
+  //
+  // 实测现象（2026-10-26）：mp4 已完整写出（ffprobe 读得出全部帧），
+  // `caiyun --render` 却永不退出——CPU 累计只有 0.6~3.7s，所有线程停在
+  // `Wait:UserRequest`。`--keep-frames` 同样挂，所以与 ffmpeg 管道无关。
+  // 从外面看就是“渲染要跑几分钟”，实际渲染本体 10 帧只需 1.75s。
+  //
+  // 修法：把“写状态”与“通知”分开——先在锁内改完 `status_`，出锁后再通知。
   const auto finish = [&](bool failed, std::string error) {
-    const std::scoped_lock lock(mutex_);
-    status_.running = false;
-    status_.finished = !failed;
-    status_.failed = failed;
-    status_.stage = failed ? "failed" : "done";
-    status_.error = std::move(error);
-    status_.elapsed_s = static_cast<double>(st::time::now_ms() - started_ms) / 1000.0;
+    {
+      const std::scoped_lock lock(mutex_);
+      status_.running = false;
+      status_.finished = !failed;
+      status_.failed = failed;
+      status_.stage = failed ? "failed" : "done";
+      status_.error = std::move(error);
+      status_.elapsed_s = static_cast<double>(st::time::now_ms() - started_ms) / 1000.0;
+    }
     running_.store(false);
     if (on_update) on_update();
   };
@@ -853,6 +866,16 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
   // 每 worker 一份度量累加器：每帧都要写，共享加锁会成热点；几十字节的状态，
   // 每线程一份再归并的代价可忽略（与上面 render/encode 计时同一套做法）。
   std::vector<StatsAccumulator> worker_stats(workers);
+  // 每 worker 一份“脚本编排层求值失败”计数。
+  //
+  // ## 为何必须按 worker 收
+  //
+  // `layout_engine()` 是 **thread_local**（每线程一个实例，换来无锁），
+  // 所以主线程那个引擎从未跑过帧、`failure_count()` 恒为 0。
+  // 在汇总处直接读 `layout_engine()` 拿到的是**空副本** —— 实测就是“明明每帧都报错，
+  // 汇总却一声不响”。与 `worker_stats` 同一套做法：每线程记本位，事后归并。
+  std::vector<std::uint64_t> worker_layout_failures(workers, 0);
+  std::vector<std::string> worker_layout_error(workers);
   // 轨迹记录（只在 job.trajectory 时填；每 worker 一份再归并）
   struct TrajectoryRecord {
     int frame{0};
@@ -916,12 +939,24 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
       worker_scratch.push_back(std::make_unique<st::raster::Canvas>(job.width, job.height, 1.0f));
     }
   }
-  const auto worker_body = [&](std::size_t slot) {
+    const auto worker_body = [&](std::size_t slot) {
     st::raster::Surface& local = *worker_canvases[slot];
+    // 本线程引擎的起始基线：本 worker 只跑一部分帧，而 `failure_count()` 是
+    // 本线程**累计**值。取差值得本 worker 的真实贡献（一个 worker 可能跨多次导出）。
+    const std::uint64_t layout_failures_base = layout_engine().failure_count();
     while (true) {
-      if (cancel_.load() || write_failed.load()) return;
+      if (cancel_.load() || write_failed.load()) {
+        // 退出前把本 worker 的脚本失败量交回（正常路径也在下面收尾时交）
+        worker_layout_failures[slot] = layout_engine().failure_count() - layout_failures_base;
+        worker_layout_error[slot] = layout_engine().last_error();
+        return;
+      }
       const int index = next_index.fetch_add(1);
-      if (index >= last) return;
+      if (index >= last) {
+        worker_layout_failures[slot] = layout_engine().failure_count() - layout_failures_base;
+        worker_layout_error[slot] = layout_engine().last_error();
+        return;
+      }
       const std::int64_t render_start = st::time::now_ns();
       // 轨迹采集：每 worker 一份本地缓冲（不共享，无锁）
       std::vector<ElementTrack> frame_track{};
@@ -1175,6 +1210,34 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
     }
   }
 
+  // —— 脚本编排层健康检查 ——
+  //
+  // ## 为何必须单独报
+  //
+  // 脚本层失败是**静默**的：本帧零增量 ⇒ 画面退回纯 JSON，而成片照常写出、
+  // 退出码 0。不报的话，交付的就是“看着像成片、实际动效全失”的东西。
+  // 实测为此白花过完整调试轮次（一个漏定义的函数就让全部图元消失）。
+  {
+    // ## 为何要遍历 worker 而不是直接读 `layout_engine()`
+    //
+    // 引擎是 thread_local（每线程一个）。主线程那个**从未跑过帧**，
+    // 直接读它恒得 0——实测就是“每帧都报错、汇总一声不响”。
+    std::uint64_t layout_failures = 0;
+    std::string first_layout_error;
+    for (std::size_t slot = 0; slot < worker_layout_failures.size(); ++slot) {
+      layout_failures += worker_layout_failures[slot];
+      if (first_layout_error.empty() && !worker_layout_error[slot].empty()) {
+        first_layout_error = worker_layout_error[slot];
+      }
+    }
+    if (layout_failures > 0) {
+      log_line(std::format(
+                   "  ⚠ 脚本编排层求值失败 {} 次（这些帧已降级为纯 JSON，动效丢失）；原因：{}",
+                   layout_failures, first_layout_error),
+               on_update);
+    }
+  }
+
   // —— 阶段 1 收尾：导出元素轨迹（供连贯性验收做“按元素追踪”）——
   //
   // 为何要写文件而不是当场判定：验收器是独立工具（`motion_qa`），
@@ -1265,8 +1328,10 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
     }
     const std::string ffmpeg = find_ffmpeg(job.ffmpeg);
     if (ffmpeg.empty()) {
-      const std::scoped_lock lock(mutex_);
-      status_.output.clear();
+      {
+        const std::scoped_lock lock(mutex_);
+        status_.output.clear();
+      }
       finish(true, "未找到 ffmpeg（已保留 PNG 帧序列与配乐，可自行封装）");
       return;
     }
@@ -1293,12 +1358,16 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
       finish(true, std::format("ffmpeg 编码失败：{}", detail));
       return;
     }
-    const std::scoped_lock lock(mutex_);
-    status_.output = job.output_file;
+    {
+      const std::scoped_lock lock(mutex_);
+      status_.output = job.output_file;
+    }
     log_line(std::format("成片：{}", job.output_file), on_update);
   } else if (pipe_mode && !job.output_file.empty()) {
-    const std::scoped_lock lock(mutex_);
-    status_.output = job.output_file;
+    {
+      const std::scoped_lock lock(mutex_);
+      status_.output = job.output_file;
+    }
     log_line(std::format("成片：{}（管道直送，无 PNG 落盘）", job.output_file), on_update);
   }
 

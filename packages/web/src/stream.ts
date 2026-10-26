@@ -3,7 +3,7 @@ import type { ChatChunk } from "@gebai/sdk"
 import { cnyCatTurnEnd } from "./cny-cat"
 import { syncSendButton } from "./composer"
 import { refreshJumpBottom, scrollIfSticky } from "./jump-bottom"
-import { addMetaActions, appendMsg, assistantContent, clearInteractionCards, reasoningBlock, scrollSessionSticky, sealSegment, sealSessionSegment, subSessionEntry } from "./messages"
+import { addMetaActions, appendMsg, assistantContent, clearInteractionCards, reasoningBlock, scrollSessionSticky, sealSegment, sealSessionSegment, subSessionEntry, withPane } from "./messages"
 import { blockText, markdownBlock } from "./markdown"
 import { createModelErrorNotice, modelErrorText } from "./model-error"
 import { createStreamRenderer } from "./stream-render"
@@ -14,7 +14,6 @@ import { resyncPendingInteractions } from "./pending-interactions"
 import { drainQueue } from "./queue"
 import { scrollReasoningSticky } from "./reasoning-scroll"
 import { client, el, getCurrentSession, runs, syncConnThinking, type RunState, type SubSessionState } from "./state"
-import { appendTail } from "./msg-window"
 import { finishRun, noteRound, startRun } from "./subsessions"
 import { activatePane, activePane, ensurePane, paneOf, setPaneRunning } from "./msg-panes"
 import { effectiveIdleMs, initPageIdle, isPageHidden } from "./page-idle"
@@ -45,6 +44,13 @@ function rehydrateRunView(run: RunState, sessionId: string): void {
 }
 
 function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): void {
+  // 所有挂载点都必须在**本会话自己的**容器里（后台会话的事件照常渲染，但不得侵当前视图）：
+  // 没有这个作用域，尾部挂载（子会话入口行 / 模型异常记录 / 收尾说明）会落到活动容器上——
+  // 后台会话跑子会话时，“🌿 子会话 · …” 会出现在用户当前看着的另一个会话的输入框上方。
+  return withPane(paneOf(sessionId) ?? null, () => applyStreamChunkIn(run, sessionId, chunk))
+}
+
+function applyStreamChunkIn(run: RunState, sessionId: string, chunk: ChatChunk): void {
   // 子会话在途状态：容器缺失（重连重置了 subSessions，或 start 事件已在断线前投递）时惰性重建——
   // 观察面板的记录与过程区常驻，重建只补在途渲染引用，不丢已渲染内容
   const subStateOf = (runId: string): SubSessionState => {
@@ -237,12 +243,16 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
  * ——单一记录块、断线重放不堆叠，也不随恢复输出/任务结束消失。
  */
 function showModelErrorNotice(run: RunState, sessionId: string, chunk: ChatChunk): void {
-  if (!paneOf(sessionId)) return
+  const pane = paneOf(sessionId)
+  if (!pane) return
   if (!run.modelError) {
     run.modelError = createModelErrorNotice()
-    appendTail(run.modelError.el)
-    scrollIfSticky()
-    refreshJumpBottom()
+    // 尾部活动区属于该会话自己的容器（不写活动容器：后台会话的异常记录不得落到当前视图）
+    pane.virtualizer.appendTail(run.modelError.el)
+    if (pane === activePane()) {
+      scrollIfSticky()
+      refreshJumpBottom()
+    }
   }
   const key = `${chunk.retry ?? 0}/${chunk.maxRetry ?? 0}:${chunk.error ?? ""}`
   run.modelError.record(key, modelErrorText(chunk.retry, chunk.maxRetry, chunk.error))
@@ -251,8 +261,10 @@ function showModelErrorNotice(run: RunState, sessionId: string, chunk: ChatChunk
 /** 单轮耗时展示格式：<1m 整秒；<1h 分+秒；以上时+分。 */
 
 function appendFinalNotice(sessionId: string, text: string): void {
-  if (!paneOf(sessionId)) return
-  const wrapper = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() })
+  const pane = paneOf(sessionId)
+  if (!pane) return
+  // 收尾说明也挂该会话自己的容器（与正文/工具卡同一归属，不依赖当前视图）
+  const wrapper = withPane(pane, () => appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }))
   const bubble = wrapper.querySelector<HTMLElement>(".msg-body .bubble")
   if (bubble) {
     bubble.appendChild(blockText(text))

@@ -356,6 +356,45 @@ describe("createWheel（按钮轮盘原语）", () => {
     w.destroy()
   })
 
+  test("ring：显式指定的项落在目标圈（不靠分组与顺序碰运气）", async () => {
+    /* 场景：多个外组项本来会被均衡分到多圈，其中一个声明 `ring: 1`。
+       断言它落在**从圆心往外数第二圈**的半径上，且与未声明的同类项不同圈。 */
+    const trigger = stub("button")
+    trigger.rect = { left: 1100, top: 5, right: 1124, bottom: 29, width: 24, height: 24 }
+    const outer = Array.from({ length: 6 }, () => stub("button"))
+    const pinned = stub("button")
+    const w = createWheel({
+      trigger: asEl(trigger),
+      items: [...outer.map((e) => ({ el: asEl(e) })), { el: asEl(pinned), ring: 1 }],
+      firstRingR: 85,
+    })
+    trigger.dispatchEvent({ type: "pointerenter" })
+    await tick()
+    const STEP = Math.ceil((32 * Math.SQRT2 + 8) / 2) * 2
+    // 首圈 85，第二圈 = 85 + STEP
+    expect(offsetOf(pinned).radius).toBeCloseTo(85 + STEP, 2)
+    w.destroy()
+  })
+
+  test("ring：目标圈号超出已开圈数时钳到最后一圈（不为单项单开一圈）", async () => {
+    // 只两项、都在一圈内 → 只有一圈；ring:5 应钳到 0（首圈），而不是造出第 6 圈跑到屏幕外
+    const trigger = stub("button")
+    trigger.rect = { left: 1100, top: 5, right: 1124, bottom: 29, width: 24, height: 24 }
+    const a = stub("button")
+    const b = stub("button")
+    const w = createWheel({
+      trigger: asEl(trigger),
+      items: [{ el: asEl(a) }, { el: asEl(b), ring: 5 }],
+      firstRingR: 85,
+    })
+    trigger.dispatchEvent({ type: "pointerenter" })
+    await tick()
+    // 都在首圈：半径一致
+    expect(offsetOf(a).radius).toBeCloseTo(85, 2)
+    expect(offsetOf(b).radius).toBeCloseTo(85, 2)
+    w.destroy()
+  })
+
   test("分圈：同租放不下时**自动落到下一圈**，各圈半径按「边长 + 间隙」步进", async () => {
     /* 7 个同类项 @ 32px（先全排一圈看看能放几个）：首圈半径 85 在可用张角内最多 3 项，
        余项落到 85+40=125，再放不下就 165……断言取“实际出现的圈半径”集合，不写死项数分配——

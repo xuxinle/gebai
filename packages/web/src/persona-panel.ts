@@ -59,6 +59,8 @@ export interface PersonaStateView {
   sourceErrors: Record<string, string>
   channelInput: Record<string, { emitted: number; accepted: number; unrouted: number; duplicate: number; overflow: number; unavailable: number }>
   credentials: { ready: boolean; state: string; message: string; remainingMs?: number; needsAuth: boolean } | null
+  /** 拟人装配失败原因（服务仍正常运行；有值 = 开关开了但坏了）。 */
+  setupError?: string
   totals: { drivers: number; activeDrivers: number; running: number; queued: number; failed: number }
 }
 
@@ -78,6 +80,63 @@ export async function controlPersonaSource(name: string, action: "start" | "stop
   const res = await fetch(`/api/v1/persona/sources/${encodeURIComponent(name)}/${action}`, { method: "POST" })
   const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
   return { ok: res.ok && body.ok !== false, ...(body.error ? { error: body.error } : {}) }
+}
+
+/**
+ * 发起飞书授权。
+ *
+ * **令牌请求走相期弹窗**（用户要求的主动通路）：服务端生成链接后顺手推一张
+ * 带链接的授权卡到桌面常驻窗口。卡比网页提示难被忽略，而且授权本来就是
+ * 「离开浏览器去飞书点同意」的动作——在你平时就在的窗口里告诉你，比在网页角落里写一行字合理。
+ *
+ * 返回的 `card.delivered=false` = 相期没连（卡已缓存，它启动后会重推），
+ * 此时前端必须降级给一个可点的链接（否则用户被卡在一个“已发出但看不到”的状态）。
+ *
+ * 权限链路：这是**用户本人**的授权（user_access_token），与机器人应用凭据无关。
+ */
+export async function startPersonaAuthorize(): Promise<{
+  ok: boolean
+  url?: string
+  error?: string
+  card?: { delivered: boolean; error?: string }
+}> {
+  try {
+    const res = await fetch("/api/v1/persona/authorize", { method: "POST" })
+    const body = (await res.json().catch(() => ({}))) as {
+      ok?: boolean
+      url?: string
+      error?: string
+      card?: { delivered?: boolean; error?: string }
+    }
+    return {
+      ok: res.ok && body.ok !== false && !!body.url,
+      ...(body.url ? { url: body.url } : {}),
+      ...(body.error ? { error: body.error } : {}),
+      ...(body.card ? { card: { delivered: body.card.delivered === true, ...(body.card.error ? { error: body.card.error } : {}) } } : {}),
+    }
+  } catch (err) {
+    return { ok: false, error: String((err as Error)?.message || err) }
+  }
+}
+
+/**
+ * 手动提交授权码（回调打不到歌白时的兜底）。
+ *
+ * 真实场景：redirect_uri 指向别处（如端口不对、被别的服务占用），
+ * 浏览器跳转回不到歌白——此时用户把地址栏里带 code 的 URL 粘进来即可。
+ */
+export async function completePersonaAuthorize(raw: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch("/api/v1/persona/authorize/complete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: raw }),
+    })
+    const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
+    return { ok: res.ok && body.ok !== false, ...(body.error ? { error: body.error } : {}) }
+  } catch (err) {
+    return { ok: false, error: String((err as Error)?.message || err) }
+  }
 }
 
 /** 一行状态徽标（`ok` / `warn` / `bad`）。 */
@@ -124,12 +183,17 @@ export function renderPersonaPanel(host: HTMLElement, snapshot: PersonaStateView
       el(
         "div",
         "settings-row-desc",
-        `${snapshot.credentials.message}\n（人格仍会处理事件，但对外发言会失败——` +
-          `页面顶部的横幅可以完成授权）`,
+        `${snapshot.credentials.message}\n（人格仍会处理事件，但对外发言会失败）`,
       ),
     )
     row.append(info, badge("不可用", "bad"))
     cred.appendChild(row)
+    // 授权动作的主通路是**相期弹窗**（桌面常驻窗口推一张带链接的授权卡）：
+    // 授权是个「离开浏览器去飞书点同意」的动作，而相期能把卡常驻在你眼前、
+    // 完成后自动撤掉（见 compose.ts 的 syncAuthCard）。
+    //
+    // 这里保留的是两个**兼底入口**：相期没开/推送失败时，用户仍有路可走。
+    cred.appendChild(authorizeActions(onChanged))
   }
   host.appendChild(cred)
 
@@ -288,4 +352,63 @@ function blockLine(text: string): HTMLElement {
   const d = el("div", "settings-row-desc persona-block")
   d.textContent = text
   return d
+}
+
+/**
+ * 授权操作区：去授权 / 粘贴回调地址。
+ *
+ * **主通路是相期弹窗**：点「去授权」服务端会生成链接并**同时推一张授权卡到桌面窗口**，
+ * 用户直接在卡上点就能走。相期没连时（`delivered=false`）才降级为这里开新页 + 文案。
+ *
+ * 三个入口各管一段：
+ * - 相期卡：主通路（常驻窗口，难被忽略，完成后自动撤卡）
+ * - 新页打开：相期没连/用户就在电脑前直接点
+ * - 粘贴回调地址：redirect_uri 未在飞书后台登记时，浏览器跳转回不到歌白（否则用户卡在“授权完什么都没发生”）
+ */
+function authorizeActions(onChanged?: () => void): HTMLElement {
+  const wrap = el("div", "persona-auth-actions-inline")
+  const msg = el("div", "settings-row-desc")
+  const go = el("button", "mini-btn", "去授权")
+  const paste = el("button", "mini-btn", "粘贴回调地址")
+
+  go.onclick = async () => {
+    go.disabled = true
+    msg.textContent = "正在生成授权链接并推送到相期…"
+    const r = await startPersonaAuthorize()
+    go.disabled = false
+    if (!r.ok || !r.url) {
+      msg.textContent = `生成授权链接失败：${r.error ?? "未知原因"}`
+      return
+    }
+    // 相期卡已送达：**不新开标签页**——那样会同时弹出两个授权入口，
+    // 用户可能在两处都点一遍（第二次的 code 已经用过了，会看到一个莫名其妙的失败）。
+    if (r.card?.delivered) {
+      msg.textContent =
+        "已把授权卡推到桌面上的相期窗口，去那里点「去授权」即可。完成后卡会自动消失。\n" +
+        "若没看到相期窗口，可重新点本按钮——相期没开时会把链接直接开在新窗口。"
+      return
+    }
+    // 相期不可用：降级为直接开新页，并如实告知链路
+    window.open(r.url, "_blank", "noopener,noreferrer")
+    msg.textContent =
+      `相期未被送达${r.card?.error ? `（${r.card.error}）` : "（未连接）"}，已在新窗口打开授权页。\n` +
+      "完成后重新打开本面板即可看到新状态；若飞书报「重定向 URL 不合法」，" +
+      "说明后台未登记当前回调地址，可改用下方「粘贴回调地址」。"
+  }
+
+  paste.onclick = async () => {
+    const raw = prompt("把浏览器地址栏里带 code= 的完整回调地址粘贴到这里（或只粘贴 code）：")
+    if (!raw?.trim()) return
+    msg.textContent = "正在兑换…"
+    const r = await completePersonaAuthorize(raw.trim())
+    if (!r.ok) {
+      msg.textContent = `兑换失败：${r.error ?? "未知原因"}`
+      return
+    }
+    msg.textContent = "授权完成。"
+    onChanged?.()
+  }
+
+  wrap.append(go, paste, msg)
+  return wrap
 }

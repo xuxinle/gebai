@@ -32,6 +32,7 @@
  */
 
 import type { PersonaUserToken } from "./user-token"
+import { feishuFetch } from "./tls"
 
 /** 授权端点（accounts.feishu.cn，与 open.feishu.cn 不同域）。 */
 const AUTHORIZE_URL = "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
@@ -134,7 +135,10 @@ export class PersonaOAuth {
   private readonly now: () => number
 
   constructor(opts: { fetchImpl?: typeof fetch; now?: () => number } = {}) {
-    this.fetchImpl = opts.fetchImpl ?? fetch
+    // 缺省走 feishuFetch（不是原生 fetch）：内网出口改写证书链时，原生 fetch 报
+    // `unable to verify the first certificate`，而 GEBAI_FEISHU_INSECURE_TLS=true
+    // 只对 feishuFetch 生效——用原生 fetch 会让这个开关在授权链上完全失效。
+    this.fetchImpl = opts.fetchImpl ?? feishuFetch
     this.now = opts.now ?? Date.now
   }
 

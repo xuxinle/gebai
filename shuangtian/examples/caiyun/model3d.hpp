@@ -116,10 +116,18 @@ void paint_model3d(st::raster::Surface& canvas, const Layer& layer, st::math::Re
 /// · `cam_*` / `light_*` 取 **head 的**（一个世界只有一台相机、一个主光）。
 ///
 /// 这样写脚本时的心智模型很直：“桌面铺满整块，图标放在它右半边、抬高一点”。
+///
+/// ## `member_states` 应传（否则 `layout` 位移对三维成员静默失效）
+///
+/// 它必须与 `members` **同序**，且是**已经过 `apply_delta`** 的最终状态。
+/// 传 `nullptr` 时本函数会自己调 `evaluate_layer`，而那条路不包含脚本编排层
+/// 的 `dx/dy/dw/dh`（它们在渲染器的 `states[]` 里）。
+/// 实测：`dx` 从 0 改到 300，三维成员在屏幕上完全不动（783,627 两档相同）。
 void paint_model3d_group(st::raster::Surface& canvas, const Layer& head,
                          const std::vector<const Layer*>& members, float local_time,
                          float scene_duration, std::string_view asset_basis,
                          const LayerState& head_state, float canvas_w, float canvas_h,
-                         float design_w, float design_h);
+                         float design_w, float design_h,
+                         const std::vector<LayerState>* member_states = nullptr);
 
 }  // namespace caiyun

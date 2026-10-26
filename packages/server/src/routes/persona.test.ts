@@ -53,6 +53,7 @@ function makeApp(deps: {
   credentials?: unknown
   state?: () => Promise<PersonaStateSnapshot>
   sourceControl?: { start(name: string): Promise<boolean>; stop(name: string): Promise<boolean> }
+  pushAuthCard?: () => Promise<{ ok: boolean; delivered: boolean; url?: string; error?: string }>
 }): Hono<AppEnv> {
   const app = new Hono<AppEnv>()
   registerPersonaRoutes(app, {
@@ -61,6 +62,7 @@ function makeApp(deps: {
     publicBase: () => "http://localhost:3000",
     ...(deps.state ? { state: deps.state } : {}),
     ...(deps.sourceControl ? { sourceControl: deps.sourceControl } : {}),
+    ...(deps.pushAuthCard ? { pushAuthCard: deps.pushAuthCard } : {}),
   } as never)
   return app
 }
@@ -138,5 +140,78 @@ describe("POST /api/v1/persona/sources/:name/:action", () => {
     const res = await app.request("/api/v1/persona/sources/..%2Fetc/start", { method: "POST" })
     expect(res.status).toBe(400)
     expect(log).toEqual([])
+  })
+})
+
+/**
+ * 令牌请求走相期弹窗。
+ *
+ * 这条链路的关键不是「能推卡」（那是 compose 的事），而是**推失败不能连带把链接也吞了**：
+ * 相期是桌面窗口，用户没开它、或它崩了，都是很常见的事。此时前端必须能降级开链接，
+ * 否则用户就被卡在「已发出但看不到」——一个没有任何反馈的死胡同。
+ */
+describe("POST /api/v1/persona/authorize（令牌请求走相期）", () => {
+  const creds = () => ({
+    startAuthorize: () => ({ url: "https://accounts.feishu.cn/x", scopes: "im:message", expiresInMs: 600_000 }),
+    status: async () => ({ ready: false, state: "missing", message: "未授权", needsAuth: true }),
+  })
+
+  test("推卡成功 → 链接照旧返回，card.delivered=true", async () => {
+    let pushed = 0
+    const app = makeApp({
+      credentials: creds(),
+      pushAuthCard: async () => {
+        pushed++
+        return { ok: true, delivered: true }
+      },
+    })
+    const res = await app.request("/api/v1/persona/authorize", { method: "POST" })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { url: string; card: { delivered: boolean } }
+    expect(body.url).toContain("accounts.feishu.cn")
+    expect(body.card.delivered).toBe(true)
+    expect(pushed).toBe(1)
+  })
+
+  test("相期没连（delivered=false）→ 链接仍然返回（前端降级开新页）", async () => {
+    const app = makeApp({
+      credentials: creds(),
+      pushAuthCard: async () => ({ ok: true, delivered: false, error: "相期未连接" }),
+    })
+    const res = await app.request("/api/v1/persona/authorize", { method: "POST" })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { url: string; card: { delivered: boolean; error?: string } }
+    // 关键：链接不能因为推送失败就没了
+    expect(body.url).toContain("accounts.feishu.cn")
+    expect(body.card.delivered).toBe(false)
+    expect(body.card.error).toContain("相期未连接")
+  })
+
+  test("推卡抛错 → 授权本身仍然成功（推送是旁路，不是前置条件）", async () => {
+    const app = makeApp({
+      credentials: creds(),
+      pushAuthCard: async () => {
+        throw new Error("控制平面炸了")
+      },
+    })
+    const res = await app.request("/api/v1/persona/authorize", { method: "POST" })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { url: string; card: { delivered: boolean; error?: string } }
+    expect(body.url).toContain("accounts.feishu.cn")
+    expect(body.card.delivered).toBe(false)
+    expect(body.card.error).toContain("控制平面炸了")
+  })
+
+  test("未启用拟人 → 404（不推卡、不生成链接）", async () => {
+    let pushed = 0
+    const app = makeApp({
+      pushAuthCard: async () => {
+        pushed++
+        return { ok: true, delivered: true }
+      },
+    })
+    const res = await app.request("/api/v1/persona/authorize", { method: "POST" })
+    expect(res.status).toBe(404)
+    expect(pushed).toBe(0)
   })
 })

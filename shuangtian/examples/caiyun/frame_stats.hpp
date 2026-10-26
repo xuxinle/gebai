@@ -56,7 +56,33 @@
 namespace caiyun {
 
 /// 降采样后的灰度图宽度（高度按比例取偶）；整帧 64×N 字节。
+///
+/// 用于**平均差**（老口径）。保持 64 是为了与历史数据可比——换宽度会让
+/// `static_threshold=1.2` 的含义跟着变。
 inline constexpr int kStatsWidth = 64;
+
+/// 主口径的降采样宽度：每格 ≈ 10 物理像素（1080p 下 192×108）。
+///
+/// ## 为何用比 `kStatsWidth` 更细的图
+///
+/// 老口径（64 宽）每格盖 **30×30 物理像素**：一个 200×200 的纯色块移动 10px，
+/// 格子内像素只有 1/3 换了位置、但均值几乎不变。
+///
+/// 取 192 是**设计取舍**，不是被验证过的“最优值”：
+/// · 实测同一段运动，192 宽的格均差峰值明显高于 64 宽（120 vs 40）——
+///   因为它把更少的像素平均在一起，尖尖不被削弱；
+/// · 代价是每帧 20KB（1080p），900 帧约 18MB——相对多渲一遍全片可忽略。
+///
+/// ⚠ **没有测试能钉住“192 比 64 更好”**（试过，那条测试是假护栏：
+/// 把宽度退回 64 它仍绿）。这个选择由使用者按实际画面判断，见 `QualityReport`
+/// 里“参考量”那段说明。
+inline constexpr int kHiStatsWidth = 192;
+
+/// 「像素在变」的绝对差阈值（0–255）。
+///
+/// 为何取 6：低于它的差异在 8bit 下基本是编码/抖动噪声（暗场尤其明显），
+/// 计入会把“完全静止”读成“在动”。
+inline constexpr int kChangePixelDelta = 6;
 
 /// 一帧的度量。
 struct FrameStats {
@@ -78,7 +104,11 @@ struct ShotStats {
   /// 该镜内有效的相邻帧对数（分母）；与 `frames-1` 不等说明区间边界丢帧。
   int frame_pairs{0};
   double mean_luma{0.0};
-  /// 静止占比（%）；无有效帧对时为 0（无法判动静，不该报 100%）
+  /// **主口径**：变化像素占比（%）的均值。与元素尺寸无关，不被满屏面积稀释。
+  double changed_pixels_pct{0.0};
+  /// **主口径**：相邻帧的最大像素差（0–255）在镜内的中位数。
+  /// 与 `QualityReport::max_pixel_delta` 同一口径（同样是格均差峰值，不是真值）。
+  double max_pixel_delta{0.0};  /// 静止占比（%）；无有效帧对时为 0（无法判动静，不该报 100%）
   [[nodiscard]] auto still_ratio() const -> double {
     return frame_pairs > 0 ? 100.0 * static_cast<double>(still_frames) / static_cast<double>(frame_pairs) : 0.0;
   }
@@ -107,8 +137,50 @@ struct QualityReport {
   double change_density{0.0};
 
   std::vector<ShotStats> shots{};
-  /// 静止占比最高的那一镜（`shots` 为空时无值）；用来一眼指出「慢在哪」。
+  /// 静止占比最高的那一镜（`shots` 为空时无值）。
+  ///
+  /// ⚠ 它是**平均差**口径的答案，会被画面尺寸稀释。
+  /// 同一镜的 `changed_pixels_pct` 也在 `shots` 里，两者一起看更准。
   int worst_still_clip_id{-1};
+
+  // —— 参考量：变化像素占比 + 最大像素差 ——
+  //
+  // ## 定位：这是**参考量**，不是验收门槛（重要）
+  //
+  // 加入它们的动机是：全屏**平均差**会被画面尺寸稀释——一个 200×200 的元素在动，
+  // 只占 1920×1080 的 4%，平均差被稀释 25 倍。实测七条片子全报 88~90% 静止，
+  // 而画面里明明有手在走、柱子在长。
+  //
+  // ## 为何**不**给它们定及格线（经过一轮返工后的结论）
+  //
+  // “多大算在动”取决于元素对比度、尺寸、运动速度与降采样粒度，
+  // **不存在与片子无关的通用值**。试图给一个数字会得到两种坏结果：
+  // · 定得松 ⇒ 背约不了任何东西（实测：把粒度退回 64 宽，断言仍绿）
+  // · 定得紧 ⇒ 把“风格本就冷静”错判成缺陷
+  // 所以这里只**如实报数**，由人（或智能体）结合画面自己判断。
+  //
+  // ## 两个量的实测性质（供解读，不是阈值）
+  //
+  // · `changed_pixels_pct`：粒度**不一定**越大越细越好——64 宽每格盖 30×30 像素，
+  //   一个小运动会把整格刷过阈值（实测 0.61% vs 192 宽的 0.19%，反而更高）。
+  //   所以它**不能跨粒度横向比较**，只能在同一份输出里纵向看趋势。
+  // · `max_pixel_delta`：降采样图上的**格均差峰值**，不是全分辨率单像素差。
+  //   实测同一段 60 帧：本值中位 39，全分辨率真值 216（格平均把尖尖削平了）。
+  //   它随粒度变细而单调上升，适合做“有没有大体量变化”的粗筛。
+  /// 变化像素占比（%）的均值：降采样图中 |Δluma| > `kChangePixelDelta` 的格占比。
+  double changed_pixels_pct{0.0};
+  /// 相邻帧最大像素差（0–255）的中位数。
+  ///
+  /// ⚠ 这是 **`kHiStatsWidth` 降采样图上的格均差峰值**，不是全分辨率单像素差。
+  /// 实测对比（同一段 60 帧）：本值中位 39，而全分辨率真值为 **216**——
+  /// 因为每格平均了约 110 个像素，单像素的剧烈变化被格均值削平。
+  /// 所以它只能当**“有没有大体量变化”的粗筛**（>20 即肯定在动），
+  /// 不要拿它当“像素级动静幅度”用。要真值必须全分辨率（代价见 `kHiStatsWidth`）。
+  double max_pixel_delta{0.0};
+  /// 变化像素占比 > 1% 的帧对占比（%）。
+  /// 注：1% 这个门限是**画面全局**口径，单个小元素运动时往往不足 1%（只在边缘产生变化格），
+  /// 那是定义使然，不代表“它没动”。
+  double moving_pair_ratio{0.0};
 
   /// 局部渲染（`first_frame/last_frame`）时结论只覆盖那段区间。
   bool partial{false};
@@ -129,7 +201,11 @@ struct Sample {
   int index{0};
   double time_s{0.0};
   double mean_luma{0.0};
+  /// 老口径用的 64 宽灰度图（平均差）。
   std::vector<std::uint8_t> luma{};
+  /// 主口径用的 192 宽灰度图（变化像素占比 / 最大像素差）。
+  /// 为何不共用一份：64 宽的格均差会把元素级运动平均掉（见 `kHiStatsWidth`）。
+  std::vector<std::uint8_t> luma_hi{};
 };
 
 /// 增量累加器（渲染循环里逐帧喂；并行时**每线程一份**，最后归并）。
@@ -180,8 +256,8 @@ class StatsAccumulator {
   /// 本路上一帧的降采样灰度图（与 `prev_` 配套，同原因：只给 push 的返回值用）。
   std::vector<std::uint8_t> prev_luma_{};
 
-  static auto downscale_luma(std::span<const std::uint8_t> rgba, int width, int height)
-      -> std::vector<std::uint8_t>;
+  static auto downscale_luma(std::span<const std::uint8_t> rgba, int width, int height,
+                             int target_width) -> std::vector<std::uint8_t>;
 };
 
 }  // namespace caiyun

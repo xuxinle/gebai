@@ -49,6 +49,7 @@ inline constexpr std::array<std::string_view, 22> known_keys{
   target.sources = json_get_string_array(json, "sources");
   target.flags = json_get_string_array(json, "flags");
   target.exclude_sources = json_get_string_array(json, "exclude_sources");
+  target.include_sources = json_get_string_array(json, "include_sources");
   target.embed = json_get_string_array(json, "embed");
   // `log`：目标级覆盖（缺省吃工程级）。
   // 用 `st::json_find` 判“键在不在”——否则无法区分“未指定”与“显式 false”。
@@ -444,6 +445,7 @@ auto Manifest::to_json() const -> st::Json {
     entry["sources"] = to_array(target.sources);
     if (!target.flags.empty()) entry["flags"] = to_array(target.flags);
     if (!target.exclude_sources.empty()) entry["exclude_sources"] = to_array(target.exclude_sources);
+    if (!target.include_sources.empty()) entry["include_sources"] = to_array(target.include_sources);
     if (!target.embed.empty()) entry["embed"] = to_array(target.embed);
     target_map[target.name] = entry;
   }

@@ -1,0 +1,174 @@
+{
+  "fps": 30,
+  "size": [
+    1920,
+    1080
+  ],
+  "transition": 0,
+  "fade_in": 0.3,
+  "fade_out": 0.3,
+  "brand_wordmark": "",
+  "brand_latin": "",
+  "footer_note": "",
+  "audio": {
+    "enabled": false
+  },
+  "name": "style-04-scale-dive",
+  "scenes": [
+    {
+      "kind": "custom",
+      "duration": 6,
+      "layout": "layout.js",
+      "accent": "#4B8CF5",
+      "background": [
+        "#080B12",
+        "#0E1521"
+      ],
+      "wrap": false,
+      "footer_note": "",
+      "layers": [
+        {
+          "kind": "text",
+          "name": "title",
+          "x": 108,
+          "y": 110,
+          "w": 900,
+          "h": 70,
+          "text": "从一行日志，到一次训练",
+          "size": 42,
+          "color": "#5C7391",
+          "align": 1,
+          "opacity": 1,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "L3a",
+          "x": 260,
+          "y": 440,
+          "w": 1400,
+          "h": 150,
+          "text": "一次训练",
+          "size": 96,
+          "color": "#2B3C52",
+          "bold": true,
+          "align": 0,
+          "opacity": 1,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "L3b",
+          "x": 260,
+          "y": 604,
+          "w": 1400,
+          "h": 60,
+          "text": "6 小时 · 32 卡",
+          "size": 30,
+          "color": "#2B3C52",
+          "align": 0,
+          "opacity": 1,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "L2box",
+          "x": 380,
+          "y": 380,
+          "w": 1160,
+          "h": 320,
+          "fill": "#0F1724",
+          "stroke": "#22304A",
+          "stroke_width": 1,
+          "radius": 18,
+          "opacity": 1,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "L2a",
+          "x": 420,
+          "y": 420,
+          "w": 1080,
+          "h": 56,
+          "text": "一次失败研判",
+          "size": 40,
+          "color": "#7C93B4",
+          "bold": true,
+          "align": 1,
+          "opacity": 1,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "L2b",
+          "x": 420,
+          "y": 494,
+          "w": 1080,
+          "h": 40,
+          "text": "聚合 1,240 条日志 → 3 个候选根因",
+          "size": 24,
+          "color": "#4A5F7A",
+          "align": 1,
+          "opacity": 1,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "L1box",
+          "x": 560,
+          "y": 480,
+          "w": 800,
+          "h": 120,
+          "fill": "#111C2C",
+          "stroke": "#2E4A6E",
+          "stroke_width": 2,
+          "radius": 12,
+          "opacity": 1,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "L1a",
+          "x": 596,
+          "y": 506,
+          "w": 730,
+          "h": 34,
+          "text": "CUDA out of memory",
+          "size": 28,
+          "color": "#D7E4F7",
+          "bold": true,
+          "align": 1,
+          "opacity": 1,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "L1b",
+          "x": 596,
+          "y": 546,
+          "w": 730,
+          "h": 34,
+          "text": "tried to allocate 2.4 GiB",
+          "size": 24,
+          "color": "#88A0BE",
+          "align": 1,
+          "opacity": 1,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "caret",
+          "x": 596,
+          "y": 610,
+          "w": 240,
+          "h": 2,
+          "fill": "#4B8CF5",
+          "radius": 1,
+          "opacity": 1,
+          "enter": 0
+        }
+      ]
+    }
+  ]
+}

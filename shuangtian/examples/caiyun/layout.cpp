@@ -207,6 +207,67 @@ auto LayoutEngine::load(const LayoutScript& script) -> st::Status {
     return st::unexpected(wrap.error().code,
                           std::format("脚本编排层包装失败：{}", wrap.error().message));
   }
+
+  // ④ **探针帧**：用真实形状试跑一帧，把“能装载但每帧都失败”这一类**提前说出来**。
+  //
+  // ## 为何需要它（实测代价）
+  //
+  // 上面三步只能证明：语法对、顶层能跑、`layout` 是函数。它们**拦不住**
+  // 函数体里引用了不存在的名字（典型：漏定义一个缓动函数）。那种错会让
+  // **每一帧**都失败 ⇒ `shapes` 恒空 ⇒ 画面只剩背景，而渲染照常退出码 0、
+  // **一条 warn 都没有**。实测用二分试了十几轮才定位到。
+  //
+  // ## 为何**不**在装载期拒绝（这一层容易做错）
+  //
+  // 本框架已有契约：脚本运行期抛错/超时 ⇒ `load()` 成功、`evaluate()` 报错 +
+  // 零增量 + 继续出片（`layout_engine_throwing_script_degrades_not_crashes` /
+  // `..._timeout_degrades_to_zero_deltas` / ease 参数错）。这是**刻意的**：
+  // AI 写的一处错不应该毁掉整片。实测：把探针做成“失败就拒绝装载”，
+  // 直接打破上述三条契约。
+  //
+  // 而脚本引擎对外把“抛错”统一报成 `ErrorCode::Parse`，
+  // 因此 `throw new Error("boom")` 与“漏定义函数”在错误码上**完全不可区分**——
+  // 想只拒绝后者而放行前者，做不到。
+  //
+  // 所以探针的职责收敛为：**把错说在前面**（装载时一条明确 warn + 原文），
+  // 而**不改行为**（仍照常降级）。渲完的 `failure_count()` 汇总再补一刀，
+  // 两道合起来把“静默”堵死。
+  {
+    st::Json probe_canvas = st::Json::object();
+    probe_canvas["width"] = 1920.0;
+    probe_canvas["height"] = 1080.0;
+    // 空图层数组：脚本若假定“至少一层”就可能在这里报错——而这**正是**要报的
+    // （真实场景若没有图层，它每帧都会这样死，与探针一致）。
+    const auto probe = impl_->engine.call("__caiyun_layout_safe",
+                                          {st::Json(0.0), st::Json(1.0), probe_canvas,
+                                           st::Json::array()});
+    if (!probe.has_value()) {
+      // 不拒绝装载，但绝不再安静：原文 + 后果都写清楚。
+      impl_->last_error = probe.error().message;
+      // 措辞要克制：探针帧只能证明“**第 0 帧、空图层**这个输入下失败了”。
+      // 对漏定义函数这类确定性缺陷它会每帧都失败；而 `throw` / 超时可能是数据依赖的，
+      // 那正是本框架允许“运行期降级、不拒装载”的理由。所以只说“首次探测就失败了”。
+      ST_LOG_WARN(
+          "脚本编排层首次探测（t=0，空图层）就失败了，这通常是每帧都会失败——"
+          "若确实如此，动效将全部丢失（画面只剩 JSON 图层）。原因：{}",
+          probe.error().message);
+    } else {
+      // 返回值形态：既不是数组也不是 {states, shapes} 是纯写法错误，
+      // 且不会随时间变好（不像 throw 可能是数据依赖的）——这一类拒绝装载。
+      const st::Json& value = probe.value();
+      if (!value.is_array() && !value.is_object()) {
+        impl_->loaded = false;
+        impl_->last_error = "layout 的返回值不是数组也不是对象";
+        return st::unexpected(
+            st::ErrorCode::Invalid,
+            "脚本编排层探针帧发现 layout() 返回值的形态不合法："
+            "应返回增量数组，或 { states: [...], shapes: [...] }");
+      }
+    }
+  }
+
+  impl_->loaded = true;
+  impl_->failures = 0;
   return st::Status{};
 }
 

@@ -340,10 +340,67 @@ ST_TEST(frame_stats_json_roundtrip_shape) {
   for (const char* key : {"\"still_ratio\"", "\"bright_ratio\"", "\"mean_luma\"",
                           "\"change_density\"", "\"static_threshold\"", "\"shots\"",
                           "\"worst_still_clip_id\"", "\"partial\"", "\"summary\"",
-                          "\"frame_pairs\""}) {
+                          "\"frame_pairs\"", "\"changed_pixels_pct\"", "\"max_pixel_delta\"",
+                          "\"moving_pair_ratio\""}) {
     ST_CHECK(json.find(key) != std::string::npos);
   }
   // 必须能解析回来（自研 Json 的往返）
   const auto parsed = st::json_parse(json);
   ST_CHECK(parsed.has_value());
 }
+
+ST_TEST(frame_stats_primary_metric_moves_with_motion_and_is_zero_when_still) {
+  // ## 这条守什么
+  //
+  // 主口径的两个量（变化像素占比、最大像素差）必须**真的随运动变化**，
+  // 且对逐帧完全一致的画面必须报 0。
+  //
+  // ## 为何只断言方向、不断言绝对阈值
+  //
+  // 这两个量**没有通用的及格线**：“多大算在动”取决于元素对比度、
+  // 降采样粒度、运动速度。给一个数字当门槛就是指标牵引设计。
+  // 但“动的严格大于静止的、静止的必须真为 0”是稳定可验的**性质**。
+  //
+  // ## 它拦得住什么（已反向验证）
+  //
+  // · 实现恒返回 0 → `a > b` 在 0>0 时为假 → 红
+  // · 实现恒返回固定值 → 同样红
+  // 所以它守的是“指标与画面有真实关联”这条底线。
+  st::raster::Canvas canvas{1920, 1080, 1.0f};
+  StatsAccumulator moving{};
+  for (int i = 0; i < 8; ++i) {
+    fill(canvas, 16, 24, 32);
+    block(canvas, 800 + i * 20, 200, 224, 224, 224);
+    moving.push(canvas.to_rgba8(), canvas.physical_width(), canvas.physical_height(), i,
+                static_cast<double>(i) / 10.0);
+  }
+  StatsAccumulator still{};
+  for (int i = 0; i < 8; ++i) {
+    fill(canvas, 16, 24, 32);
+    block(canvas, 800, 200, 224, 224, 224);
+    still.push(canvas.to_rgba8(), canvas.physical_width(), canvas.physical_height(), i,
+               static_cast<double>(i) / 10.0);
+  }
+  const QualityReport a = moving.report(0.8, false);
+  const QualityReport b = still.report(0.8, false);
+  // 动的严格大于静止的（两个量各自都是）；这也排除了“两边都是 0”的假绿。
+  ST_CHECK(a.changed_pixels_pct > b.changed_pixels_pct);
+  ST_CHECK(a.max_pixel_delta > b.max_pixel_delta);
+  // 真静止必须接近零（真值可手算：逐帧像素完全一致）。
+  ST_CHECK(b.changed_pixels_pct < 0.01);
+  ST_CHECK(b.max_pixel_delta < 1.0);
+  ST_CHECK(b.moving_pair_ratio < 1.0);
+}
+
+// ## 关于“192 宽比 64 宽更好”——没有测试，是刻意的
+//
+// 这里曾经有三条用例声称能钉住“主口径的降采样粒度足够细”，
+// 在**反向验证时全部仍绿**（把实现退回 64 宽，它们一条也不红）。
+// 即：它们是假护栏。已删。
+//
+// 为什么断言不了：“192 宽能看见多少运动”取决于元素对比度、尺寸、速度
+// 以及降采样核，不存在与片子无关的及格值。那是一个**设计取舍**，
+// 不是可以稳定断言的性质。它在 `kHiStatsWidth` 的注释里作为理由记录，
+// 由使用者按实际画面判断，而不是由测试声称已验证。
+
+

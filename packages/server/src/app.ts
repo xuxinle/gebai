@@ -68,6 +68,15 @@ export interface AppDeps {
   personaState?: (() => Promise<import("./core/session/persona-status").PersonaStateSnapshot>) | undefined
   /** 拟人事件源手动启停（诊断用；未启用时 undefined）。 */
   personaSourceControl?: { start(name: string): Promise<boolean>; stop(name: string): Promise<boolean> } | undefined
+  /**
+   * 拟人装配失败的原因（undefined = 未失败）。
+   *
+   * 为什么要暴露：装配失败已被隔离成「服务照常启动」，代价是日志以外**看不到任何异常**——
+   * 用户只知道「人格不回消息」。把真实原因接到状态接口，才不用去翻启动日志猜。
+   */
+  personaSetupError?: string | undefined
+  /** 把授权卡推到相期（令牌请求主通路）；未启用拟人/相期不可用时 undefined。 */
+  personaPushAuthCard?: (() => Promise<{ ok: boolean; delivered: boolean; url?: string; error?: string }>) | undefined
   /** 文件工作台：写操作审计（组合根注入；缺省不审计）。 */
   fsAudit?: import("./core/fs/audit").FsAudit
   /** 文件工作台：Git 服务（组合根注入；缺省时 git 端点返回 503「Git 能力未启用」）。 */
@@ -205,6 +214,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     },
     ...(d.personaState ? { state: d.personaState } : {}),
     ...(d.personaSourceControl ? { sourceControl: d.personaSourceControl } : {}),
+    ...(d.personaSetupError ? { setupError: d.personaSetupError } : {}),
+    ...(d.personaPushAuthCard ? { pushAuthCard: d.personaPushAuthCard } : {}),
   })
   registerUserRoutes(rc)
   registerSessionRoutes(rc)

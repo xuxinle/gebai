@@ -6,6 +6,20 @@ import { toast } from "./ui"
 import { isFilePopup } from "./file-display"
 import { taskLabel } from "./task-labels"
 
+/** 待决卡增减通知：会话列表的运行角标据此从「运行中」变成「⌛ 等待你的输入」再变回去
+ *  （与 approvals.ts / messages.ts 同口径）。实时交互卡在提交成功或已失效后由本模块自己揭掉，
+ *  揭掉就是「不再等用户作答」——不通知则角标停在 ⌛。 */
+function notifyPendingChange(): void {
+  document.dispatchEvent(new CustomEvent("gebai:pending-change"))
+}
+
+/** 揭掉一张交互卡并通知列表：提交成功/卡已失效时卡片就地消失，角标要跟着回运行图标。 */
+function dropCard(card: Element | null | undefined): void {
+  if (!card) return
+  card.remove()
+  notifyPendingChange()
+}
+
 /* ---------- 工具名解析：`{agent}_{tool}` → 子Agent 名 + 短工具名 ---------- */
 
 /** 拆分带命名空间前缀的工具全名，返回 `{ agent?, tool }`（子Agent 最长前缀匹配）。 */
@@ -619,7 +633,7 @@ export function choiceBubble(
       try {
         await client.decideChoice(sessionId!, choiceId!, selection)
         settled = true
-        bubble.closest<HTMLElement>(".interaction-card")?.remove()
+        dropCard(bubble.closest(".interaction-card"))
         return
       } catch (err) {
         btn.disabled = false
@@ -627,7 +641,7 @@ export function choiceBubble(
         // 不让用户对着死卡片反复点
         if ((err as Error & { code?: string }).code === "expired") {
           toast("该询问已失效（等待超时、已在其他地方处理，或任务已结束）。")
-          bubble.closest<HTMLElement>(".interaction-card")?.remove()
+          dropCard(bubble.closest(".interaction-card"))
           return
         }
         btn.textContent = "提交失败，请重试"
@@ -890,7 +904,7 @@ export function envRequestBubble(name: string, description: string, secret: bool
     saveLocalEnv({ ...loadLocalEnv(), [name]: value })
     try {
       await client.decideEnv(sessionId, envId, value)
-      bubble.closest<HTMLElement>(".interaction-card")?.remove()
+      dropCard(bubble.closest(".interaction-card"))
     } catch (err) {
       input.disabled = false
       confirm.disabled = false
@@ -898,7 +912,7 @@ export function envRequestBubble(name: string, description: string, secret: bool
       // 服务端已无此等待：卡片已失效，撕掉并说明（同选择卡）
       if ((err as Error & { code?: string }).code === "expired") {
         toast("该填值请求已失效（等待超时、已在其他地方处理，或任务已结束）。")
-        bubble.closest<HTMLElement>(".interaction-card")?.remove()
+        dropCard(bubble.closest(".interaction-card"))
         return
       }
       confirm.textContent = "提交失败，请重试"
@@ -917,7 +931,7 @@ export function envRequestBubble(name: string, description: string, secret: bool
       }
     }
     settle("已拒绝")
-    bubble.closest<HTMLElement>(".interaction-card")?.remove()
+    dropCard(bubble.closest(".interaction-card"))
   }
   return bubble
 }

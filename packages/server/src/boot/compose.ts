@@ -47,6 +47,7 @@ import { ensureCorporateTrust } from "../core/trust/corporate"
 import { log, setLogLevel } from "@gebai/sdk/node"
 import { FeishuConn } from "../feishu-bot/conn"
 import { ChannelRegistry, ChannelInputBridge, defaultChannelScanDirs } from "@gebai/channels"
+import { authCardDeadline, AUTH_CARD_TTL_MS, decideExpiry, shouldPushAuthCard } from "../core/session/persona-expiry"
 import type { InputCounters, PersonaDispatchPort } from "@gebai/channels"
 import type { DriverPersistence as PersonaDriverPersistence, DriverRecord as PersonaDriverRecord } from "@gebai/persona"
 
@@ -393,9 +394,21 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   let personaCredentials: import("@gebai/persona").PersonaCredentials | null = null
   /** 已推出去的授权卡 id（授权完成后用它撤卡；未推为 null）。 */
   let personaAuthCardId: string | null = null
+  /**
+   * 当前那张授权卡的**过期时刻**（ms）。
+   *
+   * 为何必须记它：卡片 TTL 只有 10 分钟（链接会失效），但`personaAuthCardId`
+   * 不会自己变 null。只判 `!== null` 的话，卡过期从窗口消失之后就**再也不会重推**——
+   * 用户错过那 10 分钟就永远收不到提醒了（而凭据仍是过期的）。
+   * 查这个 bug 前先看到的现象就是“到期了它也没弹窗”。
+   */
+  let personaAuthCardExpiresAt = 0
   /** 启动后（子Agent 已发现）再推卡：凭据创建时相期还可能没被发现。 */
   let personaAuthCardSync: ((status: import("@gebai/persona").PersonaCredentialStatus) => Promise<void>) | null = null
+  /** 面板点「去授权」时的主动推送通路（令牌请求主通路）；未启用时为 null。 */
+  let personaPushAuthCard: (() => Promise<{ ok: boolean; delivered: boolean; url?: string; error?: string }>) | null = null
   if (config.personaEnabled) {
+   try {
     const { PersonaTokenStore, PersonaOAuth, PersonaCredentials, scopesFromEnv } = await import("@gebai/persona")
     const personaAppId = () => process.env.GEBAI_CHANNELS_FEISHU_APP_ID || process.env.GEBAI_FEISHU_APP_ID
     const personaAppSecret = () => process.env.GEBAI_CHANNELS_FEISHU_APP_SECRET || process.env.GEBAI_FEISHU_APP_SECRET
@@ -413,17 +426,30 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       const def = subAgents.defOf("xiangqi")
       const authorize = def?.tools?.card_authorize
       const dismiss = def?.tools?.card_dismiss
-      if (!authorize || !dismiss) return // 相期未注册（被禁或发现失败）：不报错，网页横幅仍会提示
+      if (!authorize || !dismiss) return // 相期未注册（被禁或发现失败）：不报错，靠日志的链接兜底
       try {
         if (status.ready) {
           if (personaAuthCardId !== null) {
             await dismiss.execute({ id: personaAuthCardId }, {} as never)
             personaAuthCardId = null
+            personaAuthCardExpiresAt = 0
           }
           return
         }
         if (!status.authorizeUrl) return // 未配应用凭据：推了也是废链接
-        if (personaAuthCardId !== null) return // 已有卡在，不重复推
+        // 已有卡在**且未过期** → 不重复推。
+        //
+        // 过期判断不能省（`shouldPushAuthCard`，单测钉住）：卡 TTL 10 分钟，
+        // 过期后窗口上就没了，而 id 不会自己变 null。只判 id 的话，
+        // “错过 10 分钟”= 永远没提醒。
+        if (!shouldPushAuthCard(personaAuthCardId, personaAuthCardExpiresAt, Date.now())) return
+        // 卡已过期：先把它从控制器里摘掉（否则新卡会与旧卡共存，
+        // 用户看到两个「去授权」，还得自己判断点哪个）
+        if (personaAuthCardId !== null) {
+          await dismiss.execute({ id: personaAuthCardId }, {} as never).catch(() => {})
+          personaAuthCardId = null
+          personaAuthCardExpiresAt = 0
+        }
         const res = await authorize.execute(
           {
             title: "需要飞书授权",
@@ -433,15 +459,21 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
               `${status.message}\n\n` +
               "授权后我才能以**你本人**的名义在飞书群里回消息（而不是机器人）。\n" +
               "点下面按钮完成授权；完成后这张卡会自动消失。",
-            // 链接 10 分钟过期：过期后卡片自动消失，不留一个点不开的按钮
-            ttl_ms: 10 * 60 * 1000,
+            // 链接 10 分钟过期：过期后卡片自动消失，不留一个点不开的按钮。
+            // 卡片过期后会**自动重推**（见上面的判定）——
+            // 没有 offline_access 时飞书令牌最长只有 2 小时，
+            // 漏看一次提醒就得干等下一次，不可接受。
+            ttl_ms: AUTH_CARD_TTL_MS,
           },
           {} as never,
         )
         const data = res.data as { id?: string } | undefined
-        if (data?.id) personaAuthCardId = data.id
+        if (data?.id) {
+          personaAuthCardId = data.id
+          personaAuthCardExpiresAt = authCardDeadline(Date.now())
+        }
       } catch (err) {
-        // 相期没在运行/装载失败不能影响启动：日志提示就够了（用户也可从网页顶部横幅看到）
+        // 相期没在运行/装载失败不能影响启动：日志里会带上链接（见定时检查）
         log.warn(`[gebai] 推送授权卡到相期失败：${String((err as Error)?.message || err)}`)
       }
     }
@@ -470,6 +502,22 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       // 授权完成/撤销 → 同步相期上的卡
       onChange: (status) => void syncAuthCard(status),
     })
+    // 面板点「去授权」时的主动推送通路（与启动/定时推送共用同一张卡的 id，不重复推）。
+    //
+    // 为何需要单独一条路：syncAuthCard 只在启动与 5 分钟定时器里被调，
+    // 用户“现在就想让它弹到桌面上”时无入口。相期是常驻窗口，
+    // 比任何网页提示都难被忽略——这正是令牌请求应该去的地方。
+    personaPushAuthCard = async () => {
+      const status = await personaCredentials!.status()
+      const before = personaAuthCardId
+      await syncAuthCard(status)
+      return {
+        ok: true,
+        // 已有卡在 → 不重复推，视为已送达；否则看这次是否写入了 id
+        delivered: personaAuthCardId !== null || before !== null,
+        ...(status.authorizeUrl ? { url: status.authorizeUrl } : {}),
+      }
+    }
     // 启动检查（不吐令牌明文，只报状态）
     const cred = await personaCredentials.status()
     if (cred.ready) {
@@ -494,18 +542,49 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
      * 才告诉人它需要授权」——对常驻人格是错的时机。
      *
      * 提前量取 10 分钟：足够用户看到卡、拉起手机扫码，又不至于早到“看着还早就不管了”。
-     */
-    const WARN_BEFORE_MS = 10 * 60_000
-    const personaExpiryTimer = setInterval(
+      */
+ const personaExpiryTimer = setInterval(
       () => {
         void (async () => {
           try {
             const st = await personaCredentials!.status() // status() 会顺带尝试刷新
-            if (st.ready && (st.remainingMs ?? Number.POSITIVE_INFINITY) <= WARN_BEFORE_MS) {
-              log.warn(`[gebai] 飞书凭据将在 ${Math.max(1, Math.round((st.remainingMs ?? 0) / 60000))} 分钟后失效`)
+            // 判定全在 persona-expiry 里（纯函数，单测钉住）：
+            // 能刷的在这里已被透明续掉，刷不了才会落到临期/过期提醒。
+            const decision = decideExpiry(st.ready, st.remainingMs)
+            const remaining = st.remainingMs ?? Number.POSITIVE_INFINITY
+            if (decision.state === "expiring") {
+              log.warn(`[gebai] 飞书凭据将在 ${Math.max(1, Math.round(remaining / 60000))} 分钟后失效`)
             }
-            // 状态变了（就绪→需授权）时推卡；syncAuthCard 自身幂等（已推就不重推）
-            await syncAuthCard(st)
+            // **临期就推卡，不等过期**：没有 offline_access 时令牌不可续，
+            // 过期后人格已经不能以用户名义发言——那时才弹，用户点完才发现
+            // 刚才那段时间的消息全没回。
+            if (decision.needCard && st.authorizeUrl) {
+              await syncAuthCard({
+                ...st,
+                ready: false,
+                needsAuth: true,
+                state: decision.state === "expiring" ? "expiring" : st.state,
+                message:
+                  decision.state === "expiring"
+                    ? `飞书授权将在 ${Math.max(1, Math.round(remaining / 60000))} 分钟后失效。` +
+                      `当前应用未开通长期授权（offline_access），飞书令牌最长只有 2 小时，到期需重新授权一次。`
+                    : st.message,
+              })
+            } else {
+              await syncAuthCard(st)
+            }
+            // 需要授权但卡没推出去 → **必须喊出来**。
+            //
+            // 为何不能静默：相期窗口是唯一的主动提醒通路。它没在跑时，
+            // 卡只会降级写进 inbox/ 文件（没人读），用户看不到任何东西——
+            // 而人格已经不能以他的名义发言了。这种“配了没效果”的状态
+            // 只能从日志发现，所以每次检查都要说，不能只说一次。
+            if (decision.needCard && st.authorizeUrl && personaAuthCardId === null) {
+              log.warn(
+                `[gebai] 飞书授权不可用/即将失效（${st.state}）且**相期未连接**——授权卡送不到你眼前。` +
+                  `启动相期窗口，或直接点这个链接：${st.authorizeUrl}`,
+              )
+            }
           } catch {
             // 提醒本身出错不能影响服务（unref 的定时器不持连接）
           }
@@ -515,6 +594,14 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     )
     // unref：只做后台提醒，不该阻止进程退出（测试/短命令跑完就该退）
     personaExpiryTimer.unref?.()
+   } catch (err) {
+    // 凭据层失败（令牌文件读不了/授权模块导入异常）同样不能阻止启动：
+    // 凭据只是「能不能以用户名义发言」，拿不到就是不能发，不该连带主界面一起死。
+    personaCredentials = null
+    log.warn(
+      `[gebai] 拟人凭据装配失败（服务继续启动；人格将以机器人名义或无法对外发言）：${String((err as Error)?.message || err)}`,
+    )
+   }
   }
   // 对外动作渠道（act/observe 工具，DESIGN「对外动作：渠道抽象」）：与子Agent/事件源同款
   // 「丢文件即注册」——内置 packages/channels/src/channels/ + 二开 custom/channels/。
@@ -623,7 +710,15 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   let personaChannelBridge: ChannelInputBridge | null = null
   /** 运行态快照（REST /api/v1/persona/state 与前端面板共用）。 */
   let personaState: (() => Promise<import("../core/session/persona-status").PersonaStateSnapshot>) | null = null
+  /** 拟人装配失败的原因（null = 装配成功 / 未启用）。装配失败不阻断启动，只如实上报。 */
+  let personaSetupError: string | null = null
   if (config.personaEnabled) {
+    // 整块故障隔离：拟人模式是**附加能力**，它装配期抛的任何错都不允许把整个服务拖下水。
+    //
+    // 为何这是硬要求：服务起不来，用户就连「主界面」都打不开——而主界面恰恰是他改回配置、
+    // 关掉这个开关的**唯一入口**。于是一个可降级的问题（人格配置写错）被放大成完全不可用，
+    // 用户只能手工改 .env 再重启。隔离后失败形态是「人格不工作 + 日志说明原因」，服务照常。
+    try {
     const {
       PersonaRuntime,
       PersonaCatalog,
@@ -870,6 +965,23 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
           }
         },
       })
+    } catch (err) {
+      // 装配失败：回滚到「拟人未启用」的形态（运行时/目录/状态全置空），服务照常启动。
+      // 回滚必须彻底：半装配的 personaRuntime 留在场上会让渠道把事件投给一个没有会话解析器的
+      // 运行时（表现为“消息进去了但永远不回复”），比干脆不启用更难排查。
+      const message = String((err as Error)?.message || err)
+      personaSetupError = message
+      personaRuntime = null
+      personaCatalog = null
+      personaSessions = null
+      personaCredentials = null
+      personaState = null
+      log.error(
+        `[gebai] 拟人模式装配失败（服务继续启动，主界面不受影响）：${message}\n` +
+          `  已回滚为「拟人未启用」：入站事件只记日志。修好后重启即可，或设 GEBAI_PERSONA=false 显式关闭。`,
+      )
+      if (err instanceof Error && err.stack) log.warn(`[gebai] 拟人装配堆栈：\n${err.stack}`)
+    }
   }
 
   // 渠道初始化（写/读/收三面一起起）+ 输入面桥接。
@@ -898,6 +1010,9 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   // 位置刻意在 `channels.init()` 之后：启动顺序上事件源比渠道「低一级」——
   // 渠道坏了不该连带事件源也不启动（两边失败各自隔离，日志各自清楚）。
   if (personaRuntime) {
+    // 事件源同样隔离：插件目录里一个写坏的源、一个 import 失败的依赖，都不该连带服务起不来。
+    // 失败形态：人格仍在（渠道消息照常处理），只是定时/webhook 类驱动源没通电。
+    try {
     const { EventSourceManager, defaultEventSourceScanDirs } = await import("@gebai/persona")
     // 宿主能力注入（长连接 + 读历史）：两处都是“配错时错得很难查”的地方，
     // 所以集中在 persona-feishu-deps.ts 里判定并在启动期如实报错。
@@ -940,6 +1055,11 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       `[gebai] 拟人事件源已启动 ${running.length} 个` +
         (running.length ? `：${running.map((s) => `${s.name}(${s.channel})`).join("、")}` : "（无——只靠渠道入站；放一个源文件到 custom/persona/ 即生效）"),
     )
+    } catch (err) {
+      // 事件源没起来不影响渠道与人格：事件源是驱动面，渠道是收发面
+      personaSources = null
+      log.warn(`[gebai] 拟人事件源装配失败（服务与人格不受影响，仅无定时/webhook 类驱动）：${String((err as Error)?.message || err)}`)
+    }
   }
   // 服务中断留痕（见 core/session/run-marker）：上一进程在任务中途退出时，会话里只有用户消息、
   // 没有任何助手回应——启动时对残留的在途标记补一条可见说明（历史与界面都能看出那次任务被打断）
@@ -1108,6 +1228,8 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     todos,
     // 拟人模式运行态（未启用时 undefined → REST 端点 404）
     ...(personaState ? { personaState } : {}),
+    ...(personaSetupError ? { personaSetupError } : {}),
+    ...(personaPushAuthCard ? { personaPushAuthCard } : {}),
     ...(personaSources
       ? {
           personaSourceControl: {

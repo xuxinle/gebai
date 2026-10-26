@@ -15,10 +15,21 @@ export function bindWheel() {
   const pick = (ids: string[]): HTMLButtonElement[] =>
     ids.map((id) => document.getElementById(id)).filter((b): b is HTMLButtonElement => !!b)
   const inner = pick(["export-btn", "import-session-btn", "todo-btn", "tasks-btn"])
+  // 拟人入口固定在**第二圈**（不塞进设置）：它是一个要**顺手看一眼**的运行态，不是配置项。
+  //
+  // 为何显式指定 ring 而不是靠分组/顺序：分组只决定落在哪几圈，具体第几圈是容量算法
+  // 算出来的——靠调顺序属于碰运气，以后加减一个按钮它就去别的圈了。
+  // `ring: 1` 是「从圆心往外数第二圈」（0 = 首圈）。
+  // 按钮默认 hidden，由 persona-pop 在探到 /state 可用后才显示（未启用的部署看不到它）
   const outer = pick(["approval-skip", "theme-btn", "shortcuts-btn", "settings-btn", "logout-btn"])
+  const personaBtn = document.getElementById("persona-btn")
   // 半径与分圈交给 wheel-core（首圈 85px，之后每圈自动步进）：项数或窗口变化都不需要改这里
   createWheel({
     trigger: wheelBtn,
-    items: [...inner.map((el) => ({ el, group: "inner" as const })), ...outer.map((el) => ({ el }))],
+    items: [
+      ...inner.map((el) => ({ el, group: "inner" as const })),
+      ...(personaBtn ? [{ el: personaBtn, group: "outer" as const, ring: 1 }] : []),
+      ...outer.map((el) => ({ el, group: "outer" as const })),
+    ],
   })
 }

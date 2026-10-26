@@ -28,7 +28,7 @@
  * 答复那一刻，答复也不会丢——这是 `card_ask` 能安全超时的前提。
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
 /**
@@ -374,24 +374,73 @@ export function createController(options: ControllerOptions = {}): XiangqiContro
   }
 
   /**
-   * 降级推送：把卡写到 `inbox/`（相期启动时会 `poll_inbox()` 吃掉）。
-   *
-   * 为何只在**未连接**时写：WS 通了就以 WS 为准（整批替换）。
-   * 两路同时送会让同一张卡在窗口上出现两次（文件是追加语义，不知道整批）。
-   *
-   * 返回 true = 写成功（至少相期下次启动能看到）。
-   */
-  function writeInbox(card: CardSpec & { id: string }): boolean {
-    if (!filePathEnabled()) return false
+ * 降级推送：把卡写到 `inbox/`（相期启动时会 `poll_inbox()` 吃掉）。
+ *
+ * 为何只在**未连接**时写：WS 通了就以 WS 为准（整批替换）。
+ * 两路同时送会让同一张卡在窗口上出现两次（文件是追加语义，不知道整批）。
+ *
+ * 返回 true = 写成功（至少相期下次启动能看到）。
+ *
+ * ## 为何每次写都要先清理（关键）
+ *
+ * 文件通路**没有任何消费确认**：相期没在跑时，卡就一直堆在目录里。
+ * 而授权卡带 10 分钟 TTL——堆着不情就是一堆**点不开的废链接**，
+ * 相期下次启动读到它们，用户点下去会报 state 失效，比没有卡更让人困惑。
+ *
+ * 实测踩过：相期长时间没开，同一件事堆了 21 张卡（44 秒内连发），
+ * 全是已过期的授权链接。所以写入前必须扫一遍：
+ * - 过期卡：删文件（它们的链接已失效，留着只误导）
+ * - 同一件事的旧卡：删文件（只保留最新那张，否则用户看到一堆重复卡，
+ *   还得自己判断哪张有效）
+ */
+function writeInbox(card: CardSpec & { id: string }): boolean {
+  if (!filePathEnabled()) return false
+  try {
+    mkdirSync(inboxDir(), { recursive: true })
+    pruneInbox(card)
+    // 文件名用 id：同名覆盖而不是堆积（重推同一张卡不该产生两个文件）
+    writeFileSync(join(inboxDir(), `${card.id}.json`), JSON.stringify(card, null, 2), "utf-8")
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 清理 inbox 里的无效卡（过期 / 与本次同标题的旧卡）。
+ *
+ * 失败不重要：清不了最多多几个旧文件，不该因此连新卡也写不进去。
+ */
+function pruneInbox(incoming: CardSpec & { id: string }): void {
+  const dir = inboxDir()
+  if (!existsSync(dir)) return
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return
+  }
+  const nowMs = now()
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue
+    const full = join(dir, name)
     try {
-      mkdirSync(inboxDir(), { recursive: true })
-      // 文件名用 id：同名覆盖而不是堆积（重推同一张卡不该产生两个文件）
-      writeFileSync(join(inboxDir(), `${card.id}.json`), JSON.stringify(card, null, 2), "utf-8")
-      return true
+      const prev = JSON.parse(readFileSync(full, "utf-8")) as CardSpec & { id?: string }
+      if (prev.id === incoming.id) continue // 自己那份（同名覆写）
+      const expired = prev.expiresAtMs !== undefined && prev.expiresAtMs <= nowMs
+      // 同一件事的旧卡：标题与来源相同就当成重推（相期窗口不区分 id，用户只看标题）
+      const sameThing = prev.title === incoming.title && prev.from === incoming.from
+      if (expired || sameThing) unlinkSync(full)
     } catch {
-      return false
+      // 脏文件（手改/半写）：删掉——它不可能被相期正确渲染
+      try {
+        unlinkSync(full)
+      } catch {
+        /* 删不掉就算了 */
+      }
     }
   }
+}
 
   function listen(): void {
     if (closed || server !== null) return

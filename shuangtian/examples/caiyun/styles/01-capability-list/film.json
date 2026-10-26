@@ -1,0 +1,68 @@
+{
+  "name": "style-01-capability-list",
+  "fps": 30,
+  "size": [1920, 1080],
+  "transition": 0.0,
+  "fade_in": 0.35,
+  "fade_out": 0.30,
+  "brand_wordmark": "",
+  "brand_latin": "",
+  "footer_note": "",
+  "audio": { "enabled": false },
+  "scenes": [
+    {
+      "kind": "custom",
+      "duration": 5.4,
+      "layout": "layout.js",
+      "accent": "#4B8CF5",
+      "background": ["#080B12", "#0E1521"],
+      "wrap": false,
+      "footer_note": "",
+      "layers": [
+        { "kind": "text", "name": "title", "x": 108, "y": 132, "w": 1100, "h": 88,
+          "text": "任意语言、任意进程", "size": 62, "color": "#E8F0FC", "bold": true,
+          "align": 1, "opacity": 1, "enter": 0 },
+        { "kind": "text", "name": "sub", "x": 108, "y": 226, "w": 1100, "h": 44,
+          "text": "都能被收编成工具", "size": 26, "color": "#5C7391",
+          "align": 1, "opacity": 1, "enter": 0 },
+
+        { "kind": "line", "name": "rule", "x": 108, "y": 300, "w": 0, "h": 0,
+          "stroke": "#1E2D42", "stroke_width": 1, "opacity": 1, "enter": 0 },
+
+        { "kind": "text", "name": "row0", "x": 190, "y": 356, "w": 660, "h": 40,
+          "text": "git（任意语言写的 CLI）", "size": 25, "color": "#9DB4D4",
+          "align": 1, "opacity": 1, "enter": 0 },
+        { "kind": "text", "name": "row1", "x": 190, "y": 452, "w": 660, "h": 40,
+          "text": "python 分析脚本", "size": 25, "color": "#9DB4D4",
+          "align": 1, "opacity": 1, "enter": 0 },
+        { "kind": "text", "name": "row2", "x": 190, "y": 548, "w": 660, "h": 40,
+          "text": "curl（HTTP 端点）", "size": 25, "color": "#9DB4D4",
+          "align": 1, "opacity": 1, "enter": 0 },
+        { "kind": "text", "name": "row3", "x": 190, "y": 644, "w": 660, "h": 40,
+          "text": "ffmpeg", "size": 25, "color": "#9DB4D4",
+          "align": 1, "opacity": 1, "enter": 0 },
+
+        { "kind": "rect", "name": "tick0", "x": 1010, "y": 360, "w": 22, "h": 22,
+          "fill": "#35C98A", "radius": 6, "opacity": 1, "enter": 0 },
+        { "kind": "rect", "name": "tick1", "x": 1010, "y": 456, "w": 22, "h": 22,
+          "fill": "#35C98A", "radius": 6, "opacity": 1, "enter": 0 },
+        { "kind": "rect", "name": "tick2", "x": 1010, "y": 552, "w": 22, "h": 22,
+          "fill": "#35C98A", "radius": 6, "opacity": 1, "enter": 0 },
+        { "kind": "rect", "name": "tick3", "x": 1010, "y": 648, "w": 22, "h": 22,
+          "fill": "#35C98A", "radius": 6, "opacity": 1, "enter": 0 },
+
+        { "kind": "text", "name": "verdict", "x": 1120, "y": 470, "w": 620, "h": 90,
+          "text": "4 / 4  已收编", "size": 44, "color": "#35C98A", "bold": true,
+          "align": 1, "opacity": 1, "enter": 0 },
+        { "kind": "text", "name": "verdict2", "x": 1120, "y": 570, "w": 620, "h": 44,
+          "text": "同一个调用面", "size": 24, "color": "#5C7391",
+          "align": 1, "opacity": 1, "enter": 0 },
+
+        { "kind": "ellipse", "name": "hand", "x": 300, "y": 470, "w": 26, "h": 26,
+          "fill": "#FFFFFF", "opacity": 1, "enter": 0 },
+        { "kind": "ellipse", "name": "handHalo", "x": 288, "y": 458, "w": 50, "h": 50,
+          "fill": "#4B8CF5", "opacity": 1, "enter": 0 }
+      ]
+    }
+  ]
+}

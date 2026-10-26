@@ -58,9 +58,14 @@ describe("caiyun / louyue", () => {
           expect(key).not.toBe(dep)
         }
       }
-      // 现存的自有工具只有裁云的 verify（成片质检）——写死一条，改动时逼人回看这里
+      // 自有工具清单写死——改动时逼人回看这里，确认新增的那个**只能由本代理提供**。
+      //
+      // 现有两个，都满足"别家拿不到"：
+      //   · `verify`：读本应用渲染器在渲染循环里量好的逐镜数据（旁挂子代理拿不到）
+      //   · `style_guide`：七种叙事模板，讲的是「用裁云怎么落地」——具体图层字段
+      //     与 `layout` 写法，只有裁云自己知道（放成框架文档会各自漂移）
       if (name === "caiyun") {
-        expect(own).toEqual(["verify"])
+        expect(own).toEqual(["verify", "style_guide"])
       } else {
         expect(own).toEqual([])
       }

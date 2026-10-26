@@ -1,11 +1,9 @@
 import { uuid } from "./uuid"
 import { blockNativeContextMenu } from "./native-menu"
-import { startPersonaAuthBanner, onPersonaCredentialsEvent } from "./persona-banner"
 import type { ContentBlock, SessionInfo, SubAgentInfo, TodoItem } from "@gebai/sdk"
 import "./css/base.css"
 import "./css/chat.css"
 import "./css/composer.css"
-import "./css/persona-banner.css"
 import "./css/persona-panel.css"
 import "./css/overlays.css"
 import "./css/wheel.css"
@@ -17,6 +15,7 @@ import { bindSettings } from "./settings"
 import { bindWheel } from "./wheel"
 import { bindShortcutSheet } from "./shortcut-sheet"
 import { bindTodoPop } from "./todo-pop"
+import { bindPersonaPop } from "./persona-pop"
 import { bindTasks } from "./tasks"
 import { bindSubSessions } from "./subsessions"
 import { bindFilesSplit } from "./files-split"
@@ -33,7 +32,7 @@ import { initTokenRate, noteTpsFrame } from "./token-rate"
 import { initFileDisplay } from "./file-display"
 import { installMainKeys } from "./keymap-main"
 import { initFxPanels } from "./fx-panels"
-import { attachRunningIfNeeded, bindSessionActions, enterDraftView, exportSessionJson, hideEmptyState, loadMessages, markSessionRunning, maybeAutoTitle, refreshSessions, setRuntimeInfo, updateSessionCtx } from "./sessions"
+import { attachRunningIfNeeded, bindSessionActions, enterDraftView, enterSessionView, exportSessionJson, hideEmptyState, loadMessages, markSessionRunning, maybeAutoTitle, refreshSessions, setRuntimeInfo, updateSessionCtx } from "./sessions"
 import { appendMsg, bindMessagesSessions, releaseMsgAttachments, renderMsgAttachments, sealSegment } from "./messages"
 import { sendPending } from "./attachments"
 import { loadToolCardMeta } from "./tool-cards"
@@ -101,6 +100,9 @@ composer.addEventListener("submit", async (e) => {
     }
     setCurrentSession(s)
     sessionId = s.id
+    // 消息视图先就位：本次这条命令的上屏目标是「当前会话的活动容器」，草稿页上还没有任何容器——
+    // 不先建出来，下面 appendMsg 会挂到空目标而静默丢弃（消息已落盘但页面看不见，刷新才出现）
+    enterSessionView(sessionId)
     void refreshSessions() // 列表即时出现新会话（不阻塞发送）
   }
   // 自动审批开关同步会话 env：草稿首条消息创建的会话不经过 loadMessages（applyApprovalSkip 的既有同步点），
@@ -240,6 +242,7 @@ async function init() {
   bindWheel()
 bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快捷键一览
   bindTodoPop() // 轮盘「待办」按钮 → 可拖动待办弹窗（用户级待办 + 闲时任务）
+  bindPersonaPop() // 轮盘「拟人」按钮 → 拟人运行态浮层（未启用时按钮自行隐起）
   bindTasks() // 轮盘「任务」按钮 → 任务管理抽屉（定时 / 普通 / 闲时任务与统一队列）
 bindSubSessions() // 标题栏「子会话」按钮 → 子会话观察面板（消息流里只留一行入口）
   bindFilesSplit() // 文件工作台入口：主按钮 = 分屏并列，副按钮 = 全屏打开文件工作台（见 files-split.ts）
@@ -272,9 +275,6 @@ bindSubSessions() // 标题栏「子会话」按钮 → 子会话观察面板（
       onChoiceRequest({ sessionId: ev.sessionId, prompt: String(ev.payload.prompt ?? ""), options: (Array.isArray(ev.payload.options) ? ev.payload.options : []) as Array<string | Record<string, unknown>>, choiceId: String(ev.payload.choiceId ?? ""), multi: ev.payload.multi === true, plan: ev.payload.plan as { title?: unknown; content?: unknown; path?: unknown } | undefined })
     } else if (ev.type === "event.env.request") {
       onEnvRequest({ sessionId: ev.sessionId, envId: String(ev.payload.envId ?? ""), name: String(ev.payload.name ?? ""), description: String(ev.payload.description ?? ""), secret: ev.payload.secret === true })
-    } else if (ev.type === "event.persona.credentials") {
-      // 拟人凭据变化（授权完成/失败/撤销）：立即刷新顶部横幅，不等轮询
-      onPersonaCredentialsEvent()
     } else if (ev.type === "event.draw.render") {
       onDrawRender({ sessionId: ev.sessionId, renderId: String(ev.payload.renderId ?? ""), code: String(ev.payload.code ?? ""), format: String(ev.payload.format ?? "") })
     } else if (ev.type === "event.capture.request") {
@@ -456,6 +456,4 @@ init()
   .catch((err) => setConn(`连接失败: ${(err as Error).message}`, false))
   .finally(() => {
     hideSplash()
-    // 拟人模式授权横幅：未启用时 `/status` 返回 404，本函数什么都不做
-    startPersonaAuthBanner()
   })

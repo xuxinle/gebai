@@ -87,10 +87,13 @@
     }
   },
   "targets": {
-    "st": { "kind": "executable", "sources": ["tools/stpm/*.cpp", "src/ui/window_control.cpp"],
-            "exclude_sources": ["src/ui/**", "src/app/**", "src/control/**", "src/edit/**", "src/lsp/**"],
-            "//sources": "`tools/stpm` 是入口；`src/ui/window_control.cpp` 是 shell 后端的边缘命中契约（`platform_win32.cpp` 用它）。",
-            "//exclude_sources": "工具链只需要 core/math/codec/raster/text/md/xml/pkg/ext——应用层（ui 组件与 DSL、app、control、edit、lsp）不参与。**这一条同时是自举的权威依据**（bootstrap 按它裁掉应用层）。注意 `src/ui/window_control.cpp` 在排除之后由上面的 `sources` 加回（排除先于目标源合并），所以它必须写在这里。",
+    "st": { "kind": "executable",
+            "sources": ["tools/stpm/*.cpp", "src/ui/window_control.cpp"],
+            "include_sources": ["src/pkg/*.cpp",
+                                "src/core/*.cpp",
+                                "src/ext/database.cpp", "src/ext/json.cpp", "src/ext/script.cpp"],
+            "//include_sources": "**白名单**：本目标只编这些库级源，`src/**` 其余一概不进。\n\n为何用白名单：`exclude_sources` 是黑名单，漏一条就多编几个无关单元，而构建照常成功、**静默变胖**——只能靠人把每条间接依赖都推一遍。实测代价：原先逐项排了 13 条，仍因 `src/ui/window_control.cpp` 间接依赖 `math/geometry.hpp` 把 math 拉了回来。白名单相反：漏写会链接报错（可发现）。\n\n口径来源：编译器产出的 `tools_stpm_main.cpp.o.d` 实测只有 **23 个依赖头，全部来自 core/pkg/ext**。\n\n不在白名单里的（raster/text/md/xml/net/shell/math/codec/ext-video 与应用层）都不参与——改这些文件时**不再触发 st 自举**。\n\n⚠ `src/ext/video.cpp` 不能加：它需要 `raster::Canvas`（视频解码回帧）。",
+            "//sources": "`tools/stpm` 是入口；`src/ui/window_control.cpp` 是壳层边缘命中契约（`platform_win32.cpp` 用它）。",
             "system_libs": ["dl"] },
     "crash_probe": { "kind": "executable", "sources": ["tools/crash_probe.cpp"],
                      "exclude_sources": ["src/pkg/*"] },

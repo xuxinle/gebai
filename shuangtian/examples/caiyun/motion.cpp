@@ -798,14 +798,28 @@ void paint_layers(Painter& p, const Scene& scene, float local_time, const AssetL
       }
       if (is_group_head) {
         // 收集组内成员（含 head 自己），交给组渲染器一次画完。
+        //
+        // ## 必须同时交出成员**已经过 `layout` 增量**的状态（实测缺陷）
+        //
+        // 组渲染器原来在内部对每个成员重新调 `evaluate_layer`。那条路**只算
+        // 基础值与关键帧，不包含脚本编排层的 `dx/dy/dw/dh`**（那些在
+        // `states[]` 里由 `apply_delta` 加好）。后果是：`layout` 给三维成员的
+        // 位移**静默失效**——实测同一脚本 `dx` 从 0 改为 300，包在屏幕上
+        // 一动不动（中心都是 783,627），而二维图层的 `dx` 完全正常。
+        //
+        // 这里把已算好的 `states` 一并传过去，让三维成员与其他图层走同一份状态。
         std::vector<const Layer*> members;
-        for (const Layer& candidate : scene.layers) {
-          if (candidate.model_group == layer.model_group) members.push_back(&candidate);
+        std::vector<LayerState> member_states;
+        for (std::size_t candidate = 0; candidate < scene.layers.size(); ++candidate) {
+          if (scene.layers[candidate].model_group == layer.model_group) {
+            members.push_back(&scene.layers[candidate]);
+            member_states.push_back(states[candidate]);
+          }
         }
         const LayerState head_state = state;   // head 的动画状态（决定画面框）
         paint_model3d_group(p.canvas(), layer, members, local_time,
                             static_cast<float>(scene.duration), basis, head_state,
-                            canvas_w, canvas_h, design_w, design_h);
+                            canvas_w, canvas_h, design_w, design_h, &member_states);
         continue;   // 组内成员已一并画完
       }
     }

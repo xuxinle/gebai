@@ -396,6 +396,41 @@ describe("文件通路：inbox 降级推卡", () => {
     ctl.close()
     rmSync(home, { recursive: true, force: true })
   })
+
+  /**
+   * 文件通路没有消费确认：相期不开，卡就一直堆着。
+   *
+   * 实测见过：同一件“需要授权”在 44 秒内堆了 21 张，全是已过期的链接。
+   * 相期下次启动读到一堆废链接，用户点下去报 state 失效——比没卡更让人困惑。
+   */
+  it("同一件事重推时清掉旧卡（只保留最新一张）", () => {
+    const home = mkdtempSync(join(tmpdir(), "xq-inbox3-"))
+    const ctl = freshWithHome(home)
+    for (let i = 0; i < 5; i++) ctl.push({ kind: "choice", title: "需要飞书授权", from: "歌白", options: [{ label: "去", value: "v" }] })
+    const inbox = join(home, "inbox")
+    expect(readdirSync(inbox).length).toBe(1) // 只留最新那张
+    ctl.close()
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  it("写入时清掉已过期的旧卡（不把废链接留给相期）", () => {
+    const home = mkdtempSync(join(tmpdir(), "xq-inbox4-"))
+    const ctl = freshWithHome(home)
+    const inbox = join(home, "inbox")
+    mkdirSync(inbox, { recursive: true })
+    // 一张已过期的旧卡（不同标题，不会被“同一件事”规则清掉）
+    writeFileSync(
+      join(inbox, "old.json"),
+      JSON.stringify({ kind: "notice", title: "早就过期了", id: "old", expiresAtMs: Date.now() - 60_000 }),
+      "utf-8",
+    )
+    ctl.push({ kind: "notice", title: "新的" })
+    const left = readdirSync(inbox).filter((n) => n.endsWith(".json"))
+    expect(left.some((n) => n === "old.json")).toBe(false) // 过期卡被清掉
+    expect(left.length).toBe(1) // 只剩新的那张
+    ctl.close()
+    rmSync(home, { recursive: true, force: true })
+  })
 })
 
 describe("文件通路：outbox 兼底取答复", () => {

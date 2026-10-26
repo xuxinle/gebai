@@ -83,6 +83,158 @@
   font-weight: 500;
 }
 
+/*
+ * 授权操作区（出站凭据里凭据不可用时出现）。
+ *
+ * 为何做成面板内的一行而不是主界面横幅：`#app` 是固定 2×2 grid，
+ * 插入横幅会多出一个 grid item 把 aside/main 挤到错格。
+ * 授权又是低频运维动作，放设置面板反而更合理。
+ */
+.persona-auth-actions-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0 2px;
+}
+
+/* 说明文字占满一整行（按钮在上、解释在下，避免按钮被长文本挤到视野外） */
+.persona-auth-actions-inline > .settings-row-desc {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+/* ---------- 拟人浮层（轮盘「拟人」按钮） ---------- */
+
+/*
+ * 为何是 fixed 浮层而不是嵌进主界面：
+ * #app 是严格 2×2 grid（header 占 `1 / -1`、aside/main 精确占格），任何常驻元素
+ * 进去都会多出一个 grid item、把 aside/main 挤到错格。fixed 脱离文档流，
+ * 与主布局完全无关——这是这个位置唯一安全的形态。
+ */
+.persona-pop {
+  position: fixed;
+  /* 初始位置由脚本算（钳制到视口内）；visibility 避免首帧闪到左上角 */
+  visibility: hidden;
+  z-index: 60;
+  width: min(460px, calc(100vw - 24px));
+  max-height: min(70vh, 640px);
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  /*
+   * 实底色垫在主题变量**下面**，而不是直接用它：
+   * acrylic 等主题的 --bg-elev 是半透明的（rgba(18,18,23,0.82)），
+   * 浮层悬在输入区上方时，下层的「发送」圆钮会从背后透出来，读起来像重影。
+   * 待办浮层用同样变量但面积大、内容满，不明显；这个小面板必顶自己垫底。
+   *
+   * 写法：先用 background-color 铺一层**不透明**的深底（与 --bg 同色系但无 alpha），
+   * 再把主题色作为第二层叠上去——这样在 acrylic 下仍是主题色，但不透明度足够。
+   */
+  background-color: #0c0c0f;
+  background-image: linear-gradient(var(--bg-elev), var(--bg-elev));
+  box-shadow: var(--shadow-pop);
+  overflow: hidden;
+}
+.persona-pop.show { visibility: visible; }
+.persona-pop.dragging { user-select: none; cursor: grabbing; }
+
+.persona-pop-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev-2);
+  cursor: grab;
+  flex: 0 0 auto;
+}
+.persona-pop-title { font-weight: 600; font-size: 13px; }
+.persona-pop-badge {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid transparent;
+  margin-right: auto;
+  white-space: nowrap;
+}
+.persona-pop-badge-ok { color: #2f9e44; background: rgba(47, 158, 68, 0.12); border-color: rgba(47, 158, 68, 0.3); }
+.persona-pop-badge-warn { color: #b8860b; background: rgba(184, 134, 11, 0.12); border-color: rgba(184, 134, 11, 0.3); }
+.persona-pop-badge-bad { color: #c0392b; background: rgba(192, 57, 43, 0.12); border-color: rgba(192, 57, 43, 0.3); }
+
+.persona-pop-icon {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.persona-pop-icon:hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
+
+.persona-pop-hint {
+  padding: 6px 12px 8px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-faint);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.persona-pop-body {
+  padding: 8px 12px 12px;
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+
+/* 浮层内描述文字**允许换行**：settings-row-desc 是单行省略（设置面板适合），
+   但浮层要给完整原因（凭什么「不可用」）——截断会把最关键那句话说掉 */
+.persona-pop .settings-row-desc {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  line-height: 1.6;
+}
+.persona-pop .settings-row { align-items: flex-start; }
+.persona-pop-error {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(192, 57, 43, 0.1);
+  border: 1px solid rgba(192, 57, 43, 0.28);
+  color: #c0392b;
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+/* 轮盘按钮待处理提示：有人需要动手时标一下（否则用户不会想到去点它）
+ *
+ * 为何不用 `#persona-btn { position: relative }`：那个 ID 选择器（1,0,0）会压过
+ * `.wheel button.wheel-item { position: fixed }`（0,2,1），按钮会被踢出固定定位——
+ * 扇形排布靠 JS 写 left/top + fixed 生效，一旦变回 relative，
+ * 它就变成文档流里的一个 13×13 小点，完全看不到（实际踩过）。
+ * 改用 ::after 靠 button 自己的 `display: grid` 宫格定位，不碰 position。 */
+#persona-btn.persona-btn-attention { color: #f5a623; }
+#persona-btn.persona-btn-attention::after {
+  content: "";
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #f5a623;
+  /* 与轮盘按钮的 ::before 分层： ::before 是 z-index:-1 的背景层，
+     这个提醒点必须在最上层（不动 position，只给层级） */
+  z-index: 1;
+}
+
 @media (prefers-color-scheme: dark) {
   .persona-badge-ok {
     color: #6dd58c;

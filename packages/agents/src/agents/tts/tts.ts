@@ -357,7 +357,7 @@ async function runNeural(
       let stderr = ""
       let spawnError = ""
       try {
-        const run = await ctx.runCommand(`"${python}" -X utf8 "${file.path}"`, {
+        const run = await ctx.runCommand(pythonCommand(python, file.path), {
           timeoutMs: 240_000,
           signal: ctx.signal,
         })
@@ -475,6 +475,47 @@ export const modelsTool: Tool = {
   },
 }
 
+/**
+ * 模型下载源。
+ *
+ * 缺省 `hf-mirror.com`（公网可用的 HuggingFace 镜像）；合规/内网环境用
+ * `HF_ENDPOINT` 指向自建镜像（如 `https://<内网域名>/hf`）——否则下载必然超时，
+ * 而错误信息只会是「连接超时」，看不出是地址问题而不是模型问题。
+ *
+ * 末尾斜杠先去掉：两种写法（带/不带）都应能拼出正确 URL。
+ */
+export function hfEndpoint(): string {
+  const raw = process.env.HF_ENDPOINT?.trim()
+  const base = raw && raw.length > 0 ? raw : "https://hf-mirror.com"
+  return base.replace(/\/+$/, "")
+}
+
+/**
+ * 拼一条「以解释器路径开头」的命令行。
+ *
+ * ## 为何 Windows 下必须加 `&` 调用运算符
+ *
+ * `ctx.runCommand` 在 Windows 上是 **`shell: true`**（走 PowerShell 解析），
+ * 而 PowerShell 里**以引号开头的行是字符串表达式、不是命令**：
+ *
+ * ```
+ * "C:\path with space\python.exe" -X utf8 a.py
+ * # → Unexpected token '-X' in expression or statement.
+ * ```
+ *
+ * 于是整条命令根本没启动，stdout 为空、stderr 只有一段 ParserError。
+ * 用户侧看到的是「找不到可用的 Python 解释器」——而解释器明明就在。
+ *
+ * 加 `&`（调用运算符）后 PowerShell 才把它当命令执行：
+ * `& "C:\path\python.exe" -X utf8 a.py`。
+ *
+ * POSIX shell 里 `&` 是后台运算符，不能前缀，所以只在 Windows 加。
+ */
+export function pythonCommand(python: string, args: string): string {
+  const base = `"${python}" ${args}`
+  return process.platform === "win32" ? `& ${base}` : base
+}
+
 /** 可下载的官方中文模型（sherpa-onnx 发布，镜像可用、不需要 torch）。 */
 const DOWNLOADABLE_MODELS: Record<string, { repo: string; onnx: string; note: string }> = {
   "vits-melo-zh": {
@@ -517,7 +558,7 @@ export const installTool: Tool = {
     const python = pythonCandidates(resolveGebaiHome())[0] ?? "python"
     if (args.skip_dependency !== true) {
       try {
-        const r = await ctx.runCommand(`"${python}" -m pip install -q sherpa-onnx`, {
+        const r = await ctx.runCommand(pythonCommand(python, "-m pip install -q sherpa-onnx"), {
           timeoutMs: 600_000,
           signal: ctx.signal,
         })
@@ -540,10 +581,25 @@ export const installTool: Tool = {
       // 必需件（缺了模型就不完整）与可选件（部分仓库不带，缺了不影响合成）分开：
       // 必需件下载失败要说清楚，可选件 404 属正常，不能拿它当失败。
       const required = [spec.onnx, "tokens.txt", "lexicon.txt"]
-      const optional = ["date.fst", "number.fst", "phone.fst", "new_heteronym.fst"]
+      // 可选件：部分仓库不带（404 正常）；Kokoro 系还需 data_dir/dict_dir，走手工安装
+      const optional = [
+        "date.fst",
+        "number.fst",
+        "phone.fst",
+        "new_heteronym.fst",
+        "date-zh.fst",
+        "number-zh.fst",
+        "phone-zh.fst",
+      ]
       const files = [...required.map((f) => ({ f, must: true })), ...optional.map((f) => ({ f, must: false }))]
+      const mirror = hfEndpoint()
+      out.push(`下载源：${mirror}`)
       for (const { f: name, must } of files) {
-        const url = `https://hf-mirror.com/${spec.repo}/resolve/main/${name}`
+        // 不能只靠文件名就断定仓库里叫这个：`tts_models` 扫描只认**已落盘**的名字，
+        // 而模型的真实文件名由上游仓库决定（MeloTTS 的 `model.onnx`、theresa 的
+        // `theresa.onnx`、fanchen 的 `vits-zh-hf-fanchen-C.onnx` 各不相同）。
+        // 上游改名/写错时，旧写法只会报一个 HTTP 404，看不出是“源不通”还是“名字不对”。
+        const url = `${mirror}/${spec.repo}/resolve/main/${name}`
         try {
           const resp = await fetch(url, { signal: AbortSignal.timeout(600_000) })
           if (!resp.ok) {
@@ -588,6 +644,12 @@ export const envVars = [
   {
     name: "TTS_MODEL",
     description: "默认神经模型 id（engine=neural 且未传 model 时使用；缺省自动选最优，见 tts_models）",
+  },
+  {
+    name: "HF_ENDPOINT",
+    description:
+      "模型下载源（tts_install 用）：缺省 https://hf-mirror.com；"
+      + "合规/内网环境指向自建镜像（如 https://<内网域名>/hf），否则下载必然超时",
   },
 ]
 

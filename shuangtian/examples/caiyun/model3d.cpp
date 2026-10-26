@@ -851,7 +851,8 @@ void paint_model3d_group(st::raster::Surface& canvas, const Layer& head,
                          const std::vector<const Layer*>& members, float local_time,
                          float scene_duration, std::string_view asset_basis,
                          const LayerState& head_state, float canvas_w, float canvas_h,
-                         float design_w, float design_h) {
+                         float design_w, float design_h,
+                         const std::vector<LayerState>* member_states) {
   if (head_state.alpha <= 0.004f || head_state.w < 2.0f || head_state.h < 2.0f) return;
   const st::math::Rect box{head_state.x, head_state.y + head_state.offset_y, head_state.w,
                            head_state.h};
@@ -905,9 +906,11 @@ void paint_model3d_group(st::raster::Surface& canvas, const Layer& head,
   const float center_design_y = head_state.y + head_state.h * 0.5f;
 
   /// 一个待绘制的成员（位置先算好，再分两道画）。
-  struct Placement {
-    const Layer* layer{nullptr};
-    std::shared_ptr<const st::raster::Mesh> mesh{};
+struct Placement {
+  const Layer* layer{nullptr};
+  /// 该成员这一帧的**最终**状态（含 `layout` 增量）；影子要读同一份。
+  std::shared_ptr<const LayerState> state{};
+  std::shared_ptr<const st::raster::Mesh> mesh{};
     float offset_x{0.0f};
     float offset_z{0.0f};
     float jump{0.0f};
@@ -916,10 +919,15 @@ void paint_model3d_group(st::raster::Surface& canvas, const Layer& head,
   std::vector<Placement> placements;
   placements.reserve(members.size());
 
-  for (const Layer* member : members) {
+  for (std::size_t member_index = 0; member_index < members.size(); ++member_index) {
+    const Layer* member = members[member_index];
     if (member == nullptr) continue;
+    // 优先用调用方交来的（含 `layout` 增量的）状态；没交才自己求值。
+    // 自己求值会丢掉编排层的位移——那是三维成员“能动”的唯一来源。
     const LayerState state =
-        evaluate_layer(*member, local_time, canvas_w, canvas_h, design_w, design_h);
+        (member_states != nullptr && member_index < member_states->size())
+            ? (*member_states)[member_index]
+            : evaluate_layer(*member, local_time, canvas_w, canvas_h, design_w, design_h);
     if (state.alpha <= 0.004f) continue;
     const std::shared_ptr<const st::raster::Mesh> mesh = mesh_for_layer(*member, asset_basis);
     if (mesh == nullptr || mesh->is_empty()) continue;
@@ -931,6 +939,7 @@ void paint_model3d_group(st::raster::Surface& canvas, const Layer& head,
     // 环境变量翻转 Z（用于实验定位符号错误；正式路径不用）
     const float z_sign = std::getenv("CAIYUN_FLIP_Z") != nullptr ? -1.0f : 1.0f;
     placements.push_back(Placement{member,
+                                   std::make_shared<const LayerState>(state),
                                    mesh,
                                    dx_design * world_per_design,
                                    dy_design * world_per_design * z_sign,
@@ -1015,19 +1024,41 @@ void paint_model3d_group(st::raster::Surface& canvas, const Layer& head,
   // 本来就是椭圆，看不出差别）。
   for (const Placement& p : placements) {
     if (p.layer->model_shadow <= 0.001f) continue;
+    // 影子必须读**与物体同一份**状态（含 `layout` 增量），否则物体动了、
+    // 影留在原地——那是“两个不相干的物体”的观感。
     const LayerState state =
-        evaluate_layer(*p.layer, local_time, canvas_w, canvas_h, design_w, design_h);
+        (p.state != nullptr) ? *p.state
+                             : evaluate_layer(*p.layer, local_time, canvas_w, canvas_h,
+                                              design_w, design_h);
     if (state.alpha <= 0.004f) continue;
     // 图标在**画面**上的矩形（与它的 state 一致）；影子贴在它底部
+    //
+    // 注：这里用图层矩形的中心，而三维体经过透视投影后的屏幕中心会因世界 Z 偏移
+    // 而略有不同。差异实测约几十像素，表现为“影子拖在物体一侧”。
+    // 本片所有成员的 `y` 取相同值（即无纵深偏移），所以两者一致。
+    // 若将来给成员加纵深，先给阴影补上同样的透视投影，否则一定会错位。
     const float box_cx = state.x + state.w * 0.5f;
-    const float box_bottom = state.y + state.h;
+    // ## 阴影必须画在物体的**实际落地处**，不是图层矩形底边（实测）
+    //
+    // 三维体只占图层矩形的中间约 62%（`model_scale` 与相机距离共同决定），
+    // 矩形的底边远低于物体的脚。直接拿 `state.y + state.h` 画阴影，
+    // 影就会落在物体下方留白的区域里——实测看起来是两个不相干的物体
+    //（一个球，和它下方一个黑色椭圆）。
+    //
+    // 这里按“物体占矩形中部”的经验比例把影子抬到它真实的落脚处。
+    // 比例不是拍脑袋：三维体中心与矩形中心重合，竖直方向约占 0.62，
+    // 所以底边在 `中心 + 0.31*h`。
+    const float box_bottom = state.y + state.h * 0.5f + state.h * 0.31f;
     // 离地高度 → 影子变淡变大（两个正交变化，缺一个都假）
     const float lift = std::max(0.0f, -bounce_offset(*p.layer, local_time));
     const float height_ratio = std::clamp(lift / 90.0f, 0.0f, 1.0f);
     const float strength = p.layer->model_shadow * (1.0f - 0.6f * height_ratio);
     const float grow = 1.0f + 0.45f * height_ratio;
-    // 椭圆：宽 = 图标宽 × 0.85 × grow，高 ≈ 宽的 0.34（俯视下的椭圆压扁）
-    const float rx = state.w * 0.62f * grow;
+    // 椭圆：宽 = 图标宽 × 0.42 × grow —— 系数实测决定了“影子”还是“两个物体”
+    //
+    // 早先取 0.62，阴影直径达到图标的 1.24 倍，在深底上看起来像一块
+    // 旁边独立的黑椭圆；0.42 才读成“紧贴脚下一层”。
+    const float rx = state.w * 0.42f * grow;
     const float ry = rx * 0.40f;
     const st::math::Color shadow_rgb = p.layer->model_shadow_color;
     // 多层递减：圆心浓、向外淡（近似高斯，层数 5 足够看不出台阶）
