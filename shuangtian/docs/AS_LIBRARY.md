@@ -17,7 +17,7 @@
 
 ## 2. 能直接用哪些（实测）
 
-`st_core` 库目标（`st.pkg` 里的 `"kind": "library"`）当前包含 **9 个模块、65 个对象、35 MB**：
+`st_core` 库目标（`st.pkg` 里的 `"kind": "library"`）当前包含 **9 个模块、66 个对象、35 MB**：
 
 | 模块 | 头文件 | 头行数 | 实现行数 | 内容 |
 |---|---|---|---|---|
@@ -26,18 +26,18 @@
 | **lsp** | 6 | 809 | 1,762 | Language Server Protocol 客户端与类型（protocol / client / completion / navigation / edit / actions）|
 | **net** | 3 | 390 | 1,480 | TCP（含跨平台 socket 封装）|
 | **codec** | 3 | 166 | 1,791 | PNG 编解码、DEFLATE、归档 |
-| **math** | 3 | 559 | 91 | 几何（点/矩形/变换）、颜色 |
+| **math** | 4 | 672 | 677 | 几何（点/矩形/变换）、颜色、**矢量路径**（`Path`：命令流 + 贝塞尔扁平化 + 包围盒）|
 | **test** | 1 | 365 | 536 | 单元测试框架（`ST_TEST` / `ST_CHECK` / 分片 / JUnit 输出）|
 | **xml** | 1 | 114 | 469 | XML 解析 |
 | **edit** | 1 | 202 | 112 | 文本编辑的纯数据模型（无界面）|
-| **合计** | **58** | **6,408** | **20,349** | 公开 API 约 **425** 处 |
+| **合计** | **59** | **6,521** | **20,935** | 公开 API 约 **432** 处 |
 
 ### 不能直接用的（依赖界面）
 
 | 模块 | 为什么 |
 |---|---|
 | `ui` / `raster` / `shell` / `app` | 就是界面本身 |
-| `text` | 字的**度量与栅格化**要 `raster::Path`（字形轮廓即路径）|
+| `text` | 字的**度量与栅格化**要 `raster::Canvas` / `raster::Surface`（字形位图 + 上屏）|
 | `md` | 渲染要 `text` |
 | `ext` | `script`（QuickJS 脚本层）依赖 `ui`；注意 `ext/json` 已归位到 `core` |
 | `control` | 控制通道要操作 `ui::actions` / `ui::dsl` 的具体元素 |
@@ -76,16 +76,27 @@
 用你自己的 CMake/Make 直接链 `build/dev/bin/st_core.a`，头文件目录是 `include/`：
 
 ```cmake
-target_include_directories(mytool PRIVATE ${SHUANGTIAN}/include)
-target_link_libraries(mytool PRIVATE ${SHUANGTIAN}/build/dev/bin/st_core.a ws2_32 user32 gdi32 shell32)
+# 实测过的完整链接行（MinGW-w64 GCC 16.2 / Windows 11）
+target_include_directories(mytool PRIVATE ${SHUANGTIAN}/include ${SHUANGTIAN}/third_party)
+target_link_libraries(mytool PRIVATE ${SHUANGTIAN}/build/dev/bin/st_core.a
+                      ws2_32 user32 gdi32 shell32 dbghelp)
 ```
 
-（Windows 上那串系统库是 `st` 自己用的；你只用到 core 的话通常只需 `ws2_32`。）
+**这几个库不是“可能用到”，是必需**（2026-10-27 实测：缺一个就链接失败）：
+
+| 库 | 谁要它 |
+|---|---|
+| `ws2_32` | `net` 模块的 socket |
+| `dbghelp` | `core/platform_crash.cpp` 的崩溃栈回溯（`SymInitialize` / `StackWalk64`）|
+| `user32` / `gdi32` / `shell32` | `core` 的进程/控制台与嵌入资源运行时 |
+
+另外需要 `third_party` 在包含路径里（`json.hpp` 要引 `nlohmann/json.hpp`）。
 
 ### 3.3 一个非 GUI 的最小例子
 
 ```cpp
 // 用 core 的错误模型 + 文件系统 + JSON（不需要任何界面）
+#include "st/core/entry.hpp"    // ST_MAIN：跨平台入口（Windows 的 argv 是 ANSI，中文参数会乱）
 #include "st/core/error.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/json.hpp"
@@ -94,26 +105,47 @@ auto load_config(const std::string& path) -> st::Result<int> {
   auto text = st::fs::read_text(path);
   if (!text) return st::forward_error(text.error());   // 错误链原样上抛
 
-  auto json = st::Json::parse(*text);
-  if (!json) return st::forward_error(json.error());
+  auto doc = st::json_parse(*text);                    // 解析失败带“第 N 字节”诊断
+  if (!doc) return st::forward_error(doc.error());
 
-  return static_cast<int>((*json)["port"].as_int(8080));
+  // 读取用 json_get_*，**不要**写 (*doc)["port"]：
+  // nlohmann 的 const operator[] 在键不存在时是未定义行为。
+  return static_cast<int>(st::json_get_i64(*doc, "port", 8080));
 }
+
+auto run(int /*argc*/, char** /*argv*/) -> int {
+  if (auto port = load_config("config.json"); port) {
+    std::printf("port = %d\n", *port);
+    return 0;
+  } else {
+    std::fprintf(stderr, "%s\n", port.error().message.c_str());
+    return 1;
+  }
+}
+
+ST_MAIN(run)   // 展开成跨平台 main，内部做控制台编码/诊断/崩溃处理器初始化
 ```
 
-这里的三个东西都值得单独说明：
+上面这段是**实测编译并运行过的**（缺键退默认值、坏 JSON 报错、文件缺失报错，三种都验过）。
+
+这三个东西值得单独说明：
 
 - **`st::Result<T>`**：`std::expected<T, Error>` 的薄门面，业务错误显式传播、不用异常。
 - **`st::fs`**：跨平台文件系统，路径一律 UTF-8。**Windows 上这点很关键**——
   `std::filesystem::path(std::string)` 会按 ANSI 代码页解释，中文路径直接找不到文件。
-- **`st::Json`**：单头依赖的 JSON（只有 254 行实现），没有第三方依赖。
+- **`st::Json`**：**基于 nlohmann/json v3.12.0**（内联在 `third_party/`），
+  外面包一层薄封装把它的**抛异常接口收敛成 `Result`**（`json_parse` → `Result`，
+  `json_get_*` 类型不符退默认值不抛）。选用 nlohmann 而非自研的原因：
+  旧自研实现把数字统一存 `double`，雪花 ID `1234567890123456789` 会变
+  `1.2345678901234568e+18`（详见 `CONVENTIONS.md` §3.7）。
 
 ## 4. 为什么这些能独立：分层规则
 
 模块分层的**唯一硬约束**是：**下层不得依赖上层**。当前实测（`include/` + `src/` 全量扫描）：
 
 - 47 条跨模块依赖边
-- **10 处**「下层依赖上层」的违规（原 17 处，2026-10-26 把 `json` / `async` 归位到 `core` 后降到 10）
+- **8 处**「下层依赖上层」的违规（原 17 处 → 10 处（json/async 归位 core）
+  → 8 处（Path 下沉 math）；逐条论证见 `STRUCTURE.md`）
 
 违规集中在三处，都是**真实的跨层需求**而非分类错误：
 

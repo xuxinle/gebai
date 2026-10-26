@@ -105,6 +105,12 @@
             "system_libs": ["dl"] },
     "crash_probe": { "kind": "executable", "sources": ["tools/crash_probe.cpp"],
                      "exclude_sources": ["src/pkg/*"] },
+    "library_usage_check": {
+      "//note": "验证 `docs/AS_LIBRARY.md` 的示例：只链 `st_core` 库（不带任何 UI/raster 单元）就能编出一个能跑的程序。它同时是「库是否真的自包含」的回归——若某个通用模块偷偷依赖了界面层，这里会链接失败。",
+      "kind": "executable",
+      "sources": ["tools/library_usage_check.cpp"],
+      "libraries": ["st_core"],
+      "exclude_sources": ["src/**"] },
     "gallery": { "kind": "executable", "sources": ["examples/gallery/*.cpp"],
                  "exclude_sources": ["src/pkg/*"],
                  "embed": ["examples/gallery/assets/*"] },
