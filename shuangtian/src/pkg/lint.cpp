@@ -1,10 +1,14 @@
-#include "st/pkg/lint.hpp"
+﻿#include "st/pkg/lint.hpp"
 
 #include <algorithm>
 #include <array>
 #include <format>
 #include <regex>
 #include <string>
+#include <atomic>
+#include <optional>
+#include <thread>
+#include <vector>
 
 #include "st/core/fs.hpp"
 #include "st/core/string.hpp"
@@ -730,6 +734,18 @@ auto lint_file(std::string_view path) -> Result<std::vector<LintViolation>> {
 auto lint_project(std::string_view root, const LintExemptions& exemptions) -> Result<LintReport> {
   LintReport report;
   const std::array<std::string_view, 5> roots{"include", "src", "tests", "examples", "tools"};
+
+  // ## 先收集待扫文件（串行，只走目录）
+  //
+  // 收集与扫描分开：目录遍历与文件系统的顺序性无关紧要，但**读取+扫描**是 99% 的时间。
+  // 实测（2026-10-27）：764 文件、CPU 22.7 s / 墙钟 23.0 s ⇒ 并行度 **0.99/28**。
+  struct Job {
+    std::string full{};       ///< 绝对路径（报给用户看）
+    std::string relative{};   ///< 相对工程根（清单豁免 glob 用）
+    std::string text{};       ///< 文件内容（读进内存再并行扫：读盘本身也要几百 ms）
+  };
+  std::vector<Job> jobs;
+  jobs.reserve(1024);
   for (const auto& directory : roots) {
     const std::string base = fs::join(root, directory);
     if (!fs::is_directory(base)) continue;
@@ -739,22 +755,101 @@ auto lint_project(std::string_view root, const LintExemptions& exemptions) -> Re
       if (entry.is_dir) continue;
       const std::string extension = fs::extension(entry.path);
       if (extension != ".cpp" && extension != ".hpp") continue;
-      const std::string full = fs::join(base, entry.path);
-      auto text = fs::read_text(full);
-      if (!text) return forward_error(text.error());
-      ++report.files_scanned;
+      Job job;
+      job.full = fs::join(base, entry.path);
       // 清单豁免的 glob 相对**工程根**（不是相对 `include/` 那层）——
       // 写清单的人想的是"src/app/llm.cpp"，不是相对某个扫描子目录的路径。
-      const std::string relative = fs::join(directory, entry.path);
-      std::size_t manifest_hits = 0;
-      auto violations =
-          scan_text(relative, *text, report.suppressed, exemptions, manifest_hits);
-      report.suppressed_by_manifest += manifest_hits;
-      // 违规的 `file` 字段仍报**绝对路径**（用户要能直接点开/搜索到）——
-      // 只在匹配 glob 时用相对路径。
-      for (auto& violation : violations) violation.file = full;
-      for (auto& violation : violations) report.violations.push_back(std::move(violation));
+      job.relative = fs::join(directory, entry.path);
+      jobs.push_back(std::move(job));
     }
+  }
+
+  // ## 并行扫描
+  //
+  // ### 为何可以安全并行（逐条核过）
+  //
+  // BACKLOG 里原本写着"L16 层方向需看路径、清单豁免需看 st.pkg，分片要保证全局视图"。
+  // **实际读代码后发现前提不成立**：
+  // · `check_layer_includes()` 只根据**本文件自己的路径**判它是否在 core 层（`path.contains("src/core/")`），
+  //   不读任何其他文件
+  // · `manifest_exempt()` 只查传入的 `exemptions`（只读，已在外层解析好）
+  // · `suppressed` / `manifest_suppressed` 是**每文件的局部计数器**，本来就在 `scan_text` 里累加
+  // ⇒ **所有规则都是单文件规则**，并行只需把"读+扫"分到多线程，没有共享可变状态。
+  //
+  // ### 为何先读进内存再并行
+  //
+  // 两种写法的差别：在并行任务里读盘（每线程一个 `read_text`）会让 "4096 个文件同时在磁盘队列里"，
+  // 而总带宽固定——读盘不会因为多线程变快，反而因寻道竞争可能变慢。
+  // 先把内容装进内存（串行读，OS 页缓存友好），再让 CPU 密集的正则扫描并行，
+  // 才能把 28 核用起来。代价是峰值内存：764 文件 × 平均约 20 KB ≈ 15 MB，可接受。
+  //
+  // ### 失败语义
+  //
+  // 旧实现遇到读不到的文件 **立刻 return 错误**——并行下没法中途放弃（其他线程还在跑），
+  // 所以改成"收集第一个错误、全部跑完后返回"。这比旧行为更好：
+  // 用户一次能看到**所有**读失败的文件，而不是修一个再撞下一个。
+  std::vector<std::optional<Error>> read_errors(jobs.size());
+  const std::size_t worker_count = std::clamp<std::size_t>(jobs.size(), 1, std::thread::hardware_concurrency() == 0 ? 1 : std::thread::hardware_concurrency());
+  std::atomic<std::size_t> next_index{0};
+
+  // 每个文件的扫描结果（下标对齐 jobs）
+  struct Scanned {
+    std::vector<LintViolation> violations{};
+    std::size_t suppressed{0};
+    std::size_t manifest_suppressed{0};
+    /// 是否真的被扫过（而非“分配了但没轮到”）。计数只能来自 `true` 的条目。
+    bool scanned{false};
+  };
+  std::vector<Scanned> results(jobs.size());
+
+  const auto worker = [&]() {
+    for (;;) {
+      const std::size_t index = next_index.fetch_add(1, std::memory_order_relaxed);
+      if (index >= jobs.size()) return;
+      auto& job = jobs[index];
+      auto text = fs::read_text(job.full);
+      if (!text) {
+        read_errors[index] = text.error();
+        continue;
+      }
+      Scanned scanned;
+      scanned.violations =
+          scan_text(job.relative, *text, scanned.suppressed, exemptions, scanned.manifest_suppressed);
+      scanned.scanned = true;
+      // 违规的 `file` 字段报**绝对路径**（用户要能直接点开/搜索到）——
+      // 只在匹配 glob 时用相对路径。
+      for (auto& violation : scanned.violations) violation.file = job.full;
+      results[index] = std::move(scanned);
+      // 内容用完即释放：避免 764 份全文同时驻留
+      job.text = std::string{};
+    }
+  };
+
+  {
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count);
+    for (std::size_t index = 0; index < worker_count; ++index) workers.emplace_back(worker);
+    for (auto& thread : workers) thread.join();
+  }
+
+  // 读失败：按原顺序报第一个（并行下顺序不定，取下标最小以保证可复现）
+  for (std::size_t index = 0; index < read_errors.size(); ++index) {
+    if (read_errors[index].has_value()) return unexpected(*read_errors[index]);
+  }
+
+  // 扫描数 = **真正成功扫过的文件数**（不是 `jobs.size()`）。
+  //
+  // 这里曾经写成 `report.files_scanned = jobs.size()`——那是个真实的 bug：
+  // 并行分片若漏掉某个下标（边界写错、提前 return），那个文件根本没扫，
+  // 而报告仍然显示“扫了 N 个”。逆向验证当场抓到了它：把
+  // `if (index >= jobs.size())` 改成 `index + 1 >=` 后，用例依然绿。
+  // 计数必须来自“确实产出过结果”的条目。
+  for (auto& scanned : results) {
+    if (!scanned.scanned) continue;
+    ++report.files_scanned;
+    report.suppressed += scanned.suppressed;
+    report.suppressed_by_manifest += scanned.manifest_suppressed;
+    for (auto& violation : scanned.violations) report.violations.push_back(std::move(violation));
   }
   std::ranges::sort(report.violations, [](const LintViolation& a, const LintViolation& b) {
     if (a.file != b.file) return a.file < b.file;

@@ -70,3 +70,4 @@ examples/caiyun/mtfilm/qa/*.log
 *.hashbak
 *.revert-bak.*
 *.bak-tmp
+*.lint-bak
