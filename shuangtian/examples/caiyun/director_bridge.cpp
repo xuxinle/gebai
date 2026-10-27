@@ -32,6 +32,7 @@ auto DirectorBridge::get_property(std::string_view name) const -> std::optional<
   // 上一次脚本解析产生的诊断（未知字段/越界）；`diagnostic_count` 是它的条数
   // （供“一秒判断这次改动有没有写错字段”的快速断言）。
   if (name == "schema_json") return schema_to_json();
+  if (name == "json_schema") return schema_to_json_schema();
   if (name == "schema_diagnostics") {
     return hooks_.schema_diagnostics ? hooks_.schema_diagnostics() : std::string{};
   }
@@ -79,6 +80,9 @@ auto DirectorBridge::property_names() const -> std::vector<std::string_view> {
           "render_quality_static_threshold", "render_quality_partial",
           // 字段自省与诊断（AI 原生的核心面，见 `schema.hpp`）
           "schema_json", "schema_diagnostics", "diagnostic_count",
+          // **标准 JSON Schema**（draft-2020-12）：喂给约束解码，让模型在生成时
+          // 就写不出错误字段名——比事后校验更早一层。
+          "json_schema",
           "scene_count", "duration", "fps", "size", "name"};
 }
 

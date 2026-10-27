@@ -101,7 +101,23 @@ struct SceneSpec {
   PlanarShadow shadow{};
   CullMode cull_mode{CullMode::Back};
   std::vector<SceneObjectSpec> objects{};
+
+  /// `obj:` 形状的路径基准目录（UTF-8：绝对路径，或相对于进程工作目录）。
+  ///
+  /// 为何放在 spec 而不是 `SceneObjectSpec`：一份场景里的所有外部网格
+  /// 几乎总在同一个素材目录下，逐对象重复声明只会漂移。
+  /// 为空时 `obj:` 的路径按**原样**交给 `st::fs`（即相对当前工作目录）。
+  std::string asset_basis{};
 };
+
+/// 把一个形状引用解析成实际可加载的路径。
+///
+/// 解析顺序与裁云的 `resolve_obj_path` **同一套语义**：
+/// 绝对路径 → 相对 `asset_basis` → 原样。第二档要求文件**真的存在**才采用，
+/// 否则退回原样并把错误留给加载器报告（这样错信息里带的是调用方写的路径，
+/// 而不是一个拼接出来的、看着陌生又不存在的路径）。
+[[nodiscard]] auto resolve_shape_path(std::string_view reference, std::string_view asset_basis)
+    -> std::string;
 
 /// 把 JSON 解析成 `SceneSpec`。
 ///

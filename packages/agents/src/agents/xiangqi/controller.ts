@@ -149,6 +149,12 @@ export interface XiangqiController {
    * “先起好再验证”，否则得推一张假卡催启动，而那张假卡会污染卡片列表。
    */
   listen(): void
+  /** 宿主注入形态：主服务 `/xiangqi` 升级后把连接交给控制器（新连接取代旧的）。 */
+  acceptPeer(ws: PeerSocket): void
+  /** 宿主注入形态：主服务把该连接收到的消息交给控制器。 */
+  peerMessage(raw: unknown): void
+  /** 宿主注入形态：主服务在该连接关闭时通知控制器。 */
+  peerClosed(): void
   /** 投递一张卡；`delivered=false` 表示此刻送不到（卡片已缓存，连上会重推）。 */
   push(spec: CardSpec): { id: string; delivered: boolean }
   /** 等某张卡的答复；超时返回 null。 */
@@ -610,6 +616,39 @@ function pruneInbox(incoming: CardSpec & { id: string }): void {
     return had
   }
 
+  /**
+   * 宿主（主服务 `Bun.serve`）把 `/xiangqi` 升级后的 WS 连接交给控制器。
+   *
+   * 方案 B 后相期窗口连的是**主服务同一个端口**（不再是独立的 7717 控制器端口）：
+   * 主服务在 fetch 里识别 `/xiangqi`，upgrade 后调这三个方法，把连接的生命周期
+   * 桥到本控制器内部——`peer`/`sendCards`/`handleMessage` 全部复用，
+   * 与控制器自己 `listen()` 出来的连接无差别。
+   *
+   * 为何不把 `Bun.serve` 整个搬进主服务：相期子Agent 需要保持可独立验证/独立使用
+   * （测试注入 fake WS、无主服务的场景），所以 `listen()` 保留为兜底；
+   * 宿主注入形态只是把连接**来源**换掉，不改变任何语义。
+   */
+  function acceptPeer(ws: PeerSocket): void {
+    // 只认一个窗口：新连接取代旧的（与 `listen()` 的 open 同一语义）
+    if (peer !== null && peer !== ws) {
+      try {
+        peer.close()
+      } catch {
+        /* 关不掉就算了 */
+      }
+    }
+    peer = ws
+    if (live.size > 0) sendCards()
+  }
+
+  function peerMessage(raw: unknown): void {
+    handleMessage(raw)
+  }
+
+  function peerClosed(): void {
+    peer = null
+  }
+
   function close(): void {
     closed = true
     if (pollTimer !== null) {
@@ -651,6 +690,10 @@ function pruneInbox(incoming: CardSpec & { id: string }): void {
       peer = null
     },
     listen,
+    // 宿主注入形态：主服务 `/xiangqi` 升级后的连接桥（见 acceptPeer 注释）
+    acceptPeer,
+    peerMessage,
+    peerClosed,
     push,
     waitForAnswer,
     pending,

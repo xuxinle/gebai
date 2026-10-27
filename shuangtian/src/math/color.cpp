@@ -39,6 +39,16 @@ auto Color::darken(float amount) const noexcept -> Color {
                quantize(static_cast<float>(b) / 255.0f * ratio), a};
 }
 
+auto Color::offset_lightness(float delta) const noexcept -> Color {
+  // 直接对三个通道加同一个绝对值（而不是往白/黑按比例插值）：
+  // 这样“跨 1 个量化台阶”对深色与浅色是同一件事，不受剩余空间影响。
+  const auto shift = [delta](std::uint8_t channel) -> std::uint8_t {
+    const float v = static_cast<float>(channel) / 255.0f + delta;
+    return static_cast<std::uint8_t>(std::lround(clamp01(v) * 255.0f));
+  };
+  return Color{shift(r), shift(g), shift(b), a};
+}
+
 auto Color::mix(const Color& other, float t) const noexcept -> Color {
   const float ratio = clamp01(t);
   return st::math::lerp(*this, other, ratio);

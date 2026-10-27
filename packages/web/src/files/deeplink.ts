@@ -19,6 +19,8 @@ export interface DeepLinkRoot {
   id: string
   kind: string
   path: string
+  /** 歌白自身项目（内置「歌白」）：无会话上下文时的默认落脚点。 */
+  self?: boolean
 }
 
 export interface DeepLinkTarget {
@@ -87,8 +89,11 @@ export function resolveDeepLink(roots: DeepLinkRoot[], search: string, opts: Dee
   const sessId = params.get("session") ?? ""
   const byId = (id: string): DeepLinkRoot | undefined => roots.find((r) => r.id === id)
   const pickDefault = (): DeepLinkRoot | undefined =>
-    // 显式指定会话时以该会话工作区为先（入口按钮语义：看本会话 Agent 产物）；否则项目类根优先
+    // 显式指定会话时以该会话工作区为先（入口按钮语义：看本会话 Agent 产物）；
+    // 没有会话上下文（该会话根不在清单里）→ 歌白自身（家目录当工作区，手工打开 `/files` 看源码）；
+    // 都没有才退到首个项目根 / 首个根。
     (sessId ? byId(`sess:${sessId}`) : undefined) ??
+    roots.find((r) => r.kind === "proj" && r.self === true) ??
     roots.find((r) => r.kind === "proj") ??
     roots[0]
 

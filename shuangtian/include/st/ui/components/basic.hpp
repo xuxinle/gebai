@@ -26,6 +26,38 @@ class Text : public Element {
   void set_multiline(bool multiline);
   void set_max_lines(std::size_t lines);
   void set_tone(Tone tone);
+
+  /// 字号档位（**语义化**：跟随主题令牌，而不是写死像素值）。
+  ///
+  /// 为何需要它（而不是让调用方写 `set_font_size(12.0f)`）：
+  /// 字号是**主题的尺度**——同一份界面在 11pt 与 12pt 基准下应当整体等比，
+  /// 而字面量不会跟。实测代价（2026-10-27）：`gallery` 里 49/150 个文本节点
+  /// 用了阶梯外的 11/11.5/12/12.5px，四种散值意味着排版没有节奏；
+  /// 根因是**阶梯缺 11~12px 档**（`font_xs` 曾是 13），调用方只能写字面量。
+  /// 补上 `font_2xs=11` 并把 `font_xs` 降到 12 后，本枚举让这些地方有语义名可用。
+  ///
+  /// `Override` 是默认值（不改写，仍由 `set_font_size` 说了算），
+  /// 所以加这个枚举对既有代码零影响。
+  enum class Scale : std::uint8_t {
+    Override,  ///< 不按档位：用 `set_font_size` 的值（否则 `font_base`）
+    Xs2,       ///< `Metrics::font_2xs`（11）——版本号/分组名/最次要标注
+    Xs,        ///< `Metrics::font_xs`（12）——卡片说明/状态行
+    Sm,        ///< `Metrics::font_sm`（14）——次要正文
+    Base,      ///< `Metrics::font_base`（15）——正文
+    Lg,        ///< `Metrics::font_lg`（17）
+    Xl,        ///< `Metrics::font_xl`（20）
+  };
+  /// 按语义档位取字号（可在 `apply_theme` 里跟随主题重算）。
+  void set_scale(Scale scale);
+  [[nodiscard]] auto scale() const noexcept -> Scale { return scale_; }
+
+  /// 档位 → 主题令牌（`Override` 返回 0）。
+  ///
+  /// 公开而不仅内部用：测试需要拿**同一份**映射去断言“档位真的落到那个令牌上”，
+  /// 否则测试里再写一遍 switch 就成了测自己的逻辑（回退生产代码仍会全绿）。
+  [[nodiscard]] static auto font_size_for_scale(const Metrics& metrics, Scale scale) -> float;
+
+  /// 显式字号（像素）。设了它就盖过 `set_scale`（记在 `font_size_override_`）。
   void set_font_size(float size);
   void set_weight(FontWeight weight);
 
@@ -85,6 +117,7 @@ class Text : public Element {
   bool multiline_{false};
   std::size_t max_lines_{0};
   Tone tone_{Tone::Default};
+  Scale scale_{Scale::Override};
   float font_size_override_{0.0f};
   FontWeight weight_{FontWeight::Regular};
 

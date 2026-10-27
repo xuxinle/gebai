@@ -218,3 +218,8 @@ shuangtian/examples/*/assets/vo/*.wav
 
 # 文档截图（README/DESIGN 内联引用的界面图，属于文档本体）
 !docs/screenshots/*.png
+
+# 裁云工程包的**迁移产物**：由 tools/caiyun_migrate_styles_to_packages.py 生成，
+# 可用一条命令重建，且包里含 intent.md 骨架与 scene.json（与源脚本同内容的不同形态）。
+# 源脚本 film.json / film-multishot.json 才是真值源，包不入库。
+*.cypkg/

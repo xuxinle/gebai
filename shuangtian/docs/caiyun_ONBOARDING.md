@@ -23,6 +23,80 @@ examples/caiyun/assets/ 下有两个文件是**长期资产**：
 | 写 `layout` 脚本 | `docs/caiyun_layout_script.md`（尤其 §6 排查） |
 | 判断片子"够不够动" | `docs/caiyun_motion_acceptance.md` |
 | 查某个坑 | `docs/PITFALLS.md`（按场景索引） |
+| 知道有哪些字段 | `get director schema_json`（自省）或 `json_schema`（标准 JSON Schema） |
+
+## 脚本写错会在启动时就失败（`--strict` 默认开）
+
+字段名拼错、类型不符 —— 这些**曾经是静默忽略的**：照常出片、日志零提示，
+而“球没自转”与“写对了但转速是 0”在画面上完全一样。现在默认会拦住：
+
+```bash
+caiyun --headless --script x.json --render out.mp4     # 写错 → 退出码 1
+caiyun --headless --no-strict --script x.json ...       # 逐字段试效果时关掉
+```
+
+报错会直接给路径与建议字段名（`scenes[0].layers[0]` / `model_rot` → `model_spin`）。
+**看到退出码 1 就去改那一行**，不要 `--no-strict` 绕过去——那行本来就没生效。
+
+### 给约束解码用：标准 JSON Schema
+
+`get director json_schema` 返回 draft-2020-12 标准 schema（`additionalProperties:false`
++ 嵌套 `items` 引用）。把它喂给 structured outputs / GBNF / Outlines，模型在**生成时**
+就写不出错误字段名——比事后校验更早一层。
+
+交叉验证（用**标准**校验器，不是只看自己的单测）：
+
+```bash
+python tools/caiyun_schema_crosscheck.py <导出的 schema.json>
+```
+
+> 为何需要这个脚本：`schema_to_json_schema` 的 C++ 单测曾**六条全绿**，
+> 而标准校验器一跑就发现 `layers` 只写了 `type: array` 却没给 `items`——
+> 校验器不会进入元素，图层里的拼写错**永远抓不到**。详见 `PITFALLS.md`〔schema〕。
+
+## 成本纪律：怎么不把一轮创作变成三十轮
+
+> 实测代价：一条 10 秒三维短片花了约 30 轮，其中 **18 轮（60%）是"用渲染去试画面"**——
+> 一次 300 帧 1080p 全片 100~140 秒，加一次读图，每猜错一个参数就是一轮。
+> 下面的四条把其中大部分可省掉。
+
+### 1. 参数语义不确定时，读源码而不试渲
+
+一个字段"到底怎么算"，`grep` 它的使用处约 30 秒；而"改一下渲一版看看"约 20~140 秒。
+**判据：如果你准备为了搞清语义而渲一次，先停下来 grep 那个字段名。**
+特别值钱的一类：着色公式（`shade_surface` / `shade_terms_at`）——
+它能一举解释"为什么某个参数调上去反而更黑/更平"。
+
+### 2. 先查"已经好看"的官方样例，再动参数
+
+`examples/caiyun/assets/` 下的 `scene-script-demo.json`、`sample-cinematic.json`
+是**已验证过观感**的参照物。自己写的东西发灰/发平时，**先 diff 光照与相机参数**，
+而不是从零调——实测多次证明：参数看似相近、结果差一个数量级，往往就是某一项偏离了样例。
+
+### 3. 造型试错用极小样本，构图定型后才渲全片
+
+```
+造型/材质/光照试错 → 单镜、3~10 帧（约 8~20 秒/次）
+构图定型           → 单镜落定帧，抽帧看（不重渲）
+动效验证           → 只渲该幕（其他场景 duration 调到 0.1，或单独建小脚本）
+最终成片           → 全片仅渲 1~2 次
+```
+⚠ 小样本时必须让**脚本里的 `size` 与实际渲染尺寸一致**，否则画面会错乱。
+
+### 4. 验收用「量化 + 抽帧」替代「重渲」
+
+```bash
+python shuangtian/examples/caiyun/styles/measure_motion.py <frames>   # 3 秒，占静止/变化密度
+ffmpeg -ss 3.0 -i out/film.mp4 -frames:v 1 -y check/f3.png            # 抽帧，不重渲
+```
+数字管"有没有在动"，人眼管"好不好看"——但**两者都不需要重渲一次全片**。
+
+### 反模式
+
+- **为一个动效对不到，渲整片**（应只渲那一幕）
+- **在没有量化口径的情况下连调三个参数**（失败时无法归因，已排除项也没记下来）
+- **用渲染结果反推参数语义**（应先读源码；渲染只用于"确认观感"）
+
 
 ## 三条最容易撞的（都在 `PITFALLS.md`〔编排〕有完整取证）
 

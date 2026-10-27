@@ -458,6 +458,48 @@ describe("EventSourceManager：热加载", () => {
     expect(await mgr.refreshIfChanged()).toBe(true)
     expect(mgr.list()).toHaveLength(0)
   })
+
+  /**
+   * 删掉一个**加载失败**的源，它必须从 `state()` 与 `loadErrors()` 里一起消失。
+   *
+   * 为何钉住：`state()` 专门把 errors 里的源当「加载失败也要可见」补进列表，
+   * 所以 errors 漏删一个，删掉的文件就永久留在面板上（重启前不消失），
+   * 且 `sourceErrors` 一直报一个已经不存在的文件——把「已修好/已删除」误报成「还坏着」。
+   * 实测形态：实测删掉坏的二开源后，`/api/v1/persona/state` 的 `sourceErrors`
+   * 直到重启前一直挂着那条错误。
+   */
+  test("删掉加载失败的源后，state 与 loadErrors 都不再报它", async () => {
+    // 加载期抛错的源（import 进来就炸）
+    writeSource("custom", "badgone", `throw new Error("探针：加载期故意抛错")\nexport const source = {} as never\n`)
+    const rt = makeRuntime()
+    const { mgr } = makeManager(rt)
+    await mgr.start()
+    expect(mgr.loadErrors().badgone).toContain("加载期故意抛错")
+    expect(mgr.state().some((s) => s.name === "badgone")).toBe(true)
+
+    rmSync(join(dirs().custom, "badgone.ts"))
+    // 目录为空：目录签名会变（文件消失），能触发重扫
+    expect(await mgr.refreshIfChanged()).toBe(true)
+
+    expect(mgr.loadErrors().badgone).toBeUndefined()
+    expect(mgr.state().some((s) => s.name === "badgone")).toBe(false)
+  })
+
+  /** 修好一个坏源后，错误必须消失（否则「已修好」看起来还是坏的）。 */
+  test("坏源改好后错误从 loadErrors 消失", async () => {
+    writeSource("custom", "fixme", `throw new Error("先坏着")\nexport const source = {} as never\n`)
+    const rt = makeRuntime()
+    const { mgr } = makeManager(rt)
+    await mgr.start()
+    expect(mgr.loadErrors().fixme).toContain("先坏着")
+
+    writeSource("custom", "fixme", `export const source = { name: "fixme", description: "好了", channel: "fx", start: async () => {} }`)
+    expect(await mgr.refreshIfChanged()).toBe(true)
+
+    expect(mgr.loadErrors().fixme).toBeUndefined()
+    expect(mgr.list().map((s) => s.name)).toContain("fixme")
+    expect(mgr.state().find((s) => s.name === "fixme")!.started).toBe(true)
+  })
 })
 
 describe("EventSourceManager：参考实现 file_drop", () => {

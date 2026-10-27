@@ -39,6 +39,7 @@
 #include "st/core/error.hpp"
 #include "layer.hpp"
 #include "layout.hpp"
+#include "render_preset.hpp"
 #include "schema.hpp"
 #include "st/math/color.hpp"
 
@@ -409,5 +410,32 @@ struct Script {
 [[nodiscard]] auto parse_color(std::string_view text, st::math::Color fallback) -> st::math::Color;
 /// Color → `#rrggbb`。
 [[nodiscard]] auto color_to_hex(st::math::Color color) -> std::string;
+
+/// 预设表：相机与光照各一份。
+///
+/// 为何是 thread_local 而不是 `parse_script` 的参数：预设是**工程级的静止配置**，
+/// 而 `parse_script` 的签名已被多处调用（测试、控制通道、main）。
+/// 每处都加两个参数会把“只是想解析一段 JSON”变成必须懂预设。
+/// thread_local 与导出时 16 路并行相容（每线程一份，读同一份内容）。
+struct RenderPresetTable {
+  std::vector<RenderPreset> cameras{};
+  std::vector<RenderPreset> lightings{};
+  /// 是否已初始化（未初始化的空表 = 不允许用预设）。
+  bool initialized{false};
+};
+
+[[nodiscard]] auto render_presets() -> RenderPresetTable&;
+
+/// 设置预设表（载入工程包时调一次）。传入空目录也能用——只剩内置预设。
+///
+/// `package_root` 为空：只用内置；否则额外读 `<root>/cameras/*.json`
+/// 与 `<root>/lighting/*.json`（同名覆盖内置）。
+void set_render_presets_from_package(std::string_view package_root);
+
+/// 把一份 `Script` 里的相机/光照预设**展开成实值**（就地）。
+///
+/// 为何对外暴露：`--flatten` 导出的脚本必须是**自包含**的——
+/// 导出后不依赖预设文件也能跑。所以拍平前要先展开。
+[[nodiscard]] auto expand_script_presets(Script& script) -> Result<void>;
 
 }  // namespace caiyun

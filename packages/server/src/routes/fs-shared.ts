@@ -4,6 +4,7 @@ import type { Context } from "hono"
 import type { AppDeps } from "../app"
 import type { AuthUser } from "../auth"
 import { FsError, parseExtraRoots, localExtraRoots, type RootContext, type FileRoot } from "../core/fs/roots"
+import { SELF_PROJECT_NAME } from "../core/tools/projects"
 import { GitError } from "../core/git/service"
 
 /** 文件工作台是否可用（GEBAI_FS_ENABLED）。 */
@@ -73,6 +74,9 @@ export async function buildRootContext(
     writable: d.config.fsWrite !== false,
     projects,
     extraRoots,
+    // 内置「歌白」：沙箱模式下不在项目清单里（与服务端规则同源，见 builtinProjects），
+    // 故标记也无意义——直接不给，前端自然不会有置顶分组。
+    selfProject: sandboxed ? undefined : SELF_PROJECT_NAME,
   }
   if (opts.withSessions) {
     const key = user.id

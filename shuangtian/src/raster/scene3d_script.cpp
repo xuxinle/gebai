@@ -3,6 +3,7 @@
 #include <cmath>
 #include <string>
 
+#include "st/core/fs.hpp"
 #include "st/raster/mesh.hpp"
 
 namespace st::raster {
@@ -275,13 +276,20 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
   //
   // 因为 build_mesh 的报错里没有对象索引，调用方（尤其生成代码的模型）
   // 拿不到"是第几个对象写错了"。在解析阶段就拦住，信息最全。
+  //
+  // `obj:` 前缀不在这张表里：它后面跟的是**任意路径**，不是枚举名。
+  // 所以单独按前缀判定（见下），而不是往表里塞一个永远匹配不上的字串。
   static constexpr const char* kShapes[] = {"sphere", "box", "plane", "cylinder", "torus"};
-  bool known = false;
+  const bool is_obj_shape = obj.shape.rfind("obj:", 0) == 0;
+  bool known = is_obj_shape;
   for (const char* name : kShapes) {
     if (obj.shape == name) {
       known = true;
       break;
     }
+  }
+  if (is_obj_shape && obj.shape.size() <= 4) {
+    return st::unexpected(ErrorCode::Parse, path + ".shape：`obj:` 后面需要文件路径");
   }
   if (!known) {
     std::string allowed;
@@ -290,7 +298,8 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
       allowed += name;
     }
     return st::unexpected(ErrorCode::Parse,
-                          path + ".shape：只接受 " + allowed + "，收到 " + obj.shape);
+                          path + ".shape：只接受 " + allowed + " 或 obj:<路径>，收到 " +
+                              obj.shape);
   }
   return obj;
 }
@@ -391,6 +400,20 @@ auto parse_scene_spec_text(std::string_view text) -> Result<SceneSpec> {
   return parse_scene_spec(*json);
 }
 
+auto resolve_shape_path(std::string_view reference, std::string_view asset_basis)
+    -> std::string {
+  if (reference.empty()) return {};
+  std::string ref{reference};
+  if (st::fs::is_absolute(ref)) return ref;
+  if (!asset_basis.empty()) {
+    const std::string joined = st::fs::join(std::string(asset_basis), ref);
+    // 只有**文件真的存在**才采用拼接结果：否则报错里会出现一个
+    // 调用方从未写过的路径，排查时先怀疑拼接规则而不是“我路径写错了”。
+    if (st::fs::exists(joined)) return joined;
+  }
+  return ref;
+}
+
 auto build_mesh(const SceneObjectSpec& object) -> Result<Mesh> {
   if (object.shape == "sphere") {
     return Mesh::colored_sphere(object.radius, std::max(object.segments, 4), object.color);
@@ -408,6 +431,11 @@ auto build_mesh(const SceneObjectSpec& object) -> Result<Mesh> {
   if (object.shape == "torus") {
     return Mesh::torus(object.radius, object.radius * 0.35f, std::max(object.segments, 3),
                        std::max(object.segments / 2, 3), object.color);
+  }
+  if (object.shape.rfind("obj:", 0) == 0) {
+    // 不带 `asset_basis` 的重载：`build_mesh` 只拿到对象、拿不到场景。
+    // 带基准目录的那条在 `draw_one` 里单独处理（场景级信息在那才可见）。
+    return Mesh::load_obj_file(object.shape.substr(4), object.color);
   }
   return st::unexpected(ErrorCode::Unsupported, "不支持的形状：" + object.shape);
 }
@@ -441,7 +469,13 @@ auto render_scene_into(const SceneSpec& spec, Scene3D& scene, Canvas& canvas,
   //
   // 分两遍的代价是遍历两次 `spec.objects`，收益是调用方不必知道这个顺序。
   const auto draw_one = [&](const SceneObjectSpec& obj) -> Result<void> {
-    const auto mesh = build_mesh(obj);
+    // `obj:` 的路径基准目录是**场景级**信息，`build_mesh` 只拿到对象，
+    // 所以在这里先重写成已解析路径再交给它。
+    SceneObjectSpec resolved = obj;
+    if (obj.shape.rfind("obj:", 0) == 0) {
+      resolved.shape = "obj:" + resolve_shape_path(obj.shape.substr(4), spec.asset_basis);
+    }
+    const auto mesh = build_mesh(resolved);
     if (!mesh) return st::forward_error(mesh.error());
 
     Material material{};

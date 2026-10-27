@@ -27,6 +27,24 @@ struct Shadow {
   float offset_x{0.0f};
   float offset_y{0.0f};
 
+  /// **内阴影**（inset）：阴影改画在框体**内侧**，用来表达“凹进去”。
+  ///
+  /// ## 为什么需要它
+  ///
+  /// 换底色（`Surface::Sunken`）只能表达“这个区域比周围深”，表达不了“它被压进去了”——
+  /// 后者靠的是**光影方向**：上缘一道暗线、下缘一道弱亮线。输入框、凹槽、按下态
+  /// 都需要这一层，否则放大看就是一个“较深的圆角矩形”，没有体积感。
+  ///
+  /// ## 怎么实现（不改光栅层）
+  ///
+  /// 内阴影 ≡「把外投影的偏移取反、并裁剪到框内」。于是 `paint_box` 只需
+  /// `push_clip_rounded_rect(框)` 包一次已有的 `draw_shadow`，
+  /// 光栅层与缓存机制全部复用（阴影遮罩本来就按几何参数缓存）。
+  ///
+  /// 语义上**不要**把 `inset` 与 `color2`（第二层环境光）叠成“两层内阴影”：
+  /// 内阴影的作用是把物体“压下去”，叠两层只会让凹槽边缘发脏。
+  bool inset{false};
+
   /// **第二层（环境光）**：与主层叠加成“关键光 + 环境光”。
   ///
   /// 单层投影在浅底上会被读成一条“灰边”，而不是“浮起来的物体”——
@@ -40,7 +58,8 @@ struct Shadow {
 
   [[nodiscard]] auto visible() const noexcept -> bool { return color.a != 0U && blur > 0.0f; }
   [[nodiscard]] auto second_visible() const noexcept -> bool {
-    return color2.a != 0U && blur2 > 0.0f;
+    // `inset` 不参与第二层：内阴影只有一层才有“压下去”的读法（见 `inset` 的说明）。
+    return !inset && color2.a != 0U && blur2 > 0.0f;
   }
 };
 

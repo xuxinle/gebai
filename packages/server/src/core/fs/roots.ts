@@ -44,6 +44,8 @@ export interface FileRoot {
   description?: string
   writable: boolean
   sessionId?: string
+  /** 歌白自身项目（家目录）：前端据此把它从项目组里提出来单独置顶。 */
+  self?: boolean
 }
 
 export interface ResolvedRoot {
@@ -69,6 +71,9 @@ export interface RootContext {
   extraRoots: FileRoot[]
   /** 会话清单（构建 `sess:` 根） */
   sessions?: Array<{ id: string; name: string }>
+  /** 歌白自身项目名（内置「歌白」）：根清单据此给对应 `proj:` 根打 `self` 标，
+   *  前端把它从项目组提出来单独置顶。 */
+  selfProject?: string
   /** 目录存在性判定（测试注入用；默认查真实文件系统） */
   isDir?: (p: string) => boolean
 }
@@ -279,7 +284,17 @@ export function rootCatalog(ctx: RootContext, opts: { sessionLimit?: number } = 
     const abs = sessionTmpRoot(ctx, s.id)
     push({ id: `sess:${s.id}`, kind: "sess", name: s.name || s.id.slice(0, 8), path: abs, sessionId: s.id, writable: ctx.writable })
   }
-  for (const p of ctx.projects) push({ id: `proj:${p.name}`, kind: "proj", name: p.name, path: p.path, description: p.description, writable: ctx.writable })
+  for (const p of ctx.projects) {
+    push({
+      id: `proj:${p.name}`,
+      kind: "proj",
+      name: p.name,
+      path: p.path,
+      description: p.description,
+      writable: ctx.writable,
+      self: p.name === ctx.selfProject || undefined,
+    })
+  }
   push({ id: "user:", kind: "user", name: "用户目录", path: join(ctx.home, "users", ctx.user), writable: ctx.writable })
   for (const r of ctx.extraRoots) push(r)
   return out.slice(0, limit + ctx.projects.length + ctx.extraRoots.length + 1)

@@ -490,9 +490,18 @@ auto run_app(int argc, char** argv) -> int {
   sidebar->style().width = 224.0f;
   sidebar->style().padding = Insets{12.0f, 16.0f, 12.0f, 16.0f};
   sidebar->style().gap = 4.0f;
+  // 侧栏是**内容容器**，声明中层面板（`surface`）。
+  //
+  // 为何必须声明而不是“看着还行就算了”：不声明时它是透明的，直接露出页面底（`bg`）。
+  // 而主题的存在意义就是「这几个层级必须分得开」——`ui_theme_test` 锁着
+  // `surface` 对 `bg` ≥ 1.08，但那个护栏验的是**令牌之间**的关系；
+  // 应用如果不把令牌用上，实机上三者仍是同一个色。
+  // 实测（声明前）：侧栏↔内容底 **1.008:1**、状态栏↔内容底 **1.008:1**（暗色），
+  // 相当于整屏只有一种底色，所有“层次”都靠阴影硬撑。
+  sidebar->set_surface(Element::Surface::Base);
   auto nav_label = std::make_unique<Text>("导航");
   nav_label->set_tone(Tone::Faint);
-  nav_label->set_font_size(11.0f);
+  nav_label->set_scale(Text::Scale::Xs2);
   sidebar->add_child(std::move(nav_label));
 
   // 导航项与页面一一对应（清单来自 `page_specs()`，不在两处各写一遍）
@@ -509,7 +518,7 @@ auto run_app(int argc, char** argv) -> int {
   sidebar->add_child(std::move(sidebar_spacer));
   auto version_text = std::make_unique<Text>("霜天 v0.1.0 · C++20");
   version_text->set_tone(Tone::Faint);
-  version_text->set_font_size(11.0f);
+  version_text->set_scale(Text::Scale::Xs2);
   sidebar->add_child(std::move(version_text));
   body->add_child(std::move(sidebar));
 
@@ -533,7 +542,7 @@ auto run_app(int argc, char** argv) -> int {
   auto status_text_early = std::make_unique<Text>("就绪");
   status_text_early->set_id("status-text");
   status_text_early->set_tone(Tone::Muted);
-  status_text_early->set_font_size(12.0f);
+  status_text_early->set_scale(Text::Scale::Xs);
   auto* status_ptr = status_text_early.get();
   hooks.set_status = [status_ptr](std::string text) { status_ptr->set_content(std::move(text)); };
   hooks.add_overlay = [root_ptr](std::unique_ptr<Element> overlay) {
@@ -562,6 +571,10 @@ auto run_app(int argc, char** argv) -> int {
   // 状态栏
   auto status_bar = std::make_unique<Panel>(FlexDirection::Row);
   status_bar->set_id("status-bar");
+  // 状态栏是**外壳条带**（与标题栏同色一圈）：声明 `Alt` 而不是让它透明。
+  // 不声明时它直接露页面底（`bg`），与内容区对比实测 **1.008:1**——
+  // 肉眼就是“没有状态栏”，只剩文字浮在页面底上。
+  status_bar->set_surface(Element::Surface::Alt);
   status_bar->style().height = 30.0f;
   status_bar->style().padding = Insets{24.0f, 0.0f, 24.0f, 0.0f};
   status_bar->style().align_items = Align::Center;
@@ -586,7 +599,7 @@ auto run_app(int argc, char** argv) -> int {
   auto status_right = std::make_unique<Text>("等待控制通道…");
   status_right->set_id("status-right");
   status_right->set_tone(Tone::Faint);
-  status_right->set_font_size(12.0f);
+  status_right->set_scale(Text::Scale::Xs);
   auto* status_right_ptr = status_right.get();
   status_bar->add_child(std::move(status_right));
   root_panel->add_child(std::move(status_bar));

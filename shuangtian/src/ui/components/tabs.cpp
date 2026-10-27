@@ -45,10 +45,8 @@ constexpr float k_trailing_zone = 30.0f;    // 尾部动作钮命中区宽
 constexpr double k_anim_idle = -1.0;
 constexpr double k_anim_pending = -2.0;
 
-[[nodiscard]] auto ease_out(float t) noexcept -> float {
-  const float inverse = 1.0f - t;
-  return 1.0f - inverse * inverse * inverse;
-}
+// 缓出曲线已上提到 `st::ui::ease_out(theme, t)`（主题令牌驱动）。
+// 此处的私有实现与 `toggle.cpp` 那份原本是同型的两份，已一并改用公共入口。
 
 /// 画 ×（两条对角线，stroke_path 走线条；颜色由调用方给）。
 void draw_cross(raster::Surface& canvas, math::Point center, float size, math::Color color) {
@@ -583,7 +581,7 @@ auto Tabs::resolve_indicator(const RenderContext& context, math::Rect target) co
     indicator_start_ = k_anim_idle;
     return snapped();
   }
-  const float t = ease_out(static_cast<float>(elapsed / duration));
+  const float t = st::ui::ease_out(context.theme, static_cast<float>(elapsed / duration));
   indicator_x_ = indicator_from_x_ + (target.x - indicator_from_x_) * t;
   indicator_width_ = indicator_from_width_ + (target.width - indicator_from_width_) * t;
   return math::Rect{indicator_x_, target.y, indicator_width_, target.height};

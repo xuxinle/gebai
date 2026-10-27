@@ -110,9 +110,19 @@ struct Color {
            (static_cast<std::uint32_t>(b) << 8U) | static_cast<std::uint32_t>(a);
   }
   [[nodiscard]] auto to_css() const -> std::string;
-  /// 与白色/黑色按比例调亮调暗（交互态 hover/active 用）。
+  /// 与白色/黑色按**比例**调亮调暗（交互态 hover/active 用）。
+  ///
+  /// ⚠ 比例语义有个隐含缺陷：色值越接近满值，同样比例的实际变化越小;
+  /// 到 `255` 时调亮恒为 0。需要“肯定看得见的一点点亮”时用 `offset_lightness`。
   [[nodiscard]] auto lighten(float amount) const noexcept -> Color;
   [[nodiscard]] auto darken(float amount) const noexcept -> Color;
+  /// 按**绝对量**（−1..+1 的归一化亮度增量）调亮/调暗（负数为暗）。
+  ///
+  /// 为何需要它：面内微渐变要的是“跨过至少 1 个 8 位量化台阶的坡”，
+  /// 而比例式调亮在两端都会失效——亮色卡片 `#fffaf6` 再调亮 0.4% 在 R 通道封顶，
+  /// 暗色面板 `rgb(24,30,42)` 调亮 0.4% 只有 0.1/255，舍入后为 0。
+  /// 实测后果：用比例式做的渐变，侧栏空白 50 行的行均值跨度依然是 **0.00**（等于没画）。
+  [[nodiscard]] auto offset_lightness(float delta) const noexcept -> Color;
   [[nodiscard]] auto mix(const Color& other, float t) const noexcept -> Color;
 };
 

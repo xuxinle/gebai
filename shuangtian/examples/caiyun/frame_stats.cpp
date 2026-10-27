@@ -308,6 +308,23 @@ auto StatsAccumulator::report(double duration_s, bool partial) const -> QualityR
       out.frames, out.changed_pixels_pct, out.max_pixel_delta,
       out.still_ratio, out.static_threshold, pairs, out.bright_ratio, out.bright_luma,
       out.mean_luma, out.change_density, worst_line);
+  // ## 为何还要单报 `moving_pair_ratio`（2026-10-27 实测）
+  //
+  // `still_ratio` 走 64 宽降采样（每格 30px，**面积加权**）：一条 0.09% 面积的光带
+  // 横穿全屏，全屏平均差只有 0.18，远低于判据 1.2 → 整段被判“静止”。
+  // 实测代价：三条不同的动效改动（缩放呼吸 / alpha 脉冲 / 连续流光带）
+  // 都把 `格均差峰值` 从 12 抬到 50（**4 倍**，说明画质确实在动），
+  // 而 `still_ratio` 纹丝不动到 96.1%——凭它调参就会陷入“怎么改都无效”。
+  //
+  // `moving_pair_ratio` 走 192 宽图、按 |Δluma|>6 的像素占比判，不被面积稀释。
+  // 两个口径**并列报**：前者对应“整体观感是否闪动”，后者对应“有没有东西在变”。
+  out.summary += std::format("｜在动帧对 {:.1f}%", out.moving_pair_ratio);
+  // 口径提醒：`静止占比` 走 64 宽面积加权，**小面积元素的运动会被稀释**——
+  // 实测一条占全屏 0.09% 的光带横穿全屏，全屏平均差仅 0.18（判据 1.2）。
+  // 所以它低不代表“没东西在动”，只代表“没有大面积闪动”。
+  if (out.still_ratio > 70.0 && out.changed_pixels_pct > 1.0) {
+    out.summary += "（⚠ 小面积运动会被面积加权稀释，判“是否卡住”应以元素轨迹为准）";
+  }
   // 分母为 0 时必须明说：否则「0 对 / 0.0%」会被读成一个有效的「不静」结论。
   if (pairs == 0) out.summary += "｜⚠ 无有效相邻帧对（只渲了 1 帧或帧号不连续）：静止占比不可信";
   if (partial) out.summary += "（局部渲染，结论只覆盖该区间）";

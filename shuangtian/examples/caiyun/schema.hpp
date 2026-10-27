@@ -44,6 +44,13 @@ enum class SchemaType : std::uint8_t {
   String,   ///< 自由字符串（文案、素材引用、模型形状）
   Color,    ///< `#rrggbb` 或 `#rrggbbaa`
   Dimension, ///< 数字（设计像素）或 `"50%"` 字符串——两种写法都合法
+  /// JS 编排层：**两种写法都合法**——文件路径字符串，或 `{"source": ...}` 内联对象。
+  ///
+  /// 为何要单独一个类型（而不是复用 String）：内联写法一直存在
+  /// （`parse_layout_script` 两种都收），但 schema 层只声明了 String，
+  /// 于是**拍平后的自包含脚本会被 --strict 判为类型错误**。
+  /// 实测代价：七套模板迁移后从包拍平再渲染，三条 layout 全被判 error。
+  Layout,
   Array,    ///< 数组（points / lines / values / tracks）
   Object,   ///< 对象（tracks 的按属性名分组写法）
 };
@@ -153,7 +160,44 @@ struct Diagnostic {
 
 /// 类型不符诊断（例如给数字字段写了字符串）。
 [[nodiscard]] auto wrong_type_diagnostic(const FieldSpec& spec, std::string_view actual_type,
-                                         std::string_view path) -> Diagnostic;
+                                        std::string_view path) -> Diagnostic;
+
+/// `--strict` 下该被拦的诊断条数（纯函数，供渲染入口与回归测试共用）。
+///
+/// ## 为何不直接用 `Diagnostic::is_error`
+///
+/// 未知字段的 `is_error` **有意为 false**（`unknown_key_diagnostic` 的注释：
+/// “宽容：未知键不阻断加载，老脚本仍要能出片”）。那个默认是对的——
+/// 手工调参时写个未登记字段不该被拦。
+///
+/// 但 `--strict` 的语义正好相反：它要在 CI/智能体场景下把“静默忽略”
+/// **变成失败**。而**字段名写错恰好是典型场景**（实测：`model_rot` /
+/// `camera_azimuth` 两个拼错的键，旧行为照常出片、日志零提示，
+/// 而“球没自转”与“写对了但转速是 0”在画面上完全一样）。
+///
+/// 所以这里按**事实**（未知键 / 类型错）判，而不是按那个宽容的默认标位。
+[[nodiscard]] auto strict_violation_count(const std::vector<Diagnostic>& list) -> std::size_t;
+
+/// 把字段表导成**标准 JSON Schema**（draft-2020-12）。
+///
+/// ## 为何要另外导出一份（已有 `schema_to_json` 还不够）
+///
+/// `schema_to_json` 是**自省面**：形状按我们的作用域分（script/audio/scene/...），
+/// 是给人/智能体**读**的。而这一份是**机器契约**：喂给约束解码（structured outputs /
+/// GBNF / Outlines / XGrammar）后，模型在**生成时**就写不出错误字段名——
+/// 这是唯一能真正消灭拼写/类型错误的机制（校验只能事后抓）。
+///
+/// 两份都从同一张 `FieldSpec` 表生成，不会漂移。
+///
+/// ## 映射规则
+///
+/// - 每个作用域一个 `$defs` 条目，`additionalProperties: false` —— 写错键即失败；
+/// - `has_range` → `minimum`/`maximum`；`Integer` 额外加 `type: integer`；
+/// - `Dimension` → `oneOf [number, string]`（裁云接受 `640` 与 `"50%"`）；
+/// - `Color` → `pattern: ^#[0-9a-fA-F]{6,8}$`；
+/// - `aliases` → `deprecated` 提示写进 `description`（不列入 properties：
+///   别名字段本来就不是合法键，列进去反而会让 schema 认下拼错的写法）。
+[[nodiscard]] auto schema_to_json_schema() -> std::string;
 
 /// 把 schema 导成 JSON（智能体的自省入口）。
 ///

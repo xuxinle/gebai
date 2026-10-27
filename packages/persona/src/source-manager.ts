@@ -218,6 +218,15 @@ export class EventSourceManager {
         if (this.explicit.has(name)) continue
         if (!result.sources.has(name)) this.defs.delete(name)
       }
+      // 已修好/已删除的源要从 errors 里摘除（与 defs 同一口径）。
+      //
+      // 为何必须做：`state()` 专门把 errors 里的源当作「加载失败也要可见」补进列表，
+      // 所以这里漏删一个，删掉的文件就**永久**留在面板上（重启前永不消失），
+      // 且 `sourceErrors` 一直报一个已经不存在的文件——把「已修好」误报成「还坏着」。
+      for (const name of [...this.errors.keys()]) {
+        if (this.explicit.has(name)) continue
+        if (!result.errors.has(name)) this.errors.delete(name)
+      }
       for (const [name, err] of result.errors) {
         this.log("warn", `事件源 ${name} 加载失败 [${err.domain}]: ${err.error}`)
       }

@@ -1,9 +1,13 @@
 /**
  * 根选择菜单的分组与折叠（纯逻辑，无 DOM，资源管理器的根按钮用它拼菜单）。
  *
- * 分两类决策：
+ * 三类决策：
  *
- * - **分组顺序与标题**：项目（`proj`）排最上——它是最常用的落脚点，其余按「会话工作区 → 其它」。
+ * - **歌白置顶且无标题**：歌白自身（`proj:` 且带 `self` 标）排在最上，**不占分组行**——
+ *   它本身就是一项，再顶一行「歌白」只会让菜单多一层、且那一行不可点（与它下面那项重复）。
+ *   排在项目组之前是因为它跟当前在看哪个会话无关，是用户绕开工件流转一圈的家目录，
+ *   混在项目列表里会被业务项目淡化。
+ * - **其余项目**：`proj` 按注册表顺序排在歌白之后，再往后是「会话工作区 → 其它」。
  *   标题「项目」而不是「预置项目」：菜单里说「项目」就够，`proj` 这个名字是服务端注册表的叫法。
  * - **会话折叠**：会话根按最近使用排（服务端已这样排）且数量可以很多（上限 20），全铺出来会把这个
  *   菜单拉成一长条，而其中绝大多数是「顺手点一下看看」的旧会话。默认只列「最近若干个 + 当前所在的那个」，
@@ -19,10 +23,12 @@ export interface RootMenuEntry {
   /** 是否仓库（菜单里给分支后缀用） */
   isRepo?: boolean
   branch?: string
+  /** 歌白自身项目（单独置顶，不排在普通项目组里） */
+  self?: boolean
 }
 
 export interface RootMenuSection {
-  /** 分类标题（菜单里渲染成不可点的分组行） */
+  /** 分类标题（菜单里渲染成不可点的分组行）；**空串 = 不渲染分组行**（歌白自身直接露出）。 */
   title: string
   entries: RootMenuEntry[]
   /** 折叠出去的其余项（会话组专属；为空表示不折叠） */
@@ -32,20 +38,26 @@ export interface RootMenuSection {
 /** 会话组默认折叠阈值：超过它就收进「更多」（会话名往往很长，多列几条就把菜单拉成一长条）。 */
 export const SESSION_VISIBLE = 5
 
-const GROUP_ORDER: Array<{ title: string; kind: string; collapse?: boolean }> = [
-  { title: "项目", kind: "proj" },
-  { title: "会话工作区", kind: "sess", collapse: true },
-  { title: "其它", kind: "other" },
+/**
+ * 分组定义：`match` 决定一行归哪组（按顺序首个命中生效），`collapse` 仅会话组有。
+ * 歌白组必须排在项目组之前——它的判据（`self`）是项目组的子集。
+ */
+const GROUP_ORDER: Array<{ title: string; match: (x: RootMenuEntry) => boolean; collapse?: boolean }> = [
+  { title: "", match: (x) => x.kind === "proj" && x.self === true },
+  { title: "项目", match: (x) => x.kind === "proj" },
+  { title: "会话工作区", match: (x) => x.kind === "sess", collapse: true },
+  { title: "其它", match: (x) => x.kind !== "sess" && x.kind !== "proj" },
 ]
-
-const KNOWN_KINDS = ["sess", "proj"]
 
 /** 分组 + 折叠（`roots` 的顺序按调用方给的来；会话组保持服务端的最近使用序）。 */
 export function buildRootSections(roots: RootMenuEntry[], currentRootId: string, sessVisible = SESSION_VISIBLE): RootMenuSection[] {
   const sections: RootMenuSection[] = []
+  /** 已被前面分组收走的项：后组不得重复收录（歌白虽也是 `proj`）。 */
+  const taken = new Set<RootMenuEntry>()
   for (const g of GROUP_ORDER) {
-    const list = roots.filter((x) => (g.kind === "other" ? !KNOWN_KINDS.includes(x.kind) : x.kind === g.kind))
+    const list = roots.filter((x) => !taken.has(x) && g.match(x))
     if (!list.length) continue
+    for (const x of list) taken.add(x)
     if (!g.collapse || list.length <= sessVisible) {
       sections.push({ title: g.title, entries: list })
       continue

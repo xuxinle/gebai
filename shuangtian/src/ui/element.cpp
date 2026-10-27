@@ -657,6 +657,33 @@ void Element::layout_children(const RenderContext& context, math::Rect content) 
   if (leftover < 0.0f) leftover = 0.0f;
   const float grow_unit = grow_weight > 0.0f ? leftover / grow_weight : 0.0f;
 
+  // **把均分产生的整像素余数按顺序补给前几个 `grow` 子项**。
+  //
+  // ## 为何不能直接均分（实测代价）
+  //
+  // `leftover / grow_weight` 常常落在半像素上：gallery 的四张统计卡是
+  // 858 可用宽 - 3×8 gap = 834，÷4 = **208.5**，于是每张卡宽 214.5、
+  // 第二张卡的 x 落在 **490.5**。后果是卡片的**左右边界跨在半个像素上**，
+  // 1px 描边被劈成两半（各 50% 覆盖）——观感是“左右边缘发虚”。
+  //
+  // 实测同一张卡的两个方向的边界剖面（暗色）：
+  //   上边缘（y 为整数）  14 → **88**          一处锐利过渡
+  //   右边缘（x 为 .5）   54 → **50** → 9      分散在两三个像素上
+  // 这种“只在一个方向发虚”最容易被读成渲染 bug。
+  //
+  // ## 为何是“补给前几个”而不是四舍五入每个
+  //
+  // 四舍五入每个子项会让总宽不再等于可用宽（4×208.5 各自取整后可能多出 2px），
+  // 表现为末尾空隙或溢出。按顺序发余数则总和不变，且偏差均摊（每个子项最多差 1px）。
+  // 与 Chromium 的 `LayoutUnit` 处理同构。
+  const int grow_count = static_cast<int>(grow_weight);
+  const int base_extent = static_cast<int>(grow_unit);
+  int grow_remainder = 0;
+  if (grow_count > 0) {
+    grow_remainder = static_cast<int>(std::lround(leftover)) - base_extent * grow_count;
+  }
+  int grow_index = 0;
+
   float cursor = row ? content.x : content.y;
   float used = total_gap + fixed_main;
   for (auto* child : visible) {
@@ -664,7 +691,12 @@ void Element::layout_children(const RenderContext& context, math::Rect content) 
     float main_extent = main_size(style_.direction, child->measured_size());
     const float explicit_main = row ? child_style.width : child_style.height;
     if (explicit_main != kAuto) main_extent = explicit_main;
-    if (child_style.grow) main_extent = grow_unit;
+    if (child_style.grow) {
+      // 前 `grow_remainder` 个子项各多拿 1px（余数均摊），其余崄基准值。
+      main_extent = static_cast<float>(base_extent +
+                                       (grow_index < grow_remainder ? 1 : 0));
+      ++grow_index;
+    }
 
     float cross_extent = cross_size(style_.direction, child->measured_size());
     const float explicit_cross = row ? child_style.height : child_style.width;
@@ -817,8 +849,8 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
     canvas.fill_rect(box.inflate(spread), raster::Paint::solid(glow),
                      style_.radius + spread, raster::DrawOptions{.opacity = style_.opacity});
   }
-  if (style_.shadow.visible()) {
-    // 上浮时阴影跟着走（否则"抬起"会被阴影钉在原地，看着像两层错位）
+  if (style_.shadow.visible() && !style_.shadow.inset) {
+    // 上浮时阴影跟着走（否则“抬起”会被阴影钉在原地，看着像两层错位）
     const math::Rect shadow_box = box.inset(style_.margin);
     // **告诉后端“哪块随后会被不透明底盖掉”**（`covered_region`）。
     //
@@ -858,20 +890,90 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
     canvas.fill_rect(box, raster::Paint::solid(background), style_.radius,
                      raster::DrawOptions{.opacity = style_.opacity});
   }
-  // 顶部内高光（亚克力的"玻璃边缘"）：最后画，压在描边之上。
+  // **内阴影（`inset`）在底色之后画**——它要压在底色之上才看得见。
   //
-  // 为什么用**横向渐变**而不是一条实线：等宽实线在两端会被读成"多了一道边框"，
-  // 而玻璃边缘的受光是中间强、向两侧衰减的。渐变两端 alpha 归零，于是就自然消失在
-  // 圆角处——不需要额外的圆角裁剪（也不会在圆角处露出直角）。
+  // ## 为何不用 `draw_shadow`（实测踩到，两轮才想清楚）
+  //
+  // 最初想“内阴影 = 外投影的偏移取反 + 裁剪到框内”，以为能直接复用。
+  // 但 `draw_shadow` 的遮罩语义是「**矩形内满强度、矩形外只有 blur 宽度的衰减带**」
+  // （见 `tools/draw_shadow_profile_probe.cpp` 的实测剖面：矩形内 3.1 恒定、
+  // 边缘 4~6px 内降到 0）。于是把矩形放到框内 → 整块都吃满阴影，
+  // 变成了“换了个更深的底色”而不是“边缘压暗”。把矩形外扩也不行：
+  // 衰减带只有 blur 宽，而框宽几百像素，中心永远落在矩形内。
+  //
+  // ## 正确的形状：四条渐变带（与 CSS `inset box-shadow` 同构）
+  //
+  // 每条带从**框边**的 `shadow.color` 渐变到**框内 `spread` 处**的透明；
+  // 四条叠在一起就是“四周内缘压暗”。用圆角裁剪把四角收齐。
+  // 偏移（`offset_x/offset_y`）通过**偏置四条带的过渡长度**表达方向：
+  // 偏移为正的那一侧带更窄（光从那侧来），负的那侧更宽。
+  if (style_.shadow.visible() && style_.shadow.inset) {
+    const float spread = std::max(style_.shadow.blur * 2.0f, 2.0f);
+    const math::Color edge = style_.shadow.color;
+    const math::Color clear = edge.with_alpha(0);
+    // 偏移归一化到 [-1, 1]，用来把两侧过渡长度调成不对称。
+    const float ox = std::clamp(style_.shadow.offset_x / spread, -1.0f, 1.0f);
+    const float oy = std::clamp(style_.shadow.offset_y / spread, -1.0f, 1.0f);
+    // 偏移为正 ⇒ 该侧变窄（受光），为负 ⇒ 变宽（背光）。
+    const float top_len = spread * (1.0f - oy * 0.5f);
+    const float bottom_len = spread * (1.0f + oy * 0.5f);
+    const float left_len = spread * (1.0f - ox * 0.5f);
+    const float right_len = spread * (1.0f + ox * 0.5f);
+
+    canvas.push_clip_rounded_rect(box, style_.radius);
+    const auto band = [&](math::Point from, math::Point to, math::Rect rect) {
+      if (rect.width <= 0.0f || rect.height <= 0.0f) return;
+      canvas.fill_rect(
+          rect,
+          raster::Paint::with_gradient(raster::Gradient::linear(
+              from, to,
+              std::vector<raster::GradientStop>{raster::GradientStop{0.0f, edge},
+                                                raster::GradientStop{1.0f, clear}})),
+          0.0f, raster::DrawOptions{.opacity = style_.opacity});
+    };
+    const float ix = box.x + std::min(style_.margin.left, 0.0f);
+    const float iy = box.y + std::min(style_.margin.top, 0.0f);
+    const float iw = box.width;
+    const float ih = box.height;
+    // 上带：从顶边往下渐变
+    band(math::Point{ix, iy}, math::Point{ix, iy + top_len},
+         math::Rect{ix, iy, iw, top_len});
+    // 下带：从底边往上渐变
+    band(math::Point{ix, iy + ih}, math::Point{ix, iy + ih - bottom_len},
+         math::Rect{ix, iy + ih - bottom_len, iw, bottom_len});
+    // 左带
+    band(math::Point{ix, iy}, math::Point{ix + left_len, iy},
+         math::Rect{ix, iy, left_len, ih});
+    // 右带
+    band(math::Point{ix + iw, iy}, math::Point{ix + iw - right_len, iy},
+         math::Rect{ix + iw - right_len, iy, right_len, ih});
+    canvas.pop_clip();
+  }
+  // 顶部内高光（亚克力的“玻璃边缘”）：最后画，压在描边之上。
+  //
+  // 为什么不是一条实线：等宽实线在两端会被读成“多了一道边框”，
+  // 而玻璃边缘的受光是中间强、向两侧衰减的。渐变两端 alpha 归零，于是自然消失在
+  // 圆角处（不需要额外裁剪，也不会在圆角处露出直角）。
+  //
+  // **2026-10-27 改为径向（左上受光）**：横向单条在宽卡片上会被读成“贴了一条亮胶带”——
+  // 因为真实的受光不在“顶边中点”，而在**光源方向**（约定左上）。
+  // 改成以左上角为圆心的径向后，亮度沿对角线向向衰减，与 `Shadow` 的“光从上来”
+  // （内阴影压在上内缘）方向一致——两者方向一致才像一个物体，否则会自相矛盾。
   if (style_.top_highlight.a != 0U && style_.highlight_width > 0.0f && box.width > 0.0f) {
     const math::Color edge = style_.top_highlight;
     const math::Color fading = edge.with_alpha(0);
-    // 只在顶边**内沿**那一条（高度 = highlight_width）内绘制。
+    // 只占顶边**内沿**那一条（高度 = highlight_width）：径向渐变的垂直影响
+    // 天然衰减得很快，但把它限制在一条带里才能保证“不下泼到内容区”。
     const math::Rect band{box.x, box.y, box.width, style_.highlight_width};
-    const raster::Gradient gradient = raster::Gradient::linear(
-        math::Point{band.x, band.y}, math::Point{band.right(), band.y},
-        std::vector<raster::GradientStop>{raster::GradientStop{0.0f, fading},
-                                          raster::GradientStop{0.5f, edge},
+    // 径向半径：取宽度的 55%。太小 → 只有左上一小段亮（像块污渍）；
+    // 太大 → 整条顶边均匀发亮，又退化回“亮胶带”。宽高都参与，使窄卡也不会局部过亮。
+    const float reach = std::max(box.width, box.height * 3.0f) * 0.55f;
+    const raster::Gradient gradient = raster::Gradient::radial(
+        math::Point{band.x, band.y}, reach,
+        std::vector<raster::GradientStop>{raster::GradientStop{0.0f, edge},
+                                          raster::GradientStop{0.45f, edge.with_alpha(
+                                                                            static_cast<std::uint8_t>(
+                                                                                edge.a / 3))},
                                           raster::GradientStop{1.0f, fading}});
     // 裁剪到圆角内：半径大于 0 时顶边那段会被圆角削掉，不裁就会在角上多出一小块。
     if (style_.radius > 0.0f) canvas.push_clip_rounded_rect(box, style_.radius);

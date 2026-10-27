@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
 import MarkdownIt from "markdown-it"
 
 // markdown.ts 模块加载期访问 document（state.ts 顶层 getElementById 等），bun test 无 DOM：
@@ -36,6 +36,12 @@ const doc = {
   currentScript: null,
   baseURI: "http://localhost/",
 }
+const prevGlobals = {
+  document: (globalThis as Record<string, unknown>).document,
+  navigator: (globalThis as Record<string, unknown>).navigator,
+  location: (globalThis as Record<string, unknown>).location,
+  MutationObserver: (globalThis as Record<string, unknown>).MutationObserver,
+}
 ;(globalThis as Record<string, unknown>).document = new Proxy(doc, {
   get(t, k) {
     if (typeof k === "string" && k in t) return (t as Record<string, unknown>)[k]
@@ -49,6 +55,16 @@ const doc = {
   observe() {}
   disconnect() {}
 }
+// document/navigator/location/MutationObserver 是整体替换的：本文件跑完必须放回基线那一份，
+// 否则同进程后续测试文件读到这里的桩（成员多为 no-op），表现为单文件全过、全量随顺序失败
+// （约定见 scripts/test-preload.ts）。
+afterAll(() => {
+  const g = globalThis as Record<string, unknown>
+  g.document = prevGlobals.document
+  g.navigator = prevGlobals.navigator
+  g.location = prevGlobals.location
+  g.MutationObserver = prevGlobals.MutationObserver
+})
 
 const { applyLinkTargetRule, applyTaskLists, enhanceDiagramBlocks, fenceDiagramFormat, openFenceLang } = await import("./markdown")
 

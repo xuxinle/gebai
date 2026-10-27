@@ -1,0 +1,51 @@
+{
+  "id": "lighting-studio-3d",
+  "kind": "snippet",
+  "path": "examples/caiyun/assets/snippets/lighting-studio.json",
+  "summary": "三维场景的棚拍打光：主光 + 两盏冷暖点光，实测零过曝且保留材质层次",
+  "use_for": "model_script 里画面发灰/发白/像塑料时先套这份。总光量（ambient+diffuse+rim）控制在 0.88 附近是实测的过曝分界线；点光强度 1.3~1.5 足够，给到 2.8 会让环面结这类复杂形状 30% 像素过曝",
+  "tags": ["snippet", "3d", "lighting", "model_script", "studio", "verified"],
+  "verified": "verified",
+  "measured": {
+    "overexposed_ratio": 0.0,
+    "note": "五个参数化网格（齿轮/棱柱/胶囊/弯管/环面结）在 1000x620 下的过曝占比，逐块量测均为 0.0%"
+  },
+  "highlights": [
+    "key_direction [-0.40, 0.66, 0.64]：左上前方主光，与相机成约 40°",
+    "总光量 ambient 0.10 + diffuse 0.52 + rim 0.26 = 0.88（实测：1.25 时环面结 30.6% 过曝，0.88 时 0%）",
+    "两盏点光 intensity 1.5 / 1.3，radius 9.0 —— 给到 2.8 会过曝",
+    "tone_map 用 agx：比 aces 更压高光、中间调略去饱和，适合产品片",
+    "exposure 0.92：略低于 1，给后续调色留余量"
+  ],
+  "caveats": [
+    "金属球（metallic=1）用这套几乎无改善：点光的漫反射项乘 (1-metallic) 归零，只剩极窄的 GGX 高光，环境感建立不起来。金属要用大 roughness（0.35+）或干脆改用非金属",
+    "点光 radius 是硬截断：超出半径瞬间归零。实测球背面 6 像素内亮度掉 70 级，会看到一圈硬边。把 radius 给大（9.0+）让截断落在画面外",
+    "没有 AO / 环境反射 / 多次反弹：物体接触处不会有暗角，复杂形状的自遮挡层次全靠单次 N·L"
+  ],
+  "body": {
+    "lighting": {
+      "key_direction": [-0.40, 0.66, 0.64],
+      "ambient": 0.10,
+      "diffuse": 0.52,
+      "rim": 0.26,
+      "exposure": 0.92,
+      "tone_map": "agx",
+      "extra_lights": [
+        {
+          "kind": "point",
+          "position": [-3.4, 2.0, -1.0],
+          "color": [1.0, 0.74, 0.46],
+          "intensity": 1.5,
+          "radius": 9.0
+        },
+        {
+          "kind": "point",
+          "position": [3.6, 1.2, 1.6],
+          "color": [0.44, 0.68, 1.0],
+          "intensity": 1.3,
+          "radius": 9.0
+        }
+      ]
+    }
+  }
+}

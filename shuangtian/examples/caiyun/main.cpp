@@ -35,6 +35,10 @@
 #include "director.hpp"
 #include "director_bridge.hpp"
 #include "layer_schema.hpp"
+#include "package.hpp"
+#include "package_expand.hpp"
+#include "snapshot.hpp"
+#include "usd_export.hpp"
 #include "project.hpp"
 #include "render.hpp"
 #include "views.hpp"
@@ -79,11 +83,34 @@ struct Options {
   std::string shots{};
   /// `--script <路径>`：启动即装载导演脚本（AI/CI 的入口）。
   std::string script{};
+  /// 工程包（`.cypkg`）的建包/拍平/规范化（三个一次性动作，不启界面）。
+  std::string pack_source{};
+  std::string pack_target{};
+  std::string flatten_source{};
+  std::string normalize_source{};
+  /// `--check <包目录>`：意图偏差 + 资产漂移体检（不启界面）。
+  std::string check_source{};
+  /// `--snapshot <帧目录> <快照输出目录>`：从 PNG 帧序列抽稀疏快照。
+  std::string snapshot_frames{};
+  std::string snapshot_out{};
+  /// `--diff-snap <快照A> <快照B>`：逐帧视觉比对。
+  std::string diff_a{};
+  std::string diff_b{};
+  /// `--export-usda <model_script.json> <输出.usda>`：导出三维几何/材质。
+  std::string usd_source{};
+  std::string usd_target{};
   /// `--ai-control`：启动即进入 AI 控制态（人只能查看）。
   ///
   /// 为何要这个开关而不是“让 AI 自己发 edit_lock”：演示/人机同屏时，
   /// **启动那一刻就不该给人工编辑留窗口**——先把界面摆对，再开始放片子。
   bool ai_control{false};
+  /// `--strict`：脚本里有 **error 级** schema 诊断就拒绝应用（不出片、非 0 退出）。
+  ///
+  /// **默认开**：字段名拼错 / 类型不符一律失败。实测依据——三个官方样例与
+  /// `styles/` 下全部模板脚本在严格模式下**全部通过**，所以它不会误伤存量脚本；
+  /// 而它拦住的都是“看着像出片了、实际那行没生效”的静默错误。
+  /// 逐字段试效果时可用 `--no-strict` 关掉（不想被一个未登记键打断）。
+  bool strict{true};
   /// `--render <输出 mp4>` + `--render-size WxH` + `--render-frames N`：启动即渲染。
   std::string render_output{};
   int render_width{1920};
@@ -112,6 +139,8 @@ auto print_usage(std::string_view program) -> void {
       "内容/自动化\n"
       "  --script PATH         启动即装载导演脚本（JSON；缺省 = 内置歌白 10 秒宣传片）\n"
   "  --ai-control          启动即进入 AI 控制态（人工编辑控件置灰，只能查看/播放）\n"
+      "  --strict              脚本有 error 级 schema 诊断则拒绝启动（**默认开**）\n"
+      "  --no-strict           关闭严格校验（手工逐字段试效果时用）\n"
       "  --render PATH         启动即渲染成片（mp4；需本机有 ffmpeg）\n"
       "  --render-size WxH     成片分辨率（缺省 1920x1080）\n"
       "  --render-frames N     只渲染前 N 帧（快速试渲）\n"
@@ -166,8 +195,39 @@ auto parse_options(int argc, char** argv) -> Options {
       options.shots = value("");
       } else if (raw == "--script") {
     options.script = value("");
+  } else if (raw == "--pack") {
+    // 建包：`--pack <脚本.json> <包目录>`（两个值）。
+    options.pack_source = value("");
+    options.pack_target = value("");
+  } else if (raw == "--flatten") {
+    // 拍平：把一个包写成单文件脚本（标准输出，便于管道与 diff）。
+    options.flatten_source = value("");
+  } else if (raw == "--check") {
+    // 体检：意图偏差 + 素材漂移。
+    options.check_source = value("");
+  } else if (raw == "--snapshot") {
+    // 抽快照：`--snapshot <帧目录> <快照输出目录>`
+    options.snapshot_frames = value("");
+    options.snapshot_out = value("");
+  } else if (raw == "--diff-snap") {
+    // 视觉比对：`--diff-snap <快照A> <快照B>`
+    options.diff_a = value("");
+    options.diff_b = value("");
+  } else if (raw == "--export-usda") {
+    // 导出三维内容：`--export-usda <model_script.json> <输出.usda>`
+    options.usd_source = value("");
+    options.usd_target = value("");
+  } else if (raw == "--normalize") {
+    // 规范化：读脚本再按同一序列化器写回标准输出。
+    // 用途是给“包拍平 vs 原脚本”提供**同一口径的参照物**——
+    // 直接拿原文比会把排版差异误判成语义丢失。
+    options.normalize_source = value("");
   } else if (raw == "--ai-control") {
     options.ai_control = true;
+  } else if (raw == "--strict") {
+    options.strict = true;
+  } else if (raw == "--no-strict") {
+    options.strict = false;
   } else if (raw == "--render") {
       options.render_output = value("");
     } else if (raw == "--export-dir") {
@@ -201,6 +261,14 @@ auto parse_options(int argc, char** argv) -> Options {
       // 保留 PNG 帧序列。默认走管道（RGBA 直送 ffmpeg），不落盘——
       // 需要逐帧抽样的验收工具（ot_bench / carry_qa）必须显式打开它。
       options.keep_frames = true;
+    } else if (raw == "--dump-schema") {
+      // 打印字段表后立即退出：给子 Agent 的 `script_schema` 工具用。
+      //
+      // 为何要一个专用参数而不是走控制通道：查字段是最频的动作，
+      // 而控制通道要求“应用先启动 + 连 token + 同一应用只允许一实例”。
+      // 离线批处理场景下 `--dump-schema` 一行就够，且没有清理负担。
+      st::print("{}", caiyun::schema_to_json());
+      std::exit(0);
     } else if (raw == "--bench") {
       options.bench_seconds = static_cast<int>(std::clamp(parse_int("--bench", 0), 0LL, 3600LL));
     } else if (raw == "-h" || raw == "--help") {
@@ -1037,6 +1105,14 @@ class CaiyunPage final : public dsl::Component {
   [[nodiscard]] auto timeline_widget() noexcept -> TimelineView* { return timeline_; }
 
   /// 应用脚本文本（控制通道 `invoke script` 的落点；走 `parse_script` 同一口径）。
+  ///
+  /// ## 返回形状为何带诊断
+  ///
+  /// 早先只返回脚本名，诊断就算收集了也得靠调用方**再发一次**
+  /// `get director schema_diagnostics` 才看得到。而模型/CI 的典型行为是
+  /// “发脚本 → 看到成功 → 直接渲”——于是拼写错字段被静默忽略，
+  /// **整轮渲染（几十秒~两分钟）都是白做的**。
+  /// 把诊断直接拼进返回值，错误就在**同一个回合**里暴露。
   auto apply_script_text(std::string_view json) -> st::Result<std::string> {
     const auto parsed = caiyun::parse_script(json);
     if (!parsed) return st::forward_error(parsed.error());
@@ -1047,10 +1123,57 @@ class CaiyunPage final : public dsl::Component {
     if (monitor_ != nullptr) monitor_->refresh();
     if (timeline_ != nullptr) timeline_->set_project(&project_);
     bump();
-    log(std::format("已应用内联脚本：{}（{} 场景）", project_.script.name,
-                    project_.script.scenes.size()));
-    return project_.script.name;
+
+    // 诊断随返回值回传（形状与 `schema_diagnostics` 同一口径，便于工具侧解析）。
+    const std::string diags = diagnostics_json();
+    const std::size_t count = project_.script.diagnostics.size();
+    const std::size_t errors = strict_violation_count();
+    if (count == 0U) {
+      log(std::format("已应用内联脚本：{}（{} 场景）· 无诊断", project_.script.name,
+                      project_.script.scenes.size()));
+      return std::format("{}\n__diagnostics__:{}", project_.script.name, diags);
+    }
+    log(std::format("已应用内联脚本：{}（{} 场景）· {} 条诊断（{} 错误）", project_.script.name,
+                    project_.script.scenes.size(), count, errors));
+    // **严格模式**：有 error 级诊断就不让“成功”糊过去——调用方拿到错误才能拦住渲染。
+    // 只拦 error（未知字段/类型错），不拦 warning（越界夹取是有意保留的宽容）。
+    if (strict_ && errors > 0U) {
+      return st::unexpected(
+          st::ErrorCode::Invalid,
+          std::format("--strict：{} 条错误级 schema 诊断，拒绝应用脚本：\n{}", errors, diags));
+    }
+    return std::format("{}\n__diagnostics__:{}", project_.script.name, diags);
   }
+
+  /// 把当前脚本的诊断序列化成 JSON 数组（与 `schema_diagnostics` **同一形状**）。
+  ///
+  /// 为何不复用控制通道那个 lambda：两者用途不同（这里是返回值）但**形状必须一致**，
+  /// 否则工具侧要写两套解析。字段与 `severity` 逐项对齐那个实现。
+  [[nodiscard]] auto diagnostics_json() const -> std::string {
+    st::Json list = st::Json::array();
+    for (const Diagnostic& diag : project_.script.diagnostics) {
+      st::Json item = st::Json::object();
+      item["severity"] = diag.is_error ? "error" : "warning";
+      item["path"] = diag.path;
+      item["key"] = diag.key;
+      item["message"] = diag.message;
+      if (!diag.suggestion.empty()) item["suggestion"] = diag.suggestion;
+      list.push_back(std::move(item));
+    }
+    return list.dump();
+  }
+
+  /// 严格模式下该被拦的诊断条数。
+  ///
+  /// 判定规则在 `caiyun::strict_violation_count`（纯函数，回归测试直接覆盖）；
+  /// 这里只负责把它接到当前工程上——**同一套规则只写一份**。
+  [[nodiscard]] auto strict_violation_count() const -> std::size_t {
+    return caiyun::strict_violation_count(project_.script.diagnostics);
+  }
+
+  /// 严格模式的开关（启动参数 `--strict` 与测试入口共用同一实现）。
+  void set_strict(bool on) noexcept { strict_ = on; }
+  [[nodiscard]] auto strict() const noexcept -> bool { return strict_; }
 
   [[nodiscard]] auto script_json() const -> std::string {
     return caiyun::script_to_json(project_.script);
@@ -1066,6 +1189,12 @@ class CaiyunPage final : public dsl::Component {
   std::string script_path_{};
   std::vector<std::string> log_lines_{};
   int selected_scene_{0};
+  /// `--strict`：有 error 级 schema 诊断就**拒绝应用脚本**（不出片、非 0 退出）。
+  ///
+  /// 与 `Options::strict` 同默认（**开**）：构造后由 `set_strict(options.strict)` 覆盖。
+  /// 这里也写 true，是为了让直接构造 `CaiyunPage` 的调用方（测试/其它入口）
+  /// 不会静默回到宽容态——**默认安全**比默认方便更重要。
+  bool strict_{true};
   dsl::State<std::size_t> version_{0};
 };
 
@@ -1073,6 +1202,209 @@ class CaiyunPage final : public dsl::Component {
 
 auto run_app(int argc, char** argv) -> int {
   const Options options = parse_options(argc, argv);
+
+  // ── 工程包（`.cypkg`）的三个一次性动作 ──
+  //
+  // 它们不启界面、不开控制通道：都是“给工具链用的原子操作”，
+  // 与渲染无关，也不应该顺带把窗口拉起来（CI 里那是噪音）。
+
+  // ① 建包：`--pack <脚本.json> <包目录>`
+  if (!options.pack_source.empty()) {
+    if (options.pack_target.empty()) {
+      st::eprint("--pack 需要两个值：<脚本.json> <包目录>\n");
+      return 2;
+    }
+    const auto text = st::fs::read_text(options.pack_source);
+    if (!text) {
+      st::eprint("读不到脚本：{}\n", options.pack_source);
+      return 1;
+    }
+    const auto parsed = caiyun::parse_script(*text, st::fs::parent(options.pack_source));
+    if (!parsed) {
+      st::eprint("脚本解析失败：{}\n", parsed.error().message);
+      return 1;
+    }
+    const auto created = caiyun::create_package(options.pack_target, *parsed,
+                                      st::fs::parent(options.pack_source), {}, true);
+    if (!created) {
+      st::eprint("建包失败：{}\n", created.error().message);
+      return 1;
+    }
+    st::print("已建包：{}\n", options.pack_target);
+    return 0;
+  }
+
+  // ② 体检：`--check <包目录>` → 意图偏差 + 资产漂移（有则非 0 退出，可进 CI）
+  if (!options.check_source.empty()) {
+    const auto expanded = caiyun::expand_package(options.check_source);
+    if (!expanded) {
+      st::eprint("读包失败：{}\n", expanded.error().message);
+      return 1;
+    }
+    int problems = 0;
+    if (!expanded->intent_deviations.empty()) {
+      st::print("意图偏差 {} 条：\n", expanded->intent_deviations.size());
+      for (const auto& dev : expanded->intent_deviations) {
+        st::print("  - {}\n", dev.to_string());
+      }
+      problems += static_cast<int>(expanded->intent_deviations.size());
+    }
+    const caiyun::AssetCheck& assets = expanded->asset_check;
+    if (!assets.missing.empty()) {
+      st::print("素材缺失 {} 个：\n", assets.missing.size());
+      for (const auto& name : assets.missing) st::print("  - {}\n", name);
+      problems += static_cast<int>(assets.missing.size());
+    }
+    if (!assets.modified.empty()) {
+      st::print("素材被改动 {} 个（内容与登记时不同）：\n", assets.modified.size());
+      for (const auto& name : assets.modified) st::print("  - {}\n", name);
+      problems += static_cast<int>(assets.modified.size());
+    }
+    if (!assets.untracked.empty()) {
+      // 未登记不算问题（可能只是新增了还没用上的素材），只提示。
+      st::print("未登记素材 {} 个（仅提示）：\n", assets.untracked.size());
+      for (const auto& name : assets.untracked) st::print("  - {}\n", name);
+    }
+    if (problems == 0) st::print("工程包体检通过：意图符合、素材完整。\n");
+    return problems == 0 ? 0 : 1;
+  }
+
+  // ④ 视觉快照：`--snapshot <帧目录> <快照目录>`（可选 `--script` 提供场景边界）
+  if (!options.snapshot_frames.empty()) {
+    if (options.snapshot_out.empty()) {
+      st::eprint("--snapshot 需要两个值：<帧目录> <快照目录>\n");
+      return 2;
+    }
+    // 场景边界：有脚本就按真实分镜算（这是“按镜首中尾抽”能成立的前提）。
+    // 没脚本就传空，由 build_snapshot 退化为全片均匀抽取。
+    std::vector<std::pair<int, int>> bounds;
+    double fps = 30.0;
+    int width = 0;
+    int height = 0;
+    if (!options.script.empty()) {
+      const auto text = st::fs::read_text(options.script);
+      if (text) {
+        const auto parsed = caiyun::parse_script(*text, st::fs::parent(options.script));
+        if (parsed) {
+          fps = parsed->fps;
+          width = parsed->width;
+          height = parsed->height;
+          int cursor = 0;
+          for (const auto& scene : parsed->scenes) {
+            const int span = std::max(1, static_cast<int>(std::lround(
+                                                static_cast<double>(scene.duration) * fps)));
+            bounds.emplace_back(cursor, cursor + span);
+            cursor += span;
+          }
+        } else {
+          st::eprint("脚本解析失败，将退化为均匀抽取：{}\n", parsed.error().message);
+        }
+      }
+    }
+    const auto snap = caiyun::build_snapshot(options.snapshot_frames, options.snapshot_out,
+                                             "snapshot", bounds, 0, fps, width, height);
+    if (!snap) {
+      st::eprint("抽快照失败：{}\n", snap.error().message);
+      return 1;
+    }
+    st::print("快照已建立：{}（{} 帧）\n", options.snapshot_out, snap->frames.size());
+    for (const auto& frame : snap->frames) {
+      st::print("  - 第 {} 帧（{:.2f}s，镜{}，{}）\n", frame.index, frame.time_s,
+                frame.scene_index, frame.role);
+    }
+    return 0;
+  }
+
+  // ⑤ 视觉比对：`--diff-snap <快照A> <快照B>`
+  if (!options.diff_a.empty()) {
+    if (options.diff_b.empty()) {
+      st::eprint("--diff-snap 需要两个值：<快照A> <快照B>\n");
+      return 2;
+    }
+    const auto diff = caiyun::diff_snapshots(options.diff_a, options.diff_b);
+    if (!diff) {
+      st::eprint("视觉比对失败：{}\n", diff.error().message);
+      return 1;
+    }
+    st::print("可比帧 {} 对，均差 {:.4f}%，最大差 {:.3f}%（第 {} 帧）\n", diff->compared,
+              diff->mean_diff_pct, diff->worst_diff_pct, diff->worst_frame_index);
+    for (const auto& frame : diff->frames) {
+      st::print("  第 {:5d} 帧：{:7.3f}%  区域 {}x{}+{}+{}  最大通道差 {}\n", frame.index,
+                frame.diff_pct, frame.bounds_w, frame.bounds_h, frame.bounds_x,
+                frame.bounds_y, frame.max_channel_delta);
+    }
+    st::print("判词：{}\n", diff->verdict());
+    return 0;
+  }
+
+  // ⑥ USD 导出：`--export-usda <model_script.json> <输出.usda>`
+  //
+  // 输入是**一份 `model_script`**（不是整份导演脚本）：USD 只携带三维内容，
+  // 而一部片子可能有多个三维镜头。真要导全片，逐镜导多份再在下游拼。
+  if (!options.usd_source.empty()) {
+    if (options.usd_target.empty()) {
+      st::eprint("--export-usda 需要两个值：<model_script.json> <输出.usda>\n");
+      return 2;
+    }
+    const auto text = st::fs::read_text(options.usd_source);
+    if (!text) {
+      st::eprint("读不到输入：{}\n", options.usd_source);
+      return 1;
+    }
+    caiyun::UsdExportOptions usd{ };
+    usd.output_path = options.usd_target;
+    // `obj:` 网格按输入文件所在目录解析（与渲染时同一语义）。
+    const auto spec = st::raster::parse_scene_spec_text(*text);
+    if (!spec) {
+      st::eprint("解析 model_script 失败：{}\n", spec.error().message);
+      return 1;
+    }
+    st::raster::SceneSpec resolved = *spec;
+    if (resolved.asset_basis.empty()) {
+      resolved.asset_basis = st::fs::parent(options.usd_source);
+    }
+    const auto usda = caiyun::scene_spec_to_usda(resolved, usd);
+    if (!usda) {
+      st::eprint("导出失败：{}\n", usda.error().message);
+      return 1;
+    }
+    if (const auto wrote = st::fs::write_text(options.usd_target, *usda); !wrote) {
+      st::eprint("写文件失败：{}\n", wrote.error().message);
+      return 1;
+    }
+    st::print("已导出：{}（{} 字节）\n", options.usd_target, usda->size());
+    return 0;
+  }
+
+  // ⑦ 拍平：`--flatten <包目录>` → 标准输出
+  if (!options.flatten_source.empty()) {
+    const auto flat = caiyun::flatten_to_json(options.flatten_source);
+    if (!flat) {
+      st::eprint("拍平失败：{}\n", flat.error().message);
+      return 1;
+    }
+    st::print("{}", *flat);
+    return 0;
+  }
+
+  // ③ 规范化：`--normalize <脚本.json>` → 标准输出
+  //
+  // 存在理由：给“包拍平 vs 原脚本”提供同一口径的参照物。
+  // 直接比原文会把**排版差异**误判成语义丢失（存量脚本缩进各不相同）。
+  if (!options.normalize_source.empty()) {
+    const auto text = st::fs::read_text(options.normalize_source);
+    if (!text) {
+      st::eprint("读不到脚本：{}\n", options.normalize_source);
+      return 1;
+    }
+    const auto parsed = caiyun::parse_script(*text, st::fs::parent(options.normalize_source));
+    if (!parsed) {
+      st::eprint("脚本解析失败：{}\n", parsed.error().message);
+      return 1;
+    }
+    st::print("{}", caiyun::script_to_json(*parsed));
+    return 0;
+  }
 
   st::app::AppOptions app_options;
   app_options.width = 1180;
@@ -1096,6 +1428,21 @@ auto run_app(int argc, char** argv) -> int {
   }
 
   auto page = std::make_shared<CaiyunPage>(options.script);
+  // 严格模式必须在**任何脚本应用之前**生效（包括构造期的 `load_initial_script`）。
+  page->set_strict(options.strict);
+  if (options.strict) {
+    // 构造期已经装载过一份（有可能是带错的）：立刻复核一次，错就拒绝启动。
+    //
+    // 为何要在这里拦而不是等渲染：`--strict` 的语义是“宁可不在此启动，
+    // 也不产出一份建立在错误字段上的成片”。实测代价：静默忽略的字段名会让
+    // 整轮渲染（几十秒~两分钟）建立在错误语义上，而画面上看不出来。
+    const std::size_t errors = page->strict_violation_count();
+    if (errors > 0U) {
+      st::eprint("--strict：脚本有 {} 条错误级 schema 诊断，拒绝启动：\n{}\n", errors,
+                 page->diagnostics_json());
+      return 1;
+    }
+  }
   // 启动即接管（`--ai-control`）：必须在**首帧之前**设好，否则会出现“先能改、
   // 锁上”的一瞬——而那一瞬恰好是演示时镜头对着屏幕的时候。
   if (options.ai_control) (void)page->project().set_ai_control(true);

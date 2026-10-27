@@ -158,6 +158,7 @@ export function destroyPane(sessionId: string): boolean {
   const pane = panes.get(sessionId)
   if (!pane || pane.running) return false
   if (active === pane) deactivatePane()
+  pane.sticky.dispose()
   pane.container.remove()
   panes.delete(sessionId)
   return true
@@ -177,6 +178,7 @@ export function reapIdlePanes(keep = IDLE_PANE_CACHE): number {
   idle.sort((a, b) => a.lastUsed - b.lastUsed) // 最久未用在前
   let n = 0
   for (const pane of idle.slice(0, excess)) {
+    pane.sticky.dispose()
     pane.container.remove()
     panes.delete(pane.sessionId)
     n += 1
@@ -191,7 +193,10 @@ export function paneCount(): number {
 
 /** 清空全部 pane（登出/测试）：不做运行态保护。 */
 export function resetPanes(): void {
-  for (const pane of panes.values()) pane.container.remove()
+  for (const pane of panes.values()) {
+    pane.sticky.dispose()
+    pane.container.remove()
+  }
   panes.clear()
   active = null
   for (const cb of activateListeners) cb(null)

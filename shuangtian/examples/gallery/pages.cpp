@@ -158,7 +158,7 @@ using st::ui::timeline::Track;
 [[nodiscard]] auto make_caption(std::string_view text) -> std::unique_ptr<Text> {
   auto caption = std::make_unique<Text>(std::string(text));
   caption->set_tone(Tone::Faint);
-  caption->set_font_size(11.0f);
+  caption->set_scale(Text::Scale::Xs2);
   return caption;
 }
 
@@ -180,7 +180,7 @@ using st::ui::timeline::Track;
   header->add_child(std::move(icon_view));
   auto label_text = std::make_unique<Text>(std::move(label));
   label_text->set_tone(Tone::Muted);
-  label_text->set_font_size(12.0f);
+  label_text->set_scale(Text::Scale::Xs);
   header->add_child(std::move(label_text));
   card->add_child(std::move(header));
 
@@ -728,7 +728,7 @@ namespace {
   auto select_state = std::make_unique<Text>("当前：headless（无头离屏）");
   select_state->set_id("select-state");
   select_state->set_tone(Tone::Faint);
-  select_state->set_font_size(12.0f);
+  select_state->set_scale(Text::Scale::Xs);
   auto* select_state_ptr = select_state.get();
   select_card->add_child(std::move(select_state));
   page->add_child(std::move(select_card));
@@ -848,7 +848,7 @@ namespace {
   auto svg_head = std::make_unique<st::ui::Text>(
       std::format("装载 {} 个图标；同一图标从 16px 到 64px 逐级放大——边缘始终平滑（位图放大会糊）",
                   svg_ids.size()));
-  svg_head->set_font_size(11.5f);
+  svg_head->set_scale(Text::Scale::Xs);
   svg_head->set_tone(st::ui::Tone::Muted);
   svg_card->add_child(std::move(svg_head));
   auto svg_grid = make_row(2.0f, /*wrap=*/true);
@@ -917,11 +917,11 @@ namespace {
     left->style().gap = 6.0f;
     auto left_title = std::make_unique<Text>("左面板");
     left_title->set_weight(FontWeight::SemiBold);
-    left_title->set_font_size(12.5f);
+    left_title->set_scale(Text::Scale::Xs);
     left->add_child(std::move(left_title));
     auto left_note = std::make_unique<Text>("拖右边的手柄\n改变两侧比例");
     left_note->set_tone(Tone::Faint);
-    left_note->set_font_size(12.0f);
+    left_note->set_scale(Text::Scale::Xs);
     left->add_child(std::move(left_note));
     split_demo->set_first(std::move(left));
   }
@@ -932,11 +932,11 @@ namespace {
     right->style().gap = 6.0f;
     auto right_title = std::make_unique<Text>("右面板");
     right_title->set_weight(FontWeight::SemiBold);
-    right_title->set_font_size(12.5f);
+    right_title->set_scale(Text::Scale::Xs);
     right->add_child(std::move(right_title));
     auto right_note = std::make_unique<Text>("双击手柄回 50%；\n上下方向用 orientation=vertical");
     right_note->set_tone(Tone::Faint);
-    right_note->set_font_size(12.0f);
+    right_note->set_scale(Text::Scale::Xs);
     right->add_child(std::move(right_note));
     split_demo->set_second(std::move(right));
   }
@@ -998,7 +998,7 @@ namespace {
   auto overlay_state = std::make_unique<Text>("尚未触发浮层");
   overlay_state->set_id("overlay-state");
   overlay_state->set_tone(Tone::Faint);
-  overlay_state->set_font_size(12.0f);
+  overlay_state->set_scale(Text::Scale::Xs);
   auto* overlay_state_ptr = overlay_state.get();
   overlay_card->add_child(std::move(overlay_state));
   page->add_child(std::move(overlay_card));
@@ -1016,7 +1016,7 @@ namespace {
   auto textarea_state = std::make_unique<Text>("内容 0 字");
   textarea_state->set_id("textarea-state");
   textarea_state->set_tone(Tone::Faint);
-  textarea_state->set_font_size(12.0f);
+  textarea_state->set_scale(Text::Scale::Xs);
   auto* textarea_state_ptr = textarea_state.get();
   multiline_card->add_child(std::move(textarea_state));
   page->add_child(std::move(multiline_card));
@@ -1053,7 +1053,7 @@ namespace {
   auto tree_state = std::make_unique<Text>("未选中");
   tree_state->set_id("tree-state");
   tree_state->set_tone(Tone::Faint);
-  tree_state->set_font_size(12.0f);
+  tree_state->set_scale(Text::Scale::Xs);
   auto* tree_state_ptr = tree_state.get();
   tree_card->add_child(std::move(tree_demo));
   tree_card->add_child(std::move(tree_state));
@@ -1082,7 +1082,7 @@ namespace {
   auto tooltip_state = std::make_unique<Text>("气泡未挂出");
   tooltip_state->set_id("tooltip-state");
   tooltip_state->set_tone(Tone::Faint);
-  tooltip_state->set_font_size(12.0f);
+  tooltip_state->set_scale(Text::Scale::Xs);
   auto* tooltip_state_ptr = tooltip_state.get();
   tooltip_card->add_child(std::move(tooltip_state));
   page->add_child(std::move(tooltip_card));
@@ -1101,7 +1101,7 @@ namespace {
   auto picker_state = std::make_unique<Text>("#2563EB（rgba(37, 99, 235, 255)）");
   picker_state->set_id("colorpicker-state");
   picker_state->set_tone(Tone::Faint);
-  picker_state->set_font_size(12.0f);
+  picker_state->set_scale(Text::Scale::Xs);
   auto* picker_state_ptr = picker_state.get();
   auto picker_swatch = std::make_unique<Panel>(FlexDirection::Column);
   picker_swatch->set_id("colorpicker-swatch");
@@ -1132,7 +1132,7 @@ namespace {
   auto viewport_state = std::make_unique<Text>("缩放 100% · pan (0, 0)——滚轮/拖拽后实时回显");
   viewport_state->set_id("viewport-state");
   viewport_state->set_tone(Tone::Faint);
-  viewport_state->set_font_size(12.0f);
+  viewport_state->set_scale(Text::Scale::Xs);
   auto* viewport_state_ptr = viewport_state.get();
   viewport_card->add_child(std::move(viewport_state));
   page->add_child(std::move(viewport_card));
@@ -1172,7 +1172,7 @@ namespace {
   auto editor_state = std::make_unique<Text>("（装载后回显行数/字符数）");
   editor_state->set_id("editor-state");
   editor_state->set_tone(Tone::Faint);
-  editor_state->set_font_size(12.0f);
+  editor_state->set_scale(Text::Scale::Xs);
   auto* editor_state_ptr = editor_state.get();
   editor_card->add_child(std::move(editor_state));
   page->add_child(std::move(editor_card));
@@ -1208,7 +1208,7 @@ namespace {
   auto diff_state = std::make_unique<Text>("（装载后回显差异块数）");
   diff_state->set_id("diff-state");
   diff_state->set_tone(Tone::Faint);
-  diff_state->set_font_size(12.0f);
+  diff_state->set_scale(Text::Scale::Xs);
   auto* diff_state_ptr = diff_state.get();
   diff_card->add_child(std::move(diff_state));
   page->add_child(std::move(diff_card));
@@ -1229,7 +1229,7 @@ namespace {
   auto completion_state = std::make_unique<Text>("未唤起（LSP 场景见 gbcode；本卡静态候选表）");
   completion_state->set_id("completion-state");
   completion_state->set_tone(Tone::Faint);
-  completion_state->set_font_size(12.0f);
+  completion_state->set_scale(Text::Scale::Xs);
   auto* completion_state_ptr = completion_state.get();
   completion_card->add_child(std::move(completion_state));
   page->add_child(std::move(completion_card));
@@ -1247,7 +1247,7 @@ namespace {
   auto palette_state = std::make_unique<Text>("未唤起（选命令后回显；Esc/点遮罩关闭）");
   palette_state->set_id("palette-state");
   palette_state->set_tone(Tone::Faint);
-  palette_state->set_font_size(12.0f);
+  palette_state->set_scale(Text::Scale::Xs);
   auto* palette_state_ptr = palette_state.get();
   palette_card->add_child(std::move(palette_state));
   page->add_child(std::move(palette_card));
@@ -1294,7 +1294,7 @@ namespace {
   auto timeline_state = std::make_unique<Text>("（装载后回显播放头时间码）");
   timeline_state->set_id("timeline-state");
   timeline_state->set_tone(Tone::Faint);
-  timeline_state->set_font_size(12.0f);
+  timeline_state->set_scale(Text::Scale::Xs);
   auto* timeline_state_ptr = timeline_state.get();
   timeline_card->add_child(std::move(timeline_state));
   page->add_child(std::move(timeline_card));
@@ -1337,7 +1337,7 @@ namespace {
   auto merge_state = std::make_unique<Text>("（装载后回显冲突/已解计数）");
   merge_state->set_id("merge-state");
   merge_state->set_tone(Tone::Faint);
-  merge_state->set_font_size(12.0f);
+  merge_state->set_scale(Text::Scale::Xs);
   auto* merge_state_ptr = merge_state.get();
   merge_card->add_child(std::move(merge_state));
   page->add_child(std::move(merge_card));
@@ -1375,7 +1375,7 @@ namespace {
   auto menubar_state = std::make_unique<Text>("点菜单标题展开；条目点击回显到这里");
   menubar_state->set_id("menubar-state");
   menubar_state->set_tone(Tone::Faint);
-  menubar_state->set_font_size(12.0f);
+  menubar_state->set_scale(Text::Scale::Xs);
   auto* menubar_state_ptr = menubar_state.get();
   menubar_card->add_child(std::move(menubar_state));
   page->add_child(std::move(menubar_card));
@@ -1395,7 +1395,7 @@ namespace {
   auto context_state = std::make_unique<Text>("未唤起（条目激活后回显；Esc/点外关闭）");
   context_state->set_id("context-state");
   context_state->set_tone(Tone::Faint);
-  context_state->set_font_size(12.0f);
+  context_state->set_scale(Text::Scale::Xs);
   auto* context_state_ptr = context_state.get();
   context_card->add_child(std::move(context_state));
   page->add_child(std::move(context_card));
@@ -1415,7 +1415,7 @@ namespace {
   auto filedialog_state = std::make_unique<Text>("未打开（确认后回显全路径；Esc/取消关闭）");
   filedialog_state->set_id("filedialog-state");
   filedialog_state->set_tone(Tone::Faint);
-  filedialog_state->set_font_size(12.0f);
+  filedialog_state->set_scale(Text::Scale::Xs);
   auto* filedialog_state_ptr = filedialog_state.get();
   filedialog_card->add_child(std::move(filedialog_state));
   page->add_child(std::move(filedialog_card));
@@ -1448,7 +1448,7 @@ namespace {
   auto terminal_state = std::make_unique<Text>("（装载后回显行数）");
   terminal_state->set_id("terminal-state");
   terminal_state->set_tone(Tone::Faint);
-  terminal_state->set_font_size(12.0f);
+  terminal_state->set_scale(Text::Scale::Xs);
   auto* terminal_state_ptr = terminal_state.get();
   terminal_card->add_child(std::move(terminal_state));
   page->add_child(std::move(terminal_card));
@@ -1895,6 +1895,10 @@ namespace {
   table->set_id("demo-table");
   table->style().height = 248.0f;
   table->set_row_height(34.0f);
+  // 斑马纹默认**关**（`Table::zebra_` 缺省 false，那是留给调用方的开关），
+  // 而本页的说明文字明写着“表头、斑马纹、hover 全部自绘”——不打开就是
+  // **文案与画面不符**；且这张表跨度近 860px，不隔行很容易跟错行。
+  table->set_zebra(true);
   for (const auto& row : std::vector<std::vector<std::string>>{
            {"光栅器", "raster", "稳定", "扫描线覆盖抗锯齿 · 运行段覆盖率", "18"},
            {"字体引擎", "text", "稳定", "TTF/OTF/CFF/CID · CJK 回退 · 字形缓存", "12"},
@@ -2057,7 +2061,7 @@ namespace {
   auto drill_state = std::make_unique<Text>("计数 0 · 输入空 · 开关 关");
   drill_state->set_id("drill-state");
   drill_state->set_tone(Tone::Muted);
-  drill_state->set_font_size(12.0f);
+  drill_state->set_scale(Text::Scale::Xs);
   auto* drill_state_ptr = drill_state.get();
   target_card->add_child(std::move(drill_state));
   page->add_child(std::move(target_card));

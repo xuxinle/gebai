@@ -60,7 +60,18 @@ void sync_control_style(Element& element, const RenderContext& context) {
   const Metrics& metrics = context.theme.metrics();
   Style& style = element.style();
   if (style.radius <= 0.0f) style.radius = metrics.radius_sm;
-  if (style.background.a == 0U) style.background = colors.surface;
+  // 底色用**凹槽**（`surface_sunken`）而不是面板色（`surface`）。
+  //
+  // 设计文档里写得很直白（`BACKLOG` 表面阶梯表）：
+  //   「凹槽（输入框/代码块）→ 暗色再深一档、亮色再沉一档」。
+  // 而旧实现取的是 `surface`，与**卡片底完全同色**——实测（暗色）两者都是
+  // `(30,30,36)`，对比 1.000:1。后果：输入框只能靠 1px 描边“看得出是个控件”，
+  // 而描边本身又极淡（`border` 23% 白），于是整个表单在视觉上“塌”进卡片里，
+  // 没有可点击物的体积感。
+  //
+  // 用 `Sunken` 而不是 `Content`：`Content` 是给**阅读面**（编辑器/终端/预览）的，
+  // 两个模式解析到不同 token；输入框是**控件**不是阅读面，语义上就是“凹进去的一块”。
+  if (style.background.a == 0U) style.background = colors.surface_sunken;
   if (style.border_width <= 0.0f) style.border_width = metrics.border_width;
   if (style.border_color.a == 0U) style.border_color = colors.border;
 }
@@ -310,7 +321,7 @@ void Input::apply_theme(const Theme& theme) {
   // 已被 `measure` 的 “未设则填” 写成某个具体色。若只看“是否等于我方上次写的值”，
   // 首轮就会判为“被别人改过”→ 永远不更新 → 主题切换完全无效。
   // 用 `theme_style_owned_` 记“这份色是我们落的”这个事实。
-  const math::Color next_bg = theme.colors().surface;
+  const math::Color next_bg = theme.colors().surface_sunken;
   const math::Color next_border = theme.colors().border;
   const auto untouched = [](math::Color current, math::Color mine) {
     return current.r == mine.r && current.g == mine.g && current.b == mine.b &&
@@ -325,6 +336,20 @@ void Input::apply_theme(const Theme& theme) {
     style_.border_color = next_border;
     applied_theme_border_ = next_border;
   }
+  // **凹槽内阴影**：把“输入框”从“一块较深的底色”变成“被压进去的槽”。
+  //
+  // 这里**无条件重落**（不跟 `theme_style_owned_`）：内阴影不是调用方能显式设的
+  // 外观项（`Style` 里没有对外的 inset 入口），也就不存在“保住显式设置”的问题。
+  // 它也必须每帧跟着主题走——亮/暗两个模式的浓度不同（见 `Metrics::sunken_shadow`）。
+  //
+  // 偏移 `{0, 1}`：光从左上来 ⇒ 暗部压在**上**内缘。只有纵向偏移是故意的：
+  // 横向也给偏移会让左右两边一亮一暗，而输入框是水平拉伸的矩形，
+  // 左右不对称在宽框上会被读成“描边没对齐”（实测第一版就是左右偏了 1px 的效果）。
+  style_.shadow.color = theme.metrics().sunken_shadow;
+  style_.shadow.blur = theme.metrics().sunken_shadow_blur;
+  style_.shadow.offset_x = 0.0f;
+  style_.shadow.offset_y = 1.0f;
+  style_.shadow.inset = true;
   // ⚠ **不要在这里 `mark_dirty()`**（实测踩到：加了它会让
   // `script_write_takes_partial_damage_path` 这类“局部重绘”用例直接变红）：
   // `apply_theme` 现在每帧都会被调（主题传播与重排解耦，见 `UiRoot::layout`），
@@ -365,9 +390,10 @@ void Input::paint_content(const RenderContext& context, raster::Surface& canvas)
   const float radius = style_.radius > 0.0f ? style_.radius : metrics.radius_sm;
   const bool usable = enabled();
 
-  math::Color background = colors.surface;
+  math::Color background = colors.surface_sunken;
   math::Color border = colors.border;
   if (!usable) {
+    // 禁用态仍然要比正常态**浮起来一档**（不可交互 = 不是凹槽），顺便与正常态拉开。
     background = colors.surface_alt;
     border = colors.border;
   } else if (focused()) {
@@ -914,7 +940,7 @@ void TextArea::paint_content(const RenderContext& context, raster::Surface& canv
   const float radius = style_.radius > 0.0f ? style_.radius : metrics.radius_sm;
   const bool usable = enabled();
 
-  math::Color background = colors.surface;
+  math::Color background = colors.surface_sunken;
   math::Color border = colors.border;
   if (!usable) {
     background = colors.surface_alt;

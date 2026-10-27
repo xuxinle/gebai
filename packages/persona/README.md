@@ -288,3 +288,31 @@ new PersonaRuntime({
    报 undefined。字符串替换式改写特别容易引入这类错误——改完必须跑类型检查。
 3. **测试别依赖真实时序**：文件轮询（1.5s）只用于端到端那一条；桥接语义用注入 fake 源
    精确断言，否则失败时分不清「逻辑错」还是「没等到」。
+
+## 已定稿：投递目录双消费——默认目录分离（2026-10-27 定，方案 A）
+
+**背景**（2026-10-27 实测）：`file_drop` 事件源与内置 `local` 渠道的 `drop` 监听**原默认共用**
+（`{GEBAI_HOME}/persona-drop/`），两者都用 1.5s 轮询、都「处理完即删文件」。同一批文件被谁抢到是竞态：
+
+| 被谁抢到 | 后果 |
+|---|---|
+| `file_drop` 源 | 尊重事件里的 `kind`/`channel` → 按订阅正确路由 |
+| `local` 渠道 drop 监听 | 归类为渠道消息（`kind` 取渠道 `defaultKind`）→ **路由到别的 driver** |
+
+实测（8 条 `kind:webhook` 同批投递）：`alerts`（webhook 订阅）只收到 1 条，另 7 条被 `local` 渠道抢走，
+按 message 类落到 `support`。**这不会报错、计数也全绿**，只表现为「订阅好像没按配置生效」。
+
+**第二次实测（2026-10-27，动态分身）**：投一条 `kind:idle, channel:probetick` 给动态分身 `probe_echo`（订阅 `probetick`），
+结果文件同样被 `local` 渠道抢走 → 按渠道 message 归类 → 无人订阅 `probetick:message` → `unrouted`，
+目标 driver **永远收不到**（`probe_echo.accepted=0`，会话都未创建）。这比「路由错位」更隐蔽：
+**订阅正确的 driver 直接饿死，且不报错**。
+
+**定稿决定（用户拍板：不用兼容，最优化改）**：
+
+- **默认目录分离**（方案 A）：`local` 渠道的 drop 监听改为 `{GEBAI_HOME}/channel-drop/`，
+  `file_drop` 事件源保持 `{GEBAI_HOME}/persona-drop/`。两个入口各自独立，channel/kind 路由可靠。
+- 改动：`packages/channels/src/channels/local.ts`（envVars 描述/`startListen`/注释）+
+  `packages/channels/src/input.test.ts`（测试目录）+
+  `packages/persona/src/sources/file_drop.ts`（注释补目录归属说明）。
+- **不做兼容迁移**：既有部署若在老的 `persona-drop/` 里放文件给渠道用，需改用 `channel-drop/`。
+- 已有 `GEBAI_CHANNELS_LOCAL_DROP_DIR` / `GEBAI_PERSONA_FILEDROP_DIR` 显式配置不受影响（优先于默认值）。

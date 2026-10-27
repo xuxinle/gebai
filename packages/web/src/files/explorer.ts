@@ -1012,7 +1012,8 @@ function openMoreMenu(anchor: HTMLElement): void {
     })
     const items: Array<Record<string, unknown>> = []
     for (const g of sections) {
-      items.push({ label: g.title, disabled: true })
+      // 空标题 = 不渲染分组行（歌白自身直接露出，再顶一行不可点的分类标题与它下面那项重复）
+      if (g.title) items.push({ label: g.title, disabled: true })
       for (const x of g.entries) items.push(asItem(x))
       // 会话组的其余项收进子菜单：hover 才展开，不让菜单一开就是几十条。
       // 不传 icon：带 submenu 的项本来就会在右端出一个右箭头（再传一个会变成两个）。

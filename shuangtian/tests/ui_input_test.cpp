@@ -83,7 +83,7 @@ ST_TEST(ui_input_icon_prefix_is_drawn) {
 
   const Rect slot = icon_slot(input, fixture.theme.metrics());
   // 图标是描边式矢量：16px 的放大镜至少几十个像素颜色不同于底色
-  ST_CHECK(differing_pixels(fixture.canvas, slot, fixture.theme.colors().surface) > 40);
+  ST_CHECK(differing_pixels(fixture.canvas, slot, fixture.theme.colors().surface_sunken) > 40);
 }
 
 ST_TEST(ui_input_without_icon_leaves_slot_empty) {
@@ -92,8 +92,14 @@ ST_TEST(ui_input_without_icon_leaves_slot_empty) {
   render(input, fixture);
 
   const Rect slot = icon_slot(input, fixture.theme.metrics());
-  // 没有任何图标时，槽位里应该是**纯底色**（没被任何图元碰过）
-  ST_CHECK(differing_pixels(fixture.canvas, slot, fixture.theme.colors().surface) == 0);
+  // 没有任何图标时，槽位里应该是**纯底色**（没被任何图元碰过）。
+  //
+  // 口径是 `surface_sunken` 而不是 `surface`：输入框是**凹槽**而非面板
+  //（设计令牌表里写的就是“凹槽（输入框/代码块）→ 再深一档”）。
+  // 本断言原本写的是 `surface`，那是在底色还被错当成面板色时配套的；
+  // 改成 `surface_sunken` 后输入框底与卡片底不再同色，若还用 `surface`
+  // 比对，槽位里每个像素都会被当成“图元碰过”。
+  ST_CHECK(differing_pixels(fixture.canvas, slot, fixture.theme.colors().surface_sunken) == 0);
 }
 
 ST_TEST(ui_input_text_box_shifts_right_for_icon) {

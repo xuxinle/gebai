@@ -56,8 +56,7 @@ function makeRegistry(home: string): ChannelRegistry {
     scanDirs: { builtin: join(home, "__n1__"), custom: join(home, "__n2__") },
     home,
     envReader: (n) =>
-      n === "GEBAI_CHANNELS_LOCAL_DROP_DIR"
-        ? join(home, "persona-drop")
+      n === "GEBAI_CHANNELS_LOCAL_DROP_DIR" ? join(home, "channel-drop")
         : n === "GEBAI_CHANNELS_LOCAL_INBOX_DIR"
           ? join(home, "persona-inbox")
           : undefined,
@@ -134,7 +133,7 @@ describe("装配：渠道 → 桥接 → 内核", () => {
 describe("端到端：真投递 → 真跑 driver", () => {
   test("写 JSON 进 drop 目录 → 事件穿过三段职责到 driver", async () => {
     const home = mkdtempSync(join(tmpdir(), "in-e2e-"))
-    const dropDir = join(home, "persona-drop")
+    const dropDir = join(home, "channel-drop")
     mkdirSync(dropDir, { recursive: true })
     const reg = makeRegistry(home)
     const { runtime, runs } = makeKernel()
@@ -294,7 +293,7 @@ describe("治理：渠道拿不到内核能力", () => {
 describe("生命周期：stopListen 真的摘订阅", () => {
   test("stop 后定时器停掉，新文件不再产生事件", async () => {
     const home = mkdtempSync(join(tmpdir(), "in-stop-"))
-    const dropDir = join(home, "persona-drop")
+    const dropDir = join(home, "channel-drop")
     mkdirSync(dropDir, { recursive: true })
     const reg = makeRegistry(home)
     const { runtime, runs } = makeKernel()
@@ -313,7 +312,7 @@ describe("生命周期：stopListen 真的摘订阅", () => {
 
   test("热加载（refreshIfChanged）后订阅仍存活", async () => {
     const home = mkdtempSync(join(tmpdir(), "in-hot-"))
-    const dropDir = join(home, "persona-drop")
+    const dropDir = join(home, "channel-drop")
     mkdirSync(dropDir, { recursive: true })
     const reg = makeRegistry(home)
     const { runtime, runs } = makeKernel()

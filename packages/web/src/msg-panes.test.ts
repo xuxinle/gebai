@@ -2,6 +2,7 @@
  *  这里只测纯注册表逻辑（DOM 由测试基线的 Proxy 元素替身承担）。 */
 import { afterEach, describe, expect, test } from "bun:test"
 import { activatePane, activePane, deactivatePane, ensurePane, IDLE_PANE_CACHE, paneCount, paneOf, reapIdlePanes, resetPanes, setPaneRunning } from "./msg-panes"
+import { jumpBottom } from "./state"
 
 afterEach(() => {
   resetPanes()
@@ -113,5 +114,68 @@ describe("激活时间戳（LRU 依据）", () => {
     activatePane("s2")
     activatePane("s1")
     expect(pane.lastUsed).toBeGreaterThan(before)
+  })
+})
+
+describe("「回到最新」按钮（全局唯一，按活动 pane 驱动）", () => {
+  type El = { scrollHeight: number; clientHeight: number; scrollTop: number; dispatchEvent: (ev: unknown) => boolean }
+  const geom = (el: El, height: number, viewport: number, top: number) => {
+    el.scrollHeight = height
+    el.clientHeight = viewport
+    el.scrollTop = top
+  }
+  /** 用户上翻：wheel 输入事件 → 位置变化 → scroll 事件。 */
+  const scrollUp = (el: El, top: number) => {
+    el.dispatchEvent({ type: "wheel", deltaY: -120 })
+    el.scrollTop = top
+    el.dispatchEvent({ type: "scroll" })
+  }
+
+  test("切回先创建的会话后点击仍有效（点击按活动 pane 分发，不归最后创建的容器）", () => {
+    const a = activatePane("A")
+    const elA = a.container as unknown as El
+    geom(elA, 1000, 200, 800)
+    a.sticky.lockToBottom()
+    const b = activatePane("B") // 建第二个容器
+    geom(b.container as unknown as El, 1000, 200, 800)
+    b.sticky.lockToBottom()
+
+    activatePane("A")
+    scrollUp(elA, 0) // A 里上翻阅读历史
+    expect(jumpBottom.hidden).toBe(false)
+    ;(jumpBottom as unknown as { onclick: (() => void) | null }).onclick?.()
+    expect(elA.scrollTop).toBe(800)
+    // 真实浏览器里赋值 scrollTop 会随后派发 scroll 事件（按钮据此刷新显隐）；桩不自动派发，手动补一次
+    elA.dispatchEvent({ type: "scroll" })
+    expect(jumpBottom.hidden).toBe(true)
+  })
+
+  test("非活动容器的实例不驱动按钮", () => {
+    const a = activatePane("A")
+    geom(a.container as unknown as El, 1000, 200, 800)
+    a.sticky.lockToBottom()
+    const b = activatePane("B")
+    geom(b.container as unknown as El, 1000, 200, 800)
+    b.sticky.lockToBottom()
+    activatePane("A")
+    scrollUp(a.container as unknown as El, 0)
+    expect(jumpBottom.hidden).toBe(false)
+    // B（非活动）内容变更/刷新不得改按钮显隐
+    b.sticky.refresh()
+    expect(jumpBottom.hidden).toBe(false)
+  })
+
+  test("容器被 LRU 释放后按钮仍有主（释放先于新建) " , () => {
+    const a = activatePane("A")
+    geom(a.container as unknown as El, 1000, 200, 800)
+    a.sticky.lockToBottom()
+    const b = activatePane("B")
+    void b
+    activatePane("A")
+    reapIdlePanes(0) // 释放 B
+    expect(paneOf("B")).toBeUndefined()
+    scrollUp(a.container as unknown as El, 0)
+    ;(jumpBottom as unknown as { onclick: (() => void) | null }).onclick?.()
+    expect((a.container as unknown as El).scrollTop).toBe(800)
   })
 })

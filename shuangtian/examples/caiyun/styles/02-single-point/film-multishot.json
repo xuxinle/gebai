@@ -1,0 +1,85 @@
+{
+  "name": "style-02-single-point-multishot",
+  "fps": 30,
+  "size": [1920, 1080],
+  "transition": 0,
+  "fade_in": 0.3,
+  "fade_out": 0.3,
+  "brand_wordmark": "",
+  "brand_latin": "",
+  "footer_note": "",
+  "audio": { "enabled": false },
+  "scenes": [
+    {
+      "kind": "custom",
+      "duration": 3.0,
+      "layout": "layout-ms0.js",
+      "accent": "#4B8CF5",
+      "background": ["#080B12", "#0E1521"],
+      "wrap": false,
+      "layers": [
+        { "kind": "text", "name": "eyebrow0", "x": 108, "y": 320, "w": 1000, "h": 40,
+          "text": "单点身份", "size": 24, "color": "#5C7391", "align": 1, "enter": 0 },
+        { "kind": "text", "name": "title0", "x": 108, "y": 410, "w": 1000, "h": 90,
+          "text": "一个点，够讲完", "size": 62, "color": "#E8F0FC", "bold": true, "align": 1, "enter": 0 },
+        { "kind": "ellipse", "name": "dot", "x": 936, "y": 640, "w": 48, "h": 48,
+          "fill": "#8FC0FF", "enter": 0 }
+      ],
+      "carry_out": {
+        "name": "单点·本体",
+        "into": 1,
+        "at": 2.7,
+        "dur": 0.7,
+        "from": { "x": "48.75%", "y": "59.3%", "w": "2.5%", "h": "4.44%", "radius": 24 },
+        "to": { "x": "20%", "y": "40%", "w": "60%", "h": "1.1%", "radius": 999 },
+        "fill": "#8FC0FF",
+        "stroke_width": 0,
+        "curve": "expo_out"
+      }
+    },
+    {
+      "kind": "custom",
+      "duration": 3.4,
+      "layout": "layout-ms1.js",
+      "accent": "#4B8CF5",
+      "background": ["#080B12", "#0E1521"],
+      "wrap": false,
+      "layers": [
+        { "kind": "text", "name": "eyebrow1", "x": 108, "y": 240, "w": 1200, "h": 40,
+          "text": "点 → 线", "size": 24, "color": "#5C7391", "align": 1, "enter": 0 },
+        { "kind": "text", "name": "title1", "x": 108, "y": 330, "w": 1400, "h": 90,
+          "text": "先拉成一条线", "size": 58, "color": "#E8F0FC", "bold": true, "align": 1, "enter": 0 },
+        { "kind": "rect", "name": "bar", "x": 660, "y": 700, "w": 600, "h": 6,
+          "fill": "#4B8CF5", "radius": 3, "enter": 0 },
+        { "kind": "text", "name": "cap1", "x": 660, "y": 760, "w": 600, "h": 40,
+          "text": "同一条线，不是新的一根", "size": 24, "color": "#5C7391", "align": 0, "enter": 0 }
+      ],
+      "carry_out": {
+        "name": "单点·本体",
+        "into": 2,
+        "at": 6.1,
+        "dur": 0.7,
+        "from": { "x": "34.4%", "y": "64.8%", "w": "31.3%", "h": "0.56%", "radius": 3 },
+        "to": { "x": "25%", "y": "30%", "w": "50%", "h": "40%", "radius": 18 },
+        "fill": "#132033",
+        "stroke": "#4B8CF5",
+        "stroke_width": 3,
+        "curve": "expo_in_out"
+      }
+    },
+    {
+      "kind": "custom",
+      "duration": 3.0,
+      "layout": "layout-ms2.js",
+      "accent": "#4B8CF5",
+      "background": ["#0A1020", "#101A2E"],
+      "wrap": false,
+      "layers": [
+        { "kind": "text", "name": "title2", "x": 480, "y": 430, "w": 960, "h": 100,
+          "text": "最后成了面", "size": 64, "color": "#E8F0FC", "bold": true, "align": 0, "enter": 0 },
+        { "kind": "text", "name": "sub2", "x": 480, "y": 540, "w": 960, "h": 50,
+          "text": "全程只有一个元素在变形", "size": 26, "color": "#5C7391", "align": 0, "enter": 0 }
+      ]
+    }
+  ]
+}

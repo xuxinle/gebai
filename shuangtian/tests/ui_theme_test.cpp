@@ -352,6 +352,7 @@ ST_TEST(theme_metrics_scale_is_consistent) {
   ST_CHECK(metrics.radius_sm < metrics.radius_md);
   ST_CHECK(metrics.radius_md < metrics.radius_lg);
   ST_CHECK(metrics.radius_lg < metrics.radius_xl);
+  ST_CHECK(metrics.font_2xs < metrics.font_xs);
   ST_CHECK(metrics.font_xs < metrics.font_sm);
   ST_CHECK(metrics.font_sm < metrics.font_base);
   ST_CHECK(metrics.font_base < metrics.font_lg);
@@ -416,4 +417,141 @@ ST_TEST(theme_content_surface_resolves_differently_per_mode) {
   ST_CHECK(st::math::relative_luminance(dark_bg) < 0.05F);
   ST_CHECK(st::math::relative_luminance(light_bg) > 0.85F);
   ST_CHECK(dark_bg.r != light_bg.r);
+}
+
+/// 字号档位（`Text::Scale`）必须落到对应的主题令牌上，而**不是**写死的像素值。
+///
+/// ## 守的是什么（实测代价：gallery 里 49/150 个文本节点在用阶梯外字号）
+///
+/// 阶梯最小档曾是 `font_xs=13`，而中文辅助文字（版本号、导航分组名、卡片说明）
+/// 实际需要 11~12px。没有档位可用时调用方只能写 `set_font_size(12.0f)` 这类字面量，
+/// 而字面量**不会跟主题走**（字号缩放 `scale_fonts` 时它们不动）。
+/// 实测：加了 `font_2xs=11`、`font_xs` 降到 12 并把 gallery 全部换成 `set_scale` 后，
+/// 阶梯外字号从 **49 处降到 0**。
+///
+/// ## 为何要测“跟随主题”而不是只测“值对”
+///
+/// 若实现里把枚举写成一张常量表（不读 `Metrics`），单看某一档的数值仍然“对”，
+/// 但 `scale_fonts(1.2)` 后就不对了。所以这里用**缩放后的主题**再量一遍。
+ST_TEST(theme_text_scale_follows_metrics_not_literals) {
+  using Scale = st::ui::Text::Scale;
+  const st::ui::Theme theme = st::ui::Theme::dark();
+  const st::ui::Metrics& m = theme.metrics();
+
+  // ① 档位与令牌一一对应
+  ST_CHECK(st::ui::Text::font_size_for_scale(m, Scale::Xs2) == m.font_2xs);
+  ST_CHECK(st::ui::Text::font_size_for_scale(m, Scale::Xs) == m.font_xs);
+  ST_CHECK(st::ui::Text::font_size_for_scale(m, Scale::Sm) == m.font_sm);
+  ST_CHECK(st::ui::Text::font_size_for_scale(m, Scale::Base) == m.font_base);
+  ST_CHECK(st::ui::Text::font_size_for_scale(m, Scale::Lg) == m.font_lg);
+  ST_CHECK(st::ui::Text::font_size_for_scale(m, Scale::Xl) == m.font_xl);
+  // `Override` 表示“不用档位”，必须返回 0 供调用方回退
+  ST_CHECK(st::ui::Text::font_size_for_scale(m, Scale::Override) == 0.0f);
+
+  // ② 阶梯最小档必须能盖住 11~12px（这就是它存在的理由）
+  ST_CHECK(m.font_2xs <= 11.0f);
+  ST_CHECK(m.font_xs <= 12.0f);
+  ST_CHECK(m.font_2xs < m.font_xs);
+
+  // ③ 真的跟随主题缩放（不是一张写死的常量表）
+  st::ui::Metrics scaled = m;
+  scaled.scale_fonts(1.5f);
+  const float before = st::ui::Text::font_size_for_scale(m, Scale::Xs);
+  const float after = st::ui::Text::font_size_for_scale(scaled, Scale::Xs);
+  ST_CHECK(after > before);
+}
+
+/// `Text::set_scale` 必须**真的改写 `style().font_size`**（经过 `apply_theme`），
+/// 且显式 `set_font_size` 优先于它（不破坏既有调用方的契约）。
+ST_TEST(theme_text_scale_lands_in_style_and_respects_explicit_size) {
+  using Scale = st::ui::Text::Scale;
+  const st::ui::Theme theme = st::ui::Theme::dark();
+  const st::ui::Metrics& m = theme.metrics();
+
+  // 档位生效
+  st::ui::Text by_scale("x");
+  by_scale.set_scale(Scale::Xs2);
+  by_scale.apply_theme(theme);
+  ST_CHECK(by_scale.style().font_size == m.font_2xs);
+
+  // 显式像素优先（既有契约）
+  st::ui::Text by_pixels("x");
+  by_pixels.set_scale(Scale::Xs2);
+  by_pixels.set_font_size(19.0f);
+  by_pixels.apply_theme(theme);
+  ST_CHECK(by_pixels.style().font_size == 19.0f);
+
+  // 都不设 → 正文档（不能被档位机制意外改成别的值）
+  st::ui::Text plain("x");
+  plain.apply_theme(theme);
+  ST_CHECK(plain.style().font_size == m.font_base);
+}
+
+/// 卡片边框必须**保留** `border` 令牌的透明度，不能被调成不透明。
+///
+/// ## 这一条守的是什么（实测代价：一屏 8 张卡片全成了刺眼白框）
+///
+/// `Card::apply_theme` 曾经写的是
+/// ```cpp
+/// style_.border_color = theme.colors().border.with_alpha_f(Dark ? 1.0f : 0.55f);
+/// ```
+/// 而 `with_alpha_f` 是**覆盖**语义（把 alpha 直接设成给定量），不是“乘上倍率”。
+/// `border` 族令牌本身带半透明 alpha（亚克力口径：它是一道白光/黑光），于是：
+///   · 暗色 `with_alpha_f(1.0)` → alpha 覆盖成 **255** → 不透明纯白 1px 边框
+///     （实测合成亮度 255/255、对卡底对比度 **13.09:1**）；
+///   · 亮色 `with_alpha_f(0.55)` → 覆盖成 55% 黑 → 合成 `#717172`、对比度 4.2:1，
+///     与“浅色下淡到几乎看不见”的设计意图相反。
+///
+/// ## 判据为何落在“alpha 保真”而不是“对比度恰好是多少”
+///
+/// 对比度是主题调色的**产品决策**（会随设计调整而变），而“组件不得把半透明令牌
+/// 悄悄变成实色”是**契约**。所以这里断言：
+///   ① 卡片边框 **必须仍带 alpha**（`a < 255`）——无论亮/暗、无论调成多少倍率；
+///   ② 且 alpha **不得超过** `border` 令牌自身的 alpha（组件只能调淡，不能调浓）；
+///   ③ 亮色比暗色**更淡**（注释里的设计意图，两个模式不是同一个权重）。
+///
+/// 走**真实**的 `Card::apply_theme`（不是在这里重算一遍算式）：
+/// 否则就是测“测试自己写的逻辑”，回退生产代码后依然全绿。
+ST_TEST(theme_card_border_keeps_token_transparency) {
+  const auto border_of = [](const st::ui::Theme& theme) {
+    st::ui::Card card;
+    card.apply_theme(theme);
+    return card.style().border_color;
+  };
+
+  const st::ui::Theme dark = st::ui::Theme::dark();
+  const st::ui::Theme light = st::ui::Theme::light();
+  const Color dark_border = border_of(dark);
+  const Color light_border = border_of(light);
+
+  // ① 两个模式都必须**保留透明度**（不能是实色）。
+  // 暗色漏了这条时得到 alpha=255 的纯白框；亮色漏了得到 alpha=140 的 55% 黑框。
+  ST_CHECK(dark_border.a < 255);
+  ST_CHECK(light_border.a < 255);
+
+  // ② 组件只能把边框调**淡**，不得调浓（超过令牌自身的透明度）。
+  // 注：暗色倍率是 1.0，所以这里断言的是“不超过”，上限 = 令牌 alpha。
+  ST_CHECK(dark_border.a <= dark.colors().border.a);
+  ST_CHECK(light_border.a <= light.colors().border.a);
+
+  // ③ 亮色必须比暗色更淡（同一份令牌在两模式的权重不同，这是设计意图）。
+  ST_CHECK(light_border.a < dark_border.a);
+
+  // ④ 边框合成到卡底后，对比度必须**落在“看得见但不刺眼”的区间**里。
+  //
+  // 上限 3.0 拦住“不透明实边”（实测旧值：暗色 **13.09:1**、亮色 4.2:1）。
+  // 下限取 **1.08**（而不是拍到 1.15）：亮色的设计值就是**极淡**——
+  // `border` 令牌淡色下是 `rgba(0,0,0,28)`，再乘 0.55 后 alpha=15，
+  // 合成到 `surface` 上是 (235,235,237)、对比度 **1.142:1**。
+  // 那正是注释里“淡到几乎看不见”的含义：**它靠阴影而非描边收边**。
+  // 把下限抬高会逼着后来人把边框调浓，与设计意图相反。
+  // （实测口径：这里的 1.142 是纯颜色合成值；实机截图里峰值像素对卡底为 1.50~1.65，
+  //   因为边框叠在阴影之上。两者同向，都远低于“刺眼”。）
+  const auto composed_contrast = [](const Color& border, const Color& surface) {
+    return contrast(composite(border, surface), surface);
+  };
+  const double dark_ratio = composed_contrast(dark_border, dark.colors().surface);
+  const double light_ratio = composed_contrast(light_border, light.colors().surface);
+  ST_CHECK(dark_ratio >= 1.08 && dark_ratio <= 3.0);
+  ST_CHECK(light_ratio >= 1.08 && light_ratio <= 3.0);
 }

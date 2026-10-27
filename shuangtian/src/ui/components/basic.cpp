@@ -118,6 +118,25 @@ void Text::set_font_size(float size) {
   mark_layout_dirty();
 }
 
+void Text::set_scale(Scale scale) {
+  if (scale_ == scale) return;
+  scale_ = scale;
+  mark_layout_dirty();
+}
+
+auto Text::font_size_for_scale(const Metrics& metrics, Scale scale) -> float {
+  switch (scale) {
+    case Scale::Override: return 0.0f;  // 调用方自己定（见 `apply_theme`）
+    case Scale::Xs2: return metrics.font_2xs;
+    case Scale::Xs: return metrics.font_xs;
+    case Scale::Sm: return metrics.font_sm;
+    case Scale::Base: return metrics.font_base;
+    case Scale::Lg: return metrics.font_lg;
+    case Scale::Xl: return metrics.font_xl;
+  }
+  return metrics.font_base;
+}
+
 void Text::set_weight(FontWeight weight) {
   weight_ = weight;
   mark_dirty();
@@ -126,7 +145,15 @@ void Text::set_weight(FontWeight weight) {
 void Text::apply_theme(const Theme& theme) {
   style_.color = text_tone_override().has_value() ? tone_color(theme, *text_tone_override())
                                                   : tone_color(theme, tone_);
-  style_.font_size = font_size_override_ > 0.0f ? font_size_override_ : theme.metrics().font_base;
+  // 优先级：显式像素 > 语义档位 > 主题正文。
+  // 显式优先是为了不破坏 `set_font_size` 的旧契约（既有调用方一大片）。
+  if (font_size_override_ > 0.0f) {
+    style_.font_size = font_size_override_;
+  } else if (scale_ != Scale::Override) {
+    style_.font_size = font_size_for_scale(theme.metrics(), scale_);
+  } else {
+    style_.font_size = theme.metrics().font_base;
+  }
   style_.font_weight = weight_;
   style_.background = math::Color{0, 0, 0, 0};
   // 显式排版覆盖（DSL `BoxProps::color/hex_color/size/weight`）**最后**回放——
@@ -1060,7 +1087,16 @@ void Card::apply_theme(const Theme& theme) {
                                        : shadow_sm(theme);
   // 卡片边框在浅色主题下**淡到几乎看不见**（它只用来在深色主题/高对比场景收边）：
   // 有阴影的卡片再配一道同等明显的描边，会变成“双层轮廓”，显得脏。
-  style_.border_color = theme.colors().border.with_alpha_f(
+  //
+  // ⚠ **必须是 `scale_alpha`（乘）而不是 `with_alpha_f`（覆盖）**。
+  // `border` 族令牌自带半透明 alpha（亚克力口径：它是一道“叠在任意底色上强度一致”的白光/黑光），
+  // 深色下 23% 白、浅色下 11% 黑。要“在令牌基础上再调淡/调浓”只能**乘**：
+  //   · 用 `with_alpha_f(1.0)` 会把 alpha **覆盖成 255** → 暗色卡片得一道**不透明的纯白 1px 实边**
+  //     （实测四边中左/下正打在像素格上，合成后亮度 255/255：屏幕上是刺眼白框）；
+  //   · 用 `with_alpha_f(0.55)` 是覆盖成 55% 黑 → 浅色卡片边框合成到 `surface` 后为 `#717172`，
+  //     与 `surface` 对比 4.2:1，正是注释里要避免的“脏边”。
+  // 两者都不是“乘”，因为**源色本身带 alpha 时两个字面量恰好都长得像倍率**，这是最容易被误读的地方。
+  style_.border_color = theme.colors().border.scale_alpha(
       theme.mode() == ThemeMode::Dark ? 1.0f : 0.55f);
   // 亚克力的「玻璃边缘」：抬升的卡片顶部一道极弱亮线。
   // 只给**真抬升**的卡片（有阴影的那些）——平铺的内容块加边缘光会变成"到处在发光"。

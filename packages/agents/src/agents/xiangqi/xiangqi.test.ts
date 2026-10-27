@@ -779,3 +779,92 @@ describe("数据根：缺省不写到 cwd（防污染仓库）", () => {
     }
   })
 })
+
+describe("宿主注入形态：主服务把 /xiangqi 升级后的连接交给控制器（方案 B）", () => {
+  /** 假 peer：只实现 PeerSocket 的 send/close（主服务侧的真实连接会经 acceptPeer 包装成这形状）。 */
+  function fakePeer() {
+    const sent: unknown[] = []
+    let closed = false
+    return {
+      data: { sent, get closed() {
+        return closed
+      } },
+      ws: {
+        send: (s: string) => sent.push(JSON.parse(s)),
+        close: () => {
+          closed = true
+        },
+      } as { send(s: string): void; close(): void },
+    }
+  }
+
+  /** 从假 peer 收到的报文里取最近一次 cards（send 存的是已 parse 的对象）。 */
+  function lastCardsOf(f: ReturnType<typeof fakePeer>): Array<{ id: string; kind: string; title: string }> {
+    for (let index = f.data.sent.length - 1; index >= 0; index -= 1) {
+      const m = f.data.sent[index] as { type?: string; cards?: Array<{ id: string; kind: string; title: string }> }
+      if (m?.type === "cards") return m.cards ?? []
+    }
+    return []
+  }
+
+  it("acceptPeer 后 isConnected() 变 true，push 能实时送达", async () => {
+    const ctl = fresh()
+    expect(ctl.isConnected()).toBe(false)
+
+    const f = fakePeer()
+    ctl.acceptPeer(f.ws)
+    expect(ctl.isConnected()).toBe(true)
+
+    const result = ctl.push({ kind: "notice", title: "注入连接" })
+    expect(result.delivered).toBe(true)
+    // 应整批下发（含刚 push 的卡）
+    expect(lastCardsOf(f).some((x) => x.title === "注入连接")).toBe(true)
+
+    ctl.close()
+  })
+
+  it("acceptPeer 新连接取代旧连接（窗口只能有一个）", async () => {
+    const ctl = fresh()
+    const a = fakePeer()
+    const b = fakePeer()
+    ctl.acceptPeer(a.ws)
+    ctl.acceptPeer(b.ws)
+    expect(a.data.closed).toBe(true) // 旧的被关掉
+    expect(b.data.closed).toBe(false)
+    expect(ctl.isConnected()).toBe(true)
+    ctl.close()
+  })
+
+  it("peerMessage 收到 answer 会投递（等于用户在窗口上点了）", async () => {
+    const ctl = fresh()
+    const f = fakePeer()
+    ctl.acceptPeer(f.ws)
+    ctl.push({ kind: "choice", title: "选一个", options: [{ label: "A", value: "a" }] })
+    const pushed = lastCardsOf(f)
+    expect(pushed).toHaveLength(1)
+    const id = pushed[0]!.id
+
+    // 直接喂协议消息（主服务的 message 处理器转发过来）
+    ctl.peerMessage(JSON.stringify({ type: "answer", id, kind: "choice", answer: { choice: "a" } }))
+    // 卡已被处理掉（live 中移除）：下次整批下发不再包含它
+    ctl.push({ kind: "notice", title: "触发重推" })
+    expect(lastCardsOf(f).some((x) => x.id === id)).toBe(false)
+    ctl.close()
+  })
+
+  it("peerClosed 后 isConnected() 复位 false，卡仍可重推", async () => {
+    const ctl = fresh()
+    const f = fakePeer()
+    ctl.acceptPeer(f.ws)
+    ctl.push({ kind: "notice", title: "断线时攒的" })
+    expect(ctl.isConnected()).toBe(true)
+
+    ctl.peerClosed()
+    expect(ctl.isConnected()).toBe(false)
+    // 断线后再连（新旧都可用 acceptPeer 重新注入）→ 存量卡重推
+    const g = fakePeer()
+    ctl.acceptPeer(g.ws)
+    expect(lastCardsOf(g).some((x) => x.title === "断线时攒的")).toBe(true)
+    ctl.close()
+  })
+})

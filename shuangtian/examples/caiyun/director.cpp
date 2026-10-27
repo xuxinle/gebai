@@ -65,11 +65,57 @@ using st::math::Color;
 /// 而漏掉的那个字段会变成“夹取不报告”，比全不报告更难发现（因为其余都正常）。
 /// 这里改成：解析照旧（一行不改），然后**拿 schema 遍历节点**比“写了什么”与
 /// “实际生效什么”。新增字段只需登记进表，校验自动生效。
+/// JSON 值的类型名（仅用于诊断文案，故只区分实际会写错的几种）。
+[[nodiscard]] auto json_type_name(const st::Json& value) -> std::string_view {
+  if (value.is_string()) return "字符串";
+  if (value.is_boolean()) return "布尔值";
+  if (value.is_array()) return "数组";
+  if (value.is_object()) return "对象";
+  if (value.is_number()) return "数字";
+  return "null";
+}
+
 auto collect_range_diagnostics(const st::Json& node, SchemaScope scope, const std::string& path,
                               std::vector<Diagnostic>& diagnostics) -> void {
   for (const auto& [key, value] : node.items()) {
     const FieldSpec* spec = find_field_schema(scope, key);
-    if (spec == nullptr || !spec->has_range || !spec->clamped) continue;
+    if (spec == nullptr) continue;
+    // **类型校验**：写在范围校验之前，因为类型不对时范围校验也做不了。
+    //
+    // 为何需要：`st::json_get_double(node, k, fallback)` 在值不是数字时
+    // **静默返回 fallback**——写 `"model_spin":"fast"` 会得到“转速=默认值”，
+    // 而画面上与“写对了但转速就是默认值”完全一样。这类错误只能靠诊断暴露。
+    //
+    // 只校验四种有明确 JSON 形态的类型；`Dimension` 既接受数字又接受 `"50%"`，
+    // 故不在此列（它有自己的解析规则）。
+    const bool type_ok = [&] {
+      switch (spec->type) {
+        case SchemaType::Number:
+        case SchemaType::Integer:
+          return value.is_number();
+        case SchemaType::Bool:
+          return value.is_boolean();
+        case SchemaType::String:
+        case SchemaType::Color:
+          return value.is_string();
+        case SchemaType::Array:
+          return value.is_array();
+        case SchemaType::Object:
+          return value.is_object();
+        case SchemaType::Dimension:
+          return value.is_number() || value.is_string();
+        case SchemaType::Layout:
+          // 路径字符串，或内联对象（`{"source": ...}`）。
+          // 对象形式必须是**对象**（不接数组）：内联源是键值结构。
+          return value.is_string() || value.is_object();
+      }
+      return true;
+    }();
+    if (!type_ok) {
+      diagnostics.push_back(wrong_type_diagnostic(*spec, json_type_name(value), path));
+      continue;
+    }
+    if (!spec->has_range || !spec->clamped) continue;
     if (!value.is_number()) continue;
     const double written = value.get<double>();
     const double applied = std::clamp(written, spec->min_value, spec->max_value);
@@ -308,7 +354,32 @@ auto collect_track_diagnostics(const st::Json& node, const std::string& path,
         if (script->is_string()) {
           layer.model_script = script->get<std::string>();
         } else if (script->is_object() || script->is_array()) {
-          layer.model_script = script->dump();
+          // ## 预设展开在**解析期**做，不是渲染期
+          //
+          // 两个理由：
+          // ① 序列化看到的是展开后的值（`--flatten` 导出的脚本可以直接跑，
+          //    不依赖外部预设文件）；
+          // ② schema 校验能看到真实生效的字段——否则“预设里写错了”
+          //    会等到渲染时才暴露，而那时已经跑了几十秒。
+          st::Json expanded = *script;
+          if (expanded.is_object()) {
+            const auto presets = render_presets();
+            const auto applied =
+                apply_render_presets(expanded, presets.cameras, presets.lightings, path);
+            if (!applied) {
+              // 预设找不到是**错误**（不是警告）：继续跑会得到一份
+              // “相机/光照是默认值”的片子，而作者以为用的是预设。
+              if (diagnostics != nullptr) {
+                Diagnostic diag{};
+                diag.is_error = true;
+                diag.path = path;
+                diag.key = "model_script.preset";
+                diag.message = applied.error().message;
+                diagnostics->push_back(std::move(diag));
+              }
+            }
+          }
+          layer.model_script = expanded.dump();
         } else {
           ST_LOG_WARN("裁云：model_script 需要字符串或对象，已忽略");
         }

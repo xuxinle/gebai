@@ -723,12 +723,34 @@ auto TextRenderer::shaped_ascent(std::string_view utf8, float size, FontRole rol
 }
 
 auto TextRenderer::line_height(float size) const -> float {
-  if (stack_->empty()) return size * 1.45f;
+  // **向上取整到整像素**。
+  //
+  // ## 为何必须取整（整条布局链都受它影响）
+  //
+  // 字体度量算出来的是小数：字号 15 在默认字体上是 **19.797**，字号 12 是 **15.838**。
+  // 而 `Text::measure` 直接把它当高度，于是小数沿布局链一路传下去：
+  // 实测 gallery 一屏 105 个节点里 **Text 的 43/64 个高度非整**，
+  // 卡片（`88.315`）、面板（`913.320`）、侧栏撑杆（`368.964`）全部跟着带小数。
+  //
+  // 两个具体代价：
+  // ① **基线落在半像素**⇒ 字形栅格化时被反馈到纵向上，竖笔发虚、发胖不一致；
+  // ② 卡片上/下边界非整 ⇒ 1px 描边无法盖满一整行像素（`paint_box` 里已有
+  //    “边框吸到整像素”的对策，但那是治标：真正的源头在这里）。
+  //
+  // ## 为何向上取整而不是四舍五入
+  //
+  // 行高是**容量**：向下取整会让多行文本的行间挤在一起（尤其 11px 小字，
+  // 15.838→15 只剩 3.2px 行间距），而向上取整最多多 0.5px 留白，永远不会挤。
+  // 这跟 `ceil` 在排版里的惯例一致。
+  //
+  // 注意：只对齐**行高**，不对齐字形位置——字形的 y 由基线决定，
+  // 强制整像素会让基线随字号在小数上跳，反而破坏纵向节奏（见 `ascent` 的说明）。
+  if (stack_->empty()) return std::ceil(size * 1.45f);
   const FontMetrics& metrics = stack_->primary().metrics();
   const float units = metrics.units_per_em > 0.0f ? metrics.units_per_em : 1000.0f;
   const float span = metrics.ascender - metrics.descender + metrics.line_gap;
   const float height = span / units * size;
-  return height > size ? height : size * 1.2f;
+  return std::ceil(height > size ? height : size * 1.2f);
 }
 
 auto TextRenderer::shape(std::string_view utf8, float size, FontRole role,

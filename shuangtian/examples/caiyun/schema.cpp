@@ -262,8 +262,8 @@ constexpr auto kSceneFields = std::array{
               "背景渐变 [上, 下]（两个 #rrggbb）", true, Aliases("bg", "background_color")},
     FieldSpec{"layers", SchemaScope::Scene, SchemaType::Array, false, 0, 0, false,
               "通用图层数组（kind=custom 时是主体）"},
-    FieldSpec{"layout", SchemaScope::Scene, SchemaType::String, false, 0, 0, false,
-              "JS 编排脚本（相对脚本目录的 .js 路径，或 {\"source\":...}）"},
+    FieldSpec{"layout", SchemaScope::Scene, SchemaType::Layout, false, 0, 0, false,
+              "JS 编排脚本（相对脚本目录的 .js 路径，或 {\"source\":...} 内联）"},
 
     // 素材
     FieldSpec{"image", SchemaScope::Scene, SchemaType::String, false, 0, 0, false,
@@ -429,6 +429,7 @@ auto schema_type_name(SchemaType type) -> std::string_view {
     case SchemaType::String: return "string";
     case SchemaType::Color: return "color";
     case SchemaType::Dimension: return "dimension";
+    case SchemaType::Layout: return "layout（字符串路径或 {source}）";
     case SchemaType::Array: return "array";
     case SchemaType::Object: return "object";
   }
@@ -606,6 +607,134 @@ auto wrong_type_diagnostic(const FieldSpec& spec, std::string_view actual_type,
   diag.message = std::format("字段 '{}' 需要 {}，收到 {}（已用默认值）", spec.name,
                              schema_type_name(spec.type), actual_type);
   return diag;
+}
+
+auto strict_violation_count(const std::vector<Diagnostic>& list) -> std::size_t {
+  std::size_t count = 0;
+  for (const Diagnostic& diag : list) {
+    // 未知键：消息统一以“未知字段”开头（与 `unknown_key_diagnostic` 一致）。
+    // 判断用消息而不用 `key` 是否为空（越界诊断也带 key）。
+    //
+    // 为何不用 `is_error`：未知字段有意标成非错误以保证老脚本能出片（见头文件）。
+    const bool unknown_key = diag.message.rfind("未知字段", 0) == 0;
+    // 类型不符：文本由 `wrong_type_diagnostic` 生成（含“需要 X，收到 Y”）。
+    const bool wrong_type = diag.message.find("（已用默认值）") != std::string::npos;
+    if (diag.is_error || unknown_key || wrong_type) ++count;
+  }
+  return count;
+}
+
+auto schema_to_json_schema() -> std::string {
+  // 每个作用域 -> {字段名: 子 schema}
+  const auto scope_properties = [](SchemaScope scope) {
+    st::Json props = st::Json::object();
+    for (const FieldSpec* spec : fields_in_scope(scope)) {
+      st::Json field = st::Json::object();
+      switch (spec->type) {
+        case SchemaType::Number: field["type"] = "number"; break;
+        case SchemaType::Integer: field["type"] = "integer"; break;
+        case SchemaType::Bool: field["type"] = "boolean"; break;
+        case SchemaType::String: field["type"] = "string"; break;
+        case SchemaType::Color:
+          field["type"] = "string";
+          field["pattern"] = "^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$";
+          break;
+        case SchemaType::Dimension: {
+          // 裁云同时接受设计像素（640）与画面比例（"50%"）。
+          // ⚠ `oneOf` 必须是**数组的两个对象元素**，不是“数组的数组”——
+          // 后者是合法 JSON 但语义上不成立，约束解码器会直接拒掉整个 schema。
+          st::Json variants = st::Json::array();
+          st::Json as_number = st::Json::object();
+          as_number["type"] = "number";
+          variants.push_back(std::move(as_number));
+          st::Json as_string = st::Json::object();
+          as_string["type"] = "string";
+          as_string["pattern"] = "^[0-9.]+%$";
+          variants.push_back(std::move(as_string));
+          field["oneOf"] = std::move(variants);
+          break;
+        }
+        case SchemaType::Layout: {
+          // 两种写法：路径字符串，或 `{"source": ...}` 内联对象。
+          st::Json variants = st::Json::array();
+          st::Json as_string = st::Json::object();
+          as_string["type"] = "string";
+          variants.push_back(std::move(as_string));
+          st::Json as_object = st::Json::object();
+          as_object["type"] = "object";
+          variants.push_back(std::move(as_object));
+          field["oneOf"] = std::move(variants);
+          break;
+        }
+        case SchemaType::Array: field["type"] = "array"; break;
+        case SchemaType::Object: field["type"] = "object"; break;
+      }
+      if (spec->has_range && (spec->type == SchemaType::Number ||
+                              spec->type == SchemaType::Integer)) {
+        field["minimum"] = spec->min_value;
+        field["maximum"] = spec->max_value;
+      }
+      // 说明 + 越界行为进 description：约束解码看不到它们，但模型读提示词时能拿到。
+      std::string desc(spec->summary);
+      if (spec->has_range && spec->clamped) desc += "（越界会被夹取到范围内）";
+      for (const std::string_view alias : spec->aliases) {
+        if (!alias.empty()) desc += std::format("；勿写 '{}'", alias);
+      }
+      field["description"] = desc;
+      props[std::string(spec->name)] = std::move(field);
+    }
+    return props;
+  };
+
+  st::Json root = st::Json::object();
+  root["$schema"] = "https://json-schema.org/draft/2020-12/schema";
+  root["$id"] = "https://shuangtian.local/caiyun/director-script.schema.json";
+  root["title"] = "裁云导演脚本";
+  root["description"] =
+      "由 schema.hpp 的单一真值表生成；字段名写错、类型不符、数值越界都会在校验期暴露。";
+
+  st::Json defs = st::Json::object();
+  for (const SchemaScope scope : kAllScopes) {
+    st::Json node = st::Json::object();
+    node["type"] = "object";
+    node["properties"] = scope_properties(scope);
+    // 写错键 = 失败。这是整个导出的**核心价值**——没有它，未知字段仍会被静默忽略。
+    node["additionalProperties"] = false;
+    defs[std::string(schema_scope_name(scope))] = std::move(node);
+  }
+
+  // **把嵌在里面的对象/数组接上引用**。
+  //
+  // 这一步不能省：只写 `"layers":{"type":"array"}` 时，校验器不会进入元素，
+  // 于是图层里的拼写错（`model_rot`）**永远抓不到**——schema 看着很完整，
+  // 实测却是三个样本全放行。这是"自己写的测试过了、标准校验器不过"才暴露的。
+  const auto attach = [&defs](SchemaScope scope, std::string_view key, std::string_view ref) {
+    st::Json& props = defs[std::string(schema_scope_name(scope))]["properties"];
+    if (!props.contains(std::string(key))) return;
+    st::Json array = st::Json::object();
+    array["type"] = "array";
+    array["items"] = st::Json{{"$ref", std::string(ref)}};
+    props[std::string(key)] = std::move(array);
+  };
+  // 场景里的图层、三维脚本的对象、关键帧/轨道：型状都在这三处嵌套。
+  attach(SchemaScope::Scene, "layers", "#/$defs/layer");
+  attach(SchemaScope::Layer, "tracks", "#/$defs/track");
+  attach(SchemaScope::Scene, "keyframes", "#/$defs/keyframe");
+
+  root["$defs"] = std::move(defs);
+
+  // 顶层从 script 作用域长出来（脚本根对象），再把 scenes 声明成 scene 数组。
+  st::Json root_props = scope_properties(SchemaScope::Script);
+  st::Json scenes = st::Json::object();
+  scenes["type"] = "array";
+  scenes["items"] = st::Json{{"$ref", "#/$defs/scene"}};
+  root_props["scenes"] = std::move(scenes);
+  root["type"] = "object";
+  root["properties"] = std::move(root_props);
+  root["additionalProperties"] = false;
+  root["required"] = st::Json::array();
+  root["required"].push_back("scenes");
+  return st::json_dump(root, true, 2);
 }
 
 auto schema_to_json() -> std::string {

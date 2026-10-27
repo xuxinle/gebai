@@ -63,6 +63,15 @@
 
 这个方向由相期那边定（`shuangtian/examples/xiangqi` 用自研 WS 客户端连出去）。
 
+**方案 B（2026-10-27）：窗口连主服务端口，不再独立开 7717。**
+
+- 主服务 `Bun.serve` 在 `/xiangqi` 路径升级 WebSocket，经 `acceptPeer`/`peerMessage`/`peerClosed`
+  桥到控制器（`packages/server/src/boot/serve.ts`）；
+- 控制器本身保留 `listen()`（独立端口）作为兜底——测试与无主服务场景仍可用；
+- 拟人模式启动时（`compose.ts` 的 `launchXiangqi`）拉起窗口：
+  `xiangqi.exe --agent ws://127.0.0.1:{GEBAI_PORT}/xiangqi --home {GEBAI_HOME}/相期`，
+  `XIANGQI_BIN` 覆盖 exe 路径、`XIANGQI_AUTO=off` 关闭自动拉起。
+
 ⚠ **把方向搞反的后果很隐蔽**：控制器去主动连 `url` 会连到自己的服务端形成自环——
 `isConnected()` 报 true、`send()` 不报错，但卡片永远到不了窗口。
 实测踩过：`#cards` 一直是空的，而所有日志都在说"发送成功"。

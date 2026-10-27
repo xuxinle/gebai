@@ -39,11 +39,9 @@ constexpr float k_glow_alpha = 0.24f;       // 按压时指示器的柔光（pri
 constexpr double k_anim_idle = -1.0;
 constexpr double k_anim_pending = -2.0;
 
-/// 缓出三次曲线（180ms 的状态切换手感）。
-[[nodiscard]] auto ease_out(float t) noexcept -> float {
-  const float inverse = 1.0f - t;
-  return 1.0f - inverse * inverse * inverse;
-}
+/// 缓出曲线已上提到 `st::ui::ease_out(theme, t)`（主题令牌驱动）。
+/// 原先这里是私有实现，而 `tabs.cpp` 另写了一份——两份只要有一处被调成
+/// `²` 或 `⁴`，两个控件的节奏就不一致了（见 `Metrics::motion_ease_out_power`）。
 
 /// 左对齐、垂直居中的单行标签（超出以省略号收尾）。
 void paint_label(const RenderContext& context, raster::Surface& canvas, std::string_view text,
@@ -467,7 +465,7 @@ auto Switch::knob_progress(const RenderContext& context) const -> float {
     toggle_time_ = k_anim_idle;
     return target;
   }
-  const float t = ease_out(static_cast<float>(elapsed / duration));
+  const float t = st::ui::ease_out(context.theme, static_cast<float>(elapsed / duration));
   const float from = animation_from_ ? 1.0f : 0.0f;
   return from + (target - from) * t;
 }

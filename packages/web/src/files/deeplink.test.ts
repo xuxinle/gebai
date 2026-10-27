@@ -167,8 +167,28 @@ describe("deeplink 相对路径与会话根", () => {
   })
 })
 
-describe("deeplink 默认与边界", () => {  test("无参数 → 项目根优先（手工打开 /files 看代码）", () => {
+describe("deeplink 默认与边界", () => {
+  test("无参数 → 项目根优先（手工打开 /files 看代码）", () => {
     expect(resolve("")).toEqual({ rootId: "proj:gebai", dir: "", file: "", line: undefined })
+  })
+
+  test("无会话工作区时默认落到歌白自身（即使它不在项目清单首位）", () => {
+    const withSelf: DeepLinkRoot[] = [
+      { id: "proj:modeltrain-be", kind: "proj", path: "/coding/modeltrain-be" },
+      { id: "proj:歌白", kind: "proj", path: "/gebai", self: true },
+      { id: "user:", kind: "user", path: "/gebai/users/admin" },
+    ]
+    expect(resolveDeepLink(withSelf, "")?.rootId).toBe("proj:歌白")
+    // 指定了不存在的会话（清单里没有会话根）同样落到歌白，而不是首个业务项目
+    expect(resolveDeepLink(withSelf, "?session=ffffffffffffffffffffffffffffffff")?.rootId).toBe("proj:歌白")
+  })
+
+  test("有会话上下文时仍以会话根为先（歌白不抢位）", () => {
+    const withSelf: DeepLinkRoot[] = [
+      { id: `sess:${SESS}`, kind: "sess", path: `/gebai/users/admin/sessions/6e/39/${SESS}/tmp` },
+      { id: "proj:歌白", kind: "proj", path: "/gebai", self: true },
+    ]
+    expect(resolveDeepLink(withSelf, `?session=${SESS}`)?.rootId).toBe(`sess:${SESS}`)
   })
 
   test("无项目根时回退第一个根", () => {

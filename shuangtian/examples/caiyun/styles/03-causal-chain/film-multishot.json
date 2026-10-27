@@ -1,0 +1,327 @@
+{
+  "name": "style-03-causal-chain-multishot",
+  "fps": 30,
+  "size": [
+    1920,
+    1080
+  ],
+  "transition": 0,
+  "fade_in": 0.3,
+  "fade_out": 0.3,
+  "brand_wordmark": "",
+  "brand_latin": "",
+  "footer_note": "",
+  "audio": {
+    "enabled": false
+  },
+  "scenes": [
+    {
+      "kind": "custom",
+      "duration": 3.0,
+      "layout": "layout-ms0.js",
+      "accent": "#4B8CF5",
+      "background": [
+        "#080B12",
+        "#0E1521"
+      ],
+      "wrap": false,
+      "layers": [
+        {
+          "kind": "text",
+          "name": "eyebrow0",
+          "x": 200,
+          "y": 280,
+          "w": 1200,
+          "h": 40,
+          "text": "因果链",
+          "size": 24,
+          "color": "#5C7391",
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "title0",
+          "x": 200,
+          "y": 370,
+          "w": 1400,
+          "h": 90,
+          "text": "一次失败，撞出下一次",
+          "size": 60,
+          "color": "#E8F0FC",
+          "bold": true,
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "node0",
+          "x": 200,
+          "y": 560,
+          "w": 168,
+          "h": 168,
+          "fill": "#131C2B",
+          "stroke": "#25344A",
+          "stroke_width": 2,
+          "radius": 12,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "lit0",
+          "x": 204,
+          "y": 564,
+          "w": 160,
+          "h": 160,
+          "fill": "#4E8FE0",
+          "radius": 9,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "cap0",
+          "x": 200,
+          "y": 760,
+          "w": 220,
+          "h": 40,
+          "text": "第一次失败",
+          "size": 22,
+          "color": "#5C7391",
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "spark",
+          "x": 430,
+          "y": 620,
+          "w": 56,
+          "h": 56,
+          "fill": "#FF8A52",
+          "radius": 8,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "rail0",
+          "x": 200,
+          "y": 792,
+          "w": 520,
+          "h": 9,
+          "fill": "#4B8CF5",
+          "radius": 4,
+          "enter": 0
+        }
+      ],
+      "carry_out": {
+        "name": "因果·动量",
+        "into": 1,
+        "at": 2.7,
+        "dur": 0.7,
+        "from": {
+          "x": "22.396%",
+          "y": "57.407%",
+          "w": "2.917%",
+          "h": "5.185%",
+          "radius": 8
+        },
+        "to": {
+          "x": "57.292%",
+          "y": "54.815%",
+          "w": "2.917%",
+          "h": "5.185%",
+          "radius": 8
+        },
+        "fill": "#FF8A52",
+        "stroke_width": 0,
+        "curve": "expo_out"
+      }
+    },
+    {
+      "kind": "custom",
+      "duration": 3.4,
+      "layout": "layout-ms1.js",
+      "accent": "#4B8CF5",
+      "background": [
+        "#080B12",
+        "#0E1521"
+      ],
+      "wrap": false,
+      "layers": [
+        {
+          "kind": "text",
+          "name": "eyebrow1",
+          "x": 200,
+          "y": 240,
+          "w": 1200,
+          "h": 40,
+          "text": "因果链 · 第二环",
+          "size": 24,
+          "color": "#5C7391",
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "title1",
+          "x": 200,
+          "y": 325,
+          "w": 1500,
+          "h": 90,
+          "text": "每一环都由上一环触发",
+          "size": 56,
+          "color": "#E8F0FC",
+          "bold": true,
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "node1",
+          "x": 1330,
+          "y": 470,
+          "w": 200,
+          "h": 200,
+          "fill": "#131C2B",
+          "stroke": "#25344A",
+          "stroke_width": 2,
+          "radius": 16,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "lit1",
+          "x": 1334,
+          "y": 474,
+          "w": 192,
+          "h": 192,
+          "fill": "#4E8FE0",
+          "radius": 13,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "cap1",
+          "x": 1330,
+          "y": 700,
+          "w": 220,
+          "h": 40,
+          "text": "日志聚合",
+          "size": 22,
+          "color": "#5C7391",
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "rail",
+          "x": 620,
+          "y": 616,
+          "w": 480,
+          "h": 9,
+          "fill": "#4B8CF5",
+          "radius": 4,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "spark",
+          "x": 1100,
+          "y": 592,
+          "w": 56,
+          "h": 56,
+          "fill": "#FF8A52",
+          "radius": 8,
+          "enter": 0
+        }
+      ],
+      "carry_out": {
+        "name": "因果·动量",
+        "into": 2,
+        "at": 6.1,
+        "dur": 0.7,
+        "from": {
+          "x": "57.292%",
+          "y": "54.815%",
+          "w": "2.917%",
+          "h": "5.185%",
+          "radius": 8
+        },
+        "to": {
+          "x": "64.583%",
+          "y": "51.852%",
+          "w": "2.917%",
+          "h": "5.185%",
+          "radius": 8
+        },
+        "fill": "#FF8A52",
+        "stroke_width": 0,
+        "curve": "expo_out"
+      }
+    },
+    {
+      "kind": "custom",
+      "duration": 3.0,
+      "layout": "layout-ms2.js",
+      "accent": "#4B8CF5",
+      "background": [
+        "#0A1020",
+        "#101A2E"
+      ],
+      "wrap": false,
+      "layers": [
+        {
+          "kind": "text",
+          "name": "eyebrow2",
+          "x": 200,
+          "y": 400,
+          "w": 900,
+          "h": 40,
+          "text": "落定",
+          "size": 24,
+          "color": "#5C7391",
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "title2",
+          "x": 200,
+          "y": 480,
+          "w": 1400,
+          "h": 100,
+          "text": "根因在第 2 环",
+          "size": 62,
+          "color": "#E8F0FC",
+          "bold": true,
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "sub2",
+          "x": 200,
+          "y": 600,
+          "w": 1400,
+          "h": 50,
+          "text": "显存分配失败",
+          "size": 26,
+          "color": "#35C98A",
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "spark2",
+          "x": 1240,
+          "y": 560,
+          "w": 56,
+          "h": 56,
+          "fill": "#FF8A52",
+          "radius": 8,
+          "enter": 0
+        }
+      ]
+    }
+  ]
+}

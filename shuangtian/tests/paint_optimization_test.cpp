@@ -25,6 +25,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <format>
@@ -456,10 +457,30 @@ ST_TEST(border_edge_lands_on_whole_pixels_after_snapping) {
     // 只统计“靠背景那一侧”的方向，避免卡片内部底色干扰
     peak = std::max(peak, diff);
   }
-  const int full = std::abs(static_cast<int>(border.r) - static_cast<int>(background.r)) +
-                   std::abs(static_cast<int>(border.g) - static_cast<int>(background.g)) +
-                   std::abs(static_cast<int>(border.b) - static_cast<int>(background.b));
-  st::print("[border-snap] 上缘峰值 {}（满分 {}）\n", peak, full);
+  // 满分口径：`border` 令牌**先合成到背景**再算色差。
+  //
+  // ⚠ 这里必须合成（曾经漏了，代价：本用例变成了“只有边框画错才通过”）：
+  // `border` 是**半透明**的（暗色 `rgba(255,255,255,59)`，alpha=59），
+  // 它在屏幕上呈现的颜色是它与底色的合成值，不是字面的 255。
+  // 拿未合成的 RGB 当满分时，`full` = 711，而任何“正确”的半透明边框
+  // 实测只有 164 —— 于是判据 `peak >= full*0.8` 永不可达；
+  // 它历史上能绿，恰恰因为 `Card::apply_theme` 当时把 alpha 覆盖成了 255
+  // （把半透明边变成了不透明白框，`full` 才对得上）。那是缺陷在养着测试。
+  const auto composite_over_background = [&background](const st::math::Color& c) {
+    const double a = static_cast<double>(c.a) / 255.0;
+    const auto mix = [a](std::uint8_t top, std::uint8_t bottom) {
+      return static_cast<int>(std::lround(static_cast<double>(top) * a +
+                                          static_cast<double>(bottom) * (1.0 - a)));
+    };
+    return std::array<int, 3>{mix(c.r, background.r), mix(c.g, background.g),
+                              mix(c.b, background.b)};
+  };
+  const auto shown = composite_over_background(border);
+  const auto base = std::array<int, 3>{background.r, background.g, background.b};
+  const int full = std::abs(shown[0] - base[0]) + std::abs(shown[1] - base[1]) +
+                   std::abs(shown[2] - base[2]);
+  st::print("[border-snap] 上缘峰值 {}（满分 {}，令牌 alpha={}）\n", peak, full,
+            static_cast<int>(border.a));
 
   // 对齐后那条边必须**铺满一整像素行**：峰值接近满值。
   // 不对齐时它被摊到两行、每行约一半——这就是用户看到的“边缘不够平滑”。

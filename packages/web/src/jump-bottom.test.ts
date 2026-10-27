@@ -35,6 +35,9 @@ function makeEl(init: { scrollHeight: number; clientHeight: number }) {
     addEventListener(type: string, fn: Listener) {
       ;(listeners[type] ??= []).push(fn)
     },
+    removeEventListener(type: string, fn: Listener) {
+      listeners[type] = (listeners[type] ?? []).filter((f) => f !== fn)
+    },
     scrollTo(opts: { top: number }) {
       scrollTop = Math.max(0, Math.min(opts.top, scrollHeight - el.clientHeight))
     },
@@ -249,6 +252,49 @@ describe("sticky-scroll 粘底滚动", () => {
     el.scrollHeight = 2000
     sticky.scrollIfSticky()
     expect(el.scrollTop).toBe(800)
+  })
+
+  test("多实例共用同一按钮：点击落到活动实例的容器（不归最后创建的那个）", () => {
+    // 按钮全局唯一、实例按会话各一份：按实例闭包绑 onclick 会让按钮永久属于最后创建的容器，
+    // 切回先创建的会话后点击无任何反应（容器被 LRU 释放后更是无主）
+    const btn = makeBtn()
+    const elA = makeEl({ scrollHeight: 1000, clientHeight: 200 })
+    const elB = makeEl({ scrollHeight: 1000, clientHeight: 200 })
+    let activeIsA = true
+    const stickyA = createStickyScroll(elA as unknown as HTMLElement, btn as unknown as HTMLElement, { isActive: () => activeIsA })
+    const stickyB = createStickyScroll(elB as unknown as HTMLElement, btn as unknown as HTMLElement, { isActive: () => !activeIsA })
+    for (const [el, sticky, isA] of [
+      [elA, stickyA, true],
+      [elB, stickyB, false],
+    ] as const) {
+      sticky.lockToBottom()
+      activeIsA = isA
+      userScrollUp(el as ReturnType<typeof makeEl>, 50)
+    }
+    // 切回 A 并点击：落点必须在 A 的容器
+    activeIsA = true
+    btn.click()
+    expect(elA.scrollTop).toBe(800)
+    // B 留在自己读到的位置（不被抢走）
+    expect(elB.scrollTop).toBe(50)
+    // 切到 B 再点：轮到 B
+    activeIsA = false
+    btn.click()
+    expect(elB.scrollTop).toBe(800)
+  })
+
+  test("实例释放后不再参与按钮点击分发（容器被回收后按钮仍有主）", () => {
+    const btn = makeBtn()
+    const elA = makeEl({ scrollHeight: 1000, clientHeight: 200 })
+    const elB = makeEl({ scrollHeight: 1000, clientHeight: 200 })
+    const stickyA = createStickyScroll(elA as unknown as HTMLElement, btn as unknown as HTMLElement)
+    // B 后建、先释放：不能把按钮的点击留成空绑定
+    const stickyB = createStickyScroll(elB as unknown as HTMLElement, btn as unknown as HTMLElement)
+    stickyB.dispose()
+    stickyA.lockToBottom()
+    userScrollUp(elA, 50)
+    btn.click()
+    expect(elA.scrollTop).toBe(800)
   })
 
   test("restoreScroll：恢复历史位置同步锁定状态，未决跟随回调不把位置拽到底（loadMessages 尾部竞态）", async () => {

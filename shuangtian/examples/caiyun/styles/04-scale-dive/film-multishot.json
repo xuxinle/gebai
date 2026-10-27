@@ -1,0 +1,320 @@
+{
+  "name": "style-04-scale-dive-multishot",
+  "fps": 30,
+  "size": [
+    1920,
+    1080
+  ],
+  "transition": 0,
+  "fade_in": 0.3,
+  "fade_out": 0.3,
+  "brand_wordmark": "",
+  "brand_latin": "",
+  "footer_note": "",
+  "audio": {
+    "enabled": false
+  },
+  "scenes": [
+    {
+      "kind": "custom",
+      "duration": 3.0,
+      "layout": "layout-ms0.js",
+      "accent": "#4B8CF5",
+      "background": [
+        "#080B12",
+        "#0E1521"
+      ],
+      "wrap": false,
+      "layers": [
+        {
+          "kind": "text",
+          "name": "eyebrow0",
+          "x": 108,
+          "y": 300,
+          "w": 1100,
+          "h": 40,
+          "text": "尺度一镜",
+          "size": 24,
+          "color": "#5C7391",
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "title0",
+          "x": 108,
+          "y": 390,
+          "w": 1300,
+          "h": 90,
+          "text": "从这里开始放大",
+          "size": 62,
+          "color": "#E8F0FC",
+          "bold": true,
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "frame",
+          "x": 880,
+          "y": 580,
+          "w": 160,
+          "h": 160,
+          "fill": "#132033",
+          "stroke": "#4B8CF5",
+          "stroke_width": 3,
+          "radius": 12,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "core",
+          "x": 920,
+          "y": 620,
+          "w": 80,
+          "h": 80,
+          "fill": "#8FC0FF",
+          "radius": 6,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "cap0",
+          "x": 760,
+          "y": 790,
+          "w": 400,
+          "h": 40,
+          "text": "一块而已",
+          "size": 24,
+          "color": "#5C7391",
+          "align": 0,
+          "enter": 0
+        }
+      ],
+      "carry_out": {
+        "name": "尺度·锚点",
+        "into": 1,
+        "at": 2.7,
+        "dur": 0.7,
+        "from": {
+          "x": "45.833%",
+          "y": "53.704%",
+          "w": "8.333%",
+          "h": "14.815%",
+          "radius": 12
+        },
+        "to": {
+          "x": "8%",
+          "y": "14%",
+          "w": "84%",
+          "h": "66%",
+          "radius": 12
+        },
+        "fill": "#132033",
+        "stroke": "#4B8CF5",
+        "stroke_width": 3,
+        "curve": "expo_in_out",
+        "fade_out": 0.35
+      }
+    },
+    {
+      "kind": "custom",
+      "duration": 3.4,
+      "layout": "layout-ms1.js",
+      "accent": "#4B8CF5",
+      "background": [
+        "#080B12",
+        "#0E1521"
+      ],
+      "wrap": false,
+      "layers": [
+        {
+          "kind": "rect",
+          "name": "pageframe",
+          "x": "8%",
+          "y": "14%",
+          "w": "84%",
+          "h": "66%",
+          "fill": "#132033",
+          "stroke": "#4B8CF5",
+          "stroke_width": 3,
+          "radius": 12,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "eyebrow1",
+          "x": 220,
+          "y": 210,
+          "w": 1200,
+          "h": 40,
+          "text": "同一块 · 整页",
+          "size": 24,
+          "color": "#5C7391",
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "title1",
+          "x": 220,
+          "y": 290,
+          "w": 1400,
+          "h": 80,
+          "text": "同一块，已是整页",
+          "size": 52,
+          "color": "#E8F0FC",
+          "bold": true,
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "row0",
+          "x": 220,
+          "y": 420,
+          "w": 1480,
+          "h": 44,
+          "fill": "#223552",
+          "radius": 6,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "row1",
+          "x": 220,
+          "y": 490,
+          "w": 1290,
+          "h": 44,
+          "fill": "#223552",
+          "radius": 6,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "row2",
+          "x": 220,
+          "y": 560,
+          "w": 1370,
+          "h": 44,
+          "fill": "#223552",
+          "radius": 6,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "row3",
+          "x": 220,
+          "y": 630,
+          "w": 1120,
+          "h": 44,
+          "fill": "#223552",
+          "radius": 6,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "sweep",
+          "x": 220,
+          "y": 418,
+          "w": 1480,
+          "h": 6,
+          "fill": "#A8CCFF",
+          "radius": 3,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "cap1",
+          "x": 220,
+          "y": 730,
+          "w": 1480,
+          "h": 40,
+          "text": "刚才那块，就是这一页的边框",
+          "size": 24,
+          "color": "#5C7391",
+          "align": 0,
+          "enter": 0
+        }
+      ],
+      "carry_out": {
+        "name": "尺度·锚点",
+        "into": 2,
+        "at": 6.1,
+        "dur": 0.7,
+        "from": {
+          "x": "8%",
+          "y": "14%",
+          "w": "84%",
+          "h": "66%",
+          "radius": 12
+        },
+        "to": {
+          "x": "42%",
+          "y": "46%",
+          "w": "16%",
+          "h": "8%",
+          "radius": 999
+        },
+        "fill": "#132033",
+        "stroke": "#4B8CF5",
+        "stroke_width": 3,
+        "curve": "expo_in_out",
+        "fade_out": 0.35
+      }
+    },
+    {
+      "kind": "custom",
+      "duration": 3.0,
+      "layout": "layout-ms2.js",
+      "accent": "#4B8CF5",
+      "background": [
+        "#0A1020",
+        "#101A2E"
+      ],
+      "wrap": false,
+      "layers": [
+        {
+          "kind": "rect",
+          "name": "capsule",
+          "x": "42%",
+          "y": "46%",
+          "w": "16%",
+          "h": "8%",
+          "fill": "#132033",
+          "stroke": "#4B8CF5",
+          "stroke_width": 3,
+          "radius": 54,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "title2",
+          "x": 0,
+          "y": 700,
+          "w": 1920,
+          "h": 80,
+          "text": "再缩回去，它一直在",
+          "size": 48,
+          "color": "#E8F0FC",
+          "bold": true,
+          "align": 0,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "sub2",
+          "x": 0,
+          "y": 776,
+          "w": 1920,
+          "h": 46,
+          "text": "整片只在改变一个矩形的尺寸",
+          "size": 24,
+          "color": "#5C7391",
+          "align": 0,
+          "enter": 0
+        }
+      ]
+    }
+  ]
+}

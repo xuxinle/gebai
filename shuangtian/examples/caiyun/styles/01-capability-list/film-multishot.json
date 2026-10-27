@@ -1,0 +1,366 @@
+{
+  "name": "style-01-capability-list-multishot",
+  "fps": 30,
+  "size": [
+    1920,
+    1080
+  ],
+  "transition": 0,
+  "fade_in": 0.3,
+  "fade_out": 0.3,
+  "brand_wordmark": "",
+  "brand_latin": "",
+  "footer_note": "",
+  "audio": {
+    "enabled": false
+  },
+  "scenes": [
+    {
+      "kind": "custom",
+      "duration": 3.0,
+      "layout": "layout-ms0.js",
+      "accent": "#4B8CF5",
+      "background": [
+        "#080B12",
+        "#0E1521"
+      ],
+      "wrap": false,
+      "layers": [
+        {
+          "kind": "text",
+          "name": "eyebrow0",
+          "x": 108,
+          "y": 300,
+          "w": 1000,
+          "h": 40,
+          "text": "能力清单",
+          "size": 24,
+          "color": "#5C7391",
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "title0",
+          "x": 108,
+          "y": 390,
+          "w": 1100,
+          "h": 90,
+          "text": "点一下，界面才开始",
+          "size": 60,
+          "color": "#E8F0FC",
+          "bold": true,
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "panel0",
+          "x": 560,
+          "y": 600,
+          "w": 800,
+          "h": 300,
+          "fill": "#0D1522",
+          "stroke": "#1E2D42",
+          "stroke_width": 1,
+          "radius": 18,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "row0a",
+          "x": 610,
+          "y": 680,
+          "w": 600,
+          "h": 40,
+          "text": "真源是 JSON",
+          "size": 26,
+          "color": "#C8D6EA",
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "row0b",
+          "x": 610,
+          "y": 760,
+          "w": 600,
+          "h": 40,
+          "text": "改一行就重出全片",
+          "size": 26,
+          "color": "#C8D6EA",
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "ellipse",
+          "name": "cursor0",
+          "x": 860,
+          "y": 569,
+          "w": 26,
+          "h": 26,
+          "fill": "#FFFFFF",
+          "enter": 0
+        }
+      ],
+      "carry_out": {
+        "name": "光标·本体",
+        "into": 1,
+        "at": 2.7,
+        "dur": 0.7,
+        "from": {
+          "x": "44.79%",
+          "y": "52.69%",
+          "w": "1.35%",
+          "h": "2.41%",
+          "radius": 13
+        },
+        "to": {
+          "x": "6.20%",
+          "y": "20.28%",
+          "w": "2.71%",
+          "h": "4.81%",
+          "radius": 26
+        },
+        "fill": "#FFFFFF",
+        "stroke_width": 0,
+        "curve": "expo_in_out"
+      }
+    },
+    {
+      "kind": "custom",
+      "duration": 3.4,
+      "layout": "layout-ms1.js",
+      "accent": "#4B8CF5",
+      "background": [
+        "#080B12",
+        "#0E1521"
+      ],
+      "wrap": false,
+      "layers": [
+        {
+          "kind": "text",
+          "name": "eyebrow1",
+          "x": 260,
+          "y": 200,
+          "w": 1400,
+          "h": 40,
+          "text": "尺度跳变：同一处，已是细节",
+          "size": 24,
+          "color": "#5C7391",
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "title1",
+          "x": 260,
+          "y": 300,
+          "w": 1500,
+          "h": 90,
+          "text": "它碰过的每一行",
+          "size": 58,
+          "color": "#E8F0FC",
+          "bold": true,
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "cardA",
+          "x": 240,
+          "y": 470,
+          "w": 440,
+          "h": 300,
+          "fill": "#0D1522",
+          "stroke": "#24354C",
+          "stroke_width": 1,
+          "radius": 16,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "cardB",
+          "x": 740,
+          "y": 470,
+          "w": 440,
+          "h": 300,
+          "fill": "#0D1522",
+          "stroke": "#24354C",
+          "stroke_width": 1,
+          "radius": 16,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "cardC",
+          "x": 1240,
+          "y": 470,
+          "w": 440,
+          "h": 300,
+          "fill": "#0D1522",
+          "stroke": "#24354C",
+          "stroke_width": 1,
+          "radius": 16,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "txtA",
+          "x": 300,
+          "y": 640,
+          "w": 330,
+          "h": 40,
+          "text": "真源是 JSON",
+          "size": 26,
+          "color": "#C8D6EA",
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "txtB",
+          "x": 800,
+          "y": 640,
+          "w": 330,
+          "h": 40,
+          "text": "改一行重出全片",
+          "size": 26,
+          "color": "#C8D6EA",
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "txtC",
+          "x": 1300,
+          "y": 640,
+          "w": 330,
+          "h": 40,
+          "text": "全程可回溯",
+          "size": 26,
+          "color": "#C8D6EA",
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "tickA",
+          "x": 300,
+          "y": 520,
+          "w": 22,
+          "h": 22,
+          "fill": "#35C98A",
+          "radius": 5,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "tickB",
+          "x": 800,
+          "y": 520,
+          "w": 22,
+          "h": 22,
+          "fill": "#35C98A",
+          "radius": 5,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "tickC",
+          "x": 1300,
+          "y": 520,
+          "w": 22,
+          "h": 22,
+          "fill": "#35C98A",
+          "radius": 5,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "sweep1",
+          "x": 240,
+          "y": 760,
+          "w": 1440,
+          "h": 3,
+          "fill": "#4B8CF5",
+          "radius": 2,
+          "enter": 0
+        },
+        {
+          "kind": "ellipse",
+          "name": "cursor1",
+          "x": 119,
+          "y": 219,
+          "w": 52,
+          "h": 52,
+          "fill": "#FFFFFF",
+          "enter": 0
+        }
+      ],
+      "carry_out": {
+        "name": "光标·本体",
+        "into": 2,
+        "at": 6.1,
+        "dur": 0.7,
+        "from": {
+          "x": "67.08%",
+          "y": "46.85%",
+          "w": "2.71%",
+          "h": "4.81%",
+          "radius": 26
+        },
+        "to": {
+          "x": "71.98%",
+          "y": "75.93%",
+          "w": "1.35%",
+          "h": "2.41%",
+          "radius": 13
+        },
+        "fill": "#FFFFFF",
+        "stroke_width": 0,
+        "curve": "expo_in_out"
+      }
+    },
+    {
+      "kind": "custom",
+      "duration": 3.0,
+      "layout": "layout-ms2.js",
+      "accent": "#4B8CF5",
+      "background": [
+        "#0A1020",
+        "#101A2E"
+      ],
+      "wrap": false,
+      "layers": [
+        {
+          "kind": "text",
+          "name": "title2",
+          "x": 420,
+          "y": 470,
+          "w": 1080,
+          "h": 100,
+          "text": "它一直在那儿",
+          "size": 64,
+          "color": "#E8F0FC",
+          "bold": true,
+          "align": 0,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "sub2",
+          "x": 420,
+          "y": 580,
+          "w": 1080,
+          "h": 50,
+          "text": "每一次反应都能追到它的一个动作",
+          "size": 26,
+          "color": "#5C7391",
+          "align": 0,
+          "enter": 0
+        }
+      ]
+    }
+  ]
+}

@@ -60,12 +60,30 @@ describe("caiyun / louyue", () => {
       }
       // 自有工具清单写死——改动时逼人回看这里，确认新增的那个**只能由本代理提供**。
       //
-      // 现有两个，都满足"别家拿不到"：
+      // 五个都满足"别家拿不到"：
       //   · `verify`：读本应用渲染器在渲染循环里量好的逐镜数据（旁挂子代理拿不到）
       //   · `style_guide`：七种叙事模板，讲的是「用裁云怎么落地」——具体图层字段
       //     与 `layout` 写法，只有裁云自己知道（放成框架文档会各自漂移）
+      //   · `script_schema` / `script_check` / `film_render`：知道裁云 exe 的位置与档位、
+      //     `--strict` 的默认、帧目录约定（`<成片目录>/frames`，不可指定）、
+      //     以严格模式的诊断格式。这些都是**裁云的实现细节**，
+      //     放进通用子代理会让它每部片重猜一遍。
+      //   · `assets`：资产库的元数据（哪份示例是全特效、哪份是白底、
+      //     光照配方的具体字段值、实测静止占比）。它讲的是“裁云的库里有什么”，
+      //     依赖方根本不知道这个库存在。
+      //
+      // 为何不是"把 sh 命令包一层"：模型自己拼 `caiyun.exe --headless --script …`
+      // 需要记住六个参数与它们的交互（`--strict` 默认、`--render-frames` 语义、
+      // 帧落在哪），而一步写错就是一轮 100 秒的渲染。工具把这些固定动作变成一次调用。
       if (name === "caiyun") {
-        expect(own).toEqual(["verify", "style_guide"])
+        expect(own).toEqual([
+          "verify",
+          "style_guide",
+          "assets",
+          "script_schema",
+          "script_check",
+          "film_render",
+        ])
       } else {
         expect(own).toEqual([])
       }

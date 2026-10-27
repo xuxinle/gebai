@@ -1,0 +1,108 @@
+{
+  "name": "style-07-pointer-multishot",
+  "fps": 30,
+  "size": [1920, 1080],
+  "transition": 0,
+  "fade_in": 0.3,
+  "fade_out": 0.3,
+  "brand_wordmark": "",
+  "brand_latin": "",
+  "footer_note": "",
+  "audio": { "enabled": false },
+  "scenes": [
+    {
+      "kind": "custom",
+      "duration": 3.0,
+      "layout": "layout-ms0.js",
+      "accent": "#4B8CF5",
+      "background": ["#080B12", "#0E1521"],
+      "wrap": false,
+      "layers": [
+        { "kind": "text", "name": "eyebrow0", "x": 108, "y": 296, "w": 1200, "h": 40,
+          "text": "在场操作", "size": 24, "color": "#5C7391", "align": 1, "enter": 0 },
+        { "kind": "text", "name": "title0", "x": 108, "y": 386, "w": 1500, "h": 90,
+          "text": "每一次反馈都来自一次动作", "size": 58, "color": "#E8F0FC", "bold": true, "align": 1, "enter": 0 },
+        { "kind": "rect", "name": "btn0", "x": 860, "y": 700, "w": 200, "h": 64,
+          "fill": "#131C2B", "stroke": "#25344A", "stroke_width": 2, "radius": 10, "enter": 0 },
+        { "kind": "rect", "name": "btnLit0", "x": 864, "y": 704, "w": 192, "h": 56,
+          "fill": "#4E8FE0", "radius": 8, "opacity": 0, "enter": 0 },
+        { "kind": "ellipse", "name": "shadow0", "x": 940, "y": 714, "w": 44, "h": 12,
+          "fill": "#000000", "opacity": 0, "enter": 0 },
+        { "kind": "ellipse", "name": "hero0", "x": -60, "y": 700, "w": 40, "h": 40,
+          "fill": "#F5C24A", "opacity": 0, "enter": 0 }
+      ],
+      "carry_out": {
+        "name": "角色·本体",
+        "into": 1,
+        "at": 2.7,
+        "dur": 0.7,
+        "from": { "x": "48.96%", "y": "62.04%", "w": "2.08%", "h": "3.70%", "radius": 20 },
+        "to": { "x": "30.21%", "y": "35.19%", "w": "2.08%", "h": "3.70%", "radius": 20 },
+        "fill": "#F5C24A",
+        "stroke_width": 0,
+        "curve": "expo_in_out"
+      }
+    },
+    {
+      "kind": "custom",
+      "duration": 3.4,
+      "layout": "layout-ms1.js",
+      "accent": "#4B8CF5",
+      "background": ["#080B12", "#0E1521"],
+      "wrap": false,
+      "layers": [
+        { "kind": "text", "name": "eyebrow1", "x": 108, "y": 146, "w": 1200, "h": 40,
+          "text": "角色划过哪里", "size": 24, "color": "#5C7391", "align": 1, "enter": 0 },
+        { "kind": "text", "name": "title1", "x": 108, "y": 226, "w": 1600, "h": 80,
+          "text": "一行一行，都是它碰过的", "size": 52, "color": "#E8F0FC", "bold": true, "align": 1, "enter": 0 },
+        { "kind": "rect", "name": "panel", "x": 560, "y": 320, "w": 1000, "h": 450,
+          "fill": "#0B1320", "stroke": "#1E2C40", "stroke_width": 2, "radius": 14, "enter": 0 },
+        { "kind": "rect", "name": "row0", "x": 600, "y": 350, "w": 920, "h": 100,
+          "fill": "#101B2C", "radius": 10, "enter": 0 },
+        { "kind": "rect", "name": "rowLit0", "x": 600, "y": 350, "w": 920, "h": 100,
+          "fill": "#1B3A63", "radius": 10, "opacity": 0, "enter": 0 },
+        { "kind": "rect", "name": "row1", "x": 600, "y": 480, "w": 920, "h": 100,
+          "fill": "#101B2C", "radius": 10, "enter": 0 },
+        { "kind": "rect", "name": "rowLit1", "x": 600, "y": 480, "w": 920, "h": 100,
+          "fill": "#1B3A63", "radius": 10, "opacity": 0, "enter": 0 },
+        { "kind": "rect", "name": "row2", "x": 600, "y": 610, "w": 920, "h": 100,
+          "fill": "#101B2C", "radius": 10, "enter": 0 },
+        { "kind": "rect", "name": "rowLit2", "x": 600, "y": 610, "w": 920, "h": 100,
+          "fill": "#1B3A63", "radius": 10, "opacity": 0, "enter": 0 },
+        { "kind": "ellipse", "name": "shadow1", "x": 580, "y": 654, "w": 44, "h": 12,
+          "fill": "#000000", "opacity": 0, "enter": 0 },
+        { "kind": "ellipse", "name": "hero1", "x": 580, "y": 380, "w": 40, "h": 40,
+          "fill": "#F5C24A", "opacity": 0, "enter": 0 }
+      ],
+      "carry_out": {
+        "name": "角色·本体",
+        "into": 2,
+        "at": 6.1,
+        "dur": 0.7,
+        "from": { "x": "30.21%", "y": "59.26%", "w": "2.08%", "h": "3.70%", "radius": 20 },
+        "to": { "x": "36.46%", "y": "61.11%", "w": "2.08%", "h": "3.70%", "radius": 20 },
+        "fill": "#F5C24A",
+        "stroke_width": 0,
+        "curve": "expo_in_out"
+      }
+    },
+    {
+      "kind": "custom",
+      "duration": 3.0,
+      "layout": "layout-ms2.js",
+      "accent": "#4B8CF5",
+      "background": ["#0A1020", "#101A2E"],
+      "wrap": false,
+      "layers": [
+        { "kind": "text", "name": "title2", "x": 480, "y": 436, "w": 960, "h": 100,
+          "text": "手停了，界面才静", "size": 64, "color": "#E8F0FC", "bold": true, "align": 0, "enter": 0 },
+        { "kind": "text", "name": "sub2", "x": 480, "y": 536, "w": 960, "h": 50,
+          "text": "角色始终是那个唯一的主语", "size": 26, "color": "#5C7391", "align": 0, "enter": 0 },
+        { "kind": "ellipse", "name": "shadow2", "x": 700, "y": 674, "w": 44, "h": 12,
+          "fill": "#000000", "opacity": 0, "enter": 0 },
+        { "kind": "ellipse", "name": "hero2", "x": 700, "y": 660, "w": 40, "h": 40,
+          "fill": "#F5C24A", "opacity": 0, "enter": 0 }
+      ]
+    }
+  ]
+}

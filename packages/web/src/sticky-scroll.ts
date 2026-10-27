@@ -37,6 +37,45 @@ export interface StickyScrollHandle {
   clearUnread(): void
   /** 按当前位置刷新按钮显隐。 */
   refresh(): void
+  /** 释放实例（容器销毁时）：注销按钮点击分发与容器监听。 */
+  dispose(): void
+}
+
+/** 按钮点击分发的实例登记项。 */
+interface JumpOwner {
+  isActive: () => boolean
+  follow: () => void
+}
+
+/**
+ * 按钮点击分发（按按钮分桶）：
+ * 同一按钮服务多个滚动容器实例（多 pane 并存），但点击只能落到**活动**实例的几何上——
+ * 按实例闭包绑 onclick 会让按钮永久归最后创建的那个容器（切回先创建的会话后点击无反应），
+ * 容器被 LRU 释放后更是无主。故此处按按钮汇总全部实例，点击时执行活动实例的跟随。
+ */
+const ownersByBtn = new WeakMap<HTMLElement, Set<JumpOwner>>()
+
+function registerJumpOwner(btn: HTMLElement, owner: JumpOwner): void {
+  let owners = ownersByBtn.get(btn)
+  if (!owners) {
+    owners = new Set()
+    ownersByBtn.set(btn, owners)
+    btn.onclick = () => {
+      for (const candidate of ownersByBtn.get(btn) ?? []) {
+        if (!candidate.isActive()) continue
+        candidate.follow()
+        return
+      }
+    }
+  }
+  owners.add(owner)
+}
+
+function unregisterJumpOwner(btn: HTMLElement, owner: JumpOwner): void {
+  const owners = ownersByBtn.get(btn)
+  if (!owners) return
+  owners.delete(owner)
+  if (owners.size === 0) ownersByBtn.delete(btn)
 }
 
 export function createStickyScroll(el: HTMLElement, btn: HTMLElement, opts?: { isActive?: () => boolean }): StickyScrollHandle {
@@ -61,19 +100,15 @@ export function createStickyScroll(el: HTMLElement, btn: HTMLElement, opts?: { i
     btn.hidden = !core.shouldShowJump()
   }
 
-  // 点击滚动到底并重新锁定
-  btn.onclick = () => {
-    if (isActive()) core.follow()
-  }
+  // 点击滚动到底并重新锁定（分发给活动实例，见 registerJumpOwner）
+  const owner: JumpOwner = { isActive, follow: () => core.follow() }
+  registerJumpOwner(btn, owner)
 
   // 图片异步加载改变高度（含 markdown 内嵌 <img>，无独立 onload 处理）：跟随中滚动到底
-  el.addEventListener(
-    "load",
-    (e) => {
-      if ((e.target as HTMLElement).tagName === "IMG") core.contentChanged()
-    },
-    true,
-  )
+  const onLoad = (e: Event) => {
+    if ((e.target as HTMLElement).tagName === "IMG") core.contentChanged()
+  }
+  el.addEventListener("load", onLoad, true)
 
   refresh()
   return {
@@ -89,5 +124,9 @@ export function createStickyScroll(el: HTMLElement, btn: HTMLElement, opts?: { i
     noteIncoming: refresh,
     clearUnread: refresh,
     refresh,
+    dispose() {
+      el.removeEventListener("load", onLoad, true)
+      unregisterJumpOwner(btn, owner)
+    },
   }
 }

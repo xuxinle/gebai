@@ -456,3 +456,55 @@ describe("PersonaRuntime：投递失败不占用幂等位（否则瞬时故障=�
     runtime.stop()
   })
 })
+
+describe("PersonaRuntime.bindings：运行态快照的会话来源", () => {
+  /**
+   * `bindings()` 是快照里 `sessionId` / `sessionRunning` 两列的唯一来源。
+   *
+   * 为何钉住：宿主侧快照（`persona-status.ts`）只要拿不到它，就把所有分身的
+   * `sessionId` 一律显示 null——**分身明明正在跑，面板却说「它还没接过事件」**，
+   * 把「在干活」误报成「没通电」，正是这套视图最该避免的误判。
+   * 实测形态：真投递跑完一轮后，`/api/v1/persona/state` 里 support 的
+   * `sessionId` 仍为 null，而会话里已经有完整对话。
+   */
+  test("解析过会话后，bindings() 能报出 driverKey → sessionId", async () => {
+    const runtime = new PersonaRuntime({
+      lookup: {
+        get: () => IDENT,
+        subscribers: () => [{ personaId: "xiaoshuang", user: "admin", driverIds: ["main"] }],
+        drivers: () => [{ id: "main", focus: "主驱动", subscriptions: ["*"] }],
+        maxConcurrent: () => 1,
+      },
+      runner: { isRunning: () => false, run: async () => {} },
+      sessions: { resolveDriver: async () => ({ sessionId: "s-bound", created: false, name: "x" }) },
+    })
+    runtime.start()
+    // 未投递前：没有任何绑定（这本身就是「它还没接过事件」的正确信号）
+    expect(runtime.bindings()).toEqual([])
+
+    await runtime.dispatch(ev("bind-1"))
+
+    expect(runtime.bindings()).toEqual([{ personaId: "xiaoshuang", driverId: "main", sessionId: "s-bound" }])
+    runtime.stop()
+  })
+
+  test("driver 下线后绑定被清掉（不留下指向已停分身的陈旧会话）", async () => {
+    const runtime = new PersonaRuntime({
+      lookup: {
+        get: () => IDENT,
+        subscribers: () => [{ personaId: "xiaoshuang", user: "admin", driverIds: ["main"] }],
+        drivers: () => [{ id: "main", focus: "主驱动", subscriptions: ["*"] }],
+        maxConcurrent: () => 1,
+      },
+      runner: { isRunning: () => false, run: async () => {} },
+      sessions: { resolveDriver: async () => ({ sessionId: "s-gone", created: false, name: "x" }) },
+    })
+    runtime.start()
+    await runtime.dispatch(ev("bye-1"))
+    expect(runtime.bindings()).toHaveLength(1)
+
+    runtime.syncDriver("xiaoshuang", "main", "offline")
+    expect(runtime.bindings()).toEqual([])
+    runtime.stop()
+  })
+})

@@ -4,6 +4,7 @@
 import { existsSync } from "node:fs"
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import { spawn } from "node:child_process"
 import type { ServerWebSocket } from "bun"
 import { isolationConfigConflict, loadConfig } from "../core/base/config"
 import { SessionStore } from "../core/session/store"
@@ -244,6 +245,12 @@ export interface Composed {
   devReload: DevReloadManager | null
   /** 热刷新通道连接集合（serve.ts 的 websocket.open 注册，DevReloadManager 广播消费）。 */
   devReloadClients: Set<ServerWebSocket<unknown>>
+  /**
+   * 拉起相期桌面窗口（若可用）。serve.ts 在监听建立后调用——
+   * 窗口连的是主服务端口（方案 B），需先有 `/xiangqi` WS 可连。
+   * 找不到 exe / 非本机形态时为空操作（日志提示，不阻断）。
+   */
+  launchXiangqi: () => void
 }
 
 export async function composeServer(overrides: Partial<Parameters<typeof loadConfig>[0]> = {}): Promise<Composed> {
@@ -1284,5 +1291,54 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     })
   }
 
-  return { config, store, registry, engine, subAgents, channels, auth, events, sandbox, webhooks, tasks, todos, gc, feishuBot, deps, state, app, devReload, devReloadClients }
+  // ── 相期桌面窗口拉起（方案 B）──
+  //
+  // 目标：“拟人模式 agent 服务一启动，相期就在”。窗口是独立 C++ 桌面程序
+  // `xiangqi.exe`，作为 WS 客户端连**主服务端口**的 `/xiangqi`（不是独立 7717）。
+  //
+  // 何时拉起：仅在**本地形态**（auth=local，桌面/开发部署）且拟人模式启用时——
+  // 服务模式下没有用户的桌面，拉起窗口无处可放。
+  //
+  // 可配置：`XIANGQI_BIN` 覆盖 exe 路径（缺省按仓库/常见位置探测）；
+  // `XIANGQI_AUTO=off` 显式关闭（不想让服务替你开窗口时）。
+  //
+  // 失败策略：找不到/启动失败只记日志，绝不阻断服务——相期是附加提醒面，
+  // 没有它时授权卡仍走 REST 链接降级（`/api/v1/persona/status` 的 authorizeUrl）。
+  const launchXiangqi = (): void => {
+    if (!config.personaEnabled || config.auth !== "local") return
+    if (String(process.env.XIANGQI_AUTO ?? "").toLowerCase() === "off") {
+      log.info("[gebai] XIANGQI_AUTO=off：不自动拉起相期窗口")
+      return
+    }
+    const bin =
+      process.env.XIANGQI_BIN?.trim() ||
+      // 多个候选按序探测：dev 版实测可常驻（quick 版在部分环境会闪退），
+      // 取第一个存在的；找不到时具体原因见下方 warn
+      ["dev", "quick", "release"]
+        .map((profile) => join(config.gebaiHome, "shuangtian", "build", profile, "bin", "xiangqi.exe"))
+        .find((p) => existsSync(p)) ||
+      join(import.meta.dirname, "..", "..", "..", "..", "..", "shuangtian", "build", "dev", "bin", "xiangqi.exe")
+    if (!existsSync(bin)) {
+      log.warn(`[gebai] 相期窗口未找到：${bin}（拟人模式已启用但桌面提醒不可用；设 XIANGQI_BIN 指定路径，或忽略）`)
+      return
+    }
+    const agentUrl = `ws://127.0.0.1:${config.port}/xiangqi`
+    const home = process.env.XIANGQI_HOME?.trim() || join(config.gebaiHome, "相期")
+    log.info(`[gebai] 拉起相期窗口：${bin} --agent ${agentUrl} --home ${home}`)
+    try {
+      const child = spawn(bin, [`--agent`, agentUrl, `--home`, home], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: false,
+      })
+      child.unref()
+      child.on("error", (err) => {
+        log.warn(`[gebai] 相期窗口启动失败：${String((err as Error).message || err)}`)
+      })
+    } catch (err) {
+      log.warn(`[gebai] 相期窗口启动异常：${String((err as Error).message || err)}`)
+    }
+  }
+
+  return { config, store, registry, engine, subAgents, channels, auth, events, sandbox, webhooks, tasks, todos, gc, feishuBot, deps, state, app, devReload, devReloadClients, launchXiangqi }
 }

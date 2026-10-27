@@ -36,19 +36,19 @@ auto Theme::light() -> Theme {
   //   输入框/代码块            → 再沉一档（`code_bg` / 控件自己的 `sunken`）
   //   弹层/菜单               → `surface_raised`（纯白 + 阴影）
   // 页面底：与面板拉得开（护栏：`surface` 对 `bg` ≥1.08）。
-  palette.bg = hex(0xE8E8EEFFU);
-  palette.surface = hex(0xFAFAFCFFU);
+  palette.bg = hex(0xEEE8E8FFU);
+  palette.surface = hex(0xFFFAF6FFU);
   // 外壳条带：压暗一点（亮色下“更亮”已到头，靠压暗边框区把内容托起来）。
   // VSCode Light：侧栏 #f3f3f3 / 编辑器 #ffffff；本主题同构。
-  palette.surface_alt = hex(0xEEEEF3FFU);
+  palette.surface_alt = hex(0xF4EEEDFFU);
   // 凹槽（输入框底/代码块/进度槽）：**真凹进去**（比 `bg` 暗）——
   // 它不服务于编辑器（编辑器走 `Surface::Content`，见下）。
-  palette.surface_sunken = hex(0xDCDCE5FFU);
+  palette.surface_sunken = hex(0xE2DCDFFFU);
   // 编辑内容区 / 抬升面（同一个 token 服务两个语义）：
   //   · `Surface::Content`（编辑区阅读面）亮色下就是**纯白**——与外壳（`alt` 浅灰）拉开一层；
   //   · 弹层/菜单（`surface_raised`）浅色下也是白系，抬升由**阴影**表达（见 `elevation`）。
   // 两者取值相同是有意的：亮色下“最亮的面”只有一个候选值。
-  palette.surface_raised = hex(0xFFFFFFFFU);
+  palette.surface_raised = hex(0xFFFFF9FFU);
   // 描边是**半透明黑光**（`theme.hpp` 亚克力口径 §1）：叠在任意底色上强度一致。
   //
   // 为何不能用“按主体底色合成一次的等效实色”：那只能对**一种**底色正确。
@@ -73,8 +73,8 @@ auto Theme::light() -> Theme {
   palette.primary_active = hex(0x2E3AB4FFU);
   // 悬浮档位要**看得见**：早先取 0xF2F6FC，与侧栏底色只差 4/2/0（肉眼近乎没有），
   // 实测像素差才 6/255。现在这一步在浅色底上清晰可辨，又不至于喧宾夺主。
-  palette.surface_hover = hex(0xEDEDEFFFU);
-  palette.surface_pressed = hex(0xE3E3E5FFU);
+  palette.surface_hover = hex(0xF4EDECFFU);
+  palette.surface_pressed = hex(0xE8E0DFFFU);
   palette.border_hover = hex(0x9A9AA6FFU);
   palette.glow = hex(0x4655D82EU);
   palette.primary_soft = hex(0xEDEEF9FFU);
@@ -139,6 +139,13 @@ auto Theme::light() -> Theme {
       hex(0x4E4E5CFFU), hex(0xBC1C12FFU), hex(0x0E6F3CFFU), hex(0x865700FFU),
       hex(0x1D4ED8FFU), hex(0x9317A8FFU), hex(0x096B80FFU), hex(0x3A3A45FFU)};
   theme.metrics_ = Metrics{};
+  // 凹槽内阴影（亮色）：一道**极淡的灰**。
+  //
+  // 为何这么淡：`surface_sunken` 已经比周围深一档（#DCDCE5 vs #FAFAFC），
+  // 内阴影只负责把“凹进去”的**方向**说出来（上缘略暗、下缘略亮），
+  // 再重就会被读成“脏边”——与卡片边框同一个道理（见 DESIGN §4.2.4）。
+  theme.metrics_.sunken_shadow = hex(0x00000026U);   // ~15% 黑
+  theme.metrics_.sunken_shadow_blur = 5.0f;
   return theme;
 }
 
@@ -169,13 +176,13 @@ auto Theme::dark() -> Theme {
   // 它是暗色阶梯的**最低点**（`sunken` 必须比它亮——见 `ui_theme_test`），
   // 所以不能像旧值那样比 `sunken` 还亮。同时它参与 `faint` 文字对比度取最小值，
   // 压得太黑会把 `text_faint` 的 4.0:1 拖下去（实测 #0A0A0C 就不过）。
-  palette.bg = hex(0x111114FFU);
-  palette.surface = hex(0x1E1E24FFU);      ///< 侧栏/面板：内容容器
-  palette.surface_alt = hex(0x2A2A33FFU);  ///< 外壳条带：比面板再亮一档
-  palette.surface_sunken = hex(0x0D0D10FFU); ///< 编辑器底/输入框/代码块：往内沉
+  palette.bg = hex(0x0B111AFFU);
+  palette.surface = hex(0x181E2AFFU);      ///< 侧栏/面板：内容容器
+  palette.surface_alt = hex(0x242A39FFU);  ///< 外壳条带：比面板再亮一档
+  palette.surface_sunken = hex(0x070D16FFU); ///< 编辑器底/输入框/代码块：往内沉
   // 抬升面（弹层/菜单）比 surface 再亮一档：深色下**阴影几乎不可见**，
   // 层次只能靠底色本身拉开。
-  palette.surface_raised = hex(0x34343FFFU);
+  palette.surface_raised = hex(0x2E3445FFU);
   // 描边 = 半透明白光叠在**面板色**上的等效值。
   // 三档必须**同时**满足两组朝向相反的约束（`ui_theme_test` 锁着）：
   //   ● 各自对 `surface`/`alt` 看得见（≥ 1.10）——外壳条带抬高后旧值集体不够；
@@ -197,8 +204,8 @@ auto Theme::dark() -> Theme {
   palette.primary_active = hex(0x7787F5FFU);
   // 深色主题同样要给这套令牌：漏掉的话默认是全透明，**悬浮在暗色下毫无反馈**——
   // 而这种"某个主题下静默失效"的问题最难发现（浅色看着一切正常）。
-  palette.surface_hover = hex(0x2A2A33FFU);
-  palette.surface_pressed = hex(0x363642FFU);
+  palette.surface_hover = hex(0x232A38FFU);
+  palette.surface_pressed = hex(0x2C3342FFU);
   palette.border_hover = hex(0x70707EFFU);
   palette.glow = hex(0x8B9AFF38U);
   palette.primary_soft = hex(0x2A2E45FFU);
@@ -256,6 +263,12 @@ auto Theme::dark() -> Theme {
       hex(0x8A8A8AFFU), hex(0xF14C4CFFU), hex(0x23D18BFFU), hex(0xF5F543FFU),
       hex(0x3B8EEAFFU), hex(0xD670D6FFU), hex(0x29B8DBFFU), hex(0xFFFFFFFFU)};
   theme.metrics_ = Metrics{};
+  // 凹槽内阴影（暗色）：比亮色**稍强**。
+  //
+  // 暗底上一切都很淡：同样的 alpha 在暗色里几乎读不出方向（实测 15% 黑在
+  // #0D0D10 上只压出 2/255），所以这里提到 ~26%。
+  theme.metrics_.sunken_shadow = hex(0x00000042U);   // ~26% 黑
+  theme.metrics_.sunken_shadow_blur = 6.0f;
   return theme;
 }
 
@@ -367,6 +380,21 @@ void apply_shadow_tuning(const Theme& theme, Shadow& shadow) {
   return shadow;
 }
 
+auto ease_out(float t, float power) noexcept -> float {
+  // 夹到 [0,1]：动画首尾会因为时间戳抖动给出 −1e-7 这类值,
+  // 而 `pow(负数, 非整数次)` 是 NaN——NaN 混进布局会变成“元素凭空消失”。
+  const float clamped = std::clamp(t, 0.0f, 1.0f);
+  // `power <= 0` 退化成线性（而不是让整体变成 0：那会让动画卡在起点）。
+  if (!(power > 0.0f)) return clamped;
+  // `power == 1` 时 `pow` 与直减等价，但省一次 `pow` 调用（每帧每控件都在算）。
+  if (power == 1.0f) return clamped;
+  return 1.0f - std::pow(1.0f - clamped, power);
+}
+
+auto ease_out(const Theme& theme, float t) noexcept -> float {
+  return ease_out(t, theme.metrics().motion_ease_out_power);
+}
+
 // —— 令牌名表 ——
 //
 // 实现方式是"名字数组 + 一个取址表"，而不是两张 switch：
@@ -438,6 +466,7 @@ constexpr MetricToken kMetricTokens[] = {
     {"radius_lg", &Metrics::radius_lg, 0.0f, 256.0f},
     {"radius_xl", &Metrics::radius_xl, 0.0f, 256.0f},
     {"radius_pill", &Metrics::radius_pill, 0.0f, 4096.0f},
+    {"font_2xs", &Metrics::font_2xs, 4.0f, 256.0f},
     {"font_xs", &Metrics::font_xs, 4.0f, 256.0f},
     {"font_sm", &Metrics::font_sm, 4.0f, 256.0f},
     {"font_base", &Metrics::font_base, 4.0f, 256.0f},
@@ -458,6 +487,8 @@ constexpr MetricToken kMetricTokens[] = {
     {"motion_fast", &Metrics::motion_fast, 0.0f, 10000.0f},
     {"motion_normal", &Metrics::motion_normal, 0.0f, 10000.0f},
     {"motion_slow", &Metrics::motion_slow, 0.0f, 10000.0f},
+    // 缓动幂次：上限取 8（再高就近似“瞬间到位后再爬一段”，没有实际用途）。
+    {"motion_ease_out_power", &Metrics::motion_ease_out_power, 0.0f, 8.0f},
     {"hover_lift", &Metrics::hover_lift, 0.0f, 64.0f},
     {"hover_glow_width", &Metrics::hover_glow_width, 0.0f, 64.0f},
     {"press_sink", &Metrics::press_sink, 0.0f, 64.0f},

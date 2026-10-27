@@ -190,6 +190,23 @@ export class PersonaRuntime {
   }
 
   /**
+   * 已解析的 `(人格, 分身) → 常驻会话` 绑定（诊断/运行态快照用）。
+   *
+   * 为何要暴露它：宿主侧快照要回答的是「**运行时实际投递到了哪个会话**」——
+   * 那是本类内部的 `driverSessions`（调度器把 driver 翻译成会话时写下的）。
+   * 没有这个方法时，快照（`persona-status.ts`）只能去调 `SessionResolver.bindings()`，
+   * 而那是**另一个对象**、且不一定有该方法 → 快照里 `sessionId` 永远是 null：
+   * 分身明明正在跑，面板却说「它还没接过事件」，把「在干活」误报成「没通电」——
+   * 恰恰是这套视图最该避免的那类误判。
+   */
+  bindings(): Array<{ personaId: string; driverId: string; sessionId: string }> {
+    return [...this.driverSessions.entries()].map(([key, sessionId]) => {
+      const [personaId, driverId] = key.split("/")
+      return { personaId: personaId!, driverId: driverId!, sessionId }
+    })
+  }
+
+  /**
    * 取消某 driver 下**正在跑**的那一轮。
    *
    * 返回是否确有在跑。语义：长任务卡住（等审批/等接口/死循环）时的唯一出口——

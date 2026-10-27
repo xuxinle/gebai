@@ -11,6 +11,11 @@
  * - `start` **必须尽快返回**（订阅后即 resolve），长驻循环放后台；
  * - `stop` 负责清理定时器/连接。
  *
+ * **目录归属**：本源独占 `{GEBAI_HOME}/persona-drop/`。内置 `local` 渠道的 drop 监听
+ * 默认用 `{GEBAI_HOME}/channel-drop/`（见 `packages/channels/src/channels/local.ts`），
+ * 两路刻意分开——共用同一目录会发生双消费竞态（谁抢到算谁的，channel/kind 路由失效，
+ * 且计数全绿不报错）。需要自定目录用 `GEBAI_PERSONA_FILEDROP_DIR`。
+ *
  * **状态隔离的写法（重要，踩过两次）**：`start` 可能被同一模块函数多次调用（多 manager
  * 实例、热加载、测试并行），因此运行时状态**绝不能放模块级变量**，也不能挂在共享的
  * `def` 对象字段上——两者都会被不同实例互相覆盖，表现为「事件偶发丢失」。

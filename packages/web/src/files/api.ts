@@ -24,6 +24,8 @@ export interface RootInfo {
   isRepo?: boolean
   branch?: string
   repoRoot?: string
+  /** 歌白自身项目（内置「歌白」）：根菜单把它单独置顶。 */
+  self?: boolean
 }
 
 export interface RootsResponse {

@@ -178,6 +178,11 @@
                          "exclude_sources": ["src/pkg/*"] },
     "ring_raster_probe": { "kind": "executable", "sources": ["tools/ring_raster_probe.cpp"],
                            "exclude_sources": ["src/pkg/*"] },
+    "border_alpha_probe": { "kind": "executable", "sources": ["tools/border_alpha_probe.cpp"],
+                            "exclude_sources": ["src/pkg/*"] },
+    "draw_shadow_profile_probe": { "kind": "executable",
+                                   "sources": ["tools/draw_shadow_profile_probe.cpp"],
+                                   "exclude_sources": ["src/pkg/*"] },
     "rounded_fill_probe": {
       "kind": "executable",
       "sources": ["tools/rounded_fill_probe.cpp"],

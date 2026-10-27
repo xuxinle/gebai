@@ -1,7 +1,8 @@
 /**
  * 根选择菜单的分组与折叠（`files/root-menu.ts`）。
  *
- * 三条口径要钉住：项目组排最上且标题就叫「项目」；会话组超过阈值时折叠（其余进「更多」子菜单）；
+ * 四条口径要钉住：歌白自身单独置顶且**不占分组行**（空标题，不混在项目组里、不重复收录）；
+ * 其余项目紧随其后且标题就叫「项目」；会话组超过阈值时折叠（其余进「更多」子菜单）；
  * 当前所在的会话永远可见（否则「我在哪个会话」要靠猜）。
  */
 import { describe, expect, test } from "bun:test"
@@ -13,16 +14,30 @@ const tree: RootMenuEntry[] = [
   root("sess:1", "会话一", "sess"),
   root("sess:2", "会话二", "sess"),
   root("sess:3", "会话三", "sess"),
+  root("proj:歌白", "歌白", "proj", { isRepo: true, branch: "master", self: true }),
   root("proj:gebai", "gebai", "proj", { isRepo: true, branch: "master" }),
   root("user:", "用户目录", "user"),
   root("abs:C:\\tmp", "tmp", "abs"),
 ]
 
 describe("根选择菜单分组", () => {
-  test("项目组在最上，标题是「项目」（不是「预置项目」）", () => {
+  test("歌白单独置顶且无分组标题（不渲染分类行）", () => {
     const s = buildRootSections(tree, "sess:1")
-    expect(s[0]!.title).toBe("项目")
-    expect(s[0]!.entries.map((e) => e.id)).toEqual(["proj:gebai"])
+    expect(s[0]!.title).toBe("")
+    expect(s[0]!.entries.map((e) => e.id)).toEqual(["proj:歌白"])
+    // 其余项目组紧随其后，且歌白不重复出现在项目组里
+    expect(s[1]!.title).toBe("项目")
+    expect(s[1]!.entries.map((e) => e.id)).toEqual(["proj:gebai"])
+    expect(s.map((x) => x.title)).toEqual(["", "项目", "会话工作区", "其它"])
+  })
+
+  test("空标题只给歌白自身用（其余每组都有标题）", () => {
+    const s = buildRootSections(tree, "sess:1")
+    expect(s.filter((x) => !x.title).map((x) => x.entries.map((e) => e.id))).toEqual([["proj:歌白"]])
+  })
+
+  test("没有歌白项目时不留空组（沙箱模式 / 未内置）", () => {
+    const s = buildRootSections(tree.filter((x) => !x.self), "sess:1")
     expect(s.map((x) => x.title)).toEqual(["项目", "会话工作区", "其它"])
   })
 

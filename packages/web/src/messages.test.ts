@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, test } from "bun:test"
+import { afterAll, afterEach, describe, expect, mock, test } from "bun:test"
 import type { ToolInfo } from "@gebai/sdk"
 import type { RunState, SubSessionState } from "./state"
 // markdown.ts 模块级 import dompurify：bun test 无 DOM 环境 sanitize 不可用，先 mock 模块（须早于动态 import messages）
@@ -19,8 +19,7 @@ interface MockEl {
   remove(): void
   replaceWith(node: unknown): void
   readonly childNodes: MockEl[]
-}
-/** MockEl + 查询能力（由 Proxy 陷阱提供，类型上补齐声明）。 */
+}/** MockEl + 查询能力（由 Proxy 陷阱提供，类型上补齐声明）。 */
 type MockElWithQuery = MockEl & { querySelector(sel: string): unknown; querySelectorAll(sel: string): unknown[] }
 function makeMockEl(tag = "div"): MockElWithQuery {
   const dataset: Record<string, string> = {}
@@ -145,6 +144,12 @@ const doc = {
   currentScript: null,
   baseURI: "http://localhost/",
 }
+const prevDocument = (globalThis as Record<string, unknown>).document
+const prevNavigator = (globalThis as Record<string, unknown>).navigator
+const prevLocation = (globalThis as Record<string, unknown>).location
+const prevRaf = (globalThis as Record<string, unknown>).requestAnimationFrame
+const prevCaf = (globalThis as Record<string, unknown>).cancelAnimationFrame
+const prevMutationObserver = (globalThis as Record<string, unknown>).MutationObserver
 ;(globalThis as Record<string, unknown>).document = new Proxy(doc, {
   get(t, k) {
     if (typeof k === "string" && k in t) return (t as Record<string, unknown>)[k]
@@ -163,6 +168,17 @@ const doc = {
   observe() {}
   disconnect() {}
 }
+// document/navigator 等全局是整体替换的：用完必须放回基线那一份，否则同进程后续测试文件
+// 读到的是这里的桩（成员多为 no-op），表现为单文件全过、全量随文件顺序失败
+// （约定见 scripts/test-preload.ts）。
+afterAll(() => {
+  ;(globalThis as Record<string, unknown>).document = prevDocument
+  ;(globalThis as Record<string, unknown>).navigator = prevNavigator
+  ;(globalThis as Record<string, unknown>).location = prevLocation
+  ;(globalThis as Record<string, unknown>).requestAnimationFrame = prevRaf
+  ;(globalThis as Record<string, unknown>).cancelAnimationFrame = prevCaf
+  ;(globalThis as Record<string, unknown>).MutationObserver = prevMutationObserver
+})
 
 // 动态 import：mock 之后加载依赖 DOM 的模块
 const { sealSegment, subSessionEntry, sealSessionSegment, sealBlockResultSegment, bindSessionScroll, scrollSessionSticky, renderBlock, renderMsgAttachments, appendAskUserRecord, appendPlanCard, appendToolResult, renderChoiceCard, appendMsg, addMetaActions, compactNoticeTitle } = await import("./messages")

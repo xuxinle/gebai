@@ -8,6 +8,7 @@ import { WsStateService } from "../ws-state"
 import { originAllowed } from "../core/base/origin"
 import type { Composed } from "./compose"
 import { log } from "@gebai/sdk/node"
+import { xiangqiController } from "@gebai/agents"
 
 /** 每个 WS 连接的事件总线退订函数（以连接为键，避免与 ws.data 的 user 字段互相覆盖）。 */
 const wsSubs = new WeakMap<object, () => void>()
@@ -104,7 +105,7 @@ export function makeWsConn(ws: ServerWebSocket<unknown>, d: AppDeps, state: WsSt
 
 /** 启动监听（compose 之后）：Bun.serve + WS 生命周期 + 退出钩子；返回 server 实例。 */
 export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
-  const { config, deps, app, state, devReload, devReloadClients } = c
+  const { config, deps, app, state, devReload, devReloadClients, launchXiangqi } = c
   const server = Bun.serve<unknown>({
     hostname: config.host,
     port: config.port,
@@ -126,12 +127,21 @@ export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
         return new Response(verdict.reason === "cross-origin" ? "cross-origin ws rejected" : "invalid origin", { status: 403 })
       }
       if (url.pathname === "/ws" && srv.upgrade(req, { data: {} })) return
+      // 相期桌面窗口（WS 客户端）连主服务端口（不是独立 7717）：
+      // 方案 B——窗口连 3000，服务常在则窗口随时能连（不再依赖控制器懒监听时机）。
+      // 升级后用 data 标记，websocket 生命周期里按标记桥到相期控制器（见 acceptPeer）。
+      if (url.pathname === "/xiangqi" && srv.upgrade(req, { data: { xiangqiPeer: true } })) return
       // 开发热刷新通道（仅 --reload 模式注册）：页面经此接收 reload 广播
       if (config.devReload && url.pathname === "/__gebai_hot" && srv.upgrade(req, { data: { hot: true } })) return
       return app.fetch(req, srv)
     },
     websocket: {
       open(ws) {
+        // 相期窗口连接：交给控制器（新连接取代旧的，卡片整批重推）
+        if ((ws.data as { xiangqiPeer?: boolean } | undefined)?.xiangqiPeer) {
+          xiangqiController().acceptPeer(ws as unknown as Parameters<ReturnType<typeof xiangqiController>["acceptPeer"]>[0])
+          return
+        }
         // 热刷新通道连接（无消息语义，仅接收广播）；主 /ws 通道逻辑见下
         if ((ws.data as { hot?: boolean } | undefined)?.hot) {
           devReloadClients.add(ws)
@@ -155,6 +165,11 @@ export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
         }
       },
       async message(ws, raw) {
+        // 相期窗口消息：转发给控制器（answer 等多条协议）
+        if ((ws.data as { xiangqiPeer?: boolean } | undefined)?.xiangqiPeer) {
+          xiangqiController().peerMessage(raw)
+          return
+        }
         let msg: { type: string; payload?: Record<string, unknown>; id?: string }
         try {
           msg = JSON.parse(raw as string)
@@ -171,6 +186,11 @@ export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
         await next
       },
       close(ws) {
+        // 相期窗口断开：通知控制器（清 peer，卡片仍在 live，重连后重推）
+        if ((ws.data as { xiangqiPeer?: boolean } | undefined)?.xiangqiPeer) {
+          xiangqiController().peerClosed()
+          return
+        }
         wsSubs.get(ws)?.()
         wsSubs.delete(ws)
         devReloadClients.delete(ws)
@@ -189,6 +209,13 @@ export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
   console.log(
     `[gebai] listening on http://${server.hostname}:${server.port} (GEBAI_HOME=${config.gebaiHome}, auth=${config.auth}, sandbox=${c.sandbox.enabled}${config.devReload ? ", dev-reload" : ""})`,
   )
+  // 相期窗口在监听建立后拉起（方案 B：窗口连主服务端口的 /xiangqi）——
+  // 先有 WS 可连，窗口一起就能立即建立连接；失败只记日志不阻断
+  try {
+    launchXiangqi()
+  } catch (err) {
+    log.warn(`[gebai] 拉起相期窗口异常：${String((err as Error).message || err)}`)
+  }
   // 飞书机器人长连接在监听建立后异步启动：通道握手（网络）不阻塞服务可用；失败只记日志不退出
   // （GEBAI_FEISHU_BOT_ENABLED 的凭证缺失在 compose 启动期已抛错）
   if (c.feishuBot) {

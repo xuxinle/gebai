@@ -125,3 +125,9 @@ export {
   type TriageSummary,
   type TriageVerdict,
 } from "./core/triage"
+
+// 相期（xiangqi 子Agent 的桌面卡片控制器）：
+// 方案 B 后主服务把 `/xiangqi` WebSocket 升级桥到本控制器（serve.ts 消费），
+// server 需要直接拿到实例——从包出口暴露，而非穿透 src 路径。
+export { controller as xiangqiController, resetControllerForTest as resetXiangqiControllerForTest } from "./agents/xiangqi/controller"
+export type { XiangqiController, CardSpec, CardAnswer, PeerSocket } from "./agents/xiangqi/controller"

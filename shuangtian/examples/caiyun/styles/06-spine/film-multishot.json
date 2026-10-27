@@ -1,0 +1,298 @@
+{
+  "name": "style-06-spine-multishot",
+  "fps": 30,
+  "size": [
+    1920,
+    1080
+  ],
+  "transition": 0,
+  "fade_in": 0.3,
+  "fade_out": 0.3,
+  "brand_wordmark": "",
+  "brand_latin": "",
+  "footer_note": "",
+  "audio": {
+    "enabled": false
+  },
+  "scenes": [
+    {
+      "kind": "custom",
+      "duration": 3.2,
+      "layout": "layout-ms0.js",
+      "accent": "#4B8CF5",
+      "background": [
+        "#080B12",
+        "#0E1521"
+      ],
+      "wrap": false,
+      "layers": [
+        {
+          "kind": "text",
+          "name": "eyebrow0",
+          "x": 108,
+          "y": 300,
+          "w": 1200,
+          "h": 40,
+          "text": "脊椎串联",
+          "size": 24,
+          "color": "#5C7391",
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "title0",
+          "x": 108,
+          "y": 400,
+          "w": 1200,
+          "h": 100,
+          "text": "一条线，串起五个动作",
+          "size": 68,
+          "color": "#E8F0FC",
+          "bold": true,
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "spine",
+          "x": 300,
+          "y": 640,
+          "w": 1320,
+          "h": 4,
+          "fill": "#4B8CF5",
+          "radius": 2,
+          "enter": 0
+        },
+        {
+          "kind": "ellipse",
+          "name": "bead",
+          "x": 276,
+          "y": 616,
+          "w": 52,
+          "h": 52,
+          "fill": "#8FC0FF",
+          "enter": 0
+        }
+      ],
+      "carry_out": {
+        "name": "脊椎·主线",
+        "into": 1,
+        "at": 2.9,
+        "dur": 0.7,
+        "from": {
+          "x": "15.6%",
+          "y": "59.3%",
+          "w": "68.7%",
+          "h": "0.37%",
+          "radius": 2
+        },
+        "to": {
+          "x": "6%",
+          "y": "50%",
+          "w": "88%",
+          "h": "0.37%",
+          "radius": 2
+        },
+        "fill": "#4B8CF5",
+        "stroke_width": 0,
+        "curve": "expo_in_out"
+      }
+    },
+    {
+      "kind": "custom",
+      "duration": 3.4,
+      "layout": "layout-ms1.js",
+      "accent": "#4B8CF5",
+      "background": [
+        "#080B12",
+        "#0E1521"
+      ],
+      "wrap": false,
+      "layers": [
+        {
+          "kind": "text",
+          "name": "eyebrow1",
+          "x": 108,
+          "y": 240,
+          "w": 1200,
+          "h": 40,
+          "text": "第二步",
+          "size": 24,
+          "color": "#5C7391",
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "title1",
+          "x": 108,
+          "y": 340,
+          "w": 1400,
+          "h": 100,
+          "text": "每个动作回到同一条线",
+          "size": 60,
+          "color": "#E8F0FC",
+          "bold": true,
+          "align": 1,
+          "enter": 0
+        },
+        {
+          "kind": "ellipse",
+          "name": "b1",
+          "x": 420,
+          "y": 508,
+          "w": 64,
+          "h": 64,
+          "fill": "#8FC0FF",
+          "enter": 0
+        },
+        {
+          "kind": "ellipse",
+          "name": "b2",
+          "x": 860,
+          "y": 508,
+          "w": 64,
+          "h": 64,
+          "fill": "#8FC0FF",
+          "enter": 0
+        },
+        {
+          "kind": "ellipse",
+          "name": "b3",
+          "x": 1300,
+          "y": 508,
+          "w": 64,
+          "h": 64,
+          "fill": "#8FC0FF",
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "l1",
+          "x": 356,
+          "y": 640,
+          "w": 192,
+          "h": 40,
+          "text": "采集",
+          "size": 24,
+          "color": "#5C7391",
+          "align": 0,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "l2",
+          "x": 796,
+          "y": 640,
+          "w": 192,
+          "h": 40,
+          "text": "归并",
+          "size": 24,
+          "color": "#5C7391",
+          "align": 0,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "l3",
+          "x": 1236,
+          "y": 640,
+          "w": 192,
+          "h": 40,
+          "text": "落定",
+          "size": 24,
+          "color": "#5C7391",
+          "align": 0,
+          "enter": 0
+        },
+        {
+          "kind": "rect",
+          "name": "flow",
+          "x": "6%",
+          "y": "49.7%",
+          "w": "10%",
+          "h": "0.9%",
+          "fill": "#9ec4ff",
+          "radius": 2,
+          "enter": 0
+        }
+      ],
+      "carry_out": {
+        "name": "脊椎·主线",
+        "into": 2,
+        "at": 6.3,
+        "dur": 0.7,
+        "from": {
+          "x": "6%",
+          "y": "50%",
+          "w": "88%",
+          "h": "0.37%",
+          "radius": 2
+        },
+        "to": {
+          "x": "0%",
+          "y": "0%",
+          "w": "100%",
+          "h": "100%",
+          "radius": 0
+        },
+        "fill": "#4B8CF5",
+        "stroke_width": 0,
+        "curve": "expo_in_out",
+        "fade_out": 0.5
+      }
+    },
+    {
+      "kind": "custom",
+      "duration": 2.6,
+      "layout": "layout-ms2.js",
+      "accent": "#4B8CF5",
+      "background": [
+        "#0A1020",
+        "#101A2E"
+      ],
+      "wrap": false,
+      "layers": [
+        {
+          "kind": "line",
+          "name": "rule",
+          "x": 660,
+          "y": 470,
+          "w": 600,
+          "h": 0,
+          "stroke": "#4B8CF5",
+          "stroke_width": 4,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "title2",
+          "x": 360,
+          "y": 430,
+          "w": 1200,
+          "h": 90,
+          "text": "回到主线",
+          "size": 64,
+          "color": "#E8F0FC",
+          "bold": true,
+          "align": 0,
+          "enter": 0
+        },
+        {
+          "kind": "text",
+          "name": "sub2",
+          "x": 360,
+          "y": 540,
+          "w": 1200,
+          "h": 50,
+          "text": "每一次偏离都留下一个珠子",
+          "size": 28,
+          "color": "#5C7391",
+          "align": 0,
+          "enter": 0
+        }
+      ]
+    }
+  ]
+}

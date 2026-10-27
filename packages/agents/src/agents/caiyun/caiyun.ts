@@ -11,6 +11,21 @@ import { verifyTool } from "./verify"
 // 放在本目录的 `styles/`：它是**裁云的知识**（讲具体图层与 layout 写法），
 // 跟着 Agent 走才不会与框架文档各自漂移；霜天仓库只放可运行的示例脚本。
 import { styleGuideTool } from "./style_guide"
+// 制作闭环工具组：查字段 / 校验脚本 / 渲染并核验。
+//
+// ## 为何要这组工具（实测代价）
+//
+// 封装前做一条 10 秒片子花了约 30 轮，其中约 18 轮花在**脚手架上**：
+// 翻源码查字段名、拼 exe 命令行、轮询渲染完成、自己调 ffmpeg 抽帧、
+// 自己跑度量脚本再解读数字。这些都是**固定动作**，不该每部片重做一遍。
+// 三个工具各自把它们收成一次调用（见 production.ts 顶部的对照表）。
+import { productionTools } from "./production"
+// 资产库：验证过的示例脚本/素材图/可复用片段。
+//
+// 与 `style_guide` 分工：那个回答“**该用哪种叙事结构**”（方法论），
+// 这个回答“**有没有现成能用的东西**”（具体到字段值与素材）。
+// 两者都需要——方法论告诉你怎么排，资产告诉你具体写什么值。
+import { assetsTool } from "./assets"
 
 // 工具面全部走依赖（DESIGN「子Agent 依赖与自动装载」）：霜天全套（shuangtian）、图像生成（imagegen）、
 // 语音与音效（tts）——本代理零自有工具，三个依赖的工具各以自己的命名空间注册
@@ -36,7 +51,8 @@ export const description =
 // 归一成 `\n`：**提示词的字符内容应当等于文件内容**。
 export const systemPrompt = systemPromptBase.replace(/\r\n/g, "\n")
 
-// 自有工具：`verify`（成片质检）+ `style_guide`（风格模板读取）。
+// 自有工具：`verify`（成片质检）+ `style_guide`（风格模板读取）
+// + 制作闭环三件（`script_schema` / `script_check` / `film_render`）。
 // 其余能力仍走依赖（霜天 / imagegen / tts），不内联展开——同一能力只允许一个来源。
 //
 // `verify` 必须自有：它读的是本应用渲染器在**渲染循环里量好的**数据（逐镜边界、每帧时刻），
@@ -44,7 +60,16 @@ export const systemPrompt = systemPromptBase.replace(/\r\n/g, "\n")
 //
 // `style_guide` 必须自有：模板讲的是「用裁云怎么落地」——具体图层字段与 `layout`
 // 写法，只有裁云自己知道。放成纯文档则会与框架文档各自漂移。
-export const tools: Record<string, Tool> = { verify: verifyTool, style_guide: styleGuideTool }
+//
+// 制作闭环三件必须自有：它们知道裁云的 exe 在哪、`--strict` 的默认、
+// 帧目录约定、以及“写错字段会怎样”——这些都是裁云的知识，
+// 放进通用子代理会让它反复推猜。
+export const tools: Record<string, Tool> = {
+  verify: verifyTool,
+  style_guide: styleGuideTool,
+  assets: assetsTool,
+  ...productionTools,
+}
 export const preload = false
 // 三个依赖名与 caiyun 均不构成前缀，工具各以自身命名空间注册
 export const def: SubAgentDef = { name, description, systemPrompt, tools, preload, dependencies: ["shuangtian", "imagegen", "tts"] }

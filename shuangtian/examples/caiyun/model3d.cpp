@@ -768,9 +768,14 @@ void paint_model3d(st::raster::Surface& canvas, const Layer& layer, st::math::Re
       ST_LOG_WARN("裁云三维：model_script 解析失败：{}", spec.error().message);
       return;
     }
+    // 场景里的 `obj:` 形状按**脚本所在目录**解析（与贴图 `media/xxx.png`
+    // 同一套基准）。不传会让相对路径落到进程工作目录上——预览时碰巧对，
+    // 换个目录导出就变成「模型不见了」。
+    st::raster::SceneSpec resolved = *spec;
+    resolved.asset_basis = std::string(asset_basis);
     st::raster::Canvas offscreen{width, height, 1.0f};
     const auto status =
-        st::raster::render_scene_into(*spec, *scene, offscreen, st::math::Color{0, 0, 0, 0});
+        st::raster::render_scene_into(resolved, *scene, offscreen, st::math::Color{0, 0, 0, 0});
     if (!status) {
       canvas.fill_rect(box, st::raster::Paint::solid(st::math::Color{48, 20, 26, 255}));
       ST_LOG_WARN("裁云三维：model_script 渲染失败：{}", status.error().message);

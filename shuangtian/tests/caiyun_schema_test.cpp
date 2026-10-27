@@ -18,6 +18,8 @@
 #include "examples/caiyun/schema.cpp"
 
 #include "st/test/test.hpp"
+// `st::print`：lint L7 禁 printf，统一走它（带编码/镜像/缓冲顺序保障）
+#include "st/core/print.hpp"
 
 namespace {
 
@@ -440,4 +442,198 @@ ST_TEST(schema_json_lists_all_fields_with_metadata) {
   }
   // "schema_json 里找不到 model_spin"
   ST_CHECK(found_spin);
+}
+
+// ————————————————————————————————————————————————————————————————————————————
+// 四、`--strict` 的拦截判据
+//
+// 这一组的价值在于：静默忽略是“AI 最贵的坑”——字段名拼错时旧实现照常出片、
+// 日志零提示，而“球没自转”与“写对了但转速是 0”在画面上完全一样。
+// 严格模式必须把这类错误变成**失败**。
+// ————————————————————————————————————————————————————————————————————————————
+
+ST_TEST(strict_blocks_unknown_field_even_though_is_error_is_false) {
+  // 关键语义：未知字段的 `is_error` 有意为 false（保老脚本能出片），
+  // 所以严格模式**不能**只看 is_error——这一条就是钉住这个区别。
+  const auto script = caiyun::parse_script(
+      script_with_layers(R"({"kind":"rect","x":"0%","y":"0%","w":"10%","h":"10%",
+                              "model_rot":45})"));
+  ST_REQUIRE(script.has_value());
+  const auto& diags = script.value().diagnostics;
+  const Diagnostic* hit = find_diagnostic(diags, "model_rot");
+  ST_REQUIRE(hit != nullptr);
+  ST_CHECK(!hit->is_error);  // 宽容语义仍在
+  // 但严格模式要拦住它
+  ST_CHECK_EQ(caiyun::strict_violation_count(diags), std::size_t{1});
+}
+
+ST_TEST(strict_allows_clean_script) {
+  const auto script = caiyun::parse_script(script_with_layers(
+      R"({"kind":"rect","x":"0%","y":"0%","w":"10%","h":"10%","fill":"#ffffff"})"));
+  ST_REQUIRE(script.has_value());
+  ST_CHECK_EQ(caiyun::strict_violation_count(script.value().diagnostics), std::size_t{0});
+}
+
+ST_TEST(strict_counts_every_typo) {
+  // 一次列全、一次拦全：AI 一轮就能改完，不必“改一个、跑一次、再发现下一个”。
+  const auto script = caiyun::parse_script(
+      script_with_layers(R"({"kind":"model3d","x":"0%","y":"0%","w":"50%","h":"50%",
+                              "model_rot":45,"camera_azimuth":60,"light_rimm":0.9})"));
+  ST_REQUIRE(script.has_value());
+  ST_CHECK_EQ(caiyun::strict_violation_count(script.value().diagnostics), std::size_t{3});
+}
+
+ST_TEST(strict_does_not_block_range_clamp) {
+  // 越界是**有意保留的宽容**（写 200 按 96 处理）——严格模式不该拦它，
+  // 否则“宽容解析”会退化成“一律拒绝”，手工调参寸步难行。
+  const auto script = caiyun::parse_script(
+      script_with_layers(R"({"kind":"model3d","x":"0%","y":"0%","w":"50%","h":"50%",
+                              "model_spin":99999})"));
+  ST_REQUIRE(script.has_value());
+  // 确实产生了越界诊断（告知生效值）……
+  ST_CHECK(!script.value().diagnostics.empty());
+  // ……但不构成严格模式下的拦截
+  ST_CHECK_EQ(caiyun::strict_violation_count(script.value().diagnostics), std::size_t{0});
+}
+
+ST_TEST(strict_blocks_wrong_type) {
+  // 类型写错同样是“写了但没生效”，必须拦。
+  const auto script = caiyun::parse_script(
+      script_with_layers(R"({"kind":"model3d","x":"0%","y":"0%","w":"50%","h":"50%",
+                              "model_spin":"fast"})"));
+  ST_REQUIRE(script.has_value());
+  ST_CHECK(caiyun::strict_violation_count(script.value().diagnostics) >= 1U);
+}
+
+// ————————————————————————————————————————————————————————————————————————————
+// 五、标准 JSON Schema 导出（喂约束解码的机器契约）
+//
+// 与 `schema_to_json`（自省面）不同，这一份是**机器契约**：
+// 只有 `additionalProperties: false` 真正存在，"写错字段名"才有机会在
+// **生成时**被挡掉——否则导出的只是一份好看的文档。
+// ————————————————————————————————————————————————————————————————————————————
+
+namespace {
+
+[[nodiscard]] auto parse_json_schema() -> st::Json {
+  return st::json_parse(caiyun::schema_to_json_schema()).value();
+}
+
+}  // namespace
+
+ST_TEST(json_schema_declares_draft_2020_12) {
+  const st::Json schema = parse_json_schema();
+  ST_CHECK_EQ(schema.value("$schema", std::string{}),
+              std::string("https://json-schema.org/draft/2020-12/schema"));
+  ST_CHECK_EQ(schema.value("type", std::string{}), std::string("object"));
+}
+
+ST_TEST(json_schema_rejects_unknown_fields_at_every_level) {
+  // 这条是整个导出存在的理由：没有 additionalProperties:false，
+  // 拼错的字段名仍会被静默忽略，导出就毫无价值。
+  const st::Json schema = parse_json_schema();
+  ST_CHECK(schema.contains("additionalProperties"));
+  ST_CHECK(!schema.value("additionalProperties", true));
+  for (const auto& [name, node] : st::json_at(schema, "$defs").items()) {
+    if (node.value("additionalProperties", true)) {
+      // 打印是哪个作用域漏了，便于直接改
+      st::print("作用域 {} 未声明 additionalProperties:false\n", name);
+    }
+    ST_CHECK(!node.value("additionalProperties", true));
+  }
+}
+
+ST_TEST(json_schema_covers_every_registered_field) {
+  // 表里有的字段，导出的 properties 里必须都有——否则"校验通过"与
+  // "schema 里没这个字段"会互相矛盾。
+  const st::Json schema = parse_json_schema();
+  const st::Json& layer =
+      st::json_at(st::json_at(st::json_at(schema, "$defs"), "layer"), "properties");
+  ST_CHECK(layer.contains("model_spin"));
+  ST_CHECK(layer.contains("model_bob"));
+  ST_CHECK(layer.contains("kind"));
+  ST_CHECK(layer.contains("opacity"));
+  // 别名字段不该作为合法键出现（列进去等于认下拼错的写法）
+  ST_CHECK(!layer.contains("model_rot"));
+}
+
+ST_TEST(json_schema_maps_types_and_ranges) {
+  const st::Json schema = parse_json_schema();
+  const st::Json& layer =
+      st::json_at(st::json_at(st::json_at(schema, "$defs"), "layer"), "properties");
+
+  // 数字 + 范围
+  const st::Json& spin = st::json_at(layer, "model_spin");
+  ST_CHECK_EQ(spin.value("type", std::string{}), std::string("number"));
+  ST_CHECK(spin.value("minimum", 0.0) < 0.0);
+  ST_CHECK(spin.value("maximum", 0.0) > 0.0);
+
+  // Dimension：数字或百分比串（`oneOf` 必须是两个对象元素，不是数组的数组）
+  const st::Json& x = st::json_at(layer, "x");
+  ST_CHECK(x.contains("oneOf"));
+  const st::Json& variants = st::json_at(x, "oneOf");
+  ST_CHECK_EQ(variants.size(), std::size_t{2});
+  ST_CHECK(variants[0].is_object());
+  ST_CHECK(variants[1].is_object());
+  ST_CHECK_EQ(variants[0].value("type", std::string{}), std::string("number"));
+  ST_CHECK_EQ(variants[1].value("type", std::string{}), std::string("string"));
+
+  // Color：字符串 + 十六进制约束
+  const st::Json& fill = st::json_at(layer, "fill");
+  ST_CHECK_EQ(fill.value("type", std::string{}), std::string("string"));
+  ST_CHECK_EQ(fill.value("pattern", std::string{}),
+              std::string("^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$"));
+}
+
+ST_TEST(json_schema_requires_scenes) {
+  // 没有 scenes 的脚本无法渲染——顶层必须把它标成 required，
+  // 这样约束解码不会生成"合法但没有分镜"的脚本。
+  const st::Json schema = parse_json_schema();
+  const st::Json& required = st::json_at(schema, "required");
+  bool has_scenes = false;
+  for (const auto& item : required) {
+    if (item.get<std::string>() == "scenes") has_scenes = true;
+  }
+  ST_CHECK(has_scenes);
+}
+
+ST_TEST(json_schema_description_warns_about_aliases) {
+  // 说明里带上"勿写 X"：约束解码看不到 description，
+  // 但**读提示词的模型**能看到——两道防线各管一段。
+  const st::Json schema = parse_json_schema();
+  const st::Json& spin = st::json_at(st::json_at(st::json_at(st::json_at(
+      schema, "$defs"), "layer"), "properties"), "model_spin");
+  const std::string desc = spin.value("description", std::string{});
+  ST_CHECK(desc.find("model_rot") != std::string::npos);
+}
+
+ST_TEST(json_schema_links_nested_arrays) {
+  // 这一条是"标准校验器救回来的缺陷"的钉子。
+  //
+  // 实测：`layers` 只声明 `type: array` 而不给 `items` 时，校验器**不会进入元素**，
+  // 图层里的拼写错（`model_rot`）永远抓不到——schema 看着完整，样本全放行。
+  // 自己的单测当时六条全绿，直到用标准校验器才暴露。
+  const st::Json schema = parse_json_schema();
+  const st::Json& sceneProps =
+      st::json_at(st::json_at(st::json_at(schema, "$defs"), "scene"), "properties");
+  const st::Json& layerArray = st::json_at(sceneProps, "layers");
+  const st::Json& layerItems = st::json_at(layerArray, "items");
+  ST_CHECK(layerItems.is_object());
+  ST_CHECK_EQ(layerItems.value("$ref", std::string{}),
+              std::string("#/$defs/layer"));
+}
+
+ST_TEST(json_schema_one_of_holds_objects_not_arrays) {
+  // draft-2020-12 要求 oneOf 的元素是 schema（对象），不是数组。
+  // 写成 `[[{...}],[{...}]]` 是合法 JSON，但元 schema 校验直接失败——
+  // 而约束解码器会拒掉整个 schema，这条路就白修了。
+  const st::Json schema = parse_json_schema();
+  const st::Json& variants = st::json_at(
+      st::json_at(st::json_at(st::json_at(st::json_at(schema, "$defs"), "layer"),
+                   "properties"), "x"), "oneOf");
+  ST_CHECK_EQ(variants.size(), std::size_t{2});
+  for (const auto& item : variants) {
+    ST_CHECK(item.is_object());   // 不是数组
+    ST_CHECK(item.contains("type"));
+  }
 }

@@ -1,0 +1,711 @@
+{
+  "version": 2,
+  "note": "裁云资产库。measured 全部由 tools/caiyun_audit_assets.py 实测产出（2026-10-27，15/15 渲染通过）；use_for/highlights/caveats 是人补的判断。verified=在 --strict 下能渲染+抽帧核过+有量化结论；draft=能渲染但未核观感，只可用于结构参考。",
+  "audit_note": "实测结论：所有示例的静止占比都在 84.7~93.7%，远高于 caiyun_verify 的 40% 判据。这不是缺陷，而是**风格基调**（冷静节奏 + 落定留白）。所以：静止占比高不构成'不合格'，但**也别把它们当成'够动'的参照**——要让画面活，得自己叠层（见 lighting-dark-stage 与 camera-push-rest 的 highlights）。另：launch-benchmark 两版亮度 221~223、过亮帧 97~99%，是**白底**片子，只在要浅底时参考。",
+  "assets": [
+    {
+      "id": "sample-cinematic",
+      "kind": "script",
+      "path": "examples/caiyun/assets/sample-cinematic.json",
+      "summary": "最全的特效示例：景深/粒子/光晕/体积光/光扫/运镜都有，字段可直接删减",
+      "use_for": "想知道某个特效字段怎么写、或要一份'全特效'基线时读它；也是 4.59/s 变化密度最高的一份",
+      "tags": [
+        "script",
+        "effects",
+        "dof",
+        "particles",
+        "glow",
+        "god-ray",
+        "camera"
+      ],
+      "verified": "verified",
+      "measured": {
+        "still_ratio": 84.7,
+        "change_density": 4.59,
+        "bright_ratio": 0.0,
+        "mean_luma": 127.8,
+        "frames": 366
+      },
+      "highlights": [
+        "15 个示例里变化密度最高（4.59/s），静态与动态的搭配最接近'有呼吸'",
+        "特效字段全部默认 0=关闭零开销，可以逐项打开试"
+      ],
+      "caveats": [
+        "静止占比仍 84.7%——它'够看'不等于'够动'，别拿它当动效标杆"
+      ]
+    },
+    {
+      "id": "sample-3d",
+      "kind": "script",
+      "path": "examples/caiyun/assets/sample-3d.json",
+      "summary": "三维图层的最小可用示例（盒子/球/环 + 光照 + 相机），字段量少、最容易改",
+      "use_for": "第一次做三维镜头时从这个改，不要从零写 —— 它已经把 model_script 的必要结构摆好",
+      "tags": [
+        "script",
+        "3d",
+        "model3d",
+        "lighting",
+        "camera"
+      ],
+      "verified": "verified",
+      "measured": {
+        "still_ratio": 87.9,
+        "change_density": 3.62,
+        "bright_ratio": 0.0,
+        "mean_luma": 130.2,
+        "frames": 390
+      },
+      "highlights": [
+        "三维脚本的骨架：scene 里一个全屏 layer + model_script{objects, lighting, camera}"
+      ],
+      "caveats": [
+        "它的光照不是深色舞台配方 —— 要暗场体积感用 lighting-dark-stage 那一套",
+        "三维图层是全屏矩形：移动主体用 camera.target，给图层 dx 会被裁边"
+      ]
+    },
+    {
+      "id": "sample-basic",
+      "kind": "script",
+      "path": "examples/caiyun/assets/sample-basic.json",
+      "summary": "最小的合法脚本（1 个场景、2 个图层），用来理解必填字段",
+      "use_for": "写校验/审计工具时当最小夹具；不需要任何素材依赖",
+      "tags": [
+        "script",
+        "minimal",
+        "fixture"
+      ],
+      "verified": "verified",
+      "measured": {
+        "still_ratio": 86.0,
+        "change_density": 4.2,
+        "bright_ratio": 0.0,
+        "mean_luma": 122.9,
+        "frames": 300
+      }
+    },
+    {
+      "id": "carry-continuity",
+      "kind": "script",
+      "path": "examples/caiyun/assets/carry-continuity.json",
+      "summary": "跨场承接（carry_out）的完整示例：一个元素跨分镜边界活下来并变形",
+      "use_for": "要让两个分镜之间'长出来'而不是'换掉'时读它——这是去 PPT 感的关键手法",
+      "tags": [
+        "script",
+        "carry",
+        "transition",
+        "continuity"
+      ],
+      "verified": "verified",
+      "measured": {
+        "still_ratio": 93.7,
+        "change_density": 1.88,
+        "bright_ratio": 0.0,
+        "mean_luma": 92.4,
+        "frames": 480
+      },
+      "highlights": [
+        "carry_out 的三条硬约束：at < 边界 < at+dur；不许整屏不透明盖上；铺满阶段用 fade_out 让位"
+      ],
+      "caveats": [
+        "变化密度只有 1.88/s——承接本身不产生运动，它靠的是'同一个物体'的连续性"
+      ]
+    },
+    {
+      "id": "scene-script-demo",
+      "kind": "script",
+      "path": "examples/caiyun/assets/scene-script-demo.json",
+      "summary": "脚本编排层（layout JS）的示例：把动效写成函数而不是字段",
+      "use_for": "当你要的动效用现有字段表达不了时（如'入场后持续起伏'），读它学 layout 写法",
+      "tags": [
+        "script",
+        "layout",
+        "js",
+        "motion"
+      ],
+      "verified": "verified",
+      "measured": {
+        "still_ratio": 89.4,
+        "change_density": 3.17,
+        "bright_ratio": 0.0,
+        "mean_luma": 130.6,
+        "frames": 180
+      }
+    },
+    {
+      "id": "launch-benchmark",
+      "kind": "script",
+      "path": "examples/caiyun/assets/launch-benchmark.json",
+      "summary": "长脚本范例（24 KB，多镜 + 配音轨 + 数据版式），结构最接近真实发布会片子",
+      "use_for": "要看'一个完整项目的脚本怎么组织'时读它；**浅底**风格",
+      "tags": [
+        "script",
+        "long",
+        "voice",
+        "metrics",
+        "light-background"
+      ],
+      "verified": "verified",
+      "measured": {
+        "still_ratio": 93.1,
+        "change_density": 2.06,
+        "bright_ratio": 99.0,
+        "mean_luma": 223.1,
+        "frames": 495
+      },
+      "highlights": [
+        "多镜 + audio.voice 轨 + metrics 数值版式的组合写法"
+      ],
+      "caveats": [
+        "**白底**（亮度 223、过亮帧 99%）——不要拿它给暗场片子做参照，配色会整体错",
+        "同目录 launch-benchmark-plain.json 是它的无配音版本，可对比出 voice 轨的写法"
+      ]
+    },
+    {
+      "id": "slot-robot-example",
+      "kind": "script",
+      "path": "examples/caiyun/assets/slot-robot-example.json",
+      "summary": "浅底实体 + 时间线点亮 + 关节姿态的完整小片（README 里点名的长期资产）",
+      "use_for": "要做'设备/机器人启动'类叙事时读它；也是 kit 内核的配套示例",
+      "tags": [
+        "script",
+        "robot",
+        "timeline",
+        "light-background",
+        "kit"
+      ],
+      "verified": "verified",
+      "measured": {
+        "still_ratio": 89.2,
+        "change_density": 3.22,
+        "bright_ratio": 93.0,
+        "mean_luma": 226.2,
+        "frames": 270
+      },
+      "caveats": [
+        "**白底**片子（亮度 226）——只适合浅底风格"
+      ]
+    },
+    {
+      "id": "styles-01-to-07",
+      "kind": "script",
+      "path": "examples/caiyun/styles/<编号>-<名字>/film.json",
+      "summary": "七个风格模板各一镜示例，每个都是该模板的最小可运行落地",
+      "use_for": "选完 style_guide 的模板后，读对应目录的 film.json 看'这套方法论在裁云里长什么样'",
+      "tags": [
+        "script",
+        "style",
+        "template",
+        "one-shot"
+      ],
+      "verified": "verified",
+      "measured": {
+        "still_ratio": 88.2,
+        "change_density": 3.52,
+        "bright_ratio": 0.0,
+        "mean_luma": 109.5,
+        "frames": 162
+      },
+      "highlights": [
+        "七份的静止占比集中在 88~90%、亮度 106~123 —— 同一视觉谱系，适合互相参照",
+        "每份都配 render_all.py 的静默降级检查（layout 写错会报警，不是静默通过）"
+      ],
+      "caveats": [
+        "都是一镜短片（162~180 帧），不演示多镜之间的承接"
+      ]
+    },
+    {
+      "id": "lighting-dark-stage",
+      "kind": "snippet",
+      "path": "",
+      "summary": "深色舞台上的三维材质光照配方：蓝青单色系、无环境反射、靠高光与弱边缘光出体积",
+      "use_for": "深底三维产品/技术短片；要'冷静、有体积感、不塑料'时用这套，不要从零调",
+      "tags": [
+        "3d",
+        "lighting",
+        "material",
+        "dark",
+        "product"
+      ],
+      "verified": "verified",
+      "highlights": [
+        "lighting: {\"key_direction\":[0.4,0.8,0.6], \"ambient\":0.20, \"diffuse\":0.70, \"rim\":0.24, \"exposure\":1.15, \"tone_map\":\"aces\"}",
+        "extra_lights: 两盏补光一冷一暖、强度比约 2:1 —— [{\"direction\":[-0.7,0.25,0.5],\"color\":\"#8fc0ff\",\"intensity\":1.0}, {\"direction\":[0.65,0.32,0.7],\"color\":\"#b8d8ff\",\"intensity\":0.55}]",
+        "模型色走同色相不同明度（#a8c4e8 → #d2e0f4），不要跨色相；粉/橙会立刻显廉价",
+        "相机：eye [0.1,0.55,4.35]、target [-0.52,0.05,0]、fov 42 —— 这个 target 位移把主体推到右侧，左侧留出文字区",
+        "accent 压到 #3f5f92（它会被 26%+14% 两层铺光刷满背景，用亮色会得到灰蓝底）"
+      ],
+      "caveats": [
+        "metallic 必须 0：本渲染器无环境反射，漫反射权重 = 1-metallic，>0.3 表面发黑",
+        "rim 不要超过 0.30：它按法线 z 加权，过强会让轮廓亮过中心，球被读成平盘（schema 摘要里写的 0.35~0.5 偏乐观）",
+        "ground/plane 在低机位会画出斜贯全屏的亮楔；要地板必须同时给接触阴影，否则宁可让物体悬浮"
+      ],
+      "inline": true
+    },
+    {
+      "id": "camera-push-rest",
+      "kind": "snippet",
+      "path": "",
+      "summary": "入场推进 2.2 秒后彻底静止的 layout 写法，自动满足'落定后呼吸'的验收要求",
+      "use_for": "每一镜的基础动效骨架：缓推 + 文字分层错峰 + 尾段完全静止",
+      "tags": [
+        "layout",
+        "motion",
+        "camera",
+        "rhythm"
+      ],
+      "verified": "verified",
+      "highlights": [
+        "推进用 inOut3(seg(t, 0, 2.20)) 且幅度 ≤1.045（版式安全边距只有 5%，推到 1.06 内容会贴边）",
+        "文字分层错峰：眉标 seg(t,0.60,1.55)、主标 (0.80,1.80)、说明 (1.15,2.10) —— 后一层比前一层晚 0.2~0.35s",
+        "呼吸必须收束：Math.min(Math.max(0, t - t0), 0.8) 截断相位，否则正弦永不停止、rest 被破坏",
+        "dy 入场：(1 - k) * 20~28（越小的元素位移越小）"
+      ],
+      "caveats": [
+        "宿主只提供 ease/spring/spring_vel/settle/lerp/clamp/snap/noise —— 没有 seg/E.*/D()，写错会静默降级为纯 JSON",
+        "入口函数必须叫 layout；路径基准是 json 所在目录",
+        "实测：静止占比 8.7%（全程在动）→ 55.2%（动得太少）→ 39.5% 是可用区间"
+      ],
+      "inline": true
+    },
+    {
+      "id": "text-hierarchy-3lvl",
+      "kind": "snippet",
+      "path": "",
+      "summary": "三级文字层级的间距公式（眉标/主标/说明），按基线算，避免'粘住'",
+      "use_for": "任何有眉标+主标+说明的版式；手调百分比必然反复踩这个坑",
+      "tags": [
+        "text",
+        "layout",
+        "typography"
+      ],
+      "verified": "verified",
+      "highlights": [
+        "text 图层的 y 是**基线**，不是顶边：字形顶部 ≈ y − 0.75×size，底部 ≈ y + 0.22×size",
+        "眉标 24px 与主标 92px 要拉开 ≥26px 间隙：主标基线 y ≥ 眉标基线 + 24×0.22 + 26 + 92×0.75",
+        "align:0 是**框内居中**不是画面居中 —— 要画面居中必须 x:'0%' + w:'100%' + align:0 三件套同给",
+        "主标两行第二行基线 = 首行基线 + size × line_height"
+      ],
+      "caveats": [
+        "文字超宽会自动缩字号（不会溢出），但缩太多看起来不对劲时应显式用 \\n 断行并调 w"
+      ],
+      "inline": true
+    },
+    {
+      "id": "bg-deep",
+      "kind": "media",
+      "path": "examples/caiyun/assets/media/bg-deep.png",
+      "summary": "深色底图（1 MB），低对比、大留白，适合叠白字",
+      "use_for": "暗场片子的底板；叠字前按素材对比度压暗 image_dim 0.22~0.35",
+      "tags": [
+        "media",
+        "background",
+        "dark"
+      ],
+      "verified": "draft",
+      "caveats": [
+        "未在具体片子里核过叠字可读性 —— 用前 read 看一眼，并确认压暗量"
+      ]
+    },
+    {
+      "id": "bg-aurora",
+      "kind": "media",
+      "path": "examples/caiyun/assets/media/bg-aurora.png",
+      "summary": "极光氛围底图（904 KB），带柔和渐变",
+      "use_for": "需要一点色彩氛围但要压住（dim 0.35~0.5）的暗场底板",
+      "tags": [
+        "media",
+        "background",
+        "aurora",
+        "gradient"
+      ],
+      "verified": "draft",
+      "caveats": [
+        "未核过叠字可读性；色彩较饱和，压暗不够会抢文字"
+      ]
+    },
+    {
+      "id": "bg-mesh",
+      "kind": "media",
+      "path": "examples/caiyun/assets/media/bg-mesh.png",
+      "summary": "网格/结构感底图（477 KB），适合技术类底板",
+      "use_for": "技术叙事底板；网格是高频细节，叠字必须压暗（dim 0.4 起）",
+      "tags": [
+        "media",
+        "background",
+        "mesh",
+        "tech"
+      ],
+      "verified": "draft",
+      "caveats": [
+        "高频细节图叠字容易糊 —— 这是需要压暗最狠的一类"
+      ]
+    },
+    {
+      "id": "bg-slate",
+      "kind": "media",
+      "path": "examples/caiyun/assets/media/bg-slate.png",
+      "summary": "石板灰底图（1 MB），中性无色偏",
+      "use_for": "需要中性底色、不想被 accent 铺光带偏时用",
+      "tags": [
+        "media",
+        "background",
+        "neutral"
+      ],
+      "verified": "draft"
+    },
+    {
+      "id": "accent-glow",
+      "kind": "media",
+      "path": "examples/caiyun/assets/media/accent-glow.png",
+      "summary": "强调色光斑（742 KB），可当单点高光用",
+      "use_for": "单点高质量高光（不是群发泛光）；配合 glow 场景级光晕使用",
+      "tags": [
+        "media",
+        "glow",
+        "accent",
+        "light"
+      ],
+      "verified": "draft",
+      "caveats": [
+        "装饰性泛光群发即廉价 —— 一个画面只该有一处主角光"
+      ]
+    },
+    {
+      "id": "multishot-01-capability-list",
+      "kind": "script",
+      "path": "examples/caiyun/styles/01-capability-list/film-multishot.json",
+      "summary": "capability-list 模板的三镜承接示例（承接分 1.00，承接物：光标·本体）",
+      "use_for": "要学「分镜之间怎么接」时读它——一镜版 film.json 演示不了承接，而承接是唯一能判定像不像 PPT 的指标",
+      "tags": [
+        "script",
+        "multishot",
+        "carry",
+        "transition",
+        "capability-list",
+        "01",
+        "three-shot"
+      ],
+      "verified": "verified",
+      "measured": {
+        "carry_score": 1.0,
+        "moving_pair_ratio": 6.8,
+        "still_ratio_trajectory": 32.5,
+        "scenes": 3
+      },
+      "highlights": [
+        "承接手法：因果：手是开关。光标点下去，界面才响应（响应晚 0.05~0.12s）",
+        "carry_out 的 from 必须与该幕末帧实景吻合、to 必须与下幕 from 完全一致",
+        "布局里不要再画承接物（由 carry 绘制，两边都画会双影）",
+        "每幕文字层必须逐幕不同名（title0/title1/title2）——重名会让 carry_qa 把两个不同文案误判成「同一元素存活」"
+      ],
+      "caveats": [
+        "像素口径静止占比会报 85~95%，而元素轨迹口径只有 32.5%——两者都是真的，差在量法：64 宽面积加权会把小元素运动稀释掉。判“是否卡住”看轨迹",
+        "bodies/ 改完必须重跑 tools/caiyun_gen_layouts.py 生成 layout-ms*.js，否则改动静默不生效"
+      ]
+    },
+    {
+      "id": "multishot-02-single-point",
+      "kind": "script",
+      "path": "examples/caiyun/styles/02-single-point/film-multishot.json",
+      "summary": "single-point 模板的三镜承接示例（承接分 1.00，承接物：单点·本体）",
+      "use_for": "要学「分镜之间怎么接」时读它——一镜版 film.json 演示不了承接，而承接是唯一能判定像不像 PPT 的指标",
+      "tags": [
+        "script",
+        "multishot",
+        "carry",
+        "transition",
+        "single-point",
+        "02",
+        "three-shot"
+      ],
+      "verified": "verified",
+      "measured": {
+        "carry_score": 1.0,
+        "moving_pair_ratio": 12.5,
+        "still_ratio_trajectory": 36.6,
+        "scenes": 3
+      },
+      "highlights": [
+        "承接手法：自身 morph：点 → 线 → 面，全程只有一个元素在变形",
+        "carry_out 的 from 必须与该幕末帧实景吻合、to 必须与下幕 from 完全一致",
+        "布局里不要再画承接物（由 carry 绘制，两边都画会双影）",
+        "每幕文字层必须逐幕不同名（title0/title1/title2）——重名会让 carry_qa 把两个不同文案误判成「同一元素存活」"
+      ],
+      "caveats": [
+        "像素口径静止占比会报 85~95%，而元素轨迹口径只有 36.6%——两者都是真的，差在量法：64 宽面积加权会把小元素运动稀释掉。判“是否卡住”看轨迹",
+        "bodies/ 改完必须重跑 tools/caiyun_gen_layouts.py 生成 layout-ms*.js，否则改动静默不生效"
+      ]
+    },
+    {
+      "id": "multishot-03-causal-chain",
+      "kind": "script",
+      "path": "examples/caiyun/styles/03-causal-chain/film-multishot.json",
+      "summary": "causal-chain 模板的三镜承接示例（承接分 1.00，承接物：火花·动量）",
+      "use_for": "要学「分镜之间怎么接」时读它——一镜版 film.json 演示不了承接，而承接是唯一能判定像不像 PPT 的指标",
+      "tags": [
+        "script",
+        "multishot",
+        "carry",
+        "transition",
+        "causal-chain",
+        "03",
+        "three-shot"
+      ],
+      "verified": "verified",
+      "measured": {
+        "carry_score": 1.0,
+        "moving_pair_ratio": 9.3,
+        "still_ratio_trajectory": 22.8,
+        "scenes": 3
+      },
+      "highlights": [
+        "承接手法：动量：被撞飞的方块跨幕砸在下一环上，大位移而非原地变形",
+        "carry_out 的 from 必须与该幕末帧实景吻合、to 必须与下幕 from 完全一致",
+        "布局里不要再画承接物（由 carry 绘制，两边都画会双影）",
+        "每幕文字层必须逐幕不同名（title0/title1/title2）——重名会让 carry_qa 把两个不同文案误判成「同一元素存活」"
+      ],
+      "caveats": [
+        "像素口径静止占比会报 85~95%，而元素轨迹口径只有 22.8%——两者都是真的，差在量法：64 宽面积加权会把小元素运动稀释掉。判“是否卡住”看轨迹",
+        "bodies/ 改完必须重跑 tools/caiyun_gen_layouts.py 生成 layout-ms*.js，否则改动静默不生效"
+      ]
+    },
+    {
+      "id": "multishot-04-scale-dive",
+      "kind": "script",
+      "path": "examples/caiyun/styles/04-scale-dive/film-multishot.json",
+      "summary": "scale-dive 模板的三镜承接示例（承接分 1.00，承接物：锚点·本体）",
+      "use_for": "要学「分镜之间怎么接」时读它——一镜版 film.json 演示不了承接，而承接是唯一能判定像不像 PPT 的指标",
+      "tags": [
+        "script",
+        "multishot",
+        "carry",
+        "transition",
+        "scale-dive",
+        "04",
+        "three-shot"
+      ],
+      "verified": "verified",
+      "measured": {
+        "carry_score": 1.0,
+        "moving_pair_ratio": 35.2,
+        "still_ratio_trajectory": 38.8,
+        "scenes": 3
+      },
+      "highlights": [
+        "承接手法：锚点：同一块从 40px 长到满屏成背景版式，再缩回胶囊（跨尺度）",
+        "carry_out 的 from 必须与该幕末帧实景吻合、to 必须与下幕 from 完全一致",
+        "布局里不要再画承接物（由 carry 绘制，两边都画会双影）",
+        "每幕文字层必须逐幕不同名（title0/title1/title2）——重名会让 carry_qa 把两个不同文案误判成「同一元素存活」"
+      ],
+      "caveats": [
+        "像素口径静止占比会报 85~95%，而元素轨迹口径只有 38.8%——两者都是真的，差在量法：64 宽面积加权会把小元素运动稀释掉。判“是否卡住”看轨迹",
+        "bodies/ 改完必须重跑 tools/caiyun_gen_layouts.py 生成 layout-ms*.js，否则改动静默不生效"
+      ]
+    },
+    {
+      "id": "multishot-05-contrast-split",
+      "kind": "script",
+      "path": "examples/caiyun/styles/05-contrast-split/film-multishot.json",
+      "summary": "contrast-split 模板的三镜承接示例（承接分 1.00，承接物：对照·中线）",
+      "use_for": "要学「分镜之间怎么接」时读它——一镜版 film.json 演示不了承接，而承接是唯一能判定像不像 PPT 的指标",
+      "tags": [
+        "script",
+        "multishot",
+        "carry",
+        "transition",
+        "contrast-split",
+        "05",
+        "three-shot"
+      ],
+      "verified": "verified",
+      "measured": {
+        "carry_score": 1.0,
+        "moving_pair_ratio": 16.4,
+        "still_ratio_trajectory": 16.6,
+        "scenes": 3
+      },
+      "highlights": [
+        "承接手法：并置：竖中线加宽成带、再转成横线，两态始终围着它",
+        "carry_out 的 from 必须与该幕末帧实景吻合、to 必须与下幕 from 完全一致",
+        "布局里不要再画承接物（由 carry 绘制，两边都画会双影）",
+        "每幕文字层必须逐幕不同名（title0/title1/title2）——重名会让 carry_qa 把两个不同文案误判成「同一元素存活」"
+      ],
+      "caveats": [
+        "像素口径静止占比会报 85~95%，而元素轨迹口径只有 16.6%——两者都是真的，差在量法：64 宽面积加权会把小元素运动稀释掉。判“是否卡住”看轨迹",
+        "bodies/ 改完必须重跑 tools/caiyun_gen_layouts.py 生成 layout-ms*.js，否则改动静默不生效"
+      ]
+    },
+    {
+      "id": "multishot-06-spine",
+      "kind": "script",
+      "path": "examples/caiyun/styles/06-spine/film-multishot.json",
+      "summary": "spine 模板的三镜承接示例（承接分 1.00，承接物：脊椎·主线）",
+      "use_for": "要学「分镜之间怎么接」时读它——一镜版 film.json 演示不了承接，而承接是唯一能判定像不像 PPT 的指标",
+      "tags": [
+        "script",
+        "multishot",
+        "carry",
+        "transition",
+        "spine",
+        "06",
+        "three-shot"
+      ],
+      "verified": "verified",
+      "measured": {
+        "carry_score": 1.0,
+        "moving_pair_ratio": 18.2,
+        "still_ratio_trajectory": 21.4,
+        "scenes": 3
+      },
+      "highlights": [
+        "承接手法：主线：一条线拉长、串起三幕，每次偏离都回到它",
+        "carry_out 的 from 必须与该幕末帧实景吻合、to 必须与下幕 from 完全一致",
+        "布局里不要再画承接物（由 carry 绘制，两边都画会双影）",
+        "每幕文字层必须逐幕不同名（title0/title1/title2）——重名会让 carry_qa 把两个不同文案误判成「同一元素存活」"
+      ],
+      "caveats": [
+        "像素口径静止占比会报 85~95%，而元素轨迹口径只有 21.4%——两者都是真的，差在量法：64 宽面积加权会把小元素运动稀释掉。判“是否卡住”看轨迹",
+        "bodies/ 改完必须重跑 tools/caiyun_gen_layouts.py 生成 layout-ms*.js，否则改动静默不生效"
+      ]
+    },
+    {
+      "id": "multishot-07-pointer",
+      "kind": "script",
+      "path": "examples/caiyun/styles/07-pointer/film-multishot.json",
+      "summary": "pointer 模板的三镜承接示例（承接分 1.00，承接物：角色·本体）",
+      "use_for": "要学「分镜之间怎么接」时读它——一镜版 film.json 演示不了承接，而承接是唯一能判定像不像 PPT 的指标",
+      "tags": [
+        "script",
+        "multishot",
+        "carry",
+        "transition",
+        "pointer",
+        "07",
+        "three-shot"
+      ],
+      "verified": "verified",
+      "measured": {
+        "carry_score": 1.0,
+        "moving_pair_ratio": 7.1,
+        "still_ratio_trajectory": 66.5,
+        "scenes": 3
+      },
+      "highlights": [
+        "承接手法：角色即指针：同一个点跨三幕，每个界面反应都能追溯到它的动作",
+        "carry_out 的 from 必须与该幕末帧实景吻合、to 必须与下幕 from 完全一致",
+        "布局里不要再画承接物（由 carry 绘制，两边都画会双影）",
+        "每幕文字层必须逐幕不同名（title0/title1/title2）——重名会让 carry_qa 把两个不同文案误判成「同一元素存活」"
+      ],
+      "caveats": [
+        "像素口径静止占比会报 85~95%，而元素轨迹口径只有 66.5%——两者都是真的，差在量法：64 宽面积加权会把小元素运动稀释掉。判“是否卡住”看轨迹",
+        "bodies/ 改完必须重跑 tools/caiyun_gen_layouts.py 生成 layout-ms*.js，否则改动静默不生效"
+      ]
+    },
+    {
+      "id": "multishot-carry-recipe",
+      "kind": "snippet",
+      "inline": true,
+      "summary": "多镜承接的通用配方：三幕骨架 + carry_out 链 + 两个必查的断点",
+      "use_for": "任何需要多镜片的场景；照它搭骨架，再按模板换承接物与隐喻",
+      "tags": [
+        "carry",
+        "multishot",
+        "layout",
+        "transition"
+      ],
+      "verified": "verified",
+      "highlights": [
+        "三幕骨架：幕 0 立主体（3.0s）→ 幕 1 展开（3.4s）→ 幕 2 收束（3.0s）。时长不能等分（CV<0.25 判 PPT）",
+        "carry_out 写法：at 在幕内、at+dur 跨过边界（dur 3.0 的幕用 at=2.7 dur=0.7）",
+        "链的闭合：幕 N 的 to 必须逐字等于幕 N+1 的 from——这是唯一定义『同一个东西』的地方",
+        "layout 分文件写（每幕一份），不要靠 duration 判断当前是哪一幕（改名/改时长就会串场，且静默降级）",
+        "每幕末帧必须与 carry_out.from 吻合：若幕内让元素长大/鼓起，必须收回再进边界",
+        "**carry_out 只在 at~at+dur 那 0.7s 绘制，之后什么都不画**——目标场景必须自己再画一份终态（值与 carry_out.to 完全一致），否则“它一直在”会变成“它消失了”"
+      ],
+      "caveats": [
+        "carry_out 不许整屏不透明盖上（会盖掉下一幕的文字）；铺满阶段用 fade_out 让位",
+        "**双影是固有陷阱**：carry 与目标场景自绘框会同时可见（实测错开 3px，帧上看是两个套着的框）。解法：carry_out.fade_out 0.35 + 自绘层在**同一个窗口** alpha 0→1 淡入",
+        "淡入/滑入不算承接（那是换掉的礼貌说法）——承接分 0.00 会被判不合格",
+        "没有 carry_out 也能承接（靠坐标对齐），但拿不到承接分；只在边界本就该安静时用"
+      ]
+    },
+    {
+      "id": "lighting-studio-3d",
+      "kind": "snippet",
+      "path": "examples/caiyun/assets/snippets/lighting-studio.json",
+      "summary": "三维场景的棚拍打光：主光 + 两盏冷暖点光，实测零过曝且保留材质层次",
+      "use_for": "model_script 里画面发灰/发白/像塑料时先套这份。总光量（ambient+diffuse+rim）控制在 0.88 附近是实测的过曝分界线；点光强度 1.3~1.5 足够，给到 2.8 会让环面结这类复杂形状 30% 像素过曝",
+      "tags": [
+        "snippet",
+        "3d",
+        "lighting",
+        "model_script",
+        "studio",
+        "verified"
+      ],
+      "verified": "verified",
+      "measured": {
+        "overexposed_ratio": 0.0,
+        "note": "五个参数化网格（齿轮/棱柱/胶囊/弯管/环面结）在 1000x620 下的过曝占比，逐块量测均为 0.0%"
+      },
+      "highlights": [
+        "key_direction [-0.40, 0.66, 0.64]：左上前方主光，与相机成约 40°",
+        "总光量 ambient 0.10 + diffuse 0.52 + rim 0.26 = 0.88（实测：1.25 时环面结 30.6% 过曝，0.88 时 0%）",
+        "两盏点光 intensity 1.5 / 1.3，radius 9.0 —— 给到 2.8 会过曝",
+        "tone_map 用 agx：比 aces 更压高光、中间调略去饱和，适合产品片",
+        "exposure 0.92：略低于 1，给后续调色留余量"
+      ],
+      "caveats": [
+        "金属球（metallic=1）用这套几乎无改善：点光的漫反射项乘 (1-metallic) 归零，只剩极窄的 GGX 高光，环境感建立不起来。金属要用大 roughness（0.35+）或干脆改用非金属",
+        "点光 radius 是硬截断：超出半径瞬间归零。实测球背面 6 像素内亮度掉 70 级，会看到一圈硬边。把 radius 给大（9.0+）让截断落在画面外",
+        "没有 AO / 环境反射 / 多次反弹：物体接触处不会有暗角，复杂形状的自遮挡层次全靠单次 N·L"
+      ],
+      "body": {
+        "lighting": {
+          "key_direction": [
+            -0.4,
+            0.66,
+            0.64
+          ],
+          "ambient": 0.1,
+          "diffuse": 0.52,
+          "rim": 0.26,
+          "exposure": 0.92,
+          "tone_map": "agx",
+          "extra_lights": [
+            {
+              "kind": "point",
+              "position": [
+                -3.4,
+                2.0,
+                -1.0
+              ],
+              "color": [
+                1.0,
+                0.74,
+                0.46
+              ],
+              "intensity": 1.5,
+              "radius": 9.0
+            },
+            {
+              "kind": "point",
+              "position": [
+                3.6,
+                1.2,
+                1.6
+              ],
+              "color": [
+                0.44,
+                0.68,
+                1.0
+              ],
+              "intensity": 1.3,
+              "radius": 9.0
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -304,4 +304,19 @@ describe("core/fs 根解析（sess:/proj:/user:/abs:）", () => {
     expect(new Set(ids).size).toBe(ids.length)
     expect(list.find((r) => r.id === "proj:gebai")?.name).toBe("gebai")
   })
+
+  test("rootCatalog：歌白自身项目带 self 标（前端据此置顶），其余项目不带", () => {
+    const c = ctx({
+      projects: [
+        { name: "modeltrain-be", path: "/coding/modeltrain-be" },
+        { name: "歌白", path: "/gebai" },
+      ],
+      selfProject: "歌白",
+    })
+    const list = rootCatalog(c)
+    expect(list.find((r) => r.id === "proj:歌白")?.self).toBe(true)
+    expect(list.find((r) => r.id === "proj:modeltrain-be")?.self).toBeUndefined()
+    // 未配 selfProject（沙箱 / 服务模式）时没有任何根带标
+    expect(rootCatalog(ctx()).some((r) => r.self)).toBe(false)
+  })
 })
