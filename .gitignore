@@ -226,3 +226,6 @@ shuangtian/examples/*/assets/vo/*.wav
 # 源脚本 film.json / film-multishot.json 才是真值源，包不入库。
 *.cypkg/
 commit-msg.txt
+# 临时提交信息文件（人工/脚本生成，不入库）
+_m.txt
+commit-msg.txt
