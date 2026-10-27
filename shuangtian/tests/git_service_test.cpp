@@ -100,7 +100,15 @@ struct Repo {
 
 #include "examples/gbcode/git_service.cpp"
 
-ST_TEST(git_service_groups_by_xy_matrix) {
+/// **为何是 `ST_TEST_SLOW`（默认不跑）**
+///
+/// 它跑真 `git` 子进程建临时仓库、真读写文件。`st test` 默认 16 片并行时，
+/// 多个片同时在文件系统上重活（建仓/索引/写对象），实测出现过偶发假红；
+/// 单跑稳定绿。这与 `tools/examples_e2e_all.py` 里“并行会抢 CPU 互相拖慢”
+/// 是同一类问题：**环境敏感用例不该与别人争资源**。
+///
+/// 要验证它时：`st test --slow git_service`（单进程、独占）。
+ST_TEST_SLOW(git_service_groups_by_xy_matrix) {
   if (!git_available()) {
     std::cout << "[git] git 未安装，跳过" << '\n';
     return;

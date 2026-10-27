@@ -20,6 +20,20 @@
 /// 噪声（实测抖动 < 15%）根本够不着它，而退化（≥12×）一定越线。
 /// 这也是它不必限定 release 档的原因——比值里没有"清屏 vs AA"那种跨档差异。
 ///
+/// ## 为何这些用例是 `ST_TEST_SLOW`（默认不跑）
+///
+/// 它们的判据是**耗时比值**——比值本身抗噪（噪声 <15% vs 判据 5×），但
+/// `t(1×)` 的绝对值很小（SelectPanel 实测 0.64 ms），小样本里**几毫秒的调度抖动
+/// 就能改掉比值**。`st test` 默认 16 片并行，CPU 被抢载时实测出现过
+/// `比值 5.2 > 上限 5.0` 的假红（单跑恒为 3.15~3.17，稳定）。
+///
+/// 这与 `tools/examples_e2e_all.py` 里“并行会抢 CPU 互相拖慢”的教训同源：
+/// **量机器性能的断言不该与别人争 CPU**。归档为 `slow` 后：
+/// - 常规 `st test` 不再被它们偶发拖红（内循环只报“代码对不对”）；
+/// - 要验证规模不变性时显式跑 `st test --slow`（单进程、独占，数据可比）。
+///
+/// 不是把阈值放宽——阈值 5.0 是有依据的（退化是 12~40×），放宽会削弱门禁。
+
 /// ## 覆盖的组件（**十个**；前六个对应本轮修过的缺口，后四个是本轮扫描判定“当前健康”的）
 ///
 /// | 组件 | 缺口形态 | 修前比值 |
@@ -165,7 +179,7 @@ template <class Fn>
 ///
 /// 这条守的是本轮最大的一处缺口（3298 ms → 0.438 ms @20000 行）。
 /// 它同时覆盖了多行 `Text`——终端行模式就是把全文交给一个 `Text` 子件。
-ST_TEST(scale_gate_terminal_frame_is_independent_of_log_size) {
+ST_TEST_SLOW(scale_gate_terminal_frame_is_independent_of_log_size) {
   auto& setup = shared_setup();
   if (!setup.ready) return;
 
@@ -196,7 +210,7 @@ ST_TEST(scale_gate_terminal_frame_is_independent_of_log_size) {
 }
 
 /// `Table`：行数 20× 而每帧成本不变（守 113.27 ms → 0.502 ms @5000 行）。
-ST_TEST(scale_gate_table_frame_is_independent_of_row_count) {
+ST_TEST_SLOW(scale_gate_table_frame_is_independent_of_row_count) {
   auto& setup = shared_setup();
   if (!setup.ready) return;
 
@@ -229,7 +243,7 @@ ST_TEST(scale_gate_table_frame_is_independent_of_row_count) {
 ///
 /// 这条同时盯住**二分定位**——若有人把二分改回全量遍历，或把"组矩形相交"判据写错
 /// （退回"组首行永不剔除"），比值都会立刻越线。
-ST_TEST(scale_gate_markdown_frame_is_independent_of_document_size) {
+ST_TEST_SLOW(scale_gate_markdown_frame_is_independent_of_document_size) {
   auto& setup = shared_setup();
   if (!setup.ready) return;
 
@@ -254,7 +268,7 @@ ST_TEST(scale_gate_markdown_frame_is_independent_of_document_size) {
 }
 
 /// `Tree`：行数 20× 而每帧成本不变（守 5.36 ms → 0.24 ms @1000 行）。
-ST_TEST(scale_gate_tree_frame_is_independent_of_row_count) {
+ST_TEST_SLOW(scale_gate_tree_frame_is_independent_of_row_count) {
   auto& setup = shared_setup();
   if (!setup.ready) return;
 
@@ -289,7 +303,7 @@ ST_TEST(scale_gate_tree_frame_is_independent_of_row_count) {
 ///
 /// 单列一条（而不是只靠 Terminal 那条）：`Text` 是**基础组件**，
 /// 将来若有别的宿主用它放大内容，这条门禁仍然盖得住。
-ST_TEST(scale_gate_multiline_text_frame_is_independent_of_line_count) {
+ST_TEST_SLOW(scale_gate_multiline_text_frame_is_independent_of_line_count) {
   auto& setup = shared_setup();
   if (!setup.ready) return;
 
@@ -323,7 +337,7 @@ ST_TEST(scale_gate_multiline_text_frame_is_independent_of_line_count) {
 ///
 /// `List` 的项是真子元素（走 `Element::paint` 的元素级剔除），所以它是
 /// “靠子元素剔除兜底”的那一类——本门禁守的就是“这个兜底不被改坏”。
-ST_TEST(scale_gate_list_frame_is_independent_of_item_count) {
+ST_TEST_SLOW(scale_gate_list_frame_is_independent_of_item_count) {
   auto& setup = shared_setup();
   if (!setup.ready) return;
 
@@ -360,7 +374,7 @@ ST_TEST(scale_gate_list_frame_is_independent_of_item_count) {
 /// 扫描判定它健康（真实画布 800×600 下 100 项 0.875 ms），而 "画布尺寸" 正是它
 /// 唯一的护城河——所以这条门禁特别有价值：**画布尺寸是外部赋予的假设**，
 /// 而这假设一旦变（缩略图/离屏渲染），它会立刻变线性。
-ST_TEST(scale_gate_select_panel_frame_is_independent_of_option_count) {
+ST_TEST_SLOW(scale_gate_select_panel_frame_is_independent_of_option_count) {
   auto& setup = shared_setup();
   if (!setup.ready) return;
 
@@ -390,7 +404,7 @@ ST_TEST(scale_gate_select_panel_frame_is_independent_of_option_count) {
 }
 
 /// `MenuPanel`：菜单项数 20× 而每帧成本不变。
-ST_TEST(scale_gate_menu_panel_frame_is_independent_of_item_count) {
+ST_TEST_SLOW(scale_gate_menu_panel_frame_is_independent_of_item_count) {
   auto& setup = shared_setup();
   if (!setup.ready) return;
 
@@ -425,7 +439,7 @@ ST_TEST(scale_gate_menu_panel_frame_is_independent_of_item_count) {
 }
 
 /// `Tabs`：标签数 20× 而每帧成本不变。
-ST_TEST(scale_gate_tabs_frame_is_independent_of_tab_count) {
+ST_TEST_SLOW(scale_gate_tabs_frame_is_independent_of_tab_count) {
   auto& setup = shared_setup();
   if (!setup.ready) return;
 
@@ -456,7 +470,7 @@ ST_TEST(scale_gate_tabs_frame_is_independent_of_tab_count) {
 /// `MergeView`：行数 20× 而每帧成本不变。
 ///
 /// 两侧文本各 `lines` 行、每隔 50 行一处差异 —— 于是段数随行数一起长。
-ST_TEST(scale_gate_merge_view_frame_is_independent_of_line_count) {
+ST_TEST_SLOW(scale_gate_merge_view_frame_is_independent_of_line_count) {
   auto& setup = shared_setup();
   if (!setup.ready) return;
 

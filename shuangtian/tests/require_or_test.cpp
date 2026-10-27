@@ -56,11 +56,31 @@ namespace {
 }
 
 /// 自启动本二进制（带哨兵开关），跑哨兵失败路径。
+///
+/// ## 必须清掉 `ST_TEST_SHARD_LOG`（实测假红，2026-10-27）
+///
+/// 分片跑时父进程给每片下发 `ST_TEST_SHARD_LOG=<该片日志路径>`，而本用例自启动的
+/// 子进程会**继承它**——于是子进程里那个“故意失败”的输出被 tee 进了**同一份
+/// 分片日志**。汇总时它看起来就像本分片真的红了一条：
+///
+/// ```
+///   FAIL require_or_probe_fails  ... 前置断言失败: value > 0
+///   ...
+///   121 passed, 0 failed, 712 assertions
+/// ```
+///
+/// 一个分片里同时出现 FAIL 与 0 failed——这个矛盾就是线索。
+/// 单跑时没有该变量，所以永远看不到它；只有 `st test`（16 片并行）才发作。
+///
+/// 子进程的输出本来就被父进程捕获（`capture_output`）用于取证，
+/// 不需要（也不应该）再落一份到分片日志。
 [[nodiscard]] auto run_self_probe() -> st::Result<st::process::RunResult> {
   auto exe = st::process::executable_path();
   if (!exe) return st::unexpected(exe.error());
   st::process::Options options;
   options.env["ST_REQUIRE_OR_PROBE"] = "1";
+  // 空串 = 覆盖成空值（子进程 `getenv` 拿到空串，`console_log::open` 不启用）。
+  options.env["ST_TEST_SHARD_LOG"] = "";
   return st::process::run(*exe, {"require_or_probe"}, options);
 }
 

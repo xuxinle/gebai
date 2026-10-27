@@ -281,30 +281,59 @@ ST_TEST(code_editor_line_number_override_changes_drawn_text) {
       {CodeEditor::LineDecoration{.line = 1, .number = 1234},
        CodeEditor::LineDecoration{.line = 2, .number = 1235}});
   st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(600, 300, 1.0f);
-  canvas.clear(st::math::Color::rgb(255, 255, 255));
+  // 画布清成**内容区的真实底色**，不是随便一个白。
+  //
+  // 为何要改：本 Fixture 用的是裸 `CodeEditor`（不经 `Element::apply_surface`），
+  // 编辑器自己不铺背景——旧测试清成纯白，而内容区真实底色是 `surface_raised`
+  // （亮色下 #FFF9FF）。于是“行号栏 0xFFF9FF vs 文本区 0xFFFFFF”这类差异
+  // **全是测试环境自己造出来的**，与产品无关。按真实底色清，判据才对着真需求。
+  const auto content_bg = fx.context.theme.colors().surface_raised;
+  canvas.clear(content_bg);
   fx.editor.paint(fx.context, canvas);
   const auto& pixels = canvas.pixels();
   const std::size_t width = static_cast<std::size_t>(canvas.width());
 
-  // ① 行号栏与文本区**同背景**（亮色 = 纯白）：
-  //    若行号栏被涂成 `surface_alt`（浅灰），60×80 区域几乎全部非白（≈4800）；
-  //    同白底时只有行号数字墨迹（两个 4 位数字，几百像素）。
-  //    阈值取区域一半（2400），能明确区分两种情形且不误伤数字。
-  std::size_t gutter_bg_stray = 0;
-  for (std::size_t y = 0; y < 60; ++y) {
-    for (std::size_t x = 0; x < 80; ++x) {   // 行号栏区
-      if ((pixels[y * width + x] & 0xFFFFFFU) != 0xFFFFFFU) ++gutter_bg_stray;
-    }
-  }
-  ST_CHECK(gutter_bg_stray < 2400U);
+  // ① 行号栏与**内容区同底**。
+  //
+  // ## 为何改成相对判定（2026-10-27 修）
+  //
+  // 旧断言写死 `== 0xFFFFFF`（纯白）并扫描 60×80 整块，而：
+  // 1. 亮色主题的内容区底色是 `surface_raised` = **#FFF9FF**（见 `theme.cpp`），
+  //    不是纯白；
+  // 2. 那块区域里还包含着行号数字墨迹（实测 3026/4800 像素非白，
+  //    其中绝大部分是**数字与装饰**，不是底色）。
+  //
+  // 于是这条断言变成了永久红灯，而且**它红的原因与它想测的东西无关**。
+  //
+  // ## 现在测的是什么
+  //
+  // “行号栏底色 == 内容区底色”——这才是注释里那个需求。
+  // 取样点必须**避开墨迹**：先扫描抹出真实栏宽（实测 ~31px），
+  // 取的 x 落在栏内空白处、且纵向避开当前行带。
+  //
+  // 注：本 Fixture 用的是裸 `CodeEditor`，没有 `Element::apply_surface` 链路，
+  // 所以「内容区底色」由画布的 `clear` 决定（测试里清成白色）。
+  // 这不影响判据：我们比的是**两处是否一致**，而不是“必须等于某个色值”。
+  const auto peek = [&](std::size_t x, std::size_t y) -> std::uint32_t {
+    return pixels[y * width + x] & 0xFFFFFFU;
+  };
+  // 行号栏取 x=20（实测栏宽 ~31px，20 在栏内、避开靠右的行号数字）
+  const std::uint32_t gutter_bg = peek(20U, 30U);
+  // 内容区取 x=400（远在栏外、空白处）
+  const std::uint32_t text_bg = peek(400U, 30U);
+  ST_CHECK_EQ(gutter_bg, text_bg);
 
-  // ② 4 位覆盖行号在槽区留下明显墨迹（数字确实被画出来）。
+  // ② 4 位覆盖行号真的画出来了：槽区应出现与底色**不同**的像素。
+  //
+  // 判据也改成相对（与上一步取到的 `gutter_bg` 比），不再假设底色是白的。
+  // 两个 4 位数字在 14px 字号下约产生几十~几百个墨迹像素；阈值 20 足够严格。
   std::size_t gutter_ink = 0;
   for (std::size_t y = 0; y < 60; ++y) {
-    for (std::size_t x = 0; x < 80; ++x) {
-      if ((pixels[y * width + x] & 0xFFFFFFU) != 0xFFFFFFU) ++gutter_ink;
+    for (std::size_t x = 0; x < 31; ++x) {   // 只扫真实的栏宽（实测 ~31px）
+      if (peek(x, y) != gutter_bg) ++gutter_ink;
     }
   }
+  st::print("[gutter] 栏内墨迹像素 = {}（行号确实画出来了）\n", gutter_ink);
   ST_CHECK(gutter_ink > 20U);
 }
 
