@@ -17,10 +17,10 @@ import type { SessionControlService, ToolContext } from "../base/types"
 import { sessionTool } from "./session"
 
 /** 内存桩：store/engine/run 三柄的最小实现（计数注入便于断言副作用）。 */
-function makeSvc(opts: { running?: string[]; selfId?: string } = {}): { svc: SessionControlService; calls: { run: string[]; cancel: string[]; delete: string[]; env: Array<[string, Record<string, string | null>]> } } {
+function makeSvc(opts: { running?: string[]; selfId?: string } = {}): { svc: SessionControlService; calls: { run: string[]; runOpts: Array<Record<string, unknown> | undefined>; cancel: string[]; delete: string[]; env: Array<[string, Record<string, string | null>]> } } {
   const running = new Set(opts.running ?? [])
   const sessions = new Map<string, { id: string; name: string; userId: string; messages: Array<{ role: string; content?: unknown }> }>()
-  const calls = { run: [] as string[], cancel: [] as string[], delete: [] as string[], env: [] as Array<[string, Record<string, string | null>]> }
+  const calls = { run: [] as string[], runOpts: [] as Array<Record<string, unknown> | undefined>, cancel: [] as string[], delete: [] as string[], env: [] as Array<[string, Record<string, string | null>]> }
   const svc: SessionControlService = {
     store: {
       createSession: async (userId, name) => {
@@ -53,8 +53,9 @@ function makeSvc(opts: { running?: string[]; selfId?: string } = {}): { svc: Ses
       runtimeOf: async () => ({}) as never,
       runningIds: async () => [...running] as never,
     },
-    run: async (id, _user, prompt) => {
+    run: async (id, _user, prompt, o) => {
       calls.run.push(prompt)
+      calls.runOpts.push(o as Record<string, unknown> | undefined)
       const s = sessions.get(id)
       if (s) s.messages.push({ role: "user", content: prompt })
     },
@@ -158,6 +159,28 @@ describe("session 工具：status / send / stop / delete", () => {
     expect(r.output).toContain("已注入")
     expect(r.output).toContain("已完成")
     expect(calls.run).toEqual(["继续演进：读台账选下个方向"])
+  })
+
+  test("send：缺省免审（无人值守不卡审批），approve=false 收紧为按需审批", async () => {
+    const { svc, calls } = makeSvc()
+    const created = await svc.store.createSession("u1", "worker")
+    // 缺省：本轮以 autoApprove 运行——工具派出的活无人守审批卡，不能挂着等审批超时
+    const r = await sessionTool.execute({ action: "send", session_id: created.id, message: "干重活" }, ctxWith(svc))
+    expect(calls.runOpts[0]).toEqual({ autoApprove: true, interactionMode: "realtime" })
+    expect(r.output).toContain("免审")
+    // 显式收紧：需审批工具在无交互通道下直接拒绝（deny），但仍会注入并驱动一轮
+    const r2 = await sessionTool.execute({ action: "send", session_id: created.id, message: "再干一次", approve: false }, ctxWith(svc))
+    expect(calls.runOpts[1]).toEqual({ autoApprove: false, interactionMode: "realtime" })
+    expect(calls.run).toHaveLength(2)
+    expect(r2.output).toContain("按需审批")
+  })
+
+  test("send：interactive=false 按无交互通道运行（ask 类工具不挂起等超时）", async () => {
+    const { svc, calls } = makeSvc()
+    const created = await svc.store.createSession("u1", "后台")
+    const r = await sessionTool.execute({ action: "send", session_id: created.id, message: "跑批", interactive: false }, ctxWith(svc))
+    expect(calls.runOpts[0]).toEqual({ autoApprove: true, interactionMode: "none" })
+    expect(r.output).toContain("已注入")
   })
 
   test("send：长任务 2 秒后放行（不阻塞控制会话）；短任务同步完成如实报告", async () => {

@@ -10,7 +10,7 @@ import type { Sandbox } from "../security/sandbox"
 import type { EventBus } from "../base/event-bus"
 import type { ServerConfig } from "../base/config"
 import type { SubAgentManager } from "../agents/subagents"
-import type { ToolContext, ToolResult, Tool, PresetProject, ChoiceResult, ChoiceOption, ChoicePlan, InteractionMode, OutputMode, SessionData, DynamicToolDef, SubAgentDef, ToolResultImage } from "../base/types"
+import type { ToolContext, ToolResult, Tool, PresetProject, ChoiceResult, ChoiceOption, ChoicePlan, InteractionMode, OutputMode, SessionData, DynamicToolDef, SubAgentDef, ToolResultImage, SessionRunOptions } from "../base/types"
 import { ToolRegistry as BaseToolRegistry } from "../base/registry"
 import { normalizeToolArgs, tolerantToolName } from "../base/tool-args"
 import { agentListTool, agentLoadTool, subSessionRunTool, subSessionMergeTool, bgTaskTool, createGlobalTools, isGlobalToolExcluded, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput, walkDirFiles, todoSnapshot } from "../tools"
@@ -1825,7 +1825,7 @@ private activeSchemas(sessionId: string) {
           // （那就是把「一个数字两个量」换成「一个数字两个源」的同型错）。
           contextWindow: () => self.contextWindow(),
         },
-        run: (id: string, userId: string, prompt: string, o?: Record<string, unknown>) => self.run(id, userId, prompt, o),
+        run: (id: string, userId: string, prompt: string, o?: SessionRunOptions) => self.run(id, userId, prompt, o),
       },
       registry: {
         schemas: (enabledOnly = true) => (opts?.registry ?? self.opts.registry).schemas(enabledOnly),

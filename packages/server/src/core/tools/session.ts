@@ -38,7 +38,7 @@ function messageTailLine(m: { role: string; content?: unknown; name?: string }, 
 export const sessionTool: Tool = {
   name: "session",
   description:
-    "会话管控（跨会话控制平面）：创建新会话、列出/查看会话状态与消息尾部、向会话注入消息（触发其执行）、终止运行中的任务、删除会话。与 subsession_run 不同：本工具创建/操作的会话与当前上下文无父子绑定（脱管），适合驻留工作会话、多会话编排、演进会话观察与干预。自保护：不能对当前会话自身执行任何动作（终止自己=结果无处落盘；注入自己=与任务循环竞态），create 的新会话不受此限。",
+    "会话管控（跨会话控制平面）：创建新会话、列出/查看会话状态与消息尾部、向会话注入消息（触发其执行）、终止运行中的任务、删除会话。与 subsession_run 不同：本工具创建/操作的会话与当前上下文无父子绑定（脱管），适合驻留工作会话、多会话编排、演进会话观察与干预。send 驱动的轮次**默认免审**（无人值守，需审批工具不阻塞；approve=false 可收紧；interactive=false 同时关闭依赖前端的交互能力）。自保护：不能对当前会话自身执行任何动作（终止自己=结果无处落盘；注入自己=与任务循环竞态），create 的新会话不受此限。",
   parameters: schema(
     {
       action: {
@@ -49,6 +49,15 @@ export const sessionTool: Tool = {
       session_id: { type: "string", description: "目标会话 id（create/list 外必填）" },
       name: { type: "string", description: "create：会话名（缺省自动命名）" },
       message: { type: "string", description: "send：注入的用户消息（触发目标会话执行一轮）" },
+      approve: {
+        type: "boolean",
+        description:
+          "send：目标会话本轮是否需要审批（缺省 true = 免审——工具派出的活无人值守，需审批工具自动通过、不空等审批超时；显式 false = 需审批工具在无交互通道下直接拒绝，不进入等待）",
+      },
+      interactive: {
+        type: "boolean",
+        description: "send：目标会话本轮是否保留交互能力（缺省 true，即 ask/show 预览等可用）；false = 按无交互通道运行（依赖前端的交互工具直接返回不可用，不挂起等超时）",
+      },
       env: { type: "object", additionalProperties: { type: "string" }, description: "create：会话环境变量（内存态会话 env，零落盘；服务重启即空——持久配置用任务级 env 或 AUTO_EVOLVE 类变量前缀）" },
       tail: { type: "number", description: "status：消息尾部条数（默认 12，上限 60）" },
     },
@@ -130,20 +139,28 @@ export const sessionTool: Tool = {
           data: { running: true },
         }
       }
+      // 审批姿态缺省免审：本工具派出的会话轮次都是无人值守的活，无人守审批卡——按实时审批
+      // 运行会让需审批工具挂到超时（每层重活都中道而废），服务模式下更直接被拒。语义与
+      // task 型无人值守执行同一授权面（任务经用户审批创建，执行即其授权的免审落地）。
+      // 显式 approve=false 收紧为 deny（无交互通道下需审批工具即时报拒绝，不空等超时）。
+      const approve = args.approve !== false
+      // 交互模式显式给出（缺省 realtime 与引擎缺省同值）：无人值守会话的 ask 类工具若仍按实时通道
+      // 运行，会挂起到交互超时（审批已免审，但选择/填值/计划审批仍是阻塞点）。
+      const interactionMode = args.interactive === false ? ("none" as const) : ("realtime" as const)
       // 脱管注入：不等待目标会话执行完（那是目标会话事件循环的事）——只同步等待启动早期错误
       //（会话缺失/存储异常等同步段失败，约 2 秒窗口），之后立即放行（目标会话后台自行驱动）。
       // 否则控制会话派发长任务 worker 时会被 run 的 Promise 拖住，控制平面自身被锁死。
-      const started = svc.run(sessionId, ctx.user, message)
+      const started = svc.run(sessionId, ctx.user, message, { autoApprove: approve, interactionMode })
       const early = await Promise.race([started.then(() => "ok"), new Promise<string>((r) => setTimeout(() => r("bg"), 2000))])
       if (early === "ok") {
         // run 已完整结束（消息极短任务/目标会话立即出错）——若 throw 则如实上抛
         return {
-          output: `消息已注入会话 ${sessionId}${target.name ? `「${target.name}」` : ""}，执行已完成（目标会话本次运行已结束）。用 action=status 查看。`,
+          output: `消息已注入会话 ${sessionId}${target.name ? `「${target.name}」` : ""}${approve ? "（本轮免审）" : "（本轮按需审批）"}，执行已完成（目标会话本次运行已结束）。用 action=status 查看。`,
           data: { running: false },
         }
       }
       return {
-        output: `消息已注入会话 ${sessionId}${target.name ? `「${target.name}」` : ""}，执行已触发（后台运行——本调用不等待完成）。用 action=status 跟踪进展与消息尾部。`,
+        output: `消息已注入会话 ${sessionId}${target.name ? `「${target.name}」` : ""}${approve ? "（本轮免审：需审批工具自动通过）" : "（本轮按需审批：无交互通道下需审批工具直接拒绝）"}，执行已触发（后台运行——本调用不等待完成）。用 action=status 跟踪进展与消息尾部。`,
         data: { running: true },
       }
     }

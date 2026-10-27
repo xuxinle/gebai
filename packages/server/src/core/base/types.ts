@@ -74,8 +74,19 @@ export interface SessionControlService {
     contextWindow?(): number
   }
   /** 触发目标会话执行（session 工具 send）：引擎 run 的脱管调用面——注入用户消息并驱动一轮。
- *  目标会话忙时抛错（同会话并发 run 竞态保护，引擎 tasks.has 检查）。 */
-  run: (sessionId: string, user: string, prompt: string, opts?: Record<string, unknown>) => Promise<void>
+   *  目标会话忙时抛错（同会话并发 run 竞态保护，引擎 tasks.has 检查）。
+   *  opts 透传引擎 run 的任务级选项（本工具用 autoApprove 定本轮审批姿态、interactionMode 定通道能力）。 */
+  run: (sessionId: string, user: string, prompt: string, opts?: SessionRunOptions) => Promise<void>
+}
+
+/** 脱管运行的任务级选项（session 工具 send → 引擎 run 的透传面，语义同 AgentEngine.run 同名参数）：
+ *  autoApprove=true 需审批工具自动通过 / false 无交互通道下直接拒绝 / 缺省通道默认姿态；
+ *  interactionMode 缺省 realtime（工具声明的交互等级高于此值时被禁用）。 */
+export interface SessionRunOptions {
+  autoApprove?: boolean
+  interactionMode?: "none" | "multi_turn" | "realtime"
+  outputMode?: "final_only" | "streaming"
+  envOverride?: Record<string, string>
 }
 
 /** 引擎侧 Tool：契约 Tool 的 execute/requiresApproval 换用引擎增强 ToolContext（shTasks/subSessions 等服务
