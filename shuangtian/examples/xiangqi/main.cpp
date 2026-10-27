@@ -225,7 +225,19 @@ class AgentLink {
     }
     std::string response;
     std::uint8_t buffer[1024];
+    // 握手读取**必须有超时**（实测教训）：`read_some` 是阻塞读，
+    // 拿着“已连上但从不回应”的对端（或防火墙静默丢包）时会一直等下去。
+    // 实测：agent 未启动时这个循环卡了 **~450 ms**，而它在主线程上。
+    // 用 `wait_readable(剩余毫秒)` 做整体截止时间，而不是每轮重置——
+    // 否则对端可一遍遍送半个包把时间拖到无限。
+    const auto handshake_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
     while (response.find("\r\n\r\n") == std::string::npos) {
+      const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 handshake_deadline - std::chrono::steady_clock::now())
+                                 .count();
+      if (remaining <= 0) break;
+      const auto ready = tcp_->wait_readable(static_cast<int>(remaining));
+      if (!ready.has_value() || !*ready) break;   // 超时/出错：当作握手失败
       const auto n = tcp_->read_some(buffer);
       if (!n.has_value() || *n == 0) break;
       response.append(reinterpret_cast<const char*>(buffer), *n);
@@ -604,6 +616,13 @@ struct Options {
   std::string control_file{};
   std::string shots{};
   std::string home{};
+  /// 渲染器：**空串 = 未指定**（跟框架缺省走，即允许延迟 GPU 升级）/
+  /// `auto` / `gpu` / `software`。
+  ///
+  /// 为何默认空串而不是 `auto`：两者在框架里语义不同——空串才允许
+  /// `defer_gpu`（窗口先用软件画布秒开）；写 `auto` 会被当成“显式指定”，
+  /// 于是 GPU 初始化又回到窗口露出之前的同步路径上。
+  std::string renderer{};
   /// agent 控制器地址（`--agent` 或环境变量 `ST_XIANGQI_AGENT` 覆盖）。
   std::string agent_url{"ws://127.0.0.1:7717/xiangqi"};
 };
@@ -639,6 +658,8 @@ auto parse_options(int argc, char** argv) -> Options {
       options.shots = next();
     } else if (arg == "--home") {
       options.home = next();
+    } else if (arg == "--renderer") {
+      options.renderer = next();
     } else if (arg == "--agent") {
       options.agent_url = next();
     }
@@ -1115,6 +1136,7 @@ auto run_app(int argc, char** argv) -> int {
   app_options.title = "相期";
   app_options.headless = options.headless;
   app_options.backend = options.headless ? "headless" : std::string{};
+  app_options.renderer = options.renderer;
   app_options.theme = options.theme == "dark" ? st::ui::ThemeMode::Dark : st::ui::ThemeMode::Light;
   app_options.control_port = options.control_port;
   app_options.control_file = options.control_file;
@@ -1204,16 +1226,25 @@ auto run_app(int argc, char** argv) -> int {
 
   // ④ 连 agent（连不上不算错误：agent 可能还没起，界面会显示未连接）
   //
-  // ⚠ **不在启动关键路径上连**（实测教训）：`connect_tcp` 的超时是 2000 ms，
-  // 而 agent 未启动时它会把**主线程整整阻塞 2 秒**——窗口已经可见但不响应消息，
-  // Windows 判定“未响应”，鼠标就一直转圈。实测：窗口句柄 529 ms 就绪，
-  // UI 线程直到 2585 ms 才应答，而 CPU 只用了 516 ms（纯阻塞等待，不是算不动）。
+  // ⚠ **在后台线程连**（实测教训，2026-10-27）：
   //
-  // 所以改成**第一帧之后**再连：先让窗口把首帧画出来、能响应点击，
-  // 然后用**更短的超时**（本机回环，agent 就绪时 <1 ms 就能连上；
-  // 连不上就是没起，多等无意义）。连接结果照旧反映到界面。
+  // 即使把超时收到 400 ms，“连一个没监听的端口”仍要花 **~450 ms**——
+  // 本机防火墙会静默丢 SYN，只能等满超时。之前把它放在主循环第一帧，
+  // 于是窗口已显示却 ~450 ms 不应答（Windows 判定未响应，鼠标转圈）。
+  //
+  // 而 `AgentLink` 的后续读取全在主循环里做（`poll()` 是非阻塞的），
+  // 所以只需把"建立连接"这一下挪到线程里。连接能不能成，
+  // 由主循环看 `agent_connect_done` 后如实打到界面。
   AgentLink link;
-  bool agent_connect_pending = true;
+  std::atomic<bool> agent_connect_done{false};
+  std::atomic<bool> agent_connect_ok{false};
+  /// 主循环侧：是否已把连接结果打到日志/界面（只报一次）。
+  bool agent_connect_reported = false;
+  std::thread agent_worker([&link, &options, &agent_connect_done, &agent_connect_ok] {
+    const bool ok = link.connect(options.agent_url);
+    agent_connect_ok.store(ok, std::memory_order_relaxed);
+    agent_connect_done.store(true, std::memory_order_release);
+  });
 
   // ⑤ 暴露能力 + 装载 JS
   CardStore store;
@@ -1263,11 +1294,10 @@ auto run_app(int argc, char** argv) -> int {
   while (!app.quit_requested()) {
     const std::int64_t frame_start_ms = st::time::now_ms();
 
-    // 首帧已出：现在才连 agent（见第 ④ 步的说明——不在启动路径上连，
-    // 否则 agent 未启动时主线程会阻塞满 2000 ms，窗口被判定“未响应”）。
-    if (agent_connect_pending) {
-      agent_connect_pending = false;
-      if (link.connect(options.agent_url)) {
+    // 首帧已出：汇报 agent 连接结果（连接本身在后台线程做的，见第 ④ 步）。
+    if (!agent_connect_reported && agent_connect_done.load(std::memory_order_acquire)) {
+      agent_connect_reported = true;   // 只汇报一次
+      if (agent_connect_ok.load(std::memory_order_relaxed)) {
         st::print("[相期] 已连接 agent 控制器：{}\n", options.agent_url);
       } else {
         st::print("[相期] 未能连接 agent 控制器（{}）——降级为文件投递，界面显示未连接\n",
@@ -1317,6 +1347,9 @@ auto run_app(int argc, char** argv) -> int {
     }
     app.pace_loop(frame_start_ms);
   }
+  // 后台连接线程必须收尾——它持有 `link` 的引用，而 `link` 是本函数局部变量。
+  // 连接超时最多 400 ms，所以这里最多等那么久（正常情况下早已完成）。
+  if (agent_worker.joinable()) agent_worker.join();
   link.disconnect();
   st::print("相期退出：{} 帧，处理消息 {} 条（未处理的卡片留在 {}，下次启动会重新出现）\n", frames,
             handled, store.inbox_dir());

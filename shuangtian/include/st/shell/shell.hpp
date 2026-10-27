@@ -48,6 +48,8 @@ struct WindowOptions {
   /// 处漏掉；而自绘窗框才与 UI 共用同一套设计令牌、同一套 DPI 口径与**同一份无头截图**。
   /// `true` 仅留给"确实想要系统窗框"的宿主（如系统级调试工具），不是常规路径。
   bool decorations{false};
+  /// 先给软件画布把窗口开出来，GPU 在后台备好后再换型（见 `AppOptions::defer_gpu`）。
+  bool defer_gpu{true};
   /// 渲染器：`auto`（按实测性能选）/ `gpu` / `software`。
   ///
   /// 缺省 `auto`，但 **headless 后端把空串/`auto` 解析为 `software`**（见

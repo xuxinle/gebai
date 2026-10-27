@@ -16,15 +16,18 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <deque>
 #include <format>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "st/core/error.hpp"
@@ -149,6 +152,10 @@ class Win32Backend final : public Backend {
  public:
   Win32Backend() = default;
   ~Win32Backend() override {
+    // 后台预建线程必须在**任何内部状态被拆**之前收尾：它会写 `gpu_ready_`/`gpu_ok_`
+    // 与 `this` 的生命周期绑定。`available()` 本身是进程级 static（可能还要用几十毫秒），
+    // 所以这里真的是“等它跑完”，而不是只置个退出标志。
+    if (gpu_worker_.joinable()) gpu_worker_.join();
     if (dib_ != nullptr) ::DeleteObject(dib_);
     if (memory_dc_ != nullptr) ::DeleteDC(memory_dc_);
     if (window_ != nullptr) ::DestroyWindow(window_);
@@ -263,6 +270,7 @@ class Win32Backend final : public Backend {
     logical_height_ = options.height > 0 ? options.height : 720;
     decorations_ = options.decorations;
     window_resizable_ = options.resizable;
+    defer_gpu_ = options.defer_gpu;
     scale_ = options.scale > 0.0f ? options.scale : 1.0f;
     // 显式给了 `--scale` 就**不再被窗口 DPI 覆盖**：它是测试/复现用的覆盖值。
     // 关键在于"窗口尺寸"与"缓冲尺寸"必须用**同一个** scale——早先窗口按请求值建、
@@ -358,6 +366,9 @@ class Win32Backend final : public Backend {
                   client.bottom);
       }
     }
+    // 画布已经就绪（软件路径，或显式指定的路径）：若允许延迟升级，
+    // 现在才启动后台 GPU 预建——这笔 ~385 ms 不再堵在窗口露出之前。
+    start_gpu_prewarm();
     return ok();
   }
 
@@ -877,6 +888,12 @@ class Win32Backend final : public Backend {
       size_dirty_ = false;
       (void)sync_buffers_to_client(scale_);
     }
+    // 延迟升级：后台 GPU 就绪后，在这里换型。
+    //
+    // 为何放在帧边界（本函数）：`render_frame` 的第一件事就是取画布，
+    // 随后就在这块画布上排版与绘制——在这里换，本帧画的就是新画布，
+    // 不会出现“画在旧画布、present 新画布”的错位（与尺寸重建同一条时序纪律）。
+    try_upgrade_to_gpu();
     return *surface_;
   }
 
@@ -1100,7 +1117,10 @@ class Win32Backend final : public Backend {
     // 实测（gallery 1600×1000 @1.5x，GPU）：一次尺寸变化后的一帧 31.9ms，其中
     // 布局 0.16 + 绘制 2.75 + 送显 0.17 = 3.1ms，**剩下 ~29ms 全是这笔重复选型**。
     // 同一进程、同一设备下"谁更快"不会变，重复测只是白花时间（还堵在拖动路径上）。
-    const std::string wanted = resolved_renderer_.empty() ? renderer_ : resolved_renderer_;
+    const std::string wanted = resolved_renderer_.empty()
+                                   ? (defer_gpu_ && renderer_ == "auto" ? std::string("software")
+                                                                         : renderer_)
+                                   : resolved_renderer_;
 
     // ── 快路径：已有画布 + 同缩放 + 只是尺寸变了 → **原地换缓冲** ──
     //
@@ -1261,6 +1281,93 @@ class Win32Backend final : public Backend {
     std::string name{"software"};
     std::string note{};
   };
+
+  /// 启动后台预建（`defer_gpu_` 为真时）。
+  ///
+  /// 只做两件事：把进程级 D3D11 设备建出来、把着色器管线预热一次。
+  /// 两者都是 `static` 局部变量（线程安全），主线程随后调用时直接命中缓存。
+  ///
+  /// **不在这里建 swapchain**：`CreateSwapChain` 需要消息泵（要与窗口同线程），
+  /// 后台线程上会把 `HWND` 交给它却等不到窗口消息，结果是失败或挂死。
+  void start_gpu_prewarm() {
+    if (!defer_gpu_ || gpu_worker_.joinable()) return;
+    gpu_ready_.store(false);
+    gpu_ok_.store(false);
+    const auto started = std::chrono::steady_clock::now();
+    gpu_worker_ = std::thread([this, started] {
+      // **降优先级**：建 D3D11 设备是 CPU 密集的重活（实测 ~385 ms），
+      // 而这段时间主线程正在画首帧、响应输入。不降优先级会抢核，
+      // 实测造成“窗口已显示但 UI 线程 600 ms 才应答”（首帧被挤）。
+      ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+      const bool ok = raster::gpu::available();
+      if (ok) {
+        // 预热：建一块极小的画布，它的构造会惰性建着色器管线。
+        // 失败不影响结论（管线会在真正绘制时再试），只要设备在就算成功。
+        (void)raster::gpu::create_canvas(4, 4, 1.0f);
+      }
+      const double ms = std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - started)
+                            .count();
+      if (ok) {
+        ST_LOG_INFO("GPU 设备后台就绪：{:.1f} ms（窗口已先用软件画布运行）", ms);
+      } else {
+        ST_LOG_INFO("GPU 不可用（{:.1f} ms 探测）：继续用软件画布", ms);
+      }
+      gpu_ok_.store(ok, std::memory_order_relaxed);
+      // release：确保 `gpu_ok_` 的写入对看到 `ready == true` 的线程可见
+      //（主线程用 acquire 读它）。
+      gpu_ready_.store(true, std::memory_order_release);
+    });
+  }
+
+  /// 后台就绪后，把软件画布换成 GPU 画布（在**帧边界**调用，上层无感）。
+  ///
+  /// 失败就静默保留软件画布——“升级失败”不应该让应用变形或崩溃。
+  void try_upgrade_to_gpu() {
+    if (!defer_gpu_ || upgraded_ || window_ == nullptr) return;
+    // acquire：与后台线程的 release 配对（见 `start_gpu_prewarm`）。
+    if (!gpu_ready_.load(std::memory_order_acquire)) return;
+    upgraded_ = true;   // 无论成败都只试一次
+    if (!gpu_ok_.load()) return;
+    // 尺寸按**当前客户区**：窗口开出来之后用户可能已经缩放过。
+    RECT client{};
+    if (::GetClientRect(window_, &client) == 0) return;
+    const int width = std::max(1, static_cast<int>(client.right));
+    const int height = std::max(1, static_cast<int>(client.bottom));
+    const auto upgrade_start = std::chrono::steady_clock::now();
+    auto gpu = raster::gpu::create_canvas(width, height, scale_);
+    if (!gpu.has_value()) {
+      ST_LOG_INFO("GPU 升级放弃（建画布失败：{}），继续用软件画布", gpu.error().message);
+      return;
+    }
+    // 新画布是空的。**不尝试把软件画布的像素拷过去**：
+    //
+    // `GpuCanvas::pixels()` 虽然返回非 const 引用，但它是**回读缓存**的视图，
+    // 写入不会回到 GPU 纹理（需要 upload 路径，而 Surface 没有这个接口）。
+    // 而升级发生在 `framebuffer()` 里、**本帧排版与绘制之前**——所以
+    // 本帧就会把完整内容画进新画布，不存在“闪一帧空白”的问题。
+    //
+    // swapchain 必须在**主线程**建（`CreateSwapChain` 需要消息泵）。
+    auto presenter = raster::gpu::create_presenter(window_, width, height);
+    if (!presenter.has_value()) {
+      ST_LOG_INFO("GPU 升级放弃（建 swapchain 失败：{}），继续用软件画布",
+                  presenter.error().message);
+      return;
+    }
+    surface_ = std::move(*gpu);
+    presenter_ = std::move(*presenter);
+    renderer_name_ = "gpu";
+    resolved_renderer_ = "gpu";
+    renderer_base_note_ = std::format(
+        "D3D11 · {} · 后台预热后升级",
+        raster::gpu::probe().has_value() ? raster::gpu::probe()->adapter : std::string("GPU"));
+    renderer_note_ = std::format("{} · {}", renderer_base_note_, presenter_->note());
+    // DIB 是软件路径的东西：换到 GPU 后**先留着**（GPU 呈现失败时还要回落它）。
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - upgrade_start)
+                          .count();
+    ST_LOG_INFO("已升级到 GPU 画布：{}x{}，升级耗时 {:.1f} ms", width, height, ms);
+  }
 
   /// 建绘制面：`auto` = **有 GPU 就用 GPU**，否则软件。
   ///
@@ -1848,6 +1955,21 @@ class Win32Backend final : public Backend {
   static constexpr UINT kTrayIconId = 1;
   /// 当前托盘图标句柄（通知区显示的那一个）。
   HICON tray_icon_{nullptr};
+
+  // ── 延迟 GPU 升级（`WindowOptions::defer_gpu`，见 AppOptions 的说明）──
+  //
+  // 窗口用软件画布先开出来，这个线程只做耗时的大头（建 D3D11 设备 +
+  // 预热着色器管线，实测共 ~385 ms）。**swapchain 不在后台建**：
+  // `CreateSwapChain` 内部要跑消息泵（与创建它的窗口同线程），
+  // 在别的线程上调会失败——所以它留在主线程、到帧边界再建。
+  bool defer_gpu_{false};
+  /// 后台预建是否已结束（成功与否都置位，避免主线程无限等）。
+  std::atomic<bool> gpu_ready_{false};
+  /// 后台线程看到的“设备可用吗”（与 `gpu_ready_` 配对读）。
+  std::atomic<bool> gpu_ok_{false};
+  /// 是否已尝试过升级（无论成败都只试一次）。
+  bool upgraded_{false};
+  std::thread gpu_worker_{};
   /// 是否已 `NIM_ADD`（决定下次是 ADD 还是 MODIFY）。
   bool tray_added_{false};
   /// 托盘点击累计（`take_tray_clicks` 取走后归零）。

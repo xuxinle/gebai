@@ -828,6 +828,9 @@ auto Application::start() -> Status {
   // 窗框一律自绘（`CONVENTIONS.md` §10 第 7 条）：把开关如实交给后端。
       window.decorations = options_.decorations;
     window.resizable = options_.resizable;
+    // 只在“未显式指定渲染器”时才启用延迟升级（显式 gpu/software 要保持可复现语义）。
+    // 判据走 `defer_gpu_effective()` 而不是在这里再写一遍：实现与测试用同一个入口。
+    window.defer_gpu = options_.defer_gpu_effective();
   window.headless = impl_->backend->headless();
   if (auto status = impl_->backend->create_window(window); !status) {
     // 自动选择的后端开不出窗口（例如探测到 libX11 但没有可用显示服务）→ 按约定回退 headless，
