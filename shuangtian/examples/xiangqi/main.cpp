@@ -193,77 +193,113 @@ class AgentLink {
   ///
   /// 失败**不抛**（返回 false + 记 last_error）：常驻应用启动时 agent 很可能
   /// 还没起来，那是正常情况——直接崩掉比连不上更糟。
+  ///
+  /// ## 线程约束（重要）
+  ///
+  /// **本函数只在主线程调**：它会写 `tcp_`/`session_`/`conn_name_` 等成员。
+  /// 想异步建连用 `build_connection()`（纯函数，不碰成员）+ `adopt()`（主线程落位）。
   auto connect(const std::string& url) -> bool {
-    disconnect();
+    auto built = build_connection(url);
+    if (!built.ok) {
+      disconnect();
+      last_error_ = std::move(built.error);
+      return false;
+    }
+    adopt(std::move(built));
+    return true;
+  }
+
+  /// 建连的**结果**（可跨线程搬运：只含堆对象与字符串，不引用 `AgentLink`）。
+  struct Built {
+    bool ok{false};
+    std::string error{};
+    std::unique_ptr<st::net::TcpStream> tcp{};
+    std::string leftover{};
+    std::string conn_name{};
+  };
+
+  /// **纯函数**：建 TCP + 跑握手，**不读写任何成员**。
+  ///
+  /// 为何要这样拆（实测教训，2026-10-27）：把整个 `connect()` 丢到后台线程
+  /// 会造成**数据竞争**——主循环从第一帧就调 `poll()`/`connected()`/
+  /// `status_text()`（且 JS 桥也会调），而后台线程同时在写 `tcp_`/`session_`。
+  /// 那是同一对象的并发读写，属于未定义行为（`unique_ptr` 的指针与
+  /// `std::string` 的缓冲区可能被读到半成品，表现为随机崩溃或乱码）。
+  ///
+  /// 拆开后：后台线程只碰**自己拥有的局部对象**，主线程等它完成后
+  /// 才用 `adopt()` 把结果装进成员——中间没有任何共享可变状态。
+  [[nodiscard]] static auto build_connection(const std::string& url) -> Built {
+    Built built;
     const auto parsed = parse_ws_url(url);
     if (!parsed.has_value()) {
-      last_error_ = "地址格式不对：" + url + "（应为 ws://host:port/path）";
-      return false;
+      built.error = "地址格式不对：" + url + "（应为 ws://host:port/path）";
+      return built;
     }
     const auto& target = *parsed;
-    // 超时：本机回环（agent 与相期同机）就绪时 <1 ms 就连上；2000 ms 只服务于
-    // “万一网络慢”，而它对**未启动**的 agent 会白白卡满 2 秒——那时主线程若在
-    // 启动路径上（曾经如此），窗口就是“已显示但未响应”，鼠标转圈。
-    // 连接现在已挪到首帧之后（见 run_app），这里再把超时收到 400 ms：
-    // 局域网/跨机部署仍然够用，未启动时只多卡一帧。
+    // 超时：本机回环（agent 与相期同机）就绪时 <1 ms 就连上。
+    // 400 ms 对局域网/跨机部署仍够用，而“未启动的 agent”只需等这么久。
     auto tcp = st::net::connect_tcp(target.host, target.port, 400);
     if (!tcp.has_value()) {
-      last_error_ = std::format("连不上 {}:{} — {}", target.host, target.port, tcp.error().message);
-      return false;
+      built.error =
+          std::format("连不上 {}:{} — {}", target.host, target.port, tcp.error().message);
+      return built;
     }
-    tcp_ = std::make_unique<st::net::TcpStream>(std::move(*tcp));
-    tcp_->set_no_delay(true);
+    auto stream = std::make_unique<st::net::TcpStream>(std::move(*tcp));
+    stream->set_no_delay(true);
 
     // 握手：写请求 → 读到空行为止 → 校验 101 + Sec-WebSocket-Accept
     const std::string key = st::net::ws::make_handshake_key();
-    const std::string request = st::net::ws::client_handshake_request(target.host, target.port, target.path, key);
-    const auto write_status = tcp_->write_text(request);
-    if (!write_status) {
-      last_error_ = "握手写入失败";
-      tcp_.reset();
-      return false;
+    const std::string request =
+        st::net::ws::client_handshake_request(target.host, target.port, target.path, key);
+    if (const auto write_status = stream->write_text(request); !write_status) {
+      built.error = "握手写入失败";
+      return built;
     }
     std::string response;
     std::uint8_t buffer[1024];
-    // 握手读取**必须有超时**（实测教训）：`read_some` 是阻塞读，
-    // 拿着“已连上但从不回应”的对端（或防火墙静默丢包）时会一直等下去。
-    // 实测：agent 未启动时这个循环卡了 **~450 ms**，而它在主线程上。
-    // 用 `wait_readable(剩余毫秒)` 做整体截止时间，而不是每轮重置——
+    // 握手读取**必须有超时**：`read_some` 是阻塞读，拿着“已连上但从不回应”的
+    // 对端（或防火墙静默丢包）时会一直等下去。用整体截止时间而不是每轮重置——
     // 否则对端可一遍遍送半个包把时间拖到无限。
-    const auto handshake_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
+    const auto handshake_deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
     while (response.find("\r\n\r\n") == std::string::npos) {
       const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                                  handshake_deadline - std::chrono::steady_clock::now())
                                  .count();
       if (remaining <= 0) break;
-      const auto ready = tcp_->wait_readable(static_cast<int>(remaining));
+      const auto ready = stream->wait_readable(static_cast<int>(remaining));
       if (!ready.has_value() || !*ready) break;   // 超时/出错：当作握手失败
-      const auto n = tcp_->read_some(buffer);
+      const auto n = stream->read_some(buffer);
       if (!n.has_value() || *n == 0) break;
       response.append(reinterpret_cast<const char*>(buffer), *n);
       if (response.size() > 16384) break;   // 防对端刷屏
     }
     if (!st::net::ws::validate_server_handshake(response, key)) {
-      last_error_ = "握手被拒（对端不是 WebSocket 或路径不对）";
-      tcp_.reset();
-      return false;
+      built.error = "握手被拒（对端不是 WebSocket 或路径不对）";
+      return built;
     }
-
     // ⚠ 关键：握手应答与第一帧数据**很可能在同一个 TCP 包**里到达。
     // 上面的 read_some 会把 `\r\n\r\n` 之后的字节一起读进来——那部分就是 WS 帧，
-    // 如果直接丢掉，解码器永远看不到它们，表现为「连接成功但永远收不到消息」
-    // （实测踩到：心跳日志一直是 处理=0，而链路上什么都没错）。
-    // 因此把余下字节喂回解码器。
-    const auto header_end = response.find("\r\n\r\n");
+    // 直接丢掉的话解码器永远看不到它们，表现为「连接成功但永远收不到消息」。
+    const std::size_t header_end = response.find("\r\n\r\n");
     const std::size_t leftover_offset = header_end + 4;
-    std::string leftover = (leftover_offset < response.size()) ? response.substr(leftover_offset) : std::string{};
+    built.leftover =
+        (leftover_offset < response.size()) ? response.substr(leftover_offset) : std::string{};
+    built.tcp = std::move(stream);
+    built.conn_name = std::format("已连接 {}", url);
+    built.ok = true;
+    return built;
+  }
 
+  /// **主线程**：把 `build_connection()` 的结果装进成员（含建 WS 会话）。
+  void adopt(Built built) {
+    disconnect();
+    tcp_ = std::move(built.tcp);
     adapter_ = std::make_unique<TcpStreamAdapter>(*tcp_);
-    adapter_->preload(std::move(leftover));
+    adapter_->preload(std::move(built.leftover));
     session_ = std::make_unique<st::net::ws::WsSession>(*adapter_, /*client_side=*/true);
-    conn_name_ = std::format("已连接 {}", url);
+    conn_name_ = std::move(built.conn_name);
     last_error_.clear();
-    return true;
   }
 
   /// 断开（显式；界面会因此显示"未连接"）。
@@ -1228,22 +1264,35 @@ auto run_app(int argc, char** argv) -> int {
   //
   // ⚠ **在后台线程连**（实测教训，2026-10-27）：
   //
-  // 即使把超时收到 400 ms，“连一个没监听的端口”仍要花 **~450 ms**——
+  // 即使把超时收到 400 ms，“连一个没监听的端口”仍要花 ~450 ms——
   // 本机防火墙会静默丢 SYN，只能等满超时。之前把它放在主循环第一帧，
   // 于是窗口已显示却 ~450 ms 不应答（Windows 判定未响应，鼠标转圈）。
   //
-  // 而 `AgentLink` 的后续读取全在主循环里做（`poll()` 是非阻塞的），
-  // 所以只需把"建立连接"这一下挪到线程里。连接能不能成，
-  // 由主循环看 `agent_connect_done` 后如实打到界面。
+  // ## 为何后台只跑 `build_connection()`（纯函数）
+  //
+  // 最初的做法是把整个 `connect()` 丢进线程——那是错的：主循环从**第一帧**
+  // 就调 `link.poll()`，而且 JS 桥也会调 `connected()`/`status_text()`，
+  // 与后台线程写 `tcp_`/`session_` 构成**同一对象的并发读写**（未定义行为）。
+  //
+  // 现在：后台线程只碰自己拥有的局部对象（`Built`），主线程等到
+  // `agent_connect_done` 后才 `adopt()` 装进成员——中间无共享可变状态。
   AgentLink link;
-  std::atomic<bool> agent_connect_done{false};
-  std::atomic<bool> agent_connect_ok{false};
-  /// 主循环侧：是否已把连接结果打到日志/界面（只报一次）。
+  /// 后台线程建连的产物 + 把“结果已就绪”与数据放在**同一把锁**下。
+  ///
+  /// 为何不只靠一个 atomic 标志：`Built` 里是 `unique_ptr` 与 `std::string`，
+  /// 它们本身没有原子性。仅用 `done` 做同步也能对（release/acquire 能建立
+  /// happens-before），但那要求两边都严格不遗漏内存序——把数据与标志放在
+  /// 同一把锁下，下个人改这块时不需要重新推一遍时序是否正确。
+  std::mutex agent_mutex{};
+  AgentLink::Built agent_built{};
+  bool agent_connect_done = false;
+  /// 主循环侧：是否已把连接结果落位并汇报（只做一次）。
   bool agent_connect_reported = false;
-  std::thread agent_worker([&link, &options, &agent_connect_done, &agent_connect_ok] {
-    const bool ok = link.connect(options.agent_url);
-    agent_connect_ok.store(ok, std::memory_order_relaxed);
-    agent_connect_done.store(true, std::memory_order_release);
+  std::thread agent_worker([&options, &agent_mutex, &agent_built, &agent_connect_done] {
+    auto built = AgentLink::build_connection(options.agent_url);
+    const std::lock_guard<std::mutex> guard(agent_mutex);
+    agent_built = std::move(built);
+    agent_connect_done = true;
   });
 
   // ⑤ 暴露能力 + 装载 JS
@@ -1295,13 +1344,24 @@ auto run_app(int argc, char** argv) -> int {
     const std::int64_t frame_start_ms = st::time::now_ms();
 
     // 首帧已出：汇报 agent 连接结果（连接本身在后台线程做的，见第 ④ 步）。
-    if (!agent_connect_reported && agent_connect_done.load(std::memory_order_acquire)) {
-      agent_connect_reported = true;   // 只汇报一次
-      if (agent_connect_ok.load(std::memory_order_relaxed)) {
-        st::print("[相期] 已连接 agent 控制器：{}\n", options.agent_url);
-      } else {
-        st::print("[相期] 未能连接 agent 控制器（{}）——降级为文件投递，界面显示未连接\n",
-                  link.status_text());
+    if (!agent_connect_reported) {
+      std::unique_lock<std::mutex> guard(agent_mutex, std::try_to_lock);
+      if (guard.owns_lock() && agent_connect_done) {
+        guard.unlock();
+        agent_connect_reported = true;   // 只落位/汇报一次
+        // 落位仍然要拿锁（`Built` 里是 move-only 资源）
+        AgentLink::Built built;
+        {
+          const std::lock_guard<std::mutex> relock(agent_mutex);
+          built = std::move(agent_built);
+        }
+        if (built.ok) {
+          link.adopt(std::move(built));
+          st::print("[相期] 已连接 agent 控制器：{}\n", options.agent_url);
+        } else {
+          st::print("[相期] 未能连接 agent 控制器（{}）——降级为文件投递，界面显示未连接\n",
+                    built.error);
+        }
       }
     }
 
