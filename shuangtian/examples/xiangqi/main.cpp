@@ -271,7 +271,10 @@ class AgentLink {
       if (!ready.has_value() || !*ready) break;   // 超时/出错：当作握手失败
       const auto n = stream->read_some(buffer);
       if (!n.has_value() || *n == 0) break;
-      response.append(reinterpret_cast<const char*>(buffer), *n);
+      // 用**迭代器区间**追加：`std::string::append(first, last)` 是模板，
+      // `std::uint8_t*` 是合法迭代器，其元素能隐式转成 char——
+      // 于是不必 `reinterpret_cast` 指针（本仓 lint L6 禁它）。
+      response.append(buffer, buffer + *n);
       if (response.size() > 16384) break;   // 防对端刷屏
     }
     if (!st::net::ws::validate_server_handshake(response, key)) {
