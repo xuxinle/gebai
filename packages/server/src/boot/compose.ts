@@ -43,6 +43,7 @@ import { FeishuBot } from "../feishu-bot/bot"
 import { EngineBotAdapter } from "../feishu-bot/adapter"
 import { createFeishuApi } from "../feishu-bot/api"
 import { makeWsSink } from "./serve"
+import { planXiangqiLaunch } from "./xiangqi-launch"
 import { installBrowserFetchProxy } from "../core/browser/fetch-proxy"
 import { ensureCorporateTrust } from "../core/trust/corporate"
 import { log, setLogLevel } from "@gebai/sdk/node"
@@ -246,11 +247,12 @@ export interface Composed {
   /** 热刷新通道连接集合（serve.ts 的 websocket.open 注册，DevReloadManager 广播消费）。 */
   devReloadClients: Set<ServerWebSocket<unknown>>
   /**
-   * 拉起相期桌面窗口（若可用）。serve.ts 在监听建立后调用——
+   * 拉起相期桌面窗口（若可用）。serve.ts 在监听建立后调用，**必须传实际监听端口**——
+   * `port=0`（桌面形态）时配置值不是真实端口，窗口会连错地方。
    * 窗口连的是主服务端口（方案 B），需先有 `/xiangqi` WS 可连。
    * 找不到 exe / 非本机形态时为空操作（日志提示，不阻断）。
    */
-  launchXiangqi: () => void
+  launchXiangqi: (actualPort: number) => void
 }
 
 export async function composeServer(overrides: Partial<Parameters<typeof loadConfig>[0]> = {}): Promise<Composed> {
@@ -1299,41 +1301,63 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   // 何时拉起：仅在**本地形态**（auth=local，桌面/开发部署）且拟人模式启用时——
   // 服务模式下没有用户的桌面，拉起窗口无处可放。
   //
-  // 可配置：`XIANGQI_BIN` 覆盖 exe 路径（缺省按仓库/常见位置探测）；
+  // 可配置：`XIANGQI_BIN` 覆盖 exe 路径（缺省按部署副本/仓库标记探测，见 boot/xiangqi-launch）；
   // `XIANGQI_AUTO=off` 显式关闭（不想让服务替你开窗口时）。
   //
   // 失败策略：找不到/启动失败只记日志，绝不阻断服务——相期是附加提醒面，
   // 没有它时授权卡仍走 REST 链接降级（`/api/v1/persona/status` 的 authorizeUrl）。
-  const launchXiangqi = (): void => {
+  const launchXiangqi = (port: number): void => {
     if (!config.personaEnabled || config.auth !== "local") return
-    if (String(process.env.XIANGQI_AUTO ?? "").toLowerCase() === "off") {
-      log.info("[gebai] XIANGQI_AUTO=off：不自动拉起相期窗口")
+    const plan = planXiangqiLaunch({
+      gebaiHome: config.gebaiHome,
+      // 服务自身所在目录：源码形态 = packages/server/src/boot，dist 形态 = packages/server/dist
+      moduleDir: import.meta.dirname,
+      port,
+      env: process.env as Record<string, string | undefined>,
+    })
+    if (plan.action === "skip") {
+      if (plan.reason === "auto-off") {
+        log.info("[gebai] XIANGQI_AUTO=off：不自动拉起相期窗口")
+      } else if (plan.reason === "bin-not-found") {
+        // 列表要把**全部候选**吐出来：只报一个会把人带向错的方向（本 bug 就是这么漏了很久）。
+        log.warn(
+          `[gebai] 相期窗口未找到（拟人模式已启用但桌面提醒不可用；设 XIANGQI_BIN 指定路径，或忽略）\n` +
+            `  已从 ${plan.searchedFrom.join(" / ")} 向上查找仓库根，试过：\n` +
+            plan.candidates.map((p) => `   · ${p}`).join("\n"),
+        )
+      }
       return
     }
-    const bin =
-      process.env.XIANGQI_BIN?.trim() ||
-      // 多个候选按序探测：dev 版实测可常驻（quick 版在部分环境会闪退），
-      // 取第一个存在的；找不到时具体原因见下方 warn
-      ["dev", "quick", "release"]
-        .map((profile) => join(config.gebaiHome, "shuangtian", "build", profile, "bin", "xiangqi.exe"))
-        .find((p) => existsSync(p)) ||
-      join(import.meta.dirname, "..", "..", "..", "..", "..", "shuangtian", "build", "dev", "bin", "xiangqi.exe")
-    if (!existsSync(bin)) {
-      log.warn(`[gebai] 相期窗口未找到：${bin}（拟人模式已启用但桌面提醒不可用；设 XIANGQI_BIN 指定路径，或忽略）`)
-      return
+    // 数据根与控制器侧同一公式（agents 的 homeFromEnv）：两处各写一份的话，
+    // WS 断时推卡写一处、答复读另一处，而正常路径下完全看不出异常。
+    log.info(`[gebai] 拉起相期窗口：${plan.bin} ${plan.args.join(" ")}`)
+    if (plan.uiDir === null) {
+      // 缺 UI 目录时 exe 会以「装载失败」自己退出，不提前说会让人误以为是连接问题。
+      log.warn(`[gebai] 相期 UI 资源目录未找到（${plan.bin} 所在树里没有 shuangtian/examples/xiangqi/ui）——窗口可能启动即退出`)
     }
-    const agentUrl = `ws://127.0.0.1:${config.port}/xiangqi`
-    const home = process.env.XIANGQI_HOME?.trim() || join(config.gebaiHome, "相期")
-    log.info(`[gebai] 拉起相期窗口：${bin} --agent ${agentUrl} --home ${home}`)
     try {
-      const child = spawn(bin, [`--agent`, agentUrl, `--home`, home], {
+      const child = spawn(plan.bin, plan.args, {
         detached: true,
         stdio: "ignore",
         windowsHide: false,
       })
+      // pid 是“它真起来了”的唯一可核对凭据（用户可以去任务管理器对）。
+      const pid = child.pid
+      if (pid === undefined) {
+        log.warn("[gebai] 相期窗口启动失败：spawn 没有返回 pid")
+      } else {
+        log.info(`[gebai] 相期窗口已拉起：pid=${pid}（连 ${plan.url}，数据根 ${plan.home}）`)
+      }
       child.unref()
       child.on("error", (err) => {
         log.warn(`[gebai] 相期窗口启动失败：${String((err as Error).message || err)}`)
+      })
+      // exit 回调不是“起没起来”的凭据（正常关窗口也走它），但**启动即退出**是本 bug 的形态之一，
+      // 所以只在刚起几秒内退出时报 warn——那时几乎必然是资源/参数问题。
+      const spawnedAt = Date.now()
+      child.on("exit", (code) => {
+        const alive = Date.now() - spawnedAt
+        if (alive < 10_000) log.warn(`[gebai] 相期窗口启动后 ${alive}ms 就退出了（退出码 ${String(code)}）——多半是 UI 资源/参数问题`)
       })
     } catch (err) {
       log.warn(`[gebai] 相期窗口启动异常：${String((err as Error).message || err)}`)

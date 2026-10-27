@@ -340,6 +340,7 @@
 | **用例里的未捕获异常会带走整个测试进程** | `Json::get<int>()` 对 null **抛**（不是断言失败）；逃到用例线程入口 = `terminate` ⇒ 整套 1268 条用例在第 800 条处消失，前面几百条 PASS 全部作废。框架层已加异常边界（记 FAIL 并继续） | `src/test/test_runner.cpp` |
 | **"分片绿"不等于"测试全绿"** | `--test-jobs N` 分片**碰巧**避开某些用例；我这一轮先信了分片结果，后来才发现单进程全跑必崩。**判据要用最长的那条路径（全跑）** | `BACKLOG.md` C 轮说明 |
 | **崩溃会掩盖真正的缺陷** | `expose` 挂错命名空间 → 后续断言拿到 null → 抛异常 → 整进程 terminate。于是报出来只是"跑到某处崩了"，而"`app.add` 不是函数"这个真因被藏了很久。**先修异常边界，缺陷自己会浮出来** | 同上 |
+| **测试输出绕过了日志镜像（只进终端、不进文件）**〔测试日志〕 | `test_runner.cpp` 全程用裸 `std::fprintf(stdout, …)` 打 PASS/FAIL/断言消息——而文件镜像挂在 `st::print` 上（`console_log::mirror`），于是**逐用例结果只存在于终端**。分片并行时 16 片输出交错，调用方（智能体工具只给尾部、CI 只存末尾 N 行）看到的是“失败用例（1）”但**永远看不到是哪一条、断言是什么**，只能重跑。修法：测试输出统一走 `st::print`（双出口：控制台 + `.st/logs/test-shard-<i>-of-<n>.log`），且分片进程自己 `console_log::open`。**判据**：给 `ST_TEST_SHARD_LOG` 跑一次，日志里必须有 `PASS <用例名>` 行（回退后只剩汇总行 = 39 B vs 405 B） | `src/test/test_runner.cpp`、`src/pkg/build.cpp` 的 `run_shards`；实测 2026-10-27 |
 | **二进制比源码旧时，验证是假的** | `st build` **不包含**测试目标；`st test` 才会编它。删掉 `st_tests.exe` 后重建期间又跑了几轮"验证"，读到的全是旧行为（一度以为"改了没用"） | `src/pkg/build.cpp` |
 | **文件被占用时 `ld` 报 permission denied** | 后台任务（gdb / 长跑的测试）握着 exe；`Get-Process` 未必显示得到。**先 `bg_task action=list` 看有没有在跑的东西** | 实测 |
 | **整进程崩溃时 JUnit 报告也不会写** | 写报告在跑完之后；崩了就没有报告 ⇒ CI 上表现为"没有结果"而不是"有失败" | `src/test/test_main.cpp` |

@@ -32,6 +32,7 @@
 #include "st/codec/png.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/gpu.hpp"
+#include "st/shell/icon_scale.hpp"
 #include "st/shell/shell.hpp"
 #include "st/ui/window_control.hpp"
 
@@ -744,28 +745,36 @@ class Win32Backend final : public Backend {
       return unexpected(ErrorCode::Io, "CreateDIBSection 失败");
     }
     auto* pixels = static_cast<std::uint8_t*>(bits);
+    // 重采样成目标尺寸：**面积平均**（算法与实测数据见 `shell/icon_scale.hpp`）。
+    //
+    // 为何不在这里自己写：这段逻辑直接决定「图标糊不糊」，而各平台后端（Win32/X11/...）
+    // 都要做同一件事——埋在平台文件里就既没测试、也容易被各写一遍。抽成
+    // `st::shell::resample_rgba` 后可以用纯逻辑钉住（含「源=目标时恒等」）。
+    const auto scaled = resample_rgba(rgba, width, height, size, size);
+    if (scaled.empty()) {
+      ::DeleteObject(color);
+      ::DeleteDC(dc);
+      return unexpected(ErrorCode::Invalid, "图标重采样失败（源位图尺寸或数据非法）");
+    }
     for (int y = 0; y < size; ++y) {
-      const int source_y = (y * height) / size;   // 最近邻：缩幅很小，不值得引入重采样
       for (int x = 0; x < size; ++x) {
-        const int source_x = (x * width) / size;
-        const std::size_t source =
-            (static_cast<std::size_t>(source_y) * static_cast<std::size_t>(width) +
-             static_cast<std::size_t>(source_x)) * 4U;
-        const std::uint8_t r = rgba[source];
-        const std::uint8_t g = rgba[source + 1U];
-        const std::uint8_t b = rgba[source + 2U];
-        const std::uint8_t a = rgba[source + 3U];
+        const std::size_t src_idx =
+            (static_cast<std::size_t>(y) * static_cast<std::size_t>(size) +
+             static_cast<std::size_t>(x)) * 4U;
+        const std::uint8_t r = scaled[src_idx];
+        const std::uint8_t g = scaled[src_idx + 1U];
+        const std::uint8_t b = scaled[src_idx + 2U];
+        const std::uint8_t a = scaled[src_idx + 3U];
+        // ① 32 位 DIB 的通道序是 **BGRA**；② 带 alpha 的图标颜色**必须预乘**
+        // （否则半透明边缘会泛白）——两条硬约定，错任一项都不报错、只是看着不对。
         const auto premul = [a](std::uint8_t channel) -> std::uint8_t {
           return static_cast<std::uint8_t>((static_cast<unsigned>(channel) *
                                             static_cast<unsigned>(a) + 127U) / 255U);
         };
-        const std::size_t target =
-            (static_cast<std::size_t>(y) * static_cast<std::size_t>(size) +
-             static_cast<std::size_t>(x)) * 4U;
-        pixels[target] = premul(b);
-        pixels[target + 1U] = premul(g);
-        pixels[target + 2U] = premul(r);
-        pixels[target + 3U] = a;
+        pixels[src_idx] = premul(b);
+        pixels[src_idx + 1U] = premul(g);
+        pixels[src_idx + 2U] = premul(r);
+        pixels[src_idx + 3U] = a;
       }
     }
 
@@ -973,14 +982,22 @@ class Win32Backend final : public Backend {
     if (work_w <= 0.0f || work_h <= 0.0f) {
       return unexpected(ErrorCode::Unsupported, "工作区尺寸无效");
     }
-    // 直接开到工作区 92%（低于最小可用尺寸时取最小值）——
-    // 与 `fit_window_to_work_area` 同一个口径：桌面应用该按可用区域铺开，
-    // 而不是“保持一个写死的期望尺寸”。
+    // **只缩不放大**：名字是“夹到工作区”，所以当前尺寸不超工作区时**一律不动**。
+    //
+    // 这里曾经写成“直接开到工作区 92%”——那与函数名相反，效果是任何窗口
+    // 不论请求多小都被撑到满屏（实测：相期请求 460×620，实际得到 2355×1280，
+    // 用户看到的是“窗口没有圆角”，实际是窗口比屏幕还大、圆角在屏外）。
+    // 铺开是另一个函数的职责（`fit_window_to_work_area`，且由
+    // `AppOptions::fill_work_area` 开关控制）。
+    const math::Size current = logical_size();
+    const float limit_w = work_w;
+    const float limit_h = work_h;
+    if (current.width <= limit_w && current.height <= limit_h) return ok();
     const math::Size min_size = min_logical_size();
-    const int limit_w = static_cast<int>(std::lround(std::max(min_size.width, work_w * 0.92f)));
-    const int limit_h = static_cast<int>(std::lround(std::max(min_size.height, work_h * 0.92f)));
-    logical_width_ = std::max(1, limit_w);
-    logical_height_ = std::max(1, limit_h);
+    logical_width_ = std::max(1, static_cast<int>(std::lround(
+        current.width > limit_w ? std::max(min_size.width, limit_w) : current.width)));
+    logical_height_ = std::max(1, static_cast<int>(std::lround(
+        current.height > limit_h ? std::max(min_size.height, limit_h) : current.height)));
     logical_width_exact_ = static_cast<float>(logical_width_);
     logical_height_exact_ = static_cast<float>(logical_height_);
     return ok();

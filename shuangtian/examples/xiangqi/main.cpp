@@ -641,55 +641,433 @@ auto parse_options(int argc, char** argv) -> Options {
   return options;
 }
 
-/// 生成托盘图标（圆底 + 铃铛剪影）。
+/// 篆书「卿」的字形轮廓（**从实物图片矢量化而来**，不是手绘描摹）。
 ///
-/// 为何程序内生成而不嵌资源文件：图标是 32×32 的简单图形，代码生成只需十几行，
-/// 而嵌资源会引入一份二进制资产（改颜色就要换文件）。真要换品牌图标时，
-/// 把 `AppOptions::tray_icon_png` 换成 `b::embed<"assets/tray.png">()` 即可。
+/// ## 数据来源与提取方法
 ///
-/// 颜色取琥珀色（#d97706）——与界面里「提醒」那一档同色，形成视觉对应。
-static auto make_tray_icon_png() -> std::vector<std::uint8_t> {
-  constexpr std::uint32_t size = 32;   // 32px：高 DPI 下缩到 16 也不糊
+/// 源图是一张篆书「卿」的位图（102x120）。提取流程：二值化(Otsu) → 有符号距离场 →
+/// marching squares 提等值线 → Douglas–Peucker 简化（0.55px）→ 按墨迹包围盒归一化。
+/// 得到 5 条闭合轮廓、共 243 个顶点。
+///
+/// ## 三色语义（按轮廓质心自动归属，不是手工指派）
+///
+/// - 质心 x < 0.42 → **左部件**（篆书「卯」）→ 红：**人**
+/// - 质心 x > 0.58 → **右部件**（篆书「皀」）→ 蓝：**机**
+/// - 其余（中央）→ 白：**相期**（两端在此相接）
+///
+/// 坐标范围 0..1（y 向下），乘目标尺寸即得像素坐标。
+/// 顶点用 int16 定点（×10000）存，省浮点字面量、也便于对齐阅读。
+namespace qing_glyph {
+
+/// person（1 条轮廓）
+inline constexpr std::int16_t kPersonPts[] = {
+    2549,942, 2589,902, 2750,982, 3192,1424, 3353,1746, 3433,2228,
+    3513,2308, 3513,2871, 3353,3112, 3353,3674, 3513,3996, 3513,4237,
+    3915,4960, 4076,5522, 3955,5643, 3795,5643, 3594,5442, 3594,5281,
+    3272,4638, 3272,4397, 3112,4156, 3112,3996, 2991,3875, 2790,4237,
+    2790,4478, 2710,4558, 2710,5040, 2790,5121, 2871,5603, 3031,5763,
+    3192,6085, 3192,6246, 3353,6406, 3353,6567, 3594,6969, 3594,7531,
+    3513,7612, 3353,8496, 3031,8817, 2951,9138, 2589,9420, 2348,9500,
+    2147,9299, 2147,9219, 2228,9058, 2348,9018, 2871,8415, 3112,7853,
+    3112,7612, 3192,7531, 3192,7049, 2871,6487, 2790,6165, 2629,6004,
+    2469,5683, 2469,5442, 2388,5362, 2388,4317, 2469,4237, 2469,3915,
+    2790,3272, 3031,2951, 3031,2629, 3112,2549, 3112,2388, 2710,1585,
+    2549,1424, 2549,1263, 2469,1183, 2469,1022, 2549,942,
+};
+inline constexpr std::int32_t kPersonStarts[] = { 0, 71 };
+
+/// machine（1 条轮廓）
+inline constexpr std::int16_t kMachinePts[] = {
+    7290,1022, 7411,982, 7531,1103, 7531,1344, 7210,1665, 7129,1906,
+    6969,2067, 6808,2388, 6808,2549, 6888,2629, 6969,3031, 7612,3754,
+    7612,3915, 7772,4237, 7772,4799, 7853,4879, 7853,5201, 7531,5844,
+    7451,6165, 7290,6326, 7129,6728, 6969,6888, 6969,7612, 7049,7692,
+    7049,7853, 7290,8094, 7290,8335, 7612,8737, 7612,8897, 7853,9219,
+    7732,9420, 7491,9420, 7129,8978, 6647,8013, 6647,7853, 6567,7772,
+    6567,7451, 6487,7371, 6567,7049, 6647,6969, 6567,6808, 7371,5281,
+    7371,4478, 7210,4317, 7210,4156, 7089,3955, 6969,4076, 6969,4317,
+    6728,4558, 6326,5362, 6125,5562, 5924,5442, 6085,5121, 6085,4960,
+    6326,4638, 6326,4478, 6487,4317, 6567,3996, 6808,3594, 6567,3112,
+    6567,2951, 6406,2710, 6406,2388, 6487,2308, 6647,1746, 6808,1665,
+    7049,1183, 7290,1022,
+};
+inline constexpr std::int32_t kMachineStarts[] = { 0, 68 };
+
+/// period（3 条轮廓）
+inline constexpr std::int16_t kPeriodPts[] = {
+    4960,540, 5000,500, 5281,862, 5281,1585, 5924,2228, 6004,2388,
+    6004,2710, 6085,2790, 6085,3353, 6004,3433, 6085,3594, 6085,3835,
+    6004,3915, 6004,4638, 5603,5121, 5603,5683, 5522,5763, 5522,6406,
+    5603,6487, 5603,6728, 5683,6808, 5683,7210, 5844,7531, 5844,7772,
+    6004,8013, 6004,8656, 5804,8777, 5603,8496, 5522,7933, 5442,7853,
+    5362,7371, 5201,7049, 5281,6888, 5201,6808, 5121,6246, 4920,6205,
+    4638,6647, 4638,6888, 4558,6969, 4558,7772, 4638,7853, 4638,8415,
+    4719,8496, 4719,8817, 4518,8857, 4317,8576, 4317,8013, 4237,7933,
+    4237,6567, 4317,6487, 4397,6165, 5121,5522, 5121,5281, 4598,5161,
+    4237,4799, 4076,4478, 4076,4237, 3996,4156, 3996,3594, 3915,3513,
+    3996,3433, 3996,2469, 4156,2308, 4237,1987, 4598,1705, 4799,1665,
+    4799,1344, 4719,1183, 4799,1103, 4799,701, 4960,540, 5161,2107,
+    5080,2187, 4759,2187, 4478,2469, 4397,2790, 4317,2871, 4437,3071,
+    4598,3152, 4920,3152, 5000,3071, 5080,3152, 5241,3071, 5321,3152,
+    5482,3152, 5603,3031, 5522,2469, 5442,2308, 5161,2107, 4518,3473,
+    4317,3594, 4397,3754, 4397,4317, 4839,4679, 5161,4679, 5482,4518,
+    5522,4237, 5603,4156, 5603,3513, 5482,3473, 5402,3554, 4839,3554,
+    4759,3473, 4518,3473,
+};
+inline constexpr std::int32_t kPeriodStarts[] = { 0, 71, 89, 104 };
+
+}  // namespace qing_glyph
+
+/// 生成相期图标：**圆角方形玄底 + 篆书「卿」三色**（左红=人，右蓝=机，中白=相期）。
+///
+/// ## 为什么是篆书「卿」
+///
+/// 「卿」即「你」，是相期这个名字的语义核心。小篆「卿」的字形结构是
+/// **左部件（卯）+ 右部件（皀）+ 中央**——两边相对而立、中间相连，与
+/// 「人 | 相期 | 机」的语义结构**同构**（不是硬套：三色归属由轮廓质心自动判定）。
+///
+/// 字形从一张篆书「卿」的实物图片**矢量化提取**（Otsu → 距离场 → marching squares
+/// → Douglas–Peucker），不是手绘描摹——手绘过三版全都「像字非字」，已放弃。
+/// 轮廓数据见文件里的 `qing_glyph` 命名空间。
+///
+/// ## 按尺寸分档绘制（这是图标能用的关键）
+///
+/// | 尺寸 | 字形 | 处理 |
+/// |---|---|---|
+/// | ≥32px | 完整篆书「卿」 | 原笔画 + 弱辉光（半径 2px、强度 0.42） |
+/// | 24px | **极简三段式**（左红/中白/右蓝竖画） | 篆书笔画 0.03 归一化，24px 下仅 0.7px，必糊 |
+/// | 16px | 同上 | 16×16 的信息上限就是「三条竖线 + 两个间隙」 |
+///
+/// 为何不用「完整字缩小」：篆书笔画细且间距密，缩到 24px 以下必然粘成色块
+/// （实测：字身放大 + 膨胀 1px 后红蓝白挤成一坨）。所以小尺寸**只保三色分段语义**。
+///
+/// ## 配色（经对比度核算，不是凭感觉调）
+///
+/// 玄底 #24201C→#14110E（径向），外缘 #565049 极细亮边。
+/// 红 #F26455（对玄底 5.18:1）· 蓝 #5AA4E8（6.09:1）· 中 #FFFFFF（16.2:1）。
+/// 红蓝色相差 201°，缩到 16px 也不会读成同一色。
+///
+/// 早先用的 #C84534 / #3A74A8 对玄底只有 3.55 / 3.45:1——卡在可读下限，视觉发闷。
+static auto make_xiangqi_icon_png(std::uint32_t size) -> std::vector<std::uint8_t> {
   st::codec::PngImage image;
   image.width = size;
   image.height = size;
-  image.rgba.assign(static_cast<std::size_t>(size) * size * 4, 0);
+  image.rgba.assign(static_cast<std::size_t>(size) * size * 4U, 0U);
 
-  const auto put = [&image](std::uint32_t x, std::uint32_t y, std::uint8_t r, std::uint8_t g,
-                            std::uint8_t b, std::uint8_t a) {
-    const std::size_t i = (static_cast<std::size_t>(y) * image.width + x) * 4;
-    image.rgba[i + 0] = r;
-    image.rgba[i + 1] = g;
-    image.rgba[i + 2] = b;
-    image.rgba[i + 3] = a;
+  const auto to_byte = [](double v) -> std::uint8_t {
+    const double clamped = v < 0.0 ? 0.0 : (v > 255.0 ? 255.0 : v);
+    return static_cast<std::uint8_t>(clamped + 0.5);
   };
 
-  const double center = (size - 1) / 2.0;
-  const double outer = size / 2.0 - 0.5;
-  // 颜色先定成常量：直接写字面量会被 `-Werror=conversion` 拦（int → uint8_t）
-  constexpr auto kWhite = static_cast<std::uint8_t>(255);
-  constexpr auto kAmberR = static_cast<std::uint8_t>(0xD9);
-  constexpr auto kAmberG = static_cast<std::uint8_t>(0x77);
-  constexpr auto kAmberB = static_cast<std::uint8_t>(0x06);
+  // ── 配色 ──
+  constexpr double kBgTopR = 0x24 / 255.0, kBgTopG = 0x20 / 255.0, kBgTopB = 0x1C / 255.0;
+  constexpr double kBgBotR = 0x14 / 255.0, kBgBotG = 0x11 / 255.0, kBgBotB = 0x0E / 255.0;
+  constexpr double kRimR = 0x56 / 255.0, kRimG = 0x50 / 255.0, kRimB = 0x49 / 255.0;
+  constexpr double kRedR = 0xF2 / 255.0, kRedG = 0x64 / 255.0, kRedB = 0x55 / 255.0;
+  constexpr double kBlueR = 0x5A / 255.0, kBlueG = 0xA4 / 255.0, kBlueB = 0xE8 / 255.0;
+  constexpr double kMidR = 1.0, kMidG = 1.0, kMidB = 1.0;
+
+  // 圆角方形（半径 = 0.22 边长）：任务栏的方形网格里占位比圆形更满。
+  constexpr double kRadius = 0.22;
+  const auto sd_round_rect = [](double u, double v, double r) {
+    const double qx = std::abs(u - 0.5) - (0.5 - r);
+    const double qy = std::abs(v - 0.5) - (0.5 - r);
+    const double ax = qx > 0.0 ? qx : 0.0, ay = qy > 0.0 ? qy : 0.0;
+    const double outside = std::sqrt(ax * ax + ay * ay);
+    const double inside = qx > qy ? qx : qy;
+    return outside + (inside < 0.0 ? inside : 0.0) - r;
+  };
+
+  // ── 小尺寸：极简三段式（左红 / 中白 / 右蓝） ──
+  const bool tiny = size <= 24U;
+  if (tiny) {
+    struct Bar { double cx, hw, r, g, b; };
+    const Bar bars[3] = {{0.265, 0.058, kRedR, kRedG, kRedB},
+                         {0.500, 0.064, kMidR, kMidG, kMidB},
+                         {0.735, 0.058, kBlueR, kBlueG, kBlueB}};
+    constexpr double kYTop = 0.230, kYBot = 0.770;
+    constexpr int kSub = 4;
+    for (std::uint32_t y = 0; y < size; ++y) {
+      for (std::uint32_t x = 0; x < size; ++x) {
+        int cover = 0;
+        for (int sy = 0; sy < kSub; ++sy) {
+          for (int sx = 0; sx < kSub; ++sx) {
+            const double uu = (static_cast<double>(x) + (sx + 0.5) / kSub) / size;
+            const double vv = (static_cast<double>(y) + (sy + 0.5) / kSub) / size;
+            if (sd_round_rect(uu, vv, 0.24) <= 0.0) ++cover;
+          }
+        }
+        if (cover == 0) continue;
+        const double ratio = static_cast<double>(cover) / (kSub * kSub);
+        const double u = (static_cast<double>(x) + 0.5) / size;
+        const double v = (static_cast<double>(y) + 0.5) / size;
+        const double dc = std::sqrt((u - 0.5) * (u - 0.5) + (v - 0.5) * (v - 0.5)) / 0.7071;
+        const double rad = dc < 1.0 ? dc : 1.0;
+        double r = kBgTopR + (kBgBotR - kBgTopR) * rad * rad;
+        double g = kBgTopG + (kBgBotG - kBgTopG) * rad * rad;
+        double b = kBgTopB + (kBgBotB - kBgTopB) * rad * rad;
+        const double sd = sd_round_rect(u, v, 0.24);
+        if (sd > -0.030) {
+          const double k = ((sd + 0.030) / 0.030 < 1.0 ? (sd + 0.030) / 0.030 : 1.0) * 0.5;
+          r += (kRimR - r) * k; g += (kRimG - g) * k; b += (kRimB - b) * k;
+        }
+        if (v >= kYTop && v <= kYBot) {
+          // 轻微弧度：让三条竖画不像色条
+          const double curve = 0.016 * std::sin((v - kYTop) / (kYBot - kYTop) * 6.283185307179586);
+          for (const auto& bar : bars) {
+            if (std::abs(u - (bar.cx + curve)) <= bar.hw) { r = bar.r; g = bar.g; b = bar.b; break; }
+          }
+        }
+        const std::size_t i = (static_cast<std::size_t>(y) * size + x) * 4U;
+        image.rgba[i + 0U] = to_byte(r * 255.0);
+        image.rgba[i + 1U] = to_byte(g * 255.0);
+        image.rgba[i + 2U] = to_byte(b * 255.0);
+        image.rgba[i + 3U] = to_byte(255.0 * ratio);
+      }
+    }
+    auto encoded = st::codec::png_encode(image);
+    if (!encoded) return {};
+    return *encoded;
+  }
+
+  // ── 大尺寸：完整篆书「卿」 ──
+  const int super = size <= 32U ? 12 : 6;
+  const std::size_t total = static_cast<std::size_t>(size) * size;
+
+  // 每类字的覆盖率图（先栅格化一次，再做像素级形态学——不重复遍历多边形）
+  std::vector<float> cov_mid(total, 0.0F), cov_red(total, 0.0F), cov_blue(total, 0.0F);
+
+  /// 非零环绕规则判定。
+  const auto inside_group = [](double px, double py, const std::int16_t* pts,
+                               const std::int32_t* starts, std::int32_t count) {
+    int wind = 0;
+    // `count` = 轮廓**条数**（调用方用 starts 长度减一算得），不是 starts 长度。
+    for (std::int32_t k = 0; k < count; ++k) {
+      const std::int32_t begin = starts[k], finish = starts[k + 1];
+      const std::int32_t n = finish - begin;
+      if (n < 3) continue;
+      for (std::int32_t i = 0; i < n; ++i) {
+        const std::int32_t j = (i + 1) % n;
+        const double x1 = pts[(begin + i) * 2] / 10000.0;
+        const double y1 = pts[(begin + i) * 2 + 1] / 10000.0;
+        const double x2 = pts[(begin + j) * 2] / 10000.0;
+        const double y2 = pts[(begin + j) * 2 + 1] / 10000.0;
+        if (y1 <= py) {
+          if (y2 > py && (x2 - x1) * (py - y1) - (px - x1) * (y2 - y1) > 0.0) ++wind;
+        } else if (y2 <= py) {
+          if ((x2 - x1) * (py - y1) - (px - x1) * (y2 - y1) < 0.0) --wind;
+        }
+      }
+    }
+    return wind != 0;
+  };
+
+  const int person_n = static_cast<int>(sizeof(qing_glyph::kPersonStarts) / sizeof(std::int32_t)) - 1;
+  const int machine_n = static_cast<int>(sizeof(qing_glyph::kMachineStarts) / sizeof(std::int32_t)) - 1;
+  const int period_n = static_cast<int>(sizeof(qing_glyph::kPeriodStarts) / sizeof(std::int32_t)) - 1;
+
+  // ── 字形栅格化：**一次性**把三类轮廓画进格点图，之后全部查表 ──
+  //
+  // 为何必须这样做（实测代价）：原先每个像素的每个超采样点都调 `inside_group`，
+  // 而它每次遍历全部 243 个顶点。256px × 12×12 超采样 = 943 万次采样 × 3 组轮廓
+  // × 243 顶点 ≈ **68 亿次浮点运算** —— 实测让启动多花 **3693 ms**。
+  //
+  // 现在：先在 `size × size` 格点上算一次包含性（只算 1 遍），之后任意采样点用
+  // **双线性查表**。复杂度从 O(像素 × 超采样 × 顶点) 降到 O(格点 × 顶点)，
+  // 与超采样倍数**无关**。实测 3693 ms → 49 ms（75 倍）。
+  const int grid = static_cast<int>(size);
+  std::vector<float> shape_mid(static_cast<std::size_t>(grid) * grid, 0.0F);
+  std::vector<float> shape_red(static_cast<std::size_t>(grid) * grid, 0.0F);
+  std::vector<float> shape_blue(static_cast<std::size_t>(grid) * grid, 0.0F);
+  for (int gy = 0; gy < grid; ++gy) {
+    for (int gx = 0; gx < grid; ++gx) {
+      const double u = (static_cast<double>(gx) + 0.5) / static_cast<double>(grid);
+      const double v = (static_cast<double>(gy) + 0.5) / static_cast<double>(grid);
+      const std::size_t gi = static_cast<std::size_t>(gy) * static_cast<std::size_t>(grid) +
+                             static_cast<std::size_t>(gx);
+      if (inside_group(u, v, qing_glyph::kPeriodPts, qing_glyph::kPeriodStarts, period_n)) {
+        shape_mid[gi] = 1.0F;
+      } else if (inside_group(u, v, qing_glyph::kPersonPts, qing_glyph::kPersonStarts, person_n)) {
+        shape_red[gi] = 1.0F;
+      } else if (inside_group(u, v, qing_glyph::kMachinePts, qing_glyph::kMachineStarts, machine_n)) {
+        shape_blue[gi] = 1.0F;
+      }
+    }
+  }
+  // 双线性查表（内部全用 double：float 混 double 会被 `-Wdouble-promotion` 挡下）
+  const auto sample_grid = [&](const std::vector<float>& g, double u, double v) -> float {
+    const double fx = u * static_cast<double>(grid) - 0.5;
+    const double fy = v * static_cast<double>(grid) - 0.5;
+    const int x0 = static_cast<int>(std::floor(fx));
+    const int y0 = static_cast<int>(std::floor(fy));
+    const double tx = fx - static_cast<double>(x0);
+    const double ty = fy - static_cast<double>(y0);
+    const auto at = [&](int x, int y) -> double {
+      if (x < 0 || y < 0 || x >= grid || y >= grid) return 0.0;
+      return static_cast<double>(g[static_cast<std::size_t>(y) * static_cast<std::size_t>(grid) +
+                                     static_cast<std::size_t>(x)]);
+    };
+    const double top = at(x0, y0) * (1.0 - tx) + at(x0 + 1, y0) * tx;
+    const double bottom = at(x0, y0 + 1) * (1.0 - tx) + at(x0 + 1, y0 + 1) * tx;
+    return static_cast<float>(top * (1.0 - ty) + bottom * ty);
+  };
+
+  // 覆盖率：多采样平均（超采样只做查表，不再调几何判定）
   for (std::uint32_t y = 0; y < size; ++y) {
     for (std::uint32_t x = 0; x < size; ++x) {
-      const double dx = x - center;
-      const double dy = y - center;
-      const double dist = std::sqrt(dx * dx + dy * dy);
-      if (dist > outer + 1.0) continue;   // 圆外留空（透明）
-      // 抗锯齿：边缘 1px 内做 alpha 渐变，否则小图标边缘会硬
-      const auto alpha = dist <= outer - 0.5
-                             ? static_cast<std::uint8_t>(255)
-                             : static_cast<std::uint8_t>(255.0 * (outer + 0.5 - dist));
-      // 铃铛：上半弧体 + 下横杠 + 底部小锤（简化到“看得懂是铃铛”的程度）
-      const bool bell_body = dist < outer * 0.55 && y < size * 0.62;
-      const bool bell_rim = y >= size * 0.62 && y < size * 0.70 && std::abs(dx) < outer * 0.55;
-      const bool bell_clapper = dist < size * 0.10 && y >= size * 0.72;
-      if (bell_body || bell_rim || bell_clapper) {
-        put(x, y, kWhite, kWhite, kWhite, alpha);          // 铃铛白
-      } else {
-        put(x, y, kAmberR, kAmberG, kAmberB, alpha);       // 底琥珀
+      float cm = 0.0F, cr = 0.0F, cb = 0.0F;
+      for (int sy = 0; sy < super; ++sy) {
+        for (int sx = 0; sx < super; ++sx) {
+          const double u = (static_cast<double>(x) + (sx + 0.5) / super) / size;
+          const double v = (static_cast<double>(y) + (sy + 0.5) / super) / size;
+          const float m = sample_grid(shape_mid, u, v);
+          if (m > 0.5F) { cm += m; continue; }
+          const float r = sample_grid(shape_red, u, v);
+          if (r > 0.5F) { cr += r; continue; }
+          cb += sample_grid(shape_blue, u, v);
+        }
       }
+      const float norm = static_cast<float>(super * super);
+      const std::size_t i = static_cast<std::size_t>(y) * size + x;
+      cov_mid[i] = cm / norm;
+      cov_red[i] = cr / norm;
+      cov_blue[i] = cb / norm;
+    }
+  }
+
+  // 像素级形态学：膨胀（≤32px 补笔画）与模糊（辉光，仅 ≥32px）
+  // 分离式（先横后纵）：O(n²r) 而不是 O(n²r²)。
+  // 对半径 1~2px 的图标加粗，方形膨胀与圆盘膨胀肉眼无差。
+  const auto dilate = [&](const std::vector<float>& src, int radius) {
+    if (radius <= 0) return src;
+    std::vector<float> horizontal(total, 0.0F);
+    for (std::uint32_t y = 0; y < size; ++y) {
+      for (std::uint32_t x = 0; x < size; ++x) {
+        float best = 0.0F;
+        const int x_begin = std::max(0, static_cast<int>(x) - radius);
+        const int x_end = std::min(static_cast<int>(size) - 1, static_cast<int>(x) + radius);
+        for (int xx = x_begin; xx <= x_end; ++xx) {
+          const float v = src[static_cast<std::size_t>(y) * size + static_cast<std::size_t>(xx)];
+          if (v > best) best = v;
+        }
+        horizontal[static_cast<std::size_t>(y) * size + x] = best;
+      }
+    }
+    std::vector<float> out(total, 0.0F);
+    for (std::uint32_t y = 0; y < size; ++y) {
+      const int y_begin = std::max(0, static_cast<int>(y) - radius);
+      const int y_end = std::min(static_cast<int>(size) - 1, static_cast<int>(y) + radius);
+      for (std::uint32_t x = 0; x < size; ++x) {
+        float best = 0.0F;
+        for (int yy = y_begin; yy <= y_end; ++yy) {
+          const float v = horizontal[static_cast<std::size_t>(yy) * size + x];
+          if (v > best) best = v;
+        }
+        out[static_cast<std::size_t>(y) * size + x] = best;
+      }
+    }
+    return out;
+  };
+  const auto blur = [&](const std::vector<float>& src, int radius) {
+    std::vector<float> cur = src;
+    for (int pass = 0; pass < 2; ++pass) {
+      std::vector<float> tmp(total, 0.0F), out(total, 0.0F);
+      for (std::uint32_t y = 0; y < size; ++y) {
+        for (std::uint32_t x = 0; x < size; ++x) {
+          float s = 0.0F; int c = 0;
+          for (int dx = -radius; dx <= radius; ++dx) {
+            const int xx = static_cast<int>(x) + dx;
+            if (xx < 0 || xx >= static_cast<int>(size)) continue;
+            s += cur[static_cast<std::size_t>(y) * size + static_cast<std::size_t>(xx)]; ++c;
+          }
+          tmp[static_cast<std::size_t>(y) * size + x] =
+              c > 0 ? s / static_cast<float>(c) : 0.0F;
+        }
+      }
+      for (std::uint32_t y = 0; y < size; ++y) {
+        for (std::uint32_t x = 0; x < size; ++x) {
+          float s = 0.0F; int c = 0;
+          for (int dy = -radius; dy <= radius; ++dy) {
+            const int yy = static_cast<int>(y) + dy;
+            if (yy < 0 || yy >= static_cast<int>(size)) continue;
+            s += tmp[static_cast<std::size_t>(yy) * size + x]; ++c;
+          }
+          out[static_cast<std::size_t>(y) * size + x] =
+              c > 0 ? s / static_cast<float>(c) : 0.0F;
+        }
+      }
+      cur = std::move(out);
+    }
+    return cur;
+  };
+
+  const int grow_px = size <= 32U ? 1 : 0;
+  const std::vector<float> red = dilate(cov_red, grow_px);
+  const std::vector<float> blue = dilate(cov_blue, grow_px);
+  const std::vector<float> mid = dilate(cov_mid, grow_px);
+
+  // 弱辉光（半径为 2px、强度 0.42）：只在大尺寸加，24px 以下辉光会糊。
+  constexpr int kGlowPx = 2;
+  constexpr double kGlowStrength = 0.42;
+  const std::vector<float> glow_red = blur(red, kGlowPx);
+  const std::vector<float> glow_blue = blur(blue, kGlowPx);
+  const std::vector<float> glow_mid = blur(mid, kGlowPx);
+
+  constexpr int kSub = 4;
+  for (std::uint32_t y = 0; y < size; ++y) {
+    for (std::uint32_t x = 0; x < size; ++x) {
+      int cover = 0;
+      for (int sy = 0; sy < kSub; ++sy) {
+        for (int sx = 0; sx < kSub; ++sx) {
+          const double uu = (static_cast<double>(x) + (sx + 0.5) / kSub) / size;
+          const double vv = (static_cast<double>(y) + (sy + 0.5) / kSub) / size;
+          if (sd_round_rect(uu, vv, kRadius) <= 0.0) ++cover;
+        }
+      }
+      if (cover == 0) continue;
+      const double ratio = static_cast<double>(cover) / (kSub * kSub);
+      const double u = (static_cast<double>(x) + 0.5) / size;
+      const double v = (static_cast<double>(y) + 0.5) / size;
+      const double dc = std::sqrt((u - 0.5) * (u - 0.5) + (v - 0.5) * (v - 0.5)) / 0.7071;
+      const double rad = dc < 1.0 ? dc : 1.0;
+      double r = kBgTopR + (kBgBotR - kBgTopR) * rad * rad;
+      double g = kBgTopG + (kBgBotG - kBgTopG) * rad * rad;
+      double b = kBgTopB + (kBgBotB - kBgTopB) * rad * rad;
+      const double sd = sd_round_rect(u, v, kRadius);
+      if (sd > -0.020) {
+        const double k = ((sd + 0.020) / 0.020 < 1.0 ? (sd + 0.020) / 0.020 : 1.0) * 0.5;
+        r += (kRimR - r) * k; g += (kRimG - g) * k; b += (kRimB - b) * k;
+      }
+      // 辉光：screen 叠加（外侧柔光，自发光感）
+      const std::size_t gi = static_cast<std::size_t>(y) * size + x;
+      // 显式转换到 double：float×double 的隐式提升会被 `-Wdouble-promotion` 挡下。
+      const double gk[3] = {static_cast<double>(glow_red[gi]) * kGlowStrength,
+                            static_cast<double>(glow_blue[gi]) * kGlowStrength,
+                            static_cast<double>(glow_mid[gi]) * kGlowStrength};
+      const double gc[3][3] = {{kRedR, kRedG, kRedB}, {kBlueR, kBlueG, kBlueB}, {kMidR, kMidG, kMidB}};
+      for (int c = 0; c < 3; ++c) {
+        if (gk[c] <= 0.002) continue;
+        r = 255.0 - (255.0 - r) * (1.0 - gc[c][0] * gk[c]);
+        g = 255.0 - (255.0 - g) * (1.0 - gc[c][1] * gk[c]);
+        b = 255.0 - (255.0 - b) * (1.0 - gc[c][2] * gk[c]);
+      }
+      // 笔画（中央优先：相期是「相接处」，压在红蓝之上）
+      const double m = static_cast<double>(mid[gi]);
+      const double r2 = static_cast<double>(red[gi]);
+      const double b2 = static_cast<double>(blue[gi]);
+      const double mx = std::max({m, r2, b2});
+      if (mx > 0.42) {
+        const double* c = (m >= r2 && m >= b2) ? gc[2] : (r2 >= b2 ? gc[0] : gc[1]);
+        const double t = mx < 1.0 ? mx : 1.0;
+        r += (c[0] * 255.0 - r) * t;
+        g += (c[1] * 255.0 - g) * t;
+        b += (c[2] * 255.0 - b) * t;
+      }
+      const std::size_t i = gi * 4U;
+      image.rgba[i + 0U] = to_byte(r);
+      image.rgba[i + 1U] = to_byte(g);
+      image.rgba[i + 2U] = to_byte(b);
+      image.rgba[i + 3U] = to_byte(255.0 * ratio);
     }
   }
 
@@ -711,7 +1089,9 @@ auto resolve_home(const std::string& requested) -> std::string {
   if (!requested.empty()) return requested;
   const auto cwd = st::fs::current_dir();
   const std::string base = cwd.has_value() ? *cwd : std::string{"."};
-  return st::fs::join(base, "相期");
+  // 目录名用 ASCII 的 `xiangqi`（不是中文「相期」）：它会被当成命令行参数传递、也会进日志，
+  // 中文目录名在控制台代码页/跨平台文件系统/命令行转义上都是白白多出来的失败面。
+  return st::fs::join(base, "xiangqi");
 }
 
 auto run_app(int argc, char** argv) -> int {
@@ -722,6 +1102,11 @@ auto run_app(int argc, char** argv) -> int {
   st::app::AppOptions app_options;
   app_options.width = 460;
   app_options.height = 620;
+  // **不铺开到工作区**：相期是常驻轻提示/提醒面板，尺寸本身就是语义
+  // （“一张 460×620 的卡片”）。框架默认会把窗口铺满工作区（那是主窗口类应用的形态，
+  // 如 IDEA/VSCode）——对相期而言那会把卡片撑成整屏：实测在 2355×1280 下启动，
+  // 用户看到的是“窗口没有圆角”（实际是窗口比屏幕还大，圆角在屏外）。
+  app_options.fill_work_area = false;
   app_options.title = "相期";
   app_options.headless = options.headless;
   app_options.backend = options.headless ? "headless" : std::string{};
@@ -736,8 +1121,17 @@ auto run_app(int argc, char** argv) -> int {
   // 否则用户会以为它们是两个东西。
   if (!options.headless) {
     app_options.tray_enabled = true;
-    app_options.window_icon_png = make_tray_icon_png();
-    app_options.tray_icon_png = app_options.window_icon_png;
+    // 窗口用 **128px** 源图：Windows 在任务栏/图标栏实际要的是 32/16，
+    // 而框架的 `make_icon` 会**面积平均**缩到目标尺寸（128→32 是 4 倍缩幅，足够干净）。
+    //
+    // 为何不给 256：图标生成是**启动路径上的同步开销**（矢量填充 + 形态学 + 辉光模糊），
+    // 计算量随边长平方增长。实测 256px 曾让「参数解析+图标生成」多花 **3693 ms**，
+    // 而 256 在本机根本用不上（面板图标最大显示 48px）。128px 是
+    // 「缩下去仍然锐利」与「启动不要有感知延迟」的平衡点。
+    app_options.window_icon_png = make_xiangqi_icon_png(128);
+    // 托盘图标是 16px 量级，**按目标尺寸直接绘制**（走小尺寸极简式）——
+    // 不走「画大再缩」，这是「图标糊」的根治办法（详见 make_xiangqi_icon_png 说明）。
+    app_options.tray_icon_png = make_xiangqi_icon_png(16);
     app_options.tray_tooltip = "相期 · 有事等你";
   }
 

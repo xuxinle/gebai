@@ -68,9 +68,43 @@
 - 主服务 `Bun.serve` 在 `/xiangqi` 路径升级 WebSocket，经 `acceptPeer`/`peerMessage`/`peerClosed`
   桥到控制器（`packages/server/src/boot/serve.ts`）；
 - 控制器本身保留 `listen()`（独立端口）作为兜底——测试与无主服务场景仍可用；
-- 拟人模式启动时（`compose.ts` 的 `launchXiangqi`）拉起窗口：
-  `xiangqi.exe --agent ws://127.0.0.1:{GEBAI_PORT}/xiangqi --home {GEBAI_HOME}/相期`，
-  `XIANGQI_BIN` 覆盖 exe 路径、`XIANGQI_AUTO=off` 关闭自动拉起。
+- 拟人模式启动时（`compose.ts` 的 `launchXiangqi`）拉起窗口，决策逻辑在
+  `packages/server/src/boot/xiangqi-launch.ts`：
+  `xiangqi --agent ws://127.0.0.1:{实际监听端口}/xiangqi --home {相期数据根} --ui {UI 目录}`
+
+### 三个参数都是「推出来的」，不是写死的
+
+| 参数 | 怎么定 | 为什么必须这样 |
+|---|---|---|
+| `--agent` 端口 | `Bun.serve` 返回的 `server.port` | `GEBAI_PORT=0`（桌面形态）时真实端口由 OS 分配，用配置值会连错地方 |
+| `--home` | `xiangqiHomeFromEnv()`（与控制器内部**同一个函数**） | 两边各写一份公式时，WS 断后推卡写一处、答复读另一处，而 WS 通时毫无异常 |
+| `--ui` | 从仓库根取 `shuangtian/examples/xiangqi/ui` | 相期自身的资源探测是**相对 cwd** 的，而宿主 cwd 与 exe 所在树无关——不传就会「装载失败：读不到 main.xml」后立刻退出 |
+
+### exe 路径探测（`resolveXiangqiBin`）
+
+按序取第一个存在的：
+
+1. `XIANGQI_BIN` ——**显式指定时不再探测别的**，指错就如实失败（不静默回落）；
+2. `{GEBAI_HOME}/shuangtian/build/{dev,quick,release,debug}/bin/xiangqi[.exe]` ——部署副本；
+3. 从**服务自身目录**逐级上溯找仓库标记 `shuangtian/examples/xiangqi/`，再取 `<仓库>/shuangtian/build/<档>/bin/`；
+4. 从 `{GEBAI_HOME}` 同样上溯（`.gebai-local` 这类子目录也能收敛到仓库根）。
+
+第 3、4 步刻意**不数相对级数**：数过一次、少算一级，就落到仓库外的同名路径上，
+而失败只是一句 warn、服务照常起——**静默了很久没人发现**。找不到时 warn 会列全试过的路径与上溯起点。
+
+### 日志：怎么确认「它真起来了」
+
+| 日志 | 含义 |
+|---|---|
+| `相期窗口已拉起：pid=N（连 ws://…，数据根 …）` | 进程起来了（pid 可去任务管理器对） |
+| `相期窗口已连上（/xiangqi）` | **握手上来了**——只有这条成立才算真的可用 |
+| `相期窗口已断开（重开后卡片会重推）` | 窗口关了/崩了；控制器已清 peer |
+| `相期窗口未找到（…）` + 候选清单 | 一个候选都不存在 |
+| `相期窗口启动后 Nms 就退出了` | 起来了又立刻退（多半是 UI 资源缺失，看下一条 warn） |
+| `相期 UI 资源目录未找到（…）` | exe 所在树里没有 `examples/xiangqi/ui`，它会自己退出 |
+
+`XIANGQI_AUTO=off` 关闭自动拉起；找不到 exe / 拉起失败**只记日志不阻断服务**
+（相期是附加提醒面，没有它时授权卡仍走 REST 链接降级）；服务模式（`auth=server`）不拉起。
 
 ⚠ **把方向搞反的后果很隐蔽**：控制器去主动连 `url` 会连到自己的服务端形成自环——
 `isConnected()` 报 true、`send()` 不报错，但卡片永远到不了窗口。
@@ -138,7 +172,10 @@
 
 | 变量 | 说明 |
 |---|---|
-| `XIANGQI_PORT` | 控制器监听端口（缺省 7717） |
+| `XIANGQI_PORT` | 控制器自己 `listen()` 时的端口（缺省 7717）。**方案 B 下窗口走主服务端口**，只有「无主服务的独立使用」场景需要它 |
+| `XIANGQI_HOME` | 相期数据根（`inbox/` `outbox/` `seen.txt`）。缺省 `{GEBAI_HOME}/xiangqi`，再退 `<cwd>/xiangqi`。**必须与相期进程的 `--home` 是同一个**——宿主拉起窗口时用的就是这个函数（`xiangqiHomeFromEnv`） |
+| `XIANGQI_BIN` | 拉起窗口用的 exe 路径。设了就**只用它**（不再探测），指错会如实报「未找到」 |
+| `XIANGQI_AUTO` | `off` = 不自动拉起窗口；其余值/未设 = 自动 |
 
 ## 验证
 
@@ -175,8 +212,11 @@ WS 是主路，但报障时它是单点。相期本来就设计了两条文件�
   （可能是上个进程留下的）
 - **坏文件不被标记已消费**：刚好读到半写状态时不永久丢件，下轮再看
 
-目录位置用 `XIANGQI_HOME` 配（缺省 `<cwd>/相期`，与相期自己的
+目录位置用 `XIANGQI_HOME` 配（缺省 `<cwd>/xiangqi`，与相期自己的
 `resolve_home()` 一致）。**必须与相期启动时的 `--home` 是同一个**。
+
+目录名是 **ASCII 的 `xiangqi`**（不是中文「相期」）：它作为命令行参数传给原生窗口、也会进日志与
+降级文件路径，中文目录名在控制台代码页、跨平台文件系统、命令行转义上都是白白多出来的失败面。
 
 ## 已知未做
 

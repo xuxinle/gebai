@@ -22,8 +22,10 @@
 .reverse_verify.lock
 
 # 相期（Xiāngqī）的运行期数据目录：inbox/outbox/seen.txt 是卡片投递与答复的**本地状态**，
-# 不是项目文件。缺省落在 {GEBAI_HOME}/相期，未设时回退 <cwd>/相期（测试、临时实例、
+# 不是项目文件。缺省落在 {GEBAI_HOME}/xiangqi，未设时回退 <cwd>/xiangqi（测试、临时实例、
 # 直接跑二进制都会在 cwd 下长出来）——故用无路径前缀的裸模式。
+xiangqi/
+# 旧版目录名（中文）：仍保留忽略，避免用旧构建产物在仓库里种出这个目录时误入库。
 相期/
 
 # deps

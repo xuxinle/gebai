@@ -826,8 +826,8 @@ auto Application::start() -> Status {
   window.title = options_.title;
   window.renderer = options_.renderer;
   // 窗框一律自绘（`CONVENTIONS.md` §10 第 7 条）：把开关如实交给后端。
-  window.decorations = options_.decorations;
-  window.resizable = options_.resizable;
+      window.decorations = options_.decorations;
+    window.resizable = options_.resizable;
   window.headless = impl_->backend->headless();
   if (auto status = impl_->backend->create_window(window); !status) {
     // 自动选择的后端开不出窗口（例如探测到 libX11 但没有可用显示服务）→ 按约定回退 headless，
@@ -900,13 +900,33 @@ auto Application::start() -> Status {
   //
   // 无条件调用（不再判断“是否超屏”）：尺寸收敛由后端负责
   // `[min_logical_size, 工作区 × 0.92]`，这里不重复算口径。
-  if (const auto fitted = impl_->backend->fit_window_to_work_area(); !fitted) {
-    // 无头/拿不到屏幕不是错误：退回 `work_area_override` 的语义。
+  //
+  // `fill_work_area = false` 的应用**跳过这一步**：常驻面板/轻提示的尺寸是
+  // 它自己的语义（“一张 460×620 的卡片”），铺开到工作区会直接毁掉它。
+  if (options_.fill_work_area) {
+    if (const auto fitted = impl_->backend->fit_window_to_work_area(); !fitted) {
+      // 无头/拿不到屏幕不是错误：退回 `work_area_override` 的语义。
+      const math::Size work = work_area_logical();
+      const math::Size current = impl_->backend->logical_size();
+      if (work.width > 0.0f && work.height > 0.0f) {
+        ST_LOG_WARN("窗口未自适应（{}），当前 {}×{} 工作区 {}×{}", fitted.error().message,
+                    current.width, current.height, work.width, work.height);
+      }
+    }
+  } else {
+    // 不铺开，但**仍要夹上限**：请求尺寸超过屏幕时必须缩下来（否则窗口大部分在屏外）。
+    // 只缩不放大：工作区取不到（无头/覆盖值）时直接跳过。
     const math::Size work = work_area_logical();
     const math::Size current = impl_->backend->logical_size();
-    if (work.width > 0.0f && work.height > 0.0f) {
-      ST_LOG_WARN("窗口未自适应（{}），当前 {}×{} 工作区 {}×{}", fitted.error().message,
-                  current.width, current.height, work.width, work.height);
+    if (work.width > 0.0f && work.height > 0.0f &&
+        (current.width > work.width || current.height > work.height)) {
+      const int capped_w = static_cast<int>(std::lround(
+          current.width > work.width ? work.width : current.width));
+      const int capped_h = static_cast<int>(std::lround(
+          current.height > work.height ? work.height : current.height));
+      (void)impl_->backend->set_size(capped_w, capped_h);
+      ST_LOG_INFO("窗口超屏，已夹到工作区：{}×{}（请求 {}×{}）", capped_w, capped_h,
+                  current.width, current.height);
     }
   }
 

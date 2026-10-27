@@ -117,7 +117,7 @@ export interface ControllerOptions {
   /**
    * 相期的数据根（里面是 `inbox/` / `outbox/`）。
    *
-   * 缺省顺序：`XIANGQI_HOME` → `{GEBAI_HOME}/相期` → `<cwd>/相期`。
+   * 缺省顺序：`XIANGQI_HOME` → `{GEBAI_HOME}/xiangqi` → `<cwd>/xiangqi`。
    * 握手不成时靠这目录做文件兼底。传空串 = **禁用文件通路**（只走 WS）。
    */
   homeDir?: string
@@ -182,18 +182,25 @@ function portFromEnv(): number {
 }
 
 /**
- * 从环境读数据根：`XIANGQI_HOME` → `{GEBAI_HOME}/相期` → `<cwd>/相期`。
+ * 从环境读数据根：`XIANGQI_HOME` → `{GEBAI_HOME}/xiangqi` → `<cwd>/xiangqi`。
  *
  * 为何要认 `GEBAI_HOME`：宿主进程的 cwd 可能是仓库目录或任意工作目录，
- * 直接往 cwd 写会在那里凭空长出 `相期/`（实测：跑一次测试仓库里多了一个目录）。
+ * 直接往 cwd 写会在那里凭空长出 `xiangqi/`（实测：跑一次测试仓库里多了一个目录）。
  * 歌白的数据本来就在 `GEBAI_HOME` 下，把相期的箱件放那里才符合“一份部署一份数据”。
+ *
+ * 为何目录名用 ASCII 的 `xiangqi` 而不是中文的「相期」：这个路径要作为 `--home` 的**命令行参数**
+ * 传给原生窗口进程，也会出现在日志与降级文件路径里。中文目录名在控制台代码页、跨平台文件系统、
+ * 命令行转义上都是白白多出来的一处失败面（面名仍叫相期，改的只是磁盘上的目录名）。
+ *
+ * **导出是给宿主用的**：`boot/serve` 拉起窗口时要传 `--home`，必须与这里算出同一个目录——
+ * 两边各写一份公式的后果是推卡降级写一处、答复轮询读另一处（WS 通时完全看不出异常）。
  */
-function homeFromEnv(): string {
+export function homeFromEnv(): string {
   const raw = process.env.XIANGQI_HOME
   if (raw !== undefined && raw.trim() !== "") return raw.trim()
   const home = process.env.GEBAI_HOME
-  if (home !== undefined && home.trim() !== "") return join(home.trim(), "相期")
-  return join(process.cwd(), "相期")
+  if (home !== undefined && home.trim() !== "") return join(home.trim(), "xiangqi")
+  return join(process.cwd(), "xiangqi")
 }
 
 /**

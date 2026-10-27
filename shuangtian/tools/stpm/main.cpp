@@ -672,7 +672,10 @@ auto command_test(const Arguments& arguments) -> int {
               junit_path.empty() ? "" : std::format(" → {}", junit_path));
   st::print("{}\n", arguments.has("slow") ? "（含慢/环境敏感用例）" : "");
   auto code = st::pkg::run_tests(*manifest, options, filter, list_only, junit_path,
-                                 /*include_slow=*/arguments.has("slow"));
+                                 /*include_slow=*/arguments.has("slow"),
+                                 // 分片日志与主日志**同一目录**（`.st/logs`）：
+                                 // 事后只需 `ls .st/logs` 一个地方，不必再猜临时目录。
+                                 st::fs::join(manifest->directory, std::string(st::cli_log::kDirectory)));
   if (!code) {
     const st::Error& error = code.error();
     if (st::pkg::is_link_failure(error)) {

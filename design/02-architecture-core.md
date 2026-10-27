@@ -1285,6 +1285,23 @@ export const persona: PersonaDef = {
 | **相期卡片**（主） | 桌面常驻窗口，不打开网页也看得到；带可点链接；授权完成自动消失 | 需相期在运行 |
 | **网页横幅**（副） | 只要有浏览器就可见 | 需用户先打开歌白页面 |
 
+「需相期在运行」不是一个靠用户手动开的前提：拟人模式启用（`GEBAI_PERSONA=true`）且本地形态
+（`auth=local`）时，服务监听建立后会自己把窗口拉起来（方案 B：窗口作为 WS 客户端连**主服务端口**的
+`/xiangqi`，不再独立开 7717）。拉起窗口的决策在 `packages/server/src/boot/xiangqi-launch.ts`，三条约定：
+
+- **端口取 `Bun.serve` 返回的实际值**：`GEBAI_PORT=0`（桌面形态）时真实端口由 OS 分配，用配置值会连错；
+- **数据根与控制器同一函数**（`xiangqiHomeFromEnv`：`XIANGQI_HOME` → `{GEBAI_HOME}/xiangqi` → `<cwd>/xiangqi`）——
+  两边各写一份公式的后果是文件兼底各写各的（WS 通时看不出任何异常）；
+  目录名刻意用**纯 ASCII**：它作为 `--home` 的命令行参数传给原生窗口、也进日志与降级文件路径，
+  中文目录名在控制台代码页/跨平台文件系统/命令行转义上都是白白多出来的失败面；
+- **`--ui` 显式传绝对路径**：相期自身的资源探测是相对 cwd 的，而宿主 cwd 与 exe 所在树无关。
+
+exe 探测不数相对级数（数错一次就静默失败）：`XIANGQI_BIN` → `{GEBAI_HOME}/shuangtian/build/<档>/bin/`
+→ 从服务自身目录与 `GEBAI_HOME` 逐级上溯找仓库标记 `shuangtian/examples/xiangqi/`。
+失败只记日志（列出全部试过的路径）不阻断服务；`XIANGQI_AUTO=off` 显式关闭。
+成功时两条 info 日志可核对：`相期窗口已拉起：pid=N` 与 **`相期窗口已连上（/xiangqi）`**——
+后者才是「真的可用」的判据（进程活着但没连上的形态很容易出现）。
+
 两者都从同一个 `PersonaCredentialStatus` 读取，不各自判定——`authorizeUrl` 由状态惰性附带
 （拿到即可直接渲染，少一次往返）。
 

@@ -140,6 +140,9 @@ export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
         // 相期窗口连接：交给控制器（新连接取代旧的，卡片整批重推）
         if ((ws.data as { xiangqiPeer?: boolean } | undefined)?.xiangqiPeer) {
           xiangqiController().acceptPeer(ws as unknown as Parameters<ReturnType<typeof xiangqiController>["acceptPeer"]>[0])
+          // 这条日志是「窗口真的连上了」的唯一服务端凭据：PID 只证明进程起来了，
+          // 而握手/路径/端口任一错都会让进程活着但永远不连（窗口上显示「未连接」）。
+          log.info("[gebai] 相期窗口已连上（/xiangqi）")
           return
         }
         // 热刷新通道连接（无消息语义，仅接收广播）；主 /ws 通道逻辑见下
@@ -189,6 +192,7 @@ export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
         // 相期窗口断开：通知控制器（清 peer，卡片仍在 live，重连后重推）
         if ((ws.data as { xiangqiPeer?: boolean } | undefined)?.xiangqiPeer) {
           xiangqiController().peerClosed()
+          log.info("[gebai] 相期窗口已断开（重开后卡片会重推）")
           return
         }
         wsSubs.get(ws)?.()
@@ -210,9 +214,10 @@ export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
     `[gebai] listening on http://${server.hostname}:${server.port} (GEBAI_HOME=${config.gebaiHome}, auth=${config.auth}, sandbox=${c.sandbox.enabled}${config.devReload ? ", dev-reload" : ""})`,
   )
   // 相期窗口在监听建立后拉起（方案 B：窗口连主服务端口的 /xiangqi）——
-  // 先有 WS 可连，窗口一起就能立即建立连接；失败只记日志不阻断
+  // 先有 WS 可连，窗口一起就能立即建立连接；失败只记日志不阻断。
+  // 端口必顶 `server.port`（不是 config.port）：`port=0` 时真实端口由 OS 分配。
   try {
-    launchXiangqi()
+    launchXiangqi(server.port ?? config.port)
   } catch (err) {
     log.warn(`[gebai] 拉起相期窗口异常：${String((err as Error).message || err)}`)
   }

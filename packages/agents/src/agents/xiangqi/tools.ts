@@ -74,7 +74,7 @@ const cardKindSchema = {
  * 早期写的是 `const ctl = deps.controller ?? controller()`——那会在**模块加载**
  * 时就抓好单例（`xiangqi.ts` 顶层就调 `createTools()`），后果：
  *
- * 1. 单例一出生就绑定了当时的 cwd（缺省数据根 `<cwd>/相期`）——
+ * 1. 单例一出生就绑定了当时的 cwd（缺省数据根 `<cwd>/xiangqi`）——
  *    测试里就算后来 `resetControllerForTest()` 也救不回来，还会把卡片文件
  *    写进仓库目录（实测踩到）。
  * 2. 子Agent 的“进程级单例”变成“模块级单例”，多实例/重建场景全错。

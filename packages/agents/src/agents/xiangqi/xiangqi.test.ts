@@ -72,7 +72,7 @@ class FakeXiangqi {
 /**
  * 造一个监听随机端口、还没人连的控制器。
  *
- * ⚠ 必须显式给 `homeDir`（临时目录）：不给的话会落到缺省的 `<cwd>/相期`，
+ * ⚠ 必须显式给 `homeDir`（临时目录）：不给的话会落到缺省的 `<cwd>/xiangqi`，
  * 测试会把卡片文件写到仓库目录里、还互相干扰。
  */
 function fresh(homeDir?: string) {
@@ -545,7 +545,7 @@ describe("单例：连接必须宿主唯一", () => {
     // 顺带钉住一个踩过的坑：`createTools()` **不能在构造时就抓好单例**。
     // 以前它是 `const ctl = deps.controller ?? controller()`，而 `xiangqi.ts`
     // 顶层就调 `createTools()`——于是单例一出生就绑定了当时的 cwd，
-    // 把卡片文件写进仓库目录（实测：跑完测试仓库里多了 相期/inbox/）。
+    // 把卡片文件写进仓库目录（实测：跑完测试仓库里多了 xiangqi/inbox/）。
     resetControllerForTest()
     const tools = createTools()   // 自己不传控制器 → 走单例
     const fresh = controller({ port: 0, homeDir: mkdtempSync(join(tmpdir(), "xq-lazy-")) })
@@ -725,7 +725,7 @@ describe("card_dismiss 支持单卡撤回", () => {
 })
 
 describe("数据根：缺省不写到 cwd（防污染仓库）", () => {
-  it("设了 GEBAI_HOME 时，箱件落在 {GEBAI_HOME}/相期", async () => {
+  it("设了 GEBAI_HOME 时，箱件落在 {GEBAI_HOME}/xiangqi", async () => {
     const home = mkdtempSync(join(tmpdir(), "xq-gh-"))
     const prev = process.env.GEBAI_HOME
     process.env.GEBAI_HOME = home
@@ -739,8 +739,8 @@ describe("数据根：缺省不写到 cwd（防污染仓库）", () => {
       ctl.push({ kind: "notice", title: "需要写盘的卡" })
       void peer
       await new Promise((r) => setTimeout(r, 150))
-      const wroteToGebaiHome = existsSync(join(home, "相期", "inbox"))
-      const wroteToCwd = existsSync(join(process.cwd(), "相期"))
+      const wroteToGebaiHome = existsSync(join(home, "xiangqi", "inbox"))
+      const wroteToCwd = existsSync(join(process.cwd(), "xiangqi"))
       console.log(`    实测: GEBAI_HOME下=${wroteToGebaiHome} cwd下=${wroteToCwd}`)
       expect(wroteToGebaiHome).toBe(true)
       expect(wroteToCwd).toBe(false)
@@ -765,9 +765,9 @@ describe("数据根：缺省不写到 cwd（防污染仓库）", () => {
       ctl.dropPeerForTest()
       ctl.push({ kind: "notice", title: "落显式目录" })
       await new Promise((r) => setTimeout(r, 150))
-      console.log(`    实测: 显式下=${existsSync(join(explicit, "inbox"))} GEBAI_HOME下=${existsSync(join(home, "相期", "inbox"))}`)
+      console.log(`    实测: 显式下=${existsSync(join(explicit, "inbox"))} GEBAI_HOME下=${existsSync(join(home, "xiangqi", "inbox"))}`)
       expect(existsSync(join(explicit, "inbox"))).toBe(true)
-      expect(existsSync(join(home, "相期", "inbox"))).toBe(false)
+      expect(existsSync(join(home, "xiangqi", "inbox"))).toBe(false)
       ctl.close()
     } finally {
       if (prevHome === undefined) delete process.env.GEBAI_HOME

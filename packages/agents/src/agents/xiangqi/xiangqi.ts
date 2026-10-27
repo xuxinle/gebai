@@ -49,12 +49,21 @@ export function toolSchemas() {
 export const envVars = [
   {
     name: "XIANGQI_PORT",
-    description: "相期连接器监听端口（缺省 7717；相期用 `--agent ws://127.0.0.1:<port>/xiangqi` 连过来）",
+    description:
+      "相期控制器自己 listen() 时的端口（缺省 7717）。方案 B 下窗口连的是**主服务端口**，只有「无主服务的独立使用」场景才需要它",
   },
   {
     name: "XIANGQI_HOME",
     description:
-      "相期数据根（含 inbox/ outbox/，缺省 `<cwd>/相期`）——必须与相期启动时 `--home` 是同一个，否则文件兼底两边各写各的",
+      "相期数据根（含 inbox/ outbox/，缺省 `{GEBAI_HOME}/xiangqi`）——必须与相期启动时 `--home` 是同一个，否则文件兼底两边各写各的",
+  },
+  {
+    name: "XIANGQI_BIN",
+    description: "拉起相期窗口用的 exe 路径（设了只用它，不再按部署副本/仓库标记探测；指错会如实报未找到）",
+  },
+  {
+    name: "XIANGQI_AUTO",
+    description: "`off` = 拟人模式启动时不自动拉起相期窗口；其余值或未设 = 自动拉起",
   },
   {
     name: "XIANGQI_WAIT_MS",

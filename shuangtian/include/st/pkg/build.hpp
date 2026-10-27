@@ -179,9 +179,18 @@ struct BuildStats {
 /// `include_slow` = 额外跑“慢/环境敏感”用例（见 `test.hpp` 的 `ST_TEST_SLOW`）：
 /// 默认 false——它们量机器性能或需真编译，占测试壁钟近三分之一，
 /// 且在共享机器上会**偶发红灯**；迭代内循环默认不附这个不确定性。
+///
+/// `shard_log_dir` = 分片输出的落盘目录（**空 = 系统临时目录**）。
+///
+/// **为何分片输出一定要落盘**：分片并行时逐用例输出交错在同一个 stdout 里，
+/// 而调用方往往只看得到尾部（智能体工具截断、CI 只存末尾 N 行）——
+/// “到底哪条用例红了”恰好落在那段之外。实测踩过：失败详情只在 stdout、
+/// `.st/logs` 只剩三行摘要，只能重跑定位。落盘后每片一份
+/// `test-shard-<i>-of-<n>.log`，且**失败分片的完整输出会追加进 st 日志**。
 [[nodiscard]] auto run_tests(const Manifest& manifest, const BuildOptions& options,
                              std::string_view filter, bool list_only = false,
-                             std::string_view junit_path = {}, bool include_slow = false)
+                             std::string_view junit_path = {}, bool include_slow = false,
+                             std::string_view shard_log_dir = {})
     -> Result<int>;
 
 /// 链接诊断文本是否表示「产物被运行中的实例占用」（跨三套工具链的文案判定；

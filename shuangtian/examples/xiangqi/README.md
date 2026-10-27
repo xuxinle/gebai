@@ -68,7 +68,7 @@ st build xiangqi --profile quick
 | 参数 | 说明 |
 |---|---|
 | `--agent <url>` | 控制器地址（默认 `ws://127.0.0.1:7717/xiangqi`；也可用 `ST_XIANGQI_AGENT`） |
-| `--home <dir>` | 数据根（默认 `<cwd>/相期`，内含 `inbox/` `outbox/` `seen.txt`） |
+| `--home <dir>` | 数据根（默认 `<cwd>/xiangqi`，内含 `inbox/` `outbox/` `seen.txt`）—— 目录名用 ASCII 而非中文，因为它是命令行参数且会进日志/降级文件路径 |
 | `--headless` | 无头运行（e2e/CI 用） |
 | `--control-port` / `--control-file` | 控制通道（自动化验证用） |
 | `--theme` / `--shots` / `--ui` | 主题 / 截图目录 / 资源目录 |

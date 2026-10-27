@@ -2,6 +2,9 @@
 #include <cstdlib>
 #include <string_view>
 
+#include "st/core/console_log.hpp"
+#include "st/core/fs.hpp"
+#include "st/core/print.hpp"
 #include "st/test/test.hpp"
 
 /// 测试可执行入口：
@@ -10,6 +13,13 @@
 ///   st_tests --slow                   额外跑“慢/环境敏感”用例（默认**跳过**，见下）
 ///   st_tests --shard i/n              只跑第 i 片（i 从 1 起；`st test --jobs` 驱动）
 ///   ST_JUNIT_XML=<路径>               运行后把**本次**跑过的用例写成 JUnit XML（CI 消费）
+///   ST_TEST_SHARD_LOG=<路径>          把本次输出 tee 到该文件（`st test` 分片时下发）
+///
+/// **日志两个出口**：`ST_TEST_SHARD_LOG` 设了就调 `console_log::open`，
+/// 于是本进程的 `st::print` 输出同时到**终端与文件**（与 `st` 自己同一套 tee 实现）。
+/// 为何要有：分片并行时十几片输出交错在终端里，而调用方（智能体工具/CI/回滚缓冲）
+/// 往往只看得到尾部——逐用例结果与断言消息恰好落在看到的那段之外。实测踩过：
+/// 失败详情只在终端、`.st/logs` 只剩一行“── 失败 ──”，定位只能靠重跑。
 ///
 /// **为何默认不跑慢用例**：这类用例量的是**机器性能**（帧耗时相对清屏的比值）
 /// 或需要真编译，耗时由环境决定而非被测代码。它们占测试壁钟的近三分之一，
@@ -40,13 +50,18 @@ auto main(int argc, char** argv) -> int {
     }
   }
   st::test::set_include_slow(include_slow);
+  // 日志第二个出口：由 `st test` 分片时下发，子进程自己在启动时打开镜像。
+  // 放在 `run_all` **之前**：用例的第一行输出也必须进文件。
+  if (const char* shard_log = std::getenv("ST_TEST_SHARD_LOG");
+      shard_log != nullptr && shard_log[0] != '\0') {
+    (void)st::console_log::open(shard_log);
+  }
   // 分片参数写错**必须报错退出**：静默当成"不分片"会让每个子进程都跑全部用例
   // （8 路并行跑出 8 倍的总时长、还互相抢 CPU），看起来"并行了"而实际更慢。
   if (!shard_text.empty()) {
     const auto [shard_index, shard_count] = st::test::parse_shard(shard_text);
     if (shard_index == 0) {
-      std::fprintf(stderr, "分片参数非法: %s（应为 i/n，i 从 1 起且 i <= n）\n",
-                   std::string(shard_text).c_str());
+      st::eprint("分片参数非法: {}（应为 i/n，i 从 1 起且 i <= n）\n", shard_text);
       return 2;
     }
     st::test::set_shard(shard_index, shard_count);
@@ -60,7 +75,7 @@ auto main(int argc, char** argv) -> int {
     // `--test-jobs 4` + filter 只命中一个用例时，3 个空片各报一条 stderr 噪声）。
     // 只报后者；0 用例是完全正常的状态，静默跳过。
     if (!st::test::last_results().empty() && st::test::write_junit(junit) == 0) {
-      std::fprintf(stderr, "JUnit 报告写入失败: %s\n", junit);
+      st::eprint("JUnit 报告写入失败: {}\n", junit);
     }
   }
   return failed;

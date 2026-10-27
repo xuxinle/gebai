@@ -19,6 +19,7 @@
 #include "st/core/fs.hpp"
 #include "st/core/hash.hpp"
 #include "st/core/log.hpp"
+#include "st/core/print.hpp"
 #include "st/core/process.hpp"
 #include "st/core/string.hpp"
 #include "st/core/thread_pool.hpp"
@@ -2904,7 +2905,8 @@ namespace {
 /// `st::pkg::merge_junit_files` 做（`include/st/pkg/junit.hpp`）。
 [[nodiscard]] auto run_shards(const std::string& output, const std::string& framework_root,
                               const std::vector<std::string>& base_args, bool list_only,
-                              std::string_view junit_path, std::size_t test_jobs) -> Result<int> {
+                              std::string_view junit_path, std::size_t test_jobs,
+                              std::string_view shard_log_dir) -> Result<int> {
   // 框架根经环境变量下发：**集成级用例**（`tests/pkg_integration_test.cpp`）要真建一个
   // 引用 framework 的最小工程来构建——而"框架在哪"只有构建驱动知道（它是从清单目录/可执行位置
   // 推出来的）。让测试进程去猜仓库布局会随目录结构变化而碎，也容易猜错后构造出假失败。
@@ -2941,11 +2943,31 @@ namespace {
     shard_reports[index] = fs::join(shard_dir, std::format("shard-{}.xml", index + 1));
   }
 
-  ST_LOG_INFO("测试分片：{} 片并行（每片一个测试进程；片内顺序不变）", shards);
+    ST_LOG_INFO("测试分片：{} 片并行（每片一个测试进程；片内顺序不变）", shards);
   // 用线程池而不是裸 std::thread：与编译侧同一套并发原语（RAII 回收、可诊断）。
-  // 子进程输出**不捕获**（直接继承终端）：分片不是为了给人看整齐的报告，
-  // 捕获到内存再回显会让长跑期间看不到任何进展。
+  //
+  // ## 输出去向：**子进程自己 tee**（控制台 + 文件两个出口），父进程不拦截
+  //
+  // 每片经环境变量 `ST_TEST_SHARD_LOG` 收到自己的日志路径，由**子进程**在启动时
+  // `console_log::open` 打开镜像——于是它打的每一行都同时到终端与文件，
+  // 与 `st::print` 的单出口/双出口口径**完全一致**（同一套 tee 实现）。
+  //
+  // 为何不捕获到父进程再转发：那是第二套转发路径，要自己处理交错、截断、
+  // 内存与行分割——而 `console_log` 已经把这些都做对了（互斥串行化、每条 flush、
+  // 写失败静默降级）。分片的全部输出也因此**落在 `.st/logs` 里**，事后 grep 一条命令。
+  //
+  // 实测踩过（旧做法）：子进程继承终端 stdout、无人镜像，于是逐用例结果
+  // 只存在于那次终端回滚缓冲里；`.st/logs` 只剩一行“── 失败 ──”，
+  // 调用方（智能体工具/CI）只能看到尾部时，“哪条用例红了”永久丢失。
   ThreadPool pool(shards);
+  // 每片一份日志（与主日志同目录）：子进程自己 tee 到这些文件。
+  const std::string shard_log_dir_actual =
+      shard_log_dir.empty() ? fs::join(fs::temp_dir(), "st-test-logs") : std::string(shard_log_dir);
+  std::vector<std::string> shard_logs(shards);
+  for (std::size_t index = 0; index < shards; ++index) {
+    shard_logs[index] = fs::join(shard_log_dir_actual,
+                                 std::format("test-shard-{}-of-{}.log", index + 1, shards));
+  }
   std::mutex result_mutex;
   std::vector<int> exit_codes(shards, -1);
   std::vector<std::string> first_errors(shards);
@@ -2954,8 +2976,10 @@ namespace {
       std::vector<std::string> args = base_args;
       args.push_back("--shard");
       args.push_back(std::format("{}/{}", index + 1, shards));
+      // 输出直接继承终端（人看得见进展），**镜像由子进程自己开**（见上）。
       process::Options run_options{.env = base_env, .capture_output = false};
       run_options.env["ST_JUNIT_XML"] = shard_reports[index];
+      run_options.env["ST_TEST_SHARD_LOG"] = shard_logs[index];
       auto result = process::run(output, args, run_options);
       const std::scoped_lock lock(result_mutex);
       if (!result) {
@@ -2968,6 +2992,9 @@ namespace {
   pool.wait_idle();
 
   int failed_total = 0;
+  // 失败分片的日志路径要在**主日志**里可见：调用方只看得到尾部时，
+  // 至少能拿到"去哪看详情"的确定路径（而不是叫人重跑）。
+  std::vector<std::string> failed_shard_logs;
   for (std::size_t index = 0; index < shards; ++index) {
     if (exit_codes[index] < 0) {
       (void)fs::remove_all(shard_dir);
@@ -2998,6 +3025,14 @@ namespace {
                                     index + 1, shards));
     }
     failed_total += exit_codes[index];
+    if (exit_codes[index] != 0) failed_shard_logs.push_back(shard_logs[index]);
+  }
+  if (!failed_shard_logs.empty()) {
+    ST_LOG_INFO("失败分片的完整输出（逐用例结果 + 断言消息）：");
+    for (const auto& path : failed_shard_logs) ST_LOG_INFO("  {}", path);
+    // 同时打到控制台："去哪看详情"本身也是诊断信息，不能被截断掉。
+    st::print("\n  失败分片日志（含逐用例结果）：\n");
+    for (const auto& path : failed_shard_logs) st::print("    {}\n", path);
   }
   if (!junit_path.empty()) {
     // 各片报告里的**失败用例数**由合并函数回填；返回值只用于日志（不改变退出码语义）
@@ -3175,7 +3210,8 @@ namespace {
 }
 
 auto run_tests(const Manifest& manifest, const BuildOptions& options, std::string_view filter,
-               bool list_only, std::string_view junit_path, bool include_slow) -> Result<int> {
+               bool list_only, std::string_view junit_path, bool include_slow,
+               std::string_view shard_log_dir) -> Result<int> {
   // ## `--list` 直接复用已有二进制，不走构建
   //
   // 实测（2026-10-26）：`st test --list` 壁钟 **7.6s**，而直接跑
@@ -3211,7 +3247,8 @@ auto run_tests(const Manifest& manifest, const BuildOptions& options, std::strin
     return unexpected(ErrorCode::Unsupported,
                       std::format("交叉编译产物无法在宿主执行: {}（请在目标平台运行）", output));
   }
-  return run_shards(output, manifest.directory, args, list_only, junit_path, options.test_jobs);
+  return run_shards(output, manifest.directory, args, list_only, junit_path, options.test_jobs,
+                    shard_log_dir);
 }
 
 /// 错误分类：`run_tests` 链路上哪些失败是「链接/构建失败」而非「用例断言红」。

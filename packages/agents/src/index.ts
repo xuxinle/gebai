@@ -129,5 +129,10 @@ export {
 // 相期（xiangqi 子Agent 的桌面卡片控制器）：
 // 方案 B 后主服务把 `/xiangqi` WebSocket 升级桥到本控制器（serve.ts 消费），
 // server 需要直接拿到实例——从包出口暴露，而非穿透 src 路径。
-export { controller as xiangqiController, resetControllerForTest as resetXiangqiControllerForTest } from "./agents/xiangqi/controller"
+export {
+  controller as xiangqiController,
+  resetControllerForTest as resetXiangqiControllerForTest,
+  // 宿主侧拉起窗口时要算 `--home`，必须与控制器内部同一公式（不能各写一份）
+  homeFromEnv as xiangqiHomeFromEnv,
+} from "./agents/xiangqi/controller"
 export type { XiangqiController, CardSpec, CardAnswer, PeerSocket } from "./agents/xiangqi/controller"
