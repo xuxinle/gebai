@@ -225,3 +225,4 @@ shuangtian/examples/*/assets/vo/*.wav
 # 可用一条命令重建，且包里含 intent.md 骨架与 scene.json（与源脚本同内容的不同形态）。
 # 源脚本 film.json / film-multishot.json 才是真值源，包不入库。
 *.cypkg/
+commit-msg.txt

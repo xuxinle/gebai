@@ -2986,28 +2986,23 @@ class D3dPresenter final : public Presenter {
     // 锁：`submit_deferred_locked` 内部注释要求调用方持有 `g_context_mutex()`；
     // `CopyResource` + `Present` 也碰立即上下文，所以整段一起进锁。
     const std::scoped_lock present_lock(g_context_mutex());
-    // ## 运行期断言（2026-10-25，防复发）
+    // ## 上屏前**自己提交**（而不是要求调用方先提交）
     //
-    // `submit_deferred_locked` 在“没记账”时会静默返回（`pending == 0` 视为无事可做）。
-    // 那条分支一旦是因为**新加的绘制路径忘了记账**，就会默默拷一张空纹理上屏 ——
-    // 症状又是“全黑、无报错”，和本 bug 一模一样。
+    // 旧实现这里是“断言 + 报错跳过”，前提是“调用方一定先提交过”。那个契约
+    // 没有对外手段：`Surface` 不暴露提交入口，所以调用方**无法**满足它。
+    // 实测代价（相期启动，2026-10-27）：分配画布时的 `surface_->clear(...)`
+    // 记了一笔未提交绘制，紧接着建 presenter、`show_when_ready()` 调 present()
+    // → 断言为真 → **跳过上屏并报错** → 退回 GDI blit。8 秒内重复 5 次，
+    // **GPU 路径实际从未生效**（每帧都走 GPU→CPU 回读），首帧多花 ~440 ms，
+    // 窗口已显示却不响应 → 鼠标转圈。
     //
-    // `has_uncommitted_draws()` 检查的正是“有未提交的录制命令”：为真却走到这里，
-    // 说明有人漏了提交。此时宁可报错也不要静默上屏：
-    //   · 报错会被日志记下、被调用方看到，排查从“猜”变成“看”；
-    //   · 静默上屏只能等肉眼发现“窗口黑了”。
-    //
-    // 注：这不是替代 RAII（`draw_scope` 才是根治），而是**兵弟弟一道**：
-    // 万一将来有人新增绘制路径却绕过了类型系统（比如直接拿 `context_`），它能接住。
-    if (gpu_canvas->has_uncommitted_draws()) {
-      ST_LOG_ERROR("GPU 呈现：画布有未提交的绘制命令（漏了 submit_deferred_locked）");
-      return unexpected(ErrorCode::Invalid,
-                        "present 被跳过了：画布还有未提交的绘制命令——重复用例："
-                        "若有新绘制路径没经 draw_scope() 记账，它会永远不提交");
-    }
+    // 正确做法：`present()` 的语义就是“把画布现在的样子推上屏”，它应当
+    // **自己保证命令已执行**。提交后再断言——那时若还有未提交命令，才是
+    // 真正的异常（`FinishCommandList` 失败 / 设备丢失）。
     gpu_canvas->submit_deferred_locked();
     if (gpu_canvas->has_uncommitted_draws()) {
-      // 提交完之后仍然有：说明 FinishCommandList 失败（设备丢失等）——同样不能静默上屏
+      // 提交完仍有：说明 `FinishCommandList` 失败（设备丢失等），不能静默上屏
+      ST_LOG_ERROR("GPU 呈现：提交后仍有未提交的绘制命令（FinishCommandList 失败）");
       return unexpected(ErrorCode::Io, "命令列表提交失败（设备可能丢失），本帧跳过上屏");
     }
     // 关键一步：GPU → GPU 拷贝，**不经过 CPU**（这就是 M5 的全部价值）

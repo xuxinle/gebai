@@ -201,7 +201,12 @@ class AgentLink {
       return false;
     }
     const auto& target = *parsed;
-    auto tcp = st::net::connect_tcp(target.host, target.port, 2000);
+    // 超时：本机回环（agent 与相期同机）就绪时 <1 ms 就连上；2000 ms 只服务于
+    // “万一网络慢”，而它对**未启动**的 agent 会白白卡满 2 秒——那时主线程若在
+    // 启动路径上（曾经如此），窗口就是“已显示但未响应”，鼠标转圈。
+    // 连接现在已挪到首帧之后（见 run_app），这里再把超时收到 400 ms：
+    // 局域网/跨机部署仍然够用，未启动时只多卡一帧。
+    auto tcp = st::net::connect_tcp(target.host, target.port, 400);
     if (!tcp.has_value()) {
       last_error_ = std::format("连不上 {}:{} — {}", target.host, target.port, tcp.error().message);
       return false;
@@ -1198,12 +1203,17 @@ auto run_app(int argc, char** argv) -> int {
   }
 
   // ④ 连 agent（连不上不算错误：agent 可能还没起，界面会显示未连接）
+  //
+  // ⚠ **不在启动关键路径上连**（实测教训）：`connect_tcp` 的超时是 2000 ms，
+  // 而 agent 未启动时它会把**主线程整整阻塞 2 秒**——窗口已经可见但不响应消息，
+  // Windows 判定“未响应”，鼠标就一直转圈。实测：窗口句柄 529 ms 就绪，
+  // UI 线程直到 2585 ms 才应答，而 CPU 只用了 516 ms（纯阻塞等待，不是算不动）。
+  //
+  // 所以改成**第一帧之后**再连：先让窗口把首帧画出来、能响应点击，
+  // 然后用**更短的超时**（本机回环，agent 就绪时 <1 ms 就能连上；
+  // 连不上就是没起，多等无意义）。连接结果照旧反映到界面。
   AgentLink link;
-  if (link.connect(options.agent_url)) {
-    st::print("[相期] 已连接 agent 控制器：{}\n", options.agent_url);
-  } else {
-    st::print("[相期] 未能连接 agent 控制器（{}）——降级为文件投递，界面显示未连接\n", link.status_text());
-  }
+  bool agent_connect_pending = true;
 
   // ⑤ 暴露能力 + 装载 JS
   CardStore store;
@@ -1252,6 +1262,18 @@ auto run_app(int argc, char** argv) -> int {
   std::uint64_t handled = 0;
   while (!app.quit_requested()) {
     const std::int64_t frame_start_ms = st::time::now_ms();
+
+    // 首帧已出：现在才连 agent（见第 ④ 步的说明——不在启动路径上连，
+    // 否则 agent 未启动时主线程会阻塞满 2000 ms，窗口被判定“未响应”）。
+    if (agent_connect_pending) {
+      agent_connect_pending = false;
+      if (link.connect(options.agent_url)) {
+        st::print("[相期] 已连接 agent 控制器：{}\n", options.agent_url);
+      } else {
+        st::print("[相期] 未能连接 agent 控制器（{}）——降级为文件投递，界面显示未连接\n",
+                  link.status_text());
+      }
+    }
 
     // 托盘点击：把窗口叫回前台。
     //
