@@ -29,6 +29,7 @@
 #include "rasterize_internal.hpp"
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
@@ -301,10 +302,10 @@ auto main(int argc, char** argv) -> int {
     if (first >= 0) sprite_nonzero += static_cast<std::size_t>(last - first + 1);
   }
 
-  st::print("阴影结构对照 · 卡片 {:.0f}×{:.0f} r={:.0f} · 关键层 blur={:.0f} 环境层 blur={:.0f}\n",
+  st::log::out("阴影结构对照 · 卡片 {:.0f}×{:.0f} r={:.0f} · 关键层 blur={:.0f} 环境层 blur={:.0f}\n",
             static_cast<double>(card_w), static_cast<double>(card_h), static_cast<double>(radius),
             static_cast<double>(md.blur), static_cast<double>(md.blur2));
-  st::print("  关键层 region {}×{} · 环境层 {}×{} · 贴图 {}×{}（非零跨度 {} px）\n",
+  st::log::out("  关键层 region {}×{} · 环境层 {}×{} · 贴图 {}×{}（非零跨度 {} px）\n",
             key.region.width, key.region.height, env.region.width, env.region.height, sprite.width,
             sprite.height, sprite_nonzero);
 
@@ -336,7 +337,7 @@ auto main(int argc, char** argv) -> int {
                       std::chrono::duration<double, std::milli>(Clock::now() - start).count());
     }
     if (!reference) reference = best;
-    st::print("  {:<28} {:>8.4} ms · 提速 {:>5.2}× · 触碰 {:>6} px\n", run.name, best,
+    st::log::out("  {:<28} {:>8.4} ms · 提速 {:>5.2}× · 触碰 {:>6} px\n", run.name, best,
               reference / std::max(best, 1e-9), touched);
   }
 
@@ -347,7 +348,7 @@ auto main(int argc, char** argv) -> int {
   Buffer c_buffer(background);
   (void)blit_sprite(c_buffer, sprite, true, &cover);
   const Diff raw = diff_buffers(a_buffer, c_buffer);
-  st::print("  A vs C（未铺底）：超差 {} px（最大Δ{}）\n", raw.differing, raw.max_delta);
+  st::log::out("  A vs C（未铺底）：超差 {} px（最大Δ{}）\n", raw.differing, raw.max_delta);
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 
   return st::probe::main_of(spec, opts, verdict);

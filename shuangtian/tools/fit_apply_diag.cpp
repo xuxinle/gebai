@@ -7,6 +7,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/text/font.hpp"
 #include "st/text/grid_fit.hpp"
 #include "st/text/text.hpp"
@@ -62,7 +63,7 @@ auto main(int argc, char** argv) -> int {
   const float pixel_size = 20.25f;
   const std::string sample = "霜天自绘概览组件三川目口国回";
   for (const float supersample : {1.0f, 2.0f}) {
-    st::print("\n===== supersample={} =====\n", supersample);
+    st::log::out("\n===== supersample={} =====\n", supersample);
     for (const char32_t codepoint : st::utf8_decode(sample)) {
       const FontFace* face = fonts.find_face(codepoint);
       if (face == nullptr) continue;
@@ -78,7 +79,7 @@ auto main(int argc, char** argv) -> int {
                                            std::pair{"normal", GridFitMode::Normal}}) {
         const auto result = st::text::grid_fit(
             path, {.mode = mode, .grid = supersample});
-        st::print("  {} {}: applied={} vstems={} hstems={} mean_shift={:.4f} drift={:.4f}\n", utf8,
+        st::log::out("  {} {}: applied={} vstems={} hstems={} mean_shift={:.4f} drift={:.4f}\n", utf8,
                   mode_name, result.applied ? "Y" : "N", result.vertical_stems,
                   result.horizontal_stems, static_cast<double>(result.mean_shift),
                   static_cast<double>(result.drift));

@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/paint.hpp"
 #include "st/raster/simd.hpp"
@@ -50,23 +51,23 @@ auto main(int argc, char** argv) -> int {
   }
   st::probe::result verdict{};
 
-  st::print("后端 = {}\n\n", st::raster::simd::backend());
-  st::print("{:>8}  {:>12}  {:>10}\n", "长度", "ns/px", "相对 512");
+  st::log::out("后端 = {}\n\n", st::raster::simd::backend());
+  st::log::out("{:>8}  {:>12}  {:>10}\n", "长度", "ns/px", "相对 512");
   constexpr std::size_t kRef = 512;
   const double ref = ns_per_px(kRef, 20000);
   for (const std::size_t count : {1, 2, 4, 6, 8, 12, 16, 32, 64, 128, 256, 512, 1024}) {
     // 短行的迭代数放大，保证总样本量相当。
     const int iterations = static_cast<int>(std::max<std::size_t>(2000, 4000000 / (count + 1)));
     const double value = ns_per_px(count, iterations);
-    st::print("{:>8}  {:>12.4f}  {:>9.2f}×\n", count, value, value / ref);
+    st::log::out("{:>8}  {:>12.4f}  {:>9.2f}×\n", count, value, value / ref);
   }
-  st::print("\n注：相对 512 一列 > 1 表示该长度每像素更贵（受固定开销拖累）。\n");
+  st::log::out("\n注：相对 512 一列 > 1 表示该长度每像素更贵（受固定开销拖累）。\n");
 
   // **关键对照**：整行一次 vs 切两段跳过中间（正是 covered_region 的形态）。
   // 这直接回答“切分到底划不划算”，不依赖阴影路径的其它开销。
-  st::print("\n分段对照（总宽 140px，中间跳过 skipped px，两侧均分剩余）：\n");
-  st::print("每行跑 140 像素——单次调用只有几十纳秒，必须靠**内层多次重复**压噪声：\n");
-  st::print("{:>8}  {:>12}  {:>12}  {:>10}\n", "跳过", "整行 ns", "两段 ns", "收益");
+  st::log::out("\n分段对照（总宽 140px，中间跳过 skipped px，两侧均分剩余）：\n");
+  st::log::out("每行跑 140 像素——单次调用只有几十纳秒，必须靠**内层多次重复**压噪声：\n");
+  st::log::out("{:>8}  {:>12}  {:>12}  {:>10}\n", "跳过", "整行 ns", "两段 ns", "收益");
   constexpr int kTotal = 140;
   for (const int skipped : {40, 80, 120}) {
     const int side = (kTotal - skipped) / 2;
@@ -97,7 +98,7 @@ auto main(int argc, char** argv) -> int {
                                  src_full.data() + kTotal - side,
                                  static_cast<std::size_t>(side));
     });
-    st::print("{:>8}  {:>12.2f}  {:>12.2f}  {:>9.1f}%\n", skipped, whole, split,
+    st::log::out("{:>8}  {:>12.2f}  {:>12.2f}  {:>9.1f}%\n", skipped, whole, split,
               (whole - split) / whole * 100.0);
   }
   return st::probe::main_of(spec, opts, verdict);

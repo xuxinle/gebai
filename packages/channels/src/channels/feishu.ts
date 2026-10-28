@@ -141,6 +141,95 @@ function extractMessage(ev: Record<string, unknown>): {
   }
 }
 
+/** open_id → 姓名缓存（进程内、模块级：渠道实例可能多次起，按 openId 分键即可共享）。 */
+const userNameCache = new Map<string, string>()
+
+/** 群成员表缓存（chat_id → 成员表 + 拉取时刻）：一次请求拉整群，TTL 内全群消息直接命中。
+ *  空群/接口失败也缓存（空表 + 短 TTL）——否则权限不足时每条消息都白打一次接口。 */
+const memberCache = new Map<string, { members: Map<string, string>; fetchedAt: number }>()
+const MEMBER_CACHE_TTL_MS = 5 * 60_000
+/** 空表/失败的冷却（更短）：避免消息风暴时每条都重试无效请求。 */
+const MEMBER_CACHE_EMPTY_TTL_MS = 60_000
+
+/**
+ * 尽力而为地按 open_id 查发送者姓名（contact API，应用身份）。
+ *
+ * 飞书事件里没有姓名，只有 open_id；要显示「谁说的」只能查通讯录接口
+ * （需应用开通 `contact:user.base:readonly`）。查不到/无权限/失败一律返回 undefined——
+ * 入站带名字是锦上添花，绝不能让查名失败阻断消息投递。
+ */
+async function resolveUserNameContact(ctx: ChannelContext, openId: string): Promise<string | undefined> {
+  if (!openId) return undefined
+  const hit = userNameCache.get(openId)
+  if (hit !== undefined) return hit
+  const c0 = credsOf(ctx)
+  if (!c0.appId || !c0.appSecret) return undefined
+  try {
+    const token = await tenantToken(c0.appId, c0.appSecret)
+    const res = await fetch(`${FEISHU_BASE}/contact/v3/users/${encodeURIComponent(openId)}?user_id_type=open_id`, {
+      method: "GET",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    })
+    const json = (await res.json()) as { code?: number; msg?: string; data?: { user?: { name?: string } } }
+    if (!res.ok || json.code !== 0) return undefined
+    const name = json.data?.user?.name?.trim()
+    if (name) userNameCache.set(openId, name)
+    return name || undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 拉取群成员表（应用身份）：`GET /im/v1/chats/{chat_id}/members` 一次拿整群成员
+ * （页大小 100，按需翻页）。比逐条 contact 查询少很多请求、且权限点不同——
+ * 群成员接口不可用时静默返回空表，调用方回退 contact。
+ */
+async function resolveMemberTable(ctx: ChannelContext, chatId: string): Promise<Map<string, string>> {
+  const c0 = credsOf(ctx)
+  if (!c0.appId || !c0.appSecret) return new Map()
+  // 命中缓存（含空表冷却）：直接返回，不重复拉
+  const cached = memberCache.get(chatId)
+  if (cached) {
+    const ttl = cached.members.size ? MEMBER_CACHE_TTL_MS : MEMBER_CACHE_EMPTY_TTL_MS
+    if (Date.now() - cached.fetchedAt <= ttl) return cached.members
+  }
+  try {
+    const token = await tenantToken(c0.appId, c0.appSecret)
+    const members = new Map<string, string>()
+    let pageToken: string | undefined
+    for (;;) {
+      const q = new URLSearchParams({ page_size: "100", member_id_type: "open_id", ...(pageToken ? { page_token: pageToken } : {}) })
+      const res = await fetch(`${FEISHU_BASE}/im/v1/chats/${encodeURIComponent(chatId)}/members?${q.toString()}`, {
+        method: "GET",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      })
+      const json = (await res.json()) as {
+        code?: number
+        msg?: string
+        data?: { items?: Array<{ member_id?: string; name?: string }>; page_token?: string; has_more?: boolean }
+      }
+      if (!res.ok || json.code !== 0) {
+        // 无权限/失败：回退 contact，且冷却一段（不每条消息都重试）
+        memberCache.set(chatId, { members: new Map(), fetchedAt: Date.now() })
+        return new Map()
+      }
+      for (const it of json.data?.items ?? []) {
+        if (it.member_id && it.name) members.set(it.member_id, it.name.trim())
+      }
+      if (!json.data?.has_more || !json.data?.page_token) break
+      pageToken = json.data.page_token
+    }
+    memberCache.set(chatId, { members, fetchedAt: Date.now() })
+    // 群成员表入库后也回填 openId 缓存（后续消息直接命中单条路径）
+    for (const [oid, name] of members) userNameCache.set(oid, name)
+    return members
+  } catch {
+    memberCache.set(chatId, { members: new Map(), fetchedAt: Date.now() })
+    return new Map()
+  }
+}
+
 interface FeishuCreds {
   appId: string
   appSecret: string
@@ -181,6 +270,29 @@ async function userTokenOf(ctx: ChannelContext): Promise<string> {
     throw new Error(`as_user=true 但飞书用户授权不可用：${got.reason}——请在界面完成授权后重试`)
   }
   return got.token.accessToken
+}
+
+/**
+ * 观测（读历史/成员）的取身份策略：**用户优先、机器人回落**。
+ *
+ * 机器人（tenant token）读群历史需要 `im:message.group_msg`，多数应用未开通；
+ * 而用户身份只需授权时勾选 `im:message.group_msg:get_as_user`（默认可申请）。
+ * 所以有用户令牌就**优先用它**（能力最大，能读用户参与的所有群）；拿不到/调用失败时
+ * 回落机器人身份，并把原因带出来（`note`）——静默降级会让「这个群为什么读不到历史」
+ * 永远查不出来，而它看起来完全像「这个群就是没历史」。
+ */
+async function observeIdentity(ctx: ChannelContext): Promise<{ token?: string; note?: string }> {
+  const creds = ctx.deps.personaCredentials as
+    | { token(): Promise<{ token: { accessToken: string } } | { reason: string }> }
+    | undefined
+  if (!creds) return { note: "以机器人身份读取（未启用拟人授权）" }
+  try {
+    const got = await creds.token()
+    if ("token" in got) return { token: got.token.accessToken }
+    return { note: `以机器人身份读取（用户授权不可用：${got.reason}）` }
+  } catch (err) {
+    return { note: `以机器人身份读取（用户令牌失效：${String((err as Error)?.message ?? err)}）` }
+  }
 }
 
 export const channel: ChannelDef = {
@@ -313,6 +425,10 @@ export const channel: ChannelDef = {
     }
 
     const ignoreSelf = !/^(off|0|false|no)$/i.test(ctx.env("GEBAI_CHANNELS_FEISHU_IGNORE_SELF") ?? "")
+    // 自发送消息记账（宿主注入）：自己发出/回复的消息按 message_id 精确过滤——
+    // 以用户名义（as_user=true）发的消息 sender_type=user，能绕过 IGNORE_SELF 的 app 过滤，
+    // 不查这笔账就会把自己说的话又当新消息投回去（人格多处理一轮）。
+    const sentMessages = ctx.deps.sentMessages as { hit(id: string): boolean } | undefined
     const allowed = new Set((ctx.env("GEBAI_CHANNELS_FEISHU_CHATS") ?? "").split(/[,\s]+/).filter(Boolean))
     // 未配白名单 = 不限定入站群（入站不做写操作，风险低于出站）；但日志里明确说清楚
     if (!allowed.size) ctx.log("info", "未配置 GEBAI_CHANNELS_FEISHU_CHATS：入站不限群（出站仍 fail-closed）")
@@ -323,31 +439,50 @@ export const channel: ChannelDef = {
       onEvent: (ev) => {
         const msg = extractMessage(ev)
         if (!msg) return // 非消息事件（卡片回调等）不归本渠道
+        // 自己发出的消息（含 as_user 名义）精确过滤：命中记账即丢弃，防自触发循环
+        if (sentMessages?.hit(msg.messageId)) {
+          ctx.log("info", `忽略自发送消息 ${msg.messageId}（防回灌）`)
+          return
+        }
         if (ignoreSelf && msg.senderType === "app") return // 防自触发循环
         if (allowed.size && !allowed.has(msg.chatId)) {
           ctx.log("info", `忽略非白名单群消息：${msg.chatId}`)
           return
         }
-        void sink
-          .emit({
-            summary: `${msg.senderName ?? msg.senderId ?? "有人"}：${msg.text.slice(0, 60)}`,
-            body: msg.text,
-            source: msg.chatName === "与我的单聊" ? "飞书单聊" : msg.chatName ? `飞书群「${msg.chatName}」` : `飞书群 ${msg.chatId}`,
-            kind: "message",
-            // 幂等键：飞书消息 id（它会重投同一消息）
-            id: `feishu:${msg.messageId}`,
-            at: msg.createTime,
-            refs: {
-              chatId: msg.chatId,
-              messageId: msg.messageId,
-              ...(msg.senderId ? { senderId: msg.senderId } : {}),
-              ...(msg.senderName ? { senderName: msg.senderName } : {}),
-            },
-          })
-          .then((r) => {
-            if (r.status !== "accepted") ctx.log("warn", `消息 ${msg.messageId} 未被接管（${r.status}）`)
-          })
-          .catch((err) => ctx.log("warn", `投递 ${msg.messageId} 失败: ${String((err as Error)?.message || err)}`))
+        // 发送者姓名：优先群成员表（批量，一次覆盖全群），未命中再逐条查 contact API。
+        // 查不到（权限不足/接口失败）时 body 兜底标「用户」——模型至少知道这条是别人发的，
+        // 而不是把无前缀消息当成来自自己的上下文。
+        void (async () => {
+          let senderName: string | undefined
+          // 群消息：先尝试整群成员表；单聊（p2p）没有群成员接口，直接走 contact
+          if (msg.chatId && msg.chatType !== "p2p") {
+            const table = await resolveMemberTable(ctx, msg.chatId)
+            senderName = table.get(msg.senderId ?? "")
+          }
+          if (!senderName && msg.senderId) senderName = await resolveUserNameContact(ctx, msg.senderId)
+          const who = senderName?.trim() ? `【${senderName.trim()}】` : "【用户】"
+          void sink
+            .emit({
+              summary: `${senderName ?? msg.senderId ?? "用户"}：${msg.text.slice(0, 60)}`,
+              body: who + msg.text,
+              source: msg.chatName === "与我的单聊" ? "飞书单聊" : msg.chatName ? `飞书群「${msg.chatName}」` : `飞书群 ${msg.chatId}`,
+              kind: "message",
+              // 幂等键：飞书消息 id（它会重投同一消息）
+              id: `feishu:${msg.messageId}`,
+              at: msg.createTime,
+              refs: {
+                chatId: msg.chatId,
+                messageId: msg.messageId,
+                ...(msg.senderId ? { senderId: msg.senderId } : {}),
+                ...(senderName ? { senderName } : {}),
+                ...(!senderName ? { senderName: "用户" } : {}),
+              },
+            })
+            .then((r) => {
+              if (r.status !== "accepted") ctx.log("warn", `消息 ${msg.messageId} 未被接管（${r.status}）`)
+            })
+            .catch((err) => ctx.log("warn", `投递 ${msg.messageId} 失败: ${String((err as Error)?.message || err)}`))
+        })()
       },
     })
 
@@ -385,6 +520,11 @@ export const channel: ChannelDef = {
         asUser ? await userTokenOf(ctx) : undefined,
       )
       const who = asUser ? "（以你的名义）" : ""
+      // 自发送记账：入站长连接收到自己发的消息时能认出并丢弃（防回灌）。
+      // 飞书事件里只有 message_id 能精确对上（sender_type=user 与用户本人无法区分）；
+      // 拿不到 message_id（接口异常等）也不阻断发送——只是少了防回灌能力。
+      const sent = ctx.deps.sentMessages as { record(id: string): void } | undefined
+      if (data.message_id) sent?.record(data.message_id)
       return {
         summary: `已发到飞书群 ${input.address}${who}（${text.length} 字符）`,
         ...(data.message_id ? { ref: data.message_id } : {}),
@@ -402,6 +542,8 @@ export const channel: ChannelDef = {
         asUser ? await userTokenOf(ctx) : undefined,
       )
       const who = asUser ? "（以你的名义）" : ""
+      const sent = ctx.deps.sentMessages as { record(id: string): void } | undefined
+      if (data.message_id) sent?.record(data.message_id)
       return {
         summary: `已引用回复 ${replyTo}${who}（新消息 ${data.message_id ?? "?"}）`,
         ...(data.message_id ? { ref: data.message_id } : {}),
@@ -415,12 +557,15 @@ export const channel: ChannelDef = {
   async observe(input, ctx) {
     const c0 = credsOf(ctx)
     const creds: FeishuCreds = { appId: c0.appId!, appSecret: c0.appSecret!, chats: [] }
+    const identity = await observeIdentity(ctx)
 
     if (input.what === "messages") {
       const limit = Math.max(1, Math.min(50, Number(input.args.limit ?? 20) || 20))
       const data = await api<{ items?: Array<Record<string, unknown>>; has_more?: boolean }>(
         creds,
         `/im/v1/messages?container_id_type=chat&container_id=${encodeURIComponent(input.address)}&sort_type=ByCreateTimeDesc&page_size=${limit}`,
+        undefined,
+        identity?.token,
       )
       const items = data.items ?? []
       const rows = items.map((m) => {
@@ -435,8 +580,10 @@ export const channel: ChannelDef = {
         return `- [${String(m.create_time ?? "")}] ${sender}: ${text.slice(0, 200)}${text.length > 200 ? "…" : ""}`
       })
       return {
-        summary: rows.length ? `飞书群 ${input.address} 最近 ${rows.length} 条消息：\n${rows.join("\n")}` : "（这个群还没有消息，或机器人不在群里）",
-        data: { chatId: input.address, count: rows.length, hasMore: !!data.has_more, items },
+        summary: rows.length
+          ? `飞书群 ${input.address} 最近 ${rows.length} 条消息${identity.note ? `（${identity.note}）` : ""}：\n${rows.join("\n")}`
+          : "（这个群还没有消息，或当前身份不在群里）",
+        data: { chatId: input.address, count: rows.length, hasMore: !!data.has_more, items, identity: identity.token ? "user" : "bot" },
       }
     }
 
@@ -445,12 +592,16 @@ export const channel: ChannelDef = {
       const data = await api<{ items?: Array<Record<string, unknown>> }>(
         creds,
         `/im/v1/chats/${encodeURIComponent(input.address)}/members?member_id_type=open_id&page_size=${limit}`,
+        undefined,
+        identity?.token,
       )
       const items = data.items ?? []
       const rows = items.map((m) => `- ${String(m.name ?? "?")}（${String(m.member_id ?? m.open_id ?? "?")}）`)
       return {
-        summary: rows.length ? `飞书群 ${input.address} 共 ${rows.length} 位成员：\n${rows.join("\n")}` : "（读不到成员：机器人可能不在这个群）",
-        data: { chatId: input.address, count: rows.length, members: items },
+        summary: rows.length
+          ? `飞书群 ${input.address} 共 ${rows.length} 位成员${identity.note ? `（${identity.note}）` : ""}：\n${rows.join("\n")}`
+          : "（读不到成员：当前身份可能不在这个群）",
+        data: { chatId: input.address, count: rows.length, members: items, identity: identity.token ? "user" : "bot" },
       }
     }
 

@@ -146,7 +146,33 @@ describe("source：启动与投递", () => {
     expect(emitted[0]!.id).toBe("feishu:om_1")
     expect(emitted[0]!.channel).toBe("feishu")
     expect(emitted[0]!.refs?.chatId).toBe("oc_support")
-    expect(emitted[0]!.body).toBe("任务一直 pending")
+    expect(emitted[0]!.body).toBe("用户：任务一直 pending")
+    await source.stop?.()
+  })
+
+  test("注入 feishuUserName → 入站 body 带发送者姓名", async () => {
+    const { state, factory } = fakeConn()
+    const { ctx: c, emitted } = ctx(
+      { FEISHU_BOT_APP_ID: "cli_x", FEISHU_BOT_APP_SECRET: "s" },
+      { feishuLongConn: factory, feishuUserName: async (id: string) => (id === "ou_sender" ? "张三" : undefined) },
+    )
+    await source.start(c)
+    state.handler!(ev())
+    await new Promise((r) => setTimeout(r, 10))
+    expect(emitted.length).toBe(1)
+    expect(emitted[0]!.body).toBe("张三：任务一直 pending")
+    await source.stop?.()
+  })
+
+  test("未注入 feishuUserName → 兜底标「用户」，不阻断入站", async () => {
+    const { state, factory } = fakeConn()
+    const { ctx: c, emitted } = ctx({ FEISHU_BOT_APP_ID: "cli_x", FEISHU_BOT_APP_SECRET: "s" }, { feishuLongConn: factory })
+    await source.start(c)
+    state.handler!(ev())
+    await new Promise((r) => setTimeout(r, 10))
+    expect(emitted.length).toBe(1)
+    expect(emitted[0]!.body).toBe("用户：任务一直 pending")
+    expect(emitted[0]!.refs?.senderName).toBe("用户")
     await source.stop?.()
   })
 
@@ -159,6 +185,39 @@ describe("source：启动与投递", () => {
     )
     await new Promise((r) => setTimeout(r, 10))
     expect(emitted.length).toBe(0)
+    await source.stop?.()
+  })
+
+  test("自己发出去的消息（as_user 名义）→ 按记账命中即丢弃（防回灌）", async () => {
+    const { state, factory } = fakeConn()
+    const marker = { ids: new Set<string>() }
+    const { ctx: c, emitted, logs } = ctx(
+      { FEISHU_BOT_APP_ID: "cli_x", FEISHU_BOT_APP_SECRET: "s" },
+      {
+        feishuLongConn: factory,
+        sentMessages: {
+          record: (id: string) => marker.ids.add(id),
+          hit: (id: string) => marker.ids.has(id),
+        },
+      },
+    )
+    await source.start(c)
+
+    // 自己以用户名义发的消息（sender_type=user，字段上无法与用户本人区分）→ 记账命中即丢
+    marker.ids.add("om_self_user")
+    state.handler!(
+      ev({ event: { sender: { sender_type: "user" }, message: { message_id: "om_self_user", chat_id: "oc_1", message_type: "text", content: '{"text":"今天是星期三"}' } } }),
+    )
+    await new Promise((r) => setTimeout(r, 10))
+    expect(emitted.length).toBe(0)
+    expect(logs.some((l) => l.msg.includes("防回灌"))).toBe(true)
+
+    // 用户本人消息（未记账）→ 照常
+    state.handler!(
+      ev({ event: { sender: { sender_type: "user" }, message: { message_id: "om_other", chat_id: "oc_1", message_type: "text", content: '{"text":"你好"}' } } }),
+    )
+    await new Promise((r) => setTimeout(r, 10))
+    expect(emitted.length).toBe(1)
     await source.stop?.()
   })
 
@@ -207,7 +266,7 @@ describe("source：启动与投递", () => {
     state.handler!(ev())
     await new Promise((r) => setTimeout(r, 20))
     expect(emitted.length).toBe(1) // 消息照投
-    expect(emitted[0]!.body).toBe("任务一直 pending") // 没有历史段
+    expect(emitted[0]!.body).toBe("用户：任务一直 pending") // 没有历史段
     expect(logs.some((l) => l.level === "warn" && l.msg.includes("读历史失败"))).toBe(true)
     await source.stop?.()
   })

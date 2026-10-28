@@ -52,6 +52,7 @@
 #include "st/codec/png.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 
 namespace {
 
@@ -368,23 +369,23 @@ struct Measurement {
 void print_report(const Measurement& m, int cols, int rows, int step, float fps,
                   float change_floor) {
   if (!m.ok) {
-    st::print("[{}] 无法测量：{}\n", m.label, m.error);
+    st::log::out("[{}] 无法测量：{}\n", m.label, m.error);
     return;
   }
   const float interval_ms = 1000.0f / fps * static_cast<float>(step);
-  st::print("[{}] {} 帧，网格 {}×{}，步长 {}（采样间隔 {:.1f} ms）\n", m.label, m.frame_count,
+  st::log::out("[{}] {} 帧，网格 {}×{}，步长 {}（采样间隔 {:.1f} ms）\n", m.label, m.frame_count,
             cols, rows, step, static_cast<double>(interval_ms));
-  st::print("  画面沿用率   均值 {:.3f}\n", m.carry_mean);
-  st::print("  变化强度     均值 {:.3f} · 中位数 {:.3f} · p95 {:.3f} · 峰值 {:.2f}\n",
+  st::log::out("  画面沿用率   均值 {:.3f}\n", m.carry_mean);
+  st::log::out("  变化强度     均值 {:.3f} · 中位数 {:.3f} · p95 {:.3f} · 峰值 {:.2f}\n",
             m.delta_mean, m.delta_median, m.delta_p95, static_cast<double>(m.delta_max));
-  st::print("  有效变化     {} / {} = {:.1f}%（门槛 {:.2f}）\n", m.changed_pairs,
+  st::log::out("  有效变化     {} / {} = {:.1f}%（门槛 {:.2f}）\n", m.changed_pairs,
             static_cast<int>(m.deltas.size()), m.changed_ratio * 100.0,
             static_cast<double>(change_floor));
   if (m.identity_mean >= 0.0) {
-    st::print("  元素身份延续 均值 {:.3f}（{} 对相邻帧）\n", m.identity_mean, m.identity_pairs);
+    st::log::out("  元素身份延续 均值 {:.3f}（{} 对相邻帧）\n", m.identity_mean, m.identity_pairs);
   }
-  st::print("  判读：均值被尖峰支配，**必须与中位数/峰值一起看**；\n");
-  st::print("        均值高 + 中位数低 = 「大部分静止 + 少数剧烈运动」。\n");
+  st::log::out("  判读：均值被尖峰支配，**必须与中位数/峰值一起看**；\n");
+  st::log::out("        均值高 + 中位数低 = 「大部分静止 + 少数剧烈运动」。\n");
 }
 
 }  // namespace
@@ -420,27 +421,27 @@ auto main(int argc, char** argv) -> int {
       change_floor = static_cast<float>(std::atof(next().c_str()));
     } else if (arg == "--csv") dump_csv = next();
     else if (arg == "--help" || arg == "-h") {
-      st::print("动效验收（motion QA）\n\n");
-      st::print("用法:\n");
-      st::print("  motion_qa --dir <帧目录> [--ref <参考帧目录>] [选项]\n\n");
-      st::print("选项:\n");
-      st::print("  --traj <tsv>        元素轨迹（渲染时 --track-elements 导出）\n");
-      st::print("  --ref-traj <tsv>    参考片的元素轨迹\n");
-      st::print("  --fps <n>           帧率，默认 30（用于报告采样间隔）\n");
-      st::print("  --step <n>          采样步长，默认 1\n");
-      st::print("  --cols/--rows <n>   验收网格，默认 32×18\n");
-      st::print("  --change-floor <v>  有效变化门槛（默认 0.35/255）\n");
-      st::print("  --csv <path>        导出逐帧数据（帧号,沿用率,变化强度）\n\n");
-      st::print("⚠ 与参考片对比时必须**同采样间隔**（同 fps 同 step），否则强度不可比。\n");
-      st::print("⚠ 均值会被尖峰支配，请同时看中位数与峰值。\n");
+      st::log::out("动效验收（motion QA）\n\n");
+      st::log::out("用法:\n");
+      st::log::out("  motion_qa --dir <帧目录> [--ref <参考帧目录>] [选项]\n\n");
+      st::log::out("选项:\n");
+      st::log::out("  --traj <tsv>        元素轨迹（渲染时 --track-elements 导出）\n");
+      st::log::out("  --ref-traj <tsv>    参考片的元素轨迹\n");
+      st::log::out("  --fps <n>           帧率，默认 30（用于报告采样间隔）\n");
+      st::log::out("  --step <n>          采样步长，默认 1\n");
+      st::log::out("  --cols/--rows <n>   验收网格，默认 32×18\n");
+      st::log::out("  --change-floor <v>  有效变化门槛（默认 0.35/255）\n");
+      st::log::out("  --csv <path>        导出逐帧数据（帧号,沿用率,变化强度）\n\n");
+      st::log::out("⚠ 与参考片对比时必须**同采样间隔**（同 fps 同 step），否则强度不可比。\n");
+      st::log::out("⚠ 均值会被尖峰支配，请同时看中位数与峰值。\n");
       return 0;
     } else {
-      st::eprint("未知参数：{}（用 --help 看用法）\n", arg);
+      st::log::err("未知参数：{}（用 --help 看用法）\n", arg);
       return 2;
     }
   }
   if (dir.empty()) {
-    st::eprint("缺少 --dir <帧目录>\n");
+    st::log::err("缺少 --dir <帧目录>\n");
     return 2;
   }
 
@@ -457,7 +458,7 @@ auto main(int argc, char** argv) -> int {
                          static_cast<double>(subject.deltas[i].second));
     }
     if (const auto written = st::fs::write_text(dump_csv, csv); written.has_value()) {
-      st::print("逐帧数据 → {}\n", dump_csv);
+      st::log::out("逐帧数据 → {}\n", dump_csv);
     }
   }
 
@@ -469,24 +470,24 @@ auto main(int argc, char** argv) -> int {
   print_report(ref, cols, rows, step, fps, change_floor);
   if (!ref.ok) return 2;
 
-  st::print("\n=== 同口径对照 ===\n");
+  st::log::out("\n=== 同口径对照 ===\n");
   const auto relative = [](double mine, double theirs) {
     if (theirs <= 1e-9) return std::string{"—"};
     return std::format("{:.2f}×", mine / theirs);
   };
-  st::print("  变化强度均值   {:.3f} vs {:.3f}  → {}\n", subject.delta_mean, ref.delta_mean,
+  st::log::out("  变化强度均值   {:.3f} vs {:.3f}  → {}\n", subject.delta_mean, ref.delta_mean,
             relative(subject.delta_mean, ref.delta_mean));
-  st::print("  变化强度中位数 {:.3f} vs {:.3f}  → {}\n", subject.delta_median, ref.delta_median,
+  st::log::out("  变化强度中位数 {:.3f} vs {:.3f}  → {}\n", subject.delta_median, ref.delta_median,
             relative(subject.delta_median, ref.delta_median));
-  st::print("  强度峰值       {:.2f} vs {:.2f}  → {}\n", static_cast<double>(subject.delta_max),
+  st::log::out("  强度峰值       {:.2f} vs {:.2f}  → {}\n", static_cast<double>(subject.delta_max),
             static_cast<double>(ref.delta_max),
             relative(static_cast<double>(subject.delta_max), static_cast<double>(ref.delta_max)));
-  st::print("  有效变化率     {:.1f}% vs {:.1f}%\n", subject.changed_ratio * 100.0,
+  st::log::out("  有效变化率     {:.1f}% vs {:.1f}%\n", subject.changed_ratio * 100.0,
             ref.changed_ratio * 100.0);
-  st::print("  画面沿用率     {:.3f} vs {:.3f}\n", subject.carry_mean, ref.carry_mean);
+  st::log::out("  画面沿用率     {:.3f} vs {:.3f}\n", subject.carry_mean, ref.carry_mean);
 
   // 诊断：把「均值 / 中位数 / 峰值」三者的关系讲成人话。
-  st::print("\n  诊断：\n");
+  st::log::out("\n  诊断：\n");
   const auto diagnose = [](const Measurement& m, const char* who) {
     const double mean_to_median = m.delta_median > 1e-9 ? m.delta_mean / m.delta_median : 0.0;
     // 分级阈值（12 / 4）是实测标定的：
@@ -494,19 +495,19 @@ auto main(int argc, char** argv) -> int {
     //   真正「几乎全静止」的片是 43.2。
     // 最初用 2.0，结果把两者归成同一类，诊断失去区分力。
     if (mean_to_median > 12.0) {
-      st::print("    · {}：均值/中位数 = {:.1f} → 大多数帧**几乎完全冻住**（尖峰集中在极少数帧）\n",
+      st::log::out("    · {}：均值/中位数 = {:.1f} → 大多数帧**几乎完全冻住**（尖峰集中在极少数帧）\n",
                 who, mean_to_median);
     } else if (mean_to_median > 4.0) {
-      st::print("    · {}：均值/中位数 = {:.1f} → 静止为主 + 少数强运动段（常见的推进感节奏）\n",
+      st::log::out("    · {}：均值/中位数 = {:.1f} → 静止为主 + 少数强运动段（常见的推进感节奏）\n",
                 who, mean_to_median);
     } else {
-      st::print("    · {}：均值/中位数 = {:.1f} → 运动分布较均匀\n", who, mean_to_median);
+      st::log::out("    · {}：均值/中位数 = {:.1f} → 运动分布较均匀\n", who, mean_to_median);
     }
     if (m.changed_ratio < 0.10) {
-      st::print("    · {}：有效变化率 {:.1f}% 极低 —— 大半时间完全冻住\n", who,
+      st::log::out("    · {}：有效变化率 {:.1f}% 极低 —— 大半时间完全冻住\n", who,
                 m.changed_ratio * 100.0);
     } else if (m.changed_ratio < 0.25) {
-      st::print("    · {}：有效变化率 {:.1f}% 偏低 —— 大半时间几乎静止\n", who,
+      st::log::out("    · {}：有效变化率 {:.1f}% 偏低 —— 大半时间几乎静止\n", who,
                 m.changed_ratio * 100.0);
     }
   };
@@ -514,13 +515,13 @@ auto main(int argc, char** argv) -> int {
   diagnose(ref, "参考");
 
   const double strength = ref.delta_median > 1e-9 ? subject.delta_median / ref.delta_median : 0.0;
-  st::print("\n  结论：按**中位数**衡量的变化强度是参考片的 {:.2f}×", strength);
+  st::log::out("\n  结论：按**中位数**衡量的变化强度是参考片的 {:.2f}×", strength);
   if (strength < 0.6) {
-    st::print("（明显偏弱：内容量/运动幅度不够）\n");
+    st::log::out("（明显偏弱：内容量/运动幅度不够）\n");
   } else if (strength > 1.6) {
-    st::print("（明显偏强：可能过于躁动）\n");
+    st::log::out("（明显偏强：可能过于躁动）\n");
   } else {
-    st::print("（与参考接近）\n");
+    st::log::out("（与参考接近）\n");
   }
   return 0;
 }

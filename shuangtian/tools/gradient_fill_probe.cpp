@@ -12,6 +12,7 @@
 
 #include "st/core/print.hpp"
 #include "st/core/time.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -85,19 +86,19 @@ auto main(int argc, char** argv) -> int {
         {GradientStop{0.0f, Color{120, 160, 255, 66}}, GradientStop{1.0f, Color{120, 160, 255, 0}}});
     canvas.fill_rect(full, Paint::with_gradient(std::move(gradient)));
   });
-  st::print("口径：{}×{}，{} 次平均\n", kWidth, kHeight, kIterations);
-  st::print("  纯色整幅        {:7.2f} ms/帧  {:6.2f} ns/px\n", solid.ms_per_frame,
+  st::log::out("口径：{}×{}，{} 次平均\n", kWidth, kHeight, kIterations);
+  st::log::out("  纯色整幅        {:7.2f} ms/帧  {:6.2f} ns/px\n", solid.ms_per_frame,
             solid.ns_per_pixel);
-  st::print("  线性渐变整幅    {:7.2f} ms/帧  {:6.2f} ns/px（{:.0f}× 纯色）\n",
+  st::log::out("  线性渐变整幅    {:7.2f} ms/帧  {:6.2f} ns/px（{:.0f}× 纯色）\n",
             linear.ms_per_frame, linear.ns_per_pixel,
             solid.ms_per_frame > 0.0 ? linear.ms_per_frame / solid.ms_per_frame : 0.0);
-  st::print("  径向渐变整幅    {:7.2f} ms/帧  {:6.2f} ns/px（{:.0f}× 纯色）\n",
+  st::log::out("  径向渐变整幅    {:7.2f} ms/帧  {:6.2f} ns/px（{:.0f}× 纯色）\n",
             radial.ms_per_frame, radial.ns_per_pixel,
             solid.ms_per_frame > 0.0 ? radial.ms_per_frame / solid.ms_per_frame : 0.0);
-  st::print("  线性渐变（半透明）{:7.2f} ms/帧  {:6.2f} ns/px（{:.0f}× 纯色）\n",
+  st::log::out("  线性渐变（半透明）{:7.2f} ms/帧  {:6.2f} ns/px（{:.0f}× 纯色）\n",
             linear_alpha.ms_per_frame, linear_alpha.ns_per_pixel,
             solid.ms_per_frame > 0.0 ? linear_alpha.ms_per_frame / solid.ms_per_frame : 0.0);
-  st::print("  → 结论：**线性**渐变与纯色同量级，**径向**渐变是它的 {:.0f} 倍（1080p 单次约\n"
+  st::log::out("  → 结论：**线性**渐变与纯色同量级，**径向**渐变是它的 {:.0f} 倍（1080p 单次约\n"
             "     {:.0f} ms）。所以“背景贵”的根因是**径向**渐变（逐像素算距离），线性不需要回避。\n",
             linear.ms_per_frame > 0.0 ? radial.ms_per_frame / linear.ms_per_frame : 0.0,
             radial.ms_per_frame);

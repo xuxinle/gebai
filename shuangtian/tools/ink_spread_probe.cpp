@@ -14,6 +14,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
 
@@ -36,7 +37,7 @@ auto main(int argc, char** argv) -> int {
 
   auto loaded = st::text::FontStack::system_default();
   if (!loaded || loaded->empty()) {
-    st::print("字体栈不可用\n");
+    st::log::out("字体栈不可用\n");
     return 0;
   }
   const st::text::FontStack stack = std::move(*loaded);
@@ -61,7 +62,7 @@ auto main(int argc, char** argv) -> int {
 
   std::vector<double> without;
   std::vector<double> with;
-  st::print("{:<6} {:>10} {:>10} {:>10} {:>8}\n", "字符", "基准", "拟合(无补偿)", "拟合+补偿", "补偿率");
+  st::log::out("{:<6} {:>10} {:>10} {:>10} {:>8}\n", "字符", "基准", "拟合(无补偿)", "拟合+补偿", "补偿率");
   for (const char32_t codepoint : st::utf8_decode(kText)) {
     const std::string single = st::utf8_encode(std::u32string(1, codepoint));
     const double reference = ink_of(single, st::text::GridFitMode::Off, false);
@@ -72,7 +73,7 @@ auto main(int argc, char** argv) -> int {
     const double r_with = compensated / reference;
     without.push_back(r_without);
     with.push_back(r_with);
-    st::print("{:<6} {:>10.0f} {:>10.3f} {:>10.3f} {:>8.3f}\n", single, reference, r_without, r_with,
+    st::log::out("{:<6} {:>10.0f} {:>10.3f} {:>10.3f} {:>8.3f}\n", single, reference, r_without, r_with,
               r_with - r_without);
   }
   const auto spread = [](const std::vector<double>& v) {
@@ -85,13 +86,13 @@ auto main(int argc, char** argv) -> int {
     for (const double x : v) sum += x;
     return v.empty() ? 0.0 : sum / static_cast<double>(v.size());
   };
-  st::print("\n无补偿：极差 {:.3f}（min {:.3f} max {:.3f}）均值 {:.3f}\n", spread(without),
+  st::log::out("\n无补偿：极差 {:.3f}（min {:.3f} max {:.3f}）均值 {:.3f}\n", spread(without),
             *std::min_element(without.begin(), without.end()),
             *std::max_element(without.begin(), without.end()), mean_of(without));
-  st::print("有补偿：极差 {:.3f}（min {:.3f} max {:.3f}）均值 {:.3f}\n", spread(with),
+  st::log::out("有补偿：极差 {:.3f}（min {:.3f} max {:.3f}）均值 {:.3f}\n", spread(with),
             *std::min_element(with.begin(), with.end()),
             *std::max_element(with.begin(), with.end()), mean_of(with));
-  st::print("收窄比 = {:.4f}（阈值 < 0.8）\n", spread(with) / spread(without));
+  st::log::out("收窄比 = {:.4f}（阈值 < 0.8）\n", spread(with) / spread(without));
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 
   return st::probe::main_of(spec, opts, verdict);

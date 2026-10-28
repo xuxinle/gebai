@@ -15,6 +15,7 @@
 
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/text/text.hpp"
 #include "st/ui/line_layout.hpp"
@@ -28,10 +29,10 @@ void dump(const st::ui::TextPort& port, std::string_view label, std::string_view
   const float ascent = port.shaped_ascent(sample, size, FontRole::Monospace);
   const auto ink = port.ink_metrics(sample, size, FontRole::Monospace);
   if (!ink) {
-    st::print("{:<22} 端口报不出墨迹\n", label);
+    st::log::out("{:<22} 端口报不出墨迹\n", label);
     return;
   }
-  st::print("{:<22} above {:>5.2f}  below {:>5.2f}  墨迹高 {:>5.2f} | "
+  st::log::out("{:<22} above {:>5.2f}  below {:>5.2f}  墨迹高 {:>5.2f} | "
             "行盒内上留白 {:>5.2f} 下留白 {:>5.2f} | 行高 {:.2f} 基线距顶 {:.2f}\n",
             label, ink->above, ink->below, ink->above + ink->below,
             ascent - ink->above, line - ascent - ink->below, line, ascent);
@@ -57,7 +58,7 @@ auto main(int argc, char** argv) -> int {
   const st::app::RendererTextPort port(renderer);
   const float size = 15.0F;
 
-  st::print("=== 候选取样（字号 {:.0f}，Monospace）===\n", size);
+  st::log::out("=== 候选取样（字号 {:.0f}，Monospace）===\n", size);
   dump(port, "空串", "", size);
   dump(port, "空格", " ", size);
   dump(port, "x（x-height）", "x", size);
@@ -73,8 +74,8 @@ auto main(int argc, char** argv) -> int {
 
   // —— 候选“参考墨迹样本”：用来把墨迹在行盒里居中 ——
   // 判据是「墨迹顶/底各留多少」在行盒里大致相等，且样本能被固定（不随行内容变）。
-  st::print("\n=== 候选参考样本（spacing 1.15，位移 delta 由 line_block_offset 直接给）===\n");
-  st::print("{:<20} {:>7} {:>7} {:>9} {:>9} {:>10}\n", "样本", "above", "below", "墨迹高",
+  st::log::out("\n=== 候选参考样本（spacing 1.15，位移 delta 由 line_block_offset 直接给）===\n");
+  st::log::out("{:<20} {:>7} {:>7} {:>9} {:>9} {:>10}\n", "样本", "above", "below", "墨迹高",
             "居中前上留", "delta");
   for (const std::string_view candidate : {"Ag", "Ag|", "Ag(|)", "A(g|)", "(_|", "Hg|()",
                                            "auto fill(S& c) {"}) {
@@ -85,15 +86,15 @@ auto main(int argc, char** argv) -> int {
     const float delta =
         st::ui::layout_line(port, candidate, size, port.line_height(size) * 1.15F,
                             FontRole::Monospace).origin_y;
-    st::print("{:<20} {:>7.2f} {:>7.2f} {:>9.2f} {:>9.2f} {:>10.2f}\n", candidate, ink->above,
+    st::log::out("{:<20} {:>7.2f} {:>7.2f} {:>9.2f} {:>9.2f} {:>10.2f}\n", candidate, ink->above,
               ink->below, ink->above + ink->below, raw_top, delta);
   }
-  st::print("\n（末列 delta = 行距分摊 + 墨迹居中修正；各行必须用**同一个**样本，\n");
-  st::print("  否则纯中文行与纯拉丁行的基线会相差数 px——实测 shaped_ascent 拉丁 11.14 / 中文 15.87）\n");
+  st::log::out("\n（末列 delta = 行距分摊 + 墨迹居中修正；各行必须用**同一个**样本，\n");
+  st::log::out("  否则纯中文行与纯拉丁行的基线会相差数 px——实测 shaped_ascent 拉丁 11.14 / 中文 15.87）\n");
 
   // —— 参考样本 vs 真实代码行的墨迹：决定“带”该多高 ——
-  st::print("\n=== 各行真实墨迹（决定“带”多高 / 是否包得住）===\n");
-  st::print("{:<14} {:>6} {:>6} {:>8} {:>10} {:>11}\n", "行", "above", "below", "墨迹高",
+  st::log::out("\n=== 各行真实墨迹（决定“带”多高 / 是否包得住）===\n");
+  st::log::out("{:<14} {:>6} {:>6} {:>8} {:>10} {:>11}\n", "行", "above", "below", "墨迹高",
             "中心(相对基线)", "上沿(相对基线)");
   struct Row {
     std::string_view label;
@@ -107,10 +108,10 @@ auto main(int argc, char** argv) -> int {
                         Row{"行9 中文注释", "// 覆盖率是**带符号**量（非零环绕）：画布侧取绝对值"}}) {
     const auto ink = port.ink_metrics(row.text, size, FontRole::Monospace);
     if (!ink) {
-      st::print("{:<14} 端口报不出墨迹\n", row.label);
+      st::log::out("{:<14} 端口报不出墨迹\n", row.label);
       continue;
     }
-    st::print("{:<14} {:>6.2f} {:>6.2f} {:>8.2f} {:>+10.2f} {:>+11.2f}\n", row.label, ink->above,
+    st::log::out("{:<14} {:>6.2f} {:>6.2f} {:>8.2f} {:>+10.2f} {:>+11.2f}\n", row.label, ink->above,
               ink->below, ink->above + ink->below, (ink->below - ink->above) * 0.5F, -ink->above);
   }
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）

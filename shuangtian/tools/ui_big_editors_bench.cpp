@@ -31,6 +31,7 @@
 
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -88,7 +89,7 @@ auto main(int argc, char** argv) -> int {
 
   auto fonts = st::text::FontStack::system_default();
   if (!fonts.has_value()) {
-    st::print("SKIP: 无系统字体，量尺不成立（measure_width 恒 0 会量出假结果）\n");
+    st::log::out("SKIP: 无系统字体，量尺不成立（measure_width 恒 0 会量出假结果）\n");
     return 0;
   }
   st::text::TextRenderer renderer{*fonts};
@@ -103,7 +104,7 @@ auto main(int argc, char** argv) -> int {
   // 编辑器/终端在自己的 bounds 内滚动：把它们排成"内容全高"（与 ScrollView 子元素同姿态）。
   const float tall = static_cast<float>(kViewportHeight);  // 它们靠内部 scroll_y_ 滚动
 
-  st::print("lines={}\n", lines);
+  st::log::out("lines={}\n", lines);
 
   // ────────── CodeEditor ──────────
   {
@@ -127,9 +128,9 @@ auto main(int argc, char** argv) -> int {
       canvas.clear(st::math::Color{0xFF, 0xFF, 0xFF, 0xFF});
       editor.paint(context, canvas);
     });
-    st::print("  CodeEditor  set_text      {:8.3f} ms   <- 喂内容（含首次高亮）\n", set_ms);
-    st::print("  CodeEditor  paint(首次)   {:8.3f} ms   <- 含一次性高亮重建\n", first_paint_ms);
-    st::print("  CodeEditor  paint(稳态)   {:8.3f} ms   <- 每帧成本\n", steady_ms);
+    st::log::out("  CodeEditor  set_text      {:8.3f} ms   <- 喂内容（含首次高亮）\n", set_ms);
+    st::log::out("  CodeEditor  paint(首次)   {:8.3f} ms   <- 含一次性高亮重建\n", first_paint_ms);
+    st::log::out("  CodeEditor  paint(稳态)   {:8.3f} ms   <- 每帧成本\n", steady_ms);
   }
 
   // ────────── Terminal（行模式 append） ──────────
@@ -156,9 +157,9 @@ auto main(int argc, char** argv) -> int {
       canvas.clear(st::math::Color{0xFF, 0xFF, 0xFF, 0xFF});
       terminal.paint(context, canvas);
     });
-    st::print("  Terminal    append×{}   {:8.3f} ms   <- 喂内容\n", lines, feed_ms);
-    st::print("  Terminal    paint(首次)   {:8.3f} ms\n", first_paint_ms);
-    st::print("  Terminal    paint(稳态)   {:8.3f} ms   <- 每帧成本\n", steady_ms);
+    st::log::out("  Terminal    append×{}   {:8.3f} ms   <- 喂内容\n", lines, feed_ms);
+    st::log::out("  Terminal    paint(首次)   {:8.3f} ms\n", first_paint_ms);
+    st::log::out("  Terminal    paint(稳态)   {:8.3f} ms   <- 每帧成本\n", steady_ms);
   }
 
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）

@@ -25,6 +25,7 @@
 
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 
 namespace {
@@ -205,21 +206,21 @@ auto main(int argc, char** argv) -> int {
   }
   const auto rows = parse_rows(rows_path);
   if (rows.empty()) {
-    st::print("行表为空：{}\n", rows_path);
+    st::log::out("行表为空：{}\n", rows_path);
     return 1;
   }
   FT_Library library = nullptr;
   FT_Init_FreeType(&library);
   FT_Face face = nullptr;
   if (FT_New_Face(library, font.c_str(), face_index, &face) != 0) {
-    st::print("打不开 {} face {}\n", font, face_index);
+    st::log::out("打不开 {} face {}\n", font, face_index);
     return 1;
   }
-  st::print("字体 {} face={} 行数 {} 画布 {}x{} scale={}\n", font, face_index, rows.size(), width,
+  st::log::out("字体 {} face={} 行数 {} 画布 {}x{} scale={}\n", font, face_index, rows.size(), width,
             height, scale);
   render(library, face, rows, width, height, scale, true, out_dir + "/ft-hint-on.png");
   render(library, face, rows, width, height, scale, false, out_dir + "/ft-hint-off.png");
-  st::print("已写 {}/ft-hint-on.png 与 ft-hint-off.png\n", out_dir);
+  st::log::out("已写 {}/ft-hint-on.png 与 ft-hint-off.png\n", out_dir);
   FT_Done_Face(face);
   FT_Done_FreeType(library);
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）

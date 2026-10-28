@@ -65,6 +65,9 @@ export const PERSONA_SCOPES = [
   "im:message",
   "im:message:send_as_bot",
   "im:message:readonly",
+  // 以用户身份读群历史（`get_as_user` 是用户侧权限，默认可申请；
+  // 无它则渠道 observe 只能回落到机器人身份——机器人读群历史需 `im:message.group_msg`，多数应用未开）
+  "im:message.group_msg:get_as_user",
   "im:chat:readonly",
   "im:chat.members:read",
 ].join(" ")

@@ -15,6 +15,7 @@
 // 测试目标不链接 examples/caiyun，所以直接包含实现（仓库惯例）。
 #include "examples/caiyun/usd_export.cpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/test/test.hpp"
 
 namespace {
@@ -55,7 +56,7 @@ ST_TEST(caiyun_usd_header_and_axis) {
   const auto usda = export_json(R"({"objects":[{"shape":"sphere","radius":0.5}]})");
   ST_CHECK(usda.has_value());
   if (!usda) {
-    st::print("导出失败：{}\n", usda.error().message);
+    st::log::out("导出失败：{}\n", usda.error().message);
     return;
   }
   // 头必须声明 upAxis，且是 Y（与霜天三维同向，不做轴变换）
@@ -113,7 +114,7 @@ ST_TEST(caiyun_usd_box_has_twelve_triangles) {
   }
   ST_CHECK(items == 12);
   if (items != 12) {
-    st::print("faceVertexCounts 项数 = {}，内容 =「{}」\n", items, counts.substr(0, 120));
+    st::log::out("faceVertexCounts 项数 = {}，内容 =「{}」\n", items, counts.substr(0, 120));
   }
 
   // 同时校验索引数 = 面数 × 3（拓扑自洽）
@@ -188,7 +189,7 @@ ST_TEST(caiyun_usd_bad_obj_fails_whole_export) {
     {"shape":"obj:definitely_missing_mesh.obj"}
   ]})");
   ST_CHECK(!usda.has_value());
-  if (!usda) st::print("缺网格的报错：{}\n", usda.error().message);
+  if (!usda) st::log::out("缺网格的报错：{}\n", usda.error().message);
 }
 
 ST_TEST(caiyun_usd_rejects_broken_json) {

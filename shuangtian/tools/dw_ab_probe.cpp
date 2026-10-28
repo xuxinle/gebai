@@ -15,7 +15,8 @@
 #include "text_ab_common.hpp"
 
 #include "st/app/app.hpp"   // ClassGammas / DarkClassGammas：探针必须用应用同一份常量
-#include "st/core/fs.hpp"     // read_env：复刻 resolve_text_lcd 的“环境变量覆盖”口径
+#include "st/core/fs.hpp"
+#include "st/core/log.hpp"     // read_env：复刻 resolve_text_lcd 的“环境变量覆盖”口径
 
 #include "dwab/rows-light.inc"
 #include "dwab/rows-dark.inc"
@@ -94,7 +95,7 @@ auto main(int argc, char** argv) -> int {
 
   auto stack = st::text::FontStack::system_default();
   if (!stack) {
-    st::print("未找到可用字体\n");
+    st::log::out("未找到可用字体\n");
     return 1;
   }
   ab::print_font_stack(*stack);
@@ -140,13 +141,13 @@ auto main(int argc, char** argv) -> int {
       loaded = curve.load_from_file("resources/text_weight_curve.txt");
     }
     if (loaded > 0) {
-      st::print("  weight_curve: {} 个采样点  {}\n", loaded, curve.describe());
+      st::log::out("  weight_curve: {} 个采样点  {}\n", loaded, curve.describe());
       renderer.set_weight_curve(std::move(curve));
     } else {
-      st::print("  weight_curve: 未加载（{}）\n", curve_path.empty() ? "默认路径不存在" : curve_path);
+      st::log::out("  weight_curve: 未加载（{}）\n", curve_path.empty() ? "默认路径不存在" : curve_path);
     }
   } else {
-    st::print("  weight_curve: 已禁用（--no-curve）\n");
+    st::log::out("  weight_curve: 已禁用（--no-curve）\n");
   }
   // Skia 式覆盖率校正（Chromium 在 DWrite 之上那一层）：实测 VS Code 比霜天「更实且彩边更少」
   // 的差距就在这里。contrast 越大，中间调越向两端推（→ 更实、彩边更少）。
@@ -174,13 +175,13 @@ auto main(int argc, char** argv) -> int {
   }
   renderer.set_stem_darkening(true);                  // app 默认开（TrueType 上无效果，如实接线）
 
-  st::print("scale={} dark={} gamma={} class_gamma={} (digit={} letter={} han={}) subpixel={} fit={} ss={}\n",
+  st::log::out("scale={} dark={} gamma={} class_gamma={} (digit={} letter={} han={}) subpixel={} fit={} ss={}\n",
             scale, dark, renderer.coverage_gamma(), class_gamma,
             renderer.class_gamma(st::text::GlyphClass::Digit),
             renderer.class_gamma(st::text::GlyphClass::Letter),
             renderer.class_gamma(st::text::GlyphClass::Han),
             options.subpixel, options.fit, renderer.supersample());
-  st::print("  subpixel_strength={}\n", renderer.subpixel_strength());
+  st::log::out("  subpixel_strength={}\n", renderer.subpixel_strength());
 
   const auto fg = dark ? to_color(dwab_dark::kDwFg) : to_color(dwab_light::kDwFg);
   for (int i = 0; i < n_lines; ++i) {
@@ -193,6 +194,6 @@ auto main(int argc, char** argv) -> int {
   char path[512];
   sprintf_s(path, sizeof path, "%s/st-%s.png", out_dir.c_str(), dark ? "dark" : "light");
   ab::save(canvas.to_rgba8(), width, height, path);
-  st::print("已写 {}（{}x{} 物理像素）\n", path, width, height);
+  st::log::out("已写 {}（{}x{} 物理像素）\n", path, width, height);
   return 0;
 }

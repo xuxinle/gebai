@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -115,19 +116,19 @@ auto main(int argc, char** argv) -> int {
     bucket.total_px += area * static_cast<double>(kRepeat);
   }
 
-  st::print("{:<28}  {:>8}  {:>12}  {:>14}\n", "尺寸档", "次数", "ns/px", "占比");
+  st::log::out("{:<28}  {:>8}  {:>12}  {:>14}\n", "尺寸档", "次数", "ns/px", "占比");
   double all_ms = 0.0;
   for (const auto& [name, bucket] : buckets) all_ms += bucket.total_ms;
   for (const auto& [name, bucket] : buckets) {
     const double ns_per_px = bucket.total_px > 0.0 ? bucket.total_ms * 1e6 / bucket.total_px : 0.0;
-    st::print("{:<28}  {:>8}  {:>12.3f}  {:>13.1f}%\n", name, bucket.calls, ns_per_px,
+    st::log::out("{:<28}  {:>8}  {:>12.3f}  {:>13.1f}%\n", name, bucket.calls, ns_per_px,
               all_ms > 0.0 ? bucket.total_ms / all_ms * 100.0 : 0.0);
   }
-  st::print("\n合计 {:.3f} ms（{} 次绘制）\n", all_ms,
+  st::log::out("\n合计 {:.3f} ms（{} 次绘制）\n", all_ms,
             static_cast<int>(buckets["小 <5k px（按钮/标签）"].calls +
                              buckets["中 5k~50k（卡片/输入框）"].calls +
                              buckets["大 >50k（面板/编辑区）"].calls));
-  st::print("理论下界（0.19 ns/px，见 frame_floor_probe）：{:.3f} ms\n",
+  st::log::out("理论下界（0.19 ns/px，见 frame_floor_probe）：{:.3f} ms\n",
             [&] {
               double px = 0.0;
               for (const auto& [name, bucket] : buckets) px += bucket.total_px;

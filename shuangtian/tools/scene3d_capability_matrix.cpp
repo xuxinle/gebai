@@ -26,6 +26,7 @@
 
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/mesh.hpp"
 #include "st/raster/scene3d.hpp"
@@ -158,7 +159,7 @@ int main(int argc, char** argv) {
       {"金属高光", 3},
   };
 
-  st::print("{:<12}{:>10}{:>10}{:>10}{:>10}\n", "能力", "软件差值", "GPU差值", "软件", "GPU");
+  st::log::out("{:<12}{:>10}{:>10}{:>10}{:>10}\n", "能力", "软件差值", "GPU差值", "软件", "GPU");
   int mismatches = 0;
   for (const Case& c : cases) {
     Canvas sw_base{kW, kH, 1.0f};
@@ -167,7 +168,7 @@ int main(int argc, char** argv) {
     Canvas gpu_on{kW, kH, 1.0f};
     if (!render_variant("software", 0, sw_base) || !render_variant("software", c.variant, sw_on) ||
         !render_variant("gpu", 0, gpu_base) || !render_variant("gpu", c.variant, gpu_on)) {
-      st::print("{:<12}  后端不可用，跳过\n", c.name);
+      st::log::out("{:<12}  后端不可用，跳过\n", c.name);
       continue;
     }
     const Measure a = measure(sw_base);
@@ -179,7 +180,7 @@ int main(int argc, char** argv) {
     const double gpu_delta = std::abs(d.luma - e.luma);
     const bool sw_has = sw_delta > 0.3;
     const bool gpu_has = gpu_delta > 0.3;
-    st::print("{:<12}{:>10.2f}{:>10.2f}{:>10}{:>10}\n", c.name, sw_delta, gpu_delta,
+    st::log::out("{:<12}{:>10.2f}{:>10.2f}{:>10}{:>10}\n", c.name, sw_delta, gpu_delta,
               sw_has ? "有" : "无", gpu_has ? "有" : "无");
     if (sw_has != gpu_has) ++mismatches;
   }
@@ -192,8 +193,8 @@ int main(int argc, char** argv) {
   //
   // 把它单列出来，是为了让差异**显式可见**——本仓库反复出现的正是
   // 「一边有一边没有、而测试跑在默认后端所以看不出来」。
-  st::print("\n已知未实现：GPU 腿的投影阴影（设计决策，见 BACKLOG）\n");
-  st::print("{}\n", mismatches == 0 ? "其余能力两腿一致 ✓"
+  st::log::out("\n已知未实现：GPU 腿的投影阴影（设计决策，见 BACKLOG）\n");
+  st::log::out("{}\n", mismatches == 0 ? "其余能力两腿一致 ✓"
                                     : "有 " + std::to_string(mismatches) + " 项能力两腿不一致");
   return mismatches == 0 ? 0 : 1;
 }

@@ -49,6 +49,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 
 namespace st::probe {
 
@@ -231,15 +232,15 @@ inline constexpr int exit_skip = 77;
 
 /// 打印 `--help`（由 `spec` 生成，取代 54 份手写用法段落）。
 inline void print_help(std::string_view program, const spec& s) {
-  st::print("{}\n", s.title);
-  if (!s.criterion.empty()) st::print("\n判据：{}\n", s.criterion);
-  st::print("\n用法：{} {} [--json] [--help]\n", program, s.usage_args);
+  st::log::out("{}\n", s.title);
+  if (!s.criterion.empty()) st::log::out("\n判据：{}\n", s.criterion);
+  st::log::out("\n用法：{} {} [--json] [--help]\n", program, s.usage_args);
   if (!s.flags.empty()) {
-    st::print("选项：\n");
-    for (const auto f : s.flags) st::print("  {}\n", f);
+    st::log::out("选项：\n");
+    for (const auto f : s.flags) st::log::out("  {}\n", f);
   }
-  st::print("  通用：--json 追加一行结构化结论；--help 显示本说明\n");
-  st::print("\n退出码：0 合格 / 1 不合格 / 77 条件不具备（跳过，不冒充通过）/ 2 参数错\n");
+  st::log::out("  通用：--json 追加一行结构化结论；--help 显示本说明\n");
+  st::log::out("\n退出码：0 合格 / 1 不合格 / 77 条件不具备（跳过，不冒充通过）/ 2 参数错\n");
 }
 
 /// 把探针结论转成进程退出码，并在 `--json` 时追加一行结构化结论。
@@ -255,9 +256,9 @@ inline void print_help(std::string_view program, const spec& s) {
 /// ```
 [[nodiscard]] inline auto main_of([[maybe_unused]] const spec& s, const options& opts, const result& r) -> int {
   if (r.state == status::fail || r.state == status::skip) {
-    st::eprint("\n[{}] {}\n", name_of(r.state), r.reason);
+    st::log::err("\n[{}] {}\n", name_of(r.state), r.reason);
   }
-  if (opts.wants_json()) st::print("{}\n", to_json(r));
+  if (opts.wants_json()) st::log::out("{}\n", to_json(r));
   return exit_code_of(r.state);
 }
 

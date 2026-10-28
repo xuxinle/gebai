@@ -11,6 +11,7 @@
 // 开关：`Canvas::set_alpha_table_enabled(false)` 走逐像素原式。
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -94,7 +95,7 @@ ST_TEST(alpha_table_matches_per_pixel_scaling) {
         paint, {.opacity = item.opacity});
 
     const auto [differing, worst] = diff_of(with_table, per_pixel);
-    st::print("[alpha-table] {}：差异 {} px（Δ≤{}）\n", item.name, differing, worst);
+    st::log::out("[alpha-table] {}：差异 {} px（Δ≤{}）\n", item.name, differing, worst);
     ST_CHECK(differing == 0);
   }
 }

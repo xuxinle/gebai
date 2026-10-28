@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -79,7 +80,7 @@ auto main(int argc, char** argv) -> int {
        }) {
     const Path path = make_round_rect(box, radius);
     const double area = static_cast<double>(box.width) * static_cast<double>(box.height);
-    st::print("{}（{:.0f} px，{} 条命令）\n", name, area, path.commands().size());
+    st::log::out("{}（{:.0f} px，{} 条命令）\n", name, area, path.commands().size());
 
     // ① 仅构造路径（`add_rounded_rect` 本身）
     const double t_add = best_ns([&] {
@@ -157,17 +158,17 @@ auto main(int argc, char** argv) -> int {
       (void)fn;
     });
 
-    st::print("  ① add_rounded_rect        {:>9.0f} ns  （{:>5.2f} ns/px）\n", t_add,
+    st::log::out("  ① add_rounded_rect        {:>9.0f} ns  （{:>5.2f} ns/px）\n", t_add,
               t_add / area);
-    st::print("  ② path_control_origin     {:>9.0f} ns  （{:>5.2f} ns/px）\n", t_origin,
+    st::log::out("  ② path_control_origin     {:>9.0f} ns  （{:>5.2f} ns/px）\n", t_origin,
               t_origin / area);
-    st::print("  ③ path_geometry_key       {:>9.0f} ns  （{:>5.2f} ns/px）\n", t_key,
+    st::log::out("  ③ path_geometry_key       {:>9.0f} ns  （{:>5.2f} ns/px）\n", t_key,
               t_key / area);
-    st::print("  ④ std::function 构造      {:>9.0f} ns  （{:>5.2f} ns/px）\n", t_fn,
+    st::log::out("  ④ std::function 构造      {:>9.0f} ns  （{:>5.2f} ns/px）\n", t_fn,
               t_fn / area);
     const double sum = t_add + t_origin + t_key + t_fn;
-    st::print("  合计（不含实际混合）      {:>9.0f} ns  （{:>5.2f} ns/px）\n\n", sum, sum / area);
+    st::log::out("  合计（不含实际混合）      {:>9.0f} ns  （{:>5.2f} ns/px）\n\n", sum, sum / area);
   }
-  st::print("注：这些是**每次绘制都要付**的成本（即使缓存命中）。\n");
+  st::log::out("注：这些是**每次绘制都要付**的成本（即使缓存命中）。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

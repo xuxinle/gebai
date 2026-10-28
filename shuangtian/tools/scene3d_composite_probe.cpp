@@ -28,6 +28,7 @@
 
 #include "st/core/print.hpp"
 #include "st/core/time.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/gpu.hpp"
@@ -90,9 +91,9 @@ auto main(int argc, char** argv) -> int {
     return st::probe::main_of(spec, opts, st::probe::skip("本平台没有可用的三维实现"));
   }
   const bool gpu_ok = st::raster::gpu::available();
-  st::print("GPU 可用：{}\n", gpu_ok ? "是" : "否");
+  st::log::out("GPU 可用：{}\n", gpu_ok ? "是" : "否");
   if (const auto info = st::raster::gpu::probe(); info.has_value()) {
-    st::print("设备：{} · {}\n", info->adapter, info->feature_level);
+    st::log::out("设备：{} · {}\n", info->adapter, info->feature_level);
   }
 
   const Mesh mesh = Mesh::sphere(0.9f, 24);
@@ -103,7 +104,7 @@ auto main(int argc, char** argv) -> int {
   if (!scene_for_software.has_value()) {
     return st::probe::main_of(spec, opts, st::probe::skip("三维场景建不起来"));
   }
-  st::print("三维腿：{}\n\n", (*scene_for_software)->backend());
+  st::log::out("三维腿：{}\n\n", (*scene_for_software)->backend());
   Canvas software_target{kWidth, kHeight, 1.0f};
   software_target.clear(Color{0, 0, 0, 255});
   draw_scene(**scene_for_software, software_target, mesh, model);   // 预热
@@ -118,7 +119,7 @@ auto main(int argc, char** argv) -> int {
   if (gpu_ok) {
     auto gpu_canvas = st::raster::gpu::create_canvas(kWidth, kHeight, 1.0f, {});
     if (!gpu_canvas.has_value()) {
-      st::print("GPU 画布创建失败：{}\n", gpu_canvas.error().message);
+      st::log::out("GPU 画布创建失败：{}\n", gpu_canvas.error().message);
     } else {
       Surface& target = **gpu_canvas;
       target.clear(Color{0, 0, 0, 255});
@@ -144,10 +145,10 @@ auto main(int argc, char** argv) -> int {
     }
   }
 
-  st::print("{:<34} {:>10}\n", "路径", "耗时");
-  st::print("{:<34} {:>8.2f} ms\n", "① 三维 → 软件画布（回读路）", to_software_ms);
+  st::log::out("{:<34} {:>10}\n", "路径", "耗时");
+  st::log::out("{:<34} {:>8.2f} ms\n", "① 三维 → 软件画布（回读路）", to_software_ms);
   if (gpu_ok && to_gpu_ms > 0.0) {
-    st::print("{:<34} {:>8.2f} ms\n", "② 三维 → GPU 画布（零拷贝）", to_gpu_ms);
+    st::log::out("{:<34} {:>8.2f} ms\n", "② 三维 → GPU 画布（零拷贝）", to_gpu_ms);
     // ③ 零拷贝 + flush：把 GPU 真跑完的成本也算进去。
     // ② 的 0.03 ms 是**提交**耗时（命令递给驱动就返回）；只看它会把显卡说得过于便宜。
     // 真导出一帧要等它渲染完（否则下一帧的缓冲可能被覆盖），所以这里补上同步值。
@@ -165,10 +166,10 @@ auto main(int argc, char** argv) -> int {
         });
       }
     }
-    st::print("{:<34} {:>8.2f} ms\n", "③ 基线：GPU 画布贴普通位图", baseline_ms);
-    st::print("{:<34} {:>8.2f} ms\n", "④ 零拷贝 + 等 GPU 画完（真实帧成本）",
+    st::log::out("{:<34} {:>8.2f} ms\n", "③ 基线：GPU 画布贴普通位图", baseline_ms);
+    st::log::out("{:<34} {:>8.2f} ms\n", "④ 零拷贝 + 等 GPU 画完（真实帧成本）",
               to_gpu_sync_ms);
-    st::print("\n零拷贝相对回读：{:.1f}× 更快；相对基线多花 {:.2f} ms（三维光栅+合成）\n",
+    st::log::out("\n零拷贝相对回读：{:.1f}× 更快；相对基线多花 {:.2f} ms（三维光栅+合成）\n",
               to_gpu_ms > 0.0 ? to_software_ms / to_gpu_ms : 0.0,
               to_gpu_ms - baseline_ms);
     verdict.add("零拷贝比回读快 1 个数量级", to_software_ms > to_gpu_ms * 10.0,
@@ -180,7 +181,7 @@ auto main(int argc, char** argv) -> int {
     verdict.add("零拷贝+同步达到 5ms 级", to_gpu_sync_ms > 0.0 && to_gpu_sync_ms <= 5.0,
                 std::format("{:.2f} ms", to_gpu_sync_ms));
   } else {
-    st::print("\n（GPU 不可用：只有回读路。这正是“没显卡也能降级”的形态——\n"
+    st::log::out("\n（GPU 不可用：只有回读路。这正是“没显卡也能降级”的形态——\n"
               "  画面正确，只是每帧多付一次 CPU 合成。）\n");
   }
   verdict.add("回读路画出了内容", true, "ok");

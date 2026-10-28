@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 
@@ -93,14 +94,14 @@ auto main(int argc, char** argv) -> int {
                                  st::raster::CoverageFormat::Lcd);
   });
 
-  st::print("{}x{} 位图（{} 像素）\n\n", kGlyphW, kGlyphH, pixel_count);
-  st::print("灰度路径    {:>8.1f} ns   → {:>6.2f} ns/px\n", gray_ns,
+  st::log::out("{}x{} 位图（{} 像素）\n\n", kGlyphW, kGlyphH, pixel_count);
+  st::log::out("灰度路径    {:>8.1f} ns   → {:>6.2f} ns/px\n", gray_ns,
             gray_ns / static_cast<double>(pixel_count));
-  st::print("LCD 路径    {:>8.1f} ns   → {:>6.2f} ns/px\n", lcd_ns,
+  st::log::out("LCD 路径    {:>8.1f} ns   → {:>6.2f} ns/px\n", lcd_ns,
             lcd_ns / static_cast<double>(pixel_count));
-  st::print("\nLCD / 灰度 = **{:.2f}×**\n",
+  st::log::out("\nLCD / 灰度 = **{:.2f}×**\n",
             gray_ns > 0.0 ? lcd_ns / gray_ns : 0.0);
-  st::print("\n参考：短行 `over_row` 单价（`simd_short_row_probe`）：\n");
-  st::print("  长 1~6 → 3.6~6.1 ns/px · 长 8 → 0.85 · 长 16 → 0.47\n");
+  st::log::out("\n参考：短行 `over_row` 单价（`simd_short_row_probe`）：\n");
+  st::log::out("  长 1~6 → 3.6~6.1 ns/px · 长 8 → 0.85 · 长 16 → 0.47\n");
   return st::probe::main_of(spec, opts, verdict);
 }

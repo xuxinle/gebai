@@ -22,6 +22,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/font.hpp"
@@ -151,13 +152,13 @@ auto main(int argc, char** argv) -> int {
 
   constexpr std::string_view kCjk = "资源管理器设置概览数据控制通道关于按钮";
   constexpr std::string_view kLatin = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP";
-  st::print("device_scale={} supersample={}（应用实际口径）\n", device_scale, ss);
-  st::print("「half」= 0.45~0.55 半覆盖像素（糊边）；「applied」= 该字形拟合是否生效\n\n");
+  st::log::out("device_scale={} supersample={}（应用实际口径）\n", device_scale, ss);
+  st::log::out("「half」= 0.45~0.55 半覆盖像素（糊边）；「applied」= 该字形拟合是否生效\n\n");
 
   for (const auto [text, tag] : {std::pair{kCjk, "CJK"}, std::pair{kLatin, "拉丁"}}) {
-    st::print("=== {} ===\n", tag);
-    st::print("  {:>5s} {:>7s}", "逻辑px", "max_shift");
-    st::print(" {:>7s} {:>7s} {:>7s} {:>8s} {:>7s}\n", "applied", "half", "mid", "mid/solid",
+    st::log::out("=== {} ===\n", tag);
+    st::log::out("  {:>5s} {:>7s}", "逻辑px", "max_shift");
+    st::log::out(" {:>7s} {:>7s} {:>7s} {:>8s} {:>7s}\n", "applied", "half", "mid", "mid/solid",
               "ink");
     for (const float size : {12.0f, 13.0f, 13.5f, 16.0f, 21.0f}) {
       const float pixel_size = size * device_scale;
@@ -178,13 +179,13 @@ auto main(int argc, char** argv) -> int {
           total.applied += one.applied;
           ++glyphs;
         }
-        st::print("  {:>5.1f} {:>9.1f}", size, max_shift);
-        st::print(" {:>7d} {:>7d} {:>7d} {:>8.3f} {:>7.0f}  ({}/{} 字形拟合生效)\n", total.applied,
+        st::log::out("  {:>5.1f} {:>9.1f}", size, max_shift);
+        st::log::out(" {:>7d} {:>7d} {:>7d} {:>8.3f} {:>7.0f}  ({}/{} 字形拟合生效)\n", total.applied,
                   total.half, total.mid,
                   total.solid > 0 ? static_cast<double>(total.mid) / total.solid : -1.0, total.ink,
                   total.applied, glyphs);
       }
-      st::print("\n");
+      st::log::out("\n");
     }
   }
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）

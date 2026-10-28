@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/math/color.hpp"
 
@@ -81,11 +82,11 @@ auto main(int argc, char** argv) -> int {
   const st::math::Color color = st::math::Color::rgb(0x0F, 0x17, 0x2A).with_alpha_f(0.15f);
   const std::uint32_t premul = st::math::premultiply(color);
 
-  st::print("阴影合成开销分解（repeat={}）\n", repeat);
+  st::log::out("阴影合成开销分解（repeat={}）\n", repeat);
 
   // a) 建表
   std::array<std::uint32_t, 256> table{};
-  st::print("  a) 建 256 项查表                {:>9.4} ms\n", best_ms(repeat, [&] {
+  st::log::out("  a) 建 256 项查表                {:>9.4} ms\n", best_ms(repeat, [&] {
              for (std::size_t level = 0; level < table.size(); ++level) {
                table[level] = scale_premul(
                    premul, static_cast<std::uint32_t>(st::math::clamp01(
@@ -98,7 +99,7 @@ auto main(int argc, char** argv) -> int {
   constexpr int kCount = 16384;
   std::vector<std::uint32_t> pixels(static_cast<std::size_t>(kCount), 0xFFF7F8FAU);
   const std::uint32_t fixed_src = table[200];
-  st::print("  b) 逐像素 over_premul ×{}      {:>9.4} ms · {:.2f} ns/px\n",
+  st::log::out("  b) 逐像素 over_premul ×{}      {:>9.4} ms · {:.2f} ns/px\n",
             kCount, best_ms(repeat, [&] {
               for (int index = 0; index < kCount; ++index) {
                 pixels[static_cast<std::size_t>(index)] =
@@ -117,7 +118,7 @@ auto main(int argc, char** argv) -> int {
   for (std::size_t index = 0; index < mask.size(); ++index) {
     mask[index] = static_cast<std::uint8_t>((index * 37U) % 256U);
   }
-  st::print("  c) 读遮罩+查表+合成 ×{}        {:>9.4} ms · {:.2f} ns/px\n", kCount,
+  st::log::out("  c) 读遮罩+查表+合成 ×{}        {:>9.4} ms · {:.2f} ns/px\n", kCount,
             best_ms(repeat, [&] {
               for (int index = 0; index < kCount; ++index) {
                 const std::uint8_t m = mask[static_cast<std::size_t>(index)];
@@ -137,7 +138,7 @@ auto main(int argc, char** argv) -> int {
 
   // d) 对照：纯内存写（清屏）同尺寸
   const std::uint32_t fill = 0xFFF7F8FAU;
-  st::print("  d) 对照 纯内存写 ×{}          {:>9.4} ms · {:.2f} ns/px\n", kCount,
+  st::log::out("  d) 对照 纯内存写 ×{}          {:>9.4} ms · {:.2f} ns/px\n", kCount,
             best_ms(repeat, [&] { std::fill(pixels.begin(), pixels.end(), fill); }),
             1e6 * best_ms(repeat, [&] { std::fill(pixels.begin(), pixels.end(), fill); }) /
                 static_cast<double>(kCount));

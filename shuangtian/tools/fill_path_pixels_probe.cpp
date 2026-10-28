@@ -16,6 +16,7 @@
 #include <functional>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 
@@ -91,13 +92,13 @@ auto main(int argc, char** argv) -> int {
     plain_ns = std::min(plain_ns, std::chrono::duration<double, std::nano>(end - start).count());
   }
 
-  st::print("圆角矩形 320×200 r16（触达 {} 像素）\n\n", pixels);
-  st::print("  缓存命中    {:>9.0f} ns   → {:>7.3f} ns/px\n", cached_ns,
+  st::log::out("圆角矩形 320×200 r16（触达 {} 像素）\n\n", pixels);
+  st::log::out("  缓存命中    {:>9.0f} ns   → {:>7.3f} ns/px\n", cached_ns,
             pixels == 0 ? 0.0 : cached_ns / static_cast<double>(pixels));
-  st::print("  真光栅化    {:>9.0f} ns   → {:>7.3f} ns/px\n", plain_ns,
+  st::log::out("  真光栅化    {:>9.0f} ns   → {:>7.3f} ns/px\n", plain_ns,
             pixels == 0 ? 0.0 : plain_ns / static_cast<double>(pixels));
-  st::print("\n缓存加速 {:.2f}×\n", cached_ns > 0.0 ? plain_ns / cached_ns : 0.0);
-  st::print("\n参考：`fill_rect`（直角大面）实测 0.0061 ms / 1.42 M px = 0.0043 ns/px；\n");
-  st::print("      `round_rect` 面板 0.35 ns/px。\n");
+  st::log::out("\n缓存加速 {:.2f}×\n", cached_ns > 0.0 ? plain_ns / cached_ns : 0.0);
+  st::log::out("\n参考：`fill_rect`（直角大面）实测 0.0061 ms / 1.42 M px = 0.0043 ns/px；\n");
+  st::log::out("      `round_rect` 面板 0.35 ns/px。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

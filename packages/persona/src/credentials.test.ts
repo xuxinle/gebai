@@ -208,6 +208,8 @@ describe("PersonaOAuth：授权链接与兑换", () => {
     // 只要收发消息相关权限，不申请云文档（少要权限用户更愿意点同意）
     expect(u.searchParams.get("scope")).toContain("im:message")
     expect(u.searchParams.get("scope")).not.toContain("docx")
+    // 用户身份读群历史（渠道 observe 读群消息的必需权限）
+    expect(u.searchParams.get("scope")).toContain("im:message.group_msg:get_as_user")
     // offline_access 缺省不带（需应用后台先开通）
     expect(u.searchParams.get("scope")).not.toContain(OFFLINE_ACCESS_SCOPE)
   })

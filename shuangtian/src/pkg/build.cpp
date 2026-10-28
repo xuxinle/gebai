@@ -51,7 +51,6 @@ namespace {
 
 /// 源文件语言（决定编译器标志：`.c` 必须按 C 编译，不能用 `-std=c++XX`）。
 enum class SourceLang : std::uint8_t { Cxx, C };
-
 struct CompileUnit {
   std::string source{};   ///< 绝对路径
   std::string object{};   ///< 绝对路径
@@ -68,6 +67,121 @@ struct CompileUnit {
   /// （不同目标嵌入不同资源，声明集合不同），无法放进工程的公共包含路径。
   std::vector<std::string> extra_include_dirs{};
 };
+
+/// 检查模式的增量状态：`build/<profile>/.check_state`。
+///
+/// ## 为什么检查模式需要自己的状态（而非复用构建的 `.o`/`.meta`）
+///
+/// 构建增量靠「`.o` 要不要重编」判定（存在性 + 指纹 + 依赖哈希），检查模式**不产出**
+/// 任何东西——没有 `.o` 可依。旧行为是每次全量 `-fsyntax-only` 全部单元（155 单元
+/// 实测 ~59 s），为的是“恒绿哨兵”语义：源码没变也必须查过一遍才放心。
+///
+/// 折中：**内容哈希做增量判定**——记录上次查过时每个单元的源+依赖哈希，下次
+/// 只查变了（或首次）的单元。语义从“每次都全量查”变成“只查有变化的”（与构建
+/// 增量同一哲学），`--force` 仍可强制全量（CI 用）。
+///
+/// ## 文件格式（每行一个单元）
+///
+/// ```
+/// <源文件绝对路径>\t<源哈希16hex>\t<依赖1哈希16hex>,<依赖2哈希16hex>…
+/// ```
+/// 依赖清单取自该单元上次 check 产出的 `.d`（check 命令带 `-MMD`）。
+/// 哈希缺失（读不到文件）→ 判“变了”（保守：多查一次）。
+constexpr std::string_view kCheckStateName = ".check_state";
+
+[[nodiscard]] auto check_state_path(const std::string& build_dir) -> std::string {
+  return fs::join(build_dir, std::string(kCheckStateName));
+}
+
+/// 读 check 状态（损坏/缺失 → 空表，调用方按“全量要查”处理）。
+/// 返回：源路径 → {源哈希, 依赖哈希…}
+[[nodiscard]] auto read_check_state(const std::string& path)
+    -> std::map<std::string, std::vector<std::uint64_t>> {
+  std::map<std::string, std::vector<std::uint64_t>> state;
+  const auto text = fs::read_text(path);
+  if (!text) return state;
+  for (const std::string_view line : st::split(*text, '\n')) {
+    const auto first = line.find('\t');
+    if (first == std::string_view::npos) continue;
+    const std::string source(line.substr(0, first));
+    const std::string_view rest = line.substr(first + 1);
+    // 首项 = 源哈希（到第一个逗号为止；`parse_u64` 要求整串被消费，不能带逗号）
+    const auto comma = rest.find(',');
+    const std::string_view source_hash_text =
+        comma == std::string_view::npos ? rest : rest.substr(0, comma);
+    const auto source_hash = st::parse_u64(source_hash_text);
+    if (!source_hash.has_value()) continue;
+    std::vector<std::uint64_t> hashes{*source_hash};
+    bool first_item = true;
+    for (const std::string_view item : st::split(rest, ',')) {
+      if (item.empty()) continue;
+      if (first_item) { first_item = false; continue; }  // 首项已取
+      if (const auto hash = st::parse_u64(item); hash.has_value()) hashes.push_back(*hash);
+    }
+    state[source] = std::move(hashes);
+  }
+  return state;
+}
+
+/// 写 check 状态（全量覆盖；失败不阻断——下次全量查即可）。
+void write_check_state(const std::string& path,
+                       const std::map<std::string, std::vector<std::uint64_t>>& state) {
+  std::string text;
+  for (const auto& [source, hashes] : state) {
+    text.append(source).append(1, '\t');
+    for (std::size_t i = 0; i < hashes.size(); ++i) {
+      if (i > 0) text.push_back(',');
+      // 十进制：`st::parse_u64`（std::from_chars）只认十进制，十六进制会解析失败。
+      text.append(std::to_string(hashes[i]));
+    }
+    text.push_back('\n');
+  }
+  if (const auto status = fs::write_text(path, text); !status) {
+    // 写失败不阻断本次检查——下次全量查即可（见函数头注释）。
+    ST_LOG_ERROR("check：状态写回失败 {}（下次将全量检查）", status.error().message);
+  }
+}
+
+/// 检查模式下某单元是否需要本次检查：源+全部依赖内容哈希与上次记录一致 → 跳过。
+/// 状态缺失/记录缺失/任一哈希读不到 → 查（保守）。
+[[nodiscard]] auto check_unit_needs_check(
+    const CompileUnit& unit, const std::vector<std::uint64_t>& recorded) -> bool {
+  const auto source_hash = file_content_hash(unit.source);
+  if (!source_hash.has_value()) return true;
+  if (recorded.empty() || recorded[0] != *source_hash) {
+    return true;
+  }
+  // 依赖清单（check 产出的 .d）。`.d` 首项是源文件自身（`<obj>: <源> <头>…`），
+  // 跳过它——源哈希已经在前面单独比对过。
+  const auto deps = parse_depfile(unit.depfile);
+  if (deps.size() < 1) {
+    return true;
+  }
+  if (deps.size() != recorded.size()) {
+    return true;  // 依赖数变了（增/删头）
+  }
+  for (std::size_t i = 1; i < deps.size(); ++i) {
+    const auto dep_hash = file_content_hash(deps[i]);
+    if (!dep_hash.has_value() || *dep_hash != recorded[i]) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/// 构造某单元当前内容的哈希向量（源在前，依赖随 `.d` 顺序）——写状态用。
+/// `.d` 首项是源自身，跳过（源哈希已经单独放首位）。
+[[nodiscard]] auto check_unit_hashes(const CompileUnit& unit) -> std::vector<std::uint64_t> {
+  std::vector<std::uint64_t> hashes;
+  if (const auto hash = file_content_hash(unit.source); hash.has_value()) hashes.push_back(*hash);
+  const auto deps = parse_depfile(unit.depfile);
+  for (std::size_t i = 1; i < deps.size(); ++i) {
+    if (const auto hash = file_content_hash(deps[i]); hash.has_value()) hashes.push_back(*hash);
+  }
+  return hashes;
+}
+
+
 
 /// 按扩展名判定语言；非 `.c` 一律按 C++ 处理（`.cpp/.cc/.cxx`）。
 [[nodiscard]] auto language_of(std::string_view path) noexcept -> SourceLang {
@@ -1051,7 +1165,8 @@ struct LanguageFlags {
                                  const std::vector<CompileUnit>& units,
                                  const std::vector<std::string>& profile_flags_list,
                                  const ResolvedToolchain& toolchain,
-                                 const FrameworkFlags* framework_flags, std::size_t& rebuilt)
+                                 const FrameworkFlags* framework_flags, std::size_t& rebuilt,
+                                 std::vector<std::string>* out_checked = nullptr)
     -> Result<std::size_t> {
   // 编译器在工具链解析阶段已经定下（路径 + 族 + 环境），这里只做非空校验：
   // 重复探测会多花时间，还可能因为环境变化给出与链接阶段不同的答案。
@@ -1095,11 +1210,12 @@ struct LanguageFlags {
       }
       return std::string{};
     }();
-    // 检查模式不建 PCH：**另一个编译器吃不了这个编译器的 .gch**
-    // （`prefix.hpp.gch` 是 gcc 的格式，clang 会直接报 “is not a valid precompiled header”），
-    // 而“用 clang 检查”正是 `st check` 的主要用法。代价是每单元重解析标准库头——
-    // 实测 77 单元 16.5 s（见 `docs/BUILD_CHECK.md`），可接受。
-    if (!pch_header.empty() && !options.check_only) {
+    // 检查模式**也建/读 PCH**：`st check` 默认用与 build 相同的编译器（gcc），
+    // 此时 `.gch` 可复用——每单元省去重新解析标准库头。
+    // 跨编译器（`--toolchain=clang`）时 ensure_pch 的产物目录按编译器隔离
+    // （`build/<profile>/pch/` 下按 compiler 分目录），clang 吃到的是自己编的 .gch，
+    // 不会读到 gcc 的——因此这里不区分 check/build，一律尝试。
+    if (!pch_header.empty()) {
       pch = ensure_pch(compiler_path, flags, include_dirs, build_dir, pch_header);
     }
   }
@@ -1183,6 +1299,11 @@ struct LanguageFlags {
   // `needs_rebuild` 内部无共享可写状态（`content_hash_cached` 自带 mutex），
   // 因此并行安全；并发度沿用本函数的 `workers` 口径。
   std::vector<std::uint8_t> needs(units.size(), 0);
+  // 检查模式增量判定用的状态快照（`build/<profile>/.check_state`）：
+  // 源路径 → {源哈希, 依赖哈希…}。只读共享，并发安全。
+  const std::map<std::string, std::vector<std::uint64_t>> check_state =
+      options.check_only ? read_check_state(check_state_path(build_dir))
+                         : std::map<std::string, std::vector<std::uint64_t>>{};
   {
     std::atomic<std::size_t> next{0};
     const std::size_t lane_count = std::max<std::size_t>(1, units.size());
@@ -1197,8 +1318,20 @@ struct LanguageFlags {
           const std::size_t index = next.fetch_add(1);
           if (index >= units.size()) return;
           const CompileUnit& unit = units[index];
-          if (options.check_only || options.force) {
-            needs[index] = 1;   // 检查/强制模式：全部要做
+          if (options.force) {
+            needs[index] = 1;   // 强制模式：全部要做
+            continue;
+          }
+          if (options.check_only) {
+            // 检查模式增量：源+依赖哈希与上次记录一致 → 跳过（不查）。
+            // `--force` 走上面分支全量（CI 用）。
+            const auto* found = [&]() -> const std::vector<std::uint64_t>* {
+              const auto it = check_state.find(unit.source);
+              return it == check_state.end() ? nullptr : &it->second;
+            }();
+            const auto& state =
+                found != nullptr ? *found : std::vector<std::uint64_t>{};
+            needs[index] = check_unit_needs_check(unit, state) ? 1 : 0;
             continue;
           }
           needs[index] = needs_rebuild(unit, unit_flags_for(unit), profile_flags_list,
@@ -1213,16 +1346,18 @@ struct LanguageFlags {
 
   for (std::size_t unit_index = 0; unit_index < units.size(); ++unit_index) {
     const CompileUnit& unit = units[unit_index];
-    // 检查模式：**全部单元都查**——不做增量判定，也不查共享对象缓存。
-    // 理由：这里的两个跳过机制判的都是“`.o` 是不是还要重编”，而检查模式根本不产出 `.o`。
-    // 若沿用它们，一个“已构建过、源码未变”的仓库会**一个单元都不查**，
-    // 于是 `st check` 直接报成功——一个恒绿的检查比没有检查更糟。
-    const bool must_check = options.check_only;
-    if (!must_check && !options.force && needs[unit_index] == 0) {
+    // 检查模式：**增量跳过**（源+依赖哈希与上次记录一致 → 这单元不查）。
+    // 旧行为是全量查全部单元（“恒绿哨兵”：源码没变也全查一遍，155 单元实测 ~59 s）——
+    // 与构建增量同一哲学改为只查有变化的，`--force` 强制全量（CI 用，语义不变）。
+    const bool skip_by_needs = !options.force && needs[unit_index] == 0;
+    if (skip_by_needs) {
+      // 检查模式还要**更新状态**：增量判定依赖“上次查过”的记录——
+      // 若某单元因未变被跳过，它的状态记录保持原样即可；首次（无记录）不在这里处理。
+      if (options.check_only) continue;
       continue;
     }
     // 工程内已过期 → 先问共享缓存：命中就不必真编译（跨工程复用框架对象的主要路径）
-    if (!must_check && !options.force &&
+    if (!options.check_only && !options.force &&
         object_cache_restore(object_cache, cache_key_for(unit), unit)) {
       ++cache_hits;
       // 从共享缓存恢复的对象也要补写标志指纹：否则下次构建因"缺指纹"再重编一遍，
@@ -1234,6 +1369,7 @@ struct LanguageFlags {
       continue;
     }
     pending.push_back(&unit);
+    if (out_checked != nullptr) out_checked->push_back(unit.source);  // check 模式：记实际查的
   }
   rebuilt = pending.size();
   if (pending.empty()) return std::size_t{0};
@@ -1344,6 +1480,12 @@ struct LanguageFlags {
       const std::string temporary_object = unit->object + ".tmp";
       const std::string temporary_depfile = unit->depfile + ".tmp";
       if (options.check_only) {
+        // 检查模式**也产出依赖清单**（`-MMD`）：增量判定要拿“这单元依赖哪些头”。
+        // 写标准 `.d` 路径（`<obj>.d`）不冲突：构建判新靠 `.o` 存在/指纹/`.meta`，
+        // 这个 `.d` 只被 check 状态读取；放到临时名，成功才改名（失败不留半截）。
+        args.push_back("-MMD");
+        args.push_back("-MF");
+        args.push_back(temporary_depfile);
         args.push_back("-fsyntax-only");
         args.push_back(unit->source);
       } else {
@@ -1392,8 +1534,12 @@ struct LanguageFlags {
         }
         return;
       }
-      // 检查模式到此结束：没有产物要改名，也不写指纹/缓存（什么都没产出）。
+      // 检查模式：只把依赖清单改名到位（`-MMD` 产出），供下次增量判定读依赖列表。
+      // 不写 `.o`、不写指纹/缓存。改名失败不阻断（下次全量查）。
       if (options.check_only) {
+        if (fs::is_regular_file(temporary_depfile)) {
+          (void)fs::rename(temporary_depfile, unit->depfile);
+        }
         ++done;
         return;
       }
@@ -2526,9 +2672,12 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
                                            *flags, *toolchain);
   }
   std::size_t rebuilt = 0;
+  // check 模式：收集本次实际查过（哈希变化/首次）的单元源路径，用于状态写回。
+  std::vector<std::string> checked_sources;
   const std::int64_t compile_start = time::now_ns();
   auto compiled = compile_units(effective, options, units, *flags, *toolchain,
-                                framework_flags.has_value() ? &*framework_flags : nullptr, rebuilt);
+                                framework_flags.has_value() ? &*framework_flags : nullptr, rebuilt,
+                                options.check_only ? &checked_sources : nullptr);
   if (!compiled) return forward_error(compiled.error());
   const std::int64_t compile_ms = (time::now_ns() - compile_start) / 1'000'000;
 
@@ -2543,7 +2692,7 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
     BuildStats check_stats;
     check_stats.units_total = units.size();
     check_stats.units_rebuilt = rebuilt;              // 检查模式：这个值就是“实际检查的单元数”
-    check_stats.units_cached = 0;
+    check_stats.units_cached = units.size() - rebuilt;  // 增量跳过（哈希一致）的单元
     check_stats.compile_ms = compile_ms;
     check_stats.elapsed_ms = (time::now_ns() - start_ns) / 1'000'000;
     const ConcurrencyPlan plan = plan_concurrency(options.jobs, options.jobs_large,
@@ -2553,7 +2702,24 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
     check_stats.workers_large = plan.jobs_large;
     check_stats.memory_budget_mb = plan.budget_mb;
     check_stats.concurrency_reason = plan.reason;
-    check_stats.pch_used = false;                     // 检查模式不建也不消费 PCH
+    check_stats.pch_used = options.use_pch;        // 检查模式现在也消费 PCH（同编译器）
+    // 增量状态写回：本次查过的单元更新哈希，跳过的保持旧记录（合并写）。
+    // 编译失败（compile_units 返回 error）不会走到这里——状态永远只记录“查过且通过”。
+    if (!checked_sources.empty()) {
+      std::map<std::string, std::vector<std::uint64_t>> state =
+          read_check_state(check_state_path(build_dir));
+      const std::map<std::string, const CompileUnit*> by_source = [&]() {
+        std::map<std::string, const CompileUnit*> map;
+        for (const auto& unit : units) map.emplace(unit.source, &unit);
+        return map;
+      }();
+      for (const auto& source : checked_sources) {
+        const auto found = by_source.find(source);
+        if (found == by_source.end()) continue;
+        state[source] = check_unit_hashes(*found->second);
+      }
+      write_check_state(check_state_path(build_dir), state);
+    }
     return check_stats;
   }
 
@@ -3031,8 +3197,8 @@ namespace {
     ST_LOG_INFO("失败分片的完整输出（逐用例结果 + 断言消息）：");
     for (const auto& path : failed_shard_logs) ST_LOG_INFO("  {}", path);
     // 同时打到控制台："去哪看详情"本身也是诊断信息，不能被截断掉。
-    st::print("\n  失败分片日志（含逐用例结果）：\n");
-    for (const auto& path : failed_shard_logs) st::print("    {}\n", path);
+    st::log::out("\n  失败分片日志（含逐用例结果）：\n");
+    for (const auto& path : failed_shard_logs) st::log::out("    {}\n", path);
   }
   if (!junit_path.empty()) {
     // 各片报告里的**失败用例数**由合并函数回填；返回值只用于日志（不改变退出码语义）

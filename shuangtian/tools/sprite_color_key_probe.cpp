@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -86,8 +87,8 @@ auto main(int argc, char** argv) -> int {
   }
   st::probe::result verdict{};
 
-  st::print("同一批形状 × N 种颜色（每帧都画一遍）\n\n");
-  st::print("{:>10}  {:>12}  {:>10}  {:>10}  {:>10}  {:>14}\n", "颜色数", "每帧耗时 ms", "hits",
+  st::log::out("同一批形状 × N 种颜色（每帧都画一遍）\n\n");
+  st::log::out("{:>10}  {:>12}  {:>10}  {:>10}  {:>10}  {:>14}\n", "颜色数", "每帧耗时 ms", "hits",
             "misses", "rejected", "未命中占比");
   for (const int colors : {1, 2, 4, 8}) {
     Canvas canvas(kWidth, kHeight, 1.0f);
@@ -101,13 +102,13 @@ auto main(int argc, char** argv) -> int {
     const std::uint64_t add_hits = after.hits - before.hits;
     const std::uint64_t add_misses = after.misses - before.misses;
     const std::uint64_t add_total = add_hits + add_misses;
-    st::print("{:>10}  {:>12.3f}  {:>10}  {:>10}  {:>10}  {:>13.1f}%\n", colors, ms, add_hits,
+    st::log::out("{:>10}  {:>12.3f}  {:>10}  {:>10}  {:>10}  {:>13.1f}%\n", colors, ms, add_hits,
               add_misses, after.rejected - before.rejected,
               add_total == 0 ? 0.0
                              : static_cast<double>(add_misses) /
                                    static_cast<double>(add_total) * 100.0);
   }
-  st::print("\n注：若“条目数”随颜色数线性增长，说明同一几何在为每种颜色重复建图——\n");
-  st::print("    改成“贴图只存覆盖率、颜色在贴出时乘”可把条目数压回形状数。\n");
+  st::log::out("\n注：若“条目数”随颜色数线性增长，说明同一几何在为每种颜色重复建图——\n");
+  st::log::out("    改成“贴图只存覆盖率、颜色在贴出时乘”可把条目数压回形状数。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

@@ -34,6 +34,7 @@
 #include "st/core/print.hpp"
 #include "st/core/time.hpp"
 #include "st/core/json.hpp"
+#include "st/core/log.hpp"
 #include "st/ui/components/title_bar.hpp"
 #include "st/ui/components/window_frame.hpp"
 #include "st/ui/hot_reload.hpp"
@@ -137,7 +138,7 @@ struct Options {
 /// 用法说明。**必须有**：未知参数会报错退出，没有 `--help` 就等于"报错了也没处查"
 ///（承 gbcode 同名函数）。
 auto print_usage(std::string_view program) -> void {
-  st::print(
+  st::log::out(
       "用法: {} [选项]\n"
       "\n"
       "窗口/主题\n"
@@ -183,7 +184,7 @@ auto parse_options(int argc, char** argv) -> Options {
         return consumed == text.size();   // 尾巴（如 `8x`）也是非法值
       }();
       if (!ok) {
-        st::eprint("参数 {} 需要一个整数，得到：{}（用 --help 看可用项）\n",
+        st::log::err("参数 {} 需要一个整数，得到：{}（用 --help 看可用项）\n",
                    flag, text.empty() ? "（缺值）" : text);
         std::exit(2);
       }
@@ -204,7 +205,7 @@ auto parse_options(int argc, char** argv) -> Options {
     } else if (arg == "--control-port") {
       const std::int64_t port = parse_int("--control-port");
       if (port < 0 || port > 65535) {
-        st::eprint("参数 --control-port 超出端口范围：{}\n", port);
+        st::log::err("参数 --control-port 超出端口范围：{}\n", port);
         std::exit(2);
       }
       options.control_port = static_cast<std::uint16_t>(port);
@@ -218,7 +219,7 @@ auto parse_options(int argc, char** argv) -> Options {
     // **未知参数报错，不静默忽略**（gbcode 实证过的温床：新加的开关被静默
     // 吃掉，表现是"三档渲染出来的图几乎一样"，差点被当成结论）。
     else {
-      st::eprint("未知参数：{}（用 --help 看可用项）\n", arg);
+      st::log::err("未知参数：{}（用 --help 看可用项）\n", arg);
       std::exit(2);
     }
   }
@@ -305,10 +306,10 @@ auto run_app(int argc, char** argv) -> int {
     std::fprintf(stderr, "装载失败：%s\n", status.error().message.c_str());
     return 1;
   }
-  st::print("xmlapp 就绪：界面 {} · 逻辑 {} · 桥 {} 个函数 · 热重载 {}\n", ui_dir,
+  st::log::out("xmlapp 就绪：界面 {} · 逻辑 {} · 桥 {} 个函数 · 热重载 {}\n", ui_dir,
             st::fs::join(ui_dir, "app.js"), bridge.exposed().size(),
             options.watch ? "开（改文件即生效）" : "关（--watch 打开）");
-  st::print("  {}\n", hot.last_summary());
+  st::log::out("  {}\n", hot.last_summary());
 
   // 主循环：**承 gallery/louyue 形态**（需要每帧显式推进声明式宿主）。
   // 每帧的 `hot.poll()` 没开 watch 时是常数级判断，不影响帧时间。
@@ -322,7 +323,7 @@ auto run_app(int argc, char** argv) -> int {
     app.pace_loop(frame_start_ms);
   }
   const Json final_status = hot.status();
-  st::print("xmlapp 退出：{} 帧（界面重建 {} 次 / 逻辑重装 {} 次）\n", frames,
+  st::log::out("xmlapp 退出：{} 帧（界面重建 {} 次 / 逻辑重装 {} 次）\n", frames,
             st::json_as_i64(final_status["ui_refreshes"], 0),
             st::json_as_i64(final_status["script_refreshes"], 0));
   return 0;

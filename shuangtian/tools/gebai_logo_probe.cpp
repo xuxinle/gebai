@@ -28,6 +28,7 @@
 
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/svg.hpp"
@@ -104,15 +105,15 @@ auto main(int argc, char** argv) -> int {
       argc > 2 ? argv[2] : "examples/assets/gebai-logo.svg";
   const std::string source = read_file(path);
   if (source.empty()) {
-    st::print("读不到 SVG：{}\n", path);
+    st::log::out("读不到 SVG：{}\n", path);
     return 1;
   }
   const auto document = st::ui::svg::parse(source);
   if (!document.has_value() || document->is_empty()) {
-    st::print("SVG 解析失败（{} 个节点）\n", document.has_value() ? document->nodes.size() : 0);
+    st::log::out("SVG 解析失败（{} 个节点）\n", document.has_value() ? document->nodes.size() : 0);
     return 1;
   }
-  st::print("解析成功：viewBox {}x{}，{} 个节点\n", document->view_w, document->view_h,
+  st::log::out("解析成功：viewBox {}x{}，{} 个节点\n", document->view_w, document->view_h,
             document->nodes.size());
 
   // 逐档尺寸（物理像素）：16 = 标题栏逻辑 16px @1.0；24/32 = 高 DPI 下的对应档；
@@ -144,7 +145,7 @@ auto main(int argc, char** argv) -> int {
                                             static_cast<float>(size)},
                       std::nullopt);
     const Metrics metrics = measure(cell);
-    st::print("{:>4}px  白瓣缝宽 {:>4.1f}px  白 {}  蓝 {}\n", size, metrics.min_gap,
+    st::log::out("{:>4}px  白瓣缝宽 {:>4.1f}px  白 {}  蓝 {}\n", size, metrics.min_gap,
               metrics.has_white ? "有" : "无", metrics.has_blue ? "有" : "无");
   }
 
@@ -154,10 +155,10 @@ auto main(int argc, char** argv) -> int {
   image.rgba = canvas.to_rgba8();
   const auto written = st::codec::png_write_file(out, image);
   if (!written) {
-    st::print("写盘失败：{}\n", written.error().message);
+    st::log::out("写盘失败：{}\n", written.error().message);
     return 1;
   }
-  st::print("已写出 {}\n", out);
+  st::log::out("已写出 {}\n", out);
 
   // —— 裸图标导出（给窗口/任务栏图标用）——
   //
@@ -177,10 +178,10 @@ auto main(int argc, char** argv) -> int {
     icon_image.height = kIconSize;
     icon_image.rgba = icon_canvas.to_rgba8();
     if (auto status = st::codec::png_write_file(icon_path, icon_image); !status) {
-      st::print("裸图标写盘失败：{}\n", status.error().message);
+      st::log::out("裸图标写盘失败：{}\n", status.error().message);
       return 1;
     }
-    st::print("已写出 {}（{}×{} 裸图标，供窗口/任务栏使用）\n", icon_path, kIconSize, kIconSize);
+    st::log::out("已写出 {}（{}×{} 裸图标，供窗口/任务栏使用）\n", icon_path, kIconSize, kIconSize);
   }
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 

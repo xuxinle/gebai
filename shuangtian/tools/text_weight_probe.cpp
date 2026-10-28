@@ -15,6 +15,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -97,9 +98,9 @@ auto main(int argc, char** argv) -> int {
   };
   for (const Sample& sample : samples) {
     const float physical = sample.size * 1.5f;
-    st::print("\n=== {} 「{}」（物理 {}px）===\n", sample.tag, sample.text, physical);
+    st::log::out("\n=== {} 「{}」（物理 {}px）===\n", sample.tag, sample.text, physical);
     const Stat base = render(renderer, sample.text, sample.size, 0.0f);
-    st::print("  {:<10s} ink={:8.1f} solid={:4d} mid={:4d} peak={:.3f}\n", "Regular",
+    st::log::out("  {:<10s} ink={:8.1f} solid={:4d} mid={:4d} peak={:.3f}\n", "Regular",
               base.ink, base.solid, base.mid, base.peak);
     for (const FontWeight weight : {FontWeight::Medium, FontWeight::SemiBold, FontWeight::Bold}) {
       const float radius = st::ui::embolden_radius(physical, weight);
@@ -110,7 +111,7 @@ auto main(int argc, char** argv) -> int {
         const Stat stat = render(renderer, sample.text, sample.size, embolden);
         const char* name = weight == FontWeight::Medium ? "Medium"
                            : (weight == FontWeight::SemiBold ? "SemiBold" : "Bold");
-        st::print("  {:<10s} ink={:8.1f} solid={:4d} mid={:4d} peak={:.3f}  "
+        st::log::out("  {:<10s} ink={:8.1f} solid={:4d} mid={:4d} peak={:.3f}  "
                   "墨量 {:+.1f}%  中间调 {:+.1f}%\n",
                   name, stat.ink, stat.solid, stat.mid, stat.peak,
                   (stat.ink / base.ink - 1.0) * 100.0,

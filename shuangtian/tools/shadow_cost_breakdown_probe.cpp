@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 
@@ -124,12 +125,12 @@ auto main(int argc, char** argv) -> int {
     }
     (void)whitepaper;
   }
-  st::print("参与阴影的像素合计：{}\n\n", sample_count);
+  st::log::out("参与阴影的像素合计：{}\n\n", sample_count);
 
-  st::print("① 完整 draw_shadow（7 次，遮罩已缓存）  {:>8.3f} ms\n", full_ms);
+  st::log::out("① 完整 draw_shadow（7 次，遮罩已缓存）  {:>8.3f} ms\n", full_ms);
   const double full_ns_per_px =
       sample_count == 0 ? 0.0 : full_ms * 1e6 / static_cast<double>(sample_count);
-  st::print("   → {:.3f} ns/px\n\n", full_ns_per_px);
+  st::log::out("   → {:.3f} ns/px\n\n", full_ns_per_px);
 
   // ③ 纯逐像素 over_premul 的下界：同样像素数，无遮罩读取、无分支。
   std::vector<std::uint32_t> scratch(static_cast<std::size_t>(kWidth) *
@@ -142,10 +143,10 @@ auto main(int argc, char** argv) -> int {
       scratch[index] = over_premul_ref(scratch[index], premul);
     }
   });
-  st::print("② 纯 over_premul 同像素数（无遮罩/无分支） {:>8.3f} ms\n", pure_ms);
+  st::log::out("② 纯 over_premul 同像素数（无遮罩/无分支） {:>8.3f} ms\n", pure_ms);
   const double pure_ns_per_px =
       sample_count == 0 ? 0.0 : pure_ms * 1e6 / static_cast<double>(sample_count);
-  st::print("   → {:.3f} ns/px\n\n", pure_ns_per_px);
-  st::print("注：①/② 的比值说明“遮罩读取 + 查表 + 变 α 分支”占多少。\n");
+  st::log::out("   → {:.3f} ns/px\n\n", pure_ns_per_px);
+  st::log::out("注：①/② 的比值说明“遮罩读取 + 查表 + 变 α 分支”占多少。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

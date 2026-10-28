@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -72,8 +73,8 @@ auto main(int argc, char** argv) -> int {
   };
   const Paint paint = Paint::solid(Color{0x2F, 0x6F, 0xE0, 255});
 
-  st::print("画布 {}x{}，每项 {} 轮取最小\n\n", kWidth, kHeight, kRounds);
-  st::print("{:<20}  {:>12}  {:>12}  {:>10}  {:>14}\n", "形状", "A 三带 ms", "B 贴图 ms",
+  st::log::out("画布 {}x{}，每项 {} 轮取最小\n\n", kWidth, kHeight, kRounds);
+  st::log::out("{:<20}  {:>12}  {:>12}  {:>10}  {:>14}\n", "形状", "A 三带 ms", "B 贴图 ms",
             "B/A", "A 的 ns/px");
   for (const Shape& shape : shapes) {
     const Rect box{100.0f, 100.0f, shape.width, shape.height};
@@ -93,11 +94,11 @@ auto main(int argc, char** argv) -> int {
     canvas_b.fill_path(path, paint);   // 预热：建贴图
     const double b_ms = best_ms([&] { canvas_b.fill_path(path, paint); });
 
-    st::print("{:<20}  {:>12.3f}  {:>12.3f}  {:>10.2f}  {:>14.3f}\n", shape.name, a_ms, b_ms,
+    st::log::out("{:<20}  {:>12.3f}  {:>12.3f}  {:>10.2f}  {:>14.3f}\n", shape.name, a_ms, b_ms,
               b_ms > 0.0 ? a_ms / b_ms : 0.0, a_ms * 1e6 / area);
   }
-  st::print("\n注：B 会先预热一次（建贴图），所以 B 报的是**稳态命中**成本。\n");
-  st::print("    两者逐像素等价已由 tests/raster_fill_test.cpp 的\n");
-  st::print("    `fill_round_rect_split_matches_path_rasterization`（零容差）钉住。\n");
+  st::log::out("\n注：B 会先预热一次（建贴图），所以 B 报的是**稳态命中**成本。\n");
+  st::log::out("    两者逐像素等价已由 tests/raster_fill_test.cpp 的\n");
+  st::log::out("    `fill_round_rect_split_matches_path_rasterization`（零容差）钉住。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

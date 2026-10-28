@@ -150,7 +150,7 @@ constexpr const char* kStpmVersion = "0.1.0";
 }
 
 void print_usage() {
-  st::print(R"((霜天工具链 st — 自研包管理器与构建驱动
+  st::log::out(R"((霜天工具链 st — 自研包管理器与构建驱动
 
 用法: st <命令> [参数]
 
@@ -255,7 +255,7 @@ auto command_rebuild(const Arguments& arguments) -> int {
   options.verbose = arguments.has("verbose") || arguments.has("v");
   options.output_override = staging;
 
-  st::print("重建构建工具（目标 st，档位 {}）…\n", options.profile);
+  st::log::out("重建构建工具（目标 st，档位 {}）…\n", options.profile);
   const std::int64_t start = st::time::now_ns();
   auto stats = st::pkg::build(*manifest, options);
   if (!stats) {
@@ -287,9 +287,9 @@ auto command_rebuild(const Arguments& arguments) -> int {
     return 1;
   }
 
-  st::print("已重建 → {}（{}）\n", self, elapsed);
-  st::print("  旧版本备份在 {}\n", backup);
-  st::print("  **当前进程仍跑旧逻辑；下次运行 st 即为新版。**\n");
+  st::log::out("已重建 → {}（{}）\n", self, elapsed);
+  st::log::out("  旧版本备份在 {}\n", backup);
+  st::log::out("  **当前进程仍跑旧逻辑；下次运行 st 即为新版。**\n");
   return 0;
 }
 
@@ -329,9 +329,9 @@ auto command_build(const Arguments& arguments) -> int {
     std::fprintf(stderr, "%s\n", stats.error().message.c_str());
     return 1;
   }
-  st::print("构建完成 [{}] 单元 {}（重编 {} / 命中缓存 {}）\n", options.profile,
+  st::log::out("构建完成 [{}] 单元 {}（重编 {} / 命中缓存 {}）\n", options.profile,
               stats->units_total, stats->units_rebuilt, stats->units_cached);
-  st::print("  编译 {} · {} · 总 {} · 并行 {} 路{}\n",
+  st::log::out("  编译 {} · {} · 总 {} · 并行 {} 路{}\n",
               st::time::format_duration_ns(stats->compile_ms * 1'000'000),
               stats->linked ? std::format("链接 {}",
                                           st::time::format_duration_ns(stats->link_ms * 1'000'000))
@@ -340,14 +340,14 @@ auto command_build(const Arguments& arguments) -> int {
               stats->pch_used ? " · PCH" : "");
   // 并发决策必须可见："为什么是 14 路而不是 28"是运维/排查会问的第一个问题
   if (!stats->concurrency_reason.empty()) {
-    st::print("  并发依据: {}（超大单元上限 {}）\n", stats->concurrency_reason,
+    st::log::out("  并发依据: {}（超大单元上限 {}）\n", stats->concurrency_reason,
                 stats->workers_large);
   }
-  if (!stats->artifact.empty()) st::print("产物: {}\n", stats->artifact);
+  if (!stats->artifact.empty()) st::log::out("产物: {}\n", stats->artifact);
   // 测试二进制被顺带重建时必须说一声——这个动作的全部价值就在于消除
   // 「以为验了新代码，其实跑的是旧的」。静默重建等于把功劳埋了。
   if (stats->tests_rebuilt) {
-    st::print("  测试: 目标已过期 → 已同步重建（只构建，未运行；跑测试用 `st test`）\n");
+    st::log::out("  测试: 目标已过期 → 已同步重建（只构建，未运行；跑测试用 `st test`）\n");
   }
 
   return 0;
@@ -413,21 +413,21 @@ auto command_watch(const Arguments& arguments) -> int {
     return 1;
   }
 
-  st::print("监视 {} 个文件（间隔 {}ms · 静默期 {}ms）\n", plan->size(), interval_ms,
+  st::log::out("监视 {} 个文件（间隔 {}ms · 静默期 {}ms）\n", plan->size(), interval_ms,
             debounce_ms);
-  st::print("  档位 {} · 目标 {}\n", options.profile,
+  st::log::out("  档位 {} · 目标 {}\n", options.profile,
             options.target.empty() ? std::string("(库)") : options.target);
-  st::print("  Ctrl+C 退出。\n\n");
+  st::log::out("  Ctrl+C 退出。\n\n");
 
   const auto build_once = [&](std::string_view why) -> int {
     const std::int64_t start = st::time::now_ns();
     auto stats = st::pkg::build(*manifest, options);
     const std::string took = st::time::format_duration_ns(st::time::now_ns() - start);
     if (!stats) {
-      st::eprint("[{}] 失败（{}）：{}\n", clock_text(), took, stats.error().message);
+      st::log::err("[{}] 失败（{}）：{}\n", clock_text(), took, stats.error().message);
       return 1;
     }
-    st::print("[{}] {} → 重编 {} / 命中 {} · {}{}\n", clock_text(), why, stats->units_rebuilt,
+    st::log::out("[{}] {} → 重编 {} / 命中 {} · {}{}\n", clock_text(), why, stats->units_rebuilt,
               stats->units_cached, took, stats->linked ? "" : " （未重链）");
     return 0;
   };
@@ -442,7 +442,7 @@ auto command_watch(const Arguments& arguments) -> int {
   // 而 `--once` 的用途恰恰是“我现在就要一次构建结果”，不该依赖有变更。
   if (once) {
     const int code = build_once("一次性构建");
-    st::print("\n--once：构建完成（退出码 {}）\n", code);
+    st::log::out("\n--once：构建完成（退出码 {}）\n", code);
     return code;
   }
 
@@ -534,9 +534,9 @@ auto command_watch(const Arguments& arguments) -> int {
   }
   if (newest_stamp > *artifact_time) return std::nullopt;
 
-  st::print("未重编：资源文件（XML/JS）是运行期读的——产物较壳层源码新，直接用。\n");
-  st::print("  （改了 C++ 才需要构建；要强制重建加 build 或 --force）\n");
-  st::print("运行: {}\n", artifact);
+  st::log::out("未重编：资源文件（XML/JS）是运行期读的——产物较壳层源码新，直接用。\n");
+  st::log::out("  （改了 C++ 才需要构建；要强制重建加 build 或 --force）\n");
+  st::log::out("运行: {}\n", artifact);
   std::fflush(stdout);
   st::process::Options run_options;
   run_options.capture_output = false;
@@ -585,7 +585,7 @@ auto command_run(const Arguments& arguments) -> int {
     std::fprintf(stderr, "%s\n", stats.error().message.c_str());
     return 1;
   }
-  st::print("运行: {}\n", stats->artifact);
+  st::log::out("运行: {}\n", stats->artifact);
   std::fflush(stdout);
   // 交叉产物仅在与宿主平台不同时拒绝执行（目标==宿主则照常跑，见 BuildStats.runs_on_host）
   if (!stats->runs_on_host) {
@@ -666,11 +666,11 @@ auto command_test(const Arguments& arguments) -> int {
     junit_path = arguments.get("junit-out", "");
     if (junit_path.empty()) junit_path = st::fs::join(manifest->directory, "build/test-results.xml");
   }
-  st::print("{}测试 [{}]{}{}{}", list_only ? "列出" : "运行", options.profile,
+  st::log::out("{}测试 [{}]{}{}{}", list_only ? "列出" : "运行", options.profile,
               filter.empty() ? "" : std::format(" 过滤: {}", filter),
               options.test_jobs > 1 ? std::format(" {} 片并行", options.test_jobs) : "",
               junit_path.empty() ? "" : std::format(" → {}", junit_path));
-  st::print("{}\n", arguments.has("slow") ? "（含慢/环境敏感用例）" : "");
+  st::log::out("{}\n", arguments.has("slow") ? "（含慢/环境敏感用例）" : "");
   auto code = st::pkg::run_tests(*manifest, options, filter, list_only, junit_path,
                                  /*include_slow=*/arguments.has("slow"),
                                  // 分片日志与主日志**同一目录**（`.st/logs`）：
@@ -715,27 +715,27 @@ auto command_stats(const Arguments& arguments) -> int {
     std::fprintf(stderr, "错误: %s\n", stats.error().to_string().c_str());
     return 1;
   }
-  st::print("源码结构度量（{} 个文件）\n", stats->files);
-  st::print("  总行数 {} · 非空行 {} · 函数 {}\n\n", stats->lines, stats->code_lines,
+  st::log::out("源码结构度量（{} 个文件）\n", stats->files);
+  st::log::out("  总行数 {} · 非空行 {} · 函数 {}\n\n", stats->lines, stats->code_lines,
             stats->functions);
 
-  st::print("最大文件\n");
-  for (const auto& f : stats->biggest_files) st::print("  {:5d} 行  {}\n", f.lines, f.path);
-  st::print("\n最大函数（含注释与签名）\n");
+  st::log::out("最大文件\n");
+  for (const auto& f : stats->biggest_files) st::log::out("  {:5d} 行  {}\n", f.lines, f.path);
+  st::log::out("\n最大函数（含注释与签名）\n");
   for (const auto& f : stats->biggest_functions) {
-    st::print("  {:5d} 行  {}:{}  {}\n", f.lines, f.file, f.line, f.name);
+    st::log::out("  {:5d} 行  {}:{}  {}\n", f.lines, f.file, f.line, f.name);
   }
-  st::print("\n最复杂函数（近似圈复杂度）\n");
+  st::log::out("\n最复杂函数（近似圈复杂度）\n");
   for (const auto& f : stats->complex_functions) {
-    st::print("  CC≈{:4d}  {:5d} 行  {}:{}  {}\n", f.complexity, f.lines, f.file, f.line, f.name);
+    st::log::out("  CC≈{:4d}  {:5d} 行  {}:{}  {}\n", f.complexity, f.lines, f.file, f.line, f.name);
   }
-  st::print("\n函数长度分布\n");
-  st::print("  >=200 行 {} · 150-199 {} · 100-149 {}\n", stats->functions_over_200,
+  st::log::out("\n函数长度分布\n");
+  st::log::out("  >=200 行 {} · 150-199 {} · 100-149 {}\n", stats->functions_over_200,
             stats->functions_over_150, stats->functions_over_100);
-  st::print("\n被包含最多的头（直接包含数）\n");
-  for (const auto& h : stats->hot_headers) st::print("  {:4d}   {}\n", h.includers, h.header);
-  st::print("\n爆炸半径（改它要重编多少 .cpp，含传递）\n");
-  for (const auto& h : stats->blast_radius) st::print("  {:4d}   {}\n", h.includers, h.header);
+  st::log::out("\n被包含最多的头（直接包含数）\n");
+  for (const auto& h : stats->hot_headers) st::log::out("  {:4d}   {}\n", h.includers, h.header);
+  st::log::out("\n爆炸半径（改它要重编多少 .cpp，含传递）\n");
+  for (const auto& h : stats->blast_radius) st::log::out("  {:4d}   {}\n", h.includers, h.header);
   return 0;
 }
 
@@ -751,24 +751,26 @@ auto command_check(const Arguments& arguments) -> int {
   options.toolchain = arguments.get("toolchain", "");
   options.verbose = arguments.has("verbose");
   options.check_only = true;               // ← 关键：同一段决策，不产出
+  // `--force` = 全量检查（忽略增量状态；CI 兜底用）
+  options.force = arguments.has("force");
   // 并发：检查是**纯 CPU**（无对象写盘、无链接），不需按编译的内存预算保守推导，
   // 所以不用 `plan_concurrency` 的内存口径；但也不超订硬件核数（超了只会互相抢）。
   const auto jobs = arguments.number_any({"j", "jobs"}, 0.0);
   options.jobs = jobs > 0.0 ? static_cast<std::size_t>(jobs) : st::hardware_concurrency();
 
-  st::print("检查 [{}]{}{}", options.profile,
+  st::log::out("检查 [{}]{}{}", options.profile,
             options.toolchain.empty() ? "" : std::format(" 工具链: {}", options.toolchain),
             options.target.empty() ? "" : std::format(" 目标: {}", options.target));
-  st::print("{}\n", options.verbose ? "（详细）" : "");
+  st::log::out("{}\n", options.verbose ? "（详细）" : "");
 
   const auto started = st::time::now_ns();
   auto stats = st::pkg::build(*manifest, options);
   if (!stats) {
-    st::print("\n检查未通过\n{}", stats.error().to_string());
+    st::log::out("\n检查未通过\n{}", stats.error().to_string());
     return 1;
   }
   const auto elapsed = (st::time::now_ns() - started) / 1'000'000;
-  st::print("检查通过 [{}] 单元 {}（{:.2f}s）并行 {} 路 · {}\n", options.profile,
+  st::log::out("检查通过 [{}] 单元 {}（{:.2f}s）并行 {} 路 · {}\n", options.profile,
             stats->units_total, static_cast<double>(elapsed) / 1000.0, stats->workers,
             stats->concurrency_reason);
   return 0;
@@ -777,12 +779,12 @@ auto command_check(const Arguments& arguments) -> int {
 auto command_lint(const Arguments& arguments) -> int {
   if (arguments.has("rules")) {
     for (const auto& [rule, description] : st::pkg::known_rules()) {
-      st::print("  {:<4} {}\n", rule, description);
+      st::log::out("  {:<4} {}\n", rule, description);
     }
     return 0;
   }
   if (!arguments.get("explain").empty()) {
-    st::print("{}\n", st::pkg::explain_rule(arguments.get("explain")));
+    st::log::out("{}\n", st::pkg::explain_rule(arguments.get("explain")));
     return 0;
   }
   auto root = project_root();
@@ -806,12 +808,12 @@ auto command_lint(const Arguments& arguments) -> int {
   std::size_t failing = 0;
   for (const auto& violation : report->violations) {
     if (!violation.advisory) ++failing;
-    st::print("{}{}:{} [{}] {}\n", violation.advisory ? "(提示) " : "", violation.file,
+    st::log::out("{}{}:{} [{}] {}\n", violation.advisory ? "(提示) " : "", violation.file,
                 violation.line, violation.rule, violation.text);
   }
   // 豁免计数**分开报**：行内（单点破例）与清单（工程级边界）是两种性质的东西，
   // 混在一起就看不出全局边界有多宽。
-  st::print("\n扫描 {} 个文件，违反 {} 项（提示 {} 项，豁免 {} 处：行内 {} / 清单 {}）\n",
+  st::log::out("\n扫描 {} 个文件，违反 {} 项（提示 {} 项，豁免 {} 处：行内 {} / 清单 {}）\n",
               report->files_scanned, failing, report->violations.size() - failing,
               report->suppressed, report->suppressed - report->suppressed_by_manifest,
               report->suppressed_by_manifest);
@@ -820,64 +822,64 @@ auto command_lint(const Arguments& arguments) -> int {
 
 auto command_doctor(const Arguments& arguments) -> int {
   (void)arguments;
-  st::print("霜天环境自检\n");
-  st::print("  版本            : {}\n", kStpmVersion);
+  st::log::out("霜天环境自检\n");
+  st::log::out("  版本            : {}\n", kStpmVersion);
   const auto compiler = st::pkg::detect_compiler();
-  st::print("  C++ 编译器      : {}\n",
+  st::log::out("  C++ 编译器      : {}\n",
               compiler ? compiler->c_str() : std::format("未找到（{}）", compiler.error().message));
   if (compiler) {
     auto version = st::process::run(*compiler, {"--version"});
     if (version && version->exit_code == 0) {
-      st::print("  编译器版本      : {}\n", st::trim(version->stdout_text).data());
+      st::log::out("  编译器版本      : {}\n", st::trim(version->stdout_text).data());
     }
   }
-  st::print("  逻辑核心        : {}\n", st::hardware_concurrency());
+  st::log::out("  逻辑核心        : {}\n", st::hardware_concurrency());
   // 容器/系统 CPU 配额：与核数不同的第二个并发上界（配额小于核数时以配额为准）
   if (const std::size_t quota = st::pkg::detect_cpu_quota(); quota > 0) {
-    st::print("  CPU 配额        : {} 核（cgroup/ST_CPU_LIMIT）\n", quota);
+    st::log::out("  CPU 配额        : {} 核（cgroup/ST_CPU_LIMIT）\n", quota);
   } else {
-    st::print("  CPU 配额        : 不可知（容器 CFS 配额探测失败，按逻辑核心数；可用 ST_CPU_LIMIT 指定）\n");
+    st::log::out("  CPU 配额        : 不可知（容器 CFS 配额探测失败，按逻辑核心数；可用 ST_CPU_LIMIT 指定）\n");
   }
   // 内存预算与推导出的并发：编译是内存密集型的，这两个数字比核数更能决定能不能跑完
   {
     const auto limit = st::pkg::detect_memory_limit();
     if (limit.limit_mb > 0) {
-      st::print("  内存上限        : {} MiB（{}）\n", limit.limit_mb, limit.source);
+      st::log::out("  内存上限        : {} MiB（{}）\n", limit.limit_mb, limit.source);
     } else {
-      st::print("  内存上限        : 不可知（并发将退回按核数推导；可用 ST_MEMORY_MB 指定）\n");
+      st::log::out("  内存上限        : 不可知（并发将退回按核数推导；可用 ST_MEMORY_MB 指定）\n");
     }
     for (const auto profile : {"dev", "san"}) {
       const auto plan = st::pkg::plan_concurrency(0, 0, 0, profile, st::hardware_concurrency());
-      st::print("  默认并发 [{}]    : {} 路（超大单元 {}）· {}\n", profile, plan.jobs,
+      st::log::out("  默认并发 [{}]    : {} 路（超大单元 {}）· {}\n", profile, plan.jobs,
                   plan.jobs_large, plan.reason);
     }
     // 测试分片：与编译并发**同一套资源探测**，但约束不同（测试进程内存轻、吃满一个核），
     // 所以它有自己的推导（见 `plan_test_shards`）。两行并列显示才能看出"为何两类并行不一样"。
     const auto shard_plan = st::pkg::plan_test_shards(0, st::hardware_concurrency(), 0, 0,
                                                       16);
-    st::print("  默认测试分片    : {} 片 · {}\n", shard_plan.shards, shard_plan.reason);
+    st::log::out("  默认测试分片    : {} 片 · {}\n", shard_plan.shards, shard_plan.reason);
   }
   // 交叉编译工具链探测：清单里声明了什么、本机是否真的装了
   if (auto manifest = load_manifest(arguments); manifest) {
     if (manifest->toolchains.empty()) {
-      st::print("  交叉工具链      : 未声明（st.pkg 的 toolchains 段可声明，如 mingw）\n");
+      st::log::out("  交叉工具链      : 未声明（st.pkg 的 toolchains 段可声明，如 mingw）\n");
     }
     for (const auto& toolchain : manifest->toolchains) {
       const auto found = st::process::which(toolchain.compiler);
-      st::print("  交叉工具链 [{}]  : {} → {}\n", toolchain.name, toolchain.compiler,
+      st::log::out("  交叉工具链 [{}]  : {} → {}\n", toolchain.name, toolchain.compiler,
                   found ? *found : std::string("未安装"));
       // 工具链声明的**目标三元组**必须与编译器自报的默认目标并列可见：
       // 两者不同不是错（`--target` 覆盖默认），但不显示会让人在错的方向上找原因——
       // 实测：`clang++` 自报 `Target: x86_64-pc-windows-msvc`，而本工程实际按
       // `x86_64-w64-windows-gnu` 编译，只看 `--version` 的输出会得出相反结论。
       if (!toolchain.target_triple.empty()) {
-        st::print("                    --target={}（覆盖上面这行自报的默认目标）\n",
+        st::log::out("                    --target={}（覆盖上面这行自报的默认目标）\n",
                   toolchain.target_triple);
       }
       if (found) {
         auto version = st::process::run(toolchain.compiler, {"--version"});
         if (version && version->exit_code == 0) {
-          st::print("                    {}\n", st::trim(version->stdout_text).data());
+          st::log::out("                    {}\n", st::trim(version->stdout_text).data());
         }
       }
     }
@@ -889,8 +891,8 @@ auto command_doctor(const Arguments& arguments) -> int {
   }();
   const std::string backend_hint = !display_env ? "headless"
       : (st::fs::exists("/usr/lib/x86_64-linux-gnu/libX11.so.6") ? "x11（窗口实现规划 v0.2）" : "headless");
-  st::print("  显示服务        : {}\n", display_env ? "有" : "无（无头模式）");
-  st::print("  图形后端        : {}\n", backend_hint);
+  st::log::out("  显示服务        : {}\n", display_env ? "有" : "无（无头模式）");
+  st::log::out("  图形后端        : {}\n", backend_hint);
   const auto fonts = [] {
     std::vector<std::string> found;
     for (const auto path : {"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -900,13 +902,13 @@ auto command_doctor(const Arguments& arguments) -> int {
     }
     return found;
   }();
-  st::print("  系统字体        : {} 个候选{}\n", fonts.size(),
+  st::log::out("  系统字体        : {} 个候选{}\n", fonts.size(),
               fonts.empty() ? "（文本将不渲染）" : "");
-  for (const auto& font : fonts) st::print("      - {}\n", font);
+  for (const auto& font : fonts) st::log::out("      - {}\n", font);
   const std::string cache = st::fs::join(st::fs::home_dir(), ".shuangtian/cache");
-  st::print("  依赖缓存        : {}{}\n", cache, st::fs::is_directory(cache) ? "" : "（尚未创建）");
-  st::print("  控制通道        : 可用（TCP，默认只绑 127.0.0.1）\n");
-  st::print("  无头开发        : 可用（headless 后端 = 软件光栅器，像素结果与窗口一致）\n");
+  st::log::out("  依赖缓存        : {}{}\n", cache, st::fs::is_directory(cache) ? "" : "（尚未创建）");
+  st::log::out("  控制通道        : 可用（TCP，默认只绑 127.0.0.1）\n");
+  st::log::out("  无头开发        : 可用（headless 后端 = 软件光栅器，像素结果与窗口一致）\n");
   return 0;
 }
 
@@ -918,22 +920,22 @@ auto command_tree(const Arguments& arguments) -> int {
   }
   auto sources = manifest->source_files();
   auto tests = manifest->test_files();
-  st::print("{} {} ({})\n", manifest->name, manifest->version,
+  st::log::out("{} {} ({})\n", manifest->name, manifest->version,
               manifest->kind);
-  st::print("  清单        : {}\n", st::fs::join(manifest->directory, "st.pkg"));
-  st::print("  模块        : {} 个\n", manifest->modules.size());
-  st::print("  源文件      : {} 个\n", sources ? sources->size() : 0U);
-  st::print("  测试文件    : {} 个\n", tests ? tests->size() : 0U);
-  st::print("  目标        :\n");
+  st::log::out("  清单        : {}\n", st::fs::join(manifest->directory, "st.pkg"));
+  st::log::out("  模块        : {} 个\n", manifest->modules.size());
+  st::log::out("  源文件      : {} 个\n", sources ? sources->size() : 0U);
+  st::log::out("  测试文件    : {} 个\n", tests ? tests->size() : 0U);
+  st::log::out("  目标        :\n");
   for (const auto& target : manifest->targets) {
-    st::print("      {:<10} {:<14} {}\n", target.name, target.kind,
+    st::log::out("      {:<10} {:<14} {}\n", target.name, target.kind,
                 target.sources.empty() ? "-" : target.sources.front());
   }
-  st::print("  依赖        : 源码 {} 个 / 模块 {} 个 / 系统库 {} 个\n",
+  st::log::out("  依赖        : 源码 {} 个 / 模块 {} 个 / 系统库 {} 个\n",
               manifest->dependencies.size(), manifest->dependency_modules.size(),
               manifest->dependency_system.size());
   for (const auto& dependency : manifest->dependencies) {
-    st::print("      - {} {}\n", dependency.name, dependency.version_req);
+    st::log::out("      - {} {}\n", dependency.name, dependency.version_req);
   }
   return 0;
 }
@@ -1010,7 +1012,7 @@ auto command_deps(const Arguments& arguments) -> int {
   }
   if (manifest->dependencies.empty()) {
     // 引导语不再提不存在的 `st add`：登记依赖就是编辑 st.pkg 的 dependencies 段。
-    st::print("无第三方源码依赖（框架本体零依赖；需要时在 st.pkg 的 dependencies.source 段登记）\n");
+    st::log::out("无第三方源码依赖（框架本体零依赖；需要时在 st.pkg 的 dependencies.source 段登记）\n");
     return 0;
   }
   auto plan = plan_dependencies(*manifest, arguments.has("locked"));
@@ -1018,7 +1020,7 @@ auto command_deps(const Arguments& arguments) -> int {
     std::fprintf(stderr, "错误: %s\n", plan.error().to_string().c_str());
     return 1;
   }
-  st::print("依赖解析（回溯求解 · 语义版本）{}\n",
+  st::log::out("依赖解析（回溯求解 · 语义版本）{}\n",
             arguments.has("locked") ? " · --locked（只读 st.lock）" : "");
   for (const auto& package : plan->graph.packages) {
     // 标记直接依赖（*）：求解后的图是全量的，混在一起看不出哪些是清单自己声明的。
@@ -1026,11 +1028,11 @@ auto command_deps(const Arguments& arguments) -> int {
                                     [&](const st::pkg::DependencySpec& root) {
                                       return root.name == package.name;
                                     });
-    st::print("  {} {:<20} {:<12} {:<12} {}\n", direct ? "*" : " ", package.name,
+    st::log::out("  {} {:<20} {:<12} {:<12} {}\n", direct ? "*" : " ", package.name,
               package.version.to_string(),
               st::pkg::source_kind_name(package.source.kind), package.source.location);
   }
-  st::print("\n共 {} 个直接依赖；解析后共 {} 个包（拓扑序，依赖在前；* = 直接依赖）\n",
+  st::log::out("\n共 {} 个直接依赖；解析后共 {} 个包（拓扑序，依赖在前；* = 直接依赖）\n",
             manifest->dependencies.size(), plan->graph.packages.size());
   return 0;
 }
@@ -1042,7 +1044,7 @@ auto command_fetch(const Arguments& arguments) -> int {
     return 1;
   }
   if (manifest->dependencies.empty()) {
-    st::print("无第三方源码依赖，无需获取\n");
+    st::log::out("无第三方源码依赖，无需获取\n");
     return 0;
   }
   auto plan = plan_dependencies(*manifest, arguments.has("locked"));
@@ -1060,7 +1062,7 @@ auto command_fetch(const Arguments& arguments) -> int {
     return 1;
   }
   for (const auto& item : *fetched) {
-    st::print("  {:<20} → {}（sha256 {}）\n", item.package.name, item.directory,
+    st::log::out("  {:<20} → {}（sha256 {}）\n", item.package.name, item.directory,
               item.sha256.empty() ? "-" : item.sha256);
   }
   // `--locked` 时不重写锁（只读语义）；否则锁是求解结果的落盘。
@@ -1069,9 +1071,9 @@ auto command_fetch(const Arguments& arguments) -> int {
       std::fprintf(stderr, "错误: %s\n", status.error().to_string().c_str());
       return 1;
     }
-    st::print("已写 {}\n", plan->lock_path);
+    st::log::out("已写 {}\n", plan->lock_path);
   }
-  st::print("获取完成，共 {} 个包\n", fetched->size());
+  st::log::out("获取完成，共 {} 个包\n", fetched->size());
   return 0;
 }
 
@@ -1082,7 +1084,7 @@ auto command_vendor(const Arguments& arguments) -> int {
     return 1;
   }
   if (manifest->dependencies.empty()) {
-    st::print("无第三方源码依赖，无需固化\n");
+    st::log::out("无第三方源码依赖，无需固化\n");
     return 0;
   }
   // vendor 走真求解（不吃 --locked：固化的是"现在解出来的"这棵树，锁是它的产物之一）。
@@ -1109,9 +1111,9 @@ auto command_vendor(const Arguments& arguments) -> int {
     std::fprintf(stderr, "错误: %s\n", status.error().to_string().c_str());
     return 1;
   }
-  st::print("已固化 {} 个包到 {}（vendor.lock 随源码树；离线可构建）\n", fetched->size(),
+  st::log::out("已固化 {} 个包到 {}（vendor.lock 随源码树；离线可构建）\n", fetched->size(),
             vendor_root);
-  st::print("已写 {}\n", plan->lock_path);
+  st::log::out("已写 {}\n", plan->lock_path);
   return 0;
 }
 
@@ -1260,10 +1262,10 @@ ST_MAIN(run_app)
     return 1;
   }
 
-  st::print("工程已创建: {}\n  {}\n  {}\n  {}\n", root, st::fs::join(root, "st.pkg"),
+  st::log::out("工程已创建: {}\n  {}\n  {}\n  {}\n", root, st::fs::join(root, "st.pkg"),
               st::fs::join(root, "src/main.cpp"), st::fs::join(root, "build.sh"));
-  st::print("引用框架: {}\n", framework_path);
-  st::print("下一步: cd {} && ./build.sh\n", root);
+  st::log::out("引用框架: {}\n", framework_path);
+  st::log::out("下一步: cd {} && ./build.sh\n", root);
   return 0;
 }
 
@@ -1307,7 +1309,7 @@ ST_MAIN(run_app)
                ? std::format("{:.1f} MiB", static_cast<double>(bytes) / 1048576.0)
                : std::format("{} KiB", bytes / 1024ULL);
   };
-  st::print("已清理 {}（释放 {}）\n", build_dir, removed > 0 ? format_mb(removed) : std::string{"0"});
+  st::log::out("已清理 {}（释放 {}）\n", build_dir, removed > 0 ? format_mb(removed) : std::string{"0"});
 
   if (arguments.has("all")) {
     std::string home;
@@ -1322,7 +1324,7 @@ ST_MAIN(run_app)
         std::fprintf(stderr, "缓存删除失败: %s\n", status.error().message.c_str());
         return 1;
       }
-      st::print("已清理共享缓存 {}（对象缓存；下次构建全量重编）\n", cache_dir);
+      st::log::out("已清理共享缓存 {}（对象缓存；下次构建全量重编）\n", cache_dir);
     }
   }
   return 0;
@@ -1357,12 +1359,12 @@ ST_MAIN(run_app)
   }
   const std::string dir = st::fs::join(root, std::string(st::cli_log::kDirectory));
   if (!st::fs::is_directory(dir)) {
-    st::print("还没有日志目录：{}\n", dir);
+    st::log::out("还没有日志目录：{}\n", dir);
     return 1;
   }
   const auto entries = st::fs::list_dir(dir);
   if (!entries) {
-    st::print("读不了日志目录：{}\n", dir);
+    st::log::out("读不了日志目录：{}\n", dir);
     return 1;
   }
   // 文件名里的时间戳决定了“新旧”（不用 mtime：拷贝/恢复会改 mtime）。
@@ -1377,29 +1379,29 @@ ST_MAIN(run_app)
     files.push_back(entry.path);
   }
   if (files.empty()) {
-    st::print("没有匹配的日志（目录 {}{}）\n", dir,
+    st::log::out("没有匹配的日志（目录 {}{}）\n", dir,
               action.empty() ? std::string{} : std::format("，过滤 {}", action));
     return 1;
   }
   std::ranges::sort(files);
   if (arguments.has("list")) {
     const std::size_t shown = std::min<std::size_t>(files.size(), 10);
-    st::print("最近 {} 份日志（共 {}）：\n", shown, files.size());
+    st::log::out("最近 {} 份日志（共 {}）：\n", shown, files.size());
     for (std::size_t index = files.size() - shown; index < files.size(); ++index) {
       const auto size = st::fs::file_size(files[index]).value_or(0);
-      st::print("  {}  {} 字节\n", st::fs::file_name(files[index]), size);
+      st::log::out("  {}  {} 字节\n", st::fs::file_name(files[index]), size);
     }
     return 0;
   }
   const std::string& latest = files.back();
   const auto text = st::fs::read_text(latest);
   if (!text) {
-    st::print("读不了日志：{}\n", latest);
+    st::log::out("读不了日志：{}\n", latest);
     return 1;
   }
   // 日志文件自己的首行就是「日志：<它自己的路径>」（见 `cli_log::begin`）——
   // 这里就不再重复一遍。只在本行与首行不同时才打（如 --action 筛到旧文件）。
-  if (!(*text).starts_with("日志：")) st::print("日志：{}\n", latest);
+  if (!(*text).starts_with("日志：")) st::log::out("日志：{}\n", latest);
   const auto lines = st::split(*text, '\n');
   const std::string pattern = arguments.get("grep", "");
   if (!pattern.empty()) {
@@ -1407,10 +1409,10 @@ ST_MAIN(run_app)
     for (std::size_t index = 0; index < lines.size(); ++index) {
       if (!lines[index].contains(pattern)) continue;
       // 行号前缀：与源码的 `文件:行` 习惯对齐，方便再回到日志里定位
-      st::print("{:>4}: {}\n", index + 1, lines[index]);
+      st::log::out("{:>4}: {}\n", index + 1, lines[index]);
       ++hits;
     }
-    st::print("── 命中 {} 行（共 {} 行）\n", hits, lines.size());
+    st::log::out("── 命中 {} 行（共 {} 行）\n", hits, lines.size());
     return hits == 0 ? 1 : 0;
   }
   if (arguments.has("full")) {
@@ -1426,7 +1428,7 @@ ST_MAIN(run_app)
     if (index + 1 < lines.size()) st::print_raw("\n");
   }
   if (begin > 0) {
-    st::print("\n── 尾部 {} 行（共 {} 行；--full 看全部）\n", lines.size() - begin, lines.size());
+    st::log::out("\n── 尾部 {} 行（共 {} 行；--full 看全部）\n", lines.size() - begin, lines.size());
   }
   return 0;
 }
@@ -1589,7 +1591,7 @@ struct SelfStaleness {
   const std::string self = st::fs::normalize(*exe_result);
   const std::string staging = self + std::format(".new-{}", st::process::current_id());
 
-  st::print("检测到构建工具源码有更新 → 自动重建（档位 {}）…\n", profile);
+  st::log::out("检测到构建工具源码有更新 → 自动重建（档位 {}）…\n", profile);
 
   st::pkg::BuildOptions options;
   options.profile = profile;
@@ -1651,7 +1653,7 @@ struct SelfStaleness {
     std::fprintf(stderr, "新产物就位失败：%s\n", placed.error().message.c_str());
     return 1;
   }
-  st::print("已重建（{}），用新工具重跑本次命令…\n", elapsed);
+  st::log::out("已重建（{}），用新工具重跑本次命令…\n", elapsed);
 
   // ## 可信增量校验（`ST_VERIFY_SELF_REBUILD=1` 时开）
   //
@@ -1689,7 +1691,7 @@ struct SelfStaleness {
         (void)st::fs::remove_file(staging);
         return 1;
       }
-      st::print("可信增量校验通过（产物含 {}）\n", *token);
+      st::log::out("可信增量校验通过（产物含 {}）\n", *token);
     }
   }
 
@@ -1770,9 +1772,9 @@ auto run_app(int argc, char** argv) -> int {
   }
 
   if (arguments.command == "version") {
-    st::print("st (霜天工具链) {}\n", kStpmVersion);
+    st::log::out("st (霜天工具链) {}\n", kStpmVersion);
     const auto compiler = st::pkg::detect_compiler();
-    st::print("编译器: {}\n", compiler ? compiler->c_str() : "未找到");
+    st::log::out("编译器: {}\n", compiler ? compiler->c_str() : "未找到");
     return 0;
   }
   if (arguments.command == "rebuild") return finish(command_rebuild(arguments));

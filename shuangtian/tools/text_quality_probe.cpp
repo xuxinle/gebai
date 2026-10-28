@@ -38,6 +38,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -197,13 +198,13 @@ void print_coverage_levels(const std::vector<float>& coverage) {
     const int bucket = static_cast<int>(std::lround(static_cast<double>(value) * 16.0));
     buckets[std::clamp(bucket, 0, 16)] += 1;
   }
-  st::print("    覆盖率档位（1/16，中间调）:");
+  st::log::out("    覆盖率档位（1/16，中间调）:");
   for (int index = 1; index < 16; ++index) {
     if (buckets[index] > 0) {
-      st::print(" {:.4}={}", static_cast<double>(index) / 16.0, buckets[index]);
+      st::log::out(" {:.4}={}", static_cast<double>(index) / 16.0, buckets[index]);
     }
   }
-  st::print("\n");
+  st::log::out("\n");
 }
 
 constexpr std::string_view kRamp = " .:-=+*#%@";
@@ -219,7 +220,7 @@ void dump_bitmap(const std::vector<float>& coverage, int width, int height) {
       index = std::clamp(index, 0, 9);
       line.push_back(kRamp[static_cast<std::size_t>(index)]);
     }
-    st::print("    |{}|\n", line);
+    st::log::out("    |{}|\n", line);
   }
 }
 
@@ -235,25 +236,25 @@ void report_glyph(const FontStack& fonts, char32_t codepoint, float pixel_size, 
   const char* fit_name =
       fit == GridFitMode::Off ? "off" : (fit == GridFitMode::Light ? "light" : "normal");
   if (bitmap == nullptr) {
-    st::print("[{}] size={} fit={} ss={} —— 无字形\n", utf8, pixel_size, fit_name, supersample);
+    st::log::out("[{}] size={} fit={} ss={} —— 无字形\n", utf8, pixel_size, fit_name, supersample);
     return;
   }
-  st::print("[{}] size={} fit={} ss={} bitmap={}x{} offset=({},{})\n", utf8, pixel_size, fit_name,
+  st::log::out("[{}] size={} fit={} ss={} bitmap={}x{} offset=({},{})\n", utf8, pixel_size, fit_name,
             supersample, bitmap->width, bitmap->height, bitmap->offset_x, bitmap->offset_y);
   dump_bitmap(bitmap->coverage, bitmap->width, bitmap->height);
   const auto vertical = cluster_runs(scan_runs(bitmap->coverage, bitmap->width, bitmap->height,
                                                true, 6));
   const auto horizontal = cluster_runs(scan_runs(bitmap->coverage, bitmap->width, bitmap->height,
                                                  false, 6));
-  st::print("    竖笔画（{} 条，≥5 行）:\n", vertical.size());
+  st::log::out("    竖笔画（{} 条，≥5 行）:\n", vertical.size());
   for (const auto& stroke : vertical) {
-    st::print("      x≈{:.1f} rows={:>3} weight={:.2f} sd={:.2f} trans={:.1f} peak={:.2f}\n",
+    st::log::out("      x≈{:.1f} rows={:>3} weight={:.2f} sd={:.2f} trans={:.1f} peak={:.2f}\n",
               stroke.center, stroke.rows, stroke.weight_mean, stroke.weight_sd,
               stroke.transitions_mean, stroke.peak_mean);
   }
-  st::print("    横笔画（{} 条，≥5 列）:\n", horizontal.size());
+  st::log::out("    横笔画（{} 条，≥5 列）:\n", horizontal.size());
   for (const auto& stroke : horizontal) {
-    st::print("      y≈{:.1f} cols={:>3} weight={:.2f} sd={:.2f} trans={:.1f} peak={:.2f}\n",
+    st::log::out("      y≈{:.1f} cols={:>3} weight={:.2f} sd={:.2f} trans={:.1f} peak={:.2f}\n",
               stroke.center, stroke.rows, stroke.weight_mean, stroke.weight_sd,
               stroke.transitions_mean, stroke.peak_mean);
   }
@@ -294,9 +295,9 @@ void render_sample(const FontStack& fonts, const Sample& sample, bool lcd, GridF
   image.rgba = canvas.to_rgba8();
   const auto status = st::codec::png_write_file(out_dir + "/" + name + ".png", image);
   if (!status.has_value()) {
-    st::print("  写 PNG 失败：{}\n", status.error().message);
+    st::log::out("  写 PNG 失败：{}\n", status.error().message);
   } else {
-    st::print("  → {}.png\n", name);
+    st::log::out("  → {}.png\n", name);
   }
 }
 
@@ -353,7 +354,7 @@ void render_glyph_png(const FontStack& fonts, char32_t codepoint, float pixel_si
                                        static_cast<int>(supersample));
   (void)name_buffer;
   const auto status = st::codec::png_write_file(out_dir + "/" + name + ".png", image);
-  if (!status.has_value()) st::print("  写 PNG 失败：{}\n", status.error().message);
+  if (!status.has_value()) st::log::out("  写 PNG 失败：{}\n", status.error().message);
 }
 
 }  // namespace
@@ -375,28 +376,28 @@ auto main(int argc, char** argv) -> int {
     return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体（ST_FONT_LATIN/ST_FONT_CJK 可显式指定）\\n"));
   }
   const FontStack& fonts = *stack;
-  st::print("device_scale={}  应用口径：supersample=round(scale)={}\n\n", scale,
+  st::log::out("device_scale={}  应用口径：supersample=round(scale)={}\n\n", scale,
             std::lround(scale));
 
-  st::print("=== 字形报告（物理像素 20.25 = 13.5 逻辑 @1.5）===\n");
+  st::log::out("=== 字形报告（物理像素 20.25 = 13.5 逻辑 @1.5）===\n");
   for (const char32_t codepoint : {U'霜', U'画'}) {
     for (const GridFitMode fit :
          {GridFitMode::Off, GridFitMode::Light, GridFitMode::Normal}) {
       report_glyph(fonts, codepoint, 20.25f, fit, 2.0f);
-      st::print("\n");
+      st::log::out("\n");
     }
   }
-  st::print("=== 量化对照：三（横画）与川（竖画），ss=1 vs ss=2 ===\n");
+  st::log::out("=== 量化对照：三（横画）与川（竖画），ss=1 vs ss=2 ===\n");
   for (const char32_t codepoint : {U'三', U'川'}) {
     report_glyph(fonts, codepoint, 21.0f, GridFitMode::Off, 1.0f);
-    st::print("\n");
+    st::log::out("\n");
     report_glyph(fonts, codepoint, 21.0f, GridFitMode::Off, 2.0f);
-    st::print("\n");
+    st::log::out("\n");
     report_glyph(fonts, codepoint, 21.0f, GridFitMode::Normal, 2.0f);
-    st::print("\n");
+    st::log::out("\n");
   }
 
-  st::print("=== 单字形 PNG（与浏览器逐像素可比）===\n");
+  st::log::out("=== 单字形 PNG（与浏览器逐像素可比）===\n");
   for (const char32_t codepoint : {U'霜', U'川', U'三'}) {
     for (const auto [fit, sup] : {std::pair{GridFitMode::Off, 1.0f}, {GridFitMode::Off, 2.0f},
                                   {GridFitMode::Normal, 2.0f}}) {
@@ -404,9 +405,9 @@ auto main(int argc, char** argv) -> int {
     }
   }
 
-  st::print("=== 字符串渲染（浏览器对照）===\n");
+  st::log::out("=== 字符串渲染（浏览器对照）===\n");
   for (const Sample& sample : kSamples) {
-    st::print("[{}] {}\n", sample.label, sample.text);
+    st::log::out("[{}] {}\n", sample.label, sample.text);
     render_sample(fonts, sample, false, GridFitMode::Off, scale, out_dir);
     render_sample(fonts, sample, true, GridFitMode::Off, scale, out_dir);
     render_sample(fonts, sample, true, GridFitMode::Normal, scale, out_dir);

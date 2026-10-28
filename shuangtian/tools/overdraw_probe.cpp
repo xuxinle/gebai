@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -110,20 +111,20 @@ auto main(int argc, char** argv) -> int {
 
   constexpr int kWidth = 1600;
   constexpr int kHeight = 1000;
-  st::print("画布 {}x{} = {} 像素\n\n", kWidth, kHeight,
+  st::log::out("画布 {}x{} = {} 像素\n\n", kWidth, kHeight,
             static_cast<std::uint64_t>(kWidth) * static_cast<std::uint64_t>(kHeight));
-  st::print("{:>8}  {:>10}  {:>14}  {:>12}  {:>10}\n", "卡片数", "含阴影", "累计写入像素",
+  st::log::out("{:>8}  {:>10}  {:>14}  {:>12}  {:>10}\n", "卡片数", "含阴影", "累计写入像素",
             "等效屏数", "每像素均写");
   for (const bool shadow : {false, true}) {
     for (const int cards : {4, 8, 12}) {
       const SceneStats stats = measure(kWidth, kHeight, cards, shadow);
-      st::print("{:>8}  {:>10}  {:>14}  {:>12.2f}  {:>10.2f}\n", cards, shadow ? "是" : "否",
+      st::log::out("{:>8}  {:>10}  {:>14}  {:>12.2f}  {:>10.2f}\n", cards, shadow ? "是" : "否",
                 stats.writes,
                 static_cast<double>(stats.writes) /
                     (static_cast<double>(kWidth) * static_cast<double>(kHeight)),
                 stats.mean_overdraw);
     }
   }
-  st::print("\n注：每像素均写 > 1 表示同一个像素被多次覆盖——每次都付内存带宽。\n");
+  st::log::out("\n注：每像素均写 > 1 表示同一个像素被多次覆盖——每次都付内存带宽。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

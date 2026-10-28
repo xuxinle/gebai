@@ -190,6 +190,13 @@ export const source: EventSourceDef = {
         if (stopped) return
         const msg = extractMessage(ev)
         if (!msg) return
+        // 自发送消息记账（宿主注入，与渠道共享同一实例）：自己发出/回复的消息
+        // （含 as_user 名义，sender_type=user 拦不住）按 message_id 精确过滤，防回灌
+        const sentMessages = ctx.deps.sentMessages as { hit(id: string): boolean } | undefined
+        if (sentMessages?.hit(msg.messageId)) {
+          ctx.log("info", `忽略自发送消息 ${msg.messageId}（防回灌）`)
+          return
+        }
         // 防自触发循环：机器人自己发的消息若被当输入，会无限自我对话
         if (msg.senderType === "app") return
         if (allowed.size && !allowed.has(msg.chatId)) return
@@ -212,13 +219,20 @@ export const source: EventSourceDef = {
               ctx.log("warn", `读历史失败（本条仍投递，只是不带上下文）: ${String((err as Error)?.message || err)}`)
             }
           }
+          // 发送者姓名（尽力而为）：优先群成员表（宿主注入了 chatId 上下文），contact 兜底。
+          // 查不到（无权限/接口失败）时 body 兜底标「用户」——模型至少知道这条是别人发的。
+          const senderName =
+            msg.senderId && typeof ctx.deps.feishuUserName === "function"
+              ? await (ctx.deps.feishuUserName as (id: string, chatId?: string) => Promise<string | undefined>)(msg.senderId, msg.chatId)
+              : undefined
+          const who = senderName?.trim() ? `${senderName}：` : "用户："
           const isGroup = msg.chatType !== "p2p"
           const ingress: IngressEvent = {
             kind: "message",
             channel: "feishu",
             source: isGroup ? `飞书群 ${msg.chatId}` : "飞书单聊",
-            summary: `${msg.senderId ?? "有人"}：${msg.text.slice(0, 60)}`,
-            body: msg.text + history,
+            summary: `${senderName ?? msg.senderId ?? "用户"}：${msg.text.slice(0, 60)}`,
+            body: who + msg.text + history,
             // 幂等键 = 飞书消息 id（它会重投同一消息）
             id: `feishu:${msg.messageId}`,
             ...(msg.createTime ? { at: msg.createTime } : {}),
@@ -226,6 +240,7 @@ export const source: EventSourceDef = {
               chatId: msg.chatId,
               messageId: msg.messageId,
               ...(msg.senderId ? { senderId: msg.senderId } : {}),
+              ...(senderName ? { senderName } : { senderName: "用户" }),
               ...(history ? { extra: { historyCount: String(historyLimit), readIdentity: history ? (useUser ? "user" : "app") : "none" } } : {}),
             },
           }

@@ -113,10 +113,22 @@ ST_TEST(check_only_writes_no_artifacts) {
   const auto after_build = snapshot(build_dir);
   const auto after_src = snapshot(st::fs::join(project->dir, "src"));
 
-  // ③ 判据：两处都**逐项完全一致**（路径 + 大小 + 修改时间）
-  ST_CHECK_EQ(before_build.size(), after_build.size());
-  for (std::size_t i = 0; i < std::min(before_build.size(), after_build.size()); ++i) {
-    ST_CHECK_EQ(before_build[i], after_build[i]);
+  // ③ 判据：build/ 允许新增的是**依赖清单**（`.d`，增量判定用，见 `compile_units` 的
+  //    `-MMD`），除此之外逐项一致（不写 `.o`、不写指纹、不碰 PCH、不写缓存）。
+  const auto changed = [](const std::vector<std::string>& before,
+                          const std::vector<std::string>& after) {
+    std::vector<std::string> diff;
+    for (const auto& item : after) {
+      if (std::ranges::find(before, item) == before.end()) diff.push_back(item);
+    }
+    return diff;
+  };
+  const auto added = changed(before_build, after_build);
+  // 允许：`.d`（依赖清单，增量判定输入）与 `.check_state`（增量状态文件）；
+  // 不允许：`.o`/指纹 / 缓存任何一项
+  for (const auto& item : added) {
+    ST_CHECK(item.find(".d|") != std::string::npos ||
+             item.find(".check_state|") != std::string::npos);
   }
   ST_CHECK_EQ(before_src.size(), after_src.size());
   for (std::size_t i = 0; i < std::min(before_src.size(), after_src.size()); ++i) {
@@ -158,11 +170,11 @@ ST_TEST(check_only_finds_broken_source) {
   (void)st::fs::remove_all(project->dir);
 }
 
-ST_TEST(check_only_checks_every_unit_not_incremental) {
-  // 检查模式**不做增量判定**：必须每次都查全部单元。
+ST_TEST(check_only_incremental_skips_unchanged_units) {
+  // 检查模式**增量判定**：源+依赖哈希与上次记录一致 → 跳过（不查）。
   //
-  // 为何钉这一条：若沿用 `needs_rebuild`，一个"已构建过、源码未变"的工程会
-  // **一个单元都不查**，check 直接报成功——恒绿的检查比没有检查更糟。
+  // 旧语义是每次全量查（"恒绿哨兵"），155 单元实测 ~59 s；
+  // 改为内容哈希增量后，不变仓库/不变单元接近零开销，`--force` 仍可强制全量。
   auto project = make_mini_project("st-check-every");
   ST_REQUIRE(project.has_value());
 
@@ -176,9 +188,16 @@ ST_TEST(check_only_checks_every_unit_not_incremental) {
 
   ST_CHECK(first->units_total > 0);
   ST_CHECK_EQ(first->units_total, second->units_total);
-  // 第二次也真查了（增量判定下 `units_rebuilt` 会是 0）
-  ST_CHECK(second->units_rebuilt > 0);
-  ST_CHECK_EQ(second->units_rebuilt, second->units_total);
+  // 第一次全查；第二次（无变化）全部跳过
+  ST_CHECK_EQ(first->units_rebuilt, first->units_total);
+  ST_CHECK_EQ(second->units_rebuilt, std::size_t{0});
+
+  // `--force` 绕过增量：即使刚查过也全量
+  auto force_opts = build_opts(true);
+  force_opts.force = true;
+  const auto forced = st::pkg::build(project->manifest, force_opts);
+  ST_REQUIRE(forced.has_value());
+  ST_CHECK_EQ(forced->units_rebuilt, forced->units_total);
 
   (void)st::fs::remove_all(project->dir);
 }

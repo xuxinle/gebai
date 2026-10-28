@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -79,7 +80,7 @@ auto main(int argc, char** argv) -> int {
 
   int failed_cases = 0;
   int one_lsb_cases = 0;
-  st::print("{:<24}  {:>10}  {:>10}  {:>16}\n", "档位", "差异像素", "最大通道差", "首个差异位置");
+  st::log::out("{:<24}  {:>10}  {:>10}  {:>16}\n", "档位", "差异像素", "最大通道差", "首个差异位置");
   for (const Case& item : cases) {
     const Paint paint = Paint::solid(ink);
 
@@ -127,7 +128,7 @@ auto main(int argc, char** argv) -> int {
     }
     const std::string where =
         first_x < 0 ? std::string("-") : std::format("({}, {}) {}", first_x, first_y, detail);
-    st::print("{:<24}  {:>10}  {:>10}  {:>16}\n", item.name, diff_pixels, max_channel, where);
+    st::log::out("{:<24}  {:>10}  {:>10}  {:>16}\n", item.name, diff_pixels, max_channel, where);
     // 判据分两档：
     //   · 零差 —— 理想
     //   · 1 LSB（max_channel == 1）且差异像素 ≤ 总面积 0.01% —— 已知的弧缘量化，接受
@@ -142,12 +143,12 @@ auto main(int argc, char** argv) -> int {
     ++failed_cases;
   }
 
-  st::print("\n");
+  st::log::out("\n");
   if (failed_cases == 0) {
-    st::print("PASS：零差 {} 档", 0);
-    st::print("，1 LSB 内 {} 档（贴图 8 位量化的固有代价，见文件头）\n", one_lsb_cases);
+    st::log::out("PASS：零差 {} 档", 0);
+    st::log::out("，1 LSB 内 {} 档（贴图 8 位量化的固有代价，见文件头）\n", one_lsb_cases);
   } else {
-    st::print("FAIL：{} 个档位超出 1 LSB 界限（见上表定位）。\n", failed_cases);
+    st::log::out("FAIL：{} 个档位超出 1 LSB 界限（见上表定位）。\n", failed_cases);
     verdict.state = st::probe::status::fail;
     verdict.reason = "圆角走贴图后与三带拆分的差异超出 1 LSB";
   }

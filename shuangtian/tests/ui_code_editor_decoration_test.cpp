@@ -11,6 +11,7 @@
 
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/test/test.hpp"
 #include "st/text/text.hpp"
@@ -333,7 +334,7 @@ ST_TEST(code_editor_line_number_override_changes_drawn_text) {
       if (peek(x, y) != gutter_bg) ++gutter_ink;
     }
   }
-  st::print("[gutter] 栏内墨迹像素 = {}（行号确实画出来了）\n", gutter_ink);
+  st::log::out("[gutter] 栏内墨迹像素 = {}（行号确实画出来了）\n", gutter_ink);
   ST_CHECK(gutter_ink > 20U);
 }
 

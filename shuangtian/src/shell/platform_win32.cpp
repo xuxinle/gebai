@@ -183,10 +183,12 @@ class Win32Backend final : public Backend {
     return ok();
   }
 
-  /// 从最小化/后台恢复到前台并取得焦点。
+  /// 从最小化/后台/隐藏恢复到前台并取得焦点。
   ///
   /// 两步都必须做，且顺序有讲究：
   /// - `SW_RESTORE` 先解除最小化（否则 `SetForegroundWindow` 对最小化窗口无效）；
+  ///   **隐藏（SW_HIDE，托盘常驻）窗口还要先 `SW_SHOW`**——SW_HIDE 不是最小化，
+  ///   `IsIconic` 不认它，光 SW_RESTORE 不会让它重新出现。
   /// - `SetForegroundWindow` 才是把焦点拿过来。
   ///
   /// ⚠ Windows 有**前台锁**（foreground lock）：后台进程不能无条件抢焦点，
@@ -195,6 +197,8 @@ class Win32Backend final : public Backend {
   /// 若真被拒，应让调用方知道而不是假装“已经叫回来了”。
   [[nodiscard]] auto restore() -> Status override {
     if (window_ == nullptr) return unexpected(ErrorCode::Io, "窗口未创建");
+    // 隐藏（托盘常驻）→ 先 SHOW；最小化 → 先 RESTORE；两者都会让窗口可见
+    if (::IsWindowVisible(window_) == 0) ::ShowWindow(window_, SW_SHOW);
     if (::IsIconic(window_) != 0) ::ShowWindow(window_, SW_RESTORE);
     if (::SetForegroundWindow(window_) == 0) {
       // 不视为硬错误：窗口已经解除最小化（用户能看到它），只是没抢到焦点。
@@ -268,10 +272,11 @@ class Win32Backend final : public Backend {
 
     logical_width_ = options.width > 0 ? options.width : 1280;
     logical_height_ = options.height > 0 ? options.height : 720;
-    decorations_ = options.decorations;
-    window_resizable_ = options.resizable;
-    defer_gpu_ = options.defer_gpu;
-    scale_ = options.scale > 0.0f ? options.scale : 1.0f;
+          decorations_ = options.decorations;
+  window_resizable_ = options.resizable;
+  defer_gpu_ = options.defer_gpu;
+  tray_minimize_on_close_ = options.tray_minimize_on_close;
+  scale_ = options.scale > 0.0f ? options.scale : 1.0f;
     // 显式给了 `--scale` 就**不再被窗口 DPI 覆盖**：它是测试/复现用的覆盖值。
     // 关键在于"窗口尺寸"与"缓冲尺寸"必须用**同一个** scale——早先窗口按请求值建、
     // 缓冲按查询值建，两者不一致时 GPU 呈现只能让 DXGI 缩放 → 整屏发糊。
@@ -1550,20 +1555,58 @@ class Win32Backend final : public Backend {
     return self->handle_message(window, message, wparam, lparam);
   }
 
+  /// 托盘右键菜单：打开主界面 / 退出。
+  ///
+  /// 这是托盘常驻应用的**退出入口**（关窗只隐藏，进程没有其它常规退出路径）。
+  /// 用 `TrackPopupMenu` 弹系统菜单，选择由返回值同步判定：
+  /// -「打开主界面」→ 显示窗口并抢前台（与托盘左键同语义）
+  /// -「退出」→ 置 `close_requested_`（与关窗即退出的收尾路径一致，进程资源正常释放）
+  void show_tray_menu() {
+    if (window_ == nullptr || !tray_added_) return;
+    // 菜单必须先建再弹；命令 id 用固定值，与窗口过程同一作用域内判定。
+    HMENU menu = ::CreatePopupMenu();
+    if (menu == nullptr) return;
+    ::AppendMenuW(menu, MF_STRING, 1, L"打开主界面");
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_STRING, 2, L"退出");
+    // 在鼠标位置弹出；`SetForegroundWindow` 是 `TrackPopupMenu` 能正常收
+    // WM_COMMAND 的惯例（否则菜单可能立即消失）。
+    ::SetForegroundWindow(window_);
+    POINT cursor{};
+    ::GetCursorPos(&cursor);
+    const int cmd = ::TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD, cursor.x,
+                                     cursor.y, 0, window_, nullptr);
+    ::DestroyMenu(menu);
+    if (cmd == 1) {
+      if (::IsIconic(window_) != 0) ::ShowWindow(window_, SW_RESTORE);
+      ::ShowWindow(window_, SW_SHOW);
+      ::SetForegroundWindow(window_);
+    } else if (cmd == 2) {
+      close_requested_ = true;
+    }
+  }
+
   auto handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lparam) -> LRESULT {
-    // 托盘图标事件（自定义消息）：只计双击/左键单击，其它忽略。
-    //
-    // 为何只计这两类：托盘图标对用户心理模型就是"点一下把我叫回来"，
-    // 右键菜单另属一套（本框架不提供菜单，应用可自行用 overlay 做）。
+    // 托盘图标事件（自定义消息）：
+    // - 左键单击/双击 = “把我叫回来”（计数，应用主循环取走）
+    // - 右键 = 弹出系统菜单（打开主界面 / 退出）——托盘常驻应用的退出入口
     if (message == kTrayMessage) {
       const auto event = static_cast<UINT>(lparam);
       if (event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK) {
         ++tray_clicks_;
+      } else if (event == WM_RBUTTONUP) {
+        show_tray_menu();
       }
       return 0;
     }
     switch (message) {
       case WM_CLOSE:
+        // 关窗→托盘常驻：隐藏窗口而非退出（进程/托盘图标保留，从托盘菜单或
+        // 显式 request_quit 退出）。未启用该行为（或托盘没建起来）才走“关窗即退出”。
+        if (tray_minimize_on_close_ && tray_added_) {
+          ::ShowWindow(window, SW_HIDE);
+          return 0;
+        }
         // 关窗即请求退出：交由应用主循环收尾（进程内还有控制通道等资源要停）
         close_requested_ = true;
         return 0;
@@ -1898,6 +1941,8 @@ class Win32Backend final : public Backend {
   bool shown_{false};
   /// 是否让窗口系统画标题栏/边框（默认 `false` = 自绘，见 `CONVENTIONS.md` §10 第 7 条）。
   bool decorations_{false};
+  /// 关窗→托盘常驻：用户点 × 时隐藏窗口而非请求退出（见 `WindowOptions::tray_minimize_on_close`）。
+  bool tray_minimize_on_close_{false};
   /// 窗口是否可缩放（`WindowOptions::resizable`）：关掉后边缘命中不参与缩放。
   bool window_resizable_{true};
   HDC memory_dc_{nullptr};

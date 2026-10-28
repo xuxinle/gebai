@@ -29,6 +29,7 @@
 #include <functional>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 
@@ -95,15 +96,15 @@ auto main(int argc, char** argv) -> int {
         kBlur, st::math::Point{0.0f, 2.0f}, ambient, kBlur2, st::math::Point{0.0f, 6.0f});
   });
 
-  st::print("卡片 140×48 圆角 8 · 两层阴影（blur 12 / 24）\n\n");
-  st::print("B 稳态（缓存命中）   {:>9.2f} µs/次\n", cached_ns / 1000.0);
-  st::print("A 每次换位置          {:>9.2f} µs/次   → B/A = {:.2f}×\n", moved_ns / 1000.0,
+  st::log::out("卡片 140×48 圆角 8 · 两层阴影（blur 12 / 24）\n\n");
+  st::log::out("B 稳态（缓存命中）   {:>9.2f} µs/次\n", cached_ns / 1000.0);
+  st::log::out("A 每次换位置          {:>9.2f} µs/次   → B/A = {:.2f}×\n", moved_ns / 1000.0,
             moved_ns > 0.0 ? cached_ns / moved_ns : 0.0);
-  st::print("\n参考：测试里 96 张 = 6.9 ms → **{:.1f} µs/张**（文档 §3.1 实测）\n",
+  st::log::out("\n参考：测试里 96 张 = 6.9 ms → **{:.1f} µs/张**（文档 §3.1 实测）\n",
             6900.0 / 96.0);
-  st::print("\n判读：\n");
-  st::print("  · B 与“每张 µs”同量级 → 72 µs 就是**扁平贴图成本**，缓存已生效；\n");
-  st::print("    要再快只能减面积（更小的 blur/外扩）或减流量（16 位像素）。\n");
-  st::print("  · 若 B 远大于“每张 µs” → 每次都在重建遮罩（缺陷）。\n");
+  st::log::out("\n判读：\n");
+  st::log::out("  · B 与“每张 µs”同量级 → 72 µs 就是**扁平贴图成本**，缓存已生效；\n");
+  st::log::out("    要再快只能减面积（更小的 blur/外扩）或减流量（16 位像素）。\n");
+  st::log::out("  · 若 B 远大于“每张 µs” → 每次都在重建遮罩（缺陷）。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

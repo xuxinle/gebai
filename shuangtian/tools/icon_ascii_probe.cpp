@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
@@ -45,7 +46,7 @@ auto main(int argc, char** argv) -> int {
     st::raster::Canvas canvas{size, size, 1.0f};
     canvas.clear(background);
     st::ui::Icon::draw(canvas, name, box, ink, 0.0f);
-    st::print("Icon::draw（自动选路径类型）· {} · {}px\n", name, size);
+    st::log::out("Icon::draw（自动选路径类型）· {} · {}px\n", name, size);
     for (int y = 0; y < size; ++y) {
       std::string line;
       for (int x = 0; x < size; ++x) {
@@ -54,7 +55,7 @@ auto main(int argc, char** argv) -> int {
         const int cov = 255 - r;
         line += cov > 200 ? '#' : (cov > 120 ? '+' : (cov > 40 ? '.' : ' '));
       }
-      st::print("|{}|\n", line);
+      st::log::out("|{}|\n", line);
     }
   } else {
     const st::math::Path path = st::ui::Icon::path(name, box, 0.0f);
@@ -62,9 +63,9 @@ auto main(int argc, char** argv) -> int {
     canvas.clear(background);
     if (mode == "filled") {
       st::ui::Icon::draw_filled(canvas, name, box, ink);
-      st::print("draw_filled · {} · {}px\n", name, size);
+      st::log::out("draw_filled · {} · {}px\n", name, size);
     } else {
-      st::print("stroke_path（未走 Icon::draw）\n");
+      st::log::out("stroke_path（未走 Icon::draw）\n");
     }
     for (int y = 0; y < size; ++y) {
       std::string line;
@@ -72,7 +73,7 @@ auto main(int argc, char** argv) -> int {
         const int cov = 255 - static_cast<int>(canvas.pixel_at(x, y).r);
         line += cov > 200 ? '#' : (cov > 120 ? '+' : (cov > 40 ? '.' : ' '));
       }
-      st::print("|{}|\n", line);
+      st::log::out("|{}|\n", line);
     }
     (void)path;
   }

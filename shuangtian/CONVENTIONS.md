@@ -522,6 +522,7 @@ PowerShell 的 PSReadLine 会画一段**只有显示、不是输入**的内联�
 | L15 | raw string 无定界符（`R"(`）——内容里的 `)"` 会提前终结（提示级） | 无（改用 `R"x(…)x"`；本仓实测踩过两次） |
 | L16 | **层方向**：文件在 `src/core/`、`include/st/core/` 下且 `#include "st/ui/…"`（core 不得依赖 ui——BACKLOG P1 根因①的防护栏；`check_layer_includes` 专用检查，方向判定需文件路径，单行正则表达不了） | 无（core→ui 没有合法形态；将来若真需要，走清单豁免并在此登记） |
 | L17 | **禁止 `long` / `long long` 表达数据**（`-Werror` 的 `-Wconversion` 抓不到它——`long` 本身就是合法类型，错在**宽度随平台变**）。排除 `long double`、注释与字符串 | ①	extbf{平台 ABI 边界}：`platform_*` 文件按定义就是对系统类型的如实声明（X11 的 `XEvent` 布局、OpenSSL 函数指针签名、Win32 `LONG`、`FIONBIO` 宏），换了反而错——按文件名豁免；② C 标准库调用点（`ftell`/`fseek`/`sscanf`）用行内 `// lint-allow: L17` 就地说明 |
+| L18 | **禁止绕过日志通道的裸打印**（`printf`/`puts`/`fprintf`/`std::cout`/`std::cerr`）——直接写 stdout/stderr，不经 `st::print`（终端+镜像落盘）也不经 `ST_LOG_*`（分级/过滤/订阅）。合法通道：`st::print`/`st::eprint`（镜像落盘）、`ST_LOG_*`（日志系统） | 打印实现方（`print.cpp`/`console_log.cpp`/`log_file.cpp`/`platform_crash.cpp`/`platform_*`）与独立工具区（`tools/**`、`tests/**`、`examples/**`——输出各有镜像/分片/捕获通道，迁移到 `ST_LOG` 是增量过程，存量先登记豁免） |
 
 **扫描语义（重要）**：匹配前先做两层净化——① **注释**不参与任何规则；② **字符串字面量内容**不参与任何规则
 （关键字表、规则表自身的正则字符串都不是代码，否则 linter 会对着自己的关键词表报几十条"违规"）。
@@ -547,6 +548,9 @@ PowerShell 的 PSReadLine 会画一段**只有显示、不是输入**的内联�
 | L3 | `src/net/platform_tls_openssl.cpp`（`ST_SYM`） | dlopen 符号还原样板：11 个 `ST_SYM` 展开是同一形参表，函数化反而藏错。行内豁免在此**结构上放不下**：`#define` 首行必须以 `\` 结尾（尾随注释在 Linux g++ 判 stray `'\'` 拒编），而 `has_allow_comment` 只认同一行 | **清单**（`st.pkg` 的 `lint.exempt.L3`） |
 | L3 | `tests/shard_parity_test.cpp`（`ST_SHARDPROBE_CASE`） | 哨兵生成 X 宏：12 个哨兵展开是同一段注册体，函数化反而藏错（且落片断言依赖哨兵按数值序注册，手写 12 段更容易插错位置）。行内豁免同样结构上放不下（多行宏首行以 `\` 结尾） | **清单**（`st.pkg` 的 `lint.exempt.L3`） |
 | L14 | `src/shell/backend.cpp` | 需 `dlopen` 做**运行时后端探测**——而这正是 §10 第 1 条「平台后端一律运行时探测（不产生链接期依赖）」的实现处：探测本身就是平台差异的唯一判定点 | 内置 |
+| L6 | `src/raster/*simd*`（NEON/SIMD 内核） | SIMD intrinsics 的位级重解释只能在单点封装里发生（与 L6 的 `platform_*` 同一纪律） | 内置 |
+| L18 | `tools/**`、`tests/**`、`examples/**` | 存量输出已各有落盘通道：`tools/**`（stpm 的 `st::print`/`fprintf` 走 `cli_log` 镜像落盘 `st` 命令日志；探针/参考工具是独立实体不进框架库）、`tests/**`（测试输出进分片日志）、`examples/**`（应用入口错误经宿主 stderr 捕获）。迁移到 `ST_LOG` 是增量过程，新增代码应走 `st::print`/`ST_LOG_*` | **清单**（`st.pkg` 的 `lint.exempt.L18`） |
+| L18 | `print.cpp`/`console_log.cpp`/`log_file.cpp`/`platform_crash.cpp`/`platform_*` | 打印**实现方**：`print`/`console_log` 是 `st::print` 的底层、`log_file` 是 `st::log` 的落盘实现、`platform_crash` 的崩溃栈必须在日志系统不可用时仍能输出（信号处理器里不能依赖分配/锁） | 内置 |
 
 > 两条豁免通道都**各自计数**（`st lint` 汇总行报出「行内 N / 清单 M」），不允许静默。
 >
@@ -874,8 +878,9 @@ LLVM 官方 Windows 包编译成 MSVC 目标（会去要 Visual Studio 的头与
 san 档需要 sanitizer 运行库，MinGW 发行版多数不带——构建前会探测并给出可行动的报错。
 
 **跨编译器检查是常规手段**：`st check --toolchain=clang` 只做语义分析（`-fsyntax-only`），
-不产出、不链接，全量 77 单元约 15 s。它与 `build` 走同一段单元枚举与标志组装
-（`BuildOptions::check_only`），所以"检查过了"就是"编得过"——
+不产出、不链接，全量 77 单元约 15 s（默认编译器全量 155 单元实测 ~38 s；
+**增量模式下无变化 <1 s**，只查哈希变化的单元，`--force` 强制全量）。它与 `build` 走同一段
+单元枚举与标志组装（`BuildOptions::check_only`），所以"检查过了"就是"编得过"——
 而**它查不出的东西要另外补**：链接期问题（ODR 违反、符号缺失、ABI 不匹配）只有真链接才暴露，
 所以 `st check` 不能替代 `st build --toolchain=clang`，两者是"高频便宜"与"低频完整"的分工。
 详见 `docs/BUILD_CHECK.md`。

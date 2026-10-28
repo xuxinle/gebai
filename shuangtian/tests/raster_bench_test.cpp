@@ -27,6 +27,7 @@
 #include <format>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/math/path.hpp"
@@ -164,13 +165,13 @@ struct Measurement {
 /// 返回 `true` = 调用方应当返回（跳过）。
 [[nodiscard]] inline auto skip_ratios_under_instrumentation(const char* name) -> bool {
   if (instrumented_build()) {
-    st::print("[bench] {}：插桩档（san）跳过比值阈值——ASan 开销 ∝ 内存访问量，\n"
+    st::log::out("[bench] {}：插桩档（san）跳过比值阈值——ASan 开销 ∝ 内存访问量，\n"
               "        而分母（清屏）是纯内存写，比值不再机器无关。标定以发布档为准。\n",
               name);
     return true;
   }
   if (!calibration_profile()) {
-    st::print("[bench] {}：非标定档（非 release）跳过比值阈值——清屏是纯 memset（可向量化）\n"
+    st::log::out("[bench] {}：非标定档（非 release）跳过比值阈值——清屏是纯 memset（可向量化）\n"
               "        而 AA 光栅化是标量循环，两者对 -O 的响应不同，同一负载在 dev 与 release\n"
               "        下比值相差 1.6 倍且**两个方向都会发生**（实测圆角 release 2.03× / dev 3.23×；\n"
               "        文本 release 26.96× / dev 18.74×），而本文件的阈值与\"实测\"注释全是 release 标定。\n"
@@ -334,7 +335,7 @@ inline constexpr double kMaxHeadroom{3.5};
 ST_TEST_SLOW(bench_rounded_card_fill) {
   const double unit = baseline_ms_per_pixel();
   const Measurement m = measure_rounded_cards(unit);
-  st::print("[bench] 圆角卡片填充 ×60: {:.2f} ms（{:.3f} ms/张，{:.2f}× 清屏单位，阈值 {}×）\n",
+  st::log::out("[bench] 圆角卡片填充 ×60: {:.2f} ms（{:.3f} ms/张，{:.2f}× 清屏单位，阈值 {}×）\n",
             m.ms, m.ms / 60.0, m.ratio, kRoundedCardsLimit);
   if (skip_ratios_under_instrumentation("圆角卡片填充")) return;
   ST_CHECK(m.ratio <= kRoundedCardsLimit);
@@ -343,7 +344,7 @@ ST_TEST_SLOW(bench_rounded_card_fill) {
 ST_TEST_SLOW(bench_card_shadow) {
   const double unit = baseline_ms_per_pixel();
   const Measurement m = measure_card_shadows(unit);
-  st::print("[bench] 卡片投影 ×20（blur=16）: {:.2f} ms（{:.3f} ms/个，{:.2f}× 清屏单位，阈值 {}×）\n",
+  st::log::out("[bench] 卡片投影 ×20（blur=16）: {:.2f} ms（{:.3f} ms/个，{:.2f}× 清屏单位，阈值 {}×）\n",
             m.ms, m.ms / 20.0, m.ratio, kShadowLimit);
   if (skip_ratios_under_instrumentation("卡片投影")) return;
   ST_CHECK(m.ratio <= kShadowLimit);
@@ -353,10 +354,10 @@ ST_TEST_SLOW(bench_text_draw) {
   bool available = false;
   const Measurement m = measure_text(&available);
   if (!available) {
-    st::print("[bench] 文本：无系统字体，本项跳过（不算通过）\n");
+    st::log::out("[bench] 文本：无系统字体，本项跳过（不算通过）\n");
     return;
   }
-  st::print("[bench] 文本 ×60（59 字符/行，字型缓存命中）: {:.2f} ms（{:.3f} ms/行，{:.2f}× 清屏单位，阈值 {}×）\n",
+  st::log::out("[bench] 文本 ×60（59 字符/行，字型缓存命中）: {:.2f} ms（{:.3f} ms/行，{:.2f}× 清屏单位，阈值 {}×）\n",
             m.ms, m.ms / 60.0, m.ratio, kTextLimit);
   if (skip_ratios_under_instrumentation("文本绘制")) return;
   ST_CHECK(m.ratio <= kTextLimit);
@@ -365,7 +366,7 @@ ST_TEST_SLOW(bench_text_draw) {
 ST_TEST_SLOW(bench_gradient_fill) {
   const double unit = baseline_ms_per_pixel();
   const Measurement m = measure_gradients(unit);
-  st::print("[bench] 渐变填充 ×200（1200×36）: {:.2f} ms（{:.3f} ms/块，{:.2f}× 清屏单位，阈值 {}×）\n",
+  st::log::out("[bench] 渐变填充 ×200（1200×36）: {:.2f} ms（{:.3f} ms/块，{:.2f}× 清屏单位，阈值 {}×）\n",
             m.ms, m.ms / 200.0, m.ratio, kGradientLimit);
   if (skip_ratios_under_instrumentation("渐变填充")) return;
   ST_CHECK(m.ratio <= kGradientLimit);
@@ -388,7 +389,7 @@ ST_TEST_SLOW(bench_thresholds_have_bounded_headroom) {
   const auto check = [](const char* name, double limit, const Measurement& m) {
     ST_REQUIRE(m.ratio > 0.0);
     const double headroom = limit / m.ratio;
-    st::print("[bench-guard] {}: 阈值 {:.1f}× / 实测 {:.2f}× = 余量 {:.2f} 倍（上限 {}）\n", name,
+    st::log::out("[bench-guard] {}: 阈值 {:.1f}× / 实测 {:.2f}× = 余量 {:.2f} 倍（上限 {}）\n", name,
               limit, m.ratio, headroom, kMaxHeadroom);
     // 余量太小 → 机器噪声就会误报；太大 → 抓不住退化。两头都要卡住。
     //
@@ -405,7 +406,7 @@ ST_TEST_SLOW(bench_thresholds_have_bounded_headroom) {
   check("渐变填充", kGradientLimit, measure_gradients(unit));
 
   if (instrumented_build() || !calibration_profile()) {
-    st::print("[bench-guard] 跳过余量上下界断言——{}。性能标定以发布档为准。\n",
+    st::log::out("[bench-guard] 跳过余量上下界断言——{}。性能标定以发布档为准。\n",
               instrumented_build() ? "插桩档：ASan 开销 ∝ 内存访问量，而清屏是纯内存写"
                                    : "非标定档：清屏可向量化而 AA 光栅化是标量循环");
     return;
@@ -428,7 +429,7 @@ ST_TEST_SLOW(bench_fault_multiplication_is_caught) {
   const double unit = baseline_ms_per_pixel();
   const auto check = [](const char* name, double limit, const Measurement& m) {
     const bool caught = m.ratio * kFaultFactor > limit;
-    st::print("[bench-guard] {}: 实测 {:.2f}× × {} 倍退化 = {:.2f}× vs 阈值 {:.1f}× → {}\n", name,
+    st::log::out("[bench-guard] {}: 实测 {:.2f}× × {} 倍退化 = {:.2f}× vs 阈值 {:.1f}× → {}\n", name,
               m.ratio, kFaultFactor, m.ratio * kFaultFactor, limit, caught ? "会被抓住" : "**抓不住**");
     // 与上一条自检同一限制：这条也建立在"比值机器/档位无关"之上
     //（非优化档下比值偏小 → 会报出假的"抓不住"，而那与阈值标定无关）。

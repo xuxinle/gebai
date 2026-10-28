@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -234,10 +235,10 @@ auto main(int argc, char** argv) -> int {
         }
       }));
 
-  st::print("ablation · repeat={} · clear_each={} · move={} · 清屏 {:.3f}ms\n", repeat,
+  st::log::out("ablation · repeat={} · clear_each={} · move={} · 清屏 {:.3f}ms\n", repeat,
             config.clear_each ? 1 : 0, config.move ? 1 : 0, clear_ms);
   for (const Row& row : rows) {
-    st::print("  {:<40} {:>9.3} ms · {:>8.1} µs\n", row.name, row.ms, row.ms * 1000.0);
+    st::log::out("  {:<40} {:>9.3} ms · {:>8.1} µs\n", row.name, row.ms, row.ms * 1000.0);
   }
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 

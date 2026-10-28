@@ -114,6 +114,10 @@ class WsSession {
   /// 收下一条**应用**消息（阻塞；Ping 自动回 Pong、Pong 静默吞——它们不是应用消息）。
   /// 连接关闭（收到 Close 且已回）返回 nullopt。
   auto read_message() -> std::optional<Message>;
+  /// **非阻塞**收下一条应用消息：从 socket 读一次（无数据/would-block 不阻塞），
+  /// 再取一条已解析消息。返回 nullopt = 「这次没有」（可能数据未凑齐，也可能已关闭）——
+  /// 调用方用 `close_received()`/`close_sent()` 区分。适合主循环每帧轮询。
+  auto read_message_nb() -> std::optional<Message>;
   /// 非阻塞探测：有完整消息立返（内部解析；无则 nullopt）。read_message 前用。
   auto try_read_message() -> std::optional<Message>;
 

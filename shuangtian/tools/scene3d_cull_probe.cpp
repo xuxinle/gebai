@@ -15,6 +15,7 @@
 #include <cstdint>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/mesh.hpp"
 #include "st/raster/scene3d.hpp"
@@ -72,7 +73,7 @@ auto render(const Mesh& mesh, Vec3 eye, CullMode cull) -> int {
                                              static_cast<float>(kH)});
   (*scene)->flush();
   const int n = lit_pixels(canvas);
-  st::print("    backend={} draw_calls={} lit={}\n", (*scene)->backend(), calls, n);
+  st::log::out("    backend={} draw_calls={} lit={}\n", (*scene)->backend(), calls, n);
   return n;
 }
 }  // namespace
@@ -90,25 +91,25 @@ int main() {
                         {"Back（剔背面）", CullMode::Back},
                         {"Front（剔正面）", CullMode::Front}};
 
-  st::print("{:<18} {:>12} {:>12}\n", "剔除模式", "正面(cam+Z)", "背面(cam-Z)");
+  st::log::out("{:<18} {:>12} {:>12}\n", "剔除模式", "正面(cam+Z)", "背面(cam-Z)");
   int bad = 0;
   for (const Case& c : cases) {
     const int f = render(plane, front, c.mode);
     const int b = render(plane, back, c.mode);
-    st::print("{:<18} {:>12} {:>12}\n", c.name, f, b);
+    st::log::out("{:<18} {:>12} {:>12}\n", c.name, f, b);
     if (c.mode == CullMode::None && (f <= 0 || b <= 0)) {
-      st::print("  ✗ 双面模式应两个方向都可见\n");
+      st::log::out("  ✗ 双面模式应两个方向都可见\n");
       ++bad;
     }
     if (c.mode == CullMode::Back && (f <= 0 || b != 0)) {
-      st::print("  ✗ 剔背面：正面应可见、背面应为 0\n");
+      st::log::out("  ✗ 剔背面：正面应可见、背面应为 0\n");
       ++bad;
     }
     if (c.mode == CullMode::Front && (f != 0 || b <= 0)) {
-      st::print("  ✗ 剔正面：正面应为 0、背面应可见\n");
+      st::log::out("  ✗ 剔正面：正面应为 0、背面应可见\n");
       ++bad;
     }
   }
-  st::print("\n{}\n", bad == 0 ? "方向正确 ✓" : "方向错误 ✗");
+  st::log::out("\n{}\n", bad == 0 ? "方向正确 ✓" : "方向错误 ✗");
   return bad == 0 ? 0 : 1;
 }

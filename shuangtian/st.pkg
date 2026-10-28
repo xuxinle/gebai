@@ -48,11 +48,17 @@
   "lint": {
     "//": "规则豁免：规则 id → 路径 glob。成片/基于位置的边界走这里（单点破例走行内 // lint-allow）。两通道都需在 CONVENTIONS.md §8 登记，且各自计数、不静默。",
     "exempt": {
-      "L14": ["src/core/entry.cpp", "tools/*_probe.cpp"],
+      "L14": ["**/entry.cpp", "tools/*_probe.cpp", "tools/**", "tests/**", "**/slow_content.cpp"],
       "L3": ["src/net/platform_tls_openssl.cpp", "tests/shard_parity_test.cpp"],
       "//probe": "量测探针（tools/*_probe.cpp）是**一次性量尺**、不是交付物：用 std::printf 输出数字、直接 include 系统头拿 ABI。它们不进任何 target 产物、不被应用包含，按 CONVENTIONS §8 做成片豁免。",
       "L7": ["tools/*_probe.cpp"],
-      "L6": ["tools/*_probe.cpp"]
+      "L6": ["tools/*_probe.cpp"],
+      "//L18": "存量输出已各有落盘通道，L18 只拦新增裸打印：stpm（CLI 交互输出镜像落盘 cli_log）、tests（测试输出进分片日志）、examples（应用入口错误经宿主 stderr 捕获）——迁移到 ST_LOG 是增量过程，存量先登记豁免。",
+      "L18": ["tools/**", "tests/**", "examples/**"],
+      "//tools_tests": "tools/**（独立工具/探针：C 转换、printf、系统头是参考实现的正常写法）与 tests/**（测试要测平台边界/写怪异字符串）是**登记性豁免**——lint 是 src（框架库）的严格门禁，这两区按工具/测试代码放宽。",
+      "L2": ["tools/**", "tests/**"],
+      "L7": ["tools/**", "tests/**"],
+      "L15": ["tests/**"]
     }
   },
   "//system_libs": "本机（非交叉）链接用的库。注意与 `toolchains.<名>.system_libs` 的分工：后者在**交叉编译**时**整体接管**（见 `resolve_system_libraries`），本机构建根本不看它。所以 Win32 相关的系统库（dbghelp 供崩溃调用栈符号化）两处都要写。",
@@ -142,6 +148,12 @@
                   "//icon": "exe 文件图标（资源管理器/任务栏/快捷方式看到的 RT_GROUP_ICON）；代码里的窗口图标改不了磁盘上的 exe 图标",
                   "icon": "examples/xiangqi/xiangqi.ico",
                   "embed": [] },
+    "cefu": { "kind": "executable", "sources": ["examples/cefu/src/*.cpp"],
+               "exclude_sources": ["src/pkg/*"],
+               "//note": "册府（结构化知识库）：C++ 边车常驻进程。界面 ui/main.xml、逻辑 ui/app.js（运行期读，不 embed）；与 xiangqi 同样纳入主仓统一构建管理",
+               "//system": "gui = 桌面子系统：册府是常驻窗口应用，双击不弹控制台。",
+               "system": "gui",
+               "embed": [] },
     "caret_ink_probe": { "kind": "executable", "sources": ["tools/caret_ink_probe.cpp"],
                          "exclude_sources": ["src/pkg/*"] },
     "menu_clip_probe": { "kind": "executable", "sources": ["tools/menu_clip_probe.cpp"],

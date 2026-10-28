@@ -9,6 +9,7 @@
 
 #include "st/core/memory.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/test/test.hpp"
 
 #include <memory>
@@ -41,7 +42,7 @@ ST_TEST(memory_stats_are_monotonic_and_non_negative) {
   const std::uint64_t faults_after = page_fault_count();
   const std::uint64_t resident_after = working_set_bytes();
 
-  st::print("[memory] 缺页 {} → {}（+{}）· 工作集 {} → {} 字节\n", faults_before, faults_after,
+  st::log::out("[memory] 缺页 {} → {}（+{}）· 工作集 {} → {} 字节\n", faults_before, faults_after,
             faults_after - faults_before, resident_before, resident_after);
 
   // ① 累计缺页只增不减（回绕/读失败会表现为减小或归零）。

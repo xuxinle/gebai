@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/mesh.hpp"
 #include "st/test/test.hpp"
 
@@ -98,7 +99,7 @@ ST_TEST(mesh_generators_have_consistent_winding) {
   };
   for (const Case& c : cases) {
     const Winding w = analyze(c.mesh);
-    st::print("[winding] {:<16} same={:4} opposite={:4} degenerate={:3}\n", c.name, w.same,
+    st::log::out("[winding] {:<16} same={:4} opposite={:4} degenerate={:3}\n", c.name, w.same,
               w.opposite, w.degenerate);
     // 反向三角形一个都不允许（这就是 `CullMode::Back` 会把物体剔成内壁的原因）
     ST_CHECK(w.opposite == 0);

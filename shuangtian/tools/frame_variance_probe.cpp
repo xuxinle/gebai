@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/components/basic.hpp"
@@ -118,8 +119,8 @@ auto main(int argc, char** argv) -> int {
       {"C Card + paint_frame()", true, true},
   };
 
-  st::print("96 卡片 + 13px 文字，1280×800\n\n");
-  st::print("{:<32}{:>14}{:>14}\n", "场景", "耗时", "相对 A");
+  st::log::out("96 卡片 + 13px 文字，1280×800\n\n");
+  st::log::out("{:<32}{:>14}{:>14}\n", "场景", "耗时", "相对 A");
 
   double first_ns = 0.0;
   for (const Case& item : cases) {
@@ -143,14 +144,14 @@ auto main(int argc, char** argv) -> int {
       }
     });
     if (first_ns == 0.0) first_ns = ns;
-    st::print("{:<32}{:>11.1f} µs{:>13.2f}×\n", item.name, ns / 1000.0,
+    st::log::out("{:<32}{:>11.1f} µs{:>13.2f}×\n", item.name, ns / 1000.0,
               first_ns > 0.0 ? ns / first_ns : 0.0);
   }
 
-  st::print("\n参考（debug 档 `st test`）：局部帧 2458 µs / 整帧 43597 µs\n");
-  st::print("\n判读：\n");
-  st::print("  · 若 B ≫ A → 差距主体是 **Card 的两层阴影**（与 PAINT_DIAGNOSIS 一致）；\n");
-  st::print("  · 若 C ≈ B → `paint_frame` 的额外工作可忽略；\n");
-  st::print("  · 剩余差距（release vs debug）通常是 2~4 倍，不是 19 倍。\n");
+  st::log::out("\n参考（debug 档 `st test`）：局部帧 2458 µs / 整帧 43597 µs\n");
+  st::log::out("\n判读：\n");
+  st::log::out("  · 若 B ≫ A → 差距主体是 **Card 的两层阴影**（与 PAINT_DIAGNOSIS 一致）；\n");
+  st::log::out("  · 若 C ≈ B → `paint_frame` 的额外工作可忽略；\n");
+  st::log::out("  · 剩余差距（release vs debug）通常是 2~4 倍，不是 19 倍。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

@@ -42,6 +42,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/scene3d.hpp"
@@ -206,30 +207,30 @@ auto main(int argc, char** argv) -> int {
     gpu_note = "（强制 gpu 失败，实际落到了：" + gpu_rows.front().backend + "）";
   }
 
-  st::print("三维两条腿对照（1100 面级网格，best-of-{}）{}\n\n", kRounds, gpu_note);
-  st::print("{:<12} {:>22} {:>26} {:>10}\n", "尺寸", "GPU 光栅 / 完整帧 / 回读",
+  st::log::out("三维两条腿对照（1100 面级网格，best-of-{}）{}\n\n", kRounds, gpu_note);
+  st::log::out("{:<12} {:>22} {:>26} {:>10}\n", "尺寸", "GPU 光栅 / 完整帧 / 回读",
             "软件 光栅 / 完整帧 / 回读", "完整帧快多少");
   for (std::size_t i = 0; i < sizes.size() && i < gpu_rows.size() && i < software_rows.size();
        ++i) {
     const LegResult& g = gpu_rows[i];
     const LegResult& s = software_rows[i];
-    st::print("{:<12} {:>7.2f} /{:>7.2f} /{:>7.2f} {:>10.2f} /{:>7.2f} /{:>7.2f} {:>10.2f}×\n",
+    st::log::out("{:<12} {:>7.2f} /{:>7.2f} /{:>7.2f} {:>10.2f} /{:>7.2f} /{:>7.2f} {:>10.2f}×\n",
               std::format("{}x{}", sizes[i].first, sizes[i].second),
               g.raster_ms, g.full_ms, g.readback_ms,
               s.raster_ms, s.full_ms, s.readback_ms,
               g.full_ms > 0.0 ? s.full_ms / g.full_ms : 0.0);
   }
 
-  st::print("\n判读：\n");
+  st::log::out("\n判读：\n");
   if (!gpu_rows.empty() && !software_rows.empty()) {
     const LegResult& g = gpu_rows.front();
     const LegResult& s = software_rows.front();
-    st::print("  1080p：GPU 光栅 {:.2f} ms（占整帧 {:.0f}%），回读 {:.2f} ms；\n", g.raster_ms,
+    st::log::out("  1080p：GPU 光栅 {:.2f} ms（占整帧 {:.0f}%），回读 {:.2f} ms；\n", g.raster_ms,
               g.full_ms > 0.0 ? g.raster_ms / g.full_ms * 100.0 : 0.0, g.readback_ms);
-    st::print("         软件 光栅 {:.2f} ms（占整帧 {:.0f}%）。\n", s.raster_ms,
+    st::log::out("         软件 光栅 {:.2f} ms（占整帧 {:.0f}%）。\n", s.raster_ms,
               s.full_ms > 0.0 ? s.raster_ms / s.full_ms * 100.0 : 0.0);
     const bool gpu_raster_wins = g.raster_ms < s.raster_ms;
-    st::print("  → 光栅环节{}（{:.2f} vs {:.2f} ms）；传输环节是{}的主要成本。\n",
+    st::log::out("  → 光栅环节{}（{:.2f} vs {:.2f} ms）；传输环节是{}的主要成本。\n",
               gpu_raster_wins ? "GPU 更快" : "GPU 没占优", g.raster_ms, s.raster_ms,
               g.readback_ms > g.raster_ms ? "GPU 腿" : "两者各自");
     verdict.add("GPU 光栅快于软件光栅", gpu_raster_wins,

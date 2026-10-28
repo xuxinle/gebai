@@ -16,6 +16,7 @@
 
 #include "st/core/print.hpp"
 #include "st/core/json.hpp"
+#include "st/core/log.hpp"
 #include "st/test/test.hpp"
 
 namespace {
@@ -28,7 +29,7 @@ ST_TEST(layer_schema_is_self_consistent) {
   // 重名、反向区间、step 大于区间、choice 无候选…… 全部不该出现。
   // 这些错误**不会崩**，只会生成一个拖到底也不动的控件。
   const auto problem = st::ui::validate_property_schema(caiyun::layer_property_schema());
-  if (problem.has_value()) st::print("[layer-schema] {}\n", problem.value());
+  if (problem.has_value()) st::log::out("[layer-schema] {}\n", problem.value());
   ST_CHECK(!problem.has_value());
   ST_CHECK(caiyun::layer_property_schema().size() > 10);
 }

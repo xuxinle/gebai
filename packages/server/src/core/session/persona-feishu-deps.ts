@@ -61,6 +61,8 @@ export interface FeishuSourceDepsOptions {
   userToken?: () => Promise<{ token: { accessToken: string } } | { reason: string }>
   /** 应用令牌（应用身份读历史）。 */
   appToken?: () => Promise<string>
+  /** 自发送消息记账（渠道 act 成功登记 message_id；入站侧据此过滤自己发的消息）。可选——未注入时不做防回灌过滤。 */
+  sentMessages?: { record(id: string): void; hit(id: string): boolean }
   /** HTTP 垫片（测试注入；缺省 fetch）。 */
   fetchImpl?: (url: string, init: RequestInit) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>
   log?: { info(msg: string): void; warn(msg: string): void }
@@ -153,6 +155,96 @@ export function createFeishuSourceDeps(opts: FeishuSourceDepsOptions): Record<st
     if (!opts.appToken) throw new Error("未配置任何可用身份读取群历史（既无用户令牌也无应用凭据）")
     return call(await opts.appToken(), "app")
   }
+
+  // ③ 入站消息带发送者姓名：**群成员表优先**（一次拉整群，批量覆盖全群消息），
+  //    contact API 兜底（单聊没群成员表）。查不到返回 undefined，不阻断入站。
+  // 与 feishuHistory 共用 appToken（应用身份）；进程内按 openId + chatId 双缓存。
+  const userNameCache = new Map<string, string>()
+  const memberCache = new Map<string, { members: Map<string, string>; fetchedAt: number }>()
+  const MEMBER_CACHE_TTL_MS = 5 * 60_000
+  const MEMBER_CACHE_EMPTY_TTL_MS = 60_000
+
+  /** 拉取群成员表（应用身份）：一次拿整群（页大小 100，按需翻页）。失败/无权限 → 空表。 */
+  const memberTable = async (chatId: string): Promise<Map<string, string>> => {
+    const cached = memberCache.get(chatId)
+    if (cached) {
+      const ttl = cached.members.size ? MEMBER_CACHE_TTL_MS : MEMBER_CACHE_EMPTY_TTL_MS
+      if (Date.now() - cached.fetchedAt <= ttl) return cached.members
+    }
+    const fetchImpl = opts.fetchImpl ?? ((url, init) => fetch(url, init) as never)
+    try {
+      const token = await opts.appToken!()
+      const members = new Map<string, string>()
+      let pageToken: string | undefined
+      for (;;) {
+        const q = new URLSearchParams({ page_size: "100", member_id_type: "open_id", ...(pageToken ? { page_token: pageToken } : {}) })
+        const res = await fetchImpl(`${FEISHU_BASE}/im/v1/chats/${encodeURIComponent(chatId)}/members?${q.toString()}`, {
+          method: "GET",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json; charset=utf-8" },
+        })
+        const json = (await res.json()) as {
+          code?: number
+          msg?: string
+          data?: { items?: Array<{ member_id?: string; name?: string }>; page_token?: string; has_more?: boolean }
+        }
+        if (!res.ok || json.code !== 0) {
+          memberCache.set(chatId, { members: new Map(), fetchedAt: Date.now() }) // 冷却
+          return new Map() // 无权限/失败 → 回退 contact
+        }
+        for (const it of json.data?.items ?? []) {
+          if (it.member_id && it.name) members.set(it.member_id, it.name.trim())
+        }
+        if (!json.data?.has_more || !json.data?.page_token) break
+        pageToken = json.data.page_token
+      }
+      memberCache.set(chatId, { members, fetchedAt: Date.now() })
+      if (members.size) {
+        for (const [oid, name] of members) userNameCache.set(oid, name)
+      }
+      return members
+    } catch {
+      memberCache.set(chatId, { members: new Map(), fetchedAt: Date.now() }) // 冷却
+      return new Map()
+    }
+  }
+
+  /** open_id → 姓名（带 chatId 群上下文）：群成员表优先，contact 兜底。 */
+  deps.feishuUserName = async (openId: string, chatId?: string): Promise<string | undefined> => {
+    if (!openId) return undefined
+    const hit = userNameCache.get(openId)
+    if (hit !== undefined) return hit
+    if (chatId) {
+      const name = (await memberTable(chatId)).get(openId)
+      if (name) {
+        userNameCache.set(openId, name)
+        return name
+      }
+    }
+    if (!opts.appToken) return undefined
+    const fetchImpl = opts.fetchImpl ?? ((url, init) => fetch(url, init) as never)
+    try {
+      const token = await opts.appToken()
+      const res = await fetchImpl(`${FEISHU_BASE}/contact/v3/users/${encodeURIComponent(openId)}?user_id_type=open_id`, {
+        method: "GET",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json; charset=utf-8" },
+      })
+      const json = (await res.json()) as { code?: number; msg?: string; data?: { user?: { name?: string } } }
+      if (!res.ok || json.code !== 0) {
+        opts.log?.info(`[gebai] 查飞书用户名失败（不影响入站）：code=${json.code} ${json.msg ?? res.status}`)
+        return undefined
+      }
+      const name = json.data?.user?.name?.trim()
+      if (name) userNameCache.set(openId, name)
+      return name || undefined
+    } catch (err) {
+      opts.log?.info(`[gebai] 查飞书用户名异常（不影响入站）：${String((err as Error)?.message ?? err)}`)
+      return undefined
+    }
+  }
+
+  // ④ 自发送消息记账（防回灌）：渠道 act 成功后登记 message_id，本源入站据此过滤——
+  // 自己以用户名义发的消息（sender_type=user）无法从事件字段区分，只能精确对账。
+  if (opts.sentMessages) deps.sentMessages = opts.sentMessages
 
   return deps
 }

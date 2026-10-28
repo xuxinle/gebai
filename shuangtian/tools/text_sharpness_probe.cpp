@@ -36,6 +36,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -127,7 +128,7 @@ struct Stats {
 }
 
 void print_stats(const std::string& tag, const Stats& stats) {
-  st::print("  {:<26s} dark={:.3f} solid={:6d} mid={:6d} mid/solid={:6.3f} ink={:9.0f}\n", tag,
+  st::log::out("  {:<26s} dark={:.3f} solid={:6d} mid={:6d} mid/solid={:6.3f} ink={:9.0f}\n", tag,
             stats.darkest, stats.solid, stats.mid, stats.mid_ratio, stats.ink);
 }
 
@@ -179,7 +180,7 @@ void write_png(const std::vector<std::uint8_t>& rgba, const std::string& path, i
     }
   }
   const auto status = st::codec::png_write_file(path, image);
-  if (!status.has_value()) st::print("  写 PNG 失败：{}\n", status.error().message);
+  if (!status.has_value()) st::log::out("  写 PNG 失败：{}\n", status.error().message);
 }
 
 }  // namespace
@@ -221,9 +222,9 @@ auto main(int argc, char** argv) -> int {
   };
 
   for (const Sample& sample : kSamples) {
-    st::print("\n=== {} \"{}\" @{}px ===\n", sample.label, sample.text, sample.size);
+    st::log::out("\n=== {} \"{}\" @{}px ===\n", sample.label, sample.text, sample.size);
     for (const float supersample : {1.0f, 2.0f}) {
-      st::print("  — 画布 DPI 口径 canvas_scale={} / supersample={} —\n", scale, supersample);
+      st::log::out("  — 画布 DPI 口径 canvas_scale={} / supersample={} —\n", scale, supersample);
       for (const Mode& mode : modes) {
         const auto pixels =
             render(fonts, sample, scale, supersample, mode.lcd, mode.filter, mode.fit);
@@ -234,7 +235,7 @@ auto main(int argc, char** argv) -> int {
     }
     const auto pixels =
         render(fonts, sample, 1.0f, 1.0f, true, true, GridFitMode::Normal);
-    st::print("  — 画布 DPI 口径 canvas_scale=1 / supersample=1 —\n");
+    st::log::out("  — 画布 DPI 口径 canvas_scale=1 / supersample=1 —\n");
     print_stats("lcd+filt/normal (基准)",
                 measure(pixels, kWidth, kHeight));
     std::string name = std::string("sharp-") + sample.label + "-lcd-f-normal";

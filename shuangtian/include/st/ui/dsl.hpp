@@ -21,6 +21,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+
+#include "st/core/print.hpp"
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -46,6 +48,7 @@
 // 使用方将在一个塔的模板栈里报 “invalid use of incomplete type … basic_json”，
 // 很难反推到本头。详见 `st/core/json_fwd.hpp` 的里注释。
 #include "st/core/json_fwd.hpp"
+#include "st/core/log.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/styling.hpp"
 #include "st/ui/ui_root.hpp"
@@ -737,9 +740,9 @@ template <class T>
   // 这里不做异常（禁令 L5：业务错误走 Result/致命断言）：编译期类型 + 注册表
   // 应当一致，不一致就是程序缺陷——直接终止并打印出缺的类型名。
   if (element == nullptr) {
-    std::fprintf(stderr, "[dsl] custom<T> 未注册的组件类型: %s（内置类型需补 type_name 特化；\n",
-                 element_type_name<T>().c_str());
-    std::fprintf(stderr, "      外部类型需先 dsl::register_element_type<T>(\"名字\")）\n");
+    st::log::err("[dsl] custom<T> 未注册的组件类型: {}（内置类型需补 type_name 特化；\n",
+               element_type_name<T>());
+    st::log::err("      外部类型需先 dsl::register_element_type<T>(\"名字\")）\n");
     std::abort();
   }
   apply_box(*element, props);

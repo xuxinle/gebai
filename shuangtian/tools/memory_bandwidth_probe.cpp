@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/simd.hpp"
 
@@ -119,9 +120,9 @@ auto main(int argc, char** argv) -> int {
       static_cast<std::size_t>(kWidth) * static_cast<std::size_t>(kHeight) * 4U;
 
   const double single = measure_single(buffer);
-  st::print("缓冲 {}×{} = {:.1f} MB（每轮）· {} 轮取最小\n", kWidth, kHeight,
+  st::log::out("缓冲 {}×{} = {:.1f} MB（每轮）· {} 轮取最小\n", kWidth, kHeight,
             static_cast<double>(write_bytes) / (1024.0 * 1024.0), kRounds);
-  st::print("  单线程整块写           {:>7.3f} ms · {:>6.2f} GB/s\n", single,
+  st::log::out("  单线程整块写           {:>7.3f} ms · {:>6.2f} GB/s\n", single,
             bandwidth_gb_s(write_bytes, single));
 
   const int hardware = static_cast<int>(std::thread::hardware_concurrency());
@@ -135,7 +136,7 @@ auto main(int argc, char** argv) -> int {
   for (const int threads : counts) {
     const double banded = measure_banded(buffer, threads);
     const double speedup = single / std::max(banded, 1.0e-9);
-    st::print("  {:>2} 线程按行带写      {:>7.3f} ms · {:>6.2f} GB/s · 加速 {:.2f}×\n", threads,
+    st::log::out("  {:>2} 线程按行带写      {:>7.3f} ms · {:>6.2f} GB/s · 加速 {:.2f}×\n", threads,
               banded, bandwidth_gb_s(write_bytes, banded), speedup);
     if (banded < best_banded) {
       best_banded = banded;
@@ -144,14 +145,14 @@ auto main(int argc, char** argv) -> int {
   }
 
   const double over = measure_over(buffer, source);
-  st::print("  单线程 src-over(读+写){:>11.3f} ms · {:>6.2f} GB/s（按写字节算）\n", over,
+  st::log::out("  单线程 src-over(读+写){:>11.3f} ms · {:>6.2f} GB/s（按写字节算）\n", over,
             bandwidth_gb_s(write_bytes, over));
 
   const double best_speedup = single / std::max(best_banded, 1.0e-9);
-  st::print("\n结论：行带并行上限 {:.2f}×（{} 线程）——", best_speedup, best_threads);
+  st::log::out("\n结论：行带并行上限 {:.2f}×（{} 线程）——", best_speedup, best_threads);
   // 判据：≥1.5× 才值得做（低于这个量级，线程建/同步开销会吃掉大半）。
   const bool worth = best_speedup >= 1.5;
-  st::print("{}\n", worth ? "有空间，值得做" : "空间有限，收益会被线程开销吃掉");
+  st::log::out("{}\n", worth ? "有空间，值得做" : "空间有限，收益会被线程开销吃掉");
   verdict.add("多线程写显著快于单线程（≥1.5×）", worth,
               std::format("{:.2f}× @ {} 线程（单线程 {:.2f} GB/s）", best_speedup, best_threads,
                           bandwidth_gb_s(write_bytes, single)));

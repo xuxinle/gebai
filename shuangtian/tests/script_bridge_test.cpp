@@ -13,6 +13,7 @@
 
 #include "st/core/print.hpp"
 #include "st/core/json.hpp"
+#include "st/core/log.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/script_host.hpp"
 #include "st/ui/ui_root.hpp"
@@ -70,7 +71,7 @@ ST_TEST(script_bridge_exposes_cpp_functions_under_namespaces) {
 
   // JS 侧按命名空间调用：`app.counter.bump()` / `app.text.remember(…)`。
   const Json bumped = eval_ok(script, "app.counter.bump(5); app.counter.bump();");
-  st::print("[bridge] bump 返回：{}\n", st::json_dump(bumped));
+  st::log::out("[bridge] bump 返回：{}\n", st::json_dump(bumped));
   ST_CHECK(bumped.is_number());
   if (bumped.is_number()) ST_CHECK_EQ(bumped.get<int>(), 6);
   ST_CHECK_EQ(app.counter, 6);
@@ -80,7 +81,7 @@ ST_TEST(script_bridge_exposes_cpp_functions_under_namespaces) {
   ST_CHECK_EQ(app.last_message, std::string("你好，霜天"));
 
   // "能用什么"应当可查（诊断/文档两面）。
-  if (bridge.exposed().size() != 2) st::print("[bridge] 失败原因：{}\n", bridge.last_error());
+  if (bridge.exposed().size() != 2) st::log::out("[bridge] 失败原因：{}\n", bridge.last_error());
   const auto& names = bridge.exposed();
   ST_CHECK(std::ranges::find(names, std::string("counter.bump")) != names.end());
   ST_CHECK(std::ranges::find(names, std::string("text.remember")) != names.end());

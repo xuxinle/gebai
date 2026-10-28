@@ -20,6 +20,7 @@
 
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/icon.hpp"
@@ -47,7 +48,7 @@ auto main(int argc, char** argv) -> int {
 
   const auto names = st::ui::Icon::names();
   if (names.empty()) {
-    st::print("图标表为空\n");
+    st::log::out("图标表为空\n");
     return 1;
   }
   const auto theme = theme_name == "light" ? st::ui::Theme::light() : st::ui::Theme::dark();
@@ -63,9 +64,9 @@ auto main(int argc, char** argv) -> int {
   st::raster::Canvas canvas{width, height, 1.0f};
   canvas.clear(background);
 
-  st::print("图标数 {} → {}×{} 格（{:.0f}px/格）主题 {}\n", names.size(), kColumns, rows,
+  st::log::out("图标数 {} → {}×{} 格（{:.0f}px/格）主题 {}\n", names.size(), kColumns, rows,
             static_cast<double>(cell), theme_name);
-  st::print("\n{:<22} {:>8} {:>8} {:>8} {:>8}\n", "name", "w/24", "h/24", "cx%", "cy%");
+  st::log::out("\n{:<22} {:>8} {:>8} {:>8} {:>8}\n", "name", "w/24", "h/24", "cx%", "cy%");
   for (std::size_t index = 0; index < names.size(); ++index) {
     const auto column = static_cast<int>(index % kColumns);
     const auto row = static_cast<int>(index / kColumns);
@@ -78,7 +79,7 @@ auto main(int argc, char** argv) -> int {
 
     // 量该图标在 24×24 视图框内的墨迹口——用 `view_bounds`（布局对齐用的同一份几何）。
     const Rect view = st::ui::Icon::view_bounds(names[index]);
-    st::print("{:<22} {:>8.2f} {:>8.2f} {:>8.2f} {:>8.2f}\n", names[index],
+    st::log::out("{:<22} {:>8.2f} {:>8.2f} {:>8.2f} {:>8.2f}\n", names[index],
               static_cast<double>(view.width / 24.0f), static_cast<double>(view.height / 24.0f),
               static_cast<double>(view.center().x / 24.0f * 100.0f),
               static_cast<double>(view.center().y / 24.0f * 100.0f));
@@ -90,7 +91,7 @@ auto main(int argc, char** argv) -> int {
   image.rgba = canvas.to_rgba8();
   const auto written = st::codec::png_write_file(out, image);
   if (!written) {
-    st::print("写盘失败：{}\n", written.error().message);
+    st::log::out("写盘失败：{}\n", written.error().message);
     return 1;
   }
 
@@ -113,12 +114,12 @@ auto main(int argc, char** argv) -> int {
     if (auto file = std::fopen(index_path.c_str(), "wb"); file != nullptr) {
       (void)std::fwrite(json.data(), 1, json.size(), file);
       (void)std::fclose(file);
-      st::print("已写出 {}（格位索引）\n", index_path);
+      st::log::out("已写出 {}（格位索引）\n", index_path);
     } else {
-      st::print("写索引失败：{}\n", index_path);
+      st::log::out("写索引失败：{}\n", index_path);
     }
   }
-  st::print("已写出 {}\n", out);
+  st::log::out("已写出 {}\n", out);
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 
   return st::probe::main_of(spec, opts, verdict);

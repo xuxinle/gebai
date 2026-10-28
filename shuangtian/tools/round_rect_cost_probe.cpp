@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -72,8 +73,8 @@ auto main(int argc, char** argv) -> int {
       {"面板 720x480 r16", 720.0f, 480.0f, 16.0f},
   };
 
-  st::print("画布 {}x{}，每项 {} 轮取最小\n\n", kWidth, kHeight, kRounds);
-  st::print("{:<22}  {:>10}  {:>12}  {:>12}  {:>12}\n", "形状", "面积(px)", "命中 ns/px",
+  st::log::out("画布 {}x{}，每项 {} 轮取最小\n\n", kWidth, kHeight, kRounds);
+  st::log::out("{:<22}  {:>10}  {:>12}  {:>12}  {:>12}\n", "形状", "面积(px)", "命中 ns/px",
             "未命中 ns/px", "未命中/命中");
   for (const Case& item : cases) {
     const Rect box{100.0f, 100.0f, item.width, item.height};
@@ -91,7 +92,7 @@ auto main(int argc, char** argv) -> int {
         }
       });
       const double ns_per_px = ms * 1e6 / (area * 40.0);
-      st::print("{:<22}  {:>10.0f}  {:>12.3f}", item.name, area, ns_per_px);
+      st::log::out("{:<22}  {:>10.0f}  {:>12.3f}", item.name, area, ns_per_px);
 
       // ② 未命中：每轮换一个半径，逼它建新图——但那会 Mix 进光栅化+建图之外的
       //    "新键计算"成本。更干净的做法是每轮清表重画同一形状。
@@ -108,12 +109,12 @@ auto main(int argc, char** argv) -> int {
         }
         miss_ns_per_px = best * 1e6 / area;
       }
-      st::print("  {:>12.3f}  {:>12.2f}×\n", miss_ns_per_px,
+      st::log::out("  {:>12.3f}  {:>12.2f}×\n", miss_ns_per_px,
                 ns_per_px > 0.0 ? miss_ns_per_px / ns_per_px : 0.0);
     }
   }
-  st::print("\n注：「命中」= 贴图复用，纯混合成本（带宽型）；"
+  st::log::out("\n注：「命中」= 贴图复用，纯混合成本（带宽型）；"
             "「未命中」= 含路径光栅化 + 建贴图（计算型）。\n");
-  st::print("    若未命中远贵于命中 → 减少建图次数比优化光栅化更值。\n");
+  st::log::out("    若未命中远贵于命中 → 减少建图次数比优化光栅化更值。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

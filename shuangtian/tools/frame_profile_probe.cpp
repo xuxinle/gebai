@@ -27,6 +27,7 @@
 
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -151,7 +152,7 @@ auto main(int argc, char** argv) -> int {
   if (config.textport) {
     auto loaded = st::text::FontStack::system_default();
     if (!loaded) {
-      st::print("probe: 无系统字体——文本端口不可用（本组数据不含文字绘制）\n");
+      st::log::out("probe: 无系统字体——文本端口不可用（本组数据不含文字绘制）\n");
       config.textport = false;
     } else {
       fonts.emplace(std::move(*loaded));
@@ -203,12 +204,12 @@ auto main(int argc, char** argv) -> int {
                               st::raster::paint_op_name(static_cast<st::raster::PaintOp>(op)),
                               entry.op_ms[op], static_cast<double>(entry.op_calls[op]));
       }
-      st::print("  #{:<3} 帧={:7.2}ms{}\n", index, entry.paint_ms, detail);
+      st::log::out("  #{:<3} 帧={:7.2}ms{}\n", index, entry.paint_ms, detail);
     }
     if (index >= frames / 4) samples.push_back(entry);
   }
   if (samples.empty()) {
-    st::print("probe: 采样为空\n");
+    st::log::out("probe: 采样为空\n");
     return 1;
   }
   const auto fastest = std::ranges::min_element(samples, {}, &Breakdown::paint_ms);
@@ -217,25 +218,25 @@ auto main(int argc, char** argv) -> int {
   for (const auto& sample : samples) paints.push_back(sample.paint_ms);
   std::ranges::sort(paints);
 
-  st::print("probe · {}x{} · text={} shadow={} border={} bg={} port={} · scale={:.2f} · 清屏 "
+  st::log::out("probe · {}x{} · text={} shadow={} border={} bg={} port={} · scale={:.2f} · 清屏 "
             "{:.3f}ms · 稳态 {} 帧（噪声 p50 {:.2f}ms）\n",
             config.rows, config.columns, config.text ? 1 : 0, config.shadow ? 1 : 0,
             config.border ? 1 : 0, config.background ? 1 : 0, port != nullptr ? 1 : 0,
             static_cast<double>(scale), clear_unit, static_cast<int>(samples.size()),
             paints[paints.size() / 2]);
-  st::print("  最优帧 paint {:.2f}ms（{:.1f}× 清屏）· painted={} full={}\n", best.paint_ms,
+  st::log::out("  最优帧 paint {:.2f}ms（{:.1f}× 清屏）· painted={} full={}\n", best.paint_ms,
             best.paint_ms / clear_unit, root.painted_elements(),
             root.last_frame_partial() ? 0 : 1);
   double accounted = 0.0;
   for (std::size_t op = 0; op < kOps; ++op) {
     if (best.op_calls[op] == 0) continue;
     accounted += best.op_ms[op];
-    st::print("  {:<12} {:>7.2} 次 · {:>7.2} ms · {:>9.1} µs/次\n",
+    st::log::out("  {:<12} {:>7.2} 次 · {:>7.2} ms · {:>9.1} µs/次\n",
               st::raster::paint_op_name(static_cast<st::raster::PaintOp>(op)),
               static_cast<double>(best.op_calls[op]), best.op_ms[op],
               best.op_ms[op] * 1000.0 / static_cast<double>(best.op_calls[op]));
   }
-  st::print("  （分解 {:.2f}ms / 帧计 {:.2f}ms；差 {:.2f}ms = 树遍历+剔除+调度）\n", accounted,
+  st::log::out("  （分解 {:.2f}ms / 帧计 {:.2f}ms；差 {:.2f}ms = 树遍历+剔除+调度）\n", accounted,
             best.paint_ms, best.paint_ms - accounted);
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 

@@ -13,6 +13,7 @@
 #include <string>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -44,14 +45,14 @@ auto main(int argc, char** argv) -> int {
   canvas.draw_shadow(rect, 6.0f, blur, shadow, st::math::Point{0.0f, offset_y});
 
   const double base = luminance(background);
-  st::print("=== draw_shadow 剖面（rect y=100..160, blur={:.1f}, offset_y={:.1f}）===\n",
+  st::log::out("=== draw_shadow 剖面（rect y=100..160, blur={:.1f}, offset_y={:.1f}）===\n",
             static_cast<double>(blur), static_cast<double>(offset_y));
-  st::print("矩形外上方 / 矩形内（上→下） / 矩形外下方，取 x=160 一列：\n");
+  st::log::out("矩形外上方 / 矩形内（上→下） / 矩形外下方，取 x=160 一列：\n");
   constexpr int kCol = 160;
   for (int y = 90; y <= 175; y += 2) {
     const double drop = base - luminance(canvas.pixel_at(kCol, y));
     const char* where = (y < 100) ? "外" : (y <= 160 ? "内" : "外");
-    st::print("  y={:3d} [{}] 压暗 {:.1f}\n", y, where, drop);
+    st::log::out("  y={:3d} [{}] 压暗 {:.1f}\n", y, where, drop);
   }
   return 0;
 }

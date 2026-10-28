@@ -19,6 +19,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -118,11 +119,11 @@ auto main(int argc, char** argv) -> int {
       {"UI 路径", "src/raster/renderer.cpp", FontRole::Proportional},
       {"编辑器 等宽", "const auto polylines", FontRole::Monospace},
   };
-  st::print("口径：device_scale={}、灰度（把相位定位与彩边分开）、拟合 Off vs Normal\n",
+  st::log::out("口径：device_scale={}、灰度（把相位定位与彩边分开）、拟合 Off vs Normal\n",
             device_scale);
   for (const Sample& sample : samples) {
-    st::print("\n=== {} 「{}」 ===\n", sample.tag, sample.text);
-    st::print("  {:>5s} {:>9s} {:>9s} {:>9s} {:>10s} {:>9s}\n", "逻辑px", "峰值", "solid",
+    st::log::out("\n=== {} 「{}」 ===\n", sample.tag, sample.text);
+    st::log::out("  {:>5s} {:>9s} {:>9s} {:>9s} {:>10s} {:>9s}\n", "逻辑px", "峰值", "solid",
               "mid", "mid/solid", "边缘陡度");
     for (const float size : {11.0f, 12.0f, 12.5f, 13.0f, 13.5f, 14.0f, 16.0f, 21.0f}) {
       for (const bool fit : {false, true}) {
@@ -130,7 +131,7 @@ auto main(int argc, char** argv) -> int {
         renderer.set_subpixel(false);
         renderer.set_grid_fit(fit ? GridFitMode::Normal : GridFitMode::Off);
         const Stat stat = measure(renderer, sample.text, size, device_scale, sample.role);
-        st::print("  {:>5.1f} {:>9.3f} {:>9d} {:>9d} {:>10.3f} {:>9.4f}   {}\n", size, stat.peak,
+        st::log::out("  {:>5.1f} {:>9.3f} {:>9d} {:>9d} {:>10.3f} {:>9.4f}   {}\n", size, stat.peak,
                   stat.solid, stat.mid,
                   stat.solid > 0 ? static_cast<double>(stat.mid) / stat.solid : -1.0, stat.sharp,
                   fit ? "拟合" : "原样");

@@ -13,6 +13,7 @@
 #include <format>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -87,13 +88,13 @@ auto main(int argc, char** argv) -> int {
     const auto pct = [](std::size_t part, std::size_t whole) {
       return whole == 0 ? 0.0 : static_cast<double>(part) / static_cast<double>(whole) * 100.0;
     };
-    st::print("卡片高 {:5.0f}px\n", static_cast<double>(card_h));
-    st::print("  box 内部：非零 {:6d} / 面积 {:6d}  = {:5.2f}%\n", cov.inside_nonzero,
+    st::log::out("卡片高 {:5.0f}px\n", static_cast<double>(card_h));
+    st::log::out("  box 内部：非零 {:6d} / 面积 {:6d}  = {:5.2f}%\n", cov.inside_nonzero,
               cov.inside_area, pct(cov.inside_nonzero, cov.inside_area));
-    st::print("  box 外部：非零 {:6d} / 面积 {:6d}  = {:5.2f}%\n", cov.outside_nonzero,
+    st::log::out("  box 外部：非零 {:6d} / 面积 {:6d}  = {:5.2f}%\n", cov.outside_nonzero,
               cov.outside_area, pct(cov.outside_nonzero, cov.outside_area));
     const std::size_t total_nonzero = cov.inside_nonzero + cov.outside_nonzero;
-    st::print("  → 全部阴影像素中，落在内部的占 {:5.2f}%（这才是「跳过」能省的）\n\n",
+    st::log::out("  → 全部阴影像素中，落在内部的占 {:5.2f}%（这才是「跳过」能省的）\n\n",
               pct(cov.inside_nonzero, total_nonzero));
   }
   return st::probe::main_of(spec, opts, verdict);

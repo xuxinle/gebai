@@ -18,6 +18,7 @@
 
 #include "examples/caiyun/director.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/test/test.hpp"
 
 namespace {
@@ -136,7 +137,7 @@ ST_TEST(caiyun_script_json_roundtrip_is_lossless) {
   const auto first = caiyun::parse_script(original);
   ST_CHECK(first.has_value());
   if (!first) {
-    st::print("解析失败：{}\n", first.error().message);
+    st::log::out("解析失败：{}\n", first.error().message);
     return;
   }
   const std::string once = caiyun::script_to_json(*first);
@@ -144,7 +145,7 @@ ST_TEST(caiyun_script_json_roundtrip_is_lossless) {
   const auto second = caiyun::parse_script(once);
   ST_CHECK(second.has_value());
   if (!second) {
-    st::print("二次解析失败：{}\n", second.error().message);
+    st::log::out("二次解析失败：{}\n", second.error().message);
     return;
   }
   const std::string twice = caiyun::script_to_json(*second);
@@ -156,7 +157,7 @@ ST_TEST(caiyun_script_json_roundtrip_is_lossless) {
     std::size_t diff = 0;
     while (diff < limit && once[diff] == twice[diff]) ++diff;
     const std::size_t from = diff > 120 ? diff - 120 : 0;
-    st::print("首次差异在偏移 {}\nonce  ...{}\n", diff, once.substr(from, 260));
+    st::log::out("首次差异在偏移 {}\nonce  ...{}\n", diff, once.substr(from, 260));
       }
   ST_CHECK(once == twice);
 

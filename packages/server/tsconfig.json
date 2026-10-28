@@ -1,7 +1,13 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "types": ["bun"]
+    "types": ["bun"],
+    "paths": {
+      "@gebai/sdk": ["../sdk/src"],
+      "@gebai/sdk/node": ["../sdk/src/node.ts"],
+      "@gebai/agents": ["../agents/src"],
+      "@gebai/server/credential-sources": ["./credential-sources.ts"]
+    }
   },
   "include": ["src"]
 }

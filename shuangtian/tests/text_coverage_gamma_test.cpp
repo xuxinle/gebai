@@ -33,6 +33,7 @@
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -147,7 +148,7 @@ ST_TEST(text_coverage_gamma_maps_linear_light) {
       worst_mid_error = std::max(worst_mid_error, std::abs(b - (1.0 - srgb_encode(1.0 - a))));
     }
   }
-  st::print("[gamma] 像素 {}，中间调 {}，端点最大偏差 {:.6f}，与 sRGB 编码最大偏差 {:.4f}"
+  st::log::out("[gamma] 像素 {}，中间调 {}，端点最大偏差 {:.6f}，与 sRGB 编码最大偏差 {:.4f}"
             "（反向变墨计数 {}）\n",
             identity.size(), mid_count, worst_endpoint, worst_mid_error, lightened);
   ST_CHECK(mid_count > 20);
@@ -182,7 +183,7 @@ ST_TEST(text_coverage_gamma_can_darken) {
     // 而库侧一直是对的，画布口径的 ④ 用例同时在跑、当场排除了库的嫌疑）。
     if (b > a + 1.0e-4) ++changed;
   }
-  st::print("[gamma] γ=0.7 压黑：{} / {} 个中间调像素变黑，端点最大偏差 {:.6f}\n", changed,
+  st::log::out("[gamma] γ=0.7 压黑：{} / {} 个中间调像素变黑，端点最大偏差 {:.6f}\n", changed,
             identity.size(), worst_endpoint);
   ST_CHECK(changed > 20);
   ST_CHECK_NEAR(worst_endpoint, 0.0, 1.0e-6);
@@ -292,13 +293,13 @@ ST_TEST(text_coverage_gamma_changes_rendered_weight) {
       TextRenderer::kDefaultCoverageGamma < 1.0f ? TextRenderer::kDefaultCoverageGamma : 0.5f;
   const Stats bright = measure(2.2f);
   const Stats dark = measure(dark_gamma);
-  st::print("[gamma] γ=1.0  平均亮度 {:.3f}  实心 {:.1f}%  过渡带 {:.1f}%  线性墨量 {:.1f}\n",
+  st::log::out("[gamma] γ=1.0  平均亮度 {:.3f}  实心 {:.1f}%  过渡带 {:.1f}%  线性墨量 {:.1f}\n",
             base.raw_mean_lum, base.solid_ratio * 100.0, base.band_ratio * 100.0,
             base.linear_ink);
-  st::print("[gamma] γ=2.2  平均亮度 {:.3f}  实心 {:.1f}%  过渡带 {:.1f}%  线性墨量 {:.1f}\n",
+  st::log::out("[gamma] γ=2.2  平均亮度 {:.3f}  实心 {:.1f}%  过渡带 {:.1f}%  线性墨量 {:.1f}\n",
             bright.raw_mean_lum, bright.solid_ratio * 100.0, bright.band_ratio * 100.0,
             bright.linear_ink);
-  st::print("[gamma] γ={}  平均亮度 {:.3f}  实心 {:.1f}%  过渡带 {:.1f}%  线性墨量 {:.1f}\n",
+  st::log::out("[gamma] γ={}  平均亮度 {:.3f}  实心 {:.1f}%  过渡带 {:.1f}%  线性墨量 {:.1f}\n",
             dark_gamma, dark.raw_mean_lum, dark.solid_ratio * 100.0, dark.band_ratio * 100.0,
             dark.linear_ink);
   ST_CHECK(base.solid_ratio > 0.0);
@@ -343,10 +344,10 @@ ST_TEST(text_ink_compensation_evens_out_glyph_weight) {
   if (const auto override_value = st::fs::read_env("ST_TEST_FIT");
       override_value.has_value() && !override_value->empty()) {
     fit = st::app::resolve_text_fit(*override_value);
-    st::print("[ink] 档位被 ST_TEST_FIT={} 覆盖\n", *override_value);
+    st::log::out("[ink] 档位被 ST_TEST_FIT={} 覆盖\n", *override_value);
   }
   const bool compensation_enabled = st::app::resolve_ink_compensation(fit);
-  st::print("[ink] 档位 fit={} 补偿={}\n",
+  st::log::out("[ink] 档位 fit={} 补偿={}\n",
             fit == st::text::GridFitMode::Off
                 ? "off"
                 : (fit == st::text::GridFitMode::Light ? "light" : "normal"),
@@ -355,7 +356,7 @@ ST_TEST(text_ink_compensation_evens_out_glyph_weight) {
   // 而不是继续拿一个与产品无关的档位去卡阈值。
   if (fit == st::text::GridFitMode::Off) {
     ST_CHECK(!compensation_enabled);   // 拟合关 ⇒ 补偿也必须关（成对约定）
-    st::print("[ink] 拟合默认关 ⇒ 无字间扰乱，本闸门在当前档位下无适用场景（已跳过）；"
+    st::log::out("[ink] 拟合默认关 ⇒ 无字间扰乱，本闸门在当前档位下无适用场景（已跳过）；"
               "可用 ST_TEST_FIT=light 跑完整断言\n");
     return;
   }
@@ -397,8 +398,8 @@ ST_TEST(text_ink_compensation_evens_out_glyph_weight) {
   const std::vector<double> without = ratios(false);
   const std::vector<double> with = ratios(true);
   if (without.empty() || with.empty()) return;
-  st::print("[ink] 补偿关：逐字变化率 {} 个，极差 {:.3f}\n", without.size(), spread(without));
-  st::print("[ink] 补偿开：逐字变化率 {} 个，极差 {:.3f}\n", with.size(), spread(with));
+  st::log::out("[ink] 补偿关：逐字变化率 {} 个，极差 {:.3f}\n", without.size(), spread(without));
+  st::log::out("[ink] 补偿开：逐字变化率 {} 个，极差 {:.3f}\n", with.size(), spread(with));
   // 拟合确实扰乱了字间墨量（否则这条用例与补偿都没有存在的理由）
   ST_CHECK(spread(without) > 0.15);
   // 补偿把它收窄——这是本补偿的全部目的

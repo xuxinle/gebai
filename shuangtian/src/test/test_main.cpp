@@ -5,6 +5,7 @@
 #include "st/core/console_log.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/test/test.hpp"
 
 /// 测试可执行入口：
@@ -61,7 +62,7 @@ auto main(int argc, char** argv) -> int {
   if (!shard_text.empty()) {
     const auto [shard_index, shard_count] = st::test::parse_shard(shard_text);
     if (shard_index == 0) {
-      st::eprint("分片参数非法: {}（应为 i/n，i 从 1 起且 i <= n）\n", shard_text);
+      st::log::err("分片参数非法: {}（应为 i/n，i 从 1 起且 i <= n）\n", shard_text);
       return 2;
     }
     st::test::set_shard(shard_index, shard_count);
@@ -75,7 +76,7 @@ auto main(int argc, char** argv) -> int {
     // `--test-jobs 4` + filter 只命中一个用例时，3 个空片各报一条 stderr 噪声）。
     // 只报后者；0 用例是完全正常的状态，静默跳过。
     if (!st::test::last_results().empty() && st::test::write_junit(junit) == 0) {
-      st::eprint("JUnit 报告写入失败: {}\n", junit);
+      st::log::err("JUnit 报告写入失败: {}\n", junit);
     }
   }
   return failed;

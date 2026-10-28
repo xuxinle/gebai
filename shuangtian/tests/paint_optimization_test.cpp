@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -145,7 +146,7 @@ ST_TEST(border_ring_covers_same_area_as_stroke) {
 
   const double ring_ink = border_ink(ring_canvas, background);
   const double stroke_ink = border_ink(stroke_canvas, background);
-  st::print("[border-ink] 环形 {:.0f} · 描边 {:.0f} · 比值 {:.3f}\n", ring_ink, stroke_ink,
+  st::log::out("[border-ink] 环形 {:.0f} · 描边 {:.0f} · 比值 {:.3f}\n", ring_ink, stroke_ink,
             ring_ink / stroke_ink);
   ST_CHECK(ring_ink > 0.0);
   ST_CHECK(stroke_ink > 0.0);
@@ -240,7 +241,7 @@ ST_TEST(border_ring_arcs_carry_same_ink_as_stroke) {
     const double stroke_value = region_ink(stroke_canvas, quadrant);
     ST_CHECK(stroke_value > 0.0);
     const double ratio = ring_value / stroke_value;
-    st::print("[border-arc] {} 角：环形 {:.0f} vs 描边 {:.0f} 比 {:.3f}\n", quadrant.name,
+    st::log::out("[border-arc] {} 角：环形 {:.0f} vs 描边 {:.0f} 比 {:.3f}\n", quadrant.name,
               ring_value, stroke_value, ratio);
     ST_CHECK(ratio > 0.95 && ratio < 1.05);
   }
@@ -284,7 +285,7 @@ ST_TEST(diagonal_band_ink_is_angle_independent) {
   for (const float angle : {15.0f, 30.0f, 45.0f, 60.0f, 75.0f}) {
     const double value = band_ink(angle);
     const double ratio = value / horizontal;
-    st::print("[band-ink] {:>4.0f}° 墨量 {:.1f}（水平 {:.1f}）比 {:.4f}\n",
+    st::log::out("[band-ink] {:>4.0f}° 墨量 {:.1f}（水平 {:.1f}）比 {:.4f}\n",
               static_cast<double>(angle), value, horizontal, ratio);
     // 修复前 45° 只有 0.857；修复后六档全部在 1.0000±0.005。
     ST_CHECK(ratio > 0.99 && ratio < 1.01);
@@ -322,7 +323,7 @@ ST_TEST(border_ring_total_ink_matches_perimeter_times_width) {
                           std::abs(static_cast<double>(border.b) - static_cast<double>(background.b));
   const double expected = (straight + arcs) * static_cast<double>(kBorderWidth) * full_ink;
   const double ratio = measured / expected;
-  st::print("[ring-ink] 实测 {:.1f} · 周长×宽 {:.1f} · 比 {:.4f}（直线段 {:.1f} + 弧 {:.1f}）\n",
+  st::log::out("[ring-ink] 实测 {:.1f} · 周长×宽 {:.1f} · 比 {:.4f}（直线段 {:.1f} + 弧 {:.1f}）\n",
             measured, expected, ratio, straight, arcs);
   ST_CHECK(ratio > 0.99 && ratio < 1.01);
 }
@@ -385,7 +386,7 @@ ST_TEST(clip_mask_coverage_accumulates_instead_of_maxing) {
                            2.0 * kPi * mid_radius) *
                           static_cast<double>(kWidthPx);
   const double ratio = ring_area / analytic;
-  st::print("[clip-mask] 直角自检 {:.1f}（应为 {:.1f}）· 环 {:.2f}（解析 {:.2f}）· 比 {:.4f}\n",
+  st::log::out("[clip-mask] 直角自检 {:.1f}（应为 {:.1f}）· 环 {:.2f}（解析 {:.2f}）· 比 {:.4f}\n",
             square_area, 120.0 * 90.0, ring_area, analytic, ratio);
   // 取最大值（旧）实测 0.9178；累加实测 1.0009。
   ST_CHECK(ratio > 0.99 && ratio < 1.01);
@@ -409,7 +410,7 @@ ST_TEST(border_ring_edge_matches_stroke_within_tolerance) {
     Canvas stroke_canvas = make_canvas(item.dpi);
     draw_border_by_stroke(stroke_canvas, box, item.radius, border, item.border_width);
     const PixelDiff result = diff(ring_canvas, stroke_canvas);
-    st::print("[border-diff] w={:.0f} r={:.0f} bw={:.1f} dpi={:.1f}：超差 {:.3f}%（Δ≤{}）\n",
+    st::log::out("[border-diff] w={:.0f} r={:.0f} bw={:.1f} dpi={:.1f}：超差 {:.3f}%（Δ≤{}）\n",
               static_cast<double>(item.width_px), static_cast<double>(item.radius),
               static_cast<double>(item.border_width), static_cast<double>(item.dpi),
               result.ratio() * 100.0, result.max_delta);
@@ -479,7 +480,7 @@ ST_TEST(border_edge_lands_on_whole_pixels_after_snapping) {
   const auto base = std::array<int, 3>{background.r, background.g, background.b};
   const int full = std::abs(shown[0] - base[0]) + std::abs(shown[1] - base[1]) +
                    std::abs(shown[2] - base[2]);
-  st::print("[border-snap] 上缘峰值 {}（满分 {}，令牌 alpha={}）\n", peak, full,
+  st::log::out("[border-snap] 上缘峰值 {}（满分 {}，令牌 alpha={}）\n", peak, full,
             static_cast<int>(border.a));
 
   // 对齐后那条边必须**铺满一整像素行**：峰值接近满值。
@@ -562,7 +563,7 @@ ST_TEST(layered_shadow_matches_two_draws) {
   // 未铺底色时差异来自"多一次取整"——必须全部落在 Δ≤1。
   // ⚠ 若这里出现 Δ 明显大于 1 的差异，说明贴图烘进了底色（那才是最危险的错法）。
   const PixelDiff raw = diff(layered, twice);
-  st::print("[shadow-diff] 未铺底色：超差 {:.3f}%（Δ≤{}）\n", raw.ratio() * 100.0,
+  st::log::out("[shadow-diff] 未铺底色：超差 {:.3f}%（Δ≤{}）\n", raw.ratio() * 100.0,
             raw.max_delta);
   ST_CHECK(raw.max_delta <= 1);
 
@@ -570,7 +571,7 @@ ST_TEST(layered_shadow_matches_two_draws) {
   layered.fill_rect(box, Paint::solid(surface), kRadius);
   twice.fill_rect(box, Paint::solid(surface), kRadius);
   const PixelDiff covered = diff(layered, twice);
-  st::print("[shadow-diff] 铺底色后：超差 {} px（Δ≤{}）\n", covered.differing, covered.max_delta);
+  st::log::out("[shadow-diff] 铺底色后：超差 {} px（Δ≤{}）\n", covered.differing, covered.max_delta);
   ST_CHECK(covered.max_delta <= 1);
   (void)background;
 }
@@ -613,7 +614,7 @@ ST_TEST(layered_shadow_is_background_independent) {
   for (const Color background : {Color::rgb(0xF7, 0xF8, 0xFA), Color::rgb(0x10, 0x14, 0x1B),
                                  Color::rgb(0x3B, 0x82, 0xF6)}) {
     const PixelDiff result = diff(render(background, true), render(background, false));
-    st::print("[shadow-bg] 底色 #{:02X}{:02X}{:02X}：超差 {} px（Δ≤{}）\n", background.r,
+    st::log::out("[shadow-bg] 底色 #{:02X}{:02X}{:02X}：超差 {} px（Δ≤{}）\n", background.r,
               background.g, background.b, result.differing, result.max_delta);
     ST_CHECK(result.max_delta <= 2);
   }
@@ -632,7 +633,7 @@ ST_TEST(layered_shadow_single_layer_matches_draw) {
   reference.draw_shadow(box, 10.0f, shadow.blur, shadow.color,
                         st::math::Point{shadow.offset_x, shadow.offset_y});
   const PixelDiff result = diff(single, reference);
-  st::print("[shadow-single] 单层退化：超差 {} px（Δ≤{}）\n", result.differing, result.max_delta);
+  st::log::out("[shadow-single] 单层退化：超差 {} px（Δ≤{}）\n", result.differing, result.max_delta);
   ST_CHECK(result.differing == 0);
 }
 
@@ -675,14 +676,14 @@ ST_TEST(shadow_covered_region_is_exact_and_effective) {
     // ① 不透明底：跳过与不跳过必须逐像素相等。
     const Color opaque_face = Color::rgb(0xFF, 0xFF, 0xFF);
     const PixelDiff same = diff(render(true, opaque_face), render(false, opaque_face));
-    st::print("[covered] 宽 {:5.0f}px 不透明底：超差 {} px（要求 0）\n",
+    st::log::out("[covered] 宽 {:5.0f}px 不透明底：超差 {} px（要求 0）\n",
               static_cast<double>(width), same.differing);
     ST_CHECK_EQ(same.differing, 0U);
 
     // ② 半透明底（alpha<255）：底色盖不严，跳过必须能看出来——否则 ① 是恒真的。
     const Color translucent_face{0xFF, 0xFF, 0xFF, 128};
     const PixelDiff visible = diff(render(true, translucent_face), render(false, translucent_face));
-    st::print("[covered] 宽 {:5.0f}px 半透明底：超差 {} px（要求 > 0）\n",
+    st::log::out("[covered] 宽 {:5.0f}px 半透明底：超差 {} px（要求 > 0）\n",
               static_cast<double>(width), visible.differing);
     ST_CHECK(visible.differing > 0U);
   }
@@ -705,7 +706,7 @@ ST_TEST(layered_shadow_respects_device_scale) {
   layered.fill_rect(box, Paint::solid(Color::rgb(0xFF, 0xFF, 0xFF)), 8.0f);
   twice.fill_rect(box, Paint::solid(Color::rgb(0xFF, 0xFF, 0xFF)), 8.0f);
   const PixelDiff result = diff(layered, twice);
-  st::print("[shadow-dpi] scale=2 铺底色后：超差 {} px（Δ≤{}）\n", result.differing,
+  st::log::out("[shadow-dpi] scale=2 铺底色后：超差 {} px（Δ≤{}）\n", result.differing,
             result.max_delta);
   ST_CHECK(result.max_delta <= 1);   // 同样只允许 8 位取整噪声（见 matches_two_draws）
 }
@@ -732,7 +733,7 @@ ST_TEST(layered_shadow_cache_eviction_stays_correct) {
     const PixelDiff result = diff(layered, twice);
     // 淘汰前后都必须只差取整噪声——**淘汰若写错（如返回悬垂指针）会直接崩或大面积超差**。
     if (result.max_delta > 1) {
-      st::print("[shadow-cache] 第 {} 种宽度超差：{} px（Δ≤{}）\n", index, result.differing,
+      st::log::out("[shadow-cache] 第 {} 种宽度超差：{} px（Δ≤{}）\n", index, result.differing,
                 result.max_delta);
     }
     ST_CHECK(result.max_delta <= 1);
@@ -785,7 +786,7 @@ ST_TEST(border_ring_is_not_slower_than_stroke) {
   };
   const double ring_ms = measure(true);
   const double stroke_ms = measure(false);
-  st::print("[border-cost] 环形 {:.4f} ms · 描边 {:.4f} ms · 提速 {:.2f}×（每轮 {} 张，{} 轮取最小）\n",
+  st::log::out("[border-cost] 环形 {:.4f} ms · 描边 {:.4f} ms · 提速 {:.2f}×（每轮 {} 张，{} 轮取最小）\n",
             ring_ms, stroke_ms, stroke_ms / std::max(ring_ms, 1e-9), kPerRun, kRuns);
   // 余量给足（本机实测 1.4~3.3×）：只要求“环形严格更快”是稳妥的回归方向。
   ST_CHECK(ring_ms < stroke_ms);
@@ -823,7 +824,7 @@ ST_TEST(layered_shadow_is_not_slower_than_two_draws) {
   };
   const double merged_ms = measure(true);
   const double twice_ms = measure(false);
-  st::print("[shadow-cost] 合并 {:.4f} ms · 两次 {:.4f} ms · 提速 {:.2f}×\n", merged_ms, twice_ms,
+  st::log::out("[shadow-cost] 合并 {:.4f} ms · 两次 {:.4f} ms · 提速 {:.2f}×\n", merged_ms, twice_ms,
             twice_ms / std::max(merged_ms, 1e-9));
   ST_CHECK(merged_ms < twice_ms);
 }
@@ -878,7 +879,7 @@ ST_TEST(shadow_run_grouping_matches_per_pixel_blend) {
                           st::math::Point{0.0f, 4.0f}, {.opacity = item.opacity});
 
     const PixelDiff result = diff(grouped, reference);
-    st::print("[shadow-runs] {}：超差 {} px（Δ≤{}）\n", item.name, result.differing,
+    st::log::out("[shadow-runs] {}：超差 {} px（Δ≤{}）\n", item.name, result.differing,
               result.max_delta);
     ST_CHECK(result.differing == 0);
   }

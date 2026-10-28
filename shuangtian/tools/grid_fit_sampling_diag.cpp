@@ -17,6 +17,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/math/path.hpp"
 #include "st/text/font.hpp"
 #include "st/text/grid_fit.hpp"
@@ -129,7 +130,7 @@ auto main(int argc, char** argv) -> int {
   const float pixel_size = 20.25f;  // 13.5 逻辑 @1.5
   const std::string sample = "霜天自绘概览组件三川目";
   for (const float supersample : {1.0f, 2.0f}) {
-    st::print("\n========== supersample={} ==========\n", supersample);
+    st::log::out("\n========== supersample={} ==========\n", supersample);
     // 三种口径：现状默认（阈值按采样单位）、按物理像素换算的阈值
     struct Variant {
       const char* name;
@@ -180,9 +181,9 @@ auto main(int argc, char** argv) -> int {
           if (distance >= 0.03f) ++off_grid_after;
         }
       }
-      st::print("  [{}] 字形 {}：绘制的竖笔画 {}，生效 {}，平均位移 {:.3f}\n", variant.name, glyphs,
+      st::log::out("  [{}] 字形 {}：绘制的竖笔画 {}，生效 {}，平均位移 {:.3f}\n", variant.name, glyphs,
                 total_stems, applied, glyphs > 0 ? mean_shift_sum / static_cast<double>(glyphs) : 0.0);
-      st::print("     竖直线边落在**物理像素网格**上的比例：拟合前 {}/{} = {:.1f}% → 拟合后 {}/{} = {:.1f}%\n",
+      st::log::out("     竖直线边落在**物理像素网格**上的比例：拟合前 {}/{} = {:.1f}% → 拟合后 {}/{} = {:.1f}%\n",
                 edges_before - off_grid_before, edges_before,
                 edges_before > 0 ? static_cast<double>(edges_before - off_grid_before) /
                                        static_cast<double>(edges_before) * 100.0

@@ -45,6 +45,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/pty.hpp"
+#include "st/core/log.hpp"
 #include "st/text/ansi_screen.hpp"
 #include "st/ui/components/terminal.hpp"
 #include "st/ui/theme.hpp"
@@ -179,7 +180,7 @@ struct Tally {
 };
 
 void print_tally(const Arm& arm, const Tally& tally, double load_before, double load_after) {
-  st::print("  {:<2} 红 {}/{}（{:.0f}%）· 绿轮 ms：均 {} / 最差 {} · 负载 {:.2f} → {:.2f}\n",
+  st::log::out("  {:<2} 红 {}/{}（{:.0f}%）· 绿轮 ms：均 {} / 最差 {} · 负载 {:.2f} → {:.2f}\n",
             arm.label, tally.red, tally.rounds,
             tally.rounds > 0 ? 100.0 * tally.red / tally.rounds : 0.0,
             tally.green_count > 0 ? tally.green_sum / tally.green_count : 0L, tally.green_worst,
@@ -189,7 +190,7 @@ void print_tally(const Arm& arm, const Tally& tally, double load_before, double 
     for (const std::int64_t ms : tally.red_recover_ms) {
       detail += std::format(" {}ms", ms);
     }
-    st::print("     红轮「再发一次 Ctrl+C 恢复」耗时：{}\n", detail);
+    st::log::out("     红轮「再发一次 Ctrl+C 恢复」耗时：{}\n", detail);
   }
 }
 
@@ -212,13 +213,13 @@ int main(int argc, char** argv) {
   // （实测：进程 CPU 空转、永不退出）。所以必须在这里按**平台**早退，
   // 而不能只靠 `supported()`（它回答的是“有没有 PTY”，不是“有没有目标 shell”）。
 #if defined(_WIN32)
-  st::print("本探针面向 POSIX shell（/bin/bash + /proc/loadavg）：Windows 上不适用\n");
+  st::log::out("本探针面向 POSIX shell（/bin/bash + /proc/loadavg）：Windows 上不适用\n");
   (void)per_arm;
   (void)only;
   return 0;
 #endif
   if (!st::process::PtySession::supported()) {
-    st::print("本环境不支持 PTY：探针不适用\n");
+    st::log::out("本环境不支持 PTY：探针不适用\n");
     return 0;
   }
 
@@ -236,7 +237,7 @@ int main(int argc, char** argv) {
   }
 
   const double load_at_start = load1();
-  st::print("每臂 {} 轮 · 臂={} · 起始负载 {:.2f}\n", per_arm, only, load_at_start);
+  st::log::out("每臂 {} 轮 · 臂={} · 起始负载 {:.2f}\n", per_arm, only, load_at_start);
 
   std::vector<Tally> tallies(arms.size());
   // **逐轮轮转**（round-major）而不是"一臂跑完再跑下一臂"：后者会把
@@ -258,7 +259,7 @@ int main(int argc, char** argv) {
   }
 
   const double load_at_end = load1();
-  st::print("\n结果（负载 {:.2f} → {:.2f}）：\n", load_at_start, load_at_end);
+  st::log::out("\n结果（负载 {:.2f} → {:.2f}）：\n", load_at_start, load_at_end);
   for (std::size_t index = 0; index < arms.size(); ++index) {
     print_tally(arms[index], tallies[index], load_at_start, load_at_end);
   }

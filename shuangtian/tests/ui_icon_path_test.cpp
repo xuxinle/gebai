@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/math/geometry.hpp"
 #include "st/math/path.hpp"
 #include "st/ui/icon.hpp"
@@ -225,10 +226,10 @@ ST_TEST(ui_icon_names_have_no_duplicates) {
     if (sorted[i] == sorted[i - 1]) duplicated.push_back(sorted[i]);
   }
   if (!duplicated.empty()) {
-    st::print("[icon-dup] {} 条里只有 {} 个唯一名，重复：", names.size(),
+    st::log::out("[icon-dup] {} 条里只有 {} 个唯一名，重复：", names.size(),
               names.size() - duplicated.size());
-    for (const auto& name : duplicated) st::print(" {}", name);
-    st::print("\n");
+    for (const auto& name : duplicated) st::log::out(" {}", name);
+    st::log::out("\n");
   }
   // 条目数 == 唯一名数；不允许“追在表尾”式的重复。
   ST_CHECK(duplicated.empty());
@@ -271,7 +272,7 @@ ST_TEST(ui_icon_optical_size_is_consistent) {
     min_extent = std::min(min_extent, extent);
     max_extent = std::max(max_extent, extent);
   }
-  st::print("[icon-optical] 墨迹最长边 min={:.2f} max={:.2f} 比={:.2f}\n",
+  st::log::out("[icon-optical] 墨迹最长边 min={:.2f} max={:.2f} 比={:.2f}\n",
             static_cast<double>(min_extent), static_cast<double>(max_extent),
             static_cast<double>(max_extent / min_extent));
   // 归一化前实测比 1.9×（0.42 ↔ 0.78 逻辑px 的 24 倍口径）；收紧到 1.25×
@@ -345,7 +346,7 @@ ST_TEST(ui_icon_dot_style_glyphs_actually_render) {
     }
     return runs;
   };
-  st::print("[icon-dots] 三点菜单：横向 {} 段 · 纵向 {} 段（应为各 3）\n",
+  st::log::out("[icon-dots] 三点菜单：横向 {} 段 · 纵向 {} 段（应为各 3）\n",
             dot_runs("more-horizontal", true), dot_runs("more-vertical", false));
   ST_CHECK_EQ(dot_runs("more-horizontal", true), 3U);
   ST_CHECK_EQ(dot_runs("more-vertical", false), 3U);
@@ -389,7 +390,7 @@ ST_TEST(ui_icon_small_box_stroke_has_a_legible_floor) {
   };
   const std::size_t at_24 = ink_pixels(24.0f);
   const std::size_t at_13 = ink_pixels(13.0f);
-  st::print("[icon-small-box] eye 墨像素：24px 盒 {} · 13px 盒 {}\n", at_24, at_13);
+  st::log::out("[icon-small-box] eye 墨像素：24px 盒 {} · 13px 盒 {}\n", at_24, at_13);
   ST_REQUIRE(at_24 > 0U);
   // 13px 盒面积是 24px 盒的 29.3%；描边有下限时墨量比应**不低于面积比**
   //（描边不跟着缩到底）。无下限时实测值正好落差一档。
@@ -448,7 +449,7 @@ ST_TEST(ui_icon_stroked_and_filled_render_at_the_same_size) {
   // 描边式（`folder`/`search`/`terminal`…）与实心式（`dot`）各取样本。
   const float stroked = (ink_extent("folder") + ink_extent("search") + ink_extent("terminal")) / 3.0f;
   const float filled = ink_extent("dot");
-  st::print("[icon-ink] 描边式均 {:.1f}px · 实心式(dot) {:.1f}px · 差 {:.1f}%\n",
+  st::log::out("[icon-ink] 描边式均 {:.1f}px · 实心式(dot) {:.1f}px · 差 {:.1f}%\n",
             static_cast<double>(stroked), static_cast<double>(filled),
             static_cast<double>((stroked - filled) / stroked) * 100.0);
   ST_CHECK(stroked > 0.0f);
@@ -510,7 +511,7 @@ ST_TEST(ui_icon_ink_size_matches_what_is_drawn) {
     const float error = std::abs(declared - drawn);
     worst = std::max(worst, error);
     ++checked;
-    st::print("  {:<10} 声明 {:.1f} · 实际 {:.1f} · 差 {:.2f}px\n", name,
+    st::log::out("  {:<10} 声明 {:.1f} · 实际 {:.1f} · 差 {:.2f}px\n", name,
               static_cast<double>(declared), static_cast<double>(drawn),
               static_cast<double>(error));
     // 容差 2px（**与盒径无关**的绝对量）：抗锯齿边缘——判据取覆盖率 > 8%，
@@ -519,7 +520,7 @@ ST_TEST(ui_icon_ink_size_matches_what_is_drawn) {
     // 回退修复（描边项漏乘 fit）时描边式掉到 2.00px，误差 3.05px —— 分得开。
     ST_CHECK(error <= 2.0f);
   }
-  st::print("[icon-ink] ink_size vs 实际绘制：{} 个图标，最大误差 {:.2f}px\n", checked,
+  st::log::out("[icon-ink] ink_size vs 实际绘制：{} 个图标，最大误差 {:.2f}px\n", checked,
             static_cast<double>(worst));
   ST_CHECK(checked >= 8U);
 }

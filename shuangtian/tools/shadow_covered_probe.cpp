@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -136,7 +137,7 @@ auto main(int argc, char** argv) -> int {
   const Canvas covered_good = render_cards(true, true, true);
   const Canvas baseline_good = render_cards(false, true, true);
   const int diff_opaque = max_channel_diff(covered_good, baseline_good);
-  st::print("不透明底 + 双层：传 covered_region vs 不传，最大通道差 = {}\n", diff_opaque);
+  st::log::out("不透明底 + 双层：传 covered_region vs 不传，最大通道差 = {}\n", diff_opaque);
 
   // ── ② 判别力：半透明底 + 跳过 **必须**有可见差异 ──
   //
@@ -145,7 +146,7 @@ auto main(int argc, char** argv) -> int {
   const Canvas covered_translucent = render_cards(true, false, true);
   const Canvas baseline_translucent = render_cards(false, false, true);
   const int diff_translucent = max_channel_diff(covered_translucent, baseline_translucent);
-  st::print("半透明底 + 双层：传 covered_region vs 不传，最大通道差 = {}（应 > 0）\n",
+  st::log::out("半透明底 + 双层：传 covered_region vs 不传，最大通道差 = {}（应 > 0）\n",
             diff_translucent);
 
   // ── ③ 收益（按阴影层数分开报：单层目前没有跳过）──
@@ -158,11 +159,11 @@ auto main(int argc, char** argv) -> int {
     if (base <= 0.0) return "-";
     return std::format("{:.1f}%", (base - now) / base * 100.0);
   };
-  st::print("耗时（{} 张卡片，{} 轮取最小）：\n", kCards, kRounds);
-  st::print("  双层 不传 : {:.3f} ms\n", baseline_two);
-  st::print("  双层 传   : {:.3f} ms  （省 {}）\n", covered_two, pct(baseline_two, covered_two));
-  st::print("  单层 不传 : {:.3f} ms\n", baseline_one);
-  st::print("  单层 传   : {:.3f} ms  （省 {}）\n", covered_one, pct(baseline_one, covered_one));
+  st::log::out("耗时（{} 张卡片，{} 轮取最小）：\n", kCards, kRounds);
+  st::log::out("  双层 不传 : {:.3f} ms\n", baseline_two);
+  st::log::out("  双层 传   : {:.3f} ms  （省 {}）\n", covered_two, pct(baseline_two, covered_two));
+  st::log::out("  单层 不传 : {:.3f} ms\n", baseline_one);
+  st::log::out("  单层 传   : {:.3f} ms  （省 {}）\n", covered_one, pct(baseline_one, covered_one));
 
   if (diff_opaque != 0) {
     verdict.state = st::probe::status::fail;

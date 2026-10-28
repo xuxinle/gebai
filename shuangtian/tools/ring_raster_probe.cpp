@@ -10,6 +10,7 @@
 #include <cstdlib>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -58,7 +59,7 @@ void report(const char* label, const Path& path, double expect_logical, float sc
   canvas.fill_path(path, st::raster::Paint::solid(st::math::Color::rgb(0x00, 0x00, 0x00)));
   const double measured_physical = ink_area(canvas);
   const double expect_physical = expect_logical * static_cast<double>(scale) * static_cast<double>(scale);
-  st::print("  {:<12} 实测 {:9.2f}   解析 {:9.2f}   比 {:.4f}   差 {:+.2f}\n", label,
+  st::log::out("  {:<12} 实测 {:9.2f}   解析 {:9.2f}   比 {:.4f}   差 {:+.2f}\n", label,
             measured_physical, expect_physical, measured_physical / expect_physical,
             measured_physical - expect_physical);
 }
@@ -81,7 +82,7 @@ auto main(int argc, char** argv) -> int {
   const double w = 100.0;
   const double h = 60.0;
 
-  st::print("=== 圆角环光栅化精度（逻辑 100×60，r=14，宽=1，scale={:.1f}）===\n",
+  st::log::out("=== 圆角环光栅化精度（逻辑 100×60，r=14，宽=1，scale={:.1f}）===\n",
             static_cast<double>(scale));
 
   Path outer;
@@ -101,7 +102,7 @@ auto main(int argc, char** argv) -> int {
          analytic_ring(w, h, static_cast<double>(kRadius), static_cast<double>(kWidth)), scale);
 
   // —— 决定性对照：竖带 vs 斜带（几何完全已知，面积都是 w × len）——
-  st::print("\n=== 对照：同宽度（1 逻辑px）的带，角度不同 ===\n");
+  st::log::out("\n=== 对照：同宽度（1 逻辑px）的带，角度不同 ===\n");
   constexpr double kLen = 60.0;
   constexpr double kBandWidth = 1.0;
   for (int angle_deg : {0, 15, 30, 45, 60, 75, 90}) {
@@ -123,7 +124,7 @@ auto main(int argc, char** argv) -> int {
     canvas.fill_path(band, st::raster::Paint::solid(st::math::Color::rgb(0x00, 0x00, 0x00)));
     const double measured = ink_area(canvas);
     const double expect = kLen * kBandWidth * static_cast<double>(scale) * static_cast<double>(scale);
-    st::print("  {:>2}°  实测 {:9.2f}  解析 {:9.2f}  比 {:.4f}  差 {:+.2f}\n", angle_deg, measured,
+    st::log::out("  {:>2}°  实测 {:9.2f}  解析 {:9.2f}  比 {:.4f}  差 {:+.2f}\n", angle_deg, measured,
               expect, measured / expect, measured - expect);
   }
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）

@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/grid_fit.hpp"
@@ -44,7 +45,7 @@ auto main(int argc, char** argv) -> int {
 
   auto stack = st::text::FontStack::system_default();
   if (!stack.has_value()) {
-    st::print("跳过：拿不到系统字体\n");
+    st::log::out("跳过：拿不到系统字体\n");
     return st::probe::main_of(spec, opts, verdict);
   }
   st::text::TextRenderer renderer(*stack, 1.0f);
@@ -61,7 +62,7 @@ auto main(int argc, char** argv) -> int {
       {"48px 英文（大字）", "Title", 48.0f},
   };
 
-  st::print("{:<22}  {:>10}  {:>10}  {:>10}  {:>10}\n", "样本", "非零像素", "满格占比",
+  st::log::out("{:<22}  {:>10}  {:>10}  {:>10}  {:>10}\n", "样本", "非零像素", "满格占比",
             "0.1~0.99", "≤0.1");
   for (const Sample& item : samples) {
     constexpr int kWidth = 600;
@@ -93,10 +94,10 @@ auto main(int argc, char** argv) -> int {
       return nonzero == 0 ? 0.0
                           : static_cast<double>(value) * 100.0 / static_cast<double>(nonzero);
     };
-    st::print("{:<22}  {:>10}  {:>9.1f}%  {:>9.1f}%  {:>9.1f}%\n", item.name, nonzero, pct(full),
+    st::log::out("{:<22}  {:>10}  {:>9.1f}%  {:>9.1f}%  {:>9.1f}%\n", item.name, nonzero, pct(full),
               pct(mid), pct(low));
   }
-  st::print("\n「满格占比」= 覆盖率 ≥0.999 的像素，那部分走 `simd::blend_row`；\n");
-  st::print("其余走逐像素浮点 + `scale_premul`（4 次整数除法）。\n");
+  st::log::out("\n「满格占比」= 覆盖率 ≥0.999 的像素，那部分走 `simd::blend_row`；\n");
+  st::log::out("其余走逐像素浮点 + `scale_premul`（4 次整数除法）。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

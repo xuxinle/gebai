@@ -33,6 +33,7 @@
 
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 
 namespace {
@@ -71,7 +72,7 @@ auto main(int argc, char** argv) -> int {
 
   if (!st::fs::is_directory(dir) || !st::fs::is_regular_file(medium_file) ||
       !st::fs::is_regular_file(small_file)) {
-    st::print("跳过：需在仓库根运行（找不到 {} / {}）\n", dir, medium_file);
+    st::log::out("跳过：需在仓库根运行（找不到 {} / {}）\n", dir, medium_file);
     return st::probe::main_of(spec, opts, verdict);
   }
 
@@ -91,27 +92,27 @@ auto main(int argc, char** argv) -> int {
     (void)text;
   });
 
-  st::print("目录 {} 与两个源文件\n\n", dir);
-  st::print("A list_dir({:<14})              {:>9.2f} µs\n", dir, list_ns / 1000.0);
-  st::print("B read_text(medium, {:>6} 字节)  {:>9.2f} µs\n", medium_size, medium_ns / 1000.0);
-  st::print("C read_text(small,  {:>6} 字节)  {:>9.2f} µs\n", small_size, small_ns / 1000.0);
+  st::log::out("目录 {} 与两个源文件\n\n", dir);
+  st::log::out("A list_dir({:<14})              {:>9.2f} µs\n", dir, list_ns / 1000.0);
+  st::log::out("B read_text(medium, {:>6} 字节)  {:>9.2f} µs\n", medium_size, medium_ns / 1000.0);
+  st::log::out("C read_text(small,  {:>6} 字节)  {:>9.2f} µs\n", small_size, small_ns / 1000.0);
 
   const double bytes_ratio = small_size > 0 ? static_cast<double>(medium_size) /
                                                   static_cast<double>(small_size)
                                             : 0.0;
   const double time_ratio = small_ns > 0.0 ? medium_ns / small_ns : 0.0;
-  st::print("\n文件大小比 {:.1f}× · 读取耗时比 {:.2f}×\n", bytes_ratio, time_ratio);
-  st::print("\n判读：\n");
+  st::log::out("\n文件大小比 {:.1f}× · 读取耗时比 {:.2f}×\n", bytes_ratio, time_ratio);
+  st::log::out("\n判读：\n");
   if (time_ratio < bytes_ratio / 2.0) {
-    st::print("  耗时比远小于大小比 → **固定开销主导**（打开/关闭/元数据）。\n");
-    st::print("  优化方向是**减少调用次数**（批量读、缓存命中、避免每帧 stat），\n");
-    st::print("  而不是加快单次读写。每次调用约 {:.1f} µs 的固定成本。\n",
+    st::log::out("  耗时比远小于大小比 → **固定开销主导**（打开/关闭/元数据）。\n");
+    st::log::out("  优化方向是**减少调用次数**（批量读、缓存命中、避免每帧 stat），\n");
+    st::log::out("  而不是加快单次读写。每次调用约 {:.1f} µs 的固定成本。\n",
               std::min(medium_ns, small_ns) / 1000.0);
   } else {
-    st::print("  耗时比接近大小比 → **数据量主导**，方向是减少读取的字节数\n");
-    st::print("  （如只读可视区域、增量加载）。\n");
+    st::log::out("  耗时比接近大小比 → **数据量主导**，方向是减少读取的字节数\n");
+    st::log::out("  （如只读可视区域、增量加载）。\n");
   }
-  st::print("\n参考：`docs/BACKLOG` 记录过 `ensure_git_log()` 同步跑 9 条 git 子进程\n");
-  st::print("      = 3301 ms（每条 ~367 ms）——**进程启动**的固定成本比文件 IO 高两个量级。\n");
+  st::log::out("\n参考：`docs/BACKLOG` 记录过 `ensure_git_log()` 同步跑 9 条 git 子进程\n");
+  st::log::out("      = 3301 ms（每条 ~367 ms）——**进程启动**的固定成本比文件 IO 高两个量级。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
@@ -76,22 +77,22 @@ auto main(int argc, char** argv) -> int {
     TextRenderer renderer(fonts, 1.5f);
     renderer.set_subpixel(lcd);
     renderer.set_grid_fit(GridFitMode::Normal);
-    st::print("\n=== {} ===", lcd ? "亚像素 LCD" : "灰度");
+    st::log::out("\n=== {} ===", lcd ? "亚像素 LCD" : "灰度");
     // 先热身（字形位图缓存填充不计入）
     (void)measure_ms(renderer, 0.0f, 1);
     const double base = measure_ms(renderer, 0.0f, 5);
-    st::print("\n  Regular（无加粗）      {:7.2f} ms/帧", base);
+    st::log::out("\n  Regular（无加粗）      {:7.2f} ms/帧", base);
     for (const float physical : {16.5f, 20.25f, 31.5f, 39.0f}) {
-      st::print("\n  —— 物理 {}px ——", physical);
+      st::log::out("\n  —— 物理 {}px ——", physical);
       for (const auto [name, divisor] :
            {std::pair{"Medium  ", 48.0f}, {"SemiBold", 32.0f}, {"Bold    ", 20.0f}}) {
         const float radius = physical / divisor;
         const double ms = measure_ms(renderer, radius, 5);
-        st::print("\n    {} radius={:.2f}px  {:7.2f} ms/帧  ({:+.1f}%)", name, radius, ms,
+        st::log::out("\n    {} radius={:.2f}px  {:7.2f} ms/帧  ({:+.1f}%)", name, radius, ms,
                   (ms / base - 1.0) * 100.0);
       }
     }
-    st::print("\n");
+    st::log::out("\n");
   }
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 

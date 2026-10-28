@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/ui_root.hpp"
@@ -56,7 +57,7 @@ auto main(int argc, char** argv) -> int {
   }
   st::probe::result verdict{};
 
-  st::print("{:>8}  {:>14}  {:>16}  {:>14}\n", "节点数", "layout 早退", "其中主题遍历",
+  st::log::out("{:>8}  {:>14}  {:>16}  {:>14}\n", "节点数", "layout 早退", "其中主题遍历",
             "主题占比");
 
   for (const int target : {20, 90, 300, 900}) {
@@ -87,11 +88,11 @@ auto main(int argc, char** argv) -> int {
     const double force_ns = best_ns([&] { root.layout(true); });
 
     // C) 主题下发的成本 ≈ 早退路径的主体（早退只剩它 + 少量判断）。
-    st::print("{:>8}  {:>11.0f} ns  {:>13.0f} ns  {:>13.1f}%\n", made, early_ns, early_ns,
+    st::log::out("{:>8}  {:>11.0f} ns  {:>13.0f} ns  {:>13.1f}%\n", made, early_ns, early_ns,
               early_ns > 0.0 ? 100.0 : 0.0);
-    st::print("{:>8}  {:>11.0f} ns  （强制重排带签名两遍）\n", "", force_ns);
+    st::log::out("{:>8}  {:>11.0f} ns  （强制重排带签名两遍）\n", "", force_ns);
   }
-  st::print("\n注：早退路径（`!force && !dirty_ && !tree_layout_dirty()`）里**先**做主题下发，\n");
-  st::print("    所以“早退”并不是零成本——它含一次整树递归。\n");
+  st::log::out("\n注：早退路径（`!force && !dirty_ && !tree_layout_dirty()`）里**先**做主题下发，\n");
+  st::log::out("    所以“早退”并不是零成本——它含一次整树递归。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

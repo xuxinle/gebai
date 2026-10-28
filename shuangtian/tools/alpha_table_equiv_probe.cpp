@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 
 namespace {
@@ -59,8 +60,8 @@ auto main(int argc, char** argv) -> int {
   constexpr std::uint32_t kPremul = 0x282C34FFU;   // r=40 g=44 b=52 a=255
   const float opacities[] = {1.0f, 0.9f, 0.75f, 0.5f, 0.35f, 0.2f, 0.1f};
 
-  st::print("颜色 0x{:08X}（不透明深灰）\n\n", kPremul);
-  st::print("{:>10}  {:>12}  {:>14}  {:>12}\n", "opacity", "分歧组数", "最大通道差", "占全域");
+  st::log::out("颜色 0x{:08X}（不透明深灰）\n\n", kPremul);
+  st::log::out("{:>10}  {:>12}  {:>14}  {:>12}\n", "opacity", "分歧组数", "最大通道差", "占全域");
   for (const float opacity : opacities) {
     // 旧式：cov 取连续浮点，直接乘 opacity 后量化（**一步**）。
     // 新式：cov 先量化成字节 k（0~255），表里再乘 opacity 量化（**两步**）。
@@ -98,10 +99,10 @@ auto main(int argc, char** argv) -> int {
         }
       }
     }
-    st::print("{:>10.2f}  {:>12}  {:>14}  {:>11.2f}%\n", opacity, mismatches, worst,
+    st::log::out("{:>10.2f}  {:>12}  {:>14}  {:>11.2f}%\n", opacity, mismatches, worst,
               static_cast<double>(mismatches) * 100.0 / static_cast<double>(total));
   }
-  st::print("\n注：分歧 = 新式（两步量化）与旧式（一步量化）产出的像素不同。\n");
-  st::print("    “最大通道差”是分歧组里的最大单通道差。\n");
+  st::log::out("\n注：分歧 = 新式（两步量化）与旧式（一步量化）产出的像素不同。\n");
+  st::log::out("    “最大通道差”是分歧组里的最大单通道差。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

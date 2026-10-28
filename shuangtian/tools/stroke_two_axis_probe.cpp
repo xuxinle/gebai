@@ -42,6 +42,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
 
@@ -244,7 +245,7 @@ auto main(int argc, char** argv) -> int {
     // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
     return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体\\n"));
   }
-  st::print("scale={} 物理字号={} fit={} gamma={} lcd={}\n", scale, size,
+  st::log::out("scale={} 物理字号={} fit={} gamma={} lcd={}\n", scale, size,
             fit == GridFitMode::Off ? "off" : (fit == GridFitMode::Light ? "light" : "normal"),
             gamma, lcd ? "on" : "off");
 
@@ -267,21 +268,21 @@ auto main(int argc, char** argv) -> int {
     const Stats v = within_glyph_stats(vertical, v_lines);
     const Stats h = within_glyph_stats(horizontal, h_lines);
     const auto avg = [](double a, double b) { return (a + b) / 2.0; };
-    st::print("\n「{}」每字内部离散（{} 组长笔画）：\n", text, v.samples + h.samples);
-    st::print("  墨量 ink_sd  = {:.4f}   （总墨量波动）\n", avg(v.ink_sd, h.ink_sd));
-    st::print("  墨色 peak_sd = {:.4f}   ← **同一字里“有的笔画黑、有的发灰”**\n",
+    st::log::out("\n「{}」每字内部离散（{} 组长笔画）：\n", text, v.samples + h.samples);
+    st::log::out("  墨量 ink_sd  = {:.4f}   （总墨量波动）\n", avg(v.ink_sd, h.ink_sd));
+    st::log::out("  墨色 peak_sd = {:.4f}   ← **同一字里“有的笔画黑、有的发灰”**\n",
               avg(v.peak_sd, h.peak_sd));
-    st::print("  几何 span_sd = {:.4f}   ← **同一字里“有的笔画宽、有的窄”**\n",
+    st::log::out("  几何 span_sd = {:.4f}   ← **同一字里“有的笔画宽、有的窄”**\n",
               avg(v.span_sd, h.span_sd));
     const int samples = v.samples + h.samples;
     const int bimodal = v.bimodal_groups + h.bimodal_groups;
-    st::print("  **双峰组 = {} / {}（{:.1f}%）** ← 同组内实心与发灰共存（“看着不均”的直接形态）\n",
+    st::log::out("  **双峰组 = {} / {}（{:.1f}%）** ← 同组内实心与发灰共存（“看着不均”的直接形态）\n",
               bimodal, samples, samples ? 100.0 * bimodal / samples : 0.0);
-    st::print("    全实心 {} 组 · 全半调 {} 组 · 混合 {} 组\n",
+    st::log::out("    全实心 {} 组 · 全半调 {} 组 · 混合 {} 组\n",
               v.solid_only_groups + h.solid_only_groups,
               v.soft_only_groups + h.soft_only_groups, v.mixed_groups + h.mixed_groups);
   }
-  st::print("\n判读：哪个 _sd 大，用户看到的“不均匀”就主要是哪一路。\n"
+  st::log::out("\n判读：哪个 _sd 大，用户看到的“不均匀”就主要是哪一路。\n"
             "  span_sd 大 ⇒ 几何（轮廓相位）——该动的是字形/落点；\n"
             "  peak_sd 大 ⇒ 墨色（覆盖率达不满）——该动的是覆盖率映射；\n"
             "  **双峰组占比高 ⇒ 部分笔画被处理、部分原样**（拟合召回不足的典型形态）；\n"

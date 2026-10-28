@@ -29,6 +29,7 @@
 #include FT_MODULE_H
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 
 namespace {
@@ -127,11 +128,11 @@ int main(int argc, char** argv) {
   if (FT_Init_FreeType(&lib) != 0) return 1;
   FT_Face face = nullptr;
   if (FT_New_Face(lib, path.c_str(), face_index, &face) != 0) {
-    st::print("打不开 {} face {}\n", path, face_index);
+    st::log::out("打不开 {} face {}\n", path, face_index);
     return 1;
   }
-  st::print("字体 {} face={} 格式={}\n", path, face_index, FT_Get_Font_Format(face));
-  st::print("{:<24}{:>8}{:>6}{:>12}{:>12}{:>8}{:>12}{:>12}{:>8}\n", "样本", "物理px", "字数",
+  st::log::out("字体 {} face={} 格式={}\n", path, face_index, FT_Get_Font_Format(face));
+  st::log::out("{:<24}{:>8}{:>6}{:>12}{:>12}{:>8}{:>12}{:>12}{:>8}\n", "样本", "物理px", "字数",
             "LCDC墨量", "LCD关墨量", "比", "灰度墨量", "灰度关墨量", "比");
   for (double ppem : ppems) {
     for (const std::string& s : samples) {
@@ -142,7 +143,7 @@ int main(int argc, char** argv) {
       const Ink l_off = render(face, s.c_str(), ppem, true);
       const Ink g_off = render(face, s.c_str(), ppem, false);
       set_stem_darkening(lib, 0);
-      st::print("{:<24}{:>8.4g}{:>6}{:>12.6g}{:>12.6g}{:>8.3}{:>12.6g}{:>12.6g}{:>8.3}\n", s, ppem,
+      st::log::out("{:<24}{:>8.4g}{:>6}{:>12.6g}{:>12.6g}{:>8.3}{:>12.6g}{:>12.6g}{:>8.3}\n", s, ppem,
                 decode(s.c_str()).size(), l_on.ink, l_off.ink,
                 l_off.ink > 0 ? l_on.ink / l_off.ink : 0.0, g_on.ink, g_off.ink,
                 g_off.ink > 0 ? g_on.ink / g_off.ink : 0.0);

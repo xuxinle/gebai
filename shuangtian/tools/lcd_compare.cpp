@@ -27,6 +27,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -80,7 +81,7 @@ void render_mode(const FontStack& stack, const Mode& mode, const std::string& pa
   image.height = static_cast<std::uint32_t>(kHeight);
   image.rgba = canvas.to_rgba8();
   const auto status = st::codec::png_write_file(path, image);
-  st::print("{} → {}\n", path, status.has_value() ? "ok" : status.error().message);
+  st::log::out("{} → {}\n", path, status.has_value() ? "ok" : status.error().message);
 }
 
 /// 打印某一行、某个 x 窗口内的原始像素（边缘剖面的原始证据）。
@@ -91,13 +92,13 @@ void print_profile(const FontStack& stack, const Mode& mode, int row, int from, 
   renderer.set_subpixel(mode.lcd);
   renderer.set_subpixel_filter(mode.filter);
   draw_all(canvas, renderer);
-  st::print("  {:<11} ", mode.name);
+  st::log::out("  {:<11} ", mode.name);
   for (int x = from; x <= to; ++x) {
     const Color pixel = canvas.pixel_at(x, row);
-    st::print("({:3},{:3},{:3}) ", static_cast<int>(pixel.r), static_cast<int>(pixel.g),
+    st::log::out("({:3},{:3},{:3}) ", static_cast<int>(pixel.r), static_cast<int>(pixel.g),
               static_cast<int>(pixel.b));
   }
-  st::print("\n");
+  st::log::out("\n");
 }
 
 }  // namespace
@@ -145,7 +146,7 @@ int main(int argc, char** argv) {
       break;
     }
   }
-  st::print("边缘剖面（y={}，x={}..{}，13.5px 正文）：\n", best_row, first_ink - 2, first_ink + 9);
+  st::log::out("边缘剖面（y={}，x={}..{}，13.5px 正文）：\n", best_row, first_ink - 2, first_ink + 9);
   for (const Mode& mode : kModes) {
     print_profile(*stack, mode, best_row, first_ink - 2, first_ink + 9);
   }

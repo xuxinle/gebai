@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -67,7 +68,7 @@ auto stats(const st::ui::Shadow& shadow, float blur, st::math::Color color, floa
 auto report(const char* name, const SpanStats& s) -> void {
   const double region = static_cast<double>(s.region_area);
   const double span = static_cast<double>(s.span_area);
-  st::print("  {:<20} 区域 {:>7} px · 非零 {:>6.1}% · 行跨度面积 {:>6.1}% · 空行 {:>5.1}% · "
+  st::log::out("  {:<20} 区域 {:>7} px · 非零 {:>6.1}% · 行跨度面积 {:>6.1}% · 空行 {:>5.1}% · "
             "跨度/非零 {:.2f}\n",
             name, s.region_area, 100.0 * static_cast<double>(s.nonzero) / region,
             100.0 * span / region, 100.0 * static_cast<double>(s.empty_rows) /
@@ -90,7 +91,7 @@ auto main(int argc, char** argv) -> int {
   const st::ui::Shadow sm = st::ui::shadow_sm(theme);
   const st::ui::Shadow md = st::ui::shadow_md(theme);
   const st::ui::Shadow lg = st::ui::shadow_lg(theme);
-  st::print("阴影 region 内的空白（决定「按行收紧」的收益）：\n");
+  st::log::out("阴影 region 内的空白（决定「按行收紧」的收益）：\n");
   report("sm 关键层 blur=3", stats(sm, sm.blur, sm.color, sm.offset_y));
   report("sm 环境层 blur=10", stats(sm, sm.blur2, sm.color2, sm.offset2_y));
   report("md 关键层 blur=6", stats(md, md.blur, md.color, md.offset_y));

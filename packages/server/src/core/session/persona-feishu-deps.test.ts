@@ -139,6 +139,72 @@ describe("feishuHistory：用户身份优先，降级如实上报", () => {
   })
 })
 
+describe("feishuUserName：入站发送者姓名（尽力而为）", () => {
+  const userName = (deps: Record<string, unknown>) => deps.feishuUserName as (id: string, chatId?: string) => Promise<string | undefined>
+
+  test("contact API 返回姓名 → 返回名字（并按 openId 缓存，二次不重查）", async () => {
+    const urls: string[] = []
+    let calls = 0
+    const impl = async (url: string) => {
+      urls.push(url)
+      calls++
+      return { ok: true, status: 200, json: async () => ({ code: 0, data: { user: { name: "张三" } } }) }
+    }
+    const deps = createFeishuSourceDeps({ ...base, fetchImpl: impl as never, appToken: async () => "app-token" })
+    expect(await userName(deps)("ou_1")).toBe("张三")
+    expect(await userName(deps)("ou_1")).toBe("张三")
+    expect(calls).toBe(1) // 缓存生效，不重复打 API
+    expect(urls[0]).toContain("/contact/v3/users/ou_1")
+  })
+
+  test("contact API 无权限/失败 → undefined，不抛错（不阻断入站）", async () => {
+    const impl = async () => ({ ok: true, status: 200, json: async () => ({ code: 99991663, msg: "no permission" }) })
+    const deps = createFeishuSourceDeps({ ...base, fetchImpl: impl as never, appToken: async () => "app-token" })
+    expect(await userName(deps)("ou_1")).toBeUndefined()
+  })
+
+  test("空 openId / 未配置 appToken → undefined（不查）", async () => {
+    const deps = createFeishuSourceDeps({ ...base, fetchImpl: (async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ code: 0, data: { user: { name: "张三" } } }),
+    })) as never })
+    expect(await userName(deps)("")).toBeUndefined()
+    expect(await userName(deps)("ou_1")).toBeUndefined() // 无 appToken
+  })
+
+  test("带 chatId：群成员表缓存 TTL 内不重拉，成员表缺失时回退 contact", async () => {
+    let memberCalls = 0
+    let contactCalls = 0
+    const impl = async (url: string) => {
+      if (url.includes("/im/v1/chats/")) {
+        memberCalls++
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            code: 0,
+            data: { items: [{ member_id: "ou_1", name: "李四" }], has_more: false },
+          }),
+        }
+      }
+      if (url.includes("/contact/v3/users/")) {
+        contactCalls++
+        return { ok: true, status: 200, json: async () => ({ code: 0, data: { user: { name: "赵六" } } }) }
+      }
+      return { ok: true, status: 200, json: async () => ({ code: 0, data: {} }) }
+    }
+    const deps = createFeishuSourceDeps({ ...base, fetchImpl: impl as never, appToken: async () => "app-token" })
+    // 群成员表命中（成员表只拉一次）
+    expect(await userName(deps)("ou_1", "oc_group")).toBe("李四")
+    expect(await userName(deps)("ou_1", "oc_group")).toBe("李四")
+    expect(memberCalls).toBe(1)
+    // 成员表没有此人 → 回退 contact
+    expect(await userName(deps)("ou_99", "oc_group")).toBe("赵六")
+    expect(contactCalls).toBe(1)
+  })
+})
+
 describe("parseBody：正文解析", () => {
   test("text 类型取 content.text", () => {
     expect(parseBody("text", '{"text":"你好"}')).toBe("你好")

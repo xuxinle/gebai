@@ -11,6 +11,7 @@
 
 #include "st/core/string.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/text/font.hpp"
 
 namespace {
@@ -89,19 +90,19 @@ auto main(int argc, char** argv) -> int {
   const std::string text = argc > 3 ? argv[3] : "叫响哨吗呢啊霜天中国";
 
   FT_Library library = nullptr;
-  if (FT_Init_FreeType(&library) != 0) { st::print("FreeType 初始化失败\n"); return 1; }
+  if (FT_Init_FreeType(&library) != 0) { st::log::out("FreeType 初始化失败\n"); return 1; }
   FT_Face ft_face = nullptr;
   if (FT_New_Face(library, path_text.c_str(), face_index, &ft_face) != 0) {
-    st::print("FreeType 打开字体失败\n");
+    st::log::out("FreeType 打开字体失败\n");
     return 1;
   }
 
   auto face = st::text::FontFace::load(path_text, face_index);
-  if (!face) { st::print("霜天加载失败: {}\n", face.error()); return 1; }
+  if (!face) { st::log::out("霜天加载失败: {}\n", face.error()); return 1; }
 
   const double upem = static_cast<double>(ft_face->units_per_EM);
-  st::print("upem: freetype={:.0f} 霜天={:.0f}\n", upem, static_cast<double>(face->metrics().units_per_em));
-  st::print("{:<4} {:<8} {:<8} | {:<22} | {:<22} | 判定\n", "字", "FTgid", "我们gid", "FT(轮廓/点/bbox)",
+  st::log::out("upem: freetype={:.0f} 霜天={:.0f}\n", upem, static_cast<double>(face->metrics().units_per_em));
+  st::log::out("{:<4} {:<8} {:<8} | {:<22} | {:<22} | 判定\n", "字", "FTgid", "我们gid", "FT(轮廓/点/bbox)",
               "霜天(轮廓/点/bbox)");
 
   const std::u32string codepoints = st::utf8_decode(text);
@@ -130,12 +131,12 @@ auto main(int argc, char** argv) -> int {
                           std::abs(ft.min_y - ours.min_y) < 4.0;
     const bool good = same_gid && same_contours && same_box;
     if (!good) ++mismatches;
-    st::print("{:<4} %-8u %-8u | %4zu/%5zu/{:.0f},{:.0f},{:.0f},{:.0f} | %4zu/%5zu/{:.0f},{:.0f},{:.0f},{:.0f} | {}\n",
+    st::log::out("{:<4} %-8u %-8u | %4zu/%5zu/{:.0f},{:.0f},{:.0f},{:.0f} | %4zu/%5zu/{:.0f},{:.0f},{:.0f},{:.0f} | {}\n",
                 one, ft_glyph, (our_glyph.has_value() ? *our_glyph : 0u), ft.contours, ft.points, ft.min_x, ft.min_y,
                 ft.max_x, ft.max_y, ours.contours, ours.points, ours.min_x, ours.min_y, ours.max_x,
                 ours.max_y, good ? "一致" : (same_gid ? "轮廓不一致" : "cmap 不一致"));
   }
-  st::print("不一致字形: {} / {}\n", mismatches, codepoints.size());
+  st::log::out("不一致字形: {} / {}\n", mismatches, codepoints.size());
   FT_Done_Face(ft_face);
   FT_Done_FreeType(library);
   return mismatches == 0 ? 0 : 1;

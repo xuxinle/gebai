@@ -28,6 +28,6 @@ if (!hasTs(customRoot)) {
   console.log("[typecheck:custom] custom/ 无 .ts 文件（空骨架），跳过")
   process.exit(0)
 }
-const proc = Bun.spawn(["bunx", "tsc", "-p", "custom/tsconfig.json", "--noEmit"], { cwd: root, stdout: "inherit", stderr: "inherit" })
+const proc = Bun.spawn(["bun", "x", "tsc", "-p", "custom/tsconfig.json", "--noEmit"], { cwd: root, stdout: "inherit", stderr: "inherit" })
 const code = await proc.exited
 process.exit(code)

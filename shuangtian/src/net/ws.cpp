@@ -390,4 +390,14 @@ auto WsSession::read_message() -> std::optional<Message> {
   }
 }
 
+auto WsSession::read_message_nb() -> std::optional<Message> {
+  // 先看已解析帧（可能上次读入了多个帧）
+  if (auto message = try_read_message(); message.has_value()) return message;
+  if (close_received_ || decoder_.failed()) return std::nullopt;
+  // 从 socket 读一次：非阻塞——无数据/would-block 时 pump_frames 返回 false，
+  // 但那只是「这次没读到」，不是断开（断开由 close_received_/后续探测判定）。
+  if (!pump_frames()) return std::nullopt;
+  return try_read_message();
+}
+
 }  // namespace st::net::ws

@@ -34,6 +34,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
 
@@ -129,18 +130,18 @@ auto main(int argc, char** argv) -> int {
     }
   }
   if (ratios.empty()) {
-    st::print("没有可用字形\n");
+    st::log::out("没有可用字形\n");
     return 1;
   }
   const auto [min_it, max_it] = std::minmax_element(ratios.begin(), ratios.end());
   mean_ratio /= static_cast<double>(ratios.size());
-  st::print("fit={:<6s} 字形={}  逐字变化率: min={:.3f} max={:.3f} 均值={:.3f}  "
+  st::log::out("fit={:<6s} 字形={}  逐字变化率: min={:.3f} max={:.3f} 均值={:.3f}  "
             "**ratio_spread={:.1f}%**  过渡带={:.3f}\n",
             fit == GridFitMode::Off ? "off" : (fit == GridFitMode::Light ? "light" : "normal"),
             glyphs, *min_it, *max_it, mean_ratio,
             100.0 * (*max_it - *min_it),
             band_base > 0.0 ? band_total / band_base : 0.0);
-  st::print("\n判读：**三个数一起看**——ratio_spread 小（拟合对每个字的改变一致）、\n"
+  st::log::out("\n判读：**三个数一起看**——ratio_spread 小（拟合对每个字的改变一致）、\n"
             "      过渡带小（锐）、均值接近 1.0（没整体变轻）。\n"
             "      只看其中一个就会“顾此失彼”（例如为了均匀整体变糊）。\n");
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）

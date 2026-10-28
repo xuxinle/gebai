@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -120,7 +121,7 @@ auto main(int argc, char** argv) -> int {
       {"极扁", Rect{20.0f, 20.0f, 150.0f, 12.0f}, 4.0f},
   };
 
-  st::print("{:<16}  {:>14}  {:>14}  {:>10}\n", "档位", "三带 偏差", "整块 偏差", "谁更准");
+  st::log::out("{:<16}  {:>14}  {:>14}  {:>10}\n", "档位", "三带 偏差", "整块 偏差", "谁更准");
   for (const Case& item : cases) {
     // 参考真值：把形状放大 kSuper 倍画，再降采样。
     const std::vector<double> truth =
@@ -144,10 +145,10 @@ auto main(int argc, char** argv) -> int {
     const double whole_error =
         total_abs_error(canvas_coverage(via_whole, kWidth, kHeight), truth);
 
-    st::print("{:<16}  {:>14.4f}  {:>14.4f}  {:>10}\n", item.name, split_error, whole_error,
+    st::log::out("{:<16}  {:>14.4f}  {:>14.4f}  {:>10}\n", item.name, split_error, whole_error,
               whole_error < split_error ? "整块" : (split_error < whole_error ? "三带" : "相同"));
   }
-  st::print("\n注：偏差 = 逐像素覆盖率与 {0}× 超采样真值的绝对差之和（越小越准）。\n", kSuper);
-  st::print("    出现「三带 vs 整块」差异时，以本表判谁是哪一条的近似。\n");
+  st::log::out("\n注：偏差 = 逐像素覆盖率与 {0}× 超采样真值的绝对差之和（越小越准）。\n", kSuper);
+  st::log::out("    出现「三带 vs 整块」差异时，以本表判谁是哪一条的近似。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

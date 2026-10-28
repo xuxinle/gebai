@@ -27,6 +27,7 @@
 
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
 #include "st/ui/components/basic.hpp"
@@ -67,13 +68,13 @@ ST_TEST(ui_text_weight_reaches_pixels) {
   renderer.set_subpixel(true);
   renderer.set_grid_fit(st::text::GridFitMode::Normal);
   st::app::RendererTextPort port(renderer);
-  st::print("[ui-weight] has_bold={} has_real_bold={}\n", stack.has_bold(), port.has_real_bold());
-  st::print("[ui-weight] faces={} bold_faces={}\n", stack.faces().size(),
+  st::log::out("[ui-weight] has_bold={} has_real_bold={}\n", stack.has_bold(), port.has_real_bold());
+  st::log::out("[ui-weight] faces={} bold_faces={}\n", stack.faces().size(),
             stack.bold_faces().size());
   for (const char32_t cp : {U'\u971c', U'A'}) {
     const auto* reg = stack.find_face(cp, st::text::FontRole::Proportional, false);
     const auto* bld = stack.find_face(cp, st::text::FontRole::Proportional, true);
-    st::print("[ui-weight] U+{:04X} reg={} bold={}\n", static_cast<unsigned>(cp),
+    st::log::out("[ui-weight] U+{:04X} reg={} bold={}\n", static_cast<unsigned>(cp),
               reg ? reg->path() : "<null>", bld ? bld->path() : "<null>");
   }
 
@@ -110,11 +111,11 @@ ST_TEST(ui_text_weight_reaches_pixels) {
   const InkStats semibold = paint(FontWeight::SemiBold);
   const InkStats bold = paint(FontWeight::Bold);
 
-  st::print("[ui-weight] ink r={:.1f} m={:.1f} sb={:.1f} b={:.1f} / peak r={:.3f} b={:.3f}\n",
+  st::log::out("[ui-weight] ink r={:.1f} m={:.1f} sb={:.1f} b={:.1f} / peak r={:.3f} b={:.3f}\n",
             regular.ink, medium.ink, semibold.ink, bold.ink, regular.peak, bold.peak);
   // 检查字重链路中间那一跳：最后一次 Bold 绘制收到的参数。
   (void)paint(FontWeight::Bold);
-  st::print("[ui-weight] 链路：Bold 档 draw(bold={}, embolden={:.3f})\n", spy.last_bold,
+  st::log::out("[ui-weight] 链路：Bold 档 draw(bold={}, embolden={:.3f})\n", spy.last_bold,
             spy.last_embolden);
   ST_CHECK(spy.last_bold);
 
@@ -206,7 +207,7 @@ ST_TEST(ui_semibold_uses_the_real_bold_face) {
     }
     return total;
   };
-  st::print("[ui-weight] SemiBold 真粗体面：regular Σ墨={:.1f} · semibold Σ墨={:.1f}\n", ink(regular),
+  st::log::out("[ui-weight] SemiBold 真粗体面：regular Σ墨={:.1f} · semibold Σ墨={:.1f}\n", ink(regular),
             ink(semibold));
   ST_CHECK(ink(semibold) > ink(regular) * 1.05);
 }

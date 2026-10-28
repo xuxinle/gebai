@@ -18,6 +18,7 @@
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
 #include "st/core/time.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/scene3d.hpp"
@@ -75,7 +76,7 @@ auto main(int argc, char** argv) -> int {
     return st::probe::main_of(spec, opts, st::probe::skip("三维场景建不起来"));
   }
   Scene3D& scene = **created;
-  st::print("三维腿：{}\n", scene.backend());
+  st::log::out("三维腿：{}\n", scene.backend());
 
   Canvas canvas{kWidth, kHeight, 1.0f};
   canvas.clear(Color{0, 0, 0, 255});
@@ -109,12 +110,12 @@ auto main(int argc, char** argv) -> int {
   const Color bottom_right = at(0.70f, 0.70f);
   const Color middle = at(0.50f, 0.50f);
 
-  st::print("\n画布取样（ambient=1 / diffuse=0，所以亮度≈纹理原色）：\n");
-  st::print("  左上 ({:3},{:3},{:3})\n", top_left.r, top_left.g, top_left.b);
-  st::print("  右上 ({:3},{:3},{:3})\n", top_right.r, top_right.g, top_right.b);
-  st::print("  左下 ({:3},{:3},{:3})\n", bottom_left.r, bottom_left.g, bottom_left.b);
-  st::print("  右下 ({:3},{:3},{:3})\n", bottom_right.r, bottom_right.g, bottom_right.b);
-  st::print("  中心 ({:3},{:3},{:3})\n", middle.r, middle.g, middle.b);
+  st::log::out("\n画布取样（ambient=1 / diffuse=0，所以亮度≈纹理原色）：\n");
+  st::log::out("  左上 ({:3},{:3},{:3})\n", top_left.r, top_left.g, top_left.b);
+  st::log::out("  右上 ({:3},{:3},{:3})\n", top_right.r, top_right.g, top_right.b);
+  st::log::out("  左下 ({:3},{:3},{:3})\n", bottom_left.r, bottom_left.g, bottom_left.b);
+  st::log::out("  右下 ({:3},{:3},{:3})\n", bottom_right.r, bottom_right.g, bottom_right.b);
+  st::log::out("  中心 ({:3},{:3},{:3})\n", middle.r, middle.g, middle.b);
 
   // 判据：**画布左上 = 纹理左上（红）**。
   //
@@ -142,8 +143,8 @@ auto main(int argc, char** argv) -> int {
 
   const bool any_textured = is_red(top_left) || is_green(top_left) || is_blue(top_left) ||
                             is_white(top_left);
-  st::print("\n判读：\n");
-  st::print("  左上={} 右上={} 左下={} 右下={} 中心={}\n", name_of(top_left), name_of(top_right),
+  st::log::out("\n判读：\n");
+  st::log::out("  左上={} 右上={} 左下={} 右下={} 中心={}\n", name_of(top_left), name_of(top_right),
             name_of(bottom_left), name_of(bottom_right), name_of(middle));
 
   verdict.add("纹理确实被采样（不是全黑/全白）", any_textured,
@@ -170,7 +171,7 @@ auto main(int argc, char** argv) -> int {
     image.rgba[i * 4U + 3U] = static_cast<std::uint8_t>(pixel & 0xFFU);
   }
   (void)st::codec::png_write_file("build/test-artifacts/scene3d-texture.png", image);
-  st::print("\n产物：build/test-artifacts/scene3d-texture.png\n");
+  st::log::out("\n产物：build/test-artifacts/scene3d-texture.png\n");
 
   verdict.conclude();
   return st::probe::main_of(spec, opts, verdict);

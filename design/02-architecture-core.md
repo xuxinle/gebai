@@ -1270,8 +1270,13 @@ export const persona: PersonaDef = {
 | 触发 | 用户主动发起 | **启动时自动检查** |
 
 申请的 scopes 只要收发消息相关（`im:message` / `im:message:send_as_bot` /
-`im:message:readonly` / `im:chat:readonly` / `im:chat.members:read` / `offline_access`）——
+`im:message:readonly` / `im:message.group_msg:get_as_user` / `im:chat:readonly` /
+`im:chat.members:read` / `offline_access`）——
 **不申请云文档权限**。少要权限的好处是真实的：授权页勾选项越少，用户越愿意点同意。
+
+`im:message.group_msg:get_as_user` 是**以用户身份读群历史**所需（渠道/拟人源读历史时
+优先走用户身份，能力最大）；机器人身份读群历史需要 `im:message.group_msg`（应用后台开通），
+多数应用未开，故授权时补上用户侧权限。
 
 `offline_access` 必须有：没有它就拿不到 `refresh_token`，2 小时后就要重新授权。
 
@@ -1440,6 +1445,9 @@ exe 探测不数相对级数（数错一次就静默失败）：`XIANGQI_BIN` �
 - 与会话机器人同 AppID 且机器人已启用 → **启动期拒绝注入并告警**（不是静默空转）
 - 无用户令牌 → 退回应用身份，**把原因写进日志并标注在正文里**（“可能不全”），
   否则「这个群为什么没历史」永远查不出来——它看起来完全像「这个群就是没历史」
+
+入站消息投递时**正文带发送者姓名**（`张三：内容`）：经 `deps.feishuUserName`（contact API，尽力而为 + 按 openId 缓存）
+查询——查不到/未注入则不修饰正文，绝不因查名失败阻断入站。
 
 #### 事件的驱动面：`EventSourceManager`
 
@@ -1646,6 +1654,22 @@ listens?  → startListen(sink, ctx)     收（推）
 非白名单群忽略、非消息事件不归本渠道（卡片回调留给会话机器人）、
 非文本消息降级为可读说明（不静默丢弃）、缺 `message_id`/`chat_id` 不投（幂等键与
 出站目标都靠它）。
+
+**自发送消息防回灌**（`packages/channels/src/outbox.ts`）：人格以 `act(as_user:true)`
+发的消息在群里 `sender_type=user`，与用户本人发言**无法从事件字段区分**——只挡
+`sender_type=app` 会漏掉自己说的话，人格会把「自己的回复」又当新消息处理一轮
+（典型现象：对「复述」再做无意义回应）。精确解法是**记账过滤**：`act()` 成功后把返回的
+`message_id` 登记进 `SentMessageRegistry`（有界 LRU + TTL，与渠道/人格事件源共享同一
+实例），两端飞书入站（渠道 `startListen` 与人格源 `sources/feishu.ts`）先查记账、命中即
+丢弃。只挡**自己发的那条**，用户本人的同名消息不受影响；未注入记账（如独立部署的渠道
+测试）时不做此过滤，属可接受的降级。
+
+**入站发送者姓名**：飞书事件只有 open_id 没有姓名。优先拉**群成员表**（`GET
+/im/v1/chats/{chat_id}/members`，应用身份，页大小 100 翻页）——一次请求覆盖整群、
+TTL 内全群消息直接命中；群成员表没有此人/单聊时再逐条查 `contact/v3/users/{open_id}`
+（需 `contact:user.base:readonly`）。两处尽力而为：均查不到时 body 兜底标「用户」（模型
+至少知道这是别人发的），绝不阻断入站。群成员表接口失败会冷却 60s（避免消息风暴时每条
+都白打一次无效请求），成功缓存 5 分钟。
 
 #### 与 `feishu_group` 子 Agent 的分工
 

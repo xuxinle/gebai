@@ -24,6 +24,7 @@
 #include <cmath>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/ui/theme.hpp"
 
 namespace {
@@ -82,7 +83,7 @@ ST_TEST(ease_out_is_monotonic_and_shape_shifts_with_token) {
   const float v3 = st::ui::ease_out(cubic, kMid);
   const float v5 = st::ui::ease_out(steep, kMid);
   const float v1 = st::ui::ease_out(linear, kMid);
-  st::print("[ease] t=0.25 时 power1={:.4f} power3={:.4f} power5={:.4f}\n",
+  st::log::out("[ease] t=0.25 时 power1={:.4f} power3={:.4f} power5={:.4f}\n",
             static_cast<double>(v1), static_cast<double>(v3), static_cast<double>(v5));
   ST_CHECK(v3 > v1);
   ST_CHECK(v5 > v3);

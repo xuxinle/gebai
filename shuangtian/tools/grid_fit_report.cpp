@@ -25,6 +25,7 @@
 
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/text/text.hpp"
 
 using st::text::FontStack;
@@ -75,7 +76,7 @@ void report(std::string_view label, const Stats& stats) {
   const double mid = stats.ink > 0 ? 100.0 * static_cast<double>(stats.mid) /
                                          static_cast<double>(stats.ink)
                                    : 0.0;
-  st::print("  {:<14} 有墨 {:6}  中间调占比 {:5.1f}%  墨量 {:9.0f}\n", label, stats.ink, mid,
+  st::log::out("  {:<14} 有墨 {:6}  中间调占比 {:5.1f}%  墨量 {:9.0f}\n", label, stats.ink, mid,
             stats.ink_sum);
 }
 
@@ -84,12 +85,12 @@ void report(std::string_view label, const Stats& stats) {
 int main() {
   auto stack = FontStack::system_default();
   if (!stack) {
-    st::print("无可用字体\n");
+    st::log::out("无可用字体\n");
     return 1;
   }
-  st::print("\n字号 {} 逻辑 px @{} DPI → 物理 {:.2f}px\n", kSize, kDpi, kSize * kDpi);
+  st::log::out("\n字号 {} 逻辑 px @{} DPI → 物理 {:.2f}px\n", kSize, kDpi, kSize * kDpi);
   for (const auto& [name, text] : {std::pair{"中文", kCjk}, std::pair{"拉丁", kLatin}}) {
-    st::print("── {} ──\n", name);
+    st::log::out("── {} ──\n", name);
     const Stats off = measure(*stack, text, GridFitMode::Off);
     const Stats light = measure(*stack, text, GridFitMode::Light);
     const Stats normal = measure(*stack, text, GridFitMode::Normal);
@@ -97,7 +98,7 @@ int main() {
     report("Light", light);
     report("Normal", normal);
     const double ink_delta = off.ink_sum > 0.0 ? 100.0 * (light.ink_sum / off.ink_sum - 1.0) : 0.0;
-    st::print("  → 中间调占比降低 {:.1f} 个百分点，墨量变化 {:+.2f}%\n",
+    st::log::out("  → 中间调占比降低 {:.1f} 个百分点，墨量变化 {:+.2f}%\n",
               (off.ink > 0 ? 100.0 * static_cast<double>(off.mid) / static_cast<double>(off.ink) : 0.0) -
                   (light.ink > 0 ? 100.0 * static_cast<double>(light.mid) / static_cast<double>(light.ink) : 0.0),
               ink_delta);

@@ -1,6 +1,7 @@
 #include <cmath>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/test/test.hpp"
 #include "st/text/text.hpp"
 
@@ -33,7 +34,7 @@ ST_TEST(line_height_snaps_to_whole_pixels) {
   // 覆盖 UI 实际用到的字号档（11/12/14/15/17/20/26）
   for (const float size : {11.0F, 12.0F, 14.0F, 15.0F, 17.0F, 20.0F, 26.0F}) {
     const float height = renderer.line_height(size);
-    st::print("[line-height] size={:.1f} → {:.3f}\n", static_cast<double>(size),
+    st::log::out("[line-height] size={:.1f} → {:.3f}\n", static_cast<double>(size),
               static_cast<double>(height));
     // ① 必须是整像素（小数会污染整条布局链）
     ST_CHECK(std::abs(height - std::round(height)) <= 1e-3F);

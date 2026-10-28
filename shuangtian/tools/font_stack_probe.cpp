@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/text/text.hpp"
 
@@ -47,7 +48,7 @@ auto main(int argc, char** argv) -> int {
         }
       }
       const auto& m = face->metrics();
-      st::print("  face[{:>2}] name={}  covers_U+753B={}  advance={:.3f}em  asc/em={:.3f}\n",
+      st::log::out("  face[{:>2}] name={}  covers_U+753B={}  advance={:.3f}em  asc/em={:.3f}\n",
                 index, name, covers ? 1 : 0, ink_h,
                 m.ascender / (m.units_per_em > 0.0f ? m.units_per_em : 1000.0f));
     }
@@ -64,40 +65,40 @@ auto main(int argc, char** argv) -> int {
     return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体\\n"));
   }
   const FontStack& fonts = *stack;
-  st::print("=== FontStack 实际装配 ===\n");
+  st::log::out("=== FontStack 实际装配 ===\n");
   std::size_t index = 0;
   for (const auto& face : fonts.faces()) {
     const auto& m = face.metrics();
-    st::print("  [{:>2}] {}  face={}  units/em={:.0f} asc={:.0f} desc={:.0f} linegap={:.0f}\n",
+    st::log::out("  [{:>2}] {}  face={}  units/em={:.0f} asc={:.0f} desc={:.0f} linegap={:.0f}\n",
               index++, face.path(), face.face_index(), m.units_per_em, m.ascender, m.descender,
               m.line_gap);
   }
-  st::print("  等宽 {} 个 / 粗体 {} 个\n", fonts.monospace_faces().size(), fonts.bold_faces().size());
+  st::log::out("  等宽 {} 个 / 粗体 {} 个\n", fonts.monospace_faces().size(), fonts.bold_faces().size());
 
   // 等宽链与粗体链的**逐档路径**：这两条链的“首位是谁”同样是产品约定
   //（等宽要 Consolas；粗体必须与常规链**逐位同族**，否则拉丁粗体会接管中文字）。
-  st::print("  等宽链：");
-  for (const auto& face : fonts.monospace_faces()) st::print(" {};", face.path());
-  st::print("\n  粗体链：");
-  for (const auto& face : fonts.bold_faces()) st::print(" {};", face.path());
-  st::print("\n");
+  st::log::out("  等宽链：");
+  for (const auto& face : fonts.monospace_faces()) st::log::out(" {};", face.path());
+  st::log::out("\n  粗体链：");
+  for (const auto& face : fonts.bold_faces()) st::log::out(" {};", face.path());
+  st::log::out("\n");
 
-  st::print("\n=== 码点归属 ===\n");
+  st::log::out("\n=== 码点归属 ===\n");
   for (const char32_t cp : probes) {
     const auto* face = fonts.find_face(cp, FontRole::Proportional);
     if (face == nullptr) {
-      st::print("  U+{:04X}  <无字体覆盖>\n", static_cast<unsigned>(cp));
+      st::log::out("  U+{:04X}  <无字体覆盖>\n", static_cast<unsigned>(cp));
       continue;
     }
     const auto glyph = face->glyph_for(cp);
     const auto& m = face->metrics();
     const float units = m.units_per_em > 0.0f ? m.units_per_em : 1000.0f;
     if (glyph.has_value()) {
-      st::print("  U+{:04X}  ← {}\n          face_index={}  advance={:.3f}em  bearing=({:.3f},{:.3f})em\n",
+      st::log::out("  U+{:04X}  ← {}\n          face_index={}  advance={:.3f}em  bearing=({:.3f},{:.3f})em\n",
                 static_cast<unsigned>(cp), face->path(), face->face_index(),
                 glyph->advance / units, glyph->bearing_x / units, glyph->bearing_y / units);
     } else {
-      st::print("  U+{:04X}  ← {}（glyph_for 失败）\n", static_cast<unsigned>(cp), face->path());
+      st::log::out("  U+{:04X}  ← {}（glyph_for 失败）\n", static_cast<unsigned>(cp), face->path());
     }
   }
 
@@ -105,16 +106,16 @@ auto main(int argc, char** argv) -> int {
   // 等宽链：ASCII 应是 Consolas；汉字不在 Consolas 里 → 回退正文档（雅黑）。
   // 粗体链：中英文都应在**雅黑粗体**（msyhbd）——若英文落到 segoeuib、中文落到
   // 别的面，说明两条链的下标没对齐。
-  st::print("\n=== 等宽链归属 ===\n");
+  st::log::out("\n=== 等宽链归属 ===\n");
   for (const char32_t cp : {U'i', U'M', U'W', U'霜'}) {
     const auto* mono_face = fonts.find_face(cp, FontRole::Monospace);
-    st::print("  U+{:04X}  ← {}\n", static_cast<unsigned>(cp),
+    st::log::out("  U+{:04X}  ← {}\n", static_cast<unsigned>(cp),
               mono_face != nullptr ? mono_face->path() : std::string("<无覆盖>"));
   }
-  st::print("\n=== 粗体归属 ===\n");
+  st::log::out("\n=== 粗体归属 ===\n");
   for (const char32_t cp : {U'A', U'霜'}) {
     const auto* bold_face = fonts.find_face(cp, FontRole::Proportional, /*bold=*/true);
-    st::print("  U+{:04X}  ← {}\n", static_cast<unsigned>(cp),
+    st::log::out("  U+{:04X}  ← {}\n", static_cast<unsigned>(cp),
               bold_face != nullptr ? bold_face->path() : std::string("<无覆盖>"));
   }
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）

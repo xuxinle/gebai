@@ -21,6 +21,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/text/grid_fit.hpp"
 #include "st/text/text.hpp"
 
@@ -48,7 +49,7 @@ auto main(int argc, char** argv) -> int {
     // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
     return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体\\n"));
   }
-  st::print("device_scale={} 物理字号={}\n", device_scale, pixel_size);
+  st::log::out("device_scale={} 物理字号={}\n", device_scale, pixel_size);
   struct Row {
     float slant;
     int stems;
@@ -82,14 +83,14 @@ auto main(int argc, char** argv) -> int {
     }
     rows.push_back(row);
   }
-  st::print("\n{:<10s} {:>7s} {:>7s} {:>7s} {:>7s} {:>8s} {:>9s} {:>7s}\n", "slant(px)",
+  st::log::out("\n{:<10s} {:>7s} {:>7s} {:>7s} {:>7s} {:>8s} {:>9s} {:>7s}\n", "slant(px)",
             "全部边", "直线边", "够长", "够直", "配对失败", "找到笔画", "被拒");
   for (const Row& row : rows) {
-    st::print("{:<10.2f} {:>7d} {:>7d} {:>7d} {:>7d} {:>8d} {:>9d} {:>7d}\n", row.slant,
+    st::log::out("{:<10.2f} {:>7d} {:>7d} {:>7d} {:>7d} {:>8d} {:>9d} {:>7d}\n", row.slant,
               row.edges, row.line, row.long_enough, row.straight, row.pairs_failed, row.stems,
               row.rejected);
   }
-  st::print("\n判读：看哪一列掉得快——\n"
+  st::log::out("\n判读：看哪一列掉得快——\n"
             "  “全部边→直线边” 掉 ⇒ 轮廓以**曲线**为主（该支持曲线边才能提高召回）；\n"
             "  “够直→配对失败” 掉 ⇒ 宽度/跨度条件太紧；\n"
             "  “找到笔画→被拒” 掉 ⇒ 预算不足（调 `max_shift`）。\n");

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -48,7 +49,7 @@ void expect_matches_reference(Canvas& canvas, const Paint& paint, Rect rect) {
     }
   }
   if (worst > 2) {
-    st::print("  最大偏差 {} @ ({}, {})\n", worst, worst_x, worst_y);
+    st::log::out("  最大偏差 {} @ ({}, {})\n", worst, worst_x, worst_y);
   }
   ST_CHECK(worst <= 2);
 }

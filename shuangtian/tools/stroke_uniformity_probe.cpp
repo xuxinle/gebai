@@ -39,6 +39,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
 
@@ -131,7 +132,7 @@ auto summarize(const std::vector<Stroke>& strokes) -> Summary {
 }
 
 void report(std::string_view label, const Summary& summary) {
-  st::print("  {:<10s} n={:5d}  crisp={:5.1f}%  peak={:.3f}  w_sd={:.3f}  **w_off={:.3f}**\n",
+  st::log::out("  {:<10s} n={:5d}  crisp={:5.1f}%  peak={:.3f}  w_sd={:.3f}  **w_off={:.3f}**\n",
             label, summary.count, summary.crisp_ratio() * 100.0, summary.peak_mean,
             summary.weight_sd, summary.weight_off);
 }
@@ -176,7 +177,7 @@ auto main(int argc, char** argv) -> int {
     // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
     return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体\\n"));
   }
-  st::print("device_scale={} 逻辑字号={} fit={} gamma={}\n", device_scale, pixel_size,
+  st::log::out("device_scale={} 逻辑字号={} fit={} gamma={}\n", device_scale, pixel_size,
             fit == GridFitMode::Off ? "off" : (fit == GridFitMode::Light ? "light" : "normal"),
             gamma);
 
@@ -193,7 +194,7 @@ auto main(int argc, char** argv) -> int {
       scan(*bitmap, /*vertical=*/true, vertical);
       scan(*bitmap, /*vertical=*/false, horizontal);
     }
-    st::print("\n「{}」（{} 个字形）\n", text, st::utf8_decode(text).size());
+    st::log::out("\n「{}」（{} 个字形）\n", text, st::utf8_decode(text).size());
     const Summary v = summarize(vertical);
     const Summary h = summarize(horizontal);
     report("竖笔画", v);
@@ -208,14 +209,14 @@ auto main(int argc, char** argv) -> int {
                         return merged;
                       }()};
     report("合计", all);
-    st::print("    墨量直方图（×10）：");
+    st::log::out("    墨量直方图（×10）：");
     std::map<int, std::size_t> merged_hist = v.histogram;
     for (const auto& [key, value] : h.histogram) merged_hist[key] += value;
     for (const auto& [key, value] : merged_hist) {
       if (key % 10 == 0) continue;   // 只列非整数量（整数是期望）
-      st::print(" {:.1f}×{}", static_cast<double>(key) / 10.0, value);
+      st::log::out(" {:.1f}×{}", static_cast<double>(key) / 10.0, value);
     }
-    st::print("   ← 非整数墨量的笔画（越少越均匀）\n");
+    st::log::out("   ← 非整数墨量的笔画（越少越均匀）\n");
   }
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 

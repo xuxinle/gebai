@@ -29,6 +29,7 @@
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
 #include "st/core/time.hpp"
+#include "st/core/log.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/scroll.hpp"
 #include "st/ui/components/window_frame.hpp"   // 自绘外壳（标题栏 + 内容槽 + 缩放边缘）
@@ -128,18 +129,18 @@ auto audit_gallery_tree(const st::ui::UiRoot& root) -> void {
   // 但逐条打印——无头 e2e/人工都能从启动日志直接看到。
   const bool ok = missing.empty() && injected.empty() && unexpected.empty();
   if (!ok) {
-    st::print("[gallery 树自检] 登记与实物不符：\n");
+    st::log::out("[gallery 树自检] 登记与实物不符：\n");
     for (const std::string& name : missing) {
-      st::print("  - 展示集登记了「{}」但启动树上没有（非懒卡应建卡即上树）\n", name);
+      st::log::out("  - 展示集登记了「{}」但启动树上没有（非懒卡应建卡即上树）\n", name);
     }
     for (const std::string& name : injected) {
-      st::print("  - 放行清单要求「{}」在场（注入型，父组件应在）但树上没有\n", name);
+      st::log::out("  - 放行清单要求「{}」在场（注入型，父组件应在）但树上没有\n", name);
     }
     for (const std::string& name : unexpected) {
-      st::print("  - 树上出现登记集外的「{}」（新组件？该登记进 kGalleryExhibits 或放行）\n", name);
+      st::log::out("  - 树上出现登记集外的「{}」（新组件？该登记进 kGalleryExhibits 或放行）\n", name);
     }
   } else {
-    st::print("[gallery 树自检] 通过：树上 {} 种 type，登记 {}（含懒 {}）/豁免外放行 {}\n",
+    st::log::out("[gallery 树自检] 通过：树上 {} 种 type，登记 {}（含懒 {}）/豁免外放行 {}\n",
               seen.size(), exhibits.size(), lazy.size(), allowed.size());
   }
 }
@@ -206,7 +207,7 @@ std::string ui_font_scale{"auto"};
     try {
       return std::stoi(text);
     } catch (const std::exception&) {
-      st::eprint("gallery: {} 的取值不是整数: {}\n", name, text);
+      st::log::err("gallery: {} 的取值不是整数: {}\n", name, text);
       std::exit(2);
     }
     (void)fallback;
@@ -216,12 +217,12 @@ std::string ui_font_scale{"auto"};
     try {
       const double parsed = std::stod(text);
       if (parsed <= 0.0) {
-        st::eprint("gallery: {} 的取值不是正数: {}\n", name, text);
+        st::log::err("gallery: {} 的取值不是正数: {}\n", name, text);
         std::exit(2);
       }
       return static_cast<float>(parsed);
     } catch (const std::exception&) {
-      st::eprint("gallery: {} 的取值不是正数: {}\n", name, text);
+      st::log::err("gallery: {} 的取值不是正数: {}\n", name, text);
       std::exit(2);
     }
     (void)fallback;
@@ -267,7 +268,7 @@ std::string ui_font_scale{"auto"};
     else if (raw == "--ms") options.max_ms = int_or_die(next("0"), "--ms", 0);
     else if (raw == "--theme-file") options.theme_file = next("");
     else if (raw == "--help" || raw == "-h") {
-      st::print("用法: gallery [--headless] [--backend auto|x11|wayland|win32|headless] [--scale 2.0]\n"
+      st::log::out("用法: gallery [--headless] [--backend auto|x11|wayland|win32|headless] [--scale 2.0]\n"
                 "               [--width N] [--height N] [--theme dark] [--theme-file PATH] [--control-port 0]\n"
                 "               [--control-file PATH] [--shots DIR] [--frames N] [--bench N] [--ms N]\n"
                 "               [--renderer auto|gpu|software] [--text-lcd auto|on|off] [--text-fit auto|off|light|normal]\n"
@@ -345,17 +346,17 @@ std::string ui_font_scale{"auto"};
     };
     double sum = 0.0;
     for (const double value : samples) sum += value;
-    st::print("  {:<8} p50 {:6.2f} ms · p95 {:6.2f} ms · 均 {:6.2f} ms · 最大 {:6.2f} ms\n", name,
+    st::log::out("  {:<8} p50 {:6.2f} ms · p95 {:6.2f} ms · 均 {:6.2f} ms · 最大 {:6.2f} ms\n", name,
               at(0.5), at(0.95), sum / static_cast<double>(samples.size()), samples.back());
   };
-  st::print("渲染基准：{} 帧（每帧强制全量重绘）\n", frames);
+  st::log::out("渲染基准：{} 帧（每帧强制全量重绘）\n", frames);
   summarize("总帧", total);
   summarize("排版", layout);
   summarize("绘制", paint);
   summarize("送显", present);
   // 绘制分解（需 `ST_PAINT_PROFILE=1`）：只看"绘制 30ms"不知道该改哪里
   if (const st::raster::PaintProfiler* profile = app.paint_profile(); profile != nullptr) {
-    st::print("绘制分解（最后一帧，按累计耗时排序）：\n");
+    st::log::out("绘制分解（最后一帧，按累计耗时排序）：\n");
     std::vector<std::pair<double, std::string>> rows;
     for (std::size_t index = 0; index < static_cast<std::size_t>(st::raster::PaintOp::Count);
          ++index) {
@@ -368,7 +369,7 @@ std::string ui_font_scale{"auto"};
                                stat.ms / static_cast<double>(stat.calls)));
     }
     std::ranges::sort(rows, [](const auto& lhs, const auto& rhs) { return lhs.first > rhs.first; });
-    for (const auto& [ms, text] : rows) st::print("  {}\n", text);
+    for (const auto& [ms, text] : rows) st::log::out("  {}\n", text);
     // **同帧自校验**：各原语累计之和。
     //
     // ⚠ 不要拿它去减“本批绘制的最小值”或中位数——`PaintProfiler` 记的是
@@ -377,7 +378,7 @@ std::string ui_font_scale{"auto"};
     // 而连续 6 次实测真值是 **0.00 ms**）。
     // 要对比就与**同帧的 `paint_ms`** 比（见 `metrics.paint_ms` 与输出顺序）。
     const double total_ms = profile->total_ms();
-    st::print("  原语合计 {:.2f} ms（最后一帧；各原语之和 == 本帧 `paint` 耗时）\n", total_ms);
+    st::log::out("  原语合计 {:.2f} ms（最后一帧；各原语之和 == 本帧 `paint` 耗时）\n", total_ms);
   }
   return 0;
 }
@@ -728,7 +729,7 @@ auto run_app(int argc, char** argv) -> int {
   if (Element* decl_anchor = app.root().find("declarative-host"); decl_anchor != nullptr) {
     decl_host = st::ui::dsl::mount_into(app.root(), *decl_anchor,
                                         gallery::make_declarative_component());
-    if (decl_host == nullptr) st::print("声明式页挂载失败（该页将只显示壳）\n");
+    if (decl_host == nullptr) st::log::out("声明式页挂载失败（该页将只显示壳）\n");
   }
   // 启动树自检（mount_into 之后：声明式子树也是被审计对象；39 轮未竟项②）。
   // 不达标不阻断启动（展示型自检），结论打印在启动日志；无头 e2e 可 grep 断言。
@@ -766,7 +767,7 @@ auto run_app(int argc, char** argv) -> int {
     // 旧实现固定 `sleep_for(16ms)`：命令延迟被拉到 16~31ms（实测 ping p50=31ms）。
     app.pace_loop(frame_start_ms);
   }
-  st::print("gallery 退出：{} 帧，DPI {:.1f}，后端 {}\n", frames,
+  st::log::out("gallery 退出：{} 帧，DPI {:.1f}，后端 {}\n", frames,
             static_cast<double>(app.device_scale()), std::string(app.backend_name()));
   return 0;
 }

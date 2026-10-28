@@ -14,6 +14,7 @@
 
 #include "st/core/print.hpp"
 #include "st/core/json.hpp"
+#include "st/core/log.hpp"
 #include "st/ext/script.hpp"
 #include "st/probe/probe.hpp"
 
@@ -48,7 +49,7 @@ auto main(int argc, char** argv) -> int {
   if (!engine.valid()) {
     return st::probe::main_of(spec, opts, st::probe::skip("脚本引擎不可用"));
   }
-  st::print("QuickJS 版本：{}\n", st::ext::ScriptEngine::version());
+  st::log::out("QuickJS 版本：{}\n", st::ext::ScriptEngine::version());
 
   // ── ① 注册宿主函数（脚本能调的 C++ 能力）──
   auto runtime = std::make_shared<MiniRuntime>();
@@ -119,7 +120,7 @@ auto main(int argc, char** argv) -> int {
   const Json& layers = produced.value();
   const bool is_array = layers.is_array();
   const std::size_t count = is_array ? layers.size() : 0;
-  st::print("\n脚本产出 {} 个图层（含条件分支的 outro）\n", count);
+  st::log::out("\n脚本产出 {} 个图层（含条件分支的 outro）\n", count);
   verdict.add("一遍 eval 产出图层表", is_array && count == 6,
               std::format("产出 {} 个（期望 6 = 5 图标 + 1 outro）", count));
 
@@ -156,14 +157,14 @@ auto main(int argc, char** argv) -> int {
   auto bad = engine.eval("const a = 1;\nconst b = ;\n", "broken.js");
   const bool has_line = !bad.has_value() && bad.error().message.find("broken.js") !=
                                                  std::string::npos;
-  st::print("\n语法错误消息：{}\n", bad.has_value() ? "(无错误)" : bad.error().message);
+  st::log::out("\n语法错误消息：{}\n", bad.has_value() ? "(无错误)" : bad.error().message);
   verdict.add("语法错误带文件名/行号", has_line,
               has_line ? "含 broken.js" : "消息缺少定位信息");
 
   verdict.conclude();
-  st::print("\n=== 逐项结果 ===\n");
+  st::log::out("\n=== 逐项结果 ===\n");
   for (const auto& item : verdict.checks) {
-    st::print("  [{}] {} — {}\n", item.passed ? "PASS" : "FAIL", item.name, item.detail);
+    st::log::out("  [{}] {} — {}\n", item.passed ? "PASS" : "FAIL", item.name, item.detail);
   }
   return st::probe::main_of(spec, opts, verdict);
 }

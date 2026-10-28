@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 
@@ -91,7 +92,7 @@ auto main(int argc, char** argv) -> int {
   const Color key{0, 0, 0, 40};
   const Color ambient{0, 0, 0, 20};
 
-  st::print("{:>8}  {:>12}  {:>14}  {:>12}\n", "张数", "总耗时", "每张摊销", "相对单张");
+  st::log::out("{:>8}  {:>12}  {:>14}  {:>12}\n", "张数", "总耗时", "每张摊销", "相对单张");
 
   const std::vector<st::math::Rect> all_cards = layout_cards(96);
   const double single_ns = 5.80e3;   // 单张实测基线（`shadow_unit_cost_probe`）
@@ -111,13 +112,13 @@ auto main(int argc, char** argv) -> int {
       }
     });
     const double per = total_ns / static_cast<double>(count);
-    st::print("{:>8}  {:>9.1f} µs  {:>11.2f} µs  {:>10.2f}×\n", count, total_ns / 1000.0,
+    st::log::out("{:>8}  {:>9.1f} µs  {:>11.2f} µs  {:>10.2f}×\n", count, total_ns / 1000.0,
               per / 1000.0, per / single_ns);
   }
 
-  st::print("\n判读：\n");
-  st::print("  · 每张摊销随张数**上升** → 缓存容量/命中率问题，值一轮修复；\n");
-  st::print("  · 恒定 ≈ 5.8 µs → 文档 §3.1 的“71.9 µs/张”是**旧数字**，应更新；\n");
-  st::print("  · 恒定但明显高于 5.8 → 差异在“同屏 96 张”的共享资源上。\n");
+  st::log::out("\n判读：\n");
+  st::log::out("  · 每张摊销随张数**上升** → 缓存容量/命中率问题，值一轮修复；\n");
+  st::log::out("  · 恒定 ≈ 5.8 µs → 文档 §3.1 的“71.9 µs/张”是**旧数字**，应更新；\n");
+  st::log::out("  · 恒定但明显高于 5.8 → 差异在“同屏 96 张”的共享资源上。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

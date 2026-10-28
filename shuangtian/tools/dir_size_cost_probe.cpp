@@ -40,6 +40,7 @@
 #include <functional>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 
 namespace {
@@ -83,13 +84,13 @@ auto main(int argc, char** argv) -> int {
       {"src/ui/components", "少量大文件"},
   };
 
-  st::print("{:<24}{:>8}{:>16}{:>16}{:>12}\n", "目录", "条目", "status 不查size",
+  st::log::out("{:<24}{:>8}{:>16}{:>16}{:>12}\n", "目录", "条目", "status 不查size",
             "status+size", "size 占比");
   for (const Dir& item : dirs) {
     const sys::path path{item.path};
     std::error_code ec;
     if (!sys::is_directory(path, ec)) {
-      st::print("{:<24}  （不存在）\n", item.path);
+      st::log::out("{:<24}  （不存在）\n", item.path);
       continue;
     }
     std::size_t count = 0;
@@ -134,15 +135,15 @@ auto main(int argc, char** argv) -> int {
     });
 
     const double size_share = b_ns > 0.0 ? (b_ns - a_ns) / b_ns * 100.0 : 0.0;
-    st::print("{:<24}{:>8}{:>11.0f} µs{:>13.0f} µs{:>11.0f}%\n", item.path, count,
+    st::log::out("{:<24}{:>8}{:>11.0f} µs{:>13.0f} µs{:>11.0f}%\n", item.path, count,
               a_ns / 1000.0, b_ns / 1000.0, size_share);
     (void)sink_a;
     (void)sink_b;
   }
 
-  st::print("\n判读：\n");
-  st::print("  · 若 size 占比 > 50% → 加一个“不查 size”的可选参数值得：\n");
-  st::print("    不需要大小的调用方（`lint` / `hash` / `fetch`）能省掉一大半。\n");
-  st::print("  · 若占比低 → 不改接口，保持简单。\n");
+  st::log::out("\n判读：\n");
+  st::log::out("  · 若 size 占比 > 50% → 加一个“不查 size”的可选参数值得：\n");
+  st::log::out("    不需要大小的调用方（`lint` / `hash` / `fetch`）能省掉一大半。\n");
+  st::log::out("  · 若占比低 → 不改接口，保持简单。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

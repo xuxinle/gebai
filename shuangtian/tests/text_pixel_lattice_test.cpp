@@ -28,6 +28,7 @@
 
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
 #include "st/ui/text_port.hpp"
@@ -170,7 +171,7 @@ ST_TEST(text_bold_uses_a_distinct_face) {
   FontFixture fixture;
   if (!fixture.ok) return;
   if (!fixture.stack->has_bold()) {
-    st::print("[bold] 本机无真粗体面：本用例的语义不成立（bold 会退化成 Regular）\n");
+    st::log::out("[bold] 本机无真粗体面：本用例的语义不成立（bold 会退化成 Regular）\n");
     return;
   }
   const auto* regular =
@@ -202,7 +203,7 @@ ST_TEST(text_bold_and_regular_do_not_share_cache_entries) {
   FontFixture fixture;
   if (!fixture.ok) return;
   if (!fixture.stack->has_bold()) {
-    st::print("[bold] 本机无真粗体面：跳过（bold 会退化成 Regular）\n");
+    st::log::out("[bold] 本机无真粗体面：跳过（bold 会退化成 Regular）\n");
     return;
   }
   for (const bool lcd : {true, false}) {

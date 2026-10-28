@@ -11,6 +11,7 @@
 #include <string>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/math/path.hpp"
 
@@ -34,27 +35,27 @@ using st::math::PathCommand;
 
 void dump_commands(const Path& path) {
   const auto commands = path.commands();
-  st::print("命令数 = {}\n", commands.size());
+  st::log::out("命令数 = {}\n", commands.size());
   for (std::size_t index = 0; index < commands.size(); ++index) {
     const PathCommand& command = commands[index];
     switch (command.kind) {
       case PathCommand::Kind::MoveTo:
       case PathCommand::Kind::LineTo:
-        st::print("  {:2} {} ({:.3f}, {:.3f})\n", index, kind_name(command.kind),
+        st::log::out("  {:2} {} ({:.3f}, {:.3f})\n", index, kind_name(command.kind),
                   fl(command.p1.x), fl(command.p1.y));
         break;
       case PathCommand::Kind::QuadTo:
-        st::print("  {:2} {} end({:.3f}, {:.3f}) ctrl({:.3f}, {:.3f})\n", index,
+        st::log::out("  {:2} {} end({:.3f}, {:.3f}) ctrl({:.3f}, {:.3f})\n", index,
                   kind_name(command.kind), fl(command.p1.x), fl(command.p1.y),
                   fl(command.p2.x), fl(command.p2.y));
         break;
       case PathCommand::Kind::CubicTo:
-        st::print("  {:2} {} end({:.3f}, {:.3f}) c1({:.3f}, {:.3f}) c2({:.3f}, {:.3f})\n", index,
+        st::log::out("  {:2} {} end({:.3f}, {:.3f}) c1({:.3f}, {:.3f}) c2({:.3f}, {:.3f})\n", index,
                   kind_name(command.kind), fl(command.p1.x), fl(command.p1.y),
                   fl(command.p2.x), fl(command.p2.y), fl(command.p3.x), fl(command.p3.y));
         break;
       case PathCommand::Kind::Close:
-        st::print("  {:2} {}\n", index, kind_name(command.kind));
+        st::log::out("  {:2} {}\n", index, kind_name(command.kind));
         break;
     }
   }
@@ -62,10 +63,10 @@ void dump_commands(const Path& path) {
 
 void dump_polylines(const Path& path, float tolerance) {
   const auto polylines = path.flatten(tolerance);
-  st::print("展平(tol={:.2f})后折线数 = {}\n", fl(tolerance), polylines.size());
+  st::log::out("展平(tol={:.2f})后折线数 = {}\n", fl(tolerance), polylines.size());
   for (std::size_t index = 0; index < polylines.size(); ++index) {
     const auto& polyline = polylines[index];
-    st::print("  折线[{}] 点数={} closed={}  首({:.3f},{:.3f}) 尾({:.3f},{:.3f})\n", index,
+    st::log::out("  折线[{}] 点数={} closed={}  首({:.3f},{:.3f}) 尾({:.3f},{:.3f})\n", index,
               polyline.points.size(), polyline.closed ? 1 : 0,
               fl(polyline.points.front().x), fl(polyline.points.front().y),
               fl(polyline.points.back().x), fl(polyline.points.back().y));
@@ -80,7 +81,7 @@ void check_inner_arc_geometry(const Path& ring, const st::math::Rect& box, float
                               float width) {
   const auto polylines = ring.flatten(0.25f);
   if (polylines.size() < 2) {
-    st::print("内圈子路径缺失（折线数 {}）\n", polylines.size());
+    st::log::out("内圈子路径缺失（折线数 {}）\n", polylines.size());
     return;
   }
   // 左上圆弧：圆心在 (box.x+radius, box.y+radius)
@@ -101,9 +102,9 @@ void check_inner_arc_geometry(const Path& ring, const st::math::Rect& box, float
     ++counted;
     if (std::abs(deviation) > std::abs(worst)) worst = deviation;
   }
-  st::print("内圈左上弧：采样 {} 点，理想半径 {:.3f}，实际均值 {:.3f}，最大偏差 {:+.4f} 逻辑px\n",
+  st::log::out("内圈左上弧：采样 {} 点，理想半径 {:.3f}，实际均值 {:.3f}，最大偏差 {:+.4f} 逻辑px\n",
             counted, ideal, counted > 0 ? sum_radius / static_cast<double>(counted) : 0.0, worst);
-  st::print("（偏差 >0 = 内圈外撇 = 环变薄；纯几何实现应 ≈ 0）\n");
+  st::log::out("（偏差 >0 = 内圈外撇 = 环变薄；纯几何实现应 ≈ 0）\n");
 }
 
 /// 从**展平后的多边形**量壁厚：对每个内圈点，求它到外圈多边形的最近距离。
@@ -113,7 +114,7 @@ void check_inner_arc_geometry(const Path& ring, const st::math::Rect& box, float
 void check_wall_thickness(const Path& ring, float radius, float width) {
   const auto polylines = ring.flatten(0.1f);
   if (polylines.size() < 2) {
-    st::print("壁厚检查：折线数 {}（需 2）\n", polylines.size());
+    st::log::out("壁厚检查：折线数 {}（需 2）\n", polylines.size());
     return;
   }
   const auto& outer = polylines[0].points;
@@ -164,8 +165,8 @@ void check_wall_thickness(const Path& ring, float radius, float width) {
     if (d < arc_min) arc_min = d;
     if (d > arc_max) arc_max = d;
   }
-  st::print("壁厚（内圈点到外圈多边形的最短距离，理想 {:.3f}）：\n", static_cast<double>(width));
-  st::print("  全部内圈点：min {:.4f}  max {:.4f}  均值 {:.4f}\n", straight_min, straight_max,
+  st::log::out("壁厚（内圈点到外圈多边形的最短距离，理想 {:.3f}）：\n", static_cast<double>(width));
+  st::log::out("  全部内圈点：min {:.4f}  max {:.4f}  均值 {:.4f}\n", straight_min, straight_max,
             arc_count > 0 ? arc_sum / static_cast<double>(arc_count) : 0.0);
 }
 
@@ -182,7 +183,7 @@ auto main(int argc, char** argv) -> int {
 
   const st::math::Rect box{0.0f, 0.0f, 100.0f, 60.0f};
   const Path ring = st::math::make_rounded_border_ring(box, 14.0f, 1.0f);
-  st::print("=== 环路径（100x60, r=14, w=1）===\n");
+  st::log::out("=== 环路径（100x60, r=14, w=1）===\n");
   dump_commands(ring);
   dump_polylines(ring, 0.25f);
   check_inner_arc_geometry(ring, box, 14.0f, 1.0f);

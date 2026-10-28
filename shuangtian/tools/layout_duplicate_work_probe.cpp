@@ -30,6 +30,7 @@
 #include <memory>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/components/basic.hpp"
@@ -96,20 +97,20 @@ auto main(int argc, char** argv) -> int {
   // B) 早退（只剩主题下发遍）
   const double early_ns = best_ns([&] { root.layout(false); });
 
-  st::print("{} 段文本（96 卡片，13px）\n\n", texts);
-  st::print("A 全量重排（measure + arrange）{:>10.2f} µs\n", force_ns / 1000.0);
-  st::print("B 早退（主题下发遍）         {:>10.2f} µs\n", early_ns / 1000.0);
-  st::print("A − B（真重排）              {:>10.2f} µs  → {:.1f} µs/段文本\n",
+  st::log::out("{} 段文本（96 卡片，13px）\n\n", texts);
+  st::log::out("A 全量重排（measure + arrange）{:>10.2f} µs\n", force_ns / 1000.0);
+  st::log::out("B 早退（主题下发遍）         {:>10.2f} µs\n", early_ns / 1000.0);
+  st::log::out("A − B（真重排）              {:>10.2f} µs  → {:.1f} µs/段文本\n",
             (force_ns - early_ns) / 1000.0,
             (force_ns - early_ns) / 1000.0 / static_cast<double>(texts));
 
-  st::print("\n判读：\n");
+  st::log::out("\n判读：\n");
   const double per_text = (force_ns - early_ns) / 1000.0 / static_cast<double>(texts);
   if (per_text < 1.0) {
-    st::print("  {:.2f} µs/段 → 文本宽度缓存**生效**（未缓存的排版远高于此，\n", per_text);
-    st::print("  一次 13px 中文串的完整排版是几十 µs 量级）。布局无重复计算问题。\n");
+    st::log::out("  {:.2f} µs/段 → 文本宽度缓存**生效**（未缓存的排版远高于此，\n", per_text);
+    st::log::out("  一次 13px 中文串的完整排版是几十 µs 量级）。布局无重复计算问题。\n");
   } else {
-    st::print("  {:.2f} µs/段偏高 → 可能每次重排都在重算文本宽度，值一轮修复。\n", per_text);
+    st::log::out("  {:.2f} µs/段偏高 → 可能每次重排都在重算文本宽度，值一轮修复。\n", per_text);
   }
   return st::probe::main_of(spec, opts, verdict);
 }

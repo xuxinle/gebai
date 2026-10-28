@@ -11,6 +11,7 @@
 
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/mesh.hpp"
 #include "st/raster/scene3d.hpp"
@@ -110,7 +111,7 @@ int main(int argc, char** argv) {
        {0.85f, 0.0f, 0.0f}},
   };
 
-  st::print("{:<16}{:>9}{:>9}{:>9}{:>9}{:>9}\n", "布光", "亮面", "暗面", "暗/亮", "R", "B");
+  st::log::out("{:<16}{:>9}{:>9}{:>9}{:>9}{:>9}\n", "布光", "亮面", "暗面", "暗/亮", "R", "B");
   for (const Case& c : cases) {
     auto scene = Scene3D::create(kW, kH);
     Canvas canvas{kW, kH, 1.0f};
@@ -125,7 +126,7 @@ int main(int argc, char** argv) {
       lit.extra_lights[static_cast<std::size_t>(i)].direction = c.dirs[i];
       lit.extra_lights[static_cast<std::size_t>(i)].color = c.colors[i];
       lit.extra_lights[static_cast<std::size_t>(i)].intensity = c.intensities[i];
-      st::print("   [set] #{} dir=({:.2f},{:.2f},{:.2f}) int={:.2f}\n", i, c.dirs[i].x,
+      st::log::out("   [set] #{} dir=({:.2f},{:.2f},{:.2f}) int={:.2f}\n", i, c.dirs[i].x,
                 c.dirs[i].y, c.dirs[i].z, c.intensities[i]);
     }
     (*scene)->begin_frame(bg);
@@ -138,10 +139,10 @@ int main(int argc, char** argv) {
     (*scene)->flush();
     const Regions r = measure(canvas);
     const double ratio = r.bright > 1e-6 ? r.dark / r.bright : 0.0;
-    st::print("{:<16}{:>9.1f}{:>9.1f}{:>9.3f}{:>9.1f}{:>9.1f}\n", c.name, r.bright, r.dark,
+    st::log::out("{:<16}{:>9.1f}{:>9.1f}{:>9.3f}{:>9.1f}{:>9.1f}\n", c.name, r.bright, r.dark,
               ratio, r.mean_r, r.mean_b);
     const std::string path = out_dir + "/lights-" + c.name + ".png";
-    st::print("   -> {}\n", save_png(canvas, path) ? path : std::string("(写图失败)"));
+    st::log::out("   -> {}\n", save_png(canvas, path) ? path : std::string("(写图失败)"));
   }
   return 0;
 }

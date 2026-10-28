@@ -15,6 +15,7 @@
 #include <format>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -38,7 +39,7 @@ auto main(int argc, char** argv) -> int {
 
   auto stack = st::text::FontStack::system_default();
   if (!stack.has_value()) {
-    st::print("跳过：拿不到系统字体\n");
+    st::log::out("跳过：拿不到系统字体\n");
     return st::probe::main_of(spec, opts, verdict);
   }
   st::text::TextRenderer renderer(*stack, 1.0f);
@@ -55,7 +56,7 @@ auto main(int argc, char** argv) -> int {
       {"48px 英文（大字）", "Title", 48.0f},
   };
 
-  st::print("{:<22}  {:>10}  {:>10}  {:>10}  {:>10}\n", "样本", "总行数", "空行占比",
+  st::log::out("{:<22}  {:>10}  {:>10}  {:>10}  {:>10}\n", "样本", "总行数", "空行占比",
             "总列数", "空列占比");
   for (const Sample& item : samples) {
     // 用一张够大的画布，把文字画在透明底上，逐行/逐列统计“是否有非零 alpha”。
@@ -106,10 +107,10 @@ auto main(int argc, char** argv) -> int {
     const auto pct = [](int value, int total) {
       return total == 0 ? 0.0 : static_cast<double>(value) * 100.0 / static_cast<double>(total);
     };
-    st::print("{:<22}  {:>10}  {:>9.1f}%  {:>10}  {:>9.1f}%\n", item.name, rows,
+    st::log::out("{:<22}  {:>10}  {:>9.1f}%  {:>10}  {:>9.1f}%\n", item.name, rows,
               pct(empty_rows, rows), cols, pct(empty_cols, cols));
   }
-  st::print("\n注：空行 = 该行完全没有非零覆盖率像素。`blend_coverage_bitmap` 现在\n");
-  st::print("    仍会对它调一次 `blend_coverage_row`（查裁剪栈 + 算交集）。\n");
+  st::log::out("\n注：空行 = 该行完全没有非零覆盖率像素。`blend_coverage_bitmap` 现在\n");
+  st::log::out("    仍会对它调一次 `blend_coverage_row`（查裁剪栈 + 算交集）。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

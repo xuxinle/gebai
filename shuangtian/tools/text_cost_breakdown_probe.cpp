@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -65,7 +66,7 @@ auto main(int argc, char** argv) -> int {
 
   auto stack = st::text::FontStack::system_default();
   if (!stack.has_value()) {
-    st::print("跳过：拿不到系统字体\n");
+    st::log::out("跳过：拿不到系统字体\n");
     return st::probe::main_of(spec, opts, verdict);
   }
   st::text::TextRenderer renderer(*stack, 1.0f);
@@ -119,13 +120,13 @@ auto main(int argc, char** argv) -> int {
     }
   }
 
-  st::print("49 个文字 run：完整 draw {:.3f} ms\n", text_ms);
-  st::print("  实际触达像素 {} · 每像素 {:.2f} ns\n", lit_pixels,
+  st::log::out("49 个文字 run：完整 draw {:.3f} ms\n", text_ms);
+  st::log::out("  实际触达像素 {} · 每像素 {:.2f} ns\n", lit_pixels,
             lit_pixels == 0 ? 0.0 : text_ms * 1e6 / static_cast<double>(lit_pixels));
   (void)ink_pixels;
-  st::print("\n参考（`tools/simd_short_row_probe.cpp` 实测单价，ns/px）：\n");
-  st::print("  长 1~6 → 3.6~6.1 · 长 8 → 0.85 · 长 16 → 0.47 · 长 ≥32 → 0.28~0.33\n");
-  st::print("\n判据：若“每行 ns”远大于“该行长度的合理单价”，则固定开销是主因，\n");
-  st::print("      方向是“减少每行调用次数”（合并位图 / 行内一次算完裁剪）。\n");
+  st::log::out("\n参考（`tools/simd_short_row_probe.cpp` 实测单价，ns/px）：\n");
+  st::log::out("  长 1~6 → 3.6~6.1 · 长 8 → 0.85 · 长 16 → 0.47 · 长 ≥32 → 0.28~0.33\n");
+  st::log::out("\n判据：若“每行 ns”远大于“该行长度的合理单价”，则固定开销是主因，\n");
+  st::log::out("      方向是“减少每行调用次数”（合并位图 / 行内一次算完裁剪）。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

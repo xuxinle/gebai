@@ -205,6 +205,25 @@ auto TcpStream::read_some(std::span<std::uint8_t> buffer) -> Result<std::size_t>
   }
 }
 
+auto TcpStream::read_some_nonblocking(std::span<std::uint8_t> buffer) -> Result<std::size_t> {
+  if (handle_ < 0) return unexpected(ErrorCode::Invalid, "连接已关闭");
+  if (buffer.empty()) return std::size_t{0};
+#if defined(_WIN32)
+  const int received = ::recv(to_handle(handle_), reinterpret_cast<char*>(buffer.data()),
+                              static_cast<int>(buffer.size()), 0);
+#else
+  const auto received = ::recv(to_handle(handle_), buffer.data(), buffer.size(), 0);
+#endif
+  if (received == 0) return std::size_t{0};
+  if (received < 0) {
+    // 非阻塞：暂无可读数据（would-block）立即返回，不等待——等待属于调用方
+    // （主循环每帧重试）；这里等 = 把“WSAPoll 误报可读”变成主线程 5 秒冻结。
+    if (would_block(get_socket_error())) return unexpected(ErrorCode::Timeout, "暂无可读数据");
+    return unexpected(ErrorCode::Io, std::string("接收失败: ").append(last_error_text()));
+  }
+  return static_cast<std::size_t>(received);
+}
+
 auto TcpStream::read_exact(std::span<std::uint8_t> buffer) -> Status {
   std::size_t filled = 0;
   while (filled < buffer.size()) {

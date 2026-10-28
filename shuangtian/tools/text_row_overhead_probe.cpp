@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 
@@ -100,18 +101,18 @@ auto main(int argc, char** argv) -> int {
                                  st::raster::CoverageFormat::Grayscale);
   });
 
-  st::print("裁剪查询 clip_rect()        {:>8.1f} ns/次\n", clip_ns / 10000.0);
-  st::print("has_mask_clip()（遍历栈）   {:>8.1f} ns/次\n", mask_ns / 10000.0);
-  st::print("\n一次 blend_coverage_bitmap（{}x{} 位图）  {:>8.1f} ns\n", kGlyphW, kGlyphH,
+  st::log::out("裁剪查询 clip_rect()        {:>8.1f} ns/次\n", clip_ns / 10000.0);
+  st::log::out("has_mask_clip()（遍历栈）   {:>8.1f} ns/次\n", mask_ns / 10000.0);
+  st::log::out("\n一次 blend_coverage_bitmap（{}x{} 位图）  {:>8.1f} ns\n", kGlyphW, kGlyphH,
             bitmap_ns);
-  st::print("  每行平均 {:>6.1f} ns（共 {} 行）\n", bitmap_ns / kGlyphH, kGlyphH);
-  st::print("  每像素   {:>6.1f} ns（共 {} px）\n",
+  st::log::out("  每行平均 {:>6.1f} ns（共 {} 行）\n", bitmap_ns / kGlyphH, kGlyphH);
+  st::log::out("  每像素   {:>6.1f} ns（共 {} px）\n",
             bitmap_ns / (static_cast<double>(kGlyphW) * kGlyphH), kGlyphW * kGlyphH);
 
   const double per_row_fixed = mask_ns / 10000.0 + clip_ns / 10000.0;
-  st::print("\n若每行只付 ①+②，那么 {:.1f} ns/行 × {} 行 = {:.1f} ns\n", per_row_fixed, kGlyphH,
+  st::log::out("\n若每行只付 ①+②，那么 {:.1f} ns/行 × {} 行 = {:.1f} ns\n", per_row_fixed, kGlyphH,
             per_row_fixed * kGlyphH);
-  st::print("占一次调用（{:.1f} ns）的 **{:.0f}%**\n", bitmap_ns,
+  st::log::out("占一次调用（{:.1f} ns）的 **{:.0f}%**\n", bitmap_ns,
             bitmap_ns > 0.0 ? per_row_fixed * kGlyphH / bitmap_ns * 100.0 : 0.0);
   return st::probe::main_of(spec, opts, verdict);
 }

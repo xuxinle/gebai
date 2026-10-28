@@ -28,6 +28,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/text/text.hpp"
 
 using st::text::FontRole;
@@ -59,7 +60,7 @@ auto main(int argc, char** argv) -> int {
     return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体\\n"));
   }
   TextRenderer renderer(*stack, device_scale);
-  st::print("device_scale={} 逻辑字号={} 物理字号={}\n", device_scale, size, size * device_scale);
+  st::log::out("device_scale={} 逻辑字号={} 物理字号={}\n", device_scale, size, size * device_scale);
 
   // 相位分桶：把 [0,1) 分成 8 份。
   constexpr int kBuckets = 8;
@@ -76,7 +77,7 @@ auto main(int argc, char** argv) -> int {
     for (const FontRole role : {FontRole::Proportional, FontRole::Monospace}) {
       const auto shaped = renderer.shape_cached(text, size, role);
       if (shaped->runs.size() < 2) continue;
-      st::print("\n── [{}] 「{}」 字形 {} ──\n", role == FontRole::Monospace ? "等宽" : "正文",
+      st::log::out("\n── [{}] 「{}」 字形 {} ──\n", role == FontRole::Monospace ? "等宽" : "正文",
                 text, shaped->runs.size());
       std::vector<double> ideal;
       std::vector<double> actual;
@@ -102,7 +103,7 @@ auto main(int argc, char** argv) -> int {
         sum_spacing_err_sq += error * error;
         ++spacing_count;
         if (spacing_count <= 400) {
-          st::print("    字距{:2}: 设计 {:7.3f}px → 实际 {:6.0f}px  误差 {:+.3f}px\n", index,
+          st::log::out("    字距{:2}: 设计 {:7.3f}px → 实际 {:6.0f}px  误差 {:+.3f}px\n", index,
                     ideal_gap, actual_gap, error);
         }
       }
@@ -115,20 +116,20 @@ auto main(int argc, char** argv) -> int {
                                  ? sum_spacing_err_sq / static_cast<double>(spacing_count) -
                                        mean_spacing * mean_spacing
                                  : 0.0;
-  st::print("\n==== 汇总（{} 个字形 / {} 对相邻字距）====\n", total, spacing_count);
-  st::print("笔位相位分布（8 桶，理想均匀 = 12.5%/桶）：\n  ");
+  st::log::out("\n==== 汇总（{} 个字形 / {} 对相邻字距）====\n", total, spacing_count);
+  st::log::out("笔位相位分布（8 桶，理想均匀 = 12.5%/桶）：\n  ");
   for (int index = 0; index < kBuckets; ++index) {
-    st::print("[{:.2f}~{:.2f}) {:5.1f}%  ", static_cast<double>(index) / kBuckets,
+    st::log::out("[{:.2f}~{:.2f}) {:5.1f}%  ", static_cast<double>(index) / kBuckets,
               static_cast<double>(index + 1) / kBuckets,
               total > 0 ? 100.0 * static_cast<double>(phase_hist[index]) / static_cast<double>(total)
                         : 0.0);
   }
-  st::print("\n");
-  st::print("字形被取整挪动的平均量：{:.3f}px（理论均匀相位 0.250px）\n",
+  st::log::out("\n");
+  st::log::out("字形被取整挪动的平均量：{:.3f}px（理论均匀相位 0.250px）\n",
             shift_count > 0 ? sum_abs_shift / static_cast<double>(shift_count) : 0.0);
-  st::print("字距误差：均值 {:+.4f}px  标准差 {:.4f}px  最坏 {:.4f}px\n", mean_spacing,
+  st::log::out("字距误差：均值 {:+.4f}px  标准差 {:.4f}px  最坏 {:.4f}px\n", mean_spacing,
             std::sqrt(std::max(0.0, var_spacing)), worst_spacing_err);
-  st::print("（对照：保留 1/4 像素相位 → 误差上界 ±0.125px；1/64 像素相位 → ±0.008px）\n");
+  st::log::out("（对照：保留 1/4 像素相位 → 误差上界 ±0.125px；1/64 像素相位 → ±0.008px）\n");
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 
   return st::probe::main_of(spec, opts, verdict);

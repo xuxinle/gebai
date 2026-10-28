@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/element.hpp"
@@ -67,7 +68,7 @@ auto main(int argc, char** argv) -> int {
   }
   st::probe::result verdict{};
 
-  st::print("gallery 实测：{} 个元素、原语 2.97 ms、绘制 3.40 ms、未归因 0.42 ms\n\n",
+  st::log::out("gallery 实测：{} 个元素、原语 2.97 ms、绘制 3.40 ms、未归因 0.42 ms\n\n",
             43);   // gallery 树自检报告 43 种 type，这里只作背景说明
 
   st::raster::Canvas canvas(1600, 1000, 1.0f);
@@ -94,14 +95,14 @@ auto main(int argc, char** argv) -> int {
   // B) 只 layout（无损坏区时早退）
   const double layout_ns = best_ns([&] { root.layout(false); });
 
-  st::print("{} 节点树：\n\n", made);
-  st::print("整帧 paint()      {:>10.1f} µs\n", paint_ns / 1000.0);
-  st::print("layout(早退)      {:>10.1f} µs\n", layout_ns / 1000.0);
-  st::print("\n每元素平均        {:>10.2f} ns（paint）\n",
+  st::log::out("{} 节点树：\n\n", made);
+  st::log::out("整帧 paint()      {:>10.1f} µs\n", paint_ns / 1000.0);
+  st::log::out("layout(早退)      {:>10.1f} µs\n", layout_ns / 1000.0);
+  st::log::out("\n每元素平均        {:>10.2f} ns（paint）\n",
             paint_ns / static_cast<double>(made));
-  st::print("\n判读：\n");
-  st::print("  · 若每元素 ns 落在几十~几百，则“未归因 0.42 ms”≈ 树遍历 + 每元素固定开销；\n");
-  st::print("  · 那是**难以消除**的（剔除判断、裁剪栈、虚派发都必要），\n");
-  st::print("    除非减少元素数（如虚拟化长列表）——那是应用层选择，不是框架优化点。\n");
+  st::log::out("\n判读：\n");
+  st::log::out("  · 若每元素 ns 落在几十~几百，则“未归因 0.42 ms”≈ 树遍历 + 每元素固定开销；\n");
+  st::log::out("  · 那是**难以消除**的（剔除判断、裁剪栈、虚派发都必要），\n");
+  st::log::out("    除非减少元素数（如虚拟化长列表）——那是应用层选择，不是框架优化点。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

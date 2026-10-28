@@ -756,7 +756,7 @@ void paint_layers(Painter& p, const Scene& scene, float local_time, const AssetL
   for (const Layer& layer : scene.layers) {
     const LayerState state = states[layer_index++];
     if (std::getenv("CAIYUN_LAYER_DEBUG") != nullptr) {
-      st::print("[layer] kind={} x={} y={} w={} h={} (raw x={} y={}) alpha={:.2f}\n",
+      st::log::out("[layer] kind={} x={} y={} w={} h={} (raw x={} y={}) alpha={:.2f}\n",
                 layer_kind_name(layer.kind), state.x, state.y, state.w, state.h, layer.x,
                 layer.y, state.alpha);
     }
@@ -1447,7 +1447,7 @@ void set_trajectory_sink(std::vector<ElementTrack>* sink) { trajectory_cell().si
 /// `in_view` 用 0..960/0..540 的**物理像素**范围（`paint_script_shapes` 收的就是
 /// 屏幕像素，见那里的坐标系契约），给的是中心点落在画布内的图元数。
 void report_script_shapes(bool loaded, const std::vector<ScriptShape>& shapes) {
-  st::print("[shapes] loaded={} count={}\n", loaded, shapes.size());
+  st::log::out("[shapes] loaded={} count={}\n", loaded, shapes.size());
   if (shapes.empty()) return;
 
   double min_x = 1e18, min_y = 1e18, max_x = -1e18, max_y = -1e18;
@@ -1467,19 +1467,19 @@ void report_script_shapes(bool loaded, const std::vector<ScriptShape>& shapes) {
       ++by_kind[static_cast<std::size_t>(s.kind)];
     }
   }
-  st::print("[shapes] bbox=({:.0f},{:.0f})-({:.0f},{:.0f})  in_view={}/{}  alpha~0={}\n",
+  st::log::out("[shapes] bbox=({:.0f},{:.0f})-({:.0f},{:.0f})  in_view={}/{}  alpha~0={}\n",
             min_x, min_y, max_x, max_y, in_view, shapes.size(), invisible);
-  st::print("[shapes] kind 分布: circle={} rect={} line={} text={}\n", by_kind[0],
+  st::log::out("[shapes] kind 分布: circle={} rect={} line={} text={}\n", by_kind[0],
             by_kind[1], by_kind[2], by_kind[3]);
   for (std::size_t i = 0; i < shapes.size() && i < 3; ++i) {
     const auto& s = shapes[i];
-    st::print("[shapes] #{:<2} kind={} ({:.0f},{:.0f}) {:.0f}x{:.0f} rgba=({},{},{},{})\n", i,
+    st::log::out("[shapes] #{:<2} kind={} ({:.0f},{:.0f}) {:.0f}x{:.0f} rgba=({},{},{},{})\n", i,
               s.kind, static_cast<double>(s.x), static_cast<double>(s.y),
               static_cast<double>(s.w), static_cast<double>(s.h), s.color.r, s.color.g,
               s.color.b, s.color.a);
   }
   if (in_view == 0) {
-    st::print("[shapes] ⚠ 没有任何图元落在画布内 —— 检查坐标是否忘了按屏幕像素给\n");
+    st::log::out("[shapes] ⚠ 没有任何图元落在画布内 —— 检查坐标是否忘了按屏幕像素给\n");
   }
 }
 
@@ -1748,7 +1748,7 @@ void render_scene(st::raster::Surface& target, const Scene& scene, double local_
     const auto t_shapes0 = now();
     paint_script_shapes(p);
     if (profile) {
-      st::print("[profile] shapes={:.1f}ms\n",
+      st::log::out("[profile] shapes={:.1f}ms\n",
                 static_cast<double>(now() - t_shapes0) / 1.0e6);
     }
   }
@@ -1806,7 +1806,7 @@ void render_scene(st::raster::Surface& target, const Scene& scene, double local_
   // 那时四角标记与 `01 / 03` 反而跳戏。默认 true 保持旧行为不变。
   if (scene.wrap) paint_wrap(p, scene, time, scene_index, scene_total);
   if (profile) {
-    st::print("[profile] bg={:.1f}ms content={:.1f}ms\n",
+    st::log::out("[profile] bg={:.1f}ms content={:.1f}ms\n",
               static_cast<double>(t1 - t0) / 1.0e6, static_cast<double>(now() - t1) / 1.0e6);
   }
 }

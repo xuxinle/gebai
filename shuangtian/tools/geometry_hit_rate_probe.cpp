@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 
@@ -70,7 +71,7 @@ auto main(int argc, char** argv) -> int {
       {"量化外 +0.3px", 0.3f},
   };
 
-  st::print("{:<22}  {:>10}  {:>10}  {:>10}  {:>12}\n", "场景", "命中", "未命中", "命中率",
+  st::log::out("{:<22}  {:>10}  {:>10}  {:>10}  {:>12}\n", "场景", "命中", "未命中", "命中率",
             "总耗时 ms");
   for (const Scenario& item : scenarios) {
     const auto before = canvas.geometry_stats();
@@ -83,11 +84,11 @@ auto main(int argc, char** argv) -> int {
     const std::uint64_t hits = after.hits - before.hits;
     const std::uint64_t misses = after.misses - before.misses;
     const std::uint64_t total = hits + misses;
-    st::print("{:<22}  {:>10}  {:>10}  {:>9.1f}%  {:>12}\n", item.name, hits, misses,
+    st::log::out("{:<22}  {:>10}  {:>10}  {:>9.1f}%  {:>12}\n", item.name, hits, misses,
               total == 0 ? 0.0 : static_cast<double>(hits) * 100.0 / static_cast<double>(total),
               "—");
   }
-  st::print("\n注：键按 0.25px 量化（`path_geometry_key` 的 tolerance）。\n");
-  st::print("    “完全相同/浮点噪声”应 100% 命中；“+0.3px”应 0% 命中（几何真变了）。\n");
+  st::log::out("\n注：键按 0.25px 量化（`path_geometry_key` 的 tolerance）。\n");
+  st::log::out("    “完全相同/浮点噪声”应 100% 命中；“+0.3px”应 0% 命中（几何真变了）。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

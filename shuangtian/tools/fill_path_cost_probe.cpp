@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 
@@ -110,13 +111,13 @@ auto main(int argc, char** argv) -> int {
     canvas.fill_path(shifted, paint);
   });
 
-  st::print("自定义图标路径（4 子路径）\n");
-  st::print("  A 缓存命中      {:>8.4f} ms\n", cached_ms);
-  st::print("  B 缓存关闭      {:>8.4f} ms   → A/B = {:.2f}\n", plain_ms,
+  st::log::out("自定义图标路径（4 子路径）\n");
+  st::log::out("  A 缓存命中      {:>8.4f} ms\n", cached_ms);
+  st::log::out("  B 缓存关闭      {:>8.4f} ms   → A/B = {:.2f}\n", plain_ms,
             plain_ms > 0.0 ? cached_ms / plain_ms : 0.0);
-  st::print("  D 缓存未命中    {:>8.4f} ms（每次不同键，必须建图）\n", miss_ms);
-  st::print("\n单条圆角矩形路径\n");
-  st::print("  C 缓存命中      {:>8.4f} ms\n", rounded_ms);
-  st::print("\n若 A ≈ B，说明这条路径上缓存**没帮上忙**（键太敏感 / 每次都未命中）。\n");
+  st::log::out("  D 缓存未命中    {:>8.4f} ms（每次不同键，必须建图）\n", miss_ms);
+  st::log::out("\n单条圆角矩形路径\n");
+  st::log::out("  C 缓存命中      {:>8.4f} ms\n", rounded_ms);
+  st::log::out("\n若 A ≈ B，说明这条路径上缓存**没帮上忙**（键太敏感 / 每次都未命中）。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

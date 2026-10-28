@@ -13,6 +13,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ChannelRegistry } from "./index"
 import type { IngressEvent } from "./index"
+import { ActionExecutor } from "./executor"
 import { channel as feishu } from "./channels/feishu"
 
 /** 一条飞书 schema 2.0 消息事件。 */
@@ -69,7 +70,7 @@ function stubFeishuFetch(): () => void {
 function makeRegistry(
   home: string,
   env: Record<string, string>,
-  opts: { withConn?: boolean; sessionAppId?: string } = {},
+  opts: { withConn?: boolean; sessionAppId?: string; extraDeps?: Record<string, unknown> } = {},
 ): { reg: ChannelRegistry; conns: FakeConn[]; events: IngressEvent[] } {
   const conns: FakeConn[] = []
   const events: IngressEvent[] = []
@@ -99,6 +100,7 @@ function makeRegistry(
             },
           }),
       ...(opts.sessionAppId ? { feishuSessionAppId: opts.sessionAppId } : {}),
+      ...(opts.extraDeps ?? {}),
     },
     log: { info: () => {}, warn: () => {}, error: () => {} },
   })
@@ -204,11 +206,50 @@ describe("入站：消息抽取与治理", () => {
     console.log(`    实测: id=${e.id} summary=${JSON.stringify(e.summary)}`)
     console.log(`          refs=${JSON.stringify(e.refs)}`)
     expect(e.id).toBe("feishu:om_abc") // 显式幂等键（飞书会重投同一消息）
-    expect(e.body).toBe("任务为什么一直 pending")
+    // 成员表与 contact 都查不到（ stub 无数据）→ 兜底标「用户」（模型至少知道这条是别人发的）
+    expect(e.body).toBe("【用户】任务为什么一直 pending")
+    expect(e.refs?.senderName).toBe("用户")
     expect(e.refs?.chatId).toBe("oc_support")
     expect(e.refs?.messageId).toBe("om_abc")
     expect(e.refs?.senderId).toBe("ou_zhangsan")
     await reg.stop()
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("contact API 返回姓名 → 入站 body 带【姓名】前缀，refs.senderName 填充", async () => {
+    const home = mkdtempSync(join(tmpdir(), "fs-name-"))
+    // 让 contact 请求返回姓名（其余照旧吐牌）
+    const real = globalThis.fetch
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      const u = String(url)
+      if (u.includes("/contact/v3/users/")) {
+        return new Response(JSON.stringify({ code: 0, data: { user: { name: "张三" } } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      }
+      if (u.includes("tenant_access_token")) {
+        return new Response(JSON.stringify({ code: 0, tenant_access_token: "t-fake", expire: 7200 }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      }
+      return new Response(JSON.stringify({ code: 0, msg: "ok", data: {} }), { status: 200, headers: { "content-type": "application/json" } })
+    }) as typeof fetch
+    try {
+      const { reg, conns, events } = makeRegistry(home, CREDS)
+      await reg.init()
+      conns[0]!.fire(msgEvent({ messageId: "om_n1", text: "报错了" }))
+      await new Promise((r) => setTimeout(r, 150))
+      expect(events.length).toBe(1)
+      const e = events[0]!
+      expect(e.body).toBe("【张三】报错了")
+      expect(e.refs?.senderName).toBe("张三")
+      expect(e.summary).toContain("张三")
+      await reg.stop()
+    } finally {
+      globalThis.fetch = real
+    }
     rmSync(home, { recursive: true, force: true })
   })
 
@@ -224,6 +265,35 @@ describe("入站：消息抽取与治理", () => {
 
     // 用户的消息照常
     conns[0]!.fire(msgEvent({ messageId: "om_user", senderType: "user" }))
+    await new Promise((r) => setTimeout(r, 100))
+    expect(events.length).toBe(1)
+    await reg.stop()
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("自己发出去的消息（as_user 名义，senderType=user）→ 按记账精确过滤（防回灌）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "fs-reflux-"))
+    // 简化的记账替身：直接由用例控制
+    const marker = { ids: new Set<string>() }
+    const { reg, conns, events } = makeRegistry(home, CREDS, {
+      extraDeps: {
+        sentMessages: {
+          record: (id: string) => marker.ids.add(id),
+          hit: (id: string) => marker.ids.has(id),
+        },
+      },
+    })
+    await reg.init()
+
+    // 自己以用户名义发的消息（senderType=user，无法从事件字段区分）→ 记账命中即丢弃
+    marker.ids.add("om_self_user")
+    conns[0]!.fire(msgEvent({ messageId: "om_self_user", senderType: "user" }))
+    await new Promise((r) => setTimeout(r, 100))
+    console.log(`    实测: 记账命中的事件数=${events.length}`)
+    expect(events.length).toBe(0)
+
+    // 用户本人类似内容的消息（未记账）→ 照常投递
+    conns[0]!.fire(msgEvent({ messageId: "om_other", senderType: "user", text: "今天是星期三（2026-10-28）。" }))
     await new Promise((r) => setTimeout(r, 100))
     expect(events.length).toBe(1)
     await reg.stop()
@@ -302,6 +372,114 @@ describe("入站：消息抽取与治理", () => {
     expect(events[0]!.source).toContain("单聊")
     await reg.stop()
     rmSync(home, { recursive: true, force: true })
+  })
+})
+
+describe("observe 身份策略：用户身份优先，机器人回落", () => {
+  /** 造一个只对 observe 读者生效的 registry（覆盖 fetch：捕获 Authorization，返回可控消息）。 */
+  function makeObsRegistry(home: string, persona: unknown, messagesData: unknown) {
+    const seen: string[] = []
+    const real = globalThis.fetch
+    ;(globalThis as { fetch: typeof fetch }).fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const u = String(input)
+      const headers = (init?.headers ?? {}) as Record<string, string>
+      const auth = headers.authorization ?? headers.Authorization ?? ""
+      seen.push(`${u.split("?")[0]} :: ${auth}`)
+      if (u.includes("tenant_access_token")) {
+        return new Response(JSON.stringify({ code: 0, tenant_access_token: "t-bot", expire: 7200 }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      }
+      return new Response(JSON.stringify({ code: 0, msg: "ok", data: messagesData }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    }) as typeof fetch
+    const reg = new ChannelRegistry({
+      scanDirs: { builtin: join(home, "__n1__"), custom: join(home, "__n2__") },
+      home,
+      envReader: (n) => CREDS[n as keyof typeof CREDS],
+      deps: { ...(persona !== undefined ? { personaCredentials: persona } : {}) },
+      log: { info: () => {}, warn: () => {}, error: () => {} },
+    })
+    reg.register(feishu)
+    const api = { reg, seen, restore: () => { globalThis.fetch = real } }
+    return api
+  }
+
+  test("无 personaCredentials → 以机器人身份读（身份=bot）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "fs-ob-1-"))
+    const { reg, seen, restore } = makeObsRegistry(home, undefined, { items: [{ body: { content: JSON.stringify({ text: "hello" }) } }] })
+    await reg.init()
+    try {
+      const ex = new ActionExecutor(reg)
+      const r = await ex.observe({ target: "feishu:oc_support", what: "messages", args: {} })
+      console.log(`    实测: ok=${r.ok} summary=${r.ok ? r.outcome.summary : r.reason}`)
+      expect(r.ok).toBe(true)
+      if (r.ok) {
+        expect(r.outcome.summary).toContain("hello")
+        expect(r.outcome.data?.identity).toBe("bot")
+      }
+      const call = seen.find((s) => s.includes("im/v1/messages"))
+      expect(call).toBeDefined()
+      // 无 persona → 机器人 token（不是用户 token uat-user；此处实际是 beforeAll 全局 stub 的 t-fake）
+      expect(call).toContain("Bearer ")
+      expect(call).not.toContain("uat-user")
+    } finally {
+      restore()
+      await reg.stop()
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test("有 personaCredentials → 以用户身份读（身份=user）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "fs-ob-2-"))
+    const persona = { token: async () => ({ token: { accessToken: "uat-user" } }) }
+    const { reg, seen, restore } = makeObsRegistry(home, persona, { items: [{ body: { content: JSON.stringify({ text: "secret" }) } }] })
+    await reg.init()
+    try {
+      const ex = new ActionExecutor(reg)
+      const r = await ex.observe({ target: "feishu:oc_support", what: "messages", args: {} })
+      console.log(`    实测: ok=${r.ok} summary=${r.ok ? r.outcome.summary : r.reason}`)
+      expect(r.ok).toBe(true)
+      if (r.ok) {
+        expect(r.outcome.summary).toContain("secret")
+        expect(r.outcome.data?.identity).toBe("user")
+      }
+      const seenCall = seen.find((s) => s.includes("im/v1/messages"))
+      expect(seenCall).toBeDefined()
+      expect(seenCall).toContain("Bearer uat-user")
+    } finally {
+      restore()
+      await reg.stop()
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test("用户令牌不可用 → 回落机器人并带原因（note）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "fs-ob-3-"))
+    const persona = { token: async () => ({ reason: "未授权" }) }
+    const { reg, seen, restore } = makeObsRegistry(home, persona, { items: [{ body: { content: JSON.stringify({ text: "fallback" }) } }] })
+    await reg.init()
+    try {
+      const ex = new ActionExecutor(reg)
+      const r = await ex.observe({ target: "feishu:oc_support", what: "messages", args: {} })
+      console.log(`    实测: ok=${r.ok} summary=${r.ok ? r.outcome.summary : r.reason}`)
+      expect(r.ok).toBe(true)
+      if (r.ok) {
+        expect(r.outcome.summary).toContain("fallback")
+        expect(r.outcome.summary).toContain("以机器人身份读取")
+        expect(r.outcome.data?.identity).toBe("bot")
+      }
+      const seenCall = seen.find((s) => s.includes("im/v1/messages"))
+      expect(seenCall).toBeDefined()
+      expect(seenCall).not.toContain("uat-user") // 回落走机器人 token
+    } finally {
+      restore()
+      await reg.stop()
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 })
 

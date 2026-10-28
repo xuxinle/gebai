@@ -13,6 +13,7 @@
 #include <string>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/text/text.hpp"
 
@@ -57,10 +58,10 @@ auto main(int argc, char** argv) -> int {
     const float size = 13.5f;
     const float whole = renderer.measure_width(row, size, role);
     const float by_glyph = width_by_glyphs(renderer, row, size, role);
-    st::print("\nrole={}\n", role == FontRole::Monospace ? "Monospace" : "Proportional");
-    st::print("  整段 measure_width = {:.4f}\n", static_cast<double>(whole));
-    st::print("  逐字累加宽度       = {:.4f}\n", static_cast<double>(by_glyph));
-    st::print("  差（行尾最长漂移）= {:.4f} px  ({:.2f}%)\n",
+    st::log::out("\nrole={}\n", role == FontRole::Monospace ? "Monospace" : "Proportional");
+    st::log::out("  整段 measure_width = {:.4f}\n", static_cast<double>(whole));
+    st::log::out("  逐字累加宽度       = {:.4f}\n", static_cast<double>(by_glyph));
+    st::log::out("  差（行尾最长漂移）= {:.4f} px  ({:.2f}%)\n",
               static_cast<double>(whole - by_glyph),
               static_cast<double>((whole - by_glyph) / whole * 100.0f));
 
@@ -75,7 +76,7 @@ auto main(int argc, char** argv) -> int {
         worst_at = n;
       }
     }
-    st::print("  逐列最大分岐 = {:.4f} px（第 {} 字节处）\n", worst, worst_at);
+    st::log::out("  逐列最大分岐 = {:.4f} px（第 {} 字节处）\n", worst, worst_at);
   }
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 

@@ -63,7 +63,8 @@
 #include "st/core/process.hpp"
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
-#include "st/core/json.hpp"   // dsl::custom<T> 实例化需要 Json 完整类型（模板体里按值传 Json）
+#include "st/core/json.hpp"
+#include "st/core/log.hpp"   // dsl::custom<T> 实例化需要 Json 完整类型（模板体里按值传 Json）
 #include "st/text/diff.hpp"
 #include "st/text/highlight.hpp"
 #include "st/ui/components/basic.hpp"
@@ -160,7 +161,7 @@ struct Options {
 
 /// 用法说明。**必须有**：未知参数会报错退出，没有 `--help` 就等于"报错了也没处查"。
 auto print_usage(std::string_view program) -> void {
-  st::print(
+  st::log::out(
       "用法: {} [选项]\n"
       "\n"
       "窗口/主题\n"
@@ -223,7 +224,7 @@ auto print_usage(std::string_view program) -> void {
         return consumed == text.size();   // 尾巴（如 `1.5x`）也是非法值
       }();
       if (!ok) {
-        st::eprint("参数 {} 需要一个数值，得到：{}（用 --help 看可用项）\n", flag, text);
+        st::log::err("参数 {} 需要一个数值，得到：{}（用 --help 看可用项）\n", flag, text);
         std::exit(2);
       }
       return parsed;
@@ -241,7 +242,7 @@ auto print_usage(std::string_view program) -> void {
         return consumed == text.size();
       }();
       if (!ok) {
-        st::eprint("参数 {} 需要一个整数，得到：{}（用 --help 看可用项）\n", flag, text);
+        st::log::err("参数 {} 需要一个整数，得到：{}（用 --help 看可用项）\n", flag, text);
         std::exit(2);
       }
       return parsed;
@@ -294,7 +295,7 @@ auto print_usage(std::string_view program) -> void {
     else if (raw == "--control-port") {
       const std::int64_t port = parse_int("--control-port", 0);
       if (port < 0 || port > 65535) {
-        st::eprint("参数 --control-port 超出端口范围：{}\n", port);
+        st::log::err("参数 --control-port 超出端口范围：{}\n", port);
         std::exit(2);
       }
       options.control_port = static_cast<std::uint16_t>(port);
@@ -311,7 +312,7 @@ auto print_usage(std::string_view program) -> void {
     else if (raw == "--frames") {
       const std::int64_t frames = parse_int("--frames", 0);
       if (frames < 0) {
-        st::eprint("参数 --frames 不能为负：{}\n", frames);
+        st::log::err("参数 --frames 不能为负：{}\n", frames);
         std::exit(2);
       }
       options.frames = static_cast<std::uint32_t>(frames);
@@ -319,7 +320,7 @@ auto print_usage(std::string_view program) -> void {
     else if (raw == "--ms") {
       const std::int64_t ms = parse_int("--ms", 0);
       if (ms < 0) {
-        st::eprint("参数 --ms 不能为负：{}\n", ms);
+        st::log::err("参数 --ms 不能为负：{}\n", ms);
         std::exit(2);
       }
       options.max_ms = static_cast<int>(ms);
@@ -342,7 +343,7 @@ auto print_usage(std::string_view program) -> void {
     // 表现是"三档渲染出来的图几乎一样"（实测 B vs C 只差 20 像素），
     // 差点被当成"三档观感接近"的结论。静默忽略未知参数正是这类事故的温床。
     else {
-      st::eprint("未知参数：{}（用 --help 看可用项）\n", raw);
+      st::log::err("未知参数：{}（用 --help 看可用项）\n", raw);
       std::exit(2);
     }
   }
@@ -418,7 +419,7 @@ auto run_app(int argc, char** argv) -> int {
     const auto logo = b::embed<"examples/gbcode/assets/gbcode-logo.svg">();
     const std::string_view source(logo.data(), logo.length());
     if (!st::ui::svg_registry().add_single("gbcode-logo", source)) {
-      st::print("品牌标记注册失败（{} 字节）\n", logo.length());
+      st::log::out("品牌标记注册失败（{} 字节）\n", logo.length());
     }
   }
   // 窗口/任务栏图标：同一记号的 PNG 版本（由 `gebai_logo_probe` 从上面的 SVG 导出），
@@ -440,7 +441,7 @@ auto run_app(int argc, char** argv) -> int {
       return consumed == text.size();
     }();
     if (!valid) {
-      st::eprint("参数 {} 需要一个数值，得到：{}（用 --help 看可用项）\n", flag, text);
+      st::log::err("参数 {} 需要一个数值，得到：{}（用 --help 看可用项）\n", flag, text);
       std::exit(2);
     }
     return parsed;
@@ -496,7 +497,7 @@ auto run_app(int argc, char** argv) -> int {
     if (explicit_workspace) {
       gbcode::push_recent(page->recent_folders_, workspace);
     } else if (options.open_path.empty() && page->restore_session(saved)) {
-      st::print("已恢复上次会话（工作区 {}，{} 个标签）\n", saved.workspace,
+      st::log::out("已恢复上次会话（工作区 {}，{} 个标签）\n", saved.workspace,
                 saved.files.size());
     }
   }
@@ -835,7 +836,7 @@ auto run_app(int argc, char** argv) -> int {
     const st::math::Size work = app.work_area_logical();
     const st::math::Size mins = app.min_logical_size();
     const auto live = app.metrics();
-    st::print("[DPI] scale={:.2f} logical={:.0f}x{:.0f} physical={:.0f}x{:.0f} "
+    st::log::out("[DPI] scale={:.2f} logical={:.0f}x{:.0f} physical={:.0f}x{:.0f} "
               "work_area={:.0f}x{:.0f} min={:.0f}x{:.0f} backend={}\n",
               static_cast<double>(live.device_scale),
               static_cast<double>(app.viewport().width),
@@ -877,7 +878,7 @@ auto run_app(int argc, char** argv) -> int {
   // 退出前先收终端：可能在跑的作业得停掉并 join 读线程，
   // 否则 `jthread` 在析构时发现 `joinable` 会直接 `std::terminate`。
   page->shutdown();
-  st::print("歌白代码 退出：{} 帧，标签 {} 个，可用语言 {} 种\n", frames,
+  st::log::out("歌白代码 退出：{} 帧，标签 {} 个，可用语言 {} 种\n", frames,
             page->buffers_.value().size(), CodeEditor::available_languages().size());
   return 0;
 }

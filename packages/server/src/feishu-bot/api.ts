@@ -36,6 +36,8 @@ export interface FeishuApiLike {
   uploadImage(data: Uint8Array, mime: string, fileName?: string): Promise<string>
   /** 查询会话信息（群名/单聊对象名）；失败返回 null。 */
   getChatName(chatId: string): Promise<string | null>
+  /** 按 open_id 查用户名（contact API，尽力而为：无权限/失败返回 undefined，不阻断入站）。 */
+  getUserName?(openId: string): Promise<string | undefined>
   /** 更新已发送消息内容（PATCH /im/v1/messages/{id}；仅同类型可更新）：工具过程滚动状态消息用。
    *  失败返回 false 不抛错（上层回落发新撤旧）。 */
   patchMessage(messageId: string, msgType: string, content: unknown): Promise<boolean>
@@ -260,7 +262,29 @@ export function createFeishuApi(opts: FeishuApiOptions): FeishuApiLike {
     }
   }
 
-  return { getTenantToken, sendMessage, replyMessage, deleteMessage, addMessageReaction, deleteMessageReaction, downloadResource, uploadImage, getChatName, patchMessage }
+  // open_id → 姓名缓存（进程内、按 openId 分键；contact API 尽力而为，失败不缓存——下次重试）
+  const userNameCache = new Map<string, string>()
+
+  /** 按 open_id 查用户名（contact/v3/users；需应用开通 `contact:user.base:readonly`）。
+   *  失败/无权限返回 undefined——入站带名字是锦上添花，不能让查名失败阻断消息收录。 */
+  async function getUserName(openId: string): Promise<string | undefined> {
+    const hit = userNameCache.get(openId)
+    if (hit !== undefined) return hit
+    try {
+      const token = await getTenantToken()
+      const body = await request<{ data?: { user?: { name?: string } } }>(
+        `/open-apis/contact/v3/users/${encodeURIComponent(openId)}?user_id_type=open_id`,
+        { method: "GET", headers: { ...DEFAULT_HEADERS, Authorization: `Bearer ${token}` } },
+      )
+      const name = body.data?.user?.name?.trim()
+      if (name) userNameCache.set(openId, name)
+      return name || undefined
+    } catch {
+      return undefined // 尽力而为：无权限/网络失败不阻断入站
+    }
+  }
+
+  return { getTenantToken, sendMessage, replyMessage, deleteMessage, addMessageReaction, deleteMessageReaction, downloadResource, uploadImage, getChatName, getUserName, patchMessage }
 }
 
 /** 事件订阅回调的飞书签名校验（Webhook 模式预留；本期长连接不使用）。 */

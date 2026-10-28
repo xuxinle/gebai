@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/element.hpp"
@@ -88,14 +89,14 @@ auto main(int argc, char** argv) -> int {
   // 只 layout（早退路径：含主题下发遍）
   const double layout_only_ns = best_ns([&] { root.layout(false); });
 
-  st::print("{} 节点树：\n\n", made);
-  st::print("整帧 paint()   {:>9.1f} µs  → 每元素 {:>6.1f} ns\n", paint_full_ns / 1000.0,
+  st::log::out("{} 节点树：\n\n", made);
+  st::log::out("整帧 paint()   {:>9.1f} µs  → 每元素 {:>6.1f} ns\n", paint_full_ns / 1000.0,
             paint_full_ns / static_cast<double>(made));
-  st::print("layout(早退)   {:>9.1f} µs  → 每元素 {:>6.1f} ns\n", layout_only_ns / 1000.0,
+  st::log::out("layout(早退)   {:>9.1f} µs  → 每元素 {:>6.1f} ns\n", layout_only_ns / 1000.0,
             layout_only_ns / static_cast<double>(made));
-  st::print("\n判读：\n");
-  st::print("  · 这两项之和远小于 420 µs → **整树收尾不是 0.42 ms 的来源**；\n");
-  st::print("    那 0.42 ms 只能在某个具体原语里，而该原语的 OpScope 统计有缺口。\n");
-  st::print("  · 若接近 420 µs → 就是它，方向是把收尾遍改成“只走标脏子树”。\n");
+  st::log::out("\n判读：\n");
+  st::log::out("  · 这两项之和远小于 420 µs → **整树收尾不是 0.42 ms 的来源**；\n");
+  st::log::out("    那 0.42 ms 只能在某个具体原语里，而该原语的 OpScope 统计有缺口。\n");
+  st::log::out("  · 若接近 420 µs → 就是它，方向是把收尾遍改成“只走标脏子树”。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

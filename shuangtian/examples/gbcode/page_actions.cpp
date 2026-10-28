@@ -20,6 +20,7 @@
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
+#include "st/core/log.hpp"
 
 namespace gbcode_ui {
 
@@ -116,9 +117,9 @@ namespace gbcode_ui {
     const bool saved = gbcode::save_session(session_path_, state);
     // 写状态栏（不是弹窗）：关窗瞬间没人看弹窗，日志里有这条即可。
     if (saved) {
-      st::print("会话已保存（{} 个标签）: {}\n", state.files.size(), session_path_);
+      st::log::out("会话已保存（{} 个标签）: {}\n", state.files.size(), session_path_);
     } else {
-      st::eprint("会话保存失败: {}\n", session_path_);
+      st::log::err("会话保存失败: {}\n", session_path_);
     }
   }
 

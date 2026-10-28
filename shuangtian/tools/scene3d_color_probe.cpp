@@ -27,6 +27,7 @@
 
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/color_pipeline.hpp"
 #include "st/raster/mesh.hpp"
@@ -176,7 +177,7 @@ auto save_png(const Canvas& canvas, const std::string& path) -> bool {
 
 auto main(int argc, char** argv) -> int {
   const std::string out_dir = argc > 1 ? argv[1] : ".";
-  st::print("三维颜色管线对照探针（{}x{}，软件腿，保证无显卡也能跑）\n\n", kWidth, kHeight);
+  st::log::out("三维颜色管线对照探针（{}x{}，软件腿，保证无显卡也能跑）\n\n", kWidth, kHeight);
 
   // 场景：一个球，用**自定义中调灰**。
   //
@@ -206,22 +207,22 @@ auto main(int argc, char** argv) -> int {
   const Stats a = measure(old_canvas, kBackground);
   const Stats b = measure(new_canvas, kBackground);
 
-  st::print("{:<28}{:>12}{:>12}\n", "指标", "旧(None直存)", "新(ACES+sRGB)");
-  st::print("{:<28}{:>12.4f}{:>12.4f}\n", "平均 sRGB 亮度（屏幕上）", a.mean_srgb, b.mean_srgb);
-  st::print("{:<28}{:>12.4f}{:>12.4f}\n", "平均线性亮度", a.mean_linear, b.mean_linear);
-  st::print("{:<28}{:>12.2f}{:>12.2f}\n", "过曝像素占比 %", a.clipped_ratio * 100.0,
+  st::log::out("{:<28}{:>12}{:>12}\n", "指标", "旧(None直存)", "新(ACES+sRGB)");
+  st::log::out("{:<28}{:>12.4f}{:>12.4f}\n", "平均 sRGB 亮度（屏幕上）", a.mean_srgb, b.mean_srgb);
+  st::log::out("{:<28}{:>12.4f}{:>12.4f}\n", "平均线性亮度", a.mean_linear, b.mean_linear);
+  st::log::out("{:<28}{:>12.2f}{:>12.2f}\n", "过曝像素占比 %", a.clipped_ratio * 100.0,
             b.clipped_ratio * 100.0);
-  st::print("{:<28}{:>12}{:>12}\n", "实体像素数", a.lit_pixels, b.lit_pixels);
+  st::log::out("{:<28}{:>12}{:>12}\n", "实体像素数", a.lit_pixels, b.lit_pixels);
 
   const std::string p_old = out_dir + "/scene3d_color_legacy.png";
   const std::string p_new = out_dir + "/scene3d_color_modern.png";
   const bool ok_old = save_png(old_canvas, p_old);
   const bool ok_new = save_png(new_canvas, p_new);
-  st::print("\n落盘：{}\n", ok_old ? p_old : std::string("(失败)"));
-  st::print("落盘：{}\n", ok_new ? p_new : std::string("(失败)"));
+  st::log::out("\n落盘：{}\n", ok_old ? p_old : std::string("(失败)"));
+  st::log::out("落盘：{}\n", ok_new ? p_new : std::string("(失败)"));
 
   // 判读：新链的线性亮度应当**高于**旧的（旧的把线性当 sRGB，等于额外压暗一次）
-  st::print("\n判读：新链平均线性亮度 {:.4f} vs 旧 {:.4f}（{}）\n", b.mean_linear, a.mean_linear,
+  st::log::out("\n判读：新链平均线性亮度 {:.4f} vs 旧 {:.4f}（{}）\n", b.mean_linear, a.mean_linear,
             b.mean_linear > a.mean_linear ? "更亮，符合预期" : "未提升，需检查");
   return (ok_old && ok_new) ? 0 : 1;
 }

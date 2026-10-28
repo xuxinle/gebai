@@ -19,6 +19,7 @@
 #include <string>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/scroll.hpp"
 #include "st/ui/element.hpp"
@@ -90,7 +91,7 @@ ST_TEST(scrolling_content_outside_the_viewport_is_not_hit) {
   auto* view = dynamic_cast<ScrollView*>(fx.root.find("clipper"));
   ST_REQUIRE(view != nullptr);
   ST_REQUIRE(fx.inside != nullptr);
-  st::print("[clip] 视口 y {:.1f}..{:.1f} · 被滚出的按钮 y {:.1f}..{:.1f} · 顶栏 y {:.1f}..{:.1f}\n",
+  st::log::out("[clip] 视口 y {:.1f}..{:.1f} · 被滚出的按钮 y {:.1f}..{:.1f} · 顶栏 y {:.1f}..{:.1f}\n",
             view->bounds().y, view->bounds().bottom(), fx.inside->bounds().y,
             fx.inside->bounds().bottom(), fx.topbar->bounds().y, fx.topbar->bounds().bottom());
   ST_REQUIRE(!fx.inside->bounds().is_empty());

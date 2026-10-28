@@ -11,6 +11,7 @@
 
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/scene3d_script.hpp"
 
@@ -108,15 +109,15 @@ int main(int argc, char** argv) {
     ]
   })json";
 
-  st::print("── 1. 解析与字段核对 ──\n");
+  st::log::out("── 1. 解析与字段核对 ──\n");
   const auto spec = parse_scene_spec_text(scene_text);
   if (!spec) {
-    st::print("解析失败：{}\n", spec.error().message);
+    st::log::out("解析失败：{}\n", spec.error().message);
     return 1;
   }
   const auto check_near = [&](const char* name, double got, double want, double tol) {
     const bool ok = std::abs(got - want) <= tol;
-    st::print("  {:<22} got={:<10.4f} want={:<10.4f} {}\n", name, got, want,
+    st::log::out("  {:<22} got={:<10.4f} want={:<10.4f} {}\n", name, got, want,
               ok ? "[OK]" : "[X]");
     if (!ok) ++failures;
   };
@@ -128,15 +129,15 @@ int main(int argc, char** argv) {
   check_near("shadow.strength", spec->shadow.strength, 0.4, 1e-6);
   check_near("shadow.ground_y", spec->shadow.ground_y, -0.5, 1e-6);
   check_near("objects 数量", static_cast<double>(spec->objects.size()), 3.0, 0.0);
-  st::print("  {:<22} got={:<10} \n", "objects[1].shape", spec->objects[1].shape);
-  st::print("  {:<22} got=#{:02x}{:02x}{:02x}\n", "objects[1].color",
+  st::log::out("  {:<22} got={:<10} \n", "objects[1].shape", spec->objects[1].shape);
+  st::log::out("  {:<22} got=#{:02x}{:02x}{:02x}\n", "objects[1].color",
             static_cast<int>(spec->objects[1].color.r), static_cast<int>(spec->objects[1].color.g),
             static_cast<int>(spec->objects[1].color.b));
   if (spec->objects[1].shape != "sphere") ++failures;
   if (spec->objects[1].color.r != 0xC8) ++failures;   // #c8a07a
 
   // ── 2. 错误能指路 ──
-  st::print("\n── 2. 错误信息是否带字段路径 ──\n");
+  st::log::out("\n── 2. 错误信息是否带字段路径 ──\n");
   struct BadCase {
     const char* name;
     const char* text;
@@ -155,22 +156,22 @@ int main(int argc, char** argv) {
     const bool failed = !r.has_value();
     const std::string msg = r.has_value() ? std::string("(居然成功了)") : r.error().message;
     const bool located = msg.find(c.must_contain) != std::string::npos;
-    st::print("  {:<16} 拒绝={} 含路径={} : {}\n", c.name, failed ? "是" : "否",
+    st::log::out("  {:<16} 拒绝={} 含路径={} : {}\n", c.name, failed ? "是" : "否",
               located ? "是" : "否", msg);
     if (!failed || !located) ++failures;
   }
 
   {
   // ── 3. 能渲染 + 参数确实生效 ──
-  st::print("\n── 3. 渲染与参数生效 ──\n");
+  st::log::out("\n── 3. 渲染与参数生效 ──\n");
   Canvas canvas{kW, kH, 1.0f};
   const auto status = render_scene(*spec, canvas, background);
   if (!status) {
-    st::print("渲染失败：{}\n", status.error().message);
+    st::log::out("渲染失败：{}\n", status.error().message);
     return 1;
   }
   const double inked = inked_ratio(canvas);
-  st::print("  实体像素占比 {:.3f}\n", inked);
+  st::log::out("  实体像素占比 {:.3f}\n", inked);
   if (inked < 0.3) ++failures;   // 地面就占了大半屏
   save_png(canvas, out_dir + "/scene-json-full.png");
 
@@ -181,7 +182,7 @@ int main(int argc, char** argv) {
   if (render_scene(metal, metal_canvas, background)) {
     const double a = mean_luma(canvas);
     const double b = mean_luma(metal_canvas);
-    st::print("  改 metallic 前后均值：{:.2f} -> {:.2f} 差={:.2f}\n", a, b, std::abs(a - b));
+    st::log::out("  改 metallic 前后均值：{:.2f} -> {:.2f} 差={:.2f}\n", a, b, std::abs(a - b));
     if (std::abs(a - b) < 2.0) ++failures;
     save_png(metal_canvas, out_dir + "/scene-json-metal.png");
   }
@@ -193,14 +194,14 @@ int main(int argc, char** argv) {
   if (render_scene(no_shadow, ns_canvas, background)) {
     const double a = mean_luma(canvas);
     const double b = mean_luma(ns_canvas);
-    st::print("  开关阴影前后均值：{:.2f} -> {:.2f}\n", a, b);
+    st::log::out("  开关阴影前后均值：{:.2f} -> {:.2f}\n", a, b);
     if (b <= a) ++failures;   // 关掉阴影应当更亮
   }
 
   }
 
   // ── 4. 确定性 ──
-  st::print("\n── 4. 确定性 ──\n");
+  st::log::out("\n── 4. 确定性 ──\n");
   {
     Canvas first{kW, kH, 1.0f};
     Canvas again{kW, kH, 1.0f};
@@ -208,11 +209,11 @@ int main(int argc, char** argv) {
     const auto r2 = render_scene(*spec, again, background);
     if (r1 && r2) {
       const bool same = pixels_equal(first, again);
-      st::print("  同一份 JSON 渲两次逐像素相同：{}\n", same ? "是" : "否");
+      st::log::out("  同一份 JSON 渲两次逐像素相同：{}\n", same ? "是" : "否");
       if (!same) ++failures;
     }
   }
 
-  st::print("\n{}\n", failures == 0 ? "全部通过" : "有 " + std::to_string(failures) + " 项失败");
+  st::log::out("\n{}\n", failures == 0 ? "全部通过" : "有 " + std::to_string(failures) + " 项失败");
   return failures == 0 ? 0 : 1;
 }

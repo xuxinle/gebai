@@ -15,6 +15,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/text/grid_fit.hpp"
 #include "st/text/text.hpp"
 
@@ -43,7 +44,7 @@ auto main(int argc, char** argv) -> int {
     return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体\\n"));
   }
   const int supersample = std::max(1, static_cast<int>(std::lround(device_scale)));
-  st::print("device_scale={} 物理字号={}（supersample={}，拟合的 grid 口径）\n", device_scale,
+  st::log::out("device_scale={} 物理字号={}（supersample={}，拟合的 grid 口径）\n", device_scale,
             pixel_size, supersample);
 
   TextRenderer renderer(*stack, device_scale);
@@ -53,8 +54,8 @@ auto main(int argc, char** argv) -> int {
   float worst = 0.0f;
   std::size_t with_reject = 0;
   for (const std::string& text : texts) {
-    st::print("\n「{}」\n", text);
-    st::print("  字形    位图网格       被拒笔画  最坏被拒位移\n");
+    st::log::out("\n「{}」\n", text);
+    st::log::out("  字形    位图网格       被拒笔画  最坏被拒位移\n");
     for (const char32_t codepoint : st::utf8_decode(text)) {
       const auto bitmap = renderer.glyph_bitmap_of(codepoint, pixel_size);
       if (bitmap == nullptr) continue;
@@ -62,20 +63,20 @@ auto main(int argc, char** argv) -> int {
       rejected += static_cast<std::size_t>(bitmap->fit_rejected_stems);
       if (bitmap->fit_rejected_stems > 0) ++with_reject;
       worst = std::max(worst, bitmap->fit_worst_rejected_shift);
-      st::print("  U+{:04X}  {:2d}x{:2d}@{:3d},{:3d}   {:4d}      {:.3f}px{}\n",
+      st::log::out("  U+{:04X}  {:2d}x{:2d}@{:3d},{:3d}   {:4d}      {:.3f}px{}\n",
                 static_cast<unsigned>(codepoint), bitmap->width, bitmap->height,
                 bitmap->offset_x, bitmap->offset_y, bitmap->fit_rejected_stems,
                 bitmap->fit_worst_rejected_shift,
                 bitmap->fit_rejected_stems > 0 ? "   ← 没落网格（就是“看着更细”的那根）" : "");
     }
   }
-  st::print("\n==== 汇总（{} 个字形）====\n", glyphs);
-  st::print("被拒笔画合计 {} 条；含拒载的字形 {} 个（{:.0f}%）；最坏被拒位移 {:.3f}px\n",
+  st::log::out("\n==== 汇总（{} 个字形）====\n", glyphs);
+  st::log::out("被拒笔画合计 {} 条；含拒载的字形 {} 个（{:.0f}%）；最坏被拒位移 {:.3f}px\n",
             rejected, with_reject,
             glyphs > 0 ? 100.0 * static_cast<double>(with_reject) / static_cast<double>(glyphs)
                        : 0.0,
             worst);
-  st::print("判读：被拒 ⇒ 该笔画的位移需求超过 `max_shift + grid/2`（小字号当前 {:.1f}+{:.1f}）；\n"
+  st::log::out("判读：被拒 ⇒ 该笔画的位移需求超过 `max_shift + grid/2`（小字号当前 {:.1f}+{:.1f}）；\n"
             "      “最坏被拒位移”就是 `max_shift` 要放到多大才收得下它。\n",
             1.0f, static_cast<float>(supersample) * 0.5f);
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）

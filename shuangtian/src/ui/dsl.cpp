@@ -186,7 +186,7 @@ auto current_composer() noexcept -> Composer* { return tls_composer; }
 /// “这里不可能发生”。真实缺陷就该**立刻、带类型名、可定位**地失败，而不是悄悄 UB。
 /// （`make_element` 已覆盖全部内置组件；走到这里只可能是新组件忘了登记。）
 [[noreturn]] void fail_missing_element_factory(std::string_view type) {
-  st::eprint("[dsl] 内部错误：create_element(\"{}\") 返回空——make_element 未覆盖该类型", type);
+  st::log::err("[dsl] 内部错误：create_element(\"{}\") 返回空——make_element 未覆盖该类型", type);
   std::abort();
 }
 
@@ -335,7 +335,7 @@ struct Composer::Impl {
         last_stats.error = std::format("作用域嵌套超过 {} 层（疑似递归 build）",
                                        guardrails.max_depth);
       }
-      std::fprintf(stderr, "[dsl] %s\n", last_stats.error.c_str());
+      ST_LOG_ERROR("[dsl] {}", last_stats.error);
       return nullptr;
     }
     Scope* scope = parent->find_child(key);
@@ -471,8 +471,7 @@ struct Composer::Impl {
   }
 
   void log_scope_error(const Scope& scope, std::string_view message) {
-    std::fprintf(stderr, "[dsl] 作用域 %s 构建失败：%s\n", scope.key.c_str(),
-                 std::string(message).c_str());
+    ST_LOG_ERROR("[dsl] 作用域 {} 构建失败：{}", scope.key, message);
   }
 
   // —─ 异步（`resource`）—─
@@ -810,7 +809,7 @@ auto Composer::reconcile() -> ReconcileStats {
     for (const auto& write : impl_->last_stats.build_time_state_writes) {
       if (impl_->reported_build_writes.count(write) > 0) continue;
       impl_->reported_build_writes.insert(write);
-      st::eprint("[dsl] 构建期写入 State：{}（已延迟到帧末落地；"
+      st::log::err("[dsl] 构建期写入 State：{}（已延迟到帧末落地；"
                  "建议移到事件回调/effect——构建中改状态会触发递归重组）",
                  write);
     }
@@ -879,7 +878,7 @@ auto Composer::run_pending_effects() -> std::size_t {
       try {
         previous();
       } catch (...) {
-        std::fprintf(stderr, "[dsl] effect 清理异常\n");
+        ST_LOG_ERROR("[dsl] effect 清理异常");
       }
     }
     try {
@@ -887,9 +886,9 @@ auto Composer::run_pending_effects() -> std::size_t {
       ++ran;
     } catch (const std::exception&
                   error) {   // lint-allow: L5 捕获合法（副作用体不得拖垮重组）
-      std::fprintf(stderr, "[dsl] effect 异常：%s\n", error.what());
+      ST_LOG_ERROR("[dsl] effect 异常：{}", error.what());
     } catch (...) {
-      std::fprintf(stderr, "[dsl] effect 未知异常\n");
+      ST_LOG_ERROR("[dsl] effect 未知异常");
     }
   }
   return ran;
@@ -928,7 +927,7 @@ void Composer::run_all_effect_cleanups() {
     try {
       cleanup();
     } catch (...) {
-      std::fprintf(stderr, "[dsl] effect 清理异常\n");
+      ST_LOG_ERROR("[dsl] effect 清理异常");
     }
   }
 }
@@ -1136,7 +1135,7 @@ auto Composer::create_element(std::string_view type, const st::Json& props,
             "把两个顶层元素包进 column/row（或用一个容器）再声明",
             type);
       }
-      std::fprintf(stderr, "[dsl] %s\n", impl_->last_stats.error.c_str());
+      ST_LOG_ERROR("[dsl] {}", impl_->last_stats.error);
     }
     auto created = make_element(std::string(type));
     if (created == nullptr) return nullptr;

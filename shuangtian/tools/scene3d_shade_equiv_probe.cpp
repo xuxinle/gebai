@@ -13,6 +13,7 @@
 #include <cmath>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/scene3d.hpp"
 
 int main() {
@@ -42,14 +43,14 @@ int main() {
                       std::fabs(old_out.z - new_out.z);
       if (d > 1e-6f) {
         ++bad;
-        st::print("  MISMATCH n=({:.1f},{:.1f},{:.1f}) c=({:.2f},{:.2f},{:.2f}): "
+        st::log::out("  MISMATCH n=({:.1f},{:.1f},{:.1f}) c=({:.2f},{:.2f},{:.2f}): "
                   "old=({:.6f},{:.6f},{:.6f}) new=({:.6f},{:.6f},{:.6f})\n",
                   nv.x, nv.y, nv.z, cv.x, cv.y, cv.z, old_out.x, old_out.y, old_out.z,
                   new_out.x, new_out.y, new_out.z);
       }
     }
   }
-  st::print("\n检查 {} 组，不一致 {} 组 -> {}\n", checked, bad,
+  st::log::out("\n检查 {} 组，不一致 {} 组 -> {}\n", checked, bad,
             bad == 0 ? "默认路径逐位等价" : "默认路径被改变了");
   return bad == 0 ? 0 : 1;
 }

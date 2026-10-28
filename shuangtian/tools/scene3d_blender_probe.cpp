@@ -23,6 +23,7 @@
 
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/scene3d.hpp"
 
@@ -161,7 +162,7 @@ class ForcedSoftware {
 int failures = 0;   // lint-allow: L8 探针的失败计数器（单进程、单线程，与其它探针同例）
 
 void report(bool ok, const char* name, const std::string& detail) {
-  st::print("  {:<28} {}  {}\n", name, ok ? "[OK]" : "[X]", detail);
+  st::log::out("  {:<28} {}  {}\n", name, ok ? "[OK]" : "[X]", detail);
   if (!ok) ++failures;
 }
 
@@ -176,7 +177,7 @@ int main(int argc, char** argv) {
     Canvas probe{kW, kH, 1.0f};
     probe.clear(kBg);
     auto s = Scene3D::create(kW, kH);
-    st::print("自检: Scene3D::create 成功={} backend={}\n", s.has_value(),
+    st::log::out("自检: Scene3D::create 成功={} backend={}\n", s.has_value(),
               s.has_value() ? (*s)->backend() : "n/a");
     if (s.has_value()) {
       Lighting L{};
@@ -192,13 +193,13 @@ int main(int argc, char** argv) {
     }
     const Stats st0 = analyze(probe);
     const Color mid = probe.pixel_at(kW / 2, kH / 2);
-    st::print("自检: luma={:.2f} lit={} 中心像素=({},{},{})\n", st0.luma, st0.lit, mid.r, mid.g,
+    st::log::out("自检: luma={:.2f} lit={} 中心像素=({},{},{})\n", st0.luma, st0.lit, mid.r, mid.g,
               mid.b);
     save_png(probe, out_dir + "/cap-selfcheck.png");
   }
 
   // ══ 1. 材质 base_color：同一网格只换材质色 ══
-  st::print("── 1. 材质 base_color（网格不变，只换材质）──\n");
+  st::log::out("── 1. 材质 base_color（网格不变，只换材质）──\n");
   {
     RenderCase red{};
     red.lighting.ambient = 0.6f;
@@ -218,7 +219,7 @@ int main(int argc, char** argv) {
     const Color pr = c_red.pixel_at(kW / 2, kH / 2);
     const Color pb = c_blue.pixel_at(kW / 2, kH / 2);
     const Color pv = c_vertex.pixel_at(kW / 2, kH / 2);
-    st::print("    中心像素: 红材质=({},{},{}) 蓝材质=({},{},{}) 顶点色=({},{},{})\n", pr.r, pr.g,
+    st::log::out("    中心像素: 红材质=({},{},{}) 蓝材质=({},{},{}) 顶点色=({},{},{})\n", pr.r, pr.g,
               pr.b, pb.r, pb.g, pb.b, pv.r, pv.g, pv.b);
     // 同一网格两个颜色必须不同，且各自的主色通道正确
     report(pr.r > pr.b && pb.b > pb.r, "换材质色会改变画面",
@@ -229,7 +230,7 @@ int main(int argc, char** argv) {
   }
 
   // ══ 2. 自发光不受光照影响 ══
-  st::print("\n── 2. 自发光（emission_unlit）──\n");
+  st::log::out("\n── 2. 自发光（emission_unlit）──\n");
   {
     RenderCase dark{};
     dark.lighting.ambient = 0.0f;
@@ -262,21 +263,21 @@ int main(int argc, char** argv) {
     const Canvas c_unlit2 = render(unlit_with_light);
     const Stats s_dark = analyze(c_dark);
     const Stats s_unlit = analyze(c_unlit);
-    st::print("    亮度: 全黑={:.2f} 发光={:.2f}  可见像素: {} -> {}\n", s_dark.luma, s_unlit.luma,
+    st::log::out("    亮度: 全黑={:.2f} 发光={:.2f}  可见像素: {} -> {}\n", s_dark.luma, s_unlit.luma,
               s_dark.lit, s_unlit.lit);
     report(s_unlit.luma > 20.0, "纯黑环境下发光体仍亮", std::format("luma={:.2f}", s_unlit.luma));
     report(s_unlit.lit > 1000, "发光体有实体像素", std::format("lit={}", s_unlit.lit));
     // 有环境光时：unlit 丢掉受光项 → 必须明显不同于旧语义
     const Stats s_lit = analyze(c_lit);
     const Stats s_unlit2 = analyze(c_unlit2);
-    st::print("    有环境光时: unlit={:.2f} vs 受光语义={:.2f}\n", s_unlit2.luma, s_lit.luma);
+    st::log::out("    有环境光时: unlit={:.2f} vs 受光语义={:.2f}\n", s_unlit2.luma, s_lit.luma);
     report(std::abs(s_unlit2.luma - s_lit.luma) > 1.0, "两种自发光语义不同",
            std::format("{:.2f} vs {:.2f}", s_unlit2.luma, s_lit.luma));
     save_png(c_unlit, out_dir + "/cap-emission-unlit.png");
   }
 
   // ══ 3. 点光距离衰减 ══
-  st::print("\n── 3. 点光距离衰减（1/d²）──\n");
+  st::log::out("\n── 3. 点光距离衰减（1/d²）──\n");
   {
     const auto point_at = [](float z) {
       RenderCase c{};
@@ -295,7 +296,7 @@ int main(int argc, char** argv) {
     // 灯拉得足够近/远，让 1/d² 的差异明显；太近会饱和，太远会被环境光淹没
     const Stats near_light = analyze(render(point_at(0.9f)));
     const Stats far_light = analyze(render(point_at(2.9f)));
-    st::print("    灯距 0.9 → 峰值 {:.2f}（均值 {:.2f}）；灯距 2.9 → 峰值 {:.2f}（均值 {:.2f}）\n",
+    st::log::out("    灯距 0.9 → 峰值 {:.2f}（均值 {:.2f}）；灯距 2.9 → 峰值 {:.2f}（均值 {:.2f}）\n",
               near_light.peak, near_light.luma, far_light.peak, far_light.luma);
     // 判据用**峰值**：近处那面被强照，均值会被背光半球拉低（见 Stats::peak 说明）
     report(near_light.peak > far_light.peak * 1.3, "近处峰值明显更亮",
@@ -309,13 +310,13 @@ int main(int argc, char** argv) {
     outside.lighting.extra_lights[0].radius = 0.25f;  // 远小球半径 → 只有一小块被照亮
     const Stats in_r = analyze(render(clipped));
     const Stats out_r = analyze(render(outside));
-    st::print("    radius=2.0 → {:.2f}；radius=0.5 → {:.2f}\n", in_r.luma, out_r.luma);
+    st::log::out("    radius=2.0 → {:.2f}；radius=0.5 → {:.2f}\n", in_r.luma, out_r.luma);
     report(in_r.luma > out_r.luma * 2.0, "radius 截断生效",
            std::format("{:.2f} vs {:.2f}", in_r.luma, out_r.luma));
   }
 
   // ══ 4. 聚光锥形 ══
-  st::print("\n── 4. 聚光锥形（内锥外锥）──\n");
+  st::log::out("\n── 4. 聚光锥形（内锥外锥）──\n");
   {
     // 一堵墙正对相机，聚光灯从相机侧照过去 → 中心亮、四周暗。
     //
@@ -357,7 +358,7 @@ int main(int argc, char** argv) {
     };
     const double wide_ratio = ratio(wide);
     const double narrow_ratio = ratio(narrow);
-    st::print("    中心/角落亮度比: 宽锥(30°/40°)={:.2f}  窄锥(5°/12°)={:.2f}\n", wide_ratio,
+    st::log::out("    中心/角落亮度比: 宽锥(30°/40°)={:.2f}  窄锥(5°/12°)={:.2f}\n", wide_ratio,
               narrow_ratio);
     // 判据：窄锥的「中心/边缘」对比必须明显强于宽锥。
     // 阈值 1.2 是按实测定的（宽 1.25 / 窄 1.70 → 比 1.36）：球面上离轴最远的点
@@ -370,7 +371,7 @@ int main(int argc, char** argv) {
   }
 
   // ══ 5. AgX 的高光去饱和 ══
-  st::print("\n── 5. AgX 色调映射（高饱和过曝要往白吐）──\n");
+  st::log::out("\n── 5. AgX 色调映射（高饱和过曝要往白吐）──\n");
   {
     RenderCase hot{};
     hot.lighting.ambient = 0.0f;
@@ -383,9 +384,9 @@ int main(int argc, char** argv) {
     const Stats aces = analyze(render(hot, ToneMap::Aces));
     const Stats agx = analyze(render(hot, ToneMap::Agx));
     const Stats filmic = analyze(render(hot, ToneMap::Filmic));
-    st::print("    饱和度: ACES={:.3f}  Filmic={:.3f}  **AgX={:.3f}**\n", aces.saturation,
+    st::log::out("    饱和度: ACES={:.3f}  Filmic={:.3f}  **AgX={:.3f}**\n", aces.saturation,
               filmic.saturation, agx.saturation);
-    st::print("    亮度:   ACES={:.1f}  Filmic={:.1f}  AgX={:.1f}\n", aces.luma, filmic.luma,
+    st::log::out("    亮度:   ACES={:.1f}  Filmic={:.1f}  AgX={:.1f}\n", aces.luma, filmic.luma,
               agx.luma);
     // AgX 的关键特征：过曝时不保持纯红，而是去饱和
     report(agx.saturation < aces.saturation * 0.95, "AgX 比 ACES 更去饱和",
@@ -395,7 +396,7 @@ int main(int argc, char** argv) {
   }
 
   // ══ 6. 正交相机（远近同尺寸）══
-  st::print("\n── 6. 正交相机（远近同尺寸）──\n");
+  st::log::out("\n── 6. 正交相机（远近同尺寸）──\n");
   {
     const auto two_spheres = [](ProjectionKind kind) {
       Canvas canvas{kW, kH, 1.0f};
@@ -443,9 +444,9 @@ int main(int argc, char** argv) {
     const int p_far = ball_width(persp, 3 * kW / 4);
     const int o_near = ball_width(ortho, kW / 4);
     const int o_far = ball_width(ortho, 3 * kW / 4);
-    st::print("    透视: 近球宽={}px 远球宽={}px（比 {:.2f}）\n", p_near, p_far,
+    st::log::out("    透视: 近球宽={}px 远球宽={}px（比 {:.2f}）\n", p_near, p_far,
               p_far > 0 ? static_cast<double>(p_near) / p_far : 0.0);
-    st::print("    正交: 近球宽={}px 远球宽={}px（比 {:.2f}）\n", o_near, o_far,
+    st::log::out("    正交: 近球宽={}px 远球宽={}px（比 {:.2f}）\n", o_near, o_far,
               o_far > 0 ? static_cast<double>(o_near) / o_far : 0.0);
     report(p_near > p_far * 1.15, "透视下近大远小",
            std::format("{} vs {}", p_near, p_far));
@@ -467,9 +468,9 @@ int main(int argc, char** argv) {
   // 为何先不启用：它现在会让画面**变错**（整片发黑），比"没有阴影"更糟。
   // 所以 `set_shadow_map` 保留在 API 里但**默认不启用**，
   // 等定位到根因再开。这个状态记在 BACKLOG 与文档里，不藏着。
-  st::print("\n── 7. 阴影贴图：已知缺陷（过度遮蔽），本版不启用 ──\n");
-  st::print("    详见 BACKLOG「三维：阴影贴图过度遮蔽」\n");
+  st::log::out("\n── 7. 阴影贴图：已知缺陷（过度遮蔽），本版不启用 ──\n");
+  st::log::out("    详见 BACKLOG「三维：阴影贴图过度遮蔽」\n");
 
-  st::print("\n{}\n", failures == 0 ? "全部通过" : std::format("有 {} 项失败", failures));
+  st::log::out("\n{}\n", failures == 0 ? "全部通过" : std::format("有 {} 项失败", failures));
   return failures == 0 ? 0 : 1;
 }

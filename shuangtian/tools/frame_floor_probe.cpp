@@ -18,6 +18,7 @@
 #include <functional>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -58,7 +59,7 @@ auto main(int argc, char** argv) -> int {
   st::probe::result verdict{};
 
   const double screen_px = static_cast<double>(kWidth) * static_cast<double>(kHeight);
-  st::print("画布 {}x{} = {:.0f} 像素，每项 {} 轮取最小\n\n", kWidth, kHeight, screen_px,
+  st::log::out("画布 {}x{} = {:.0f} 像素，每项 {} 轮取最小\n\n", kWidth, kHeight, screen_px,
             kRounds);
 
   const Rect full{0.0f, 0.0f, static_cast<float>(kWidth), static_cast<float>(kHeight)};
@@ -73,7 +74,7 @@ auto main(int argc, char** argv) -> int {
       canvas.fill_rect(full, white);
     });
   }
-  st::print("① 单层（clear + 1 次整屏填充）      {:>7.3f} ms  → {:.3f} ns/px\n", single_ms,
+  st::log::out("① 单层（clear + 1 次整屏填充）      {:>7.3f} ms  → {:.3f} ns/px\n", single_ms,
             single_ms * 1e6 / (screen_px * 2.0));
 
   // ② N 层：同一块区域反复覆盖（每层都真的走一遍混合）
@@ -87,13 +88,13 @@ auto main(int argc, char** argv) -> int {
                          0.0f);
       }
     });
-    st::print("② {} 层覆盖率叠（画 {}.0 屏）          {:>7.3f} ms  → {:.3f} ns/px\n", layers,
+    st::log::out("② {} 层覆盖率叠（画 {}.0 屏）          {:>7.3f} ms  → {:.3f} ns/px\n", layers,
               layers + 1, ms, ms * 1e6 / (screen_px * static_cast<double>(layers + 1)));
   }
 
-  st::print("\n参考：gallery 1600x1000 实测整帧 p50 ≈ 4.3 ms，累计绘制 3.37 屏。\n");
-  st::print("      即它的“每屏成本”约 {:.2f} ms/屏。\n",
+  st::log::out("\n参考：gallery 1600x1000 实测整帧 p50 ≈ 4.3 ms，累计绘制 3.37 屏。\n");
+  st::log::out("      即它的“每屏成本”约 {:.2f} ms/屏。\n",
             4.3 / 3.37);
-  st::print("      若已接近 ② 的线性区间 → 瓶颈是纯带宽，唯一出路是少写（减 overdraw）。\n");
+  st::log::out("      若已接近 ② 的线性区间 → 瓶颈是纯带宽，唯一出路是少写（减 overdraw）。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

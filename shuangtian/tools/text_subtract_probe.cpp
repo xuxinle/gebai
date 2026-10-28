@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -59,7 +60,7 @@ auto main(int argc, char** argv) -> int {
 
   auto stack = st::text::FontStack::system_default();
   if (!stack.has_value()) {
-    st::print("跳过：拿不到系统字体\n");
+    st::log::out("跳过：拿不到系统字体\n");
     return st::probe::main_of(spec, opts, verdict);
   }
   st::text::TextRenderer renderer(*stack, 1.0f);
@@ -115,19 +116,19 @@ auto main(int argc, char** argv) -> int {
     glyph_total += static_cast<std::uint64_t>(chars);
   }
 
-  st::print("{} 个 run\n\n", runs.size());
-  st::print("A 完整 draw        {:>8.3f} ms   → {:>7.2f} µs/run\n", draw_ms,
+  st::log::out("{} 个 run\n\n", runs.size());
+  st::log::out("A 完整 draw        {:>8.3f} ms   → {:>7.2f} µs/run\n", draw_ms,
             draw_ms * 1000.0 / static_cast<double>(runs.size()));
-  st::print("B 只 measure       {:>8.3f} ms   → {:>7.2f} µs/run\n", measure_ms,
+  st::log::out("B 只 measure       {:>8.3f} ms   → {:>7.2f} µs/run\n", measure_ms,
             measure_ms * 1000.0 / static_cast<double>(runs.size()));
-  st::print("\nA − B（提交位图 + 混合）  {:>8.3f} ms   → {:>7.2f} µs/run\n", draw_ms - measure_ms,
+  st::log::out("\nA − B（提交位图 + 混合）  {:>8.3f} ms   → {:>7.2f} µs/run\n", draw_ms - measure_ms,
             (draw_ms - measure_ms) * 1000.0 / static_cast<double>(runs.size()));
-  st::print("\nB 占 A 的 **{:.0f}%**\n",
+  st::log::out("\nB 占 A 的 **{:.0f}%**\n",
             draw_ms > 0.0 ? measure_ms / draw_ms * 100.0 : 0.0);
-  st::print("\n若 B 占比显著，则“排版/字形查找”才是主体，不是混合。\n");
-  st::print("字符数合计 {} → **{:.2f} µs/字符**（含 LCD 混合）\n", glyph_total,
+  st::log::out("\n若 B 占比显著，则“排版/字形查找”才是主体，不是混合。\n");
+  st::log::out("字符数合计 {} → **{:.2f} µs/字符**（含 LCD 混合）\n", glyph_total,
             glyph_total == 0 ? 0.0 : draw_ms * 1000.0 / static_cast<double>(glyph_total));
-  st::print("\n参考（gallery 实测）：49 个 run / 0.59 ms。若按中文字符数换算，\n");
-  st::print("它能对齐到同一个 µs/字符 就是“成本合理”；差很多则是 gallery 的字形更多/更大。\n");
+  st::log::out("\n参考（gallery 实测）：49 个 run / 0.59 ms。若按中文字符数换算，\n");
+  st::log::out("它能对齐到同一个 µs/字符 就是“成本合理”；差很多则是 gallery 的字形更多/更大。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

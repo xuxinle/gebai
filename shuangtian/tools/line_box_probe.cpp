@@ -23,6 +23,7 @@
 
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/text/text.hpp"
 #include "st/ui/text_port.hpp"
@@ -40,7 +41,7 @@ void report(const st::ui::TextPort& port, std::string_view label, std::string_vi
   const float ascent = port.shaped_ascent(sample, size, FontRole::Monospace);
   const auto ink = port.ink_metrics(sample, size, FontRole::Monospace);
   if (!ink) {
-    st::print("{:<12} 行高 {:.2f}（端口报不出墨迹，无法判定上下留白）\n", label, line_height);
+    st::log::out("{:<12} 行高 {:.2f}（端口报不出墨迹，无法判定上下留白）\n", label, line_height);
     return;
   }
   // **与编辑器同口径**：`st::ui::line_block_offset` 把行距增量两侧分摊，
@@ -51,7 +52,7 @@ void report(const st::ui::TextPort& port, std::string_view label, std::string_vi
                                           port.line_height(size) * spacing).origin_y;
   const float top_gap = offset + (ascent - ink->above);           // 行盒顶 → 墨迹顶
   const float bottom_gap = line_height - (offset + ascent + ink->below);  // 墨迹底 → 行盒底
-  st::print(
+  st::log::out(
       "{:<12} 行高 {:.2f} | 上留白 {:>6.2f}  下留白 {:>6.2f} | 下-上 {:+.2f}"
       "  | 墨迹高 {:.2f}\n",
       label, line_height, top_gap, bottom_gap, bottom_gap - top_gap, ink->above + ink->below);
@@ -78,17 +79,17 @@ auto main(int argc, char** argv) -> int {
 
   // 与实际编辑器同口径：Monospace、字号跟随主题（这里取探针可复现的绝对档）
   for (const float size : {15.0f}) {
-    st::print("=== 字号 {:.0f}（Monospace）===\n", size);
+    st::log::out("=== 字号 {:.0f}（Monospace）===\n", size);
     for (const float spacing : {1.0f, 1.15f, 1.3f, 1.5f}) {
       const std::string label = std::format("spacing {:.2f}", spacing);
       // 一条中文、一条拉丁：字体的 above/below 不同，最好两个方向都看
       report(port, label + " 中文", "行间距", size, spacing);
       report(port, label + " 拉丁", "Ag", size, spacing);
     }
-    st::print("\n");
+    st::log::out("\n");
   }
-  st::print("▲ 判据：spacing 从 1.0 加到 1.5 时，**上/下留白应各分增量的一半**。\n");
-  st::print("  若『上留白』几乎不变而『下留白』吃掉全部增量，就是“间距全在行下方”。\n");
+  st::log::out("▲ 判据：spacing 从 1.0 加到 1.5 时，**上/下留白应各分增量的一半**。\n");
+  st::log::out("  若『上留白』几乎不变而『下留白』吃掉全部增量，就是“间距全在行下方”。\n");
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 
   return st::probe::main_of(spec, opts, verdict);

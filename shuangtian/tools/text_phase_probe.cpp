@@ -20,6 +20,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/text/text.hpp"
 
 using st::text::FontRole;
@@ -101,7 +102,7 @@ auto main(int argc, char** argv) -> int {
     TextRenderer renderer(fonts, device_scale);
     renderer.set_subpixel(false);
     renderer.set_grid_fit(GridFitMode::Normal);
-    st::print("\n=== device_scale={} supersample={} ===\n", device_scale,
+    st::log::out("\n=== device_scale={} supersample={} ===\n", device_scale,
               static_cast<int>(std::lround(device_scale)));
     // 连续字号档：物理尺寸每次 +0.5（= 1/2 物理像素级的相位变化）
     for (const char32_t codepoint : {U'霜', U'H', U'三'}) {
@@ -110,11 +111,11 @@ auto main(int argc, char** argv) -> int {
         const float physical = 16.0f + static_cast<float>(step) * 0.5f;
         rows.push_back(scan(renderer, codepoint, physical));
       }
-      st::print("  U+{:04X}  相位抖动={:.4f}\n", static_cast<unsigned>(codepoint),
+      st::log::out("  U+{:04X}  相位抖动={:.4f}\n", static_cast<unsigned>(codepoint),
                 roughness(rows));
-      st::print("    px      solid   mid   mid/solid   ink   off(x,y)\n");
+      st::log::out("    px      solid   mid   mid/solid   ink   off(x,y)\n");
       for (const Row& row : rows) {
-        st::print("    {:5.1f}   {:6d} {:5d}   {:8.3f} {:7.1f}   ({:3d},{:3d})\n", row.size,
+        st::log::out("    {:5.1f}   {:6d} {:5d}   {:8.3f} {:7.1f}   ({:3d},{:3d})\n", row.size,
                   row.solid, row.mid, row.mid_ratio, row.ink, row.offset_x, row.offset_y);
       }
     }

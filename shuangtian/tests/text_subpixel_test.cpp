@@ -29,6 +29,7 @@
 
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
 
@@ -220,7 +221,7 @@ ST_TEST(text_subpixel_bitmap_grid_matches_grayscale) {
       if (a->width != b->width || a->height != b->height || a->offset_x != b->offset_x ||
           a->offset_y != b->offset_y) {
         ++mismatched;
-        st::print("[lcd] 网格不一致：U+{:04X} @{}px 灰度 {}x{}@{},{} vs LCD {}x{}@{},{}\n",
+        st::log::out("[lcd] 网格不一致：U+{:04X} @{}px 灰度 {}x{}@{},{} vs LCD {}x{}@{},{}\n",
                   static_cast<unsigned>(codepoint), size, a->width, a->height, a->offset_x,
                   a->offset_y, b->width, b->height, b->offset_x, b->offset_y);
       }
@@ -232,7 +233,7 @@ ST_TEST(text_subpixel_bitmap_grid_matches_grayscale) {
                   static_cast<int>(b->width * b->height * 3));
     }
   }
-  st::print("[lcd] 网格对齐：比较 {} 个字形，不一致 {}\n", compared, mismatched);
+  st::log::out("[lcd] 网格对齐：比较 {} 个字形，不一致 {}\n", compared, mismatched);
   ST_CHECK(compared > 20);
   ST_CHECK_EQ(static_cast<int>(mismatched), 0);
 }
@@ -298,7 +299,7 @@ ST_TEST(text_subpixel_ink_matches_grayscale) {
       gray_total > 0.0 ? std::abs(lcd_total / gray_total - 1.0) : 1.0;
   const double redistribute_error =
       raw_total > 0.0 ? std::abs(lcd_total / raw_total - 1.0) : 1.0;
-  st::print("[lcd] 墨量：{} 个字形，聚合误差 {:.2f}%（对灰度）/ {:.2f}%（滤波对未滤波）、"
+  st::log::out("[lcd] 墨量：{} 个字形，聚合误差 {:.2f}%（对灰度）/ {:.2f}%（滤波对未滤波）、"
             "逐字形最坏 {:.2f}%；形状：未滤波逐像素均值偏差 ≤{:.4f}（最大 ≤{:.4f}）、"
             "滤波后摊墨 ≤{:.4f}\n",
             compared, aggregate_error * 100.0, redistribute_error * 100.0,
@@ -335,7 +336,7 @@ ST_TEST(text_subpixel_luminance_profile_matches_grayscale) {
       worst = std::max(worst, luminance_stats(*a, *b).mean_abs_difference);
     }
   }
-  st::print("[lcd] 亮度 profile 平均差（子像素口径，滤波后）≤{:.4f}（{} 个字形）\n", worst,
+  st::log::out("[lcd] 亮度 profile 平均差（子像素口径，滤波后）≤{:.4f}（{} 个字形）\n", worst,
             compared);
   ST_CHECK(compared > 20);
   ST_CHECK(worst < 0.06);
@@ -405,7 +406,7 @@ ST_TEST(text_subpixel_edges_carry_color_and_core_stays_neutral) {
     }
   }
   if (edge_pixels > 0) edge_spread /= static_cast<double>(edge_pixels);
-  st::print("[lcd] 彩边分布（9 个字形 @22/40px）：边缘 {} 个（带色 {}，平均通道差 {:.3f}）；"
+  st::log::out("[lcd] 彩边分布（9 个字形 @22/40px）：边缘 {} 个（带色 {}，平均通道差 {:.3f}）；"
             "深墨心 {} 个（带色 {}，最大通道差 {:.3f}）\n",
             edge_pixels, colored_edges, edge_spread, core_pixels, tinted_cores, core_spread_max);
   ST_CHECK(edge_pixels > 20);
@@ -456,7 +457,7 @@ ST_TEST(text_subpixel_filter_trades_fringe_for_sharpness) {
       raw_slope = std::max(raw_slope, raw_stats.lcd_max_slope);
     }
   }
-  st::print("[lcd] 彩边能量：滤波 {:.1f} vs 原始 {:.1f}（{:.1f}%）；"
+  st::log::out("[lcd] 彩边能量：滤波 {:.1f} vs 原始 {:.1f}（{:.1f}%）；"
             "亮度最大斜率：灰度 {:.3f} / 滤波 {:.3f}（{:.2f}×）/ 原始 {:.3f}（{:.2f}×）\n",
             filtered_energy, raw_energy,
             raw_energy > 0.0 ? filtered_energy / raw_energy * 100.0 : 0.0, gray_slope,

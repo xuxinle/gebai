@@ -22,6 +22,7 @@
 #include "examples/caiyun/render_preset_table.cpp"
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/test/test.hpp"
 
 namespace {
@@ -29,7 +30,7 @@ namespace {
 [[nodiscard]] auto parse(std::string_view text) -> st::Json {
   const auto json = st::json_parse(text);
   if (!json) {
-    st::print("测试夹具 JSON 坏了：{}\n", text);
+    st::log::out("测试夹具 JSON 坏了：{}\n", text);
     return st::Json::object();
   }
   return *json;
@@ -99,7 +100,7 @@ ST_TEST(caiyun_render_preset_applies_and_leaves_no_trace) {
       "scenes[0].layers[0]");
   ST_CHECK(applied.has_value());
   if (!applied) {
-    st::print("展开失败：{}\n", applied.error().message);
+    st::log::out("展开失败：{}\n", applied.error().message);
     return;
   }
 
@@ -125,7 +126,7 @@ ST_TEST(caiyun_render_preset_unknown_name_is_an_error_with_choices) {
   ST_CHECK(!applied.has_value());
   if (applied) return;
   const std::string message = applied.error().message;
-  st::print("报错：{}\n", message);
+  st::log::out("报错：{}\n", message);
   // 报错要能定位（哪一幕哪一图层）并列出可选项
   ST_CHECK(message.find("scenes[2].layers[1]") != std::string::npos);
   ST_CHECK(message.find("no_such_preset") != std::string::npos);

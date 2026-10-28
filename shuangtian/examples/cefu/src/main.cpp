@@ -56,11 +56,13 @@
 
 #include "cefu_index.hpp"
 #include "st/app/app.hpp"
+#include "st/codec/png.hpp"
 #include "st/core/entry.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
 #include "st/core/time.hpp"
 #include "st/core/json.hpp"
+#include "st/core/log.hpp"
 #include "st/ui/components/title_bar.hpp"
 #include "st/ui/components/window_frame.hpp"
 #include "st/ui/hot_reload.hpp"
@@ -173,7 +175,7 @@ class CeFu {
       index_.note_hit(id);
       if (auto status = store_->bump_hits(id, st::time::now_ms()); !status.has_value()) {
         // 命中计数写失败不该让读词条失败（读数优先于统计）
-        st::print("知识库：命中计数写失败 {}\n", status.error().message);
+        st::log::out("知识库：命中计数写失败 {}\n", status.error().message);
       }
       return full_json(*entry);
     });
@@ -528,7 +530,7 @@ class CeFu {
   auto seed_from(const std::string& path) -> void {
     const auto text = st::fs::read_text(path);
     if (!text.has_value()) {
-      st::print("知识库：种子文件读不到 {}\n", path);
+      st::log::out("知识库：种子文件读不到 {}\n", path);
       return;
     }
     const auto drafts = split_markdown(*text, "示例/值班知识");
@@ -566,6 +568,82 @@ struct Options {
   /// （实测踩过：GPU 呈现异常时截图全对、屏幕全黑，没有这个开关只能盲猜）。
   std::string renderer{};
 };
+
+/// 册府图标（窗口/托盘共用）：深色圆角底 + 白色书页轮廓。
+///
+/// 小尺寸（16px 托盘）走极简式（两页白 + 书脊），大尺寸（窗口）加书页折线。
+/// 用程序化绘制而不是嵌入式资源：与相期图标同一套做法，无外部素材依赖。
+static auto make_cefu_icon_png(std::uint32_t size) -> std::vector<std::uint8_t> {
+  st::codec::PngImage image;
+  image.width = size;
+  image.height = size;
+  image.rgba.assign(static_cast<std::size_t>(size) * size * 4U, 0U);
+
+  const auto to_byte = [](double v) -> std::uint8_t {
+    const double clamped = v < 0.0 ? 0.0 : (v > 255.0 ? 255.0 : v);
+    return static_cast<std::uint8_t>(clamped + 0.5);
+  };
+
+  // 配色：暖棕底 + 白书页 + 深书脊
+  constexpr double kBgR = 0x8F / 255.0, kBgG = 0x7A / 255.0, kBgB = 0x66 / 255.0;
+  constexpr double kPageR = 0xFF / 255.0, kPageG = 0xFB / 255.0, kPageB = 0xF2 / 255.0;
+  constexpr double kSpineR = 0x5A / 255.0, kSpineG = 0x4B / 255.0, kSpineB = 0x3D / 255.0;
+
+  // 圆角方形 SDF（半径 = 0.22 边长）
+  constexpr double kRadius = 0.22;
+  const auto sd_round_rect = [](double u, double v, double r) {
+    const double qx = std::abs(u - 0.5) - (0.5 - r);
+    const double qy = std::abs(v - 0.5) - (0.5 - r);
+    const double ax = qx > 0.0 ? qx : 0.0, ay = qy > 0.0 ? qy : 0.0;
+    const double outside = std::sqrt(ax * ax + ay * ay);
+    const double inside = qx > qy ? qx : qy;
+    return outside + (inside < 0.0 ? inside : 0.0) - r;
+  };
+
+  // 书页：左侧页 + 右侧页（中央书脊），上下留页边
+  constexpr double kTop = 0.26, kBot = 0.74;
+  constexpr double kLeft = 0.16, kRight = 0.84;      // 左右页外缘
+  constexpr double kSpine = 0.50;                    // 书脊中线
+  constexpr double kSpineW = 0.045;                  // 书脊半宽
+  constexpr int kSub = 4;
+
+  for (std::uint32_t y = 0; y < size; ++y) {
+    for (std::uint32_t x = 0; x < size; ++x) {
+      int cover = 0;
+      for (int sy = 0; sy < kSub; ++sy) {
+        for (int sx = 0; sx < kSub; ++sx) {
+          const double uu = (static_cast<double>(x) + (sx + 0.5) / kSub) / size;
+          const double vv = (static_cast<double>(y) + (sy + 0.5) / kSub) / size;
+          if (sd_round_rect(uu, vv, kRadius) <= 0.0) ++cover;
+        }
+      }
+      if (cover == 0) continue;
+      const double ratio = static_cast<double>(cover) / (kSub * kSub);
+      const double u = (static_cast<double>(x) + 0.5) / size;
+      const double v = (static_cast<double>(y) + 0.5) / size;
+      // 底色：中央微亮（书页反光）
+      double r = kBgR, g = kBgG, b = kBgB;
+      if (u >= kLeft && u <= kRight && v >= kTop && v <= kBot) {
+        if (u >= kSpine - kSpineW && u <= kSpine + kSpineW) {
+          r = kSpineR; g = kSpineG; b = kSpineB;
+        } else {
+          const double page_edge = std::min(std::min(u - kLeft, kRight - u),
+                                            std::min(v - kTop, kBot - v));
+          const double shade = page_edge < 0.12 ? 0.88 + 0.12 * (page_edge / 0.12) : 1.0;
+          r = kPageR * shade; g = kPageG * shade; b = kPageB * shade;
+        }
+      }
+      const std::size_t i = (static_cast<std::size_t>(y) * size + x) * 4U;
+      image.rgba[i + 0U] = to_byte(r * 255.0);
+      image.rgba[i + 1U] = to_byte(g * 255.0);
+      image.rgba[i + 2U] = to_byte(b * 255.0);
+      image.rgba[i + 3U] = to_byte(255.0 * ratio);
+    }
+  }
+  auto encoded = st::codec::png_encode(image);
+  if (!encoded) return {};
+  return *encoded;
+}
 
 auto parse_options(int argc, char** argv) -> Options {
   Options o;
@@ -629,6 +707,15 @@ auto run_app(int argc, char** argv) -> int {
   app_options.screenshot_dir = options.shots;
   // 脚本宿主只在需要时创建：本示例的界面逻辑全在 JS 里，必须打开
   app_options.enable_script = true;
+  // 托盘常驻：窗口可关但进程不退出，从托盘图标恢复/退出
+  if (!options.headless) {
+    app_options.tray_enabled = true;
+    app_options.window_icon_png = make_cefu_icon_png(128);
+    app_options.tray_icon_png = make_cefu_icon_png(16);
+    app_options.tray_tooltip = "册府 · 知识库";
+    // 关窗→托盘常驻：点 × 只隐藏窗口，退出走托盘右键菜单（「退出」）
+    app_options.tray_minimize_on_close = true;
+  }
 
   st::app::Application app("cefu", "0.1.0", app_options);
 
@@ -681,21 +768,23 @@ auto run_app(int argc, char** argv) -> int {
     std::fprintf(stderr, "界面装载失败：%s\n", status.error().message.c_str());
     return 1;
   }
-  st::print("册府就绪：界面 {} · 桥 {} 个函数 · 词条 {} 条 · 库 {}\n", ui_dir,
+  st::log::out("册府就绪：界面 {} · 桥 {} 个函数 · 词条 {} 条 · 库 {}\n", ui_dir,
             bridge.exposed().size(), knowledge.entry_count(), options.db_path);
-  st::print("  {}\n", hot.last_summary());
+  st::log::out("  {}\n", hot.last_summary());
 
   // ⑥ 主循环：每帧推进声明式宿主（改文件后热重载即时生效）
   std::uint64_t frames = 0;
   while (!app.quit_requested()) {
     const std::int64_t frame_start_ms = st::time::now_ms();
+    // 托盘左键点击：把窗口叫回前台（关窗只隐藏、进程常驻，恢复靠这里）
+    if (app.take_tray_clicks() > 0) (void)app.window_restore();
     if (hot.poll() > 0) app.request_repaint();
     if (app.root().tick_declarative_hosts() > 0U) app.request_repaint();
     app.tick();
     ++frames;
     app.pace_loop(frame_start_ms);
   }
-  st::print("册府退出：{} 帧\n", frames);
+  st::log::out("册府退出：{} 帧\n", frames);
   return opened ? 0 : 1;
 }
 

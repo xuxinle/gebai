@@ -37,6 +37,7 @@
 
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -97,7 +98,7 @@ auto main(int argc, char** argv) -> int {
 
   auto fonts = st::text::FontStack::system_default();
   if (!fonts.has_value()) {
-    st::print("SKIP: 无系统字体，量尺不成立（measure_width 恒 0 会量出假结果）\n");
+    st::log::out("SKIP: 无系统字体，量尺不成立（measure_width 恒 0 会量出假结果）\n");
     return 0;
   }
   st::text::TextRenderer renderer{*fonts};
@@ -152,15 +153,15 @@ auto main(int argc, char** argv) -> int {
   cold_tree.measure(context, st::ui::Constraints{});
   const double cold_measure_ms = elapsed_ms(cold_start);
 
-  st::print("rows={}  行高={:.0f}  视口=400px(约 {} 行)\n", rows, tree.row_height(),
+  st::log::out("rows={}  行高={:.0f}  视口=400px(约 {} 行)\n", rows, tree.row_height(),
             static_cast<std::size_t>(400.0f / tree.row_height()));
-  st::print("  sync_nodes       {:8.3f} ms\n", sync_ms);
-  st::print("  measure+arrange  {:8.3f} ms\n", measure_ms);
-  st::print("  paint(400px)     {:8.3f} ms   <- 每帧真实成本（视口只显示十几行）\n",
+  st::log::out("  sync_nodes       {:8.3f} ms\n", sync_ms);
+  st::log::out("  measure+arrange  {:8.3f} ms\n", measure_ms);
+  st::log::out("  paint(400px)     {:8.3f} ms   <- 每帧真实成本（视口只显示十几行）\n",
             paint_viewport_ms);
-  st::print("  paint(全量{:5}px) {:8.3f} ms   <- 上界：视口高到装下全部行\n", full_height,
+  st::log::out("  paint(全量{:5}px) {:8.3f} ms   <- 上界：视口高到装下全部行\n", full_height,
             paint_full_ms);
-  st::print("  measure(冷首轮)   {:8.3f} ms   <- 近似值：整形缓存未预热的首轮\n",
+  st::log::out("  measure(冷首轮)   {:8.3f} ms   <- 近似值：整形缓存未预热的首轮\n",
             cold_measure_ms);
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 

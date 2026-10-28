@@ -525,7 +525,7 @@ export class FeishuBot {
         await this.handleCommand(trimmed, chatId, openId, sessionId)
         return
       }
-      await this.runPrompt(chatId, sessionId, trimmed, messageId, openId)
+      await this.runPrompt(chatId, sessionId, trimmed, messageId, openId, undefined, await this.senderName(openId))
       return
     }
     // 图片：下载为附件后进入会话
@@ -542,13 +542,22 @@ export class FeishuBot {
         const mime = sniffImageMime(data)
         await this.runPrompt(chatId, sessionId, "（收到一张图片，请分析其内容）", messageId, openId, [
           { name: `${fileKey}.img`, mime, data },
-        ])
+        ], await this.senderName(openId))
       } catch (err) {
         this.outbox(chatId).sendText(`⚠️ 图片读取失败：${String((err as Error).message || err)}`)
       }
       return
     }
     this.outbox(chatId).sendText(`暂不支持 ${messageType} 类型消息，请发送文字。`)
+  }
+
+  /** 尽力而为地取发送者姓名（contact API；拿不到/无权限返回 undefined，不阻断入站）。 */
+  private async senderName(openId: string): Promise<string | undefined> {
+    try {
+      return await this.api.getUserName?.(openId)
+    } catch {
+      return undefined
+    }
   }
 
   /** 会话映射：sessionIdForChat(chatId)（确定性 32-hex），按需创建（chatId 级并发锁 + 归属持久化）。
@@ -712,6 +721,7 @@ export class FeishuBot {
     messageId: string,
     openId: string,
     attachments?: Array<{ name: string; mime?: string; data: Uint8Array }>,
+    senderName?: string,
   ): Promise<void> {
     return (async () => {
       if (this.opts.adapter.isRunning(sessionId)) {
@@ -740,7 +750,9 @@ export class FeishuBot {
           this.outbox(chatId).error("会话归属用户不可用（映射用户缺失），无法运行任务。请联系管理员检查用户注册表。", messageId)
           return
         }
-        await this.opts.adapter.run(sessionId, owner, text, {
+        // 入站消息带发送者名（尽力而为；查不到就不加，不阻断）——多人群聊时模型需要知道是谁说的
+        const prompt = senderName ? `【${senderName}】${text}` : text
+        await this.opts.adapter.run(sessionId, owner, prompt, {
           messageId: /^[A-Za-z0-9_-]{8,64}$/.test(messageId) ? messageId : undefined,
           attachments,
         }, {

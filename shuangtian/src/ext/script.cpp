@@ -17,6 +17,7 @@
 #include "quickjs/quickjs.h"
 
 #include "st/core/json.hpp"
+#include "st/core/log.hpp"
 
 namespace st::ext {
 
@@ -578,9 +579,8 @@ auto ScriptEngine::pump_jobs() -> std::size_t {
   JSContext* context = nullptr;
   while (JS_IsJobPending(impl_->runtime)) {
     if (JS_ExecutePendingJob(impl_->runtime, &context) < 0) {
-      // 不引 core/log（ext 层此前零日志依赖）——微任务失败经 stderr 可见即可
-      std::fprintf(stderr, "[script] 微任务失败: %s\n",
-                   describe_exception(impl_->context, limits_).c_str());
+      ST_LOG_ERROR("[script] 微任务失败: {}",
+                   describe_exception(impl_->context, limits_));
       break;
     }
     ++executed;

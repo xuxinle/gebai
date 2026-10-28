@@ -52,6 +52,7 @@
 
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/completion_popup.hpp"
 #include "st/ui/components/file_dialog.hpp"
@@ -313,14 +314,14 @@ ST_TEST(wheel_direction_contract_holds_for_every_scrollable_component) {
     const WheelProbe probe = entry.probe();
     if (!probe.usable) {
       ++skipped;
-      st::print("[wheel-contract] {}：夹具不可滚动，跳过\n", entry.name);
+      st::log::out("[wheel-contract] {}：夹具不可滚动，跳过\n", entry.name);
       continue;
     }
     // 契约本体：向下滚必须让偏移变大、向上滚必须让它变小。
     ST_CHECK(probe.after_down > 0.0F);
     ST_CHECK(probe.after_up < probe.after_down);
     ++verified;
-    st::print("[wheel-contract] {}：向下滚 → {:.1f}；向上滚 → {:.1f}（期望 0 < 后者 < 前者）\n",
+    st::log::out("[wheel-contract] {}：向下滚 → {:.1f}；向上滚 → {:.1f}（期望 0 < 后者 < 前者）\n",
               entry.name, static_cast<double>(probe.after_down),
               static_cast<double>(probe.after_up));
   }
@@ -348,6 +349,6 @@ ST_TEST(wheel_direction_contract_holds_for_every_scrollable_component) {
       ST_CHECK(!has_legacy);
     }
   }
-  st::print("[wheel-contract] 验过 {} 条，跳过 {} 条（共 {} 条）\n", verified, skipped,
+  st::log::out("[wheel-contract] 验过 {} 条，跳过 {} 条（共 {} 条）\n", verified, skipped,
             cases.size());
 }

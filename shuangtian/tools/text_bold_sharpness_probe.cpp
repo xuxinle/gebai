@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
 
@@ -84,27 +85,27 @@ auto main(int argc, char** argv) -> int {
 
   const auto loaded = st::text::FontStack::system_default();
   if (!loaded.has_value()) {
-    st::eprint("系统字体栈加载失败\n");
+    st::log::err("系统字体栈加载失败\n");
     return 1;
   }
   st::text::TextRenderer renderer(loaded.value(), 1.0f);
   renderer.set_subpixel(false);   // 与动效片导出同口径（灰度）
   renderer.set_grid_fit(st::text::GridFitMode::Normal);
 
-  st::print("字号 {:.0f}px，样本「{}」\n\n", static_cast<double>(size), text);
-  st::print("{:<12} {:>10} {:>10} {:>12} {:>12}\n", "字体面", "Σ墨", "实心/墨", "过渡/墨",
+  st::log::out("字号 {:.0f}px，样本「{}」\n\n", static_cast<double>(size), text);
+  st::log::out("{:<12} {:>10} {:>10} {:>12} {:>12}\n", "字体面", "Σ墨", "实心/墨", "过渡/墨",
             "峰值");
 
   const InkStats regular = measure(render(renderer, text, size, false, 0));
   const auto report = [](const char* label, const InkStats& stats) {
     const double solid_ratio = stats.ink > 0.0 ? stats.solid / stats.ink : 0.0;
     const double transition_ratio = stats.ink > 0.0 ? stats.transition / stats.ink : 0.0;
-    st::print("{:<12} {:>10.1f} {:>10.3f} {:>12.3f} {:>12.3f}\n", label, stats.ink, solid_ratio,
+    st::log::out("{:<12} {:>10.1f} {:>10.3f} {:>12.3f} {:>12.3f}\n", label, stats.ink, solid_ratio,
               transition_ratio, stats.peak);
   };
   report("Regular", regular);
   if (!loaded.value().has_bold()) {
-    st::print("\n本机无真粗体面 —— 无法对照（禁用合成加粗后 bold 会退化成 Regular）\n");
+    st::log::out("\n本机无真粗体面 —— 无法对照（禁用合成加粗后 bold 会退化成 Regular）\n");
     return 1;
   }
   const InkStats bold = measure(render(renderer, text, size, true, 0));
@@ -115,10 +116,10 @@ auto main(int argc, char** argv) -> int {
   const double bold_solid = bold.ink > 0.0 ? bold.solid / bold.ink : 0.0;
   const double regular_solid = regular.ink > 0.0 ? regular.solid / regular.ink : 0.0;
 
-  st::print("\n判读（过渡/墨 越低越锐；实心/墨 越高越实）：\n");
-  st::print("  Regular  过渡 {:.3f} · 实心 {:.3f}\n", regular_transition, regular_solid);
-  st::print("  真粗体   过渡 {:.3f} · 实心 {:.3f}\n", bold_transition, bold_solid);
-  st::print("\n结论：{}\n",
+  st::log::out("\n判读（过渡/墨 越低越锐；实心/墨 越高越实）：\n");
+  st::log::out("  Regular  过渡 {:.3f} · 实心 {:.3f}\n", regular_transition, regular_solid);
+  st::log::out("  真粗体   过渡 {:.3f} · 实心 {:.3f}\n", bold_transition, bold_solid);
+  st::log::out("\n结论：{}\n",
             bold_transition <= regular_transition + 0.02
                 ? "真粗体的过渡占比不高于 Regular —— 变粗但没变糊"
                 : "真粗体的过渡占比明显更高 —— 需要复查字体面是否选对");

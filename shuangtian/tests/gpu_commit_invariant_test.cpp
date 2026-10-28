@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/gpu.hpp"
@@ -96,7 +97,7 @@ ST_TEST(gpu_committed_draws_land_in_the_canvas) {
   // 回读路径自己会提交，但这里要确认的是**像素真的落了地**
   const int painted = painted_pixels(target);
   ST_CHECK(painted > 0);
-  st::print("[gpu-commit] 基本图元：{} 个非零像素\n", painted);
+  st::log::out("[gpu-commit] 基本图元：{} 个非零像素\n", painted);
 }
 
 /// ② 离屏绘制（走 `submit_to`）：阴影遮罩 / 盒式模糊都靠它。
@@ -107,7 +108,7 @@ ST_TEST(gpu_offscreen_effects_reach_the_canvas) {
   if (!gpu_ready()) return;
   const auto caps = st::raster::gpu::capabilities();
   if (!caps.shadows) {
-    st::print("[gpu-commit] 跳过：后端未声明 shadows\n");
+    st::log::out("[gpu-commit] 跳过：后端未声明 shadows\n");
     return;
   }
   auto surface = make_gpu();
@@ -128,7 +129,7 @@ ST_TEST(gpu_offscreen_effects_reach_the_canvas) {
       if (reference.pixel_at(x, y).a != 0) ++reference_painted;
     }
   }
-  st::print("[gpu-commit] 离屏阴影：GPU {} 个 / 软件 {} 个非零像素\n", painted, reference_painted);
+  st::log::out("[gpu-commit] 离屏阴影：GPU {} 个 / 软件 {} 个非零像素\n", painted, reference_painted);
   ST_CHECK(reference_painted > 0);   // 用法本身得对
   ST_CHECK(painted > 0);             // GPU 也跟着要有
 }
@@ -140,7 +141,7 @@ ST_TEST(gpu_canvas_composition_reaches_the_canvas) {
   if (!gpu_ready()) return;
   const auto caps = st::raster::gpu::capabilities();
   if (!caps.bitmaps) {
-    st::print("[gpu-commit] 跳过：后端未声明 bitmaps\n");
+    st::log::out("[gpu-commit] 跳过：后端未声明 bitmaps\n");
     return;
   }
   auto source = make_gpu();
@@ -157,7 +158,7 @@ ST_TEST(gpu_canvas_composition_reaches_the_canvas) {
   dst.draw_canvas_at(src, 0, 0);
   const int painted = painted_pixels(dst);
   ST_CHECK(painted > 0);
-  st::print("[gpu-commit] 画布合成：{} 个非零像素\n", painted);
+  st::log::out("[gpu-commit] 画布合成：{} 个非零像素\n", painted);
 }
 
 /// ④ **顺带验证"提交点必须在攒批之后"**（2026-10-25 的真实顺序 bug）。
@@ -182,5 +183,5 @@ ST_TEST(gpu_readback_is_stable_across_repeated_reads) {
   ST_CHECK_EQ(first, second);
   // 首次就该有内容：若第一次为 0、第二次才有，说明"首帧全黑"那类缺陷回来了
   ST_CHECK(first > 0);
-  st::print("[gpu-commit] 回读稳定：第一次 {} / 第二次 {}\n", first, second);
+  st::log::out("[gpu-commit] 回读稳定：第一次 {} / 第二次 {}\n", first, second);
 }

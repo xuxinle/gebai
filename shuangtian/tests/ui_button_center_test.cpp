@@ -33,6 +33,7 @@
 #include "st/raster/canvas.hpp"
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/text_port.hpp"
 #include "st/ui/ui_root.hpp"
@@ -216,7 +217,7 @@ ST_TEST(button_content_is_centered_without_icon) {
   ST_REQUIRE(ink.any);
   const float dx = ink.center_x() - box.center().x;
   const float dy = ink.center_y() - box.center().y;
-  st::print("[btn-center] 无图标 内容中心偏移 dx={:+.3f} dy={:+.3f}（墨迹 {:.1f}×{:.1f}）\n", dx,
+  st::log::out("[btn-center] 无图标 内容中心偏移 dx={:+.3f} dy={:+.3f}（墨迹 {:.1f}×{:.1f}）\n", dx,
             dy, ink.x1 - ink.x0, ink.y1 - ink.y0);
   ST_CHECK_NEAR(dx, 0.0f, 0.5f);
   ST_CHECK_NEAR(dy, 0.0f, 0.5f);
@@ -251,7 +252,7 @@ ST_TEST(button_align_start_puts_content_at_left_edge) {
   ST_REQUIRE(ink.any);
   // 墨迹左缘 = 盒左缘 + 左内边距（不能紧贴描边，也不能居中）。
   const float expected = box.x + button->style().padding.left;
-  st::print("[btn-align] 贴左：墨迹左缘 {:.1f}，期望 {:.1f}（盒左 {:.1f}，中心 {:.1f}）\n",
+  st::log::out("[btn-align] 贴左：墨迹左缘 {:.1f}，期望 {:.1f}（盒左 {:.1f}，中心 {:.1f}）\n",
             ink.x0, expected, box.x, box.center().x);
   ST_CHECK_NEAR(ink.x0, expected, 1.0f);
   // 再镖一条“它确实不在居中位置”：居中时左缘会远离盒左缘（这条防实现退回居中）。
@@ -288,7 +289,7 @@ ST_TEST(button_icon_and_text_together_are_centered) {
   ST_REQUIRE(ink.any);
   const float dx = ink.center_x() - box.center().x;
   const float dy = ink.center_y() - box.center().y;
-  st::print("[btn-center] 图标+文字 内容中心偏移 dx={:+.3f} dy={:+.3f}（墨迹 {:.1f}×{:.1f}）\n", dx,
+  st::log::out("[btn-center] 图标+文字 内容中心偏移 dx={:+.3f} dy={:+.3f}（墨迹 {:.1f}×{:.1f}）\n", dx,
             dy, ink.x1 - ink.x0, ink.y1 - ink.y0);
   // 图标与文字的总宽度应当**真的用上了**：太窄说明图标没画/没算进宽度
   ST_CHECK(ink.x1 - ink.x0 > 40.0f);
@@ -304,7 +305,7 @@ ST_TEST(button_icon_and_text_together_are_centered) {
                        theme.metrics().space_sm + button->icon_ink_size().width +
                        theme.metrics().space_lg * 2.0f;
   const float measured = button->measured_size().width;
-  st::print("[btn-center] 宽 {}（期望 {}：文字 + 间距 + 墨迹宽 + 2×内边距）\n",
+  st::log::out("[btn-center] 宽 {}（期望 {}：文字 + 间距 + 墨迹宽 + 2×内边距）\n",
             static_cast<double>(measured), static_cast<double>(expect));
   ST_CHECK_NEAR(measured, expect, 0.01f);
   // 若误用盒宽，宽度会比这个多出“盒 − 墨迹”（描边式图标约 4~5px）——分得开。
@@ -337,7 +338,7 @@ ST_TEST(button_with_unknown_icon_stays_centered) {
   ST_REQUIRE(ink.any);
   const float dx = ink.center_x() - box.center().x;
   const float dy = ink.center_y() - box.center().y;
-  st::print("[btn-center] 未知图标 内容中心偏移 dx={:+.3f} dy={:+.3f}（墨迹 {:.1f}×{:.1f}）\n", dx,
+  st::log::out("[btn-center] 未知图标 内容中心偏移 dx={:+.3f} dy={:+.3f}（墨迹 {:.1f}×{:.1f}）\n", dx,
             dy, ink.x1 - ink.x0, ink.y1 - ink.y0);
   ST_CHECK_NEAR(dx, 0.0f, 0.5f);
   ST_CHECK_NEAR(dy, 0.0f, 0.5f);
@@ -389,7 +390,7 @@ ST_TEST(button_hover_does_not_shift_the_whole_button) {
 
   const float dy = hovered.center_y() - rest.center_y();
   const float dx = hovered.center_x() - rest.center_x();
-  st::print("[btn-shift] 静止 y[{:.2f},{:.2f}] · 悬浮 y[{:.2f},{:.2f}] · 位移 ({:+.3f},{:+.3f})\n",
+  st::log::out("[btn-shift] 静止 y[{:.2f},{:.2f}] · 悬浮 y[{:.2f},{:.2f}] · 位移 ({:+.3f},{:+.3f})\n",
             static_cast<double>(rest.y0), static_cast<double>(rest.y1),
             static_cast<double>(hovered.y0), static_cast<double>(hovered.y1),
             static_cast<double>(dx), static_cast<double>(dy));
@@ -427,7 +428,7 @@ ST_TEST(button_hover_still_has_visual_feedback) {
   (void)root.dispatch(move);
   Color hovered = rest;
   for (int i = 0; i < 40; ++i) hovered = sample(0.1 * (i + 1));
-  st::print("[btn-feedback] 静止 #{:02X}{:02X}{:02X} · 悬浮 #{:02X}{:02X}{:02X}\n",
+  st::log::out("[btn-feedback] 静止 #{:02X}{:02X}{:02X} · 悬浮 #{:02X}{:02X}{:02X}\n",
             static_cast<unsigned>(rest.r), static_cast<unsigned>(rest.g),
             static_cast<unsigned>(rest.b), static_cast<unsigned>(hovered.r),
             static_cast<unsigned>(hovered.g), static_cast<unsigned>(hovered.b));
@@ -516,7 +517,7 @@ ST_TEST(button_focus_ring_covers_its_own_border) {
   const std::pair<int, int> left_band = bands.front();
   const int left_x = static_cast<int>(std::floor(box.x));
   const int band_width = left_band.second - left_band.first + 1;
-  st::print("[btn-focus] 左环带 x[{},{}] 宽 {}px（控件左边 {}，上限 ceil(max(focus,border))={}）\n",
+  st::log::out("[btn-focus] 左环带 x[{},{}] 宽 {}px（控件左边 {}，上限 ceil(max(focus,border))={}）\n",
             left_band.first, left_band.second, band_width, left_x,
             static_cast<int>(std::ceil(focus)));
   // ① 环带**不得向外多长**：最左像素不早于 `R - ceil(width)`（环从 `R-bw` 起画，

@@ -14,6 +14,7 @@
 #include "st/core/fs.hpp"      // FileDialog 卡起始目录（st::fs::current_dir）
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/paint.hpp"
 #include "st/ui/components/basic.hpp"
@@ -1957,7 +1958,7 @@ namespace {
     const auto embedded = b::embed<"examples/gallery/assets/about.txt">();
     const std::string_view body(embedded.data(), embedded.length());
     const std::size_t newline = body.find('\n');
-    st::print("嵌入资源 about.txt: {} 字节 · 首行「{}」\n", embedded.length(),
+    st::log::out("嵌入资源 about.txt: {} 字节 · 首行「{}」\n", embedded.length(),
               body.substr(0, newline == std::string_view::npos ? body.size() : newline));
     auto row =
         std::make_unique<KeyValueRow>("嵌入资源", std::format("about.txt · {} 字节", embedded.length()));

@@ -16,6 +16,7 @@
 
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/gpu.hpp"
@@ -101,7 +102,7 @@ auto main(int argc, char** argv) -> int {
 
   Scene scene;
   if (scene.gpu == nullptr) {
-    st::print("GPU 表面不可用\n");
+    st::log::out("GPU 表面不可用\n");
     return 0;
   }
   Panel root(FlexDirection::Column);
@@ -125,7 +126,7 @@ auto main(int argc, char** argv) -> int {
 
   const auto left = scene.software.pixels();
   const auto right = scene.gpu->pixels();
-  st::print("尺寸 {} vs {}\n", left.size(), right.size());
+  st::log::out("尺寸 {} vs {}\n", left.size(), right.size());
   if (left.size() != right.size() || left.empty()) return 0;
 
   std::vector<int> per_row(kHeight, 0);
@@ -146,23 +147,23 @@ auto main(int argc, char** argv) -> int {
       }
     }
   }
-  st::print("结构性像素（Δ>64）{} / {} = {:.3f}%  阈值 0.1%\n", structural, left.size(),
+  st::log::out("结构性像素（Δ>64）{} / {} = {:.3f}%  阈值 0.1%\n", structural, left.size(),
             100.0 * static_cast<double>(structural) / static_cast<double>(left.size()));
-  st::print("\n按行分布（只列非零行）：\n");
+  st::log::out("\n按行分布（只列非零行）：\n");
   for (int y = 0; y < kHeight; ++y) {
     const int count = per_row[static_cast<std::size_t>(y)];
     if (count == 0) continue;
-    st::print("  y={:3}  {:3}  {}\n", y, count, std::string(static_cast<std::size_t>(count), '#'));
+    st::log::out("  y={:3}  {:3}  {}\n", y, count, std::string(static_cast<std::size_t>(count), '#'));
   }
-  st::print("\n最差 8 处：\n");
+  st::log::out("\n最差 8 处：\n");
   for (const auto& [delta, index] : worst) {
     if (index < 0) continue;
-    st::print("  ({:3},{:3}) Δ{:<4} 软件 #{:08X}  GPU #{:08X}\n", index % kWidth, index / kWidth, delta,
+    st::log::out("  ({:3},{:3}) Δ{:<4} 软件 #{:08X}  GPU #{:08X}\n", index % kWidth, index / kWidth, delta,
               left[static_cast<std::size_t>(index)], right[static_cast<std::size_t>(index)]);
   }
 
   // 元素定位：把每个元素的包围盒列出来，与上面非零行对齐看是谁在 y=75 / y=124
-  st::print("\n元素包围盒（按 y 排序）：\n");
+  st::log::out("\n元素包围盒（按 y 排序）：\n");
   std::vector<std::pair<Rect, std::string>> boxes;
   const auto walk = [&](const st::ui::Element& element, auto&& self) -> void {
     boxes.emplace_back(element.bounds(), std::string(element.type()));
@@ -173,7 +174,7 @@ auto main(int argc, char** argv) -> int {
   walk(root, walk);
   std::ranges::sort(boxes, {}, [](const auto& entry) { return entry.first.y; });
   for (const auto& [bounds, type] : boxes) {
-    st::print("  y={:6.1f} h={:5.1f}  x={:6.1f} w={:6.1f}  {}\n", static_cast<double>(bounds.y),
+    st::log::out("  y={:6.1f} h={:5.1f}  x={:6.1f} w={:6.1f}  {}\n", static_cast<double>(bounds.y),
               static_cast<double>(bounds.height), static_cast<double>(bounds.x),
               static_cast<double>(bounds.width), type);
   }

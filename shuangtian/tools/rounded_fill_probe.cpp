@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -118,14 +119,14 @@ auto main(int argc, char** argv) -> int {
   const double area = kCardWidth * kCardHeight;
   const auto report = [&](const char* name, double ms) {
     const double per_card = ms / static_cast<double>(kCards);
-    st::print("{:<28} {:8.2f} ms（{:.3f} ms/张，比值 {:6.2f}× 清屏单位）\n", name, ms, per_card,
+    st::log::out("{:<28} {:8.2f} ms（{:.3f} ms/张，比值 {:6.2f}× 清屏单位）\n", name, ms, per_card,
               per_card / area / unit);
   };
-  st::print("清屏每像素 {:.6f} ms（{:.3f} ms 整屏）\n", unit, unit * kCanvasWidth * kCanvasHeight);
+  st::log::out("清屏每像素 {:.6f} ms（{:.3f} ms 整屏）\n", unit, unit * kCanvasWidth * kCanvasHeight);
   report("圆角 radius=12（bench 几何）", rounded_ms);
   report("直角 radius=0（整数对齐）", square_ms);
   report("直角 radius=0（非对齐）", square_path_ms);
-  st::print("\n比值口径与 tests/raster_bench_test.cpp 一致（每张卡片每像素 / 清屏每像素）\n");
+  st::log::out("\n比值口径与 tests/raster_bench_test.cpp 一致（每张卡片每像素 / 清屏每像素）\n");
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 
   return st::probe::main_of(spec, opts, verdict);

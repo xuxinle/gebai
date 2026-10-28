@@ -29,6 +29,7 @@
 #include <string>
 #include <vector>
 
+#include "st/core/log.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
 #include "st/core/process.hpp"
@@ -71,6 +72,7 @@ constexpr std::string_view kMainSource = R"CPP(// 由 tests/pkg_integration_test
 
 #include "st/app/cli.hpp"
 #include "st/core/entry.hpp"
+#include "st/core/log.hpp"
 #include "st/ext/database.hpp"
 
 auto run_app(int argc, char** argv) -> int {
@@ -93,14 +95,14 @@ ST_MAIN(run_app)
     -> int {
   const auto result = st::process::run(path, arguments);
   if (!result) {
-    st::print("[独立工程] 无法执行产物: {}\n", result.error().to_string());
+    st::log::out("[独立工程] 无法执行产物: {}\n", result.error().to_string());
     return -1;
   }
   if (!result->stdout_text.empty()) {
-    st::print("[独立工程] 产物输出: {}\n", result->stdout_text);
+    st::log::out("[独立工程] 产物输出: {}\n", result->stdout_text);
   }
   if (!result->stderr_text.empty()) {
-    st::print("[独立工程] 产物 stderr: {}\n", result->stderr_text);
+    st::log::out("[独立工程] 产物 stderr: {}\n", result->stderr_text);
   }
   return result->exit_code;
 }
@@ -133,7 +135,7 @@ ST_TEST_WITH_TIMEOUT(independent_project_builds_links_and_runs, 60'000) {
   // 共享对象缓存另有 ST_HOME 管，不影响正确性）
   const std::string root = st::fs::join(
       st::fs::temp_dir(), std::format("st-integration-{}", st::process::current_id()));
-  st::print("[独立工程] 生成并构建 {}（framework={}）\n", root, framework);
+  st::log::out("[独立工程] 生成并构建 {}（framework={}）\n", root, framework);
   (void)st::fs::remove_all(root);
   ST_REQUIRE(st::fs::create_directories(st::fs::join(root, "src")).has_value());
 
@@ -169,7 +171,7 @@ ST_TEST_WITH_TIMEOUT(independent_project_builds_links_and_runs, 60'000) {
   const auto stats = st::pkg::build(*manifest, options);
   if (!stats) {
     // 构建失败就是本用例要抓的东西，不能静默跳过
-    st::print("[独立工程] 构建失败: {}\n", stats.error().to_string());
+    st::log::out("[独立工程] 构建失败: {}\n", stats.error().to_string());
     ST_CHECK(false);
     return;
   }

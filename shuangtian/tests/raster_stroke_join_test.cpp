@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -85,7 +86,7 @@ ST_TEST(stroke_single_segment_area_matches_length_times_width) {
   const double ink = ink_total(canvas);
   const double expected = kLength * kWidth * 255.0;
   const double ratio = ink / expected;
-  st::print("[stroke] 单段直线 墨量 {:.0f} / 理论 {:.0f} = {:.4f}\n", ink, expected, ratio);
+  st::log::out("[stroke] 单段直线 墨量 {:.0f} / 理论 {:.0f} = {:.4f}\n", ink, expected, ratio);
   ST_CHECK(ratio > 0.98 && ratio < 1.02);
 }
 
@@ -103,7 +104,7 @@ ST_TEST(stroke_arc_area_matches_arc_length_times_width) {
   const double ink = ink_total(canvas);
   const double expected = kPi * kRadius * kWidth * 255.0;
   const double ratio = ink / expected;
-  st::print("[stroke] 半圆弧 墨量 {:.0f} / 解析 {:.0f} = {:.4f}\n", ink, expected, ratio);
+  st::log::out("[stroke] 半圆弧 墨量 {:.0f} / 解析 {:.0f} = {:.4f}\n", ink, expected, ratio);
   // 弦比弧短 0.04%（64 段）；顶点补圆把外侧楔形补回一部分（补的是圆，比楔形略多）。
   // 实测 0.98（kMaxGapPx=0.1）——判据放在 ±3%，同时守住"缺墨"与"变胖"两侧。
   ST_CHECK(ratio > 0.97 && ratio < 1.03);
@@ -131,7 +132,7 @@ ST_TEST(stroke_right_angle_join_area) {
   const double miter_corner = half * half;
   const double expected = (two_bands - overlap + miter_corner) * 255.0;
   const double ratio = ink / expected;
-  st::print("[stroke] 直角折线 墨量 {:.0f} / 解析 {:.0f} = {:.4f}\n", ink, expected, ratio);
+  st::log::out("[stroke] 直角折线 墨量 {:.0f} / 解析 {:.0f} = {:.4f}\n", ink, expected, ratio);
   ST_CHECK(ratio > 0.96 && ratio < 1.04);
 }
 
@@ -169,7 +170,7 @@ ST_TEST(stroke_curve_has_no_periodic_gaps) {
     if (worst < 0.0 || value < worst) worst = value;
   }
   const double mean = sum / static_cast<double>(count);
-  st::print("[stroke] 弧顶列高 均值 {:.2f}（应≈宽 {:.1f}）最差 {:.2f} 凹陷 {:.1f}%\n", mean,
+  st::log::out("[stroke] 弧顶列高 均值 {:.2f}（应≈宽 {:.1f}）最差 {:.2f} 凹陷 {:.1f}%\n", mean,
             kWidth, worst, 100.0 * (1.0 - worst / mean));
   // 平滑弧的列高应稳定在"宽"附近：均值贴近宽度、最差列不低于 90%。
   ST_CHECK(mean > kWidth * 0.9 && mean < kWidth * 1.1);

@@ -16,6 +16,7 @@
 
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/mesh.hpp"
 #include "st/raster/scene3d.hpp"
@@ -125,16 +126,16 @@ int main(int argc, char** argv) {
       {"emissive", 0.0f, 0.95f, 0.0f, 1.5f},        // 自发光（>1，应被滚降）
   };
 
-  st::print("{:<18}{:>9}{:>9}{:>11}{:>9}{:>8}\n", "材质", "均值", "峰值", "高光占比%", "金属",
+  st::log::out("{:<18}{:>9}{:>9}{:>11}{:>9}{:>8}\n", "材质", "均值", "峰值", "高光占比%", "金属",
             "粗糙");
   for (const Case& c : cases) {
     const Canvas canvas = render(sphere, c);
     const Stats s = measure(canvas);
-    st::print("{:<18}{:>9.3f}{:>9.3f}{:>11.2f}{:>9.1f}{:>8.2f}\n", c.name, s.mean, s.peak,
+    st::log::out("{:<18}{:>9.3f}{:>9.3f}{:>11.2f}{:>9.1f}{:>8.2f}\n", c.name, s.mean, s.peak,
               s.hot_ratio * 100.0, static_cast<double>(c.metallic),
               static_cast<double>(c.roughness));
     const std::string path = out_dir + "/materials-" + c.name + ".png";
-    st::print("   → {}\n", save_png(canvas, path) ? path : std::string("(写图失败)"));
+    st::log::out("   → {}\n", save_png(canvas, path) ? path : std::string("(写图失败)"));
   }
   return 0;
 }

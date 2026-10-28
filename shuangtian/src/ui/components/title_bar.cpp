@@ -387,7 +387,18 @@ auto TitleBar::run_window_action(std::string_view action) -> bool {
     if (changed) mark_layout_dirty();
     return changed;
   }
-  if (action == "close") return control_->window_request_close();
+  if (action == "close") {
+    const bool ok = control_->window_request_close();
+    if (ok) {
+      // 关闭动作触发后**复位按下态**：sw_hide 让窗口隐藏太快，MouseUp 往往
+      // 到不了（点 × → 窗口没了），`pressed_button_` 会残留 → 恢复窗口后
+      // 关闭按钮仍显示按下高亮（像“聚焦在关闭按钮上”，实测现象）。
+      // 按钮的使命在触发关闭那一刻就结束了，按下态不该带进下一次显示。
+      pressed_button_ = -1;
+      mark_dirty();
+    }
+    return ok;
+  }
   return false;
 }
 

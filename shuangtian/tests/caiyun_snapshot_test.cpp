@@ -20,6 +20,7 @@
 #include "st/codec/png.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/test/test.hpp"
 
 namespace {
@@ -107,7 +108,7 @@ ST_TEST(caiyun_snapshot_diff_counts_exactly) {
   const double expected = 100.0 * 64.0 / 3072.0;
   ST_CHECK(std::abs(diff->diff_pct - expected) < 0.001);
   if (std::abs(diff->diff_pct - expected) >= 0.001) {
-    st::print("差异占比 {:.4f}%，期望 {:.4f}%\n", diff->diff_pct, expected);
+    st::log::out("差异占比 {:.4f}%，期望 {:.4f}%\n", diff->diff_pct, expected);
   }
   // 区域必须精确圈到那块 8x8
   ST_CHECK(diff->bounds_x == 20);
@@ -129,7 +130,7 @@ ST_TEST(caiyun_snapshot_diff_rejects_size_mismatch) {
   const auto diff = caiyun::diff_png(a, b);
   ST_CHECK(!diff.has_value());
   if (!diff) {
-    st::print("尺寸不匹配的报错：{}\n", diff.error().message);
+    st::log::out("尺寸不匹配的报错：{}\n", diff.error().message);
     ST_CHECK(diff.error().message.find("64x48") != std::string::npos);
   }
 }
@@ -147,7 +148,7 @@ ST_TEST(caiyun_snapshot_build_picks_per_scene_positions) {
   const auto snap = caiyun::build_snapshot(frames, out, "probe", bounds, 30, 30.0, 16, 12);
   ST_CHECK(snap.has_value());
   if (!snap) {
-    st::print("抽快照失败：{}\n", snap.error().message);
+    st::log::out("抽快照失败：{}\n", snap.error().message);
     return;
   }
   // 每镜 3 帧 = 9 帧
@@ -163,7 +164,7 @@ ST_TEST(caiyun_snapshot_build_picks_per_scene_positions) {
       if (at >= snap->frames.size()) return;
       const int want = bounds[s].first + expected_offsets[k];
       if (snap->frames[at].index != want) {
-        st::print("镜 {} 的第 {} 个采样：实际第 {} 帧，期望第 {} 帧\n", s, k,
+        st::log::out("镜 {} 的第 {} 个采样：实际第 {} 帧，期望第 {} 帧\n", s, k,
                   snap->frames[at].index, want);
       }
       ST_CHECK(snap->frames[at].index == want);
@@ -215,7 +216,7 @@ ST_TEST(caiyun_snapshot_diff_snapshots_pairs_by_frame_index) {
   const auto diff = caiyun::diff_snapshots(dir_a, dir_b);
   ST_CHECK(diff.has_value());
   if (!diff) {
-    st::print("比对失败：{}\n", diff.error().message);
+    st::log::out("比对失败：{}\n", diff.error().message);
     return;
   }
   ST_CHECK(diff->compared == 3);   // 只有 3 对共有帧

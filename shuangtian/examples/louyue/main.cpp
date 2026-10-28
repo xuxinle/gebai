@@ -35,6 +35,7 @@
 #include "st/core/entry.hpp"   // `ST_MAIN`（跨平台入口：正规化 argv 编码）
 #include "st/core/print.hpp"
 #include "st/core/time.hpp"
+#include "st/core/log.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/color_picker.hpp"
 #include "st/ui/components/file_dialog.hpp"
@@ -70,7 +71,7 @@ struct Options {
 /// 用法说明。**必须有**：未知参数会报错退出，没有 `--help` 就等于"报错了也没处查"
 ///（承 gbcode 同名函数）。
 auto print_usage(std::string_view program) -> void {
-  st::print(
+  st::log::out(
       "用法: {} [选项]\n"
       "\n"
       "窗口/主题\n"
@@ -114,7 +115,7 @@ auto parse_options(int argc, char** argv) -> Options {
         return consumed == text.size();   // 尾巴（如 `8x`）也是非法值
       }();
       if (!ok) {
-        st::eprint("参数 {} 需要一个整数，得到：{}（用 --help 看可用项）\n", flag, text);
+        st::log::err("参数 {} 需要一个整数，得到：{}（用 --help 看可用项）\n", flag, text);
         std::exit(2);
       }
       return parsed;
@@ -133,7 +134,7 @@ auto parse_options(int argc, char** argv) -> Options {
     else if (raw == "--control-port") {
       const std::int64_t port = parse_int("--control-port", 0);
       if (port < 0 || port > 65535) {
-        st::eprint("参数 --control-port 超出端口范围：{}\n", port);
+        st::log::err("参数 --control-port 超出端口范围：{}\n", port);
         std::exit(2);
       }
       options.control_port = static_cast<std::uint16_t>(port);
@@ -144,7 +145,7 @@ auto parse_options(int argc, char** argv) -> Options {
     // **未知参数报错，不静默忽略**（gbcode 实证过的温床：新加的开关被静默
     // 吃掉，表现是"三档渲染出来的图几乎一样"，差点被当成结论）。
     else {
-      st::eprint("未知参数：{}（用 --help 看可用项）\n", raw);
+      st::log::err("未知参数：{}（用 --help 看可用项）\n", raw);
       std::exit(2);
     }
   }
@@ -507,12 +508,12 @@ class LouyuePage final : public dsl::Component {
               file_dialog_open_.set(false);
               if (saving) {
                 if (!document_->export_png(path)) {
-                  st::eprint("导出失败：{}\n", path);
+                  st::log::err("导出失败：{}\n", path);
                 }
                 return;
               }
               if (!open_file(path)) {
-                st::eprint("无法打开：{}\n", path);
+                st::log::err("无法打开：{}\n", path);
               }
             };
             dialog.on_cancel = [this] { file_dialog_open_.set(false); };
@@ -1148,7 +1149,7 @@ while (!app.quit_requested() && !page->quit_requested()) {
   ++frames;
   app.pace_loop(frame_start_ms);
 }
-  st::print("镂月退出：{} 帧，DPI {:.1f}，后端 {}\n", frames,
+  st::log::out("镂月退出：{} 帧，DPI {:.1f}，后端 {}\n", frames,
             static_cast<double>(app.device_scale()), std::string(app.backend_name()));
   return 0;
 }

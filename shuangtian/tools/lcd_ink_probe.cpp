@@ -19,6 +19,7 @@
 
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/text/text.hpp"
 
 using st::text::FontStack;
@@ -51,12 +52,12 @@ constexpr std::string_view kSamples = "霜天自绘概览组件数据控制通�
 int main() {
   auto loaded = FontStack::system_default();
   if (!loaded.has_value()) {
-    st::print("无字体\n");
+    st::log::out("无字体\n");
     return 0;
   }
   FontStack stack(std::move(*loaded));
   if (stack.empty()) {
-    st::print("字体栈为空\n");
+    st::log::out("字体栈为空\n");
     return 0;
   }
 
@@ -67,7 +68,7 @@ int main() {
   lcd_raw.set_subpixel(true);
   lcd_raw.set_subpixel_filter(false);
 
-  st::print("{:<8} {:>5} {:>10} {:>10}\n", "字形", "px", "滤波开", "滤波关");
+  st::log::out("{:<8} {:>5} {:>10} {:>10}\n", "字形", "px", "滤波开", "滤波关");
   double worst_f = 0.0;
   double worst_r = 0.0;
   char32_t worst_f_cp = 0;
@@ -94,14 +95,14 @@ int main() {
       }
       // 只打印偏差较大的（前几档）
       if (mf > 0.04 || mr > 0.04) {
-        st::print("{:>6X} {:>5.1f} {:>10.4f} {:>10.4f}\n", static_cast<unsigned>(codepoint),
+        st::log::out("{:>6X} {:>5.1f} {:>10.4f} {:>10.4f}\n", static_cast<unsigned>(codepoint),
                   static_cast<double>(size), mf, mr);
       }
     }
   }
-  st::print("\n滤波开：worst={:.4f} @U+{:04X} {}px\n", worst_f, static_cast<unsigned>(worst_f_cp),
+  st::log::out("\n滤波开：worst={:.4f} @U+{:04X} {}px\n", worst_f, static_cast<unsigned>(worst_f_cp),
             static_cast<double>(worst_f_size));
-  st::print("滤波关：worst={:.4f} @U+{:04X} {}px\n", worst_r, static_cast<unsigned>(worst_r_cp),
+  st::log::out("滤波关：worst={:.4f} @U+{:04X} {}px\n", worst_r, static_cast<unsigned>(worst_r_cp),
             static_cast<double>(worst_r_size));
   return 0;
 }

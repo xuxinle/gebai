@@ -29,6 +29,7 @@
 
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/math/path.hpp"
 #include "st/text/grid_fit.hpp"
@@ -178,7 +179,7 @@ ST_TEST(grid_fit_bitmap_grid_matches_unfitted) {
       };
       if (!same_grid(*fitted) || !same_grid(*strong)) {
         ++mismatched;
-        st::print("[fit] 网格不一致：U+{:04X} @{}px 基准 {}x{}@{},{} / Light {}x{}@{},{} / "
+        st::log::out("[fit] 网格不一致：U+{:04X} @{}px 基准 {}x{}@{},{} / Light {}x{}@{},{} / "
                   "Normal {}x{}@{},{}\n",
                   static_cast<unsigned>(codepoint), size, base->width, base->height,
                   base->offset_x, base->offset_y, fitted->width, fitted->height, fitted->offset_x,
@@ -187,7 +188,7 @@ ST_TEST(grid_fit_bitmap_grid_matches_unfitted) {
       }
     }
   }
-  st::print("[fit] 网格对齐：比较 {} 个字形，不一致 {}\n", compared, mismatched);
+  st::log::out("[fit] 网格对齐：比较 {} 个字形，不一致 {}\n", compared, mismatched);
   ST_CHECK(compared > 50);
   ST_CHECK_EQ(static_cast<int>(mismatched), 0);
 }
@@ -206,7 +207,7 @@ ST_TEST(grid_fit_sharpens_stems) {
     const StepStats fitted = step_stats(normal, text, pixel_size);
     const double mid_base = mid_tone_ratio(off, text, pixel_size);
     const double mid_fitted = mid_tone_ratio(normal, text, pixel_size);
-    st::print("[fit] {}：一步到位 {} → {}（缓坡 {} → {}）；中间调占比 {:.1f}% → {:.1f}%\n",
+    st::log::out("[fit] {}：一步到位 {} → {}（缓坡 {} → {}）；中间调占比 {:.1f}% → {:.1f}%\n",
               name, base.steps, fitted.steps, base.gradual, fitted.gradual, mid_base * 100.0,
               mid_fitted * 100.0);
     // 中间调占比必须下降（这是"看着不糊了"的可断言代理），且幅度要真实可见
@@ -243,7 +244,7 @@ ST_TEST(grid_fit_preserves_ink) {
       const double fitted = ink_sum(normal, text, size);
       if (base < 1.0) continue;
       const double delta = std::fabs(fitted / base - 1.0);
-      st::print("[fit] {} @{}px 墨量变化 {:+.2f}%\n", name, size, (fitted / base - 1.0) * 100.0);
+      st::log::out("[fit] {} @{}px 墨量变化 {:+.2f}%\n", name, size, (fitted / base - 1.0) * 100.0);
       // 小字号容差放宽（笔画本来就小于 2px，吸附会带来更明显的相对变化）；
       // 大字号必须接近恒等——那里"不需要"hinting，动了反而说明实现有问题。
       ST_CHECK(delta < (size <= 16.0f ? 0.08 : 0.03));
@@ -409,7 +410,7 @@ ST_TEST(grid_fit_combines_with_subpixel_without_distortion) {
   }
   ST_CHECK(compared > 20);
   if (plain_ink_total > 1.0) {
-    st::print("[fit] 亚像素+拟合：墨量总量变化 {:+.2f}%（{} 个字形）\n",
+    st::log::out("[fit] 亚像素+拟合：墨量总量变化 {:+.2f}%（{} 个字形）\n",
               (fitted_ink_total / plain_ink_total - 1.0) * 100.0, compared);
     ST_CHECK(std::fabs(fitted_ink_total / plain_ink_total - 1.0) < 0.06);
   }
@@ -575,7 +576,7 @@ ST_TEST(font_stem_hints_reach_the_fitter) {
                                                             ? 0.0
                                                             : 0.25));
   if (bitmap == nullptr) return;
-  st::print("[hint] U+4E2D 提示 {} 条；拟合内 seen={} bound={} 参与={}\n", hints.size(),
+  st::log::out("[hint] U+4E2D 提示 {} 条；拟合内 seen={} bound={} 参与={}\n", hints.size(),
             bitmap->fit_hint_seen, bitmap->fit_hint_bound, bitmap->fit_hint_stems);
   // 断言到「接上轮廓点」为止，不断言「最终参与拟合的条数 > 0」：
   // 后者取决于字体给的是哪种提示（CJK 的「中」给的竖提示算下来是整字宽的边框，
@@ -670,7 +671,7 @@ ST_TEST(quantize_does_not_amplify_design_width_differences) {
   const float lower = median_stem(kLower, std::size(kLower));
   if (upper <= 0.0f || lower <= 0.0f) return;
   const float ratio = upper / lower;
-  st::print("[quantize] 11px 竖笔宽：大写 {:.2f} / 小写 {:.2f} = {:.3f}\n", upper, lower, ratio);
+  st::log::out("[quantize] 11px 竖笔宽：大写 {:.2f} / 小写 {:.2f} = {:.3f}\n", upper, lower, ratio);
   // 参照（真窗口浏览器）的同一比值是 1.099；量化放大后实测 1.56。
   ST_CHECK(ratio < 1.25f);
   ST_CHECK(ratio > 1.0f);   // 大写确实略粗于小写（字体设计如此），不能反向
@@ -712,7 +713,7 @@ ST_TEST(class_gamma_affects_only_its_class_and_survives_cache) {
   const auto digit_after = renderer.glyph_bitmap_of(U'3', 15.0f);
   const auto letter_after = renderer.glyph_bitmap_of(U'A', 15.0f);
   ST_CHECK(digit_after != nullptr && letter_after != nullptr);
-  st::print("[class] 数字 3：{:.1f} -> {:.1f}；字母 A：{:.1f} -> {:.1f}\n", digit_ink_0,
+  st::log::out("[class] 数字 3：{:.1f} -> {:.1f}；字母 A：{:.1f} -> {:.1f}\n", digit_ink_0,
             ink(*digit_after), letter_ink_0, ink(*letter_after));
   // 数字变重（γ<1 压黑），且幅度可观（实测 ~7%）
   ST_CHECK(ink(*digit_after) > digit_ink_0 * 1.03);
@@ -765,7 +766,7 @@ ST_TEST(class_gamma_affects_only_its_class_and_survives_cache) {
   for (std::size_t index = 0; index < plain.size(); ++index) {
     if (plain[index] != darkened[index]) ++changed;
   }
-  st::print("[class] 绘制路径：{} / {} 字节变化（数字像素应占少数，字母必须不动）\n", changed,
+  st::log::out("[class] 绘制路径：{} / {} 字节变化（数字像素应占少数，字母必须不动）\n", changed,
             plain.size());
   ST_CHECK(changed > 0);   // 变了 ⇒ 绘制路径确实走了类（这一条就是漏接线时的红点）
 }
@@ -884,7 +885,7 @@ ST_TEST(grid_fit_size_cap_takes_effect_and_enters_cache) {
     const double unlimited = ink_of(renderer.glyph_bitmap_of(U'测', 30.0f));
     renderer.set_grid_fit_max_size(22.0f);                     // 上限 22：30 物理不拟合
     const double capped = ink_of(renderer.glyph_bitmap_of(U'测', 30.0f));
-    st::print("[fitmax] 30 物理 px 的「测」墨量：不限 {:.1f} vs 上限22 {:.1f}\n", unlimited, capped);
+    st::log::out("[fitmax] 30 物理 px 的「测」墨量：不限 {:.1f} vs 上限22 {:.1f}\n", unlimited, capped);
     ST_CHECK(unlimited > 0.0 && capped > 0.0);
     // 键里漏掉上限 ⇒ 第二次会命中第一次的位图，两者逐位相同（本断言即为此设）
     ST_CHECK(std::fabs(unlimited - capped) > 0.5);

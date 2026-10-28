@@ -43,6 +43,17 @@ function partialOutput(stdout: string, stderr: string): string {
   return `${o.trim() ? `\n已产出 stdout（尾部 ${o.length} 字符）:\n${o}` : ""}${e.trim() ? `\n已产出 stderr（尾部 ${e.length} 字符）:\n${e}` : ""}`
 }
 
+/** 运行时长通知阈值（毫秒）：命令跑超过它时，返回输出末尾附一行耗时，提醒模型“这条命令花了多久”。 */
+const SLOW_CMD_MS = 5000
+
+/** 运行时长提示：超过阈值时返回“\n\n[耗时 x.xs]”，否则空串。
+ *  aim：sh 工具跑得久（构建/测试/安装）时，模型容易误以为卡住或没跑——
+ *  把具体秒数摆在输出末尾，让它能判断“正常慢”还是“疑似挂起”。 */
+function slowRunNote(elapsedMs: number): string {
+  if (elapsedMs < SLOW_CMD_MS) return ""
+  return `\n\n[运行时长 ${(elapsedMs / 1000).toFixed(1)}s]`
+}
+
 /** sh/py 免审参数（approval:false 跳过本次审批）的动态审批判定：缺省/true 需审批；显式 false 时
  *  **强制白名单校验**——仅只读（validateShCommandSafeMode）或测试/静态检查类命令（shApprovalFreeAllowed）
  *  放行免审，其余仍需审批（防提示词注入借免审标记执行任意命令）；py 的 code 为任意代码、无法静态判定，
@@ -128,23 +139,33 @@ export const shTool: Tool = {
         if (args.strict === true && code !== 0) {
           throw new Error(`命令执行失败（exit ${code}）${r.stderr ? `：\n${r.stderr.slice(0, 2000)}` : ""}`)
         }
+        // 运行时长（只对真正跑完的同步结果附）：>5s 追加一行，提醒模型这条命令花了多久
+        const runNote = slowRunNote(r.record.endedAt != null ? r.record.endedAt - r.record.startedAt : 0)
         const out = code === 0 ? r.stdout : `${r.stdout}\n${r.stderr}\n[exit ${code}]`
         // 成功但无输出：明确提示（区分「命令成功无输出」与「输出捕获失败/静默吞掉」）
         const final = code === 0 && !r.stdout.trim() ? "（命令执行成功，无输出）" : out
-        return { ...(await truncate(cleanScriptOutput(final) + cwdNote, "sh", ctx)), data: scriptData(r.stdout, r.stderr, code) }
+        return {
+          ...(await truncate(cleanScriptOutput(final) + cwdNote + runNote, "sh", ctx)),
+          data: scriptData(r.stdout, r.stderr, code),
+        }
       }
       // 后台启动失败（并发超限等）：回退下面的同步执行，命令照旧能跑
     }
     // 同步回退路径：同一 `timeout` 在此为**杀进程上限**（无后台服务可用，只有同步执行一条路）
+    const t0 = Date.now()
     const { stdout, stderr, code } = await ctx.runCommand(command, { workdir, env: ctx.env, input, timeoutMs: waitMs })
     // strict：非 0 退出码转工具级异常（js 编排内未捕获即中断整个脚本，try/catch 可容错继续）
     if (args.strict === true && code !== 0) {
       throw new Error(`命令执行失败（exit ${code}）${stderr ? `：\n${stderr.slice(0, 2000)}` : ""}`)
     }
+    const runNote = slowRunNote(Date.now() - t0)
     const out = code === 0 ? stdout : `${stdout}\n${stderr}\n[exit ${code}]`
     // 成功但无输出：明确提示（区分「命令成功无输出」与「输出捕获失败/静默吞掉」）
     const final = code === 0 && !stdout.trim() ? "（命令执行成功，无输出）" : out
-    return { ...(await truncate(cleanScriptOutput(final) + cwdNote, "sh", ctx)), data: scriptData(stdout, stderr, code) }
+    return {
+      ...(await truncate(cleanScriptOutput(final) + cwdNote + runNote, "sh", ctx)),
+      data: scriptData(stdout, stderr, code),
+    }
   },
 }
 

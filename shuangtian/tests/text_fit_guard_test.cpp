@@ -28,6 +28,7 @@
 
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/text/grid_fit.hpp"
 #include "st/text/text.hpp"
 
@@ -137,7 +138,7 @@ ST_TEST(grid_fit_quantized_stems_keep_both_edges) {
     const Sharpness after = scan(fitted, text, kPixelSize);
     ST_REQUIRE(base.half > 0);
     const double ratio = static_cast<double>(after.half) / static_cast<double>(base.half);
-    st::print("[fit/护栏] {} @{}px：half {} → {}（{:+.0f}%）· mid/solid {:.3f} → {:.3f}\n", name,
+    st::log::out("[fit/护栏] {} @{}px：half {} → {}（{:+.0f}%）· mid/solid {:.3f} → {:.3f}\n", name,
               kPixelSize, base.half, after.half, (ratio - 1.0) * 100.0,
               static_cast<double>(base.mid) / static_cast<double>(base.solid),
               static_cast<double>(after.mid) / static_cast<double>(after.solid));
@@ -176,7 +177,7 @@ ST_TEST(grid_fit_keeps_ink_identity_for_large_glyphs) {
       const Sharpness after = scan(fitted, text, pixel_size);
       if (base.ink < 1.0) continue;
       const double delta = std::fabs(after.ink / base.ink - 1.0);
-      st::print("[fit/大字号] {} @{}px 墨量变化 {:+.2f}%\n", name, pixel_size,
+      st::log::out("[fit/大字号] {} @{}px 墨量变化 {:+.2f}%\n", name, pixel_size,
                 (after.ink / base.ink - 1.0) * 100.0);
       ST_CHECK(delta < 0.02);
     }

@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -69,7 +70,7 @@ auto main(int argc, char** argv) -> int {
                          st::math::Point{md.offset2_x, md.offset2_y});
       best = std::min(best, elapsed_ms(start));
     }
-    st::print("① 环境层 blur=22：首次（建遮罩+模糊+合成）{:>8.3} ms · 后续（仅合成）{:>8.3} ms · "
+    st::log::out("① 环境层 blur=22：首次（建遮罩+模糊+合成）{:>8.3} ms · 后续（仅合成）{:>8.3} ms · "
               "建遮罩占比 {:.0f}%\n",
               first_ms, best, 100.0 * std::max(0.0, first_ms - best) / std::max(first_ms, 1e-9));
   }
@@ -85,7 +86,7 @@ auto main(int argc, char** argv) -> int {
                          st::math::Point{md.offset_x, md.offset_y});
       best = std::min(best, elapsed_ms(start));
     }
-    st::print("② 关键层 blur=6 ：首次（建遮罩+模糊+合成）{:>8.3} ms · 后续（仅合成）{:>8.3} ms · "
+    st::log::out("② 关键层 blur=6 ：首次（建遮罩+模糊+合成）{:>8.3} ms · 后续（仅合成）{:>8.3} ms · "
               "建遮罩占比 {:.0f}%\n",
               first_ms, best, 100.0 * std::max(0.0, first_ms - best) / std::max(first_ms, 1e-9));
   }
@@ -100,7 +101,7 @@ auto main(int argc, char** argv) -> int {
                          st::math::Point{0.0f, 6.0f + static_cast<float>(index % 16) * 0.25f});
       best = std::min(best, elapsed_ms(start));
     }
-    st::print("③ 环境层 每遍换几何（全未命中，缓存上限 48）：{:>8.3} ms\n", best);
+    st::log::out("③ 环境层 每遍换几何（全未命中，缓存上限 48）：{:>8.3} ms\n", best);
   }
 
   // ④ 96 张卡片形态：同一几何 → 命中 96 次（真实基准的情形）
@@ -115,7 +116,7 @@ auto main(int argc, char** argv) -> int {
       canvas.draw_shadow(st::math::Rect{x, y, 140.0f, 48.0f}, kRadius, md.blur, md.color,
                          st::math::Point{md.offset_x, md.offset_y});
     }
-    st::print("④ 96 张卡片两层阴影（同几何，缓存命中）：{:>8.3} ms/帧\n", elapsed_ms(start));
+    st::log::out("④ 96 张卡片两层阴影（同几何，缓存命中）：{:>8.3} ms/帧\n", elapsed_ms(start));
   }
 
   // ⑤ 对照：96 张卡片两层阴影 + 每遍强制换几何（全未命中）
@@ -130,7 +131,7 @@ auto main(int argc, char** argv) -> int {
       canvas.draw_shadow(st::math::Rect{x, y, 140.0f, 48.0f}, kRadius, md.blur, md.color,
                          st::math::Point{static_cast<float>(index % 64) * 0.25f, 0.0f});
     }
-    st::print("⑤ 96 张卡片两层阴影（每张换几何，全未命中）：{:>8.3} ms/帧\n", elapsed_ms(start));
+    st::log::out("⑤ 96 张卡片两层阴影（每张换几何，全未命中）：{:>8.3} ms/帧\n", elapsed_ms(start));
   }
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 

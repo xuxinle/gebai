@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/element.hpp"
@@ -88,19 +89,19 @@ auto main(int argc, char** argv) -> int {
     root.paint(canvas);
   });
 
-  st::print("{} 行的列表界面\n\n", rows);
-  st::print("整帧（clear + 全树）  {:>9.2f} µs\n\n", full_ns / 1000.0);
-  st::print("逐元素绘制（只走 paint，不 clear）每行都画的成本：\n");
+  st::log::out("{} 行的列表界面\n\n", rows);
+  st::log::out("整帧（clear + 全树）  {:>9.2f} µs\n\n", full_ns / 1000.0);
+  st::log::out("逐元素绘制（只走 paint，不 clear）每行都画的成本：\n");
 
   // 只 paint 不 clear：这就是“局部帧”路径的最大开销（损坏区覆盖全屏时）。
   const double paint_only_ns = best_ns([&] { root.paint(canvas); });
-  st::print("  paint() 全屏相交      {:>9.2f} µs\n", paint_only_ns / 1000.0);
-  st::print("\n判读：\n");
-  st::print("  · 局部帧**不清屏**，成本 ≈ paint()；整帧 = clear + paint()。\n");
-  st::print("  · 所以当损坏区覆盖全屏时，局部帧只省下 clear（本测 {:.2f} µs，占 {:.0f}%），\n",
+  st::log::out("  paint() 全屏相交      {:>9.2f} µs\n", paint_only_ns / 1000.0);
+  st::log::out("\n判读：\n");
+  st::log::out("  · 局部帧**不清屏**，成本 ≈ paint()；整帧 = clear + paint()。\n");
+  st::log::out("  · 所以当损坏区覆盖全屏时，局部帧只省下 clear（本测 {:.2f} µs，占 {:.0f}%），\n",
             (full_ns - paint_only_ns) / 1000.0,
             full_ns > 0.0 ? (full_ns - paint_only_ns) / full_ns * 100.0 : 0.0);
-  st::print("    **并不存在“省掉未变元素”这层收益**——剔除只在“与损坏区不相交”时生效。\n");
-  st::print("  · 因此“顶部状态栏刷新导致整帧变慢”不是缺陷，而是这条设计的必然结果。\n");
+  st::log::out("    **并不存在“省掉未变元素”这层收益**——剔除只在“与损坏区不相交”时生效。\n");
+  st::log::out("  · 因此“顶部状态栏刷新导致整帧变慢”不是缺陷，而是这条设计的必然结果。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

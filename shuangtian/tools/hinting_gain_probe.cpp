@@ -35,6 +35,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 
 namespace {
 
@@ -115,7 +116,7 @@ void report(const char* label, const Stats& stats) {
   const double on_grid =
       stats.vertical_edges > 0 ? 100.0 * stats.on_grid / stats.vertical_edges : 0.0;
   const double half = stats.vertical_edges > 0 ? 100.0 * stats.near_half / stats.vertical_edges : 0.0;
-  st::print("  {:<38} 竖边 {:5}  在整数网格上 {:5.1f}%  平均离网格 {:.3f} px  最糊相位 {:5.1f}%\n",
+  st::log::out("  {:<38} 竖边 {:5}  在整数网格上 {:5.1f}%  平均离网格 {:.3f} px  最糊相位 {:5.1f}%\n",
             label, stats.vertical_edges, on_grid, mean, half);
 }
 
@@ -132,14 +133,14 @@ int main(int argc, char** argv) {
 
   FT_Library library = nullptr;
   if (FT_Init_FreeType(&library) != 0) {
-    st::print("FreeType 初始化失败\n");
+    st::log::out("FreeType 初始化失败\n");
     return 1;
   }
   const std::string path = argc > 1 ? argv[1] : "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
   const int face_index = argc > 2 ? std::stoi(argv[2]) : 0;
   FT_Face face = nullptr;
   if (FT_New_Face(library, path.c_str(), face_index, &face) != 0) {
-    st::print("打开字体失败：{}\n", path);
+    st::log::out("打开字体失败：{}\n", path);
     return 1;
   }
   FT_Set_Pixel_Sizes(face, 0, static_cast<FT_UInt>(std::lround(kPixelSize)));
@@ -157,12 +158,12 @@ int main(int argc, char** argv) {
   const std::string kind = has_cff && !has_glyf
                                ? "CFF 轮廓（只有 stem hint）"
                                : (has_glyf ? "TrueType 轮廓（有完整指令）" : "其他");
-  st::print("\n=== {} (face {})  {} · pixel size {:.2f} ===\n",
+  st::log::out("\n=== {} (face {})  {} · pixel size {:.2f} ===\n",
             path.substr(path.find_last_of('/') + 1), face_index, kind, kPixelSize);
 
   const bool cjk_font = has_cff;
   const std::u32string samples = st::utf8_decode(argc > 3 ? argv[3] : (cjk_font ? kCjk : kLatin));
-  st::print("  样本：{} 个字形\n", samples.size());
+  st::log::out("  样本：{} 个字形\n", samples.size());
 
   Options none;
   none.hinting = false;

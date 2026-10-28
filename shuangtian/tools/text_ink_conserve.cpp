@@ -20,6 +20,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -83,8 +84,8 @@ auto main(int argc, char** argv) -> int {
       {"编辑器", "const auto polylines = path", FontRole::Monospace},
   };
 
-  st::print("口径：device_scale={}；「真值」= 超采样 8 档（近似解析覆盖率）\n", device_scale);
-  st::print("  {:<14s} {:>5s} {:>10s} {:>10s} {:>10s} {:>9s} {:>9s}\n", "样本", "逻辑px", "真值(ss8)",
+  st::log::out("口径：device_scale={}；「真值」= 超采样 8 档（近似解析覆盖率）\n", device_scale);
+  st::log::out("  {:<14s} {:>5s} {:>10s} {:>10s} {:>10s} {:>9s} {:>9s}\n", "样本", "逻辑px", "真值(ss8)",
             "ss2 无拟合", "ss2 拟合", "拟合/真值", "无拟合/真值");
   for (const Sample& sample : samples) {
     for (const float size : {11.0f, 12.0f, 13.0f, 13.5f, 14.0f, 16.0f}) {
@@ -103,10 +104,10 @@ auto main(int argc, char** argv) -> int {
       fitted.set_grid_fit(GridFitMode::Normal);
       const double with_fit = ink_of(fitted, sample.text, size, device_scale, sample.role);
 
-      st::print("  {:<14s} {:>5.1f} {:>10.1f} {:>10.1f} {:>10.1f} {:>9.3f} {:>9.3f}\n",
+      st::log::out("  {:<14s} {:>5.1f} {:>10.1f} {:>10.1f} {:>10.1f} {:>9.3f} {:>9.3f}\n",
                 sample.tag, size, truth, no_fit, with_fit, with_fit / truth, no_fit / truth);
     }
-    st::print("\n");
+    st::log::out("\n");
   }
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 

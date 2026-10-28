@@ -78,3 +78,6 @@ export { ActionExecutor } from "./executor"
 // ── 输入面（渠道 → 调度内核） ──
 export type { ChannelInputBridgeOptions, InputCounters, PersonaDispatchPort } from "./bridge"
 export { ChannelInputBridge, eventIdFor, hash32 } from "./bridge"
+
+// ── 自发送消息记账（入站侧防回灌） ──
+export { SentMessageRegistry } from "./outbox"

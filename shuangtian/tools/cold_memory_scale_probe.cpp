@@ -24,6 +24,7 @@
 
 #include "st/core/memory.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 
 namespace {
@@ -48,11 +49,11 @@ auto main(int argc, char** argv) -> int {
   st::probe::result verdict{};
 
   if (!st::memory::has_stats()) {
-    st::print("跳过：本平台不支持内存统计\n");
+    st::log::out("跳过：本平台不支持内存统计\n");
     return st::probe::main_of(spec, opts, verdict);
   }
 
-  st::print("{:>12}  {:>12}  {:>12}  {:>10}  {:>12}\n", "缓冲大小", "首次 ms", "第二次 ms",
+  st::log::out("{:>12}  {:>12}  {:>12}  {:>10}  {:>12}\n", "缓冲大小", "首次 ms", "第二次 ms",
             "倍数", "首次缺页");
 
   const std::size_t sizes_kb[] = {600, 2048, 8192, 32768};
@@ -81,13 +82,13 @@ auto main(int argc, char** argv) -> int {
       warm_best =
           std::min(warm_best, std::chrono::duration<double, std::milli>(warm_end - warm_start).count());
     }
-    st::print("{:>9} KB  {:>12.3f}  {:>12.3f}  {:>9.2f}×  {:>12}\n", kilobytes, cold_best,
+    st::log::out("{:>9} KB  {:>12.3f}  {:>12.3f}  {:>9.2f}×  {:>12}\n", kilobytes, cold_best,
               warm_best, warm_best > 0.0 ? cold_best / warm_best : 0.0, faults_total);
   }
 
-  st::print("\n判读：\n");
-  st::print("  · 600 KB（= 447 KB Markdown 展开后的量级）只有零点几 ms；\n");
-  st::print("  · 而 BACKLOG 那条要解释的是一帧 58 ms —— **差两个数量级**，\n");
-  st::print("    所以冷内存/缺页**不是**那 58 ms 的原因，别往“预碰”方向投入。\n");
+  st::log::out("\n判读：\n");
+  st::log::out("  · 600 KB（= 447 KB Markdown 展开后的量级）只有零点几 ms；\n");
+  st::log::out("  · 而 BACKLOG 那条要解释的是一帧 58 ms —— **差两个数量级**，\n");
+  st::log::out("    所以冷内存/缺页**不是**那 58 ms 的原因，别往“预碰”方向投入。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

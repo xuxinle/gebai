@@ -13,6 +13,7 @@
 
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -109,23 +110,23 @@ inline void save(const std::vector<std::uint8_t>& rgba, int width, int height,
   image.rgba.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4U, 255U);
   // 尺寸一致性必须先查：不匹配时 `std::copy` 会直接写越界（实测过堆损坏）。
   if (rgba.size() != image.rgba.size()) {
-    st::print("  口径不一致：像素 {} vs 目标 {}，跳过 {}\n", rgba.size(), image.rgba.size(), path);
+    st::log::out("  口径不一致：像素 {} vs 目标 {}，跳过 {}\n", rgba.size(), image.rgba.size(), path);
     return;
   }
   std::copy(rgba.begin(), rgba.end(), image.rgba.begin());
   if (const auto status = st::codec::png_write_file(path, image); !status.has_value()) {
-    st::print("  写 {} 失败：{}\n", path, status.error().message);
+    st::log::out("  写 {} 失败：{}\n", path, status.error().message);
   }
 }
 
 /// 打印实际生效的字体链（量尺必须能自证"两侧同一套字体"）。
 inline void print_font_stack(const FontStack& stack) {
-  st::print("字体链：");
+  st::log::out("字体链：");
   for (std::size_t i = 0; i < stack.faces().size(); ++i) {
     const auto& face = stack.faces()[i];
-    st::print(" [{}]={}#{}", i, face.path(), face.face_index());
+    st::log::out(" [{}]={}#{}", i, face.path(), face.face_index());
   }
-  st::print("\n");
+  st::log::out("\n");
 }
 
 }  // namespace ab

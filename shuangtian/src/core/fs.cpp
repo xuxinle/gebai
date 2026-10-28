@@ -634,8 +634,24 @@ auto relative_to(std::string_view path, std::string_view base) -> std::string {
 }
 
 auto match_glob(std::string_view pattern, std::string_view path) -> bool {
-  const std::vector<std::string_view> pattern_parts = split(pattern, '/');
-  const std::vector<std::string_view> path_parts = split(path, '/');
+  // 分隔符归一化：Windows 的 `recursive_directory_iterator` 返回反斜杠路径，
+  // 而清单豁免的 glob 写的是正斜杠（`tools/**`）。不归一化时两个字符都参与 split，
+  // `tools\dw.cpp` 被拆成一段、永远匹配不上 `tools/**`——豁免静默失效
+  //（lint 报违规而清单里明明写着豁免，最难得查的那种偏）。
+  const std::string pat_norm = [&] {
+    std::string out(pattern);
+    for (auto& ch : out)
+      if (ch == '\\') ch = '/';
+    return out;
+  }();
+  const std::string path_norm = [&] {
+    std::string out(path);
+    for (auto& ch : out)
+      if (ch == '\\') ch = '/';
+    return out;
+  }();
+  const std::vector<std::string_view> pattern_parts = split(pat_norm, '/');
+  const std::vector<std::string_view> path_parts = split(path_norm, '/');
   std::vector<std::string_view> clean_pattern;
   for (const auto part : pattern_parts) {
     if (!part.empty()) clean_pattern.push_back(part);

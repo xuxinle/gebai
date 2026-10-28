@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 
@@ -57,7 +58,7 @@ auto main(int argc, char** argv) -> int {
       {"大面板 720x480 r16 blur32", 720.0f, 480.0f, 16.0f, 32.0f, 6.0f},
   };
 
-  st::print("{:<26}  {:>12}  {:>10}  {:>10}  {:>10}  {:>10}\n", "参数", "区域像素",
+  st::log::out("{:<26}  {:>12}  {:>10}  {:>10}  {:>10}  {:>10}\n", "参数", "区域像素",
             "α=0 占比", "α≤8 占比", "α≤32 占比", "α>32 占比");
   for (const Params& item : params) {
     Canvas canvas(kWidth, kHeight, 1.0f);
@@ -103,10 +104,10 @@ auto main(int argc, char** argv) -> int {
     const auto pct = [total](std::uint64_t value) {
       return total == 0 ? 0.0 : static_cast<double>(value) * 100.0 / static_cast<double>(total);
     };
-    st::print("{:<26}  {:>12}  {:>9.1f}%  {:>9.1f}%  {:>9.1f}%  {:>9.1f}%\n", item.name, total,
+    st::log::out("{:<26}  {:>12}  {:>9.1f}%  {:>9.1f}%  {:>9.1f}%  {:>9.1f}%\n", item.name, total,
               pct(zero), pct(le8), pct(le32), pct(gt32));
   }
-  st::print("\n注：“α=0 占比”那一列是现有 `if (mask_byte == 0) continue;` 已经能省的；\n");
-  st::print("    剩下那些极淡值（α≤32）**跳不过**，它们的成本是逐像素混合本身。\n");
+  st::log::out("\n注：“α=0 占比”那一列是现有 `if (mask_byte == 0) continue;` 已经能省的；\n");
+  st::log::out("    剩下那些极淡值（α≤32）**跳不过**，它们的成本是逐像素混合本身。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

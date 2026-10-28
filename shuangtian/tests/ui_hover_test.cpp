@@ -124,6 +124,28 @@ ST_TEST(hover_marks_element_and_fires_callback) {
   ST_CHECK_EQ(static_cast<int>(fixture.sequence.size()), 2);
 }
 
+ST_TEST(clear_hover_resets_hover_state_without_mouse_move) {
+  // 「窗口恢复/内容重置」场景：鼠标没动（没新的 MouseMove），但悬停状态必须清——
+  // 否则隐藏窗口期间残留的 hover（如关闭按钮红色高亮）会带进下一次显示。
+  Fixture fixture;
+  fixture.layout();
+  fixture.move_to(60.0f, 40.0f);
+  ST_CHECK(fixture.button->hovered());
+  ST_CHECK_EQ(fixture.enters, 1);
+
+  // 直接清（模拟窗口恢复：不移动鼠标）
+  fixture.root.clear_hover();
+  ST_CHECK(!fixture.button->hovered());
+  ST_CHECK_EQ(fixture.leaves, 1);   // 离开事件照发（旧目标有机会复位视觉）
+  ST_CHECK_EQ(fixture.hover_events, 2);  // HoverIn + HoverOut
+
+  // 鼠标再动才重新 hover（不受“清过一次”影响）
+  fixture.move_to(280.0f, 140.0f);
+  fixture.move_to(60.0f, 40.0f);
+  ST_CHECK(fixture.button->hovered());
+  ST_CHECK_EQ(fixture.enters, 2);
+}
+
 ST_TEST(hover_callback_and_event_both_reach_the_element) {
   // 回调与事件是**两套入口**：回调给"这个按钮被悬浮时要做什么"，
   // 事件给统一处理（状态栏/埋点/脚本绑定）。只给一套会让另一类用法变扭。

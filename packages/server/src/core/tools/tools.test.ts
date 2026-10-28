@@ -217,6 +217,44 @@ describe("global tools", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
+  test("sh 慢命令（>5s）输出末尾附运行时长提示", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-sh-slow-"))
+    const c = ctx(home)
+    // ① shTasks 路径：record.startedAt→endedAt ≈ 6s
+    c.shTasks = shTasksStub(async (command) => ({
+      started: true,
+      record: shRec({ command, startedAt: Date.now() - 6000, endedAt: Date.now(), exitCode: 0 }),
+      finished: true,
+      aborted: false,
+      stdout: "slow build output",
+      stderr: "",
+      truncated: false,
+    }))
+    const slow = await shTool.execute({ command: "slow" }, c)
+    expect(slow.output).toContain("[运行时长 6.0s]")
+    // 快命令（<5s）不附
+    c.shTasks = shTasksStub(async (command) => ({
+      started: true,
+      record: shRec({ command, startedAt: Date.now() - 500, endedAt: Date.now(), exitCode: 0 }),
+      finished: true,
+      aborted: false,
+      stdout: "fast",
+      stderr: "",
+      truncated: false,
+    }))
+    const fast = await shTool.execute({ command: "fast" }, c)
+    expect(fast.output).not.toContain("[运行时长")
+    // ② 同步回退路径（无 shTasks 服务）：真实计时
+    c.runCommand = async () => {
+      await new Promise((res) => setTimeout(res, 30)) // 快，<5s
+      return { stdout: "fallback", stderr: "", code: 0 }
+    }
+    delete (c as { shTasks?: unknown }).shTasks
+    const fb = await shTool.execute({ command: "fallback" }, c)
+    expect(fb.output).not.toContain("[运行时长")
+    rmSync(home, { recursive: true, force: true })
+  })
+
   test("sh async:true returns taskId immediately without waiting; bg_task wait/stop/list manage it", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-sh-async-"))
     const c = ctx(home)

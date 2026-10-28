@@ -12,6 +12,7 @@
 #include <memory>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/test/test.hpp"
@@ -75,7 +76,7 @@ void expect_same_pixels(const Canvas& left, const Canvas& right) {
   if (differing != 0) {
     const auto x = static_cast<int>(first % static_cast<std::size_t>(kWidth));
     const auto y = static_cast<int>(first / static_cast<std::size_t>(kWidth));
-    st::print("  首个差异像素 ({}, {}): {:08x} vs {:08x}（共 {} 处）\n", x, y, a[first], b[first],
+    st::log::out("  首个差异像素 ({}, {}): {:08x} vs {:08x}（共 {} 处）\n", x, y, a[first], b[first],
               differing);
   }
   ST_CHECK_EQ(differing, 0);

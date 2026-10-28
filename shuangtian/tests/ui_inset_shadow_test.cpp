@@ -22,6 +22,7 @@
 #include <cmath>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/components/basic.hpp"
@@ -86,7 +87,7 @@ ST_TEST(element_inset_shadow_darkens_only_the_inner_edge) {
   const double inset_deep = luminance(inset.pixel_at(kCol, kDeep));
   const double plain_above = luminance(plain.pixel_at(kCol, kAbove));
   const double inset_above = luminance(inset.pixel_at(kCol, kAbove));
-  st::print("[inset] 上内缘 {:.1f}→{:.1f}  深处 {:.1f}→{:.1f}  框外 {:.1f}→{:.1f}\n", plain_top,
+  st::log::out("[inset] 上内缘 {:.1f}→{:.1f}  深处 {:.1f}→{:.1f}  框外 {:.1f}→{:.1f}\n", plain_top,
             inset_top, plain_deep, inset_deep, plain_above, inset_above);
 
   // ① 上内缘必须变暗——“压进去”的读法就来自这里

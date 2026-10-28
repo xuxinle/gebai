@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
@@ -224,7 +225,7 @@ auto main(int argc, char** argv) -> int {
     cases.push_back(std::move(item));
   }
 
-  st::print("清屏 + 首层同色底合并：A/B 等价性（同一进程，只切一个开关）\n");
+  st::log::out("清屏 + 首层同色底合并：A/B 等价性（同一进程，只切一个开关）\n");
   std::size_t failures = 0;
   std::size_t skipped_equivalences = 0;
   for (const auto& item : cases) {
@@ -276,7 +277,7 @@ auto main(int argc, char** argv) -> int {
     if (!ok) ++failures;
     if (item.should_skip && identical) ++skipped_equivalences;
 
-    st::print("  {:<34} {:<4} 差异 {:>4} 像素{}\n", item.name, ok ? "ok" : "FAIL", diff,
+    st::log::out("  {:<34} {:<4} 差异 {:>4} 像素{}\n", item.name, ok ? "ok" : "FAIL", diff,
               content_ok ? "" : " · 内容不对（漏画/多画）");
     verdict.add(item.name, ok,
                 std::format("差异 {} 像素 · 内容{}", diff, content_ok ? "正确" : "不对"));
@@ -285,12 +286,12 @@ auto main(int argc, char** argv) -> int {
   // **自检**：必须真的覆盖到“跳过”这条路径，否则上面的“差异 0”只是在比两份
   // 完全相同的“不跳”结果——恒绿的空护栏（本仓踩过多次）。
   if (skipped_equivalences == 0) {
-    st::print("  ⚠ 一条“应跳”用例都没有真的走到跳过路径（判绿不代表快路径正确）\n");
+    st::log::out("  ⚠ 一条“应跳”用例都没有真的走到跳过路径（判绿不代表快路径正确）\n");
     verdict.add("覆盖到跳过路径", false, "所有应跳用例都没生效");
   } else {
     verdict.add("覆盖到跳过路径", true,
                 std::format("{} 条应跳用例逐像素相同", skipped_equivalences));
   }
-  if (failures == 0) st::print("  ✓ 全部用例通过\n");
+  if (failures == 0) st::log::out("  ✓ 全部用例通过\n");
   return st::probe::main_of(spec, opts, verdict.conclude());
 }

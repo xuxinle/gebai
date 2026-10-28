@@ -1,3 +1,4 @@
+#include "st/core/console_log.hpp"
 #include "st/core/log.hpp"
 
 #include <atomic>
@@ -91,7 +92,22 @@ void remove_listener(std::uint64_t id) noexcept {
   std::erase_if(listeners, [id](const Listener& item) { return item.id == id; });
 }
 
-void write(Level msg_level, std::string_view message) {
+/**
+ * 统一输出核心：级别消息（带时间戳前缀）与纯文本输出（无前缀，`st::print`/`st::eprint`）
+ * 走同一条管道——tail 环形缓冲、可替换 sink、订阅 listener、console_log 镜像落盘。
+ *
+ * ## 为什么 print 也走这里（统一入口的意义）
+ *
+ * 所有对外输出（CLI 进度、测试结果、业务日志、错误提示）**只有一个出口**：
+ * 改格式/加订阅/查尾部/落盘都在一处。避免三套输出各写各的（print 直接写 FD、
+ * ST_LOG 写 sink、测试框架又一份），认知与维护都省。
+ *
+ * 差异只保留两个：
+ * - 前缀：级别消息带 `[时间戳] LEVEL`，纯文本不带（CLI 可读性）；
+ * - 裁剪：`ST_LOG_*` 宏被 `ST_LOG_DISABLED` 裁（release 裁事件日志），
+ *   `st::print`/`st::eprint` 是函数**永远在**（CLI 输出不可裁）。
+ */
+void write_impl(Level msg_level, std::string_view message, bool prefixed, bool to_stderr) {
   std::function<void(Level, std::string_view)> sink;
   std::vector<std::function<void(Level, std::string_view)>> current_listeners;
   {
@@ -103,17 +119,34 @@ void write(Level msg_level, std::string_view message) {
     current_listeners.reserve(listeners.size());
     for (const auto& item : listeners) current_listeners.push_back(item.callback);
   }
+  const std::string line =
+      prefixed ? std::format("[{}] {:<5} {}\n", time::iso8601_now(), to_string(msg_level),
+                             message)
+               : std::string(message);
   // 尾部缓冲**先于** sink：不依赖排版形态、不依赖是否开了文件落盘（见 `tail` 说明）。
-  push_tail(std::format("[{}] {:<5} {}\n", time::iso8601_now(), to_string(msg_level), message));
+  push_tail(line);
   if (sink) {
     sink(msg_level, message);
   } else {
-    const std::string line =
-        std::format("[{}] {:<5} {}\n", time::iso8601_now(), to_string(msg_level), message);
-    std::fwrite(line.data(), 1, line.size(), stderr);
-    std::fflush(stderr);
+    // 无 sink（默认直写终端）：print 走 stdout、级别日志走 stderr——
+    // 与调用方的语义一致（进度给人看、事件进 stderr 可管道）。
+    std::fwrite(line.data(), 1, line.size(), to_stderr ? stderr : stdout);
+    std::fflush(to_stderr ? stderr : stdout);
+    // 镜像落盘：`st::print` 与 `ST_LOG_*` 都进 `.st/logs/*.log`——
+    // 构建日志（print 镜像）与事件日志（ST_LOG）同一份文件，事后一文件看全。
+    console_log::mirror(line);
   }
   for (const auto& listener : current_listeners) listener(msg_level, message);
+}
+
+void write(Level msg_level, std::string_view message) {
+  write_impl(msg_level, message, /*prefixed=*/true, /*to_stderr=*/true);
+}
+
+/// 纯文本输出（无前缀；`st::print`/`st::eprint` 的底层）。
+/// `to_stderr` = true 时写标准错误（`st::eprint`），否则写标准输出（`st::print`）。
+void write_plain(std::string_view message, bool to_stderr) {
+  write_impl(Level::Info, message, /*prefixed=*/false, to_stderr);
 }
 
 namespace tail {

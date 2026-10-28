@@ -8,6 +8,7 @@
 #include <format>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 
 namespace caiyun {
 
@@ -139,7 +140,7 @@ auto evaluate_path(const Layer& layer, float local_time, float canvas_w, float c
   out.dx = dx;
   out.dy = dy - layer.path_arc * arc;
   if (std::getenv("CAIYUN_PATH_DEBUG") != nullptr) {
-    st::print("[path] t={:.3f} from=({:.1f},{:.1f}) to=({:.1f},{:.1f}) d=({:.1f},{:.1f})\n",
+    st::log::out("[path] t={:.3f} from=({:.1f},{:.1f}) to=({:.1f},{:.1f}) d=({:.1f},{:.1f})\n",
               static_cast<double>(t), static_cast<double>(from_x), static_cast<double>(from_y),
               static_cast<double>(to_x), static_cast<double>(to_y), static_cast<double>(dx),
               static_cast<double>(dy));

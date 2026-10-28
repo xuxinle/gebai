@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/gpu.hpp"
@@ -149,12 +150,12 @@ auto main(int argc, char** argv) -> int {
   }
 
   const std::string backend = backend_name();
-  st::print("三维腿        : {}\n", backend);
+  st::log::out("三维腿        : {}\n", backend);
   if (const auto info = st::raster::gpu::probe(); info.has_value()) {
-    st::print("GPU 设备      : {} · {} · {}{}\n", info->adapter, info->feature_level,
+    st::log::out("GPU 设备      : {} · {} · {}{}\n", info->adapter, info->feature_level,
               info->backend, info->warp ? "（WARP，CPU 模拟）" : "");
   } else {
-    st::print("GPU 设备      : 不可用（{}）\n", info.error().message);
+    st::log::out("GPU 设备      : 不可用（{}）\n", info.error().message);
   }
 
   const std::vector<SizeCase> sizes = {
@@ -173,37 +174,37 @@ auto main(int argc, char** argv) -> int {
   meshes.push_back({"sphere(0.9,seg=24)", Mesh::sphere(0.9f, 24)});
   meshes.push_back({"sphere(0.9,seg=64)", Mesh::sphere(0.9f, 64)});
 
-  st::print("\n单帧成本（best-of-{}）\n", kRounds);
+  st::log::out("\n单帧成本（best-of-{}）\n", kRounds);
   // ── 表 1：尺寸 × 网格 ──
-  st::print("{:<22}", "网格 \\ 尺寸");
-  for (const auto& size : sizes) st::print("{:>14}", size.label);
-  st::print("\n");
+  st::log::out("{:<22}", "网格 \\ 尺寸");
+  for (const auto& size : sizes) st::log::out("{:>14}", size.label);
+  st::log::out("\n");
   for (const auto& item : meshes) {
-    st::print("{:<22}", item.label);
+    st::log::out("{:<22}", item.label);
     for (const auto& size : sizes) {
       const Cost cost = measure(item.mesh, size, 3.0f);
-      st::print("{:>14}", std::format("{:.2f} ms", cost.frame_ns / 1.0e6));
+      st::log::out("{:>14}", std::format("{:.2f} ms", cost.frame_ns / 1.0e6));
     }
-    st::print("\n");
+    st::log::out("\n");
   }
 
   // ── 表 2：净成本拆解（帧总 − 只清屏+合成） ──
-  st::print("\n净成本拆解（1080p）：帧总 / 空场景 / 网格净耗时\n");
+  st::log::out("\n净成本拆解（1080p）：帧总 / 空场景 / 网格净耗时\n");
   for (const auto& item : meshes) {
     const Cost cost = measure(item.mesh, SizeCase{1920, 1080, "1080p"}, 3.0f);
     const double net = cost.frame_ns - cost.clear_ns;
-    st::print("  {:<22} {:>7.2f} ms / {:>6.2f} ms / {:>6.2f} ms   覆盖 {:>5.1f}%  三角形 {}\n",
+    st::log::out("  {:<22} {:>7.2f} ms / {:>6.2f} ms / {:>6.2f} ms   覆盖 {:>5.1f}%  三角形 {}\n",
               item.label, cost.frame_ns / 1.0e6, cost.clear_ns / 1.0e6, net / 1.0e6,
               cost.inked_ratio * 100.0, cost.triangles);
   }
 
   // ── 表 3：每百万像素的单价（判断成本随面积还是随面数涨） ──
-  st::print("\n单价（sphere seg=24，按像素面积归一）：\n");
+  st::log::out("\n单价（sphere seg=24，按像素面积归一）：\n");
   for (const auto& size : sizes) {
     const Cost cost = measure(meshes[1].mesh, size, 3.0f);
     const double megapixels =
         static_cast<double>(size.width) * static_cast<double>(size.height) / 1.0e6;
-    st::print("  {:<14} {:>7.2f} ms   {:.2f} Mpx   {:.3f} ms/Mpx\n", size.label,
+    st::log::out("  {:<14} {:>7.2f} ms   {:.2f} Mpx   {:.3f} ms/Mpx\n", size.label,
               cost.frame_ns / 1.0e6, megapixels,
               megapixels > 0.0 ? cost.frame_ns / 1.0e6 / megapixels : 0.0);
   }
@@ -211,7 +212,7 @@ auto main(int argc, char** argv) -> int {
   // ── 判据：1080p + 1000 面级 ──
   const Cost judge = measure(meshes[1].mesh, SizeCase{1920, 1080, "1080p"}, 3.0f);
   const double judge_ms = judge.frame_ns / 1.0e6;
-  st::print("\n判据：1080p + {} 面 = {:.2f} ms（阈值 8.00 ms）→ {}\n", judge.triangles, judge_ms,
+  st::log::out("\n判据：1080p + {} 面 = {:.2f} ms（阈值 8.00 ms）→ {}\n", judge.triangles, judge_ms,
             judge_ms <= 8.0 ? "合格" : "超标");
   verdict.add("1080p/1000面单帧 ≤ 8ms", judge_ms <= 8.0, std::format("{:.2f} ms", judge_ms));
   verdict.add("确实画出了内容（非空帧）", judge.inked_ratio > 0.02,

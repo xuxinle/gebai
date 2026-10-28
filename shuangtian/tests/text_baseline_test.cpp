@@ -22,6 +22,7 @@
 #include <string_view>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/text/text.hpp"
 
 namespace {
@@ -42,7 +43,7 @@ ST_TEST(shaped_ascent_is_the_line_baseline_not_the_token_metric) {
   // 那版假设 `shape().ascent` 是绘制用的量，而真正该做的是把 `draw` 也统一过来。）
   auto stack = st::text::FontStack::system_default();
   if (!stack) {
-    st::print("[行基线] 无可用字体栈 → 跳过（非通过）\n");
+    st::log::out("[行基线] 无可用字体栈 → 跳过（非通过）\n");
     return;
   }
   const st::text::TextRenderer renderer{*stack};

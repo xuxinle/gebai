@@ -22,6 +22,7 @@
 #include "st/codec/png.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -210,18 +211,18 @@ auto main(int argc, char** argv) -> int {
   image.rgba = sheet.to_rgba8();
   const std::string sheet_path = dir + "/wbtn-grid.png";
   if (auto written = st::codec::png_write_file(sheet_path, image); !written) {
-    st::print("写盘失败：{}\n", written.error().message);
+    st::log::out("写盘失败：{}\n", written.error().message);
     return 1;
   }
-  st::print("网格图: {}\n", sheet_path);
+  st::log::out("网格图: {}\n", sheet_path);
 
   const std::string text_path = dir + "/wbtn-metrics.txt";
   if (auto status = st::fs::write_text(text_path, report); !status) {
-    st::print("写度量失败：{}\n", status.error().to_string());
+    st::log::out("写度量失败：{}\n", status.error().to_string());
     return 1;
   }
-  st::print("{}", report);
-  st::print("度量: {}\n", text_path);
+  st::log::out("{}", report);
+  st::log::out("度量: {}\n", text_path);
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 
   return st::probe::main_of(spec, opts, verdict);

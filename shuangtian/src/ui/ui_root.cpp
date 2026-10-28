@@ -472,7 +472,11 @@ auto UiRoot::dispatch_to(Element& element, Event& event) -> bool {
   return handled;
 }
 
-void UiRoot::update_hover(Element* target) {
+  void UiRoot::clear_hover() {
+    update_hover(nullptr);
+  }
+
+  void UiRoot::update_hover(Element* target) {
   // ⚠ **失联/回来的判定必须在提前返回之前**：
   //
   // `hovered_ == target` 时下面会提前 return，于是 `set_hint_target` 不调——

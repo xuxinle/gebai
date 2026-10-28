@@ -17,6 +17,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
 
@@ -58,8 +59,8 @@ auto main(int argc, char** argv) -> int {
     // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
     return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体\\n"));
   }
-  st::print("逻辑字号={}  文本：{}\n\n", logic_size, texts.front());
-  st::print("{:<6s} {:>8s} {:>8s} {:>10s} {:>10s} {:>12s} {:>14s}\n", "缩放", "字形宽", "字形高",
+  st::log::out("逻辑字号={}  文本：{}\n\n", logic_size, texts.front());
+  st::log::out("{:<6s} {:>8s} {:>8s} {:>10s} {:>10s} {:>12s} {:>14s}\n", "缩放", "字形宽", "字形高",
             "墨像素", "过渡像素", "过渡/墨像素", "宽÷缩放(=逻辑)");
   for (const float scale : {1.0f, 1.5f, 2.0f, 3.0f}) {
     // 画布按**物理分辨率**建（device_scale = scale），排版用逻辑字号——
@@ -99,14 +100,14 @@ auto main(int argc, char** argv) -> int {
     }
     shape.width = max_x - min_x + 1;
     shape.height = max_y - min_y + 1;
-    st::print("{:<6.1f} {:>8d} {:>8d} {:>10d} {:>10d} {:>12.3f} {:>14.1f}\n", scale, shape.width,
+    st::log::out("{:<6.1f} {:>8d} {:>8d} {:>10d} {:>10d} {:>12.3f} {:>14.1f}\n", scale, shape.width,
               shape.height, shape.ink_pixels, shape.edge_pixels,
               shape.ink_pixels ? static_cast<double>(shape.edge_pixels) /
                                      static_cast<double>(shape.ink_pixels)
                                : 0.0,
               static_cast<double>(shape.width) / static_cast<double>(scale));
   }
-  st::print("\n判读：**直接按物理尺寸栅格化** ⇒ 「宽÷缩放」恒定（=逻辑宽），"
+  st::log::out("\n判读：**直接按物理尺寸栅格化** ⇒ 「宽÷缩放」恒定（=逻辑宽），"
             "且「过渡/墨像素」随缩放**递减（≈1/s）**。\n"
             "      **先渲染再放大** ⇒ 「过渡/墨像素」**保持不变**（边缘与字身同步被放大）。\n");
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）

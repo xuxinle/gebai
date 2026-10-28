@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/math/geometry.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/element.hpp"
@@ -105,7 +106,7 @@ ST_TEST(grow_distributes_whole_pixels_and_keeps_total) {
 
     // ④ 各子项宽度差不超过 1px（余数应当均摊，而不是全给第一个）
     const auto [lo, hi] = std::minmax_element(ws.begin(), ws.end());
-    st::print("[grow] {}：宽 {}..{}  总 {:.1f}（期望 {:.1f}）\n", item.name, *lo, *hi, total,
+    st::log::out("[grow] {}：宽 {}..{}  总 {:.1f}（期望 {:.1f}）\n", item.name, *lo, *hi, total,
               expected);
     ST_CHECK(*hi - *lo <= 1.0f + 1e-3F);
   }

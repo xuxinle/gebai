@@ -77,6 +77,7 @@
 #include "st/core/print.hpp"
 #include "st/core/time.hpp"
 #include "st/core/json.hpp"
+#include "st/core/log.hpp"
 #include "st/net/ws.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/scroll.hpp"
@@ -155,7 +156,10 @@ class TcpStreamAdapter : public st::net::ws::WsSession::Stream {
       pending_.erase(0, n);
       return static_cast<int>(n);
     }
-    const auto n = tcp_.read_some(buffer);
+    // **必须用非阻塞读**：`WsSession::Stream::read_some` 的契约是“非阻塞”（-1 = 无数据/错误）。
+    // 用阻塞版 read_some 会把 would-block 放大成主线程 5 秒等待——WSAPoll 误报可读时
+    // 表现为相期主界面长时间冻结（实测症状：连接上服务、长时间无新消息后卡住）。
+    const auto n = tcp_.read_some_nonblocking(buffer);
     if (!n.has_value()) return -1;              // 错误与 EOF 在这里归为"不可继续读"
     return static_cast<int>(*n);                // 0 = 对端关闭（与接口约定一致）
   }
@@ -289,6 +293,12 @@ class AgentLink {
     built.leftover =
         (leftover_offset < response.size()) ? response.substr(leftover_offset) : std::string{};
     built.tcp = std::move(stream);
+    // **关键：把 socket 保持非阻塞**。`connect_tcp` 交付前会把 socket 设回阻塞
+    // （那是给 `read_exact`/控制通道的语义）；而 WS 客户端的主循环靠 `wait_readable(0)`
+    // 非阻塞探测 + 非阻塞读跑——保持阻塞的话，一次 "WSAPoll 误报可读但实际无数据"
+    // 会让 `recv` 永久阻塞（主线程冻死，实测栈：recv → ZwWaitForSingleObject，
+    // 表现为「连接服务后长时间无新消息 → 主界面卡死」）。
+    built.tcp->set_nonblocking(true);
     built.conn_name = std::format("已连接 {}", url);
     built.ok = true;
     return built;
@@ -336,9 +346,8 @@ class AgentLink {
   /// 这个区分很重要：把"暂时没消息"当成"断开"会让界面疯狂闪烁。
   ///
   /// ⚠ **必须先 `wait_readable(0)` 探测**：`try_read_message` 只消费**已解析的帧**，
-  /// 它本身不读 socket（底层 `pump_frames` 是阻塞 read）。直接调 `try_read_message`
-  /// 的结果是永远拿不到任何消息——而现象是"WS 连上了但卡片不出现"，
-  /// 且没有任何报错（实测踩到：表现为连接状态正常、卡片永远为空）。
+  /// 它本身不读 socket。直接调 `try_read_message` 的结果是永远拿不到任何消息——
+  /// 而现象是"WS 连上了但卡片不出现"（实测踩到过）。
   auto poll() -> std::optional<Json> {
     if (!session_ || !tcp_) return std::nullopt;
     // 有预置字节时必须无条件读一把（它们不在 socket 里，wait_readable 看不到）
@@ -355,16 +364,23 @@ class AgentLink {
       ++poll_readable_;
     }
 
-    // ⚠ 必须用 `read_message()` 而不是 `try_read_message()`：
-    // 后者只消费 `pending_frames_`（已解析的帧），**自身不读 socket**；
-    // 而能进到这里说明 `wait_readable` 已确认有数据，`read_message` 不会阻塞。
-    // 实测症状：可读计数一路涨（pong/控制帧在），但应用消息永远取不到。
-    const auto message = session_->read_message();
+    // 有数据到达迹象（wait_readable 为真）：这是"对端还活着"的最轻证迹——
+    // 半开连接（对端进程已死但 socket 挂着）不会持续产生可读事件。
+    // 保活超时判据靠它：真活的对端会对我们的 ping 回 pong（产生可读）。
+    last_activity_ms_ = st::time::now_ms();
+    missed_pings_ = 0;
+
+    // **非阻塞读**：socket 非阻塞（build_connection 末尾 set_nonblocking(true)），
+    // read_message_nb 一次 pump + 取帧。返回 nullopt 只表示"这次没有完整消息"
+    // ——可能是数据未凑齐（TCP 分包/大帧），**不是断开**。只有对方发了 Close
+    // 帧或 wait_readable 持续报错才断开（由 close_received / 保活判定）。
+    const auto message = session_->read_message_nb();
     if (!message.has_value()) {
-      // 读到 EOF / 半帧：EOF 必须立刻断开，否则主循环会在"可读但读不出"上忙转
-      // （实测症状：CPU 打满、内存疯狂增长直到 std::bad_alloc）。
-      last_error_ = session_->close_received() ? "对端已关闭连接" : "连接已结束（读取未返回消息）";
-      disconnect();
+      // 真的关闭（收到 Close 帧）才断开；否则只是"这次没读到"，下帧再试
+      if (session_->close_received()) {
+        last_error_ = "对端已关闭连接";
+        disconnect();
+      }
       return std::nullopt;
     }
     if (message->opcode == st::net::ws::Opcode::Close) {
@@ -375,6 +391,36 @@ class AgentLink {
     if (message->opcode != st::net::ws::Opcode::Text) return std::nullopt;
     if (const auto parsed = st::json_parse(message->text); parsed.has_value()) return *parsed;
     return std::nullopt;
+  }
+
+  /// 保活探测（主循环每帧调用；对长时间无消息的连接主动 ping，确认对端仍活着）。
+  ///
+  /// - 空闲 >30s：发 ping（WS 协议要求对端回 pong）
+  /// - 连续 3 次 ping（约 90s）无任何可读响应：判定对端已死（半开连接），断开。
+  ///   这是"连接上但长时间没消息"场景的最后防线：没有它，半死连接会永远挂着，
+  ///   界面显示"已连接"但卡片永远不来。
+  void keepalive() {
+    if (!connected()) return;
+    const auto now = st::time::now_ms();
+    if (now - last_activity_ms_ < 30'000) {
+      missed_pings_ = 0;
+      return;
+    }
+    // 空闲已超 30s：发 ping（若距上次 ping 已过 10s；last_activity 不更新，
+    // 因为 pong 是可读事件，会走 poll() 的 wait_readable 分支更新它）
+    if (now - last_ping_ms_ < 10'000) return;
+    last_ping_ms_ = now;
+    ++missed_pings_;
+    if (!session_->send_ping()) {
+      // 发送失败 = 连接已坏，直接断
+      last_error_ = "保活发送失败（连接已断）";
+      disconnect();
+      return;
+    }
+    if (missed_pings_ >= 3) {
+      last_error_ = "连接已超时（对端长时间无响应）";
+      disconnect();
+    }
   }
 
   [[nodiscard]] auto last_error() const -> std::string { return last_error_; }
@@ -426,6 +472,12 @@ class AgentLink {
   std::string last_error_{};
   int poll_probes_{0};
   int poll_readable_{0};
+  /// 保活：最后一次看到可读事件的时刻（0 = 尚未连接后首帧）。
+  std::int64_t last_activity_ms_{0};
+  /// 保活：最后一次发 ping 的时刻。
+  std::int64_t last_ping_ms_{0};
+  /// 保活：连续无响应 ping 数（>=3 判死）。
+  int missed_pings_{0};
 };
 
 /// 卡片存储 + 答复通道（含文件降级路径）。
@@ -514,7 +566,7 @@ struct CardStore {
       const auto parsed = st::json_parse(*text);
       if (!parsed.has_value()) {
         // 坏文件不消费：留待人工看（静默删掉会让"我明明投了"变成无法排查）
-        st::print("[相期] 跳过无法解析的投递：{}\n", name);
+        st::log::out("[相期] 跳过无法解析的投递：{}\n", name);
         continue;
       }
       if ((*parsed).is_array()) {
@@ -544,7 +596,7 @@ struct CardStore {
     if (link != nullptr && link->connected()) sent = link->send(record);
     (void)st::fs::create_directories(outbox_dir());
     (void)st::fs::write_text(st::fs::join(outbox_dir(), id + ".json"), st::json_dump(record, true));
-    if (!sent) st::print("[相期] 答复 {} 未能实时送达（已落盘 {}）\n", id, outbox_dir());
+    if (!sent) st::log::out("[相期] 答复 {} 未能实时送达（已落盘 {}）\n", id, outbox_dir());
 
     cards.erase(it);
     return as_json();
@@ -620,7 +672,7 @@ struct CardStore {
         return st::unexpected(st::ErrorCode::Invalid, "只允许打开 http(s) 链接");
       }
       const bool ok = st::platform::open_external(url);
-      st::print("[相期] 打开外部链接（{}）：{}\n", ok ? "成功" : "失败", url);
+      st::log::out("[相期] 打开外部链接（{}）：{}\n", ok ? "成功" : "失败", url);
       return Json{{{"ok", ok}, {"url", url}}};
     });
 
@@ -1199,6 +1251,9 @@ auto run_app(int argc, char** argv) -> int {
     // 不走「画大再缩」，这是「图标糊」的根治办法（详见 make_xiangqi_icon_png 说明）。
     app_options.tray_icon_png = make_xiangqi_icon_png(16);
     app_options.tray_tooltip = "相期 · 有事等你";
+    // 关窗→托盘常驻：点 × 只隐藏窗口，退出走托盘右键菜单（「退出」）。
+    // 相期是常驻面板，窗口关了托盘图标还在——有事仍能提醒，且随时能点回来。
+    app_options.tray_minimize_on_close = true;
   }
 
   st::app::Application app("xiangqi", "0.1.0", app_options);
@@ -1333,7 +1388,7 @@ auto run_app(int argc, char** argv) -> int {
     std::fprintf(stderr, "装载失败：%s\n", status.error().message.c_str());
     return 1;
   }
-  st::print("相期就绪：界面 {} · 逻辑 {} · 桥 {} 个函数 · 数据 {} · 热重载 {}\n", ui_dir,
+  st::log::out("相期就绪：界面 {} · 逻辑 {} · 桥 {} 个函数 · 数据 {} · 热重载 {}\n", ui_dir,
             st::fs::join(ui_dir, "app.js"), bridge.exposed().size(), home,
             options.watch ? "开" : "关（--watch 打开）");
 
@@ -1360,20 +1415,17 @@ auto run_app(int argc, char** argv) -> int {
         }
         if (built.ok) {
           link.adopt(std::move(built));
-          st::print("[相期] 已连接 agent 控制器：{}\n", options.agent_url);
+          st::log::out("[相期] 已连接 agent 控制器：{}\n", options.agent_url);
         } else {
-          st::print("[相期] 未能连接 agent 控制器（{}）——降级为文件投递，界面显示未连接\n",
+          st::log::out("[相期] 未能连接 agent 控制器（{}）——降级为文件投递，界面显示未连接\n",
                     built.error);
         }
       }
     }
 
-    // 托盘点击：把窗口叫回前台。
-    //
-    // 这就是托盘图标对用户心理模型的全部：点一下 = “我来看一眼”。
-    // 不做右键菜单（那是另一套交互，且各平台差异大）。
+    // 托盘点击：把窗口叫回前台（关窗只隐藏进托盘，这就是恢复入口）。
     if (app.take_tray_clicks() > 0) {
-      (void)app.window_minimize();   // placeholder…
+      (void)app.window_restore();
     }
 
     // 处理入站消息（每帧最多 8 条：留出渲染时间，且不会真的堆积）
@@ -1398,6 +1450,9 @@ auto run_app(int argc, char** argv) -> int {
       }
     }
 
+    // 保活：长时间无消息时主动 ping，确认对端活着；无响应则断开（半开连接现形）。
+    link.keepalive();
+
     if (app.root().tick_declarative_hosts() > 0U) app.request_repaint();
     app.tick();
     ++frames;
@@ -1405,7 +1460,7 @@ auto run_app(int argc, char** argv) -> int {
     // 探测/可读两个计数用于区分"没有消息"与"有数据但读不出"——
     // 后者是 WS 客户端最容易出的问题（实测踩过一次，无任何报错）。
     if (frames % 1200 == 0) {
-      st::print("[相期] 心跳 帧={} 连接={} 卡片={} 处理={} 探测={} 可读={}\n", frames, link.connected(),
+      st::log::out("[相期] 心跳 帧={} 连接={} 卡片={} 处理={} 探测={} 可读={}\n", frames, link.connected(),
                 store.cards.size(), handled, link.probe_count(), link.readable_count());
     }
     app.pace_loop(frame_start_ms);
@@ -1414,7 +1469,7 @@ auto run_app(int argc, char** argv) -> int {
   // 连接超时最多 400 ms，所以这里最多等那么久（正常情况下早已完成）。
   if (agent_worker.joinable()) agent_worker.join();
   link.disconnect();
-  st::print("相期退出：{} 帧，处理消息 {} 条（未处理的卡片留在 {}，下次启动会重新出现）\n", frames,
+  st::log::out("相期退出：{} 帧，处理消息 {} 条（未处理的卡片留在 {}，下次启动会重新出现）\n", frames,
             handled, store.inbox_dir());
   return 0;
 }

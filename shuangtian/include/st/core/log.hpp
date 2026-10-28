@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <format>
 #include <functional>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -34,6 +35,38 @@ void set_sink(std::function<void(Level, std::string_view)> sink);
 
 /// 底层写入（已格式化文本，含级别过滤与时间戳前缀）。
 void write(Level level, std::string_view message);
+
+/// 纯文本输出（无时间戳/级别前缀；`st::log::out`/`st::log::err` 的底层）。
+/// `to_stderr` = true 时写标准错误。与 `write` 同一条管道（tail/sink/listener/镜像）。
+void write_plain(std::string_view message, bool to_stderr = false);
+
+/// **程序主输出**（无时间戳/级别前缀，永不裁剪）：构建进度、测试结果、命令结果。
+/// 所有对外输出的统一入口（`st::log` 命名空间）。
+///
+/// ## 与 `info` 的区别
+///
+/// - `out`：无前缀、写 stdout、**永不裁**（CLI 主输出 release 也在）；
+/// - `info`：带 `[时间戳] info` 前缀、写 stderr、可被 `ST_LOG_DISABLED` 裁掉（诊断事件）。
+///
+/// 两者底层同一条管道（tail/sink/listener/镜像落盘），差异只在呈现与裁剪。
+///
+/// ## 与 `st::print` 的分工
+///
+/// `st::print`/`st::eprint` 是**纯用户控制台交互**通道（实时交互提示、用户直读的原样输出），
+/// 不经日志管道、不携带扩展信息；`out`/`err` 是**程序输出**（进度/结果/诊断），走日志管道。
+template <class... Args>
+void out(std::format_string<Args...> format_text, Args&&... args) {
+  const std::string text = std::format(format_text, std::forward<Args>(args)...);
+  write_plain(text, /*to_stderr=*/false);
+}
+
+/// **程序错误输出**（无前缀，写 stderr，永不裁剪）：用户必读的程序错误。
+/// 原 `st::eprint` 之外的程序级错误通道（走日志管道）。
+template <class... Args>
+void err(std::format_string<Args...> format_text, Args&&... args) {
+  const std::string text = std::format(format_text, std::forward<Args>(args)...);
+  write_plain(text, /*to_stderr=*/true);
+}
 
 /// **进程内日志尾部**（最近 N 条，固定容量环形缓冲）。
 ///

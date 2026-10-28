@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/glyph_atlas_content.hpp"
 #include "st/test/test.hpp"
 
@@ -99,7 +100,7 @@ ST_TEST(glyph_atlas_content_grows_and_keeps_old_entries) {
     if (placed->fresh) planted.emplace_back(key, value);
   }
   ST_CHECK(atlas.width() > 64);   // 确实扩容过
-  st::print("[atlas] 120 个条目后画布 {}×{}，共 {} 条\n", atlas.width(), atlas.height(),
+  st::log::out("[atlas] 120 个条目后画布 {}×{}，共 {} 条\n", atlas.width(), atlas.height(),
             atlas.entry_count());
 
   // **关键断言：扩容后所有旧条目仍然命中，且内容没被搬坏**
@@ -121,7 +122,7 @@ ST_TEST(glyph_atlas_content_grows_and_keeps_old_entries) {
     ST_CHECK(pixels[offset] == value);
     ++verified;
   }
-  st::print("[atlas] 扩容后逐条校验 {} 项，全部命中且内容正确\n", verified);
+  st::log::out("[atlas] 扩容后逐条校验 {} 项，全部命中且内容正确\n", verified);
 }
 
 ST_TEST(glyph_atlas_content_stops_at_max_dimension) {
@@ -139,5 +140,5 @@ ST_TEST(glyph_atlas_content_stops_at_max_dimension) {
   }
   ST_CHECK(accepted > 0);
   ST_CHECK(accepted < 200);   // 一定装不下 200 个
-  st::print("[atlas] 32×32 上限下滑装了 {} 个 12×12 条目\n", accepted);
+  st::log::out("[atlas] 32×32 上限下滑装了 {} 个 12×12 条目\n", accepted);
 }

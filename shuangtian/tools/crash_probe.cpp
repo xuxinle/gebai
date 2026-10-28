@@ -12,6 +12,7 @@
 #include "st/ui/dsl.hpp"
 #include "st/ui/state_trace.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 
 /// 崩溃链（`noinline` 保证栈上真有这几帧；`volatile` 防优化器删掉整条链）。
 ///
@@ -33,7 +34,7 @@ auto run_app(int argc, char** argv) -> int {
   st::ui::dsl::State<int> probe_state{0};
   probe_state.set(1);
   probe_state.set(2);
-  st::print("crash_probe: 即将触发空指针解引用（验证崩溃栈输出）\n");
+  st::log::out("crash_probe: 即将触发空指针解引用（验证崩溃栈输出）\n");
   std::fflush(stdout);
   probe_depth_one();
   return 0;   // 不可达（上面必然崩）；写在这里是为了明确意图

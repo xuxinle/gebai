@@ -13,6 +13,7 @@
 
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
@@ -90,7 +91,7 @@ auto main(int argc, char** argv) -> int {
   image.rgba = canvas.to_rgba8();
   for (std::size_t i = 3; i < image.rgba.size(); i += 4U) image.rgba[i] = 255U;
   if (const auto s = st::codec::png_write_file(out_path, image); !s.has_value()) {
-    st::print("写 {} 失败\n", out_path);
+    st::log::out("写 {} 失败\n", out_path);
     return 1;
   }
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）

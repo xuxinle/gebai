@@ -28,6 +28,7 @@
 #include <version>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 
 namespace {
 
@@ -48,14 +49,14 @@ namespace {
 
 int main() {
 #if defined(__cpp_lib_stacktrace)
-  st::print("__cpp_lib_stacktrace = {}\n", static_cast<std::int64_t>(__cpp_lib_stacktrace));
+  st::log::out("__cpp_lib_stacktrace = {}\n", static_cast<std::int64_t>(__cpp_lib_stacktrace));
   const auto frames = deepest();
   for (std::size_t index = 0; index < frames.size(); ++index) {
-    st::print("  #{} {}\n", index, frames[index]);
+    st::log::out("  #{} {}\n", index, frames[index]);
   }
-  st::print("frames = {}\n", frames.size());
+  st::log::out("frames = {}\n", frames.size());
   if (frames.empty()) {
-    st::print("结论：宏在但抓不到帧——不可用\n");
+    st::log::out("结论：宏在但抓不到帧——不可用\n");
     return 1;
   }
   // 帧**全部同名**说明符号化没生效（帧地址有、名字是同一份误导值）。
@@ -71,15 +72,15 @@ int main() {
     }
     if (!seen) ++distinct;
   }
-  st::print("distinct = {} / {}\n", distinct, frames.size());
+  st::log::out("distinct = {} / {}\n", distinct, frames.size());
   if (distinct <= 1U) {
-    st::print("结论：能链接、能取帧，但**符号化失效**（所有帧同名）——不可用于定位缺陷\n");
+    st::log::out("结论：能链接、能取帧，但**符号化失效**（所有帧同名）——不可用于定位缺陷\n");
     return 2;
   }
-  st::print("结论：可用（{} 帧 / {} 个不同符号）\n", frames.size(), distinct);
+  st::log::out("结论：可用（{} 帧 / {} 个不同符号）\n", frames.size(), distinct);
   return 0;
 #else
-  st::print("__cpp_lib_stacktrace 未定义\n结论：该编译器族不提供 <stacktrace>\n");
+  st::log::out("__cpp_lib_stacktrace 未定义\n结论：该编译器族不提供 <stacktrace>\n");
   return 3;
 #endif
 }

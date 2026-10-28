@@ -150,6 +150,12 @@ class UiRoot : public Element::HostFocus {
   /// 返回 `true` = 焦点状态已按请求应用（含「本就如此」的幂等情形）；
   /// **调用方应当检查返回值**（控制通道/脚本据此如实报告，而不是静默丢弃焦点请求）。
   auto set_focus(Element* element) -> bool;
+  /// 清空悬停状态（`hovered_` 置空 + 旧目标标脏重绘）。
+  ///
+  /// 用途：窗口恢复/内容替换等“鼠标没动但界面要重置交互态”的场合——
+  /// 否则隐藏窗口期间残留的 hover（如关闭按钮红色高亮）会带进下一次显示。
+  /// 鼠标一旦真的移动，`dispatch(MouseMove)` 会按新位置重新 hover，不受影响。
+  void clear_hover();
   /// `Element::HostFocus` 的实现（子组件隔着 `element.hpp` 请求焦点时用）。
   auto set_keyboard_focus(Element* element) -> bool override { return set_focus(element); }
   /// 当前**焦点环是否应该画出来**（键盘导航语义；组件画环前问它）。

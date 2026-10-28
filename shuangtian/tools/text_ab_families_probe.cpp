@@ -6,6 +6,7 @@
 /// 用法：text_ab_families_probe <outdir> [scale] [gamma] [--gray] [--nofit] [--nofilter] [--nocomp]
 #include "text_ab_common.hpp"
 
+#include "st/core/log.hpp"
 #include "text_ab_families_rows.inc"        // 亮底行表（kLines）
 #include "text_ab_families_rows_dark.inc"   // 暗底行表（kLinesDark）——同文本/同字号/同位置，仅换色
 
@@ -44,11 +45,11 @@ auto main(int argc, char** argv) -> int {
   }
   auto stack = st::text::FontStack::system_default();
   if (!stack) {
-    st::print("未找到可用字体\n");
+    st::log::out("未找到可用字体\n");
     return 1;
   }
   ab::print_font_stack(*stack);
-  st::print("device_scale={}  画布={}x{} 逻辑  {} 行  subpixel={} fit={}\n", scale, kWidth, kHeight,
+  st::log::out("device_scale={}  画布={}x{} 逻辑  {} 行  subpixel={} fit={}\n", scale, kWidth, kHeight,
             ab::rows_for<Line, kLines, kLinesDark>(options.dark).size(), options.subpixel, options.fit);
 
   const int width = static_cast<int>(kWidth * scale);
@@ -64,7 +65,7 @@ auto main(int argc, char** argv) -> int {
   }
   const std::string path = out_dir + "/ab-families-st.png";
   ab::save(canvas.to_rgba8(), width, height, path);
-  st::print("  已写 {}（{}x{} 物理像素，coverage_gamma={}）\n", path, width, height,
+  st::log::out("  已写 {}（{}x{} 物理像素，coverage_gamma={}）\n", path, width, height,
             renderer.coverage_gamma());
   return 0;
 }

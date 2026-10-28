@@ -11,6 +11,7 @@
 
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 
@@ -64,10 +65,10 @@ auto main(int argc, char** argv) -> int {
 
   const auto written = st::codec::png_write_file(out, image);
   if (!written.has_value()) {
-    st::print("写盘失败: {}（{}）\n", out, written.error().message);
+    st::log::out("写盘失败: {}（{}）\n", out, written.error().message);
     return 1;
   }
-  st::print("已写出 {}（{}×{}）\n", out, kWidth, kHeight);
+  st::log::out("已写出 {}（{}×{}）\n", out, kWidth, kHeight);
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 
   return st::probe::main_of(spec, opts, verdict);

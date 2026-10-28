@@ -34,6 +34,7 @@
 #include <memory>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/element.hpp"
@@ -119,22 +120,22 @@ auto main(int argc, char** argv) -> int {
     canvas.pop_clip();
   });
 
-  st::print("{} 个卡片（{}×{}）\n\n", cards, kWidth, kHeight);
-  st::print("A 全屏裁剪      {:>10.2f} µs\n", full_ns / 1000.0);
-  st::print("B 185×97 小裁剪 {:>10.2f} µs   → A/B = {:.2f}×\n", small_ns / 1000.0,
+  st::log::out("{} 个卡片（{}×{}）\n\n", cards, kWidth, kHeight);
+  st::log::out("A 全屏裁剪      {:>10.2f} µs\n", full_ns / 1000.0);
+  st::log::out("B 185×97 小裁剪 {:>10.2f} µs   → A/B = {:.2f}×\n", small_ns / 1000.0,
             small_ns > 0.0 ? full_ns / small_ns : 0.0);
-  st::print("C 完全在屏外    {:>10.2f} µs   → A/C = {:.2f}×\n", empty_ns / 1000.0,
+  st::log::out("C 完全在屏外    {:>10.2f} µs   → A/C = {:.2f}×\n", empty_ns / 1000.0,
             empty_ns > 0.0 ? full_ns / empty_ns : 0.0);
-  st::print("\n判读：\n");
+  st::log::out("\n判读：\n");
   const double ratio = small_ns > 0.0 ? full_ns / small_ns : 0.0;
   if (ratio < 1.5) {
-    st::print("  A/B 只有 {:.2f}× → **剔除几乎没省时间**，这是个缺陷。\n", ratio);
-    st::print("  预期：185×97 只与 1~2 个卡片相交，B 应显著小于 A。\n");
+    st::log::out("  A/B 只有 {:.2f}× → **剔除几乎没省时间**，这是个缺陷。\n", ratio);
+    st::log::out("  预期：185×97 只与 1~2 个卡片相交，B 应显著小于 A。\n");
     verdict.state = st::probe::status::fail;
     verdict.reason = "裁剪剔除未生效";
   } else {
-    st::print("  A/B = {:.2f}× → 剔除**生效**；2.46 ms 的花费不在元素遍历上，\n", ratio);
-    st::print("  而在别处（如 `paint_frame` 的损坏区处理 / 文字排版）。\n");
+    st::log::out("  A/B = {:.2f}× → 剔除**生效**；2.46 ms 的花费不在元素遍历上，\n", ratio);
+    st::log::out("  而在别处（如 `paint_frame` 的损坏区处理 / 文字排版）。\n");
   }
   return st::probe::main_of(spec, opts, verdict);
 }

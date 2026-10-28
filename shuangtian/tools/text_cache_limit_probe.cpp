@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -68,13 +69,13 @@ auto main(int argc, char** argv) -> int {
 
   auto stack = st::text::FontStack::system_default();
   if (!stack.has_value()) {
-    st::print("跳过：拿不到系统字体\n");
+    st::log::out("跳过：拿不到系统字体\n");
     return st::probe::main_of(spec, opts, verdict);
   }
   st::text::TextRenderer renderer(*stack, 1.0f);
 
-  st::print("量 `measure` 随「不同文本条数」的耗时（13px 中文混排）\n\n");
-  st::print("{:>10}{:>16}{:>16}\n", "不同文本数", "单次 measure", "相对 16 条");
+  st::log::out("量 `measure` 随「不同文本条数」的耗时（13px 中文混排）\n\n");
+  st::log::out("{:>10}{:>16}{:>16}\n", "不同文本数", "单次 measure", "相对 16 条");
 
   double baseline_ns = 0.0;
   for (const int count : {16, 64, 256, 1024, 4096}) {
@@ -100,14 +101,14 @@ auto main(int argc, char** argv) -> int {
     const double per_ns = total_ns / static_cast<double>(count);
     if (baseline_ns == 0.0) baseline_ns = per_ns;
 
-    st::print("{:>10}{:>11.2f} µs{:>15.2f}×\n", count, per_ns / 1000.0,
+    st::log::out("{:>10}{:>11.2f} µs{:>15.2f}×\n", count, per_ns / 1000.0,
               baseline_ns > 0.0 ? per_ns / baseline_ns : 0.0);
   }
 
-  st::print("\n判读：\n");
-  st::print("  · 若单次耗时随条数**大幅上升** → 缓存有上限，真实界面超过后会退化；\n");
-  st::print("  · 若基本持平（<1.5×）→ 缓存容量足够，无拐点，不需要调参。\n");
-  st::print("\n参考：`docs/BACKLOG` 记过「LRU 被后台排版刷爆（2.2~2.9×）」——\n");
-  st::print("      那是**多线程争用同一缓存**的情形，与本探针的单线程稳态不同。\n");
+  st::log::out("\n判读：\n");
+  st::log::out("  · 若单次耗时随条数**大幅上升** → 缓存有上限，真实界面超过后会退化；\n");
+  st::log::out("  · 若基本持平（<1.5×）→ 缓存容量足够，无拐点，不需要调参。\n");
+  st::log::out("\n参考：`docs/BACKLOG` 记过「LRU 被后台排版刷爆（2.2~2.9×）」——\n");
+  st::log::out("      那是**多线程争用同一缓存**的情形，与本探针的单线程稳态不同。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

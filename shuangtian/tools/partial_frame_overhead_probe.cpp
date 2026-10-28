@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/element.hpp"
@@ -75,7 +76,7 @@ auto main(int argc, char** argv) -> int {
   }
   st::probe::result verdict{};
 
-  st::print("{:>8}  {:>14}  {:>14}  {:>14}\n", "节点数", "layout(早退)", "paint(全帧)",
+  st::log::out("{:>8}  {:>14}  {:>14}  {:>14}\n", "节点数", "layout(早退)", "paint(全帧)",
             "两者合计");
 
   for (const int target : {100, 300, 600, 1200}) {
@@ -100,15 +101,15 @@ auto main(int argc, char** argv) -> int {
 
     const double early_ns = best_ns([&] { root.layout(false); });
     const double paint_ns = best_ns([&] { root.paint(canvas); });
-    st::print("{:>8}  {:>11.1f} µs  {:>11.1f} µs  {:>11.1f} µs\n", made, early_ns / 1000.0,
+    st::log::out("{:>8}  {:>11.1f} µs  {:>11.1f} µs  {:>11.1f} µs\n", made, early_ns / 1000.0,
               paint_ns / 1000.0, (early_ns + paint_ns) / 1000.0);
   }
 
-  st::print("\n判读：\n");
-  st::print("  · 这两项之和随节点数**线性增长**，且每帧都付（与损坏区大小无关）；\n");
-  st::print("  · 实测局部帧 2.46 ms 而脏区只有 17945 px —— 说明主体是这些整树递归，\n");
-  st::print("    不是绘制本身（按 `over_row` 单价那点面积只需 ~4.7 µs）。\n");
-  st::print("  · 方向：把 `collect_tree_damage` / `collect_animation_requests` /\n");
-  st::print("    `apply_theme_tree` 三层整树递归改成**只走标脏子树**（脏标记沿树上传）。\n");
+  st::log::out("\n判读：\n");
+  st::log::out("  · 这两项之和随节点数**线性增长**，且每帧都付（与损坏区大小无关）；\n");
+  st::log::out("  · 实测局部帧 2.46 ms 而脏区只有 17945 px —— 说明主体是这些整树递归，\n");
+  st::log::out("    不是绘制本身（按 `over_row` 单价那点面积只需 ~4.7 µs）。\n");
+  st::log::out("  · 方向：把 `collect_tree_damage` / `collect_animation_requests` /\n");
+  st::log::out("    `apply_theme_tree` 三层整树递归改成**只走标脏子树**（脏标记沿树上传）。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

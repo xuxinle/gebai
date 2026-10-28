@@ -13,6 +13,7 @@
 // 测试目标不链接 examples/caiyun，所以直接包含实现（仓库惯例）。
 #include "examples/caiyun/intent.cpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/test/test.hpp"
 
 namespace {
@@ -72,7 +73,7 @@ ST_TEST(caiyun_intent_broken_json_is_an_error) {
   const auto spec = caiyun::parse_intent(
       "text\n<!-- caiyun:intent\n{duration_s: 6.0}\n-->\n");
   ST_CHECK(!spec.has_value());
-  if (!spec) st::print("坏 JSON 的报错：{}\n", spec.error().message);
+  if (!spec) st::log::out("坏 JSON 的报错：{}\n", spec.error().message);
 }
 
 ST_TEST(caiyun_intent_unclosed_block_is_an_error) {

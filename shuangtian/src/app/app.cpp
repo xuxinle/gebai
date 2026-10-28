@@ -463,16 +463,26 @@ auto Application::script() -> ui::ScriptHost* { return impl_->script.get(); }
   return impl_->backend != nullptr && impl_->backend->maximized();
 }
 
-[[nodiscard]] auto Application::window_restore() -> bool {
-  if (impl_->backend == nullptr) return false;
-  const auto status = impl_->backend->restore();
-  if (!status) {
-    // 不当作硬失败：窗口通常已经解除最小化，只是可能没抢到前台焦点。
-    // 但必须能看见——否则“点了托盘没反应”会变成谜案。
-    ST_LOG_WARN("恢复窗口：{}", status.error().message);
+  [[nodiscard]] auto Application::window_restore() -> bool {
+    if (impl_->backend == nullptr) return false;
+    const auto status = impl_->backend->restore();
+    if (!status) {
+      // 不当作硬失败：窗口通常已经解除最小化，只是可能没抢到前台焦点。
+      // 但必须能看见——否则“点了托盘没反应”会变成谜案。
+      ST_LOG_WARN("恢复窗口：{}", status.error().message);
+    }
+    // 恢复后**清除 UI 焦点与悬停残留**：
+    // - 焦点：关窗时焦点停留在关闭按钮上（用户点它关的），直接恢复会把焦点环带回；
+    // - 悬停：关窗时鼠标在关闭按钮上，窗口隐藏期间没有新的 MouseMove，`hovered_`
+    //   一直指向关闭按钮——恢复后按钮继续显示 hover 红色高亮，看起来像“聚焦/选中”
+    //   了它（实测现象：鼠标没到窗口、关闭按钮红色）。两者都不是“窗口回来了”
+    //   该有的样子，清掉后等鼠标真的移动再重新 hover。
+    if (status) {
+      (void)root_.set_focus(nullptr);
+      root_.clear_hover();
+    }
+    return status.has_value();
   }
-  return status.has_value();
-}
 
 auto Application::set_window_size(int width_logical, int height_logical) -> Status {
   if (impl_->backend == nullptr) return unexpected(ErrorCode::Unsupported, "后端未就绪");
@@ -831,6 +841,8 @@ auto Application::start() -> Status {
     // 只在“未显式指定渲染器”时才启用延迟升级（显式 gpu/software 要保持可复现语义）。
     // 判据走 `defer_gpu_effective()` 而不是在这里再写一遍：实现与测试用同一个入口。
     window.defer_gpu = options_.defer_gpu_effective();
+    // 关窗→托盘常驻：与托盘同开关（托盘没建起来时关窗仍走退出，避免“窗口没了进程还在”的孤儿）
+    window.tray_minimize_on_close = options_.tray_enabled && options_.tray_minimize_on_close;
   window.headless = impl_->backend->headless();
   if (auto status = impl_->backend->create_window(window); !status) {
     // 自动选择的后端开不出窗口（例如探测到 libX11 但没有可用显示服务）→ 按约定回退 headless，
@@ -1122,16 +1134,16 @@ auto Application::start() -> Status {
       if (loaded > 0) {
         impl_->renderer->set_weight_curve(std::move(curve));
         if (fs::read_env("ST_TEXT_DEBUG").has_value()) {
-          st::print("[text] weight_curve={} ({})\n", loaded, curve_name);
+          st::log::out("[text] weight_curve={} ({})\n", loaded, curve_name);
         }
       } else if (fs::read_env("ST_TEXT_DEBUG").has_value()) {
-        st::print("[text] weight_curve=未加载（{}）\n", curve_name);
+        st::log::out("[text] weight_curve=未加载（{}）\n", curve_name);
       }
     }
     // 生效值自检（`ST_TEXT_DEBUG=1`）：测"参数是否真的生效"的**唯一**可靠手段——
     // 实测踩到两次：补丁被回退后两份渲染出几乎一样的图、应用自带解析器把新参数静默吃掉。
     if (fs::read_env("ST_TEXT_DEBUG").has_value()) {
-      st::print("[text] theme_gamma={:.2f} fit={} fit_max_size={} class_gamma={}/{}/{}\n",
+      st::log::out("[text] theme_gamma={:.2f} fit={} fit_max_size={} class_gamma={}/{}/{}\n",
                 impl_->renderer->coverage_gamma(),
                 static_cast<int>(impl_->renderer->grid_fit()), fit_max_size, gammas.digit,
                 gammas.letter, gammas.han);

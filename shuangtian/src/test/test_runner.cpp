@@ -13,6 +13,7 @@
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
+#include "st/core/log.hpp"
 
 // lint-allow: L8 测试注册表与当前用例失败栈是测试基础设施的进程级状态（CONVENTIONS §3.6 例外登记）
 namespace st::test {
@@ -233,7 +234,7 @@ void Registry::record_skip(std::string_view reason) {
   // 跳过理由必须进输出（否则只是把"静默计成 PASS"换成"静默不计"，可见性问题没解决）。
   // 不入失败栈：跳过与失败同时发生时，run_all 的判定序是「失败优先」——失败栈里
   // 混入跳过记录反而会把纯跳过用例误判成失败。
-  st::print("  \x1b[33mSKIP\x1b[0m {}\n", std::string(reason).substr(0, 200));
+  st::log::out("  \x1b[33mSKIP\x1b[0m {}\n", std::string(reason).substr(0, 200));
   g_skip_requested.store(true);
 }
 
@@ -343,7 +344,7 @@ auto run_all(std::string_view filter) -> int {
     const std::int64_t case_timeout_ms = item.timeout_ms > 0 ? item.timeout_ms : timeout_ms;
     if (time::now_ns() - start_ns > case_timeout_ms * 1'000'000LL &&
         !timed_out.exchange(true)) {
-      st::print("  \x1b[33mTIME\x1b[0m {:<44} 超过 {} ms 仍在运行（软超时标记 FAIL，继续等待）\n",
+      st::log::out("  \x1b[33mTIME\x1b[0m {:<44} 超过 {} ms 仍在运行（软超时标记 FAIL，继续等待）\n",
                 item.name, case_timeout_ms);
     }
     }
@@ -358,26 +359,26 @@ auto run_all(std::string_view filter) -> int {
     result.timed_out = timed_out.load();
     if (!registry.failures().empty()) {
       ++failed_cases;
-      st::print("  \x1b[31mFAIL\x1b[0m {:<44} {}\n", item.name, elapsed);
+      st::log::out("  \x1b[31mFAIL\x1b[0m {:<44} {}\n", item.name, elapsed);
       for (const auto& failure : registry.failures()) {
-        st::print("        {}\n", failure);
+        st::log::out("        {}\n", failure);
       }
       // **复现提示**：把"怎么单跑这一条"直接给出。
       // 为什么值得（AI 迭代的核心动作就是"跑失败的那条"）：用例名长且带下划线，
       // 手敲容易错；而且本工程默认 4 片并行，直接 `st test <名>` 的分片过滤
       // 有过不命中的情况——给出准确形式省一次试错。
       failed_names.push_back(item.name);
-      st::print("        \x1b[33m复现\x1b[0m st test {}\n", item.name);
+      st::log::out("        \x1b[33m复现\x1b[0m st test {}\n", item.name);
     } else if (registry.skip_requested()) {
       // 运行中跳过（`ST_SKIP`）：不算通过（否则环境缺失被计成绿灯）、不算失败
       // （那会把"框架根未注入"误报成被测对象的缺陷）。理由已由 `record_skip` 打出。
       ++skipped_env;
       result.skipped = true;
-      st::print("  \x1b[33mSKIP\x1b[0m {:<44} {}\n", item.name, elapsed);
+      st::log::out("  \x1b[33mSKIP\x1b[0m {:<44} {}\n", item.name, elapsed);
     } else {
       ++passed_cases;
       result.passed = true;
-      st::print("  \x1b[32mPASS\x1b[0m {:<44} {}\n", item.name, elapsed);
+      st::log::out("  \x1b[32mPASS\x1b[0m {:<44} {}\n", item.name, elapsed);
     }
     {
       const std::scoped_lock lock(registry_mutex());
@@ -390,22 +391,22 @@ auto run_all(std::string_view filter) -> int {
   // **失败汇总**：跑了几百条时，失败散布在输出里（尤其分片并行时各片交错），
   // 结尾集中列一遍，省得往上翻。
   if (!failed_names.empty()) {
-    st::print("\n  \x1b[31m失败用例（{}）\x1b[0m：\n", failed_names.size());
+    st::log::out("\n  \x1b[31m失败用例（{}）\x1b[0m：\n", failed_names.size());
     for (const auto& name : failed_names) {
-      st::print("    - {}\n", name);
+      st::log::out("    - {}\n", name);
     }
-    st::print("  单条复现：st test <用例名>\n");
+    st::log::out("  单条复现：st test <用例名>\n");
   }
-  st::print("\n  {} passed, {} failed, {} assertions", passed_cases, failed_cases, checks);
+  st::log::out("\n  {} passed, {} failed, {} assertions", passed_cases, failed_cases, checks);
   if (skipped_env > 0) {
     // 运行中跳过必须在汇总里可见：CI 门禁看到"跳过 N"才能发现"环境没配好，
     // 这一条其实没验"（静默时它藏在 PASS 计数里，BACKLOG 3903）。
-    st::print(", {} skipped（环境前置不满足，ST_SKIP）", skipped_env);
+    st::log::out(", {} skipped（环境前置不满足，ST_SKIP）", skipped_env);
   }
   if (skipped_slow > 0) {
-    st::print("（另 {} 个慢/环境敏感用例默认跳过：`--slow` 或 `st test --slow`）", skipped_slow);
+    st::log::out("（另 {} 个慢/环境敏感用例默认跳过：`--slow` 或 `st test --slow`）", skipped_slow);
   }
-  st::print("\n");
+  st::log::out("\n");
   return failed_cases;
 }
 
@@ -416,7 +417,7 @@ auto list_cases(std::string_view filter) -> int {
     const std::size_t ordinal_now = ordinal++;
     if (!in_shard(ordinal_now)) continue;
     if (!filter.empty() && item.name.find(filter) == std::string::npos) continue;
-    st::print("{}\n", item.name);
+    st::log::out("{}\n", item.name);
   }
   return 0;
 }

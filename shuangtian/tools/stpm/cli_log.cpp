@@ -5,6 +5,7 @@
 
 #include "st/core/console_log.hpp"
 #include "st/core/fs.hpp"
+#include "st/core/log.hpp"
 #include "st/core/print.hpp"
 #include "st/core/process.hpp"
 #include "st/core/string.hpp"
@@ -65,7 +66,7 @@ auto begin(std::string_view root, std::string_view action, std::string_view targ
   g_start_ns = st::time::now_ns();
   // 这行本身也会进日志（它由 print 写出，而镜像此时已打开）——所以日志的
   // 第一行就是它自己的路径：拿到一个日志文件就能反查"这是哪一次运行的"。
-  st::print("日志：{}\n", file);
+  st::log::out("日志：{}\n", file);
   return file;
 }
 
@@ -75,7 +76,7 @@ void end(int exit_code) {
   const std::size_t bytes = st::console_log::bytes_written();
   // 收尾行必须**在关闭镜像之前**写：否则它只出现在终端，日志文件缺最后一行。
   // 这行是"事后判断这次跑成没成"的第一眼信息。
-  st::print("── {} ── 耗时 {} · 退出码 {} · 日志 {} 字节\n",
+  st::log::out("── {} ── 耗时 {} · 退出码 {} · 日志 {} 字节\n",
             exit_code == 0 ? "完成" : "失败", elapsed, exit_code, bytes);
   st::console_log::close();
   g_path.clear();

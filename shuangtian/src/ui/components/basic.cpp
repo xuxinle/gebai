@@ -9,6 +9,7 @@
 
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/paint.hpp"
 #include "st/math/path.hpp"
 #include "components_internal.hpp"
@@ -79,7 +80,7 @@ void warn_unknown_icon_once(const std::string& name) {
   const std::size_t slot = std::hash<std::string>{}(name) % kMaxTracked;
   bool expected = false;
   if (!reported[slot].compare_exchange_strong(expected, true)) return;
-  st::eprint("[ui] 未知图标名 `{}`（该按钮的图标不会绘制）——图标需登记在 `Icon` 表"
+  st::log::err("[ui] 未知图标名 `{}`（该按钮的图标不会绘制）——图标需登记在 `Icon` 表"
              "（src/ui/icon.cpp）里，`examples/*/assets/icons.svg` 那份是另一套",
              name);
 }

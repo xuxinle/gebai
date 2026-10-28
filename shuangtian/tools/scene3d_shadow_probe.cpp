@@ -11,6 +11,7 @@
 
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/mesh.hpp"
 #include "st/raster/scene3d.hpp"
@@ -98,7 +99,7 @@ int main(int argc, char** argv) {
   const Case cases[] = {
       {"off", 0.0f}, {"weak", 0.25f}, {"mid", 0.45f}, {"strong", 0.70f}};
 
-  st::print("{:<8}{:>10}{:>12}{:>12}{:>10}\n", "强度", "地面区", "球体上方", "阴影区", "对比");
+  st::log::out("{:<8}{:>10}{:>12}{:>12}{:>10}\n", "强度", "地面区", "球体上方", "阴影区", "对比");
   double prev_shadow = 1e9;
   bool monotonic = true;
   double off_ground = 0.0;
@@ -115,19 +116,19 @@ int main(int argc, char** argv) {
     if (i == 0) off_ground = ground;
     if (i > 0 && shadow_area > prev_shadow + 0.5) monotonic = false;
     prev_shadow = shadow_area;
-    st::print("{:<8}{:>10.1f}{:>12.1f}{:>12.1f}{:>10.1f}\n", cases[i].name, ground, above,
+    st::log::out("{:<8}{:>10.1f}{:>12.1f}{:>12.1f}{:>10.1f}\n", cases[i].name, ground, above,
               shadow_area, shadow_area - off_ground);
     save_png(canvas, out_dir + "/shadow-" + cases[i].name + ".png");
   }
 
   // 判据 3：强度增大时阴影区应当单调变暗
-  st::print("\n强度单调性：{}\n", monotonic ? "成立" : "不成立（有反复）");
+  st::log::out("\n强度单调性：{}\n", monotonic ? "成立" : "不成立（有反复）");
   // 判据 1：最强档的阴影区应当明显暗于关闭档
   const Canvas strong = render(0.70f);
   const Canvas off = render(0.0f);
   const double s_off = luma_at(off, 146, 249, 14);
   const double s_strong = luma_at(strong, 146, 249, 14);
-  st::print("阴影区：关闭={:.1f} 强={:.1f} 差值={:.1f}\n", s_off, s_strong, s_off - s_strong);
-  st::print("→ 阴影{}\n", (s_off - s_strong) > 15.0 ? "确实生效" : "未生效或太弱");
+  st::log::out("阴影区：关闭={:.1f} 强={:.1f} 差值={:.1f}\n", s_off, s_strong, s_off - s_strong);
+  st::log::out("→ 阴影{}\n", (s_off - s_strong) > 15.0 ? "确实生效" : "未生效或太弱");
   return 0;
 }

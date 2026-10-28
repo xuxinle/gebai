@@ -28,6 +28,7 @@
 #include <functional>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 
@@ -101,19 +102,19 @@ auto main(int argc, char** argv) -> int {
   const double without_ns = best_ns([&] { draw_all(false); });
   const double with_ns = best_ns([&] { draw_all(true); });
 
-  st::print("96 张卡片阴影（140×48 圆角 8，两层）\n\n");
-  st::print("不传 covered_region   {:>9.1f} µs\n", without_ns / 1000.0);
-  st::print("传 covered_region     {:>9.1f} µs   → {:.2f}×\n", with_ns / 1000.0,
+  st::log::out("96 张卡片阴影（140×48 圆角 8，两层）\n\n");
+  st::log::out("不传 covered_region   {:>9.1f} µs\n", without_ns / 1000.0);
+  st::log::out("传 covered_region     {:>9.1f} µs   → {:.2f}×\n", with_ns / 1000.0,
             with_ns > 0.0 ? without_ns / with_ns : 0.0);
-  st::print("\n判读：\n");
+  st::log::out("\n判读：\n");
   const double gain = without_ns / std::max(with_ns, 1.0);
   if (gain < 1.05) {
-    st::print("  传了几乎没变（{:.2f}×）→ **后端没真正跳**。\n", gain);
-    st::print("  可能：跳过量未达 `kMinSkipPixels`(40px)，或贴图本身已按 spans 只覆盖非零区\n");
-    st::print("  （阴影像素大多本来就在卡片外侧，可跳的部分很小）。\n");
+    st::log::out("  传了几乎没变（{:.2f}×）→ **后端没真正跳**。\n", gain);
+    st::log::out("  可能：跳过量未达 `kMinSkipPixels`(40px)，或贴图本身已按 spans 只覆盖非零区\n");
+    st::log::out("  （阴影像素大多本来就在卡片外侧，可跳的部分很小）。\n");
   } else {
-    st::print("  传了快 {:.2f}× → 后端确实跳了；那 UI 层就该生效，\n", gain);
-    st::print("  若实测没变则是 UI 层条件没满足（查 `background.a`）。\n");
+    st::log::out("  传了快 {:.2f}× → 后端确实跳了；那 UI 层就该生效，\n", gain);
+    st::log::out("  若实测没变则是 UI 层条件没满足（查 `background.a`）。\n");
   }
   return st::probe::main_of(spec, opts, verdict);
 }

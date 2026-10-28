@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 
@@ -53,7 +54,7 @@ auto main(int argc, char** argv) -> int {
       {"大面板 720x480 r16 blur32", 720.0f, 480.0f, 16.0f, 32.0f},
   };
 
-  st::print("{:<26}  {:>10}  {:>12}  {:>12}  {:>14}\n", "参数", "段数", "平均段长",
+  st::log::out("{:<26}  {:>10}  {:>12}  {:>12}  {:>14}\n", "参数", "段数", "平均段长",
             "中位段长", "≥8px 像素占比");
   for (const Params& item : params) {
     Canvas canvas(kWidth, kHeight, 1.0f);
@@ -105,10 +106,10 @@ auto main(int argc, char** argv) -> int {
                                 ? 0.0
                                 : static_cast<double>(pixels_in_long_runs) * 100.0 /
                                       static_cast<double>(pixels_total);
-    st::print("{:<26}  {:>10}  {:>12.2f}  {:>12}  {:>13.1f}%\n", item.name, run_lengths.size(),
+    st::log::out("{:<26}  {:>10}  {:>12.2f}  {:>12}  {:>13.1f}%\n", item.name, run_lengths.size(),
               mean, median, long_pct);
   }
-  st::print("\n注：平均段长 ≥ 16 且 ≥8px 占比高 → 分组 + `blend_row` 有戏；\n");
-  st::print("    若中位段长为 1（噪点式分布） → 分组白花，应该找其它路子。\n");
+  st::log::out("\n注：平均段长 ≥ 16 且 ≥8px 占比高 → 分组 + `blend_row` 有戏；\n");
+  st::log::out("    若中位段长为 1（噪点式分布） → 分组白花，应该找其它路子。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

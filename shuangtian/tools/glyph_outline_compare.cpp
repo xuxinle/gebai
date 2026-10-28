@@ -30,6 +30,7 @@
 #include FT_OUTLINE_H
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/math/path.hpp"
 #include "st/text/font.hpp"
@@ -191,7 +192,7 @@ auto main(int argc, char** argv) -> int {
 
   auto face = st::text::FontFace::load(path, face_index);
   if (!face.has_value()) {
-    st::print("霜天侧加载失败：{}\n", face.error().message);
+    st::log::out("霜天侧加载失败：{}\n", face.error().message);
     return 1;
   }
   FT_Library lib = nullptr;
@@ -201,15 +202,15 @@ auto main(int argc, char** argv) -> int {
   // `NO_SCALE`：两侧都拿**字体单位**的原始轮廓（比的是解释器，不是 hinting/缩放）。
   const double upem = static_cast<double>(face->metrics().units_per_em);
 
-  st::print("字体 {} face={}  units_per_em={:.0f}\n", path, face_index, upem);
-  st::print("{:<8}{:>12}{:>22}{:>20}{:>10}{:>18}{:>18}\n", "码点", "子路径 霜/FT", "面积 霜/FT(em2)",
+  st::log::out("字体 {} face={}  units_per_em={:.0f}\n", path, face_index, upem);
+  st::log::out("{:<8}{:>12}{:>22}{:>20}{:>10}{:>18}{:>18}\n", "码点", "子路径 霜/FT", "面积 霜/FT(em2)",
             "周长 霜/FT(em)", "面积比", "宽 霜/FT", "高 霜/FT");
   for (std::uint32_t cp : codepoints) {
     const auto gid = face->glyph_index(static_cast<char32_t>(cp));
     if (!gid.has_value()) continue;
     const auto outline = face->glyph_outline(*gid);
     if (!outline.has_value()) {
-      st::print("U+{:04X} 霜天取轮廓失败：{}\n", cp, outline.error().message);
+      st::log::out("U+{:04X} 霜天取轮廓失败：{}\n", cp, outline.error().message);
       continue;
     }
     const Geometry a = analyze(contours_st(*outline), upem);
@@ -225,7 +226,7 @@ auto main(int argc, char** argv) -> int {
     funcs.cubic_to = cubic_to;
     FT_Outline_Decompose(&ft->glyph->outline, &funcs, &state);
     const Geometry b = analyze(ft_contours, upem);
-    st::print("U+{:04X}  {:>5}/{:<5}{:>10.4f}/{:<10.4f}{:>9.3f}/{:<9.3f}{:>10.4f}"
+    st::log::out("U+{:04X}  {:>5}/{:<5}{:>10.4f}/{:<10.4f}{:>9.3f}/{:<9.3f}{:>10.4f}"
               "{:>9.4f}/{:<9.4f}{:>9.4f}/{:<9.4f}\n",
               cp, a.contours, b.contours, a.area, b.area, a.perimeter, b.perimeter,
               b.area > 0 ? a.area / b.area : 0.0, a.x1 - a.x0, b.x1 - b.x0, a.y1 - a.y0,

@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -104,7 +105,7 @@ template <class Body>
 }
 
 auto report(const std::string& name, const Diff& result) -> void {
-  st::print("  {:<40} 超差 {:>6} / {} px（{:.4f}%）· 最大Δ{} @({},{})\n", name, result.differing,
+  st::log::out("  {:<40} 超差 {:>6} / {} px（{:.4f}%）· 最大Δ{} @({},{})\n", name, result.differing,
             result.total,
             result.total == 0 ? 0.0
                               : 100.0 * static_cast<double>(result.differing) /
@@ -139,7 +140,7 @@ auto main(int argc, char** argv) -> int {
                                 {320.0f, 4.0f, 1.0f, 1.0f},  {60.0f, 30.0f, 1.0f, 1.0f},
                                 {200.0f, 40.0f, 1.5f, 3.0f}, {10.0f, 5.0f, 1.0f, 1.0f}};
 
-  st::print("① 圆角边框：描边（现状） vs 环形填充（候选，内圈倒序点）\n");
+  st::log::out("① 圆角边框：描边（现状） vs 环形填充（候选，内圈倒序点）\n");
   for (const Case& item : cases) {
     const st::math::Rect box{40.0f, 40.0f, item.card_w, 100.0f};
     const float half = item.border_width * 0.5f;
@@ -164,7 +165,7 @@ auto main(int argc, char** argv) -> int {
            diff(stroke_canvas, ring_canvas));
   }
 
-  st::print("② 直角边框（对照，无曲线）\n");
+  st::log::out("② 直角边框（对照，无曲线）\n");
   {
     const st::math::Rect box{40.0f, 40.0f, 140.0f, 100.0f};
     st::raster::Canvas stroke_canvas = st::raster::Canvas::for_logical_size(kWidth, kHeight, 1.0f);
@@ -185,7 +186,7 @@ auto main(int argc, char** argv) -> int {
     report("直角 1px", diff(stroke_canvas, ring_canvas));
   }
 
-  st::print("③ 成本（单次，最快值）\n");
+  st::log::out("③ 成本（单次，最快值）\n");
   st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(1280, 800, 1.0f);
   canvas.clear(st::math::Color::rgb(0xF7, 0xF8, 0xFA));
   const st::math::Rect box{100.0f, 100.0f, 140.0f, 48.0f};
@@ -195,11 +196,11 @@ auto main(int argc, char** argv) -> int {
     return p;
   }();
   const st::math::Path ring = make_border_ring(box, 12.0f, 1.0f);
-  st::print("  描边 stroke_path        {:.4} ms\n",
+  st::log::out("  描边 stroke_path        {:.4} ms\n",
             best_ms(repeat, [&] { canvas.stroke_path(outline, border, 1.0f); }));
-  st::print("  环形 fill_path          {:.4} ms\n",
+  st::log::out("  环形 fill_path          {:.4} ms\n",
             best_ms(repeat, [&] { canvas.fill_path(ring, border); }));
-  st::print("  环形路径构造 + fill     {:.4} ms\n", best_ms(repeat, [&] {
+  st::log::out("  环形路径构造 + fill     {:.4} ms\n", best_ms(repeat, [&] {
              canvas.fill_path(make_border_ring(box, 12.0f, 1.0f), border);
            }));
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）

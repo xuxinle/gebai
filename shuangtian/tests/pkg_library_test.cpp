@@ -55,7 +55,7 @@ struct TempDir {
   }}
 }})",
                      lib_kind,
-                     app_depends_on_lib ? std::format(R"(, "libraries": ["{}"])", app_lib_name) : "");
+                     app_depends_on_lib ? std::format(R"(, "libraries": ["{}"])", app_lib_name) : "");  // lint-allow: L15 测试构造的 JSON 片段（内容安全）
 }
 
 }  // namespace

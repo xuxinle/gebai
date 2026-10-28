@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
@@ -83,8 +84,8 @@ auto main(int argc, char** argv) -> int {
   st::probe::result verdict{};
 
   const int size = argc > 1 ? std::atoi(argv[1]) : 64;
-  st::print("渲染盒 {}×{} 逻辑 px（与 Button::paint_content 同调用形态）\n", size, size);
-  st::print("理论：几何墨迹最长边被归一到 kOpticalTargetPx=17 单位 → "
+  st::log::out("渲染盒 {}×{} 逻辑 px（与 Button::paint_content 同调用形态）\n", size, size);
+  st::log::out("理论：几何墨迹最长边被归一到 kOpticalTargetPx=17 单位 → "
             "在 {}px 盒里 = {:.2f}px\n\n",
             size, 17.0 * (static_cast<double>(size) / 24.0));
 
@@ -93,7 +94,7 @@ auto main(int argc, char** argv) -> int {
       "folder", "search", "diff", "play", "package", "git-branch", "terminal",
       "check",  "star",   "cpu",  "heart", "gear",    "sun",        "list"};
 
-  st::print("{:<14} {:>8} {:>8} {:>10} {:>6} {:>9}\n", "name", "ink_w", "ink_h", "extent",
+  st::log::out("{:<14} {:>8} {:>8} {:>10} {:>6} {:>9}\n", "name", "ink_w", "ink_h", "extent",
             "filled", "vs目标");
   double sum_stroked = 0.0;
   int n_stroked = 0;
@@ -102,7 +103,7 @@ auto main(int argc, char** argv) -> int {
   for (const auto name : names) {
     const Ink ink = measure(name, size);
     if (ink.x0 < 0.0f) {
-      st::print("{:<14} （空）\n", name);
+      st::log::out("{:<14} （空）\n", name);
       continue;
     }
     const auto path = st::ui::Icon::path(name, Rect{0.0f, 0.0f, 24.0f, 24.0f}, 2.0f);
@@ -110,7 +111,7 @@ auto main(int argc, char** argv) -> int {
     const double target = 17.0 * (static_cast<double>(size) / 24.0);
     // 判断来源：内置表里 stroke==0 且 filled 即实心
     const bool likely_filled = name == "diff" || name == "play";
-    st::print("{:<14} {:>8.1f} {:>8.1f} {:>10.1f} {:>6} {:>8.2f}%\n", name,
+    st::log::out("{:<14} {:>8.1f} {:>8.1f} {:>10.1f} {:>6} {:>8.2f}%\n", name,
               static_cast<double>(ink.width()), static_cast<double>(ink.height()),
               static_cast<double>(ink.extent()), likely_filled ? "?" : "-",
               (static_cast<double>(ink.extent()) / target - 1.0) * 100.0);
@@ -122,7 +123,7 @@ auto main(int argc, char** argv) -> int {
       ++n_stroked;
     }
   }
-  st::print("\n描边式均值 {:.2f}px（n={}）· 实心式均值 {:.2f}px（n={}）\n",
+  st::log::out("\n描边式均值 {:.2f}px（n={}）· 实心式均值 {:.2f}px（n={}）\n",
             n_stroked > 0 ? sum_stroked / n_stroked : 0.0, n_stroked,
             n_filled > 0 ? sum_filled / n_filled : 0.0, n_filled);
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）

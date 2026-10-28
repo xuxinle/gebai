@@ -40,6 +40,7 @@
 
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -108,7 +109,7 @@ auto main(int argc, char** argv) -> int {
 
   auto fonts = st::text::FontStack::system_default();
   if (!fonts.has_value()) {
-    st::print("SKIP: 无系统字体，量尺不成立（measure_width 恒 0 会量出假结果）\n");
+    st::log::out("SKIP: 无系统字体，量尺不成立（measure_width 恒 0 会量出假结果）\n");
     return 0;
   }
   st::text::TextRenderer renderer{*fonts};
@@ -146,13 +147,13 @@ auto main(int argc, char** argv) -> int {
     table.paint(context, canvas);
   });
 
-  st::print("rows={}  cols={}  行高={:.0f}  视口={}px(约 {} 行)\n", rows_wanted, columns_wanted,
+  st::log::out("rows={}  cols={}  行高={:.0f}  视口={}px(约 {} 行)\n", rows_wanted, columns_wanted,
             table.row_height(), kViewportHeight,
             static_cast<std::size_t>(static_cast<float>(kViewportHeight) / table.row_height()));
-  st::print("  measure                 {:8.3f} ms   <- 只算列宽，与行数无关\n", measure_ms);
-  st::print("  paint(bounds=内容全高)   {:8.3f} ms   <- **真实场景**（ScrollView 给内容全高）\n",
+  st::log::out("  measure                 {:8.3f} ms   <- 只算列宽，与行数无关\n", measure_ms);
+  st::log::out("  paint(bounds=内容全高)   {:8.3f} ms   <- **真实场景**（ScrollView 给内容全高）\n",
             paint_fullbounds_ms);
-  st::print("  paint(bounds=视口高)     {:8.3f} ms   <- 对照：提前退出生效时\n",
+  st::log::out("  paint(bounds=视口高)     {:8.3f} ms   <- 对照：提前退出生效时\n",
             paint_viewportbounds_ms);
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 

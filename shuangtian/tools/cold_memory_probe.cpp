@@ -30,6 +30,7 @@
 
 #include "st/core/memory.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 
 namespace {
@@ -55,12 +56,12 @@ auto main(int argc, char** argv) -> int {
   st::probe::result verdict{};
 
   if (!st::memory::has_stats()) {
-    st::print("跳过：本平台不支持内存统计\n");
+    st::log::out("跳过：本平台不支持内存统计\n");
     return st::probe::main_of(spec, opts, verdict);
   }
 
   constexpr std::size_t kPixels = 64U * 1024U * 1024U / 4U;   // 64 MB
-  st::print("缓冲 {} MB，逐缓存行触碰\n\n", kPixels * 4U / (1024U * 1024U));
+  st::log::out("缓冲 {} MB，逐缓存行触碰\n\n", kPixels * 4U / (1024U * 1024U));
 
   std::vector<double> cold_ms;
   std::vector<double> warm_ms;
@@ -96,22 +97,22 @@ auto main(int argc, char** argv) -> int {
   const double warm_best = best(warm_ms);
   const double ratio = warm_best > 0.0 ? cold_best / warm_best : 0.0;
 
-  st::print("首次触碰（新分配）：最小 {:.2f} ms · 缺页合计 {}\n", cold_best, cold_faults);
-  st::print("第二次触碰（同块）：最小 {:.2f} ms · 缺页合计 {}\n", warm_best, warm_faults);
-  st::print("\n耗时比（首次/第二次）= **{:.2f}×**\n", ratio);
+  st::log::out("首次触碰（新分配）：最小 {:.2f} ms · 缺页合计 {}\n", cold_best, cold_faults);
+  st::log::out("第二次触碰（同块）：最小 {:.2f} ms · 缺页合计 {}\n", warm_best, warm_faults);
+  st::log::out("\n耗时比（首次/第二次）= **{:.2f}×**\n", ratio);
 
   // 理论缺页数：64 MB / 4 KB 页 = 16384，8 轮约 131072。
   const std::uint64_t expected = static_cast<std::uint64_t>(kPixels * 4U / 4096U) * 8U;
-  st::print("\n判读：\n");
+  st::log::out("\n判读：\n");
   if (cold_faults > expected / 4U) {
-    st::print("  首次缺页 {} 次（理论 ~{} 次）→ **冷内存确实是主因**\n", cold_faults, expected);
-    st::print("  → 方向：预占 + 预碰（alloc-then-touch），别让主线程在首帧逐页触发缺页。\n");
-    st::print("  ⚠ 但先看**绝对量**：`tools/cold_memory_scale_probe.cpp` 显示 600 KB 只需\n");
-    st::print("    0.373 ms，而待解释的首帧是 58 ms——机制成立不等于值得优化。\n");
+    st::log::out("  首次缺页 {} 次（理论 ~{} 次）→ **冷内存确实是主因**\n", cold_faults, expected);
+    st::log::out("  → 方向：预占 + 预碰（alloc-then-touch），别让主线程在首帧逐页触发缺页。\n");
+    st::log::out("  ⚠ 但先看**绝对量**：`tools/cold_memory_scale_probe.cpp` 显示 600 KB 只需\n");
+    st::log::out("    0.373 ms，而待解释的首帧是 58 ms——机制成立不等于值得优化。\n");
   } else if (ratio > 3.0) {
-    st::print("  缺页相近但耗时差很多 → **不是缺页**，该查调度/抢 CPU/缓存\n");
+    st::log::out("  缺页相近但耗时差很多 → **不是缺页**，该查调度/抢 CPU/缓存\n");
   } else {
-    st::print("  两者都接近 → 本机在这个尺度上看不到明显冷热效应\n");
+    st::log::out("  两者都接近 → 本机在这个尺度上看不到明显冷热效应\n");
   }
   return st::probe::main_of(spec, opts, verdict);
 }

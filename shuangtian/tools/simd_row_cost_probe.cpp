@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/simd.hpp"
 
@@ -58,7 +59,7 @@ auto main(int argc, char** argv) -> int {
   std::vector<std::uint32_t> dst(kBufferPixels, 0xFFF0F0F4U);
   std::vector<std::uint32_t> src(kBufferPixels, 0x802F6FE0U);
 
-  st::print("{:>8}  {:>14}  {:>14}  {:>10}\n", "行长", "over_row", "blend_row", "比值");
+  st::log::out("{:>8}  {:>14}  {:>14}  {:>10}\n", "行长", "over_row", "blend_row", "比值");
   const std::size_t lengths[] = {4, 8, 16, 32, 64, 128, 512, 2048};
   for (const std::size_t length : lengths) {
     // 每次调用只处理一行 `length` 像素；重复多次以放大到可测。
@@ -74,12 +75,12 @@ auto main(int argc, char** argv) -> int {
       }
     });
     const double total_px = static_cast<double>(length) * kRepeat;
-    st::print("{:>8}  {:>9.3f} ns/px  {:>9.3f} ns/px  {:>9.2f}×\n", length,
+    st::log::out("{:>8}  {:>9.3f} ns/px  {:>9.3f} ns/px  {:>9.2f}×\n", length,
               over_ns / total_px, blend_ns / total_px,
               blend_ns > 0.0 ? over_ns / blend_ns : 0.0);
   }
-  st::print("\n注：两者都直接调用 `simd::*`，不含画布/裁剪开销。\n");
-  st::print("若“长 512/2048”时比值仍很大 → 是**算法本身**的差（解包 vs 常量 alpha）；\n");
-  st::print("若只在短行时差 → 是**每行固定开销**（调用/初始化）。\n");
+  st::log::out("\n注：两者都直接调用 `simd::*`，不含画布/裁剪开销。\n");
+  st::log::out("若“长 512/2048”时比值仍很大 → 是**算法本身**的差（解包 vs 常量 alpha）；\n");
+  st::log::out("若只在短行时差 → 是**每行固定开销**（调用/初始化）。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

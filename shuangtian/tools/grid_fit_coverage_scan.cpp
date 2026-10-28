@@ -20,6 +20,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
 
@@ -121,8 +122,8 @@ auto main(int argc, char** argv) -> int {
     // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
     return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体\\n"));
   }
-  st::print("scale={} 物理字号={}  覆盖率门槛扫描（汉字，γ=0.6，LCD）\n", scale, size);
-  st::print("\n{:<10s} {:>8s} {:>12s} {:>10s}\n", "门槛", "应用率", "双峰笔划占比", "墨色 sd");
+  st::log::out("scale={} 物理字号={}  覆盖率门槛扫描（汉字，γ=0.6，LCD）\n", scale, size);
+  st::log::out("\n{:<10s} {:>8s} {:>12s} {:>10s}\n", "门槛", "应用率", "双峰笔划占比", "墨色 sd");
   for (const float coverage : {0.0f, 0.5f, 0.75f, 0.9f, 1.01f}) {
     std::size_t glyphs = 0;
     std::size_t applied = 0;
@@ -229,13 +230,13 @@ auto main(int argc, char** argv) -> int {
         }
       }
     }
-    st::print("{:<10.2f} {:>7.1f}% {:>9.1f}% {:>10.4f}   [字形 {} / 横截面 {} / 组 {}]\n", coverage,
+    st::log::out("{:<10.2f} {:>7.1f}% {:>9.1f}% {:>10.4f}   [字形 {} / 横截面 {} / 组 {}]\n", coverage,
               glyphs ? 100.0 * static_cast<double>(applied) / static_cast<double>(glyphs) : 0.0,
               groups ? 100.0 * static_cast<double>(bimodal) / static_cast<double>(groups) : 0.0,
               sd_groups ? peak_sd_sum / static_cast<double>(sd_groups) : 0.0, glyphs, scan_total,
               groups);
   }
-  st::print("\n判读：**两个数一起看**——应用率（还有多少字形真被拟合 = 锐度收益）\n"
+  st::log::out("\n判读：**两个数一起看**——应用率（还有多少字形真被拟合 = 锐度收益）\n"
             "      对双峰组占比（同组内实心与发灰共存 = 观感上的“粗细不均”）。\n"
             "      门槛抬高会让更多字形整体放弃：这是“看得见的代价”（应用率下降），\n"
             "      换来的是不再产出**带低覆盖率却声称已拟合**的混合字形（看不见的那种）。\n");

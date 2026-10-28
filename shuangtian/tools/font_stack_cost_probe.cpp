@@ -15,6 +15,7 @@
 #include "st/core/fs.hpp"
 #include "st/core/font_platform.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/text/text.hpp"
 
 namespace {
@@ -39,16 +40,16 @@ double best_ms(int rounds, Fn&& fn) {
 int main() {
   auto boot = st::text::FontStack::system_default();
   if (!boot) {
-    st::print("无字体环境：本探针不适用\n");
+    st::log::out("无字体环境：本探针不适用\n");
     return 0;
   }
 
   const auto text = st::platform::preferred_text_fonts();
   const auto bold = st::platform::preferred_text_fonts_bold();
   const auto mono = st::platform::preferred_mono_fonts();
-  st::print("候选数：正文 {} · 粗体 {} · 等宽 {}\n", text.size(), bold.size(), mono.size());
+  st::log::out("候选数：正文 {} · 粗体 {} · 等宽 {}\n", text.size(), bold.size(), mono.size());
   for (const auto& e : text) {
-    st::print("  正文候选 cjk={}  {}\n", e.cjk ? 1 : 0, e.path);
+    st::log::out("  正文候选 cjk={}  {}\n", e.cjk ? 1 : 0, e.path);
   }
 
   // ① 纯平台层：候选链枚举（内含每条的 is_regular_file）
@@ -75,10 +76,10 @@ int main() {
     (void)ok;
   });
 
-  st::print("\n");
-  st::print("① 平台层候选链枚举       {:>8.3f} ms\n", platform_ms);
-  st::print("② 仅文件存在性探测       {:>8.3f} ms\n", exists_ms);
-  st::print("③ system_default（热）   {:>8.3f} ms   ← 原断言要求 < 1.0\n", hot_ms);
-  st::print("   ③ − ① =              {:>8.3f} ms\n", hot_ms - platform_ms);
+  st::log::out("\n");
+  st::log::out("① 平台层候选链枚举       {:>8.3f} ms\n", platform_ms);
+  st::log::out("② 仅文件存在性探测       {:>8.3f} ms\n", exists_ms);
+  st::log::out("③ system_default（热）   {:>8.3f} ms   ← 原断言要求 < 1.0\n", hot_ms);
+  st::log::out("   ③ − ① =              {:>8.3f} ms\n", hot_ms - platform_ms);
   return 0;
 }

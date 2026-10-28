@@ -25,6 +25,7 @@
 #include FT_MODULE_H
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
@@ -137,10 +138,10 @@ int main(int argc, char** argv) {
   FT_Face ft = nullptr;
   if (FT_New_Face(library, path.c_str(), face_index, &ft) != 0) return 1;
   auto stack = st::text::FontStack::system_default();
-  if (!stack) { st::print("无可用字体\n"); return 1; }
+  if (!stack) { st::log::out("无可用字体\n"); return 1; }
 
   for (double ppem : ppems) {
-    st::print("\n物理字号 {:.1f}px（逻辑 {:.1f} × DPI {:.1f}）\n", ppem,
+    st::log::out("\n物理字号 {:.1f}px（逻辑 {:.1f} × DPI {:.1f}）\n", ppem,
               ppem / static_cast<double>(scale), static_cast<double>(scale));
     st::text::TextRenderer renderer{*stack, scale};
     renderer.set_subpixel(true);
@@ -149,7 +150,7 @@ int main(int argc, char** argv) {
     renderer.set_ink_compensation(false);
     renderer.set_coverage_gamma(1.0f);
 
-    st::print("{:<8}{:>10}{:>10}{:>10}{:>10}{:>10}{:>12}{:>12}{:>12}\n", "码点", "FT默档",
+    st::log::out("{:<8}{:>10}{:>10}{:>10}{:>10}{:>10}{:>12}{:>12}{:>12}\n", "码点", "FT默档",
               "FT关加墨", "FT关hint", "FT都关", "霜天", "hint贡献", "加墨贡献", "霜天/FT默档");
     for (std::uint32_t cp : cps) {
       const std::string u = utf8_of(cp);
@@ -158,7 +159,7 @@ int main(int argc, char** argv) {
       const double nd = ft_ink(library, ft, cp, ppem, false, true);
       const double nn = ft_ink(library, ft, cp, ppem, false, false);
       const double st = st_ink(renderer, u, static_cast<float>(ppem / scale), scale);
-      st::print("U+{:04X}  {:>10.1f}{:>10.1f}{:>10.1f}{:>10.1f}{:>10.1f}"
+      st::log::out("U+{:04X}  {:>10.1f}{:>10.1f}{:>10.1f}{:>10.1f}{:>10.1f}"
                 "{:>12.3f}{:>12.3f}{:>12.3f}\n",
                 cp, hd, hn, nd, nn, st, nn > 0 ? nd / nn : 0.0, hn > 0 ? hd / hn : 0.0,
                 hd > 0 ? st / hd : 0.0);

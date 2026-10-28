@@ -27,6 +27,7 @@
 
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -109,7 +110,7 @@ auto main(int argc, char** argv) -> int {
 
   auto fonts = st::text::FontStack::system_default();
   if (!fonts.has_value()) {
-    st::print("SKIP: 无系统字体，量尺不成立（measure_width 恒 0 会量出假结果）\n");
+    st::log::out("SKIP: 无系统字体，量尺不成立（measure_width 恒 0 会量出假结果）\n");
     return 0;
   }
   st::text::TextRenderer renderer{*fonts};
@@ -122,7 +123,7 @@ auto main(int argc, char** argv) -> int {
   constexpr int kHeight = 400;
   st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(kWidth, kHeight, 1.0f);
 
-  st::print("scale={}\n", scale);
+  st::log::out("scale={}\n", scale);
 
   // ────────── MarkdownView ──────────
   {
@@ -145,9 +146,9 @@ auto main(int argc, char** argv) -> int {
       canvas.clear(st::math::Color{0xFF, 0xFF, 0xFF, 0xFF});
       view.paint(context, canvas);
     });
-    st::print("  MarkdownView  set_markdown  {:8.3f} ms\n", set_ms);
-    st::print("  MarkdownView  paint(首次)   {:8.3f} ms\n", first_paint_ms);
-    st::print("  MarkdownView  paint(稳态)   {:8.3f} ms   <- 每帧成本\n", steady_ms);
+    st::log::out("  MarkdownView  set_markdown  {:8.3f} ms\n", set_ms);
+    st::log::out("  MarkdownView  paint(首次)   {:8.3f} ms\n", first_paint_ms);
+    st::log::out("  MarkdownView  paint(稳态)   {:8.3f} ms   <- 每帧成本\n", steady_ms);
   }
 
   // ────────── MergeView ──────────
@@ -172,9 +173,9 @@ auto main(int argc, char** argv) -> int {
       canvas.clear(st::math::Color{0xFF, 0xFF, 0xFF, 0xFF});
       view.paint(context, canvas);
     });
-    st::print("  MergeView     set_texts     {:8.3f} ms   <- 含一次三方合并\n", set_ms);
-    st::print("  MergeView     paint(首次)   {:8.3f} ms\n", first_paint_ms);
-    st::print("  MergeView     paint(稳态)   {:8.3f} ms   <- 每帧成本\n", steady_ms);
+    st::log::out("  MergeView     set_texts     {:8.3f} ms   <- 含一次三方合并\n", set_ms);
+    st::log::out("  MergeView     paint(首次)   {:8.3f} ms\n", first_paint_ms);
+    st::log::out("  MergeView     paint(稳态)   {:8.3f} ms   <- 每帧成本\n", steady_ms);
   }
 
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）

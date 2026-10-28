@@ -32,6 +32,9 @@ class TcpStream {
   [[nodiscard]] auto write_text(std::string_view text) -> Status;
   /// 读一次（返回实际字节数；0 表示对端已关闭）。
   [[nodiscard]] auto read_some(std::span<std::uint8_t> buffer) -> Result<std::size_t>;
+  /// 非阻塞读一次：would-block（暂无可读数据）立即返回 `unexpected(Timeout)`，**不等待**。
+  /// 给主循环/事件循环里“已确认可读再读一次”的调用点用——避免误报可读时把线程冻住。
+  [[nodiscard]] auto read_some_nonblocking(std::span<std::uint8_t> buffer) -> Result<std::size_t>;
   /// 读满 `buffer.size()`（不足即 EOF 报错）。
   [[nodiscard]] auto read_exact(std::span<std::uint8_t> buffer) -> Status;
 

@@ -34,7 +34,8 @@
 #include "st/app/app.hpp"
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
-#include "st/core/json.hpp"  // ScriptHost::eval 返回 Result<Json>（完整类型，json_fwd 不够）
+#include "st/core/json.hpp"
+#include "st/core/log.hpp"  // ScriptHost::eval 返回 Result<Json>（完整类型，json_fwd 不够）
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/test/test.hpp"
@@ -289,7 +290,7 @@ ST_TEST_SLOW(frame_cost_stays_within_budget) {
   // 插桩档下用**档位松弛**而不是跳过：这条是"整帧别失控"的安全网，值得留着；
   // 而 50× 是为发布档标定的（ASan 把整帧抬到 ~1.9 倍清屏比值，实测 57×~63×）。
   const double limit = kInstrumentedBuild ? kFrameLimitInstrumented : kFrameLimit;
-  st::print("[frame] 稳态帧耗时 best={:.2f}ms p50={:.2f}ms p95={:.2f}ms worst={:.2f}ms"
+  st::log::out("[frame] 稳态帧耗时 best={:.2f}ms p50={:.2f}ms p95={:.2f}ms worst={:.2f}ms"
             "（{} 帧采样；清屏 {:.3f}ms → best = {:.2f}× 清屏，阈值 {}×{}）\n",
             timing.best, timing.p50, timing.p95, timing.worst, timing.sampled, unit, ratio, limit,
             kInstrumentedBuild ? "，插桩档松弛" : "");
@@ -306,7 +307,7 @@ ST_TEST_SLOW(frame_cost_p95_stays_within_budget) {
   // "有没有偶发超时"（如每 N 帧重建一次缓存）。共享机器上 p95 会被邻居抬高，
   // 所以给 2 倍宽限——它只用来抓"量级不对"，精细的性能判断归上一条（best）。
   const double limit = kFrameLimit * 2.0;
-  st::print("[frame] p95 = {:.2f}× 清屏（阈值 {}×，含共享机器宽限）\n", ratio, limit);
+  st::log::out("[frame] p95 = {:.2f}× 清屏（阈值 {}×，含共享机器宽限）\n", ratio, limit);
   ST_CHECK(ratio <= limit);
 }
 
@@ -334,10 +335,10 @@ ST_TEST_SLOW(frame_budget_threshold_has_bounded_headroom) {
   // 打印的“上限”必须是**实际生效的那个**（`kFrameMaxHeadroom`）。
   // 旧版这里印的是全局的 `kMaxHeadroom`(3.5)，而检查用的是 25——日志说的与做的不一致，
   // 看上去像“余量 1.18 倍但上限 3.5，为什么还能过”。
-  st::print("[frame-guard] 阈值 {:.1f}× / 实测 {:.2f}× = 余量 {:.2f} 倍（上限 {}）\n", kFrameLimit,
+  st::log::out("[frame-guard] 阈值 {:.1f}× / 实测 {:.2f}× = 余量 {:.2f} 倍（上限 {}）\n", kFrameLimit,
             ratio, headroom, kFrameMaxHeadroom);
   if (kInstrumentedBuild || !calibration_profile()) {
-    st::print("[frame-guard] 跳过余量上下界断言——{}。本门的标定与把关以发布档为准。\n",
+    st::log::out("[frame-guard] 跳过余量上下界断言——{}。本门的标定与把关以发布档为准。\n",
               kInstrumentedBuild ? "插桩档：ASan 开销 ∝ 内存访问量，而分母是纯内存写（实测 59×~142× 乱跳）"
                                  : "非标定档：分母（清屏）可向量化而整帧绘制是标量循环（实测 release 24.5× / dev 60.7×）");
     return;
@@ -352,11 +353,11 @@ ST_TEST_SLOW(frame_budget_fault_multiplication_is_caught) {
   const FrameTiming timing = measure_frames_best(30);
   const double ratio = timing.best / unit;
   const bool caught = ratio * kFaultFactor > kFrameLimit;
-  st::print("[frame-guard] 实测 {:.2f}× × {} 倍退化 = {:.2f}× vs 阈值 {:.1f}× → {}\n", ratio,
+  st::log::out("[frame-guard] 实测 {:.2f}× × {} 倍退化 = {:.2f}× vs 阈值 {:.1f}× → {}\n", ratio,
             kFaultFactor, ratio * kFaultFactor, kFrameLimit, caught ? "会被抓住" : "**抓不住**");
   // 同上：插桩档 / 非标定档的比值不可比，这条也不适用（它同样建立在"比值机器无关"之上）。
   if (kInstrumentedBuild || !calibration_profile()) {
-    st::print("[frame-guard] 跳过此自检（理由同上：比值在插桩档/非标定档不可比）。\n");
+    st::log::out("[frame-guard] 跳过此自检（理由同上：比值在插桩档/非标定档不可比）。\n");
     return;
   }
   ST_CHECK(caught);
@@ -395,7 +396,7 @@ ST_TEST_SLOW(frame_cost_breakdown_for_diagnostics) {
   const double frames = static_cast<double>(kFrames - kFrames / 4);
   const double layout_ms = layout_total / frames;
   const double paint_ms = paint_total / frames;
-  st::print("[frame-split] layout {:.2f}ms（{:.1f}× 清屏）· paint {:.2f}ms（{:.1f}× 清屏）· "
+  st::log::out("[frame-split] layout {:.2f}ms（{:.1f}× 清屏）· paint {:.2f}ms（{:.1f}× 清屏）· "
             "合计 {:.2f}ms\n",
             layout_ms, layout_ms / unit, paint_ms, paint_ms / unit, layout_ms + paint_ms);
   ST_CHECK(layout_ms > 0.0);
@@ -465,7 +466,7 @@ ST_TEST_SLOW(script_write_partial_vs_full_frame_cost) {
   const double partial_median = partial_samples[kRounds / 2];
   const double full_median = full_samples[kRounds / 2];
   const double unit = clear_ms();
-  st::print("[frame-js-write] 局部帧中位 {:.3f}ms（{:.2f}× 清屏） vs 整帧中位 {:.3f}ms（{:.2f}× 清屏）"
+  st::log::out("[frame-js-write] 局部帧中位 {:.3f}ms（{:.2f}× 清屏） vs 整帧中位 {:.3f}ms（{:.2f}× 清屏）"
             "→ 局部/整帧 = {:.2f}（末轮局部={}，dirty={}×{}）\n",
             partial_median, partial_median / unit, full_median, full_median / unit,
             partial_median / full_median, last_partial_flag, dirty_w, dirty_h);

@@ -50,6 +50,11 @@ struct WindowOptions {
   bool decorations{false};
   /// 先给软件画布把窗口开出来，GPU 在后台备好后再换型（见 `AppOptions::defer_gpu`）。
   bool defer_gpu{true};
+  /// 关窗动作：`true` 且托盘图标已建立时，用户点 × 只**隐藏窗口**（SW_HIDE），
+  /// 进程继续常驻（托盘图标还在）；`false`（默认）= 关窗即请求退出。
+  ///
+  /// 常驻类应用（托盘 + 后台等事件）用它实现“窗口关了但服务还在”。
+  bool tray_minimize_on_close{false};
   /// 渲染器：`auto`（按实测性能选）/ `gpu` / `software`。
   ///
   /// 缺省 `auto`，但 **headless 后端把空串/`auto` 解析为 `software`**（见

@@ -49,6 +49,7 @@
 #include "st/core/print.hpp"
 #include "st/core/time.hpp"
 #include "st/core/json.hpp"
+#include "st/core/log.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/scroll.hpp"
 #include "st/ui/components/slider.hpp"
@@ -129,7 +130,7 @@ struct Options {
 
 /// 用法说明。**必须有**：未知参数会报错退出，没有 `--help` 就等于"报错了也没处查"。
 auto print_usage(std::string_view program) -> void {
-  st::print(
+  st::log::out(
       "用法: {} [选项]\n"
       "\n"
       "窗口/主题\n"
@@ -176,7 +177,7 @@ auto parse_options(int argc, char** argv) -> Options {
         ok = false;
       }
       if (!ok) {
-        st::eprint("参数 {} 需要一个整数，收到「{}」\n", flag, text);
+        st::log::err("参数 {} 需要一个整数，收到「{}」\n", flag, text);
         std::exit(2);
       }
       return parsed;
@@ -236,14 +237,14 @@ auto parse_options(int argc, char** argv) -> Options {
       const std::string text = value("1920x1080");
       const auto at = text.find('x');
       if (at == std::string::npos) {
-        st::eprint("参数 --render-size 需要 WxH（如 1920x1080），收到「{}」\n", text);
+        st::log::err("参数 --render-size 需要 WxH（如 1920x1080），收到「{}」\n", text);
         std::exit(2);
       }
       try {
         options.render_width = std::clamp(std::stoi(text.substr(0, at)), 64, 7680);
         options.render_height = std::clamp(std::stoi(text.substr(at + 1)), 64, 4320);
       } catch (const std::exception&) {
-        st::eprint("参数 --render-size 不是合法尺寸：「{}」\n", text);
+        st::log::err("参数 --render-size 不是合法尺寸：「{}」\n", text);
         std::exit(2);
       }
     } else if (raw == "--render-frames") {
@@ -267,7 +268,7 @@ auto parse_options(int argc, char** argv) -> Options {
       // 为何要一个专用参数而不是走控制通道：查字段是最频的动作，
       // 而控制通道要求“应用先启动 + 连 token + 同一应用只允许一实例”。
       // 离线批处理场景下 `--dump-schema` 一行就够，且没有清理负担。
-      st::print("{}", caiyun::schema_to_json());
+      st::log::out("{}", caiyun::schema_to_json());
       std::exit(0);
     } else if (raw == "--bench") {
       options.bench_seconds = static_cast<int>(std::clamp(parse_int("--bench", 0), 0LL, 3600LL));
@@ -275,7 +276,7 @@ auto parse_options(int argc, char** argv) -> Options {
       print_usage(argv[0]);
       std::exit(0);
     } else {
-      st::eprint("未知参数：{}（用 --help 看可用项）\n", raw);
+      st::log::err("未知参数：{}（用 --help 看可用项）\n", raw);
       std::exit(2);
     }
   }
@@ -579,12 +580,12 @@ class CaiyunPage final : public dsl::Component {
     if (path.empty()) return caiyun::builtin_sample_promo();
     const auto text = st::fs::read_text(path);
     if (!text) {
-      st::eprint("脚本读取失败：{}（改用内置歌白宣传片）\n", text.error().message);
+      st::log::err("脚本读取失败：{}（改用内置歌白宣传片）\n", text.error().message);
       return caiyun::builtin_sample_promo();
     }
     const auto parsed = caiyun::parse_script(text.value(), st::fs::parent(path));
     if (!parsed) {
-      st::eprint("脚本解析失败：{}（改用内置歌白宣传片）\n", parsed.error().message);
+      st::log::err("脚本解析失败：{}（改用内置歌白宣传片）\n", parsed.error().message);
       return caiyun::builtin_sample_promo();
     }
     caiyun::Script script = parsed.value();
@@ -1211,26 +1212,26 @@ auto run_app(int argc, char** argv) -> int {
   // ① 建包：`--pack <脚本.json> <包目录>`
   if (!options.pack_source.empty()) {
     if (options.pack_target.empty()) {
-      st::eprint("--pack 需要两个值：<脚本.json> <包目录>\n");
+      st::log::err("--pack 需要两个值：<脚本.json> <包目录>\n");
       return 2;
     }
     const auto text = st::fs::read_text(options.pack_source);
     if (!text) {
-      st::eprint("读不到脚本：{}\n", options.pack_source);
+      st::log::err("读不到脚本：{}\n", options.pack_source);
       return 1;
     }
     const auto parsed = caiyun::parse_script(*text, st::fs::parent(options.pack_source));
     if (!parsed) {
-      st::eprint("脚本解析失败：{}\n", parsed.error().message);
+      st::log::err("脚本解析失败：{}\n", parsed.error().message);
       return 1;
     }
     const auto created = caiyun::create_package(options.pack_target, *parsed,
                                       st::fs::parent(options.pack_source), {}, true);
     if (!created) {
-      st::eprint("建包失败：{}\n", created.error().message);
+      st::log::err("建包失败：{}\n", created.error().message);
       return 1;
     }
-    st::print("已建包：{}\n", options.pack_target);
+    st::log::out("已建包：{}\n", options.pack_target);
     return 0;
   }
 
@@ -1238,41 +1239,41 @@ auto run_app(int argc, char** argv) -> int {
   if (!options.check_source.empty()) {
     const auto expanded = caiyun::expand_package(options.check_source);
     if (!expanded) {
-      st::eprint("读包失败：{}\n", expanded.error().message);
+      st::log::err("读包失败：{}\n", expanded.error().message);
       return 1;
     }
     int problems = 0;
     if (!expanded->intent_deviations.empty()) {
-      st::print("意图偏差 {} 条：\n", expanded->intent_deviations.size());
+      st::log::out("意图偏差 {} 条：\n", expanded->intent_deviations.size());
       for (const auto& dev : expanded->intent_deviations) {
-        st::print("  - {}\n", dev.to_string());
+        st::log::out("  - {}\n", dev.to_string());
       }
       problems += static_cast<int>(expanded->intent_deviations.size());
     }
     const caiyun::AssetCheck& assets = expanded->asset_check;
     if (!assets.missing.empty()) {
-      st::print("素材缺失 {} 个：\n", assets.missing.size());
-      for (const auto& name : assets.missing) st::print("  - {}\n", name);
+      st::log::out("素材缺失 {} 个：\n", assets.missing.size());
+      for (const auto& name : assets.missing) st::log::out("  - {}\n", name);
       problems += static_cast<int>(assets.missing.size());
     }
     if (!assets.modified.empty()) {
-      st::print("素材被改动 {} 个（内容与登记时不同）：\n", assets.modified.size());
-      for (const auto& name : assets.modified) st::print("  - {}\n", name);
+      st::log::out("素材被改动 {} 个（内容与登记时不同）：\n", assets.modified.size());
+      for (const auto& name : assets.modified) st::log::out("  - {}\n", name);
       problems += static_cast<int>(assets.modified.size());
     }
     if (!assets.untracked.empty()) {
       // 未登记不算问题（可能只是新增了还没用上的素材），只提示。
-      st::print("未登记素材 {} 个（仅提示）：\n", assets.untracked.size());
-      for (const auto& name : assets.untracked) st::print("  - {}\n", name);
+      st::log::out("未登记素材 {} 个（仅提示）：\n", assets.untracked.size());
+      for (const auto& name : assets.untracked) st::log::out("  - {}\n", name);
     }
-    if (problems == 0) st::print("工程包体检通过：意图符合、素材完整。\n");
+    if (problems == 0) st::log::out("工程包体检通过：意图符合、素材完整。\n");
     return problems == 0 ? 0 : 1;
   }
 
   // ④ 视觉快照：`--snapshot <帧目录> <快照目录>`（可选 `--script` 提供场景边界）
   if (!options.snapshot_frames.empty()) {
     if (options.snapshot_out.empty()) {
-      st::eprint("--snapshot 需要两个值：<帧目录> <快照目录>\n");
+      st::log::err("--snapshot 需要两个值：<帧目录> <快照目录>\n");
       return 2;
     }
     // 场景边界：有脚本就按真实分镜算（这是“按镜首中尾抽”能成立的前提）。
@@ -1297,19 +1298,19 @@ auto run_app(int argc, char** argv) -> int {
             cursor += span;
           }
         } else {
-          st::eprint("脚本解析失败，将退化为均匀抽取：{}\n", parsed.error().message);
+          st::log::err("脚本解析失败，将退化为均匀抽取：{}\n", parsed.error().message);
         }
       }
     }
     const auto snap = caiyun::build_snapshot(options.snapshot_frames, options.snapshot_out,
                                              "snapshot", bounds, 0, fps, width, height);
     if (!snap) {
-      st::eprint("抽快照失败：{}\n", snap.error().message);
+      st::log::err("抽快照失败：{}\n", snap.error().message);
       return 1;
     }
-    st::print("快照已建立：{}（{} 帧）\n", options.snapshot_out, snap->frames.size());
+    st::log::out("快照已建立：{}（{} 帧）\n", options.snapshot_out, snap->frames.size());
     for (const auto& frame : snap->frames) {
-      st::print("  - 第 {} 帧（{:.2f}s，镜{}，{}）\n", frame.index, frame.time_s,
+      st::log::out("  - 第 {} 帧（{:.2f}s，镜{}，{}）\n", frame.index, frame.time_s,
                 frame.scene_index, frame.role);
     }
     return 0;
@@ -1318,22 +1319,22 @@ auto run_app(int argc, char** argv) -> int {
   // ⑤ 视觉比对：`--diff-snap <快照A> <快照B>`
   if (!options.diff_a.empty()) {
     if (options.diff_b.empty()) {
-      st::eprint("--diff-snap 需要两个值：<快照A> <快照B>\n");
+      st::log::err("--diff-snap 需要两个值：<快照A> <快照B>\n");
       return 2;
     }
     const auto diff = caiyun::diff_snapshots(options.diff_a, options.diff_b);
     if (!diff) {
-      st::eprint("视觉比对失败：{}\n", diff.error().message);
+      st::log::err("视觉比对失败：{}\n", diff.error().message);
       return 1;
     }
-    st::print("可比帧 {} 对，均差 {:.4f}%，最大差 {:.3f}%（第 {} 帧）\n", diff->compared,
+    st::log::out("可比帧 {} 对，均差 {:.4f}%，最大差 {:.3f}%（第 {} 帧）\n", diff->compared,
               diff->mean_diff_pct, diff->worst_diff_pct, diff->worst_frame_index);
     for (const auto& frame : diff->frames) {
-      st::print("  第 {:5d} 帧：{:7.3f}%  区域 {}x{}+{}+{}  最大通道差 {}\n", frame.index,
+      st::log::out("  第 {:5d} 帧：{:7.3f}%  区域 {}x{}+{}+{}  最大通道差 {}\n", frame.index,
                 frame.diff_pct, frame.bounds_w, frame.bounds_h, frame.bounds_x,
                 frame.bounds_y, frame.max_channel_delta);
     }
-    st::print("判词：{}\n", diff->verdict());
+    st::log::out("判词：{}\n", diff->verdict());
     return 0;
   }
 
@@ -1343,12 +1344,12 @@ auto run_app(int argc, char** argv) -> int {
   // 而一部片子可能有多个三维镜头。真要导全片，逐镜导多份再在下游拼。
   if (!options.usd_source.empty()) {
     if (options.usd_target.empty()) {
-      st::eprint("--export-usda 需要两个值：<model_script.json> <输出.usda>\n");
+      st::log::err("--export-usda 需要两个值：<model_script.json> <输出.usda>\n");
       return 2;
     }
     const auto text = st::fs::read_text(options.usd_source);
     if (!text) {
-      st::eprint("读不到输入：{}\n", options.usd_source);
+      st::log::err("读不到输入：{}\n", options.usd_source);
       return 1;
     }
     caiyun::UsdExportOptions usd{ };
@@ -1356,7 +1357,7 @@ auto run_app(int argc, char** argv) -> int {
     // `obj:` 网格按输入文件所在目录解析（与渲染时同一语义）。
     const auto spec = st::raster::parse_scene_spec_text(*text);
     if (!spec) {
-      st::eprint("解析 model_script 失败：{}\n", spec.error().message);
+      st::log::err("解析 model_script 失败：{}\n", spec.error().message);
       return 1;
     }
     st::raster::SceneSpec resolved = *spec;
@@ -1365,14 +1366,14 @@ auto run_app(int argc, char** argv) -> int {
     }
     const auto usda = caiyun::scene_spec_to_usda(resolved, usd);
     if (!usda) {
-      st::eprint("导出失败：{}\n", usda.error().message);
+      st::log::err("导出失败：{}\n", usda.error().message);
       return 1;
     }
     if (const auto wrote = st::fs::write_text(options.usd_target, *usda); !wrote) {
-      st::eprint("写文件失败：{}\n", wrote.error().message);
+      st::log::err("写文件失败：{}\n", wrote.error().message);
       return 1;
     }
-    st::print("已导出：{}（{} 字节）\n", options.usd_target, usda->size());
+    st::log::out("已导出：{}（{} 字节）\n", options.usd_target, usda->size());
     return 0;
   }
 
@@ -1380,10 +1381,10 @@ auto run_app(int argc, char** argv) -> int {
   if (!options.flatten_source.empty()) {
     const auto flat = caiyun::flatten_to_json(options.flatten_source);
     if (!flat) {
-      st::eprint("拍平失败：{}\n", flat.error().message);
+      st::log::err("拍平失败：{}\n", flat.error().message);
       return 1;
     }
-    st::print("{}", *flat);
+    st::log::out("{}", *flat);
     return 0;
   }
 
@@ -1394,15 +1395,15 @@ auto run_app(int argc, char** argv) -> int {
   if (!options.normalize_source.empty()) {
     const auto text = st::fs::read_text(options.normalize_source);
     if (!text) {
-      st::eprint("读不到脚本：{}\n", options.normalize_source);
+      st::log::err("读不到脚本：{}\n", options.normalize_source);
       return 1;
     }
     const auto parsed = caiyun::parse_script(*text, st::fs::parent(options.normalize_source));
     if (!parsed) {
-      st::eprint("脚本解析失败：{}\n", parsed.error().message);
+      st::log::err("脚本解析失败：{}\n", parsed.error().message);
       return 1;
     }
-    st::print("{}", caiyun::script_to_json(*parsed));
+    st::log::out("{}", caiyun::script_to_json(*parsed));
     return 0;
   }
 
@@ -1438,7 +1439,7 @@ auto run_app(int argc, char** argv) -> int {
     // 整轮渲染（几十秒~两分钟）建立在错误语义上，而画面上看不出来。
     const std::size_t errors = page->strict_violation_count();
     if (errors > 0U) {
-      st::eprint("--strict：脚本有 {} 条错误级 schema 诊断，拒绝启动：\n{}\n", errors,
+      st::log::err("--strict：脚本有 {} 条错误级 schema 诊断，拒绝启动：\n{}\n", errors,
                  page->diagnostics_json());
       return 1;
     }
@@ -1476,7 +1477,7 @@ auto run_app(int argc, char** argv) -> int {
   page->set_text_port(app.root().text_port());
   if (!options.export_dir.empty()) {
     const int written = page->export_frames(options.export_dir, app.root().text_port());
-    st::print("已导出 {} 帧到 {}\n", written, options.export_dir);
+    st::log::out("已导出 {} 帧到 {}\n", written, options.export_dir);
     // 导出是一次性动作：完成后**直接退出**。
     //
     // 早先这里导完就落进事件循环，进程不退出——`--export-dir` 的语义是
@@ -1505,7 +1506,7 @@ auto run_app(int argc, char** argv) -> int {
       job.use_gpu = std::string(gpu_env) != "0";
     }
     render_launched = page->start_render(job);
-    st::print("渲染启动：{}x{} → {}\n", job.width, job.height, job.output_file);
+    st::log::out("渲染启动：{}x{} → {}\n", job.width, job.height, job.output_file);
   }
 
   // `--bench`：真开播放再压测（背景：不播放时监视器不重合成，量到的是空转成本）。
@@ -1548,11 +1549,11 @@ auto run_app(int argc, char** argv) -> int {
           // 逐帧进度只显示尾部（40 条环形缓冲里大半是它，会把"每帧耗时"这类
           // 真正有用的汇总行挤掉）。
           if (line.starts_with("帧 ") && !line.starts_with("帧完成")) continue;
-          st::print("  {}\n", line);
+          st::log::out("  {}\n", line);
         }
-        st::print("渲染结果：{}（{} 帧 / {:.2f}s）{}\n", status.stage, status.frames_done,
+        st::log::out("渲染结果：{}（{} 帧 / {:.2f}s）{}\n", status.stage, status.frames_done,
                   status.elapsed_s, status.error.empty() ? "" : " · " + status.error);
-        if (!status.output.empty()) st::print("成片：{}\n", status.output);
+        if (!status.output.empty()) st::log::out("成片：{}\n", status.output);
         if (options.bench_seconds <= 0) break;
         render_launched = false;
       }
@@ -1562,12 +1563,12 @@ auto run_app(int argc, char** argv) -> int {
   }
   if (options.bench_seconds > 0) {
     const auto metrics = app.metrics();
-    st::print("压测：{} 秒 / {} 帧；墙钟间隔 p50={:.2f}ms p95={:.2f}ms（含帧预算睡眠），"
+    st::log::out("压测：{} 秒 / {} 帧；墙钟间隔 p50={:.2f}ms p95={:.2f}ms（含帧预算睡眠），"
               "帧内耗时 p50={:.2f}ms p95={:.2f}ms（绘制 {:.2f}ms）\n",
               options.bench_seconds, frames, metrics.wall_p50_ms, metrics.wall_p95_ms,
               metrics.frame_p50_ms, metrics.frame_p95_ms, metrics.paint_ms);
   }
-  st::print("裁云退出：{} 帧，后端 {}\n", frames, std::string(app.backend_name()));
+  st::log::out("裁云退出：{} 帧，后端 {}\n", frames, std::string(app.backend_name()));
   return 0;
 }
 

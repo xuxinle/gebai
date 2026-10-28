@@ -68,6 +68,7 @@
 
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
 #include "st/ui/components/basic.hpp"
@@ -168,7 +169,7 @@ template <class Fn>
 [[nodiscard]] auto report_ratio(const char* name, double small_ms, double large_ms,
                                 std::size_t factor) -> double {
   const double ratio = small_ms > 0.0 ? large_ms / small_ms : 1.0e9;
-  st::print("[scale-gate] {}: t(1×)={:.3f}ms · t({}×)={:.3f}ms → 比值 {:.2f}（上限 {:.1f}）\n",
+  st::log::out("[scale-gate] {}: t(1×)={:.3f}ms · t({}×)={:.3f}ms → 比值 {:.2f}（上限 {:.1f}）\n",
             name, small_ms, factor, large_ms, ratio, kMaxScaleRatio);
   return ratio;
 }

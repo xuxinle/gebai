@@ -19,6 +19,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/pty.hpp"
+#include "st/core/log.hpp"
 #include "st/text/ansi_screen.hpp"
 #include "st/ui/components/terminal.hpp"
 #include "st/ui/theme.hpp"
@@ -115,17 +116,17 @@ struct Harness {
 };
 
 void one_round(int round, int settle_ms, bool early_stop) {
-  st::print("\n════ 轮次 {} ════\n", round);
+  st::log::out("\n════ 轮次 {} ════\n", round);
   Harness harness;
   harness.terminal->open_shell();
   if (!harness.wait_until([&] {
         return harness.screen_text().find(prompt_needle()) != std::string::npos;
       }, 4000)) {
-    st::print("  首个提示符都没等到 —— 环境问题，本轮跳过\n");
+    st::log::out("  首个提示符都没等到 —— 环境问题，本轮跳过\n");
     harness.terminal->send_stop();
     return;
   }
-  st::print("  首提示符 OK · busy={} pty_active={}\n", harness.terminal->busy() ? 1 : 0,
+  st::log::out("  首提示符 OK · busy={} pty_active={}\n", harness.terminal->busy() ? 1 : 0,
             harness.terminal->pty_active() ? 1 : 0);
 
   const std::string cmd = early_stop ? bare_long_cmd() : long_cmd();
@@ -141,7 +142,7 @@ void one_round(int round, int settle_ms, bool early_stop) {
       : harness.wait_until(
             [&] { return harness.screen_text().find(kRunningMarker) != std::string::npos; }, 3000);
   const int prompts_before = count_needle(harness.screen_text(), prompt_needle());
-  st::print("  回显={} · 已开始执行={} · 发停止前提示符数={}\n", echo_seen ? "有" : "无",
+  st::log::out("  回显={} · 已开始执行={} · 发停止前提示符数={}\n", echo_seen ? "有" : "无",
             early_stop ? "（不等前置）" : (running_seen ? "是" : "**否**"), prompts_before);
 
   // settle_ms 旋钮只为**对照实验**用（验证“就是启动竞态”而非别的）。
@@ -154,7 +155,7 @@ void one_round(int round, int settle_ms, bool early_stop) {
   // 发完停止立刻看一次：区分“根本没回显”与“回显了但没回到提示符”
   harness.terminal->pump();
   const std::string right_after = harness.screen_text();
-  st::print("  发停止前 {} 字符 → 后 {} 字符（屏幕{}）\n", before_stop.size(),
+  st::log::out("  发停止前 {} 字符 → 后 {} 字符（屏幕{}）\n", before_stop.size(),
             right_after.size(),
             right_after.size() < before_stop.size() ? "**缩小了**" : "未缩小");
 
@@ -163,7 +164,7 @@ void one_round(int round, int settle_ms, bool early_stop) {
   const auto ms_back = std::chrono::duration_cast<std::chrono::milliseconds>(
                            Clock::now() - t_stop)
                            .count();
-  st::print("  back_to_prompt={}（{} ms）· 提示符数={} · pty_active={}\n",
+  st::log::out("  back_to_prompt={}（{} ms）· 提示符数={} · pty_active={}\n",
             back ? "是" : "**否**", ms_back,
             count_needle(harness.screen_text(), prompt_needle()),
             harness.terminal->pty_active() ? 1 : 0);
@@ -171,7 +172,7 @@ void one_round(int round, int settle_ms, bool early_stop) {
   harness.terminal->send_bytes(after_cmd() + "\r");
   const bool after = harness.wait_until(
       [&] { return harness.screen_text().find("after-stop-9271") != std::string::npos; }, 4000);
-  st::print("  after-stop 可见={}\n", after ? "是" : "**否**");
+  st::log::out("  after-stop 可见={}\n", after ? "是" : "**否**");
 
   // 失败现场：关键区分——再发一次 Ctrl+C，看会话是“吞了这一次中断”还是“彻底僵住”。
   // 前者是测试的时序问题，后者是产品的 bug（会话不可用）。
@@ -182,7 +183,7 @@ void one_round(int round, int settle_ms, bool early_stop) {
         [&] { return count_needle(harness.screen_text(), prompt_needle()) >= 2; }, 3000);
     const auto ms2 =
         std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t2).count();
-    st::print("  再发一次 Ctrl+C → 恢复={}（{} ms）· 文本长度={}\n",
+    st::log::out("  再发一次 Ctrl+C → 恢复={}（{} ms）· 文本长度={}\n",
               recovered ? "是（第一次被吞了）" : "**否（会话僵住）**", ms2,
               harness.screen_text().size());
   }
@@ -190,11 +191,11 @@ void one_round(int round, int settle_ms, bool early_stop) {
   if (!back || !after) {
     const auto* screen = harness.terminal->screen(0);
     const std::string text = harness.screen_text();
-    st::print("  ── 失败现场 ──\n");
-    st::print("  screen(0) 空指针={} · 文本长度={} · 会话数={}\n",
+    st::log::out("  ── 失败现场 ──\n");
+    st::log::out("  screen(0) 空指针={} · 文本长度={} · 会话数={}\n",
               screen == nullptr ? "是" : "否", text.size(),
               harness.terminal->session_count());
-    st::print("  |{}|\n", text.substr(0, 300));
+    st::log::out("  |{}|\n", text.substr(0, 300));
   }
   harness.terminal->send_stop();
 }
@@ -214,10 +215,10 @@ int main(int argc, char** argv) {
   const int settle_ms = argc > 2 ? std::atoi(argv[2]) : 0;
   const bool early_stop = argc > 3 && std::atoi(argv[3]) != 0;
   if (!st::process::PtySession::supported()) {
-    st::print("本环境不支持 PTY：探针不适用\n");
+    st::log::out("本环境不支持 PTY：探针不适用\n");
     return 0;
   }
-  st::print("轮数={} · 发 Ctrl+C 前的额外延时={} ms · 不等前置={}\n", rounds, settle_ms,
+  st::log::out("轮数={} · 发 Ctrl+C 前的额外延时={} ms · 不等前置={}\n", rounds, settle_ms,
             early_stop ? 1 : 0);
   for (int i = 1; i <= rounds; ++i) one_round(i, settle_ms, early_stop);
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）

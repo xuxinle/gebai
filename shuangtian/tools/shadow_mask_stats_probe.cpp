@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -69,7 +70,7 @@ auto measure_shadow(const st::ui::Shadow& shadow, float blur, st::math::Color co
 
 auto report(const char* name, const Stats& stats) -> void {
   const double area = static_cast<double>(stats.area);
-  st::print("  {:<22} 区域 {:>7} px · 有差 {:>6.1}% · 微弱(Δ≤2) {:>6.1}% · 明显(Δ≥16) {:>6.1}% · "
+  st::log::out("  {:<22} 区域 {:>7} px · 有差 {:>6.1}% · 微弱(Δ≤2) {:>6.1}% · 明显(Δ≥16) {:>6.1}% · "
             "总墨量 {:>10.0f}\n",
             name, stats.area, 100.0 * static_cast<double>(stats.touched) / area,
             100.0 * static_cast<double>(stats.faint) / area,
@@ -91,7 +92,7 @@ auto main(int argc, char** argv) -> int {
   const st::ui::Shadow sm = st::ui::shadow_sm(theme);
   const st::ui::Shadow md = st::ui::shadow_md(theme);
   const st::ui::Shadow lg = st::ui::shadow_lg(theme);
-  st::print("阴影遮罩可见性分布（140×48 卡片，radius 12，白底）：\n");
+  st::log::out("阴影遮罩可见性分布（140×48 卡片，radius 12，白底）：\n");
   report("sm 关键层 blur=3", measure_shadow(sm, sm.blur, sm.color, sm.offset_y, false));
   report("sm 环境层 blur=10", measure_shadow(sm, sm.blur2, sm.color2, sm.offset2_y, true));
   report("md 关键层 blur=6", measure_shadow(md, md.blur, md.color, md.offset_y, false));
@@ -100,7 +101,7 @@ auto main(int argc, char** argv) -> int {
   report("lg 环境层 blur=40", measure_shadow(lg, lg.blur2, lg.color2, lg.offset2_y, true));
 
   // 对照：仅 key 层（单层阴影）的可见量
-  st::print("对照：\n");
+  st::log::out("对照：\n");
   report("md 两层合计", measure_shadow(md, md.blur, md.color, md.offset_y, false));
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 

@@ -48,7 +48,7 @@ import { installBrowserFetchProxy } from "../core/browser/fetch-proxy"
 import { ensureCorporateTrust } from "../core/trust/corporate"
 import { dataSubdir, log, setLogLevel } from "@gebai/sdk/node"
 import { FeishuConn } from "../feishu-bot/conn"
-import { ChannelRegistry, ChannelInputBridge, defaultChannelScanDirs } from "@gebai/channels"
+import { ChannelRegistry, ChannelInputBridge, SentMessageRegistry, defaultChannelScanDirs } from "@gebai/channels"
 import { authCardDeadline, AUTH_CARD_TTL_MS, decideExpiry, shouldPushAuthCard } from "../core/session/persona-expiry"
 import type { InputCounters, PersonaDispatchPort } from "@gebai/channels"
 import type { DriverPersistence as PersonaDriverPersistence, DriverRecord as PersonaDriverRecord } from "@gebai/persona"
@@ -612,6 +612,10 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     )
    }
   }
+  // 自发送消息记账（防回灌）：渠道 act 成功登记 message_id，两端飞书入站（渠道长连接 +
+  // 人格事件源）共享同一实例按 id 过滤——自己发的消息不会被当新消息再处理一轮。
+  // 单例必须在此处（渠道与人格源装配之前）创建，且两个注入面拿到同一个实例。
+  const sentMessages = new SentMessageRegistry()
   // 对外动作渠道（act/observe 工具，DESIGN「对外动作：渠道抽象」）：与子Agent/事件源同款
   // 「丢文件即注册」——内置 packages/channels/src/channels/ + 二开 custom/channels/。
   // 发现/启动失败只记 loadErrors 不阻断启动（单渠道坏不能连带整个服务起不来）。
@@ -633,6 +637,8 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
           log: (m) => log.info(`[channels:feishu] ${m}`),
         }),
       ...(config.feishuAppId ? { feishuSessionAppId: config.feishuAppId } : {}),
+      // 自发送消息记账（防回灌，与人格事件源共享同一实例）
+      sentMessages,
       // 拟人凭据（feishu 渠道的 `as_user=true` 用它以用户本人名义发消息）；未启用时为 null
       ...(personaCredentials ? { personaCredentials } : {}),
     },
@@ -1046,6 +1052,8 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
         return await feishuTenantToken(id, secret)
       },
       log: { info: log.info, warn: log.warn },
+      // 自发送消息记账（防回灌，与渠道共享同一实例）：入站过滤自己发出的消息
+      sentMessages,
     })
     personaSources = new EventSourceManager({
       scanDirs: defaultEventSourceScanDirs({ packageRoot: await resolvePersonaPackageRoot() }),

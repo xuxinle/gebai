@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/components/basic.hpp"
@@ -100,21 +101,21 @@ auto main(int argc, char** argv) -> int {
   const double early = median_of(std::vector<double>(samples.begin(), samples.begin() + 100));
   const double late = median_of(std::vector<double>(samples.end() - 100, samples.end()));
 
-  st::print("{} 段文本的界面（1280×800），重复绘制 {} 帧\n\n", labels, kFrames);
-  st::print("p05 {:>7.1f} µs · p50 {:>7.1f} µs · p95 {:>7.1f} µs\n", p05, p50, p95);
-  st::print("p95/p50 = {:.2f}×   ·   p05/p50 = {:.2f}×\n", p95 / p50, p05 / p50);
-  st::print("前 100 帧中位 {:>7.1f} µs · 后 100 帧中位 {:>7.1f} µs → {:.2f}×\n", early, late,
+  st::log::out("{} 段文本的界面（1280×800），重复绘制 {} 帧\n\n", labels, kFrames);
+  st::log::out("p05 {:>7.1f} µs · p50 {:>7.1f} µs · p95 {:>7.1f} µs\n", p05, p50, p95);
+  st::log::out("p95/p50 = {:.2f}×   ·   p05/p50 = {:.2f}×\n", p95 / p50, p05 / p50);
+  st::log::out("前 100 帧中位 {:>7.1f} µs · 后 100 帧中位 {:>7.1f} µs → {:.2f}×\n", early, late,
             early > 0.0 ? late / early : 0.0);
 
-  st::print("\n判读：\n");
+  st::log::out("\n判读：\n");
   const double spread = p95 / p50;
   if (spread < 1.20 && early > 0.0 && late / early < 1.10) {
-    st::print("  离散度 {:.2f}×（<1.2）且前后段无趋势 → **分配压力小**，分配器处于稳定态，\n",
+    st::log::out("  离散度 {:.2f}×（<1.2）且前后段无趋势 → **分配压力小**，分配器处于稳定态，\n",
               spread);
-    st::print("  绘制路径没有明显的逐帧堆分配抖动。\n");
+    st::log::out("  绘制路径没有明显的逐帧堆分配抖动。\n");
   } else {
-    st::print("  离散度 {:.2f}×或前后段有趋势 → 有分配抖动/碎片累积，\n", spread);
-    st::print("  值查逐帧堆分配（向量扩容 / 临时 string / 每元素分配）。\n");
+    st::log::out("  离散度 {:.2f}×或前后段有趋势 → 有分配抖动/碎片累积，\n", spread);
+    st::log::out("  值查逐帧堆分配（向量扩容 / 临时 string / 每元素分配）。\n");
   }
   return st::probe::main_of(spec, opts, verdict);
 }

@@ -12,6 +12,7 @@
 
 #include "st/core/fs.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 
 namespace st::pkg {
 namespace {
@@ -24,7 +25,7 @@ struct RuleSpec {
 };
 
 /// 规则表（与 `CONVENTIONS.md` §8 一一对应）。
-constexpr std::array<RuleSpec, 17> kRules{{
+constexpr std::array<RuleSpec, 18> kRules{{
     {"L1", "禁止裸 new/delete/malloc/free（用 unique_ptr/RAII/容器）",
      R"(\bnew\s|\bdelete\s|\bmalloc\s*\(|\bfree\s*\(|\brealloc\s*\()"},
     {"L2", "禁止 C 风格强制转换（用 static_cast/bit_cast）",
@@ -133,6 +134,19 @@ constexpr std::array<RuleSpec, 17> kRules{{
     // 用 `std::int64_t` 永远同样简洁，而收益是确定的。
     {"L17", "禁止 long / long long 表达数据（用 std::intN_t / std::uintN_t / std::size_t）",
      R"((?:^|[\s(+,*<:])(?:(?:unsigned|signed)\s+)?long(?:\s+long)?(?![\s]*double)\b)"},
+    // L18：**禁止绕过日志通道的裸打印**——`printf`/`puts`/`fprintf`/`std::cout` 直接
+    // 写 stdout/stderr，不经 `st::log` 的统一输出管道（`st::log::out`/`err`/`ST_LOG_*`，
+    // 走 tail/sink/listener/镜像落盘）。于是：
+    //  - 库被嵌入宿主时这些输出无法被关闭/分级/审计；
+    //  - `st`（CLI）里它们不进 build/check/test 的运行日志，事后无法追溯。
+    //
+    // 合法的输出通道（不在此列）：`st::log::out` / `st::log::err`（无前缀主输出，
+    // 原 `st::print`/`st::eprint`）、`ST_LOG_*`（带级别诊断）、`write_stdout`/`write_stderr`
+    // 的调用方（print.cpp 本身与 console_log.cpp 是打印的实现方）。
+    // 白名单（`rule_exempt` L18）：打印实现方（print.cpp/console_log.cpp/log_file.cpp/
+    // platform_crash.cpp）、平台层（platform_* 直调系统输出是点名要求）。
+    {"L18", "禁止绕过日志通道的裸打印（printf/puts/fprintf/cout/cerr；用 st::log::out/err 或 ST_LOG_*）",
+     R"((?:^|[\s:;(])std::cout\b|(?:^|[\s:;(])std::cerr\b|\bstd::puts|\bstd::printf|\bprintf\s*\(|\bputs\s*\(|\bfprintf\s*\(|\bfprintf_s?\s*\()"},
 }};
 
 /// 去掉行注释与块注释状态（保留字符串内容，简单启发式）。
@@ -208,6 +222,20 @@ constexpr std::array<RuleSpec, 17> kRules{{
     // 判据用文件名而不是清单：这类文件**按定义**就是平台层，漏登记一个就会
     // 逼着人去"改错"真正的系统签名。
     return file_name.find("platform_") != std::string_view::npos;
+  }
+  if (rule == "L18") {
+    // 打印**实现方**（必然直写系统句柄）：print/console_log 是 `st::print` 的
+    // 底层、log_file 是 `st::log` 的落盘实现、platform_crash 的崩溃栈必须在
+    // 日志系统都不可用时仍能输出（信号处理器里不能依赖任何分配/锁）。
+    // 平台层（platform_*）直调系统输出是点名要求（如 WASM/裸机的 puts 替代）。
+    // CLI 工具（stpm/*）是**交互输出方**：用户直接面对这些消息（构建进度/错误），
+    // 且 `st::print` 已镜像落盘（见 console_log），fprintf(stderr) 的错误同样
+    // 在 cli_log 的镜像里——可审计性已保证，不做日志化（ST_LOG_DISABLED 会裁掉
+    // 用户必须看到的错误）。
+    return file_name == "print.cpp" || file_name == "console_log.cpp" ||
+           file_name == "log_file.cpp" || file_name == "platform_crash.cpp" ||
+           file_name.find("platform_") != std::string_view::npos ||
+           file_name.find("stpm") != std::string_view::npos;
   }
   return false;
 }

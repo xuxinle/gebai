@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/math/path.hpp"
@@ -663,7 +664,7 @@ ST_TEST(restore_icon_ink_differs_from_maximize_icon) {
       if (!(restore.pixel_at(x, y) == maximize.pixel_at(x, y))) ++differing;
     }
   }
-  st::print("[restore-vs-maximize] 不同像素 {} / {}\n", differing, kSize * kSize);
+  st::log::out("[restore-vs-maximize] 不同像素 {} / {}\n", differing, kSize * kSize);
   // “看得出不一样”：至少要有可观的一片像素不同（不是抗锯齿的单像素抖动）
   ST_CHECK(differing > 60U);
 }
@@ -755,7 +756,7 @@ ST_TEST(title_bar_control_button_states_are_visible) {
     const ControlButtonShot pressed = render_control_button(fixture, -1, index, slot);
     const float hover_ratio = contrast(probe(hovered), bar_bg);
     const float press_ratio = contrast(probe(pressed), bar_bg);
-    st::print("[wbtn] 按钮 {} 悬停对比度 {:.4f} · 按下 {:.4f}（底色 #{:02X}{:02X}{:02X}）\n", index,
+    st::log::out("[wbtn] 按钮 {} 悬停对比度 {:.4f} · 按下 {:.4f}（底色 #{:02X}{:02X}{:02X}）\n", index,
               static_cast<double>(hover_ratio), static_cast<double>(press_ratio),
               static_cast<unsigned>(bar_bg.r), static_cast<unsigned>(bar_bg.g),
               static_cast<unsigned>(bar_bg.b));
@@ -804,7 +805,7 @@ ST_TEST(title_bar_control_hover_block_is_inset_vertically) {
   ST_REQUIRE(first >= 0);
   const int inset_top = first - static_cast<int>(button.y);
   const int inset_bottom = static_cast<int>(button.bottom()) - 1 - last;
-  st::print("[wbtn] 悬停块纵向内缩 {}/{} · 块高 {}\n", inset_top, inset_bottom, last - first + 1);
+  st::log::out("[wbtn] 悬停块纵向内缩 {}/{} · 块高 {}\n", inset_top, inset_bottom, last - first + 1);
   ST_CHECK(inset_top > 0);
   ST_CHECK(inset_bottom > 0);
   ST_CHECK_EQ(inset_top, inset_bottom);
@@ -844,7 +845,7 @@ ST_TEST(title_bar_press_does_not_darken_the_whole_bar) {
       if (!(before_frame.pixel_at(x, y) == after_frame.pixel_at(x, y))) ++differing;
     }
   }
-  st::print("[wbtn] 按住标题栏空白处：整栏差异 {} px\n", differing);
+  st::log::out("[wbtn] 按住标题栏空白处：整栏差异 {} px\n", differing);
   ST_CHECK_EQ(static_cast<int>(differing), 0);
   ST_CHECK(fixture.bar->bounds().height == TitleBar::bar_height());
 }
@@ -895,6 +896,6 @@ ST_TEST(title_bar_icon_and_leading_slot_coexist) {
       if (delta > 30) ++ink;
     }
   }
-  st::print("[brand] 前置图标盒内墨迹 {} px（槽左缘 x={:.1f}）\n", ink, slot_rect.x);
+  st::log::out("[brand] 前置图标盒内墨迹 {} px（槽左缘 x={:.1f}）\n", ink, slot_rect.x);
   ST_CHECK(ink > 20U);
 }

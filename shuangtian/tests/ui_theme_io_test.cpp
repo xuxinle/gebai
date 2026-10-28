@@ -16,6 +16,7 @@
 
 #include "st/core/json.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/ui/theme.hpp"
 #include "st/ui/theme_io.hpp"
@@ -133,13 +134,13 @@ ST_TEST(theme_json_accepts_documented_color_syntaxes) {
     if (!parsed) {
       // 失败时把**是哪个用例**与原因打出来：十多个用例里只有一个红，
       // 而失败信息只有“parsed.has_value()”时根本定位不到（实测就卡在这里）。
-      st::print("[case] color syntax '{}' 被拒绝：{}\n", item.text, parsed.error().message);
+      st::log::out("[case] color syntax '{}' 被拒绝：{}\n", item.text, parsed.error().message);
       continue;
     }
     if (!same(parsed->colors().primary, item.expected)) {
       // 同理：值是错的也要能看出是哪一个（rgba 的 alpha 换算最容易差一档）。
       const Color& got = parsed->colors().primary;
-      st::print("[case] color syntax '{}' 得到 #{:02X}{:02X}{:02X}{:02X}，期望 #{:02X}{:02X}{:02X}{:02X}\n",
+      st::log::out("[case] color syntax '{}' 得到 #{:02X}{:02X}{:02X}{:02X}，期望 #{:02X}{:02X}{:02X}{:02X}\n",
                 item.text, got.r, got.g, got.b, got.a, item.expected.r, item.expected.g,
                 item.expected.b, item.expected.a);
     }

@@ -26,6 +26,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
 
@@ -171,9 +172,9 @@ auto main(int argc, char** argv) -> int {
                  {"英文常规", "Renderer Pipeline Overview Settings Ggpq", 0.0f},
                  {"英文粗体", "Renderer Pipeline Overview Settings Ggpq", real_bold ? 0.0f : 0.75f},
              };
-  st::print("逻辑字号={} 缩放={} fit={}\n\n", size, scale,
+  st::log::out("逻辑字号={} 缩放={} fit={}\n\n", size, scale,
             fit == GridFitMode::Off ? "off" : (fit == GridFitMode::Light ? "light" : "normal"));
-  st::print("{:<10s} {:>8s} {:>10s} {:>10s} {:>10s} {:>11s} {:>10s} {:>10s} {:>10s}\n", "样本",
+  st::log::out("{:<10s} {:>8s} {:>10s} {:>10s} {:>10s} {:>11s} {:>10s} {:>10s} {:>10s}\n", "样本",
             "字形数", "墨量均值", "过渡带占比", "过渡/墨像素", "字间离散", "左端覆盖", "右端覆盖",
             "右-左", "彩边");
   for (const Sample& sample : samples) {
@@ -223,14 +224,14 @@ auto main(int argc, char** argv) -> int {
     const auto [low, high] = std::minmax_element(ratios.begin(), ratios.end());
     const double l_mean = edge_runs ? left_edge / static_cast<double>(edge_runs) : 0.0;
     const double r_mean = edge_runs ? right_edge / static_cast<double>(edge_runs) : 0.0;
-    st::print("{:<10s} {:>8d} {:>10.1f} {:>10.3f} {:>10.3f} {:>10.1f}% {:>10.3f} {:>10.3f} "
+    st::log::out("{:<10s} {:>8d} {:>10.1f} {:>10.3f} {:>10.3f} {:>10.1f}% {:>10.3f} {:>10.3f} "
               "{:>10.3f} {:>8.3f}\n",
               sample.title, count, ink_mean / static_cast<double>(count),
               count ? band_ratio / static_cast<double>(count) : 0.0,
               count ? edge_ratio / static_cast<double>(count) : 0.0, 100.0 * (*high - *low), l_mean,
               r_mean, r_mean - l_mean, fringe_max);
   }
-  st::print("\n判读：**分三类各看各的**——中文常规 / 中文粗体 / 英文的几何不同，\n"
+  st::log::out("\n判读：**分三类各看各的**——中文常规 / 中文粗体 / 英文的几何不同，\n"
             "      拿一类的结果代表全部正是“顾此失彼”的来源。\n"
             "      过渡带占比高 = 边缘摊得开（糊）；字间离散大 = 有的字实、有的字灰。\n");
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）

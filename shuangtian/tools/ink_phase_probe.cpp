@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -55,10 +56,10 @@ auto main(int argc, char** argv) -> int {
   auto stack = FontStack::system_default();
   if (!stack) return 1;
 
-  st::print("字号 {}px  字符 {}  —— 墨量和随**起点相位**的变化\n", size, ch);
+  st::log::out("字号 {}px  字符 {}  —— 墨量和随**起点相位**的变化\n", size, ch);
 
   // ① 孤立字形：起点 x 从 0 到 0.9 扫（步长 0.1），看墨量随相位怎么变
-  st::print("\n① 孤立字形（量的是同一个字，只改起点小数部分）：\n");
+  st::log::out("\n① 孤立字形（量的是同一个字，只改起点小数部分）：\n");
   std::vector<double> isolated;
   for (int step = 0; step <= 9; ++step) {
     const float phase = static_cast<float>(step) * 0.1f;
@@ -73,7 +74,7 @@ auto main(int argc, char** argv) -> int {
     (void)renderer.draw(canvas, ch, Point{4.0f + phase, 4.0f}, size, Color{0x0F, 0x17, 0x2A, 0xFF});
     const double ink = ink_of(canvas);
     isolated.push_back(ink);
-    st::print("   起点偏移 {:.1f}px -> 墨量 {:.2f}\n", static_cast<double>(phase), ink);
+    st::log::out("   起点偏移 {:.1f}px -> 墨量 {:.2f}\n", static_cast<double>(phase), ink);
   }
   double lo = isolated[0];
   double hi = isolated[0];
@@ -81,11 +82,11 @@ auto main(int argc, char** argv) -> int {
     lo = std::min(lo, value);
     hi = std::max(hi, value);
   }
-  st::print("   ⇒ 波动范围 {:.2f} ~ {:.2f}（极差 {:.1f}%，中位 {:.2f}）\n", lo, hi,
+  st::log::out("   ⇒ 波动范围 {:.2f} ~ {:.2f}（极差 {:.1f}%，中位 {:.2f}）\n", lo, hi,
             (hi - lo) / lo * 100.0, isolated[isolated.size() / 2U]);
 
   // ② 文本串：同样的字符重复 k 次，量**每个字形**的墨量（看串内与串首是否一致）
-  st::print("\n② 文本串（同一字符重复 8 次，逐字形量）：\n");
+  st::log::out("\n② 文本串（同一字符重复 8 次，逐字形量）：\n");
   const std::string text = [&] {
     std::string out;
     for (int i = 0; i < 8; ++i) out += ch;
@@ -138,10 +139,10 @@ auto main(int argc, char** argv) -> int {
     for (int x = spans[index].first; x < spans[index].second; ++x) {
       sum += column_ink[static_cast<std::size_t>(x)];
     }
-    st::print("   第 {} 个字形 -> 墨量 {:.2f}\n", index + 1, sum);
+    st::log::out("   第 {} 个字形 -> 墨量 {:.2f}\n", index + 1, sum);
   }
-  st::print("\n判据：① 若同一字形只改起点小数部分就让墨量明显变化（几 % 级），\n");
-  st::print("      则「孤立单字形 vs 文本串」的差异主要是**采样相位**，不是渲染质量差异。\n");
+  st::log::out("\n判据：① 若同一字形只改起点小数部分就让墨量明显变化（几 % 级），\n");
+  st::log::out("      则「孤立单字形 vs 文本串」的差异主要是**采样相位**，不是渲染质量差异。\n");
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 
   return st::probe::main_of(spec, opts, verdict);

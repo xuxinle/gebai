@@ -20,6 +20,7 @@
 #include "st/test/test.hpp"
 // `st::print`：lint L7 禁 printf，统一走它（带编码/镜像/缓冲顺序保障）
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 
 namespace {
 
@@ -537,7 +538,7 @@ ST_TEST(json_schema_rejects_unknown_fields_at_every_level) {
   for (const auto& [name, node] : st::json_at(schema, "$defs").items()) {
     if (node.value("additionalProperties", true)) {
       // 打印是哪个作用域漏了，便于直接改
-      st::print("作用域 {} 未声明 additionalProperties:false\n", name);
+      st::log::out("作用域 {} 未声明 additionalProperties:false\n", name);
     }
     ST_CHECK(!node.value("additionalProperties", true));
   }

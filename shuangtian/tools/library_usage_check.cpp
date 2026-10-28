@@ -45,6 +45,7 @@
 #include "st/core/fs.hpp"
 #include "st/core/json.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 
 namespace {
 
@@ -64,9 +65,9 @@ auto load_config(const std::string& path) -> st::Result<int> {
 /// 一个检查的公共形状：跑一遍，打印结论，累计失败数。
 auto report(std::string_view label, bool ok, std::string_view detail, int& failures) -> void {
   if (ok) {
-    st::print("{}  {}  ✅\n", label, detail);
+    st::log::out("{}  {}  ✅\n", label, detail);
   } else {
-    st::print("{}  {}  ❌\n", label, detail);
+    st::log::out("{}  {}  ❌\n", label, detail);
     ++failures;
   }
 }
@@ -111,10 +112,10 @@ auto run(int /*argc*/, char** /*argv*/) -> int {
   (void)st::fs::remove_file(path);
 
   if (failures == 0) {
-    st::print("\n✅ AS_LIBRARY.md 的示例行为全部成立\n");
+    st::log::out("\n✅ AS_LIBRARY.md 的示例行为全部成立\n");
     return 0;
   }
-  st::eprint("\n❌ {} 项与文档不符\n", failures);
+  st::log::err("\n❌ {} 项与文档不符\n", failures);
   return 1;
 }
 

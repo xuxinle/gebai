@@ -12,6 +12,7 @@
 #include "st/test/test.hpp"
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/gpu.hpp"
@@ -230,11 +231,11 @@ ST_TEST(gpu_rejects_invalid_size) {
 ST_TEST(gpu_device_diagnostics) {
   const auto& info = device_info();
   if (!info.has_value()) {
-    st::print("[gpu] 不可用: {}\n", info.error().message);
+    st::log::out("[gpu] 不可用: {}\n", info.error().message);
     return;
   }
-  st::print("[gpu] backend={} adapter={} level={} warp={} vram={} MiB\n", info->backend,
+  st::log::out("[gpu] backend={} adapter={} level={} warp={} vram={} MiB\n", info->backend,
             info->adapter, info->feature_level, info->warp,
             info->vram_bytes / (1024ULL * 1024ULL));
-  st::print("[gpu] live_canvases={}\n", st::raster::gpu::live_canvas_count());
+  st::log::out("[gpu] live_canvases={}\n", st::raster::gpu::live_canvas_count());
 }

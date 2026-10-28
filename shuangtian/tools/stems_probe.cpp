@@ -13,6 +13,7 @@
 #include <cstdlib>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/text/text.hpp"
 
@@ -85,13 +86,13 @@ auto main(int argc, char** argv) -> int {
   renderer.set_coverage_gamma(1.0f);
 
   // ① 字体里有多少 hints
-  st::print("字体链：{} 个面；首位 {}#{}  逻辑 {:.1f}px → 物理 {:.1f}px\n", fonts.faces().size(),
+  st::log::out("字体链：{} 个面；首位 {}#{}  逻辑 {:.1f}px → 物理 {:.1f}px\n", fonts.faces().size(),
             fonts.primary().path(), fonts.primary().face_index(), logical, pixel_size);
-  st::print("汉字归属：{}#{}（hints 在它上面）\n",
+  st::log::out("汉字归属：{}#{}（hints 在它上面）\n",
             [&] { const auto* f = fonts.find_face(U'霜'); return f ? f->path() : std::string("—"); }(),
             [&] { const auto* f = fonts.find_face(U'霜'); return f ? f->face_index() : -1; }());
-  st::print("\n① 字形自带的 stem hints（字体单位）\n");
-  st::print("{:<8}{:>8}{:>8}{:>10}{:>10}\n", "码点", "竖提示", "横提示", "最窄竖宽", "最宽竖宽");
+  st::log::out("\n① 字形自带的 stem hints（字体单位）\n");
+  st::log::out("{:<8}{:>8}{:>8}{:>10}{:>10}\n", "码点", "竖提示", "横提示", "最窄竖宽", "最宽竖宽");
   for (const char* sample : kSamples) {
     for (const char* p = sample; *p != '\0';) {
       // UTF-8 → 码点（简化：本批全是 BMP）
@@ -113,15 +114,15 @@ auto main(int argc, char** argv) -> int {
           ++horizontal;
         }
       }
-      st::print("U+{:04X}  {:>8}{:>8}{:>10.1f}{:>10.1f}\n", static_cast<unsigned>(cp), vertical,
+      st::log::out("U+{:04X}  {:>8}{:>8}{:>10.1f}{:>10.1f}\n", static_cast<unsigned>(cp), vertical,
                 horizontal, vertical ? narrow : 0.0f, vertical ? wide : 0.0f);
       break;   // 每串只看第一个字，够说明问题
     }
   }
 
   // ② hints 是否真被用上
-  st::print("\n② 逐字形拟合诊断（fit_stems = 参与拟合的笔画数，hint = 其中来自字体的）\n");
-  st::print("{:<10}{:>12}{:>10}{:>12}{:>12}\n", "字形", "字体hint数", "接上点", "参与拟合", "被拒");
+  st::log::out("\n② 逐字形拟合诊断（fit_stems = 参与拟合的笔画数，hint = 其中来自字体的）\n");
+  st::log::out("{:<10}{:>12}{:>10}{:>12}{:>12}\n", "字形", "字体hint数", "接上点", "参与拟合", "被拒");
   int with_hint = 0, without_hint = 0, total_stems = 0, total_hint = 0;
   for (const char* sample : kSamples) {
     for (const char* p = sample; *p != '\0';) {
@@ -134,18 +135,18 @@ auto main(int argc, char** argv) -> int {
       if (bitmap->fit_hint_stems > 0) ++with_hint;
       else ++without_hint;
       if (std::getenv("ST_TEXT_HINT_DEBUG") != nullptr) {
-        st::print("HINTDBG cp=U+{:04X} seen={} bound={} stems={} fit={}\n",
+        st::log::out("HINTDBG cp=U+{:04X} seen={} bound={} stems={} fit={}\n",
                   static_cast<unsigned>(cp), bitmap->fit_hint_seen, bitmap->fit_hint_bound,
                   bitmap->fit_hint_stems, bitmap->fit_stems);
       }
       if (bitmap->fit_hint_seen > 0) {
-        st::print("U+{:04X}  {:>12}{:>10}{:>12}{:>12}\n", static_cast<unsigned>(cp),
+        st::log::out("U+{:04X}  {:>12}{:>10}{:>12}{:>12}\n", static_cast<unsigned>(cp),
                   bitmap->fit_hint_seen, bitmap->fit_hint_bound, bitmap->fit_hint_stems,
                   bitmap->fit_rejected_stems);
       }
     }
   }
-  st::print("合计：{} 个字形中 {} 个用上了 hints，{} 个没有；笔画总数 {}（其中 hint {}）\n", with_hint + without_hint,
+  st::log::out("合计：{} 个字形中 {} 个用上了 hints，{} 个没有；笔画总数 {}（其中 hint {}）\n", with_hint + without_hint,
             with_hint, without_hint, total_stems, total_hint);
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 

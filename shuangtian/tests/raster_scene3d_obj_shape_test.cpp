@@ -87,7 +87,7 @@ ST_TEST(scene3d_script_accepts_obj_shape) {
   const std::string json_abs =
       R"({"camera":{"eye":[0,0.4,3.2],"target":[0,0,0],"fov":40},)"
       R"("lighting":{"key_direction":[0.3,0.6,0.7],"ambient":0.35,"diffuse":0.8,"rim":0.1},)"
-      R"("objects":[{"shape":"obj:)" + abs_obj + R"(","color":"#ffffff","scale":[1.2,1.2,1.2]}]})";
+      R"("objects":[{"shape":"obj:)" + abs_obj + R"(","color":"#ffffff","scale":[1.2,1.2,1.2]}]})";  // lint-allow: L15 拼接 JSON，\)" 后是字符串拼接非提前终结
   const int abs_pixels = lit_pixel_count(json_abs);
   std::printf("绝对路径非背景像素：%d\n", abs_pixels);
   // 判据：四面体在这个取景下应当覆盖数百个像素。给宽区间（下限 200），

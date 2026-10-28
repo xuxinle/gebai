@@ -30,6 +30,7 @@
 #include <string>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/math/path.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
@@ -141,9 +142,9 @@ struct Row {
 
 void report_group(st::probe::result& verdict, const char* group, float scale, bool cache_enabled,
                   bool& any_bad) {
-  st::print("\n--- {}（scale={:.1f}，几何贴图缓存={}）---\n", group, static_cast<double>(scale),
+  st::log::out("\n--- {}（scale={:.1f}，几何贴图缓存={}）---\n", group, static_cast<double>(scale),
             cache_enabled ? "开" : "关");
-  st::print("{:>10} | {:>17} | {:>17}\n", "输入 alpha", "环 left/right/top/bot", "实心 left/right/top/bot");
+  st::log::out("{:>10} | {:>17} | {:>17}\n", "输入 alpha", "环 left/right/top/bot", "实心 left/right/top/bot");
 
   for (const std::uint8_t alpha : {std::uint8_t{255}, std::uint8_t{128}, std::uint8_t{64},
                                    std::uint8_t{20}, std::uint8_t{0}}) {
@@ -152,7 +153,7 @@ void report_group(st::probe::result& verdict, const char* group, float scale, bo
     Path solid;
     solid.add_rounded_rect(kBox, kRadius);
     const auto filled = measure_edges(solid, alpha, scale, cache_enabled);
-    st::print("{:>10} | {:>17} | {:>17}\n", static_cast<int>(alpha),
+    st::log::out("{:>10} | {:>17} | {:>17}\n", static_cast<int>(alpha),
               std::format("{}/{}/{}/{}", ring[0], ring[1], ring[2], ring[3]),
               std::format("{}/{}/{}/{}", filled[0], filled[1], filled[2], filled[3]));
 
@@ -205,7 +206,7 @@ auto main(int argc, char** argv) -> int {
   const float scale =
       opts.positional(0) ? static_cast<float>(std::atof(std::string(*opts.positional(0)).c_str()))
                          : 1.0f;
-  st::print("=== 圆角边框环 alpha 传递（逻辑框 120×80，r=14，宽=1）===\n");
+  st::log::out("=== 圆角边框环 alpha 传递（逻辑框 120×80，r=14，宽=1）===\n");
 
   bool any_bad = false;
   report_group(verdict, "缓存开", scale, true, any_bad);

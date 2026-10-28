@@ -16,6 +16,7 @@
 #include <format>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 
 auto main(int argc, char** argv) -> int {
@@ -54,14 +55,14 @@ auto main(int argc, char** argv) -> int {
     }
   }
 
-  st::print("检查 {} 组 (x, n)\n", checked);
-  st::print("不一致 {} 组\n", mismatches);
+  st::log::out("检查 {} 组 (x, n)\n", checked);
+  st::log::out("不一致 {} 组\n", mismatches);
   if (mismatches != 0) {
-    st::print("首个不一致：x={} n={}  经典={} 快式={}\n", worst_x, worst_n, worst_a, worst_b);
+    st::log::out("首个不一致：x={} n={}  经典={} 快式={}\n", worst_x, worst_n, worst_a, worst_b);
     verdict.state = st::probe::status::fail;
     verdict.reason = "等价式在该取值域内不成立，不能替换";
     return st::probe::main_of(spec, opts, verdict);
   }
-  st::print("\nPASS：两者在 x∈[0,255] × n∈[0,255] 上完全一致，可以安全替换。\n");
+  st::log::out("\nPASS：两者在 x∈[0,255] × n∈[0,255] 上完全一致，可以安全替换。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

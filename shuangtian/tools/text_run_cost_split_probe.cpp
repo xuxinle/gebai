@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -59,7 +60,7 @@ auto main(int argc, char** argv) -> int {
 
   auto stack = st::text::FontStack::system_default();
   if (!stack.has_value()) {
-    st::print("跳过：拿不到系统字体\n");
+    st::log::out("跳过：拿不到系统字体\n");
     return st::probe::main_of(spec, opts, verdict);
   }
   st::text::TextRenderer renderer(*stack, 1.0f);
@@ -121,16 +122,16 @@ auto main(int argc, char** argv) -> int {
     }
   });
 
-  st::print("{} 个 run\n\n", runs.size());
-  st::print("A 完整 draw（位图预热）      {:>8.3f} ms   → {:>6.2f} µs/run\n", draw_ms,
+  st::log::out("{} 个 run\n\n", runs.size());
+  st::log::out("A 完整 draw（位图预热）      {:>8.3f} ms   → {:>6.2f} µs/run\n", draw_ms,
             draw_ms * 1000.0 / static_cast<double>(runs.size()));
-  st::print("B 只画 1/8（{} 个）           {:>8.3f} ms   → {:>6.2f} µs/run\n", runs.size() / 8,
+  st::log::out("B 只画 1/8（{} 个）           {:>8.3f} ms   → {:>6.2f} µs/run\n", runs.size() / 8,
             eighth_ms, eighth_ms * 1000.0 / static_cast<double>(runs.size() / 8));
-  st::print("C 纯混合（同量位图）        {:>8.3f} ms   → {:>6.2f} µs/run\n", blend_ms,
+  st::log::out("C 纯混合（同量位图）        {:>8.3f} ms   → {:>6.2f} µs/run\n", blend_ms,
             blend_ms * 1000.0 / static_cast<double>(runs.size()));
-  st::print("\nA − C = 每 run 的**非混合开销**（排版/字形查找/状态准备）：\n");
-  st::print("  {:.3f} ms（{:.0f}% 的 A）\n", draw_ms - blend_ms,
+  st::log::out("\nA − C = 每 run 的**非混合开销**（排版/字形查找/状态准备）：\n");
+  st::log::out("  {:.3f} ms（{:.0f}% 的 A）\n", draw_ms - blend_ms,
             draw_ms > 0.0 ? (draw_ms - blend_ms) / draw_ms * 100.0 : 0.0);
-  st::print("\n若 B×8 ≈ A，则无“一次性”开销，成本随 run 数线性。\n");
+  st::log::out("\n若 B×8 ≈ A，则无“一次性”开销，成本随 run 数线性。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

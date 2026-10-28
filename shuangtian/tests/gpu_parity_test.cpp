@@ -22,6 +22,7 @@
 #include "st/app/text_port.hpp"
 #include "st/codec/png.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/gpu.hpp"
@@ -213,7 +214,7 @@ ST_TEST(gpu_matches_software_for_layout_of_real_widgets) {
   // 真实的进度由 `capabilities()` 报出，并在下方断言里打印出来。
   const st::raster::gpu::Capabilities caps = st::raster::gpu::capabilities();
   if (!caps.shadows || !caps.paths) {
-    st::print("[gpu-diff] 跳过（待 M3b/M4）：shadows={} paths={}\n", caps.shadows, caps.paths);
+    st::log::out("[gpu-diff] 跳过（待 M3b/M4）：shadows={} paths={}\n", caps.shadows, caps.paths);
     return;
   }
   Scene scene;
@@ -241,7 +242,7 @@ ST_TEST(gpu_matches_software_for_layout_of_real_widgets) {
 
   const Comparison result =
       compare(scene.software.pixels(), scene.gpu->pixels(), /*max_channel_delta=*/12, kWidth);
-  st::print("[gpu-diff] 小界面：超差 {:.3f}% · 结构性 {:.3f}% · 最大Δ{} · 非底色 {:.3f} vs {:.3f} · {}\n",
+  st::log::out("[gpu-diff] 小界面：超差 {:.3f}% · 结构性 {:.3f}% · 最大Δ{} · 非底色 {:.3f} vs {:.3f} · {}\n",
             result.differing_ratio * 100.0, result.structural_ratio * 100.0, result.max_delta,
             result.ink_ratio_left, result.ink_ratio_right, result.worst_offsets);
   // 几何必须落在同一位置：超差像素占比很小；覆盖率（该画的地方）必须接近
@@ -275,7 +276,7 @@ ST_TEST(gpu_text_matches_software_closely) {
 
   const Comparison result =
       compare(scene.software.pixels(), scene.gpu->pixels(), /*max_channel_delta=*/16, kWidth);
-  st::print("[gpu-diff] 文字：超差 {:.3f}% · 结构性 {:.3f}% · 最大Δ{} · 非底色 {:.4f} vs {:.4f} · {}\n",
+  st::log::out("[gpu-diff] 文字：超差 {:.3f}% · 结构性 {:.3f}% · 最大Δ{} · 非底色 {:.4f} vs {:.4f} · {}\n",
             result.differing_ratio * 100.0, result.structural_ratio * 100.0, result.max_delta,
             result.ink_ratio_left, result.ink_ratio_right, result.worst_offsets);
   // 有字必须有墨：两边覆盖率同量级（字形缺失会让 GPU 侧覆盖率归零）
@@ -295,7 +296,7 @@ ST_TEST(gpu_subpixel_text_matches_software) {
   if (!gpu_ready()) return;
   const st::raster::gpu::Capabilities caps = st::raster::gpu::capabilities();
   if (!caps.lcd_text) {
-    st::print("[gpu-diff] 跳过：后端未声明 lcd_text\n");
+    st::log::out("[gpu-diff] 跳过：后端未声明 lcd_text\n");
     return;
   }
   Scene scene;
@@ -339,7 +340,7 @@ ST_TEST(gpu_subpixel_text_matches_software) {
     };
     const std::size_t software_colored = colored_pixels(scene.software.pixels());
     const std::size_t gpu_colored = colored_pixels(scene.gpu->pixels());
-    st::print("[gpu-diff] 亚像素文字（bg={:08X}）：超差 {:.3f}% · 结构性 {:.3f}% · 最大Δ{} · "
+    st::log::out("[gpu-diff] 亚像素文字（bg={:08X}）：超差 {:.3f}% · 结构性 {:.3f}% · 最大Δ{} · "
               "彩边像素 {} vs {}\n",
               item.packed, result.differing_ratio * 100.0, result.structural_ratio * 100.0,
               result.max_delta, software_colored, gpu_colored);
@@ -378,7 +379,7 @@ ST_TEST(gpu_gradient_uses_same_lut_as_software) {
 
   const Comparison result =
       compare(scene.software.pixels(), scene.gpu->pixels(), /*max_channel_delta=*/12, kWidth);
-  st::print("[gpu-diff] 渐变：超差 {:.3f}% · 最大Δ{} · {}\n", result.differing_ratio * 100.0,
+  st::log::out("[gpu-diff] 渐变：超差 {:.3f}% · 最大Δ{} · {}\n", result.differing_ratio * 100.0,
             result.max_delta, result.first_offsets);
   ST_CHECK(result.differing_ratio < 0.05);
   ST_CHECK(result.max_delta <= 40);
@@ -406,7 +407,7 @@ ST_TEST(gpu_shadow_matches_software) {
     target.draw_shadow(rect, radius, blur, shadow, offset);
     const Comparison result = compare(software.pixels(), target.pixels(), 12, kWidth,
                                       /*background=*/0x0A0F1AFFU);
-    st::print("[gpu-diff] 投影 r={} b={}：超差 {:.3f}% · 结构性 {:.3f}% · 最大Δ{} · 非底色 {:.3f} vs {:.3f}\n",
+    st::log::out("[gpu-diff] 投影 r={} b={}：超差 {:.3f}% · 结构性 {:.3f}% · 最大Δ{} · 非底色 {:.3f} vs {:.3f}\n",
               radius, blur, result.differing_ratio * 100.0, result.structural_ratio * 100.0,
               result.max_delta, result.ink_ratio_left, result.ink_ratio_right);
     // 投影是**低对比度大面积**的东西：结构性差异必须为零，
@@ -431,7 +432,7 @@ ST_TEST(gpu_capabilities_are_consistent_with_probe) {
   ST_CHECK(caps.coverage_masks);
   ST_CHECK(caps.clips);
   // 未落地的部分必须**报缺失**（如实优于好看）
-  st::print("[gpu] 能力：shapes={} gradients={} masks={} bitmaps={} clips={} shadows={} paths={} "
+  st::log::out("[gpu] 能力：shapes={} gradients={} masks={} bitmaps={} clips={} shadows={} paths={} "
             "lcd_text={}\n",
             caps.solid_shapes, caps.gradients, caps.coverage_masks, caps.bitmaps, caps.clips,
             caps.shadows, caps.paths, caps.lcd_text);
@@ -510,7 +511,7 @@ ST_TEST(gpu_huge_path_mask_is_bounded_by_canvas) {
   // 与软件光栅器语义一致（仅允许边缘抗锯齿的权重差）
   const Comparison result = compare(software.pixels(), target.pixels(), 12, width,
                                     /*background=*/0x0A0F1AFFU);
-  st::print("[gpu-diff] 巨大路径：超差 {:.3f}% · 结构性 {:.3f}% · 最大Δ{} · 非底色 {:.4f} vs {:.4f}\n",
+  st::log::out("[gpu-diff] 巨大路径：超差 {:.3f}% · 结构性 {:.3f}% · 最大Δ{} · 非底色 {:.4f} vs {:.4f}\n",
             result.differing_ratio * 100.0, result.structural_ratio * 100.0, result.max_delta,
             result.ink_ratio_left, result.ink_ratio_right);
   ST_CHECK(result.structural_ratio < 0.005);

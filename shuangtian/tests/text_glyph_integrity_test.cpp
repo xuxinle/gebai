@@ -21,6 +21,7 @@
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/gpu.hpp"
 #include "st/text/text.hpp"
@@ -201,7 +202,7 @@ ST_TEST(text_glyphs_are_not_clipped) {
       }
       if (touches_border) {
         ++clipped;
-        st::print("[glyph] 墨迹贴边（可能被裁切）：{} @ {}px  {}x{}\n", sample, size,
+        st::log::out("[glyph] 墨迹贴边（可能被裁切）：{} @ {}px  {}x{}\n", sample, size,
                   bitmap->width, bitmap->height);
       }
     }
@@ -317,7 +318,7 @@ ST_TEST(text_shape_cache_distinguishes_bold) {
   // 它**没有 bold 参数**（`TextPort::measure_width` 的接口面就没这一项），
   // 所以布局按常规面量宽、绘制按粗体面画。两面的字宽不一致时，
   // 粗体文本的居中/换行会有偏差。这里把量到的差值打出来做证据。
-  st::print("[glyph] measure(bold=false)={:.3f} · shape(bold=true).width={:.3f} · 差 {:.3f}\n",
+  st::log::out("[glyph] measure(bold=false)={:.3f} · shape(bold=true).width={:.3f} · 差 {:.3f}\n",
             static_cast<double>(renderer.measure_width(kSample, 15.0f)),
             static_cast<double>(bold.width),
             static_cast<double>(bold.width - renderer.measure_width(kSample, 15.0f)));
@@ -459,6 +460,6 @@ ST_TEST(app_runtime_dpi_switch_matches_startup_dpi) {
   for (std::size_t index = 0; index < dense.size(); ++index) {
     if (dense[index] != switched[index]) ++differing;
   }
-  st::print("[app-dpi] 启动即 2.0 vs 1.0→切 2.0：{} / {} 像素不同\n", differing, dense.size());
+  st::log::out("[app-dpi] 启动即 2.0 vs 1.0→切 2.0：{} / {} 像素不同\n", differing, dense.size());
   ST_CHECK_EQ(static_cast<int>(differing), 0);
 }

@@ -14,6 +14,7 @@
 
 #include "st/app/text_port.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
@@ -113,17 +114,17 @@ auto main(int argc, char** argv) -> int {
     const InkBox ink = ink_box(canvas, background);
 
     const auto metrics = port->ink_metrics(item.label, size);
-    st::print("[{}] 字号 {:.1f}\n", item.tag, static_cast<double>(size));
-    st::print("   行盒 {:.2f} · shaped_ascent {:.2f} · ink above/below {:.2f}/{:.2f}\n",
+    st::log::out("[{}] 字号 {:.1f}\n", item.tag, static_cast<double>(size));
+    st::log::out("   行盒 {:.2f} · shaped_ascent {:.2f} · ink above/below {:.2f}/{:.2f}\n",
               static_cast<double>(port->line_height(size)),
               static_cast<double>(port->shaped_ascent(item.label, size)),
               metrics ? static_cast<double>(metrics->above) : -1.0,
               metrics ? static_cast<double>(metrics->below) : -1.0);
-    st::print("   框中心 y={:.2f} · 图上墨迹 y=[{:.2f},{:.2f}] 中心 {:.2f} → 偏移 {:+.3f}\n",
+    st::log::out("   框中心 y={:.2f} · 图上墨迹 y=[{:.2f},{:.2f}] 中心 {:.2f} → 偏移 {:+.3f}\n",
               static_cast<double>(box.center().y), static_cast<double>(ink.y0),
               static_cast<double>(ink.y1), static_cast<double>(ink.cy()),
               static_cast<double>(ink.cy() - box.center().y));
-    st::print("   横向：框中心 x={:.2f} · 墨迹 x=[{:.2f},{:.2f}] 中心 {:.2f} → 偏移 {:+.3f}\n",
+    st::log::out("   横向：框中心 x={:.2f} · 墨迹 x=[{:.2f},{:.2f}] 中心 {:.2f} → 偏移 {:+.3f}\n",
               static_cast<double>(box.center().x), static_cast<double>(ink.x0),
               static_cast<double>(ink.x1), static_cast<double>(ink.cx()),
               static_cast<double>(ink.cx() - box.center().x));

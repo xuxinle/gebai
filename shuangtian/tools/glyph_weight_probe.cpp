@@ -19,6 +19,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/text.hpp"
 
@@ -74,10 +75,10 @@ auto main(int argc, char** argv) -> int {
     // 「没测成」不是「不合格」：后者会让人以为量规有问题，实际只是本机缺字体。
     return st::probe::main_of(spec, opts, st::probe::skip("未找到可用字体\\n"));
   }
-  st::print("scale={} 物理字号={} fit={} gamma={}\n", scale, size,
+  st::log::out("scale={} 物理字号={} fit={} gamma={}\n", scale, size,
             fit == GridFitMode::Off ? "off" : (fit == GridFitMode::Light ? "light" : "normal"),
             gamma);
-  st::print("\n{:<6s} {:>5s} {:>6s} {:>6s} {:>8s} {:>7s} {:>8s} {:>8s}\n", "字形", "拟合", "找到",
+  st::log::out("\n{:<6s} {:>5s} {:>6s} {:>6s} {:>8s} {:>7s} {:>8s} {:>8s}\n", "字形", "拟合", "找到",
             "被拒", "候选边", "墨量", "峰值", "暗占比");
   for (const std::string& text : texts) {
     for (const char32_t codepoint : st::utf8_decode(text)) {
@@ -101,14 +102,14 @@ auto main(int argc, char** argv) -> int {
       const char32_t single = codepoint;
       label += static_cast<char>(' ');
       (void)single;
-      st::print("U+{:04X} {:>6s} {:>6d} {:>6d} {:>8d} {:>7.1f} {:>8.3f} {:>7.1f}%\n",
+      st::log::out("U+{:04X} {:>6s} {:>6d} {:>6d} {:>8d} {:>7.1f} {:>8.3f} {:>7.1f}%\n",
                 static_cast<unsigned>(codepoint), bitmap->fit_applied ? "是" : "否",
                 bitmap->fit_stems, bitmap->fit_rejected_stems, bitmap->fit_funnel.straight,
                 weight.ink, weight.peak, weight.dark_ratio * 100.0);
       (void)label;
     }
   }
-  st::print("\n判读：同一字号/字重下**墨量应当接近**。哪个字被拟合（“拟合=是”）且\n"
+  st::log::out("\n判读：同一字号/字重下**墨量应当接近**。哪个字被拟合（“拟合=是”）且\n"
             "墨量峰值高（接近 1.0），它就是“清晰的那个”——其余字是没被处理的那批。\n"
             "若同一串里拟合与否混杂，就是“字间不一致”的直接证据。\n");
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）

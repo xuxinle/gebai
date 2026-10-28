@@ -21,6 +21,7 @@
 #include "examples/caiyun/package_history.cpp"
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/test/test.hpp"
 
 namespace {
@@ -106,7 +107,7 @@ ST_TEST(caiyun_package_roundtrip_preserves_script) {
   const auto created = caiyun::create_package(dir, original, dir, "probe", false);
   ST_CHECK(created.has_value());
   if (!created) {
-    st::print("建包失败：{}\n", created.error().message);
+    st::log::out("建包失败：{}\n", created.error().message);
     return;
   }
 
@@ -120,7 +121,7 @@ ST_TEST(caiyun_package_roundtrip_preserves_script) {
     std::size_t d = 0;
     while (d < limit && (*flattened)[d] == expected[d]) ++d;
     const std::size_t from = d > 100 ? d - 100 : 0;
-    st::print("拍平后与原文不同，首个差异偏移 {}\n期望 ...{}\n实际 ...{}\n", d,
+    st::log::out("拍平后与原文不同，首个差异偏移 {}\n期望 ...{}\n实际 ...{}\n", d,
                 expected.substr(from, 240).c_str(),
                 flattened->substr(from, 240).c_str());
   }
@@ -193,7 +194,7 @@ ST_TEST(caiyun_package_asset_check_detects_drift) {
   ST_CHECK(!drifted.ok());
   ST_CHECK(drifted.modified.size() == 1);
   if (!drifted.modified.empty()) {
-    st::print("被改动的资产：{}\n", drifted.modified[0]);
+    st::log::out("被改动的资产：{}\n", drifted.modified[0]);
     // 登记的路径是**相对包根**的原写法（`assets/bg.png`），不是去前缀的 `bg.png`：
     // 它要能直接与脚本里的引用串对应上，否则人无法判断“哪个引用失效了”。
     ST_CHECK(drifted.modified[0] == "assets/bg.png");
@@ -269,7 +270,7 @@ ST_TEST(caiyun_package_rejects_future_schema) {
   const auto manifest = caiyun::read_manifest(dir);
   ST_CHECK(!manifest.has_value());
   if (!manifest) {
-    st::print("未来版本的报错：{}\n", manifest.error().message);
+    st::log::out("未来版本的报错：{}\n", manifest.error().message);
     ST_CHECK(manifest.error().message.find("9999") != std::string::npos);
   }
 

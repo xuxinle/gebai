@@ -33,6 +33,7 @@
 #include "st/core/print.hpp"
 #include "st/probe/probe.hpp"
 #include "st/core/string.hpp"
+#include "st/core/log.hpp"
 #include "st/text/font.hpp"
 #include "st/text/grid_fit.hpp"
 #include "st/text/text.hpp"
@@ -201,12 +202,12 @@ void report(const char* title, const Tally& data) {
       data.vertical_edges > 0 ? 100.0 * data.on_grid / data.vertical_edges : 0.0;
   const double phase = data.vertical_edges > 0 ? data.phase_sum / data.vertical_edges : 0.0;
   const double half = data.vertical_edges > 0 ? 100.0 * data.near_half / data.vertical_edges : 0.0;
-  st::print("{}（{} 条竖边 / {} 条竖笔画）：\n", title, data.vertical_edges, data.stems);
-  st::print("    边缘落在整数网格 {:5.1f}%   平均离网格 {:.3f} px   最糊相位 {:5.1f}%\n", on_grid,
+  st::log::out("{}（{} 条竖边 / {} 条竖笔画）：\n", title, data.vertical_edges, data.stems);
+  st::log::out("    边缘落在整数网格 {:5.1f}%   平均离网格 {:.3f} px   最糊相位 {:5.1f}%\n", on_grid,
             phase, half);
   for (const auto& [partials, count] : data.histogram) {
     const double ratio = data.stems > 0 ? 100.0 * static_cast<double>(count) / data.stems : 0.0;
-    st::print("    部分覆盖 {} 像素：{:5} 条（{:5.1f}%）{}\n", partials, count, ratio,
+    st::log::out("    部分覆盖 {} 像素：{:5} 条（{:5.1f}%）{}\n", partials, count, ratio,
               partials == 0 ? "  ← 锐（边缘落在整数网格上）" : "");
   }
 }
@@ -247,7 +248,7 @@ int main(int argc, char** argv) {
   const std::u32string latin_samples = st::utf8_decode(
       "Handgloves Illegible ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz 0123456789");
 
-  st::print("\n字号：13.5 逻辑 px @1.25 DPI → 物理 16.88 px\n");
+  st::log::out("\n字号：13.5 逻辑 px @1.25 DPI → 物理 16.88 px\n");
   const char* label = mode == GridFitMode::Off ? "【现状（无拟合）】" : "【网格拟合 Normal】";
   (void)latin;
   if (mode == GridFitMode::Off || mode == GridFitMode::Normal) {
@@ -259,7 +260,7 @@ int main(int argc, char** argv) {
     report("中文", tally(cjk_face, cjk_samples,
                          static_cast<double>(cjk_face.metrics().units_per_em), mode));
   }
-  st::print("  （{}）\n", label);
+  st::log::out("  （{}）\n", label);
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 
   return st::probe::main_of(spec, opts, verdict);

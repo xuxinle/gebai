@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/simd.hpp"
@@ -226,19 +227,19 @@ auto main(int argc, char** argv) -> int {
 
   const auto [diff_ab, worst_ab] = diff_of(target_a, target_b);
 
-  st::print("{:<28}  {:>10}  {:>12}\n", "路线", "耗时 ms", "相对 A");
-  st::print("{:<28}  {:>10.3f}  {:>12.2f}\n", "A 逐像素", a_ms, 1.0);
-  st::print("{:<28}  {:>10.3f}  {:>12.2f}\n", "B 按段分组 + blend_row", b_ms,
+  st::log::out("{:<28}  {:>10}  {:>12}\n", "路线", "耗时 ms", "相对 A");
+  st::log::out("{:<28}  {:>10.3f}  {:>12.2f}\n", "A 逐像素", a_ms, 1.0);
+  st::log::out("{:<28}  {:>10.3f}  {:>12.2f}\n", "B 按段分组 + blend_row", b_ms,
             a_ms > 0.0 ? b_ms / a_ms : 0.0);
-  st::print("\nA vs B 像素差异：{} 像素（最大通道差 {}）\n", diff_ab, worst_ab);
+  st::log::out("\nA vs B 像素差异：{} 像素（最大通道差 {}）\n", diff_ab, worst_ab);
   if (diff_ab != 0) {
-    st::print("⚠ 两路不等价，B 不可用（需先查明差异来源）。\n");
+    st::log::out("⚠ 两路不等价，B 不可用（需先查明差异来源）。\n");
     verdict.state = st::probe::status::fail;
     verdict.reason = "按段分组与逐像素结果不一致";
   } else if (b_ms < a_ms) {
-    st::print("→ B 更快且逐像素相同，值得改 `draw_shadow`。\n");
+    st::log::out("→ B 更快且逐像素相同，值得改 `draw_shadow`。\n");
   } else {
-    st::print("→ B 不更快（分组开销吃掉了 SIMD 收益），不改。\n");
+    st::log::out("→ B 不更快（分组开销吃掉了 SIMD 收益），不改。\n");
   }
   return st::probe::main_of(spec, opts, verdict);
 }

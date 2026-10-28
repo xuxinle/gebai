@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/glyph_atlas.hpp"
 #include "st/test/test.hpp"
 
@@ -52,7 +53,7 @@ ST_TEST(glyph_atlas_regions_stay_inside_canvas) {
     ST_CHECK(region.x + region.width <= 128);
     ST_CHECK(region.y + region.height <= 128);
   }
-  st::print("[atlas] 128×128 画布装了 {} 个条目\n", regions.size());
+  st::log::out("[atlas] 128×128 画布装了 {} 个条目\n", regions.size());
 }
 
 ST_TEST(glyph_atlas_regions_never_overlap) {
@@ -74,7 +75,7 @@ ST_TEST(glyph_atlas_regions_never_overlap) {
       ST_CHECK(!overlaps(regions[i], regions[j]));
     }
   }
-  st::print("[atlas] 256×128 装了 {} 个随机尺寸条目，无重叠\n", regions.size());
+  st::log::out("[atlas] 256×128 装了 {} 个随机尺寸条目，无重叠\n", regions.size());
 }
 
 ST_TEST(glyph_atlas_rejects_oversized_and_keeps_state) {
@@ -97,7 +98,7 @@ ST_TEST(glyph_atlas_rejects_oversized_and_keeps_state) {
   const std::size_t when_full = packer.entry_count();
   ST_CHECK(!packer.allocate(10, 10).has_value());
   ST_CHECK(packer.entry_count() == when_full);
-  st::print("[atlas] 超限与满页都返回空且不改变状态（已占 {} 项）\n", when_full);
+  st::log::out("[atlas] 超限与满页都返回空且不改变状态（已占 {} 项）\n", when_full);
 }
 
 ST_TEST(glyph_atlas_reset_clears_state) {

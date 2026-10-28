@@ -23,6 +23,7 @@
 #include "rasterize_internal.hpp"
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -162,7 +163,7 @@ auto report(const char* name, const std::vector<st::math::Polyline>& polylines) 
   const int first_y = static_cast<int>(std::floor(bounds.y));
   const int last_y = static_cast<int>(std::ceil(bounds.bottom())) + 1;
   const Stats stats = analyse(polylines, first_y, last_y);
-  st::print("  {:<34} 折线 {:>4} · 边 {:>5} · 行 {:>3} · 峰值活动 {:>4} · 现状边测试 {:>8} · "
+  st::log::out("  {:<34} 折线 {:>4} · 边 {:>5} · 行 {:>3} · 峰值活动 {:>4} · 现状边测试 {:>8} · "
             "AET {:>7} · 省 {:.1f}×\n",
             name, polylines.size(), stats.edges, stats.rows, stats.peak_active,
             stats.current_tests, stats.aet_tests,
@@ -190,7 +191,7 @@ auto main(int argc, char** argv) -> int {
   outline.add_rounded_rect(box.inset(st::math::Insets::all(0.5f)), kRadius - 0.5f);
   const st::math::Path expanded = st::raster::detail::stroke_to_path(outline, 1.0f, 0.25f);
 
-  st::print("扫描线边扫描量（同一份几何，两种方案）：\n");
+  st::log::out("扫描线边扫描量（同一份几何，两种方案）：\n");
   report("圆角矩形填充（单子路径）", rounded.flatten(0.25f));
   report("1px 边框 描边（现状实现）", expanded.flatten(0.25f));
   report("1px 边框 环形（候选实现）",

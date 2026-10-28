@@ -14,6 +14,7 @@
 #include <string>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/ui/actions.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/input.hpp"
@@ -66,7 +67,7 @@ ST_TEST(xml_ui_builds_nested_tree_with_text_and_attributes) {
       </Row>
     </Column>)", &report);
   ST_REQUIRE(tree != nullptr);
-  if (!report.clean()) st::print("[xml-ui] 报告：{}\n", describe(report));
+  if (!report.clean()) st::log::out("[xml-ui] 报告：{}\n", describe(report));
   ST_CHECK(report.clean());
   ST_CHECK_EQ(tree->id(), std::string("page"));
   ST_CHECK_EQ(tree->child_count(), std::size_t{2});
@@ -87,7 +88,7 @@ ST_TEST(xml_ui_style_properties_land_on_style) {
   auto tree = st::ui::build_from_xml(
       R"(<Column gap="6" padding_x="10" width="200" grow="true" surface="alt"/>)", &report);
   ST_REQUIRE(tree != nullptr);
-  if (!report.clean()) st::print("[xml-ui] 报告：{}\n", describe(report));
+  if (!report.clean()) st::log::out("[xml-ui] 报告：{}\n", describe(report));
   ST_CHECK(report.clean());
   ST_CHECK_NEAR(tree->style().gap, 6.0f, 0.001f);
   ST_CHECK_NEAR(tree->style().padding.left, 10.0f, 0.001f);
@@ -108,7 +109,7 @@ ST_TEST(xml_ui_short_names_take_their_own_value) {
       R"(<Row align="center" bg="#112233" fg="#ffffff"><Text fg="#ff0000">x</Text></Row>)",
       &report);
   ST_REQUIRE(tree != nullptr);
-  if (!report.clean()) st::print("[xml-ui] 报告：{}\n", describe(report));
+  if (!report.clean()) st::log::out("[xml-ui] 报告：{}\n", describe(report));
   ST_CHECK(report.clean());
   ST_CHECK(tree->style().align_items == st::ui::Align::Center);
   // 字面色取值：`bg` → `background`，落成具体的 `math::Color`（不是默认的全透明）。
@@ -233,7 +234,7 @@ ST_TEST(xml_ui_multiple_top_level_nodes_warn_but_use_first) {
   st::ui::XmlBuildReport report;
   // ⚠ 用**同名同级**会歧义，所以这里两个都是 Text——取第一个符合语义。
   auto tree = st::ui::build_from_xml("<Text>一</Text><Text>二</Text>", &report);
-  if (tree == nullptr) st::print("[xml-ui] 多顶层失败：{}\n", describe(report));
+  if (tree == nullptr) st::log::out("[xml-ui] 多顶层失败：{}\n", describe(report));
   ST_REQUIRE(tree != nullptr);
   ST_CHECK(!report.parse_warning.empty());   // 提示"只用了第一个"
   ST_CHECK_EQ(tree->id(), std::string(""));  // 没给 id

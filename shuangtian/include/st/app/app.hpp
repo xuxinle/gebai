@@ -308,6 +308,10 @@ struct AppOptions {
   std::vector<std::uint8_t> tray_icon_png{};
   /// 托盘悬停提示（空 = 用窗口标题）。
   std::string tray_tooltip{};
+  /// 关窗→托盘常驻：`true` 时用户点 × 只隐藏窗口（进程与托盘图标保留），
+  /// 退出只能走托盘菜单（或显式 `request_quit`）。默认 `false`（关窗即退出）。
+  /// 无托盘（未启用/后端不支持）时自动退化回“关窗即退出”。
+  bool tray_minimize_on_close{false};
   std::string theme_file{};
   std::string log_level{"info"};
   std::uint32_t max_frames{0};        ///< >0 时跑满即退出（无头冒烟/CI 用）

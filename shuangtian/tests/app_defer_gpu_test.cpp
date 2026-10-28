@@ -31,6 +31,7 @@
 
 #include "st/app/app.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 
 namespace {
 
@@ -44,7 +45,7 @@ ST_TEST(defer_gpu_is_on_by_default) {
   ST_CHECK(options.defer_gpu);
   ST_CHECK(options.renderer.empty());
   ST_CHECK(options.defer_gpu_effective());
-  st::print("[defer-gpu] 默认：defer_gpu={} renderer='{}' → 生效={}\n", options.defer_gpu,
+  st::log::out("[defer-gpu] 默认：defer_gpu={} renderer='{}' → 生效={}\n", options.defer_gpu,
             options.renderer, options.defer_gpu_effective());
 }
 
@@ -54,7 +55,7 @@ ST_TEST(defer_gpu_is_off_when_renderer_is_explicitly_gpu) {
   options.renderer = "gpu";
   ST_CHECK(options.defer_gpu);            // 字段本身仍是默认 true
   ST_CHECK(!options.defer_gpu_effective());  // 但判据为假
-  st::print("[defer-gpu] renderer=gpu → 生效={}（必须为 0）\n",
+  st::log::out("[defer-gpu] renderer=gpu → 生效={}（必须为 0）\n",
             options.defer_gpu_effective());
 }
 
@@ -66,7 +67,7 @@ ST_TEST(defer_gpu_is_off_when_renderer_is_explicitly_software) {
   AppOptions options;
   options.renderer = "software";
   ST_CHECK(!options.defer_gpu_effective());
-  st::print("[defer-gpu] renderer=software → 生效={}（必须为 0）\n",
+  st::log::out("[defer-gpu] renderer=software → 生效={}（必须为 0）\n",
             options.defer_gpu_effective());
 }
 
@@ -79,7 +80,7 @@ ST_TEST(defer_gpu_is_off_when_renderer_is_explicitly_auto) {
   AppOptions options;
   options.renderer = "auto";
   ST_CHECK(!options.defer_gpu_effective());
-  st::print("[defer-gpu] renderer=auto → 生效={}（显式 auto 也算指定，必须为 0）\n",
+  st::log::out("[defer-gpu] renderer=auto → 生效={}（显式 auto 也算指定，必须为 0）\n",
             options.defer_gpu_effective());
 }
 
@@ -89,6 +90,6 @@ ST_TEST(defer_gpu_flag_can_be_turned_off_explicitly) {
   options.defer_gpu = false;
   ST_CHECK(options.renderer.empty());
   ST_CHECK(!options.defer_gpu_effective());
-  st::print("[defer-gpu] defer_gpu=false → 生效={}（必须为 0）\n",
+  st::log::out("[defer-gpu] defer_gpu=false → 生效={}（必须为 0）\n",
             options.defer_gpu_effective());
 }

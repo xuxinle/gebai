@@ -13,6 +13,7 @@
 #include <string>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -114,7 +115,7 @@ auto main(int argc, char** argv) -> int {
   const double ms = std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - start)
                         .count();
-  st::print("hotspot probe: {} 帧 · {:.2f} ms/帧（{:.1f} FPS）\n", frames, ms / frames,
+  st::log::out("hotspot probe: {} 帧 · {:.2f} ms/帧（{:.1f} FPS）\n", frames, ms / frames,
             1000.0 * static_cast<double>(frames) / ms);
   // 结论退出码由外壳统一给出（0 合格 / 1 不合格 / 77 跳过）
 

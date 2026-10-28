@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/probe/probe.hpp"
 
 namespace {
@@ -45,9 +46,9 @@ auto main(int argc, char** argv) -> int {
   }
   st::probe::result verdict{};
 
-  st::print("模拟 `mask_cache_` 的线性扫描（`platform_d3d11.cpp:1501`）：\n");
-  st::print("每帧 305 个字形，每个都要从头扫到命中为止。\n\n");
-  st::print("{:>10}{:>16}{:>16}\n", "缓存项数", "每帧总比较次数", "仅查找耗时/帧");
+  st::log::out("模拟 `mask_cache_` 的线性扫描（`platform_d3d11.cpp:1501`）：\n");
+  st::log::out("每帧 305 个字形，每个都要从头扫到命中为止。\n\n");
+  st::log::out("{:>10}{:>16}{:>16}\n", "缓存项数", "每帧总比较次数", "仅查找耗时/帧");
 
   // 字形身份是散列的 uint64，命中位置近似均匀分布。
   for (const int fill : {64, 128, 256, 512}) {
@@ -76,14 +77,14 @@ auto main(int argc, char** argv) -> int {
     const double total_ms =
         std::chrono::duration<double, std::milli>(end - start).count() / kRounds;
 
-    st::print("{:>10}{:>16}{:>13.3f} µs\n", fill,
+    st::log::out("{:>10}{:>16}{:>13.3f} µs\n", fill,
               static_cast<std::uint64_t>(comparisons / kRounds), total_ms * 1000.0);
   }
 
-  st::print("\n参考：GPU 实测 `text` 总耗时 **0.67 ms/帧**（305 次）。\n");
-  st::print("\n判读：\n");
-  st::print("  · 若“仅查找”就占 0.67 ms 的可观比例 → 改哈希表值得；\n");
-  st::print("  · 若只有几十 µs → 瓶颈在 draw call 与纹理上传，查找不是重点。\n");
-  st::print("\n注：本探针只量**查找比较**的 CPU 成本，不含 draw call / 纹理上传。\n");
+  st::log::out("\n参考：GPU 实测 `text` 总耗时 **0.67 ms/帧**（305 次）。\n");
+  st::log::out("\n判读：\n");
+  st::log::out("  · 若“仅查找”就占 0.67 ms 的可观比例 → 改哈希表值得；\n");
+  st::log::out("  · 若只有几十 µs → 瓶颈在 draw call 与纹理上传，查找不是重点。\n");
+  st::log::out("\n注：本探针只量**查找比较**的 CPU 成本，不含 draw call / 纹理上传。\n");
   return st::probe::main_of(spec, opts, verdict);
 }

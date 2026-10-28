@@ -10,6 +10,7 @@
 // 用法：dw_ab_colors_probe <outdir> [--scale 1.0] [--lcd]
 #include "text_ab_common.hpp"
 
+#include "st/core/log.hpp"
 #include <cstdio>
 #include <string>
 
@@ -61,7 +62,7 @@ auto main(int argc, char** argv) -> int {
 
   auto stack = st::text::FontStack::system_default();
   if (!stack) {
-    st::print("没找到可用字体\n");
+    st::log::out("没找到可用字体\n");
     return 1;
   }
 
@@ -107,6 +108,6 @@ auto main(int argc, char** argv) -> int {
   char path[512];
   sprintf_s(path, sizeof path, "%s/colors-%s.png", out_dir.c_str(), lcd ? "lcd" : "gray");
   ab::save(canvas.to_rgba8(), width, height, path);
-  st::print("已写 {}（{}x{}，{}）\n", path, width, height, lcd ? "亚像素" : "灰度");
+  st::log::out("已写 {}（{}x{}，{}）\n", path, width, height, lcd ? "亚像素" : "灰度");
   return 0;
 }

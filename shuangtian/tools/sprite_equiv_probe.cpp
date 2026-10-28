@@ -47,6 +47,7 @@
 #include <vector>
 
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/math/color.hpp"
 #include "st/probe/probe.hpp"
 #include "st/raster/canvas.hpp"
@@ -280,12 +281,12 @@ auto main(int argc, char** argv) -> int {
 
   for (auto& item : cases) execute(item);
 
-  st::print("几何 sprite 缓存等价性（同一进程内 A/B，只切缓存开关）\n");
+  st::log::out("几何 sprite 缓存等价性（同一进程内 A/B，只切缓存开关）\n");
   bool any_pixel_diff = false;
   bool cache_used = false;
   for (const auto& item : cases) {
     if (item.hits > 0) cache_used = true;
-    st::print("  {:<32} {:<4} {}\n", item.name, item.passed() ? "ok" : "FAIL", item.detail());
+    st::log::out("  {:<32} {:<4} {}\n", item.name, item.passed() ? "ok" : "FAIL", item.detail());
     verdict.add(item.name, item.passed(), item.detail());
     if (item.diff.pixels != 0) any_pixel_diff = true;
   }
@@ -293,13 +294,13 @@ auto main(int argc, char** argv) -> int {
   // **自检：探针本身必须能分辨**——若“开缓存”一条都没命中，上面所有“差异 0”
   // 都是在比较两份完全相同的“不走缓存”结果，判绿毫无意义。
   if (!cache_used) {
-    st::print("  ⚠ 一条都没命中缓存——本探针没有覆盖到缓存路径（判绿不代表缓存正确）\n");
+    st::log::out("  ⚠ 一条都没命中缓存——本探针没有覆盖到缓存路径（判绿不代表缓存正确）\n");
     verdict.add("探针覆盖了缓存路径", false, "所有用例命中数均为 0");
   } else {
     verdict.add("探针覆盖了缓存路径", true, "");
   }
   if (!any_pixel_diff && cache_used) {
-    st::print("  ✓ 全部用例：开缓存与不开缓存逐像素相同\n");
+    st::log::out("  ✓ 全部用例：开缓存与不开缓存逐像素相同\n");
   }
   return st::probe::main_of(spec, opts, verdict.conclude());
 }

@@ -63,9 +63,10 @@ interface Fakes {
     deleteMessageReaction(messageId: string, reactionId: string): Promise<boolean>
     downloadResource(id: string, key: string, type: string): Promise<Uint8Array>
     uploadImage(data: Uint8Array, mime: string, fileName?: string): Promise<string>
-    getChatName(id: string): Promise<string | null>
-    patchMessage(messageId: string, msgType: string, content: unknown): Promise<boolean>
-  }
+      getChatName(id: string): Promise<string | null>
+  getUserName?(id: string): Promise<string | undefined>
+  patchMessage(messageId: string, msgType: string, content: unknown): Promise<boolean>
+}
   emit(ev: AgentEvent): void
   /** 触发卡片按钮回调（模拟 conn 的 card 帧）。 */
   cardAction(payload: Record<string, unknown>): Record<string, unknown>
@@ -73,7 +74,7 @@ interface Fakes {
   releaseRuns: () => void
 }
 
-function makeBot(opts: Partial<{ authMode: "local" | "server"; home: string; hangRun: boolean; renderError: string | null; notify: { tools?: boolean; assistant?: boolean } }> = {}): Fakes {
+function makeBot(opts: Partial<{ authMode: "local" | "server"; home: string; hangRun: boolean; renderError: string | null; notify: { tools?: boolean; assistant?: boolean }; api?: Partial<Fakes["api"]> }> = {}): Fakes {
   // 归属映射（feishu/chat-owners.json）写入真实临时目录；共享 home 可测「重启恢复」
   const home = opts.home ?? mkdtempSync(join(tmpdir(), "feishu-bot-test-"))
   const sessions = new Map<string, SessionData>()
@@ -201,6 +202,8 @@ function makeBot(opts: Partial<{ authMode: "local" | "server"; home: string; han
     },
     getChatName: async () => "测试群",
   }
+  // 测试可按需覆盖/补充 api 方法（如 getUserName 带发送者名）
+  if (opts.api) Object.assign(api, opts.api)
   let lastHandlers: import("./adapter").BotRunHandlers | null = null
   const bot = new FeishuBot({
     appId: "cli_a",
@@ -388,6 +391,22 @@ describe("消息处理", () => {
     expect(f.runs).toHaveLength(1)
     expect(f.runs[0]).toMatchObject({ sessionId: sid(), user: "admin", prompt: "你好" })
     expect((f.runs[0].opts as { messageId: string }).messageId).toBe("om_msg12")
+  })
+
+  test("api 提供 getUserName → 入站 prompt 带发送者姓名", async () => {
+    const f = makeBot({ api: { getUserName: async (id: string) => (id === "ou_123" ? "张三" : undefined) } })
+    await f.bot.handleFeishuEvent(receiveEvent())
+    await flush()
+    expect(f.runs).toHaveLength(1)
+    expect(f.runs[0]!.prompt).toBe("【张三】你好")
+  })
+
+  test("api 无 getUserName → 不带姓名，原样入站", async () => {
+    const f = makeBot()
+    await f.bot.handleFeishuEvent(receiveEvent())
+    await flush()
+    expect(f.runs).toHaveLength(1)
+    expect(f.runs[0]!.prompt).toBe("你好")
   })
 
   test("会话已存在时复用（不重复 save）", async () => {

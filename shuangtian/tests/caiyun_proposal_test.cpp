@@ -22,6 +22,7 @@
 #include "examples/caiyun/proposal.cpp"
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
+#include "st/core/log.hpp"
 #include "st/test/test.hpp"
 
 namespace {
@@ -48,7 +49,7 @@ ST_TEST(caiyun_proposal_requires_rationale) {
   const auto empty = caiyun::propose(dir, "agent", "把相机拉近", "");
   ST_CHECK(!empty.has_value());
   if (!empty) {
-    st::print("空理由的报错：{}\n", empty.error().message);
+    st::log::out("空理由的报错：{}\n", empty.error().message);
     ST_CHECK(empty.error().message.find("理由") != std::string::npos);
   }
 }
@@ -64,7 +65,7 @@ ST_TEST(caiyun_proposal_create_and_read_back) {
                                     "聚焦产品细节；实测 1.06 时细节仍偏小", changes);
   ST_CHECK(made.has_value());
   if (!made) {
-    st::print("提议失败：{}\n", made.error().message);
+    st::log::out("提议失败：{}\n", made.error().message);
     return;
   }
   ST_CHECK(!made->id.empty());
@@ -107,7 +108,7 @@ ST_TEST(caiyun_proposal_accept_writes_history_with_effect) {
                               effect);
   ST_CHECK(decided.has_value());
   if (!decided) {
-    st::print("采纳失败：{}\n", decided.error().message);
+    st::log::out("采纳失败：{}\n", decided.error().message);
     return;
   }
   ST_CHECK(decided->state == caiyun::ProposalState::Accepted);
@@ -145,7 +146,7 @@ ST_TEST(caiyun_proposal_terminal_state_cannot_be_redecided) {
       caiyun::decide_proposal(dir, made->id, caiyun::ProposalState::Rejected, "human");
   ST_CHECK(!again.has_value());
   if (!again) {
-    st::print("二次裁决的报错：{}\n", again.error().message);
+    st::log::out("二次裁决的报错：{}\n", again.error().message);
     ST_CHECK(again.error().message.find("终态") != std::string::npos);
   }
 
@@ -168,7 +169,7 @@ ST_TEST(caiyun_proposal_supersede_chain) {
       caiyun::supersede_proposal(dir, first->id, second->id, "agent", "幅度不够");
   ST_CHECK(done.has_value());
   if (!done) {
-    st::print("取代失败：{}\n", done.error().message);
+    st::log::out("取代失败：{}\n", done.error().message);
     return;
   }
   ST_CHECK(done->state == caiyun::ProposalState::Superseded);
