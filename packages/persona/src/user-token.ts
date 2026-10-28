@@ -30,6 +30,7 @@
 
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import { dataSubdir } from "@gebai/sdk/node"
 import { feishuFetch } from "./tls"
 
 /** 与 `@gebai/agents` 的 `UserTokenEntry` 同形（结构化兼容，无需适配器）。 */
@@ -91,7 +92,7 @@ export class PersonaTokenStore {
   private warnedNeedsAuth = false
 
   constructor(private readonly opts: PersonaTokenStoreOptions) {
-    this.path = join(opts.home, "persona", TOKEN_FILE)
+    this.path = join(dataSubdir(opts.home, "persona"), TOKEN_FILE)
     // 缺省走 feishuFetch：刷新令牌同样打 accounts.feishu.cn，与兑换同一条 TLS 路径
     //（GEBAI_FEISHU_INSECURE_TLS 只对 feishuFetch 生效，用原生 fetch 会让开关静默失效）
     this.fetchImpl = opts.fetchImpl ?? feishuFetch
@@ -130,7 +131,7 @@ export class PersonaTokenStore {
   private async save(entry: PersonaUserToken | null): Promise<void> {
     this.cache = entry
     try {
-      await mkdir(join(this.opts.home, "persona"), { recursive: true })
+      await mkdir(dataSubdir(this.opts.home, "persona"), { recursive: true })
       if (entry === null) {
         // 清空：写一个空对象而不是删文件（保留 0600 权限语义，且便于诊断"曾经有过"）
         await writeFile(this.path, "{}", { encoding: "utf8", mode: 0o600 })

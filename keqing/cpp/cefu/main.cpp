@@ -85,7 +85,12 @@ auto read_list(const Json& obj, const char* key) -> std::vector<std::string> {
 
 /* ══════════════ 存储 ══════════════ */
 
-/// 数据文件路径：`$CEFU_DB` 优先，否则 `<家目录>/knowledge/cefu.json`。
+/// 数据文件路径：`$CEFU_DB` 优先，否则 `$GEBAI_HOME/data/knowledge/cefu.json`。
+///
+/// **为何认 GEBAI_HOME 而不是 USERPROFILE**：外部进程（本边车）只看得到宿主注入的环境变量，
+/// 而歌白所有运行时数据都归在 `{GEBAI_HOME}/data/` 下（与 persona/相期同一约定）。
+/// 旧版曾用 `<家目录>/knowledge/`，于是数据散落到用户家目录、与歌白数据分家；
+/// 宿主现在还会显式注入 `CEFU_DB`（带旧位置回退），本函数只是无注入时的兜底。
 ///
 /// 为什么是 JSON 而不是 SQLite：边车要**零依赖**（纯标准库即可编译），
 /// 而 SQLite 要么链 amalgamation（~250KB 源码、每次构建多几秒），
@@ -93,6 +98,9 @@ auto read_list(const Json& obj, const char* key) -> std::vector<std::string> {
 /// 附带好处是可 diff、可手工编辑、出问题肉眼能看。
 auto data_path() -> std::string {
   if (const char* env = std::getenv("CEFU_DB"); env != nullptr && *env != '\0') return env;
+  if (const char* gebai = std::getenv("GEBAI_HOME"); gebai != nullptr && *gebai != '\0') {
+    return std::string(gebai) + "/data/knowledge/cefu.json";
+  }
   std::string home;
   if (const char* h = std::getenv("USERPROFILE"); h != nullptr) home = h;
   else if (const char* h2 = std::getenv("HOME"); h2 != nullptr) home = h2;

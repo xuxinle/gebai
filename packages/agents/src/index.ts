@@ -134,5 +134,6 @@ export {
   resetControllerForTest as resetXiangqiControllerForTest,
   // 宿主侧拉起窗口时要算 `--home`，必须与控制器内部同一公式（不能各写一份）
   homeFromEnv as xiangqiHomeFromEnv,
+  XIANGQI_HOME_DIRNAME,
 } from "./agents/xiangqi/controller"
 export type { XiangqiController, CardSpec, CardAnswer, PeerSocket } from "./agents/xiangqi/controller"

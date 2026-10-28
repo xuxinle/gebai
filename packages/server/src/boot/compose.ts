@@ -46,7 +46,7 @@ import { makeWsSink } from "./serve"
 import { planXiangqiLaunch } from "./xiangqi-launch"
 import { installBrowserFetchProxy } from "../core/browser/fetch-proxy"
 import { ensureCorporateTrust } from "../core/trust/corporate"
-import { log, setLogLevel } from "@gebai/sdk/node"
+import { dataSubdir, log, setLogLevel } from "@gebai/sdk/node"
 import { FeishuConn } from "../feishu-bot/conn"
 import { ChannelRegistry, ChannelInputBridge, defaultChannelScanDirs } from "@gebai/channels"
 import { authCardDeadline, AUTH_CARD_TTL_MS, decideExpiry, shouldPushAuthCard } from "../core/session/persona-expiry"
@@ -106,7 +106,7 @@ class LogOnlyDispatcher implements PersonaDispatchPort {
 }
 
 /**
- * 动态 driver 持久化：模型自建的分身落盘到 `{GEBAI_HOME}/persona/drivers.json`。
+ * 动态 driver 持久化：模型自建的分身落盘到 `{GEBAI_HOME}/data/persona/drivers.json`。
  *
  * 为何单独一个文件而不是写进会话：driver 是**人格级**的（跨会话生效），
  * 跟某个对话无关。写进会话会导致「换个会话就丢分工」。
@@ -118,7 +118,7 @@ class PersonaDriverStore implements PersonaDriverPersistence {
   private chain: Promise<unknown> = Promise.resolve()
 
   constructor(home: string) {
-    this.path = join(home, "persona", "drivers.json")
+    this.path = join(dataSubdir(home, "persona"), "drivers.json")
   }
 
   private serialize<T>(fn: () => Promise<T>): Promise<T> {

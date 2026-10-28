@@ -221,11 +221,11 @@ describe("拉起决策 planXiangqiLaunch", () => {
     }
   })
 
-  test("xiangqiHomeFor：XIANGQI_HOME 优先，其次 {GEBAI_HOME}/xiangqi", () => {
+  test("xiangqiHomeFor：XIANGQI_HOME 优先，其次 {GEBAI_HOME}/data/xiangqi", () => {
     expect(xiangqiHomeFor("/h", { XIANGQI_HOME: "/x" })).toBe("/x")
-    expect(xiangqiHomeFor("/h", {})).toBe(join("/h", "xiangqi"))
+    expect(xiangqiHomeFor("/h", {})).toBe(join("/h", "data", "xiangqi"))
     // 空串按「未设置」处理（不能算出相对路径）
-    expect(xiangqiHomeFor("/h", { XIANGQI_HOME: "  " })).toBe(join("/h", "xiangqi"))
+    expect(xiangqiHomeFor("/h", { XIANGQI_HOME: "  " })).toBe(join("/h", "data", "xiangqi"))
   })
 
   test("数据根目录名是纯 ASCII（中文目录名会作为 --home 命令行参数传出去）", () => {

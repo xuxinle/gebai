@@ -9,6 +9,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "echo 'no lint configured'"
   },
+  "dependencies": {
+    "@gebai/sdk": "workspace:*"
+  },
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "^5.7.0"

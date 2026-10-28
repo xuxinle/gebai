@@ -725,7 +725,7 @@ describe("card_dismiss 支持单卡撤回", () => {
 })
 
 describe("数据根：缺省不写到 cwd（防污染仓库）", () => {
-  it("设了 GEBAI_HOME 时，箱件落在 {GEBAI_HOME}/xiangqi", async () => {
+  it("设了 GEBAI_HOME 时，箱件落在 {GEBAI_HOME}/data/xiangqi", async () => {
     const home = mkdtempSync(join(tmpdir(), "xq-gh-"))
     const prev = process.env.GEBAI_HOME
     process.env.GEBAI_HOME = home
@@ -739,10 +739,11 @@ describe("数据根：缺省不写到 cwd（防污染仓库）", () => {
       ctl.push({ kind: "notice", title: "需要写盘的卡" })
       void peer
       await new Promise((r) => setTimeout(r, 150))
-      const wroteToGebaiHome = existsSync(join(home, "xiangqi", "inbox"))
+      const wroteToDataDir = existsSync(join(home, "data", "xiangqi", "inbox"))
+      const wroteToLegacy = existsSync(join(home, "xiangqi", "inbox"))
       const wroteToCwd = existsSync(join(process.cwd(), "xiangqi"))
-      console.log(`    实测: GEBAI_HOME下=${wroteToGebaiHome} cwd下=${wroteToCwd}`)
-      expect(wroteToGebaiHome).toBe(true)
+      console.log(`    实测: data/xiangqi下=${wroteToDataDir} 旧位置下=${wroteToLegacy} cwd下=${wroteToCwd}`)
+      expect(wroteToDataDir).toBe(true)
       expect(wroteToCwd).toBe(false)
       ctl.close()
     } finally {

@@ -22,8 +22,9 @@
 .reverse_verify.lock
 
 # 相期（Xiāngqī）的运行期数据目录：inbox/outbox/seen.txt 是卡片投递与答复的**本地状态**，
-# 不是项目文件。缺省落在 {GEBAI_HOME}/xiangqi，未设时回退 <cwd>/xiangqi（测试、临时实例、
-# 直接跑二进制都会在 cwd 下长出来）——故用无路径前缀的裸模式。
+# 不是项目文件。现在统一落在 {GEBAI_HOME}/data/xiangqi（已被上面 `/data/` 覆盖）；
+# 这里保留旧位置 `{GEBAI_HOME}/xiangqi`（升级前的部署）与 <cwd>/xiangqi（测试、临时实例、
+# 直接跑二进制）的忽略——故用无路径前缀的裸模式。
 xiangqi/
 # ⚠ 裸模式的**代价（实测踩到）**：gitignore 的模式匹配路径的**任意一段**，所以上面这条把
 # `shuangtian/examples/xiangqi/` 这个**示例源码目录**也一起忽略了——现象是往里新加 `.cpp`/
@@ -67,6 +68,11 @@ gebai.log
 # 运行时数据（GEBAI_HOME when script-debug at repo root）
 users/
 tmp/
+# 运行时数据根（拟人模式/相期/册府等统一收在这里，见 packages/sdk/src/data-dir.ts）。
+# ⚠ **必须根锛定 `/data/`，不能写裸模式 `data/`**：裸模式匹配路径任意一段，
+# 会连 `packages/xxx/src/data/` 这类源码目录一起忽略，导致文件静默不入库
+# （本仓被 `xiangqi/` 裸模式坑过一次，见提交 58ca27e8）。
+/data/
 audit-fs.jsonl
 feishu/
 # 拟人模式运行时数据（{GEBAI_HOME}/persona/：feishu-user-token.json 是**用户令牌凭据**、

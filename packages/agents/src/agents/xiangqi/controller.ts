@@ -30,6 +30,16 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { resolveDataPath } from "@gebai/sdk/node"
+
+/**
+ * 相期数据目录名（`{GEBAI_HOME}/data/xiangqi`）。
+ *
+ * **单一真源**：宿主拉起窗口时要传 `--home`（见 server `boot/xiangqi-launch.ts`），
+ * 与控制器自己算的必须是同一个值。两处各写一份字面量的后果是推卡降级写一处、
+ * 答复轮询读另一处——WS 通时完全看不出异常。故常量与公式一起导出，宿主直接引用。
+ */
+export const XIANGQI_HOME_DIRNAME = "xiangqi"
 
 /**
  * 相期除了经 WS 回 `answer`，还会把答复**总是**落 `outbox/<id>.json`
@@ -182,11 +192,14 @@ function portFromEnv(): number {
 }
 
 /**
- * 从环境读数据根：`XIANGQI_HOME` → `{GEBAI_HOME}/xiangqi` → `<cwd>/xiangqi`。
+ * 从环境读数据根：`XIANGQI_HOME` → `{GEBAI_HOME}/data/xiangqi` → `<cwd>/data/xiangqi`。
  *
  * 为何要认 `GEBAI_HOME`：宿主进程的 cwd 可能是仓库目录或任意工作目录，
  * 直接往 cwd 写会在那里凭空长出 `xiangqi/`（实测：跑一次测试仓库里多了一个目录）。
  * 歌白的数据本来就在 `GEBAI_HOME` 下，把相期的箱件放那里才符合“一份部署一份数据”。
+ *
+ * 为何在 `Home` 下再加一层 `data/`：开发形态下 `GEBAI_HOME` 就是仓库根，不加这层则相期目录
+ * 会与代码目录混在一起（详见 `@gebai/sdk/node` 的 `data-dir`）。口径与 persona/册府一致。
  *
  * 为何目录名用 ASCII 的 `xiangqi` 而不是中文的「相期」：这个路径要作为 `--home` 的**命令行参数**
  * 传给原生窗口进程，也会出现在日志与降级文件路径里。中文目录名在控制台代码页、跨平台文件系统、
@@ -198,9 +211,11 @@ function portFromEnv(): number {
 export function homeFromEnv(): string {
   const raw = process.env.XIANGQI_HOME
   if (raw !== undefined && raw.trim() !== "") return raw.trim()
-  const home = process.env.GEBAI_HOME
-  if (home !== undefined && home.trim() !== "") return join(home.trim(), "xiangqi")
-  return join(process.cwd(), "xiangqi")
+  const home = process.env.GEBAI_HOME || process.cwd()
+  // 迁移兜底：旧位置 `{GEBAI_HOME}/xiangqi` 若还在而新位置尚未出现，先沿用旧位置
+  // （新位置一旦出现（写入/迁移）就永远以新位置为准）。相期是独立进程，
+  // 无法自己搬家，故由宿主（xiangqi-launch）启动前代为迁移。
+  return resolveDataPath(home, XIANGQI_HOME_DIRNAME, XIANGQI_HOME_DIRNAME)
 }
 
 /**

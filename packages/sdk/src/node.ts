@@ -1,6 +1,7 @@
 /**
  * @gebai/sdk node 子入口（`@gebai/sdk/node`）：node 工具模块聚合——agent-utils（截断/路径工具）、
  * artifacts（内容块产物）、projects（预置项目解析）、walk（目录遍历）、paths（分片/沙箱路径）、
+ * data-dir（运行时数据根 `{GEBAI_HOME}/data` 的**单一真源**）、
  * logger（最小日志器：GEBAI_LOG_LEVEL 的消费点）。
  *
  * 这些模块 import node:path/node:crypto/node:fs，浏览器构建不可解析，故独立于主入口
@@ -12,4 +13,5 @@ export * from "./artifacts"
 export * from "./projects"
 export * from "./walk"
 export * from "./paths"
+export * from "./data-dir"
 export * from "./logger"

@@ -15,8 +15,8 @@
  *
  * ## 地址语义
  *
- * - `local:memory`   → `{GEBAI_HOME}/persona/memory.md`（按 section 分段的追加式记忆）
- * - `local:outbox`   → `{GEBAI_HOME}/persona/outbox/`（落盘产物，带时间戳文件名）
+ * - `local:memory`   → `{GEBAI_HOME}/data/persona/memory.md`（按 section 分段的追加式记忆）
+ * - `local:outbox`   → `{GEBAI_HOME}/data/persona/outbox/`（落盘产物，带时间戳文件名）
  *
  * ## 为何 memory 用「分段追加」而不是整体重写
  *
@@ -26,6 +26,7 @@
 
 import { appendFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import { dataSubdir, migrateLegacyDir } from "@gebai/sdk/node"
 import type { ChannelContext, ChannelDef } from "../channel"
 
 /**
@@ -71,10 +72,10 @@ function serialize<T>(key: string, fn: () => Promise<T>): Promise<T> {
 }
 
 function memoryPath(home: string): string {
-  return join(home, "persona", "memory.md")
+  return join(dataSubdir(home, "persona"), "memory.md")
 }
 function outboxDir(home: string): string {
-  return join(home, "persona", "outbox")
+  return join(dataSubdir(home, "persona"), "outbox")
 }
 
 /** 现有 section 名（供 append 校验与 observe 展示）。 */
@@ -189,9 +190,18 @@ export const channel: ChannelDef = {
   },
 
   async start(ctx: ChannelContext) {
-    await mkdir(outboxDir(ctx.home), { recursive: true })
-    ctx.log("info", `local 渠道就绪：memory=${memoryPath(ctx.home)} outbox=${outboxDir(ctx.home)}`)
-  },
+  // 旧部署的 `{GEBAI_HOME}/persona` → `data/persona`：幂等搬家（不覆盖），失败不阻断
+  const migrated = migrateLegacyDir(ctx.home, "persona")
+  if (migrated.moved > 0 || migrated.skipped > 0 || migrated.error) {
+    ctx.log(
+      "info",
+      `local 数据目录迁移：${migrated.from} → ${migrated.to}（搬 ${migrated.moved}、跳过 ${migrated.skipped}` +
+        `${migrated.error ? `、失败：${migrated.error}` : ""}）`,
+    )
+  }
+  await mkdir(outboxDir(ctx.home), { recursive: true })
+  ctx.log("info", `local 渠道就绪：memory=${memoryPath(ctx.home)} outbox=${outboxDir(ctx.home)}`)
+},
 
   /**
    * 订阅本机目录（轮询）。
@@ -315,8 +325,8 @@ export const channel: ChannelDef = {
       if (!text.trim()) throw new Error("append 需要非空 text")
       const file = memoryPath(ctx.home)
       return serialize(file, async () => {
-        await mkdir(join(ctx.home, "persona"), { recursive: true })
-        const existing = await readFile(file, "utf8").catch(() => "")
+            await mkdir(dataSubdir(ctx.home, "persona"), { recursive: true })
+    const existing = await readFile(file, "utf8").catch(() => "")
         const heading = `${SECTION_PREFIX}${section}`
         const lines = existing.split("\n")
         const idx = lines.findIndex((l) => l.trim() === heading)
@@ -357,8 +367,8 @@ export const channel: ChannelDef = {
       const text = String(input.args.text ?? "")
       const file = memoryPath(ctx.home)
       return serialize(file, async () => {
-        await mkdir(join(ctx.home, "persona"), { recursive: true })
-        const before = await readFile(file, "utf8").catch(() => "")
+            await mkdir(dataSubdir(ctx.home, "persona"), { recursive: true })
+    const before = await readFile(file, "utf8").catch(() => "")
         await writeFile(file, text, "utf8")
         return {
           summary: `已替换 memory.md 全文（原 ${before.length} 字符 → 现 ${text.length} 字符）`,

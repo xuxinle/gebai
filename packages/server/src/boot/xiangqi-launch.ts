@@ -20,6 +20,8 @@
  */
 import { existsSync } from "node:fs"
 import { dirname, isAbsolute, join, resolve } from "node:path"
+import { resolveDataPath } from "@gebai/sdk/node"
+import { XIANGQI_HOME_DIRNAME } from "@gebai/agents"
 
 /** 可执行文件名：Windows 要带 `.exe`（`spawn` 不会替你补后缀）。 */
 export const XINGQI_EXE_NAME = process.platform === "win32" ? "xiangqi.exe" : "xiangqi"
@@ -178,21 +180,20 @@ export function planXiangqiLaunch(input: XiangqiPlanInput, exists: (p: string) =
 }
 
 /**
- * 相期数据根：`XIANGQI_HOME` → `{GEBAI_HOME}/xiangqi` → `<cwd>/xiangqi`。
+ * 相期数据根：`XIANGQI_HOME` → `{GEBAI_HOME}/data/xiangqi` → `<cwd>/data/xiangqi`。
  *
- * 目录名是 ASCII 的 `xiangqi`（不是中文「相期」）：这个路径会作为 `--home` 的**命令行参数**
- * 传给原生窗口，也出现在日志与降级文件路径里——中文目录名在控制台代码页、跨平台文件系统、
- * 命令行转义上都是白白多出来的一处失败面。
+ * **公式只有一份**：目录名常量与 `homeFromEnv` 同源于 agents 侧（相期控制器自己算的就是
+ * 读写箱件的位置）。本函数只是把 GEBAI_HOME **显式传进去**的版本（宿主在启动期就需知道
+ * 路径，而 `homeFromEnv` 只读 process.env，测试注入不便）。
  *
- * **与 agents 侧 `homeFromEnv()` 同一公式**（本函数只是把 GEBAI_HOME 显式传进去）：
  * 两边算出不同目录的后果是文件兼底各写各的（推卡降级写一处、答复轮询读另一处），
- * 而 WS 通的时候看不出任何异常。
+ * 而 WS 通的时候看不出任何异常——所以这里**不再自己拼字符串**，统一走 `resolveDataPath`。
  */
-export const XIANGQI_HOME_DIRNAME = "xiangqi"
+export { XIANGQI_HOME_DIRNAME }
 
 export function xiangqiHomeFor(gebaiHome: string, env: Record<string, string | undefined>): string {
   const explicit = env.XIANGQI_HOME?.trim()
   if (explicit) return explicit
   const home = (gebaiHome || env.GEBAI_HOME || "").trim()
-  return join(home === "" ? process.cwd() : home, XIANGQI_HOME_DIRNAME)
+  return resolveDataPath(home === "" ? process.cwd() : home, XIANGQI_HOME_DIRNAME, XIANGQI_HOME_DIRNAME)
 }
