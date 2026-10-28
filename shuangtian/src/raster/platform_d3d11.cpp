@@ -538,18 +538,33 @@ float4 shade(float2 local_px, float2 local01, float2 pixel, float4 rect_uv, floa
   float3 coverage_rgb = float3(1.0, 1.0, 1.0);
 
   if (mode == 4) {
-    // 可分离盒式模糊（阴影遮罩）：与 `blur_mask` 同一口径（3 遍 [水平+垂直]）。
+    // 可分离盒式模糊：与 `blur_mask` 同一口径（3 遍 [水平+垂直]）。
     // 循环上界必须是编译期常量，而半径是运行期参数：取足够大的常量 + 条件跳过。
+    //
+    // ## `g_mode.w` 决定模糊**几个通道**
+    //
+    //   0（缺省）= **单通道**（只模糊 R，输出 `(r,0,0,1)`）—— 阴影遮罩用，
+    //             遮罩是灰度覆盖率，只要一个通道。
+    //   1       = **全色**（RGBA 都模糊）—— 毛玻璃用。
+    //
+    // ⚠ 毛玻璃**必须**走全色：直接复用单通道会把 G/B 写成 0、A 写成 1，
+    // 贴回画布后整块区域只剩红色分量——实测暗色弹窗右侧出现一条
+    // “红绿色块”竖带（R 在 44~62 波动、G 恒为 30、B 恒为 38），
+    // 就是色通道被丢弃后与底色混合的结果。
     const int radius = (int)g_axis_extra.x;
     const float2 step = g_axis.xy / g_viewport.xy;
-    float sum = 0.0;
+    const bool full_color = g_mode.w > 0.5;
+    float4 sum = float4(0.0, 0.0, 0.0, 0.0);
     float count = 0.0;
     for (int i = -64; i <= 64; ++i) {
       if (i < -radius || i > radius) continue;
-      sum += g_texture.SampleLevel(g_sampler, local01 + step * (float)i, 0).r;
+      sum += g_texture.SampleLevel(g_sampler, local01 + step * (float)i, 0);
       count += 1.0;
     }
-    return float4(count > 0.0 ? sum / count : 0.0, 0.0, 0.0, 1.0);
+    if (count <= 0.0) return float4(0.0, 0.0, 0.0, full_color ? 0.0 : 1.0);
+    if (full_color) return sum / count;
+    // 单通道（阴影）：R 通道取均值，alpha 固定 1（遮罩语义）。
+    return float4(sum.r / count, 0.0, 0.0, 1.0);
   }
 
   if (mode == 0 || mode == 1) {
@@ -1378,6 +1393,107 @@ class GpuCanvas final : public Surface {
                static_cast<std::uint64_t>(std::lround(destination.height * scale_)));
     return true;
   }
+  /// **区域毛玻璃（GPU）**：把 `rect` 内已绘内容就地模糊。
+  ///
+  /// ## 为什么能在 GPU 上做，而且比 CPU 快
+  ///
+  /// 需要的机制在 `shadow_mask()` 里已经全部跑通：离屏 RT + `DrawMode::BoxBlur`
+  /// 着色器的多 pass ping-pong。区别只是采样源从“现画的圆角矩形遮罩”换成
+  /// **画布自己的 `color_` 纹理**（它的 SRV 已建好，见 `create_target`）。
+  /// 全程不落 CPU——回读只服务截图/导出，跟渲染无关。
+  ///
+  /// ## 三个必须做对的地方
+  ///
+  /// 1. **先提交已录制命令**：deferred 下画布内容还在命令队列里，`color_` 里是旧的。
+  /// 2. **每个 pass 后提交**：下一 pass 要拿上一 pass 的输出当采样源，
+  ///    而 D3D11 不允许同一资源同时绑 RT 与 SRV（`shadow_mask` 里同一条教训）。
+  /// 3. **贴回时用圆角遮罩**：模糊只在矩形上跑，不认圆角（同软件端）。
+  [[nodiscard]] auto blur_region(math::Rect rect, float radius) -> bool override {
+    if (radius <= 0.0f || rect.is_empty() || target_ == nullptr || target_srv_ == nullptr) {
+      return false;
+    }
+    // 逻辑 → 物理，并与裁剪域/画布求交（与软件端同口径）。
+    math::IntRect area = to_physical(rect).intersect(clip_rect());
+    area = area.intersect(math::IntRect{0, 0, physical_width_, physical_height_});
+    if (area.width <= 1 || area.height <= 1) return false;
+
+    // ① 先把已录制的绘制落地——否则采样到的是旧内容。
+    submit_deferred_now();
+
+    // ② 拿一对离屏 RT 做 ping-pong（与阴影同一个池，尺寸不同就另分配）。
+    ShadowTargets targets;
+    if (!acquire_shadow_targets(area.width, area.height, targets)) return false;
+    const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    const DrawScope gfx = draw_scope();
+    gfx->ClearRenderTargetView(targets.rtv_a, zero);
+    gfx->ClearRenderTargetView(targets.rtv_b, zero);
+    note_deferred_draw();
+
+    // ③ 把画布这一块拷进 A（用 `uv` 子矩形采样，不 `CopyResource` 整张纹理）。
+    //
+    // `uv` 是归一化的 {u0, v0, w, h}；`Bitmap` 模式直接采样它。
+    ShaderParams copy = base_params(
+        DrawMode::Bitmap,
+        math::Rect{0.0f, 0.0f, static_cast<float>(area.width), static_cast<float>(area.height)},
+        {0.0f, 0.0f, 0.0f, 0.0f}, 1.0f);
+    copy.uv[0] = static_cast<float>(area.x) / static_cast<float>(physical_width_);
+    copy.uv[1] = static_cast<float>(area.y) / static_cast<float>(physical_height_);
+    copy.uv[2] = static_cast<float>(area.width) / static_cast<float>(physical_width_);
+    copy.uv[3] = static_cast<float>(area.height) / static_cast<float>(physical_height_);
+    apply_shadow_viewport(copy, area);
+    submit_deferred_now();
+    submit_to(targets.rtv_a, copy, target_srv_, true, true, area.width, area.height);
+
+    // ④ 3 pass × [水平+垂直]，ping-pong 于 A/B（与 `shadow_mask` 完全同构）。
+    const int box_radius = std::max(1, static_cast<int>(std::lround(radius * scale_ * 0.5f)));
+    ID3D11RenderTargetView* read_rtv = targets.rtv_a;
+    ID3D11ShaderResourceView* read_srv = targets.srv_a;
+    for (int pass = 0; pass < 3; ++pass) {
+      for (const bool along_x : {true, false}) {
+        const bool reading_a = read_rtv == targets.rtv_a;
+        ID3D11RenderTargetView* write_rtv = reading_a ? targets.rtv_b : targets.rtv_a;
+        ShaderParams blur_params = base_params(
+            DrawMode::BoxBlur,
+            math::Rect{0.0f, 0.0f, static_cast<float>(area.width), static_cast<float>(area.height)},
+            {0.0f, 0.0f, 0.0f, 0.0f}, 1.0f);
+        blur_params.axis[0] = along_x ? 1.0f : 0.0f;
+        blur_params.axis[1] = along_x ? 0.0f : 1.0f;
+        blur_params.axis_extra[0] = static_cast<float>(box_radius);
+        // **全色模糊**：`g_mode.w = 1` 让着色器模糊 RGBA 四个通道。
+        // 缺省 0 是阴影遮罩的"只模糊 R 通道"模式——毛玻璃直接用它会把
+        // G/B 写成 0、A 写成 1，贴回后整块只剩红色分量。
+        // 实测：暗色弹窗右侧一条红绿色块竖带（R 波动 44~62、G 恒 30、B 恒 38）。
+        blur_params.mode[3] = 1.0f;
+        apply_shadow_viewport(blur_params, area);
+        submit_deferred_now();   // 上一 pass 必须真执行（见函数注释第 2 条）
+        submit_to(write_rtv, blur_params, read_srv, false, true, area.width, area.height);
+        read_rtv = write_rtv;
+        read_srv = reading_a ? targets.srv_b : targets.srv_a;
+      }
+    }
+    submit_deferred_now();
+
+    // ⑤ 贴回画布。**rect 必须是物理像素**（`base_params` 的口径：
+    // 它内部直接写进着色器常量，不做缩放；`draw_canvas` 那里传的是
+    // `to_physical_rect(destination)`、`shadow_mask` 传的是局部物理坐标）。
+    //
+    // ⚠ 我第一版在这里除了 `scale_`（把它当逻辑坐标），结果贴回只盖住了
+    // 区域的左上一部分，对话框上出现一条笔直的**半灰半白**分界线。
+    ShaderParams paste = base_params(
+        DrawMode::Bitmap,
+        math::Rect{static_cast<float>(area.x), static_cast<float>(area.y),
+                   static_cast<float>(area.width), static_cast<float>(area.height)},
+        {0.0f, 0.0f, 0.0f, 0.0f}, 1.0f);
+    paste.uv[0] = 0.0f;
+    paste.uv[1] = 0.0f;
+    paste.uv[2] = 1.0f;
+    paste.uv[3] = 1.0f;
+    submit_to(rtv_, paste, read_srv, true, true, physical_width_, physical_height_);
+    note_deferred_draw();
+    return true;
+  }
+  [[nodiscard]] auto supports_blur() const noexcept -> bool override { return true; }
+
   void draw_canvas_at(const Surface& source, int x, int y, DrawOptions options = {}) override {
     // ⚠ 与 `Canvas::draw_canvas_at` **必须同语义**：`x/y` 是**物理像素**，
     // 而 `draw_canvas` 的 `destination` 是逻辑坐标——直接传会多乘一次 `device_scale`。
@@ -2643,9 +2759,19 @@ class GpuCanvas final : public Surface {
     if (FAILED(device_->CreateRenderTargetView(target_, nullptr, &rtv_))) {
       ST_LOG_ERROR("GPU 渲染：创建渲染目标视图失败");
     }
+    // **目标纹理的 SRV**：毛玻璃（`blur_region`）要拿画布自己当采样源。
+    // `BindFlags` 里本来就有 `BIND_SHADER_RESOURCE`（三维合成那条路要用），
+    // 但视图一直没建——不建就采不了。
+    if (FAILED(device_->CreateShaderResourceView(target_, nullptr, &target_srv_))) {
+      ST_LOG_WARN("GPU 渲染：创建目标纹理视图失败（毛玻璃不可用）");
+    }
   }
 
   void release_resources() {
+    if (target_srv_ != nullptr) {
+      target_srv_->Release();
+      target_srv_ = nullptr;
+    }
     if (rtv_ != nullptr) {
       rtv_->Release();
       rtv_ = nullptr;
@@ -2806,6 +2932,8 @@ class GpuCanvas final : public Surface {
   bool readback_ready_{false};
   ID3D11Texture2D* target_{nullptr};
   ID3D11RenderTargetView* rtv_{nullptr};
+  /// 目标纹理的 SRV（毛玻璃要拿画布自己当采样源）。
+  ID3D11ShaderResourceView* target_srv_{nullptr};
   ID3D11Texture2D* staging_{nullptr};
   std::vector<std::uint32_t> readback_{};
   std::vector<ClipFrame> clip_stack_{};

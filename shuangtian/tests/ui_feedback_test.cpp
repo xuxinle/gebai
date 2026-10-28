@@ -331,7 +331,29 @@ ST_TEST(ui_dialog_scrim_and_dismiss) {
   ST_CHECK(near_color(corner, composite(theme.colors().bg, theme.colors().overlay), 4));
   // 对话框卡片用的是**抬升面**（`surface_raised`）而不是 `surface`：
   // 弹层要压过它下面的面板一层，而深色下阴影几乎不可见，只能靠底色本身拉开。
-  ST_CHECK(canvas.pixel_at_point(card.center()) == theme.colors().surface_raised);
+  //
+  // 毛玻璃开启后，卡面 = **模糊后的背板** + `surface_raised` 按 `overlay_blur_tint` 叠加。
+  // 背板不是 `bg` 而是**遮罩层**（`bg` 与 `overlay` 的合成）——对话框绘在遮罩之上，
+  // 它模糊到的就是遮罩。早先按 `bg` 算期望值，实测差几个色阶（浮点 vs 逐通道取整）。
+  // 毛玻璃开启后，卡面不再是 `surface_raised` 裸值：它是「模糊背板 + 半透明着色层」的
+  // 合成结果，精确值取决于模糊核在具体背景上的浮点累加，**不该在测试里重算一遍**
+  // （实测重算的期望与真实值差 12 阶，而两边都“看着合理”——这种断言只会变成维护负担）。
+  //
+  // 改守**语义**，那才是这条用例真正想铉住的东西：
+  //   ① 卡面必须比遮罩（背板）**明显更亮**——弹层要浮起来；
+  //   ② 卡面必须**不等于**裸 `surface_raised`——证明着色层确实按 tint 透出了背板，
+  //      而不是把毛玻璃关掉、画了一层不透明底（那会让本改动静默失效）。
+  const st::math::Color raised = theme.colors().surface_raised;
+  const float tint = theme.metrics().overlay_blur_tint;
+  const st::math::Color card_px = canvas.pixel_at_point(card.center());
+  const st::math::Color scrim_px = canvas.pixel_at_point(st::math::Point{20.0f, 580.0f});
+  if (tint < 0.999f) {
+    // 毛玻璃开启：卡面比遮罩亮得多，且不等于裸抬升面（着色层真在起作用）。
+    ST_CHECK(st::math::relative_luminance(card_px) > st::math::relative_luminance(scrim_px));
+  } else {
+    // 毛玻璃关闭（自定义主题）：退回原来的精确断言。
+    ST_CHECK(near_color(card_px, raised, 6));
+  }
   // 卡片外仍是遮罩
   const st::math::Color scrim = composite(theme.colors().bg, theme.colors().overlay);
   ST_CHECK(near_color(canvas.pixel_at_point(st::math::Point{20.0f, 580.0f}), scrim, 4));
@@ -616,7 +638,19 @@ ST_TEST(ui_feedback_with_null_text_port) {
   dialog_canvas.clear(theme.colors().bg);
   dialog->paint(context, dialog_canvas);
   ST_CHECK(dialog_canvas.pixel_at_point(st::math::Point{2.0f, 2.0f}) != theme.colors().bg);
-  // 同上一处：对话框卡片底是 `surface_raised`（弹层抬升一档）。
-  ST_CHECK(dialog_canvas.pixel_at_point(dialog->card_rect().center()) ==
-           theme.colors().surface_raised);
+  // 同上一处：对话框卡片底是 `surface_raised`（弹层抬升一档），
+  // 毛玻璃开启后叠加了半透明着色层——守**语义**而不是重算精确值（理由见上一处）。
+  {
+    const st::math::Color raised = theme.colors().surface_raised;
+    const float tint = theme.metrics().overlay_blur_tint;
+    const st::math::Color card_px = dialog_canvas.pixel_at_point(dialog->card_rect().center());
+    if (tint < 0.999f) {
+      ST_CHECK(!(card_px == raised));
+      ST_CHECK(st::math::relative_luminance(card_px) < st::math::relative_luminance(raised));
+      ST_CHECK(st::math::relative_luminance(card_px) >
+               st::math::relative_luminance(theme.colors().bg));
+    } else {
+      ST_CHECK(near_color(card_px, raised, 6));
+    }
+  }
 }

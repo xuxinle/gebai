@@ -107,15 +107,23 @@ inline void draw_glass_edge(const RenderContext& context, raster::Surface& canva
   if (radius > 0.0f) canvas.pop_clip();
 }
 
-/// 弹层表面三件套：阴影（环境层 + 关键层）→ `surface_raised` 底 → 玻璃边缘。
+/// 弹层表面四件套：阴影（环境层 + 关键层）→ **毛玻璃**→ 底色 → 玻璃边缘。
 ///
 /// 存在的理由：菜单 / 对话框 / 气泡 / 命令面板五处各自抄过一段几乎相同的
-/// 「画阴影 + 填底」，而亚克力把「抬升感」托付给了这三步的组合——
+/// 「画阴影 + 填底」，而亚克力把「抬升感」托付给了这几步的组合——
 /// 分散写的话，改一处漏一处的结果是“某个浮层没有边缘光”，肉眼看得出、测试难抓。
+///
+/// ## 毛玻璃为什么在这里做
+///
+/// 它模糊的是**这一步之前已经画在画布上的像素**（弹层背后的内容），
+/// 所以必须在**画底色之前**执行——顺序反了就只能模糊到自己的底，白做。
+/// 后端不支持时（`supports_blur` 为假、或半径令牌为 0）自动跳过，
+/// 下面的实色底照常画，观感退回“不透明弹层”而不是报错或半透明裸底。
 inline void paint_raised_surface(const RenderContext& context, raster::Surface& canvas,
                                  math::Rect rect, float radius, const Shadow& shadow) {
   if (rect.is_empty()) return;
   const Palette& colors = context.theme.colors();
+  const Metrics& metrics = context.theme.metrics();
   if (shadow.visible()) {
     const bool has_ambient = shadow.second_visible();
     canvas.draw_shadow_layered(
@@ -125,7 +133,22 @@ inline void paint_raised_surface(const RenderContext& context, raster::Surface& 
         has_ambient ? shadow.blur2 : 0.0f,
         math::Point{shadow.offset2_x, shadow.offset2_y});
   }
-  fill_round_rect(canvas, rect, radius, colors.surface_raised);
+  // 毛玻璃：先模糊背板，再叠半透明底色。
+  //
+  // 裁剪到圆角内是**必须的**：`blur_region` 只按矩形跑模糊，不认圆角，
+  // 不裁的话四个角上的模糊会溢出到圆角之外，看起来像“毛边”。
+  const bool frosted = metrics.overlay_blur_radius > 0.0f && canvas.supports_blur();
+  if (frosted) {
+    if (radius > 0.0f) canvas.push_clip_rounded_rect(rect, radius);
+    (void)canvas.blur_region(rect, metrics.overlay_blur_radius);
+    if (radius > 0.0f) canvas.pop_clip();
+    // 着色层：让模糊后的背板沉下去，文字才读得出来。
+    const math::Color tint =
+        colors.surface_raised.with_alpha_f(math::clamp01(metrics.overlay_blur_tint));
+    fill_round_rect(canvas, rect, radius, tint);
+  } else {
+    fill_round_rect(canvas, rect, radius, colors.surface_raised);
+  }
   draw_glass_edge(context, canvas, rect, radius);
 }
 

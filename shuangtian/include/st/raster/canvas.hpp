@@ -133,6 +133,9 @@ class Canvas final : public Surface {
   /// 位图合成（双线性缩放）。
   void draw_canvas(const Surface& source, math::Rect destination, DrawOptions options = {}) override;
   void draw_canvas_at(const Surface& source, int x, int y, DrawOptions options = {}) override;
+  /// 区域毛玻璃（背板模糊）：把 `rect` 内**已绘内容**就地模糊，见 `Surface::blur_region`。
+  [[nodiscard]] auto blur_region(math::Rect rect, float radius) -> bool override;
+  [[nodiscard]] auto supports_blur() const noexcept -> bool override { return true; }
   /// 覆盖率位图混合（文字/遮罩）：软件实现逐行走 `blend_coverage_row`
   /// （`CoverageFormat::Lcd` 时走 `blend_coverage_row_subpixel`）。
   void blend_coverage_bitmap(int x, int y, std::span<const float> coverage, int width, int height,

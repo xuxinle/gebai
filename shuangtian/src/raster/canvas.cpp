@@ -343,6 +343,49 @@ void box_blur_pass(std::span<std::uint8_t> values, int width, int height, int ra
   }
 }
 
+/// 预乘 RGBA 的一维盒式模糊（滑动窗口），就地修改 `pixels` 的一行/一列。
+///
+/// 与上面的单通道版分开实现而不是泛化：那个跑在 `Mask`（阴影遮罩）的局部坐标里，
+/// 这个跑在画布的**物理像素区**，要同时处理四通道且边界夹取方式不同。
+/// 硬揉成一个模板会让两边都变难读。
+void box_blur_rgba_pass(std::uint32_t* origin, int stride, int width, int height, int radius,
+                        bool horizontal) {
+  if (radius <= 0 || width <= 0 || height <= 0) return;
+  const auto divisor = static_cast<std::uint32_t>(2 * radius + 1);
+  const int lines = horizontal ? height : width;
+  const int span = horizontal ? width : height;
+  const int step = horizontal ? 1 : stride;
+  for (int line = 0; line < lines; ++line) {
+    std::uint32_t* base = origin + static_cast<std::ptrdiff_t>(line) * (horizontal ? stride : 1);
+    std::uint32_t sr = 0;
+    std::uint32_t sg = 0;
+    std::uint32_t sb = 0;
+    std::uint32_t sa = 0;
+    const auto add = [&](const std::uint32_t px) {
+      sr += px & 0xFFU;
+      sg += (px >> 8U) & 0xFFU;
+      sb += (px >> 16U) & 0xFFU;
+      sa += (px >> 24U) & 0xFFU;
+    };
+    const auto take = [&](const std::uint32_t px) {
+      sr -= px & 0xFFU;
+      sg -= (px >> 8U) & 0xFFU;
+      sb -= (px >> 16U) & 0xFFU;
+      sa -= (px >> 24U) & 0xFFU;
+    };
+    for (int offset = -radius; offset <= radius; ++offset) {
+      add(base[static_cast<std::ptrdiff_t>(std::clamp(offset, 0, span - 1)) * step]);
+    }
+    for (int position = 0; position < span; ++position) {
+      base[static_cast<std::ptrdiff_t>(position) * step] =
+          ((sa / divisor) << 24U) | ((sb / divisor) << 16U) | ((sg / divisor) << 8U) |
+          (sr / divisor);
+      take(base[static_cast<std::ptrdiff_t>(std::clamp(position - radius, 0, span - 1)) * step]);
+      add(base[static_cast<std::ptrdiff_t>(std::clamp(position + radius + 1, 0, span - 1)) * step]);
+    }
+  }
+}
+
 }  // namespace
 
 // —— Mask ——
@@ -2170,6 +2213,82 @@ void Canvas::draw_canvas_at(const Surface& source, int x, int y, DrawOptions opt
                          static_cast<float>(y) / target_scale,
                          static_cast<float>(source.width()), static_cast<float>(source.height())},
               options);
+}
+
+auto Canvas::blur_region(math::Rect rect, float radius) -> bool {
+  if (radius <= 0.0f || rect.is_empty()) return false;
+  // 逻辑坐标 → 物理像素，再与裁剪域/画布求交：模糊只能作用于**真画在屏上**
+  // 的那一块（否则会把屏幕外的像素也算进来，但因为不可见而白花时间）。
+  math::IntRect area = to_physical(rect).intersect(clip_rect());
+  area = area.intersect(math::IntRect{0, 0, physical_width_, physical_height_});
+  if (area.width <= 1 || area.height <= 1) return false;
+
+  // 半径换算到物理像素；三遍盒式模糊近似高斯（与 `blur_mask` 同一手腕，
+  // 每遍的盒半径取 `total * 0.5`，三遍叠加后的等效 σ 与 `blur` 接近）。
+  const int box = std::max(1, static_cast<int>(std::lround(radius * scale_ * 0.5f)));
+
+  // 取这块区域的像素**副本**：盒式模糊逐行跑的是滑动窗口，直接就地做
+  // 向右扩散时会把已被模糊的像素再拿去当输入（产生拖尾），必须用独立缓冲。
+  std::vector<std::uint32_t> patch(static_cast<std::size_t>(area.width) *
+                                   static_cast<std::size_t>(area.height));
+  for (int y = 0; y < area.height; ++y) {
+    const auto* row = pixels_.data() +
+                      static_cast<std::size_t>(area.y + y) * static_cast<std::size_t>(physical_width_) +
+                      static_cast<std::size_t>(area.x);
+    std::memcpy(patch.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(area.width),
+                row, static_cast<std::size_t>(area.width) * sizeof(std::uint32_t));
+  }
+
+  // 三遍 [水平+垂直]：单遍盒式模糊在边缘会有方向性台阶，三遍后近似高斯。
+  for (int pass = 0; pass < 3; ++pass) {
+    box_blur_rgba_pass(patch.data(), area.width, area.width, area.height, box, true);
+    box_blur_rgba_pass(patch.data(), area.width, area.width, area.height, box, false);
+  }
+
+  // ## 写回必须遵守**遮罩裁剪**，不能只管矩形
+  //
+  // `clip_rect()` 只给矩形；圆角（`push_clip_rounded_rect`）在 `ClipFrame::mask`
+  // 里。直接 `memcpy` 会把模糊写到圆角**之外**，于是弹层四角外多出一圈脏边。
+  // 实测（对话框左上圆角 10x 放大）：圆角本身干净，但外面多出一块矩形灰块。
+  // 所以无遮罩时整行拷贝（快路径），有遮罩时逐像素按覆盖率插值。
+  const ClipFrame& frame = current_clip();
+  const Mask* mask = frame.mask.get();
+  for (int y = 0; y < area.height; ++y) {
+    const int py = area.y + y;
+    auto* row = pixels_.data() +
+                static_cast<std::size_t>(py) * static_cast<std::size_t>(physical_width_) +
+                static_cast<std::size_t>(area.x);
+    const std::uint32_t* src =
+        patch.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(area.width);
+    if (mask == nullptr) {
+      std::memcpy(row, src, static_cast<std::size_t>(area.width) * sizeof(std::uint32_t));
+      continue;
+    }
+    for (int x = 0; x < area.width; ++x) {
+      // 遮罩坐标是**物理像素**且以 `mask_origin` 为原点。
+      const int mx = area.x + x - frame.mask_origin_x;
+      const int my = py - frame.mask_origin_y;
+      const float coverage = mask->sample(static_cast<float>(mx) + 0.5f,
+                                          static_cast<float>(my) + 0.5f);
+      if (coverage >= 0.999f) {
+        row[x] = src[x];
+      } else if (coverage > 0.0f) {
+        // 部分覆盖（圆角抗锯齿带）：在模糊结果与**原像素**之间插值，
+        // 于是圆角边缘仍然平滑，而圆外保持原样。
+        const auto mix = [coverage](std::uint32_t a, std::uint32_t b) {
+          return static_cast<std::uint32_t>(static_cast<float>(a) * coverage +
+                                            static_cast<float>(b) * (1.0f - coverage));
+        };
+        const std::uint32_t old_px = row[x];
+        row[x] = mix(src[x] & 0xFFU, old_px & 0xFFU) |
+                 (mix((src[x] >> 8U) & 0xFFU, (old_px >> 8U) & 0xFFU) << 8U) |
+                 (mix((src[x] >> 16U) & 0xFFU, (old_px >> 16U) & 0xFFU) << 16U) |
+                 (mix((src[x] >> 24U) & 0xFFU, (old_px >> 24U) & 0xFFU) << 24U);
+      }
+      // coverage == 0：保留原像素（不动）
+    }
+  }
+  return true;
 }
 
 void Canvas::push_clip_rect(math::Rect rect) {

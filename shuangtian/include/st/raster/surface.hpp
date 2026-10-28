@@ -223,6 +223,30 @@ class Surface {
                            DrawOptions options = {}) = 0;
   virtual void draw_canvas_at(const Surface& source, int x, int y, DrawOptions options = {}) = 0;
 
+  /// **区域内毛玻璃**（毛玻璃/背板模糊）：把 `rect` 覆盖的那一块**已绘内容**就地模糊。
+  ///
+  /// ## 语义（与 CSS `backdrop-filter: blur()` 同口径）
+  ///
+  /// 模糊的是**本画布此刻已经画上去的像素**——也就是“这块区域背后的东西”。
+  /// 因此调用时机很重要：必须在“背板已经被绘制”之后、“覆盖层（文字/边框）”之前。
+  ///
+  /// 它**不改变几何**：只改 `rect` 内的颜色，不新增半透明层。想让模糊看得见，
+  /// 调用方还得在这之上叠一层半透明底色（否则只是“背景糊了”而不是“一块玻璃”）。
+  ///
+  /// `radius` 是模糊半径（逻辑 px，内部按 `device_scale` 换算）。
+  /// `rect` 的圆角裁剪由调用方自己保证（`push_clip_rounded_rect`）——
+  /// 这里不做圆角，因为“模糊区域”与“最终覆盖形状”是两件事。
+  ///
+  /// 默认实现什么都不做并返回 `false`：毛玻璃是**可选能力**，
+  /// 一旦后端没实现，调用方画出来的就是“没模糊的底色”，界面仍然正确。
+  [[nodiscard]] virtual auto blur_region(math::Rect rect, float radius) -> bool {
+    (void)rect;
+    (void)radius;
+    return false;
+  }
+  /// 本后端是否支持 `blur_region`（调用方据此决定要不要走毛玻璃排版）。
+  [[nodiscard]] virtual auto supports_blur() const noexcept -> bool { return false; }
+
   /// **不透明纹理句柄**：把“本 Surface 的像素”以不透明句柄交给同后端的上层合成。
   ///
   /// 存在的理由（实测数据说话）：三维 GPU 腿的光栅只要 **0.06 ms**，而把它交回一张
