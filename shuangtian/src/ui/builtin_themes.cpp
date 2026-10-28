@@ -34,7 +34,6 @@ struct Entry {
     const auto add = [&list](std::string_view name, auto file) {
       list.push_back(Entry{name, load_embedded(file.data(), file.length())});
     };
-    add("acrylic", b::embed<"src/ui/themes/acrylic.json">());
     add("aether", b::embed<"src/ui/themes/aether.json">());
     add("aurora", b::embed<"src/ui/themes/aurora.json">());
     add("cny", b::embed<"src/ui/themes/cny.json">());

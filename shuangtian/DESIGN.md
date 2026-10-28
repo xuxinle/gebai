@@ -451,11 +451,15 @@ CJK 多轮廓字形不糊块、Latin/CJK 带孔字形墨迹占比上限）。
 #### 内置主题库（移植自歌白）
 
 `include/st/ui/builtin_themes.hpp` + `src/ui/themes/*.json`（编译期嵌入）。
-10 套主题随二进制分发，`--theme <名字>` 即可切换；`light`/`dark` 也能走同一入口。
+9 套主题随二进制分发，`--theme <名字>` 即可切换；`light`/`dark` 也能走同一入口。
+
+> **默认两档（`light`/`dark`）本身就是亚克力质感**：色相取歌白
+> `themes/acrylic.css`，明度按霜天的最小可辨拉开（见 §8）。
+> 因此不再单独提供 `acrylic` 主题——那会与默认两档形成两套几乎重叠的深色主题（实测 32 个
+> 颜色 token 里只有 10 个相同），用户在 `dark` 与 `acrylic` 之间无法判断该选哪个。
 
 | 主题 | 基准 | 观感 |
 |---|---|---|
-| `acrylic` | dark | 近黑极低饱和冷中性，毛玻璃强依赖 |
 | `aether` | dark | 深空紫调 + 四色极光，最强玻璃模糊 |
 | `aurora` | dark | 纯黑底 + 旋转极光 |
 | `cny` | dark | 丝绒红底 + 中国红 + 鎏金 |

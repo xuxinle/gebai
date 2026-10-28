@@ -410,7 +410,8 @@ auto run_app(int argc, char** argv) -> int {
   app_options.screenshot_dir = options.shots;
   app_options.theme_file = options.theme_file;
   // `--theme` 既接受明暗两档（`light`/`dark`），也接受**内置主题名**
-  // （`acrylic` / `cyberpunk` / `ink` …，见 `st/ui/builtin_themes.hpp`）。
+  // （`cyberpunk` / `ink` / `matrix` …，见 `st/ui/builtin_themes.hpp`）。
+  // 默认两档本身就是亚克力质感，所以没有单独的 `acrylic` 主题。
   //
   // 为何不拆成两个参数：对使用者来说“选主题”就是一件事；
   // 内部区分“明暗基准”与“调色板”是实现细节。未知名字不静默回退——

@@ -23,8 +23,8 @@ using st::ui::builtin_theme_names;
 /// 所以这里对每个名字都做**强断言**（不是"能返回就行"，还要检查调色板真的换了）。
 ST_TEST(builtin_themes_all_load) {
   static const std::vector<std::string_view> expected{
-      "acrylic", "aether",   "aurora",  "cny",       "cyberpunk",
-      "ink",     "matrix",   "qinhan",  "synthwave", "tokyo-night",
+      "aether",   "aurora",  "cny",       "cyberpunk", "ink",
+      "matrix",   "qinhan",  "synthwave", "tokyo-night",
   };
   for (const std::string_view name : expected) {
     const auto theme = builtin_theme(name);
@@ -65,10 +65,10 @@ ST_TEST(builtin_themes_unknown_name_returns_nullopt) {
 /// 名字表必须覆盖全部主题，且有序、无重复（供 `--list-themes` 类入口直接用）。
 ST_TEST(builtin_theme_names_are_complete_and_sorted) {
   const auto names = builtin_theme_names();
-  ST_CHECK(names.size() >= 12U);   // 10 个移植主题 + light + dark
+  ST_CHECK(names.size() >= 11U);   // 9 个移植主题 + light + dark
   ST_CHECK(std::is_sorted(names.begin(), names.end()));
   ST_CHECK(std::adjacent_find(names.begin(), names.end()) == names.end());   // 无重复
-  for (const std::string_view must : {"light", "dark", "acrylic", "cyberpunk", "ink"}) {
+  for (const std::string_view must : {"light", "dark", "cyberpunk", "ink"}) {
     ST_CHECK(std::find(names.begin(), names.end(), must) != names.end());
   }
 }
