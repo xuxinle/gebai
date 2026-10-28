@@ -409,7 +409,16 @@ auto run_app(int argc, char** argv) -> int {
   app_options.control_file = options.control_file;
   app_options.screenshot_dir = options.shots;
   app_options.theme_file = options.theme_file;
-  app_options.theme = options.theme == "dark" ? st::ui::ThemeMode::Dark : st::ui::ThemeMode::Light;
+  // `--theme` 既接受明暗两档（`light`/`dark`），也接受**内置主题名**
+  // （`acrylic` / `cyberpunk` / `ink` …，见 `st/ui/builtin_themes.hpp`）。
+  //
+  // 为何不拆成两个参数：对使用者来说“选主题”就是一件事；
+  // 内部区分“明暗基准”与“调色板”是实现细节。未知名字不静默回退——
+  // 那会让“我选的 vit 主题没生效”变成一个谜——交由 `compose_theme_with` 报错。
+  app_options.theme_name = options.theme;
+  app_options.theme = options.theme == "dark"   ? st::ui::ThemeMode::Dark
+                      : options.theme == "light" ? st::ui::ThemeMode::Light
+                                                 : st::ui::ThemeMode::Dark;
 
   st::app::Application app("gallery", "0.1.0", app_options);
 

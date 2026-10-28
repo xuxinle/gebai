@@ -545,6 +545,11 @@ constexpr MetricToken kMetricTokens[] = {
     {"press_sink", &Metrics::press_sink, 0.0f, 64.0f},
     {"shadow_strength", &Metrics::shadow_strength, 0.0f, 4.0f},
     {"shadow_spread", &Metrics::shadow_spread, 0.1f, 4.0f},
+    // 弹层毛玻璃（2026-10 新增）。必须进 token 表，否则主题文件/控制通道改不了它们——
+    // 而"从 CSS 主题移植"恰恰最需要：歌白十个主题的 `--glass` 半径各不相同
+    //（18~28px），tint 也必须按明暗分别给（亮色低了弹层就“陷进去”）。
+    {"overlay_blur_radius", &Metrics::overlay_blur_radius, 0.0f, 128.0f},
+    {"overlay_blur_tint", &Metrics::overlay_blur_tint, 0.0f, 1.0f},
 };
 
 // `hover_duration` 是 `double`（秒）——单独处理。

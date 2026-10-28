@@ -17,6 +17,7 @@
 #include "st/core/wait.hpp"
 #include "st/core/json.hpp"
 #include "st/text/text.hpp"
+#include "st/ui/builtin_themes.hpp"
 #include "st/ui/theme_io.hpp"
 
 namespace st::app {
@@ -163,6 +164,25 @@ auto resolve_ui_font_scale(std::string_view mode) -> float {
   return theme;
 }
 
+/// 同 `scaled_theme`，但以**给定主题**为底（用于内置主题库）。
+///
+/// 字号缩放必须与内置两档走**同一条路**：`scale_fonts` 是等比缩放，
+/// 漏掉它会让"用内置主题时 UI 字号缩放不生效"——而那个现象很难一眼看出。
+[[nodiscard]] auto scaled_theme_from(ui::Theme base, float factor) -> ui::Theme {
+  base.metrics().scale_fonts(factor);
+  return base;
+}
+
+/// 把名字列表拼成 `a / b / c`（错误消息用）。
+[[nodiscard]] auto join_names(const std::vector<std::string_view>& names) -> std::string {
+  std::string out;
+  for (std::size_t i = 0; i < names.size(); ++i) {
+    if (i != 0) out += " / ";
+    out += names[i];
+  }
+  return out;
+}
+
 /// 解析生效的自定义主题文件（命令行 > `ST_THEME_FILE`）。
 [[nodiscard]] auto resolve_theme_file(std::string_view configured) -> std::string {
   if (!configured.empty()) return std::string(configured);
@@ -307,7 +327,19 @@ Application::Application(std::string name, std::string version, AppOptions optio
   impl_->log_lines.set_capacity(kLogLineCapacity);
   impl_->font_scale = resolve_ui_font_scale(options_.ui_font_scale);
   impl_->work_area_override = options_.work_area_override;
-  root_.set_theme(scaled_theme(options_.theme, impl_->font_scale));
+  // 初始主题必须走 **`compose_theme`**（内置主题名 → 文件覆盖 → 运行期覆盖）：
+  // 直接 `scaled_theme(options_.theme, …)` 会把 `--theme cyberpunk` 这类
+  // 内置主题名全部忽略掉，而症状是“界面能开、主题不生效”——
+  // 难查是因为不报错（实测：`theme` 命令返回 name="dark"）。
+  {
+    const auto initial = compose_theme(options_.theme);
+    if (!initial) {
+      ST_LOG_WARN("初始主题构建失败，已退回内置基准：{}", initial.error().message);
+      root_.set_theme(scaled_theme(options_.theme, impl_->font_scale));
+    } else {
+      root_.set_theme(*initial);
+    }
+  }
   // 绘制剖析默认关闭：挂了才计时（代价是每次绘制两次时钟读）。
   if (const auto flag = fs::read_env("ST_PAINT_PROFILE"); flag.has_value() && !flag->empty() &&
       *flag != "0") {
@@ -390,7 +422,23 @@ void Application::apply_theme_file() {
 [[nodiscard]] auto Application::compose_theme_with(ui::ThemeMode mode,
                                                    const Json& runtime) const
     -> Result<ui::Theme> {
+  // 优先级：内置主题的调色板 → 主题文件稀疏覆盖 → 运行期 `theme.set`。
+  //
+  // 为何内置主题要在这里而不是当成一份“完整的 theme_spec”：
+  // `theme_name` 选定的是**基准调色板**（包含“不是 token 的派生量”，如字体 gamma），
+  // 而 `theme_spec` 是稀疏覆盖。两者叠在一起才是“选一套主题再微调”。
   ui::Theme theme = scaled_theme(mode, impl_->font_scale);
+  if (!options_.theme_name.empty()) {
+    auto builtin = ui::builtin_theme(options_.theme_name);
+    if (!builtin.has_value()) {
+      return unexpected(ErrorCode::Invalid,
+                        std::format("未知内置主题：{}（可用：{}）", options_.theme_name,
+                                    join_names(ui::builtin_theme_names())));
+    }
+    theme = scaled_theme_from(*builtin, impl_->font_scale);
+    ST_LOG_INFO("主题：已应用内置主题 {}（bg={:08X} surface={:08X}）", options_.theme_name,
+                theme.colors().bg.to_hex(), theme.colors().surface.to_hex());
+  }
   if (impl_->theme_spec.is_object() && !impl_->theme_spec.empty()) {
     Json spec = impl_->theme_spec;
     spec.erase("base");

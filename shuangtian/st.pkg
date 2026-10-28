@@ -24,7 +24,7 @@
     "src/edit/*.cpp",
     "src/lsp/*.cpp"
   ],
-  "embed": ["src/ui/script_api.js", "src/ui/declarative.js"],
+  "embed": ["src/ui/script_api.js", "src/ui/declarative.js", "src/ui/themes/*.json"],
   "third_party_sources": ["third_party/quickjs/*.c", "third_party/sqlite/*.c"],
   "c_flags": ["-std=gnu11", "-include", "st_sqlite3_config.h"],
   "tests": ["tests/*_test.cpp"],

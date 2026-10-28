@@ -286,13 +286,25 @@ struct AppOptions {
   std::string screenshot_dir{};       ///< 控制通道 `encode=file` 的落盘目录（空=会话临时目录）
   std::string font_latin{};           ///< 显式指定拉丁字体文件（空=自动探测）
   std::string font_cjk{};             ///< 显式指定 CJK 字体文件（空=自动探测）
-  ui::ThemeMode theme{ui::ThemeMode::Light};
+    ui::ThemeMode theme{ui::ThemeMode::Light};
+  /// **内置主题名**（`st/ui/builtin_themes.hpp` 里的那些；空 = 不用）。
+  ///
+  /// 与 `theme` 的分工：`theme` 只决定**明暗基准**（影响文本 gamma、卡片描边强度
+  /// 这类派生量），而 `theme_name` 指定一套完整的调色板。两者同时给时：
+  /// `theme_name` 生效，`theme` 被它自己的 `base` 覆盖。
+  ///
+  /// 为何不用 `theme_file` 传内置主题：内置主题必须**开箱即用**
+  /// （用户不该为了用默认观感而先下载一份 JSON）。
+  std::string theme_name{};
   /// **自定义主题文件**（JSON，稀疏覆盖，见 `st/ui/theme_io.hpp`）。
   ///
   /// 命令行 `--theme-file PATH` > 环境变量 `ST_THEME_FILE`。空 = 用内置主题。
   /// 加载失败（文件不在 / 语法错 / 未知 token）**不阻止启动**，也不静默——
   /// 退回内置主题并写一条告警日志：主题是外观配置，不是运行前提
-  /// （与“配置写错不该让进程崩”的失败安全姿态一致）。
+  ///（与“配置写错不该让进程崩”的失败安全姿态一致）。
+  ///
+  /// 优先级：`theme_name` 的调色板 → 本文件覆盖 → 运行期 `theme.set`。
+  /// 这样“选一套主题再用文件微调”是自然写法。
   /// **窗口/任务栏图标**（PNG 字节，通常是编译期嵌入的资源）。
   ///
   /// 为何交给应用而不是框架自己找文件：图标是产品资产（各应用各不相同），
