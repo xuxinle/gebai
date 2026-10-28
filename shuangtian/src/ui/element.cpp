@@ -886,7 +886,58 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
         has_ambient ? style_.shadow.blur2 : 0.0f,
         math::Point{style_.shadow.offset2_x, style_.shadow.offset2_y}, options);
   }
-  if (background.a != 0U) {
+  // **渐变底优先**：设了 `background_gradient` 就用它（`background` 退为回退色）。
+  //
+  // `Style` 里存的是 **0~1 归一化**几何（`apply_theme` 跑在布局之前，拿不到尺寸），
+  // 而光栅器要的是**绝对逻辑坐标**（`canvas.cpp` 按 `(p - from) / (to - from)` 算 t）。
+  // 这里做一次映射：
+  //
+  //   `from_box = box.xy + from_norm * box.wh`
+  //   `to_box   = box.xy + to_norm   * box.wh`
+  //
+  // 对圆形/径向渐变同理（圆心与半径一起缩放）。非线性的径向/扫掠这里**不处理**：
+  // 目前只有线性渐变在用（主按钮的双色），非线性的语义需要“非等比缩放”决策，
+  // 与其拍一个再重做，不如等真有需求时按那时候的场景定。
+  bool painted_gradient = false;
+  if (style_.background_gradient.has_value() &&
+      !style_.background_gradient->stops().empty() && style_.gradient_opacity > 0.0f) {
+    raster::Gradient gradient = *style_.background_gradient;
+    if (gradient.kind() == raster::Gradient::Kind::Linear) {
+      const auto map_point = [&](math::Point p) {
+        return math::Point{box.x + p.x * box.width, box.y + p.y * box.height};
+      };
+      // **悬停/按下的明度偏移必须也作用到渐变**，否则主按钮悬浮时“没反应”——
+      // 渐变分支不看 `background`，而上面那整段提亮/压暗改的正是 `background`。
+      //
+      // 用与纯色路径**同一个量**（`up`/`down` 与 `pressed_boost`），
+      // 只是把它应用到每个色标上，而不是重算一套。
+      // ⚠ `up`/`down` 定义在上面的 `if (hovering …)` 作用域**里**，这里取不到——
+      // 所以重新从调色板算（两个都是 1 次减法，与那里完全同源）。
+      std::vector<raster::GradientStop> stops;
+      stops.reserve(gradient.stops().size());
+      const float grad_up = static_cast<float>(colors.surface_hover.r) -
+                            static_cast<float>(colors.surface.r);
+      const float grad_down = static_cast<float>(colors.surface.r) -
+                              static_cast<float>(colors.surface_pressed.r);
+      const bool dark_base = colors.surface.r < 128U;
+      const float delta = dark_base ? grad_up : -grad_down;
+      const float pressed_boost = pressed_ ? 1.6f : 1.0f;
+      const float amount = delta / 255.0f * hover_t * pressed_boost;
+      for (const auto& stop : gradient.stops()) {
+        math::Color color = stop.color;
+        if (hovering && hover_effect_.background && amount != 0.0f) {
+          color = amount >= 0.0f ? color.lighten(amount) : color.darken(-amount);
+        }
+        stops.push_back(raster::GradientStop{stop.offset, color});
+      }
+      gradient = raster::Gradient::linear(map_point(gradient.start()),
+                                          map_point(gradient.end()), std::move(stops));
+    }
+    canvas.fill_rect(box, raster::Paint::with_gradient(gradient), style_.radius,
+                     raster::DrawOptions{.opacity = style_.opacity * style_.gradient_opacity});
+    painted_gradient = true;
+  }
+  if (!painted_gradient && background.a != 0U) {
     canvas.fill_rect(box, raster::Paint::solid(background), style_.radius,
                      raster::DrawOptions{.opacity = style_.opacity});
   }

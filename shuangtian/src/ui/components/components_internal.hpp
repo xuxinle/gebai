@@ -124,6 +124,20 @@ inline void paint_raised_surface(const RenderContext& context, raster::Surface& 
   if (rect.is_empty()) return;
   const Palette& colors = context.theme.colors();
   const Metrics& metrics = context.theme.metrics();
+  // **辉光在最外层**（在阴影之前画）：它是“氛围”，几何固定为
+  // 阴影半径的 2 倍、无偏移，靠 alpha 调强度。
+  //
+  // 为何不是“作为阴影的第三层”：`draw_shadow_layered` 的几何参数量是
+  // “关键层 + 环境层”两档，再塞一层会把那个语义弄乱（而且辉光的偏移与阴影不同）。
+  // 强度为 0（缺省）时完全不画，绝大多数主题零开销。
+  if (colors.shadow_glow.a != 0U && metrics.shadow_glow_strength > 0.0f) {
+    const float strength = metrics.shadow_glow_strength;
+    const float glow_blur = shadow.visible() ? std::max(shadow.blur2, shadow.blur) * 2.0f : 24.0f;
+    const math::Color glow{colors.shadow_glow.r, colors.shadow_glow.g, colors.shadow_glow.b,
+                           static_cast<std::uint8_t>(std::min(
+                               255.0f, static_cast<float>(colors.shadow_glow.a) * strength))};
+    canvas.draw_shadow(rect, radius, glow_blur, glow, math::Point{0.0f, 0.0f});
+  }
   if (shadow.visible()) {
     const bool has_ambient = shadow.second_visible();
     canvas.draw_shadow_layered(

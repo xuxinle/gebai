@@ -34,12 +34,11 @@ struct Entry {
     const auto add = [&list](std::string_view name, auto file) {
       list.push_back(Entry{name, load_embedded(file.data(), file.length())});
     };
-    add("aether", b::embed<"src/ui/themes/aether.json">());
-    add("aurora", b::embed<"src/ui/themes/aurora.json">());
     add("cny", b::embed<"src/ui/themes/cny.json">());
     add("cyberpunk", b::embed<"src/ui/themes/cyberpunk.json">());
     add("ink", b::embed<"src/ui/themes/ink.json">());
     add("matrix", b::embed<"src/ui/themes/matrix.json">());
+    add("nebula", b::embed<"src/ui/themes/nebula.json">());
     add("qinhan", b::embed<"src/ui/themes/qinhan.json">());
     add("synthwave", b::embed<"src/ui/themes/synthwave.json">());
     add("tokyo-night", b::embed<"src/ui/themes/tokyo-night.json">());

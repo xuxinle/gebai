@@ -4,10 +4,12 @@
 /// 组件通过 `Style` 表达外观，具体色值来自 `Theme`（见 theme.hpp），实现"换主题不改组件代码"。
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include "st/math/color.hpp"
 #include "st/math/geometry.hpp"
+#include "st/raster/paint.hpp"
 
 namespace st::ui {
 
@@ -84,6 +86,18 @@ struct Style {
 
   // —— 外观 ——
   math::Color background{0, 0, 0, 0};
+  /// **渐变背景**（可选）：非空时 `paint_box` 优先用它填底，
+  /// `background` 退为它不可用时的回退色。
+  ///
+  /// 几何坐标是 **0~1 归一化**（相对本元素框）：`(0,0)` 到 `(1,1)` 就是
+  /// 「左上 → 右下」的 135° 斜向。`paint_box` 会把它映射到当前 `box`。
+  ///
+  /// 为何用相对坐标而不是绝对坐标：`apply_theme` 在**布局之前**跑
+  /// （`bounds_` 还是空的），那时拿不到尺寸；而渐变几何一旦存成绝对值，
+  /// 就会随窗口缩放/内容变化而错位。
+  std::optional<raster::Gradient> background_gradient{};
+  /// 渐变的不透明度（`1.0` = 按渐变自身的颜色合成）。
+  float gradient_opacity{1.0f};
   float radius{0.0f};
   math::Color border_color{0, 0, 0, 0};
   float border_width{0.0f};

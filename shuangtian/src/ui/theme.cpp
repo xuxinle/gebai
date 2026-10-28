@@ -486,6 +486,7 @@ constexpr ColorToken kColorTokens[] = {
     {"surface_hover", &Palette::surface_hover},
     {"surface_pressed", &Palette::surface_pressed},
     {"glow", &Palette::glow},
+    {"shadow_glow", &Palette::shadow_glow},
     {"highlight", &Palette::highlight},
     {"focus_ring", &Palette::focus_ring},
     {"overlay", &Palette::overlay},
@@ -550,6 +551,7 @@ constexpr MetricToken kMetricTokens[] = {
     //（18~28px），tint 也必须按明暗分别给（亮色低了弹层就“陷进去”）。
     {"overlay_blur_radius", &Metrics::overlay_blur_radius, 0.0f, 128.0f},
     {"overlay_blur_tint", &Metrics::overlay_blur_tint, 0.0f, 1.0f},
+    {"shadow_glow_strength", &Metrics::shadow_glow_strength, 0.0f, 4.0f},
 };
 
 // `hover_duration` 是 `double`（秒）——单独处理。

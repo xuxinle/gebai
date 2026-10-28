@@ -451,7 +451,7 @@ CJK 多轮廓字形不糊块、Latin/CJK 带孔字形墨迹占比上限）。
 #### 内置主题库（移植自歌白）
 
 `include/st/ui/builtin_themes.hpp` + `src/ui/themes/*.json`（编译期嵌入）。
-9 套主题随二进制分发，`--theme <名字>` 即可切换；`light`/`dark` 也能走同一入口。
+8 套主题随二进制分发，`--theme <名字>` 即可切换；`light`/`dark` 也能走同一入口。
 
 > **默认两档（`light`/`dark`）本身就是亚克力质感**：色相取歌白
 > `themes/acrylic.css`，明度按霜天的最小可辨拉开（见 §8）。
@@ -460,8 +460,7 @@ CJK 多轮廓字形不糊块、Latin/CJK 带孔字形墨迹占比上限）。
 
 | 主题 | 基准 | 观感 |
 |---|---|---|
-| `aether` | dark | 深空紫调 + 四色极光，最强玻璃模糊 |
-| `aurora` | dark | 纯黑底 + 旋转极光 |
+| `nebula` | dark | 青绿主色 + 紫色辅色，**主按钮渐变** + 弹层辉光，最大圆角与最强玻璃 |
 | `cny` | dark | 丝绒红底 + 中国红 + 鎏金 |
 | `cyberpunk` | dark | 近黑紫底 + 霓虹粉×青双主色，小圆角 |
 | `ink` | light | 宣纸暖白 + 墨黑 + 朱砂（唯一固定亮色） |
@@ -486,6 +485,27 @@ CJK 多轮廓字形不糊块、Latin/CJK 带孔字形墨迹占比上限）。
 
 主题的**稀疏覆盖**格式（`theme_io.hpp`）使这些偏离可以逐项表达，
 也让用户可以“选一套主题再用 `--theme-file` 微调”。
+
+#### 渐变背景与辉光（主题特色的载体）
+
+纯色调色板无法表达“极光/霓虹/品牌渐变”这类特色。为此补充两个令牌：
+
+| 能力 | 入口 | 用在哪里 |
+|---|---|---|
+| **渐变背景** | `Style::background_gradient` + `gradient_opacity` | 主按钮（`primary`→`accent` 的 135° 斜向） |
+| **辉光** | `Palette::shadow_glow` + `Metrics::shadow_glow_strength` | 弹层（`paint_raised_surface`，在阴影之外） |
+
+三个必须知道的约束：
+
+1. **渐变几何是 0~1 归一化**（相对元素框），由 `paint_box` 映射到实际 `box`。
+   因为 `apply_theme` 跑在**布局之前**（那时 `bounds_` 为空），存绝对坐标会随窗口缩放错位。
+   而光栅器要的是绝对坐标（`canvas.cpp` 按 `(p - from) / (to - from)` 算 `t`）——映射那一步是这个差异的桥。
+2. **悬停/按下的明度偏移必须同时作用于渐变**：否则主按钮悬浮时“没反应”
+   （渐变分支不看 `background`，而提亮/压暗改的正是 `background`）。
+3. **`gradient_opacity == 0` 等于“没设渐变”**：必须退回纯色底，
+   否则会出现“整块底不见了”（实测：一个该露纯色底的场景露出了页面背景）。
+
+辉光只在主题提供了 `shadow_glow` 且强度 > 0 时绘制——绝大多数主题零开销。
 
 #### 半透明令牌的两种“调淡”写法：`scale_alpha` 与 `with_alpha_f`
 `math::Color` 提供两个易混的接口，**源色自带 alpha 时二者完全不同**：

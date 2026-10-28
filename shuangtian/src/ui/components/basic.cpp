@@ -770,6 +770,23 @@ void Button::apply_theme(const Theme& theme) {
     case Variant::Primary:
       style_.background = inactive ? colors.primary_soft : colors.primary;
       style_.color = inactive ? colors.primary : colors.on_primary;
+      // **主按钮的双色渐变**：仅当主题把 `accent` 定成与 `primary` 不同的颜色时才有（
+      // 缺省两者相等 → 不画渐变，零开销回退到纯色）。
+      //
+      // 为何做在主按钮：它是界面上唯一“品牌色大面积填充”的地方，
+      // 歌白用 `--user-grad` / 渐变主色正是这个意图。而给所有卡片都上渐变会让
+      // 界面失去层次（实测：面板全渐变后，内容区与背景分不开）。
+      style_.background_gradient.reset();
+      if (!inactive && colors.accent.a != 0U &&
+          (colors.accent.r != colors.primary.r || colors.accent.g != colors.primary.g ||
+           colors.accent.b != colors.primary.b)) {
+        // ⚠ `Style::background_gradient` 的几何是 **0~1 归一化**（相对元素框），
+        // 由 `paint_box` 映射到实际 box——因为 `apply_theme` 跑在布局**之前**，
+        // 那时还拿不到 `bounds_`。若在这里存绝对坐标，窗口缩放就会错位。
+        style_.background_gradient = raster::Gradient::linear(
+            math::Point{0.0f, 0.0f}, math::Point{1.0f, 1.0f},
+            {{0.0f, colors.primary}, {1.0f, colors.accent}});
+      }
       break;
     case Variant::Secondary:
       style_.background = colors.surface;
