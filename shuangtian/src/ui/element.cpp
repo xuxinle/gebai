@@ -901,39 +901,59 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
   bool painted_gradient = false;
   if (style_.background_gradient.has_value() &&
       !style_.background_gradient->stops().empty() && style_.gradient_opacity > 0.0f) {
-    raster::Gradient gradient = *style_.background_gradient;
-    if (gradient.kind() == raster::Gradient::Kind::Linear) {
-      const auto map_point = [&](math::Point p) {
-        return math::Point{box.x + p.x * box.width, box.y + p.y * box.height};
-      };
-      // **悬停/按下的明度偏移必须也作用到渐变**，否则主按钮悬浮时“没反应”——
-      // 渐变分支不看 `background`，而上面那整段提亮/压暗改的正是 `background`。
-      //
-      // 用与纯色路径**同一个量**（`up`/`down` 与 `pressed_boost`），
-      // 只是把它应用到每个色标上，而不是重算一套。
-      // ⚠ `up`/`down` 定义在上面的 `if (hovering …)` 作用域**里**，这里取不到——
-      // 所以重新从调色板算（两个都是 1 次减法，与那里完全同源）。
-      std::vector<raster::GradientStop> stops;
-      stops.reserve(gradient.stops().size());
-      const float grad_up = static_cast<float>(colors.surface_hover.r) -
-                            static_cast<float>(colors.surface.r);
-      const float grad_down = static_cast<float>(colors.surface.r) -
-                              static_cast<float>(colors.surface_pressed.r);
-      const bool dark_base = colors.surface.r < 128U;
-      const float delta = dark_base ? grad_up : -grad_down;
-      const float pressed_boost = pressed_ ? 1.6f : 1.0f;
-      const float amount = delta / 255.0f * hover_t * pressed_boost;
-      for (const auto& stop : gradient.stops()) {
-        math::Color color = stop.color;
-        if (hovering && hover_effect_.background && amount != 0.0f) {
-          color = amount >= 0.0f ? color.lighten(amount) : color.darken(-amount);
-        }
-        stops.push_back(raster::GradientStop{stop.offset, color});
+    const raster::Gradient& source = *style_.background_gradient;
+
+    // ① 色标：悬停/按下的明度偏移必须也作用到渐变，否则主按钮悬浮时“没反应”——
+    //    渐变分支不看 `background`，而上面那整段提亮/压暗改的正是 `background`。
+    //    用与纯色路径**同一个量**，只是把它应用到每个色标上，而不是重算一套。
+    std::vector<raster::GradientStop> stops;
+    stops.reserve(source.stops().size());
+    const float grad_up =
+        static_cast<float>(colors.surface_hover.r) - static_cast<float>(colors.surface.r);
+    const float grad_down =
+        static_cast<float>(colors.surface.r) - static_cast<float>(colors.surface_pressed.r);
+    const bool dark_base = colors.surface.r < 128U;
+    const float delta = dark_base ? grad_up : -grad_down;
+    const float pressed_boost = pressed_ ? 1.6f : 1.0f;
+    const float amount = delta / 255.0f * hover_t * pressed_boost;
+    for (const auto& stop : source.stops()) {
+      math::Color color = stop.color;
+      if (hovering && hover_effect_.background && amount != 0.0f) {
+        color = amount >= 0.0f ? color.lighten(amount) : color.darken(-amount);
       }
-      gradient = raster::Gradient::linear(map_point(gradient.start()),
-                                          map_point(gradient.end()), std::move(stops));
+      stops.push_back(raster::GradientStop{stop.offset, color});
     }
-    canvas.fill_rect(box, raster::Paint::with_gradient(gradient), style_.radius,
+
+    // ② 几何：`Style` 存的是 **0~1 归一化**，光栅器要**绝对坐标**，
+    //    所以三种渐变都要映射（不只线性）。
+    //
+    //    ⚠ 只映射线性时，径向/扫掠的圆心会停在画布原点附近而半径按 0~1 算，
+    //    于是整个元素被推出渐变范围、clamp 到**端点色**——实测整块纯色（中心与
+    //    角落同色 `(0,0,255)`），看上去像“没画渐变”。
+    const auto map_point = [&](math::Point p) {
+      return math::Point{box.x + p.x * box.width, box.y + p.y * box.height};
+    };
+    // 半径按**较短边**缩放：0~1 的半径语义是“相对元素尺寸”，
+    // 用较长边会让圆形渐变在宽元素上被拉成椭圆（CSS 的 `farthest-side` 同口径）。
+    const float radius_scale = std::min(box.width, box.height);
+    // ⚠ `Gradient` 的构造函数是私有的（只能经 static 工厂创建），所以不能用
+    // “先默认构造再 switch 赋值”；这里用 `std::optional` 承接，每个分支各造一份。
+    std::optional<raster::Gradient> mapped;
+    switch (source.kind()) {
+      case raster::Gradient::Kind::Linear:
+        mapped = raster::Gradient::linear(map_point(source.start()), map_point(source.end()),
+                                          std::move(stops));
+        break;
+      case raster::Gradient::Kind::Radial:
+        mapped = raster::Gradient::radial(map_point(source.start()),
+                                          source.radius() * radius_scale, std::move(stops));
+        break;
+      case raster::Gradient::Kind::Sweep:
+        // 扫掠是纯角度量，圆心要映射，半径与角度无关联（无需缩放）。
+        mapped = raster::Gradient::sweep(map_point(source.start()), std::move(stops));
+        break;
+    }
+    canvas.fill_rect(box, raster::Paint::with_gradient(std::move(*mapped)), style_.radius,
                      raster::DrawOptions{.opacity = style_.opacity * style_.gradient_opacity});
     painted_gradient = true;
   }
