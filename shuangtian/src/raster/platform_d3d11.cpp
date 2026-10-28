@@ -1420,22 +1420,45 @@ class GpuCanvas final : public Surface {
     // ① 先把已录制的绘制落地——否则采样到的是旧内容。
     submit_deferred_now();
 
-    // ② 拿一对离屏 RT 做 ping-pong（与阴影同一个池，尺寸不同就另分配）。
+    // ② 拿一对**彩色**离屏 RT 做 ping-pong。
+    //
+    // ⚠ 不能用 `acquire_shadow_targets`：那个是 `R8_UNORM`（只有 R 通道），
+    // 阴影遮罩是灰度所以够用，但毛玻璃模糊的是彩色图像——渲进 R8 会直接丢掉 G/B，
+    // 无论着色器算得多对。那是“红绿色块”缺陷的第一层成因。
     ShadowTargets targets;
-    if (!acquire_shadow_targets(area.width, area.height, targets)) return false;
-    const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    if (!acquire_color_targets(area.width, area.height, targets)) return false;
+    // **alpha 清成 1**（不是 0）：模糊会沿区域边界采样，
+    // 若目标 alpha 是 0，模糊会把边界外的不透明像素与这里的 0 平均，
+    // 结果 alpha < 1，贴回时就变成半透明——与软件端 `over` 混合结果不一致，
+    // 表现为整体偏暗（实测弹层区域均值 GPU 210 vs 软件 225）。
+    const float clear_rgba[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     const DrawScope gfx = draw_scope();
-    gfx->ClearRenderTargetView(targets.rtv_a, zero);
-    gfx->ClearRenderTargetView(targets.rtv_b, zero);
+    gfx->ClearRenderTargetView(targets.rtv_a, clear_rgba);
+    gfx->ClearRenderTargetView(targets.rtv_b, clear_rgba);
     note_deferred_draw();
 
     // ③ 把画布这一块拷进 A（用 `uv` 子矩形采样，不 `CopyResource` 整张纹理）。
     //
     // `uv` 是归一化的 {u0, v0, w, h}；`Bitmap` 模式直接采样它。
+    //
+    // ⚠ **拷贝时把 alpha 拉满**（`g_mode.z = 0` 已默认，这里显式写在注释里）：
+    // 源是画布的**预乘**像素，如果弹层所在位置本身有半透明（比如面板有 alpha），
+    // 拷贝后的 alpha 会 < 1，后面 3 遍模糊又把它平均开，贴回时就整体变淡。
+    // 毛玻璃的语义是"模糊背后的内容"，与背板自身的 alpha 无关——
+    // 所以拷进来时就该是**不透明**的。
     ShaderParams copy = base_params(
         DrawMode::Bitmap,
         math::Rect{0.0f, 0.0f, static_cast<float>(area.width), static_cast<float>(area.height)},
         {0.0f, 0.0f, 0.0f, 0.0f}, 1.0f);
+    // **离屏渲染必须禁用裁剪**（包括圆角）。
+    //
+    // `base_params` 会从 `current_clip()` 取当前的裁剪状态写进 `g_mode.z`/
+    // `g_clip*`，而着色器用 `g_viewport` 算裁剪 SDF。但这里渲染到的是
+    // **尺寸为 area 的离屏 RT**，viewport 也改成了 area——两边坐标系不一致，
+    // 算出的覆盖率是错的，像素被当成裁剪外丢掉（渲染结果变黑）。
+    // 实测：带圆角裁剪的毛玻璃在 GPU 上整块变纯黑（`#000000`），
+    // 结构性差异 4.5%、最大 Δ217。
+    copy.mode[2] = 0.0f;
     copy.uv[0] = static_cast<float>(area.x) / static_cast<float>(physical_width_);
     copy.uv[1] = static_cast<float>(area.y) / static_cast<float>(physical_height_);
     copy.uv[2] = static_cast<float>(area.width) / static_cast<float>(physical_width_);
@@ -1464,6 +1487,7 @@ class GpuCanvas final : public Surface {
         // G/B 写成 0、A 写成 1，贴回后整块只剩红色分量。
         // 实测：暗色弹窗右侧一条红绿色块竖带（R 波动 44~62、G 恒 30、B 恒 38）。
         blur_params.mode[3] = 1.0f;
+        blur_params.mode[2] = 0.0f;   // 离屏：禁用裁剪（理由见上面 `copy` 处）
         apply_shadow_viewport(blur_params, area);
         submit_deferred_now();   // 上一 pass 必须真执行（见函数注释第 2 条）
         submit_to(write_rtv, blur_params, read_srv, false, true, area.width, area.height);
@@ -1484,15 +1508,31 @@ class GpuCanvas final : public Surface {
         math::Rect{static_cast<float>(area.x), static_cast<float>(area.y),
                    static_cast<float>(area.width), static_cast<float>(area.height)},
         {0.0f, 0.0f, 0.0f, 0.0f}, 1.0f);
-    paste.uv[0] = 0.0f;
-    paste.uv[1] = 0.0f;
-    paste.uv[2] = 1.0f;
-    paste.uv[3] = 1.0f;
-    submit_to(rtv_, paste, read_srv, true, true, physical_width_, physical_height_);
+    // `g_uv` 语义是 `{u0, v0, w, h}`（**宽高**，不是 u1/v1）——
+    // `sample_subrect` 里是 `rect_uv.xy + uv01 * rect_uv.zw`。
+    // RT 与 area 同尺寸（1:1），所以直接取整张纹理即可；
+    // UV 内缩半个纹素以让采样中心对齐像素中心（否则边缘一列会偏）。
+    const float half_u = 0.5f / static_cast<float>(std::max(1, area.width));
+    const float half_v = 0.5f / static_cast<float>(std::max(1, area.height));
+    paste.uv[0] = half_u;
+    paste.uv[1] = half_v;
+    paste.uv[2] = 1.0f - 2.0f * half_u;
+    paste.uv[3] = 1.0f - 2.0f * half_v;
+    // **贴回时收紧剪裁矩形**：`vs_main` 会把四边形外扩 1 像素，
+    // 而贴回采样结果不需要外扩——外扩会把区域边界外侧写成边缘采样值。
+    // 实测：`region={20,40,260,160}` 时右边界 x=280 在软端仍是原始颜色，
+    // GPU 端被写成底色（Δ192，整个区域的最大差就在这一列）。
+    // **贴回必须走正常混合**（`opaque=false`）：
+    //
+    // 圆角裁剪下，着色器会给边缘像素一个**部分覆盖率**（SDF），表现为 alpha<1。
+    // 用 `opaque=true` 直接替换，就把"38/255 不透明"写进了画布——
+    // 那一圈像素变成半透明，而软件端是"按覆盖率与原底色混合"后的不透明色。
+    // 实测：圆角边缘出现 alpha=0x26 的像素（软端 #202028FF vs GPU #05050626，Δ217）。
+    submit_to(rtv_, paste, read_srv, true, /*opaque=*/false, physical_width_, physical_height_,
+              &area);
     note_deferred_draw();
     return true;
-  }
-  [[nodiscard]] auto supports_blur() const noexcept -> bool override { return true; }
+  }  [[nodiscard]] auto supports_blur() const noexcept -> bool override { return true; }
 
   void draw_canvas_at(const Surface& source, int x, int y, DrawOptions options = {}) override {
     // ⚠ 与 `Canvas::draw_canvas_at` **必须同语义**：`x/y` 是**物理像素**，
@@ -2458,9 +2498,17 @@ class GpuCanvas final : public Surface {
   }
 
   /// 提交到指定 RT（影子遮罩用；与 `submit` 的区别是目标不是画布自身的 RT）。
+    /// 提交到指定 RT（影子遮罩用；与 `submit` 的区别是目标不是画布自身的 RT）。
+  ///
+  /// `scissor`：给定时用它代替整个视口作为剪裁矩形（绝对物理坐标）。
+  /// 毛玻璃贴回需要它：`vs_main` 会把四边形**外扩 1 像素**，
+  /// 而贴回一张采样结果不需要外扩——外扩会把区域边界外侧的像素也写掉。
+  /// 实测：`region={20,40,260,160}` 时 x=280（右边界）在软端仍是原始颜色，
+  /// GPU 端被写成渐变边缘值（Δ192）。
   void submit_to(ID3D11RenderTargetView* target, const ShaderParams& params,
-                 ID3D11ShaderResourceView* view, bool point_sample, bool opaque, int viewport_width,
-                 int viewport_height) {
+                 ID3D11ShaderResourceView* view, bool point_sample, bool opaque,
+                 int viewport_width, int viewport_height,
+                 const math::IntRect* scissor_rect = nullptr) {
     const Pipeline& pipes = pipeline();
     if (!pipes.ok || target == nullptr) return;
     // 记一笔待提交（走 deferred 时才有意义）。
@@ -2477,7 +2525,13 @@ class GpuCanvas final : public Surface {
     const D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(viewport_width),
                                   static_cast<float>(viewport_height), 0.0f, 1.0f};
     gfx->RSSetViewports(1, &viewport);
-    const D3D11_RECT scissor{0, 0, viewport_width, viewport_height};
+    // 剪裁矩形默认是整张视口；调用方可以收紧（贴回时用，抵消 `vs_main` 的 1px 外扩）。
+    const D3D11_RECT scissor =
+        scissor_rect != nullptr
+            ? D3D11_RECT{scissor_rect->x, scissor_rect->y,
+                         scissor_rect->x + scissor_rect->width,
+                         scissor_rect->y + scissor_rect->height}
+            : D3D11_RECT{0, 0, viewport_width, viewport_height};
     gfx->RSSetScissorRects(1, &scissor);
     gfx->RSSetState(pipes.raster_scissor);
     const float blend_factor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -2507,6 +2561,33 @@ class GpuCanvas final : public Surface {
     desc.MipLevels = 1;
     desc.ArraySize = 1;
     desc.Format = DXGI_FORMAT_R8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    const auto build = [&](ID3D11Texture2D** texture, ID3D11RenderTargetView** rtv,
+                           ID3D11ShaderResourceView** srv) -> bool {
+      if (FAILED(device_->CreateTexture2D(&desc, nullptr, texture))) return false;
+      if (FAILED(device_->CreateRenderTargetView(*texture, nullptr, rtv))) return false;
+      if (FAILED(device_->CreateShaderResourceView(*texture, nullptr, srv))) return false;
+      return true;
+    };
+    if (!build(&targets.texture_a, &targets.rtv_a, &targets.srv_a)) return false;
+    return build(&targets.texture_b, &targets.rtv_b, &targets.srv_b);
+  }
+
+  /// **彩色离屏目标**（毛玻璃用）。
+  ///
+  /// 为何不能复用 `acquire_shadow_targets`：它建的是 `DXGI_FORMAT_R8_UNORM`——
+  /// **只有 R 通道**。阴影遮罩是灰度覆盖率，单通道正好；而毛玻璃模糊的是彩色图像，
+  /// 渲染进 R8 目标会把 G/B 直接丢掉（无论着色器算得多对）。
+  /// 实测症状：暗色弹窗右侧一条“红绿色块”竖带（R 波动、G/B 几乎不变）。
+  auto acquire_color_targets(int width, int height, ShadowTargets& targets) -> bool {
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = static_cast<UINT>(width);
+    desc.Height = static_cast<UINT>(height);
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = kFormat;   // 与画布同格式（RGBA8），才能原样贴回
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;

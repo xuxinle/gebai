@@ -419,6 +419,119 @@ ST_TEST(gpu_shadow_matches_software) {
   }
 }
 
+ST_TEST(gpu_blur_matches_software) {
+  // 毛玻璃是 GPU 侧**第二个**需要多遍渲染到纹理的原语（阴影是第一个）。
+  // 它比阴影更容易错：彩色图像要求 RT 是 RGBA、要全色模糊、要处理 alpha 与混合。
+  // 实测踩过两处（都是本测试会当场红的形态）：
+  //   ① 复用阴影的 `R8_UNORM` 目标 ⇒ G/B 直接丢失，弹窗出现红绿色块竖带；
+  //   ② `BoxBlur` 单通道分支 ⇒ 输出 `(r,0,0,1)`，同样丢色。
+  if (!gpu_ready()) return;
+  auto gpu = st::raster::gpu::create_canvas(kWidth, kHeight, 1.0f, {});
+  ST_CHECK(gpu.has_value());
+  if (!gpu.has_value()) return;
+  Surface& target = **gpu;
+  Canvas software(kWidth, kHeight);
+
+  // 造一块**彩色条纹**背景：模糊后它的颜色组成必须与软件端一致。
+  // 用**中等饱和度**的色（而不是纯红/纯绿）：
+  // 模糊核差异在"极端对比度的锐边"上会被放大（纯红 #E03040 对深底 #202028
+  // 的边缘，两边权重差一点就能差 30+），那量到的是"核形状不同"，
+  // 而不是"毛玻璃对不对"。真实界面的对比度接近这里的中等档。
+  const auto paint_stripes = [](Surface& canvas) {
+    canvas.clear(Color{0x20, 0x20, 0x28, 0xFF});
+    for (int i = 0; i < 8; ++i) {
+      const float x = 40.0f + static_cast<float>(i) * 40.0f;
+      const Color c = (i % 2 == 0) ? Color{0x8C, 0x40, 0x48, 0xFF}   // 中红
+                                   : Color{0x40, 0x78, 0x50, 0xFF};  // 中绿
+      canvas.fill_rect(Rect{x, 60.0f, 24.0f, 120.0f}, st::raster::Paint::solid(c));
+    }
+  };
+  paint_stripes(software);
+  paint_stripes(target);
+
+  // **带边界的区域**：边界处理是毛玻璃最容易错的地方
+  // （`vs_main` 的 1px 外扩会让贴回写到区域外）。
+  const Rect region{20.0f, 40.0f, 260.0f, 160.0f};
+  // **走与真实界面相同的路径：圆角裁剪**。
+  // 毛玻璃在 `paint_raised_surface` 里总是套在 `push_clip_rounded_rect` 内，
+  // 而不套裁剪的路径可能测不出与它相关的差异。
+  software.push_clip_rounded_rect(region, 12.0f);
+  target.push_clip_rounded_rect(region, 12.0f);
+  const bool sw_ok = software.blur_region(region, 14.0f);
+  const bool gpu_ok = target.blur_region(region, 14.0f);
+  software.pop_clip();
+  target.pop_clip();
+  ST_CHECK(sw_ok);
+  ST_CHECK(gpu_ok);
+  if (!sw_ok || !gpu_ok) return;
+
+  const Comparison result = compare(software.pixels(), target.pixels(),
+                                    /*max_channel_delta=*/16, kWidth,
+                                    /*background=*/0x202028FFU);
+  st::log::out("[gpu-diff] 毛玻璃：超差 {:.3f}% · 结构性 {:.3f}% · 最大Δ{} · 非底色 {:.3f} vs {:.3f}\n",
+            result.differing_ratio * 100.0, result.structural_ratio * 100.0, result.max_delta,
+            result.ink_ratio_left, result.ink_ratio_right);  // **取证：把差异最大的几个像素与原值都打出来**。
+  // 只看聚合量（超差百分比）无法分辨"整体偏暗"与"局部错位"；
+  // 实测 maxΔ=192 说明某些像素完全不是同一个颜色，必须看到具体值才能定位。
+  {
+    const auto sw = software.pixels();
+    const auto gp = target.pixels();
+    int worst = 0;
+    int worst_x = 0;
+    int worst_y = 0;
+    for (int y = 0; y < kHeight; ++y) {
+      for (int x = 0; x < kWidth; ++x) {
+        const std::size_t i = static_cast<std::size_t>(y) * kWidth + static_cast<std::size_t>(x);
+        const std::uint32_t a = sw[i];
+        const std::uint32_t b = gp[i];
+        // 像素打包是 **0xRRGGBBAA**（见 `docs/perceptual_changes.md` §5.4），
+        // 不能按 AARRGGBB 读。这里逐通道取最大差。
+        const int dr = std::abs(static_cast<int>((a >> 24) & 0xFF) - static_cast<int>((b >> 24) & 0xFF));
+        const int dg = std::abs(static_cast<int>((a >> 16) & 0xFF) - static_cast<int>((b >> 16) & 0xFF));
+        const int db = std::abs(static_cast<int>((a >> 8) & 0xFF) - static_cast<int>((b >> 8) & 0xFF));
+        const int d = std::max({dr, dg, db});
+        if (d > worst) {
+          worst = d;
+          worst_x = x;
+          worst_y = y;
+        }
+      }
+    }
+    const std::size_t wi = static_cast<std::size_t>(worst_y) * kWidth +
+                           static_cast<std::size_t>(worst_x);
+    st::log::out("[gpu-diff] 最大差位于 ({}, {}) Δ{}：软件 #{:08X} GPU #{:08X}\n", worst_x, worst_y,
+              worst, sw[wi], gp[wi]);
+    for (const auto& [sx, sy] : {std::pair{150, 120}, std::pair{40, 60}, std::pair{270, 180},
+                                 std::pair{25, 45}, std::pair{275, 195}}) {
+      const std::size_t si = static_cast<std::size_t>(sy) * kWidth + static_cast<std::size_t>(sx);
+      st::log::out("[gpu-diff]   ({},{}): 软 #{:08X} · GPU #{:08X}\n", sx, sy, sw[si], gp[si]);
+    }
+    // **alpha 通道必须保持 1**：模糊不能把它拉低，否则后面叠半透明着色时
+    // 结果就不是"盖在模糊背板上"，而是又和更深的东西混合——表现为整体偏暗。
+    for (const auto& [sx, sy] : {std::pair{150, 120}, std::pair{40, 60}}) {
+      const std::size_t si = static_cast<std::size_t>(sy) * kWidth + static_cast<std::size_t>(sx);
+      const int sw_a = static_cast<int>(sw[si] & 0xFF);
+      const int gp_a = static_cast<int>(gp[si] & 0xFF);
+      st::log::out("[gpu-diff]   alpha ({},{}): 软 {} GPU {}\n", sx, sy, sw_a, gp_a);
+      ST_CHECK(gp_a == 255);
+    }
+  }
+  // ## 两侧允许多大差异（每一条都有实测依据）
+  //
+  // **结构性差异必须为 0**：几何/位置只要错一点，模糊块就会整体偏移，
+  // 那在视觉上是"毛玻璃错位了"。实测修复前后：0.100% → **0.000%**。
+  //
+  // **最大 Δ 与模糊强度允许小差异**：两边的模糊核本来就不同——
+  // 软件是整数盒式 3 遍（每个像素等权），GPU 是浮点线性采样（带插值权重），
+  // 核宽度与权重分布不完全一样。实测最大 Δ28（`#F93243` vs `#DD3040`，
+  // **同色相不同浓度**）。这是实现差异，不是缺陷；但它必须有上限，
+  // 否则"模糊几乎没做"或"糊成一片"也会蒙混过关。
+  ST_CHECK(result.structural_ratio < 0.01);
+  ST_CHECK(result.ink_ratio_left > 0.1);   // 两侧都真模糊出了东西
+  ST_CHECK(std::abs(result.ink_ratio_left - result.ink_ratio_right) < 0.05);
+  ST_CHECK(result.max_delta <= 48);
+}
+
 ST_TEST(gpu_capabilities_are_consistent_with_probe) {
   // 能力声明必须与实际可用性一致：不可用时不能声称任何能力
   const st::raster::gpu::Capabilities caps = st::raster::gpu::capabilities();
