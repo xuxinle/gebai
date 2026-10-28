@@ -36,48 +36,64 @@ auto Theme::light() -> Theme {
   //   输入框/代码块            → 再沉一档（`code_bg` / 控件自己的 `sunken`）
   //   弹层/菜单               → `surface_raised`（纯白 + 阴影）
   // 页面底：与面板拉得开（护栏：`surface` 对 `bg` ≥1.08）。
-  palette.bg = hex(0xEEE8E8FFU);
-  palette.surface = hex(0xFFFAF6FFU);
+  // —— 白色亚克力（默认亮色，对齐歌白前端 `themes/acrylic.css`）——
+  //
+  // ## 色相取歌白，**层差按霜天要求拉开**
+  //
+  // 歌白的亚克力是**半透明叠层 + backdrop-filter 毛玻璃**：它的面板与页底
+  // 预合成后只差 1.03（`#FEFEFE` vs `#FAFAFC`），层差靠模糊与阴影补足。
+  // 霜天自绘管线没有 backdrop-filter（DESIGN §5），**层差必须自己给足**，
+  // 否则 `ui_theme_test` 的相邻 ≥1.08 过不了，界面也会糊成一片。
+  //
+  // 所以：色相与冷暖基调取歌白（**冷中性**，不是暖中性），明度按最小可辨拉开。
+  //
+  //   页底 `#F4F5F9`   面板 `#FEFEFF`   外壳/次面 `#F7F7FA`   凹槽 `#E9EAF0`
+  //   实测：面板/页底 1.081（要求 ≥1.08）· 面板/次面 1.061（≥1.05）· 凹槽/页底 1.140
+  palette.bg = hex(0xF4F5F9FFU);
+  palette.surface = hex(0xFEFEFFFFU);
   // 外壳条带：压暗一点（亮色下“更亮”已到头，靠压暗边框区把内容托起来）。
   // VSCode Light：侧栏 #f3f3f3 / 编辑器 #ffffff；本主题同构。
-  palette.surface_alt = hex(0xF4EEEDFFU);
+  palette.surface_alt = hex(0xF7F7FAFFU);
   // 凹槽（输入框底/代码块/进度槽）：**真凹进去**（比 `bg` 暗）——
   // 它不服务于编辑器（编辑器走 `Surface::Content`，见下）。
-  palette.surface_sunken = hex(0xE2DCDFFFU);
+  palette.surface_sunken = hex(0xE9EAF0FFU);
   // 编辑内容区 / 抬升面（同一个 token 服务两个语义）：
   //   · `Surface::Content`（编辑区阅读面）亮色下就是**纯白**——与外壳（`alt` 浅灰）拉开一层；
   //   · 弹层/菜单（`surface_raised`）浅色下也是白系，抬升由**阴影**表达（见 `elevation`）。
   // 两者取值相同是有意的：亮色下“最亮的面”只有一个候选值。
-  palette.surface_raised = hex(0xFFFFF9FFU);
+  palette.surface_raised = hex(0xFFFFFFFFU);
   // 描边是**半透明黑光**（`theme.hpp` 亚克力口径 §1）：叠在任意底色上强度一致。
   //
   // 为何不能用“按主体底色合成一次的等效实色”：那只能对**一种**底色正确。
   // 实测等效实色 `#D2D2D9` 的强度在四个底色上是 1.10~1.44（**离散 0.339**），
   // 正是 `theme.hpp` 说的“在卡片上清楚、在页底上糊掉”。
   // 改成 `rgba(0,0,0,.11)` 后：1.27~1.28（**离散 0.006**），且平均强度不变。
-  palette.border = hex(0x0000001CU);         // rgba(0,0,0,28/255)  平均 1.27
-  palette.border_strong = hex(0x00000035U);  // rgba(0,0,0,53/255)  平均 1.62
+  palette.border = hex(0x0000001AU);         // rgba(0,0,0,26/255)  合成 1.276
+  palette.border_strong = hex(0x00000030U);  // rgba(0,0,0,48/255)  合成 1.552
   // 细分隔线：**比 `border` 更淡**（护栏：`subtle` 强度 < `border`）——
   // 它的职责是“同组内”的弱分隔，不能抢过控件边界。
   // 半透明后两个条件同时满足：平均 1.16 < 1.27，且对每个底色都 ≥ 1.15。
-  palette.border_subtle = hex(0x00000011U);  // rgba(0,0,0,17/255)  平均 1.16
+  palette.border_subtle = hex(0x0000000FU);  // rgba(0,0,0,15/255)  合成 1.152
   palette.text = hex(0x141418FFU);
   palette.text_muted = hex(0x4E4E5AFFU);
   // `faint` 会被用在**编辑器内**（注释/行号）——而编辑器底是 `sunken`（阶梯最低点）。
   // 它必须同时对 `bg`/`alt`/`surface`/`sunken` 达 4.5:1（WCAG AA 正文口径）。
   // 四个底色的实测值（`sunken` 是最严的一条，它最亮、与文字差最小）：
-  //   bg 5.07 / surface 5.94 / alt 5.35 / **sunken 4.54**
-  palette.text_faint = hex(0x60606DFFU);
-  palette.primary = hex(0x4655D8FFU);
-  palette.primary_hover = hex(0x3A48C8FFU);
-  palette.primary_active = hex(0x2E3AB4FFU);
+  //   bg 4.96 / surface 5.37 / alt 5.06 / **sunken 4.51**
+  // `#696976` 而不是歌白的 `#7A7A88`：后者对凹槽只有 4.20，不足 AA 正文口径。
+  palette.text_faint = hex(0x696976FFU);
+  // 主色取歌白 `accent` 与 `accent-hover` 之间：歌白的 `#5566EE` 对白面只有 4.61（无余量），
+  // 而且它的"主色底上白字"也只有 4.65——霜天两个方向都要 ≥4.5，留不出安全边界。
+  palette.primary = hex(0x4A5AE0FFU);
+  palette.primary_hover = hex(0x3E4DD0FFU);
+  palette.primary_active = hex(0x3642BEFFU);
   // 悬浮档位要**看得见**：早先取 0xF2F6FC，与侧栏底色只差 4/2/0（肉眼近乎没有），
   // 实测像素差才 6/255。现在这一步在浅色底上清晰可辨，又不至于喧宾夺主。
-  palette.surface_hover = hex(0xF4EDECFFU);
-  palette.surface_pressed = hex(0xE8E0DFFFU);
+  palette.surface_hover = hex(0xF0F1F6FFU);
+  palette.surface_pressed = hex(0xE2E4EDFFU);
   palette.border_hover = hex(0x9A9AA6FFU);
-  palette.glow = hex(0x4655D82EU);
-  palette.primary_soft = hex(0xEDEEF9FFU);
+  palette.glow = hex(0x4A5AE02EU);
+  palette.primary_soft = hex(0xEDEEFBFFU);
   // 顶部内高光：**浅色档留给透明**。
   //
   // 亚克力的"玻璃边缘"在两个模式下不是同一件事：深色底的边缘是**弱白光**（提亮），
@@ -88,17 +104,17 @@ auto Theme::light() -> Theme {
   palette.on_primary = hex(0xFFFFFFFFU);
   palette.accent = hex(0x0E849CFFU);
   palette.accent_soft = hex(0xE2EEF2FFU);
-  palette.success = hex(0x1B8B55FFU);
-  palette.warning = hex(0x8F6614FFU);
-  palette.danger = hex(0xD13B40FFU);
-  palette.focus_ring = hex(0x4655D866U);
+  palette.success = hex(0x1F9D5FFFU);
+  palette.warning = hex(0xB07F1EFFU);
+  palette.danger = hex(0xD63A40FFU);
+  palette.focus_ring = hex(0x4A5AE066U);
   palette.overlay = hex(0x0A0A0F4DU);
   // 阴影基色 alpha 定在 0x26（15%）：`shadow_lg` 的关键层乘 1.05 → ≈16%，
   // 刚好卡在"浅底上单层不超过 16% 否则显脏"的上限内。
   palette.shadow = hex(0x0A0A1226U);
   palette.selection = hex(0xC6CBF7FFU);
-  palette.code_bg = hex(0xEDEDF3FFU);
-  palette.code_border = hex(0xDFDFE7FFU);
+  palette.code_bg = hex(0xF2F3F7FFU);
+  palette.code_border = hex(0xE4E5ECFFU);
   // 语法色板（浅色）：关键字紫、字符串绿、数字橙、注释灰、类型青、函数蓝——彼此高辨识度
   theme.syntax_.plain = hex(0x1E2433FFU);
   theme.syntax_.keyword = hex(0x8B31C7FFU);
@@ -176,13 +192,20 @@ auto Theme::dark() -> Theme {
   // 它是暗色阶梯的**最低点**（`sunken` 必须比它亮——见 `ui_theme_test`），
   // 所以不能像旧值那样比 `sunken` 还亮。同时它参与 `faint` 文字对比度取最小值，
   // 压得太黑会把 `text_faint` 的 4.0:1 拖下去（实测 #0A0A0C 就不过）。
-  palette.bg = hex(0x0B111AFFU);
-  palette.surface = hex(0x181E2AFFU);      ///< 侧栏/面板：内容容器
-  palette.surface_alt = hex(0x242A39FFU);  ///< 外壳条带：比面板再亮一档
-  palette.surface_sunken = hex(0x070D16FFU); ///< 编辑器底/输入框/代码块：往内沉
+  // —— 黑色亚克力（默认暗色，对齐歌白前端 `themes/acrylic.css`）——
+  //
+  // 色相取歌白（**冷中性**：`#0B0B0E` 略带冷调，不是偏蓝），层差按霜天要求拉开：
+  // 歌白预合成后 面板/页底 只差 1.04，靠毛玻璃补；霜天无毛玻璃，必须自己给到 ≥1.08。
+  //
+  //   页底 `#0B0B0E`   面板 `#15151A`   外壳/次面 `#1E1E26`   凹槽 `#07070A`   抬升面 `#25252E`
+  //   实测：面板/页底 1.080 · 次面/面板 1.100 · 凹槽/面板 1.106 · 抬升面 ≥ 次面
+  palette.bg = hex(0x0B0B0EFFU);
+  palette.surface = hex(0x15151AFFU);      ///< 侧栏/面板：内容容器
+  palette.surface_alt = hex(0x1F1F28FFU);  ///< 外壳条带：比面板再亮一档
+  palette.surface_sunken = hex(0x07070AFFU); ///< 编辑器底/输入框/代码块：往内沉
   // 抬升面（弹层/菜单）比 surface 再亮一档：深色下**阴影几乎不可见**，
   // 层次只能靠底色本身拉开。
-  palette.surface_raised = hex(0x2E3445FFU);
+  palette.surface_raised = hex(0x25252EFFU);
   // 描边 = 半透明白光叠在**面板色**上的等效值。
   // 三档必须**同时**满足两组朝向相反的约束（`ui_theme_test` 锁着）：
   //   ● 各自对 `surface`/`alt` 看得见（≥ 1.10）——外壳条带抬高后旧值集体不够；
@@ -191,28 +214,36 @@ auto Theme::dark() -> Theme {
   // 与浅色同理：**用半透明白光**，不用不透明实色（`theme.hpp` 亚克力口径 §1）。
   // 不透明实色在四个底色上的强度离散度实测 0.43~0.89，正是“一处清楚一处糊”。
   // 半透明后离散度降到 0.06~0.10，且平均强度与原设计一致（2.05 / 2.84 / 1.37）。
-  palette.border = hex(0xFFFFFF3BU);         // rgba(255,255,255,58/255)  平均 2.05
-  palette.border_strong = hex(0xFFFFFF52U);  // rgba(255,255,255,81/255)  平均 2.84
-  palette.border_subtle = hex(0xFFFFFF1CU);  // rgba(255,255,255,28/255)  平均 1.37
+  palette.border = hex(0xFFFFFF1FU);         // rgba(255,255,255,31/255)  合成 1.415
+  // `border_strong` 的 alpha **被一条结构性约束卡住**，不是随手取的数：
+  // `ui_theme_test` 要求描边族在四个底色上的强度**离散度 ≤ 0.15**，
+  // 而暗色四底色的明度跨度（sunken 比 surface 暗 1.11、alt 比 surface 亮 1.11）
+  // 本身就决定了同一道白光的离散度有一个随 alpha 单调上升的下限：
+  //   alpha 34 → 0.1504（超）  alpha 33 → 0.1451  alpha 32 → 0.1397（取此）
+  // 所以取 32：它给量化误差留了 ~0.01 的余量（离散度按**逐通道取整后**的值算，
+  // 浮点直算会少算 ~0.004——实测就是这个差把 alpha 34 误判成"能过"）。
+  palette.border_strong = hex(0xFFFFFF20U);  // rgba(255,255,255,32/255)  合成 1.427
+  palette.border_subtle = hex(0xFFFFFF12U);  // rgba(255,255,255,18/255)  合成 1.220
   palette.text = hex(0xF2F2F5FFU);
   palette.text_muted = hex(0xB4B4BEFFU);
   // `faint` 会在**外壳条带（`alt`）上**用（状态栏提示/行号），而 `alt` 本次抬高了一档；
   // 旧值 #80808C 对 `alt` 只有 3.64，不够 4.0。抬到对三档均 ≥ 4.0。
-  palette.text_faint = hex(0x8A8A96FFU);
+  // 取歌白 `#80808C`：对四个底色的最小值 4.62（要求 4.0）。
+  palette.text_faint = hex(0x80808CFFU);
   palette.primary = hex(0x8B9AFFFFU);
   palette.primary_hover = hex(0xA0ADFFFFU);
   palette.primary_active = hex(0x7787F5FFU);
   // 深色主题同样要给这套令牌：漏掉的话默认是全透明，**悬浮在暗色下毫无反馈**——
   // 而这种"某个主题下静默失效"的问题最难发现（浅色看着一切正常）。
-  palette.surface_hover = hex(0x232A38FFU);
-  palette.surface_pressed = hex(0x2C3342FFU);
+  palette.surface_hover = hex(0x1C1C24FFU);
+  palette.surface_pressed = hex(0x24242EFFU);
   palette.border_hover = hex(0x70707EFFU);
   palette.glow = hex(0x8B9AFF38U);
-  palette.primary_soft = hex(0x2A2E45FFU);
-  palette.highlight = hex(0x3A3A46FFU);   ///< 顶部内高光：深色下的玻璃边缘（弱白光）
+  palette.primary_soft = hex(0x23263AFFU);
+  palette.highlight = hex(0x2E2E38FFU);   ///< 顶部内高光：深色下的玻璃边缘（弱白光）
   palette.on_primary = hex(0x0B0B14FFU);
   palette.accent = hex(0x6FD8E8FFU);
-  palette.accent_soft = hex(0x1C292FFFU);
+  palette.accent_soft = hex(0x1C2A2EFFU);
   palette.success = hex(0x55D396FFU);
   palette.warning = hex(0xE6BD6DFFU);
   palette.danger = hex(0xFF7A7AFFU);
@@ -223,8 +254,8 @@ auto Theme::dark() -> Theme {
   palette.shadow = hex(0x000000B3U);
   palette.selection = hex(0x2B3D66FFU);
   // 代码块/行内代码底：与“编辑器底”再拉开一档（代码块是嵌在正文里的凹槽）。
-  palette.code_bg = hex(0x0C0C0FFFU);
-  palette.code_border = hex(0x2E2E38FFU);
+  palette.code_bg = hex(0x0D0D11FFU);
+  palette.code_border = hex(0x26262EFFU);
   // 语法色板（深色）：同族色相提亮，保证在深底上仍有足够对比
   theme.syntax_.plain = hex(0xD7E0F0FFU);
   theme.syntax_.keyword = hex(0xC792EAFFU);
