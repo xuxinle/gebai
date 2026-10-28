@@ -25,6 +25,16 @@
 # 不是项目文件。缺省落在 {GEBAI_HOME}/xiangqi，未设时回退 <cwd>/xiangqi（测试、临时实例、
 # 直接跑二进制都会在 cwd 下长出来）——故用无路径前缀的裸模式。
 xiangqi/
+# ⚠ 裸模式的**代价（实测踩到）**：gitignore 的模式匹配路径的**任意一段**，所以上面这条把
+# `shuangtian/examples/xiangqi/` 这个**示例源码目录**也一起忽略了——现象是往里新加 `.cpp`/
+# `.js` 一律静默不入库（`git add` 只报一句 paths are ignored，很容易当成“加过了”），
+# 换台机器构建就缺文件。同源教训见 `shuangtian/.gitignore` 里“不要用裸 core”那条。
+# 取舍：保留裸模式兜住“运行期目录在任意位置长出来”，同时**显式放行示例源码目录**，
+# 并把裸模式原本要保护的运行期数据在示例目录内逐条挡回（否则数据会随示例一起入库）。
+!shuangtian/examples/xiangqi/
+shuangtian/examples/xiangqi/inbox/
+shuangtian/examples/xiangqi/outbox/
+shuangtian/examples/xiangqi/seen.txt
 # 旧版目录名（中文）：仍保留忽略，避免用旧构建产物在仓库里种出这个目录时误入库。
 相期/
 
@@ -177,6 +187,11 @@ go.zip
 # 而生成脚本（tools/make_ico.py）需要先有一张源 PNG，不能凭空重建。
 # 其余 `*.ico`（截图/导出产物）仍然不入库。
 !**/assets/**/*.ico
+# 相期的图标按 `st.pkg` 的 `"icon": "examples/xiangqi/xiangqi.ico"` 就放在目标目录根下
+# （与 gbcode 放 `assets/` 不同），所以上面那条按 `assets/` 的放行盖不到它。
+# ⚠ 放行必须写在 `*.ico` **之后**：gitignore 是“后出现的规则覆盖先出现的”，
+# 写在前面会被后面的 `*.ico` 又盖回去（临时仓库实测过：规则置前时仍被忽略）。
+!shuangtian/examples/xiangqi/*.ico
 *.mp4
 *.mov
 *.webm
