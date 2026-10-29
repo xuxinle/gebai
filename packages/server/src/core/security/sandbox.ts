@@ -8,6 +8,7 @@ import { sessionPath } from "../base/paths"
 import { resolveInSandbox, stripTmpPrefix } from "../base/paths"
 import { which } from "../exec/which"
 import { isSensitive } from "../session/env"
+import { withCanonicalPath } from "../support/child-env"
 import { log } from "@gebai/sdk/node"
 
 export interface SandboxOptions {
@@ -413,7 +414,10 @@ export class Sandbox {
       const stripSensitive = this.opts.enabled && (opts.user == null || !this.isExempt(opts.user))
       const filtered = stripSensitive ? Object.fromEntries(Object.entries(merged).filter(([k]) => !isSensitive(k))) : merged
       // 脚本运行根收敛（服务模式）：HOME/TEMP/XDG 指向会话内目录——后于任务 env 合并，环境收敛优先
-      const env = { ...filtered, ...this.scriptEnv(opts.user, opts.sessionId) }
+      // PATH 归一（withCanonicalPath）：合并进来的 PATH 键在 Windows 上是 `Path`，而 spawn 解析
+      // 裸命令名（含下面 `command(killAll)` 与后台任务的 `taskkill`）只认大写 `PATH`——缺了会落到
+      // WindowsApps 的别名存根、或干脆回退到父进程环境（见 support/child-env.ts 的实测表）。
+      const env = withCanonicalPath({ ...filtered, ...this.scriptEnv(opts.user, opts.sessionId) })
       // 走 shell 时按平台解析解释器并显式启动（不经 Node 的隐式 `/bin/sh`）：Windows 经 PowerShell
       // （winShellPlan：解释器引导段已切 UTF-8 输出编码；GEBAI_SH_SHELL=cmd 回落 cmd.exe 分支的
       // `chcp 65001 >nul && …` 切代码页）、POSIX 经 bash（posixShellPlan）；输出统一按 UTF-8 解码
@@ -548,7 +552,7 @@ export class Sandbox {
     const merged = { ...process.env, ...opts.env }
     const stripSensitive = this.opts.enabled && (opts.user == null || !this.isExempt(opts.user))
     const filtered = stripSensitive ? Object.fromEntries(Object.entries(merged).filter(([k]) => !isSensitive(k))) : merged
-    const env = { ...filtered, ...this.scriptEnv(opts.user, opts.sessionId) }
+    const env = withCanonicalPath({ ...filtered, ...this.scriptEnv(opts.user, opts.sessionId) })
     const isWin = process.platform === "win32"
     const basePlan = isWin ? winShellPlan(cmd) : posixShellPlan(cmd)
     const plan = isWin ? basePlan : this.scriptPlan({ user: opts.user, sessionId: opts.sessionId, cwd: opts.cwd, shellPlan: basePlan })

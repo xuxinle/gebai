@@ -516,6 +516,25 @@ describe("样式契约：变更面板", () => {
     expect(ruleBody(".fw-change-count")).not.toMatch(/border-radius:/)
   })
 
+  test("分组头的整组动作：放弃在前、暂存在后，且已暂存组不给放弃", () => {
+    /* 为何钉在源码层：分组头的两个按钮是“顺序反了就随时多一个误点”的东西——
+     * 行内与目录行的次序都是「放弃 → 暂存」，组头若反过来，用户在同一个面板里
+     * 就要记住两套手势方向；而「已暂存组不给放弃」是一条**语义**约束（`discard` 对已跟踪路径
+     * 走 `git checkout -- <path>`，源是 index，全部暂存的文件点下去什么也不会发生），
+     * 删掉这道守卫不会报错，只会多一个静默的空按钮。 */
+    const src = stripComments(readFileSync(join(SRC, "files", "changes.ts"), "utf8"))
+    // ① 两类可放弃的组都有整组放弃，且用的是同一个 discard（确认框/backup:false 只有一份）
+    expect(src).toContain('g.key === "unstaged" || g.key === "untracked"')
+    // ② 组头里的次序：discardAll 在 stageAll 之前
+    const head = src.slice(src.indexOf('class: `fw-change-group-head'), src.indexOf('class: `fw-change-group-head') + 900)
+    expect(head.indexOf("discardAll")).toBeGreaterThan(-1)
+    expect(head.indexOf("discardAll")).toBeLessThan(head.indexOf("stageAll"))
+    // ③ 放弃是破坏性动作：按钮必须走 danger 档（图标按钮的另一条 hover 色，见 .fw-icon-btn.danger）
+    const discardBlock = src.slice(src.indexOf("const discardAll"), src.indexOf("const stageAll"))
+    expect(discardBlock).toContain('"danger"')
+    expect(ruleBody(".fw-icon-btn.danger:hover")).toMatch(/--danger/)
+  })
+
   test("改动列表一律整仓库（不按仓库内前缀过滤）", () => {
     /* 为何钉在源码层：本面板回答「我改了什么、要不要提交」，而提交动的是整个仓库——
      * 若按当前根在仓库内的子目录前缀过滤，别处的改动会从列表里消失（且不留任何提示），

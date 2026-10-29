@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { combinePromptExtra, loadDomainProfile, readExtraFile, resolveProfilePath } from "./profile"
 
 function tmpHome(): string {
@@ -13,7 +13,15 @@ describe("领域档案路径解析（GEBAI_PROFILE）", () => {
     expect(resolveProfilePath("coding", "/home/x/.gebai")).toBe(join("/home/x/.gebai", "profiles", "coding.json"))
     expect(resolveProfilePath("coding.json", "/home/x/.gebai")).toBe(join(process.cwd(), "coding.json"))
     expect(resolveProfilePath("profiles/ops.json", "/home/x/.gebai")).toBe(join(process.cwd(), "profiles", "ops.json"))
-    expect(resolveProfilePath("/tmp/p.json", "/home/x/.gebai")).toBe("/tmp/p.json")
+    /* 绝对路径：「直接用」的**可判定含义**是不被当成档案名拼进 gebaiHome/profiles，
+     * 而不是“字符串一字不改地返回”——实现走 `resolve(v)`，而 resolve 会按平台归一
+     * （Windows 上 `/tmp/p.json` 是根相对路径，归一成 `C:\tmp\p.json`）。
+     * 早期这里写死 `/tmp/p.json`，在 Windows 上必红；改成对 `resolve` 取齐后，
+     * 断言的仍是同一件事（不经 profiles/），且两个平台都成立。 */
+    const abs = resolve("/tmp/p.json")
+    const got = resolveProfilePath("/tmp/p.json", "/home/x/.gebai")
+    expect(got).toBe(abs)
+    expect(got).not.toContain("profiles") // 没被当档案名
   })
 })
 

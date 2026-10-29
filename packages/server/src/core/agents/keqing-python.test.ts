@@ -8,7 +8,11 @@
  * 约定：
  * - 具体用例在 `keqing/python/tests/*_test.py`（纯标准库运行器，pytest 风格命名但不依赖 pytest）
  * - **缺解释器即跳过**（不是失败）：不是所有部署形态都装 Python，缺它不该让 CI 变红
- * - 用 `GEBAI_TEST_PYTHON` 可指定解释器（默认 `python3`）
+ * - 解释器缺省**按候选逐个探测**（`python3` → `python` → `py`，与 py 工具的 `resolvePythonCmd` 同口径）；
+ *   也可用 `GEBAI_TEST_PYTHON` 指定。
+ *   为何不能写死 `python3`：Windows 上没有 `python3`（只有 `python`/`py`），而 `%LOCALAPPDATA%\Microsoft\WindowsApps`
+ *   下那个 `python3.exe` 是商店应用的**执行别名存根**——它“存在”但执行返回 9009，`Bun.spawnSync` 直接抛
+ *   ENOENT（不是返回非 0），于是“缺解释器即跳过”的初衷变成了**整例报错**。
  */
 import { describe, expect, test } from "bun:test"
 import { existsSync } from "node:fs"
@@ -18,12 +22,26 @@ const repoRoot = join(import.meta.dirname, "../../../../..")
 const runner = join(repoRoot, "keqing/python/tests/run_tests.py")
 
 function pythonBin(): string {
-  return process.env.GEBAI_TEST_PYTHON || "python3"
+  const override = (process.env.GEBAI_TEST_PYTHON ?? "").trim()
+  if (override) return override
+  // 逐个候选探测（与 py 工具同口径）：首个真能跑起 `-c` 的就是它；
+  // 全不可用则回退 `python3`，由下面的 available() 判定后跳过本用例。
+  for (const cand of ["python3", "python", "py"]) {
+    const p = Bun.which(cand)
+    if (p && available(p)) return p
+  }
+  return "python3"
 }
 
+/** 可用性探测：用**绝对路径**探测（裸名在 Windows 上可能命中商店别名存根而抛 ENOENT），
+ *  并把「可执行文件缺失」当成「不可用」而不是让异常冒出去。 */
 function available(bin: string): boolean {
-  const probe = Bun.spawnSync({ cmd: [bin, "-c", "import sys; print(sys.version_info[0])"], stdout: "pipe", stderr: "pipe" })
-  return probe.exitCode === 0
+  try {
+    const probe = Bun.spawnSync({ cmd: [bin, "-c", "import sys; print(sys.version_info[0])"], stdout: "pipe", stderr: "pipe" })
+    return probe.exitCode === 0
+  } catch {
+    return false
+  }
 }
 
 describe("客卿 Python 侧测试（keqing/python/tests）", () => {

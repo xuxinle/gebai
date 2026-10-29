@@ -217,11 +217,13 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
    * 所以确认框必须把话说明白（几条 / 哪些 / 不可恢复）。未跟踪走删除，其余走「恢复到版本库版本」，
    * 这两种语义在同一次调用里各自对应各自的路径（服务端按 `git status` 自行分流，混在一批也没关系）。
    */
-  async function discard(paths: string[], opts: { untracked?: boolean; dir?: string } = {}): Promise<void> {
+  async function discard(paths: string[], opts: { untracked?: boolean; dir?: string; scope?: string } = {}): Promise<void> {
     const n = paths.length
     if (!n) return
     const one = n === 1 ? paths[0]! : ""
-    const where = opts.dir ? `「${opts.dir}/」下的 ` : ""
+    // 范围前缀：目录行给 `dir`（「pkg/」下的）、分组头给 `scope`（「未暂存」组中的）——
+    // 两者都是「一次抹掉一批」的不可逆动作，确认框必须说清这一次到底动了哪一批
+    const where = opts.dir ? `「${opts.dir}/」下的 ` : opts.scope ? `「${opts.scope}」组中的 ` : ""
     const ok = await confirmDialog({
       title: opts.untracked ? "删除未跟踪文件" : "放弃更改",
       message: opts.untracked
@@ -787,16 +789,38 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
       // 折叠态跨重绘保留（collapsedGroups），**箭头靠折叠类旋转**（转 → 向右）：图标节点不重建，
       // 只切类才能让过渡动画成立，也免得再写一套「换图标」的同步逻辑。
       const collapsed = collapsedGroups.has(g.key)
+      const groupPaths = g.items.map((c) => c.path)
+      /**
+       * 分组头的整组动作：**放弃在前、暂存在后**（与文件行、目录行同一顺序，跨行读起来一致）。
+       *
+       * 已暂存组**不给**「全部放弃」：`discard` 对已跟踪路径走 `git checkout -- <path>`，源是 **index**
+       * 而非 HEAD——全部暂存的文件工作区本来就等于 index，点下去既不改工作区也不动 index，
+       * 是一次静默的空动作（真要看撤销暂存内容的动作，先「全部取消暂存」再放弃，与文件行/目录行同口径）。
+       * 冲突组两个都不给：`git checkout --` 对 unmerged 文件报错，得先解决冲突或中止合并。
+       */
+      const discardAll =
+        g.key === "unstaged" || g.key === "untracked"
+          ? btnIcon(
+              "undo",
+              g.key === "untracked" ? `全部删除未跟踪文件（${g.items.length} 个）` : `全部放弃更改（${g.items.length} 个文件）`,
+              () => void discard(groupPaths, { untracked: g.key === "untracked", scope: g.label }),
+              "danger",
+            )
+          : null
+      const stageAll =
+        g.key === "staged"
+          ? btnIcon("minus", "全部取消暂存", () => void op("unstage", { paths: groupPaths }, undefined, { silent: true }))
+          : g.key === "conflicted"
+            ? null
+            : btnIcon("check", "全部暂存", () => void op("stage", { paths: groupPaths }, "已全部暂存", { silent: true }))
       const head = h("div", { class: `fw-change-group-head${collapsed ? " collapsed" : ""}` }, [
         icon("chevronDown", 12),
         // 组名与计数分两个节点：计数用与面板标题同一种胶囊样式（见 .fw-changes-count 那一节）
         h("span", { text: g.label }),
         h("span", { class: "fw-change-group-count", text: String(g.items.length) }),
         h("span", { class: "fw-grow" }),
-        g.key !== "staged" && g.key !== "conflicted"
-          ? btnIcon("check", "全部暂存", () => void op("stage", { paths: g.items.map((c) => c.path) }, "已全部暂存", { silent: true }))
-          : null,
-        g.key === "staged" ? btnIcon("undo", "全部取消暂存", () => void op("unstage", { paths: g.items.map((c) => c.path) }, undefined, { silent: true })) : null,
+        discardAll,
+        stageAll,
       ])
       const inner = h(
         "div",

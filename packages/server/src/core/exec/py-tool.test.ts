@@ -9,6 +9,7 @@ import { join, resolve } from "node:path"
 import { buildPyBridgeScript, pyTool, _resetPythonCmdCache } from "./py-tool"
 import { jsTool } from "./js-tool"
 import { BRIDGE_TOOL_MAX_CALLS } from "./tool-bridge"
+import { withCanonicalPath } from "../support/child-env"
 import type { Tool, ToolContext, ToolResult } from "../base/types"
 
 /** 解释器可用性探测：与产品同口径逐个候选试 `--version`（Windows 上 "python3" 可能是失效的商店别名）。 */
@@ -85,9 +86,22 @@ function ctx(home: string, opts: CtxOpts = {}): ToolContext {
       }
       const m = /^(\S+) -X utf8 "(.+)"$/.exec(cmd)
       if (!m) return { stdout: "", stderr: `bad cmd: ${cmd}`, code: 1 }
-      const r = Bun.spawnSync([m[1], "-X", "utf8", m[2]], {
+      /*
+       * 解释器解析口径：命令里的**裸名**按测试预设的 PATH 解析（这样「PATH 指向不存在的目录」这类用例
+       * 能真的把解释器弄不可用）；解析不到时退回**本进程已确定的真实解释器绝对路径**。
+       *
+       * 为何需要后者：“解释器不可用就降级为纯脚本执行”那一例要验证的是**降级分支**，
+       * 而降级后的纯脚本执行本身当然需要能跑——两者在产品里靠同一套 env/PATH 同时成立不了
+       * （PATH 坏则全都坏）。测试桩因此区分两件事：**对桥是否可用的判断走真实解析**（跑不通即降级），
+       * **降级后的纯脚本执行用已知可用的绝对路径**（它验的是“降级后仍能执行脚本”，不是“PATH 坏了还能执行”）。
+       * 早期这里直接传 `{...process.env}`，在 Windows 上又踩了 env 的 `Path` 键名问题
+       * （spawn 解析裸命令名只认大写 `PATH`，缺了会落到 WindowsApps 的别名存根）。
+       */
+      const env = withCanonicalPath({ ...process.env, ...(o?.env ?? {}), PYTHONUTF8: "1" })
+      const bin = Bun.which(m[1]!) ?? PY!
+      const r = Bun.spawnSync([bin, "-X", "utf8", m[2]], {
         cwd: o?.workdir,
-        env: { ...process.env, PYTHONUTF8: "1" }, // 桩模拟产品侧执行：解释器查找用真实 PATH（不受 ctx.env 影响）
+        env,
         stdout: "pipe",
         stderr: "pipe",
       })

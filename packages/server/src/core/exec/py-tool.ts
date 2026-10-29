@@ -628,7 +628,19 @@ export function _resetPythonCmdCache(): void {
   pythonCmdCache = undefined
 }
 
-/** 探测可用的 python 命令（跨平台：Linux/macOS 多为 python3，Windows 多为 python/py），结果缓存。 */
+/**
+ * 探测可用的 python 命令（跨平台：Linux/macOS 多为 python3，Windows 多为 python/py），结果缓存。
+ *
+ * **探测必须与真实执行同口径**：`ctx.runCommand` 走的是沙箱里的同一套 env（含 PATH），
+ * 而后面桥/旧路径的 `spawn(pythonCmd, …)` 用的是 `scriptChildEnv(ctx)`（两者在 Windows 上
+ * 都是 `withCanonicalPath` 归一过的）。口径一旦不一致，就会出现「探到的能跑 --version、
+ * 执行时却是另一个东西」的静默错配（典型现场：WindowsApps 的 `python.exe` 别名存根——
+ * 它“存在”但执行返回 9009，落成退出码 49、stderr 为空，看上去像“python 坏了”）。
+ *
+ * 候选顺序有语义（不是随手排的）：`python3` → `python` → `py`。前两个优先是因为它们是
+ * POSIX/主流发行版的标准名；Windows 上 `python` 常被商店别名占位，故 `py`（官方启动器）必须在列。
+ * 全部不可用时回退 `python`（沿用历史行为：让后续执行自己去报错，错误信息里带着实际命令）。
+ */
 export async function resolvePythonCmd(ctx: ToolContext): Promise<string> {
   if (pythonCmdCache != null) return pythonCmdCache
   for (const cand of ["python3", "python", "py"]) {

@@ -43,6 +43,7 @@ import {
 import { truncate } from "../support/truncate"
 import { cleanScriptOutput } from "../support/script-output"
 import { scriptTimeoutMs } from "../support/exec-opts"
+import { withCanonicalPath } from "../support/child-env"
 
 /** 单次脚本执行内工具调用总数上限（分发层 BRIDGE_TOOL_MAX_CALLS 的 js 侧别名，唯一真源在 tool-bridge）。 */
 export const JS_TOOL_MAX_CALLS = BRIDGE_TOOL_MAX_CALLS
@@ -343,13 +344,19 @@ interface JsRunResult {
 export function scriptChildEnv(ctx: ToolContext): Record<string, string> {
   // 会话脚本环境（ctx.scriptEnv，服务模式注入）最后合并：HOME/TEMP/XDG 指向会话内目录，
   // 优先于任务 env——否则任务 env 里一个 HOME 就能把脚本环境指回宿主共享位置。
-  const mergedEnv: Record<string, string> = {}
+  const mergedEnv: Record<string, string | undefined> = {}
   for (const [k, v] of Object.entries({ ...process.env, ...ctx.env, ...(ctx.scriptEnv ?? {}) })) {
-    if (v !== undefined) mergedEnv[k] = v
+    mergedEnv[k] = v
   }
-  return ctx.sandboxed || ctx.safeMode === true
-    ? Object.fromEntries(Object.entries(mergedEnv).filter(([k]) => !isSensitive(k)))
-    : mergedEnv
+  const filtered =
+    ctx.sandboxed || ctx.safeMode === true
+      ? Object.fromEntries(Object.entries(mergedEnv).filter(([k]) => !isSensitive(k)))
+      : mergedEnv
+  // PATH 归一在最后一步：上游合并进来的是 `Path`（Windows 上 process.env 的真实键名），
+  // 而 spawn 按裸命令名解析只认大写的 `PATH`——缺了就会落到 WindowsApps 的别名存根
+  // （exit 49、stderr 为空，见 support/child-env.ts 的实测表）。脱敏之后再归一，
+  // 保证子进程拿到的就是最终形态。
+  return withCanonicalPath(filtered)
 }
 
 async function runJsScript(

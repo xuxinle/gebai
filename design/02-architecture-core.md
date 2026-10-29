@@ -230,7 +230,7 @@ src/
     llm/            #   LLM 接入（Provider 工厂与三接口实现）+ 多模态解析
     engine/         #   引擎：engine.ts（主循环）+ interactions.ts（五种阻塞交互的等待/决策）+ compressor.ts（上下文压缩/溢出恢复）+ prompt.ts（系统提示词构建）
     tools/          #   全局工具域：注册文件（fs/exec/show/agent/interact/schemas/restart/projects）+ shared.ts（GlobalToolEntry 契约与 schema/parseRegion 助手）+ index.ts（聚合器/barrel）。本地识别共享工厂（cv-analysis）与 vision 工厂已迁 @gebai/agents core/shared，经 registry 直调消费
-    support/        #   工具与引擎共用支撑：truncate/walk/artifacts/plan/exec-opts/fetch-scope/diagram-render（analyzer 与 image-resize 已迁 @gebai/agents）
+    support/        #   工具与引擎共用支撑：truncate/walk/artifacts/plan/exec-opts/fetch-scope/diagram-render/child-env（analyzer 与 image-resize 已迁 @gebai/agents）
     session/        #   会话域：store（持久化）/env/subsessions（子会话运行）/gc
         schedule/       # 统一任务与用户级待办：tasks（定时/普通/闲时任务 + 队列与执行）+ expr（执行表达式）+ notify（通知通道）+ todos（用户级待办清单与闲时任务绑定）
     exec/           #   脚本执行：js-tool/sh-tasks
@@ -1032,6 +1032,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
     - **冲突**：两个都不给（与文件行、组头一致：冲突要先解决再谈暂存/放弃——`git checkout --` 对 unmerged 文件本就报错）。
     - 文案带实际文件数（严格等于该支下的改动数）；**放弃是不可逆动作**，确认框写清范围与条数（`放弃「pkg/」下的 3 个文件的更改？…此操作不可恢复`），未跟踪则明说「不在 Git 版本控制里，删除后无法恢复」。撤销备份走服务端 `backup:false`（不自动 stash，见「放弃更改不带自动 stash 备份」那条），要留存改动请在「储存」栏显式储存。
     - 点按钮**不等于点行**（否则暂存完顺带把目录折上，还得再展开看结果）——`onclick` 里用 `closest("button")` 过滤，与文件行同一手法。目录行同样适用「按钮不可压缩、名字先让位」那条布局契约（目录名 `text-overflow: ellipsis`；实测最窄 180px、两个按钮同在也不越界）。
+  - **分组头也有整组动作**（**放弃在前、暂存在后**，与文件行、目录行同一顺序）：未暂存组 `全部放弃更改（N 个文件）` + `全部暂存`；未跟踪组 `全部删除未跟踪文件（N 个）` + `全部暂存`；已暂存组只有 `全部取消暂存`；冲突组两个都不给。**已暂存组不给「全部放弃」是语义约束**：`discard` 对已跟踪路径走 `git checkout -- <path>`，源是 **index** 而非 HEAD——全部暂存的文件工作区本就等于 index，这一点下去既不修改工作区也不动 index，是一次静默的空动作（要撤已暂存内容就先「取消全部暂存」再放弃，两步各自可见）。实现上复用同一个 `discard()`（`backup:false`、同一份确认框），多传一个 `scope` 让确认框写出组名（`放弃「未暂存」组中的 2 个文件的更改？…此操作不可恢复`）——整组动作一次抹掉一批文件，确认框不写清是哪一批就是不可接受的。放弃按钮走 `danger` 档（hover 转红，与 `.fw-icon-btn.danger` 同一口径）。
   - **行内布局：文件名优先、按钮不占常态宽度**。列表行按 VSCode 的改动列表排：`[标记] 文件名 目录 … [行内动作] [状态字母]`——**文件名在前**、目录作为灰色小字后缀跟在后（目录被收缩时它先让位，窄栏下整段消失，文件名仍完整）；M/A/D/R/S 这类**读出来的**状态字母靠右，只有冲突 `!` 与未跟踪 `U` 这两种「要动手的」留在行首。左栏窄（~286px），旧序（目录在前）下实测 46 行有 **43 行的目录被截成 `packages/ser…` 这类认不出的碎片**，而文件名反而被挤到中途才开始。
     - 收缩分工：**按钮组是不可压缩的整体**（`.fw-change-actions` `flex: none`，组内间距 2px）；文件名与目录各自 `text-overflow: ellipsis` + `min-width: 0`，收缩时目录的 shrink 权重远大于文件名（1000 : 1），即先让出目录、再让文件名出省略号；行上再叠一道 `overflow: hidden` 兜底。
     - **行内按钮在常态不占宽度**（`width: 0` + `overflow: hidden`，悬停/聚焦时让回宽度）：只用 `opacity` 藏起按钮时它仍占 60~70px 的行宽，左栏里这等于给每行强行挖走三分之一——实测把按钮改为零宽后，同样 10 行「文件名被截」从 1 行降到 0 行、「目录被截」从 8 行降到 1 行。代价是悬停行里文件名会即时收一点（只在用户正指着那一行时发生）。
@@ -1933,6 +1934,8 @@ TTL 内全群消息直接命中；群成员表没有此人/单聊时再逐条查
 - **工作目录标注**：`sh`/`py` 在**非会话默认目录**执行（`workdir` 参数、`project` 参数路由或项目绑定会话）时输出末尾标注「（cwd: …）」——按 cwd 发现目标的工具（`bun test` 等）目录不对时一眼可辨（「命令在哪个目录跑的」不再靠猜）；`sh` 的退出码直接读返回结果的 `exitCode` 字段（无需 `echo $?` / `%errorlevel%` / `$LASTEXITCODE`——Windows 分支已由命令行包装段带出）
 - **输出大小**：工具输出超过截断阈值走上下文保护（截断落盘），防止内存膨胀
 - **输出纯净化**：`sh`/`py`/`js`/`bg_task` 的脚本输出统一经 `core/support/script-output.ts` 清洗——去 ANSI 控制序列、CRLF → LF、去行尾空白、连续空行压缩、去首尾空行（顺序、缩进、行号与错误文本等正文一律不动）：这些噪声对模型无信息量（Windows 子进程逐行带 `\r`、彩色输出带转义序列）
+- **子进程 env 的 PATH 归一（`core/support/child-env.ts` 的 `withCanonicalPath`，sh/py/js 脚本子进程与后台任务共用）**：Windows 上 `process.env` 的 PATH 键名是 **`Path`**（系统规范写法），而 `spawn(file)` 在 `file` 不含路径、需按名解析时**只认传入 env 里的精确大写 `PATH`**：只有 `Path` 时视同没有 PATH，回退到父进程的 PATH——而父进程 PATH 里 `%LOCALAPPDATA%\Microsoft\WindowsApps` 排在真解释器之前，那里面的 `python.exe` 是商店的**应用执行别名存根**，执行返回 9009（落成退出码 49、**stderr 为空**）。症状是一句无任何线索的 `[exit 49]`。故凡「自拼 env 再 spawn 裸命令名」处一律过一遍归一：**PATH 类键去重为大写 `PATH`**（大小写变体视为同一键，后者胜；属 Windows 环境变量名不区分大小写的语言事实）、**空串 PATH 视为「有」**（显式收紧搜索路径不能被当成没过）、**丢弃 `undefined` 值**。实测（Windows 11 + Bun 1.3.14，同一裸命令 `python`）：`{PATH:真值}` → 真 Python；`{Path:真值}` → 存根 exit 49；不传 env → 真 Python。
+  这条也约束了**测试替身**：凡替身里用 `{...process.env}` 包 env 再 spawn 裸命令名，必须同样归一，否则替身会稳定地失败在存根上（而产品路径可能完全正常）。同理，**探测与执行必须同口径**（py 的 `resolvePythonCmd` 走 `ctx.runCommand`、桥/旧路径用 `scriptChildEnv`，两处都归一），否则会出现「探到的能跑 `--version`、执行时却是另一个东西」的错配。
 
 #### 后台任务（三类同一管理面 `bg_task`）
 

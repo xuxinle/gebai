@@ -8,6 +8,7 @@ import { searchSymbolsTool } from "@gebai/agents"
 import { SessionStore } from "../session/store"
 import { resolveInSandbox, sessionPath, stripTmpPrefix } from "../base/paths"
 import { resetRipgrepCache, ripgrepAvailable } from "../support/ripgrep"
+import { withCanonicalPath } from "../support/child-env"
 import type { ToolContext, Tool, ToolResult } from "../base/types"
 import type { ShTaskRecord, ShTaskRunOutcome } from "../exec/sh-tasks"
 
@@ -63,8 +64,10 @@ function ctx(home: string, sessionId = SID, env: Record<string, string> = {}): T
     moveFile: async () => {},
     runCommand: async (cmd, o) => {
       const { spawn } = await import("node:child_process")
+      // env 一律经 withCanonicalPath：与产品同一口径（Windows 上 process.env 的 PATH 键叫 `Path`，
+      // 而 spawn 解析裸命令名只认大写 `PATH`——不归一会落到 WindowsApps 的别名存根）。
       return new Promise((resolve) => {
-        const child = spawn(cmd, { cwd: o?.workdir, shell: true, stdio: ["pipe", "pipe", "pipe"] })
+        const child = spawn(cmd, { cwd: o?.workdir, shell: true, env: withCanonicalPath({ ...process.env, ...(o?.env ?? {}) }), stdio: ["pipe", "pipe", "pipe"] })
         let stdout = ""
         let stderr = ""
         if (o?.input != null) child.stdin.write(o.input)
@@ -454,15 +457,20 @@ describe("global tools", () => {
     await c.writeFile(join(c.workdir, "data.txt"), "hello-python")
     // 真实执行（Bun.spawnSync）：ctx.runCommand 默认桩不执行命令，此处替换为真实子进程；
     // --version 探测按真实可用性应答（python3 缺失须报非 0，防 resolvePythonCmd 缓存错误候选）
+    //
+    // **探测与执行必须用同一套 env 口径**（都经 withCanonicalPath）：Windows 上 `process.env`
+    // 的 PATH 键叫 `Path`，而 spawn 按裸命令名解析只认大写 `PATH`——只探测不归一、执行归一（或反之）
+    // 会让“探到的”和“能跑的”不是同一个解释器（实测：不归一时落到 WindowsApps 的 `python.exe`
+    // 别名存根，返回 9009 → 落成退出码 49、stderr 为空，报错信息里完全看不出根因）。
     c.runCommand = async (cmd, o) => {
       if (cmd.endsWith("--version")) {
-        return probe(cmd.split(" ")[0]) ? { stdout: "Python 3.x\n", stderr: "", code: 0 } : { stdout: "", stderr: "", code: 1 }
+        return probe(cmd.split(" ")[0]!) ? { stdout: "Python 3.x\n", stderr: "", code: 0 } : { stdout: "", stderr: "", code: 1 }
       }
       const m = /^(\S+) -X utf8 "(.+)"$/.exec(cmd)
       if (!m) return { stdout: "", stderr: `bad cmd: ${cmd}`, code: 1 }
-      const r = Bun.spawnSync([m[1], "-X", "utf8", m[2]], {
+      const r = Bun.spawnSync([m[1]!, "-X", "utf8", m[2]!], {
         cwd: o?.workdir,
-        env: { ...process.env, ...(o?.env ?? {}), PYTHONUTF8: "1" },
+        env: withCanonicalPath({ ...process.env, ...(o?.env ?? {}), PYTHONUTF8: "1" }),
         stdout: "pipe",
         stderr: "pipe",
       })

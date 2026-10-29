@@ -94,6 +94,8 @@ function extractMessage(ev: Record<string, unknown>): {
   messageId: string
   chatId: string
   chatName?: string
+  /** 会话类型（飞书 `chat_type`：`p2p` 单聊 / `group` 群）：群消息才走整群成员表查名 */
+  chatType?: string
   senderId?: string
   senderName?: string
   senderType?: string
@@ -134,6 +136,11 @@ function extractMessage(ev: Record<string, unknown>): {
     messageId,
     chatId,
     ...(chatType === "p2p" ? { chatName: "与我的单聊" } : {}),
+    // chatType 必须原样带出：下游要据此决定「是否走整群成员表查发送者姓名」——
+    // 单聊没有群成员接口，带上 p2p 才不会再白打一次必然失败的请求。
+    // 早期这里只把 p2p 转成 chatName 就丢了 chatType，下游那句 `msg.chatType !== "p2p"`
+    // 于是恒为真（undefined !== "p2p"），单聊也去查群成员表。（类型缺失被 typecheck 抓出）
+    ...(chatType ? { chatType } : {}),
     ...(sender.sender_id?.open_id ? { senderId: sender.sender_id.open_id } : {}),
     ...(sender.sender_type ? { senderType: sender.sender_type } : {}),
     text,

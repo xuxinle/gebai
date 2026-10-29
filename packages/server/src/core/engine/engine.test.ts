@@ -1763,8 +1763,15 @@ test("usage 真值：event.session.ctx 推送与任务结束持久化以真实 i
     const joined = JSON.stringify(lastChat)
     expect(joined).not.toContain("子代理推理过程")
     expect(joined).not.toContain("子代理开始分析")
-    // 子会话内 todo（全局工具继承）的执行结果（查询待办清单文本）不进主上下文
-    expect(joined).not.toContain("待办")
+    /* 子会话内 todo（全局工具继承）的执行结果（查询待办清单文本）不进主上下文。
+     *
+     * 断言的**是“那次 todo 调用的产物”不在这里**，不是“整段历史里不许出现『待办』两个字”：
+     * 系统提示词本身就会提待办（例如「简单任务无需计划审批，直接用 todo 跟踪」），
+     * 系统提示词依设计就在每一轮 chat 里，于是一个裸的 not.toContain("待办") 在
+     * 系统提示词加入该词的那天开始无意义地变红——它守的不是行为，是提示词的措辞。
+     * 改为锁 todo 工具输出里的**专属文案**（子会话里那条查询结果的内容），这才是
+     * 「子会话内部工具结果不进主上下文」的指向物。 */
+    expect(joined).not.toContain("当前没有待办事项")
     expect(joined).toContain("subsession_run")
     expect(joined).toContain("子代理完成分析")
     cleanup(home)
@@ -4119,9 +4126,15 @@ describe("AgentEngine task integration", () => {
     const subAgents = new SubAgentManager({ registry, preloadOverride: [] })
     await subAgents.discover()
     const provider = new FakeProvider("tool")
-    // sh（需审批）读任务环境变量：一步同时验证「env 注入到工具子进程」与「服务模式免审批」
+    // 任务 env 已注入（未注入则为空值）；服务模式下未落入「无交互拒继」
+    /* 命令写法必须按平台分：Windows 上 sh 走 PowerShell，`$TASK_FLAG` 是 **PowerShell 变量**
+     * （未定义即为空）——环境变量要写 `$env:TASK_FLAG`。早期这里写 POSIX 的 `$VAR`，
+     * 在 Windows 上 echo 出 `flag=`，看起来像「任务 env 没注入」，实际是测试自身的语法偷渡。
+     * 同一写法仓内另有先例：`security/sandbox.test.ts` 的 envProbe。 */
     provider.toolName = "sh"
-    provider.toolArgs = { command: "echo flag=$TASK_FLAG" }
+    provider.toolArgs = {
+      command: process.platform === "win32" ? "echo flag=$env:TASK_FLAG" : "echo flag=$TASK_FLAG",
+    }
     const tasks = new TaskManager({ home, store, env, sandbox, events, now: () => 1_780_000_000_000, maxConcurrent: 1 })
     try {
       tasks.attach(new AgentEngine({ provider, registry, store, env, sandbox, events, config, subAgents }))
