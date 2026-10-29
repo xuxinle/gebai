@@ -461,8 +461,10 @@ export const channel: ChannelDef = {
         // 而不是把无前缀消息当成来自自己的上下文。
         void (async () => {
           let senderName: string | undefined
-          // 群消息：先尝试整群成员表；单聊（p2p）没有群成员接口，直接走 contact
-          if (msg.chatId && msg.chatName !== "与我的单聊") {
+          // 群消息：先尝试整群成员表；单聊（p2p）没有群成员接口，直接走 contact。
+          // 判据取**协议字段** `chatType`，不拿展示文案 `chatName === "与我的单聊"` 当前置条件——
+          // 后者是给人看的字符串（随时可能改措辞/本地化），把它当判据等于让「改一句文案」变成改变行为。
+          if (msg.chatId && msg.chatType !== "p2p") {
             const table = await resolveMemberTable(ctx, msg.chatId)
             senderName = table.get(msg.senderId ?? "")
           }
