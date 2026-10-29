@@ -330,6 +330,76 @@ st::raster::gltf_write_file("out/gear.glb", objects, {.binary = true});
 > `shape` 走内置图元；`gltf` 走外部文件（自动读节点变换与材质）。两者互斥，
 > 同时写时 `gltf` 优先。
 
+## 4.6 蒙皮（骨骼 / 权重 / LBS）
+
+刚性父子（`scene_graph`）对机械臂够用，但**角色不行**：手臂弯曲时肩部皮肤要连续变形，
+不能出现一条裂缝。蒙皮解决这件事，实现见 `include/st/raster/skin.hpp`。
+
+### 4.6.1 原理一句话
+
+```text
+顶点 = Σ wᵢ · (骨骼ᵢ的世界矩阵 · 逆绑定矩阵ᵢ) · 顶点
+```
+
+- **逆绑定矩阵**：模型空间 → 骨骼的绑定（建模时）空间；
+- **世界矩阵**：再把它搬回**当前姿态**的模型空间；
+- 两者之积就是"这根骨骼此刻的形变"，多根按权重加权。
+
+绑定姿态下两者相消 → 蒙皮矩阵 = 单位阵 → **形变恒等**（最硬的一条自检）。
+
+### 4.6.2 数据布局：为什么权重是平行边表
+
+`Mesh::kVertexFloats = 9` 是"生成器 ↔ 后端上传"的契约（三处后端按它算 stride）。
+往里加 8 个分量要同时改生成器、全部后端、glTF 读写、OBJ 导出——其中绝大多数路径
+根本不涉及蒙皮（静态场景、界面小图标）。所以与 UV 一致，存成平行边表：
+
+```cpp
+std::vector<float> skins;   // 每顶点 8 个：[j0,w0, j1,w1, j2,w2, j3,w3]
+```
+
+空 = 没有蒙皮。好处是零破坏、零开销、语义清楚。
+固定 4 个影响是行业事实标准（GPU 顶点着色器不能循环可变长数组，glTF 的
+`JOINTS_0` 也是 4 个/组）；超过时取权重最大的四个再归一化。
+
+### 4.6.3 脚本形态
+
+```json
+"skeleton": { "joints": ["root", "upper", "forearm"] },
+"objects": [
+  { "name": "root", "group": true },
+  { "name": "upper", "parent": "root", "translate": [0, 0.6, 0] },
+  { "name": "body", "parent": "upper", "shape": "capsule", "skin": true }
+]
+```
+
+- `skeleton.joints` 的关节名**必须与节点名一致**（找不到时报错并指出是哪个关节）；
+- `inverse_bind` 可省略（默认单位阵）；真实角色应当在绑定姿态下用
+  `inverse_bind_from_world(节点世界矩阵)` 生成；
+- `objects[].skin: true` 的对象才参与蒙皮（场景里常常刚体与软体混排）。
+
+**没有权重时会用朴素自动权重**（离哪个关节近给谁）——这不是自动绑定，
+真实角色应当在 Blender 里刷权重再用 glTF 导入。
+
+### 4.6.4 一条必须声明的限制
+
+本实现是 **LBS（线性混合蒙皮）**。它在关节**大幅扭转**时会出现"糖纸效应"
+（体积塌陷、边缘捏扁）。双四元数（DQS）能解决，但成本翻倍且 glTF 不表达它——
+所以这里选 LBS（与所有引擎的实际行为一致），并写进文档而不是假装没有。
+
+### 4.6.5 glTF 互操作
+
+| glTF | 本框架 |
+|---|---|
+| `skins[].joints`（节点索引） | `Skeleton::joints`（**名字**，读写时按名互转） |
+| `skins[].inverseBindMatrices` | `Skeleton::inverse_bind`（列主序 MAT4） |
+| `JOINTS_0`（VEC4 无符号整数） | `Mesh::skins` 的 `j*`（写 u8，索引 > 255 时自动升 u16） |
+| `WEIGHTS_0`（VEC4 float） | `Mesh::skins` 的 `w*`（写出前强制归一化） |
+
+**写出时会补出缺失的关节节点**：骨架关节常常是"纯骨骼"节点（没有几何），
+不在 `objects` 里；若只按 `objects` 建节点表就找不到它们，整副骨架会被跳过——
+文件仍然合法，只是读回来没有蒙皮。所以缺失的关节会自动补节点（用逆绑定矩阵的逆
+作为绑定姿态）。
+
 ## 6. 验收（可复算）
 
 | 产物 | 钉住什么 |
@@ -339,6 +409,8 @@ st::raster::gltf_write_file("out/gear.glb", objects, {.binary = true});
 | `tests/geom_scene_graph_test.cpp` | 组合模型：父动子动、乘序、枢轴（含预设/符号）、扁平=嵌套、可见性继承、端到端渲染、错误带路径 |
 | `tests/geom_animation_test.cpp` | 动画：slerp 最短路径、缓动曲线、端点保持、旋转不走欧拉插值、可见性阶跃、校验、端到端、枢轴×动画组合 |
 | `tools/animation_probe.cpp` | 8 帧分镜图 + 带动画的 `.glb`（稠密化后读回验证） |
+| `tests/geom_skin_test.cpp` | 蒙皮 10 条：逆绑定往返、权重限制/归一化、刚体与混合、未归一化不缩小、绑定姿态恒等、glTF 权重往返、端到端形变 |
+| `tools/skin_probe.cpp` | 蒙皮 vs 刚性分段对照图（关节连续 vs 断裂台阶） |
 | `tests/geom_scene_integration_test.cpp` | 22 个图元**真的画出像素**、旧形状语义不变、参数生效、导出→读回、焊接/变换/OBJ 往返 |
 | `tools/primitives_gallery_probe.cpp` | 22 格总览 PNG + 每个图元的 `.glb`（可拖进 Blender 对照） |
 | `tools/composite_pivot_probe.cpp` | 组合模型四格对照（无旋转 / 绕肩转 / 枢轴错放 / 父隐藏），证明父子与枢轴各自生效 |

@@ -53,6 +53,7 @@
 #include <vector>
 
 #include "st/raster/animation.hpp"
+#include "st/raster/skin.hpp"
 
 #include "st/core/error.hpp"
 #include "st/core/json.hpp"
@@ -200,6 +201,12 @@ struct SceneObjectSpec {
   /// 是否可见（不可见不渲染、不参与包围盒）。
   bool visible{true};
 
+  /// 是否参与蒙皮（`true` 且场景给了 `skeleton` 时，这个对象的网格会按骨骼形变）。
+  ///
+  /// 为什么是**每对象**的开关而不是全局：一个场景里常常既有蒙皮的软体
+  ///（角色/布料）又有刚体（地板/道具）；给后者也蒙皮只会浪费 CPU。
+  bool skin{false};
+
   /// 外部 **glTF** 引用（`gltf:<路径>` 形式时用；非空时覆盖 `shape` 的几何）。
   ///
   /// ## 为什么给 glTF 一个独立字段而不是又一种 `shape` 前缀
@@ -254,6 +261,21 @@ struct SceneSpec {
   /// 几乎总在同一个素材目录下，逐对象重复声明只会漂移。
   /// 为空时 `obj:` 的路径按**原样**交给 `st::fs`（即相对当前工作目录）。
   std::string asset_basis{};
+
+  /// 骨架（可选）：与 `objects` 里的节点名对应。给了骨架且对象标了 `skin` 时，
+  /// 渲染会按**当前姿态**做逐顶点蒙皮（LBS）。
+  ///
+  /// JSON 形态：
+  /// ```json
+  /// "skeleton": {
+  ///   "joints": ["root", "spine", "head"],
+  ///   "inverse_bind": [[16 个数], [16 个数], [16 个数]]   // 可省略（默认单位阵）
+  /// }
+  /// ```
+  ///
+  /// `inverse_bind` 省略时按单位阵处理——那适合"网格就在关节空间里"的简单情形；
+  /// 真实角色应当在绑定姿态下用 `inverse_bind_from_world(节点世界矩阵)` 生成。
+  std::optional<st::raster::Skeleton> skeleton{};
 
   /// 场景自带的动画（最多一段；播放时刻由 `render_scene_at` 指定）。
   ///

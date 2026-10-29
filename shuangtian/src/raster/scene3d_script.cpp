@@ -1,6 +1,7 @@
 #include "st/raster/scene3d_script.hpp"
 
 #include "st/raster/gltf.hpp"
+#include "st/raster/animation.hpp"
 #include "st/raster/scene_graph.hpp"
 
 #include <set>
@@ -259,6 +260,13 @@ auto read_shadow(const Json& json) -> Result<PlanarShadow> {
   object.scale = node.local.scale;
   object.pivot = node.pivot;
   object.visible = node.visible;
+  // ## `skin` / 形状 / 材质字段在树化时**只能从原始 spec 补回**
+  //
+  // `SceneNode` 只管空间（名字/变换/枢轴/可见性），不管"这个节点画什么、
+  // 是否蒙皮"。所以 `from_node` 造出来的 spec 只有空间字段，几何字段是默认值。
+  // 建树前必须把非空间字段搬过去——否则症状是"树化之后对象的形状/材质/蒙皮全丢"，
+  // 而画面里只剩默认球体（或者干脆什么都不画）。
+  // 这里留一个标记位，由调用方在建树后回填（见 `parse_scene_spec` 里那段）。
   object.children.reserve(node.children.size());
   for (const st::raster::SceneNode& child : node.children) object.children.push_back(from_node(child));
   return object;
@@ -330,6 +338,7 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
   obj.parent = json_get_string(node, "parent", obj.parent);
   obj.group = json_get_bool(node, "group", json_get_bool(node, "kind_is_group", obj.group));
   obj.visible = json_get_bool(node, "visible", obj.visible);
+  obj.skin = json_get_bool(node, "skin", obj.skin);
   obj.pivot_at = json_get_string(node, "pivot_at", obj.pivot_at);
   const auto pivot = read_vec3(node, "pivot", obj.pivot, path);
   if (!pivot) return st::forward_error(pivot.error());
@@ -517,6 +526,137 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
                           "cull：只接受 none/back/front，收到 " + cull);
   }
 
+  // ── 骨架（可选）──
+  if (const Json* skeleton = json_find(json, "skeleton"); skeleton != nullptr) {
+    if (!skeleton->is_object()) {
+      return st::unexpected(ErrorCode::Parse, "skeleton：需要对象");
+    }
+    st::raster::Skeleton parsed{};
+    const Json* joints = json_find(*skeleton, "joints");
+    if (joints == nullptr || !joints->is_array()) {
+      return st::unexpected(ErrorCode::Parse, "skeleton.joints：需要数组（关节名，与节点名一致）");
+    }
+    std::size_t index = 0;
+    for (const Json& joint : *joints) {
+      if (!joint.is_string()) {
+        return st::unexpected(ErrorCode::Parse,
+                              std::format("skeleton.joints[{}]：需要字符串（关节名）", index));
+      }
+      parsed.joints.push_back(joint.get<std::string>());
+      ++index;
+    }
+    if (parsed.joints.empty()) {
+      return st::unexpected(ErrorCode::Parse, "skeleton.joints：至少要一个关节");
+    }
+    // 逆绑定矩阵（可选）：每个关节 16 个数，**列主序**（与 Mat4 相同）
+    if (const Json* bind = json_find(*skeleton, "inverse_bind"); bind != nullptr) {
+      if (!bind->is_array() || bind->size() != parsed.joints.size()) {
+        return st::unexpected(
+            ErrorCode::Parse,
+            std::format("skeleton.inverse_bind：需要与 joints 等长的数组（{} 个矩阵），收到 {} 个",
+                        parsed.joints.size(), bind->is_array() ? bind->size() : 0U));
+      }
+      std::size_t matrix_index = 0;
+      for (const Json& matrix : *bind) {
+        if (!matrix.is_array() || matrix.size() != 16U) {
+          return st::unexpected(
+              ErrorCode::Parse,
+              std::format("skeleton.inverse_bind[{}]：需要 16 个数（列主序 4×4）", matrix_index));
+        }
+        math::Mat4 value = math::Mat4::identity();
+        for (int column = 0; column < 4; ++column) {
+          for (int row = 0; row < 4; ++row) {
+            const Json& element = matrix[static_cast<std::size_t>(column * 4 + row)];
+            if (!element.is_number()) {
+              return st::unexpected(
+                  ErrorCode::Parse,
+                  std::format("skeleton.inverse_bind[{}][{}]：需要数字", matrix_index,
+                              column * 4 + row));
+            }
+            value.set(row, column, static_cast<float>(element.get<double>()));
+          }
+        }
+        parsed.inverse_bind.push_back(value);
+        ++matrix_index;
+      }
+    }
+    spec.skeleton = std::move(parsed);
+  }
+
+  // ── 动画（可选；一段）──  // ── 动画（可选；一段）──
+  if (const Json* animation = json_find(json, "animation"); animation != nullptr) {
+    if (!animation->is_object()) {
+      return st::unexpected(ErrorCode::Parse, "animation：需要对象");
+    }
+    st::raster::Clip clip{};
+    clip.name = json_get_string(*animation, "name", "animation");
+    if (const Json* tracks = json_find(*animation, "tracks"); tracks != nullptr) {
+      if (!tracks->is_array()) {
+        return st::unexpected(ErrorCode::Parse, "animation.tracks：需要数组");
+      }
+      std::size_t track_index = 0;
+      for (const Json& track_node : *tracks) {
+        const std::string path = std::format("animation.tracks[{}]", track_index);
+        ++track_index;
+        st::raster::Track track{};
+        track.node = json_get_string(track_node, "node", "");
+        if (track.node.empty()) {
+          return st::unexpected(ErrorCode::Parse, path + ".node：不能为空");
+        }
+        const std::string kind_name = json_get_string(track_node, "kind", "translate");
+        const auto kind = st::raster::parse_track_kind(kind_name);
+        if (!kind.has_value()) {
+          return st::unexpected(ErrorCode::Parse,
+                                std::format("{}.kind：只接受 {}，收到 \"{}\"", path,
+                                            st::raster::track_kind_names(), kind_name));
+        }
+        track.kind = *kind;
+        const Json* keys = json_find(track_node, "keys");
+        if (keys == nullptr || !keys->is_array()) {
+          return st::unexpected(ErrorCode::Parse, path + ".keys：需要数组");
+        }
+        std::size_t key_index = 0;
+        for (const Json& key_node : *keys) {
+          const std::string key_path = std::format("{}.keys[{}]", path, key_index);
+          ++key_index;
+          st::raster::Keyframe key{};
+          // `t` 与 `time` 都收（前者是推荐写法，后者不让人因拼写被拒）
+          const Json* time_node = json_find(key_node, "t");
+          if (time_node == nullptr) time_node = json_find(key_node, "time");
+          if (time_node == nullptr || !time_node->is_number()) {
+            return st::unexpected(ErrorCode::Parse,
+                                  key_path + ".t：缺少时间（秒；`t` 或 `time`）");
+          }
+          key.time = static_cast<float>(time_node->get<double>());
+          if (!std::isfinite(key.time)) {
+            return st::unexpected(ErrorCode::Parse, key_path + ".t：必须是有限数（NaN 会污染插值）");
+          }
+          const auto value = read_vec3(key_node, "value", math::Vec3{}, key_path);
+          if (!value) return st::forward_error(value.error());
+          key.value = *value;
+          const std::string easing = json_get_string(key_node, "easing", "linear");
+          const auto parsed_easing = st::raster::parse_easing(easing);
+          if (!parsed_easing.has_value()) {
+            return st::unexpected(ErrorCode::Parse,
+                                  std::format("{}.easing：只接受 {}，收到 \"{}\"", key_path,
+                                              st::raster::easing_names(), easing));
+          }
+          key.easing = *parsed_easing;
+          track.keys.push_back(key);
+        }
+        // 关键帧排序：手写 JSON 常按叙事顺序写，而采样要求时间有序。
+        // 同一时刻的两个关键帧保持**后写的赢**（`stable_sort` 保住输入顺序，
+        // 然后采样取"最后一个 ≤ t 的"）。
+        std::stable_sort(track.keys.begin(), track.keys.end(),
+                         [](const st::raster::Keyframe& lhs, const st::raster::Keyframe& rhs) {
+                           return lhs.time < rhs.time;
+                         });
+        clip.tracks.push_back(std::move(track));
+      }
+    }
+    spec.animation = std::move(clip);
+  }
+
   const Json* objects = json_find(json, "objects");
   if (objects == nullptr) {
     return st::unexpected(ErrorCode::Parse, "objects：缺少（哪怕是空数组也要写）");
@@ -573,11 +713,40 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
       flat.push_back(to_node(object));
       parents.push_back(object.parent);
     }
+    // 记下"名字 → 原始 spec"，建树后把几何/材质/skin 回填到树上
+    std::map<std::string, const SceneObjectSpec*> original;
+    const auto index_original = [&](auto&& self, const SceneObjectSpec& object) -> void {
+      original.emplace(object.name, &object);
+      for (const SceneObjectSpec& child : object.children) self(self, child);
+    };
+    for (const SceneObjectSpec& object : spec.objects) index_original(index_original, object);
     const auto attached = st::raster::attach_by_parent(flat, parents);
     if (!attached) return st::forward_error(attached.error());
     spec.objects.clear();
     spec.objects.reserve(flat.size());
-    for (const st::raster::SceneNode& root : flat) spec.objects.push_back(from_node(root));
+    for (const st::raster::SceneNode& root : flat) {
+      // 递归地把空间字段换上树里的值、其余字段保留原始 spec 的
+      const auto graft = [&](auto&& self, const st::raster::SceneNode& node) -> SceneObjectSpec {
+        SceneObjectSpec out{};
+        if (const auto found = original.find(node.name); found != original.end()) {
+          out = *found->second;
+          out.children.clear();
+        }
+        out.name = node.name;
+        out.group = !node.has_geometry;
+        out.translate = node.local.translation;
+        out.rotate = node.local.rotation;
+        out.scale = node.local.scale;
+        out.pivot = node.pivot;
+        out.visible = node.visible;
+        out.children.reserve(node.children.size());
+        for (const st::raster::SceneNode& child : node.children) {
+          out.children.push_back(self(self, child));
+        }
+        return out;
+      };
+      spec.objects.push_back(graft(graft, root));
+    }
   }
   return spec;
 }
@@ -711,8 +880,35 @@ auto render_scene(const SceneSpec& spec, Canvas& canvas, math::Color background)
   return render_scene_into(spec, **scene, canvas, background);
 }
 
+/// 实现主体：`time` 为 `std::nullopt` 表示"不采样动画"（静态场景）。
+///
+/// 为什么用一个可选时间而不是两个函数体：动画与静态只有**一行**差别
+/// （`roots` 是否被采样结果替换），拆成两份必然漂移。
+[[nodiscard]] auto render_impl(const SceneSpec& spec, const std::optional<float>& time,
+                               Scene3D& scene, Canvas& canvas, math::Color background)
+    -> Result<void>;
+
 auto render_scene_into(const SceneSpec& spec, Scene3D& scene, Canvas& canvas,
                        math::Color background) -> Result<void> {
+  return render_impl(spec, std::nullopt, scene, canvas, background);
+}
+
+auto render_scene_at_into(const SceneSpec& spec, float time, Scene3D& scene, Canvas& canvas,
+                          math::Color background) -> Result<void> {
+  return render_impl(spec, time, scene, canvas, background);
+}
+
+auto render_scene_at(const SceneSpec& spec, float time, Canvas& canvas, math::Color background)
+    -> Result<void> {
+  auto scene = Scene3D::create(canvas.physical_width(), canvas.physical_height());
+  if (!scene.has_value()) {
+    return st::unexpected(ErrorCode::Unsupported, "无法创建三维场景（后端不可用）");
+  }
+  return render_impl(spec, time, **scene, canvas, background);
+}
+
+auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3D& scene,
+                 Canvas& canvas, math::Color background) -> Result<void> {
   canvas.clear(background);
 
   // ## 顺序在这里被钉死
@@ -730,6 +926,18 @@ auto render_scene_into(const SceneSpec& spec, Scene3D& scene, Canvas& canvas,
   //（实测：开关阴影画面均值 115.40 → 115.40，完全不变）。
   //
   // 分两遍的代价是遍历两次 `spec.objects`，收益是调用方不必知道这个顺序。
+
+  // ── 蒙皮矩阵（前向声明，实际值在 `resolve` 之后算）──
+  //
+  // ## 为什么声明与填充分成两处
+  //
+  // `draw_world` 是 lambda，按引用捕获；而蒙皮矩阵必须等"动画采样 + resolve"
+  // 之后才能算（它依赖当前姿态的世界矩阵）。所以先声明可变更的容器、
+  // 让 lambda 捕获它，再在 resolve 之后填值——捕获是引用，填值对 lambda 可见。
+  std::optional<st::raster::SkinMatrices> skin_matrices;
+  /// 已 resolve 的树（蒙皮自动权重要用它的世界矩阵）；在 `resolve` 之后填。
+  std::optional<st::raster::ResolvedTree> resolved_tree;
+
   // 用**已解算的世界矩阵**画一个对象（几何/材质来自它的 spec）。
   //
   // 与旧 `draw_one` 的差别只有一处：旧版在这里现算 `T·R·S`，新版直接收矩阵。
@@ -783,8 +991,18 @@ auto render_scene_into(const SceneSpec& spec, Scene3D& scene, Canvas& canvas,
       return {};
     }
 
-    const auto mesh = build_mesh(resolved_object);
+    auto mesh = build_mesh(resolved_object);
     if (!mesh) return st::forward_error(mesh.error());
+
+    // ── 蒙皮：按当前姿态形变（重网格缓存的是**绑定姿态**，形变结果每帧不同）──
+    if (obj.skin && skin_matrices.has_value()) {
+      if (!mesh->has_skins()) {
+        // 没有权重：用朴素自动权重（离哪个关节近给谁）。
+        // 真实角色应当在 Blender 里刷权重再用 glTF 导入；这里保"能跑起来"。
+        *mesh = st::raster::auto_weights(*mesh, *spec.skeleton, *resolved_tree);
+      }
+      *mesh = st::raster::skin_mesh(*mesh, *skin_matrices);
+    }
 
     Material material{};
     material.metallic = obj.metallic;
@@ -830,8 +1048,27 @@ auto render_scene_into(const SceneSpec& spec, Scene3D& scene, Canvas& canvas,
   std::vector<st::raster::SceneNode> roots;
   roots.reserve(named.size());
   for (const SceneObjectSpec& object : named) roots.push_back(to_node(object));
-  const auto resolved = st::raster::resolve(roots);
+  // ── 动画采样（只有给了时间且场景带动画时才生效）──
+  //
+  // 顺序很关键：**先采样、再 resolve**。因为采样改的是 `local`（局部 TRS），
+  // 世界矩阵必须从"动画后的 local"重新求；反过来做（先 resolve 再改 local）
+  // 得到的是上一帧的世界矩阵，症状是"动画慢一帧"。
+  if (time.has_value() && spec.animation.has_value()) {
+    const st::raster::Clip& clip = *spec.animation;
+    const auto status = st::raster::validate_clip(clip, roots);
+    if (!status) return st::forward_error(status.error());
+    const auto sampled = st::raster::sample_clip(clip, *time);
+    roots = st::raster::apply_sample(roots, sampled);
+  }
+  auto resolved = st::raster::resolve(roots);
   if (!resolved) return st::forward_error(resolved.error());
+  resolved_tree = *resolved;
+  if (spec.skeleton.has_value()) {
+    // 蒙皮矩阵 = 世界矩阵 · 逆绑定矩阵；世界矩阵是"动画采样 + resolve"之后的那一份
+    auto computed = st::raster::compute_skin_matrices(*spec.skeleton, *resolved);
+    if (!computed) return st::forward_error(computed.error());
+    skin_matrices = std::move(*computed);
+  }
 
   // 名字 → 原始 spec（几何/材质字段在渲染时要取回来）。
   // 用**名字**而不是路径：上面已保证整棵树内名字唯一，而名字与
@@ -915,18 +1152,25 @@ auto render_scene_into(const SceneSpec& spec, Scene3D& scene, Canvas& canvas,
     if (found == spec_of.end() || found->second->pivot_at.empty()) return node.world;
     const auto preset = st::raster::parse_pivot_preset(found->second->pivot_at);
     if (!preset.has_value()) return node.world;
-    // 枢轴 = 预设位置 − 节点原点（在**父坐标系**里表达枢轴，因为 local_matrix
-    // 把它加在局部坐标系中，而局部原点在父坐标系里的位置正是 translation）
+    // 枢轴 = 预设位置（在节点局部坐标系里表达）。
     const st::raster::Bounds box = bounds_of(bounds_of, *found->second, node.name);
     if (box.is_empty()) return node.world;
     const math::Vec3 pivot_local = st::raster::pivot_from_bounds(box, *preset);
     st::raster::SceneNode patched = to_node(*found->second);
+    // ## 必须用**已采样**的 local，而不是 spec 里的原始值
+    //
+    // 踩过：这里原先从 `*found->second` 重新 `to_node()`，于是动画刚采好的
+    // `local`（旋转角）被场景里写死的初始值覆盖——症状是"角色在动，但凡是
+    // 设了 pivot_at 的节点都纹丝不动"，而采样日志里角度明明在变。
+    // 世界矩阵只能由 `node`（resolve 的输出，已含动画）推出来。
+    patched.local = node.local;
     patched.pivot = pivot_local;
     return node.parent >= 0
                ? resolved->nodes[static_cast<std::size_t>(node.parent)].world *
                      st::raster::local_matrix(patched)
                : st::raster::local_matrix(patched);
   };
+
 
   // 画一棵子树（父先子后；不可见整棵跳过）
   const auto paint = [&](const st::raster::ResolvedNode& node) -> Result<void> {

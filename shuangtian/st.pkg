@@ -469,6 +469,12 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "用一份 JSON 描述整个三维场景：解析/报错指路/渲染/参数生效/确定性"
     },
+    "skin_probe": {
+      "kind": "executable",
+      "sources": ["tools/skin_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "蒙皮对照：同一骨骼同一姿态，上排 LBS 形变 vs 下排刚性父子"
+    },
     "animation_probe": {
       "kind": "executable",
       "sources": ["tools/animation_probe.cpp"],

@@ -578,6 +578,44 @@ auto gltf_read_impl(std::span<const std::uint8_t> bytes, std::string_view base_d
             if (values) normals = std::move(*values);
           }
         }
+        // ── 蒙皮权重（JOINTS_0 / WEIGHTS_0）──
+        // 两者必须同时存在且长度一致；缺一个就整块没有蒙皮（半边数据比没有更糟）。
+        std::vector<float> skin_floats;
+        {
+          const Json* joints_node = json_find(*attributes, "JOINTS_0");
+          const Json* weights_node = json_find(*attributes, "WEIGHTS_0");
+          if (joints_node != nullptr && joints_node->is_number() && weights_node != nullptr &&
+              weights_node->is_number()) {
+            auto joints_view = accessor_view(
+                ctx, static_cast<int>(joints_node->get<std::int64_t>()),
+                where + ".attributes.JOINTS_0");
+            auto weights_view = accessor_view(
+                ctx, static_cast<int>(weights_node->get<std::int64_t>()),
+                where + ".attributes.WEIGHTS_0");
+            if (joints_view.has_value() && weights_view.has_value() &&
+                joints_view->components >= 4U && weights_view->components >= 4U &&
+                joints_view->count == positions->size() &&
+                weights_view->count == positions->size()) {
+              skin_floats.reserve(positions->size() * 8U);
+              for (std::size_t i = 0; i < positions->size(); ++i) {
+                const std::uint8_t* joint_base = joints_view->data + i * joints_view->stride;
+                const std::uint8_t* weight_base = weights_view->data + i * weights_view->stride;
+                for (std::size_t slot = 0; slot < 4U; ++slot) {
+                  // JOINTS_0 通常是 u8/u16（整数型），WEIGHTS_0 是 float
+                  const std::uint32_t joint =
+                      read_index(joint_base + slot * joints_view->component_bytes,
+                                 joints_view->type);
+                  const float weight = read_component(
+                      weight_base + slot * weights_view->component_bytes, weights_view->type);
+                  skin_floats.push_back(static_cast<float>(joint));
+                  skin_floats.push_back(weight);
+                }
+              }
+              scene.has_skin_weights = true;
+            }
+          }
+        }
+
         std::vector<std::pair<float, float>> uvs;
         if (const Json* uv_node = json_find(*attributes, "TEXCOORD_0");
             uv_node != nullptr && uv_node->is_number()) {
@@ -606,6 +644,9 @@ auto gltf_read_impl(std::span<const std::uint8_t> bytes, std::string_view base_d
             mesh_out.uvs.push_back(u);
             mesh_out.uvs.push_back(v);
           }
+        }
+        if (skin_floats.size() == positions->size() * 8U) {
+          mesh_out.skins = std::move(skin_floats);
         }
 
         const int indices_index = static_cast<int>(json_get_i64(primitive, "indices", -1));
@@ -694,6 +735,51 @@ auto gltf_read_impl(std::span<const std::uint8_t> bytes, std::string_view base_d
       scene.nodes.push_back(std::move(entry));
       ++node_index;
     }
+  }
+
+  // ── 骨架（读 `skins[]`，取第一个）──
+  if (const Json* skins = json_find(document, "skins"); skins != nullptr && skins->is_array() &&
+      !skins->empty()) {
+    const Json& skin = (*skins)[0];
+    Skeleton parsed{};
+    if (const Json* joints = json_find(skin, "joints"); joints != nullptr && joints->is_array()) {
+      const Json* nodes_json = json_find(document, "nodes");
+      // glTF 的 joints 是**索引数组**（指向 nodes），不是名字
+      for (const Json& joint : *joints) {
+        if (!joint.is_number()) continue;
+        const std::int64_t index = joint.get<std::int64_t>();
+        if (index < 0) continue;
+        if (nodes_json != nullptr && nodes_json->is_array() &&
+            static_cast<std::size_t>(index) < nodes_json->size()) {
+          parsed.joints.push_back(
+              json_get_string((*nodes_json)[static_cast<std::size_t>(index)], "name",
+                              std::format("node{}", index)));
+        } else {
+          parsed.joints.push_back(std::format("node{}", index));
+        }
+      }
+    }
+    // 逆绑定矩阵
+    const int bind_accessor = static_cast<int>(json_get_i64(skin, "inverseBindMatrices", -1));
+    if (bind_accessor >= 0) {
+      auto view = accessor_view(ctx, bind_accessor, "skins[0].inverseBindMatrices");
+      if (view.has_value() && view->components >= 16U) {
+        for (std::size_t i = 0; i < view->count; ++i) {
+          const std::uint8_t* base = view->data + i * view->stride;
+          math::Mat4 matrix = math::Mat4::identity();
+          for (int column = 0; column < 4; ++column) {
+            for (int row = 0; row < 4; ++row) {
+              matrix.set(row, column,
+                         read_component(base + static_cast<std::size_t>(column * 4 + row) *
+                                                  view->component_bytes,
+                                        view->type));
+            }
+          }
+          parsed.inverse_bind.push_back(matrix);
+        }
+      }
+    }
+    if (!parsed.joints.empty()) scene.skeleton = std::move(parsed);
   }
 
   // ── 动画（读）──
@@ -1088,6 +1174,89 @@ auto gltf_write_json(const std::vector<GltfObject>& objects, const GltfWriteOpti
       uv_accessor = add_accessor(views.size() - 1U, geom.positions.size() / 3U, "VEC2", 5126,
                                  false, nullptr, nullptr);
     }
+    // ── 蒙皮权重（JOINTS_0 / WEIGHTS_0）──
+    //
+    // ## 格式细节（写错了下游就读不到，而"读不到"= 模型僵硬不报错）
+    //
+    // - `JOINTS_0`：VEC4 **无符号**整数。这里统一写 u8（索引 < 256 时最省；
+    //   超过 255 个关节的模型极罕见，真遇到时应当拆骨架）。
+    // - `WEIGHTS_0`：VEC4 float，**必须已归一化**（glTF 规范要求；不归一化
+    //   在 Blender 里表现为"模型缩小"，因为权重和 < 1）。
+    std::size_t joints_accessor = 0;
+    std::size_t weights_accessor = 0;
+    bool has_skin = false;
+    if (object.skinned && object.mesh.has_skins() && geom.positions.size() / 3U > 0U) {
+      const std::size_t vertex_count = geom.positions.size() / 3U;
+      // 关节索引：检查是否都在 u8 范围内
+      std::uint32_t max_joint = 0;
+      for (std::size_t i = 0; i < vertex_count; ++i) {
+        for (std::size_t slot = 0; slot < 4U; ++slot) {
+          max_joint = std::max(max_joint, object.mesh.influence_at(i, slot).first);
+        }
+      }
+      const bool fits_u8 = max_joint <= 255U;
+      // 打包成 4 个 u8 / 顶点（或 4 个 u16）
+      std::vector<std::uint8_t> joints_u8;
+      std::vector<std::uint16_t> joints_u16;
+      std::vector<float> weights;
+      joints_u8.reserve(vertex_count * 4U);
+      weights.reserve(vertex_count * 4U);
+      if (!fits_u8) joints_u16.reserve(vertex_count * 4U);
+      for (std::size_t i = 0; i < vertex_count; ++i) {
+        // 归一化（防御：调用方的权重可能差一点点，而 glTF 要求严格和为 1）
+        float total = 0.0f;
+        std::array<float, 4> slot_weights{};
+        std::array<std::uint32_t, 4> slot_joints{};
+        for (std::size_t slot = 0; slot < 4U; ++slot) {
+          const auto [joint, weight] = object.mesh.influence_at(i, slot);
+          slot_joints[slot] = joint;
+          slot_weights[slot] = weight;
+          total += weight;
+        }
+        const float scale = total > 1.0e-6f ? 1.0f / total : 0.0f;
+        for (std::size_t slot = 0; slot < 4U; ++slot) {
+          if (fits_u8) {
+            joints_u8.push_back(static_cast<std::uint8_t>(std::min(slot_joints[slot], 255U)));
+          } else {
+            joints_u16.push_back(static_cast<std::uint16_t>(
+                std::min(slot_joints[slot], 65535U)));
+          }
+          weights.push_back(slot_weights[slot] * scale);
+        }
+      }
+      if (fits_u8) {
+        const std::size_t offset = buffer.add(joints_u8.data(), joints_u8.size());
+        Json view = Json::object();
+        view["buffer"] = 0;
+        view["byteOffset"] = static_cast<std::int64_t>(offset);
+        view["byteLength"] = static_cast<std::int64_t>(joints_u8.size());
+        view["target"] = 34962;
+        views.push_back(view);
+        joints_accessor = add_accessor(views.size() - 1U, vertex_count, "VEC4", 5121, false,
+                                       nullptr, nullptr);
+      } else {
+        const std::size_t offset = buffer.add(joints_u16.data(), joints_u16.size() * 2U);
+        Json view = Json::object();
+        view["buffer"] = 0;
+        view["byteOffset"] = static_cast<std::int64_t>(offset);
+        view["byteLength"] = static_cast<std::int64_t>(joints_u16.size() * 2U);
+        view["target"] = 34962;
+        views.push_back(view);
+        joints_accessor = add_accessor(views.size() - 1U, vertex_count, "VEC4", 5123, false,
+                                       nullptr, nullptr);
+      }
+      const std::size_t weight_offset = buffer.add_floats(weights);
+      Json weight_view = Json::object();
+      weight_view["buffer"] = 0;
+      weight_view["byteOffset"] = static_cast<std::int64_t>(weight_offset);
+      weight_view["byteLength"] = static_cast<std::int64_t>(weights.size() * sizeof(float));
+      weight_view["target"] = 34962;
+      views.push_back(weight_view);
+      weights_accessor = add_accessor(views.size() - 1U, vertex_count, "VEC4", 5126, false,
+                                      nullptr, nullptr);
+      has_skin = true;
+    }
+
     std::size_t index_accessor = 0;
     if (!geom.indices.empty()) {
       const std::size_t offset = buffer.add_uint32(geom.indices);
@@ -1109,7 +1278,15 @@ auto gltf_write_json(const std::vector<GltfObject>& objects, const GltfWriteOpti
     attributes["POSITION"] = static_cast<std::int64_t>(pos_accessor);
     if (has_normal) attributes["NORMAL"] = static_cast<std::int64_t>(normal_accessor);
     if (geom.has_uv) attributes["TEXCOORD_0"] = static_cast<std::int64_t>(uv_accessor);
+    if (has_skin) {
+      attributes["JOINTS_0"] = static_cast<std::int64_t>(joints_accessor);
+      attributes["WEIGHTS_0"] = static_cast<std::int64_t>(weights_accessor);
+    }
     primitive["attributes"] = attributes;
+    if (has_skin) {
+      // 所有蒙皮对象共用 `skins[0]`（导出选项里只接受一副骨架）
+      primitive["extras"] = Json{{"skinned", true}};
+    }
     if (!geom.indices.empty()) {
       primitive["indices"] = static_cast<std::int64_t>(index_accessor);
     }
@@ -1127,6 +1304,7 @@ auto gltf_write_json(const std::vector<GltfObject>& objects, const GltfWriteOpti
     node["name"] = object.name.empty() ? std::format("node{}", object_index) : object.name;
     node["mesh"] = static_cast<std::int64_t>(meshes.size() - 1U);
     node["matrix"] = matrix_json(object.transform);
+    if (has_skin) node["skin"] = static_cast<std::int64_t>(0);
     nodes.push_back(node);
     ++object_index;
   }
@@ -1235,6 +1413,77 @@ auto gltf_write_json(const std::vector<GltfObject>& objects, const GltfWriteOpti
   }
 
   // 根节点：把 scene 的所有节点挂在它下面（便于在 Blender 里看到单一层级）
+  // ── 骨架（写 `skins[0]`）──
+  //
+  // ## 关节节点必须在 `nodes` 里能按名字找到
+  //
+  // glTF 的 `skins.joints` 是**节点索引**数组，而我们要写的骨架是"关节名"。
+  // 所以先在已写出的 `nodes` 里按名字定位；找不到时**跳过该骨架并写明**——
+  // 静默写一个缺关节的 skin 会让下游把它读成"所有顶点都绑到第 0 个关节"。
+  Json skins_json = Json::array();
+  bool wrote_skins = false;
+  if (options.skeleton.has_value() && !options.skeleton->joints.empty()) {
+    std::map<std::string, std::int64_t> node_index_of;
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+      const auto found = json_find(nodes[i], "name");
+      if (found != nullptr && found->is_string()) {
+        node_index_of.emplace(found->get<std::string>(), static_cast<std::int64_t>(i));
+      }
+    }
+    // ## 骨架关节可能不在 `objects` 里（它常常是"纯骨骼"节点，没有几何）
+    //
+    // 踩过：只按 `objects` 建节点表时，关节名找不到 → 整副骨架被跳过 →
+    // 读回来 `skeleton` 是空的，而文件本身合法（只是没蒙皮）。
+    // 所以这里给缺失的关节**补出节点**（用逆绑定矩阵的逆作为初始变换：
+    // 绑定姿态下关节就应当在那里）。
+    Json joint_indices = Json::array();
+    for (std::size_t i = 0; i < options.skeleton->joints.size(); ++i) {
+      const std::string& joint = options.skeleton->joints[i];
+      if (const auto found = node_index_of.find(joint); found != node_index_of.end()) {
+        joint_indices.push_back(found->second);
+        continue;
+      }
+      // 补一个节点：位置取逆绑定矩阵的逆（绑定姿态）
+      Json node = Json::object();
+      node["name"] = joint;
+      const math::Mat4 bind = options.skeleton->bind_matrix_at(i);
+      const math::Mat4 world = st::raster::inverse_bind_from_world(bind);
+      node["matrix"] = matrix_json(world);
+      node["extras"] = Json{{"autoJoint", true}};
+      nodes.push_back(node);
+      const auto index = static_cast<std::int64_t>(nodes.size() - 1U);
+      node_index_of.emplace(joint, index);
+      joint_indices.push_back(index);
+    }
+    const bool all_found = joint_indices.size() == options.skeleton->joints.size();
+    if (all_found) {
+      // 逆绑定矩阵：按列主序写 16 个 float / 关节
+      std::vector<float> bind;
+      bind.reserve(options.skeleton->joints.size() * 16U);
+      for (std::size_t i = 0; i < options.skeleton->joints.size(); ++i) {
+        const math::Mat4 matrix = options.skeleton->bind_matrix_at(i);
+        for (int column = 0; column < 4; ++column) {
+          for (int row = 0; row < 4; ++row) bind.push_back(matrix.value(row, column));
+        }
+      }
+      const std::size_t bind_offset = buffer.add_floats(bind);
+      Json bind_view = Json::object();
+      bind_view["buffer"] = 0;
+      bind_view["byteOffset"] = static_cast<std::int64_t>(bind_offset);
+      bind_view["byteLength"] = static_cast<std::int64_t>(bind.size() * sizeof(float));
+      views.push_back(bind_view);
+      const std::size_t bind_accessor =
+          add_accessor(views.size() - 1U, options.skeleton->joints.size(), "MAT4", 5126, false,
+                       nullptr, nullptr);
+      Json skin = Json::object();
+      skin["joints"] = joint_indices;
+      skin["inverseBindMatrices"] = static_cast<std::int64_t>(bind_accessor);
+      skins_json.push_back(skin);
+      wrote_skins = true;
+    }
+  }
+  if (wrote_skins) document["skins"] = skins_json;
+
   Json root = Json::object();
   root["name"] = options.root_name;
   Json children = Json::array();
@@ -1244,6 +1493,7 @@ auto gltf_write_json(const std::vector<GltfObject>& objects, const GltfWriteOpti
   root["children"] = children;
   nodes.push_back(root);
   const std::size_t root_index = nodes.size() - 1U;
+
 
   if (!animations_json.empty()) document["animations"] = animations_json;
   document["accessors"] = accessors;

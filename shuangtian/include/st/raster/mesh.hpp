@@ -47,6 +47,44 @@ struct Mesh {
   /// 每顶点 `(u, v)`（`u*N = v*N = uvs.size()/2`）；空 = 无 UV（不贴图）。
   std::vector<float> uvs{};
 
+  // ── 蒙皮（2026-10-30）──
+  //
+  // ## 为什么权重是**平行边表**而不是塞进顶点
+  //
+  // `kVertexFloats = 9` 是"生成器 ↔ 后端上传"的契约（三处后端按它算 stride）。
+  // 往里加 8 个分量等于改契约：所有生成器、全部后端、glTF 读写、OBJ 导出同时要动，
+  // 而其中绝大多数路径根本不涉及蒙皮（静态场景、界面小图标）。
+  //
+  // 与 UV 的取舍完全一致：存成**平行于顶点的边表**，空 = 没有蒙皮。
+  // 好处是零破坏（老代码一字不改）、零开销（不蒙皮不分配）、语义清楚
+  // （"有没有蒙皮"是查一次就知的事实，而不是一句口头约定）。
+  //
+  // ## 布局（交错，每顶点 4 个影响）
+  //
+  // `skins` 每顶点 8 个 float：`[j0, w0, j1, w1, j2, w2, j3, w3]`
+  // - `j*` 是**关节下标**（指向 `Skeleton::joints`），存成 float 是为了与权重同表；
+  // - `w*` 是权重，**调用方保证已归一化**（和为 1）；全零的顶点视为不受骨骼影响。
+  //
+  // 为什么固定 4 个影响而不是可变长：GPU 顶点着色器不能循环可变长数组，
+  // 而 4 是行业事实标准（glTF 的 `JOINTS_0`/`WEIGHTS_0` 也是 4 个/组）。
+  // 超过 4 个影响时取最大的四个再归一化（`limit_to_four_influences`）。
+  std::vector<float> skins{};
+
+  /// 是否有可用蒙皮权重（边长等于顶点数 × 8）。
+  [[nodiscard]] auto has_skins() const noexcept -> bool {
+    return !skins.empty() && skins.size() == vertex_count() * 8U;
+  }
+  /// 第 `index` 个顶点的第 `slot` 个影响：`(关节下标, 权重)`；无蒙皮返回 `(0, 0)`。
+  [[nodiscard]] auto influence_at(std::size_t index, std::size_t slot) const noexcept
+      -> std::pair<std::uint32_t, float> {
+    if (!has_skins() || slot >= 4U) return {0U, 0.0f};
+    const std::size_t at = index * 8U + slot * 2U;
+    if (at + 1U >= skins.size()) return {0U, 0.0f};
+    const float joint = skins[at];
+    return {joint >= 0.0f ? static_cast<std::uint32_t>(joint) : 0U,
+            skins[at + 1U] < 0.0f ? 0.0f : skins[at + 1U]};
+  }
+
   [[nodiscard]] auto vertex_count() const noexcept -> std::size_t {
     return vertices.size() / kVertexFloats;
   }

@@ -50,6 +50,7 @@
 /// 与 `scene3d_script` 同一口径：生成代码的模型拿到路径就能自己修。
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -60,6 +61,7 @@
 #include "st/math/matrix.hpp"
 #include "st/raster/mesh.hpp"
 #include "st/raster/animation.hpp"
+#include "st/raster/skin.hpp"
 #include "st/raster/scene3d.hpp"
 
 namespace st::raster {
@@ -112,6 +114,18 @@ struct GltfScene {
   /// （万向锁附近），所以这里只做"能播出来"的翻译，不假装精确：
   /// 需要精确保真时请直接用 glTF 文件本身，不要经本结构往返。
   std::vector<Clip> animations{};
+
+  /// 文件里的骨架（`skins[]`，最多取第一个）。
+  ///
+  /// ## 为什么只取一个
+  ///
+  /// 一个 glTF 可以有多个 skin（多个角色共享一份文件），但本框架的
+  /// `SceneSpec` 只支持一副骨架（多角色需要多份场景）。取第一个并**如实声明**，
+  /// 好过"看起来支持但实际只用了一个"。
+  std::optional<Skeleton> skeleton{};
+
+  /// 网格里是否带蒙皮权重（`JOINTS_0`/`WEIGHTS_0` 是否读到）。
+  bool has_skin_weights{false};
 };
 
 /// 导出时的一个可写对象（几何 + 变换 + 材质）。
@@ -120,6 +134,8 @@ struct GltfObject {
   std::string name{"mesh"};
   math::Mat4 transform{math::Mat4::identity()};
   Material material{};
+  /// 该对象的网格是否带蒙皮权重（写 `JOINTS_0`/`WEIGHTS_0` + `skins[]`）。
+  bool skinned{false};
   /// 节点层级：父节点在 `objects` 里的下标（-1 = 根）。
   ///
   /// 为什么用下标而不是名字：`GltfObject` 是**导出**用的临时结构，
@@ -143,10 +159,13 @@ struct GltfWriteOptions {
   /// 是否写相机（`camera` 有效时）。
   bool write_camera{false};
   Camera camera{};
+  /// 要写出的骨架（`objects[].skinned` 为真的对象会引用它）。
+  std::optional<Skeleton> skeleton{};
   /// 要写出的动画（可多段）。每段的 `Track::node` 必须与某个 `GltfObject::name` 同名。
   ///
   /// 空 = 不写 `animations`（静态文件）。
   std::vector<Clip> animations{};
+
 };
 
 /// 从 glTF 文本（`.gltf`，JSON）或二进制（`.glb`）导入。

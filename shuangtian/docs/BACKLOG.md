@@ -609,6 +609,12 @@ G3 format +15.9 MB（**89/147 个单元直接用，不能移**）· G4 filesyste
 + 稠密化。场景脚本加 `animation` 字段与 `render_scene_at`；glTF 读写动画（含
 CUBICSPLINE 取控制点、ease-* 导出前稠密化的取舍）。
 
+**同一轮第四块：蒙皮**（`include/st/raster/skin.hpp` + `src/geom/skin.cpp`）。
+骨架（关节名 + 逆绑定矩阵）、蒙皮矩阵（世界 × 逆绑定）、逐顶点 LBS、权重限 4 并归一化、
+朴素自动权重。`Mesh::skins` 存成**平行边表**（每顶点 8 float）而不是塞进顶点——
+`kVertexFloats = 9` 是生成器与三处后端的契约，改动面远大于收益。glTF 侧读写
+`skins` / `JOINTS_0` / `WEIGHTS_0`（写出时补出缺失的关节节点）。
+
 **验收**：`tests/geom_primitives_test.cpp`（6 条，逐图元断言）、`tests/geom_gltf_test.cpp`
 （6 条，含 `.glb` 头/chunk 长度、第三方文件、错误路径、落盘往返）、
 `tests/geom_scene_graph_test.cpp`（7 条，组合模型：乘序/枢轴/扁平=嵌套/可见性继承/端到端/错误路径）、
@@ -616,7 +622,9 @@ CUBICSPLINE 取控制点、ease-* 导出前稠密化的取舍）。
 `tools/primitives_gallery_probe.cpp`（22 格 PNG + 22 个 `.glb`，实测 22/22 通过）、
 `tools/composite_pivot_probe.cpp`（四格对照图，父转/枢轴/可见性三条判据均 ok）、
 `tests/geom_animation_test.cpp`（11 条，含 slerp 最短路径、缓动曲线、枢轴×动画组合）、
-`tools/animation_probe.cpp`（8 帧分镜 + 带动画 glb，四条判据均 ok）。
+`tools/animation_probe.cpp`（8 帧分镜 + 带动画 glb，四条判据均 ok）、
+`tests/geom_skin_test.cpp`（10 条，含绑定姿态恒等、未归一化权重不缩小、glTF 权重往返）、
+`tools/skin_probe.cpp`（蒙皮 vs 刚性对照图：关节连续 vs 断裂）。
 文档：`docs/geometry.md`。
 
 **这一轮踩到的缺陷形态（值得记住）**：22 个生成器第一版有 **6 个绕序错**
