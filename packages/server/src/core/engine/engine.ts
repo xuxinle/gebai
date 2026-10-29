@@ -310,6 +310,9 @@ export interface AgentEngineOptions {
   /** 对外动作渠道注册表（act/observe 工具用）：进程级服务，启动时装配一次。
    *  未注入时 act/observe 返回明确的装配说明（不假装成功，也不抛栈）。 */
   channels?: import("@gebai/channels").ChannelRegistry
+  /** 人格出站治理依赖（相期卡工具/授权卡推送，act 的 feishu 发送前审核用）：
+   *  compose 装配时注入；未注入时审核环节如实拒绝（不静默放行）。 */
+  personaOutboundDeps?: import("../tools/persona-outbound-review").OutboundGateDeps
   /** 模型接口异常/空响应的重试退避基数（毫秒，缺省 800；测试注入小值加速重试用例）。 */
   retryBackoffMs?: number
   /** 统一任务调度器（GEBAI_TASKS_ENABLED=true 时注入，task_* 工具经 ToolContext 绑定）。 */
@@ -1802,6 +1805,8 @@ private activeSchemas(sessionId: string) {
       // 对外动作渠道（act/observe 工具）：进程级单例，父子会话/子代理共用（渠道连接不该每会话一份）。
       // 未装配时为 undefined，工具层给出明确的装配说明而不是静默失败。
       ...(this.opts.channels ? { channels: this.opts.channels } : {}),
+      // 人格出站治理依赖（act 的 feishu 发送审核用）：同 channels 为进程级注入。
+      ...(this.opts.personaOutboundDeps ? { personaOutboundDeps: this.opts.personaOutboundDeps } : {}),
       // 会话管控服务（session 工具，DESIGN「会话管控」）：跨会话控制平面。store/engine 双柄注入公开面；
       // run 入口同 REST prompt 语义（脱管——不等待完成，会话事件循环自行驱动）。
       // 子会话/子代理上下文同注入（管控面不区分父子——只看目标会话与当前会话的自身保护，

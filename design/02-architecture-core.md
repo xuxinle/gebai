@@ -1212,6 +1212,26 @@ export const persona: PersonaDef = {
 | `GEBAI_PERSONA_ENABLE` | 人格启用白名单（逗号分隔 id；非空仅启用名单内）——与 `GEBAI_EVENT_SOURCES_ENABLE` 同口径 |
 | `GEBAI_PERSONA_<ID>_CHATS` | 该人格只监听这些群（逗号分隔 chat_id；未设 = 不限群）。**替换**（不是追加）——设置后该人格的 feishu 消息订阅（`feishu` / `feishu:message` / `message` / `*` 四类能匹配 feishu 消息的）全部换成逐群三段式订阅；其余订阅原样保留 |
 
+**出站同样按人格收窄（入站出站对称）**：`act` / `observe` 执行时反查会话归属
+（`SessionData.persona`，经 `ctx.sessions.store.load`），若人格配置了 `GEBAI_PERSONA_<ID>_CHATS`，
+飞书群目标必须在该名单内，否则**直接拒绝**（不进审批，与渠道白名单同语义）。
+实现：`core/tools/persona-outbound.ts`，在 `core/tools/channels.ts` 的 act/observe/requiresApproval 接入。
+非人格会话不过滤（沿用渠道全局白名单）；未配置 CHATS 的人格不限制（与入站同语义）；
+非 feishu 目标（jira/local 等）不经过人格群约束（走渠道自身白名单）。
+
+**人格出站治理三重闸**（`core/tools/persona-outbound-review.ts`，act 的 feishu send/reply 前过闸；
+普通会话全部跳过）：
+
+1. **禁机器人身份回退**：人格会话 `as_user≠true` 直接拒绝——人格的定义就是以用户本人在群里
+   说话，模型发现授权失效后改用机器人名义发等于人格悄悄变成机器人（群里看到 app 头像，
+   用户身份形同虚设）。普通会话不受影响。
+2. **出站审核**（`GEBAI_PERSONA_OUTBOUND_REVIEW`，缺省**开**）：发送前推相期 `card_ask`
+   （choice：批准/驳回，正文带目标群与消息全文）等用户点选——批准放行，驳回/超时/相期未连
+   均不发送（fail-closed）。审核依赖（card_ask 工具）由 compose 经 `ToolContext.personaOutboundDeps`
+   注入（engine opts 同名传入）；未注入时审核环节如实拒绝。
+3. **授权弹卡**：act 失败原因为「用户授权不可用」时自动推相期授权卡（复用 syncAuthCard 通路，
+   含去重/TTL/重推）——用户在群里等回复的当下就该看到提醒，不等 5 分钟定时器。
+
 装配点在 `boot/compose.ts` 的 `applyPersonaEnv`（discover 之后、Catalog 之前），热加载重扫
 同样经过它（改 env 无需重启）。
 

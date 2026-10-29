@@ -38,6 +38,9 @@ export type ToolContext = ContractToolContext & {
    *  进程级服务（渠道连接不该每会话一份），引擎与工具层共用同一实例。
    *  未装配时 act/observe 返回明确的装配说明（不假装成功，也不抛栈）。 */
   channels?: import("@gebai/channels").ChannelRegistry
+  /** 人格出站治理依赖（act 的 feishu 发送审核：相期 card_ask 工具 + 授权卡推送）。
+   *  compose 装配时注入；未注入时人格审核环节如实拒绝（fail-closed）。 */
+  personaOutboundDeps?: import("../tools/persona-outbound-review").OutboundGateDeps
   /** 子会话向父会话合入/拉取（subsession_merge 工具；仅异步子会话运行上下文注入）。 */
   subSessionMerge?: (content?: string) => Promise<string>
   /** 后端渲染图表源码为 PNG 字节（show 图表分支 render=backend 时用）。 */

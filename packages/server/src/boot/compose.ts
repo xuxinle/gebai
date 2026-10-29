@@ -32,6 +32,7 @@ import { loadCustomCredentialSources } from "../custom-auth"
 import { applyModelEnvOverrides, createProvider, parseExtraParams, resolveModelRouteProvider, resolveVisionProvider, type ApiKind, type ProviderConfig } from "../core/llm/llm"
 import { setVisionProviderGetter } from "@gebai/agents"
 import { takeoverProcess } from "@gebai/agents"
+import { xiangqiController } from "@gebai/agents"
 import { scheduleGC } from "../core/session/gc"
 import { TaskManager } from "../core/schedule/tasks"
 import { UserTodoManager } from "../core/schedule/todos"
@@ -417,6 +418,13 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   let personaAuthCardSync: ((status: import("@gebai/persona").PersonaCredentialStatus) => Promise<void>) | null = null
   /** 面板点「去授权」时的主动推送通路（令牌请求主通路）；未启用时为 null。 */
   let personaPushAuthCard: (() => Promise<{ ok: boolean; delivered: boolean; url?: string; error?: string }>) | null = null
+  // 人格出站治理依赖（act 的 feishu 发送审核）：engine 构造在 persona 装配之前，
+  // 用可变容器桥接（persona 块就绪后填充；未启用拟人时保持空——未注入时审核环节
+  // 如实拒绝，与「拟人未启用则无人格会话」自洽）。
+  const personaOutboundDeps: import("../core/tools/persona-outbound-review").OutboundGateDeps = {}
+  // launchXiangqi 的反向引用（定义在函数尾 return 前；出站审核自动重启用它）：
+  // persona 块先于其定义，故用可变引用桥接，launchXiangqi 定义后填充。
+  let launchXiangqiRef: ((port: number) => Promise<void>) | null = null
   if (config.personaEnabled) {
    try {
     const { PersonaTokenStore, PersonaOAuth, PersonaCredentials, scopesFromEnv } = await import("@gebai/persona")
@@ -526,6 +534,55 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
         // 已有卡在 → 不重复推，视为已送达；否则看这次是否写入了 id
         delivered: personaAuthCardId !== null || before !== null,
         ...(status.authorizeUrl ? { url: status.authorizeUrl } : {}),
+      }
+    }
+    // 人格出站治理依赖填充（engine 构造时已注入容器引用，此处补实现）：
+    // - askCard：相期 card_ask（子Agent 定义取工具，与 syncAuthCard 同模式；
+    //   惰性取 def——发现是异步的，启动早期为空时 gate 会如实拒绝并说明）
+    // - pushAuthCard：授权失效时的主动弹卡通路（复用 syncAuthCard，已含去重/TTL/重推逻辑）
+    personaOutboundDeps.askCard = {
+      execute: async (args, _ctx) => {
+        const def = subAgents.defOf("xiangqi")
+        const ask = def?.tools?.card_ask
+        if (!ask) {
+          return {
+            output: "相期未注册（xiangqi 子Agent 未发现）——无法推审核卡",
+            data: { delivered: false, answered: false },
+          }
+        }
+        const r = await ask.execute(args, _ctx as never)
+        // 收敛到 gate 期望的形状（ToolResult 宽类型 → 明确子集）
+        const d = r.data as { id?: string; delivered?: boolean; answered?: boolean; answer?: { choice?: unknown } } | undefined
+        return {
+          output: r.output,
+          data: {
+            ...(d?.id !== undefined ? { id: d.id } : {}),
+            ...(d?.delivered !== undefined ? { delivered: d.delivered } : {}),
+            ...(d?.answered !== undefined ? { answered: d.answered } : {}),
+            ...(d?.answer !== undefined ? { answer: d.answer } : {}),
+          },
+        }
+      },
+    }
+    personaOutboundDeps.pushAuthCard = async () => {
+      const status = await personaCredentials!.status()
+      await syncAuthCard(status)
+    }
+    // 相期不可用时的自动重启与连接探针（供出站审核恢复闭环）：
+    personaOutboundDeps.restartXiangqi = async () => {
+      const fn = launchXiangqiRef
+      if (!fn) return
+      try {
+        await fn(config.port)
+      } catch (err) {
+        log.warn(`[gebai] 出站审核自动重启相期失败：${String((err as Error)?.message || err)}`)
+      }
+    }
+    personaOutboundDeps.isXiangqiConnected = () => {
+      try {
+        return xiangqiController().isConnected()
+      } catch {
+        return false
       }
     }
     // 启动检查（不吐令牌明文，只报状态）
@@ -709,6 +766,7 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     // 子会话运行模型路由（DESIGN「子会话运行」多路接口）：GEBAI_LLM_ROUTES 路由名命中走
     // 独立端点/模型，字面模型名按主配置基准覆盖——多分支多路并行分摊单路限流
     resolveModelProvider: (env, name) => resolveModelRouteProvider(mainConfig, env, name),
+    personaOutboundDeps,
   })
   // 拟人模式装配（GEBAI_PERSONA=true）：**开关关闭时以下代码一行不执行**。
   //
@@ -1367,6 +1425,8 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   // 失败策略：找不到/启动失败只记日志，绝不阻断服务——相期是附加提醒面，
   // 没有它时授权卡仍走 REST 链接降级（`/api/v1/persona/status` 的 authorizeUrl）。
   const launchXiangqi = async (port: number): Promise<void> => {
+    // 出站审核的自动重启引用（persona 块里声明，此处填充——启动即生效）
+    launchXiangqiRef = launchXiangqi
     if (!config.personaEnabled || config.auth !== "local") return
     const plan = planXiangqiLaunch({
       gebaiHome: config.gebaiHome,

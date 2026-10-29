@@ -2078,9 +2078,18 @@ auto MarkdownView::on_event(const RenderContext& context, Event& event) -> bool 
   switch (event.kind) {
     case EventKind::Wheel: {
       if (event.wheel_delta == 0.0f) return false;
-      // 一格滚轮 = step 像素（与 CodeEditor/completion 等组件的同一口径；
-      // 旧实现直接减 wheel_delta（一格 = 1px），滚一整屏要百格——用户报「滚动太慢」）。
-      scroll_to(scroll_offset_ - event.wheel_delta * step);
+      const float max = max_scroll();
+      // **自身不可滚时把滚轮让给外层容器**（return false → 事件冒泡）：
+      // 嵌套滚动（卡片列表里的 MarkdownView）里，内容没超高时滚轮应滚动外层列表，
+      // 而不是被本视图吞掉——旧实现无条件消费 + 内部 no-op 滚动，
+      // 外层 ScrollView 永远收不到 wheel（实测：相期卡片列表滚不动）。
+      // 已在边界且继续滚向边界外同样放行（薄边触到外层继续滚，主流滚动语义）。
+      if (max <= 0.0f) return false;
+      const float next = scroll_offset_ - event.wheel_delta * step;
+      if ((next < 0.0f && scroll_offset_ <= 0.0f) || (next > max && scroll_offset_ >= max)) {
+        return false;
+      }
+      scroll_to(next);
       event.handled = true;
       return true;
     }
