@@ -1,5 +1,8 @@
 #include "st/raster/scene3d_script.hpp"
 
+#include "st/raster/gltf.hpp"
+#include "st/raster/primitives.hpp"
+
 #include <cmath>
 #include <string>
 
@@ -254,6 +257,27 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
   obj.height = static_cast<float>(json_get_double(node, "height", obj.height));
   obj.depth = static_cast<float>(json_get_double(node, "depth", obj.depth));
   obj.segments = static_cast<int>(json_get_i64(node, "segments", obj.segments));
+  // 图元库的新参数（语义与 `primitives::PrimitiveParams` 逐项一致）
+  obj.rings = static_cast<int>(json_get_i64(node, "rings", obj.rings));
+  obj.subdivisions = static_cast<int>(json_get_i64(node, "subdivisions", obj.subdivisions));
+  obj.major_radius = static_cast<float>(json_get_double(node, "major_radius", obj.major_radius));
+  obj.minor_radius = static_cast<float>(json_get_double(node, "minor_radius", obj.minor_radius));
+  obj.minor_segments = static_cast<int>(json_get_i64(node, "minor_segments", obj.minor_segments));
+  obj.top_radius = static_cast<float>(json_get_double(node, "top_radius", obj.top_radius));
+  obj.columns = static_cast<int>(json_get_i64(node, "columns", obj.columns));
+  obj.rows = static_cast<int>(json_get_i64(node, "rows", obj.rows));
+  obj.teeth = static_cast<int>(json_get_i64(node, "teeth", obj.teeth));
+  obj.tooth_height = static_cast<float>(json_get_double(node, "tooth_height", obj.tooth_height));
+  obj.tooth_width = static_cast<float>(json_get_double(node, "tooth_width", obj.tooth_width));
+  obj.twist = static_cast<float>(json_get_double(node, "twist", obj.twist));
+  obj.turns = static_cast<float>(json_get_double(node, "turns", obj.turns));
+  obj.taper = static_cast<float>(json_get_double(node, "taper", obj.taper));
+  obj.knot_p = static_cast<int>(json_get_i64(node, "knot_p", obj.knot_p));
+  obj.knot_q = static_cast<int>(json_get_i64(node, "knot_q", obj.knot_q));
+  obj.face_camera = json_get_bool(node, "face_camera", obj.face_camera);
+  obj.gltf = json_get_string(node, "gltf", obj.gltf);
+  obj.gltf_use_material = json_get_bool(node, "gltf_use_material", obj.gltf_use_material);
+  obj.sides = static_cast<int>(json_get_i64(node, "sides", obj.sides));
 
   obj.ground = json_get_bool(node, "ground", false);
   obj.metallic = read_unit(node, "metallic", 0.0f);
@@ -279,9 +303,21 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
   //
   // `obj:` 前缀不在这张表里：它后面跟的是**任意路径**，不是枚举名。
   // 所以单独按前缀判定（见下），而不是往表里塞一个永远匹配不上的字串。
-  static constexpr const char* kShapes[] = {"sphere", "box", "plane", "cylinder", "torus"};
+  // 形状白名单：与 `primitives` 的规范名一致（外加历史别名 sphere/box）。
+  // ## 为什么允许别名
+  //
+  // `sphere` / `box` 是既有脚本里已经在用的名字（裁云图层、旧探针），改掉会让
+  // **已经能出片的 JSON 突然报错**。别名映射到同一个生成器，行为逐像素不变。
+  static constexpr const char* kShapes[] = {
+      "sphere",   "box",         "plane",   "cylinder", "torus",     "uv_sphere",
+      "cube",     "ico_sphere",  "cone",    "capsule",   "disc",     "circle",
+      "grid",     "tube",        "prism",   "gear",      "torus_knot", "arrow",
+      "wedge",    "tetrahedron", "octahedron", "dodecahedron", "icosahedron", "helix"};
   const bool is_obj_shape = obj.shape.rfind("obj:", 0) == 0;
-  bool known = is_obj_shape;
+  // 给了 `gltf` 时 `shape` 不参与几何选择（它只作为兜底默认值存在），
+  // 所以不必强制它是内置图元名——否则写 `{"gltf": "a.glb"}` 会因为默认 `sphere`
+  // 之外的值被拒绝，而那个值根本没用到。
+  bool known = is_obj_shape || obj.gltf.rfind("gltf:", 0) == 0;
   for (const char* name : kShapes) {
     if (obj.shape == name) {
       known = true;
@@ -415,29 +451,82 @@ auto resolve_shape_path(std::string_view reference, std::string_view asset_basis
 }
 
 auto build_mesh(const SceneObjectSpec& object) -> Result<Mesh> {
-  if (object.shape == "sphere") {
-    return Mesh::colored_sphere(object.radius, std::max(object.segments, 4), object.color);
-  }
-  if (object.shape == "box") {
-    return Mesh::colored_box(object.width, object.height, object.depth, object.color);
-  }
-  if (object.shape == "plane") {
-    return Mesh::plane(object.width, object.height, object.color);
-  }
-  if (object.shape == "cylinder") {
-    return Mesh::cylinder(object.radius, object.height, std::max(object.segments, 3),
-                          object.color);
-  }
-  if (object.shape == "torus") {
-    return Mesh::torus(object.radius, object.radius * 0.35f, std::max(object.segments, 3),
-                       std::max(object.segments / 2, 3), object.color);
-  }
   if (object.shape.rfind("obj:", 0) == 0) {
     // 不带 `asset_basis` 的重载：`build_mesh` 只拿到对象、拿不到场景。
     // 带基准目录的那条在 `draw_one` 里单独处理（场景级信息在那才可见）。
     return Mesh::load_obj_file(object.shape.substr(4), object.color);
   }
-  return st::unexpected(ErrorCode::Unsupported, "不支持的形状：" + object.shape);
+
+  // 形状 → 图元库。`sphere` / `box` 是历史别名（既有脚本在用），
+  // 映射到 `uv_sphere` / `cube` 后参数语义与原实现保持一致：
+  //   - `sphere` 的 `radius` 就是半径（原 `colored_sphere` 同义）；
+  //   - `box` 的三轴用 `width`/`height`/`depth`（原 `colored_box` 同义）。
+  const std::string_view shape = object.shape;
+  primitives::PrimitiveParams params{};
+  params.segments = object.segments;
+  params.rings = object.rings;
+  params.subdivisions = object.subdivisions;
+  params.color = object.color;
+  params.face_camera = object.face_camera;
+  params.columns = object.columns;
+  params.rows = object.rows;
+  params.teeth = object.teeth;
+  params.tooth_height = object.tooth_height;
+  params.tooth_width = object.tooth_width;
+  params.knot_p = object.knot_p;
+  params.knot_q = object.knot_q;
+  params.turns = object.turns;
+  params.taper = object.taper;
+
+  if (shape == "sphere") {
+    params.radius = object.radius;
+    return primitives::make_uv_sphere(params);
+  }
+  if (shape == "box") {
+    // 旧语义：`width`(X) × `height`(Y) × `depth`(Z)
+    params.radius = object.width * 0.5f;
+    params.depth = object.height;
+    params.height = object.depth;
+    return primitives::make_cube(params);
+  }
+  if (shape == "plane") {
+    params.radius = object.width * 0.5f;
+    params.depth = object.height;
+    params.face_camera = true;   // 旧 `Mesh::plane` 朝 +Z（立面）
+    return primitives::make_plane(params);
+  }
+  if (shape == "cylinder") {
+    params.radius = object.radius;
+    params.depth = object.height;
+    return primitives::make_cylinder(params);
+  }
+  if (shape == "torus" || shape == "torus_knot") {
+    // 旧 `torus` 语义：`radius` 是环外半径、管径固定为 0.35×；新参数可显式覆盖
+    params.major_radius = object.major_radius > 0.0f ? object.major_radius : object.radius;
+    params.minor_radius = object.minor_radius > 0.0f ? object.minor_radius
+                                                     : object.major_radius * 0.35f;
+    if (params.minor_radius <= 0.0f) params.minor_radius = object.radius * 0.35f;
+    params.minor_segments = object.minor_segments;
+    params.major_segments = object.segments;
+    params.twist = object.twist;
+    if (shape == "torus") return primitives::make_torus(params);
+    return primitives::make_torus_knot(params);
+  }
+
+  // 其余形状直接走图元库：`radius` + `depth` 是通用的一套，
+  // 旧字段 `height` 在 `depth` 有意义处优先（与 `PrimitiveParams` 的约定一致）。
+  params.radius = object.radius;
+  params.depth = object.depth;
+  params.height = object.height;
+  params.top_radius = object.top_radius;
+  params.major_radius = object.major_radius > 0.0f ? object.major_radius : object.radius;
+  params.minor_radius = object.minor_radius > 0.0f ? object.minor_radius
+                                                   : object.major_radius * 0.35f;
+  params.minor_segments = object.minor_segments;
+  params.major_segments = object.segments;
+  params.twist = object.twist;
+  params.sides = object.sides;
+  return primitives::make_from_name(shape, params);
 }
 
 auto render_scene(const SceneSpec& spec, Canvas& canvas, math::Color background)
@@ -475,6 +564,67 @@ auto render_scene_into(const SceneSpec& spec, Scene3D& scene, Canvas& canvas,
     if (obj.shape.rfind("obj:", 0) == 0) {
       resolved.shape = "obj:" + resolve_shape_path(obj.shape.substr(4), spec.asset_basis);
     }
+    if (!obj.gltf.empty()) {
+      // `gltf` 字段：`gltf:xxx.glb` 或裸路径（裸路径自动补前缀）
+      const std::string reference = obj.gltf.rfind("gltf:", 0) == 0 ? obj.gltf.substr(5) : obj.gltf;
+      resolved.shape = "gltf:" + resolve_shape_path(reference, spec.asset_basis);
+    }
+    // ── glTF：整份文件摆进来（含它自己的节点变换与材质）──
+    if (resolved.shape.rfind("gltf:", 0) == 0) {
+      const std::string path = resolve_shape_path(resolved.shape.substr(5), spec.asset_basis);
+      auto gltf_scene = gltf_read_file(path);
+      if (!gltf_scene) return st::forward_error(gltf_scene.error());
+      // 对象级变换：套在文件里**每个节点**的变换前面（`obj.translate/rotate/scale` 仍生效）
+      math::Mat4 model = math::Mat4::translation(obj.translate);
+      if (std::abs(obj.rotate.z) > 1e-6f) {
+        model = model * math::Mat4::rotation(math::Vec3{0.0f, 0.0f, 1.0f}, obj.rotate.z);
+      }
+      if (std::abs(obj.rotate.y) > 1e-6f) {
+        model = model * math::Mat4::rotation(math::Vec3{0.0f, 1.0f, 0.0f}, obj.rotate.y);
+      }
+      if (std::abs(obj.rotate.x) > 1e-6f) {
+        model = model * math::Mat4::rotation(math::Vec3{1.0f, 0.0f, 0.0f}, obj.rotate.x);
+      }
+      model = model * math::Mat4::scaling(obj.scale);
+      for (const GltfNode& node : gltf_scene->nodes) {
+        for (const std::size_t mesh_index : node.meshes) {
+          if (mesh_index >= gltf_scene->meshes.size()) continue;
+          Material material{};
+          if (!obj.gltf_use_material) {
+            material.metallic = obj.metallic;
+            material.roughness = obj.roughness;
+            material.specular = obj.specular;
+            material.emission = obj.emission;
+            material.opacity = obj.opacity;
+          } else if (node.material >= 0 &&
+                     static_cast<std::size_t>(node.material) < gltf_scene->materials.size()) {
+            const auto& slot = gltf_scene->materials[static_cast<std::size_t>(node.material)];
+            // glTF 的 baseColorFactor 是**线性**，`Material::base_color` 也是线性
+            material.base_color =
+                math::Vec3{static_cast<float>(slot.base_color.r) / 255.0f,
+                           static_cast<float>(slot.base_color.g) / 255.0f,
+                           static_cast<float>(slot.base_color.b) / 255.0f};
+            material.base_color_set = true;
+            material.metallic = slot.metallic;
+            material.roughness = slot.roughness;
+            material.opacity = slot.opacity;
+            material.specular = slot.metallic > 0.0f ? 1.0f : 0.0f;
+            material.emission = slot.emissive;
+            material.emissive_color = slot.emissive_color;
+            material.emissive_color_set = slot.emissive > 0.0f;
+          } else {
+            material.metallic = obj.metallic;
+            material.roughness = obj.roughness;
+            material.specular = obj.specular;
+            material.opacity = obj.opacity;
+          }
+          scene.set_material(material);
+          scene.draw_mesh(gltf_scene->meshes[mesh_index], model * node.transform);
+        }
+      }
+      return {};
+    }
+
     const auto mesh = build_mesh(resolved);
     if (!mesh) return st::forward_error(mesh.error());
 

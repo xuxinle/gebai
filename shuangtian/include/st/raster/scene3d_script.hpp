@@ -66,12 +66,40 @@ struct SceneObjectSpec {
   math::Vec3 rotate{0.0f, 0.0f, 0.0f};   ///< 欧拉角（弧度），顺序 X→Y→Z
   math::Vec3 scale{1.0f, 1.0f, 1.0f};
 
-  // 形状参数（按 shape 取用）
+  // 形状参数（按 shape 取用；语义与 `primitives::PrimitiveParams` 逐项一致）
   float radius{0.8f};
   float width{1.0f};
   float height{1.0f};
   float depth{1.0f};
   int segments{24};
+  /// 球的纬度环数（`uv_sphere`）。
+  int rings{16};
+  /// 二十面体球/正多面体的细分次数（`ico_sphere`）。
+  int subdivisions{1};
+  /// 环的主/小半径（`torus` / `torus_knot`）与截面细分。
+  float major_radius{0.0f};   ///< 0 = 用 `radius`（即环外半径）
+  float minor_radius{0.0f};   ///< 0 = 用 `major_radius * 0.35`（与旧 `torus` 的比例一致）
+  int minor_segments{12};
+  /// 锥的顶面半径（0 = 尖锥；>0 = 圆台）。
+  float top_radius{0.0f};
+  /// 网格平面的两向分段（`grid`）。
+  int columns{8};
+  int rows{8};
+  /// 棱柱边数（非 0 时覆盖 `segments`）。
+  int sides{0};
+  /// 齿轮的齿数/齿高/齿宽占比；管的壁厚占比。
+  int teeth{12};
+  float tooth_height{0.08f};
+  float tooth_width{0.5f};
+  /// 扭转（弧度，整段高度上的总扭转）。
+  float twist{0.0f};
+  /// 螺旋的圈数与收缩；纽结的 (p, q)。
+  float turns{3.0f};
+  float taper{0.0f};
+  int knot_p{2};
+  int knot_q{3};
+  /// 平面/盘/环带是否朝 +Z（立面），默认朝 +Y（地面）。
+  bool face_camera{false};
 
   // 材质
   float metallic{0.0f};
@@ -87,6 +115,18 @@ struct SceneObjectSpec {
   /// true = 纯发光体（不受光照影响，如霓虹灯管 / 屏幕）。
   bool emission_unlit{false};
 
+  /// 外部 **glTF** 引用（`gltf:<路径>` 形式时用；非空时覆盖 `shape` 的几何）。
+  ///
+  /// ## 为什么给 glTF 一个独立字段而不是又一种 `shape` 前缀
+  ///
+  /// `obj:` 前缀是历史形态（已经有一批脚本在用），而 glTF 需要**额外两件事**：
+  /// ① 一份 glb 里可能有多个网格与节点变换（要全部摆进来）；
+  /// ② 材质应当来自文件（PBR 参数），而不是对象上的 `metallic/roughness`。
+  /// 用前缀会把这些差异藏进"形状名"，读代码的人看不出来。
+  /// 所以单独一个字段：`shape` 继续管内置图元，`gltf` 管外部文件，语义互斥且显式。
+  std::string gltf{};
+  /// `gltf` 是否覆盖本对象的材质（默认 `true`：文件里写了材质就用文件的）。
+  bool gltf_use_material{true};
   /// 是否作为**地面**（接收阴影、不遮挡阴影）。
   ///
   /// JSON 里没法表达「先画谁」这种顺序依赖，所以用一个字段显式区分，

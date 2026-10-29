@@ -579,6 +579,40 @@ G3 format +15.9 MB（**89/147 个单元直接用，不能移**）· G4 filesyste
 
 ## P0
 
+### 三维建模：图元库 / glTF / 建模运算（2026-10-30，已完成）
+
+**做了什么**：新增 `src/geom/`（`primitives` / `mesh_ops` / `gltf`）与 `include/st/raster/` 下三个头：
+
+- **22 个参数化图元**（plane / cube / uv_sphere / ico_sphere / cylinder / cone / capsule /
+  torus / disc / circle / grid / tube / prism / gear / torus_knot / arrow / wedge /
+  四个正多面体 / helix），契约是"水密 + 绕序与法线同向 + 单位法线 + UV 0..1 + 确定性"。
+- **建模运算**：变换（逆转置法线 + 镜像翻绕序）、合并、焊接、法线重算、尺寸归一、
+  落地、AABB、JSON 自检摘要、OBJ 导出。
+- **glTF 2.0 读写**：`.gltf`(外部/内嵌 bin) 与 `.glb`(单文件)，含节点层级变换、PBR 材质、
+  相机、错误带 JSON 路径。**格式选型理由**：Blender/Unity/Unreal/Godot/three.js 全线原生支持，
+  且是模型最眼熟的三维格式。
+- 接入两处调用面：`scene3d_script` 的 `shape`（22 个名字 + 别名）与新的 `gltf` 字段、
+  裁云 `model3d` 的 `model_shape`（未知名字现在会 WARN 并给可用清单，不再静默落盒子）。
+
+**为什么值得做**：在此之前三维只有 5 个内置工厂 + OBJ 文件，"想造一个胶囊/齿轮/棱柱"
+只能手写 OBJ。而"能做 Blender 和游戏引擎"的前提是**能造形状 + 能用通用格式交换**——
+这两件事这次都通了。
+
+**验收**：`tests/geom_primitives_test.cpp`（6 条，逐图元断言）、`tests/geom_gltf_test.cpp`
+（6 条，含 `.glb` 头/chunk 长度、第三方文件、错误路径、落盘往返）、
+`tests/geom_scene_integration_test.cpp`（7 条，含 22 图元**真的画出像素**、导出读回）、
+`tools/primitives_gallery_probe.cpp`（22 格 PNG + 22 个 `.glb`，实测 22/22 通过）。
+文档：`docs/geometry.md`。
+
+**这一轮踩到的缺陷形态（值得记住）**：22 个生成器第一版有 **6 个绕序错**
+（tube 内壁全反、gear 侧壁 32 个反、torus_knot/helix 整体内外翻转、wedge 少两个面、
+capsule 10 个零面积三角形、dodecahedron 面表 33 条边界边）。
+根因全都一样：**绕序靠人脑推**。修法不是逐个改，而是把定向从生成器里拿掉——
+`Builder::face()` 用叉积算几何法线、与解析法线反向就自动翻序，于是"绕序与法线同向"
+从"每个生成器各自保证的不变式"变成结构上不可能违反。
+同理，`wedge` 改写成"顶点表 + 逐面自动定向"、`dodecahedron` 改用**对偶构造**
+（二十面体的面心 = 十二面体顶点），不再手拼面表。
+
 ### 把构建工具从框架里剥离成独立项目（2026-10-26，结构性）
 
 **这是根因，下面那条 `force=true` 只是它的症状。**

@@ -121,7 +121,9 @@ ST_TEST(scene_script_errors_carry_field_paths) {
     const char* must_contain;
   };
   const Case cases[] = {
-      {R"j({"objects":[{"shape":"dodecahedron"}]})j", "objects[0].shape"},
+      // 未知形状（`dodecahedron` 现在是合法图元了，所以换一个真正不存在的名字）
+      {R"j({"objects":[{"shape":"dodecahedronx"}]})j", "objects[0].shape"},
+      {R"j({"objects":[{"shape":"unknown_shape_xyz"}]})j", "objects[0].shape"},
       {R"j({"objects":[{"shape":"box","color":"#xyz"}]})j", "objects[0].color"},
       {R"j({"camera":{"eye":[0,1]}})j", "camera.eye"},
       {R"j({"camera":{}})j", "objects"},

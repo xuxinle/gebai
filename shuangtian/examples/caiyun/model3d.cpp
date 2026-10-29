@@ -2,6 +2,8 @@
 
 #include "model3d.hpp"
 
+#include "st/raster/primitives.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -197,8 +199,40 @@ auto mesh_for_layer(const Layer& layer, std::string_view asset_basis)
     // 立体扁平块：宽 2.0 / 厚 0.06 / 深 1.5（16:12 的“桌面”比例）。
     // 厚度取 6% ：能看到明显的侧壁成形，但不会变成“一块砖”。
     *mesh = st::raster::Mesh::textured_slab(2.0f, 0.06f, 1.5f, base);
+  } else if (const auto kind = st::raster::primitives::parse_kind(layer.model_shape);
+             kind.has_value()) {
+    // ── 框架图元库（2026-10-30 接入）──
+    //
+    // 之前这里只有五种内置形状 + OBJ 文件，超出范围的形状只能落到"默认盒子"：
+    // 用户写 `capsule` 会得到一只盒子，而且**没有任何提示**。
+    // 现在把全部图元（capsule / cone / gear / prism / tube / wedge / 正多面体 / helix…）
+    // 接到同一个入口，图元参数从图层字段派生（`model_segments` 是共用的细分档）。
+    //
+    // ## 为什么颜色走"顶点色"而不是材质
+    //
+    // 裁云的图层已有 `model_color` / `model_color_alt` 做双色渐变，那套机制读的是
+    // **顶点色**。图元生成器接受 `color` 并直接写进顶点，正好接上；
+    // 换成材质色会让渐变逻辑失效（渐变是逐顶点插值，材质只有一个基色）。
+    st::raster::primitives::PrimitiveParams params{};
+    params.radius = 0.6f;
+    params.depth = 1.15f;
+    params.height = 1.15f;
+    params.segments = segments;
+    params.rings = std::clamp(segments / 2, 4, 48);
+    params.major_segments = segments;
+    params.minor_segments = std::clamp(segments / 2, 6, 48);
+    params.major_radius = 0.55f;
+    params.minor_radius = 0.22f;
+    params.subdivisions = 2;
+    params.columns = 6;
+    params.rows = 6;
+    params.color = base;
+    *mesh = st::raster::primitives::make(*kind, params);
   } else {
-    // 默认与未知形状都落盒子：写错一个形状名不该让整帧没有主体。
+    // 未知形状落到盒子：写错一个形状名不该让整帧没有主体。
+    // ⚠ 但**必须**留一条日志——静默兜底等于让"名字拼错"永远查不出来。
+    ST_LOG_WARN("裁云三维：未知形状 \"{}\"（可用：{}），已退回盒子", layer.model_shape,
+                st::raster::primitives::all_kind_names());
     *mesh = st::raster::Mesh::colored_box(1.15f, 1.15f, 1.15f, base);
   }
 
