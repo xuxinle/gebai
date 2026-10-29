@@ -11,6 +11,7 @@
 #include "st/core/fs.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/color_pipeline.hpp"
+#include "st/math/quaternion.hpp"
 #include "st/raster/mesh_ops.hpp"
 
 namespace st::raster {
@@ -695,6 +696,135 @@ auto gltf_read_impl(std::span<const std::uint8_t> bytes, std::string_view base_d
     }
   }
 
+  // ── 动画（读）──
+  //
+  // ## 三个必须说清的取舍（都写在 `GltfScene::animations` 的注释里）
+  //
+  // 1. `rotation` 的采样是**四元数**，而本框架的 `Keyframe::value` 是欧拉角
+  //    → 逐个采样转欧拉角。万向锁附近有损，这是已知近似。
+  // 2. `CUBICSPLINE` 的 accessor 每个关键帧有 3 个值（入切线、值、出切线），
+  //    这里**取中间那个**（值是准的，曲率丢掉了）。
+  // 3. 时间轴：`input` accessor 是秒（与本框架同一单位），直接搬。
+  if (const Json* animations = json_find(document, "animations");
+      animations != nullptr && animations->is_array()) {
+    std::size_t anim_index = 0;
+    for (const Json& animation : *animations) {
+      const std::string anim_path = std::format("animations[{}]", anim_index);
+      ++anim_index;
+      Clip clip{};
+      clip.name = json_get_string(animation, "name", std::format("animation{}", anim_index - 1U));
+
+      // sampler 索引 → (输入时间 accessor, 输出值 accessor, 插值方式)
+      struct SamplerRef {
+        int input{-1};
+        int output{-1};
+        std::string interpolation{"LINEAR"};
+      };
+      std::vector<SamplerRef> samplers;
+      if (const Json* list = json_find(animation, "samplers");
+          list != nullptr && list->is_array()) {
+        for (const Json& sampler : *list) {
+          SamplerRef ref{};
+          ref.input = static_cast<int>(json_get_i64(sampler, "input", -1));
+          ref.output = static_cast<int>(json_get_i64(sampler, "output", -1));
+          ref.interpolation = json_get_string(sampler, "interpolation", "LINEAR");
+          samplers.push_back(ref);
+        }
+      }
+
+      if (const Json* channels = json_find(animation, "channels");
+          channels != nullptr && channels->is_array()) {
+        std::size_t channel_index = 0;
+        for (const Json& channel : *channels) {
+          const std::string channel_path =
+              std::format("{}.channels[{}]", anim_path, channel_index);
+          ++channel_index;
+          const Json* target = json_find(channel, "target");
+          if (target == nullptr || !target->is_object()) {
+            return st::unexpected(ErrorCode::Parse, channel_path + ".target：缺少");
+          }
+          const int node_index = static_cast<int>(json_get_i64(*target, "node", -1));
+          const std::string path_name = json_get_string(*target, "path", "");
+          if (node_index < 0) {
+            return st::unexpected(ErrorCode::Parse,
+                                  std::format("{}.target.node：缺失或越界", channel_path));
+          }
+          const auto kind = [&]() -> std::optional<TrackKind> {
+            if (path_name == "translation") return TrackKind::Translation;
+            if (path_name == "rotation") return TrackKind::Rotation;
+            if (path_name == "scale") return TrackKind::Scale;
+            return std::nullopt;
+          }();
+          if (!kind.has_value()) {
+            // `weights`（morph target）不支持——跳过这一条通道，不让整份文件失败
+            continue;
+          }
+          const int sampler_index = static_cast<int>(json_get_i64(channel, "sampler", -1));
+          if (sampler_index < 0 ||
+              static_cast<std::size_t>(sampler_index) >= samplers.size()) {
+            return st::unexpected(
+                ErrorCode::Parse,
+                std::format("{}.sampler = {} 越界（共 {} 个）", channel_path, sampler_index,
+                            samplers.size()));
+          }
+          const SamplerRef& sampler = samplers[static_cast<std::size_t>(sampler_index)];
+          auto time_view = accessor_view(ctx, sampler.input, channel_path + ".sampler.input");
+          if (!time_view) return st::forward_error(time_view.error());
+          // 时间 accessor 是 SCALAR float
+          std::vector<float> times;
+          times.reserve(time_view->count);
+          for (std::size_t i = 0; i < time_view->count; ++i) {
+            times.push_back(read_component(time_view->data + i * time_view->stride,
+                                           time_view->type));
+          }
+          auto value_view = accessor_view(ctx, sampler.output, channel_path + ".sampler.output");
+          if (!value_view) return st::forward_error(value_view.error());
+
+          Track track{};
+          // 节点名：与 `nodes` 的读取保持同一规则（无名则 `nodeN`）
+          const Json* nodes_json = json_find(document, "nodes");
+          if (nodes_json != nullptr && nodes_json->is_array() &&
+              static_cast<std::size_t>(node_index) < nodes_json->size()) {
+            track.node = json_get_string((*nodes_json)[static_cast<std::size_t>(node_index)],
+                                         "name", std::format("node{}", node_index));
+          } else {
+            track.node = std::format("node{}", node_index);
+          }
+          track.kind = *kind;
+          // CUBICSPLINE 的每个关键帧占 3 个元素（入切线 / 值 / 出切线）
+          const std::size_t stride_elements = sampler.interpolation == "CUBICSPLINE" ? 3U : 1U;
+          for (std::size_t i = 0; i < times.size(); ++i) {
+            const std::size_t element = i * stride_elements +
+                                        (stride_elements == 3U ? 1U : 0U);   // 取"值"那个
+            const std::uint8_t* base = value_view->data + element * value_view->stride;
+            Keyframe key{};
+            key.time = times[i];
+            key.easing = sampler.interpolation == "STEP" ? Easing::Constant : Easing::Linear;
+            const auto component = [&](std::size_t index) {
+              return read_component(base + index * value_view->component_bytes, value_view->type);
+            };
+            if (track.kind == TrackKind::Rotation) {
+              // 四元数（x,y,z,w）→ 欧拉角
+              if (value_view->components < 4U) {
+                return st::unexpected(
+                    ErrorCode::Parse,
+                    std::format("{}：rotation 轨道需要 VEC4（四元数），收到 {} 个分量",
+                                channel_path, value_view->components));
+              }
+              const math::Quat quat{component(0), component(1), component(2), component(3)};
+              key.value = quat.to_euler();
+            } else {
+              key.value = math::Vec3{component(0), component(1), component(2)};
+            }
+            track.keys.push_back(key);
+          }
+          if (!track.keys.empty()) clip.tracks.push_back(std::move(track));
+        }
+      }
+      if (!clip.tracks.empty()) scene.animations.push_back(std::move(clip));
+    }
+  }
+
   // 相机
   if (const Json* cameras = json_find(document, "cameras"); cameras != nullptr &&
       cameras->is_array() && !cameras->empty()) {
@@ -1005,6 +1135,105 @@ auto gltf_write_json(const std::vector<GltfObject>& objects, const GltfWriteOpti
     return st::unexpected(ErrorCode::Invalid, "导出 glTF：没有可写的网格（对象全为空）");
   }
 
+  // ── 动画（写）──
+  //
+  // ## 三条必须对齐的口径
+  //
+  // 1. **旋转存四元数**：glTF 的 `rotation` 采样必须是 VEC4 四元数（规范如此），
+  //    而本框架的 `Keyframe::value` 是欧拉角 → 逐帧转四元数。
+  // 2. **时间用秒**：input accessor 是 SCALAR float 秒，与本框架同一单位。
+  // 3. **节点按名字找**：`Track::node` 匹配 `GltfObject::name`；找不到时**跳过该轨道**
+  //    而不是让整份导出失败（少一条轨道 vs 一个文件都出不来，前者可救）。
+  Json animations_json = Json::array();
+  if (!options.animations.empty()) {
+    // 名字 → 节点下标（写出的 nodes 数组里，对象在前、根在后）
+    std::map<std::string, int> node_of;
+    for (std::size_t i = 0; i < objects.size(); ++i) {
+      const std::string name =
+          objects[i].name.empty() ? std::format("node{}", i) : objects[i].name;
+      node_of.emplace(name, static_cast<int>(i));
+    }
+    for (const Clip& clip : options.animations) {
+      Json channels = Json::array();
+      Json samplers = Json::array();
+      for (const Track& track : clip.tracks) {
+        if (track.keys.empty()) continue;
+        const auto found_node = node_of.find(track.node);
+        if (found_node == node_of.end()) continue;   // 跳过而不是整份失败
+        const std::string path_name = track.kind == TrackKind::Rotation  ? "rotation"
+                                      : track.kind == TrackKind::Scale   ? "scale"
+                                                                         : "translation";
+        if (track.kind == TrackKind::Visible) continue;   // glTF 没有可见性轨道
+        // 时间序列
+        std::vector<float> times;
+        times.reserve(track.keys.size());
+        for (const Keyframe& key : track.keys) times.push_back(key.time);
+        // 值序列（旋转转四元数）
+        std::vector<float> values;
+        const bool is_rotation = track.kind == TrackKind::Rotation;
+        values.reserve(track.keys.size() * (is_rotation ? 4U : 3U));
+        for (const Keyframe& key : track.keys) {
+          if (is_rotation) {
+            const math::Quat quat = math::Quat::from_euler(key.value);
+            values.insert(values.end(), {quat.x, quat.y, quat.z, quat.w});
+          } else {
+            values.insert(values.end(), {key.value.x, key.value.y, key.value.z});
+          }
+        }
+        // 时间 accessor（SCALAR float，必须带 min/max——播放器用它算时长）
+        const std::size_t time_offset = buffer.add_floats(times);
+        Json time_view = Json::object();
+        time_view["buffer"] = 0;
+        time_view["byteOffset"] = static_cast<std::int64_t>(time_offset);
+        time_view["byteLength"] = static_cast<std::int64_t>(times.size() * sizeof(float));
+        views.push_back(time_view);
+        const float time_min = times.empty() ? 0.0f : times.front();
+        const float time_max = times.empty() ? 0.0f : times.back();
+        const std::size_t time_accessor =
+            add_accessor(views.size() - 1U, times.size(), "SCALAR", 5126, true, &time_min,
+                         &time_max);
+        // 值 accessor（旋转 VEC4 / 其余 VEC3）
+        const std::size_t value_offset = buffer.add_floats(values);
+        Json value_view = Json::object();
+        value_view["buffer"] = 0;
+        value_view["byteOffset"] = static_cast<std::int64_t>(value_offset);
+        value_view["byteLength"] = static_cast<std::int64_t>(values.size() * sizeof(float));
+        views.push_back(value_view);
+        const std::size_t value_accessor =
+            add_accessor(views.size() - 1U, track.keys.size(), is_rotation ? "VEC4" : "VEC3",
+                         5126, false, nullptr, nullptr);
+
+        Json sampler = Json::object();
+        sampler["input"] = static_cast<std::int64_t>(time_accessor);
+        sampler["output"] = static_cast<std::int64_t>(value_accessor);
+        // 缓动：glTF 只有 LINEAR / STEP / CUBICSPLINE。我们的 ease-* 是**曲线**，
+        // 无法用 LINEAR 表达 → 退化成 LINEAR 并**逐帧采样**（调用方可用
+        // `sample_clip` 按固定步长生成密集关键帧，那样曲线形状就能保真）。
+        // 这里如实写 LINEAR，而不是假装支持。
+        const bool step = std::any_of(track.keys.begin(), track.keys.end(),
+                                      [](const Keyframe& key) {
+                                        return key.easing == Easing::Constant;
+                                      });
+        sampler["interpolation"] = step ? "STEP" : "LINEAR";
+        samplers.push_back(sampler);
+
+        Json target = Json::object();
+        target["node"] = static_cast<std::int64_t>(found_node->second);
+        target["path"] = path_name;
+        Json channel = Json::object();
+        channel["sampler"] = static_cast<std::int64_t>(samplers.size() - 1U);
+        channel["target"] = target;
+        channels.push_back(channel);
+      }
+      if (channels.empty()) continue;
+      Json animation = Json::object();
+      animation["name"] = clip.name;
+      animation["channels"] = channels;
+      animation["samplers"] = samplers;
+      animations_json.push_back(animation);
+    }
+  }
+
   // 根节点：把 scene 的所有节点挂在它下面（便于在 Blender 里看到单一层级）
   Json root = Json::object();
   root["name"] = options.root_name;
@@ -1016,6 +1245,7 @@ auto gltf_write_json(const std::vector<GltfObject>& objects, const GltfWriteOpti
   nodes.push_back(root);
   const std::size_t root_index = nodes.size() - 1U;
 
+  if (!animations_json.empty()) document["animations"] = animations_json;
   document["accessors"] = accessors;
   document["meshes"] = meshes;
   if (!materials.empty()) document["materials"] = materials;

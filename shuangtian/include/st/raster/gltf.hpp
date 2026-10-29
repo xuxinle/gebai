@@ -59,6 +59,7 @@
 #include "st/math/color.hpp"
 #include "st/math/matrix.hpp"
 #include "st/raster/mesh.hpp"
+#include "st/raster/animation.hpp"
 #include "st/raster/scene3d.hpp"
 
 namespace st::raster {
@@ -90,6 +91,27 @@ struct GltfScene {
   Camera camera{};
   /// 资产生成器（`asset.generator`），用于排查"这文件谁导的"。
   std::string generator{};
+
+  /// 文件里的动画（**已翻译成本框架的 `Clip`**）。
+  ///
+  /// ## 翻译口径（三处必须对齐，否则"在 Blender 里对、在霜天里不对"）
+  ///
+  /// | glTF | 本框架 |
+  /// |---|---|
+  /// | `channels[].target.node` | 节点名（`nodes[].name`，无名则 `nodeN`） |
+  /// | `path: translation` | `TrackKind::Translation` |
+  /// | `path: rotation`（四元数采样） | `TrackKind::Rotation`（**转成欧拉角存**） |
+  /// | `path: scale` | `TrackKind::Scale` |
+  /// | `sampler.interpolation: LINEAR` | `Easing::Linear` |
+  /// | `sampler.interpolation: STEP` | `Easing::Constant` |
+  /// | `sampler.interpolation: CUBICSPLINE` | 取控制点（不支持切线的曲率，**声明为近似**） |
+  ///
+  /// ## 为什么不保留四元数采样
+  ///
+  /// 本框架的 `Keyframe::value` 是 `Vec3`（欧拉角）。转成欧拉角**是有损的**
+  /// （万向锁附近），所以这里只做"能播出来"的翻译，不假装精确：
+  /// 需要精确保真时请直接用 glTF 文件本身，不要经本结构往返。
+  std::vector<Clip> animations{};
 };
 
 /// 导出时的一个可写对象（几何 + 变换 + 材质）。
@@ -98,6 +120,12 @@ struct GltfObject {
   std::string name{"mesh"};
   math::Mat4 transform{math::Mat4::identity()};
   Material material{};
+  /// 节点层级：父节点在 `objects` 里的下标（-1 = 根）。
+  ///
+  /// 为什么用下标而不是名字：`GltfObject` 是**导出**用的临时结构，
+  /// 调用方常常是"循环造一批对象"，名字可能重复或为空；
+  /// 下标在同一批里永远唯一，且建树时不必再做一次名字查找。
+  int parent{-1};
 };
 
 /// 导出选项。
@@ -115,6 +143,10 @@ struct GltfWriteOptions {
   /// 是否写相机（`camera` 有效时）。
   bool write_camera{false};
   Camera camera{};
+  /// 要写出的动画（可多段）。每段的 `Track::node` 必须与某个 `GltfObject::name` 同名。
+  ///
+  /// 空 = 不写 `animations`（静态文件）。
+  std::vector<Clip> animations{};
 };
 
 /// 从 glTF 文本（`.gltf`，JSON）或二进制（`.glb`）导入。

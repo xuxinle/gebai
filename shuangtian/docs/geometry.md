@@ -214,7 +214,90 @@ local = T(translate) · T(pivot) · R(rotation) · S(scale) · T(-pivot)
 而新图元 `plane` 本就朝 +Y。不吸收那 -90°，地面会立成墙——实测投影阴影
 **一个像素都不出**（开关阴影画面均值 99.063 → 99.063）。
 
-## 5. 用法（三层层层可用）
+## 4.5 动画（关键帧 / 缓动 / 四元数插值）
+
+有了空间体系之后，"骨架"已经能摆位；动画让它可以**按时间动**。
+实现见 `include/st/raster/animation.hpp` 与 `st/math/quaternion.hpp`。
+
+### 4.5.1 为什么旋转必须用四元数
+
+欧拉角有三个致命的插值问题，全都表现为"动画看起来不对"：
+
+| 问题 | 症状 | 四元数如何解决 |
+|---|---|---|
+| **绕远路** | 350° → 10° 线性插值转过 340°（先反着猛转一圈） | `slerp` 走球面大圆的短弧（20°） |
+| **万向锁** | 两轴对齐时丢一个自由度，中间姿态突然跳变 | 四元数无奇点 |
+| **分量不独立** | 逐分量插值得到的中间姿态不在最短路径上（"甩"而非"摆"） | 整体插值 |
+
+这也是 glTF 用四元数存旋转的原因。`slerp` 里还有一个**最容易漏**的细节：
+`q` 与 `-q` 表示同一个旋转，若点积为负必须翻转 `b`，否则会走 360°-θ 的长弧——
+**短动画看着正常，某些关键帧对之间突然反向猛转**。`tests/geom_animation_test.cpp`
+有一条专门钉它（350°→10° 的中点必须在 0° 附近，而不是 180°）。
+
+脚本层仍写欧拉角（人更容易算），转换点只有两处：
+`Quat::from_euler`（进动画）与 `Quat::to_euler`（出动画）。
+
+### 4.5.2 脚本形态
+
+```json
+"animation": {
+  "name": "wave", "duration": 2.0,
+  "tracks": [
+    { "node": "shoulder", "kind": "rotate",
+      "keys": [ { "t": 0.0, "value": [0, 0, 0],   "easing": "ease-in-out" },
+                { "t": 1.0, "value": [0, 0, 1.0], "easing": "ease-in-out" },
+                { "t": 2.0, "value": [0, 0, 0] } ] },
+    { "node": "hand", "kind": "visible",
+      "keys": [ { "t": 0.0, "value": [1, 0, 0] }, { "t": 1.5, "value": [0, 0, 0] } ] }
+  ]
+}
+```
+
+| 字段 | 含义 | 说明 |
+|---|---|---|
+| `tracks[].node` | 目标节点名 | 必须存在于场景树（否则渲染时报错并指路） |
+| `tracks[].kind` | `translate` / `rotate` / `scale` / `visible` | 别名：`position`/`rotation`/`size`/`show` |
+| `keys[].t` | 时间（**秒**） | 也接受 `time`；**不要求有序**（解析时排序） |
+| `keys[].value` | 值 | `rotate` 是**欧拉角（弧度）**；`visible` 取 `value.x > 0.5` |
+| `keys[].easing` | `linear` / `constant` / `ease-in` / `ease-out` / `ease-in-out` | 作用于"本帧 → 下一帧"这一段 |
+
+**端点保持**：时间在关键帧范围外取端点值（不循环、不外推）——循环是播放器的策略
+（`t = fmod(t, duration)`），库只负责"给我 t 时刻的值"。
+
+### 4.5.3 渲染某一时刻
+
+```cpp
+// 静态（原行为，逐像素不变）
+render_scene(spec, canvas, background);
+// 动画：渲染 t 时刻
+render_scene_at(spec, time_seconds, canvas, background);
+// 复用已有场景实例（批量导出用这条）
+render_scene_at_into(spec, time, scene, canvas, background);
+```
+
+没有动画时两者**逐像素相同**（`anim_script_without_time_matches_static` 钉住）。
+
+### 4.5.4 glTF 中的动画（含一条必须说清的损失）
+
+| glTF | 本框架 |
+|---|---|
+| `channels[].target.path: translation / rotation / scale` | `TrackKind::Translation / Rotation / Scale` |
+| `rotation` 采样（**四元数**） | 转欧拉角存 → **万向锁附近有损** |
+| `interpolation: LINEAR / STEP` | `Easing::Linear / Constant` |
+| `interpolation: CUBICSPLINE` | 取"值"那个控制点（曲率丢失，**声明为近似**） |
+
+**反方向的损失更要紧**：glTF 的插值只有 LINEAR / STEP / CUBICSPLINE 三种，
+而本框架的 `ease-*` 是**任意曲线**。直接写 LINEAR 会让缓动消失（霜天里对、Blender 里不对）。
+解法是导出前**稠密化**：
+
+```cpp
+options.animations = { densify(clip, 1.0f / 30.0f) };   // 按 30Hz 重采样
+```
+
+曲线形状因此保真（2 秒动画 → 61 个关键帧），代价是关键帧变多。
+`densify` 会跳过本来就全是 LINEAR 的轨道（不白白膨胀）。
+
+
 
 ```cpp
 // ① 直接造形状
@@ -254,6 +337,8 @@ st::raster::gltf_write_file("out/gear.glb", objects, {.binary = true});
 | `tests/geom_primitives_test.cpp` | 22 个图元逐个：绕序/水密/单位法线/UV/确定性/尺寸语义/别名与报错 |
 | `tests/geom_gltf_test.cpp` | `.glb` 头与 chunk 长度、往返逐顶点、第三方文件能读、错误带路径、落盘往返 |
 | `tests/geom_scene_graph_test.cpp` | 组合模型：父动子动、乘序、枢轴（含预设/符号）、扁平=嵌套、可见性继承、端到端渲染、错误带路径 |
+| `tests/geom_animation_test.cpp` | 动画：slerp 最短路径、缓动曲线、端点保持、旋转不走欧拉插值、可见性阶跃、校验、端到端、枢轴×动画组合 |
+| `tools/animation_probe.cpp` | 8 帧分镜图 + 带动画的 `.glb`（稠密化后读回验证） |
 | `tests/geom_scene_integration_test.cpp` | 22 个图元**真的画出像素**、旧形状语义不变、参数生效、导出→读回、焊接/变换/OBJ 往返 |
 | `tools/primitives_gallery_probe.cpp` | 22 格总览 PNG + 每个图元的 `.glb`（可拖进 Blender 对照） |
 | `tools/composite_pivot_probe.cpp` | 组合模型四格对照（无旋转 / 绕肩转 / 枢轴错放 / 父隐藏），证明父子与枢轴各自生效 |

@@ -138,6 +138,7 @@ auto walk(const SceneNode& node, std::string_view parent_path, const math::Mat4&
   resolved.parent = parent_index;
   resolved.has_geometry = node.has_geometry;
   resolved.visible = parent_visible && node.visible;
+  resolved.local = node.local;
   resolved.world = parent_world * local_matrix(node);
 
   const int index = static_cast<int>(state.tree.nodes.size());

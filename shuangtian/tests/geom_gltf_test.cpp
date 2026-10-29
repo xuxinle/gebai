@@ -18,8 +18,11 @@
 #include <vector>
 
 #include "st/core/fs.hpp"
+#include "st/core/log.hpp"
 #include "st/core/json.hpp"
+#include "st/raster/animation.hpp"
 #include "st/raster/gltf.hpp"
+#include "st/math/quaternion.hpp"
 #include "st/raster/mesh_ops.hpp"
 #include "st/raster/primitives.hpp"
 #include "st/test/test.hpp"
@@ -31,6 +34,11 @@ using st::raster::GltfObject;
 using st::raster::GltfScene;
 using st::raster::GltfWriteOptions;
 using st::raster::Mesh;
+using st::raster::Clip;
+using st::raster::Track;
+using st::raster::Keyframe;
+using st::raster::Easing;
+using st::raster::TrackKind;
 namespace prim = st::raster::primitives;
 
 auto make_cube_mesh() -> Mesh {
@@ -280,4 +288,127 @@ ST_TEST(gltf_file_round_trip_through_disk) {
   ST_REQUIRE(!from_gltf->meshes.empty());
   ST_CHECK_EQ(from_gltf->meshes.front().vertex_count(), object.mesh.vertex_count());
   ST_CHECK_EQ(from_gltf->meshes.front().indices.size(), object.mesh.indices.size());
+}
+
+ST_TEST(gltf_animation_round_trips) {
+  // 端到端：本框架的 Clip → 写出 glTF → 读回 → 采样值一致。
+  //
+  // ## 判据为什么钉"采样值"而不是"关键帧数"
+  //
+  // glTF 存旋转用**四元数**、本框架存**欧拉角**，往返必然过一次转换。
+  // 所以关键帧数可能不同（读回时每条通道一帧），但**同一时刻的姿态**必须一致——
+  // 那才是"动画对不对"的事实。
+  GltfObject object{};
+  object.mesh = make_cube_mesh();
+  object.name = "box";
+
+  Clip clip{};
+  clip.name = "move";
+  Track track{};
+  track.node = "box";
+  track.kind = TrackKind::Translation;
+  track.keys = {Keyframe{0.0f, st::math::Vec3{0.0f, 0.0f, 0.0f}, Easing::Linear},
+                Keyframe{1.0f, st::math::Vec3{1.0f, 0.5f, -0.5f}, Easing::Linear}};
+  clip.tracks = {track};
+
+  GltfWriteOptions options{};
+  options.binary = true;
+  options.animations = {clip};
+  auto bytes = st::raster::gltf_write_binary({object}, options);
+  ST_REQUIRE(bytes.has_value());
+  auto scene = st::raster::gltf_read(*bytes);
+  ST_REQUIRE(scene.has_value());
+  ST_REQUIRE(scene->animations.size() == 1U);
+  const Clip& back = scene->animations.front();
+  ST_CHECK_EQ(back.name, std::string("move"));
+  ST_REQUIRE(back.tracks.size() == 1U);
+  ST_CHECK(back.tracks.front().kind == TrackKind::Translation);
+  ST_CHECK_EQ(back.tracks.front().node, std::string("box"));
+  ST_REQUIRE(back.tracks.front().keys.size() == 2U);
+
+  // 采样值：中点必须是 (0.5, 0.25, -0.25)
+  const auto sampled = st::raster::sample_clip(back, 0.5f);
+  ST_REQUIRE(!sampled.empty());
+  ST_CHECK_NEAR(sampled.front().local.translation.x, 0.5f, 1e-4f);
+  ST_CHECK_NEAR(sampled.front().local.translation.y, 0.25f, 1e-4f);
+  ST_CHECK_NEAR(sampled.front().local.translation.z, -0.25f, 1e-4f);
+}
+
+ST_TEST(gltf_animation_rotation_survives_quaternion_round_trip) {
+  // 旋转：欧拉角 → 四元数（写）→ 欧拉角（读）。同一时刻的姿态必须等价。
+  //
+  // ⚠ 判据按**矩阵**比而不是按欧拉角比：欧拉角有多组等价写法
+  // （350° 与 -10°、万向锁附近的无穷组），直接比数值会得到假红。
+  // 旋转矩阵是唯一表示——同一姿态必得同一矩阵。
+  GltfObject object{};
+  object.mesh = make_cube_mesh();
+  object.name = "arm";
+
+  Clip clip{};
+  Track track{};
+  track.node = "arm";
+  track.kind = TrackKind::Rotation;
+  track.keys = {Keyframe{0.0f, st::math::Vec3{0.0f, 0.0f, 0.0f}, Easing::Linear},
+                Keyframe{1.0f, st::math::Vec3{0.3f, 0.0f, 0.9f}, Easing::Linear}};
+  clip.tracks = {track};
+
+  GltfWriteOptions options{};
+  options.binary = true;
+  options.animations = {clip};
+  auto bytes = st::raster::gltf_write_binary({object}, options);
+  ST_REQUIRE(bytes.has_value());
+  auto scene = st::raster::gltf_read(*bytes);
+  ST_REQUIRE(scene.has_value());
+  ST_REQUIRE(scene->animations.size() == 1U);
+
+  for (const float time : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+    const auto original = st::raster::sample_clip(clip, time);
+    const auto loaded = st::raster::sample_clip(scene->animations.front(), time);
+    ST_REQUIRE(!original.empty());
+    ST_REQUIRE(!loaded.empty());
+    const st::math::Mat4 a =
+        st::math::Quat::from_euler(original.front().local.rotation).to_matrix();
+    const st::math::Mat4 b = st::math::Quat::from_euler(loaded.front().local.rotation).to_matrix();
+    for (int row = 0; row < 3; ++row) {
+      for (int column = 0; column < 3; ++column) {
+        ST_CHECK_NEAR(a.value(row, column), b.value(row, column), 0.02f);
+      }
+    }
+  }
+}
+
+ST_TEST(gltf_densify_preserves_easing_curve) {
+  // 缓动曲线在稠密化之后必须保形：原始 ease-in-out 的中点是 0.5，
+  // 四分之一处必须 **明显小于** 线性值 0.25（曲线特征）。
+  Track track{};
+  track.node = "box";
+  track.kind = TrackKind::Translation;
+  track.keys = {Keyframe{0.0f, st::math::Vec3{0.0f, 0.0f, 0.0f}, Easing::EaseInOut},
+                Keyframe{1.0f, st::math::Vec3{1.0f, 0.0f, 0.0f}, Easing::Linear}};
+  Clip clip{};
+  clip.tracks = {track};
+
+  const Clip dense = st::raster::densify(clip, 0.05f);
+  ST_REQUIRE(!dense.tracks.empty());
+  // 1 秒 / 0.05 = 20 段 → 21 个关键帧
+  ST_CHECK(dense.tracks.front().keys.size() >= 20U);
+  // 全部变成线性（稠密化之后每段都是直线）
+  for (const Keyframe& key : dense.tracks.front().keys) {
+    ST_CHECK(key.easing == Easing::Linear);
+  }
+  // 曲线保形：四分之一处 ease-in-out 的值 ≈ 0.156（< 线性 0.25）
+  const auto sampled = st::raster::sample_clip(dense, 0.25f);
+  ST_REQUIRE(!sampled.empty());
+  st::log::out("[gltf] densified t=0.25 x={:.4f}\n",
+               static_cast<double>(sampled.front().local.translation.x));
+  ST_CHECK(sampled.front().local.translation.x < 0.2f);
+  ST_CHECK(sampled.front().local.translation.x > 0.1f);
+  // 端点仍精确
+  ST_CHECK_NEAR(st::raster::sample_clip(dense, 0.0f).front().local.translation.x, 0.0f, 1e-5f);
+  ST_CHECK_NEAR(st::raster::sample_clip(dense, 1.0f).front().local.translation.x, 1.0f, 1e-5f);
+
+  // 全线性的轨道不该被膨胀（白白变胖）
+  clip.tracks[0].keys[0].easing = Easing::Linear;
+  const Clip untouched = st::raster::densify(clip, 0.05f);
+  ST_CHECK_EQ(untouched.tracks.front().keys.size(), 2U);
 }

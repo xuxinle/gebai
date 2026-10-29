@@ -604,12 +604,19 @@ G3 format +15.9 MB（**89/147 个单元直接用，不能移**）· G4 filesyste
 扁平写法（`parent` 引用，父可后置）与嵌套写法等价（逐位比世界矩阵）。重名/环/父不存在/深度超限
 全部在解析阶段报错并带路径。
 
+**同一轮第三块：动画**（`src/geom/quaternion.cpp` + `src/geom/animation.cpp`）。
+四元数（slerp / 欧拉互转）+ 关键帧轨道（translate/rotate/scale/visible）+ 四种缓动
++ 稠密化。场景脚本加 `animation` 字段与 `render_scene_at`；glTF 读写动画（含
+CUBICSPLINE 取控制点、ease-* 导出前稠密化的取舍）。
+
 **验收**：`tests/geom_primitives_test.cpp`（6 条，逐图元断言）、`tests/geom_gltf_test.cpp`
 （6 条，含 `.glb` 头/chunk 长度、第三方文件、错误路径、落盘往返）、
 `tests/geom_scene_graph_test.cpp`（7 条，组合模型：乘序/枢轴/扁平=嵌套/可见性继承/端到端/错误路径）、
 `tests/geom_scene_integration_test.cpp`（8 条，含 22 图元**真的画出像素**、导出读回、尺寸字段优先级）、
 `tools/primitives_gallery_probe.cpp`（22 格 PNG + 22 个 `.glb`，实测 22/22 通过）、
-`tools/composite_pivot_probe.cpp`（四格对照图，父转/枢轴/可见性三条判据均 ok）。
+`tools/composite_pivot_probe.cpp`（四格对照图，父转/枢轴/可见性三条判据均 ok）、
+`tests/geom_animation_test.cpp`（11 条，含 slerp 最短路径、缓动曲线、枢轴×动画组合）、
+`tools/animation_probe.cpp`（8 帧分镜 + 带动画 glb，四条判据均 ok）。
 文档：`docs/geometry.md`。
 
 **这一轮踩到的缺陷形态（值得记住）**：22 个生成器第一版有 **6 个绕序错**

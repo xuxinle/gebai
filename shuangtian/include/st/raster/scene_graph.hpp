@@ -133,6 +133,13 @@ struct ResolvedNode {
   std::size_t depth{0};
   int parent{-1};                              ///< 指向 `ResolvedNode` 的下标；-1 = 根
   math::Mat4 world{math::Mat4::identity()};    ///< 已含父链
+  /// 本节点的局部 TRS（**已含动画采样结果**）。
+  ///
+  /// 为什么把它带出来：调用方常常需要在"世界矩阵之外"拿到局部值
+  /// （例如枢轴预设要重算局部矩阵、导出动画要取当前姿态）。
+  /// 只给 `world` 的话，重算局部就会退回场景里的初始值——实测症状是
+  /// "设了枢轴的节点纹丝不动，其它节点正常"。
+  TransformTRS local{};
   bool visible{true};                          ///< 自身与全部祖先都可见才为真
   bool has_geometry{true};
 };

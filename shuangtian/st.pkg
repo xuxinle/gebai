@@ -469,6 +469,12 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "用一份 JSON 描述整个三维场景：解析/报错指路/渲染/参数生效/确定性"
     },
+    "animation_probe": {
+      "kind": "executable",
+      "sources": ["tools/animation_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "关键帧动画：分镜图（8 帧）+ 导出带动画的 .glb 并读回验证采样值"
+    },
     "composite_pivot_probe": {
       "kind": "executable",
       "sources": ["tools/composite_pivot_probe.cpp"],

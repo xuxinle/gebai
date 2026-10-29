@@ -48,8 +48,11 @@
 ///   `layout`），在这里引入时间会让确定性变复杂。
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
+
+#include "st/raster/animation.hpp"
 
 #include "st/core/error.hpp"
 #include "st/core/json.hpp"
@@ -216,6 +219,27 @@ struct SceneObjectSpec {
   bool ground{false};
 };
 
+/// 一段动画的**脚本层形态**说明（真正的数据结构是 `Clip`，见 `st/raster/animation.hpp`）。
+///
+/// ## JSON 形状（与大模型友好优先：字段名直白、时间就是秒）
+///
+/// ```json
+/// "animation": {
+///   "name": "wave",
+///   "duration": 2.0,
+///   "tracks": [
+///     { "node": "shoulder", "kind": "rotate",
+///       "keys": [ { "t": 0.0, "value": [0, 0, 0], "easing": "ease-in-out" },
+///                 { "t": 1.0, "value": [0, 0, 0.8] },
+///                 { "t": 2.0, "value": [0, 0, 0] } ] },
+///     { "node": "hand", "kind": "visible",
+///       "keys": [ { "t": 0.0, "value": [1, 0, 0] }, { "t": 1.5, "value": [0, 0, 0] } ] }
+///   ]
+/// }
+/// ```
+///
+/// `keys[].t` 用 **`t`**（而不是 `time`）：少打三个字、且和数学写法一致；
+/// 但两级都接受 `time`（不让人因为拼写而被拒）。
 /// 完整场景描述。
 struct SceneSpec {
   Camera camera{};
@@ -230,6 +254,12 @@ struct SceneSpec {
   /// 几乎总在同一个素材目录下，逐对象重复声明只会漂移。
   /// 为空时 `obj:` 的路径按**原样**交给 `st::fs`（即相对当前工作目录）。
   std::string asset_basis{};
+
+  /// 场景自带的动画（最多一段；播放时刻由 `render_scene_at` 指定）。
+  ///
+  /// 为什么放在 `SceneSpec` 而不是 `SceneObjectSpec`：动画是**跨节点**的
+  ///（一条轨道动一个节点，一段动画动整台设备），挂在单个对象上表达不了。
+  std::optional<st::raster::Clip> animation{};
 };
 
 /// 把一个形状引用解析成实际可加载的路径。
@@ -269,6 +299,26 @@ struct SceneSpec {
 /// @param background 清屏色（线性值）
 [[nodiscard]] auto render_scene(const SceneSpec& spec, Canvas& canvas,
                                 math::Color background) -> Result<void>;
+
+/// 渲染**某一时刻**的一帧（场景自带动画时用它）。
+///
+/// ## 为什么给独立函数而不是给 `render_scene` 加个默认参数
+///
+/// "静态场景"与"动画场景"是两种用法：前者一次出图，后者逐帧出片。
+/// 把 `time` 塞进 `render_scene` 会让静态调用点多一个无意义参数，
+/// 也让"这份脚本到底有没有动画"变成运行期才知道的事。
+///
+/// ## 时间语义
+///
+/// - `time` 单位是**秒**；范围外按端点保持（不循环——循环是播放器策略，
+///   见 `animation.hpp`）。要循环：`time = fmod(time, clip.duration())`。
+/// - 没有动画时与 `render_scene` **逐像素相同**。
+[[nodiscard]] auto render_scene_at(const SceneSpec& spec, float time, Canvas& canvas,
+                                   math::Color background) -> Result<void>;
+
+/// 同上，但复用调用方已有的场景实例（裁云导出时用这条）。
+[[nodiscard]] auto render_scene_at_into(const SceneSpec& spec, float time, Scene3D& scene,
+                                        Canvas& canvas, math::Color background) -> Result<void>;
 
 /// 用**调用方提供的场景实例**渲染（不新建、不碰环境变量）。
 ///
