@@ -148,15 +148,23 @@ test("协议版本不匹配拒绝（v1 驱动上报被拒）", async () => {
   sc.dispose("test-done")
 })
 
-test("崩溃自愈：进程静默死亡后请求重发一次成功（重发携带原 ctx）", async () => {
+test("崩溃不自愈：进程死亡拒绝在途请求，下次调用自动拉起新进程成功", async () => {
   const sc = new AgentSidecar({ command: BUN, spawn: fakeSpawn("crash-once-silent") })
   const info = await sc.init() // 第一次进程正常握手
   expect(info.name).toBe("fake")
-  // 第一次 tool.call：驱动静默死亡 → 宿主重启进程 → 重发该请求 → 新进程响应
-  const r = await sc.toolCall("echo", { retry: true }, CTX)
+  // 第一次 tool.call：驱动静默死亡 → 不重发自愈 → 在途请求被拒
+  let err = ""
+  try {
+    await sc.toolCall("echo", { retry: true }, CTX)
+  } catch (e) {
+    err = (e as Error).message
+  }
+  expect(err).toContain("边车进程退出")
+  // 下次调用：ensureStarted 自动拉新进程（新进程正常响应，FLAG_FILE 已存在）
+  const r = await sc.toolCall("echo", { after: "crash" }, CTX)
   expect(r.error).toBeUndefined()
   const echoed = JSON.parse(r.output.slice("echo:".length)) as { ctx: SidecarCtx }
-  expect(echoed.ctx.sessionId).toBe("s-test") // 重发请求原样重写请求行，ctx 不丢
+  expect(echoed.ctx.sessionId).toBe("s-test")
   sc.dispose("test-done")
 })
 
@@ -170,7 +178,7 @@ test("请求超时：杀进程重启，该次拒绝，下次调用用新进程�
     err = (e as Error).message
   }
   expect(err).toContain("超时")
-  // 超时后进程被杀重启：换回 ok 行为验证新进程可用
+  // 超时后进程被杀：下次调用 ensureStarted 拉新进程（换 ok 行为验证）
   ;(sc as unknown as { opts: { spawn: SidecarSpawnFn } }).opts.spawn = fakeSpawn("ok")
   const r = await sc.toolCall("echo", { after: "timeout" }, CTX)
   expect(r.output).toContain("echo:")
@@ -187,6 +195,20 @@ test("抖动风暴：启动即死不无限重启", async () => {
   }
   // 第一次启动即死：在途 init 请求被拒（重启后台进行但新进程同样即死；不产生无限进程风暴）
   expect(err.length).toBeGreaterThan(0)
+  sc.dispose("test-done")
+})
+
+test("stop 后可重启：主动停（发现拿完清单即停）不销毁，下次调用重新拉起", async () => {
+  const sc = new AgentSidecar({ command: BUN, spawn: fakeSpawn("ok") })
+  const info = await sc.init()
+  expect(info.name).toBe("fake")
+  const tools = await sc.toolsList()
+  expect(tools.length).toBe(1) // 发现阶段：拿完工具清单
+  sc.stop() // 发现即停：进程收起，但不 disposed
+  // stop 后调用自动重新拉起（新进程正常响应）
+  const r = await sc.toolCall("echo", { after: "stop" }, CTX)
+  expect(r.error).toBeUndefined()
+  expect(r.output).toContain("echo:")
   sc.dispose("test-done")
 })
 

@@ -455,7 +455,7 @@ export const channel: ChannelDef = {
         void (async () => {
           let senderName: string | undefined
           // 群消息：先尝试整群成员表；单聊（p2p）没有群成员接口，直接走 contact
-          if (msg.chatId && msg.chatType !== "p2p") {
+          if (msg.chatId && msg.chatName !== "与我的单聊") {
             const table = await resolveMemberTable(ctx, msg.chatId)
             senderName = table.get(msg.senderId ?? "")
           }

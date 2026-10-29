@@ -31,6 +31,7 @@ import { defaultCredentialSources, parseCredentialSources } from "../credential-
 import { loadCustomCredentialSources } from "../custom-auth"
 import { applyModelEnvOverrides, createProvider, parseExtraParams, resolveModelRouteProvider, resolveVisionProvider, type ApiKind, type ProviderConfig } from "../core/llm/llm"
 import { setVisionProviderGetter } from "@gebai/agents"
+import { takeoverProcess } from "@gebai/agents"
 import { scheduleGC } from "../core/session/gc"
 import { TaskManager } from "../core/schedule/tasks"
 import { UserTodoManager } from "../core/schedule/todos"
@@ -252,7 +253,7 @@ export interface Composed {
    * 窗口连的是主服务端口（方案 B），需先有 `/xiangqi` WS 可连。
    * 找不到 exe / 非本机形态时为空操作（日志提示，不阻断）。
    */
-  launchXiangqi: (actualPort: number) => void
+  launchXiangqi: (actualPort: number) => Promise<void>
 }
 
 export async function composeServer(overrides: Partial<Parameters<typeof loadConfig>[0]> = {}): Promise<Composed> {
@@ -742,7 +743,9 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       discoverPersonas,
       createDriverTools,
       createDriverListTool,
+      matchesSubscription,
     } = await import("@gebai/persona")
+    type PersonaDef = import("@gebai/persona").PersonaDef
     const { PersonaSessionResolver } = await import("../core/session/persona-sessions")
     const { EnginePersonaRunner } = await import("../core/session/persona-runner")
     const { toEngineTools: adaptDriverTools, personaContextResolver } = await import("../core/session/persona-driver-tools")
@@ -752,26 +755,74 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
 
     const personaDirs = defaultPersonaScanDirs({ packageRoot: await resolvePersonaPackageRoot() })
     const found = await discoverPersonas(personaDirs)
+
+    // 环境变量配置面：**人格共性放代码、使用者差异放 env**（同名角色在不同部署
+    // 只需改 env 不改代码）。两个变量在热加载重扫时同样生效（见 syncPersonaDefs）。
+    //
+    // GEBAI_PERSONA_ENABLE：人格启用白名单（逗号分隔 id；非空仅启用名单内——
+    // 与 GEBAI_EVENT_SOURCES_ENABLE / GEBAI_SUB_AGENTS_ENABLE 同口径）。
+    // GEBAI_PERSONA_<ID>_CHATS：该人格只监听这些群（逗号分隔 chat_id）——
+    // 注入为三段式订阅 `feishu:<chatId>:message`，与定义里的共性订阅取并集；
+    // <ID> 为人格 id 的大写（下划线不变），如 finops_auditor → GEBAI_PERSONA_FINOPS_AUDITOR_CHATS。
+    const applyPersonaEnv = (personas: Map<string, PersonaDef>): Map<string, PersonaDef> => {
+      const enableRaw = (process.env.GEBAI_PERSONA_ENABLE ?? "").trim()
+      const enable = new Set(enableRaw ? enableRaw.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean) : [])
+      const matchesSub = matchesSubscription
+      const out = new Map<string, PersonaDef>()
+      for (const [id, def] of personas) {
+        if (enable.size && !enable.has(id)) {
+          log.info(`[gebai] 人格 ${id} 不在 GEBAI_PERSONA_ENABLE 名单内，未启用`)
+          continue
+        }
+        const chatsRaw = (process.env[`GEBAI_PERSONA_${id.toUpperCase()}_CHATS`] ?? "").trim()
+        if (!chatsRaw) {
+          out.set(id, def)
+          continue
+        }
+        const chats = chatsRaw.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean)
+        if (chats.length === 0) {
+          out.set(id, def)
+          continue
+        }
+        // 群收窄（替换而非追加——追加不收窄：既有 feishu:message 仍匹配所有群）：
+        // 凡能匹配「feishu 渠道 message 事件」的订阅（feishu / feishu:message /
+        // message / *），一律替换为逐群三段式订阅；其余订阅（schedule/webhook 等
+        // 不碰 feishu 消息的）原样保留。
+        // 注：订阅了 `*`/`message` 的人格会被收窄到名单内群（其它渠道 message 事件
+        // 也不再匹配）——设置 CHATS 即声明「这个人格只看这些群」。
+        const chatSubs = chats.map((chatId) => `feishu:${chatId}:message`)
+        const narrow = (subs: string[]): string[] => {
+          const kept = subs.filter((s) => !matchesSub(s, { kind: "message", channel: "feishu", chatId: "__probe__" }))
+          return [...kept, ...chatSubs.filter((s) => !kept.includes(s))]
+        }
+        const drivers = (def.drivers ?? []).map((d) => ({ ...d, subscriptions: narrow(d.subscriptions) }))
+        out.set(id, { ...def, drivers })
+        log.info(`[gebai] 人格 ${id} 已收窄到群：${chats.join("、")}（GEBAI_PERSONA_${id.toUpperCase()}_CHATS）`)
+      }
+      return out
+    }
+
+    const foundFiltered = applyPersonaEnv(found.personas)
     if (found.personas.size === 0) {
       log.warn(
         `[gebai] GEBAI_PERSONA 已开启但未发现任何人格定义（内置 ${personaDirs.builtin} / 二开 ${personaDirs.custom}）` +
           `——入站事件将无人处理（记日志）。放一个 \`export const persona: PersonaDef\` 文件即可。`,
       )
     } else {
-      log.info(`[gebai] 拟人模式已启用，${found.personas.size} 个人格：${[...found.personas.keys()].join("、")}`)
+      log.info(`[gebai] 拟人模式已启用，${foundFiltered.size} 个人格：${[...foundFiltered.keys()].join("、")}`)
     }
     for (const [id, err] of found.errors) log.warn(`[gebai] 人格 ${id} 加载失败 [${err.domain}]: ${err.error}`)
 
     // 动态 driver 持久化：模型自建的分身落盘到 {GEBAI_HOME}/persona/drivers.json
     const driverStore = new PersonaDriverStore(config.gebaiHome)
     const driverRegistry = new DriverRegistry({
-      statics: [...found.personas.values()].flatMap((p) => (p.drivers ?? []).map((def) => ({ personaId: p.id, def }))),
+      statics: [...foundFiltered.values()].flatMap((p) => (p.drivers ?? []).map((def) => ({ personaId: p.id, def }))),
       persistence: driverStore,
       log: { info: log.info, warn: log.warn },
     })
     await driverRegistry.init()
 
-    personaCatalog = new PersonaCatalog({ personas: found.personas, drivers: driverRegistry })
+    personaCatalog = new PersonaCatalog({ personas: foundFiltered, drivers: driverRegistry })
     personaSessions = new PersonaSessionResolver({
       store,
       log: { info: log.info, warn: log.warn },
@@ -796,16 +847,17 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
      *
      * 失败隔离：重扫失败（目录不可读/定义写错）**保留旧可用版本**，不把当前人格清空。
      */
-    const syncPersonaDefs = async (): Promise<void> => {
+        const syncPersonaDefs = async (): Promise<void> => {
       if (!personaCatalog || !personaRuntime) return
       const res = await discoverPersonas(personaDirs)
       if (res.personas.size === 0) {
-        // 一个都读不到：多半是目录暂时不可读 / 文件全写坏了。不清空——
+        // 一个都读不到：多半是目录暂时不可读/文件全写坏了。不清空——
         // 把现有全部人格下线比“配置暂不可读”严重得多
         log.warn(`[gebai] 人格目录重扫为一个都未找到（保留当前 ${personaCatalog.ids().length} 个人格）：${personaDirs.custom}`)
         return
       }
-      const diff = personaCatalog.replace(res.personas)
+      // env 配置面同样作用于热加载重扫（改 GEBAI_PERSONA_ENABLE/_CHATS 后无需重启）
+      const diff = personaCatalog.replace(applyPersonaEnv(res.personas))
       for (const [id, err] of res.errors) log.warn(`[gebai] 人格 ${id} 重加载失败 [${err.domain}]: ${err.error}`)
       if (!diff.added.length && !diff.removed.length && !diff.changed.length && !diff.driversAdded.length && !diff.driversRemoved.length) {
         return // 内容无变化（只是 mtime 变了/别的文件动了）：不打日志不刷屏
@@ -1314,7 +1366,7 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   //
   // 失败策略：找不到/启动失败只记日志，绝不阻断服务——相期是附加提醒面，
   // 没有它时授权卡仍走 REST 链接降级（`/api/v1/persona/status` 的 authorizeUrl）。
-  const launchXiangqi = (port: number): void => {
+  const launchXiangqi = async (port: number): Promise<void> => {
     if (!config.personaEnabled || config.auth !== "local") return
     const plan = planXiangqiLaunch({
       gebaiHome: config.gebaiHome,
@@ -1338,12 +1390,19 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     }
     // 数据根与控制器侧同一公式（agents 的 homeFromEnv）：两处各写一份的话，
     // WS 断时推卡写一处、答复读另一处，而正常路径下完全看不出异常。
+    //
+    // 接管：先关掉已经在跑的同一 exe（服务重启后旧窗口还连着已死的服务端 WS，
+    // 不接管的话新旧并存、旧窗口全部无响应）——枚举/kill 失败只记日志，不阻断拉起。
+    const takeover = takeoverProcess(plan.bin, { log })
     log.info(`[gebai] 拉起相期窗口：${plan.bin} ${plan.args.join(" ")}`)
     if (plan.uiDir === null) {
       // 缺 UI 目录时 exe 会以「装载失败」自己退出，不提前说会让人误以为是连接问题。
       log.warn(`[gebai] 相期 UI 资源目录未找到（${plan.bin} 所在树里没有 shuangtian/examples/xiangqi/ui）——窗口可能启动即退出`)
     }
     try {
+      const take = await takeover
+      if (take.warnings.length) for (const w of take.warnings) log.warn(`[gebai] 相期接管警告：${w}`)
+      if (take.killed.length) log.info(`[gebai] 已接管旧相期实例：${take.killed.map((k) => `pid=${k.pid}`).join("、")}`)
       const child = spawn(plan.bin, plan.args, {
         detached: true,
         stdio: "ignore",

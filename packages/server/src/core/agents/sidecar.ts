@@ -5,9 +5,8 @@
  * 进程管理对齐 CV sidecar（core/cv/sidecar.ts）已验证模式，并按「子代理进程」语义增强：
  * - 惰性启动 + 启动串行化（并发首次请求共用一次启动）
  * - 请求超时：杀进程重启、该次请求拒绝（下次调用用新进程）
- * - 崩溃自愈：进程意外退出自动重启一次并重试在途请求一次（长驻子代理的常见抖动自愈，
- *   如 pip_install 建好 venv 后边车主动退出重启即切换 venv 解释器——无需重启服务）
- * - 自动重启不无限：进程退出后短时间内反复死亡 → 放弃重启（待下次调用再拉起），防抖动风暴
+ * - **惰性生命周期**：发现阶段拿完工具清单即 `stop()`（不维持常驻）；进程退出/崩溃不自动
+ *   重启——拒绝在途请求、状态收起，等下次工具调用 `request → ensureStarted` 再拉起
  * - stderr 环形缓冲（16KB，排障）；stdout 协议行解析带行上限防护
  * - 父进程退出清理（process exit hook）+ 驱动侧 stdin EOF 自杀 双保险防孤儿进程
  *
@@ -25,10 +24,6 @@ const REQUEST_TIMEOUT_MS = 120_000
 const HANDSHAKE_TIMEOUT_MS = 30_000
 /** stdout 协议行上限（异常大行 = 协议损坏，丢弃防内存膨胀）。 */
 const LINE_LIMIT = 1 << 24
-/** 崩溃自动重启的冷却判定：连续两次退出间隔不足该值累计为「连续快速退出」，第 3 次放弃自动重启
- *  （防抖动风暴；稳定运行后的单次崩溃总是自愈重发）。 */
-const RESTART_BACKOFF_MS = 10_000
-
 /** 边车协议版本（协议 v2：tool.call 携带请求级 ctx 载荷，见 keqing/README.md）。 */
 export const SIDECAR_PROTOCOL = 2
 
@@ -91,8 +86,6 @@ export interface SidecarResponse {
 interface Pending {
   resolve: (r: SidecarResponse) => void
   reject: (e: Error) => void
-  /** 崩溃自愈重试标记：置位后进程重启时重发一次请求。 */
-  replay?: { id: number; line: string }
 }
 
 /** 单个边车进程宿主：一个 manifest（一个子代理）一个实例，由客卿发现器（keqing）持有。
@@ -106,8 +99,6 @@ export class AgentSidecar {
   private nextId = 1
   private stderrTail = ""
   private starting: Promise<void> | null = null
-  private lastExitAt = 0
-  private consecutiveExits = 0
   private exitHookInstalled = false
   private disposed = false
   private buf = ""
@@ -180,8 +171,6 @@ export class AgentSidecar {
       this.pending.set(id, {
         resolve: (r) => { clearTimeout(timer); resolve(r) },
         reject: (e) => { clearTimeout(timer); reject(e) },
-        // 崩溃自愈：进程意外退出时该请求随进程重启重发一次（超时/正常响应不重发）
-        replay: { id, line },
       })
       // 写入可能 EPIPE（驱动主动退出如 pip 装完自杀/进程刚死管道已断）：吞掉转为该请求拒绝，
       // 不让未捕获异常打死进程；onExit 的自愈重启照常进行
@@ -269,6 +258,8 @@ export class AgentSidecar {
 
   /** 进程意外退出：短冷却内非频繁 → 自动重启 + 在途请求重发一次；频繁死亡 → 拒绝在途请求、
    *  不再自动拉起（下次调用 ensureStarted 再试）。 */
+  /** 进程退出：**不自愈**。拒绝在途请求（提交错误给调用方），进程清理归零——
+   *  下次工具调用 `request → ensureStarted` 再拉起（惰性生命周期，不维持常驻）。 */
   private onExit(): void {
     const procWasAlive = !!this.proc
     this.proc = null
@@ -277,47 +268,9 @@ export class AgentSidecar {
       this.rejectAll(new Error("边车已销毁"))
       return
     }
-    const now = Date.now()
-    const rapidExit = this.lastExitAt > 0 && now - this.lastExitAt < RESTART_BACKOFF_MS
-    this.consecutiveExits = rapidExit ? this.consecutiveExits + 1 : 1
-    this.lastExitAt = now
-    if (procWasAlive && this.consecutiveExits < 3) {
-      // 崩溃自愈：拉起新进程并在启动完成后重发在途请求（各重发一次，重发后不再带 replay）
-      void this.ensureStarted()
-        .then(() => {
-          // 已重试过（无 replay 标记）的在途请求立即拒绝：重试名额已用——典型是该请求本身
-          // 触发进程退出（os._exit/致命崩溃），再发只会杀死新进程，等超时白等
-          for (const [id, p] of [...this.pending]) {
-            if (p.replay) continue
-            this.pending.delete(id)
-            p.reject(new Error("边车进程在请求重试后仍退出（该请求可能触发进程退出，已放弃重试；后续调用用新进程）"))
-          }
-          for (const [id, p] of [...this.pending]) {
-            const rp = p.replay
-            if (!rp) continue
-            const { resolve, reject } = p
-            const timer = setTimeout(() => {
-              this.pending.delete(id)
-              this.killAndRestart(`重试请求超时（id ${id}）`)
-              reject(new Error("边车请求重试超时"))
-            }, this.opts.requestTimeoutMs)
-            this.pending.set(id, {
-              resolve: (r) => { clearTimeout(timer); resolve(r) },
-              reject: (e) => { clearTimeout(timer); reject(e) },
-              // 重发请求不再登记 replay（新进程再死即按抖动处理，拒绝防无限循环）
-            })
-            // 重发请求不再登记 replay（新进程再死即按抖动处理，拒绝防无限循环）；写入 EPIPE 同样吞掉
-            try {
-              const w = this.stdin?.write(rp.line)
-              if (w && typeof (w as Promise<unknown>).catch === "function") (w as Promise<unknown>).catch(() => {})
-            } catch { /* 新进程天折：请求由超时/退出路径收尾 */ }
-          }
-        })
-        .catch(() => this.rejectAll(new Error("边车崩溃后重启失败")))
-      return
-    }
-    const reason = this.consecutiveExits >= 3 ? `边车进程连续快速退出（${this.consecutiveExits} 次），放弃自动重启` : "边车进程退出"
+    const reason = `边车进程退出（已收起；下次调用自动重新启动）`
     this.rejectAll(new Error(this.exitErrorText(reason)))
+    void procWasAlive
   }
 
   private exitErrorText(prefix: string): string {
@@ -336,6 +289,24 @@ export class AgentSidecar {
     this.proc = null
     this.stdin = null
     this.rejectAll(new Error(reason))
+    try {
+      proc?.kill()
+    } catch { /* 已退出 */ }
+  }
+
+  /**
+   * 主动停止（**可重启**）：杀进程、拒在途，但保持可用——下次 `request` 经 `ensureStarted`
+   * 重新拉起。区别于 `dispose`（永久销毁，之后一律报边车已销毁）。
+   *
+   * 用途：发现阶段拿完工具清单就停（不维持常驻——进程只在真实工具调用期间存在）；
+   * 或空闲回收（长时间无调用后停掉，下次用再起）。
+   */
+  stop(): void {
+    if (this.disposed) return
+    const proc = this.proc
+    this.proc = null
+    this.stdin = null
+    this.rejectAll(new Error("边车已停止（下次调用自动重新启动）"))
     try {
       proc?.kill()
     } catch { /* 已退出 */ }

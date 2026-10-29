@@ -217,7 +217,9 @@ export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
   // 先有 WS 可连，窗口一起就能立即建立连接；失败只记日志不阻断。
   // 端口必顶 `server.port`（不是 config.port）：`port=0` 时真实端口由 OS 分配。
   try {
-    launchXiangqi(server.port ?? config.port)
+    void launchXiangqi(server.port ?? config.port).catch((err: unknown) =>
+      log.warn(`[gebai] 拉起相期窗口异常：${String((err as Error).message || err)}`),
+    )
   } catch (err) {
     log.warn(`[gebai] 拉起相期窗口异常：${String((err as Error).message || err)}`)
   }

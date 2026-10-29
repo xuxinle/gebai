@@ -46,6 +46,8 @@ export interface XiangqiProbeInput {
   profiles?: readonly string[]
   /** 文件存在判定（测试注入；缺省 `existsSync`）。 */
   exists?: (p: string) => boolean
+  /** PATH 查找（测试注入；缺省 `Bun.which`）。返回绝对路径或 null。 */
+  which?: (name: string) => string | null
 }
 
 export interface XiangqiBinResult {
@@ -73,9 +75,13 @@ function findRepoRoot(start: string, exists: (p: string) => boolean): string | n
 
 /**
  * 探测相期 exe：`XIANGQI_BIN` 覆盖 > `{GEBAI_HOME}/shuangtian/build/<档>` >
- * 「从服务自身目录上溯找仓库根」>「从 `{GEBAI_HOME}` 上溯找仓库根」。
+ * 「从服务自身目录上溯找仓库根」>「从 `{GEBAI_HOME}` 上溯找仓库根」>
+ * `{GEBAI_HOME}/xiangqi(.exe)` 直查 > `PATH`（Bun.which）。
  *
- * 后两路为什么不合并成一路：`GEBAI_HOME` 可能与仓库同根（源码形态）、可能是仓库下的
+ * 后两路是后备：使用者把单个 exe 放进 GEBAI_HOME（不随仓库/部署副本）或装进 PATH
+ * 时仍能找到——不同使用者的本地部署形态各异，探测面宁宽勿狭。
+ *
+ * 为什么后两路不合并成一路：`GEBAI_HOME` 可能与仓库同根（源码形态）、可能是仓库下的
  * 子目录（本地实例 `.gebai-local`）、也可能完全在别处（`~/.gebai` 部署）——
  * 从任意一个点**上溯找标记**都能收敛到仓库根，比硬编码相对级数可靠。
  */
@@ -110,6 +116,14 @@ export function resolveXiangqiBin(input: XiangqiProbeInput): XiangqiBinResult {
   for (const root of roots) {
     for (const profile of profiles) push(join(root, "shuangtian", "build", profile, "bin", XINGQI_EXE_NAME))
   }
+
+  // ④ GEBAI_HOME 直查（后备：使用者把单个 exe 放数据根，不随仓库/部署副本）
+  push(join(input.gebaiHome, XINGQI_EXE_NAME))
+
+  // ⑤ PATH（后备：装进了系统/用户 PATH 的场景）——which 返回的就是绝对路径
+  const which = input.which ?? ((name: string) => Bun.which(name) ?? null)
+  const onPath = which(XINGQI_EXE_NAME)
+  if (onPath) push(onPath)
 
   for (const candidate of candidates) {
     if (exists(candidate)) {

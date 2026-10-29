@@ -363,6 +363,10 @@ export async function launchKeqing(
   const def = { name: manifest.name, description, systemPrompt, tools: toolSet }
   liveSidecars.get(manifest.name)?.dispose("重新启动（热加载重扫）")
   liveSidecars.set(manifest.name, sidecar)
+  // **发现即停**：拿完工具清单（def.tools 已固化 schema）立刻停进程——不维持常驻。
+  // 生命周期改惰性：进程只在真实工具调用期间存在（sidecarTool.execute → request →
+  // ensureStarted 拉起）；崩溃也不自愈（onExit 只拒在途请求、清状态），等下次调用再起。
+  sidecar.stop()
   return { def, sidecar }
 }
 

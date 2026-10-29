@@ -111,6 +111,34 @@ describe("exe 路径探测：三种部署形态", () => {
     expect(r.candidates).toContain(exeOf(empty, "dev"))
     expect(r.candidates).toContain(exeOf(empty, "quick"))
   })
+
+  test("GEBAI_HOME 直查：{GEBAI_HOME}/xiangqi.exe 是后备（无仓库树时也能找到）", () => {
+    const home = tmpRoot("homebin")
+    const direct = join(home, XINGQI_EXE_NAME)
+    writeFileSync(direct, "fake")
+    const r = resolveXiangqiBin({ gebaiHome: home, moduleDir: join(tmpRoot("nowhere"), "x") })
+    expect(r.bin).toBe(direct)
+  })
+
+  test("仓库树候选优先于 GEBAI_HOME 直查（直查是后备）", () => {
+    const repo = makeRepo("homebinsrc")
+    // GEBAI_HOME 直查也存在，但仓库树应优先
+    writeFileSync(join(repo, XINGQI_EXE_NAME), "fake")
+    const r = resolveXiangqiBin({ gebaiHome: repo, moduleDir: join(repo, "packages", "server", "src", "boot") })
+    expect(r.bin).toBe(exeOf(repo))
+  })
+
+  test("PATH 后备：which 命中（注入 which 替身模拟：仓库树/GEBAI_HOME 都没有，只有 PATH 有）", () => {
+    const empty = tmpRoot("pathbin")
+    const onPath = join(tmpRoot("pbin"), XINGQI_EXE_NAME)
+    writeFileSync(onPath, "fake")
+    const r = resolveXiangqiBin({
+      gebaiHome: empty,
+      moduleDir: join(empty, "no", "repo", "here"),
+      which: () => onPath,
+    })
+    expect(r.bin).toBe(onPath)
+  })
 })
 
 describe("UI 资源目录", () => {

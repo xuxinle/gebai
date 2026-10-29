@@ -27,6 +27,9 @@ export { feishuFetch, feishuWsOptions, feishuTlsInsecure } from "./core/shared/t
 export { pageCaptureTool, PAGE_CAPTURE_HTML_LIMIT } from "./core/shared/page-capture"
 export { readFeedbackTool } from "./core/shared/feedback"
 
+// 进程接管（拉起常驻伴生应用前先关旧实例）：server 启动接线（相期/册府）与 cefu 控制器共用
+export { takeoverProcess, type TakeoverResult, type TakeoverLogger } from "./core/process-takeover"
+
 // 本机离线语音合成引擎（core/tts）：子Agent 工具与 REST 朗读接口共用同一份脚本与解析逻辑，
 // 执行通道（runCommand/文件读写）经 TtsDeps 注入——server 侧不重写脚本
 export {
