@@ -153,14 +153,14 @@ TS 侧（`packages/agents/src/{name}.ts`）与 客卿 侧（manifest 目录）�
 
 - 惰性启动、请求 id 配对（并发复用同一进程）、启动串行化
 - 请求级 ctx：每次 `tool.call` 携带 `ctx`（sessionId/user/cwd/env/sandboxed，见协议 v2）——进程单例跨会话共享，会话上下文随请求传递
-- 请求超时：杀进程重启、该次请求拒绝
-- 崩溃自愈：进程意外退出自动重启一次 + 在途请求重发一次（重发即原样重写请求行，携带原 ctx）
+- 请求超时：杀进程重启、该次请求拒绝（下次调用用新进程）
+- **惰性生命周期**：发现阶段拿完工具清单即 `stop()`（进程收起，不维持常驻）；进程退出/崩溃**不自动重启**——拒绝在途请求、状态收起，等下次工具调用自动拉起（`request → ensureStarted`）
 - 服务退出清理（exit hook）+ 驱动侧 stdin EOF 自杀 双保险
 - stderr 环形缓冲 16KB（错误信息附因）
 
 ## 生命周期与门控
 
-- **发现即启动**：`SubAgentManager.discover()` 尾部并行启动全部 客卿 边车（manifest/驱动/提示词文件变化触发重扫重注册——热加载；venv/__pycache__/编译产物不触发）
+- **发现即停**：`discoverKeqing` 启动每个边车完成握手（init/tools.list——工具清单必须在进程内才能拿到），**拿完即 `stop()`**——常驻不再存在，进程只在真实工具调用期间存在（`sidecarTool.execute → request → ensureStarted`）
 - **仅本地形态**：沙箱启用（服务端部署）或 `GEBAI_KEQING=off` 时整体禁用（对 `agent_list` 完全不可见）
 - **失败安全**：manifest 损坏/边车启动失败/握手失败/构建失败 → 该项记入 loadErrors（模型可见根因），不影响其他子代理与主流程
 - 工具调用恒需审批（任意代码执行面）

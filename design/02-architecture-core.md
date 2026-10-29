@@ -1193,6 +1193,49 @@ export const persona: PersonaDef = {
 **同 id 静态胜出**。否则模型可以靠「创建一个同名 driver」把关注面改成 `*`，
 等于让人手写的部署配置被模型静默改写。
 
+#### 订阅：三段式（channel:chatId:kind）支持按群收窄
+
+订阅是封闭集合（`*` / `kind` / `channel` / `channel:kind`，段序无关），现在扩展第三维：
+
+| 写法 | 含义 |
+|---|---|
+| `"feishu:oc_xxx:message"` | 只接 **feishu 渠道 · oc_xxx 群 · message 事件**（三段且关系，段序无关） |
+
+`EventCoords` 增加 `chatId`（取自 `PersonaEvent.context.refs.chatId`）。三段式是
+**不同群归不同人格**（A 群给算力审核员、B 群给值班助手）的基础。
+
+#### 环境变量配置面：人格共性放代码、差异放 env
+
+同名角色在不同部署（不同使用者）复用同一份定义文件，**启用与否与监听群**由 env 决定：
+
+| 变量 | 语义 |
+|---|---|
+| `GEBAI_PERSONA_ENABLE` | 人格启用白名单（逗号分隔 id；非空仅启用名单内）——与 `GEBAI_EVENT_SOURCES_ENABLE` 同口径 |
+| `GEBAI_PERSONA_<ID>_CHATS` | 该人格只监听这些群（逗号分隔 chat_id；未设 = 不限群）。**替换**（不是追加）——设置后该人格的 feishu 消息订阅（`feishu` / `feishu:message` / `message` / `*` 四类能匹配 feishu 消息的）全部换成逐群三段式订阅；其余订阅原样保留 |
+
+**出站同样按人格收窄（入站出站对称）**：`act` / `observe` 执行时反查会话归属
+（`SessionData.persona`，经 `ctx.sessions.store.load`），若人格配置了 `GEBAI_PERSONA_<ID>_CHATS`，
+飞书群目标必须在该名单内，否则**直接拒绝**（不进审批，与渠道白名单同语义）。
+实现：`core/tools/persona-outbound.ts`，在 `core/tools/channels.ts` 的 act/observe/requiresApproval 接入。
+非人格会话不过滤（沿用渠道全局白名单）；未配置 CHATS 的人格不限制（与入站同语义）；
+非 feishu 目标（jira/local 等）不经过人格群约束（走渠道自身白名单）。
+
+**人格出站治理三重闸**（`core/tools/persona-outbound-review.ts`，act 的 feishu send/reply 前过闸；
+普通会话全部跳过）：
+
+1. **禁机器人身份回退**：人格会话 `as_user≠true` 直接拒绝——人格的定义就是以用户本人在群里
+   说话，模型发现授权失效后改用机器人名义发等于人格悄悄变成机器人（群里看到 app 头像，
+   用户身份形同虚设）。普通会话不受影响。
+2. **出站审核**（`GEBAI_PERSONA_OUTBOUND_REVIEW`，缺省**开**）：发送前推相期 `card_ask`
+   （choice：批准/驳回，正文带目标群与消息全文）等用户点选——批准放行，驳回/超时/相期未连
+   均不发送（fail-closed）。审核依赖（card_ask 工具）由 compose 经 `ToolContext.personaOutboundDeps`
+   注入（engine opts 同名传入）；未注入时审核环节如实拒绝。
+3. **授权弹卡**：act 失败原因为「用户授权不可用」时自动推相期授权卡（复用 syncAuthCard 通路，
+   含去重/TTL/重推）——用户在群里等回复的当下就该看到提醒，不等 5 分钟定时器。
+
+装配点在 `boot/compose.ts` 的 `applyPersonaEnv`（discover 之后、Catalog 之前），热加载重扫
+同样经过它（改 env 无需重启）。
+
 #### 会话映射：稳定又可扩展
 
 映射写在 `SessionData.persona`（`{ personaId, driverId, boundAt }`，随 chat.json 持久化）：
@@ -1303,10 +1346,28 @@ export const persona: PersonaDef = {
 - **`--ui` 显式传绝对路径**：相期自身的资源探测是相对 cwd 的，而宿主 cwd 与 exe 所在树无关。
 
 exe 探测不数相对级数（数错一次就静默失败）：`XIANGQI_BIN` → `{GEBAI_HOME}/shuangtian/build/<档>/bin/`
-→ 从服务自身目录与 `GEBAI_HOME` 逐级上溯找仓库标记 `shuangtian/examples/xiangqi/`。
+→ 从服务自身目录与 `GEBAI_HOME` 逐级上溯找仓库标记 `shuangtian/examples/xiangqi/`
+→ `{GEBAI_HOME}/xiangqi(.exe)` 直查 → `PATH`（Bun.which）。
 失败只记日志（列出全部试过的路径）不阻断服务；`XIANGQI_AUTO=off` 显式关闭。
 成功时两条 info 日志可核对：`相期窗口已拉起：pid=N` 与 **`相期窗口已连上（/xiangqi）`**——
 后者才是「真的可用」的判据（进程活着但没连上的形态很容易出现）。
+
+**接管**：拉起前先关掉已经在跑的同一 exe（`agents/core/process-takeover.ts`：按可执行文件
+**全路径精确匹配**枚举进程 → kill 进程树 → 等退出）。服务重启后旧窗口还连着已死的服务端 WS，
+不接管的话新旧并存、旧窗口全部无响应。枚举/kill 失败只记日志不阻断（接管是清理不是门槛）；
+`GEBAI_TAKEOVER_DISABLE=1` 可整体跳过（CI/无权限环境）。册府（无头）与相期共用同一接管模块。
+
+##### 册府：TS 直接控制霜天应用（无头形态）
+
+册府（知识库）不再做独立客卿边车（`keqing/cpp/cefu` 已移除）——TS 子代理直接控制霜天册府
+应用的无头形态：`cefu.exe --headless --control-port 0 --control-file <ctl>` 起进程，读 ctl 拿
+port+token，经**长度前缀 JSON-RPC**（4 字节大端长度 + `{id,method,params}`）`hello` 握手后，
+用 `script {code:"app.cefu.<fn>(...)"}` 调桥函数。**一份 C++ 代码两个形态**（有头给人看、
+无头给歌白用），数据同一个 SQLite 库（`{GEBAI_HOME}/data/cefu/cefu.db`），不会再有
+「边车版加了功能、应用版没跟上」的分叉。exe 探测 `CEFU_BIN` → `{GEBAI_HOME}/shuangtian/...`
+→ 仓库树上溯 → `{GEBAI_HOME}/cefu(.exe)` → `PATH`（与相期同构）；拉起前同样接管旧实例。
+控制器（`packages/agents/src/agents/cefu/`）是**进程级单例**、工具首次调用时懒启动、
+进程崩溃自动重拉。
 
 两者都从同一个 `PersonaCredentialStatus` 读取，不各自判定——`authorizeUrl` 由状态惰性附带
 （拿到即可直接渲染，少一次往返）。

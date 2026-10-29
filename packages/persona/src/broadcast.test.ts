@@ -131,12 +131,14 @@ describe("subscription：订阅匹配语义", () => {
   })
 
   test("validateSubscription 拒绝非法写法", () => {
-    expect(validateSubscription("*")).toBeNull()
-    expect(validateSubscription("feishu:message")).toBeNull()
-    expect(validateSubscription("a:b:c")).toContain("段数")
-    expect(validateSubscription("feishu*")).toContain("非法")
-    expect(validateSubscription("")).toContain("不能为空")
-  })
+  expect(validateSubscription("*")).toBeNull()
+  expect(validateSubscription("feishu:message")).toBeNull()
+  // 三段式（channel:chatId:kind）是合法扩展
+  expect(validateSubscription("feishu:oc_abc:message")).toBeNull()
+  expect(validateSubscription("a:b:c:d")).toContain("段数")
+  expect(validateSubscription("feishu*")).toContain("非法")
+  expect(validateSubscription("")).toContain("不能为空")
+})
 })
 
 describe("driver 级筛选：只有关注的 driver 收到", () => {

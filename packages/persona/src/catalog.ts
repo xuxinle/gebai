@@ -189,7 +189,7 @@ export class PersonaCatalog implements PersonaLookup {
     // 定向 driver（worker 回报回到派它的那个分身）
     const explicitDriver = (event as { driverId?: string }).driverId
 
-    const coords = coordsOf(event as Pick<PersonaEvent, "kind" | "channel">)
+    const coords = coordsOf(event)
     const out: Array<{ personaId: string; user: string; driverIds: string[] }> = []
     for (const personaId of candidates) {
       if (!this.personas.has(personaId)) continue

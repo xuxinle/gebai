@@ -1437,10 +1437,31 @@ auto run_app(int argc, char** argv) -> int {
       const std::string type = msg.contains("type") ? st::json_as_string(msg["type"]) : std::string{};
       if (type == "cards" || type == "sync") {
         // 权威列表：整批替换（agent 是真相源）
-        if (msg.contains("cards")) (void)store.replace_all(msg["cards"]);
+        if (msg.contains("cards")) {
+          (void)store.replace_all(msg["cards"]);
+          // 整批同步里含需要答复的卡（重连/重启后恢复待办）→ 同样弹窗，
+          // 理由同单张新增：不能允许“重连后待办静默躺在后台窗口”。
+          if (msg["cards"].is_array()) {
+            for (const auto& card : msg["cards"]) {
+              const std::string kind =
+                  card.contains("kind") ? st::json_as_string(card["kind"]) : std::string{};
+              if (kind == KIND_CHOICE || kind == KIND_TODO) {
+                (void)app.window_restore();
+                break;
+              }
+            }
+          }
+        }
       } else if (type == "card") {
         // 单张新增/更新：更省流量的增量形态
         (void)store.push(msg);
+        // **需要答复的卡必须把窗口弹到前台**：choice/todo 不允许被忽略——
+        // 静默推到后台窗口等于允许请求静默消失（比不弹出来更糟：agent 以为
+        // 你收到并默许了）。notice 不弹（批量告知类，弹窗反而是打扰）。
+        const std::string kind = msg.contains("kind") ? st::json_as_string(msg["kind"]) : std::string{};
+        if (kind == KIND_CHOICE || kind == KIND_TODO) {
+          (void)app.window_restore();
+        }
       } else if (type == "dismiss") {
         // agent 主动撤回某张卡（如它自己解决了）
         if (msg.contains("id")) {

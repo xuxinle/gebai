@@ -32,6 +32,12 @@ import { ActionExecutor, ChannelRegistry } from "@gebai/channels"
 import type { ActOutcome, ObserveOutcome } from "@gebai/channels"
 import type { Tool } from "../base/types"
 import { schema, type GlobalToolEntry } from "./shared"
+import { personaOutboundBlock } from "./persona-outbound"
+import { personaOutboundGate, isAuthFailure, notifyAuthNeeded } from "./persona-outbound-review"
+import type { OutboundGateDeps } from "./persona-outbound-review"
+
+/** 出站治理依赖（相期卡工具/授权卡推送）在 ToolContext 上的注入键（compose 装配时写入）。 */
+export const PERSONA_OUTBOUND_DEPS_KEY = "personaOutboundDeps" as const
 
 /** 渠道注册表在 ToolContext 上的注入键（服务端启动装配时写入）。 */
 export const CHANNEL_REGISTRY_KEY = "channels" as const
@@ -71,6 +77,9 @@ export const actTool: Tool = {
   // 审批按动词的 writes 声明动态判定：读类免审，写类需审。
   // 未知渠道/动词返回 false（让执行期直接拒绝——不问「是否允许发给无关群」）。
   requiresApproval: async (args, ctx) => {
+    // 人格出站约束：越界的目标不该弹审批（问了也注定拒绝，与白名单同语义）
+    const block = await personaOutboundBlock(ctx, String(args.to ?? ""))
+    if (block) return false
     const ex = executorOf(ctx as { channels?: ChannelRegistry })
     if (!ex) return false
     return ex.needsApproval({
@@ -112,10 +121,29 @@ export const actTool: Tool = {
     if (!verb) return { output: "act 缺少 verb（动作名，见 channels_list）" }
     const payload = args.args && typeof args.args === "object" ? (args.args as Record<string, unknown>) : {}
 
+    // 人格出站约束：人格会话只能发到 GEBAI_PERSONA_<ID>_CHATS 允许的群（未配置不限）
+    const block = await personaOutboundBlock(ctx, to)
+    if (block) {
+      return { output: `出站被拒：${block}`, data: { ok: false, kind: "rejected", reason: block } }
+    }
+
+    // 人格出站治理（禁机器人回退 + 出站审核）：人格会话的 feishu 发送前过闸
+    const gateDeps = (ctx as Record<string, unknown>)[PERSONA_OUTBOUND_DEPS_KEY] as OutboundGateDeps | undefined
+    const gate = await personaOutboundGate(ctx, { target: to, verb, args: { ...payload, ...(args.why ? { why: String(args.why) } : {}) } }, gateDeps)
+    if (!gate.allowed) {
+      return { output: `发送未放行：${gate.reason}`, data: { ok: false, kind: "rejected", reason: gate.reason } }
+    }
+
     const r = await ex.act({ target: to, verb, args: payload })
     if (!r.ok) {
       const head = r.kind === "rejected" ? "动作被拒绝" : "动作失败"
-      return { output: `${head}：${r.reason}`, data: { ok: false, kind: r.kind, reason: r.reason } }
+      // 授权不可用类失败 → 推相期授权卡（用户在群里等回复的当下就该看到提醒）
+      let note = ""
+      if (isAuthFailure(r.reason)) {
+        const pushed = await notifyAuthNeeded(gateDeps?.pushAuthCard)
+        if (pushed) note = "\n（已在相期弹出授权卡——点链接完成授权后重发即可恢复以你的名义发言）"
+      }
+      return { output: `${head}：${r.reason}${note}`, data: { ok: false, kind: r.kind, reason: r.reason } }
     }
     const o: ActOutcome = r.outcome
     const why = String(args.why ?? "").trim()
@@ -154,6 +182,12 @@ export const observeTool: Tool = {
     if (!to) return { output: "observe 缺少 to（目标格式 channel:address）" }
     if (!what) return { output: "observe 缺少 what（观测项，见 channels_list）" }
     const payload = args.args && typeof args.args === "object" ? (args.args as Record<string, unknown>) : {}
+
+    // 人格出站约束（读面同样按人格收窄：只能观测自己群的上下文）
+    const block = await personaOutboundBlock(ctx, to)
+    if (block) {
+      return { output: `观测被拒：${block}`, data: { ok: false, kind: "rejected", reason: block } }
+    }
 
     const r = await ex.observe({ target: to, what, args: payload })
     if (!r.ok) {
