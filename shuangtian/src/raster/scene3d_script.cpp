@@ -1,6 +1,9 @@
 #include "st/raster/scene3d_script.hpp"
 
 #include "st/raster/gltf.hpp"
+#include "st/raster/scene_graph.hpp"
+
+#include <set>
 #include "st/raster/primitives.hpp"
 
 #include <cmath>
@@ -227,6 +230,40 @@ auto read_shadow(const Json& json) -> Result<PlanarShadow> {
   return shadow;
 }
 
+/// `SceneObjectSpec` → `SceneNode`（几何/材质留在 spec，空间信息进节点）。
+///
+/// 为什么要有这层桥：场景脚本的 `SceneObjectSpec` 同时承载"是什么"（形状/材质）
+/// 与"在哪"（变换），而 `scene_graph` 只管"在哪"。两者职责不同但字段重叠，
+/// 所以解析与渲染之间需要一个**显式**的转换点——而不是让两套结构互相 include。
+[[nodiscard]] auto to_node(const SceneObjectSpec& object) -> st::raster::SceneNode {
+  st::raster::SceneNode node{};
+  node.name = object.name;
+  node.has_geometry = !object.group;
+  node.local.translation = object.translate;
+  node.local.rotation = object.rotate;
+  node.local.scale = object.scale;
+  node.pivot = object.pivot;
+  node.visible = object.visible;
+  node.children.reserve(object.children.size());
+  for (const SceneObjectSpec& child : object.children) node.children.push_back(to_node(child));
+  return node;
+}
+
+/// `SceneNode` → `SceneObjectSpec`（保留空间信息；几何/材质取默认，由渲染侧按名字回填）。
+[[nodiscard]] auto from_node(const st::raster::SceneNode& node) -> SceneObjectSpec {
+  SceneObjectSpec object{};
+  object.name = node.name;
+  object.group = !node.has_geometry;
+  object.translate = node.local.translation;
+  object.rotate = node.local.rotation;
+  object.scale = node.local.scale;
+  object.pivot = node.pivot;
+  object.visible = node.visible;
+  object.children.reserve(node.children.size());
+  for (const st::raster::SceneNode& child : node.children) object.children.push_back(from_node(child));
+  return object;
+}
+
 auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec> {
   if (!node.is_object()) {
     return st::unexpected(ErrorCode::Parse,
@@ -252,6 +289,16 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
   if (!scale) return st::forward_error(scale.error());
   obj.scale = *scale;
 
+  // 记下"调用方显式写了哪些尺寸字段"（见 `SceneObjectSpec::specified` 的说明）。
+  // 这一位是"静默用错默认值"的解药：缺字段就落到该形状的历史默认，
+  // 写了就按写的来——两种脚本都能得到符合预期的形状。
+  const auto note_field = [&](const char* key, std::uint8_t flag) {
+    if (json_find(node, key) != nullptr) obj.specified |= flag;
+  };
+  note_field("radius", SceneObjectSpec::kSpecifiedRadius);
+  note_field("depth", SceneObjectSpec::kSpecifiedDepth);
+  note_field("height", SceneObjectSpec::kSpecifiedHeight);
+  note_field("width", SceneObjectSpec::kSpecifiedWidth);
   obj.radius = static_cast<float>(json_get_double(node, "radius", obj.radius));
   obj.width = static_cast<float>(json_get_double(node, "width", obj.width));
   obj.height = static_cast<float>(json_get_double(node, "height", obj.height));
@@ -277,9 +324,66 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
   obj.face_camera = json_get_bool(node, "face_camera", obj.face_camera);
   obj.gltf = json_get_string(node, "gltf", obj.gltf);
   obj.gltf_use_material = json_get_bool(node, "gltf_use_material", obj.gltf_use_material);
+
+  // ── 组合模型的空间体系 ──
+  obj.name = json_get_string(node, "name", obj.name);
+  obj.parent = json_get_string(node, "parent", obj.parent);
+  obj.group = json_get_bool(node, "group", json_get_bool(node, "kind_is_group", obj.group));
+  obj.visible = json_get_bool(node, "visible", obj.visible);
+  obj.pivot_at = json_get_string(node, "pivot_at", obj.pivot_at);
+  const auto pivot = read_vec3(node, "pivot", obj.pivot, path);
+  if (!pivot) return st::forward_error(pivot.error());
+  obj.pivot = *pivot;
+  if (!obj.pivot_at.empty() && !st::raster::parse_pivot_preset(obj.pivot_at).has_value()) {
+    return st::unexpected(
+        ErrorCode::Parse,
+        std::format("{}.pivot_at：只接受 {}，收到 \"{}\"", path,
+                    st::raster::pivot_preset_names(), obj.pivot_at));
+  }
+  if (const Json* child_list = json_find(node, "children"); child_list != nullptr) {
+    if (!child_list->is_array()) {
+      return st::unexpected(ErrorCode::Parse, path + ".children：需要数组");
+    }
+    std::size_t child_index = 0;
+    for (const Json& child : *child_list) {
+      const auto parsed = read_object(child, child_index);
+      if (!parsed) return st::forward_error(parsed.error());
+      if (!parsed->parent.empty()) {
+        return st::unexpected(ErrorCode::Parse,
+                              std::format("{}.children[{}].parent：嵌套写法里不能再写 parent"
+                                          "（两种写法选一种）",
+                                          path, child_index));
+      }
+      obj.children.push_back(*parsed);
+      ++child_index;
+    }
+  }
+  // ## 分组节点不必是合法图元名
+  //
+  // `group: true` 的节点自己不画几何，`shape` 只作为"若被当叶子看待时"的兜底。
+  // 所以名字校验要对它放行——否则写 `{"name":"robot","group":true,"children":[...]}`
+  // 会因为默认 `shape` 之外的值被拒，而那个值根本用不到。
+  if (obj.group) return obj;
   obj.sides = static_cast<int>(json_get_i64(node, "sides", obj.sides));
 
   obj.ground = json_get_bool(node, "ground", false);
+  // ## 地面去倾斜（兼容旧脚本的必经一笔）
+  //
+  // 旧语义里 `plane` 朝 +Z（立面），所以所有旧脚本都写 `"rotate": [-π/2,0,0]`
+  // 把它扳成水平。现在 `plane` 图元**本就朝 +Y**，那 -90° 会把它立成墙——
+  // 地面与投影阴影一起失效（实测：开关阴影的画面均值 99.063 → 99.063，完全不变）。
+  //
+  // 所以 `ground: true` 只保留**绕 Y 的朝向**：水平面绕竖直轴转向有意义，
+  // 绕 X/Z 倾斜与"地面"语义冲突。旧脚本的意图（要一个水平地面）因此被保住。
+  if (obj.ground) obj.rotate = math::Vec3{0.0f, obj.rotate.y, 0.0f};
+  // ## 地面的朝向（兼容旧脚本的必经一笔）
+  //
+  // `ground: true` 的平面在旧语义里是"朝 +Z 的立面"，脚本普遍用
+  // `"rotate": [-π/2, 0, 0]` 把它扳成水平。而现在的 `plane` 图元**本就朝 +Y**，
+  // 再转 -90° 会变成竖直墙——地面与投影阴影一起失效。
+  //
+  // 所以地面节点在这里只保留绕 Y 的朝向（水平面绕竖直轴转向是有意义的，
+  // 绕 X/Z 倾斜则与"地面"语义冲突）。旧脚本因此逐像素不变。
   obj.metallic = read_unit(node, "metallic", 0.0f);
   obj.roughness = read_unit(node, "roughness", 1.0f);
   obj.specular = read_unit(node, "specular", 0.0f);
@@ -317,7 +421,7 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
   // 给了 `gltf` 时 `shape` 不参与几何选择（它只作为兜底默认值存在），
   // 所以不必强制它是内置图元名——否则写 `{"gltf": "a.glb"}` 会因为默认 `sphere`
   // 之外的值被拒绝，而那个值根本没用到。
-  bool known = is_obj_shape || obj.gltf.rfind("gltf:", 0) == 0;
+  bool known = is_obj_shape || obj.gltf.rfind("gltf:", 0) == 0 || obj.group;
   for (const char* name : kShapes) {
     if (obj.shape == name) {
       known = true;
@@ -427,6 +531,54 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
     if (!obj) return st::forward_error(obj.error());
     spec.objects.push_back(*obj);
   }
+  // 扁平写法（`objects` 里平铺 + 各自 `parent`）→ 树。
+  //
+  // ## 为什么在解析阶段就建树（而不是渲染时才算）
+  //
+  // 建树要校验三件事：父存在、无环、无重名。这三件事都是**输入错误**，
+  // 应当在"解析"这一步就报出来——否则渲染到一半才发现"某个节点找不到父"，
+  // 调用方拿到的是一帧半成品。而且建树之后 `spec.objects` 就是根节点列表，
+  // 渲染与导出都只需一次前序遍历。
+  // ## 重名检查在解析阶段就做（不只在扁平写法里）
+  //
+  // 嵌套写法不走 `attach_by_parent`，但重名同样是**输入错误**：
+  // 按名字寻址会静默指向其中一个，而调用方以为拿到的是另一个。
+  // 所以这里对整棵树（含嵌套 children）统一查一遍。
+  {
+    std::set<std::string> seen;
+    std::string duplicated;
+    const auto scan = [&](auto&& self, const SceneObjectSpec& object) -> void {
+      if (!object.name.empty() && !seen.insert(object.name).second) {
+        if (!duplicated.empty()) duplicated += ", ";
+        duplicated += object.name;
+      }
+      for (const SceneObjectSpec& child : object.children) self(self, child);
+    };
+    for (const SceneObjectSpec& object : spec.objects) scan(scan, object);
+    if (!duplicated.empty()) {
+      return st::unexpected(ErrorCode::Invalid,
+                            std::format("场景里有重名节点：{}（节点名在同一场景里必须唯一；"
+                                        "不同分支下请用不同名字）",
+                                        duplicated));
+    }
+  }
+
+  if (std::any_of(spec.objects.begin(), spec.objects.end(),
+                  [](const SceneObjectSpec& object) { return !object.parent.empty(); })) {
+    std::vector<st::raster::SceneNode> flat;
+    std::vector<std::string> parents;
+    flat.reserve(spec.objects.size());
+    parents.reserve(spec.objects.size());
+    for (const SceneObjectSpec& object : spec.objects) {
+      flat.push_back(to_node(object));
+      parents.push_back(object.parent);
+    }
+    const auto attached = st::raster::attach_by_parent(flat, parents);
+    if (!attached) return st::forward_error(attached.error());
+    spec.objects.clear();
+    spec.objects.reserve(flat.size());
+    for (const st::raster::SceneNode& root : flat) spec.objects.push_back(from_node(root));
+  }
   return spec;
 }
 
@@ -478,34 +630,55 @@ auto build_mesh(const SceneObjectSpec& object) -> Result<Mesh> {
   params.turns = object.turns;
   params.taper = object.taper;
 
+  // ## 尺寸取值：显式写的 > 该形状的历史字段 > 图元库默认值
+  //
+  // 历史字段（旧脚本在用，不能改语义）：
+  //   sphere → radius；box → width/height/depth；plane → width/height；
+  //   cylinder → radius/height；torus → radius。
+  // 通用字段（新脚本自然写法）：radius（半尺寸）、depth（Y 向长度）。
+  const auto radius_of = [&](float fallback) {
+    if (object.has(SceneObjectSpec::kSpecifiedRadius)) return object.radius;
+    return fallback;
+  };
+  // Y 向长度：`depth` 与 `height` 都常被用来表达"高"，谁写了用谁（depth 优先）
+  const auto length_y = [&](float fallback) {
+    if (object.has(SceneObjectSpec::kSpecifiedDepth)) return object.depth;
+    if (object.has(SceneObjectSpec::kSpecifiedHeight)) return object.height;
+    return fallback;
+  };
+
   if (shape == "sphere") {
-    params.radius = object.radius;
+    params.radius = radius_of(object.radius);
     return primitives::make_uv_sphere(params);
   }
   if (shape == "box") {
-    // 旧语义：`width`(X) × `height`(Y) × `depth`(Z)
-    params.radius = object.width * 0.5f;
-    params.depth = object.height;
-    params.height = object.depth;
+    // 旧语义：`width`(X) × `height`(Y) × `depth`(Z)；通用写法用 `radius` 表达半边长。
+    params.radius = object.has(SceneObjectSpec::kSpecifiedWidth) ? object.width * 0.5f
+                                                                 : radius_of(0.5f);
+    params.depth = length_y(1.0f);
+    params.height = object.has(SceneObjectSpec::kSpecifiedDepth) ? object.depth : 0.0f;
     return primitives::make_cube(params);
   }
   if (shape == "plane") {
-    params.radius = object.width * 0.5f;
-    params.depth = object.height;
-    params.face_camera = true;   // 旧 `Mesh::plane` 朝 +Z（立面）
+    // 旧语义：`width` × `height`，朝 +Z（立面）。新图元朝 +Y；要立面写 `face_camera`。
+    params.radius = object.has(SceneObjectSpec::kSpecifiedWidth) ? object.width * 0.5f
+                                                                 : radius_of(0.8f);
+    params.depth = object.has(SceneObjectSpec::kSpecifiedHeight)
+                       ? object.height
+                       : (object.has(SceneObjectSpec::kSpecifiedDepth) ? object.depth : 1.6f);
     return primitives::make_plane(params);
   }
   if (shape == "cylinder") {
-    params.radius = object.radius;
-    params.depth = object.height;
+    // 旧语义：`radius` + `height`。通用写法用 `depth` 表达高。
+    params.radius = radius_of(0.5f);
+    params.depth = length_y(1.0f);
     return primitives::make_cylinder(params);
   }
   if (shape == "torus" || shape == "torus_knot") {
     // 旧 `torus` 语义：`radius` 是环外半径、管径固定为 0.35×；新参数可显式覆盖
-    params.major_radius = object.major_radius > 0.0f ? object.major_radius : object.radius;
+    params.major_radius = object.major_radius > 0.0f ? object.major_radius : radius_of(0.6f);
     params.minor_radius = object.minor_radius > 0.0f ? object.minor_radius
-                                                     : object.major_radius * 0.35f;
-    if (params.minor_radius <= 0.0f) params.minor_radius = object.radius * 0.35f;
+                                                     : params.major_radius * 0.35f;
     params.minor_segments = object.minor_segments;
     params.major_segments = object.segments;
     params.twist = object.twist;
@@ -557,53 +730,38 @@ auto render_scene_into(const SceneSpec& spec, Scene3D& scene, Canvas& canvas,
   //（实测：开关阴影画面均值 115.40 → 115.40，完全不变）。
   //
   // 分两遍的代价是遍历两次 `spec.objects`，收益是调用方不必知道这个顺序。
-  const auto draw_one = [&](const SceneObjectSpec& obj) -> Result<void> {
-    // `obj:` 的路径基准目录是**场景级**信息，`build_mesh` 只拿到对象，
-    // 所以在这里先重写成已解析路径再交给它。
-    SceneObjectSpec resolved = obj;
+  // 用**已解算的世界矩阵**画一个对象（几何/材质来自它的 spec）。
+  //
+  // 与旧 `draw_one` 的差别只有一处：旧版在这里现算 `T·R·S`，新版直接收矩阵。
+  // 为什么必须改：组合模型的世界矩阵是"父链 × 局部（含枢轴）"，
+  // 在绘制函数里再算一遍等于把同一套语义实现两遍——而两处一旦漂移，
+  // 表现为"深层节点的位置和预期差一点点"，极难定位。
+  const auto draw_world = [&](const SceneObjectSpec& obj,
+                              const math::Mat4& world) -> Result<void> {
+    SceneObjectSpec resolved_object = obj;
     if (obj.shape.rfind("obj:", 0) == 0) {
-      resolved.shape = "obj:" + resolve_shape_path(obj.shape.substr(4), spec.asset_basis);
+      resolved_object.shape = "obj:" + resolve_shape_path(obj.shape.substr(4), spec.asset_basis);
     }
     if (!obj.gltf.empty()) {
-      // `gltf` 字段：`gltf:xxx.glb` 或裸路径（裸路径自动补前缀）
       const std::string reference = obj.gltf.rfind("gltf:", 0) == 0 ? obj.gltf.substr(5) : obj.gltf;
-      resolved.shape = "gltf:" + resolve_shape_path(reference, spec.asset_basis);
+      resolved_object.shape = "gltf:" + resolve_shape_path(reference, spec.asset_basis);
     }
-    // ── glTF：整份文件摆进来（含它自己的节点变换与材质）──
-    if (resolved.shape.rfind("gltf:", 0) == 0) {
-      const std::string path = resolve_shape_path(resolved.shape.substr(5), spec.asset_basis);
+
+    if (resolved_object.shape.rfind("gltf:", 0) == 0) {
+      const std::string path = resolved_object.shape.substr(5);
       auto gltf_scene = gltf_read_file(path);
       if (!gltf_scene) return st::forward_error(gltf_scene.error());
-      // 对象级变换：套在文件里**每个节点**的变换前面（`obj.translate/rotate/scale` 仍生效）
-      math::Mat4 model = math::Mat4::translation(obj.translate);
-      if (std::abs(obj.rotate.z) > 1e-6f) {
-        model = model * math::Mat4::rotation(math::Vec3{0.0f, 0.0f, 1.0f}, obj.rotate.z);
-      }
-      if (std::abs(obj.rotate.y) > 1e-6f) {
-        model = model * math::Mat4::rotation(math::Vec3{0.0f, 1.0f, 0.0f}, obj.rotate.y);
-      }
-      if (std::abs(obj.rotate.x) > 1e-6f) {
-        model = model * math::Mat4::rotation(math::Vec3{1.0f, 0.0f, 0.0f}, obj.rotate.x);
-      }
-      model = model * math::Mat4::scaling(obj.scale);
       for (const GltfNode& node : gltf_scene->nodes) {
         for (const std::size_t mesh_index : node.meshes) {
           if (mesh_index >= gltf_scene->meshes.size()) continue;
           Material material{};
-          if (!obj.gltf_use_material) {
-            material.metallic = obj.metallic;
-            material.roughness = obj.roughness;
-            material.specular = obj.specular;
-            material.emission = obj.emission;
-            material.opacity = obj.opacity;
-          } else if (node.material >= 0 &&
-                     static_cast<std::size_t>(node.material) < gltf_scene->materials.size()) {
+          if (obj.gltf_use_material && node.material >= 0 &&
+              static_cast<std::size_t>(node.material) < gltf_scene->materials.size()) {
             const auto& slot = gltf_scene->materials[static_cast<std::size_t>(node.material)];
             // glTF 的 baseColorFactor 是**线性**，`Material::base_color` 也是线性
-            material.base_color =
-                math::Vec3{static_cast<float>(slot.base_color.r) / 255.0f,
-                           static_cast<float>(slot.base_color.g) / 255.0f,
-                           static_cast<float>(slot.base_color.b) / 255.0f};
+            material.base_color = math::Vec3{static_cast<float>(slot.base_color.r) / 255.0f,
+                                             static_cast<float>(slot.base_color.g) / 255.0f,
+                                             static_cast<float>(slot.base_color.b) / 255.0f};
             material.base_color_set = true;
             material.metallic = slot.metallic;
             material.roughness = slot.roughness;
@@ -619,13 +777,13 @@ auto render_scene_into(const SceneSpec& spec, Scene3D& scene, Canvas& canvas,
             material.opacity = obj.opacity;
           }
           scene.set_material(material);
-          scene.draw_mesh(gltf_scene->meshes[mesh_index], model * node.transform);
+          scene.draw_mesh(gltf_scene->meshes[mesh_index], world * node.transform);
         }
       }
       return {};
     }
 
-    const auto mesh = build_mesh(resolved);
+    const auto mesh = build_mesh(resolved_object);
     if (!mesh) return st::forward_error(mesh.error());
 
     Material material{};
@@ -635,42 +793,171 @@ auto render_scene_into(const SceneSpec& spec, Scene3D& scene, Canvas& canvas,
     material.emission = obj.emission;
     material.opacity = obj.opacity;
     // 自发光色与“纯发光体”开关。
-    //
-    // 为何 `emission_unlit` 要把漫反射项**清零**：Blender 的 Emission 不受光照影响，
-    // 而本管线的 `emission` 是“加在受光结果上”的。两者差异在暗场景里很明显：
-    // 霓虹灯管应当自己亮着，而不是“被环境照亮后再亮一点”。
     material.emissive_color = obj.emissive_color;
     material.emissive_color_set = obj.emissive_color_set;
     material.emission_unlit = obj.emission_unlit;
     scene.set_material(material);
-
-    // 变换顺序：缩放 → 绕 X → 绕 Y → 绕 Z → 平移。
-    //
-    // 为何是"缩放先"：先平移再缩放会把位移也放大（那不是使用者的预期）。
-    math::Mat4 model = math::Mat4::translation(obj.translate);
-    if (std::abs(obj.rotate.z) > 1e-6f) {
-      model = model * math::Mat4::rotation(math::Vec3{0.0f, 0.0f, 1.0f}, obj.rotate.z);
-    }
-    if (std::abs(obj.rotate.y) > 1e-6f) {
-      model = model * math::Mat4::rotation(math::Vec3{0.0f, 1.0f, 0.0f}, obj.rotate.y);
-    }
-    if (std::abs(obj.rotate.x) > 1e-6f) {
-      model = model * math::Mat4::rotation(math::Vec3{1.0f, 0.0f, 0.0f}, obj.rotate.x);
-    }
-    model = model * math::Mat4::scaling(obj.scale);
-    scene.draw_mesh(*mesh, model);
+    scene.draw_mesh(*mesh, world);
     return {};
   };
 
-  for (const SceneObjectSpec& obj : spec.objects) {
-    if (!obj.ground) continue;
-    const auto status = draw_one(obj);
+  // ── 组合模型：先解整棵树的世界矩阵，再按"父先子后"的顺序画 ──
+  //
+  // ## 为什么只解一次（而不是递归时逐层乘）
+  //
+  // 递归里逐层 `parent * local` 每层都要重算父矩阵，深度一深就成 O(n·depth)；
+  // 而且**枢轴**与可见性继承都需要"完整父链"，递归版本得把上下文层层传下去。
+  // 一次性展平（`resolve`）把这两件事都变成一次遍历，且求得的世界矩阵可以直接
+  // 交给导出器/包围盒计算，渲染之外的用途也复用同一份。
+  // ## 先给未命名节点补名（统一规则）
+  //
+  // 踩过：`spec` 侧用 `<unnamed>` 当键，而 `scene_graph::resolve` 对空名生成 `#序号`，
+  // 两边规则不一致 → 渲染时"按路径找不到 spec" → **静默跳过**，
+  // 画面全黑而解析完全成功（`st test scene3d_script_accepts_obj_shape` 的 0 像素）。
+  //
+  // 修法：建树之前一次性把空名字补成 `#先序号`，此后**整条链路只有一种命名规则**。
+  // 用副本而不是改调用方的 spec：`render_scene` 的入参是 const，改它属于越权。
+  std::vector<SceneObjectSpec> named = spec.objects;
+  {
+    std::size_t counter = 0;
+    const auto assign = [&](auto&& self, SceneObjectSpec& object) -> void {
+      if (object.name.empty()) object.name = std::format("#{}", counter++);
+      for (SceneObjectSpec& child : object.children) self(self, child);
+    };
+    for (SceneObjectSpec& object : named) assign(assign, object);
+  }
+
+  std::vector<st::raster::SceneNode> roots;
+  roots.reserve(named.size());
+  for (const SceneObjectSpec& object : named) roots.push_back(to_node(object));
+  const auto resolved = st::raster::resolve(roots);
+  if (!resolved) return st::forward_error(resolved.error());
+
+  // 名字 → 原始 spec（几何/材质字段在渲染时要取回来）。
+  // 用**名字**而不是路径：上面已保证整棵树内名字唯一，而名字与
+  // `ResolvedNode::name` 是同一个字段，不会像路径那样出现两套拼装规则。
+  std::map<std::string, const SceneObjectSpec*> spec_of;
+  const auto index_specs = [&](auto&& self, const SceneObjectSpec& object) -> void {
+    spec_of.emplace(object.name, &object);
+    for (const SceneObjectSpec& child : object.children) self(self, child);
+  };
+  for (const SceneObjectSpec& object : named) index_specs(index_specs, object);
+
+  // 几何包围盒缓存（枢轴预设要按自身几何算；同名同形状只算一次）
+  std::map<std::string, st::raster::Bounds> local_bounds;
+  const auto bounds_of = [&](auto&& self, const SceneObjectSpec& object,
+                             std::string_view path) -> st::raster::Bounds {
+    if (const auto found = local_bounds.find(std::string(path)); found != local_bounds.end()) {
+      return found->second;
+    }
+    st::raster::Bounds box = st::raster::Bounds::empty();
+    if (!object.group) {
+      SceneObjectSpec resolved_object = object;
+      if (object.shape.rfind("obj:", 0) == 0) {
+        resolved_object.shape = "obj:" + resolve_shape_path(object.shape.substr(4), spec.asset_basis);
+      }
+      if (!object.gltf.empty()) {
+        const std::string reference =
+            object.gltf.rfind("gltf:", 0) == 0 ? object.gltf.substr(5) : object.gltf;
+        resolved_object.shape = "gltf:" + resolve_shape_path(reference, spec.asset_basis);
+      }
+      if (resolved_object.shape.rfind("gltf:", 0) != 0) {
+        if (const auto mesh = build_mesh(resolved_object); mesh.has_value()) {
+          box = st::raster::bounds(*mesh);
+        }
+      }
+    }
+    // 分组的包围盒 = 子节点（在自身局部坐标里）的并
+    for (const SceneObjectSpec& child : object.children) {
+      const std::string child_path = std::format("{}/{}", path,
+                                                 child.name.empty() ? "<unnamed>" : child.name);
+      const st::raster::Bounds child_box = self(self, child, child_path);
+      if (child_box.is_empty()) continue;
+      const auto child_node = to_node(child);
+      const st::raster::Bounds transformed = [&] {
+        const auto matrix = st::raster::local_matrix(child_node);
+        st::raster::Bounds out = st::raster::Bounds::empty();
+        for (const auto& corner : {std::pair{child_box.min, 0}, std::pair{child_box.max, 1}}) {
+          const math::Vec3 point = corner.first;
+          const math::Vec3 moved{
+              matrix.value(0, 0) * point.x + matrix.value(0, 1) * point.y +
+                  matrix.value(0, 2) * point.z + matrix.value(0, 3),
+              matrix.value(1, 0) * point.x + matrix.value(1, 1) * point.y +
+                  matrix.value(1, 2) * point.z + matrix.value(1, 3),
+              matrix.value(2, 0) * point.x + matrix.value(2, 1) * point.y +
+                  matrix.value(2, 2) * point.z + matrix.value(2, 3)};
+          out = out.union_with(moved);
+        }
+        // 八个角都要并（只并两个角在旋转后会低估）
+        for (int mask = 0; mask < 8; ++mask) {
+          const math::Vec3 corner_point{(mask & 1) != 0 ? child_box.max.x : child_box.min.x,
+                                        (mask & 2) != 0 ? child_box.max.y : child_box.min.y,
+                                        (mask & 4) != 0 ? child_box.max.z : child_box.min.z};
+          out = out.union_with(math::Vec3{
+              matrix.value(0, 0) * corner_point.x + matrix.value(0, 1) * corner_point.y +
+                  matrix.value(0, 2) * corner_point.z + matrix.value(0, 3),
+              matrix.value(1, 0) * corner_point.x + matrix.value(1, 1) * corner_point.y +
+                  matrix.value(1, 2) * corner_point.z + matrix.value(1, 3),
+              matrix.value(2, 0) * corner_point.x + matrix.value(2, 1) * corner_point.y +
+                  matrix.value(2, 2) * corner_point.z + matrix.value(2, 3)});
+        }
+        return out;
+      }();
+      box = box.union_with(transformed);
+    }
+    local_bounds.emplace(std::string(path), box);
+    return box;
+  };
+
+  // 一个节点的**最终世界矩阵**（含枢轴）：枢轴预设按几何包围盒算
+  const auto world_matrix_of = [&](const st::raster::ResolvedNode& node) {
+    const auto found = spec_of.find(node.name);
+    if (found == spec_of.end() || found->second->pivot_at.empty()) return node.world;
+    const auto preset = st::raster::parse_pivot_preset(found->second->pivot_at);
+    if (!preset.has_value()) return node.world;
+    // 枢轴 = 预设位置 − 节点原点（在**父坐标系**里表达枢轴，因为 local_matrix
+    // 把它加在局部坐标系中，而局部原点在父坐标系里的位置正是 translation）
+    const st::raster::Bounds box = bounds_of(bounds_of, *found->second, node.name);
+    if (box.is_empty()) return node.world;
+    const math::Vec3 pivot_local = st::raster::pivot_from_bounds(box, *preset);
+    st::raster::SceneNode patched = to_node(*found->second);
+    patched.pivot = pivot_local;
+    return node.parent >= 0
+               ? resolved->nodes[static_cast<std::size_t>(node.parent)].world *
+                     st::raster::local_matrix(patched)
+               : st::raster::local_matrix(patched);
+  };
+
+  // 画一棵子树（父先子后；不可见整棵跳过）
+  const auto paint = [&](const st::raster::ResolvedNode& node) -> Result<void> {
+    if (!node.visible) return {};
+    const auto found = spec_of.find(node.name);
+    if (found == spec_of.end()) return {};
+    const SceneObjectSpec& obj = *found->second;
+    const math::Mat4 world = world_matrix_of(node);
+    if (!obj.group) {
+      const auto status = draw_world(obj, world);
+      if (!status) return st::forward_error(status.error());
+    }
+    return {};
+  };
+
+  // 先画地面（阴影契约：`set_planar_shadow` 之前画的算"地面/非实体"）
+  //
+  // ⚠ 顺序被**世界矩阵**影响：`resolve` 的输出是"父先子后"的先序，所以这里
+  // 必须保证地面是**根节点**（或至少它的祖先不依赖"阴影之前/之后"的划分）。
+  // 旧脚本里地面就是一个顶层对象，天然满足。
+  for (const st::raster::ResolvedNode& node : resolved->nodes) {
+    const auto found = spec_of.find(node.name);
+    if (found == spec_of.end() || !found->second->ground) continue;
+    const auto status = paint(node);
     if (!status) return st::forward_error(status.error());
   }
   scene.set_planar_shadow(spec.shadow);
-  for (const SceneObjectSpec& obj : spec.objects) {
-    if (obj.ground) continue;
-    const auto status = draw_one(obj);
+  for (const st::raster::ResolvedNode& node : resolved->nodes) {
+    const auto found = spec_of.find(node.name);
+    if (found != spec_of.end() && found->second->ground) continue;
+    const auto status = paint(node);
     if (!status) return st::forward_error(status.error());
   }
 

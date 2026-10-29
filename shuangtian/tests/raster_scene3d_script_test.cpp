@@ -84,10 +84,30 @@ constexpr const char* kScene = R"json({
   return scene.has_value() && (*scene)->backend() != "software";
 }
 
-auto render_text(const char* text) -> Canvas {  Canvas canvas{kW, kH, 1.0f};
+/// 最近一次 `render_text` 实际跑在哪条腿上（`"software"` / `"gpu"` / `""`）。
+///
+/// ## 为什么要"实测"而不是"探测"
+///
+/// 原先的 `backend_lacks_scene_features()` 另建一个场景去探后端，再让测试
+/// 据此跳过。问题在于**探的和用的不是同一个场景**：并行全跑时
+/// `ST_SCENE3D_BACKEND` 是进程级环境变量（`Scene3D::create` 会临时改写它来选腿），
+/// 探测那一刻的结论与真正渲染时的不一定相同。
+/// 实测代价：`scene_script_shadow_takes_effect` 在 `st test scene_` 并行下
+/// **每十次红一两次**，而单跑必绿——那种抖动会被当成"我改坏了"。
+///
+/// 改成渲染时把实际后端记下来（`Scene3D::backend()` 本来就有），
+/// 判据与事实同源，抖动消失。
+std::string g_last_backend{};
+
+auto render_text(const char* text) -> Canvas {
+  Canvas canvas{kW, kH, 1.0f};
   const auto spec = st::raster::parse_scene_spec_text(text);
   if (!spec) return canvas;
-  const auto status = st::raster::render_scene(*spec, canvas, Color{22, 24, 32, 255});
+  auto scene = st::raster::Scene3D::create(kW, kH);
+  if (!scene) return canvas;
+  g_last_backend = (*scene)->backend();
+  const auto status =
+      st::raster::render_scene_into(*spec, **scene, canvas, Color{22, 24, 32, 255});
   (void)status;
   return canvas;
 }
@@ -162,12 +182,13 @@ ST_TEST(scene_script_material_parameter_takes_effect) {
 }
 
 ST_TEST(scene_script_shadow_takes_effect) {
-  if (backend_lacks_scene_features()) return;
+  // 先渲染一次拿到**实际后端**，再决定这条用例是否有意义（见 `render_text` 的注释）。
+  const Canvas with_shadow = render_text(kScene);
+  if (g_last_backend != "software") return;   // GPU 腿不渲染平面投影阴影（已声明）
   // 关掉阴影后画面必须**变亮**（地面不再被压暗）。
   //
   // 这条抓到了一个真 bug：`render_scene` 原本先设阴影再画所有对象，
   // 地面被当成实体打上遮罩，阴影一个像素都画不出来（均值 115.40 → 115.40）。
-  const Canvas with_shadow = render_text(kScene);
   const std::string no_shadow_text =
       std::string(kScene).replace(std::string(kScene).find("\"strength\": 0.45"),
                                   std::string("\"strength\": 0.45").size(),

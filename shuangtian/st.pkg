@@ -469,6 +469,12 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "用一份 JSON 描述整个三维场景：解析/报错指路/渲染/参数生效/确定性"
     },
+    "composite_pivot_probe": {
+      "kind": "executable",
+      "sources": ["tools/composite_pivot_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "组合模型空间体系对照：同一机械臂只改枢轴/父子可见性，四格出图证明各自生效"
+    },
     "primitives_gallery_probe": {
       "kind": "executable",
       "sources": ["tools/primitives_gallery_probe.cpp"],

@@ -5953,12 +5953,39 @@ gear 侧壁 32 个反、torus_knot/helix 整体内外翻转、wedge 少两个面
 （二十面体的 20 个面心 = 十二面体的 20 个顶点，12 个顶点周围的面按极角排成五边形），
 不再手拼面表——手拼的那版 36 个三角形里 33 条是边界边（面之间根本对不上）。
 
+#### 组合模型的空间体系（同一轮补齐）
+
+图元库解决"造形状"，但"把零件组合成一个模型"需要另一件事：**节点树**。
+原先场景脚本只有一层扁平对象列表——没有父子、没有局部坐标系、没有枢轴，
+于是"让机械臂整体绕肩关节抬起"只能手工算角度或临时拼空组。
+
+新增 `src/geom/scene_graph.cpp` + `include/st/raster/scene_graph.hpp`：
+
+| 概念 | 语义 | 与 Blender 对应 |
+|---|---|---|
+| `SceneNode` | 节点（有/无几何同型，都能挂子） | Object（Empty / Mesh） |
+| `TransformTRS` | 平移 / 欧拉角（X→Y→Z）/ 缩放 | `location` / `rotation_euler` / `scale` |
+| `pivot` | 旋转与缩放绕它进行 | `origin` |
+| `pivot_at` | 预设：`origin`/`center`/`bottom`/`top` | 无（但 `bottom` ≈ "Origin to Geometry" 的底面变体） |
+| `resolve()` | 展平成世界矩阵（父先子后） | 依赖图求值 |
+
+**枢轴为什么值得单独做**：`local = T · T(pivot) · R · S · T(-pivot)` 一个式子，
+就能表达"门绕合页转""机器人绕脚底转"。没有它只能靠"父节点套空组 + 手算偏移"，
+而偏移量一改零件尺寸就失效。`pivot_at: "bottom"` 甚至不必知道尺寸——按几何包围盒算。
+
+**扁平与嵌套两种写法等价**（逐位比世界矩阵），因为实际的编辑顺序往往是
+"先写零件、再想起给它加父节点"，要求先声明父会让人反复挪段落。
+
+**校验都在解析阶段**：重名（按名字寻址会歧义）、环、父不存在、深度超限——
+全部带路径。这些都是输入错误，不该等到渲染到一半才发现。
+
 #### 接入面（零修改获得新能力）
 
 | 调用面 | 改动 |
 |---|---|
 | `scene3d_script` 的 `objects[].shape` | 白名单扩到 22 个规范名 + 历史别名（`sphere`/`box` 行为逐像素不变） |
 | `scene3d_script` 新增 `objects[].gltf` | 引用外部 `.glb`/`.gltf`（读节点变换与 PBR 材质） |
+| `scene3d_script` 新增 `children`/`parent`/`pivot`/`pivot_at`/`visible`/`group` | 组合模型：父子层级、局部坐标、枢轴、可见性继承 |
 | 裁云 `model3d` 的 `model_shape` | 未知名字不再静默落盒子，而是 WARN + 给可用清单 |
 
 **验收**：`tests/geom_*.cpp` 三类共 19 条用例 + `tools/primitives_gallery_probe.cpp`

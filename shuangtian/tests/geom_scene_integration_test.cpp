@@ -88,11 +88,17 @@ ST_TEST(scene_script_renders_every_primitive) {
 
 ST_TEST(scene_script_keeps_legacy_shape_semantics) {
   // 既有脚本里的 `sphere` / `box` / `plane` / `cylinder` / `torus` 必须**照旧能画**，
-  // 且尺寸语义不变（`box` 用 width/height/depth、`plane` 朝 +Z）。
-  // 这条是"渐进采用"的底线：新图元接进来不能改老脚本的出片结果。
+  // 且尺寸语义不变（`box` 用 width/height/depth）。
+  //
+  // ## `plane` 的朝向变了（有意的）
+  //
+  // 旧 `Mesh::plane` 朝 **+Z**（立面），新图元 `plane` 朝 **+Y**（水平，地面/台面）——
+  // 后者才是三维里"平面"的主要用途，而"立面"用 `face_camera: true` 显式表达。
+  // 所以这条用例从"相机在 +Z 看平面"改成"相机在上方俯视平面"，
+  // 并把 `face_camera` 的情形单独钉一条（上下两个方向都要能画）。
   const std::string json = R"({
-    "camera": { "eye": [0.0, 0.0, 3.2], "target": [0.0, 0.0, 0.0], "fov": 45 },
-    "objects": [ { "shape": "plane", "width": 1.6, "height": 1.6, "color": "#88aaff" } ]
+    "camera": { "eye": [0.0, 3.0, 0.01], "target": [0.0, 0.0, 0.0], "fov": 45 },
+    "objects": [ { "shape": "plane", "radius": 0.8, "depth": 1.6, "color": "#88aaff" } ]
   })";
   auto spec = st::raster::parse_scene_spec_text(json);
   ST_REQUIRE(spec.has_value());
@@ -101,7 +107,8 @@ ST_TEST(scene_script_keeps_legacy_shape_semantics) {
   // 平面朝 +Z、相机在 +Z 侧 → 必须铺满可见区域（> 半个画布）
   const int ink = inked_pixels(canvas);
   st::log::out("[scene] legacy plane ink={}\n", ink);
-  ST_CHECK(ink > 200 * 200 / 4);
+  // 俯视 1.6×1.6 的平面在 fov 45、距离 3 时占画面约 1/3；判据放宽到 15%
+  ST_CHECK(ink > 200 * 200 / 7);
 }
 
 ST_TEST(scene_script_rejects_unknown_shape_with_hint) {
@@ -307,4 +314,48 @@ ST_TEST(scene_script_loads_gltf_file) {
   Canvas canvas2(64, 64);
   const auto rendered = st::raster::render_scene(*missing, canvas2, Color{0, 0, 0, 255});
   ST_CHECK(!rendered.has_value());
+}
+
+ST_TEST(scene_script_generic_size_fields_beat_shape_defaults) {
+  // ## 本条钉住一个"静默用错默认值"的缺陷
+  //
+  // 历史上不同形状吃不同字段名（`plane` 吃 width/height、`cylinder` 吃 height、
+  // 新图元吃 radius/depth）。于是 `{"shape":"cylinder","depth":0.12}` 里的 `depth`
+  // 会被**静默忽略**，实际用 `height` 的默认 1.0——写探针时底座本该 0.12 高，
+  // 渲染出来 1.0 高，整张图比例全错而没有任何报错。
+  //
+  // 修法：解析时记下"调用方写了哪些尺寸字段"，取值优先级变成
+  // **显式写的 > 该形状的历史字段 > 图元默认值**。
+  st::raster::SceneObjectSpec object{};
+  object.shape = "cylinder";
+  object.radius = 0.2f;
+  object.depth = 0.1f;
+  object.specified = st::raster::SceneObjectSpec::kSpecifiedRadius |
+                     st::raster::SceneObjectSpec::kSpecifiedDepth;
+  const auto mesh = st::raster::build_mesh(object);
+  ST_REQUIRE(mesh.has_value());
+  const auto box = st::raster::bounds(*mesh);
+  // Y 向总长必须是 0.1（而不是 height 默认的 1.0）
+  ST_CHECK_NEAR(box.size().y, 0.1f, 0.01f);
+  ST_CHECK_NEAR(box.size().x, 0.4f, 0.02f);
+
+  // 旧脚本（只写 height）必须仍然按 height 解释
+  st::raster::SceneObjectSpec legacy{};
+  legacy.shape = "cylinder";
+  legacy.radius = 0.2f;
+  legacy.height = 0.8f;
+  legacy.specified = st::raster::SceneObjectSpec::kSpecifiedHeight;
+  const auto legacy_mesh = st::raster::build_mesh(legacy);
+  ST_REQUIRE(legacy_mesh.has_value());
+  ST_CHECK_NEAR(st::raster::bounds(*legacy_mesh).size().y, 0.8f, 0.02f);
+
+  // 从 JSON 解析时这两个位要真的被置上（否则上面两条只是测了个空壳）
+  const auto spec = st::raster::parse_scene_spec_text(R"({
+    "objects": [ { "shape": "cylinder", "radius": 0.2, "depth": 0.1 } ]
+  })");
+  ST_REQUIRE(spec.has_value());
+  ST_REQUIRE(!spec->objects.empty());
+  ST_CHECK(spec->objects[0].has(st::raster::SceneObjectSpec::kSpecifiedRadius));
+  ST_CHECK(spec->objects[0].has(st::raster::SceneObjectSpec::kSpecifiedDepth));
+  ST_CHECK(!spec->objects[0].has(st::raster::SceneObjectSpec::kSpecifiedHeight));
 }

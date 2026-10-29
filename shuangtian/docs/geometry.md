@@ -121,6 +121,99 @@
 `accessors[0]`、`buffers[0].uri`。理由与场景脚本同一口径：**生成代码的模型拿到
 "解析失败"没法修正，拿到字段路径能立刻改对**。
 
+## 4.4 组合模型的空间体系（节点树 / 局部坐标 / 枢轴）
+
+一个"组合模型"是**一棵节点树**：每个节点有自己的局部坐标系，子节点相对父节点定位
+（父动子动）。这与 Blender 的父子关系、游戏引擎的 Scene Graph 是同一套语义，
+数值可以直接互相搬。实现见 `include/st/raster/scene_graph.hpp`。
+
+### 4.4.1 两种等价写法
+
+```json
+// 嵌套：层级清楚，适合人读
+{ "name": "robot", "group": true, "translate": [0, 0, 0], "children": [
+    { "name": "arm", "group": true, "translate": [0.5, 0.3, 0], "rotate": [0, 0.6, 0],
+      "children": [
+        { "name": "upper", "shape": "capsule", "radius": 0.12, "depth": 0.8,
+          "translate": [0, -0.4, 0] },
+        { "name": "hand", "shape": "uv_sphere", "radius": 0.1, "translate": [0, -0.85, 0] } ] } ] }
+
+// 扁平：适合增量编辑（改一行不影响其它行），父可以出现在子之后
+[ { "name": "robot", "group": true },
+  { "name": "arm", "parent": "robot", "group": true, "translate": [0.5, 0.3, 0], "rotate": [0, 0.6, 0] },
+  { "name": "upper", "parent": "arm", "shape": "capsule", "translate": [0, -0.4, 0] },
+  { "name": "hand", "parent": "arm", "shape": "uv_sphere", "translate": [0, -0.85, 0] } ]
+```
+
+两种写法得到**逐位相同**的世界矩阵（`tests/geom_scene_graph_test.cpp` 逐元素比对）。
+
+### 4.4.2 枢轴（pivot）：绕哪里转
+
+没有枢轴时一切旋转绕局部原点。而现实里的组合体几乎都不是这样：门的枢轴在合页、
+机械臂的枢轴在肩关节、整台设备的枢轴在底座中心。
+
+```text
+local = T(translate) · T(pivot) · R(rotation) · S(scale) · T(-pivot)
+```
+
+`pivot = (0,0,0)` 时退化成 `T · R · S`（旧行为，逐像素不变）。
+
+**预设**（按自身几何包围盒算，比手算可靠）：
+
+| `pivot_at` | 枢轴位置 | 典型用途 |
+|---|---|---|
+| `origin` | 局部原点（默认） | 旧行为 |
+| `center` | 包围盒中心 | 自由旋转 |
+| `bottom` | 底面中心 | **"站在地上"的物体**（机器人/家具/车辆） |
+| `top` | 顶面中心 | 悬挂物（吊灯/钟摆） |
+
+```json
+{ "shape": "cube", "radius": 0.5, "depth": 1.0, "height": 1.0,
+  "pivot_at": "bottom", "rotate": [1.5707963, 0, 0] }   // 就地倾倒，不插进地里
+```
+
+### 4.4.3 约定与校验
+
+| 项 | 约定 |
+|---|---|
+| 手性 | 右手系，+Y 朝上 |
+| 角度 | 弧度；`rotate` 合成顺序 **X → Y → Z**（= Blender `rotation_euler` XYZ） |
+| 局部 | 子节点的 `translate/rotate/scale` **相对父节点** |
+| 可见性 | **继承**：父不可见 → 整棵子树不可见（藏一台设备不必逐个零件关） |
+| 名字 | 同一场景内**必须唯一**（重名即报错，不做"后者覆盖前者"） |
+| 深度 | 上限 32 层（防病态输入） |
+
+**错误都带路径**：重名报出是哪几个名字、扁平写法的父不存在报出"谁要挂谁"、
+环报出经过哪个节点、`pivot_at` 拼错时列出可用清单。
+
+### 4.4.5 尺寸字段的优先级（一处"静默用错默认值"的修复）
+
+历史上不同形状吃不同的尺寸字段名：`plane` 吃 `width`/`height`、`cylinder` 吃 `height`、
+`box` 吃三个都行、新图元统一吃 `radius`/`depth`。于是
+
+```json
+{ "shape": "cylinder", "radius": 0.2, "depth": 0.1 }   // 意图：一个 0.1 高的矮圆柱
+```
+
+里的 `depth` 会被**静默忽略**，实际用 `height` 的默认值 1.0——写探针时底座本该 0.12 高，
+渲染出来 1.0 高，整张图比例全错，而且没有任何报错。
+
+现在的取值优先级是：
+
+```text
+显式写的字段  >  该形状的历史字段  >  图元库默认值
+```
+
+`SceneObjectSpec::specified` 记下"调用方到底写了哪些"，`build_mesh` 据此选值。
+**旧脚本（只写历史字段）逐像素不变；新脚本写通用字段立刻生效。**
+
+### 4.4.4 地面对齐（一处必须知道的历史包袱）
+
+`ground: true` 的节点**只保留绕 Y 的朝向**（自动去掉绕 X/Z 的倾斜）。
+原因：旧 `Mesh::plane` 朝 +Z（立面），所以旧脚本普遍写 `rotate: [-π/2,0,0]` 把它扳平；
+而新图元 `plane` 本就朝 +Y。不吸收那 -90°，地面会立成墙——实测投影阴影
+**一个像素都不出**（开关阴影画面均值 99.063 → 99.063）。
+
 ## 5. 用法（三层层层可用）
 
 ```cpp
@@ -160,8 +253,10 @@ st::raster::gltf_write_file("out/gear.glb", objects, {.binary = true});
 |---|---|
 | `tests/geom_primitives_test.cpp` | 22 个图元逐个：绕序/水密/单位法线/UV/确定性/尺寸语义/别名与报错 |
 | `tests/geom_gltf_test.cpp` | `.glb` 头与 chunk 长度、往返逐顶点、第三方文件能读、错误带路径、落盘往返 |
+| `tests/geom_scene_graph_test.cpp` | 组合模型：父动子动、乘序、枢轴（含预设/符号）、扁平=嵌套、可见性继承、端到端渲染、错误带路径 |
 | `tests/geom_scene_integration_test.cpp` | 22 个图元**真的画出像素**、旧形状语义不变、参数生效、导出→读回、焊接/变换/OBJ 往返 |
 | `tools/primitives_gallery_probe.cpp` | 22 格总览 PNG + 每个图元的 `.glb`（可拖进 Blender 对照） |
+| `tools/composite_pivot_probe.cpp` | 组合模型四格对照（无旋转 / 绕肩转 / 枢轴错放 / 父隐藏），证明父子与枢轴各自生效 |
 
 ```
 st test primitives_      # 6 条

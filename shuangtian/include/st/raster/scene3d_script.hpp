@@ -47,6 +47,7 @@
 /// - **不做动画**：这份描述是「一个静止场景」。时间轴属于上层（裁云的
 ///   `layout`），在这里引入时间会让确定性变复杂。
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -101,6 +102,34 @@ struct SceneObjectSpec {
   /// 平面/盘/环带是否朝 +Z（立面），默认朝 +Y（地面）。
   bool face_camera{false};
 
+  // ── 「哪些尺寸字段是调用方**显式写的**」（2026-10-30）──
+  //
+  // ## 为什么需要这个位掩码
+  //
+  // 历史原因，不同形状吃不同的字段名：`plane` 吃 `width`/`height`、
+  // `cylinder` 吃 `height`、`box` 吃三个都有、而新图元统一吃 `radius`/`depth`。
+  // 于是 `{"shape":"cylinder","radius":0.3,"depth":0.12}` 里的 `depth`
+  // 会被**静默忽略**、实际用 `height` 的默认值 1.0——生成脚本的模型完全无从发现
+  // （实测：写探针时底座本该 0.12 高，渲染出来 1.0 高，比例全错）。
+  //
+  // 所以这里记下"调用方到底写了哪些"，让 `build_mesh` 能按
+  //
+  //    显式写的 > 该形状的历史字段 > 图元库默认值
+  //
+  // 的优先级取值。旧脚本只写历史字段 → 行为逐像素不变；新脚本写通用字段 →
+  // 立刻生效（不再被默认值吃掉）。
+  enum : std::uint8_t {
+    kSpecifiedRadius = 1U << 0U,
+    kSpecifiedDepth = 1U << 1U,
+    kSpecifiedHeight = 1U << 2U,
+    kSpecifiedWidth = 1U << 3U,
+  };
+  std::uint8_t specified{0};
+
+  [[nodiscard]] auto has(std::uint8_t flag) const noexcept -> bool {
+    return (specified & flag) != 0U;
+  }
+
   // 材质
   float metallic{0.0f};
   float roughness{1.0f};
@@ -114,6 +143,59 @@ struct SceneObjectSpec {
   bool emissive_color_set{false};
   /// true = 纯发光体（不受光照影响，如霓虹灯管 / 屏幕）。
   bool emission_unlit{false};
+
+  // ── 组合模型的空间体系（2026-10-30）──
+  //
+  // 一个"组合模型"= 一棵节点树。树上的每个节点有自己的**局部坐标系**，
+  // 子节点相对父节点定位（父动子动）。这与 Blender 的父子关系、游戏引擎的
+  // Scene Graph 是同一套语义，所以数值可以直接互相搬。
+  //
+  // ## 两种等价写法（都支持，选顺手的那个）
+  //
+  // 嵌套（层级清楚，适合人读）：
+  // ```json
+  // { "name": "robot", "children": [
+  //     { "name": "arm", "translate": [0.5, 0.3, 0], "children": [
+  //         { "shape": "capsule", "translate": [0, -0.4, 0] } ] } ] }
+  // ```
+  // 扁平（适合增量编辑：不必维护括号层级，改一行不影响其它行）：
+  // ```json
+  // [ { "name": "robot" }, { "name": "arm", "parent": "robot" },
+  //   { "shape": "capsule", "parent": "arm", "translate": [0, -0.4, 0] } ]
+  // ```
+  //
+  // ## 坐标系约定（与 Blender / glTF 一致）
+  //
+  // | 项 | 约定 |
+  // |---|---|
+  // | 手性 | 右手系，+Y 朝上 |
+  // | 角度 | 弧度；`rotate` 的合成顺序 **X → Y → Z** |
+  // | 局部 | 子节点的 `translate/rotate/scale` **相对父节点** |
+  // | 枢轴 | 旋转与缩放**绕枢轴**，平移不受枢轴影响（= Blender 的 origin） |
+  //
+  // 旧脚本（扁平 `objects`、三个字段 translate/rotate/scale）**逐像素不变**：
+  // 没有 `children` / `parent` / `pivot` 时，每个对象就是一棵只有根的树，
+  // 世界矩阵 = 原来的 `T · R · S`。
+
+  /// 节点名（**在同一场景内唯一**；按名字寻址、报错指路、导出后的引擎对象名都用它）。
+  std::string name{};
+  /// 父节点名（扁平写法用；与 `children` 互斥——给了 `parent` 就别再写嵌套）。
+  std::string parent{};
+  /// 子节点（嵌套写法用）。
+  std::vector<SceneObjectSpec> children{};
+  /// 是否是**分组节点**（`false` = 只承载子节点、自己不画几何）。
+  ///
+  /// 为什么需要它：给一组零件一个共同枢轴（"整台设备绕底座中心转"）时，
+  /// 那个父节点本身没有几何。默认 `has_geometry = true` 以保持旧行为
+  /// （旧对象都是叶子）。
+  bool group{false};
+  /// 枢轴点（**在自身局部坐标系里**）；旋转与缩放绕它进行。
+  math::Vec3 pivot{0.0f, 0.0f, 0.0f};
+  /// 枢轴预设（按自身几何包围盒算）：`origin` / `center` / `bottom` / `top`。
+  /// 写了预设就以它为准（覆盖 `pivot` 的裸值），因为它通常比手算可靠。
+  std::string pivot_at{};
+  /// 是否可见（不可见不渲染、不参与包围盒）。
+  bool visible{true};
 
   /// 外部 **glTF** 引用（`gltf:<路径>` 形式时用；非空时覆盖 `shape` 的几何）。
   ///

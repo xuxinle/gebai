@@ -598,10 +598,18 @@ G3 format +15.9 MB（**89/147 个单元直接用，不能移**）· G4 filesyste
 只能手写 OBJ。而"能做 Blender 和游戏引擎"的前提是**能造形状 + 能用通用格式交换**——
 这两件事这次都通了。
 
+**同一轮补齐：组合模型的空间体系**（`src/geom/scene_graph.cpp` + `include/st/raster/scene_graph.hpp`）。
+图元库解决"造形状"，"把零件组合成模型"需要节点树：父子层级（父动子动）、每节点局部坐标系、
+以及**枢轴**（`local = T · T(pivot) · R · S · T(-pivot)`，`pivot_at` 支持 origin/center/bottom/top）。
+扁平写法（`parent` 引用，父可后置）与嵌套写法等价（逐位比世界矩阵）。重名/环/父不存在/深度超限
+全部在解析阶段报错并带路径。
+
 **验收**：`tests/geom_primitives_test.cpp`（6 条，逐图元断言）、`tests/geom_gltf_test.cpp`
 （6 条，含 `.glb` 头/chunk 长度、第三方文件、错误路径、落盘往返）、
-`tests/geom_scene_integration_test.cpp`（7 条，含 22 图元**真的画出像素**、导出读回）、
-`tools/primitives_gallery_probe.cpp`（22 格 PNG + 22 个 `.glb`，实测 22/22 通过）。
+`tests/geom_scene_graph_test.cpp`（7 条，组合模型：乘序/枢轴/扁平=嵌套/可见性继承/端到端/错误路径）、
+`tests/geom_scene_integration_test.cpp`（8 条，含 22 图元**真的画出像素**、导出读回、尺寸字段优先级）、
+`tools/primitives_gallery_probe.cpp`（22 格 PNG + 22 个 `.glb`，实测 22/22 通过）、
+`tools/composite_pivot_probe.cpp`（四格对照图，父转/枢轴/可见性三条判据均 ok）。
 文档：`docs/geometry.md`。
 
 **这一轮踩到的缺陷形态（值得记住）**：22 个生成器第一版有 **6 个绕序错**
