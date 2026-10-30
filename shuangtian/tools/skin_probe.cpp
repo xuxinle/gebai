@@ -49,7 +49,7 @@ auto column_json(bool skinned, float bend) -> std::string {
         R"json(
       {{ "name": "seg{0}", "parent": "{1}", "shape": "capsule",
          "radius": 0.075, "depth": 0.3, "color": "#c9a06b",
-         "translate": [0.0, 0.28, 0.0], "rotate": [0.0, 0.0, {2:.4f}], {3}
+         "translate": [0.0, 0.28, 0.0], "rotation": [0.0, 0.0, {2:.4f}], {3}
          "metallic": 0.2, "roughness": 0.5 }}{4})json",
         segment, segment == 0 ? "root" : std::format("seg{}", segment - 1), angle, skin_flag,
         segment < 3 ? "," : "");
@@ -57,13 +57,12 @@ auto column_json(bool skinned, float bend) -> std::string {
   return std::format(
       R"json({{
     "camera": {{ "eye": [0.85, 0.95, 1.65], "target": [0.1, 0.65, 0.0], "fov": 38 }},
-    "lighting": {{ "key_direction": [0.35, 0.82, 0.6], "ambient": 0.32, "diffuse": 0.8,
+    "lighting": {{ "light_from": [0.35, 0.82, 0.6], "ambient": 0.32, "diffuse": 0.8,
                    "rim": 0.2 }},
     "shadow": {{ "strength": 0.3, "ground_y": 0.0 }},
     "skeleton": {{ "joints": ["root", "seg0", "seg1", "seg2", "seg3"] }},
     "objects": [
-      {{ "name": "ground", "shape": "plane", "radius": 1.2, "depth": 1.2,
-         "color": "#3c414b", "ground": true }},
+      {{"name": "ground", "shape": "plane", "color": "#3c414b", "ground": true, "size": [2.4, 1.2]}},
       {{ "name": "root", "group": true, "translate": [0.0, 0.02, 0.0] }},{0}
     ]
   }})json",

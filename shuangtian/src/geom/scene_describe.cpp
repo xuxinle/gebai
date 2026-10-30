@@ -80,7 +80,7 @@ auto describe_scene(const SceneSpec& spec) -> SceneSummary {
     node.name = object.name;
     node.has_geometry = !object.group;
     node.local.translation = object.translate;
-    node.local.rotation = object.rotate;
+    node.local.rotation = object.rotation;
     node.local.scale = object.scale;
     node.pivot = object.pivot;
     node.visible = object.visible;
@@ -126,7 +126,7 @@ auto describe_scene(const SceneSpec& spec) -> SceneSummary {
       summary.total_triangles += mesh->indices.size() / 3U;
       // 地面节点在渲染时会去掉绕 X/Z 的倾斜（见 scene3d_script 的说明），
       // 摘要也按同一规则算，否则"报告说包围盒有这个高度、实际渲染没有"。
-      math::Vec3 rotation = object.rotate;
+      math::Vec3 rotation = object.rotation;
       if (object.ground) rotation = math::Vec3{0.0f, rotation.y, 0.0f};
       const math::Mat4 local =
           math::Mat4::translation(object.translate) *
@@ -231,7 +231,7 @@ auto describe_scene(const SceneSpec& spec) -> SceneSummary {
   // ⑥ 地面朝向被自动修正过
   for_each_object(spec.objects, [&](const SceneObjectSpec& object) {
     if (!object.ground) return;
-    if (std::abs(object.rotate.x) > 1.0e-4f || std::abs(object.rotate.z) > 1.0e-4f) {
+    if (std::abs(object.rotation.x) > 1.0e-4f || std::abs(object.rotation.z) > 1.0e-4f) {
       add(DiagnosticLevel::Info, "ground_tilt_ignored",
           "ground 物体的绕 X/Z 旋转会被忽略（地面强制水平）",
           "如果确实要倾斜的面，不要标 ground");
@@ -261,28 +261,7 @@ auto describe_scene(const SceneSpec& spec) -> SceneSummary {
     }
   }
 
-  // ⑨ 旧尺寸字段（`radius`/`width`/`height`/`depth`）
-  //
-  // ## 为什么自检要管这个
-  //
-  // 旧字段的语义随形状变化（实测：box 的 height 完全无效、plane 的 radius 是半长）。
-  // 写成旧字段不会报错，但会**静默按某套晦涩规则换算**——正是要淘汰的东西。
-  // 自检里提示一句，让作者有机会换成 `size`（此时语义一目了然）。
-  for_each_object(spec.objects, [&](const SceneObjectSpec& object) {
-    if (object.size_count > 0U) return;   // 已用新写法
-    const char* legacy = nullptr;
-    if (object.has(SceneObjectSpec::kSpecifiedRadius)) legacy = "radius";
-    else if (object.has(SceneObjectSpec::kSpecifiedWidth)) legacy = "width";
-    else if (object.has(SceneObjectSpec::kSpecifiedDepth)) legacy = "depth";
-    else if (object.has(SceneObjectSpec::kSpecifiedHeight)) legacy = "height";
-    if (legacy == nullptr) return;
-    add(DiagnosticLevel::Info, "legacy_size_field",
-        std::format("物体 {} 用了旧尺寸字段 \"{}\"（语义随形状变化，容易写错）",
-                    object.name.empty() ? "<未命名>" : object.name, legacy),
-        "改用 \"size\"（全长）：裸数字是该形状的主尺寸，数组按形状的自然顺序");
-  });
-
-  // ⑩ 未命名物体（重名检查已在解析期做，这里只提示可维护性）
+  // ⑨ 未命名物体（重名检查已在解析期做，这里只提示可维护性）
   std::size_t unnamed = 0;
   for_each_object(spec.objects, [&](const SceneObjectSpec& object) {
     if (object.name.empty()) ++unnamed;

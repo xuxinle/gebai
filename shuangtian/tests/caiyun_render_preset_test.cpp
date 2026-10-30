@@ -40,7 +40,7 @@ namespace {
 
 ST_TEST(caiyun_render_preset_merges_deeply) {
   const st::Json base = parse(R"({
-    "key_direction": [-0.4, 0.66, 0.64],
+    "light_from": [-0.4, 0.66, 0.64],
     "ambient": 0.10, "diffuse": 0.52, "rim": 0.26,
     "extra_lights": [{"kind": "point"}, {"kind": "point"}]
   })");
@@ -52,7 +52,7 @@ ST_TEST(caiyun_render_preset_merges_deeply) {
   // 未提及的键**保留预设值**——这是"复用"的全部意义
   ST_CHECK(merged["diffuse"].get<double>() > 0.51);
   ST_CHECK(merged["rim"].get<double>() > 0.25);
-  ST_CHECK(merged["key_direction"].is_array());
+  ST_CHECK(merged["light_from"].is_array());
   // 数组没动过就原样保留
   ST_CHECK(merged["extra_lights"].size() == 2);
 }

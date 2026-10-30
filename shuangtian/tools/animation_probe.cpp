@@ -48,38 +48,29 @@ auto robot_json(float duration) -> std::string {
   const double whole = static_cast<double>(duration);
   return std::format(R"json({{
     "camera": {{ "eye": [0.95, 0.75, 1.75], "target": [0.05, 0.5, 0.0], "fov": 36 }},
-    "lighting": {{ "key_direction": [0.4, 0.8, 0.6], "ambient": 0.34, "diffuse": 0.76, "rim": 0.22 }},
+    "lighting": {{ "light_from": [0.4, 0.8, 0.6], "ambient": 0.34, "diffuse": 0.76, "rim": 0.22 }},
     "shadow": {{ "strength": 0.32, "ground_y": 0.0 }},
     "objects": [
-      {{ "name": "ground", "shape": "plane", "radius": 1.6, "depth": 1.6,
-         "color": "#3c414b", "ground": true }},
-      {{ "name": "base", "shape": "cylinder", "radius": 0.2, "depth": 0.1,
-         "color": "#8a8f99", "translate": [0.0, 0.05, 0.0],
-         "metallic": 0.6, "roughness": 0.35 }},
+      {{"name": "ground", "shape": "plane", "color": "#3c414b", "ground": true, "size": [3.2, 1.6]}},
+      {{"name": "base", "shape": "cylinder", "color": "#8a8f99", "translate": [0.0, 0.05, 0.0], "metallic": 0.6, "roughness": 0.35, "size": [0.4, 0.1]}},
       {{ "name": "shoulder", "group": true, "translate": [0.0, 0.1, 0.0],
         "children": [
-          {{ "name": "upper", "shape": "capsule", "radius": 0.07, "depth": 0.62,
-             "color": "#d4b07a", "translate": [0.0, 0.28, 0.0],
-             "metallic": 0.3, "roughness": 0.4 }},
+          {{"name": "upper", "shape": "capsule", "color": "#d4b07a", "translate": [0.0, 0.28, 0.0], "metallic": 0.3, "roughness": 0.4, "size": [0.14, 0.62]}},
           {{ "name": "elbow", "group": true, "translate": [0.0, 0.58, 0.0],
             "children": [
-              {{ "name": "forearm", "shape": "capsule", "radius": 0.055, "depth": 0.5,
-                 "color": "#c8a07a", "translate": [0.0, 0.22, 0.0],
-                 "metallic": 0.3, "roughness": 0.4 }},
-              {{ "name": "hand", "shape": "box", "radius": 0.07, "depth": 0.1, "height": 0.15,
-                 "color": "#6f7681", "translate": [0.0, 0.5, 0.0],
-                 "metallic": 0.85, "roughness": 0.2 }}
+              {{"name": "forearm", "shape": "capsule", "color": "#c8a07a", "translate": [0.0, 0.22, 0.0], "metallic": 0.3, "roughness": 0.4, "size": [0.11, 0.5]}},
+              {{"name": "hand", "shape": "box", "color": "#6f7681", "translate": [0.0, 0.5, 0.0], "metallic": 0.85, "roughness": 0.2, "size": [0.14, 0.1, 0.1]}}
             ] }}
         ] }}
     ],
     "animation": {{
       "name": "wave", "duration": {0:.3f},
       "tracks": [
-        {{ "node": "shoulder", "kind": "rotate",
+        {{ "node": "shoulder", "kind": "rotation",
            "keys": [ {{ "t": 0.0, "value": [0, 0, 0], "easing": "ease-in-out" }},
                      {{ "t": {1:.3f}, "value": [0, 0, 1.0], "easing": "ease-in-out" }},
                      {{ "t": {2:.3f}, "value": [0, 0, 0] }} ] }},
-        {{ "node": "elbow", "kind": "rotate",
+        {{ "node": "elbow", "kind": "rotation",
            "keys": [ {{ "t": 0.0, "value": [0, 0, -0.5], "easing": "ease-in-out" }},
                      {{ "t": {3:.3f}, "value": [0, 0, -1.3], "easing": "ease-in-out" }},
                      {{ "t": {4:.3f}, "value": [0, 0, -0.5] }} ] }}

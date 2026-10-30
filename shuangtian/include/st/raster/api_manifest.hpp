@@ -26,7 +26,7 @@
 ///   "version": "1",
 ///   "generated_for": "shuangtian/raster/scene3d_script",
 ///   "primitives": { "names": [...], "aliases": {...} },
-///   "tracks": ["translate", "rotate", "scale", "visible"],
+///   "tracks": ["translate", "rotation", "scale", "visible"],
 ///   "easings": ["linear", "constant", "ease-in", "ease-out", "ease-in-out"],
 ///   "scopes": {
 ///     "objects[]": {

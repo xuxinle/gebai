@@ -164,10 +164,12 @@ auto scene_spec_to_usda(const st::raster::SceneSpec& spec, const UsdExportOption
     line("    {");
     // 变换：先缩放、再旋转、后平移（与渲染器的 TRS 顺序一致）。
     line(std::format("        double3 xformOp:translate = {}", vec3(object.translate)));
+    // `object.rotation` 内部已是**弧度**，USD 的 rotateXYZ 要**度**，所以这里转换
+    constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
     line(std::format("        float3 xformOp:rotateXYZ = ({}, {}, {})",
-                     num(static_cast<double>(object.rotate.x) * 180.0 / 3.14159265358979323846),
-                     num(static_cast<double>(object.rotate.y) * 180.0 / 3.14159265358979323846),
-                     num(static_cast<double>(object.rotate.z) * 180.0 / 3.14159265358979323846)));
+                     num(static_cast<double>(object.rotation.x) * kRadToDeg),
+                     num(static_cast<double>(object.rotation.y) * kRadToDeg),
+                     num(static_cast<double>(object.rotation.z) * kRadToDeg)));
     line(std::format("        float3 xformOp:scale = {}", vec3(object.scale)));
     line("        uniform token[] xformOpOrder = [\"xformOp:translate\", "
          "\"xformOp:rotateXYZ\", \"xformOp:scale\"]");

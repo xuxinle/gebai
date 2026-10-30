@@ -75,7 +75,7 @@ enum class SchemaScope : std::uint8_t {
   /// ## 为什么这两个要单独成 scope
   ///
   /// 它们是**嵌套对象**，字段集与图层/layer 完全不同（`eye`/`target`/`fov` 与
-  /// `key_direction`/`ambient`/`extra_lights`）。混进 `Layer` 会让
+  /// `light_from`/`ambient`/`extra_lights`）。混进 `Layer` 会让
   /// 未知字段检查用错表——实测就是这样：`lighting.extra_lights` 是合法字段，
   /// 却因为没有 Lighting scope 被报成"未知字段"。
   Lighting,

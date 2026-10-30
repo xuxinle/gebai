@@ -248,21 +248,93 @@ ST_TEST(skin_script_end_to_end_deforms_mesh) {
   //
   // 判据用"渲染像素不同"+"顶点位置真的变了"两层：
   // 只看像素会被"模型整体挪走"骗过，只看顶点会被"形变了但没画出来"骗过。
-  const std::string json = R"({
-    "camera": { "eye": [0.0, 0.6, 3.2], "target": [0.0, 0.6, 0.0], "fov": 42 },
-    "lighting": { "ambient": 0.4, "diffuse": 0.8 },
-    "skeleton": { "joints": ["root", "upper"] },
-    "objects": [
-      { "name": "root", "group": true, "translate": [0.0, 0.3, 0.0] },
-      { "name": "upper", "parent": "root", "translate": [0.0, 0.6, 0.0] },
-      { "name": "body", "parent": "upper", "shape": "capsule", "radius": 0.14, "depth": 0.9,
-        "color": "#d4b07a", "translate": [0.0, 0.35, 0.0], "skin": true }
+  const std::string json = R"j({
+  "camera": {
+    "eye": [
+      0.0,
+      0.6,
+      3.2
     ],
-    "animation": { "tracks": [
-      { "node": "upper", "kind": "rotate", "keys": [
-        { "t": 0.0, "value": [0, 0, 0] },
-        { "t": 1.0, "value": [0, 0, 1.1] } ] } ] }
-  })";
+    "target": [
+      0.0,
+      0.6,
+      0.0
+    ],
+    "fov": 42
+  },
+  "lighting": {
+    "ambient": 0.4,
+    "diffuse": 0.8
+  },
+  "skeleton": {
+    "joints": [
+      "root",
+      "upper"
+    ]
+  },
+  "objects": [
+    {
+      "name": "root",
+      "group": true,
+      "translate": [
+        0.0,
+        0.3,
+        0.0
+      ]
+    },
+    {
+      "name": "upper",
+      "parent": "root",
+      "translate": [
+        0.0,
+        0.6,
+        0.0
+      ]
+    },
+    {
+      "name": "body",
+      "parent": "upper",
+      "shape": "capsule",
+      "color": "#d4b07a",
+      "translate": [
+        0.0,
+        0.35,
+        0.0
+      ],
+      "skin": true,
+      "size": [
+        0.28,
+        0.9
+      ]
+    }
+  ],
+  "animation": {
+    "tracks": [
+      {
+        "node": "upper",
+        "kind": "rotation",
+        "keys": [
+          {
+            "t": 0.0,
+            "value": [
+              0,
+              0,
+              0
+            ]
+          },
+          {
+            "t": 1.0,
+            "value": [
+              0,
+              0,
+              1.1
+            ]
+          }
+        ]
+      }
+    ]
+  }
+})j";
   auto spec = st::raster::parse_scene_spec_text(json);
   ST_REQUIRE(spec.has_value());
   ST_REQUIRE(spec->skeleton.has_value());

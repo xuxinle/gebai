@@ -846,7 +846,7 @@ void paint_model3d(st::raster::Surface& canvas, const Layer& layer, st::math::Re
   camera.far_z = 100.0f;
 
   st::raster::Lighting lighting{};
-  lighting.key_direction = pose.light_direction;
+  lighting.light_from = pose.light_direction;
   lighting.ambient = pose.ambient;
   lighting.rim = pose.rim;
 
@@ -915,7 +915,7 @@ void paint_model3d_group(st::raster::Surface& canvas, const Layer& head,
   camera.near_z = 0.05f;
   camera.far_z = 100.0f;
   st::raster::Lighting lighting{};
-  lighting.key_direction = pose.light_direction;
+  lighting.light_from = pose.light_direction;
   lighting.ambient = pose.ambient;
   lighting.rim = pose.rim;
 

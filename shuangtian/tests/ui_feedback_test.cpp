@@ -145,7 +145,7 @@ ST_TEST(ui_spinner_animation) {
   // 同一相位（一整圈 1.2s）像素完全一致
   ST_CHECK(same_pixels(frame0, frame12));
   ST_CHECK_EQ(spinner.semantics_text(), std::string{"loading"});
-  ST_CHECK_EQ(spinner.get_property("size").value_or(""), std::string{"18"});
+  ST_CHECK_EQ(spinner.get_property("diameter").value_or(""), std::string{"18"});
 }
 
 // —— ⑤ Badge / Chip / Avatar：语义与尺寸 + 形状像素 ——

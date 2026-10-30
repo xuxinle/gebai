@@ -250,25 +250,103 @@ ST_TEST(anim_validate_rejects_bad_tracks) {
 
 ST_TEST(anim_script_animation_moves_the_model) {
   // 端到端：肩关节在 0/1/2 秒摆动，渲染三个时刻必须得到**三个不同的画面**。
-  const std::string json = R"({
-    "camera": { "eye": [1.2, 1.0, 2.4], "target": [0.0, 0.5, 0.0], "fov": 40 },
-    "lighting": { "ambient": 0.35, "diffuse": 0.8 },
-    "objects": [
-      { "name": "base", "shape": "cylinder", "radius": 0.2, "depth": 0.1,
-        "color": "#8a8f99", "translate": [0.0, 0.05, 0.0] },
-      { "name": "shoulder", "group": true, "translate": [0.0, 0.1, 0.0],
-        "children": [
-          { "name": "upper", "shape": "capsule", "radius": 0.07, "depth": 0.7,
-            "color": "#d4b07a", "translate": [0.0, 0.3, 0.0] } ] }
+  const std::string json = R"j({
+  "camera": {
+    "eye": [
+      1.2,
+      1.0,
+      2.4
     ],
-    "animation": {
-      "name": "swing", "duration": 2.0,
-      "tracks": [
-        { "node": "shoulder", "kind": "rotate",
-          "keys": [ { "t": 0.0, "value": [0, 0, 0], "easing": "ease-in-out" },
-                    { "t": 1.0, "value": [0, 0, 0.9] },
-                    { "t": 2.0, "value": [0, 0, 0] } ] } ] }
-  })";
+    "target": [
+      0.0,
+      0.5,
+      0.0
+    ],
+    "fov": 40
+  },
+  "lighting": {
+    "ambient": 0.35,
+    "diffuse": 0.8
+  },
+  "objects": [
+    {
+      "name": "base",
+      "shape": "cylinder",
+      "color": "#8a8f99",
+      "translate": [
+        0.0,
+        0.05,
+        0.0
+      ],
+      "size": [
+        0.4,
+        0.1
+      ]
+    },
+    {
+      "name": "shoulder",
+      "group": true,
+      "translate": [
+        0.0,
+        0.1,
+        0.0
+      ],
+      "children": [
+        {
+          "name": "upper",
+          "shape": "capsule",
+          "color": "#d4b07a",
+          "translate": [
+            0.0,
+            0.3,
+            0.0
+          ],
+          "size": [
+            0.14,
+            0.7
+          ]
+        }
+      ]
+    }
+  ],
+  "animation": {
+    "name": "swing",
+    "duration": 2.0,
+    "tracks": [
+      {
+        "node": "shoulder",
+        "kind": "rotation",
+        "keys": [
+          {
+            "t": 0.0,
+            "value": [
+              0,
+              0,
+              0
+            ],
+            "easing": "ease-in-out"
+          },
+          {
+            "t": 1.0,
+            "value": [
+              0,
+              0,
+              0.9
+            ]
+          },
+          {
+            "t": 2.0,
+            "value": [
+              0,
+              0,
+              0
+            ]
+          }
+        ]
+      }
+    ]
+  }
+})j";
   auto spec = st::raster::parse_scene_spec_text(json);
   ST_REQUIRE(spec.has_value());
   ST_REQUIRE(spec->animation.has_value());
@@ -290,10 +368,28 @@ ST_TEST(anim_script_animation_moves_the_model) {
 ST_TEST(anim_script_without_time_matches_static) {
   // 没有动画的场景：`render_scene` 与 `render_scene_at(任意 t)` 必须逐像素相同。
   // 这条保"渐进采用"：加了动画层不能改变静态场景的出图结果。
-  const std::string json = R"({
-    "camera": { "eye": [0.0, 0.6, 3.0], "target": [0.0, 0.0, 0.0], "fov": 42 },
-    "objects": [ { "shape": "uv_sphere", "radius": 0.6, "color": "#c8a07a" } ]
-  })";
+  const std::string json = R"j({
+  "camera": {
+    "eye": [
+      0.0,
+      0.6,
+      3.0
+    ],
+    "target": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "fov": 42
+  },
+  "objects": [
+    {
+      "shape": "uv_sphere",
+      "color": "#c8a07a",
+      "size": 1.2
+    }
+  ]
+})j";
   auto spec = st::raster::parse_scene_spec_text(json);
   ST_REQUIRE(spec.has_value());
   ST_CHECK(!spec->animation.has_value());
@@ -319,29 +415,29 @@ ST_TEST(anim_script_errors_carry_paths) {
     return st::raster::parse_scene_spec_text(json);
   };
   // 1) track 没写 node
-  auto no_node = parse(R"({"objects":[],"animation":{"tracks":[{"kind":"rotate","keys":[]}]}})");
+  auto no_node = parse(R"j({"objects":[],"animation":{"tracks":[{"kind":"rotation","keys":[]}]}})j");
   ST_REQUIRE(!no_node.has_value());
   ST_CHECK(no_node.error().message.find("tracks[0].node") != std::string::npos);
   // 2) kind 拼错 → 给可用清单
   auto bad_kind = parse(
-      R"({"objects":[],"animation":{"tracks":[{"node":"a","kind":"colour","keys":[]}]}})");
+      R"j({"objects":[],"animation":{"tracks":[{"node":"a","kind":"colour","keys":[]}]}})j");
   ST_REQUIRE(!bad_kind.has_value());
   ST_CHECK(bad_kind.error().message.find("tracks[0].kind") != std::string::npos);
-  ST_CHECK(bad_kind.error().message.find("rotate") != std::string::npos);
+  ST_CHECK(bad_kind.error().message.find("rotation") != std::string::npos);
   // 3) key 缺时间
   auto no_time = parse(
-      R"({"objects":[],"animation":{"tracks":[{"node":"a","kind":"rotate","keys":[{"value":[0,0,0]}]}]}})");
+      R"j({"objects":[],"animation":{"tracks":[{"node":"a","kind":"rotation","keys":[{"value":[0,0,0]}]}]}})j");
   ST_REQUIRE(!no_time.has_value());
   ST_CHECK(no_time.error().message.find("keys[0].t") != std::string::npos);
   // 4) easing 拼错 → 给可用清单
   auto bad_easing = parse(
-      R"({"objects":[],"animation":{"tracks":[{"node":"a","kind":"rotate","keys":[{"t":0,"value":[0,0,0],"easing":"bounce"}]}]}})");
+      R"j({"objects":[],"animation":{"tracks":[{"node":"a","kind":"rotation","keys":[{"t":0,"value":[0,0,0],"easing":"bounce"}]}]}})j");
   ST_REQUIRE(!bad_easing.has_value());
   ST_CHECK(bad_easing.error().message.find("easing") != std::string::npos);
   ST_CHECK(bad_easing.error().message.find("ease-in-out") != std::string::npos);
   // 5) 轨道指向不存在的节点（这条在**渲染**时才查，因为解析时节点还没建树）
   auto spec = parse(
-      R"({"objects":[{"name":"a","shape":"cube"}],"animation":{"tracks":[{"node":"ghost","kind":"rotate","keys":[{"t":0,"value":[0,0,0]}]}]}})");
+      R"j({"objects":[{"name":"a","shape":"cube"}],"animation":{"tracks":[{"node":"ghost","kind":"rotation","keys":[{"t":0,"value":[0,0,0]}]}]}})j");
   ST_REQUIRE(spec.has_value());
   st::raster::Canvas canvas(64, 64);
   const auto rendered =
@@ -353,13 +449,52 @@ ST_TEST(anim_script_errors_carry_paths) {
 ST_TEST(anim_keyframes_are_sorted_independent_of_input_order) {
   // 手写 JSON 常按叙事顺序写关键帧（不按时间）。解析必须排序，
   // 否则采样会取到错的分段（症状：动画抖一下然后跳）。
-  const std::string json = R"({
-    "objects": [ { "name": "box", "shape": "cube", "radius": 0.4 } ],
-    "animation": { "tracks": [ { "node": "box", "kind": "translate", "keys": [
-      { "t": 2.0, "value": [2, 0, 0] },
-      { "t": 0.0, "value": [0, 0, 0] },
-      { "t": 1.0, "value": [1, 0, 0] } ] } ] }
-  })";
+  const std::string json = R"j({
+  "objects": [
+    {
+      "name": "box",
+      "shape": "cube",
+      "size": [
+        0.8,
+        1.0
+      ]
+    }
+  ],
+  "animation": {
+    "tracks": [
+      {
+        "node": "box",
+        "kind": "translate",
+        "keys": [
+          {
+            "t": 2.0,
+            "value": [
+              2,
+              0,
+              0
+            ]
+          },
+          {
+            "t": 0.0,
+            "value": [
+              0,
+              0,
+              0
+            ]
+          },
+          {
+            "t": 1.0,
+            "value": [
+              1,
+              0,
+              0
+            ]
+          }
+        ]
+      }
+    ]
+  }
+})j";
   auto spec = st::raster::parse_scene_spec_text(json);
   ST_REQUIRE(spec.has_value());
   ST_REQUIRE(spec->animation.has_value());
@@ -384,20 +519,75 @@ ST_TEST(anim_pivot_and_animation_compose) {
   //
   // 判据：同一份模型，带动画的两个时刻渲染结果必须不同，**且**该节点同时有
   // `pivot_at`（否则这条测不到那个覆盖路径）。
-  const std::string json = R"({
-    "camera": { "eye": [0.9, 0.75, 1.7], "target": [0.0, 0.5, 0.0], "fov": 36 },
-    "objects": [
-      { "name": "pivot_node", "group": true, "translate": [0.0, 0.1, 0.0],
-        "pivot_at": "bottom",
-        "children": [
-          { "name": "arm", "shape": "capsule", "radius": 0.07, "depth": 0.6,
-            "color": "#d4b07a", "translate": [0.0, 0.3, 0.0] } ] }
+  const std::string json = R"j({
+  "camera": {
+    "eye": [
+      0.9,
+      0.75,
+      1.7
     ],
-    "animation": { "tracks": [
-      { "node": "pivot_node", "kind": "rotate", "keys": [
-        { "t": 0.0, "value": [0, 0, 0] },
-        { "t": 1.0, "value": [0, 0, 1.2] } ] } ] }
-  })";
+    "target": [
+      0.0,
+      0.5,
+      0.0
+    ],
+    "fov": 36
+  },
+  "objects": [
+    {
+      "name": "pivot_node",
+      "group": true,
+      "translate": [
+        0.0,
+        0.1,
+        0.0
+      ],
+      "pivot_at": "bottom",
+      "children": [
+        {
+          "name": "arm",
+          "shape": "capsule",
+          "color": "#d4b07a",
+          "translate": [
+            0.0,
+            0.3,
+            0.0
+          ],
+          "size": [
+            0.14,
+            0.6
+          ]
+        }
+      ]
+    }
+  ],
+  "animation": {
+    "tracks": [
+      {
+        "node": "pivot_node",
+        "kind": "rotation",
+        "keys": [
+          {
+            "t": 0.0,
+            "value": [
+              0,
+              0,
+              0
+            ]
+          },
+          {
+            "t": 1.0,
+            "value": [
+              0,
+              0,
+              1.2
+            ]
+          }
+        ]
+      }
+    ]
+  }
+})j";
   const int ink_start = render_at(json, 0.0f);
   const int ink_end = render_at(json, 1.0f);
   st::log::out("[anim] pivot+anim ink t=0 {} t=1 {}\n", ink_start, ink_end);

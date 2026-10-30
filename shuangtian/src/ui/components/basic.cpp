@@ -474,7 +474,18 @@ auto Text::get_property(std::string_view name) const -> std::optional<std::strin
   if (name == "multiline") return multiline_ ? "true" : "false";
   // 字号：与 `set_property` 对称（不报出去就改不了——`apply_properties` 的判据
   // 是“名字在元素自己声明的清单里”）。
-  if (name == "font_size" || name == "size") return std::format("{}", style_.font_size);
+  // ## 读的是"生效值"，但要考虑尚未经过 `apply_theme` 的显式设置
+  //
+  // `set_font_size` 写 `font_size_override_`，而 `style_.font_size` 只在
+  // `apply_theme()` 里从它同步。于是"刚设完就读"会读到旧值——实测：
+  // `set_property("font_size","18")` 返回 true，但 `get_property` 仍是 14。
+  //
+  // 这是一类真实的"改了没生效"缺陷（属性面往返断裂）。所以读的时候
+  // 优先用 override（它是作者显式设定的那个值）。
+  if (name == "font_size") {
+    const float effective = font_size_override_ > 0.0f ? font_size_override_ : style_.font_size;
+    return std::format("{}", effective);
+  }
   if (name == "selectable") return selectable_ ? "true" : "false";
   if (name == "selection") return selected_text();
   if (name == "tone") return std::string(components_internal::tone_name(tone_));
@@ -498,7 +509,7 @@ auto Text::set_property(std::string_view name, std::string_view value) -> bool {
     set_multiline(value == "true" || value == "1");
     return true;
   }
-  if (name == "font_size" || name == "size") {
+  if (name == "font_size") {
     // 字号：接受 `18` / `18px`（属性面是文本，单位由调用方决定）。
     // 旧名 `size` 仍接受（兼容期），但新写法是 `font_size`。
     const std::string text(value);
@@ -519,7 +530,7 @@ auto Text::property_names() const -> std::vector<std::string_view> {
   // `size` 是字号（与 `Button` 的尺寸档位**同名不同义**——各自解释，见 `xml_ui.cpp`
   // 里 `normalize_property` 的说明）。
   // `selectable` 可读写（自动化/声明式都靠它开启选区）。
-  return {"text", "content", "multiline", "font_size", "size", "selectable", "tone"};
+  return {"text", "content", "multiline", "font_size", "selectable", "tone"};
 }
 
 auto Text::readonly_property_names() const -> std::vector<std::string_view> {
@@ -676,14 +687,14 @@ auto IconView::get_property(std::string_view name) const -> std::optional<std::s
   if (name == "icon") return icon_;
   // 图标的 `size` 是**直径**（不是字号）——名字统一为 `diameter`，
   // 避免与 `font_size` 混淆（同一层里两个"大小"必须能区分开）。
-  if (name == "diameter" || name == "size") return std::format("{}", size_);
+  if (name == "diameter") return std::format("{}", size_);
   if (name == "tone") return std::string(components_internal::tone_name(tone_));
   return std::nullopt;
 }
 
 // 与 `get/set_property` 对称（见头文件里的说明）：不报名字 = 这条路命不中。
 auto IconView::property_names() const -> std::vector<std::string_view> {
-  return {"icon", "diameter", "size", "tone"};
+  return {"icon", "diameter", "tone"};
 }
 
 auto IconView::set_property(std::string_view name, std::string_view value) -> bool {
@@ -697,7 +708,7 @@ auto IconView::set_property(std::string_view name, std::string_view value) -> bo
     set_tone(*parsed);
     return true;
   }
-  if (name == "diameter" || name == "size") {
+  if (name == "diameter") {
     if (const auto parsed = parse_f64(value); parsed.has_value()) {
       set_size(static_cast<float>(*parsed));
       return true;
@@ -1013,7 +1024,7 @@ auto Button::get_property(std::string_view name) const -> std::optional<std::str
   }
   // 按钮的 `size` 是**枚举**（small/medium/large），不是长度——
   // 改叫 `scale` 以免与长度类字段混淆。
-  if (name == "scale" || name == "size") {
+  if (name == "scale") {
     switch (size_) {
       case Size::Small: return "small";
       case Size::Medium: return "medium";
@@ -1058,7 +1069,7 @@ auto Button::set_property(std::string_view name, std::string_view value) -> bool
     }
     return true;
   }
-  if (name == "scale" || name == "size") {
+  if (name == "scale") {
     const std::string text(value);
     if (text == "small") {
       set_size(Size::Small);
@@ -1079,7 +1090,7 @@ auto Button::set_property(std::string_view name, std::string_view value) -> bool
 }
 
 auto Button::property_names() const -> std::vector<std::string_view> {
-  return {"label", "text", "icon", "variant", "scale", "size", "hint", "tone"};
+  return {"label", "text", "icon", "variant", "scale", "hint", "tone"};
 }
 
 auto Button::invoke_action(std::string_view action, std::string_view argument) -> bool {

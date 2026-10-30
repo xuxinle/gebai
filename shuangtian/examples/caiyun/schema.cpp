@@ -180,7 +180,7 @@ constexpr auto kLayerFields = std::array{
               "模型缩放（组内=世界单位尺寸）", true, Aliases("scale", "size")},
     FieldSpec{"model_spin", SchemaScope::Layer, SchemaType::Number, true, -720.0, 720.0, true,
               "自转角速度（度/秒，绕 Y；负值=反向；8~15 是缓慢自转）", true,
-              Aliases("rotation", "rotate", "model_rot")},
+              Aliases("rotation", "rotation", "model_rot")},
     FieldSpec{"model_yaw", SchemaScope::Layer, SchemaType::Number, true, -3600.0, 3600.0, true,
               "初始角度（度）", true, Aliases("yaw", "heading")},
     FieldSpec{"model_tilt", SchemaScope::Layer, SchemaType::Number, true, -89.0, 89.0, true,
@@ -268,7 +268,7 @@ constexpr auto kCameraFields = std::array{
 
 /// 三维 `lighting` 对象。
 constexpr auto kLightingFields = std::array{
-    FieldSpec{"key_direction", SchemaScope::Lighting, SchemaType::Array, false, 0, 0, false,
+    FieldSpec{"light_from", SchemaScope::Lighting, SchemaType::Array, false, 0, 0, false,
               "主光方向 [x,y,z]（**指向光源**，不是照射方向）", true,
               Aliases("key_dir", "direction")},
     FieldSpec{"ambient", SchemaScope::Lighting, SchemaType::Number, true, 0.0, 4.0, true,
@@ -307,7 +307,7 @@ constexpr auto kObject3dFields = std::array{
               "球类是直径、柱/锥/胶囊是 [直径,高]、torus 是 [外径,管径]"},
     FieldSpec{"translate", SchemaScope::Object3d, SchemaType::Array, false, 0, 0, false,
               "平移 [x,y,z]", true, Aliases("position", "pos")},
-    FieldSpec{"rotate", SchemaScope::Object3d, SchemaType::Array, false, 0, 0, false,
+    FieldSpec{"rotation", SchemaScope::Object3d, SchemaType::Array, false, 0, 0, false,
               "欧拉角（**弧度**）[x,y,z]，顺序 X→Y→Z", true, Aliases("rotation")},
     FieldSpec{"scale", SchemaScope::Object3d, SchemaType::Array, false, 0, 0, false,
               "缩放 [x,y,z]"},

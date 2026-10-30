@@ -21,7 +21,7 @@ int main() {
   using st::math::Vec3;
 
   Lighting lit{};
-  lit.key_direction = Vec3{0.4f, 0.8f, 0.6f};
+  lit.light_from = Vec3{0.4f, 0.8f, 0.6f};
 
   int bad = 0;
   int checked = 0;

@@ -45,18 +45,14 @@ constexpr int kHeight = 240;
 /// 场景：三个不同形状 + 一个组合体（父子链），用来验证"不同零件各自命中"。
 const char* kSceneJson = R"json({
   "camera": { "eye": [1.4, 1.1, 3.2], "target": [0.0, 0.35, 0.0], "fov": 42 },
-  "lighting": { "key_direction": [0.4, 0.8, 0.6], "ambient": 0.35, "diffuse": 0.75 },
+  "lighting": { "light_from": [0.4, 0.8, 0.6], "ambient": 0.35, "diffuse": 0.75 },
   "objects": [
-    { "name": "ground", "shape": "plane", "radius": 3.0, "depth": 3.0,
-      "color": "#33383f", "ground": true },
-    { "name": "box", "shape": "cube", "radius": 0.28, "depth": 0.56, "height": 0.56,
-      "color": "#d4b07a", "translate": [-0.75, 0.28, 0.0] },
-    { "name": "sphere", "shape": "uv_sphere", "radius": 0.3, "color": "#7aa8d4",
-      "translate": [0.0, 0.3, 0.0] },
-    { "name": "rig", "group": true, "translate": [0.75, 0.1, 0.0], "rotate": [0, 0.5, 0],
+    {"name": "ground", "shape": "plane", "color": "#33383f", "ground": true, "size": [6.0, 3.0]},
+    {"name": "box", "shape": "cube", "color": "#d4b07a", "translate": [-0.75, 0.28, 0.0], "size": [0.56, 0.56, 0.56]},
+    {"name": "sphere", "shape": "uv_sphere", "color": "#7aa8d4", "translate": [0.0, 0.3, 0.0], "size": 0.6},
+    { "name": "rig", "group": true, "translate": [0.75, 0.1, 0.0], "rotation": [0, 0.5, 0],
       "children": [
-        { "name": "arm", "shape": "capsule", "radius": 0.08, "depth": 0.5,
-          "color": "#c98a8a", "translate": [0.0, 0.25, 0.0] }
+        {"name": "arm", "shape": "capsule", "color": "#c98a8a", "translate": [0.0, 0.25, 0.0], "size": [0.16, 0.5]}
       ] }
   ]
 })json";
@@ -182,7 +178,7 @@ int main(int argc, char** argv) {
     node.name = object.name;
     node.has_geometry = !object.group;
     node.local.translation = object.translate;
-    node.local.rotation = object.rotate;
+    node.local.rotation = object.rotation;
     node.local.scale = object.scale;
     for (const auto& child : object.children) {
       st::raster::SceneNode child_node{};

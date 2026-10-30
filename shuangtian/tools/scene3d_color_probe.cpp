@@ -191,7 +191,7 @@ auto main(int argc, char** argv) -> int {
   // 这才是调用方（裁云/界面）的真实用法。
   const Mesh sphere = Mesh::colored_sphere(0.85f, 24, st::math::Color{140, 128, 115, 255});
   Lighting lighting{};
-  lighting.key_direction = Vec3{0.45f, 0.8f, 0.55f};
+  lighting.light_from = Vec3{0.45f, 0.8f, 0.55f};
 
   // ① 旧行为：线性值当字节直存（已无渲染路径，用 None 档反推）
   Lighting none = lighting;

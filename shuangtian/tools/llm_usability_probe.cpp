@@ -63,8 +63,8 @@ int main() {
        {"segments", "负", "范围", "至少"}, true},
       // ── 动画相关 ──
       {"kind 拼错 colour", R"j({"objects":[],"animation":{"tracks":[{"node":"a","kind":"colour","keys":[]}]}})j",
-       {"kind", "rotate", "可用"}, true},
-      {"关键帧缺 t", R"j({"objects":[],"animation":{"tracks":[{"node":"a","kind":"rotate","keys":[{"value":[0,0,0]}]}]}})j",
+       {"kind", "rotation", "可用"}, true},
+      {"关键帧缺 t", R"j({"objects":[],"animation":{"tracks":[{"node":"a","kind":"rotation","keys":[{"value":[0,0,0]}]}]}})j",
        {"t", "时间"}, true},
       // ── 正确写法（必须通过，否则前面的判据无意义）──
       {"正确脚本", R"j({"camera":{"eye":[0,1,3]},"objects":[{"name":"a","shape":"cube","radius":0.5}]})j",

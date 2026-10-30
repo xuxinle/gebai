@@ -86,7 +86,7 @@ ST_TEST(scene3d_script_accepts_obj_shape) {
   // ① 绝对路径：最直接的用法。
   const std::string json_abs =
       R"({"camera":{"eye":[0,0.4,3.2],"target":[0,0,0],"fov":40},)"
-      R"("lighting":{"key_direction":[0.3,0.6,0.7],"ambient":0.35,"diffuse":0.8,"rim":0.1},)"
+      R"("lighting":{"light_from":[0.3,0.6,0.7],"ambient":0.35,"diffuse":0.8,"rim":0.1},)"
       R"("objects":[{"shape":"obj:)" + abs_obj + R"(","color":"#ffffff","scale":[1.2,1.2,1.2]}]})";  // lint-allow: L15 拼接 JSON，\)" 后是字符串拼接非提前终结
   const int abs_pixels = lit_pixel_count(json_abs);
   std::printf("绝对路径非背景像素：%d\n", abs_pixels);
@@ -102,7 +102,7 @@ ST_TEST(scene3d_script_resolves_obj_against_asset_basis) {
   // 只给相对文件名、把基准目录放进 spec.asset_basis —— 与裁云的实际用法一致。
   const std::string json_rel =
       R"({"camera":{"eye":[0,0.4,3.2],"target":[0,0,0],"fov":40},)"
-      R"("lighting":{"key_direction":[0.3,0.6,0.7],"ambient":0.35,"diffuse":0.8,"rim":0.1},)"
+      R"("lighting":{"light_from":[0.3,0.6,0.7],"ambient":0.35,"diffuse":0.8,"rim":0.1},)"
       R"("objects":[{"shape":"obj:tetra.obj","color":"#ffffff","scale":[1.2,1.2,1.2]}]})";
 
   auto spec = st::raster::parse_scene_spec_text(json_rel);

@@ -6,7 +6,7 @@
 ///
 /// ```jsonc
 /// {"camera":{"eye":[0,0.4,5.4],"target":[0,0,0],"fov":44},
-///  "lighting":{"key_direction":[-0.4,0.66,0.64],"ambient":0.1,"diffuse":0.52,
+///  "lighting":{"light_from":[-0.4,0.66,0.64],"ambient":0.1,"diffuse":0.52,
 ///              "rim":0.26,"exposure":0.92,"tone_map":"agx",
 ///              "extra_lights":[{...},{...}]},
 ///  "objects":[...]}

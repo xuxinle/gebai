@@ -105,33 +105,28 @@ auto serialize_object(const SceneObjectSpec& object) -> Json {
   if (!vec3_equals(object.translate, defaults.translate)) {
     item["translate"] = vec3_json(object.translate);
   }
-  if (!vec3_equals(object.rotate, defaults.rotate)) item["rotate"] = vec3_json(object.rotate);
+  // 写出时换回**度**（对调用方的单位）
+  if (!vec3_equals(object.rotation, defaults.rotation)) {
+    // 写出时换回**度**（脚本层单位）；内部是弧度
+    constexpr float kRadToDeg = 180.0f / 3.14159265358979323846f;
+    item["rotation"] = vec3_json(math::Vec3{object.rotation.x * kRadToDeg,
+                                            object.rotation.y * kRadToDeg,
+                                            object.rotation.z * kRadToDeg});
+  }
   if (!vec3_equals(object.scale, defaults.scale)) item["scale"] = vec3_json(object.scale);
   if (!color_equals(object.color, defaults.color)) item["color"] = color_json(object.color);
 
-  // 尺寸字段：**按 `specified` 位掩码写**（它记录了调用方原来看的是哪些字段名）。
-  //
-  // 这一点很重要：`cylinder` 的 `depth` 与 `height` 语义不同，若一律写
-  // 归一化后的值，读回时会因为"字段名不同"走到另一条取值分支，
-  // 于是往返后语义变了。写原来那个名字才能保真。
-  const auto write_if_was_specified = [&](std::uint8_t flag, const char* name, float value) {
-    if ((object.specified & flag) != 0U) item[name] = number_json(value);
-  };
-  write_if_was_specified(SceneObjectSpec::kSpecifiedRadius, "radius", object.radius);
-  write_if_was_specified(SceneObjectSpec::kSpecifiedWidth, "width", object.width);
-  write_if_was_specified(SceneObjectSpec::kSpecifiedHeight, "height", object.height);
-  write_if_was_specified(SceneObjectSpec::kSpecifiedDepth, "depth", object.depth);
-  // ## 兜底：一个尺寸字段都没写时补 `radius`
-  //
-  // 必要性：有些图元不靠这几个字段（`torus` 用 `major_radius`/`minor_radius`），
-  // 若输出里完全没有尺寸，读回时 `specified` 会是 0，而原文是 0——一致。
-  // 但**父层若靠 shape 默认尺寸**，不写会让读回时的默认值依赖解析顺序。
-  //
-  // 判据：只有当几何真的依赖 `radius`（即 `radius` 非默认）时才补，
-  // 否则会把 `specified` 掩码改脏（往返测试抓到过：torus 的 specified 从 0 变 1，
-  // 于是读回时走了另一条尺寸分支）。
-  if (object.specified == 0U && object.radius != defaults.radius) {
-    item["radius"] = number_json(object.radius);
+  // 尺寸：只有 `size` 一条路（旧字段已删除，不必再考虑位掩码）
+  if (object.size_count > 0U) {
+    if (object.size_count == 1U) {
+      item["size"] = number_json(object.size.x);
+    } else {
+      Json size_array = Json::array();
+      size_array.push_back(number_json(object.size.x));
+      size_array.push_back(number_json(object.size.y));
+      if (object.size_count >= 3U) size_array.push_back(number_json(object.size.z));
+      item["size"] = size_array;
+    }
   }
 
   if (object.segments != defaults.segments) item["segments"] = object.segments;
@@ -240,7 +235,7 @@ auto serialize_scene(const SceneSpec& spec) -> Json {
   // ── lighting ──
   {
     Json lighting = Json::object();
-    lighting["key_direction"] = vec3_json(spec.lighting.key_direction);
+    lighting["light_from"] = vec3_json(spec.lighting.light_from);
     if (spec.lighting.ambient != defaults.lighting.ambient) {
       lighting["ambient"] = number_json(spec.lighting.ambient);
     }

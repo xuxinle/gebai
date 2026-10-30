@@ -129,7 +129,7 @@ auto collect_track_diagnostics(const st::Json& node, const std::string& path,
                                std::vector<Diagnostic>& diagnostics) -> void {
   const auto supported = [](std::string_view property) {
     return property == "x" || property == "y" || property == "w" || property == "h" ||
-           property == "scale" || property == "alpha" || property == "rotate";
+           property == "scale" || property == "alpha" || property == "rotation";
   };
   const st::Json* tracks = st::json_find(node, "tracks");
   if (tracks == nullptr) return;
@@ -837,7 +837,7 @@ auto scene_from(const st::Json& node, std::size_t index, std::string_view asset_
     out.at = st::json_get_double(*carry, "at", 0.0);
     out.dur = std::clamp(st::json_get_double(*carry, "dur", 0.5), 0.01, 10.0);
     out.curve = st::json_get_string(*carry, "curve", out.curve);
-    out.rotate = static_cast<float>(st::json_get_double(*carry, "rotate", 0.0));
+    out.rotate = static_cast<float>(st::json_get_double(*carry, "rotation", 0.0));
     out.fade_out =
         static_cast<float>(std::clamp(st::json_get_double(*carry, "fade_out", 0.0), 0.0, 1.0));
     out.fill = color_field(*carry, "fill", out.fill);
@@ -1163,7 +1163,7 @@ auto script_to_json(const Script& script) -> std::string {
         if (carry.text_size != 48.0f) out["text_size"] = static_cast<double>(carry.text_size);
       }
       if (!carry.curve.empty()) out["curve"] = carry.curve;
-          if (carry.rotate != 0.0f) out["rotate"] = static_cast<double>(carry.rotate);
+          if (carry.rotate != 0.0f) out["rotation"] = static_cast<double>(carry.rotate);
     if (carry.fade_out > 0.0f) out["fade_out"] = static_cast<double>(carry.fade_out);
     node["carry_out"] = std::move(out);
     }

@@ -88,7 +88,7 @@ int main(int argc, char** argv) {
   const std::string scene_text = R"json({
     "camera": { "eye": [0, 0.7, 3.2], "target": [0, 0.1, 0], "fov": 42 },
     "lighting": {
-      "key_direction": [0.4, 0.8, 0.6],
+      "light_from": [0.4, 0.8, 0.6],
       "ambient": 0.18, "diffuse": 0.62, "rim": 0.2,
       "tone_map": "aces",
       "extra_lights": [
@@ -98,14 +98,9 @@ int main(int argc, char** argv) {
     "shadow": { "strength": 0.4, "ground_y": -0.5 },
     "cull": "back",
     "objects": [
-      { "shape": "plane", "width": 6, "height": 6, "color": "#6b6f7a",
-        "rotate": [-1.5707963, 0, 0], "translate": [0, -0.5, 0], "ground": true },
-      { "shape": "sphere", "radius": 0.6, "color": "#c8a07a", "segments": 32,
-        "metallic": 0.0, "roughness": 0.18, "specular": 1.0,
-        "translate": [0, 0.15, 0] },
-      { "shape": "box", "width": 0.5, "height": 0.5, "depth": 0.5, "color": "#7a8fc8",
-        "metallic": 1.0, "roughness": 0.25, "specular": 1.0,
-        "translate": [0.95, -0.2, 0.1], "rotate": [0, 0.6, 0] }
+      {"shape": "plane", "color": "#6b6f7a", "rotation": [-1.5707963, 0, 0], "translate": [0, -0.5, 0], "ground": true, "size": [6, 6]},
+      {"shape": "sphere", "color": "#c8a07a", "segments": 32, "metallic": 0.0, "roughness": 0.18, "specular": 1.0, "translate": [0, 0.15, 0], "size": 1.2},
+      {"shape": "box", "color": "#7a8fc8", "metallic": 1.0, "roughness": 0.25, "specular": 1.0, "translate": [0.95, -0.2, 0.1], "rotation": [0, 0.6, 0], "size": [0.5, 0.5, 0.5]}
     ]
   })json";
 

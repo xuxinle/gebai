@@ -96,32 +96,21 @@ auto robot_json(float shoulder_angle, bool pivot_at_joint, bool hide_shoulder) -
                      : R"pv("pivot": [0.0, -0.1, 0.0])pv";
   return std::format(R"json({{
     "camera": {{ "eye": [1.3, 1.05, 2.3], "target": [0.05, 0.55, 0.0], "fov": 40 }},
-    "lighting": {{ "key_direction": [0.4, 0.8, 0.6], "ambient": 0.35, "diffuse": 0.7, "rim": 0.2 }},
+    "lighting": {{ "light_from": [0.4, 0.8, 0.6], "ambient": 0.35, "diffuse": 0.7, "rim": 0.2 }},
     "shadow": {{ "strength": 0.35, "ground_y": 0.0 }},
     "objects": [
-      {{ "name": "ground", "shape": "plane", "radius": 1.4, "depth": 1.4,
-         "color": "#3c414b", "ground": true }},
-      {{ "name": "base", "shape": "cylinder", "radius": 0.22, "depth": 0.1,
-         "color": "#8a8f99", "translate": [0.0, 0.05, 0.0],
-         "metallic": 0.6, "roughness": 0.35 }},
+      {{"name": "ground", "shape": "plane", "color": "#3c414b", "ground": true, "size": [2.8, 1.4]}},
+      {{"name": "base", "shape": "cylinder", "color": "#8a8f99", "translate": [0.0, 0.05, 0.0], "metallic": 0.6, "roughness": 0.35, "size": [0.44, 0.1]}},
       {{ "name": "shoulder", "group": true, "translate": [0.0, 0.1, 0.0],
-         "rotate": [0.0, 0.0, {}], "visible": {}, {},
+         "rotation": [0.0, 0.0, {}], "visible": {}, {},
          "children": [
-           {{ "name": "upper", "shape": "capsule", "radius": 0.075, "depth": 0.62,
-              "color": "#d4b07a", "translate": [0.0, 0.28, 0.0],
-              "metallic": 0.3, "roughness": 0.4 }},
-           {{ "name": "elbow", "shape": "uv_sphere", "radius": 0.09,
-              "color": "#6f7681", "translate": [0.0, 0.58, 0.0],
-              "metallic": 0.8, "roughness": 0.25 }},
+           {{"name": "upper", "shape": "capsule", "color": "#d4b07a", "translate": [0.0, 0.28, 0.0], "metallic": 0.3, "roughness": 0.4, "size": [0.15, 0.62]}},
+           {{"name": "elbow", "shape": "uv_sphere", "color": "#6f7681", "translate": [0.0, 0.58, 0.0], "metallic": 0.8, "roughness": 0.25, "size": 0.18}},
            {{ "name": "forearm", "group": true, "translate": [0.0, 0.58, 0.0],
-              "rotate": [0.0, 0.0, -0.9],
+              "rotation": [0.0, 0.0, -0.9],
               "children": [
-                {{ "name": "lower", "shape": "capsule", "radius": 0.06, "depth": 0.5,
-                   "color": "#c8a07a", "translate": [0.0, 0.22, 0.0],
-                   "metallic": 0.3, "roughness": 0.4 }},
-                {{ "name": "hand", "shape": "box", "radius": 0.075, "depth": 0.1,
-                   "height": 0.16, "color": "#6f7681", "translate": [0.0, 0.5, 0.0],
-                   "metallic": 0.85, "roughness": 0.2 }}
+                {{"name": "lower", "shape": "capsule", "color": "#c8a07a", "translate": [0.0, 0.22, 0.0], "metallic": 0.3, "roughness": 0.4, "size": [0.12, 0.5]}},
+                {{"name": "hand", "shape": "box", "color": "#6f7681", "translate": [0.0, 0.5, 0.0], "metallic": 0.85, "roughness": 0.2, "size": [0.15, 0.1, 0.1]}}
               ] }}
          ] }}
     ]

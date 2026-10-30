@@ -192,7 +192,7 @@ auto build_api_manifest() -> Json {
   mistakes.push_back("rotate/value 用**弧度**，不是角度：90 度 = 1.5708");
   mistakes.push_back("旧字段 height 对 cube/cylinder **无效**（实测），请改用 size");
   mistakes.push_back("模型半径 < 0.05 时必须把 camera.near 调小，否则渲染出空白");
-  mistakes.push_back("key_direction 是**指向光源**的方向，写反会让阴影朝反方向");
+  mistakes.push_back("light_from 是**指向光源**的方向，写反会让阴影朝反方向");
   mistakes.push_back("父节点不可见时整棵子树都不可见（visible 会继承）");
   mistakes.push_back("同一场景内节点名必须唯一（动画与骨架按名字引用）");
   mistakes.push_back("写完用 st_api --check 核尺寸：包围盒会打印出来，能立刻发现写错");
@@ -208,7 +208,7 @@ auto minimal_example_script() -> std::string {
   // 尺寸一律用 `size`（全长）—— 这是首选写法，示例必须示范它。
   return R"json({
   "camera": { "eye": [2.2, 1.6, 2.8], "target": [0, 0.25, 0], "fov": 42 },
-  "lighting": { "key_direction": [0.4, 0.8, 0.6], "ambient": 0.3, "diffuse": 0.8 },
+  "lighting": { "light_from": [0.4, 0.8, 0.6], "ambient": 0.3, "diffuse": 0.8 },
   "shadow": { "strength": 0.35, "ground_y": 0 },
   "objects": [
     { "name": "ground", "shape": "plane", "size": [4, 4],

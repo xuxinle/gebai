@@ -358,42 +358,8 @@ auto Element::get_property(std::string_view name) const -> std::optional<std::st
   //
   // 兼容期：仍接受 `size`，但走告警路径（见 set_property）。
   if (name == "font_size") return std::format("{:.2f}", static_cast<double>(style_.font_size));
-  if (name == "size") return std::format("{:.2f}", static_cast<double>(style_.font_size));
   if (name == "weight") return std::string(ui::to_string(style_.font_weight));
   return std::nullopt;
-}
-
-/// 旧属性名 → 新属性名的对照（用于告警）。
-///
-/// ## 为什么 UI 侧的 `size` 必须分三种改名，而不是一律改
-///
-/// 实测发现 `size` 在 UI 里有**四种语义**：
-///
-/// | 组件 | 旧 `size` 的含义 | 新名 |
-/// |---|---|---|
-/// | Text / Heading | 字号 | `font_size` |
-/// | IconView / Avatar / Spinner | 直径 | `diameter` |
-/// | Button | 枚举 small/medium/large | `scale` |
-///
-/// 一律改成 `font_size` 会把"图标直径"也叫成字号——那就是造出一个新的语义错误。
-/// 所以按组件各自改名，`size` 只保留为兼容别名。
-constexpr struct {
-  const char* legacy;
-  const char* replacement;
-  const char* applies_to;
-} kLegacyUiNames[] = {
-    {"size", "font_size", "Text/Heading 的字号"},
-    {"size", "diameter", "Icon/Avatar/Spinner 的直径"},
-    {"size", "scale", "Button 的 small/medium/large"},
-};
-
-/// 若 `name` 是旧名则告警一次（带新名与适用范围）。
-void warn_legacy_ui_property(std::string_view name) {
-  if (name != "size") return;
-  // 三种新名都可能对应，按"最可能"给提示（调用方看组件类型即可确认）
-  ST_LOG_INFO(
-      "UI 属性 \"size\" 是旧名：字号请用 \"font_size\"，"
-      "直径请用 \"diameter\"，按钮尺寸请用 \"scale\"（本次仍按旧语义生效）");
 }
 
 auto Element::set_property(std::string_view name, std::string_view value) -> bool {
@@ -404,7 +370,7 @@ auto Element::set_property(std::string_view name, std::string_view value) -> boo
 
 auto Element::property_names() const -> std::vector<std::string_view> {
   return {"hovered", "hover_progress", "hover_effect", "color", "color_override",
-          "tone_override", "font_size", "size", "weight"};
+          "tone_override", "font_size", "weight"};
 }
 
 auto Element::readonly_property_names() const -> std::vector<std::string_view> {

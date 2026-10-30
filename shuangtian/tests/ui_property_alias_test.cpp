@@ -1,13 +1,18 @@
-/// UI 属性改名的等价性与告警测试。
+/// UI 属性名严格性测试。
 ///
-/// ## 为什么这类测试必须有
+/// ## 为什么这条现在是"严格性"而不是"兼容性"
 ///
-/// 改名（`size` → `font_size` / `diameter` / `scale`）最容易出的问题是
-/// **改了名字但没接上实现**：旧的还能用、新的没人认，而界面上看不出差别
-/// （因为旧名还在生效）。只有"新名与旧名产出相同结果"这条能抓住它。
+/// 2026-10-31 起 `size` 兼容别名**已删除**：UI 的"大小"按语义拆成三个名字
+/// （`font_size` / `diameter` / `scale`）。删除的理由是 `size` 与三维场景的
+/// `size`（全长）同名不同义——那是模型最容易踩的坑（名字一样、含义无关、两边都不报错）。
 ///
-/// 另一类问题是**改错语义**：`size` 在 UI 里有四种含义（字号/直径/枚举），
-/// 一律改成 `font_size` 会把图标直径也叫成字号——那等于造出一个新的语义错误。
+/// 所以本文件现在验证的是**旧名必须被拒绝**，而不是"旧名仍然能用"。
+/// 一个还能用的别名会让作者继续写错，而错误不会报出来。
+///
+/// ## 另一类问题：改错语义
+///
+/// `size` 在 UI 里有四种含义（字号/直径/枚举）。一律改成 `font_size`
+/// 会把图标直径也叫成字号——那等于造出一个新的语义错误。
 /// 所以下面分别验证：字号归字号、直径归直径、枚举归枚举。
 #include <string>
 #include <vector>
@@ -18,65 +23,62 @@
 #include "st/ui/components/feedback.hpp"
 #include "st/ui/element.hpp"
 
-ST_TEST(ui_text_font_size_alias_equivalence) {
-  // `font_size` 与旧的 `size` 必须产出**相同字号**
-  st::ui::Text a;
-  st::ui::Text b;
-  ST_CHECK(a.set_property("font_size", "18"));
-  ST_CHECK(b.set_property("size", "18"));
-  const auto size_a = a.get_property("font_size");
-  const auto size_b = b.get_property("size");
-  ST_REQUIRE(size_a.has_value());
-  ST_REQUIRE(size_b.has_value());
-  ST_CHECK_EQ(*size_a, *size_b);
-  st::log::out("[ui-alias] font_size=%s size=%s\n", size_a->c_str(), size_b->c_str());
+ST_TEST(ui_font_size_is_the_only_text_size_name) {
+  // 字号：`font_size` 生效，`size` 被拒
+  st::ui::Text text;
+  ST_CHECK(text.set_property("font_size", "18"));
+  const auto value = text.get_property("font_size");
+  ST_REQUIRE(value.has_value());
+  ST_CHECK_EQ(*value, std::string("18"));
+
+  // 旧名 `size` 必须**失败**（不是静默忽略，也不是兼容）
+  st::ui::Text legacy;
+  ST_CHECK(!legacy.set_property("size", "18"));
+  ST_CHECK(!legacy.get_property("size").has_value());
 }
 
 ST_TEST(ui_icon_diameter_is_not_font_size) {
-  // ## 关键：图标/头像的 `size` 是**直径**，不是字号
+  // ## 图标/头像的"大小"是**直径**，不是字号
   //
-  // 若改名时一律改成 `font_size`，这条会红——它会证明"直径"这条路径
-  // 不再接受 `font_size`（因为它压根不是字号）。
-  st::ui::IconView icon_a;
-  st::ui::IconView icon_b;
-  ST_CHECK(icon_a.set_property("diameter", "24"));
-  ST_CHECK(icon_b.set_property("size", "24"));
-  const auto diameter_a = icon_a.get_property("diameter");
-  const auto diameter_b = icon_b.get_property("size");
-  ST_REQUIRE(diameter_a.has_value());
-  ST_REQUIRE(diameter_b.has_value());
-  ST_CHECK_EQ(*diameter_a, *diameter_b);
+  // 若当初图省事把 `size` 一律改成 `font_size`，这条会红——
+  // 它会证明"直径"这条路径不接受 `font_size`（因为它压根不是字号）。
+  st::ui::IconView icon;
+  ST_CHECK(icon.set_property("diameter", "24"));
+  const auto diameter = icon.get_property("diameter");
+  ST_REQUIRE(diameter.has_value());
+  ST_CHECK_EQ(*diameter, std::string("24"));
 
-  // 图标**不接受** `font_size`（它不是文本）
-  st::ui::IconView icon_c;
-  ST_CHECK(!icon_c.set_property("font_size", "24"));
+  // 图标不接受字号，也不接受旧名
+  st::ui::IconView other;
+  ST_CHECK(!other.set_property("font_size", "24"));
+  ST_CHECK(!other.set_property("size", "24"));
 }
 
-ST_TEST(ui_button_scale_enum_alias) {
-  // 按钮的 `size` 是枚举 small/medium/large，新名 `scale`
-  st::ui::Button button_a{"ok"};
-  st::ui::Button button_b{"ok"};
-  ST_CHECK(button_a.set_property("scale", "large"));
-  ST_CHECK(button_b.set_property("size", "large"));
-  const auto scale_a = button_a.get_property("scale");
-  const auto scale_b = button_b.get_property("size");
-  ST_REQUIRE(scale_a.has_value());
-  ST_REQUIRE(scale_b.has_value());
-  ST_CHECK_EQ(*scale_a, *scale_b);
-  ST_CHECK_EQ(*scale_a, std::string("large"));
+ST_TEST(ui_button_scale_is_an_enum_not_a_length) {
+  // 按钮的"大小"是**枚举**（small/medium/large），名字是 `scale`
+  st::ui::Button button{"ok"};
+  ST_CHECK(button.set_property("scale", "large"));
+  const auto scale = button.get_property("scale");
+  ST_REQUIRE(scale.has_value());
+  ST_CHECK_EQ(*scale, std::string("large"));
 
-  // 非法枚举值必须被拒（而不是静默接受）
-  st::ui::Button button_c{"ok"};
-  ST_CHECK(!button_c.set_property("scale", "huge"));
+  // 非法枚举值必须被拒
+  st::ui::Button invalid{"ok"};
+  ST_CHECK(!invalid.set_property("scale", "huge"));
+
+  // 旧名被拒
+  st::ui::Button legacy{"ok"};
+  ST_CHECK(!legacy.set_property("size", "large"));
 }
 
 ST_TEST(ui_new_names_are_advertised) {
-  // `property_names()` 必须**同时**报新名（否则 `apply_properties` 认不出新名）
+  // `property_names()` 必须报新名（`apply_properties` 靠它认名字）
   st::ui::Text text;
-  const auto names = text.property_names();
   bool has_font_size = false;
-  for (const auto name : names) {
+  for (const auto name : text.property_names()) {
     if (name == "font_size") has_font_size = true;
+    // 旧名不应再出现在声明清单里
+    ST_CHECK(name != "size");
   }
   ST_CHECK(has_font_size);
 

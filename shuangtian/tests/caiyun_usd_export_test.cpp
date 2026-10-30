@@ -53,7 +53,14 @@ namespace {
 }  // namespace
 
 ST_TEST(caiyun_usd_header_and_axis) {
-  const auto usda = export_json(R"({"objects":[{"shape":"sphere","radius":0.5}]})");
+  const auto usda = export_json(R"j({
+  "objects": [
+    {
+      "shape": "sphere",
+      "size": 1.0
+    }
+  ]
+})j");
   ST_CHECK(usda.has_value());
   if (!usda) {
     st::log::out("导出失败：{}\n", usda.error().message);
@@ -67,11 +74,29 @@ ST_TEST(caiyun_usd_header_and_axis) {
 }
 
 ST_TEST(caiyun_usd_each_object_becomes_a_prim) {
-  const auto usda = export_json(R"({"objects":[
-    {"shape":"sphere","radius":0.5},
-    {"shape":"box","width":1,"height":1,"depth":1},
-    {"shape":"torus","radius":0.4}
-  ]})");
+  const auto usda = export_json(R"j({
+  "objects": [
+    {
+      "shape": "sphere",
+      "size": 1.0
+    },
+    {
+      "shape": "box",
+      "size": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "shape": "torus",
+      "size": [
+        1.08,
+        0.28
+      ]
+    }
+  ]
+})j");
   ST_CHECK(usda.has_value());
   if (!usda) return;
   // 三个对象 → 三个 Mesh Prim。少一个就是"导出了但丢东西"。
@@ -83,7 +108,18 @@ ST_TEST(caiyun_usd_each_object_becomes_a_prim) {
 
 ST_TEST(caiyun_usd_box_has_twelve_triangles) {
   // 立方体的已知量：6 面 × 2 三角形 = 12，24 个独立顶点（硬边，不共享）。
-  const auto usda = export_json(R"({"objects":[{"shape":"box","width":1,"height":1,"depth":1}]})");
+  const auto usda = export_json(R"j({
+  "objects": [
+    {
+      "shape": "box",
+      "size": [
+        1,
+        1,
+        1
+      ]
+    }
+  ]
+})j");
   ST_CHECK(usda.has_value());
   if (!usda) return;
   const std::size_t counts_at = usda->find("int[] faceVertexCounts = [");
@@ -139,10 +175,24 @@ ST_TEST(caiyun_usd_box_has_twelve_triangles) {
 }
 
 ST_TEST(caiyun_usd_transform_is_preserved) {
-  const auto usda = export_json(R"({"objects":[
-    {"shape":"sphere","radius":0.5,
-     "translate":[1.5,-2.25,0.75], "scale":[2,3,4]}
-  ]})");
+  const auto usda = export_json(R"j({
+  "objects": [
+    {
+      "shape": "sphere",
+      "translate": [
+        1.5,
+        -2.25,
+        0.75
+      ],
+      "scale": [
+        2,
+        3,
+        4
+      ],
+      "size": 1.0
+    }
+  ]
+})j");
   ST_CHECK(usda.has_value());
   if (!usda) return;
   // 值必须原样出现（浮点格式化错位会让物体飞走，且画面上看像"相机不对"）
@@ -155,9 +205,14 @@ ST_TEST(caiyun_usd_transform_is_preserved) {
 ST_TEST(caiyun_usd_sanitizes_identifiers) {
   // 形状名实际只有内置几个，但对象名可能来自脚本；非法字符会让 usdcat 报语法错，
   // 而错误指向"第几行有非法字符"，离"是某个名字"很远。
-  const auto usda = export_json(R"({"objects":[
-    {"shape":"sphere","radius":0.5}
-  ]})", "My World-1");
+  const auto usda = export_json(R"j({
+  "objects": [
+    {
+      "shape": "sphere",
+      "size": 1.0
+    }
+  ]
+})j", "My World-1");
   ST_CHECK(usda.has_value());
   if (!usda) return;
   // 根名被净化成合法标识符
@@ -169,14 +224,28 @@ ST_TEST(caiyun_usd_sanitizes_identifiers) {
 
 ST_TEST(caiyun_usd_color_is_linearized) {
   // sRGB 255 → 线性 1.0；sRGB 128 → 约 0.2158（gamma 2.2 附近）
-  const auto usda = export_json(R"({"objects":[{"shape":"sphere","radius":0.5,
-    "color":"#ffffff"}]})");
+  const auto usda = export_json(R"j({
+  "objects": [
+    {
+      "shape": "sphere",
+      "color": "#ffffff",
+      "size": 1.0
+    }
+  ]
+})j");
   ST_CHECK(usda.has_value());
   if (!usda) return;
   ST_CHECK(usda->find("displayColor = [(1.0, 1.0, 1.0)]") != std::string::npos);
 
-  const auto mid = export_json(R"({"objects":[{"shape":"sphere","radius":0.5,
-    "color":"#808080"}]})");
+  const auto mid = export_json(R"j({
+  "objects": [
+    {
+      "shape": "sphere",
+      "color": "#808080",
+      "size": 1.0
+    }
+  ]
+})j");
   ST_CHECK(mid.has_value());
   if (!mid) return;
   // 128/255 = 0.502 sRGB → 线性 0.2158。若不做转换会写成 0.501961（明显偏亮）。
@@ -185,9 +254,9 @@ ST_TEST(caiyun_usd_color_is_linearized) {
 
 ST_TEST(caiyun_usd_bad_obj_fails_whole_export) {
   // `obj:` 加载失败必须**整体失败**：静默少一个物体是导出类功能最难发现的缺陷。
-  const auto usda = export_json(R"({"objects":[
+  const auto usda = export_json(R"j({"objects":[
     {"shape":"obj:definitely_missing_mesh.obj"}
-  ]})");
+  ]})j");
   ST_CHECK(!usda.has_value());
   if (!usda) st::log::out("缺网格的报错：{}\n", usda.error().message);
 }
@@ -199,7 +268,14 @@ ST_TEST(caiyun_usd_rejects_broken_json) {
 
 ST_TEST(caiyun_usd_no_creative_layers_leak) {
   // 意图/历史/动画**不该**出现在 USD 里（那是创作过程，不是场景内容）。
-  const auto usda = export_json(R"({"objects":[{"shape":"sphere","radius":0.5}]})");
+  const auto usda = export_json(R"j({
+  "objects": [
+    {
+      "shape": "sphere",
+      "size": 1.0
+    }
+  ]
+})j");
   ST_CHECK(usda.has_value());
   if (!usda) return;
   ST_CHECK(usda->find("intent") == std::string::npos);

@@ -128,10 +128,12 @@ ST_TEST(scene_script_primitive_params_take_effect) {
   // 判据用 `build_mesh`（不渲染），因为"大了 10%"在 240px 画面上只有几个像素差。
   st::raster::SceneObjectSpec object{};
   object.shape = "uv_sphere";
-  object.radius = 0.5f;
+  object.size = st::math::Vec3{0.5f * 2.0f, 0.0f, 0.0f};
+  object.size_count = 1;
   auto small = st::raster::build_mesh(object);
   ST_REQUIRE(small.has_value());
-  object.radius = 1.0f;
+  object.size = st::math::Vec3{1.0f * 2.0f, 0.0f, 0.0f};
+  object.size_count = 1;
   auto large = st::raster::build_mesh(object);
   ST_REQUIRE(large.has_value());
   const auto small_box = st::raster::bounds(*small);
@@ -141,7 +143,8 @@ ST_TEST(scene_script_primitive_params_take_effect) {
 
   // 齿轮的齿数：齿数翻倍 → 侧壁三角形数翻倍
   object.shape = "gear";
-  object.radius = 0.6f;
+  object.size = st::math::Vec3{0.6f * 2.0f, 0.0f, 0.0f};
+  object.size_count = 1;
   object.teeth = 8;
   auto gear8 = st::raster::build_mesh(object);
   ST_REQUIRE(gear8.has_value());
@@ -152,7 +155,8 @@ ST_TEST(scene_script_primitive_params_take_effect) {
 
   // 细分次数：ico_sphere 每 +1 三角形数 ×4
   object.shape = "ico_sphere";
-  object.radius = 0.5f;
+  object.size = st::math::Vec3{0.5f * 2.0f, 0.0f, 0.0f};
+  object.size_count = 1;
   object.subdivisions = 0;
   auto ico0 = st::raster::build_mesh(object);
   ST_REQUIRE(ico0.has_value());
@@ -295,7 +299,7 @@ ST_TEST(scene_script_loads_gltf_file) {
 
   const std::string json = R"({
     "camera": { "eye": [0.8, 0.9, 2.6], "target": [0.0, 0.0, 0.0], "fov": 40 },
-    "objects": [ { "shape": "sphere", "gltf": "gear.glb", "rotate": [0.4, 0.0, 0.0] } ]
+    "objects": [ { "shape": "sphere", "gltf": "gear.glb", "rotation": [0.4, 0.0, 0.0] } ]
   })";
   auto spec = st::raster::parse_scene_spec_text(json);
   ST_REQUIRE(spec.has_value());
@@ -316,46 +320,35 @@ ST_TEST(scene_script_loads_gltf_file) {
   ST_CHECK(!rendered.has_value());
 }
 
-ST_TEST(scene_script_generic_size_fields_beat_shape_defaults) {
-  // ## 本条钉住一个"静默用错默认值"的缺陷
+ST_TEST(scene_script_size_is_the_only_size_path) {
+  // ## 这条钉住"尺寸只有一条路"
   //
-  // 历史上不同形状吃不同字段名（`plane` 吃 width/height、`cylinder` 吃 height、
-  // 新图元吃 radius/depth）。于是 `{"shape":"cylinder","depth":0.12}` 里的 `depth`
-  // 会被**静默忽略**，实际用 `height` 的默认 1.0——写探针时底座本该 0.12 高，
-  // 渲染出来 1.0 高，整张图比例全错而没有任何报错。
+  // 历史上有两套尺寸字段（width/height/depth 与 radius/depth 并存），
+  // 每个形状再各有一套映射分支。结果是 `{"shape":"cylinder","depth":0.12}`
+  // 里的 depth 被**静默忽略**（实际用 height 默认 1.0），整张图比例全错而无报错。
   //
-  // 修法：解析时记下"调用方写了哪些尺寸字段"，取值优先级变成
-  // **显式写的 > 该形状的历史字段 > 图元默认值**。
+  // 2026-10-31：旧字段彻底删除，尺寸只剩 `size`（全长）。
+  // 这里验证两件事：
+  //   1. 写 size 就是精确的那个尺寸（不经过任何"历史字段"换算）；
+  //   2. 写旧字段（radius/depth）**不再被接受**——报"未知字段"而不是静默忽略。
+
+  // ① size 精确生效
   st::raster::SceneObjectSpec object{};
   object.shape = "cylinder";
-  object.radius = 0.2f;
-  object.depth = 0.1f;
-  object.specified = st::raster::SceneObjectSpec::kSpecifiedRadius |
-                     st::raster::SceneObjectSpec::kSpecifiedDepth;
+  object.size = st::math::Vec3{0.4f, 0.1f, 0.0f};   // [直径, 高]
+  object.size_count = 2;
   const auto mesh = st::raster::build_mesh(object);
   ST_REQUIRE(mesh.has_value());
   const auto box = st::raster::bounds(*mesh);
-  // Y 向总长必须是 0.1（而不是 height 默认的 1.0）
-  ST_CHECK_NEAR(box.size().y, 0.1f, 0.01f);
-  ST_CHECK_NEAR(box.size().x, 0.4f, 0.02f);
+  ST_CHECK_NEAR(box.size().x, 0.4f, 0.02f);   // 直径
+  ST_CHECK_NEAR(box.size().y, 0.1f, 0.02f);   // 高
 
-  // 旧脚本（只写 height）必须仍然按 height 解释
-  st::raster::SceneObjectSpec legacy{};
-  legacy.shape = "cylinder";
-  legacy.radius = 0.2f;
-  legacy.height = 0.8f;
-  legacy.specified = st::raster::SceneObjectSpec::kSpecifiedHeight;
-  const auto legacy_mesh = st::raster::build_mesh(legacy);
-  ST_REQUIRE(legacy_mesh.has_value());
-  ST_CHECK_NEAR(st::raster::bounds(*legacy_mesh).size().y, 0.8f, 0.02f);
-
-  // 从 JSON 解析时这两个位要真的被置上（否则上面两条只是测了个空壳）
-  const auto spec = st::raster::parse_scene_spec_text(R"({
+  // ② 旧字段不再被接受（这是"彻底"的关键：不是忽略，是拒绝）
+  const auto legacy = st::raster::parse_scene_spec_text(R"({
     "objects": [ { "shape": "cylinder", "radius": 0.2, "depth": 0.1 } ]
   })");
-  ST_REQUIRE(spec.has_value());
-  ST_REQUIRE(!spec->objects.empty());
-  ST_CHECK(spec->objects[0].has(st::raster::SceneObjectSpec::kSpecifiedRadius));
-  ST_CHECK(spec->objects[0].has(st::raster::SceneObjectSpec::kSpecifiedDepth));
-  ST_CHECK(!spec->objects[0].has(st::raster::SceneObjectSpec::kSpecifiedHeight));
+  ST_REQUIRE(!legacy.has_value());
+  const std::string message = legacy.error().message;
+  ST_CHECK(message.find("radius") != std::string::npos);   // 指出是哪个字段
+  ST_CHECK(message.find("size") != std::string::npos);     // 并给出正确写法
 }

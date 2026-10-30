@@ -3991,7 +3991,7 @@ class GpuScene3d final : public st::raster::Scene3D {
         params.model[index] = model.value(row, column);
       }
     }
-    const math::Vec3 light = lighting_.key_direction.normalized();
+    const math::Vec3 light = lighting_.light_from.normalized();
     params.light = {light.x, light.y, light.z, lighting_.ambient};
     // g_tune.w：本网格是否采样纹理（1 = 采）
     const bool use_texture = texture_view_ != nullptr && buffers->uvs != nullptr;

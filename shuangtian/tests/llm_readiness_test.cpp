@@ -61,9 +61,9 @@ ST_TEST(schema_unknown_field_covers_all_layers) {
       {"objects", R"j({"objects":[{"shape":"cube","translaet":[0,1,0]}]})j",
        "objects[0].translaet"},
       {"animation", R"j({"objects":[],"animation":{"traks":[]}})j", "animation.traks"},
-      {"tracks", R"j({"objects":[],"animation":{"tracks":[{"node":"a","kind":"rotate","keys":[],"easng":"linear"}]}})j",
+      {"tracks", R"j({"objects":[],"animation":{"tracks":[{"node":"a","kind":"rotation","keys":[],"easng":"linear"}]}})j",
        "animation.tracks[0].easng"},
-      {"keys", R"j({"objects":[],"animation":{"tracks":[{"node":"a","kind":"rotate","keys":[{"t":0,"value":[0,0,0],"easing2":"x"}]}]}})j",
+      {"keys", R"j({"objects":[],"animation":{"tracks":[{"node":"a","kind":"rotation","keys":[{"t":0,"value":[0,0,0],"easing2":"x"}]}]}})j",
        "animation.tracks[0].keys[0].easing2"},
       {"skeleton", R"j({"objects":[],"skeleton":{"joint":["a"]}})j", "skeleton.joint"},
   };
@@ -84,15 +84,15 @@ ST_TEST(schema_edit_distance_and_suggestions) {
   ST_CHECK_EQ(st::raster::edit_distance("raduis", "radius", 10), 2);   // 相邻换位
   ST_CHECK_EQ(st::raster::edit_distance("xyz", "abc", 10), 3);
 
-  const std::vector<std::string> candidates{"radius", "rings", "width", "depth"};
+  const std::vector<std::string> candidates{"radius", "rings", "segments", "size"};
   const auto suggestions = st::raster::suggest_fields("raduis", candidates, 2, 3);
   ST_REQUIRE(!suggestions.empty());
   ST_CHECK_EQ(suggestions.front(), std::string("radius"));
 
   // 大小写差异应当算"距离 0 的候选"（`Radius` 明显是想写 `radius`）
-  const auto cased = st::raster::suggest_fields("Radius", candidates, 2, 3);
+  const auto cased = st::raster::suggest_fields("Size", candidates, 2, 3);
   ST_REQUIRE(!cased.empty());
-  ST_CHECK_EQ(cased.front(), std::string("radius"));
+  ST_CHECK_EQ(cased.front(), std::string("size"));
 
   // 完全无关时不给候选（避免胡乱指路）
   ST_CHECK(st::raster::suggest_fields("zzzzzz", candidates, 2, 3).empty());
@@ -100,7 +100,7 @@ ST_TEST(schema_edit_distance_and_suggestions) {
 
 ST_TEST(schema_field_type_errors_are_reported) {
   // 类型错必须报错（`json_get_double` 会静默退回默认值，不能靠它）
-  const auto string_for_number = parse(R"j({"objects":[{"shape":"cube","radius":"0.5"}]})j");
+  const auto string_for_number = parse(R"j({"objects":[{"shape":"cube","size":"0.5"}]})j");
   ST_REQUIRE(!string_for_number.has_value());
   ST_CHECK(string_for_number.error().message.find("期望数字") != std::string::npos);
 
@@ -120,7 +120,7 @@ ST_TEST(schema_valid_script_still_parses) {
   // 新检查不能误伤合法脚本（这是最需要防的回归）
   const auto spec = parse(R"({
     "camera": {"eye":[2,1.6,2.8],"target":[0,0.25,0],"fov":42},
-    "lighting": {"key_direction":[0.4,0.8,0.6],"ambient":0.3},
+    "lighting": {"light_from":[0.4,0.8,0.6],"ambient":0.3},
     "shadow": {"strength":0.35,"ground_y":0},
     "objects": [
       {"name":"ground","shape":"plane","radius":2.0,"depth":4.0,"ground":true},
@@ -213,15 +213,15 @@ void check_round_trip(std::string_view original, const char* label) {
     ST_CHECK_EQ(b.name, a.name);
     ST_CHECK_EQ(b.shape, a.shape);
     // 尺寸：往返后必须一致（这是"语义保真"的核心）
-    ST_CHECK_NEAR(b.radius, a.radius, 1.0e-5f);
-    ST_CHECK_NEAR(b.depth, a.depth, 1.0e-5f);
-    ST_CHECK_NEAR(b.height, a.height, 1.0e-5f);
-    ST_CHECK_NEAR(b.width, a.width, 1.0e-5f);
+    ST_CHECK_EQ(b.size_count, a.size_count);
+    ST_CHECK_NEAR(b.size.x, a.size.x, 1.0e-5f);
+    ST_CHECK_NEAR(b.size.y, a.size.y, 1.0e-5f);
+    ST_CHECK_NEAR(b.size.z, a.size.z, 1.0e-5f);
     // 变换
     ST_CHECK_NEAR(b.translate.x, a.translate.x, 1.0e-5f);
     ST_CHECK_NEAR(b.translate.y, a.translate.y, 1.0e-5f);
     ST_CHECK_NEAR(b.translate.z, a.translate.z, 1.0e-5f);
-    ST_CHECK_NEAR(b.rotate.x, a.rotate.x, 1.0e-5f);
+    ST_CHECK_NEAR(b.rotation.x, a.rotation.x, 1.0e-5f);
     ST_CHECK_NEAR(b.scale.x, a.scale.x, 1.0e-5f);
     // 材质
     ST_CHECK_NEAR(b.metallic, a.metallic, 1.0e-5f);
@@ -229,8 +229,7 @@ void check_round_trip(std::string_view original, const char* label) {
     ST_CHECK_NEAR(b.opacity, a.opacity, 1.0e-5f);
     ST_CHECK_EQ(b.ground, a.ground);
     ST_CHECK_EQ(b.group, a.group);
-    // `specified` 掩码也要保真：否则读回时另一条分支会给出不同尺寸
-    ST_CHECK_EQ(b.specified, a.specified);
+
   }
 
   // 相机
@@ -249,13 +248,13 @@ ST_TEST(serialize_round_trip_rich_scene) {
   // 覆盖：多种图元参数、嵌套 children、材质、贴图变换、动画、骨架、分组
   check_round_trip(R"({
     "camera": {"eye":[5,3,5],"target":[0,1,0],"up":[0,1,0],"fov":50,"near":0.01,"far":200},
-    "lighting": {"key_direction":[0.5,0.7,0.5],"ambient":0.25,"diffuse":0.9,"rim":0.15},
+    "lighting": {"light_from":[0.5,0.7,0.5],"ambient":0.25,"diffuse":0.9,"rim":0.15},
     "shadow": {"strength":0.4,"ground_y":0,"lift":0.02},
     "cull": "none",
     "asset_basis": "assets",
     "objects": [
       {"name":"root","group":true,"translate":[0,0,0],"children":[
-        {"name":"arm","shape":"capsule","radius":0.08,"depth":0.7,"rotate":[0,0,0.4],
+        {"name":"arm","shape":"capsule","radius":0.08,"depth":0.7,"rotation":[0,0,0.4],
          "metallic":0.7,"roughness":0.3,"pivot_at":"top"},
         {"name":"hand","shape":"ico_sphere","radius":0.09,"subdivisions":2,
          "translate":[0,-0.7,0]}
@@ -267,7 +266,7 @@ ST_TEST(serialize_round_trip_rich_scene) {
        "minor_segments":16,"segments":32,"color":"#ffcc44","emission":0.5}
     ],
     "animation": {"name":"wave","duration":2.0,"tracks":[
-      {"node":"arm","kind":"rotate","keys":[
+      {"node":"arm","kind":"rotation","keys":[
         {"t":0,"value":[0,0,0],"easing":"ease-in-out"},
         {"t":1,"value":[0,0,0.6]},
         {"t":2,"value":[0,0,0]}
@@ -311,15 +310,15 @@ ST_TEST(serialize_read_modify_write_loop) {
 
   // 改一处：把 ball 的半径从 0.5 改成 0.8
   auto modified = *original;
-  modified.objects[0].radius = 0.8f;
-  modified.objects[0].specified |= st::raster::SceneObjectSpec::kSpecifiedRadius;
+  modified.objects[0].size = st::math::Vec3{1.6f, 0.0f, 0.0f};
+  modified.objects[0].size_count = 1;
 
   const auto text = st::raster::serialize_scene_text(modified, false);
   const auto reloaded = parse(text);
   ST_REQUIRE(reloaded.has_value());
   ST_CHECK_EQ(reloaded->objects.size(), 2U);
-  ST_CHECK_NEAR(reloaded->objects[0].radius, 0.8f, 1.0e-5f);   // 改的生效了
-  ST_CHECK_NEAR(reloaded->objects[1].radius, 0.4f, 1.0e-5f);   // 没改的没被动
+  ST_CHECK_NEAR(reloaded->objects[0].size.x, 1.6f, 1.0e-5f);   // 改的生效了
+  ST_CHECK_NEAR(reloaded->objects[1].size.x, 0.8f, 1.0e-5f);   // 没改的没被动
   ST_CHECK_NEAR(reloaded->objects[1].translate.x, 1.2f, 1.0e-5f);
 }
 
@@ -394,7 +393,7 @@ ST_TEST(describe_catches_near_plane_clipping) {
 ST_TEST(describe_catches_animation_missing_node) {
   const auto spec = parse(R"({
     "objects": [{"name":"ball","shape":"cube"}],
-    "animation": {"tracks":[{"node":"hand","kind":"rotate","keys":[{"t":0,"value":[0,0,0]}]}]}
+    "animation": {"tracks":[{"node":"hand","kind":"rotation","keys":[{"t":0,"value":[0,0,0]}]}]}
   })");
   ST_REQUIRE(spec.has_value());
   const auto summary = st::raster::describe_scene(*spec);

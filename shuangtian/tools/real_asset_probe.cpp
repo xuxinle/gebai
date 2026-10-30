@@ -145,7 +145,7 @@ int main(int argc, char** argv) {
     camera.up = Vec3{0.0f, 1.0f, 0.0f};
 
     st::raster::Lighting lighting{};
-    lighting.key_direction = Vec3{0.45f, 0.80f, 0.55f};
+    lighting.light_from = Vec3{0.45f, 0.80f, 0.55f};
     lighting.ambient = 0.30f;
     lighting.diffuse = 0.85f;
 

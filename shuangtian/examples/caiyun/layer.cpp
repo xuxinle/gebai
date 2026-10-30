@@ -268,7 +268,7 @@ auto evaluate_tracks(const Layer& layer, float time, float canvas_w, float canva
     } else if (track.property == "alpha") {
       out.alpha = std::clamp(value, 0.0f, 1.0f);
       out.has_alpha = true;
-    } else if (track.property == "rotate") {
+    } else if (track.property == "rotation") {
       out.rotate = value;
       out.has_rotate = true;
     }

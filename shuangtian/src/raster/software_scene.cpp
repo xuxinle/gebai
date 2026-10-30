@@ -205,7 +205,7 @@ struct LightSample {
 auto shade_terms_at(math::Vec3 normal, math::Vec3 color, const Lighting& lighting,
                     math::Vec3 world_position) -> math::Vec3 {
   const math::Vec3 n = normal.normalized();
-  const math::Vec3 light = lighting.key_direction.normalized();
+  const math::Vec3 light = lighting.light_from.normalized();
   const float diffuse = std::max(n.dot(light), 0.0f);
   // 边缘光：视线沿 -Z（相机朝 -Z 看），所以 `1 - n.z` 就是“偏离正对相机”的程度。
   const float rim_base = 1.0f - std::max(n.z, 0.0f);
@@ -337,7 +337,7 @@ math::Vec3 shade_surface(math::Vec3 normal, math::Vec3 base_color, math::Vec3 vi
                          math::Vec3 emissive_color = math::Vec3{1.0f, 1.0f, 1.0f},
                          bool emission_unlit = false) {
   const math::Vec3 n = normal.normalized();
-  const math::Vec3 l = lighting.key_direction.normalized();
+  const math::Vec3 l = lighting.light_from.normalized();
 
   // ## 渐进采用：高光为 0 时必须与旧 `shade_terms` 逐位相同
   if (specular <= 0.0f && emission <= 0.0f && metallic <= 0.0f) {
@@ -705,10 +705,10 @@ class SoftwareScene final : public Scene3D {
   /// 光几乎水平时 `t` 趋于无穷，投影会跑到极远的地方（画面上是一道拖到天际的条）。
   /// 物理上那也确实“不产生可见阴影”，所以直接跳过。
   void collect_shadow_triangle(const Vertex& a, const Vertex& b, const Vertex& c) {
-    const math::Vec3 dir = lighting_.key_direction.normalized();
+    const math::Vec3 dir = lighting_.light_from.normalized();
     // ## 方向约定（一开始写反了，阴影完全不出）
     //
-    // `key_direction` 是**指向光源**的方向。光从上方来时 `dir.y > 0`，
+    // `light_from` 是**指向光源**的方向。光从上方来时 `dir.y > 0`，
     // 影子落在地面（下方）——所以投射方向是 `-dir`，投射后
     // `t = (h - p.y) / (-dir.y)` 分母为负，结果仍正确（`h < p.y` 时 `t > 0`）。
     //

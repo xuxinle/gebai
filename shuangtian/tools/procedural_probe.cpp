@@ -242,7 +242,7 @@ addVertices(verts, norms) + 0;
   camera.fov_y_degrees = 42.0f;
 
   st::raster::Lighting lighting{};
-  lighting.key_direction = Vec3{0.4f, 0.85f, 0.5f};
+  lighting.light_from = Vec3{0.4f, 0.85f, 0.5f};
   lighting.ambient = 0.3f;
   lighting.diffuse = 0.85f;
 

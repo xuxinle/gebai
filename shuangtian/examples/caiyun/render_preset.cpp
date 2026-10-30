@@ -49,7 +49,7 @@ auto builtin_lighting_presets() -> std::vector<RenderPreset> {
   out.push_back(RenderPreset{
       .name = "studio",
       .body = st::json_parse(R"({
-        "key_direction": [-0.40, 0.66, 0.64],
+        "light_from": [-0.40, 0.66, 0.64],
         "ambient": 0.10, "diffuse": 0.52, "rim": 0.26,
         "exposure": 0.92, "tone_map": "agx",
         "extra_lights": [
@@ -67,7 +67,7 @@ auto builtin_lighting_presets() -> std::vector<RenderPreset> {
   out.push_back(RenderPreset{
       .name = "moody",
       .body = st::json_parse(R"({
-        "key_direction": [0.5, 0.35, 0.6],
+        "light_from": [0.5, 0.35, 0.6],
         "ambient": 0.04, "diffuse": 0.40, "rim": 0.52,
         "exposure": 0.85, "tone_map": "aces",
         "extra_lights": [
@@ -84,7 +84,7 @@ auto builtin_lighting_presets() -> std::vector<RenderPreset> {
   out.push_back(RenderPreset{
       .name = "flat",
       .body = st::json_parse(R"({
-        "key_direction": [0.0, 1.0, 0.15],
+        "light_from": [0.0, 1.0, 0.15],
         "ambient": 0.55, "diffuse": 0.45, "rim": 0.0,
         "exposure": 1.0, "tone_map": "none",
         "extra_lights": []

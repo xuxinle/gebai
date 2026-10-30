@@ -15,14 +15,14 @@
 /// ```json
 /// {
 ///   "camera":  { "eye": [0, 0.6, 3.4], "target": [0, 0, 0], "fov": 45 },
-///   "lighting": { "key_direction": [0.4, 0.8, 0.6], "ambient": 0.2,
+///   "lighting": { "light_from": [0.4, 0.8, 0.6], "ambient": 0.2,
 ///                 "diffuse": 0.6,
 ///                 "extra_lights": [{"direction": [-0.6,-0.2,0.5], "intensity": 0.5}] },
 ///   "shadow":  { "strength": 0.45, "ground_y": -0.55 },
 ///   "objects": [
 ///     { "shape": "sphere", "radius": 0.9, "color": "#c8a07a",
 ///       "metallic": 0.0, "roughness": 0.2, "specular": 1.0,
-///       "translate": [0, 0.4, 0], "rotate": [0, 0, 0] }
+///       "translate": [0, 0.4, 0], "rotation": [0, 0, 0] }
 ///   ]
 /// }
 /// ```
@@ -68,7 +68,19 @@ struct SceneObjectSpec {
   std::string shape{"sphere"};
   math::Color color{200, 200, 200, 255};
   math::Vec3 translate{0.0f, 0.0f, 0.0f};
-  math::Vec3 rotate{0.0f, 0.0f, 0.0f};   ///< 欧拉角（弧度），顺序 X→Y→Z
+  /// 欧拉角（**度**），顺序 X→Y→Z。
+  ///
+  /// ## 为什么用「度」而不是「弧度」
+  ///
+  /// 旧名 `rotate` + 弧度，是模型最容易写错的一处：它几乎必然先写 90
+  /// （角度直觉），而 90 弧度 ≈ 5156° —— 旋转看起来"完全乱了"，不报错。
+  ///
+  /// 现在名字是 `rotation`、单位是**度**：
+  /// - 名字说明它是"姿态"而不是动词；
+  /// - 单位与人的直觉一致（写 90 就是转 90 度）。
+  ///
+  /// 内部数学仍用弧度（`math::` 都吃弧度），在 `build_mesh`/节点求解的边界处转一次。
+  math::Vec3 rotation{0.0f, 0.0f, 0.0f};
   math::Vec3 scale{1.0f, 1.0f, 1.0f};
 
   // ── 统一尺寸字段（2026-10-31，**首选写法**）──
@@ -100,12 +112,8 @@ struct SceneObjectSpec {
 
   // 形状参数（按 shape 取用；语义与 `primitives::PrimitiveParams` 逐项一致）
   //
-  // **以下字段为旧写法，已降级为兼容别名**：写了仍生效（按旧语义换算），
-  // 但解析时会告警"请改用 size"。见 `docs/geometry.md` §4.13。
-  float radius{0.8f};
-  float width{1.0f};
-  float height{1.0f};
-  float depth{1.0f};
+  // 尺寸**只有** `size` 一条路（见上）。旧字段 radius/width/height/depth
+  // 已在 2026-10-31 彻底删除——它们在各形状下语义不同，是错误之源。
   int segments{24};
   /// 球的纬度环数（`uv_sphere`）。
   int rings{16};
@@ -136,33 +144,6 @@ struct SceneObjectSpec {
   /// 平面/盘/环带是否朝 +Z（立面），默认朝 +Y（地面）。
   bool face_camera{false};
 
-  // ── 「哪些尺寸字段是调用方**显式写的**」（2026-10-30）──
-  //
-  // ## 为什么需要这个位掩码
-  //
-  // 历史原因，不同形状吃不同的字段名：`plane` 吃 `width`/`height`、
-  // `cylinder` 吃 `height`、`box` 吃三个都有、而新图元统一吃 `radius`/`depth`。
-  // 于是 `{"shape":"cylinder","radius":0.3,"depth":0.12}` 里的 `depth`
-  // 会被**静默忽略**、实际用 `height` 的默认值 1.0——生成脚本的模型完全无从发现
-  // （实测：写探针时底座本该 0.12 高，渲染出来 1.0 高，比例全错）。
-  //
-  // 所以这里记下"调用方到底写了哪些"，让 `build_mesh` 能按
-  //
-  //    显式写的 > 该形状的历史字段 > 图元库默认值
-  //
-  // 的优先级取值。旧脚本只写历史字段 → 行为逐像素不变；新脚本写通用字段 →
-  // 立刻生效（不再被默认值吃掉）。
-  enum : std::uint8_t {
-    kSpecifiedRadius = 1U << 0U,
-    kSpecifiedDepth = 1U << 1U,
-    kSpecifiedHeight = 1U << 2U,
-    kSpecifiedWidth = 1U << 3U,
-  };
-  std::uint8_t specified{0};
-
-  [[nodiscard]] auto has(std::uint8_t flag) const noexcept -> bool {
-    return (specified & flag) != 0U;
-  }
 
   // 材质
   float metallic{0.0f};
@@ -291,7 +272,7 @@ struct SceneObjectSpec {
 ///   "name": "wave",
 ///   "duration": 2.0,
 ///   "tracks": [
-///     { "node": "shoulder", "kind": "rotate",
+///     { "node": "shoulder", "kind": "rotation",
 ///       "keys": [ { "t": 0.0, "value": [0, 0, 0], "easing": "ease-in-out" },
 ///                 { "t": 1.0, "value": [0, 0, 0.8] },
 ///                 { "t": 2.0, "value": [0, 0, 0] } ] },

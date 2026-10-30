@@ -17,6 +17,23 @@
 #include "st/raster/mesh.hpp"
 
 namespace st::raster {
+
+namespace {
+
+/// 度 → 弧度。
+///
+/// 脚本层用**度**（与人的直觉一致：写 90 就是转 90 度），
+/// 内部数学层用弧度。转换点集中在这里，避免每处各写一遍常量。
+[[nodiscard]] constexpr auto to_radians(float degrees) noexcept -> float {
+  return degrees * 3.14159265358979323846f / 180.0f;
+}
+
+/// 弧度 → 度（序列化时用）。
+[[nodiscard]] constexpr auto to_degrees(float radians) noexcept -> float {
+  return radians * 180.0f / 3.14159265358979323846f;
+}
+
+}  // namespace
 namespace {
 
 /// 从 JSON 里读一个三元组（支持 `[x,y,z]` 与 `{"x":…,"y":…,"z":…}` 两种写法）。
@@ -138,9 +155,9 @@ auto read_lighting(const Json& json) -> Result<Lighting> {
       return st::forward_error(status.error());
     }
   }
-  const auto key_dir = read_vec3(*node, "key_direction", lit.key_direction, "lighting");
+  const auto key_dir = read_vec3(*node, "light_from", lit.light_from, "lighting");
   if (!key_dir) return st::forward_error(key_dir.error());
-  lit.key_direction = *key_dir;
+  lit.light_from = *key_dir;
   lit.ambient = static_cast<float>(json_get_double(*node, "ambient", lit.ambient));
   lit.diffuse = static_cast<float>(json_get_double(*node, "diffuse", lit.diffuse));
   lit.rim = static_cast<float>(json_get_double(*node, "rim", lit.rim));
@@ -360,7 +377,7 @@ auto read_shadow(const Json& json) -> Result<PlanarShadow> {
   node.name = object.name;
   node.has_geometry = !object.group;
   node.local.translation = object.translate;
-  node.local.rotation = object.rotate;
+  node.local.rotation = object.rotation;
   node.local.scale = object.scale;
   node.pivot = object.pivot;
   node.visible = object.visible;
@@ -375,7 +392,7 @@ auto read_shadow(const Json& json) -> Result<PlanarShadow> {
   object.name = node.name;
   object.group = !node.has_geometry;
   object.translate = node.local.translation;
-  object.rotate = node.local.rotation;
+  object.rotation = node.local.rotation;
   object.scale = node.local.scale;
   object.pivot = node.pivot;
   object.visible = node.visible;
@@ -421,29 +438,23 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
   if (!translate) return st::forward_error(translate.error());
   obj.translate = *translate;
 
-  const auto rotate = read_vec3(node, "rotate", obj.rotate, path);
-  if (!rotate) return st::forward_error(rotate.error());
-  obj.rotate = *rotate;
+  // `rotation` 是**度**（对调用方），内部统一换弧度。
+  const auto rotation = read_vec3(node, "rotation", math::Vec3{}, path);
+  if (!rotation) return st::forward_error(rotation.error());
+  obj.rotation = math::Vec3{to_radians(rotation->x), to_radians(rotation->y),
+                            to_radians(rotation->z)};
 
   const auto scale = read_vec3(node, "scale", obj.scale, path);
   if (!scale) return st::forward_error(scale.error());
   obj.scale = *scale;
 
-  // 记下"调用方显式写了哪些尺寸字段"（见 `SceneObjectSpec::specified` 的说明）。
-  // 这一位是"静默用错默认值"的解药：缺字段就落到该形状的历史默认，
-  // 写了就按写的来——两种脚本都能得到符合预期的形状。
-  const auto note_field = [&](const char* key, std::uint8_t flag) {
-    if (json_find(node, key) != nullptr) obj.specified |= flag;
-  };
-  // ── 统一尺寸字段 `size`（首选写法）──
+  // ## 尺寸：`size` 是**唯一**写法（全长）
   //
-  // 接受标量（`"size": 2`）或数组（`"size": [2, 1, 3]`）。
-  // 标量对球类是直径、对柱类是直径（高取默认）。
+  // 旧字段 radius/width/height/depth 已彻底删除——它们在同一形状下
+  // 有时是半长有时是全长、有时完全无效（实测 `box` 的 height 无效、
+  // `plane` 的 radius 是半长而 width 是全长），是"名字对但含义错"的根源。
   //
-  // ## 为什么先读 size 再读旧字段
-  //
-  // 两者都写时以 `size` 为准（它是新语义、无歧义），但**要告警**：
-  // 同时写两套说明调用方在混用，那正是要消灭的状态。
+  // `size` 接受标量（球类是直径）或数组（按形状定顺序）。
   if (const Json* size_value = json_find(node, "size"); size_value != nullptr) {
     if (size_value->is_number()) {
       obj.size.x = static_cast<float>(size_value->get<double>());
@@ -452,8 +463,8 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
       if (size_value->empty() || size_value->size() > 3U) {
         return st::unexpected(
             ErrorCode::Parse,
-            std::format("{}:size：数组需要 1~3 个数（按形状解释为 [直径/宽, 高, 深]），收到 {} 项",
-                        path, size_value->size()));
+            std::format("{}:size：数组需要 1~3 个数（按形状解释），收到 {} 项", path,
+                        size_value->size()));
       }
       for (std::size_t i = 0; i < size_value->size(); ++i) {
         if (!(*size_value)[i].is_number()) {
@@ -475,59 +486,18 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
                             std::format("{}:size：期望数字或数组，收到 {}", path,
                                         json_type_name(*size_value)));
     }
-    // 尺寸必须为正（0 或负会让几何退化或翻面，且**不会报错**）
+    // 尺寸必须为正（0 或负会让几何退化或翻面，且不会报错）
     for (std::size_t i = 0; i < 3U; ++i) {
       const float value = (i == 0) ? obj.size.x : ((i == 1) ? obj.size.y : obj.size.z);
       if (i < obj.size_count && value <= 0.0f) {
         return st::unexpected(ErrorCode::Parse,
                               std::format("{}:size[{}]：必须 > 0（收到 {}）；"
-                                          "尺寸是**全长**，不是半径",
+                                          "size 是**全长**，不是半径",
                                           path, i, value));
       }
     }
   }
 
-  // ── 旧字段告警（不静默共存）──
-  //
-  // ## 为什么必须告警而不是悄悄兼容
-  //
-  // 旧字段的根本问题是"同一名字在不同形状下含义不同"（实测：box 的 `height`
-  // 完全无效、plane 的 `radius` 是半长而 `width` 是全长）。
-  // 如果只是继续支持而不提醒，这套歧义会永远活下去——新写的脚本会继续踩。
-  //
-  // 告警而不是报错：126 处存量写法（测试/工具/示例）不能一次全改，
-  // 而"报错"会让它们全部失效（那是不必要的破坏）。所以留兼容期 + 明确指引。
-  if (obj.size_count == 0U) {
-    struct LegacyHint {
-      const char* name;
-      std::uint8_t flag;
-      const char* advice;
-    };
-    const LegacyHint hints[] = {
-        {"radius", SceneObjectSpec::kSpecifiedRadius,
-         "改用 \"size\"（全长）：例如 size:[r*2, r*2, r*2] 或 size:r*2"},
-        {"width", SceneObjectSpec::kSpecifiedWidth,
-         "改用 \"size\" 的第 0 项（X 向全长）"},
-        {"height", SceneObjectSpec::kSpecifiedHeight,
-         "改用 \"size\"（注意：height 在 cube/cylinder 的旧语义里不起作用）"},
-        {"depth", SceneObjectSpec::kSpecifiedDepth,
-         "改用 \"size\" 的第 1 项（Y 向全长）"},
-    };
-    for (const LegacyHint& hint : hints) {
-      if (json_find(node, hint.name) == nullptr) continue;
-      ST_LOG_INFO("{}.{}：旧写法（语义随形状变化）——{}", path, hint.name, hint.advice);
-      break;   // 一个物体只提醒一次，避免刷屏
-    }
-  }
-
-  note_field("radius", SceneObjectSpec::kSpecifiedRadius);
-  note_field("depth", SceneObjectSpec::kSpecifiedDepth);
-  note_field("height", SceneObjectSpec::kSpecifiedHeight);
-  note_field("width", SceneObjectSpec::kSpecifiedWidth);
-  obj.radius = static_cast<float>(json_get_double(node, "radius", obj.radius));
-  obj.width = static_cast<float>(json_get_double(node, "width", obj.width));
-  obj.height = static_cast<float>(json_get_double(node, "height", obj.height));
-  obj.depth = static_cast<float>(json_get_double(node, "depth", obj.depth));
   obj.segments = static_cast<int>(json_get_i64(node, "segments", obj.segments));
   // 图元库的新参数（语义与 `primitives::PrimitiveParams` 逐项一致）
   obj.rings = static_cast<int>(json_get_i64(node, "rings", obj.rings));
@@ -610,17 +580,17 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
   obj.ground = json_get_bool(node, "ground", false);
   // ## 地面去倾斜（兼容旧脚本的必经一笔）
   //
-  // 旧语义里 `plane` 朝 +Z（立面），所以所有旧脚本都写 `"rotate": [-π/2,0,0]`
+  // 旧语义里 `plane` 朝 +Z（立面），所以所有旧脚本都写 `"rotation": [-π/2,0,0]`
   // 把它扳成水平。现在 `plane` 图元**本就朝 +Y**，那 -90° 会把它立成墙——
   // 地面与投影阴影一起失效（实测：开关阴影的画面均值 99.063 → 99.063，完全不变）。
   //
   // 所以 `ground: true` 只保留**绕 Y 的朝向**：水平面绕竖直轴转向有意义，
   // 绕 X/Z 倾斜与"地面"语义冲突。旧脚本的意图（要一个水平地面）因此被保住。
-  if (obj.ground) obj.rotate = math::Vec3{0.0f, obj.rotate.y, 0.0f};
+  if (obj.ground) obj.rotation = math::Vec3{0.0f, obj.rotation.y, 0.0f};
   // ## 地面的朝向（兼容旧脚本的必经一笔）
   //
   // `ground: true` 的平面在旧语义里是"朝 +Z 的立面"，脚本普遍用
-  // `"rotate": [-π/2, 0, 0]` 把它扳成水平。而现在的 `plane` 图元**本就朝 +Y**，
+  // `"rotation": [-π/2, 0, 0]` 把它扳成水平。而现在的 `plane` 图元**本就朝 +Y**，
   // 再转 -90° 会变成竖直墙——地面与投影阴影一起失效。
   //
   // 所以地面节点在这里只保留绕 Y 的朝向（水平面绕竖直轴转向是有意义的，
@@ -1021,7 +991,7 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
         out.name = node.name;
         out.group = !node.has_geometry;
         out.translate = node.local.translation;
-        out.rotate = node.local.rotation;
+        out.rotation = node.local.rotation;
         out.scale = node.local.scale;
         out.pivot = node.pivot;
         out.visible = node.visible;
@@ -1085,109 +1055,46 @@ auto build_mesh(const SceneObjectSpec& object) -> Result<Mesh> {
   params.turns = object.turns;
   params.taper = object.taper;
 
-  // ## 尺寸取值：`size`（统一写法）> 显式旧字段 > 该形状的历史字段 > 图元库默认值
+  // ## 尺寸取值：**只有 `size` 一条路**
   //
-  // `size` 一旦写了就**完全接管**尺寸：不再让旧字段参与，避免两套混算。
-  // 这也是 `size` 的价值——它让"这个物体多大"只有一个答案。
+  // 旧字段（radius/width/height/depth）已彻底删除。它们在各形状下语义不同
+  // （实测：`box` 的 height 完全无效、`plane` 的 radius 是半长而 width 是全长），
+  // 是"写对了名字但含义不对"的根源——那类错误任何检查都抓不住。
+  //
+  // `size_of(i, fallback)`：第 i 项，没写就返回该形状的合理默认。
   const bool has_size = object.size_count > 0U;
-  /// `size` 的第 `index` 项；没写那么多项时返回 `fallback`。
-  const auto size_of = [&](std::size_t index, float fallback) {
+  const auto size_of = [&](std::size_t index, float fallback) -> float {
     if (!has_size) return fallback;
     if (index == 0U) return object.size.x;
-    if (index == 1U) return object.size.y;
-    if (index == 2U) return object.size.z;
+    if (index == 1U) return (object.size_count >= 2U) ? object.size.y : fallback;
+    if (index == 2U) return (object.size_count >= 3U) ? object.size.z : fallback;
     return fallback;
   };
 
-  // ## 尺寸取值（旧字段路径）：显式写的 > 该形状的历史字段 > 图元库默认值
+  // ## 形状 → 图元库（尺寸只有 `size` 一条路）
   //
-  // 历史字段（旧脚本在用，不能改语义）：
-  //   sphere → radius；box → width/height/depth；plane → width/height；
-  //   cylinder → radius/height；torus → radius。
-  // 通用字段（新脚本自然写法）：radius（半尺寸）、depth（Y 向长度）。
-  const auto radius_of = [&](float fallback) {
-    if (object.has(SceneObjectSpec::kSpecifiedRadius)) return object.radius;
-    return fallback;
-  };
-  // Y 向长度：`depth` 与 `height` 都常被用来表达"高"，谁写了用谁（depth 优先）
-  const auto length_y = [&](float fallback) {
-    if (object.has(SceneObjectSpec::kSpecifiedDepth)) return object.depth;
-    if (object.has(SceneObjectSpec::kSpecifiedHeight)) return object.height;
-    return fallback;
-  };
-
-  if (shape == "sphere") {
-    // `size` 对球类是**直径**
-    params.radius = has_size ? size_of(0U, object.radius * 2.0f) * 0.5f
-                             : radius_of(object.radius);
-    return primitives::make_uv_sphere(params);
-  }
-  if (shape == "box") {
-    // 旧语义：`width`(X) × `height`(Y) × `depth`(Z)；通用写法用 `radius` 表达半边长。
-    //
-    // `size` 语义：`[X, Y, Z]` 三边全长。`make_cube` 的入参是
-    // （radius = 半个 X, depth = 全长 Y, height = 全长 Z），所以 X 要除 2。
-    if (has_size) {
-      params.radius = size_of(0U, object.width) * 0.5f;
-      params.depth = size_of(1U, 1.0f);
-      params.height = size_of(2U, 0.0f);   // 0 = 与 X 同（正方体）
-      return primitives::make_cube(params);
-    }
-    params.radius = object.has(SceneObjectSpec::kSpecifiedWidth) ? object.width * 0.5f
-                                                                 : radius_of(0.5f);
-    params.depth = length_y(1.0f);
-    params.height = object.has(SceneObjectSpec::kSpecifiedDepth) ? object.depth : 0.0f;
+  // `PrimitiveParams` 里仍是 `radius`/`depth`/`height` —— 那是**内部实现层**，
+  // 它服务的是图元生成器（圆的半径、柱的高），语义在那一层是清晰的。
+  // 脚本层只暴露 `size`（全长），在这里换一次。
+  if (shape == "cube" || shape == "box") {
+    // [X, Y, Z] 三边全长。图元入参：radius = 半个 X，depth = Y，height = Z（0 = 同 X）
+    params.radius = size_of(0U, 1.0f) * 0.5f;
+    params.depth = size_of(1U, 1.0f);
+    params.height = size_of(2U, 0.0f);
     return primitives::make_cube(params);
   }
   if (shape == "plane") {
-    // 旧语义：`width` × `height`，朝 +Z（立面）。新图元朝 +Y；要立面写 `face_camera`。
-    //
-    // `size` 语义：`[X, Z]`（平面在 XZ 面上；厚度不参与，平面的 depth 是第二边）。
-    // `make_plane` 入参：radius = 半个 X，depth = 全长 Z。
-    if (has_size) {
-      params.radius = size_of(0U, object.width) * 0.5f;
-      params.depth = size_of(1U, 1.6f);
-      return primitives::make_plane(params);
-    }
-    params.radius = object.has(SceneObjectSpec::kSpecifiedWidth) ? object.width * 0.5f
-                                                                 : radius_of(0.8f);
-    params.depth = object.has(SceneObjectSpec::kSpecifiedHeight)
-                       ? object.height
-                       : (object.has(SceneObjectSpec::kSpecifiedDepth) ? object.depth : 1.6f);
+    // [X, Z]（平面在 XZ 面）。入参：radius = 半个 X，depth = Z
+    params.radius = size_of(0U, 1.6f) * 0.5f;
+    params.depth = size_of(1U, 1.6f);
     return primitives::make_plane(params);
   }
-  if (shape == "cylinder") {
-    // 旧语义：`radius` + `height`。通用写法用 `depth` 表达高。
-    //
-    // `size` 语义：`[直径, 高]`（柱类是圆形截面，只需一个直径）。
-    if (has_size) {
-      params.radius = size_of(0U, 1.0f) * 0.5f;
-      params.depth = size_of(1U, 1.0f);
-      return primitives::make_cylinder(params);
-    }
-    params.radius = radius_of(0.5f);
-    params.depth = length_y(1.0f);
-    return primitives::make_cylinder(params);
-  }
   if (shape == "torus" || shape == "torus_knot") {
-    // `size` 语义：`[外径, 管径]`。旧语义里 `radius` 是**外半径**，
-    // 所以外径换算要 /2；管径在旧语义里是"固定 0.35× 外半径"，这里显式化为第二项。
-    if (has_size) {
-      const float outer_diameter = size_of(0U, 1.6f);
-      const float tube = size_of(1U, outer_diameter * 0.35f);
-      // `make_torus` 的 major_radius 是**中心线**半径 = (外径 - 管径) / 2
-      params.major_radius = std::max((outer_diameter - tube) * 0.5f, tube * 0.05f);
-      params.minor_radius = tube * 0.5f;
-      params.minor_segments = object.minor_segments;
-      params.major_segments = object.segments;
-      params.twist = object.twist;
-      if (shape == "torus") return primitives::make_torus(params);
-      return primitives::make_torus_knot(params);
-    }
-    // 旧 `torus` 语义：`radius` 是环外半径、管径固定为 0.35×；新参数可显式覆盖
-    params.major_radius = object.major_radius > 0.0f ? object.major_radius : radius_of(0.6f);
-    params.minor_radius = object.minor_radius > 0.0f ? object.minor_radius
-                                                     : params.major_radius * 0.35f;
+    // [外径, 管径]。入参：major_radius 是**中心线**半径 = (外径 - 管径) / 2
+    const float outer = size_of(0U, 1.6f);
+    const float tube = size_of(1U, outer * 0.35f);
+    params.major_radius = std::max((outer - tube) * 0.5f, tube * 0.05f);
+    params.minor_radius = tube * 0.5f;
     params.minor_segments = object.minor_segments;
     params.major_segments = object.segments;
     params.twist = object.twist;
@@ -1195,40 +1102,13 @@ auto build_mesh(const SceneObjectSpec& object) -> Result<Mesh> {
     return primitives::make_torus_knot(params);
   }
 
-  // 其余形状直接走图元库：`radius` + `depth` 是通用的一套，
-  // 旧字段 `height` 在 `depth` 有意义处优先（与 `PrimitiveParams` 的约定一致）。
-  //
-  // ## 通用路径的 `size` 换算（覆盖 cube / uv_sphere / ico_sphere / capsule /
-  //    cone / prism / gear / helix / 正多面体 …）
-  //
-  // 这些形状在 `PrimitiveParams` 里都是"半径 + Y 向长度"这一套：
-  //   - `size` 第 0 项 → **直径**，所以 radius = size[0] / 2
-  //   - `size` 第 1 项 → Y 向全长，直接给 depth
-  //
-  // 例外：`cube` 走通用路径时 `make_cube` 的语义是（radius = 半个 X，
-  // depth = Y 全长，height = Z 全长），所以三轴要单独映射。
-  if (has_size) {
-    if (shape == "cube") {
-      // 三轴：`size = [X, Y, Z]` 全是全长
-      params.radius = size_of(0U, 1.0f) * 0.5f;
-      params.depth = size_of(1U, 1.0f);
-      params.height = size_of(2U, 0.0f);   // 0 = 与 X 同（正方体）
-      params.color = object.color;
-      return primitives::make_from_name(shape, params);
-    }
-    params.radius = size_of(0U, object.radius * 2.0f) * 0.5f;
-    params.depth = size_of(1U, 1.0f);
-    params.height = 0.0f;
-    // 其余通用参数照常赋值（下面那段统一做）
-  } else {
-    params.radius = object.radius;
-  }
-  if (!has_size) {
-    params.depth = object.depth;
-    params.height = object.height;
-  }
+  // 其余形状统一是"圆形截面 + Y 向长度"：
+  //   球类 → 只用第 0 项（直径）
+  //   柱/锥/胶囊/棱柱/齿轮/管/螺旋/箭头 → [直径, 高]
+  params.radius = size_of(0U, 1.0f) * 0.5f;
+  params.depth = size_of(1U, 1.0f);
   params.top_radius = object.top_radius;
-  params.major_radius = object.major_radius > 0.0f ? object.major_radius : object.radius;
+  params.major_radius = object.major_radius > 0.0f ? object.major_radius : params.radius;
   params.minor_radius = object.minor_radius > 0.0f ? object.minor_radius
                                                    : object.major_radius * 0.35f;
   params.minor_segments = object.minor_segments;

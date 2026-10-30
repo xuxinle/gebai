@@ -194,7 +194,7 @@ ST_TEST(scene3d_two_legs_agree_on_the_same_scene) {
   if (!st::raster::gpu::available()) return;   // 无 GPU 的机器只跑得了一条腿
   const Mesh mesh = Mesh::sphere(0.9f, 24);
   Lighting lighting{};
-  lighting.key_direction = Vec3{0.5f, 0.7f, 0.5f};
+  lighting.light_from = Vec3{0.5f, 0.7f, 0.5f};
 
   const Canvas gpu = render_with("gpu", mesh, lighting, 0.5f);
   const Canvas software = render_with("software", mesh, lighting, 0.5f);
@@ -228,11 +228,11 @@ ST_TEST(scene3d_lighting_parameter_changes_the_picture) {
   // 用同一腿比两次渲染：不同主光方向 → 平均亮度必须不同。
   const Mesh mesh = Mesh::sphere(0.9f, 20);
   Lighting front{};
-  front.key_direction = Vec3{0.0f, 0.0f, 1.0f};
+  front.light_from = Vec3{0.0f, 0.0f, 1.0f};
   front.ambient = 0.15f;
 
   Lighting back{};
-  back.key_direction = Vec3{0.0f, 0.0f, -1.0f};   // 背光：朝向相机的面在阴影里
+  back.light_from = Vec3{0.0f, 0.0f, -1.0f};   // 背光：朝向相机的面在阴影里
   back.ambient = 0.15f;
 
   const Canvas lit_front = render_with("software", mesh, front, 0.0f);
@@ -456,7 +456,7 @@ ST_TEST(scene3d_metallic_takes_effect_on_both_legs) {
   Lighting lighting{};
   lighting.ambient = 0.10f;
   lighting.diffuse = 0.70f;
-  lighting.key_direction = Vec3{0.4f, 0.5f, 0.75f};
+  lighting.light_from = Vec3{0.4f, 0.5f, 0.75f};
 
   st::raster::Material plastic{};
   plastic.roughness = 0.9f;

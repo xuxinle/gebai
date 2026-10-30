@@ -63,11 +63,11 @@ auto inked_ratio(const Canvas& canvas) -> double {  const Color bg = canvas.pixe
 /// 一份最小但完整的场景：地面 + 一个球。
 constexpr const char* kScene = R"json({
   "camera": { "eye": [0, 0.7, 3.2], "target": [0, 0.1, 0], "fov": 42 },
-  "lighting": { "key_direction": [0.4, 0.8, 0.6], "ambient": 0.18, "diffuse": 0.62 },
+  "lighting": { "light_from": [0.4, 0.8, 0.6], "ambient": 0.18, "diffuse": 0.62 },
   "shadow": { "strength": 0.45, "ground_y": -0.5 },
   "objects": [
     { "shape": "plane", "width": 6, "height": 6, "color": "#6b6f7a",
-      "rotate": [-1.5707963, 0, 0], "translate": [0, -0.5, 0], "ground": true },
+      "rotation": [-1.5707963, 0, 0], "translate": [0, -0.5, 0], "ground": true },
     { "shape": "sphere", "radius": 0.6, "color": "#c8a07a", "segments": 24,
       "roughness": 0.2, "specular": 1.0, "translate": [0, 0.15, 0] }
   ]

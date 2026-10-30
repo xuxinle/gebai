@@ -180,7 +180,7 @@ struct Camera {
 /// | `Mesh::vertices` 直接写 | **线性值** | 那是已经解码后的工作空间 |
 /// | `set_texture()` 的 RGBA8 | **sRGB 字节** | 那是 PNG/图片文件里的字节 |
 /// | `begin_frame(clear_color)` | **线性值** | 与 `Lighting` 同一口径 |
-/// | `Lighting` 里的颜色（隐含于 `key_direction` 等） | **线性值** | — |
+/// | `Lighting` 里的颜色（隐含于 `light_from` 等） | **线性值** | — |
 /// | `Lighting::exposure` / `tone_map` | 曝光 / 算子 | 作用于**线性** HDR 值 |
 ///
 /// 一句话：**从图片/设计工具来的 → sRGB；在代码里手算的 → 线性**。
@@ -197,7 +197,7 @@ struct Camera {
 ///
 /// ## 为什么是“附加”而不是“列表里的一条”
 ///
-/// 现有的 `key_direction` / `ambient` / `diffuse` 已经被大量场景引用。
+/// 现有的 `light_from` / `ambient` / `diffuse` 已经被大量场景引用。
 /// 把它们改成“光源列表的第一个”会让**所有已出的片子的数值语义**都变
 /// （比如 `ambient` 不是光源而是全局项，放进列表就很难再表达）。
 ///
@@ -334,7 +334,7 @@ float strength{0.0f};
 
 struct Lighting {
   /// 主光方向（世界空间，**指向光源**，不需要预先归一化）。
-  math::Vec3 key_direction{0.4f, 0.8f, 0.6f};
+  math::Vec3 light_from{0.4f, 0.8f, 0.6f};
   /// 环境项：无光照处的底色亮度（0 = 背光面全黑）。
   float ambient{0.35f};
   /// 漫反射权重（与环境项相加，1.10 ≈ 原值 ambient 0.35 + diffuse 0.75）。

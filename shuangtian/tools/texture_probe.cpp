@@ -176,7 +176,7 @@ auto cell_json(const std::string& shape, const std::string& texture, const std::
   return std::format(
       R"j({{
     "camera": {{ "eye": [1.15, 0.95, 2.15], "target": [0.0, 0.12, 0.0], "fov": 40 }},
-    "lighting": {{ "key_direction": [0.4, 0.8, 0.6], "ambient": 0.5, "diffuse": 0.55 }},
+    "lighting": {{ "light_from": [0.4, 0.8, 0.6], "ambient": 0.5, "diffuse": 0.55 }},
     "objects": [
       {{ "name": "obj", "shape": "{}", "radius": 0.62, "depth": 1.0, "height": 1.0,
          "color": "#ffffff", "texture": "{}", {} }}

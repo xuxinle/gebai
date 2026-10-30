@@ -225,25 +225,102 @@ ST_TEST(scene_graph_rejects_duplicate_names_and_cycles) {
 ST_TEST(scene_graph_flat_and_nested_forms_are_equivalent) {
   // 同一个模型，嵌套写法 与 扁平写法 必须得到**逐位相同**的世界矩阵。
   // 这条钉的是"两种入口不会漂移"——否则用户会发现"换个写法位置就变了"。
-  const std::string nested = R"({
-    "objects": [
-      { "name": "arm", "group": true, "translate": [0.5, 0.3, 0.0], "rotate": [0.0, 0.6, 0.0],
-        "children": [
-          { "name": "upper", "shape": "capsule", "radius": 0.12, "depth": 0.8,
-            "translate": [0.0, -0.4, 0.0], "rotate": [0.3, 0.0, 0.0] },
-          { "name": "hand", "shape": "uv_sphere", "radius": 0.1, "translate": [0.0, -0.85, 0.0] }
-        ] }
-    ]
-  })";
-  const std::string flat = R"({
-    "objects": [
-      { "name": "arm", "group": true, "translate": [0.5, 0.3, 0.0], "rotate": [0.0, 0.6, 0.0] },
-      { "name": "upper", "parent": "arm", "shape": "capsule", "radius": 0.12, "depth": 0.8,
-        "translate": [0.0, -0.4, 0.0], "rotate": [0.3, 0.0, 0.0] },
-      { "name": "hand", "parent": "arm", "shape": "uv_sphere", "radius": 0.1,
-        "translate": [0.0, -0.85, 0.0] }
-    ]
-  })";
+  const std::string nested = R"j({
+  "objects": [
+    {
+      "name": "arm",
+      "group": true,
+      "translate": [
+        0.5,
+        0.3,
+        0.0
+      ],
+      "rotation": [
+        0.0,
+        0.6,
+        0.0
+      ],
+      "children": [
+        {
+          "name": "upper",
+          "shape": "capsule",
+          "translate": [
+            0.0,
+            -0.4,
+            0.0
+          ],
+          "rotation": [
+            0.3,
+            0.0,
+            0.0
+          ],
+          "size": [
+            0.24,
+            0.8
+          ]
+        },
+        {
+          "name": "hand",
+          "shape": "uv_sphere",
+          "translate": [
+            0.0,
+            -0.85,
+            0.0
+          ],
+          "size": 0.2
+        }
+      ]
+    }
+  ]
+})j";
+  const std::string flat = R"j({
+  "objects": [
+    {
+      "name": "arm",
+      "group": true,
+      "translate": [
+        0.5,
+        0.3,
+        0.0
+      ],
+      "rotation": [
+        0.0,
+        0.6,
+        0.0
+      ]
+    },
+    {
+      "name": "upper",
+      "parent": "arm",
+      "shape": "capsule",
+      "translate": [
+        0.0,
+        -0.4,
+        0.0
+      ],
+      "rotation": [
+        0.3,
+        0.0,
+        0.0
+      ],
+      "size": [
+        0.24,
+        0.8
+      ]
+    },
+    {
+      "name": "hand",
+      "parent": "arm",
+      "shape": "uv_sphere",
+      "translate": [
+        0.0,
+        -0.85,
+        0.0
+      ],
+      "size": 0.2
+    }
+  ]
+})j";
   auto a = st::raster::parse_scene_spec_text(nested);
   auto b = st::raster::parse_scene_spec_text(flat);
   ST_REQUIRE(a.has_value());
@@ -260,7 +337,7 @@ ST_TEST(scene_graph_flat_and_nested_forms_are_equivalent) {
     out.name = object.name;
     out.has_geometry = !object.group;
     out.local.translation = object.translate;
-    out.local.rotation = object.rotate;
+    out.local.rotation = object.rotation;
     out.local.scale = object.scale;
     for (const auto& child : object.children) {
       SceneNode slot{};
@@ -312,19 +389,61 @@ ST_TEST(scene_graph_visibility_inherits) {
 ST_TEST(scene_script_composite_model_renders_children) {
   // 端到端：一个"支架 + 两个球"的组合，用**父节点**统一抬起，
   // 两个球必须跟着一起动。判据是渲染覆盖像素数（父不动时球在画面外/贴边）。
-  const std::string json = R"({
-    "camera": { "eye": [0.0, 0.8, 4.2], "target": [0.0, 0.6, 0.0], "fov": 40 },
-    "lighting": { "ambient": 0.4, "diffuse": 0.8, "rim": 0.2 },
-    "objects": [
-      { "name": "rig", "group": true, "translate": [0.0, 1.2, 0.0],
-        "children": [
-          { "name": "left", "shape": "uv_sphere", "radius": 0.3, "translate": [-0.5, 0.0, 0.0],
-            "color": "#88aaff" },
-          { "name": "right", "shape": "uv_sphere", "radius": 0.3, "translate": [0.5, 0.0, 0.0],
-            "color": "#ffaa88" }
-        ] }
-    ]
-  })";
+  const std::string json = R"j({
+  "camera": {
+    "eye": [
+      0.0,
+      0.8,
+      4.2
+    ],
+    "target": [
+      0.0,
+      0.6,
+      0.0
+    ],
+    "fov": 40
+  },
+  "lighting": {
+    "ambient": 0.4,
+    "diffuse": 0.8,
+    "rim": 0.2
+  },
+  "objects": [
+    {
+      "name": "rig",
+      "group": true,
+      "translate": [
+        0.0,
+        1.2,
+        0.0
+      ],
+      "children": [
+        {
+          "name": "left",
+          "shape": "uv_sphere",
+          "translate": [
+            -0.5,
+            0.0,
+            0.0
+          ],
+          "color": "#88aaff",
+          "size": 0.6
+        },
+        {
+          "name": "right",
+          "shape": "uv_sphere",
+          "translate": [
+            0.5,
+            0.0,
+            0.0
+          ],
+          "color": "#ffaa88",
+          "size": 0.6
+        }
+      ]
+    }
+  ]
+})j";
   const int ink = render(json, 260, 200);
   st::log::out("[graph] composite ink={}\n", ink);
   ST_CHECK(ink > 0);
@@ -332,8 +451,8 @@ ST_TEST(scene_script_composite_model_renders_children) {
   // 把父的抬起量改成 0（球会落到画面下方中央）→ 覆盖像素数应当变化，
   // 这证明"父的变换确实作用到了子身上"（而不是子被当成世界坐标画）。
   std::string lower = json;
-  const std::string from = R"("translate": [0.0, 1.2, 0.0],)";
-  const std::string to = R"("translate": [0.0, 0.0, 0.0],)";
+  const std::string from = R"j("translate": [0.0, 1.2, 0.0],)j";
+  const std::string to = R"j("translate": [0.0, 0.0, 0.0],)j";
   const std::size_t at = lower.find(from);
   ST_REQUIRE(at != std::string::npos);
   lower.replace(at, from.size(), to);
@@ -345,21 +464,72 @@ ST_TEST(scene_script_composite_model_renders_children) {
 ST_TEST(scene_script_pivot_at_bottom_rotates_in_place) {
   // `pivot_at: "bottom"` 的立方体绕 X 转 90°：它会"就地倾倒"而不是**插进地里**。
   // 判据：渲染后物体不越出画布下沿（越界会被裁掉，覆盖像素数明显变小）。
-  const std::string with_pivot = R"({
-    "camera": { "eye": [0.0, 0.5, 3.6], "target": [0.0, 0.0, 0.0], "fov": 42 },
-    "objects": [
-      { "name": "crate", "shape": "cube", "radius": 0.5, "depth": 1.0, "height": 1.0,
-        "pivot_at": "bottom", "rotate": [1.5707963, 0.0, 0.0], "color": "#d4b07a" }
-    ]
-  })";
+  const std::string with_pivot = R"j({
+  "camera": {
+    "eye": [
+      0.0,
+      0.5,
+      3.6
+    ],
+    "target": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "fov": 42
+  },
+  "objects": [
+    {
+      "name": "crate",
+      "shape": "cube",
+      "pivot_at": "bottom",
+      "rotation": [
+        1.5707963,
+        0.0,
+        0.0
+      ],
+      "color": "#d4b07a",
+      "size": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    }
+  ]
+})j";
   // 同样的方块但枢轴在原点（默认）：转 90° 后一半会沉到 y<0
-  const std::string without_pivot = R"({
-    "camera": { "eye": [0.0, 0.5, 3.6], "target": [0.0, 0.0, 0.0], "fov": 42 },
-    "objects": [
-      { "name": "crate", "shape": "cube", "radius": 0.5, "depth": 1.0, "height": 1.0,
-        "rotate": [1.5707963, 0.0, 0.0], "color": "#d4b07a" }
-    ]
-  })";
+  const std::string without_pivot = R"j({
+  "camera": {
+    "eye": [
+      0.0,
+      0.5,
+      3.6
+    ],
+    "target": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "fov": 42
+  },
+  "objects": [
+    {
+      "name": "crate",
+      "shape": "cube",
+      "rotation": [
+        1.5707963,
+        0.0,
+        0.0
+      ],
+      "color": "#d4b07a",
+      "size": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    }
+  ]
+})j";
   const int ink_pivot = render(with_pivot, 240, 240);
   const int ink_origin = render(without_pivot, 240, 240);
   st::log::out("[graph] pivot={} origin={}\n", ink_pivot, ink_origin);
@@ -373,32 +543,32 @@ ST_TEST(scene_script_pivot_at_bottom_rotates_in_place) {
 ST_TEST(scene_script_composite_errors_carry_paths) {
   // 组合写法的错误必须指到**具体节点**。模型拿到 "objects[0].children[1].parent"
   // 才能改；拿到"解析失败"只能重写。
-  const std::string nested_with_parent = R"({
+  const std::string nested_with_parent = R"j({
     "objects": [ { "name": "a", "children": [ { "shape": "cube", "parent": "a" } ] } ]
-  })";
+  })j";
   auto nested = st::raster::parse_scene_spec_text(nested_with_parent);
   ST_REQUIRE(!nested.has_value());
   ST_CHECK(nested.error().message.find("children[0]") != std::string::npos);
   ST_CHECK(nested.error().message.find("parent") != std::string::npos);
 
-  const std::string bad_pivot = R"({
+  const std::string bad_pivot = R"j({
     "objects": [ { "name": "a", "shape": "cube", "pivot_at": "elbow" } ]
-  })";
+  })j";
   auto pivot = st::raster::parse_scene_spec_text(bad_pivot);
   ST_REQUIRE(!pivot.has_value());
   ST_CHECK(pivot.error().message.find("pivot_at") != std::string::npos);
   ST_CHECK(pivot.error().message.find("bottom") != std::string::npos);   // 可用清单
 
-  const std::string missing_parent = R"({
+  const std::string missing_parent = R"j({
     "objects": [ { "name": "a", "shape": "cube", "parent": "ghost" } ]
-  })";
+  })j";
   auto missing = st::raster::parse_scene_spec_text(missing_parent);
   ST_REQUIRE(!missing.has_value());
   ST_CHECK(missing.error().message.find("ghost") != std::string::npos);
 
-  const std::string duplicate = R"({
+  const std::string duplicate = R"j({
     "objects": [ { "name": "same", "shape": "cube" }, { "name": "same", "shape": "cube" } ]
-  })";
+  })j";
   auto dup = st::raster::parse_scene_spec_text(duplicate);
   ST_REQUIRE(!dup.has_value());
   ST_CHECK(dup.error().message.find("same") != std::string::npos);
