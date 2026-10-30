@@ -4,6 +4,7 @@
 #include "st/codec/png.hpp"
 #include "st/core/log.hpp"
 #include "st/raster/animation.hpp"
+#include "st/raster/scene_schema.hpp"
 #include "st/raster/scene_graph.hpp"
 
 #include <set>
@@ -132,6 +133,11 @@ auto read_lighting(const Json& json) -> Result<Lighting> {
   if (!node->is_object()) {
     return st::unexpected(ErrorCode::Parse, "lighting：需要对象");
   }
+  if (const auto* table = st::raster::find_field_table("lighting"); table != nullptr) {
+    if (const auto status = st::raster::check_unknown_fields(*node, *table, "lighting"); !status) {
+      return st::forward_error(status.error());
+    }
+  }
   const auto key_dir = read_vec3(*node, "key_direction", lit.key_direction, "lighting");
   if (!key_dir) return st::forward_error(key_dir.error());
   lit.key_direction = *key_dir;
@@ -222,6 +228,11 @@ auto read_shadow(const Json& json) -> Result<PlanarShadow> {
   if (!node->is_object()) {
     return st::unexpected(ErrorCode::Parse, "shadow：需要对象");
   }
+  if (const auto* table = st::raster::find_field_table("shadow"); table != nullptr) {
+    if (const auto status = st::raster::check_unknown_fields(*node, *table, "shadow"); !status) {
+      return st::forward_error(status.error());
+    }
+  }
   shadow.strength = read_unit(*node, "strength", 0.0f);
   shadow.ground_y = static_cast<float>(json_get_double(*node, "ground_y", 0.0));
   shadow.lift = static_cast<float>(json_get_double(*node, "lift", shadow.lift));
@@ -231,6 +242,112 @@ auto read_shadow(const Json& json) -> Result<PlanarShadow> {
                       static_cast<float>(color->g) / 255.0f,
                       static_cast<float>(color->b) / 255.0f};
   return shadow;
+}
+
+/// JSON 值的类型名（用于报错时说明"收到的是什么"）。
+///
+/// 为什么要专门给中文类型名而不是 `json::value_t` 枚举：报错是给人/模型看的，
+/// `number_integer` 这种名字对"我该写什么"没有帮助。
+[[nodiscard]] auto json_type_name(const Json& value) -> std::string {
+  if (value.is_null()) return "null";
+  if (value.is_boolean()) return "布尔";
+  if (value.is_number()) return "数字";
+  if (value.is_string()) return "字符串";
+  if (value.is_array()) return std::format("数组（{} 项）", value.size());
+  if (value.is_object()) return "对象";
+  return "未知";
+}
+
+/// 按字段表校验**已存在**字段的类型与范围。
+///
+/// ## 为什么必须校验类型（而不只是"给个默认值"）
+///
+/// `json_get_double(node, "radius", fallback)` 遇到 `"radius": "0.5"`（字符串）
+/// 会**静默返回 fallback**。调用方看到"解析成功"，但值没生效——
+/// 与大模型最常犯的"拼错字段"是同一类问题：**没有报错，所以无从修正**。
+///
+/// 所以这里显式检查：字段存在但类型不对 → 报错并指出期望类型。
+///
+/// 范围检查只覆盖"越界会静默变形"的几项（`segments >= 3` 之类）——
+/// 完整范围校验留给 `describe_scene` 的"配置问题"提示，
+/// 因为有些范围与形状相关（`segments` 对 cube 无意义），不该在这里硬卡。
+[[nodiscard]] auto validate_field_types(const Json& node, const std::string& path) -> Status {
+  const auto* table = st::raster::find_field_table("objects[]");
+  if (table == nullptr) return st::ok();
+  for (const st::raster::FieldSpec& field : table->fields) {
+    const Json* value = json_find(node, field.name);
+    if (value == nullptr) continue;
+    const std::string& type = field.type;
+    const std::string where = path + "." + field.name;
+    if (type == "number") {
+      // 允许整数与浮点；拒绝字符串与布尔（`true` 转成 1 是更常见的坑）
+      if (!value->is_number()) {
+        return st::unexpected(ErrorCode::Parse,
+                              std::format("{}：期望数字（number），收到 {}；"
+                                          "不要加引号，也不要用 true/false",
+                                          where, json_type_name(*value)));
+      }
+    } else if (type == "bool") {
+      if (!value->is_boolean()) {
+        return st::unexpected(ErrorCode::Parse,
+                              std::format("{}：期望布尔（true/false），收到 {}", where,
+                                          json_type_name(*value)));
+      }
+    } else if (type == "string") {
+      if (!value->is_string()) {
+        return st::unexpected(ErrorCode::Parse,
+                              std::format("{}：期望字符串（string），收到 {}", where,
+                                          json_type_name(*value)));
+      }
+    } else if (type == "vec3") {
+      if (!value->is_array() || value->size() != 3U) {
+        return st::unexpected(ErrorCode::Parse,
+                              std::format("{}：期望 3 个数字的数组 [x, y, z]，收到 {}", where,
+                                          json_type_name(*value)));
+      }
+      for (std::size_t i = 0; i < 3U; ++i) {
+        if (!(*value)[i].is_number()) {
+          return st::unexpected(ErrorCode::Parse,
+                                std::format("{}[{}]：期望数字，收到 {}", where, i,
+                                            json_type_name((*value)[i])));
+        }
+      }
+    } else if (type == "color") {
+      // 颜色可以是 "#rrggbb" 字符串，也可以是 [r,g,b] 数组
+      const bool as_string = value->is_string();
+      const bool as_array = value->is_array() && value->size() >= 3U;
+      if (!as_string && !as_array) {
+        return st::unexpected(
+            ErrorCode::Parse,
+            std::format("{}：期望颜色（\"#rrggbb\" 或 [r,g,b]），收到 {}", where,
+                        json_type_name(*value)));
+      }
+    }
+  }
+  // ## 范围检查：只覆盖"越界会静默变形"的整数分段
+  //
+  // 不做完整范围校验的理由：有些范围与形状相关（`segments` 对 cube 无意义），
+  // 在解析期硬卡会误伤合法组合。这里只拦"无论什么形状都不合理"的几项。
+  struct RangeCheck {
+    const char* name;
+    std::int64_t minimum;
+  };
+  const RangeCheck ranges[] = {{"segments", 3},   {"rings", 2},  {"minor_segments", 3},
+                               {"subdivisions", 0}, {"columns", 1}, {"rows", 1},
+                               {"sides", 3},        {"teeth", 3},  {"knot_p", 1},
+                               {"knot_q", 1}};
+  for (const RangeCheck& check : ranges) {
+    const Json* value = json_find(node, check.name);
+    if (value == nullptr || !value->is_number()) continue;
+    const auto actual = static_cast<std::int64_t>(value->get<double>());
+    if (actual < check.minimum) {
+      return st::unexpected(
+          ErrorCode::Parse,
+          std::format("{}.{}：至少 {}, 收到 {}（负数或过小的分段会让几何退化成碎片）",
+                      path, check.name, check.minimum, actual));
+    }
+  }
+  return st::ok();
 }
 
 /// `SceneObjectSpec` → `SceneNode`（几何/材质留在 spec，空间信息进节点）。
@@ -280,6 +397,19 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
                           "objects[" + std::to_string(index) + "]：需要对象");
   }
   const std::string path = "objects[" + std::to_string(index) + "]";
+  // 未知字段检查（拼错 `raduis` 必须报错并给候选，不能静默用默认值）
+  //
+  // 注意 `children` 是嵌套的对象数组，它们各自在递归调用里检查——
+  // 所以这里只查本层，不深入。
+  if (const auto* table = st::raster::find_field_table("objects[]"); table != nullptr) {
+    if (const auto status = st::raster::check_unknown_fields(node, *table, path); !status) {
+      return st::forward_error(status.error());
+    }
+  }
+  // 类型校验（`"radius": "0.5"` 必须报错，不能静默退回默认值）
+  if (const auto status = validate_field_types(node, path); !status) {
+    return st::forward_error(status.error());
+  }
   SceneObjectSpec obj{};
   obj.shape = json_get_string(node, "shape", "sphere");
 
@@ -475,12 +605,28 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
   if (!json.is_object()) {
     return st::unexpected(ErrorCode::Parse, "场景描述：顶层需要对象");
   }
+  // ## 先查未知字段（在解析任何内容之前）
+  //
+  // 顺序很重要：若先解析再检查，拼错的字段会先让某处退回默认值、
+  // 然后才报"未知字段"——两条错误一起出现，调用方反而不知道哪个是真的。
+  // 放在最前面，报错就只有一个来源。
+  if (const auto* table = st::raster::find_field_table("scene");
+      table != nullptr) {
+    if (const auto status = st::raster::check_unknown_fields(json, *table, "scene"); !status) {
+      return st::forward_error(status.error());
+    }
+  }
   SceneSpec spec{};
 
   const Json* camera = json_find(json, "camera");
   if (camera != nullptr) {
     if (!camera->is_object()) {
       return st::unexpected(ErrorCode::Parse, "camera：需要对象");
+    }
+    if (const auto* table = st::raster::find_field_table("camera"); table != nullptr) {
+      if (const auto status = st::raster::check_unknown_fields(*camera, *table, "camera"); !status) {
+        return st::forward_error(status.error());
+      }
     }
     const auto eye = read_vec3(*camera, "eye", spec.camera.eye, "camera");
     if (!eye) return st::forward_error(eye.error());
@@ -548,6 +694,12 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
     if (!skeleton->is_object()) {
       return st::unexpected(ErrorCode::Parse, "skeleton：需要对象");
     }
+    if (const auto* table = st::raster::find_field_table("skeleton"); table != nullptr) {
+      if (const auto status = st::raster::check_unknown_fields(*skeleton, *table, "skeleton");
+          !status) {
+        return st::forward_error(status.error());
+      }
+    }
     st::raster::Skeleton parsed{};
     const Json* joints = json_find(*skeleton, "joints");
     if (joints == nullptr || !joints->is_array()) {
@@ -605,6 +757,12 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
     if (!animation->is_object()) {
       return st::unexpected(ErrorCode::Parse, "animation：需要对象");
     }
+    if (const auto* table = st::raster::find_field_table("animation"); table != nullptr) {
+      if (const auto status = st::raster::check_unknown_fields(*animation, *table, "animation");
+          !status) {
+        return st::forward_error(status.error());
+      }
+    }
     st::raster::Clip clip{};
     clip.name = json_get_string(*animation, "name", "animation");
     if (const Json* tracks = json_find(*animation, "tracks"); tracks != nullptr) {
@@ -615,6 +773,13 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
       for (const Json& track_node : *tracks) {
         const std::string path = std::format("animation.tracks[{}]", track_index);
         ++track_index;
+        if (const auto* table = st::raster::find_field_table("animation.tracks[]");
+            table != nullptr) {
+          if (const auto status = st::raster::check_unknown_fields(track_node, *table, path);
+              !status) {
+            return st::forward_error(status.error());
+          }
+        }
         st::raster::Track track{};
         track.node = json_get_string(track_node, "node", "");
         if (track.node.empty()) {
@@ -636,6 +801,13 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
         for (const Json& key_node : *keys) {
           const std::string key_path = std::format("{}.keys[{}]", path, key_index);
           ++key_index;
+          if (const auto* table = st::raster::find_field_table("animation.tracks[].keys[]");
+              table != nullptr) {
+            if (const auto status = st::raster::check_unknown_fields(key_node, *table, key_path);
+                !status) {
+              return st::forward_error(status.error());
+            }
+          }
           st::raster::Keyframe key{};
           // `t` 与 `time` 都收（前者是推荐写法，后者不让人因拼写被拒）
           const Json* time_node = json_find(key_node, "t");

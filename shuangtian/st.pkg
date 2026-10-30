@@ -469,6 +469,18 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "用一份 JSON 描述整个三维场景：解析/报错指路/渲染/参数生效/确定性"
     },
+    "st_api": {
+      "kind": "executable",
+      "sources": ["tools/st_api.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "输出机读能力清单（场景脚本字段契约）。独立于 st：st 的源白名单刻意不含 raster"
+    },
+    "llm_usability_probe": {
+      "kind": "executable",
+      "sources": ["tools/llm_usability_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "大模型可用性实测：拼错字段/缺字段/类型错时的报错质量"
+    },
     "real_asset_probe": {
       "kind": "executable",
       "sources": ["tools/real_asset_probe.cpp"],

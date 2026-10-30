@@ -690,6 +690,116 @@ build\dev\bin\real_asset_probe.exe out\real tmp\real\*.glb
 st test real_asset
 ```
 
+## 4.12 大模型可用性（把"对熟练人类友好"变成"对模型友好"）
+
+### 4.12.1 起点：实测出的四个短板
+
+用"模拟大模型最常犯的错"的方式测（`tools/llm_usability_probe.cpp`），
+起点是 **5 类错误被静默接受**：
+
+```
+radius 拼成 raduis       → (接受)，用默认值 0.8
+translate 拼成 translaet  → (接受)，物体停在原点
+顶层 camra                → (接受)，相机用默认
+radius 写成字符串 "0.5"   → (接受)，读不到就退回默认
+segments: -5              → (接受)，被 clamp
+```
+
+**为什么这比崩溃更糟**：模型看到"解析成功"会认为改好了，画面没变 → 随机试错
+（换字段名、换数值、换形状），每次都被静默接受 → 长循环。**报错反而能让它一次改对。**
+
+### 4.12.2 ① 未知字段检查：报错 + 候选，但**不自动修**
+
+现在得到：
+
+```
+objects[0].raduis：未知字段（objects[] 这一层不认识 "raduis"）；
+    你是不是想写 radius？
+```
+
+机制：`scene_schema.hpp` 的**字段白名单表**是唯一真源，解析后逐层比对，
+差集用编辑距离给候选（返回 2~3 个，因为 `radius` 与 `rings` 只差两字符，
+单给一个有时会指错方向）。
+
+**刻意不自动修**：自动替换会让调用方失去校正机会，一旦猜错就变成新的静默错误。
+"报错 + 候选"已经能让模型一次改对，比任何自动修复都可靠。
+
+覆盖 9 层：`scene` / `objects[]` / `camera` / `lighting` / `shadow` / `animation` /
+`animation.tracks[]` / `animation.tracks[].keys[]` / `skeleton`。
+
+实测结果：**静默接受错误 5 → 0**。
+
+### 4.12.3 ② `st_api`：机读能力清单
+
+```bash
+st_api              # 完整清单（JSON）
+st_api --compact    # 单行
+st_api --example    # 最小可运行脚本
+st_api --scopes     # 只列各层（9 层 / 92 个字段）
+st_api --check f.json    # 校验 + 自检（写完自查）
+st_api --normalize f.json # 读入再写出（看引擎"理解成了什么"）
+```
+
+清单含：图元名（22 个）、轨道种类、缓动名、9 层字段（类型/范围/说明/示例/**常见错误**）、
+起步脚本、8 条"最容易犯的错"。
+
+**为什么从字段表生成而不是手写**：手写两份必然漂移，而"清单说支持、代码其实不读"
+是最难查的一类问题。测试里有一条**逐项比对清单与字段表**（名称/类型/必填），
+加了新字段忘了更新会立刻红。
+
+### 4.12.4 ③ 反向序列化：读 → 改 → 写
+
+`serialize_scene` / `serialize_scene_text`。这是**增量修改**的前提：
+模型最常见的工作方式是"在已有场景上改一个数值"，而不是重写整份
+（重写常常顺手改坏没打算碰的地方）。
+
+**往返一致性的口径是语义等价，不是逐字符相等**：只写非默认值
+（写全量会让输出膨胀、改动反而不醒目），但"必须显式"的项一定写
+（`objects` 必填、`shape` 是核心信息）。
+
+两个靠往返测试抓到的真 bug：
+
+| bug | 症状 | 根因 |
+|---|---|---|
+| `Json{42}` 变成 `[42]` | 序列化出 `"eye":[[2.2],[1.6],[2.8]]`，再解析报"eye 与 target 重合" | nlohmann 的**初始化列表重载**：`Json{x}` 把标量包成数组 |
+| `specified` 掩码变脏 | `torus` 往返后 `specified` 从 0 变 1，走另一条尺寸分支 | 无条件补写 `radius` |
+
+这两个都"能编译、输出不报错、但语义完全错"——**只有往返测试（写出去再读回来）能发现**。
+
+### 4.12.5 ④ 场景自检：回答"我写对了吗"
+
+```bash
+st_api --check scene.json
+```
+
+输出事实 + 诊断，**事实与诊断分开**（前者是数据可直接用，后者是意见）：
+
+```
+物体 2 个（分组 0 个）· 顶点 1417 · 三角形 2090
+包围盒 (-2.00,-0.00,-2.00) – (2.00,1.00,2.00) · 尺寸 4.00×1.00×4.00
+建议相机距离 8.40
+诊断 1 条：
+  [error] camera_inside_geometry：相机 eye (0.00,0.00,0.00) 落在场景包围盒内部
+      建议：把 eye 往外挪到距中心约 3.9 处（建议距离）
+```
+
+9 类诊断，每条都带**可执行建议**：
+
+| code | 级别 | 说明 |
+|---|---|---|
+| `empty_scene` | error | 没有可画的物体 |
+| `camera_inside_geometry` | error | 相机在包围盒内 → 画面全黑 |
+| `near_plane_too_far` | warning | **实测踩过**：3cm 道具 + near=0.1 → 渲染 0 像素 |
+| `camera_too_close` / `too_far` | warning | 偏离建议距离 0.45×~3× |
+| `animation_missing_node` | error | 轨道引用的节点不存在 |
+| `texture_transform_without_texture` | warning | 设了 UV 变换但没有 texture |
+| `shadow_without_ground` | info | 开阴影但没有 ground 物体 |
+| `ground_tilt_ignored` | info | ground 的绕 X/Z 旋转会被忽略 |
+| `unnamed_objects` | info | 物体没名字，无法被动画/拾取引用 |
+
+`suggested_camera_distance` 由 fov 反解（`radius / (0.62 * tan(fov/2))`）——
+模型可以直接拿它当相机距离，不必自己推。
+
 ## 6. 验收（可复算）
 
 | 产物 | 钉住什么 |
@@ -712,6 +822,9 @@ st test real_asset
 | `tests/real_asset_test.cpp` | 真实素材 6 条：贴图解码、15452 三角形、骨架动画、Draco 拒绝、尺度跨度 115x |
 | `tools/real_asset_probe.cpp` | 真实素材渲染成 PNG（人眼验收） |
 | `tools/fetch_assets.ps1` | 素材获取（Khronos 官方样例，不进仓库） |
+| `tests/llm_readiness_test.cpp` | 大模型可用性 20 条：未知字段（9 层）、清单防漂移、往返一致性、自检 9 类 |
+| `tools/llm_usability_probe.cpp` | 模拟大模型常见错误，量报错质量（静默错误 5 → 0） |
+| `tools/st_api.cpp` | 机读能力清单 / 校验自检 / 读入再写出 |
 | `tests/geom_scene_integration_test.cpp` | 22 个图元**真的画出像素**、旧形状语义不变、参数生效、导出→读回、焊接/变换/OBJ 往返 |
 | `tools/primitives_gallery_probe.cpp` | 22 格总览 PNG + 每个图元的 `.glb`（可拖进 Blender 对照） |
 | `tools/composite_pivot_probe.cpp` | 组合模型四格对照（无旋转 / 绕肩转 / 枢轴错放 / 父隐藏），证明父子与枢轴各自生效 |
