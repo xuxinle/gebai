@@ -469,6 +469,12 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "用一份 JSON 描述整个三维场景：解析/报错指路/渲染/参数生效/确定性"
     },
+    "real_asset_probe": {
+      "kind": "executable",
+      "sources": ["tools/real_asset_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "真实素材渲染：读生态素材（Khronos 样例）并渲成 PNG，人眼验收"
+    },
     "jpeg_probe": {
       "kind": "executable",
       "sources": ["tools/jpeg_probe.cpp"],

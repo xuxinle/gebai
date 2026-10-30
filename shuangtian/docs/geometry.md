@@ -625,6 +625,71 @@ TypeError: addData 的第 1 个参数必须是 Float32Array（收到类型码 -1
 **不做隐式转换**——那会悄悄退回慢路径，于是"我明明用了二进制通道怎么还是慢"
 变成一个查不出的问题。
 
+## 4.11 真实素材实测（Khronos glTF 官方样例）
+
+自造素材的局限：**我按自己的理解构造，也按自己的理解验证**，于是双方一致的错误
+永远不会被发现。所以用别人按规范导出的真实素材再验一遍。
+
+### 4.11.1 结果：8/8 渲染成功，1/1 正确拒绝
+
+| 素材 | 三角形 | 贴图 | 半径 | 结果 |
+|---|---|---|---|---|
+| Box | 12 | 0 | 0.5 | ✅ |
+| BoxTextured | 12 | 1 | 0.5 | ✅ |
+| DamagedHelmet | 15452 | **5** | 1.0 | ✅ 细节/破损/贴纸全在 |
+| Avocado | 682 | 1 | **0.031** | ✅ 果皮纹理、果核渐变 |
+| Corset | 18324 | 1 | **0.031** | ✅ 天鹅绒、系带、木纹 |
+| WaterBottle | 4510 | 1 | 0.13 | ✅ 标签 logo 清晰 |
+| AntiqueCamera | 20066 | 多张 | 3.60 | ✅ 木纹三脚架、金属机身 |
+| RiggedSimple | 188 | 0 | 4.58 | ✅ 骨架 2 关节 + 动画 |
+| **Box (Draco)** | — | — | — | ✅ **正确拒绝并指路** |
+
+### 4.11.2 真素材抓到的两个缺陷（自造素材碰不到）
+
+**① 近裁剪面固定 0.1**
+
+Avocado / Corset 的半径是 **0.031**（3cm 道具）。相机距离约 0.08，
+于是**整个模型落在近裁剪面之内 → 渲染出 0 个像素**，而且没有任何报错——
+画面只是一片背景色。
+
+这是"生态素材"的普遍问题：不同来源的模型单位差几个数量级
+（珠宝 mm、道具 cm、建筑 km）。**实测跨度 115 倍**（0.0314 ↔ 3.604），
+任何固定的 near/far 都会在某一端失效。
+
+修法：调用方按模型尺度自适应 `near_z = distance * 0.01`。
+
+**② 相机距离凭常数**
+
+初版用 `radius * 3.4`：对半径 1.0 合适，对 0.5 就把模型顶出画框。
+根因是"物体占画面的比例"由 `2*atan(radius/distance)` 决定，而 fov 固定——
+正解是由 fov 反解距离：`distance = radius / (fill_ratio * tan(fov/2))`。
+
+### 4.11.3 素材获取与测试
+
+真实素材**不进仓库**（几十 MB + 第三方版权）。用脚本取：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/fetch_assets.ps1
+# 或指定目录
+powershell -ExecutionPolicy Bypass -File tools/fetch_assets.ps1 -OutDir D:\assets
+```
+
+来源 [KhronosGroup/glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets)
+（多数 CC0 / CC-BY 4.0，每个模型目录下有 LICENSE.md）。
+
+`tests/real_asset_test.cpp` 在素材不存在时用 **`ST_SKIP`**（报告里可见，
+不算通过也不算失败）——而不是静默 `return`（那会让"没测"和"测过"看起来一样）。
+也可用 `ST_REAL_ASSETS` 环境变量指向自己的素材目录。
+
+```powershell
+# 兼容性总账
+build\dev\bin\ecosystem_probe.exe tmp\real\*.glb
+# 渲染成图片（人眼验收）
+build\dev\bin\real_asset_probe.exe out\real tmp\real\*.glb
+# 回归测试
+st test real_asset
+```
+
 ## 6. 验收（可复算）
 
 | 产物 | 钉住什么 |
@@ -644,6 +709,9 @@ TypeError: addData 的第 1 个参数必须是 Float32Array（收到类型码 -1
 | `tools/ecosystem_probe.cpp` | 生态素材保留率总账（补齐后 5/5 = 100%） |
 | `tools/jpeg_probe.cpp` | JPEG 解码按已知图案趋势验证（红随 x、绿随 y） |
 | `tools/procedural_probe.cpp` | 过程化：出图 + JSON/二进制通道开销对照 + 瓶颈拆解 |
+| `tests/real_asset_test.cpp` | 真实素材 6 条：贴图解码、15452 三角形、骨架动画、Draco 拒绝、尺度跨度 115x |
+| `tools/real_asset_probe.cpp` | 真实素材渲染成 PNG（人眼验收） |
+| `tools/fetch_assets.ps1` | 素材获取（Khronos 官方样例，不进仓库） |
 | `tests/geom_scene_integration_test.cpp` | 22 个图元**真的画出像素**、旧形状语义不变、参数生效、导出→读回、焊接/变换/OBJ 往返 |
 | `tools/primitives_gallery_probe.cpp` | 22 格总览 PNG + 每个图元的 `.glb`（可拖进 Blender 对照） |
 | `tools/composite_pivot_probe.cpp` | 组合模型四格对照（无旋转 / 绕肩转 / 枢轴错放 / 父隐藏），证明父子与枢轴各自生效 |
