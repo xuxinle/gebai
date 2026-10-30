@@ -231,6 +231,11 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props,
         element.set_surface(Element::Surface::Alt);
       } else if (text == "sunken") {
         element.set_surface(Element::Surface::Sunken);
+      } else if (text == "content") {
+        // 「我在这里读东西」的阅读面（编辑器/终端/预览同语义）：在亮色下归白、
+        // 暗色下更沉，由主题决定方向（见 element.hpp 的 Surface::Content 说明）。
+        // XML/JS 侧此前写不了这一档，只能拿 base/alt 凑——语义面该能在 XML 里声明。
+        element.set_surface(Element::Surface::Content);
       } else {
         return false;
       }

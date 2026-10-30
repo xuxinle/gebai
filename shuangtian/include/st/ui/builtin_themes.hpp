@@ -66,4 +66,19 @@ namespace st::ui {
 /// 供 `--list-themes` 一类入口与"画廊逐主题遍历"使用。
 [[nodiscard]] auto builtin_theme_names() -> std::vector<std::string_view>;
 
+/// 内置主题的**中文显示名**（选择器 UI 用；英文名仍是稳定 id）。
+/// 名字取自各主题的观感意象（见上表）：不存在的名字返回原名——
+/// 外部 `--theme-file` 注册的主题没有中文登记，原名即最好的显示名。
+[[nodiscard]] auto builtin_theme_display_name(std::string_view name) -> std::string_view;
+
+/// 内置主题的**预览色**（选择器 UI 的色点用）：`bg` 与 `primary` 两色最能一眼认主题。
+/// � `nullopt` 表示没登记（调用方用当前主题的色作占位，而非报错——
+/// 选择器不能因为一个主题缺预览就整页画不出来）。
+struct ThemePreviewColors {
+  math::Color bg{};       ///< 主题底色
+  math::Color primary{};  ///< 主题主色
+};
+[[nodiscard]] auto builtin_theme_preview_colors(std::string_view name)
+    -> std::optional<ThemePreviewColors>;
+
 }  // namespace st::ui

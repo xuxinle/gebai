@@ -53,6 +53,23 @@ namespace st::ui::components_internal {
   return std::nullopt;
 }
 
+/// `Tone` → 色调短名（`tone_from_name` 的反函数；未覆盖值回 "default"）。
+/// 供组件把当前 tone 报回控制通道/`get`（属性面可写就该可读）。
+[[nodiscard]] inline auto tone_name(Tone tone) -> std::string_view {
+  switch (tone) {
+    case Tone::Default: return "default";
+    case Tone::Muted: return "muted";
+    case Tone::Faint: return "faint";
+    case Tone::Primary: return "primary";
+    case Tone::Accent: return "accent";
+    case Tone::Success: return "success";
+    case Tone::Warning: return "warning";
+    case Tone::Danger: return "danger";
+    case Tone::OnPrimary: return "on_primary";
+  }
+  return "default";
+}
+
 /// 圆角矩形填充（**四角独立半径**；四角同半径时的简写在下方；`radius == 0` 即普通矩形）。
 ///
 /// 历史（勿重蹈）：本函数曾与一份 `oriented(path)` 成对出现在各组件里——当时 raster 层

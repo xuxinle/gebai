@@ -37,6 +37,7 @@
 #include "st/ui/components/merge_view.hpp"
 #include "st/ui/components/timeline_view.hpp"
 #include "st/ui/components/select.hpp"
+#include "st/ui/components/theme_picker.hpp"
 #include "st/ui/components/slider.hpp"
 #include "st/ui/components/split_view.hpp"
 #include "st/ui/components/table.hpp"
@@ -1405,6 +1406,7 @@ auto Composer::root() noexcept -> UiRoot& { return impl_->root; }
   X(Switch, "Switch", std::make_unique<Switch>(""))                       \
   X(Slider, "Slider", std::make_unique<Slider>())                         \
   X(Select, "Select", std::make_unique<Select>())                         \
+  X(ThemePicker, "ThemePicker", std::make_unique<ThemePicker>())           \
   X(List, "List", std::make_unique<List>())                               \
   X(ListItem, "ListItem", std::make_unique<ListItem>("", ""))             \
   X(Table, "Table", std::make_unique<Table>())                            \

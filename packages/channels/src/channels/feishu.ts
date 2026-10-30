@@ -568,13 +568,28 @@ export const channel: ChannelDef = {
     const creds: FeishuCreds = { appId: c0.appId!, appSecret: c0.appSecret!, chats: [] }
     const identity = await observeIdentity(ctx)
 
+    // 机器人身份读不到（230027 等权限码）且拟人凭据存在：几乎必然是**用户 token 过期后回落**——
+    // 真实原因是「需重新授权」而非「接口失败」。报错必须带上授权语义，否则上层 gate
+    // 识别不出、不弹授权卡，用户只看到无休止的 code=230027（实测：算力审核员会话
+    // 静默等待数小时，没人知道要去授权）。
+    const hasPersona = (ctx.deps.personaCredentials ?? null) !== null
+    const readAsBot = async <T>(path: string): Promise<T> => {
+      try {
+        return await api<T>(creds, path, undefined, identity?.token)
+      } catch (err) {
+        if (hasPersona && !identity?.token && /code=230027|code=99991672/.test(String((err as Error)?.message ?? err))) {
+          throw new Error(
+            `用户授权不可用：token 已过期或失效，回落机器人身份后无权读取（${String((err as Error)?.message ?? err)}）——请在相期授权卡重新完成飞书授权`,
+          )
+        }
+        throw err
+      }
+    }
+
     if (input.what === "messages") {
       const limit = Math.max(1, Math.min(50, Number(input.args.limit ?? 20) || 20))
-      const data = await api<{ items?: Array<Record<string, unknown>>; has_more?: boolean }>(
-        creds,
+      const data = await readAsBot<{ items?: Array<Record<string, unknown>>; has_more?: boolean }>(
         `/im/v1/messages?container_id_type=chat&container_id=${encodeURIComponent(input.address)}&sort_type=ByCreateTimeDesc&page_size=${limit}`,
-        undefined,
-        identity?.token,
       )
       const items = data.items ?? []
       const rows = items.map((m) => {
@@ -598,11 +613,8 @@ export const channel: ChannelDef = {
 
     if (input.what === "members") {
       const limit = Math.max(1, Math.min(100, Number(input.args.limit ?? 50) || 50))
-      const data = await api<{ items?: Array<Record<string, unknown>> }>(
-        creds,
+      const data = await readAsBot<{ items?: Array<Record<string, unknown>> }>(
         `/im/v1/chats/${encodeURIComponent(input.address)}/members?member_id_type=open_id&page_size=${limit}`,
-        undefined,
-        identity?.token,
       )
       const items = data.items ?? []
       const rows = items.map((m) => `- ${String(m.name ?? "?")}（${String(m.member_id ?? m.open_id ?? "?")}）`)

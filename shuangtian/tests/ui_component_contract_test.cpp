@@ -65,7 +65,7 @@ using st::ui::dsl::registered_element_types;
 /// 就意味着声明式/协议建的界面会**凭空少一块**（且不报错）。
 ST_TEST(contract_every_type_builds_and_answers_basics) {
   const auto names = registered_element_types();
-  ST_CHECK(names.size() >= 48U);  // 组件库规模下界（防"清单被误删"）
+  ST_CHECK(names.size() >= 49U);  // 组件库规模下界（防"清单被误删"；49 = 48 + ThemePicker）
   for (const std::string& name : names) {
     auto element = make_element(name);
     ST_REQUIRE(element != nullptr);

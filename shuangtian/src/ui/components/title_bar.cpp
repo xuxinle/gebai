@@ -1,12 +1,13 @@
 #include "st/ui/components/title_bar.hpp"
 
 #include <algorithm>
+#include <memory>
 #include <utility>
-
 
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/math/path.hpp"
+#include "st/ui/components/theme_picker.hpp"
 #include "st/ui/icon.hpp"
 #include "st/ui/text_port.hpp"
 
@@ -154,6 +155,32 @@ TitleBar::TitleBar(std::string title) : title_(std::move(title)) {
   // 实测：按住标题栏拖动时整条栏从 #EDEDF2 变成 #DADADF（x=400/1200 同时变），
   // 看着像“整个窗框闪了一下”。按钮自己的悬停/按下由 `paint_content` 逐按钮画。
   set_hover_effect(HoverEffect{.enabled = false});
+  // 默认命令按钮：主题选择（窗口级能力，效果同控制按钮——同位同规格，
+  // 点击弹框架主题选择器模态弹窗）。`show_controls` 同一开关控制它。
+  //
+  // 点击转给内嵌 `theme_picker_`（它自己经宿主契约弹模态/切主题）——按钮本身
+  // 只是视觉载体：与控制按钮同一套 hover/press 绘制，不重复实现。
+  auto picker = std::make_unique<ThemePicker>();
+  picker->set_id("theme-picker");
+  // 标题栏里的 ThemePicker 不自己画按钮（caption 位就是它的按钮）：
+  // 不可见即不参与布局/命中，所有交互经 caption_button_rect 命中转接。
+  //
+  // ⚠ 挂载方式：**不能走 `add_child`**——`TitleBar::add_child` 默认归尾部槽
+  //（声明式惯例），主题按钮会被排进 trailing、跟「全部忽略」这类宿主控件挤在一堆，
+  // 还把 `slots_left_` 哨兵污染成非零（实测：关掉控制按钮后 caption_rect 拿到旧值）。
+  // 直接进 children 不进槽；宿主传播在 `arrange` 里手动补（每帧一次，幂等）。
+  picker->set_visible(false);
+  theme_picker_ = picker.get();
+  Element::add_child(std::move(picker));
+  caption_buttons_.push_back(CaptionButtonSpec{
+      .icon = "brush",
+      .hint = "主题",
+      .on_click = [this] {
+        if (theme_picker_ != nullptr) {
+          if (theme_picker_->is_open()) theme_picker_->close();
+          else (void)theme_picker_->open();
+        }
+      }});
 }
 
 void TitleBar::set_title(std::string title) {
@@ -188,9 +215,41 @@ auto TitleBar::control_button_rect(std::size_t index) const -> math::Rect {
   return math::Rect{right - size, bounds_.y, size, std::min(bounds_.height, size * 2.0f)};
 }
 
+auto TitleBar::add_caption_button(CaptionButtonSpec spec) -> std::size_t {
+  const std::size_t index = caption_buttons_.size();
+  caption_buttons_.push_back(std::move(spec));
+  mark_layout_dirty();
+  return index;
+}
+
+auto TitleBar::caption_button_rect(std::size_t index) const -> math::Rect {
+  if (!show_controls_ || index >= caption_buttons_.size()) return {};
+  const float size = control_button_size();
+  // 紧贴最小化按钮左侧，从右往左排（序号 0 离最小化最近）。
+  // 公式：控制按钮先占 k_control_count 个，再往左数 (count-1-index) 个命令按钮。
+  // ⚠ 曾把 caption 总数也计入偏移（right = right - (count+size-index)·size），
+  // 算出的位置比正确值再左移一个按钮宽——实测主题按钮与最小化之间空出
+  // 46px，用户看到的就是「没和最小化靠在一起」。
+  const float right = bounds_.right() -
+      static_cast<float>(k_control_count) * size -
+      static_cast<float>(caption_buttons_.size() - 1 - index) * size;
+  return math::Rect{right - size, bounds_.y, size, std::min(bounds_.height, size * 2.0f)};
+}
+
+auto TitleBar::invoke_caption_button(std::size_t index) -> bool {
+  if (index >= caption_buttons_.size()) return false;
+  const auto& button = caption_buttons_[index];
+  if (!button.on_click) return false;
+  button.on_click();
+  return true;
+}
+
 auto TitleBar::controls_rect() const -> math::Rect {
   if (!show_controls_) return {};
-  const float width = control_button_size() * static_cast<float>(k_control_count);
+  // 含命令按钮（主题等）：与 arrange/controls_left 同口径——否则尾部槽让位计算
+  // 与实际按钮区不一致（实测：主题按钮被尾部槽遮住）。
+  const float width =
+      control_button_size() * static_cast<float>(k_control_count + caption_buttons_.size());
   return math::Rect{bounds_.right() - width, bounds_.y, width, bounds_.height};
 }
 
@@ -285,9 +344,20 @@ auto TitleBar::insert_child(std::size_t index, std::unique_ptr<Element> child) -
 /// 且知道"标题栏多高、内边距多少"这类约定——那正是"每个应用各写一套外壳"的来源。
 void TitleBar::arrange(const RenderContext& context, math::Rect rect) {
   Element::arrange(context, rect);
+  // 非槽子元素（内嵌 theme_picker_）手动补宿主传播：它不走槽位路径，
+  // `adopt_host` 只在挂载时跑一次而 TitleBar 挂在树上时它可能还没建好。
+  // 幂等（set_host 同值无副作用），每帧一次成本可忽略。
+  if (theme_picker_ != nullptr && host() != nullptr) {
+    theme_picker_->set_host(host());
+  }
+  // 控制按钮区左缘（含命令按钮：尾部槽要让开**全部**按钮，否则像「全部忽略」
+  // 这类尾部槽会直接压在主题按钮上——实测用户看到主题按钮被遮住）。
   const float controls_left =
-      show_controls_ ? bounds_.right() - control_button_size() * static_cast<float>(k_control_count)
-                     : bounds_.right();
+      show_controls_
+          ? bounds_.right() -
+                control_button_size() *
+                    static_cast<float>(k_control_count + caption_buttons_.size())
+          : bounds_.right();
   const float head_left = bounds_.x + k_padding_x;
   // —— 品牌区：`[左边距][图标][间隔][品牌名]` ——
   //
@@ -542,6 +612,33 @@ void TitleBar::paint_content(const RenderContext& context, raster::Surface& canv
         rect.y + (rect.height - k_icon_size) * 0.5f, k_icon_size, k_icon_size};
     Icon::draw(canvas, button_icon(index), glyph, tone, 0.0f);
   }
+
+  // —— 2.5 命令按钮（默认：主题选择；与控制按钮同规格的 hover/press 块）——
+  for (std::size_t index = 0; index < caption_buttons_.size(); ++index) {
+    const math::Rect rect = caption_button_rect(index);
+    if (rect.is_empty()) continue;
+    const bool hovered = hovered_caption_ == static_cast<int>(index);
+    const bool pressed = pressed_caption_ == static_cast<int>(index);
+    const math::Rect block{rect.x, rect.y + k_control_hover_inset_y, rect.width,
+                           std::max(0.0f, rect.height - k_control_hover_inset_y * 2.0f)};
+    math::Color tone = style_.color;
+    // 主题按钮激活态：弹窗开着时主题色（与普通按钮区分——“现在能切的就是我”）。
+    const bool active =
+        index == 0 && theme_picker_ != nullptr && theme_picker_->is_open();
+    if (!block.is_empty() && (hovered || pressed || active)) {
+      math::Color fill = active ? colors.primary : neutral_hover_tint(colors);
+      if (pressed) {
+        fill = fill.darken(0.08f);
+        fill.a = 255U;
+      }
+      fill_rounded(canvas, block, k_control_hover_radius, fill);
+      if (active) tone = colors.on_primary;
+    }
+    const math::Rect glyph{
+        rect.x + (rect.width - k_icon_size) * 0.5f,
+        rect.y + (rect.height - k_icon_size) * 0.5f, k_icon_size, k_icon_size};
+    Icon::draw(canvas, caption_buttons_[index].icon, glyph, tone, 0.0f);
+  }
 }
 
 auto TitleBar::on_event(const RenderContext& context, Event& event) -> bool {
@@ -555,6 +652,14 @@ auto TitleBar::on_event(const RenderContext& context, Event& event) -> bool {
         for (std::size_t index = 0; index < k_control_count; ++index) {
           if (control_button_rect(index).contains(event.position)) {
             pressed_button_ = static_cast<int>(index);
+            mark_dirty();
+            return true;
+          }
+        }
+        // ①′ 命令按钮（主题等）：同款“按下高亮、松开触发”。
+        for (std::size_t index = 0; index < caption_buttons_.size(); ++index) {
+          if (caption_button_rect(index).contains(event.position)) {
+            pressed_caption_ = static_cast<int>(index);
             mark_dirty();
             return true;
           }
@@ -581,18 +686,28 @@ auto TitleBar::on_event(const RenderContext& context, Event& event) -> bool {
       return false;
     }
     case EventKind::MouseUp: {
-      if (pressed_button_ < 0) return false;
-      const auto pressed = static_cast<std::size_t>(pressed_button_);
+      if (pressed_button_ < 0 && pressed_caption_ < 0) return false;
+      const bool was_control = pressed_button_ >= 0;
+      const auto pressed =
+          static_cast<std::size_t>(was_control ? pressed_button_ : pressed_caption_);
       pressed_button_ = -1;
+      pressed_caption_ = -1;
       mark_dirty();
       // 松开位置仍在该按钮内才触发（拖出去 = 取消，系统同款语义）。
-      if (!control_button_rect(pressed).contains(event.position)) return true;
-      if (pressed == k_button_minimize) {
-        (void)run_window_action("minimize");
-      } else if (pressed == k_button_maximize) {
-        (void)run_window_action("maximize");
+      const math::Rect target =
+          was_control ? control_button_rect(pressed) : caption_button_rect(pressed);
+      if (!target.contains(event.position)) return true;
+      if (was_control) {
+        if (pressed == k_button_minimize) {
+          (void)run_window_action("minimize");
+        } else if (pressed == k_button_maximize) {
+          (void)run_window_action("maximize");
+        } else {
+          (void)run_window_action("close");
+        }
       } else {
-        (void)run_window_action("close");
+        const auto& button = caption_buttons_[pressed];
+        if (button.on_click) button.on_click();
       }
       return true;
     }
@@ -620,11 +735,26 @@ auto TitleBar::on_event(const RenderContext& context, Event& event) -> bool {
         hovered_button_ = hovered;
         mark_dirty();
       }
+      // 命令按钮悬浮（单独记；与控制按钮互斥不冲突）。
+      int hovered_caption = -1;
+      if (show_controls_) {
+        for (std::size_t index = 0; index < caption_buttons_.size(); ++index) {
+          if (caption_button_rect(index).contains(event.position)) {
+            hovered_caption = static_cast<int>(index);
+            break;
+          }
+        }
+      }
+      if (hovered_caption != hovered_caption_) {
+        hovered_caption_ = hovered_caption;
+        mark_dirty();
+      }
       return false;   // 不消费：移动事件继续冒泡（父容器/根仍要看到）
     }
     case EventKind::HoverOut: {
-      if (hovered_button_ != -1) {
+      if (hovered_button_ != -1 || hovered_caption_ != -1) {
         hovered_button_ = -1;
+        hovered_caption_ = -1;
         mark_dirty();
       }
       return false;

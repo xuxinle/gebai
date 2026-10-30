@@ -77,4 +77,34 @@ auto builtin_theme_names() -> std::vector<std::string_view> {
   return names;
 }
 
+auto builtin_theme_display_name(std::string_view name) -> std::string_view {
+  // 中文名登记表（英文名是稳定 id，中文名是给选择器 UI 看的意象名）。
+  // ⚠ 轻量映射不触发主题解析：给 10 套内置主题查名字不需要解析 JSON。
+  static constexpr std::pair<std::string_view, std::string_view> kDisplayNames[]{
+      {"light", "亮色"},
+      {"dark", "暗色"},
+      {"qinhan", "秦汉玄漆"},
+      {"nebula", "星云青"},
+      {"cny", "中国红"},
+      {"cyberpunk", "赛博朋克"},
+      {"ink", "水墨"},
+      {"matrix", "矩阵绿"},
+      {"synthwave", "合成波"},
+      {"tokyo-night", "东京夜"},
+  };
+  for (const auto& [id, display] : kDisplayNames) {
+    if (id == name) return display;
+  }
+  return name;   // 外部主题文件：原名即显示名（不报错——选择器不能因缺登记拒显示）
+}
+
+auto builtin_theme_preview_colors(std::string_view name)
+    -> std::optional<ThemePreviewColors> {
+  // 解析主题拿 bg/primary（两色最能一眼认主题：底色 + 主色）。
+  // 解析失败/名字不存在 → nullopt（调用方用当前主题色占位）。
+  const auto theme = builtin_theme(name);
+  if (!theme.has_value()) return std::nullopt;
+  return ThemePreviewColors{theme->colors().bg, theme->colors().primary};
+}
+
 }  // namespace st::ui

@@ -22,6 +22,14 @@
 
 namespace st::ui {
 
+/// 前向声明：`HostFocus` 的浮层接口要用到 `OverlayLayout`（原为 `UiRoot` 的嵌套枚举，
+/// 嵌套枚举在仅前向声明 `UiRoot` 时不可用——提为顶层，`UiRoot` 复用）。
+class UiRoot;
+
+/// 叠加层排布形态（`HostFocus::host_add_overlay` 与 `UiRoot::add_overlay` 共用）：
+enum class OverlayLayout { Stack, FillViewport };
+
+/// 元素基类……
 using ElementId = std::string;
 
 /// 语义角色（无障碍与自动化对齐；控制通道 `tree`/`find` 的选择维度）。
@@ -398,6 +406,19 @@ class Element {
     /// UiRoot——元素自己不存主题（存了就是影子状态，换肤会分岔）。
     /// 无宿主/未实现时返回空指针（调用方退回内置亮色主题）。
     [[nodiscard]] virtual auto host_theme() const -> const Theme* { return nullptr; }
+
+    /// 换主题（按内置主题库名字）。**唯一真切换点**：组件不自己实现换肤，
+    /// 而是问宿主要——宿主的实现（Application）负责合成/持久化/通知。
+    /// 名字无效/宿主不支持 → 返回 false（调用方如实回落，不假装成功）。
+    virtual auto host_apply_theme(std::string_view /*name*/) -> bool { return false; }
+
+    /// 挂一个浮层（模态对话框/菜单/主题选择器用）。返回 false = 无宿主/不支持。
+    virtual auto host_add_overlay(std::unique_ptr<Element> /*overlay*/,
+                                  OverlayLayout /*layout*/) -> bool {
+      return false;
+    }
+    /// 摘一个浮层（对应用户点击遮罩/Esc 关闭）。返回 false = 无宿主/不在场。
+    virtual auto host_remove_overlay(Element* /*overlay*/) -> bool { return false; }
   };
 
   [[nodiscard]] auto host() const noexcept -> HostFocus* { return host_; }

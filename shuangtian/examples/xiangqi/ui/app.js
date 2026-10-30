@@ -47,11 +47,16 @@
     return n + ' 件等你处理';
   }
 
-  /** 一张卡片的语义色：三类各有自己的调性。 */
+  /** 一张卡片的语义调性：三类各有自己的 tone（跟主题走，非硬编码色）。
+   *
+   * choice → primary：需要定夺，最重的事。
+   * todo   → warning：时间敏感，拖着有代价。
+   * notice → muted：轻告知，读完就走。
+   */
   function toneOf(kind) {
-    if (kind === 'choice') return { icon: 'info', color: '#2563eb', label: '需要你定' };
-    if (kind === 'todo') return { icon: 'clock', color: '#d97706', label: '等你去做' };
-    return { icon: 'message', color: '#6b7280', label: '有事告诉你' };
+    if (kind === 'choice') return { tone: 'primary', label: '需要你定' };
+    if (kind === 'todo') return { tone: 'warning', label: '等你去做' };
+    return { tone: 'muted', label: '有事告诉你' };
   }
 
   // ── 渲染 ────────────────────────────────────────────────────────────────
@@ -103,8 +108,8 @@
     // 保留用户的阅读位置（不无脑滚到底）——卡片按到达顺序排，
     // 正在看上面那张的人不该被抽走位置。
 
-    // 徽标
-    $('#badge').set({ text: badgeText() });
+    // 徽标：有卡时主色强调、空态弱化（动态信息该比静态标题跳一级）
+    $('#badge').set({ text: badgeText(), tone: cards.length > 0 ? 'primary' : 'faint' });
 
     // 形态互斥：展开态下隐藏 compact 区（标题栏一直可见）
     $('#compact').set({ visible: 'false' });
@@ -151,7 +156,7 @@
     // 徽标在**两种形态下都要更新**：它住在常驻标题栏里，
     // 只在主界面分支里写会让轻提示形态停在“暂无待办”——
     // 而同一屏下面明明写着“另 5 件”，两处自相矛盾。
-    $('#badge').set({ text: badgeText() });
+    $('#badge').set({ text: badgeText(), tone: cards.length > 0 ? 'primary' : 'faint' });
 
     const card = cards[0];
     if (!card) {
@@ -160,8 +165,7 @@
       return;
     }
     const tone = toneOf(card.kind);
-    $('#compact-icon').set({ icon: tone.icon, text_color: tone.color });
-    $('#compact-kind').set({ text: tone.label, text_color: tone.color });
+    $('#compact-kind').set({ text: tone.label, tone: tone.tone });
     $('#compact-title').set({ text: card.title || '（无标题）' });
     // 正文也是 markdown（与主界面同一口径——同一条内容两种形态不应长得不一样）
     if (card.body) {
@@ -194,11 +198,11 @@
    */
   function paintLinkState(textHandle, iconHandle) {
     if (peer && peer.connected) {
-      iconHandle.set({ icon: 'link', text_color: '#059669' });
+      iconHandle.set({ icon: 'link', tone: 'success' });
       // 文字元素**隐藏**而不是留空：空文本仍占一行行高，会把标题栏顶高。
       textHandle.set({ text: '', visible: 'false' });
     } else {
-      iconHandle.set({ icon: 'warning', text_color: '#dc2626' });
+      iconHandle.set({ icon: 'warning', tone: 'danger' });
       textHandle.set({ text: '', visible: 'false' });
     }
     // 具体状态文字改挂到图标的 hint 上（悬停可见），不占横向空间。
@@ -241,28 +245,30 @@
     const sid = 'card-' + index;
     const list = $('#cards');
 
+    // 卡片容器：语义表面 + 主题色描边（不再硬编码 #e5e7eb——那在暗色主题上
+    // 是一道灰白裂缝，且切主题不跟随）。Content 面在暗色下更沉、亮色下归白，
+    // 正是“一张卡”该有的层级。圆角随主题 metrics（内置主题大多 10-14px）。
     list.append('Column', {
       id: sid,
-      gap: '8',
-      padding: '12',
-      surface: 'alt',
-      radius: '8',
+      gap: '10',
+      padding: '16',
+      surface: 'content',
+      radius: '12',
       border_width: '1',
-      border_color: '#e5e7eb',
     });
 
-    // ① 抬头：图标 + 类别 + 来源
+    // ① 抬头：Badge 胶囊（类别）+ 来源。Badge 自带 tone 柔底色，
+    // 比“图标+彩字”更有质感且天然跟主题走（feedback 组件的既成能力，不重造）。
     const headId = sid + '-head';
-    $('#' + sid).append('Row', { id: headId, gap: '8' });
-    $('#' + headId).append('Icon', { icon: tone.icon, size: '16', text_color: tone.color });
-    $('#' + headId).append('Text', { size: '12', text: tone.label, text_color: tone.color });
+    $('#' + sid).append('Row', { id: headId, gap: '8', align_items: 'center' });
+    $('#' + headId).append('Badge', { id: sid + '-kind', text: tone.label, tone: tone.tone });
     $('#' + headId).append('Spacer', { grow: 'true' });
     if (card.from) {
-      $('#' + headId).append('Text', { size: '11', text: card.from, text_color: '#9ca3af' });
+      $('#' + headId).append('Text', { size: '11', text: card.from, tone: 'faint', margin_left: '6' });
     }
 
-    // ② 标题与正文
-    $('#' + sid).append('Text', { size: '15', text: card.title || '（无标题）' });
+    // ② 标题与正文：标题加重一档，正文用 muted 退后一层，层级靠色阶而不是字号堆砌。
+    $('#' + sid).append('Text', { size: '15', text: card.title || '（无标题）', font_weight: 'semibold' });
     if (card.body) {
       // 正文用 **MarkdownView** 而不是 Text：大模型生成的内容天然是 markdown
       //（列表、代码块、强调、表格）。当普通文本画的话，`**粗**`、`- 项`、
@@ -277,9 +283,10 @@
       });
     }
 
-    // ③ 交互区：按类型分派
+    // ③ 交互区：按类型分派。主操作带图标（视觉反馈：纯文字按钮显得单薄），
+    // 主/轻操作间留出呼吸。
     const actId = sid + '-act';
-    $('#' + sid).append('Row', { id: actId, gap: '8', padding_y: '4' });
+    $('#' + sid).append('Row', { id: actId, gap: '8', padding_y: '2' });
 
     if (card.kind === 'choice' && card.options) {
       // 选择卡：每个选项一个按钮，**不给「忽略」**——那类的价值就是必须定夺
@@ -313,20 +320,27 @@
       const doneId = actId + '-done';
       const laterId = actId + '-later';
       $('#' + actId).append('Button', { id: doneId, label: '完成了', icon: 'check', variant: 'primary', size: 'small' });
-      $('#' + actId).append('Button', { id: laterId, label: '先放着', variant: 'ghost', size: 'small' });
+      $('#' + actId).append('Button', { id: laterId, label: '先放着', icon: 'clock', variant: 'ghost', size: 'small' });
       $('#' + doneId).on('click', function () {
         submit(card.id, { done: true });
       });
       $('#' + laterId).on('click', function () {
         submit(card.id, { snooze: true });
       });
+      // 截止时间挂到抬头（与来源同侧）：塞在按钮行里会挤压操作区，
+      // 且它是元信息不是动作，与 from 同层级更顺。
       if (card.due) {
-        $('#' + actId).append('Text', { size: '11', text: '截止 ' + card.due, text_color: '#9ca3af' });
+        const dueId = sid + '-due';
+        $('#' + sid + '-head').append('Icon', { id: dueId, icon: 'clock', size: '11', tone: 'warning' });
+        $('#' + sid + '-head').append('Text', {
+          id: dueId + '-t', size: '11', text: card.due, tone: 'warning',
+        });
       }
     } else {
-      // 提示卡：知道就行
+      // 提示卡：知道就行。带 check 图标与 todo 的「完成了」呼应，
+      // 也让纯文字按钮不再单薄（视觉反馈建议）。
       const okId = actId + '-ok';
-      $('#' + actId).append('Button', { id: okId, label: '知道了', variant: 'soft', size: 'small' });
+      $('#' + actId).append('Button', { id: okId, label: '知道了', icon: 'check', variant: 'soft', size: 'small' });
       $('#' + okId).on('click', function () {
         submit(card.id, { acknowledged: true });
       });
@@ -390,7 +404,7 @@
       // 答复失败**必须说出来**：静默失败会让卡片停在原地，用户以为点没生效又点一次，
       // 而 agent 那头可能已经收到了第一次。
       log('相期：答复失败 ' + id + ' — ' + e);
-      $('#link-text').set({ text: '答复失败：' + e, text_color: '#dc2626' });
+      $('#link-text').set({ text: '答复失败：' + e, tone: 'danger', visible: 'true' });
     }
   }
 
@@ -403,7 +417,7 @@
 
   var POLL_MS = 500;
 
-  function tick() {
+      function tick() {
     try {
       const snapshot = app.cards.poll();
       const nextCards = snapshot.cards || [];
@@ -424,7 +438,7 @@
     } catch (e) {
       // 轮询失败只降级显示，不打断界面（下次 tick 可能就好了）
       peer = { connected: false, name: '' };
-      $('#link-text').set({ text: '轮询失败：' + e, text_color: '#dc2626' });
+      $('#link-text').set({ text: '轮询失败：' + e, tone: 'danger', visible: 'true' });
       return;
     }
 
@@ -471,7 +485,7 @@
   } else {
     // 真没有定时器就明确说出来，而不是假装在工作
     log('相期：宿主无 every()，卡片不会自动刷新');
-    $('#link-text').set({ text: '宿主无定时器：卡片不会自动刷新', text_color: '#dc2626' });
+    $('#link-text').set({ text: '宿主无定时器：卡片不会自动刷新', tone: 'danger', visible: 'true' });
   }
 
   log('相期就绪：等待 agent 投递卡片');

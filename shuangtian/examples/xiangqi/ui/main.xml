@@ -42,21 +42,29 @@
        `ScrollView::add_child` 会把内容子元素插到滚动条**之前**（条恒在末尾），
        所以这里直接写 XML 子节点就是对的（不需要 content 属性那种写法）。 -->
   <Scroll id="cards-scroll" grow="true">
-    <Column id="cards" gap="10" padding="14"/>
+    <Column id="cards" gap="12" padding="16" surface="alt"/>
   </Scroll>
+
+  <!-- 底部动作行：右下角「全部忽略」。
+       之前挂在标题栏 trailing 槽——但标题栏已拥挤（徽标 + 主题/控制按钮），
+       「轻操作」藏在角落按钮里不划不来；右下角是“扫到底了、清掉它们”的
+       自然位置（与邮件客户端“全部已读”同侧）。 -->
+  <Row id="footer-actions" padding_x="16" padding_y="8" justify="end">
+    <Button id="dismiss-all" label="全部忽略" variant="ghost" size="small"
+            hint="把所有提示清掉（选择类与待办类不会被忽略——那两类必须给出结果）"/>
+  </Row>
 
   <!-- 轻提示形态（compact）：只显示最新一条，输入区与底部都隐藏。
        为何要这个形态：notice 类不该把整个主界面拉出来——
        人只是被通知一声，给他一整个工作面板是打扰。
        窗口本身会同步缩到小尺寸贴角（挨 application.set_window_size）。 -->
-  <Column id="compact" gap="10" padding="14" grow="true" visible="false">
-    <Row id="compact-head" gap="8">
-      <Icon id="compact-icon" icon="bell" size="16" text_color="#d97706"/>
-      <Text id="compact-kind" size="12" text_color="#d97706">有事告诉你</Text>
+  <Column id="compact" gap="10" padding="16" grow="true" visible="false">
+    <Row id="compact-head" gap="8" align_items="center">
+      <Badge id="compact-kind" text="有事告诉你" tone="warning"/>
       <Spacer grow="true"/>
-      <Text id="compact-more" size="11" text_color="#9ca3af"/>
+      <Text id="compact-more" size="11" tone="faint"/>
     </Row>
-    <Text id="compact-title" size="15"></Text>
+    <Text id="compact-title" size="15" font_weight="semibold"></Text>
     <!-- 正文用 markdown：大模型给的内容天然是 markdown，
          当纯文本画会把 `**粗**`、`- 项`、代码块原样露出来。 -->
     <MarkdownView id="compact-body" max_height="120"></MarkdownView>
@@ -69,7 +77,7 @@
            为何不能省：这一形态把主界面底部栏整体隐了，若这里再不显示，
            断线时整个窗口里没有任何“已断开”的痕迹——用户以为 agent 还在盯着，
            而提醒根本没送到。那是比“不弹窗”更糟的状态。 -->
-      <Icon id="compact-link-icon" icon="warning" size="12" text_color="#dc2626"/>
+      <Icon id="compact-link-icon" icon="warning" size="12" tone="danger"/>
       <Text id="compact-link" size="11" visible="false">已连接</Text>
     </Row>
   </Column>
@@ -77,10 +85,10 @@
   <!-- 空状态：没有卡片时显示（与徽标呼应，避免空白窗口让人以为挂了）
        注：纵向容器的主轴是竖向，所以「内容居中」用 justify；
        align 是**交叉轴**（这里为横向）——两者不可混。 -->
-  <Column id="empty" gap="6" padding="40" grow="true" justify="center">
-    <Icon id="empty-icon" icon="sun" size="32" text_color="#9ca3af"/>
-    <Text id="empty-title" size="15" text_color="#6b7280">这里空着</Text>
-    <Text id="empty-hint" size="12" text_color="#9ca3af">agent 有事找你时会放到这里</Text>
+  <Column id="empty" gap="8" padding="40" grow="true" justify="center" align_items="center">
+    <Icon id="empty-icon" icon="sun" size="28" tone="faint"/>
+    <Text id="empty-title" size="15" tone="muted" padding_y="2">这里空着</Text>
+    <Text id="empty-hint" size="12" tone="faint">agent 有事找你时会放到这里</Text>
   </Column>
 
   <!-- ✗ 不再有底部栏：连接状态与「全部忽略」都上提到真标题栏了（见 main.cpp）。

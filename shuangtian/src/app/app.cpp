@@ -340,6 +340,12 @@ Application::Application(std::string name, std::string version, AppOptions optio
       root_.set_theme(*initial);
     }
   }
+  // 主题切换回调：组件（如标题栏 ThemePicker）经 `host_apply_theme` 触发时，
+  // 走与控制通道/JS 同一条 `set_theme_name` 管线（合成/覆盖叠加/换调色都一致）。
+  // 接在初始化后：回调里调的 `set_theme_name` 依赖 root_/renderer 已就绪。
+  root_.theme_applier = [this](std::string_view theme_name) {
+    return set_theme_name(theme_name).has_value();
+  };
   // 绘制剖析默认关闭：挂了才计时（代价是每次绘制两次时钟读）。
   if (const auto flag = fs::read_env("ST_PAINT_PROFILE"); flag.has_value() && !flag->empty() &&
       *flag != "0") {
@@ -583,6 +589,30 @@ void Application::set_theme_mode(ui::ThemeMode mode) {
   if (impl_->renderer != nullptr && options_.text_gamma.empty()) {
     impl_->renderer->set_coverage_gamma(default_gamma_for(mode));
   }
+}
+
+auto Application::set_theme_name(std::string_view name) -> Status {
+  // 名字必须在内置库里才生效（不猜、不静默回退：选错主题要让调用方看见）。
+  if (!ui::builtin_theme(std::string(name)).has_value()) {
+    return unexpected(ErrorCode::Invalid,
+                      std::format("未知内置主题：{}（可用：{}）", name,
+                                  join_names(ui::builtin_theme_names())));
+  }
+  // 与 `set_theme_mode` 同一管线：`theme_name` 是基准调色板，`theme_spec`/
+  // `runtime_overlay` 继续在其上叠加（换主题不丢调色微调）。
+  const std::string previous = options_.theme_name;
+  options_.theme_name = std::string(name);   // 先换名字再合成：compose 读的正是它
+  const auto composed = compose_theme_with(options_.theme, impl_->runtime_overlay);
+  if (!composed) {
+    options_.theme_name = previous;   // 合成失败：还原名字（“先校验后落地”）
+    return forward_error(composed.error());
+  }
+  custom_theme_ = *composed;
+  root_.set_theme(custom_theme_);
+  if (impl_->renderer != nullptr && options_.text_gamma.empty()) {
+    impl_->renderer->set_coverage_gamma(default_gamma_for(options_.theme));
+  }
+  return ok();
 }
 
 auto Application::apply_theme_overrides(const st::Json& overrides) -> Status {

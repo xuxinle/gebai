@@ -477,12 +477,21 @@ auto Text::get_property(std::string_view name) const -> std::optional<std::strin
   if (name == "size") return std::format("{}", style_.font_size);
   if (name == "selectable") return selectable_ ? "true" : "false";
   if (name == "selection") return selected_text();
+  if (name == "tone") return std::string(components_internal::tone_name(tone_));
   return std::nullopt;
 }
 
 auto Text::set_property(std::string_view name, std::string_view value) -> bool {
   if (name == "text" || name == "content") {
     set_content(std::string(value));
+    return true;
+  }
+  if (name == "tone") {
+    // 语义色（跟主题走）：XML/JS 里 `tone="primary"` 与硬编码 `text_color="#25.."`
+    // 的区别在切主题时就显现——后者会在暗色主题上错层。
+    const auto parsed = components_internal::tone_from_name(value);
+    if (!parsed.has_value()) return false;
+    set_tone(*parsed);
     return true;
   }
   if (name == "multiline") {
@@ -509,7 +518,7 @@ auto Text::property_names() const -> std::vector<std::string_view> {
   // `size` 是字号（与 `Button` 的尺寸档位**同名不同义**——各自解释，见 `xml_ui.cpp`
   // 里 `normalize_property` 的说明）。
   // `selectable` 可读写（自动化/声明式都靠它开启选区）。
-  return {"text", "content", "multiline", "size", "selectable"};
+  return {"text", "content", "multiline", "size", "selectable", "tone"};
 }
 
 auto Text::readonly_property_names() const -> std::vector<std::string_view> {
@@ -665,17 +674,24 @@ void IconView::paint_content(const RenderContext& context, raster::Surface& canv
 auto IconView::get_property(std::string_view name) const -> std::optional<std::string> {
   if (name == "icon") return icon_;
   if (name == "size") return std::format("{}", size_);
+  if (name == "tone") return std::string(components_internal::tone_name(tone_));
   return std::nullopt;
 }
 
 // 与 `get/set_property` 对称（见头文件里的说明）：不报名字 = 这条路命不中。
 auto IconView::property_names() const -> std::vector<std::string_view> {
-  return {"icon", "size"};
+  return {"icon", "size", "tone"};
 }
 
 auto IconView::set_property(std::string_view name, std::string_view value) -> bool {
   if (name == "icon") {
     set_icon(std::string(value));
+    return true;
+  }
+  if (name == "tone") {
+    const auto parsed = components_internal::tone_from_name(value);
+    if (!parsed.has_value()) return false;
+    set_tone(*parsed);
     return true;
   }
   if (name == "size") {
@@ -1001,6 +1017,7 @@ auto Button::get_property(std::string_view name) const -> std::optional<std::str
     return "medium";
   }
   if (name == "hint") return hint();
+  if (name == "tone") return std::string(components_internal::tone_name(tone_));
   return std::nullopt;
 }
 
@@ -1011,6 +1028,12 @@ auto Button::set_property(std::string_view name, std::string_view value) -> bool
   }
   if (name == "icon") {
     set_icon(std::string(value));
+    return true;
+  }
+  if (name == "tone") {
+    const auto parsed = components_internal::tone_from_name(value);
+    if (!parsed.has_value()) return false;
+    set_tone(*parsed);
     return true;
   }
   if (name == "variant") {
@@ -1051,7 +1074,7 @@ auto Button::set_property(std::string_view name, std::string_view value) -> bool
 }
 
 auto Button::property_names() const -> std::vector<std::string_view> {
-  return {"label", "text", "icon", "variant", "size", "hint"};
+  return {"label", "text", "icon", "variant", "size", "hint", "tone"};
 }
 
 auto Button::invoke_action(std::string_view action, std::string_view argument) -> bool {

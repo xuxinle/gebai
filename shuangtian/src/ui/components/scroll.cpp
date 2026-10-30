@@ -174,8 +174,13 @@ auto ScrollView::insert_child(std::size_t index, std::unique_ptr<Element> child)
 }
 
 auto ScrollView::reserved_width() const noexcept -> float {
-  // 滚动条占位：条宽 + 4px 间隙（与 ScrollBar 的视觉规格保持一致）
-  return show_bar_ ? ScrollBar::kBarWidth + 4.0f : 0.0f;
+  // 滚动条占位：条宽 + 4px 间隙（与 ScrollBar 的视觉规格保持一致）。
+  // **只在真的溢出时才占位**：条本身的可见性就是按 `content_height_ > view_height_`
+  // 动态判的（arrange 尾部），静态预留会在内容不满时留出一条永远不画的空槽
+  // ——现象是卡片右侧莫名多一块空边（左右 padding 不对称，实测用户报“右侧多了空边”）。
+  // 溢出与否在 measure/arrange 阶段已知，这里同口径判断。
+  if (!show_bar_) return 0.0f;
+  return content_height_ > view_height_ + 0.5f ? ScrollBar::kBarWidth + 4.0f : 0.0f;
 }
 
 auto ScrollView::content_extent(const Element& child) const noexcept -> float {

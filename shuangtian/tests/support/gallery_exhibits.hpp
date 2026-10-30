@@ -56,7 +56,7 @@ namespace gallery {
 /// 与 examples/gallery/{pages,main}.cpp 的实例化点一一对应。
 /// 「直接实例化」含两种形态：建卡时实例化，以及懒创建组件经按钮触发构造后挂
 /// 叠加层（后者另列 kGalleryLazy；树自检时两类都在场断言里放行）。
-inline constexpr std::array<std::string_view, 44> kGalleryExhibits{
+inline constexpr std::array<std::string_view, 45> kGalleryExhibits{
     "Panel",       "Text",       "Heading",     "Icon",        "Button",
     "Card",        "Divider",    "KeyValueRow", "Input",       "TextArea",
     "Checkbox",    "Radio",      "Switch",      "Slider",      "Select",
@@ -66,7 +66,7 @@ inline constexpr std::array<std::string_view, 44> kGalleryExhibits{
     "Tree",        "Tooltip",    "ColorPicker", "Viewport",
     "CodeEditor",  "DiffView",   "CompletionPopup", "CommandPalette",
     "TimelineView", "MergeView", "MenuBar",     "ContextMenu", "FileDialog",
-    "Terminal",
+    "Terminal",    "ThemePicker",
 };
 
 /// gallery 懒创建展示集：交互时才构造、挂 UiRoot 叠加层的展示卡组件。
@@ -81,7 +81,8 @@ inline constexpr std::array<std::string_view, 7> kGalleryLazy{
 };
 
 /// gallery 豁免清单：注册表里不该有展示卡的组件（注册名 + 理由）。
-/// 结构性豁免 4 条，与展示集 44 条合起来正好覆盖注册表 48 项（48 = 44 + 4，
+/// 结构性豁免 4 条，与展示集 45 条合起来正好覆盖注册表 49 项（49 = 45 + 4，
+/// ThemePicker（2026-10-30）随组件新增补卡，同步升到 45。
 /// 【待补卡】清单已随三包补卡全部清零：首包 Tree/Tooltip/ColorPicker/Viewport，
 /// 二包 CodeEditor/DiffView/CompletionPopup/CommandPalette，
 /// 三包 TimelineView/MergeView/MenuBar/ContextMenu/FileDialog/Terminal）。

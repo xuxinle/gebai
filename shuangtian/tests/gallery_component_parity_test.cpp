@@ -122,10 +122,10 @@ ST_TEST(gallery_parity_registry_minus_exemptions_equals_exhibits) {
   const std::vector<std::string> exempt = exemptions();
   const std::vector<std::string> shown = exhibits();
 
-  // 内置注册表基线：48 项（外部注册不计——当前测试二进制无外部注册方，
+  // 内置注册表基线：49 项（外部注册不计——当前测试二进制无外部注册方，
   // registered == 内置全集；若将来有外部注册方加入，此断言先红，提醒改用
   // `make_element` 可达性或专用枚举 API 区分内外——见终报「未竟」）。
-  ST_CHECK(registered.size() >= 48U);
+  ST_CHECK(registered.size() >= 49U);
 
   const std::vector<std::string> expected = minus(registered, exempt);
   const std::vector<std::string> missing = minus(expected, shown);  // 有组件没卡也没豁免

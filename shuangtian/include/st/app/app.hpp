@@ -403,6 +403,10 @@ class Application final : public control::Host, public ui::WindowControl {
   [[nodiscard]] auto font_stack() const -> const st::text::FontStack&;
   [[nodiscard]] auto metrics() const -> control::Metrics override;
   void set_theme_mode(ui::ThemeMode mode) override;
+  /// 按名字切主题（内置主题库：light/dark/nebula/qinhan/…）。
+  /// 与 `set_theme_mode` 同一管线（`compose_theme_with` 重合成），
+  /// `--theme-file` 与运行期 `theme.set` 的覆盖不丢。未知名字返回失败、不切换。
+  [[nodiscard]] auto set_theme_name(std::string_view name) -> Status;
   /// 控制通道 `theme.set`：在当前主题上施加稀疏覆盖，成功即重绘。
   [[nodiscard]] auto apply_theme_overrides(const st::Json& overrides) -> Status override;
   /// 控制通道 `theme.tokens`：当前生效主题的完整快照。

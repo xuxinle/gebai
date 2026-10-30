@@ -29,6 +29,7 @@
 #include "st/math/geometry.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/window_control.hpp"
+#include "st/ui/components/theme_picker.hpp"
 
 namespace st::ui {
 
@@ -93,6 +94,35 @@ class TitleBar : public Element {
   /// 能力差异只体现在动作返回值上）。
   void set_show_controls(bool show);
   [[nodiscard]] auto show_controls() const noexcept -> bool { return show_controls_; }
+
+  /// —— 标题栏命令按钮（窗口控制按钮的通用扩展位）——
+  ///
+  /// 与控制按钮**同形同规格**（46px 宽、hover 高亮块、点击语义）但动作由宿主定义。
+  /// 默认自带一个「调色板」按钮（点开框架主题选择器模态弹窗）——`show_controls`
+  /// 的同一开关控制它（关控制按钮一并关它）。
+  ///
+  /// 为什么进框架而不是每个应用自己摆：主题切换是**窗口级能力**（相期/xmlapp/
+  /// gallery 全都要），按钮位置应与控制按钮同组（右上角）——若由应用在 trailing
+  /// 槽自摆，位置/间距/观感各自为政，还会被应用误删。
+  struct CaptionButtonSpec {
+    std::string icon{};               ///< 图标名（icon 表）
+    std::string hint{};               ///< 语义提示（状态栏/无障碍；不占布局）
+    std::function<void()> on_click{}; ///< 点击回调（空 = 点击无动作，按钮照常显示）
+  };
+  /// 追加一个命令按钮（排在既有命令按钮尾、最小化按钮左侧）；返回序号。
+  /// 框架默认已含主题按钮，一般不需要再添——它是给「设置」等窗口级命令预留的。
+  auto add_caption_button(CaptionButtonSpec spec) -> std::size_t;
+  /// 命令按钮个数（含框架自带的主题按钮）。
+  [[nodiscard]] auto caption_button_count() const noexcept -> std::size_t {
+    return caption_buttons_.size();
+  }
+  /// 命令按钮矩形（与窗口控制按钮同规格；越界返回空矩形）。序号 0 是框架主题按钮。
+  [[nodiscard]] auto caption_button_rect(std::size_t index) const -> math::Rect;
+  /// 点击命令按钮（控制通道 `invoke` 用）：等同用户点击。
+  auto invoke_caption_button(std::size_t index) -> bool;
+  /// 内嵌主题选择器（默认自带；控制通道 `theme-picker` 定位/自动化验证用）。
+  /// 可空（构造异常时）；未上树时它的模态弹不了（如实降级）。
+  [[nodiscard]] auto theme_picker() const noexcept -> ThemePicker* { return theme_picker_; }
   /// 绑定窗口控制端口（宿主提供；为空时按钮与拖动**如实拒绝**）。
   void set_window_control(WindowControl* control) noexcept { control_ = control; }
   /// 双击标题区触发的回调（缺省走 `window_toggle_maximize`）。
@@ -182,11 +212,12 @@ class TitleBar : public Element {
   auto run_window_action(std::string_view action) -> bool;
   /// 控制按钮个数（最小化 / 最大化 / 关闭）：与实现文件里的 `k_control_count` 必须一致。
   static constexpr std::size_t k_control_button_count{3};
-  /// 控制按钮区左缘（`show_controls` 关闭时为窗口右缘）。
+  /// 控制按钮区左缘（`show_controls` 关闭时为窗口右缘）。命令按钮紧贴其左侧。
   [[nodiscard]] auto controls_left() const noexcept -> float {
-    return show_controls_ ? bounds_.right() - control_button_size() *
-                                                static_cast<float>(k_control_button_count)
-                          : bounds_.right();
+    if (!show_controls_) return bounds_.right();
+    return bounds_.right() - control_button_size() *
+                                 static_cast<float>(k_control_button_count +
+                                                     caption_buttons_.size());
   }
 
   std::string title_{};
@@ -215,6 +246,16 @@ class TitleBar : public Element {
   mutable int hovered_button_{-1};
   /// 当前按下的控制按钮序号（`-1` = 无）：画出按压态。
   int pressed_button_{-1};
+  /// 命令按钮（含框架主题按钮；见 `add_caption_button`）。
+  std::vector<CaptionButtonSpec> caption_buttons_{};
+  /// 悬浮/按下的**命令**按钮序号（与控制按钮分开记；`-1` = 无）。
+  mutable int hovered_caption_{-1};
+  int pressed_caption_{-1};
+  /// 内嵌主题选择器（caption 位 0 的动作目标）：按钮点击转接给它，
+  /// 它自己经宿主契约弹模态/切主题。不可见（不占布局），仅作逻辑部件；
+  /// 以**子节点**上树（不可见子元素也会被 `adopt_host`），否则 `host()` 为空、
+  /// 模态弹不了。所有权在子树（本指针仅观察）。
+  ThemePicker* theme_picker_{nullptr};
 };
 
 }  // namespace st::ui

@@ -461,6 +461,64 @@ def main():
             proc_b.kill()
         handle_b.close()
 
+    # ── 场景 C：页面切主题（ThemePicker）───────────────────────────────
+    log("场景 C：页面切主题（ThemePicker + 持久化）")
+    shots_c = ROOT / "tmp" / "xiangqi-e2e-theme"
+    shutil.rmtree(shots_c, ignore_errors=True)
+    shots_c.mkdir(parents=True, exist_ok=True)
+    ctl_c = shots_c / "ctl.json"
+    handle_c = open(shots_c / "log.txt", "wb")
+    proc_c = subprocess.Popen(
+        [str(BIN), "--headless", "--control-port", "0", "--control-file", str(ctl_c),
+         "--shots", str(shots_c), "--home", str(shots_c / "home")],
+        stdout=handle_c, stderr=subprocess.STDOUT)
+    try:
+        client_c = None
+        if wait_for(lambda: ctl_c.exists(), 20.0):
+            for _ in range(80):
+                try:
+                    info = json.loads(ctl_c.read_text(encoding="utf-8"))
+                    if info.get("port"):
+                        client_c = Client(info["port"], info.get("token", ""))
+                        client_c.ok("hello")
+                        break
+                except Exception:  # noqa: BLE001
+                    pass
+                time.sleep(0.2)
+        check(client_c is not None, "主题场景：应用启动")
+        if client_c is not None:
+            time.sleep(0.5)
+            # 选项来自内置主题库
+            props = client_c.ok("get", {"id": "theme-picker"}).get("props") or {}
+            options = props.get("options", "")
+            check("qinhan" in options and "light" in options,
+                  f"ThemePicker 选项含内置主题库（{options[:40]}…）")
+            # 切换（invoke change = 用户选择语义，会触发回调与持久化）
+            before = client_c.ok("theme", {"tokens": True})
+            client_c.ok("invoke", {"id": "theme-picker", "action": "change",
+                                   "argument": "qinhan"})
+            time.sleep(0.5)
+            after = client_c.ok("theme", {"tokens": True})
+            check(after.get("name") == "qinhan", f"切后主题名 qinhan（{after.get('name')!r}）")
+            bg_before = before.get("tokens", {}).get("colors", {}).get("bg", "")
+            bg_after = after.get("tokens", {}).get("colors", {}).get("bg", "")
+            check(bg_before != bg_after and bg_after != "",
+                  f"调色板真换了（bg {bg_before} -> {bg_after}）")
+            # 持久化：theme.txt
+            saved = (shots_c / "home" / "theme.txt")
+            check(saved.exists() and saved.read_text(encoding="utf-8").strip() == "qinhan",
+                  "主题持久化 theme.txt=qinhan")
+            # picker 显示同步
+            props = client_c.ok("get", {"id": "theme-picker"}).get("props") or {}
+            check(props.get("value") == "qinhan", f"picker 选中同步（{props.get('value')!r}）")
+    finally:
+        try:
+            proc_c.terminate()
+            proc_c.wait(timeout=5)
+        except Exception:  # noqa: BLE001
+            proc_c.kill()
+        handle_c.close()
+
     log("")
     if failures:
         log(f"失败 {len(failures)} 项：")

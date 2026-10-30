@@ -208,11 +208,17 @@ ST_TEST(title_bar_lays_out_controls_at_right_edge) {
   ST_CHECK_EQ(minimize.width, TitleBar::control_button_size());
   ST_CHECK_EQ(minimize.height, bounds.height);
 
-  // 标题**文字区**：起于图标之后（本夹具设了图标），止于按钮区左缘。
+  // 标题**文字区**：起于图标之后（本夹具设了图标），止于按钮区左缘
+  //（含命令按钮：框架默认自带主题按钮，按钮组是 3 控制 + 1 命令）。
+  const Rect theme_button = fixture.bar->caption_button_rect(0);
   const Rect caption = fixture.bar->caption_rect();
   ST_CHECK(caption.x > bounds.x);          // 让出左内边距 + 图标位
-  ST_CHECK_EQ(caption.right(), minimize.x);
-  ST_CHECK(!caption.contains(minimize.center()));
+  ST_CHECK_EQ(caption.right(), theme_button.x);
+  ST_CHECK(!caption.contains(theme_button.center()));
+  // 命令按钮紧邻最小化、与控制按钮同规格（同位同组的“窗口级按钮”）。
+  ST_CHECK_EQ(theme_button.right(), minimize.x);
+  ST_CHECK_EQ(theme_button.width, TitleBar::control_button_size());
+  ST_CHECK_EQ(fixture.bar->caption_button_count(), 1U);   // 默认自带主题按钮
   // **拖动区**则从窗口左缘起（与系统标题栏的 `HTCAPTION` 同口径）。
   ST_CHECK_EQ(fixture.bar->drag_rect().x, bounds.x);
   ST_CHECK(fixture.bar->hits_caption(caption.center()));
@@ -373,6 +379,8 @@ ST_TEST(title_bar_property_surface_round_trip) {
   //   否则自动化"改属性→查几何"会拿到旧值，实测就是这么撞出来的。）
   ST_CHECK_EQ(fixture.bar->caption_rect().right(), fixture.bar->bounds().right());
   ST_CHECK(!fixture.bar->set_property("nonsense", "x"));
+  // 关掉控制按钮连命令按钮（主题）一起关：同一开关（见头文件约定）。
+  ST_CHECK(fixture.bar->caption_button_rect(0).is_empty());
 }
 
 // ───────────────────────── TitleBar：附属槽（窗框是框架） ─────────────────────────
@@ -392,7 +400,9 @@ ST_TEST(title_bar_accessory_slots_arrange_inside_the_row) {
   // 槽位不算拖动区：否则点主题按钮会把窗口拖走。
   ST_CHECK(!fixture.bar->hits_caption(slot_rect.center()));
   // 槽位是标题栏的**子元素**（内容子元素口径一致，声明式才能正确对齐/裁剪）。
-  ST_CHECK_EQ(fixture.bar->children().size(), 1U);
+  // 另一个子元素是框架自带的 theme-picker（非槽：caption 按钮的逻辑部件，
+  // 不进 content 口径——它由标题栏自持排版，不属于调用方的内容）。
+  ST_CHECK_EQ(fixture.bar->children().size(), 2U);
   ST_CHECK_EQ(fixture.bar->content_child_count(), 1U);
 }
 

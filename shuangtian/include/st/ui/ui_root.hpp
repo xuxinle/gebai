@@ -189,6 +189,26 @@ class UiRoot : public Element::HostFocus {
   }
   /// 样式系统的主题真值源（`Element::apply_appearance` 立即落位用）。
   [[nodiscard]] auto host_theme() const -> const Theme* override { return &theme_; }
+  /// **主题切换回调**（`Application` 装配时注入；组件经 `host_apply_theme` 触发）。
+  ///
+  /// 为什么 UiRoot 不直接换 `theme_`：主题名要经 `Application::set_theme_name`
+  /// （合成主题/持久化/配置回调）才算真切换——那套逻辑在 app 层。空回调 =
+  /// 应用没接（headless 单测里常见），如实返回 false。
+  std::function<bool(std::string_view)> theme_applier{};
+  auto host_apply_theme(std::string_view name) -> bool override {
+    return theme_applier != nullptr && theme_applier(name);
+  }
+  /// 浮层挂/摘转发：组件能自弹模态（主题选择器）而不必让每个应用手接 overlay 回调。
+  auto host_add_overlay(std::unique_ptr<Element> overlay, OverlayLayout layout) -> bool override {
+    if (overlay == nullptr) return false;
+    add_overlay(std::move(overlay), layout);
+    return true;
+  }
+  auto host_remove_overlay(Element* overlay) -> bool override {
+    if (overlay_at(0) == nullptr) return false;   // 一个都没挂：不在场
+    remove_overlay(overlay);
+    return true;
+  }
   /// 焦点环可见性（**只在键盘导航时为真**；见 `focus_ring_visible()` 的说明）。
   /// 写入方只有 `UiRoot` 的事件分支——写的时候顺带把焦点元素标脏。
   void set_focus_ring_visible(bool value) {
@@ -337,7 +357,8 @@ class UiRoot : public Element::HostFocus {
 
   /// 叠加层排布形态：`Stack`（自上而下堆叠，历史行为）或 `FillViewport`
   /// （铺满视口，由 overlay 自己在 bounds 内定位卡片——模态遮罩/命令面板的标准形态）。
-  enum class OverlayLayout { Stack, FillViewport };
+  /// 定义在 `element.hpp`（顶层枚举，`HostFocus` 的浮层接口要用）；这里复用。
+  using OverlayLayout = st::ui::OverlayLayout;
 
   /// 叠加层（对话框 / Toast / 菜单）：绘制在内容之上，事件优先命中。
   /// `layout` 选排布形态：`FillViewport` 时 measure 拿到完整视口约束、arrange 全视口矩形，

@@ -192,7 +192,16 @@ export const observeTool: Tool = {
     const r = await ex.observe({ target: to, what, args: payload })
     if (!r.ok) {
       const head = r.kind === "rejected" ? "观测被拒绝" : "观测失败"
-      return { output: `${head}：${r.reason}`, data: { ok: false, kind: r.kind, reason: r.reason } }
+      // 授权失败同样弹卡：读面（observe）与写面（act）的恢复体验必须一致——
+      // 只在 act 弹会让「读不到消息」永远没人告诉用户去授权（实测：算力审核员
+      // 会话长期 230027 静默等待，用户以为系统坏了）。
+      const gateDeps = (ctx as Record<string, unknown>)[PERSONA_OUTBOUND_DEPS_KEY] as OutboundGateDeps | undefined
+      let note = ""
+      if (isAuthFailure(r.reason)) {
+        const pushed = await notifyAuthNeeded(gateDeps?.pushAuthCard)
+        if (pushed) note = "\n（已在相期弹出授权卡——点链接完成授权后重试即可恢复读取）"
+      }
+      return { output: `${head}：${r.reason}${note}`, data: { ok: false, kind: r.kind, reason: r.reason } }
     }
     const o: ObserveOutcome = r.outcome
     return { output: o.summary, data: { ok: true, ...(o.data ? o.data : {}) } }

@@ -71,9 +71,21 @@ st build xiangqi --profile quick
 | `--home <dir>` | 数据根（默认 `<cwd>/xiangqi`，内含 `inbox/` `outbox/` `seen.txt`）—— 目录名用 ASCII 而非中文，因为它是命令行参数且会进日志/降级文件路径 |
 | `--headless` | 无头运行（e2e/CI 用） |
 | `--control-port` / `--control-file` | 控制通道（自动化验证用） |
-| `--theme` / `--shots` / `--ui` | 主题 / 截图目录 / 资源目录 |
+| `--theme` / `--shots` / `--ui` | 主题 / 截图目录 / 资源目录。**主题除 light/dark 外还接受内置主题库的名字**（nebula/cny/cyberpunk/ink/matrix/qinhan/synthwave/tokyo-night）——卡片全部用语义色与语义表面，切主题整套观感自动跟随 |
 
 连不上 agent **不算错误**：应用照常启动，界面显示未连接。
+
+### 页面切主题
+
+标题栏右上角自带**主题按钮**（半圆对比图标，与窗口控制按钮同组同规格，框架默认开启）：
+点击弹**模态色卡墙**——遮罩铺满、居中卡片，10 套主题各一张三段拼色样品卡（主题底色 +
+主色粗带 + 主色洗色），中文名在卡下，点卡即切整套观感并自动持久化到 `<home>/theme.txt`
+（重启后仍是上次选的主题）。优先级：`--theme`（显式指定）> `theme.txt`（页面选过）> light。
+
+```bash
+# 显式指定优先（不受上次页面选择影响）
+./build/quick/bin/xiangqi.exe --theme nebula
+```
 
 ## 验证
 

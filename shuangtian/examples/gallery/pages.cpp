@@ -27,6 +27,8 @@
 #include "st/ui/components/file_dialog.hpp"
 #include "st/ui/components/input.hpp"
 #include "st/ui/components/list.hpp"
+#include "st/ui/components/theme_picker.hpp"
+#include "st/ui/builtin_themes.hpp"   // builtin_theme_display_name（主题卡回显）
 #include "st/ui/components/markdown_view.hpp"
 #include "st/ui/components/menu.hpp"
 #include "st/ui/components/merge_view.hpp"
@@ -93,6 +95,7 @@ using st::ui::Radio;
 using st::ui::Select;
 using st::ui::Slider;
 using st::ui::Spinner;
+using st::ui::ThemePicker;
 using st::ui::SplitView;
 using st::ui::Switch;
 using st::ui::Table;
@@ -742,6 +745,30 @@ namespace {
     const std::string label(select_ptr->selected_label());
     select_state_ptr->set_content(std::format("当前：{}（值 {}）", label, value));
     hooks.set_status(std::format("已选择 {}（值 {}）", label, value));
+  };
+
+  // —— 主题选择器（内置主题库色卡墙；选中回调由装配层接 Application::set_theme_name）——
+  auto theme_card = make_card("card-theme", "主题选择");
+  theme_card->add_child(make_caption("ThemePicker：内置主题库色卡墙（中文名 + 三段拼色样品），点击即选"));
+  auto theme_picker = std::make_unique<ThemePicker>();
+  theme_picker->set_id("demo-theme-picker");
+  theme_picker->style().width = 48.0f;
+  auto* theme_picker_ptr = theme_picker.get();
+  theme_card->add_child(std::move(theme_picker));
+  auto theme_state = std::make_unique<Text>("当前：亮色");
+  theme_state->set_id("theme-state");
+  theme_state->set_tone(Tone::Faint);
+  theme_state->set_scale(Text::Scale::Xs);
+  auto* theme_state_ptr = theme_state.get();
+  theme_card->add_child(std::move(theme_state));
+  page->add_child(std::move(theme_card));
+
+  theme_picker_ptr->on_change = [theme_state_ptr, hooks](std::string_view name) {
+    // 模态弹窗/真实切换由宿主契约自动接通（上树后 host_apply_theme 生效）；
+    // 这里只回显演示态。
+    theme_state_ptr->set_content(std::format("当前：{}（已自动切换：宿主契约）",
+                                             st::ui::builtin_theme_display_name(name)));
+    hooks.set_status(std::format("已选主题 {}", name));
   };
 
   // —— 反馈与徽标 ——
