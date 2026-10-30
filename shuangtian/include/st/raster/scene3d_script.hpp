@@ -71,7 +71,37 @@ struct SceneObjectSpec {
   math::Vec3 rotate{0.0f, 0.0f, 0.0f};   ///< 欧拉角（弧度），顺序 X→Y→Z
   math::Vec3 scale{1.0f, 1.0f, 1.0f};
 
+  // ── 统一尺寸字段（2026-10-31，**首选写法**）──
+  //
+  // ## `size` 的语义：**全长**，顺序由形状决定
+  //
+  // 旧字段（`radius`/`width`/`height`/`depth`）的根本问题是
+  // **同一名字在不同形状下含义不同**（实测：`plane` 的 `radius` 是半长、
+  // `width` 是全长；`cube` 的 `height` 是 Z 向；`height` 对 `cylinder` 完全无效）。
+  // 模型无法从名字推出语义，只能去读 2.6 万字的文档或赌一把。
+  //
+  // `size` 用**一个字段 + 按形状定顺序**解决：
+  //
+  // | 形状 | `size` 含义 |
+  // |---|---|
+  // | `cube` / `box` | `[X, Y, Z]` 三边全长 |
+  // | `plane` | `[X, Z]`（厚度可选第三项） |
+  // | 球类 | `直径`（标量） |
+  // | 柱/锥/胶囊/棱柱/齿轮 | `[直径, 高]` |
+  // | `torus` | `[外径, 管径]` |
+  //
+  // **一律是全长，没有半长**。模型只需记住"这是一整个东西有多长"，
+  // 不必区分 radius/半宽/全长——那正是旧设计最容易出错的地方。
+  //
+  // `size_count == 0` 表示没写（走旧字段或默认值）。
+  math::Vec3 size{0.0f, 0.0f, 0.0f};
+  /// `size` 被写了几项（1、2 或 3）。0 = 未使用 `size`。
+  std::uint8_t size_count{0};
+
   // 形状参数（按 shape 取用；语义与 `primitives::PrimitiveParams` 逐项一致）
+  //
+  // **以下字段为旧写法，已降级为兼容别名**：写了仍生效（按旧语义换算），
+  // 但解析时会告警"请改用 size"。见 `docs/geometry.md` §4.13。
   float radius{0.8f};
   float width{1.0f};
   float height{1.0f};

@@ -67,13 +67,22 @@ auto build_tables() -> std::vector<FieldTable> {
               {"scale", "vec3", false, "", "缩放", R"j([1,1,1])j", {}},
               {"color", "color", false, "", "固有色（sRGB）", R"j("#c8a07a")j",
                {"写 \"red\" 会被拒（要 #rrggbb）"}},
-              {"radius", "number", false, "> 0", "通用半尺寸（各族图元含义见 geometry.md）",
+              {"size", "number/array", false, "> 0（**全长**）",
+               "统一尺寸字段（首选写法）。标量或数组，含义按形状定："
+               "cube/box 是 [X,Y,Z]、plane 是 [X,Z]、球类是直径、"
+               "柱/锥/胶囊/棱柱是 [直径,高]、torus 是 [外径,管径]。"
+               "**一律全长，没有半长**——这是替代 radius/width/height/depth 的写法",
+               "R\"j([2, 1, 3])j\"",
+               {"写成半径会得到一半大小（size 是全长）", "旧字段 radius 等仍可用但会告警"}},
+              {"radius", "number", false, "> 0",
+               "**旧写法（半长）**：通用半尺寸（各族图元含义见 geometry.md）。"
+               "新脚本请用 size",
                "0.5", {"拼成 raduis 会被拒", "对 cube 是半边 X，不是半径"}},
-              {"width", "number", false, "> 0", "历史字段：X 向长度（box/plane）", "1.0",
+              {"width", "number", false, "> 0", "**旧写法（全长）**：历史字段：X 向长度（box/plane）", "1.0",
                {"plane 的 width 是全长，不是半长"}},
-              {"height", "number", false, "> 0", "历史字段：Y/Z 向长度（按形状不同）", "1.0",
+              {"height", "number", false, "> 0", "**旧写法（按形状含义不同）**：历史字段：Y/Z 向长度（按形状不同）", "1.0",
                {"对 cube 是 Z 向长度"}},
-              {"depth", "number", false, "> 0", "Y 向长度（cylinder/capsule 的高度）", "0.5",
+              {"depth", "number", false, "> 0", "**旧写法（Y 向长度）**：Y 向长度（cylinder/capsule 的高度）", "0.5",
                {"对 cube 是 Y 向长度"}},
               {"segments", "number", false, ">= 3", "周向分段", "24",
                {"小于 3 会退化成退化几何"}},

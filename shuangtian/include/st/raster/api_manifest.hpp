@@ -41,6 +41,7 @@
 /// ```
 
 #include <string>
+#include <string_view>
 
 #include "st/core/json_fwd.hpp"
 
@@ -51,6 +52,16 @@ namespace st::raster {
 
 /// 生成清单的文本形式（`pretty` 为真时缩进）。
 [[nodiscard]] auto api_manifest_text(bool pretty = true) -> std::string;
+
+/// 某个形状的 `size` 说明（人读文本）。
+///
+/// ## 为什么单独暴露这个函数
+///
+/// 模型最高频的问题是"这个形状的 size 怎么写"。它要的不是"docs 里有什么"，
+/// 而是**直接答案**：含义、示例、旧写法怎么换算。
+///
+/// `st_api --shape cube` 就是调它——把 2.6 万字文档里的一行直接递到手上。
+[[nodiscard]] auto shape_size_doc(std::string_view shape) -> std::string;
 
 /// 一段**最小可运行**的场景脚本（供模型抄起步）。
 ///

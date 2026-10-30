@@ -800,6 +800,67 @@ st_api --check scene.json
 `suggested_camera_distance` 由 fov 反解（`radius / (0.62 * tan(fov/2))`）——
 模型可以直接拿它当相机距离，不必自己推。
 
+## 4.13 尺寸语义：统一到 `size`（破坏性变更，v2）
+
+### 4.13.1 旧语义的六个陷阱（全部实测）
+
+| 陷阱 | 实测 |
+|---|---|
+| `radius` 有时半长、有时全长 | `plane radius=1` → 宽 2.00；`plane width=1` → 宽 1.00 |
+| `height` 对 cylinder 完全无效 | `height=4` 与 `depth=4` 结果相同 |
+| `height` 对 cube 是 Z 向 | `cube height=3` → Z 变长（不是竖直 Y） |
+| `height` 对 box **完全无效** | `box width=2 height=1 depth=3` → `2.00×3.00×3.00` |
+| `radius` 对 cube 是"半边 X" | 不是半径 |
+| `radius` 对 torus 是**中心线**半径 | `radius=1` → 外径 2.70（不是 2.00） |
+
+**根源**：历史字段（`width`/`height`/`depth`）+ 通用字段（`radius`/`depth`）
+两套并存，每个形状再各有一套映射分支。模型无法从名字推出语义。
+
+### 4.13.2 新语义：`size`，**一律全长**
+
+```jsonc
+{ "shape": "cube",     "size": [2, 1, 3] }   // X/Y/Z 三边
+{ "shape": "plane",    "size": [2, 4] }      // X/Z
+{ "shape": "uv_sphere","size": 2 }           // 直径
+{ "shape": "cylinder", "size": [2, 4] }      // 直径 + 高
+{ "shape": "torus",    "size": [2, 0.4] }    // 外径 + 管径
+```
+
+**没有半长**。模型只需回答"这一整个东西有多长"，不必区分
+radius / 半宽 / 全长——那正是旧设计最容易出错的地方。
+
+查某个形状怎么写：**`st_api --shape cube`**（直接给含义/示例/旧写法换算，
+不必去读这份 2.7 万字文档）。
+
+### 4.13.3 旧字段：保留兼容，但**会告警**
+
+旧字段仍可用（126 处存量写法不必一次全改），但：
+
+- 解析时输出 `objects[0].radius：旧写法（语义随形状变化）——改用 "size"`
+- `st_api --check` 的自检里有 `legacy_size_field` 诊断项
+- `st_api` 清单里标了 `**旧写法**` 前缀
+
+**为什么告警而不报错**：126 处存量（测试/工具/示例）一次全改风险高、收益低；
+但只兼容不提醒，这套歧义会永远活下去。告警是让新脚本不再踩、老脚本还能跑。
+
+### 4.13.4 验证：逐形状量包围盒
+
+`tests/geom_size_test.cpp` **7 条**，核心两条：
+
+1. **`size` 语义**：9 个形状各写 `size`，量出的包围盒必须**精确等于**期望
+   （不是近似——`cube size:[2,1,3]` 就必须是 `2.00×1.00×3.00`）
+2. **旧字段等价**：迁移的正确性保证——旧写法与对应新写法的几何**完全相同**
+
+第二组特别重要：若不等价，迁移就会静默改掉所有既有片子的画面。
+
+### 4.13.5 迁移的实际情况
+
+原估 433 处，精确统计后是 **126 个物体 / 18 个文件**（433 里大多是 UI
+代码里的同名 `width`/`height`）。这些分散在 C++ 字符串字面量里，
+**没有做自动迁移**——风险高于收益，且旧写法受支持并会告警。
+
+真实 JSON 脚本里只有 4 个物体用了旧字段（`examples/caiyun/assets/scene-script-demo.json`）。
+
 ## 6. 验收（可复算）
 
 | 产物 | 钉住什么 |
@@ -824,7 +885,8 @@ st_api --check scene.json
 | `tools/fetch_assets.ps1` | 素材获取（Khronos 官方样例，不进仓库） |
 | `tests/llm_readiness_test.cpp` | 大模型可用性 20 条：未知字段（9 层）、清单防漂移、往返一致性、自检 9 类 |
 | `tools/llm_usability_probe.cpp` | 模拟大模型常见错误，量报错质量（静默错误 5 → 0） |
-| `tools/st_api.cpp` | 机读能力清单 / 校验自检 / 读入再写出 |
+| `tools/st_api.cpp` | 机读能力清单 / 按形状查尺寸 / 校验自检 / 读入再写出 |
+| `tests/geom_size_test.cpp` | 尺寸语义 7 条：9 个形状精确包围盒、旧字段等价、size 优先级 |
 | `tests/geom_scene_integration_test.cpp` | 22 个图元**真的画出像素**、旧形状语义不变、参数生效、导出→读回、焊接/变换/OBJ 往返 |
 | `tools/primitives_gallery_probe.cpp` | 22 格总览 PNG + 每个图元的 `.glb`（可拖进 Blender 对照） |
 | `tools/composite_pivot_probe.cpp` | 组合模型四格对照（无旋转 / 绕肩转 / 枢轴错放 / 父隐藏），证明父子与枢轴各自生效 |

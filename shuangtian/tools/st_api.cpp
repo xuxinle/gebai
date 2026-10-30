@@ -14,6 +14,7 @@
 //   st_api --compact       # 单行（管道给程序时用）
 //   st_api --example       # 只输出起步脚本
 //   st_api --scopes        # 只列各层名字（快速查"有哪些 scope"）
+//   st_api --shape <名字>  # 这个形状的 size 怎么写（最高频的问题）
 //   st_api --check <文件>  # 校验并自检一份场景脚本（**写完后自查**）
 //   st_api --normalize <文件>  # 读入再重新写出（看引擎"理解成了什么"）
 #include <cstdio>
@@ -34,6 +35,7 @@ int main(int argc, char** argv) {
   bool scopes_only = false;
   std::string check_path;
   std::string normalize_path;
+  std::string shape_query;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--compact") {
@@ -46,6 +48,8 @@ int main(int argc, char** argv) {
       check_path = argv[++i];
     } else if (arg == "--normalize" && i + 1 < argc) {
       normalize_path = argv[++i];
+    } else if (arg == "--shape" && i + 1 < argc) {
+      shape_query = argv[++i];
     } else if (arg == "--help" || arg == "-h") {
       std::printf(
           "用法: st_api [选项]\n"
@@ -53,6 +57,7 @@ int main(int argc, char** argv) {
           "  --compact   单行 JSON\n"
           "  --example   只输出最小可运行脚本\n"
           "  --scopes    只列各层名字（objects[] / animation.tracks[] ...）\n"
+          "  --shape <n> 某个形状的 size 怎么写（含义/示例/旧写法换算）\n"
           "  --check <f>      校验场景脚本并输出自检摘要（退出码非 0 = 有问题）\n"
           "  --normalize <f>  读入后重新写出（看引擎理解成了什么）\n");
       return 0;
@@ -61,6 +66,10 @@ int main(int argc, char** argv) {
 
   if (example_only) {
     std::printf("%s\n", st::raster::minimal_example_script().c_str());
+    return 0;
+  }
+  if (!shape_query.empty()) {
+    std::printf("%s\n", st::raster::shape_size_doc(shape_query).c_str());
     return 0;
   }
   if (scopes_only) {
