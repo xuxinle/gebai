@@ -34,6 +34,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -95,6 +96,28 @@ struct ScriptLimits {
 /// 而不是伪装成一个值——脚本可以用 try/catch 接住并决定怎么办。
 using ScriptHostFunction = std::function<Result<Json>(const std::vector<Json>&)>;
 
+/// **二进制宿主函数**：接收 `Float32Array` 直传的数据。
+///
+/// ## 为什么需要这条旁路（实测数据说话）
+///
+/// 走 `Json` 那条路时，脚本传 1 个顶点 = 3 个 `Json` 数字对象 + 递归转换。
+/// 实测 **3.5 µs/顶点**：10 万顶点要 350 ms。对"一次性生成"够用，
+/// 但对**每帧重算**（过程化动画）就是 3 fps——不可用。
+///
+/// 二进制旁路：JS 侧填好 `Float32Array`，宿主直接把那块内存按 `span<const float>` 读走，
+/// 成本从"每元素一次对象分配"降到"每缓冲一次取指针"。
+///
+/// ## 为什么是"若干个 Float32Array"而不是通用 ArrayBuffer
+///
+/// 过程化几何需要的是**几组平行的 float**（位置/法线/颜色），不是任意字节流。
+/// 接口按用途收窄，调用方的错误面就小：传错类型立即报错，
+/// 而不是拿到一堆乱字节再在深处崩。
+using ScriptBinaryHostFunction =
+    std::function<Result<Json>(const std::vector<std::span<const float>>& arrays)>;
+
+/// 二进制宿主函数可接收的数组数量上限。
+inline constexpr std::size_t kMaxBinaryArrays = 8;
+
 /// 一次执行的统计（供日志/测试观测资源使用）。
 struct ScriptStats {
   std::size_t memory_used{0};
@@ -126,6 +149,21 @@ class ScriptEngine {
   /// 注册宿主函数（脚本里以 `name(...)` 调用）。返回 `Invalid` 表示名字非法或已被占用
   /// （不覆盖既有绑定：静默覆盖会让"谁改了这个函数"变得无法追查）。
   auto register_function(std::string name, ScriptHostFunction function) -> Status;
+
+  /// 注册二进制宿主函数：脚本以 `Float32Array` 传参，宿主直接读内存。
+  ///
+  /// ```js
+  /// const positions = new Float32Array(n * 3);
+  /// addGeometry(positions);            // 单个数组
+  /// addGeometry(positions, normals);   // 多个平行数组
+  /// ```
+  ///
+  /// ## 类型不符时明确报错（不隐式转换）
+  ///
+  /// 传普通数组会立即报错并指出是第几个参数、期望什么类型。
+  /// **不隐式转换**——那会悄悄退回慢路径，于是"我明明用了二进制通道怎么还是慢"
+  /// 变成一个查不出的问题。
+  auto register_binary_function(std::string name, ScriptBinaryHostFunction function) -> Status;
 
   /// 设置/读取脚本全局值（走 JSON 转换）。
   auto set_global(std::string_view name, const Json& value) -> Status;

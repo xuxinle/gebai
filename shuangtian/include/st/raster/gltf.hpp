@@ -85,7 +85,59 @@ struct GltfScene {
     math::Vec3 emissive_color{1.0f, 1.0f, 1.0f};
     float opacity{1.0f};
     std::string name{};
+    /// 贴图引用（`-1` = 没有）。
+    ///
+    /// 这里存的是**本结构的 `textures` 下标**，不是文件里的原始下标——
+    /// 中间差一层是因为文件可能引用不存在的 texture（损坏素材），
+    /// 归一化之后下游只需判断 `>= 0`。
+    int base_color_texture{-1};
+    int normal_texture{-1};
+    int emissive_texture{-1};
+    int metallic_roughness_texture{-1};
+    /// 用哪一组 UV（`TEXCOORD_0` / `TEXCOORD_1`）。绝大多数素材是 0。
+    int base_color_uv{0};
+    int normal_uv{0};
+    int emissive_uv{0};
+    int metallic_roughness_uv{0};
+    /// `KHR_texture_transform`：`uv' = uv * scale + offset`（与场景脚本同一语义）。
+    float uv_scale_u{1.0f};
+    float uv_scale_v{1.0f};
+    float uv_offset_u{0.0f};
+    float uv_offset_v{0.0f};
   };
+
+  /// 一张解码后的贴图（**已解出像素**，不是原始文件字节）。
+  ///
+  /// ## 为什么读文件时就解码
+  ///
+  /// 渲染器的 `set_texture` 吃的是 RGBA8 像素。若这里只存原始 PNG/JPEG 字节，
+  /// 每个渲染调用点都要再解一次——而同一张贴图常被多个材质引用。
+  /// 读一次、解一次、多处用，是唯一不浪费的形态。
+  ///
+  /// 代价是内存：一张 2048² 的图占 16MB。所以 `GltfScene` 是**一次性加载结果**，
+  /// 不适合持有上千张贴图（那种场景应当改成按需流式加载）。
+  struct TextureData {
+    /// RGBA8、行优先、非预乘（与 `Scene3D::set_texture` 同一格式）。
+    std::vector<std::uint8_t> rgba{};
+    int width{0};
+    int height{0};
+    std::string name{};
+    /// 来源描述（文件路径 / `data:` / `bufferView N`），用于排查"这张图哪来的"。
+    std::string source{};
+    /// 是否加载失败（此时 `rgba` 为空，但**保留占位**，便于报错时指出是哪一张）。
+    bool failed{false};
+    std::string error{};
+
+    [[nodiscard]] auto is_valid() const noexcept -> bool {
+      return !failed && width > 0 && height > 0 && !rgba.empty();
+    }
+  };
+
+  /// 贴图数组（`images` 解码后的结果，与文件里的 `textures[]` **同下标**）。
+  ///
+  /// 一个 `textures[i]` 指向 `images[texture.source]`；若一个 texture 被多个材质
+  /// 引用，这里仍是**一份**（按 texture 下标存，而不是按材质复制）。
+  std::vector<TextureData> textures{};
   std::vector<MaterialSlot> materials{};
   std::vector<GltfNode> nodes{};
   /// 文件里声明的相机（缺省时保留霜天默认相机）。
@@ -114,6 +166,36 @@ struct GltfScene {
   /// （万向锁附近），所以这里只做"能播出来"的翻译，不假装精确：
   /// 需要精确保真时请直接用 glTF 文件本身，不要经本结构往返。
   std::vector<Clip> animations{};
+
+  /// 文件的扩展清单与处置结果（**这是"吸收生态"的关键诊断信息**）。
+  ///
+  /// ## 三档处置（为什么必须区分"忽略"与"阻断"）
+  ///
+  /// | 档 | 含义 | 处置 |
+  /// |---|---|---|
+  /// | 支持 | 本框架实现了 | 正常读 |
+  /// | 忽略 | 只影响细节（材质微调、元数据），缺了也能看 | 继续，但**列进报告** |
+  /// | 阻断 | 缺了就读不对（几何被压缩、必须的解码器） | **报错并给解决动作** |
+  ///
+  /// ## 为什么"阻断"必须报错而不是尽力而为
+  ///
+  /// Draco 压缩的模型，不装解码器时**读出来是空几何**——文件合法、解析成功、
+  /// 渲染出空白画面。用户会以为"素材坏了"或"框架不行"，而真相是"缺了个扩展"。
+  /// 明确报错 + 告诉用户怎么办（用 Blender 重新导出并关掉 Draco），
+  /// 比静默给一个空模型负责得多。
+  struct ExtensionReport {
+    /// 文件声明的全部扩展（`extensionsUsed`）。
+    std::vector<std::string> used{};
+    /// 必需的扩展（`extensionsRequired`）中本框架**不支持**的 —— 非空即失败。
+    std::vector<std::string> blocking{};
+    /// 认识但不影响主流程的扩展（被忽略）—— 渲染成功，但如实列出。
+    std::vector<std::string> ignored{};
+    /// 可选的、本框架不认识的扩展（不阻断，仅提示）。
+    std::vector<std::string> unknown_optional{};
+
+    [[nodiscard]] auto has_blocking() const noexcept -> bool { return !blocking.empty(); }
+  };
+  ExtensionReport extensions{};
 
   /// 文件里的骨架（`skins[]`，最多取第一个）。
   ///

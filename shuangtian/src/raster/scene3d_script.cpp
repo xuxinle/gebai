@@ -988,6 +988,8 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
       const std::string path = resolved_object.shape.substr(5);
       auto gltf_scene = gltf_read_file(path);
       if (!gltf_scene) return st::forward_error(gltf_scene.error());
+      // 是否有 glTF 贴图被绑定（画完要清，见下）
+      bool gltf_texture_bound = false;
       for (const GltfNode& node : gltf_scene->nodes) {
         for (const std::size_t mesh_index : node.meshes) {
           if (mesh_index >= gltf_scene->meshes.size()) continue;
@@ -1007,6 +1009,27 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
             material.emission = slot.emissive;
             material.emissive_color = slot.emissive_color;
             material.emissive_color_set = slot.emissive > 0.0f;
+
+            // ── 贴图：从 glTF 素材自动挂上（脚本零改动）──
+            //
+            // ## 这是"吸收生态素材"的最后一环
+            //
+            // 前面几步把图片解码进了 `GltfScene::textures`，这里把它交给渲染器。
+            // 关键点：`set_texture` 是**场景状态**，必须在 `draw_mesh` 之前设；
+            // 且每个 mesh 画完要清掉，否则上一张图会泄漏到下一个材质（症状是
+            // "这个模型的下半身贴着上一个模型的图"）。
+            const int texture_index = slot.base_color_texture;
+            if (texture_index >= 0 &&
+                static_cast<std::size_t>(texture_index) < gltf_scene->textures.size()) {
+              const auto& texture = gltf_scene->textures[static_cast<std::size_t>(texture_index)];
+              if (texture.is_valid()) {
+                scene.set_texture(texture.rgba, texture.width, texture.height);
+                // `KHR_texture_transform`（等价于场景脚本的 texture_scale/offset）
+                scene.set_texture_transform(slot.uv_scale_u, slot.uv_scale_v, slot.uv_offset_u,
+                                           slot.uv_offset_v, false);
+                gltf_texture_bound = true;
+              }
+            }
           } else {
             material.metallic = obj.metallic;
             material.roughness = obj.roughness;
@@ -1015,6 +1038,12 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
           }
           scene.set_material(material);
           scene.draw_mesh(gltf_scene->meshes[mesh_index], world * node.transform);
+          // 画完清掉贴图：避免泄漏到下一个材质/下一个对象
+          if (gltf_texture_bound) {
+            scene.set_texture({}, 0, 0);
+            scene.set_texture_transform(1.0f, 1.0f, 0.0f, 0.0f, false);
+            gltf_texture_bound = false;
+          }
         }
       }
       return {};

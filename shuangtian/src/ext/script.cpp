@@ -37,6 +37,16 @@ struct detail::ScriptState {
   bool timed_out{false};
   bool out_of_ops{false};
   std::vector<std::pair<std::string, ScriptHostFunction>> host_functions{};
+  /// 二进制宿主函数表（与 `host_functions` 分开，因为调用协议完全不同）
+  std::vector<std::pair<std::string, ScriptBinaryHostFunction>> binary_host_functions{};
+
+  [[nodiscard]] auto find_binary_host(std::string_view name) const
+      -> const ScriptBinaryHostFunction* {
+    for (const auto& [key, function] : binary_host_functions) {
+      if (key == name) return &function;
+    }
+    return nullptr;
+  }
 
   [[nodiscard]] auto find_host(std::string_view name) const -> const ScriptHostFunction* {
     for (const auto& [key, function] : host_functions) {
@@ -610,6 +620,107 @@ auto ScriptEngine::register_function(std::string name, ScriptHostFunction functi
   JsRef owned{impl_->context, function_value};
   JsRef global{impl_->context, JS_GetGlobalObject(impl_->context)};
   JS_SetPropertyStr(impl_->context, global.get(), name.c_str(), owned.release());
+  return ok();
+}
+
+/// 二进制宿主函数桥接：从 JS 参数里取 `Float32Array` 的底层内存。
+///
+/// ## 为什么用 `JS_GetTypedArrayBuffer` + `JS_GetArrayBuffer`
+///
+/// QuickJS 的 typed array 是"ArrayBuffer + 偏移 + 长度"的视图。
+/// 直接拿内存要走两步（先取 buffer 再取 data），而**不能**用 `JS_GetPropertyStr` 逐元素读
+/// ——那会退化成和 Json 通道一样的逐元素开销，等于白做。
+///
+/// ## 传错类型必须报错，不能隐式转换
+///
+/// 隐式转换（比如接受普通数组再转成 float）会悄悄退回慢路径，
+/// 于是"我明明用了二进制通道怎么还是慢"变成查不出的问题。
+/// 所以这里**严格**只接 `Float32Array`，并指出是第几个参数。
+static JSValue binary_host_bridge(JSContext* context, JSValueConst this_value, int argc,
+                                  JSValueConst* argv, int magic, JSValue* func_data) {
+  (void)this_value;
+  (void)magic;
+  auto* state = static_cast<detail::ScriptState*>(JS_GetContextOpaque(context));
+  if (state == nullptr) return JS_EXCEPTION;
+  // `func_data[0]` = 函数名（注册时塞进去的）
+  const char* name = JS_ToCString(context, func_data[0]);
+  if (name == nullptr) return JS_EXCEPTION;
+  const std::string function_name{name};
+  JS_FreeCString(context, name);
+
+  const auto* function = state->find_binary_host(function_name);
+  if (function == nullptr) return JS_EXCEPTION;
+
+  // 收集每个 Float32Array 的内存视图
+  std::vector<std::span<const float>> arrays;
+  std::vector<JsRef> keep_alive;
+  arrays.reserve(static_cast<std::size_t>(argc));
+  // 用于校验类型：`JS_GetTypedArrayType` 返回 -1 表示不是 typed array
+  for (int index = 0; index < argc; ++index) {
+    // ## 类型校验
+    //
+    // QuickJS 的 `JS_GetTypedArrayType` 对非 typed array 返回 -1。
+    // FLOAT32 = 11（`JS_TYPED_ARRAY_FLOAT32`）。
+    const int type = JS_GetTypedArrayType(argv[index]);
+    if (type != JS_TYPED_ARRAY_FLOAT32) {
+      const std::string detail = std::format(
+          "{} 的第 {} 个参数必须是 Float32Array（收到类型码 {}）；"
+          "请用 new Float32Array(n) 构造后再传",
+          function_name, index + 1, type);
+      return JS_ThrowTypeError(context, "%s", detail.c_str());
+    }
+    std::size_t byte_offset = 0;
+    std::size_t byte_length = 0;
+    std::size_t bytes_per_element = 0;
+    JSValue buffer = JS_GetTypedArrayBuffer(context, argv[index], &byte_offset, &byte_length,
+                                            &bytes_per_element);
+    if (JS_IsException(buffer)) return JS_EXCEPTION;
+    JsRef owned{context, buffer};
+    std::size_t buffer_length = 0;
+    std::uint8_t* base = JS_GetArrayBuffer(context, &buffer_length, owned.get());
+    if (base == nullptr) return JS_EXCEPTION;
+    if (byte_offset + byte_length > buffer_length) {
+      return JS_ThrowInternalError(context, "%s：typed array 越界", function_name.c_str());
+    }
+    keep_alive.push_back(std::move(owned));
+    // 这里必须 reinterpret_cast：ArrayBuffer 是**字节**视图，而调用方要 float 视图。
+    // 用 memcpy 逐元素拷会引入一次全量拷贝——那正是这条通道要消除的开销。
+    // 对齐由 QuickJS 保证（Float32Array 的 byteOffset 总是 4 的倍数）。
+    const auto* floats = reinterpret_cast<const float*>(base + byte_offset);   // lint-allow: L6
+    const std::size_t count = bytes_per_element > 0 ? byte_length / bytes_per_element : 0U;
+    arrays.emplace_back(floats, count);
+  }
+
+  auto outcome = (*function)(arrays);
+  if (!outcome.has_value()) {
+    return JS_ThrowTypeError(context, "%s", outcome.error().message.c_str());
+  }
+  return convert_json_to_js(context, *outcome, 0, state->limits.max_convert_depth);
+}
+
+auto ScriptEngine::register_binary_function(std::string name, ScriptBinaryHostFunction function)
+    -> Status {
+  if (!valid()) return unexpected(ErrorCode::Unsupported, "脚本引擎未就绪");
+  if (name.empty()) return unexpected(ErrorCode::Invalid, "宿主函数名不能为空");
+  if (!function) return unexpected(ErrorCode::Invalid, "宿主函数为空");
+  if (impl_->find_host(name) != nullptr || impl_->find_binary_host(name) != nullptr) {
+    return unexpected(ErrorCode::Busy, std::format("宿主函数已存在: {}", name));
+  }
+  impl_->binary_host_functions.emplace_back(name, std::move(function));
+
+  JSValue data[1] = {JS_NewStringLen(impl_->context, name.data(), name.size())};
+  JSValue function_value =
+      JS_NewCFunctionData(impl_->context, binary_host_bridge, 0, /*magic=*/0, /*data_len=*/1, data);
+  JS_FreeValue(impl_->context, data[0]);
+  if (JS_IsException(function_value)) {
+    impl_->binary_host_functions.pop_back();
+    const std::string detail = describe_exception(impl_->context, limits_);
+    return unexpected(ErrorCode::Unsupported, std::format("创建函数失败: {}", detail));
+  }
+  JsRef owned{impl_->context, function_value};
+  JSValue global = JS_GetGlobalObject(impl_->context);
+  JsRef global_owned{impl_->context, global};
+  JS_SetPropertyStr(impl_->context, global_owned.get(), name.c_str(), owned.release());
   return ok();
 }
 

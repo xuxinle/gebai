@@ -469,6 +469,24 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "用一份 JSON 描述整个三维场景：解析/报错指路/渲染/参数生效/确定性"
     },
+    "jpeg_probe": {
+      "kind": "executable",
+      "sources": ["tools/jpeg_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "JPEG 解码验证：解真实 JPEG，按已知图案趋势验证内容正确"
+    },
+    "procedural_probe": {
+      "kind": "executable",
+      "sources": ["tools/procedural_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "过程化可行性：脚本算公式->宿主造几何->渲染，并实测 Json 通道开销"
+    },
+    "ecosystem_probe": {
+      "kind": "executable",
+      "sources": ["tools/ecosystem_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "生态素材兼容性总账：读真实形态 glTF，报告哪些信息被保留、哪些被丢弃"
+    },
     "texture_probe": {
       "kind": "executable",
       "sources": ["tools/texture_probe.cpp"],

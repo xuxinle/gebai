@@ -11,6 +11,11 @@
 #include "st/core/fs.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/color_pipeline.hpp"
+#include "st/codec/image.hpp"
+#include <algorithm>
+#include <set>
+
+#include "st/core/log.hpp"
 #include "st/math/quaternion.hpp"
 #include "st/raster/mesh_ops.hpp"
 
@@ -174,6 +179,103 @@ struct DocContext {
 };
 
 /// 解析 `buffers[]`（外部 .bin / data URI / GLB 的 BIN 块）。
+/// 读一张图并解码成 RGBA8。
+///
+/// ## 三种来源（glTF 规范允许，生态素材里都会遇到）
+///
+/// | 来源 | 形态 | 常见于 |
+/// |---|---|---|
+/// | 外部文件 | `images[i].uri = "albedo.jpg"` | Blender / three.js 导出的**分离式**素材 |
+/// | data URI | `images[i].uri = "data:image/png;base64,..."` | 单文件 `.gltf`（自包含） |
+/// | bufferView | `images[i].bufferView = 3` | `.glb`（二进制内嵌，最常见） |
+///
+/// ## 失败不中断整份文件
+///
+/// 一张贴图坏了不该让整个模型读不进来（模型本身可能完好）。
+/// 所以失败时**保留占位并记下错误**，由调用方决定是警告还是拒绝——
+/// 而"静默丢掉"是绝不能做的（症状是"这个模型怎么是纯色"，查起来极慢）。
+[[nodiscard]] auto load_image(const DocContext& ctx, const Json& image, std::size_t index)
+    -> GltfScene::TextureData {
+  GltfScene::TextureData texture{};
+  texture.name = json_get_string(image, "name", std::format("image{}", index));
+
+  std::vector<std::uint8_t> bytes;
+  // ① bufferView（.glb 内嵌，最常见）
+  const std::int64_t view_index = json_get_i64(image, "bufferView", -1);
+  if (view_index >= 0) {
+    const std::string where = std::format("images[{}].bufferView", index);
+    // 直接按 bufferView 取切片（不用 accessor 抽象：图片不是顶点数据，
+    // accessor 还要处理 componentType/count/type 那套，对图片没意义）
+    const Json* views = ctx.json != nullptr ? json_find(*ctx.json, "bufferViews") : nullptr;
+    if (views == nullptr || !views->is_array() ||
+        static_cast<std::size_t>(view_index) >= views->size()) {
+      texture.failed = true;
+      texture.error = std::format("{}：bufferView {} 不存在", where, view_index);
+      return texture;
+    }
+    const Json& view_json = (*views)[static_cast<std::size_t>(view_index)];
+    const int buffer_index = static_cast<int>(json_get_i64(view_json, "buffer", 0));
+    const std::int64_t offset = json_get_i64(view_json, "byteOffset", 0);
+    const std::int64_t length = json_get_i64(view_json, "byteLength", 0);
+    if (buffer_index < 0 || static_cast<std::size_t>(buffer_index) >= ctx.buffers.size()) {
+      texture.failed = true;
+      texture.error = std::format("{}：buffer {} 越界", where, buffer_index);
+      return texture;
+    }
+    const auto& buffer = ctx.buffers[static_cast<std::size_t>(buffer_index)];
+    if (offset < 0 || length <= 0 ||
+        static_cast<std::size_t>(offset + length) > buffer.size()) {
+      texture.failed = true;
+      texture.error = std::format("{}：切片 [{},{}) 越界（buffer 长 {}）", where, offset,
+                                  offset + length, buffer.size());
+      return texture;
+    }
+    bytes.assign(buffer.begin() + offset, buffer.begin() + offset + length);
+    texture.source = std::format("bufferView {}", view_index);
+  } else if (const Json* uri = json_find(image, "uri"); uri != nullptr && uri->is_string()) {
+    const std::string value = uri->get<std::string>();
+    if (value.rfind("data:", 0) == 0) {
+      auto decoded = decode_data_uri(value);
+      if (!decoded.has_value()) {
+        texture.failed = true;
+        texture.error = decoded.error().message;
+        return texture;
+      }
+      bytes = std::move(*decoded);
+      texture.source = "data URI";
+    } else {
+      const std::string path = st::fs::is_absolute(value)
+                                   ? value
+                                   : st::fs::join(ctx.base_dir, value);
+      const auto read = st::fs::read_bytes(path);
+      if (!read.has_value()) {
+        texture.failed = true;
+        texture.error = std::format("读取 \"{}\" 失败：{}", path, read.error().message);
+        return texture;
+      }
+      bytes = *read;
+      texture.source = path;
+    }
+  } else {
+    texture.failed = true;
+    texture.error = std::format("images[{}]：既无 bufferView 也无 uri", index);
+    return texture;
+  }
+
+  // ② 按**魔数**解码（而不是按扩展名）：外部文件的扩展名经常与实际内容不符
+  //   （素材包里 `.png` 实际是 JPEG 的情况真实存在）。
+  const auto image_data = st::codec::decode_image(bytes);
+  if (!image_data.has_value()) {
+    texture.failed = true;
+    texture.error = image_data.error().message;
+    return texture;
+  }
+  texture.rgba = image_data->rgba;
+  texture.width = image_data->width;
+  texture.height = image_data->height;
+  return texture;
+}
+
 auto load_buffers(DocContext& ctx) -> Status {
   const Json* buffers = json_find(*ctx.json, "buffers");
   if (buffers == nullptr || !buffers->is_array()) return st::ok();
@@ -498,6 +600,139 @@ auto gltf_read_impl(std::span<const std::uint8_t> bytes, std::string_view base_d
 
   GltfScene scene{};
   // 材质
+  // ── 扩展检查（必须在解析几何**之前**：阻断型扩展时不该白解一遍）──
+  //
+  // ## 为什么这件事比"多支持一个扩展"更重要
+  //
+  // 生态里的模型大量使用 Draco / meshopt / KTX2。不支持它们时，
+  // **旧行为是静默读出一个空模型**——解析成功、渲染空白。那是最糟的失败形态：
+  // 用户以为素材坏了或框架不行，而真相只是缺了个解码器。
+  //
+  // 所以这里把"不支持"分成三档，并且**必需扩展不支持时直接失败**，
+  // 错误消息里写清"是什么扩展、怎么绕过"。
+  {
+    // 本框架真正实现的扩展
+    const std::set<std::string> supported{
+        "KHR_texture_transform",              // 已读（uv 缩放/偏移）
+        "KHR_materials_unlit",                // 可读（emissive_unlit 语义近似）
+        "KHR_materials_emissive_strength",    // 已读（并进 emissive 强度）
+        "KHR_materials_ior",                  // 读进 specular
+        "KHR_lights_punctual",                // 忽略但无害（场景光照由脚本控制）
+        "KHR_mesh_quantization",              // 已读（accessor 的归一化整数）
+        "KHR_materials_double_sided",         // 无副作用
+    };
+    // 认识的扩展，但当前不处理（不阻断：缺了照样能看）
+    const std::set<std::string> ignorable{
+        "KHR_materials_specular",      "KHR_materials_clearcoat",
+        "KHR_materials_sheen",         "KHR_materials_transmission",
+        "KHR_materials_volume",        "KHR_materials_iridescence",
+        "KHR_materials_anisotropy",    "KHR_materials_variants",
+        "KHR_animation_pointer",       "KHR_materials_dispersion",
+        "EXT_texture_webp",            "KHR_texture_basisu",
+        "EXT_texture_avif",            "MSFT_texture_dds",
+    };
+
+    const auto collect = [&](const char* key, std::vector<std::string>& target) {
+      const Json* list = json_find(document, key);
+      if (list == nullptr || !list->is_array()) return;
+      for (const Json& item : *list) {
+        if (item.is_string()) target.push_back(item.get<std::string>());
+      }
+    };
+    collect("extensionsUsed", scene.extensions.used);
+
+    std::vector<std::string> required;
+    collect("extensionsRequired", required);
+    for (const std::string& name : required) {
+      if (supported.contains(name)) continue;
+      // 必需的、但本框架不实现 → 阻断
+      scene.extensions.blocking.push_back(name);
+    }
+    for (const std::string& name : scene.extensions.used) {
+      if (supported.contains(name)) continue;
+      if (ignorable.contains(name)) {
+        scene.extensions.ignored.push_back(name);
+      } else if (std::find(scene.extensions.blocking.begin(), scene.extensions.blocking.end(),
+                           name) == scene.extensions.blocking.end()) {
+        scene.extensions.unknown_optional.push_back(name);
+      }
+    }
+
+    if (!scene.extensions.blocking.empty()) {
+      // ## 错误消息要给**解决动作**，而不只是"不支持"
+      //
+      // 模型拿到 "unsupported extension" 只能干瞪眼；给它"用 Blender 重新导出
+      // 并关闭 Draco 压缩"才能自己修好。
+      std::string list;
+      for (const std::string& name : scene.extensions.blocking) {
+        if (!list.empty()) list += ", ";
+        list += name;
+      }
+      std::string advice = "请用导出器重新导出并关闭这些特性";
+      if (std::find(scene.extensions.blocking.begin(), scene.extensions.blocking.end(),
+                    "KHR_draco_mesh_compression") != scene.extensions.blocking.end()) {
+        advice = "其中 KHR_draco_mesh_compression 是几何压缩：请在 Blender 导出时关闭\"压缩\"，"
+                 "或让导出方选择未压缩的 glTF（本框架暂不内置 Draco 解码器）";
+      } else if (std::find(scene.extensions.blocking.begin(), scene.extensions.blocking.end(),
+                           "KHR_texture_basisu") != scene.extensions.blocking.end()) {
+        advice = "其中 KHR_texture_basisu 是 KTX2 压缩纹理：请改用 PNG/JPEG 格式的贴图重新导出";
+      }
+      return st::unexpected(
+          ErrorCode::Unsupported,
+          std::format("这份 glTF 依赖本框架不支持的必需扩展：{}。{}", list, advice));
+    }
+    // 不阻断但如实记录（渲染仍然继续）
+    for (const std::string& name : scene.extensions.ignored) {
+      ST_LOG_INFO("glTF 扩展 {} 未处理（不影响显示）", name);
+    }
+    for (const std::string& name : scene.extensions.unknown_optional) {
+      ST_LOG_INFO("glTF 扩展 {} 不认识（可选，已忽略）", name);
+    }
+  }
+
+  // ── 图片与纹理（`images` / `textures`）──
+  //
+  // ## 两步分开，因为它们是两层间接
+  //
+  // `textures[i].source → images[j]`。生态素材里常见多个 texture 指向同一张 image
+  //（不同采样参数复用同一张图），所以解码按 **image** 做一次、按 **texture** 引用。
+  // 这里把结果按 texture 下标存（`textures[i]` 直接可用），省得下游再跳一次。
+  std::vector<GltfScene::TextureData> decoded_images;
+  if (const Json* images = json_find(document, "images"); images != nullptr && images->is_array()) {
+    std::size_t index = 0;
+    for (const Json& image : *images) {
+      decoded_images.push_back(load_image(ctx, image, index));
+      if (decoded_images.back().failed) {
+        // 保留占位但记下失败：不中断整份文件（模型可能完好），也不静默丢掉
+        ST_LOG_WARN("glTF 贴图 images[{}] 加载失败：{}", index, decoded_images.back().error);
+      }
+      ++index;
+    }
+  }
+  if (const Json* textures = json_find(document, "textures");
+      textures != nullptr && textures->is_array()) {
+    std::size_t index = 0;
+    for (const Json& texture : *textures) {
+      const int source = static_cast<int>(json_get_i64(texture, "source", -1));
+      GltfScene::TextureData entry{};
+      if (source >= 0 && static_cast<std::size_t>(source) < decoded_images.size()) {
+        entry = decoded_images[static_cast<std::size_t>(source)];
+        // 记录是哪个 texture 引用它（便于报错时指出"这张图被哪个槽用了"）
+        entry.source = std::format("textures[{}] ← images[{}]{}", index, source,
+                                   decoded_images[static_cast<std::size_t>(source)].source.empty()
+                                       ? ""
+                                       : (" (" + decoded_images[static_cast<std::size_t>(source)].source + ")"));
+      } else {
+        entry.failed = true;
+        entry.error = std::format("textures[{}]：source {} 越界（共 {} 张图）", index, source,
+                                  decoded_images.size());
+        ST_LOG_WARN("{}", entry.error);
+      }
+      scene.textures.push_back(std::move(entry));
+      ++index;
+    }
+  }
+
   if (const Json* materials = json_find(document, "materials");
       materials != nullptr && materials->is_array()) {
     std::size_t index = 0;
@@ -520,6 +755,49 @@ auto gltf_read_impl(std::span<const std::uint8_t> bytes, std::string_view base_d
       }
       slot.base_color = linear_rgba_to_color(base, alpha);
       slot.opacity = alpha;
+
+      // ── 贴图引用 ──
+      //
+      // ## `KHR_texture_transform` 的语义与场景脚本一致
+      //
+      // `uv' = uv * scale + offset`。它常被用来"同一张图在不同零件上以不同密度平铺"——
+      // 导出器（Blender 的 UV Map 节点、three.js 的 texture.repeat）都会写这个扩展。
+      // 不读它的话，生态素材里"已经平铺好"的图会显示成被拉伸的一整张贴图。
+      const auto read_texture_ref = [&](const Json* holder, const char* key,
+                                        int& texture_out, int& uv_out) {
+        const Json* info = json_find(*holder, key);
+        if (info == nullptr || !info->is_object()) return;
+        const int texture_index = static_cast<int>(json_get_i64(*info, "index", -1));
+        if (texture_index >= 0 && static_cast<std::size_t>(texture_index) < scene.textures.size()) {
+          texture_out = texture_index;
+        }
+        // `texCoord`：用第几组 UV（绝大多数是 0）
+        uv_out = static_cast<int>(json_get_i64(*info, "texCoord", 0));
+        // `extensions.KHR_texture_transform`
+        if (const Json* extensions = json_find(*info, "extensions");
+            extensions != nullptr && extensions->is_object()) {
+          if (const Json* transform = json_find(*extensions, "KHR_texture_transform");
+              transform != nullptr && transform->is_object()) {
+            const Json* scale = json_find(*transform, "scale");
+            if (scale != nullptr && scale->is_array() && scale->size() >= 2U) {
+              slot.uv_scale_u = static_cast<float>((*scale)[0].get<double>());
+              slot.uv_scale_v = static_cast<float>((*scale)[1].get<double>());
+            }
+            const Json* offset = json_find(*transform, "offset");
+            if (offset != nullptr && offset->is_array() && offset->size() >= 2U) {
+              slot.uv_offset_u = static_cast<float>((*offset)[0].get<double>());
+              slot.uv_offset_v = static_cast<float>((*offset)[1].get<double>());
+            }
+          }
+        }
+      };
+      read_texture_ref(pbr, "baseColorTexture", slot.base_color_texture, slot.base_color_uv);
+      read_texture_ref(&material, "normalTexture", slot.normal_texture, slot.normal_uv);
+      read_texture_ref(&material, "emissiveTexture", slot.emissive_texture, slot.emissive_uv);
+      if (pbr != nullptr) {
+        read_texture_ref(pbr, "metallicRoughnessTexture", slot.metallic_roughness_texture,
+                         slot.metallic_roughness_uv);
+      }
       const math::Vec3 emissive = read_vec3_or(material, "emissiveFactor", math::Vec3{});
       slot.emissive_color = emissive;
       slot.emissive = std::max({emissive.x, emissive.y, emissive.z});
