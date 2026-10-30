@@ -264,11 +264,11 @@
     $('#' + headId).append('Badge', { id: sid + '-kind', text: tone.label, tone: tone.tone });
     $('#' + headId).append('Spacer', { grow: 'true' });
     if (card.from) {
-      $('#' + headId).append('Text', { size: '11', text: card.from, tone: 'faint', margin_left: '6' });
+      $('#' + headId).append('Text', { font_size: '11', text: card.from, tone: 'faint', margin_left: '6' });
     }
 
     // ② 标题与正文：标题加重一档，正文用 muted 退后一层，层级靠色阶而不是字号堆砌。
-    $('#' + sid).append('Text', { size: '15', text: card.title || '（无标题）', font_weight: 'semibold' });
+    $('#' + sid).append('Text', { font_size: '15', text: card.title || '（无标题）', font_weight: 'semibold' });
     if (card.body) {
       // 正文用 **MarkdownView** 而不是 Text：大模型生成的内容天然是 markdown
       //（列表、代码块、强调、表格）。当普通文本画的话，`**粗**`、`- 项`、
@@ -297,7 +297,7 @@
           // 链接项带外链标识：让人一眼看出"按下去会离开相期"
           label: opt.url ? opt.label + ' ↗' : opt.label,
           variant: oi === 0 ? 'primary' : 'soft',
-          size: 'small',
+          scale: 'small',
           hint: opt.url ? '在浏览器中打开' : (opt.hint || ''),
         });
         $('#' + bid).on('click', function () {
@@ -319,8 +319,8 @@
       // 待办卡：「完成了 / 先放着」（后者不是忽略，是"还记着，晚点做"）
       const doneId = actId + '-done';
       const laterId = actId + '-later';
-      $('#' + actId).append('Button', { id: doneId, label: '完成了', icon: 'check', variant: 'primary', size: 'small' });
-      $('#' + actId).append('Button', { id: laterId, label: '先放着', icon: 'clock', variant: 'ghost', size: 'small' });
+      $('#' + actId).append('Button', { id: doneId, label: '完成了', icon: 'check', variant: 'primary', scale: 'small' });
+      $('#' + actId).append('Button', { id: laterId, label: '先放着', icon: 'clock', variant: 'ghost', scale: 'small' });
       $('#' + doneId).on('click', function () {
         submit(card.id, { done: true });
       });
@@ -331,16 +331,16 @@
       // 且它是元信息不是动作，与 from 同层级更顺。
       if (card.due) {
         const dueId = sid + '-due';
-        $('#' + sid + '-head').append('Icon', { id: dueId, icon: 'clock', size: '11', tone: 'warning' });
+        $('#' + sid + '-head').append('Icon', { id: dueId, icon: 'clock', font_size: '11', tone: 'warning' });
         $('#' + sid + '-head').append('Text', {
-          id: dueId + '-t', size: '11', text: card.due, tone: 'warning',
+          id: dueId + '-t', font_size: '11', text: card.due, tone: 'warning',
         });
       }
     } else {
       // 提示卡：知道就行。带 check 图标与 todo 的「完成了」呼应，
       // 也让纯文字按钮不再单薄（视觉反馈建议）。
       const okId = actId + '-ok';
-      $('#' + actId).append('Button', { id: okId, label: '知道了', icon: 'check', variant: 'soft', size: 'small' });
+      $('#' + actId).append('Button', { id: okId, label: '知道了', icon: 'check', variant: 'soft', scale: 'small' });
       $('#' + okId).on('click', function () {
         submit(card.id, { acknowledged: true });
       });

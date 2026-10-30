@@ -190,6 +190,27 @@ auto collect_track_diagnostics(const st::Json& node, const std::string& path,
     // 诊断路径：`scenes[0].layers[2]`——智能体拿到就能直接定位到编辑位置。
     const std::string path = std::format("{}.layers[{}]", path_prefix, layers.size());
     const auto kind = layer_kind_from(kind_name);
+    // ## 未知字段检查（拼错的字段不能静默忽略）
+    //
+    // `{"kind":"text","sise":18}` 里的 `sise` 会走 schema 的别名表比对失败。
+    // 旧行为：静默忽略 → 用默认字号画 → 作者看到"渲染成功"但字号不对。
+    // 现在：报诊断（带最接近的候选），一次能改对。
+    if (diagnostics != nullptr) {
+      std::vector<std::string> keys;
+      for (auto it = node.begin(); it != node.end(); ++it) {
+        keys.push_back(it.key());
+      }
+      const std::string unknown =
+          caiyun::check_unknown_fields(keys, caiyun::SchemaScope::Layer, path);
+      if (!unknown.empty()) {
+        Diagnostic diag{};
+        diag.path = path;
+        diag.key = "?";
+        diag.is_error = true;
+        diag.message = unknown;
+        diagnostics->push_back(std::move(diag));
+      }
+    }
     // **非法色值要报出来**（而不是静默回退）。
     //
     // `parse_color` 只接受 `#rrggbb` / `#rrggbbaa`；写 `rgb(30,40,50)`、
@@ -501,6 +522,12 @@ auto collect_track_diagnostics(const st::Json& node, const std::string& path,
       }
     }
 
+    // 尺寸单位校验（在图层字段**填充完之后**做，否则读到的是默认值）
+    //
+    // 用 canvas=1 / design=1 只验证**语法**（能否解析成数），不做实际换算
+    // ——真实画布尺寸要到渲染期才知道。
+    // 这样写错的值只报一次，而不是每帧刷 30 条。
+    (void)validate_layer_dims(layer, 1.0f, 1.0f, 1.0f, 1.0f);
     layers.push_back(std::move(layer));
   }
   return layers;

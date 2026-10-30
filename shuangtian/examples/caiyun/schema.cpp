@@ -245,6 +245,94 @@ constexpr auto kLayerFields = std::array{
               Aliases("light_rimm", "rim", "light_edge")},
 };
 
+/// 三维 `camera` 对象。
+constexpr auto kCameraFields = std::array{
+    FieldSpec{"eye", SchemaScope::Camera, SchemaType::Array, false, 0, 0, false,
+              "相机位置 [x,y,z]"},
+    FieldSpec{"target", SchemaScope::Camera, SchemaType::Array, false, 0, 0, false,
+              "看向的点 [x,y,z]（与 eye 重合会报错）"},
+    FieldSpec{"up", SchemaScope::Camera, SchemaType::Array, false, 0, 0, false,
+              "上方向 [x,y,z]，默认 [0,1,0]"},
+    FieldSpec{"fov", SchemaScope::Camera, SchemaType::Number, true, 1.0, 179.0, true,
+              "竖直视场角（帧）", true, Aliases("fov_y")},
+    FieldSpec{"near", SchemaScope::Camera, SchemaType::Number, true, 0.0001, 100.0, true,
+              "近裁剪面（**小模型要调小**：半径 < 0.1 的模型用默认 0.1 会渲染出空白）",
+              true, Aliases("near_z")},
+    FieldSpec{"far", SchemaScope::Camera, SchemaType::Number, true, 1.0, 100000.0, true,
+              "远裁剪面", true, Aliases("far_z")},
+    FieldSpec{"projection", SchemaScope::Camera, SchemaType::String, false, 0, 0, false,
+              "perspective / orthographic"},
+    FieldSpec{"ortho_scale", SchemaScope::Camera, SchemaType::Number, true, 0.01, 10000.0, true,
+              "正交投影的垂直可视高度"},
+};
+
+/// 三维 `lighting` 对象。
+constexpr auto kLightingFields = std::array{
+    FieldSpec{"key_direction", SchemaScope::Lighting, SchemaType::Array, false, 0, 0, false,
+              "主光方向 [x,y,z]（**指向光源**，不是照射方向）", true,
+              Aliases("key_dir", "direction")},
+    FieldSpec{"ambient", SchemaScope::Lighting, SchemaType::Number, true, 0.0, 4.0, true,
+              "环境光强度"},
+    FieldSpec{"diffuse", SchemaScope::Lighting, SchemaType::Number, true, 0.0, 4.0, true,
+              "漫反射强度"},
+    FieldSpec{"rim", SchemaScope::Lighting, SchemaType::Number, true, 0.0, 4.0, true,
+              "边缘光强度"},
+    FieldSpec{"exposure", SchemaScope::Lighting, SchemaType::Number, true, 0.01, 10.0, true,
+              "曝光"},
+    FieldSpec{"extra_lights", SchemaScope::Lighting, SchemaType::Array, false, 0, 0, false,
+              "追加光列表 [{direction,color,intensity}]；写 null 表示清空预设补光",
+              true, Aliases("extra_light", "lights")},
+};
+
+/// 三维 `shadow` 对象。
+constexpr auto kShadowFields = std::array{
+    FieldSpec{"strength", SchemaScope::Shadow, SchemaType::Number, true, 0.0, 1.0, true,
+              "阴影强度（0 = 关闭）"},
+    FieldSpec{"ground_y", SchemaScope::Shadow, SchemaType::Number, true, -1000.0, 1000.0, true,
+              "投影地面的 Y 高度", true, Aliases("ground")},
+    FieldSpec{"lift", SchemaScope::Shadow, SchemaType::Number, true, 0.0, 1.0, true,
+              "阴影抬起量（防 z-fighting）"},
+    FieldSpec{"color", SchemaScope::Shadow, SchemaType::String, false, 0, 0, false,
+              "阴影颜色 #rrggbb"},
+};
+
+/// 三维 `objects[]` 的每一项。
+constexpr auto kObject3dFields = std::array{
+    FieldSpec{"name", SchemaScope::Object3d, SchemaType::String, false, 0, 0, false,
+              "节点名（动画/骨架按名字引用；同一场景内唯一）"},
+    FieldSpec{"shape", SchemaScope::Object3d, SchemaType::String, false, 0, 0, false,
+              "图元名，或 obj:<路径> / gltf:<路径>", true, Aliases("geometry")},
+    FieldSpec{"size", SchemaScope::Object3d, SchemaType::Array, false, 0, 0, false,
+              "尺寸（**全长**）：cube/box 是 [X,Y,Z]、plane 是 [X,Z]、"
+              "球类是直径、柱/锥/胶囊是 [直径,高]、torus 是 [外径,管径]"},
+    FieldSpec{"translate", SchemaScope::Object3d, SchemaType::Array, false, 0, 0, false,
+              "平移 [x,y,z]", true, Aliases("position", "pos")},
+    FieldSpec{"rotate", SchemaScope::Object3d, SchemaType::Array, false, 0, 0, false,
+              "欧拉角（**弧度**）[x,y,z]，顺序 X→Y→Z", true, Aliases("rotation")},
+    FieldSpec{"scale", SchemaScope::Object3d, SchemaType::Array, false, 0, 0, false,
+              "缩放 [x,y,z]"},
+    FieldSpec{"color", SchemaScope::Object3d, SchemaType::String, false, 0, 0, false,
+              "固有色 #rrggbb"},
+    FieldSpec{"metallic", SchemaScope::Object3d, SchemaType::Number, true, 0.0, 1.0, true,
+              "金属度"},
+    FieldSpec{"roughness", SchemaScope::Object3d, SchemaType::Number, true, 0.0, 1.0, true,
+              "粗糙度"},
+    FieldSpec{"opacity", SchemaScope::Object3d, SchemaType::Number, true, 0.0, 1.0, true,
+              "不透明度"},
+    FieldSpec{"emission", SchemaScope::Object3d, SchemaType::Number, true, 0.0, 10.0, true,
+              "自发光强度"},
+    FieldSpec{"texture", SchemaScope::Object3d, SchemaType::String, false, 0, 0, false,
+              "贴图路径", true, Aliases("map")},
+    FieldSpec{"segments", SchemaScope::Object3d, SchemaType::Number, true, 3, 512, true,
+              "周向分段", true, Aliases("detail", "resolution")},
+    FieldSpec{"parent", SchemaScope::Object3d, SchemaType::String, false, 0, 0, false,
+              "父节点名（扁平写法）"},
+    FieldSpec{"pivot_at", SchemaScope::Object3d, SchemaType::String, false, 0, 0, false,
+              "枢轴预设 origin/center/bottom/top"},
+    FieldSpec{"ground", SchemaScope::Object3d, SchemaType::Number, false, 0, 1, false,
+              "是否地面（1/0）"},
+};
+
 /// 场景字段（`scenes[]` 的每一项）。
 constexpr auto kSceneFields = std::array{
     FieldSpec{"kind", SchemaScope::Scene, SchemaType::String, false, 0, 0, false,
@@ -415,6 +503,10 @@ constexpr std::array<SchemaScope, 6> kAllScopes = {SchemaScope::Script, SchemaSc
     case SchemaScope::Layer: return {kLayerFields.data(), kLayerFields.size()};
     case SchemaScope::KeyFrame: return {kKeyFrameFields.data(), kKeyFrameFields.size()};
     case SchemaScope::ObjEntry: return {kObjEntryFields.data(), kObjEntryFields.size()};
+    case SchemaScope::Camera: return {kCameraFields.data(), kCameraFields.size()};
+    case SchemaScope::Lighting: return {kLightingFields.data(), kLightingFields.size()};
+    case SchemaScope::Shadow: return {kShadowFields.data(), kShadowFields.size()};
+    case SchemaScope::Object3d: return {kObject3dFields.data(), kObject3dFields.size()};
   }
   return {nullptr, 0};
 }
@@ -444,6 +536,10 @@ auto schema_scope_name(SchemaScope scope) -> std::string_view {
     case SchemaScope::Layer: return "layer";
     case SchemaScope::KeyFrame: return "keyframe";
     case SchemaScope::ObjEntry: return "track";
+    case SchemaScope::Camera: return "camera";
+    case SchemaScope::Lighting: return "lighting";
+    case SchemaScope::Shadow: return "shadow";
+    case SchemaScope::Object3d: return "object3d";
   }
   return "layer";
 }
@@ -735,6 +831,76 @@ auto schema_to_json_schema() -> std::string {
   root["required"] = st::Json::array();
   root["required"].push_back("scenes");
   return st::json_dump(root, true, 2);
+}
+
+auto check_unknown_fields(const std::vector<std::string>& keys, SchemaScope scope,
+                          std::string_view path) -> std::string {
+  auto [fields, count] = scope_table(scope);
+  if (fields == nullptr) return {};   // 该层没有字段表（如任意字典），不检查
+
+  // 收集这一层认识的全部名字（含别名）
+  std::vector<std::string> known;
+  known.reserve(count * 3U);
+  for (std::size_t i = 0; i < count; ++i) {
+    known.emplace_back(fields[i].name);
+    for (const auto& alias : fields[i].aliases) {
+      if (!alias.empty()) known.emplace_back(alias);
+    }
+  }
+
+  for (const std::string& key : keys) {
+    bool matched = false;
+    for (const std::string& name : known) {
+      if (name == key) {
+        matched = true;
+        break;
+      }
+    }
+    if (matched) continue;
+
+    // ## 给最接近的候选（编辑距离）
+    //
+    // 只报"未知字段 sise"对作者帮助有限——他要自己想到是 `size` 拼错。
+    // 给候选之后一次就能改对。
+    std::string best;
+    int best_distance = 3;   // 阈值：距离 3 以内才认为"像"
+    for (const std::string& name : known) {
+      // 简单编辑距离（字段名都短，不必优化）
+      const std::size_t n = key.size();
+      const std::size_t m = name.size();
+      std::vector<int> previous(m + 1U);
+      std::vector<int> current(m + 1U);
+      for (std::size_t j = 0; j <= m; ++j) previous[j] = static_cast<int>(j);
+      for (std::size_t i = 1; i <= n; ++i) {
+        current[0] = static_cast<int>(i);
+        for (std::size_t j = 1; j <= m; ++j) {
+          const int cost = key[i - 1U] == name[j - 1U] ? 0 : 1;
+          current[j] = std::min({previous[j] + 1, current[j - 1U] + 1, previous[j - 1U] + cost});
+        }
+        std::swap(previous, current);
+      }
+      if (previous[m] < best_distance) {
+        best_distance = previous[m];
+        best = name;
+      }
+    }
+
+    std::string message =
+        std::format("{}.{}：未知字段（{} 这一层不认识 \"{}\"）", path, key,
+                    schema_scope_name(scope), key);
+    if (!best.empty()) {
+      message += std::format("；你是不是想写 \"{}\"？", best);
+    } else {
+      message += "；该层可用字段：";
+      for (std::size_t i = 0; i < count && i < 12U; ++i) {
+        if (i > 0) message += ", ";
+        message += fields[i].name;
+      }
+      if (count > 12U) message += ", …";
+    }
+    return message;
+  }
+  return {};
 }
 
 auto schema_to_json() -> std::string {

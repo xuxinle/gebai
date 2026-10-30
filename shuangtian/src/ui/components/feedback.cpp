@@ -231,13 +231,14 @@ auto Spinner::semantics_text() const -> std::string { return "loading"; }
 auto Spinner::semantics_value() const -> std::string { return "loading"; }
 
 auto Spinner::get_property(std::string_view name) const -> std::optional<std::string> {
-  if (name == "size" || name == "diameter") return std::format("{}", diameter_);
+  // 直径类：主名 `diameter`（旧 `size` 兼容）
+  if (name == "diameter" || name == "size") return std::format("{}", diameter_);
   if (name == "tone") return std::string(tone_name(tone_));
   return std::nullopt;
 }
 
 auto Spinner::set_property(std::string_view name, std::string_view value) -> bool {
-  if (name == "size" || name == "diameter") {
+  if (name == "diameter" || name == "size") {
     const auto parsed = st::parse_f64(value);
     if (!parsed.has_value()) return false;
     set_diameter(static_cast<float>(*parsed));
@@ -566,7 +567,7 @@ void Avatar::paint_content(const RenderContext& context, raster::Surface& canvas
 auto Avatar::get_property(std::string_view name) const -> std::optional<std::string> {
   if (name == "name" || name == "text") return name_;
   if (name == "initials") return initials();
-  if (name == "size") return std::format("{}", size_);
+  if (name == "diameter" || name == "size") return std::format("{}", size_);
   return std::nullopt;
 }
 
@@ -575,7 +576,7 @@ auto Avatar::set_property(std::string_view name, std::string_view value) -> bool
     set_name(std::string(value));
     return true;
   }
-  if (name == "size") {
+  if (name == "diameter" || name == "size") {
     const auto parsed = st::parse_f64(value);
     if (!parsed.has_value()) return false;
     set_size(static_cast<float>(*parsed));

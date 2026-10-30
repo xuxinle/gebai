@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <format>
+#include <set>
 
 #include "st/core/print.hpp"
 #include "st/core/log.hpp"
@@ -44,21 +45,85 @@ auto layer_kind_from(std::string_view name) -> std::optional<LayerKind> {
 
 namespace {
 
-/// 解析"设计像素或画面比例"的坐标值。
+/// 解析"设计像素或画面比例"的坐标值（**严格校验**）。
 ///
-/// 两种写法：`"640"`（设计像素）与 `"50%"`（画面比例）。
+/// ## 两种合法写法
+///
+/// | 写法 | 含义 | 例 |
+/// |---|---|---|
+/// | `<数字>` 或 `<数字>px` | 设计像素（按画布比例缩放） | `"640"` / `"640px"` |
+/// | `<数字>%` | 画面比例 | `"50%"` |
+///
 /// 用字符串而不是数字，是因为 JSON 里两者都能写、而 `double` 存不下百分比语义。
-[[nodiscard]] auto parse_dim(const std::string& raw, float canvas, float design) -> float {
-  if (raw.empty()) return 0.0f;
-  if (raw.back() == '%') {
-    const std::string body = raw.substr(0, raw.size() - 1);
-    const auto value = std::strtof(body.c_str(), nullptr);
+///
+/// ## 为什么必须严格（旧实现静默吞掉一切错误）
+///
+/// 旧实现用 `std::strtof(raw.c_str(), nullptr)`——**不检查消耗了多少字符**。
+/// 于是：
+///
+/// | 输入 | 旧行为 | 后果 |
+/// |---|---|---|
+/// | `"abc"` | → 0 | 元素跑到左上角，无任何提示 |
+/// | `"10%%"` | → 10（`%%` 被忽略） | 看起来"能用" |
+/// | `"12px"` | → 12（`px` 被忽略） | 恰好对，**掩盖了问题** |
+/// | `"-5"` | → -5 | 负坐标（可能有意，但更可能是笔误） |
+///
+/// 实测确认：把 `x:"abc"`、`y:"10%%"`、`h:"-5"` 一起写进脚本，
+/// 裁云 **exit 0 并正常出片**——写错的元素只是悄悄跑偏。
+/// 这是最坏的一类失败：模型以为改好了，只有看画面才发现不对。
+///
+/// 所以这里返回 `optional`，非法输入返回 `nullopt` 由调用方报错。
+[[nodiscard]] auto parse_dim(const std::string& raw, float canvas, float design)
+    -> std::optional<float> {
+  if (raw.empty()) return std::nullopt;
+
+  // 显式单位后缀：`%` 或 `px`。其它后缀一律拒绝（不猜）。
+  enum class Unit { Design, Percent, Pixels };
+  Unit unit = Unit::Design;
+  std::string body = raw;
+  if (raw.size() >= 1U && raw.back() == '%') {
+    unit = Unit::Percent;
+    body = raw.substr(0, raw.size() - 1U);
+  } else if (raw.size() >= 2U && raw.compare(raw.size() - 2U, 2U, "px") == 0) {
+    unit = Unit::Pixels;
+    body = raw.substr(0, raw.size() - 2U);
+  } else if (!std::isdigit(static_cast<unsigned char>(raw.back())) && raw.back() != '.' &&
+             raw.back() != '-' && raw.back() != '+') {
+    // 结尾既不是数字也不是已知单位 → 这是 `"abc"` / `"10em"` 这类无意义输入
+    return std::nullopt;
+  }
+
+  // ## 必须检查消耗长度
+  //
+  // `strtof` 只认开头的数字部分，`"12abc"` 会得到 12。不检查消耗量就等于
+  // 接受任何"以数字开头"的垃圾——而那种输入的真实意图无从猜测。
+  char* end = nullptr;
+  const float value = std::strtof(body.c_str(), &end);
+  if (end == body.c_str() || end == nullptr || *end != '\0') return std::nullopt;
+  if (!std::isfinite(value)) return std::nullopt;
+
+  if (unit == Unit::Percent) {
     return canvas * (value / 100.0f);
   }
-  const auto value = std::strtof(raw.c_str(), nullptr);
   // 设计像素 → 物理像素（按画布宽 / 设计宽的比例缩放；高度同比例，保证不变形）
   const float scale = design > 0.5f ? canvas / design : 1.0f;
   return value * scale;
+}
+
+/// 带上下文的取尺寸：非法输入**报错**而不是静默变 0。
+///
+/// ## 为什么错误信息必须带"哪个图层、哪个字段"
+///
+/// 一份剧本里几十个图层、每个都有 x/y/w/h。只说"尺寸格式错误"
+/// 等于没说——作者还是得逐个翻。而给出 `layers[7].x = "abc"` 就能直接改。
+[[nodiscard]] auto dim_or_error(const std::string& raw, float canvas, float design,
+                                std::string_view where, std::string_view field)
+    -> std::optional<float> {
+  // 渲染期不重复报错：`validate_layer_dims` 已在解析期报过一次。
+  // 这里静默降级为 0（错误信息已经给出，刷屏只会淹掉它）。
+  (void)where;
+  (void)field;
+  return parse_dim(raw, canvas, design);
 }
 
 /// 缓动：与 motion.cpp 同口径（`ease_out_cubic`），但独立实现避免循环依赖。
@@ -119,16 +184,16 @@ auto evaluate_path(const Layer& layer, float local_time, float canvas_w, float c
   const float t = std::clamp(elapsed / duration, 0.0f, 1.0f);
 
   // 起点/终点：缺省一边时用图层自身位置（= “从这里出发”或“飞到这里”）。
-  const float layer_x = parse_dim(layer.x, canvas_w, design_w);
-  const float layer_y = parse_dim(layer.y, canvas_h, design_h);
+  const float layer_x = dim_or_error(layer.x, canvas_w, design_w, layer.name, "x").value_or(0.0f);
+  const float layer_y = dim_or_error(layer.y, canvas_h, design_h, layer.name, "y").value_or(0.0f);
   const float from_x = layer.path_from_x.empty() ? layer_x
-                                                 : parse_dim(layer.path_from_x, canvas_w, design_w);
+                                                 : dim_or_error(layer.path_from_x, canvas_w, design_w, layer.name, "path_from_x").value_or(0.0f);
   const float from_y = layer.path_from_y.empty() ? layer_y
-                                                 : parse_dim(layer.path_from_y, canvas_h, design_h);
+                                                 : dim_or_error(layer.path_from_y, canvas_h, design_h, layer.name, "path_from_y").value_or(0.0f);
   const float to_x = layer.path_to_x.empty() ? layer_x
-                                             : parse_dim(layer.path_to_x, canvas_w, design_w);
+                                             : dim_or_error(layer.path_to_x, canvas_w, design_w, layer.name, "path_to_x").value_or(0.0f);
   const float to_y = layer.path_to_y.empty() ? layer_y
-                                             : parse_dim(layer.path_to_y, canvas_h, design_h);
+                                             : dim_or_error(layer.path_to_y, canvas_h, design_h, layer.name, "path_to_y").value_or(0.0f);
 
   const float eased = ease_path(t, layer.path_ease);
   const float dx = (to_x - from_x) * eased;
@@ -212,13 +277,46 @@ auto evaluate_tracks(const Layer& layer, float time, float canvas_w, float canva
   return out;
 }
 
+/// 解析期校验一个图层的尺寸字段（**只检查，不评估**）。
+///
+/// ## 为什么需要单独一个入口
+///
+/// 尺寸解析在**每一帧**都会跑（同一图层要画 30 次）。若解析时就报错，
+/// 一个写错的值会刷 30 条，把真正有用的信息淹掉。
+///
+/// 所以拆成两步：解析期调用本函数**报一次**，渲染期用 `value_or(0)` 静默降级
+/// （错误已经报过了，不必重复）。
+[[nodiscard]] auto validate_layer_dims(const Layer& layer, float canvas_w, float canvas_h,
+                                       float design_w, float design_h) -> bool {
+  bool ok = true;
+  const auto check = [&](const std::string& raw, const char* field) {
+    if (raw.empty()) return;   // 空 = 用默认值，不算错
+    if (!parse_dim(raw, field == std::string_view{"x"} || field == std::string_view{"w"}
+                            ? canvas_w
+                            : canvas_h,
+                   field == std::string_view{"x"} || field == std::string_view{"w"} ? design_w
+                                                                                    : design_h)
+             .has_value()) {
+      ST_LOG_ERROR("图层 \"{}\":{} = \"{}\" 不是合法尺寸：要 \"数字\" / \"数字px\" / 数字%"
+                   "（例如 640 / 640px / 50%）",
+                   layer.name, field, raw);
+      ok = false;
+    }
+  };
+  check(layer.x, "x");
+  check(layer.y, "y");
+  check(layer.w, "w");
+  check(layer.h, "h");
+  return ok;
+}
+
 auto evaluate_layer(const Layer& layer, float local_time, float canvas_w, float canvas_h,
                     float design_w, float design_h) -> LayerState {
   LayerState state{};
-  state.x = parse_dim(layer.x, canvas_w, design_w);
-  state.y = parse_dim(layer.y, canvas_h, design_h);
-  state.w = parse_dim(layer.w, canvas_w, design_w);
-  state.h = parse_dim(layer.h, canvas_h, design_h);
+  state.x = dim_or_error(layer.x, canvas_w, design_w, layer.name, "x").value_or(0.0f);
+  state.y = dim_or_error(layer.y, canvas_h, design_h, layer.name, "y").value_or(0.0f);
+  state.w = dim_or_error(layer.w, canvas_w, design_w, layer.name, "w").value_or(0.0f);
+  state.h = dim_or_error(layer.h, canvas_h, design_h, layer.name, "h").value_or(0.0f);
   state.alpha = std::clamp(layer.opacity, 0.0f, 1.0f);
 
   // ── 关键帧时间线：**绝对值**覆盖 JSON 基准 ──

@@ -68,6 +68,21 @@ enum class SchemaScope : std::uint8_t {
   Layer,    ///< `layers[]` 的每一项
   KeyFrame, ///< `tracks` 里每个关键帧 `{t, v, ease}`
   ObjEntry, ///< `tracks` 的数组写法 `{property, keys}`
+  /// 三维场景里的 `camera` 对象（`objects[]` 的兄弟节点）。
+  Camera,
+  /// 三维场景里的 `lighting` 对象。
+  ///
+  /// ## 为什么这两个要单独成 scope
+  ///
+  /// 它们是**嵌套对象**，字段集与图层/layer 完全不同（`eye`/`target`/`fov` 与
+  /// `key_direction`/`ambient`/`extra_lights`）。混进 `Layer` 会让
+  /// 未知字段检查用错表——实测就是这样：`lighting.extra_lights` 是合法字段，
+  /// 却因为没有 Lighting scope 被报成"未知字段"。
+  Lighting,
+  /// 三维场景里的 `shadow` 对象。
+  Shadow,
+  /// 三维场景里的 `objects[]` 每一项。
+  Object3d,
 };
 
 [[nodiscard]] auto schema_scope_name(SchemaScope scope) -> std::string_view;
@@ -203,6 +218,26 @@ struct Diagnostic {
 ///
 /// `data.compare_diagnostics` 也会用它做"表本身是否自洽"的检查。形状：
 /// `{"version":1,"scopes":{"layer":[{"name":"model_spin","type":"number",...}]}}`
+/// **未知字段检查**：对象里出现了该 scope 不认识的键就报错。
+///
+/// ## 为什么裁云也必须做这件事
+///
+/// 三维场景脚本已经在做（`scene_schema.hpp`），但裁云的剧本脚本没有。
+/// 结果是同一个病：`{"kind":"text","sise":18}` 里的 `sise`（拼错 `size`）
+/// 会被静默忽略，元素用默认字号画出来——作者看到"渲染成功"，
+/// 只有看图才发现字号不对。
+///
+/// `Aliases` 机制已经在（`size`/`scale` 等多种写法都认），
+/// 所以这里只需要对比"对象里的键"与"schema 认识的键（含别名）"。
+///
+/// @param keys  要检查的对象里出现了哪些键
+/// @param scope  它属于哪一层（决定用哪张字段表）
+/// @param path   报错时用的定位（如 `scenes[0].layers[3]`）
+/// @return 全部合法时 ok；否则返回第一个未知字段的错误，消息里带最接近的候选。
+/// @param keys 该对象里出现的全部键（由调用方从自己的 JSON 类型取，避免耦合）
+[[nodiscard]] auto check_unknown_fields(const std::vector<std::string>& keys, SchemaScope scope,
+                                        std::string_view path) -> std::string;
+
 [[nodiscard]] auto schema_to_json() -> std::string;
 
 /// 建议的最大编辑距离（随未知串长度缩放：长键允许更多打字错误）。

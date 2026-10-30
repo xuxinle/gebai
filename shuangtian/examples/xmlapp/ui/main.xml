@@ -16,17 +16,17 @@
 <Column id="root" gap="0" grow="true" surface="base">
   <!-- 标题栏 -->
   <Row id="header" gap="10" padding="14" surface="alt" align="center">
-    <Icon id="header-icon" icon="list" size="20" text_color="#2563eb"/>
-    <Text id="header-title" size="18">任务清单</Text>
+    <Icon id="header-icon" icon="list" diameter="20" text_color="#2563eb"/>
+    <Text id="header-title" font_size="18">任务清单</Text>
     <Spacer grow="true"/>
-    <Text id="counter" size="13" text_color="#6b7280">共 0 项</Text>
+    <Text id="counter" font_size="13" text_color="#6b7280">共 0 项</Text>
   </Row>
   <Divider/>
 
   <!-- 输入行 -->
   <Row id="composer" gap="8" padding="14">
     <Input id="draft" placeholder="输入任务，回车添加" grow="true"/>
-    <Button id="add" label="添加" icon="plus" variant="primary" size="small"/>
+    <Button id="add" label="添加" icon="plus" variant="primary" scale="small"/>
   </Row>
 
   <!-- 清单 -->
@@ -34,12 +34,12 @@
 
   <!-- 底部：过滤 + 进度 -->
   <Row id="footer" gap="8" padding="12" surface="alt" align="center">
-    <Button id="filter-all" label="全部" variant="soft" size="small"/>
-    <Button id="filter-open" label="未完成" variant="ghost" size="small"/>
-    <Button id="filter-done" label="已完成" variant="ghost" size="small"/>
+    <Button id="filter-all" label="全部" variant="soft" scale="small"/>
+    <Button id="filter-open" label="未完成" variant="ghost" scale="small"/>
+    <Button id="filter-done" label="已完成" variant="ghost" scale="small"/>
     <Spacer grow="true"/>
     <Progress id="progress" value="0" width="120"/>
-    <Button id="clear-done" label="清除已完成" variant="ghost" size="small"
+    <Button id="clear-done" label="清除已完成" variant="ghost" scale="small"
             hint="移除所有已完成的任务"/>
   </Row>
 </Column>

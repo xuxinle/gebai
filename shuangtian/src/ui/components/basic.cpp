@@ -474,7 +474,7 @@ auto Text::get_property(std::string_view name) const -> std::optional<std::strin
   if (name == "multiline") return multiline_ ? "true" : "false";
   // 字号：与 `set_property` 对称（不报出去就改不了——`apply_properties` 的判据
   // 是“名字在元素自己声明的清单里”）。
-  if (name == "size") return std::format("{}", style_.font_size);
+  if (name == "font_size" || name == "size") return std::format("{}", style_.font_size);
   if (name == "selectable") return selectable_ ? "true" : "false";
   if (name == "selection") return selected_text();
   if (name == "tone") return std::string(components_internal::tone_name(tone_));
@@ -498,8 +498,9 @@ auto Text::set_property(std::string_view name, std::string_view value) -> bool {
     set_multiline(value == "true" || value == "1");
     return true;
   }
-  if (name == "size") {
+  if (name == "font_size" || name == "size") {
     // 字号：接受 `18` / `18px`（属性面是文本，单位由调用方决定）。
+    // 旧名 `size` 仍接受（兼容期），但新写法是 `font_size`。
     const std::string text(value);
     char* end = nullptr;
     const double parsed = std::strtod(text.c_str(), &end);
@@ -518,7 +519,7 @@ auto Text::property_names() const -> std::vector<std::string_view> {
   // `size` 是字号（与 `Button` 的尺寸档位**同名不同义**——各自解释，见 `xml_ui.cpp`
   // 里 `normalize_property` 的说明）。
   // `selectable` 可读写（自动化/声明式都靠它开启选区）。
-  return {"text", "content", "multiline", "size", "selectable", "tone"};
+  return {"text", "content", "multiline", "font_size", "size", "selectable", "tone"};
 }
 
 auto Text::readonly_property_names() const -> std::vector<std::string_view> {
@@ -673,14 +674,16 @@ void IconView::paint_content(const RenderContext& context, raster::Surface& canv
 
 auto IconView::get_property(std::string_view name) const -> std::optional<std::string> {
   if (name == "icon") return icon_;
-  if (name == "size") return std::format("{}", size_);
+  // 图标的 `size` 是**直径**（不是字号）——名字统一为 `diameter`，
+  // 避免与 `font_size` 混淆（同一层里两个"大小"必须能区分开）。
+  if (name == "diameter" || name == "size") return std::format("{}", size_);
   if (name == "tone") return std::string(components_internal::tone_name(tone_));
   return std::nullopt;
 }
 
 // 与 `get/set_property` 对称（见头文件里的说明）：不报名字 = 这条路命不中。
 auto IconView::property_names() const -> std::vector<std::string_view> {
-  return {"icon", "size", "tone"};
+  return {"icon", "diameter", "size", "tone"};
 }
 
 auto IconView::set_property(std::string_view name, std::string_view value) -> bool {
@@ -694,7 +697,7 @@ auto IconView::set_property(std::string_view name, std::string_view value) -> bo
     set_tone(*parsed);
     return true;
   }
-  if (name == "size") {
+  if (name == "diameter" || name == "size") {
     if (const auto parsed = parse_f64(value); parsed.has_value()) {
       set_size(static_cast<float>(*parsed));
       return true;
@@ -1008,7 +1011,9 @@ auto Button::get_property(std::string_view name) const -> std::optional<std::str
     }
     return "primary";
   }
-  if (name == "size") {
+  // 按钮的 `size` 是**枚举**（small/medium/large），不是长度——
+  // 改叫 `scale` 以免与长度类字段混淆。
+  if (name == "scale" || name == "size") {
     switch (size_) {
       case Size::Small: return "small";
       case Size::Medium: return "medium";
@@ -1053,7 +1058,7 @@ auto Button::set_property(std::string_view name, std::string_view value) -> bool
     }
     return true;
   }
-  if (name == "size") {
+  if (name == "scale" || name == "size") {
     const std::string text(value);
     if (text == "small") {
       set_size(Size::Small);
@@ -1074,7 +1079,7 @@ auto Button::set_property(std::string_view name, std::string_view value) -> bool
 }
 
 auto Button::property_names() const -> std::vector<std::string_view> {
-  return {"label", "text", "icon", "variant", "size", "hint", "tone"};
+  return {"label", "text", "icon", "variant", "scale", "size", "hint", "tone"};
 }
 
 auto Button::invoke_action(std::string_view action, std::string_view argument) -> bool {

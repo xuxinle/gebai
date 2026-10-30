@@ -109,7 +109,7 @@ function renderList() {
     const card = box.append('Column', { gap: 2, padding: 7, surface: 'alt', radius: 6 })
     const title_row = card.append('Row', { gap: 4, align_items: 'center' })
     title_row.append('Text', { text: e.title, font_size: 14, font_weight: 'semibold', grow: true })
-    const hit = title_row.append('Button', { label: '›', variant: 'ghost', size: 'small' })
+    const hit = title_row.append('Button', { label: '›', variant: 'ghost', scale: 'small' })
     hit.on('click', () => openEntry(e.id))
     if (e.key_line) {
       card.append('Text', { text: e.key_line, font_size: 12, text_color: '#8a8f98', wrap: true })
@@ -286,7 +286,7 @@ $('#review').on('click', () => {
     card.append('Text', { text: it.reason, font_size: 12, text_color: '#8a8f98', wrap: true })
     card.append('Text', { text: '→ ' + it.action, font_size: 12, wrap: true })
     if (it.ids.length === 1) {
-      const btn = card.append('Button', { label: '去处理', variant: 'ghost', size: 'small' })
+      const btn = card.append('Button', { label: '去处理', variant: 'ghost', scale: 'small' })
       btn.on('click', () => openEntry(it.ids[0]))
     }
   }

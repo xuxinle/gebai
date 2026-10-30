@@ -534,7 +534,14 @@ struct LayerState {
 ///
 /// `canvas_w/canvas_h` 用于解析百分比坐标；`design_w/design_h` 是设计基准
 /// （百分比按画面算、像素按设计坐标缩放）。
-[[nodiscard]] auto evaluate_layer(const Layer& layer, float local_time, float canvas_w,
+[[nodiscard]] /// 解析期校验图层的尺寸字段（只检查语法，不做换算）。
+///
+/// 返回 false 表示有字段格式非法（错误已通过日志报出）。
+/// 渲染期不重复报错——那时的 `parse_dim` 静默降级为 0。
+[[nodiscard]] auto validate_layer_dims(const Layer& layer, float canvas_w, float canvas_h,
+                                       float design_w, float design_h) -> bool;
+
+auto evaluate_layer(const Layer& layer, float local_time, float canvas_w,
                                   float canvas_h, float design_w, float design_h) -> LayerState;
 
 /// 阻尼弹跳的竖直位移（像素；**负值 = 向上**，与画布 y 轴向相反）。

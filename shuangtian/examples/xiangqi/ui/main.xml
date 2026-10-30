@@ -50,7 +50,7 @@
        「轻操作」藏在角落按钮里不划不来；右下角是“扫到底了、清掉它们”的
        自然位置（与邮件客户端“全部已读”同侧）。 -->
   <Row id="footer-actions" padding_x="16" padding_y="8" justify="end">
-    <Button id="dismiss-all" label="全部忽略" variant="ghost" size="small"
+    <Button id="dismiss-all" label="全部忽略" variant="ghost" scale="small"
             hint="把所有提示清掉（选择类与待办类不会被忽略——那两类必须给出结果）"/>
   </Row>
 
@@ -62,23 +62,23 @@
     <Row id="compact-head" gap="8" align_items="center">
       <Badge id="compact-kind" text="有事告诉你" tone="warning"/>
       <Spacer grow="true"/>
-      <Text id="compact-more" size="11" tone="faint"/>
+      <Text id="compact-more" font_size="11" tone="faint"/>
     </Row>
-    <Text id="compact-title" size="15" font_weight="semibold"></Text>
+    <Text id="compact-title" font_size="15" font_weight="semibold"></Text>
     <!-- 正文用 markdown：大模型给的内容天然是 markdown，
          当纯文本画会把 `**粗**`、`- 项`、代码块原样露出来。 -->
     <MarkdownView id="compact-body" max_height="120"></MarkdownView>
     <Row id="compact-act" gap="8" padding_y="4">
-      <Button id="compact-expand" label="展开" variant="ghost" size="small"
+      <Button id="compact-expand" label="展开" variant="ghost" scale="small"
               hint="打开完整面板（处理选择与待办）"/>
-      <Button id="compact-ok" label="知道了" variant="soft" size="small"/>
+      <Button id="compact-ok" label="知道了" variant="soft" scale="small"/>
       <Spacer grow="true"/>
       <!-- 连接状态：轻提示形态下**也必须有**。
            为何不能省：这一形态把主界面底部栏整体隐了，若这里再不显示，
            断线时整个窗口里没有任何“已断开”的痕迹——用户以为 agent 还在盯着，
            而提醒根本没送到。那是比“不弹窗”更糟的状态。 -->
-      <Icon id="compact-link-icon" icon="warning" size="12" tone="danger"/>
-      <Text id="compact-link" size="11" visible="false">已连接</Text>
+      <Icon id="compact-link-icon" icon="warning" diameter="12" tone="danger"/>
+      <Text id="compact-link" font_size="11" visible="false">已连接</Text>
     </Row>
   </Column>
 
@@ -86,9 +86,9 @@
        注：纵向容器的主轴是竖向，所以「内容居中」用 justify；
        align 是**交叉轴**（这里为横向）——两者不可混。 -->
   <Column id="empty" gap="8" padding="40" grow="true" justify="center" align_items="center">
-    <Icon id="empty-icon" icon="sun" size="28" tone="faint"/>
-    <Text id="empty-title" size="15" tone="muted" padding_y="2">这里空着</Text>
-    <Text id="empty-hint" size="12" tone="faint">agent 有事找你时会放到这里</Text>
+    <Icon id="empty-icon" icon="sun" diameter="28" tone="faint"/>
+    <Text id="empty-title" font_size="15" tone="muted" padding_y="2">这里空着</Text>
+    <Text id="empty-hint" font_size="12" tone="faint">agent 有事找你时会放到这里</Text>
   </Column>
 
   <!-- ✗ 不再有底部栏：连接状态与「全部忽略」都上提到真标题栏了（见 main.cpp）。
