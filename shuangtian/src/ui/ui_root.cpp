@@ -253,6 +253,9 @@ void UiRoot::layout_subtree(Element& element, math::Rect rect) {
 /// 换来的是"淡入真的是淡入"而不是卡在第一格。
 void UiRoot::collect_animation_requests() {
   animation_pending_ = false;
+  // **定时唤醒点也在这同一次遍历里顺带汇总**（取最早）：到点要帧的低频事件
+  //（闪烁/倒计时）与连续动画共用这一趟树遍历，零额外成本。分开收集就得再遍历一次。
+  wake_at_ = -1.0;
   // **悬停提示在计时中 → 必须要下一帧**。
   //
   // 为何必须在这里：提示是“悬停满 N 毫秒才弹”，而主循环在静止时不开帧
@@ -262,6 +265,15 @@ void UiRoot::collect_animation_requests() {
     animation_pending_ = true;
   }
   const auto walk = [this](auto&& self, Element& element) -> void {
+    // **定时唤醒：汇总后立即消费（清元素侧）**。与 `animation_requested_` 同一
+    // 套"消费-重立"协议：元素在自己的下一次绘制里重新登记新的唤醒点。
+    // 不清的话过期唤醒点会永远留在元素上，之后每帧都被汇总上来——静止时
+    // UiRoot 侧被 clear_dirty 清掉后没有新帧去重新登记，光标就冻结了
+    //（2026-10-29 修 CPU 空转时引入，实测 headless 下光标不动，当天即修）。
+    if (const double wake = element.wake_at(); wake >= 0.0) {
+      element.clear_wake_request();
+      if (wake_at_ < 0.0 || wake < wake_at_) wake_at_ = wake;
+    }
     if (element.animation_requested()) {
       animation_pending_ = true;
       element.clear_animation_request();  // 消费：元素在下一次绘制里重新置位
@@ -295,6 +307,10 @@ void UiRoot::paint(raster::Surface& canvas) {
   // 现象：鼠标划过某项时过渡走到 1.0，移开后开始淡出却停在 1.0 → **该项永久高亮**，
   // 侧栏看起来有两个"选中项"（实测现象）。
   collect_animation_requests();
+  // 与 `paint_frame` 同一语义的尾部收口：清掉树根上本帧绘制期产生的
+  // 损坏区残留（否则 `tree_damage_pending` 把它们误读成帧间变更，
+  // `dirty()` 永真——hover 过渡结束后仍请求帧，5 个过渡测试变红）。
+  take_root_damage();
 }
 
 /// 逐个绘制叠加层，并在**两个绘制之间**回收上一轮摘除的对象。
@@ -503,6 +519,54 @@ auto UiRoot::dispatch_to(Element& element, Event& event) -> bool {
   }
   if (hovered_ == target) return;
   prune_stale_pointers();  // `hovered_` 可能已悬垂（子树被重建）
+  // ⚠ **无视觉反馈的命中不跟踪**（2026-10-29 修"鼠标一动 CPU 拉满"）：
+  //
+  // 普通容器（Panel/Column/布局壳/CodeEditor 容器层）命中时既不显示 hover 视觉
+  //（`hover_effect_` 全 false）也没有回调——把它们的切换记进 `hovered_` 并标脏，
+  // 纯属给每次都掠过它们的鼠标付出大块重绘。实测两例：鼠标扫过 activity-bar
+  // 按钮间隙命中 690 高的列容器（damage=整列）；鼠标进编辑器命中带 hint 的
+  // 容器层（沿父链有 hint 曾被放行）→ 每帧 mark_dirty 整个编辑器（1211×540，
+  // 占视口 58% → 恒整帧 + 整窗上屏，WARP 下 382% 单核）。
+  //
+  // **门控只看视觉**：`hover_effect().enabled || has_hover_callback()`。
+  // hint 不算视觉反馈——气泡是独立 overlay（hint 机制自己驱动重绘），
+  // 因此这里照样把 hint 目标交给 `set_hint_target`（计时/弹出不受影响），
+  // 但 hovered_ 不跟踪、不标脏。
+  {
+    const bool has_feedback =
+        target != nullptr &&
+        (target->hover_effect().enabled || target->has_hover_callback());
+    if (!has_feedback) {
+      // hint 归 hint：无视觉反馈的目标仍可能是某个 hint owner 的命中点
+      //（沿父链），计时照常交给 hint 机制；没有 owner 就清空目标。
+      Element* hint_owner = nullptr;
+      for (Element* node = target; node != nullptr; node = node->parent()) {
+        if (!node->hint().empty()) {
+          hint_owner = node;
+          break;
+        }
+      }
+      set_hint_target(hint_owner);
+      // 清掉旧的（它可能带特效，离开要收）。
+      //
+      // ⚠ **必须标脏**：`set_hovered(false)` 只改标志，视觉过渡（`hover_t_`）是在
+      // `paint` 里推进的。鼠标停在无反馈容器上不动时**不会再有帧**，不标脏的话
+      // 旧控件就停在悬浮外观上——就是本文件末尾警告的“卡住的悬浮高亮 / 侧栏出现
+      // 两个选中项”。旧目标若还在过渡中，它的 `record_damage` 也靠下一帧才能发生，
+      // 同样需要这里先把帧拉起来。
+      if (hovered_ != nullptr) {
+        hovered_->set_hovered(false);
+        Event event;
+        event.kind = EventKind::HoverOut;
+        hovered_->notify_hover(false);
+        (void)dispatch_to(*hovered_, event);
+        hovered_->mark_dirty();
+        hovered_ = nullptr;
+        ++version_;
+      }
+      return;
+    }
+  }
   // 悬停对象变了 → 提示重新计时（见 `update_hint`）。
   set_hint_target(target);
   const RenderContext context = render_context();
@@ -1347,6 +1411,11 @@ void UiRoot::clear_dirty() noexcept {
   // 要留给下一帧做增量重绘（帧首由 `paint_frame` 收集消费）。
   followup_ = animation_pending_;
   animation_pending_ = false;
+  // **到期的定时唤醒消费掉**：本帧正是被它拉起的（元素在本次绘制里会重新登记
+  // 下一个唤醒点——闪烁的下一翻转、Toast 的新到期时刻）。不清的话
+  // `needs_frame()` 会一直为真，帧循环永远不停——那就成了另一个烧 CPU 的死循环。
+  // 未到期的保留（收集时取 min，可能登记了比本帧更远的点）。
+  if (wake_at_ >= 0.0 && time_seconds_ >= wake_at_) wake_at_ = -1.0;
   // 帧级"整帧"标记的兜底清理：正常流程里 `paint_frame` 已消费（帧首快照）；
   // 直接调 `layout()/paint()` 的路径（测试/手写循环）没有消费者，留着会让
   // `dirty()` 永不安静。
@@ -1359,6 +1428,20 @@ auto UiRoot::tree_layout_dirty() const noexcept -> bool {
   if (content_ != nullptr && content_->layout_dirty()) return true;
   for (const auto& overlay : overlays_) {
     if (overlay != nullptr && overlay->layout_dirty()) return true;
+  }
+  return false;
+}
+
+auto UiRoot::tree_damage_pending() const noexcept -> bool {
+  // **帧间登记盲区**（2026-10-29 修）：元素的 `mark_dirty`/`record_damage` 把损坏区
+  // 记到**树根元素**的 extras 上，而搬运进 `pending_damage_` 发生在帧首
+  // （`collect_tree_damage`，`paint_frame` 里）——只看 UiRoot 侧的话，两帧之间
+  // 的变更永远等不来帧（无事件伴随的状态变化：`invoke focus` 后界面不重绘、
+  // 光标闪烁拿不到首帧去登记定时唤醒点，headless 实测光标冻结）。
+  // 与 `tree_layout_dirty` 同一姿势：只读根元素的标志，O(1)。
+  if (content_ != nullptr && content_->has_pending_damage()) return true;
+  for (const auto& overlay : overlays_) {
+    if (overlay != nullptr && overlay->has_pending_damage()) return true;
   }
   return false;
 }
@@ -1379,8 +1462,14 @@ auto UiRoot::needs_frame() const noexcept -> bool {
       hint_visible_ && hint_shown_ns_ > 0 &&
       (static_cast<double>(st::time::now_ns() - hint_shown_ns_) / 1e6) <
           kHintMinVisibleMs;
+  // **定时唤醒到期 → 要帧**：不到点不置真，这就是它省 CPU 的未质——
+  // 低频周期事件（光标闪烁/Toast 倒计时）登记的唤醒点在时刻未到时完全不妨
+  // 帧循环睡眠，到点那一刻才拉起一帧。时间轴是 `set_time` 推进的单调秒，
+  // 与元素登记 `request_wake_at` 时用的口径同源。
+  const bool wake_due = wake_at_ >= 0.0 && time_seconds_ >= wake_at_;
   return dirty_ || followup_ || pending_full_ || !pending_damage_.is_empty() ||
-         tree_layout_dirty() || hint_counting || hint_leave_pending || hint_sticky;
+         tree_layout_dirty() || tree_damage_pending() || hint_counting ||
+         hint_leave_pending || hint_sticky || wake_due;
 }
 
 void UiRoot::collect_tree_damage() {
@@ -1397,6 +1486,15 @@ void UiRoot::collect_tree_damage() {
   };
   merge(content_.get());
   for (const auto& overlay : overlays_) merge(overlay.get());
+}
+
+void UiRoot::take_root_damage() noexcept {
+  // 见头文件声明处的说明：清掉树根上"本帧绘制期产生"的损坏区残留。
+  // `take_damage` 本身幂等（没登记时返回 invalid），content/overlay 根各清一次。
+  if (content_ != nullptr) (void)content_->take_damage();
+  for (const auto& overlay : overlays_) {
+    if (overlay != nullptr) (void)overlay->take_damage();
+  }
 }
 
 auto UiRoot::paint_frame(raster::Surface& canvas) -> bool {
@@ -1426,14 +1524,45 @@ auto UiRoot::paint_frame(raster::Surface& canvas) -> bool {
       std::max(1.0f, viewport_rect.width * viewport_rect.height);
   const float damage_area =
       clipped_damage.is_empty() ? 0.0f : clipped_damage.width * clipped_damage.height;
-  // 全量条件：显式整帧标记 / 画布不支持局部 / 损坏区为空（保守地"什么都画"）/
-  // 损坏区过大（超过视口 55% 时整帧更划算——跳过裁剪开销与小块拼接）。
+  // **定时唤醒到期**：本帧就是被它拉起的（光标要求翻转/Tost 到期）。
+  //
+  // ⚠ 这一帧**必须真的画**：元素的 `request_wake_at` 是“消费-重立”协议
+  // （`collect_animation_requests` 汇总时清掉元素侧），新的唤醒点只能在
+  // `paint` 里重新登记。若这里跟普通空帧一样跳过绘制，元素就永远没机会
+  // 重立 → `clear_dirty` 再把到期的 `wake_at_` 清掉 → **无唤醒点也无损坏区
+  // ⇒ 光标/Toast 永久冻结**（实测：唤醒帧走空帧路径，闪烁链第二帧就断）。
+  const bool wake_due = wake_at_ >= 0.0 && time_seconds_ >= wake_at_;
+  // **续帧中的动画**：上一帧末声明的“还在动”（`followup_`，由 `clear_dirty` 从
+  // `animation_pending_` 滚过来）。
+  //
+  // ⚠ 这一帧**也必须真的画**，理由与 `wake_due` 同类：过渡推进本身就在
+  // `paint` 里（`Element::advance_hover`），跳过绘制会让动画停在半程；
+  // 而且“启动过渡”那一帧返回的是**旧值**（先记 `hover_start`，下一帧才开始动），
+  // 所以那一帧并不产生自己的 damage——只看 damage 就永远拿不到后续帧。
+  // 实测（悬停淡出）：第 0 帧建成过渡并返回 1.0，第 1 帧因损坏区空而走空帧路径
+  // → `hover_t` 永久停在 1.0（按钮看起来“一直亮着”）。
+  const bool animating = followup_;
+  // **空帧**：损坏区为空、无整帧标记、没有到期的定时唤醒、也没有续帧中的动画
+  // ——本帧没有任何像素要变。此时**不画也不报局部**
+  //（`last_frame_presentable_` = false），上层据此跳过 present
+  //（后备缓冲里的画面就是最新，多拷一次是纯浪费；WARP 下那是 CPU 多线程的
+  // 整纹理拷贝，实测每帧 ~7ms）。hint 计时已在本函数开头推进过，跳过绘制不影响它。
+  if (!full_flag && clipped_damage.is_empty() && !wake_due && !animating) {
+    last_frame_presentable_ = false;
+    collect_animation_requests();
+    (void)take_root_damage();
+    return false;
+  }
+  // 全量条件：显式整帧标记 / 画布不支持局部 / 损坏区为空（无可裁剪的区，
+  // 通常是“只有定时唤醒到期”的帧）/ 损坏区过大（超过视口 55% 时整帧更划算
+  // ——跳过裁剪开销与小块拼接）。
   const bool use_full = full_flag || !canvas.supports_partial_repaint() ||
                         clipped_damage.is_empty() || damage_area > viewport_area * 0.55f;
 
   painted_elements_ = 0;
   RenderContext context = render_context();
   context.painted_elements = &painted_elements_;
+  last_frame_presentable_ = true;
 
   if (use_full) {
     // 整帧：清屏 + 绘制整树（GPU 画布恒走这条，与旧行为完全一致）。
@@ -1466,6 +1595,12 @@ auto UiRoot::paint_frame(raster::Surface& canvas) -> bool {
   }
   // 绘制后汇总"还有谁在动"（与 `paint()` 同一时机：必须在所有绘制之后）。
   collect_animation_requests();
+  // **耗尽树根上本帧绘制期产生的 damage**：`paint` 已经画了它们（整树遍历
+  // 覆盖），残留只会让 `tree_damage_pending()` 永远为真——那是"本帧壁画"
+  // 不是"帧间新变更"，不该再要一帧（2026-10-29 修：hover 落位帧残留导致
+  // `dirty()` 恒真，5 个过渡测试变红）。帧首的 `collect_tree_damage` 已把
+  // 帧间登记搬进 `pending_damage_`，这里清的是它搬完后的余量。
+  (void)take_root_damage();
   return last_frame_partial_;
 }
 

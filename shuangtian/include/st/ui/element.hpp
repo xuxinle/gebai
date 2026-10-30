@@ -599,7 +599,17 @@ class Element {
   [[nodiscard]] auto focused() const noexcept -> bool { return focused_; }
   void set_hovered(bool value) noexcept { hovered_ = value; }
   void set_pressed(bool value) noexcept { pressed_ = value; }
-  virtual void set_focused(bool value) noexcept { focused_ = value; }
+  /// 焦点是视觉状态（焦点环/终端光标闪烁都随它变化）——变化必须标脏。
+  ///
+  /// 旧实现只改标志不标脏：靠终端的常驻 `request_animation`（帧循环永不收敛）
+  /// 把所有状态变化“顺带”画出来。2026-10-29 修 CPU 空转（闪烁改定时唤醒）后，
+  /// 帧循环真正安静下来，这个隐藏缺陷才暴露：`invoke focus` 后界面不再重绘，
+  /// 光标闪烁也因此拿不到第一帧去登记唤醒点（headless 实测光标冻结）。
+  virtual void set_focused(bool value) noexcept {
+    if (focused_ == value) return;
+    focused_ = value;
+    mark_dirty();
+  }
 
   // —— 布局与绘制 ——
   [[nodiscard]] auto bounds() const noexcept -> math::Rect { return bounds_; }
@@ -890,6 +900,26 @@ class Element {
     animation_requested_ = false;
     if (RenderExtras* state = extras_.get(); state != nullptr) state->hover_animating = false;
   }
+  /// 请求在指定单调时刻得到下一帧（低频周期事件专用）。
+  ///
+  /// 与 `request_animation` 的分工——两者的滥用史都实测烧过 CPU：
+  /// · `request_animation` = **连续动画**（悬浮过渡/骨架屏）：每帧都在动，
+  ///   每帧请求下一帧，动画结束自然停。
+  /// · `request_wake_at` = **定时点**（光标闪烁/Toast 倒计时）：一秒只变两次的
+  ///   东西若走连续续帧，主循环就会以帧预算上限（60fps）空转重绘同一张静止画面
+  ///   ——纯 CPU 软件光栅下实测吃满 5 核（2026-10-29 用户报"gbcode 占用 70%"）。
+  ///   语义是"到 t 这个时刻我需要一帧"：帧循环会把空闲等待精确夹到最近的唤醒点，
+  ///   期间真正睡眠。
+  ///
+  /// 时间口径：与应用帧时间轴同源（`UiRoot::set_time` 推进的 `time_seconds`，
+  /// 单调秒）。重复调用取更早者（多组件各有唤醒点时，最先到的先服务）。
+  /// 与 `request_animation` 互不排斥——一个元素可以既在连续动又有定时点。
+  void request_wake_at(double monotonic_seconds) const noexcept {
+    if (wake_at_ < 0.0 || monotonic_seconds < wake_at_) wake_at_ = monotonic_seconds;
+  }
+  /// 本元素登记的唤醒时刻（< 0 = 无）；由 `collect_animation_requests` 消费。
+  [[nodiscard]] auto wake_at() const noexcept -> double { return wake_at_; }
+  void clear_wake_request() const noexcept { wake_at_ = -1.0; }
   /// 标记“本元素（及其祖先）需要重新 measure/arrange”。
   ///
   /// **虚函数**，子组件可收紧冒泡范围：默认实现沿 `parent_` 链把标记写到所在树的根
@@ -919,8 +949,30 @@ class Element {
   };
   /// 消费累积的损坏区（调用后清零；mutable：由 UiRoot 在帧首收集，元素只负责记录）。
   [[nodiscard]] auto take_damage() const noexcept -> DamageReport;
+  /// 是否有未消费的损坏上报（只读不清零）。
+  ///
+  /// 存在的理由（2026-10-29）：`UiRoot::needs_frame()` 要能看到**帧间**登记的
+  /// 损坏区——搬运（`collect_tree_damage`）发生在帧首，若只看 UiRoot 侧的
+  /// `pending_damage_`，两帧之间的变更就永远等不来帧（无事件伴随的状态变化
+  /// 正中盲区：`invoke focus` 后界面不重绘、终端光标闪烁拿不到首帧去登记唤醒点）。
+  [[nodiscard]] auto has_pending_damage() const noexcept -> bool {
+    const RenderExtras* state = extras_if_any();
+    return state != nullptr && state->damage_valid;
+  }
   /// 把自己的损坏区记到所在树的根元素（内部用；`mark_dirty`/`request_animation` 调用）。
   void record_damage() const noexcept;
+  /// **报一块自定义矩形**的损坏（比 `mark_dirty` 更细的粒度）。
+  ///
+  /// 为什么需要：`mark_dirty` 报的是整个元素 bounds——对 CodeEditor 这类
+  /// 大面积组件，一次「悬停行底纹变化」实际只改了两条 20px 的细条，却要求
+  /// 重绘整个编辑器（占视口 80%+ → 超 55% 阈值退化成整帧 + 整窗上屏）。
+  /// WARP（纯 CPU 模拟 GPU）下那是每帧 ~7ms 的整窗拷贝，鼠标扫过文本区
+  /// 时 CPU 直接拉满（2026-10-29 实测 382% 单核，本接口就是为修它而生）。
+  ///
+  /// 语义：`rect` 是**窗口坐标**（与 `bounds_` 同坐标系，含滚动偏移后的
+  /// 可见位置）；只登记损坏不置 dirty 标志——组件需要重绘自己的其它部分时
+  /// 仍应调 `mark_dirty()`。
+  void record_damage_rect(math::Rect rect) const noexcept;
 
  protected:
   /// 子类绘制自身的"盒子"（背景/边框/圆角/阴影）。
@@ -1000,6 +1052,8 @@ class Element {
 
   /// 组件主动请求的续帧（与悬浮过渡共用汇总链路）。
   mutable bool animation_requested_{false};
+  /// 登记的唤醒时刻（单调秒；< 0 = 无）。mutable：paint 是 const 路径。
+  mutable double wake_at_{-1.0};
   bool pressed_{false};
   bool focused_{false};
   bool dirty_{true};

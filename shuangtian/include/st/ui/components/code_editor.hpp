@@ -36,6 +36,33 @@
 
 namespace st::ui {
 
+/// 用来判断“主题真的换了吗”的内容快照（见 `CodeEditor::apply_theme`）。
+///
+/// 只收**本组件真正依赖**的那几项：主题名/模式、基准字号与行高相关度量、
+/// 正文与背景色、及语法调色板里的几个主色。字段不是越多越好——多一个就要
+/// 保证它真的影响渲染，否则就成了“名字叫快照、实际不完整”的假判据。
+struct ThemeSnapshot {
+  ThemeMode mode{ThemeMode::Light};
+  /// 主题名（`light`/`dark`/自定义名）。比 `mode` 更细：`theme_name` 可以选到
+  /// 同一模式下另一套基准调色板，只比 mode 会漏。
+  std::string name{};
+  float font_base{-1.0F};
+  math::Color text{};
+  math::Color surface_sunken{};
+  math::Color surface_raised{};
+  math::Color surface_alt{};
+  math::Color syntax_plain{};
+  math::Color syntax_keyword{};
+  math::Color syntax_string{};
+  math::Color syntax_comment{};
+  math::Color syntax_number{};
+  math::Color syntax_current_line{};
+  math::Color syntax_cursor{};
+
+  [[nodiscard]] static auto of(const Theme& theme) noexcept -> ThemeSnapshot;
+  [[nodiscard]] auto operator==(const ThemeSnapshot& rhs) const noexcept -> bool = default;
+};
+
 class CodeEditor : public Element {
  public:
   CodeEditor();
@@ -634,6 +661,13 @@ class CodeEditor : public Element {
   /// 而改 `font_scale` 只标了元素脏（本组件故意不让布局脏冒泡到根）→
   /// 快照会停在旧值上（实测：档位 1.15→1.0 后 `font_size` 仍报 17.25）。
   float theme_base_font_{15.0f};
+  /// 上次套用的主题**内容快照**（用于“真的变了才标脏”，见 `apply_theme`）。
+  ///
+  /// ⚠ 不能存指针做身份比较：`UiRoot::set_theme` 是 `theme_ = std::move(theme)`
+  /// ——**同一地址、内容变了**。指针相等在这里恒成立，于是切主题后
+  /// `theme_base_font_` 永远停在第一次套用的值上（实测：`--ui-font-scale`
+  /// 与亮/暗切换对编辑器全部无效）。
+  std::optional<ThemeSnapshot> applied_theme_{};
   int tab_width_{4};
   bool insert_spaces_{true};
   bool read_only_{false};

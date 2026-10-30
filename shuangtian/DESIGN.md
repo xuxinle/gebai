@@ -4369,7 +4369,7 @@ X11 与 Wayland 各自落地为**真后端**（不再是桩）。两者与 Win32
 | 去装饰建窗 | `WS_POPUP`（去 `WS_CAPTION`） | `_MOTIF_WM_HINTS` decorations=0 | `zxdg_toplevel_decoration_v1.set_mode(client_side)` |
 | 客户区 == 整窗 | `WM_NCCALCSIZE` 返回 0 | 天然成立（WM 不画框） | 天然成立（客户端绘制） |
 | 帧缓冲上屏 | `BitBlt`（DIB） | **`XShmPutImage`**（MIT-SHM 共享段；不可用时回退 `XPutImage`） | `wl_shm` 共享内存 + `wl_buffer` |
-| 局部上屏（只送本帧改动区） | 未接 | **已接**（`set_present_region` → 只重排+只送该矩形） | 不适用（双缓冲必须整帧） |
+| 局部上屏（只送本帧改动区） | **不支持**（GPU 路径接受但忽略；见 §4.6 后端表） | **已接**（`set_present_region` → 只重排+只送该矩形） | 不适用（双缓冲必须整帧） |
 | 尺寸真源 | 客户区（随时可问） | `XGetWindowAttributes`（随时可问） | **只有 configure 事件** |
 | 拖动 / 缩放 | `WM_NCLBUTTONDOWN` 模态循环 | `_NET_WM_MOVERESIZE` | `xdg_toplevel.move`/`resize(seat, serial, edge)` |
 | 最小化 | `ShowWindow(SW_MINIMIZE)` | `WM_CHANGE_STATE` = IconicState | `xdg_toplevel.set_minimized` |
@@ -4491,7 +4491,13 @@ memory segment*），此后服务端不再读该段；而屏幕上看到的是"�
 |---|---|---|
 | X11 | **支持** | 双缓冲在本后端是"连续 `PutImage` 到同一可绘制区"，服务端每帧都把段内容拷走，没有"另一块缓冲停在旧内容"的问题 |
 | Wayland | **不支持**（接受但忽略） | `wl_surface` 是**双缓冲**（交替 attach），每块都必须是完整帧——只重排当前 `target` 的损坏区会让另一块停在旧内容（交替提交时闪烁） |
+| Win32 · GPU（DXGI） | **不支持**（接受但忽略） | swapchain 是 `DXGI_SWAP_EFFECT_DISCARD`，`Present` 之后后备缓冲内容**未定义**——局部拷贝会让未拷贝的区域变黑块（实测 NVIDIA L20-6Q）。要启用需先换保留型 swapchain（`FLIP_SEQUENTIAL`）并重做拷贝路径（FLIP 的后备缓冲只读） |
+| Win32 · 软件（GDI） | 不适用 | `BitBlt` 整窗搬运，后端自己不做局部优化 |
 | headless | 接受但忽略 | 写入离屏缓冲，无传输范围可言 |
+
+> **同一份契约，不同后端能给的能力不同**：`set_present_region` 的文档明确写了
+> “后端**可以忽略它**、不得当命令”。上面两行“不支持”正是在行使这个许可——
+> 忽略只会慢，误用会**画错**（黑区/闪烁），所以宁可忽略。
 
 **像素重排下沉到 `st::raster::simd::convert_rgba_to_xrgb_row`**：两个后端共用同一语义
 （AVX2 / SSE2 / 标量三路，逐像素一致由 `tests/raster_simd_test.cpp` 钉住）——

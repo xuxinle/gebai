@@ -86,12 +86,6 @@ void paint_border(raster::Surface& canvas, math::Rect rect, float radius, math::
 }
 
 /// 光标闪烁相位（1s 周期，亮 55% / 灭 45%）。
-[[nodiscard]] auto blink_visible(const RenderContext& context) noexcept -> bool {
-  const double phase = std::fmod(context.time_seconds, k_blink_period);
-  const double normalized = phase < 0.0 ? phase + k_blink_period : phase;
-  return normalized < k_blink_period * k_blink_duty;
-}
-
 /// 一行文本内按水平偏移定位字节列（`offset_x` 相对行首）。
 [[nodiscard]] auto column_at_offset(const TextPort& port, std::string_view line_text, float size,
                                     float offset_x) -> std::size_t {
@@ -454,11 +448,28 @@ void Input::paint_content(const RenderContext& context, raster::Surface& canvas)
     port.draw(canvas, port.ellipsize(shown, size, box.width), math::Point{box.x, text_y}, size,
               text_color);
   }
-  if (usable && focused() && blink_visible(context)) {
+  if (usable && focused()) {
+    // **闪烁走定时唤醒**（与 Terminal 光标同一套协议）：一秒只翻转两次的
+    // 光标若每帧续帧，静止的聚焦输入框就会把帧循环拉满（60fps 空转重绘静止
+    // 画面，纯 CPU 环境实测烧多核）。登记下一翻转点到点才拉一帧。
+    const double blink = std::fmod(context.time_seconds, k_blink_period);
+    const bool visible_now = blink < k_blink_period * k_blink_duty;
+    const double next_flip = context.time_seconds +
+        (visible_now ? k_blink_period * k_blink_duty - blink
+                     : k_blink_period - blink);
+    request_wake_at(next_flip);
+    // 只在相位真翻转的那帧上报损坏区（每帧报会与帧间损坏判据互相触发成
+    // 每帧续帧循环，见 Terminal 光标处的说明）。
+    if (last_blink_visible_ != (visible_now ? 1 : 0)) {
+      record_damage();
+      last_blink_visible_ = visible_now ? 1 : 0;
+    }
+    if (visible_now) {
     const float height = std::min(line, box.height);
     const math::Rect caret{cursor_x(context), box.y + (box.height - height) * 0.5f, k_cursor_width,
                           height};
     canvas.fill_rect(caret, raster::Paint::solid(colors.primary), k_cursor_radius);
+    }
   }
   canvas.pop_clip();
 }
@@ -1013,14 +1024,28 @@ void TextArea::paint_content(const RenderContext& context, raster::Surface& canv
     }
   }
 
-  if (usable && focused() && blink_visible(context)) {
-    const std::size_t row = row_of(lines, cursor_);
-    const Line& entry = lines[row];
-    const float caret_x = box.x + port.measure_width(
-                                      whole.substr(entry.begin, cursor_ - entry.begin), size);
-    const float caret_y = box.y + static_cast<float>(row) * line - scroll_;
-    canvas.fill_rect(math::Rect{caret_x, caret_y, k_cursor_width, line},
-                     raster::Paint::solid(colors.primary), k_cursor_radius);
+  if (usable && focused()) {
+    // **闪烁走定时唤醒**（与 Input 光标同一套协议，见那儿的说明）。
+    const double blink = std::fmod(context.time_seconds, k_blink_period);
+    const bool visible_now = blink < k_blink_period * k_blink_duty;
+    const double next_flip = context.time_seconds +
+        (visible_now ? k_blink_period * k_blink_duty - blink
+                     : k_blink_period - blink);
+    request_wake_at(next_flip);
+    // 只在相位真翻转的那帧上报损坏区（同 Input 光标处）。
+    if (last_blink_visible_ != (visible_now ? 1 : 0)) {
+      record_damage();
+      last_blink_visible_ = visible_now ? 1 : 0;
+    }
+    if (visible_now) {
+      const std::size_t row = row_of(lines, cursor_);
+      const Line& entry = lines[row];
+      const float caret_x = box.x + port.measure_width(
+          whole.substr(entry.begin, cursor_ - entry.begin), size);
+      const float caret_y = box.y + static_cast<float>(row) * line - scroll_;
+      canvas.fill_rect(math::Rect{caret_x, caret_y, k_cursor_width, line},
+                       raster::Paint::solid(colors.primary), k_cursor_radius);
+    }
   }
   canvas.pop_clip();
 

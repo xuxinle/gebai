@@ -228,7 +228,39 @@ auto CodeEditor::notify_scroll(float before_x, float before_y) -> void {
   if (on_scroll) on_scroll(scroll_x_, scroll_y_);
 }
 
+auto ThemeSnapshot::of(const Theme& theme) noexcept -> ThemeSnapshot {
+  const Palette& colors = theme.colors();
+  const SyntaxPalette& syntax = theme.syntax();
+  ThemeSnapshot snapshot;
+  snapshot.mode = theme.mode();
+  snapshot.name = theme.name();
+  snapshot.font_base = theme.metrics().font_base;
+  snapshot.text = colors.text;
+  snapshot.surface_sunken = colors.surface_sunken;
+  snapshot.surface_raised = colors.surface_raised;
+  snapshot.surface_alt = colors.surface_alt;
+  snapshot.syntax_plain = syntax.plain;
+  snapshot.syntax_keyword = syntax.keyword;
+  snapshot.syntax_string = syntax.string;
+  snapshot.syntax_comment = syntax.comment;
+  snapshot.syntax_number = syntax.number;
+  snapshot.syntax_current_line = syntax.current_line;
+  snapshot.syntax_cursor = syntax.cursor;
+  return snapshot;
+}
+
 void CodeEditor::apply_theme(const Theme& theme) {
+  // **主题真的变了才标脏**：声明式宿主每次 `layout()` 都会重走一遍
+  // `apply_theme_tree`，无条件 `mark_dirty()` 会让编辑器（占视口 45%+）每帧
+  // 报一整块损坏区，与终端的同类标脏合并后恒超 55% 阈值 → 每帧整帧 + 整窗
+  // 上屏（WARP 下实测 382% 单核）。
+  //
+  // ⚠ 判据必须是**内容**而不是指针：`UiRoot::set_theme` 是 `theme_ = std::move(theme)`
+  //——同一地址、内容变了。用指针比较会让切主题彻底不生效（实测：字号与
+  // 亮/暗切换对编辑器全部无效，因为 `theme_base_font_` 永远停在第一次的值）。
+  const ThemeSnapshot snapshot = ThemeSnapshot::of(theme);
+  if (applied_theme_.has_value() && *applied_theme_ == snapshot) return;
+  applied_theme_ = snapshot;
   // 语法配色在绘制时按 `theme.syntax()` 取（无需缓存到样式），但**基准字号必须在这里落**：
   // 主题是字号缩放（`--ui-font-scale` → `Metrics::scale_fonts`）的唯一真值源，
   // 不读它就会与普通文字脱钩（edit 前：本组件硬写绝对像素，缩放全局生效惟它不动）。
@@ -2281,11 +2313,31 @@ auto CodeEditor::on_event(const RenderContext& context, Event& event) -> bool {
         apply_v_scroll_drag(context, event.position.y);
         return true;
       }
-      // 悬停行底纹（阅读长文件时定位当前行；VSCode 同族反馈）
+      // 悬停行底纹（阅读长文件时定位当前行；VSCode 同族反馈）。
+      //
+      // **只报行级 damage 而不是 `mark_dirty()` 整编辑器**（2026-10-29 修
+      // “鼠标扫过文本区 CPU 拉满”）：底纹实际只改新旧两行各一条 ~20px 细条
+      //（绘制处 `fill_rect(bounds_.x, row_top+band_top, bounds_.width, band_height)`），
+      // 而 `mark_dirty` 报的是整个编辑器 bounds（占视口 80%+ → 超 55% 阈值
+      // 退化整帧+整窗上屏，WARP 下每帧 ~7ms CPU 拷贝，实测 382% 单核）。
+      // 这里按同样的几何只报两条行条；dirty 标志不置——底纹绘制不依赖
+      // 其它状态重算，行几何已在本函数开头 `hover_line_at → rebuild_line_geometry`
+      // 里重建。
       const int line = hover_line_at(context, event.position);
       if (line != hover_line_) {
+        const auto line_band = [&](int index) -> math::Rect {
+          if (index < 0) return {};
+          const float height = line_height_cache_;
+          if (height <= 0.0f) return {};
+          const float top = bounds_.y + kTopPadding +
+                            static_cast<float>(index) * height - scroll_y_;
+          // 与绘制处同源：行高的一部分作为底纹（视觉对齐当前行底色），
+          // 不确定具体占比时取整行——宽取编辑器全宽（底纹就是全宽的）。
+          return math::Rect{bounds_.x, top, bounds_.width, height};
+        };
+        record_damage_rect(line_band(hover_line_));  // 旧行：底纹消失
+        record_damage_rect(line_band(line));         // 新行：底纹出现
         hover_line_ = line;
-        mark_dirty();
       }
       // （这里原来还有"悬停词变化 → `on_hover_word`"回调，供宿主发起 LSP hover。
       //  LSP 符号悬停卡片已整套删除，取词与防抖一并下掉——鼠标移动不再产生

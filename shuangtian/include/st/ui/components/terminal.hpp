@@ -545,6 +545,12 @@ class Terminal : public Element {
   mutable std::string last_active_key_{};
   /// 「回到底部」按钮的悬停态（高亮反馈）。
   mutable bool hover_to_end_{false};
+  /// 上一次绘制时光标的**闪烁可见相位**（`fmod(time,1) < 0.5`）。
+  ///
+  /// 只在相位真翻转的那帧才上报损坏区：若每帧都报，配合帧间损坏判据
+  /// （`tree_damage_pending`）就成了又一个"每帧续帧"循环（2026-10-29 修 CPU
+  /// 空转时引入，实测 headless 下 35fps 空转，当天即修）。`-1` = 从未画过。
+  mutable int last_blink_visible_{-1};
   /// 屏幕文本的渲染缓存（逐行，避免每帧重建整屏字符串）。
   mutable std::vector<std::string> screen_lines_{};
   /// 刷新实测格宽缓存（字体端口/字号/缩放变化时调用；`arrange` 里先于列数计算）。

@@ -1533,6 +1533,15 @@ class GpuCanvas final : public Surface {
     note_deferred_draw();
     return true;
   }  [[nodiscard]] auto supports_blur() const noexcept -> bool override { return true; }
+  /// GPU 画布**不**支持区域重绘：整帧绘制只需 ~1ms，而局部路径要另维护一套
+  /// 裁剪/命令列表状态；更关键的是局部重绘成立的前提是**画布保留上一帧内容**——
+  /// GPU 画布的呈现走 `DXGI_SWAP_EFFECT_DISCARD` 的 swapchain，`Present` 之后
+  /// 后备缓冲内容**未定义**（驱动可随意丢弃），只拷损坏区会让其余像素变成黑块。
+  ///
+  /// 实测（Windows + NVIDIA L20-6Q，`--renderer gpu`）：把这里改成 `true` 后
+  /// 界面频繁出现大片黑区；同一份代码在纯 CPU 机器上正常，因为那里走软件画布
+  /// （`Canvas::supports_partial_repaint()` 才是真的可用）。
+  [[nodiscard]] auto supports_partial_repaint() const noexcept -> bool override { return false; }
 
   void draw_canvas_at(const Surface& source, int x, int y, DrawOptions options = {}) override {
     // ⚠ 与 `Canvas::draw_canvas_at` **必须同语义**：`x/y` 是**物理像素**，
@@ -3222,6 +3231,27 @@ class D3dPresenter final : public Presenter {
                                                    static_cast<unsigned>(result)));
     }
     return ok();
+  }
+
+  /// **局部上屏**：`dirty` 重载。
+  ///
+  /// ⚠ **当前实现一律回退整窗拷贝**，这是有意的：局部拷贝的正确性依赖「后备缓冲
+  /// 保留上一帧内容」，而本 swapchain 用的是 `DXGI_SWAP_EFFECT_DISCARD`
+  ///（见 `resize()`）——它的 `Present` 之后后备缓冲内容**未定义**，驱动可以
+  /// 随意丢弃/覆写。于是“只拷损坏区”会让未拷贝的绝大部分区域变成**黑块**。
+  ///
+  /// 实测（Windows + NVIDIA L20-6Q，`--renderer gpu`）：启用 `CopySubresourceRegion`
+  /// 局部拷贝后界面频繁出现大片黑区；同一份代码在纯 CPU 机器上正常——那里走
+  /// 软件画布（`Canvas::supports_partial_repaint()` 才是真的可用）。
+  ///
+  /// 要让这里真的只搬损坏区，前提是把 swapchain 换成**保留型**
+  ///（`DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL`），并按 FLIP 模型重做上屏路径
+  ///（FLIP 的后备缓冲只读，不能当 `CopySubresourceRegion` 的目标）。
+  /// 在那之前保留这个重载只为接口完整：调用方传区域也不会画错。
+  auto present(Surface& canvas, int width, int height,
+               const math::IntRect& dirty) -> Status override {
+    (void)dirty;
+    return present(canvas, width, height);
   }
 
   [[nodiscard]] auto note() const -> std::string override {

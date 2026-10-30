@@ -56,6 +56,19 @@ class UiRoot : public Element::HostFocus {
   void set_time(double seconds) noexcept { time_seconds_ = seconds; }
   [[nodiscard]] auto time() const noexcept -> double { return time_seconds_; }
 
+  /// 距下一次定时唤醒的毫秒数（无唤醒点时返回负值；已到期返回 0）。
+  ///
+  /// 低频周期事件（光标闪烁/Toast 倒计时）经 `Element::request_wake_at` 登记后，
+  /// 帧循环用它把空闲等待夹到最近的唤醒点——期间真正睡眠，而不是 60fps 空转
+  /// 重绘同一张静止画面（纯 CPU 软件光栅下实测烧 5 核的根因，2026-10-29）。
+  /// 帧循环轮询它（每帧一次），必须 O(1)：收集已在 `collect_animation_requests`
+  /// 里顺带做完（那一次遍历本来就在），这里只读结果。
+  [[nodiscard]] auto next_wake_in_ms() const noexcept -> double {
+    if (wake_at_ < 0.0) return -1.0;
+    const double delta = (wake_at_ - time_seconds_) * 1000.0;
+    return delta < 0.0 ? 0.0 : delta;
+  }
+
   /// 事件分发（命中测试 → 捕获链 → 冒泡；焦点/悬停状态随之更新）。
   [[nodiscard]] auto dispatch(Event& event) -> bool;
 
@@ -287,11 +300,14 @@ class UiRoot : public Element::HostFocus {
 
   void mark_dirty_all();
   [[nodiscard]] auto dirty() const noexcept -> bool { return needs_frame(); }
-  /// 帧是否需要渲染：布局脏 / 有损坏区待重绘 / 动画续帧。
+  /// 帧是否需要渲染：布局脏 / 有损坏区待重绘 / 动画续帧 / 定时唤醒到期。
   ///
   /// 与旧语义的差别：动画续帧不再要求"重新布局"（只重画动画元素那块），
-  /// 元素级损坏区也计入（增量重绘的输入）。
+  /// 元素级损坏区也计入（增量重绘的输入）；树根上**帧间**登记的损坏区
+  /// 直接计入（不再依赖帧首搬运，2026-10-29 修盲区）。
   [[nodiscard]] auto needs_frame() const noexcept -> bool;
+  /// 树根上是否有未搬运的损坏区（帧间盲区的补口，见实现处说明）。
+  [[nodiscard]] auto tree_damage_pending() const noexcept -> bool;
   /// 上一帧**实际绘制**的元素数（视口剔除后）。诊断与控制通道用。
   [[nodiscard]] auto painted_elements() const noexcept -> std::uint64_t {
     return painted_elements_;
@@ -300,6 +316,13 @@ class UiRoot : public Element::HostFocus {
   [[nodiscard]] auto dirty_rect() const noexcept -> math::IntRect { return dirty_rect_; }
   /// 上一帧是否走了**区域重绘**（增量）路径。
   [[nodiscard]] auto last_frame_partial() const noexcept -> bool { return last_frame_partial_; }
+  /// **本帧是否有可上屏的变化**（2026-10-29）：`paint_frame` 走了空帧路径
+  ///（损坏区空、无整帧标记——hint 计时等驱动但画面未变）时为 false。
+  /// 上层（`Application::render_frame`）据此跳过 present，避免每帧整窗拷贝
+  /// 上屏一个没变的画面（WARP 下实测 ~7ms/帧的 CPU 白烧）。
+  [[nodiscard]] auto last_frame_presentable() const noexcept -> bool {
+    return last_frame_presentable_;
+  }
   void clear_dirty() noexcept;
 
   /// 增量重绘：绘制一帧（自动选择全量/局部），返回是否走了局部路径。
@@ -361,6 +384,14 @@ class UiRoot : public Element::HostFocus {
   void paint_subtree(const RenderContext& context, Element& element, raster::Surface& canvas);
   /// 绘制后汇总"还有元素在过渡中"（决定要不要再给一帧）。
   void collect_animation_requests();
+  /// 清空树根上残留的损坏区（不搬运——调用方已在本帧画出它们）。
+  ///
+  /// 见 `paint_frame` 尾部的说明：本帧绘制期产生的 damage 会被
+  /// `tree_damage_pending()` 误读成"帧间新变更"，残留会令 `dirty()` 恒真。
+  /// 但注意：这只清**树根元素**的 extras 残留（帧首 `collect_tree_damage`
+  /// 搬完后的余量），元素自身新增的（绘制中 `request_animation`）仍留给
+  /// 下一帧帧首——两条路径互不干扰。
+  void take_root_damage() noexcept;
   [[nodiscard]] auto hit_test_subtree(Element& element, math::Point point) -> Element*;
   [[nodiscard]] auto dispatch_to(Element& element, Event& event) -> bool;
   /// 清掉已不在树上的 `focused_` / `hovered_` / `pressed_`。
@@ -523,12 +554,20 @@ class UiRoot : public Element::HostFocus {
   bool animation_pending_{false};
   /// 上一帧之后仍需下一帧（动画续帧；clear_dirty 时从 animation_pending_ 滚动）。
   bool followup_{false};
+  /// 最近的定时唤醒时刻（单调秒；< 0 = 无）。
+  ///
+  /// 与 `followup_` 的分工：那是"连续动画要下一帧"（时间不定，必须马上续），
+  /// 这是"到点才要帧"（闪烁/倒计时）——`needs_frame()` 在时刻未到时**不**因它置真，
+  /// 帧循环只拿它夹空闲等待的时长（`next_wake_in_ms`）。
+  double wake_at_{-1.0};
   /// 累积损坏区（逻辑像素）与"整帧"标记（帧首消费，绘制期间新记录的留给下一帧）。
   math::Rect pending_damage_{};
   bool pending_full_{true};
   /// 上一帧重绘区域/是否局部（诊断用）。
   math::IntRect dirty_rect_{};
   bool last_frame_partial_{false};
+  /// 本帧是否真的有可上屏的变化（空帧 = false；见 `last_frame_presentable`）。
+  bool last_frame_presentable_{true};
   double time_seconds_{0.0};
 };
 

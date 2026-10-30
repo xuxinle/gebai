@@ -910,6 +910,26 @@ auto Application::start() -> Status {
     }
   }
 
+  // **软件渲染（WARP）帧预算自适应**（2026-10-29，后收敛为仅日志）：
+  //
+  // 背景：WARP（CPU 模拟 GPU）下曾因「每事件整窗重绘 + 整纹理 CopyResource」
+  // 导致鼠标一动 CPU 拉满（实测 382% 单核）。第一阶段曾用「16ms→33ms 降帧」
+  // 压制症状，但那是钝刀：hover 过渡被限到 15fps，观感变差。
+  //
+  // 现在根治手段已落地——win32 局部上屏（`set_present_region` →
+  // `CopySubresourceRegion`，与 X11 同能力）：hover 只拷 32×32 的损坏区，
+  // 整窗 6.7MP 的 CPU 拷贝消失。降帧预算不再需要，恢复 60fps；只留这条
+  // 日志让“这台机器在用 WARP”成为可观察事实（排障时不用猜）。
+  if (options_.frame_budget_ms <= 16.0) {
+    const std::string note = impl_->backend->renderer_note();
+    const bool software_raster =
+        note.find("WARP") != std::string::npos ||
+        note.find("Basic Render Driver") != std::string::npos;
+    if (software_raster) {
+      ST_LOG_INFO("软件渲染（{}）：已启用局部上屏，帧预算维持 16ms", note);
+    }
+  }
+
   // 窗口/任务栏图标（PNG 字节，编译期嵌入）：**建窗之后**才能设（要 `HWND`）。
   //
   // 为何不失败就退出：图标是外观资源，不是运行前提。后端不支持（无头）或数据不合法时
@@ -1388,6 +1408,15 @@ void Application::render_frame() {
   // 窗口后端的“局部上屏”只在本帧确实只改了那一个矩形时才成立（否则上屏一块
   // 而画布已整屏重画的其余部分就送不出去，表现为“画面停在旧帧上”）。
   const bool partial = root_.paint_frame(canvas);
+  // **空帧不上屏**（2026-10-29）：hint 计时/定时唤醒驱动的帧常常没有任何像素
+  // 变化（损坏区空、无整帧标记）——多一次 present 是纯浪费：WARP 下那是
+  // CPU 多线程整纹理拷贝（实测 ~7ms/帧），鼠标停在按钮上等气泡的那 450ms
+  // 里每帧都在白烧。后备缓冲里的画面就是最新，跳过即可。
+  if (!root_.last_frame_presentable()) {
+    impl_->repaint = false;
+    root_.clear_dirty();
+    return;
+  }
   impl_->backend->set_present_region(partial ? root_.dirty_rect() : math::IntRect{});
   const std::int64_t present_start = time::now_ns();
   impl_->backend->present();
@@ -1432,16 +1461,25 @@ void Application::tick() {
   // `WM_MOUSEMOVE` 可达 125~1000 次/秒，逐个派发会让绘制类应用在一帧里改几百次文档
   //（并推几百条撤销记录）。合并在**这里**（帧循环）而不是 `UiRoot::dispatch`：
   // 只有这里有"帧"的概念，而测试/控制通道期望"调一次派发一次"。
+  //
+  // ⚠ **repaint 只由真派发的事件置位**（2026-10-29 修"鼠标一动 CPU 拉满"）：
+  // 被合并器收下的 move 在这里对 UI 零影响——若也置 repaint，125Hz 的移动就
+  // 变成每秒 125 次"无条件整窗重绘"（实测纯软件 WARP 下 509% 单核）。
+  // 合并结果在帧末 flush，届时 UI 真变了（hover 进入/离开 → set_hovered →
+  // mark_dirty）自然有 dirty 驱动下一帧，不需要这里预先拉。
   while (true) {
     auto event = impl_->backend->poll_event();
     if (!event.has_value()) break;
-    if (!root_.feed_pointer_move(*event)) {
+    const bool coalesced = root_.feed_pointer_move(*event);
+    if (!coalesced) {
       (void)root_.dispatch(*event);
+      impl_->repaint = true;
     }
-    impl_->repaint = true;
   }
   // 帧末把合并的移动派发出去（位置取最新；本帧走过的整段由合并器的 `earliest` 记录）。
-  (void)root_.flush_coalesced_moves();
+  // flush 后的 UI 变化走 dirty 路径驱动下一帧——鼠标停在原处时（hover 已稳定）
+  // 不再有任何帧，CPU 归零。
+  if (root_.flush_coalesced_moves() > 0 && root_.dirty()) impl_->repaint = true;
 }
 
 Application::~Application() {
@@ -1491,7 +1529,7 @@ auto Application::run_loop() -> Result<int> {
   return 0;
 }
 
-void Application::pace_loop(std::int64_t tick_start_ms) const {
+void Application::pace_loop(std::int64_t tick_start_ms) {
   // 两种节拍都**可被控制通道打断**：
   //
   // 为什么“有活干”那一路也必须可打断：本轮 `tick()` 的次序是
@@ -1525,8 +1563,26 @@ void Application::pace_loop(std::int64_t tick_start_ms) const {
     if (remaining > 0.5) interruptible_wait(static_cast<int>(remaining));
     return;
   }
-  // 空闲：等控制通道可读（或 4ms 超时），而不是盲睡固定拍
-  interruptible_wait(4);
+  // 空闲：等控制通道可读，超时夹到「最近的定时唤醒点」（2026-10-29 改）。
+  //
+  // 低频周期事件（光标闪烁/Toast 倒计时）经 `Element::request_wake_at` 登记
+  // 唤醒点：`needs_frame()` 在时刻未到时**不**置真，到这里就是真空闲。若超时
+  // 仍固定 4ms，闪烁的那一帧要靠 4ms 轮询碰运气（最多晚 4ms，且每秒 250 次
+  // 空醒）。现在直接睡到唤醒点（控制通道可读仍即时唤醒，输入响应不受影响）——
+  // 无唤醒点时维持 4ms 上限（输入事件靠后端消息泵，4ms 轮询是它的响应保障）。
+  //
+  // ⚠ 先把帧时间轴刷新到当前墙钟：`time_seconds_` 停在上一帧，而唤醒点是
+  // 绝对时刻——不刷新的话剩余时长永远按旧基准算，不是睡过头就是频繁早醒。
+  root_.set_time(static_cast<double>(time::now_ns() - impl_->started_ns) / 1'000'000'000.0);
+  const double wake_in_ms = root_.next_wake_in_ms();
+  int idle_ms = 4;
+  if (wake_in_ms >= 0.0) {
+    // 到点或已过：立即醒（下一轮 tick 会看到 needs_frame 为真）。
+    idle_ms = static_cast<int>(wake_in_ms);
+  }
+  if (idle_ms <= 0) return;  // 唤醒点已到：不睡，直接下一轮
+  if (idle_ms > 4000) idle_ms = 4000;  // 防御：时钟异常时不至于睡死
+  interruptible_wait(idle_ms);
 }
 
 void Application::wake_control() {

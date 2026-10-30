@@ -70,6 +70,16 @@ class Presenter {
   /// 呈现一次：把 `canvas` 的内容送到窗口。
   /// **要求 `canvas` 是本进程创建的 GPU 画布**（不同设备间无法直接拷贝）。
   virtual auto present(Surface& canvas, int width, int height) -> Status = 0;
+  /// 呈现一次，**只搬运 `dirty` 矩形**（物理像素，画布坐标系）。
+  ///
+  /// 缺省实现回退整窗拷贝：旧呈现器/未实现局部路径的平仓不受影响。
+  /// 语义约定：后备缓冲保留上一帧内容（CopyResource/CopySubresourceRegion
+  /// 都不是翻转语义），只改损坏区 → Present 整帧翻转仍得到正确完整画面。
+  virtual auto present(Surface& canvas, int width, int height,
+                       const math::IntRect& dirty) -> Status {
+    (void)dirty;
+    return present(canvas, width, height);
+  }
   /// 人话描述（哪块卡、几个缓冲、是否撕裂模式），用于 `metrics` 上报与排障。
   [[nodiscard]] virtual auto note() const -> std::string = 0;
 };

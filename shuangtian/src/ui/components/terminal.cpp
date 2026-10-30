@@ -513,6 +513,10 @@ void Terminal::set_shell(std::string program, std::vector<std::string> args) {
 }
 
 void Terminal::set_working_directory(std::string dir) {
+  // **值未变不标脏**（2026-10-29 修“鼠标一动 CPU 拉满”）：gbcode 每帧重组
+  // 都会重设一遍 cwd——无条件 mark_dirty 让终端（占视口 30%）每帧报
+  // 损坏区，与编辑器合并后恒超 55% 阈值退化成整帧+整窗上屏。
+  if (cwd_default_ == dir) return;
   cwd_default_ = std::move(dir);
   mark_dirty();
 }
@@ -1599,12 +1603,25 @@ void Terminal::paint_content(const RenderContext& context, raster::Surface& canv
   // 旧实现 `!in_alt_screen()` 把它禁了，vim 里看不到光标在哪（实测踩到）。
   // 回看滚动时（`sb_offset > 0`）不画——那是在看历史，不在编辑。
   //
-  // ⚠ 闪烁**不要求下一帧**：不调 `request_animation()` 的话，重绘平静后
-  // 就没有新帧，光标会冻在它碰巧停住的相位上——用户看到的就是
-  // "闪一下就定住了"（实测：静置 6 秒像素零变化）。
+  // ⚠ 闪烁走**定时唤醒**（`request_wake_at`），不走连续续帧：一秒只翻转两次的
+  // 东西若每帧 `request_animation()`，帧循环就永不停歇——以帧预算上限（60fps）
+  // 空转重绘同一张静止画面，纯 CPU 软件光栅下实测烧满 5 核（2026-10-29
+  // 用户报"gbcode CPU 70%"的根因）。现在只在下一个相位翻转点拉一帧。
   const bool blinking = screen.cursor_visible() && sb_offset == 0 && focused();
-  if (blinking) request_animation();   // 续帧：一秒周期，本组件自己管
   if (blinking) {
+    const double blink = std::fmod(context.time_seconds, 1.0);
+    const bool visible_now = blink < 0.5;
+    const double next_flip =
+        context.time_seconds + (visible_now ? 0.5 - blink : 1.0 - blink);
+    request_wake_at(next_flip);
+    // **只在相位真翻转的那帧上报损坏区**：光标那一格的重画由翻转驱动，
+    // 平时（同相位内的帧）上报只会与帧间损坏判据（`tree_damage_pending`）
+    // 互相触发成又一个每帧续帧循环（实测 headless 35fps 空转）。
+    // 屏幕内容/光标位置的其它变化走 PTY 泉的标脏路径，不在这几。
+    if (last_blink_visible_ != (visible_now ? 1 : 0)) {
+      record_damage();
+      last_blink_visible_ = visible_now ? 1 : 0;
+    }
     // 挂起态（写满一行还没换行）：光标停在**最后一个字符上**，不是下一列——
     // 多画一格会出现"光标永远多跳一列"的错位感。
     const int cursor_col = screen.pending_wrap() && screen.cursor_col() > 0
@@ -1612,8 +1629,7 @@ void Terminal::paint_content(const RenderContext& context, raster::Surface& canv
                                : screen.cursor_col();
     const float cx = origin_x + static_cast<float>(cursor_col) * cell_w;
     const float cy = origin_y + static_cast<float>(screen.cursor_row()) * line_h;
-    const float blink = std::fmod(static_cast<float>(context.time_seconds), 1.0f);
-    if (blink < 0.5f) {
+    if (visible_now) {
       switch (screen.cursor_shape()) {
         case st::text::AnsiCursorShape::Block:
           canvas.fill_rect(math::Rect{cx, cy, cell_w, line_h},

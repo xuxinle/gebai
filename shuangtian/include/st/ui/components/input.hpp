@@ -119,6 +119,10 @@ auto set_property(std::string_view name, std::string_view value) -> bool overrid
   std::string icon_prefix_{};
   std::size_t cursor_{0};
   bool password_{false};
+  /// 上一次绘制时光标的**闪烁可见相位**；只在真翻转的那帧才上报损坏区
+  ///（每帧报会与帧间损坏判据互相触发成每帧续帧循环，见 Terminal 同名成员）。
+  /// `-1` = 从未画过。mutable：paint 是 const 路径。
+  mutable int last_blink_visible_{-1};
 
   // —— 选区（2026-10-14）——
   //
@@ -247,6 +251,9 @@ class TextArea : public Element {
   std::string placeholder_{};
   std::size_t cursor_{0};
   float scroll_{0.0f};
+  /// 上一次绘制时光标的**闪烁可见相位**；只在真翻转的那帧才上报损坏区
+  ///（见 Input 同名成员的说明）。
+  mutable int last_blink_visible_{-1};
   /// 只读（编辑禁入，但可聚焦/定位光标/滚动）。与 `enabled_` **无关**：
   /// 后者是“控件不可用”（变灰、不响应），两者语义不同，不要用一个代替另一个。
   bool read_only_{false};

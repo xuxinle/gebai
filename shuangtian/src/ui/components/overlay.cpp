@@ -375,14 +375,17 @@ void Toast::paint(const RenderContext& context, raster::Surface& canvas) const {
     const double now = context.time_seconds;
     if (dismiss_at_ < 0.0) {
       dismiss_at_ = now + auto_dismiss_ms_ / 1000.0;  // 首次绘制起算
-      request_animation();
+      request_wake_at(dismiss_at_);
     } else if (now >= dismiss_at_) {
       expired_ = true;
       record_damage();  // 摘除后需要一帧把旧内容抹掉（mark_dirty 非 const；绘制路径用损坏区上报）
       if (on_dismiss) on_dismiss();
       return;  // 到期：整组件不绘制（含阴影）
     } else {
-      request_animation();  // 计时中：续帧，到期那帧才会真的触发
+      // **倒计时走定时唤醒**（2026-10-29 改）：Toast 的自动消失是"到点一次性事件"，
+      // 却原先每帧 `request_animation()` 续帧——一个挂 4 秒的 Toast 就把帧循环
+      // 拉满 4 秒（60fps 空转重绘静止画面）。现在登记到期点，到点才拉一帧。
+      request_wake_at(dismiss_at_);
     }
   }
   Element::paint(context, canvas);

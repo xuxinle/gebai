@@ -408,3 +408,84 @@ ST_TEST(hover_fade_out_completes_across_frames) {
   ST_CHECK(fixture.button->hover_progress() < 0.01f);   // 高亮彻底消失
   ST_CHECK(frames < 40);
 }
+
+ST_TEST(hover_out_to_non_feedback_target_still_repaints_the_old_one) {
+  // **鼠标从"有视觉反馈的控件"移到"无反馈容器"时，旧控件必须被重绘一次。**
+  //
+  // ### 缺陷原形
+  //
+  // 为省 CPU 给 `UiRoot::update_hover` 加了一条"无视觉反馈的命中不跟踪"的早退：
+  // 普通容器（Panel/布局壳）既不显示 hover 视觉也没回调，跟踪它们纯属白付重绘。
+  // 但那条分支清旧目标时**只调了 `set_hovered(false)`、没标脏**，理由是
+  // "旧目标若在过渡中，下一帧的过渡推进会自己报到自家 damage"。
+  //
+  // 那个理由漏了一个前提：**得先有下一帧**。鼠标停在无反馈容器上不动时，
+  // 既没有新事件、也没有动画在跑，帧循环已经收敛——于是 `hover_t_` 停在 1.0，
+  // 画面上按钮**永久保持悬浮高亮**。正是本文件末尾注释警告的
+  // "卡住的悬浮高亮 / 侧栏出现两个选中项"。
+  //
+  // ### 判据
+  //
+  // 不看 `root.dirty()`（`clear_dirty` 的行语义会干扰），直接看两件事：
+  // ① 移出后**确实请求了新的一帧**（否则视觉永远不会被修）；
+  // ② 帧循环跑完后 `hover_progress()` 真的回落到 0——即"高亮消失"这个结果成立。
+  Theme theme = Theme::dark();
+  UiRoot root;
+  root.set_theme(theme);
+  root.set_viewport(st::math::Size{static_cast<float>(kWidth), static_cast<float>(kHeight)});
+
+  // 外层是无 hover 视觉的容器；里面放一个**带 hover 视觉**的按钮。
+  // 这样鼠标从按钮移到容器空白处，命中目标就从"有反馈"变成"无反馈"。
+  auto panel = std::make_unique<st::ui::Panel>();
+  panel->set_id("probe-panel");
+  auto owned = std::make_unique<Button>("确定");
+  Button* button = owned.get();
+  button->set_id("probe-btn");
+  panel->add_child(std::move(owned));
+  root.set_content(std::move(panel));
+  root.layout();
+  const auto context = st::ui::RenderContext{theme, nullptr, 0.0};
+  button->measure(context, st::ui::Constraints{});
+  button->arrange(context, Rect{20.0f, 20.0f, 120.0f, 40.0f});
+
+  const auto move_to = [&](float x, float y) {
+    Event event;
+    event.kind = EventKind::MouseMove;
+    event.position = Point{x, y};
+    (void)root.dispatch(event);
+  };
+
+  Canvas canvas{kWidth, kHeight};
+  const auto settle = [&](double start) {
+    double time = start;
+    for (int i = 0; i < 40; ++i) {
+      root.set_time(time);
+      root.paint_frame(canvas);
+      root.clear_dirty();
+      time += 0.016;
+      if (!root.dirty()) break;
+    }
+    root.clear_dirty();
+  };
+
+  root.set_time(1.0);
+  root.paint_frame(canvas);
+  root.clear_dirty();
+
+  // ① 移到按钮上，等淡入走完。
+  move_to(60.0f, 40.0f);
+  settle(1.0);
+  ST_CHECK(button->hovered());
+  ST_CHECK(button->hover_progress() > 0.99f);
+
+  // ② 移到容器空白处（无反馈目标）。
+  move_to(static_cast<float>(kWidth) - 10.0f, static_cast<float>(kHeight) - 10.0f);
+  ST_CHECK(!button->hovered());   // HoverOut 已送达
+
+  // ★ 核心判据：这一刻必须**请求了新帧**，否则高亮永远停在那儿。
+  ST_CHECK(root.dirty());
+
+  // ③ 帧循环跑完后高亮真的消失。
+  settle(10.0);
+  ST_CHECK(button->hover_progress() < 0.01f);
+}

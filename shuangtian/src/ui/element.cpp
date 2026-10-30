@@ -433,6 +433,19 @@ void Element::record_damage() const noexcept {
   top->extras().damage_valid = true;
 }
 
+void Element::record_damage_rect(math::Rect rect) const noexcept {
+  // 空矩形不登记（与 `record_damage` 对零几何元素的处理同一逻辑：画不出的东西
+  // 不占像素）。矩形有效性由调用方保证（它是唯一知道“改了哪块”的人）。
+  if (rect.is_empty()) return;
+  const Element* top = this;
+  for (const Element* current = parent_; current != nullptr; current = current->parent_) {
+    top = current;
+  }
+  RenderExtras& top_state = top->extras();
+  top_state.damage = top_state.damage_valid ? top_state.damage.union_with(rect) : rect;
+  top_state.damage_valid = true;
+}
+
 auto Element::take_damage() const noexcept -> DamageReport {
   DamageReport report;
   const RenderExtras& state = extras();

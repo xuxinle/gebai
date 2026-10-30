@@ -512,6 +512,12 @@ class Win32Backend final : public Backend {
     // 否则本帧画在旧画布、present 时才换新画布，新画布要等下一帧才有内容，
     // 而"下一帧"没有必然的触发（repaint 已消费）→ 屏幕停在拉伸的旧内容上。）
     // GPU 画布优先走 swapchain（零 CPU 拷贝）；软件画布或未就绪时落回 GDI blit。
+    //
+    // ⚠ **不做局部上屏**：本 swapchain 用 `DXGI_SWAP_EFFECT_DISCARD`，`Present`
+    // 之后后备缓冲内容未定义，只拷损坏区会让其余像素变黑块（实测：Windows +
+    // NVIDIA L20-6Q 上界面频繁出现大片黑区）。局部上屏需要先换成保留型
+    //（`FLIP_SEQUENTIAL`）并重做拷贝路径，那是独立一轮的事——在那之前
+    // `set_present_region` 收下的区域只当“提示”，不参与上屏。
     if (presenter_ != nullptr) {
       if (auto presented = presenter_->present(*surface_, surface_->physical_width(),
                                                surface_->physical_height());
@@ -920,6 +926,14 @@ class Win32Backend final : public Backend {
     return present_skipped_;
   }
   [[nodiscard]] auto frame_count() const noexcept -> std::uint64_t override { return frames_; }
+  /// 应用告知本帧唯一被改动的区域（逻辑像素；空 = 整帧）。
+  ///
+  /// ⚠ 本后端**不据此做局部上屏**：swapchain 是 `DXGI_SWAP_EFFECT_DISCARD`，
+  /// `Present` 后后备缓冲内容未定义，只拷损坏区会留黑块（实测 NVIDIA L20-6Q
+  /// 上大片黑区）。要靠它省拷贝量，得先换成保留型 swapchain（`FLIP_SEQUENTIAL`）
+  /// 并重做上屏路径。现在只记录逻辑像素区域供诊断，不参与像素搬运。
+  void set_present_region(math::IntRect region) override { present_region_ = region; }
+
   [[nodiscard]] auto device_scale() const noexcept -> float override { return scale_; }
   [[nodiscard]] auto logical_size() const noexcept -> math::Size override {
     // 用**精确**值（物理 / scale）而不是取整后的整数：布局按它排布，
@@ -1967,6 +1981,12 @@ class Win32Backend final : public Backend {
   /// 正是 2026-10-20 那个软件路径空白窗口的典型形态）。
   std::uint64_t present_skipped_{0};
   bool present_fallback_logged_{false};
+  /// 应用声明的本帧改动区（**逻辑像素**；空 = 整帧）——由 `set_present_region` 写入。
+  ///
+  /// ⚠ 仅作诊断记录，**不参与上屏**：本 swapchain 是 `DXGI_SWAP_EFFECT_DISCARD`，
+  /// `Present` 后后备缓冲内容未定义，只拷损坏区会留黑块（实测 NVIDIA L20-6Q
+  /// 上大片黑区）。要真用它省拷贝量，得先换成 `FLIP_SEQUENTIAL` 并重做上屏路径。
+  math::IntRect present_region_{};
   /// 请求的渲染器（来自 `--renderer`；`auto` 表示"首次建面时实测选优"）。
   std::string renderer_{"auto"};
   /// **已解析**的渲染器（`"gpu"` / `"software"`）；空 = 尚未选型。

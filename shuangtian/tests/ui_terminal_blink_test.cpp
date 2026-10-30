@@ -1,24 +1,25 @@
-/// 终端**光标闪烁续帧**回归测试（缺陷：闪烁其实完全不闪）。
+/// 终端**光标闪烁定时唤醒**回归测试（缺陷史：闪烁烧 CPU + 闪烁冻结，两次都钉住）。
 ///
-/// ### 本轮钉住的缺陷（2026-10-08，用户报「光标闪烁不稳定」）
+/// ### 第一轮（2026-10-08，用户报「光标闪烁不稳定」）
 ///
 /// `Terminal::paint_content` 用 `fmod(context.time_seconds, 1.0)` 决定光标显隐，
 /// 却**从不调 `request_animation()`**——而"还要不要下一帧"由它汇总：
-/// `UiRoot` 帧末 `collect_animation_requests()` → `followup_`，
-/// 下一帧起 `UiRoot::dirty()`（`needs_frame()`）才为真。
+/// 于是重绘平静下来后不再有新帧，光标**冻在它碰巧停住的相位上**。
 ///
-/// 于是重绘平静下来后不再有新帧，光标**冻在它碰巧停住的相位上**
-/// （实测：静置 6 秒、30 次采样，像素**零变化**）。
-/// 用户说"不稳定"是准确的——他们看到的是"有时亮着一直不灭"。
+/// ### 第二轮（2026-10-29，用户报「gbcode CPU 70%、几个示例都烧」）
 ///
-/// ### 判据
+/// 第一轮的修法把闪烁挂到 `request_animation()`（连续续帧）——修好了冻结，
+/// 却引入了新缺陷：**一秒只翻转两次的光标让帧循环永不收敛**，以帧预算上限
+/// （60fps）空转重绘同一张静止画面，纯 CPU 软件光栅下实测烧满 5 核。
 ///
-/// **画过一帧、且没有新输入时，`UiRoot::dirty()` 必须仍为真**
-/// （=「还有动画要下一帧」）。这条与"光标画在哪儿"无关，
-/// 直接对应"闪烁能不能继续"这个机制本身。
+/// 现在的语义（`Element::request_wake_at`）：闪烁登记**下一个相位翻转点**，
+/// 帧循环把空闲等待睡到那个点——两帧之间真正睡眠。判据也随之更新：
 ///
-/// 用 `focused()` 前置：**失焦的终端不该占用帧预算**（那是纯浪费），
-/// 因此本用例必须先给终端焦点——这同时钉住了这个刻意的行为。
+/// 1. 聚焦静止时，**帧循环收敛**（`needs_frame` 为假）——不烧帧预算；
+/// 2. 但 `next_wake_in_ms()` 给出**有限的正值**（闪烁仍会继续，不会冻结）；
+/// 3. 把时间轴推进到唤醒点之后，`needs_frame()` 变真——到点真拉帧。
+///
+/// 用 `focused()` 前置：**失焦的终端不该登记唤醒**（那是纯浪费）。
 
 #include "st/test/test.hpp"
 
@@ -63,9 +64,9 @@ class BlankTextPort final : public st::ui::TextPort {
     canvas.fill_rect(st::math::Rect{origin.x, origin.y, width_of(utf8), kAscent},
                      st::raster::Paint::solid(color));
   }
-  [[nodiscard]] auto ellipsize(std::string_view utf8, float, float) const
+  [[nodiscard]] auto ellipsize(std::string_view, float, float) const
       -> std::string override {
-    return std::string{utf8};
+    return {};
   }
   [[nodiscard]] auto wrap(std::string_view utf8, float, float) const
       -> std::vector<std::string_view> override {
@@ -90,7 +91,7 @@ void expect(bool ok, std::string message) {
 
 }  // namespace
 
-ST_TEST(terminal_cursor_requests_followup_frames_while_focused) {
+ST_TEST(terminal_cursor_wakes_at_flip_points_while_focused) {
   if (!st::process::PtySession::supported()) return;
   BlankTextPort port{};
   st::ui::UiRoot root{};
@@ -112,6 +113,7 @@ ST_TEST(terminal_cursor_requests_followup_frames_while_focused) {
     terminal->pump();
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
     root.layout(false);
+    root.set_time(static_cast<double>(i) * 0.03);
     root.paint_frame(canvas);
     root.clear_dirty();
   }
@@ -119,36 +121,38 @@ ST_TEST(terminal_cursor_requests_followup_frames_while_focused) {
   expect(root.set_focus(terminal), "无法把焦点给终端");
   expect(terminal->focused(), "焦点没落在终端上");
 
-  // 让光标在**已聚焦**状态下画一帧（此时它才会请求续帧）。
+  // 让光标在**已聚焦**状态下画一帧（此时它会登记下一个唤醒点）。
+  root.set_time(10.0);
   root.paint_frame(canvas);
   root.clear_dirty();
 
-  // **核心判据：帧循环必须不收敛**。
-  //
-  // 为什么不看 `terminal->animation_requested()`：那个开关在**绘制时**就被
-  // `collect_animation_requests` 消费掉了，画完后读它永远是 false
-  //——第一版用例就这么写过，得到的是假结论。
-  // 也不看单帧的 `root.dirty()`：PTY 输出产生的损坏区会把它与动画混为一谈。
-  //
-  // 用**循环能不能停下来**最直接：光标每秒闪两次，帧就永远有下一帧。
-  // （须成对调 `paint_frame` + `clear_dirty`——后者才是把本帧的动画请求
-  //   滚成 `followup_` 的地方，与应用的帧循环同形。）
+  // ① 聚焦静止：帧循环必须收敛（不烧帧预算）。
+  //    （PTY 输出静下来后剩下的只有闪烁的定时唤醒——它不该让 needs_frame 为真。）
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
   int frames = 0;
   while (root.dirty() && frames < 40) {
+    root.set_time(10.0 + static_cast<double>(frames) * 0.001);
     root.paint_frame(canvas);
     root.clear_dirty();
     ++frames;
   }
-  expect(frames >= 40, std::format("帧循环在 {} 帧后收敛了 —— 光标不会继续闪（缺陷原形）",
-                                   frames));
+  expect(frames < 5, std::format("聚焦静止时帧循环跑了 {} 帧才停 —— 定时唤醒没生效，仍在连续续帧",
+                                 frames));
+
+  // ② 但必须有唤醒点（否则光标又会冻住——2026-10-08 的老缺陷回归）。
+  const double wake_in_ms = root.next_wake_in_ms();
+  expect(wake_in_ms > 0.0 && wake_in_ms <= 500.0,
+         std::format("唤醒点缺失或异常：next_wake_in_ms={}（光标会冻结）", wake_in_ms));
+
+  // ③ 时间推进到唤醒点之后：needs_frame 必须变真（到点真拉帧，闪烁继续）。
+  root.set_time(10.0 + (wake_in_ms / 1000.0) + 0.01);
+  expect(root.dirty(), "到唤醒点后 needs_frame 仍为假 —— 光标不会翻转（冻结回归）");
 
   terminal->send_stop();
 }
 
-ST_TEST(terminal_cursor_does_not_request_frames_when_unfocused) {
-  // 反向护栏：**失焦**时不该因为光标而续帧（省帧预算）。
-  // 与上一条同一判据、相反结论：失焦时帧循环应当**收敛**。
-  // 若实现把 `request_animation` 写成无条件，本用例变红。
+ST_TEST(terminal_cursor_does_not_wake_when_unfocused) {
+  // 反向护栏：**失焦**时不该登记唤醒点（省帧预算）。
   if (!st::process::PtySession::supported()) return;
   BlankTextPort port{};
   st::ui::UiRoot root{};
@@ -168,22 +172,29 @@ ST_TEST(terminal_cursor_does_not_request_frames_when_unfocused) {
     terminal->pump();
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
     root.layout(false);
+    root.set_time(static_cast<double>(i) * 0.03);
     root.paint_frame(canvas);
     root.clear_dirty();
   }
   expect(port.draws > 0, "终端一帧都没画（夹具没跑起来）");
 
-  // 不调 pump：让 PTY 输出静下来，剩下的“还要不要帧”就只剩光标。
+  // 不调 pump：让 PTY 输出静下来，剩下的"还要不要帧"就只剩光标。
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
   expect(!terminal->focused(), "夹具前提不成立：终端不该有焦点");
 
+  root.set_time(20.0);
+  root.paint_frame(canvas);
+  root.clear_dirty();
+
   int frames = 0;
   while (root.dirty() && frames < 40) {
+    root.set_time(20.0 + static_cast<double>(frames) * 0.001);
     root.paint_frame(canvas);
     root.clear_dirty();
     ++frames;
   }
   expect(frames < 10, std::format("失焦时帧循环跑了 {} 帧才停 —— 白烧帧预算", frames));
+  expect(root.next_wake_in_ms() < 0.0, "失焦的终端不该登记唤醒点");
 
   terminal->send_stop();
 }

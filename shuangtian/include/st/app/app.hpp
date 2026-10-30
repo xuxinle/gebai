@@ -485,12 +485,15 @@ class Application final : public control::Host, public ui::WindowControl {
   /// 主循环节拍（自定义主循环在每轮末尾调用；`run_loop` 用同一实现）：
   ///
   /// - **有活干**（待重绘/动画/布局脏）→ 睡到帧预算余量（60fps 节拍）；
-  /// - **空闲** → 等**控制通道可读**（或 4ms 超时）；没有可等的句柄时才回退盲睡。
+  /// - **空闲** → 等**控制通道可读**，超时夹到最近的定时唤醒点（光标闪烁/Toast
+  ///   倒计时等低频周期事件登记的到帧时刻，见 `Element::request_wake_at`）；
+  ///   无唤醒点时维持 4ms 上限（输入响应保障）。没有可等句柄时回退盲睡。
   ///   盲睡会把命令落地时刻量化到节拍边界（实测延迟 = 帧节拍 − 距上次命令的间隔：
   ///   间隔 0ms → 15.7ms、8ms → 8.5ms、16ms → 3.8ms）——连续操作几乎总是白等一拍。
   ///
   /// `tick_start_ms`：本轮 `tick()` 开始前的时刻（`st::time::now_ms()`）。
-  void pace_loop(std::int64_t tick_start_ms) const;
+  /// 非 const（2026-10-29）：空闲分支要把帧时间轴刷新到当前墙钟（`set_time`）。
+  void pace_loop(std::int64_t tick_start_ms);
 
   /// 控制通道有新帧到达：若正处于空闲等待，立即结束它（下一轮 `tick()` 就处理）。
   /// 由 `Server` 在读到数据时回调；非空闲时是空操作。
