@@ -400,6 +400,111 @@ std::vector<float> skins;   // 每顶点 8 个：[j0,w0, j1,w1, j2,w2, j3,w3]
 文件仍然合法，只是读回来没有蒙皮。所以缺失的关节会自动补节点（用逆绑定矩阵的逆
 作为绑定姿态）。
 
+## 4.7 碰撞与拾取（`math/collision.hpp` + `raster/pick.hpp`）
+
+### 4.7.1 为什么分宽相 / 窄相
+
+一个 5000 三角形的模型逐三角形求交要算 5000 次（每次含一次除法 + 三个叉积），
+而先测它的 AABB 只要 6 次比较。差 2~3 个数量级——所以凡"场景里可能有多个物体"，
+先宽相后窄相不是优化，是**能不能用**的区别。
+
+| 阶段 | 判据 | 说明 |
+|---|---|---|
+| 宽相 | 射线 × **世界空间 AABB**（slab 法） | 永远先做 |
+| 窄相 | 射线 × **三角形**（Möller–Trumbore，在模型空间） | 宽相通过后 |
+
+窄相在**模型空间**做（把射线用逆矩阵搬进去）：后者每个三角形要 12 次乘法，
+前者每个物体只有一次求逆。
+
+### 4.7.2 三个数值陷阱（都踩过）
+
+1. **平行射线的 0/0**：方向某轴为 0 时除法得 `±inf` 或 `NaN`。
+   `if (t < best)` 对 NaN 恒假 → "永远打不中"，看起来像"还没实现拾取"。
+   本实现**显式判断**平行轴，不依赖 IEEE 特殊值比较。
+2. **退化三角形**：`|det|` 极小时硬算会得到噪声 `t`，症状是掠射角下随机命中。
+   本实现直接返回"不相交"。
+3. **世界 AABB 只变换两个角**：旋转后严重低估（绕对角线转 45° 的长方体，
+   变换两角得到的盒子小一半）→ "明明在盒里却拾取不到"。
+   本实现变换**8 个角**再取并。
+
+### 4.7.3 用法
+
+```cpp
+// 造拾取物体（自动算世界 AABB）
+auto object = make_pick_object("box", mesh, node_world_matrix);
+
+// 拾取最近命中（结果带节点名、命中点、法线、重心坐标）
+if (const auto hit = raycast(objects, ray); hit.has_value()) {
+  // hit->name / distance / point / normal / triangle / bary_u / bary_v
+}
+
+// 穿透看全部（按距离升序）
+const auto all = raycast_all(objects, ray);
+
+// 碰撞宽相
+if (overlaps(a, b)) { ... }          // 世界 AABB 重叠
+const float gap = bounds_gap(a, b);  // 最近距离（重叠为 0）
+```
+
+法线统一**朝射线来向**（调用方总想"往自己这边推"）；不统一的话同一物体会时正时反。
+
+### 4.7.4 边界
+
+只做**几何查询**（raycast / overlap），不做刚体动力学（质量、摩擦、冲量）。
+"点选物体""判断两个模型是否穿插""视线遮挡"这些三维应用最常要的事，几何查询就够。
+
+## 4.8 材质贴图（纹理 + UV 变换）
+
+### 4.8.1 脚本形态
+
+```json
+{ "name": "wall", "shape": "cube", "radius": 1.0, "depth": 2.0, "height": 1.0,
+  "color": "#c8c8c8",            // 顶点色 = 染色（与纹理相乘）
+  "texture": "brick.png",        // 相对路径按 asset_basis 解析
+  "texture_tile": 4.0,           // 便利字段：两个方向同时平铺 4 次
+  "texture_scale_u": 4.0,        // 等价于 texture_tile 的单轴版本
+  "texture_scale_v": 4.0,
+  "texture_offset_u": 0.0,       // 平铺相位
+  "texture_offset_v": 0.0,
+  "texture_clamp": false }       // false = repeat 平铺（默认），true = 夹边缘
+```
+
+采样契约：**纹理 × 顶点色**（与 Blender 的 Base Color 纹理 + 顶点色相乘同语义）。
+
+### 4.8.2 为什么 UV 变换是场景状态而不是烘焙进网格
+
+"同一张图在不同零件上以不同密度平铺"（砖墙、地面、布料）是极常见的需求。
+烘焙意味着每个零件一份网格副本（内存 ×N、且不再共享几何），
+而 UV 变换只是 `uv' = uv * scale + offset`——采样前两次乘法。
+
+### 4.8.3 repeat 与 clamp
+
+| 模式 | 语义 | 用在哪 |
+|---|---|---|
+| `repeat`（默认） | 超出 0..1 环绕 | 平铺（砖、地面、布料） |
+| `clamp` | 取边缘色 | 图标、单张贴图、UI 面片 |
+
+repeat 用 `x - floor(x)` 而**不用 `fmod`**：`fmod` 对负数返回负值（C++ 语义），
+直接拿去索引会越界，而越界会被 clamp 掩盖——表现为"负 UV 区域全取边缘色"。
+
+### 4.8.4 一处必须写下来的坑：立方体 UV
+
+`make_cube` 的 UV **按每个面各自归一化到 0..1**（与所有建模软件一致）。
+踩过两次：
+
+1. 六个面硬编码 0..1 → 非立方体时各面长宽比不同，方格被拉成**条纹**；
+2. 按世界尺寸归一化（"1 米一格"）→ 方格比例对了，但小面只覆盖 UV 的一部分，
+   `texture_tile` 一乘就露馅（图案被切一半再拉伸）。
+
+代价：面上图案的长宽比随面尺寸变化（宽面上方格被拉宽）——这是 UV 映射的固有取舍。
+
+### 4.8.5 双后端一致
+
+`set_texture_transform` 在软件腿（`sample_texture` 里做仿射 + 环绕）与
+GPU 腿（顶点着色器里做仿射 + 常量缓冲传参）都实现了。
+**仿射放顶点侧**（逐顶点与逐像素等价，省每像素两次乘法），
+**repeat/clamp 留像素侧**（那是取模，跨三角形插值后逐像素才正确）。
+
 ## 6. 验收（可复算）
 
 | 产物 | 钉住什么 |
@@ -411,6 +516,10 @@ std::vector<float> skins;   // 每顶点 8 个：[j0,w0, j1,w1, j2,w2, j3,w3]
 | `tools/animation_probe.cpp` | 8 帧分镜图 + 带动画的 `.glb`（稠密化后读回验证） |
 | `tests/geom_skin_test.cpp` | 蒙皮 10 条：逆绑定往返、权重限制/归一化、刚体与混合、未归一化不缩小、绑定姿态恒等、glTF 权重往返、端到端形变 |
 | `tools/skin_probe.cpp` | 蒙皮 vs 刚性分段对照图（关节连续 vs 断裂台阶） |
+| `tests/geom_collision_test.cpp` | 碰撞 10 条：AABB slab、平行轴无 NaN、三角形重心、退化/掠射、球与盒、变换射线、8 角 AABB、最近命中、穿透、组合场景拾取 |
+| `tools/pick_probe.cpp` | 21 条屏幕射线，命中点重投影回屏幕验证（黄点必须落在轮廓里） |
+| `tests/geom_texture_test.cpp` | 贴图 6 条：加载与染色、平铺/clamp、缺失文件回落、asset_basis 解析、字段解析 |
+| `tools/texture_probe.cpp` | 四格贴图对照（基准/平铺/球面/染色） |
 | `tests/geom_scene_integration_test.cpp` | 22 个图元**真的画出像素**、旧形状语义不变、参数生效、导出→读回、焊接/变换/OBJ 往返 |
 | `tools/primitives_gallery_probe.cpp` | 22 格总览 PNG + 每个图元的 `.glb`（可拖进 Blender 对照） |
 | `tools/composite_pivot_probe.cpp` | 组合模型四格对照（无旋转 / 绕肩转 / 枢轴错放 / 父隐藏），证明父子与枢轴各自生效 |

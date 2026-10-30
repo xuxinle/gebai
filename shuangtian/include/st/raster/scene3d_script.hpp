@@ -201,6 +201,32 @@ struct SceneObjectSpec {
   /// 是否可见（不可见不渲染、不参与包围盒）。
   bool visible{true};
 
+  // ── 材质贴图（2026-10-30）──
+  //
+  // 采样的契约：**纹理 × 顶点色**（顶点色当"染色/基础色"，纹理提供图案）。
+  // 这与 Blender 的 Base Color 纹理 + 顶点色相乘是同一套语义。
+  //
+  // ## 为什么 UV 变换放在这里而不是烘焙进网格
+  //
+  // "让同一张图在不同零件上以不同密度平铺"是极常见的需求（砖墙、地面、布料），
+  // 而烘焙意味着每个零件一份网格副本（内存 × N、且不再共享）。
+  // UV 变换只是一次仿射：`uv' = uv * scale + offset`——放在采样前做的成本是每像素两次乘法。
+  /// 贴图路径（PNG；相对路径按 `asset_basis` 解析）。空 = 不用贴图。
+  std::string texture{};
+  /// UV 缩放（`u*scale_u`、`v*scale_v`）：把同一张图平铺多次时用（如 4,4 = 4×4 平铺）。
+  ///
+  /// **超出 0..1 会按 repeat 环绕**（贴图平铺的语义），而不是 clamp——
+  /// clamp 会让"平铺"变成"边缘色拉伸"。两种行为用 `texture_clamp` 切换。
+  float texture_scale_u{1.0f};
+  float texture_scale_v{1.0f};
+  /// UV 偏移（平铺时的相位）。
+  float texture_offset_u{0.0f};
+  float texture_offset_v{0.0f};
+  /// 是否把超出 0..1 的 UV 夹到边缘（默认 `false` = repeat 平铺）。
+  bool texture_clamp{false};
+  /// 是否按贴图的 alpha 做透明（默认 `false`：PNG 的 alpha 常用于遮罩，不该默认吃掉）。
+  bool texture_alpha{false};
+
   /// 是否参与蒙皮（`true` 且场景给了 `skeleton` 时，这个对象的网格会按骨骼形变）。
   ///
   /// 为什么是**每对象**的开关而不是全局：一个场景里常常既有蒙皮的软体

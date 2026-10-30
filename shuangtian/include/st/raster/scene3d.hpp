@@ -504,6 +504,21 @@ class Scene3D {
   /// 空 span 或非法尺寸 = 清除纹理（回到顶点色）。
   virtual void set_texture(std::span<const std::uint8_t> /*pixels*/, int /*width*/,
                            int /*height*/) {}
+  /// 设 UV 变换（**可选**；在采样前作用：`uv' = uv * scale + offset`）。
+  ///
+  /// ## 为什么 UV 变换是场景状态而不是网格属性
+  ///
+  /// 与 `set_texture` 同一理由：换平铺密度不该重建网格。
+  /// 而且"同一张图在不同零件上以不同密度平铺"是极常见的需求（砖墙、地面、布料），
+  /// 烘焙进网格意味着每个零件一份顶点副本（内存 × N、且不再共享）。
+  ///
+  /// `clamp_edges` 为真时超出 `0..1` 的 UV 夹到边缘（图标/贴图的常见语义），
+  /// 为假时按 **repeat 环绕**（平铺的语义）。
+  ///
+  /// 不调用就是恒等变换（`scale = (1,1)`、`offset = (0,0)`、repeat）——
+  /// 与以前完全一致。
+  virtual void set_texture_transform(float /*scale_u*/, float /*scale_v*/, float /*offset_u*/,
+                                     float /*offset_v*/, bool /*clamp_edges*/) {}
   /// 画一个网格（可带模型变换）。同一个网格重复绘制会复用已上传的缓冲。
   virtual void draw_mesh(const Mesh& mesh, const math::Mat4& model) = 0;
   /// 结束一帧并把结果**合成**到 `target` 的目的矩形（逻辑坐标）。

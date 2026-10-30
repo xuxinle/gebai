@@ -615,6 +615,12 @@ CUBICSPLINE 取控制点、ease-* 导出前稠密化的取舍）。
 `kVertexFloats = 9` 是生成器与三处后端的契约，改动面远大于收益。glTF 侧读写
 `skins` / `JOINTS_0` / `WEIGHTS_0`（写出时补出缺失的关节节点）。
 
+**同一轮第五、六块：碰撞拾取 + 材质贴图**。
+碰撞：`math/collision.hpp`（射线×AABB slab / 射线×三角形 Möller–Trumbore / 球 / 盒距）
++ `raster/pick.hpp`（场景级 raycast/raycast_all/overlaps/bounds_gap，8 角世界 AABB）。
+贴图：`texture` 字段 + UV 变换（scale/offset/repeat/clamp）+ 双后端一致，
+采样契约"纹理 × 顶点色"。
+
 **验收**：`tests/geom_primitives_test.cpp`（6 条，逐图元断言）、`tests/geom_gltf_test.cpp`
 （6 条，含 `.glb` 头/chunk 长度、第三方文件、错误路径、落盘往返）、
 `tests/geom_scene_graph_test.cpp`（7 条，组合模型：乘序/枢轴/扁平=嵌套/可见性继承/端到端/错误路径）、
@@ -624,7 +630,9 @@ CUBICSPLINE 取控制点、ease-* 导出前稠密化的取舍）。
 `tests/geom_animation_test.cpp`（11 条，含 slerp 最短路径、缓动曲线、枢轴×动画组合）、
 `tools/animation_probe.cpp`（8 帧分镜 + 带动画 glb，四条判据均 ok）、
 `tests/geom_skin_test.cpp`（10 条，含绑定姿态恒等、未归一化权重不缩小、glTF 权重往返）、
-`tools/skin_probe.cpp`（蒙皮 vs 刚性对照图：关节连续 vs 断裂）。
+`tools/skin_probe.cpp`（蒙皮 vs 刚性对照图：关节连续 vs 断裂）、
+`tests/geom_collision_test.cpp`（10 条）与 `tools/pick_probe.cpp`（21 射线重投影核验）、
+`tests/geom_texture_test.cpp`（6 条）与 `tools/texture_probe.cpp`（四格贴图对照）。
 文档：`docs/geometry.md`。
 
 **这一轮踩到的缺陷形态（值得记住）**：22 个生成器第一版有 **6 个绕序错**

@@ -1,6 +1,8 @@
 #include "st/raster/scene3d_script.hpp"
 
 #include "st/raster/gltf.hpp"
+#include "st/codec/png.hpp"
+#include "st/core/log.hpp"
 #include "st/raster/animation.hpp"
 #include "st/raster/scene_graph.hpp"
 
@@ -339,6 +341,21 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
   obj.group = json_get_bool(node, "group", json_get_bool(node, "kind_is_group", obj.group));
   obj.visible = json_get_bool(node, "visible", obj.visible);
   obj.skin = json_get_bool(node, "skin", obj.skin);
+
+  // ── 材质贴图 ──
+  obj.texture = json_get_string(node, "texture", obj.texture);
+  obj.texture_scale_u = static_cast<float>(json_get_double(node, "texture_scale_u", obj.texture_scale_u));
+  obj.texture_scale_v = static_cast<float>(json_get_double(node, "texture_scale_v", obj.texture_scale_v));
+  obj.texture_offset_u = static_cast<float>(json_get_double(node, "texture_offset_u", obj.texture_offset_u));
+  obj.texture_offset_v = static_cast<float>(json_get_double(node, "texture_offset_v", obj.texture_offset_v));
+  obj.texture_clamp = json_get_bool(node, "texture_clamp", obj.texture_clamp);
+  obj.texture_alpha = json_get_bool(node, "texture_alpha", obj.texture_alpha);
+  // `tile` 是便利字段：一个数同时设两个方向的平铺次数（最常见用法）
+  if (const Json* tile = json_find(node, "texture_tile"); tile != nullptr && tile->is_number()) {
+    const auto value = static_cast<float>(tile->get<double>());
+    obj.texture_scale_u = value;
+    obj.texture_scale_v = value;
+  }
   obj.pivot_at = json_get_string(node, "pivot_at", obj.pivot_at);
   const auto pivot = read_vec3(node, "pivot", obj.pivot, path);
   if (!pivot) return st::forward_error(pivot.error());
@@ -656,6 +673,18 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
     }
     spec.animation = std::move(clip);
   }
+
+  // ── 素材基准目录（`asset_basis`）──
+  //
+  // ## 踩到过：字段被读取但从没被解析
+  //
+  // `resolve_shape_path` 一直在用 `spec.asset_basis`，但解析器里没有读这个字段，
+  // 于是它恒为空——`obj:` / `gltf:` / `texture` 的相对路径全部退回"按工作目录找"。
+  // 现有用例能过是因为**它们是从 C++ 直接给 `spec.asset_basis` 赋值**的，
+  // 走 JSON 的路径从未被覆盖。写贴图用例时才发现（画面是顶点色，没有贴图）。
+  //
+  // 教训：字段"被用到"不等于"被解析到"，两头都要有用例。
+  spec.asset_basis = json_get_string(json, "asset_basis", spec.asset_basis);
 
   const Json* objects = json_find(json, "objects");
   if (objects == nullptr) {
@@ -990,6 +1019,31 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
       }
       return {};
     }
+
+    // ── 贴图与 UV 变换（**必须在 draw_mesh 之前设**：它们是场景状态）──
+    //
+    // ## 每帧每对象都重新读文件是浪费，但这里故意不缓存
+    //
+    // 缓存要处理"文件改了""同一路径不同对象"两件事，而 `render_scene` 的调用
+    // 形态是"一次出图"（不是每帧几百次）。真正需要缓存的是交互式预览，
+    // 那种场合应当由调用方持有 `Scene3D` 并自己管资源生命周期。
+    // 先做对、再做快：读一次 PNG 在 260×200 的出图里完全不是瓶颈。
+    bool texture_ready = false;
+    if (!obj.texture.empty()) {
+      const std::string path = resolve_shape_path(obj.texture, spec.asset_basis);
+      if (const auto image = st::codec::png_read_file(path); image.has_value()) {
+        scene.set_texture(image->rgba, static_cast<int>(image->width),
+                          static_cast<int>(image->height));
+        texture_ready = true;
+      } else {
+        // 贴图加载失败：**不中断渲染**（一张图丢了不该让整帧出不来），
+        // 但要留下可查的痕迹——否则"怎么没贴上"要看代码才知道。
+        ST_LOG_WARN("场景对象 \"{}\" 的贴图读取失败：{}（改用顶点色）", obj.name, path);
+      }
+    }
+    if (!texture_ready) scene.set_texture({}, 0, 0);   // 显式清除：避免上一对象的贴图泄漏
+    scene.set_texture_transform(obj.texture_scale_u, obj.texture_scale_v, obj.texture_offset_u,
+                               obj.texture_offset_v, obj.texture_clamp);
 
     auto mesh = build_mesh(resolved_object);
     if (!mesh) return st::forward_error(mesh.error());

@@ -433,6 +433,50 @@ auto make_cube(const PrimitiveParams& params) -> Mesh {
     out.quad(side.a, side.b, side.c, side.d, side.normal, side.normal, side.normal, side.normal,
              {0.0f, 1.0f}, {1.0f, 1.0f}, {1.0f, 0.0f}, {0.0f, 0.0f});
   }
+  // ## UV 按**每个面各自**归一化到 0..1（不是按世界尺寸、也不是全局归一化）
+  //
+  // 踩过两次，都是"看起来能贴、但图案是条纹"：
+  //
+  // 1. 六个面硬编码 0..1 → 非立方体时各面长宽比不同，方格被拉成长条；
+  // 2. 按世界尺寸归一化（"1 米一格"或"最大面 = 整张图"）→ 方格比例对了，
+  //    但**小面只覆盖 UV 的一部分**，`texture_tile` 一乘就露馅（图案被切一半再拉伸）。
+  //
+  // 正确做法与所有建模软件一致：**每个面独立映射到 0..1**。
+  // 于是"一张图铺满每一个面"，`texture_tile: 2` 就是对每个面平铺 2×2——
+  // 语义与用户预期一致，换物体尺寸也不会变。
+  // 代价：面上图案的长宽比随面尺寸变化（宽面上方格会被拉宽），
+  // 这是 UV 映射的固有取舍；要等比应当用世界单位 UV（那是另一个模式，不入默认）。
+  if (p.with_uv) {
+    auto& vertices = out.mesh.vertices;
+    auto& uvs = out.mesh.uvs;
+    uvs.clear();
+    uvs.reserve((vertices.size() / Mesh::kVertexFloats) * 2U);
+    for (std::size_t i = 0; i + Mesh::kVertexFloats <= vertices.size();
+         i += Mesh::kVertexFloats) {
+      const Vec3 position{vertices[i], vertices[i + 1U], vertices[i + 2U]};
+      const Vec3 normal{vertices[i + 3U], vertices[i + 4U], vertices[i + 5U]};
+      const float ax = std::abs(normal.x);
+      const float ay = std::abs(normal.y);
+      const float az = std::abs(normal.z);
+      float u = 0.5f;
+      float v = 0.5f;
+      if (ax >= ay && ax >= az) {
+        // ±X 面：切向 = (Z, Y)，按该面的实际半宽 hz / 半高 hy 归一化
+        u = hz > 1.0e-6f ? position.z / (2.0f * hz) + 0.5f : 0.5f;
+        v = hy > 1.0e-6f ? position.y / (2.0f * hy) + 0.5f : 0.5f;
+      } else if (ay >= az) {
+        // ±Y 面：切向 = (X, Z)
+        u = hx > 1.0e-6f ? position.x / (2.0f * hx) + 0.5f : 0.5f;
+        v = hz > 1.0e-6f ? position.z / (2.0f * hz) + 0.5f : 0.5f;
+      } else {
+        // ±Z 面：切向 = (X, Y)
+        u = hx > 1.0e-6f ? position.x / (2.0f * hx) + 0.5f : 0.5f;
+        v = hy > 1.0e-6f ? position.y / (2.0f * hy) + 0.5f : 0.5f;
+      }
+      uvs.push_back(u);
+      uvs.push_back(v);
+    }
+  }
   return out.finish();
 }
 

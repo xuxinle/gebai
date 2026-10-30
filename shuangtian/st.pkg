@@ -469,6 +469,18 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "用一份 JSON 描述整个三维场景：解析/报错指路/渲染/参数生效/确定性"
     },
+    "texture_probe": {
+      "kind": "executable",
+      "sources": ["tools/texture_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "贴图四格对照：基准/平铺/曲面/染色，验证采样与 UV 变换"
+    },
+    "pick_probe": {
+      "kind": "executable",
+      "sources": ["tools/pick_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "拾取探针：屏幕上打 21 条射线，把命中点重投影回去叠在渲染图上核验"
+    },
     "skin_probe": {
       "kind": "executable",
       "sources": ["tools/skin_probe.cpp"],
