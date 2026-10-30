@@ -54,6 +54,33 @@ for f in files:
                 problems.append(f"{f}:{line} → {doc} §{sec} 不存在")
 print(f"检查 § 引用 {checked} 处")
 
+# ── ①b 文档地图完整性（漏登即报） ──
+#
+# ## 为什么这条检查必须有
+#
+# `docs/README.md` 是"入口"，它自称收录全部文档。但实测发现它只收了 26/49 份
+#（包括 `geometry.md` 这份三维能力权威都在外面的孤儿）。
+# 地图不准比没有地图更糟——它看起来是权威的，读者会以为"没登记=不存在"。
+#
+# 根因是**纯人工维护必然失效**：加文档时想不起来同步。所以把它变成检查。
+#
+# 口径：docs/ 下每个 .md 的文件名都要在地图正文里出现。
+# 不检查链接格式（那会绑死写法），只要求"提到这个名字"。
+map_path = root / 'docs' / 'README.md'
+if map_path.exists():
+    map_text = map_path.read_text(encoding='utf-8')
+    doc_files = sorted(p.name for p in (root / 'docs').glob('*.md'))
+    missing_in_map = [name for name in doc_files
+                      if name != 'README.md' and name not in map_text]
+    print(f"文档地图: docs 下 {len(doc_files)} 份，覆盖 {len(doc_files) - len(missing_in_map) - 1} 份")
+    for name in missing_in_map:
+        problems.append(
+            f"docs/{name} 未登记到 docs/README.md 的地图里"
+            f"（加文档时必须同步登记，否则它会变成孤儿）"
+        )
+else:
+    problems.append("docs/README.md 不存在（文档地图缺失）")
+
 # ── ② 旧值清零（历史批次） ──
 stale = {
     'DESIGN.md': ['102 用例 / 2018 断言', '11 条禁用特性规则', '7 处登记豁免',
