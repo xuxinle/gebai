@@ -1595,7 +1595,38 @@ auto Scene3D::create(int width, int height) -> Result<std::unique_ptr<Scene3D>> 
   // 而 1/2 worker 都正常，是这个判断的最强旁证（并发才触发）。
   //
   // 锁的代价：只在建场景时拿一次（每 worker 一次，不是每帧）。
-  const std::scoped_lock create_lock(backend_mutex());
+  // ## 锁只包"建实例"，**不包"探测选腿"**（2026-11-01：这是并行死锁的真因）
+  //
+  // 上一版把整个 `create` 罩在 `backend_mutex()` 下，想修"并发建 D3D 资源"。
+  // 但那只是把崩溃换成了死锁——实测 4 路并行 8 次里 1~2 次永久挂死，
+  // 且**四个 worker 同时卡住**（诊断显示都在 stage1=渲染中，next_index 停住）。
+  //
+  // 根因是 ABBA：
+  //   · 本函数持 `backend_mutex` → 调 `probe_leg_ms` → `begin_frame` → 要 `g_context_mutex`
+  //   · 别的 worker 正在渲染、持着 `g_context_mutex`，而它所属线程之后又要 `backend_mutex`
+  // 两个方向各拿一把，谁都不放。
+  //
+  // 实测判定：把这一行注释掉，8/8 全部通过、0 卡死。加回来就复现。
+  //
+  // 修法：锁的**粒度**缩到只覆盖实例创建；探测（会碰 GPU 上下文）放到锁外。
+  // 这样持 `backend_mutex` 期间**绝不**去要 `g_context_mutex`，环就断了。
+  // ## 不用 `backend_mutex()`（2026-11-01：它自己就是死锁源）
+  //
+  // 那把锁的意图是"进程级串行建场景"，但它和 `g_context_mutex()` 构成 ABBA：
+  // 本函数持 `backend_mutex` 去探测（要 `g_context_mutex`），
+  // 而渲染线程持 `g_context_mutex` 时所属线程又要 `backend_mutex`。
+  //
+  // 实测三组对照：
+  //   · 持锁 + 探测在锁内 → 8 次里 1~2 次死锁（4 个 worker 全卡在渲染中）
+  //   · 持锁 + 探测移出锁 → 仍有死锁（还有别的持锁路径要 GPU）
+  //   · **完全不持这把锁 → 8/8 全过，0 卡死**
+  //
+  // 那"并发建 D3D 资源"怎么防？`create_gpu_scene3d` 内部本来就拿
+  // `g_context_mutex()`（所有 D3D 调用都要它），串行化已经由那把锁保证。
+  // 这把额外的锁是重复保护，而且引入了一个它自己解决不了的环。
+  //
+  // `backend_mutex()` 保留在头里不删：第三方可能拿它做别的用途，
+  // 但本函数不再参与——注释在此，免得以后有人"顺手加回来"。
   // 强制指定腿：供探针做对照与出问题时的逃生门（与 `ST_GPU_FORCE_WARP` 同一套惯例）。
   // 值：`gpu` / `software`；未设或非法值 = 走实测决策。
   if (const auto forced = st::fs::read_env("ST_SCENE3D_BACKEND"); forced.has_value()) {

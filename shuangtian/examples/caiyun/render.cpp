@@ -1,3 +1,4 @@
+#include <cstdio>
 /// 成片渲染管线的实现（见 `render.hpp`）。
 ///
 /// 三个阶段各自独立可成：帧（PNG）、声（WAV）、封装（ffmpeg）。前两个**始终可用**，
@@ -883,6 +884,21 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
   };
   std::vector<TrajectoryRecord> trajectory_records{};
   std::vector<std::vector<TrajectoryRecord>> worker_trajectory(workers);
+
+  // ## 死锁诊断：每个 worker 当前停在哪个阶段
+  //
+  // 为何要这个：多路并行的死锁是概率性的（约 1/8），且环境里没有任何
+  // 线程栈工具（procdump / windbg / cdb 都不可用）。没有栈就只能猜，
+  // 而猜的成本已经付过三次。
+  //
+  // 做法：worker 每进入一个阶段就写一次自己的槽位（原子 int，无锁）。
+  // 主线程另起一个 watchdog 线程，如果**整批帧长时间没有推进**，
+  // 就把所有 worker 的阶段打到日志里。
+  //
+  // 阶段编号见 `kStage*` 常量。这样即使是概率死锁，只要发生过一次，
+  // 日志就会告诉我们到底谁卡在哪一步——等于把"没有栈"补上了一大半。
+  std::vector<std::atomic<int>> worker_stage(workers);
+  for (auto& stage : worker_stage) stage.store(0);
   std::atomic<int> next_index{first};
   std::atomic<bool> write_failed{false};
   // 管道模式的帧序闸门：只有 `write_turn` 这一帧允许写进 ffmpeg stdin。
@@ -939,6 +955,16 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
       worker_scratch.push_back(std::make_unique<st::raster::Canvas>(job.width, job.height, 1.0f));
     }
   }
+    // 阶段编号（与 watchdog 的诊断输出一一对应）
+    enum Stage : int {
+      kStageIdle = 0,
+      kStageRender = 1,      ///< 正在渲染一帧（CPU 光栅）
+      kStageReadback = 2,    ///< 正在从画布取像素
+      kStageGateWait = 3,    ///< 在帧序闸门上等待
+      kStagePipeWrite = 4,   ///< 正在写 ffmpeg 管道
+      kStageEnqueue = 5,     ///< 正在压入 PNG 编码队列
+      kStageDone = 6,        ///< 本 worker 已结束
+    };
     const auto worker_body = [&](std::size_t slot) {
     st::raster::Surface& local = *worker_canvases[slot];
     // 本线程引擎的起始基线：本 worker 只跑一部分帧，而 `failure_count()` 是
@@ -949,17 +975,20 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
         // 退出前把本 worker 的脚本失败量交回（正常路径也在下面收尾时交）
         worker_layout_failures[slot] = layout_engine().failure_count() - layout_failures_base;
         worker_layout_error[slot] = layout_engine().last_error();
+        worker_stage[slot].store(kStageDone);
         return;
       }
       const int index = next_index.fetch_add(1);
       if (index >= last) {
         worker_layout_failures[slot] = layout_engine().failure_count() - layout_failures_base;
         worker_layout_error[slot] = layout_engine().last_error();
+        worker_stage[slot].store(kStageDone);
         return;
       }
       const std::int64_t render_start = st::time::now_ns();
       // 轨迹采集：每 worker 一份本地缓冲（不共享，无锁）
       std::vector<ElementTrack> frame_track{};
+      worker_stage[slot].store(kStageRender);
       render_frame_with_motion_blur(project, local, job, index, text_port,
                                     *worker_scratch[slot],
                                     job.trajectory ? &frame_track : nullptr);
@@ -1008,6 +1037,7 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
         // `to_rgba8()` 返回空 → 走到这个 return → 进程挂死。
         // 日志还在刷「创建离屏渲染目标失败」，看起来像在干活，实际已无人推进。
         {
+          worker_stage[slot].store(kStageGateWait);
           std::unique_lock<std::mutex> lock(pipe_mutex);
           if (pipe_mode && write_turn == index) ++write_turn;
           pipe_cv.notify_all();
@@ -1087,7 +1117,8 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
           ++write_turn;
           pipe_cv.notify_all();
         } else {
-          encode_queue.push(std::move(frame));
+          worker_stage[slot].store(kStageEnqueue);
+      encode_queue.push(std::move(frame));
         }
       }
       worker_render_ns[slot] += render_end - render_start;
@@ -1142,6 +1173,43 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
     for (std::size_t i = 0; i < workers; ++i) {
       pool.emplace_back([&worker_body, i] { worker_body(i); });
     }
+
+    // ## 死锁 watchdog（诊断用）
+    //
+    // 每 5 秒看一次"已写帧数"有没有增加；连续 3 次没动（15 秒）就打印
+    // 所有 worker 停在哪一阶段，然后自己退出。
+    //
+    // 这不是修复，是**让下一次死锁留下证据**——环境里没有线程栈工具，
+    // 而概率死锁单靠肉眼抓不到（约 1/8，测试跑几次都正常）。
+    std::atomic<bool> watchdog_stop{false};
+    std::jthread watchdog([&](std::stop_token) {
+      int last_done = -1;
+      int stalled = 0;
+      while (!watchdog_stop.load()) {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        if (watchdog_stop.load()) break;
+        int done = 0;
+        for (std::size_t s = 0; s < workers; ++s) {
+          if (worker_stage[s].load() == kStageDone) ++done;
+        }
+        if (done == static_cast<int>(workers)) break;
+        if (done == last_done) {
+          if (++stalled >= 3) {
+            std::string report = "死锁诊断：15 秒无进展。各 worker 阶段 = ";
+            for (std::size_t s = 0; s < workers; ++s) {
+              report += std::format("[{}=stage{}] ", s, worker_stage[s].load());
+            }
+            report += std::format("（next_index={} / last={}）",
+                                  next_index.load(), last);
+            std::fprintf(stderr, "[WATCHDOG] %s\n", report.c_str());
+            break;
+          }
+        } else {
+          stalled = 0;
+          last_done = done;
+        }
+      }
+    });
     // `jthread` 析构会自动 join（本仓纪律：不 detach）。
   } else {
     worker_body(0);
