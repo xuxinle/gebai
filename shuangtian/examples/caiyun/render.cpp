@@ -1014,7 +1014,11 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
         }
         return;
       }
-      worker_stats[slot].push(rgba, fw, fh, index, frame_time(index, job.fps));
+      // 采集统计可关：它每帧要把整幅 RGBA 降采样两遍（见 RenderJob::collect_stats）
+      // —— 1080p 约 9.1ms，占整帧 32%，而它只产出导出后的诊断报告。
+      if (job.collect_stats) {
+        worker_stats[slot].push(rgba, fw, fh, index, frame_time(index, job.fps));
+      }
 
       // ## 出口：管道模式直送 ffmpeg；PNG 模式进队列
       //
@@ -1200,7 +1204,10 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
 
   // —— 画面质量报告（逐镜静止占比 / 过亮帧 / 平均亮度）——
   // 这一步替代"渲完再抽几帧用眼睛看"：结论是数，可复核、可对比、能指出哪一镜最静。
-  {
+  //
+  // `collect_stats` 关闭时这里整段跳过：没采数据时 `merged` 为空，
+  // `report()` 会返回"无帧（未渲染）"——那条日志会让人误以为渲染失败。
+  if (job.collect_stats) {
     StatsAccumulator merged{};
     for (auto& acc : worker_stats) merged.merge(acc);
     merged.attach_spans(shot_spans);

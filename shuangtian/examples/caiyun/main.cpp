@@ -164,6 +164,8 @@ struct Options {
   bool trajectory{false};
   /// `--keep-frames`：保留 PNG 帧序列（默认走管道直送 ffmpeg，不落盘）。
   bool keep_frames{false};
+  /// `--no-stats`：不采集画面质量统计（导出加速约 1.4 倍，见 `RenderJob::collect_stats`）。
+  bool no_stats{false};
   std::string export_dir{};   ///< `--export-dir <dir>`：启动即导出 PNG 帧序列（旧口径，保留）
   int bench_seconds{0};       ///< `--bench <秒>`：播放压测时长
 };
@@ -186,7 +188,8 @@ auto print_usage(std::string_view program) -> void {
       "  --render-size WxH     成片分辨率（缺省 1920x1080）\n"
       "  --render-frames N     只渲染前 N 帧（快速试渲）\n"
       "  --export-dir DIR      启动即导出 PNG 帧序列（320x180，无 ffmpeg 时的兜底）\n"
-      "  --keep-frames         保留 1080p PNG 帧序列（默认走管道直送 ffmpeg，不落盘）\n"
+      "  --keep-frames         保留 1080p PNG 帧序列（默认走管道直送 ffmpeg，不落盘）\n""  --no-stats            不采集画面质量统计（导出加速；诊断报告会省略）\n"
+      
       "  --bench N             真开播放压测 N 秒后退出\n"
       "  --control-port N      控制通道端口（0 = 自动）\n"
       "  --control-file PATH   控制信息落盘路径\n"
@@ -298,6 +301,8 @@ auto parse_options(int argc, char** argv) -> Options {
     } else if (raw == "--track-elements") {
       // 导出元素轨迹（trajectory.tsv）：供连贯性验收做“按元素追踪”。
       options.trajectory = true;
+    } else if (raw == "--no-stats") {
+      options.no_stats = true;
     } else if (raw == "--keep-frames") {
       // 保留 PNG 帧序列。默认走管道（RGBA 直送 ffmpeg），不落盘——
       // 需要逐帧抽样的验收工具（ot_bench / carry_qa）必须显式打开它。
@@ -1559,6 +1564,13 @@ auto run_app(int argc, char** argv) -> int {
     // 走错方向的代价（慢 2 倍）比错过收益（慢 1.5 倍）更贵。
     const float model_area_ratio = model3d_area_ratio(page->project().script);
     job.use_gpu = model_area_ratio < 0.35f;
+    // 采集画面质量统计：默认开；`--no-stats` 或 `CAIYUN_STATS=0` 关。
+    // 它是导出期间的**头号 CPU 开销**（每帧整幅降采样两遍，
+    // 1080p 约 9.1ms = 整帧 32%），但只产出导出后的诊断报告，不参与成片。
+    if (options.no_stats) job.collect_stats = false;
+    if (const char* st = std::getenv("CAIYUN_STATS"); st != nullptr) {
+      job.collect_stats = std::string(st) != "0";
+    }
     if (const char* gpu_env = std::getenv("CAIYUN_GPU"); gpu_env != nullptr) {
       job.use_gpu = std::string(gpu_env) != "0";   // 显式覆盖（含 "0" 强制关）
     }
