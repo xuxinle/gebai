@@ -1,3 +1,4 @@
+#include <cstdio>
 /// D3D11 GPU 绘制目标的平台实现（Windows）。
 ///
 /// 本文件是**唯一**允许出现 `d3d11.h`/`dxgi.h` 与 `LoadLibrary` 的地方
@@ -923,6 +924,12 @@ struct Pipeline {
 /// 而 `R8G8B8A8` 的内存序就是 R,G,B,A——回读/上传只需要一次通道重排，
 /// 且不依赖 `D3D11_CREATE_DEVICE_BGRA_SUPPORT` 的行为差异。
 constexpr DXGI_FORMAT kFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+
+/// 三维渲染目标格式（sRGB 视图）。
+///
+/// 让硬件在做"着色器输出 → 存储"时自动线性→sRGB 编码，于是**半透明混合
+/// 发生在编码之前的线性空间**——与软件腿的"解码目标 → 线性混合 → 编码回去"等价。
+constexpr DXGI_FORMAT kSceneFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 
 /// 2D 绘制画布。
 ///
@@ -3670,10 +3677,8 @@ float4 ps_scene3d(VsOut input) : SV_Target {
   // Narkowicz 2015 的 ACES 近似（与 C++ 侧 `aces()` 同系数）
   const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
   hdr = saturate((hdr * (a * hdr + b)) / (hdr * (c * hdr + d) + e));
-  // sRGB 编码（IEC 61966-2-1；与 C++ 侧 `linear_to_srgb` 同常数）
-  float3 lo = hdr * 12.92;
-  float3 hi = 1.055 * pow(max(hdr, 1e-8), 1.0 / 2.4) - 0.055;
-  float3 encoded = (hdr <= 0.0031308) ? lo : hi;
+  // sRGB 编码交给硬件（RTV/_SRGB 视图）——手工再编码一次会偏亮
+  float3 encoded = hdr;
   // ## alpha 两个字的意义（不要混淆）
   //
   // - `rgb` 是 **sRGB 编码值**（显示用，与软件腿逐像素对齐）；
@@ -4049,14 +4054,20 @@ class GpuScene3d final : public st::raster::Scene3D {
     //
     // 实测（背景 (40,44,52)）：软件腿清出 159.0、GPU 腿清出 110.5，差 48 级。
     // 单看任一条腿都"正常"，只有并排比才看得出——特性矩阵测试就是这么撞上的。
+    // ## 清屏：给**线性值**，编码交给 `_SRGB` 视图的硬件
+    //
+    // 与实体同口径：`ps_scene3d` 输出线性值，硬件在线性→sRGB 编码后再存；
+    // 这里也必须给线性值。若先 `encode_pixel` 再写，硬件会**再编码一次**，
+    // 背景整片偏亮（实测背景 0.517 vs 软件腿 0.299）。
+    //
+    // 色调映射仍在着色器里做（ACES），清屏色要跟它一致：
+    // 所以这里先做 ACES、**不做** sRGB 编码。
     const math::Vec3 bg_linear{static_cast<float>(clear_color.r) / 255.0f,
                                static_cast<float>(clear_color.g) / 255.0f,
                                static_cast<float>(clear_color.b) / 255.0f};
-    const math::Color encoded = st::raster::encode_pixel(bg_linear, 1.0f, lighting_.tone_map);
+    const math::Vec3 mapped = st::raster::tone_map(bg_linear, lighting_.tone_map);
     const float alpha = static_cast<float>(clear_color.a) / 255.0f;
-    const float values[4] = {static_cast<float>(encoded.r) / 255.0f * alpha,
-                             static_cast<float>(encoded.g) / 255.0f * alpha,
-                             static_cast<float>(encoded.b) / 255.0f * alpha, alpha};
+    const float values[4] = {mapped.x * alpha, mapped.y * alpha, mapped.z * alpha, alpha};
     context_->ClearRenderTargetView(rtv_, values);
     context_->ClearDepthStencilView(dsv_, D3D11_CLEAR_DEPTH, 1.0f, 0);
     mvp_ready_ = false;
@@ -4437,7 +4448,7 @@ class GpuScene3d final : public st::raster::Scene3D {
     UINT quality = 0;
     for (const UINT candidate : {8U, 4U, 2U}) {
       quality = 0;
-      if (SUCCEEDED(device_->CheckMultisampleQualityLevels(kFormat, candidate, &quality)) &&
+      if (SUCCEEDED(device_->CheckMultisampleQualityLevels(kSceneFormat, candidate, &quality)) &&
           quality > 0) {
         sample_count_ = candidate;
         break;
@@ -4448,7 +4459,7 @@ class GpuScene3d final : public st::raster::Scene3D {
     color_desc.Height = static_cast<UINT>(height_);
     color_desc.MipLevels = 1;
     color_desc.ArraySize = 1;
-    color_desc.Format = kFormat;
+    color_desc.Format = kSceneFormat;   // 见 kSceneFormat 的说明
     color_desc.SampleDesc.Count = sample_count_;
     color_desc.Usage = D3D11_USAGE_DEFAULT;
     // ⚠ MSAA 纹理**不能**绑 SHADER_RESOURCE（只能 RENDER_TARGET），否则创建失败
@@ -4464,6 +4475,8 @@ class GpuScene3d final : public st::raster::Scene3D {
 
     if (sample_count_ > 1) {
       // resolve 目标：单采样、可采样（零拷贝合成用它的 SRV）
+      // 从 `color_desc` 复制：格式自然是 `_SRGB`（见上），resolve 只是把
+      // 多样本解析成单样本，格式不能变——变了 `ResolveSubresource` 会失败。
       D3D11_TEXTURE2D_DESC resolved_desc = color_desc;
       resolved_desc.SampleDesc.Count = 1;
       resolved_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
@@ -4491,7 +4504,12 @@ class GpuScene3d final : public st::raster::Scene3D {
   /// 把 MSAA 结果 resolve 到可采样纹理（单采样时是空操作）。
   void resolve_if_needed() {
     if (sample_count_ > 1 && resolved_ != nullptr && color_ != nullptr) {
-      context_->ResolveSubresource(resolved_, 0, color_, 0, kFormat);
+      // ⚠ 格式必须是 `kSceneFormat`（与源/目标纹理一致）。
+      // 写 `kFormat`（`_UNORM`）而纹理是 `_SRGB` 时，`ResolveSubresource`
+      // **直接失败且不报错**，`resolved_` 保留上一次的内容——
+      // 表现是"画面对，但读数不对/偏亮"，而且改 staging 格式也没用
+      // （因为根本没走到那次 CopyResource 的正确数据）。
+      context_->ResolveSubresource(resolved_, 0, color_, 0, kSceneFormat);
     }
   }
 
@@ -4626,7 +4644,10 @@ class GpuScene3d final : public st::raster::Scene3D {
       desc.Height = static_cast<UINT>(height_);
       desc.MipLevels = 1;
       desc.ArraySize = 1;
-      desc.Format = kFormat;
+      // ⚠ 必须与源纹理**同格式**：`CopyResource` 要求格式完全一致。
+      // 源是 `_SRGB`、这里用 `_UNORM` 时复制会失败，随后 `Map` 拿到的是
+      // **未初始化的旧内容** —— 表现是"画面比实际亮一大截"（实测 0.517 vs 0.299）。
+      desc.Format = kSceneFormat;
       desc.SampleDesc.Count = 1;
       desc.Usage = D3D11_USAGE_STAGING;
       desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
