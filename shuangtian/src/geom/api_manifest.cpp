@@ -189,8 +189,8 @@ auto build_api_manifest() -> Json {
   Json mistakes = Json::array();
   mistakes.push_back("**尺寸用 size（全长）**：写 size:[2,4] 就是 2 宽 4 高，没有半长");
   mistakes.push_back("字段名拼错（raduis）→ 报错并给候选；不要猜，看报错里的候选");
-  mistakes.push_back("rotate/value 用**弧度**，不是角度：90 度 = 1.5708");
-  mistakes.push_back("旧字段 height 对 cube/cylinder **无效**（实测），请改用 size");
+  mistakes.push_back("`rotation` 与动画里 rotate 轨道的 value 都用**度**：写 90 就是转 90 度");
+  mistakes.push_back("尺寸只有 `size`（全长）；旧字段 radius/width/height/depth 已删除，写了会报错");
   mistakes.push_back("模型半径 < 0.05 时必须把 camera.near 调小，否则渲染出空白");
   mistakes.push_back("light_from 是**指向光源**的方向，写反会让阴影朝反方向");
   mistakes.push_back("父节点不可见时整棵子树都不可见（visible 会继承）");

@@ -1133,7 +1133,7 @@ auto build_mesh(const SceneObjectSpec& object) -> Result<Mesh> {
   return primitives::make_from_name(shape, params);
 }
 
-auto render_scene(const SceneSpec& spec, Canvas& canvas, math::Color background)
+auto render_scene(const SceneSpec& spec, Surface& canvas, math::Color background)
     -> Result<void> {
   auto scene = Scene3D::create(canvas.physical_width(), canvas.physical_height());
   if (!scene.has_value()) {
@@ -1147,20 +1147,20 @@ auto render_scene(const SceneSpec& spec, Canvas& canvas, math::Color background)
 /// 为什么用一个可选时间而不是两个函数体：动画与静态只有**一行**差别
 /// （`roots` 是否被采样结果替换），拆成两份必然漂移。
 [[nodiscard]] auto render_impl(const SceneSpec& spec, const std::optional<float>& time,
-                               Scene3D& scene, Canvas& canvas, math::Color background)
+                               Scene3D& scene, Surface& canvas, math::Color background)
     -> Result<void>;
 
-auto render_scene_into(const SceneSpec& spec, Scene3D& scene, Canvas& canvas,
+auto render_scene_into(const SceneSpec& spec, Scene3D& scene, Surface& canvas,
                        math::Color background) -> Result<void> {
   return render_impl(spec, std::nullopt, scene, canvas, background);
 }
 
-auto render_scene_at_into(const SceneSpec& spec, float time, Scene3D& scene, Canvas& canvas,
+auto render_scene_at_into(const SceneSpec& spec, float time, Scene3D& scene, Surface& canvas,
                           math::Color background) -> Result<void> {
   return render_impl(spec, time, scene, canvas, background);
 }
 
-auto render_scene_at(const SceneSpec& spec, float time, Canvas& canvas, math::Color background)
+auto render_scene_at(const SceneSpec& spec, float time, Surface& canvas, math::Color background)
     -> Result<void> {
   auto scene = Scene3D::create(canvas.physical_width(), canvas.physical_height());
   if (!scene.has_value()) {
@@ -1170,7 +1170,7 @@ auto render_scene_at(const SceneSpec& spec, float time, Canvas& canvas, math::Co
 }
 
 auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3D& scene,
-                 Canvas& canvas, math::Color background) -> Result<void> {
+                 Surface& canvas, math::Color background) -> Result<void> {
   canvas.clear(background);
 
   // ## 顺序在这里被钉死

@@ -356,7 +356,7 @@ struct SceneSpec {
 /// @param spec 场景描述
 /// @param canvas 目标画布（尺寸决定场景分辨率）
 /// @param background 清屏色（线性值）
-[[nodiscard]] auto render_scene(const SceneSpec& spec, Canvas& canvas,
+[[nodiscard]] auto render_scene(const SceneSpec& spec, Surface& canvas,
                                 math::Color background) -> Result<void>;
 
 /// 渲染**某一时刻**的一帧（场景自带动画时用它）。
@@ -372,12 +372,12 @@ struct SceneSpec {
 /// - `time` 单位是**秒**；范围外按端点保持（不循环——循环是播放器策略，
 ///   见 `animation.hpp`）。要循环：`time = fmod(time, clip.duration())`。
 /// - 没有动画时与 `render_scene` **逐像素相同**。
-[[nodiscard]] auto render_scene_at(const SceneSpec& spec, float time, Canvas& canvas,
+[[nodiscard]] auto render_scene_at(const SceneSpec& spec, float time, Surface& canvas,
                                    math::Color background) -> Result<void>;
 
 /// 同上，但复用调用方已有的场景实例（裁云导出时用这条）。
 [[nodiscard]] auto render_scene_at_into(const SceneSpec& spec, float time, Scene3D& scene,
-                                        Canvas& canvas, math::Color background) -> Result<void>;
+                                        Surface& canvas, math::Color background) -> Result<void>;
 
 /// 用**调用方提供的场景实例**渲染（不新建、不碰环境变量）。
 ///
@@ -390,7 +390,7 @@ struct SceneSpec {
 /// 控制通道完全超时**。
 ///
 /// 宿主已有场景实例时用本函数；场景实例的尺寸要与 `canvas` 一致。
-[[nodiscard]] auto render_scene_into(const SceneSpec& spec, Scene3D& scene, Canvas& canvas,
+[[nodiscard]] auto render_scene_into(const SceneSpec& spec, Scene3D& scene, Surface& canvas,
                                      math::Color background) -> Result<void>;
 
 /// 生成一个对象的网格（`shape` + 形状参数）。

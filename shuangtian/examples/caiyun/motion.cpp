@@ -98,6 +98,17 @@ thread_local st::raster::Canvas backdrop_canvas{2, 2, 1.0f};
 /// "预览对、成片错位"这类最难查的差异（且只在导出时才现形）。
 class Painter {
  public:
+  /// 合成目标是不是 GPU 画布（决定三维能否零拷贝接住纹理）。
+  ///
+  /// ## 为什么由画布自己回答而不是外部传参
+  ///
+  /// 三维能不能用显卡，取决于**合成目标能不能零拷贝接住它的纹理**。
+  /// 软件画布没有 `native_texture()`，接不住；GPU 画布能。
+  /// 这个事实只有画布自己知道——写常量会在换后端时悄悄失效。
+  [[nodiscard]] auto target_is_gpu() const noexcept -> bool {
+    return canvas_.native_texture().handle != nullptr;
+  }
+
   Painter(st::raster::Surface& canvas, const TextPort* port)
       : canvas_(canvas), port_(port),
         scale_(static_cast<float>(canvas.physical_width()) / kDesignWidth),
@@ -819,7 +830,8 @@ void paint_layers(Painter& p, const Scene& scene, float local_time, const AssetL
         const LayerState head_state = state;   // head 的动画状态（决定画面框）
         paint_model3d_group(p.canvas(), layer, members, local_time,
                             static_cast<float>(scene.duration), basis, head_state,
-                            canvas_w, canvas_h, design_w, design_h, &member_states);
+                            canvas_w, canvas_h, design_w, design_h, &member_states,
+                              p.target_is_gpu());
         continue;   // 组内成员已一并画完
       }
     }
@@ -1011,7 +1023,8 @@ void paint_layers(Painter& p, const Scene& scene, float local_time, const AssetL
         // 不跳会画两遍：一遍在共享世界里（对）、一遍孤立（错，而且能看见）。
         if (layer.model_group.empty() || is_group_head) {
           paint_model3d(p.canvas(), layer, st::math::Rect{lx, ly, lw, lh}, local_time,
-                        static_cast<float>(scene.duration), state.alpha, basis);
+                        static_cast<float>(scene.duration), state.alpha, basis,
+                       p.target_is_gpu());
         }
         break;
       }

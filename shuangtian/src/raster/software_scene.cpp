@@ -1431,6 +1431,7 @@ class SoftwareScene final : public Scene3D {
 /// 声明在这里而不在公共头：它返回 D3D 无关的 `Scene3D`，**调用方不需要知道
 /// 它背后是哪条腿**——这正是「平台中立接口」的含义。
 [[nodiscard]] auto gpu_scene3d_available() -> bool;
+[[nodiscard]] auto gpu_scene3d_unavailable_reason() -> std::string;
 [[nodiscard]] auto create_gpu_scene3d(int width, int height)
     -> Result<std::unique_ptr<Scene3D>>;
 
@@ -1514,8 +1515,23 @@ auto Scene3D::create(int width, int height) -> Result<std::unique_ptr<Scene3D>> 
     }
   }
   // 先试 GPU（只要平台实现了这条腿且着色器真建起来了）
+  //
+  // ## 为什么"不可用"必须记日志
+  //
+  // 旧实现在 GPU 腿建不起来时**静默**落到软件腿。后果是：一台 RTX 4080
+  // 在跑纯 CPU 光栅化（实测 3.2 秒/帧），而日志里一个字都没有——
+  // 没人会想到"显卡明明有，为什么这么慢"。
+  //
+  // GPU 不可用是**异常状态**（用户买了显卡就是为了用），不是正常的降级路径，
+  // 所以这里必须让调用方看得见原因。
+  if (!gpu_scene3d_available()) {
+    ST_LOG_INFO("三维：GPU 腿不可用（{}）→ 用软件腿", gpu_scene3d_unavailable_reason());
+  }
   if (gpu_scene3d_available()) {
     auto gpu = create_gpu_scene3d(width, height);
+    if (!gpu.has_value()) {
+      ST_LOG_WARN("三维：GPU 腿创建失败（{}）→ 回退软件腿", gpu.error().message);
+    }
     if (gpu.has_value()) {
       // **实测取快的那条**：两条腿各画一帧，软件明显更快就用软件。
       //
@@ -1535,8 +1551,8 @@ auto Scene3D::create(int width, int height) -> Result<std::unique_ptr<Scene3D>> 
                       height, software_ms, gpu_ms);
           return software;
         }
-        ST_LOG_DEBUG("三维：{}×{} 实测软件 {:.2f} ms vs GPU {:.2f} ms → 选 GPU 腿", width,
-                     height, software_ms, gpu_ms);
+        ST_LOG_INFO("三维：{}×{} 实测软件 {:.2f} ms vs GPU {:.2f} ms → 选 GPU 腿", width,
+                    height, software_ms, gpu_ms);
       }
       return gpu;
     }

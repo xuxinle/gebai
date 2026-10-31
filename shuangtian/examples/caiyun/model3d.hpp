@@ -95,9 +95,11 @@ struct Model3dPose {
 /// 设计坐标缩放，因为它同时被预览与导出调用，两者的 scale 不同。
 ///
 /// `alpha` 是整体不透明度（入场动画用），0 直接跳过。
+/// @param target_is_gpu 合成目标是否是 GPU 画布（决定三维能否零拷贝，
+///        见 model3d.cpp 里 `kTargetAcceptsTexture` 的说明）
 void paint_model3d(st::raster::Surface& canvas, const Layer& layer, st::math::Rect box,
                    float local_time, float scene_duration, float alpha,
-                   std::string_view asset_basis);
+                   std::string_view asset_basis, bool target_is_gpu);
 
 /// 把一个**三维组**画进画布：组内所有 `model_group` 相同的图层共用一个场景。
 ///
@@ -128,6 +130,7 @@ void paint_model3d_group(st::raster::Surface& canvas, const Layer& head,
                          float scene_duration, std::string_view asset_basis,
                          const LayerState& head_state, float canvas_w, float canvas_h,
                          float design_w, float design_h,
-                         const std::vector<LayerState>* member_states = nullptr);
+                         const std::vector<LayerState>* member_states = nullptr,
+                         bool target_is_gpu = false);
 
 }  // namespace caiyun

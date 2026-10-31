@@ -100,6 +100,9 @@ namespace st::raster {
 [[nodiscard]] auto create_gpu_scene3d(int, int) -> Result<std::unique_ptr<Scene3D>> {
   return unexpected(ErrorCode::Unsupported, "GPU 三维当前仅实现了 D3D11（Windows）后端");
 }
+[[nodiscard]] auto gpu_scene3d_unavailable_reason() -> std::string {
+  return "GPU 三维当前仅实现了 D3D11（Windows）后端";
+}
 }  // namespace st::raster
 
 #else
@@ -1355,6 +1358,30 @@ class GpuCanvas final : public Surface {
     log_op(PaintOp::Image, start,
            static_cast<std::uint64_t>(std::lround(destination.width * scale_)) *
                static_cast<std::uint64_t>(std::lround(destination.height * scale_)));
+  }
+
+  /// 把本画布的**离屏纹理**交出去，供同后端的消费方零拷贝采样。
+  ///
+  /// ## 为什么这个接口必须存在（它的缺席让三维白跑了纯 CPU）
+  ///
+  /// 三维场景要知道"合成目标能不能零拷贝接住我的结果"，判据就是本函数
+  /// 是否返回有效句柄。若 `GpuCanvas` 不实现它（默认实现返回空），
+  /// 调用方会认为**所有目标都接不住**——于是三维永远走软件腿。
+  ///
+  /// 实测代价：RTX 4080 上跑纯 CPU 光栅化，1080p 三物体 344 ms/帧，
+  /// 而零拷贝路径只要 0.85 ms/帧（`tests/gpu_zero_copy_test.go`）。
+  ///
+  /// 注意：只交**纹理视图**（SRV），不交出所有权——本画布析构时会释放它，
+  /// 消费方必须在同一帧内用完（裁云的合成就是同帧、同线程）。
+  [[nodiscard]] auto native_texture() const noexcept
+      -> st::raster::Surface::NativeTexture override {
+    if (target_srv_ == nullptr) return {};
+    st::raster::Surface::NativeTexture out{};
+    out.handle = target_srv_;
+    out.backend = "d3d11";
+    out.width = physical_width();
+    out.height = physical_height();
+    return out;
   }
 
   /// **同后端原生纹理的零拷贝合成**（`Surface::composite_native_texture` 的实现）。
@@ -4463,6 +4490,28 @@ namespace st::raster {
 /// GPU 三维腿是否可用（着色器与状态**真建起来**才算，不只看"有设备"）。
 [[nodiscard]] auto gpu_scene3d_available() -> bool {
   return st::raster::gpu::scene3d_pipeline().ok;
+}
+
+/// GPU 腿不可用的**具体原因**（可用时返回空串）。
+///
+/// ## 为什么单独一个函数
+///
+/// `gpu_scene3d_available()` 只给 bool，失败原因（缺 d3dcompiler / HLSL 编译
+/// 报错 / 设备创建失败）全被吞掉。实测代价：一台 RTX 4080 在跑纯 CPU 光栅化、
+/// 3.2 秒/帧，而日志里没有任何线索——排查只能靠读代码猜。
+///
+/// 这些原因对使用者是有行动价值的（装 d3dcompiler / 换驱动 / 报 shader bug），
+/// 所以必须能取出来。
+[[nodiscard]] auto gpu_scene3d_unavailable_reason() -> std::string {
+  const st::raster::gpu::DeviceHolder& device = st::raster::gpu::holder();
+  if (!device.ok) {
+    return device.error.empty() ? std::string("D3D11 设备未创建") : device.error;
+  }
+  const st::raster::gpu::Scene3dPipeline& pipes = st::raster::gpu::scene3d_pipeline();
+  if (!pipes.ok) {
+    return pipes.error.empty() ? std::string("三维渲染管线未就绪") : pipes.error;
+  }
+  return {};
 }
 
 /// 建 GPU 三维场景；不可用时给出**具体原因**（上层据此回退软件腿并记日志）。

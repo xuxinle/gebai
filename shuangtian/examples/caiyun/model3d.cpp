@@ -307,8 +307,18 @@ struct SceneSlot {
         gpu_target == want_gpu_target) {
       return scene.get();
     }
-    // 目标接不住纹理 → 临时指定软件腿（框架的进程级开关，用完还原，
-    // 不影响调用方自己的设置）。
+    // ## 目标接不住纹理时必须用软件腿（实测结论，勿改成"让框架自动选"）
+    //
+    // 这里曾尝试过"交给 Scene3D::create 实测择优"，结果是**灾难**：
+    // GPU 腿在回读模式下每帧要把 8MB 颜色缓冲从显存搬回内存 + 同步等 GPU，
+    // 实测从 63ms/帧 退化到几分钟都跑不完（16 路并行全堵在上下文锁上）。
+    //
+    // 框架的 `probe_leg_ms` 测不出这个问题：它量的是"画一帧"，而回读的成本
+    // 在 `end_frame` 之后、并且随**并行度**放大——单线程探测看到的是
+    // "GPU 0.06ms vs 软件 177ms"，完全是假象。
+    //
+    // 所以这条判据必须保留在这里：**目标能零拷贝（Surface）才用 GPU**。
+    // 等 ① 的零拷贝路径打通后，这个常量才会变成 true。
     const char* previous = std::getenv("ST_SCENE3D_BACKEND");
     const std::string saved = previous != nullptr ? previous : "";
     const bool had = previous != nullptr;
@@ -754,7 +764,7 @@ void upload_layer_texture(st::raster::Scene3D& scene, const Layer& layer,
 
 void paint_model3d(st::raster::Surface& canvas, const Layer& layer, st::math::Rect box,
                    float local_time, float scene_duration, float alpha,
-                   std::string_view asset_basis) {
+                   std::string_view asset_basis, bool target_is_gpu) {
   if (alpha <= 0.004f || box.width < 2.0f || box.height < 2.0f) return;
 
 
@@ -784,7 +794,19 @@ void paint_model3d(st::raster::Surface& canvas, const Layer& layer, st::math::Re
   //
   // 将来若把渲染管线改成 `Surface&`（P1 计划），这里改成查目标能力即可，
   // 三维就能拿到 0.07ms 的零拷贝路径。
-  constexpr bool kTargetAcceptsTexture = false;
+  // ## 合成目标能不能零拷贝接住 GPU 纹理（2026-10-31）
+  //
+  // 这是三维能不能用显卡的**唯一开关**。开关为 false 时三维走软件腿
+  // （实测 1080p 三物体 344ms/帧）；为 true 时走 GPU 零拷贝
+  // （同场景 0.85ms/帧 @800x450，实测快 17.6 倍，见 `tests/gpu_zero_copy_test.cpp`）。
+  //
+  // **前提**：合成画布必须是 `GpuCanvas`（`CAIYUN_GPU=1` 时才是）。
+  // 软件画布没有 `native_texture()`，接不住纹理——那时若仍走 GPU 腿，
+  // `end_frame` 会自己回退成"回读"，反而比软件腿慢十几倍。
+  //
+  // 所以这里查**运行时**能力，不再写常量：目标是不是 GPU 画布由 `dispatch`
+  // 传入（见 `paint_model3d` 的 `target_is_gpu` 参数）。
+  const bool kTargetAcceptsTexture = target_is_gpu;
   SceneSlot& slot = scene_slot();
   st::raster::Scene3D* scene = slot.acquire(width, height, kTargetAcceptsTexture);
   if (scene == nullptr) {
@@ -898,14 +920,27 @@ void paint_model3d_group(st::raster::Surface& canvas, const Layer& head,
                          float scene_duration, std::string_view asset_basis,
                          const LayerState& head_state, float canvas_w, float canvas_h,
                          float design_w, float design_h,
-                         const std::vector<LayerState>* member_states) {
+                         const std::vector<LayerState>* member_states,
+                         bool target_is_gpu) {
   if (head_state.alpha <= 0.004f || head_state.w < 2.0f || head_state.h < 2.0f) return;
   const st::math::Rect box{head_state.x, head_state.y + head_state.offset_y, head_state.w,
                            head_state.h};
   const int width = std::max(2, static_cast<int>(std::lround(box.width)));
   const int height = std::max(2, static_cast<int>(std::lround(box.height)));
   SceneSlot& slot = scene_slot();
-  constexpr bool kTargetAcceptsTexture = false;
+  // ## 合成目标能不能零拷贝接住 GPU 纹理（2026-10-31）
+  //
+  // 这是三维能不能用显卡的**唯一开关**。开关为 false 时三维走软件腿
+  // （实测 1080p 三物体 344ms/帧）；为 true 时走 GPU 零拷贝
+  // （同场景 0.85ms/帧 @800x450，实测快 17.6 倍，见 `tests/gpu_zero_copy_test.cpp`）。
+  //
+  // **前提**：合成画布必须是 `GpuCanvas`（`CAIYUN_GPU=1` 时才是）。
+  // 软件画布没有 `native_texture()`，接不住纹理——那时若仍走 GPU 腿，
+  // `end_frame` 会自己回退成"回读"，反而比软件腿慢十几倍。
+  //
+  // 所以这里查**运行时**能力，不再写常量：目标是不是 GPU 画布由 `dispatch`
+  // 传入（见 `paint_model3d` 的 `target_is_gpu` 参数）。
+  const bool kTargetAcceptsTexture = target_is_gpu;
   st::raster::Scene3D* scene = slot.acquire(width, height, kTargetAcceptsTexture);
   if (scene == nullptr) {
     canvas.fill_rect(box, st::raster::Paint::solid(st::math::Color{48, 20, 26, 255}));

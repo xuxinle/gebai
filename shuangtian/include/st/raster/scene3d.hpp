@@ -561,4 +561,13 @@ class Scene3D {
   [[nodiscard]] virtual auto texture() const noexcept -> SceneTexture { return {}; }
 };
 
+/// GPU 三维腿不可用的**具体原因**（可用时返回空串）。
+///
+/// ## 为什么单独一个函数
+///
+/// `available()` 只给 bool，失败原因（缺 d3dcompiler / HLSL 编译报错 /
+/// 设备创建失败）全被吞掉。实测代价：一台 RTX 4080 在跑纯 CPU 光栅化、
+/// 3.2 秒/帧，而日志里没有任何线索——排查只能靠读代码猜。
+[[nodiscard]] auto gpu_scene3d_unavailable_reason() -> std::string;
+
 }  // namespace st::raster
