@@ -1,16 +1,16 @@
 {
   "camera": {
     "eye": [
-      2.9,
-      1.7,
-      3.6
+      3.6,
+      2.3,
+      4.4
     ],
     "target": [
       0,
-      0.05,
+      0.02,
       0
     ],
-    "fov": 34
+    "fov": 32
   },
   "lighting": {
     "light_from": [
@@ -18,21 +18,21 @@
       0.8,
       0.55
     ],
-    "ambient": 0.46,
-    "diffuse": 0.82,
-    "rim": 0.48,
-    "exposure": 1.22,
+    "ambient": 0.52,
+    "diffuse": 0.85,
+    "rim": 0.5,
+    "exposure": 1.18,
     "env_sky": [
-      0.58,
-      0.68,
-      0.88
+      0.62,
+      0.7,
+      0.9
     ],
     "env_ground": [
-      0.14,
-      0.14,
-      0.18
+      0.17,
+      0.16,
+      0.2
     ],
-    "env_strength": 1.0
+    "env_strength": 1.05
   },
   "shadow": {
     "strength": 0.0
@@ -43,11 +43,11 @@
       "shape": "cylinder",
       "size": [
         0.3,
-        2.1
+        2.05
       ],
-      "color": "#eef2f7",
-      "metallic": 0.88,
-      "roughness": 0.24,
+      "color": "#eef1f5",
+      "metallic": 0.35,
+      "roughness": 0.32,
       "rotation": [
         90,
         0,
@@ -64,11 +64,11 @@
       "shape": "cone",
       "size": [
         0.3,
-        0.5
+        0.55
       ],
-      "color": "#eef2f7",
-      "metallic": 0.88,
-      "roughness": 0.24,
+      "color": "#eef1f5",
+      "metallic": 0.35,
+      "roughness": 0.3,
       "rotation": [
         90,
         0,
@@ -81,221 +81,541 @@
       ]
     },
     {
-      "name": "wing_l",
-      "shape": "box",
+      "name": "tail_cone",
+      "shape": "cone",
       "size": [
-        0.9,
-        0.045,
-        0.34
+        0.26,
+        0.45
       ],
-      "color": "#dfe6ef",
-      "metallic": 0.85,
-      "roughness": 0.28,
+      "color": "#eef1f5",
+      "metallic": 0.35,
+      "roughness": 0.32,
       "rotation": [
-        0,
+        -90,
         0,
         0
       ],
       "translate": [
-        -0.6,
-        0.02,
-        -0.02
+        0,
+        0,
+        -1.24
+      ]
+    },
+    {
+      "name": "wing_l",
+      "shape": "box",
+      "size": [
+        1.15,
+        0.13,
+        0.52
+      ],
+      "color": "#eef1f5",
+      "metallic": 0.3,
+      "roughness": 0.34,
+      "translate": [
+        -0.62,
+        -0.02,
+        0.05
+      ],
+      "rotation": [
+        0,
+        14,
+        0
       ]
     },
     {
       "name": "wing_r",
       "shape": "box",
       "size": [
-        0.9,
-        0.045,
+        1.15,
+        0.13,
+        0.52
+      ],
+      "color": "#eef1f5",
+      "metallic": 0.3,
+      "roughness": 0.34,
+      "translate": [
+        0.62,
+        -0.02,
+        0.05
+      ],
+      "rotation": [
+        0,
+        -14,
+        0
+      ]
+    },
+    {
+      "name": "wingtip_l",
+      "shape": "box",
+      "size": [
+        0.2,
+        0.1,
         0.34
       ],
-      "color": "#dfe6ef",
-      "metallic": 0.85,
-      "roughness": 0.28,
+      "color": "#1f4f8a",
+      "metallic": 0.4,
+      "roughness": 0.3,
+      "translate": [
+        -1.14,
+        0.03,
+        0.2
+      ],
       "rotation": [
         0,
-        0,
+        26,
         0
-      ],
-      "translate": [
-        0.6,
-        0.02,
-        -0.02
       ]
     },
     {
-      "name": "tail_fin",
+      "name": "wingtip_r",
       "shape": "box",
       "size": [
-        0.05,
-        0.36,
-        0.3
+        0.2,
+        0.1,
+        0.34
       ],
-      "color": "#c8342e",
-      "metallic": 0.85,
-      "roughness": 0.26,
+      "color": "#1f4f8a",
+      "metallic": 0.4,
+      "roughness": 0.3,
+      "translate": [
+        1.14,
+        0.03,
+        0.2
+      ],
       "rotation": [
         0,
-        0,
+        -26,
         0
-      ],
-      "translate": [
-        0,
-        0.22,
-        -1.0
       ]
     },
     {
-      "name": "tail_wing_l",
+      "name": "fin",
       "shape": "box",
       "size": [
-        0.34,
-        0.04,
-        0.18
+        0.06,
+        0.3,
+        0.26
       ],
-      "color": "#dfe6ef",
-      "metallic": 0.85,
-      "roughness": 0.28,
-      "rotation": [
-        0,
-        0,
-        0
-      ],
+      "color": "#c8322c",
+      "metallic": 0.35,
+      "roughness": 0.33,
       "translate": [
-        -0.24,
+        0,
+        0.2,
+        -0.98
+      ]
+    },
+    {
+      "name": "hstab_l",
+      "shape": "box",
+      "size": [
+        0.42,
         0.05,
+        0.22
+      ],
+      "color": "#eef1f5",
+      "metallic": 0.3,
+      "roughness": 0.34,
+      "translate": [
+        -0.26,
+        0.06,
         -1.02
       ]
     },
     {
-      "name": "tail_wing_r",
+      "name": "hstab_r",
       "shape": "box",
       "size": [
-        0.34,
-        0.04,
-        0.18
-      ],
-      "color": "#dfe6ef",
-      "metallic": 0.85,
-      "roughness": 0.28,
-      "rotation": [
-        0,
-        0,
-        0
-      ],
-      "translate": [
-        0.24,
+        0.42,
         0.05,
+        0.22
+      ],
+      "color": "#eef1f5",
+      "metallic": 0.3,
+      "roughness": 0.34,
+      "translate": [
+        0.26,
+        0.06,
         -1.02
-      ]
-    },
-    {
-      "name": "engine_l",
-      "shape": "cylinder",
-      "size": [
-        0.16,
-        0.46
-      ],
-      "color": "#b9c2ce",
-      "metallic": 0.95,
-      "roughness": 0.22,
-      "rotation": [
-        90,
-        0,
-        0
-      ],
-      "translate": [
-        -0.52,
-        -0.1,
-        0.1
-      ]
-    },
-    {
-      "name": "engine_r",
-      "shape": "cylinder",
-      "size": [
-        0.16,
-        0.46
-      ],
-      "color": "#b9c2ce",
-      "metallic": 0.95,
-      "roughness": 0.22,
-      "rotation": [
-        90,
-        0,
-        0
-      ],
-      "translate": [
-        0.52,
-        -0.1,
-        0.1
       ]
     },
     {
       "name": "cockpit",
       "shape": "box",
       "size": [
-        0.18,
-        0.05,
-        0.38
+        0.24,
+        0.07,
+        0.46
       ],
-      "color": "#122b44",
-      "metallic": 0.2,
-      "roughness": 0.06,
-      "rotation": [
-        0,
-        0,
-        0
-      ],
+      "color": "#16283d",
+      "metallic": 0.15,
+      "roughness": 0.1,
       "translate": [
         0,
-        0.16,
-        0.72
+        0.17,
+        0.7
+      ],
+      "rotation": [
+        8,
+        0,
+        0
       ]
     },
     {
-      "name": "window_row_l",
+      "name": "win_l0",
       "shape": "box",
       "size": [
-        0.03,
-        0.04,
-        1.1
+        0.025,
+        0.045,
+        0.1
       ],
-      "color": "#0e2136",
-      "metallic": 0.2,
-      "roughness": 0.08,
+      "color": "#16283d",
+      "metallic": 0.1,
+      "roughness": 0.1,
+      "translate": [
+        -0.152,
+        0.1,
+        0.4
+      ]
+    },
+    {
+      "name": "win_r0",
+      "shape": "box",
+      "size": [
+        0.025,
+        0.045,
+        0.1
+      ],
+      "color": "#16283d",
+      "metallic": 0.1,
+      "roughness": 0.1,
+      "translate": [
+        0.152,
+        0.1,
+        0.4
+      ]
+    },
+    {
+      "name": "win_l1",
+      "shape": "box",
+      "size": [
+        0.025,
+        0.045,
+        0.1
+      ],
+      "color": "#16283d",
+      "metallic": 0.1,
+      "roughness": 0.1,
+      "translate": [
+        -0.152,
+        0.1,
+        0.18000000000000002
+      ]
+    },
+    {
+      "name": "win_r1",
+      "shape": "box",
+      "size": [
+        0.025,
+        0.045,
+        0.1
+      ],
+      "color": "#16283d",
+      "metallic": 0.1,
+      "roughness": 0.1,
+      "translate": [
+        0.152,
+        0.1,
+        0.18000000000000002
+      ]
+    },
+    {
+      "name": "win_l2",
+      "shape": "box",
+      "size": [
+        0.025,
+        0.045,
+        0.1
+      ],
+      "color": "#16283d",
+      "metallic": 0.1,
+      "roughness": 0.1,
+      "translate": [
+        -0.152,
+        0.1,
+        -0.03999999999999998
+      ]
+    },
+    {
+      "name": "win_r2",
+      "shape": "box",
+      "size": [
+        0.025,
+        0.045,
+        0.1
+      ],
+      "color": "#16283d",
+      "metallic": 0.1,
+      "roughness": 0.1,
+      "translate": [
+        0.152,
+        0.1,
+        -0.03999999999999998
+      ]
+    },
+    {
+      "name": "win_l3",
+      "shape": "box",
+      "size": [
+        0.025,
+        0.045,
+        0.1
+      ],
+      "color": "#16283d",
+      "metallic": 0.1,
+      "roughness": 0.1,
+      "translate": [
+        -0.152,
+        0.1,
+        -0.26
+      ]
+    },
+    {
+      "name": "win_r3",
+      "shape": "box",
+      "size": [
+        0.025,
+        0.045,
+        0.1
+      ],
+      "color": "#16283d",
+      "metallic": 0.1,
+      "roughness": 0.1,
+      "translate": [
+        0.152,
+        0.1,
+        -0.26
+      ]
+    },
+    {
+      "name": "win_l4",
+      "shape": "box",
+      "size": [
+        0.025,
+        0.045,
+        0.1
+      ],
+      "color": "#16283d",
+      "metallic": 0.1,
+      "roughness": 0.1,
+      "translate": [
+        -0.152,
+        0.1,
+        -0.48
+      ]
+    },
+    {
+      "name": "win_r4",
+      "shape": "box",
+      "size": [
+        0.025,
+        0.045,
+        0.1
+      ],
+      "color": "#16283d",
+      "metallic": 0.1,
+      "roughness": 0.1,
+      "translate": [
+        0.152,
+        0.1,
+        -0.48
+      ]
+    },
+    {
+      "name": "win_l5",
+      "shape": "box",
+      "size": [
+        0.025,
+        0.045,
+        0.1
+      ],
+      "color": "#16283d",
+      "metallic": 0.1,
+      "roughness": 0.1,
+      "translate": [
+        -0.152,
+        0.1,
+        -0.7000000000000001
+      ]
+    },
+    {
+      "name": "win_r5",
+      "shape": "box",
+      "size": [
+        0.025,
+        0.045,
+        0.1
+      ],
+      "color": "#16283d",
+      "metallic": 0.1,
+      "roughness": 0.1,
+      "translate": [
+        0.152,
+        0.1,
+        -0.7000000000000001
+      ]
+    },
+    {
+      "name": "win_l6",
+      "shape": "box",
+      "size": [
+        0.025,
+        0.045,
+        0.1
+      ],
+      "color": "#16283d",
+      "metallic": 0.1,
+      "roughness": 0.1,
+      "translate": [
+        -0.152,
+        0.1,
+        -0.92
+      ]
+    },
+    {
+      "name": "win_r6",
+      "shape": "box",
+      "size": [
+        0.025,
+        0.045,
+        0.1
+      ],
+      "color": "#16283d",
+      "metallic": 0.1,
+      "roughness": 0.1,
+      "translate": [
+        0.152,
+        0.1,
+        -0.92
+      ]
+    },
+    {
+      "name": "engine_l",
+      "shape": "cylinder",
+      "size": [
+        0.155,
+        0.6
+      ],
+      "color": "#b8c0cc",
+      "metallic": 0.7,
+      "roughness": 0.28,
       "rotation": [
-        0,
+        90,
         0,
         0
       ],
       "translate": [
+        -0.66,
         -0.16,
-        0.06,
-        0.02
+        0.06
       ]
     },
     {
-      "name": "window_row_r",
-      "shape": "box",
+      "name": "intake_l",
+      "shape": "cylinder",
       "size": [
-        0.03,
-        0.04,
-        1.1
+        0.165,
+        0.05
       ],
-      "color": "#0e2136",
-      "metallic": 0.2,
-      "roughness": 0.08,
+      "color": "#2a2f36",
+      "metallic": 0.5,
+      "roughness": 0.4,
       "rotation": [
-        0,
+        90,
         0,
         0
       ],
       "translate": [
+        -0.66,
+        -0.16,
+        0.37
+      ]
+    },
+    {
+      "name": "pylon_l",
+      "shape": "box",
+      "size": [
+        0.09,
         0.16,
-        0.06,
-        0.02
+        0.34
+      ],
+      "color": "#eef1f5",
+      "metallic": 0.35,
+      "roughness": 0.33,
+      "translate": [
+        -0.66,
+        -0.06,
+        0.04
+      ]
+    },
+    {
+      "name": "engine_r",
+      "shape": "cylinder",
+      "size": [
+        0.155,
+        0.6
+      ],
+      "color": "#b8c0cc",
+      "metallic": 0.7,
+      "roughness": 0.28,
+      "rotation": [
+        90,
+        0,
+        0
+      ],
+      "translate": [
+        0.66,
+        -0.16,
+        0.06
+      ]
+    },
+    {
+      "name": "intake_r",
+      "shape": "cylinder",
+      "size": [
+        0.165,
+        0.05
+      ],
+      "color": "#2a2f36",
+      "metallic": 0.5,
+      "roughness": 0.4,
+      "rotation": [
+        90,
+        0,
+        0
+      ],
+      "translate": [
+        0.66,
+        -0.16,
+        0.37
+      ]
+    },
+    {
+      "name": "pylon_r",
+      "shape": "box",
+      "size": [
+        0.09,
+        0.16,
+        0.34
+      ],
+      "color": "#eef1f5",
+      "metallic": 0.35,
+      "roughness": 0.33,
+      "translate": [
+        0.66,
+        -0.06,
+        0.04
       ]
     }
   ]

@@ -156,7 +156,7 @@
       "translate": [
         0,
         0.26,
-        0.16
+        0.17
       ],
       "emission": 1.1,
       "emissive_color": "#4ee8ff",
@@ -176,13 +176,13 @@
       "translate": [
         0,
         0.1,
-        0.16
+        0.17
       ]
     },
     {
       "name": "shoulder_l",
       "shape": "uv_sphere",
-      "size": 0.16,
+      "size": 0.15,
       "color": "#c3cad6",
       "metallic": 0.85,
       "roughness": 0.26,
@@ -195,12 +195,12 @@
     {
       "name": "shoulder_r",
       "shape": "uv_sphere",
-      "size": 0.16,
+      "size": 0.15,
       "color": "#c3cad6",
       "metallic": 0.85,
       "roughness": 0.26,
       "translate": [
-        0.3,
+        -0.3,
         0.4,
         0
       ]
@@ -277,9 +277,9 @@
       "name": "hip",
       "shape": "box",
       "size": [
-        0.4,
-        0.12,
-        0.28
+        0.36,
+        0.14,
+        0.26
       ],
       "color": "#9aa3b0",
       "metallic": 0.9,
@@ -294,7 +294,7 @@
       "name": "leg_l",
       "shape": "cylinder",
       "size": [
-        0.13,
+        0.145,
         0.42
       ],
       "color": "#dfe4ec",
@@ -315,7 +315,7 @@
       "name": "leg_r",
       "shape": "cylinder",
       "size": [
-        0.13,
+        0.145,
         0.42
       ],
       "color": "#dfe4ec",
@@ -334,36 +334,44 @@
     },
     {
       "name": "foot_l",
-      "shape": "box",
+      "shape": "capsule",
       "size": [
-        0.18,
-        0.09,
-        0.26
+        0.17,
+        0.28
       ],
       "color": "#7c8794",
       "metallic": 0.85,
       "roughness": 0.3,
       "translate": [
         -0.13,
-        -0.55,
-        0.04
+        -0.53,
+        0.045
+      ],
+      "rotation": [
+        90,
+        0,
+        0
       ]
     },
     {
       "name": "foot_r",
-      "shape": "box",
+      "shape": "capsule",
       "size": [
-        0.18,
-        0.09,
-        0.26
+        0.17,
+        0.28
       ],
       "color": "#7c8794",
       "metallic": 0.85,
       "roughness": 0.3,
       "translate": [
         0.13,
-        -0.55,
-        0.04
+        -0.53,
+        0.045
+      ],
+      "rotation": [
+        90,
+        0,
+        0
       ]
     }
   ]

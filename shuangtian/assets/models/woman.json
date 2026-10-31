@@ -1,13 +1,13 @@
 {
   "camera": {
     "eye": [
-      1.55,
-      1.05,
-      3.75
+      1.9,
+      1.15,
+      3.7
     ],
     "target": [
       0,
-      0.12,
+      0.92,
       0
     ],
     "fov": 34
@@ -18,19 +18,19 @@
       0.78,
       0.58
     ],
-    "ambient": 0.5,
-    "diffuse": 0.82,
+    "ambient": 0.52,
+    "diffuse": 0.85,
     "rim": 0.5,
-    "exposure": 1.22,
+    "exposure": 1.2,
     "env_sky": [
-      0.58,
-      0.64,
-      0.84
+      0.6,
+      0.68,
+      0.88
     ],
     "env_ground": [
-      0.15,
-      0.14,
-      0.18
+      0.18,
+      0.17,
+      0.2
     ],
     "env_strength": 1.0
   },
@@ -41,43 +41,47 @@
     {
       "name": "head",
       "shape": "uv_sphere",
-      "size": 0.34,
-      "color": "#e8b894",
-      "metallic": 0.0,
+      "size": [
+        0.235,
+        0.29,
+        0.245
+      ],
+      "color": "#efc0a0",
       "roughness": 0.62,
       "translate": [
         0,
-        0.86,
+        1.6,
         0
       ]
     },
     {
       "name": "hair",
       "shape": "uv_sphere",
-      "size": 0.35,
+      "size": [
+        0.25,
+        0.24,
+        0.26
+      ],
       "color": "#3a2216",
-      "metallic": 0.05,
-      "roughness": 0.7,
+      "roughness": 0.72,
       "translate": [
         0,
-        0.94,
-        -0.04
+        1.675,
+        -0.015
       ]
     },
     {
       "name": "neck",
-      "shape": "box",
+      "shape": "capsule",
       "size": [
-        0.13,
-        0.1,
-        0.13
+        0.105,
+        0.14
       ],
-      "color": "#e8b894",
-      "metallic": 0.0,
+      "color": "#efc0a0",
       "roughness": 0.62,
       "translate": [
         0,
-        0.66,
+        1.45,
         0
       ]
     },
@@ -85,204 +89,270 @@
       "name": "torso",
       "shape": "capsule",
       "size": [
-        0.3,
-        0.46
+        0.355,
+        0.64
       ],
       "color": "#8a3d6b",
-      "metallic": 0.05,
       "roughness": 0.68,
-      "rotation": [
-        0,
-        0,
-        0
-      ],
       "translate": [
         0,
-        0.32,
+        1.16,
         0
       ]
     },
     {
       "name": "hip",
-      "shape": "uv_sphere",
-      "size": 0.3,
-      "color": "#2a2434",
-      "metallic": 0.05,
-      "roughness": 0.7,
-      "translate": [
-        0,
-        0.02,
-        0
-      ]
-    },
-    {
-      "name": "shoulder_-1",
-      "shape": "uv_sphere",
-      "size": 0.15,
-      "color": "#8a3d6b",
-      "metallic": 0.05,
-      "roughness": 0.68,
-      "translate": [
-        -0.3,
-        0.52,
-        0
-      ]
-    },
-    {
-      "name": "arm_-1",
       "shape": "capsule",
       "size": [
-        0.11,
-        0.42
-      ],
-      "color": "#8a3d6b",
-      "metallic": 0.05,
-      "roughness": 0.68,
-      "rotation": [
-        0,
-        0,
-        0
-      ],
-      "translate": [
-        -0.33,
-        0.26,
-        0
-      ]
-    },
-    {
-      "name": "hand_-1",
-      "shape": "uv_sphere",
-      "size": 0.11,
-      "color": "#e8b894",
-      "metallic": 0.0,
-      "roughness": 0.62,
-      "translate": [
-        -0.33,
-        -0.04,
-        0
-      ]
-    },
-    {
-      "name": "leg_-1",
-      "shape": "capsule",
-      "size": [
-        0.15,
-        0.5
-      ],
-      "color": "#2a2434",
-      "metallic": 0.05,
-      "roughness": 0.7,
-      "rotation": [
-        0,
-        0,
-        0
-      ],
-      "translate": [
-        -0.13,
-        -0.28,
-        0
-      ]
-    },
-    {
-      "name": "shoe_-1",
-      "shape": "box",
-      "size": [
-        0.18,
-        0.1,
-        0.28
-      ],
-      "color": "#15181d",
-      "metallic": 0.1,
-      "roughness": 0.6,
-      "translate": [
-        -0.13,
-        -0.6,
-        0.04
-      ]
-    },
-    {
-      "name": "shoulder_1",
-      "shape": "uv_sphere",
-      "size": 0.15,
-      "color": "#8a3d6b",
-      "metallic": 0.05,
-      "roughness": 0.68,
-      "translate": [
         0.3,
-        0.52,
+        0.22
+      ],
+      "color": "#2a2434",
+      "roughness": 0.7,
+      "translate": [
+        0,
+        0.86,
         0
       ]
     },
     {
-      "name": "arm_1",
+      "name": "upper_arm_l",
       "shape": "capsule",
       "size": [
-        0.11,
-        0.42
+        0.115,
+        0.36
       ],
       "color": "#8a3d6b",
-      "metallic": 0.05,
       "roughness": 0.68,
-      "rotation": [
-        0,
-        0,
-        0
-      ],
       "translate": [
-        0.33,
-        0.26,
+        -0.225,
+        1.14,
         0
       ]
     },
     {
-      "name": "hand_1",
-      "shape": "uv_sphere",
-      "size": 0.11,
-      "color": "#e8b894",
-      "metallic": 0.0,
-      "roughness": 0.62,
-      "translate": [
-        0.33,
-        -0.04,
-        0
-      ]
-    },
-    {
-      "name": "leg_1",
+      "name": "upper_arm_r",
       "shape": "capsule",
       "size": [
-        0.15,
+        0.115,
+        0.36
+      ],
+      "color": "#8a3d6b",
+      "roughness": 0.68,
+      "translate": [
+        0.225,
+        1.14,
+        0
+      ]
+    },
+    {
+      "name": "forearm_l",
+      "shape": "capsule",
+      "size": [
+        0.098,
+        0.32
+      ],
+      "color": "#efc0a0",
+      "roughness": 0.62,
+      "translate": [
+        -0.23,
+        0.84,
+        0
+      ]
+    },
+    {
+      "name": "forearm_r",
+      "shape": "capsule",
+      "size": [
+        0.098,
+        0.32
+      ],
+      "color": "#efc0a0",
+      "roughness": 0.62,
+      "translate": [
+        0.23,
+        0.84,
+        0
+      ]
+    },
+    {
+      "name": "hand_l",
+      "shape": "uv_sphere",
+      "size": [
+        0.1,
+        0.13,
+        0.075
+      ],
+      "color": "#efc0a0",
+      "roughness": 0.62,
+      "translate": [
+        -0.212,
+        0.69,
+        0
+      ]
+    },
+    {
+      "name": "hand_r",
+      "shape": "uv_sphere",
+      "size": [
+        0.1,
+        0.13,
+        0.075
+      ],
+      "color": "#efc0a0",
+      "roughness": 0.62,
+      "translate": [
+        0.212,
+        0.69,
+        0
+      ]
+    },
+    {
+      "name": "thigh_l",
+      "shape": "capsule",
+      "size": [
+        0.17,
         0.5
       ],
       "color": "#2a2434",
-      "metallic": 0.05,
       "roughness": 0.7,
-      "rotation": [
-        0,
-        0,
-        0
-      ],
       "translate": [
-        0.13,
-        -0.28,
+        -0.088,
+        0.6,
         0
       ]
     },
     {
-      "name": "shoe_1",
-      "shape": "box",
+      "name": "thigh_r",
+      "shape": "capsule",
       "size": [
-        0.18,
-        0.1,
-        0.28
+        0.17,
+        0.5
       ],
-      "color": "#15181d",
-      "metallic": 0.1,
-      "roughness": 0.6,
+      "color": "#2a2434",
+      "roughness": 0.7,
       "translate": [
-        0.13,
-        -0.6,
+        0.088,
+        0.6,
+        0
+      ]
+    },
+    {
+      "name": "shin_l",
+      "shape": "capsule",
+      "size": [
+        0.14,
+        0.46
+      ],
+      "color": "#2a2434",
+      "roughness": 0.7,
+      "translate": [
+        -0.088,
+        0.27,
+        0
+      ]
+    },
+    {
+      "name": "shin_r",
+      "shape": "capsule",
+      "size": [
+        0.14,
+        0.46
+      ],
+      "color": "#2a2434",
+      "roughness": 0.7,
+      "translate": [
+        0.088,
+        0.27,
+        0
+      ]
+    },
+    {
+      "name": "shoe_l",
+      "shape": "capsule",
+      "size": [
+        0.155,
+        0.26
+      ],
+      "color": "#2a2434",
+      "roughness": 0.55,
+      "translate": [
+        -0.088,
+        0.085,
         0.04
+      ],
+      "rotation": [
+        90,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "shoe_r",
+      "shape": "capsule",
+      "size": [
+        0.155,
+        0.26
+      ],
+      "color": "#2a2434",
+      "roughness": 0.55,
+      "translate": [
+        0.088,
+        0.085,
+        0.04
+      ],
+      "rotation": [
+        90,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "knee_l",
+      "shape": "uv_sphere",
+      "size": [
+        0.16,
+        0.16,
+        0.16
+      ],
+      "color": "#2a2434",
+      "roughness": 0.7,
+      "translate": [
+        -0.088,
+        0.42,
+        0
+      ]
+    },
+    {
+      "name": "knee_r",
+      "shape": "uv_sphere",
+      "size": [
+        0.16,
+        0.16,
+        0.16
+      ],
+      "color": "#2a2434",
+      "roughness": 0.7,
+      "translate": [
+        0.088,
+        0.42,
+        0
+      ]
+    },
+    {
+      "name": "hair_back",
+      "shape": "uv_sphere",
+      "size": [
+        0.245,
+        0.4,
+        0.2
+      ],
+      "color": "#3a2216",
+      "roughness": 0.72,
+      "translate": [
+        0,
+        1.5,
+        -0.075
       ]
     }
   ]
