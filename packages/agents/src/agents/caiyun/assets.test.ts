@@ -122,9 +122,16 @@ describe("资产库数据的自洽性", () => {
     }
     for (const a of lib.assets) {
       if (a.kind !== "snippet") continue
-      // 允许省略 path；写了就應該是空或明确的非路径标记
+      // 允许省略 path；写了就必须是**真实存在的文件**或明确的非路径标记。
+      //
+      // 旧断言是「snippet 的 path 不得包含 `/`」——它默认 snippet 只能是内联文本。
+      // 但 `lighting-studio-3d` 就是指向一份真实的片段文件（2431 字节，确实存在），
+      // 把「有路径」当作错误会把合法用法判死。真正要防的是「**装成路径的字符串**」
+      // （模型拿去 read 时报莫名其妙的 ENOENT），所以改成验文件是否真的存在。
       if (!a.path) continue
-      expect(a.path.includes("/") && !a.path.includes(" " )).toBe(false)
+      if (a.path.includes("/")) {
+        expect(existsSync(join(FRAMEWORK, a.path))).toBe(true)
+      }
     }
   })
 
