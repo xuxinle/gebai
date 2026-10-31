@@ -208,6 +208,70 @@ export class GebaiClient {
     return this.token
   }
 
+  /**
+   * 核对连接与运行态真相（页面回前台/定时自检用）。
+   *
+   * 为何需要：手机后台（系统冻结页面、浏览器挂起定时器）回来时，WS 对象往往仍是
+   * `readyState === OPEN`、也没有 `close` 事件——但后台期间攒住的事件没消化、心跳早已
+   * 过期，界面显示「已连接」而内容不更新（半死连接）；反过来服务端任务也可能在离线
+   * 期间跑完，本地却还在等。单看本地标志位无法识别这类情况，只能主动向服务端核对。
+   *
+   * 只收敛不改语义：拿到快照就更新模型；心跳超期则先探一拍（不通则断连触发重连）；
+   * 事件 seq 落后则拉一次增量。任一环节不可达就如实把连接标记为断开（由退避重连接管），
+   * 不在此处凭空猜测。
+   *
+   * 返回 { running, missed, heartbeatOk }：running 为服务端运行中的会话 id（权威清单），
+   * missed 为本地尚未消化的事件数（>0 说明事件积压/漏消费），heartbeatOk=false 表示连接已判死。
+   */
+  async verify(): Promise<{ running: string[]; missed: number; heartbeatOk: boolean }> {
+    if (!this.connected || this.manualClose) {
+      // 未连接：交给自动建连/退避重连，不在这里重复发起
+      return { running: [], missed: 0, heartbeatOk: false }
+    }
+    // 心跳超期（典型：页面被冻结，定时器停摆）：WS 对象看着是 OPEN，但链路实际已静默。
+    // 先主动探一拍：通了说明只是定时器被节流；不通则判死并断开（onclose → 退避重连）。
+    const heartbeatStale = this.heartbeatPending || !this.heartbeatAlive()
+    if (heartbeatStale) {
+      const ok = await this.pingOnce()
+      if (!ok) {
+        this.ws?.close()
+        return { running: [], missed: 0, heartbeatOk: false }
+      }
+    }
+    try {
+      const snap = await this.requestSnapshot()
+      // 快照基线之后的增量事件（后台期间攒住/漏消费的）补拉一次
+      const r = await this.syncEvents(this.lastSeq)
+      if (!r.overrun) {
+        for (const ev of r.events) this.dispatchEvent(ev)
+      }
+      this.lastSeq = Math.max(this.lastSeq, r.lastSeq)
+      return { running: snap.running, missed: r.events.length, heartbeatOk: true }
+    } catch {
+      // 核对失败：连接实际不可用。如实标断（退避重连接管），不把失败当成「没在跑」
+      if (!this.isConnected()) return { running: [], missed: 0, heartbeatOk: false }
+      return { running: [], missed: 0, heartbeatOk: false }
+    }
+  }
+
+  /** 心跳是否仍新鲜（最近一拍已在心跳超时窗口内成功归来）。 */
+  private heartbeatAlive(): boolean {
+    return !!this.ws && this.ws.readyState === WebSocket.OPEN && !this.heartbeatPending
+  }
+
+  /** 打一拍心跳并等待结果（自检用）：成功 true，超时/失败 false。 */
+  private pingOnce(): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let done = false
+      const finish = (ok: boolean) => {
+        if (done) return
+        done = true
+        resolve(ok)
+      }
+      this.send("ping", {}, { timeoutMs: this.heartbeatTimeoutMs, onOk: () => finish(true), onError: () => finish(false) })
+    })
+  }
+
   /** WS 连接是否处于可用状态（UI 状态展示/SSE 兜底判定用）。 */
   isConnected(): boolean {
     return this.connected

@@ -47,6 +47,8 @@ import { bindTooltips, showNoticeDialog, toast } from "./ui"
 // 副作用导入（勿删）：attach.ts 向 sessions.ts 注册运行中会话附加钩子（setRunningAttach）——
 // 模块无具名导出，不导入则钩子恒为 null，刷新后运行中会话不恢复（在途流不续接/待决卡片不重建、任务超时）
 import "./attach"
+// 回前台/定时自检：手机后台冻结时 WS 看着仍 OPEN、事件却攒在浏览器里（详见 attach.ts）
+import { bindConnectionVerify } from "./attach"
 
 // 二开前端脚本（custom/web/，产物根 gebai.config.js 与 gebai.custom.js）：配置模块加载即应用——先于任何
 // 模块级/初始化期读取 localStorage 的代码；初始化脚本的异步引导在 init 首行等待（awaitCustomBoot）
@@ -403,6 +405,9 @@ bindSubSessions() // 标题栏「子会话」按钮 → 子会话观察面板（
   const agentsPromise = client.listSubAgents().catch(() => [] as SubAgentInfo[])
   await connPromise
   setConn("已连接")
+  // 回前台 / pageshow / 定时自检：手机后台冻结时 WS 看着仍 OPEN、事件却攒在浏览器里，
+  // 界面会停在旧内容且不报断连——只能主动向服务端核对真相（详见 attach.ts 的 verifyConnection）
+  bindConnectionVerify()
   // 缓存子Agent 名：工具全名（{agent}_{tool}）解析显示用
   setSubAgentNames((await agentsPromise).map((a) => a.name))
   let sessions: SessionInfo[] = []

@@ -43,6 +43,19 @@ function rehydrateRunView(run: RunState, sessionId: string): void {
   refreshJumpBottom()
 }
 
+/** 丢弃本轮的流式气泡（自检收尾用）：服务端已结束而本页还在等时，流逻辑不会再往里写，
+ *  留着就是一条永远停在一半的重复气泡（历史重读已经把完整回答渲染出来了）。
+ *  只动 DOM，不碰 run 的累积——收尾清理仍交回 consumeTaskStream 的 finally。 */
+export function discardRunBubble(sessionId: string): void {
+  const run = runs.get(sessionId)
+  if (!run) return
+  clearStreamRender(run)
+  run.el?.remove()
+  run.reasoningEl?.remove()
+  run.el = null
+  run.reasoningEl = null
+}
+
 function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): void {
   // 所有挂载点都必须在**本会话自己的**容器里（后台会话的事件照常渲染，但不得侵当前视图）：
   // 没有这个作用域，尾部挂载（子会话入口行 / 模型异常记录 / 收尾说明）会落到活动容器上——

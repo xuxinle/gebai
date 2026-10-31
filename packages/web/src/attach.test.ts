@@ -33,3 +33,62 @@ describe("运行态同步（任务开始事件 + 快照 running 清单）", () =
     expect(/export function attachRunningIfNeeded\(sessionId: string\): void \{[\s\S]{0,200}runningAttachHook\?\.\(sessionId\)/.test(src)).toBe(true)
   })
 })
+
+/**
+ * 手机后台的「半死连接」（页面被冻结）：WS 对象仍 `readyState === OPEN`、也不发 `close`，
+ * 后台期间的事件攒在浏览器里、心跳早过期——界面显示「已连接」而内容不更新。
+ * 实测（CDP 冻结模拟）：冻结 20s 后只 1 个 WS、`close=0`，且 `visibilitychange` **一次都不触发**
+ * （只有 `pageshow` 与「定时器恢复首拍」可靠）。因此不能只靠可见性事件，必须定时自检兜底。
+ * 这些接线分散在 SDK 与 attach.ts，缺一根都不会报 typecheck/lint，故以源码扫描钉住。
+ */
+describe("手机后台半死连接：回前台/定时自检必需接线", () => {
+  const attachSrc = () => readFileSync(join(import.meta.dirname, "attach.ts"), "utf8")
+  const clientSrc = () => readFileSync(join(import.meta.dirname, "..", "..", "sdk", "src", "client.ts"), "utf8")
+
+  test("SDK 提供 verify()：主动核对连接与运行态真相", () => {
+    const s = clientSrc()
+    expect(s).toContain("async verify()")
+    // 心跳超期先探活（WS 看着 OPEN 但链路静默），不通则断开重连
+    expect(s).toContain("heartbeatStale")
+    expect(s).toContain("pingOnce")
+    // 事件 seq 落后要补拉（后台期间攒住的）
+    expect(s).toContain("syncEvents(this.lastSeq)")
+  })
+
+  test("自检按服务端 running 与本地 runs 双向收敛（已结束要收尾、在跑要附加）", () => {
+    const s = attachSrc()
+    // 本地在等但服务端已没在跑：收尾并补齐正文
+    expect(s).toContain("runs.keys()].filter((id) => !r.running.includes(id))")
+    // 顺序有讲究：先中止 + 丢弃旧气泡，再重读历史——反了会留下半截气泡（历史一份完整 + 旧流式一份）
+    const fn = s.slice(s.indexOf("const stale ="), s.indexOf("const stale =") + 700)
+    const abortAt = fn.indexOf("abort.abort()")
+    const discardAt = fn.indexOf("discardRunBubble(sid)")
+    const reloadAt = fn.indexOf("await loadMessages(sid)")
+    expect(abortAt).toBeGreaterThan(-1)
+    expect(discardAt).toBeGreaterThan(abortAt)
+    expect(reloadAt).toBeGreaterThan(discardAt)
+    // 服务端在跑而本页没接管：附加恢复
+    expect(s).toContain("attachRunningIfNeeded(sid)")
+  })
+
+  test("不可见时不自检（省电省流量）", () => {
+    const s = attachSrc()
+    const fn = s.slice(s.indexOf("export function bindConnectionVerify"), s.indexOf("export function bindConnectionVerify") + 900)
+    expect(fn).toContain("document.hidden")
+    expect(fn.indexOf("document.hidden")).toBeLessThan(fn.indexOf("verifyConnection()"))
+  })
+
+  test("回前台信号覆盖 pageshow 与定时自检（visibilitychange 在冻结场景不可靠）", () => {
+    const s = attachSrc()
+    const fn = s.slice(s.indexOf("export function bindConnectionVerify"), s.indexOf("export function bindConnectionVerify") + 900)
+    expect(fn).toContain('addEventListener("pageshow"')
+    expect(fn).toContain('addEventListener("visibilitychange"')
+    expect(fn).toContain("setInterval(trigger, VERIFY_INTERVAL_MS)")
+  })
+
+  test("main.ts 建连后绑定自检（不挂钩即永不核对，半死连接无人发现）", () => {
+    const s = readFileSync(join(import.meta.dirname, "main.ts"), "utf8")
+    expect(s).toContain("bindConnectionVerify()")
+    expect(/await connPromise[\s\S]{0,400}bindConnectionVerify\(\)/.test(s)).toBe(true)
+  })
+})
