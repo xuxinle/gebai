@@ -3583,7 +3583,19 @@ float4 ps_scene3d(VsOut input) : SV_Target {
   //
   // 用反射向量采样双色渐变环境（`g_env.xyz` = 天空色，
   // `g_env_ground.xyz` = 地面色，`g_env.w` = 强度）。
-  if (g_env.w > 0.0) {
+  // ## `g_env.w == 0` 不能直接跳过（2026-10-31 修）
+  //
+  // 软件腿在 `env_strength == 0` 时**仍有一个 `ambient` 挂钩的兜底强度**：
+  //
+  //   ambient_strength = (0.30 + 0.70*(0.5+0.5n.y)) * (lighting.ambient + 0.55)
+  //
+  // 这里原先写的是 `if (g_env.w > 0.0)` —— 即 GPU 腿在默认配置下**完全不做
+  // 环境反射**。实测后果：`metallic=1` 时球从 88.3 掉到 24.8（GPU 腿），
+  // 而软件腿只掉到 59.7 —— 同一场景两条腿差 28/255 的整片亮度。
+  //
+  // 特性矩阵测试（`raster_scene3d_feature_matrix_test.cpp`）把它抓出来了：
+  // 单看任一条腿都"正常"，只有并排比才看得见。
+  {
     float3 view_dir = normalize(g_eye.xyz - input.world);
     float n_dot_v = max(dot(n, view_dir), 0.0);
     // 菲涅耳（Schlick）
@@ -3592,20 +3604,36 @@ float4 ps_scene3d(VsOut input) : SV_Target {
     float nv2 = one_minus_nv * one_minus_nv;
     float fresnel = f0.x + (1.0 - f0.x) * nv2 * nv2;
 
+    // ## 环境色的**回退值必须与软件腿一致**（2026-10-31 修）
+    //
+    // 软件腿在 `env_strength == 0`（未配置）时用硬编码中性色
+    //   sky = (0.52, 0.58, 0.68)、ground = sky（**同一色，无渐变**）
+    // 而 GPU 腿原样用 `g_env`/`g_env_ground`——未配置时它们是 0（黑），
+    // 于是"默认配置"下两条腿的环境反射颜色就不同。
+    //
+    // 实测：这就是 `metallic=1` 时 59.7 vs 45.2 那 14 级差的来源。
+    float3 env_sky = (g_env.w > 0.0) ? g_env.xyz : float3(0.52, 0.58, 0.68);
+    float3 env_ground = (g_env.w > 0.0) ? g_env_ground.xyz : env_sky;
+
     // 反射向量 `reflect(-v, n)`，Y 分量映到 [0,1] 取天/地色
     float3 r = normalize(reflect(-view_dir, n));
     float sky_t = saturate(0.5 + 0.5 * r.y);
-    float3 env_color = lerp(g_env_ground.xyz, g_env.xyz, sky_t);
+    float3 env_color = lerp(env_ground, env_sky, sky_t);
 
     // 粗糙度把锐利反射打散成模糊一片（向均值靠拢、变暗）
     float rough = saturate(roughness);
     float blur = 1.0 - rough;
-    float3 env_mean = (g_env.xyz + g_env_ground.xyz) * 0.5;
+    float3 env_mean = (env_sky + env_ground) * 0.5;
     env_color = lerp(env_color, env_mean, rough * g_env_ground.w);
 
     // 金属映环境本色，非金属映“环境×固有色”
     float3 tinted = env_color * (0.45 + 0.55 * base * metallic);
-    float weight = g_env.w * fresnel * (0.35 + 0.65 * blur);
+    // 强度：显式 `env_strength` 优先；未配置时回退到 `ambient` 挂钩
+    // （与 C++ 侧 `shade_surface` 的 `ambient_strength` 逐字对应）
+    float ambient_strength = g_env.w > 0.0
+                                 ? g_env.w
+                                 : (0.30 + 0.70 * (0.5 + 0.5 * n.y)) * (g_light.w + 0.55);
+    float weight = ambient_strength * fresnel * (0.35 + 0.65 * blur);
     lit += tinted * weight;
   }
 
