@@ -36,6 +36,7 @@
 #include "director_bridge.hpp"
 #include "layer_schema.hpp"
 #include "layout_check.hpp"
+#include "model_preview.hpp"
 #include "package.hpp"
 #include "package_expand.hpp"
 #include "snapshot.hpp"
@@ -169,6 +170,10 @@ struct Options {
   bool no_stats{false};
   /// `--check-layout`：只做布局自检并退出（不渲染）。
   bool check_layout{false};
+  /// `--preview-model <spec.json>`：素材预览与自检（渲染单帧 + 停非 0 退出）。
+  std::string preview_model{};
+  /// `--out <png>`：预览图落盘路径
+  std::string preview_out{};
   std::string export_dir{};   ///< `--export-dir <dir>`：启动即导出 PNG 帧序列（旧口径，保留）
   int bench_seconds{0};       ///< `--bench <秒>`：播放压测时长
 };
@@ -193,6 +198,7 @@ auto print_usage(std::string_view program) -> void {
       "  --export-dir DIR      启动即导出 PNG 帧序列（320x180，无 ffmpeg 时的兜底）\n"
       "  --keep-frames         保留 1080p PNG 帧序列（默认走管道直送 ffmpeg，不落盘）\n""  --no-stats            不采集画面质量统计（导出加速；诊断报告会省略）\n"
       "  --check-layout        只做布局自检并退出（检查文字出界/溢出/遮挡，非 0 = 有错误）\n"
+      "  --preview-model FILE  素材预览与自检（渲染单帧 + 亮度/构图检查，配 --out 落 PNG）\n"
       
       "  --bench N             真开播放压测 N 秒后退出\n"
       "  --control-port N      控制通道端口（0 = 自动）\n"
@@ -307,6 +313,10 @@ auto parse_options(int argc, char** argv) -> Options {
       options.trajectory = true;
     } else if (raw == "--no-stats") {
       options.no_stats = true;
+    } else if (raw == "--preview-model") {
+      options.preview_model = value("--preview-model");
+    } else if (raw == "--out") {
+      options.preview_out = value("--out");
     } else if (raw == "--check-layout") {
       // 只做布局自检并退出（不渲染、不建窗口）。
       //
@@ -1487,6 +1497,15 @@ auto run_app(int argc, char** argv) -> int {
     }
     st::log::out("{}", caiyun::script_to_json(*parsed));
     return 0;
+  }
+
+  // ③b 素材预览：`--preview-model <spec.json> --out a.png`
+  //
+  // 一条命令给出「图 + 结论」。做第一个素材（手机）时踩的三个坑里有
+  // 两个只能靠渲完看图发现，人工一次几十秒；这里把它们变成
+  // 秒级、可脚本化、有非零退出码的问题。
+  if (!options.preview_model.empty()) {
+    return caiyun::preview_model(options.preview_model, options.preview_out, 900, 900);
   }
 
   // ④ 布局自检：`--check-layout <脚本.json>` → 报告 + 退出码

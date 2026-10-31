@@ -1,0 +1,221 @@
+{
+  "camera": {
+    "eye": [
+      1.35,
+      0.62,
+      2.45
+    ],
+    "target": [
+      0,
+      0,
+      0
+    ],
+    "fov": 38
+  },
+  "lighting": {
+    "light_from": [
+      0.45,
+      0.8,
+      0.55
+    ],
+    "ambient": 0.42,
+    "diffuse": 0.7,
+    "rim": 0.35,
+    "exposure": 1.25
+  },
+  "shadow": {
+    "strength": 0.0
+  },
+  "objects": [
+    {
+      "name": "body",
+      "shape": "box",
+      "size": [
+        0.42,
+        0.86,
+        0.045
+      ],
+      "color": "#2a2f3a",
+      "metallic": 0.85,
+      "roughness": 0.28,
+      "specular": 0.7,
+      "translate": [
+        0,
+        0,
+        0.0
+      ],
+      "pivot_at": "center"
+    },
+    {
+      "name": "bezel",
+      "shape": "box",
+      "size": [
+        0.405,
+        0.845,
+        0.02
+      ],
+      "color": "#0a0c10",
+      "metallic": 0.0,
+      "roughness": 0.9,
+      "translate": [
+        0,
+        0,
+        0.028
+      ]
+    },
+    {
+      "name": "screen",
+      "shape": "box",
+      "size": [
+        0.372,
+        0.79,
+        0.012
+      ],
+      "color": "#16304f",
+      "metallic": 0.0,
+      "roughness": 0.06,
+      "specular": 1.0,
+      "emission": 0.55,
+      "translate": [
+        0,
+        0,
+        0.048
+      ],
+      "emission_unlit": false,
+      "emissive_color": "#2a5fa8"
+    },
+    {
+      "name": "notch",
+      "shape": "box",
+      "size": [
+        0.11,
+        0.019,
+        0.014
+      ],
+      "color": "#05070a",
+      "metallic": 0.0,
+      "roughness": 0.95,
+      "translate": [
+        0,
+        0.375,
+        0.052
+      ]
+    },
+    {
+      "name": "btn_side",
+      "shape": "capsule",
+      "size": [
+        0.011,
+        0.075,
+        0.011
+      ],
+      "color": "#7c848f",
+      "metallic": 1.0,
+      "roughness": 0.35,
+      "translate": [
+        0.216,
+        0.16,
+        0
+      ]
+    },
+    {
+      "name": "btn_power",
+      "shape": "capsule",
+      "size": [
+        0.011,
+        0.06,
+        0.011
+      ],
+      "color": "#7c848f",
+      "metallic": 1.0,
+      "roughness": 0.35,
+      "translate": [
+        0.216,
+        -0.14,
+        0
+      ]
+    },
+    {
+      "name": "camera_bump",
+      "shape": "box",
+      "size": [
+        0.155,
+        0.155,
+        0.012
+      ],
+      "color": "#1a1e26",
+      "metallic": 0.9,
+      "roughness": 0.3,
+      "translate": [
+        -0.1,
+        0.31,
+        -0.028
+      ]
+    },
+    {
+      "name": "lens1",
+      "shape": "cylinder",
+      "size": [
+        0.052,
+        0.016
+      ],
+      "color": "#0d1016",
+      "metallic": 0.4,
+      "roughness": 0.12,
+      "specular": 1.0,
+      "rotation": [
+        90,
+        0,
+        0
+      ],
+      "translate": [
+        -0.13,
+        0.35,
+        -0.04
+      ]
+    },
+    {
+      "name": "lens2",
+      "shape": "cylinder",
+      "size": [
+        0.052,
+        0.016
+      ],
+      "color": "#0d1016",
+      "metallic": 0.4,
+      "roughness": 0.12,
+      "specular": 1.0,
+      "rotation": [
+        90,
+        0,
+        0
+      ],
+      "translate": [
+        -0.066,
+        0.27,
+        -0.04
+      ]
+    },
+    {
+      "name": "flash",
+      "shape": "cylinder",
+      "size": [
+        0.022,
+        0.01
+      ],
+      "color": "#f2e9d0",
+      "metallic": 0.0,
+      "roughness": 0.5,
+      "rotation": [
+        90,
+        0,
+        0
+      ],
+      "translate": [
+        -0.066,
+        0.35,
+        -0.036
+      ]
+    }
+  ]
+}

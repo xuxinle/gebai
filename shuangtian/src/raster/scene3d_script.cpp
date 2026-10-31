@@ -601,7 +601,22 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
   obj.emission = static_cast<float>(json_get_double(node, "emission", 0.0));
   obj.opacity = read_unit(node, "opacity", 1.0f);
   // 自发光色与“不受光”开关（对齐 Blender 的 Emission Color / Strength 分离）
-  if (const Json* emissive = json_find(node, "emission_color"); emissive != nullptr) {
+  //
+  // ## 字段名以 `emissive_color` 为准，旧名 `emission_color` 保留兼容
+  //
+  // 实测踩过（2026-10-31）：schema 校验器声明的名字是 **`emissive_color`**，
+  // 而这里原本读的是 **`emission_color`** —— 两者不一致的后果很阴：
+  // 写 `emissive_color` **能过校验**，但自发光完全不生效
+  //（`emissive_color_set` 恒为 false → 退回白色发光 → 屏幕一片灰白）。
+  if (const Json* emissive = json_find(node, "emissive_color"); emissive != nullptr) {
+    const auto c = read_color(node, "emissive_color", math::Color{255, 255, 255, 255}, path);
+    if (!c) return st::forward_error(c.error());
+    obj.emissive_color =
+        math::Vec3{static_cast<float>(c->r) / 255.0f, static_cast<float>(c->g) / 255.0f,
+                   static_cast<float>(c->b) / 255.0f};
+    obj.emissive_color_set = true;
+  } else if (const Json* legacy = json_find(node, "emission_color"); legacy != nullptr) {
+    // 旧名兼容（上面的注释解释了为什么两个名字都存在）
     const auto c = read_color(node, "emission_color", math::Color{255, 255, 255, 255}, path);
     if (!c) return st::forward_error(c.error());
     obj.emissive_color =

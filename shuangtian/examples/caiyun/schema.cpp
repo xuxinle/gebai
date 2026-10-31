@@ -218,8 +218,10 @@ constexpr auto kLayerFields = std::array{
     //
     // 为何类型是 `Object`：它的值是**一整个 JSON 对象**（相机/光照/阴影/物体列表），
     // 不是标量。用 Object 才能让校验器认得它，而不会报“未知字段”。
-    FieldSpec{"model_script", SchemaScope::Layer, SchemaType::Object, false, 0, 0, false,
-              "场景脚本：整幅三维场景（camera/lighting/shadow/objects）；"
+    FieldSpec{"model_script", SchemaScope::Layer, SchemaType::Layout, false, 0, 0, false,
+              "场景脚本：整幅三维场景（camera/lighting/shadow/objects）。"
+              "两种写法：①对象（推荐，可直接用素材库的 preset）；"
+              "②字符串（内嵌紧凑 JSON，适合生成式写入）；"
               "设了就接管整幅图层（自带相机与光照，与 model_shape 互斥）",
               true},
     FieldSpec{"model_shadow", SchemaScope::Layer, SchemaType::Number, true, 0.0, 1.0, true,

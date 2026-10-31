@@ -3460,6 +3460,14 @@ cbuffer Scene : register(b0) {
  //   g_env_ground.w   = 粗糙度向均值弥散的强度
  float4 g_env;
  float4 g_env_ground;
+ // ## 自发光——与 `Material::emission` / `emissive_color` 逐字对应
+ //   g_emissive.xyz = 自发光颜色（线性空间）
+ //   g_emissive.w   = 自发光强度（0 = 关闭，与旧行为逐位相同）
+ //
+ // ⚠ GPU 腿原本**完全没有实现自发光**：软件腿有、GPU 腿没有。
+ // 实测症状：写 `emission: 5.0` 在 GPU 腿上一整帧像素不变（与不写逐字节相同），
+ // 而探针确认材质值已正确传到 `set_material`——就是着色器里没这段。
+ float4 g_emissive;
 };
 
 struct VsIn {
@@ -3591,6 +3599,26 @@ float4 ps_scene3d(VsOut input) : SV_Target {
     lit += tinted * weight;
   }
 
+  // ## 自发光（与 C++ 侧 `shade_surface` 的 emission 段逐字对应）
+  //
+  // ⚠ GPU 腿原本**完全漏了这一段**：软件腿有、GPU 腿没有。
+  // 实测症状：`emission: 5.0` 在 GPU 腿上一整帧像素不变（与不写逐位相同），
+  // 而探针确认材质值已正确到 `set_material`——就是着色器里缺这段。
+  //
+  // `g_emissive.w > 0` 才进：默认 0 时与旧行为逐位相同（回归测试靠这条）。
+  // 注意顺序：自发光要**加在 saturate 之前**，否则超过 1 的部分会被
+  // 白白截掉，高强度发光就永远拉不出亮区。
+  // 约定：`g_emissive.w` 为**带符号**强度——
+  // 正值 = 自发光叠加在受光结果上；负值 = 纯发光体（丢受光项）。
+  // 用符号而不是另加一个字段：常量缓冲的每个 float4 都要与 C++ 侧对齐，
+  // 多一个字段就多一处可能错位的地方。
+  if (abs(g_emissive.w) > 0.0) {
+    if (g_emissive.w < 0.0) {
+      lit = float3(0.0, 0.0, 0.0);   // 纯发光体：不受光照影响
+    }
+    lit += g_emissive.xyz * abs(g_emissive.w);
+  }
+
   lit = saturate(lit);
   // ## 输出链：线性 → 曝光 → 色调映射 → sRGB 编码
   //
@@ -3631,6 +3659,8 @@ struct Scene3dParams {
   std::array<float, 4> env{};
   /// 地面色 + 粗糙度弥散强度
   std::array<float, 4> env_ground{};
+  /// 自发光：xyz = 颜色，w = 带符号强度（负 = 纯发光体）
+  std::array<float, 4> emissive{};
 };
 static_assert(sizeof(Scene3dParams) % 16 == 0, "常量缓冲必须是 16 字节的倍数");
 
@@ -4133,6 +4163,15 @@ class GpuScene3d final : public st::raster::Scene3D {
                   lighting_.env_strength};
     params.env_ground = {lighting_.env_ground.x, lighting_.env_ground.y,
                          lighting_.env_ground.z, lighting_.env_rough_falloff};
+    // 自发光：与软件腿 `shade_surface` 的 emission 逻辑对齐。
+    // 用**带符号**强度传递 `emission_unlit`（负值 = 纯发光体），
+    // 避免再加一个 float4 —— 常量缓冲多一个字段就多一处错位可能。
+    {
+      const float strength = material_.emission_unlit ? -material_.emission : material_.emission;
+      const math::Vec3 color = material_.emissive_color_set ? material_.emissive_color
+                                                            : math::Vec3{1.0f, 1.0f, 1.0f};
+      params.emissive = {color.x, color.y, color.z, strength};
+    }
 
     // 从这一行到 DrawIndexed 全部在锁内：常景缓冲 Map、状态设置、绘制
     // 都是上下文操作，不能与别的线程交错。

@@ -159,6 +159,10 @@ auto collect_range_diagnostics(const st::Json& node, SchemaScope scope, const st
         case SchemaType::Layout:
           // 路径字符串，或内联对象（`{"source": ...}`）。
           // 对象形式必须是**对象**（不接数组）：内联源是键值结构。
+          //
+          // ⚠ `model_script` 也借用这个类型：它同样接受
+          // 「字符串（内嵌 JSON）」与「对象（直接写）」两种写法。
+          // 两者都是“字符串或键值结构”的语义，共用同一分支是合理的。
           return value.is_string() || value.is_object();
       }
       return true;
