@@ -2080,12 +2080,17 @@ class GpuCanvas final : public Surface {
     // 结果 `pixels()` 在首次调用时返回空 span、第二次才正常 ——
     // 这种"第一次为空"的形态在导出路径上表现为**首帧全黑**，
     // 在测试上是"同一断言时红时绿"，极难查。一次 5ms 换掉这类不确定性不值。
-    (void)const_cast<GpuCanvas*>(this)->ensure_readback();
+    auto* self = const_cast<GpuCanvas*>(this);
+    (void)self->ensure_readback();
+    // 导出路径可能跳过打包（见 `skip_packed_readback_`）：这里按需补上，
+    // 于是不会出现"有 RGBA 但 pixels() 空"的不确定态。
+    if (self->packed_readback_stale_) self->rebuild_packed_readback();
     return {readback_.data(), readback_.size()};
   }
 
   [[nodiscard]] auto pixels() noexcept -> std::span<std::uint32_t> override {
     (void)ensure_readback();
+    if (packed_readback_stale_) rebuild_packed_readback();
     return {readback_.data(), readback_.size()};
   }
   /// 导出路径的取像素入口：**直接返回回读缓存的 RGBA 字节**，零转换。
@@ -2095,6 +2100,13 @@ class GpuCanvas final : public Surface {
   /// `pixels()` 4.06ms vs `to_rgba8()` 9.38ms）。
   ///
   /// 而 staging 纹理本来就是 RGBA 字节序，回读时按行 memcpy 下来即可。
+  /// 声“本次回读不需要打包视图”（导出路径用；见 `ensure_readback`）。
+  ///
+  /// 为何不直接惰性生成：惰性会让 `pixels()` 首次返回空 span（实测导致
+  /// 导出首帧全黑）。这里要求调用方**显式声明**，而 `pixels()` 仍能
+  /// 按需补算，两边都没有不确定态。
+  void skip_next_packed_readback() noexcept override { skip_packed_readback_ = true; }
+
   [[nodiscard]] auto to_rgba8() const -> std::vector<std::uint8_t> override {
     (void)const_cast<GpuCanvas*>(this)->ensure_readback();
     return readback_rgba_;
@@ -3012,15 +3024,38 @@ class GpuCanvas final : public Surface {
       const std::uint8_t* row = source + static_cast<std::size_t>(y) * mapped.RowPitch;
       std::memcpy(readback_rgba_.data() + static_cast<std::size_t>(y) * row_bytes, row, row_bytes);
     }
-    // ## 两份视图一起生成
+    // ## 两份视图：打包视图**可按需省略**（2026-10-31）
     //
-    // `readback_rgba_` 给导出（零转换，直接返回）；`readback_` 给 `pixels()` 口径。
-    // 后者要多一遍位运算（1080p 约 5.3ms），但它只在"要看像素"的路径上被读到 ——
-    // 而导出路径（`to_rgba8`）根本不碰它。做成惰性生成会引入"首次为空"的不确定性，
-    // 所以这里**一并算好**，代价是导出每帧多 5.3ms（占 34ms 的 15%）。
+    // `readback_rgba_` 给导出（零转换）；`readback_` 给 `pixels()` 口径。
+    // 后者要多一遍位运算（1080p 约 5.3ms，占整帧 CPU 的 8~15%）。
     //
-    // 这条取舍是明确的：正确性 > 那 5.3ms。真要省，应该让导出路径**永不**生成它
-    //（用一个独立的"只取 RGBA"入口），而不是让它"有时有、有时没有"。
+    // 曾经试过把它改成“按需惰性生成”，结果 `pixels()` 首次返回空 span、
+    // 第二次才正常——在导出路径上表现为**首帧全黑**，极难查，已回退。
+    // 那个错不在“省”而在“不确定何时有”。
+    //
+    // 现在改成**显式提示**：调用方在取 RGBA 之前可以说“这次只要 RGBA”
+    //（`skip_packed_readback_`），于是本帧跳过打包；`pixels()` 若真的
+    // 被调到，它自己会把打包补上（见 `pixels()` 内的按需生成），
+    // 所以**不会出现“有 RGBA 但 pixels() 空”的不确定态**。
+    //
+    // 导出路径（`to_rgba8` + 帧统计）确实不碰 `pixels()`，所以这是纯收益。
+    const bool skip_packed = skip_packed_readback_;
+    skip_packed_readback_ = false;
+    if (!skip_packed) {
+      rebuild_packed_readback();
+    } else {
+      packed_readback_stale_ = true;   // 标记：真有人要 pixels() 时再算
+    }
+    readback_ready_ = true;
+    context_->Unmap(staging_, 0);
+    readback_dirty_ = false;
+    return true;
+  }
+
+  /// 把 `readback_rgba_` 打包成 `0xRRGGBBAA` 的 uint32 视图（`pixels()` 口径）。
+  void rebuild_packed_readback() {
+    const auto total_pixels = static_cast<std::size_t>(physical_width_) *
+                              static_cast<std::size_t>(physical_height_);
     readback_.resize(total_pixels);
     for (std::size_t index = 0; index < total_pixels; ++index) {
       const std::uint8_t* src = readback_rgba_.data() + index * 4U;
@@ -3029,10 +3064,7 @@ class GpuCanvas final : public Surface {
                          (static_cast<std::uint32_t>(src[2]) << 8U) |
                          static_cast<std::uint32_t>(src[3]);
     }
-    readback_ready_ = true;
-    context_->Unmap(staging_, 0);
-    readback_dirty_ = false;
-    return true;
+    packed_readback_stale_ = false;
   }
 
   /// 供 `set_pixel` 用的可写像素（写完由调用方标脏并整体回传——M2 只保证接口语义正确）。
@@ -3047,6 +3079,10 @@ class GpuCanvas final : public Surface {
   std::vector<std::uint8_t> readback_rgba_{};
   /// `readback_`（uint32 打包视图）是否与 `readback_rgba_` 同步。
   bool readback_ready_{false};
+  /// 本帧回读**跳过**打包视图（导出路径显式提示；见 `ensure_readback`）。
+  bool skip_packed_readback_{false};
+  /// 打包视图未生成/已过期（`pixels()` 被调到时按需补）。
+  bool packed_readback_stale_{false};
   ID3D11Texture2D* target_{nullptr};
   ID3D11RenderTargetView* rtv_{nullptr};
   /// 目标纹理的 SRV（毛玻璃要拿画布自己当采样源）。

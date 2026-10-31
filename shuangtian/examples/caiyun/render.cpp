@@ -990,6 +990,9 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
       // （1080p 每遍 5~17ms，实测数据见 `Job::use_gpu` 的注释）。
       //
       // 现在：先取一次 RGBA，统计与出口共用这份字节。
+      // 导出路径只要 RGBA 字节（直接给 ffmpeg），不需要 `pixels()` 那套打包视图。
+      // 显式声明后 GPU 画布会跳过它（1080p 省约 5.3ms/帧）。
+      local.skip_next_packed_readback();
       const auto rgba = local.to_rgba8();
       const int fw = local.physical_width();
       const int fh = local.physical_height();

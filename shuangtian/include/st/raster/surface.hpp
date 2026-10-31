@@ -376,6 +376,18 @@ class Surface {
       -> std::mdspan<std::uint32_t, std::dextents<std::size_t, 2>>;
   /// 导出为直通 RGBA8 字节流（PNG 编码/截图用；物理分辨率）。
   [[nodiscard]] virtual auto to_rgba8() const -> std::vector<std::uint8_t> = 0;
+
+  /// 声“接下来的回读只需要 RGBA 字节，不需要打包的 uint32 视图”。
+  ///
+  /// 给导出路径用：GPU 画布每次回读会顺带生成一份 `0xRRGGBBAA` 打包视图
+  ///（给 `pixels()` 用），1080p 上多花 5.3ms/帧。导出路径（`to_rgba8`）
+  /// 根本不碰 `pixels()`，所以可以不要。
+  ///
+  /// 默认空实现：软件画布的“打包视图”就是内存直通，没有可省的东西。
+  ///
+  /// 为何不让它自动惰性：试过，`pixels()` 首次会返回空 span，
+  /// 在导出路径上表现为首帧全黑（极难查）。所以必须**显式声明**。
+  virtual void skip_next_packed_readback() noexcept {}
   /// 非全透明像素的最小包围盒（**物理**像素；测试与截图裁剪用）。
   [[nodiscard]] virtual auto content_bounds() const noexcept -> math::IntRect = 0;
   /// 同上，但换算到逻辑像素。
