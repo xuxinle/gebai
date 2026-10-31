@@ -12,6 +12,7 @@
 
 #include "carry.hpp"
 #include "fx.hpp"
+#include "st/raster/gpu.hpp"
 #include "motion.hpp"
 #include "st/math/path.hpp"
 #include "st/ui/text_port.hpp"
@@ -418,7 +419,26 @@ void Project::render_frame(st::raster::Surface& target, double time, const st::u
         continue;
       }
       // 片段渲染到临时画布再按 opacity 合成（这样透明度与"内容画了什么"解耦）。
-      Canvas layer{target.physical_width(), target.physical_height(), 1.0f};
+      //
+      // ## 中间画布必须与 `target` 同后端（2026-10-31）
+      //
+      // 这段代码在"片段不唯一不透明"时执行（有过场交叠、或有半透明图层）——
+      // 没有 `transition` 的脚本每帧都会进到这里，不是边缘情况。
+      //
+      // 旧实现固定建软件 `Canvas`，于是三维图层的合成目标变成了软件画布：
+      // `GpuScene3d::end_frame` 看到 "backend=software" → 走显存回读，
+      // 零拷贝快路（实测 0.85ms vs 15ms）完全没用上。
+      std::unique_ptr<st::raster::Surface> layer_storage;
+      if (target.native_texture().handle != nullptr) {
+        auto created = st::raster::gpu::create_canvas(target.physical_width(),
+                                                     target.physical_height(), 1.0f, {});
+        if (created.has_value()) layer_storage = std::move(*created);
+      }
+      if (layer_storage == nullptr) {
+        layer_storage = std::make_unique<Canvas>(target.physical_width(),
+                                                  target.physical_height(), 1.0f);
+      }
+      st::raster::Surface& layer = *layer_storage;
       layer.clear(Color{0, 0, 0, 0});
       if (const Scene* scene = scene_of(clip); scene != nullptr) {
         // 场景：`local_time` 已含素材入点与速度（修剪/调速都自动正确）。
@@ -477,7 +497,19 @@ void Project::render_frame(st::raster::Surface& target, double time, const st::u
       // ② 新一幕画进独立画布，再以 eased 叠上去。
       // 交出的那一幕同时**微缩 + 上移**，叠在新幕上就有"镜头推进"的方向感。
       // 幅度很小（3% 缩放 / 1.6% 位移）：转场是"让观众不迷失"不是炫技。
-      Canvas bridge{target.physical_width(), target.physical_height(), 1.0f};
+      // 转场的中间画布同样要与 `target` 同后端（理由见上面 `layer` 那段）：
+      // 软件中间画布会让转场里的三维图层又走回显存回读。
+      std::unique_ptr<st::raster::Surface> bridge_storage;
+      if (target.native_texture().handle != nullptr) {
+        auto created = st::raster::gpu::create_canvas(target.physical_width(),
+                                                     target.physical_height(), 1.0f, {});
+        if (created.has_value()) bridge_storage = std::move(*created);
+      }
+      if (bridge_storage == nullptr) {
+        bridge_storage = std::make_unique<Canvas>(target.physical_width(),
+                                                   target.physical_height(), 1.0f);
+      }
+      st::raster::Surface& bridge = *bridge_storage;
       bridge.clear(Color{0, 0, 0, 0});
       render_scene(bridge, *scene, clip.local_time(time), scene->duration, text_port,
                    &assets_, asset_basis_, clip.scene_index,
