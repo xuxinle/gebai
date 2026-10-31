@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 事件源扩展规范用例：与子 Agent 同款的「丢文件即注册」四套机制。
  *
  * 覆盖重点（每一条都是真实故障形态）：
@@ -191,6 +191,26 @@ describe("discoverySignature：热加载判定", () => {
     const before = await discoverySignature(dirs())
     writeSource("builtin", "newone", `export const source = { name: "newone", description: "x", channel: "f", start: async () => {} }`)
     expect(await discoverySignature(dirs())).not.toBe(before)
+  })
+
+  /** 同一时间戳内改内容也必须改变签名。
+   *  为何钉住：文件系统时间精度有限，快速连续写同一文件时 `mtimeMs` 常常返回同一个值
+   *  （Windows 实测 200 次连写有 160 次相同）——签名只靠 mtime 就把「刚改好的源」当成没变，
+   *  热加载不触发，面板上的旧错误永不消失。这里显式把 mtime 钉成同一个值（不靠碰运气），
+   *  用 size 变化制造真实的「内容变了」场景。 */
+  test("mtime 未变但内容变了（长度不同）→ 签名必变", async () => {
+    const { utimesSync } = await import("node:fs")
+    const file = join(dirs().builtin, "samems.ts")
+    writeSource("builtin", "samems", `export const source = { name: "samems", description: "短", channel: "f", start: async () => {} }`)
+    const fixed = new Date(Date.now() - 5000)
+    utimesSync(file, fixed, fixed)
+    const baseline = await discoverySignature(dirs())
+    expect(baseline).toContain("samems") // 前提：签名里确实包含这个文件（否则下面的比较是在空转）
+    // 改成长度不同的内容，再把 mtime 按回同一个值：模拟「同一时间精度内改完」
+    writeFileSync(file, `export const source = { name: "samems", description: "改长了的一段描述", channel: "f", start: async () => {} }`)
+    utimesSync(file, fixed, fixed)
+    const after = await discoverySignature(dirs())
+    expect(after).not.toBe(baseline)
   })
 })
 
@@ -500,6 +520,30 @@ describe("EventSourceManager：热加载", () => {
     expect(mgr.list().map((s) => s.name)).toContain("fixme")
     expect(mgr.state().find((s) => s.name === "fixme")!.started).toBe(true)
   })
+
+  /** 修好一个坏源，且新文件与原文件 **mtime 相同**（同一时间精度内改完）时也必须重载。
+   *  为何钉住：模块缓存靠 `import(\`路径?失配参数\`)` 绕过，失配参数只取 mtime 时，
+   *  同一精度内改写拿到的是**缓存里的旧模块**——文件已经修好，报的仍是旧错误。
+   *  这里把 mtime 钉成同一值（不依赖碰运气），靠内容长度制造真实变化。 */
+  test("坏源改好且 mtime 未变（同一时间精度内）→ 仍能重载并清掉旧错误", async () => {
+    const { utimesSync } = await import("node:fs")
+    const file = join(dirs().custom, "fixme2.ts")
+    writeSource("custom", "fixme2", `throw new Error("先坏着")\nexport const source = {} as never\n`)
+    const rt = makeRuntime()
+    const { mgr } = makeManager(rt)
+    const fixed = new Date(Date.now() - 5000)
+    utimesSync(file, fixed, fixed)
+    await mgr.start()
+    expect(mgr.loadErrors().fixme2).toContain("先坏着")
+
+    // 改成合法的源（长度不同），再把 mtime 按回同一个值
+    writeSource("custom", "fixme2", `export const source = { name: "fixme2", description: "好了", channel: "fx2", start: async () => {} }`)
+    utimesSync(file, fixed, fixed)
+    expect(await mgr.refreshIfChanged()).toBe(true)
+
+    expect(mgr.loadErrors().fixme2).toBeUndefined()
+    expect(mgr.state().find((s) => s.name === "fixme2")!.started).toBe(true)
+  })
 })
 
 describe("EventSourceManager：参考实现 file_drop", () => {
@@ -581,3 +625,4 @@ describe("端到端：内置参考源 file_drop", () => {
     await mgr.stop()
   }, 20000)
 })
+

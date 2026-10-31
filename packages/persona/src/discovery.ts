@@ -43,10 +43,14 @@ export function defaultEventSourceScanDirs(opts: { packageRoot: string; repoRoot
 }
 
 /**
- * 目录签名：递归收集定义文件（`.ts`/`.js`，排除 `.test.`）的 `相对路径:mtimeMs` 排序拼接。
+ * 目录签名：递归收集定义文件（`.ts`/`.js`，排除 `.test.`）的 `相对路径:mtimeMs:size` 排序拼接。
  *
  * 与 `subagentsDirSignature` 同算法。**目录不存在返回 `null`**（区分「域未使用」与
  * 「域为空」：前者不算错误，后者是配了空目录）；存在但无定义文件返回空串。
+ *
+ * 入签名的不只是 mtime：文件系统时间戳精度有限（Windows 实测快速连续写同一文件时
+ * `mtimeMs` 常回落成同一个值），只看 mtime 会把「刚改好的源」当成没变——热加载不生效，
+ * 面板上的旧错误永不消失。带上 `size` 后，「改内容且长度不同」这一类改动必被识别。
  */
 export async function sourceDirSignature(dir: string): Promise<string | null> {
   let entries
@@ -64,17 +68,22 @@ export async function sourceDirSignature(dir: string): Promise<string | null> {
       for (const candidate of [`${base}.ts`, "index.ts"]) {
         const p = join(dir, base, candidate)
         const st = await stat(p).catch(() => null)
-        if (st?.isFile()) parts.push(`${base}/${candidate}:${st.mtimeMs}`)
+        if (st?.isFile()) parts.push(`${base}/${candidate}:${fileStamp(st)}`)
       }
     } else if (e.isFile() && isDefFile(e.name)) {
       const base = e.name.replace(/\.(ts|js)$/, "")
       if (!/^[a-z0-9_]+$/.test(base)) continue
       const st = await stat(join(dir, e.name)).catch(() => null)
-      if (st) parts.push(`${e.name}:${st.mtimeMs}`)
+      if (st) parts.push(`${e.name}:${fileStamp(st)}`)
     }
   }
   parts.sort()
   return parts.join("|")
+}
+
+/** 单文件的变更标识：mtime + size（见 `sourceDirSignature` 注释：只靠 mtime 会漏检）。 */
+function fileStamp(st: { mtimeMs: number; size: number }): string {
+  return `${st.mtimeMs}:${st.size}`
 }
 
 /** 双域签名（热加载判定单一来源，`discover` 与 `refreshIfChanged` 同源防漂移）。 */
@@ -197,9 +206,12 @@ async function loadOne(dir: string, entry: { name: string; isDirectory(): boolea
   }
 
   try {
-    // mtime 查询参数绕过模块缓存（Bun 对 file:// URL 的查询参数不生效，故用绝对路径 + query）
-    const mtime = (await stat(filePath).catch(() => null))?.mtimeMs ?? 0
-    const mod = (await import(`${filePath}?t=${mtime}`)) as { source?: unknown; persona?: unknown; default?: unknown }
+    // 缓存失配参数：mtime + size（Bun 对 file:// URL 的查询参数不生效，故用绝对路径 + query）。
+    // 只靠 mtime 不够：文件系统时间戳精度有限，快速连续写同一文件时 `mtimeMs` 常常不变，
+    // 失效参数就也没变——import() 拿到的是缓存里的旧模块，表现出来的就是「改好的源仍然报旧错误」。
+    const st = await stat(filePath).catch(() => null)
+    const stamp = `${st?.mtimeMs ?? 0}:${st?.size ?? 0}`
+    const mod = (await import(`${filePath}?v=${stamp}`)) as { source?: unknown; persona?: unknown; default?: unknown }
     // **同名目录共用的靠写**：`custom/persona/` 同时放人格定义与事件源（同一个二开域，
     // 靠导出名区分）。发现人格时会把事件源文件当成“无 persona 导出”报错，反之亦然——
     // 两边都报就是持续噪声，且会把真实错误淹掉。所以这里先看**另一个导出**在不在：

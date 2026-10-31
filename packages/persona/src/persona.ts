@@ -189,7 +189,9 @@ export interface PersonaDiscoveryResult {
   signature: string
 }
 
-/** 目录签名（热加载判定；与子 Agent / 事件源 / 渠道同算法）。 */
+/** 目录签名（热加载判定；与子 Agent / 事件源 / 渠道同算法）。
+ *  变更标识取 `mtimeMs:size`——只靠 mtime 会漏掉「同一时间精度内改完」的文件
+ *  （Windows 实测快速连续写同一文件时 `mtimeMs` 常不变），改完人格定义也不重载。 */
 async function dirSignature(dir: string): Promise<string | null> {
   let entries
   try {
@@ -203,13 +205,13 @@ async function dirSignature(dir: string): Promise<string | null> {
       if (!ID_RE.test(e.name)) continue
       for (const c of [`${e.name}.ts`, "index.ts"]) {
         const st = await stat(join(dir, e.name, c)).catch(() => null)
-        if (st?.isFile()) parts.push(`${e.name}/${c}:${st.mtimeMs}`)
+        if (st?.isFile()) parts.push(`${e.name}/${c}:${st.mtimeMs}:${st.size}`)
       }
     } else if (e.isFile() && isDefFile(e.name)) {
       const base = e.name.replace(/\.(ts|js)$/, "")
       if (!ID_RE.test(base)) continue
       const st = await stat(join(dir, e.name)).catch(() => null)
-      if (st) parts.push(`${e.name}:${st.mtimeMs}`)
+      if (st) parts.push(`${e.name}:${st.mtimeMs}:${st.size}`)
     }
   }
   parts.sort()
@@ -263,8 +265,10 @@ async function loadOne(dir: string, entry: { name: string; isDirectory(): boolea
   }
 
   try {
-    const mtime = (await stat(filePath).catch(() => null))?.mtimeMs ?? 0
-    const mod = (await import(`${filePath}?t=${mtime}`)) as { persona?: unknown; source?: unknown; default?: unknown }
+    // 缓存失配参数取 mtime + size（只靠 mtime：文件系统精度有限，快速连续写同一文件时常常不变，
+    // 失效参数没变 → import() 拿到缓存里的旧模块，表现出来的就是「改完人格定义也不重载」）。
+    const st = await stat(filePath).catch(() => null)
+    const mod = (await import(`${filePath}?v=${st?.mtimeMs ?? 0}:${st?.size ?? 0}`)) as { persona?: unknown; source?: unknown; default?: unknown }
     // **同名目录共用的靠写**（与 discovery.ts 的 loadOne 对称）：`custom/persona/` 同时放
     // 人格定义与事件源。先看 source 在不在：在就说明这是事件源文件，不是人格——
     // 安静跳过，避免“两边互相报对方格式不对”的持续噪声。
