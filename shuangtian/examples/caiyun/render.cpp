@@ -995,6 +995,20 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
       const int fh = local.physical_height();
       if (rgba.size() != static_cast<std::size_t>(fw) * static_cast<std::size_t>(fh) * 4U) {
         write_failed.store(true);
+        // ## 丢帧必须「置位 + 唤醒 + 推闸门」（2026-10-31 卡死修复）
+        //
+        // 管道模式用一个「只能写 write_turn 这一帧」的闸门保证帧序。
+        // 旧实现这里直接 `return` —— 于是 `write_turn` 永远停在本帧，
+        // 而且没唤醒别人：**后面所有 worker 在 `pipe_cv.wait` 上永久阻塞**。
+        //
+        // 实测触发：GPU 画布在 4 路并行下丢设备（`0x887A0005`），
+        // `to_rgba8()` 返回空 → 走到这个 return → 进程挂死。
+        // 日志还在刷「创建离屏渲染目标失败」，看起来像在干活，实际已无人推进。
+        {
+          std::unique_lock<std::mutex> lock(pipe_mutex);
+          if (pipe_mode && write_turn == index) ++write_turn;
+          pipe_cv.notify_all();
+        }
         return;
       }
       worker_stats[slot].push(rgba, fw, fh, index, frame_time(index, job.fps));
@@ -1020,9 +1034,19 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
         if (pipe_mode) {
           // 等自己成为队首（前序帧都已写完），期间不占 CPU
           std::unique_lock<std::mutex> lock(pipe_mutex);
-          pipe_cv.wait(lock, [&] { return write_turn == index || cancel_.load() ||
-                                          pipe_failed.load(); });
-          if (cancel_.load() || pipe_failed.load()) return;
+          // ## 等待条件必须盖住**所有**让人退出的情形（2026-10-31 卡死修复）
+          //
+          // 旧条件只有 `write_turn == index || cancel_ || pipe_failed`。
+          // 但别的 worker 因设备丢失丢帧时只置了 `write_failed`，没置 `pipe_failed`，
+          // 也不通知 —— 于是停在这里的 worker 永远收不到信号，
+          // `write_turn` 也再无人推进 → **整个导出挂死**。
+          //
+          // 实测：4 路并行 + GPU 画布时必现（丢设备 `0x887A0005` 后进程挂死）。
+          pipe_cv.wait(lock, [&] {
+            return write_turn == index || cancel_.load() || pipe_failed.load() ||
+                   write_failed.load();
+          });
+          if (cancel_.load() || pipe_failed.load() || write_failed.load()) return;
           // `write` 收 `string_view`，而像素是 `uint8_t` 缓冲——同一块内存换
           // 一个字节类型（不改变对齐与布局）。这是“把二进制送进管道”必然的一步，
           // 不是把指针当另一个类型用。
