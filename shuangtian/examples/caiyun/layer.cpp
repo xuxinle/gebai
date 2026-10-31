@@ -285,6 +285,11 @@ auto evaluate_tracks(const Layer& layer, float time, float canvas_w, float canva
 /// 一个写错的值会刷 30 条，把真正有用的信息淹掉。
 ///
 /// 所以拆成两步：解析期调用本函数**报一次**，渲染期用 `value_or(0)` 静默降级
+auto parse_dim_public(const std::string& raw, float canvas, float design)
+    -> std::optional<float> {
+  return parse_dim(raw, canvas, design);
+}
+
 /// （错误已经报过了，不必重复）。
 [[nodiscard]] auto validate_layer_dims(const Layer& layer, float canvas_w, float canvas_h,
                                        float design_w, float design_h) -> bool {

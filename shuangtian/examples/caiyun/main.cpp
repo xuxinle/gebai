@@ -35,6 +35,7 @@
 #include "director.hpp"
 #include "director_bridge.hpp"
 #include "layer_schema.hpp"
+#include "layout_check.hpp"
 #include "package.hpp"
 #include "package_expand.hpp"
 #include "snapshot.hpp"
@@ -166,6 +167,8 @@ struct Options {
   bool keep_frames{false};
   /// `--no-stats`：不采集画面质量统计（导出加速约 1.4 倍，见 `RenderJob::collect_stats`）。
   bool no_stats{false};
+  /// `--check-layout`：只做布局自检并退出（不渲染）。
+  bool check_layout{false};
   std::string export_dir{};   ///< `--export-dir <dir>`：启动即导出 PNG 帧序列（旧口径，保留）
   int bench_seconds{0};       ///< `--bench <秒>`：播放压测时长
 };
@@ -189,6 +192,7 @@ auto print_usage(std::string_view program) -> void {
       "  --render-frames N     只渲染前 N 帧（快速试渲）\n"
       "  --export-dir DIR      启动即导出 PNG 帧序列（320x180，无 ffmpeg 时的兜底）\n"
       "  --keep-frames         保留 1080p PNG 帧序列（默认走管道直送 ffmpeg，不落盘）\n""  --no-stats            不采集画面质量统计（导出加速；诊断报告会省略）\n"
+      "  --check-layout        只做布局自检并退出（检查文字出界/溢出/遮挡，非 0 = 有错误）\n"
       
       "  --bench N             真开播放压测 N 秒后退出\n"
       "  --control-port N      控制通道端口（0 = 自动）\n"
@@ -303,6 +307,17 @@ auto parse_options(int argc, char** argv) -> Options {
       options.trajectory = true;
     } else if (raw == "--no-stats") {
       options.no_stats = true;
+    } else if (raw == "--check-layout") {
+      // 只做布局自检并退出（不渲染、不建窗口）。
+      //
+      // ## 为何要一个独立开关（而不是只在加载时报日志）
+      //
+      // 智能体写剧本的循环是“写完 → 想知道对不对”。如果只能靠出片后看图，
+      // 一次迭代就是几十秒；而布局问题是**度量能算出来**的，不该等渲。
+      //
+      // 这个开关把“写得对吗”变成一个**廉价、可脚本化、非零退出码**的问题，
+      // 配合 CI / 智能体的自检环节用。
+      options.check_layout = true;
     } else if (raw == "--keep-frames") {
       // 保留 PNG 帧序列。默认走管道（RGBA 直送 ffmpeg），不落盘——
       // 需要逐帧抽样的验收工具（ot_bench / carry_qa）必须显式打开它。
@@ -384,6 +399,28 @@ class CaiyunPage final : public dsl::Component {
     }
     if (!project_.apply_script(script)) {
       return st::unexpected(st::ErrorCode::Invalid, "脚本没有分镜（scenes 为空）");
+    }
+    // ## 布局自检（见 `layout_check.hpp`）
+    //
+    // 为何放在这里：schema 校验只能拦“字段名/类型/范围”，拦不住
+    // “文字压在页码条上”“标题撞上角标区”“文字框放不下”。那类错误
+    // 实测只能在**渲完看图**时发现，而看图是链路上最晚、最贵的一步。
+    //
+    // 这里不阻止加载（布局问题不解则成语法错，不应让工程打不开），
+    // 只把问题报出来——真正的硬拦截在渲染前（`--strict` 的强约束语义
+    // 留给 schema，那才是“确定写错”的）。
+    {
+      const caiyun::LayoutReport layout =
+          caiyun::check_layout(project_.script, text_port_);
+      for (const caiyun::LayoutIssue& issue : layout.issues) {
+        log(std::format("[布局{}] {}：{}",
+                        issue.level == caiyun::LayoutIssueLevel::Error ? "错误" : "提示",
+                        issue.path, issue.message));
+      }
+      if (layout.error_count() > 0) {
+        log(std::format("布局自检：{} 个错误、{} 个提示（共检查 {} 个图层）",
+                        layout.error_count(), layout.warning_count(), layout.checked_layers));
+      }
     }
     // 素材基准目录与素材库根（脚本旁边的 media/）：与构造路径**同一入口**。
     set_asset_context(path);
@@ -1450,6 +1487,42 @@ auto run_app(int argc, char** argv) -> int {
     }
     st::log::out("{}", caiyun::script_to_json(*parsed));
     return 0;
+  }
+
+  // ④ 布局自检：`--check-layout <脚本.json>` → 报告 + 退出码
+  //
+  // 与大模型写剧本的循环对齐：写完先跑这个（几百毫秒），
+  // 通过后再出片（几十秒）。它拦的是 schema 拦不住的那类：
+  // 文字压在页码条上、标题撞角标、文字框放不下。
+  //
+  // 退出码：0 = 无错误（可能带提示）；1 = 有 Error 级问题。
+  if (options.check_layout) {
+    if (options.script.empty()) {
+      st::log::err("--check-layout 需要配合 --script <路径>\n");
+      return 2;
+    }
+    const auto text = st::fs::read_text(options.script);
+    if (!text) {
+      st::log::err("读不到脚本：{}\n", options.script);
+      return 2;
+    }
+    const auto parsed = caiyun::parse_script(*text, st::fs::parent(options.script));
+    if (!parsed) {
+      st::log::err("脚本解析失败：{}\n", parsed.error().message);
+      return 2;
+    }
+    // 无 TextPort 时文字宽度量不了——那句提示要当真，
+    // 否则只凭“没报错”就以为布局没问题，比不检查更危险。
+    const caiyun::LayoutReport report = caiyun::check_layout(*parsed, nullptr);
+    for (const caiyun::LayoutIssue& issue : report.issues) {
+      st::log::out("{} {} {}：{}\n",
+                   issue.level == caiyun::LayoutIssueLevel::Error ? "[错误]" : "[提示]",
+                   issue.path, issue.layer, issue.message);
+    }
+    st::log::out("布局自检：{} 个图层｜{} 错误 / {} 提示\n", report.checked_layers,
+                 report.error_count(), report.warning_count());
+    st::log::out("（注：未加载字体，文字宽度相关检查已略过；出片阶段会补上）\n");
+    return report.error_count() > 0 ? 1 : 0;
   }
 
   st::app::AppOptions app_options;

@@ -541,6 +541,17 @@ struct LayerState {
 [[nodiscard]] auto validate_layer_dims(const Layer& layer, float canvas_w, float canvas_h,
                                        float design_w, float design_h) -> bool;
 
+/// 解析一个尺寸/坐标字段（`"50%"` / `"120px"` / `"1080"`）。
+///
+/// **与渲染期同一套规则**（内部就是同一个 `parse_dim`）——这一点很关键：
+/// 布局自检（`layout_check.hpp`）如果自己另实现一套换算，就会出现
+/// “自检说没问题、渲出来却是另一个位置”，比不检查更糟。
+///
+/// 格式非法返回 `nullopt`（渲染期会静默降级为 0，报错留给
+/// `validate_layer_dims`）。
+[[nodiscard]] auto parse_dim_public(const std::string& raw, float canvas, float design)
+    -> std::optional<float>;
+
 auto evaluate_layer(const Layer& layer, float local_time, float canvas_w,
                                   float canvas_h, float design_w, float design_h) -> LayerState;
 
