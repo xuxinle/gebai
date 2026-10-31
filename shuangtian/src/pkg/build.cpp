@@ -319,55 +319,40 @@ namespace {
 
 /// 依赖快照的反序列化目标：restore 与快路径共用。
 ///
-/// ## 为什么是 `(mtime, size, hash)` 三元组而不是二元组（2026-10-25）
+/// ## 唯一判据是内容哈希
 ///
-/// 原来只记 `(mtime, size)`，于是**同长度改动 + 保留 mtime** 必然判"没变"：
-/// 实测把 `render.hpp` 改成 `rendEr.hpp`（等长）+ `os.utime` 回原值，
-/// `st build` 报「编译 111ms / 链接已跳过」，而源文件已经是改过的代码；
-/// `git status` 同时显示无改动（它也用 stat 缓存）。三方一起被骗。
+/// 记录里**只有内容哈希**，没有 mtime、没有 size。任何元数据（时间戳、长度）都不参与
+/// "要不要重编"的判定：
 ///
-/// 加一列内容哈希后，这个窗口被关掉。代价实测（`tools/deps_hash_cost_probe`，
-/// 151 文件 / 3.9MB）：只 stat 5.59ms、读全部+fnv1a64 **18.43ms**、
-/// 读全部+sha256 30.51ms。而真实构建的依赖总量是 43.6MB（去重后），
-/// 对一次 7.4s 的构建约 +0.2s（2.7%）——**换掉一次误判导致的整轮重编就回本**。
+/// · 时间戳会被 `git checkout` / `stash pop` / `touch` / 编辑器原子保存整批刷新，
+///   而内容一字未改——按它判定等于白等一轮全量重编（实测：仅 touch 一个被 33 个单元
+///   依赖的头 ⇒ 重编 34 单元、20.3 s）；
+/// · 反过来，等长改写 + 保留时间戳又会被它漏掉（拿旧产物当新结果）。
 ///
-/// 选 fnv1a64 而不是 sha256：这里要的是"内容变了没有"，不是抗碰撞证明。
-/// 攻击者不参与构建；而 sha256 慢 1.7 倍，没有对应收益。
+/// 两个方向都由同一条判据（哈希）关掉，不需要"快路径 + 兜底"的两层结构。
 struct DepsEntry {
-  std::int64_t mtime{0};
-  std::uint64_t size{0};
-  /// 内容哈希；空 = 旧格式（该条退回 mtime+size 判定）。
   std::uint64_t hash{0};
-  bool has_hash{false};
 };
 
 using DepsMeta = std::map<std::string, DepsEntry>;
 
-/// 依赖快照序列化：`path<TAB>mtime<TAB>size` 逐行，覆盖源文件与 `.d` 里的全部依赖。
+/// 依赖快照序列化：`path<TAB>hash` 逐行，覆盖源文件与 `.d` 里的全部依赖。
 ///
 /// 含制表符的路径**不记录**（也不引入转义语法）：`\t` 在 Windows 路径里是
 /// `D:\tools` 这类真实子串，转义/反转义会把无辜路径改坏；而真实路径几乎不含
-/// 制表符，跳过即可——该依赖退回 mtime-only（保守方向，不交付旧内容）。
-/// 读不到 mtime/size 的路径同样不记（两侧对称：不记 = 不校）。
+/// 制表符，跳过即可——该依赖不记即不校，保守方向由"缺记录 ⇒ 判变了"承担。
+/// 读不到内容的路径同样不记。
 [[nodiscard]] auto serialize_deps_meta(const std::string& source, const std::string& depfile) -> std::string {
   std::string meta;
   std::set<std::string> seen{};   // 同一文件被多个单元引用时只算一次哈希
   const auto append_entry = [&meta, &seen](const std::string& path) {
     if (path.find('\t') != std::string::npos) return;
     if (!seen.insert(path).second) return;
-    const auto time = fs::modified_ns(path);
-    const auto size = fs::file_size(path);
-    if (!time.has_value() || !size.has_value()) return;
+    const auto digest = content_hash_of(path);
+    if (!digest.has_value()) return;
     meta += path;
     meta += '\t';
-    meta += std::to_string(*time);
-    meta += '\t';
-    meta += std::to_string(*size);
-    // 第 4 列：内容哈希。算不出来就不写（旧行为，判定退回 mtime+size）。
-    if (const auto digest = content_hash_of(path); digest.has_value()) {
-      meta += '\t';
-      meta += std::to_string(*digest);
-    }
+    meta += std::to_string(*digest);
     meta += '\n';
   };
   append_entry(source);
@@ -377,111 +362,48 @@ using DepsMeta = std::map<std::string, DepsEntry>;
 
 /// 依赖快照反序列化（与 `serialize_deps_meta` 对称）。空文本/损坏行 → 空表或
 /// 缺行，调用方按"无记录不校验"处理——旧条目/旧对象不因此失效。
+/// 依赖快照反序列化（与 `serialize_deps_meta` 对称）。空文本/损坏行 → 空表或缺行，
+/// 调用方按"无记录 ⇒ 判变了"处理（保守方向）。
 [[nodiscard]] auto parse_deps_meta(std::string_view text) -> DepsMeta {
   DepsMeta snapshot;
   for (const std::string_view line : st::split(text, '\n')) {
     if (line.empty()) continue;
     const std::size_t first = line.find('\t');
     if (first == std::string_view::npos) continue;
-    const std::size_t second = line.find('\t', first + 1);
-    if (second == std::string_view::npos) continue;
-    const auto mtime = st::parse_i64(line.substr(first + 1, second - first - 1));
-    // 第 3 列之后可能还有第 4 列（哈希）；旧格式没有 → 本轮构建前产出的 .meta
-    // 仍能解析，该条按 `has_hash = false` 退回 mtime+size 判定（不阻塞构建）。
-    const std::size_t third = line.find('\t', second + 1);
-    const auto size_text = (third == std::string_view::npos)
-                               ? line.substr(second + 1)
-                               : line.substr(second + 1, third - second - 1);
-    const auto size = st::parse_u64(size_text);
-    if (!mtime.has_value() || !size.has_value()) continue;
-    DepsEntry entry{};
-    entry.mtime = *mtime;
-    entry.size = *size;
-    if (third != std::string_view::npos) {
-      if (const auto hash = st::parse_u64(line.substr(third + 1)); hash.has_value()) {
-        entry.hash = *hash;
-        entry.has_hash = true;
-      }
-    }
-    snapshot.emplace(std::string(line.substr(0, first)), entry);
+    const auto hash = st::parse_u64(line.substr(first + 1));
+    if (!hash.has_value()) continue;
+    snapshot.insert_or_assign(std::string(line.substr(0, first)), DepsEntry{*hash});
   }
   return snapshot;
 }
 
 /// 目标是否需要重建：源文件、**任一被包含的头文件**、**编译标志**或 **PCH 身份**变化时重建。
+///
+/// 只有两个输入：`.flags` 指纹与 `.meta` 内容快照。时间戳与文件长度**一律不参与**——
+/// 它们会被 `git checkout` / `stash pop` / `touch` 整批刷新（一字未改却白等全量重编），
+/// 又会在等长改写 + 保留时间戳时漏报（拿旧产物当新结果）。只比内容，两个方向一起关掉。
 [[nodiscard]] auto needs_rebuild(const CompileUnit& unit,
                                  const std::vector<std::string>& unit_flags,
                                  const std::vector<std::string>& profile_flags,
                                  CompilerKind kind, const std::string& pch_token) -> bool {
   if (!fs::is_regular_file(unit.object)) return true;
-  const auto object_time = fs::modified_ns(unit.object);
-  if (!object_time) return true;
-  // 编译标志变了 → 必须重编（时间戳看不出这件事）
   const auto stamp = fs::read_text(flags_stamp_path(unit.object));
   if (!stamp.has_value() ||
       *stamp != compile_fingerprint(kind, unit_flags, profile_flags, unit.third_party, pch_token)) {
     return true;
   }
-  const auto source_time = fs::modified_ns(unit.source);
-  if (!source_time) return true;
-  // ## 为何不在这里“mtime 比 .o 新 ⇒ 直接重建”
-  //
-  // 原实现是这么写的，代价实测（2026-10-26）：
-  // 仅 `touch` 一个被 33 个单元依赖的头（内容一字未改）⇒ **重编 34 个单元、发 20.3 s**。
-  // 而“元数据变了但内容没变”在真实工作流里很常见：
-  // · `git checkout` / `stash pop` 切分支（mtime 常被整批刷新）
-  // · `touch` / 构建脚本批量更新时间戳
-  // · 编辑器原子保存（写临时文件再 rename）
-  // 这 20 秒是**纯浪费**：编出来的对象与已有的逐字节相同。
-  //
-  // 所以 mtime 不再参与“是否重建”的判定——**内容哈希是唯一真相源**。
-  // 唯一例外：`.meta` 侧边车缺失（本改动前构建的旧对象）时没有内容可依，
-  // 那时退回 mtime-only（与改动前一致），否则那些对象的依赖会被全量重算一遍。
-  if (!fs::is_regular_file(deps_meta_path(unit.object))) {
-    if (*source_time > *object_time) return true;
-    for (const auto& dep : parse_depfile(unit.depfile)) {
-      const auto dep_time = fs::modified_ns(dep);
-      if (dep_time && *dep_time > *object_time) return true;
-      if (!dep_time && !fs::exists(dep)) return true;  // 头被删除 → 重编
-    }
-    return false;
-  }
-  // **mtime+size 双校验（快路径）**：上面纯 mtime 判定抓不住「内容变了但 mtime
-  // 没变」的窗口（同秒改+建、拷贝保留旧 mtime、时钟回拨）——旧对象一声不响地
-  // 继续链接。侧边车 `<obj>.meta` 记着这份 .o 出生时的源+依赖 (mtime, size)，
-  // 严格不等比对（`!=` 而非 `>`：回拨后的 mtime 比 .o 还旧，`>` 抓不住）。
-  // 与 restore 路径同一套序列化（`parse_deps_meta`），两路判定语义一致。
-  // 缺侧边车（本改动前构建的旧对象）→ 退回 mtime-only，不阻塞构建。
-  if (const auto meta_text = fs::read_text(deps_meta_path(unit.object)); meta_text.has_value()) {
-    const DepsMeta snapshot = parse_deps_meta(*meta_text);
-    // ## 判定：mtime/size 一致时**还要比内容哈希**（2026-10-25）
-    //
-    // 少了这一步就有那个窗口：同长度改动 + 保留 mtime（`copy2` / `cp -p` /
-    // 编辑器"保留时间戳" / `os.utime` 回写）→ 判"没变" → 拿旧产物当新结果，
-    // 而构建照样报"编译 111ms"。实测过，`git status` 也一起被骗。
-    //
-    // 哈希**只在这一步现算**：mtime 或 size 任一不同就已判"变了"，直接返回，
-    // 不读内容。所以日常构建（改了文件）不付这笔成本；只有"看起来没变"的
-    // 文件才读一次——而它们本来就是要被跳过的那批，读 43.6MB 约 0.2s。
-    const auto changed = [&](const std::string& path) -> bool {
-      const auto found = snapshot.find(path);
-      if (found == snapshot.end()) return false;   // 无记录不校验（对称：写入侧不记）
-      const auto& entry = found->second;
-      const auto recorded = entry.has_hash ? std::optional<std::uint64_t>(entry.hash)
-                                           : std::nullopt;
-      return !deps_entry_matches(path, entry.mtime, entry.size, recorded);
-    };
-    if (changed(unit.source)) return true;
-    for (const auto& dep : parse_depfile(unit.depfile)) {
-      if (changed(dep)) return true;
-    }
-    // ## 依赖文件被删除 ⇒ 必须重编
-    //
-    // `deps_entry_matches` 对“读不到”会返回 false（判“变了”）——那条路径已经覆盖了。
-    // 但**源文件被删**（而不是头）时 `changed()` 同样返回 true（读不到），也对。
-    // 这里额外显式检查一次：`.meta` 里有记录、而文件已经不存在 —— 这是
-    // “删了头但没重编”的典型场景（旧实现靠 `!dep_time && !fs::exists(dep)` 抓）。
-    if (!fs::is_regular_file(unit.source)) return true;
+  // 没有出生快照（或快照里没有这条）⇒ 无从校验，保守重编。
+  const auto meta_text = fs::read_text(deps_meta_path(unit.object));
+  if (!meta_text.has_value()) return true;
+  const DepsMeta snapshot = parse_deps_meta(*meta_text);
+  const auto changed = [&snapshot](const std::string& path) -> bool {
+    const auto found = snapshot.find(path);
+    if (found == snapshot.end()) return true;
+    return !deps_entry_matches(path, found->second.hash);
+  };
+  if (changed(unit.source)) return true;
+  for (const auto& dep : parse_depfile(unit.depfile)) {
+    if (changed(dep)) return true;
   }
   return false;
 }
@@ -542,40 +464,16 @@ struct ObjectCache {
   const std::string cached_object = fs::join(directory, "unit.o");
   const std::string cached_depfile = fs::join(directory, "unit.d");
   if (!fs::is_regular_file(cached_object) || !fs::is_regular_file(cached_depfile)) return false;
-  const auto cached_time = fs::modified_ns(cached_object);
-  if (!cached_time) return false;
-  // mtime+size 双校验（BACKLOG「对象缓存对头文件变化的失效范围」修复；旧条目无
-  // .meta 时按 mtime-only 放行——见下方逐处注释）。
   const std::string cached_meta = fs::join(directory, "unit.meta");
-  // 解析与序列化是共用的一对（`parse_deps_meta`/`serialize_deps_meta`——工程内
-  // 快路径侧边车 `<obj>.meta` 与共享缓存 `unit.meta` 同一套格式）；解析失败/
-  // 空文本 = 无记录不校验，旧条目不因此失效。
-  const DepsMeta snapshot = parse_deps_meta(fs::read_text(cached_meta).value_or(""));
-  const bool has_meta = !snapshot.empty();
-  // 依赖新鲜度：源文件与 `.d` 里的每个依赖都不得比缓存对象新；有元数据时
-  // **再加 mtime+size 严格比对**——mtime 窗口（同秒改+建、拷贝保留旧 mtime、
-  // 时钟回拨）里内容变了 mtime 大概率也变，兜住绝大多数静默旧对象顶替。
-  // 等长改写仍漏（那要内容哈希才能根治，见 BACKLOG 观察方向）。无记录（旧条目）不校验。
-  const auto stale = [&](const std::string& path) -> bool {
-    const auto dep_time = fs::modified_ns(path);
-    if (!dep_time) return !fs::exists(path);   // 头被删除 → 重编
-    if (*dep_time > *cached_time) return true;
-    if (has_meta) {
-      if (const auto found = snapshot.find(path); found != snapshot.end()) {
-        // mtime **严格等于记录值**才放行：`>` 比对抓不住时钟回拨（回拨后改的文件
-        // mtime 比缓存对象还旧，看起来"更不新"），`!=` 抓得住。误伤面仅 touch/
-        // 跨文件系统拷贝带来的 mtime 抖动（FAT 2s 粒度）——多编一次后重写
-        // .meta 即恢复，保守方向不交付旧内容。
-        // 与增量快路径**共用同一份判定**（含内容哈希）：
-        // 否则"增量构建"与"共享缓存"会在边界条件上给出不同答案，
-        // 而同长度改动 + 保留 mtime 正是那种边界。
-        const auto& entry = found->second;
-        const auto recorded =
-            entry.has_hash ? std::optional<std::uint64_t>(entry.hash) : std::nullopt;
-        if (!deps_entry_matches(path, entry.mtime, entry.size, recorded)) return true;
-      }
-    }
-    return false;
+  // 缓存条目自带出生快照（与工程内 `<obj>.meta` 同一套格式）。
+  // 没有快照 = 无从校验内容，不命中（否则等于“相信旧对象就是新代码”）。
+  const auto cached_meta_text = fs::read_text(cached_meta);
+  if (!cached_meta_text.has_value()) return false;
+  const DepsMeta snapshot = parse_deps_meta(*cached_meta_text);
+  const auto stale = [&snapshot](const std::string& path) -> bool {
+    const auto found = snapshot.find(path);
+    if (found == snapshot.end()) return true;
+    return !deps_entry_matches(path, found->second.hash);
   };
   if (stale(unit.source)) return false;
   for (const auto& dep : parse_depfile(cached_depfile)) {
@@ -583,32 +481,16 @@ struct ObjectCache {
   }
   if (auto status = fs::copy_file(cached_object, unit.object); !status) return false;
   if (auto status = fs::copy_file(cached_depfile, unit.depfile); !status) return false;
-  // **restore 后把 `.o` 的 mtime 置为现在**。
-  //
-  // 为何必需：Win32 `CopyFile`（`std::filesystem::copy_file` 在 Windows 上的实现）
-  // **保留源文件时间戳**。于是缓存 restore 出来的对象“内容是新条目的，mtime 却停在
-  // 缓存条目创建的那一刻”。下游任何按时间比较的判据都会被误导，典型是
-  // 链接跳过里的“.o 比产物旧吗”——旧 mtime 让它放行，于是**产物停留在旧代码上**。
-  //（链接指纹已同时加入 (mtime, size)，这里再 touch 一次，让两套判据一致、
-  //  且“刚构建过”这个语义在时间戳上也成立。）
-  (void)fs::touch_now(unit.object);
   // **同步落工程内侧边车**：restore 复制回来的对象进入快路径（下一轮
-  // `needs_rebuild` 直接判它），侧边车让快路径读到同一套 (mtime, size) 快照——
-  // 两条路径一个真值源。旧缓存条目（无 .meta，快照空）时这里不写：该对象走
-  // 快路径 mtime-only（与历史行为一致，不阻塞构建）。
-  if (has_meta) {
-    if (const auto meta_text = fs::read_text(cached_meta)) {
-      (void)fs::write_text(deps_meta_path(unit.object), *meta_text);
-    }
-  }
+  // `needs_rebuild` 直接判它），侧边车让两条路径读到同一套内容快照——一个真值源。
+  (void)fs::write_text(deps_meta_path(unit.object), *cached_meta_text);
   return true;
 }
 
 /// 编译成功后写入缓存（失败不影响构建：缓存是加速手段，不是正确性前提）。
 ///
-/// 元数据 `unit.meta`（BACKLOG 修复）：逐行 `path<TAB>mtime<TAB>size`（格式与
-/// 含制表符路径的处理见 `serialize_deps_meta`），覆盖源文件与 `.d` 里的全部依赖
-/// ——restore 时 mtime+size 双校验。
+/// 元数据 `unit.meta`：逐行 `path<TAB>hash`（格式与含制表符路径的处理见
+/// `serialize_deps_meta`），覆盖源文件与 `.d` 里的全部依赖——restore 时逐条比内容。
 auto object_cache_store(const ObjectCache& cache, std::string_view key, const CompileUnit& unit,
                         std::atomic<std::size_t>& stores) -> void {
   if (!cache.enabled()) return;
@@ -799,16 +681,32 @@ struct PchContext {
   }
 
   const std::string gch = wrapper + ".gch";
-  bool stale = wrapper_changed;
-  if (!stale) {
-    if (const auto gch_time = fs::modified_ns(gch); gch_time.has_value()) {
-      const auto header_time = fs::modified_ns(header_path);
-      stale = !header_time.has_value() || *header_time > *gch_time;
-    } else {
-      stale = true;
+  const std::string depfile = gch + ".d";
+  const std::string stamp_path = fs::join(directory, "pch.stamp");
+  // PCH 的身份 = **它的输入内容**：编译器 + 标志 + 包含路径 + 代理头与全部依赖头的哈希。
+  // 不用 `.gch` 的时间戳/体积：`objcopy`/拷贝/checkout 都会让它们变而内容不变。
+  const auto stamp = [&]() -> std::string {
+    std::string material = compiler;
+    for (const auto& flag : flags) material.append("\n").append(flag);
+    for (const auto& dir : include_dirs) material.append("\n-I").append(dir);
+    std::set<std::string> deps{};
+    for (const auto& dep : parse_depfile(depfile)) deps.insert(dep);
+    for (const auto& dep : deps) {
+      material.append("\n").append(dep).append("=");
+      if (const auto digest = content_hash_of(dep); digest.has_value()) {
+        material.append(std::to_string(*digest));
+      } else {
+        material.append("missing");
+      }
     }
-  }
-  if (stale) {
+    return st::hash::fnv1a64_hex(material);
+  };
+  const bool up_to_date = [&]() -> bool {
+    if (wrapper_changed || !fs::is_regular_file(gch)) return false;
+    const auto recorded = fs::read_text(stamp_path);
+    return recorded.has_value() && *recorded == stamp();
+  }();
+  if (!up_to_date) {
     std::vector<std::string> args;
     for (const auto& flag : flags) args.push_back(flag);
     for (const auto& dir : include_dirs) args.push_back(std::format("-I{}", dir));
@@ -818,20 +716,22 @@ struct PchContext {
     args.push_back(wrapper);
     args.push_back("-o");
     args.push_back(gch);
+    args.push_back("-MMD");
+    args.push_back("-MF");
+    args.push_back(depfile);
     auto result = process::run(compiler, args);
     if (!result || result->exit_code != 0) {
       const std::string detail =
           result ? std::string(result->stderr_text).substr(0, 400) : result.error().message;
       ST_LOG_WARN("预编译头构建失败（忽略，按常规编译进行）: {}", detail);
       (void)fs::remove_file(gch);
+      (void)fs::remove_file(stamp_path);
       return std::nullopt;
     }
     ST_LOG_INFO("预编译头已生成: {}", gch);
+    (void)fs::write_text(stamp_path, stamp());
   }
-  const auto gch_time = fs::modified_ns(gch).value_or(0);
-  const auto gch_size = fs::file_size(gch).value_or(0);
-  return PchContext{directory, "prefix.hpp",
-                    std::format("<pch:{}:{}>", gch_time, gch_size)};
+  return PchContext{directory, "prefix.hpp", std::format("<pch:{}>", stamp())};
 }
 /// 目标平台的默认系统库。
 ///
@@ -2068,13 +1968,10 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
 
 }  // namespace
 
-/// 文件内容的 fnv1a64。读不到 → `nullopt`（该条不记哈希，退回 mtime+size 判定）。
+/// 文件内容的 fnv1a64。读不到 → `nullopt`。
 ///
-/// ## 为何在这里算而不是"每次都算"
-///
-/// 只有**写入侧**（真的编出一个 `.o` 之后）才算一次，而且每个文件只算一次
-/// （`append_entry` 里的路径已去重）。增量构建的**快路径不调它**——
-/// 它只会在 `(mtime, size)` 都匹配、需要验证内容时才现算（见 `changed`）。
+/// 选 fnv1a64 而不是 sha256：这里要的是"内容变了没有"，不是抗碰撞证明（攻击者不参与构建）；
+/// 实测 151 文件 / 3.9MB：fnv1a64 18.43ms、sha256 30.51ms。
 [[nodiscard]] auto content_hash_cached(const std::string& path) -> std::optional<std::uint64_t>;
 
 [[nodiscard]] auto content_hash_of(const std::string& path) -> std::optional<std::uint64_t> {
@@ -2083,7 +1980,7 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
   return st::hash::fnv1a64_bytes(std::span<const std::uint8_t>(bytes->data(), bytes->size()));
 }
 
-/// 单次构建内的内容哈希缓存（**进程级**，但每次 `st build` 都是新进程，所以等同于"每次构建一份"）。
+/// 单次构建内的内容哈希缓存。
 ///
 /// ## 为什么必须有
 ///
@@ -2094,21 +1991,27 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
 /// 用 `mutex` 是因为增量判定跑在并行分片里（28 路）；命中缓存的路径只碰一次 map 查找，
 /// 未命中的才真读文件——而同一文件在并发下重复"未命中"的窗口很小，
 /// 代价可接受（最多多读一次），换来实现简单。
+///
+/// ## 生命周期：一次构建
+///
+/// 入口处调 `clear_content_hash_cache()`。`st watch` 在**同一个进程**里反复 build，
+/// 不清就会用上一轮的旧哈希——症状是“保存了却什么也不重编”，完全静默。
+namespace {
+// lint-allow: L8 进程级缓存（一次构建内复用；每次构建入口清空）
+std::mutex g_hash_mutex;
+// lint-allow: L8 同上（与 mutex 配套的哈希表）
+std::map<std::string, std::optional<std::uint64_t>> g_hash_cache;
+}  // namespace
+
 [[nodiscard]] auto content_hash_cached(const std::string& path) -> std::optional<std::uint64_t> {
-  // 进程级缓存：一次构建内的内容哈希复用（见上方说明）。
-  // 用 static 是**有意的**——它的生命周期就该是"这次构建"（每次 `st` 运行是一个进程）。
-  // lint-allow: L8 进程级缓存（单次构建内复用，进程生命周期即天然作用域）
-  static std::mutex mutex;
-  // lint-allow: L8 同上（与 mutex 配套的哈希表）
-  static std::map<std::string, std::optional<std::uint64_t>> cache;
   {
-    const std::scoped_lock lock(mutex);
-    if (const auto found = cache.find(path); found != cache.end()) return found->second;
+    const std::scoped_lock lock(g_hash_mutex);
+    if (const auto found = g_hash_cache.find(path); found != g_hash_cache.end()) return found->second;
   }
   const auto digest = content_hash_of(path);
   {
-    const std::scoped_lock lock(mutex);
-    cache.emplace(path, digest);
+    const std::scoped_lock lock(g_hash_mutex);
+    g_hash_cache.emplace(path, digest);
   }
   return digest;
 }
@@ -2117,41 +2020,66 @@ auto file_content_hash(std::string_view path) -> std::optional<std::uint64_t> {
   return content_hash_of(std::string(path));
 }
 
-/// 判定一份依赖记录是否仍与文件一致。**增量快路径与缓存复用共用这一份**——
-/// 两处各写一遍必然在边界条件上给出不同答案（这正是 `.meta` 当初设计成共用的理由）。
-///
-/// ## 口径：内容哈希是**唯一的真相源**（2026-10-26 定稿）
-///
-/// 两个历史版本都各自错一半：
-///
-/// | 实现 | 行为 | 错在哪 |
-/// |---|---|---|
-/// | v1（mtime 变即判变） | mtime 不等 → 直接判变 | `touch` / `checkout` 时**白编**（实测 touch 一个头 → 重编 34 单元、20.3 s） |
-/// | v2（快路径 mtime+size 一致即判未变） | 一致 → 直接判未变 | **等长修改 + mtime 还原**时漏报（本文件那条用例抓到的） |
-/// | v3（当前：**全比内容**） | 一律算哈希定论 | 代价：每次构建读一遍依赖（去重后 43.6 MB，~0.2 s） |
-///
-/// 选 v3 的理由：两个方向都错过的实现，无论哪个方向都不可接受——
-/// 一个导致“白等 20 秒”，一个导致“拿旧产物当新结果”。
-/// 而 0.2 s 的代价在 `st watch`（保存即构建）下几乎无感。
-///
-/// 对**读不到**的情形仍然保守：判“变了”（宁可多编一次，不交付旧代码）。
-auto deps_entry_matches(std::string_view path, std::int64_t recorded_mtime,
-                        std::uint64_t recorded_size,
-                        std::optional<std::uint64_t> recorded_hash) -> bool {
-  const std::string owned(path);
-  (void)recorded_mtime;   // 保留参数：`.meta` 仍记录它们，便于人工排查与旧格式识别
-  (void)recorded_size;
-  if (!recorded_hash.has_value()) {
-    // 旧格式记录（无哈希）：没有内容可依，只能退回元数据比对。
-    // 两侧都一致才认为“未变”——保守方向。
-    const auto time = fs::modified_ns(owned);
-    const auto size_now = fs::file_size(owned);
-    return time.has_value() && *time == recorded_mtime && size_now.has_value() &&
-           *size_now == recorded_size;
+auto clear_content_hash_cache() -> void {
+  const std::scoped_lock lock(g_hash_mutex);
+  g_hash_cache.clear();
+}
+
+auto test_source_stamp(const std::vector<std::string>& test_files) -> std::string {
+  std::string material;
+  for (const auto& path : test_files) {
+    // **不经过缓存**：这是“现在的内容”事实，要跨调用保持新鲜。
+    const auto digest = file_content_hash(path);
+    if (!digest.has_value()) continue;
+    material.append(path).append("\t").append(std::to_string(*digest)).append("\n");
   }
-  const auto digest = content_hash_cached(owned);
-  if (!digest.has_value()) return false;   // 读不到：保守判“变了”
-  return *digest == *recorded_hash;
+  return material;
+}
+
+auto test_binary_stamp_path(const std::string& binary) -> std::string {
+  return binary + ".srcs";
+}
+
+auto test_binary_is_stale(const std::vector<std::string>& test_files, const std::string& binary)
+    -> bool {
+  if (!fs::is_regular_file(binary)) return false;
+  const auto recorded = fs::read_text(test_binary_stamp_path(binary));
+  if (!recorded.has_value()) return true;
+  return *recorded != test_source_stamp(test_files);
+}
+
+auto target_source_stamp(const Manifest& manifest, const TargetSpec& target) -> std::string {
+  std::string material;
+  std::set<std::string> seen{};
+  for (const auto& pattern : target.sources) {
+    auto matched = fs::expand_glob(manifest.directory, pattern);
+    if (!matched) continue;
+    for (const auto& relative : *matched) {
+      const std::string path =
+          fs::is_absolute(relative) ? relative : fs::join(manifest.directory, relative);
+      if (!seen.insert(path).second) continue;
+      // **不经过缓存**：同上（`st run` 会话里会反复调它）。
+      const auto digest = file_content_hash(path);
+      if (!digest.has_value()) continue;
+      material.append(fs::normalize(path)).append("\t").append(std::to_string(*digest)).append("\n");
+    }
+  }
+  return material;
+}
+
+/// 判定一份依赖记录是否仍与文件一致：**只比内容哈希**。
+///
+/// 增量判定（`needs_rebuild`）与共享缓存复用（`object_cache_restore`）共用这一份，
+/// 两处各写一遍必然在边界条件上给出不同答案。
+///
+/// 时间戳与长度不参与：`git checkout` / `stash pop` / `touch` 会整批刷新它们而内容未改
+/// （按它判等于白等一轮全量重编），等长改写 + 保留时间戳时又会漏报。
+///
+/// 对**读不到**的情形保守判“变了”（宁可多编一次，不交付旧代码）。
+auto deps_entry_matches(std::string_view path, std::uint64_t recorded_hash) -> bool {
+  const auto digest = content_hash_cached(std::string(path));
+  if (!digest.has_value()) return false;
+  return *digest == recorded_hash;
 }
 
 /// 在**编译器旁边**找 binutils 工具（`objcopy` / `objdump`），找不到再回退 PATH。
@@ -2470,8 +2398,7 @@ auto profile_flags(std::string_view profile) -> Result<std::vector<std::string>>
       options.root.empty() ? manifest.directory : options.root,
       std::format("build/{}/bin", profile_directory(options.profile, *toolchain)));
   const std::string binary = fs::join(bin_dir, "st_tests" + toolchain->executable_suffix);
-  const auto bin_time = fs::modified_ns(binary);
-  if (!bin_time.has_value()) return false;   // 从没构建过测试 → 不是"过期"，是"没开始"
+  if (!fs::is_regular_file(binary)) return false;   // 从没构建过测试 → 不是"过期"，是"没开始"
 
   if (!test_binary_is_stale(*tests, binary)) return false;
 
@@ -2487,6 +2414,9 @@ auto profile_flags(std::string_view profile) -> Result<std::vector<std::string>>
 
 auto build(const Manifest& manifest, const BuildOptions& options) -> Result<BuildStats> {
   const std::int64_t start_ns = time::now_ns();
+  // 每个构建入口先清内容哈希缓存：`st watch` 在同一个进程里反复 build，
+  // 不清就会用上一轮的旧哈希——症状是“改了文件却不重编”，完全静默。
+  clear_content_hash_cache();
   const std::string root = options.root.empty() ? manifest.directory : options.root;
   auto flags = profile_flags(options.profile);
   if (!flags) return forward_error(flags.error());
@@ -2954,54 +2884,39 @@ if (target == nullptr) {
     }
   }
 
-  // 链接跳过：0 个单元重编 + 产物已存在且比全部目标文件新 → 不重链（无改动构建近乎瞬时）
+  // 链接跳过：参与链接的东西**一个都没变**就不重链。
   //
-  // ⚠ **但只有"参与链接的东西"没变时才能跳**。原先只看"产物的时间戳比现有对象新"，
-  // 于是**删掉一个源文件后永不重链**：被删的对象已不在 `link_units` 里，剩下的对象
-  // 又都比产物旧 → 判为最新 → 产物里那部分代码**一直留着**。
-  // 实测就是用户问的"示例程序怎么有 6MB"：移除 OpenGL 之后每个构建都报"重编 0"、
-  // 从不重链，产物仍带着 GL 后端与 glad 单头编出来的近 3MB 代码；
-  // 强制全量重建后立刻降到 2.99MB（release 是 2.95MB）。
+  // 指纹的内容：编译器族 + 链接集合（对象路径按序）+ 编译标志 + 每个对象的出生快照
+  // （`.meta` 里的内容哈希）——不含时间戳，也不靠“产物比对象新”。
   //
-  // 因此把"上次链接用了哪些对象 + 什么标志"记成指纹，由它决定能否跳过。
-  //
-  // ⚠ **对象的 (mtime, size) 必须混进指纹**（2026-10-20 修）：
-  // 共享对象缓存 restore 时用 `copy_file`，Windows 的 `CopyFile` **保留源文件时间戳**
-  // ——于是"内容换成了新对象、但 .o 的 mtime 还是旧条目那时的时间"。此时：
-  //   · `rebuilt == 0`（本轮没重编，是从缓存拿的）
-  //   · `.o` 的 mtime 比产物旧 → 时间戳比较放行
-  // 两条判据都不响，**产物一声不响地停留在旧代码上**。实测现象就是
-  // "源码明明改了、测试却跑的是旧行为"，而且要 `--force` 才能醒。
-  // 把 (mtime, size) 入指纹后，内容一变指纹就变，不再依赖时间先后。
+  // 为何不看时间：`git checkout` 会整批刷时间戳（白重链），而\.o 从共享缓存 restore 时
+  // 时间戳又可能停在旧条目那一刻（内容换了时间却没动，旧实现会静默拿旧产物）。
   const auto link_fingerprint = [&]() -> std::string {
     std::string material(compiler_kind_name(toolchain->kind));
     for (const auto& unit : link_units) {
       material.append("\n").append(unit.object);
-      // 对象身份：mtime + size。size 抓“内容长度变了”，mtime 抓“重建过”。
-      // 两者都不看时，缓存 restore 换内容而不换时间戳的场景就会漏（见上）。
-      const auto time = fs::modified_ns(unit.object).value_or(0);
-      const auto bytes = fs::file_size(unit.object).value_or(0);
-      material.append("\t").append(std::to_string(time));
-      material.append("\t").append(std::to_string(bytes));
+      const auto meta = fs::read_text(deps_meta_path(unit.object));
+      material.append("\t").append(meta.value_or("missing"));
     }
     for (const auto& flag : *flags) material.append("\n@").append(flag);
+    material.append("\n<").append(target->name).append(">");
     return std::string(st::hash::fnv1a64_hex(material));
   }();
   const std::string link_stamp_path = output + ".link";
+  // 产物旁的出生快照：壳层源 → 内容哈希。`st run` 据此判“能不能直接跑现有产物”，
+  // 与 `st build` 的增量判定同一套口径（内容而不是时间）。
+  const auto write_source_stamp = [&]() {
+    (void)fs::write_text(output + ".srcs", target_source_stamp(manifest, *target));
+  };
   const bool up_to_date = [&]() {
     if (options.force || rebuilt != 0 || stats.units_rebuilt != 0) return false;
-    const auto output_time = fs::modified_ns(output);
-    if (!output_time) return false;
-    // 参与链接的集合/标志变了（含"少了某个源文件"）→ 必须重链
+    if (!fs::is_regular_file(output)) return false;
+    // 参与链接的集合/标志/对象内容变了（含"少了某个源文件"）→ 必须重链
     const auto stamp = fs::read_text(link_stamp_path);
-    if (!stamp.has_value() || *stamp != link_fingerprint) return false;
-    for (const auto& unit : link_units) {
-      const auto object_time = fs::modified_ns(unit.object);
-      if (!object_time || *object_time > *output_time) return false;
-    }
-    return true;
+    return stamp.has_value() && *stamp == link_fingerprint;
   }();
   if (up_to_date) {
+    write_source_stamp();
     stats.artifact = output;
     stats.runs_on_host = toolchain->runs_on_host();
     stats.elapsed_ms = (time::now_ns() - start_ns) / 1'000'000;
@@ -3028,6 +2943,7 @@ if (target == nullptr) {
   stats.link_ms = (time::now_ns() - link_start) / 1'000'000;
   // 记下本次链接的"成分"，下次据此判断能否跳过（写失败只是下次多链一次，不影响正确性）
   (void)fs::write_text(link_stamp_path, link_fingerprint);
+  write_source_stamp();
   stats.artifact = output;
   stats.runs_on_host = toolchain->runs_on_host();
   stats.elapsed_ms = (time::now_ns() - start_ns) / 1'000'000;
@@ -3371,6 +3287,8 @@ namespace {
       ST_LOG_WARN("分离调试信息失败（测试产物仍可用）：{}", stripped.error().message);
     }
   }
+  // 记下出生快照：下次 `st build`/`st test` 据此判“测试源改过没有”（只比内容）。
+  (void)fs::write_text(test_binary_stamp_path(output), test_source_stamp(*tests));
 
   return output;
 }
@@ -3378,7 +3296,8 @@ namespace {
 auto run_tests(const Manifest& manifest, const BuildOptions& options, std::string_view filter,
                bool list_only, std::string_view junit_path, bool include_slow,
                std::string_view shard_log_dir) -> Result<int> {
-  // ## `--list` 直接复用已有二进制，不走构建
+  // 与 `build()` 同一个理由：入口处清缓存（`st test` 可能在同一进程里被反复调用）。
+  clear_content_hash_cache();  // ## `--list` 直接复用已有二进制，不走构建
   //
   // 实测（2026-10-26）：`st test --list` 壁钟 **7.6s**，而直接跑
   // `st_tests.exe --list` 只需 **0.5s**。差的 7s 全在 `build_test_binary` 的

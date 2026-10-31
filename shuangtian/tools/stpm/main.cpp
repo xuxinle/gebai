@@ -16,6 +16,7 @@
 
 #include "st/core/entry.hpp"
 #include "st/core/fs.hpp"
+#include "st/core/hash.hpp"
 #include "st/core/print.hpp"
 #include "st/core/log.hpp"
 #include "st/core/process.hpp"
@@ -218,6 +219,10 @@ void print_usage() {
 
 // —— 命令实现 ——
 
+// 自检相关（定义在文件后部）：重建完要落一份出生快照，而 `st rebuild` 在更前面。
+[[nodiscard]] auto self_stamp_path(const std::string& exe) -> std::string;
+auto write_self_stamp(const std::string& exe) -> void;
+
 /// `st rebuild`：手工触发重建（与自动重建**同一份实现**）。
 ///
 /// 与自动路径的差别只有一点：手工重建**不重跑命令**（人只是想更新工具），
@@ -288,6 +293,8 @@ auto command_rebuild(const Arguments& arguments) -> int {
   }
 
   st::log::out("已重建 → {}（{}）\n", self, elapsed);
+  // 落出生快照：下一次自检拿它比对（没快照只能保守跳过，那会让改构建逻辑不生效）。
+  write_self_stamp(self);
   st::log::out("  旧版本备份在 {}\n", backup);
   st::log::out("  **当前进程仍跑旧逻辑；下次运行 st 即为新版。**\n");
   return 0;
@@ -502,10 +509,12 @@ auto command_watch(const Arguments& arguments) -> int {
 /// 「资源文件是运行期读的」目标：壳层源码没改就直接跑现有产物。
 ///
 /// 返回 `nullopt` = 走正常构建路径（因为 `--force`/`--toolchain`/无清单/无目标/
-/// 无产物/壳层源码更新）；返回带退出码的值 = 已经跑完。
+/// 无产物/无出生快照/壳层源码内容改过）；返回带退出码的值 = 已经跑完。
 ///
-/// 判据只有一条：**壳层源文件是否比产物新**（比 `st::pkg` 的增量判定更严：任何一壳层
-/// 源比产物新就重建）。此外它**必须自己报告**“没重编”——那是让人以为构建过了的陷阱。
+/// 判据是**内容哈希**：`st::pkg::build` 在产物旁落一份 `<产物>.srcs`（壳层源 → 内容哈希），
+/// 这里用**同一个函数**重算比对。时间戳在这里不可用：`git checkout` 会整批刷新它
+/// （白构建一轮），等长改写又能绕过它。它**必须自己报告**“没重编”——那是让人
+/// 以为构建过了的陷阱。
 [[nodiscard]] auto run_without_build(const Arguments& arguments, const std::string& target,
                                      const std::vector<std::string>& app_args)
     -> std::optional<int> {
@@ -514,25 +523,15 @@ auto command_watch(const Arguments& arguments) -> int {
   if (!manifest.has_value()) return std::nullopt;
   const st::pkg::TargetSpec* spec = manifest->find_target(target);
   if (spec == nullptr || spec->sources.empty()) return std::nullopt;
-  auto shell_sources = st::fs::expand_glob(manifest->directory, spec->sources.front());
-  if (!shell_sources.has_value()) return std::nullopt;
   const std::string profile = arguments.get("profile", "release");
   const std::string artifact = st::fs::join(
       manifest->directory,
       st::fs::join(std::format("build/{}/bin", profile), target + host_executable_suffix()));
   if (!st::fs::is_regular_file(artifact)) return std::nullopt;
-  const auto artifact_time = st::fs::modified_ns(artifact);
-  if (!artifact_time.has_value()) return std::nullopt;
-  std::string newest_source{};
-  std::int64_t newest_stamp = 0;
-  for (const auto& source : *shell_sources) {
-    const auto stamp = st::fs::modified_ns(source);
-    if (stamp.has_value() && *stamp > newest_stamp) {
-      newest_stamp = *stamp;
-      newest_source = source;
-    }
+  const auto recorded = st::fs::read_text(artifact + ".srcs");
+  if (!recorded.has_value() || *recorded != st::pkg::target_source_stamp(*manifest, *spec)) {
+    return std::nullopt;
   }
-  if (newest_stamp > *artifact_time) return std::nullopt;
 
   st::log::out("未重编：资源文件（XML/JS）是运行期读的——产物较壳层源码新，直接用。\n");
   st::log::out("  （改了 C++ 才需要构建；要强制重建加 build 或 --force）\n");
@@ -1433,14 +1432,33 @@ ST_MAIN(run_app)
   return 0;
 }
 
-/// 自检结果：构建工具自身的源码是否比可执行文件新。
+/// 自检结果：构建工具自身的源码内容是否与可执行文件出生时一致。
 struct SelfStaleness {
   bool stale{false};
   std::size_t newer_count{0};
   std::string newest_path{};
 };
 
-/// 构建工具**自检**：`st` 自己的源码是否比 `st.exe` 新。
+/// 自检基准：`<exe>.selfsrcs`（路径<TAB>内容哈希）。
+///
+/// 与产物旁的 `<产物>.srcs` **不同名也不同义**：后者是目标壳层源快照（供 `st run`
+/// 判断能不能直接跑），这里的是 `st` 自己的全部候选源（含顶层 `src/**`）。
+[[nodiscard]] auto self_stamp_path(const std::string& exe) -> std::string {
+  return exe + ".selfsrcs";
+}
+
+/// 把候选集算成快照文本（写入与比对共用这一份）。
+[[nodiscard]] auto self_stamp_of(const std::set<std::string>& candidates) -> std::string {
+  std::string material;
+  for (const auto& path : candidates) {
+    const auto digest = st::pkg::file_content_hash(path);
+    if (!digest.has_value()) continue;
+    material.append(st::fs::normalize(path)).append("\t").append(std::to_string(*digest)).append("\n");
+  }
+  return material;
+}
+
+/// 构建工具**自检**：`st` 自己的源码内容是否还与 `st.exe` 出生时一致。
 ///
 /// ## 为什么必须有这一步
 ///
@@ -1448,38 +1466,36 @@ struct SelfStaleness {
 /// `st build <目标>` 只编目标、**永远不重编 `st`** —— 新逻辑不生效，
 /// 而它照样报"构建完成"。实测代价：5 轮实验（含逆向验证）全跑在旧二进制上。
 ///
-/// ## 判据为什么不用 bootstrap 的 `.d`
+/// ## 候选集怎么算
 ///
-/// 第一版拿 `build/obj/bootstrap/*.d` 当权威清单，**实测失效**：
-/// bootstrap 在 `$objDir` 里编译，gcc 的 `-MMD` 把路径写成 basename
-/// （`build.cpp`、`src_pkg_build.cpp.o:`），拼上仓库根后**全部不存在** →
-/// 一个"更新"都找不到 → 自检永不触发（touch 了源文件也没提示）。
+/// 按清单的真实规则：顶层 `sources` 减去 `exclude_sources` 的前缀，再并上 target 自己的
+/// `sources`；白名单（`include_sources`）存在时以它为准。
+/// 两版都因为“按目录猜”而失明过：第一版拿 bootstrap 的 `.d` 当清单（路径是 basename，
+/// 一个都对不上），第二版只取 target 的 `sources`（漏掉顶层 `src/pkg/*`，而那正是构建逻辑）。
 ///
-/// 第二版只取 `st` target 的 `sources`（`tools/stpm/*.cpp`）——**又一次失明**：
-/// `src/pkg/*.cpp` 来自**顶层** `sources`（经 target 的 `exclude_sources` 过滤
-/// 后并入），而那正是构建逻辑所在。候选数从 220 涨到 319 才对。
+/// ## 判据为什么是内容哈希
 ///
-/// 现在按清单的真实规则算：顶层 `sources` 减去 `exclude_sources` 的前缀，
-/// 再并上 target 自己的 `sources`。
+/// 时间戳会被 `git checkout` / `stash pop` / `touch` 整批刷新而内容一字未改——按它判
+/// 就是一次完全白费的自举（实测 55 s）；反过来等长改写又能绕过时间戳。
+/// 读一遍候选源码（去重后 ~350 个文件）约几十毫秒，换掉一次误判就回本。
+/// 候选源集：`st` 这个可执行文件“由哪些源与头构成”。
 ///
-/// 只比 **mtime**：这一步每次运行都跑，读 3.9MB 内容只为"判断要不要重建"
-/// 不值得。构建**产物**那条路才用内容哈希（`deps_entry_matches`）。
-[[nodiscard]] auto check_self_staleness() -> SelfStaleness {
-  SelfStaleness result{};
-  const auto exe_result = st::process::executable_path();
-  if (!exe_result.has_value()) return result;
-  const std::string exe = st::fs::normalize(*exe_result);
-  const auto exe_time = st::fs::modified_ns(exe);
-  if (!exe_time.has_value()) return result;
-
-  // exe 在 <root>/build/bin/st → root 是上三级
-  const std::string root = st::fs::parent(st::fs::parent(st::fs::parent(exe)));
-  if (root.empty()) return result;
+/// 按清单的真实规则算：顶层 `sources` 减去 `exclude_sources` 的前缀，再并上 target 自己的
+/// `sources`；白名单（`include_sources`）存在时以它为准。
+/// 两版都因为“按目录猜”而失明过：第一版拿 bootstrap 的 `.d` 当清单（路径是 basename，
+/// 一个都对不上），第二版只取 target 的 `sources`（漏掉顶层 `src/pkg/*`，而那正是构建逻辑）。
+///
+/// 返回 `nullopt` = 没有清单/没有 `st` 目标（独立工程里跑本工具时会这样，不自检）。
+///
+/// ⚠ `include_sources`（白名单）**必须优先于** `exclude_sources` 参与判定，
+/// 与 `build()` 的库源选择同口径。只按黑名单算的症状不是“多算几个文件”而是两头都错：
+/// · 多算：`src/raster`/`src/text`/… 也被当成候选——改一个与 `st` 无关的文件就白重建一次；
+/// · 漏算：白名单命中的文件（`src/pkg/*`、`src/core/*`……）不在候选里。
+[[nodiscard]] auto self_source_candidates(const std::string& root) -> std::optional<std::set<std::string>> {
   const std::string manifest_path = st::fs::join(root, "st.pkg");
-  if (!st::fs::is_regular_file(manifest_path)) return result;
-
+  if (!st::fs::is_regular_file(manifest_path)) return std::nullopt;
   const auto manifest = st::pkg::Manifest::load(manifest_path);
-  if (!manifest.has_value()) return result;
+  if (!manifest.has_value()) return std::nullopt;
   const st::pkg::TargetSpec* st_target = nullptr;
   for (const auto& spec : manifest->targets) {
     if (spec.name == "st") {
@@ -1487,10 +1503,10 @@ struct SelfStaleness {
       break;
     }
   }
-  if (st_target == nullptr) return result;
+  if (st_target == nullptr) return std::nullopt;
 
   std::set<std::string> candidates{};
-  const auto add_tree = [&](const std::string& dir) {
+  const auto add_tree = [&candidates](const std::string& dir) {
     const auto walked = st::fs::walk(dir, 8);
     if (!walked.has_value()) return;
     for (const auto& entry : *walked) {
@@ -1503,17 +1519,6 @@ struct SelfStaleness {
     }
   };
 
-  // 候选源 = 顶层 sources（减去 exclude_sources 的前缀）+ target 自己的 sources
-  //
-  // ⚠ `include_sources`（白名单）**必须优先于** `exclude_sources` 参与判定，
-  // 与 `build()` 的库源选择同口径。只按黑名单算的症状不是“多算几个文件”而是两头都错：
-  // · 多算：`src/raster`/`src/text`/… 也被当成候选——改一个与 `st` 无关的文件就白重建一次；
-  // · 漏算：白名单命中的文件（`src/pkg/*`、`src/core/*`……）不在候选里——
-  //   改了构建逻辑却不自检，静默跑旧逻辑（那正是本函数存在的理由）。
-  //
-  // 用 `expand_glob` 直接展开白名单，而不是从顶层模式推目录：`include_sources`
-  // 里既有 `src/pkg/*.cpp` 这种目录 glob，也有 `src/ext/database.cpp` 这种精确文件，
-  // 自己推前缀两种都会算错。
   std::set<std::string> exclude_prefixes{};
   if (st_target->include_sources.empty()) {
     for (const auto& pattern : st_target->exclude_sources) {
@@ -1526,7 +1531,7 @@ struct SelfStaleness {
       const std::string dir = st::fs::normalize(st::fs::join(root, pattern.substr(0, slash)));
       bool excluded = false;
       for (const auto& prefix : exclude_prefixes) {
-        if (dir.size() >= prefix.size() && dir.compare(0, prefix.size(), prefix) == 0) {
+        if (dir.starts_with(prefix)) {
           excluded = true;
           break;
         }
@@ -1534,7 +1539,9 @@ struct SelfStaleness {
       if (!excluded) add_tree(dir);
     }
   } else {
-    // 白名单：只展开它点名的源（与 `build()` 里那条 `erase_if` 等价）
+    // 白名单：只展开它点名的源（与 `build()` 里那条 `erase_if` 等价）。
+    // 用 `expand_glob` 而不是从顶层模式推目录：白名单里既有 `src/pkg/*.cpp`
+    // 这种目录 glob，也有 `src/ext/database.cpp` 这种精确文件，推前缀两种都会算错。
     for (const auto& pattern : st_target->include_sources) {
       const auto matched = st::fs::expand_glob(root, pattern);
       if (!matched.has_value()) continue;
@@ -1549,18 +1556,53 @@ struct SelfStaleness {
     add_tree(st::fs::join(root, pattern.substr(0, slash)));
   }
   for (const auto& inc : manifest->include_dirs) add_tree(st::fs::join(root, inc));
+  return candidates;
+}
 
-  std::int64_t newest_time = 0;
-  for (const auto& path : candidates) {
-    const auto time = st::fs::modified_ns(path);
-    if (!time.has_value() || *time <= *exe_time) continue;
+/// 给刚重建出来的 `st` 落一份出生快照（下一次自检拿它比对）。
+///
+/// 写失败不算错：缺快照只会让下一次自检保守跳过（不重建），不会影响正确性。
+auto write_self_stamp(const std::string& exe) -> void {
+  const std::string root = st::fs::parent(st::fs::parent(st::fs::parent(exe)));
+  if (root.empty()) return;
+  const auto candidates = self_source_candidates(root);
+  if (!candidates.has_value()) return;
+  (void)st::fs::write_text(self_stamp_path(exe), self_stamp_of(*candidates));
+}
+
+[[nodiscard]] auto check_self_staleness() -> SelfStaleness {
+  SelfStaleness result{};
+  const auto exe_result = st::process::executable_path();
+  if (!exe_result.has_value()) return result;
+  const std::string exe = st::fs::normalize(*exe_result);
+  // exe 在 <root>/build/bin/st → root 是上三级
+  const std::string root = st::fs::parent(st::fs::parent(st::fs::parent(exe)));
+  if (root.empty()) return result;
+  const auto candidates = self_source_candidates(root);
+  if (!candidates.has_value()) return result;
+
+  const std::string stamp = self_stamp_of(*candidates);
+  const auto recorded = st::fs::read_text(self_stamp_path(exe));
+  if (!recorded.has_value()) {
+    // 没有出生快照：只可能是 `bootstrap` 直接编出来的（它与当前源码必然一致），
+    // 或者旧版产物。两种情况都把当前状态记为基准——以后就靠内容比对了。
+    (void)st::fs::write_text(self_stamp_path(exe), stamp);
+    return result;
+  }
+  if (stamp == *recorded) return result;
+  result.stale = true;
+  // 差异定位：只为了把“哪些文件变了”报出来（判据已由上面的整份快照给出）。
+  std::set<std::string> recorded_lines{};
+  for (const std::string_view line : st::split(*recorded, '\n')) {
+    if (!line.empty()) recorded_lines.insert(std::string(line));
+  }
+  for (const std::string_view line : st::split(stamp, '\n')) {
+    if (line.empty() || recorded_lines.contains(std::string(line))) continue;
     ++result.newer_count;
-    if (*time > newest_time) {
-      newest_time = *time;
-      result.newest_path = path;
+    if (result.newest_path.empty()) {
+      result.newest_path = std::string(line.substr(0, line.find('\t')));
     }
   }
-  result.stale = result.newer_count > 0;
   return result;
 }
 
@@ -1653,6 +1695,8 @@ struct SelfStaleness {
     std::fprintf(stderr, "新产物就位失败：%s\n", placed.error().message.c_str());
     return 1;
   }
+  // 新生效的 `st` 需要一份出生快照来支撑下一次自检（否则下轮无从比对）。
+  write_self_stamp(self);
   st::log::out("已重建（{}），用新工具重跑本次命令…\n", elapsed);
 
   // ## 可信增量校验（`ST_VERIFY_SELF_REBUILD=1` 时开）

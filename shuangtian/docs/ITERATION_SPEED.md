@@ -159,8 +159,7 @@
 
 ### 现象
 
-改了 `tests/pkg_memory_test.cpp` 后，`.o` 不重编（mtime 19:50 的源文件 vs 19:46 的对象），
-`st test` 也不重建测试二进制——**连 `--force` 都治不好**。
+改了 `tests/pkg_memory_test.cpp` 后，`.o` 不重编，`st test` 也不重建测试二进制——**连 `--force` 都治不好**。
 
 ### 根因
 
@@ -171,7 +170,7 @@ if (raw == ':') { token.clear(); seen_colon = true; continue; }   // 无条件
 ```
 
 Windows 路径的**盘符冒号**命中这一行，`C:` 被当成“目标/依赖分隔符”丢掉。
-后果链：`.meta` 第 4 列记录的是**读不到的坏路径** → `deps_entry_matches` 要么恒判“变了”
+后果链：`.meta` 记的是**读不到的坏路径** → `deps_entry_matches` 要么恒判“变了”
 （白重编）要么恒判“没变”（漏重编）→ **`include/st/**` 的头文件改动检测一并失效**。
 
 ### 为什么难发现（三重掩盖）
@@ -263,10 +262,13 @@ PS 5.1 的 `Out-File -Encoding` 是 `ValidateSet(unknown,string,unicode,…,utf8
 三条理由（写进了 `watch.hpp` 文件头）：
 1. 事件 API 要平台分支（`CONVENTIONS §10` 限制系统头只在 `platform_*` 里）；
 2. 各平台语义差异大（inotify 逐文件 add watch、RDCW 有缓冲区溢出与重命名语义）；
-3. **轮询的判据与增量判定同口径**——`deps_entry_matches` 也是看 `(mtime, size)`，
-   所以「watch 认为变了」与「构建会重编」天然一致；事件 API 会多一层偏差。
+3. **轮询的判据与增量判定同口径**——`deps_entry_matches` 也是只比**内容哈希**，
+   所以「watch 认为变了」与「构建会重编」天然一致；事件 API 会多一层偏差
+   （`git checkout` 会报一堆事件而内容一字未改）。
 
-代价实测：545 个文件一轮 `stat` 约 **0.2 s**（按 300 ms 间隔轮询）。
+代价：一轮要读一遍受监视文件的内容（~1500 个源/头、~10 MB），按 300 ms 间隔轮询
+约 15~25 ms/轮。换成 mtime 能省掉这份读盘，但代价是切分支后白构建一轮、
+以及等长改写漏报——两者都发生过，不值得。
 
 ### 性能优化：1.45 s → 0.34 s（三个静默失效）
 

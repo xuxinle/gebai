@@ -2,12 +2,16 @@
 
 #include <algorithm>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
 #include "st/core/fs.hpp"
+#include "st/core/hash.hpp"
 #include "st/core/log.hpp"
+#include "st/core/string.hpp"
+#include "st/pkg/build.hpp"
 #include "st/pkg/manifest.hpp"
 
 namespace st::pkg {
@@ -183,17 +187,14 @@ auto collect_watched_files(const std::string& root, const std::vector<std::strin
     }
     if (!wanted) continue;
 
-    // ⚠ 必须用**完整路径** stat：`entry.path` 是相对 root 的，而本函数不保证
+    // 必须用**完整路径**读：`entry.path` 是相对 root 的，而本函数不保证
     // 调用时 cwd == root（实测：测试里 root 是临时目录，cwd 是工程根——
-    // `entry.path` 指向的文件根本不在 cwd 下，`modified_ns` 恒返回 nullopt，
+    // `entry.path` 指向的文件根本不在 cwd 下，读不到时恒返回 nullopt，
     // 于是所有文件都被“读不到”静默跳过，结果是**空的监视列表、不报错**）。
     const std::string full_path = fs::join(root, rel);
-    const auto mtime = fs::modified_ns(full_path);
-    const auto size = fs::file_size(full_path);
-    if (!mtime.has_value() || !size.has_value()) {
-      continue;
-    }
-    out.push_back(WatchedFile{fs::normalize(full_path), *mtime, *size});
+    const auto content_hash = file_content_hash(full_path);
+    if (!content_hash.has_value()) continue;
+    out.push_back(WatchedFile{fs::normalize(full_path), *content_hash});
   }
   std::ranges::sort(out, {}, &WatchedFile::path);
   return out;
@@ -213,7 +214,7 @@ auto diff_watched(const std::vector<WatchedFile>& before, const std::vector<Watc
       changed.push_back(after[j].path);    // 新增
       ++j;
     } else {
-      if (before[i].mtime_ns != after[j].mtime_ns || before[i].size != after[j].size) {
+      if (before[i].hash != after[j].hash) {
         changed.push_back(after[j].path);  // 改动
       }
       ++i;

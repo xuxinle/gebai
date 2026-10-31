@@ -204,16 +204,14 @@ auto generate_embeds(const EmbedRequest& request) -> Result<EmbedOutput> {
 
     const std::string target_path = fs::join(source_dir, entry.identifier + ".cpp");
     output.sources.push_back(target_path);
-    const bool stale = [&]() {
-      const auto generated_time = fs::modified_ns(target_path);
-      const auto source_time = fs::modified_ns(entry.absolute);
-      if (!generated_time.has_value() || !source_time.has_value()) return true;
-      return *source_time > *generated_time;
-    }();
-    if (!stale) continue;
     std::string content = render_source(*source_template, entry.identifier, entry.lookup_key,
                                        entry.absolute, bytes->size(),
                                        byte_array_literal(*bytes));
+    // 按内容判变：重写成同一份内容只会白刷一次时间戳（进而拉动下游重编）。
+    if (const auto existing = fs::read_text(target_path);
+        existing.has_value() && *existing == content) {
+      continue;
+    }
     if (auto status = fs::write_text(target_path, content); !status) {
       return forward_error(status.error());
     }

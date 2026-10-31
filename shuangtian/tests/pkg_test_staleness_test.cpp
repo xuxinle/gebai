@@ -9,16 +9,8 @@
 /// | 该重建却没重建（漏报） | 跑了旧二进制、看到旧结果 → 去查被测代码，白烧几轮（实测踩过，代价最贵） |
 /// | 不该重建却重建（误报） | 每次 `st build` 多编几百个测试单元 → 构建时间翻倍，人开始习惯性加 `--no-tests` |
 ///
-/// 两个方向都不是"看起来差不多"能接受的，所以四条边界逐条钉住。
-///
-/// ## 为什么用真实文件、真实时间顺序
-///
-/// 判定函数只做一件事：比两个文件的 mtime。mock 掉文件系统会把**被测的那件事
-/// 本身**抹掉（桩回一个恒等值 → 错实现也判绿，本仓库踩过这种假绿）。
-///
-/// 没有"设置 mtime"的公共 API，所以用**真实写入顺序 + 真实等待**造时间差：
-/// 先写旧的，`sleep` 一小段，再写新的。mtime 精度在 Windows/NTFS 上是 100ns，
-/// `sleep_for(20ms)` 足够把它区分开（用例总耗时 < 100ms）。
+/// 判据是**内容哈希**（不是 mtime）：用真实文件、真实写入，
+/// 并显式构造“只动时间戳”与“等长改写”两种情形。
 #include <chrono>
 #include <thread>
 
@@ -28,14 +20,9 @@
 
 namespace {
 
-/// mtime 精度兜底：Windows 上 FAT 是 2 秒、NTFS 是 100ns，Linux 通常 ns 级。
-/// 取 20ms 足以区分，又不至于让四条用例明显变慢。
-constexpr std::chrono::milliseconds kTick{20};
-
-/// 写一个文件（内容带序号，避免"内容完全相同 → mtime 不更新"的实现差异）。
+/// 写一个文件（内容带序号，便于构造“内容变了/没变”两种情形）。
 void write_marker(const std::string& path, int seq) {
   (void)st::fs::write_text(path, std::format("x{}", seq));
-  std::this_thread::sleep_for(kTick);
 }
 
 }  // namespace
@@ -46,57 +33,64 @@ ST_TEST(test_binary_staleness_ignores_missing_binary) {
   // 判成过期的后果：第一次 `st build` 就要编 200+ 个测试单元——
   // 而多数人只是想把应用跑起来。这条边界最容易被"顺手写上 true"破坏。
   const auto dir = st::fs::make_temp_dir("st_stale_missing");
-  ST_CHECK(dir.has_value());
-  if (!dir) return;
+  ST_REQUIRE(dir.has_value());
   const std::string test_src = st::fs::join(*dir, "a_test.cpp");
   write_marker(test_src, 1);
-  const std::string binary = st::fs::join(*dir, "st_tests.exe");   // 不存在
+  const std::string binary = st::fs::join(*dir, "st_tests");   // 不存在
 
   ST_CHECK(!st::pkg::test_binary_is_stale({test_src}, binary));
   (void)st::fs::remove_all(*dir);
 }
 
-ST_TEST(test_binary_staleness_detects_newer_test_source) {
+ST_TEST(test_binary_staleness_detects_changed_test_source) {
   // 核心场景：改了测试断言、还没跑 st test → 二进制旧了。
-  const auto dir = st::fs::make_temp_dir("st_stale_newer");
-  ST_CHECK(dir.has_value());
-  if (!dir) return;
-  // 先写二进制（旧），后写测试源（新）
-  const std::string binary = st::fs::join(*dir, "st_tests.exe");
+  const auto dir = st::fs::make_temp_dir("st_stale_changed");
+  ST_REQUIRE(dir.has_value());
+  const std::string test_src = st::fs::join(*dir, "a_test.cpp");
+  write_marker(test_src, 1);
+  const std::string binary = st::fs::join(*dir, "st_tests");
   write_marker(binary, 1);
-  const std::string stale_src = st::fs::join(*dir, "a_test.cpp");
-  write_marker(stale_src, 2);
+  (void)st::fs::write_text(st::pkg::test_binary_stamp_path(binary),
+                           st::pkg::test_source_stamp({test_src}));
+  ST_CHECK(!st::pkg::test_binary_is_stale({test_src}, binary));
 
-  ST_CHECK(st::pkg::test_binary_is_stale({stale_src}, binary));
-  ST_CHECK(st::pkg::test_binary_is_stale({stale_src, binary}, binary));   // 混入不重要项也成立
+  // **等长**改写：mtime+size 判据在这里会漏，内容哈希必然抓住
+  write_marker(test_src, 2);
+  ST_CHECK(st::pkg::test_binary_is_stale({test_src}, binary));
   (void)st::fs::remove_all(*dir);
 }
 
 ST_TEST(test_binary_staleness_is_quiet_when_fresh) {
-  // 刚跑过 st test：二进制比所有测试源都新 → 不重建（否则每次构建都白编一遍）。
+  // 刚跑过 st test 且之后没改过内容 → 不重建（否则每次构建都白编一遍）。
   const auto dir = st::fs::make_temp_dir("st_stale_fresh");
-  ST_CHECK(dir.has_value());
-  if (!dir) return;
+  ST_REQUIRE(dir.has_value());
   const std::string src_a = st::fs::join(*dir, "a_test.cpp");
-  write_marker(src_a, 1);
   const std::string src_b = st::fs::join(*dir, "b_test.cpp");
+  write_marker(src_a, 1);
   write_marker(src_b, 2);
-  // 最后写二进制 → 它比两个源都新
-  const std::string binary = st::fs::join(*dir, "st_tests.exe");
+  const std::string binary = st::fs::join(*dir, "st_tests");
   write_marker(binary, 3);
+  (void)st::fs::write_text(st::pkg::test_binary_stamp_path(binary),
+                           st::pkg::test_source_stamp({src_a, src_b}));
 
+  ST_CHECK(!st::pkg::test_binary_is_stale({src_a, src_b}, binary));
+
+  // 再写一遍同样的内容（模拟 touch / `git checkout`：时间戳全刷新，内容一字未改）
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  write_marker(src_a, 1);
   ST_CHECK(!st::pkg::test_binary_is_stale({src_a, src_b}, binary));
   (void)st::fs::remove_all(*dir);
 }
 
 ST_TEST(test_binary_staleness_survives_missing_test_file) {
-  // 声明的测试文件被删了：不能因此判成"过期"（那只会在构建时再失败一次），
+  // 声明的测试文件被删了：不能因“读不到”就判成过期（那只会在构建时再失败一次），
   // 也不能崩。真正的错误由 `st test` 在编译阶段报。
   const auto dir = st::fs::make_temp_dir("st_stale_gone");
-  ST_CHECK(dir.has_value());
-  if (!dir) return;
-  const std::string binary = st::fs::join(*dir, "st_tests.exe");
+  ST_REQUIRE(dir.has_value());
+  const std::string binary = st::fs::join(*dir, "st_tests");
   write_marker(binary, 1);
+  (void)st::fs::write_text(st::pkg::test_binary_stamp_path(binary),
+                           st::pkg::test_source_stamp({}));
   const std::string gone = st::fs::join(*dir, "deleted_test.cpp");
 
   ST_CHECK(!st::pkg::test_binary_is_stale({gone}, binary));
@@ -104,39 +98,16 @@ ST_TEST(test_binary_staleness_survives_missing_test_file) {
   (void)st::fs::remove_all(*dir);
 }
 
+ST_TEST(test_binary_staleness_without_stamp_is_conservative) {
+  // 没有出生快照（旧产物，或刚被人拷进来）→ 无从校验，保守判过期。
+  // 反过来（判不过期）会在“别人塞进来的旧二进制”上永久静默。
+  const auto dir = st::fs::make_temp_dir("st_stale_nostamp");
+  ST_REQUIRE(dir.has_value());
+  const std::string test_src = st::fs::join(*dir, "a_test.cpp");
+  write_marker(test_src, 1);
+  const std::string binary = st::fs::join(*dir, "st_tests");
+  write_marker(binary, 1);
 
-ST_TEST(modified_ns_has_sub_second_precision) {
-  // ## 这条用例钉的是一个**框架级**缺陷（本轮实测发现）
-  //
-  // `modified_ns` 的 Windows 实现原先是 `std::filesystem::last_write_time`，
-  // 而 MinGW 把它**截断到整秒**：同一秒内先后写两个文件，两边返回值 `% 1e9`
-  // 都是 0，连"谁先写的"都分不出来。
-  //
-  // 代价不在这一个函数上——**所有按 mtime 做的增量判断粒度都退到秒**：
-  // 同一秒内改源码再构建会被判成"没变"，于是拿旧产物当新结果。
-  // 这正是本仓库反复踩的"改了没生效"的一支。
-  //
-  // 判据用"两次写入之间有明显间隔，时间戳必须不同"——不依赖具体精度值，
-  // 只要不是整秒截断就必然成立。
-  const auto dir = st::fs::make_temp_dir("st_mtime_precision");
-  ST_CHECK(dir.has_value());
-  if (!dir) return;
-
-  const std::string a = st::fs::join(*dir, "a.txt");
-  const std::string b = st::fs::join(*dir, "b.txt");
-  (void)st::fs::write_text(a, "1");
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  (void)st::fs::write_text(b, "2");
-
-  const auto ta = st::fs::modified_ns(a);
-  const auto tb = st::fs::modified_ns(b);
-  ST_CHECK(ta.has_value());
-  ST_CHECK(tb.has_value());
-  if (ta && tb) {
-    // 50ms 的间隔在秒级截断下必然丢失（两者相等），在真实精度下必然可分
-    ST_CHECK(*tb > *ta);
-    // 再加一道：纳秒值的低位不该恒为 0（整秒截断的铁证）
-    ST_CHECK((*ta % 1000000) != 0 || (*tb % 1000000) != 0);
-  }
+  ST_CHECK(st::pkg::test_binary_is_stale({test_src}, binary));
   (void)st::fs::remove_all(*dir);
 }

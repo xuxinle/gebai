@@ -124,32 +124,28 @@ struct BuildStats {
 
 /// 检测编译器（`ST_CXX`/`CXX` 环境变量 → g++ → clang++ → c++）。
 /// 探测 C++ 编译器（`ST_CXX`/`CXX` 环境变量优先，其次 g++/clang++/c++）。
-/// 判断一份依赖记录是否与文件当前状态一致（**含内容哈希**）。
+/// 判断一份依赖记录是否与文件当前内容一致（**只比内容哈希**）。
 ///
-/// ## 为什么要有它，且为什么是公开的
-///
-/// 增量构建原来只比 `(mtime, size)`，于是**同长度改动 + 保留 mtime** 必然判"没变"：
-/// 实测把 `render.hpp` 改成 `rendEr.hpp`（等长）+ `os.utime` 回原值后，
-/// `st build` 报「编译 111ms / 链接已跳过」，产物仍是旧代码；`git status`
-/// 同时显示无改动（它也用 stat 缓存）。三方一起被骗，排查代价极高。
-///
-/// 现在记录里多一列内容哈希，且**只在 `(mtime, size)` 都匹配时才现算**——
-/// 所以日常"文件真的改了"的路径不付这笔成本。
-///
-/// 公开它是因为这条判定必须有**能钉住的回归测试**：它错的方向有两种
-/// （漏报 = 拿旧产物当新结果；误报 = 每次全量重编），而两者都只在
-/// 特定的 mtime/size 组合下才显形，跑一遍真实构建看不出来。
-///
-/// `expected` 为 `nullopt` 时表示"记录没带哈希"（旧格式），退回 mtime+size 判定。
-[[nodiscard]] auto deps_entry_matches(std::string_view path, std::int64_t recorded_mtime,
-                                      std::uint64_t recorded_size,
-                                      std::optional<std::uint64_t> recorded_hash) -> bool;
+/// 增量构建、共享对象缓存、测试二进制过期判定共用这一套：任何地方按时间戳或长度
+/// 判定，“`git checkout`/`touch` 白重编”与“等长改写漏报”两个错就会在别处重现。
+[[nodiscard]] auto deps_entry_matches(std::string_view path, std::uint64_t recorded_hash) -> bool;
 
 /// 文件内容的 fnv1a64（读不到 → `nullopt`）。
 ///
-/// 选 fnv1a64 而不是 sha256：这里要的是"内容变了没有"，不是抗碰撞证明
-/// （攻击者不参与构建）。实测 151 文件/3.9MB：fnv 18.43ms、sha256 30.51ms。
+/// 选 fnv1a64 而不是 sha256：这里要的是"内容变了没有"，不是抗碰撞证明（攻击者不参与构建）；
+/// 实测 151 文件 / 3.9MB：fnv1a64 18.43ms、sha256 30.51ms。
+///
+/// **不经过缓存**：需要“现在的”内容时用它；构建内部的热路径用带缓存的 `deps_entry_matches`。
 [[nodiscard]] auto file_content_hash(std::string_view path) -> std::optional<std::uint64_t>;
+
+/// 清空进程内的内容哈希缓存。
+///
+/// 缓存的生命周期是**一次构建**（同一构建里同一文件会被几十个单元引用，不缓存就是 4.6 倍重复读盘）。
+/// 所以每个构建入口开头清一次：`st watch` 在**同一个进程**里反复调 build，
+/// 不清就会用上一轮的旧哈希——症状是“改了文件 watch 也不重编”（完全静默）。
+///
+/// 公开它也是为了回归测试能在同一进程里反复改写同一个文件后重新取值。
+auto clear_content_hash_cache() -> void;
 
 /// `override_compiler` 非空时直接用它（交叉编译工具链走这条路）。
 [[nodiscard]] auto detect_compiler(std::string_view override_compiler = {}) -> Result<std::string>;
@@ -203,33 +199,29 @@ struct BuildStats {
 /// 纯函数，供 `pkg_test_link_split_test` 断言分类边界。
 [[nodiscard]] bool is_link_failure(const st::Error& error);
 
+/// 壳层源快照：目标 `sources` 展开后的全部文件 → 内容哈希。
+///
+/// `st build` 把它写到 `<产物>.srcs`，`st run` 拿它判“壳层没改就能直接跑现有产物”
+/// （XML/JS 应用的源码边界只有壳层 .cpp）。两边必须用**同一个函数**：各写一份
+/// 必然在"盯哪几个文件"上分家，而分家的症状是“改了壳层却跑了旧产物”。
+[[nodiscard]] auto target_source_stamp(const Manifest& manifest, const TargetSpec& target)
+    -> std::string;
+
 /// 测试二进制是否**过期**（需要重建）。
 ///
-/// ## 为什么把判定单独抽出来
+/// 判据与增量构建同一套：**比内容，不比时间**。`<binary>.srcs` 里记着这份二进制出生时
+/// 各测试源的内容哈希；逐条重算现内容比对即可。时间戳在这里尤其不可用：`git checkout`
+/// 会整批刷新它（白编一轮），而等长改写 + 保留时间戳又能把它完全绕过（拿旧结果当新）。
 ///
-/// 它是这条逻辑唯一容易错的部分，而「重建」那半段要真编译（慢、还依赖工具链)。
-/// 拆开之后可以**零成本地穷举边界**：没构建过、刚构建过、只改了测试、
-/// 改了但测试二进制更新……这些判错都会让 AI 拿到旧结果，
-/// 而错误的代价是"白烧几轮排查被测代码"。
-///
-/// ## 判据
-///
-/// - 二进制不存在 → `false`（从没跑过测试是**正常状态**，不该每次构建都白编一遍）
-/// - 任一测试源比二进制新 → `true`
-/// - 否则 → `false`
-///
-/// 「比二进制新」而非「比对象新」：`st test` 会重编重链，二进制时间戳就是
-/// 该次构建的完成时刻；而测试单元的对象文件在两次构建间的粒度更细，
-/// 拿它比会在"只改了被 #include 的头"这类情形上判漏。
-[[nodiscard]] inline auto test_binary_is_stale(const std::vector<std::string>& test_files,
-                                        const std::string& binary) -> bool {
-  const auto bin_time = fs::modified_ns(binary);
-  if (!bin_time.has_value()) return false;
-  for (const auto& path : test_files) {
-    const auto src_time = fs::modified_ns(path);
-    if (src_time.has_value() && *src_time > *bin_time) return true;
-  }
-  return false;
-}
+/// - 二进制不存在 → `false`（从没跑过测试是**正常状态**）
+/// - 出生快照缺失 → `true`（无从校验，保守重建）
+/// - 仉一条源内容不一致 → `true`
+/// - 读不到的源不参与（它不是"过期"的证据，真正的错误由构建阶段报）
+[[nodiscard]] auto test_binary_is_stale(const std::vector<std::string>& test_files,
+                                        const std::string& binary) -> bool;
+
+/// 测试二进制的出生快照（`<binary>.srcs` 的内容；写与比共用这一份）。
+[[nodiscard]] auto test_source_stamp(const std::vector<std::string>& test_files) -> std::string;
+[[nodiscard]] auto test_binary_stamp_path(const std::string& binary) -> std::string;
 
 }  // namespace st::pkg

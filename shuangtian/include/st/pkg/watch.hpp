@@ -10,32 +10,38 @@
 /// · 目标场景是**人类编辑**（保存一次 → 想看到重编结果），毫秒级 vs 数百毫秒级事件无感；
 /// · 各平台事件 API 的语义差异很大（inotify 要逐个文件 add watch、ReadDirectoryChangesW
 ///   有缓冲区溢出与重命名语义、FSEvents 是批量的且可丢事件）——统一封装反而更容易漏事件；
-/// · 轮询 `(mtime, size)` 与**增量判定用的是同一份事实**（`deps_entry_matches` 也就是看这两个），
-///   所以"watch 认为变了"与"构建会重编"天然同口径；事件 API 则会多一层"事件 ≠ 需重编"的偏差。
+/// · 轮询**内容哈希**与增量判定用的是同一份事实（`deps_entry_matches` 也只比内容），
+///   所以"watch 认为变了"与"构建会重编"天然同口径；事件 API 则会多一层
+///   "事件 ≠ 需重编"的偏差（`git checkout` 会报一堆事件而内容一字未改）。
 ///
-/// 代价是 CPU：遍历 N 个文件的 `stat`。实测（本机 28 核、仓内 ~1500 个受监视文件）
-/// 一轮约 **3–6 ms**，按 300 ms 间隔轮询 ≈ 1–2% 单核——可接受，且可用 `--interval` 调。
+/// 代价是每轮要读一遍受监视文件。实测（本机、仓内 ~1500 个源/头文件、共 ~10 MB）
+/// 一轮约 **15–25 ms**，按 300 ms 间隔轮询 ≈ 5% 单核——可接受，且可用 `--interval` 调。
 ///
 /// ## 防抖为何必要
 ///
 /// 编辑器保存一个文件常常是**多次写入**（truncate + write，或先写临时文件再 rename）。
-/// 第一次写入就会看到 mtime 变化，此时文件可能只写了一半——立刻构建会读到半个文件
+/// 第一次写入就会看到内容变化，此时文件可能只写了一半——立刻构建会读到半个文件
 /// （更糟：可能编译失败，然后你看到一条"莫名其妙"的错误）。所以要求「静默期」：
 /// 最后一次变更后再等 `debounce` 毫秒才认为稳定。
 
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "st/core/error.hpp"
+#include "st/pkg/build.hpp"
 
 namespace st::pkg {
 
-/// 一个受监视文件的快照（mtime + size）。
+/// 一个受监视文件的快照（路径 + 内容哈希）。
+///
+/// 只存内容哈希：时间戳与长度会被 `git checkout` / `touch` / 原子保存整批刷新而内容未变，
+/// 拿它们做变更侦测会在切分支后白跑一轮构建；反过来等长改写又会被它们漏掉。
 struct WatchedFile {
   std::string path{};
-  std::int64_t mtime_ns{0};
-  std::uint64_t size{0};
+  std::uint64_t hash{0};
 };
 
 /// 扫一遍给定根目录，收集受监视文件。

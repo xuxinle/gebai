@@ -103,16 +103,18 @@ ST_TEST(watch_glob_double_star_crosses_dirs_single_star_does_not) {
 ///
 /// 只报“修改”会漏掉删源文件的情形——那时产物里会留着旧代码（`build.cpp` 的
 /// “链接跳过”注释里记的那个真实缺陷就是这一类）。
+///
+/// 字段是**内容哈希**（不是 mtime/size）：两种快照里同一个路径的哈希不同 = 内容改了。
 ST_TEST(watch_diff_reports_added_removed_and_modified) {
   const std::vector<st::pkg::WatchedFile> before = {
-      {"a.cpp", 100, 10},
-      {"b.cpp", 200, 20},
-      {"c.cpp", 300, 30},
+      {"a.cpp", 100},
+      {"b.cpp", 200},
+      {"c.cpp", 300},
   };
   const std::vector<st::pkg::WatchedFile> after = {
-      {"a.cpp", 100, 10},   // 未变
-      {"b.cpp", 999, 20},   // mtime 变（修改）
-      {"d.cpp", 400, 40},   // 新增（c 被删）
+      {"a.cpp", 100},   // 未变
+      {"b.cpp", 999},   // 内容改了
+      {"d.cpp", 400},   // 新增（c 被删）
   };
   const auto changed = st::pkg::diff_watched(before, after);
   ST_CHECK_EQ(changed.size(), 3U);   // b（改）+ c（删）+ d（增）
@@ -122,12 +124,42 @@ ST_TEST(watch_diff_reports_added_removed_and_modified) {
   ST_CHECK(std::ranges::find(changed, std::string("a.cpp")) == changed.end());
 }
 
-/// size 变了也算变（mtime 精度不足时的兜底）。
-ST_TEST(watch_diff_detects_size_change_with_same_mtime) {
-  const std::vector<st::pkg::WatchedFile> before = {{"a.cpp", 100, 10}};
-  const std::vector<st::pkg::WatchedFile> after = {{"a.cpp", 100, 11}};
-  const auto changed = st::pkg::diff_watched(before, after);
-  ST_CHECK_EQ(changed.size(), 1U);
+/// **只动时间戳、内容不变 ⇒ 不算变更**（切分支/`touch` 后不会白构建一轮）。
+///
+/// 这条与上面成对：只测“内容变了能发现”会让“一律报变”的实现通过（那是另一个错方向：
+/// 每次轮询都触发全量构建）。
+ST_TEST(watch_diff_is_quiet_when_only_timestamp_moved) {
+  TempTree tree("st_watch_touch_");
+  tree.file("src/a.cpp", "same-content");
+  const auto before = st::pkg::collect_watched_files(tree.dir, {"src/**/*.cpp"}, {});
+  ST_REQUIRE(before.has_value());
+
+  // 重写同一份内容（模拟 touch / 原子保存）：内容哈希应当不变
+  tree.file("src/a.cpp", "same-content");
+  const auto after = st::pkg::collect_watched_files(tree.dir, {"src/**/*.cpp"}, {});
+  ST_REQUIRE(after.has_value());
+  ST_CHECK(st::pkg::diff_watched(*before, *after).empty());
+
+  // 对照：内容真改了 → 必须报出来（否则上面那条会被“恒不回变”实现骗过）
+  tree.file("src/a.cpp", "changed-content");
+  const auto changed_tree = st::pkg::collect_watched_files(tree.dir, {"src/**/*.cpp"}, {});
+  ST_REQUIRE(changed_tree.has_value());
+  ST_CHECK_EQ(st::pkg::diff_watched(*before, *changed_tree).size(), 1U);
+}
+
+/// 等长改写（size 不变、时间戳不变、内容变了）必须报出来。
+///
+/// 这是 mtime+size 判据的盲区：`git checkout` 回来一份同样长的旧内容、
+/// 或编辑器原子保存保留时间戳，都会被“没变”骗过。
+ST_TEST(watch_diff_detects_equal_length_change) {
+  TempTree tree("st_watch_eqlen_");
+  tree.file("src/a.cpp", "AAAA");
+  const auto before = st::pkg::collect_watched_files(tree.dir, {"src/**/*.cpp"}, {});
+  ST_REQUIRE(before.has_value());
+  tree.file("src/a.cpp", "BBBB");
+  const auto after = st::pkg::collect_watched_files(tree.dir, {"src/**/*.cpp"}, {});
+  ST_REQUIRE(after.has_value());
+  ST_CHECK_EQ(st::pkg::diff_watched(*before, *after).size(), 1U);
 }
 
 /// 快照必须**有序**（`diff_watched` 用归并比较，依赖这个前提）。
