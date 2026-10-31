@@ -40,13 +40,8 @@
   "objects": [
     {
       "name": "figure",
-      "gltf": "assets/models/gltf/CesiumMan.gltf",
-      "gltf_use_material": true,
-      "translate": [
-        0,
-        0,
-        0
-      ]
+      "gltf": "assets/models/gltf/CesiumMan.glb",
+      "gltf_use_material": true
     }
   ]
 }

@@ -78,6 +78,39 @@ class BitReader {
 
   [[nodiscard]] auto position() const noexcept -> std::size_t { return position_; }
 
+  /// 丢弃当前字节里剩余的位（对齐到字节边界）。
+  ///
+  /// 重启标记前，编码器会把最后一个字节用 1 位填满；解码端必须先丢掉
+  /// 这些填充位，否则会拿它们当下一段数据。
+  void align_to_byte() noexcept {
+    bits_left_ = 0;
+    buffer_ = 0;
+  }
+
+  /// 消费一个重启标记 `RSTn`（`FF D0`..`FF D7`）。
+  ///
+  /// ## 为什么必须在 MCU 边界显式消费（而不是让 `next_byte` 顺手跳过）
+  ///
+  /// 带 `DRI` 段的 JPEG 每 N 个 MCU 插一个 `FF Dn`。旧实现遇到它就把
+  /// `past_end_` 置真、当成"扫描结束"——**后续所有数据不再解码**，
+  /// 表现是"图出来一小块、其余全灰"，且不报错。
+  ///
+  /// 只在 `next_byte` 里跳过也不够：那时位读取器可能已经把 `FF` 拉进
+  /// 缓冲区，剩余位混入下一块的数据，解出来是横向条纹错乱（实测过）。
+  ///
+  /// 所以在**解码每段第一个 MCU 之前**调用它：先对齐、再吃掉标记。
+  /// 返回 true 表示确实消费掉了一个标记。
+  auto consume_restart() noexcept -> bool {
+    align_to_byte();
+    if (position_ + 1U >= bytes_.size()) return false;
+    if (bytes_[position_] != 0xFF) return false;
+    const auto marker = bytes_[position_ + 1U];
+    if (marker < 0xD0 || marker > 0xD7) return false;
+    position_ += 2U;
+    past_end_ = false;   // 后续数据还在，清掉"已结束"标记
+    return true;
+  }
+
  private:
   [[nodiscard]] auto next_byte() noexcept -> int {
     if (position_ >= bytes_.size()) {
@@ -164,6 +197,8 @@ struct Frame {
   int mcu_height{0};
   int mcus_wide{0};
   int mcus_high{0};
+  /// `DRI`（定义重启间隔）声明的 MCU 间隔；0 = 无重启标记。
+  int restart_interval{0};
 };
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -619,6 +654,13 @@ auto jpeg_decode(std::span<const std::uint8_t> bytes) -> Result<JpegImage> {
         have_frame = true;
         break;
       }
+      case 0xDD: {   // DRI：定义重启间隔（MCU 个数）
+        if (segment.size() >= 2U) {
+          frame.restart_interval =
+              (static_cast<int>(segment[0]) << 8) | static_cast<int>(segment[1]);
+        }
+        break;
+      }
       case 0xC3:   // SOF3 无损
         return st::unexpected(ErrorCode::Unsupported,
                               "JPEG 无损模式（SOF3）不受支持；请用 baseline/progressive 重新导出");
@@ -727,8 +769,24 @@ auto jpeg_decode(std::span<const std::uint8_t> bytes) -> Result<JpegImage> {
           }
         } else {
           // ── 基线：一趟解完所有块 ──
+          //
+          // ## 重启间隔（`DRI`/`RSTn`）
+          //
+          // 带 DRI 的 JPEG 每 `restart_interval` 个 MCU 插一个 `FF Dn`。
+          // 两条都必须做，缺一不可：
+          //   ① 消费掉标记（先对齐字节边界——编码器会用 1 位填充到字节尾）
+          //   ② **DC 预测器归零**（规范要求：重启点是独立编码单元）
+          //
+          // 只做 ① 会得到"有颜色但横向条纹错乱"的图；只做 ② 会继续整片灰。
+          int mcu_since_restart = 0;
           for (int mcu_y = 0; mcu_y < frame.mcus_high; ++mcu_y) {
             for (int mcu_x = 0; mcu_x < frame.mcus_wide; ++mcu_x) {
+              if (frame.restart_interval > 0 && mcu_since_restart == frame.restart_interval) {
+                (void)reader.consume_restart();
+                for (const ScanPart& scan : scan_parts) scan.component->dc_predictor = 0;
+                mcu_since_restart = 0;
+              }
+              ++mcu_since_restart;
               for (const ScanPart& scan : scan_parts) {
                 const int blocks = scan.component->horizontal_sampling *
                                    scan.component->vertical_sampling;

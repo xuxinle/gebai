@@ -148,6 +148,51 @@ ST_TEST(image_decode_rejects_unknown_with_evidence) {
   ST_CHECK(message.find("3C 21 44 4F") != std::string::npos);  // 前 4 字节 = "<!DO"
 }
 
+ST_TEST(jpeg_decoder_handles_restart_markers) {
+  // ## 带 `DRI`/`RSTn` 的 JPEG 必须解码出**有内容**的图
+  //
+  // 实测踩过（2026-11-01）：带 `DRI` 段的 JPEG 每 N 个 MCU 插一个 `FF Dn`。
+  // 旧实现遇到它就把"扫描结束"置真 —— **后续所有数据不再解码**，
+  // 表现是"整幅同一个灰值"，且不报错。
+  //
+  // 那次代价很大：`CesiumMan.glb` 的内嵌贴图解码成一片 (128,128,128)。
+  // 排查时每一环单独看都正常（UV 有、GPU 上传成功、采样标志对），
+  // 最后把喂给渲染器的图 dump 出来才看见"就是灰的"。
+  //
+  // ## 为什么用真实样本而不是手工构造
+  //
+  // 试过手工拼一个最小 JPEG 骨架（SOI/DQT/DRI/SOF/DHT/SOS/数据/EOI），
+  // 但 Huffman 表为空时解码器会直接拒绝——手工造出一个**语义合法**的
+  // 熵编码段需要完整的码表，那已经等于重写编码器了。
+  //
+  // 所以直接用仓库里的真实样本：它有 DRI 段、有 RSTn、有丰富的实际内容。
+  // 判据是"解码结果不能是**单一颜色**"——那正是旧 bug 的指纹。
+  const auto bytes = st::fs::read_bytes("assets/models/gltf/CesiumMan.glb");
+  if (!bytes.has_value()) return;   // 样本不在（裁剪过的检出）：跳过而非失败
+  const auto scene = st::raster::gltf_read_file("assets/models/gltf/CesiumMan.glb");
+  ST_CHECK(scene.has_value());
+  if (!scene.has_value()) return;
+  ST_CHECK(!scene->textures.empty());
+  if (scene->textures.empty()) return;
+  const auto& texture = scene->textures[0];
+  ST_CHECK(texture.is_valid());
+  ST_CHECK_EQ(texture.width, 1024);
+  ST_CHECK_EQ(texture.height, 1024);
+  if (!texture.is_valid()) return;
+
+  // 单一颜色的判据：R 通道在整个图里只有一种取值。
+  // 旧 bug 下整幅是 128，这里会立刻红。
+  bool has_variation = false;
+  const auto first = texture.rgba.empty() ? 0U : texture.rgba[0];
+  for (std::size_t i = 0; i + 3 < texture.rgba.size(); i += 4) {
+    if (texture.rgba[i] != first) {
+      has_variation = true;
+      break;
+    }
+  }
+  ST_CHECK(has_variation);
+}
+
 ST_TEST(jpeg_decoder_reports_unsupported_variants) {
   // 不支持的 JPEG 变体必须**明确报错并说明是哪一项**，
   // 而不是解出一张乱码图（那会让用户以为素材坏了）。
