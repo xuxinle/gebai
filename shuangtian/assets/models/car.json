@@ -101,14 +101,14 @@
       "metallic": 0.1,
       "roughness": 0.08,
       "translate": [
-        0.42,
+        0.4,
         0.86,
         0
       ],
       "rotation": [
         0,
         0,
-        -26
+        26
       ]
     },
     {
@@ -123,14 +123,14 @@
       "metallic": 0.1,
       "roughness": 0.08,
       "translate": [
-        -0.6,
+        -0.58,
         0.84,
         0
       ],
       "rotation": [
         0,
         0,
-        24
+        -24
       ]
     },
     {
@@ -356,9 +356,9 @@
       "metallic": 0.1,
       "roughness": 0.9,
       "rotation": [
+        90,
         0,
-        0,
-        90
+        0
       ],
       "translate": [
         0.66,
@@ -377,9 +377,9 @@
       "metallic": 1.0,
       "roughness": 0.2,
       "rotation": [
+        90,
         0,
-        0,
-        90
+        0
       ],
       "translate": [
         0.66,
@@ -398,9 +398,9 @@
       "metallic": 0.9,
       "roughness": 0.3,
       "rotation": [
+        90,
         0,
-        0,
-        90
+        0
       ],
       "translate": [
         0.66,
@@ -419,9 +419,9 @@
       "metallic": 0.1,
       "roughness": 0.9,
       "rotation": [
+        90,
         0,
-        0,
-        90
+        0
       ],
       "translate": [
         0.66,
@@ -440,9 +440,9 @@
       "metallic": 1.0,
       "roughness": 0.2,
       "rotation": [
+        90,
         0,
-        0,
-        90
+        0
       ],
       "translate": [
         0.66,
@@ -461,9 +461,9 @@
       "metallic": 0.9,
       "roughness": 0.3,
       "rotation": [
+        90,
         0,
-        0,
-        90
+        0
       ],
       "translate": [
         0.66,
@@ -482,9 +482,9 @@
       "metallic": 0.1,
       "roughness": 0.9,
       "rotation": [
+        90,
         0,
-        0,
-        90
+        0
       ],
       "translate": [
         -0.7,
@@ -503,9 +503,9 @@
       "metallic": 1.0,
       "roughness": 0.2,
       "rotation": [
+        90,
         0,
-        0,
-        90
+        0
       ],
       "translate": [
         -0.7,
@@ -524,9 +524,9 @@
       "metallic": 0.9,
       "roughness": 0.3,
       "rotation": [
+        90,
         0,
-        0,
-        90
+        0
       ],
       "translate": [
         -0.7,
@@ -545,9 +545,9 @@
       "metallic": 0.1,
       "roughness": 0.9,
       "rotation": [
+        90,
         0,
-        0,
-        90
+        0
       ],
       "translate": [
         -0.7,
@@ -566,9 +566,9 @@
       "metallic": 1.0,
       "roughness": 0.2,
       "rotation": [
+        90,
         0,
-        0,
-        90
+        0
       ],
       "translate": [
         -0.7,
@@ -587,9 +587,9 @@
       "metallic": 0.9,
       "roughness": 0.3,
       "rotation": [
+        90,
         0,
-        0,
-        90
+        0
       ],
       "translate": [
         -0.7,
