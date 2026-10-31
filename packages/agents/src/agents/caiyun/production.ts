@@ -120,7 +120,7 @@ function missingExeMessage(ctx: ToolContext, profile: string): string {
   const root = frameworkRoot(ctx)
   return (
     `找不到裁云可执行文件：${exePath(ctx, profile)}\n`
-    + `先构建（一次约 15 秒，之后增量 2 秒）：\n`
+    + `先构建（首次约十几秒，之后增量约 2 秒）：\n`
     + `  shuangtian_run(action="build", framework="${root}", target="caiyun", profile="${profile}")\n`
     + `若框架根不对，设 SHUANGTIAN_PROJECT 或确认仓库内有 shuangtian/ 目录。`
   )
@@ -277,8 +277,9 @@ export const scriptCheckTool: Tool = {
   name: "script_check",
   safeMode: false,
   description:
-    "校验导演脚本（**不真正出片**，秒级返回）：字段名是否写错、类型是否相符、数值是否越界。"
-    + "写脚本后先调它，不要直接渲染——渲染一次 100 秒起，而这一步约 3 秒。"
+    "校验导演脚本（**不真正出片**）：字段名是否写错、类型是否相符、数值是否越界，"
+    + "外加布局问题（文字出界/溢出/遮挡）。"
+    + "写脚本后先调它——实测 **0.13 秒**，而渲染一次要几十秒（含三维的 300 帧 1080p 约 49 秒）。"
     + "返回 ok 时再渲；不 ok 时按 problems 逐条改（每条带路径与建议字段名）。"
     + "脚本可以是文件路径，也可以直接给 JSON 文本。",
   parameters: schema(
@@ -380,7 +381,9 @@ export const filmRenderTool: Tool = {
   description:
     "渲染成片并自动核验：起渲染、等完成、抽 4~6 帧、量静止占比/变化密度/过亮帧，一并返回。"
     + "**一次调用取代**「拼命令行 + 轮询 + 抽帧 + 跑度量脚本」四件事。"
-    + "成片与抽帧默认写到会话目录。渲染 300 帧 1080p 约 100~140 秒（含三维）。"
+    + "成片与抽帧默认写到会话目录。"
+    + "耗时实测（300 帧 / 1920×1080 / 8 路并行）：**纯二维约 7 秒**，"
+    + "**含三维素材约 49 秒**。耗时随三维图层数与材质复杂度上升，不只看帧数。"
     + "脚本有字段错时会直接返回错误（严格模式），不会白渲一轮。",
   parameters: schema(
     {
