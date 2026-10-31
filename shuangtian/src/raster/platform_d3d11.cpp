@@ -136,6 +136,7 @@ namespace st::raster {
 #include "st/core/time.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/glyph_atlas_content.hpp"
+#include "st/raster/color_pipeline.hpp"
 #include "st/raster/scene3d.hpp"
 
 namespace st::raster::gpu {
@@ -4040,10 +4041,22 @@ class GpuScene3d final : public st::raster::Scene3D {
     const std::scoped_lock lock(g_context_mutex());
     // 清屏**按预乘色**下传（与画布内部布局一致）：透明背景是三维层的真实需求——
     // 把模型叠在视频背景上时，三维区域的空白必须透出下层，而不是一块黑。
+    // ## 清屏色必须走**与实体同一条输出链**（实测：两条腿差 48 级）
+    //
+    // 软件腿把 `clear_color` 当**线性值**，经 `encode_pixel`（曝光 + 色调映射 +
+    // sRGB 编码）后才写进画布。这里原先直接 `clear_color / 255` 写进 RTV——
+    // 等于把线性值当 sRGB 存。
+    //
+    // 实测（背景 (40,44,52)）：软件腿清出 159.0、GPU 腿清出 110.5，差 48 级。
+    // 单看任一条腿都"正常"，只有并排比才看得出——特性矩阵测试就是这么撞上的。
+    const math::Vec3 bg_linear{static_cast<float>(clear_color.r) / 255.0f,
+                               static_cast<float>(clear_color.g) / 255.0f,
+                               static_cast<float>(clear_color.b) / 255.0f};
+    const math::Color encoded = st::raster::encode_pixel(bg_linear, 1.0f, lighting_.tone_map);
     const float alpha = static_cast<float>(clear_color.a) / 255.0f;
-    const float values[4] = {static_cast<float>(clear_color.r) / 255.0f * alpha,
-                             static_cast<float>(clear_color.g) / 255.0f * alpha,
-                             static_cast<float>(clear_color.b) / 255.0f * alpha, alpha};
+    const float values[4] = {static_cast<float>(encoded.r) / 255.0f * alpha,
+                             static_cast<float>(encoded.g) / 255.0f * alpha,
+                             static_cast<float>(encoded.b) / 255.0f * alpha, alpha};
     context_->ClearRenderTargetView(rtv_, values);
     context_->ClearDepthStencilView(dsv_, D3D11_CLEAR_DEPTH, 1.0f, 0);
     mvp_ready_ = false;

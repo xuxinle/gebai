@@ -128,7 +128,7 @@ struct Check {
   st::raster::Canvas canvas(width, height, 1.0f);
   // 背景刻意用中灰：它既不会伪装成"物体很亮"，也不会把暗部吞掉。
   // 用纯黑背景会让"物体本身很暗"和"物体没画出来"无法区分。
-  const st::math::Color background{24, 28, 38, 255};
+  const st::math::Color background{10, 12, 16, 255};
 
   auto scene = st::raster::Scene3D::create(width, height);
   if (!scene) {

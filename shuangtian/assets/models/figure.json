@@ -40,17 +40,13 @@
   "objects": [
     {
       "name": "figure",
-      "gltf": "assets/models/gltf/CesiumMan.glb",
-      "gltf_use_material": false,
-      "metallic": 0.15,
-      "roughness": 0.5,
-      "specular": 0.4,
+      "gltf": "assets/models/gltf/CesiumMan.gltf",
+      "gltf_use_material": true,
       "translate": [
         0,
         0,
         0
-      ],
-      "color": "#c8895c"
+      ]
     }
   ]
 }
