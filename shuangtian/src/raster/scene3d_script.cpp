@@ -1108,9 +1108,24 @@ auto build_mesh(const SceneObjectSpec& object) -> Result<Mesh> {
   params.radius = size_of(0U, 1.0f) * 0.5f;
   params.depth = size_of(1U, 1.0f);
   params.top_radius = object.top_radius;
-  params.major_radius = object.major_radius > 0.0f ? object.major_radius : params.radius;
-  params.minor_radius = object.minor_radius > 0.0f ? object.minor_radius
-                                                   : object.major_radius * 0.35f;
+  // ## 螺旋/环结的"螺旋半径"与"管半径"
+  //
+  // 这两个不是 `radius`（= size[0]/2，是**外廓**）。旧代码拿
+  // `object.major_radius * 0.35f` 当管半径——而 `major_radius` 默认 0，
+  // 于是管半径变成 0（被 sanitized 抬到 1e-4）→ 螺旋细成一条看不见的线。
+  //
+  // 正确映射（与 torus 同一口径）：
+  //   螺旋中心线半径 = 外廓半径 - 管半径
+  //   管半径 = 外廓半径 × 0.18（视觉上"细管绕大圈"）
+  // 显式写 major_radius/minor_radius 时以调用方为准。
+  const float outer_radius = params.radius;
+  const float tube = object.minor_radius > 0.0f
+                         ? object.minor_radius
+                         : std::max(outer_radius * 0.18f, 0.005f);
+  params.minor_radius = tube;
+  params.major_radius = object.major_radius > 0.0f
+                            ? object.major_radius
+                            : std::max(outer_radius - tube, tube);
   params.minor_segments = object.minor_segments;
   params.major_segments = object.segments;
   params.twist = object.twist;

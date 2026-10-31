@@ -198,10 +198,22 @@ auto sample_clip(const Clip& clip, float time) -> std::vector<SampledTransform> 
     SampledTransform& entry = by_node[track.node];
     const Keyframe value = sample_track(track, time);
     switch (track.kind) {
-      case TrackKind::Translation: entry.local.translation = value.value; break;
-      case TrackKind::Rotation: entry.local.rotation = value.value; break;
-      case TrackKind::Scale: entry.local.scale = value.value; break;
-      case TrackKind::Visible: entry.visible = value.value.x > 0.5f; break;
+      case TrackKind::Translation:
+        entry.local.translation = value.value;
+        entry.has_translation = true;
+        break;
+      case TrackKind::Rotation:
+        entry.local.rotation = value.value;
+        entry.has_rotation = true;
+        break;
+      case TrackKind::Scale:
+        entry.local.scale = value.value;
+        entry.has_scale = true;
+        break;
+      case TrackKind::Visible:
+        entry.visible = value.value.x > 0.5f;
+        entry.has_visible = true;
+        break;
     }
   }
   std::vector<SampledTransform> out;
@@ -220,10 +232,15 @@ auto apply_sample(const std::vector<SceneNode>& roots,
   const auto walk = [&](auto&& self, SceneNode& node) -> void {
     if (const auto found = by_name.find(node.name); found != by_name.end()) {
       const SampledTransform& entry = *found->second;
-      node.local.translation = entry.local.translation;
-      node.local.rotation = entry.local.rotation;
-      node.local.scale = entry.local.scale;
-      node.visible = entry.visible;
+      // ## 按通道覆盖（不是整体覆盖）
+      //
+      // 只写 rotate 轨道的物体，其 `translation` 必须保持场景里写死的值；
+      // 否则它会被搬到原点。实测：给 7 个物体中的 5 个写 rotate 轨道，
+      // 那 5 个全部消失（挤在原点互相遮挡），画面像是"物体都没了"。
+      if (entry.has_translation) node.local.translation = entry.local.translation;
+      if (entry.has_rotation) node.local.rotation = entry.local.rotation;
+      if (entry.has_scale) node.local.scale = entry.local.scale;
+      if (entry.has_visible) node.visible = entry.visible;
     }
     for (SceneNode& child : node.children) self(self, child);
   };

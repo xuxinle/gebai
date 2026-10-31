@@ -808,8 +808,15 @@ void paint_model3d(st::raster::Surface& canvas, const Layer& layer, st::math::Re
     st::raster::SceneSpec resolved = *spec;
     resolved.asset_basis = std::string(asset_basis);
     st::raster::Canvas offscreen{width, height, 1.0f};
-    const auto status =
-        st::raster::render_scene_into(resolved, *scene, offscreen, st::math::Color{0, 0, 0, 0});
+    // ## 必须用 `render_scene_at_into`（带时间），而不是 `render_scene_into`
+    //
+    // 实测：用静态版本时 `model_script` 里的 `animation` **完全被忽略**——
+    // 画面 4 秒不动，而渲染"成功"、无任何报错。这类"功能写了但没接上"
+    // 的缺陷只有对比前后帧才能发现（实测画面静止率 88%）。
+    //
+    // `local_time` 是本图层在所在镜头内的时间（秒），正是动画要的时钟。
+    const auto status = st::raster::render_scene_at_into(
+        resolved, local_time, *scene, offscreen, st::math::Color{0, 0, 0, 0});
     if (!status) {
       canvas.fill_rect(box, st::raster::Paint::solid(st::math::Color{48, 20, 26, 255}));
       ST_LOG_WARN("裁云三维：model_script 渲染失败：{}", status.error().message);

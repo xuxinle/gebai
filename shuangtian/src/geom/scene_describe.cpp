@@ -120,14 +120,20 @@ auto describe_scene(const SceneSpec& spec) -> SceneSummary {
       ++drawable_index;
       if (object.group) continue;
 
+      // ## 地面不进取景包围盒
+      //
+      // 实测：一 个 24×24 的地面把"建议相机距离"从 6.4 推到 53——
+      // 而地面是**承载体**，本来就不该决定取景。所有真实的取景判断
+      //（相机太近/太远/在内部）都以主体几何为准。
+      if (object.ground) continue;
+
       const auto mesh = build_mesh(object);
       if (!mesh.has_value()) continue;
       summary.total_vertices += mesh->vertex_count();
       summary.total_triangles += mesh->indices.size() / 3U;
-      // 地面节点在渲染时会去掉绕 X/Z 的倾斜（见 scene3d_script 的说明），
-      // 摘要也按同一规则算，否则"报告说包围盒有这个高度、实际渲染没有"。
+      // 地面已在上面跳过；这里保留原注释以备将来需要"只取水平朝向"时参考：
+      // 地面节点在渲染时会去掉绕 X/Z 的倾斜（见 scene3d_script 的说明）。
       math::Vec3 rotation = object.rotation;
-      if (object.ground) rotation = math::Vec3{0.0f, rotation.y, 0.0f};
       const math::Mat4 local =
           math::Mat4::translation(object.translate) *
           math::Mat4::rotation(math::Vec3{1.0f, 0.0f, 0.0f}, rotation.x) *
@@ -145,12 +151,28 @@ auto describe_scene(const SceneSpec& spec) -> SceneSummary {
     summary.bounds_max = total.max;
     summary.bounds_valid = true;
     const math::Vec3 size = total.size();
-    const float radius = std::max({size.x, size.y, size.z}) * 0.5f;
-    // 由 fov 反解"让包围球占画面 62%"的距离（与 real_asset_probe 同一公式）
+    // ## 取景距离要**同时**满足竖直与水平两个方向
+    //
+    // 旧实现只按竖直 fov 算，于是横向铺开的场景（宽 5.58、高 1.88）
+    // 拿到的距离是按**高度**算的——远小于横向所需，物体看起来偏小，
+    // 而自检还反过来警告"相机太近"。实测就是这个问题（180° 环结场景）。
+    //
+    // 正解：分别算"竖直装下"和"水平装下"所需距离，取较大者。
+    // 水平方向的半角由宽高比推出：`tan(h_fov/2) = tan(v_fov/2) * aspect`。
+    constexpr float kFillRatio = 0.78f;   // 主体占画面的比例（留一点边距）
     const float half_fov = spec.camera.fov_y_degrees * 0.5f * 3.14159265f / 180.0f;
-    const float tangent = std::tan(half_fov);
-    summary.suggested_camera_distance =
-        tangent > 1.0e-6f ? radius / (0.62f * tangent) : radius * 3.0f;
+    const float tangent_y = std::tan(half_fov);
+    // 场景横向尺寸取 X/Z 的较大者（相机可在任意方位角，取保守值）
+    const float half_width = std::max(size.x, size.z) * 0.5f;
+    const float half_height = size.y * 0.5f;
+    // 宽高比按 16:9 保守估计（大多数成片是这个比例；方形画布会更紧，由调用方自行调整）
+    constexpr float kAssumedAspect = 16.0f / 9.0f;
+    const float tangent_x = tangent_y * kAssumedAspect;
+    const float distance_y = tangent_y > 1.0e-6f ? half_height / (kFillRatio * tangent_y) : 0.0f;
+    const float distance_x = tangent_x > 1.0e-6f ? half_width / (kFillRatio * tangent_x) : 0.0f;
+    // 再加一点包围球半径作为"从中心退到表面外"的余量
+    const float margin = std::max(size.x, std::max(size.y, size.z)) * 0.25f;
+    summary.suggested_camera_distance = std::max({distance_y, distance_x, 0.5f}) + margin;
   }
 
   if (spec.animation.has_value()) {

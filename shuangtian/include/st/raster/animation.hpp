@@ -120,6 +120,18 @@ struct SampledTransform {
   bool visible{true};
   /// 本节点是否被任何轨道命中（未命中的保持场景里写死的值）。
   bool animated{false};
+  /// ## 每个通道**分别**标记是否有轨道
+  ///
+  /// 只记一个 `animated` 不够：`apply_sample` 若按它整体覆盖 TRS，
+  /// 就会把"没有 rotate 轨道"的节点旋转**清零**。
+  ///
+  /// 实测代价：只给部分物体写 rotate 轨道时，没写轨道的物体全部
+  /// 转到原点、挤成一团（画面看起来像"物体消失了"）。
+  /// 正确做法是**按通道**覆盖：只有真写了轨道的通道才用采样值。
+  bool has_translation{false};
+  bool has_rotation{false};
+  bool has_scale{false};
+  bool has_visible{false};
 };
 
 /// 采样一个片段在 `time` 时刻的全部轨道。

@@ -357,6 +357,42 @@ math::Vec3 shade_surface(math::Vec3 normal, math::Vec3 base_color, math::Vec3 vi
   math::Vec3 result{base_color.x * diffuse_scale, base_color.y * diffuse_scale,
                     base_color.z * diffuse_scale};
 
+  // ## 环境反射（金属"不发黑"的唯一原因）
+  //
+  // 纯 Cook-Torrance 只处理**直接光**：平行光/点光在金属表面留下一个亮点，
+  // 其余像素 = 固有色 × (漫反射权重 0) = **纯黑**。
+  //
+  // 实测代价：把 metallic 从 0 调到 1，球从"浅蓝球"变成"黑球"（只剩一个小高光）。
+  // 而现实中的金属（不锈钢、黄金）之所以看得见，几乎全靠**环境反射**——
+  // 它反射天空、墙壁、地面。没有环境项，金属就是黑的。
+  //
+  // 这里用最省的近似：把"环境"当成一个**自上而下的天光梯度**
+  // （上方亮、下方暗），按菲涅耳加权反射。这不追求物理精确，
+  // 但要保证"metallic 越大越像金属"而不是"越黑"。
+  {
+    // 天光：法线朝上取亮值，朝下取暗值（与地面的接触阴影方向一致）
+    const float sky = 0.5f + 0.5f * std::clamp(n.y, -1.0f, 1.0f);
+    // 环境基色：中性偏冷（模拟室内/棚拍），强度与环境光挂钩
+    const math::Vec3 ambient_color{0.52f, 0.58f, 0.68f};
+    const float ambient_strength = (0.30f + 0.70f * sky) * (lighting.ambient + 0.55f);
+    // 菲涅耳：掠射角反射更强（Schlick，F0 随 metallic 走）
+    const math::Vec3 f0 = math::Vec3{0.04f + (base_color.x - 0.04f) * metallic,
+                                     0.04f + (base_color.y - 0.04f) * metallic,
+                                     0.04f + (base_color.z - 0.04f) * metallic};
+    const float n_dot_v = std::max(n.dot(view_dir.normalized()), 0.0f);
+    const float one_minus_nv = 1.0f - n_dot_v;
+    const float fresnel =
+        f0.x + (1.0f - f0.x) * one_minus_nv * one_minus_nv * one_minus_nv * one_minus_nv;
+    // 粗糙度会打散环境反射：粗糙金属反射的是模糊的整片环境（更暗、更均匀）
+    const float blur = 1.0f - std::clamp(roughness, 0.0f, 1.0f);
+    const math::Vec3 reflected{ambient_color.x * base_color.x, ambient_color.y * base_color.y,
+                               ambient_color.z * base_color.z};
+    const float weight = ambient_strength * fresnel * (0.35f + 0.65f * blur);
+    result.x += reflected.x * weight * (0.45f + 0.55f * metallic);
+    result.y += reflected.y * weight * (0.45f + 0.55f * metallic);
+    result.z += reflected.z * weight * (0.45f + 0.55f * metallic);
+  }
+
   // 附加光源：与 `shade_terms` 同一口径（漫反射项，乘固有色与光色）。
   // 材质路径不能漏这一步，否则“设了材质就少了几盏灯”。
   for (const Light& extra_light : lighting.extra_lights) {
