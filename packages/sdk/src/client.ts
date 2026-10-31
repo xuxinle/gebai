@@ -325,8 +325,17 @@ export class GebaiClient {
           this.connectPromise = null
           if (err) this.ws = undefined
         }
-        if (err) reject(err)
-        else resolve()
+        if (err) {
+          // 建连失败（服务未起/网络未就绪/握手被拒）：同样走退避自动重连。
+          // 不在此调度，就只剩“下次 onclose”这一条路——而本分支已把 this.ws 置空，
+          // 随之到来的 onclose 因「不是当前连接」直接返回，重连永不启动：页面打开时
+          // 服务端还没就绪、或网络刚断，界面就永久停在断开态，只能手动刷新。
+          if (!this.manualClose) {
+            this.setConnected("disconnected")
+            this.scheduleReconnect()
+          }
+          reject(err)
+        } else resolve()
       }
       ws.onopen = () => {
         this.setConnected("connected")
@@ -1282,27 +1291,37 @@ export class GebaiClient {
       if (resuming || finished) return
       resuming = true
       try {
-        if (attached) push({ kind: "resume" })
         const snap = await this.attachSession(sessionId)
         if (!snap.running) {
+          // 任务已在离线期间结束（或本轮在附加前刚好收尾）：从存储补回本轮内容。
+          // 重附时上面已发过 resume（前端据其清空在途累积），此处不补则整段回答从界面上消失
+          // ——存储里有、页面空白，只能刷新才见（与 sendPrompt 的 finishOffline 同一兜底，
+          // 此前附加路径缺这一环）。
+          if (attached) push({ kind: "resume", reloadHistory: true })
           finished = true
           wake()
           return
         }
+        if (attached) push({ kind: "resume" })
         attached = true
         // 种子 chunk：在途推理先于正文（渲染顺序：推理块 prepend 于正文气泡）；subSession 标记路由到子会话容器
         const sub = snap.stream?.subSession === true ? { subSession: true as const } : {}
         const runId = snap.stream?.subSessionId ? { subSessionId: snap.stream.subSessionId } : {}
         if (snap.stream?.reasoning) push({ kind: "reasoning", text: snap.stream.reasoning, ...sub, ...runId })
         if (snap.stream?.text) push({ kind: "text", text: snap.stream.text, messageId: snap.stream.messageId, ...sub, ...runId })
-        // 快照之后（订阅/请求期间到达）的事件按 seq 重放补入；缺口（overrun）放弃附加——存储恢复兜底
+        // 快照之后（订阅/请求期间到达）的事件按 seq 重放补入
         const r = await this.syncEvents(Number(snap.lastSeq ?? 0))
         const live = held
         held = []
         if (r.overrun) {
+          // 日志缺口（离线过久，缓冲溢出）：缺口期间的结构化事件不可重放，但任务仍在跑——
+          // 不能就此结束附加（界面会停在进行到一半的旧内容上，而服务端还在推进）。
+          // 改为全量重同步：重读消息列表（已落盘部分）+ 重新播种在途文本，随后继续实时续流。
           this.lastSeq = Math.max(this.lastSeq, r.lastSeq)
-          finished = true
-          wake()
+          push({ kind: "resume", reloadHistory: true })
+          if (snap.stream?.reasoning) push({ kind: "reasoning", text: snap.stream.reasoning, ...sub, ...runId })
+          if (snap.stream?.text) push({ kind: "text", text: snap.stream.text, messageId: snap.stream.messageId, ...sub, ...runId })
+          for (const ev of live) processEvent(ev)
           return
         }
         for (const ev of r.events) this.dispatchEvent(ev)

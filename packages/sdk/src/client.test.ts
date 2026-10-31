@@ -37,7 +37,49 @@ describe("GebaiClient", () => {
 describe("GebaiClient connect", () => {
   test("rejects quickly when server unreachable (no permanent hang)", async () => {
     const c = new GebaiClient({ baseUrl: "http://127.0.0.1:1", connectTimeoutMs: 300 })
+    const p = c.connect()
+    await expect(p).rejects.toThrow(/WS connect/)
+    ;(c as unknown as { closeWs: () => void }).closeWs() // 停止退避重连，不影响其它用例
+  })
+
+  test("首连失败后自动重试：服务端迟到就绪时无需手动刷新即自行连上", async () => {
+    // 空闲端口：先取一个再释放，用于“服务尚未就绪”的窗口
+    const probe = Bun.serve({ port: 0, fetch: () => new Response("x") })
+    const port = probe.port
+    probe.stop(true)
+
+    const c = new GebaiClient({ baseUrl: `http://127.0.0.1:${port}`, connectTimeoutMs: 300 })
+    const statuses: string[] = []
+    c.onStatusChange((s) => statuses.push(s))
+    // 首次建连失败（服务未起）：必须 reject，且不得永久停留——后续由退避重试接上
     await expect(c.connect()).rejects.toThrow(/WS connect/)
+
+    // 服务现在就绪（模拟网络恢复/服务端启动完成）
+    const srv = Bun.serve({
+      port,
+      fetch(req, server) {
+        if (server.upgrade(req)) return
+        return new Response("ok")
+      },
+      websocket: {
+        open() {},
+        message(ws, raw) {
+          const m = JSON.parse(String(raw)) as { type: string; id?: string }
+          if (m.type === "ping") ws.send(JSON.stringify({ type: m.type, id: m.id, ok: true, payload: { pong: true } }))
+          else ws.send(JSON.stringify({ type: m.type, id: m.id, ok: true, payload: {} }))
+        },
+      },
+    })
+    try {
+      // 退避首次延时 1s：等 3s 足以覆盖两次重试
+      await new Promise((r) => setTimeout(r, 3000))
+      // 不调度重试时此处置 false（缺陷形态：页面打开时服务未就绪，界面永久停在断开态，只能手动刷新）
+      expect(c.isConnected()).toBe(true)
+      expect(statuses).toContain("connected")
+    } finally {
+      ;(c as unknown as { closeWs: () => void }).closeWs()
+      srv.stop(true)
+    }
   })
 
   test("listUsers 解包 user.list 应答的 users 包裹（直接返回数组：前端 for...of 包裹对象会抛错）", async () => {
@@ -1141,3 +1183,121 @@ describe("断线恢复的状态收敛（缺口重同步 / 服务端已无任务 
     }
   })
 })
+
+describe("附加流（attachStream）断线恢复", () => {
+  /** 附加场景模拟服务端：首次 attach 报告 running（并在首个连接上断开）→ 重连后报告 running=false
+   *  （任务已在离线期间跑完）。存储里有本轮完整回答。 */
+  function makeAttachServer(opts: { stored: Array<{ id: string; role: string; content: string; createdAt: number }>; overrunAfterCut?: boolean }) {
+    let conns = 0
+    return Bun.serve({
+      port: 0,
+      fetch(req, server) {
+        if (server.upgrade(req)) return
+        return new Response("upgrade failed", { status: 500 })
+      },
+      websocket: {
+        open() {},
+        message(ws, raw) {
+          const msg = JSON.parse(String(raw)) as { type: string; id?: string; payload?: Record<string, unknown> }
+          const reply = (payload: Record<string, unknown>) => ws.send(JSON.stringify({ type: msg.type, id: msg.id, ok: true, payload }))
+          switch (msg.type) {
+            case "session.attach": {
+              conns++
+              if (conns === 1) {
+                // 首次附加：任务在跑，已有部分在途文本；随即断线（模拟网络中断）
+                reply({ running: true, startedAt: Date.now(), stream: { messageId: "a1", text: "前半段", reasoning: "" }, pending: [], tools: [], lastSeq: 10 })
+                setTimeout(() => ws.close(), 40)
+                return
+              }
+              // 重连后：任务已在离线期间结束
+              reply({ running: false, pending: [], tools: [], lastSeq: 40 })
+              return
+            }
+            case "sync.request":
+              reply({ events: [], overrun: opts.overrunAfterCut === true && conns > 1, lastSeq: 40 })
+              return
+            case "state.snapshot":
+              reply({ currentSessionId: null, sessions: [], running: conns > 1 ? [] : ["s1"], lastSeq: 40 })
+              return
+            case "session.get":
+              reply({ session: { id: "s1", name: "t", userId: "default", createdAt: 0, updatedAt: 0, messages: opts.stored } })
+              return
+            default:
+              reply({})
+          }
+        },
+      },
+    })
+  }
+
+  test("离线期间任务跑完：重连后标记 reloadHistory，界面据存储重读正文（整段回答不消失）", async () => {
+    const srv = makeAttachServer({
+      stored: [
+        { id: "u1", role: "user", content: "hi", createdAt: 1 },
+        { id: "a1", role: "assistant", content: "前半段后半段完整回答", createdAt: 2 },
+      ],
+    })
+    try {
+      const c = new GebaiClient({ baseUrl: `http://127.0.0.1:${srv.port}` })
+      const got: Array<{ kind: string; text?: string; reload?: boolean }> = []
+      const iter = (async () => {
+        for await (const ch of c.attachStream("s1")) got.push({ kind: ch.kind, text: ch.text, reload: ch.reloadHistory })
+      })()
+      await Promise.race([iter, new Promise((r) => setTimeout(r, 8000))])
+      // 首附：在途文本种子上屏
+      expect(got.some((g) => g.kind === "text" && g.text === "前半段")).toBe(true)
+      // 重连后：必须发出 reloadHistory 的 resume（前端据此重读消息列表），否则
+      // 重附的 resume 已清空在途累积，而存储里的完整回答从没上屏——页面停在空白
+      const reloads = got.filter((g) => g.kind === "resume" && g.reload === true)
+      expect(reloads.length).toBeGreaterThanOrEqual(1)
+    } finally {
+      srv.stop(true)
+    }
+  })
+
+  test("任务仍在运行时的日志缺口（overrun）：不结束附加，改为全量重同步后继续续流", async () => {
+    const srv = Bun.serve({
+      port: 0,
+      fetch(req, server) {
+        if (server.upgrade(req)) return
+        return new Response("upgrade failed", { status: 500 })
+      },
+      websocket: {
+        open() {},
+        message(ws, raw) {
+          const msg = JSON.parse(String(raw)) as { type: string; id?: string; payload?: Record<string, unknown> }
+          const reply = (payload: Record<string, unknown>) => ws.send(JSON.stringify({ type: msg.type, id: msg.id, ok: true, payload }))
+          if (msg.type === "session.attach") {
+            const first = conns === 0
+            conns++
+            // 两次附加都报告 running：任务一直在跑
+            reply({ running: true, startedAt: Date.now(), stream: { messageId: "a1", text: "在途文本", reasoning: "" }, pending: [], tools: [], lastSeq: 10 })
+            if (first) setTimeout(() => ws.close(), 40)
+            else setTimeout(() => ws.send(JSON.stringify({ type: "event.task.done", seq: 60, sessionId: "s1", payload: { sessionId: "s1" }, timestamp: Date.now() })), 120)
+            return
+          }
+          if (msg.type === "sync.request") {
+            reply({ events: [], overrun: true, lastSeq: 40 }) // 离线过久：缺口
+            return
+          }
+          reply({})
+        },
+      },
+    })
+    let conns = 0
+    try {
+      const c = new GebaiClient({ baseUrl: `http://127.0.0.1:${srv.port}` })
+      const got: Array<{ kind: string; text?: string; reload?: boolean }> = []
+      for await (const ch of c.attachStream("s1")) got.push({ kind: ch.kind, text: ch.text, reload: ch.reloadHistory })
+      // 缺口不得让附加草草结束：界面会停在进行到一半的旧内容上而服务端还在推进
+      const reloads = got.filter((g) => g.kind === "resume" && g.reload === true)
+      expect(reloads.length).toBeGreaterThanOrEqual(1)
+      // 缺口之后仍在续流：在途文本重新播种 + 实时 done 都到达
+      expect(got.filter((g) => g.kind === "text").length).toBeGreaterThanOrEqual(2)
+      expect(got.some((g) => g.kind === "done")).toBe(true)
+    } finally {
+      srv.stop(true)
+    }
+  })
+})
+
