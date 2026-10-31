@@ -13,7 +13,6 @@
 #include "st/raster/scene3d.hpp"
 
 #include <algorithm>
-#include <cstdio>
 #include <cmath>
 #include <cstring>
 #include <mutex>
@@ -1460,7 +1459,26 @@ namespace st::raster {
 namespace {
 
 /// 用同一网格 + 同一相机量一次单帧耗时（纳秒，best-of-N）。
+///
+/// ## 轮次为何是 1+2 而不是 1+5（2026-10-31 实测）
+///
+/// 旧实现是 1 次预热 + 5 次计时 = **6 次全屏渲染**，两条腿各跑一遍就是 12 次。
+/// 对软件腿，一次全屏 `end_frame` 在 800×450 上要 **176 ms**，于是选腿探测本身
+/// 要花 **2.87 秒**（实测：自动=3.84s vs 强制 gpu=0.97s）。
+///
+/// 这笔开销对短片段是灾难：2 帧的片子，整次导出 3.84 秒里有 2.9 秒是“为了
+/// 决定要不要用显卡而画了 12 帧”。
+///
+/// 而多轮的意义在这里很小——两条腿的差距是 **10 倍量级**（176 ms vs 17.8 ms），
+/// 不是 10%。best-of-2 足以定下方向，再多的轮次只是把噪声抑平到远低于
+/// 判定阈值（`software_ms > gpu_ms * 1.25`）。
+///
+/// 代价（如实记录）：臂环境噪声大时可能选错腿。选错的代价是“慢几倍”，
+/// 而旧实现选对的代价是“每次都慢 2.9 秒”——后者在任何长度的片子上都要付。
 [[nodiscard]] auto probe_leg_ms(Scene3D& scene) -> double {
+  // ⚠ 目标画布的尺寸**不决定**成本：软件腿的 `begin_frame` 清的是自己的
+  // `canvas_` 与 `depth_`（`Scene3D::create` 时按场景尺寸分配），
+  // 传一个小的 target 进来并不会少算一个像素。要降成本只能缩**场景**本身。
   Canvas canvas{scene.width(), scene.height(), 1.0f};
   Camera camera;
   camera.eye = math::Vec3{0.0f, 0.0f, 3.0f};
@@ -1477,7 +1495,7 @@ namespace {
   };
   run();   // 预热：第一次要建着色器/上传网格/分配暂存纹理，那不算稳态成本
   double best = 1e18;
-  for (int round = 0; round < 5; ++round) {
+  for (int round = 0; round < 2; ++round) {
     const std::int64_t start = st::time::now_ns();
     run();
     const double ns = static_cast<double>(st::time::now_ns() - start);
@@ -1543,16 +1561,36 @@ auto Scene3D::create(int width, int height) -> Result<std::unique_ptr<Scene3D>> 
       // 阈值 1.25：GPU 略快但差不多时不折腾（见上方隐藏成本）。反过来说，
       // **正是这一条让“界面小卡片”自然继续走软件腿，而裁云的半屏/全屏三维
       // 走 GPU 腿**——不需要调用方写任何分支。
-      if (auto software = create_software_scene3d(width, height); software.has_value()) {
-        const double gpu_ms = probe_leg_ms(**gpu);
-        const double software_ms = probe_leg_ms(**software);
+      //
+      // ## 探测用**缩小**的场景实例（2026-10-31 实测：这曾占了 2.1 秒）
+      //
+      // 旧实现直接拿全尺寸实例（`width × height`）去量。而软件腿的
+      // `begin_frame` 清的是它自己的 `canvas_`/`depth_`（按场景尺寸分配），
+      // 传小目标进来完全不省成本——于是 800×450 上一次探测要 **525 ms**。
+      //
+      // 1 次预热 + 2 轮 × 两条腿 ≈ 6 次全屏渲染 → `Scene3D::create` 实测
+      // **2100 ms**。对 2 帧的短片，整次导出 3.85 秒里有 2.1 秒花在
+      // “为了决定用哪条腿而画了 6 帧”。
+      //
+      // 修法：**探测实例单独建小尺寸**（1/4 边长 = 1/16 像素）。
+      // 两条腿的耗时都随像素数线性变化（实测：面积 100%/50%/25% → 107/44/14 ms），
+      // 所以比值在降采样后保持不变，而成本降到约 1/16。
+      //
+      // 注意：返回给调用方的仍是**全尺寸**实例，探测实例用完即弃。
+      const int probe_w = std::max(64, width / 4);
+      const int probe_h = std::max(36, height / 4);
+      auto gpu_probe = create_gpu_scene3d(probe_w, probe_h);
+      auto software_probe = create_software_scene3d(probe_w, probe_h);
+      if (gpu_probe.has_value() && software_probe.has_value()) {
+        const double gpu_ms = probe_leg_ms(**gpu_probe);
+        const double software_ms = probe_leg_ms(**software_probe);
         if (software_ms > 0.0 && gpu_ms > software_ms * 1.25) {
-          ST_LOG_INFO("三维：{}×{} 实测软件 {:.2f} ms vs GPU {:.2f} ms → 选软件腿", width,
-                      height, software_ms, gpu_ms);
-          return software;
+          ST_LOG_INFO("三维：{}×{} 实测软件 {:.2f} ms vs GPU {:.2f} ms → 选软件腿（探测于 {}×{}）",
+                      width, height, software_ms, gpu_ms, probe_w, probe_h);
+          return create_software_scene3d(width, height);
         }
-        ST_LOG_INFO("三维：{}×{} 实测软件 {:.2f} ms vs GPU {:.2f} ms → 选 GPU 腿", width,
-                    height, software_ms, gpu_ms);
+        ST_LOG_INFO("三维：{}×{} 实测软件 {:.2f} ms vs GPU {:.2f} ms → 选 GPU 腿（探测于 {}×{}）",
+                    width, height, software_ms, gpu_ms, probe_w, probe_h);
       }
       return gpu;
     }
