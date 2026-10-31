@@ -84,6 +84,33 @@ auto evaluate_model3d(const Layer& layer, float local_time, float scene_duration
   pose.light_direction = light_vector(layer.light_azimuth, layer.light_elevation);
   pose.ambient = std::clamp(layer.light_ambient, 0.0f, 1.0f);
   pose.rim = std::clamp(layer.light_rim, 0.0f, 1.0f);
+
+  // ## 环境反射（IBL）参数
+  //
+  // ### 为何强度是按 ambient 推导、而不是新增剧本字段
+  //
+  // 环境反射不是“另一个开关”，它是“环境光”物理上的真身：
+  // `light_ambient` 大 = 周围很亮 = 反射也强。两者拆开设会互相矛盾
+  // （有人会把 ambient 设 0.9、反射设 0，得到“很亮的漫反射 + 死黑金属”）。
+  //
+  // 所以：**强度 = 0.55 + 0.45 × ambient**，脚本调 ambient 时反射自然跟上，
+  // 旧剧本（ambient 默认 0.34）会拿到约 0.70 的反射强度——金属立刻不再是塑料。
+  //
+  // ### 颜色从哪来
+  //
+  // 不用固定中性色：金属映环境，环境该有**天空/地面**之分（上亮下暗）。
+  // 这两个色由主光方向推导——光从哪来，天空色就在那个方向偏亮：
+  // 这样“改个光位”反射也跟着变，不需要用户再设一道色。
+  {
+    const st::math::Vec3 light_dir = pose.light_direction.normalized();
+    // 天空色：跟主光去，强度受环境项影响
+    const float sky_gain = 0.55f + 0.55f * std::clamp(light_dir.y, 0.0f, 1.0f);
+    pose.env_sky = st::math::Vec3{0.38f * sky_gain + 0.16f, 0.46f * sky_gain + 0.18f,
+                                  0.64f * sky_gain + 0.24f};
+    // 地面色：暗、偏冷（反射朝下的那一半）
+    pose.env_ground = st::math::Vec3{0.09f, 0.10f, 0.13f};
+    pose.env_strength = 0.55f + 0.45f * pose.ambient;
+  }
   return pose;
 }
 
@@ -908,6 +935,10 @@ void paint_model3d(st::raster::Surface& canvas, const Layer& layer, st::math::Re
   lighting.light_from = pose.light_direction;
   lighting.ambient = pose.ambient;
   lighting.rim = pose.rim;
+  // 环境反射：金属"活起来"的关键。由场景背景色推导（见 `Pose::env_sky` 的说明）。
+  lighting.env_sky = pose.env_sky;
+  lighting.env_ground = pose.env_ground;
+  lighting.env_strength = pose.env_strength;
 
   // 模型变换：先按矩形长宽比适配，再缩放/倾斜/自转/浮动。
   //
@@ -933,7 +964,21 @@ void paint_model3d(st::raster::Surface& canvas, const Layer& layer, st::math::Re
   scene->begin_frame(clear_color);
   scene->set_camera(camera);
   scene->set_lighting(lighting);
-  scene->draw_mesh(*mesh, model);
+  // ## 带上材质（而不是裸 `draw_mesh`）
+  //
+  // 旧的 `draw_mesh` 没有材质参数，于是**所有三维图层都是默认材质**
+  //（`metallic=0` = 纯塑料）。场景里想要一根金属管、一块玻璃屏，做不到。
+  {
+    st::raster::Material material{};
+    material.metallic = std::clamp(layer.model_metallic, 0.0f, 1.0f);
+    material.roughness = std::clamp(layer.model_roughness, 0.0f, 1.0f);
+    // specular 跟随粗糙度：镜面（roughness≈0）给满高光，粗糙面几乎无。
+    // 为何要自动推：只调 roughness 时高光不跟着变的话，
+    // “粗糙金属”依旧会带一道锐利亮线，看着像开胶。
+    material.specular = 0.35f + 0.65f * (1.0f - material.roughness);
+    material.opacity = 1.0f;
+    scene->draw_mesh_with_material(*mesh, model, material);
+  }
 
   // 合成进图层矩形。
   //
@@ -1013,6 +1058,10 @@ void paint_model3d_group(st::raster::Surface& canvas, const Layer& head,
   lighting.light_from = pose.light_direction;
   lighting.ambient = pose.ambient;
   lighting.rim = pose.rim;
+  // 环境反射：金属"活起来"的关键。由场景背景色推导（见 `Pose::env_sky` 的说明）。
+  lighting.env_sky = pose.env_sky;
+  lighting.env_ground = pose.env_ground;
+  lighting.env_strength = pose.env_strength;
 
   const st::math::Color clear_color =
       head.model_backdrop

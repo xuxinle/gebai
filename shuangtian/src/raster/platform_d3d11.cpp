@@ -3453,6 +3453,13 @@ cbuffer Scene : register(b0) {
   float4 g_tune;       // x = 漫反射权重, y = 边缘光, z = 曝光, w = 是否采样纹理（>0.5 采）
  float4 g_opacity;    // x=不透明度 y=metallic z=roughness w=specular
  float4 g_eye;        // xyz = 相机世界位置（算逐像素视向）
+ // ## 环境反射（IBL）——与 C++ 侧 `Lighting::env_*` 逐字对应
+ //   g_env.xyz        = 天空色（反射向量朝上时）
+ //   g_env.w          = 环境反射强度（0 = 关闭，与旧行为逐位相同）
+ //   g_env_ground.xyz = 地面色（反射向量朝下时）
+ //   g_env_ground.w   = 粗糙度向均值弥散的强度
+ float4 g_env;
+ float4 g_env_ground;
 };
 
 struct VsIn {
@@ -3548,6 +3555,42 @@ float4 ps_scene3d(VsOut input) : SV_Target {
       lit += D * G * F / denom * n_dot_l * specular_w;
     }
   }
+
+  // ## 环境反射（与 C++ 侧 `shade_surface` 的环境段逐字对应）
+  //
+  // ⚠ GPU 腿原本**漏了这一整段**——软件腿有环境反射、GPU 腿没有，
+  // 于是同一场景两条腿的长相不同（金属在 GPU 腿上发黑）。
+  // 这个差异之前被 `specular_w > 0` 的分支遮住：旧测试场景里
+  // metallic 都是 0，走不到环境项。
+  //
+  // 用反射向量采样双色渐变环境（`g_env.xyz` = 天空色，
+  // `g_env_ground.xyz` = 地面色，`g_env.w` = 强度）。
+  if (g_env.w > 0.0) {
+    float3 view_dir = normalize(g_eye.xyz - input.world);
+    float n_dot_v = max(dot(n, view_dir), 0.0);
+    // 菲涅耳（Schlick）
+    float3 f0 = float3(0.04, 0.04, 0.04) + (base - 0.04) * metallic;
+    float one_minus_nv = 1.0 - n_dot_v;
+    float nv2 = one_minus_nv * one_minus_nv;
+    float fresnel = f0.x + (1.0 - f0.x) * nv2 * nv2;
+
+    // 反射向量 `reflect(-v, n)`，Y 分量映到 [0,1] 取天/地色
+    float3 r = normalize(reflect(-view_dir, n));
+    float sky_t = saturate(0.5 + 0.5 * r.y);
+    float3 env_color = lerp(g_env_ground.xyz, g_env.xyz, sky_t);
+
+    // 粗糙度把锐利反射打散成模糊一片（向均值靠拢、变暗）
+    float rough = saturate(roughness);
+    float blur = 1.0 - rough;
+    float3 env_mean = (g_env.xyz + g_env_ground.xyz) * 0.5;
+    env_color = lerp(env_color, env_mean, rough * g_env_ground.w);
+
+    // 金属映环境本色，非金属映“环境×固有色”
+    float3 tinted = env_color * (0.45 + 0.55 * base * metallic);
+    float weight = g_env.w * fresnel * (0.35 + 0.65 * blur);
+    lit += tinted * weight;
+  }
+
   lit = saturate(lit);
   // ## 输出链：线性 → 曝光 → 色调映射 → sRGB 编码
   //
@@ -3584,6 +3627,10 @@ struct Scene3dParams {
   std::array<float, 4> tune{};
   std::array<float, 4> opacity{};
   std::array<float, 4> eye{};
+  /// 环境反射：xyz = 天空色，w = 强度（0 = 关闭）
+  std::array<float, 4> env{};
+  /// 地面色 + 粗糙度弥散强度
+  std::array<float, 4> env_ground{};
 };
 static_assert(sizeof(Scene3dParams) % 16 == 0, "常量缓冲必须是 16 字节的倍数");
 
@@ -4010,6 +4057,23 @@ class GpuScene3d final : public st::raster::Scene3D {
   }
 
   void draw_mesh(const st::raster::Mesh& mesh, const math::Mat4& model) override {
+    draw_mesh_with_material(mesh, model, material_);
+  }
+
+  /// 显式指定材质的绘制（与软件腿同语义，见 `Scene3D::draw_mesh_with_material`）。
+  ///
+  /// 与软件腿一样：**画完恢复**，不让材质泄漏到后续网格。
+  void draw_mesh_with_material(const st::raster::Mesh& mesh, const math::Mat4& model,
+                               const Material& material) override {
+    if (!ok_ || !mvp_ready_ || mesh.is_empty()) return;
+    const Material saved = material_;
+    material_ = material;
+    draw_mesh_impl(mesh, model);
+    material_ = saved;
+  }
+
+  /// 实际提交（原 `draw_mesh` 的体）。
+  void draw_mesh_impl(const st::raster::Mesh& mesh, const math::Mat4& model) {
     if (!ok_ || !mvp_ready_ || mesh.is_empty()) return;
     // ## 透明网格延迟重排（与软件腿同一个道理）
     //
@@ -4063,6 +4127,12 @@ class GpuScene3d final : public st::raster::Scene3D {
     params.opacity = {material_.opacity, material_.metallic, material_.roughness,
                       material_.specular};
     params.eye = {eye_.x, eye_.y, eye_.z, 0.0f};
+    // 环境反射：未配置时 `env_strength = 0` → HLSL 里 `if (g_env.w > 0.0)` 不进，
+    // 与旧行为逐位相同（回归测试靠这条）。
+    params.env = {lighting_.env_sky.x, lighting_.env_sky.y, lighting_.env_sky.z,
+                  lighting_.env_strength};
+    params.env_ground = {lighting_.env_ground.x, lighting_.env_ground.y,
+                         lighting_.env_ground.z, lighting_.env_rough_falloff};
 
     // 从这一行到 DrawIndexed 全部在锁内：常景缓冲 Map、状态设置、绘制
     // 都是上下文操作，不能与别的线程交错。

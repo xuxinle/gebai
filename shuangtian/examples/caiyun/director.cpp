@@ -405,6 +405,11 @@ auto collect_track_diagnostics(const st::Json& node, const std::string& path,
         std::clamp(st::json_get_i64(node, "model_segments", layer.model_segments), 3LL, 96LL));
     layer.model_scale = static_cast<float>(
         std::clamp(st::json_get_double(node, "model_scale", layer.model_scale), 0.05, 8.0));
+    // PBR 材质：此前引擎支持但剧本层没暴露，导致所有三维图层都是塑料。
+    layer.model_metallic = static_cast<float>(
+        std::clamp(st::json_get_double(node, "model_metallic", layer.model_metallic), 0.0, 1.0));
+    layer.model_roughness = static_cast<float>(
+        std::clamp(st::json_get_double(node, "model_roughness", layer.model_roughness), 0.0, 1.0));
     layer.model_spin = static_cast<float>(
         std::clamp(st::json_get_double(node, "model_spin", layer.model_spin), -720.0, 720.0));
     layer.model_yaw = static_cast<float>(
@@ -701,6 +706,8 @@ auto collect_track_diagnostics(const st::Json& node, const std::string& path,
       node["model_segments"] = static_cast<std::int64_t>(layer.model_segments);
     }
     if (layer.model_scale != 1.0f) node["model_scale"] = static_cast<double>(layer.model_scale);
+    if (layer.model_metallic != 0.0f) node["model_metallic"] = static_cast<double>(layer.model_metallic);
+    if (layer.model_roughness != 0.35f) node["model_roughness"] = static_cast<double>(layer.model_roughness);
     if (layer.model_spin != 0.0f) node["model_spin"] = static_cast<double>(layer.model_spin);
     if (layer.model_yaw != 0.0f) node["model_yaw"] = static_cast<double>(layer.model_yaw);
     if (layer.model_tilt != 12.0f) node["model_tilt"] = static_cast<double>(layer.model_tilt);

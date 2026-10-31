@@ -365,31 +365,65 @@ math::Vec3 shade_surface(math::Vec3 normal, math::Vec3 base_color, math::Vec3 vi
   // 而现实中的金属（不锈钢、黄金）之所以看得见，几乎全靠**环境反射**——
   // 它反射天空、墙壁、地面。没有环境项，金属就是黑的。
   //
-  // 这里用最省的近似：把"环境"当成一个**自上而下的天光梯度**
-  // （上方亮、下方暗），按菲涅耳加权反射。这不追求物理精确，
-  // 但要保证"metallic 越大越像金属"而不是"越黑"。
+  // 环境用**程序化双色渐变**（`env_sky` / `env_ground`）而不是 HDR 立方图：
+  // 本项目的渲染对象是产品演示/信息图，需要的是"上亮下暗"这个型制，
+  // 不是真实世界的云彩——而一份 HDR 要几十 MB。
   {
-    // 天光：法线朝上取亮值，朝下取暗值（与地面的接触阴影方向一致）
-    const float sky = 0.5f + 0.5f * std::clamp(n.y, -1.0f, 1.0f);
-    // 环境基色：中性偏冷（模拟室内/棚拍），强度与环境光挂钩
-    const math::Vec3 ambient_color{0.52f, 0.58f, 0.68f};
-    const float ambient_strength = (0.30f + 0.70f * sky) * (lighting.ambient + 0.55f);
-    // 菲涅耳：掠射角反射更强（Schlick，F0 随 metallic 走）
+    const math::Vec3 v = view_dir.normalized();
+    const float n_dot_v = std::max(n.dot(v), 0.0f);
+    // 菲涅耳（Schlick，F0 随 metallic 走）
     const math::Vec3 f0 = math::Vec3{0.04f + (base_color.x - 0.04f) * metallic,
                                      0.04f + (base_color.y - 0.04f) * metallic,
                                      0.04f + (base_color.z - 0.04f) * metallic};
-    const float n_dot_v = std::max(n.dot(view_dir.normalized()), 0.0f);
     const float one_minus_nv = 1.0f - n_dot_v;
-    const float fresnel =
-        f0.x + (1.0f - f0.x) * one_minus_nv * one_minus_nv * one_minus_nv * one_minus_nv;
-    // 粗糙度会打散环境反射：粗糙金属反射的是模糊的整片环境（更暗、更均匀）
-    const float blur = 1.0f - std::clamp(roughness, 0.0f, 1.0f);
-    const math::Vec3 reflected{ambient_color.x * base_color.x, ambient_color.y * base_color.y,
-                               ambient_color.z * base_color.z};
+    const float nv2 = one_minus_nv * one_minus_nv;
+    const float fresnel = f0.x + (1.0f - f0.x) * nv2 * nv2;
+
+    // ## 用**反射向量**采样环境（2026-10-31 改）
+    //
+    // 旧实现用**法线**的 Y 分量当“天空因子”——那等于把环境当成“只看朝哪边”的
+    // 半球光，曲面上的反射不会随视角移动（看上去像涂了一层渐变，不像镜面）。
+    //
+    // 真实反射要 `reflect(-v, n)`：同一块表面，视角一动反射点就动——
+    // 这正是“金属跟着相机变”的观感来源。
+    const math::Vec3 r = (v * -1.0f + n * (2.0f * n_dot_v)).normalized();
+    // 把反射向量的 Y 映到 [0,1]：上方 = 天空色，下方 = 地面色。
+    const float sky_t = std::clamp(0.5f + 0.5f * r.y, 0.0f, 1.0f);
+
+    // 环境色：可配（`env_sky`/`env_ground`），未配置时回退到原来的硬编码中性色，
+    // 保证旧场景逐位不变（`env_strength` 默认 0 = 完全关闭）。
+    const math::Vec3 sky = lighting.env_strength > 0.0f ? lighting.env_sky
+                                                         : math::Vec3{0.52f, 0.58f, 0.68f};
+    const math::Vec3 ground = lighting.env_strength > 0.0f ? lighting.env_ground : sky;
+    const math::Vec3 env_color{ground.x + (sky.x - ground.x) * sky_t,
+                               ground.y + (sky.y - ground.y) * sky_t,
+                               ground.z + (sky.z - ground.z) * sky_t};
+
+    // 粗糙度把锐利反射打散成“模糊的一整片”：越粗糙越向环境均值靠拢、越暗。
+    const float rough = std::clamp(roughness, 0.0f, 1.0f);
+    const float blur = 1.0f - rough;
+    const math::Vec3 env_mean{(sky.x + ground.x) * 0.5f, (sky.y + ground.y) * 0.5f,
+                              (sky.z + ground.z) * 0.5f};
+    // `env_rough_falloff` 控制“越粗糙越弥散”的强度（默认 0.6）。
+    const float mix_to_mean = rough * lighting.env_rough_falloff;
+    math::Vec3 env_sampled{env_color.x + (env_mean.x - env_color.x) * mix_to_mean,
+                           env_color.y + (env_mean.y - env_color.y) * mix_to_mean,
+                           env_color.z + (env_mean.z - env_color.z) * mix_to_mean};
+
+    // 反射颜色：金属映环境本色，非金属映“环境×固有色”（弱得多）。
+    const math::Vec3 tinted{env_sampled.x * (0.45f + 0.55f * base_color.x * metallic),
+                            env_sampled.y * (0.45f + 0.55f * base_color.y * metallic),
+                            env_sampled.z * (0.45f + 0.55f * base_color.z * metallic)};
+
+    // 强度：显式配置的 `env_strength` 优先；未配置时沿用旧的 `ambient` 挂钩。
+    const float ambient_strength = lighting.env_strength > 0.0f
+                                       ? lighting.env_strength
+                                       : (0.30f + 0.70f * (0.5f + 0.5f * n.y)) *
+                                             (lighting.ambient + 0.55f);
     const float weight = ambient_strength * fresnel * (0.35f + 0.65f * blur);
-    result.x += reflected.x * weight * (0.45f + 0.55f * metallic);
-    result.y += reflected.y * weight * (0.45f + 0.55f * metallic);
-    result.z += reflected.z * weight * (0.45f + 0.55f * metallic);
+    result.x += tinted.x * weight;
+    result.y += tinted.y * weight;
+    result.z += tinted.z * weight;
   }
 
   // 附加光源：与 `shade_terms` 同一口径（漫反射项，乘固有色与光色）。
@@ -879,6 +913,32 @@ class SoftwareScene final : public Scene3D {
   }
 
   void draw_mesh(const Mesh& mesh, const math::Mat4& model) override {
+    draw_mesh_with_material(mesh, model, material_);
+  }
+
+  /// 显式指定材质的绘制（见 `Scene3D::draw_mesh_with_material` 的说明）。
+  ///
+  /// 实现要点：**只在本网格期间临时换掉 `material_`**，画完立即恢复——
+  /// 否则“给某个网格设了金属”会泄漏到后续所有网格（同一个场景里
+  /// 既有金属标牌又有塑料背景时，背景会跟着变金属）。
+  void draw_mesh_with_material(const Mesh& mesh, const math::Mat4& model,
+                               const Material& material) override {
+    if (mesh.is_empty() || !mvp_ready_) return;
+    const Material saved = material_;
+    material_ = material;
+    if (shadow_map_.strength > 0.0f) {
+      deferred_.push_back(DeferredMesh{&mesh, model, material_});
+      ++draw_calls_;
+      material_ = saved;
+      return;
+    }
+    draw_mesh_now(mesh, model);
+    ++draw_calls_;
+    material_ = saved;
+  }
+
+  /// 旧的即时入口（保留以兼容 `draw_mesh` 的语义）。
+  void draw_mesh_legacy(const Mesh& mesh, const math::Mat4& model) {
     if (mesh.is_empty() || !mvp_ready_) return;
     // ## 阴影贴图开启时：延迟到 `end_frame` 统一绘制
     //
