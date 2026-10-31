@@ -1,0 +1,302 @@
+{
+  "camera": {
+    "eye": [
+      2.9,
+      1.7,
+      3.6
+    ],
+    "target": [
+      0,
+      0.05,
+      0
+    ],
+    "fov": 34
+  },
+  "lighting": {
+    "light_from": [
+      0.45,
+      0.8,
+      0.55
+    ],
+    "ambient": 0.46,
+    "diffuse": 0.82,
+    "rim": 0.48,
+    "exposure": 1.22,
+    "env_sky": [
+      0.58,
+      0.68,
+      0.88
+    ],
+    "env_ground": [
+      0.14,
+      0.14,
+      0.18
+    ],
+    "env_strength": 1.0
+  },
+  "shadow": {
+    "strength": 0.0
+  },
+  "objects": [
+    {
+      "name": "fuselage",
+      "shape": "cylinder",
+      "size": [
+        0.3,
+        2.1
+      ],
+      "color": "#eef2f7",
+      "metallic": 0.88,
+      "roughness": 0.24,
+      "rotation": [
+        90,
+        0,
+        0
+      ],
+      "translate": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "nose",
+      "shape": "cone",
+      "size": [
+        0.3,
+        0.5
+      ],
+      "color": "#eef2f7",
+      "metallic": 0.88,
+      "roughness": 0.24,
+      "rotation": [
+        90,
+        0,
+        0
+      ],
+      "translate": [
+        0,
+        0,
+        1.3
+      ]
+    },
+    {
+      "name": "wing_l",
+      "shape": "box",
+      "size": [
+        0.9,
+        0.045,
+        0.34
+      ],
+      "color": "#dfe6ef",
+      "metallic": 0.85,
+      "roughness": 0.28,
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "translate": [
+        -0.6,
+        0.02,
+        -0.02
+      ]
+    },
+    {
+      "name": "wing_r",
+      "shape": "box",
+      "size": [
+        0.9,
+        0.045,
+        0.34
+      ],
+      "color": "#dfe6ef",
+      "metallic": 0.85,
+      "roughness": 0.28,
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "translate": [
+        0.6,
+        0.02,
+        -0.02
+      ]
+    },
+    {
+      "name": "tail_fin",
+      "shape": "box",
+      "size": [
+        0.05,
+        0.36,
+        0.3
+      ],
+      "color": "#c8342e",
+      "metallic": 0.85,
+      "roughness": 0.26,
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "translate": [
+        0,
+        0.22,
+        -1.0
+      ]
+    },
+    {
+      "name": "tail_wing_l",
+      "shape": "box",
+      "size": [
+        0.34,
+        0.04,
+        0.18
+      ],
+      "color": "#dfe6ef",
+      "metallic": 0.85,
+      "roughness": 0.28,
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "translate": [
+        -0.24,
+        0.05,
+        -1.02
+      ]
+    },
+    {
+      "name": "tail_wing_r",
+      "shape": "box",
+      "size": [
+        0.34,
+        0.04,
+        0.18
+      ],
+      "color": "#dfe6ef",
+      "metallic": 0.85,
+      "roughness": 0.28,
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "translate": [
+        0.24,
+        0.05,
+        -1.02
+      ]
+    },
+    {
+      "name": "engine_l",
+      "shape": "cylinder",
+      "size": [
+        0.16,
+        0.46
+      ],
+      "color": "#b9c2ce",
+      "metallic": 0.95,
+      "roughness": 0.22,
+      "rotation": [
+        90,
+        0,
+        0
+      ],
+      "translate": [
+        -0.52,
+        -0.1,
+        0.1
+      ]
+    },
+    {
+      "name": "engine_r",
+      "shape": "cylinder",
+      "size": [
+        0.16,
+        0.46
+      ],
+      "color": "#b9c2ce",
+      "metallic": 0.95,
+      "roughness": 0.22,
+      "rotation": [
+        90,
+        0,
+        0
+      ],
+      "translate": [
+        0.52,
+        -0.1,
+        0.1
+      ]
+    },
+    {
+      "name": "cockpit",
+      "shape": "box",
+      "size": [
+        0.18,
+        0.05,
+        0.38
+      ],
+      "color": "#122b44",
+      "metallic": 0.2,
+      "roughness": 0.06,
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "translate": [
+        0,
+        0.16,
+        0.72
+      ]
+    },
+    {
+      "name": "window_row_l",
+      "shape": "box",
+      "size": [
+        0.03,
+        0.04,
+        1.1
+      ],
+      "color": "#0e2136",
+      "metallic": 0.2,
+      "roughness": 0.08,
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "translate": [
+        -0.16,
+        0.06,
+        0.02
+      ]
+    },
+    {
+      "name": "window_row_r",
+      "shape": "box",
+      "size": [
+        0.03,
+        0.04,
+        1.1
+      ],
+      "color": "#0e2136",
+      "metallic": 0.2,
+      "roughness": 0.08,
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "translate": [
+        0.16,
+        0.06,
+        0.02
+      ]
+    }
+  ]
+}

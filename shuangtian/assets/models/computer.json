@@ -1,0 +1,192 @@
+{
+  "camera": {
+    "eye": [
+      1.9,
+      0.95,
+      3.05
+    ],
+    "target": [
+      0,
+      -0.02,
+      0
+    ],
+    "fov": 34
+  },
+  "lighting": {
+    "light_from": [
+      0.45,
+      0.8,
+      0.55
+    ],
+    "ambient": 0.42,
+    "diffuse": 0.75,
+    "rim": 0.38,
+    "exposure": 1.25
+  },
+  "shadow": {
+    "strength": 0.0
+  },
+  "objects": [
+    {
+      "name": "screen_body",
+      "shape": "box",
+      "size": [
+        1.42,
+        0.88,
+        0.045
+      ],
+      "color": "#2b3038",
+      "metallic": 0.8,
+      "roughness": 0.32,
+      "translate": [
+        0,
+        0.28,
+        0
+      ]
+    },
+    {
+      "name": "panel",
+      "shape": "box",
+      "size": [
+        1.36,
+        0.82,
+        0.02
+      ],
+      "color": "#0b0e14",
+      "metallic": 0.0,
+      "roughness": 0.85,
+      "translate": [
+        0,
+        0.28,
+        0.026
+      ]
+    },
+    {
+      "name": "display",
+      "shape": "box",
+      "size": [
+        1.3,
+        0.76,
+        0.012
+      ],
+      "color": "#14283f",
+      "metallic": 0.0,
+      "roughness": 0.07,
+      "specular": 1.0,
+      "emission": 0.62,
+      "emissive_color": "#2f6fb8",
+      "translate": [
+        0,
+        0.28,
+        0.038
+      ]
+    },
+    {
+      "name": "chin",
+      "shape": "box",
+      "size": [
+        1.42,
+        0.05,
+        0.05
+      ],
+      "color": "#20242b",
+      "metallic": 0.7,
+      "roughness": 0.4,
+      "translate": [
+        0,
+        -0.145,
+        0.002
+      ]
+    },
+    {
+      "name": "stand_neck",
+      "shape": "box",
+      "size": [
+        0.14,
+        0.3,
+        0.09
+      ],
+      "color": "#3a4048",
+      "metallic": 0.9,
+      "roughness": 0.3,
+      "translate": [
+        0,
+        -0.34,
+        -0.02
+      ]
+    },
+    {
+      "name": "stand_base",
+      "shape": "cylinder",
+      "size": [
+        0.52,
+        0.028
+      ],
+      "color": "#3a4048",
+      "metallic": 0.9,
+      "roughness": 0.28,
+      "translate": [
+        0,
+        -0.5,
+        -0.02
+      ]
+    },
+    {
+      "name": "keyboard",
+      "shape": "box",
+      "size": [
+        1.1,
+        0.028,
+        0.3
+      ],
+      "color": "#23272e",
+      "metallic": 0.6,
+      "roughness": 0.45,
+      "translate": [
+        0,
+        -0.56,
+        0.52
+      ]
+    },
+    {
+      "name": "key_area",
+      "shape": "grid",
+      "size": [
+        1.02,
+        0.24
+      ],
+      "color": "#3c434d",
+      "metallic": 0.3,
+      "roughness": 0.6,
+      "columns": 18,
+      "rows": 6,
+      "rotation": [
+        90,
+        0,
+        0
+      ],
+      "translate": [
+        0,
+        -0.56,
+        0.505
+      ]
+    },
+    {
+      "name": "trackpad",
+      "shape": "box",
+      "size": [
+        0.34,
+        0.012,
+        0.2
+      ],
+      "color": "#4a525c",
+      "metallic": 0.5,
+      "roughness": 0.35,
+      "translate": [
+        0,
+        -0.56,
+        0.66
+      ]
+    }
+  ]
+}

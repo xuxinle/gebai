@@ -162,6 +162,29 @@ auto read_lighting(const Json& json) -> Result<Lighting> {
   lit.diffuse = static_cast<float>(json_get_double(*node, "diffuse", lit.diffuse));
   lit.rim = static_cast<float>(json_get_double(*node, "rim", lit.rim));
   lit.exposure = static_cast<float>(json_get_double(*node, "exposure", lit.exposure));
+  // ## 环境反射（IBL）：金属"不发黑"的原因
+  //
+  // 这四个字段此前只存在于 C++ 的 `Lighting` 结构里，**没接到场景脚本**——
+  // 于是剧本文件根本调不到，金属只能呈现"深色塑料"。
+  // 实测症状：做相机时机身用深色 + metallic 0.85，渲出来是一块黑，
+  // 因为金属没有漫反射、又没有环境可反射。
+  if (const Json* sky = json_find(*node, "env_sky"); sky != nullptr) {
+    const auto c = read_color(*node, "env_sky", math::Color{107, 133, 196, 255}, "lighting");
+    if (!c) return st::forward_error(c.error());
+    lit.env_sky = math::Vec3{static_cast<float>(c->r) / 255.0f,
+                             static_cast<float>(c->g) / 255.0f,
+                             static_cast<float>(c->b) / 255.0f};
+  }
+  if (const Json* ground = json_find(*node, "env_ground"); ground != nullptr) {
+    const auto c = read_color(*node, "env_ground", math::Color{26, 26, 33, 255}, "lighting");
+    if (!c) return st::forward_error(c.error());
+    lit.env_ground = math::Vec3{static_cast<float>(c->r) / 255.0f,
+                                static_cast<float>(c->g) / 255.0f,
+                                static_cast<float>(c->b) / 255.0f};
+  }
+  lit.env_strength = static_cast<float>(json_get_double(*node, "env_strength", lit.env_strength));
+  lit.env_rough_falloff =
+      static_cast<float>(json_get_double(*node, "env_rough_falloff", lit.env_rough_falloff));
 
   const std::string tone = json_get_string(*node, "tone_map", "aces");
   if (tone == "none") {

@@ -169,6 +169,12 @@ auto build_tables() -> std::vector<FieldTable> {
                "追加光列表 [{direction,color,intensity}]（裁云预设补光用）；写 null 清空",
                R"j([{"direction":[-0.7,0.25,0.5]}])j", {}},
               {"exposure", "number", false, "> 0", "曝光", "1.0", {}},
+
+              {"env_sky", "color", false, "", "环境反射的天空色", R"j("#6b85c4")j",
+               {"金属没有环境反射就是塑料"}},
+              {"env_ground", "color", false, "", "环境反射的地面色", R"j("#1a1a21")j", {}},
+              {"env_strength", "number", false, ">= 0", "环境反射强度（0=关闭）", "0", {}},
+              {"env_rough_falloff", "number", false, "0..1", "粗糙度向均值弥散", "0.6", {}},
           },
       .open = false,
   });

@@ -1,0 +1,367 @@
+{
+  "camera": {
+    "eye": [
+      2.6,
+      1.15,
+      3.4
+    ],
+    "target": [
+      0,
+      0.05,
+      0
+    ],
+    "fov": 34
+  },
+  "lighting": {
+    "light_from": [
+      0.45,
+      0.8,
+      0.5
+    ],
+    "ambient": 0.45,
+    "diffuse": 0.8,
+    "rim": 0.45,
+    "exposure": 1.2,
+    "env_sky": [
+      0.58,
+      0.66,
+      0.84
+    ],
+    "env_ground": [
+      0.13,
+      0.13,
+      0.16
+    ],
+    "env_strength": 0.95
+  },
+  "shadow": {
+    "strength": 0.0
+  },
+  "objects": [
+    {
+      "name": "body",
+      "shape": "box",
+      "size": [
+        2.3,
+        0.52,
+        0.98
+      ],
+      "color": "#b8353f",
+      "metallic": 0.92,
+      "roughness": 0.24,
+      "translate": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "cabin",
+      "shape": "box",
+      "size": [
+        1.28,
+        0.46,
+        0.9
+      ],
+      "color": "#a82f38",
+      "metallic": 0.9,
+      "roughness": 0.26,
+      "translate": [
+        -0.08,
+        0.46,
+        0
+      ]
+    },
+    {
+      "name": "windshield",
+      "shape": "box",
+      "size": [
+        0.06,
+        0.34,
+        0.82
+      ],
+      "color": "#0e2136",
+      "metallic": 0.2,
+      "roughness": 0.06,
+      "translate": [
+        0.58,
+        0.48,
+        0
+      ]
+    },
+    {
+      "name": "rear_glass",
+      "shape": "box",
+      "size": [
+        0.06,
+        0.3,
+        0.8
+      ],
+      "color": "#0e2136",
+      "metallic": 0.2,
+      "roughness": 0.06,
+      "translate": [
+        -0.72,
+        0.48,
+        0
+      ]
+    },
+    {
+      "name": "side_l",
+      "shape": "box",
+      "size": [
+        1.1,
+        0.3,
+        0.05
+      ],
+      "color": "#0e2136",
+      "metallic": 0.2,
+      "roughness": 0.06,
+      "translate": [
+        -0.05,
+        0.48,
+        0.44
+      ]
+    },
+    {
+      "name": "side_r",
+      "shape": "box",
+      "size": [
+        1.1,
+        0.3,
+        0.05
+      ],
+      "color": "#0e2136",
+      "metallic": 0.2,
+      "roughness": 0.06,
+      "translate": [
+        -0.05,
+        0.48,
+        -0.44
+      ]
+    },
+    {
+      "name": "hood",
+      "shape": "box",
+      "size": [
+        0.62,
+        0.1,
+        0.92
+      ],
+      "color": "#c33c46",
+      "metallic": 0.92,
+      "roughness": 0.22,
+      "translate": [
+        0.84,
+        0.2,
+        0
+      ]
+    },
+    {
+      "name": "wheel0",
+      "shape": "cylinder",
+      "size": [
+        0.44,
+        0.22
+      ],
+      "color": "#15171b",
+      "metallic": 0.15,
+      "roughness": 0.85,
+      "rotation": [
+        0,
+        0,
+        90
+      ],
+      "translate": [
+        0.78,
+        -0.24,
+        0.5
+      ]
+    },
+    {
+      "name": "rim0",
+      "shape": "cylinder",
+      "size": [
+        0.24,
+        0.24
+      ],
+      "color": "#b9c0ca",
+      "metallic": 1.0,
+      "roughness": 0.2,
+      "rotation": [
+        0,
+        0,
+        90
+      ],
+      "translate": [
+        0.78,
+        -0.24,
+        0.5
+      ]
+    },
+    {
+      "name": "wheel1",
+      "shape": "cylinder",
+      "size": [
+        0.44,
+        0.22
+      ],
+      "color": "#15171b",
+      "metallic": 0.15,
+      "roughness": 0.85,
+      "rotation": [
+        0,
+        0,
+        90
+      ],
+      "translate": [
+        0.78,
+        -0.24,
+        -0.5
+      ]
+    },
+    {
+      "name": "rim1",
+      "shape": "cylinder",
+      "size": [
+        0.24,
+        0.24
+      ],
+      "color": "#b9c0ca",
+      "metallic": 1.0,
+      "roughness": 0.2,
+      "rotation": [
+        0,
+        0,
+        90
+      ],
+      "translate": [
+        0.78,
+        -0.24,
+        -0.5
+      ]
+    },
+    {
+      "name": "wheel2",
+      "shape": "cylinder",
+      "size": [
+        0.44,
+        0.22
+      ],
+      "color": "#15171b",
+      "metallic": 0.15,
+      "roughness": 0.85,
+      "rotation": [
+        0,
+        0,
+        90
+      ],
+      "translate": [
+        -0.78,
+        -0.24,
+        0.5
+      ]
+    },
+    {
+      "name": "rim2",
+      "shape": "cylinder",
+      "size": [
+        0.24,
+        0.24
+      ],
+      "color": "#b9c0ca",
+      "metallic": 1.0,
+      "roughness": 0.2,
+      "rotation": [
+        0,
+        0,
+        90
+      ],
+      "translate": [
+        -0.78,
+        -0.24,
+        0.5
+      ]
+    },
+    {
+      "name": "wheel3",
+      "shape": "cylinder",
+      "size": [
+        0.44,
+        0.22
+      ],
+      "color": "#15171b",
+      "metallic": 0.15,
+      "roughness": 0.85,
+      "rotation": [
+        0,
+        0,
+        90
+      ],
+      "translate": [
+        -0.78,
+        -0.24,
+        -0.5
+      ]
+    },
+    {
+      "name": "rim3",
+      "shape": "cylinder",
+      "size": [
+        0.24,
+        0.24
+      ],
+      "color": "#b9c0ca",
+      "metallic": 1.0,
+      "roughness": 0.2,
+      "rotation": [
+        0,
+        0,
+        90
+      ],
+      "translate": [
+        -0.78,
+        -0.24,
+        -0.5
+      ]
+    },
+    {
+      "name": "headlight_l",
+      "shape": "box",
+      "size": [
+        0.06,
+        0.14,
+        0.22
+      ],
+      "color": "#fff3d0",
+      "metallic": 0.1,
+      "roughness": 0.25,
+      "translate": [
+        1.17,
+        0.1,
+        0.3
+      ],
+      "emission": 0.7,
+      "emissive_color": "#fff6e0"
+    },
+    {
+      "name": "headlight_r",
+      "shape": "box",
+      "size": [
+        0.06,
+        0.14,
+        0.22
+      ],
+      "color": "#fff3d0",
+      "metallic": 0.1,
+      "roughness": 0.25,
+      "translate": [
+        1.17,
+        0.1,
+        -0.3
+      ],
+      "emission": 0.7,
+      "emissive_color": "#fff6e0"
+    }
+  ]
+}

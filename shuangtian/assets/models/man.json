@@ -1,0 +1,289 @@
+{
+  "camera": {
+    "eye": [
+      1.55,
+      1.05,
+      3.75
+    ],
+    "target": [
+      0,
+      0.12,
+      0
+    ],
+    "fov": 34
+  },
+  "lighting": {
+    "light_from": [
+      0.42,
+      0.78,
+      0.58
+    ],
+    "ambient": 0.48,
+    "diffuse": 0.82,
+    "rim": 0.45,
+    "exposure": 1.2,
+    "env_sky": [
+      0.56,
+      0.64,
+      0.82
+    ],
+    "env_ground": [
+      0.15,
+      0.14,
+      0.18
+    ],
+    "env_strength": 1.0
+  },
+  "shadow": {
+    "strength": 0.0
+  },
+  "objects": [
+    {
+      "name": "head",
+      "shape": "uv_sphere",
+      "size": 0.34,
+      "color": "#e8b894",
+      "metallic": 0.0,
+      "roughness": 0.62,
+      "translate": [
+        0,
+        0.86,
+        0
+      ]
+    },
+    {
+      "name": "hair",
+      "shape": "uv_sphere",
+      "size": 0.35,
+      "color": "#1c1a18",
+      "metallic": 0.05,
+      "roughness": 0.7,
+      "translate": [
+        0,
+        0.94,
+        -0.04
+      ]
+    },
+    {
+      "name": "neck",
+      "shape": "box",
+      "size": [
+        0.13,
+        0.1,
+        0.13
+      ],
+      "color": "#e8b894",
+      "metallic": 0.0,
+      "roughness": 0.62,
+      "translate": [
+        0,
+        0.66,
+        0
+      ]
+    },
+    {
+      "name": "torso",
+      "shape": "capsule",
+      "size": [
+        0.3,
+        0.46
+      ],
+      "color": "#2f4a7a",
+      "metallic": 0.05,
+      "roughness": 0.68,
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "translate": [
+        0,
+        0.32,
+        0
+      ]
+    },
+    {
+      "name": "hip",
+      "shape": "uv_sphere",
+      "size": 0.3,
+      "color": "#242a36",
+      "metallic": 0.05,
+      "roughness": 0.7,
+      "translate": [
+        0,
+        0.02,
+        0
+      ]
+    },
+    {
+      "name": "shoulder_-1",
+      "shape": "uv_sphere",
+      "size": 0.15,
+      "color": "#2f4a7a",
+      "metallic": 0.05,
+      "roughness": 0.68,
+      "translate": [
+        -0.3,
+        0.52,
+        0
+      ]
+    },
+    {
+      "name": "arm_-1",
+      "shape": "capsule",
+      "size": [
+        0.11,
+        0.42
+      ],
+      "color": "#2f4a7a",
+      "metallic": 0.05,
+      "roughness": 0.68,
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "translate": [
+        -0.33,
+        0.26,
+        0
+      ]
+    },
+    {
+      "name": "hand_-1",
+      "shape": "uv_sphere",
+      "size": 0.11,
+      "color": "#e8b894",
+      "metallic": 0.0,
+      "roughness": 0.62,
+      "translate": [
+        -0.33,
+        -0.04,
+        0
+      ]
+    },
+    {
+      "name": "leg_-1",
+      "shape": "capsule",
+      "size": [
+        0.15,
+        0.5
+      ],
+      "color": "#242a36",
+      "metallic": 0.05,
+      "roughness": 0.7,
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "translate": [
+        -0.13,
+        -0.28,
+        0
+      ]
+    },
+    {
+      "name": "shoe_-1",
+      "shape": "box",
+      "size": [
+        0.18,
+        0.1,
+        0.28
+      ],
+      "color": "#15181d",
+      "metallic": 0.1,
+      "roughness": 0.6,
+      "translate": [
+        -0.13,
+        -0.6,
+        0.04
+      ]
+    },
+    {
+      "name": "shoulder_1",
+      "shape": "uv_sphere",
+      "size": 0.15,
+      "color": "#2f4a7a",
+      "metallic": 0.05,
+      "roughness": 0.68,
+      "translate": [
+        0.3,
+        0.52,
+        0
+      ]
+    },
+    {
+      "name": "arm_1",
+      "shape": "capsule",
+      "size": [
+        0.11,
+        0.42
+      ],
+      "color": "#2f4a7a",
+      "metallic": 0.05,
+      "roughness": 0.68,
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "translate": [
+        0.33,
+        0.26,
+        0
+      ]
+    },
+    {
+      "name": "hand_1",
+      "shape": "uv_sphere",
+      "size": 0.11,
+      "color": "#e8b894",
+      "metallic": 0.0,
+      "roughness": 0.62,
+      "translate": [
+        0.33,
+        -0.04,
+        0
+      ]
+    },
+    {
+      "name": "leg_1",
+      "shape": "capsule",
+      "size": [
+        0.15,
+        0.5
+      ],
+      "color": "#242a36",
+      "metallic": 0.05,
+      "roughness": 0.7,
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "translate": [
+        0.13,
+        -0.28,
+        0
+      ]
+    },
+    {
+      "name": "shoe_1",
+      "shape": "box",
+      "size": [
+        0.18,
+        0.1,
+        0.28
+      ],
+      "color": "#15181d",
+      "metallic": 0.1,
+      "roughness": 0.6,
+      "translate": [
+        0.13,
+        -0.6,
+        0.04
+      ]
+    }
+  ]
+}
