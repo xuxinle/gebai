@@ -60,6 +60,46 @@
 
 namespace {
 
+/// 三维图层占画面的**面积比**（0~1，各场景取最大）。
+///
+/// ## 为什么要这个数（而不是"有没有三维"）
+///
+/// GPU 画布对二维快 1.5 倍，对三维慢 1.9 倍（实测见 `RenderJob::use_gpu`）。
+/// 一部片子里可能两种图层都有，所以决定用哪条腿的不是"有没有三维"，
+/// 而是**三维占了多大面积**。
+///
+/// 取**各场景的最大值**而不是平均：只要有一个镜头三维满屏，那一镜就会
+/// 慢一倍，平均值会把这个代价稀释掉——而导出是按镜头串行推进的。
+[[nodiscard]] auto model3d_area_ratio(const caiyun::Script& script) -> float {
+  constexpr float kDesignW = 1920.0f;
+  constexpr float kDesignH = 1080.0f;
+  const float canvas_area = kDesignW * kDesignH;
+
+  /// 解析一个尺寸字段：`"45%"` → 比例，`"640"` → 设计像素。
+  const auto resolve = [](const std::string& raw, float basis) -> float {
+    if (raw.empty()) return 0.0f;
+    if (raw.back() == '%') {
+      const float pct = std::strtof(raw.c_str(), nullptr);
+      return basis * (pct / 100.0f);
+    }
+    return std::strtof(raw.c_str(), nullptr);
+  };
+
+  float worst = 0.0f;
+  for (const caiyun::Scene& scene : script.scenes) {
+    float area = 0.0f;
+    for (const caiyun::Layer& layer : scene.layers) {
+      if (layer.kind != caiyun::LayerKind::Model3d) continue;
+      const float w = resolve(layer.w, kDesignW);
+      const float h = resolve(layer.h, kDesignH);
+      if (w > 0.0f && h > 0.0f) area += w * h;
+    }
+    const float ratio = area / canvas_area;
+    if (ratio > worst) worst = ratio;
+  }
+  return worst > 1.0f ? 1.0f : worst;
+}
+
 using caiyun::Clip;
 using caiyun::format_timecode;
 using caiyun::GeneratorKind;
@@ -1500,12 +1540,30 @@ auto run_app(int argc, char** argv) -> int {
     job.shutter = options.shutter;
     job.trajectory = options.trajectory;
     job.keep_frames = options.keep_frames;
-    // GPU 画布开关：默认**关**（软件腿更快，理由与实测数据见 `RenderJob::use_gpu`）。
-    // `CAIYUN_GPU=1` 显式打开：重负载（大量大面板 / 模糊 / 三维）时 GPU 会反超。
+    // ## GPU 画布开关：默认按**三维占比**自动判，`CAIYUN_GPU` 可强制覆盖
+    //
+    // 判据来自实测（数据见 `RenderJob::use_gpu` 与 `tests/gpu_zero_copy_test.cpp`）：
+    //
+    // | 场景（1920×1080） | 软件画布 | GPU 画布 |
+    // |---|---|---|
+    // | 纯 2D | 41.9 ms | **27.7 ms**（1.5×） |
+    // | 三维占满屏 | 56.5 ms | 105.8 ms（0.53×） |
+    // | 真实片子（2D 为主） | 161.8 ms | **50.6 ms**（3.2×） |
+    //
+    // 三维在 GPU 画布上**更慢**（逐像素填充比软件光栅重，实测随面积线性变化），
+    // 但二维在 GPU 上快得多。所以判据是**三维占多大面积**，不是"有没有显卡"。
+    //
+    // 阈值 0.35：三维面积占比超过它就退回软件画布。这个数是根据上表两组
+    // 数据之间取的——2D 为主（占比≈0）时 GPU 赢 3 倍，三维满屏（占比 1.0）
+    // 时输一半，交叉点大致在三分之一左右。宁可保守（用软件），因为
+    // 走错方向的代价（慢 2 倍）比错过收益（慢 1.5 倍）更贵。
+    const float model_area_ratio = model3d_area_ratio(page->project().script);
+    job.use_gpu = model_area_ratio < 0.35f;
     if (const char* gpu_env = std::getenv("CAIYUN_GPU"); gpu_env != nullptr) {
-      job.use_gpu = std::string(gpu_env) != "0";
+      job.use_gpu = std::string(gpu_env) != "0";   // 显式覆盖（含 "0" 强制关）
     }
-    ST_LOG_INFO("裁云：导出设置 use_gpu={} workers=CAIYUN_WORKERS={}", job.use_gpu ? 1 : 0,
+    ST_LOG_INFO("裁云：导出设置 use_gpu={}（三维面积占比 {:.2f}）workers={}", job.use_gpu ? 1 : 0,
+                static_cast<double>(model_area_ratio),
                 std::getenv("CAIYUN_WORKERS") != nullptr ? std::getenv("CAIYUN_WORKERS") : "auto");
     render_launched = page->start_render(job);
     st::log::out("渲染启动：{}x{} → {}\n", job.width, job.height, job.output_file);
