@@ -1520,6 +1520,22 @@ auto Scene3D::backend_mutex() -> std::mutex& {
 
 auto Scene3D::create(int width, int height) -> Result<std::unique_ptr<Scene3D>> {
   if (width <= 0 || height <= 0) return unexpected(ErrorCode::Invalid, "渲染尺寸必须为正");
+  // ## 整函数串行化（2026-10-31：这是 4 路并行卡死的根因）
+  //
+  // `backend_mutex()` 本来就存在（声明在头里，注释写着"进程级互斥"），
+  // 但**全仓库没有任何调用者**——声明的意图从未接上。
+  //
+  // 后果：4 个 worker 同时进到这里，并发做下面这些事：
+  //   · `create_gpu_scene3d`（建 D3D 资源、编译着色器）
+  //   · `probe_leg_ms`（共享 `g_context_mutex()` 的立即上下文）
+  //   · `create_software_scene3d`
+  //
+  // 实测（1920×1080 / 4 worker）：日志停在“选 GPU 腿”之后**再无输出**，
+  // 进程挂死，且没有 `0x887A0005`——是死锁不是设备丢失。
+  // 而 1/2 worker 都正常，是这个判断的最强旁证（并发才触发）。
+  //
+  // 锁的代价：只在建场景时拿一次（每 worker 一次，不是每帧）。
+  const std::scoped_lock create_lock(backend_mutex());
   // 强制指定腿：供探针做对照与出问题时的逃生门（与 `ST_GPU_FORCE_WARP` 同一套惯例）。
   // 值：`gpu` / `software`；未设或非法值 = 走实测决策。
   if (const auto forced = st::fs::read_env("ST_SCENE3D_BACKEND"); forced.has_value()) {
