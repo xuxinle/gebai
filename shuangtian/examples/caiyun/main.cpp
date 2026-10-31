@@ -1530,6 +1530,25 @@ auto run_app(int argc, char** argv) -> int {
       st::log::err("脚本解析失败：{}\n", parsed.error().message);
       return 2;
     }
+    // ## schema 诊断也要在这里报（2026-11-01）
+    //
+    // 原先 `--check-layout` 只报布局问题，字段名写错（未知键 / 类型不符）
+    // 一个字都不说。于是“不渲染的快速校验”是不完整的：想抓 `model_rot`
+    // 这类拼错，只能跑一次**真渲染**（`--render-frames 1`，实测 5.7 秒，
+    // 而其中真渲染只占 0.8ms，其余全是启动开销）。
+    //
+    // `parse_script` 本来就把诊断存在 `script.diagnostics` 里（只是没人打印）。
+    // 在这里一并报出来，本入口就成了**完整的秒级校验**：
+    // 字段错 + 布局错一次说完，耗时 0.14s（比渲染路径快 40 倍）。
+    const auto& diags = parsed->diagnostics;
+    for (const caiyun::Diagnostic& d : diags) {
+      // 说明文字里已经带了“是不是想写 XXX”这层建议（见 `unknown_key_diagnostic`），
+      // 不要再拼一段——同一个建议说两遍只会让人以为有两个问题。
+      st::log::out("{} {}：{}\n", d.is_error ? "[错误]" : "[提示]", d.path, d.message);
+    }
+    // 与 `--strict` 同一判据（`strict_violation_count`），否则两个入口会各说各话。
+    const std::size_t schema_errors = caiyun::strict_violation_count(diags);
+
     // 无 TextPort 时文字宽度量不了——那句提示要当真，
     // 否则只凭“没报错”就以为布局没问题，比不检查更危险。
     const caiyun::LayoutReport report = caiyun::check_layout(*parsed, nullptr);
@@ -1540,8 +1559,11 @@ auto run_app(int argc, char** argv) -> int {
     }
     st::log::out("布局自检：{} 个图层｜{} 错误 / {} 提示\n", report.checked_layers,
                  report.error_count(), report.warning_count());
+    if (schema_errors > 0U) {
+      st::log::out("字段校验：{} 条错误（与 --strict 同一判据）\n", schema_errors);
+    }
     st::log::out("（注：未加载字体，文字宽度相关检查已略过；出片阶段会补上）\n");
-    return report.error_count() > 0 ? 1 : 0;
+    return (report.error_count() > 0 || schema_errors > 0U) ? 1 : 0;
   }
 
   st::app::AppOptions app_options;

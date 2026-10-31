@@ -314,23 +314,22 @@ export const scriptCheckTool: Tool = {
       if (!existsSync(scriptPath)) return { output: `脚本文件不存在：${scriptPath}` }
     }
 
-    // `--render-frames 1` + 输出到临时目录：只为拿到退出码与诊断，不留产物负担。
-    const outDir = join(ctx.workdir ?? process.cwd(), ".caiyun-check-out")
-    await mkdir(outDir, { recursive: true })
+    // ## 走 `--check-layout`，不再“渲 1 帧”（2026-11-01）
+    //
+    // 旧实现跑 `--strict --render-frames 1`：让校验与真出片共用同一判据。
+    // 思路没错，但代价是**把整个渲染器启动一遍**——实测（320×180 最小脚本）
+    // **5.74 s**，其中真渲染只占 0.8 ms，其余全是读工程包、建渲染管线、
+    // 配乐合成尝试的固定开销。单元测试默认超时 5 s，于是它长期“看起来像坏了”。
+    //
+    // `--check-layout` 走 `parse_script`（schema 诊断在这一层就产生）+ `check_layout`，
+    // **不建窗口、不起渲染**：实测 **0.14~0.5 s**（快一个数量级）。
+    // 它现在也把 schema 诊断一并报出（`main.cpp` 同批改动），
+    // 两个入口共用 `strict_violation_count` 判据，不会各说各话。
     const r = await runProc(
       exe,
-      [
-        "--headless",
-        "--strict",
-        "--script",
-        scriptPath,
-        "--render",
-        join(outDir, "check.mp4"),
-        "--render-frames",
-        "1",
-      ],
+      ["--headless", "--check-layout", "--script", scriptPath],
       dirname(scriptPath),
-      120_000,
+      30_000,
     )
 
     if (tempScript) {
