@@ -53,6 +53,15 @@ enum class SchemaType : std::uint8_t {
   Layout,
   Array,    ///< 数组（points / lines / values / tracks）
   Object,   ///< 对象（tracks 的按属性名分组写法）
+  /// 枚举：**名称字符串或旧整数都合法**，`choices` 给出名称表。
+  ///
+  /// 为何要这个（用户要求：剧本不该出现魔法数字）：
+  /// `align` 的顺序是 `0=居中 1=左` 2=右 3=两端，与直觉相反；
+  /// 写 `"align": 1` 想居中的人会得到左对齐。名称写法消除这类误读。
+  ///
+  /// 数字仍然接受（已有剧本、模板、工具输出不破坏）——与 `Dimension`
+  /// 同一种思路：两种写法都合法，但名称是推荐写法。
+  Choice,
 };
 
 [[nodiscard]] auto schema_type_name(SchemaType type) -> std::string_view;
@@ -126,6 +135,13 @@ struct FieldSpec {
   /// 子串启发在短名上必错。所以：**别名命中优先且确定**，
   /// 子串启发只在双方名长足够时参与，编辑距离兜底。
   std::array<std::string_view, 3> aliases{};
+
+  /// `SchemaType::Choice` 的名称表（按枚举值升序，`choices[0]` 对应值 0）。
+  ///
+  /// 只有 Choice 类型用它；其它类型留空。与 `layer_schema.cpp` 里
+  /// `PropertyType::Choice` 的候选表同源、同顺序——两处必须一致，
+  /// 否则 UI 显示的名称与剧本接受的名称会对不上。
+  std::span<const std::string_view> choices{};
 };
 
 /// 全部字段（脚本 / 音频 / 场景 / 图层 / 关键帧）。

@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <optional>
+#include <string_view>
 
 #include "st/core/json.hpp"
 #include "st/core/log.hpp"
@@ -20,6 +22,49 @@ namespace caiyun {
 namespace {
 
 using st::math::Color;
+
+/// 枚举字段：**名称优先，旧数字仍兼容**。
+///
+/// ## 为何要这个（用户要求：剧本不该出现魔法数字）
+///
+/// `align` / `enter` 这类字段在 JSON 里原本只接整数，写脚本的人得对
+/// 一张对照表才知 `1` 是“左”还是“居中”——而 `align` 的顺序偏偏是
+/// **`0=居中 1=左` 2=右 3=两端**，和直觉相反（实测踩过：全写成 1 想居中，
+/// 结果全左对齐）。
+///
+/// 所以：**名称是主写法**，数字保留兼容（现有剧本与老工具不破坏）。
+///
+/// `names` 是按枚举值升序的名称表（`names[0]` 对应值 0），未知名称
+/// 返回 `fallback`——与其它 `json_get_*` 的安全读取面一致（错字段不炸）。
+[[nodiscard]] auto enum_field(const st::Json& object, std::string_view key,
+                              std::span<const std::string_view> names, int fallback) -> int {
+  const st::Json* node = st::json_find(object, key);
+  if (node == nullptr) return fallback;
+  if (node->is_string()) {
+    const std::string written = node->get<std::string>();
+    for (std::size_t i = 0; i < names.size(); ++i) {
+      if (names[i] == written) return static_cast<int>(i);
+    }
+    return fallback;   // 不认识的名称：走默认（不报错，不静默当 0）
+  }
+  if (node->is_number()) {
+    const auto raw = static_cast<int>(node->get<double>());
+    return std::clamp(raw, 0, static_cast<int>(names.size()) - 1);
+  }
+  return fallback;
+}
+
+/// 进/出场动画名称（`enter` 字段）。值顺序由 `Layer::enter` 的注释釘住。
+///
+/// 默认值是 `2`（`rise`），与 `Layer::enter{2}` 一致。
+constexpr std::string_view kEnterNames[] = {"none", "fade", "rise", "scale"};
+
+/// 逐字入场方式（`kin_enter` 字段）。
+constexpr std::string_view kKinEnterNames[] = {"rise", "scale", "blur"};
+
+/// 文字对齐（`align` 字段）。**注意顺序**：0 是居中，不是左！
+constexpr std::string_view kAlignNames[] = {"center", "left", "right", "justify"};
+
 
 /// 取颜色字段：支持 `#rrggbb` / `#rrggbbaa` 字符串，也支持 `0xRRGGBBAA` 数字。
 [[nodiscard]] auto color_field(const st::Json& object, std::string_view key, Color fallback)
@@ -104,6 +149,13 @@ auto collect_range_diagnostics(const st::Json& node, SchemaScope scope, const st
           return value.is_object();
         case SchemaType::Dimension:
           return value.is_number() || value.is_string();
+        case SchemaType::Choice:
+          // 名称字符串**或**旧整数都合法（见 `SchemaType::Choice` 的说明）。
+          //
+          // 名称是否在 `choices` 里不在这里判：不认识的名字走 fallback，
+          // 与其它字段“写错不炸”的契约一致。只拦**类型完全不对**的
+          // （比如写了个数组）。
+          return value.is_string() || value.is_number();
         case SchemaType::Layout:
           // 路径字符串，或内联对象（`{"source": ...}`）。
           // 对象形式必须是**对象**（不接数组）：内联源是键值结构。
@@ -297,8 +349,7 @@ auto collect_track_diagnostics(const st::Json& node, const std::string& path,
         std::clamp(st::json_get_double(node, "kin_stagger", layer.kin_stagger), 0.0, 2.0));
     layer.kin_dur = static_cast<float>(
         std::clamp(st::json_get_double(node, "kin_dur", layer.kin_dur), 0.01, 10.0));
-    layer.kin_enter = static_cast<int>(
-        std::clamp(st::json_get_double(node, "kin_enter", layer.kin_enter), 0.0, 2.0));
+    layer.kin_enter = enum_field(node, "kin_enter", kKinEnterNames, layer.kin_enter);
     layer.kin_rise = static_cast<float>(
         std::clamp(st::json_get_double(node, "kin_rise", layer.kin_rise), 0.0, 400.0));
     layer.kin_float = static_cast<float>(
@@ -312,7 +363,7 @@ auto collect_track_diagnostics(const st::Json& node, const std::string& path,
     layer.kin_type_cps = static_cast<float>(
         std::clamp(st::json_get_double(node, "kin_type_cps", layer.kin_type_cps), 0.0, 200.0));
     layer.bold = st::json_get_bool(node, "bold", layer.bold);
-    layer.align = static_cast<int>(std::clamp(st::json_get_i64(node, "align", layer.align), 0LL, 3LL));
+    layer.align = enum_field(node, "align", kAlignNames, layer.align);
 
     layer.src = st::json_get_string(node, "src");
     layer.contain = st::json_get_bool(node, "contain", layer.contain);
@@ -334,7 +385,7 @@ auto collect_track_diagnostics(const st::Json& node, const std::string& path,
     layer.spread = static_cast<float>(
         std::clamp(st::json_get_double(node, "spread", layer.spread), 0.02, 2.0));
 
-    layer.enter = static_cast<int>(std::clamp(st::json_get_i64(node, "enter", layer.enter), 0LL, 3LL));
+    layer.enter = enum_field(node, "enter", kEnterNames, layer.enter);
     layer.enter_at = static_cast<float>(
         std::clamp(st::json_get_double(node, "enter_at", layer.enter_at), 0.0, 600.0));
     layer.enter_dur = static_cast<float>(
@@ -565,7 +616,7 @@ auto collect_track_diagnostics(const st::Json& node, const std::string& path,
   if (layer.tracking > 0.0f) node["tracking"] = static_cast<double>(layer.tracking);
   if (layer.line_height != 1.45f) node["line_height"] = static_cast<double>(layer.line_height);
   if (layer.bold) node["bold"] = true;
-  if (layer.align != 0) node["align"] = static_cast<std::int64_t>(layer.align);
+  if (layer.align != 0) node["align"] = std::string(kAlignNames[layer.align]);
   if (layer.color.r != 255 || layer.color.g != 255 || layer.color.b != 255) {
     node["color"] = color_to_hex(layer.color);
   }
@@ -583,7 +634,7 @@ auto collect_track_diagnostics(const st::Json& node, const std::string& path,
   // 策略仍是“只在非默认时写”（保持脚本干净），但**默认值必须与字段声明一致**。
   if (layer.kin_stagger != 0.035f) node["kin_stagger"] = static_cast<double>(layer.kin_stagger);
   if (layer.kin_dur != 0.42f) node["kin_dur"] = static_cast<double>(layer.kin_dur);
-  if (layer.kin_enter != 0) node["kin_enter"] = static_cast<std::int64_t>(layer.kin_enter);
+  if (layer.kin_enter != 0) node["kin_enter"] = std::string(kKinEnterNames[layer.kin_enter]);
   if (layer.kin_rise != 22.0f) node["kin_rise"] = static_cast<double>(layer.kin_rise);
   if (layer.kin_float > 0.0f) node["kin_float"] = static_cast<double>(layer.kin_float);
   if (layer.kin_float > 0.0f) node["kin_float_hz"] = static_cast<double>(layer.kin_float_hz);
@@ -704,7 +755,7 @@ auto collect_track_diagnostics(const st::Json& node, const std::string& path,
   }
 
   // 入场动画：默认是 rise/0/0.6，只在不同时写
-  if (layer.enter != 2) node["enter"] = static_cast<std::int64_t>(layer.enter);
+  if (layer.enter != 2) node["enter"] = std::string(kEnterNames[layer.enter]);
   if (layer.enter_at > 0.0f) node["enter_at"] = static_cast<double>(layer.enter_at);
   if (layer.enter_dur != 0.6f) node["enter_dur"] = static_cast<double>(layer.enter_dur);
   return node;

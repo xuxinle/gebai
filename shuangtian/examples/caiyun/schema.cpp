@@ -21,6 +21,17 @@
 namespace caiyun {
 namespace {
 
+/// 枚举候选值表（顺序 = 枚举值，`choices[0]` 对应 0）。
+///
+/// **必须与 `layer_schema.cpp` 的 `kAlignChoices` / `kEnterChoices` 等保持一致**
+/// —— 前者给 UI 的属性面板，后者给剧本校验，两边不一致会出现
+/// “面板上能选、剧本里报错”这类怪事。
+constexpr std::string_view kGradientDirChoices[] = {"vertical", "horizontal"};
+constexpr std::string_view kAlignChoices[] = {"center", "left", "right", "justify"};
+constexpr std::string_view kEnterChoices[] = {"none", "fade", "rise", "scale"};
+constexpr std::string_view kKinEnterChoices[] = {"rise", "scale", "blur"};
+constexpr std::string_view kEaseChoices[] = {"linear", "ease-out", "ease-in-out", "overshoot"};
+
 /// 别名列表构造（不足三个时补空串）。
 [[nodiscard]] constexpr auto Aliases(std::string_view first, std::string_view second = {},
                                      std::string_view third = {})
@@ -58,8 +69,8 @@ constexpr auto kLayerFields = std::array{
               "填充色 #rrggbb / #rrggbbaa（矩形/椭圆/路径/光晕/粒子）"},
     FieldSpec{"fill_alt", SchemaScope::Layer, SchemaType::Color, false, 0, 0, false,
               "渐变第二色（a=0 表示不用渐变）"},
-    FieldSpec{"gradient_dir", SchemaScope::Layer, SchemaType::Integer, true, 0, 1, true,
-              "渐变方向：0=竖向 1=横向"},
+    FieldSpec{"gradient_dir", SchemaScope::Layer, SchemaType::Choice, true, 0, 1, true,
+              "渐变方向：vertical / horizontal", {}, {}, kGradientDirChoices},
     FieldSpec{"stroke", SchemaScope::Layer, SchemaType::Color, false, 0, 0, false,
               "描边色（a=0 表示无描边）"},
     FieldSpec{"stroke_width", SchemaScope::Layer, SchemaType::Number, true, 0.0, 80.0, true,
@@ -79,8 +90,10 @@ constexpr auto kLayerFields = std::array{
     FieldSpec{"line_height", SchemaScope::Layer, SchemaType::Number, true, 1.0, 4.0, true,
               "行高倍数"},
     FieldSpec{"bold", SchemaScope::Layer, SchemaType::Bool, false, 0, 0, false, "是否粗体"},
-    FieldSpec{"align", SchemaScope::Layer, SchemaType::Integer, true, 0, 3, true,
-              "对齐：0=居中 1=左 2=右"},
+    // 注意顺序：**center 是第一个**，不是 left —— 名字写法就是为了
+    // 让人不用背这个反直觉的顺序。
+    FieldSpec{"align", SchemaScope::Layer, SchemaType::Choice, true, 0, 3, true,
+              "对齐：center / left / right / justify", {}, {}, kAlignChoices},
     FieldSpec{"color", SchemaScope::Layer, SchemaType::Color, false, 0, 0, false,
               "文字颜色（与 fill 独立）"},
 
@@ -89,8 +102,8 @@ constexpr auto kLayerFields = std::array{
               "逐字入场延迟（秒/字），建议 0.02~0.06"},
     FieldSpec{"kin_dur", SchemaScope::Layer, SchemaType::Number, true, 0.01, 10.0, true,
               "逐字入场时长（秒）"},
-    FieldSpec{"kin_enter", SchemaScope::Layer, SchemaType::Integer, true, 0.0, 2.0, true,
-              "逐字入场方式：0=上浮淡入 1=微缩放 2=模糊上浮"},
+    FieldSpec{"kin_enter", SchemaScope::Layer, SchemaType::Choice, true, 0.0, 2.0, true,
+              "逐字入场：rise / scale / blur", {}, {}, kKinEnterChoices},
     FieldSpec{"kin_rise", SchemaScope::Layer, SchemaType::Number, true, 0.0, 400.0, true,
               "逐字上浮距离（像素）"},
     FieldSpec{"kin_float", SchemaScope::Layer, SchemaType::Number, true, 0.0, 80.0, true,
@@ -125,8 +138,8 @@ constexpr auto kLayerFields = std::array{
               "光晕半径 / 粒子扩散（相对画面短边）"},
 
     // —— 入场 ——
-    FieldSpec{"enter", SchemaScope::Layer, SchemaType::Integer, true, 0.0, 3.0, true,
-              "入场：0=无 1=淡入 2=上浮淡入 3=缩放"},
+    FieldSpec{"enter", SchemaScope::Layer, SchemaType::Choice, true, 0.0, 3.0, true,
+              "入场：none / fade / rise / scale", {}, {}, kEnterChoices},
     FieldSpec{"enter_at", SchemaScope::Layer, SchemaType::Number, true, 0.0, 600.0, true,
               "入场起始（场景内秒）"},
     FieldSpec{"enter_dur", SchemaScope::Layer, SchemaType::Number, true, 0.05, 10.0, true,
@@ -157,8 +170,8 @@ constexpr auto kLayerFields = std::array{
               "飞行时长（秒）"},
     FieldSpec{"path_at", SchemaScope::Layer, SchemaType::Number, false, 0, 0, false,
               "飞行起始（场景内秒）"},
-    FieldSpec{"path_ease", SchemaScope::Layer, SchemaType::Integer, true, 0.0, 3.0, true,
-              "缓动：0=线性 1=ease-out 2=ease-in-out 3=落地过冲"},
+    FieldSpec{"path_ease", SchemaScope::Layer, SchemaType::Choice, true, 0.0, 3.0, true,
+              "缓动：linear / ease-out / ease-in-out / overshoot", {}, {}, kEaseChoices},
 
     // —— 关键帧时间线 ——
     FieldSpec{"tracks", SchemaScope::Layer, SchemaType::Object, false, 0, 0, false,
@@ -477,8 +490,8 @@ constexpr auto kKeyFrameFields = std::array{
               "该关键帧的时间（秒，场景内）", true, Aliases("time", "at")},
     FieldSpec{"v", SchemaScope::KeyFrame, SchemaType::Number, false, 0, 0, false,
               "该关键帧的属性值", true, Aliases("value", "val")},
-    FieldSpec{"ease", SchemaScope::KeyFrame, SchemaType::Integer, true, 0.0, 3.0, true,
-              "到下一帧的缓动：0=线性 1=ease-out 2=ease-in-out 3=过冲"},
+    FieldSpec{"ease", SchemaScope::KeyFrame, SchemaType::Choice, true, 0.0, 3.0, true,
+              "到下一帧的缓动：linear / ease-out / ease-in-out / overshoot", {}, {}, kEaseChoices},
 };
 
 /// `tracks` 数组写法里的每条轨道。
@@ -517,6 +530,7 @@ auto schema_type_name(SchemaType type) -> std::string_view {
   switch (type) {
     case SchemaType::Number: return "number";
     case SchemaType::Integer: return "integer";
+    case SchemaType::Choice: return "choice";
     case SchemaType::Bool: return "bool";
     case SchemaType::String: return "string";
     case SchemaType::Color: return "color";
@@ -759,6 +773,26 @@ auto schema_to_json_schema() -> std::string {
           st::Json as_object = st::Json::object();
           as_object["type"] = "object";
           variants.push_back(std::move(as_object));
+          field["oneOf"] = std::move(variants);
+          break;
+        }
+        case SchemaType::Choice: {
+          // 名称是推荐写法，整数保留兼容 → oneOf 里两种都列。
+          // `enum` 只列名称（给模型看的提示），整数走 minimum/maximum。
+          st::Json variants = st::Json::array();
+          st::Json as_string = st::Json::object();
+          as_string["type"] = "string";
+          if (!spec->choices.empty()) {
+            st::Json names = st::Json::array();
+            for (const std::string_view choice : spec->choices) {
+              names.push_back(std::string(choice));
+            }
+            as_string["enum"] = std::move(names);
+          }
+          variants.push_back(std::move(as_string));
+          st::Json as_integer = st::Json::object();
+          as_integer["type"] = "integer";
+          variants.push_back(std::move(as_integer));
           field["oneOf"] = std::move(variants);
           break;
         }
