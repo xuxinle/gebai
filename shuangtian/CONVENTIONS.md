@@ -551,6 +551,7 @@ PowerShell 的 PSReadLine 会画一段**只有显示、不是输入**的内联�
 | L6 | `src/raster/*simd*`（NEON/SIMD 内核） | SIMD intrinsics 的位级重解释只能在单点封装里发生（与 L6 的 `platform_*` 同一纪律） | 内置 |
 | L18 | `tools/**`、`tests/**`、`examples/**` | 存量输出已各有落盘通道：`tools/**`（stpm 的 `st::print`/`fprintf` 走 `cli_log` 镜像落盘 `st` 命令日志；探针/参考工具是独立实体不进框架库）、`tests/**`（测试输出进分片日志）、`examples/**`（应用入口错误经宿主 stderr 捕获）。迁移到 `ST_LOG` 是增量过程，新增代码应走 `st::print`/`ST_LOG_*` | **清单**（`st.pkg` 的 `lint.exempt.L18`） |
 | L18 | `print.cpp`/`console_log.cpp`/`log_file.cpp`/`platform_crash.cpp`/`platform_*` | 打印**实现方**：`print`/`console_log` 是 `st::print` 的底层、`log_file` 是 `st::log` 的落盘实现、`platform_crash` 的崩溃栈必须在日志系统不可用时仍能输出（信号处理器里不能依赖分配/锁） | 内置 |
+| L6 / L8 / L12 / L17 | `tools/window_shadow_*_probe.cpp`、`tools/present_layered_cost_probe.cpp`（窗口层探针，2026-11-01） | 它们量的是 **OS 窗口**而不是画布：要直调 Win32（`reinterpret_cast<HDC/LPARAM>` 不可避免 —— L6）；**L8 走行内单点豁免**（窗口过程无参数可传，只能靠进程级状态拿「当前这一组实验参数」，共 4 处）；**L12/L17 走清单**——L12 是**文本级误报**（探针自有的像素取值器叫 `Shot::at(x,y)`，接收者不是容器），L17 是接 Win32 `HRESULT`/`DWORD`/`long` 的 ABI 边界 | **清单**（`st.pkg` 的 `lint.exempt.L12/L17`）+ 行内（L8） |
 
 > 两条豁免通道都**各自计数**（`st lint` 汇总行报出「行内 N / 清单 M」），不允许静默。
 >

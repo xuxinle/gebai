@@ -537,6 +537,8 @@ class WaylandBackend final : public Backend {
   std::string clipboard_cache_{};
 
   bool decorations_{false};
+  /// 是否要窗口外阴影（wayland 由合成器绘制；这里只如实接住开关）。
+  bool window_shadow_{true};
   bool window_resizable_{true};
   bool shown_{false};
   bool close_requested_{false};
@@ -836,8 +838,9 @@ auto WaylandBackend::create_window(const WindowOptions& options) -> Status {
     return unexpected(ErrorCode::Unsupported,
                       std::format("wl_display_connect 失败（WAYLAND_DISPLAY={}）", display_env));
   }
-  decorations_ = options.decorations;
-  window_resizable_ = options.resizable;
+      decorations_ = options.decorations;
+    window_shadow_ = options.window_shadow;
+    window_resizable_ = options.resizable;
   logical_width_ = options.width > 0 ? options.width : 1280;
   logical_height_ = options.height > 0 ? options.height : 720;
   renderer_ = options.renderer.empty() ? "auto" : options.renderer;

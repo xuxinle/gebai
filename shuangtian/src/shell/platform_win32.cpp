@@ -15,6 +15,9 @@
 #define NOMINMAX 1
 #include <windows.h>
 
+// DWM（桌面窗口管理器）：窗口外阴影。头文件必须在 `windows.h` 之后。
+#include <dwmapi.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -43,6 +46,56 @@ namespace st::shell {
 namespace {
 
 constexpr wchar_t kWindowClass[] = L"ShuangtianWindow";
+
+// ── DWM 外阴影（`CONVENTIONS.md` §10 第 7 条的可视补充）────────────────────────
+//
+// 去装饰窗口（`WS_POPUP` + 客户区=整窗）**没有系统阴影**：DWM 只给"框架窗口"
+// 画阴影，而被我们去掉的正是那个框架。后果不是"少一点装饰"，而是**层次丢失**——
+// 浅色桌面上窗口与背景连成一片，边界只能靠自绘的 1px 边框勉强分开，
+// 用户的原话是"和其他窗口不区分，没有层次"。
+//
+// `DwmExtendFrameIntoClientArea` 是**唯一**能让 DWM 重新认为"这窗口有框、要投影"
+// 而客户区尺寸不变的手段（实测：客户区 300x200 前后一致）。
+// 另外两个副作用必须同时关掉，否则自绘窗框会被系统覆盖：
+//   - Win11 给这种窗口画**圆角**（四角裁掉，客户区像素被吃掉）；
+//   - 窗内 1px **系统描边**（与自绘边框打架，实测边缘亮度差 33）。
+// 两者都用 `DwmSetWindowAttribute` 关（`DWMWA_WINDOW_CORNER_PREFERENCE` /
+// `DWMWA_BORDER_COLOR`）。三个调用全设之后实测：阴影峰 19.8（平滑衰减到 0），
+// 角点与边缘 Δ ≤ 4.9 ≈ 背景噪声，即"有阴影、无圆角、无描边"。
+//
+// ⚠ **必须挂在 `WS_THICKFRAME` 上**：无 `WS_THICKFRAME` 的 `WS_POPUP` 窗口
+// （不可缩放）即使三个属性全设，阴影仍是 0.0——DWM 不认。所以不可缩放的窗口
+// 也得带上 `WS_THICKFRAME`，靠 `WM_GETMINMAXINFO` 把 min == max 锁死尺寸
+// （实测：锁死后阴影 19.8，边缘命中 `HTCLIENT`，真的拖不动）。
+//
+// 失败一律**不致命**：DWM 不可用（远程会话/服务模式/旧系统）时窗口照常工作，
+// 只是没有阴影。因此返回值只用于日志，不向上报错。
+constexpr DWORD kDwmwaWindowCornerPreference = 33;  // Win11+，未进 mingw 头
+constexpr DWORD kDwmwaBorderColor = 34;             // Win11+
+constexpr DWORD kDwmColorNone = 0xFFFFFFFE;         // DWMWA_COLOR_NONE
+constexpr int kDwmCornerDoNotRound = 1;             // DWMWCP_DONOTROUND
+
+/// 是否让 DWM 画外阴影。`false` 只用于"确实要系统窗框"的宿主与远程会话诊断。
+struct ShadowOptions {
+  bool enabled{true};
+};
+
+/// 给一个**已经建好**的窗口挂上 DWM 外阴影（圆角/描边一并关掉）。
+///
+/// 返回 `false` 表示 DWM 不接受（旧系统/无合成/远程会话），调用方只记日志。
+[[nodiscard]] auto apply_dwm_window_shadow(HWND window) -> bool {
+  if (window == nullptr) return false;
+  // ① 触发阴影：1px 的"框架"扩展到客户区。传 0 会关掉阴影，故至少 1。
+  const MARGINS margins{1, 1, 1, 1};
+  if (::DwmExtendFrameIntoClientArea(window, &margins) != S_OK) return false;
+  // ② 关圆角：否则 Win11 把四角裁掉，客户区像素被吃掉（自绘窗框的直角会缺角）。
+  const int corner = kDwmCornerDoNotRound;
+  (void)::DwmSetWindowAttribute(window, kDwmwaWindowCornerPreference, &corner, sizeof(corner));
+  // ③ 关系统描边：否则窗内多一条 1px 系统色边，与自绘边框叠成双线。
+  const COLORREF none = kDwmColorNone;
+  (void)::DwmSetWindowAttribute(window, kDwmwaBorderColor, &none, sizeof(none));
+  return true;
+}
 
 [[nodiscard]] auto to_wide(std::string_view utf8) -> std::wstring {
   if (utf8.empty()) return {};
@@ -272,8 +325,9 @@ class Win32Backend final : public Backend {
 
     logical_width_ = options.width > 0 ? options.width : 1280;
     logical_height_ = options.height > 0 ? options.height : 720;
-          decorations_ = options.decorations;
-  window_resizable_ = options.resizable;
+              decorations_ = options.decorations;
+    shadow_enabled_ = options.window_shadow;
+    window_resizable_ = options.resizable;
   defer_gpu_ = options.defer_gpu;
   tray_minimize_on_close_ = options.tray_minimize_on_close;
   scale_ = options.scale > 0.0f ? options.scale : 1.0f;
@@ -322,7 +376,13 @@ class Win32Backend final : public Backend {
       if (!options.resizable) style &= ~static_cast<DWORD>(WS_THICKFRAME | WS_MAXIMIZEBOX);
     } else {
       style = WS_POPUP | WS_CLIPCHILDREN | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
-      if (options.resizable) style |= WS_THICKFRAME;
+      // `WS_THICKFRAME` **不管可缩放与否都要带**：
+      //  - 可缩放时：它承载 Aero Snap 与边缘缩放（见上）；
+      //  - 不可缩放时：它是 DWM 画外阴影的**前置条件**——实测无此位的 `WS_POPUP`
+      //    窗口即使挂上 `DwmExtendFrameIntoClientArea` 阴影也是 0.0。尺寸锁死改由
+      //    `WM_GETMINMAXINFO` 的 min == max 承担（实测锁死后拖不动，阴影仍在）。
+      //    若无阴影（关闭或 DWM 不认），再把这一位去掉以回到最轻的窗口类型。
+      if (options.resizable || shadow_enabled_) style |= WS_THICKFRAME;
       // `WS_POPUP` 弹窗的客户区就是整窗（系统边框不占面积，命中由 `WM_NCHITTEST`
       // 接管）——再对它调 `AdjustWindowRectEx` 会为 `WS_THICKFRAME` 加上
       // 8px/边的外框，实际却不占：窗口比目标物理尺寸大 16px，客户区
@@ -339,6 +399,21 @@ class Win32Backend final : public Backend {
     if (window_ == nullptr) {
       return unexpected(ErrorCode::Unsupported,
                         std::format("CreateWindowExW 失败（错误码 {}）", ::GetLastError()));
+    }
+    // 窗口一建好就挂阴影（在 `ShowWindow` 之前）：晚于首帧会出现"先无影后补影"的闪一下。
+    if (shadow_enabled_ && !decorations_) {
+      if (!apply_dwm_window_shadow(window_)) {
+        // 不致命：DWM 不可用（远程会话/旧系统）时窗口照常工作，只是没阴影。
+        // 但要让日志里看得见，否则"为什么这台机器没阴影"又要重新猜一遍。
+        ST_LOG_INFO("win32 窗口阴影未启用（DWM 不接受：远程会话/无合成/旧系统）");
+        shadow_enabled_ = false;
+        // 阴影不可用时把为此加上的 `WS_THICKFRAME` 撤掉（不可缩放的窗口本该最轻）。
+        if (!window_resizable_) {
+          const LONG_PTR current = ::GetWindowLongPtrW(window_, GWL_STYLE);
+          (void)::SetWindowLongPtrW(window_, GWL_STYLE,
+                                    current & ~static_cast<LONG_PTR>(WS_THICKFRAME));
+        }
+      }
     }
     // 注意：**不在这里 `ShowWindow`**——见 `show_when_ready` 的说明。
     // 先建窗口（不显示）才能拿到它落在哪个显示器、那个显示器的 DPI 是多少。
@@ -1457,13 +1532,57 @@ class Win32Backend final : public Backend {
     const std::size_t count =
         std::min(source.size(), static_cast<std::size_t>(surface_->physical_width()) *
                                     static_cast<std::size_t>(surface_->physical_height()));
-    for (std::size_t index = 0; index < count; ++index) {
+    // 通道重排：画布 `0xRRGGBBAA` → DIB `0xAARRGGBB`。
+    //
+    // 把四个字节依次看：(R,G,B,A) → (A,R,G,B)——这正好是**像素内字节循环右移一位**，
+    // 即 `(p >> 8) | (p << 24)`。早期实现拆成“取四个通道再拼回去”，语义相同但慢一倍：
+    //
+    // | 写法 | 3533×1921 median | 每像素 |
+    // |---|---|---|
+    // | 逐通道拆掩码再拼（旧） | 6.07 ms | 0.89 ns/px |
+    // | **64 位成一处理 2 像素 + ×8 展开（现）** | **2.97 ms** | **0.44 ns/px** |
+    // | 纯 `memcpy`（理论下限） | 1.71 ms | 0.25 ns/px |
+    //
+    // 两个像素拼进 `uint64` 后，低半位的 `<< 24` 会**溢出到高半位**，所以必须先分半、
+    // 再用掩码拼回去（直接整体移位会串像素）。逐字节等价由 `tools/channel_swap_probe.cpp`
+    // 验证（4 种写法结果逐字节相同）。
+    //
+    // 为什么不去掉这趟重排（曾试过两条路，都不行）：
+    // ① 让 GDI 按掩码自己解读（`BI_BITFIELDS`）：通道正确，但它内部逐像素重打包，
+    //    `BitBlt` 从 0.245 ms 涨到 **14.4 ms**（`tools/dib_bitfields_probe.cpp` 实测）；
+    // ② 改画布像素格式为 BGRA：会动到整个绘制/合成层的字节序假设，风险远大于 3 ms。
+    constexpr std::uint64_t kLo = 0x00000000FFFFFFFFULL;
+    constexpr std::uint64_t kHi = 0xFFFFFFFF00000000ULL;
+    // 一个 uint64 = 两个像素：各自做字节循环右移一位。
+    const auto rotate = [](std::uint64_t two) {
+      const std::uint64_t lo = ((two & kLo) >> 8U) | ((two & kLo) << 24U);
+      const std::uint64_t hi = ((two & kHi) >> 8U) | ((two & kHi) << 24U);
+      return (lo & kLo) | (hi & kHi);
+    };
+    std::size_t index = 0;
+    constexpr std::size_t kUnroll = 8;  // 8 像素 = 4 个 uint64
+    for (; index + kUnroll <= count; index += kUnroll) {
+      std::uint64_t a = 0;
+      std::uint64_t b = 0;
+      std::uint64_t c = 0;
+      std::uint64_t d = 0;
+      std::memcpy(&a, source.data() + index, sizeof(a));
+      std::memcpy(&b, source.data() + index + 2, sizeof(b));
+      std::memcpy(&c, source.data() + index + 4, sizeof(c));
+      std::memcpy(&d, source.data() + index + 6, sizeof(d));
+      a = rotate(a);
+      b = rotate(b);
+      c = rotate(c);
+      d = rotate(d);
+      std::memcpy(dib_pixels_ + index, &a, sizeof(a));
+      std::memcpy(dib_pixels_ + index + 2, &b, sizeof(b));
+      std::memcpy(dib_pixels_ + index + 4, &c, sizeof(c));
+      std::memcpy(dib_pixels_ + index + 6, &d, sizeof(d));
+    }
+    // 尾巴：逐像素处理（宽高不保证 8 的倍数）。
+    for (; index < count; ++index) {
       const std::uint32_t pixel = source[index];
-      const std::uint32_t red = (pixel >> 24U) & 0xFFU;
-      const std::uint32_t green = (pixel >> 16U) & 0xFFU;
-      const std::uint32_t blue = (pixel >> 8U) & 0xFFU;
-      const std::uint32_t alpha = pixel & 0xFFU;
-      dib_pixels_[index] = (alpha << 24U) | (red << 16U) | (green << 8U) | blue;
+      dib_pixels_[index] = (pixel >> 8U) | (pixel << 24U);
     }
     HDC window_dc = ::GetDC(window_);
     if (window_dc == nullptr) return false;
@@ -1689,10 +1808,32 @@ class Win32Backend final : public Backend {
       }
       case WM_GETMINMAXINFO: {
         if (!decorations_) {
-          // 无边框下系统给的默认最小宽度/高度来自"可见框"，与我们的自绘窗框无关；
-          // 不接管的话窗口能被拖到比标题栏按钮还窄（按钮被裁掉一半，且再也拖不回来）。
           auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
           if (info != nullptr) {
+            if (!window_resizable_) {
+              // 不可缩放窗口的**尺寸锁死**就在这里。
+              //
+              // 背景：为了让 DWM 画外阴影（`apply_dwm_window_shadow`），不可缩放的
+              // 窗口也带了 `WS_THICKFRAME`（无这一位就没有阴影——实测 0.0）。
+              // 但 `WS_THICKFRAME` 本身就是"可缩放"的声明，所以必须在这里把 min == max
+              // 顶回去，否则"不可缩放"的窗口真能被拖大。
+              //
+              // 锁的是**整体窗口矩形**（与 `WM_NCHITTEST` 无关）：客户区=整窗，两者同值。
+              // 实测：锁死后拖边无效（边缘命中仍按 `window_resizable_` 回 `HTCLIENT`），阴影不变。
+              // 用**创建时的目标尺寸**：不可缩放窗口的尺寸就是它哥的尺寸
+              // （应用说多大就多大），不是"最小尺寸"。
+              const int locked_width = static_cast<int>(std::lround(
+                  static_cast<double>(logical_width_) * static_cast<double>(scale_)));
+              const int locked_height = static_cast<int>(std::lround(
+                  static_cast<double>(logical_height_) * static_cast<double>(scale_)));
+              info->ptMinTrackSize.x = locked_width;
+              info->ptMinTrackSize.y = locked_height;
+              info->ptMaxTrackSize.x = locked_width;
+              info->ptMaxTrackSize.y = locked_height;
+              return 0;
+            }
+            // 无边框下系统给的默认最小宽度/高度来自"可见框"，与我们的自绘窗框无关；
+            // 不接管的话窗口能被拖到比标题栏按钮还窄（按钮被裁掉一半，且再也拖不回来）。
             const int min_width = static_cast<int>(std::lround(k_min_client_width * scale_));
             const int min_height = static_cast<int>(std::lround(k_min_client_height * scale_));
             if (info->ptMinTrackSize.x < min_width) info->ptMinTrackSize.x = min_width;
@@ -1710,7 +1851,29 @@ class Win32Backend final : public Backend {
         // （那是给鼠标抓边用的），客户区就比窗口小一圈 —— 表现为自绘窗框的右/下边缘
         // 被系统裁掉、且画布与窗口尺寸不一致（GPU 呈现会静默拉伸整块纹理 → 整屏发糊）。
         // 返回 0 = 客户区 = 整个窗口矩形。
-        if (!decorations_ && wparam != 0) return 0;
+        //
+        // `wParam` 的两个取值必须**分别处理**，只挡住一个会留下 1px 的缝：
+        //  - `wParam != 0`（带 `WINDOWPOS` 的完整调用）→ 返回 0；
+        //  - `wParam == 0`（**改尺寸时**的简化调用，`lParam` 只是一个 `RECT*`）→
+        //    交给 `DefWindowProc` 时会按 `WS_THICKFRAME` 预留边框，客户区因此比窗口少 1px。
+        //    实测（gbcode，1.5x）：窗口 2355x1281、客户区 2355x1280。
+        //    而画布是按客户区分派的 ⇒ GPU 腿会把整块纹理缩放 1px → 整屏发糊；
+        //    画面内容跟着少一排像素。标准修法：先让 `DefWindowProc` 算，再把客户区改回整窗。
+        if (!decorations_) {
+          if (wparam != 0) return 0;
+          const LRESULT result = ::DefWindowProcW(window, message, wparam, lparam);
+          auto* rect = reinterpret_cast<RECT*>(lparam);
+          if (rect != nullptr) {
+            RECT whole{};
+            if (::GetWindowRect(window, &whole) != 0) {
+              rect->left = 0;
+              rect->top = 0;
+              rect->right = whole.right - whole.left;
+              rect->bottom = whole.bottom - whole.top;
+            }
+          }
+          return result;
+        }
         break;
       }
 
@@ -1959,6 +2122,9 @@ class Win32Backend final : public Backend {
   bool tray_minimize_on_close_{false};
   /// 窗口是否可缩放（`WindowOptions::resizable`）：关掉后边缘命中不参与缩放。
   bool window_resizable_{true};
+  /// 是否给窗口挂 DWM 外阴影（`WindowOptions::window_shadow`）。
+  /// 运行时会因 DWM 不接受而转 `false`（见 `create_window`）。
+  bool shadow_enabled_{true};
   HDC memory_dc_{nullptr};
   HBITMAP dib_{nullptr};
   std::uint32_t* dib_pixels_{nullptr};

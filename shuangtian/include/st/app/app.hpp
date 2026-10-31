@@ -227,6 +227,12 @@ struct AppOptions {
   bool decorations{false};
   /// 是否可缩放（拖边改尺寸）。
   bool resizable{true};
+  /// 是否给窗口挂系统外阴影（DWM 阴影），让窗口与背景分出层次（默认 `true`）。
+  ///
+  /// 自绘窗框拿掉了系统边框，也就丢掉了系统给框架窗口画的那圈阴影——后果是
+  /// 窗口边缘与桌面融为一体（用户报的“和其他窗口不区分、没有层次”）。
+  /// 关掉它只为远程会话/无合成环境，或做 A/B 对比（详见 `WindowOptions::window_shadow`）。
+  bool window_shadow{true};
   /// 文字抗锯齿形态：`auto` / `on`（亚像素）/ `off`（灰度）。
   ///
   /// 默认**亚像素（LCD）**，且**内置通道（无头）与桌面窗口同一默认**——

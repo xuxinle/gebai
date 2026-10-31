@@ -60,6 +60,13 @@
 | `shadow_inner_loop_probe.cpp` | **阴影逐像素吞吐分解**：建 256 项查表 / 纯 `over_premul` / 读遮罩+查表+合成 / 纯内存写，各报 ns/px——用来判断“固定开销 vs 逐像素”哪个才是天花板 |
 | `shadow_mask_stats_probe.cpp` | **阴影遮罩可见性分布**：各 blur 档报 region 内“有差/微弱(Δ≤2)/明显(Δ≥16)/总墨量”占比——决定“砍层”或“加阈值”是否划算（实测环境层 60% 像素 Δ≤2，即大半看不见） |
 | `shadow_span_probe.cpp` | **遮罩 region 内空白分布**：每行首/末非零位置与空行占比——决定“按行收紧跨度”的收益（实测跨度/非零≈1.00，行内几乎无空隙，只在高 blur 下有空行） |
+| `window_shadow_scheme_probe.cpp` | **窗口外阴影方案对照**（这不是画布里的投影：“窗口”是 OS 窗口）：受控纯色背板下逐像素量窗外 1..14px 变暗剖面，比 `DwmExtendFrameIntoClientArea` / 关圆角 / 关系统描边 / `CS_DROPSHADOW` 六种组合。结论见 `DESIGN.md` §4.6.3：**基线 0.0，扩展窗框 19.8，客户区不变** |
+| `window_shadow_style_probe.cpp` | **不可缩放窗口靠哪个标志才能拿阴影**：DWM 不认没有 `WS_THICKFRAME` 的 `WS_POPUP`（逐项 0.0），但认 `WS_THICKFRAME` + min==max 锁死。顺带验边缘命中仍为 `HTCLIENT`（真的拖不动） |
+| `window_shadow_live_probe.cpp` | **成品验收**：找真实的霜天窗口 → 挪到纯色背板上 → 量窗外阴影剖面 + 上屏校验 + 窗内无系统描边。`--smallest` 在多个候选里取面积最小的（大窗口铺满屏时它没有“窗外”可量） |
+| `present_layered_cost_probe.cpp` | **上屏通道成本**（评估“窗口圆角”时的底数）：同尺寸（本机 3533×1921）逐项量通道重排 / `BitBlt` / `UpdateLayeredWindow`。⚠ **第一版量具是错的**：`BitBlt` 只搬 1/16 面积却与 ULW 全量对比，得出被面积比污染的“2 倍”。本版固定同全量，并加 `1×1` 固定开销与 `BitBlt 内存→内存` 两项对照 |
+| `dib_bitfields_probe.cpp` | **能不能让 GDI 自己重排通道**（`BI_BITFIELDS`）：通道校验（含不对称色）+ 真 `BitBlt` 计时。结论：通道正确但 `BitBlt` **14.4 ms vs 0.245 ms**（58 倍），GDI 内部逐像素重打包，此路不通 |
+| `channel_swap_probe.cpp` | **通道重排四种写法对照**：均要求逐字节等价（不验就上会得到颜色异常）。结论：64 位 + ×8 展开 **6.07→2.97 ms（快 51%）**；逐字节下标反而更慢（阻止 SIMD shuffle）。⚠ 位运算变换必须**逐字节穷举校验**——本探针曾写错两次掩码 |
+| `blit_cost_compare.cpp` | **真实 `blit()` 端到端对照**（重排 + 真 `BitBlt`）：6.56→3.48 ms（省 3.08 ms，47%）。只权重排段会高估收益，因为后面那趋 BitBlt 不跟着缩 |
 | `scanline_edges_probe.cpp` | **扫描线边扫描量**：现状「按 ymin 排序 + 前缀游标」vs「活动边表」，逐行数边测试次数。结论：**收紧游标不划算**（对连续边只省 10%，全面 AET 还要每次动态分配） |
 | `paint_hotspot_probe.cpp` | **采样剖析靶子**（本机无 `perf`，用 `gdb -p` 周期性 `interrupt` + `bt`）：无限循环跑「标脏→布局→清屏→整树绘制」，**不挂剖析器**以免计时污染 |
 | `st_visual_check.py` | 视觉树与截图核对 |

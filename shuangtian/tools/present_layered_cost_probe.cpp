@@ -1,24 +1,26 @@
-// present_cost_probe.cpp —— 量 Win32 后端两条上屏通道的每帧成本。
+// present_layered_cost_probe.cpp —— 上屏通道成本对照（**同面积、同口径**）。
 //
-// 为什么需要它：讨论"窗口圆角"要不要做时，所有方案都要在一次全窗口合成里
-// 带 alpha（四角半透明）。而霜天现有上屏是：
-//   软件腿：逐像素重排通道 → DIB → BitBlt
-//   GPU 腿：D3D11 swapchain Present
-// 圆角一上，软件腿的 BitBlt 必须换 `UpdateLayeredWindow`（窗口要 `WS_EX_LAYERED`），
-// GPU 腿要换 DirectComposition 或回读。**这次量的是现状的底数**，
-// 用来判断"新通道多出来的成本"到底占一帧多大比例。
+// 用途：评估"给窗口做圆角"要付多少上屏代价。圆角要求四角真透明，而霜天现有
+// 上屏通道都不带 alpha：
+//   软件腿：逐像素重排 → DIB → BitBlt
+//   GPU 腿：D3D11 swapchain（DXGI_SWAP_EFFECT_DISCARD，不含成）
+// 圆角一上，软件腿必须换 `UpdateLayeredWindow`（窗口加 `WS_EX_LAYERED`）。
 //
-// 三个量：
-//   A. 逐像素重排（RRGGBBAA → 内存序 B,G,R,A）—— 现有软件腿的纯 CPU 段
-//   B. DIB BitBlt 上屏（现通道）
-//   C. UpdateLayeredWindow 整窗上屏（候选新通道，需 WS_EX_LAYERED）
+// ⚠ **第一版量具是错的**（2026-11-01 实测发现）：它用 `BitBlt` 只搬 1/16 面积
+// （`width/4 × height/4`）却与 `UpdateLayeredWindow` 的**全量**对比，于是得出
+// "2 倍"这个被面积比污染的数字。本版关键约束：
+//   ① 两条通道搬**同一块全量像素**；
+//   ② 各跑相同轮次，报 min/median/max；
+//   ③ 另给一组"仅 API 开销"（1×1 像素）作为基线，把固定开销与逐像素成本分开——
+//      否则无法回答"多出来的到底是什么"。
 //
-// 编译：g++ -std=c++17 -O2 present_cost_probe.cpp -o present_cost_probe.exe -lgdi32 -luser32
+// 编译：g++ -std=c++17 -O2 present_layered_cost_probe.cpp -o present_layered_cost_probe.exe -lgdi32 -luser32
 
 #include <windows.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -32,7 +34,7 @@ double ms_since(Clock::time_point start) {
 }
 
 struct Stats {
-  double min_ms = 1e9;
+  double min_ms = 0.0;
   double med_ms = 0.0;
   double max_ms = 0.0;
 };
@@ -77,7 +79,6 @@ int main(int argc, char** argv) {
           ::GetProcAddress(::GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext"))) {
     f(-4);
   }
-  // 尺寸默认取本机实际窗口大小（DPI 缩放下是物理像素，就是要这个量级）
   int width = 3533;
   int height = 1921;
   if (argc > 2) {
@@ -85,15 +86,16 @@ int main(int argc, char** argv) {
     height = std::atoi(argv[2]);
   }
   const std::size_t count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
-  std::printf("画布 %dx%d（%.1f Mpx）\n\n", width, height, count / 1e6);
+  std::printf("画布 %dx%d（%.1f Mpx）· 所有通道都搬同一块全量像素\n\n", width, height, count / 1e6);
 
-  // 源：模拟画布内部格式 0xRRGGBBAA（预乘），填一个渐变，避免全同值被优化掉
+  // 源：模拟画布内部格式 0xRRGGBBAA（预乘），渐变避免全同值被优化
   std::vector<std::uint32_t> source(count);
   for (int y = 0; y < height; ++y) {
     for (int x = 0; x < width; ++x) {
       const std::uint32_t r = static_cast<std::uint32_t>(x * 255 / width);
       const std::uint32_t g = static_cast<std::uint32_t>(y * 255 / height);
-      source[static_cast<std::size_t>(y) * width + x] = (r << 24U) | (g << 16U) | (0x80U << 8U) | 0xFFU;
+      source[static_cast<std::size_t>(y) * width + x] =
+          (r << 24U) | (g << 16U) | (0x80U << 8U) | 0xFFU;
     }
   }
 
@@ -105,17 +107,22 @@ int main(int argc, char** argv) {
   wc.hCursor = ::LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
   ::RegisterClassExW(&wc);
 
-  // 两个窗口：一个普通（BitBlt），一个 WS_EX_LAYERED（UpdateLayeredWindow）
-  HWND plain = ::CreateWindowExW(0, L"present_cost_probe", L"plain", WS_POPUP | WS_VISIBLE, 40, 40,
-                                 width / 4, height / 4, nullptr, nullptr,
-                                 ::GetModuleHandleW(nullptr), nullptr);
-  HWND layered = ::CreateWindowExW(WS_EX_LAYERED, L"present_cost_probe", L"layered", WS_POPUP, 80,
-                                   80, width / 4, height / 4, nullptr, nullptr,
+  // 两个窗口，**尺寸相同**（避免"窗口比位图小 ⇒ GDI 少搬"这类隐形差异）。
+  // 屏幕只有 2560x1440，3533x1921 的窗口放不下；两窗口都用屏幕内尺寸，
+  // 但**搬运的像素量由 UpdateLayeredWindow/BitBlt 的参数决定**，与窗口大小无关。
+  const int win_w = std::min(width, 1200);
+  const int win_h = std::min(height, 700);
+  HWND plain = ::CreateWindowExW(0, L"present_cost_probe", L"plain", WS_POPUP | WS_VISIBLE, 20, 20,
+                                 win_w, win_h, nullptr, nullptr, ::GetModuleHandleW(nullptr),
+                                 nullptr);
+  HWND layered = ::CreateWindowExW(WS_EX_LAYERED, L"present_cost_probe", L"layered", WS_POPUP, 40,
+                                   40, win_w, win_h, nullptr, nullptr,
                                    ::GetModuleHandleW(nullptr), nullptr);
   if (plain == nullptr || layered == nullptr) {
     std::printf("窗口创建失败 %lu\n", ::GetLastError());
     return 1;
   }
+  pump(300);
 
   HDC screen = ::GetDC(nullptr);
   BITMAPINFO bi{};
@@ -135,9 +142,9 @@ int main(int argc, char** argv) {
   HDC mem = ::CreateCompatibleDC(screen);
   HGDIOBJ old = ::SelectObject(mem, dib);
 
-  constexpr int kIterations = 40;
+  constexpr int kIterations = 60;
 
-  // A. 逐像素通道重排（现有软件腿的 CPU 段）
+  // ── A. 逐像素通道重排（软件腿的 CPU 段）──
   std::vector<double> reorder;
   for (int i = 0; i < kIterations; ++i) {
     const auto t0 = Clock::now();
@@ -153,45 +160,100 @@ int main(int argc, char** argv) {
   }
   const Stats sA = summarize(reorder);
 
-  // B. BitBlt 上屏（现通道）
+  // ── A0. 对照：**不重排**、纯全量拷贝进 DIB ──
+  // 意义：现有 A 是「重排 + 写」，本项是「只写」。两者之差就回答了
+  // “能不能把重排与上屏合成一趟”这个问题——即画布若原生就是 BGRA 能省多少。
+  std::vector<double> copy_only;
+  for (int i = 0; i < kIterations; ++i) {
+    const auto t0 = Clock::now();
+    std::memcpy(target, source.data(), count * sizeof(std::uint32_t));
+    copy_only.push_back(ms_since(t0));
+  }
+  const Stats sA0 = summarize(copy_only);
+
+  // ── B_mem. 纯 GDI 内存→内存 全量拷贝（不经窗口）──
+  // 意义：B 量的是「贴到窗口」，会被窗口可见区裁切，且可异步；本项量的是
+  // GDI 真正的拷贝吞吐。两者差多少，就说明“B 的便宜”有多少是假的。
+  BITMAPINFO bi2 = bi;
+  void* bits2 = nullptr;
+  HBITMAP dib2 = ::CreateDIBSection(screen, &bi2, DIB_RGB_COLORS, &bits2, nullptr, 0);
+  std::vector<double> mem_blit;
+  if (dib2 != nullptr && bits2 != nullptr) {
+    HDC mem2 = ::CreateCompatibleDC(screen);
+    HGDIOBJ old2 = ::SelectObject(mem2, dib2);
+    for (int i = 0; i < kIterations; ++i) {
+      const auto t0 = Clock::now();
+      ::BitBlt(mem2, 0, 0, width, height, mem, 0, 0, SRCCOPY);
+      mem_blit.push_back(ms_since(t0));
+    }
+    ::SelectObject(mem2, old2);
+    ::DeleteDC(mem2);
+  }
+  const Stats sBmem = summarize(mem_blit);
+
+  // ── B 全量上屏（现通道）──
   std::vector<double> blit;
   HDC window_dc = ::GetDC(plain);
   for (int i = 0; i < kIterations; ++i) {
     const auto t0 = Clock::now();
-    ::BitBlt(window_dc, 0, 0, width / 4, height / 4, mem, 0, 0, SRCCOPY);
+    ::BitBlt(window_dc, 0, 0, width, height, mem, 0, 0, SRCCOPY);
     blit.push_back(ms_since(t0));
   }
   ::ReleaseDC(plain, window_dc);
   const Stats sB = summarize(blit);
 
-  // C. UpdateLayeredWindow 整窗上屏（候选新通道）
+  // ── C. UpdateLayeredWindow **全量**上屏（候选新通道）──
+  // 另给一组 1x1 作为"纯 API 固定开销"，用于把固定开销与逐像素成本分开。
   std::vector<double> ulw;
+  std::vector<double> ulw_tiny;
   POINT src{0, 0};
-  SIZE size{width, height};
   POINT dst{100, 100};
   BLENDFUNCTION blend{};
   blend.BlendOp = AC_SRC_OVER;
   blend.SourceConstantAlpha = 255;
   blend.AlphaFormat = AC_SRC_ALPHA;
+  SIZE full{width, height};
+  SIZE tiny{1, 1};
   for (int i = 0; i < kIterations; ++i) {
     const auto t0 = Clock::now();
-    ::UpdateLayeredWindow(layered, screen, &dst, &size, mem, &src, 0, &blend, ULW_ALPHA);
+    ::UpdateLayeredWindow(layered, screen, &dst, &full, mem, &src, 0, &blend, ULW_ALPHA);
     ulw.push_back(ms_since(t0));
   }
+  for (int i = 0; i < kIterations; ++i) {
+    const auto t0 = Clock::now();
+    ::UpdateLayeredWindow(layered, screen, &dst, &tiny, mem, &src, 0, &blend, ULW_ALPHA);
+    ulw_tiny.push_back(ms_since(t0));
+  }
   const Stats sC = summarize(ulw);
+  const Stats sC0 = summarize(ulw_tiny);
 
-  std::printf("%-34s min %7.3f  median %7.3f  max %7.3f  ms\n", "A 逐像素重排（现有 CPU 段）",
-              sA.min_ms, sA.med_ms, sA.max_ms);
-  std::printf("%-34s min %7.3f  median %7.3f  max %7.3f  ms\n", "B BitBlt 上屏（现通道）",
-              sB.min_ms, sB.med_ms, sB.max_ms);
-  std::printf("%-34s min %7.3f  median %7.3f  max %7.3f  ms\n", "C UpdateLayeredWindow（候选）",
-              sC.min_ms, sC.med_ms, sC.max_ms);
-  std::printf("\n相对现通道（A+B）的倍率：\n");
-  const double current = sA.med_ms + sB.med_ms;
-  std::printf("  现通道 A+B      = %.3f ms\n", current);
-  std::printf("  换 C 后 A+C     = %.3f ms（%.2fx）\n", sA.med_ms + sC.med_ms,
-              (sA.med_ms + sC.med_ms) / current);
-  std::printf("  若 A 也用 SIMD/原地换到 C 之前 = 未知，本次只量区间\n");
+  auto line = [](const char* name, const Stats& s) {
+    std::printf("  %-38s min %7.3f  median %7.3f  max %7.3f\n", name, s.min_ms, s.med_ms, s.max_ms);
+  };
+  std::printf("单项耗时（ms）：\n");
+  line("A  逐像素通道重排 + 写（CPU 段）", sA);
+  line("A0 仅全量 memcpy（不重排）", sA0);
+  line("B0 BitBlt 内存→内存 全量（GDI 真拷贝）", sBmem);
+  line("B  BitBlt 全量上屏（到窗口）", sB);
+  line("C  UpdateLayeredWindow 全量上屏", sC);
+  line("C0 UpdateLayeredWindow 1x1（固定开销）", sC0);
+
+  const double pixels = static_cast<double>(count);
+  std::printf("\n逐像素部分（扣除 1x1 固定开销后）：\n");
+  const double c_px = sC.med_ms - sC0.med_ms;
+  std::printf("  C 逐像素 = %.3f − %.3f = %.3f ms  → %.2f ns/px\n", sC.med_ms, sC0.med_ms, c_px,
+              c_px * 1e6 / pixels);
+  std::printf("  A 逐像素 = %.3f ms                    → %.2f ns/px\n", sA.med_ms,
+              sA.med_ms * 1e6 / pixels);
+  std::printf("  B 逐像素 = %.3f ms                    → %.2f ns/px\n", sB.med_ms,
+              sB.med_ms * 1e6 / pixels);
+
+  std::printf("\n对照（同为全量）：\n");
+  std::printf("  现通道 A+B          = %.3f ms\n", sA.med_ms + sB.med_ms);
+  std::printf("  换分层后 A+C        = %.3f ms（%.2fx）\n", sA.med_ms + sC.med_ms,
+              (sA.med_ms + sC.med_ms) / (sA.med_ms + sB.med_ms));
+  std::printf("  多出                 = %.3f ms（其中固定开销 %.3f ms，逐像素 %.3f ms）\n",
+              sC.med_ms - sB.med_ms, sC0.med_ms, c_px);
 
   ::SelectObject(mem, old);
   ::DeleteObject(dib);

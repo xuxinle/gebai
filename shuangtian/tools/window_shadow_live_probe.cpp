@@ -82,7 +82,12 @@ void pump(DWORD ms) {
   }
 }
 
-COLORREF g_fill = kBackdrop;
+// 背板颜色：窗口过程没有参数可传，只能靠进程级状态（探针固有形态，已登记）。
+struct ProbeState {
+  COLORREF fill = kBackdrop;
+};
+// lint-allow: L8 窗口过程只能靠进程级状态拿背板色
+ProbeState g_state;
 
 LRESULT CALLBACK backdrop_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   if (msg == WM_ERASEBKGND || msg == WM_PAINT) {
@@ -93,7 +98,7 @@ LRESULT CALLBACK backdrop_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     else dc = reinterpret_cast<HDC>(wp);
     RECT rc{};
     ::GetClientRect(hwnd, &rc);
-    HBRUSH b = ::CreateSolidBrush(g_fill);
+    HBRUSH b = ::CreateSolidBrush(g_state.fill);
     ::FillRect(dc, &rc, b);
     ::DeleteObject(b);
     if (began) ::EndPaint(hwnd, &ps);

@@ -38,8 +38,14 @@ constexpr DWORD kDwmwaCaptionColor = 35;
 constexpr int kCornerDefault = 0, kCornerDoNotRound = 1, kCornerRound = 2, kCornerRoundSmall = 3;
 constexpr DWORD kColorNone = 0xFFFFFFFE;  // DWMWA_COLOR_NONE
 
-COLORREF g_fill = kFill;
-bool g_nccalc_zero = true;
+// 被测方案的开关。窗口过程没有参数可传，只能用进程级状态回填当前这组实验参数——
+// 这是探针的固有形态（不是交付代码里的共享可变状态），已在 CONVENTIONS §8 登记。
+struct ProbeState {
+  COLORREF fill = kFill;
+  bool nccalc_zero = true;
+};
+// lint-allow: L8 窗口过程只能靠进程级状态拿「当前这一组实验参数」
+ProbeState g_state;
 
 LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   if (msg == WM_ERASEBKGND || msg == WM_PAINT) {
@@ -50,13 +56,13 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     else dc = reinterpret_cast<HDC>(wp);
     RECT rc{};
     ::GetClientRect(hwnd, &rc);
-    HBRUSH b = ::CreateSolidBrush(g_fill);
+    HBRUSH b = ::CreateSolidBrush(g_state.fill);
     ::FillRect(dc, &rc, b);
     ::DeleteObject(b);
     if (began) ::EndPaint(hwnd, &ps);
     return (msg == WM_PAINT) ? 0 : 1;
   }
-  if (msg == WM_NCCALCSIZE && g_nccalc_zero && wp != 0) return 0;
+  if (msg == WM_NCCALCSIZE && g_state.nccalc_zero && wp != 0) return 0;
   return ::DefWindowProcW(hwnd, msg, wp, lp);
 }
 
@@ -142,16 +148,16 @@ void run(const Variant& v, int idx, std::string& report) {
   wc.hCursor = ::LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
 
   const int wx = 260, wy = 200;
-  g_nccalc_zero = false;
-  g_fill = kBack;
+  g_state.nccalc_zero = false;
+  g_state.fill = kBack;
   wc.lpszClassName = L"v5_back_fixed";
   ::RegisterClassExW(&wc);
   HWND back = ::CreateWindowExW(0, L"v5_back_fixed", L"back", WS_POPUP | WS_VISIBLE, wx - kPad,
                                 wy - kPad, kW + 2 * kPad, kH + 2 * kPad, nullptr, nullptr,
                                 ::GetModuleHandleW(nullptr), nullptr);
 
-  g_nccalc_zero = true;
-  g_fill = kFill;
+  g_state.nccalc_zero = true;
+  g_state.fill = kFill;
   wc.lpszClassName = cls.c_str();
   ::RegisterClassExW(&wc);
   const DWORD style = WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN | v.style_extra;

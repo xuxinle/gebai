@@ -19,8 +19,14 @@ constexpr DWORD kDwmwaCorner = 33;
 constexpr DWORD kDwmwaBorder = 34;
 constexpr DWORD kColorNone = 0xFFFFFFFE;
 
-COLORREF g_fill = kFill;
-bool g_nccalc = true;
+// 被测方案的开关。窗口过程没有参数可传，只能用进程级状态回填当前这组实验参数——
+// 这是探针的固有形态（不是交付代码里的共享可变状态），已在 CONVENTIONS §8 登记。
+struct ProbeState {
+  COLORREF fill = kFill;
+  bool nccalc = true;
+};
+// lint-allow: L8 窗口过程只能靠进程级状态拿「当前这一组实验参数」
+ProbeState g_state;
 
 LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
   if (m == WM_ERASEBKGND || m == WM_PAINT) {
@@ -30,13 +36,13 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_PAINT) { dc = ::BeginPaint(h, &ps); began = true; } else dc = reinterpret_cast<HDC>(w);
     RECT rc{};
     ::GetClientRect(h, &rc);
-    HBRUSH b = ::CreateSolidBrush(g_fill);
+    HBRUSH b = ::CreateSolidBrush(g_state.fill);
     ::FillRect(dc, &rc, b);
     ::DeleteObject(b);
     if (began) ::EndPaint(h, &ps);
     return (m == WM_PAINT) ? 0 : 1;
   }
-  if (m == WM_NCCALCSIZE && g_nccalc && w != 0) return 0;
+  if (m == WM_NCCALCSIZE && g_state.nccalc && w != 0) return 0;
   return ::DefWindowProcW(h, m, w, l);
 }
 
@@ -147,15 +153,15 @@ int main() {
 
   const int ox = 200, oy = 180;
   const int tw = kW + 2 * kPad, th = kH + 2 * kPad;
-  g_nccalc = false;
-  g_fill = kBack;
+  g_state.nccalc = false;
+  g_state.fill = kBack;
   wc.lpszClassName = L"v7back";
   ::RegisterClassExW(&wc);
   HWND back = ::CreateWindowExW(0, L"v7back", L"b", WS_POPUP | WS_VISIBLE, ox, oy, tw, th, nullptr,
                                 nullptr, ::GetModuleHandleW(nullptr), nullptr);
 
-  g_nccalc = true;
-  g_fill = kFill;
+  g_state.nccalc = true;
+  g_state.fill = kFill;
 
   // ── ① 非可缩放窗口（无 WS_THICKFRAME）──
   wc.lpszClassName = L"v7fixed";

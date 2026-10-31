@@ -17,6 +17,8 @@
 #   ws2_32      winsock（src/core/platform_net.cpp、src/net/*）
 #   user32      Win32 窗口/消息（src/shell/platform_win32.cpp）
 #   gdi32       GDI 绘制辅助
+#   dwmapi      DWM（桌面窗口管理器）：DwmExtendFrameIntoClientArea / DwmSetWindowAttribute
+#               —— 窗口外阴影（src/shell/platform_win32.cpp 的 apply_dwm_window_shadow）
 #   shell32     CommandLineToArgvW（st/core/entry.cpp 的 ST_MAIN）
 #   dbghelp     崩溃栈符号化（src/core/platform_crash.cpp：SymInitialize/SymFromAddr）
 #   nanosrv     MinGW 里 libdbghelp.a 只是壳，API 存根真身在 libnanosrv.a
@@ -29,6 +31,7 @@ windows:
 ws2_32
 user32
 gdi32
+dwmapi
 shell32
 dbghelp
 nanosrv

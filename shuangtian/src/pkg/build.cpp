@@ -776,7 +776,7 @@ struct PchContext {
   // Windows：`nanosrv` 是 MinGW 里 dbghelp 的真身存根（壳库只转发）；
   // POSIX：dl 供 TLS 的运行时 dlopen OpenSSL。
   if (platform == "windows") {
-    return {"ws2_32", "user32", "gdi32", "shell32", "dbghelp", "nanosrv", "psapi",
+    return {"ws2_32", "user32", "gdi32", "dwmapi", "shell32", "dbghelp", "nanosrv", "psapi",
             "secur32", "winpthread"};
   }
   return {"pthread", "dl", "m"};

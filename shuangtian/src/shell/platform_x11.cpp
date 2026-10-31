@@ -676,6 +676,9 @@ class X11Backend final : public Backend {
     install_error_handler();
 
     decorations_ = options.decorations;
+    // 窗口外阴影是 Win32/DWM 的能力；x11 下窗口管理器自己画阴影，这里只接住开关
+    // （不读会变成又一个“静默失效字段”，见 `WindowOptions::resizable` 的前鉴）。
+    window_shadow_ = options.window_shadow;
     window_resizable_ = options.resizable;
     logical_width_ = options.width > 0 ? options.width : 1280;
     logical_height_ = options.height > 0 ? options.height : 720;
@@ -2004,7 +2007,9 @@ class X11Backend final : public Backend {
 
   bool selection_owner_ok_{false};
   bool decorations_{false};
-  bool window_resizable_{true};
+/// 是否要窗口外阴影（x11 由窗口管理器绘制；这里只如实接住开关，见 `create_window`）。
+bool window_shadow_{true};
+bool window_resizable_{true};
   bool shown_{false};
   bool close_requested_{false};
   bool maximized_{false};

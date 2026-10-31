@@ -39,6 +39,24 @@ from st_client_lib import call_with_token, load_control  # noqa: E402
 
 USER32 = ctypes.WinDLL("user32", use_last_error=True)
 
+# ⚠ **测量进程自己必须先声明 DPI 感知**，否则 `GetWindowRect`/`GetClientRect` 给的是
+# 被 **虚拟化** 过的坐标（Windows 把它们按系统缩放折算成逻辑值，分数缩放再取整）。
+# 实测教训（2026-11-01，1.5x 屏）：未声明时同一窗口报 2355x1281 窗口 / 2355x1280 客户区
+# ——看起来是“客户区少了 1px”的真缺陷，实际是 3533x1921 物理像素被换算时的截断假象。
+# 本脚本后面要拿像素做断言（阴影），坐标必须是**物理像素**，所以这一步不能省。
+# 必须早于任何窗口枚举。
+try:
+    _set_ctx = USER32.SetProcessDpiAwarenessContext
+    _set_ctx.argtypes = [ctypes.c_void_p]
+    _set_ctx.restype = ctypes.c_bool
+    _set_ctx(ctypes.c_void_p(-4))  # PER_MONITOR_AWARE_V2
+except (AttributeError, OSError):
+    pass  # 老系统：退到下面的 SetProcessDPIAware
+try:
+    USER32.SetProcessDPIAware()
+except (AttributeError, OSError):
+    pass
+
 
 class RECT(ctypes.Structure):
     _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
@@ -116,6 +134,150 @@ def window_style(pid: int) -> int:
     return style
 
 
+def window_handle(pid: int) -> int:
+    """找该进程的主窗口句柄（与 `window_rects` 同一套枚举口径）。"""
+    found: list[int] = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def callback(hwnd, _lparam):
+        owner = ctypes.c_ulong()
+        USER32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and USER32.IsWindowVisible(hwnd):
+            found.append(int(hwnd))
+        return True
+
+    USER32.EnumWindows(callback, 0)
+    return found[0] if found else 0
+
+
+GDI32 = ctypes.WinDLL("gdi32", use_last_error=True)
+
+
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", ctypes.c_uint32),
+        ("biWidth", ctypes.c_int32),
+        ("biHeight", ctypes.c_int32),
+        ("biPlanes", ctypes.c_uint16),
+        ("biBitCount", ctypes.c_uint16),
+        ("biCompression", ctypes.c_uint32),
+        ("biSizeImage", ctypes.c_uint32),
+        ("biXPelsPerMeter", ctypes.c_int32),
+        ("biYPelsPerMeter", ctypes.c_int32),
+        ("biClrUsed", ctypes.c_uint32),
+        ("biClrImportant", ctypes.c_uint32),
+    ]
+
+
+def grab_pixels(x: int, y: int, w: int, h: int) -> list[list[tuple[int, int, int]]] | None:
+    """截屏一块区域，返回逐行 BGR 像素（bgh 顺序的 list[y][x]）。
+
+    用 ctypes 直接调 GDI：本脚本要“看窗外那圈像素”，而控制通道只能拿应用自己的画布——
+    阴影在**窗口之外**，只有屏幕截图里才有。
+    """
+    screen = USER32.GetDC(None)
+    if not screen:
+        return None
+    mem = GDI32.CreateCompatibleDC(screen)
+    header = BITMAPINFOHEADER()
+    header.biSize = ctypes.sizeof(header)
+    header.biWidth = w
+    header.biHeight = -h  # 负数 = 自上而下
+    header.biPlanes = 1
+    header.biBitCount = 32
+    header.biCompression = 0  # BI_RGB
+    bits = ctypes.c_void_p()
+    dib = GDI32.CreateDIBSection(
+        screen, ctypes.byref(header), 0, ctypes.byref(bits), None, 0
+    )
+    rows = None
+    if dib and bits:
+        old = GDI32.SelectObject(mem, dib)
+        if GDI32.BitBlt(mem, 0, 0, w, h, screen, x, y, 0x00CC0020 | 0x40000000):  # SRCCOPY|CAPTUREBLT
+            raw = ctypes.string_at(bits, w * h * 4)
+            rows = [
+                [
+                    (raw[(r * w + c) * 4], raw[(r * w + c) * 4 + 1], raw[(r * w + c) * 4 + 2])
+                    for c in range(w)
+                ]
+                for r in range(h)
+            ]
+        GDI32.SelectObject(mem, old)
+    if dib:
+        GDI32.DeleteObject(dib)
+    GDI32.DeleteDC(mem)
+    USER32.ReleaseDC(None, screen)
+    return rows
+
+
+def luminance(bgr: tuple[int, int, int]) -> float:
+    return 0.114 * bgr[0] + 0.587 * bgr[1] + 0.299 * bgr[2]
+
+
+def check_window_shadow(rects, label: str) -> None:
+    """断言**窗外有阴影**（自绘窗框最容易静默丢掉的那件事）。
+
+    为什么要单独一条：无装饰窗口（`WS_POPUP` + 客户区=整窗）不会得到 DWM 阴影——
+    它不给“框架窗口”以外的东西投影。而丢掉阴影**不报错、不影响任何已有断言**，
+    只表现为“窗口和桌面糊成一片”（用户报的“没层次”）。因此必须有像素级断言。
+
+    判据（二者取一即可，窗口可能贴在某条屏幕边上）：右侧或下侧之外 1..12px
+    的亮度**显著低于** 30px 处的背景，且随距离回升（阴影的指纹）。
+    """
+    window, _client = rects
+    band = 30
+    x = window[0] - 6
+    y = window[1] - 6
+    w = (window[2] - window[0]) + 2 * band
+    h = (window[3] - window[1]) + 2 * band
+    if x < 0 or y < 0 or w > 8000 or h > 8000:
+        print(f"  (窗口贴屏幕边缘，跳过阴影像素断言：window={window})", flush=True)
+        return
+    pixels = grab_pixels(x, y, w, h)
+    if pixels is None:
+        check(False, "截屏取像素（阴影断言）")
+        return
+    right = window[2] - 1 - x
+    bottom = window[3] - 1 - y
+
+    def column_profile(offset: int) -> list[float]:
+        vals = []
+        for d in range(1, band):
+            col = right + d
+            if col >= w:
+                vals.append(float("nan"))
+                continue
+            ys = range(10, h - 10, 2)
+            sample = [luminance(pixels[r][col]) for r in ys]
+            vals.append(sum(sample) / len(sample) if sample else float("nan"))
+        return vals
+
+    def row_profile(offset: int) -> list[float]:
+        vals = []
+        for d in range(1, band):
+            row = bottom + d
+            if row >= h:
+                vals.append(float("nan"))
+                continue
+            sample = [luminance(pixels[row][c]) for c in range(10, w - 10, 2)]
+            vals.append(sum(sample) / len(sample) if sample else float("nan"))
+        return vals
+
+    def shadow_strength(profile: list[float]) -> float:
+        """近处（1..3px）比远处（24..28px）暗多少（正=有阴影）。"""
+        near = [v for v in profile[0:3] if v == v]
+        far = [v for v in profile[23:28] if v == v]
+        if not near or not far:
+            return 0.0
+        return sum(far) / len(far) - sum(near) / len(near)
+
+    strength_r = shadow_strength(column_profile(right))
+    strength_b = shadow_strength(row_profile(bottom))
+    best = max(strength_r, strength_b)
+    print(f"  阴影强度: 右侧={strength_r:.1f} 下侧={strength_b:.1f}（>5 视为有阴影）", flush=True)
+    check(best > 5.0, f"{label}: 窗外有系统阴影（自绘窗框不再与背景糊成一片）")
+
+
 def run_case(exe: pathlib.Path, decorations: bool, label: str) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     ctl = OUT_DIR / f"ctl-{label}.json"
@@ -167,13 +329,17 @@ def run_case(exe: pathlib.Path, decorations: bool, label: str) -> None:
         if not decorations:
             check(client_size == window_size,
                   f"客户区 == 窗口矩形（{client_size} vs {window_size}）")
-        # —— 3. 自绘窗框在真窗口下照旧 ——
+        # —— 3. 窗外有阴影（自绘窗框丢了系统边框，DWM 就默认不投影）——
+        # 必须放在窗口控制动作**之前**：下面会最大化/还原，窗口位置和尺寸都变了。
+        if not decorations:
+            check_window_shadow(rects, label)
+        # —— 4. 自绘窗框在真窗口下照旧 ——
         snapshot = call("get", {"id": "titlebar"})
         check(snapshot.get("type") == "TitleBar", "真窗口下 #titlebar 是自绘窗框组件")
         props = snapshot.get("props", {})
         check(props.get("window_control_available") == "true",
               "窗口控制端口可用（真窗口下应报 true）")
-        # —— 4. 窗口控制真的生效 ——
+        # —— 5. 窗口控制真的生效 ——
         reply = call("invoke", {"id": "titlebar", "action": "maximize"})
         handled = reply.get("handled")
         check(handled is True, "invoke maximize → handled=true（最大化真的发生）")
@@ -207,11 +373,11 @@ def run_case(exe: pathlib.Path, decorations: bool, label: str) -> None:
         time.sleep(0.6)
         check(call("get", {"id": "titlebar"}).get("props", {}).get("maximized") == "false",
               "还原后 maximized 属性 = false")
-        # —— 5. 截图留证 ——
+        # —— 6. 截图留证 ——
         shot = OUT_DIR / f"titlebar-{label}.png"
         result = call("capture", {"encode": "file", "path": str(shot)})
         check(bool(result.get("path") or shot.exists()), f"截图落盘 {shot.name}")
-        # —— 6. 关闭动作走收尾路径（不直接 exit）——
+        # —— 7. 关闭动作走收尾路径（不直接 exit）——
         reply = call("invoke", {"id": "titlebar", "action": "close"})
         check(reply.get("handled") is True, "invoke close → handled=true")
         try:
