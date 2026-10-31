@@ -81,12 +81,29 @@ describe("script_check", () => {
     ],
   }
 
-  test.skipIf(!hasExe)("合法脚本返回通过", async () => {
-    const ctx = await makeCtx()
-    const out = await outOf(scriptCheckTool, { script: JSON.stringify(goodScript) }, ctx)
-    expect(out).toContain("✓")
-    expect(out).toContain("可以开始渲染")
-  })
+  // ## 为何这两条要给 60s 超时
+  //
+  // `script_check` 为了让“校验判据”与“真出片”**只存一份**，用的是“极短渲染
+  // （`--render-frames 1`）+ 看退出码”的做法，而不是单独的语法检查入口。
+  //
+  // 实测（本机，320×180 的最小脚本）：**5.74 s**——其中真渲染只要 0.8 ms/帧，
+  // 其余全是渲染器启动、读包、建管线、配乐合成尝试的固定开销。
+  //
+  // 而 bun 默认超时是 **5 s**。于是这两条会卡在“进程其实成功了、但测试先超时”，
+  // 报一个看起来像功能错的失败（实际只是跑得比默认超时慢）。
+  //
+  // 另外两条不超时的用例（拼错字段名 / 类型写错）没这个问题：它们被 `--strict`
+  // 在启动阶段就拦下，根本没走到渲染。
+  test.skipIf(!hasExe)(
+    "合法脚本返回通过",
+    async () => {
+      const ctx = await makeCtx()
+      const out = await outOf(scriptCheckTool, { script: JSON.stringify(goodScript) }, ctx)
+      expect(out).toContain("✓")
+      expect(out).toContain("可以开始渲染")
+    },
+    60_000,
+  )
 
   test.skipIf(!hasExe)("拼错字段名被拦，且给出路径与建议名", async () => {
     const ctx = await makeCtx()
@@ -108,13 +125,18 @@ describe("script_check", () => {
     expect(out).toContain("✗")
   })
 
-  test.skipIf(!hasExe)("接受文件路径（不是只有内联 JSON）", async () => {
-    const ctx = await makeCtx()
-    const p = join(ctx.workdir, "s.json")
-    await writeFile(p, JSON.stringify(goodScript), "utf8")
-    const out = await outOf(scriptCheckTool, { script: "s.json" }, ctx)
-    expect(out).toContain("✓")
-  })
+  // 同上：真跑一次渲染（5.7 s），默认 5 s 超时会先一步把测试打断。
+  test.skipIf(!hasExe)(
+    "接受文件路径（不是只有内联 JSON）",
+    async () => {
+      const ctx = await makeCtx()
+      const p = join(ctx.workdir, "s.json")
+      await writeFile(p, JSON.stringify(goodScript), "utf8")
+      const out = await outOf(scriptCheckTool, { script: "s.json" }, ctx)
+      expect(out).toContain("✓")
+    },
+    60_000,
+  )
 
   test.skipIf(!hasExe)("JSON 语法错不会被误报成字段错", async () => {
     const ctx = await makeCtx()
