@@ -1,0 +1,56 @@
+{
+  "camera": {
+    "eye": [
+      0,
+      0.55,
+      3.4
+    ],
+    "target": [
+      0,
+      0.5,
+      0
+    ],
+    "fov": 34
+  },
+  "lighting": {
+    "light_from": [
+      0.45,
+      0.8,
+      0.55
+    ],
+    "ambient": 0.38,
+    "diffuse": 0.85,
+    "rim": 0.5,
+    "exposure": 1.05,
+    "env_sky": [
+      0.58,
+      0.66,
+      0.86
+    ],
+    "env_ground": [
+      0.16,
+      0.15,
+      0.2
+    ],
+    "env_strength": 0.9
+  },
+  "shadow": {
+    "strength": 0.0
+  },
+  "objects": [
+    {
+      "name": "figure",
+      "gltf": "assets/models/gltf/CesiumMan.glb",
+      "gltf_use_material": false,
+      "metallic": 0.15,
+      "roughness": 0.5,
+      "specular": 0.4,
+      "translate": [
+        0,
+        0,
+        0
+      ],
+      "color": "#c8895c"
+    }
+  ]
+}

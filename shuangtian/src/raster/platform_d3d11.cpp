@@ -3468,6 +3468,15 @@ cbuffer Scene : register(b0) {
  // 实测症状：写 `emission: 5.0` 在 GPU 腿上一整帧像素不变（与不写逐字节相同），
  // 而探针确认材质值已正确传到 `set_material`——就是着色器里没这段。
  float4 g_emissive;
+ // ## 材质基色——与 `Material::base_color` 逐字对应
+ //   g_base.xyz = 基色（线性）
+ //   g_base.w   = 是否启用（0 = 用顶点色）
+ //
+ // ⚠ GPU 腿原本**完全没有 base_color**：软件腿的 `shade_surface` 在读它，
+ // GPU 腿只读顶点色。后果：glTF 白模（顶点色恒为白）在剧本里写
+ // `"color": "#c8895c"` 完全不生效，永远是白的。
+ // 这是「两条腿功能不同步」的又一个实例（前三次：环境反射、自发光、纹理标志）。
+ float4 g_base;
 };
 
 struct VsIn {
@@ -3526,7 +3535,8 @@ float4 ps_scene3d(VsOut input) : SV_Target {
  float scale = (g_light.w * diffuse_weight + diffuse * g_tune.x * diffuse_weight + rim) * g_tune.z;
   // g_tune.w > 0.5 = 本网格带 UV 且已设纹理 → 采样并与顶点色相乘
   // （与软件腿同一口径：顶点色当基础色/染色，纹理提供图案）
-  float3 base = input.color;
+  // 基色：剧本指定时**取代**顶点色（与软件腿 `material_.base_color_set` 同语义）
+  float3 base = (g_base.w > 0.5) ? g_base.xyz : input.color;
   if (g_tune.w > 0.5) {
     float3 texel = g_scene_texture.Sample(g_scene_sampler, input.uv).rgb;
     // ## 纹理字节是 sRGB，必须解码到线性（与 C++ 侧 `sample_texture` 逐字对应）
@@ -3661,6 +3671,8 @@ struct Scene3dParams {
   std::array<float, 4> env_ground{};
   /// 自发光：xyz = 颜色，w = 带符号强度（负 = 纯发光体）
   std::array<float, 4> emissive{};
+  /// 材质基色：xyz = 颜色，w = 是否启用
+  std::array<float, 4> base{};
 };
 static_assert(sizeof(Scene3dParams) % 16 == 0, "常量缓冲必须是 16 字节的倍数");
 
@@ -4171,6 +4183,14 @@ class GpuScene3d final : public st::raster::Scene3D {
       const math::Vec3 color = material_.emissive_color_set ? material_.emissive_color
                                                             : math::Vec3{1.0f, 1.0f, 1.0f};
       params.emissive = {color.x, color.y, color.z, strength};
+    }
+    // 基色：`base_color_set` 为真时用材质色取代顶点色。
+    // glTF 白模靠这一条才能被剧本上色（其顶点色恒为白）。
+    {
+      const math::Vec3 base_color =
+          material_.base_color_set ? material_.base_color : math::Vec3{1.0f, 1.0f, 1.0f};
+      params.base = {base_color.x, base_color.y, base_color.z,
+                     material_.base_color_set ? 1.0f : 0.0f};
     }
 
     // 从这一行到 DrawIndexed 全部在锁内：常景缓冲 Map、状态设置、绘制

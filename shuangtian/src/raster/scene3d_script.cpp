@@ -1302,6 +1302,18 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
               }
             }
           } else {
+            // ## `gltf_use_material=false` 时**必须**把剧本的 color 铺成基色
+            //
+            // 原先这里只设了 metallic/roughness/specular/opacity，漏了 base_color。
+            // 而 glTF 网格的顶点色恒为白（导出器不写颜色），于是：
+            // 剧本里写 `"color": "#c08a5a"` 完全无效，模型永远是**一块白模**。
+            //
+            // 这正是“白模接入”要解决的最后一环——几何来自 glTF，
+            // 材质/颜色由剧本控制，两者才能各自发挥长处。
+            material.base_color = math::Vec3{static_cast<float>(obj.color.r) / 255.0f,
+                                             static_cast<float>(obj.color.g) / 255.0f,
+                                             static_cast<float>(obj.color.b) / 255.0f};
+            material.base_color_set = true;
             material.metallic = obj.metallic;
             material.roughness = obj.roughness;
             material.specular = obj.specular;
