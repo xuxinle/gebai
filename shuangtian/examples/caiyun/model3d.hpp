@@ -99,7 +99,7 @@ struct Model3dPose {
 ///        见 model3d.cpp 里 `kTargetAcceptsTexture` 的说明）
 void paint_model3d(st::raster::Surface& canvas, const Layer& layer, st::math::Rect box,
                    float local_time, float scene_duration, float alpha,
-                   std::string_view asset_basis, bool target_is_gpu);
+                   std::string_view asset_basis, bool target_is_gpu = false);
 
 /// 把一个**三维组**画进画布：组内所有 `model_group` 相同的图层共用一个场景。
 ///

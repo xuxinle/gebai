@@ -1505,6 +1505,8 @@ auto run_app(int argc, char** argv) -> int {
     if (const char* gpu_env = std::getenv("CAIYUN_GPU"); gpu_env != nullptr) {
       job.use_gpu = std::string(gpu_env) != "0";
     }
+    ST_LOG_INFO("裁云：导出设置 use_gpu={} workers=CAIYUN_WORKERS={}", job.use_gpu ? 1 : 0,
+                std::getenv("CAIYUN_WORKERS") != nullptr ? std::getenv("CAIYUN_WORKERS") : "auto");
     render_launched = page->start_render(job);
     st::log::out("渲染启动：{}x{} → {}\n", job.width, job.height, job.output_file);
   }

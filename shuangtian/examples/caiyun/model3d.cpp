@@ -1,6 +1,10 @@
+#include <typeinfo>
+#include <cstdio>
 /// 裁云 · 三维图层实现（见 `model3d.hpp` 的设计说明）。
 
 #include "model3d.hpp"
+
+#include "st/raster/gpu.hpp"
 
 #include "st/raster/primitives.hpp"
 
@@ -829,7 +833,33 @@ void paint_model3d(st::raster::Surface& canvas, const Layer& layer, st::math::Re
     // 换个目录导出就变成「模型不见了」。
     st::raster::SceneSpec resolved = *spec;
     resolved.asset_basis = std::string(asset_basis);
-    st::raster::Canvas offscreen{width, height, 1.0f};
+    // ## offscreen 必须与主画布**同后端**
+    //
+    // 这是零拷贝能否生效的最后一环（实测定位）。
+    //
+    // 旧实现固定建软件 `Canvas`：三维画进它 → `draw_canvas` 再拷到主画布。
+    // 即便主画布是 GPU 画布，这一层中转也会让三维的 `end_frame` 看到
+    // "目标 backend=software" → 走回读 → 零拷贝被拒。
+    //
+    // 实测表现：设了 `CAIYUN_GPU=1`，日志里仍反复出现
+    // "零拷贝合成被拒（目标 backend=software）→ 回读"，且三维场景明显变慢
+    // （GPU 画布 265ms/帧 vs 软件画布 54ms/帧——回读比不画还贵）。
+    //
+    // 同后端之后：三维结果留在显存，`draw_canvas` 也是同后端纹理合成，
+    // 全程不出显存（`tests/gpu_zero_copy_test.cpp` 量到 0.85ms vs 15ms）。
+    std::unique_ptr<st::raster::Surface> offscreen_storage;
+    if (bool needs_gpu_offscreen = (canvas.native_texture().handle != nullptr);
+        needs_gpu_offscreen) {
+      auto created = st::raster::gpu::create_canvas(width, height, 1.0f, {});
+      if (created.has_value()) {
+        offscreen_storage = std::move(*created);
+      } else {
+      }
+    }
+    if (offscreen_storage == nullptr) {
+      offscreen_storage = std::make_unique<st::raster::Canvas>(width, height, 1.0f);
+    }
+    st::raster::Surface& offscreen = *offscreen_storage;
     // ## 必须用 `render_scene_at_into`（带时间），而不是 `render_scene_into`
     //
     // 实测：用静态版本时 `model_script` 里的 `animation` **完全被忽略**——
@@ -912,6 +942,29 @@ void paint_model3d(st::raster::Surface& canvas, const Layer& layer, st::math::Re
   // “我用的是哪条腿”——降级链只在框架里实现一次。
   st::raster::DrawOptions options{};
   options.opacity = std::clamp(alpha, 0.0f, 1.0f);
+  // ## mesh 分支同样要经过**同后端** offscreen（2026-10-31）
+  //
+  // 这条分支（`model_shape` 单网格，非 `model_script`）之前直接
+  // `end_frame(canvas, ...)`。当 `canvas` 是 GPU 画布时本可直接零拷贝——
+  // 但实际上裁云传进来的 `canvas` 常是**软件画布**（`project.cpp` 里
+  // 片段/转场的中间画布），于是三维又一次走回读。
+  //
+  // 统一成：先渲进与目标同后端的 offscreen，再 `draw_canvas` 合成。
+  // 目标本身是软件画布时，offscreen 也是软件——行为与旧实现一致，无额外代价。
+  if (canvas.native_texture().handle != nullptr) {
+    auto created = st::raster::gpu::create_canvas(width, height, 1.0f, {});
+    if (created.has_value()) {
+      st::raster::Surface& offscreen = **created;
+      const float draw_opacity = std::clamp(alpha, 0.0f, 1.0f);
+      scene->end_frame(offscreen, st::math::Rect{0.0f, 0.0f, static_cast<float>(width),
+                                                 static_cast<float>(height)},
+                       draw_opacity);
+      st::raster::DrawOptions blit_options{};
+      blit_options.opacity = draw_opacity;
+      canvas.draw_canvas(offscreen, box, blit_options);
+      return;
+    }
+  }
   scene->end_frame(canvas, box, options.opacity);
 }
 
@@ -1084,7 +1137,31 @@ struct Placement {
   // 形成“贴地”的过渡），但必须在**桌面之后**（否则会被桌面盖住）。
   // 三维场景内部无法做到这个顺序（它只有深度缓冲、没有图层概念），
   // 所以 3D 先整体合成、随后在画布上用二维椭圆补阴影。
-  scene->end_frame(canvas, box, options.opacity);
+  // ## 三维结果先落进**与目标同后端**的 offscreen，再合成（2026-10-31）
+  //
+  // 直接 `end_frame(canvas, ...)` 时，若 `canvas` 是软件画布（`project.cpp`
+  // 里的片段/转场中间画布就是这样），三维会走显存回读——实测 800×450
+  // 三个物体从 53 ms/帧 退化到 307 ms/帧。
+  //
+  // 同后端之后目标能直接采样纹理（零拷贝）。后面的二维接触阴影仍然画在
+  // `canvas` 上，顺序不变。
+  {
+    std::unique_ptr<st::raster::Surface> stage_storage;
+    if (canvas.native_texture().handle != nullptr) {
+      auto created = st::raster::gpu::create_canvas(width, height, 1.0f, {});
+      if (created.has_value()) stage_storage = std::move(*created);
+    }
+    if (stage_storage != nullptr) {
+      st::raster::Surface& stage = *stage_storage;
+      stage.clear(st::math::Color{0, 0, 0, 0});
+      scene->end_frame(stage, st::math::Rect{0.0f, 0.0f, static_cast<float>(width),
+                                             static_cast<float>(height)},
+                       options.opacity);
+      canvas.draw_canvas(stage, box, options);
+    } else {
+      scene->end_frame(canvas, box, options.opacity);
+    }
+  }
 
   // ── 接触阴影：在**二维层**画柔和椭圆 ──
   //
