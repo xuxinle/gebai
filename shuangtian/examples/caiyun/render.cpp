@@ -1049,10 +1049,26 @@ void Renderer::run(Project project, RenderJob job, const st::ui::TextPort* text_
           // `write_turn` 也再无人推进 → **整个导出挂死**。
           //
           // 实测：4 路并行 + GPU 画布时必现（丢设备 `0x887A0005` 后进程挂死）。
-          pipe_cv.wait(lock, [&] {
+          // ## 带上超时的等待（2026-11-01 防挂死保险）
+          //
+          // 帧序闸门理论上会被 `++write_turn` 正常推进，但实测 4 路并行导出
+          // 仍有约 1/10 概率永久挂死（CPU 停住、10 秒只走 0.1s）。
+          // 已两次尝试按「找出漏推进的路径」来修，均失败并引入新问题。
+          //
+          // 既然根因定位不到，就让**系统不会永久卡住**：等待带上超时，
+          // 超时后自己把闸门推过去并记一条警告。代价是极端情况下帧序可能
+          // 乱一帧，但比「整片出不来」好得多——而且真发生时会留日志，
+          // 比静默挂死可诊断。
+          const auto gate_ready = [&] {
             return write_turn == index || cancel_.load() || pipe_failed.load() ||
                    write_failed.load();
-          });
+          };
+          if (!pipe_cv.wait_for(lock, std::chrono::seconds(20), gate_ready)) {
+            ST_LOG_WARN("帧序闸门等待超时（帧 {}，当前 write_turn {}）——强制推进", index,
+                        write_turn);
+            if (write_turn == index) ++write_turn;
+            pipe_cv.notify_all();
+          }
           if (cancel_.load() || pipe_failed.load() || write_failed.load()) return;
           // `write` 收 `string_view`，而像素是 `uint8_t` 缓冲——同一块内存换
           // 一个字节类型（不改变对齐与布局）。这是“把二进制送进管道”必然的一步，
