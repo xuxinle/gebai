@@ -895,6 +895,47 @@ clawd 同类），都是靠“抽帧发现画面空了”才定位。
 
 ## P1
 
+- [ ] **测试目标里 `#include` 进来的 `.cpp` 改了，`st build` 报“重编 0”**
+
+  **现象**：`tests/gedou_rl_test.cpp` 用 `#include "examples/gedou/rl_env.cpp"`
+  把实现编进测试（本仓 `gedou_test` / `caiyun_carry_test` 同构）。
+  改 `rl_env.cpp` 后跑 `st build --profile debug`，输出
+  `单元 180（重编 0 / 命中缓存 180）`，测试行为**不变**。
+
+  **已取证的（都不是原因）**：
+  - `build/debug/obj/<tests_gedou_rl_test>.cpp.o.d` 里**有**
+    `examples/gedou/rl_env.cpp` 与 `rl_env.hpp`；
+  - `.o.meta` 里**有** `rl_env.cpp<TAB>9910634641080394083`；
+  - 不是“注释被优化掉”：用 `std::fputs("ZZREVMARK", stderr)` 验证过，
+    改动**能**进测试二进制（那次也是“重编 0”，说明缓存命中判定为“无变化”）；
+  - `st build --force` 全量重编后也一样。
+
+  **对照**：`tests/gedou_test.cpp` 同样 `#include` 了 `examples/gedou/ai.cpp`，
+  改 `ai.cpp` 后回退→测试**能**变红。所以不是“所有 include 进来的 .cpp 都失效”，
+  具体触发条件待查。
+
+  **2026-11-01 又收窄了一步**：同一批案例里，回退 `examples/gedou/policy.cpp`
+  （也是被 `#include` 进测试）时的断言**能**变红（`policy_single_layer_...` 红了），
+  而回退 `rl_env.cpp` 的不能。两者的差别：`rl_env.cpp` **同时**被
+  `gedou_rl` target 当普通源文件编译（`st.pkg` 的 `sources` 里列了它），
+  `policy.cpp` 也是——但只有 `rl_env.cpp` 失效。
+  下一步应看 `build/debug/obj/` 里这两份对象是否共用缓存目录。
+
+  **影响**：`tools/gedou_rl_reverse_verify.py` 的三个案例（egocentric / reward 符号 /
+  冷却）目前**无法**用“回退→变红”证明，只能靠代码审阅。
+
+  **方向**：查 `needs_rebuild` 对“测试单元”的快照来源——`--force` 后仍命中，
+  说明判定未走到内容哈希，而是走了更粗的“测试源码 stamp”快路径
+  （`build.cpp: test_source_stamp` 只对 `tests/*_test.cpp` 取哈希）。
+
+  **已定位到具体位置（2026-11-01，下一步可直接改这里）**：
+  `src/pkg/build.cpp` 的 `test_binary_is_stale()` → `test_source_stamp(test_files)`
+  只对 `tests/*_test.cpp` 自身取内容哈希。修法：额外遍历测试单元的 `.d`，
+  把其中列出的每个依赖与 `.meta` 里的哈希逐个比对（`.d` 本来就包含被 include 的
+  `.cpp`，且 `.meta` 里也记了 `rl_env.cpp` 的哈希，所以信息齐备）。
+  由于会动到**所有测试**的增量判定，需求先补一条回归测试
+  （“改被 include 的 .cpp → `st build` 必须真重编”）再改。
+
 - [ ] **GPU `present()` 的“调用方先提交”契约无法被满足（已改为自提交，但缺回归测试）**
 
   **现象**：`Presenter::present()` 原本要求“调用方已 `submit_deferred_locked()`”，

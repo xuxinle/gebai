@@ -38,6 +38,10 @@
 | `hot_reload_e2e.py` | xmlapp | **改文件即生效**（真进程）：改 XML 换树 / 改 JS 重装且绑定不叠 / 写错 XML 不清界面 / 写错 JS 不丢逻辑 | `py -3 tools/hot_reload_e2e.py` |
 | `gedou_e2e.py` | gedou | **类拳皇对战**的 7 组断言：判定只在判定帧出盒 / 命中扣血 = 招式表 / 判定盒在朝向方向 / 必杀破防且击倒 / 血空→over+胜者胜利姿态+KO / 打开判定盒画面真变（像素哈希 + 亮度统计）/ AI 同种子两跑逐值一致 | `py -3 tools/gedou_e2e.py` |
 | `gedou_reverse_verify.py` | gedou | **逆向验证**（非普通断言）：逐条把修复回退→确认重编成功→确 e2e/单测变红→恢复回绿。7 个案例（含一个"应当保持绿"的对照：期望值与实现同源） | `py -3 tools/gedou_reverse_verify.py [--only 案例名]` |
+| `gedou_balance_check.py` | gedou | **训练前的平衡体检**：8 个固定动作 × 3 档难度矩阵。判据写死：任一固定动作胜率 ≥ 90% 即"无脑必胜"，训练没意义（实测：不体检直接训，"一直按踢"100% 胜） | `py -3 tools/gedou_balance_check.py --episodes 80` |
+| `gedou_rl_train.py` | gedou | **PPO 训练**：collect→train→eval 循环，每次导出自动跑前向自检（torch vs C++ 逐值），输出权重 JSON + 报告（含随机/手写两条基线） | `py -3 tools/gedou_rl_train.py --rounds 26 --episodes 320 --eval-episodes 240 --entropy 0.05` |
+| `gedou_rl_plot.py` | gedou | 把训练报告画成曲线（胜率/熵/回报三联，基线水平线并排） | `py -3 tools/gedou_rl_plot.py` |
+| `gedou_rl_reverse_verify.py` | gedou | RL 链路的**逆向验证**：前向矩阵/自我中心观测/奖励符号/冷却/观测维度漂移，五个回退各自必须让对应用例变红（三条因构建缺陷标了 skip，见 BACKLOG P1） | `py -3 tools/gedou_rl_reverse_verify.py [--only 案例名]` |
 
 ## 一键全跑
 

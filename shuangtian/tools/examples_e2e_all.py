@@ -81,9 +81,17 @@ KNOWN_EXCLUDED = {
     # 与「示例 e2e 全跑」的定位（改完代码跑一遍）不同——属于专项验证，
     # 改 gedou 的判定/姿态时手工跑（见 gedou/README.md）。
     "gedou_reverse_verify.py",
+    # RL 训练链路：三个脚本各自的定位不同，且都不属于“改完代码跑一遍”的预算：
+    #   balance_check 跑 24 个固定策略组合（~1 分钟）——改**战斗数值**时手跑；
+    #   rl_train 要几分钟且输出权重（不是布尔断言）；
+    #   rl_reverse_verify 自己会回退源码+重编（~10 分钟）。
+    "gedou_balance_check.py",
+    "gedou_rl_train.py",
+    "gedou_rl_plot.py",
+    "gedou_rl_reverse_verify.py",
 }
 
-DEV_APPS = ["gallery", "gbcode", "louyue", "caiyun", "xmlapp", "gedou"]
+DEV_APPS = ["gallery", "gbcode", "louyue", "caiyun", "xmlapp", "gedou", "gedou_rl"]
 
 
 def bin_path(profile: str, app: str) -> Path:
