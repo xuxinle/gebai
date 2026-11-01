@@ -1,5 +1,7 @@
 #include "game_view.hpp"
 
+#include "battery/embed.hpp"
+
 #include "st/core/log.hpp"
 
 #include <algorithm>
@@ -43,6 +45,8 @@ GameView::GameView() {
   set_focusable(true);   // 键盘要能落到这里（否则方向键被 Tab 焦点环吃掉）
   style().background = Color{0x0B, 0x0E, 0x16, 0xFF};
   match_ = std::make_unique<Match>(0, 1, Arena{});
+  load_portraits();
+
   // 两个角色的装配（glTF 本体 + 服装）。建一次就缓存。
   // 模型缺失时 `create` 返回 nullptr——此时退化成不画角色（游戏仍可玩）。
   fighter_rig_[0] = FighterRig::create("assets/models/gltf/CesiumMan.glb", fighter_look(0));
@@ -75,6 +79,17 @@ void GameView::set_battle_mode(BattleMode mode) {
   if (mode == BattleMode::AiVsAi) {
     dummy_ = false;
     set_ai_enabled(true);
+  }
+}
+
+// 立绘加载：从内嵌字节解码（`b::embed` 在编译期把 PNG 塞进二进制）。
+//
+// 放在构造里一次做完：解码是逐像素的（437×640 ≈ 28 万像素），每帧做会掉帧。
+void GameView::load_portraits() {
+  portrait_[0] = CharacterPortrait::load(b::embed<"examples/gedou/assets/chars/donut-42.png">());
+  portrait_[1] = CharacterPortrait::load(b::embed<"examples/gedou/assets/chars/husheng-42.png">());
+  if (!portrait_[0].valid() || !portrait_[1].valid()) {
+    st::log::out("角色立绘缺失，退回矢量绘制\n");
   }
 }
 
@@ -992,18 +1007,56 @@ void GameView::paint_fighters_2d(const st::ui::RenderContext& context,
     if (fighter.apple_form > 0) continue;   // 苹果形态由特效层画
     const Pose pose = match_->world_pose(side);
     const auto& palette = fighter_palette(std::min(fighter.profile, kFighterCount - 1));
-
-    FighterDrawOptions options{};
-    options.flash = fighter.hitstun > 0 ? 0.55f : 0.0f;
-    options.facing_right = fighter.facing_right;
-    // 影子随离地高度变淡变小（落地感）
     const float ground_y = match_->arena().ground;
-    const float lift =
-        std::clamp((ground_y - std::max(pose.foot_front.y, pose.foot_back.y)) / 90.0f, 0.0f, 1.0f);
-    options.shadow_alpha = 0.38f * (1.0f - lift * 0.55f);
-    options.shadow_scale = 1.0f - lift * 0.30f;
+    const float lowest = std::max(pose.foot_front.y, pose.foot_back.y);
+    const float lift = std::clamp((ground_y - lowest) / 90.0f, 0.0f, 1.0f);
 
-    draw_fighter(canvas, pose, palette, options);
+    // ── 落地阴影（两种绘制方式共用）──
+    {
+      const float middle_x = (pose.foot_front.x + pose.foot_back.x) * 0.5f;
+      const float radius = pose.head_radius * (1.5f - lift * 0.45f);
+      math::Path shadow;
+      shadow.add_ellipse(math::Rect{middle_x - radius, ground_y - radius * 0.20f, radius * 2.0f,
+                                    radius * 0.40f});
+      canvas.fill_path(shadow,
+                       st::raster::Paint::solid(math::Color{
+                           0x00, 0x00, 0x00,
+                           static_cast<std::uint8_t>(200.0f * 0.38f * (1.0f - lift * 0.55f))}));
+    }
+
+    // ── 选哪种画法 ──
+    //
+    // 默认用**立绘**（AI 出图质量远高于手绘矢量）。
+    // 只有一种情况切矢量：**出招的判定帧**——那时手必须真的伸到判定位置，
+    // 否则"看着没打中、判定却中了"。
+    //
+    // 注意判据用 `move_frame` 落在 active 窗口内，而不是"整招都切"：
+    // 起手与收招时手位置变化不大，立绘看起来更连贯（切太早会闪）。
+    const MoveId move = fighter.move;
+    const bool in_active_window =
+        is_attack(move) && fighter.move_frame >= fighter.timing.startup &&
+        fighter.move_frame < fighter.timing.startup + fighter.timing.active;
+    const CharacterPortrait& portrait =
+        portrait_[std::min(static_cast<std::size_t>(side), static_cast<std::size_t>(1))];
+    const bool use_portrait = portrait.valid() && !in_active_window;
+
+    if (use_portrait) {
+      // 立绘高度：与矢量的身高对齐。
+      //
+      // 从骨架量：脚底（foot.y）→ 头顶（head.y - head_radius）。
+      // 用**实测的骨架跨度**而不是"head_radius × 常数"：
+      // 前者随角色缩放自动正确，后者一旦改 kBodyScale 就会失调
+      //（实测：按 6.4 倍算出来只有正确高度的约 55%，人物看着像小人偶）。
+      const float top = pose.head.y - pose.head_radius;
+      const float height = std::max(40.0f, lowest - top);
+      portrait.draw(canvas, fighter.x, lowest, height, fighter.facing_right);
+    } else {
+      FighterDrawOptions options{};
+      options.flash = fighter.hitstun > 0 ? 0.55f : 0.0f;
+      options.facing_right = fighter.facing_right;
+      options.shadow_alpha = 0.0f;   // 影子已单独画过
+      draw_fighter(canvas, pose, palette, options);
+    }
   }
 }
 

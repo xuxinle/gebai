@@ -188,8 +188,32 @@ auto fighter_palette(std::size_t profile_index) -> const FighterPalette& {
   return profile_index == 0 ? kDonut : kHusheng;
 }
 
-void draw_fighter(st::raster::Surface& canvas, const Pose& pose, const FighterPalette& palette,
+void draw_fighter(st::raster::Surface& canvas, const Pose& raw_pose, const FighterPalette& palette,
                   const FighterDrawOptions& options) {
+  // ── 身高归一化 ──
+  //
+  // 矢量造型里所有尺寸都由 `head_radius` 派生（头 0.82、肩 1.32、上臂 0.50…），
+  // 所以"整体多大"完全取决于这一个值。骨架给的 `head_radius` 是按**判定盒**
+  // 定的（约 19 像素 ⇒ 身高仅约 120px），而立绘按骨架的"脚底到头顶"摆位
+  //（约 240px）——两者差一倍，切画法时人物会突然变小（实测截图里就是这样）。
+  //
+  // 这里把 `head_radius` 统一放大到"与骨架实际身高匹配"：
+  // 从 foot.y 到 (head.y - radius) 是真实身高，除以 6.0（矢量的头身比）即为目标半径。
+  Pose pose = raw_pose;
+  {
+    const float foot_y = std::max(raw_pose.foot_front.y, raw_pose.foot_back.y);
+    const float top_y = raw_pose.head.y - raw_pose.head_radius;
+    const float span = foot_y - top_y;
+    if (span > 10.0f) {
+      // 6.0：从脚底到头顶约等于 6 个头半径（这里画出来头约 0.82 半径，
+      // 即头顶到脚底 ≈ 7.3 个头半径 —— 取 6.0 让角色显得更"Q"一点，
+      // 与立绘的动漫比例接近）。
+      const float target_radius = span / 6.0f;
+      if (target_radius > raw_pose.head_radius * 0.5f) {
+        pose.head_radius = target_radius;
+      }
+    }
+  }
   const auto tint = [&](Color color) {
     // 受击闪白：把颜色往白色推（保留 alpha）。
     if (options.flash > 0.001f) {

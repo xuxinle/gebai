@@ -20,6 +20,7 @@
 #include "ai.hpp"
 #include "fight.hpp"
 #include "battle_select.hpp"
+#include "char_portrait.hpp"
 #include "fighter_art.hpp"
 #include "fighter_rig.hpp"
 #include "policy.hpp"
@@ -179,7 +180,7 @@ class GameView : public st::ui::Element {
   /// 3D 角色批量渲染（两个角色必须在同一次 begin/end_frame 里）。
   void paint_fighters_3d(const st::ui::RenderContext& context,
                          st::raster::Surface& canvas) const;
-  /// 2D 矢量角色绘制（取代 3D；两条路径都在，方便对比）。
+  /// 2D 角色绘制：待机/移动/受击用**立绘**，出招用**矢量**（肢体要跟着动）。
   void paint_fighters_2d(const st::ui::RenderContext& context, st::raster::Surface& canvas) const;
   /// 角色的 2D 覆盖层（影子/防御罩/必杀环/连击数）。
   void paint_fighter_overlays(const st::ui::RenderContext& context,
@@ -199,6 +200,10 @@ class GameView : public st::ui::Element {
   void paint_banner(const st::ui::RenderContext& context, st::raster::Surface& canvas) const;
 
   std::unique_ptr<Match> match_{};
+  /// 加载两张立绘（构造时一次）。
+  void load_portraits();
+  /// 两个角色的立绘（AI 生成）。缺失时自动退回矢量绘制。
+  CharacterPortrait portrait_[2]{};
 
   // —— 3D 角色渲染 ——
   //
