@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <utility>
 
 #include "st/codec/png.hpp"
 #include "st/core/log.hpp"
@@ -111,6 +112,22 @@ void CharacterPortrait::draw(st::raster::Surface& canvas, float center_x, float 
   const st::raster::Surface* source = surface_.get();
   if (!facing_right && mirrored_ != nullptr) source = mirrored_.get();
   canvas.draw_canvas(*source, destination);
+}
+
+// ── ActionSprites ──
+
+void ActionSprites::set(std::size_t action, CharacterPortrait portrait) {
+  if (action >= kActionCount) return;
+  if (portrait.valid()) any_valid_ = true;
+  sprites_[action] = std::move(portrait);
+}
+
+auto ActionSprites::get(std::size_t action) const -> const CharacterPortrait& {
+  static const CharacterPortrait kEmpty{};
+  if (action < kActionCount && sprites_[action].valid()) return sprites_[action];
+  // 回退到 idle（`MoveId::Idle` 的数值是 0）
+  if (sprites_[0].valid()) return sprites_[0];
+  return kEmpty;
 }
 
 }  // namespace gedou

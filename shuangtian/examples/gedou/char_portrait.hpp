@@ -26,6 +26,7 @@
 ///
 /// 立绘按**骨架的包围盒**缩放摆位（脚底对齐 `pose` 的最低点、身高对齐髋到头）。
 /// 这样即使立绘画得比矢量版高一点，也不会出现"贴图浮在地面上方"。
+#include <array>
 #include <string_view>
 #include <vector>
 
@@ -64,5 +65,36 @@ class CharacterPortrait {
   /// 比"每帧逐像素镜像"或"改框架加字段"都便宜。
   std::unique_ptr<st::raster::Surface> mirrored_{};
 };
+
+/// 一个角色的**整套动作立绘**（每个 `MoveId` 一张）。
+///
+/// ## 为什么按 MoveId 索引而不是按名字查表
+///
+/// 每帧每个角色都要取一张图，走 `std::map<string>` 查表在 60Hz × 2 角色下
+/// 是白白的开销；而且 `MoveId` 本来就是"这一帧在干嘛"的唯一真值，
+/// 用数组直接索引既快又不会拼错名字。
+///
+/// ## 缺图行为
+///
+/// 某动作没有图（比如打桩模式用不到的动作）时回退到 `idle`；
+/// 连 `idle` 都没有才判定整张立绘不可用（`valid() == false`），
+/// 调用方退回矢量绘制。
+class ActionSprites {
+ public:
+  /// 动作数（与 `MoveId::Count` 对齐）。
+  static constexpr std::size_t kActionCount = 18;
+
+  /// 从内嵌字节建一张（`action` 是 `MoveId` 的数值）。
+  void set(std::size_t action, CharacterPortrait portrait);
+  /// 取某动作的立绘；没有则返回 `idle`；再没有返回空。
+  [[nodiscard]] auto get(std::size_t action) const -> const CharacterPortrait&;
+  /// 至少有一张可用（用于决定"要不要退回矢量"）。
+  [[nodiscard]] auto valid() const noexcept -> bool { return any_valid_; }
+
+ private:
+  std::array<CharacterPortrait, kActionCount> sprites_{};
+  bool any_valid_{false};
+};
+
 
 }  // namespace gedou

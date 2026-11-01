@@ -58,6 +58,8 @@ GameView::GameView() {
     st::log::out("角色本体缺失：角色将不绘制（判定与操作不受影响）\n");
   }
 }
+GameView::~GameView() = default;
+
 
 void GameView::set_record_dir(std::string dir, int stride) {
   record_dir_ = std::move(dir);
@@ -138,38 +140,93 @@ void GameView::set_battle_mode(BattleMode mode) {
 //
 // 放在构造里一次做完：解码是逐像素的（437×640 ≈ 28 万像素），每帧做会掉帧。
 void GameView::load_portraits() {
-  portrait_[0] = CharacterPortrait::load(b::embed<"examples/gedou/assets/chars/donut-42.png">());
-  portrait_[1] = CharacterPortrait::load(b::embed<"examples/gedou/assets/chars/husheng-42.png">());
-  if (!portrait_[0].valid() || !portrait_[1].valid()) {
-    st::log::out("角色立绘缺失，退回矢量绘制\n");
+  // 每个动作一张图（SDXL 生成，见 `tools/sdxl_actions.py`）。
+  //
+  // 表驱动而不是逐行 `embed<...>`：17 个动作 × 2 角色 = 34 处调用，
+  // 手写必然漏项，而漏项的表现是"某个招式突然变回矢量画风"——很难查。
+  // 表里列全，编译期就能对上 `MoveId` 的名字。
+  // 清单（加动作时照这个补图；`MoveId::Count` 与 `ActionSprites::kActionCount` 对齐）：
+  //   idle / walk / guard / light / heavy / kick / special /
+  //   donut_toss / puff_spray / waist_grab / apple_drop / apple_guard / apple_life /
+  //   hurt / knockdown / victory / defeat
+  //
+  // ⚠ `b::embed<"...">()` 的路径必须是**编译期常量字符串**，
+  // 不能从表里循环取——所以下面是逐项展开写，不是重复劳动。
+  sprites_[0].set(static_cast<std::size_t>(MoveId::Idle),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/donut-idle.png">()));
+  sprites_[0].set(static_cast<std::size_t>(MoveId::Walk),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/donut-walk.png">()));
+  sprites_[0].set(static_cast<std::size_t>(MoveId::Guard),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/donut-guard.png">()));
+  sprites_[0].set(static_cast<std::size_t>(MoveId::Light),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/donut-light.png">()));
+  sprites_[0].set(static_cast<std::size_t>(MoveId::Heavy),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/donut-heavy.png">()));
+  sprites_[0].set(static_cast<std::size_t>(MoveId::Kick),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/donut-kick.png">()));
+  sprites_[0].set(static_cast<std::size_t>(MoveId::Special),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/donut-special.png">()));
+  sprites_[0].set(static_cast<std::size_t>(MoveId::DonutToss),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/donut-donut_toss.png">()));
+  sprites_[0].set(static_cast<std::size_t>(MoveId::PuffSpray),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/donut-puff_spray.png">()));
+  sprites_[0].set(static_cast<std::size_t>(MoveId::WaistGrab),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/donut-waist_grab.png">()));
+  sprites_[0].set(static_cast<std::size_t>(MoveId::AppleDrop),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/donut-apple_drop.png">()));
+  sprites_[0].set(static_cast<std::size_t>(MoveId::AppleGuard),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/donut-apple_guard.png">()));
+  sprites_[0].set(static_cast<std::size_t>(MoveId::AppleLife),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/donut-apple_life.png">()));
+  sprites_[0].set(static_cast<std::size_t>(MoveId::Hurt),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/donut-hurt.png">()));
+  sprites_[0].set(static_cast<std::size_t>(MoveId::KnockDown),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/donut-knockdown.png">()));
+  sprites_[0].set(static_cast<std::size_t>(MoveId::Victory),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/donut-victory.png">()));
+  sprites_[0].set(static_cast<std::size_t>(MoveId::Defeat),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/donut-defeat.png">()));
+
+  sprites_[1].set(static_cast<std::size_t>(MoveId::Idle),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/husheng-idle.png">()));
+  sprites_[1].set(static_cast<std::size_t>(MoveId::Walk),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/husheng-walk.png">()));
+  sprites_[1].set(static_cast<std::size_t>(MoveId::Guard),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/husheng-guard.png">()));
+  sprites_[1].set(static_cast<std::size_t>(MoveId::Light),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/husheng-light.png">()));
+  sprites_[1].set(static_cast<std::size_t>(MoveId::Heavy),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/husheng-heavy.png">()));
+  sprites_[1].set(static_cast<std::size_t>(MoveId::Kick),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/husheng-kick.png">()));
+  sprites_[1].set(static_cast<std::size_t>(MoveId::Special),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/husheng-special.png">()));
+  sprites_[1].set(static_cast<std::size_t>(MoveId::DonutToss),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/husheng-donut_toss.png">()));
+  sprites_[1].set(static_cast<std::size_t>(MoveId::PuffSpray),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/husheng-puff_spray.png">()));
+  sprites_[1].set(static_cast<std::size_t>(MoveId::WaistGrab),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/husheng-waist_grab.png">()));
+  sprites_[1].set(static_cast<std::size_t>(MoveId::AppleDrop),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/husheng-apple_drop.png">()));
+  sprites_[1].set(static_cast<std::size_t>(MoveId::AppleGuard),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/husheng-apple_guard.png">()));
+  sprites_[1].set(static_cast<std::size_t>(MoveId::AppleLife),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/husheng-apple_life.png">()));
+  sprites_[1].set(static_cast<std::size_t>(MoveId::Hurt),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/husheng-hurt.png">()));
+  sprites_[1].set(static_cast<std::size_t>(MoveId::KnockDown),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/husheng-knockdown.png">()));
+  sprites_[1].set(static_cast<std::size_t>(MoveId::Victory),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/husheng-victory.png">()));
+  sprites_[1].set(static_cast<std::size_t>(MoveId::Defeat),
+                  CharacterPortrait::load(b::embed<"examples/gedou/assets/actions/husheng-defeat.png">()));
+
+  if (!sprites_[0].valid() || !sprites_[1].valid()) {
+    st::log::out("动作立绘缺失，退回矢量绘制\n");
   }
 }
 
-auto GameView::ensure_scene3d(st::raster::Surface& canvas) const -> bool {
-  const int width = static_cast<int>(canvas.physical_width());
-  const int height = static_cast<int>(canvas.physical_height());
-  if (width <= 0 || height <= 0) return false;
-  if (scene3d_ != nullptr && scene3d_width_ == width && scene3d_height_ == height) {
-    return true;
-  }
-  auto created = st::raster::Scene3D::create(width, height);
-  if (!created.has_value()) {
-    // 没有三维能力不是致命错：退化成“不画角色”（操作与判定仍然正确）。
-    // 只警告一次，不每帧刷屏。
-    // 只在第一次失败时记一条（每帧刷屏会把日志淹掉）。
-    if (!scene3d_warned_) {
-      scene3d_warned_ = true;
-      st::log::out("三维不可用（角色不绘制）：{}。\n", created.error().to_string());
-    }
-    return false;
-  }
-  scene3d_ = std::move(*created);
-  scene3d_width_ = width;
-  scene3d_height_ = height;
-  return true;
-}
-
-GameView::~GameView() = default;
 
 void GameView::start_match(std::size_t left_profile, std::size_t right_profile) {
   match_ = std::make_unique<Match>(left_profile, right_profile, Arena{});
@@ -1079,32 +1136,41 @@ void GameView::paint_fighters_2d(const st::ui::RenderContext& context,
                            static_cast<std::uint8_t>(200.0f * 0.38f * (1.0f - lift * 0.55f))}));
     }
 
-    // ── 选哪种画法 ──
+    // ── 选哪张图 ──
     //
-    // 默认用**立绘**（AI 出图质量远高于手绘矢量）。
-    // 只有一种情况切矢量：**出招的判定帧**——那时手必须真的伸到判定位置，
-    // 否则"看着没打中、判定却中了"。
+    // 每个动作都有自己的立绘，所以**不再需要"出招切矢量"**——
+    // 这正是给所有动作出图的目的：全程同一画风，不会有"切的一瞬间变样"。
     //
-    // 注意判据用 `move_frame` 落在 active 窗口内，而不是"整招都切"：
-    // 起手与收招时手位置变化不大，立绘看起来更连贯（切太早会闪）。
+    // 只有两个例外仍用矢量：
+    // 1. 该动作的图缺失（`get` 回退到 idle 也算有图，所以只有整张都没有才会触发）；
+    // 2. 苹果形态（本体被特效层画成一颗苹果，这里不画人）。
     const MoveId move = fighter.move;
-    const bool in_active_window =
-        is_attack(move) && fighter.move_frame >= fighter.timing.startup &&
-        fighter.move_frame < fighter.timing.startup + fighter.timing.active;
-    const CharacterPortrait& portrait =
-        portrait_[std::min(static_cast<std::size_t>(side), static_cast<std::size_t>(1))];
-    const bool use_portrait = portrait.valid() && !in_active_window;
+    const CharacterPortrait& sprite =
+        sprites_[std::min(static_cast<std::size_t>(side), static_cast<std::size_t>(1))]
+            .get(static_cast<std::size_t>(move));
 
-    if (use_portrait) {
-      // 立绘高度：与矢量的身高对齐。
-      //
-      // 从骨架量：脚底（foot.y）→ 头顶（head.y - head_radius）。
-      // 用**实测的骨架跨度**而不是"head_radius × 常数"：
-      // 前者随角色缩放自动正确，后者一旦改 kBodyScale 就会失调
-      //（实测：按 6.4 倍算出来只有正确高度的约 55%，人物看着像小人偶）。
+    if (sprite.valid()) {
       const float top = pose.head.y - pose.head_radius;
       const float height = std::max(40.0f, lowest - top);
-      portrait.draw(canvas, fighter.x, lowest, height, fighter.facing_right);
+      // **角色打光**：在立绘脚下画一圈柔和光晕。
+      //
+      // 为什么需要：立绘是白底渲染的明亮动漫图，直接放在深色夜景上会
+      // "陷进背景"——实测截图里角色整体偏暗、轮廓读不出来。
+      // 加一圈地面光晕后，角色像被舞台灯照到，从背景里"站"了出来。
+      // 这是舞台演出的常规手法（不是给贴图本身调亮度，那样会失真）。
+      {
+        const float radius = pose.head_radius * 2.6f;
+        math::Path glow;
+        glow.add_ellipse(math::Rect{fighter.x - radius, lowest - radius * 0.42f, radius * 2.0f,
+                                    radius * 0.62f});
+        canvas.fill_path(
+            glow,
+            st::raster::Paint::with_gradient(st::raster::Gradient::radial(
+                math::Point{fighter.x, lowest - radius * 0.1f}, radius,
+                {{0.0f, math::Color{0xFF, 0xF0, 0xD8, 0x3C}},
+                 {1.0f, math::Color{0xFF, 0xF0, 0xD8, 0x00}}})));
+      }
+      sprite.draw(canvas, fighter.x, lowest, height, fighter.facing_right);
     } else {
       FighterDrawOptions options{};
       options.flash = fighter.hitstun > 0 ? 0.55f : 0.0f;
@@ -1112,84 +1178,6 @@ void GameView::paint_fighters_2d(const st::ui::RenderContext& context,
       options.shadow_alpha = 0.0f;   // 影子已单独画过
       draw_fighter(canvas, pose, palette, options);
     }
-  }
-}
-
-void GameView::paint_fighters_3d(const st::ui::RenderContext& context,
-                                 st::raster::Surface& canvas) const {
-  if (!ensure_scene3d(canvas)) return;
-  auto& scene = *scene3d_;
-
-  // 相机：正交投影（格斗是 2D 玩法，角色在 z=0 平面上排开；
-  // 用透视会让远近两侧的角色大小不一致，看着像"一个站得远"）。
-  st::raster::Camera camera{};
-  // 垂直可视高度 = 画布高（像素）/ kPixelPerMeter ⇒ 1 世界单位 = kPixelPerMeter 像素。
-  // 这样 3D 角色与 2D 特效（按世界像素画）尺寸完全对齐。
-  // 正交视图：让 **1 世界单位 = kPixelPerMeter 像素**，与 2D 层完全同尺度。
-  // `ortho_scale` 是**垂直**可视高度，所以按画布高算。
-  // 视口：画布 → 世界（米）。
-  //
-  // `pixels_per_meter` 决定"1 米占多少像素"。这里按**画布高度**算，
-  // 让 1.30 米高的人物约占画布高度的 62%——换窗口尺寸时角色保持同样视觉占比。
-  //
-  // ⚠ 这个值**只影响"画出来多大"**，不参与骨骼位置换算：
-  // 角色的姿态→米换算用模型自己的尺度（`FighterRig` 里的 `kScale`）。
-  // 两者混用会让骨骼非等比缩放（实测：腿被拉成面条）。
-  // 视口与相机。
-  //
-  // ## 为什么用"画布高 ≈ 3.2 米"这个固定视野
-  //
-  // 早先按角色身高反推每米像素数，结果**正交视野随窗口尺寸变化**，
-  // 而角色位置按世界像素换算——两者不匹配时角色会偏出画面（实测：人挤在右侧）。
-  //
-  // 现在改成"视野固定为 3.2 米高"，再按画布尺寸反算每米像素：
-  // - 角色 1.3 米高 ⇒ 约占画面 40%（够看清动作，也留出跳跃空间）
-  // - 改变窗口时**视野内容不变、只是像素变多**——这才是相机该有的行为
-  constexpr float kViewHeightMeters = 3.2f;
-  const float pixels_per_meter =
-      static_cast<float>(canvas.physical_height()) / kViewHeightMeters;
-  pixels_per_meter_3d_ = pixels_per_meter;
-
-  camera.projection = st::raster::ProjectionKind::Orthographic;
-  camera.ortho_scale = kViewHeightMeters;
-
-  // 相机 x 对准**两个角色的中点**（世界像素 → 米，与角色位置同一把尺）。
-  const float focus_x =
-      (match_->state(0).x + match_->state(1).x) * 0.5f / pixels_per_meter;
-  // 相机 y：让地面落在画面下方 1/4 处（上方留天空与跳跃空间）。
-  const float focus_y = kViewHeightMeters * 0.25f;
-
-  camera.eye = st::math::Vec3{focus_x, focus_y, 10.0f};
-  camera.target = st::math::Vec3{focus_x, focus_y, 0.0f};
-  camera.up = st::math::Vec3{0.0f, 1.0f, 0.0f};
-
-  scene.begin_frame(Color{0x00, 0x00, 0x00, 0x00});
-  scene.set_camera(camera);
-
-  st::raster::Lighting lighting{};
-  lighting.light_from = st::math::Vec3{0.4f, 0.85f, 0.6f};
-  lighting.ambient = 0.55f;
-  lighting.diffuse = 0.85f;
-  lighting.rim = 0.35f;
-  scene.set_lighting(lighting);
-
-  for (int side = 0; side < 2; ++side) {
-    const FighterState& fighter = match_->state(side);
-    if (fighter.apple_form > 0) continue;   // 苹果形态不画人（见 paint_status_overlays）
-    const std::size_t profile_index = std::min(fighter.profile, static_cast<std::size_t>(1));
-    const auto& rig = fighter_rig_[profile_index];
-    if (rig == nullptr) continue;
-    const Pose pose = match_->world_pose(side);
-    rig->draw(scene, pose, fighter.x, match_->arena().ground, fighter.facing_right,
-              pixels_per_meter_3d_);
-  }
-
-  scene.end_frame(canvas, Rect{0.0f, 0.0f, static_cast<float>(canvas.physical_width()),
-                               static_cast<float>(canvas.physical_height())});
-
-  // —— 2D 覆盖层（这些仍是矢量绘制，与 3D 角色叠在一起）——
-  for (int side = 0; side < 2; ++side) {
-    paint_fighter_overlays(context, canvas, side);
   }
 }
 

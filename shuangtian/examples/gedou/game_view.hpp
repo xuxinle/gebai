@@ -182,8 +182,6 @@ class GameView : public st::ui::Element {
   void paint_backdrop(const st::ui::RenderContext& context, st::raster::Surface& canvas) const;
   void paint_arena(const st::ui::RenderContext& context, st::raster::Surface& canvas) const;
   /// 3D 角色批量渲染（两个角色必须在同一次 begin/end_frame 里）。
-  void paint_fighters_3d(const st::ui::RenderContext& context,
-                         st::raster::Surface& canvas) const;
   /// 2D 角色绘制：待机/移动/受击用**立绘**，出招用**矢量**（肢体要跟着动）。
   void paint_fighters_2d(const st::ui::RenderContext& context, st::raster::Surface& canvas) const;
   /// 角色的 2D 覆盖层（影子/防御罩/必杀环/连击数）。
@@ -216,8 +214,8 @@ class GameView : public st::ui::Element {
   int record_stride_{1};
   mutable int record_counter_{0};
 
-  /// 两个角色的立绘（AI 生成）。缺失时自动退回矢量绘制。
-  CharacterPortrait portrait_[2]{};
+  /// 两个角色的**整套动作立绘**（AI 生成，每个 MoveId 一张）。
+  ActionSprites sprites_[2]{};
 
   // —— 3D 角色渲染 ——
   //
@@ -238,7 +236,6 @@ class GameView : public st::ui::Element {
   /// 相机诊断日志只记一次。
   mutable bool scene3d_logged_{false};
   /// 确保 `scene3d_` 与当前画布尺寸一致；返回是否可用。
-  auto ensure_scene3d(st::raster::Surface& canvas) const -> bool;
   /// 下面这些在 `paint_content()`（const）里被推进，因此是 `mutable`：
   /// 动画状态必须能被绘制路径推进（否则动画停在首帧），而 `paint` 的 const
   /// 契约不能破——框架里各组件动画都是这一套（见 `Element::RenderExtras`）。
