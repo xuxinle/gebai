@@ -1,5 +1,7 @@
 #include "game_view.hpp"
 
+#include "st/core/log.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <format>
@@ -33,28 +35,7 @@ constexpr Color kInk{0x11, 0x14, 0x1B, 0xFF};
 constexpr Color kPale{0xF4, 0xF7, 0xFF, 0xFF};
 
 /// 沿一条线段画粗线（骨架用）。
-void draw_bone(Canvas& canvas, Point from, Point to, Color color, float width) {
-  st::math::Path path;
-  path.move_to(from);
-  path.line_to(to);
-  canvas.stroke_path(path, Paint::solid(color), width, st::raster::StrokeStyle{
-                                                     st::raster::LineCap::Round,
-                                                     st::raster::LineJoin::Round});
-}
-
 /// 在两点之间画一个"胶囊"（比描边更结实的四肢观感；半径随宽度走）。
-void draw_limb(Canvas& canvas, Point from, Point to, Color color, float width) {
-  // 用三条粗线叠出圆头：中段直线 + 两端圆点。比 `stroke_path` 圆帽更稳
-  // （圆帽在极短线段上会退化成一个点，关节处会露缝）。
-  draw_bone(canvas, from, to, color, width);
-  canvas.fill_circle(from, width * 0.5f, Paint::solid(color));
-  canvas.fill_circle(to, width * 0.5f, Paint::solid(color));
-}
-
-[[nodiscard]] auto mix_alpha(Color color, float alpha) -> Color {
-  return color.with_alpha_f(std::clamp(alpha, 0.0f, 1.0f));
-}
-
 }  // namespace
 
 GameView::GameView() {
@@ -62,6 +43,63 @@ GameView::GameView() {
   set_focusable(true);   // 键盘要能落到这里（否则方向键被 Tab 焦点环吃掉）
   style().background = Color{0x0B, 0x0E, 0x16, 0xFF};
   match_ = std::make_unique<Match>(0, 1, Arena{});
+  // 两个角色的装配（glTF 本体 + 服装）。建一次就缓存。
+  // 模型缺失时 `create` 返回 nullptr——此时退化成不画角色（游戏仍可玩）。
+  fighter_rig_[0] = FighterRig::create("assets/models/gltf/CesiumMan.glb", fighter_look(0));
+  fighter_rig_[1] = FighterRig::create("assets/models/gltf/CesiumMan.glb", fighter_look(1));
+  if (fighter_rig_[0] == nullptr) {
+    st::log::out("角色本体缺失：角色将不绘制（判定与操作不受影响）\n");
+  }
+}
+
+void GameView::open_select() {
+  select_ = SelectState{};
+  select_.left = 0;
+  select_.right = 1;
+  select_.mode = BattleMode::PlayerVsAi;
+  select_.active = true;
+  // 选人时把手上的按键状态清掉：否则进入对战的第一帧会带着"按住"的旧状态。
+  key_left_ = false;
+  key_right_ = false;
+  key_guard_ = false;
+  pending_attack_.reset();
+}
+
+void GameView::skip_select() {
+  select_.active = false;
+}
+
+void GameView::set_battle_mode(BattleMode mode) {
+  select_.mode = mode;
+  // 机机模式：两侧都由 AI 驱动（`dummy_` 关掉，否则右侧不动）。
+  if (mode == BattleMode::AiVsAi) {
+    dummy_ = false;
+    set_ai_enabled(true);
+  }
+}
+
+auto GameView::ensure_scene3d(st::raster::Surface& canvas) const -> bool {
+  const int width = static_cast<int>(canvas.physical_width());
+  const int height = static_cast<int>(canvas.physical_height());
+  if (width <= 0 || height <= 0) return false;
+  if (scene3d_ != nullptr && scene3d_width_ == width && scene3d_height_ == height) {
+    return true;
+  }
+  auto created = st::raster::Scene3D::create(width, height);
+  if (!created.has_value()) {
+    // 没有三维能力不是致命错：退化成“不画角色”（操作与判定仍然正确）。
+    // 只警告一次，不每帧刷屏。
+    // 只在第一次失败时记一条（每帧刷屏会把日志淹掉）。
+    if (!scene3d_warned_) {
+      scene3d_warned_ = true;
+      st::log::out("三维不可用（角色不绘制）：{}。\n", created.error().to_string());
+    }
+    return false;
+  }
+  scene3d_ = std::move(*created);
+  scene3d_width_ = width;
+  scene3d_height_ = height;
+  return true;
 }
 
 GameView::~GameView() = default;
@@ -387,13 +425,17 @@ void GameView::paint_content(const st::ui::RenderContext& context, Canvas& canva
   // 危险物画在**角色之下**：甜甜圈/苹果从头顶飞过，不应遮住拳脚。
   // 只有落点预警例外——它是画在**地面**上的标记（在下层反而更对）。
   paint_hazards(context, canvas);
-  paint_fighter(context, canvas, 0);
-  paint_fighter(context, canvas, 1);
+  // 3D 角色：两个角色必须落在**同一次** begin/end_frame 里，
+  // 否则第二次 begin_frame 会清屏、把第一个角色抹掉
+  // （实测踩过：先按角色各渲染一次，结果只有后画的那个出现）。
+  paint_fighters_3d(context, canvas);
   // 冰壳与护盾画在**角色之上**（它们是包在身上的效果）。
   paint_status_overlays(context, canvas);
   if (view_.show_hitbox) paint_hitboxes(context, canvas);
   paint_hud(context, canvas);
   paint_banner(context, canvas);
+  // 选人界面盖在**一切之上**（包括 HUD 与横幅）——它是模态的。
+  if (select_.active) paint_select(context, canvas);
   canvas.pop_clip();
 }
 
@@ -715,7 +757,9 @@ void GameView::paint_status_overlays(const st::ui::RenderContext& context, Canva
       const float cy = match_->arena().ground - 88.0f;
       // 脉动：回血时看着有“呼吸”感（幅度小，不卡顿）
       const float pulse = 1.0f + 0.04f * std::sin(static_cast<float>(view_.logic_frames) * 0.18f);
-      paint_apple(canvas, Point{cx, cy}, 74.0f * pulse);
+      // 尺寸对齐 3D 角色：3D 人形约 1.24 米 ⇒ 200 像素高，苹果取半径 ~62。
+      // 早先 74 半径于两人贴身时会整个盖住对面（截图里甜甜圈被苹果吞了）。
+      paint_apple(canvas, Point{cx, cy}, 62.0f * pulse);
       // 回血光晕（柔和的绿）
       math::Path halo;
       halo.add_circle(Point{cx, cy}, 92.0f * pulse);
@@ -750,122 +794,284 @@ void GameView::paint_apple(Canvas& canvas, Point center, float radius) const {
                    st::raster::Paint::solid(Color{0x6B, 0x4A, 0x2E, 0xFF}));
 }
 
-void GameView::paint_fighter(const st::ui::RenderContext& context, Canvas& canvas, int side) const {
-  const FighterState& fighter = match_->state(side);
-  const FighterProfile& profile = fighter_profile(fighter.profile);
-  // 苹果形态（苹果人生）：**不画人**。
-  //
-  // 为何要在这一层拦：果子是圆形的，而人的肩/头/腿会从圆里穿出来
-  // （实测截图：一颗苹果里伸出头和两条腿——看着是“抱着苹果”而不是“变成苹果”）。
-  // 靠把果子画大去盖是错的：姿态会变，总能露出一点。
-  if (fighter.apple_form > 0) return;
-  // 震屏：整体偏移（只影响绘制，不影响判定——判定在逻辑层，绝不跟着抖）。
-  const float shake_x = view_.shake * std::sin(hue_phase_ * 21.0f) * 0.5f;
-  const float shake_y = view_.shake * std::cos(hue_phase_ * 17.0f) * 0.35f;
-  Pose pose = match_->world_pose(side);
-  const auto shift = [&](Point point) {
-    return Point{point.x + shake_x, point.y + shake_y};
+
+/// 画选人界面（覆盖在对战画面之上）。
+///
+/// 视觉要点（都是"不加就读不懂"的那一类）：
+/// - **暗化底图**：直接盖一层深色半透明，让底下的对战画面退到背景；
+/// - 两张**角色卡**：配色取自 `fighter_look`（与 3D 模型同源），
+///   选中态用加粗边框 + 提亮背景，而不是只改边框颜色（远处也要能看出）；
+/// - **模式与难度**：模式是二选一，难度只在人机模式下可用（机机时灰掉）；
+/// - **开始按钮**：实心主色 + 大字号，是整屏唯一的"前进"动作。
+void GameView::paint_select(const st::ui::RenderContext& context,
+                            st::raster::Surface& canvas) const {
+  const Rect area = bounds();
+  if (area.is_empty()) return;
+
+  // 暗化底图（保留一点对战画面当背景，比纯黑更有"舞台"感）
+  canvas.fill_rect(area, Paint::solid(Color{0x05, 0x07, 0x0C, 0xE6}));
+
+  const SelectHitAreas areas = select_layout(area);
+  select_areas_ = areas;
+
+  // —— 标题 ——
+  if (context.text != nullptr) {
+    const std::string title = "选择角色";
+    const float title_size = 34.0f;
+    const float width = context.text->measure_width(title, title_size);
+    context.text->draw(canvas, title,
+                       Point{area.x + (area.width - width) * 0.5f, area.y + 34.0f}, title_size,
+                       Color{0xFF, 0xFF, 0xFF, 0xFF});
+    // 副标题：放在标题**下方一行**并留足间距——早先它与 "1P/2P" 标签同一行，
+    // 两段文字直接叠在一起（截图里糊成一团）。
+    const std::string sub = "J/K/L 三个技能位 · U 必杀 · 开打后按 P 暂停";
+    const float sub_width = context.text->measure_width(sub, 13.0f);
+    context.text->draw(canvas, sub,
+                       Point{area.x + (area.width - sub_width) * 0.5f, area.y + 82.0f}, 13.0f,
+                       Color{0x9A, 0xA4, 0xB8, 0xFF});
+  }
+
+  // —— 两张角色卡 ——
+  const auto draw_card = [&](Rect rect, std::size_t index, bool selected) {
+    const FighterProfile& profile = fighter_profile(index);
+    const FighterLook& look = fighter_look(index);
+    // 卡底：选中时用角色主色的暗调，未选中用中性深灰。
+    const Color base = selected ? look.torso.darken(0.62f) : Color{0x1A, 0x1E, 0x28, 0xFF};
+    canvas.fill_rect(rect, Paint::solid(base), 14.0f);
+    // 边框：选中 3px 亮色、未选中 1.5px 暗色（远处也能分辨）
+    const math::Path border = [&] {
+      math::Path path;
+      path.add_rounded_rect(rect, 14.0f);
+      return path;
+    }();
+    canvas.stroke_path(border, Paint::solid(selected ? look.torso.lighten(0.25f)
+                                                     : Color{0x33, 0x3A, 0x48, 0xFF}),
+                       selected ? 3.0f : 1.5f, st::raster::StrokeStyle{});
+
+    // 角色"立绘"：用色块拼一个简化剪影（帽子/上衣/裤子三段），
+    // 与 3D 模型同配色——不必精细，"认得出是谁"就够。
+    const float cx = rect.x + rect.width * 0.5f;
+    const float head_y = rect.y + 74.0f;
+    if (look.has_cap) {
+      // 帽子：蓝底 + 红色横条
+      canvas.fill_circle(Point{cx, head_y}, 26.0f, Paint::solid(look.cap_base));
+      canvas.fill_rect(Rect{cx - 26.0f, head_y - 4.0f, 52.0f, 6.0f},
+                       Paint::solid(look.cap_stripe));
+      canvas.fill_rect(Rect{cx - 26.0f, head_y + 10.0f, 52.0f, 5.0f},
+                       Paint::solid(look.torso_accent));
+    } else {
+      canvas.fill_circle(Point{cx, head_y}, 26.0f, Paint::solid(look.skin));
+      // 头发
+      canvas.fill_rect(Rect{cx - 26.0f, head_y - 26.0f, 52.0f, 16.0f},
+                       Paint::solid(look.hair), 8.0f);
+      // 亮片眼镜：两块深色镜片 + 白点
+      canvas.fill_rect(Rect{cx - 20.0f, head_y - 2.0f, 16.0f, 11.0f},
+                       Paint::solid(Color{0x2A, 0x24, 0x3C, 0xFF}), 4.0f);
+      canvas.fill_rect(Rect{cx + 4.0f, head_y - 2.0f, 16.0f, 11.0f},
+                       Paint::solid(Color{0x2A, 0x24, 0x3C, 0xFF}), 4.0f);
+      for (int i = 0; i < 3; ++i) {
+        canvas.fill_circle(Point{cx - 16.0f + static_cast<float>(i) * 6.0f, head_y + 2.0f}, 1.6f,
+                           Paint::solid(Color{0xFF, 0xFF, 0xFF, 0xFF}));
+        canvas.fill_circle(Point{cx + 8.0f + static_cast<float>(i) * 6.0f, head_y + 2.0f}, 1.6f,
+                           Paint::solid(Color{0xFF, 0xFF, 0xFF, 0xFF}));
+      }
+    }
+    // 上衣
+    canvas.fill_rect(Rect{cx - 40.0f, head_y + 32.0f, 80.0f, 86.0f},
+                     Paint::solid(look.torso), 10.0f);
+    if (look.long_sleeves) {
+      // 夹克：两条白色跑动条
+      canvas.fill_rect(Rect{cx - 26.0f, head_y + 36.0f, 6.0f, 78.0f},
+                       Paint::solid(look.torso_accent));
+      canvas.fill_rect(Rect{cx + 20.0f, head_y + 36.0f, 6.0f, 78.0f},
+                       Paint::solid(look.torso_accent));
+    } else {
+      // polo：领口 + 门襟
+      canvas.fill_rect(Rect{cx - 22.0f, head_y + 34.0f, 44.0f, 12.0f},
+                       Paint::solid(look.torso_accent), 4.0f);
+      canvas.fill_rect(Rect{cx - 3.0f, head_y + 46.0f, 6.0f, 40.0f},
+                       Paint::solid(look.torso_accent));
+    }
+    // 裤子
+    canvas.fill_rect(Rect{cx - 34.0f, head_y + 118.0f, 28.0f, 66.0f}, Paint::solid(look.legs),
+                     6.0f);
+    canvas.fill_rect(Rect{cx + 6.0f, head_y + 118.0f, 28.0f, 66.0f}, Paint::solid(look.legs),
+                     6.0f);
+
+    // 名字与定位
+    if (context.text != nullptr) {
+      const float name_size = 22.0f;
+      const float name_width = context.text->measure_width(std::string(profile.name), name_size);
+      context.text->draw(canvas, std::string(profile.name),
+                         Point{rect.x + (rect.width - name_width) * 0.5f, rect.bottom() - 62.0f},
+                         name_size, Color{0xFF, 0xFF, 0xFF, 0xFF});
+      const float title_width = context.text->measure_width(std::string(profile.title), 12.0f);
+      context.text->draw(canvas, std::string(profile.title),
+                         Point{rect.x + (rect.width - title_width) * 0.5f, rect.bottom() - 34.0f},
+                         12.0f, Color{0x98, 0xA2, 0xB6, 0xFF});
+    }
   };
-  pose = [&] {
-    Pose out = pose;
-    out.hip = shift(out.hip);
-    out.chest = shift(out.chest);
-    out.head = shift(out.head);
-    out.shoulder_front = shift(out.shoulder_front);
-    out.shoulder_back = shift(out.shoulder_back);
-    out.elbow_front = shift(out.elbow_front);
-    out.hand_front = shift(out.hand_front);
-    out.elbow_back = shift(out.elbow_back);
-    out.hand_back = shift(out.hand_back);
-    out.knee_front = shift(out.knee_front);
-    out.foot_front = shift(out.foot_front);
-    out.knee_back = shift(out.knee_back);
-    out.foot_back = shift(out.foot_back);
-    return out;
-  }();
+  draw_card(areas.left_card, select_.left, select_.focus == 0);
+  draw_card(areas.right_card, select_.right, select_.focus == 1);
 
-  const bool down = fighter.move == MoveId::KnockDown;
-  const float ground_y = match_->arena().ground + shake_y;
+  // 两侧标记
+  if (context.text != nullptr) {
+    // 标签与卡片顶边留 14px：再近就和卡片边框糊在一起。
+    context.text->draw(canvas, "1P", Point{areas.left_card.x, areas.left_card.y - 8.0f}, 12.0f,
+                       Color{0x7F, 0xD8, 0xFF, 0xFF});
+    // 2P 标签要与副标题错开：副标题在中线附近，标签贴在**卡片左上角**外侧
+    context.text->draw(canvas, "2P / CPU",
+                       Point{areas.right_card.x, areas.right_card.y - 8.0f}, 12.0f,
+                       Color{0xFF, 0xB4, 0x7F, 0xFF});
+  }
 
-  // 影子：地面上的椭圆（强度随"离地高度"变化——必杀腾空时影子变小变淡）。
-  //
-  // 必杀腾空时影子**跟着身体走**（水平向腾跃方向偏）：上一版固定在脚下，
-  // 结果画面是“人往前飞、影子原地不动”——最容易被解读成“地上有个黑点”。
-  const float lowest_foot = std::max(pose.foot_front.y, pose.foot_back.y);
-  const float air = std::clamp((ground_y - lowest_foot) / 60.0f, 0.0f, 1.0f);
-  const float body_dx = (pose.hip.x - fighter.x) * 0.75f;
+  // —— 模式切换 ——
+  const bool human_mode = select_.mode == BattleMode::PlayerVsAi;
+  canvas.fill_rect(areas.mode_toggle,
+                   Paint::solid(select_.focus == 2 ? Color{0x2A, 0x3A, 0x58, 0xFF}
+                                                   : Color{0x18, 0x1C, 0x26, 0xFF}),
+                   10.0f);
+  canvas.stroke_path([&] {
+                       math::Path path;
+                       path.add_rounded_rect(areas.mode_toggle, 10.0f);
+                       return path;
+                     }(),
+                     Paint::solid(select_.focus == 2 ? Color{0x5A, 0x8A, 0xC8, 0xFF}
+                                                     : Color{0x30, 0x38, 0x48, 0xFF}),
+                     1.6f, st::raster::StrokeStyle{});
+  if (context.text != nullptr) {
+    const std::string label = std::string(battle_mode_label(select_.mode));
+    const float width = context.text->measure_width(label, 16.0f);
+    context.text->draw(canvas, label,
+                       Point{areas.mode_toggle.x + (areas.mode_toggle.width - width) * 0.5f,
+                             areas.mode_toggle.y + 12.0f},
+                       16.0f, Color{0xE8, 0xEE, 0xFA, 0xFF});
+    // 难度（只在人机模式有实际作用）
+    const Color tone = human_mode ? Color{0xD8, 0xE2, 0xF2, 0xFF} : Color{0x50, 0x56, 0x60, 0xFF};
+    context.text->draw(canvas, "-", Point{areas.difficulty_minus.x + 12.0f,
+                                          areas.difficulty_minus.y + 8.0f},
+                       16.0f, tone);
+    context.text->draw(canvas, "+", Point{areas.difficulty_plus.x + 11.0f,
+                                         areas.difficulty_plus.y + 8.0f},
+                       16.0f, tone);
+    const std::string difficulty = std::string(difficulty_name(view_.difficulty));
+    context.text->draw(canvas, difficulty,
+                       Point{areas.difficulty_plus.right() + 12.0f,
+                             areas.difficulty_minus.y + 9.0f},
+                       14.0f, tone);
+  }
+
+  // —— 开始按钮 ——
+  const bool start_focus = select_.focus == 3;
+  canvas.fill_rect(areas.start_button,
+                   Paint::solid(start_focus ? Color{0x3A, 0x8A, 0xF0, 0xFF}
+                                            : Color{0x24, 0x58, 0xA8, 0xFF}),
+                   areas.start_button.height * 0.5f);
+  if (context.text != nullptr) {
+    const std::string label = "开始对战";
+    const float width = context.text->measure_width(label, 20.0f);
+    context.text->draw(canvas, label,
+                       Point{areas.start_button.x + (areas.start_button.width - width) * 0.5f,
+                             areas.start_button.y + 15.0f},
+                       20.0f, Color{0xFF, 0xFF, 0xFF, 0xFF});
+    // 操作提示
+    const std::string hint = "←/→ 选角色 · Tab 切换焦点 · Enter 开始";
+    const float hint_width = context.text->measure_width(hint, 12.0f);
+    context.text->draw(canvas, hint,
+                       Point{area.x + (area.width - hint_width) * 0.5f,
+                             areas.start_button.bottom() + 18.0f},
+                       12.0f, Color{0x7A, 0x84, 0x96, 0xFF});
+  }
+}
+
+void GameView::paint_fighters_3d(const st::ui::RenderContext& context,
+                                 st::raster::Surface& canvas) const {
+  if (!ensure_scene3d(canvas)) return;
+  auto& scene = *scene3d_;
+
+  // 相机：正交投影（格斗是 2D 玩法，角色在 z=0 平面上排开；
+  // 用透视会让远近两侧的角色大小不一致，看着像"一个站得远"）。
+  st::raster::Camera camera{};
+  // 垂直可视高度 = 画布高（像素）/ kPixelPerMeter ⇒ 1 世界单位 = kPixelPerMeter 像素。
+  // 这样 3D 角色与 2D 特效（按世界像素画）尺寸完全对齐。
+  // 正交视图：让 **1 世界单位 = kPixelPerMeter 像素**，与 2D 层完全同尺度。
+  // `ortho_scale` 是**垂直**可视高度，所以按画布高算。
+  const float view_height = static_cast<float>(canvas.physical_height()) / kPixelPerMeter;
+  const float view_width = static_cast<float>(canvas.physical_width()) / kPixelPerMeter;
+  camera.projection = st::raster::ProjectionKind::Orthographic;
+  camera.ortho_scale = view_height;
+  // 相机中心对准**画布中心**对应的世界位置：
+  //   x: 场地中心（画布宽的一半 / kPixelPerMeter）
+  //   y: 画布高的一半 / kPixelPerMeter（世界 y=0 在画布底边）
+  // 相机中心 y：画布中心（画布高一半）对应世界 y = (ground - h/2)/ppm。
+  // 用地面线作参照最直观：地面之上 h/2 像素处。
+  const float center_x = view_width * 0.5f;
+  const float center_y = (match_->arena().ground - static_cast<float>(canvas.physical_height()) * 0.5f) /
+                         kPixelPerMeter;
+  camera.eye = st::math::Vec3{center_x, center_y, 10.0f};
+  camera.target = st::math::Vec3{center_x, center_y, 0.0f};
+  camera.near_z = 0.1f;
+  camera.far_z = 40.0f;
+  camera.near_z = 0.1f;
+  camera.far_z = 20.0f;
+
+  scene.begin_frame(Color{0x00, 0x00, 0x00, 0x00});
+  scene.set_camera(camera);
+  {
+    if (!scene3d_logged_) {
+      scene3d_logged_ = true;
+      st::log::out(
+          "3D 诊断：画布={}x{} view_height={} 相机eye=({},{},{}) target=({},{},{})\n"
+          "  角色位置：x0={} x1={} ground={} rig0={} rig1={}\n",
+          canvas.physical_width(), canvas.physical_height(), view_height, camera.eye.x, camera.eye.y,
+          camera.eye.z, camera.target.x, camera.target.y, camera.target.z, match_->state(0).x,
+          match_->state(1).x, match_->arena().ground,
+          fighter_rig_[0] != nullptr ? "有" : "无",
+          fighter_rig_[1] != nullptr ? "有" : "无");
+    }
+  }
+
+  st::raster::Lighting lighting{};
+  lighting.light_from = st::math::Vec3{0.4f, 0.85f, 0.6f};
+  lighting.ambient = 0.55f;
+  lighting.diffuse = 0.85f;
+  lighting.rim = 0.35f;
+  scene.set_lighting(lighting);
+
+  for (int side = 0; side < 2; ++side) {
+    const FighterState& fighter = match_->state(side);
+    if (fighter.apple_form > 0) continue;   // 苹果形态不画人（见 paint_status_overlays）
+    const std::size_t profile_index = std::min(fighter.profile, static_cast<std::size_t>(1));
+    const auto& rig = fighter_rig_[profile_index];
+    if (rig == nullptr) continue;
+    const Pose pose = match_->world_pose(side);
+    rig->draw(scene, pose, fighter.x, match_->arena().ground, fighter.facing_right);
+  }
+
+  scene.end_frame(canvas, Rect{0.0f, 0.0f, static_cast<float>(canvas.physical_width()),
+                               static_cast<float>(canvas.physical_height())});
+
+  // —— 2D 覆盖层（这些仍是矢量绘制，与 3D 角色叠在一起）——
+  for (int side = 0; side < 2; ++side) {
+    paint_fighter_overlays(context, canvas, side);
+  }
+}
+
+void GameView::paint_fighter_overlays(const st::ui::RenderContext& context,
+                                      st::raster::Surface& canvas, int side) const {
+  const FighterState& fighter = match_->state(side);
+  if (fighter.apple_form > 0) return;
+  const Pose pose = match_->world_pose(side);
+  const float ground_y = match_->arena().ground;
+
+  // 影子（3D 角色落地感的关键：没有影子会像"浮在空中"）
+  const float air = std::clamp((ground_y - std::max(pose.foot_front.y, pose.foot_back.y)) / 60.0f,
+                               0.0f, 1.0f);
   st::math::Path shadow;
-  shadow.add_ellipse(Rect{fighter.x + body_dx - 42.0f * (1.0f - air * 0.3f) + shake_x,
-                          ground_y - 9.0f, 84.0f * (1.0f - air * 0.3f), 18.0f});
+  shadow.add_ellipse(Rect{fighter.x - 42.0f * (1.0f - air * 0.3f), ground_y - 9.0f,
+                          84.0f * (1.0f - air * 0.3f), 18.0f});
   canvas.fill_path(shadow,
                    Paint::solid(Color{0x00, 0x00, 0x00, static_cast<std::uint8_t>(90 - air * 45)}));
-
-  // 无敌帧/受击闪光：受击那一侧整体提亮（读起来像"被打了"）。
-  Color gi = down ? profile.gi.darken(0.25f) : profile.gi;
-  if (fighter.hitstun > 0) gi = gi.mix(Color{0xFF, 0xE2, 0xE2, 0xFF}, 0.45f);
-
-  // —— 骨架 ——
-  //
-  // 绘制顺序 = 遮挡顺序：后肢（更暗）→ 躯干 → 前肢 → 头。
-  // 手臂从**肩点**出发（不是躯干中线）：两条臂同源会糊成一坠。
-  const Color line = gi;
-  const float bone = 26.0f;   // 世界像素；骨架已按 `kBodyScale` 缩放过，这里是最终粗细
-  const Color back = line.darken(0.3f);
-  draw_limb(canvas, pose.hip, pose.knee_back, back, bone * 1.0f);
-  draw_limb(canvas, pose.knee_back, pose.foot_back, back, bone * 0.88f);
-  draw_limb(canvas, pose.shoulder_back, pose.elbow_back, back, bone * 0.86f);
-  draw_limb(canvas, pose.elbow_back, pose.hand_back, back, bone * 0.74f);
-  // 躯干：髋→胸为主体，再用一个稍宽的梯形肩线把“胸膛”读出来
-  draw_limb(canvas, pose.hip, pose.chest, line, bone * 1.7f);
-  draw_limb(canvas, pose.shoulder_back, pose.shoulder_front, line, bone * 1.2f);
-  // 前肢
-  draw_limb(canvas, pose.hip, pose.knee_front, line, bone * 1.06f);
-  draw_limb(canvas, pose.knee_front, pose.foot_front, line, bone * 0.92f);
-  draw_limb(canvas, pose.shoulder_front, pose.elbow_front, line, bone * 0.92f);
-  draw_limb(canvas, pose.elbow_front, pose.hand_front, line, bone * 0.78f);
-
-  /// 腰带（配色带）+ 拳套（强调色圆点）+ 脚
-  // 腰带是**横向**的带子：沿髋→胸的垂直方向取两个端点，
-  // 而不是沿躯干方向（沿躯干画会得到一个“大圆盘”——实测截图里像肚子肻了个球）。
-  {
-    const float dx = pose.chest.x - pose.hip.x;
-    const float dy = pose.chest.y - pose.hip.y;
-    const float length = std::max(1.0f, std::sqrt(dx * dx + dy * dy));
-    const Point unit{dx / length, dy / length};
-    const Point perpendicular{-unit.y, unit.x};
-    const Point belt_center{pose.hip.x + dx * 0.40f, pose.hip.y + dy * 0.40f};
-    const float half_span = bone * 0.72f;
-    draw_bone(canvas, Point{belt_center.x - perpendicular.x * half_span,
-                            belt_center.y - perpendicular.y * half_span},
-              Point{belt_center.x + perpendicular.x * half_span,
-                    belt_center.y + perpendicular.y * half_span},
-              profile.accent, bone * 0.5f);
-  }
-  // 拳套用**比道服亮**的配色（不是更暗）：暗拳套贴在暗道服上会糊成一个色块，
-  // 看截图根本分不出“这是手”（实测改过两轮）。亮一阶 + 落在身体轮廓外侧才可读。
-  canvas.fill_circle(pose.hand_front, bone * 0.44f,
-                     Paint::solid(profile.accent.lighten(0.10f)));
-  canvas.fill_circle(pose.hand_back, bone * 0.4f, Paint::solid(profile.accent.darken(0.10f)));
-  canvas.fill_circle(pose.foot_front, bone * 0.44f, Paint::solid(kInk));
-  canvas.fill_circle(pose.foot_back, bone * 0.4f, Paint::solid(mix_alpha(kInk, 0.82f)));
-
-  // 头：颈 → 脸 → 头带 → 朝向标记
-  // 颈必须画（否则头看起来是飘的：胸腔上缘与头部之间有 4~6px 空白）。
-  draw_bone(canvas, pose.chest, pose.head, line.darken(0.12f), bone * 0.7f);
-  canvas.fill_circle(pose.head, pose.head_radius, Paint::solid(profile.skin));
-  {
-    // 头带（配色）+ 面朝方向的短须（用两条短线拼出"视线"）。
-    const float band = pose.head_radius * 0.42f;
-    canvas.fill_rect(Rect{pose.head.x - pose.head_radius, pose.head.y - band * 1.55f,
-                          pose.head_radius * 2.0f, band},
-                     Paint::solid(profile.accent), band * 0.5f);
-    const float sign = fighter.facing_right ? 1.0f : -1.0f;
-    draw_bone(canvas, Point{pose.head.x + sign * pose.head_radius * 0.96f, pose.head.y},
-              Point{pose.head.x + sign * pose.head_radius * 1.42f, pose.head.y + 3.0f}, kInk, 3.0f);
-    draw_bone(canvas, Point{pose.head.x + sign * pose.head_radius * 0.5f, pose.head.y - 3.0f},
-              Point{pose.head.x + sign * pose.head_radius * 0.72f, pose.head.y - 3.0f},
-              Color{0x1A, 0x1A, 0x1A, 0xFF}, 3.0f);
-  }
 
   // 防御：身前一道弧形护盾（读起来就是"挡住了"）。
   if (fighter.move == MoveId::Guard) {
@@ -1109,6 +1315,42 @@ auto GameView::on_event(const st::ui::RenderContext& context, st::ui::Event& eve
   }
   const bool down = event.kind == st::ui::EventKind::KeyDown;
   const std::string& key = event.key;
+  // —— 选人界面优先吃掉键盘 ——
+  //
+  // 为什么放在最前面：选人时按 J/K/L 不该"顺便出招"（那些键在对战里是攻击）。
+  // 这类"界面在、输入还在往游戏里漏"的 bug 表现得很隐晦：
+  // 玩家在选人时按了方向键，进入对战的第一帧角色已经在走了。
+  if (select_.active) {
+    // ⚠ 所有导航键都只在 **down** 时响应：key_up 也触发的话，
+    // 一次按键会推进两次焦点（实测：按两下 Tab 却跳到了"开始对战"）。
+    if (down && (key == "left" || key == "a" || key == "A" || (key == "tab" && event.shift))) {
+      select_.focus = (select_.focus + 3) % 4;
+      event.handled = true;
+      return true;
+    }
+    if (down && (key == "right" || key == "d" || key == "D" || key == "tab")) {
+      select_.focus = (select_.focus + 1) % 4;
+      event.handled = true;
+      return true;
+    }
+    if (down && (key == "return" || key == "enter" || key == " ")) {
+      // Enter：先"确认当前焦点"，若焦点已在开始按钮上就直接开始。
+      if (select_.focus == 3) {
+        skip_select();
+      } else if (select_.focus == 2) {
+        set_battle_mode(select_.mode == BattleMode::PlayerVsAi ? BattleMode::AiVsAi
+                                                               : BattleMode::PlayerVsAi);
+      } else {
+        select_.focus = 3;   // 选完角色直接跳到"开始"
+      }
+      event.handled = true;
+      return true;
+    }
+    // 其它键一律吞掉（不让它漏到对战里）。
+    event.handled = true;
+    return true;
+  }
+
   // 键位：A/D 移动、S 防御、J/K/L **三个技能位**、U 必杀。
   //
   // “三个技能位”而不是“轻/重/腿”：每个角色的 J/K/L 是它自己的三个招

@@ -13,27 +13,16 @@ namespace {
 /// 这正是这个示例想说明的两件事：同一套骨架能表达不同手感，
 /// 而机制不同的角色也能跑在同一台状态机上。
 constexpr std::array<FighterProfile, kFighterCount> kProfiles{{
-    {"swift", "凌云", "疾风步 · 速度型", math::Color{0x2E, 0x6F, 0xB5, 0xFF},
-     math::Color{0xE8, 0xC7, 0x4C, 0xFF}, math::Color{0xE6, 0xB9, 0x8C, 0xFF}, 900.0f, 4.6f, 0.9f,
-     0.82f},
-    {"balanced", "磐石", "均衡 · 攻守兼备", math::Color{0x2F, 0x8F, 0x6A, 0xFF},
-     math::Color{0xE0, 0xE0, 0xE0, 0xFF}, math::Color{0xD9, 0xA0, 0x74, 0xFF}, 1000.0f, 3.6f,
-     1.0f, 1.0f},
-    {"power", "赤霄", "重击 · 一击必倒", math::Color{0x9C, 0x35, 0x2F, 0xFF},
-     math::Color{0x2A, 0x2A, 0x2E, 0xFF}, math::Color{0xC9, 0x93, 0x6E, 0xFF}, 1100.0f, 3.0f, 1.25f,
-     1.18f},
-    // —— 技能型角色 ——
-    //
-    // 血少、走得快：靠技能拉开距离，而不是靠对拳。
-    // 招式位：轻=真好吃（抛甜甜圈） 重=泡芙（扇喷） 必杀=摸腰（冻结+半血）
-    {"donut", "甜甜圈", "甜到你发愣 · 技能型", math::Color{0xF2, 0x8C, 0xA8, 0xFF},
+    // 甜甜圈：血少、走得快，靠技能拉开距离而不是对拳。
+    // 技能位：轻=真好吃（抛甜甜圈） 重=泡芙（扇喷） 必杀=摸腰（冻结+半血）
+    {"donut", "甜甜圈", "甜到你发愣 · 技能型", math::Color{0xD9, 0x2B, 0x3A, 0xFF},
      math::Color{0xFF, 0xE1, 0x8A, 0xFF}, math::Color{0xF4, 0xC6, 0xA8, 0xFF}, 900.0f, 4.2f,
      0.92f, 0.94f,
      {MoveId::DonutToss, MoveId::PuffSpray, MoveId::WaistGrab},
      {"真好吃", "泡芙", "摸腰"}},
-    // 户圣：慢一点、血厚一点，但三个技能都是“不靠对拳”的类型。
-    // 招式位：轻=苹果手机（天降） 重=苹果小区（护盾反击） 必杀=苹果人生（变身回血）
-    {"husheng", "户圣", "苹安喜乐 · 忍耐型", math::Color{0xC8, 0x3A, 0x2E, 0xFF},
+    // 户圣：慢一点、血厚一点，三个技能都不靠对拳。
+    // 技能位：轻=苹果手机（天降） 重=苹果小区（护盾反击） 必杀=苹果人生（变身回血）
+    {"husheng", "户圣", "苹安喜乐 · 忍耐型", math::Color{0x9A, 0x9E, 0xA6, 0xFF},
      math::Color{0x4E, 0x9A, 0x4A, 0xFF}, math::Color{0xE8, 0xC0, 0x9C, 0xFF}, 1050.0f, 3.4f,
      1.05f, 1.02f,
      {MoveId::AppleDrop, MoveId::AppleGuard, MoveId::AppleLife},

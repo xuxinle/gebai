@@ -142,7 +142,7 @@ struct FighterProfile {
 };
 
 /// 角色数量（选人与 `match` 的属性面据此枚举）。
-inline constexpr std::size_t kFighterCount = 5;
+inline constexpr std::size_t kFighterCount = 2;
 
 [[nodiscard]] auto fighter_profile(std::size_t index) -> const FighterProfile&;
 /// 招式数值（**按值返回**：距离字段由命中帧的姿态反算，见实现）。

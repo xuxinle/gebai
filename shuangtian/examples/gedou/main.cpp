@@ -69,7 +69,7 @@ struct Options {
   bool hitbox{false};
   /// 难度。
   Difficulty difficulty{Difficulty::Normal};
-  /// 双方角色档（0 凌云 / 1 磐石 / 2 赤霄）。
+  /// 双方角色档（0 甜甜圈 / 1 户圣）。
   std::size_t left_profile{0};
   std::size_t right_profile{1};
   /// 用**训练好的神经网络策略**接管对手侧（`--policy 文件`）。
@@ -160,7 +160,7 @@ auto run_app(int argc, char** argv) -> int {
     st::log::out(
         "格斗示例专有选项：\n"
         "  --difficulty easy|normal|hard  电脑强度（默认 normal）\n"
-        "  --left N --right N             双方角色档（0 凌云 / 1 磐石 / 2 赤霄）\n"
+        "  --left N --right N             双方角色档（0 甜甜圈 / 1 户圣）\n"
         "  --dummy                        训练模式：对手不动\n"
         "  --paused                       以暂停态启动（截图用）\n"
         "  --hitbox                       显示判定盒\n");

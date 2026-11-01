@@ -19,9 +19,12 @@
 
 #include "ai.hpp"
 #include "fight.hpp"
+#include "battle_select.hpp"
+#include "fighter_rig.hpp"
 #include "policy.hpp"
 #include "rl_env.hpp"
 #include "st/math/geometry.hpp"
+#include "st/raster/scene3d.hpp"
 #include "st/ui/element.hpp"
 
 namespace gedou {
@@ -89,6 +92,19 @@ class GameView : public st::ui::Element {
 
   /// 换对局（选人条/重开都走它）。
   void start_match(std::size_t left_profile, std::size_t right_profile);
+
+  // —— 选人 / 对战模式 ——
+  /// 打开选人界面（开局默认打开；`--left/--right` 等命令行给了具体角色时也仍打开，
+  /// 只是默认选中项不同）。
+  void open_select();
+  /// 关掉选人界面直接用给定配置开打（供 e2e / 命令行跳过选人）。
+  void skip_select();
+  [[nodiscard]] auto select_state() const -> const SelectState& { return select_; }
+  /// 切换对战模式（会立刻应用到对手决策：机机模式下两侧都是 AI）。
+  void set_battle_mode(BattleMode mode);
+  [[nodiscard]] auto battle_mode() const noexcept -> BattleMode { return select_.mode; }
+  /// 选人界面是否仍在显示。
+  [[nodiscard]] auto selecting() const noexcept -> bool { return select_.active; }
   void restart();
   [[nodiscard]] auto match() noexcept -> Match& { return *match_; }
   [[nodiscard]] auto match() const noexcept -> const Match& { return *match_; }
@@ -159,7 +175,12 @@ class GameView : public st::ui::Element {
   // —— 绘制分解（每块一个函数：观感出问题时能直接定位到哪一层画的） ——
   void paint_backdrop(const st::ui::RenderContext& context, st::raster::Surface& canvas) const;
   void paint_arena(const st::ui::RenderContext& context, st::raster::Surface& canvas) const;
-  void paint_fighter(const st::ui::RenderContext& context, st::raster::Surface& canvas, int side) const;
+  /// 3D 角色批量渲染（两个角色必须在同一次 begin/end_frame 里）。
+  void paint_fighters_3d(const st::ui::RenderContext& context,
+                         st::raster::Surface& canvas) const;
+  /// 角色的 2D 覆盖层（影子/防御罩/必杀环/连击数）。
+  void paint_fighter_overlays(const st::ui::RenderContext& context,
+                              st::raster::Surface& canvas, int side) const;
   /// 危险物：飞行中的投射物与地面落点预警（画在角色**之下**）。
   void paint_hazards(const st::ui::RenderContext& context, st::raster::Surface& canvas) const;
   /// 包在角色**身上**的状态效果（冰壳/护盾环/苹果形态）。
@@ -175,6 +196,25 @@ class GameView : public st::ui::Element {
   void paint_banner(const st::ui::RenderContext& context, st::raster::Surface& canvas) const;
 
   std::unique_ptr<Match> match_{};
+
+  // —— 3D 角色渲染 ——
+  //
+  // 两个角色各一份装配（glTF 本体 + 服装，建一次就缓存），
+  // 每帧只改变换。`scene3d_` 是离屏渲染目标，尺寸随窗口变化。
+  //
+  // 为何放在视图层而不是逻辑层：三维只是**表现**，`Match` 不该知道它的存在
+  // （否则单测/E2E/RL 全部要拖上一个 GPU 上下文）。
+  std::shared_ptr<const FighterRig> fighter_rig_[2]{};
+  /// 离屏三维场景（尺寸变化时重建）。
+  mutable std::unique_ptr<st::raster::Scene3D> scene3d_{};
+  mutable int scene3d_width_{0};
+  mutable int scene3d_height_{0};
+  /// 三维不可用的告警只记一次（每帧刷屏会把日志淹掉）。
+  mutable bool scene3d_warned_{false};
+  /// 相机诊断日志只记一次。
+  mutable bool scene3d_logged_{false};
+  /// 确保 `scene3d_` 与当前画布尺寸一致；返回是否可用。
+  auto ensure_scene3d(st::raster::Surface& canvas) const -> bool;
   /// 下面这些在 `paint_content()`（const）里被推进，因此是 `mutable`：
   /// 动画状态必须能被绘制路径推进（否则动画停在首帧），而 `paint` 的 const
   /// 契约不能破——框架里各组件动画都是这一套（见 `Element::RenderExtras`）。
@@ -185,6 +225,13 @@ class GameView : public st::ui::Element {
   mutable int policy_cooldown_{0};
   /// 对手决策（策略与手写 AI 的唯一分岔点；见实现里的说明）。
   [[nodiscard]] auto opponent_decision() const -> Intent;
+  /// 选人界面状态（绘制与命中都读它）。
+  mutable SelectState select_{};
+  /// 选人界面缓存的命中区（`draw` 时按当前视口填好，点击复用同一份）。
+  mutable SelectHitAreas select_areas_{};
+  /// 画选人界面（覆盖在对战画面之上）。
+  void paint_select(const st::ui::RenderContext& context, st::raster::Surface& canvas) const;
+
   mutable ViewState view_{};
   mutable Intent player_intent_{};
   mutable Intent opponent_intent_{};

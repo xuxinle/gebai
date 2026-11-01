@@ -360,14 +360,6 @@ ST_TEST(gd_new_characters_have_their_own_moves) {
   ST_CHECK(gedou::fighter_move_label(husheng, 2) == "苹果人生");
 }
 
-ST_TEST(gd_old_characters_keep_their_moves) {
-  // 加新角色**不得**动旧角色的操作面（这是“覆盖键位”方案的前提）。
-  const std::size_t swift = profile_index("swift");
-  ST_CHECK(gedou::fighter_move(swift, 0) == MoveId::Light);
-  ST_CHECK(gedou::fighter_move(swift, 1) == MoveId::Heavy);
-  ST_CHECK(gedou::fighter_move(swift, 2) == MoveId::Special);
-}
-
 ST_TEST(gd_every_new_move_is_an_attack) {
   // `is_attack` 漏加新招式 ⇒ 判定盒返回空矩形 ⇒ “能放但打不到”。
   // 这条直接钉住那个门。
@@ -398,7 +390,7 @@ ST_TEST(gd_move_specs_carry_their_mechanics) {
 // ════════════════════════════════════════════════════════════════════════
 
 ST_TEST(gd_donut_toss_spawns_a_projectile) {
-  Match match = make_match("donut", "balanced");
+  Match match = make_match("donut", "husheng");
   match.place(0, 300.0f);
   match.place(1, 700.0f);
   match.force_move(0, MoveId::DonutToss);
@@ -410,7 +402,7 @@ ST_TEST(gd_donut_toss_spawns_a_projectile) {
 }
 
 ST_TEST(gd_projectile_travels_and_hits) {
-  Match match = make_match("donut", "balanced");
+  Match match = make_match("donut", "husheng");
   match.place(0, 300.0f);
   match.place(1, 760.0f);
   const float before = match.state(1).hp;
@@ -433,7 +425,7 @@ ST_TEST(gd_projectile_does_not_hit_its_owner) {
 }
 
 ST_TEST(gd_projectile_expires_when_nobody_is_hit) {
-  Match match = make_match("donut", "balanced");
+  Match match = make_match("donut", "husheng");
   match.place(0, 200.0f);
   match.place(1, 1150.0f);   // 站在最边上，但仍会被飞到的位置之外
   match.force_move(0, MoveId::DonutToss);
@@ -454,7 +446,7 @@ ST_TEST(gd_fan_spray_has_range_limit) {
   // 出招时永远是面向对手的——"背后"这个局面在正常对局里不存在，
   // 为它写断言只会得到一条永远不可能失败的用例。
   const auto damage_at = [](float gap) {
-    Match match = make_match("donut", "balanced");
+    Match match = make_match("donut", "husheng");
     match.place(0, 400.0f);
     match.place(1, 400.0f + gap);
     const float before = match.state(1).hp;
@@ -474,7 +466,7 @@ ST_TEST(gd_fan_spray_has_range_limit) {
 ST_TEST(gd_fan_spray_is_multi_hit) {
   // 扇形的定位是“压着人打”，所以它必须**多段**——
   // 单段的话它就只是一发伤害很低的近战，那还不如直接出拳。
-  Match match = make_match("donut", "balanced");
+  Match match = make_match("donut", "husheng");
   match.place(0, 400.0f);
   match.place(1, 520.0f);
   const float before = match.state(1).hp;
@@ -490,7 +482,7 @@ ST_TEST(gd_fan_spray_is_multi_hit) {
 // ════════════════════════════════════════════════════════════════════════
 
 ST_TEST(gd_waist_grab_freezes_and_burns_half_hp) {
-  Match match = make_match("donut", "balanced");
+  Match match = make_match("donut", "husheng");
   match.place(0, 400.0f);
   match.place(1, 460.0f);   // 必须贴近（这一招射程很短）
   const float before = match.state(1).hp;
@@ -510,7 +502,7 @@ ST_TEST(gd_waist_grab_freezes_and_burns_half_hp) {
 ST_TEST(gd_frozen_victim_cannot_act) {
   // 冻结的**后果**：不能行动。只看 `frozen > 0` 不够——
   // 若 `busy()` 没把它算进去，角色被冻着却还能走能打。
-  Match match = make_match("donut", "balanced");
+  Match match = make_match("donut", "husheng");
   match.place(0, 400.0f);
   match.place(1, 460.0f);
   match.force_move(0, MoveId::WaistGrab);
@@ -534,7 +526,7 @@ ST_TEST(gd_frozen_victim_cannot_act) {
 
 ST_TEST(gd_freeze_expires) {
   // 冻结必须**会过期**——不会过期的控制 = 永久封印对手。
-  Match match = make_match("donut", "balanced");
+  Match match = make_match("donut", "husheng");
   match.place(0, 400.0f);
   match.place(1, 460.0f);
   match.force_move(0, MoveId::WaistGrab);
@@ -546,7 +538,7 @@ ST_TEST(gd_freeze_expires) {
 
 ST_TEST(gd_waist_grab_can_be_blocked) {
   // 能挡是它不成为“无脑必胜”的关键（前摇 22 帧，看见了就能按防）。
-  Match match = make_match("donut", "balanced");
+  Match match = make_match("donut", "husheng");
   match.place(0, 400.0f);
   match.place(1, 460.0f);
   const float before = match.state(1).hp;
@@ -566,7 +558,7 @@ ST_TEST(gd_waist_grab_can_be_blocked) {
 
 ST_TEST(gd_apple_drop_warns_before_falling) {
   // 有预警才有“躲”这个选项——否则就是无法反制的瞬发伤害。
-  Match match = make_match("husheng", "balanced");
+  Match match = make_match("donut", "husheng");
   match.place(0, 400.0f);
   match.place(1, 700.0f);
   match.force_move(0, MoveId::AppleDrop);
@@ -577,7 +569,7 @@ ST_TEST(gd_apple_drop_warns_before_falling) {
 
 ST_TEST(gd_apple_drop_can_be_dodged) {
   // 落点是**生成那一刻**的对手位置：跑开就落空。这是它有互动性的证明。
-  Match match = make_match("husheng", "balanced");
+  Match match = make_match("donut", "husheng");
   match.place(0, 400.0f);
   match.place(1, 700.0f);
   const float hp_before = match.state(1).hp;
@@ -591,7 +583,7 @@ ST_TEST(gd_apple_drop_can_be_dodged) {
 }
 
 ST_TEST(gd_apple_drop_hits_if_you_stay) {
-  Match match = make_match("husheng", "balanced");
+  Match match = make_match("donut", "husheng");
   match.place(0, 400.0f);
   match.place(1, 700.0f);
   const float hp_before = match.state(1).hp;
@@ -606,7 +598,7 @@ ST_TEST(gd_apple_drop_hits_if_you_stay) {
 
 ST_TEST(gd_apple_guard_grants_shield_to_self) {
   // 护盾挂在**自己**身上（不是对手）——这是它与其它招最容易被写反的一点。
-  Match match = make_match("husheng", "balanced");
+  Match match = make_match("donut", "husheng");
   match.place(0, 400.0f);
   match.place(1, 700.0f);
   match.force_move(0, MoveId::AppleGuard);
@@ -616,7 +608,7 @@ ST_TEST(gd_apple_guard_grants_shield_to_self) {
 
 ST_TEST(gd_shield_blocks_and_reflects) {
   // 核心机制：护盾挡下伤害，并把一部分**弹回攻击方**。
-  Match match = make_match("husheng", "balanced");
+  Match match = make_match("donut", "husheng");
   match.place(0, 400.0f);
   match.place(1, 480.0f);
   match.force_move(0, MoveId::AppleGuard);
@@ -636,7 +628,7 @@ ST_TEST(gd_shield_blocks_and_reflects) {
 }
 
 ST_TEST(gd_shield_expires) {
-  Match match = make_match("husheng", "balanced");
+  Match match = make_match("donut", "husheng");
   match.place(0, 400.0f);
   match.place(1, 700.0f);
   match.force_move(0, MoveId::AppleGuard);
@@ -651,7 +643,7 @@ ST_TEST(gd_shield_expires) {
 // ════════════════════════════════════════════════════════════════════════
 
 ST_TEST(gd_apple_life_regenerates_hp) {
-  Match match = make_match("husheng", "balanced");
+  Match match = make_match("donut", "husheng");
   match.place(0, 400.0f);
   match.place(1, 900.0f);
   match.apply_damage(0, 400.0f);   // 先掉血，才有得回
@@ -663,7 +655,7 @@ ST_TEST(gd_apple_life_regenerates_hp) {
 
 ST_TEST(gd_apple_life_cannot_move) {
   // 回血的代价：**不能动**。否则“一边跑一边回血”就是无敌。
-  Match match = make_match("husheng", "balanced");
+  Match match = make_match("donut", "husheng");
   match.place(0, 400.0f);
   match.place(1, 900.0f);
   match.force_move(0, MoveId::AppleLife);
@@ -679,7 +671,7 @@ ST_TEST(gd_apple_life_cannot_move) {
 ST_TEST(gd_apple_life_reduces_damage) {
   // 减伤必须真的生效：同一招在“变身中”与“平时”造成的伤害要明显不同。
   const auto damage_taken = [](bool in_apple_form) {
-    Match match = make_match("husheng", "balanced");
+    Match match = make_match("donut", "husheng");
     match.place(0, 400.0f);
     match.place(1, 480.0f);
     if (in_apple_form) {
@@ -698,7 +690,7 @@ ST_TEST(gd_apple_life_reduces_damage) {
 }
 
 ST_TEST(gd_apple_life_ends_and_returns_to_idle) {
-  Match match = make_match("husheng", "balanced");
+  Match match = make_match("donut", "husheng");
   match.place(0, 400.0f);
   match.place(1, 900.0f);
   match.force_move(0, MoveId::AppleLife);
@@ -790,7 +782,7 @@ ST_TEST(gd_freeze_cannot_be_refreshed_while_active) {
   // 若此时冻结已经自然走完（120 帧），那 `frozen <= 0` 成立、写入满值**完全正确**
   // ——早先版本就栽在这里：断言红了两边（真实现与回退版都红），说明测的不是刷新。
   // 正确做法：从**第 1 帧就开始起手**（不等），让命中落在冻结还剩很多的时候。
-  Match match = make_match("donut", "balanced");
+  Match match = make_match("donut", "husheng");
   match.place(0, 400.0f);
   match.place(1, 440.0f);
   match.force_move(0, MoveId::WaistGrab);
@@ -814,7 +806,7 @@ ST_TEST(gd_freeze_cannot_be_refreshed_while_active) {
 
 /// 摸腰的伤害必须是**半血**（这是需求里最硬的一条数值）。
 ST_TEST(gd_waist_grab_deals_half_max_hp) {
-  Match match = make_match("donut", "balanced");
+  Match match = make_match("donut", "husheng");
   match.place(0, 400.0f);
   match.place(1, 440.0f);   // 必须贴脸（这一招射程很短）
   const float before = match.state(1).hp;
