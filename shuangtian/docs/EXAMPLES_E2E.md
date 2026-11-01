@@ -36,6 +36,8 @@
 | `caiyun_e2e.py` | caiyun | 设计文档 §7 五条验收：帧哈希确定性（同刻两次一致、异刻不同——证明预览跟着播放头走）/修剪分割移动入出点/导出帧数与抽查哈希/`--bench` 压测 | `py -3 tools/caiyun_e2e.py` |
 | `xmlapp_e2e.py` | xmlapp | 通路的三个接缝：XML 建出界面树/JS 调 C++ 真落数据/JS 动态建删结构 | `py -3 tools/xmlapp_e2e.py` |
 | `hot_reload_e2e.py` | xmlapp | **改文件即生效**（真进程）：改 XML 换树 / 改 JS 重装且绑定不叠 / 写错 XML 不清界面 / 写错 JS 不丢逻辑 | `py -3 tools/hot_reload_e2e.py` |
+| `gedou_e2e.py` | gedou | **类拳皇对战**的 7 组断言：判定只在判定帧出盒 / 命中扣血 = 招式表 / 判定盒在朝向方向 / 必杀破防且击倒 / 血空→over+胜者胜利姿态+KO / 打开判定盒画面真变（像素哈希 + 亮度统计）/ AI 同种子两跑逐值一致 | `py -3 tools/gedou_e2e.py` |
+| `gedou_reverse_verify.py` | gedou | **逆向验证**（非普通断言）：逐条把修复回退→确认重编成功→确 e2e/单测变红→恢复回绿。7 个案例（含一个"应当保持绿"的对照：期望值与实现同源） | `py -3 tools/gedou_reverse_verify.py [--only 案例名]` |
 
 ## 一键全跑
 

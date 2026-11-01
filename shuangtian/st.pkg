@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "shuangtian",
   "version": "0.1.0",
   "kind": "static_library",
@@ -159,6 +159,10 @@
                "//system": "gui = 桌面子系统：册府是常驻窗口应用，双击不弹控制台。",
                "system": "gui",
                "embed": [] },
+    "gedou": { "kind": "executable", "sources": ["examples/gedou/*.cpp"],
+                 "exclude_sources": ["src/pkg/*"],
+                 "//note": "格斗（类拳皇 2D 对战）：自绘舞台 + 60Hz 逻辑帧 + 骨架姿态。分层见 main.cpp 头注（姿态/数据/逻辑/对手/视图）",
+                 "embed": [] },
     "caret_ink_probe": { "kind": "executable", "sources": ["tools/caret_ink_probe.cpp"],
                          "exclude_sources": ["src/pkg/*"] },
     "menu_clip_probe": { "kind": "executable", "sources": ["tools/menu_clip_probe.cpp"],

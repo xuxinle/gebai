@@ -61,6 +61,8 @@ SEQUENCE = [
     "xmlapp_e2e.py",
     # 同一二进制的另一面：**改文件即生效**（改 XML/JS 保存就重载，写错不清界面）
     "hot_reload_e2e.py",
+    # 实时类：每秒 60 次判定 + 每帧重绘（判定帧/朝向/回合结束/AI 确定性）
+    "gedou_e2e.py",
 ]
 BENCH = ["gbcode_sidebar_keepalive_bench.py"]  # 无断言的对照测量，--with-bench 才跑
 
@@ -75,9 +77,13 @@ KNOWN_EXCLUDED = {
     "split_view_e2e.py",        # SplitView 拖拽原语
     "theme_file_e2e.py",        # --theme-file 装载接线
     "visual_assert_e2e.py",     # 视觉断言原语（capture.hash/visual.diff）
+    # 逆向验证脚本：它**自己会**回退源码 + 重编 + 跑测试，单次耗时 ~15 分钟，
+    # 与「示例 e2e 全跑」的定位（改完代码跑一遍）不同——属于专项验证，
+    # 改 gedou 的判定/姿态时手工跑（见 gedou/README.md）。
+    "gedou_reverse_verify.py",
 }
 
-DEV_APPS = ["gallery", "gbcode", "louyue", "caiyun", "xmlapp"]
+DEV_APPS = ["gallery", "gbcode", "louyue", "caiyun", "xmlapp", "gedou"]
 
 
 def bin_path(profile: str, app: str) -> Path:
