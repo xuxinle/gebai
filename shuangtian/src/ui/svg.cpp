@@ -1426,9 +1426,23 @@ auto IconSet::load(std::string_view source) -> bool {
   }
   const PreScan pre = prescan(source);
   if (pre.symbols.empty()) return false;
-  symbols_.clear();
+  // **追加而不是清空**：这方法叫 `load`（“装载 sprite”），而注册表是**进程级共享**的
+  // ——同一进程里多个来源（应用图标、图标库 sprite、插件）会先后装载。
+  // 早先这里是 `symbols_.clear()`，后果是“后装载的 sprite 把先前注册的图标全冲掉”，
+  // 而 `add_single` 当时**已经返回 true**、日志也写着成功。
+  //
+  // 实测代价（2026-11-01）：gallery 先注册 `gallery-logo`、再装 `icons.svg` sprite，
+  // 结果标题栏图标区空了一格（位子留了、图标不画）；加一行启动自检才看出
+  // “gallery-logo=缺失 而 sprite=17 项”。这类“先成功后消失”从界面上完全看不出。
   for (const auto& [id, inner] : pre.symbols) {
-    symbols_.push_back(Symbol{std::string(id), std::string(inner)});
+    // 同名则覆盖（后装载者为准）——与 `add_single` 的“追加新图标为主”口径一致。
+    const auto existing = std::find_if(symbols_.begin(), symbols_.end(),
+                                       [&id](const Symbol& symbol) { return symbol.id == id; });
+    if (existing != symbols_.end()) {
+      existing->source = std::string(inner);
+    } else {
+      symbols_.push_back(Symbol{std::string(id), std::string(inner)});
+    }
   }
   return !symbols_.empty();
 }

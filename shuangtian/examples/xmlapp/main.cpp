@@ -28,6 +28,7 @@
 #include <string_view>
 #include <vector>
 
+#include "../app_icon.hpp"   // 图标两件套：PNG（窗口/任务栏）+ SVG（标题栏品牌）
 #include "st/app/app.hpp"
 #include "st/core/entry.hpp"
 #include "st/core/fs.hpp"
@@ -254,6 +255,12 @@ auto run_app(int argc, char** argv) -> int {
   // 脚本宿主只在需要时创建（默认关）——纯 C++ 应用不必付这份开销。
   app_options.enable_script = true;
 
+  // 窗口/任务栏图标 + 标题栏品牌标记（两份素材，用途不同——见 app_icon.hpp）。
+  st::app::icon::attach_png(app_options.window_icon_png,
+                            b::embed<"examples/xmlapp/assets/xmlapp-icon.png">());
+  st::app::icon::register_svg("xmlapp-logo",
+                              b::embed<"examples/xmlapp/assets/xmlapp-logo.svg">());
+
   st::app::Application app("xmlapp", "0.1.0", app_options);
 
   // ① 外壳：标题栏 + 内容槽（与其他示例同形态）。
@@ -266,7 +273,8 @@ auto run_app(int argc, char** argv) -> int {
   frame->set_window_control(&app);
   if (frame->title_bar() != nullptr) {
     frame->title_bar()->set_id("titlebar");
-    frame->title_bar()->set_icon("list");
+    // 品牌标记（本应用自己的 SVG 记号，不是通用图标）。
+    st::app::icon::apply_brand(frame->title_bar(), "xmlapp-logo");
   }
   app.set_content(std::move(frame));
 

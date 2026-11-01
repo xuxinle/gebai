@@ -280,6 +280,40 @@ ST_TEST(svg_registry_and_icon_fallback) {
   ST_CHECK(count_any_ink(builtin) > 0);
 }
 
+/// 装载 sprite **不得抹掉**先前注册的单个图标。
+///
+/// 为何这条必须存在：`SvgIconRegistry` 是**进程级共享**的，应用先
+/// `add_single(品牌标记)` 再 `load_sprite(图标库)` 是自然写法。而旧实现里
+/// `IconSet::load` 一开始就 `symbols_.clear()`——于是后装载的 sprite 把先注册的
+/// 品牌图标**静默冲掉**，`add_single` 当时还返回 true、日志也写着成功。
+///
+/// 实测代价（2026-11-01）：gallery 标题栏图标区**留了位子但什么也没画**，
+/// 而 `get titlebar` 的 `icon` 属性明明是 `svg:gallery-logo`。
+/// 加了一行启动自检才看出来：“gallery-logo=缺失 而 sprite=17 项”。
+ST_TEST(svg_sprite_load_keeps_existing_singles) {
+  st::ui::svg::IconSet set;
+  // ① 先注册单个
+  ST_CHECK(set.load_single(
+      "brand-first",
+      R"x(<svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16"/></svg>)x"));
+  ST_CHECK(set.has("brand-first"));
+  // ② 再装 sprite
+  ST_CHECK(set.load(
+      R"x(<svg xmlns="http://www.w3.org/2000/svg"><symbol id="s1" viewBox="0 0 24 24"><path d="M4 4 L20 20"/></symbol><symbol id="s2" viewBox="0 0 24 24"><path d="M4 20 L20 4"/></symbol></svg>)x"));
+  // ③ 两者共存（这就是回归点）
+  ST_CHECK(set.has("brand-first"));
+  ST_CHECK(set.has("s1"));
+  ST_CHECK(set.has("s2"));
+  ST_CHECK_EQ(set.ids().size(), static_cast<std::size_t>(3));
+
+  // ④ 同名时后者覆盖（不重复堆积）
+  ST_CHECK(set.load(
+      R"x(<svg xmlns="http://www.w3.org/2000/svg"><symbol id="s1" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6"/></symbol></svg>)x"));
+  ST_CHECK_EQ(set.ids().size(), static_cast<std::size_t>(3));
+  ST_CHECK(set.has("s1"));
+  ST_CHECK(set.has("brand-first"));   // 覆盖不能连带清别家
+}
+
 ST_TEST(svg_painter_cache_hits) {
   st::ui::svg::IconSet set;
   ST_CHECK(set.load(

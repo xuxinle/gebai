@@ -229,16 +229,27 @@ macOS 上 GL 已废弃）。它既不是"保证腿"也不是"加分腿"，因此
 
 ### 作为桌面应用交付：图标 + 不弹控制台
 
-每个示例都是可直接双击运行的桌面程序，不是“从命令行启动的演示”：
+每个示例都是可直接双击运行的桌面程序，不是“从命令行启动的演示”。
+图标有**三类**，跑在三条独立链路上（不互通）：
 
-| 属性 | 在 `st.pkg` 里 | 效果 |
+| 图标 | 谁设 | 看到的地方 |
 |---|---|---|
-| 文件图标 | `"icon": ".../*.ico"` | 资源管理器/任务栏/快捷方式显示各自图标（多尺寸 16~256） |
-| 无控制台 | `"system": "gui"` | PE Subsystem=2，双击不弹黑框 |
+| `st.pkg` 的 `"icon": "*.ico"` | 构建期进 PE 资源 | 资源管理器 / 快捷方式 |
+| `AppOptions::window_icon_png` | 运行期后端 | **任务栏 / Alt-Tab** |
+| `svg_registry` + `TitleBar::set_icon` | 运行期自绘 | **标题栏左上角** |
 
-图标源图由 `tools/make_icons.py` **用代码画**（纯 Python，无 Pillow），
-再经 `tools/make_ico.py` 转多尺寸；改配色/形状时重跑即得，不必找素材。
-验证读**产物**：`py -3 tools/gui_subsystem_check.py [--reverse]`（PE 头 + 图标指纹）。
+外加 `"system": "gui"`（PE Subsystem=2，双击不弹黑框）。
+
+> 前两类最容易混：只配 `.ico` 不设 `window_icon_png`，**文件图标好看、任务栏却是空白**——
+> 任务栏用的是窗口的 `WM_SETICON`，不是 PE 资源。
+
+源图全由代码生成（`tools/make_icons.py` 出 PNG、`make_brand_svgs.py` 出 SVG），
+同一记号两份格式：PNG 给系统 API、SVG 给自绘标题栏（高 DPI 下矢量才清晰）。
+应用侧接入见 `examples/app_icon.hpp`（四行）。
+
+验证读**产物/像素**：`py -3 tools/gui_subsystem_check.py [--reverse]`（子系统 + 文件图标）、
+`py -3 tools/window_icon_check.py`（窗口/任务栏图标）、
+`./build/dev/bin/svg_sheet out.png 64 examples/*/assets/*-logo.svg`（SVG 渲染成图看）。
 
 > 工具链 `st`、探针与 `gedou_rl` **故意保持 console**——它们要在终端里跑、输出要能管道。
 > GUI 应用带参数从 cmd 启动时输出不会丢：入口的 `startup_configure_console()`

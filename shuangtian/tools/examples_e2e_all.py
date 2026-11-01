@@ -93,6 +93,9 @@ KNOWN_EXCLUDED = {
     # `link_fingerprint` 漏了 system/icon 时，`st build` 照样写“完成”，
     # 只有看 PE 头才能发现没生效（实测踩过）。
     "gui_subsystem_check.py",
+    # 窗口/任务栏图标（`window_icon_png`）——与 `.ico` 是两条独立链路：
+    # 只配 `.ico` 不设它，文件图标好看但任务栏是空白。
+    "window_icon_check.py",
 }
 
 DEV_APPS = ["gallery", "gbcode", "louyue", "caiyun", "xmlapp", "gedou", "gedou_rl"]

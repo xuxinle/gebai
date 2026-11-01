@@ -23,7 +23,7 @@
 #include <vector>
 
 #include "pages.hpp"
-
+#include "../app_icon.hpp"   // 图标两件套：PNG（窗口/任务栏）+ SVG（标题栏品牌）
 #include "st/app/app.hpp"
 #include "st/core/entry.hpp"
 #include "st/core/fs.hpp"
@@ -421,6 +421,33 @@ auto run_app(int argc, char** argv) -> int {
                       : options.theme == "light" ? st::ui::ThemeMode::Light
                                                  : st::ui::ThemeMode::Dark;
 
+  // 窗口/任务栏图标 + 标题栏品牌标记（两份素材，用途不同——见 app_icon.hpp）。
+  st::app::icon::attach_png(app_options.window_icon_png,
+                            b::embed<"examples/gallery/assets/gallery-icon.png">());
+  st::app::icon::register_svg("gallery-logo",
+                              b::embed<"examples/gallery/assets/gallery-logo.svg">());
+  // 图标全集页里的 SVG 图标（`svg:<id>`）也要注册才能画：
+  // sprite 是 `assets/icons.svg`（17 个 `<symbol>`，Lucide 子集）。
+  //
+  // ⚠ 之前**从未装载过**——于是那一整页 `svg:` 图标静默空白，
+  // 而“图标与其名字并排”这个设计意图正好就是拿来发现问题图标的。
+  st::app::icon::load_sprite(b::embed<"examples/gallery/assets/icons.svg">());
+
+  // 启动自检：把注册表里“本应用要用的两个 id”报出来。
+  //
+  // 为何值得一行日志：SVG 图标注册失败/名字拼错时，`Icon::draw` 只会**静默不画**
+  // （没有图标、没有空白块、没有报错）。而“标题栏左侧空了一格”既可能是没注册、
+  // 也可能是注册了但名字对不上——日志一下就能分开（实测为了这个加过一轮）。
+  {
+    const auto ids = st::ui::svg_registry().ids();
+    const auto present = [&ids](std::string_view id) {
+      return std::ranges::find(ids, id) != ids.end();
+    };
+    st::log::out("图标注册：gallery-logo={} icons.sprite={} 项\n",
+                 present("gallery-logo") ? "ok" : "缺失",
+                 static_cast<int>(ids.size()) - (present("gallery-logo") ? 1 : 0));
+  }
+
   st::app::Application app("gallery", "0.1.0", app_options);
 
   auto* app_ptr = &app;
@@ -444,7 +471,8 @@ auto run_app(int argc, char** argv) -> int {
   st::ui::WindowFrame* frame_ptr = frame.get();
   if (frame_ptr->title_bar() != nullptr) {
     frame_ptr->title_bar()->set_id("titlebar");
-    frame_ptr->title_bar()->set_icon("sparkles");
+    // 品牌标记（本应用自己的 SVG 记号，不是通用 `sparkles`）。
+    st::app::icon::apply_brand(frame_ptr->title_bar(), "gallery-logo");
     frame_ptr->title_bar()->set_window_control(&app);
   }
   // 品牌：用 `TitleBar::set_brand`（**真正的品牌区**，不是占 `leading` 槽）——

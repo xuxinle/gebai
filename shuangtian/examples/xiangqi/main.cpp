@@ -1,4 +1,4 @@
-/// 相期 · agent 控制的本地桌面常驻应用（**零 C++ UI 代码**）。
+﻿/// 相期 · agent 控制的本地桌面常驻应用（**零 C++ UI 代码**）。
 ///
 /// ## 这个应用检验什么
 ///
@@ -68,6 +68,7 @@
 #include <string_view>
 #include <vector>
 
+#include "../app_icon.hpp"   // 品牌标记：SVG（标题栏）
 #include "st/app/app.hpp"
 #include "st/codec/png.hpp"
 #include "st/core/entry.hpp"
@@ -1326,6 +1327,15 @@ auto run_app(int argc, char** argv) -> int {
     app_options.tray_minimize_on_close = true;
   }
 
+  // 品牌标记：标题栏用矢量（任意 DPI 下重新光栅化才清晰）。
+
+  // 窗口/任务栏图标仍走下面代码现画的那一份（PNG，给系统 API）。
+
+  st::app::icon::register_svg("xiangqi-logo",
+
+                              b::embed<"examples/xiangqi/assets/xiangqi-logo.svg">());
+
+
   st::app::Application app("xiangqi", "0.1.0", app_options);
 
   // ① 外壳（**先壳后树**）：热重载换根的落点是 XML 根当前的父元素。
@@ -1334,7 +1344,7 @@ auto run_app(int argc, char** argv) -> int {
   frame->set_window_control(&app);
   if (frame->title_bar() != nullptr) {
     frame->title_bar()->set_id("titlebar");
-    frame->title_bar()->set_icon("bell");
+    st::app::icon::apply_brand(frame->title_bar(), "xiangqi-logo");
 
     // 徽标 / 连接图标 / 「全部忽略」全部上提到标题栏。
     //

@@ -39,6 +39,7 @@
 #include "ai.hpp"
 #include "fight.hpp"
 #include "game_view.hpp"
+#include "../app_icon.hpp"   // 图标两件套：PNG（窗口/任务栏）+ SVG（标题栏品牌）
 #include "st/app/app.hpp"
 #include "st/app/cli.hpp"
 #include "st/core/entry.hpp"
@@ -179,6 +180,12 @@ auto run_app(int argc, char** argv) -> int {
   // 想要浅色就跑 `--theme-file <浅色主题>`（主题文件的优先级高于这里的默认）。
   app_options.theme = st::ui::ThemeMode::Dark;
 
+  // 窗口/任务栏图标 + 标题栏品牌标记（两份素材，用途不同——见 app_icon.hpp）。
+  st::app::icon::attach_png(app_options.window_icon_png,
+                            b::embed<"examples/gedou/assets/gedou-icon.png">());
+  st::app::icon::register_svg("gedou-logo",
+                              b::embed<"examples/gedou/assets/gedou-logo.svg">());
+
   st::app::Application app("gedou", "0.1.0", app_options);
   
   auto frame = std::make_unique<st::ui::WindowFrame>("格斗 · 霜天示例");
@@ -186,7 +193,8 @@ auto run_app(int argc, char** argv) -> int {
   frame->set_window_control(&app);
   if (frame->title_bar() != nullptr) {
     frame->title_bar()->set_id("titlebar");
-    frame->title_bar()->set_icon("grid");
+    // 品牌标记（本应用自己的 SVG 记号，不是通用图标）。
+    st::app::icon::apply_brand(frame->title_bar(), "gedou-logo");
     frame->title_bar()->set_brand("格斗");
   }
 

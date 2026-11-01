@@ -44,6 +44,7 @@
 #include "project.hpp"
 #include "render.hpp"
 #include "views.hpp"
+#include "../app_icon.hpp"   // 图标两件套：PNG（窗口/任务栏）+ SVG（标题栏品牌）
 #include "st/app/app.hpp"
 #include "st/codec/png.hpp"
 #include "st/core/entry.hpp"
@@ -1578,6 +1579,12 @@ auto run_app(int argc, char** argv) -> int {
   app_options.control_file = options.control_file;
   app_options.screenshot_dir = options.shots;
 
+  // 窗口/任务栏图标 + 标题栏品牌标记（两份素材，用途不同——见 app_icon.hpp）。
+  st::app::icon::attach_png(app_options.window_icon_png,
+                            b::embed<"examples/caiyun/assets/caiyun-icon.png">());
+  st::app::icon::register_svg("caiyun-logo",
+                              b::embed<"examples/caiyun/assets/caiyun-logo.svg">());
+
   st::app::Application app("caiyun", "0.2.0", app_options);
   // **自绘组件必须先注册**（`custom<T>` 用它之前）。注册名不能与内置组件重名。
   if (!dsl::register_element_type<TimelineView>("CaiyunTimeline") ||
@@ -1615,7 +1622,8 @@ auto run_app(int argc, char** argv) -> int {
   frame->set_window_control(&app);
   if (frame->title_bar() != nullptr) {
     frame->title_bar()->set_id("titlebar");
-    frame->title_bar()->set_icon("sparkles");
+    // 品牌标记（本应用自己的 SVG 记号，不是通用图标）。
+    st::app::icon::apply_brand(frame->title_bar(), "caiyun-logo");
   }
   st::ui::Element* slot = frame->content();
   app.set_content(std::move(frame));

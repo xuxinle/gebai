@@ -55,6 +55,7 @@
 #include <vector>
 
 #include "cefu_index.hpp"
+#include "../../app_icon.hpp"   // 品牌标记：SVG（标题栏）
 #include "st/app/app.hpp"
 #include "st/codec/png.hpp"
 #include "st/core/entry.hpp"
@@ -717,6 +718,15 @@ auto run_app(int argc, char** argv) -> int {
     app_options.tray_minimize_on_close = true;
   }
 
+  // 品牌标记：标题栏用矢量（任意 DPI 下重新光栅化才清晰）。
+
+  // 窗口/任务栏图标仍走下面代码现画的那一份（PNG，给系统 API）。
+
+  st::app::icon::register_svg("cefu-logo",
+
+                              b::embed<"examples/cefu/assets/cefu-logo.svg">());
+
+
   st::app::Application app("cefu", "0.1.0", app_options);
 
   // ① 外壳：标题栏 + 内容槽。
@@ -726,7 +736,7 @@ auto run_app(int argc, char** argv) -> int {
   frame->set_window_control(&app);
   if (frame->title_bar() != nullptr) {
     frame->title_bar()->set_id("titlebar");
-    frame->title_bar()->set_icon("list");
+    st::app::icon::apply_brand(frame->title_bar(), "cefu-logo");
   }
   app.set_content(std::move(frame));
 

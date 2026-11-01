@@ -43,43 +43,74 @@
 | `gedou_rl_plot.py` | gedou | 把训练报告画成曲线（胜率/熵/回报三联，基线水平线并排） | `py -3 tools/gedou_rl_plot.py` |
 | `gedou_rl_reverse_verify.py` | gedou | RL 链路的**逆向验证**：前向矩阵/自我中心观测/奖励符号/冷却/观测维度漂移，五个回退各自必须让对应用例变红 | `py -3 tools/gedou_rl_reverse_verify.py [--only 案例名]` |
 | `gui_subsystem_check.py` | 全部桌面应用 | **读产物**而非读构建输出：PE 头的 Subsystem 是否 gui(2)、exe 里有没有 256 图标；命令行工具是否仍保持 console(3)。带 `--reverse` 逐项回退验证 | `py -3 tools/gui_subsystem_check.py [--reverse]` |
+| `window_icon_check.py` | 全部桌面应用 | 窗口/任务栏图标的接入面：八个应用是否都设了 `window_icon_png`（这是独立于 `.ico` 的另一条链路） | `py -3 tools/window_icon_check.py` |
 
 ## 桌面应用：图标与子系统
 
-每个桌面应用都有**两样**交付属性，二者都写在 `st.pkg` 的 target 里：
+每个桌面应用有**三类**图标，它们跑在三条独立链路上——**不会自动互通**：
 
-```json
-"gallery": { ..., "system": "gui", "icon": "examples/gallery/assets/gallery.ico" }
-```
+| 图标 | 谁设置 | 给谁看 | 没配的后果 |
+|---|---|---|---|
+| `st.pkg` 的 `"icon": "*.ico"` | 构建期进 PE 资源 | 资源管理器/快捷方式 | 显示空白文件图标 |
+| `AppOptions::window_icon_png` | 运行期后端 `set_window_icon` | **任务栏 / Alt-Tab** | 任务栏显示默认空白图标 |
+| `svg_registry()` + `TitleBar::set_icon` | 运行期自绘 | **标题栏左上角** | 标题栏左侧空一格 |
+
+外加一条交付属性 `system`：
 
 | 属性 | 效果 | 没配的后果 |
 |---|---|---|
 | `system: "gui"` | PE Subsystem=2，双击不弹黑框 | 双击先弹一个空控制台窗口 |
-| `icon` | exe **文件**图标（资源管理器/任务栏/快捷方式） | 显示成默认空白图标 |
 
-> `icon` 只影响磁盘上的 exe。代码里 `SetWindowIcon` 换的是**窗口**图标（任务栏缩略图等），
-> 两者不是一回事。
+> **前两类最容易混**：只配 `.ico` 而不设 `window_icon_png`，文件图标很好看、
+> 任务栏却是空白——因为任务栏用的是窗口的 `WM_SETICON`，不是 PE 资源。
 
-### 图标从哪来（可重生成）
+### 图标从哪来（都可重生成）
 
 ```bash
-py -3 tools/make_icons.py            # 画 PNG 源图（纯 Python，无 Pillow）
-py -3 tools/make_ico.py <src.png> <out.ico>   # 转多尺寸 ico（16/24/32/48/64/128/256）
+py -3 tools/make_icons.py         # PNG 源图（窗口图标 + .ico 的源）
+py -3 tools/make_brand_svgs.py    # SVG 品牌标记（标题栏用，矢量）
+py -3 tools/make_ico.py <src.png> <out.ico>   # 转多尺寸 ico（16~256）
 ```
 
 源图**用代码画**而不是找素材：配色/圆角/线宽要能批量调，位图做不到。
-每个应用一个主题色 + 一个能表意的符号（gallery 九宫格、louyue 版式、
-caiyun 胶片+播放、gedou 拳+冲击波、cefu 书+检索、xiangqi 卡片+人像）。
+每个应用一个主题色 + 一个能表意的符号。同一记号出两份格式：PNG 给窗口系统、
+SVG 给自绘标题栏（高 DPI 下矢量才清晰）。
+
+### 应用侧接入（四行）
+
+`examples/app_icon.hpp` 把三件事封成一个头：
+
+```cpp
+#include "../app_icon.hpp"
+st::app::icon::attach_png(app_options.window_icon_png,
+                          b::embed<"examples/gedou/assets/gedou-icon.png">());
+st::app::icon::register_svg("gedou-logo",
+                            b::embed<"examples/gedou/assets/gedou-logo.svg">());
+// frame 拿到之后、首帧之前：
+st::app::icon::apply_brand(frame->title_bar(), "gedou-logo");
+```
+
+⚠ 两个坑（都实测踩过）：
+
+1. **注册必须在首帧之前**。`TitleBar` 只在重绘时向注册表取图形，晚注册不报错、
+   只表现为“图标不出现”。
+2. **`apply_brand` 之后不要再调 `set_icon("某个内置名")`**——会把它覆盖掉。
+   批量接入时旧代码末尾留了一行 `set_icon("brush")`，结果标题栏显示成笔形。
 
 ### 验证
 
 ```bash
-py -3 tools/gui_subsystem_check.py            # 当前产物对不对
+py -3 tools/gui_subsystem_check.py            # 子系统 + exe 文件图标（读 PE 头）
 py -3 tools/gui_subsystem_check.py --reverse  # 逐项回退→必须变红
+py -3 tools/window_icon_check.py              # 窗口/任务栏图标是否接上（八个应用）
+./build/dev/bin/svg_sheet build/i.png 64 examples/*/assets/*-logo.svg   # SVG 渲染成图看
 ```
 
-**这个检查必须读产物，不能读构建输出**：`st build` 说“完成”不代表子系统/图标改过了——
-详见下面“链接期输入”。
+**`svg_sheet` 不是可选项**：SVG 写错时 `add_single` 可能返回 true 而 `draw` 静默失败，
+从界面上只能看到“图标不出现”。先把它渲染成 PNG，“画的是不是那个东西”一眼就能看。
+
+**检查必须读产物/读像素，不能读构建输出**：`st build` 说“完成”不代表子系统、
+文件图标或窗口图标改过了——详见下面“链接期输入”。
 
 ### 链接期输入（踩过的坑）
 

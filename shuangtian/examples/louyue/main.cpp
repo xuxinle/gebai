@@ -29,6 +29,7 @@
 #include "poster.hpp"
 #include "poster_bridge.hpp"
 #include "battery/embed.hpp"   // 编译期资源嵌入（stpm 生成）
+#include "../app_icon.hpp"   // 图标两件套：PNG（窗口/任务栏）+ SVG（标题栏品牌）
 #include "st/app/app.hpp"
 #include "st/codec/png.hpp"
 #include "st/math/geometry.hpp"
@@ -1051,6 +1052,12 @@ auto run_app(int argc, char** argv) -> int {
   app_options.control_file = options.control_file;
   app_options.screenshot_dir = options.shots;
 
+  // 窗口/任务栏图标 + 标题栏品牌标记（两份素材，用途不同——见 app_icon.hpp）。
+  st::app::icon::attach_png(app_options.window_icon_png,
+                            b::embed<"examples/louyue/assets/louyue-icon.png">());
+  st::app::icon::register_svg("louyue-logo",
+                              b::embed<"examples/louyue/assets/louyue-logo.svg">());
+
   st::app::Application app("louyue", "0.1.0", app_options);
   // **自绘组件必须先注册**（在 `custom<T>` 用它之前，即建界面之前）。
   // `CanvasView` 是示例级类型，不进框架组件表（那会让框架的公开组件面
@@ -1087,7 +1094,8 @@ if (!dsl::register_element_type<louyue::PosterBridge>("LouyuePoster")) {
   frame->set_window_control(&app);
   if (frame->title_bar() != nullptr) {
     frame->title_bar()->set_id("titlebar");
-    frame->title_bar()->set_icon("brush");
+    // 品牌标记（本应用自己的 SVG 记号，不是通用图标）。
+    st::app::icon::apply_brand(frame->title_bar(), "louyue-logo");
   }
   st::ui::Element* slot = frame->content();
   app.set_content(std::move(frame));

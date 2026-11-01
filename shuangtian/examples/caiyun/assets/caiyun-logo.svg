@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <!-- caiyun —— 裁云（AI 视频）。胶片框 + 上下齿孔 + 播放三角。
+       三角是主特征（最先被识别），齿孔在 16px 下退化为上下两条点线——可接受。
+
+       家族语言（与 gbcode 的 `< >` 同源）：圆角方底 + 白色单色前景、纯填充无描边。
+       几何约定见 tools/make_brand_svgs.py 的文件头。 -->
+  <path fill="#339E99" d="M6.75 0.5 L17.25 0.5 C20.15 0.5 22.5 2.85 22.5 5.75 L22.5 16.25
+    C22.5 19.15 20.15 21.5 17.25 21.5 L6.75 21.5 C3.85 21.5 1.5 19.15 1.5 16.25
+    L1.5 5.75 C1.5 2.85 3.85 0.5 6.75 0.5 Z"/>
+  <g fill="#FFFFFF">
+    <rect x="4.2" y="6.4" width="15.6" height="11.2" rx="1.5" opacity="0.30"/>
+    <rect x="5.6" y="4.6" width="2.0" height="2.0" rx="0.6" opacity="0.85"/>
+    <rect x="9.4" y="4.6" width="2.0" height="2.0" rx="0.6" opacity="0.85"/>
+    <rect x="13.2" y="4.6" width="2.0" height="2.0" rx="0.6" opacity="0.85"/>
+    <rect x="5.6" y="17.4" width="2.0" height="2.0" rx="0.6" opacity="0.85"/>
+    <rect x="9.4" y="17.4" width="2.0" height="2.0" rx="0.6" opacity="0.85"/>
+    <rect x="13.2" y="17.4" width="2.0" height="2.0" rx="0.6" opacity="0.85"/>
+    <path d="M10.4 9.2 L10.4 14.8 L15.2 12.0 Z"/>
+  </g>
+</svg>

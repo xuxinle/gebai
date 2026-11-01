@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <!-- cefu —— 册府（结构化知识库）。三本叠放的书（透明度递减表达"摞"）+ 检索环。
+       环是空心圆（stroke）——放大镜的"孔"必须是空的，否则与书本糊成一坨。
+
+       家族语言（与 gbcode 的 `< >` 同源）：圆角方底 + 白色单色前景、纯填充无描边。
+       几何约定见 tools/make_brand_svgs.py 的文件头。 -->
+  <path fill="#6B5CAD" d="M6.75 0.5 L17.25 0.5 C20.15 0.5 22.5 2.85 22.5 5.75 L22.5 16.25
+    C22.5 19.15 20.15 21.5 17.25 21.5 L6.75 21.5 C3.85 21.5 1.5 19.15 1.5 16.25
+    L1.5 5.75 C1.5 2.85 3.85 0.5 6.75 0.5 Z"/>
+  <g fill="#FFFFFF">
+    <rect x="5.0" y="6.2" width="10.2" height="3.0" rx="1.2"/>
+    <rect x="5.7" y="10.4" width="10.2" height="3.0" rx="1.2" opacity="0.72"/>
+    <rect x="6.4" y="14.6" width="10.2" height="3.0" rx="1.2" opacity="0.48"/>
+    <circle cx="16.6" cy="9.4" r="3.4" fill="none" stroke="#FFFFFF" stroke-width="1.6"/>
+    <path d="M19.0 11.8 L21.2 14.0" stroke="#FFFFFF" stroke-width="1.8" 
+          stroke-linecap="round"/>
+  </g>
+</svg>
