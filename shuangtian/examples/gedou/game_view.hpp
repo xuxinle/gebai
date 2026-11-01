@@ -141,6 +141,10 @@ class GameView : public st::ui::Element {
   void set_difficulty(Difficulty difficulty);
   void set_paused(bool paused);
   void set_show_hitbox(bool show);
+  /// 开启逐帧录制：`dir` 下的 `frame-00001.png` 序列。
+  void set_record_dir(std::string dir, int stride = 1);
+  /// 把当前帧存成 PNG（录制用；目录为空时什么也不做）。
+  void save_record_frame(st::raster::Surface& canvas) const;
   /// 训练模式：对手不动（打桩）。给"看招式/拍素材"用。
   void set_dummy(bool dummy);
   [[nodiscard]] auto dummy() const noexcept -> bool { return dummy_; }
@@ -202,6 +206,16 @@ class GameView : public st::ui::Element {
   std::unique_ptr<Match> match_{};
   /// 加载两张立绘（构造时一次）。
   void load_portraits();
+  /// `--record <目录>`：非空时把每一帧存成 PNG（供 ffmpeg 合成视频）。
+  ///
+  /// 为什么在 `GameView` 里存而不是在主循环：主循环拿不到画布
+  ///（`Application` 内部持有，没有取用接口），而这里每帧画完就有一份现成的。
+  std::string record_dir_{};
+  mutable int record_index_{0};
+  /// 录制时跳帧（每 N 帧存一张）。60Hz 全存会出 60 张/秒、几分钟就上万张。
+  int record_stride_{1};
+  mutable int record_counter_{0};
+
   /// 两个角色的立绘（AI 生成）。缺失时自动退回矢量绘制。
   CharacterPortrait portrait_[2]{};
 

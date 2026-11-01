@@ -2,9 +2,12 @@
 
 #include "battery/embed.hpp"
 
+#include "st/codec/png.hpp"
+
 #include "st/core/log.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <cmath>
 #include <format>
 #include <string>
@@ -53,6 +56,55 @@ GameView::GameView() {
   fighter_rig_[1] = FighterRig::create("assets/models/gltf/CesiumMan.glb", fighter_look(1));
   if (fighter_rig_[0] == nullptr) {
     st::log::out("角色本体缺失：角色将不绘制（判定与操作不受影响）\n");
+  }
+}
+
+void GameView::set_record_dir(std::string dir, int stride) {
+  record_dir_ = std::move(dir);
+  record_stride_ = std::max(1, stride);
+  record_index_ = 0;
+  record_counter_ = 0;
+  if (!record_dir_.empty()) {
+    st::log::out("逐帧录制开启：{}（每 {} 帧存一张）\n", record_dir_, record_stride_);
+  }
+}
+
+/// 把当前帧存成 PNG（录制用）。
+///
+/// 只在 `record_dir_` 非空时动作。用 `st::codec::png_write_file` 直写——
+/// 比"编码成内存再写"省一次拷贝（每帧一张，几百帧下来差别可感）。
+void GameView::save_record_frame(st::raster::Surface& canvas) const {
+  if (record_dir_.empty()) return;
+  if (++record_counter_ < record_stride_) return;
+  record_counter_ = 0;
+
+  const int width = canvas.physical_width();
+  const int height = canvas.physical_height();
+  if (width <= 0 || height <= 0) return;
+
+  st::codec::PngImage image;
+  image.width = static_cast<std::uint32_t>(width);
+  image.height = static_cast<std::uint32_t>(height);
+  const auto pixels = canvas.pixels();
+  image.rgba.resize(pixels.size() * 4U);
+  // ⚠ **不能直接 memcpy**：画布是 `uint32_t` 且值是 `R<<24|G<<16|B<<8|A`，
+  // 而 x86/ARM 都是小端，内存里逐字节排出来是 **A,B,G,R**；
+  // PNG 要的是 **R,G,B,A**。直接拷会把颜色通道全错位——
+  // 实测现象是整屏变红（红通道拿到了 A=255、绿拿到 B、蓝拿到 G）。
+  for (std::size_t i = 0; i < pixels.size(); ++i) {
+    const std::uint32_t pixel = pixels[i];
+    image.rgba[i * 4 + 0] = static_cast<std::uint8_t>((pixel >> 24) & 0xFFU);   // R
+    image.rgba[i * 4 + 1] = static_cast<std::uint8_t>((pixel >> 16) & 0xFFU);   // G
+    image.rgba[i * 4 + 2] = static_cast<std::uint8_t>((pixel >> 8) & 0xFFU);    // B
+    image.rgba[i * 4 + 3] = static_cast<std::uint8_t>(pixel & 0xFFU);           // A
+  }
+
+  char name[64] = {};
+  std::snprintf(name, sizeof(name), "/frame-%05d.png", record_index_++);
+  const std::string path = record_dir_ + name;
+  const auto wrote = st::codec::png_write_file(path, image);
+  if (!wrote.has_value()) {
+    st::log::out("录制写盘失败：{}\n", path);
   }
 }
 
@@ -452,6 +504,9 @@ void GameView::paint_content(const st::ui::RenderContext& context, Canvas& canva
   // 选人界面盖在**一切之上**（包括 HUD 与横幅）——它是模态的。
   if (select_.active) paint_select(context, canvas);
   canvas.pop_clip();
+
+  // 录制：画完这一帧后存盘（此时画布上就是最终画面）。
+  save_record_frame(canvas);
 }
 
 void GameView::paint_backdrop(const st::ui::RenderContext& context, Canvas& canvas) const {

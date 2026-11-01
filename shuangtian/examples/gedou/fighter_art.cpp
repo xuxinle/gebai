@@ -190,28 +190,34 @@ auto fighter_palette(std::size_t profile_index) -> const FighterPalette& {
 
 void draw_fighter(st::raster::Surface& canvas, const Pose& raw_pose, const FighterPalette& palette,
                   const FighterDrawOptions& options) {
-  // ── 身高归一化 ──
+  // ── 尺寸对齐（与立绘同高）──
   //
-  // 矢量造型里所有尺寸都由 `head_radius` 派生（头 0.82、肩 1.32、上臂 0.50…），
-  // 所以"整体多大"完全取决于这一个值。骨架给的 `head_radius` 是按**判定盒**
-  // 定的（约 19 像素 ⇒ 身高仅约 120px），而立绘按骨架的"脚底到头顶"摆位
-  //（约 240px）——两者差一倍，切画法时人物会突然变小（实测截图里就是这样）。
+  // ## 错过的两次做法（都试过，都不对）
   //
-  // 这里把 `head_radius` 统一放大到"与骨架实际身高匹配"：
-  // 从 foot.y 到 (head.y - radius) 是真实身高，除以 6.0（矢量的头身比）即为目标半径。
+  // 1. **放大 `head_radius`**：矢量的肢体粗细都派生自它，但**身高**是由
+  //    `pose` 的关节位置决定的（`head.y - foot.y` 约 256px）——放大头半径
+  //    只会得到"大头矮子"，身高不变。
+  // 2. **按 `span / 6.0` 算头半径**：同上，身体高度根本没变。
+  //
+  // ## 正确做法
+  //
+  // 矢量的骨架点（`pose`）本来就是正确身高；问题只在**头画得偏小**
+  //（`head_radius` 是判定盒尺寸，约 19px，而按身高应是约 256/7 ≈ 36px）。
+  // 所以只调头半径到合理值，其余尺寸由它按比例派生——这样既不改身高，
+  // 又让头身比正常，与立绘看起来一样高。
+  //
+  // 立绘那边的目标是 `foot.y → head.y - head_radius`（同一份骨架），
+  // 两者的"脚底/头顶"因此天然对齐，切画法时不会跳。
   Pose pose = raw_pose;
   {
     const float foot_y = std::max(raw_pose.foot_front.y, raw_pose.foot_back.y);
-    const float top_y = raw_pose.head.y - raw_pose.head_radius;
-    const float span = foot_y - top_y;
-    if (span > 10.0f) {
-      // 6.0：从脚底到头顶约等于 6 个头半径（这里画出来头约 0.82 半径，
-      // 即头顶到脚底 ≈ 7.3 个头半径 —— 取 6.0 让角色显得更"Q"一点，
-      // 与立绘的动漫比例接近）。
-      const float target_radius = span / 6.0f;
-      if (target_radius > raw_pose.head_radius * 0.5f) {
-        pose.head_radius = target_radius;
-      }
+    const float span = foot_y - raw_pose.head.y;   // 髋侧到头中心的距离近似全身
+    if (span > 20.0f) {
+      // 头身比：`span` 是「脚底 → 头中心」（约 259px），
+      // 全身 ≈ span + 一个头半径。动漫角色常见 6.5~7.5 头身，取 7：
+      //   (span + r) / (2r) = 7  ⇒  r = span / 13
+      // 早先写成 `span / 5.6`，算出来 r≈46，头占了全身的 1/3（大头娃娃）。
+      pose.head_radius = span / 13.0f;
     }
   }
   const auto tint = [&](Color color) {

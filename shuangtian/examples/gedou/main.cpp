@@ -63,6 +63,11 @@ struct Options {
   bool show_help{false};
   /// 训练模式（对手打桩）。
   bool dummy{false};
+  /// `--record <目录>`：把每一帧存成 PNG（供 ffmpeg 合成视频）。
+  /// 空 = 不录。
+  std::string record_dir{};
+  /// `--ai-vs-ai`：跳过选人界面、直接进机机对战（录制/观战用）。
+  bool ai_vs_ai{false};
   /// 直接以暂停态启动（截图/素材用）。
   bool paused{false};
   /// 显示判定盒。
@@ -93,6 +98,14 @@ struct Options {
       ++index;
       return std::string_view{argv[index]};
     };
+    if (argument == "--record" && index + 1 < argc) {
+      options.record_dir = argv[++index];
+      continue;
+    }
+    if (argument == "--ai-vs-ai") {
+      options.ai_vs_ai = true;
+      continue;
+    }
     if (argument == "--dummy") {
       options.dummy = true;
     } else if (argument == "--paused") {
@@ -162,6 +175,8 @@ auto run_app(int argc, char** argv) -> int {
         "  --difficulty easy|normal|hard  电脑强度（默认 normal）\n"
         "  --left N --right N             双方角色档（0 甜甜圈 / 1 户圣）\n"
         "  --dummy                        训练模式：对手不动\n"
+        "  --record <目录>                逐帧存 PNG（供 ffmpeg 合成视频）\n"
+        "  --ai-vs-ai                     跳过选人，直接机机对战（录制/观战）\n"
         "  --paused                       以暂停态启动（截图用）\n"
         "  --hitbox                       显示判定盒\n");
     return 0;
@@ -215,6 +230,15 @@ auto run_app(int argc, char** argv) -> int {
     st::log::out("对手由神经网络策略接管：{}\n", options.policy_path);
   }
   if (options.paused) view->set_paused(true);
+  if (options.ai_vs_ai) {
+    view->skip_select();
+    view->set_battle_mode(gedou::BattleMode::AiVsAi);
+  }
+  if (!options.record_dir.empty()) {
+    // 录制时跳帧：60Hz 全存会出 60 张/秒，几十秒就上万张。
+    // 默认每 2 帧存一张（30fps 的成片节奏），够顺滑也不至于爆盘。
+    view->set_record_dir(options.record_dir, 2);
+  }
   GameView* view_ptr = view.get();
   if (frame->content() != nullptr) frame->content()->add_child(std::move(view));
 
