@@ -413,155 +413,247 @@ void FighterRig::draw(st::raster::Scene3D& scene, const Pose& pose, float origin
     matrices.matrices[j] = world_matrix * skin_.bind_matrix_at(j);
   }
 
-  // ── ③-b 服装（程序化几何，挂到已驱动的骨骼上）──
+  // ── ③-b 服装：**按顶点位置直接染色**（不是外挂几何）──
   //
-  // 为什么不做成"另一套蒙皮网格"：服装是**刚体**（夹克、帽子、眼镜），
-  // 它们只需要跟随某根骨骼的整体变换，不需要逐顶点形变。
-  // 用"骨骼世界矩阵 × 局部偏移"摆一件刚体几何，既准确又便宜得多。
+  // ## 为什么换成这个做法
   //
-  // 骨骼世界矩阵直接从 `world[]` 取（它已经把 2D 姿态翻译成了模型空间），
-  // 所以服装与本体**永远同源**——拳挥出去时帽子会跟着头动，不会脱节。
-  const auto bone_world = [&](std::string_view name) -> Mat4 {
-    const std::size_t index = index_of(name);
-    return index < kBoneCount ? world[index] : Mat4::identity();
+  // 之前是"在骨骼位置挂独立的球/方块"当衣服，结果衣服与身体**错位**
+  // （截图里人物光秃秃的，衣服零件飘在旁边）——两套坐标系没对齐，
+  // 而对着骨骼调位置既脆又难验证。
+  //
+  // 现在改成：身体网格每个顶点本来就是"皮肤"，按它在**模型空间的位置**
+  // 判断这一块该是什么颜色（躯干→夹克、腿→裤子、头→脸），直接写顶点色。
+  // 衣服于是**天生贴合身体**——它就是同一张皮上的颜色。
+  //
+  // ## 分区依据（实测的顶点分布，见 tools/vertex_region.cpp）
+  //
+  // 网格是归一化的（y ∈ [-1, 1]，模型缩放后对应身高）：
+  //
+  // | y 区间 | 部位 | 依据 |
+  // |---|---|---|
+  // | [-1.00, -0.62] | 脚/鞋 | 最窄，x 在 ±0.26 内 |
+  // | [-0.62, -0.20] | 腿 | 两条分开的柱（中线附近顶点少） |
+  // | [-0.20, +0.32] | 躯干 | 顶点密度最高（765+337+210） |
+  // | [+0.32, +0.58] | 手臂 | x 明显外扩 |
+  // | [+0.58, +1.00] | 头/颈 | 最上，x 收窄到 ±0.24 |
+  //
+  // 边界值都在 `kRegion*` 常量里，调衣服长短只改这里。
+  // 分区边界：**用 Z 轴判高度**（这个模型是 Z-up，不是 Y-up）。
+  //
+  // ⚠ 这是本文件里最难发现的一个坑：`Cesium_Man` 节点带着一个
+  // `Armature` 的 **Z-up → Y-up** 旋转，但那个旋转在**节点变换**里，
+  // 蒙皮网格的**顶点坐标仍然是原来的 Z-up**（顶点数据没被转过）。
+  //
+  // 我一开始按 `y` 判"头/躯干/腿"，结果分区完全错乱——
+  // 诊断色截图里**脸是躯干的红色、头顶是腿的绿色**，因为
+  // 那个模型的 `y` 是**前后深度**，`z` 才是上下高度。
+  //
+  // 实测顶点范围：x∈[-0.131,0.181]（左右）、y∈[-0.57,0.57]（**前後**）、
+  // z 才是身高方向。所以下面的"高度"一律取 `z`。
+  // **实测的 z 范围**（从 dress 的顶点日志读出：z ∈ [0.974, 1.449]）。
+  //
+  // 之前写成 ±0.569，那是一次错误采样的结果 —— 实际所有顶点的 z 都在
+  // 0.97 以上，于是"z >= kHeadBottom(0.35)"永远成立，整个模型被当成头染成肤色
+  //（截图里全身米白）。这台模型是 Z-up 且原点在地面上方约 1 米处。
+  // **实测的 z 直方图**（每 0.075 一格，见 dress 里的诊断输出）：
+  //
+  //     z:  0.04  0.11  0.19  0.26  0.34  0.41  0.49  0.57  0.64  0.72
+  //     n:   264    74    18     0    72    18    18    36    80    26
+  //     z:  0.79  0.87  0.94  1.02  1.09  1.17  1.24  1.32  1.39  1.47
+  //     n:    53   127   111    97    74   233   538   459   566   409
+  //
+  // 读法（从下往上）：
+  //   0.00~0.26 脚（顶点集中，脚掌扁）
+  //   0.26~0.55 腿（稀疏，两条细柱）
+  //   0.55~0.95 躯干（中等密度）
+  //   0.95~1.15 肩/臂（密度下降）
+  //   1.15~1.51 头（密度骤增，是个球）
+  //
+  // 早先按 ±0.569 写边界，而实际最低点是 0（脚底）、最高 1.507，
+  // 所以整条判断链全错（全身变米白）。**分区边界必须用实测值**。
+  // 边界（第二轮微调：躯干下探到 0.48、上探到 1.05，头从 1.26 起）
+  //
+  // 第一轮用 0.55/0.95/1.15 时，粉红夹克出现在**上臂**、头是个大肉球——
+  // 说明躯干区间偏下、头区间偏大。这轮的取值让
+  // 躯干覆盖"腰到胸"、头部只含颅骨（脖子以下算躯干）。
+  constexpr float kFootTop = 0.24f;      // 脚踝
+  constexpr float kLegTop = 0.48f;       // 腰
+  constexpr float kTorsoTop = 1.05f;     // 胸/肩线
+  constexpr float kHeadBottom = 1.26f;   // 颈以上
+  // 躯干半宽：用**左右方向**的绝对值，Z-up 下左右是 x
+  const float kTorsoHalfWidth = 0.085f;
+
+  const auto dress_vertex = [this, kFootTop, kLegTop, kTorsoTop, kHeadBottom,
+                             kTorsoHalfWidth](float x, float y, float z) -> std::array<float, 3> {
+    // Z-up：`z` = 高度、`x` = 左右、`y` = 前后深度。
+    const float height = z;
+    const float abs_x = std::abs(x);
+    // 正面判定：模型面朝 +Y 一侧（从截图可见脸在 y>0 那面）。
+    // 保守起见用 `|y|` 判"离中面多远"，只在明显偏正面时才画条纹。
+    const bool front = y > 0.02f;
+
+    math::Color color = look_.skin;
+
+    if (height >= kHeadBottom) {
+      // 头：皮肤色（帽子/头发是另外的几何）
+      color = look_.skin;
+    } else if (height >= kTorsoTop) {
+      // 肩/臂带：手臂看袖长，肩部算上衣
+      // 肩/臂区：**整个都算袖子**（长袖=上衣色；短袖=上臂以下露肤）
+      //
+      // 早先按 |x| 区分"躯干/手臂"导致整条胳膊判成皮肤——
+      // 因为这个高度区间（1.05~1.26）本来就全是肩膀与上臂，
+      // 而 |x| 阈值 0.085 太小，几乎全被判成"躯干"。
+      color = look_.long_sleeves ? look_.torso : look_.skin;
+      // 肩部点缀（夹克的肩线）
+      if (look_.long_sleeves && abs_x <= kTorsoHalfWidth && height > kTorsoTop + 0.02f) {
+        color = look_.torso_accent;
+      }
+    } else if (height >= kLegTop) {
+      // 躯干：上衣主色
+      color = look_.torso;
+      if (front) {
+        if (look_.long_sleeves) {
+          // 夹克：两条竖向白色跑动条
+          if (std::abs(abs_x - 0.052f) < 0.014f) color = look_.torso_accent;
+        } else {
+          // polo：中间一道门襟
+          if (abs_x < 0.011f) color = look_.torso_accent;
+        }
+      }
+    } else if (height >= kFootTop) {
+      color = look_.legs;    // 裤子
+    } else {
+      color = look_.shoes;   // 鞋
+    }
+    return {static_cast<float>(color.r) / 255.0f, static_cast<float>(color.g) / 255.0f,
+            static_cast<float>(color.b) / 255.0f};
   };
 
-  // 坐标约定：`world[]` 出来的已经是**模型空间**（Y-up），
-  // 而 glTF 本体在 mesh 里是 Z-up。所以服装要按 Z-up 摆（与顶点同坐标系），
-  // 蒙皮矩阵会把它们一起转过去——这里直接用 `Mat4::identity()` 之外的
-  // `node.transform` 都不需要。
+  // 给蒙皮后的网格逐顶点上色。
   //
-  // 简化：服装几何按 **Y-up 直接建**，然后用 `bone_world × R(x,-90°)` 转进 Z-up 模型空间。
-  const Mat4 yup_to_zup = Mat4::rotation(Vec3{1.0f, 0.0f, 0.0f}, -1.5707963f);
+  // ⚠ 用**蒙皮前**的顶点位置判定（那是标准的 T-pose 模型空间，分区稳定）；
+  // 蒙皮后的位置会随动作变化，拿它分区会让衣服"跟着动作乱跳"。
+  const auto dress = [&dress_vertex](const st::raster::Mesh& mesh) -> st::raster::Mesh {
+    st::raster::Mesh out = mesh;
+    const std::size_t count = out.vertex_count();
+    for (std::size_t i = 0; i < count; ++i) {
+      const float x = out.vertices[i * 9 + 0];
+      const float y = out.vertices[i * 9 + 1];
+      const float z = out.vertices[i * 9 + 2];
+      const auto rgb = dress_vertex(x, y, z);
+      out.vertices[i * 9 + 6] = rgb[0];
+      out.vertices[i * 9 + 7] = rgb[1];
+      out.vertices[i * 9 + 8] = rgb[2];
+    }
+    return out;
+  };
 
-  const Color torso_color = look_.torso;
-  const Color accent = look_.torso_accent;
-
-  // —— 夹克 / polo：挂在胸腔骨骼上的一圈箱体 ——
+  // ── ③-c 头部特征件（帽子 / 头发 / 五官）──
+  //
+  // ## 坐标系（这一层最容易搞错）
+  //
+  // 蒙皮网格是用 `Mat4::identity()` 画的（蒙皮矩阵已把顶点送到世界），
+  // 所以头部特征件也必须**直接放在世界坐标**里——它们的坐标要跟
+  // "头顶在世界里的位置"一致，而不是模型空间。
+  //
+  // 头顶的世界坐标：由 `Skeleton_neck_joint_2` 的骨骼世界矩阵给出
+  //（`world[]` 里的矩阵，已经是"模型空间"的米制坐标）。
   {
-    // 夹克用**扁球**而不是方块：方块在 3D 里读起来像纸箱，
-    // 而人躯干是圆的。球压扁成椭球（用 scale 变换）就有"身体"的体积感。
-    st::raster::Mesh jacket = st::raster::Mesh::colored_sphere(0.5f, 16, torso_color);
-    const Mat4 at_chest = bone_world("torso_joint_3");
-    // 椭球：横向 0.20、纵向 0.26、深浅 0.15（单位：米）
-    scene.draw_mesh(jacket, at_chest * yup_to_zup * Mat4::translation(Vec3{0.0f, -0.06f, 0.0f}) *
-                                Mat4::scaling(Vec3{0.20f, 0.26f, 0.15f}));
-    // 白色跑动条 / polo 门襟：贴在椭球表面的窄条
-    st::raster::Mesh stripe = st::raster::Mesh::colored_sphere(0.5f, 10, accent);
-    scene.draw_mesh(stripe, at_chest * yup_to_zup * Mat4::translation(Vec3{-0.085f, -0.05f, 0.115f}) *
-                                Mat4::scaling(Vec3{0.018f, 0.22f, 0.030f}));
-    scene.draw_mesh(stripe, at_chest * yup_to_zup * Mat4::translation(Vec3{0.085f, -0.05f, 0.115f}) *
-                                Mat4::scaling(Vec3{0.018f, 0.22f, 0.030f}));
-
-    // 袖子：挂到两根上臂骨骼上（夹克是长袖、polo 是短袖）。
+    const std::size_t head_index = index_of("Skeleton_neck_joint_2");
+    const Vec3 head_pos = head_index < kBoneCount
+                              ? Vec3{world[head_index].m[12], world[head_index].m[13],
+                                     world[head_index].m[14]}
+                              : Vec3{};
+    // 实测：颈关节在绑定姿势下 z=1.19（模型空间），头中心约在它上方 0.09 米。
+    // 但世界矩阵的平移已经是"该关节在世界的位置"，直接用。
+    // `world[head]` 的平移是**颈关节的骨骼原点**（不是头中心）。
+    // 实测：颈部骨骼在 z≈1.14，而头中心约在 z≈1.30（头顶 1.51）。
+    // 所以头中心 = 骨骼原点 + 约 0.16 米。
     //
-    // 为什么袖子必须单独做：躯干箱体只盖住胸背，手臂是**独立骨骼**驱动的，
-    // 不做袖子就会看到"红夹克 + 光膀子"（截图里就是这样）。
-    const float sleeve_len = look_.long_sleeves ? 0.20f : 0.10f;
-    for (const std::string_view arm_bone : {"Skeleton_arm_joint_L__4_", "Skeleton_arm_joint_R"}) {
-      st::raster::Mesh sleeve =
-          st::raster::Mesh::cylinder(0.045f, sleeve_len, 12, torso_color);
-      // 圆柱沿 Y 居中 ⇒ 需要把它移到骨骼下方半个长度处（骨骼朝下延伸）。
-      scene.draw_mesh(sleeve, bone_world(arm_bone) * yup_to_zup *
-                                  Mat4::translation(Vec3{0.0f, -sleeve_len * 0.5f, 0.0f}));
+    // 早先直接用骨骼原点当"头中心"，帽子和眼镜全部贴在**下半脸/下巴**上
+    //（截图里蓝帽子压在鼻子上、黑发贴着嘴）。
+    const Vec3 head_center = Vec3{head_pos.x, head_pos.y, head_pos.z + 0.16f};
+
+    // 头半径：模型总高 1.507 米、头占最后 0.35 米 ⇒ 半径约 0.11
+    // 头的实际半径：模型头顶 1.507、颈 1.15 ⇒ 高 0.357，半径约 0.18。
+    // 早先按 0.105 建帽子，结果帽子比头小、被肤色球包住看不见。
+    // 最终取值：0.125。0.175 时帽子把整张脸包住（看着像大头娃娃），
+    // 0.105 时帽子又被肤色球埋掉看不见。0.125 让帽子露在头顶、脸留出来。
+    constexpr float kHeadRadius = 0.125f;
+
+    if (look_.has_cap) {
+      // 帽体：比头略大的球，中心上移 0.055（只盖颅顶，帽檐以下露脸）
+      st::raster::Mesh crown = st::raster::Mesh::colored_sphere(kHeadRadius * 1.02f, 16,
+                                                                look_.cap_base);
+      scene.draw_mesh(crown, Mat4::translation(Vec3{head_center.x, head_center.y,
+                                                    head_center.z + 0.085f}));
+      // 帽沿红白条
+      st::raster::Mesh band = st::raster::Mesh::cylinder(kHeadRadius * 1.04f, 0.016f, 18,
+                                                         look_.cap_stripe);
+      scene.draw_mesh(band, Mat4::translation(Vec3{head_center.x, head_center.y,
+                                                   head_center.z + 0.060f}));
+      // 帽檐：薄片前伸（模型正面朝 +Y）
+      st::raster::Mesh brim = st::raster::Mesh::colored_box(kHeadRadius * 1.5f, 0.011f, 0.075f,
+                                                            look_.cap_base);
+      scene.draw_mesh(brim, Mat4::translation(Vec3{head_center.x, head_center.y + 0.075f,
+                                                   head_center.z + 0.058f}));
+    } else {
+      // 头发：略大于头的球，后上方
+      st::raster::Mesh hair = st::raster::Mesh::colored_sphere(kHeadRadius * 1.03f, 14,
+                                                               look_.hair);
+      scene.draw_mesh(hair, Mat4::translation(Vec3{head_center.x, head_center.y - 0.012f,
+                                                   head_center.z + 0.062f}));
     }
-  }
 
-  // —— 头部特征件 ——
-  const Mat4 at_head = bone_world("Skeleton_neck_joint_2");
-
-  if (look_.has_cap) {
-    // 帽体（深蓝球）+ 红白条 + 帽檐
-    // 头部几何实测：颈关节 y=1.19，头顶约 1.30 ⇒ 头半径 ≈ 0.11 米。
-    // 帽体必须**略大于头**、中心落在"头顶偏上"处，否则会盖住整张脸
-    // （早先半径 0.13 + 偏移 0.125 ⇒ 帽子把脸包住了）。
-    // 帽体半径必须**小于头半径**才能露出脸：
-    // 早先 0.118 比头还大，把整张脸包住了（截图里只剩一个蓝色球）。
-    st::raster::Mesh crown = st::raster::Mesh::colored_sphere(0.088f, 18, look_.cap_base);
-    // 往上抬到"头顶"，只盖住颅顶，帽沿以下露脸
-    scene.draw_mesh(crown, at_head * yup_to_zup * Mat4::translation(Vec3{0.0f, 0.072f, -0.010f}));
-    st::raster::Mesh band = st::raster::Mesh::cylinder(0.091f, 0.016f, 20, look_.cap_stripe);
-    scene.draw_mesh(band, at_head * yup_to_zup * Mat4::translation(Vec3{0.0f, 0.048f, -0.010f}));
-    st::raster::Mesh band2 = st::raster::Mesh::cylinder(0.089f, 0.014f, 20, accent);
-    scene.draw_mesh(band2, at_head * yup_to_zup * Mat4::translation(Vec3{0.0f, 0.064f, -0.010f}));
-    // 帽檐：薄薄一片，贴在额头前方（**不要太大**——早先 0.26×0.19 直接糊住了整张脸）
-    // 帽檐：薄片，从帽沿**向前**伸（模型前方向是 +Z 附近，取 0.13）
-    // 帽檐：薄的短檐，紧贴帽沿**前上方**——太靠下会直接遮住眼睛
-    // 帽檐：贴在帽体前下沿（**低于眼睛就会挡视线**，所以抬高到 0.062）
-    st::raster::Mesh brim = st::raster::Mesh::colored_box(0.13f, 0.011f, 0.080f, look_.cap_base);
-    scene.draw_mesh(brim, at_head * yup_to_zup *
-                              Mat4::translation(Vec3{0.0f, 0.062f, 0.090f}));
-    // 帽徽
-    st::raster::Mesh star = st::raster::Mesh::colored_sphere(0.026f, 10, accent);
-    scene.draw_mesh(star, at_head * yup_to_zup * Mat4::translation(Vec3{0.0f, 0.075f, 0.085f}));
-  }
-
-  // —— 头发（没有帽子的角色才画）——
-  //
-  // 户圣没戴帽子，如果不画头发就是一颗光头。做法：一个比头略大的球，
-  // 上移并后移，覆盖颅顶与后脑（**下沿不能过低**，否则盖住眉毛/眼睛）。
-  if (!look_.has_cap) {
-    st::raster::Mesh hair = st::raster::Mesh::colored_sphere(0.108f, 16, look_.hair);
-    scene.draw_mesh(hair, at_head * yup_to_zup * Mat4::translation(Vec3{0.0f, 0.042f, -0.018f}) *
-                             Mat4::scaling(Vec3{1.0f, 0.86f, 1.0f}));
-  }
-
-  // —— 五官（所有角色都有）——
-  //
-  // 为什么必须手工加：CesiumMan 是低模，脸上**没有五官**（贴图是图案，
-  // 换成皮肤色后就是一张空白的脸）。不加眼睛的话，3D 角色看起来像假人。
-  // 用小球做眼球 + 小黑点是性价比最高的做法（远看足够，近看也不违和）。
-  {
-    const Color eye_white{0xF8, 0xF8, 0xF8, 0xFF};
-    const Color pupil{0x1A, 0x1A, 0x22, 0xFF};
-    for (int i = 0; i < 2; ++i) {
-      const float dx = (i == 0) ? -0.042f : 0.042f;
-      // 眼白
-      st::raster::Mesh white = st::raster::Mesh::colored_sphere(0.030f, 12, eye_white);
-      scene.draw_mesh(white, at_head * yup_to_zup *
-                                 Mat4::translation(Vec3{dx, 0.012f, 0.098f}));
-      // 瞳孔（略靠前，保证在眼白之上）
-      st::raster::Mesh dark = st::raster::Mesh::colored_sphere(0.016f, 10, pupil);
-      scene.draw_mesh(dark, at_head * yup_to_zup *
-                                Mat4::translation(Vec3{dx, 0.012f, 0.120f}));
-    }
-    // 嘴：一条扁椭球（比线段自然）
-    st::raster::Mesh mouth = st::raster::Mesh::colored_sphere(0.5f, 10,
-                                                              Color{0xB0, 0x6A, 0x60, 0xFF});
-    scene.draw_mesh(mouth, at_head * yup_to_zup * Mat4::translation(Vec3{0.0f, -0.048f, 0.098f}) *
-                              Mat4::scaling(Vec3{0.030f, 0.008f, 0.012f}));
-    // 鼻：小突起
-    st::raster::Mesh nose = st::raster::Mesh::colored_sphere(0.5f, 8, look_.skin);
-    scene.draw_mesh(nose, at_head * yup_to_zup * Mat4::translation(Vec3{0.0f, -0.012f, 0.105f}) *
-                             Mat4::scaling(Vec3{0.016f, 0.016f, 0.018f}));
-  }
-
-  if (look_.has_glasses) {
-    const Color lens{0x2A, 0x24, 0x3C, 0xFF};
-    // 两片镜片
-    for (int i = 0; i < 2; ++i) {
-      const float dx = (i == 0) ? -0.052f : 0.052f;
-      st::raster::Mesh piece = st::raster::Mesh::colored_sphere(0.042f, 16, lens);
-      scene.draw_mesh(piece, at_head * yup_to_zup *
-                                 Mat4::translation(Vec3{dx, 0.010f, 0.100f}));
-    }
-    // 金框鼻梁
-    st::raster::Mesh bridge = st::raster::Mesh::colored_box(0.035f, 0.010f, 0.014f,
-                                                            look_.glasses_frame);
-    scene.draw_mesh(bridge, at_head * yup_to_zup *
-                                Mat4::translation(Vec3{0.0f, 0.010f, 0.106f}));
-    // 亮片：绕两片镜片各一圈白点（"bling"的来源）
-    for (int i = 0; i < 10; ++i) {
-      const float angle = static_cast<float>(i) * 0.6283f;
-      for (int side = 0; side < 2; ++side) {
-        const float base_x = (side == 0) ? -0.052f : 0.052f;
-        const float cx = base_x + std::cos(angle) * 0.034f;
-        const float cy = 0.010f + std::sin(angle) * 0.034f;
-        st::raster::Mesh sparkle = st::raster::Mesh::colored_sphere(0.010f, 8,
-                                                                    Color{0xFF, 0xFF, 0xFF, 0xFF});
-        scene.draw_mesh(sparkle, at_head * yup_to_zup *
-                                     Mat4::translation(Vec3{cx, cy, 0.115f}));
+    // 五官（正面 = +Y 方向）
+    {
+      const Color eye_white{0xF8, 0xF8, 0xF8, 0xFF};
+      const Color pupil{0x1A, 0x1A, 0x22, 0xFF};
+      for (int i = 0; i < 2; ++i) {
+        const float dx = (i == 0) ? -0.038f : 0.038f;
+        st::raster::Mesh white = st::raster::Mesh::colored_sphere(0.026f, 10, eye_white);
+        scene.draw_mesh(white, Mat4::translation(Vec3{head_center.x + dx,
+                                                      head_center.y + 0.082f,
+                                                      head_center.z + 0.012f}));
+        st::raster::Mesh dark = st::raster::Mesh::colored_sphere(0.014f, 8, pupil);
+        scene.draw_mesh(dark, Mat4::translation(Vec3{head_center.x + dx,
+                                                     head_center.y + 0.100f,
+                                                     head_center.z + 0.012f}));
       }
+      // 嘴
+      st::raster::Mesh mouth = st::raster::Mesh::colored_sphere(0.5f, 8,
+                                                                Color{0xB0, 0x6A, 0x60, 0xFF});
+      scene.draw_mesh(mouth, Mat4::translation(Vec3{head_center.x, head_center.y + 0.085f,
+                                                    head_center.z - 0.042f}) *
+                                Mat4::scaling(Vec3{0.026f, 0.010f, 0.008f}));
+    }
+
+    if (look_.has_glasses) {
+      // 亮片眼镜：两片深色镜片 + 金框 + 白点
+      for (int i = 0; i < 2; ++i) {
+        const float dx = (i == 0) ? -0.038f : 0.038f;
+        st::raster::Mesh lens = st::raster::Mesh::colored_sphere(0.032f, 12,
+                                                                 Color{0x2A, 0x24, 0x3C, 0xFF});
+        scene.draw_mesh(lens, Mat4::translation(Vec3{head_center.x + dx,
+                                                     head_center.y + 0.090f,
+                                                     head_center.z + 0.012f}));
+        for (int k = 0; k < 6; ++k) {
+          const float angle = static_cast<float>(k) * 1.047f;
+          st::raster::Mesh sparkle = st::raster::Mesh::colored_sphere(
+              0.006f, 6, Color{0xFF, 0xFF, 0xFF, 0xFF});
+          scene.draw_mesh(sparkle,
+                          Mat4::translation(Vec3{head_center.x + dx + std::cos(angle) * 0.026f,
+                                                 head_center.y + 0.104f,
+                                                 head_center.z + 0.012f +
+                                                     std::sin(angle) * 0.026f}));
+        }
+      }
+      // 金框鼻梁
+      st::raster::Mesh bridge = st::raster::Mesh::colored_box(0.018f, 0.008f, 0.010f,
+                                                              look_.glasses_frame);
+      scene.draw_mesh(bridge, Mat4::translation(Vec3{head_center.x, head_center.y + 0.092f,
+                                                     head_center.z + 0.012f}));
     }
   }
 
@@ -576,38 +668,34 @@ void FighterRig::draw(st::raster::Scene3D& scene, const Pose& pose, float origin
       const auto& mesh = body_.meshes[mesh_index];
       // 材质：皮肤是**哑光绝缘体**（metallic=0），粗糙度 0.62 让它有一点柔和高光。
       // 默认 roughness=1 会显得像粉笔；0.3 以下又像塑料。
+      // 材质：**只调粗糙度，不动固有色**。
+      //
+      // `base_color_set` 必须保持 false —— 为 true 时材质颜色会**覆盖顶点色**，
+      // 逐顶点染好的衣服就全被抹成同一个颜色（实测：全身变白）。
       {
         st::raster::Material material{};
-        material.base_color_set = false;   // 用贴图颜色，不要被固有色盖掉
+        material.base_color_set = false;   // 关键：用顶点色
         material.metallic = 0.0f;
-        material.roughness = 0.62f;
-        material.specular = 0.25f;
+        material.roughness = 0.72f;
+        material.specular = 0.18f;
         scene.set_material(material);
       }
       if (mesh.has_skins()) {
-        // ⚠ 蒙皮网格用**单位阵**绘制，不能再乘 `node.transform`。
+        // 上色 → 蒙皮 → 绘制。
         //
-        // 为什么：`skin[j] = world[j] · inverse_bind[j]` 已经把顶点
-        // **从模型空间直接映射到世界空间**（`inverse_bind` 是 模型→关节绑定，
-        // `world` 是 关节→世界）。再叠一次 `node.transform` 等于把
-        // "模型→世界"那一段做两遍——而 `Cesium_Man` 节点的 transform 里
-        // 正好带着 `Armature` 的 **Z-up→Y-up** 旋转，于是整个角色被多转 90°，
-        // 表现为**横躺在地上**（这正是反复调试时的症状）。
-        scene.draw_mesh(st::raster::skin_mesh(mesh, matrices), Mat4::identity());
+        // 顺序要紧：**先上色再蒙皮**。上色用的是 T-pose 的模型空间坐标
+        //（分区稳定）；若反过来（蒙皮后再上色），顶点已被姿态挪走，
+        // "y > 0.58 是头"这类规则会在举手时把手臂当成头——衣服跟着乱跳。
+        //
+        // 蒙皮网格用**单位阵**绘制，不能再乘 `node.transform`：
+        // `skin[j] = world[j] · inverse_bind[j]` 已经把顶点从模型空间直接映射到
+        // 世界空间；再叠 `node.transform` 会把 "模型→世界" 做两遍
+        //（而那个节点带着 Armature 的 Z-up→Y-up 旋转），角色会横躺在地上。
+        const st::raster::Mesh dressed = dress(mesh);
+        scene.draw_mesh(st::raster::skin_mesh(dressed, matrices), Mat4::identity());
       } else {
         // 静态网格没有蒙皮信息，必须靠节点变换摆位。
         scene.draw_mesh(mesh, node.transform);
-      }
-      // 贴图：**用程序化皮肤贴图替换 glTF 自带的品牌色贴图**。
-      //
-      // 为什么不保留原贴图：CesiumMan 自带的是 Cesium 的蓝绿品牌图案，
-      // 贴在角色上等于"迷彩服"。而模型自带的 UV 布局是现成的——
-      // 往里填皮肤色就得到"人体"。
-      //
-      // 衣服/帽子/眼镜走 3D 服装几何（本文件 ③-b），所以这里整张都填皮肤：
-      // 裸露的手臂/腿是皮肤，躯干被夹克盖住，头被帽子盖住。
-      if (skin_texture_.valid()) {
-        scene.set_texture(skin_texture_.rgba, skin_texture_.width, skin_texture_.height);
       }
     }
   }

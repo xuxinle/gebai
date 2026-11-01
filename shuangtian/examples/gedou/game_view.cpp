@@ -428,7 +428,7 @@ void GameView::paint_content(const st::ui::RenderContext& context, Canvas& canva
   // 3D 角色：两个角色必须落在**同一次** begin/end_frame 里，
   // 否则第二次 begin_frame 会清屏、把第一个角色抹掉
   // （实测踩过：先按角色各渲染一次，结果只有后画的那个出现）。
-  paint_fighters_3d(context, canvas);
+  paint_fighters_2d(context, canvas);
   // 冰壳与护盾画在**角色之上**（它们是包在身上的效果）。
   paint_status_overlays(context, canvas);
   if (view_.show_hitbox) paint_hitboxes(context, canvas);
@@ -981,6 +981,29 @@ void GameView::paint_select(const st::ui::RenderContext& context,
                        Point{area.x + (area.width - hint_width) * 0.5f,
                              areas.start_button.bottom() + 18.0f},
                        12.0f, Color{0x7A, 0x84, 0x96, 0xFF});
+  }
+}
+
+void GameView::paint_fighters_2d(const st::ui::RenderContext& context,
+                                 st::raster::Surface& canvas) const {
+  (void)context;
+  for (int side = 0; side < 2; ++side) {
+    const FighterState& fighter = match_->state(side);
+    if (fighter.apple_form > 0) continue;   // 苹果形态由特效层画
+    const Pose pose = match_->world_pose(side);
+    const auto& palette = fighter_palette(std::min(fighter.profile, kFighterCount - 1));
+
+    FighterDrawOptions options{};
+    options.flash = fighter.hitstun > 0 ? 0.55f : 0.0f;
+    options.facing_right = fighter.facing_right;
+    // 影子随离地高度变淡变小（落地感）
+    const float ground_y = match_->arena().ground;
+    const float lift =
+        std::clamp((ground_y - std::max(pose.foot_front.y, pose.foot_back.y)) / 90.0f, 0.0f, 1.0f);
+    options.shadow_alpha = 0.38f * (1.0f - lift * 0.55f);
+    options.shadow_scale = 1.0f - lift * 0.30f;
+
+    draw_fighter(canvas, pose, palette, options);
   }
 }
 

@@ -20,6 +20,7 @@
 #include "ai.hpp"
 #include "fight.hpp"
 #include "battle_select.hpp"
+#include "fighter_art.hpp"
 #include "fighter_rig.hpp"
 #include "policy.hpp"
 #include "rl_env.hpp"
@@ -178,6 +179,8 @@ class GameView : public st::ui::Element {
   /// 3D 角色批量渲染（两个角色必须在同一次 begin/end_frame 里）。
   void paint_fighters_3d(const st::ui::RenderContext& context,
                          st::raster::Surface& canvas) const;
+  /// 2D 矢量角色绘制（取代 3D；两条路径都在，方便对比）。
+  void paint_fighters_2d(const st::ui::RenderContext& context, st::raster::Surface& canvas) const;
   /// 角色的 2D 覆盖层（影子/防御罩/必杀环/连击数）。
   void paint_fighter_overlays(const st::ui::RenderContext& context,
                               st::raster::Surface& canvas, int side) const;
