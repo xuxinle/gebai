@@ -71,3 +71,6 @@ examples/caiyun/mtfilm/qa/*.log
 *.revert-bak.*
 *.bak-tmp
 *.lint-bak
+
+# 逆向验证的源码快照（进程被杀时靠它把回退代码写回去）
+.rv-snapshots/

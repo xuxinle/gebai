@@ -2025,13 +2025,63 @@ auto clear_content_hash_cache() -> void {
   g_hash_cache.clear();
 }
 
-auto test_source_stamp(const std::vector<std::string>& test_files) -> std::string {
+/// 从上一轮编译产出的 `.d` 里取出该测试单元依赖的**非 tests/ 源文件**。
+///
+/// 为何只看“非 tests/”：`tests/*_test.cpp` 本身已由 `test_source_stamp` 覆盖，
+/// 这里要补的是它们**用 `#include` 拉进来的实现文件**（本仓多个示例这么做：
+/// `gedou_test` / `caiyun_carry_test` / `gedou_rl_test`）。
+///
+/// 为何要读 `.d` 而不是扫源码找 `#include`：`.d` 是**编译器实际看到的**依据链
+/// （含多级 include、宏展开后的结果），自己解析 `#include` 只能覆盖最简单的情形。
+/// 代价是“首次编译前拿不到 `.d`”——那时测试二进制必然重建（首个分支），
+/// 所以不影响正确性。
+[[nodiscard]] auto included_impl_files(const std::string& object_dir,
+                                      const std::vector<std::string>& test_files)
+    -> std::vector<std::string> {
+  std::vector<std::string> out;
+  const auto entries = fs::list_dir(object_dir);
+  if (!entries) return out;
+  for (const auto& test_file : test_files) {
+    const std::string stem = fs::stem(test_file);   // 如 `gedou_rl_test`
+    if (stem.empty()) continue;
+    for (const auto& entry : *entries) {
+      if (entry.is_dir) continue;
+      if (entry.name.size() < 2 || entry.name.substr(entry.name.size() - 2) != ".d") continue;
+      // `.d` 文件名含源文件主名（`..._tests_gedou_rl_test.cpp.o.d`）。
+      if (entry.name.find(stem) == std::string::npos) continue;
+      for (const auto& dep : parse_depfile(entry.path)) {
+        // 只看源码：头文件变化会经“引用它的 .cpp”间接反映，不必逐个入 stamp。
+        if (dep.size() < 4 || dep.substr(dep.size() - 4) != ".cpp") continue;
+        // tests/ 下的已由 `test_source_stamp` 覆盖。
+        if (dep.find("/tests/") != std::string::npos ||
+            dep.find("\\tests\\") != std::string::npos) {
+          continue;
+        }
+        out.push_back(dep);
+      }
+    }
+  }
+  // 去重并排序：`.d` 的列出顺序不定，否则 stamp 含自然抖动、每次构建都判“过期”。
+  std::sort(out.begin(), out.end());
+  out.erase(std::unique(out.begin(), out.end()), out.end());
+  return out;
+}
+
+auto test_source_stamp(const std::vector<std::string>& test_files, const std::string& object_dir)
+    -> std::string {
   std::string material;
   for (const auto& path : test_files) {
     // **不经过缓存**：这是“现在的内容”事实，要跨调用保持新鲜。
     const auto digest = file_content_hash(path);
     if (!digest.has_value()) continue;
     material.append(path).append("\t").append(std::to_string(*digest)).append("\n");
+  }
+  // 再补上被测试 `#include` 进来的实现文件：没有这一段，“改了实现→测试仍跑旧二进制”
+  // 会是完全静默的假绿（详见 `included_impl_files` 的注释）。
+  for (const auto& path : included_impl_files(object_dir, test_files)) {
+    const auto digest = file_content_hash(path);
+    if (!digest.has_value()) continue;
+    material.append("impl\t").append(path).append("\t").append(std::to_string(*digest)).append("\n");
   }
   return material;
 }
@@ -2040,12 +2090,12 @@ auto test_binary_stamp_path(const std::string& binary) -> std::string {
   return binary + ".srcs";
 }
 
-auto test_binary_is_stale(const std::vector<std::string>& test_files, const std::string& binary)
-    -> bool {
+auto test_binary_is_stale(const std::vector<std::string>& test_files, const std::string& binary,
+                          const std::string& object_dir) -> bool {
   if (!fs::is_regular_file(binary)) return false;
   const auto recorded = fs::read_text(test_binary_stamp_path(binary));
   if (!recorded.has_value()) return true;
-  return *recorded != test_source_stamp(test_files);
+  return *recorded != test_source_stamp(test_files, object_dir);
 }
 
 auto target_source_stamp(const Manifest& manifest, const TargetSpec& target) -> std::string {
@@ -2397,12 +2447,19 @@ auto profile_flags(std::string_view profile) -> Result<std::vector<std::string>>
   const std::string bin_dir = fs::join(
       options.root.empty() ? manifest.directory : options.root,
       std::format("build/{}/bin", profile_directory(options.profile, *toolchain)));
+  const std::string object_dir = fs::join(
+      options.root.empty() ? manifest.directory : options.root,
+      std::format("build/{}/obj", profile_directory(options.profile, *toolchain)));
   const std::string binary = fs::join(bin_dir, "st_tests" + toolchain->executable_suffix);
   if (!fs::is_regular_file(binary)) return false;   // 从没构建过测试 → 不是"过期"，是"没开始"
 
-  if (!test_binary_is_stale(*tests, binary)) return false;
+  if (!test_binary_is_stale(*tests, binary, object_dir)) return false;
 
-  ST_LOG_INFO("测试目标已过期 → 同步重建（不运行）");
+  // 重建时说一句**为什么**：测试二进制重建要重编几百个单元，用户有权知道触发源。
+  // 快照里跟踪了多少实现文件也一并告诉（那是这次修复新增的跟踪面）。
+  const auto impls = included_impl_files(object_dir, *tests);
+  ST_LOG_INFO("测试目标已过期（{} 个测试源 + {} 个被 include 的实现文件跟踪中）→ 同步重建",
+              tests->size(), impls.size());
   auto built = build_test_binary(manifest, options);
   if (!built) {
     // 不让构建失败：产物本身是好的。但必须让人看见，否则下次又会拿旧二进制。
@@ -3288,7 +3345,10 @@ namespace {
     }
   }
   // 记下出生快照：下次 `st build`/`st test` 据此判“测试源改过没有”（只比内容）。
-  (void)fs::write_text(test_binary_stamp_path(output), test_source_stamp(*tests));
+  // 含被 `#include` 进来的实现文件（见 `included_impl_files`）——否则改了它们
+  // 会被当成“没改”，测试一直跑旧二进制。
+  (void)fs::write_text(test_binary_stamp_path(output),
+                       test_source_stamp(*tests, object_dir));
 
   return output;
 }

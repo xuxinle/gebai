@@ -215,6 +215,12 @@ class RlEnv {
   [[nodiscard]] auto awaiting_action() const noexcept -> bool {
     return frames_ % std::max(1, config_.frame_skip) == 0;
   }
+  /// 当前还剩多少帧攻击冷却（0 = 可以出招）。
+  ///
+  /// 暴露它是因为“冷却真的生效了吗”无法从外部行为反推：角色在起手/收招期间
+  /// 本来也无法再出招，所以“打不出连击”既可能是冷却在挡，也可能是招式动画在挡
+  /// （逆向验证实测：只看命中次数时，去掉冷却断言仍绿）。
+  [[nodiscard]] auto attack_cooldown() const noexcept -> int { return attack_cooldown_left_; }
 
  private:
   Config config_{};

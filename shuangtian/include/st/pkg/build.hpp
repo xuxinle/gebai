@@ -215,13 +215,20 @@ auto clear_content_hash_cache() -> void;
 ///
 /// - 二进制不存在 → `false`（从没跑过测试是**正常状态**）
 /// - 出生快照缺失 → `true`（无从校验，保守重建）
-/// - 仉一条源内容不一致 → `true`
+/// - 任一条源内容不一致 → `true`
 /// - 读不到的源不参与（它不是"过期"的证据，真正的错误由构建阶段报）
+///
+/// `object_dir` 用来读上一轮编译的 `.d`：测试常用 `#include "examples/x/impl.cpp"`
+/// 把实现编进来，这类文件改了也必须重建——否则测试会一直跑旧二进制（完全静默）。
 [[nodiscard]] auto test_binary_is_stale(const std::vector<std::string>& test_files,
-                                        const std::string& binary) -> bool;
+                                        const std::string& binary,
+                                        const std::string& object_dir) -> bool;
 
 /// 测试二进制的出生快照（`<binary>.srcs` 的内容；写与比共用这一份）。
-[[nodiscard]] auto test_source_stamp(const std::vector<std::string>& test_files) -> std::string;
+///
+/// 含被测试 `#include` 进来的实现文件（从 `object_dir` 里的 `.d` 取）。
+[[nodiscard]] auto test_source_stamp(const std::vector<std::string>& test_files,
+                                    const std::string& object_dir) -> std::string;
 [[nodiscard]] auto test_binary_stamp_path(const std::string& binary) -> std::string;
 
 }  // namespace st::pkg

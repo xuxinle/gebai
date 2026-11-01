@@ -357,30 +357,72 @@ ST_TEST(rl_reward_signs) {
   ST_CHECK(reward.push_penalty < 0.0f);
   ST_CHECK(reward.step_penalty < 0.0f);
 
-  // 端到端符号：让对手**打桩不动**，主动走过去、到距离内再打 ⇒ 累计回报必须为正。
-  // 若 `damage_dealt` 符号取了反，这一条会变负。
+  // 端到端符号：**必须测 `RlEnv::step()` 真实产出的奖励**，不能只测 `RewardConfig`
+  // 里的系数——后者是"桩"：系数符号对了而实现里写反了，断言照样绿
+  // （CONVENTIONS §7.2 记的正是这类假绿）。
   //
-  // ⚠ 必须“走过去再打”：硬编码“踢两下→前进”的固定节奏会因起始距离
-  // （随机 90~430px）而踢空（实测踩过：断言 attacked 直接红）。
-  RlEnv::Config config{};
-  config.max_frames = 900;
-  config.idle_opponent_ratio = 1.0f;   // 对手一定不动
-  RlEnv env{config};
-  (void)env.reset();
-  bool attacked = false;
-  for (int frame = 0; frame < 900; ++frame) {
-    const FighterState& self = env.match().state(0);
-    const FighterState& other = env.match().state(1);
-    const float gap = std::abs(other.x - self.x);
-    const float reach = gedou::attack_spec(MoveId::Kick).reach_far * gedou::kBodyScale +
-                        30.0f * gedou::kBodyScale;
-    const RlAction action = gap > reach ? RlAction::Forward : RlAction::Kick;
-    const auto result = env.step(action);
-    if (result.hits > 0) attacked = true;
+  // 判据也不是"命中帧平均为正"：`hit_bonus`(0.35) 远大于单帧伤害(≈0.04)，
+  // 把 `damage_dealt` 反号后平均仍然为正（实测：这条假绿过一次）。
+  // 可靠判据：**伤害更大的招式命中时，单帧奖励必须更高**。
+  // 两局对照（一局只轻拳、一局只重拳），避免同局交错出招时重拳抢不到判定帧。
+  const auto hit_reward_of = [](MoveId move, float& damage_out) -> float {
+    RlEnv::Config cfg{};
+    cfg.max_frames = 900;
+    cfg.idle_opponent_ratio = 1.0f;   // 对手不动（排除挨打项）
+    cfg.seed = 777U;
+    RlEnv env{cfg};
+    (void)env.reset();
+    const RlAction attack = (move == MoveId::Heavy) ? RlAction::Heavy : RlAction::Light;
+    float best = 0.0f;
+    float biggest = 0.0f;
+    for (int frame = 0; frame < 900; ++frame) {
+      const FighterState& self = env.match().state(0);
+      const FighterState& other = env.match().state(1);
+      const float gap = std::abs(other.x - self.x);
+      const float reach = gedou::attack_spec(move).reach_far * gedou::kBodyScale +
+                          30.0f * gedou::kBodyScale;
+      const auto result = env.step(gap > reach ? RlAction::Forward : attack);
+      if (result.damage_dealt > biggest) {
+        biggest = result.damage_dealt;
+        best = result.reward;
+      }
+      if (result.done) break;
+    }
+    damage_out = biggest;
+    return best;
+  };
+  float light_damage = 0.0f;
+  float heavy_damage = 0.0f;
+  const float light_reward = hit_reward_of(MoveId::Light, light_damage);
+  const float heavy_reward = hit_reward_of(MoveId::Heavy, heavy_damage);
+  ST_CHECK(light_damage > 0.0f);    // 前提：两种招都真打中过
+  ST_CHECK(heavy_damage > 0.0f);
+  ST_CHECK(heavy_damage > light_damage * 1.5f);   // 重拳伤害本来就更大
+  // 核心断言：伤害更大的那一招，单帧奖励更高。符号反了立刻被抓住。
+  ST_CHECK(heavy_reward > light_reward);
+
+  // 反向：纯挨打（对手会动、自己不动）的帧必须是负分。
+  RlEnv::Config taken_cfg{};
+  taken_cfg.max_frames = 300;
+  taken_cfg.idle_opponent_ratio = 0.0f;
+  RlEnv taken_env{taken_cfg};
+  (void)taken_env.reset();
+  bool got_hit = false;
+  float taken_reward_sum = 0.0f;
+  int taken_frames = 0;
+  for (int frame = 0; frame < 300; ++frame) {
+    const auto result = taken_env.step(RlAction::Idle);
+    if (result.damage_taken > 0.0f) {
+      got_hit = true;
+      taken_reward_sum += result.reward;
+      ++taken_frames;
+    }
     if (result.done) break;
   }
-  ST_CHECK(attacked);   // 前提：确实打中了（否则下面那条没有意义）
-  ST_CHECK(env.episode_return() > 0.0f);}
+  ST_CHECK(got_hit);
+  ST_CHECK(taken_frames > 0);
+  ST_CHECK(taken_reward_sum / static_cast<float>(std::max(1, taken_frames)) < 0.0f);
+}
 
 ST_TEST(rl_step_is_deterministic_for_same_seed) {
   // 同种子 → 同一局。这是"评测可复现"的地基（训练脚本靠它比较不同轮次）。
@@ -404,34 +446,27 @@ ST_TEST(rl_step_is_deterministic_for_same_seed) {
 }
 
 ST_TEST(rl_attack_cooldown_blocks_repeat) {
-  // “每帧重按攻击”不能被原样执行。
+  // “每帧重按攻击”不能被原样执行 —— 这是"一直按踢腿 == 无限连"的直接原因。
   //
-  // ⚠ 早期版本只断言“60 帧里并非每帧都在攻击”——而冷却去掉后角色本身也会
-  // 因为起手/收招而无法每帧出招，断言依然绿（逆向验证实测）。
-  // 正确判据：**数“真正出招的次数”**。没有冷却时，起手一结束就能再出招，
-  // 次数会接近理论上限；有冷却（按招式总帧数）时次数应当明显更少。
-  const auto count_attacks = [](int) {
-    RlEnv::Config config{};
-    config.max_frames = 900;
-    config.frame_skip = 1;
-    config.idle_opponent_ratio = 1.0f;   // 对手不动，命中数就等于出招效率
-    RlEnv env{config};
-    (void)env.reset();
-    int attacks = 0;
-    for (int frame = 0; frame < 900; ++frame) {
-      const FighterState& self = env.match().state(0);
-      const FighterState& other = env.match().state(1);
-      const float gap = std::abs(other.x - self.x);
-      const float reach = gedou::attack_spec(MoveId::Kick).reach_far * gedou::kBodyScale +
-                          30.0f * gedou::kBodyScale;
-      const auto result = env.step(gap > reach ? RlAction::Forward : RlAction::Kick);
-      if (result.hits > 0) ++attacks;
-      if (result.done) break;
-    }
-    return attacks;
-  };
-  const int with_cooldown = count_attacks(1);
-  // 轻拳总帧数 ≈ 20+，900 帧内命中次数必然远小于“帧数/轻拳总时长”的上限。
-  ST_CHECK(with_cooldown > 0);     // 确实能打到
-  ST_CHECK(with_cooldown < 40);    // 但被冷却压住了（无冷却时可达 60+）
+  // ⚠ 走过的弯路（都是逆向验证实测出来的假绿）：
+  //  ① 断言"900 帧命中次数 < 40"——去掉冷却后角色受招式动画限制，次数照样上不去；
+  //  ② 断言"连续两帧请求不会起新招"——角色本就在起手中，`move_frame` 不为 0，测不出；
+  //  ③ 数"攻击姿态被重新起始的次数"——同样被动画掩盖。
+  // 结论：**从外部行为反推不出冷却是否生效**，必须直接观测它（所以 RlEnv 暴露了
+  // `attack_cooldown()`：这是可测试性要求，不是测试在偷看实现细节）。
+  RlEnv::Config cfg{};
+  cfg.max_frames = 200;
+  cfg.idle_opponent_ratio = 1.0f;
+  RlEnv env{cfg};
+  (void)env.reset();
+  ST_CHECK(env.attack_cooldown() == 0);          // 开局无冷却
+  (void)env.step(RlAction::Light);               // 出一招
+  ST_CHECK(env.attack_cooldown() > 0);           // 立刻进入冷却（关键断言）
+  // 冷却期间再请求攻击：冷却应当**继续倒数**而不是被重置/绕过
+  const int after_first = env.attack_cooldown();
+  (void)env.step(RlAction::Light);
+  ST_CHECK(env.attack_cooldown() <= after_first);
+  // 等足够久（远超轻拳总帧数）后冷却归零
+  for (int i = 0; i < 60; ++i) (void)env.step(RlAction::Idle);
+  ST_CHECK(env.attack_cooldown() == 0);
 }

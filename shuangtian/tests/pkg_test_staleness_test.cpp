@@ -37,8 +37,10 @@ ST_TEST(test_binary_staleness_ignores_missing_binary) {
   const std::string test_src = st::fs::join(*dir, "a_test.cpp");
   write_marker(test_src, 1);
   const std::string binary = st::fs::join(*dir, "st_tests");   // 不存在
+  // 没有 `.d` 的目录也算合法输入：此时只有 tests/ 源码进入快照。
+  const std::string object_dir = st::fs::join(*dir, "obj");
 
-  ST_CHECK(!st::pkg::test_binary_is_stale({test_src}, binary));
+  ST_CHECK(!st::pkg::test_binary_is_stale({test_src}, binary, object_dir));
   (void)st::fs::remove_all(*dir);
 }
 
@@ -49,14 +51,16 @@ ST_TEST(test_binary_staleness_detects_changed_test_source) {
   const std::string test_src = st::fs::join(*dir, "a_test.cpp");
   write_marker(test_src, 1);
   const std::string binary = st::fs::join(*dir, "st_tests");
+  // 没有 `.d` 的目录也算合法输入：此时只有 tests/ 源码进入快照。
+  const std::string object_dir = st::fs::join(*dir, "obj");
   write_marker(binary, 1);
   (void)st::fs::write_text(st::pkg::test_binary_stamp_path(binary),
-                           st::pkg::test_source_stamp({test_src}));
-  ST_CHECK(!st::pkg::test_binary_is_stale({test_src}, binary));
+                           st::pkg::test_source_stamp({test_src}, object_dir));
+  ST_CHECK(!st::pkg::test_binary_is_stale({test_src}, binary, object_dir));
 
   // **等长**改写：mtime+size 判据在这里会漏，内容哈希必然抓住
   write_marker(test_src, 2);
-  ST_CHECK(st::pkg::test_binary_is_stale({test_src}, binary));
+  ST_CHECK(st::pkg::test_binary_is_stale({test_src}, binary, object_dir));
   (void)st::fs::remove_all(*dir);
 }
 
@@ -69,16 +73,18 @@ ST_TEST(test_binary_staleness_is_quiet_when_fresh) {
   write_marker(src_a, 1);
   write_marker(src_b, 2);
   const std::string binary = st::fs::join(*dir, "st_tests");
+  // 没有 `.d` 的目录也算合法输入：此时只有 tests/ 源码进入快照。
+  const std::string object_dir = st::fs::join(*dir, "obj");
   write_marker(binary, 3);
   (void)st::fs::write_text(st::pkg::test_binary_stamp_path(binary),
-                           st::pkg::test_source_stamp({src_a, src_b}));
+                           st::pkg::test_source_stamp({src_a, src_b}, object_dir));
 
-  ST_CHECK(!st::pkg::test_binary_is_stale({src_a, src_b}, binary));
+  ST_CHECK(!st::pkg::test_binary_is_stale({src_a, src_b}, binary, object_dir));
 
   // 再写一遍同样的内容（模拟 touch / `git checkout`：时间戳全刷新，内容一字未改）
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
   write_marker(src_a, 1);
-  ST_CHECK(!st::pkg::test_binary_is_stale({src_a, src_b}, binary));
+  ST_CHECK(!st::pkg::test_binary_is_stale({src_a, src_b}, binary, object_dir));
   (void)st::fs::remove_all(*dir);
 }
 
@@ -88,13 +94,15 @@ ST_TEST(test_binary_staleness_survives_missing_test_file) {
   const auto dir = st::fs::make_temp_dir("st_stale_gone");
   ST_REQUIRE(dir.has_value());
   const std::string binary = st::fs::join(*dir, "st_tests");
+  // 没有 `.d` 的目录也算合法输入：此时只有 tests/ 源码进入快照。
+  const std::string object_dir = st::fs::join(*dir, "obj");
   write_marker(binary, 1);
   (void)st::fs::write_text(st::pkg::test_binary_stamp_path(binary),
-                           st::pkg::test_source_stamp({}));
+                           st::pkg::test_source_stamp({}, object_dir));
   const std::string gone = st::fs::join(*dir, "deleted_test.cpp");
 
-  ST_CHECK(!st::pkg::test_binary_is_stale({gone}, binary));
-  ST_CHECK(!st::pkg::test_binary_is_stale({}, binary));   // 空列表同理
+  ST_CHECK(!st::pkg::test_binary_is_stale({gone}, binary, object_dir));
+  ST_CHECK(!st::pkg::test_binary_is_stale({}, binary, object_dir));   // 空列表同理
   (void)st::fs::remove_all(*dir);
 }
 
@@ -106,8 +114,10 @@ ST_TEST(test_binary_staleness_without_stamp_is_conservative) {
   const std::string test_src = st::fs::join(*dir, "a_test.cpp");
   write_marker(test_src, 1);
   const std::string binary = st::fs::join(*dir, "st_tests");
+  // 没有 `.d` 的目录也算合法输入：此时只有 tests/ 源码进入快照。
+  const std::string object_dir = st::fs::join(*dir, "obj");
   write_marker(binary, 1);
 
-  ST_CHECK(st::pkg::test_binary_is_stale({test_src}, binary));
+  ST_CHECK(st::pkg::test_binary_is_stale({test_src}, binary, object_dir));
   (void)st::fs::remove_all(*dir);
 }

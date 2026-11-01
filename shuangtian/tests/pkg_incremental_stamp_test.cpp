@@ -89,29 +89,54 @@ ST_TEST(target_source_stamp_tracks_content_only) {
 
 /// 测试二进制过期判定：二进制不存在 → 不算过期（第一次构建不该白编几百个单元）；
 /// 快照缺失 → 保守判过期；内容改了 → 过期；内容没改（只是时间戳动了）→ 不过期。
+///
+/// 另多一块：**被测试 `#include` 进来的实现文件**也算入快照（见末段）。
+/// 没有它时，“改了实现→测试仍跑旧二进制”是完全静默的假绿——
+/// 实测代价：`tools/gedou_rl_reverse_verify.py` 三个案例因此无法成立。
 ST_TEST(test_binary_staleness_round_trip) {
   TempTree tree("st_test_stamp_");
   tree.write("tests/a_test.cpp", "// a\n");
   const std::string binary = st::fs::join(tree.dir, "st_tests");
   const std::vector<std::string> sources = {st::fs::join(tree.dir, "tests/a_test.cpp")};
+  const std::string object_dir = st::fs::join(tree.dir, "obj");
+  (void)st::fs::create_directories(object_dir);
 
   // ① 二进制不存在 → 不是“过期”，是“没开始”
-  ST_CHECK(!st::pkg::test_binary_is_stale(sources, binary));
+  ST_CHECK(!st::pkg::test_binary_is_stale(sources, binary, object_dir));
 
   // ② 二进制在、但没有出生快照 → 无从校验，保守重建
   tree.write("st_tests", "fake binary");
-  ST_CHECK(st::pkg::test_binary_is_stale(sources, binary));
+  ST_CHECK(st::pkg::test_binary_is_stale(sources, binary, object_dir));
 
   // ③ 落一份快照 → 不再过期
   (void)st::fs::write_text(st::pkg::test_binary_stamp_path(binary),
-                           st::pkg::test_source_stamp(sources));
-  ST_CHECK(!st::pkg::test_binary_is_stale(sources, binary));
+                           st::pkg::test_source_stamp(sources, object_dir));
+  ST_CHECK(!st::pkg::test_binary_is_stale(sources, binary, object_dir));
 
   // ④ 只动时间戳（写同一份内容）→ 仍然不过期
   tree.write("tests/a_test.cpp", "// a\n");
-  ST_CHECK(!st::pkg::test_binary_is_stale(sources, binary));
+  ST_CHECK(!st::pkg::test_binary_is_stale(sources, binary, object_dir));
 
   // ⑤ 内容改了（等长）→ 必须过期
   tree.write("tests/a_test.cpp", "// b\n");
-  ST_CHECK(st::pkg::test_binary_is_stale(sources, binary));
+  ST_CHECK(st::pkg::test_binary_is_stale(sources, binary, object_dir));
+
+  // ⑥ **被 include 的实现文件**改了 → 也必须过期
+  //
+  // 这条是回归测试的主体：`.d` 是编译器实际写出的依赖清单，测试单元通过
+  // `#include "examples/x/impl.cpp"` 把实现编进来时，它就在里面。
+  tree.write("tests/a_test.cpp", "// b\n");   // 回到与快照一致的内容
+  tree.write("examples/x/impl.cpp", "int f() { return 1; }\n");
+  const std::string impl = st::fs::join(tree.dir, "examples/x/impl.cpp");
+  // 手工写一份 `.d`（真实构建里是编译器产出）。文件名只需含源文件主名：
+  // `included_impl_files` 就是按主名去匹配 `.d` 的（真实文件名是路径转义后的形式，
+  // 这里不必复刻那套转义——被测的是“读 `.d` 并把它入 stamp”这段逻辑）。
+  (void)st::fs::write_text(st::fs::join(object_dir, "a_test.cpp.o.d"),
+                           "st_tests.o: " + sources[0] + " \\\n  " + impl + "\n");
+  (void)st::fs::write_text(st::pkg::test_binary_stamp_path(binary),
+                           st::pkg::test_source_stamp(sources, object_dir));
+  ST_CHECK(!st::pkg::test_binary_is_stale(sources, binary, object_dir));
+  // 只改实现文件的内容 → 过期
+  tree.write("examples/x/impl.cpp", "int f() { return 2; }\n");
+  ST_CHECK(st::pkg::test_binary_is_stale(sources, binary, object_dir));
 }
