@@ -206,6 +206,8 @@
       "exclude_sources": ["src/pkg/*"] },
     "gltf_skin_check": { "kind": "executable", "sources": ["tools/gltf_skin_check.cpp"],
                           "exclude_sources": ["src/pkg/*"] },
+    "tex_dump": { "kind": "executable", "sources": ["tools/tex_dump.cpp"],
+                  "exclude_sources": ["src/pkg/*"] },
     "rig_map_check": { "kind": "executable", "sources": ["tools/rig_map_check.cpp"],
                         "exclude_sources": ["src/pkg/*"] },
     "fighter_preview": { "kind": "executable", "sources": ["tools/fighter_preview.cpp"],

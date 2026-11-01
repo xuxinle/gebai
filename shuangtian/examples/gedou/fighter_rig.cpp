@@ -1,5 +1,7 @@
 #include "fighter_rig.hpp"
 
+#include "procedural_texture.hpp"
+
 #include <algorithm>
 #include <cmath>
 
@@ -170,11 +172,22 @@ auto FighterRig::create(std::string_view gltf_path, const FighterLook& look)
   rig->skin_ = *rig->body_.skeleton;
   rig->look_ = look;
   rig->valid_ = true;
+
+  // 生成程序化贴图（一次性；生成是逐像素的，每帧做会掉帧）。
+  const SkinPalette palette{look.skin, look.torso, look.torso_accent};
+  rig->skin_texture_ = make_skin_texture(palette, 512);
+  rig->cloth_texture_ = make_cloth_texture(look.torso, look.torso_accent, 512);
+  if (look.has_cap) {
+    rig->cap_texture_ = make_cap_texture(look.cap_base, look.cap_stripe, look.torso_accent, 256);
+  }
+  if (look.has_glasses) {
+    rig->lens_texture_ = make_lens_texture(128);
+  }
   return std::shared_ptr<const FighterRig>(std::move(rig));
 }
 
 void FighterRig::draw(st::raster::Scene3D& scene, const Pose& pose, float origin_x, float ground_y,
-                      bool facing_right) const {
+                      bool facing_right, float pixels_per_meter) const {
   if (!valid_) return;
   // `ground_y` 目前不参与换算（纵向基准由模型自身的髋高度决定，见 ⓪）。
   // 保留参数是因为调用方按"世界坐标"思考，去掉会让签名更难读。
@@ -205,21 +218,41 @@ void FighterRig::draw(st::raster::Scene3D& scene, const Pose& pose, float origin
   // `kScale` = 模型跨度 / 姿态跨度（米/像素）。
   // 有了它，"拳伸出去 60 像素"在模型上就是"伸出 60 × kScale 米"，
   // 动作幅度与模型比例自动一致。
-  const float kScale = kModelSpan / pose_span;
+  // 用全局唯一的换算比例（与相机同源），不再按姿态各算一套。
+  const float kScale = kPoseToModelScale;
+  (void)pose_span;
+  (void)kModelSpan;
   // 模型髋关节的世界 y（绑定值），用来把姿态的髋对齐到它。
   constexpr float kModelHipY = 0.679f;
   // ⚠ **Z-up → Y-up**：GLB 里有一个 `Z_UP` 节点，说明模型按 Z 轴朝上制作，
   // 而框架（与 glTF 规范默认）是 Y-up。不转换的话整个角色会**横躺**在地上
   // ——实测就是这个症状：人形横着摊平、脚朝向左边。
   // 转换：绕 X 轴 -90° 即 `(x, y, z) → (x, z, -y)`。
+  // 姿态点（世界像素）→ 模型空间（米）。
+  //
+  // **横竖用同一把尺**（`kScale`，米/姿态像素）。骨骼是刚体，
+  // 任何非等比缩放都会让它变形——实测踩过：x 用相机尺度、y 用模型尺度，
+  // 结果腿像面条一样垂到地上、手臂甩得老长。
+  //
+  // 世界位置：模型空间的原点定在**场地中心的地面**（x=场地中心、y=0 为脚底），
+  // 这样相机对准场地中心即可，角色按自己的世界 x 排开。
   const auto to_rig = [&](math::Point point) -> Vec3 {
-    // x 用与 2D 同样的世界尺度（横向幅度靠 kPixelPerMeter 换算更自然，
-    // 但纵向必须按骨骼跨度归一，否则肢体长短会不匹配）。
+    // 相对角色脚下的局部横向位移（先镜像再缩放，保证镜像绕角色自己）
     const float relative = point.x - origin_x;
     const float mirrored = facing_right ? relative : -relative;
-    const float x_meters = (origin_x + mirrored) / kPixelPerMeter;
+    // 角色在世界里的位置：**用相机尺度**换算（`pixels_per_meter`）。
+    //
+    // 为什么这里不能也用 `kScale`：`kScale` 是"姿态像素→模型米"的**骨骼尺度**
+    // （把 300px 的姿态映射到 1.24m 的模型上）；而"角色站在舞台哪个位置"
+    // 是**世界坐标**，必须与相机取景用同一把尺，否则人不会出现在该在的地方。
+    //
+    // 两者职责不同，混用任一个都会出错：
+    // - 位置用骨骼尺度 ⇒ 角色横向被压缩/拉伸（跑到场地外或两人叠在一起）；
+    // - 骨骼用相机尺度 ⇒ 骨骼非等比缩放（腿拉成面条）。
+    const float world_x = (origin_x + mirrored) / pixels_per_meter;
+    // 纵向：以模型髋关节为基准对齐
     const float y_meters = kModelHipY + (pose_hip_y - point.y) * kScale;
-    return Vec3{x_meters, y_meters, 0.0f};
+    return Vec3{world_x, y_meters, 0.0f};
   };
 
   const Vec3 hip = to_rig(pose.hip);
@@ -406,15 +439,19 @@ void FighterRig::draw(st::raster::Scene3D& scene, const Pose& pose, float origin
 
   // —— 夹克 / polo：挂在胸腔骨骼上的一圈箱体 ——
   {
-    st::raster::Mesh jacket = st::raster::Mesh::colored_box(0.34f, 0.42f, 0.22f, torso_color);
+    // 夹克用**扁球**而不是方块：方块在 3D 里读起来像纸箱，
+    // 而人躯干是圆的。球压扁成椭球（用 scale 变换）就有"身体"的体积感。
+    st::raster::Mesh jacket = st::raster::Mesh::colored_sphere(0.5f, 16, torso_color);
     const Mat4 at_chest = bone_world("torso_joint_3");
-    scene.draw_mesh(jacket, at_chest * yup_to_zup * Mat4::translation(Vec3{0.0f, 0.02f, 0.0f}));
-    // 白色跑动条 / polo 门襟
-    st::raster::Mesh stripe = st::raster::Mesh::colored_box(0.035f, 0.38f, 0.235f, accent);
-    scene.draw_mesh(stripe, at_chest * yup_to_zup *
-                                Mat4::translation(Vec3{-0.09f, 0.02f, 0.0f}));
-    scene.draw_mesh(stripe, at_chest * yup_to_zup *
-                                Mat4::translation(Vec3{0.09f, 0.02f, 0.0f}));
+    // 椭球：横向 0.20、纵向 0.26、深浅 0.15（单位：米）
+    scene.draw_mesh(jacket, at_chest * yup_to_zup * Mat4::translation(Vec3{0.0f, -0.06f, 0.0f}) *
+                                Mat4::scaling(Vec3{0.20f, 0.26f, 0.15f}));
+    // 白色跑动条 / polo 门襟：贴在椭球表面的窄条
+    st::raster::Mesh stripe = st::raster::Mesh::colored_sphere(0.5f, 10, accent);
+    scene.draw_mesh(stripe, at_chest * yup_to_zup * Mat4::translation(Vec3{-0.085f, -0.05f, 0.115f}) *
+                                Mat4::scaling(Vec3{0.018f, 0.22f, 0.030f}));
+    scene.draw_mesh(stripe, at_chest * yup_to_zup * Mat4::translation(Vec3{0.085f, -0.05f, 0.115f}) *
+                                Mat4::scaling(Vec3{0.018f, 0.22f, 0.030f}));
 
     // 袖子：挂到两根上臂骨骼上（夹克是长袖、polo 是短袖）。
     //
@@ -438,21 +475,65 @@ void FighterRig::draw(st::raster::Scene3D& scene, const Pose& pose, float origin
     // 头部几何实测：颈关节 y=1.19，头顶约 1.30 ⇒ 头半径 ≈ 0.11 米。
     // 帽体必须**略大于头**、中心落在"头顶偏上"处，否则会盖住整张脸
     // （早先半径 0.13 + 偏移 0.125 ⇒ 帽子把脸包住了）。
-    st::raster::Mesh crown = st::raster::Mesh::colored_sphere(0.118f, 18, look_.cap_base);
-    scene.draw_mesh(crown, at_head * yup_to_zup * Mat4::translation(Vec3{0.0f, 0.075f, -0.005f}));
-    st::raster::Mesh band = st::raster::Mesh::cylinder(0.121f, 0.020f, 20, look_.cap_stripe);
-    scene.draw_mesh(band, at_head * yup_to_zup * Mat4::translation(Vec3{0.0f, 0.040f, -0.005f}));
-    st::raster::Mesh band2 = st::raster::Mesh::cylinder(0.119f, 0.018f, 20, accent);
-    scene.draw_mesh(band2, at_head * yup_to_zup * Mat4::translation(Vec3{0.0f, 0.062f, -0.005f}));
+    // 帽体半径必须**小于头半径**才能露出脸：
+    // 早先 0.118 比头还大，把整张脸包住了（截图里只剩一个蓝色球）。
+    st::raster::Mesh crown = st::raster::Mesh::colored_sphere(0.088f, 18, look_.cap_base);
+    // 往上抬到"头顶"，只盖住颅顶，帽沿以下露脸
+    scene.draw_mesh(crown, at_head * yup_to_zup * Mat4::translation(Vec3{0.0f, 0.072f, -0.010f}));
+    st::raster::Mesh band = st::raster::Mesh::cylinder(0.091f, 0.016f, 20, look_.cap_stripe);
+    scene.draw_mesh(band, at_head * yup_to_zup * Mat4::translation(Vec3{0.0f, 0.048f, -0.010f}));
+    st::raster::Mesh band2 = st::raster::Mesh::cylinder(0.089f, 0.014f, 20, accent);
+    scene.draw_mesh(band2, at_head * yup_to_zup * Mat4::translation(Vec3{0.0f, 0.064f, -0.010f}));
     // 帽檐：薄薄一片，贴在额头前方（**不要太大**——早先 0.26×0.19 直接糊住了整张脸）
     // 帽檐：薄片，从帽沿**向前**伸（模型前方向是 +Z 附近，取 0.13）
     // 帽檐：薄的短檐，紧贴帽沿**前上方**——太靠下会直接遮住眼睛
-    st::raster::Mesh brim = st::raster::Mesh::colored_box(0.16f, 0.012f, 0.09f, look_.cap_base);
+    // 帽檐：贴在帽体前下沿（**低于眼睛就会挡视线**，所以抬高到 0.062）
+    st::raster::Mesh brim = st::raster::Mesh::colored_box(0.13f, 0.011f, 0.080f, look_.cap_base);
     scene.draw_mesh(brim, at_head * yup_to_zup *
-                              Mat4::translation(Vec3{0.0f, 0.062f, 0.105f}));
+                              Mat4::translation(Vec3{0.0f, 0.062f, 0.090f}));
     // 帽徽
     st::raster::Mesh star = st::raster::Mesh::colored_sphere(0.026f, 10, accent);
-    scene.draw_mesh(star, at_head * yup_to_zup * Mat4::translation(Vec3{0.0f, 0.072f, 0.100f}));
+    scene.draw_mesh(star, at_head * yup_to_zup * Mat4::translation(Vec3{0.0f, 0.075f, 0.085f}));
+  }
+
+  // —— 头发（没有帽子的角色才画）——
+  //
+  // 户圣没戴帽子，如果不画头发就是一颗光头。做法：一个比头略大的球，
+  // 上移并后移，覆盖颅顶与后脑（**下沿不能过低**，否则盖住眉毛/眼睛）。
+  if (!look_.has_cap) {
+    st::raster::Mesh hair = st::raster::Mesh::colored_sphere(0.108f, 16, look_.hair);
+    scene.draw_mesh(hair, at_head * yup_to_zup * Mat4::translation(Vec3{0.0f, 0.042f, -0.018f}) *
+                             Mat4::scaling(Vec3{1.0f, 0.86f, 1.0f}));
+  }
+
+  // —— 五官（所有角色都有）——
+  //
+  // 为什么必须手工加：CesiumMan 是低模，脸上**没有五官**（贴图是图案，
+  // 换成皮肤色后就是一张空白的脸）。不加眼睛的话，3D 角色看起来像假人。
+  // 用小球做眼球 + 小黑点是性价比最高的做法（远看足够，近看也不违和）。
+  {
+    const Color eye_white{0xF8, 0xF8, 0xF8, 0xFF};
+    const Color pupil{0x1A, 0x1A, 0x22, 0xFF};
+    for (int i = 0; i < 2; ++i) {
+      const float dx = (i == 0) ? -0.042f : 0.042f;
+      // 眼白
+      st::raster::Mesh white = st::raster::Mesh::colored_sphere(0.030f, 12, eye_white);
+      scene.draw_mesh(white, at_head * yup_to_zup *
+                                 Mat4::translation(Vec3{dx, 0.012f, 0.098f}));
+      // 瞳孔（略靠前，保证在眼白之上）
+      st::raster::Mesh dark = st::raster::Mesh::colored_sphere(0.016f, 10, pupil);
+      scene.draw_mesh(dark, at_head * yup_to_zup *
+                                Mat4::translation(Vec3{dx, 0.012f, 0.120f}));
+    }
+    // 嘴：一条扁椭球（比线段自然）
+    st::raster::Mesh mouth = st::raster::Mesh::colored_sphere(0.5f, 10,
+                                                              Color{0xB0, 0x6A, 0x60, 0xFF});
+    scene.draw_mesh(mouth, at_head * yup_to_zup * Mat4::translation(Vec3{0.0f, -0.048f, 0.098f}) *
+                              Mat4::scaling(Vec3{0.030f, 0.008f, 0.012f}));
+    // 鼻：小突起
+    st::raster::Mesh nose = st::raster::Mesh::colored_sphere(0.5f, 8, look_.skin);
+    scene.draw_mesh(nose, at_head * yup_to_zup * Mat4::translation(Vec3{0.0f, -0.012f, 0.105f}) *
+                             Mat4::scaling(Vec3{0.016f, 0.016f, 0.018f}));
   }
 
   if (look_.has_glasses) {
@@ -493,6 +574,16 @@ void FighterRig::draw(st::raster::Scene3D& scene, const Pose& pose, float origin
     for (const std::size_t mesh_index : node.meshes) {
       if (mesh_index >= body_.meshes.size()) continue;
       const auto& mesh = body_.meshes[mesh_index];
+      // 材质：皮肤是**哑光绝缘体**（metallic=0），粗糙度 0.62 让它有一点柔和高光。
+      // 默认 roughness=1 会显得像粉笔；0.3 以下又像塑料。
+      {
+        st::raster::Material material{};
+        material.base_color_set = false;   // 用贴图颜色，不要被固有色盖掉
+        material.metallic = 0.0f;
+        material.roughness = 0.62f;
+        material.specular = 0.25f;
+        scene.set_material(material);
+      }
       if (mesh.has_skins()) {
         // ⚠ 蒙皮网格用**单位阵**绘制，不能再乘 `node.transform`。
         //
@@ -507,16 +598,16 @@ void FighterRig::draw(st::raster::Scene3D& scene, const Pose& pose, float origin
         // 静态网格没有蒙皮信息，必须靠节点变换摆位。
         scene.draw_mesh(mesh, node.transform);
       }
-      // 贴图（glTF 自带）
-      if (node.material >= 0 &&
-          static_cast<std::size_t>(node.material) < body_.materials.size()) {
-        const auto& material = body_.materials[static_cast<std::size_t>(node.material)];
-        if (material.base_color_texture >= 0 &&
-            static_cast<std::size_t>(material.base_color_texture) < body_.textures.size()) {
-          const auto& texture =
-              body_.textures[static_cast<std::size_t>(material.base_color_texture)];
-          if (texture.is_valid()) scene.set_texture(texture.rgba, texture.width, texture.height);
-        }
+      // 贴图：**用程序化皮肤贴图替换 glTF 自带的品牌色贴图**。
+      //
+      // 为什么不保留原贴图：CesiumMan 自带的是 Cesium 的蓝绿品牌图案，
+      // 贴在角色上等于"迷彩服"。而模型自带的 UV 布局是现成的——
+      // 往里填皮肤色就得到"人体"。
+      //
+      // 衣服/帽子/眼镜走 3D 服装几何（本文件 ③-b），所以这里整张都填皮肤：
+      // 裸露的手臂/腿是皮肤，躯干被夹克盖住，头被帽子盖住。
+      if (skin_texture_.valid()) {
+        scene.set_texture(skin_texture_.rgba, skin_texture_.width, skin_texture_.height);
       }
     }
   }

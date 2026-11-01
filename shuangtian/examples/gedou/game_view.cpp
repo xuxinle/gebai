@@ -996,40 +996,44 @@ void GameView::paint_fighters_3d(const st::ui::RenderContext& context,
   // 这样 3D 角色与 2D 特效（按世界像素画）尺寸完全对齐。
   // 正交视图：让 **1 世界单位 = kPixelPerMeter 像素**，与 2D 层完全同尺度。
   // `ortho_scale` 是**垂直**可视高度，所以按画布高算。
-  const float view_height = static_cast<float>(canvas.physical_height()) / kPixelPerMeter;
-  const float view_width = static_cast<float>(canvas.physical_width()) / kPixelPerMeter;
+  // 视口：画布 → 世界（米）。
+  //
+  // `pixels_per_meter` 决定"1 米占多少像素"。这里按**画布高度**算，
+  // 让 1.30 米高的人物约占画布高度的 62%——换窗口尺寸时角色保持同样视觉占比。
+  //
+  // ⚠ 这个值**只影响"画出来多大"**，不参与骨骼位置换算：
+  // 角色的姿态→米换算用模型自己的尺度（`FighterRig` 里的 `kScale`）。
+  // 两者混用会让骨骼非等比缩放（实测：腿被拉成面条）。
+  // 视口与相机。
+  //
+  // ## 为什么用"画布高 ≈ 3.2 米"这个固定视野
+  //
+  // 早先按角色身高反推每米像素数，结果**正交视野随窗口尺寸变化**，
+  // 而角色位置按世界像素换算——两者不匹配时角色会偏出画面（实测：人挤在右侧）。
+  //
+  // 现在改成"视野固定为 3.2 米高"，再按画布尺寸反算每米像素：
+  // - 角色 1.3 米高 ⇒ 约占画面 40%（够看清动作，也留出跳跃空间）
+  // - 改变窗口时**视野内容不变、只是像素变多**——这才是相机该有的行为
+  constexpr float kViewHeightMeters = 3.2f;
+  const float pixels_per_meter =
+      static_cast<float>(canvas.physical_height()) / kViewHeightMeters;
+  pixels_per_meter_3d_ = pixels_per_meter;
+
   camera.projection = st::raster::ProjectionKind::Orthographic;
-  camera.ortho_scale = view_height;
-  // 相机中心对准**画布中心**对应的世界位置：
-  //   x: 场地中心（画布宽的一半 / kPixelPerMeter）
-  //   y: 画布高的一半 / kPixelPerMeter（世界 y=0 在画布底边）
-  // 相机中心 y：画布中心（画布高一半）对应世界 y = (ground - h/2)/ppm。
-  // 用地面线作参照最直观：地面之上 h/2 像素处。
-  const float center_x = view_width * 0.5f;
-  const float center_y = (match_->arena().ground - static_cast<float>(canvas.physical_height()) * 0.5f) /
-                         kPixelPerMeter;
-  camera.eye = st::math::Vec3{center_x, center_y, 10.0f};
-  camera.target = st::math::Vec3{center_x, center_y, 0.0f};
-  camera.near_z = 0.1f;
-  camera.far_z = 40.0f;
-  camera.near_z = 0.1f;
-  camera.far_z = 20.0f;
+  camera.ortho_scale = kViewHeightMeters;
+
+  // 相机 x 对准**两个角色的中点**（世界像素 → 米，与角色位置同一把尺）。
+  const float focus_x =
+      (match_->state(0).x + match_->state(1).x) * 0.5f / pixels_per_meter;
+  // 相机 y：让地面落在画面下方 1/4 处（上方留天空与跳跃空间）。
+  const float focus_y = kViewHeightMeters * 0.25f;
+
+  camera.eye = st::math::Vec3{focus_x, focus_y, 10.0f};
+  camera.target = st::math::Vec3{focus_x, focus_y, 0.0f};
+  camera.up = st::math::Vec3{0.0f, 1.0f, 0.0f};
 
   scene.begin_frame(Color{0x00, 0x00, 0x00, 0x00});
   scene.set_camera(camera);
-  {
-    if (!scene3d_logged_) {
-      scene3d_logged_ = true;
-      st::log::out(
-          "3D 诊断：画布={}x{} view_height={} 相机eye=({},{},{}) target=({},{},{})\n"
-          "  角色位置：x0={} x1={} ground={} rig0={} rig1={}\n",
-          canvas.physical_width(), canvas.physical_height(), view_height, camera.eye.x, camera.eye.y,
-          camera.eye.z, camera.target.x, camera.target.y, camera.target.z, match_->state(0).x,
-          match_->state(1).x, match_->arena().ground,
-          fighter_rig_[0] != nullptr ? "有" : "无",
-          fighter_rig_[1] != nullptr ? "有" : "无");
-    }
-  }
 
   st::raster::Lighting lighting{};
   lighting.light_from = st::math::Vec3{0.4f, 0.85f, 0.6f};
@@ -1045,7 +1049,8 @@ void GameView::paint_fighters_3d(const st::ui::RenderContext& context,
     const auto& rig = fighter_rig_[profile_index];
     if (rig == nullptr) continue;
     const Pose pose = match_->world_pose(side);
-    rig->draw(scene, pose, fighter.x, match_->arena().ground, fighter.facing_right);
+    rig->draw(scene, pose, fighter.x, match_->arena().ground, fighter.facing_right,
+              pixels_per_meter_3d_);
   }
 
   scene.end_frame(canvas, Rect{0.0f, 0.0f, static_cast<float>(canvas.physical_width()),

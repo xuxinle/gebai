@@ -44,6 +44,7 @@
 
 #include "fighter.hpp"
 #include "pose.hpp"
+#include "procedural_texture.hpp"
 #include "st/math/color.hpp"
 #include "st/math/geometry.hpp"
 #include "st/math/matrix.hpp"
@@ -81,6 +82,15 @@ struct FighterLook {
   bool long_sleeves{true};
 };
 
+/// 姿态像素 → 模型米的换算比例（**全局唯一**）。
+///
+/// 这个比例必须同时用于：骨骼位置、服装挂点、相机取景。
+/// 分开算过一次，结果是"相机按一套尺度、角色按另一套"——
+/// 表现为角色偏离自己该在的位置、甚至被拉变形。
+///
+/// 取 `0.459 / 300`：模型髋→颈 0.459 米，2D 姿态同跨度约 300 像素。
+constexpr float kPoseToModelScale = 0.459f / 300.0f;
+
 /// 角色的外观（按档案顺序；与 `fighter_profile` 一一对应）。
 [[nodiscard]] auto fighter_look(std::size_t profile_index) -> const FighterLook&;
 
@@ -97,8 +107,12 @@ class FighterRig {
   /// 按这一帧的 2D 姿态画到场景里。
   ///
   /// `origin_x` / `ground_y` 是角色脚下的世界像素坐标；`facing_right` 决定镜像。
+  /// 按这一帧的 2D 姿态画到场景里。
+  ///
+  /// `pixels_per_meter` 必须与相机用的**同一个值**——相机与角色各用一套尺度时，
+  /// 角色会偏离它该在的位置（表现为"人站在场地外面"或"两个人叠在一起"）。
   void draw(st::raster::Scene3D& scene, const Pose& pose, float origin_x, float ground_y,
-            bool facing_right) const;
+            bool facing_right, float pixels_per_meter) const;
 
   [[nodiscard]] auto valid() const noexcept -> bool { return valid_; }
   /// 本体的关节数（测试/诊断用）。
@@ -117,6 +131,16 @@ class FighterRig {
 
   bool valid_{false};
   st::raster::GltfScene body_{};
+
+  // —— 程序化贴图（替换 glTF 自带的品牌色贴图）——
+  //
+  // 为什么必须换：CesiumMan 自带的是**蓝绿品牌图案**（Cesium 的标志色），
+  // 直接用它角色像穿了迷彩服。生成一次就缓存（生成是逐像素的，每帧做会掉帧）。
+  TextureBitmap skin_texture_{};
+  TextureBitmap cloth_texture_{};
+  TextureBitmap cap_texture_{};
+  TextureBitmap lens_texture_{};
+
   st::raster::Skeleton skin_{};
   std::vector<GarmentPiece> garments_{};
   FighterLook look_{};

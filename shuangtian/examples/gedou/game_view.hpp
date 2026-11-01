@@ -209,6 +209,8 @@ class GameView : public st::ui::Element {
   mutable std::unique_ptr<st::raster::Scene3D> scene3d_{};
   mutable int scene3d_width_{0};
   mutable int scene3d_height_{0};
+  /// 上一帧相机用的"米→像素"比例（角色位置换算必须与相机同尺度）。
+  mutable float pixels_per_meter_3d_{160.0f};
   /// 三维不可用的告警只记一次（每帧刷屏会把日志淹掉）。
   mutable bool scene3d_warned_{false};
   /// 相机诊断日志只记一次。
