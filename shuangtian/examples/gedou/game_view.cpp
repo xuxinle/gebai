@@ -384,8 +384,13 @@ void GameView::paint_content(const st::ui::RenderContext& context, Canvas& canva
   paint_backdrop(context, canvas);
   paint_arena(context, canvas);
   paint_effects(context, canvas);
+  // 危险物画在**角色之下**：甜甜圈/苹果从头顶飞过，不应遮住拳脚。
+  // 只有落点预警例外——它是画在**地面**上的标记（在下层反而更对）。
+  paint_hazards(context, canvas);
   paint_fighter(context, canvas, 0);
   paint_fighter(context, canvas, 1);
+  // 冰壳与护盾画在**角色之上**（它们是包在身上的效果）。
+  paint_status_overlays(context, canvas);
   if (view_.show_hitbox) paint_hitboxes(context, canvas);
   paint_hud(context, canvas);
   paint_banner(context, canvas);
@@ -496,9 +501,264 @@ void GameView::paint_arena(const st::ui::RenderContext& context, Canvas& canvas)
   }
 }
 
+void GameView::paint_hazards(const st::ui::RenderContext& context, Canvas& canvas) const {
+  (void)context;
+  const auto& ground = match_->arena().ground;
+
+  // —— 落点预警（苹果手机）：地面上的**红色警戒圈** + 垂下的光柱 ——
+  //
+  // 为何预警要画得显眼：它是“能不能躲开”的**唯一线索**。
+  // 画得淡就等于没有预警；而没预警的瞬发伤害是不可反制的。
+  //
+  // 实测教训：第一版用 `fill_rect` 画光柱 + `stroke_path` 画圈，结果光柱
+  // 是一根几乎看不见的细柱、圈也没成形，看着像“一只灰色蜘蛛”——
+  // 因为（a）光柱宽只有圈半径的 0.7 倍、透明度 40~130，被夜色吃掉；
+  // （b）圈用 4px 描边配深色底，对比度不够。改成**实心圆环 + 双色描边**。
+  for (const SkyWarning& warning : match_->sky_warnings()) {
+    const float total = static_cast<float>(std::max(1, attack_spec(warning.visual).sky_warn_frames));
+    const float left = static_cast<float>(warning.frames_left);
+    const float urgency = 1.0f - std::clamp(left / total, 0.0f, 1.0f);   // 0→1 越来越急
+    const float radius = 52.0f * (0.75f + 0.25f * urgency);
+
+    // 光柱：**宽**（圈直径）且越来越亮——它是“从天而降”的视觉预告。
+    const Color beam{0xFF, 0x9A, 0x6A, static_cast<std::uint8_t>(30.0f + 55.0f * urgency)};
+    canvas.fill_rect(Rect{warning.x - radius, 20.0f, radius * 2.0f, ground - 20.0f},
+                     st::raster::Paint::solid(beam));
+    // 地面圈：外圈粗描边 + 内圈细描边（双层对比，任何底色上都看得清）
+    const Color outer{0xFF, 0x4A, 0x3A, static_cast<std::uint8_t>(180.0f + 75.0f * urgency)};
+    math::Path ring;
+    ring.add_circle(Point{warning.x, ground - 4.0f}, radius);
+    canvas.stroke_path(ring, st::raster::Paint::solid(outer), 5.0f, st::raster::StrokeStyle{});
+    math::Path ring2;
+    ring2.add_circle(Point{warning.x, ground - 4.0f}, radius * 0.80f);
+    canvas.stroke_path(ring2, st::raster::Paint::solid(Color{0xFF, 0xD8, 0x9A, 160}), 2.0f,
+                       st::raster::StrokeStyle{});
+    // 中心：危急时点亮（“要砸了”的提示）
+    if (urgency > 0.6f) {
+      math::Path core;
+      core.add_circle(Point{warning.x, ground - 4.0f}, radius * 0.34f);
+      canvas.fill_path(core, st::raster::Paint::solid(Color{0xFF, 0x7A, 0x4A,
+                                                            static_cast<std::uint8_t>(90.0f * urgency)}));
+    }
+  }
+
+  // —— 泡芙喷雾（扇形）：本体没有投射物，效果画在施放者身前的锥形区域 ——
+  //
+  // 为何要单独画：扇形判定是**逻辑上**的锥形，屏幕上如果什么都不画，
+  // 玩家看到的是“角色后仰了一下，然后对面掉血”——完全读不出攻击范围。
+  // 而“能打到多远、多宽”正是这个技能最需要传达的信息。
+  for (int side = 0; side < 2; ++side) {
+    const FighterState& fighter = match_->state(side);
+    const AttackSpec spec = attack_spec(fighter.move);
+    if (spec.mechanic != MoveMechanic::FanSpray) continue;
+    // 只在**判定窗口内**画（`startup ≤ move_frame < startup+active`）——
+    // 起手阶段冒烟、收招阶段还在喷，都是错的视觉信息。
+    const int at = fighter.move_frame;
+    if (at < fighter.timing.startup ||
+        at >= fighter.timing.startup + fighter.timing.active) {
+      continue;
+    }
+    const float forward = fighter.facing_right ? 1.0f : -1.0f;
+    // 喷口：与逻辑判定同源（`arena.ground - 40`），否则画的和打的不是一处。
+    const float mouth_x = fighter.x + forward * 12.0f;
+    const float mouth_y = match_->arena().ground - 34.0f;
+    const float range = spec.fan_range * kBodyScale;
+    const float half = spec.fan_half_angle * 3.14159265f / 180.0f;
+
+    // 三圈同心扇形：由内到外逐渐变淡（体积感最简单也最有效的做法）。
+    for (int ring = 0; ring < 3; ++ring) {
+      const float span = range * (1.0f - 0.22f * static_cast<float>(ring));
+      const float spread = half * (0.55f + 0.22f * static_cast<float>(ring));
+      const auto alpha = static_cast<std::uint8_t>(150.0f - 42.0f * static_cast<float>(ring));
+      // 用多边形近似扇弧（16 段足够平滑，且比路径弧便宜）。
+      math::Path fan;
+      const Point origin{mouth_x, mouth_y};
+      fan.move_to(origin);
+      constexpr int kSegments = 16;
+      for (int i = 0; i <= kSegments; ++i) {
+        const float t = -spread + (2.0f * spread) * static_cast<float>(i) /
+                                      static_cast<float>(kSegments);
+        // 局部角：t=0 指向正前方（forward）。
+        fan.line_to(Point{origin.x + std::cos(t) * span * forward,
+                          origin.y + std::sin(t) * span});
+      }
+      fan.close();
+      // 屁雾的配色就诚实点：偏黄绿（“泡芙”的语义），带一点透明。
+      const Color puff{0xD8, 0xE8, 0x8A, alpha};
+      canvas.fill_path(fan, st::raster::Paint::solid(puff));
+    }
+    // 几颗飘散的泡泡（让“喷射”有颗粒感，而不是一片色块）
+    const float phase = static_cast<float>(view_.logic_frames) * 0.7f;
+    for (int i = 0; i < 5; ++i) {
+      const float t = (static_cast<float>(i) + 0.5f) / 5.0f;
+      const float dist = range * (0.35f + 0.6f * t);
+      const float wobble = std::sin(phase + static_cast<float>(i) * 1.7f) * range * 0.09f;
+      const Point bubble{mouth_x + dist * forward,
+                         mouth_y + wobble - static_cast<float>(i) * 3.0f};
+      math::Path dot;
+      dot.add_circle(bubble, 5.5f + 1.5f * t);
+      canvas.fill_path(dot, st::raster::Paint::solid(Color{0xF0, 0xF8, 0xC0, 190}));
+    }
+  }
+
+  // —— 飞行中的投射物 ——
+  for (const Projectile& shot : match_->projectiles()) {
+    switch (shot.visual) {
+      case MoveId::DonutToss: paint_donut(canvas, shot); break;
+      default: break;
+    }
+  }
+}
+
+/// 甜甜圈：外圈面团 + 内圈糖霜 + 撒料。旋转角由位置推（不用存相位）。
+void GameView::paint_donut(Canvas& canvas, const Projectile& shot) const {
+  const float r = shot.radius;
+  const Point at = shot.at;
+  // 旋转：飞得越远转得越多（用 x 当相位，投射物一出现就在转）。
+  const float spin = at.x * 0.06f;
+
+  // 影子（地面上的椭圆）——不加影子会“飘在空中不知道在哪”。
+  const float shadow_w = r * 1.25f;
+  math::Path shadow;
+  shadow.add_ellipse(Rect{at.x - shadow_w, match_->arena().ground - 7.0f, shadow_w * 2.0f, 9.0f});
+  canvas.fill_path(shadow, st::raster::Paint::solid(Color{0, 0, 0, 60}));
+
+  // 面团（外环）：**描边**成环——甜甜圈必须有洞，实心圆就是个饼
+  // （`Path` 不支持 even-odd 填充，所以环用“圆 + 线宽”表达）。
+  math::Path dough;
+  dough.add_circle(at, r * 0.70f);
+  canvas.stroke_path(dough, st::raster::Paint::solid(Color{0xC9, 0x88, 0x4E, 0xFF}), r * 0.62f,
+                     st::raster::StrokeStyle{});
+
+  // 糖霜（粉色弧段，带旋转感）：在环上铺四段小圆。
+  const Color icing{0xFF, 0x8F, 0xB8, 0xFF};
+  for (int i = 0; i < 6; ++i) {
+    const float angle = spin + static_cast<float>(i) * 1.0472f;   // 60°
+    const float orbit = r * 0.68f;
+    const Point blob{at.x + std::cos(angle) * orbit, at.y + std::sin(angle) * orbit};
+    math::Path spot;
+    spot.add_circle(blob, r * 0.20f);
+    canvas.fill_path(spot, st::raster::Paint::solid(icing));
+  }
+
+  // 撒料（彩色小点，几个就够——多了会糊）
+  const Color sprinkles[3] = {Color{0xFF, 0xE8, 0x7A, 0xFF}, Color{0x7A, 0xD8, 0xFF, 0xFF},
+                              Color{0xB8, 0xFF, 0xA8, 0xFF}};
+  for (int i = 0; i < 3; ++i) {
+    const float angle = -spin * 1.4f + static_cast<float>(i) * 2.0944f;
+    const Point dot{at.x + std::cos(angle) * r * 0.68f, at.y + std::sin(angle) * r * 0.68f};
+    math::Path spot;
+    spot.add_circle(dot, r * 0.11f);
+    canvas.fill_path(spot, st::raster::Paint::solid(sprinkles[i]));
+  }
+}
+
+void GameView::paint_status_overlays(const st::ui::RenderContext& context, Canvas& canvas) const {
+  (void)context;
+  for (int side = 0; side < 2; ++side) {
+    const FighterState& fighter = match_->state(side);
+    const Pose pose = match_->world_pose(side);
+
+    // —— 冻结（摸腰）：半透明冰晶壳 + 内部裂纹 ——
+    //
+    // 为何用“整身高亮半透明包裹”而不是飘雪花：飘的东西会让人以为
+    // “只是一层特效”，而冻结的关键信息是**这个人此刻不能动**——
+    // 包住整个身体的块才传达“封住了”。
+    if (fighter.frozen > 0) {
+      const float top = pose.head.y - pose.head_radius - 14.0f;
+      const float bottom = match_->arena().ground;
+      const float width = 52.0f * kBodyScale * 0.5f;
+      const Rect box{fighter.x - width, top, width * 2.0f, bottom - top};
+      // 外层：淡蓝半透明
+      canvas.fill_rect(box, st::raster::Paint::solid(Color{0xA8, 0xDA, 0xFF, 78}));
+      // 内层：更亮的窄条（模拟冰的反光）
+      canvas.fill_rect(Rect{box.x + width * 0.55f, box.y + 8.0f, width * 0.28f,
+                            box.height - 24.0f},
+                       st::raster::Paint::solid(Color{0xDD, 0xF2, 0xFF, 90}));
+      // 底部：冰台（贴着地面，强调“被钉在地上”）
+      canvas.fill_rect(Rect{box.x - 6.0f, bottom - 12.0f, box.width + 12.0f, 10.0f},
+                       st::raster::Paint::solid(Color{0xBF, 0xE8, 0xFF, 130}));
+      // 裂纹：几道细线
+      const Color crack{0xFF, 0xFF, 0xFF, 120};
+      for (int i = 0; i < 3; ++i) {
+        const float fy = box.y + box.height * (0.25f + 0.22f * static_cast<float>(i));
+        canvas.fill_rect(Rect{box.x + 6.0f, fy, box.width - 12.0f, 1.5f},
+                         st::raster::Paint::solid(crack));
+      }
+    }
+
+    // —— 护盾（苹果小区）：绕身三颗苹果 + 弧光 ——
+    //
+    // “环绕”必须真的**动起来**：静态的画个圈看不出它在转，
+    // 而“绕着我转”正是这个技能的语义（把攻击挡在外面）。
+    if (fighter.shielded > 0) {
+      const float cx = fighter.x;
+      const float cy = match_->arena().ground - 105.0f;
+      const float orbit = 74.0f;
+      const float phase = static_cast<float>(view_.logic_frames) * 0.10f;
+      // 弧光（先画，在苹果下层）
+      math::Path arc;
+      arc.add_circle(Point{cx, cy}, orbit);
+      canvas.stroke_path(arc, st::raster::Paint::solid(Color{0xFF, 0xC8, 0x6A, 90}), 3.0f,
+                         st::raster::StrokeStyle{});
+      // 三颗苹果
+      for (int i = 0; i < 3; ++i) {
+        const float angle = phase + static_cast<float>(i) * 2.0944f;   // 120°
+        const Point at{cx + std::cos(angle) * orbit, cy + std::sin(angle) * orbit * 0.55f};
+        paint_apple(canvas, at, 13.0f);
+      }
+    }
+
+    // —— 苹果形态（苹果人生）：整个人变成一颗大苹果 ——
+    if (fighter.apple_form > 0) {
+      const float cx = fighter.x;
+      const float cy = match_->arena().ground - 88.0f;
+      // 脉动：回血时看着有“呼吸”感（幅度小，不卡顿）
+      const float pulse = 1.0f + 0.04f * std::sin(static_cast<float>(view_.logic_frames) * 0.18f);
+      paint_apple(canvas, Point{cx, cy}, 74.0f * pulse);
+      // 回血光晕（柔和的绿）
+      math::Path halo;
+      halo.add_circle(Point{cx, cy}, 92.0f * pulse);
+      canvas.fill_path(halo, st::raster::Paint::solid(Color{0x8A, 0xFF, 0x9C, 26}));
+    }
+  }
+}
+
+/// 画一颗苹果（护盾绕身件与变大后的本体共用）。
+///
+/// `radius` 是横半径；果子本身比正圆更宽（真实苹果是扁的），
+/// 高取 0.92 倍——直看就是苹果，不用叠球。
+void GameView::paint_apple(Canvas& canvas, Point center, float radius) const {
+  const float rx = radius;
+  const float ry = radius * 0.92f;
+  // 果身（深红）
+  math::Path body;
+  body.add_ellipse(Rect{center.x - rx, center.y - ry, rx * 2.0f, ry * 2.0f});
+  canvas.fill_path(body, st::raster::Paint::solid(Color{0xC8, 0x2E, 0x2E, 0xFF}));
+  // 高光（左上，让人看出是立体的）
+  math::Path shine;
+  shine.add_ellipse(Rect{center.x - rx * 0.55f, center.y - ry * 0.68f, rx * 0.60f, ry * 0.46f});
+  canvas.fill_path(shine, st::raster::Paint::solid(Color{0xFF, 0x7A, 0x6A, 150}));
+  // 叶子（右上，两片小椭圆斜着放）
+  math::Path leaf;
+  leaf.add_ellipse(Rect{center.x + rx * 0.10f, center.y - ry - rx * 0.30f, rx * 0.62f,
+                        ry * 0.30f});
+  canvas.fill_path(leaf, st::raster::Paint::solid(Color{0x4E, 0xB8, 0x4E, 0xFF}));
+  // 果柄（一条短线）
+  canvas.fill_rect(Rect{center.x - rx * 0.05f, center.y - ry - rx * 0.20f, rx * 0.10f,
+                        rx * 0.26f},
+                   st::raster::Paint::solid(Color{0x6B, 0x4A, 0x2E, 0xFF}));
+}
+
 void GameView::paint_fighter(const st::ui::RenderContext& context, Canvas& canvas, int side) const {
   const FighterState& fighter = match_->state(side);
   const FighterProfile& profile = fighter_profile(fighter.profile);
+  // 苹果形态（苹果人生）：**不画人**。
+  //
+  // 为何要在这一层拦：果子是圆形的，而人的肩/头/腿会从圆里穿出来
+  // （实测截图：一颗苹果里伸出头和两条腿——看着是“抱着苹果”而不是“变成苹果”）。
+  // 靠把果子画大去盖是错的：姿态会变，总能露出一点。
+  if (fighter.apple_form > 0) return;
   // 震屏：整体偏移（只影响绘制，不影响判定——判定在逻辑层，绝不跟着抖）。
   const float shake_x = view_.shake * std::sin(hue_phase_ * 21.0f) * 0.5f;
   const float shake_y = view_.shake * std::cos(hue_phase_ * 17.0f) * 0.35f;
@@ -787,10 +1047,22 @@ void GameView::paint_hud(const st::ui::RenderContext& context, Canvas& canvas) c
     context.text->draw(canvas, clock, Point{area.center().x - width * 0.5f, top + 2.0f}, 26.0f,
                        view_.paused ? Color{0xFF, 0xC8, 0x63, 0xFF} : kPale);
 
-    // 底部提示条：操作说明（三段，居中排）。
-    const std::string hint =
-        view_.paused ? "已暂停 · P 继续"
-                     : "A/D 移动 · J 轻拳 · K 重拳 · L 蹬腿 · U 必杀 · S 防御 · P 暂停 · H 判定盒";
+    // 底部提示条：操作说明 + **当前角色的三个技能名**。
+    //
+    // 为何要把技能名写进提示条：J/K/L 的含义随角色变（甜甜圈的 J 是“真好吃”，
+    // 户圣的 J 是“苹果手机”）。不写出来的话，玩家按了键才知道那是什么——
+    // 而“不知道自己在放什么”正是这类角色选择最大的困惑。
+    std::string hint;
+    if (view_.paused) {
+      hint = "已暂停 · P 继续";
+    } else {
+      const FighterProfile& left = fighter_profile(match_->state(0).profile);
+      hint = std::format("A/D 移动 · S 防御 ·  J {}   K {}   L {}   · U 必杀",
+                         fighter_move_label(match_->state(0).profile, 0),
+                         fighter_move_label(match_->state(0).profile, 1),
+                         fighter_move_label(match_->state(0).profile, 2));
+      (void)left;
+    }
     const float hint_width = context.text->measure_width(hint, 13.0f);
     const float hint_y = area.bottom() - 34.0f;
     canvas.fill_rect(Rect{area.center().x - hint_width * 0.5f - 14.0f, hint_y - 7.0f,
@@ -837,7 +1109,13 @@ auto GameView::on_event(const st::ui::RenderContext& context, st::ui::Event& eve
   }
   const bool down = event.kind == st::ui::EventKind::KeyDown;
   const std::string& key = event.key;
-  // 键位：A/D 移动、S 防御、J 轻、K 重、L 腿、U 必杀。
+  // 键位：A/D 移动、S 防御、J/K/L **三个技能位**、U 必杀。
+  //
+  // “三个技能位”而不是“轻/重/腿”：每个角色的 J/K/L 是它自己的三个招
+  // （见 `FighterProfile::moves`）——旧角色正好是轻/重/腿，
+  // 甜甜圈是 真好吃/泡芙/摸腰，户圣是 苹果手机/苹果小区/苹果人生。
+  // 这样选人时不需要记“这个角色哪个键是必杀”，三个键的含义始终是“第一/二/三个技能”。
+  //
   // **按住分离**：KeyDown 置位、KeyUp 清位——不能只靠 KeyDown 的重复事件。
   if (key == "a" || key == "A") {
     key_left_ = down;
@@ -849,15 +1127,18 @@ auto GameView::on_event(const st::ui::RenderContext& context, st::ui::Event& eve
     key_guard_ = down;
     event.handled = true;
   } else if (down && (key == "j" || key == "J")) {
-    pending_attack_ = MoveId::Light;
+    pending_attack_ = fighter_move(match_->state(0).profile, 0);
     event.handled = true;
   } else if (down && (key == "k" || key == "K")) {
-    pending_attack_ = MoveId::Heavy;
+    pending_attack_ = fighter_move(match_->state(0).profile, 1);
     event.handled = true;
   } else if (down && (key == "l" || key == "L")) {
-    pending_attack_ = MoveId::Kick;
+    pending_attack_ = fighter_move(match_->state(0).profile, 2);
     event.handled = true;
   } else if (down && (key == "u" || key == "U")) {
+    // U 仍是“耗槽的那一招”——但**它不是技能位 3**：
+    // 旧角色的必杀是 `Special`（170 伤害、破防），而新角色的第三个技能
+    // （摸腰/苹果人生）走 L 键、**不耗槽**。两者分开，否则甜甜圈就放不出摸腰了。
     pending_attack_ = MoveId::Special;
     event.handled = true;
   } else if (down && (key == "p" || key == "P")) {

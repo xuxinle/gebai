@@ -9,6 +9,13 @@
 
 namespace gedou {
 
+/// 扇形喷射的**多段命中间隔**（帧）。
+///
+/// 为何是 3：喷泉持续 10 帧、间隔 3 帧 ⇒ 最多命中 4 段。
+/// 再多就“一留神血就没了”；再少就失去“压着人打”的定位。
+inline constexpr int kFanHitInterval = 3;
+
+
 namespace {
 
 constexpr int kComboWindowFrames = 40;
@@ -91,6 +98,10 @@ void Match::begin_move(FighterState& fighter, MoveId move) {
   fighter.connected = false;
   fighter.timing = scaled_timing(move, profile.speed);
   if (move == MoveId::Special) fighter.meter = std::max(0.0f, fighter.meter - kMeterCost);
+  // 专属招式的**非命中型**效果（投射物/天降/自身状态）在起手时就生成。
+  // 为何不在“命中帧”：甜甜圈是**抛出去**的——它必须在出手那一瞬存在，
+  // 而不是“打中谁之后才出现”。
+  spawn_mechanic(fighter, static_cast<int>(&fighter - fighters_.data()), move);
 }
 
 void Match::update_fighter(FighterState& fighter, int side, const Intent& intent,
@@ -146,6 +157,32 @@ void Match::update_fighter(FighterState& fighter, int side, const Intent& intent
       fighter.move_frame = 0;
       fighter.timing = MoveTiming{};
     }
+    return;
+  }
+
+  // ②-b 冻结（摸腰）：完全不能行动——**连朝向也不转**。
+  //
+  // 为何要单独一段而不并进硬直：“被冻住”与“在挨打”是两种体验：
+  // 前者是**站着不动任人打击**（这正是摸腰强的地方），后者会随着硬直
+  // 逐帧衰减。混在一起就调不出“冻住 2 秒”这个手感。
+  if (fighter.frozen > 0) {
+    // 姿态保持冰封锁定（绘制层据 `frozen` 画冰壳）。
+    fighter.move = MoveId::Idle;
+    fighter.move_frame = 0;
+    fighter.push_velocity *= 0.7f;
+    fighter.x += fighter.push_velocity;
+    clamp_to_arena(fighter);
+    return;
+  }
+
+  // ②-c 苹果形态（苹果人生）：不能动，但姿态停在变身那一帧。
+  // 回血与倒数在 `advance_status` 里（它每帧都跑，包括结算态）。
+  if (fighter.apple_form > 0) {
+    fighter.move = MoveId::AppleLife;
+    fighter.move_frame = fighter.timing.startup + fighter.timing.active;   // 停在“成品”帧
+    fighter.push_velocity *= 0.7f;
+    fighter.x += fighter.push_velocity;
+    clamp_to_arena(fighter);
     return;
   }
 
@@ -213,12 +250,51 @@ void Match::update_fighter(FighterState& fighter, int side, const Intent& intent
 void Match::resolve_attack(FighterState& attacker, FighterState& defender, int attacker_side,
                            FrameEvents& events) {
   if (attacker.connected || !in_active_window(attacker)) return;
-  // 若本招已命中，不得再算（`connected` 由 `apply_hit` 置位）。
+  const AttackSpec spec = attack_spec(attacker.move);
+  // 扇形喷射不走矩形判定（它是个锥形，见 `resolve_fan_spray`）。
+  if (spec.mechanic == MoveMechanic::FanSpray) {
+    resolve_fan_spray(attacker, defender, attacker_side, events);
+    return;
+  }
+  // 纯辅助招（护盾/变身）不产生判定——它们的效果在 `spawn_mechanic` 里生效。
+  if (spec.damage <= 0.0f && spec.damage_ratio <= 0.0f &&
+      spec.mechanic != MoveMechanic::GripFreeze) {
+    return;
+  }
   const math::Rect box = active_hitbox(attacker_side);
   if (box.is_empty()) return;
   const math::Rect body = hurtbox(1 - attacker_side);
   if (box.intersect(body).is_empty()) return;
   apply_hit(attacker, defender, attacker_side, attacker.move, events);
+}
+
+void Match::resolve_fan_spray(FighterState& attacker, FighterState& defender, int attacker_side,
+                              FrameEvents& events) {
+  // 扇形的判据：以角色为顶点、朝向为轴、张角 `fan_half_angle`、射程 `fan_range` 的锥形。
+  //
+  // 为何不用一连串矩形近似：扇形的“越远越宽”是它的手感核心——用矩形要么
+  // 近处漏判（矩形太窄）、要么远处超伸（矩形太长）。直接算角度最准确、也最好测。
+  const AttackSpec spec = attack_spec(attacker.move);
+  const math::Point origin{attacker.x, arena_.ground - 40.0f};   // 喷口高度
+  // **每帧只能命中一次**（与其它招一致）；但扇形是**多段**：
+  // 允许每隔 `kFanHitInterval` 帧再打一次——这正是它“压着人打”的价值，
+  // 也是它单帧伤害必须低的原因（否则总伤爆表）。
+  const math::Point to_target{defender.x - origin.x, (arena_.ground - 90.0f) - origin.y};
+  const float distance = std::hypot(to_target.x, to_target.y);
+  const float range = spec.fan_range * kBodyScale;
+  if (distance > range) return;
+  const float forward = attacker.facing_right ? 1.0f : -1.0f;
+  if (to_target.x * forward <= 0.0f) return;   // 在背后
+  const float angle = std::atan2(std::abs(to_target.y), std::abs(to_target.x)) * 180.0f /
+                      3.14159265f;
+  if (angle > spec.fan_half_angle) return;
+
+  // 多段：用 `move_frame` 对齐判定窗口，每 `kFanHitInterval` 帧允许一次。
+  const int phase = (attacker.move_frame - attacker.timing.startup) % kFanHitInterval;
+  if (phase != 0) return;
+  apply_hit(attacker, defender, attacker_side, attacker.move, events);
+  // 下一段重新可命中（这是唯一“一招收多次”的招式，所以显式重置）。
+  attacker.connected = false;
 }
 
 void Match::apply_hit(FighterState& attacker, FighterState& defender, int attacker_side, MoveId move,
@@ -230,7 +306,19 @@ void Match::apply_hit(FighterState& attacker, FighterState& defender, int attack
   // 防御：只在**正面**且处于 Guard 时成立（背刺破防；必杀 `unblockable` 破防）。
   const bool facing_attacker = defender.facing_right != attacker.facing_right;
   bool blocking = defender.move == MoveId::Guard && facing_attacker && !spec.unblockable;
-  float damage = spec.damage;
+
+  // —— 护盾（苹果小区）：从**正面**来的命中被完全格挡，并按比例反弹 ——
+  //
+  // 为何跟“防御”分开算：防御是“主动按着挡”，还要吃削韧；
+  // 护盾是**技能给的**、不吃削韧、还能反弹——它是户圣的核心价值。
+  bool shielded = false;
+  if (defender.shielded > 0 && facing_attacker) {
+    shielded = true;
+    blocking = false;   // 已被护盾接手，不再走防御分支
+  }
+
+  float reflected = 0.0f;
+  float damage = outgoing_damage(spec, attacker, defender, blocking, &reflected);
   if (blocking) {
     damage *= spec.chip_ratio;
     // —— 削韧破防 ——
@@ -242,17 +330,49 @@ void Match::apply_hit(FighterState& attacker, FighterState& defender, int attack
     if (defender.guard_break >= kGuardBreakMax) {
       blocking = false;
       defender.guard_break = 0.0f;
-      // 破防：本次招式**不再削减**（全额命中），并给一段长硬直。
       events.broken_guard.push_back(1 - attacker_side);
     }
-  } else {
-    // 没在防御：削韧随时间回落（主动进攻不需要“回韧”操作）
+  } else if (!shielded) {
     defender.guard_break = std::max(0.0f, defender.guard_break - spec.guard_damage * 0.5f);
+  }
+
+  // 护盾：伤害归零，改为反弹给攻击方
+  if (shielded) {
+    damage = 0.0f;
+    if (reflected > 0.0f) {
+      attacker.hp = std::max(0.0f, attacker.hp - reflected);
+    }
   }
 
   defender.hp = std::max(0.0f, defender.hp - damage);
   attacker.meter = std::min(kMeterMax, attacker.meter + spec.meter_gain);
   defender.meter = std::min(kMeterMax, defender.meter + kMeterOnHurt);
+
+  // 异常状态：招式带的控制效果挂在受击方（护盾/冻结/变身各不相同）。
+  // 注意：**冻结在护盾面前不生效**——否则“摸腰”就是护盾也无解的必中之招。
+  if (spec.status != StatusKind::None && !blocking && !shielded) {
+    switch (spec.status) {
+      case StatusKind::Frozen: {
+        // ⚠ **不能叠加/刷新**：若每次都取 `max`，那么"摸腰→对手冻结 2 秒→
+        // 2 秒内再摸一次→重新计时"就构成**永久封印**。
+        //
+        // 实测代价（本轮真撞到）：摸腰方连按 37 次摸腰，对手一次都没还手
+        // ——冻结被反复重置，根本轮不到对方出招。屏幕上看着"双方都在动"，
+        // 但一方完全无法行动，比赛 4000 帧打不出结果。
+        //
+        // 修法：**已冻结时不再刷新**——控制反制必须有"喘息窗口"。
+        if (defender.frozen <= 0) defender.frozen = spec.status_frames;
+        break;
+      }
+      case StatusKind::Shielded:
+        defender.shielded = std::max(defender.shielded, spec.status_frames);
+        break;
+      case StatusKind::AppleForm:
+        defender.apple_form = std::max(defender.apple_form, spec.status_frames);
+        break;
+      case StatusKind::None: break;
+    }
+  }
 
   // 连击：上次命中在窗口内 → 累加，否则重置为 1。
   attacker.combo = attacker.comboTimer > 0 ? attacker.combo + 1 : 1;
@@ -263,13 +383,13 @@ void Match::apply_hit(FighterState& attacker, FighterState& defender, int attack
   defender.push_velocity = sign * knockback * (blocking ? 0.55f : 1.0f);
 
   const math::Point contact{(attacker.x + defender.x) * 0.5f, arena_.ground - 130.0f};
-  events.hits.push_back(HitEvent{1 - attacker_side, move, damage, blocking, spec.knockdown,
-                                 attacker.combo, contact});
-  if (move == MoveId::Special || (spec.knockdown && !blocking)) events.shake = 7.0f;
+  events.hits.push_back(HitEvent{1 - attacker_side, move, damage, blocking || shielded,
+                                 spec.knockdown, attacker.combo, contact});
+  if (shielded) events.shake = std::max(events.shake, 4.0f);   // 反弹也要有手感
+  else if (move == MoveId::Special || (spec.knockdown && !blocking)) events.shake = 7.0f;
   else if (!blocking) events.shake = std::max(events.shake, 2.5f);
 
   if (defender.hp <= 0.0f) {
-    // 血条清零：切倒地，回合在本帧结束。
     defender.move = MoveId::KnockDown;
     defender.move_frame = 0;
     defender.timing = MoveTiming{};
@@ -279,15 +399,13 @@ void Match::apply_hit(FighterState& attacker, FighterState& defender, int attack
     events.shake = 9.0f;
     phase_ = RoundPhase::Over;
     end_timer_ = 120;
-  } else if (spec.knockdown && !blocking) {
+  } else if (spec.knockdown && !blocking && !shielded) {
     defender.move = MoveId::KnockDown;
     defender.move_frame = 0;
     defender.timing = MoveTiming{};
     defender.pose_lock = timing_for(MoveId::KnockDown).recovery;
     defender.hitstun = 0;
-  } else {
-    // 普通命中：硬直按招式表；破防命中则给一段**更长的**硬直
-    // （“挡也不是、不挡也不是”才是防御该有的压力）。
+  } else if (!shielded) {
     const bool was_broken =
         std::find(events.broken_guard.begin(), events.broken_guard.end(), 1 - attacker_side) !=
         events.broken_guard.end();
@@ -301,6 +419,224 @@ void Match::apply_hit(FighterState& attacker, FighterState& defender, int attack
   clamp_to_arena(defender);
 }
 
+auto Match::outgoing_damage(const AttackSpec& spec, const FighterState& attacker,
+                           const FighterState& defender, bool blocked, float* reflected_out) const
+    -> float {
+  // 伤害构成：固定值 + **百分比**（摸腰的“扣半血”）。
+  // 百分比按对手 `max_hp` 算而不是当前血量：否则残血时它几乎无伤、
+  // 满血时又过强，强度随局势剧烈漂移。
+  float damage = spec.damage + spec.damage_ratio * defender.max_hp;
+
+  // 护盾（苹果小区）：完全格挡，并按比例反弹**原始伤害**。
+  // 反弹按原始值算（不是减免后的）——“反弹”就该是对面打得多重、弹回去多疼。
+  const bool facing_attacker = defender.facing_right != attacker.facing_right;
+  if (defender.shielded > 0 && facing_attacker) {
+    if (reflected_out != nullptr) {
+      // 反弹比例从**防御方正在用的那个招式**取：它才是施放护盾的那一招。
+      // （取不到就回退到 0.5，不让反射静默变成 0。）
+      const AttackSpec shield_spec = attack_spec(defender.move);
+      const float ratio = shield_spec.reflect_ratio > 0.0f ? shield_spec.reflect_ratio : 0.5f;
+      *reflected_out = damage * ratio;
+    }
+    return 0.0f;
+  }
+
+  // 苹果形态（苹果人生）：减伤。
+  if (defender.apple_form > 0) {
+    const AttackSpec form_spec = attack_spec(MoveId::AppleLife);
+    damage *= (1.0f - std::clamp(form_spec.damage_reduction, 0.0f, 0.95f));
+  }
+
+  (void)blocked;   // 防御的 `chip_ratio` 在调用方乘（它还要先判破防）
+  return damage;
+}
+
+void Match::spawn_mechanic(FighterState& attacker, int side, MoveId move) {
+  const AttackSpec spec = attack_spec(move);
+  const float forward = attacker.facing_right ? 1.0f : -1.0f;
+  switch (spec.mechanic) {
+    case MoveMechanic::Projectile: {
+      Projectile shot{};
+      shot.owner = side;
+      // 出手点：胸前高度（与骨架的“手”差不多高，看着才是从手里飞出去的）。
+      shot.at = math::Point{attacker.x + forward * 46.0f * kBodyScale, arena_.ground - 118.0f};
+      shot.velocity = math::Point{forward * spec.projectile_speed * kBodyScale, 0.0f};
+      shot.life = spec.projectile_life > 0 ? spec.projectile_life : 90;
+      shot.damage = spec.damage > 0.0f ? spec.damage : 58.0f;
+      shot.hitstun = spec.hitstun;
+      shot.knockback = spec.knockback;
+      shot.visual = move;
+      shot.radius = 14.0f;
+      projectiles_.push_back(shot);
+      break;
+    }
+    case MoveMechanic::SkyDrop: {
+      // 落点 = 对手当前位置（“砸向敌方”），但**延迟落下**——对方能跑开。
+      const FighterState& foe = fighters_[static_cast<std::size_t>(1 - side)];
+      SkyWarning warning{};
+      warning.x = foe.x;
+      warning.frames_left = spec.sky_warn_frames > 0 ? spec.sky_warn_frames : 24;
+      warning.owner = side;
+      warning.visual = move;
+      warnings_.push_back(warning);
+      break;
+    }
+    case MoveMechanic::OrbitShield: {
+      // 护盾挂到**自己**身上（不是对手）——这一点与其它“命中才生效”的招不同。
+      attacker.shielded = std::max(attacker.shielded, spec.status_frames);
+      break;
+    }
+    case MoveMechanic::Transform: {
+      attacker.apple_form = std::max(attacker.apple_form, spec.status_frames);
+      break;
+    }
+    case MoveMechanic::FanSpray:
+    case MoveMechanic::GripFreeze:
+    case MoveMechanic::None: break;   // 这两个靠命中判定，不在起手时生成
+  }
+}
+
+void Match::apply_projectile_hit(FighterState& attacker, FighterState& defender,
+                                 const Projectile& shot, FrameEvents& events) {
+  // 投射物有自己的伤害/硬直（与施放者那一招的表值分开）——见调用处的注释。
+  const bool facing_attacker = defender.facing_right != attacker.facing_right;
+  bool blocking = defender.move == MoveId::Guard && facing_attacker;
+  const bool shielded = defender.shielded > 0 && facing_attacker;
+
+  float reflected = 0.0f;
+  float damage = shot.damage;
+  // 防御只减伤（不归零）——投射物不能被“按住防御”完全省掉。
+  if (blocking) damage *= 0.15f;
+  if (shielded) {
+    const AttackSpec shield_spec = attack_spec(defender.move);
+    reflected = damage * (shield_spec.reflect_ratio > 0.0f ? shield_spec.reflect_ratio : 0.5f);
+    damage = 0.0f;
+  }
+  if (defender.apple_form > 0) {
+    const AttackSpec form_spec = attack_spec(MoveId::AppleLife);
+    damage *= (1.0f - std::clamp(form_spec.damage_reduction, 0.0f, 0.95f));
+  }
+
+  attacker.connected = true;
+  defender.hp = std::max(0.0f, defender.hp - damage);
+  if (reflected > 0.0f) attacker.hp = std::max(0.0f, attacker.hp - reflected);
+  defender.meter = std::min(kMeterMax, defender.meter + kMeterOnHurt);
+  attacker.combo = attacker.comboTimer > 0 ? attacker.combo + 1 : 1;
+  attacker.comboTimer = kComboWindowFrames;
+
+  const float sign = shot.velocity.x >= 0.0f ? 1.0f : -1.0f;
+  const FighterProfile& defender_profile = fighter_profile(defender.profile);
+  defender.push_velocity = sign * shot.knockback / std::max(0.2f, defender_profile.weight);
+
+  events.hits.push_back(HitEvent{1 - shot.owner, shot.visual, damage, blocking || shielded, false,
+                                 attacker.combo, shot.at});
+  events.shake = std::max(events.shake, blocking ? 1.5f : 3.0f);
+
+  if (defender.hp <= 0.0f) {
+    defender.move = MoveId::KnockDown;
+    defender.move_frame = 0;
+    defender.timing = MoveTiming{};
+    defender.pose_lock = timing_for(MoveId::KnockDown).recovery;
+    defender.hitstun = 0;
+    events.knocked_out.push_back(1 - shot.owner);
+    events.shake = 9.0f;
+    phase_ = RoundPhase::Over;
+    end_timer_ = 120;
+  } else if (!shielded) {
+    defender.hitstun = blocking ? std::max(4, shot.hitstun / 2) : shot.hitstun;
+    defender.move = MoveId::Hurt;
+    defender.move_frame = 0;
+    defender.timing = timing_for(MoveId::Hurt);
+  }
+  defender.x += sign * shot.knockback * 0.5f;
+  clamp_to_arena(defender);
+}
+
+void Match::advance_hazards(FrameEvents& events) {
+  // —— 投射物：移动 + 命中判定 + 超时 ——
+  for (std::size_t i = 0; i < projectiles_.size();) {
+    Projectile& shot = projectiles_[i];
+    shot.at.x += shot.velocity.x;
+    shot.at.y += shot.velocity.y;
+    if (shot.life > 0) --shot.life;
+
+    bool remove = shot.life <= 0 || shot.spent;
+    if (!remove && shot.at.x < arena_.left - 60.0f) remove = true;
+    if (!remove && shot.at.x > arena_.right + 60.0f) remove = true;
+
+    if (!remove) {
+      // 只打**对方**（不会打到自己）——这是投射物与近战最大的区别之一。
+      const int victim = 1 - shot.owner;
+      const math::Rect body = hurtbox(victim);
+      const math::Rect box{shot.at.x - shot.radius, shot.at.y - shot.radius,
+                           shot.radius * 2.0f, shot.radius * 2.0f};
+      if (!box.intersect(body).is_empty()) {
+        FighterState& attacker = fighters_[static_cast<std::size_t>(shot.owner)];
+        FighterState& defender = fighters_[static_cast<std::size_t>(victim)];
+        // 用施放者的**当前**朝向算击退方向（投射物自己的速度方向才是真方向）。
+        const bool saved_facing = attacker.facing_right;
+        attacker.facing_right = shot.velocity.x >= 0.0f;
+        attacker.connected = false;   // 投射物独立结算，不受施放者 `connected` 影响
+        // ⚠ 伤害要从**投射物自带的字段**取，不能靠 `attack_spec(shot.visual).damage`：
+        // “真好吃”这一招本身不伤人（`damage = 0`，只是抛出去），
+        // 伤害全在飞行物身上。实测踩过：只靠招式表取值时，投射物飞过去
+        // 打中、消失，而血一滴不掉（因为 0 × 任何加成 = 0）。
+        apply_projectile_hit(attacker, defender, shot, events);
+        attacker.facing_right = saved_facing;
+        shot.spent = true;
+        remove = true;
+      }
+    }
+    if (remove) {
+      projectiles_.erase(projectiles_.begin() + static_cast<std::ptrdiff_t>(i));
+    } else {
+      ++i;
+    }
+  }
+
+  // —— 天降预警：倒计时完了就“落下”（一次范围伤害）——
+  for (std::size_t i = 0; i < warnings_.size();) {
+    SkyWarning& warning = warnings_[i];
+    if (warning.frames_left > 0) --warning.frames_left;
+    bool fire = warning.frames_left <= 0;
+    if (fire) {
+      const int victim = 1 - warning.owner;
+      // 判定：落点周围一定半径内算命中（对方跑了就落空）。
+      const float radius = 52.0f * kBodyScale * 0.5f;
+      if (std::abs(fighters_[static_cast<std::size_t>(victim)].x - warning.x) <= radius) {
+        FighterState& attacker = fighters_[static_cast<std::size_t>(warning.owner)];
+        FighterState& defender = fighters_[static_cast<std::size_t>(victim)];
+        attacker.connected = false;
+        const bool saved_facing = attacker.facing_right;
+        attacker.facing_right = warning.x >= attacker.x;
+        apply_hit(attacker, defender, warning.owner, warning.visual, events);
+        attacker.facing_right = saved_facing;
+      }
+      warnings_.erase(warnings_.begin() + static_cast<std::ptrdiff_t>(i));
+    } else {
+      ++i;
+    }
+  }
+}
+
+void Match::advance_status(FighterState& fighter, FrameEvents& events) {
+  (void)events;
+  if (fighter.frozen > 0) --fighter.frozen;
+  if (fighter.shielded > 0) --fighter.shielded;
+  if (fighter.apple_form > 0) {
+    // 苹果形态：每帧回血（不超上限）；不能动由 `busy()` 保证。
+    const AttackSpec spec = attack_spec(MoveId::AppleLife);
+    fighter.hp = std::min(fighter.max_hp, fighter.hp + spec.regen_per_frame);
+    --fighter.apple_form;
+    // 变身结束时把姿态拉回待机（否则会卡在“苹果”的姿态上）。
+    if (fighter.apple_form == 0 && fighter.move == MoveId::AppleLife) {
+      fighter.move = MoveId::Idle;
+      fighter.move_frame = 0;
+      fighter.timing = MoveTiming{};
+    }
+  }
+}
+
 auto Match::advance(const Intent& left, const Intent& right) -> FrameEvents {
   FrameEvents events{};
   ++frame_index_;
@@ -310,6 +646,11 @@ auto Match::advance(const Intent& left, const Intent& right) -> FrameEvents {
     update_fighter(fighters_[1], 1, right, events);
     resolve_attack(fighters_[0], fighters_[1], 0, events);
     resolve_attack(fighters_[1], fighters_[0], 1, events);
+    // 投射物/天降：在两侧招式结算之后推进（同一帧内不会“先被打再飞走”这种怪事）。
+    advance_hazards(events);
+    // 异常状态倒数（冻结/护盾/变身）。放在最后：本帧的新状态从**下一帧**开始倒数。
+    advance_status(fighters_[0], events);
+    advance_status(fighters_[1], events);
     // 身体互不穿透（谁也不能站到对方身体里）：按"谁在动"分摊推开量。
     const float min_gap = 76.0f;
     const float delta = fighters_[1].x - fighters_[0].x;

@@ -94,9 +94,12 @@ auto observe(const Match& match, int side) -> Observation {
   const FighterProfile& opp_profile = fighter_profile(opp.profile);
 
   const float gap = std::abs(opp.x - self.x);
-  const float light_far = attack_spec(MoveId::Light).reach_far * kBodyScale;
-  const float heavy_far = attack_spec(MoveId::Heavy).reach_far * kBodyScale;
-  const float kick_far = attack_spec(MoveId::Kick).reach_far * kBodyScale;
+  // 距离特征按**角色自己的招式**算（不是硬编码的轻/重/腿）：
+  // 否则技能型角色（射程 240 的扇形、几乎只能贴身的摸腰）
+  // 会在观测里被描述成一个它们根本没有的距离画像——策略学到的东西与真能用的招脱节。
+  const float light_far = attack_spec(self_profile.moves[0]).reach_far * kBodyScale;
+  const float heavy_far = attack_spec(self_profile.moves[1]).reach_far * kBodyScale;
+  const float kick_far = attack_spec(self_profile.moves[0]).reach_far * kBodyScale;
   const float mid_far = std::max(heavy_far, kick_far);
   const float body_half = 30.0f * kBodyScale;
   // 对手是否在己方面前：正负号由朝向决定（自我中心，不含世界坐标）。
@@ -153,6 +156,27 @@ auto observe(const Match& match, int side) -> Observation {
   (void)self_profile;
   (void)opp_profile;
   return out;
+}
+
+/// 把 RL 的抽象动作映射到**该角色实际拥有的招式**。
+///
+/// 为何要这层：RL 的观测/动作空间是固定维度的（轻/重/腿/必杀四招），
+/// 这样训练好的策略与具体角色解耦。而技能型角色（甜甜圈/户圣）
+/// 手里没有“轻拳”——它们的三个技能位是自己那三招。
+///
+/// 映射语义与手写 AI 一致（`ai.cpp` 的 `to_profile_move`）：
+/// Light/Kick（快招）→ 技能位 0；Heavy → 技能位 1；Special → 技能位 2。
+/// 两处必须同一口径，否则“人机对打时双方招式容量不同”——那是隐形的难度偏移。
+[[nodiscard]] auto profile_move(const FighterState& me, MoveId abstract_move) -> MoveId {
+  if (abstract_move == MoveId::Guard || abstract_move == MoveId::Idle ||
+      abstract_move == MoveId::Walk) {
+    return abstract_move;
+  }
+  const FighterProfile& profile = fighter_profile(me.profile);
+  if (abstract_move == MoveId::Light || abstract_move == MoveId::Kick) return profile.moves[0];
+  if (abstract_move == MoveId::Heavy) return profile.moves[1];
+  if (abstract_move == MoveId::Special) return profile.moves[2];
+  return abstract_move;
 }
 
 auto action_intent(RlAction action) -> Intent {
@@ -258,6 +282,10 @@ auto RlEnv::step(RlAction action) -> StepResult {
   const float gap_before = std::abs(match_.state(1 - kSelfSide).x - self_before.x);
 
   Intent self_intent = action_intent(effective);
+  // 把抽象招式翻译成**这个角色实际拥有的**招式（见 `profile_move`）。
+  if (self_intent.attack.has_value()) {
+    self_intent.attack = profile_move(match_.state(kSelfSide), *self_intent.attack);
+  }
   Intent opp_intent = opponent_idle_ ? Intent{} : opponent_ai_.think(match_, 1 - kSelfSide);
   // 冷却按**招式自身的完整帧数**计（见 Config::attack_cooldown 的实测说明）：
   // 出招期间本就无法再次出招，冷却再压一层是防止“硬直一解就无缝接同一招”。

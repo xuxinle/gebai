@@ -240,6 +240,177 @@ void shift_torso(Pose& pose, math::Point delta) {
   return pose;
 }
 
+// ———— 专属招式姿态 ————
+//
+// 设计约束（与旧招式同一套）：
+// · 命中帧的**最前点**决定判定距离（`strike_reach` 从姿态反算）；
+// · 手必须从肩出发（`set_arm`），从躯干中线画会糊成一坠；
+// · 相邻段重叠——不追求“刚好接上”。
+
+/// 甜甜圈 · 真好吃（起手）：手向后拉、身体后坐，像棒球投手蓄力。
+[[nodiscard]] auto donut_wind() -> Pose {
+  Pose pose = neutral_pose();
+  shift_torso(pose, math::Point{-8.0f, -2.0f});
+  set_arm(pose, true, math::Point{-14.0f, 118.0f}, math::Point{-34.0f, 106.0f});
+  set_arm(pose, false, math::Point{-26.0f, 112.0f}, math::Point{-40.0f, 100.0f});
+  pose.knee_front = math::Point{14.0f, 46.0f};
+  pose.knee_back = math::Point{-20.0f, 44.0f};
+  pose.foot_front = math::Point{18.0f, body::kFootY};
+  pose.foot_back = math::Point{-26.0f, body::kFootY};
+  pose.lean = -0.16f;
+  return pose;
+}
+
+/// 甜甜圈 · 真好吃（命中）：前手直线送出去——投掷动作的定格。
+[[nodiscard]] auto donut_strike() -> Pose {
+  Pose pose = neutral_pose();
+  shift_torso(pose, math::Point{10.0f, 4.0f});
+  set_arm(pose, true, math::Point{34.0f, 124.0f}, math::Point{62.0f, 122.0f});
+  set_arm(pose, false, math::Point{10.0f, 110.0f}, math::Point{-8.0f, 100.0f});
+  pose.knee_front = math::Point{22.0f, 50.0f};
+  pose.knee_back = math::Point{-10.0f, 44.0f};
+  pose.foot_front = math::Point{30.0f, body::kFootY};
+  pose.foot_back = math::Point{-26.0f, body::kFootY};
+  pose.lean = 0.12f;
+  return pose;
+}
+
+/// 泡芙（起手）：屈膝下沉、双臂内收（蓄气的体态）。
+[[nodiscard]] auto puff_wind() -> Pose {
+  Pose pose = neutral_pose();
+  shift_torso(pose, math::Point{-6.0f, -8.0f});
+  set_arm(pose, true, math::Point{6.0f, 110.0f}, math::Point{14.0f, 94.0f});
+  set_arm(pose, false, math::Point{-14.0f, 108.0f}, math::Point{-4.0f, 92.0f});
+  pose.knee_front = math::Point{12.0f, 36.0f};
+  pose.knee_back = math::Point{-22.0f, 34.0f};
+  pose.foot_front = math::Point{20.0f, body::kFootY};
+  pose.foot_back = math::Point{-30.0f, body::kFootY};
+  pose.head_radius = body::kHeadRadius - 1.0f;
+  pose.lean = -0.24f;
+  return pose;
+}
+
+/// 泡芙（喷射）：身体前倾、转为背向对方（“工具”在后）——
+/// 双臂前提保持重心，双腿分开形成稳固支撑。
+[[nodiscard]] auto puff_strike() -> Pose {
+  Pose pose = neutral_pose();
+  shift_torso(pose, math::Point{-10.0f, 2.0f});
+  set_arm(pose, true, math::Point{24.0f, 116.0f}, math::Point{40.0f, 128.0f});
+  set_arm(pose, false, math::Point{2.0f, 112.0f}, math::Point{16.0f, 124.0f});
+  pose.knee_front = math::Point{26.0f, 48.0f};
+  pose.knee_back = math::Point{-26.0f, 50.0f};
+  pose.foot_front = math::Point{34.0f, body::kFootY};
+  pose.foot_back = math::Point{-34.0f, body::kFootY};
+  pose.lean = -0.30f;
+  return pose;
+}
+
+/// 摸腰（起手）：下盘半蹲、双手向前探出准备抓握（动作最长，要看得清）。
+[[nodiscard]] auto grab_wind() -> Pose {
+  Pose pose = neutral_pose();
+  shift_torso(pose, math::Point{-4.0f, -6.0f});
+  set_arm(pose, true, math::Point{20.0f, 112.0f}, math::Point{40.0f, 104.0f});
+  set_arm(pose, false, math::Point{6.0f, 108.0f}, math::Point{24.0f, 100.0f});
+  pose.knee_front = math::Point{16.0f, 38.0f};
+  pose.knee_back = math::Point{-24.0f, 36.0f};
+  pose.foot_front = math::Point{24.0f, body::kFootY};
+  pose.foot_back = math::Point{-30.0f, body::kFootY};
+  pose.lean = -0.20f;
+  return pose;
+}
+
+/// 摸腰（命中）：双手掐腰、身体前顶——抓住的那一下。
+[[nodiscard]] auto grab_strike() -> Pose {
+  Pose pose = neutral_pose();
+  shift_torso(pose, math::Point{14.0f, 2.0f});
+  set_arm(pose, true, math::Point{40.0f, 106.0f}, math::Point{30.0f, 96.0f});
+  set_arm(pose, false, math::Point{30.0f, 100.0f}, math::Point{22.0f, 92.0f});
+  pose.knee_front = math::Point{26.0f, 48.0f};
+  pose.knee_back = math::Point{-12.0f, 46.0f};
+  pose.foot_front = math::Point{36.0f, body::kFootY};
+  pose.foot_back = math::Point{-28.0f, body::kFootY};
+  pose.lean = 0.18f;
+  return pose;
+}
+
+/// 苹果手机（起手）：高举单手朝天，身体后仰。
+[[nodiscard]] auto drop_wind() -> Pose {
+  Pose pose = neutral_pose();
+  shift_torso(pose, math::Point{-4.0f, -4.0f});
+  set_arm(pose, true, math::Point{16.0f, 146.0f}, math::Point{20.0f, 172.0f});
+  set_arm(pose, false, math::Point{-22.0f, 116.0f}, math::Point{-34.0f, 104.0f});
+  pose.knee_front = math::Point{14.0f, 44.0f};
+  pose.knee_back = math::Point{-20.0f, 42.0f};
+  pose.foot_front = math::Point{20.0f, body::kFootY};
+  pose.foot_back = math::Point{-26.0f, body::kFootY};
+  pose.lean = -0.14f;
+  return pose;
+}
+
+/// 苹果手机（召唤）：双手同举（“召唤”的定格）。
+[[nodiscard]] auto drop_strike() -> Pose {
+  Pose pose = neutral_pose();
+  shift_torso(pose, math::Point{2.0f, -2.0f});
+  set_arm(pose, true, math::Point{18.0f, 148.0f}, math::Point{24.0f, 176.0f});
+  set_arm(pose, false, math::Point{-16.0f, 144.0f}, math::Point{-20.0f, 172.0f});
+  pose.head.y += 2.0f;
+  pose.lean = -0.06f;
+  return pose;
+}
+
+/// 苹果小区（起手）：双臂向两侧展开准备画圈。
+[[nodiscard]] auto guard_ring_wind() -> Pose {
+  Pose pose = neutral_pose();
+  shift_torso(pose, math::Point{0.0f, -2.0f});
+  set_arm(pose, true, math::Point{30.0f, 120.0f}, math::Point{46.0f, 116.0f});
+  set_arm(pose, false, math::Point{-28.0f, 118.0f}, math::Point{-44.0f, 112.0f});
+  pose.lean = -0.08f;
+  return pose;
+}
+
+/// 苹果小区（展开）：双臂平展、腿马步——护盾成形的姿态。
+[[nodiscard]] auto guard_ring_strike() -> Pose {
+  Pose pose = neutral_pose();
+  shift_torso(pose, math::Point{0.0f, 2.0f});
+  set_arm(pose, true, math::Point{40.0f, 124.0f}, math::Point{64.0f, 120.0f});
+  set_arm(pose, false, math::Point{-38.0f, 122.0f}, math::Point{-62.0f, 118.0f});
+  pose.knee_front = math::Point{22.0f, 44.0f};
+  pose.knee_back = math::Point{-24.0f, 44.0f};
+  pose.foot_front = math::Point{32.0f, body::kFootY};
+  pose.foot_back = math::Point{-32.0f, body::kFootY};
+  return pose;
+}
+
+/// 苹果人生（起手）：抱膝蹲下——缩小身体准备“变回去”。
+[[nodiscard]] auto apple_life_wind() -> Pose {
+  Pose pose = neutral_pose();
+  shift_torso(pose, math::Point{0.0f, -14.0f});
+  set_arm(pose, true, math::Point{8.0f, 100.0f}, math::Point{2.0f, 82.0f});
+  set_arm(pose, false, math::Point{-10.0f, 98.0f}, math::Point{-4.0f, 80.0f});
+  pose.knee_front = math::Point{16.0f, 30.0f};
+  pose.knee_back = math::Point{-18.0f, 30.0f};
+  pose.foot_front = math::Point{20.0f, body::kFootY};
+  pose.foot_back = math::Point{-22.0f, body::kFootY};
+  pose.head_radius = body::kHeadRadius - 3.0f;
+  pose.lean = -0.30f;
+  return pose;
+}
+
+/// 苹果人生（变身）：缩成一团——绘制层会把这个姿态整体画成一颗苹果。
+[[nodiscard]] auto apple_life_strike() -> Pose {
+  Pose pose = neutral_pose();
+  shift_torso(pose, math::Point{0.0f, -22.0f});
+  set_arm(pose, true, math::Point{6.0f, 88.0f}, math::Point{0.0f, 66.0f});
+  set_arm(pose, false, math::Point{-8.0f, 86.0f}, math::Point{-2.0f, 64.0f});
+  pose.knee_front = math::Point{14.0f, 26.0f};
+  pose.knee_back = math::Point{-16.0f, 26.0f};
+  pose.foot_front = math::Point{16.0f, body::kFootY};
+  pose.foot_back = math::Point{-18.0f, body::kFootY};
+  pose.head_radius = body::kHeadRadius - 5.0f;
+  pose.lean = 0.0f;
+  return pose;
+}
+
 /// 倒地：整体压到地面（骨架点仍在局部空间，靠 y 很小表达"躺着"）。
 [[nodiscard]] auto knockdown_pose() -> Pose {
   Pose pose{};
@@ -314,6 +485,12 @@ auto move_name(MoveId move) -> std::string_view {
     case MoveId::Heavy: return "heavy";
     case MoveId::Kick: return "kick";
     case MoveId::Special: return "special";
+    case MoveId::DonutToss: return "donut_toss";
+    case MoveId::PuffSpray: return "puff_spray";
+    case MoveId::WaistGrab: return "waist_grab";
+    case MoveId::AppleDrop: return "apple_drop";
+    case MoveId::AppleGuard: return "apple_guard";
+    case MoveId::AppleLife: return "apple_life";
     case MoveId::Hurt: return "hurt";
     case MoveId::KnockDown: return "knockdown";
     case MoveId::Victory: return "victory";
@@ -332,6 +509,12 @@ auto move_label(MoveId move) -> std::string_view {
     case MoveId::Heavy: return "重拳";
     case MoveId::Kick: return "蹬腿";
     case MoveId::Special: return "必杀";
+    case MoveId::DonutToss: return "真好吃";
+    case MoveId::PuffSpray: return "泡芙";
+    case MoveId::WaistGrab: return "摸腰";
+    case MoveId::AppleDrop: return "苹果手机";
+    case MoveId::AppleGuard: return "苹果小区";
+    case MoveId::AppleLife: return "苹果人生";
     case MoveId::Hurt: return "受击";
     case MoveId::KnockDown: return "倒地";
     case MoveId::Victory: return "胜利";
@@ -404,6 +587,15 @@ auto timing_for(MoveId move) -> MoveTiming {
     case MoveId::Heavy: return MoveTiming{9, 6, 15};
     case MoveId::Kick: return MoveTiming{8, 6, 14};
     case MoveId::Special: return MoveTiming{14, 8, 22};
+    // —— 专属招式：帧数与强度挂钩（平衡的主要手段之一）——
+    // 摸腰是全场最强单招（冻结 + 半血），所以前摇与收招都最长：
+    // 22 + 6 + 30 = 58 帧（≈0.97 秒），“看到了就能躲/能挡”。
+    case MoveId::DonutToss: return MoveTiming{10, 6, 16};
+    case MoveId::PuffSpray: return MoveTiming{12, 10, 20};
+    case MoveId::WaistGrab: return MoveTiming{22, 6, 30};
+    case MoveId::AppleDrop: return MoveTiming{14, 8, 18};
+    case MoveId::AppleGuard: return MoveTiming{10, 12, 16};
+    case MoveId::AppleLife: return MoveTiming{8, 20, 20};
     case MoveId::Hurt: return MoveTiming{0, 0, 14};
     case MoveId::KnockDown: return MoveTiming{0, 0, 26};
     case MoveId::Victory: return MoveTiming{0, 0, 40};
@@ -418,6 +610,12 @@ auto keyframes_for(MoveId move) -> std::optional<Keyframes> {
     case MoveId::Heavy: return Keyframes{heavy_wind(), heavy_strike()};
     case MoveId::Kick: return Keyframes{kick_wind(), kick_strike()};
     case MoveId::Special: return Keyframes{special_wind(), special_strike()};
+    case MoveId::DonutToss: return Keyframes{donut_wind(), donut_strike()};
+    case MoveId::PuffSpray: return Keyframes{puff_wind(), puff_strike()};
+    case MoveId::WaistGrab: return Keyframes{grab_wind(), grab_strike()};
+    case MoveId::AppleDrop: return Keyframes{drop_wind(), drop_strike()};
+    case MoveId::AppleGuard: return Keyframes{guard_ring_wind(), guard_ring_strike()};
+    case MoveId::AppleLife: return Keyframes{apple_life_wind(), apple_life_strike()};
     default: return std::nullopt;
   }
 }

@@ -25,6 +25,15 @@ namespace gedou {
 namespace math = st::math;
 
 /// 招式/状态标识。`Idle`..`Special` 是**主动作**，其余是受击与收场。
+///
+/// ## 为何专属招式也占 `MoveId`
+///
+/// 每个招式都要有**自己的帧数、姿态关键帧与判定窗口**——这三样都由 `MoveId`
+/// 索引（`timing_for` / `keyframes_for`）。新角色带来的是新招式而不是新数值，
+/// 所以它们必须各占一项；否则“甜甜圈的抛出动作”与“普通拳”在时间轴上分不开。
+///
+/// 谁能用哪一招由 `FighterProfile::moves` 决定（角色 → 三个技能位），
+/// 所以加新招式**不会**扩大旧角色的操作面。
 enum class MoveId : std::uint8_t {
   Idle = 0,
   Walk,
@@ -33,6 +42,20 @@ enum class MoveId : std::uint8_t {
   Heavy,
   Kick,
   Special,
+  // —— 专属招式（按角色归属；见 `FighterProfile::moves`）——
+  /// 甜甜圈 · 真好吃：抛出甜甜圈（投射物）
+  DonutToss,
+  /// 甜甜圈 · 泡芙：扇形喷射
+  PuffSpray,
+  /// 甜甜圈 · 摸腰：拉近冻结 + 扣半血
+  WaistGrab,
+  /// 户圣 · 苹果手机：天降苹果
+  AppleDrop,
+  /// 户圣 · 苹果小区：环绕护盾反击
+  AppleGuard,
+  /// 户圣 · 苹果人生：变身回血减伤
+  AppleLife,
+  // —— 受击与收场 ——
   Hurt,
   KnockDown,
   Victory,
@@ -47,9 +70,23 @@ enum class MoveId : std::uint8_t {
 /// 短名 → 招式（认不出返回 `nullopt`；不静默回退，调用方要能报错）。
 [[nodiscard]] auto move_from_name(std::string_view name) -> std::optional<MoveId>;
 /// 主动作（能被玩家/AI 发起的那些）。
+///
+/// ⚠ 新增专属招式**必须**加到这里：判定/绘制/`force_move` 都拿它当“这是不是一招”的门。
+/// 漏加的后果是“能发但打不到人”——因为 `active_hitbox` 直接返回空矩形。
 [[nodiscard]] constexpr auto is_attack(MoveId move) noexcept -> bool {
-  return move == MoveId::Light || move == MoveId::Heavy || move == MoveId::Kick ||
-         move == MoveId::Special;
+  switch (move) {
+    case MoveId::Light:
+    case MoveId::Heavy:
+    case MoveId::Kick:
+    case MoveId::Special:
+    case MoveId::DonutToss:
+    case MoveId::PuffSpray:
+    case MoveId::WaistGrab:
+    case MoveId::AppleDrop:
+    case MoveId::AppleGuard:
+    case MoveId::AppleLife: return true;
+    default: return false;
+  }
 }
 
 /// 骨架坐标的**全局缩放**（局部单位 → 世界像素）。

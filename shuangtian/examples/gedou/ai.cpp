@@ -6,6 +6,35 @@
 
 namespace gedou {
 
+/// 把 AI 的「通用招式意图」翻译成**该角色实际拥有的招式**。
+///
+/// 为何需要这一层：AI 的决策逻辑（抢招/防御/进攻/必杀）是按“轻/重/踢/必杀”
+/// 这套抽象写的，它对所有角色都成立。但新角色（甜甜圈/户圣）手里根本没有
+/// 轻拳——它们的三个技能位是自己那三招。
+///
+/// 两种做法：
+/// ① 把 AI 里每一处 `MoveId::Light` 换成“读角色档案”——十几处，且以后
+///    每加角色都要再想一遍；
+/// ② 保持决策抽象不变，在**出口**统一翻译一次。
+///
+/// 取 ②：决策层不认识具体角色，翻译层只认角色——两边各自单纯。
+/// 语义映射：轻/踢（快的、用来抢帧的）→ 技能位 0；重（伤害/压制）→ 技能位 1；
+/// 必杀 → 技能位 2。
+[[nodiscard]] auto to_profile_move(const FighterState& me, MoveId abstract_move) -> MoveId {
+  if (abstract_move == MoveId::Guard || abstract_move == MoveId::Idle ||
+      abstract_move == MoveId::Walk) {
+    return abstract_move;
+  }
+  const FighterProfile& profile = fighter_profile(me.profile);
+  // 旧角色（档案里就是 Light/Heavy/Special）走原路：映射结果与输入相同。
+  if (abstract_move == MoveId::Light || abstract_move == MoveId::Kick) {
+    return profile.moves[0];
+  }
+  if (abstract_move == MoveId::Heavy) return profile.moves[1];
+  if (abstract_move == MoveId::Special) return profile.moves[2];
+  return abstract_move;   // 已经是专属招式（force_move 等直接指定时）
+}
+
 namespace {
 
 /// 双方脚下距离（世界像素）。
@@ -147,7 +176,7 @@ auto AiController::think(const Match& match, int side) -> Intent {
     const int other_remaining = other.timing.startup - other.move_frame;
     if (other_remaining >= gedou::timing_for(MoveId::Light).startup &&
         gap <= light_far + kBodyHalfWidth && chance(tuning.aggression)) {
-      committed_ = Intent{0.0f, false, MoveId::Light};
+      committed_ = Intent{0.0f, false, to_profile_move(mine, MoveId::Light)};
       hold_timer_ = 3;
       decision_ = "interrupt";
       return committed_;
@@ -171,7 +200,7 @@ auto AiController::think(const Match& match, int side) -> Intent {
       chance(tuning.aggression * 0.75f)) {
     const MoveId pick = gap <= light_far + kBodyHalfWidth && chance(0.55f) ? MoveId::Light
                                                                           : MoveId::Kick;
-    committed_ = Intent{0.0f, false, pick};
+    committed_ = Intent{0.0f, false, to_profile_move(mine, pick)};
     hold_timer_ = 3;
     decision_ = pick == MoveId::Light ? "light" : "kick";
     return committed_;
@@ -180,7 +209,7 @@ auto AiController::think(const Match& match, int side) -> Intent {
   // ④ 有必杀槽：距离合适就放（必杀是破防的，AI 用它收尾）。
   if (mine.meter >= kMeterCost && gap < special_far + kBodyHalfWidth &&
       chance(tuning.special_rate)) {
-    committed_ = Intent{0.0f, false, MoveId::Special};
+    committed_ = Intent{0.0f, false, to_profile_move(mine, MoveId::Special)};
     hold_timer_ = 6;
     decision_ = "special";
     return committed_;
@@ -189,14 +218,14 @@ auto AiController::think(const Match& match, int side) -> Intent {
   // ⑤ 进攻：进入重拳距离就打重拳；正好在手边打轻拳；腿长的距离用蹬腿。
   if (gap <= heavy_far + kBodyHalfWidth && gap >= light_near - kBodyHalfWidth) {
     if (gap <= light_far + kBodyHalfWidth && chance(tuning.aggression * 0.5f)) {
-      committed_ = Intent{0.0f, false, MoveId::Light};
+      committed_ = Intent{0.0f, false, to_profile_move(mine, MoveId::Light)};
       hold_timer_ = 4;
       decision_ = "light";
       return committed_;
     }
     if (chance(tuning.aggression)) {
       const MoveId pick = kick_far > heavy_far && chance(0.5f) ? MoveId::Kick : MoveId::Heavy;
-      committed_ = Intent{0.0f, false, pick};
+      committed_ = Intent{0.0f, false, to_profile_move(mine, pick)};
       hold_timer_ = 6;
       decision_ = pick == MoveId::Kick ? "kick" : "heavy";
       return committed_;

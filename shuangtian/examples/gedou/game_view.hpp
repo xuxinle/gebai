@@ -160,6 +160,15 @@ class GameView : public st::ui::Element {
   void paint_backdrop(const st::ui::RenderContext& context, st::raster::Surface& canvas) const;
   void paint_arena(const st::ui::RenderContext& context, st::raster::Surface& canvas) const;
   void paint_fighter(const st::ui::RenderContext& context, st::raster::Surface& canvas, int side) const;
+  /// 危险物：飞行中的投射物与地面落点预警（画在角色**之下**）。
+  void paint_hazards(const st::ui::RenderContext& context, st::raster::Surface& canvas) const;
+  /// 包在角色**身上**的状态效果（冰壳/护盾环/苹果形态）。
+  void paint_status_overlays(const st::ui::RenderContext& context,
+                             st::raster::Surface& canvas) const;
+  /// 一颗甜甜圈（飞行中）。
+  void paint_donut(st::raster::Surface& canvas, const Projectile& shot) const;
+  /// 一颗苹果（护盾绕身件与变大后的本体共用）。
+  void paint_apple(st::raster::Surface& canvas, math::Point center, float radius) const;
   void paint_effects(const st::ui::RenderContext& context, st::raster::Surface& canvas) const;
   void paint_hud(const st::ui::RenderContext& context, st::raster::Surface& canvas) const;
   void paint_hitboxes(const st::ui::RenderContext& context, st::raster::Surface& canvas) const;

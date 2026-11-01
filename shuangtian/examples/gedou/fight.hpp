@@ -72,9 +72,59 @@ struct FighterState {
   /// 只在防御挨打时增长，否则缓慢回落。
   float guard_break{0.0f};
 
+  // —— 异常状态（按帧倒数；多个可同时存在，但冻结与变身互斥地抢控制权）——
+
+  /// 冻结剩余帧（摸腰）：>0 时 `busy()` 为真，完全不能行动。
+  int frozen{0};
+  /// 护盾剩余帧（苹果小区）：格挡 + 反弹。
+  int shielded{0};
+  /// 苹果形态剩余帧（苹果人生）：回血 + 减伤 + 不能动。
+  int apple_form{0};
+
   [[nodiscard]] auto alive() const noexcept -> bool { return hp > 0.0f; }
-  [[nodiscard]] auto busy() const noexcept -> bool { return hitstun > 0 || pose_lock > 0; }
+  /// 是否能行动。三种异常状态都抢控制权——
+  /// 这正是它们“强”的地方，也是必须能倒数过期、不能叠成永久的原因。
+  [[nodiscard]] auto busy() const noexcept -> bool {
+    return hitstun > 0 || pose_lock > 0 || frozen > 0 || apple_form > 0;
+  }
   [[nodiscard]] auto can_act() const noexcept -> bool { return !busy(); }
+};
+
+/// 飞行/坠落中的投射物（甜甜圈、苹果）。
+///
+/// 为何不做成“角色的一个招式帧”而是独立实体：投射物的生命周期
+/// **与施放者脱钩**——出手之后角色可以走开、可以再出别的招，
+/// 而投射物自己按自己的速度飞。把它挂在角色身上会得到“施放者一换招，
+/// 甜甜圈就消失”这种错到很难查的行为。
+struct Projectile {
+  /// 归属方（0/1）：只有**对方**可被它打中（不会打到自己）。
+  int owner{0};
+  math::Point at{};
+  /// 每帧位移（world px）。
+  math::Point velocity{};   ///< 每帧位移（复用 Point 作二维向量）
+  /// 剩余存活帧（道 0 时消失）。
+  int life{0};
+  /// 命中时的伤害与硬直（从招式表拷一份，与施放者当前状态无关）。
+  float damage{0.0f};
+  int hitstun{10};
+  float knockback{8.0f};
+  /// 是否已经命中过（一个投射物只能打中一次）。
+  bool spent{false};
+  /// 视觉类型（绘制层据此选画法；不参与逻辑）。
+  MoveId visual{MoveId::DonutToss};
+  /// 半径（world px；判定与绘制共用同一份）。
+  float radius{14.0f};
+};
+
+/// 天降招的**落点预警**（苹果手机）。
+///
+/// 为何要单独一个阶段：不给预警就是“无法反制”的瞬发伤害——
+/// 对手只能盲猜。有预警才能“看到了就走开”，这一招才是个**互动**。
+struct SkyWarning {
+  float x{0.0f};          ///< 落点（世界 x）
+  int frames_left{0};     ///< 还有多少帧落下
+  int owner{0};
+  MoveId visual{MoveId::AppleDrop};
 };
 
 /// 命中事件（一帧内一次命中一条）。
@@ -153,13 +203,17 @@ class Match {
   /// 角色可被击中的身体矩形（躯干 + 头；下蹲/倒地时变矮）。
   [[nodiscard]] auto hurtbox(int side) const -> math::Rect;
 
-  /// 手动设一条指令（供控制通道/e2e"剧本化"用：直接让某侧做某个动作）。
+    /// 手动设一条指令（供控制通道/e2e"剧本化"用：直接让某侧做某个动作）。
   /// 返回 false = 该动作当下不可发起（正在硬直/槽不足），**不静默吞掉**。
   auto force_move(int side, MoveId move) -> bool;
   /// 直接结算伤害（e2e 想造"残血"这类场景时不必打满整场）。
   auto apply_damage(int side, float damage) -> bool;
 
-  // —— 属性面（控制通道 `get` 用；键名稳定） ——
+  // —— 投射物与预警（绘制层/测试读取）——
+  [[nodiscard]] auto projectiles() const -> const std::vector<Projectile>& { return projectiles_; }
+  [[nodiscard]] auto sky_warnings() const -> const std::vector<SkyWarning>& { return warnings_; }
+
+  // —— 属性面（控制通道 `get` 用；键名稳定）——
   [[nodiscard]] auto snapshot() const -> std::string;
 
  private:
@@ -171,10 +225,29 @@ class Match {
                  FrameEvents& events);
   void clamp_to_arena(FighterState& fighter) const;
 
+  /// 招式起手时按 `AttackSpec::mechanic` 生成投射物/预警/状态。
+  void spawn_mechanic(FighterState& attacker, int side, MoveId move);
+  /// 推进投射物与预警（每帧）。
+  void advance_hazards(FrameEvents& events);
+  /// 投射物命中结算（**伤害取自投射物自身**，不是施放者当前招式）。
+  void apply_projectile_hit(FighterState& attacker, FighterState& defender,
+                            const Projectile& shot, FrameEvents& events);
+  /// 扇形喷射判定（与矩形判定分开：它是个锥形，不是盒子）。
+  void resolve_fan_spray(FighterState& attacker, FighterState& defender, int attacker_side,
+                         FrameEvents& events);
+  /// 推进异常状态（冻结/护盾/变身的倒数与每秒效果）。
+  void advance_status(FighterState& fighter, FrameEvents& events);
+  /// 给受击方算实际伤害（含百分比、减伤、护盾格挡）。
+  auto outgoing_damage(const AttackSpec& spec, const FighterState& attacker,
+                       const FighterState& defender, bool blocked, float* reflected_out) const
+      -> float;
+
   Arena arena_{};
   std::array<FighterState, 2> fighters_{};  RoundPhase phase_{RoundPhase::Fight};
   std::int64_t frame_index_{0};
   int end_timer_{0};
+  std::vector<Projectile> projectiles_{};
+  std::vector<SkyWarning> warnings_{};
 };
 
 }  // namespace gedou
