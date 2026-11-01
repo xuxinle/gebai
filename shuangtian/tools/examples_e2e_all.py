@@ -89,6 +89,10 @@ KNOWN_EXCLUDED = {
     "gedou_rl_train.py",
     "gedou_rl_plot.py",
     "gedou_rl_reverse_verify.py",
+    # 桌面应用的交付属性（子系统 + 文件图标）。读的是**产物**而不是构建输出：
+    # `link_fingerprint` 漏了 system/icon 时，`st build` 照样写“完成”，
+    # 只有看 PE 头才能发现没生效（实测踩过）。
+    "gui_subsystem_check.py",
 }
 
 DEV_APPS = ["gallery", "gbcode", "louyue", "caiyun", "xmlapp", "gedou", "gedou_rl"]

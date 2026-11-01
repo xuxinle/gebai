@@ -1637,6 +1637,9 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
                                            const ResolvedToolchain& toolchain,
                                            const std::string& output)
     -> Result<std::string> {
+  // 资源对象的出生快照（`.ico` 内容哈希）：换图标时要能发现，
+  // 而路径往往不变——只看 `.rc` 会漏（详见下方注释）。
+  const auto resource_stamp_path = [](const std::string& object) { return object + ".icon"; };
   const std::string root = options.root.empty() ? std::string{"."} : options.root;
   const std::string icon_path = root + "/" + target.icon;
   if (!fs::is_regular_file(icon_path)) {
@@ -1665,11 +1668,24 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
 
   bool needs_rebuild = !fs::is_regular_file(object_path);
   if (!needs_rebuild) {
-    // 判据只看 **`.rc` 内容是否变了**（图标路径或 ID 换了）。
-    // 为何不靠时间戳：框架没有暴露 stat 的 mtime，而“内容相等就不重编”
-    // 在语义上更准——它直接回答“这份 `.rc` 换了吗”。
+    // 判据：`.rc` 内容变了（图标路径或 ID 换了）**或 `.ico` 内容变了**。
+    //
+    // 只看 `.rc` 是不够的：换图标时路径往往不变（同一份 `app.ico` 重新生成），
+    // 于是 `.rc` 逐字相同、资源不重编，而链接阶段拿的仍是旧 `.o`——
+    // 症状是“重新生成了图标但 exe 里还是旧的”，只能靠 `--force` 才生效。
+    // 按内容比（而非时间）与全仓增量口径一致。
     auto existing = fs::read_text(rc_path);
     needs_rebuild = !existing || *existing != rc_source;
+    if (!needs_rebuild) {
+      const auto icon_stamp = resource_stamp_path(object_path);
+      const auto recorded = fs::read_text(icon_stamp);
+      const auto current = fs::read_bytes(icon_path);
+      const std::string now = current
+          ? std::to_string(st::hash::fnv1a64_bytes(*current))
+          : std::string{"missing"};
+      needs_rebuild = !recorded || *recorded != now;
+      if (!needs_rebuild) return object_path;
+    }
   }
   if (needs_rebuild) {
     if (auto status = fs::write_text(rc_path, rc_source); !status) {
@@ -1689,6 +1705,12 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
                         std::format("编译 Windows 图标资源失败\n{}{}\n{}",
                                     built->stdout_text, built->stderr_text, shown));
     }
+    // 记下本次用到的 `.ico` 内容哈希（下次据此判“图标换了没”）。
+    // 失败不影响正确性：下次会因“无快照”而重编一次。
+    const auto icon_bytes = fs::read_bytes(icon_path);
+    (void)fs::write_text(resource_stamp_path(object_path),
+                         icon_bytes ? std::to_string(st::hash::fnv1a64_bytes(*icon_bytes))
+                                    : std::string{"missing"});
   }
   return object_path;
 }
@@ -2957,6 +2979,26 @@ if (target == nullptr) {
     }
     for (const auto& flag : *flags) material.append("\n@").append(flag);
     material.append("\n<").append(target->name).append(">");
+    // 链接期**非源文件**的输入：子系统与图标资源。
+    //
+    // 不纳入指纹的代价（实测）：改 `system: console → gui` 或换 `.ico` 后，
+    // 单元一个没变 → 指纹不变 → “链接已跳过” → 产物还是旧的
+    // （PE 头仍是 CONSOLE、图标还是上一份），而构建输出说“完成”。
+    // 这类“只改了链接参数”的改动完全静默，只能靠 --force 才生效。
+    material.append("\n~system=").append(target->system);
+    if (!target->icon.empty()) {
+      const std::string icon_path = (options.root.empty() ? std::string{"."} : options.root) +
+                                    "/" + target->icon;
+      material.append("\n~icon=").append(icon_path).append("\t");
+      // 用字节哈希（`read_bytes` 返回 `Result<Bytes>`，不是 optional——
+      // 先前写成 `if (icon_hash)` 判的是 Result 对象本身，恒为真）。
+      const auto icon_bytes = fs::read_bytes(icon_path);
+      if (icon_bytes) {
+        material.append(std::to_string(st::hash::fnv1a64_bytes(*icon_bytes)));
+      } else {
+        material.append("missing");
+      }
+    }
     return std::string(st::hash::fnv1a64_hex(material));
   }();
   const std::string link_stamp_path = output + ".link";

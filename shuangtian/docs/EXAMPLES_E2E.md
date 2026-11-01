@@ -41,7 +41,57 @@
 | `gedou_balance_check.py` | gedou | **训练前的平衡体检**：8 个固定动作 × 3 档难度矩阵。判据写死：任一固定动作胜率 ≥ 90% 即"无脑必胜"，训练没意义（实测：不体检直接训，"一直按踢"100% 胜） | `py -3 tools/gedou_balance_check.py --episodes 80` |
 | `gedou_rl_train.py` | gedou | **PPO 训练**：collect→train→eval 循环，每次导出自动跑前向自检（torch vs C++ 逐值），输出权重 JSON + 报告（含随机/手写两条基线） | `py -3 tools/gedou_rl_train.py --rounds 26 --episodes 320 --eval-episodes 240 --entropy 0.05` |
 | `gedou_rl_plot.py` | gedou | 把训练报告画成曲线（胜率/熵/回报三联，基线水平线并排） | `py -3 tools/gedou_rl_plot.py` |
-| `gedou_rl_reverse_verify.py` | gedou | RL 链路的**逆向验证**：前向矩阵/自我中心观测/奖励符号/冷却/观测维度漂移，五个回退各自必须让对应用例变红（三条因构建缺陷标了 skip，见 BACKLOG P1） | `py -3 tools/gedou_rl_reverse_verify.py [--only 案例名]` |
+| `gedou_rl_reverse_verify.py` | gedou | RL 链路的**逆向验证**：前向矩阵/自我中心观测/奖励符号/冷却/观测维度漂移，五个回退各自必须让对应用例变红 | `py -3 tools/gedou_rl_reverse_verify.py [--only 案例名]` |
+| `gui_subsystem_check.py` | 全部桌面应用 | **读产物**而非读构建输出：PE 头的 Subsystem 是否 gui(2)、exe 里有没有 256 图标；命令行工具是否仍保持 console(3)。带 `--reverse` 逐项回退验证 | `py -3 tools/gui_subsystem_check.py [--reverse]` |
+
+## 桌面应用：图标与子系统
+
+每个桌面应用都有**两样**交付属性，二者都写在 `st.pkg` 的 target 里：
+
+```json
+"gallery": { ..., "system": "gui", "icon": "examples/gallery/assets/gallery.ico" }
+```
+
+| 属性 | 效果 | 没配的后果 |
+|---|---|---|
+| `system: "gui"` | PE Subsystem=2，双击不弹黑框 | 双击先弹一个空控制台窗口 |
+| `icon` | exe **文件**图标（资源管理器/任务栏/快捷方式） | 显示成默认空白图标 |
+
+> `icon` 只影响磁盘上的 exe。代码里 `SetWindowIcon` 换的是**窗口**图标（任务栏缩略图等），
+> 两者不是一回事。
+
+### 图标从哪来（可重生成）
+
+```bash
+py -3 tools/make_icons.py            # 画 PNG 源图（纯 Python，无 Pillow）
+py -3 tools/make_ico.py <src.png> <out.ico>   # 转多尺寸 ico（16/24/32/48/64/128/256）
+```
+
+源图**用代码画**而不是找素材：配色/圆角/线宽要能批量调，位图做不到。
+每个应用一个主题色 + 一个能表意的符号（gallery 九宫格、louyue 版式、
+caiyun 胶片+播放、gedou 拳+冲击波、cefu 书+检索、xiangqi 卡片+人像）。
+
+### 验证
+
+```bash
+py -3 tools/gui_subsystem_check.py            # 当前产物对不对
+py -3 tools/gui_subsystem_check.py --reverse  # 逐项回退→必须变红
+```
+
+**这个检查必须读产物，不能读构建输出**：`st build` 说“完成”不代表子系统/图标改过了——
+详见下面“链接期输入”。
+
+### 链接期输入（踩过的坑）
+
+`system` 与 `.ico` **不参与单元编译**，只影响链接与资源编译。而增量判定的两道门
+最初都没把它们算进去：
+
+1. `link_fingerprint` 只算对象清单 + 编译标志 → 改 `system` 后“链接已跳过”，
+   产物仍是 CONSOLE；
+2. 图标资源只看 `.rc` **路径**变没变 → 换 `.ico` 内容（路径不变）不重编资源。
+
+两道门现在都按**内容**比（`.ico` 字节哈希），`gui_subsystem_check.py --reverse`
+就是用来钉住它们的。
 
 ## 一键全跑
 

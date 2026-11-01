@@ -227,6 +227,10 @@ shuangtian/examples/*/assets/vo/*.wav
 !packages/web/public/icons/icon-192.png
 !packages/web/public/icons/icon-512.png
 !packages/web/public/icons/*.png
+# 示例应用的图标**源图**：由 `tools/make_icons.py` 画、再由 `make_ico.py` 转成
+# 多尺寸 `.ico` 进 PE 资源。它们是**可重生成的输入**而不是截图/素材，
+# 入库才能让人看到“图标长什么样”、也才能在 diff 里审改动。
+!shuangtian/examples/*/assets/*-icon.png
 !shuangtian/examples/gbcode/assets/gbcode-icon.png
 !shuangtian/examples/louyue/assets/sample.png
 
