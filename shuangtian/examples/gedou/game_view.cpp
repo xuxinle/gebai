@@ -856,25 +856,65 @@ void GameView::paint_status_overlays(const st::ui::RenderContext& context, Canva
       }
     }
 
-    // —— 护盾（苹果小区）：绕身三颗苹果 + 弧光 ——
+    // —— 护盾（苹果小区）：**立体环绕**的三颗苹果 ——
     //
-    // “环绕”必须真的**动起来**：静态的画个圈看不出它在转，
-    // 而“绕着我转”正是这个技能的语义（把攻击挡在外面）。
+    // ## 为什么不是画个椭圆轨道
+    //
+    // 早先是"椭圆 + sin 压扁 y"的写法：`y = cy + sin(angle) * orbit * 0.55`。
+    // 那不是三维环绕，是**在椭圆上滑动的平面贴片**——苹果永远不会"转到身后"
+    // （不会变小、不会被身体挡住），看着像绕着腰转的一圈灯。
+    //
+    // ## 立体环绕怎么做
+    //
+    // 用极坐标算三维位置，再按**深度**做两件事：
+    // 1. **远近缩放**：z 越大（离观众近）苹果越大，反之越小；
+    // 2. **前后遮挡**：z < 0（在身后）时先画，让身体盖住它；
+    //    这样"绕到背后消失、从另一侧转出来"才成立。
+    //
+    // 轨道本身画成**两段弧**（前弧亮、后弧暗且被身体挡），而不是一整圈——
+    // 一整圈会让它看起来是贴在地上的一个环。
     if (fighter.shielded > 0) {
       const float cx = fighter.x;
       const float cy = match_->arena().ground - 105.0f;
       const float orbit = 74.0f;
+      // 倾角：0 = 轨道平躺（正上方看是一条线），1 = 正对观众（圆）。
+      // 0.42 太扁，实测看着仍像"贴在地上的环"；0.55 才有"绕着身体转"的立体感。
+      const float tilt = 0.55f;
       const float phase = static_cast<float>(view_.logic_frames) * 0.10f;
-      // 弧光（先画，在苹果下层）
-      math::Path arc;
-      arc.add_circle(Point{cx, cy}, orbit);
-      canvas.stroke_path(arc, st::raster::Paint::solid(Color{0xFF, 0xC8, 0x6A, 90}), 3.0f,
+
+      // 三维位置 → 屏幕位置。返回 z 供判断前后。
+      const auto project = [&](float angle) {
+        const float x3 = std::cos(angle);
+        const float z3 = std::sin(angle);        // +z 朝观众
+        const float screen_x = cx + x3 * orbit;
+        const float screen_y = cy - z3 * orbit * tilt;
+        return std::array<float, 3>{screen_x, screen_y, z3};
+      };
+
+      // 轨道：只画**后半段**（z<0）作为暗色弧，前半段留到苹果之后画亮弧。
+      // 一整圈会把"环"画成一个平面图形，分两段才有立体感。
+      math::Path back_arc;
+      const int steps = 36;
+      for (int i = 0; i <= steps; ++i) {
+        const float angle = phase + 3.14159f + static_cast<float>(i) / steps * 3.14159f;
+        const auto at = project(angle);
+        if (i == 0) back_arc.move_to(Point{at[0], at[1]});
+        else back_arc.line_to(Point{at[0], at[1]});
+      }
+      canvas.stroke_path(back_arc, st::raster::Paint::solid(Color{0xFF, 0xC8, 0x6A, 70}), 2.0f,
                          st::raster::StrokeStyle{});
-      // 三颗苹果
+
+      // **先画身后的苹果**（z<0）：它们会被角色身体盖住一部分——
+      // 这正是"立体"的关键：挡一半，观众才相信它转到了人背后。
+      //
+      // ⚠ 别把小尺寸压得太狠：早先后方苹果只给 8~10px，加上被身体遮挡后
+      // 实测完全看不见，画面里只剩两颗苹果，"三颗环绕"的语义就没了。
       for (int i = 0; i < 3; ++i) {
-        const float angle = phase + static_cast<float>(i) * 2.0944f;   // 120°
-        const Point at{cx + std::cos(angle) * orbit, cy + std::sin(angle) * orbit * 0.55f};
-        paint_apple(canvas, at, 13.0f);
+        const float angle = phase + static_cast<float>(i) * 2.0944f;
+        const auto at = project(angle);
+        if (at[2] >= 0.0f) continue;
+        const float depth = (at[2] + 1.0f) * 0.5f;             // 0=最远 1=最近
+        paint_apple(canvas, Point{at[0], at[1]}, 11.0f + depth * 3.0f);
       }
     }
 
@@ -1185,6 +1225,45 @@ void GameView::paint_fighter_overlays(const st::ui::RenderContext& context,
                                       st::raster::Surface& canvas, int side) const {
   const FighterState& fighter = match_->state(side);
   if (fighter.apple_form > 0) return;
+
+  // ── 护盾的**前半**：前弧 + 转到身前的苹果 ──
+  //
+  // 立体环绕必须**分两次画**：身后的部分在画角色之前（会被身体盖住），
+  // 身前的部分在这里（盖在角色上面）。只在一个地方画全都，
+  // 要么苹果永远浮在脸上、要么永远被身体吃掉。
+  if (fighter.shielded > 0) {
+    const float cx = fighter.x;
+    const float cy = match_->arena().ground - 105.0f;
+    const float orbit = 96.0f;       // 与身后半弧保持一致（见 paint_fighters_2d 里的说明）
+    const float tilt = 0.55f;
+    const float phase = static_cast<float>(view_.logic_frames) * 0.10f;
+
+    const auto project = [&](float angle) {
+      const float z3 = std::sin(angle);
+      return std::array<float, 3>{cx + std::cos(angle) * orbit,
+                                  cy - z3 * orbit * tilt, z3};
+    };
+
+    math::Path front_arc;
+    const int steps = 36;
+    for (int i = 0; i <= steps; ++i) {
+      const float angle = phase + static_cast<float>(i) / steps * 3.14159f;
+      const auto at = project(angle);
+      if (i == 0) front_arc.move_to(Point{at[0], at[1]});
+      else front_arc.line_to(Point{at[0], at[1]});
+    }
+    canvas.stroke_path(front_arc, st::raster::Paint::solid(Color{0xFF, 0xD8, 0x8A, 110}), 2.5f,
+                       st::raster::StrokeStyle{});
+
+    for (int i = 0; i < 3; ++i) {
+      const float angle = phase + static_cast<float>(i) * 2.0944f;
+      const auto at = project(angle);
+      if (at[2] < 0.0f) continue;
+      const float depth = (at[2] + 1.0f) * 0.5f;
+      // 近处苹果更大（透视）：近 16px / 远 11px
+      paint_apple(canvas, Point{at[0], at[1]}, 11.0f + depth * 5.0f);
+    }
+  }
   const Pose pose = match_->world_pose(side);
   const float ground_y = match_->arena().ground;
 
