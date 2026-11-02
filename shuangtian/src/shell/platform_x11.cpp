@@ -1727,8 +1727,11 @@ class X11Backend final : public Backend {
       }
       case kLeaveNotify: {
         const auto& crossing = as<XInputEvent>(event);
+        // **窗口级**离开：不是元素级 HoverOut（那由 UiRoot 在命中切换时自己发）。
+        // 映射成 WindowLeave 让 UiRoot 清 hover/光标/合并移动——旧实现发 HoverOut
+        // 而 dispatch 对它不处理，指针滑出后悬浮与光标卡在最后命中的元素上。
         ui::Event left = make_event(crossing);
-        left.kind = ui::EventKind::HoverOut;
+        left.kind = ui::EventKind::WindowLeave;
         events_.push_back(std::move(left));
         return;
       }

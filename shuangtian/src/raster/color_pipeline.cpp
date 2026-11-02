@@ -207,14 +207,14 @@ constexpr float kAgxR2020Inv[3][3] = {
 // ── AgX 的三维入口（与逐色道版本分开）──
 auto tone_map_agx(math::Vec3 hdr) noexcept -> math::Vec3 {
   std::array<std::array<float, 3>, 3> to2020{};
-  for (int r = 0; r < 3; ++r) {
-    for (int c = 0; c < 3; ++c) to2020[r][c] = kAgxR2020[r][c];
+  for (std::size_t r = 0; r < 3; ++r) {
+    for (std::size_t c = 0; c < 3; ++c) to2020[r][c] = kAgxR2020[r][c];
   }
   const math::Vec3 wide = agx_apply(to2020, hdr);
   const math::Vec3 curved = agx_curve(wide);
   std::array<std::array<float, 3>, 3> back{};
-  for (int r = 0; r < 3; ++r) {
-    for (int c = 0; c < 3; ++c) back[r][c] = kAgxR2020Inv[r][c];
+  for (std::size_t r = 0; r < 3; ++r) {
+    for (std::size_t c = 0; c < 3; ++c) back[r][c] = kAgxR2020Inv[r][c];
   }
   const math::Vec3 out = agx_apply(back, curved);
   return math::Vec3{std::clamp(out.x, 0.0f, 1.0f), std::clamp(out.y, 0.0f, 1.0f),

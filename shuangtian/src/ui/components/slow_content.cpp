@@ -318,7 +318,7 @@ void SlowContent::paint_content(const RenderContext& context, raster::Surface& c
   while (y + bar_height <= bounds_.bottom() - 8.0f && bar < 40) {
     // 宽度伪随机变化（行长度错落）：固定序列，避免每帧闪跳。
     const float factor =
-        0.35f + 0.6f * static_cast<float>((bar * 37U) % 100U) / 100.0f;
+        0.35f + 0.6f * static_cast<float>((static_cast<unsigned int>(bar) * 37U) % 100U) / 100.0f;
     const float bar_width = std::max(min_width, bounds_.width * factor - 32.0f);
     const math::Rect rect{bounds_.x + 16.0f, y, bar_width, bar_height};
     const std::uint8_t a =

@@ -48,6 +48,9 @@ namespace {
     case EventKind::FocusOut: return "blur";
     case EventKind::HoverIn: return "hover";
     case EventKind::HoverOut: return "unhover";
+    // 窗口级事件（不为脚本桥接——它不派发给元素；这里给出名字只为
+    // event_name 对全部枚举完备，避免 -Wswitch 报缺分支）。
+    case EventKind::WindowLeave: return "windowleave";
   }
   return "unknown";
 }

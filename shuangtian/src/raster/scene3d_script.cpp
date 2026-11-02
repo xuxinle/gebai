@@ -28,10 +28,14 @@ namespace {
   return degrees * 3.14159265358979323846f / 180.0f;
 }
 
-/// 弧度 → 度（序列化时用）。
-[[nodiscard]] constexpr auto to_degrees(float radians) noexcept -> float {
+/// 弧度 → 度（序列化反向路径用；脚本 → JSON 的序列化尚未接线，函数语义已定型）。
+[[nodiscard]] [[maybe_unused]] constexpr auto to_degrees(float radians) noexcept -> float {
   return radians * 180.0f / 3.14159265358979323846f;
 }
+
+// 消除 clang 的 unused-function（gcc 不告警）：`[[maybe_unused]]` 直接标在函数上，
+// 序列化接线前没有人调它也不告警。
+//（下一行的模板常量方案保留在历史里没有意义，已删。）
 
 }  // namespace
 namespace {

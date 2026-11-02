@@ -569,6 +569,10 @@ auto polyhedron(float radius, const std::vector<Vec3>& unit_points,
 
 constexpr float kPhi = 1.6180339887498948f;
 constexpr float kInvPhi = 0.6180339887498948f;
+// 消 clang 的 unused-const-variable：`kPhi` 当前没有使用者（各图元只取 `kInvPhi`），
+// 保留它是黄金比例常量的成对完整（读代码的人对照时两个都在）。
+// `[[maybe_unused]]` 是最直白的形式，gcc/clang 都认。
+[[maybe_unused]] constexpr float kKeepPhi = kPhi;
 
 /// 正二十面体的顶点与面（后面 ico_sphere / 十二面体 / 二十面体共用）。
 auto icosahedron_data() -> std::pair<std::vector<Vec3>, std::vector<std::array<int, 3>>> {

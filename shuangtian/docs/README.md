@@ -167,6 +167,7 @@
 | [`BUILD_TEST_PERF.md`](BUILD_TEST_PERF.md) | 构建/测试性能基线（gcc vs clang、并行提速） | 详读 | 实测 |
 | [`ITERATION_SPEED.md`](ITERATION_SPEED.md) | 迭代速度基线（2026-10-26） | 详读 | 实测 |
 | [`PERF_2026-10-19.md`](PERF_2026-10-19.md) | 渲染性能专项：软件路径 14.9 → 3.95 ms | 详读 | 实测 |
+| [`perf-benchmark.md`](perf-benchmark.md) | 渲染性能实测与 Blender 对比（2026-10-31，RTX 4080S） | 详读 | 实测 |
 | [`DWRITE_PIXEL_BENCHMARK.md`](DWRITE_PIXEL_BENCHMARK.md) | 字体渲染 × Windows 原生链路像素级对标 | 详读 | 实测 |
 | [`TEXT_AB_REPORT.md`](TEXT_AB_REPORT.md) | 与浏览器字体渲染对照（全字符集 + 全字号） | 详读 | 实测 |
 | [`SKIA_TEXT_RENDERING_STUDY.md`](SKIA_TEXT_RENDERING_STUDY.md) | Skia/Chromium 覆盖率与网格拟合怎么做的 | 详读 | 实测 |

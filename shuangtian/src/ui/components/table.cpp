@@ -430,6 +430,15 @@ auto Table::on_event(const RenderContext& context, Event& event) -> bool {
       }
       return bounds_.contains(event.position);
     }
+    case EventKind::HoverOut:
+      // 悬浮链离开通知（UiRoot 按链分发，2026-11-02）：出窗/失活/移到别处时
+      // 清行高亮。旧实现只靠 MouseMove——但 move 只在本表被命中时才到达，
+      // 指针移走后最后 hover 的行高亮永久残留。
+      if (hovered_row_ != kNoRow) {
+        hovered_row_ = kNoRow;
+        mark_dirty();
+      }
+      return false;
     case EventKind::MouseDown:
       return bounds_.contains(event.position);
     case EventKind::Click:
@@ -515,6 +524,11 @@ auto Table::get_property(std::string_view name) const -> std::optional<std::stri
   if (name == "visible_rows") return std::format("{}", visible_row_count());
   if (name == "selected_row") {
     return selected_row_.has_value() ? std::format("{}", *selected_row_) : std::string("-1");
+  }
+  // 悬浮行是"只能看像素、看不出状态"的量（行高亮不在元素级 hovered 里）：
+  // 自动化验证「出窗/移开后高亮已清」需要直接读到它。-1 = 无悬浮行。
+  if (name == "hovered_row") {
+    return hovered_row_ == kNoRow ? std::string("-1") : std::format("{}", hovered_row_);
   }
   if (name == "value") return semantics_value();
   if (name == "text") return semantics_text();

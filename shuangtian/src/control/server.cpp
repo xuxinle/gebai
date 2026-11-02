@@ -1097,6 +1097,19 @@ auto Server::Impl::handle_input_mouse([[maybe_unused]] Client& client, [[maybe_u
                                       [[maybe_unused]] bool& deferred) -> Result<Json> {
   [[maybe_unused]] auto& root = host.root();
 const std::string kind = json_get_string(params, "kind", "move");
+// 窗口级指针离开：不定位任何元素，只让 UiRoot 清掉悬浮/光标残留。
+// （AI 驱动验证“指针出窗后高亮不复现”就是靠它；与元素级 hover/unhover 分工
+// 见 `EventKind::WindowLeave` 的注释。）
+if (kind == "leave") {
+  ui::Event leave;
+  leave.kind = ui::EventKind::WindowLeave;
+  (void)root.dispatch(leave);
+  host.request_repaint();
+  Json result = Json::object();
+  result["handled"] = true;
+  result["kind"] = kind;
+  return result;
+}
 ui::Event event;
 // —— 按 **id** 点击/移动：AI 的常见意图是“点这个元素”，而不是“点在 (x,y)” ——
 // 没有这条快捷路径时，调用方必须先 `find` 拿 `bounds`、再自己算中心点，

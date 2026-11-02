@@ -212,6 +212,21 @@ enum class EventKind : std::uint8_t {
   FocusOut,
   HoverIn,
   HoverOut,
+  /// **窗口级**指针离开（指针滑出整个客户区，不是离开某个元素）。
+  ///
+  /// 与 `HoverOut` 的分工（两者语义不同层，混用会互相干扰）：
+  /// - `HoverIn/HoverOut` 是**元素级**事件：UiRoot 在命中目标切换时派发给元素，
+  ///   元素自己决定悬浮视觉；
+  /// - `WindowLeave` 是**窗口级**事实：由后端产生（Win32 `WM_MOUSELEAVE`、
+  ///   X11 `LeaveNotify`、Wayland `pointer_leave`），UiRoot 据此**一次性清理**
+  ///   全部指针态（hover、光标形态、合并中的移动）。
+  ///   它**不会**派发给元素——元素不需要知道“指针出窗”与“指针移到我之外”的区别，
+  ///   两者都表现为自己的 HoverOut。
+  ///
+  /// 为何必须存在：指针出窗后不再有 MouseMove，`hovered_` 与光标会卡在最后命中的
+  /// 元素上（高亮不灭、手型光标被带出窗口）。后端检测到离开后发本事件，
+  /// 由 UiRoot 统一收尾。
+  WindowLeave,
 };
 
 /// 鼠标指针形态（**语义名**，不是平台常量）。

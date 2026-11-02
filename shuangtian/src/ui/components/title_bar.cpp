@@ -449,7 +449,19 @@ auto TitleBar::button_icon(std::size_t index) const -> std::string_view {
 
 auto TitleBar::run_window_action(std::string_view action) -> bool {
   if (control_ == nullptr || !control_->window_control_available()) return false;
-  if (action == "minimize") return control_->window_minimize();
+  if (action == "minimize") {
+    const bool changed = control_->window_minimize();
+    if (changed) {
+      // **同时复位悬浮与按下态**：最小化后窗口不可见，恢复回来时鼠标往往已不在
+      // 按钮上，但 `hovered_button_` 残留 → 按钮仍亮着高亮块（与 close 分支同源，
+      // 用户报的「标题栏按钮操作后没有取消悬浮状态」就是它）。
+      pressed_button_ = -1;
+      hovered_button_ = -1;
+      hovered_caption_ = -1;
+      mark_dirty();
+    }
+    return changed;
+  }
   if (action == "maximize") {
     const bool changed = control_->window_toggle_maximize();
     // 按钮形态随窗口状态变（最大化 ↔ 还原）：切换后连布局都变了（图标不同），
@@ -460,11 +472,13 @@ auto TitleBar::run_window_action(std::string_view action) -> bool {
   if (action == "close") {
     const bool ok = control_->window_request_close();
     if (ok) {
-      // 关闭动作触发后**复位按下态**：sw_hide 让窗口隐藏太快，MouseUp 往往
-      // 到不了（点 × → 窗口没了），`pressed_button_` 会残留 → 恢复窗口后
-      // 关闭按钮仍显示按下高亮（像“聚焦在关闭按钮上”，实测现象）。
-      // 按钮的使命在触发关闭那一刻就结束了，按下态不该带进下一次显示。
+      // 关闭动作触发后**复位按下态与悬浮态**：sw_hide 让窗口隐藏太快，MouseUp 往往
+      // 到不了（点 × → 窗口没了），`pressed_button_`/`hovered_button_` 都会残留
+      // → 恢复窗口后关闭按钮仍显示按下高亮与悬浮红底（像“聚焦在关闭按钮上”，实测现象）。
+      // 按钮的使命在触发关闭那一刻就结束了，交互态不该带进下一次显示。
       pressed_button_ = -1;
+      hovered_button_ = -1;
+      hovered_caption_ = -1;
       mark_dirty();
     }
     return ok;
@@ -772,6 +786,11 @@ auto TitleBar::get_property(std::string_view name) const -> std::optional<std::s
   if (name == "title" || name == "text") return title_;
   if (name == "icon") return icon_;
   if (name == "show_controls") return std::string(show_controls_ ? "true" : "false");
+  // 悬浮态是"只能看像素、看不出状态"的那类量（按钮级高亮不在元素级 hovered 里）：
+  // 自动化验证「操作后高亮已清」「悬浮高亮随指针切换」都需要直接读到它。
+  // -1 = 无悬浮，0..n = 对应序号（控制按钮：0最小化 1最大化 2关闭；命令按钮从 0 起）。
+  if (name == "hovered_button") return std::to_string(hovered_button_);
+  if (name == "hovered_caption") return std::to_string(hovered_caption_);
   // 窗口状态是"只能从像素看出来"的那类量：自动化验证需要能直接读到它
   // （`maximized` 决定最大化按钮此刻是"最大化"还是"还原"图标）。
   if (name == "maximized") {
@@ -801,7 +820,8 @@ auto TitleBar::set_property(std::string_view name, std::string_view value) -> bo
 }
 
 auto TitleBar::property_names() const -> std::vector<std::string_view> {
-  return {"title", "text", "icon", "show_controls", "maximized", "window_control_available"};
+  return {"title", "text", "icon", "show_controls", "maximized", "window_control_available",
+          "hovered_button", "hovered_caption"};
 }
 
 auto TitleBar::invoke_action(std::string_view action, std::string_view argument) -> bool {

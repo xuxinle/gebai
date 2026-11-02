@@ -2021,8 +2021,25 @@ class Win32Backend final : public Backend {
         }
         break;
       case WM_MOUSEMOVE:
+        // 首次进入客户区时订阅 `WM_MOUSELEAVE`（一次性事件，触发后需重新订阅）。
+        // 没有它，指针滑出窗口后不再有任何消息——悬浮高亮与语义光标会卡在
+        // 最后命中的元素上（用户报的“高亮不灭/手型光标被带出窗口”）。
+        if (!tracking_mouse_leave_) {
+          TRACKMOUSEEVENT track{};
+          track.cbSize = sizeof(track);
+          track.dwFlags = TME_LEAVE;
+          track.hwndTrack = window;
+          if (::TrackMouseEvent(&track) != 0) tracking_mouse_leave_ = true;
+        }
         push_mouse(ui::EventKind::MouseMove, lparam, 0, 1);
         return 0;
+      case WM_MOUSELEAVE: {
+        // 指针离开客户区：发**窗口级**离开（UiRoot 清 hover/光标/合并移动）。
+        // 订阅是一次性的，这里清标记——下次 WM_MOUSEMOVE 会重新订阅。
+        tracking_mouse_leave_ = false;
+        events_.push_back(ui::Event{.kind = ui::EventKind::WindowLeave});
+        return 0;
+      }
       case WM_LBUTTONDOWN:
         ::SetCapture(window);
         push_mouse(ui::EventKind::MouseDown, lparam, 1, 1);
@@ -2105,6 +2122,41 @@ class Win32Backend final : public Backend {
         events_.push_back(ui::Event{.kind = ui::EventKind::FocusIn});
         return 0;
 
+      case WM_ACTIVATE: {
+        // **窗口激活/失活**（Alt+Tab、任务栏点击、点击别的程序）。
+        //
+        // 失活（WA_INACTIVE）：指针没动但用户已不在本窗口——悬浮态留着就是
+        // 「切回来时按钮还亮着」的残影；发一条 WindowLeave 让 UiRoot 一次性清掉
+        // （hover/光标/合并移动，语义同滑出窗口）。
+        //
+        // 激活（WA_ACTIVE/WA_CLICKACTIVE）：用 `GetCursorPos` **合成一条 MouseMove**——
+        // 指针可能正停在窗口内某个控件上，但切换过程没有鼠标事件，悬浮与光标
+        // 停在切换前的旧状态（用户报的「切前台但没点击过、指针无变化」）。
+        // 合成的 move 会走正常解析链，悬浮/光标立刻跟上真实位置。
+        // 坐标在窗外时 `to_logical` 会给出越界值——那没关系：命中不到任何元素，
+        // hover 自然为空，等价于离开语义。
+        const int active = LOWORD(wparam);
+        if (active == WA_INACTIVE) {
+          events_.push_back(ui::Event{.kind = ui::EventKind::WindowLeave});
+        } else {
+          POINT cursor{};
+          if (::GetCursorPos(&cursor) != 0 && ::ScreenToClient(window, &cursor) != 0) {
+            const float safe_scale = scale_ > 0.0f ? scale_ : 1.0f;
+            ui::Event move;
+            move.kind = ui::EventKind::MouseMove;
+            move.position = math::Point{
+                static_cast<float>(static_cast<double>(cursor.x) / static_cast<double>(safe_scale)),
+                static_cast<float>(static_cast<double>(cursor.y) / static_cast<double>(safe_scale))};
+            // 修饰键状态与真实鼠标事件同口径（`push_mouse` 同一判定）。
+            move.ctrl = (::GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            move.shift = (::GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            move.alt = (::GetKeyState(VK_MENU) & 0x8000) != 0;
+            events_.push_back(std::move(move));
+          }
+        }
+        return 0;
+      }
+
       case WM_ERASEBKGND:
         return 1;  // 我们整屏重绘，抑制系统擦背景（否则闪白）
 
@@ -2165,6 +2217,11 @@ class Win32Backend final : public Backend {
   std::deque<ui::Event> events_{};
   std::string title_{};
   /// 当前语义光标（`WM_SETCURSOR` 每次都用它重设——见那个 case 的说明）。
+  /// 是否已订阅 `WM_MOUSELEAVE`（`TrackMouseEvent` 是一次性的，触发后要重新订阅）。
+  ///
+  /// 为何每次 move 都要问一遍而不是订阅一次永久有效：`TME_LEAVE` 在触发
+  /// （或窗口失活被系统撤销）后自动失效，标志位跟着清——下次进窗重新订阅。
+  bool tracking_mouse_leave_{false};
   ui::MouseCursor cursor_{ui::MouseCursor::Arrow};
   int logical_width_{1280};   ///< 逻辑尺寸（取整；用于"改窗口尺寸"时的换算与日志）
   int logical_height_{720};

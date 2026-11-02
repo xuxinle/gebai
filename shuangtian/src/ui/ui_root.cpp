@@ -1,4 +1,4 @@
-#include "st/ui/ui_root.hpp"
+﻿#include "st/ui/ui_root.hpp"
 
 #include "st/ui/input_coalescer.hpp"
 
@@ -102,6 +102,8 @@ void UiRoot::set_content(std::unique_ptr<Element> content) {
   focused_ = nullptr;
   hovered_ = nullptr;
   pressed_ = nullptr;
+  hover_chain_.clear();   // 整棵内容树被换：链上的观察者全部失效（不发 HoverOut——对象即将销毁）
+  pointer_state_dirty_ = true;   // 整棵内容换了：按新树重算悬浮/光标（若有指针在窗内）
   mark_dirty_all();
 }
 
@@ -492,7 +494,84 @@ auto UiRoot::dispatch_to(Element& element, Event& event) -> bool {
     update_hover(nullptr);
   }
 
+void UiRoot::send_hover_chain_events(const std::vector<Element*>& leaving,
+                                     const std::vector<Element*>& entering) {
+  // 直达、不冒泡：`dispatch_to` 会沿 parent 链回溯——那会让祖先后代重复收
+  // 到同一个离开/进入（链上每个元素都各自收一份，语义就是 DOM 的
+  // mouseenter/mouseleave）。这里逐个直接调 `on_event`。
+  //
+  // 顺序：先全部离开、再全部进入（同一位置切换时视觉不叠加）。
+  //
+  // ⚠ mark_dirty 只给**有悬浮视觉反馈**的元素（同跟踪门控）：链上大多数是
+  // 普通容器（Panel/布局壳），它们悬浮不变样，标脏纯属自费重绘——链上有根
+  // 容器时 damage = 整窗口，增量重绘直接退化成每帧整帧（2026-10-29 实测踩过）。
+  const auto visual = [](const Element* node) {
+    return node->hover_effect().enabled || node->has_hover_callback();
+  };
+  // **直达、不冒泡，但观察者照通知**：链上每个元素恰好收一份（DOM 的
+  // mouseenter/mouseleave 语义）。`dispatch_to` 会沿 parent 回溯——链上祖先
+  // 也在收各自的份，回溯就是重复通知（实测 CountingPanel 出窗收到两次
+  // HoverOut）。所以这里直接调 `on_event`，另把事件观察者（脚本桥/状态栏/
+  // 埋点）挂在同一条出口——可见性与既有路径一致，又不冒泡。
+  const auto deliver = [this](Element& node, Event& event) {
+    const RenderContext context = render_context();
+    (void)node.on_event(context, event);
+    if (event_observer_) event_observer_(event, node);
+  };
+  Event out;
+  out.kind = EventKind::HoverOut;
+  for (Element* node : leaving) {
+    if (node == nullptr) continue;
+    node->set_hovered(false);
+    node->notify_hover(false);
+    deliver(*node, out);
+    if (visual(node)) node->mark_dirty();
+  }
+  Event in;
+  in.kind = EventKind::HoverIn;
+  for (Element* node : entering) {
+    if (node == nullptr) continue;
+    deliver(*node, in);
+    node->notify_hover(true);
+    node->set_hovered(true);
+    if (visual(node)) node->mark_dirty();
+  }
+}
+
   void UiRoot::update_hover(Element* target) {
+  // ── 悬浮链分发（通知面，2026-11-02）──
+  //
+  // 对「离开旧链/进入新链」的元素逐一发 HoverOut/HoverIn，**直达不冒泡**。
+  // 这是悬浮态的**真值源**：自持位置悬浮的组件（MenuBar 标题、TitleBar 按钮、
+  // Table 行……）链上没有任何被跟踪元素，离开通知只发给被跟踪者的话，
+  // 它们永远收不到——高亮残留（gbcode 菜单栏实测：指针移进编辑器/出窗，
+  // 标题高亮冻结）。链模型下通知与视觉跟踪解耦：通知面看链，重绘账看门控。
+  //
+  // ⚠ 即使 `hovered_ == target`（视觉跟踪没变）链也可能变：从 MenuBar 标题
+  // （无视觉反馈，不在跟踪集）移到 Table 行（也不在）——两个都不是 hovered_，
+  // 但各自都该收到离开/进入。所以链分发在 `hovered_ == target` 早退**之前**。
+  {
+    std::vector<Element*> next_chain;
+    for (Element* node = target; node != nullptr; node = node->parent()) {
+      next_chain.push_back(node);
+    }
+    // 旧链里的元素可能已被重建（声明式每帧重组）——先清理悬垂指针再比较。
+    prune_stale_pointers();
+    std::vector<Element*> leaving;
+    for (Element* node : hover_chain_) {
+      if (std::find(next_chain.begin(), next_chain.end(), node) == next_chain.end()) {
+        leaving.push_back(node);
+      }
+    }
+    std::vector<Element*> entering;
+    for (Element* node : next_chain) {
+      if (std::find(hover_chain_.begin(), hover_chain_.end(), node) == hover_chain_.end()) {
+        entering.push_back(node);
+      }
+    }
+    hover_chain_ = std::move(next_chain);
+    send_hover_chain_events(leaving, entering);
+  }
   // ⚠ **失联/回来的判定必须在提前返回之前**：
   //
   // `hovered_ == target` 时下面会提前 return，于是 `set_hint_target` 不调——
@@ -547,7 +626,8 @@ auto UiRoot::dispatch_to(Element& element, Event& event) -> bool {
         }
       }
       set_hint_target(hint_owner);
-      // 清掉旧的（它可能带特效，离开要收）。
+      // 清掉旧的（它可能带特效，离开要收）。悬浮通知（HoverOut 事件/回调/
+      // set_hovered）已由链分发统一发出（见函数头），这里只管重绘账：
       //
       // ⚠ **必须标脏**：`set_hovered(false)` 只改标志，视觉过渡（`hover_t_`）是在
       // `paint` 里推进的。鼠标停在无反馈容器上不动时**不会再有帧**，不标脏的话
@@ -555,11 +635,6 @@ auto UiRoot::dispatch_to(Element& element, Event& event) -> bool {
       // 两个选中项”。旧目标若还在过渡中，它的 `record_damage` 也靠下一帧才能发生，
       // 同样需要这里先把帧拉起来。
       if (hovered_ != nullptr) {
-        hovered_->set_hovered(false);
-        Event event;
-        event.kind = EventKind::HoverOut;
-        hovered_->notify_hover(false);
-        (void)dispatch_to(*hovered_, event);
         hovered_->mark_dirty();
         hovered_ = nullptr;
         ++version_;
@@ -571,29 +646,12 @@ auto UiRoot::dispatch_to(Element& element, Event& event) -> bool {
   set_hint_target(target);
   const RenderContext context = render_context();
   Element* const previous = hovered_;   // 旧目标：尾部要给它标脏（见那里的说明）
-  if (hovered_ != nullptr) {
-    hovered_->set_hovered(false);
-    Event event;
-    event.kind = EventKind::HoverOut;
-    hovered_->notify_hover(false);  // 回调与事件并行：局部逻辑不必自己去解析事件流
-    (void)dispatch_to(*hovered_, event);
-  }
   hovered_ = target;
-  if (hovered_ != nullptr) {
-    hovered_->set_hovered(true);
-    Event event;
-    event.kind = EventKind::HoverIn;
-    hovered_->notify_hover(true);
-    (void)dispatch_to(*hovered_, event);
-  }
-  // ⚠ **新旧目标都要标脏**。
+  // 悬浮通知（事件/回调/set_hovered）已由链分发统一发出，这里只管重绘账
+  //（新旧目标都要标脏——漏掉旧目标会留下"卡住的悬浮高亮"，实测踩过）。
   //
-  // 漏掉旧目标会留下"卡住的悬浮高亮"：它的 `hover_t_` 还停在 1.0，而悬浮过渡是在
-  // `paint` 里推进的——不重绘就永远停在悬浮外观上。现象是侧栏出现**两个**"选中项"
-  // （一个真选中、一个卡住的悬浮），看起来像"导航自己在变来变去"。实测踩过。
-  //
-  // 只标**两个元素本身**：`mark_dirty()` 内部会把脏标记冒泡到全部祖先（不必逐个链上
-  // 调用）；而逐个链上调用会把**根元素**也记进损坏区——根=整窗口，增量重绘直接
+  // 只标**元素本身**：`mark_dirty()` 内部会把脏标记冒泡到全部祖先；
+  // 逐个链上调用会把**根元素**也记进损坏区——根=整窗口，增量重绘直接
   // 退化成每帧整帧（实测踩过：悬停一次，全帧重画）。
   if (previous != nullptr) previous->mark_dirty();
   if (target != nullptr) target->mark_dirty();
@@ -931,10 +989,28 @@ auto UiRoot::refresh_cursor(math::Point point) -> void {
     }
   }
   // 没有命中任何元素（点在窗口空白处）时保持 Arrow——上面的初值就是它。
+  apply_cursor(wanted);
+}
+
+void UiRoot::apply_cursor(MouseCursor wanted) {
+  // 只在**变化时**才调后端（分离出本函数的理由：清理路径（WindowLeave/失活/
+  // 浮层变化）也要复位光标，而它们没有“指针位置”可解析——直接给目标值）。
   if (wanted == cursor_) return;
   cursor_ = wanted;
   // 后端可能为空（测试里 UiRoot 单独使用）；空实现的后端在这里什么也不做。
   if (cursor_sink) cursor_sink(cursor_);
+}
+
+void UiRoot::revalidate_pointer_state() {
+  // 指针不在窗口内：没有可信坐标，重算无意义（等后端的新 MouseMove 重建）。
+  if (!has_pointer_) return;
+  // 先跑布局：本函数常在“浮层刚弹/内容刚换”的同一帧被调，那时刻几何还是旧的——
+  // 布局是幂等的（不脏直接返回），真有变更时它就是“把新几何算出来”的那一步。
+  layout();
+  // 与 MouseMove 分支同一条路径：命中 → 悬浮切换（含 HoverIn/Out 回调）→ 光标解析。
+  Element* target = hit_test_pointer_move(last_pointer_);
+  update_hover(target);
+  refresh_cursor(last_pointer_);
 }
 
 auto UiRoot::dispatch(Event& event) -> bool {
@@ -971,10 +1047,20 @@ auto UiRoot::dispatch(Event& event) -> bool {
         // 拖拽中光标**锁住不动**：拉分隔线时指针很容易跑出那条 12px 的手柄，
         // 若每帧重新解析，光标会在 Resize 与 Arrow 之间抳动——用户正在拖的东西
         // 看起来“丢了”。这是原生拖拽的惯例（拖到哪都是拖拽光标）。
+        //
+        // 但**位置仍要记**：`last_pointer_` 是“指针现在在哪”的客观事实（与 hover/
+        // 光标要不要锁无关）——MouseUp 的重算（见那处）靠它才能把悬浮落到**松手
+        // 位置**上。不记的话重算会用拖拽前的旧位置（实测：拖到另一按钮上松手，
+        // 悬浮仍留在拖拽起点）。hover/光标锁定的语义由“不走 update_hover/
+        // refresh_cursor”保证，与记位置不冲突。
+        last_pointer_ = event.position;
+        has_pointer_ = true;
         handled = dispatch_to(*pressed_, event);
         break;
       }
       // 光标解析放在**命中之前**（它只看位置、不改任何状态，先算不影响派发）。
+      last_pointer_ = event.position;   // 记住“指针现在在哪”：后续无需鼠标也能重算
+      has_pointer_ = true;              // （窗口重新激活/浮层变化/拖拽结束时用）
       refresh_cursor(event.position);
       // 指针移动走**移动专用命中**：屏障类元素只拦点击、放行移动，
       // 否则宿主（菜单栏/工具栏）收不到 hover（实测：面板开着时菜单栏无法悬停切换）。
@@ -1038,6 +1124,12 @@ auto UiRoot::dispatch(Event& event) -> bool {
       } else {
         handled = target != nullptr && dispatch_to(*target, event);
       }
+      // **松手后立即重算悬浮/光标**：拖拽期间 MouseMove 走 `pressed_` 锁定分支，
+      // hover 与光标一直停在拖拽开始时的状态；拖拽往往伴随界面变化（面板尺寸变了、
+      // 列表滚动过、拖出的元素自己消失了），不重算的话它们停在旧命中上。
+      //（这里几何未变也能算——`layout()` 幂等；真正的重排在下帧帧首也无妨，
+      // 那时 `pointer_state_dirty_` 还会再补一次。）
+      revalidate_pointer_state();
       break;
     }
     case EventKind::Click:
@@ -1135,6 +1227,25 @@ auto UiRoot::dispatch(Event& event) -> bool {
       handled = focused_ != nullptr && dispatch_to(*focused_, event);
       break;
     }
+    case EventKind::WindowLeave: {
+      // **窗口级指针离开**（滑出客户区/窗口失活——非元素级事件，不派发给元素）。
+      //
+      // 三件事必须一次做全：
+      // ① 清 hover：出窗后不再有 MouseMove，不清的话高亮与手型光标会卡在
+      //    最后命中的元素上（HoverOut 照发给旧目标——它要收自己的悬浮视觉）；
+      // ② 光标复位 Arrow：指针已不在我们的窗口里，语义光标失去意义；
+      // ③ 丢掉合并器里挂着的移动：那些移动发生在出窗之前，若帧末照常 flush，
+      //    会用旧位置重建 hover——把刚清掉的残留又带回来。
+      //
+      // 最后指针位置也一并失效（`has_pointer_` 置假）：指针在窗外，那个坐标
+      // 不再代表“现在在哪”，重新激活时由后端合成的新 MouseMove 重新建立。
+      moves_.reset();
+      has_pointer_ = false;
+      apply_cursor(MouseCursor::Arrow);
+      update_hover(nullptr);
+      handled = true;
+      break;
+    }
     case EventKind::FocusIn:
     case EventKind::FocusOut:
     case EventKind::HoverIn:
@@ -1206,7 +1317,7 @@ auto UiRoot::query(const Selector& selector, std::size_t limit) -> std::vector<E
 
 void UiRoot::prune_stale_pointers() {
   if (focused_ == nullptr && hovered_ == nullptr && pressed_ == nullptr &&
-      hint_target_ == nullptr && hint_bubble_raw_ == nullptr) {
+      hint_target_ == nullptr && hint_bubble_raw_ == nullptr && hover_chain_.empty()) {
     return;
   }
   // 只做指针相等比较：候选指针可能已指向销毁的元素，**绝不能解引用**
@@ -1228,6 +1339,10 @@ void UiRoot::prune_stale_pointers() {
   if (!on_tree(focused_)) focused_ = nullptr;
   if (!on_tree(hovered_)) hovered_ = nullptr;
   if (!on_tree(pressed_)) pressed_ = nullptr;
+  // 悬浮链同治：链上的元素可能已被重建（声明式每帧重组），悬垂的不光不能
+  // 解引用——还必须在下一次链比较前摘掉，否则新链里的同位新实例会被误判为
+  // "新进入"（发重复 HoverIn）而旧实例的 HoverOut 永远发不出去。
+  std::erase_if(hover_chain_, [&on_tree](Element* node) { return !on_tree(node); });
   // 提示的两个观察者：目标（在内容树）与气泡（在叠加层——上面的 `on_tree`
   // 也遍历 `overlays_`，所以同一条判据能用）。气泡被外部摘掉（`clear_overlays`）
   // 之后不能继续用，否则下一帧 `set_active` 就是 use-after-free。
@@ -1512,6 +1627,14 @@ auto UiRoot::paint_frame(raster::Surface& canvas) -> bool {
   collect_tree_damage();
   // 2) 必要时重排；真跑了重排 → 保守整帧（见 `layout` 尾部说明）。
   layout();
+  // 2.5) 指针态重算（浮层增删/内容替换置位）：布局已出新几何，此刻按最后指针
+  //      位置重算悬浮/光标才准。放这里而不是事件路径里——那些时刻几何还是旧的。
+  //      重算产生的 mark_dirty 会进**下一帧**的损坏区（本帧已收集完），恰好：
+  //      悬浮过渡本来就是逐帧动画，多一帧不产生观感差异。
+  if (pointer_state_dirty_) {
+    pointer_state_dirty_ = false;
+    revalidate_pointer_state();
+  }
   // 3) 快照并消费本次帧的损坏区（绘制期间新记录的走元素，留给下一帧）。
   const math::Rect damage = pending_damage_;
   const bool full_flag = pending_full_;
@@ -1609,7 +1732,10 @@ void UiRoot::add_overlay(std::unique_ptr<Element> overlay, OverlayLayout layout)
   wire_owner(*overlay);
   assign_ids(*overlay, std::format("overlay[{}]", overlays_.size()));
   overlays_.push_back(std::move(overlay));
-  overlay_layouts_.push_back(layout);  mark_dirty_all();
+  overlay_layouts_.push_back(layout);
+  // 浮层改变了命中链（遮罩接管/浮层接替）：指针没动但悬浮/光标可能已错——
+  // 下一帧布局后按最后指针位置重算（见 `revalidate_pointer_state`）。
+  pointer_state_dirty_ = true;  mark_dirty_all();
 }
 
 auto UiRoot::overlay_at(std::size_t index) const noexcept -> Element* {
@@ -1672,6 +1798,9 @@ void UiRoot::remove_overlay(Element* overlay) {
         overlay_layouts_.erase(overlay_layouts_.begin() +
                                static_cast<std::ptrdiff_t>(index));
       }
+      // 面板收起后它遮住的区域重新可命中：悬浮/光标要回到下面的元素上
+      //（对话框里点「确定」后指针仍停在原处——旧 hover 停在已摘除的浮层上）。
+      pointer_state_dirty_ = true;
       mark_dirty_all();
       return;
     }
@@ -1685,6 +1814,11 @@ void UiRoot::reap_overlays() {
 void UiRoot::clear_overlays() {
   overlays_.clear();
   overlay_layouts_.clear();
+  // 链上可能挂着浮层元素（面板内悬浮时）：对象即将销毁，不发 HoverOut，
+  // 直接摘链（只留内容树上的元素）；下一次 revalidate（pointer_state_dirty_
+  // 已置）按新命中重建。
+  std::erase_if(hover_chain_, [this](Element* node) { return node != content_.get(); });
+  pointer_state_dirty_ = true;   // 同 remove_overlay：命中链变了，悬浮/光标要重算
   mark_dirty_all();
 }
 

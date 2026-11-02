@@ -268,6 +268,10 @@ auto MenuPanel::on_event(const RenderContext& context, Event& event) -> bool {
       if (index != kNoIndex && !items_[index].separator) set_highlighted(index);
       return true;  // 面板内悬停跟踪
     }
+    // 悬浮链离开通知（2026-11-02）**有意不清** `highlighted_`：它是键盘导航
+    // （↑↓/Enter）与鼠标悬停共用的"当前项"状态——键盘选中的项在鼠标掠过再
+    // 离开面板后必须仍高亮（否则 Enter 不知道会激活哪项）。面板本身是模态
+    // 浮层：失焦/外点即关，不存在"高亮残留到下一次打开"的窗口。
     case EventKind::Click:
     case EventKind::MouseDown: {
       const std::size_t index = item_at_point(event.position);
@@ -535,6 +539,16 @@ auto MenuBar::on_event(const RenderContext& context, Event& event) -> bool {
       }
       return false;
     }
+    case EventKind::HoverOut:
+      // 悬浮链离开通知（UiRoot 按链分发，2026-11-02）：指针移出菜单栏/出窗/
+      // 失活时清标题高亮。旧实现只靠 MouseMove 更新 hover_index_，但本组件
+      // 只在自己被命中时才收到 move——指针移进编辑器后最后一条 hover 的高亮
+      // 就永远留在那（gbcode 实测：菜单栏悬浮残留）。
+      if (hover_index_ != -1) {
+        hover_index_ = -1;
+        mark_dirty();
+      }
+      return false;
     case EventKind::MouseDown: {
       // 只做“按下”视觉态与命中标记：**打开面板的动作留给 Click**。
       //

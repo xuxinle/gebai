@@ -4885,7 +4885,72 @@ class Compositor {                                  // UI 图层 → GPU 合成
 **预留的宽度按 `Icon::ink_size()`（实际墨迹宽）而不是盒径**——盒里有透明留白
 （见 §5.0.4 ③）。
 
-### 5.0.2 单行文本的垂直居中（一份口径）
+### 5.0.2 指针态的生命周期（窗口级，2026-11-02 补齐）
+
+悬浮/光标除了"随鼠标移动而变"，还有一组**指针不动也必须变**的时刻。
+统一由 `UiRoot` 记账：`last_pointer_`（最近一次 MouseMove 的位置）+
+`has_pointer_`（该坐标是否仍可信）+ `pointer_state_dirty_`（命中链变了、
+下一帧帧首重算）。
+
+| 时刻 | 事件 | 行为 | 后端来源 |
+|---|---|---|---|
+| 指针滑出窗口 | `WindowLeave` | 清 hover（元素照收 HoverOut）、光标回 Arrow、**丢弃合并中的移动**、`has_pointer_` 置假 | Win32 `WM_MOUSELEAVE`（`TrackMouseEvent`）；X11 `LeaveNotify`；Wayland `pointer_leave` |
+| 窗口失活（Alt+Tab/点别的程序/最小化） | `WindowLeave`（同上） | 同上——否则切回来时高亮残影 | Win32 `WM_ACTIVATE`(WA_INACTIVE) |
+| 窗口重新激活（无点击） | 合成 MouseMove（`GetCursorPos` 换算） | 走正常解析链：悬浮/光标立刻跟上真实位置——治"切前台但没点击过指针无变化" | Win32 `WM_ACTIVATE`(WA_ACTIVE/WA_CLICKACTIVE) |
+| 拖拽结束（MouseUp） | 帧内 `revalidate_pointer_state()` | 按松手位置重算 hover/光标（拖拽期间两路径被锁定） | UiRoot 内部 |
+| 浮层增删/内容替换 | `pointer_state_dirty_` → 下一帧帧首重算 | 指针没动但命中链变了：悬浮/光标落到新命中上 | UiRoot 内部 |
+
+要点：
+- **`WindowLeave` 是窗口级事件，不派发给元素**（与元素级 `HoverIn/HoverOut` 分层：
+  后者由 UiRoot 在命中切换时发，元素不知道也不需要知道"指针出窗"与"移出我"的区别）；
+- **拖拽中的 move 也记 `last_pointer_`**（但不动 hover/光标——那是拖拽锁定语义）；
+  否则松手重算用的是拖拽前的旧位置（实测：拖到另一按钮上松手，悬浮留在起点）；
+- 重算统一走 `revalidate_pointer_state()`：先 `layout()`（几何可能刚变）再命中——
+  叠加层刚 add 时布局还没跑，直接命中算的是旧几何；
+- 标题栏按钮级悬浮（`hovered_button`/`hovered_caption`）在最小化/关闭动作后一并复位
+  （窗口即将不可见，恢复回来时不该带旧高亮）；两者暴露为只读属性供自动化断言。
+
+#### 5.0.2.1 悬浮链（hover chain）：离开通知的真值源
+
+上表的四类时刻都要做同一件事——**告诉元素「指针不在你身上了」**。这件事有
+一个结构性的坑：**通知面与重绘账不是同一件事**。
+2026-10-29 的性能优化把「跟踪」收紧到只跟**有视觉反馈**的元素（`hover_effect`
+或回调），但旧实现把**离开通知**也绑在这份跟踪上（只给 `hovered_` 发 HoverOut）。
+后果：
+
+- 一批组件是**自持位置悬浮**——MenuBar 标题、TitleBar 按钮、Table 行、
+  MenuPanel 项、CompletionPopup 行。它们命中时整条链上没有任何被跟踪元素，
+  **永远收不到 HoverOut**；
+- 更隐蔽的是**跳区移动**：`MenuBar::on_event` 只有自己被命中时才收到 MouseMove，
+  指针从菜单标题移进编辑器时它看不到那条 move ——`hover_index_` 就冻结在那里
+  （gbcode 实测：菜单栏悬浮残留）；
+- 有的组件写了 HoverOut 清理（Tabs/tree/theme_picker）却因不在派发路径上成了
+  **死代码**。
+
+**修法：悬浮链模型**（DOM 的 mouseenter/mouseleave 同款）。`UiRoot::hover_chain_`
+记录「指针所在位置的元素链」——命中元素沿 `parent` 到根；每次 hover 目标变化
+（含出窗/revalidate/MouseUp）都对**离开链**的元素逐一发 HoverOut、**进入链**的发
+HoverIn。三个约束：
+
+1. **直达不冒泡**：每个链上元素恰好收一份（`dispatch_to` 会沿 parent 回溯，用它
+   就会重复通知——实测 `CountingPanel` 出窗收到两次 HoverOut）；事件观察者
+   （脚本桥/状态栏/埋点）挂在同一条出口上，可见性与既有路径一致；
+2. **通知面与重绘账解耦**：链分发负责「告诉谁」，`hovered_` 继续只跟视觉反馈
+   元素（性能门控原样保留）；链上 `mark_dirty` **也只给有视觉反馈的**——否则
+   根容器入链就是每帧整帧（2026-10-29 实测的坑）；
+3. **链与 `hovered_` 各自正交**：`hover_chain_` 在 `hovered_ == target` 的早退
+   **之前**更新（两个非跟踪元素之间切换时 `hovered_` 根本不变，但链变了）。
+
+新组件只需在自己的 `on_event` 里处理 `HoverOut`（清自持的 `hover_index_` /
+`hovered_row_` 等），出窗/失活/跨区/浮层接管**自动正确**——不必各自去猜
+什么时刻该清。悬浮态的读回面（`hovered_button`/`hovered_caption`/
+`hovered_row`/`MenuBar::hover_index()`）供自动化断言「高亮真的清了」。
+
+⚠ **键盘态不是鼠标态**：`MenuPanel::highlighted_` 与 `CompletionPopup::selected_`
+是键盘导航与鼠标悬停共用的"当前项"——它们的 HoverOut **有意不清**（键盘选中的
+项在鼠标掠过后必须仍高亮，否则 Enter 不知道会激活哪项）。悬浮链只管鼠标侧。
+
+### 5.0.3 单行文本的垂直居中（一份口径）
 
 把一行字放进一个盒子时，**对齐的是墨迹，不是行盒**。全仓唯一公式：
 `st::ui::centered_line_top`（`include/st/ui/text_port.hpp`）。

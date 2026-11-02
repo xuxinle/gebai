@@ -375,6 +375,14 @@ auto CompletionPopup::on_event(const RenderContext& context, Event& event) -> bo
       }
       return true;
     }
+    case EventKind::HoverOut:
+      // 悬浮链离开通知（UiRoot 按链分发，2026-11-02）：面板失去指针（出窗/失活/
+      // 移回编辑器）时清行高亮。键盘选中的 `selected_` 不动——那是另一套状态。
+      if (hover_row_ != -1) {
+        hover_row_ = -1;
+        mark_dirty();
+      }
+      return false;
     case EventKind::MouseDown:
     case EventKind::Click: {
       if (!bounds_.contains(event.position)) {

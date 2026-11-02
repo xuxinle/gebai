@@ -463,6 +463,7 @@ class WaylandBackend final : public Backend {
   void on_keyboard_modifiers(std::uint32_t depressed, std::uint32_t latched,
                              std::uint32_t locked, std::uint32_t group);
   void on_pointer_enter(std::uint32_t serial, std::int32_t sx, std::int32_t sy);
+  void on_pointer_leave();
   void on_pointer_motion(std::int32_t sx, std::int32_t sy);
   void on_pointer_button(std::uint32_t serial, std::uint32_t button, std::uint32_t state);
   void on_pointer_axis(std::uint32_t axis, std::int32_t value);
@@ -768,8 +769,10 @@ void pointer_enter(void* data, void* /*proxy*/, std::uint32_t serial, void* /*su
                    std::int32_t sx, std::int32_t sy) {
   self_of<WaylandBackend>(data).on_pointer_enter(serial, sx, sy);
 }
-void pointer_leave(void* /*data*/, void* /*proxy*/, std::uint32_t /*serial*/,
-                   void* /*surface*/) {}
+void pointer_leave(void* data, void* /*proxy*/, std::uint32_t /*serial*/,
+                   void* /*surface*/) {
+  self_of<WaylandBackend>(data).on_pointer_leave();
+}
 void pointer_motion(void* data, void* /*proxy*/, std::uint32_t /*time*/, std::int32_t sx,
                     std::int32_t sy) {
   self_of<WaylandBackend>(data).on_pointer_motion(sx, sy);
@@ -1675,6 +1678,16 @@ void WaylandBackend::on_pointer_enter(std::uint32_t serial, std::int32_t sx, std
   event.kind = ui::EventKind::HoverIn;
   event.position = to_logical(sx, sy);
   apply_modifiers(event);
+  events_.push_back(std::move(event));
+}
+
+void WaylandBackend::on_pointer_leave() {
+  // **窗口级**指针离开：发 WindowLeave（UiRoot 清 hover/光标/合并移动）。
+  // 旧实现这里是空的——Wayland 下指针滑出后悬浮与光标永久卡在最后命中的元素上。
+  // （`pointer_inside_` 是合成器光标协议的输入侧状态，与本事件互不替代。）
+  pointer_inside_ = false;
+  ui::Event event;
+  event.kind = ui::EventKind::WindowLeave;
   events_.push_back(std::move(event));
 }
 

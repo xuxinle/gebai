@@ -36,8 +36,9 @@ auto GlyphAtlas::place(std::uint64_t key, int w, int h,
 
   // ③ 写入像素
   const int row_bytes = packer_.canvas_width() * 4;
-  std::uint8_t* base = pixels_.data() + static_cast<std::size_t>(region->y) * row_bytes +
-                       static_cast<std::size_t>(region->x) * 4U;
+  std::uint8_t* base = pixels_.data() + static_cast<std::size_t>(region->y) *
+                                       static_cast<std::size_t>(row_bytes) +
+                           static_cast<std::size_t>(region->x) * 4U;
   if (write) write(base, row_bytes);
 
   entries_.emplace(key, *region);
@@ -75,12 +76,14 @@ auto GlyphAtlas::grow() -> bool {
     const auto region = packer_.allocate(item.old.width, item.old.height);
     if (!region.has_value()) continue;   // 理论上不会（画布只会变大），保险
     for (int row = 0; row < item.old.height; ++row) {
-      const std::uint8_t* source = previous.data() +
-                                   static_cast<std::size_t>(item.old.y + row) * previous_row_bytes +
+            const std::uint8_t* source = previous.data() +
+                                   static_cast<std::size_t>(item.old.y + row) *
+                                       static_cast<std::size_t>(previous_row_bytes) +
                                    static_cast<std::size_t>(item.old.x) * 4U;
       std::uint8_t* destination =
-          pixels_.data() + static_cast<std::size_t>(region->y + row) * row_bytes +
-          static_cast<std::size_t>(region->x) * 4U;
+          pixels_.data() + static_cast<std::size_t>(region->y + row) *
+                               static_cast<std::size_t>(row_bytes) +
+                           static_cast<std::size_t>(region->x) * 4U;
       std::memcpy(destination, source, static_cast<std::size_t>(item.old.width) * 4U);
     }
     entries_.emplace(item.key, *region);

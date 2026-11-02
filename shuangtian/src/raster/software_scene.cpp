@@ -1368,7 +1368,8 @@ class SoftwareScene final : public Scene3D {
         std::uint32_t b = 0;
         std::uint32_t a = 0;
         for (int sy = 0; sy < kBake; ++sy) {
-          const std::size_t row = static_cast<std::size_t>(y) * kBake + sy;
+          const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(kBake) +
+                                   static_cast<std::size_t>(sy);
           const std::size_t base = row * static_cast<std::size_t>(bake_width) +
                                    static_cast<std::size_t>(x) * kBake;
           for (int sx = 0; sx < kBake; ++sx) {

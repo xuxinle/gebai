@@ -105,6 +105,15 @@ class UiRoot : public Element::HostFocus {
     if (event_observer_) event_observer_(event, target);
   }
 
+  /// 用最后已知的指针位置重算悬浮态与光标（指针没动、命中结果已变的场合）。
+  ///
+  /// 何时需要：拖拽结束（拖拽期间 hover/光标被锁定）、浮层增删/内容替换
+  /// （命中链变了）、窗口重新激活（后端会补发合成 MouseMove，但无头/测试
+  /// 环境直接调它更直接）。指针不在窗口内（出窗/失活）时是空操作。
+  ///
+  /// 内部：先跑 `layout()`（几何可能是刚改过的）再命中——否则算的是旧几何。
+  void revalidate_pointer_state();
+
   [[nodiscard]] auto find(std::string_view id) -> Element*;
   [[nodiscard]] auto query(const Selector& selector, std::size_t limit = 0) -> std::vector<Element*>;
   [[nodiscard]] auto hit_test(math::Point point) -> Element*;
@@ -379,6 +388,11 @@ class UiRoot : public Element::HostFocus {
   [[nodiscard]] auto tree_layout_dirty() const noexcept -> bool;
 
   void refresh_cursor(math::Point point);
+  /// 直接把光标置为给定形态（只在变化时下发后端）。
+  ///
+  /// 与 `refresh_cursor` 的分工：那边“按位置解析”，这边“给定目标值”——
+  /// 清理路径（WindowLeave/失活）没有位置可解析，只需要复位 Arrow。
+  void apply_cursor(MouseCursor cursor);
   /// 当前生效的指针形态（控制通道只读属性 / 测试断言 / 拖拽锁定判断）。
   [[nodiscard]] auto cursor() const noexcept -> MouseCursor { return cursor_; }
   /// 指针变化时的出口（宿主注入为 `Backend::set_cursor` 的转发）。
@@ -423,6 +437,10 @@ class UiRoot : public Element::HostFocus {
   /// 置空而不是继续持有（继续持有的话，下一次解引用就是未定义行为）。
   void prune_stale_pointers();
   void collect_focus_order(Element& element, std::vector<Element*>& order);
+  /// 悬浮链分发（见 DESIGN.md §5.0.2「悬浮链」）：对离开旧链/进入新链的元素
+  /// 逐一发 HoverOut/HoverIn。**直达、不冒泡**（祖先后代各收各的，不重复）。
+  void send_hover_chain_events(const std::vector<Element*>& leaving,
+                               const std::vector<Element*>& entering);
   void update_hover(Element* target);
 
   /// 浮层键盘下钻：深度优先（后声明者优先）找**第一个能处理**该键的节点，
@@ -524,9 +542,37 @@ class UiRoot : public Element::HostFocus {
   /// 既有回归（滑块/开关/下拉/标签…）全部变红，也会让离屏/测试渲染的观感改变。
   bool focus_ring_visible_{true};
   Element* hovered_{nullptr};
+  /// 指针所在位置的元素链（命中元素沿 parent 到根）——悬浮态的**真值源**。
+  ///
+  /// 为何要链而不是只有 `hovered_`：一批组件是「自持位置悬浮」（MenuBar 标题
+  /// 高亮、TitleBar 按钮、Table 行……命中它们的子区域时链上没有任何被跟踪
+  /// 元素），离开通知若只发给被跟踪者，它们永远收不到 HoverOut——出窗、
+  /// 失活、甚至只是移到隔壁区域，高亮就残留（gbcode 菜单栏实测）。
+  /// 链模型下「谁在指针下面」是 UiRoot 的账，组件只听通知（DOM 的
+  /// mouseenter/mouseleave 同款语义）。
+  ///
+  /// 与 `hovered_`（视觉跟踪，有门控）分工：链负责**通知面**（所有链上元素），
+  /// `hovered_` 负责**重绘账**（只跟有视觉反馈的，性能优化 2026-10-29 原样保留）。
+  std::vector<Element*> hover_chain_{};
   Element* pressed_{nullptr};
   /// 当前生效的指针形态（上次下发给后端的值）。
   MouseCursor cursor_{MouseCursor::Arrow};
+  /// 最近一次 MouseMove 的位置与它是否仍有效。
+  ///
+  /// 为何要记：悬浮/光标平时只随鼠标事件重算，但有三类时刻**指针不动而命中
+  /// 结果已变**——重新激活（浮层被系统动画短暂遮挡后回来）、浮层增删（对话框
+  /// 弹出/收起改变了命中链）、拖拽结束（拖拽期间 hover 被锁定）。这些时刻
+  /// 用它重算，才能让悬浮态与光标跟上界面实际状态。
+  ///
+  /// `has_pointer_ == false` 表示指针不在窗口内（出窗/失活时置假）：那时坐标
+  /// 不代表“现在在哪”，重算没有意义，等后端合成的新 MouseMove 重建。
+  math::Point last_pointer_{};
+  bool has_pointer_{false};
+  /// 指针态需要重算（浮层增删/内容替换置位；下一帧布局后消费）。
+  ///
+  /// 为何不在置位处直接算：叠加层刚 add 时布局还没跑，命中算出来的是旧几何；
+  /// 挂到帧首（`layout()` 之后）才算，语义才是“按新几何重算”。
+  bool pointer_state_dirty_{false};
   /// 本次按下时的指针位置（与 `pressed_` 同生命周期）。
   ///
   /// 用途：区分「点击」与「拖动后的释放」——后端在 `LBUTTONUP` 后无条件补发 `Click`

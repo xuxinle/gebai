@@ -1914,7 +1914,7 @@ class GpuCanvas final : public Surface {
           std::lround(std::max(0.0f, std::min(1.0f, value)) * 255.0f));
     };
     for (int row = 0; row < height; ++row) {
-      std::uint8_t* line = dst + static_cast<std::size_t>(row) * row_bytes;
+      std::uint8_t* line = dst + static_cast<std::size_t>(row) * static_cast<std::size_t>(row_bytes);
       const std::size_t base = static_cast<std::size_t>(row) * static_cast<std::size_t>(width);
       for (int column = 0; column < width; ++column) {
         if (lcd) {
@@ -4699,8 +4699,6 @@ class GpuScene3d final : public st::raster::Scene3D {
   ID3D11Query* query_{nullptr};   ///< `flush()` 用的完成查询（复用以避免每帧建对象）
   std::vector<std::uint32_t> readback_{};
   std::vector<CacheEntry> cache_{};
-  /// 本网格是否正在采样纹理。
-  bool use_texture_{false};
   ID3D11Texture2D* texture_{nullptr};
   ID3D11ShaderResourceView* texture_view_{nullptr};
   st::raster::Lighting lighting_{};
