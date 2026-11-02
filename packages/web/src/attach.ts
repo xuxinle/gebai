@@ -66,6 +66,9 @@ export async function verifyConnection(): Promise<void> {
   verifying = true
   try {
     const r = await client.verify()
+    // 运行态明细不用在这里回写：verify 内部的 requestSnapshot 会走 applySnapshot →
+    // snapshotHandlers，main.ts 的 onSnapshot 已在那个回调里调 setRuntimeInfo——
+    // 自检因此天然把最新的 runtime 带到会话列表角标，不额外多一次往返。
     // 运行态以服务端为准收敛：本页在等但服务端已没在跑的会话，逐个收尾并补齐正文
     const stale = [...runs.keys()].filter((id) => !r.running.includes(id))
     for (const sid of stale) {

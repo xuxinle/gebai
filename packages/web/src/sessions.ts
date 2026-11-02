@@ -639,11 +639,21 @@ let runtimeInfo: Record<string, RuntimeSessionInfo> = {}
 /** 本页由事件得知的运行中会话（快照之外的增量修正）：后台任务启动/结束无需等下一次快照即可反映。 */
 const runningSeen = new Set<string>()
 
-/** 应用快照运行态（重连/登录/建连时到达）：以服务端为准收敛本地标记（断线期间的事件可能没收到）。 */
+/** 应用快照运行态（建连/登录/重连、以及周期自检时到达）：**以服务端为准整体重建本地标记**。
+ *
+ * 重建而不是合并：「哪些会话在跑」的唯一事实源是服务端的 `runtimeOf`（它遍历引擎的在跑任务，
+ * 后台任务/飞书桥接/定时任务/其他标签页发起的运行都在里面）。合并本地旧集合的话，离线期间结束的
+ * 任务没人发 `task.done`，标记就永远赖着不走（典型现象：会话早结束了，列表上一直显示在跑）。
+ *
+ * 额外补上 `runs`（本页已接管的在途流）：它是服务端事实的**一小段时序差**——刚发出 prompt、引擎
+ * 尚未登记的那一瞬间，快照可能还看不到它；下一拍快照就会包含（事件与快照同源）。不补这一项，
+ * 发送后的第一拍自检会把刚亮起的角标抹掉再下一拍又亮回来。
+ */
 export function setRuntimeInfo(rt: Record<string, RuntimeSessionInfo>): void {
   runtimeInfo = rt
   runningSeen.clear()
   for (const id of Object.keys(rt)) runningSeen.add(id)
+  for (const id of runs.keys()) runningSeen.add(id)
 }
 
 /** 事件驱动的运行态增量修正（event.task.start/done/error）：列表角标据此即时变化。 */

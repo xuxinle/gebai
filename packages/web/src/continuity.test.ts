@@ -81,6 +81,18 @@ describe("运行态可见性与列表角标", () => {
     expect(s).toContain("runMarkOf(s.id, waiting)") // 运行态变化触发列表重建（待决卡整批传入）
   })
 
+  test("快照 runtime 以服务端为准重建（离线期间结束的任务不得赖着不走）", () => {
+    const s = src("sessions.ts")
+    const at = s.indexOf("export function setRuntimeInfo")
+    const body = s.slice(at, s.indexOf("export function markSessionRunning", at))
+    // 先清后填：只有整体重建才能让“服务端已没在跑”的会话从角标上消失。
+    // 若改成合并，离线期间结束的任务没有 task.done 可收，标记会永久残留。
+    expect(body).toContain("runningSeen.clear()")
+    // 本页已接管的在途流要补上：它是服务端事实的时序差（刚发 prompt 时引擎可能尚未登记），
+    // 不补的话发送后的第一拍自检会把刚亮起的角标抹掉
+    expect(body).toContain("for (const id of runs.keys()) runningSeen.add(id)")
+  })
+
   test("任务开始/结束事件即时收敛角标（不必等下一次快照）", () => {
     const s = src("main.ts")
     expect(s).toContain("markSessionRunning(ev.sessionId, true)")

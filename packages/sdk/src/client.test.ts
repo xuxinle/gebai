@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { createServer, type Socket } from "node:net"
 import { GebaiClient, resolveWsUrl, wsEventToChunk } from "./client"
+import type { RuntimeSessionInfo } from "./types"
 
 describe("resolveWsUrl", () => {
   test("explicit baseUrl produces absolute ws/wss URL", () => {
@@ -802,6 +803,44 @@ describe("GebaiClient state snapshot (MVC model)", () => {
       expect(snap.running).toEqual(["s1"])
       expect(snap.sessions.some((s) => s.id === "s1")).toBe(true)
       expect(snap.lastSeq).toBe(5)
+    } finally {
+      srv.stop(true)
+    }
+  })
+
+  test("state.snapshot 携带 runtime 运行态明细：前端模型不得丢该字段（会话列表角标的唯一事实源）", async () => {
+    // 服务端 `buildSnapshot` 把 running 与 runtime 同源产出（runtime 的键集即 running），
+    // 前端据 runtime 才能标出“哪个会话在跑/在等谁”。SDK 若在重建快照模型时把它丢掉，
+    // 消费方拿到的永远是空对象——角标就只能靠本地事件猜，与“服务端为事实源”的约定相背。
+    const runtime: Record<string, RuntimeSessionInfo> = {
+      s1: { startedAt: 1000, pending: [{ type: "approval", toolCallId: "t1", tool: "sh", retries: 0 }], toolCalls: 2, bgTasks: [{ id: "b1", status: "running", detail: "x" }], subRuns: [] },
+    }
+    const srv = Bun.serve({
+      port: 0,
+      fetch(req, server) {
+        if (server.upgrade(req)) return
+        return new Response("upgrade failed", { status: 500 })
+      },
+      websocket: {
+        open(ws) {
+          ws.send(JSON.stringify({ type: "state.snapshot", payload: { currentSessionId: "s1", sessions: [], running: ["s1"], lastSeq: 1, runtime } }))
+        },
+        message() {},
+      },
+    })
+    try {
+      const c = new GebaiClient({ baseUrl: `http://127.0.0.1:${srv.port}` })
+      const seen: Array<Record<string, unknown> | undefined> = []
+      c.onSnapshot((s) => seen.push(s.runtime as unknown as Record<string, unknown> | undefined))
+      await c.connect()
+      await new Promise((r) => setTimeout(r, 100))
+      expect(seen.at(-1)).toEqual(runtime)
+      expect(c.getSnapshot().runtime).toEqual(runtime)
+      // 新快照不携带 runtime 时不得残留旧值（键集与 running 同源：没在跑就是空）
+      ;(c as unknown as { handleMessage: (m: MessageEvent) => void }).handleMessage(
+        { data: JSON.stringify({ type: "state.snapshot", payload: { currentSessionId: null, sessions: [], running: [], lastSeq: 2 } }) } as MessageEvent,
+      )
+      expect(c.getSnapshot().runtime).toEqual({})
     } finally {
       srv.stop(true)
     }

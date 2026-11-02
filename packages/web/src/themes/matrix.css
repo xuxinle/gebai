@@ -313,17 +313,9 @@
   box-shadow: 0 0 8px rgba(0, 255, 65, 0.2) inset, 0 0 8px rgba(0, 255, 65, 0.15);
 }
 [data-theme="matrix"] #session-list li.active::before { color: var(--accent); }
-[data-theme="matrix"] #session-list li.active::after {
-  content: "●";
-  position: absolute;
-  right: 8px;
-  top: 50%;
-  transform: translateY(-50%);
-  color: var(--accent);
-  text-shadow: 0 0 6px var(--accent);
-  font-size: 10px;
-  animation: matrix-blink 1.2s steps(2, start) infinite;
-}
+/* 选中态靠底色 + 边框 + 发光表达，不再在行尾另点一颗闪烁亮点：
+   行尾是运行态角标（.session-run，同样是 ● / ⌛）的位置，两个 ● 并排会让人分不清
+   「选中」与「这个会话在跑」。 */
 [data-theme="matrix"] .session-ico {
   border-radius: 0;
   background: rgba(0, 255, 65, 0.15);

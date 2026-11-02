@@ -21,6 +21,7 @@ import type {
   UserTodo,
   WebhookInfo,
   WsSnapshot,
+  RuntimeSessionInfo,
 } from "./types"
 import type { Task, TaskCreateInput, TaskFileEntry, TaskKind, TaskQueueState, TaskQueueView, TaskRunHandle, TaskRunRecord, TaskUpdateInput } from "./task-types"
 import { appPath, docLocation, resolveWsUrl } from "./app-base"
@@ -28,6 +29,23 @@ import { requestHeaders } from "./auth-contract"
 
 /** WS 地址解析（页面基准语义见 app-base）。 */
 export { resolveWsUrl }
+
+/**
+ * 快照运行态明细的归一一（推送与主动请求两条路径共用）。
+ *
+ * 一个字段只能在这里出现一次：快照是前端模型的收敛基线，哪里少重建一个字段，消费方就永远拿不到它
+ * （历史缺陷：`runtime` 在两条重建路径里都被丢掉 → 会话列表角标收不到服务端的运行态）。
+ * 未携带即 `{}`：runtime 的键集与 `running` 同源，没带着就等于“现在没有会话在跑”，不得残留上一份。
+ */
+function parseRuntime(raw: unknown): Record<string, RuntimeSessionInfo> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {}
+  const out: Record<string, RuntimeSessionInfo> = {}
+  for (const [id, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!v || typeof v !== "object") continue
+    out[id] = v as RuntimeSessionInfo
+  }
+  return out
+}
 
 export interface GebaiClientOptions {
   baseUrl: string
@@ -532,6 +550,9 @@ export class GebaiClient {
       lastSeq: Math.max(Number.isFinite(lastSeq) ? lastSeq : 0, this.lastSeq),
       // 模型上下文窗口（0=未知）：标题栏上下文占比显示用，重建快照时不得丢弃
       maxContextTokens: Number.isFinite(maxCtx) ? maxCtx : 0,
+      // 运行态明细（待决交互/在途工具/后台任务/子会话）：会话列表角标的事实源。
+      // 与 running 同源（键集即 running）——未携带即“当前没在跑”，不得残留上一份
+      runtime: parseRuntime(payload.runtime),
     }
     this.lastSeq = this.snapshot.lastSeq
     for (const h of this.snapshotHandlers) h(this.snapshot)
@@ -540,16 +561,10 @@ export class GebaiClient {
   /** 请求当前状态快照（主动收敛模型，幂等）。 */
   private requestSnapshot(): Promise<WsSnapshot> {
     return this.request<Partial<WsSnapshot>>("state.snapshot", {}).then((p) => {
-      const maxCtx = Number(p.maxContextTokens ?? 0)
-      const snap: WsSnapshot = {
-        currentSessionId: p.currentSessionId != null ? String(p.currentSessionId) : null,
-        sessions: p.sessions ?? [],
-        running: (p.running ?? []).map(String),
-        lastSeq: Number(p.lastSeq ?? 0),
-        maxContextTokens: Number.isFinite(maxCtx) ? maxCtx : 0,
-      }
-      this.applySnapshot(snap as unknown as Record<string, unknown>)
-      return snap
+      // 直接交给 applySnapshot 归一：两条快照路径（推送/主动请求）共用同一套字段处理，
+      // 不再各手写一份——分头手写就是“某个字段在一侧被丢掉”的温床
+      this.applySnapshot(p as unknown as Record<string, unknown>)
+      return this.snapshot
     })
   }
 
