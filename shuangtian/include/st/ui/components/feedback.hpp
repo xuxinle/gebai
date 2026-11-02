@@ -236,7 +236,7 @@ class Tooltip : public Element {
   void apply_theme(const Theme& theme) override;
   void measure(const RenderContext& context, const Constraints& constraints) override;
   void arrange(const RenderContext& context, math::Rect rect) override;
-  void paint(const RenderContext& context, raster::Surface& canvas) const override;
+  void paint_impl(const RenderContext& context, raster::Surface& canvas) const override;
   void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
   [[nodiscard]] auto hit_test(math::Point point) const noexcept -> bool override;
   [[nodiscard]] auto semantics_text() const -> std::string override { return text_; }

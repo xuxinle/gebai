@@ -724,9 +724,14 @@ void Tooltip::arrange(const RenderContext& context, math::Rect rect) {
   layout_dirty_ = false;
 }
 
-void Tooltip::paint(const RenderContext& context, raster::Surface& canvas) const {
+void Tooltip::paint_impl(const RenderContext& context, raster::Surface& canvas) const {
   if (!active_ && !hovered_) return;
-  Element::paint(context, canvas);
+  // ⚠ 这里必须是 `Element::paint_impl`（直接画基类内容），**不是** `Element::paint`：
+  // `paint` 会再虚派发到本函数 → 无限递归 → 栈溢出（0xC00000FD）。
+  // 实测（2026-11-02）：`ui_badge_chip_avatar` 的嵌套 Tooltip 触发，分片 4 整片崩溃；
+  // 单跑不崩只是栈余量碰巧够——加了几帧栈开销（帧剖析埋点）就过临界了。
+  // 这也说明该缺陷一直存在，只是藏在栈余量里。
+  Element::paint_impl(context, canvas);
 }
 
 auto Tooltip::hit_test(math::Point point) const noexcept -> bool {

@@ -127,7 +127,7 @@ class Toast : public Element {
   void apply_theme(const Theme& theme) override;
   void measure(const RenderContext& context, const Constraints& constraints) override;
   /// 到期推演前置到整组件绘制之前（阴影也不落盘；见实现注释）。
-  void paint(const RenderContext& context, raster::Surface& canvas) const override;
+  void paint_impl(const RenderContext& context, raster::Surface& canvas) const override;
   /// 居中定位：UiRoot 对叠加层的默认排布是顶部左对齐，轻提示习惯上居中（可被覆盖）。
   /// `OverlayLayout::FillViewport` 挂载时改为**底部居中**（习惯的 Toast 位置），
   /// 遮罩不绘制（浅层浮层不遮内容）。

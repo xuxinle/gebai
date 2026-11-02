@@ -316,7 +316,7 @@ void ScrollView::arrange(const RenderContext& context, math::Rect rect) {
   layout_dirty_ = false;
 }
 
-void ScrollView::paint(const RenderContext& context, raster::Surface& canvas) const {
+void ScrollView::paint_impl(const RenderContext& context, raster::Surface& canvas) const {
   if (!visible_) return;
   paint_box(context, canvas);
   paint_content(context, canvas);

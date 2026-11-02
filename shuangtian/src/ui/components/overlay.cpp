@@ -364,7 +364,7 @@ void Toast::arrange(const RenderContext& context, math::Rect rect) {
   Element::arrange(context, math::Rect{x, rect.y, width, rect.height});
 }
 
-void Toast::paint(const RenderContext& context, raster::Surface& canvas) const {
+void Toast::paint_impl(const RenderContext& context, raster::Surface& canvas) const {
   // —— 自动消失推演（先于一切绘制：连阴影都不落盘） ——
   // 不额外起线程/定时器：到期时刻由帧时间轴（context.time_seconds）推演，
   // 到期即置位并调 on_dismiss（宿主负责在下一帧前经 overlay_remove 摘除；
@@ -388,7 +388,9 @@ void Toast::paint(const RenderContext& context, raster::Surface& canvas) const {
       request_wake_at(dismiss_at_);
     }
   }
-  Element::paint(context, canvas);
+  // ⚠ 与 Tooltip 同源的错误：这里必须是 `Element::paint_impl`，不是 `Element::paint`
+  //（后者会虚派发回本函数 → 无限递归爆栈；见 `feedback.cpp` Tooltip 同名修复）。
+  Element::paint_impl(context, canvas);
 }
 
 void Toast::paint_content(const RenderContext& context, raster::Surface& canvas) const {
