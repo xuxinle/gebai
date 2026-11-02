@@ -277,6 +277,51 @@ export function filesPreview(sessionId: string, path: string, download = false):
   return appPath(`/api/v1/sessions/${sessionId}/files/preview?path=${encodeURIComponent(path)}${download ? "&download=1" : ""}`)
 }
 
+/**
+ * 媒体元素的缓存刷新：`<img>`/`<video>`/`<audio>` 的缓存键是 **URL**，命中同一 URL 时浏览器不回源，
+ * 也不理会响应头的 `Cache-Control`（实测：响应带 `no-store` 仍复用旧位图，重设同一个 src 也不发请求）。
+ * 于是「同名文件被改写/重渲后界面还是旧图」与 HTTP 缓存策略无关，**只有换 URL 这一条路**。
+ *
+ * 做法：`src` 同步设上（元素进 DOM 即可用，不延迟首帧），并在挂载后核一次内容标识：
+ * - 标识未变（`ETag` 相同）→ 浏览器缓存的就是最新内容，**什么都不做**（不重取、不闪）；
+ * - 标识变了 → 给元素换一个带一次性标记的 URL 重取。
+ *
+ * 标识用 ETag 而不是状态码：`fetch(…, {cache:"no-cache"})` 在 304 时会按规范**返回 200**（把缓存
+ * 副本包成新响应），状态码分不出「变了」与「没变」。用 `no-store` 拿服务端当下的 ETag 做比较才准；
+ * 取到响应头后立即取消 body，大文件不会被完整下载两遍。
+ */
+const mediaEtag = new Map<string, string>()
+export function refreshMedia(el: HTMLImageElement | HTMLVideoElement | HTMLAudioElement, url: string): void {
+  el.src = url
+  const known = mediaEtag.get(url)
+  if (known === undefined) {
+    // 首次见到：首加载本来就会回源，顺手记下当下的内容标识，供后续比较
+    void fetchEtag(url).then((tag) => {
+      if (tag) mediaEtag.set(url, tag)
+    })
+    return
+  }
+  void fetchEtag(url).then((tag) => {
+    if (!tag || tag === known) return
+    mediaEtag.set(url, tag)
+    // 内容真的变了：只能换 URL（媒体缓存不认响应头）
+    el.src = `${url}${url.includes("?") ? "&" : "?"}_t=${Date.now()}`
+  })
+}
+
+/** 取一个 URL 当下的内容标识（`ETag`）：不等 body，取到响应头即取消。失败返 null。 */
+async function fetchEtag(url: string): Promise<string | null> {
+  try {
+    const r = await fetch(url, { cache: "no-store" })
+    const tag = r.headers.get("etag")
+    // no-store 会真的把 body 下来，这里不需要：立即取消，避免大图/视频占带宽
+    if (r.body) void r.body.cancel().catch(() => {})
+    return tag
+  } catch {
+    return null
+  }
+}
+
 export const ROLE_NAME: Record<string, string> = { user: "我", assistant: "歌白", tool: "工具" }
 
 export function formatTime(ts: number): string {

@@ -5,7 +5,7 @@
  * 环境立即加载）；卡内文本渲染上限同 show 口径，超出截断引导「原文件」查看全文。
  */
 import type { ContentBlock } from "@gebai/sdk"
-import { el, filesPreview } from "./state"
+import { el, filesPreview, refreshMedia } from "./state"
 import { copyText, desktopDownloadHint, tip } from "./ui"
 import { nextScopeId, popKeyScope, pushKeyScope } from "./keymap"
 import { highlightedCode, markdownBlock, blockText, escapePlain } from "./markdown"
@@ -290,22 +290,25 @@ export function renderFileCard(container: HTMLElement, b: Extract<ContentBlock, 
   const fail = (err: unknown) => body.appendChild(blockText(fetchFailText(err, "card")))
   if (kind === "image") {
     const img = document.createElement("img")
-    img.src = filesPreview(sessionId, b.path)
+    const src = filesPreview(sessionId, b.path)
     img.alt = name
     img.className = "file-img"
     img.loading = "lazy"
-    img.onclick = () => openImageViewer(filesPreview(sessionId, b.path), name)
+    img.onclick = () => openImageViewer(src, name)
     body.appendChild(img)
+    // 先探源再设 src（否则命中旧位图）：详见 state.ts refreshMedia
+    refreshMedia(img, src)
     return
   }
   if (kind === "video" || kind === "audio") {
     // 音视频就地播放：取数入口同图片（files/preview 支持 Range，可拖动进度）
     const player = document.createElement(kind)
-    player.src = filesPreview(sessionId, b.path)
+    const src = filesPreview(sessionId, b.path)
     player.controls = true
     player.preload = "metadata"
     player.className = kind === "video" ? "file-video" : "file-audio"
     body.appendChild(player)
+    refreshMedia(player, src)
     return
   }
   if (kind === "pdf") {
@@ -376,20 +379,21 @@ export function openFilePreview(sessionId: string, name: string, path: string, m
 
   const kind = fileKind(name, mime ?? "")
   if (kind === "image") {
+    // 弹窗每次都新建元素、但 URL 与卡片共用——缓存键仍是 URL，依旧得先探源再设 src
     const img = document.createElement("img")
-    img.src = filesPreview(sessionId, path)
     img.alt = name
     body.appendChild(img)
+    refreshMedia(img, filesPreview(sessionId, path))
     return
   }
   if (kind === "video" || kind === "audio") {
     // 音视频：原生播放器（files/preview 支持 Range，可拖动进度）
     const player = document.createElement(kind)
-    player.src = filesPreview(sessionId, path)
     player.controls = true
     player.autoplay = kind === "video"
     player.className = kind === "video" ? "file-video" : "file-audio"
     body.appendChild(player)
+    refreshMedia(player, filesPreview(sessionId, path))
     return
   }
   if (kind === "pdf") {

@@ -12,6 +12,7 @@ import {
   approvalsEl,
   pendingTools,
   pendingToolsKey,
+  refreshMedia,
   runs,
   todoState,
   type SubSessionState,
@@ -171,6 +172,8 @@ export function renderBlock(container: HTMLElement, b: ContentBlock, sessionId: 
       tip(img, "点击查看大图")
       // 图片异步加载改变高度：粘底则跟随滚动到底（jump-bottom.ts 委托捕获阶段 load 统一处理，含 markdown 内嵌图片）
       container.appendChild(img)
+      // 媒体元素的缓存键是 URL：本页先为该 URL 探一次源，命中的旧位图就会被换掉（详见 state.ts refreshMedia）
+      refreshMedia(img, src)
       break
     }
     case "file":

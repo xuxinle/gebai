@@ -169,6 +169,15 @@ interface Tab {
   icon?: string
   /** 当前是否以**渲染形态**显示（markdown：点「渲染预览」后置位；重建/切回源码时清空） */
   previewKind?: "markdown"
+  /**
+   * 媒体内容版本（`?v=` 查询参数）：图片/媒体查看器的 URL 由它拼出，**内容一变就换一个值**。
+   *
+   * 为什么必须有：浏览器对 `<img>`/`<video>` 等媒体元素的缓存键是 **URL**，命中时不发请求、
+   * 也不理会响应头（实测同文档内二次加载即使响应带 `no-store` 也不回源，拿到的仍是旧位图）。
+   * 于是「同名文件被改写/重渲后界面还是旧内容」无法靠服务端缓存头解决，只能让 URL 跟着内容变。
+   * 值取文件元信息的 etag（`stat.etag`）：跨进程稳定、不读文件内容，见服务端 `etagOf`。
+   */
+  mediaVersion?: string
   /** blame 行装饰：两态各自开关（只读查看时可用；编辑器重建后失效）。`blameLines` 是两态共用的数据缓存 */
   blameGutter?: boolean
   blameInline?: boolean
@@ -838,7 +847,14 @@ function flushFsChanges(): void {
 }
 
 /**
- * 变更路径命中已打开的文件时，把「干净」的标签从磁盘重载（保留滚动位置，不重建编辑器）。
+ * 变更路径命中已打开的文件时，把「干净」的标签从磁盘重载。
+ *
+ * 两类标签两条路：
+ * - **编辑器标签**：重读内容就地 setValue（保留滚动位置，不重建编辑器）；
+ * - **查看器标签**（图片/音视频/PDF/Office…）：只比 `stat.etag`，变了就**重建查看器**。
+ *   重建是必须的：媒体元素的缓存键是 URL，不换 URL 就永远拿到旧位图（即使响应带 no-store）——
+ *   重建会把带新 `?v=` 的 URL 换上，这是「同名文件改写后能看到新内容」的唯一办法。
+ *   代价是播放/缩放状态会丢，所以只对**不在编辑态、无未保存改动**的标签做，且仅在内容真的变了时做。
  *
  * 比较用**绝对路径**：监听端点给的是「当前根」的相对路径，而标签可能属于别的根
  * （变更面板里点开根之外的文件 → 自动换根打开）——按 (根, 路径) 逐字段比会漏掉它们
@@ -848,10 +864,10 @@ async function reloadChangedTabs(paths: string[]): Promise<void> {
   const currentRootAbs = rootAbsOf(explorer.getRoot())
   const changed = new Set(paths.map((p) => normPath(absOfRepo(currentRootAbs, p), IS_WIN)))
   /**
-   * 「这一轮不该被自动重载」：有未保存改动 / 已在编辑态 / 不是编辑器标签（查看器的重载会丢播放与缩放位置，
-   * 交给用户手动刷新）。写成函数而不是内联条件，是为了 `await` 之后再判一次——两次判定之间用户随时可能开始打字。
+   * 「这一轮不该被自动重载」：有未保存改动 / 已在编辑态。写成函数而不是内联条件，
+   * 是为了 `await` 之后再判一次——两次判定之间用户随时可能开始打字。
    */
-  const busy = (t: Tab): boolean => t.dirty || t.mode === "edit" || !t.editor
+  const busy = (t: Tab): boolean => t.dirty || t.mode === "edit"
   for (const tab of [...state.tabs]) {
     if (tab.kind !== "file") continue
     const tabAbs = normPath(absOfRepo(rootAbsOf(tab.root), tab.path), IS_WIN)
@@ -859,6 +875,21 @@ async function reloadChangedTabs(paths: string[]): Promise<void> {
     const key = `${tab.root}|${tab.path}`
     const selfTs = selfWrites.get(key)
     if (selfTs && Date.now() - selfTs < SELF_WRITE_GRACE_MS) continue
+    // 查看器标签：重建一次就够（loadTab 自己会取最新 stat/etag 并拼新 URL），不必先读内容
+    if (!tab.editor) {
+      try {
+        const statRes = await api.stat(tab.root, [tab.path])
+        if (findTab(tab.id) !== tab || busy(tab)) continue
+        const nextEtag = statRes.items[0]?.etag
+        if (!nextEtag || nextEtag === tab.mediaVersion) continue // 内容未变（仅 mtime 抖动）：不重建
+        tab.mediaVersion = nextEtag
+        await loadTab(tab)
+        if (state.activeId === tab.id && !document.hidden) toast(`${tab.title} 已在磁盘上更新，已重新加载`, "info", 4000)
+      } catch {
+        // 文件被删/被移动：保留现有视图，不打扰用户
+      }
+      continue
+    }
     try {
       const read = await api.read(tab.root, tab.path, { maxBytes: Math.min(state.rootsResp?.maxRead ?? 10 * 1024 * 1024, 10 * 1024 * 1024) })
       if (findTab(tab.id) !== tab || busy(tab)) continue
@@ -1263,6 +1294,9 @@ async function loadTab(tab: Tab, opts: { line?: number; column?: number; forceTe
     const stat = statRes.items[0]
     if (!stat) throw new Error("文件不存在")
     tab.stat = stat
+    // 内容版分（媒体 URL 的 `?v=`）：来自文件的 etag，内容一变它就变。
+    // 查看器重建时据此拼新 URL——否则同名文件重写后媒体元素仍命中旧位图缓存（详见 Tab.mediaVersion）。
+    tab.mediaVersion = stat.etag
     if (stat.type === "dir") {
       clear(host0)
       host0.appendChild(placeholderFor(`「${tab.title}」是目录`, "目录请在左侧资源管理器中展开浏览。"))
@@ -1419,6 +1453,8 @@ function viewerCtx(tab: Tab): ViewerCtx {
     stat: tab.stat ?? ({ size: 0, mime: "", kind: "binary" } as unknown as FileStat),
     notify: (msg, kind) => toast(msg, kind ?? "info"),
     preview: tab.previewKind,
+    // 内容版本：图片/音视频这类媒体元素的 URL 要跟着内容变（否则改写后仍复用旧位图）
+    version: tab.mediaVersion ?? tab.etag,
   }
 }
 

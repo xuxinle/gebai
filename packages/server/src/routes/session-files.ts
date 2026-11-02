@@ -9,14 +9,16 @@ import { buildZip } from "../zip"
 /**
  * 文件响应的缓存策略：**必须显式 `Cache-Control: no-cache` + `ETag`**。
  *
- * 为什么（踩过的坑）：产物/文件的 URL 只由**路径**决定（`?path=...`），同名文件被重写后 URL 不变。
- * 此前这里不带任何缓存头，浏览器便按 `Last-Modified` 做**启发式缓存**（新鲜期内直接复用、
- * 不回源校验）——于是同一路径重新渲染/覆盖写入后，界面仍显示**旧内容**
- * （实际现象：重渲同名静帧后送审，用户看到的还是上一版；当时只能靠“每次换新文件名”绕开，
- * 而那是绕着走、不是修复）。
+ * 为什么：产物/文件的 URL 只由**路径**决定（`?path=...`），同名文件被重写后 URL 不变。
+ * 不带缓存头时浏览器按 `Last-Modified` 做**启发式缓存**（新鲜期内直接复用、不回源校验），
+ * 于是同一路径重新渲染/覆盖写入后，界面仍显示**旧内容**。
  *
  * `no-cache` 的语义是「可缓存，但每次必须回源校验」：配合 ETag 命中则返 304，
  * 开销仅一次往返、无重复传输，既不会脏读也几乎不耗带宽。
+ *
+ * **媒体元素（`<img>`/`<video>`）是例外**：它们的缓存键是 URL 本身，命中时不发请求、
+ * 也不理会这里的响应头——那一侧靠前端拼 `?v=`（工作台）或挂载前探源（内容块）解决，
+ * 见 `packages/web/src/state.ts` 的 `refreshMedia`。
  */
 function fileResponse(c: Context, absPath: string, extra: Record<string, string> = {}): Response {
   if (!existsSync(absPath)) return new Response("file not found", { status: 404, headers: { "Cache-Control": "no-cache" } })
@@ -97,7 +99,15 @@ export function registerSessionFileRoutes(rc: RouteCtx): void {
       const { renderOfficeReadingView } = await import("@gebai/agents")
       try {
         const html = await renderOfficeReadingView(safe)
-        return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } })
+        // 与文件内容同策略：同名文档重写后阅读视图也会变，不得让缓存脏读旧渲染
+        const st = statSync(safe)
+        return new Response(html, {
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            ETag: `"o${st.size.toString(16)}-${Math.round(st.mtimeMs).toString(16)}"`,
+            "Cache-Control": "no-cache",
+          },
+        })
       } catch (err) {
         return c.json({ error: `office 阅读视图渲染失败: ${(err as Error).message}` }, 422)
       }

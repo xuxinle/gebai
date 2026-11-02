@@ -53,6 +53,22 @@ export function registerFsRoutes(rc: RouteCtx): void {
   const { app, d } = rc
   const userOf = rc.userOf
 
+  /**
+   * 工作台全部端点的缓存姿态：**`no-store`**。
+   *
+   * 这些响应都是「磁盘此刻的样子」（目录清单、文件内容、元信息、搜索结果）——它们**永远可能变**，
+   * 而 URL 只由 (root, path) 决定、不随内容变，所以缓存下来的就是过期数据。
+   * 不带任何缓存头时浏览器会按 `Last-Modified` 做**启发式缓存**（新鲜期内直接复用、不回源），
+   * 表现就是「文件改了工作台不变」。这里的响应都不大，禁止存储比「算新鲜期再失效」划算得多。
+   *
+   * 范围上只覆盖 `/api/v1/fs/*` 的 JSON/文本端点：二进制流（`fs/raw`）自己带 `no-cache`+ETag，
+   * 媒体元素还需靠前端拼 `?v=`（见 packages/web/src/state.ts 的 refreshMedia）。
+   */
+  app.use("/api/v1/fs/*", async (c, next) => {
+    await next()
+    c.res.headers.set("Cache-Control", "no-store")
+  })
+
   /** 变更监听中枢（进程内共享：多个工作台标签页共用同一批 watcher），见 core/fs/watch.ts。 */
   const watchHub = new FsWatchHub()
   /** 在途长轮询计数（背压）。 */

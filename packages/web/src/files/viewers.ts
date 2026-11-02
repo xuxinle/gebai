@@ -37,10 +37,16 @@ export interface ViewerCtx {
   notify: (msg: string, kind?: "info" | "success" | "error") => void
   /** 以渲染形态打开（仅 markdown：它的服务端 kind 是 `text`，渲染形态由调用方显式指定） */
   preview?: "markdown"
+  /**
+   * 内容版本（`?v=`）：图片/音视频这类**媒体元素**的缓存键是 URL，命中时不回源、也不理会响应头，
+   * 所以「同名文件被改写后还是旧内容」只能靠换 URL 解决。调用方传文件的 etag（内容一变它就变）。
+   */
+  version?: string
 }
 
 function rawUrl(ctx: ViewerCtx, extra: Record<string, string | undefined> = {}): string {
-  return ctx.api.url("/api/v1/fs/raw", { root: ctx.root, path: ctx.path, ...extra })
+  // v = 内容版本（见 ViewerCtx.version）：媒体元素的缓存键只有 URL，不带它则同名文件改写后仍显示旧图
+  return ctx.api.url("/api/v1/fs/raw", { root: ctx.root, path: ctx.path, v: ctx.version, ...extra })
 }
 
 export function downloadUrl(ctx: Pick<ViewerCtx, "api" | "root" | "path">): string {
