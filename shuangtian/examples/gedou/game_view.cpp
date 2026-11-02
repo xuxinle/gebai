@@ -1513,6 +1513,66 @@ void GameView::paint_banner(const st::ui::RenderContext& context, Canvas& canvas
 
 auto GameView::on_event(const st::ui::RenderContext& context, st::ui::Event& event) -> bool {
   (void)context;
+
+  // ── 选人界面的**鼠标点击** ──
+  //
+  // ⚠ 这里曾经直接 `return false` 掉一切非键盘事件，于是选人界面
+  // **只能用键盘选**（方向键 + Enter）。用户报"实际桌面操作选取不了"就是这个：
+  // `select_hit_test()` 早就写好了、命中区域 `select_areas_` 也每帧算好存着，
+  // 唯独没人把鼠标事件接上去。
+  //
+  // 三种点击语义要分开（和浏览器一致）：
+  // - 按下：把焦点移到该控件（这样键盘和鼠标的焦点是同一份状态）；
+  // - 单击：执行动作（选角色 / 切模式 / 开始）；
+  // - 双击：也当成单击执行——双击时第一下已经处理过，这里不重复。
+  if (select_.active &&
+      (event.kind == st::ui::EventKind::MouseDown || event.kind == st::ui::EventKind::MouseUp)) {
+    const int hit = select_hit_test(select_areas_, event.position);
+    if (hit >= 0) {
+      event.handled = true;
+      if (event.kind == st::ui::EventKind::MouseDown) {
+        select_.focus = hit;
+        return true;
+      }
+      // MouseUp：真正执行。不依赖 MouseDown 是否到过这里——
+      // 外部注入的点击可能只有 Up（自动化脚本、无障碍触发）。
+      //
+      // 角色卡的语义是**循环切换**：只有两个角色，点一下换一个。
+      // 写死 `left = 0` 等于"点了没反应"（本来就是 0），
+      // 用户会以为点击没生效——这正是要用 `(x + 1) % count` 的原因。
+      const std::size_t characters = kFighterCount;
+      switch (hit) {
+        case 0:   // 左卡：切 1P 角色
+          select_.left = (select_.left + 1) % characters;
+          break;
+        case 1:   // 右卡：切对手角色
+          select_.right = (select_.right + 1) % characters;
+          break;
+        case 2:   // 模式开关
+          set_battle_mode(select_.mode == BattleMode::PlayerVsAi ? BattleMode::AiVsAi
+                                                                : BattleMode::PlayerVsAi);
+          break;
+        case 3:   // 开始对战
+          skip_select();
+          break;
+        case 4:   // 难度 -
+          set_difficulty(static_cast<Difficulty>(
+              std::max(0, static_cast<int>(view_.difficulty) - 1)));
+          break;
+        case 5:   // 难度 +
+          set_difficulty(static_cast<Difficulty>(
+              std::min(2, static_cast<int>(view_.difficulty) + 1)));
+          break;
+        default:
+          break;
+      }
+      return true;
+    }
+    // 点在空白处：吞掉事件但不动作（避免漏到对战里）
+    event.handled = true;
+    return true;
+  }
+
   if (event.kind != st::ui::EventKind::KeyDown && event.kind != st::ui::EventKind::KeyUp) {
     return false;
   }

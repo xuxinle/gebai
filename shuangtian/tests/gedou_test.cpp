@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "examples/gedou/ai.cpp"     // NOLINT(bugprone-suspicious-include) —— 见文件头
+#include "examples/gedou/battle_select.cpp"  // NOLINT(bugprone-suspicious-include)
 #include "examples/gedou/fight.cpp"  // NOLINT(bugprone-suspicious-include)
 #include "examples/gedou/fighter.cpp"  // NOLINT(bugprone-suspicious-include)
 #include "examples/gedou/pose.cpp"     // NOLINT(bugprone-suspicious-include)
@@ -831,4 +832,71 @@ ST_TEST(gd_waist_grab_is_the_slowest_move) {
   // 总帧数全场最长（代价最重）。
   ST_CHECK(grab.total() > heavy.total());
   ST_CHECK(grab.total() >= special.total());
+}
+
+
+// ── 选人界面的鼠标命中 ──
+//
+// 为什么这几条必须存在：`select_hit_test()` 与 `select_layout()` 早就写好了，
+// 但 `GameView::on_event()` 曾把一切非键盘事件直接 `return false`，
+// 于是**选人界面只能用键盘**（用户报"实际桌面操作选取不了"）。
+//
+// 单测能钉住的是"点哪里 → 命中哪个控件"这段纯逻辑；
+// "事件能进到这段逻辑"由 e2e / 真实桌面点击把关（这里测不了，视图层不参与链接）。
+
+ST_TEST(gd_select_hit_test_maps_each_control) {
+  const st::math::Rect viewport{0.0f, 0.0f, 1180.0f, 640.0f};
+  const gedou::SelectHitAreas areas = gedou::select_layout(viewport);
+
+  // 每个区域取中心点，命中结果必须是它自己。
+  const auto center = [](st::math::Rect rect) {
+    return st::math::Point{rect.x + rect.width * 0.5f, rect.y + rect.height * 0.5f};
+  };
+  ST_CHECK(gedou::select_hit_test(areas, center(areas.left_card)) == 0);
+  ST_CHECK(gedou::select_hit_test(areas, center(areas.right_card)) == 1);
+  ST_CHECK(gedou::select_hit_test(areas, center(areas.mode_toggle)) == 2);
+  ST_CHECK(gedou::select_hit_test(areas, center(areas.start_button)) == 3);
+  ST_CHECK(gedou::select_hit_test(areas, center(areas.difficulty_minus)) == 4);
+  ST_CHECK(gedou::select_hit_test(areas, center(areas.difficulty_plus)) == 5);
+}
+
+ST_TEST(gd_select_hit_test_returns_minus_one_outside) {
+  const st::math::Rect viewport{0.0f, 0.0f, 1180.0f, 640.0f};
+  const gedou::SelectHitAreas areas = gedou::select_layout(viewport);
+  // 左上角是标题区，不该命中任何控件。
+  ST_CHECK(gedou::select_hit_test(areas, st::math::Point{4.0f, 4.0f}) == -1);
+}
+
+/// **按钮优先于卡片**：它们视觉上压在卡片上方。
+///
+/// 这条不是一个理论假设——反过来判的话，点"开始对战"会被当成
+/// "选右侧角色"，用户会觉得"点了开始却换了人"。
+ST_TEST(gd_select_buttons_win_over_cards) {
+  const st::math::Rect viewport{0.0f, 0.0f, 1180.0f, 640.0f};
+  const gedou::SelectHitAreas areas = gedou::select_layout(viewport);
+  // 构造一个同时落在卡片与按钮里的点（若两者有重叠）。
+  const auto overlaps = [](st::math::Rect a, st::math::Rect b) {
+    return !(a.right() < b.x || b.right() < a.x || a.bottom() < b.y || b.bottom() < a.y);
+  };
+  if (overlaps(areas.start_button, areas.left_card)) {
+    const st::math::Point probe{areas.start_button.x + 2.0f, areas.start_button.y + 2.0f};
+    ST_CHECK(gedou::select_hit_test(areas, probe) == 3);
+  }
+  // 布局本身不能有"开始按钮完全落在卡片外"以外的意外：卡片之间不重叠。
+  ST_CHECK(!overlaps(areas.left_card, areas.right_card));
+}
+
+/// 布局必须适应窄视口（窗口被拖窄时控件不能跑到画布外）。
+ST_TEST(gd_select_layout_fits_narrow_viewport) {
+  const st::math::Rect narrow{0.0f, 0.0f, 720.0f, 480.0f};
+  const gedou::SelectHitAreas areas = gedou::select_layout(narrow);
+  const auto inside = [&narrow](st::math::Rect rect) {
+    if (rect.is_empty()) return true;
+    return rect.x >= narrow.x - 1.0f && rect.right() <= narrow.right() + 1.0f &&
+           rect.y >= narrow.y - 1.0f && rect.bottom() <= narrow.bottom() + 1.0f;
+  };
+  ST_CHECK(inside(areas.left_card));
+  ST_CHECK(inside(areas.right_card));
+  ST_CHECK(inside(areas.start_button));
+  ST_CHECK(inside(areas.mode_toggle));
 }
