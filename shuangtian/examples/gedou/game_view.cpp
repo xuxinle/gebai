@@ -150,6 +150,10 @@ void GameView::set_battle_mode(BattleMode mode) {
   if (mode == BattleMode::AiVsAi) {
     dummy_ = false;
     set_ai_enabled(true);
+    // 左侧 AI 用**不同种子**：同种子会让两边每一步都做同样的决策，
+    // 画面上就是"两个人像镜像一样同步动作"，看着像卡了。
+    ai_left_.reseed(0x5EED1234U ^ 0x9E3779B9U);
+    ai_left_.set_difficulty(ai_.difficulty());
   }
 }
 
@@ -556,6 +560,18 @@ void GameView::paint_content(const st::ui::RenderContext& context, Canvas& canva
       ++steps;
     }
     if (steps > 0) {
+      // ⚠ **机机对战**：左侧也必须由 AI 决策。
+      //
+      // 之前只设 `select_.mode` 和 AI 开关，左侧用的还是 `player_intent_`——
+      // 而那个只由键盘写入。于是"机机对战"里左边那个角色**完全不动**
+      // （站着挨打），看起来就是"机机对战不生效"。
+      //
+      // 判据用 `select_.mode`：它才是"这一局是什么模式"的唯一真相，
+      // 而 `ai_enabled` 只管"对手侧要不要 AI"。
+      if (select_.mode == BattleMode::AiVsAi) {
+        // 左右两侧各问一次；`think` 接受任意 side，所以不需要新接口。
+        player_intent_ = ai_left_.think(*match_, 0);
+      }
       if (view_.ai_enabled && !dummy_) {
         // 与 `step_logic` 走**同一个**决策入口（策略/手写 AI 在这里分流）。
         opponent_intent_ = opponent_decision();

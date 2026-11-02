@@ -240,6 +240,12 @@ class GameView : public st::ui::Element {
   /// 动画状态必须能被绘制路径推进（否则动画停在首帧），而 `paint` 的 const
   /// 契约不能破——框架里各组件动画都是这一套（见 `Element::RenderExtras`）。
   mutable AiController ai_{};
+  /// **左侧**的 AI（只在机机对战用）。
+  ///
+  /// 为什么不复用 `ai_`：`think()` 是**常驻状态**的（内部有反应计时器与
+  /// 决策节流）。左右共用一个实例，两侧会读到对方的计时器状态，
+  /// 表现是"两边动作越来越同步"。
+  mutable AiController ai_left_{};
   /// 训练好的策略（未装载时 `valid() == false`，此时用 `ai_`）。
   PolicyNet policy_{};
   /// 策略侧的攻击冷却（与训练环境同公式；见 `opponent_decision` 的说明）。

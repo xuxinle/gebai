@@ -120,6 +120,11 @@ def main() -> int:
                 print(f"  [2] 双方满血 OK（{hp}）")
 
         # ③ 点开始 → 逻辑应当开始推进
+        # 切成机机模式（点模式开关），然后才开始——这样第 ④~⑥ 条才测得到。
+        call_with_token(port, "invoke", {"id": "arena", "action": "select_hit", "argument": "2"}, token)
+        mode_state = json.loads(get_prop(port, token, "state") or "{}")
+        print(f"  模式已切到：{mode_state.get('select', {}).get('mode', '?')}")
+
         started = call_with_token(port, "invoke",
                                   {"id": "arena", "action": "start_select", "argument": ""}, token)
         # 响应是 {id, ok, result:{handled:bool}}；`ok` 为假说明方法/目标不对。
@@ -139,6 +144,54 @@ def main() -> int:
             failures.append(f"点开始后逻辑没有推进：{second} -> {third}")
         else:
             print(f"  [3] 开始后逻辑推进 OK（{second} -> {third}）")
+        # ④ **机机对战要真的打起来**：两侧都得动、都得掉血。
+        #
+        # 这条为"机机对战不生效"而写：`set_battle_mode` 早先只设 AI 开关
+        # 与 `select_.mode`，而左侧用的是 `player_intent_`（只由键盘写入），
+        # 于是机机模式下左边那个角色**站着不动**——看起来就是"模式没生效"。
+        started_left = json.loads(get_prop(port, token, "state") or "{}")
+        left_x0 = (started_left.get("fighters") or [{}])[0].get("x")
+        left_moves = set()
+        left_damaged = False
+        # 采样窗口要够长：AI 有反应计时与攻击冷却，6 秒可能只放 1 个招。
+        # 实测 6 秒窗口下左侧只采到 1 种主动技，会把"修好了"误判成红。
+        for _ in range(40):
+            time.sleep(0.35)
+            snapshot = json.loads(get_prop(port, token, "state") or "{}")
+            fighters = snapshot.get("fighters") or []
+            if len(fighters) < 2:
+                continue
+            left_moves.add(fighters[0].get("move"))
+            if float(fighters[0].get("hp", 0)) < float(fighters[0].get("max_hp", 1)):
+                left_damaged = True
+        left_x1 = (json.loads(get_prop(port, token, "state") or "{}").get("fighters") or [{}])[0].get("x")
+
+        # ⚠ 判据必须区分**主动出招**与**被打的反应**。
+        #
+        # 第一版只断言"左侧出现过 >1 种招式 且 位置有变化"——回退验证时它**没变红**：
+        # 左侧不被 AI 驱动，但被打中会进 `hurt`/`knockdown`、被击退也会移位，
+        # 于是"在动、有招式"同样成立。回退版实测左侧只有 {idle, knockdown}，
+        # 全是被动状态。这就是典型的假绿：判据看着合理，实际拦不住缺陷。
+        #
+        # 正确判据：左侧必须**主动**放攻击招（不含 idle/walk/guard/hurt/knockdown）。
+        passive = {"idle", "walk", "guard", "hurt", "knockdown", "defeat", "victory"}
+        left_attacks = {move for move in left_moves if move not in passive}
+        if len(left_attacks) < 1:
+            failures.append(
+                f"机机模式下左侧没有主动出招（招式集合 {sorted(left_moves)}，"
+                f"主动技只有 {sorted(left_attacks)}）——它没被 AI 驱动")
+        else:
+            print(f"  [4] 机机模式左侧主动出招 OK（{len(left_attacks)} 种：{sorted(left_attacks)}）")
+
+        # 位置变化单独保留作参考，但**不作为判据**：被击退也会移位。
+        if left_x0 is not None and left_x1 is not None:
+            print(f"  [5] 左侧位移 {left_x0:.0f} -> {left_x1:.0f}（仅供参考，击退也会产生位移）")
+
+        if not left_damaged:
+            failures.append("机机模式下左侧始终满血——两边根本没打起来")
+        else:
+            print("  [6] 左侧被打到掉血 OK")
+
     finally:
         try:
             process.terminate()
