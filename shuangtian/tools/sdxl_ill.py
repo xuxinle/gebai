@@ -30,8 +30,13 @@ import os
 import sys
 import time
 
-SDXL_MODEL = r"C:\Users\Administrator\Downloads\PetalRain亚洲动漫-Illustrious_V2.safetensors"
-SDXL_CONFIG = r"C:\Users\Administrator\code\gebai\resources\models\imagegen\sdxl-turbo"
+# 路径可用环境变量覆盖（`GEBAI_SDXL_MODEL` / `GEBAI_SDXL_CONFIG`）。
+# 不写死绝对路径的原因：这些脚本要能在别人的机器上跑。
+
+SDXL_MODEL = os.environ.get("GEBAI_SDXL_MODEL",
+    r"C:\Users\Administrator\Downloads\PetalRain亚洲动漫-Illustrious_V2.safetensors")
+SDXL_CONFIG = os.environ.get("GEBAI_SDXL_CONFIG",
+    r"C:\Users\Administrator\code\gebai\resources\models\imagegen\sdxl-turbo")
 CONTROLNET_DIR = "build/cn-ill"
 
 # ── 角色造型 ──

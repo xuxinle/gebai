@@ -189,7 +189,7 @@
                  "//embed": "图标两件 + 角色立绘（SDXL 生成、抠图后的透明 PNG）。",
                  "embed": ["examples/gedou/assets/gedou-icon.png",
                              "examples/gedou/assets/gedou-logo.svg",
-                             "examples/gedou/assets/chars/*.png"] },
+                             "examples/gedou/assets/actions/*.png"] },
     "gedou_rl": { "kind": "executable",
                   "sources": ["tools/gedou_rl.cpp",
                               "examples/gedou/rl_env.cpp",
