@@ -60,7 +60,7 @@ ST_TEST(xml_ui_builds_nested_tree_with_text_and_attributes) {
   st::ui::XmlBuildReport report;
   auto tree = st::ui::build_from_xml(R"(
     <Column gap="8" padding="12" id="page">
-      <Text id="title" size="18">设置</Text>
+      <Text id="title" text_size="18">设置</Text>
       <Row gap="6" id="actions">
         <Button id="ok" variant="primary">确定</Button>
         <Button id="cancel">取消</Button>

@@ -1669,7 +1669,8 @@ ST_TEST(dsl_box_props_reach_badge_list_table_tree) {
   const auto item_color = list_item->get_property("color");
   ST_REQUIRE(item_color.has_value());
   ST_CHECK_EQ(*item_color, std::string("#d13b40"));
-  const auto item_size = list_item->get_property("size");
+  // 2026-11-02 修：读回口统一为 `font_size`（`size` 是 DSL 字段名，属性面早已改名）。
+  const auto item_size = list_item->get_property("font_size");
   ST_REQUIRE(item_size.has_value());
   ST_CHECK(std::abs(std::stof(*item_size) - 18.0F) < 0.05F);
 

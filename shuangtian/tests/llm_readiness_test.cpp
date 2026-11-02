@@ -118,13 +118,17 @@ ST_TEST(schema_field_type_errors_are_reported) {
 
 ST_TEST(schema_valid_script_still_parses) {
   // 新检查不能误伤合法脚本（这是最需要防的回归）
+  //
+  // 字段口径：`radius/depth` 是旧写法，schema 已统一为 `size`（全长；
+  // 球是直径标量，平面是 [X,Z] 全长数组）。见 `st_api --shape plane/uv_sphere`。
+  // 2026-11-02 修：存量脚本没跟上 schema 演进，`radius` 触发未知字段拒绝。
   const auto spec = parse(R"({
     "camera": {"eye":[2,1.6,2.8],"target":[0,0.25,0],"fov":42},
     "lighting": {"light_from":[0.4,0.8,0.6],"ambient":0.3},
     "shadow": {"strength":0.35,"ground_y":0},
     "objects": [
-      {"name":"ground","shape":"plane","radius":2.0,"depth":4.0,"ground":true},
-      {"name":"ball","shape":"uv_sphere","radius":0.4,"translate":[0,0.4,0],
+      {"name":"ground","shape":"plane","size":[4.0,8.0],"ground":true},
+      {"name":"ball","shape":"uv_sphere","size":0.8,"translate":[0,0.4,0],
        "pivot_at":"bottom","metallic":0.2,"roughness":0.6}
     ]
   })");
@@ -254,12 +258,12 @@ ST_TEST(serialize_round_trip_rich_scene) {
     "asset_basis": "assets",
     "objects": [
       {"name":"root","group":true,"translate":[0,0,0],"children":[
-        {"name":"arm","shape":"capsule","radius":0.08,"depth":0.7,"rotation":[0,0,0.4],
+        {"name":"arm","shape":"capsule","size":[0.16,0.7],"rotation":[0,0,0.4],
          "metallic":0.7,"roughness":0.3,"pivot_at":"top"},
-        {"name":"hand","shape":"ico_sphere","radius":0.09,"subdivisions":2,
+        {"name":"hand","shape":"ico_sphere","size":0.18,"subdivisions":2,
          "translate":[0,-0.7,0]}
       ]},
-      {"name":"ground","shape":"plane","radius":3.0,"depth":6.0,"ground":true,
+      {"name":"ground","shape":"plane","size":[6.0,12.0],"ground":true,
        "color":"#3a3f48","texture":"brick.png","texture_scale_u":4.0,"texture_scale_v":4.0,
        "texture_clamp":true},
       {"name":"ring","shape":"torus","major_radius":0.8,"minor_radius":0.12,
@@ -280,14 +284,14 @@ ST_TEST(serialize_round_trip_rich_scene) {
 
 ST_TEST(serialize_only_writes_non_defaults) {
   // 只写非默认值是刻意的（输出更短、改动更醒目）——但要保证"必须显式"的项在
-  const auto spec = parse(R"j({"objects":[{"shape":"cube","radius":0.5}]})j");
+  const auto spec = parse(R"j({"objects":[{"shape":"cube","size":0.5}]})j");
   ST_REQUIRE(spec.has_value());
   const std::string text = st::raster::serialize_scene_text(*spec, false);
   // `objects` 必须写（必填字段）
   ST_CHECK(text.find("\"objects\"") != std::string::npos);
-  // `shape` 与 `radius` 必须写（核心信息）
+  // `shape` 与 `size` 必须写（核心信息；`radius` 是旧写法，schema 已统一为 size）
   ST_CHECK(text.find("\"shape\"") != std::string::npos);
-  ST_CHECK(text.find("\"radius\"") != std::string::npos);
+  ST_CHECK(text.find("\"size\"") != std::string::npos);
   // 大量默认值不应出现（否则输出膨胀、改动看不清）
   ST_CHECK(text.find("\"metallic\"") == std::string::npos);
   ST_CHECK(text.find("\"opacity\"") == std::string::npos);
@@ -302,13 +306,13 @@ ST_TEST(serialize_read_modify_write_loop) {
   const auto original = parse(R"({
     "camera": {"eye":[3,2,3],"target":[0,0.5,0]},
     "objects": [
-      {"name":"ball","shape":"uv_sphere","radius":0.5,"translate":[0,0.5,0]},
-      {"name":"box","shape":"cube","radius":0.4,"translate":[1.2,0.4,0]}
+      {"name":"ball","shape":"uv_sphere","size":1.0,"translate":[0,0.5,0]},
+      {"name":"box","shape":"cube","size":0.8,"translate":[1.2,0.4,0]}
     ]
   })");
   ST_REQUIRE(original.has_value());
 
-  // 改一处：把 ball 的半径从 0.5 改成 0.8
+  // 改一处：把 ball 的尺寸从 1.0（直径）改成 1.6
   auto modified = *original;
   modified.objects[0].size = st::math::Vec3{1.6f, 0.0f, 0.0f};
   modified.objects[0].size_count = 1;
@@ -360,7 +364,7 @@ ST_TEST(describe_catches_camera_inside_geometry) {
   // 只有看图才知道没东西。自检要在渲染前就指出来。
   const auto spec = parse(R"({
     "camera": {"eye":[0,0,0],"target":[1,0,0]},
-    "objects": [{"shape":"uv_sphere","radius":1.0}]
+    "objects": [{"shape":"uv_sphere","size":2.0}]
   })");
   ST_REQUIRE(spec.has_value());
   const auto summary = st::raster::describe_scene(*spec);
@@ -379,7 +383,7 @@ ST_TEST(describe_catches_near_plane_clipping) {
   // ## 这条钉住真实素材实测踩到的坑：3cm 道具 + near=0.1 → 渲染 0 像素
   const auto spec = parse(R"({
     "camera": {"eye":[0.1,0.1,0.2],"target":[0,0,0],"near":0.1,"fov":40},
-    "objects": [{"shape":"uv_sphere","radius":0.03}]
+    "objects": [{"shape":"uv_sphere","size":0.06}]
   })");
   ST_REQUIRE(spec.has_value());
   const auto summary = st::raster::describe_scene(*spec);

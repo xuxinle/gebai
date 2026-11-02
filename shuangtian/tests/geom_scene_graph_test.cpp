@@ -450,12 +450,16 @@ ST_TEST(scene_script_composite_model_renders_children) {
 
   // 把父的抬起量改成 0（球会落到画面下方中央）→ 覆盖像素数应当变化，
   // 这证明"父的变换确实作用到了子身上"（而不是子被当成世界坐标画）。
+  //
+  // ⚠ 匹配锚点必须**唯一且稳定**：JSON 是多行格式化过的（数组跨行），找完整的
+  // `"translate": [0.0, 1.2, 0.0],` 永远找不到；而裸数字 `1.2,` 又可能在别处出现。
+  // 用 `"rig"` 之后的第一处 `1.2,` —— 名字是唯一的，且它紧跟的抬起重只属于父节点。
   std::string lower = json;
-  const std::string from = R"j("translate": [0.0, 1.2, 0.0],)j";
-  const std::string to = R"j("translate": [0.0, 0.0, 0.0],)j";
-  const std::size_t at = lower.find(from);
+  const std::size_t rig = lower.find(R"j("rig")j");
+  ST_REQUIRE(rig != std::string::npos);
+  const std::size_t at = lower.find("1.2,", rig);
   ST_REQUIRE(at != std::string::npos);
-  lower.replace(at, from.size(), to);
+  lower.replace(at, 4, "0.0,");
   const int ink_lowered = render(lower, 260, 200);
   st::log::out("[graph] lowered ink={}\n", ink_lowered);
   ST_CHECK(ink_lowered != ink);

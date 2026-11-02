@@ -123,8 +123,10 @@ ST_TEST(size_is_full_length_for_every_shape) {
 ST_TEST(size_scalar_means_diameter_for_round_shapes) {
   // 标量 `size` 对圆形截面的形状是**直径**（不是半径）
   expect_size(measure(one("uv_sphere", R"j("size":3)j")), 3.0f, 3.0f, 3.0f, "sphere 3");
-  // 标量只给直径；高度留在默认值（= 1.0 之外的图元默认，实测为 0）
-  expect_size(measure(one("cylinder", R"j("size":3)j")), 3.0f, 0.0f, 3.0f,
+  // 标量只给直径；高度用图元自身默认（cylinder 默认高 1.0）。
+  // 2026-11-02 修：旧注释写着"实测为 0"，但实现已把默认高改回 1.0——
+  // 期望值与事实同步（量出来是 1.0，这才是"默认"的常理）。
+  expect_size(measure(one("cylinder", R"j("size":3)j")), 3.0f, 1.0f, 3.0f,
               "cylinder 3（只给直径，高为默认）");
 }
 
@@ -154,76 +156,10 @@ ST_TEST(size_rejects_non_positive_and_bad_shapes) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// ② 旧字段等价：迁移的正确性保证
-// ────────────────────────────────────────────────────────────────────────────
-
-ST_TEST(legacy_fields_equal_their_size_equivalent) {
-  // ## 迁移 433 处存量脚本的唯一正确性保证
-  //
-  // 每一对都必须产出**完全相同**的几何。若有一条不成立，
-  // 迁移就会静默改掉既有片子的画面（而且只有看图才发现）。
-  struct Pair {
-    const char* label;
-    std::string legacy;
-    std::string modern;
-  };
-  const std::vector<Pair> pairs{
-      // ## box 的旧语义实测：`height` 被**完全忽略**，Y 与 Z 都由 `depth` 决定
-      //
-      // 实测（`build_mesh` 里 `length_y()` 让 depth 优先，而 Z 也取 depth）：
-      //   width=2            → 2.00×1.00×2.00
-      //   depth=3            → 1.00×3.00×3.00
-      //   三者都写            → 2.00×3.00×3.00 （height 毫无作用）
-      //
-      // 这正是本次重构要消灭的东西：写着 height 却不起作用，且不报错。
-      // 所以这条的"等价"只能是**旧行为**的等价 —— 迁移工具据此换算。
-      {"box width=2 depth=3（height 在旧语义里无效）",
-       one("box", R"j("width":2,"height":1,"depth":3)j"), one("box", R"j("size":[2,3,3])j")},
-      // plane 旧语义：width(X) / height(Z)
-      {"plane width=2 height=4", one("plane", R"j("width":2,"height":4)j"),
-       one("plane", R"j("size":[2,4])j")},
-      // sphere 旧语义：radius
-      {"sphere radius=1", one("sphere", R"j("radius":1)j"), one("sphere", R"j("size":2)j")},
-      // uv_sphere 旧语义：radius
-      {"uv_sphere radius=1.5", one("uv_sphere", R"j("radius":1.5)j"),
-       one("uv_sphere", R"j("size":3)j")},
-      // cylinder 旧语义：radius + height
-      {"cylinder radius=1 height=4", one("cylinder", R"j("radius":1,"height":4)j"),
-       one("cylinder", R"j("size":[2,4])j")},
-      // cylinder 通用写法：radius + depth
-      {"cylinder radius=1 depth=4", one("cylinder", R"j("radius":1,"depth":4)j"),
-       one("cylinder", R"j("size":[2,4])j")},
-      // cube 通用写法：radius（半边 X）
-      {"cube radius=0.5", one("cube", R"j("radius":0.5)j"), one("cube", R"j("size":[1,1,1])j")},
-      // torus 旧语义：`radius` 是**中心线半径**（不是外半径），管径 = 0.35 × 它
-      //   实测 radius=1 → 外径 2.70（= 2×(1 + 0.35)）、管径 0.70（= 2×0.35）
-      {"torus radius=1", one("torus", R"j("radius":1)j"), one("torus", R"j("size":[2.7,0.7])j")},
-  };
-
-  for (const Pair& pair : pairs) {
-    const Box legacy = measure(pair.legacy);
-    const Box modern = measure(pair.modern);
-    ST_REQUIRE(legacy.valid);
-    ST_REQUIRE(modern.valid);
-    const auto a = legacy.size();
-    const auto b = modern.size();
-    const bool same = std::abs(a.x - b.x) < 1.0e-3f && std::abs(a.y - b.y) < 1.0e-3f &&
-                      std::abs(a.z - b.z) < 1.0e-3f;
-    if (!same) {
-      st::log::err("[size-test] {} 不等价：旧 {:.2f}×{:.2f}×{:.2f} vs 新 {:.2f}×{:.2f}×{:.2f}\n",
-                   pair.label, static_cast<double>(a.x), static_cast<double>(a.y),
-                   static_cast<double>(a.z), static_cast<double>(b.x),
-                   static_cast<double>(b.y), static_cast<double>(b.z));
-    }
-    ST_CHECK(same);
-  }
-}
-
-ST_TEST(size_takes_precedence_over_legacy_fields) {
-  // 两套同时写时以 `size` 为准（不能再让旧字段参与，否则"多大"有两个答案）
-  const Box box = measure(one("cube", R"j("size":[4,4,4],"radius":0.1,"width":9)j"));
-  expect_size(box, 4.0f, 4.0f, 4.0f, "size 优先于 radius/width");
-}
+// ② 旧字段等价（已删）：2026-10-31 彻底删除旧字段（radius/width/height/depth）后，
+// 「旧写法与 size 等价」「size 优先于旧字段」两条用例的前提消失——旧字段现在
+// 会被直接拒绝（`scene_script_size_is_the_only_size_path` 钉住该行为）。
+// 迁移期间的等价保证已完成使命，保留只会永远红（2026-11-02 存量清理）。
 
 ST_TEST(size_is_independent_of_node_scale) {
   // ## `size` 是**几何尺寸**，`scale` 是**节点变换**——两者不同层

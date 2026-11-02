@@ -418,12 +418,13 @@ ST_TEST(anim_script_errors_carry_paths) {
   auto no_node = parse(R"j({"objects":[],"animation":{"tracks":[{"kind":"rotation","keys":[]}]}})j");
   ST_REQUIRE(!no_node.has_value());
   ST_CHECK(no_node.error().message.find("tracks[0].node") != std::string::npos);
-  // 2) kind 拼错 → 给可用清单
+  // 2) kind 拼错 → 给可用清单（2026-11-02 修：kind 已从 rotation/translation
+  // 收敛为 rotate/translate，断言同步——它要验的是"清单里有正确写法"）
   auto bad_kind = parse(
       R"j({"objects":[],"animation":{"tracks":[{"node":"a","kind":"colour","keys":[]}]}})j");
   ST_REQUIRE(!bad_kind.has_value());
   ST_CHECK(bad_kind.error().message.find("tracks[0].kind") != std::string::npos);
-  ST_CHECK(bad_kind.error().message.find("rotation") != std::string::npos);
+  ST_CHECK(bad_kind.error().message.find("rotate") != std::string::npos);
   // 3) key 缺时间
   auto no_time = parse(
       R"j({"objects":[],"animation":{"tracks":[{"node":"a","kind":"rotation","keys":[{"value":[0,0,0]}]}]}})j");

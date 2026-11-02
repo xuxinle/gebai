@@ -77,7 +77,7 @@ auto plane_json(const std::string& texture_path, const std::string& extra_fields
     "camera": { "eye": [0.0, 4.0, 0.01], "target": [0.0, 0.0, 0.0], "fov": 45 },
     "lighting": { "ambient": 1.0, "diffuse": 0.0 },
     "objects": [
-      { "name": "sheet", "shape": "plane", "radius": 1.0, "depth": 2.0,
+      { "name": "sheet", "shape": "plane", "size": [2.0, 4.0],
         "color": "#ffffff", "texture": ")j") +
          texture_path + R"j(", )j" + extra_fields + R"j( }
     ]
@@ -240,7 +240,7 @@ ST_TEST(texture_relative_path_resolves_against_asset_basis) {
     "asset_basis": ")") +
       dir + R"(",
     "objects": [
-      { "name": "sheet", "shape": "plane", "radius": 1.0, "depth": 2.0,
+      { "name": "sheet", "shape": "plane", "size": [2.0, 4.0],
         "color": "#ffffff", "texture": "quad.png" }
     ]
   })";

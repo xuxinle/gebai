@@ -66,9 +66,9 @@ constexpr const char* kScene = R"json({
   "lighting": { "light_from": [0.4, 0.8, 0.6], "ambient": 0.18, "diffuse": 0.62 },
   "shadow": { "strength": 0.45, "ground_y": -0.5 },
   "objects": [
-    { "shape": "plane", "width": 6, "height": 6, "color": "#6b6f7a",
+    { "shape": "plane", "size": [6, 6], "color": "#6b6f7a",
       "rotation": [-1.5707963, 0, 0], "translate": [0, -0.5, 0], "ground": true },
-    { "shape": "sphere", "radius": 0.6, "color": "#c8a07a", "segments": 24,
+    { "shape": "sphere", "size": 1.2, "color": "#c8a07a", "segments": 24,
       "roughness": 0.2, "specular": 1.0, "translate": [0, 0.15, 0] }
   ]
 })json";

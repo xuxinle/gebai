@@ -13,6 +13,7 @@
 ///   朝相反方向收敛，且很难从曲线上看出来。
 
 #include <cmath>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -300,21 +301,33 @@ ST_TEST(policy_act_is_argmax_and_deterministic) {
 }
 
 ST_TEST(policy_json_roundtrip_preserves_output) {
+  // ⚠ 层的输入维度必须等于 `observation_dim()`：`load_json` 会校验
+  // （`policy.cpp` 的"输入维度与观测维度不符"），用 3 之类的小维度构造会被拒，
+  // `reloaded.forward` 返回空 vector——旧版还在 `b[index]` 上直接越界
+  // （访问违例把整片分片带走，实测 0xC0000005）。
+  // 修法：维度用真实观测维度；且循环前先判两侧 size（不依赖断言顺序）。
+  const std::size_t dim = gedou::observation_dim();
+  const std::size_t actions = static_cast<std::size_t>(gedou::kRlActionCount);
   LinearLayer layer{};
-  layer.in = 3;
-  layer.out = 2;
+  layer.in = dim;
+  layer.out = actions;   // 输出必须等于动作数（load_json 会校验）
   layer.tanh = true;
-  layer.weight = {0.1f, -0.2f, 0.3f, 0.4f, 0.5f, -0.6f};
-  layer.bias = {0.01f, -0.02f};
+  layer.weight.assign(dim * actions, 0.05f);
+  layer.bias.assign(actions, 0.01f);
+  std::vector<float> input(dim, 0.5f);
+  input[0] = -0.5f;
   auto original = PolicyNet::from_layers({layer});
   const std::string text = original.to_json(false);
   auto reloaded = PolicyNet::from_layers({});
   const auto error = reloaded.load_json(text);
+  if (error.has_value()) std::fprintf(stderr, "[rt] load err: %s\n", error->c_str());
   ST_CHECK(!error.has_value());
-  const std::vector<float> a = original.forward({0.5f, -0.5f, 1.0f});
-  const std::vector<float> b = reloaded.forward({0.5f, -0.5f, 1.0f});
+  const std::vector<float> a = original.forward(input);
+  const std::vector<float> b = reloaded.forward(input);
   ST_CHECK(a.size() == b.size());
-  for (std::size_t index = 0; index < a.size(); ++index) ST_CHECK(near(a[index], b[index]));
+  // 循环上界取**两者较小**：一侧为空时不越界（断言已经报了尺寸不等）。
+  const std::size_t count = std::min(a.size(), b.size());
+  for (std::size_t index = 0; index < count; ++index) ST_CHECK(near(a[index], b[index]));
 }
 
 ST_TEST(policy_rejects_malformed_weights) {
@@ -324,15 +337,22 @@ ST_TEST(policy_rejects_malformed_weights) {
   ST_CHECK(net.load_json("not json").has_value());
   ST_CHECK(net.load_json("{}").has_value());
 
-  // 维度与观测不符
+  // 维度与观测不符（⚠ weight/bias 的**长度必须先造对**：长度检查在维度检查之前，
+  // 长度先错就报不到"维度"，断言也就验不到本想验的那条路径）。
   st::Json root = st::Json::object();
   st::Json layers = st::Json::array();
   st::Json layer = st::Json::object();
-  layer["in"] = static_cast<std::int64_t>(gedou::observation_dim() + 3);
-  layer["out"] = static_cast<std::int64_t>(gedou::kRlActionCount);
+  const std::size_t in = gedou::observation_dim() + 3;
+  const std::size_t out = static_cast<std::size_t>(gedou::kRlActionCount);
+  layer["in"] = static_cast<std::int64_t>(in);
+  layer["out"] = static_cast<std::int64_t>(out);
   layer["tanh"] = false;
-  layer["weight"] = st::Json::array();
-  layer["bias"] = st::Json::array();
+  st::Json weight = st::Json::array();
+  for (std::size_t index = 0; index < in * out; ++index) weight.push_back(0.01);
+  st::Json bias = st::Json::array();
+  for (std::size_t index = 0; index < out; ++index) bias.push_back(0.0);
+  layer["weight"] = std::move(weight);
+  layer["bias"] = std::move(bias);
   layers.push_back(std::move(layer));
   root["layers"] = std::move(layers);
   auto error = net.load_json(st::json_dump(root, false));
@@ -391,15 +411,22 @@ ST_TEST(rl_reward_signs) {
     damage_out = biggest;
     return best;
   };
+  // 2026-11-02 修：默认角色已换成技能型（甜甜圈/户圣），`RlAction::Light→DonutToss(58)`
+  // 与 `Heavy→PuffSpray(26)` 的单帧伤害关系与旧「拳表 Light=42 < Heavy=96」相反。
+  // 本用例验的是**奖励符号/排序**而非角色平衡，改为：谁的实测伤害大，谁的奖励就必须高
+  //（不预判谁大）；前提是两招都真的命中过。
   float light_damage = 0.0f;
   float heavy_damage = 0.0f;
   const float light_reward = hit_reward_of(MoveId::Light, light_damage);
   const float heavy_reward = hit_reward_of(MoveId::Heavy, heavy_damage);
   ST_CHECK(light_damage > 0.0f);    // 前提：两种招都真打中过
   ST_CHECK(heavy_damage > 0.0f);
-  ST_CHECK(heavy_damage > light_damage * 1.5f);   // 重拳伤害本来就更大
   // 核心断言：伤害更大的那一招，单帧奖励更高。符号反了立刻被抓住。
-  ST_CHECK(heavy_reward > light_reward);
+  if (heavy_damage > light_damage) {
+    ST_CHECK(heavy_reward > light_reward);
+  } else {
+    ST_CHECK(light_reward > heavy_reward);
+  }
 
   // 反向：纯挨打（对手会动、自己不动）的帧必须是负分。
   RlEnv::Config taken_cfg{};

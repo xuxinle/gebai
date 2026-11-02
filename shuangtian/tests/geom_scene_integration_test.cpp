@@ -50,12 +50,15 @@ auto inked_pixels(const Canvas& canvas) -> int {
 }
 
 /// 渲染一个"只用一种形状"的场景，返回覆盖像素数。
+///
+/// 尺寸统一用 `size`（全长口径：球是直径标量，其余是数组；见 `st_api --shape <名>`）。
+/// 旧字段 radius/depth 已彻底删除（`scene_script_size_is_the_only_size_path` 钉住）。
 auto render_shape_ink(const std::string& shape, int width, int height) -> int {
   const std::string json = R"({
     "camera": { "eye": [0.0, 0.6, 3.4], "target": [0.0, 0.0, 0.0], "fov": 45 },
     "lighting": { "ambient": 0.35, "diffuse": 0.75, "rim": 0.25 },
     "objects": [
-      { "shape": ")" + shape + R"(", "radius": 0.7, "depth": 1.0, "height": 1.0,
+      { "shape": ")" + shape + R"(", "size": 1.4,
         "segments": 16, "rings": 8, "major_radius": 0.6, "minor_radius": 0.2,
         "columns": 4, "rows": 4, "teeth": 10, "sides": 5, "turns": 2.0,
         "color": "#c8a07a", "metallic": 0.0, "roughness": 0.4 }
@@ -98,7 +101,7 @@ ST_TEST(scene_script_keeps_legacy_shape_semantics) {
   // 并把 `face_camera` 的情形单独钉一条（上下两个方向都要能画）。
   const std::string json = R"({
     "camera": { "eye": [0.0, 3.0, 0.01], "target": [0.0, 0.0, 0.0], "fov": 45 },
-    "objects": [ { "shape": "plane", "radius": 0.8, "depth": 1.6, "color": "#88aaff" } ]
+    "objects": [ { "shape": "plane", "size": [1.6, 3.2], "color": "#88aaff" } ]
   })";
   auto spec = st::raster::parse_scene_spec_text(json);
   ST_REQUIRE(spec.has_value());
