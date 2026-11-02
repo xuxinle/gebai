@@ -16,6 +16,9 @@
 #include "st/core/time.hpp"
 #include "st/core/wait.hpp"
 #include "st/core/json.hpp"
+#include "st/perf/frame.hpp"
+#include "st/perf/startup.hpp"
+#include "st/perf/report.hpp"
 #include "st/text/text.hpp"
 #include "st/ui/builtin_themes.hpp"
 #include "st/ui/theme_io.hpp"
@@ -309,6 +312,9 @@ struct Application::Impl {
   /// 绘制剖析器（`ST_PAINT_PROFILE=1` 时才挂到帧缓冲画布上）。
   raster::PaintProfiler profiler{};
   bool profiling{false};
+  /// 帧剖析器（`--perf-frames N` / `ST_PERF=1` 时创建；同时会把自己设为
+  /// 进程级"当前剖析器"，供 `Element::paint` 取用）。
+  std::unique_ptr<perf::FrameProfiler> frame_profiler{};
   /// 日志订阅 id（构造时注册、析构时注销）——见 `Application::Application` 的说明。
   std::uint64_t log_listener_id{0};
   /// 应用异步任务系统（`tasks()` 的落点）。住 `Impl`：
@@ -350,6 +356,16 @@ Application::Application(std::string name, std::string version, AppOptions optio
   if (const auto flag = fs::read_env("ST_PAINT_PROFILE"); flag.has_value() && !flag->empty() &&
       *flag != "0") {
     impl_->profiling = true;
+  }
+  // 帧剖析：两个开法殊途同归（都归到一个剖析器），因为使用者是两种人：
+  // ① `ST_PERF=1`：环境变量，适合"我怀疑这个应用慢"的排查现场；
+  // ② `--perf-frames N`：命令行显式声明要抓多少帧，适合自动化/报告产物。
+  if (options_.profile_frames > 0 || perf::enabled()) {
+    impl_->frame_profiler = std::make_unique<perf::FrameProfiler>(
+        options_.profile_frames > 0 ? options_.profile_frames : std::size_t{600});
+    perf::set_active_frame_profiler(impl_->frame_profiler.get());
+    // 剖析必然要读时钟：环境变量只给 `--perf-frames` 时也要真正开启。
+    if (!perf::enabled()) perf::set_enabled(true);
   }
   if (!options_.screenshot_dir.empty()) {
     (void)fs::create_directories(options_.screenshot_dir);
@@ -557,6 +573,108 @@ auto Application::control_port() const noexcept -> std::uint16_t {
 
 auto Application::paint_profile() const -> const raster::PaintProfiler* {
   return impl_->profiling ? &impl_->profiler : nullptr;
+}
+
+auto Application::perf_report() const -> std::optional<perf::Report> {
+  if (impl_->frame_profiler == nullptr) return std::nullopt;
+  perf::MeasurementContext context{};
+  context.app = app_name();
+  context.app_version = app_version();
+  context.backend = std::string(backend_name());
+  // 构建档：`ST_BUILD_PROFILE` 由 `st` 在编译期注入；没有时按 `NDEBUG` 猜——
+  // 猜错会让报告把 debug 档的数字当成 release（这正是报告 `caveats` 要防的误读）。
+  if (const auto profile = fs::read_env("ST_BUILD_PROFILE"); profile.has_value()) {
+    context.profile = *profile;
+  }
+  if (context.profile.empty()) {
+#if defined(NDEBUG)
+    context.profile = "release";
+#else
+    context.profile = "dev";
+#endif
+  }
+  const control::Metrics snapshot = metrics();
+  context.renderer = snapshot.renderer;
+  context.headless = snapshot.headless;
+  context.device_scale = snapshot.device_scale;
+  context.width = static_cast<int>(root_.viewport().width);
+  context.height = static_cast<int>(root_.viewport().height);
+  return impl_->frame_profiler->report(context);
+}
+
+auto Application::perf_frames_csv() const -> std::string {
+  if (impl_->frame_profiler == nullptr) return {};
+  return impl_->frame_profiler->frames_csv();
+}
+
+void Application::perf_reset() {
+  if (impl_->frame_profiler != nullptr) impl_->frame_profiler->reset();
+}
+
+auto Application::perf_active() const noexcept -> bool {
+  return impl_->frame_profiler != nullptr;
+}
+
+auto Application::perf_report_json(std::uint32_t capacity) -> std::string {
+  if (capacity > 0) {
+    // “我要采更多帧”：容量变了就重建剖析器（旧样本随之丢弃，但这也是调用方
+    // 的意图——它刚要求一个新的采样窗口）。
+    if (impl_->frame_profiler == nullptr || impl_->frame_profiler->capacity() != capacity) {
+      impl_->frame_profiler = std::make_unique<perf::FrameProfiler>(capacity);
+      perf::set_active_frame_profiler(impl_->frame_profiler.get());
+      perf::set_enabled(true);
+    }
+  }
+  const auto report = perf_report();
+  if (!report.has_value()) {
+    // 未开剖析时返回一份**说清楚为什么没有数据**的报告，而不是空串：
+    // 调用方（模型/脚本）看到空串只能猜，看到 caveat 就知道下一步该干什么。
+    perf::Report shell{};
+    shell.kind = "frame";
+    shell.context.app = app_name();
+    shell.context.app_version = app_version();
+    shell.context.backend = std::string(backend_name());
+    perf::Caveat caveat{};
+    caveat.kind = "not_profiling";
+    caveat.ok = false;
+    caveat.detail = "帧剖析未开启（无样本）";
+    caveat.fix = "控制通道 perf action=start（或启动时 --perf-frames N）";
+    shell.caveats.push_back(std::move(caveat));
+    return perf::to_json(shell);
+  }
+  return perf::to_json(*report);
+}
+
+auto Application::perf_set_active(bool active, std::uint32_t capacity) -> bool {
+  if (active) {
+    if (capacity > 0 && (impl_->frame_profiler == nullptr ||
+                         impl_->frame_profiler->capacity() != capacity)) {
+      impl_->frame_profiler = std::make_unique<perf::FrameProfiler>(capacity);
+    }
+    perf_start(capacity);
+  } else {
+    perf_stop();
+  }
+  return true;
+}
+
+void Application::perf_reset_samples() { perf_reset(); }
+
+void Application::perf_start(std::uint32_t capacity) {
+  if (impl_->frame_profiler == nullptr) {
+    impl_->frame_profiler =
+        std::make_unique<perf::FrameProfiler>(capacity > 0 ? capacity : std::uint32_t{600});
+  }
+  perf::set_active_frame_profiler(impl_->frame_profiler.get());
+  // 剖析本身要读时钟：`ST_PERF` 没开时也要把它打开（“按需开”的语义就在这里）。
+  perf::set_enabled(true);
+}
+
+void Application::perf_stop() {
+  // 只摘掉“当前剖析器”并关闭探针，**不销毁**剖析器：停采样后仍要能取报告
+  // （“跑了 30 秒，现在停下来看看结果”是最常见的用法）。
+  perf::set_active_frame_profiler(nullptr);
+  perf::set_enabled(false);
 }
 
 void Application::request_quit() { impl_->quit = true; }
@@ -867,6 +985,11 @@ auto Application::capture_to_file(std::string_view path, math::IntRect region)
 auto Application::start() -> Status {
   if (started_) return ok();
 
+  // **启动分解的里程碑**：`ST_PERF_STARTUP=1` 时开启（关时每个 mark 只有一次
+  // `enabled()` 读，不读时钟）。它们回答的是“首帧那 200ms 花在哪”——
+  // 那段不属于任何一帧的阶段（帧剖析里三段加起来才 2ms）。
+  perf::startup_mark("app.start");
+
   // 后端选择：`backend` 显式指定 > `headless=true`（等价于指定 headless）> 自动探测。
   //
   // `headless` 字段**必须真的参与选择**：它原先只在"后端为空时报告用"，于是
@@ -887,6 +1010,7 @@ auto Application::start() -> Status {
     impl_->backend_holder = std::move(*backend);
   }
   impl_->backend = impl_->backend_holder.get();
+  perf::startup_mark("backend.create");
 
   // DPI 解析：显式选项 > ST_SCALE 环境变量 > **后端默认**（不要在这里填 1.0）。
   //
@@ -941,6 +1065,7 @@ auto Application::start() -> Status {
       return forward_error(status.error());
     }
   }
+  perf::startup_mark("window.create");
 
   // **软件渲染（WARP）帧预算自适应**（2026-10-29，后收敛为仅日志）：
   //
@@ -1377,7 +1502,11 @@ auto Application::start() -> Status {
   // "拖动中拉伸扭曲、松手才重绘"）。这里把"重画一帧"交给后端去调。
   impl_->backend->set_resize_repaint([this] { render_frame(); });
   started_ = true;
+  perf::startup_mark("before_first_frame");
   render_frame();
+  // 首帧完成：这是“启动慢”的真实终点（用户看到完整界面的时刻）。
+  // 它里面含字体首次光栅化与图元缓存建表——那正是帧剖析里“冷启动帧”的 200ms。
+  perf::startup_mark("first_frame");
   // 首帧已画完 → 窗口可以露面了。
   //
   // 窗口后端建窗时**故意不显**（见 `Backend::show_when_ready` 声明处）：否则
@@ -1399,6 +1528,12 @@ auto Application::start() -> Status {
 void Application::render_frame() {
   if (impl_->backend == nullptr) return;
   const std::int64_t start_ns = time::now_ns();
+  // **帧剖析**（关闭时 `profiler` 为空，整个帧只多两次判空）。
+  //
+  // 为何在这里而不在 `tick()`：拖边框时帧是由窗口过程直接驱动的，绕过了 `tick`——
+  // 剖析若挂在 `tick` 上，那些帧就不进样本，而它们正是“拖动时卡”的现场。
+  perf::FrameProfiler* profiler = impl_->frame_profiler.get();
+  if (profiler != nullptr) profiler->begin_frame(static_cast<double>(start_ns) / 1'000'000.0);
   // **墙钟帧间隔**：相邻两次进本函数之差（与帧内耗时是两件事）。
   //
   // 帧内耗时（layout+paint+present）小、而墙钟间隔大 ⇒ 被限帧（`pace_loop` 睡满
@@ -1445,8 +1580,17 @@ void Application::render_frame() {
   // CPU 多线程整纹理拷贝（实测 ~7ms/帧），鼠标停在按钮上等气泡的那 450ms
   // 里每帧都在白烧。后备缓冲里的画面就是最新，跳过即可。
   if (!root_.last_frame_presentable()) {
+    const std::int64_t now_ns = time::now_ns();
     impl_->repaint = false;
     root_.clear_dirty();
+    // 空帧也要入样本：它正是"空转烧 CPU"的证据（见 `idle_churn` 判据）。
+    if (profiler != nullptr) {
+      const auto to_ms = [](std::int64_t value) { return static_cast<double>(value) / 1'000'000.0; };
+      profiler->record_phase("layout", to_ms(paint_start - layout_start));
+      profiler->record_phase("paint", to_ms(now_ns - paint_start));
+      profiler->record_phase("present", 0.0);
+      profiler->end_frame(0, false, false);
+    }
     return;
   }
   impl_->backend->set_present_region(partial ? root_.dirty_rect() : math::IntRect{});
@@ -1462,6 +1606,13 @@ void Application::render_frame() {
   impl_->frame_times.push(impl_->last_frame_ms);
   impl_->repaint = false;
   root_.clear_dirty();
+  // 三段与帧指标同口径（`metrics.layout_ms` 等就是上面三个变量），剖析只多一次记录。
+  if (profiler != nullptr) {
+    profiler->record_phase("layout", impl_->layout_ms);
+    profiler->record_phase("paint", impl_->paint_ms);
+    profiler->record_phase("present", impl_->present_ms);
+    profiler->end_frame(root_.painted_elements(), partial, true);
+  }
 }
 
 auto Application::tasks() -> app::Tasks& { return impl_->tasks; }
@@ -1556,8 +1707,11 @@ auto Application::run_loop() -> Result<int> {
     pace_loop(frame_start / 1'000'000);
   }
   ST_LOG_INFO("应用退出：共 {} 帧，最后一帧 {:.2f}ms（排版 {:.2f} / 绘制 {:.2f} / 送显 {:.2f}）",
-            impl_->frames, impl_->last_frame_ms, impl_->layout_ms, impl_->paint_ms,
-            impl_->present_ms);
+              impl_->frames, impl_->last_frame_ms, impl_->layout_ms, impl_->paint_ms,
+              impl_->present_ms);
+  // 启动分解的收尾输出（`ST_PERF_STARTUP=1` 才有数据）。放在退出处而不是启动末尾：
+  // “启动”真正的终点在首帧之后（那里才能量到完整代价）。
+  perf::log_startup_summary();
   return 0;
 }
 

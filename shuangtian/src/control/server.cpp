@@ -693,8 +693,14 @@ struct Server::Impl {
                        bool& deferred) -> Result<Json>;
   [[nodiscard]] auto handle_script(Client& client, std::uint64_t id, const Json& params,
                        bool& deferred) -> Result<Json>;
-  [[nodiscard]] auto handle_metrics(Client& client, std::uint64_t id, const Json& params,
-                       bool& deferred) -> Result<Json>;
+    [[nodiscard]] auto handle_metrics(Client& client, std::uint64_t id, const Json& params,
+                                    bool& deferred) -> Result<Json>;
+  /// 性能诊断（`perf`）：`snapshot`（默认）/ `start` / `stop` / `reset` / `report`。
+  ///
+  /// 为什么是一个方法而不是四个：**对调用方而言只存在“给我一份诊断”这一件事**；
+  /// 开/停/清空只是它的参数。这样模型不必先学会四个动词再拼流程。
+  [[nodiscard]] auto handle_perf(Client& client, std::uint64_t id, const Json& params,
+                                 bool& deferred) -> Result<Json>;
   [[nodiscard]] auto handle_events(Client& client, std::uint64_t id, const Json& params,
                        bool& deferred) -> Result<Json>;
   [[nodiscard]] auto handle_theme(Client& client, std::uint64_t id, const Json& params,
@@ -744,6 +750,7 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
   if (method == "visual") { return handle_visual(client, id, params, deferred); }
   if (method == "script") { return handle_script(client, id, params, deferred); }
   if (method == "metrics") { return handle_metrics(client, id, params, deferred); }
+  if (method == "perf") { return handle_perf(client, id, params, deferred); }
   if (method == "events") { return handle_events(client, id, params, deferred); }
   if (method == "theme") { return handle_theme(client, id, params, deferred); }
   if (method == "wait") { return handle_wait(client, id, params, deferred); }
@@ -783,11 +790,12 @@ Json theme = Json::object();
 theme["mode"] = root.theme().mode() == ui::ThemeMode::Dark ? "dark" : "light";
 result["theme"] = std::move(theme);
 Json capabilities = Json::array();
-for (const auto name : {"tree", "find", "get", "set", "invoke", "ui.create", "ui.remove",
-                        "input.mouse", "input.key", "input.text", "capture", "capture.hash",
-                        "visual", "visual.diff", "wait", "metrics", "events", "theme", "app"}) {
-  capabilities.push_back(Json(name));
-}
+  for (const auto name : {"tree", "find", "get", "set", "invoke", "ui.create", "ui.remove",
+                         "input.mouse", "input.key", "input.text", "capture", "capture.hash",
+                         "visual", "visual.diff", "wait", "metrics", "perf", "events", "theme",
+                         "app"}) {
+    capabilities.push_back(Json(name));
+  }
 // `script` 只在真正启用时上报：能力清单是"这个进程能做什么"的事实说明，
 // 不能列一个一调就报 Unsupported 的方法。
 if (host.script() != nullptr) capabilities.push_back(Json("script"));
@@ -1847,8 +1855,61 @@ return unexpected(ErrorCode::Unsupported, std::format("未知 app 动作: {}", a
   
 }
 
-auto Server::Impl::handle_shutdown([[maybe_unused]] Client& client, [[maybe_unused]] std::uint64_t id,
-                                   [[maybe_unused]] const Json& params,
+auto Server::Impl::handle_perf([[maybe_unused]] Client& client, [[maybe_unused]] std::uint64_t id,
+                              [[maybe_unused]] const Json& params,
+                              [[maybe_unused]] bool& deferred) -> Result<Json> {
+  const std::string action = json_get_string(params, "action", "snapshot");
+  const auto capacity = static_cast<std::uint32_t>(json_get_i64(params, "frames", 0));
+  if (action == "start" || action == "stop") {
+    const bool want_active = action == "start";
+    if (!host.perf_set_active(want_active, capacity)) {
+      return unexpected(ErrorCode::Unsupported, "该应用不支持运行期剖析");
+    }
+    // 开/停之后**立即给一份状态**：调用方不必再发一条命令才知道生效了没有。
+    Json result = Json::object();
+    result["ok"] = true;
+    result["active"] = want_active;
+    result["capacity"] = static_cast<std::uint64_t>(capacity);
+    return result;
+  }
+  if (action == "reset") {
+    host.perf_reset_samples();
+    Json result = Json::object();
+    result["ok"] = true;
+    return result;
+  }
+  if (action == "snapshot" || action == "report") {
+    const std::string text = host.perf_report_json(capacity);
+    if (text.empty()) {
+      return unexpected(ErrorCode::Unsupported,
+                        "该应用未提供性能报告（Host::perf_report_json 返回空）");
+    }
+    // 报告是**完整 JSON 文本**：原样嵌进协议，不重新解码再编码——
+    // 两者的字段顺序/浮点格式不同，会让“同一份报告”在命令行与通道下呈现不同样子。
+    auto parsed = json_parse(text);
+    if (!parsed.has_value()) {
+      return unexpected(ErrorCode::Internal, "性能报告序列化失败");
+    }
+    Json result = Json::object();
+    result["report"] = std::move(*parsed);
+    // 额外的**粗粒度摘要**：模型看一眼就知道要不要展开 `report`。
+    const Json& report = json_at(result, "report");
+    const Json& findings = json_at(report, "findings");
+    result["finding_count"] = static_cast<std::uint64_t>(findings.size());
+    const Json& caveats = json_at(report, "caveats");
+    // “这份数据能不能用来下结论”——把 ok=false 的条数直接报出来，
+    // 比让调用方自己遍历数组更容易被用上。
+    std::uint64_t blockers = 0;
+    for (const auto& caveat : caveats) {
+      if (!json_get_bool(caveat, "ok", true)) ++blockers;
+    }
+    result["caveat_blockers"] = blockers;
+    return result;
+  }
+  return unexpected(ErrorCode::Unsupported, std::format("未知 perf 动作: {}", action));
+}
+
+auto Server::Impl::handle_shutdown([[maybe_unused]] Client& client, [[maybe_unused]] std::uint64_t id,                                   [[maybe_unused]] const Json& params,
                                    [[maybe_unused]] bool& deferred) -> Result<Json> {
   [[maybe_unused]] auto& root = host.root();
 host.request_quit();

@@ -4,7 +4,12 @@
 #include <string>
 #include <string_view>
 
+#include "st/core/fs.hpp"
+#include "st/core/json.hpp"
+#include "st/core/print.hpp"
 #include "st/core/string.hpp"
+#include "st/perf/clock.hpp"
+#include "st/perf/report.hpp"
 
 namespace st::app {
 namespace {
@@ -60,9 +65,11 @@ auto common_options_usage(std::string_view program) -> std::string {
       "  --enable-script       开启进程内脚本能力（默认关闭）\n"
         "  --frames N            跑够 N 帧后退出\n"
         "  --ms N                跑够 N 毫秒后退出\n"
-        "  --log-file PATH       日志落盘（父目录自动建；也看 ST_LOG_FILE）\n"
-        "  --log-level NAME      trace / debug / info / warn / error / off\n"
-        "  --crash-dir DIR       崩溃报告落盘目录（也看 ST_CRASH_DIR）\n",
+              "  --log-file PATH       日志落盘（父目录自动建；也看 ST_LOG_FILE）\n"
+      "  --log-level NAME      trace / debug / info / warn / error / off\n"
+      "  --crash-dir DIR       崩溃报告落盘目录（也看 ST_CRASH_DIR）\n"
+      "  --perf-frames N       开启帧剖析并保留 N 帧的逐帧序列（默认不剖析）\n"
+      "  --perf-report PATH    退出时把性能诊断报告写成 JSON（供 st perf --compare 或智能体读取）\n",
       program, 1280, 720);
 }
 
@@ -254,7 +261,22 @@ auto parse_common_options(int argc, char** argv, CommonOptions& options) -> Stat
       auto number = parse_int(*parsed, argument);
       if (!number) return forward_error(number.error());
       options.max_ms = static_cast<std::uint32_t>(*number < 0 ? 0 : *number);
-      } else if (argument == "--log-file" || argument == "--log-level" || argument == "--crash-dir") {
+    } else if (argument == "--perf-frames") {
+      auto parsed = value(argument);
+      if (!parsed) return forward_error(parsed.error());
+      auto number = parse_int(*parsed, argument);
+      if (!number) return forward_error(number.error());
+      options.app.profile_frames = static_cast<std::uint32_t>(*number < 0 ? 0 : *number);
+      // 显式要剖析帧就必须真的开探针（即使 `ST_PERF` 没设）：用户已经说“我要数据”。
+      if (options.app.profile_frames > 0) perf::set_enabled(true);
+    } else if (argument == "--perf-report") {
+      auto parsed = value(argument);
+      if (!parsed) return forward_error(parsed.error());
+      options.perf_report = *parsed;
+      options.perf_on_exit = true;
+    } else if (argument == "--perf-exit") {
+      options.perf_on_exit = true;
+    } else if (argument == "--log-file" || argument == "--log-level" || argument == "--crash-dir") {
     // 诊断开关：**已在 `startup_configure_diagnostics` 里生效**（它比这里跑得更早，
     // 才能盖住启动早期的日志）。这里只做“认识它”——否则会被下面那句
     // “未知参数”报错退出，而应用里写死的解析器也可能因为不认识它而拒掉整个命令行。
@@ -265,6 +287,33 @@ auto parse_common_options(int argc, char** argv, CommonOptions& options) -> Stat
     }
   }
   return ok();
+}
+
+auto finish_with_report(Application& app, const CommonOptions& options) -> bool {
+  if (!options.perf_on_exit) return false;
+  const auto report = app.perf_report();
+  if (!report.has_value()) {
+    // 剖析没开就没什么可写的。**不静默**：调用方给了 `--perf-report` 却没拿到文件，
+    // 那种“以为采到了、其实没采”的空白最难查（与 ST_SKIP 同一姿态：说清楚没测）。
+    st::eprint("未生成性能报告：剖析未开启（需要 --perf-frames N 或 ST_PERF=1）\n");
+    return false;
+  }
+  const std::string json = perf::to_json(*report);
+  if (options.perf_report.empty()) {
+    // 没给路径：打到 stdout（自动化流程直接读管道）。
+    st::print("{}\n", json);
+    return true;
+  }
+  if (const auto parent = fs::parent(options.perf_report); !parent.empty()) {
+    (void)fs::create_directories(parent);
+  }
+  if (auto written = fs::write_text(options.perf_report, json); !written) {
+    st::eprint("性能报告写入失败（{}）: {}\n", options.perf_report,
+               written.error().to_string());
+    return false;
+  }
+  st::print("性能报告: {}\n", options.perf_report);
+  return true;
 }
 
 }  // namespace st::app

@@ -42,6 +42,24 @@ void PaintProfiler::add(PaintOp op, double ms, std::uint64_t pixels) {
   stat.ms += ms;
 }
 
+void PaintProfiler::add_at(PaintOp op, std::string_view site, double ms, std::uint64_t pixels) {
+  add(op, ms, pixels);
+  if (op == PaintOp::Count) return;
+  PaintOpStat& stat = ops[static_cast<std::size_t>(op)];
+  // 调用点表按需增长；上限保护真实界面里“成千上万个不同调用点”的极端：
+  // 超出后只累计进类别，不建新桶（保持内存有界，与 `perf::Recorder` 同姿态）。
+  for (auto& entry : stat.sites) {
+    if (entry.site == site) {
+      ++entry.calls;
+      entry.ms += ms;
+      return;
+    }
+  }
+  constexpr std::size_t kMaxSitesPerOp = 64;
+  if (stat.sites.size() >= kMaxSitesPerOp) return;
+  stat.sites.push_back(PaintSiteStat{std::string(site), 1, ms});
+}
+
 auto PaintProfiler::op(PaintOp which) const noexcept -> const PaintOpStat& {
   return ops[static_cast<std::size_t>(which)];
 }
@@ -52,7 +70,9 @@ auto PaintProfiler::total_ms() const noexcept -> double {
   return total;
 }
 
-void PaintProfiler::clear() noexcept { ops.fill(PaintOpStat{}); }
+void PaintProfiler::clear() noexcept {
+  ops.fill(PaintOpStat{});
+}
 
 namespace {
 
@@ -81,20 +101,30 @@ inline constexpr std::size_t kGeometrySpriteLimit = 512;
 }
 
 /// 原语计时作用域（仅当画布挂了剖析器时记账）。
+///
+/// 调用点由 `std::source_location::current()` 的默认实参在**构造处**捕获——
+/// 于是每一个 `OpScope scope(*this, ...)` 都自动带上它自己那一行，
+/// 而 `PaintProfiler` 能回答“同一原语里哪一处调用贵”。
 struct OpScope {
   Canvas& canvas;
   PaintOp op;
   std::int64_t start_ns;
   std::uint64_t pixels;
+  std::source_location site;
 
-  OpScope(Canvas& target, PaintOp which) noexcept
-      : canvas(target), op(which), start_ns(target.profiler() != nullptr ? time::now_ns() : 0),
-        pixels(0) {}
+  OpScope(Canvas& target, PaintOp which,
+          const std::source_location location = std::source_location::current()) noexcept
+      : canvas(target),
+        op(which),
+        start_ns(target.profiler() != nullptr ? time::now_ns() : 0),
+        pixels(0),
+        site(location) {}
   OpScope(const OpScope&) = delete;
   auto operator=(const OpScope&) -> OpScope& = delete;
   ~OpScope() {
     if (start_ns == 0) return;
-    canvas.add_profile(op, static_cast<double>(time::now_ns() - start_ns) / 1'000'000.0, pixels);
+    canvas.add_profile(op, static_cast<double>(time::now_ns() - start_ns) / 1'000'000.0, pixels,
+                       site);
   }
   void set_pixels(std::uint64_t value) noexcept { pixels = value; }
 };

@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -13,6 +14,8 @@
 #include "st/control/control.hpp"
 #include "st/ext/script.hpp"
 #include "st/core/error.hpp"
+#include "st/perf/frame.hpp"
+#include "st/perf/report.hpp"
 #include "st/shell/shell.hpp"
 #include "st/text/text.hpp"   // font_stack() 的返回类型（只读字体栈）
 #include "st/ui/ui_root.hpp"
@@ -336,6 +339,13 @@ struct AppOptions {
   bool exit_on_ready{false};          ///< 首帧后立即退出（自检用）
   double frame_budget_ms{16.0};       ///< 帧间隔目标
 
+  /// **帧剖析采样帧数**（0 = 不剖析）。>0 时创建一个 `perf::FrameProfiler`，
+  /// 逐帧记录阶段/元素，并可通过 `Application::perf_report()` 取回诊断报告。
+  ///
+  /// 为何是应用层选项而不是环境变量：剖析结果要被**自动化流程**消费（`st perf`
+  /// 与控制通道都得能按需开），而环境变量只能启动期决定。
+  std::uint32_t profile_frames{0};
+
   /// **`defer_gpu` 是否真的生效**：`defer_gpu` 为真、且渲染器**未被显式指定**。
   ///
   /// 抽成函数而不是在两处各写一份：`app.cpp` 用它决定“要不要交给后端”，
@@ -408,6 +418,11 @@ class Application final : public control::Host, public ui::WindowControl {
   /// 字体数据本身不可变，多个 `TextRenderer` 共享同一个 `FontStack` 是安全的。
   [[nodiscard]] auto font_stack() const -> const st::text::FontStack&;
   [[nodiscard]] auto metrics() const -> control::Metrics override;
+  /// 控制通道 `perf` 用：报告 JSON（同 `st::perf::to_json` schema）。
+  /// `capacity > 0` 时顺带把剖析器容量扩到该值（“我现在要采 2000 帧”）。
+  [[nodiscard]] auto perf_report_json(std::uint32_t capacity) -> std::string override;
+  auto perf_set_active(bool active, std::uint32_t capacity) -> bool override;
+  void perf_reset_samples() override;
   void set_theme_mode(ui::ThemeMode mode) override;
   /// 按名字切主题（内置主题库：light/dark/nebula/qinhan/…）。
   /// 与 `set_theme_mode` 同一管线（`compose_theme_with` 重合成），
@@ -450,9 +465,28 @@ class Application final : public control::Host, public ui::WindowControl {
   /// 查询控制通道端口（0=未启动）。
   [[nodiscard]] auto control_port() const noexcept -> std::uint16_t;
   /// 最后一帧的绘制分解（**仅当 `ST_PAINT_PROFILE=1` 时非空**）：
-  /// 按原语（填充/路径/描边/阴影/文字/裁剪…）给出调用次数、覆盖像素与累计耗时。
+  /// 按原语（填充/路径/描边/阴影/文字/裁剪…）给出调用次数、覆盖像素与累计耗时，
+  /// 以及**每类原语最贵的调用点**（`PaintOpStat::sites`）。
   /// 存在的理由：“一帧 30ms”本身不指向任何行动——是阴影、文字还是渐变，只能靠分解看。
   [[nodiscard]] auto paint_profile() const -> const raster::PaintProfiler*;
+
+  // —— 性能剖析（帧级）——
+  /// 取一份诊断报告（含 `findings`/`caveats`/证据层）。无剖析器时返回 `nullopt`。
+  ///
+  /// 报告直接回答“该改哪里”：阶段主导项、元素热点、抖动帧、空转帧。
+  /// 调用前不必停剖析（报告只快照当前样本）；要“从现在开始重采”先调 `perf_reset()`。
+  [[nodiscard]] auto perf_report() const -> std::optional<perf::Report>;
+  /// 逐帧序列 CSV（抖动分析用）。无剖析器时为空串。
+  [[nodiscard]] auto perf_frames_csv() const -> std::string;
+  /// 清空样本（保留剖析器）。
+  void perf_reset();
+  /// 是否在剖析。
+  [[nodiscard]] auto perf_active() const noexcept -> bool;
+  /// 按需开关剖析（控制通道 `perf start/stop` 走这条）。
+  ///
+  /// `capacity` 是逐帧环缓冲容量；重复开启保持原有剖析器（不丢已有样本）。
+  void perf_start(std::uint32_t capacity = 600);
+  void perf_stop();
   /// 受控提前启动（`run` 内部会调用；自检可先启动再注入事件）。
   auto start() -> Status;
   [[nodiscard]] auto started() const noexcept -> bool { return started_; }

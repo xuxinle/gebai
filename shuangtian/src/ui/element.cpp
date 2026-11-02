@@ -5,6 +5,8 @@
 #include <format>
 
 #include "st/core/log.hpp"
+#include "st/perf/clock.hpp"
+#include "st/perf/frame.hpp"
 #include "st/raster/paint.hpp"
 #include "st/math/path.hpp"
 #include "st/ui/line_layout.hpp"
@@ -1164,6 +1166,32 @@ void Element::paint(const RenderContext& context, raster::Surface& canvas) const
     if (!subtree_may_paint(*this, logical_clip, margin)) return;
   }
   if (context.painted_elements != nullptr) ++*context.painted_elements;
+  // **元素级剖析**（关闭时只多两次判空，不读时钟）：计时包住整个 `paint_impl`，
+  // 于是子类的绘制与它重写的流程都在这里面。自身耗时 = 子树 − 直接子元素
+  // （子元素自己也调 `paint`，所以 `paint_cost_ns_` 已是含子孙的量）。
+  perf::FrameProfiler* profiler =
+      ::st::perf::enabled() ? ::st::perf::active_frame_profiler() : nullptr;
+  if (profiler == nullptr) {
+    paint_impl(context, canvas);
+    return;
+  }
+  const std::int64_t element_start = ::st::perf::now_ticks();
+  paint_impl(context, canvas);
+  const std::int64_t subtree_ns = ::st::perf::ticks_to_ns(::st::perf::now_ticks() - element_start);
+  // 只减**本帧真的画过**的子孙：被视口剔除的子元素不会重新计时，
+  // 它手里的是旧帧的值——减它会把别人的账算进来（或得出负值）。
+  const std::uint64_t serial = profiler->frame_serial();
+  std::int64_t children_ns = 0;
+  for (const auto& child : children_) {
+    if (child->paint_cost_serial() == serial) children_ns += child->paint_cost_ns();
+  }
+  const std::int64_t self_ns = subtree_ns > children_ns ? subtree_ns - children_ns : 0;
+  paint_cost_ns_ = subtree_ns;  // 供父元素相减（**必须记含子孙的量**）
+  paint_cost_serial_ = serial;
+  profiler->record_element(type(), id_, self_ns, subtree_ns);
+}
+
+void Element::paint_impl(const RenderContext& context, raster::Surface& canvas) const {
   paint_box(context, canvas);
   paint_content(context, canvas);
   if (style_.clip_children) {

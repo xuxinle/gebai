@@ -16,12 +16,14 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <source_location>
 #include <span>
 #include <utility>
 #include <vector>
 
 #include "st/math/color.hpp"
 #include "st/math/geometry.hpp"
+#include "st/perf/scope.hpp"
 #include "st/raster/paint.hpp"
 #include "st/math/path.hpp"
 #include "st/raster/surface.hpp"
@@ -104,8 +106,10 @@ class Canvas final : public Surface {
   void set_profiler(PaintProfiler* profiler) noexcept override { profiler_ = profiler; }
   [[nodiscard]] auto profiler() const noexcept -> PaintProfiler* override { return profiler_; }
   /// 手动记账（文本等跨模块绘制路径用）：把一段耗时记到指定原语。
-  void add_profile(PaintOp op, double ms, std::uint64_t pixels = 0) noexcept override {
-    if (profiler_ != nullptr) profiler_->add(op, ms, pixels);
+  void add_profile(PaintOp op, double ms, std::uint64_t pixels = 0,
+                   const std::source_location site =
+                       std::source_location::current()) noexcept override {
+    if (profiler_ != nullptr) profiler_->add_at(op, ::st::perf::site_of(site), ms, pixels);
   }
 
   // —— 绘制原语 ——

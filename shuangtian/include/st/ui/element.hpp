@@ -333,6 +333,15 @@ class Element {
   void set_key(std::string key) { key_ = std::move(key); }
   [[nodiscard]] virtual auto type() const noexcept -> std::string_view { return "Element"; }
   [[nodiscard]] virtual auto role() const noexcept -> Role { return Role::None; }
+  /// 上一帧本元素**子树**的绘制耗时（纳秒；仅剖析时非零）。
+  /// 父元素算“自身耗时”时减它，逐层得到真实的自持成本。
+  ///
+  /// 与 `paint_cost_serial()` 一起用：只减**同帧**的值（子元素这一帧被视口剔除时，
+  /// 它手里的是旧帧的读数）。
+  [[nodiscard]] auto paint_cost_ns() const noexcept -> std::int64_t { return paint_cost_ns_; }
+  [[nodiscard]] auto paint_cost_serial() const noexcept -> std::uint64_t {
+    return paint_cost_serial_;
+  }
 
   // —— 树结构 ——
   [[nodiscard]] auto parent() const noexcept -> Element* { return parent_; }
@@ -811,7 +820,19 @@ class Element {
   /// 应用最终矩形并布局子节点。
   virtual void arrange(const RenderContext& context, math::Rect rect);
   /// 绘制自身与子节点（坐标已由 arrange 定好，直接画到画布绝对坐标）。
+  ///
+  /// **不要直接重写它来“换一种画法”**——子类改 `paint_content` / `paint_box`；
+  /// 确实需要接管整个绘制流程的（`ScrollView`/`Toast` 这类），请重写 `paint_impl`。
+  ///
+  /// 为何这样分：`paint` 是**唯一统一的入口**（性能剖析的计时就在它身上）。
+  /// 统计若挂在它里面，重写了 `paint` 的组件就会“免费逃过”统计——实测踩过：
+  /// 报告里 `body`（ScrollView）自持 45.8ms，而实际是它下面的整棵内容树。
   virtual void paint(const RenderContext& context, raster::Surface& canvas) const;
+  /// 真正的绘制体（`paint` 做可见性/剔除/计时，然后调它）。
+  ///
+  /// 默认实现就是原来的 `paint` 主体（画自身 + 递归子节点）；需要换整个流程的
+  /// 组件重写本函数——于是计时与热点的父子关系自动正确。
+  virtual void paint_impl(const RenderContext& context, raster::Surface& canvas) const;
   /// 子类绘制自身内容（在 paint_box 之后、子节点之前）。
   ///
   /// **坐标系**：画布是**视口绝对坐标**——自绘几何必须从 `bounds_.x/y` 起算
@@ -1033,6 +1054,16 @@ class Element {
   bool enabled_{true};
   bool focusable_{false};
   bool hovered_{false};
+  /// 上一帧本元素**子树**的绘制耗时（纳秒；仅剖析时非零）。
+  ///
+  /// 存在的唯一理由：父元素算"自身耗时"时要减掉子元素——只报含子孙的耗时，
+  /// 排序永远落在根容器上，而根容器是不可改的（那正是"看不出该改哪里"的成因）。
+  /// 非剖析时恒为 0（不读时钟）。`mutable`：`paint` 是 const 方法。
+  mutable std::int64_t paint_cost_ns_{0};
+  /// 上一条耗时属于哪一帧（帧序号）。父元素只减**同帧**的子树耗时：
+  /// 子元素若这一帧被视口剔除（`paint` 没跑），残留的是旧值，减它会得出
+  /// 负的自持成本（被夹到 0）或把别人的账算到子元素头上。
+  mutable std::uint64_t paint_cost_serial_{0};
   HoverEffect hover_effect_{};
   std::function<void(bool)> on_hover_{};
   /// 行为注入回调（`set_event_handler`；组件实现之后、冒泡之前调用）。

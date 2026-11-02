@@ -30,6 +30,8 @@
 #include "st/core/print.hpp"
 #include "st/core/time.hpp"
 #include "st/core/log.hpp"
+#include "st/perf/report.hpp"
+#include "st/perf/startup.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/scroll.hpp"
 #include "st/ui/components/window_frame.hpp"   // 自绘外壳（标题栏 + 内容槽 + 缩放边缘）
@@ -192,6 +194,10 @@ std::string ui_font_scale{"auto"};
   std::uint32_t frames{0};
   /// 渲染基准帧数（`--bench N`）：每帧**强制全量重绘**并报告分阶段分位耗时。
   std::uint32_t bench{0};
+  /// 帧剖析采样帧数（`--perf-frames N`）。
+  std::uint32_t perf_report_frames{0};
+  /// 剖析报告落盘路径（`--perf-report PATH`；空 = 打到 stdout）。
+  std::string perf_report{};
   int max_ms{0};
   /// 请求系统标题栏/边框（默认关：窗框一律自绘，见 `CONVENTIONS.md` §10 第 7 条）。
   bool decorations{false};
@@ -265,12 +271,21 @@ std::string ui_font_scale{"auto"};
     else if (raw == "--shots") options.shots = next("");
     else if (raw == "--frames") options.frames = static_cast<std::uint32_t>(int_or_die(next("0"), "--frames", 0));
     else if (raw == "--bench") options.bench = static_cast<std::uint32_t>(int_or_die(next("0"), "--bench", 0));
+    else if (raw == "--perf-frames") {
+      options.perf_report_frames =
+          static_cast<std::uint32_t>(int_or_die(next("0"), "--perf-frames", 0));
+      // 显式要采样就必须真的开探针（用户已经说“我要数据”）。
+      st::perf::set_enabled(true);
+    } else if (raw == "--perf-report") {
+      options.perf_report = next("");
+    }
     else if (raw == "--ms") options.max_ms = int_or_die(next("0"), "--ms", 0);
     else if (raw == "--theme-file") options.theme_file = next("");
     else if (raw == "--help" || raw == "-h") {
       st::log::out("用法: gallery [--headless] [--backend auto|x11|wayland|win32|headless] [--scale 2.0]\n"
                 "               [--width N] [--height N] [--theme dark] [--theme-file PATH] [--control-port 0]\n"
                 "               [--control-file PATH] [--shots DIR] [--frames N] [--bench N] [--ms N]\n"
+        "               [--perf-frames N] [--perf-report PATH]\n"
                 "               [--renderer auto|gpu|software] [--text-lcd auto|on|off] [--text-fit auto|off|light|normal]\n"
                 "               [--text-gamma auto|off|<数值>] [--ui-font-scale auto|<数值>]\n");
       std::exit(0);
@@ -320,6 +335,37 @@ std::string ui_font_scale{"auto"};
 /// 框架只需提供可组合的原语（`root().mark_dirty_all()` + `render_frame()` + `metrics()`）。
 /// 每帧都先标脏整棵树——这是**最坏情况**，也正因为最坏才可复现：
 /// 否则"第二帧开始不重绘"会把排版成本静默地排除在测量之外（实测被坑过）。
+
+/// 把帧剖析报告写到 `--perf-report` 指定的位置（空则打 stdout）。
+///
+/// 只在给了 `--perf-frames` 时有意义（没开剖析时 `perf_report()` 返回空）。
+/// 单独成一个函数：`run_app` 有多条退路（bench / quit / 帧数用完），
+/// 每条都要调它——写两遍必然漂移。
+void emit_perf_report(st::app::Application& app, const Options& options) {
+  // 启动分解与帧剖析**独立**：前者不需要 `--perf-frames`（它答的是“首帧那 200ms 花在哪”），
+  // 而 gallery 用自己的主循环（不走 `Application::run` 的收尾），所以在这里主动打一次。
+  st::perf::log_startup_summary();
+  if (options.perf_report_frames == 0) return;
+  const auto report = app.perf_report();
+  if (!report.has_value()) {
+    st::eprint("未生成性能报告：剖析未开启（需要 --perf-frames N）\n");
+    return;
+  }
+  const std::string json = st::perf::to_json(*report);
+  if (options.perf_report.empty()) {
+    st::print("{}\n", json);
+    return;
+  }
+  if (const auto parent = st::fs::parent(options.perf_report); !parent.empty()) {
+    (void)st::fs::create_directories(parent);
+  }
+  if (auto written = st::fs::write_text(options.perf_report, json); !written) {
+    st::eprint("性能报告写入失败（{}）: {}\n", options.perf_report, written.error().to_string());
+    return;
+  }
+  st::print("性能报告: {}\n", options.perf_report);
+}
+
 [[nodiscard]] auto run_render_bench(st::app::Application& app, std::uint32_t frames) -> int {
   std::vector<double> total;
   std::vector<double> layout;
@@ -330,6 +376,8 @@ std::string ui_font_scale{"auto"};
   paint.reserve(frames);
   present.reserve(frames);
   for (std::uint32_t index = 0; index < frames; ++index) {
+    // 剖析时**强制画满**：否则第二帧起界面不脏、`paint_frame` 走空帧早退，
+    // 元素样本会是空（实测：--perf-frames 400 只拿到 5 帧样本，因为界面静止）。
     app.root().mark_dirty_all();
     app.render_frame();
     const st::control::Metrics metrics = app.metrics();
@@ -379,6 +427,27 @@ std::string ui_font_scale{"auto"};
     // 要对比就与**同帧的 `paint_ms`** 比（见 `metrics.paint_ms` 与输出顺序）。
     const double total_ms = profile->total_ms();
     st::log::out("  原语合计 {:.2f} ms（最后一帧；各原语之和 == 本帧 `paint` 耗时）\n", total_ms);
+    // **最贵的调用点**：“shadow 0.6ms”不指向任何行动，而“shadow 0.6ms，其中 0.48ms
+    // 在 card.cpp:812 那一处”直接告诉人该改哪一行。
+    st::log::out("调用点热点（每类原语 top3，按累计耗时）：\n");
+    for (std::size_t index = 0; index < static_cast<std::size_t>(st::raster::PaintOp::Count);
+         ++index) {
+      const auto op = static_cast<st::raster::PaintOp>(index);
+      const st::raster::PaintOpStat& stat = profile->op(op);
+      if (stat.sites.empty()) continue;
+      std::vector<st::raster::PaintSiteStat> sites = stat.sites;
+      std::ranges::sort(sites, [](const auto& lhs, const auto& rhs) { return lhs.ms > rhs.ms; });
+      for (std::size_t rank = 0; rank < std::min<std::size_t>(3, sites.size()); ++rank) {
+        st::log::out("  {:<10} {:>8.3} ms × {:>4}  {}\n", st::raster::paint_op_name(op),
+                     sites[rank].ms, sites[rank].calls, sites[rank].site);
+      }
+    }
+    // **样本量自述**：`--bench 150` 的 150 帧是可信的；`--bench 3` 的 3 帧只能看趋势。
+    // 数字后面不跟样本量就是“裸数字”（本仓反复踩的坑）。
+    if (frames < 30) {
+      st::log::out("  ⚠ 只有 {} 帧样本（分位需 ≥30 帧才有意义）——请用 --bench 150 重跑\n",
+                   frames);
+    }
   }
   return 0;
 }
@@ -390,6 +459,8 @@ auto run_app(int argc, char** argv) -> int {
   app_options.width = options.width;
   app_options.height = options.height;
   app_options.scale = options.scale;
+  // 帧剖析：把帧数传进应用（应用据此创建剖析器）；路径留在这里用（退出时落盘）。
+  app_options.profile_frames = options.perf_report_frames;
   app_options.title = "霜天 · 组件画廊";
   app_options.headless = options.headless;
   app_options.backend = !options.backend.empty() ? options.backend
@@ -783,7 +854,21 @@ auto run_app(int argc, char** argv) -> int {
   app.root().mark_dirty_all();
   app.render_frame();
 
-  if (options.bench > 0) return run_render_bench(app, options.bench);
+  if (options.bench > 0) {
+    const int bench_code = run_render_bench(app, options.bench);
+    // **跑完不退出**：`st perf` 要靠控制通道来取报告。bench 只是一段“强制定量采样”
+    // 的前置动作，取完报告由外部发 `shutdown`（与 `--frames` 那条退路不同）。
+    // 若没人来取，进程会一直空转——所以只在开了剖析时才留着
+    // （`--bench` 单独用是命令行看数字的老用法，那时应当跑完就退）。
+    if (options.perf_report_frames > 0) {
+      while (!app.quit_requested()) {
+        app.tick();
+        app.pace_loop(st::time::now_ms());
+      }
+    }
+    emit_perf_report(app, options);
+    return bench_code;
+  }
 
   const std::int64_t started_ms = st::time::now_ms();
   std::uint32_t frames = 1;
@@ -807,6 +892,11 @@ auto run_app(int argc, char** argv) -> int {
   }
   st::log::out("gallery 退出：{} 帧，DPI {:.1f}，后端 {}\n", frames,
             static_cast<double>(app.device_scale()), std::string(app.backend_name()));
+  // 剖析报告：给了 `--perf-frames` 就把它落盘（不写路径则打到 stdout）。
+  //
+  // 为何在退出处统一收口：`run` 里有多条退路（bench/控制通道 quit/帧数用完），
+  // 在这里写才能保证**每一条**退路都留下证据（否则“跑完了但没有报告”会变成谜）。
+  emit_perf_report(app, options);
   return 0;
 }
 

@@ -179,6 +179,26 @@ class Host {
   [[nodiscard]] virtual auto device_scale() const -> float = 0;
   virtual auto set_device_scale(float scale) -> Status = 0;
   [[nodiscard]] virtual auto metrics() const -> Metrics = 0;
+  /// **性能诊断**（控制通道 `perf` 方法用）。
+  ///
+  /// 为何放在 `Host` 而不是让 Server 直接拿剖析器：`perf` 是**框架模块**，
+  /// 而 `control` 层的职责是“把应用已有能力编成协议”——报告的类型与生成
+  /// 属于应用侧（它知道构建档/后端/尺寸）。默认实现返回空，旧宿主无需改动。
+  ///
+  /// 返回的 JSON 与 `st::perf::to_json` 同 schema（`st.perf.report/1`）：
+  /// 于是 `st perf` 命令行与运行中的实例给出**同一种报告**。
+  [[nodiscard]] virtual auto perf_report_json(std::uint32_t capacity) -> std::string {
+    (void)capacity;
+    return {};
+  }
+  /// 开/停帧剖析（`capacity` 仅在开启时有意义）。返回是否成功。
+  virtual auto perf_set_active(bool active, std::uint32_t capacity) -> bool {
+    (void)active;
+    (void)capacity;
+    return false;
+  }
+  /// 清空剖析样本。
+  virtual void perf_reset_samples() {}
   virtual void request_quit() = 0;
   virtual void request_repaint() = 0;
   virtual void set_theme_mode(ui::ThemeMode mode) = 0;

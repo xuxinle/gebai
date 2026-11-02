@@ -1,4 +1,4 @@
-﻿/// `st` —— 霜天自研工具链 CLI（构建 / 测试 / 禁令扫描 / 依赖管理 / 自检）。
+/// `st` —— 霜天自研工具链 CLI（构建 / 测试 / 禁令扫描 / 依赖管理 / 自检）。
 /// 自举：`bootstrap.sh` 用编译器直接产出本程序，之后一切构建都走这里（不经 CMake/Make）。
 
 #include <algorithm>
@@ -34,6 +34,7 @@
 #include "st/pkg/watch.hpp"
 
 #include "cli_log.hpp"
+#include "perf_request.hpp"
 
 namespace {
 
@@ -1268,6 +1269,22 @@ ST_MAIN(run_app)
   return 0;
 }
 
+auto command_perf(const Arguments& arguments) -> int {
+  // 只做**参数搬运**：真正的实现在 `perf_command.cpp`（它依赖 `st/perf`）。
+  stpkg_cli::PerfRequest request{};
+  request.target = arguments.positional.empty() ? std::string{} : arguments.positional.front();
+  request.profile = arguments.get("profile", "release");
+  request.frames = static_cast<std::uint32_t>(arguments.number("frames", 200.0));
+  request.bench = static_cast<std::uint32_t>(arguments.number("bench", 0.0));
+  request.bench_given = arguments.has("bench") || !arguments.get("bench").empty();
+  request.out = arguments.get("out");
+  request.baseline = arguments.get("baseline");
+  request.compare = arguments.get("compare");
+  request.threshold = arguments.number("threshold", 0.05);
+  request.as_json = arguments.has("json");
+  return stpkg_cli::command_perf(request);
+}
+
 /// `st clean [--all]`：删除构建产物。
 /// 背景：`build/` 含多个档位（dev/debug/release/san）与测试产物，实测堆积到 1.5GB+
 /// 而此前没有任何清理命令。`--all` 连共享对象缓存（`~/.shuangtian/cache`）一起清——
@@ -1837,6 +1854,7 @@ auto run_app(int argc, char** argv) -> int {
   if (arguments.command == "init") return command_init(arguments);
   if (arguments.command == "clean") return finish(command_clean(arguments));
   if (arguments.command == "log") return command_log(arguments);
+  if (arguments.command == "perf") return finish(command_perf(arguments));
 
 
   std::fprintf(stderr, "未知命令: %s\n\n", arguments.command.c_str());

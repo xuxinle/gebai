@@ -26,7 +26,9 @@
 #include <cmath>
 #include <cstdint>
 #include <mdspan>
+#include <source_location>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -70,12 +72,26 @@ enum class PaintOp : std::uint8_t {
 
 [[nodiscard]] auto paint_op_name(PaintOp op) -> std::string_view;
 
+/// 一个调用点的原语累计（`file:line` → 调用次数/毫秒）。
+struct PaintSiteStat {
+  std::string site{};  ///< `src/ui/components/card.cpp:812`
+  std::uint64_t calls{0};
+  double ms{0.0};
+};
+
 /// 单类原语的累计统计。
 struct PaintOpStat {
   std::uint64_t calls{0};
   /// 覆盖的像素数（近似：调用时按各原语的输出面积估算）
   std::uint64_t pixels{0};
   double ms{0.0};
+  /// **最贵的调用点 top-N**（回答"同一原语里哪一处调用贵"）。
+  ///
+  /// 为何需要："shadow 合计 0.61 ms"不指向任何行动——一个界面里阴影有几十处
+  /// 调用，改哪一处取决于哪一处最贵。只记原语类别只能得出"阴影贵"，
+  /// 而这条信息让人只能去猜（实测代价：`tools/paint_hotspot_probe.cpp` 那一轮
+  /// 只能靠采样器归因）。
+  std::vector<PaintSiteStat> sites{};
 };
 
 /// 绘制剖析器：**默认不挂到画布上**（挂了才计时，不挂零开销）。
@@ -83,6 +99,11 @@ struct PaintProfiler {
   std::array<PaintOpStat, static_cast<std::size_t>(PaintOp::Count)> ops{};
 
   void add(PaintOp op, double ms, std::uint64_t pixels = 0);
+  /// 记一次带**调用点**的耗时（`site` 是 `file:line`，由 `SourceLocation` 注入）。
+  ///
+  /// 与 `add()` 分开：`add()` 是跨模块的公共入口（`raster` 之外用它手动记账），
+  /// 不应强迫所有调用方都构造 `SourceLocation`。
+  void add_at(PaintOp op, std::string_view site, double ms, std::uint64_t pixels = 0);
   [[nodiscard]] auto op(PaintOp which) const noexcept -> const PaintOpStat&;
   [[nodiscard]] auto total_ms() const noexcept -> double;
   void clear() noexcept;
@@ -173,7 +194,12 @@ class Surface {
   virtual void set_profiler(PaintProfiler* profiler) noexcept = 0;
   [[nodiscard]] virtual auto profiler() const noexcept -> PaintProfiler* = 0;
   /// 手动记账（文本等跨模块绘制路径用）：把一段耗时记到指定原语。
-  virtual void add_profile(PaintOp op, double ms, std::uint64_t pixels = 0) noexcept = 0;
+  ///
+  /// `site` 的默认实参在**调用点**求值（`std::source_location` 的语义），所以
+  /// 跨模块的记账也不会丢失"哪一行"——不需要宏，也不要求每个调用方都传。
+  virtual void add_profile(PaintOp op, double ms, std::uint64_t pixels = 0,
+                           const std::source_location site =
+                               std::source_location::current()) noexcept = 0;
 
   // —— 绘制原语 ——
   virtual void clear(math::Color color) = 0;

@@ -163,6 +163,7 @@
 | 文档 | 内容 | 体量 | 契约 |
 |---|---|---|---|
 | [`PAINT_DIAGNOSIS.md`](PAINT_DIAGNOSIS.md) | 整帧 paint 成本分解（归因到原语）+ 测量口径缺陷 | 详读 | 实测·**接口** |
+| [`performance.md`](performance.md) | **性能分析体系入口**（`st perf` 一条命令）：报告字段语义/六类误读/埋点指南 | 速查 | 实测·**接口** |
 | [`BASELINE_METRICS_20261014.md`](BASELINE_METRICS_20261014.md) | 基础指标基线（性能/产物大小/内存）+ 内存去向分解 | 详读 | 实测 |
 | [`BUILD_TEST_PERF.md`](BUILD_TEST_PERF.md) | 构建/测试性能基线（gcc vs clang、并行提速） | 详读 | 实测 |
 | [`ITERATION_SPEED.md`](ITERATION_SPEED.md) | 迭代速度基线（2026-10-26） | 详读 | 实测 |

@@ -1253,8 +1253,10 @@ class GpuCanvas final : public Surface {
   // —— 剖析 ——
   void set_profiler(PaintProfiler* profiler) noexcept override { profiler_ = profiler; }
   [[nodiscard]] auto profiler() const noexcept -> PaintProfiler* override { return profiler_; }
-  void add_profile(PaintOp op, double ms, std::uint64_t pixels = 0) noexcept override {
-    if (profiler_ != nullptr) profiler_->add(op, ms, pixels);
+  void add_profile(PaintOp op, double ms, std::uint64_t pixels = 0,
+                   const std::source_location site =
+                       std::source_location::current()) noexcept override {
+    if (profiler_ != nullptr) profiler_->add_at(op, ::st::perf::site_of(site), ms, pixels);
   }
 
   // —— 绘制原语 ——

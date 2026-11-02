@@ -49,10 +49,33 @@ struct CommonOptions {
   std::uint32_t max_frames{0}; ///< 0 = 不按帧数退出
   std::uint32_t max_ms{0};     ///< 0 = 不按时间退出
   bool show_help{false};       ///< 出现 `--help`/`-h`
+
+  /// **性能报告落盘路径**（空 = 不写）。
+  ///
+  /// 为何放在通用选项里：剖析的价值在于**产物**——一份能被 `st perf --compare`
+  /// 对比、能被智能体直接读的 JSON。让每个应用自己接一次这件事，
+  /// 结果就是“只有一个示例应用能产出报告”。
+  std::string perf_report{};
+  /// 退出时自动写报告（`--perf-report` 给出时隐含为真；`--perf-exit` 可单独要）。
+  bool perf_on_exit{false};
 };
 
 /// 解析命令行。错误：`Invalid`（参数缺值/数值非法）。`--help` 不算错误（置 `show_help`）。
 [[nodiscard]] auto parse_common_options(int argc, char** argv, CommonOptions& options) -> Status;
+
+/// 把通用选项里的剖析/报告设置应用到已启动的 `Application`，并在退出时写报告。
+///
+/// 用法（每个应用的入口尾部照抄一行）：
+/// ```cpp
+/// const int code = app.run();
+/// st::app::finish_with_report(app, common);   // 退出前写 --perf-report
+/// return code;
+/// ```
+/// **不写在 `run()` 里**：报告是“这次运行的外交产物”，而 `run` 可能被自检/测试调用
+/// 多次；把落盘放在入口的收尾处，语义才是“进程退出时留下证据”。
+///
+/// 返回是否写了文件（没配 `--perf-report` 时为 `false`）。
+auto finish_with_report(Application& app, const CommonOptions& options) -> bool;
 
 /// 打印通用选项的用法（供 `--help` 与错误提示复用）。
 [[nodiscard]] auto common_options_usage(std::string_view program) -> std::string;
