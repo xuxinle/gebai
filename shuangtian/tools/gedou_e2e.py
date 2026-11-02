@@ -270,9 +270,23 @@ def main():
         moves = state["moves"]
         check(state["phase"] == "fight", "开局应处于 fight")
         check(len(state["fighters"]) == 2, "应有双方角色")
-        check(state["fighters"][0]["hp"] == 900.0, f"左侧血量应为档案值 900，实得 {state['fighters'][0]['hp']}")
-        check(state["fighters"][1]["hp"] == 1000.0, "右侧血量应为 1000")
-        check(set(moves) == {"light", "heavy", "kick", "special"}, f"招式表缺项：{sorted(moves)}")
+        # 血量从**进程自己报的 max_hp** 读，不在脚本里抄数字。
+        #
+        # 这条原本硬写 900 / 1000，角色档案一改（户圣现在是 1050）就误报。
+        # 而本文件头就写着"反假绿约定：期望值从运行中的进程取"——
+        # 这里恰好违反了自己的规矩，属实现成的教训。
+        left_max = state["fighters"][0]["max_hp"]
+        right_max = state["fighters"][1]["max_hp"]
+        check(state["fighters"][0]["hp"] == left_max,
+              f"左侧开局应满血 {left_max}，实得 {state['fighters'][0]['hp']}")
+        check(state["fighters"][1]["hp"] == right_max,
+              f"右侧开局应满血 {right_max}，实得 {state['fighters'][1]['hp']}")
+        # 招式表：只断言"必须有的几个核心招在"，**不写死全集**。
+        # 角色专属招（donut_toss / puff_spray / waist_grab / apple_*）会随角色增加，
+        # 写死全集等于每加一个技能就要改测试（之前就是这样误报的）。
+        required = {"light", "heavy", "kick", "special"}
+        missing = required - set(moves)
+        check(not missing, f"核心招式表缺项：{sorted(missing)}（实有 {sorted(moves)}）")
         # 招式距离必须单调（轻 < 重 < 踢 < 必杀），否则“手感分级”是假的。
         reach = [moves[k]["reach_far"] for k in ("light", "heavy", "kick", "special")]
         check(reach == sorted(reach), f"招式距离应递增，实得 {reach}")

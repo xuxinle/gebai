@@ -124,7 +124,24 @@ void GameView::open_select() {
 }
 
 void GameView::skip_select() {
+  // 真正开始对战：**用选中的角色开一局新的**。
+  //
+  // ⚠ 这里曾经只是 `select_.active = false`，于是有两种错法：
+  // 1. 选的角色根本没生效（`start_match` 从未用 `select_.left/right` 调用过）；
+  // 2. 选人期间逻辑仍在推进，那半局的战况被原样带进对局——
+  //    用户看到"还没开始，机机对战怎么就进行了"。
+  // 现在：选人期间冻结逻辑（见 `paint_content` 的早退分支），
+  // 点开始时按选择重建比赛。
+  if (!select_.active) return;
+  // 先把选人界面里选定的东西取出来——`start_match` 会重置整个 `view_`。
+  const BattleMode mode = select_.mode;
+  const Difficulty difficulty = view_.difficulty;
+  const std::size_t left = select_.left;
+  const std::size_t right = select_.right;
   select_.active = false;
+  start_match(left, right);
+  set_difficulty(difficulty);   // 先设难度（`set_difficulty` 会同步给 AI）
+  set_battle_mode(mode);        // 再设模式（机机模式要关掉 dummy_）
 }
 
 void GameView::set_battle_mode(BattleMode mode) {
@@ -508,7 +525,28 @@ void GameView::paint_content(const st::ui::RenderContext& context, Canvas& canva
   if (area.is_empty()) return;
 
   // —— 帧推进：固定步长累积 ——
+  //
+  // ⚠ **选人期间绝不能推进逻辑**。
+  //
+  // 症状：还没点"开始对战"，AI 已经在背景里打起来了——等你确认时
+  // 双方血量、招式、连击全都在进行中，开场就是半局。
+  //
+  // 根因是这里只判了 `paused`，没判 `select_.active`。
   const double now = context.time_seconds;
+  if (select_.active) {
+    accumulator_ = 0.0;         // 丢掉选人期间攒的时间，别在开始时一次性补完
+    last_time_ = now;
+    request_animation();        // 选人界面自己也有动画（焦点高亮），仍需重绘
+    hue_phase_ = static_cast<float>(now) * 0.6f;
+
+    canvas.push_clip_rect(area);
+    paint_backdrop(context, canvas);
+    paint_arena(context, canvas);
+    paint_select(context, canvas);
+    canvas.pop_clip();
+    save_record_frame(canvas);
+    return;
+  }
   if (last_time_ >= 0.0 && now > last_time_ && !view_.paused) {
     accumulator_ += now - last_time_;
     const double step = 1.0 / kLogicHz;
@@ -1700,7 +1738,13 @@ auto GameView::get_property(std::string_view name) const -> std::optional<std::s
   if (name == "ai") return view_.ai_enabled ? "true" : "false";
   if (name == "difficulty") return difficulty_name(ai_.difficulty());
   if (name == "player_side") return std::format("{}", view_.player_side);
-  if (name == "phase") return match_->phase() == RoundPhase::Fight ? "fight" : "over";
+  // `phase` 要能报出**选人界面**：只报 fight/over 的话，
+  // 外部（e2e、录制、调试）无法区分"在选人"与"在对战"，
+  // 于是"选人期间逻辑该不该推进"这类断言根本写不出来。
+  if (name == "phase") {
+    if (select_.active) return std::string("select");
+    return match_->phase() == RoundPhase::Fight ? std::string("fight") : std::string("over");
+  }
   if (name == "left_move") return std::string(move_name(match_->state(0).move));
   if (name == "right_move") return std::string(move_name(match_->state(1).move));
   if (name == "left_hp") return std::format("{:.1f}", match_->state(0).hp);
@@ -1779,6 +1823,37 @@ auto GameView::invoke_action(std::string_view action, std::string_view argument)
   if (action == "restart") {
     restart();
     return true;
+  }
+  // 从选人界面进入对战（等价于点"开始对战"）。
+  //
+  // 为什么要有这个 action：自动化要能**在不点鼠标的情况下**验证
+  // "选人期间逻辑冻结、点开始后开始推进"。没有它就只能靠桌面点击，
+  // 而 e2e 是 headless 的，点不了。
+  if (action == "start_select") {
+    if (!select_.active) return false;
+    skip_select();
+    mark_dirty();
+    return true;
+  }
+  // 在选人界面上切换某个控件（自动化用；`index` 是控件编号 0~5）。
+  if (action == "select_hit") {
+    if (!select_.active) return false;
+    try {
+      const int index = std::stoi(arg);
+      if (index < 0 || index > 5) return false;
+      select_.focus = index;
+      if (index <= 1) {
+        std::size_t& slot = index == 0 ? select_.left : select_.right;
+        slot = (slot + 1) % kFighterCount;
+      } else if (index == 2) {
+        set_battle_mode(select_.mode == BattleMode::PlayerVsAi ? BattleMode::AiVsAi
+                                                              : BattleMode::PlayerVsAi);
+      }
+      mark_dirty();
+      return true;
+    } catch (...) {
+      return false;
+    }
   }
   if (action == "pause") {
     set_paused(true);

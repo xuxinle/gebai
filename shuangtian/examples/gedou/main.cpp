@@ -230,9 +230,18 @@ auto run_app(int argc, char** argv) -> int {
     st::log::out("对手由神经网络策略接管：{}\n", options.policy_path);
   }
   if (options.paused) view->set_paused(true);
+  // 默认**先进选人界面**；`--ai-vs-ai` 才跳过（录制/观战用）。
+  //
+  // ⚠ 这里曾经只有 `--ai-vs-ai` 分支调用 `skip_select()`，而 `open_select()`
+  // 从头到尾**没人调用**——于是默认启动直接进对战，选人界面等于不存在。
+  // 用户报"还没开始，机机对战怎么就进行了"，根因有两层：
+  // ① 选人界面没被打开过（本处）；
+  // ② 就算打开了，`paint_content` 推逻辑帧时也不判 `select_.active`（另修）。
   if (options.ai_vs_ai) {
-    view->skip_select();
     view->set_battle_mode(gedou::BattleMode::AiVsAi);
+    view->skip_select();
+  } else {
+    view->open_select();
   }
   if (!options.record_dir.empty()) {
     // 录制时跳帧：60Hz 全存会出 60 张/秒，几十秒就上万张。
