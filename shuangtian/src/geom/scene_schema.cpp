@@ -41,6 +41,9 @@ auto build_tables() -> std::vector<FieldTable> {
                R"j({"joints":["root","arm"]})j", {}},
               {"asset_basis", "string", false, "", "素材基准目录（obj:/gltf:/texture 的相对路径）",
                R"j("assets/models")j", {"设了它相对路径才按它解析"}},
+              {"snap", "number", false, "> 0（0 = 关闭）",
+               "网格吸附步长：手写 translate 先吸附到网格再解算约束（装配值不受影响）",
+               "0.1", {"只吸 translate；rotation/scale 不动"}},
           },
       .open = false,
   });

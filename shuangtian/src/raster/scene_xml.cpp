@@ -6,6 +6,7 @@
 #include <format>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -550,12 +551,210 @@ auto scene_child_to_json(const xml::Node& child, Json& scene) -> Status {
 }  // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 对外入口：parse
+// Part / Use：部件定义与实例化（XML 层语法，展开后走普通 objects）
 // ─────────────────────────────────────────────────────────────────────────────
+
+namespace {
+
+/// 引用串里的名字加前缀。两种形态：
+/// - `attach/align/parent`：`[anchor_of:]name[+off]`（可能只有 name）
+/// - `connect`：`A -> B`（两端各自同上）
+/// 只改名字段；锚点词、偏移、箭头原样。名字不在 `names` 里（引用场景级
+/// 对象）则原样保留——模板引用外部是合法的（如统一接到底座）。
+auto rewrite_reference(const std::string& raw, const std::string& prefix,
+                        const std::set<std::string>& names) -> std::string {
+  const auto rewrite_one = [&](std::string_view segment) -> std::string {
+    // 剥偏移：最后一个 '+' 后是 dx,dy,dz（含逗号）。
+    std::string_view head = segment;
+    std::string_view offset;
+    if (const auto plus = segment.rfind('+'); plus != std::string_view::npos) {
+      const std::string_view tail = segment.substr(plus + 1);
+      if (tail.find(',') != std::string_view::npos) {
+        head = segment.substr(0, plus);
+        offset = segment.substr(plus);
+      }
+    }
+    // 剥锚点：第一个 ':' 前（含 _of 后缀）。
+    std::string_view name = head;
+    std::string_view anchor_part;
+    if (const auto colon = head.find(':'); colon != std::string_view::npos) {
+      anchor_part = head.substr(0, colon + 1);
+      name = head.substr(colon + 1);
+    }
+    if (names.count(std::string(name)) != 0U) {
+      return std::string(anchor_part) + prefix + std::string(name) + std::string(offset);
+    }
+    return std::string(segment);
+  };
+  if (const auto arrow = raw.find(" -> "); arrow != std::string::npos) {
+    return rewrite_one(raw.substr(0, arrow)) + " -> " +
+           rewrite_one(raw.substr(arrow + 4));
+  }
+  return rewrite_one(raw);
+}
+
+/// 把一个模板物体（Json）按实例改写：名字前缀、镜像、引用改写，递归子级。
+///
+/// ## 改写三件事
+///
+/// 1. **名字**：`body` → `column_L_body`（全局唯一是场景树的硬约束；
+///    前缀 `实例_零件` 两段可读且不与真实名冲突）。
+/// 2. **镜像**：`mirror="x"` 时 translate.x 与 scale.x 取反（镜像的标准
+///    做法：位置翻 + 手性翻；旋转不碰——欧拉镜像太易错，需转向的零件
+///    在模板里写好或实例上显式给 rotation）。
+/// 3. **引用改写**：attach/connect/align/parent 引用的零件名同步加前缀
+///    ——实例的装配关系在实例内自洽，不串到别的实例；引用模板外对象
+///    （如底座）原样保留（合法的跨部件装配）。
+auto instantiate_object(const Json& template_object, const std::string& prefix,
+                        const std::string& mirror,
+                        const std::set<std::string>& template_names, Json& out) -> void {
+  out = template_object;
+  if (out.contains("name") && out.at("name").is_string()) {
+    const std::string inner = out.at("name").get<std::string>();
+    if (!inner.empty()) out["name"] = prefix + inner;
+  }
+  if (mirror == "x") {
+    const auto flip = [&](const char* key) {
+      if (out.contains(key) && out.at(key).is_array() && !out.at(key).empty()) {
+        out[key][0] = -out.at(key).at(0).get<double>();
+      }
+    };
+    flip("translate");
+    flip("scale");
+  }
+  for (const char* key : {"attach", "connect", "align", "parent"}) {
+    if (out.contains(key) && out.at(key).is_string()) {
+      out[key] = rewrite_reference(out.at(key).get<std::string>(), prefix, template_names);
+    }
+  }
+  if (out.contains("children")) {
+    Json children = Json::array();
+    for (const auto& child : out.at("children")) {
+      Json rewritten;
+      instantiate_object(child, prefix, mirror, template_names, rewritten);
+      children.push_back(std::move(rewritten));
+    }
+    out["children"] = std::move(children);
+  }
+}
+
+}  // namespace
 
 auto parse_scene_xml_node(const xml::Node& root) -> Result<SceneSpec> {
   Json scene = Json::object();
   scene["objects"] = Json::array();
+
+  // ── Part/Use 展开：先收定义，遇 Use 展开成普通 objects ──
+  //
+  // <Part name="column">…零件（可含内部 attach/connect）…</Part>
+  // <Use part="column" name="column_L" translate="…" mirror="x"/>
+  //
+  // 展开是纯文本层的实例化（名字前缀/镜像/引用改写），之后的一切
+  //（约束解算、建树、渲染）看到的就是普通场景——JSON 层零改动。
+  // 模板零件的引用解析仍走 object_to_json（字段表检查全部生效）。
+  std::map<std::string, std::vector<Json>> part_templates;
+  std::map<std::string, std::set<std::string>> part_names;
+  const auto collect_part = [&](const xml::Node& node) -> Status {
+    const auto name = node.attr("name");
+    if (!name.has_value() || name->empty()) {
+      return st::unexpected(ErrorCode::Parse,
+                            at(node, "<Part> 需要 name 属性（模板名）"));
+    }
+    if (part_templates.count(std::string(*name)) != 0U) {
+      return st::unexpected(
+          ErrorCode::Parse,
+          at(node, std::format("Part \"{}\" 重复定义", *name)));
+    }
+    std::vector<Json> objects;
+    std::set<std::string> names;
+    for (const xml::Node& child : node.children) {
+      Json obj = Json::object();
+      if (const auto status = object_to_json(child, obj); !status) {
+        return st::forward_error(status.error());
+      }
+      if (obj.contains("name") && obj.at("name").is_string()) {
+        names.insert(obj.at("name").get<std::string>());
+      }
+      objects.push_back(std::move(obj));
+    }
+    part_templates.emplace(std::string(*name), std::move(objects));
+    part_names.emplace(std::string(*name), std::move(names));
+    return st::ok();
+  };
+  const auto expand_use = [&](const xml::Node& node) -> Status {
+    const auto part = node.attr("part");
+    if (!part.has_value() || part->empty()) {
+      return st::unexpected(ErrorCode::Parse,
+                            at(node, "<Use> 需要 part 属性（引用哪个 Part 模板）"));
+    }
+    const auto found = part_templates.find(std::string(*part));
+    if (found == part_templates.end()) {
+      std::string known;
+      for (const auto& [key, _] : part_templates) {
+        (void)_;
+        if (!known.empty()) known += "/";
+        known += key;
+      }
+      return st::unexpected(
+          ErrorCode::Parse,
+          at(node, std::format("Use 引用的 Part \"{}\" 未定义（已定义：{}）",
+                              *part, known.empty() ? "无" : known)));
+    }
+    const auto instance_name = node.attr_or("name", "");
+    const std::string prefix = instance_name.empty()
+                                   ? std::string(*part) + "_"
+                                   : std::string(instance_name) + "_";
+    const std::string mirror(node.attr_or("mirror", ""));
+    if (!mirror.empty() && mirror != "x") {
+      return st::unexpected(
+          ErrorCode::Parse, at(node, "mirror 只支持 \"x\"（Y/Z 镜像后续按需加）"));
+    }
+    // Use 自身的属性（translate/rotation/…）作为实例外壳的变换，
+    // 与模板零件的局部变换**相加**（外壳在先，零件在后）。
+    Json shell = Json::object();
+    {
+      const FieldTable* table = find_field_table("objects[]");
+      for (const auto& [attr, text] : node.attributes) {
+        if (attr == "part" || attr == "name" || attr == "mirror") continue;
+        const FieldSpec* field = table->find(attr);
+        if (field == nullptr) {
+          return st::unexpected(ErrorCode::Parse, unknown_attr_error(node, attr, *table));
+        }
+        auto value = attr_to_json(node, attr, text, *field);
+        if (!value) return st::forward_error(value.error());
+        shell[attr] = std::move(*value);
+      }
+    }
+    const auto& names = part_names.at(std::string(*part));
+    for (const Json& template_object : found->second) {
+      Json instantiated;
+      instantiate_object(template_object, prefix, mirror, names, instantiated);
+      // 外壳变换叠加：translate 相加，其余（rotation/材质覆盖等）零件
+      // 没写的才继承（模板优先——模板是部件的完整性定义）。
+      if (shell.contains("translate") && instantiated.contains("translate") &&
+          shell.at("translate").is_array() && instantiated.at("translate").is_array()) {
+        Json merged = Json::array();
+        for (std::size_t i = 0; i < 3U; ++i) {
+          const double shell_value =
+              shell.at("translate").size() > i ? shell.at("translate").at(i).get<double>() : 0.0;
+          const double inner_value =
+              instantiated.at("translate").size() > i
+                  ? instantiated.at("translate").at(i).get<double>()
+                  : 0.0;
+          merged.push_back(shell_value + inner_value);
+        }
+        instantiated["translate"] = std::move(merged);
+      } else if (shell.contains("translate") && !instantiated.contains("translate")) {
+        instantiated["translate"] = shell.at("translate");
+      }
+      for (const auto& [key, value] : shell.items()) {
+        if (key == "translate") continue;
+        if (!instantiated.contains(key)) instantiated[key] = value;
+      }
+      scene["objects"].push_back(std::move(instantiated));
+    }
+    return st::ok();
+  };
 
   if (root.name == "Scene") {
     // <Scene> 自身的属性：scene 层字段表（cull / asset_basis）。
@@ -564,6 +763,21 @@ auto parse_scene_xml_node(const xml::Node& root) -> Result<SceneSpec> {
       return st::forward_error(status.error());
     }
     for (const auto& child : root.children) {
+      // 大小写宽松的结构标签分发前，Part/Use 先行（它们是 XML 层语法）。
+      const std::string canonical =
+          canonical_tag(child.name).value_or(std::string(child.name));
+      if (canonical == "Part") {
+        if (const auto status = collect_part(child); !status) {
+          return st::forward_error(status.error());
+        }
+        continue;
+      }
+      if (canonical == "Use") {
+        if (const auto status = expand_use(child); !status) {
+          return st::forward_error(status.error());
+        }
+        continue;
+      }
       if (const auto status = scene_child_to_json(child, scene); !status) {
         return st::forward_error(status.error());
       }

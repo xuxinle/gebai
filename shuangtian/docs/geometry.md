@@ -864,6 +864,36 @@ XML 相对 JSON 的表达优势恰好落在三维场景上：`children` 嵌套�
 立柱/灯罩/灯泡/电缆全部自动跟随（111636 像素联动）；改用约束重写的差分机里，
 压力计管/排气管/张紧轮撑杆不再需要手算长度与角度。
 
+### 4.12.8 ⑦ Part/Use 部件库与 snap 网格（建模的组织层）
+
+**Part/Use**（XML 层语法，展开后走普通 objects——JSON 层零改动）：
+
+```xml
+<Part name="column">          <!-- 定义：局部自洽（内部 attach 引用自己的零件） -->
+  <Cylinder name="body" .../>
+  <Cone name="cap" attach="top_of:body" .../>
+</Part>
+<Use part="column" name="colL" translate="-1.05, 0.22, 0"/>
+<Use part="column" name="colR" translate="1.05, 0.22, 0" mirror="x"/>
+```
+
+展开做三件事：①名字加前缀（`colL_body`，全局唯一）；②`mirror="x"`
+时 translate.x/scale.x 取反（左右对称件只定义一次）；③模板内部的
+attach/connect/align/parent 引用同步改写（实例内自洽）；引用模板外
+对象（如底座）原样保留（跨部件装配合法）。Use 的属性作为实例外壳：
+translate 与零件叠加，其余字段模板优先。
+
+**snap**（场景级，`<Scene snap="0.1">`）：手写 translate 先吸附到网格
+**再解算约束**——吸附管手摆的整洁，约束管装配的精确，两者不互扰；
+只吸 translate（rotation 吸到网格不是用户意图）。
+
+差分机 v3（`tools/scene_xml_showcase_v3.cpp`）是三者台演：装配大纲驱动
+（整机→部件→零件先分解再落码）、4 个 Part + mirror 复用、37 对象全
+约束化零手算、snap=0.05 网格对齐——源码比 v2 短，结构可维护。
+
+测试：`tests/scene_part_test.cpp` 7 条（展开命名/镜像对称/模板内 connect
+改写/外部引用保留/重复定义拒绝/snap 生效与非法值拒绝）。
+
 测试：`tests/scene_constraint_test.cpp` 9 条（数值断言/联动/前向引用/互斥/
 auto 误用/锚点解析/旋转互逆/XML 等价与往返）。
 
@@ -1094,6 +1124,8 @@ cube 的 height 无效、torus 的 radius 是中心线半径）。
 | `src/raster/scene_constraints.cpp` | 装配约束解算器：锚点语法/attach/connect/align/旋转（四元数→XYZ 欧拉互逆） |
 | `tests/scene_constraint_test.cpp` | 约束 9 条：attach 链数值、联动跟随、connect 中点/长度/旋转、前向引用、互斥、auto 误用、XML 等价 |
 | `tools/constraint_lamp_probe.cpp` | 约束渲染验证：台灯装配 + 台面升高全灯联动（像素级对照） |
+| `tests/scene_part_test.cpp` | Part/Use 与 snap 7 条：展开命名/镜像/引用改写/外部引用/错误拒绝/snap |
+| `tools/scene_xml_showcase_v3.cpp` | 差分机 v3：装配大纲 + Part 化 + mirror + 全约束 + snap（组织方法论的样例） |
 | `tests/geom_size_test.cpp` | 尺寸语义 7 条：9 个形状精确包围盒、旧字段等价、size 优先级 |
 | `tests/geom_scene_integration_test.cpp` | 22 个图元**真的画出像素**、旧形状语义不变、参数生效、导出→读回、焊接/变换/OBJ 往返 |
 | `tools/primitives_gallery_probe.cpp` | 22 格总览 PNG + 每个图元的 `.glb`（可拖进 Blender 对照） |

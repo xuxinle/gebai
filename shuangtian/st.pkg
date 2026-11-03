@@ -570,6 +570,12 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "XML 表达力展示：蒸汽朋克差分机（11 种图元/5 层/金属+玻璃+发光/动画四帧）"
     },
+    "scene_xml_showcase_v3": {
+      "kind": "executable",
+      "sources": ["tools/scene_xml_showcase_v3.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "差分机 v3：装配大纲驱动 + Part/Use 部件化 + mirror 复用 + 全约束装配 + snap"
+    },
     "st_api": {
       "kind": "executable",
       "sources": ["tools/st_api.cpp"],

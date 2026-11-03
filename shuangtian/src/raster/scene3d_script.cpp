@@ -1221,6 +1221,10 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
   //
   // 教训：字段"被用到"不等于"被解析到"，两头都要有用例。
   spec.asset_basis = json_get_string(json, "asset_basis", spec.asset_basis);
+  spec.snap = static_cast<float>(json_get_double(json, "snap", spec.snap));
+  if (spec.snap < 0.0f) {
+    return st::unexpected(ErrorCode::Parse, "snap：步长必须 >= 0（0 = 关闭）");
+  }
 
   const Json* objects = json_find(json, "objects");
   if (objects == nullptr) {
@@ -1312,6 +1316,24 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
       };
       spec.objects.push_back(graft(graft, root));
     }
+  }
+
+  // ── 网格吸附（在约束解算前：只吸手写摆放，解算出的装配值不受影响）──
+  //
+  // 吸附服务「手写 translate」（把 -1.05 对到 -1.0）；约束解算产出精确的
+  // 装配值（台面顶 + 半高），再吸附只会破坏咬合。只吸 translate——
+  // rotation/scale 吸附会把 45° 吸到网格上，不是用户意图。递归含子级。
+  if (spec.snap > 0.0f) {
+    const auto snap_value = [](float value, float step) {
+      return std::round(value / step) * step;
+    };
+    const auto snap_tree = [&](auto&& self, SceneObjectSpec& object) -> void {
+      object.translate.x = snap_value(object.translate.x, spec.snap);
+      object.translate.y = snap_value(object.translate.y, spec.snap);
+      object.translate.z = snap_value(object.translate.z, spec.snap);
+      for (SceneObjectSpec& child : object.children) self(self, child);
+    };
+    for (SceneObjectSpec& object : spec.objects) snap_tree(snap_tree, object);
   }
 
   // ── 装配约束解算（解析后、建树前；写回 translate/rotation/size）──
