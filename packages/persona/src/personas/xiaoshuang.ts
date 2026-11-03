@@ -58,6 +58,15 @@ export const persona: PersonaDef = {
       id: "support",
       focus: "有问必答：只对疑问句回答",
       subscriptions: ["message"],
+      // 会话路由：按「群 × 话题」分会话——话题群内每个话题一段独立上下文，
+      // 普通消息按群分（A 群与 B 群互不污染）。返回空串 = 退回默认单会话。
+      // 键稳定性由飞书保证（话题 root_id 在话题生命周期内不变）。
+      sessionKeyOf: (e) => {
+        const chat = e.context.refs?.chatId ?? ""
+        const thread = e.context.refs?.threadId ?? ""
+        if (!chat) return ""
+        return thread ? `${chat}__t_${thread}` : chat
+      },
     },
   ],
 }

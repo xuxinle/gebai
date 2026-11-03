@@ -145,7 +145,11 @@ export class ChannelInputBridge {
         personaId: "",
         // 渠道名**由注册表给定**（渠道无法伪造路由键）；同样硬写而非取事件里的值
         channel: channelName,
-        threadKey: ev.refs?.chatId ? `${channelName}:${ev.refs.chatId}` : undefined,
+        threadKey: ev.refs?.chatId
+          ? ev.refs.threadId
+            ? `${channelName}:${ev.refs.chatId}:${ev.refs.threadId}`
+            : `${channelName}:${ev.refs.chatId}`
+          : undefined,
         context: {
           source: ev.source ?? channelName,
           summary: ev.summary,

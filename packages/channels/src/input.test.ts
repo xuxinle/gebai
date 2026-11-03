@@ -99,8 +99,61 @@ describe("eventIdFor：幂等键推导（桥接层唯一实现）", () => {
   })
 })
 
-describe("装配：渠道 → 桥接 → 内核", () => {
-  test("同一渠道同时声明写/读/收三面", async () => {
+ describe("装配：渠道 → 桥接 → 内核", () => {
+ test("话题消息：refs.threadId 经桥接透传，sessionKeyOf 按话题分流（入站→会话闭环）", async () => {
+   const home = mkdtempSync(join(tmpdir(), "in-thread-"))
+   try {
+     const runs: PersonaRunInput[] = []
+     const seenKeys: Array<string | undefined> = []
+     const lookup: PersonaLookup = {
+       get: (pid) => (pid === "xiaoshuang" ? IDENT : null),
+       drivers: () => [
+         {
+           id: "support",
+           focus: "f",
+           subscriptions: ["message"],
+           sessionKeyOf: (e) => {
+             const chat = e.context.refs?.chatId ?? ""
+             const thread = (e.context.refs as { threadId?: string } | undefined)?.threadId ?? ""
+             return thread ? `${chat}__t_${thread}` : chat
+           },
+         },
+       ],
+       subscribers: () => [{ personaId: "xiaoshuang", user: "admin", driverIds: ["support"] }],
+       maxConcurrent: () => 2,
+     }
+     const sessions: SessionResolver = {
+       async resolveDriver({ sessionKey }) {
+         seenKeys.push(sessionKey)
+         return { sessionId: `sess-${sessionKey ?? "default"}`, created: false, name: "n" }
+       },
+     }
+     const runner: PersonaRunner = { isRunning: () => false, async run(input) { runs.push(input) } }
+     const runtime = new PersonaRuntime({ lookup, runner, sessions, log: { info: () => {}, warn: () => {} } })
+     runtime.start()
+     const bridge = new ChannelInputBridge({ dispatch: runtime, log: { info: () => {}, warn: () => {} } })
+     // 话题内消息：refs 带 threadId
+     await bridge.deliver("feishu", "message", {
+       summary: "话题里的问题",
+       body: "【用户】话题里的问题？",
+       refs: { chatId: "oc_g", messageId: "om_1", threadId: "om_root1" },
+       id: "feishu:om_1",
+     })
+     // 顶层消息：无 threadId
+     await bridge.deliver("feishu", "message", {
+       summary: "顶层消息",
+       body: "【用户】顶层消息",
+       refs: { chatId: "oc_g", messageId: "om_2" },
+       id: "feishu:om_2",
+     })
+     expect(seenKeys).toEqual(["oc_g__t_om_root1", "oc_g"])
+     expect(runs.length).toBeGreaterThanOrEqual(2)
+   } finally {
+     rmSync(home, { recursive: true, force: true })
+   }
+ })
+
+ test("同一渠道同时声明写/读/收三面", async () => {
     const home = mkdtempSync(join(tmpdir(), "in-asm-"))
     const reg = makeRegistry(home)
     const { runtime } = makeKernel()

@@ -74,9 +74,11 @@ export interface SessionData {
   persona?: {
     /** 人格 id（对应 `PersonaDef.id`）。 */
     personaId: string
-    /** 该人格下的 driver id（一个 driver 一个常驻会话）。 */
+    /** 该人格下的 driver id（一个 driver 一个常驻会话；声明 sessionKeyOf 后一键一会话）。 */
     driverId: string
-    /** 绑定建立时间（ms）：同 (personaId, driverId) 有多个会话时取最早的（见 `SessionResolver`）。 */
+    /** 会话路由键（多会话形态；缺省 = 单会话，与旧记录天然兼容）。 */
+    sessionKey?: string
+    /** 绑定建立时间（ms）：同键有多个会话时取最早的（见 `SessionResolver`）。 */
     boundAt: number
   }
 }

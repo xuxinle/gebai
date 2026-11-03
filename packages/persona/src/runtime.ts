@@ -60,9 +60,29 @@ const DEFAULT_DEDUPE_CAPACITY = 2048
 const DEFAULT_FANOUT_CONCURRENCY = 6
 
 /** driver 的全局键（`personaId/driverId`）——调度器与幂等记账都按它区分。 */
-export function driverKey(personaId: string, driverId: string): string {
-  return `${personaId}/${driverId}`
+ export function driverKey(personaId: string, driverId: string): string {
+ return `${personaId}/${driverId}`
+ }
+
+/** 默认会话键：未声明 sessionKeyOf / 返回空时使用（保持单会话行为不变）。 */
+export const DEFAULT_SESSION_KEY = ""
+
+/** 带会话键的缓存键：默认键退回二元键形状（与历史缓存键兼容，热升级后 memo 不丢）。 */
+export function sessionDriverKey(personaId: string, driverId: string, sessionKey: string): string {
+ return sessionKey === DEFAULT_SESSION_KEY ? driverKey(personaId, driverId) : `${personaId}/${driverId}#${sessionKey}`
 }
+
+/** 会话键清洗：非法字符压成下划线、限长 128（防路由函数返回怪形/超长串污染会话名与盘上键）。 */
+export function sanitizeSessionKey(raw: string): string {
+ const cleaned = raw.trim().replace(/[^A-Za-z0-9_.:-]/g, "_").slice(0, 128)
+ return cleaned || DEFAULT_SESSION_KEY
+}
+
+/** 二元 driver 键（取消接口用：多会话键形态下仍按 driver 整体定位）。 */
+function baseDriverKey(personaId: string, driverId: string): string {
+ return driverKey(personaId, driverId)
+}
+
 
 export class PersonaRuntime {
   private readonly dedupe: EventDedupe
@@ -339,7 +359,19 @@ export class PersonaRuntime {
     if (!scheduler) {
       return { personaId, driverId: driver.id, status: "unavailable", reason: "driver 已停止" }
     }
-    const resolved = await this.driverSession(personaId, driver.id, t.user, events[0])
+    // 会话路由键：声明了 sessionKeyOf 的 driver 按事件推导（每键一会话）；
+    // 未声明/返回空 = 默认键（单一常驻会话，与历史行为逐字节一致）。
+    // 路由函数异常不能杀事件：降级默认键并记日志（与「读历史失败不阻断投递」同纪律）。
+    let sessionKey = DEFAULT_SESSION_KEY
+    if (typeof driver.sessionKeyOf === "function") {
+      try {
+        const derived = driver.sessionKeyOf(events[0]!)
+        if (derived && derived.trim()) sessionKey = sanitizeSessionKey(derived)
+      } catch (err) {
+        this.log?.warn(`[persona:${key}] sessionKeyOf 抛错（降级默认会话键）: ${String((err as Error)?.message || err)}`)
+      }
+    }
+    const resolved = await this.driverSession(personaId, driver.id, t.user, events[0]!, sessionKey)
     if (!resolved.sessionId) {
       this.bump(key, "failed")
       // 如实转出根因：只说“会话解析失败”会让排查无从下手
@@ -369,17 +401,19 @@ export class PersonaRuntime {
     driverId: string,
     user: string,
     event: PersonaEvent,
+    sessionKey: string = DEFAULT_SESSION_KEY,
   ): Promise<{ sessionId: string | null; error?: string }> {
-    // 缓存：同一 driver 的会话是稳定的（resolveDriver 幂等），没必要每条事件都问一次。
+    // 缓存：同一 driver（同一会话键）的会话是稳定的（resolveDriver 幂等），没必要每条事件都问一次。
     // 缓存住的是 **Promise**（不是结果）：并发投递时也只会真正解析一次。
-    const key = driverKey(personaId, driverId)
+    const key = sessionDriverKey(personaId, driverId, sessionKey)
     const cached = this.sessionCache.get(key)
     if (cached) return cached
     const p = (async () => {
       try {
-        const r = await this.opts.sessions.resolveDriver({ personaId, driverId, user, event })
-        // 记下 driverKey → sessionId：取消接口靠它把 driver 翻译成调度器认的会话
-        this.driverSessions.set(key, r.sessionId)
+        const r = await this.opts.sessions.resolveDriver({ personaId, driverId, user, event, sessionKey })
+        // 记下 driverKey → sessionId：取消接口靠它把 driver 翻译成调度器认的会话。
+        // 多会话键形态下同一 driver 有多条记录（取消接口取最新一条，其余会话由各自的调度器桶管理）。
+        this.driverSessions.set(baseDriverKey(personaId, driverId), r.sessionId)
         return { sessionId: r.sessionId }
       } catch (err) {
         const error = String((err as Error)?.message || err)

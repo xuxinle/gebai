@@ -96,6 +96,8 @@ function extractMessage(ev: Record<string, unknown>): {
   chatName?: string
   /** 会话类型（飞书 `chat_type`：`p2p` 单聊 / `group` 群）：群消息才走整群成员表查名 */
   chatType?: string
+  /** 话题根消息 id（话题群内消息非空；顶层消息为空）——会话分流与回复到话题都靠它。 */
+  rootId?: string
   senderId?: string
   senderName?: string
   senderType?: string
@@ -132,6 +134,10 @@ function extractMessage(ev: Record<string, unknown>): {
   }
 
   const ct = Number(header.create_time ?? 0)
+  // 话题归属：话题群每条消息都带 thread_id（omt_ 前缀，指向所属话题；非话题群恒空）。
+  // 注意不是 root_id——那是普通群「引用回复链」的字段，话题群里恒为空（实测两种群形态验证）。
+  // 出站回话题 = reply 本条消息（飞书自动继承 thread_id 落回原话题，实测 code=0 验证）。
+  const rootId = String(message.thread_id ?? "").trim() || undefined
   return {
     messageId,
     chatId,
@@ -141,6 +147,7 @@ function extractMessage(ev: Record<string, unknown>): {
     // 早期这里只把 p2p 转成 chatName 就丢了 chatType，下游那句 `msg.chatType !== "p2p"`
     // 于是恒为真（undefined !== "p2p"），单聊也去查群成员表。（类型缺失被 typecheck 抓出）
     ...(chatType ? { chatType } : {}),
+    ...(rootId ? { rootId } : {}),
     ...(sender.sender_id?.open_id ? { senderId: sender.sender_id.open_id } : {}),
     ...(sender.sender_type ? { senderType: sender.sender_type } : {}),
     text,
@@ -320,10 +327,14 @@ export const channel: ChannelDef = {
 
   verbs: {
     send: {
-      summary: "向群发文本消息（支持 <at user_id=\"open_id\">名字</at> @人）",
+      summary: "向群发文本消息（支持 <at user_id=\"open_id\">名字</at> @人；话题群传 root 发进指定话题）",
       writes: true,
       args: {
         text: { type: "string", description: "消息正文", required: true },
+        root: {
+          type: "string",
+          description: "要回复的消息 id（om_ 前缀）：传入则 reply 该消息。话题群内**必须**传本轮事件的 refs.messageId（飞书自动落回原话题）；不传会另开新话题", 
+        },
         as_user: {
           type: "boolean",
           description: "以**用户本人**名义发（默认以机器人名义）。人格回复应该用 true——群里看到的是“你”在说话，而不是机器人",
@@ -477,7 +488,6 @@ export const channel: ChannelDef = {
             .emit({
               summary: `${senderName ?? msg.senderId ?? "用户"}：${msg.text.slice(0, 60)}`,
               body: who + msg.text,
-              source: msg.chatName === "与我的单聊" ? "飞书单聊" : msg.chatName ? `飞书群「${msg.chatName}」` : `飞书群 ${msg.chatId}`,
               kind: "message",
               // 幂等键：飞书消息 id（它会重投同一消息）
               id: `feishu:${msg.messageId}`,
@@ -485,10 +495,23 @@ export const channel: ChannelDef = {
               refs: {
                 chatId: msg.chatId,
                 messageId: msg.messageId,
+                // 话题归属：话题群内消息带 root_id（话题根消息 id）——人格侧据此按话题分会话，
+                // 出站回复也靠它回到原话题（reply 的 root 语义）。非话题消息无此字段。
+                ...(msg.rootId ? { threadId: msg.rootId } : {}),
                 ...(msg.senderId ? { senderId: msg.senderId } : {}),
                 ...(senderName ? { senderName } : {}),
                 ...(!senderName ? { senderName: "用户" } : {}),
               },
+              // 话题群内消息的来源标注带话题（模型可感知「这是某个话题内的一句话」）
+              source: msg.rootId
+                ? msg.chatName
+                  ? `飞书群「${msg.chatName}」话题 ${msg.rootId}`
+                  : `飞书群 ${msg.chatId} 话题 ${msg.rootId}`
+                : msg.chatName === "与我的单聊"
+                  ? "飞书单聊"
+                  : msg.chatName
+                    ? `飞书群「${msg.chatName}」`
+                    : `飞书群 ${msg.chatId}`,
             })
             .then((r) => {
               if (r.status !== "accepted") ctx.log("warn", `消息 ${msg.messageId} 未被接管（${r.status}）`)
@@ -520,12 +543,20 @@ export const channel: ChannelDef = {
 
     if (input.verb === "send") {
       const text = String(input.args.text ?? "")
+      // 话题内发送：root 非空时 reply 该消息（飞书自动继承 thread_id 落回原话题——实测验证；
+      // 话题群没有「群顶层」：不带 root 直发会**另开新话题**，打断不到正在讨论的人）。
+      // root 取值应为**消息 id**（om_ 前缀），不是话题 id（omt_）。
+      const root = String(input.args.root ?? "").trim()
       const data = await api<{ message_id?: string }>(
         creds,
-        "/im/v1/messages?receive_id_type=chat_id",
+        root
+          ? `/im/v1/messages/${encodeURIComponent(root)}/reply`
+          : "/im/v1/messages?receive_id_type=chat_id",
         {
           method: "POST",
-          body: JSON.stringify({ receive_id: input.address, msg_type: "text", content: JSON.stringify({ text }) }),
+          body: root
+            ? JSON.stringify({ msg_type: "text", content: JSON.stringify({ text }) })
+            : JSON.stringify({ receive_id: input.address, msg_type: "text", content: JSON.stringify({ text }) }),
         },
         asUser ? await userTokenOf(ctx) : undefined,
       )
@@ -536,9 +567,9 @@ export const channel: ChannelDef = {
       const sent = ctx.deps.sentMessages as { record(id: string): void } | undefined
       if (data.message_id) sent?.record(data.message_id)
       return {
-        summary: `已发到飞书群 ${input.address}${who}（${text.length} 字符）`,
+        summary: `已发到飞书群 ${input.address}${root ? ` 话题 ${root}` : ""}${who}（${text.length} 字符）`,
         ...(data.message_id ? { ref: data.message_id } : {}),
-        data: { chatId: input.address, messageId: data.message_id ?? null, asUser },
+        data: { chatId: input.address, ...(root ? { root } : {}), messageId: data.message_id ?? null, asUser },
       }
     }
 

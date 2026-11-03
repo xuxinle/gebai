@@ -136,7 +136,7 @@ export function validatePersonaDef(raw: unknown, expectedId: string): string | n
     for (const d of o.drivers) {
       if (!d || typeof d !== "object") return "drivers 每项必须是对象"
       const dr = d as Record<string, unknown>
-      const dAllowed = new Set(["id", "focus", "subscriptions", "maxConcurrent"])
+      const dAllowed = new Set(["id", "focus", "subscriptions", "maxConcurrent", "sessionKeyOf"])
       for (const k of Object.keys(dr)) {
         if (!dAllowed.has(k)) return `drivers 项含未知字段「${k}」（可用：${[...dAllowed].join(" / ")}）`
       }
@@ -156,6 +156,18 @@ export function validatePersonaDef(raw: unknown, expectedId: string): string | n
       }
       if (dr.maxConcurrent !== undefined && (typeof dr.maxConcurrent !== "number" || !Number.isInteger(dr.maxConcurrent) || dr.maxConcurrent < 1)) {
         return `drivers「${dr.id}」的 maxConcurrent 必须是 >=1 的整数（当前：${String(dr.maxConcurrent)}）`
+      }
+      // 会话路由函数：类型 + 试运行（拿不到真事件，用最小形状验证可调用且返回字符串）。
+      // 不能函数体内容——但它若不是函数/调用抛错/返回非字符串，运行期每条事件都会炸，
+      // 加载期必须拦住（与订阅校验同理：「配了但每条都报错」比「配了但没反应」好排查得多）。
+      if (dr.sessionKeyOf !== undefined) {
+        if (typeof dr.sessionKeyOf !== "function") return `drivers「${dr.id}」的 sessionKeyOf 必须是函数`
+        try {
+          const probe = dr.sessionKeyOf(EVENT_PROBE)
+          if (typeof probe !== "string") return `drivers「${dr.id}」的 sessionKeyOf 必须返回字符串（当前：${typeof probe}）`
+        } catch (err) {
+          return `drivers「${dr.id}」的 sessionKeyOf 试运行抛错（无法用于任何事件）: ${String((err as Error)?.message || err)}`
+        }
       }
     }
   }
@@ -189,6 +201,17 @@ export interface PersonaLoadError {
   domain: "builtin" | "custom"
   error: string
 }
+
+/** sessionKeyOf 的试运行事件（最小形状；验证可调用与返回类型，不验证业务正确性）。 */
+const EVENT_PROBE = {
+  id: "__probe__",
+  kind: "message",
+  personaId: "",
+  channel: "feishu",
+  context: { source: "探测", summary: "加载期探测" },
+  body: "",
+  receivedAt: 0,
+} as const
 
 /** 发现结果。 */
 export interface PersonaDiscoveryResult {

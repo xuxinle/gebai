@@ -161,6 +161,8 @@ export interface IngressRefs {
   chatId?: string
   /** 原消息 id（出站时可用于引用回复）。 */
   messageId?: string
+  /** 话题根消息 id（话题群内消息非空；人格侧据此按话题分会话，出站带 root 回到话题）。 */
+  threadId?: string
   /** 发送者（渠道侧 id，如飞书 open_id）。 */
   senderId?: string
   /** 发送者显示名。 */

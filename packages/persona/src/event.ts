@@ -24,6 +24,8 @@ export interface PersonaEventRefs {
   chatId?: string
   /** 原消息 id（出站时可用于引用回复）。 */
   messageId?: string
+  /** 话题根消息 id（话题群内消息非空；顶层消息无）——按话题分会话与回复到话题都靠它。 */
+  threadId?: string
   /** 发送者（渠道侧 id，如飞书 open_id）。 */
   senderId?: string
   /** 发送者显示名。 */

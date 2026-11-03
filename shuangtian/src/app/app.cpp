@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <format>
+#include <string>
 
 #include "st/codec/png.hpp"
 #include "st/core/fs.hpp"
@@ -536,21 +537,26 @@ auto Application::script() -> ui::ScriptHost* { return impl_->script.get(); }
   [[nodiscard]] auto Application::window_restore() -> bool {
     if (impl_->backend == nullptr) return false;
     const auto status = impl_->backend->restore();
+    // 措辞上的区分很重要（实测踩过）：后端失败的形态有多种——
+    // 「已置顶但没拿到键盘焦点」（后台弹卡被前台锁拒的典型形态，**窗口已经在人眼前了**）
+    // 与「置顶也失败」（真异常）不是一回事。前者对“叫人看一眼”这个目的已经够了，
+    // 只是写不进前景焦点；不当成错误，只记 info，免得每次弹卡都响一条 warn 噪声。
     if (!status) {
-      // 不当作硬失败：窗口通常已经解除最小化，只是可能没抢到前台焦点。
-      // 但必须能看见——否则“点了托盘没反应”会变成谜案。
-      ST_LOG_WARN("恢复窗口：{}", status.error().message);
+      const std::string msg = status.error().message;
+      if (msg.find("已置到最上层") != std::string::npos) {
+        ST_LOG_INFO("恢复窗口：{}", msg);
+      } else {
+        ST_LOG_WARN("恢复窗口：{}", msg);
+      }
     }
     // 恢复后**清除 UI 焦点与悬停残留**：
     // - 焦点：关窗时焦点停留在关闭按钮上（用户点它关的），直接恢复会把焦点环带回；
     // - 悬停：关窗时鼠标在关闭按钮上，窗口隐藏期间没有新的 MouseMove，`hovered_`
-    //   一直指向关闭按钮——恢复后按钮继续显示 hover 红色高亮，看起来像“聚焦/选中”
-    //   了它（实测现象：鼠标没到窗口、关闭按钮红色）。两者都不是“窗口回来了”
+    //   一直指向关闭按钮——恢复后按钮继续显示 hover 红色高亮，看起来像「聚焦/选中」
+    //   了它（实测现象：鼠标没到窗口、关闭按钮红色）。两者都不是「窗口回来了」
     //   该有的样子，清掉后等鼠标真的移动再重新 hover。
-    if (status) {
-      (void)root_.set_focus(nullptr);
-      root_.clear_hover();
-    }
+    (void)root_.set_focus(nullptr);
+    root_.clear_hover();
     return status.has_value();
   }
 

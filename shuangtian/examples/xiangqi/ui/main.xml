@@ -27,8 +27,15 @@
 
   根元素必须 grow="true"：它挂在 WindowFrame::content() 下，
   不 grow 只占内容高 → 底部那条会跑到窗口中间（xmlapp 踩过）。
+
+  ✗ 根上不写 surface（走窗框的 colors.bg）：
+  历史上写过 `surface="base"`，于是窗口里有两层底——`WindowFrame` 铺 `colors.bg`
+  （背景底色），根又铺 `colors.surface`（面板底色）。卡片少时根的子树高度只到
+  内容底，下方留白露出窗框的 `bg`，肉眼看就是**两个背景色**（实测：暗色主题下
+  上半 (21,21,26)、下半 (7,7,10)，分界线在最后一张卡片下沿）。
+  分层职责：窗框 = 窗口底色（唯一一层），卡片自己的 `surface="content"` = 卡片面。
 -->
-<Column id="root" gap="0" grow="true" surface="base">
+<Column id="root" gap="0" grow="true">
 
   <!-- ✗ 不再有 XML 层标题栏：`WindowFrame` 已经带了一条（图标 + 标题 + 窗口控制按钮）。
        两边各写一份的结果是**图标与「相期」重复两遍**，且一个跟窗口走、一个不跟。
@@ -40,9 +47,15 @@
        后面的会被底部栏压住（演示截图里第四张就是这样没的）。列表本来就会长。
 
        `ScrollView::add_child` 会把内容子元素插到滚动条**之前**（条恒在末尾），
-       所以这里直接写 XML 子节点就是对的（不需要 content 属性那种写法）。 -->
+       所以这里直接写 XML 子节点就是对的（不需要 content 属性那种写法）。
+
+       ✗ 不给 `surface`（透明）：它是**内容区**，底色由根节点的 `base` 负责。
+       之前写 `surface="alt"`（那是外壳条带：标题栏/活动栏/状态栏的语义）的后果：
+       列高度只到内容底部，下方滚动留白露出根的 `base` —— 同一个窗口里
+       上下两块底色（实测截图：上半深灰、下半近黑）。卡片自己已有
+       `surface="content"` 底色（见 app.js），不需要容器再铺一层。 -->
   <Scroll id="cards-scroll" grow="true">
-    <Column id="cards" gap="12" padding="16" surface="alt"/>
+    <Column id="cards" gap="12" padding="16"/>
   </Scroll>
 
   <!-- 底部动作行：右下角「全部忽略」。

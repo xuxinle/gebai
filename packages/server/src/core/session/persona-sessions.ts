@@ -47,9 +47,15 @@ export interface PersonaSessionResolverOptions {
   agentsFor?: (personaId: string) => string[]
 }
 
-/** 会话绑定键（`personaId\0driverId`）——用 NUL 分隔避免 id 里出现冒号时的歧义。 */
-function bindingKey(personaId: string, driverId: string): string {
-  return `${personaId}\u0000${driverId}`
+/** 会话绑定键（`personaId\0driverId\0sessionKey`）——用 NUL 分隔避免 id 里出现冒号时的歧义。
+ *  sessionKey 缺省空串（单会话形态，与历史绑定键形状兼容：旧盘上无第三段的记录按空键读取）。 */
+function bindingKey(personaId: string, driverId: string, sessionKey = ""): string {
+  return `${personaId}\u0000${driverId}\u0000${sessionKey}`
+}
+
+/** 从盘上读出绑定键（兼容旧记录：无 sessionKey 字段按空键）。 */
+function bindingKeyOf(s: { persona: { personaId: string; driverId: string; sessionKey?: string } }): string {
+  return bindingKey(s.persona.personaId, s.persona.driverId, s.persona.sessionKey ?? "")
 }
 
 /**
@@ -94,7 +100,7 @@ export class PersonaSessionResolver implements SessionResolver {
       const bound = sessions.filter((s) => s.persona?.personaId && s.persona?.driverId)
       bound.sort((a, b) => (a.persona!.boundAt ?? 0) - (b.persona!.boundAt ?? 0))
       for (const s of bound) {
-        const key = bindingKey(s.persona!.personaId, s.persona!.driverId)
+        const key = bindingKeyOf(s as never)
         // 只记“首个”（最早绑定的）；计数按**盘上找到的绑定数**而不是“内存新增数”——
         // 已在 memo 里的 key 也应计入（否则重启后 warm 会报 0 条，看起来像没恢复）
         if (!this.memo.has(key)) {
@@ -103,7 +109,7 @@ export class PersonaSessionResolver implements SessionResolver {
         }
       }
       // 已在 memo 中的也计入总数（语义：盘上可恢复的绑定总数）
-      const total = new Set(bound.map((s) => bindingKey(s.persona!.personaId, s.persona!.driverId))).size
+      const total = new Set(bound.map((s) => bindingKeyOf(s as never))).size
       return total
     } catch (err) {
       this.log?.warn(`[persona:sessions] 预热失败（首次查找会走扫描）: ${String((err as Error)?.message || err)}`)
@@ -111,9 +117,10 @@ export class PersonaSessionResolver implements SessionResolver {
     }
   }
 
-  async resolveDriver(input: { personaId: string; driverId: string; user: string; event: unknown }): Promise<ResolvedSession> {
+  async resolveDriver(input: { personaId: string; driverId: string; user: string; event: unknown; sessionKey?: string }): Promise<ResolvedSession> {
     const { personaId, driverId, user } = input
-    const key = bindingKey(personaId, driverId)
+    const sessionKey = input.sessionKey ?? ""
+    const key = bindingKey(personaId, driverId, sessionKey)
 
     // ① memo 命中：确认会话仍存在（被删/被归档后要重建，不能返回死 id）
     const known = this.memo.get(key)
@@ -128,17 +135,17 @@ export class PersonaSessionResolver implements SessionResolver {
     const pending = this.inflight.get(key)
     if (pending) return pending
 
-    const task = this.resolveOrCreate(personaId, driverId, user, key).finally(() => this.inflight.delete(key))
+    const task = this.resolveOrCreate(personaId, driverId, user, key, sessionKey).finally(() => this.inflight.delete(key))
     this.inflight.set(key, task)
     return task
   }
 
-  private async resolveOrCreate(personaId: string, driverId: string, user: string, key: string): Promise<ResolvedSession> {
+  private async resolveOrCreate(personaId: string, driverId: string, user: string, key: string, sessionKey: string): Promise<ResolvedSession> {
     // ③ 扫盘：memo 未命中（首次/重启/被清）时找已有绑定
     try {
       const sessions = await this.store.listSessions(user)
       const bound = sessions
-        .filter((s) => s.persona?.personaId === personaId && s.persona?.driverId === driverId)
+        .filter((s) => s.persona?.personaId === personaId && s.persona?.driverId === driverId && (s.persona.sessionKey ?? "") === sessionKey)
         // 取最早绑定的：多会话时行为稳定（不随新建漂移）
         .sort((a, b) => (a.persona!.boundAt ?? 0) - (b.persona!.boundAt ?? 0))
       if (bound.length > 0) {
@@ -151,10 +158,10 @@ export class PersonaSessionResolver implements SessionResolver {
       this.log?.warn(`[persona:sessions] 扫描会话失败（改为新建）: ${String((err as Error)?.message || err)}`)
     }
 
-    // ④ 新建并绑定
-    const name = this.nameFor(personaId, driverId)
+    // ④ 新建并绑定（多会话键形态下会话名带键后缀，侧栏可区分同分身的不同会话）
+    const name = this.nameFor(personaId, driverId) + (sessionKey ? `·${sessionKey}` : "")
     const session = await this.store.createSession(user, name)
-    session.persona = { personaId, driverId, boundAt: Date.now() }
+    session.persona = { personaId, driverId, ...(sessionKey ? { sessionKey } : {}), boundAt: Date.now() }
     // 工具包在建会话时一次写进持久化字段（`loadedSubAgents`）——引擎重载后据此重注册。
     // 不写的话：新会话当时能用（内存里有），重启后就“工具不见了”，且不报错。
     const agents = this.agentsFor?.(personaId) ?? []
@@ -202,10 +209,10 @@ export class PersonaSessionResolver implements SessionResolver {
   }
 
   /** 当前已知绑定（诊断/面板）。 */
-  bindings(): Array<{ personaId: string; driverId: string; sessionId: string }> {
+  bindings(): Array<{ personaId: string; driverId: string; sessionKey: string; sessionId: string }> {
     return [...this.memo.entries()].map(([k, sessionId]) => {
-      const [personaId, driverId] = k.split("\u0000")
-      return { personaId: personaId!, driverId: driverId!, sessionId }
+      const [personaId, driverId, sessionKey] = k.split("\u0000")
+      return { personaId: personaId!, driverId: driverId!, sessionKey: sessionKey ?? "", sessionId }
     })
   }
 }

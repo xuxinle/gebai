@@ -1210,6 +1210,33 @@ export const persona: PersonaDef = {
 `EventCoords` 增加 `chatId`（取自 `PersonaEvent.context.refs.chatId`）。三段式是
 **不同群归不同人格**（A 群给算力审核员、B 群给值班助手）的基础。
 
+#### 会话路由键（sessionKeyOf）：事件 → 会话的规则映射
+
+default 单分身单会话；声明 `sessionKeyOf: (event) => string` 后按返回值分流——
+`(personaId, driverId, sessionKey)` 一键一常驻会话（返回空串退回默认单会话）：
+
+```ts
+{
+  id: "support",
+  focus: "答群与话题里的问题",
+  subscriptions: ["message"],
+  // 话题群：每话题一会话；普通群：每群一会话
+  sessionKeyOf: (e) => {
+    const chat = e.context.refs?.chatId ?? ""
+    const thread = e.context.refs?.threadId ?? ""
+    return thread ? `${chat}__t_${thread}` : chat
+  },
+}
+```
+
+约束（加载期强制）：同步纯函数、试运行不抛错、返回字符串；运行期清洗（非法字符压下划线、
+128 限长）与异常降级（抛错退默认键、事件不丢）。键稳定性是定义方的责任——同一连续事务
+必须返回同一键，否则上下文断裂。会话名带键后缀（`小霜·support·oc_xxx`）侧栏可辨。
+
+**话题群闭环**：feishu 渠道入站抽出 `root_id` 进 `refs.threadId`（话题根消息 id）；
+出站 send 带 `root` 参数即发进该话题（回复话题根）；personaNote 明确要求模型
+refs 有 threadId 时必传 root。调度器队列本就按 sessionId 分桶，一键一会话天然串行。
+
 #### 环境变量配置面：人格共性放代码、差异放 env
 
 同名角色在不同部署（不同使用者）复用同一份定义文件，**启用与否与监听群**由 env 决定：

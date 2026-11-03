@@ -277,9 +277,50 @@ describe("插入：失败时残留插话不丢", () => {
 })
 
 describe("renderBatch：整编成会话", () => {
-  test("单事件直通（零回归保证）", () => {
+  test("单事件：元信息 + 正文 + 回法（模型能从消息本身判完整上下文）", () => {
     const e = ev("x")
-    expect(renderBatch([e])).toBe(e.body)
+    const out = renderBatch([e])
+    // 正文仍在（事实不变）
+    expect(out).toContain(e.body)
+    // 元信息：类型/渠道/事件ID/群/消息 —— 模型不必再猜任何 id
+    expect(out).toContain("【元信息】")
+    expect(out).toContain("oc_1")
+    expect(out).toContain("消息=x")
+    expect(out).toContain("事件ID=x")
+    // 回法提示可直接复制执行
+    expect(out).toContain("act(")
+  })
+
+  test("元信息含发送者与时间（跨天/多人场景可判断）", () => {
+    const e: PersonaEvent = {
+      ...ev("m"),
+      context: { source: "飞书群", summary: "x", refs: { chatId: "oc_1", messageId: "om_1", senderName: "张三", senderId: "ou_1" } },
+    }
+    const out = renderBatch([e])
+    expect(out).toContain("张三")
+    expect(out).toContain("ou_1")
+    // 完整日期（不只 HH:MM：定时/补投场景看不出是哪天）
+    expect(out).toMatch(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}/)
+  })
+
+  test("单事件、无 chatId（worker 回报）：不编造群字段也不出回法", () => {
+    const e: PersonaEvent = { ...ev("w"), context: { source: "worker", summary: "回报" }, body: "结论" }
+    const out = renderBatch([e])
+    expect(out).toContain("结论")
+    expect(out).toContain("【元信息】")
+    expect(out).not.toContain("群=")
+    expect(out).not.toContain("act(")
+  })
+
+  test("话题消息：元信息带话题 id、回法指向原话题", () => {
+    const e: PersonaEvent = {
+      ...ev("t"),
+      context: { source: "飞书群「支持群」话题 omt_1", summary: "话题内", refs: { chatId: "oc_1", messageId: "om_9", threadId: "omt_1" } },
+    }
+    const out = renderBatch([e])
+    expect(out).toContain("话题=omt_1")
+    expect(out).toContain('root:"om_9"')
+    expect(out).toContain("原话题")
   })
 
   test("多事件编号并保留来源", () => {

@@ -55,8 +55,35 @@ export interface DriverDef {
    *
    * 实际作用面：一个 driver 只对应一个常驻会话，会话级串行先把它锁死——
    * 所以大于 1 在当前路由下不会生效。真正的并发来自「同时有事的 driver 个数」。
+   * （声明 `sessionKeyOf` 后一个 driver 可有多个会话，此时额度才是真上限。）
    */
   maxConcurrent?: number
+  /**
+   * 会话路由键（可选）：从事件推导「这件事归哪个会话」。
+   *
+   * ## 语义
+   *
+   * - 不声明（缺省）：该 driver **单一会话**（现状，所有事件进同一个常驻会话）。
+   * - 声明：返回非空字符串 = 以 `(personaId, driverId, key)` 为绑定建/取会话；
+   *   返回空/undefined = 退回默认键（与不声明同路径，即事件本身不适合分会话时不必强行分）。
+   *
+   * 典型用法：`sessionKeyOf: (e) => e.context.refs?.chatId ?? ""`——每个群一个会话，
+   * 上下文按群隔离（A 群的排障细节不挤占 B 群的答疑上下文）。
+   *
+   * ## 为什么是函数而不是配置字符串
+   *
+   * 「按什么分会话」是每个部署自己的判断（按群/按工单号/按仓库名），预设几个枚举
+   * 字段要么不够用、要么泛滥。函数把判断权交给定义方，运行期只拿一个稳定的字符串。
+   *
+   * ## 约束（加载期强制）
+   *
+   * - 必须是同步纯函数（拿不到异步信息；需要查外部系统才能定的键不适合在这里做）。
+   * - 返回值会拼进会话名与绑定键：只允许 `[A-Za-z0-9_.:-]`（非法字符在加载期拒绝），
+   *   且长度限制 128——防路由函数返回超长/怪形字符串污染会话名与盘上键。
+   * - 键不稳定 = 同一件事被拆进多个会话（上下文断裂）——这是定义方的责任，
+   *   运行期无法代偿；文档里必须写明「同一连续事务必须返回同一键」。
+   */
+  sessionKeyOf?: (event: import("./event").PersonaEvent) => string
 }
 
 /** 会话解析结果。 */
@@ -137,7 +164,7 @@ export interface PersonaRunInput extends DriverTarget {
  * 实现必须幂等：同一 (personaId, driverId) 多次调用返回同一 sessionId（重启后亦然）。
  */
 export interface SessionResolver {
-  resolveDriver(input: { personaId: string; driverId: string; user: string; event: PersonaEvent }): Promise<ResolvedSession>
+  resolveDriver(input: { personaId: string; driverId: string; user: string; event: PersonaEvent; sessionKey?: string }): Promise<ResolvedSession>
 }
 
 /** 单条投递结果（广播后每个命中的 driver 各一份）。 */

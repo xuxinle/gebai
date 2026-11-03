@@ -242,21 +242,81 @@ class Win32Backend final : public Backend {
   /// - `SW_RESTORE` 先解除最小化（否则 `SetForegroundWindow` 对最小化窗口无效）；
   ///   **隐藏（SW_HIDE，托盘常驻）窗口还要先 `SW_SHOW`**——SW_HIDE 不是最小化，
   ///   `IsIconic` 不认它，光 SW_RESTORE 不会让它重新出现。
-  /// - `SetForegroundWindow` 才是把焦点拿过来。
+  /// - 把焦点拿过来：**单靠 `SetForegroundWindow` 不够**（见下）。
   ///
-  /// ⚠ Windows 有**前台锁**（foreground lock）：后台进程不能无条件抢焦点，
-  /// 未经用户输入的调用可能仅闪烁任务栏。本函数对此**不吞掉失败**——
-  /// 调用方（托盘点击）本身就是用户输入，实际总能成功；
-  /// 若真被拒，应让调用方知道而不是假装“已经叫回来了”。
+  /// ## Windows 前台锁：为什么这里要做三层
+  ///
+  /// `SetForegroundWindow` 只对「当前已在前台」或「由用户输入触发」的进程生效。
+  /// 相期的两种调用方处境完全不同：
+  ///
+  /// | 调用方 | 有用户输入？ | 直接 SetForegroundWindow |
+  /// |---|---|---|
+  /// | 托盘点击 | 有（鼠标） | 能成功 |
+  /// | **弹卡（WS 推来的新卡片）** | **没有** | **被拒 → 只闪任务栏** |
+  ///
+  /// 实测就是这个现象：来了待办卡，任务栏图标亮一下，窗口留在后面。
+  /// 「要紧的事要弹到人眼前」是这个应用的**全部价值**，所以不能接受“只闪一下”。
+  ///
+  /// 三层依次尝试（前一层成功就不再往下）：
+  /// 1. **临时置顶**：`SetWindowPos(HWND_TOPMOST)` 再取消置顶。置顶不受前台锁约束，
+  ///    窗口会真的盖到其它窗口之上；取消置顶保证它不一劳永逸地压住人。
+  /// 2. **AttachThreadInput 绕过**：把自己线程的输入队列附到当前前台窗口的线程上，
+  ///    此时系统“认为”我们是前台进程树的一部分，`SetForegroundWindow` 即生效。
+  ///    附完立刻解附（不解会把自己与那个线程的输入状态绑在一起，后患很大）。
+  /// 3. **`FlashWindowEx`**：前两层都失败时至少让任务栏明确闪烁（而不是默默无闻）。
+  ///
+  /// 不把失败当硬错误：窗口已经可见、也会被置到最上层（第 1 层几乎总能成），
+  /// 只是“键盘焦点”未必给了它。返回失败是为了让调用方能在日志里看到真实情况。
   [[nodiscard]] auto restore() -> Status override {
     if (window_ == nullptr) return unexpected(ErrorCode::Io, "窗口未创建");
     // 隐藏（托盘常驻）→ 先 SHOW；最小化 → 先 RESTORE；两者都会让窗口可见
     if (::IsWindowVisible(window_) == 0) ::ShowWindow(window_, SW_SHOW);
     if (::IsIconic(window_) != 0) ::ShowWindow(window_, SW_RESTORE);
-    if (::SetForegroundWindow(window_) == 0) {
-      // 不视为硬错误：窗口已经解除最小化（用户能看到它），只是没抢到焦点。
-      // 但要让上层能观测到（日志），而不是静默。
-      return unexpected(ErrorCode::Io, "窗口已恢复但未能取得前台焦点（系统前台锁）");
+
+    // 第 ① 层：临时置顶（不受前台锁约束）。
+    // SWP_SHOWWINDOW 确保隐藏态也一并显出来；不去动尺寸/位置（那是用户的选择）。
+    const bool raised = ::SetWindowPos(window_, HWND_TOPMOST, 0, 0, 0, 0,
+                                       SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW) != 0 &&
+                        ::SetWindowPos(window_, HWND_NOTOPMOST, 0, 0, 0, 0,
+                                       SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) != 0;
+
+    // 第 ② 层：真拿前台焦点。先直接试（有用户输入时这一步就成），不行再附着绕锁。
+    auto grab_focus = [this]() -> bool {
+      if (::GetForegroundWindow() == window_) return true;
+      if (::SetForegroundWindow(window_) != 0 && ::GetForegroundWindow() == window_) return true;
+      // 附着到当前前台窗口的输入线程：系统据此把本次调用算作“前台进程树内部发起的”。
+      const HWND fg = ::GetForegroundWindow();
+      if (fg == nullptr) return false;
+      const DWORD fg_thread = ::GetWindowThreadProcessId(fg, nullptr);
+      const DWORD my_thread = ::GetCurrentThreadId();
+      bool ok_now = false;
+      if (fg_thread != 0 && fg_thread != my_thread && ::AttachThreadInput(my_thread, fg_thread, TRUE) != 0) {
+        ::BringWindowToTop(window_);
+        ::SetForegroundWindow(window_);
+        ::SetFocus(window_);
+        ok_now = ::GetForegroundWindow() == window_;
+        // 必须解附：不解会让两个线程的输入状态（焦点/键盘队列）纠缠，
+        // 表现为“切到别的窗口后按键跑到相期里”这类灵异现象。
+        ::AttachThreadInput(my_thread, fg_thread, FALSE);
+      }
+      return ok_now;
+    };
+    const bool focused = grab_focus();
+
+    // 第 ③ 层：实在拿不到焦点，至少明确闪任务栏（不让提醒默默无闻）。
+    if (!focused) {
+      FLASHWINFO fi{};
+      fi.cbSize = sizeof(fi);
+      fi.hwnd = window_;
+      fi.dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG;  // 一直闪到用户切过去（比固定次数可靠）
+      ::FlashWindowEx(&fi);
+    }
+
+    if (!focused) {
+      // 窗口已显示且已置到最上层（第 ① 层），只是没拿到键盘焦点。如实上报。
+      return unexpected(ErrorCode::Io,
+                        raised ? "窗口已置到最上层但未取得键盘焦点（系统前台锁）"
+                               : "窗口已恢复但未能置顶也未取得前台焦点（系统前台锁）");
     }
     return ok();
   }
