@@ -95,6 +95,8 @@ enum class PrimitiveKind : std::uint8_t {
   Dodecahedron, ///< `dodecahedron`：正十二面体
   Icosahedron,  ///< `icosahedron`：正二十面体
   Helix,        ///< `helix`：螺旋管（弹簧/螺纹）
+  Extrude,      ///< `extrude`：2D 轮廓拉伸（params.profile）
+  Revolve,      ///< `revolve`：2D 轮廓绕 Y 车削（params.profile）
 };
 
 /// 规范名（写进脚本/glTF/日志的**唯一**名字）。
@@ -168,6 +170,13 @@ struct PrimitiveParams {
   float turns{3.0f};
   float taper{0.0f};
 
+  /// 草图轮廓（extrude/revolve）：(x, y) 点列（空 = 不适用）。
+  ///
+  /// - `extrude`：沿 Y 拉伸（轮廓在 XZ 平面，深度 = depth）；
+  /// - `revolve`：绕 Y 轴旋转成型（轮廓的 x≥0 为半径、y 为高度，
+  ///   steps = 旋转分段（复用 segments）。
+  std::vector<std::pair<float, float>> profile{};
+
   /// 扭转变形：整段高度上的**总**扭转角（弧度，只对棱柱/齿轮/管有意义）。
   float twist{0.0f};
 
@@ -235,7 +244,19 @@ struct PrimitiveParams {
 [[nodiscard]] auto make_dodecahedron(const PrimitiveParams& params) -> Mesh;
 [[nodiscard]] auto make_icosahedron(const PrimitiveParams& params) -> Mesh;
 /// 螺旋管（弹簧/螺纹）。
-[[nodiscard]] auto make_helix(const PrimitiveParams& params) -> Mesh;
+  [[nodiscard]] auto make_helix(const PrimitiveParams& params) -> Mesh;
+
+  /// **拉伸**：XZ 平面的 2D 轮廓沿 Y 拉伸成闭合体（params.profile）。
+  ///
+  /// 轮廓绕向自动归一；封盖耳切（凹多边形正确）。profile 少于 3 点
+  /// 时返回空网格（调用方先行检查报错）。
+  [[nodiscard]] auto make_extrude(const PrimitiveParams& params) -> Mesh;
+
+  /// **旋转成型（车削）**：XY 平面的 2D 轮廓绕 Y 轴旋转一周成闭合体
+  ///（params.profile；x 是半径（取 |x|）、y 是高度；segments 分段）。
+  ///
+  /// 花瓶/杯子/轴类的主力：一条侧壁曲线换一台回转体。profile 至少 2 点。
+  [[nodiscard]] auto make_revolve(const PrimitiveParams& params) -> Mesh;
 
 /// 按种类分派（脚本层与界面共用这一个入口）。
 [[nodiscard]] auto make(PrimitiveKind kind, const PrimitiveParams& params) -> Mesh;

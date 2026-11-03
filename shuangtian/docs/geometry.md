@@ -894,6 +894,68 @@ translate 与零件叠加，其余字段模板优先。
 测试：`tests/scene_part_test.cpp` 7 条（展开命名/镜像对称/模板内 connect
 改写/外部引用保留/重复定义拒绝/snap 生效与非法值拒绝）。
 
+### 4.12.9 ⑧ 建模运算：布尔 / 草图挤出车削 / 阵列
+
+三个图元级建模能力，补的是「24 个原子图元表达不了」的形状。
+
+**布尔**（`<Subtract>` / `<Union>` / `<Intersect>`，标签=运算、子元素=操作体）：
+
+```xml
+<Subtract name="plate">
+  <Box size="2, 0.3, 2"/>            <!-- 首个是基体 -->
+  <Cylinder size="0.5, 1"/>          <!-- 其余是工具（孔） -->
+</Subtract>
+```
+
+- 算法：**BSP 剪裁**（csg.js 语义的 C++ 移植：invert/clipTo 组合代数）。
+  自创「尽头=内外」判定在范围错开的共面（B 的 y+ 面与 A 的 y+ 面同平面
+  但范围错开）上会整面误收，因此严格移植 csg.js。
+- 入口**绕序归一**：`Mesh::cylinder` 的有向体积是负的（绕序与 box 相反），
+  负实体在 invert 代数下会让 subtract 产出 A∩B——入口统一翻成正实体。
+- 子元素各自 TRS 在网格层烘培后参与运算；结果可再套 size 缩放。
+- 要求水密（Plane/Disc 无厚度参与布尔会报错）；链式中间结果不再校验
+  （切缝三角形可能在面积阈值边缘被丢，视觉无损但拓扑开洞）。
+- 确定性：同输入两次输出**逐字节相同**（分割面按输入顺序取，无哈希无随机）。
+- 结果丢弃 UV（工具切割面 UV 无从插值）；法线全量重算为平面法线。
+
+**草图挤出/车削**（`<Extrude>` / `<Revolve>` + `profile`）：
+
+```xml
+<Extrude profile="0,0; 1,0; 1,0.8; 0.5,1.4; 0,1.4" size="1, 0.3, 1"/>
+<Revolve profile="0.5,0; 0.42,0.1; 0.3,0.6" segments="32"/>
+```
+
+- `profile`：`"x,y; x,y; …"`——点间用空白或 `;`（推荐 `;`：坐标内可写空格），
+  坐标内用逗号。**踩过**：`"0, -0.14"` 里逗号后的空格既是坐标内空格又是
+  点分隔，无法区分，所以空白分点时坐标内不能有空格。
+- Extrude：轮廓在 XZ 平面沿 Y 拉伸，封盖用**耳切法**（凹多边形正确，扇形
+  只对凸轮廓成立）；绕向自动归一。`size[1]` = 拉伸深度，x/z 由 profile 定。
+- Revolve：轮廓 `(x=半径, y=高度)` 绕 Y 轴扫一圈，首尾 x>0 时加盘封口。
+
+**阵列**（`<Ring>` / `<Row>` + `pattern_count` / `pattern_radius` / `pattern_step`）：
+
+```xml
+<Ring name="fins" pattern_count="12" pattern_radius="0.8">
+  <Extrude profile="…"/>                <!-- 首个子元素 = 原型 -->
+</Ring>
+```
+
+实例化后 merge 成单网格（一次绘制、可直接当布尔输入）。`ring` 绕 Y 均分
+并各自朝向；`row` 沿向量等距。
+
+**布尔/阵列对象的渲染契约**：它们 `shape=group` 但**有实体几何**（几何由
+children 运算产出）。`to_node` 的 `has_geometry` 与 `paint` 的绘制判据都
+必须是 `!group || !op.empty() || !pattern.empty()`——两处不一致的症状是
+「能建出来但画不出来」（实测：阵列完全不可见，只在包围盒里占位）。
+
+测试：`tests/scene_boolean_test.cpp` 11 条（三运算体积/通孔/确定性/水密
+拒绝/布尔标签几何/错误报路/凹轮廓挤出/车削圆柱/阵列份数与铺开/阵列内
+嵌布尔/profile 错误）。
+
+实测（`tools/expressiveness_fan_probe.cpp` 轴流风扇）：扁盘 Subtract 12 孔
+环形阵列（散热孔）、Revolve 双层车削再 Subtract 挖内腔（薄壁导流罩）、
+Extrude 后掠叶片×9 环形阵列——这些形状在只有 24 个原子图元时无法表达。
+
 测试：`tests/scene_constraint_test.cpp` 9 条（数值断言/联动/前向引用/互斥/
 auto 误用/锚点解析/旋转互逆/XML 等价与往返）。
 
@@ -1126,6 +1188,9 @@ cube 的 height 无效、torus 的 radius 是中心线半径）。
 | `tools/constraint_lamp_probe.cpp` | 约束渲染验证：台灯装配 + 台面升高全灯联动（像素级对照） |
 | `tests/scene_part_test.cpp` | Part/Use 与 snap 7 条：展开命名/镜像/引用改写/外部引用/错误拒绝/snap |
 | `tools/scene_xml_showcase_v3.cpp` | 差分机 v3：装配大纲 + Part 化 + mirror + 全约束 + snap（组织方法论的样例） |
+| `src/raster/mesh_boolean.cpp` | 布尔内核：BSP 剪裁（csg.js 语义）+ 绕序归一 + 确定性 |
+| `tests/scene_boolean_test.cpp` | 建模运算 11 条：三运算体积/通孔/确定性/水密/挤出/车削/阵列/嵌套 |
+| `tools/expressiveness_fan_probe.cpp` | 表达能力 showcase：轴流风扇（布尔散热孔 + 车削导流罩 + 挤出叶片阵列） |
 | `tests/geom_size_test.cpp` | 尺寸语义 7 条：9 个形状精确包围盒、旧字段等价、size 优先级 |
 | `tests/geom_scene_integration_test.cpp` | 22 个图元**真的画出像素**、旧形状语义不变、参数生效、导出→读回、焊接/变换/OBJ 往返 |
 | `tools/primitives_gallery_probe.cpp` | 22 格总览 PNG + 每个图元的 `.glb`（可拖进 Blender 对照） |

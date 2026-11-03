@@ -12,6 +12,7 @@
 #include <set>
 #include "st/raster/primitives.hpp"
 
+#include <cstdlib>
 #include <cmath>
 #include <string>
 
@@ -404,7 +405,9 @@ auto read_shadow(const Json& json) -> Result<PlanarShadow> {
 [[nodiscard]] auto to_node(const SceneObjectSpec& object) -> st::raster::SceneNode {
   st::raster::SceneNode node{};
   node.name = object.name;
-  node.has_geometry = !object.group;
+  // 布尔/阵列对象虽然 shape=group，但**几何由 children 运算产出**——
+  // 它们是实体，不是层级容器（否则渲染会跳过，只看到空组）。
+  node.has_geometry = !object.group || !object.op.empty() || !object.pattern.empty();
   node.local.translation = object.translate;
   node.local.rotation = object.rotation;
   node.local.scale = object.scale;
@@ -604,6 +607,41 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
   obj.attach = json_get_string(node, "attach", obj.attach);
   obj.connect = json_get_string(node, "connect", obj.connect);
   obj.align = json_get_string(node, "align", obj.align);
+  obj.op = json_get_string(node, "op", obj.op);
+  obj.profile = json_get_string(node, "profile", obj.profile);
+  obj.pattern = json_get_string(node, "pattern", obj.pattern);
+  obj.pattern_count = static_cast<int>(json_get_double(node, "pattern_count",
+                                                       static_cast<double>(obj.pattern_count)));
+  obj.pattern_radius = static_cast<float>(
+      json_get_double(node, "pattern_radius", static_cast<double>(obj.pattern_radius)));
+  obj.pattern_step =
+      read_vec3(node, "pattern_step", obj.pattern_step, path).value_or(obj.pattern_step);
+  if (!obj.pattern.empty()) {
+    if (obj.pattern != "ring" && obj.pattern != "row") {
+      return st::unexpected(ErrorCode::Parse,
+                            std::format("{}.pattern：只接受 ring/row，收到 \"{}\"", path,
+                                        obj.pattern));
+    }
+    if (obj.pattern_count < 1) {
+      return st::unexpected(ErrorCode::Parse,
+                            std::format("{}.pattern_count：至少 1（收到 {}）", path,
+                                        obj.pattern_count));
+    }
+    obj.shape = "group";
+    obj.group = true;
+  }
+  if (!obj.op.empty()) {
+    if (obj.op != "union" && obj.op != "subtract" && obj.op != "intersect") {
+      return st::unexpected(ErrorCode::Parse,
+                            std::format("{}.op：只接受 union/subtract/intersect，收到 \"{}\"",
+                                        path, obj.op));
+    }
+    if (obj.shape != "group") {
+      // op 对象自身不直接画几何——shape 强制 group（避免两个几何来源打架）。
+      obj.shape = "group";
+      obj.group = true;
+    }
+  }
   {
     int constraint_count = 0;
     if (!obj.attach.empty()) ++constraint_count;
@@ -732,7 +770,8 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
       "sphere",   "box",         "plane",   "cylinder", "torus",     "uv_sphere",
       "cube",     "ico_sphere",  "cone",    "capsule",   "disc",     "circle",
       "grid",     "tube",        "prism",   "gear",      "torus_knot", "arrow",
-      "wedge",    "tetrahedron", "octahedron", "dodecahedron", "icosahedron", "helix"};
+      "wedge",    "tetrahedron", "octahedron", "dodecahedron", "icosahedron", "helix",
+      "extrude",  "revolve"};
   const bool is_obj_shape = obj.shape.rfind("obj:", 0) == 0;
   // 给了 `gltf` 时 `shape` 不参与几何选择（它只作为兜底默认值存在），
   // 所以不必强制它是内置图元名——否则写 `{"gltf": "a.glb"}` 会因为默认 `sphere`
@@ -784,7 +823,7 @@ auto solve_constraints(std::vector<SceneObjectSpec>& objects,
   const auto local_bounds_of = [&asset_basis](auto&& self, const SceneObjectSpec& object)
       -> st::raster::Bounds {
     st::raster::Bounds box = st::raster::Bounds::empty();
-    if (!object.group) {
+    if (!object.group || !object.op.empty() || !object.pattern.empty()) {
       SceneObjectSpec probe = object;
       if (object.shape.rfind("obj:", 0) == 0) {
         probe.shape = "obj:" + resolve_shape_path(object.shape.substr(4), asset_basis);
@@ -1186,7 +1225,13 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
           }
           const auto value = read_vec3(key_node, "value", math::Vec3{}, key_path);
           if (!value) return st::forward_error(value.error());
-          key.value = *value;
+          // rotation 轨道的值也是**度**（与对象 `rotation` 字段同一套对调用方
+          // 约定），内部存弧度——漏这一步的症状是“动画跑了但物体不转”
+          //（实测 480° 被当 480 弧度，浮点上几乎看不出）。
+          key.value = track.kind == st::raster::TrackKind::Rotation
+                          ? math::Vec3{to_radians(value->x), to_radians(value->y),
+                                       to_radians(value->z)}
+                          : *value;
           const std::string easing = json_get_string(key_node, "easing", "linear");
           const auto parsed_easing = st::raster::parse_easing(easing);
           if (!parsed_easing.has_value()) {
@@ -1376,6 +1421,90 @@ auto resolve_shape_path(std::string_view reference, std::string_view asset_basis
 }
 
 auto build_mesh(const SceneObjectSpec& object) -> Result<Mesh> {
+  // ── 阵列对象：first child = 原型，实例化 count 次后 merge ──
+  if (!object.pattern.empty()) {
+    if (object.children.empty()) {
+      return st::unexpected(ErrorCode::Parse,
+                            std::format("{}：pattern 需要至少 1 个子元素作为原型", object.name));
+    }
+    const SceneObjectSpec& prototype = object.children.front();
+    const auto base_mesh = build_mesh(prototype);
+    if (!base_mesh) return st::forward_error(base_mesh.error());
+    const st::raster::SceneNode node = to_node(prototype);
+    const st::math::Mat4 base_matrix = st::raster::local_matrix(node);
+    const int count = object.pattern_count;
+    std::vector<Mesh> instances;
+    instances.reserve(static_cast<std::size_t>(count));
+    constexpr float kTwoPi = 6.28318530717958647692f;
+    for (int i = 0; i < count; ++i) {
+      st::math::Mat4 placement{};
+      if (object.pattern == "ring") {
+        const float angle = kTwoPi * static_cast<float>(i) / static_cast<float>(count);
+        placement = st::math::Mat4::translation(
+                        st::math::Vec3{std::sin(angle) * object.pattern_radius, 0.0f,
+                                       std::cos(angle) * object.pattern_radius}) *
+                    st::math::Mat4::rotation(st::math::Vec3{0.0f, 1.0f, 0.0f}, angle);
+      } else {
+        placement = st::math::Mat4::translation(object.pattern_step * static_cast<float>(i));
+      }
+      instances.push_back(st::raster::transform(*base_mesh, placement * base_matrix));
+    }
+    return st::raster::merge(instances);
+  }
+  // ── 布尔运算对象：children = 操作体（首个为基体），递归求值后链式运算 ──
+  //
+  // `op` 非空时 children 的层级语义被【重定义为操作体列表】（不是父子层级）
+  //——同一个 children 字段、两种语义，以 op 为开关。这么设计而不是另开
+  // `operands` 数组的理由：XML 的嵌套写法天然就是「标签套标签」,
+  // <Subtract><Box/><Cylinder/></Subtract> 里 Cylinder 就是 Box 的子元素；
+  // 序列化/Part 展开/约束解算全部零改动复用。
+  if (!object.op.empty()) {
+    st::raster::BooleanOp boolean_op{};
+    if (object.op == "subtract") {
+      boolean_op = st::raster::BooleanOp::Subtract;
+    } else if (object.op == "union") {
+      boolean_op = st::raster::BooleanOp::Union;
+    } else if (object.op == "intersect") {
+      boolean_op = st::raster::BooleanOp::Intersect;
+    } else {
+      return st::unexpected(ErrorCode::Parse,
+                            std::format("{}.op：只接受 union/subtract/intersect，收到 \"{}\"",
+                                        object.name, object.op));
+    }
+    if (object.children.size() < 2U) {
+      return st::unexpected(
+          ErrorCode::Parse,
+          std::format("{}：{} 至少需要 2 个子元素（首个是基体，其余是工具）",
+                      object.name, object.op));
+    }
+    std::vector<Mesh> operands;
+    operands.reserve(object.children.size());
+    for (const SceneObjectSpec& child : object.children) {
+      const auto mesh = build_mesh(child);
+      if (!mesh) return st::forward_error(mesh.error());
+      // 子元素的 TRS 在网格层烘培（操作体各自的 translate/rotation 生效）。
+      const st::raster::SceneNode node = to_node(child);
+      operands.push_back(st::raster::transform(*mesh, st::raster::local_matrix(node)));
+    }
+    const auto result = st::raster::boolean_chain(operands, boolean_op);
+    if (!result) return st::forward_error(result.error());
+    Mesh mesh = *result;
+    // 尺寸缩放（布尔结果的 resize 语义与普通图元一致：按包围盒归一）。
+    if (object.size_count > 0U) {
+      const st::raster::Bounds box = st::raster::bounds(mesh);
+      const math::Vec3 current = box.size();
+      math::Vec3 target = current;
+      if (object.size_count >= 1U) target.x = object.size.x;
+      if (object.size_count >= 2U) target.y = object.size.y;
+      if (object.size_count >= 3U) target.z = object.size.z;
+      const math::Vec3 scale{current.x > 1e-6f ? target.x / current.x : 1.0f,
+                             current.y > 1e-6f ? target.y / current.y : 1.0f,
+                             current.z > 1e-6f ? target.z / current.z : 1.0f};
+      mesh = st::raster::transform(
+          mesh, st::math::Mat4::scaling(scale));
+    }
+    return mesh;
+  }
   if (object.shape.rfind("obj:", 0) == 0) {
     // 不带 `asset_basis` 的重载：`build_mesh` 只拿到对象、拿不到场景。
     // 带基准目录的那条在 `draw_one` 里单独处理（场景级信息在那才可见）。
@@ -1402,6 +1531,58 @@ auto build_mesh(const SceneObjectSpec& object) -> Result<Mesh> {
   params.knot_q = object.knot_q;
   params.turns = object.turns;
   params.taper = object.taper;
+  // 草图轮廓（extrude/revolve）："x,y x,y …"（空格分点、逗号分坐标）。
+  // 解析失败报错指路（点名与期望格式）；顺逆时针都收，生成器归一。
+  if (!object.profile.empty()) {
+    // ## 分隔符规约
+    //
+    // 点间分隔：空白或 `;`（推荐 `;`——坐标内可以写空格，可读性更好）；
+    // 坐标内：逗号。
+    // 实测坑：`"0, -0.14"` 里逗号后的空格既是坐标内空格又是点分隔，
+    // 无法区分——所以空白分点时**坐标内不能有空格**，要可读就用 `;`。
+    std::size_t cursor = 0;
+    while (cursor < object.profile.size()) {
+      while (cursor < object.profile.size() &&
+             (object.profile[cursor] == ' ' || object.profile[cursor] == '\t' ||
+              object.profile[cursor] == '\n' || object.profile[cursor] == '\r' ||
+              object.profile[cursor] == ';')) {
+        ++cursor;
+      }
+      if (cursor >= object.profile.size()) break;
+      const auto space = object.profile.find_first_of(" \t\n\r;", cursor);
+      const std::string point_text =
+          object.profile.substr(cursor, space == std::string::npos
+                                                ? std::string::npos
+                                                : space - cursor);
+      const auto comma = point_text.find(',');
+      if (comma == std::string::npos) {
+        return st::unexpected(
+            ErrorCode::Parse,
+            std::format("{}.profile：每个点是 \"x,y\"（逗号分隔），收到 \"{}\"；"
+                        "整体格式：\"0,0 1,0 1,1\"（空格分点）"
+                        "——注意坐标内不能有空格（\"0, 1\" 会被当成两个点）",
+                        object.name, point_text));
+      }
+      try {
+        const float x = std::stof(point_text.substr(0, comma));
+        const float y = std::stof(point_text.substr(comma + 1));
+        params.profile.emplace_back(x, y);
+      } catch (const std::exception&) {
+        return st::unexpected(
+            ErrorCode::Parse,
+            std::format("{}.profile：坐标不是数字（\"{}\"）", object.name, point_text));
+      }
+      if (space == std::string::npos) break;
+      cursor = space + 1;
+    }
+    const std::size_t needed = object.shape == "revolve" ? 2U : 3U;
+    if (params.profile.size() < needed) {
+      return st::unexpected(
+          ErrorCode::Parse,
+          std::format("{}.profile：{} 至少需要 {} 个点，收到 {} 个",
+                      object.name, object.shape, needed, params.profile.size()));
+    }
+  }
 
   // ## 尺寸取值：**只有 `size` 一条路**
   //
@@ -1478,6 +1659,19 @@ auto build_mesh(const SceneObjectSpec& object) -> Result<Mesh> {
   params.major_segments = object.segments;
   params.twist = object.twist;
   params.sides = object.sides;
+  // 草图形状：profile 必填（上面的解析已验证点数）。
+  //
+  // 尺寸语义：`size[1]` = 拉伸深度（已在上面经 `params.depth` 用）。
+  // x/z 范围由 profile 决定——**不参与包围盒归一**（否则会把轮廓比例
+  // 拉伸成 0.3 立方，L 形支架变薄片）。其余图元继续走归一。
+  if (shape == "extrude" || shape == "revolve") {
+    if (object.profile.empty()) {
+      return st::unexpected(
+          ErrorCode::Parse,
+          std::format("{}：{} 需要 profile 属性（\"x,y x,y …\" 点列）", object.name, shape));
+    }
+    return primitives::make_from_name(shape, params);
+  }
   return primitives::make_from_name(shape, params);
 }
 
@@ -1734,6 +1928,14 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
     const auto status = st::raster::validate_clip(clip, roots);
     if (!status) return st::forward_error(status.error());
     const auto sampled = st::raster::sample_clip(clip, *time);
+    if (std::getenv("ST_ANIM_DEBUG") != nullptr) {
+      std::fprintf(stderr, "[anim] t=%.2f 采样 %zu 个节点：", double(*time), sampled.size());
+      for (const auto& entry : sampled) {
+        std::fprintf(stderr, "%s(rot %.1f°)", entry.node.c_str(),
+                     double(entry.local.rotation.y * 57.29578f));
+      }
+      std::fprintf(stderr, "\n");
+    }
     roots = st::raster::apply_sample(roots, sampled);
   }
   auto resolved = st::raster::resolve(roots);
@@ -1764,7 +1966,7 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
       return found->second;
     }
     st::raster::Bounds box = st::raster::Bounds::empty();
-    if (!object.group) {
+    if (!object.group || !object.op.empty() || !object.pattern.empty()) {
       SceneObjectSpec resolved_object = object;
       if (object.shape.rfind("obj:", 0) == 0) {
         resolved_object.shape = "obj:" + resolve_shape_path(object.shape.substr(4), spec.asset_basis);
@@ -1855,7 +2057,10 @@ auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3
     if (found == spec_of.end()) return {};
     const SceneObjectSpec& obj = *found->second;
     const math::Mat4 world = world_matrix_of(node);
-    if (!obj.group) {
+    // 布尔/阵列对象 shape=group 但**有实体几何**（由 children 运算产出）
+    //——与 to_node 的 has_geometry 同一口径，两处必须一致（否则
+    // “能建出来但画不出来”）。
+    if (!obj.group || !obj.op.empty() || !obj.pattern.empty()) {
       const auto status = draw_world(obj, world);
       if (!status) return st::forward_error(status.error());
     }

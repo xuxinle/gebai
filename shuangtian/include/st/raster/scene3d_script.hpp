@@ -272,6 +272,30 @@ struct SceneObjectSpec {
   std::string align{};
   /// `connect` 时 size 的 Y 项是否自动（写 "auto"）——解算时填真实长度。
   bool connect_auto_length{false};
+
+  /// 布尔运算类型（"union"/"subtract"/"intersect"；空 = 普通对象）。
+  ///
+  /// 非空时 `children` 的语义变为【操作体列表】（首个是基体）：
+  /// `<Subtract><Box/><Cylinder/></Subtract>` = 立方体减圆柱。
+  /// 子元素各自的 translate/rotation/scale 在网格层烘培后参与运算；
+  /// 运算结果可以再套 size 缩放。详见 geometry.md 布尔一节。
+  std::string op{};
+
+  /// 草图轮廓（extrude/revolve 形状）：`"0,0 1,0 1,0.8 0.5,1.4 0,1.4"`
+  ///（空格分点、逗号分坐标；逆时针或顺时针都收，生成器归一）。
+  std::string profile{};
+
+  /// 阵列（"ring"/"row"；空 = 普通对象）。
+  ///
+  /// 非空时 children 的语义变为【被复制的原型】：首个子元素被实例化
+  /// `pattern_count` 次（其余子元素忽略——多个原型请各自建阵列）：
+  /// - `ring`：绕 Y 轴均分一圈（pattern_radius 半径）；
+  /// - `row`：沿 pattern_step 等距排列。
+  /// 实例化后 merge 成单网格（一次绘制、可直接当布尔输入）。
+  std::string pattern{};
+  int pattern_count{6};
+  float pattern_radius{1.0f};
+  math::Vec3 pattern_step{0.2f, 0.0f, 0.0f};
 };
 
 /// 一段动画的**脚本层形态**说明（真正的数据结构是 `Clip`，见 `st/raster/animation.hpp`）。

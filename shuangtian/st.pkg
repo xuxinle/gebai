@@ -552,6 +552,48 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "connect 数值直读（调试用）"
     },
+    "mesh_boolean_probe": {
+      "kind": "executable",
+      "sources": ["tools/mesh_boolean_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "布尔内核隔离验证：体积/确定性/快速路/水密校验/链式"
+    },
+    "mesh_boolean_render_probe": {
+      "kind": "executable",
+      "sources": ["tools/mesh_boolean_render_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "布尔渲染冒烟：带孔法兰 + 挖槽块（肉眼验证）"
+    },
+    "sketch_shapes_probe": {
+      "kind": "executable",
+      "sources": ["tools/sketch_shapes_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "Extrude/Revolve 渲染验证：凹轮廓支架/车削花瓶/星形"
+    },
+    "pattern_probe": {
+      "kind": "executable",
+      "sources": ["tools/pattern_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "Ring/Row 阵列渲染验证"
+    },
+    "rotation_static_probe": {
+      "kind": "executable",
+      "sources": ["tools/rotation_static_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "静态 rotation 是否影响渲染（判断 model 矩阵是否生效）"
+    },
+    "expressiveness_fan_probe": {
+      "kind": "executable",
+      "sources": ["tools/expressiveness_fan_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "表达能力 showcase：轴流风扇（布尔散热孔/车削导流罩/挤出叶片阵列）"
+    },
+    "mesh_boolean_xml_probe": {
+      "kind": "executable",
+      "sources": ["tools/mesh_boolean_xml_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "XML <Subtract> 标签冒烟：打孔板 + attach 联合"
+    },
     "scene3d_script_probe": {
       "kind": "executable",
       "sources": ["tools/scene3d_script_probe.cpp"],

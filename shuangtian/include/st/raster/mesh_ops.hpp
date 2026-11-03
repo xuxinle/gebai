@@ -158,4 +158,51 @@ enum class NormalShading : std::uint8_t {
 [[nodiscard]] auto write_obj_file(std::string_view path, const Mesh& mesh,
                                   std::string_view object_name = "mesh") -> Status;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 布尔运算（mesh 级 CSG，BSP 剪裁法）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 三种布尔运算。
+enum class BooleanOp : std::uint8_t {
+  Union = 0,       ///< 并（A ∪ B）
+  Subtract = 1,    ///< 差（A − B）
+  Intersect = 2,   ///< 交（A ∩ B）
+};
+
+/// **两个闭合三角网格的布尔运算**。
+///
+/// ## 算法：BSP 剪裁法（csg.js 同款）
+///
+/// 1. 把 A 的每个三角形用 B 的 BSP 树分割成「B 内 / B 外」两堆；
+/// 2. 同样把 B 按 A 分成两堆；
+/// 3. 按运算取需要的堆拼接：
+///    - Union：A外 + B外
+///    - Subtract：A外 + B内（翻面）
+///    - Intersect：A内 + B内
+/// 4. 焊接接缝顶点、重算平面法线。
+///
+/// ## 确定性契约（测试断言的东西）
+///
+/// 同一对输入两次调用的输出**逐字节相同**：分割顺序只由输入三角形顺序决定，
+/// 无哈希无随机无浮点累加顺序漂移。这让布尔结果可以进快照测试，也让
+/// 「同一场景两次解析产出同一网格」成为可能（渲染确定性的一部分）。
+///
+/// ## 边界与已知取舍（视觉级）
+///
+/// - **共面/相切**场合可能产生细碎三角形或轻微接缝——视觉级可接受，
+///   工业级 CSG 需要精确 B-Rep，那是另一个量级的工程；
+/// - 两网格都要求**闭合**（水密）：开放面（Plane/Disc 默认无厚度）参与
+///   布尔的结果未定义，会报错拒绝；
+/// - 结果**丢弃 UV**（工具切割面的 UV 无从插值）——布尔件用顶点色/材质；
+/// - 结果顶点色取基体的（切割新面继承基体色）；
+/// - 法线全量重算为**平面法线**（切割面与原面拼接后平滑法线会有断层）。
+///
+/// 错误：`Invalid`（输入不闭合/退化）；退化三角形静默丢弃（面积 < 1e-12）。
+[[nodiscard]] auto boolean(const Mesh& a, const Mesh& b, BooleanOp op, bool check_closed = true)
+    -> Result<Mesh>;
+
+/// 便捷形式：多操作体链式运算（`operands[0]` 是基体，依次与后续操作）。
+/// 至少 2 个网格，否则报 `Invalid`。
+[[nodiscard]] auto boolean_chain(std::span<const Mesh> operands, BooleanOp op) -> Result<Mesh>;
+
 }  // namespace st::raster

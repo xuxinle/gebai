@@ -73,7 +73,16 @@ template <typename T>
     for (const Keyframe& key : track.keys) {
       Json item = Json::object();
       item["t"] = number_json(key.time);
-      item["value"] = vec3_json(key.value);
+      // rotation 轨道：内部存**弧度**，对调用方（JSON/XML）写回**度**
+      //（与解析时的转弧度严格对称；否则往返一次就漂一次）。
+      if (track.kind == TrackKind::Rotation) {
+        constexpr float kRadToDeg = 57.29577951308232087680f;
+        item["value"] = vec3_json(math::Vec3{key.value.x * kRadToDeg,
+                                              key.value.y * kRadToDeg,
+                                              key.value.z * kRadToDeg});
+      } else {
+        item["value"] = vec3_json(key.value);
+      }
       if (key.easing != Easing::Linear) {
         item["easing"] = std::string(easing_name(key.easing));
       }

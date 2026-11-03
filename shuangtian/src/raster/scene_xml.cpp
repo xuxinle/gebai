@@ -46,6 +46,8 @@ const std::map<std::string, std::string, std::less<>>& tag_to_shape_table() {
       {"Wedge", "wedge"},           {"Tetrahedron", "tetrahedron"},
       {"Octahedron", "octahedron"}, {"Dodecahedron", "dodecahedron"},
       {"Icosahedron", "icosahedron"}, {"Helix", "helix"},
+      {"Extrude", "extrude"},      {"Revolve", "revolve"},
+      {"Lathe", "revolve"},
       // 别名标签
       {"Ball", "sphere"},           {"Donut", "torus"},
       {"Spring", "helix"},          {"Cog", "gear"},
@@ -69,6 +71,7 @@ const std::map<std::string, std::string_view>& shape_to_tag_table() {
       {"wedge", "Wedge"},           {"tetrahedron", "Tetrahedron"},
       {"octahedron", "Octahedron"}, {"dodecahedron", "Dodecahedron"},
       {"icosahedron", "Icosahedron"}, {"helix", "Helix"},
+      {"extrude", "Extrude"},      {"revolve", "Revolve"},
   };
   return table;
 }
@@ -96,6 +99,23 @@ auto canonical_tag(std::string_view raw) -> std::optional<std::string> {
       }
     }
     if (equal) return name;
+  }
+  // 运算/结构标签不在图元表（它们不对应 shape），但同样大小写宽松。
+  // 与图元表的差别只在「不查 shape_for_tag」——分发处各自判断。
+  static constexpr std::string_view kExtraTags[] = {
+      "Subtract", "Union", "Intersect", "Ring", "Row", "Part", "Use",
+  };
+  for (const std::string_view name : kExtraTags) {
+    if (name.size() != raw.size()) continue;
+    bool equal = true;
+    for (std::size_t i = 0; i < raw.size(); ++i) {
+      if (std::tolower(static_cast<unsigned char>(name[i])) !=
+          std::tolower(static_cast<unsigned char>(raw[i]))) {
+        equal = false;
+        break;
+      }
+    }
+    if (equal) return std::string(name);
   }
   return std::nullopt;
 }
@@ -309,8 +329,15 @@ auto object_to_json(const xml::Node& node, Json& out) -> Status {
   const std::string tag = canonical_tag(node.name).value_or(std::string(node.name));
   const bool is_group = tag == "Group";
   const bool is_object_ref = tag == "Object";
+  // 布尔运算标签：<Subtract>/<Union>/<Intersect> → op 字段 + group 外壳。
+  // 子元素 = 操作体（首个是基体），经普通 children 路径递归解析。
+  const bool is_boolean_tag =
+      tag == "Subtract" || tag == "Union" || tag == "Intersect";
+  // 阵列标签：<Ring>/<Row> → pattern 字段 + group 外壳。
+  const bool is_pattern_tag = tag == "Ring" || tag == "Row";
   const auto shape_of_tag = shape_for_tag(tag);
-  if (!shape_of_tag && !is_group && !is_object_ref) {
+  if (!shape_of_tag && !is_group && !is_object_ref && !is_boolean_tag &&
+      !is_pattern_tag) {
     if (is_struct_tag(tag)) {
       return st::unexpected(
           ErrorCode::Parse,
@@ -325,9 +352,19 @@ auto object_to_json(const xml::Node& node, Json& out) -> Status {
         at(node, "未知图元标签" + suggest_suffix(suggest_fields(tag, candidates))));
   }
   // 标签语义：图元 → shape；Group → group=true（无几何）；
-  // Object → 外部引用容器，shape/gltf 走属性（`obj:`/`gltf:` 路径无法当标签名）。
+  // Object → 外部引用容器，shape/gltf 走属性（`obj:`/`gltf:` 路径无法当标签名）；
+  // 布尔标签 → op + group（几何来自 children 的 CSG 结果）。
   if (shape_of_tag) out["shape"] = *shape_of_tag;
   if (is_group) out["group"] = true;
+  if (is_boolean_tag) {
+    out["op"] = tag == "Subtract" ? "subtract" : (tag == "Union" ? "union" : "intersect");
+    out["group"] = true;
+  }
+  // 阵列标签 → pattern + group（几何来自 children 首个子元素的实例化）。
+  if (is_pattern_tag) {
+    out["pattern"] = tag == "Ring" ? "ring" : "row";
+    out["group"] = true;
+  }
 
   const FieldTable* table = find_field_table("objects[]");
   bool object_ref_has_shape = false;

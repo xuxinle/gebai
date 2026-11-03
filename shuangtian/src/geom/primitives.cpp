@@ -191,6 +191,8 @@ auto kind_name(PrimitiveKind kind) noexcept -> std::string_view {
     case PrimitiveKind::Dodecahedron: return "dodecahedron";
     case PrimitiveKind::Icosahedron: return "icosahedron";
     case PrimitiveKind::Helix: return "helix";
+    case PrimitiveKind::Extrude: return "extrude";
+    case PrimitiveKind::Revolve: return "revolve";
   }
   return "unknown";
 }
@@ -259,6 +261,8 @@ auto parse_kind(std::string_view name) -> std::optional<PrimitiveKind> {
       {"dodeca", PrimitiveKind::Dodecahedron},  {"icosahedron", PrimitiveKind::Icosahedron},
       {"icosa", PrimitiveKind::Icosahedron},    {"helix", PrimitiveKind::Helix},
       {"spring", PrimitiveKind::Helix},         {"coil", PrimitiveKind::Helix},
+      {"extrude", PrimitiveKind::Extrude},      {"revolve", PrimitiveKind::Revolve},
+      {"lathe", PrimitiveKind::Revolve},
   };
   for (const Alias& alias : kAliases) {
     if (key == alias.name) return alias.kind;
@@ -1455,8 +1459,80 @@ auto make(PrimitiveKind kind, const PrimitiveParams& params) -> Mesh {
     case PrimitiveKind::Dodecahedron: return make_dodecahedron(params);
     case PrimitiveKind::Icosahedron: return make_icosahedron(params);
     case PrimitiveKind::Helix: return make_helix(params);
+    case PrimitiveKind::Extrude: return make_extrude(params);
+    case PrimitiveKind::Revolve: return make_revolve(params);
   }
   return Mesh{};
+}
+
+auto make_extrude(const PrimitiveParams& params) -> Mesh {
+  const PrimitiveParams p = sanitized(params);
+  if (p.profile.size() < 3U) return Mesh{};
+  return extrude_polygon(p.profile, p.depth * 0.5f, p.twist, linear_color(p.color),
+                         p.with_uv);
+}
+
+auto make_revolve(const PrimitiveParams& params) -> Mesh {
+  // 车削：轮廓 (x=半径, y=高度) 绕 Y 轴扫一圈。
+  // 侧壁：相邻轮廓点连成四边形条带（首尾各自闭合到轴或封盘）。
+  // 封口：首点 x=0 时自然闭合；否则加盘（耳切或扇形凸盘）。
+  const PrimitiveParams p = sanitized(params);
+  if (p.profile.size() < 2U) return Mesh{};
+  Builder out{};
+  out.color = linear_color(p.color);
+  const int steps = std::max(p.segments, 3);
+
+  // 环点表：每轮廓点 × 每旋转步。
+  std::vector<std::vector<Vec3>> rings;
+  rings.reserve(p.profile.size());
+  for (const auto& [radius_raw, height] : p.profile) {
+    const float radius = std::abs(radius_raw);  // x 负值镜像到正半径
+    std::vector<Vec3> ring;
+    ring.reserve(static_cast<std::size_t>(steps));
+    for (int i = 0; i < steps; ++i) {
+      const float theta = 2.0f * kPi * static_cast<float>(i) / static_cast<float>(steps);
+      ring.push_back(Vec3{radius * std::sin(theta), height, radius * std::cos(theta)});
+    }
+    rings.push_back(std::move(ring));
+  }
+
+  // 侧壁条带（相邻轮廓点之间；法线由几何叉积算，面自动定向）。
+  for (std::size_t level = 0; level + 1 < rings.size(); ++level) {
+    for (int i = 0; i < steps; ++i) {
+      const int j = (i + 1) % steps;
+      const Vec3& a0 = rings[level][static_cast<std::size_t>(i)];
+      const Vec3& a1 = rings[level][static_cast<std::size_t>(j)];
+      const Vec3& b0 = rings[level + 1][static_cast<std::size_t>(i)];
+      const Vec3& b1 = rings[level + 1][static_cast<std::size_t>(j)];
+      // 径向朝外的近似法线（条带中点向外）。
+      const Vec3 mid = (a0 + a1 + b0 + b1) * 0.25f;
+      const Vec3 normal = Vec3{mid.x, 0.0f, mid.z}.normalized().length() > 0.5f
+                              ? Vec3{mid.x, 0.0f, mid.z}.normalized()
+                              : Vec3{1.0f, 0.0f, 0.0f};
+      out.quad(a0, a1, b1, b0, normal, normal, normal, normal);
+    }
+  }
+
+  // 封口：首/末点不在轴上时加盘（扇形——盘是凸的，够用）。
+  const auto cap = [&](const std::vector<Vec3>& ring, bool top) {
+    const Vec3 center{0.0f, ring[0].y, 0.0f};
+    const Vec3 normal{0.0f, top ? 1.0f : -1.0f, 0.0f};
+    for (int i = 0; i < steps; ++i) {
+      const int j = (i + 1) % steps;
+      if (top) {
+        out.triangle(center, ring[static_cast<std::size_t>(i)],
+                     ring[static_cast<std::size_t>(j)], normal, normal, normal);
+      } else {
+        out.triangle(center, ring[static_cast<std::size_t>(j)],
+                     ring[static_cast<std::size_t>(i)], normal, normal, normal);
+      }
+    }
+  };
+  const float first_radius = std::abs(p.profile.front().first);
+  const float last_radius = std::abs(p.profile.back().first);
+  if (first_radius > 1e-5f) cap(rings.front(), false);
+  if (last_radius > 1e-5f) cap(rings.back(), true);
+  return out.finish();
 }
 
 auto make_from_name(std::string_view name, const PrimitiveParams& params) -> Result<Mesh> {

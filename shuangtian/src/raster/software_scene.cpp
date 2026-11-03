@@ -927,7 +927,8 @@ class SoftwareScene final : public Scene3D {
     const Material saved = material_;
     material_ = material;
     if (shadow_map_.strength > 0.0f) {
-      deferred_.push_back(DeferredMesh{&mesh, model, material_});
+      deferred_.push_back(
+          DeferredMesh{std::make_shared<const Mesh>(mesh), model, material_});
       ++draw_calls_;
       material_ = saved;
       return;
@@ -948,7 +949,8 @@ class SoftwareScene final : public Scene3D {
     // 这个延迟只在 `shadow_map_.strength > 0` 时启用：关闭时走原来的即时路径，
     // 行为与之前**逐位相同**（老场景不受影响）。
     if (shadow_map_.strength > 0.0f) {
-      deferred_.push_back(DeferredMesh{&mesh, model, material_});
+      deferred_.push_back(
+          DeferredMesh{std::make_shared<const Mesh>(mesh), model, material_});
       ++draw_calls_;
       return;
     }
@@ -1451,7 +1453,13 @@ class SoftwareScene final : public Scene3D {
   /// 帧内，所以安全）。材质必须快照，否则后一个网格的 `set_material` 会
   /// 覆盖前一个的。
   struct DeferredMesh {
-    const Mesh* mesh{nullptr};
+    // ⚠ **必须存副本，不能存指针**（实测踩过，很隐蔽）
+    //
+    // 调用方（`draw_world`）的 mesh 是局部变量：函数返回后指针悬空。
+    // 延迟到 `end_frame` 才读，读到的可能是已经被下一帧/下一个对象
+    // 覆盖的内存——症状是“动画在跑、世界矩阵也变了，但画面每帧完全一样”
+    //（因为读到的是同一块残留内存）。用共享指针，拷贝便宜（写时复制不需要）。
+    std::shared_ptr<const Mesh> mesh{};
     math::Mat4 model{math::Mat4::identity()};
     Material material{};
   };
