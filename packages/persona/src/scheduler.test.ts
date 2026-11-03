@@ -312,17 +312,213 @@ describe("PersonaScheduler：可观测与取消", () => {
   })
 })
 
+describe("PersonaScheduler：取消与停止的信箱残留归宿（P0 修复）", () => {
+  /**
+   * abort 路径不能丢信箱插话：cancelRunning 触发 abort 后，已 drain 未执行的
+   * pendingEvents 与信箱里尚未 drain 的都必须重新入队。若只 break 不 requeue，
+   * runtime 层已 admit 的幂等位让源的重投也判 duplicate——双保险全灭。
+   * （形态 A：轮末 drain 后回到循环顶发现 aborted；形态 B：execute 期间 abort、
+   * 信箱仍有未吸收事件。）
+   */
+  test("cancelRunning 后信箱与已 drain 残留全部重新入队（不蒸发）", async () => {
+    const rounds: string[] = []
+    /** 首轮 resolve（abort 监听里也会调它；收尾再调一次幂等）。 */
+    const releases: Array<() => void> = []
+    const logs: string[] = []
+    const scheduler = new PersonaScheduler({
+      personaId: "p1",
+      maxConcurrent: 1,
+      log: { info: () => {}, warn: (m) => logs.push(m) },
+      execute: ({ events, signal: sig }) => {
+        rounds.push(events.map((e) => e.id).join(","))
+        return new Promise<void>((resolve) => {
+          releases.push(resolve)
+          sig.addEventListener("abort", () => resolve())
+        })
+      },
+    })
+    scheduler.enqueue({ event: ev("A"), sessionId: "s1", user: "u", threadKey: "t" })
+    for (let i = 0; i < 8; i++) await Promise.resolve()
+    expect(rounds).toEqual(["A"])
+
+    // A 在跑：B 进信箱；C 也进信箱
+    scheduler.enqueue({ event: ev("B"), sessionId: "s1", user: "u", threadKey: "t" })
+    scheduler.enqueue({ event: ev("C"), sessionId: "s1", user: "u", threadKey: "t" })
+    for (let i = 0; i < 8; i++) await Promise.resolve()
+
+    // 取消在跑（abort 信号到 → execute resolve）
+    expect(scheduler.cancelRunning("s1")).toBe(true)
+    for (let i = 0; i < 16; i++) await Promise.resolve()
+
+    // 关键断言 1：B/C 没有蒸发——重新入队（等下一个自然触发点，不是同轮 pump 立刻重跑）
+    expect(rounds).toEqual(["A"])
+    releases[0]?.()
+    for (let i = 0; i < 16; i++) await Promise.resolve()
+
+    // 关键断言 2：取消后 finally 的 pump 不得把 requeue 的事件在同一次泵里捞起
+    //（否则取消形同虚设：取消了又马上重跑）。但队列里得还在（不丢）：
+    // 新事件入队触发自然 pump 时 B/C 应作为新运行被拉起。
+    expect(rounds).toEqual(["A"])
+    scheduler.enqueue({ event: ev("D"), sessionId: "s1", user: "u", threadKey: "t" })
+    for (let i = 0; i < 16; i++) await Promise.resolve()
+    expect(rounds.some((r) => r.includes("B") && r.includes("C") && r.includes("D"))).toBe(true)
+  })
+
+  /** stop() 同路径：清表前 abort → 残留已 drained 的与信箱内的一起回队列后应随 stop 清空。 */
+  test("stop 后残留不再被处理，但不抛错（stop 语义优先）", async () => {
+    const rounds: string[] = []
+    const scheduler = new PersonaScheduler({
+      personaId: "p1",
+      maxConcurrent: 1,
+      execute: ({ events, signal }) =>
+        new Promise<void>((resolve) => {
+          rounds.push(events.map((e) => e.id).join(","))
+          signal.addEventListener("abort", () => resolve())
+        }),
+    })
+    scheduler.enqueue({ event: ev("X"), sessionId: "s1", user: "u", threadKey: "t" })
+    for (let i = 0; i < 8; i++) await Promise.resolve()
+    scheduler.enqueue({ event: ev("Y"), sessionId: "s1", user: "u", threadKey: "t" })
+    for (let i = 0; i < 8; i++) await Promise.resolve()
+    scheduler.stop() // abort X；Y 在信箱
+    for (let i = 0; i < 16; i++) await Promise.resolve()
+    // stop 语义：一切终止（requeue 发生但 stop 清队在前 → 不再执行）
+    expect(rounds.filter((r) => r.includes("Y")).length).toBe(0)
+  })
+})
+
+describe("PersonaScheduler：世代隔离（stop→start 复用实例不误删新运行）", () => {
+  test("旧运行慢返回时，不得删掉新运行的表项（否则同会话双 launch）", async () => {
+    const gates: Array<() => void> = []
+    const scheduler = new PersonaScheduler({
+      personaId: "p1",
+      maxConcurrent: 1,
+      execute: () => new Promise<void>((r) => gates.push(r)),
+    })
+    const settle = async () => {
+      for (let i = 0; i < 8; i++) await Promise.resolve()
+    }
+    scheduler.enqueue({ event: ev("old"), sessionId: "s1", user: "u", threadKey: "t" })
+    await settle()
+    expect(scheduler.isRunning("s1")).toBe(true)
+
+    // stop → 立即 start（旧 execute 仍挂起未返回；stop 已 abort 但 gate 不听 abort）
+    scheduler.stop()
+    scheduler.start()
+    // 新事件 → 新运行建立（新 ctl、新世代）
+    scheduler.enqueue({ event: ev("new"), sessionId: "s1", user: "u", threadKey: "t" })
+    await settle()
+    expect(scheduler.isRunning("s1")).toBe(true) // 新运行在跑
+
+    // 旧 execute 现在才返回（慢返回）
+    gates[0]?.()
+    await settle()
+    // 关键：旧 finally 不得误删新运行的表项
+    expect(scheduler.isRunning("s1")).toBe(true)
+    // 新运行正常收尾
+    gates[1]?.()
+    await settle()
+    expect(scheduler.isRunning("s1")).toBe(false)
+  })
+})
+
+describe("PersonaScheduler：外部占用预检（isSessionBusy）", () => {
+  test("会话被外部任务占用时事件留在队列，占用结束后可跑", async () => {
+    const started: string[] = []
+    const gates: Array<() => void> = []
+    let busy = true
+    const scheduler = new PersonaScheduler({
+      personaId: "p1",
+      maxConcurrent: 1,
+      isSessionBusy: (sid) => busy && sid === "s1",
+      execute: ({ events }) => {
+        started.push(events.map((e) => e.id).join(","))
+        return new Promise<void>((r) => gates.push(r))
+      },
+    })
+    const settle = async () => {
+      for (let i = 0; i < 8; i++) await Promise.resolve()
+    }
+    scheduler.enqueue({ event: ev("m1"), sessionId: "s1", user: "u", threadKey: "t" })
+    await settle()
+    expect(started).toEqual([]) // 被 occupy：不 launch
+    expect(scheduler.state().queued).toBe(1) // 事件留在队列
+
+    busy = false
+    // 另一事件的入队触发 pump → 占用已解除 → 拉起
+    scheduler.enqueue({ event: ev("m2"), sessionId: "s2", user: "u", threadKey: "t2" })
+    await settle()
+    expect(started).toEqual(["m1"])
+    gates.shift()?.()
+    await settle()
+    expect(started).toEqual(["m1", "m2"])
+    gates.shift()?.()
+  })
+
+  test("launch 后才发生的冲突（预检竞态）→ 首批放回重试不丢弃", async () => {
+    const started: string[] = []
+    const gates: Array<() => void> = []
+    let failOnce = true
+    const scheduler = new PersonaScheduler({
+      personaId: "p1",
+      maxConcurrent: 1,
+      execute: ({ events }) => {
+        started.push(events.map((e) => e.id).join(","))
+        if (failOnce) {
+          failOnce = false
+          return Promise.reject(new Error("会话 s1 已有任务在运行"))
+        }
+        return new Promise<void>((r) => gates.push(r))
+      },
+    })
+    const settle = async () => {
+      for (let i = 0; i < 8; i++) await Promise.resolve()
+    }
+    scheduler.enqueue({ event: ev("r1"), sessionId: "s1", user: "u", threadKey: "t" })
+    await settle()
+    // 首次 launch 被引擎拒绝 → r1 放回队首重试 → 第二次成功执行
+    expect(started).toEqual(["r1", "r1"])
+    gates.shift()?.()
+  })
+})
+
 describe("PersonaScheduler：失败隔离与停止", () => {
-  test("单个事件失败不影响后续事件继续跑", async () => {
+  /**
+   * 失败后的行为（修复后语义）：首批被 shift 后执行失败 → 按原 seq 放回队首**重试**
+   * （尝试上限 MAX_LAUNCH_ATTEMPTS 兑底防毒事件死循环），而不是把失败事件丢弃。
+   * 「人的话不能被静默丢弃」优先于「失败不重跑」——确定性失败会耗尽次数后停。
+   */
+  test("单个事件失败：放回队首重试（不是丢弃），后续事件随之可跑", async () => {
     const h = makeHarness(1)
     h.scheduler.enqueue({ event: ev("bad"), sessionId: "s1", user: "u", threadKey: "t" })
-    h.scheduler.enqueue({ event: ev("good"), sessionId: "s1", user: "u", threadKey: "t" })
+    h.scheduler.enqueue({ event: ev("good"), sessionId: "s2", user: "u", threadKey: "t2" })
     await h.settle()
     const item = h.running.shift()!
     item.reject(new Error("boom"))
     await h.settle()
-    expect(h.running.map((r) => r.id)).toEqual(["good"]) // 后续照跑
-    expect(h.scheduler.state().sessions[0].failed).toBe(1)
+    // bad 放回后仍是最早入队 → 先重跑 bad（与 good 合入同轮或紧随其后，取决于批次形态）
+    expect(h.running.map((r) => r.id).join(",")).toContain("bad")
+    expect(h.scheduler.state().sessions.find((s) => s.sessionId === "s1")!.failed).toBeGreaterThanOrEqual(1)
+    await h.finishFirst()
+    await h.finishFirst()
+  })
+
+  /** 毒事件兑底：确定性失败在尝试上限后放弃（不无限重跑），后续事件照常。 */
+  test("确定性失败达尝试上限后放弃，不再阻塞后续", async () => {
+    const h = makeHarness(1)
+    h.scheduler.enqueue({ event: ev("poison"), sessionId: "s1", user: "u", threadKey: "t" })
+    h.scheduler.enqueue({ event: ev("after"), sessionId: "s1", user: "u", threadKey: "t" })
+    await h.settle()
+    // 连续拒 3 次（首次 + 2 次重试，共 MAX_LAUNCH_ATTEMPTS 次）→ poison 放弃，after 接着跑
+    for (let i = 0; i < 3; i++) {
+      const item = h.running.find((r) => r.id.startsWith("poison") || r.id.includes("poison")) ?? h.running.shift()!
+      item.reject(new Error("deterministic"))
+      await h.settle()
+    }
+    const startedIds = h.starts.join(",")
+    expect(startedIds).toContain("after") // poison 放弃后 after 能跑
+    await h.finishFirst()
+    await h.finishFirst()
   })
 
   /**
@@ -339,7 +535,10 @@ describe("PersonaScheduler：失败隔离与停止", () => {
     const item = h.running.shift()!
     item.reject(new Error("boom"))
     await h.settle()
-    expect(h.starts).toEqual(["boom", "other"]) // 失败也把额度让出来
+    // boom 放回重试后仍是 s1 队首 → 先重跑 boom；额度释放的正确判据是**它确实又被拉起**
+    expect(h.starts).toEqual(["boom", "boom"])
+    await h.finishFirst()
+    await h.finishFirst()
   })
 
   test("stop 后不再接受新事件；start 可恢复", async () => {

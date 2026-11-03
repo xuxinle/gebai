@@ -19,6 +19,68 @@ import type { WorkerOutcome, WorkerSpawnInput } from "@gebai/persona"
 import { finalAnswerOf, SessionWorkerSpawner, workerNote, workerPrompt } from "./worker-spawner"
 import { createWorkerTaskBook, createWorkerTools } from "./worker-tools"
 
+describe("SessionWorkerSpawner：超时归类（结构化信号，不靠文案正则）", () => {
+  test("超时被强制取消 → failed（不是 cancelled），错误文案带运行时限", async () => {
+    // 旧行为：超时与叫停都表现为 abort 抛错，靠 /cancel|abort|终止|中断/ 正则归类——
+    // 超时会误判成 cancelled，driver 会按「被叫停」而非「超时失败」决定补救策略。
+    const store = fakeStore()
+    let cancelHook: (() => void) | null = null
+    const cancelled: string[] = []
+    const engine = {
+      run: () =>
+        new Promise<void>((_resolve, reject) => {
+          // 与真 engine 同形：cancel 后 runLoop 以 abort 错误 reject（不是 resolve）
+          cancelHook = () => reject(new Error("The operation was aborted"))
+        }),
+      cancel: (id: string) => {
+        cancelled.push(id)
+        cancelHook?.()
+      },
+      isRunning: () => false,
+    }
+    const spawner = new SessionWorkerSpawner({
+      engine,
+      store,
+      timeoutMs: 30, // 极短时限：测试里必超
+      log: { info: () => {}, warn: () => {} },
+    })
+    const pending = spawner.spawn(fakeInput({ runId: "wk_to" }))
+    const outcome = await pending // timer 到点 → cancel → reject（abort）→ catch 收敛
+    expect(cancelled.length).toBe(1)
+    expect(outcome.status).toBe("failed") // 关键：不再是 cancelled
+    expect(outcome.error ?? "").toContain("运行时限")
+  })
+
+  test("显式取消（signal abort）→ 仍归 cancelled（超时路径不误伤取消语义）", async () => {
+    const store = fakeStore()
+    const eng = fakeEngine({ throwOnRun: new Error("user abort: 任务被取消") })
+    const spawner = new SessionWorkerSpawner({
+      engine: eng.engine,
+      store,
+      timeoutMs: 60_000,
+      log: { info: () => {}, warn: () => {} },
+    })
+    const outcome = await spawner.spawn(fakeInput({ runId: "wk_cc" }))
+    expect(outcome.status).toBe("cancelled")
+  })
+})
+
+/** 构造最小 spawn 输入（两个用例共用）。 */
+function fakeInput(o: { runId: string }): WorkerSpawnInput {
+  const controller = new AbortController()
+  return {
+    personaId: "xiaoshuang",
+    driverId: "support",
+    driverSessionId: "s-drv",
+    user: "admin",
+    identity: { id: "xiaoshuang", name: "小霜", identity: "", role: "值班" },
+    task: "查一下延迟",
+    verify: "给出具体数值",
+    runId: o.runId,
+    signal: controller.signal,
+  }
+}
+
 function session(id: string, messages: Message[] = []): SessionData {
   return { id, name: "w", userId: "admin", messages, todos: [], createdAt: 0, updatedAt: 0 }
 }

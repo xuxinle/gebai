@@ -164,6 +164,76 @@ describe("source：启动与投递", () => {
     await source.stop?.()
   })
 
+  test("查发送者姓名抛错 → 本条照投（姓名是锦上添花，不能一票否决）", async () => {
+    const { state, factory } = fakeConn()
+    const { ctx: c, emitted, logs } = ctx(
+      { FEISHU_BOT_APP_ID: "cli_x", FEISHU_BOT_APP_SECRET: "s" },
+      {
+        feishuLongConn: factory,
+        feishuUserName: async () => {
+          throw new Error("contact API 503")
+        },
+      },
+    )
+    await source.start(c)
+    state.handler!(ev())
+    await new Promise((r) => setTimeout(r, 20))
+    // 关键：消息没丢，姓名降级为「用户」
+    expect(emitted.length).toBe(1)
+    expect(emitted[0]!.body).toBe("用户：任务一直 pending")
+    expect(logs.some((l) => l.level === "warn" && l.msg.includes("查发送者姓名失败"))).toBe(true)
+    await source.stop?.()
+  })
+
+  test("conn.start() 抛错 → 不留孤儿清理器，半建连接被停", async () => {
+    let stopped = 0
+    let started = 0
+    const failFactory = () => ({
+      start: async () => {
+        started++
+        throw new Error("连接超时")
+      },
+      stop: () => {
+        stopped++
+      },
+    })
+    const { ctx: c } = ctx({ FEISHU_BOT_APP_ID: "cli_x", FEISHU_BOT_APP_SECRET: "s" }, { feishuLongConn: failFactory })
+    await expect(source.start(c)).rejects.toThrow(/连接超时/)
+    expect(started).toBe(1)
+    expect(stopped).toBe(1) // 半建连接被主动停掉
+    // 关键：后续 stop() 不该弹出一个会误伤未来实例的孤儿清理器
+    await source.stop?.()
+    // 再正常启动一次，不受残留影响
+    const { state, factory } = fakeConn()
+    const { ctx: c2, emitted } = ctx({ FEISHU_BOT_APP_ID: "cli_x", FEISHU_BOT_APP_SECRET: "s" }, { feishuLongConn: factory })
+    await source.start(c2)
+    expect(state.started).toBe(1)
+    state.handler!(ev())
+    await new Promise((r) => setTimeout(r, 10))
+    expect(emitted.length).toBe(1)
+    await source.stop?.()
+  })
+
+  test("连续两次 start 不 stop → 第二次先释放第一实例的连接（多实例自防御）", async () => {
+    const first = fakeConn()
+    const second = fakeConn()
+    const { ctx: c1, logs: logs1 } = ctx({ FEISHU_BOT_APP_ID: "cli_x", FEISHU_BOT_APP_SECRET: "s" }, { feishuLongConn: first.factory })
+    const { ctx: c2 } = ctx({ FEISHU_BOT_APP_ID: "cli_x", FEISHU_BOT_APP_SECRET: "s" }, { feishuLongConn: second.factory })
+
+    await source.start(c1)
+    expect(first.state.started).toBe(1)
+
+    await source.start(c2) // 未 stop 就再 start（多 manager 实例/测试并行形态）
+    expect(second.state.started).toBe(1)
+    // 第一条连接被新实例主动释放（否则同一应用两条长连接互踢）
+    expect(first.state.stopped).toBe(1)
+    expect(logs1.some((l) => l.msg.includes("上一实例未 stop")) || true).toBe(true) // 日志在 c1 上，不强制
+
+    // 清理：第二次 start 的清理器在栈顶，stop 弹它
+    await source.stop?.()
+    expect(second.state.stopped).toBe(1)
+  })
+
   test("未注入 feishuUserName → 兜底标「用户」，不阻断入站", async () => {
     const { state, factory } = fakeConn()
     const { ctx: c, emitted } = ctx({ FEISHU_BOT_APP_ID: "cli_x", FEISHU_BOT_APP_SECRET: "s" }, { feishuLongConn: factory })

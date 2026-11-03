@@ -44,7 +44,12 @@ interface QueueItem {
   enqueuedAt: number
   /** 入队序号（单调递增，FIFO 的唯一排序键）。 */
   seq: number
+  /** 放回重试次数（launch 失败后按原 seq 放回队首时递增；达上限放弃，防毒事件死循环）。 */
+  attempts?: number
 }
+
+/** 单个事件（含首次）的执行尝试上限：确定性失败到次数后放弃，防 restore→pump 紧循环。 */
+const MAX_LAUNCH_ATTEMPTS = 3
 
 /** 单会话队列状态（可观测）。 */
 export interface SessionQueueState {
@@ -118,6 +123,15 @@ export interface PersonaSchedulerOptions {
    * 达到上限时把剩余插话重新入队（不丢），本次运行收尾。
    */
   maxRounds?: number
+  /**
+   * 该会话是否被**外部任务**占用（引擎对「有任务在跑」的权威回答）。
+   *
+   * driver 的常驻会话在 UI 里可见可打开——用户手动对其发起任务期间，若照常
+   * launch，engine.run 会抛「已有任务在运行」，而那时首批事件已被 shift 出队。
+   * 预检为 true 时不 launch、不 shift，事件留在队列等下次 pump（占用结束后
+   * 任何新事件入队或其它运行收尾都会触发）。
+   */
+  isSessionBusy?: (sessionId: string) => boolean
   log?: PersonaLogger
 }
 
@@ -137,6 +151,7 @@ export class PersonaScheduler {
   private readonly maxRounds: number
   private readonly mailboxCapacity: number
   private readonly execute: PersonaSchedulerOptions["execute"]
+  private readonly isSessionBusy?: (sessionId: string) => boolean
   private readonly log?: PersonaLogger
 
   /** sessionId → 该会话的待跑队列。 */
@@ -145,12 +160,17 @@ export class PersonaScheduler {
   private threadKeys = new Map<string, string>()
   /** sessionId → 正在跑的运行的取消器。 */
   private running = new Map<string, AbortController>()
+  /** sessionId → 运行世代号（stop→start 复用实例时，旧 finally 不得误删新运行的表项）。 */
+  private generations = new Map<string, number>()
+  private nextGeneration = 1
   /** sessionId → 运行中的插话信箱。 */
   private mailboxes = new Map<string, InterjectionMailbox>()
   /** sessionId → 正在跑的事件 id 集合（同会话去重必须算上它们——已不在队列里）。 */
   private runningEventIds = new Map<string, Set<string>>()
   /** sessionId → 统计。 */
   private stats = new Map<string, { done: number; failed: number; round: number; interjections: number; runningEventId?: string }>()
+  /** 刚被 cancelRunning/stop 打断、尚未走完 finally-pump 的会话（见 pump 的 cancelledNow）。 */
+  private pendingCancelSkip = new Set<string>()
   /** 全局待跑事件总数。 */
   private pendingTotal = 0
   /** 入队序号发生器。 */
@@ -169,6 +189,7 @@ export class PersonaScheduler {
     this.mailboxCapacity = opts.mailboxCapacity ?? this.queueLimit
     this.maxRounds = Math.max(1, opts.maxRounds ?? DEFAULT_MAX_ROUNDS)
     this.execute = opts.execute
+    this.isSessionBusy = opts.isSessionBusy
     this.log = opts.log
   }
 
@@ -244,6 +265,15 @@ export class PersonaScheduler {
     const ctl = this.running.get(sessionId)
     if (!ctl) return false
     ctl.abort()
+    // 记入本轮取消集：被取消运行的 requeue 事件不在同一次 pump 里捞起（见 pump 注释）。
+    // 用可空 Set 而非实例字段：cancelRunning 与 finally-pump 之间没有 await，
+    // 同步标记同步消费即可；实例字段反而要考虑清理时机。
+    this.pendingCancelSkip.add(sessionId)
+    // 微任务尾满空：finally 的 pump 发生在本轮事件循环尾，届时标记已就位；
+    // pump 结束后清掉，不影响下一次自然触发的 pump。
+    void Promise.resolve().then(() => {
+      queueMicrotask(() => this.pendingCancelSkip.delete(sessionId))
+    })
     return true
   }
 
@@ -252,6 +282,7 @@ export class PersonaScheduler {
     this.stopped = true
     for (const ctl of this.running.values()) ctl.abort()
     this.running.clear()
+    this.generations.clear()
     this.mailboxes.clear()
     this.runningEventIds.clear()
     this.sessionQueues.clear()
@@ -352,18 +383,33 @@ export class PersonaScheduler {
   /** 泵：尽可能多地启动可跑的会话（受额度限制）。 */
   private pump(): void {
     if (this.stopped) return
+    /** 本轮 pump 已确认「被外部占用」的会话（只诊断一次，避免重复扫与重复日志）。 */
+    const externallyBusy = new Set<string>()
+    /** 本轮 pump 内刚被 cancelRunning/stop 打断的会话：其 requeue 的事件是「人叫停的」，
+     * 不能在同一次 pump 里立刻捞起重跑——否则取消形同虚设（取消了又马上重跑）。
+     * 留在队列里，等下一个自然触发点（新事件入队/其它运行收尾/下一次 pump）。 */
+    const cancelledNow = this.pendingCancelSkip
     while (this.running.size < this.maxConcurrent) {
-      const next = this.pickNext()
+      const next = this.pickNext(externallyBusy, cancelledNow)
       if (!next) break
+      // 外部占用预检：不 launch、不 shift 首批，事件留在队列。没有这一步，
+      // 冲突只能靠 engine.run 抛错暴露——而那时首批已被 shift，事件就丢了。
+      if (this.isSessionBusy?.(next.sessionId)) {
+        externallyBusy.add(next.sessionId)
+        this.log?.info(`[persona:${this.personaId}] 会话 ${next.sessionId} 被外部任务占用，事件暂留队列`)
+        continue
+      }
       this.launch(next)
     }
   }
 
   /** 选出下一个可跑的（未被占用 + 队首有效 + 入队最早）。 */
-  private pickNext(): QueueItem | null {
+  private pickNext(skip?: Set<string>, skip2?: Set<string>): QueueItem | null {
     let best: QueueItem | null = null
     for (const [sessionId, list] of this.sessionQueues) {
       if (this.running.has(sessionId)) continue
+      if (skip?.has(sessionId)) continue
+      if (skip2?.has(sessionId)) continue
       if (!list.length) {
         this.sessionQueues.delete(sessionId)
         continue
@@ -397,8 +443,13 @@ export class PersonaScheduler {
 
     const ctl = new AbortController()
     const mailbox = new InterjectionMailbox(this.mailboxCapacity)
+    // 世代号：stop→start 复用同一实例时，旧运行的 finally 可能在新运行建立之后才
+    // 执行；不比对就 delete 会把**新运行**的表项误删（isRunning 失真 → 同会话双
+    // launch → 引擎抛「已有任务」→ 事件丢失）。
+    const generation = ++this.nextGeneration
     this.running.set(sessionId, ctl)
     this.mailboxes.set(sessionId, mailbox)
+    this.generations.set(sessionId, generation)
     this.runningEventIds.set(sessionId, new Set(batch.map((b) => b.event.id)))
     const st = this.stats.get(sessionId) ?? { done: 0, failed: 0, round: 0, interjections: 0 }
     st.runningEventId = batch[batch.length - 1]?.event.id
@@ -412,7 +463,14 @@ export class PersonaScheduler {
       let user = batch[0]?.user ?? ""
       try {
         for (;;) {
-          if (ctl.signal.aborted) break
+          if (ctl.signal.aborted) {
+            // 取消路径与异常路径同款纪律：已 drain 未执行的 + 信箱残留都必须回到队列。
+            // 它们没被任何一轮处理过，而 runtime 层的幂等位已 admit 占位——丢了这里，
+            // 源按规范重投还会被判 duplicate 静默丢弃（双保险全灭）。
+            const rest = [...pendingEvents, ...mailbox.takeAll()]
+            if (rest.length) this.requeue(sessionId, user, rest)
+            break
+          }
           if (pendingEvents.length === 0) break
           round++
           st.round = round
@@ -439,19 +497,68 @@ export class PersonaScheduler {
       } catch (err) {
         st.failed++
         this.log?.warn(`[persona:${this.personaId}] 会话 ${sessionId} 运行失败: ${String((err as Error)?.message || err)}`)
+        // 首批已被 shift 出队：引擎拒绝（如会话被外部任务占用的竞态）或执行异常时
+        // 不能直接丢——按原 seq 放回队首重试（毒事件由尝试上限兑底，防死循环）。
+        this.restoreBatch(batch)
         // 失败时残留插话同样重新入队
         const rest = mailbox.takeAll()
         if (rest.length) this.requeue(sessionId, user, rest)
       } finally {
-        st.runningEventId = undefined
-        st.round = 0
-        this.running.delete(sessionId)
-        this.mailboxes.delete(sessionId)
-        this.runningEventIds.delete(sessionId)
-        if (!this.sessionQueues.get(sessionId)?.length) this.sessionQueues.delete(sessionId)
+        // 世代比对：表里还是自己那一代才清理（否则会把新运行的表项误删，见 launch 头注释）
+        if (this.generations.get(sessionId) === generation) {
+          this.generations.delete(sessionId)
+          this.running.delete(sessionId)
+          this.mailboxes.delete(sessionId)
+          this.runningEventIds.delete(sessionId)
+          st.runningEventId = undefined
+          st.round = 0
+          if (!this.sessionQueues.get(sessionId)?.length) {
+            this.sessionQueues.delete(sessionId)
+            // 观测表随会话终结清理：否则已死会话的 threadKeys/stats 永远增长
+            // （state() 本就不展示完全空闲的会话，这里只影响下次的累计计数归零）
+            this.threadKeys.delete(sessionId)
+            this.stats.delete(sessionId)
+          }
+        }
         this.pump()
       }
     })()
+  }
+
+  /**
+   * 把一次 launch 取走的首批按原 seq 放回队首（保命路径：引擎拒绝/执行异常时不丢事件）。
+   *
+   * 重试上限：毒事件（确定性失败）在尝试次数用尽后放弃并记日志——无上限的 restore
+   * 会在 catch→finally pump→launch 之间形成紧循环。而真正的「会话被占用」冲突
+   * 在下一次 pump 时会被 isSessionBusy 预检拦住（不烧尝试次数），空出后自然接起。
+   */
+  private restoreBatch(batch: QueueItem[]): void {
+    const bySession = new Map<string, QueueItem[]>()
+    for (const it of batch) {
+      const attempts = (it.attempts ?? 0) + 1
+      if (attempts >= MAX_LAUNCH_ATTEMPTS) {
+        this.log?.warn(
+          `[persona:${this.personaId}] 事件 ${it.event.id} 连续失败 ${attempts} 次后放弃（已从队列移除；下次重投不受影响）`,
+        )
+        continue
+      }
+      bySession.set(it.sessionId, [...(bySession.get(it.sessionId) ?? []), { ...it, attempts }])
+    }
+    for (const [sessionId, items] of bySession) {
+      while (this.pendingTotal + items.length > this.queueLimit) {
+        const dropped = this.dropOldestPending()
+        if (!dropped) break
+        this.log?.warn(`[persona:${this.personaId}] 放回批次时队列已满，丢弃最旧事件 ${dropped}`)
+      }
+      if (this.pendingTotal + items.length > this.queueLimit) {
+        for (const it of items) this.log?.warn(`[persona:${this.personaId}] 事件 ${it.event.id} 放回失败（队列容量不足），已丢弃`)
+        continue
+      }
+      // 放在队首：原 seq 早于现存队列项，全局 FIFO 不受影响
+      const existing = this.sessionQueues.get(sessionId) ?? []
+      this.sessionQueues.set(sessionId, [...items, ...existing])
+      this.pendingTotal += items.length
+    }
   }
 
   /** 把事件重新放回队列（不经过插入路径，避免"入信箱→再取出"的死循环）。 */

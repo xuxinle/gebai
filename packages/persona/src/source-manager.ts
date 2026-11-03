@@ -105,6 +105,13 @@ export class EventSourceManager {
   async refreshIfChanged(): Promise<boolean> {
     const sig = await discoverySignature(this.opts.scanDirs)
     if (sig === this.signature) return false
+    // 目录签名变化但扫描结果为空（两个域都不存在/都读不到）≠ 源全被删：
+    // 可能只是目录暂时不可读（EACCES/EBUSY/网络盘抖动）。把全部源下线比"配置暂不可读"
+    // 严重得多（与人格侧热加载的"重扫为空不清空"同口径，见 compose.ts syncPersonaDefs）。
+    if (!sig.split("|")[1] && !sig.split("|")[0].slice("builtin:".length) && this.defs.size) {
+      this.log("warn", `事件源目录签名变为空（疑似不可读，保持现有 ${this.defs.size} 个源不 Reload）`)
+      return false
+    }
     this.log("info", "事件源目录变化，重新扫描")
     await this.stop()
     await this.discover()

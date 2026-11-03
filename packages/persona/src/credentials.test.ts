@@ -12,8 +12,9 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { PersonaTokenStore } from "./user-token"
-import { PersonaOAuth, extractCode, OFFLINE_ACCESS_SCOPE, PERSONA_SCOPES, scopesFromEnv } from "./oauth"
+import { PersonaOAuth, extractCode, extractState, OFFLINE_ACCESS_SCOPE, PERSONA_SCOPES, scopesFromEnv } from "./oauth"
 import { PersonaCredentials } from "./credentials"
+import type { PersonaTokenStore as PersonaTokenStoreType } from "./user-token"
 
 const NOW = 1_800_000_000_000
 
@@ -286,6 +287,109 @@ describe("PersonaOAuth：授权链接与兑换", () => {
   })
 })
 
+describe("PersonaOAuth：无 state 兑换与 state 提取（防 account mix-up）", () => {
+  /** 成功兑换桩（oauth/v3/token + user_info 都成功）。 */
+  const okFetch = (async () =>
+    new Response(JSON.stringify({ code: 0, access_token: "uat-any", expires_in: 7200, refresh_token: "urt-any" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })) as unknown as typeof fetch
+
+  test("无 state 且 pending 唯一 → 允许兑（单用户本地手动粘贴场景）", async () => {
+    const oauth = new PersonaOAuth({ fetchImpl: okFetch, now: () => NOW })
+    oauth.startAuthorize({ appId: "cli_x", appSecret: "s", redirectUri: "http://localhost/cb" })
+    const entry = await oauth.exchange({ code: "c-unique" }) // 纯 code、无 state
+    expect(entry.accessToken).toBe("uat-any")
+  })
+
+  test("无 state 且多个 pending → 拒绝（无法确定属于哪次授权，防 account mix-up）", async () => {
+    const oauth = new PersonaOAuth({ fetchImpl: okFetch, now: () => NOW })
+    oauth.startAuthorize({ appId: "cli_x", appSecret: "s", redirectUri: "http://localhost/cb" })
+    oauth.startAuthorize({ appId: "cli_y", appSecret: "s", redirectUri: "http://localhost/cb2" })
+    // 模拟攻击者/另一个用户拿着 code 打过来且不带 state：拒绝而非默认兑最新的
+    await expect(oauth.exchange({ code: "c-attacker" })).rejects.toThrow(/无法确定本次兑换属于哪一个/)
+  })
+
+  test("无 state 且无 pending → 拒绝（过期提示）", async () => {
+    const oauth = new PersonaOAuth({ fetchImpl: okFetch, now: () => NOW })
+    await expect(oauth.exchange({ code: "c-orphan" })).rejects.toThrow(/已过期或不存在/)
+  })
+
+  test("粘贴完整回调 URL → 自动提取 state 并按它兑（不必手动拆参数）", async () => {
+    const oauth = new PersonaOAuth({ fetchImpl: okFetch, now: () => NOW })
+    const a = oauth.startAuthorize({ appId: "cli_a", appSecret: "s", redirectUri: "http://localhost/cb" })
+    oauth.startAuthorize({ appId: "cli_b", appSecret: "s", redirectUri: "http://localhost/cb" })
+    // 两个 pending 共存，但粘贴的 URL 里带着 a 的 state——应兑 a，而不是拒绝或兑 b
+    const pasted = `http://localhost/cb?code=c-a&state=${a.state}`
+    const entry = await oauth.exchange({ code: pasted })
+    expect(entry.appId).toBe("cli_a")
+  })
+
+  test("extractState：从 URL 提取，纯 code / 无 state 返回 undefined", () => {
+    expect(extractState("http://localhost/cb?code=x&state=abc123")).toBe("abc123")
+    expect(extractState("abc123")).toBeUndefined()
+    expect(extractState("http://localhost/cb?code=x")).toBeUndefined()
+  })
+})
+
+describe("PersonaTokenStore：刷新失败退避（防请求风暴）", () => {
+  test("失败后 30s 内再次 resolve → 不再打接口，直接回报上次原因", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ptb1-"))
+    let calls = 0
+    let clock = NOW
+    const failFetch = (async () => {
+      calls++
+      return new Response(JSON.stringify({ code: 500, msg: "server error" }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      })
+    }) as unknown as typeof fetch
+    const store = new PersonaTokenStore({
+      home,
+      appId: () => "cli_test",
+      appSecret: () => "secret_test",
+      fetchImpl: failFetch,
+      now: () => clock,
+    })
+    await store.set({ accessToken: "uat-old", expireAt: NOW + 1000, refreshToken: "urt", refreshExpireAt: NOW + 30 * 86400_000, scopes: [], appId: "cli_test" })
+
+    const r1 = await store.resolve()
+    expect(r1.status).toBe("expired")
+    expect(calls).toBe(1)
+
+    clock += 10_000 // 10 秒后（退避窗口内）
+    const r2 = await store.resolve()
+    expect(r2.status).toBe("expired")
+    expect(calls).toBe(1) // 没有再打接口
+
+    clock += 25_000 // 又过 25 秒（超过 30s 退避）
+    await store.resolve()
+    expect(calls).toBe(2) // 退避窗口过了才重试
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("set 新令牌后清退避（下次临期正常刷新）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ptb2-"))
+    let calls = 0
+    const okFetch = (async () => {
+      calls++
+      return new Response(JSON.stringify({ code: 0, access_token: "uat-new2", expires_in: 7200, refresh_token: "urt-n2" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    }) as unknown as typeof fetch
+    let clock = NOW
+    const store = new PersonaTokenStore({ home, appId: () => "cli_test", appSecret: () => "s", fetchImpl: okFetch, now: () => clock })
+    // 先放一个已过期令牌（退避未触发过）
+    await store.set({ accessToken: "uat-e", expireAt: NOW - 1, refreshToken: "urt", refreshExpireAt: NOW + 86400_000, scopes: [], appId: "cli_test" })
+    const r = await store.resolve()
+    expect(r.status).toBe("ok")
+    expect(calls).toBe(1)
+    void clock
+    rmSync(home, { recursive: true, force: true })
+  })
+})
+
 describe("PersonaCredentials：编排（状态机）", () => {
   function makeCreds(home: string, fetchImpl?: typeof fetch) {
     const store = makeStore(home, { ...(fetchImpl ? { fetchImpl } : {}) })
@@ -393,6 +497,87 @@ describe("PersonaCredentials：编排（状态机）", () => {
     const ok = await creds.token()
     expect("token" in ok).toBe(true)
     if ("token" in ok) expect(ok.token.accessToken).toBe("uat-ch")
+    rmSync(home, { recursive: true, force: true })
+  })
+})
+
+describe("PersonaCredentials：expiring / error 状态（提前叫人，不等人格失声）", () => {
+  function makeCreds(home: string, opts: { now?: () => number } = {}) {
+    const store = makeStore(home, opts)
+    const creds = new PersonaCredentials({
+      store,
+      oauth: new PersonaOAuth({ now: () => NOW }),
+      appId: () => "cli_test",
+      appSecret: () => "secret_test",
+      redirectUri: () => "http://localhost:3002/api/v1/persona/feishu/callback",
+    })
+    return { store, creds }
+  }
+
+  test("无 refresh_token 且剩余 < 10 分钟 → expiring（提前叫人，needsAuth=true）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pcx1-"))
+    const { store, creds } = makeCreds(home)
+    // 无 offline_access 的典型形态：只有 accessToken，剩 5 分钟。
+    // 注意：剩 5 分钟已落在 TokenStore 的刷新窗口内（REFRESH_SKEW_MS=5min），
+    // 无 refreshToken 时 resolve 直接报 expired——所以剩 8 分钟（窗口外、提醒窗口内）
+    // 才是 expiring 状态的真正可观察区间。
+    await store.set({ accessToken: "uat-dying", expireAt: NOW + 8 * 60_000, scopes: [], appId: "cli_test" })
+    const s = await creds.status()
+    console.log(`    实测: state=${s.state} ready=${s.ready} needsAuth=${s.needsAuth}`)
+    expect(s.state).toBe("expiring")
+    expect(s.ready).toBe(true) // 仍可用（还没过期）
+    expect(s.needsAuth).toBe(true) // 但要提前叫人
+    expect(s.message).toContain("即将过期")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("有 refresh_token 且剩 < 10 分钟 → 仍 ok（能自动续期就不必叫人）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pcx2-"))
+    // 刷新桩：临期会自动刷成功
+    const { store, creds } = (() => {
+      const s = makeStore(home, { fetchImpl: refreshOk("uat-renewed") })
+      const c = new PersonaCredentials({
+        store: s,
+        oauth: new PersonaOAuth({ now: () => NOW }),
+        appId: () => "cli_test",
+        appSecret: () => "secret_test",
+        redirectUri: () => "http://localhost/cb",
+      })
+      return { store: s, creds: c }
+    })()
+    await store.set({ accessToken: "uat-near", expireAt: NOW + 3 * 60_000, refreshToken: "urt-ok", refreshExpireAt: NOW + 30 * 86400_000, scopes: [], appId: "cli_test" })
+    const s = await creds.status()
+    console.log(`    实测: state=${s.state}（有 refresh_token 时临期自动刷，不标 expiring）`)
+    expect(s.state).toBe("ok")
+    expect(s.needsAuth).toBe(false)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("无 refresh_token 且剩 > 10 分钟 → ok（远未到期不制造焦虑）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pcx3-"))
+    const { store, creds } = makeCreds(home)
+    await store.set({ accessToken: "uat-fresh", expireAt: NOW + 30 * 60_000, scopes: [], appId: "cli_test" })
+    const s = await creds.status()
+    expect(s.state).toBe("ok")
+    expect(s.needsAuth).toBe(false)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("resolve 抛错 → error（不是 missing，不误导用户去白点一次授权）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pcx4-"))
+    const creds = new PersonaCredentials({
+      // 故意让 resolve 抛错：验证 error 路径不会被当成 missing
+      store: ({ resolve: async () => { throw new Error("磁盘读不了") } } as unknown) as PersonaTokenStoreType,
+      oauth: new PersonaOAuth({ now: () => NOW }),
+      appId: () => "cli_test",
+      appSecret: () => "secret_test",
+      redirectUri: () => "http://localhost/cb",
+    })
+    const s = await creds.status()
+    console.log(`    实测: state=${s.state} message=${s.message}`)
+    expect(s.state).toBe("error")
+    expect(s.ready).toBe(false)
+    expect(s.message).toContain("凭据读取异常")
     rmSync(home, { recursive: true, force: true })
   })
 })

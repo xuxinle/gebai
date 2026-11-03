@@ -26,6 +26,10 @@
  *
  * `{GEBAI_HOME}/persona/feishu-user-token.json`（0600）。
  * 放 `persona/` 下与人格的其他状态（`drivers.json`）同级，迁移时一起带走。
+ *
+ * 关于 0600：POSIX 上是硬保证；Windows 上（Bun/NTFS）mode 位基本不生效，
+ * 仅尽力而为——实际隔离依赖目录 ACL（用户目录本身仅本人可读）。这里照设
+ * 是为了在支持它的平台不遗漏，而非跨平台保证。
  */
 
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
@@ -70,6 +74,16 @@ export interface PersonaTokenStoreOptions {
 /** 提前量：临期 5 分钟就刷（避免"恰好卡在过期瞬间"）。 */
 const REFRESH_SKEW_MS = 5 * 60_000
 
+/**
+ * 刷新失败后的最小重试间隔。
+ *
+ * 为何需要：单飞只防「同一时刻并发只刷一次」，不防「连续多次 resolve 各刷一次」。
+ * 临期 + 网络故障时（人格常驻，每个事件都会 resolve），每条事件触发一次刷新请求
+ * = 对 accounts.feishu.cn 的请求风暴，且每次都注定失败。间隔内直接返回上次失败原因，
+ * 不变之处：状态仍是 expired（如实），只是不再无意义地打接口。
+ */
+const REFRESH_RETRY_MIN_MS = 30_000
+
 const TOKEN_FILE = "feishu-user-token.json"
 
 /**
@@ -90,6 +104,9 @@ export class PersonaTokenStore {
   private lastError: string | null = null
   /** 上次是否已提示过需要授权（避免每次取用都重复告警）。 */
   private warnedNeedsAuth = false
+  /** 上次刷新尝试时刻与结果（退避用，见 REFRESH_RETRY_MIN_MS）。 */
+  private lastRefreshAttemptAt = 0
+  private lastRefreshError: string | null = null
 
   constructor(private readonly opts: PersonaTokenStoreOptions) {
     this.path = join(dataSubdir(opts.home, "persona"), TOKEN_FILE)
@@ -153,6 +170,7 @@ export class PersonaTokenStore {
   async set(entry: PersonaUserToken): Promise<void> {
     this.lastError = null
     this.warnedNeedsAuth = false
+    this.lastRefreshError = null // 新令牌到手：清退避与失败记录，下次临期正常刷新
     // 保留调用方给的 appId（兑换时它就是 pending 里的应用）；没给才用当前配置。
     // 不能用当前配置无条件覆盖：那会让「旧应用的 token 在换应用后看起来仍属于新应用」，
     // 换应用检查就永远不生效。
@@ -209,13 +227,25 @@ export class PersonaTokenStore {
       return this.needsAuth("refresh_token 也已过期，需重新授权", entry)
     }
 
+    // 退避：上次刷新失败且向未调 REFRESH_RETRY_MIN_MS → 不再打接口，直接回报上次原因。
+    // 不合条件（间隔已过 / 上次成功）则清掉失败记录，正常尝试。
+    if (this.lastRefreshError !== null) {
+      if (this.now() - this.lastRefreshAttemptAt < REFRESH_RETRY_MIN_MS) {
+        return this.needsAuth(this.lastRefreshError, entry)
+      }
+      this.lastRefreshError = null
+    }
+
     try {
+      this.lastRefreshAttemptAt = this.now()
       const next = await this.refresh(entry)
       await this.save(next) // 立即落盘：否则重启后又是旧 token
+      this.lastRefreshError = null
       this.opts.log?.("info", "[persona:token] 用户令牌已自动刷新")
       return { status: "ok", token: next, remainingMs: next.expireAt - this.now() }
     } catch (err) {
       const reason = `刷新令牌失败：${String((err as Error)?.message || err)}`
+      this.lastRefreshError = reason
       return this.needsAuth(reason, entry)
     }
   }

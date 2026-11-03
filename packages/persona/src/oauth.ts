@@ -187,8 +187,15 @@ export class PersonaOAuth {
   /**
    * 用授权码换令牌。
    *
-   * `state` 可选：回调流程会带上（用于校验）；手动粘贴 code 时用户可能不带，
-   * 此时用 `latest()` 的 redirectUri（否则飞书会因 redirect_uri 不匹配拒绝兑换）。
+   * `state` 可选但受限制：回调流程必带（用于校验）；手动粘贴 code 不带时，
+   * **仅当进程内 pending 恰好只有一个**才允许用它的 redirectUri 兑换（单用户本地场景），
+   * 多于一个时拒绝——否则无法区分这次兑换属于哪次授权。
+   *
+   * 为什么这个限制是必要的（防 account mix-up）：回调端点是公开的，攻击者可以
+   * 用同一个 appId 发起自己的授权、把 code 打到回调地址且不带 state。若无条件
+   * 回落 `latest()`，就会拿攻击者的 code 兑换成功——**攻击者的飞书账号成为人格身份**
+   *（以他名义读群、发消息）。单 pending 例外仅限本地单用户场景（自己刚生成的链接
+   * 自己粘 code），公网多用户场景应始终带 state。
    */
   async exchange(opts: ExchangeOptions & { state?: string }): Promise<PersonaUserToken> {
     const now = opts.now?.() ?? this.now()
@@ -197,12 +204,24 @@ export class PersonaOAuth {
     const code = extractCode(opts.code)
     if (!code) throw new Error("未从输入中提取到授权码（应为 code=xxx 或纯 code）")
 
-    const pending = opts.state ? this.pending.get(opts.state) : this.latest()
+    // state 从显式参数或 code 原文里提取（手动粘贴完整回调 URL 时 URL 里就有 state）
+    const state = opts.state ?? extractState(opts.code)
+    let pending: PendingAuthorize | null = state ? (this.pending.get(state) ?? null) : null
+    if (!pending) {
+      if (state) {
+        throw new Error("授权会话已过期或不存在：请重新发起授权（授权链接 10 分钟内有效）")
+      }
+      // 无 state：仅当 pending 唯一才允许兑（见上方注释；多余一个时拒绝，防 account mix-up）
+      const all = [...this.pending.values()].sort((a, b) => b.createdAt - a.createdAt)
+      if (all.length === 1) pending = all[0]!
+      else if (all.length > 1)
+        throw new Error(
+          `当前存在 ${all.length} 个进行中的授权会话，无法确定本次兑换属于哪一个——` +
+            "请带上完整回调地址（含 state 参数）重试，或先只保留一个授权链接",
+        )
+    }
     if (!pending) {
       throw new Error("授权会话已过期或不存在：请重新发起授权（授权链接 10 分钟内有效）")
-    }
-    if (opts.state && pending.state !== opts.state) {
-      throw new Error("state 不匹配：该回调不是本次授权的结果，请重新发起授权")
     }
 
     const res = await this.fetchImpl(OAUTH_TOKEN_URL, {
@@ -273,4 +292,18 @@ export function extractCode(raw: string): string {
   const code = m ? decodeURIComponent(m[1]!) : text
   // code 只含字母数字与 -_（飞书规范）；不符合的当无效，避免把整段 URL 当 code 提交
   return /^[A-Za-z0-9_-]+$/.test(code) ? code : ""
+}
+
+/**
+ * 从完整回调地址里提取 state（手动粘贴兑底用）。
+ *
+ * 粘贴的通常就是整个回调 URL，里面本来就有 state——之前只提 code 把 state 丢了，
+ * 导致「明明能对上号却当成无 state 兑换」。纯 code 输入返回 undefined。
+ */
+export function extractState(raw: string): string | undefined {
+  const text = raw.trim()
+  if (!text) return undefined
+  const m = /[?&]state=([^&]+)/.exec(text)
+  const state = m ? decodeURIComponent(m[1]!) : ""
+  return /^[A-Za-z0-9_-]+$/.test(state) && state ? state : undefined
 }

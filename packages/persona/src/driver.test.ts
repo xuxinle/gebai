@@ -148,7 +148,13 @@ describe("validateCreate：校验从严", () => {
 
   test("订阅语法非法被拒（写错 = 永远收不到事件）", () => {
     expect(validateCreate({ ...base, subscriptions: ["feishu*"] }, undefined)).toContain("非法")
-    expect(validateCreate({ ...base, subscriptions: ["a:b:c"] }, undefined)).toContain("段数")
+    // 四段以上仍拒（三段式 channel:chatId:kind 已与静态定义同口径开放）
+    expect(validateCreate({ ...base, subscriptions: ["a:b:c:d"] }, undefined)).toContain("段数")
+  })
+
+  /** 三段式订阅对动态 driver 同样开放（与静态定义同一校验函数，规则不再分叉）。 */
+  test("三段式订阅（channel:chatId:kind）合法（与静态同口径）", () => {
+    expect(validateCreate({ ...base, subscriptions: ["feishu:oc_x:message"] }, undefined)).toBeNull()
   })
 
   test("id 与已有 driver 冲突被拒（防意外覆盖正在工作的分工）", () => {

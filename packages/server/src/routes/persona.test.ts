@@ -10,6 +10,7 @@
  */
 import { describe, expect, test } from "bun:test"
 import { Hono } from "hono"
+import type { Context } from "hono"
 import type { AppEnv } from "../app"
 import type { PersonaStateSnapshot } from "../core/session/persona-status"
 import { registerPersonaRoutes } from "./persona"
@@ -49,11 +50,19 @@ const SNAPSHOT: PersonaStateSnapshot = {
   totals: { drivers: 1, activeDrivers: 1, running: 0, queued: 2, failed: 0, workersRunning: 0 },
 }
 
+/** 直接以给定 deps 构造路由（需要传 makeApp 未覆盖的字段时用）。 */
+function registerPersonaRoutesWith(deps: Record<string, unknown>): Hono<AppEnv> {
+  const app = new Hono<AppEnv>()
+  registerPersonaRoutes(app, deps as never)
+  return app
+}
+
 function makeApp(deps: {
   credentials?: unknown
   state?: () => Promise<PersonaStateSnapshot>
   sourceControl?: { start(name: string): Promise<boolean>; stop(name: string): Promise<boolean> }
   pushAuthCard?: () => Promise<{ ok: boolean; delivered: boolean; url?: string; error?: string }>
+  requireAdmin?: (c: Context) => Response | null
 }): Hono<AppEnv> {
   const app = new Hono<AppEnv>()
   registerPersonaRoutes(app, {
@@ -63,6 +72,7 @@ function makeApp(deps: {
     ...(deps.state ? { state: deps.state } : {}),
     ...(deps.sourceControl ? { sourceControl: deps.sourceControl } : {}),
     ...(deps.pushAuthCard ? { pushAuthCard: deps.pushAuthCard } : {}),
+    ...(deps.requireAdmin ? { requireAdmin: deps.requireAdmin } : {}),
   } as never)
   return app
 }
@@ -140,6 +150,79 @@ describe("POST /api/v1/persona/sources/:name/:action", () => {
     const res = await app.request("/api/v1/persona/sources/..%2Fetc/start", { method: "POST" })
     expect(res.status).toBe(400)
     expect(log).toEqual([])
+  })
+})
+
+/**
+ * 写面管理员门槛：拟人凭据/事件源是部署级资源（进程级、跨用户共享），
+ * 服务模式下普通登录用户不应能撤销全局授权或停全局驱动源。
+ * 本地模式（未注入 requireAdmin）不受影响。
+ */
+describe("写面 admin 门槛（requireAdmin）", () => {
+  /** 与 app.ts 同款：模拟服务模式下非 admin 的判定。 */
+  const adminOnly = (isAdmin: boolean) =>
+    ((_c: Context) => (isAdmin ? null : new Response(JSON.stringify({ error: "admin only" }), { status: 403 }))) as (c: Context) => Response | null
+
+  test("非 admin 调写面（授权/撤销/源启停）→ 403，且不动凭据", async () => {
+    const creds = {
+      startAuthorize: () => {
+        throw new Error("不该走到这")
+      },
+      revoke: async () => {
+        throw new Error("不该走到这")
+      },
+      complete: async () => {
+        throw new Error("不该走到这")
+      },
+    }
+    const log: string[] = []
+    const app = makeApp({
+      credentials: creds as never,
+      sourceControl: {
+        start: async (n) => {
+          log.push(`start:${n}`)
+          return true
+        },
+        stop: async (n) => {
+          log.push(`stop:${n}`)
+          return true
+        },
+      },
+      requireAdmin: adminOnly(false),
+    })
+    expect((await app.request("/api/v1/persona/authorize", { method: "POST" })).status).toBe(403)
+    expect((await app.request("/api/v1/persona/authorize", { method: "DELETE" })).status).toBe(403)
+    expect((await app.request("/api/v1/persona/authorize/complete", { method: "POST", body: "{\"code\":\"x\"}", headers: { "content-type": "application/json" } })).status).toBe(403)
+    expect((await app.request("/api/v1/persona/sources/feishu/stop", { method: "POST" })).status).toBe(403)
+    expect(log).toEqual([]) // 一次都没转发
+  })
+
+  test("admin 调写面照常（门槛不误伤）", async () => {
+    const creds = {
+      startAuthorize: () => ({ url: "https://accounts.feishu.cn/x", scopes: "im:message", expiresInMs: 600_000 }),
+      status: async () => ({ ready: false, state: "missing", message: "未授权", needsAuth: true }),
+    }
+    const app = makeApp({ credentials: creds as never, requireAdmin: adminOnly(true) })
+    const res = await app.request("/api/v1/persona/authorize", { method: "POST" })
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { url: string }).url).toContain("accounts.feishu.cn")
+  })
+
+  test("读面（status/state）不设门槛：登录即可看", async () => {
+    const app = makeApp({ credentials: {}, state: async () => SNAPSHOT, requireAdmin: adminOnly(false) })
+    expect((await app.request("/api/v1/persona/state")).status).toBe(200)
+  })
+
+  test("装配失败时 sources 端点 404 文案带 setupError（与其它端点同口径）", async () => {
+    const app = registerPersonaRoutesWith({
+      credentials: null,
+      publish: () => {},
+      publicBase: () => "http://localhost:3000",
+      setupError: "PersonaCatalog 构造炸了",
+    })
+    const res = await app.request("/api/v1/persona/sources/file_drop/start", { method: "POST" })
+    expect(res.status).toBe(404)
+    expect(((await res.json()) as { error: string }).error).toContain("PersonaCatalog 构造炸了")
   })
 })
 

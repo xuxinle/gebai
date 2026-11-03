@@ -27,6 +27,7 @@
  * 这是"自我组织"的关键——角色不需要等人改配置才能开始按新分工工作。
  */
 
+import { validateSubscription } from "./subscription"
 import type { DriverDef } from "./ports"
 
 /** driver 创建来源（审计用：事后能区分"人配的"与"自己想出来的"）。 */
@@ -218,9 +219,12 @@ export function validateCreate(input: CreateDriverInput, existing: Map<string, D
     return "subscriptions 不能为空——一个不关注任何事件的 driver 永远不会被唤醒（那样它没有存在意义）"
   }
   if (subs.length > 12) return "subscriptions 过多（上限 12 条）"
-  // 订阅语法复用 subscription.ts 的唯一实现（防两处分叉）
+  // 订阅语法复用 subscription.ts 的唯一实现（防两处分叉）。
+  // 三段式（channel:chatId:kind）对动态 driver 同样开放——与静态定义（persona.ts
+  // 校验同一函数）口径一致；此前这里另有一份只允许两段的本地副本，同一套订阅
+  // 两套规则已实际分叉（静态可三段、动态不可），收敛于此。
   for (const s of subs) {
-    const bad = validateSub(s)
+    const bad = validateSubscription(s)
     if (bad) return bad
   }
   const dynamicCount = existing ? [...existing.values()].filter((r) => r.origin === "dynamic").length : 0
@@ -230,19 +234,6 @@ export function validateCreate(input: CreateDriverInput, existing: Map<string, D
   if (input.maxConcurrent !== undefined) {
     if (!Number.isInteger(input.maxConcurrent) || input.maxConcurrent < 1 || input.maxConcurrent > 16) {
       return `maxConcurrent 必须是 1~16 的整数（当前：${String(input.maxConcurrent)}）`
-    }
-  }
-  return null
-}
-
-/** 订阅语法校验（延迟引入避免循环依赖）。 */
-function validateSub(sub: string): string | null {
-  if (sub === "*") return null
-  const parts = sub.split(":")
-  if (parts.length > 2) return `订阅「${sub}」段数过多（最多 channel:kind 两段）`
-  for (const p of parts) {
-    if (!/^[a-z0-9_]+$/.test(p.trim())) {
-      return `订阅「${sub}」含非法字符（每段须为 [a-z0-9_]+；不支持通配符与正则）`
     }
   }
   return null

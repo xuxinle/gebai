@@ -165,6 +165,8 @@ export class SessionWorkerSpawner implements WorkerSpawner {
 
     let sessionId: string | null = null
     let timer: ReturnType<typeof setTimeout> | undefined
+    /** 超时标志（cancel 前置位）：catch 里用它区分「超时失败」与「被叫停」，不靠文案正则。 */
+    let timedOut = false
     try {
       if (input.signal.aborted) {
         return { runId, status: "cancelled", error: "派活时已被取消", ...(label ? { label } : {}), elapsedMs: 0 }
@@ -181,8 +183,11 @@ export class SessionWorkerSpawner implements WorkerSpawner {
       input.signal.addEventListener("abort", onAbort, { once: true })
 
       // 运行时限：到点取消（防止死循环的活永远占着；结论按「已掌握的信息」由模型自己收口
-      // 做不到——engine.cancel 是硬中止，所以这里如实报 timeout 而不是假装成功）
+      // 做不到——engine.cancel 是硬中止，所以这里如实报 timeout 而不是假装成功）。
+      // 超时先记标志再 cancel：否则 catch 里只能靠错误文案正则区分「叫停」与「超时」——
+      // 文案一改就误归类（driver 会按「被叫停」而不是「超时失败」决定补救策略）。
       timer = setTimeout(() => {
+        timedOut = true
         this.log?.warn(`[persona:worker] ${runId} 超过 ${Math.round(this.timeoutMs / 60000)} 分钟，强制取消`)
         if (sessionId) this.engine.cancel(sessionId)
       }, this.timeoutMs)
@@ -222,12 +227,13 @@ export class SessionWorkerSpawner implements WorkerSpawner {
     } catch (err) {
       const elapsedMs = this.now() - startedAt
       const message = String((err as Error)?.message || err)
+      // 超时优先：标志在 cancel 前就置位，结构化判定不依赖文案（文案正则只作兑底）。
       // 取消与超时都表现为 abort 抛错：区分开，driver 需要知道「这活是被叫停的」还是「它自己炸了」
-      const cancelled = input.signal.aborted || /cancel|abort|终止|中断/i.test(message)
+      const cancelled = !timedOut && (input.signal.aborted || /cancel|abort|终止|中断/i.test(message))
       return {
         runId,
         status: cancelled ? "cancelled" : "failed",
-        error: message,
+        error: timedOut ? `超过运行时限（${Math.round(this.timeoutMs / 60000)} 分钟）被强制取消：${message}` : message,
         ...(label ? { label } : {}),
         elapsedMs,
       }

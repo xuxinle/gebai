@@ -387,11 +387,14 @@ export const channel: ChannelDef = {
     }
     // 显式检查与 session bot 撞应用的配置错误：飞书对**同一应用**只允许一条长连接，
     // 两者同时用同一个 AppID 会互踢（表现为其中一边偶发收不到消息，极难排查）。
+    // 只在会话机器人**已启用**时才判撞：bot 停用时它根本不建长连接，同 AppID 不冲突
+    // （把残留的 GEBAI_FEISHU_APP_ID 当冲突源会误拒——bot 关了渠道也起不来，两边都哑）。
     const sessionAppId = ctx.deps.feishuSessionAppId
-    if (typeof sessionAppId === "string" && sessionAppId && sessionAppId === appId) {
+    const sessionBotEnabled = ctx.deps.feishuSessionBotEnabled !== false // 缺省视为启用（兼容旧宿主只注入 appId 的形态）
+    if (sessionBotEnabled && typeof sessionAppId === "string" && sessionAppId && sessionAppId === appId) {
       throw new Error(
-        "GEBAI_CHANNELS_FEISHU_APP_ID 与 GEBAI_FEISHU_APP_ID 相同：同一飞书应用不能建两条长连接（会互踢）。" +
-          "给本渠道新建一个独立机器人应用，或关闭其中一个。",
+        "GEBAI_CHANNELS_FEISHU_APP_ID 与已启用的会话机器人（GEBAI_FEISHU_APP_ID）相同：同一飞书应用不能建两条长连接（会互踢）。" +
+          "给本渠道新建一个独立机器人应用，或关闭其中一个（GEBAI_FEISHU_BOT_ENABLED=false）。",
       )
     }
     const chats = (ctx.env("GEBAI_CHANNELS_FEISHU_CHATS") ?? "").split(/[,\s]+/).filter(Boolean)
@@ -519,9 +522,7 @@ export const channel: ChannelDef = {
       const text = String(input.args.text ?? "")
       const data = await api<{ message_id?: string }>(
         creds,
-        asUser
-          ? "/im/v1/messages?receive_id_type=chat_id"
-          : "/im/v1/messages?receive_id_type=chat_id",
+        "/im/v1/messages?receive_id_type=chat_id",
         {
           method: "POST",
           body: JSON.stringify({ receive_id: input.address, msg_type: "text", content: JSON.stringify({ text }) }),

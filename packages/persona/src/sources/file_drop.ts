@@ -41,6 +41,11 @@ const POLL_MS = 1500
  *
  * 只存**函数、不存共享数据**：清理动作所需的状态（timer、handled、stopped）全在
  * 闭包里，因此不会跨实例串扰。这解决了「`stop()` 无参数、但状态必须按实例隔离」的矛盾。
+ *
+ * 多实例防御：连续两次 start 不 stop 时（多 manager 实例、测试并行），新 start
+ * 先弹出并执行栈中残留清理器——否则上一实例的轮询 timer 永远无人清理（表现为
+ * 「事件偶发丢失」：两个实例同扫一个目录、各自维护 handled 集合）。正常路径
+ * （manager 保证 stop→start）栈为空，零开销。
  */
 const stopQueue: Array<() => void> = []
 
@@ -57,7 +62,16 @@ export const source: EventSourceDef = {
     const handled = new Set<string>()
     let timer: ReturnType<typeof setInterval> | null = null
 
-    // 注册清理器：stop() 时调用（弹出最近一个）
+    // 注册清理器：stop() 时调用（弹出最近一个）。
+    // 多实例自防御：栈里有残留（上一实例未 stop）先执行掉，见 stopQueue 注释。
+    while (stopQueue.length > 0) {
+      try {
+        stopQueue.pop()?.()
+        ctx.log("warn", "文件投递源检测到上一实例未 stop，已先清理（多实例并行启动不受支持，依赖 manager 的 stop→start 顺序）")
+      } catch {
+        /* 旧实例清理失败不阻断新实例 */
+      }
+    }
     stopQueue.push(() => {
       stopped = true
       if (timer !== null) clearInterval(timer)

@@ -167,6 +167,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
         c.req.path === "/api/v1/auth/external-config" ||
         c.req.path === "/api/v1/auth/signup-config" ||
         c.req.path === "/api/v1/oauth/feishu/callback" ||
+        c.req.path === "/api/v1/persona/feishu/callback" || // 拟人授权回调：state 一次性凭证防重放（同上），且授权往往在另一台设备（手机飞书）完成——不带登录令牌
         c.req.path === "/api/health" ||
         c.req.path === "/api/docs" // OpenAPI 文档：公开（无敏感信息），便于集成方调试
       ) {
@@ -216,6 +217,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     ...(d.personaSourceControl ? { sourceControl: d.personaSourceControl } : {}),
     ...(d.personaSetupError ? { setupError: d.personaSetupError } : {}),
     ...(d.personaPushAuthCard ? { pushAuthCard: d.personaPushAuthCard } : {}),
+    // 写面（授权发起/兑换/撤销、源启停）是部署级操作：服务模式下仅 admin
+    requireAdmin: rc.requireAdmin,
   })
   registerUserRoutes(rc)
   registerSessionRoutes(rc)

@@ -41,6 +41,7 @@
 import { readdir, readFile, stat } from "node:fs/promises"
 import { join } from "node:path"
 import type { DriverDef, PersonaIdentity } from "./ports"
+import { validateSubscription } from "./subscription"
 
 /**
  * 人格定义：`PersonaIdentity` + 它下面的静态 driver 清单。
@@ -146,8 +147,15 @@ export function validatePersonaDef(raw: unknown, expectedId: string): string | n
       if (!Array.isArray(dr.subscriptions) || dr.subscriptions.some((s) => typeof s !== "string" || !s.trim())) {
         return `drivers「${dr.id}」的 subscriptions 必须是非空字符串数组`
       }
-      if (dr.maxConcurrent !== undefined && (typeof dr.maxConcurrent !== "number" || dr.maxConcurrent < 1)) {
-        return `drivers「${dr.id}」的 maxConcurrent 必须是 >=1 的数字`
+      // 订阅语法逐条校验（复用 subscription.ts 的唯一实现）：非法写法（如 feishu*、四段以上）
+      // 在加载期报错——否则它运行期永不命中，分身永不响应且零告警，
+      // 而「配了但没反应」是最难排查的形态。此前只查了非空字符串，语法从未验证。
+      for (const s of dr.subscriptions as string[]) {
+        const bad = validateSubscription(s)
+        if (bad) return `drivers「${dr.id}」的 ${bad}（合法写法：* / kind / channel / channel:kind / channel:chatId:kind）`
+      }
+      if (dr.maxConcurrent !== undefined && (typeof dr.maxConcurrent !== "number" || !Number.isInteger(dr.maxConcurrent) || dr.maxConcurrent < 1)) {
+        return `drivers「${dr.id}」的 maxConcurrent 必须是 >=1 的整数（当前：${String(dr.maxConcurrent)}）`
       }
     }
   }

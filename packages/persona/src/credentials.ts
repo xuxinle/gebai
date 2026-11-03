@@ -86,6 +86,9 @@ export interface PersonaCredentialsOptions {
  * 刻意不自己持有令牌：读写落在 `PersonaTokenStore`，这样「进程级唯一凭据」
  * 这条不变式只由一处保证（多处持有必然出现「刷新了但另一份还是旧的」）。
  */
+/** 前置提醒窗口：remainingMs 低于它即标 `expiring`（仍可用但即将失效）。 */
+const EXPIRING_WINDOW_MS = 10 * 60_000
+
 export class PersonaCredentials {
   private lastTicket: AuthorizeTicket | null = null
 
@@ -98,15 +101,44 @@ export class PersonaCredentials {
    * 会白点一次授权。宁可多花一次刷新，也不要造成误提示。
    */
   async status(): Promise<PersonaCredentialStatus> {
-    const resolved = await this.opts.store.resolve()
+    let resolved: Awaited<ReturnType<PersonaTokenStore["resolve"]>>
+    try {
+      resolved = await this.opts.store.resolve()
+    } catch (err) {
+      // 读盘/解析意外抛错（不是「没有令牌」那种正常态）：如实标 error，
+      // 而不是当成 missing 给一个授权链接把人引去白点一次授权。
+      return {
+        ready: false,
+        state: "error",
+        message: `凭据读取异常：${String((err as Error)?.message || err)}`,
+        needsAuth: true,
+        ...(this.ensureTicket() ? { authorizeUrl: this.ensureTicket()!.url } : {}),
+      }
+    }
     if (resolved.status === "ok") {
+      const remaining = resolved.remainingMs
+      // 无 refresh_token 时令牌不可续：到期即需人工重新授权。remaining 进入前置
+      // 窗口就标 expiring（提前叫人），而不是等它过期变 expired——那时人格已失声。
+      const renewable = !!resolved.token.refreshToken
+      if (!renewable && remaining < EXPIRING_WINDOW_MS) {
+        return {
+          ready: true,
+          state: "expiring",
+          message: `令牌即将过期（剩 ${Math.max(0, Math.round(remaining / 60_000))} 分钟，无 refresh_token 不可自动续期）——请提前重新授权`,
+          ...(resolved.token.name ? { authorizedUser: resolved.token.name } : {}),
+          expireAt: resolved.token.expireAt,
+          remainingMs: remaining,
+          scopes: resolved.token.scopes,
+          needsAuth: true,
+        }
+      }
       return {
         ready: true,
         state: "ok",
         message: resolved.token.name ? `已授权（${resolved.token.name}）` : "已授权",
         ...(resolved.token.name ? { authorizedUser: resolved.token.name } : {}),
         expireAt: resolved.token.expireAt,
-        remainingMs: resolved.remainingMs,
+        remainingMs: remaining,
         scopes: resolved.token.scopes,
         needsAuth: false,
       }

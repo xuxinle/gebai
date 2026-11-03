@@ -109,6 +109,6 @@ export { defaultPersonaScanDirs, discoverPersonas, readPersonaFile, validatePers
 export type { PersonaTokenStoreOptions, PersonaUserToken, TokenState } from "./user-token"
 export { PersonaTokenStore } from "./user-token"
 export type { AuthorizeOptions, AuthorizeTicket, ExchangeOptions, PendingAuthorize } from "./oauth"
-export { extractCode, OFFLINE_ACCESS_SCOPE, PERSONA_SCOPES, PersonaOAuth, scopesFromEnv } from "./oauth"
+export { extractCode, extractState, OFFLINE_ACCESS_SCOPE, PERSONA_SCOPES, PersonaOAuth, scopesFromEnv } from "./oauth"
 export type { PersonaCredentialStatus, PersonaCredentialsOptions } from "./credentials"
 export { PersonaCredentials } from "./credentials"

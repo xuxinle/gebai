@@ -12,11 +12,12 @@
  * 所以这里不是「照注入就好」，而是**先在启动期判定并如实报错**：
  *
  * ```
- * persona AppID == FeishuBot AppID 且 FeishuBot 已启用  →  拒绝注入 + 明确说明怎么改
+ * persona AppID == FeishuBot AppID 且 FeishuBot 已启用 → 拒绝注入 + 明确说明怎么改
+ * persona AppID == 渠道面 AppID（channelAppId）   → 拒绝注入（渠道已建同应用长连接）
  * ```
  *
- * 这与 `@gebai/channels` 里 feishu 渠道的做法一致（那里也做同一检查）——同一个坑不值得
- * 让两处各自发现一次。
+ * 与 `@gebai/channels` 里 feishu 渠道的做法一致（那里也做同一检查）——同一个坑不值得
+ * 让两处各自发现一次。三处（渠道/本源/会话机器人）两两互检，任一方建连前都知道对方在。
  *
  * ## 二、读历史必须用户身份（而且拿不到要如实说）
  *
@@ -52,6 +53,15 @@ export interface FeishuSourceDepsOptions {
   appSecret: () => string | undefined
   /** 会话机器人（FeishuBot）当前是否启用 + 它用的 AppID：用于撞车判定。 */
   sessionBot: () => { enabled: boolean; appId?: string }
+  /**
+   * 渠道面（@gebai/channels feishu）的应用 AppID：用于「渠道 ↔ 拟人源」互检。
+   *
+   * 为什么需要第三对比对：两侧原有的检查都以**会话机器人**为参照系——若渠道与
+   * 本源撞在同一应用上（GEBAI_CHANNELS_FEISHU_APP_ID == FEISHU_BOT_APP_ID），
+   * 两处检查各自都通过，然后各建一条长连接互踢。这正是所有检查想防的那个故障
+   * 形态，却谁都没防住。未配置渠道面时（undefined）不比对。
+   */
+  channelAppId?: () => string | undefined
   /** 造一个长连接（宿主传 `FeishuConn` 的工厂）。 */
   makeConn: (opts: { appId: string; appSecret: string; onEvent: (ev: Record<string, unknown>) => void }) => {
     start(): Promise<void>
@@ -87,12 +97,23 @@ export function createFeishuSourceDeps(opts: FeishuSourceDepsOptions): Record<st
   }
 
   // ① 撞车判定（同一应用只能一条长连接）
+  // 两对比对：与已启用的会话机器人、与渠道面（各自都可能建长连接，撞上任意一方都互踢）。
   const bot = opts.sessionBot()
   if (bot.enabled && bot.appId && bot.appId === appId) {
     opts.log?.warn(
       "[gebai] 拟人飞书事件源未注入长连接：FEISHU_BOT_APP_ID / GEBAI_FEISHU_APP_ID 与已启用的会话机器人相同。" +
         "飞书对同一应用只允许一条长连接，两条会互踢（表现为两边都偶发收不到消息）。" +
         "给拟人模式单独建一个应用（配 FEISHU_BOT_APP_ID / _SECRET），或关闭其中一个。",
+    )
+    return deps
+  }
+  const channelAppId = opts.channelAppId?.()
+  if (channelAppId && channelAppId === appId) {
+    opts.log?.warn(
+      "[gebai] 拟人飞书事件源未注入长连接：FEISHU_BOT_APP_ID 与渠道面 GEBAI_CHANNELS_FEISHU_APP_ID 相同。" +
+        "渠道已用同一应用建了长连接，本源再建一条会互踢（表现为两边都偶发收不到消息）。" +
+        "给拟人事件源单独建一个应用（配 FEISHU_BOT_APP_ID / _SECRET），或用 GEBAI_EVENT_SOURCES_DISABLE=feishu 关掉本源" +
+        "（渠道入站已覆盖收消息，本源的附加价值只有读历史）。",
     )
     return deps
   }

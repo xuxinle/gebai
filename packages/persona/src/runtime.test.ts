@@ -457,6 +457,91 @@ describe("PersonaRuntime：投递失败不占用幂等位（否则瞬时故障=�
   })
 })
 
+describe("PersonaRuntime：投递路径的异常护栏（K3 修复）", () => {
+  /**
+   * 病根：schedulerFor / enqueueRound 若**抛异常**（如非法额度在 PersonaScheduler
+   * 构造时同步抛错），旧实现直接向上冒——①已 admit 的幂等位没人 revoke，源重投
+   * 判 duplicate 静默丢弃；②dispatchBatch 的 Promise 链让同批其它 driver 的
+   * 投递结果全部丢失。这里钉住「异常也走 revoke + 失败投递」的纪律。
+   */
+  test("单条投递抛异常 → 幂等位被撤回，重投能被接住（不判 duplicate）", async () => {
+    let explode = true
+    const runtime = new PersonaRuntime({
+      lookup: { get: () => IDENT, subscribers: () => [{ personaId: "xiaoshuang", user: "admin", driverIds: ["main"] }], drivers: () => [{ id: "main", focus: "主驱动", subscriptions: ["*"] }], maxConcurrent: () => 1 },
+      runner: { isRunning: () => false, run: async () => {} },
+      sessions: {
+        resolveDriver: async () => {
+          if (explode) throw new Error("调度器构造炸了")
+          return { sessionId: "s-k3", created: false, name: "x" }
+        },
+      },
+    })
+    runtime.start()
+    const first = await runtime.dispatch(ev("k1"))
+    expect(first.status).toBe("unavailable")
+    expect(first.deliveries?.[0]?.reason).toContain("调度器构造炸了")
+
+    explode = false
+    const retry = await runtime.dispatch(ev("k1"))
+    expect(retry.status).toBe("accepted") // 若幂等位泄漏，这里会是 duplicate
+    runtime.stop()
+  })
+
+  test("dispatchBatch 单 driver 异常不中断整批（其它 driver 照常投递）", async () => {
+    // 同一事件命中两个 driver：bad 的会话解析抛错，good 照常被接管
+    const drivers = [
+      { id: "good", focus: "好驱动", subscriptions: ["*"] },
+      { id: "bad", focus: "坏驱动", subscriptions: ["*"] },
+    ]
+    const runtime = new PersonaRuntime({
+      lookup: { get: () => IDENT, subscribers: () => [{ personaId: "xiaoshuang", user: "admin", driverIds: ["good", "bad"] }], drivers: () => drivers, maxConcurrent: () => 1 },
+      runner: { isRunning: () => false, run: async () => {} },
+      sessions: {
+        resolveDriver: async ({ driverId }: { driverId: string }) => {
+          if (driverId === "bad") throw new Error("bad 的会话解析炸了")
+          return { sessionId: "s-good", created: false, name: "x" }
+        },
+      },
+    })
+    runtime.start()
+    const r = await runtime.dispatchBatch([ev("m1")])
+    // good 被接管，bad 如实报 unavailable（而不是整批 reject 丢失结果）
+    const byDriver = Object.fromEntries((r.deliveries ?? []).map((d) => [d.driverId, d.status]))
+    expect(byDriver["good"]).toBe("accepted")
+    expect(byDriver["bad"]).toBe("unavailable")
+    runtime.stop()
+  })
+})
+
+describe("PersonaRuntime：外部占用预检接线（K2）", () => {
+  test("runner.isRunning=true 时事件不 launch（留在队列），占用结束后接起", async () => {
+    let busy = true
+    const runs: string[] = []
+    const runtime = new PersonaRuntime({
+      lookup: { get: () => IDENT, subscribers: () => [{ personaId: "xiaoshuang", user: "admin", driverIds: ["main"] }], drivers: () => [{ id: "main", focus: "主驱动", subscriptions: ["*"] }], maxConcurrent: () => 1 },
+      runner: {
+        isRunning: () => busy,
+        run: async ({ events }) => {
+          runs.push(events.map((e) => e.id).join(","))
+        },
+      },
+      sessions: { resolveDriver: async () => ({ sessionId: "s-busy", created: false, name: "x" }) },
+    })
+    runtime.start()
+    const r = await runtime.dispatch(ev("m1"))
+    expect(r.status).toBe("accepted") // 已接管（入队成功）
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(runs).toEqual([]) // 但没有 launch（外部占用预检拦住）
+
+    busy = false
+    await runtime.dispatch(ev("m2"))
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    // m2 入队触发 pump → m1 先跑（FIFO）
+    expect(runs.join("|")).toContain("m1")
+    runtime.stop()
+  })
+})
+
 describe("PersonaRuntime.bindings：运行态快照的会话来源", () => {
   /**
    * `bindings()` 是快照里 `sessionId` / `sessionRunning` 两列的唯一来源。

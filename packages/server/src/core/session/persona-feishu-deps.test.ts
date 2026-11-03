@@ -64,6 +64,32 @@ describe("createFeishuSourceDeps：长连接注入与撞车", () => {
     })
     expect(typeof deps.feishuLongConn).toBe("function")
   })
+
+  test("与渠道面同应用（channelAppId 相同）→ 拒绝注入：渠道已建同应用长连接，本源再建必互踢", () => {
+    // 原有两处检查都以会话机器人为参照系——渠道与本源撞在同一应用时两边都放行，
+    // 然后各建一条长连接互踢（正是要防的形态却谁都没防住）。第三对比对补上这个盲区。
+    const warnings: string[] = []
+    const deps = createFeishuSourceDeps({
+      ...base,
+      appId: () => "cli_shared",
+      sessionBot: () => ({ enabled: false }),
+      channelAppId: () => "cli_shared",
+      log: { info: () => {}, warn: (m) => void warnings.push(m) },
+    })
+    expect(deps.feishuLongConn).toBeUndefined()
+    const all = warnings.join(" ")
+    expect(all).toContain("渠道")
+    expect(all).toContain("互踢")
+  })
+
+  test("与渠道面不同应用 → 照常注入（互检不误伤正常配置）", () => {
+    const deps = createFeishuSourceDeps({
+      ...base,
+      appId: () => "cli_persona",
+      channelAppId: () => "cli_channel_other",
+    })
+    expect(typeof deps.feishuLongConn).toBe("function")
+  })
 })
 
 describe("feishuHistory：用户身份优先，降级如实上报", () => {

@@ -32,7 +32,7 @@
 
 import type { DriverDef, PersonaIdentity, PersonaLookup } from "./ports"
 import type { PersonaDef } from "./persona"
-import type { DriverRegistry } from "./driver"
+import { DriverRegistry } from "./driver"
 import { coordsOf, matchesAny } from "./subscription"
 import type { PersonaEvent } from "./event"
 
@@ -96,7 +96,10 @@ export class PersonaCatalog implements PersonaLookup {
   constructor(opts: PersonaCatalogOptions) {
     this.personas = opts.personas
     this.registry = opts.drivers
-    this.defaultMaxConcurrent = Math.max(1, opts.defaultMaxConcurrent ?? 2)
+    // 整数化：非法配置（如 1.5）经 Math.max(1, x) 仍非整数，会在 PersonaScheduler
+    // 构造时抛错并连带整次投递失败——在这里就夹到合法形态（防御性，与 driver 侧校验同口径）
+    const dmc = opts.defaultMaxConcurrent
+    this.defaultMaxConcurrent = dmc !== undefined && Number.isInteger(dmc) && dmc >= 1 ? dmc : 2
   }
 
   /**
@@ -205,7 +208,9 @@ export class PersonaCatalog implements PersonaLookup {
 
   maxConcurrent(personaId: string): number {
     void personaId
-    return this.defaultMaxConcurrent
+    // 保证整数与 >=1：PersonaScheduler 构造对非整数直接抛错，而本值来自外部配置
+    const n = this.defaultMaxConcurrent
+    return Number.isInteger(n) && n >= 1 ? n : 2
   }
 
   /**

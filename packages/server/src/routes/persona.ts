@@ -62,6 +62,13 @@ export interface PersonaRouteDeps {
    * 同时**把链接一并给前端**，让面板能降级提供一个可点的链接。
    */
   pushAuthCard?: () => Promise<{ ok: boolean; delivered: boolean; url?: string; error?: string }>
+  /**
+   * 写面管理员校验（服务模式）：非 admin 返回 403。
+   *
+   * 拟人凭据与事件源是**部署级**资源（进程级、跨用户共享）——普通登录用户不应能
+   * 撤销全局授权（令所有人格失声）或停掉全局驱动源。未注入时不拦截（本地模式/单测）。
+   */
+  requireAdmin?: (c: Context) => Response | null
 }
 
 /** HTML 转义（反射型 XSS 防护：错误消息可能含外部可控内容）。 */
@@ -113,8 +120,12 @@ export function registerPersonaRoutes(app: Hono<AppEnv>, deps: PersonaRouteDeps)
     return c.json(status)
   })
 
-  /** 重新发起授权（生成新链接；旧链接随之失效）。 */
+  /** 重新发起授权（生成新链接；旧链接随之失效）。写面：仅管理员。 */
   app.post("/api/v1/persona/authorize", async (c) => {
+    if (deps.requireAdmin) {
+      const denied = deps.requireAdmin(c)
+      if (denied) return denied
+    }
     if (!deps.credentials) return notEnabled(c)
     try {
       const ticket = deps.credentials.startAuthorize()
@@ -148,6 +159,10 @@ export function registerPersonaRoutes(app: Hono<AppEnv>, deps: PersonaRouteDeps)
    * 浏览器的跳转落到别的服务上——此时用户可以把地址栏里带 code 的 URL 粘进来。
    */
   app.post("/api/v1/persona/authorize/complete", async (c) => {
+    if (deps.requireAdmin) {
+      const denied = deps.requireAdmin(c)
+      if (denied) return denied
+    }
     if (!deps.credentials) return notEnabled(c)
     const body = await c.req.json<{ code?: string; state?: string }>().catch(() => ({}) as { code?: string; state?: string })
     const code = String(body.code ?? "").trim()
@@ -163,8 +178,12 @@ export function registerPersonaRoutes(app: Hono<AppEnv>, deps: PersonaRouteDeps)
     }
   })
 
-  /** 撤销授权（清除落盘令牌，人格将停止对外动作并重新提示授权）。 */
+  /** 撤销授权（清除落盘令牌，人格将停止对外动作并重新提示授权）。写面：仅管理员。 */
   app.delete("/api/v1/persona/authorize", async (c) => {
+    if (deps.requireAdmin) {
+      const denied = deps.requireAdmin(c)
+      if (denied) return denied
+    }
     if (!deps.credentials) return notEnabled(c)
     await deps.credentials.revoke()
     deps.publish("event.persona.credentials", { ready: false, state: "missing" })
@@ -233,7 +252,20 @@ export function registerPersonaRoutes(app: Hono<AppEnv>, deps: PersonaRouteDeps)
    * **不改变启停名单**：下次热加载/重启仍按 `GEBAI_EVENT_SOURCES_*` 决定。
    */
   app.post("/api/v1/persona/sources/:name/:action", async (c) => {
-    if (!deps.sourceControl) return c.json({ error: "拟人模式未启用（GEBAI_PERSONA=true 后可用）" }, 404)
+    if (deps.requireAdmin) {
+      const denied = deps.requireAdmin(c)
+      if (denied) return denied
+    }
+    if (!deps.sourceControl) {
+      return c.json(
+        {
+          error: deps.setupError
+            ? `拟人模式装配失败：${deps.setupError}`
+            : "拟人模式未启用（GEBAI_PERSONA=true 后可用）",
+        },
+        404,
+      )
+    }
     const name = c.req.param("name")
     const action = c.req.param("action")
     if (action !== "start" && action !== "stop") {

@@ -1411,10 +1411,19 @@ port+token，经**长度前缀 JSON-RPC**（4 字节大端长度 + `{id,method,p
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | GET | `/api/v1/persona/status` | 当前凭据状态（**不返回令牌明文**） |
-| POST | `/api/v1/persona/authorize` | 重新生成授权链接 |
-| POST | `/api/v1/persona/authorize/complete` | 手动提交 code（回调打不到时的兜底） |
-| DELETE | `/api/v1/persona/authorize` | 撤销授权 |
-| GET | `/api/v1/persona/feishu/callback` | 飞书回调（公开端点，state 一次性） |
+| POST | `/api/v1/persona/authorize` | 重新生成授权链接（**admin**） |
+| POST | `/api/v1/persona/authorize/complete` | 手动提交 code（回调打不到时的兜底；**admin**；支持携带 state） |
+| DELETE | `/api/v1/persona/authorize` | 撤销授权（**admin**） |
+| GET | `/api/v1/persona/feishu/callback` | 飞书回调（公开端点，服务模式鉴权豁免；state 一次性） |
+| GET/POST | `/api/v1/persona/state` `/sources/…` | 运行态快照与源启停（读面登录即可；启停 **admin**；404 body 含 setupError） |
+
+写面加 `requireAdmin`：拟人凭据与事件源是**部署级**资源（进程级、跨用户共享），服务模式下
+普通用户不应能撤全局授权/停全局驱动源。本地模式不受影响（默认用户即 admin）。
+
+授权回调在**服务模式鉴权豁免清单**里：授权往往在手机飞书完成，回调请求不带登录态——
+不豁免则授权流程静默断在最后一步（401）。`state` 一次性凭证防重放；无 state 的 code
+仅在 pending 唯一时兑换（多 pending 拒绝，防 account mix-up——否则攻击者的 code 可顶替成人格身份）。
+前端手动粘贴回调 URL 时自动提取 state 一并提交。
 
 ##### 出站身份：`as_user`
 
@@ -1485,13 +1494,17 @@ port+token，经**长度前缀 JSON-RPC**（4 字节大端长度 + `{id,method,p
 两者**各自节流 5s**（目录不同，合并节流会让其中一个等另一个），挂在 runner 每轮之前——
 不放定时器：空闲进程不该白跑目录遍历。
 
-人格定义热加载必须同时做三件（缺一件就是「改了好像没生效」）：
+人格定义热加载必须同时做**四**件（缺一件就是「改了好像没生效」）：
 
 1. `catalog.replace()` 整体替换——下一次读身份/订阅就是新的
 2. **新增 driver → `syncDriver(online)`**，删掉的 → `offline`（不调则新分身从不响应）
 3. 订阅/并发改过的 → `syncConcurrency`（调度器要知道新额度）
+4. **`DriverRegistry` 静态镜像刷新**（`putStatic` 同步替换）——registry 与 catalog 是两个静态视图，
+   只换一边的后果：`driver_list` 显示旧集、已删 id 误报「已存在」、新增 id 可被动态同名遮蔽
+   （工具回「已创建」但实际按旧静态订阅运行，现象极像订阅配错）
 
 **重扫结果为空时不清空现有的人格**（目录暂不可读 ≠ 人格被删）：把全部人格下线比“配置暂不可读”严重得多。
+事件源侧重扫同款保护（签名变为空 = 疑似不可读，保持现有源不重载）。
 
 #### 内置飞书事件源：入站增强，不是重复实现
 
@@ -1510,9 +1523,14 @@ port+token，经**长度前缀 JSON-RPC**（4 字节大端长度 + `{id,method,p
 所以本源经 `deps.feishuLongConn` 拿宿主已有连接，自建 = 互踢 = 两边都偶发收不到消息。
 宿主侧撞车判定与读历史降级在 `core/session/persona-feishu-deps.ts`：
 
-- 与会话机器人同 AppID 且机器人已启用 → **启动期拒绝注入并告警**（不是静默空转）
+- 与会话机器人同 AppID 且机器人已启用 → **启动期拒绝注入并告警**（不是静默空转）；
+  与**渠道**同 AppID（拟人源应用 = 渠道应用）同样拒绝——两处长连接互踢不分避难所
 - 无用户令牌 → 退回应用身份，**把原因写进日志并标注在正文里**（“可能不全”），
   否则「这个群为什么没历史」永远查不出来——它看起来完全像「这个群就是没历史」
+
+撞车判定是**矩阵式的**（三对互检：渠道↔会话机器人、源↔会话机器人、源↔渠道）：
+各自只看「会话机器人」做参照系会漏掉第三对（渠道与源同 AppID 时双方都过、各建一条长连接互踢）。
+渠道侧检查也只在会话机器人**启用**时才拒（bot 停用时不误拒——同一个 AppID 不再有第二条连接）。
 
 入站消息投递时**正文带发送者姓名**（`张三：内容`）：经 `deps.feishuUserName`（contact API，尽力而为 + 按 openId 缓存）
 查询——查不到/未注入则不修饰正文，绝不因查名失败阻断入站。

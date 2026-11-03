@@ -62,10 +62,11 @@ export async function sourceDirSignature(dir: string): Promise<string | null> {
   const parts: string[] = []
   for (const e of entries) {
     if (e.isDirectory()) {
-      // 目录形式：{dir}/{name}/{name}.ts 或 index.ts（与子 Agent 目录形态一致）
+      // 目录形式：{dir}/{name}/{name}.ts / {name}.js / index.ts / index.js（与子 Agent 目录形态一致）。
+      // 候选含 .js——与 loadOne 的 import 候选一致（签名与加载不一致时：.js 源改内容不触发热加载）
       const base = e.name
       if (!/^[a-z0-9_]+$/.test(base)) continue
-      for (const candidate of [`${base}.ts`, "index.ts"]) {
+      for (const candidate of [`${base}.ts`, `${base}.js`, "index.ts", "index.js"]) {
         const p = join(dir, base, candidate)
         const st = await stat(p).catch(() => null)
         if (st?.isFile()) parts.push(`${base}/${candidate}:${fileStamp(st)}`)

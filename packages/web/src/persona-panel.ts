@@ -58,16 +58,46 @@ export interface PersonaStateView {
   }>
   sourceErrors: Record<string, string>
   channelInput: Record<string, { emitted: number; accepted: number; unrouted: number; duplicate: number; overflow: number; unavailable: number }>
+  /** 派出去的活（最近的在前；快照有、面板渲染它） */
+  workers: Array<{
+    runId: string
+    label?: string
+    personaId: string
+    driverId: string
+    status: "running" | "done" | "failed" | "cancelled"
+    startedAt: number
+    elapsedMs?: number
+  }>
   credentials: { ready: boolean; state: string; message: string; remainingMs?: number; needsAuth: boolean } | null
   /** 拟人装配失败原因（服务仍正常运行；有值 = 开关开了但坏了）。 */
   setupError?: string
-  totals: { drivers: number; activeDrivers: number; running: number; queued: number; failed: number }
+  totals: { drivers: number; activeDrivers: number; running: number; queued: number; failed: number; workersRunning: number }
 }
 
-/** 拉取快照（404 = 拟人模式未启用，返回 null；其它错误抛出）。 */
+/** 拉取快照（404 = 拟人未启用或装配失败；装配失败时 body 带 setupError，透出给调用方；其它错误抛出）。 */
 export async function fetchPersonaState(): Promise<PersonaStateView | null> {
   const res = await fetch("/api/v1/persona/state")
-  if (res.status === 404) return null
+  if (res.status === 404) {
+    // 404 body 可能携带装配失败原因（setupError）：不解析就丢，前端只能显示「未启用」，
+    // 与「把真实原因接到状态接口」的设计意图相反（排障还得翻启动日志）。
+    // 返回形态：带 setupError 的空快照（调用方据 setupError 渲染）；无则为 null（真未启用）。
+    const body = (await res.json().catch(() => ({}))) as { setupError?: string }
+    if (body.setupError) {
+      return {
+        enabled: false,
+        generatedAt: Date.now(),
+        personas: [],
+        sources: [],
+        sourceErrors: {},
+        channelInput: {},
+        workers: [],
+        credentials: null,
+        setupError: body.setupError,
+        totals: { drivers: 0, activeDrivers: 0, running: 0, queued: 0, failed: 0, workersRunning: 0 },
+      }
+    }
+    return null
+  }
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string }
     throw new Error(body.error ?? `HTTP ${res.status}`)
@@ -124,13 +154,19 @@ export async function startPersonaAuthorize(): Promise<{
  *
  * 真实场景：redirect_uri 指向别处（如端口不对、被别的服务占用），
  * 浏览器跳转回不到歌白——此时用户把地址栏里带 code 的 URL 粘进来即可。
+ *
+ * 粘贴的通常是完整回调 URL：里面的 `state` 会一并提取提交（服务端按 state 对号
+ * 兑换；多开授权页时靠 state 区分，不提取就会「兑错会话/被拒」）。
  */
 export async function completePersonaAuthorize(raw: string): Promise<{ ok: boolean; error?: string }> {
   try {
+    // 从粘贴的 URL 里提取 state（与 code 同源同段；只粘 code 时提取不到、不传）
+    const stateMatch = /[?&]state=([^&\s]+)/.exec(raw)
+    const state = stateMatch?.[1]
     const res = await fetch("/api/v1/persona/authorize/complete", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ code: raw }),
+      body: JSON.stringify({ code: raw, ...(state ? { state } : {}) }),
     })
     const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
     return { ok: res.ok && body.ok !== false, ...(body.error ? { error: body.error } : {}) }
@@ -346,6 +382,33 @@ export function renderPersonaPanel(host: HTMLElement, snapshot: PersonaStateView
     ),
   )
   host.appendChild(pSec)
+
+  // ── 5. 派活（driver 派出去的独立工作会话）──
+  // 五面里唯一原先无 UI 的一环：后端快照一直有 workers，不渲染就成了盲区——
+  // 「人格说查了但没结果」时，这里能直接看到活是 running/failed/cancelled。
+  const running = snapshot.workers.filter((w) => w.status === "running").length
+  const wSec = section(`派活（在跑 ${running}）`)
+  if (!snapshot.workers.length) {
+    wSec.appendChild(blockLine("还没有派过活。driver 週到耗时任务时会用 worker_dispatch 派出去，结论会作为事件回到它。"))
+  } else {
+    const wList = el("div", "settings-list")
+    for (const w of snapshot.workers.slice(0, 20)) {
+      const row = el("div", "settings-row")
+      const info = el("div", "settings-row-info")
+      const seconds = w.elapsedMs !== undefined ? `${Math.round(w.elapsedMs / 1000)}s` : `${Math.max(0, Math.round((Date.now() - w.startedAt) / 1000))}s`
+      info.append(
+        el("div", "settings-row-name", `${w.label ?? w.runId} · ${w.personaId}/${w.driverId}`),
+        el("div", "settings-row-desc", `${w.status} · ${seconds} · ${new Date(w.startedAt).toLocaleTimeString("zh-CN")}`),
+      )
+      row.appendChild(info)
+      row.appendChild(
+        w.status === "running" ? badge("在跑", "ok") : w.status === "done" ? badge("完成", "ok") : w.status === "cancelled" ? badge("已叫停", "warn") : badge("失败", "bad"),
+      )
+      wList.appendChild(row)
+    }
+    wSec.appendChild(wList)
+  }
+  host.appendChild(wSec)
 }
 
 function blockLine(text: string): HTMLElement {

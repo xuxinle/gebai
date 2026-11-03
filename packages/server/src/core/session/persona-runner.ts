@@ -32,6 +32,8 @@ import type { PersonaRunInput, PersonaRunner } from "@gebai/persona"
 /** 引擎面（只声明 runner 需要的部分，便于单测）。 */
 export interface PersonaEnginePort {
   isRunning(sessionId: string): boolean
+  /** 取消一个正在跑的任务（用户停止按钮同款路径：abort + 解开全部挂起等待）。 */
+  cancel(sessionId: string): void
   run(
     sessionId: string,
     user: string,
@@ -102,8 +104,8 @@ export function personaNote(input: PersonaRunInput, now = Date.now()): string {
   lines.push(`1. **要回复谁就自己发**：用 \`act(to:"<渠道>:<地址>", verb:"send", args:{text:"…", as_user:true})\` 把话发出去。`)
   lines.push("   事件里的 `refs.chatId` / `refs.messageId` 就是收件地址与可引用回复的原消息。")
   lines.push("   **只写在正文里的回复没有任何人能看到。**")
-  lines.push("   `as_user: true` 让你以用户本人（而不是机器人）的名义发言——群里看到的是「你」在说话。")
-  lines.push("   若用户授权失效（报错里会直说），改 `as_user: false` 以机器人名义发，或在界面完成授权后重试。")
+  lines.push("   `as_user: true` 让你以用户本人（而不是机器人）的名义发言——群里看到的是「你」在说话。这是唯一允许的发送名义。")
+  lines.push("   若用户授权失效（报错里会直说），**不要改用机器人名义发，也不要反复重试**——授权完成后会自动恢复；期间需要对外说明时，等用户重新完成授权后再发。")
   lines.push("2. **不需要回复就什么都不做**：判断后直接结束是合法的，不要为了「有产出」而发消息。")
   lines.push("3. **不确定时宁可先说清楚**：需要人确认的时候，发消息问，不要自己猜测执行。")
   lines.push("4. 你只能看到**本轮**的这几个事件；更早的上下文在会话历史里。")
@@ -213,10 +215,29 @@ export class EnginePersonaRunner implements PersonaRunner {
     )
 
     // ④ 交给引擎。channelNote 承载人格身份与出站纪律——engine 无需任何 persona 分支
-    await this.engine.run(input.sessionId, input.user, prompt, {
-      channelNote: personaNote(input),
-      ...(attachments.length ? { attachments } : {}),
-      ...(this.autoApprove ? { autoApprove: true } : {}),
-    })
+    //
+    // 取消桥（signal → engine.cancel）：engine.run 没有 signal 入参（任务自管 controller），
+    // 调度器的 cancelRunning/stop 置位的 abort 若无人消费，正在跑的引擎轮会完整执行完
+    // （可能长达数分钟、含对外动作）——「停了但还在动」。这里监听 signal，触发时走
+    // engine.cancel（与用户停止按钮同一条路径：abort + 解开审批/选择等挂起等待），
+    // 引擎轮得以尽快退出；监听器用完即摘，不残留。
+    const onAbort = () => {
+      try {
+        this.engine.cancel(input.sessionId)
+        this.log?.info(`[persona:runner] ${input.personaId}/${input.driver.id} 的引擎轮已被取消（signal abort → engine.cancel）`)
+      } catch (err) {
+        this.log?.warn(`[persona:runner] 取消引擎轮失败（${input.sessionId}）: ${String((err as Error)?.message || err)}`)
+      }
+    }
+    input.signal.addEventListener("abort", onAbort, { once: true })
+    try {
+      await this.engine.run(input.sessionId, input.user, prompt, {
+        channelNote: personaNote(input),
+        ...(attachments.length ? { attachments } : {}),
+        ...(this.autoApprove ? { autoApprove: true } : {}),
+      })
+    } finally {
+      input.signal.removeEventListener("abort", onAbort)
+    }
   }
 }

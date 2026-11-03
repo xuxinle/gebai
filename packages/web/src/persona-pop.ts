@@ -80,7 +80,9 @@ export function bindPersonaPop(): void {
   })
   void (async () => {
     const snapshot = await fetchPersonaState().catch(() => null)
-    if (!snapshot) return // 未启用：按钮保持隐藏
+    if (!snapshot) return // 真未启用：按钮保持隐藏
+    // 装配失败（带 setupError 的空快照）也要亮出按钮：那是「开了但坏了」——
+    // 隐藏入口等于把失败藏起来，用户只能翻启动日志。
     btn.hidden = false
     // 启动时就把**待授权提示点**点亮。
     //
@@ -165,6 +167,8 @@ async function refresh(force = false): Promise<void> {
   refs.body.innerHTML = ""
   if (snapshot.setupError) {
     refs.body.appendChild(el("div", "persona-pop-error", `拟人装配失败（服务仍正常运行）：${snapshot.setupError}`))
+    // 装配失败时其余段落都是空快照的占位，不再渲染面板骨架——失败原因就是全部信息
+    return
   }
   renderPersonaPanel(refs.body, snapshot, () => {
     void refresh(true)

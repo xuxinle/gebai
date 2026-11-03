@@ -80,14 +80,12 @@ export class PersonaRuntime {
    */
   private readonly driverSessions = new Map<string, string>()
   private readonly log?: PersonaLogger
-  private readonly now: () => number
   private readonly fanoutConcurrency: number
   private started = false
 
   constructor(private readonly opts: PersonaRuntimeOptions) {
     this.dedupe = new EventDedupe(opts.dedupeCapacity ?? DEFAULT_DEDUPE_CAPACITY)
     this.log = opts.log
-    this.now = opts.now ?? Date.now
     this.fanoutConcurrency = Math.max(1, opts.fanoutConcurrency ?? DEFAULT_FANOUT_CONCURRENCY)
   }
 
@@ -146,7 +144,17 @@ export class PersonaRuntime {
 
     const deliveries: PersonaDelivery[] = []
     for (const [key, entry] of perDriver) {
-      const d = await this.enqueueRound(key, entry.target, entry.events)
+      let d: PersonaDelivery
+      try {
+        d = await this.enqueueRound(key, entry.target, entry.events)
+      } catch (err) {
+        // 单 driver 异常不得让整批中断（后续 driver 的已 admit 幂等位会泄漏、
+        // 已完成的投递结果也全部丢失）：记为该 driver 的失败投递，其余照常。
+        const reason = String((err as Error)?.message || err)
+        this.bump(key, "failed")
+        this.log?.warn(`[persona:${key}] 批量投递异常: ${reason}`)
+        d = { personaId: entry.target.personaId, driverId: entry.target.driver.id, status: "unavailable", reason }
+      }
       // 整批同轮入队：一个没接管就全批撤回（否则下次重投只回来一半事件，上下文不完整）
       if (d.status !== "accepted") for (const id of entry.dedupeIds) this.dedupe.revoke(id)
       deliveries.push(d)
@@ -306,11 +314,22 @@ export class PersonaRuntime {
       this.bump(key, "deduped")
       return { personaId: t.personaId, driverId: t.driver.id, status: "duplicate", reason: `driver ${key} 已处理过事件 ${event.id}` }
     }
-    const delivery = await this.enqueueRound(key, t, [{ ...event, personaId: t.personaId }])
-    // 只有「确实已接管」才算处理过；其余（队列满 / 会话解析失败 / driver 已停）一律撤回，
-    // 让源的重投能真正被接住。
-    if (delivery.status !== "accepted") this.dedupe.revoke(dedupeId)
-    return delivery
+    try {
+      const delivery = await this.enqueueRound(key, t, [{ ...event, personaId: t.personaId }])
+      // 只有「确实已接管」才算处理过；其余（队列满 / 会话解析失败 / driver 已停）一律撤回，
+      // 让源的重投能真正被接住。
+      if (delivery.status !== "accepted") this.dedupe.revoke(dedupeId)
+      return delivery
+    } catch (err) {
+      // **抛异常分支同样必须撤回**：schedulerFor / enqueueMany 同步抛错（如非法额度）
+      // 时若不 revoke，该 id 被永久占位，源重投被判 duplicate 静默丢弃——
+      // 与「返回非 accepted」同一条纪律，此分支原先缺失。
+      const reason = String((err as Error)?.message || err)
+      this.dedupe.revoke(dedupeId)
+      this.bump(key, "failed")
+      this.log?.warn(`[persona:${key}] 投递异常（已撤回幂等位，重投可被接住）: ${reason}`)
+      return { personaId: t.personaId, driverId: t.driver.id, status: "unavailable", reason }
+    }
   }
 
   /** 把一批事件投进某个 driver（同一轮）。 */
@@ -408,6 +427,19 @@ export class PersonaRuntime {
       maxConcurrent,
       ...(this.opts.queueLimit !== undefined ? { queueLimit: this.opts.queueLimit } : {}),
       ...(this.opts.maxRounds !== undefined ? { maxRounds: this.opts.maxRounds } : {}),
+      // 外部占用预检（K2）：用户手动对 driver 常驻会话发起任务期间，事件留在队列
+      // 而不是 launch 后被引擎拒掉、首批丢失。isRunning 是引擎的权威回答。
+      ...(typeof this.opts.runner.isRunning === "function"
+        ? {
+            isSessionBusy: (sessionId: string) => {
+              try {
+                return this.opts.runner.isRunning(sessionId)
+              } catch {
+                return false
+              }
+            },
+          }
+        : {}),
       ...(this.log ? { log: this.log } : {}),
       execute: async ({ events, sessionId, user, signal, round, mailbox }) => {
         const identity = this.opts.lookup.get(personaId)
@@ -463,7 +495,6 @@ export class PersonaRuntime {
     const c = this.counters.get(key) ?? { accepted: 0, deduped: 0, overflowed: 0, failed: 0 }
     c[k]++
     this.counters.set(key, c)
-    void this.now
   }
 }
 

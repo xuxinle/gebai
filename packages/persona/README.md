@@ -140,7 +140,7 @@ credentials.ts / oauth.ts / user-token.ts   飞书进程级用户凭据
 ## 验证
 
 ```bash
-cd packages/persona && bun test        # 245 用例
+cd packages/persona && bun test        # 301 用例
 bun x tsc --noEmit                     # 类型检查
 ```
 
@@ -168,6 +168,17 @@ cd packages/server && bun test src/core/session/persona-driver-tools.test.ts \
 （跨会话插队）与死代码（不可达分支），已修。这类「测试绿但没守住」的情形是反向验证的唯一
 判据来源。
 
+**2026-11 全面审查补录**：三处「清单之外」的同类盲区（均已有专项用例钉住）：
+
+| 变异 | 结果 |
+|---|---|
+| abort 路径不 requeue 信箱残留（cancelRunning/stop 后插话蒸发，幂等位已占致重投也丢） | ✓ 杀（新增：取消路径的信箱归宿） |
+| launch 失败丢弃首批（引擎拒绝/执行异常时事件随 shift 消失） | ✓ 杀（新增：按原 seq 放回队首 + 尝试上限） |
+| stop→start 世代串扰（旧 finally 误删新运行表项 → 同会话双 launch） | ✓ 杀（新增：世代号比对） |
+| 外部占用不预检（isRunning 定义了无人调用 → 首批丢失） | ✓ 杀（新增：isSessionBusy 预检 + 接线） |
+| 投递路径抛异常不 revoke 幂等位 / 单 driver 异常中断整批 | ✓ 杀（新增：异常护栏） |
+| 订阅语法静态定义零校验 / 动态另有一套两段式规则 | ✓ 杀（收敛到 validateSubscription 唯一实现） |
+
 ### 取消接口的入参链（改这里时注意）
 
 `PersonaScheduler` 的表按 **sessionId** 建（`Map<sessionId, AbortController>`），而对外接口按
@@ -175,11 +186,21 @@ cd packages/server && bun test src/core/session/persona-driver-tools.test.ts \
 接起来——少了它，`cancelRunning` / `cancelWaiting` 永远查不到东西（形同死代码，
 表现为「人格卡在长任务上无法取消」）。两个接口都有专项用例看 `signal` 是否真的 abort。
 
+取消的**三层链路**（2026-11 补齐，任一环断都是「停了但还在动」）：
+
+1. 调度器 abort signal（`cancelRunning`/`stop`）——信箱与已 drain 残留统一 requeue（不蒸发）；
+   且 requeue 的事件**不在同一次 finally-pump 里捞起**（否则「取消了又马上重跑」，取消形同虚设），
+   等下一个自然触发点（新事件入队/其它运行收尾）再接起
+2. runner 取消桥（`EnginePersonaRunner`）：监听 signal，触发时调 `engine.cancel(sessionId)`
+   ——`engine.run` 没有 signal 入参（任务自管 controller），没有这层桥则引擎轮会完整跑完
+3. engine.cancel：置 cancelled + abort + 解开审批/选择等挂起等待（用户停止按钮同路径）
+
 ### 幂等记账的时机（改这里时注意）
 
-投递链路是「先 `dedupe.admit` 记账，后入队」，入队可能失败（存储瞬时不可达 / 队列已满）。
-**失败必须 `revoke` 撤回**：否则该事件 id 被永久占位，源按规范重投会被判 `duplicate`
-静默丢弃——违反「FIFO 且不丢」。
+投递链路是「先 `dedupe.admit` 记账，后入队」，入队可能失败（存储瞬时不可达 / 队列已满 /
+**投递链抛异常**）。**失败必须 `revoke` 撤回**：否则该事件 id 被永久占位，源按规范重投会被
+判 `duplicate` 静默丢弃——违反「FIFO 且不丢」。「返回非 accepted」与「抛异常」两个分支都
+有护栏（后者是 2026-11 审查补上的）。
 
 ### 两条路径都有界（插话信箱与待跑队列）
 

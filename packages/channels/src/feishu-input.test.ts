@@ -70,7 +70,7 @@ function stubFeishuFetch(): () => void {
 function makeRegistry(
   home: string,
   env: Record<string, string>,
-  opts: { withConn?: boolean; sessionAppId?: string; extraDeps?: Record<string, unknown> } = {},
+  opts: { withConn?: boolean; sessionAppId?: string; sessionBotEnabled?: boolean; extraDeps?: Record<string, unknown> } = {},
 ): { reg: ChannelRegistry; conns: FakeConn[]; events: IngressEvent[] } {
   const conns: FakeConn[] = []
   const events: IngressEvent[] = []
@@ -99,7 +99,12 @@ function makeRegistry(
               }
             },
           }),
-      ...(opts.sessionAppId ? { feishuSessionAppId: opts.sessionAppId } : {}),
+      ...(opts.sessionAppId
+        ? {
+            feishuSessionAppId: opts.sessionAppId,
+            ...(opts.sessionBotEnabled !== undefined ? { feishuSessionBotEnabled: opts.sessionBotEnabled } : {}),
+          }
+        : {}),
       ...(opts.extraDeps ?? {}),
     },
     log: { info: () => {}, warn: () => {}, error: () => {} },
@@ -174,6 +179,24 @@ describe("凭据：独立机器人，不回落 GEBAI_FEISHU_*", () => {
     expect(st.started).toBe(false)
     expect(st.error ?? "").toContain("两条长连接")
     expect(st.error ?? "").toContain("互踢")
+    await reg.stop()
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("同 AppID 但会话机器人已停用（feishuSessionBotEnabled=false）→ 不误拒：bot 不建长连接，无互踢可言", async () => {
+    // 场景：部署把会话机器人关了，渠道接管同一个应用（本仓库当前 .env 即此形态）。
+    // 旧检查不看 bot 是否启用，同 AppID 一律拒——渠道起不来、拟人全哑，还让人误以为互踢。
+    const home = mkdtempSync(join(tmpdir(), "fs-clash-off-"))
+    const { reg } = makeRegistry(
+      home,
+      { ...CREDS, GEBAI_CHANNELS_FEISHU_APP_ID: "cli_same_app" },
+      { sessionAppId: "cli_same_app", sessionBotEnabled: false },
+    )
+    await reg.init()
+    const st = reg.state().find((s) => s.name === "feishu")!
+    console.log(`    实测: started=${st.started} error=${st.error}`)
+    expect(st.started).toBe(true)
+    expect(st.error ?? "").not.toContain("互踢")
     await reg.stop()
     rmSync(home, { recursive: true, force: true })
   })

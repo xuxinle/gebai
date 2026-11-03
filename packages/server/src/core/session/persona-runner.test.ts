@@ -36,10 +36,15 @@ interface Call {
 
 function makeEngine(opts: { running?: boolean; throwOnRun?: Error } = {}) {
   const calls: Call[] = []
+  const cancelled: string[] = []
   return {
     calls,
+    cancelled,
     engine: {
       isRunning: () => opts.running ?? false,
+      cancel(sessionId: string) {
+        cancelled.push(sessionId)
+      },
       async run(sessionId: string, user: string, prompt: string, o?: Record<string, unknown>) {
         if (opts.throwOnRun) throw opts.throwOnRun
         calls.push({ sessionId, user, prompt, opts: o })
@@ -213,14 +218,36 @@ describe("EnginePersonaRunner：只经既有 channelNote 注入", () => {
   })
 
   test("autoApprove 可控：默认 true（无人值守没人守审批卡）", async () => {
-    const a = makeEngine()
-    await new EnginePersonaRunner({ engine: a.engine }).run(runInput())
-    expect(a.calls[0]!.opts?.autoApprove).toBe(true)
+  const a = makeEngine()
+  await new EnginePersonaRunner({ engine: a.engine }).run(runInput())
+  expect(a.calls[0]!.opts?.autoApprove).toBe(true)
 
-    const b = makeEngine()
-    await new EnginePersonaRunner({ engine: b.engine, autoApprove: false }).run(runInput())
-    expect(b.calls[0]!.opts?.autoApprove).toBeUndefined()
-  })
+  const b = makeEngine()
+  await new EnginePersonaRunner({ engine: b.engine, autoApprove: false }).run(runInput())
+  expect(b.calls[0]!.opts?.autoApprove).toBeUndefined()
+})
+
+ test("取消桥：signal abort → engine.cancel（调度器 cancelRunning/stop 能真正停下引擎轮）", async () => {
+  const ctl = new AbortController()
+  const { engine, cancelled } = makeEngine()
+  // engine.run 期间 abort：监听器必须在 run 挂起时已装好（先注册后 run）
+  engine.run = async () => {
+    ctl.abort()
+    await new Promise((r) => setTimeout(r, 10))
+  }
+  await new EnginePersonaRunner({ engine }).run(runInput({ signal: ctl.signal }))
+  expect(cancelled).toEqual(["sess-1"])
+ })
+
+ test("取消桥：正常完成不 cancel，监听器用完即摘（不残留）", async () => {
+  const ctl = new AbortController()
+  const { engine, cancelled } = makeEngine()
+  await new EnginePersonaRunner({ engine }).run(runInput({ signal: ctl.signal }))
+  expect(cancelled).toEqual([])
+  // run 结束后同一 signal 再 abort：不再触发 cancel（监听器已移除）
+  ctl.abort()
+  expect(cancelled).toEqual([])
+ })
 })
 
 describe("EnginePersonaRunner：事件合批与附件", () => {

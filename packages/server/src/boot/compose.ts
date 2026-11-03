@@ -418,6 +418,8 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   let personaAuthCardSync: ((status: import("@gebai/persona").PersonaCredentialStatus) => Promise<void>) | null = null
   /** 面板点「去授权」时的主动推送通路（令牌请求主通路）；未启用时为 null。 */
   let personaPushAuthCard: (() => Promise<{ ok: boolean; delivered: boolean; url?: string; error?: string }>) | null = null
+  /** 凭据块的到期提醒定时器：运行时块回滚时要清掉（否则每 5 分钟空抛一次，无声）。 */
+  let personaExpiryTimer: ReturnType<typeof setInterval> | null = null
   // 人格出站治理依赖（act 的 feishu 发送审核）：engine 构造在 persona 装配之前，
   // 用可变容器桥接（persona 块就绪后填充；未启用拟人时保持空——未注入时审核环节
   // 如实拒绝，与「拟人未启用则无人格会话」自洽）。
@@ -520,13 +522,17 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       // 授权完成/撤销 → 同步相期上的卡
       onChange: (status) => void syncAuthCard(status),
     })
+    // 闭包一律读这个捕获引用（而不是上面那个可空变量）：运行时块装配失败时会把
+    // personaCredentials 置 null，但凭据对象本身仍有效（channels deps 也持着它）。
+    // 读可空变量的闭包在置 null 后变成静默炸（TypeError 被 catch 吞掉，授权卡哑掉）。
+    const creds = personaCredentials
     // 面板点「去授权」时的主动推送通路（与启动/定时推送共用同一张卡的 id，不重复推）。
     //
     // 为何需要单独一条路：syncAuthCard 只在启动与 5 分钟定时器里被调，
     // 用户“现在就想让它弹到桌面上”时无入口。相期是常驻窗口，
     // 比任何网页提示都难被忽略——这正是令牌请求应该去的地方。
     personaPushAuthCard = async () => {
-      const status = await personaCredentials!.status()
+      const status = await creds.status()
       const before = personaAuthCardId
       await syncAuthCard(status)
       return {
@@ -565,7 +571,7 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       },
     }
     personaOutboundDeps.pushAuthCard = async () => {
-      const status = await personaCredentials!.status()
+      const status = await creds.status()
       await syncAuthCard(status)
     }
     // 相期不可用时的自动重启与连接探针（供出站审核恢复闭环）：
@@ -586,7 +592,7 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       }
     }
     // 启动检查（不吐令牌明文，只报状态）
-    const cred = await personaCredentials.status()
+    const cred = await creds.status()
     if (cred.ready) {
       log.info(`[gebai] 飞书凭据就绪：${cred.message}${cred.remainingMs ? `（剩 ${Math.round(cred.remainingMs / 60000)} 分钟）` : ""}`)
     } else if (cred.authorizeUrl) {
@@ -610,11 +616,11 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
      *
      * 提前量取 10 分钟：足够用户看到卡、拉起手机扫码，又不至于早到“看着还早就不管了”。
       */
- const personaExpiryTimer = setInterval(
+ personaExpiryTimer = setInterval(
       () => {
         void (async () => {
           try {
-            const st = await personaCredentials!.status() // status() 会顺带尝试刷新
+            const st = await creds.status() // status() 会顺带尝试刷新
             // 判定全在 persona-expiry 里（纯函数，单测钉住）：
             // 能刷的在这里已被透明续掉，刷不了才会落到临期/过期提醒。
             const decision = decideExpiry(st.ready, st.remainingMs)
@@ -694,7 +700,10 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
           onEvent: (ev) => o.onEvent(ev as Record<string, unknown>),
           log: (m) => log.info(`[channels:feishu] ${m}`),
         }),
-      ...(config.feishuAppId ? { feishuSessionAppId: config.feishuAppId } : {}),
+      // 会话机器人 AppID + 是否启用：渠道据此检测「与自己的 AppID 撞车」并拒绝启动
+      //（同一飞书应用只能一条长连接，同时用会互踢，表现为其中一边偶发收不到消息）。
+      // enabled 必须一起传：bot 停用时同 AppID 不构成冲突（渠道侧只在启用时才判撞）。
+      ...(config.feishuAppId ? { feishuSessionAppId: config.feishuAppId, feishuSessionBotEnabled: config.feishuBotEnabled } : {}),
       // 自发送消息记账（防回灌，与人格事件源共享同一实例）
       sentMessages,
       // 拟人凭据（feishu 渠道的 `as_user=true` 用它以用户本人名义发消息）；未启用时为 null
@@ -1101,6 +1110,18 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       personaSessions = null
       personaCredentials = null
       personaState = null
+      // 回滚其余挂着闭包的引用（「回滚必须彻底」不止于上面几个变量）：
+      // - 导出闭包不清 → REST /authorize 仍会推卡（半装配态不该再有对外动作面）
+      // - 定时器不清 → 每 5 分钟对已置空的变量空抛一次（catch 吞掉、无日志，授权卡哑掉）
+      //   （凭据块若成功，闭包已改读捕获的 creds 引用、不受置 null 影响；这里清的是
+      //    「运行时已回滚」场景下不该继续跑的到期提醒）
+      personaPushAuthCard = null
+      personaAuthCardSync = null
+      if (personaExpiryTimer) {
+        clearInterval(personaExpiryTimer)
+        personaExpiryTimer = null
+      }
+      personaOutboundDeps.pushAuthCard = undefined
       log.error(
         `[gebai] 拟人模式装配失败（服务继续启动，主界面不受影响）：${message}\n` +
           `  已回滚为「拟人未启用」：入站事件只记日志。修好后重启即可，或设 GEBAI_PERSONA=false 显式关闭。`,
@@ -1146,6 +1167,8 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       appId: () => process.env.FEISHU_BOT_APP_ID || process.env.GEBAI_FEISHU_APP_ID,
       appSecret: () => process.env.FEISHU_BOT_APP_SECRET || process.env.GEBAI_FEISHU_APP_SECRET,
       sessionBot: () => ({ enabled: config.feishuBotEnabled, ...(config.feishuAppId ? { appId: config.feishuAppId } : {}) }),
+      // 渠道面互检：渠道已用同一应用建长连接时本源不再建（三处两两互检的第三对）
+      channelAppId: () => process.env.GEBAI_CHANNELS_FEISHU_APP_ID,
       makeConn: (o) =>
         new FeishuConn({
           appId: o.appId,

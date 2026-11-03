@@ -29,6 +29,13 @@
  * - `start` 立即 resolve（长驻连接由宿主持有，本源只注册回调）
  * - 状态全在 `start` 闭包里（多实例/热加载/测试并行都不串扰）
  * - 幂等键用飞书消息 id（各源重投是常态）
+ *
+ * ## 多实例与清理器（见下方 `cleanups` 注释）
+ *
+ * `stop()` 无参数、`def` 禁挂字段，清理器只能放模块级栈。manager 的热加载路径
+ * 保证 stop→start 顺序（`source-manager.refreshIfChanged`），但多 manager 实例
+ * （测试并行等）可能连续两次 start 不 stop——本源在 start 时自防御：若栈里
+ * 有残留清理器先执行它，防连接泄漏（同一应用只能一条长连接，泄漏即互踢）。
  */
 
 import type { EventSourceContext, EventSourceDef, IngressEvent } from "../source"
@@ -114,7 +121,14 @@ export function renderHistory(
   return `\n\n${head}\n${lines.join("\n")}`
 }
 
-/** 清理器栈（每次 start 压一个闭包；`stop()` 无参数，弹最近一个）——见 docs/event-sources.md §5。 */
+/**
+ * 清理器栈（每次 start 压一个闭包；`stop()` 无参数，弹最近一个）——见 docs/event-sources.md §5。
+ *
+ * 多实例防御：连续两次 start 不 stop 时（多 manager 实例、测试并行——README 明说
+ * 不支持但真实发生），新 start 先弹出并执行栈中残留清理器——否则旧连接永远无人 stop，
+ * 对「同一应用只能一条长连接」的飞书即泄漏互踢。正常路径（manager 保证 stop→start）
+ * 栈为空，此防御零开销。
+ */
 const cleanups: Array<() => void> = []
 
 export const source: EventSourceDef = {
@@ -221,10 +235,17 @@ export const source: EventSourceDef = {
           }
           // 发送者姓名（尽力而为）：优先群成员表（宿主注入了 chatId 上下文），contact 兜底。
           // 查不到（无权限/接口失败）时 body 兜底标「用户」——模型至少知道这条是别人发的。
-          const senderName =
-            msg.senderId && typeof ctx.deps.feishuUserName === "function"
-              ? await (ctx.deps.feishuUserName as (id: string, chatId?: string) => Promise<string | undefined>)(msg.senderId, msg.chatId)
-              : undefined
+          // 姓名是锦上添花，不能拿到一票否决权：查询抛错只记 warn，本条照投
+          //（与上方读历史失败不阻断同款纪律——单条消息处理失败不断流）。
+          let senderName: string | undefined
+          if (msg.senderId && typeof ctx.deps.feishuUserName === "function") {
+            try {
+              senderName = await (ctx.deps.feishuUserName as (id: string, chatId?: string) => Promise<string | undefined>)(msg.senderId, msg.chatId)
+            } catch (err) {
+              ctx.log("warn", `查发送者姓名失败（本条照投，姓名降级）: ${String((err as Error)?.message || err)}`)
+              senderName = undefined
+            }
+          }
           const who = senderName?.trim() ? `${senderName}：` : "用户："
           const isGroup = msg.chatType !== "p2p"
           const ingress: IngressEvent = {
@@ -252,6 +273,32 @@ export const source: EventSourceDef = {
       },
     })
 
+    // 先启动成功、再登记清理器：start 抛错（连接超时/鉴权失败）时 manager 不会调 stop，
+    // 先入栈会留下孤儿清理器 + 半建连接无人释放（对同一应用只能一条长连接的飞书
+    // 即泄漏互踢）。start 失败时自己尝试 stop 半建连接，异常吞掉（已注定失败）。
+    try {
+      await conn.start()
+    } catch (err) {
+      try {
+        conn.stop()
+      } catch {
+        /* 半建连接的停止异常无须上抛 */
+      }
+      conn = null
+      throw err
+    }
+
+    // 多实例自防御：栈里有残留（上一实例未 stop）先执行掉，防连接泄漏（见 cleanups 注释）。
+    // 正常路径（manager 保证 stop→start）栈为空，零开销。
+    while (cleanups.length > 0) {
+      try {
+        cleanups.pop()?.()
+        ctx.log("warn", "检测到上一实例未 stop，已先释放其资源（多实例并行启动不受支持，依赖 manager 的 stop→start 顺序）")
+      } catch {
+        /* 旧实例清理失败不阻断新实例 */
+      }
+    }
+
     cleanups.push(() => {
       stopped = true
       try {
@@ -262,7 +309,6 @@ export const source: EventSourceDef = {
       conn = null
     })
 
-    await conn.start()
     ctx.log("info", `飞书消息源已启动（历史回看 ${historyLimit} 条${historyLimit > 0 ? `，用户身份优先=${useUser}` : ""}）`)
   },
 
