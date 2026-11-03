@@ -528,11 +528,47 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "颜色管线接入后的视觉对照：同一场景新旧两条输出链各落一张 PNG + 亮度/过曝统计"
     },
+    "constraint_rot_probe": {
+      "kind": "executable",
+      "sources": ["tools/constraint_rot_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "约束 connect 旋转的互逆性验证（+Y 指向方向向量）"
+    },
+    "constraint_e2e_probe": {
+      "kind": "executable",
+      "sources": ["tools/constraint_e2e_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "约束解算端到端：attach 链/connect 数值直读 + serialize 对照"
+    },
+    "constraint_lamp_probe": {
+      "kind": "executable",
+      "sources": ["tools/constraint_lamp_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "约束渲染验证：台灯 attach/connect 装配 + 台面升高联动 + 错误报路"
+    },
+    "constraint_connect_probe": {
+      "kind": "executable",
+      "sources": ["tools/constraint_connect_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "connect 数值直读（调试用）"
+    },
     "scene3d_script_probe": {
       "kind": "executable",
       "sources": ["tools/scene3d_script_probe.cpp"],
       "exclude_sources": ["src/pkg/*"],
       "//note": "用一份 JSON 描述整个三维场景：解析/报错指路/渲染/参数生效/确定性"
+    },
+    "scene_xml_render_probe": {
+      "kind": "executable",
+      "sources": ["tools/scene_xml_render_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "XML 多层场景渲染：层级/父动子动/可见性子树继承/确定性（scene_xml 的像素级验收）"
+    },
+    "scene_xml_showcase_probe": {
+      "kind": "executable",
+      "sources": ["tools/scene_xml_showcase_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "XML 表达力展示：蒸汽朋克差分机（11 种图元/5 层/金属+玻璃+发光/动画四帧）"
     },
     "st_api": {
       "kind": "executable",

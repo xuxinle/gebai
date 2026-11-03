@@ -6428,6 +6428,9 @@ objects[0].raduis：未知字段（objects[] 这一层不认识 "raduis"）；�
 | `scene3d_script` 新增 `objects[].gltf` | 引用外部 `.glb`/`.gltf`（读节点变换与 PBR 材质） |
 | `scene3d_script` 新增 `children`/`parent`/`pivot`/`pivot_at`/`visible`/`group` | 组合模型：父子层级、局部坐标、枢轴、可见性继承 |
 | 裁云 `model3d` 的 `model_shape` | 未知名字不再静默落盒子，而是 WARN + 给可用清单 |
+| `scene_xml`（新增模块） | 场景脚本的 **XML 形态**（与 xml-ui 同构：标签=图元、嵌套=层级、
+属性名与 JSON 逐字同名）；同一份字段契约的第二前端，报错带行号；
+`st_api --check/--normalize/--example --format xml` 自动分派（见 `docs/geometry.md` §4.12.6） |
 
 **验收**：`tests/geom_*.cpp` 三类共 19 条用例 + `tools/primitives_gallery_probe.cpp`
 （22 格总览 PNG + 22 个 `.glb`，实测 22/22 通过、导出文件被自家读取器逐顶点验证）。

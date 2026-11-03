@@ -800,6 +800,73 @@ st_api --check scene.json
 `suggested_camera_distance` 由 fov 反解（`radius / (0.62 * tan(fov/2))`）——
 模型可以直接拿它当相机距离，不必自己推。
 
+### 4.12.6 ⑤ XML 形态：与 xml-ui 同构的第二前端
+
+「用 XML 描述界面」（`docs/xml-ui.md`）之外，三维场景也能用 XML 写了
+（`include/st/raster/scene_xml.hpp`）：**标签 = 图元、嵌套 = 层级、
+属性名与 JSON 字段逐字同名**。
+
+```xml
+<Scene>
+  <Camera eye="0, 0.6, 3.4" target="0, 0, 0" fov="45"/>
+  <Lighting light_from="0.4, 0.8, 0.6" ambient="0.2"/>
+  <Shadow strength="0.45" ground_y="-0.55"/>
+  <Sphere name="head" size="0.9" color="#c8a07a" translate="0, 0.4, 0">
+    <Box name="eye" size="0.08, 0.08, 0.04" translate="0.2, 0.1, 0.85"/>
+  </Sphere>
+  <Animation name="wave" duration="2">
+    <Track node="head" kind="rotation">
+      <Key t="0" value="0, 0, 0" easing="ease-in-out"/>
+    </Track>
+  </Animation>
+</Scene>
+```
+
+**它是同一份契约的第二种序列化前端，不是第二套字段**：类型/范围/默认值/
+常见错误全部来自 `scene_schema.hpp` 唯一真源——XML 只做形态转换，转出的
+Json 走同一个 `parse_scene_spec`。于是：
+
+- 未知属性报错**带行号**（`第 7 行 <Sphere>：未知属性 "raduis"；你是不是想写 radius`）
+  ——行号是 XML 相对 JSON 的独有优势；
+- 24 个图元标签 + 别名（`<Ball>` `<Donut>` …）+ `<Group>`（分组）+
+  `<Object shape="obj:…"/>`（外部引用），大小写宽松；
+- `serialize_scene_xml` 反向输出规范形，XML→spec→XML 往返语义等价
+  （`scene_xml_test` 盯着）；
+- `st_api` 三条入口全部自动分派：`--check f.xml` 按内容识别、
+  `--normalize` XML 进 XML 出、`--example --format xml` 出起步样例。
+
+XML 相对 JSON 的表达优势恰好落在三维场景上：`children` 嵌套在 JSON 里
+是括号地狱，在 XML 里就是标签嵌套；改一个子元素不必重写整个数组。
+两种形态选顺手的用——同一场景两种写法解析出的 SceneSpec 语义等价（测试覆盖）。
+
+### 4.12.7 ⑥ 装配约束：attach / connect / align（声明式，不是手摆坐标）
+
+「零件摆到哪」从手工算坐标变成**引用另一个零件的特征**
+（`include/st/raster/scene_constraints.hpp`）：
+
+```xml
+<Cylinder name="post" attach="top_of:table"/>              <!-- 坐上桌 -->
+<Tube name="cable" connect="lamp_bottom -> table_front"
+      size="0.05, auto"/>                                    <!-- 两点定线 -->
+<Cylinder name="cap" align="axis:main_shaft"/>            <!-- 轴线对齐 -->
+```
+
+- **锚点语法**：`bottom/center/top/left/right/front/back` + `+dx,dy,dz` 偏移；
+  `attach="top_of:plinth+0,0.1,0"` = 贴到 plinth 顶面再抬 0.1。
+- **connect 是两点定线**：中点/朝向（+Y 指向 A→B，四元数最短旋转转 XYZ 欧拉）/
+  长度全部自动；`size` 的 Y 项写 `auto` 则长度 = 两端距离。
+- **解算写回 translate/rotation/size**（解析后建树前，一遍拓扑序、无迭代
+  求解器）：动画/渲染/序列化/glTF 导出零改动；`--normalize` 能看到解算值。
+- **依赖规则**：只能引用先出现的名字（前向引用报错指路）；三种约束互斥；
+  有环必报。与 `pivot_at` 正交（它管「绕哪转」，约束管「摆哪」）。
+
+实测价值（`tools/constraint_lamp_probe.cpp`）：台灯场景只改台面高度一个数，
+立柱/灯罩/灯泡/电缆全部自动跟随（111636 像素联动）；改用约束重写的差分机里，
+压力计管/排气管/张紧轮撑杆不再需要手算长度与角度。
+
+测试：`tests/scene_constraint_test.cpp` 9 条（数值断言/联动/前向引用/互斥/
+auto 误用/锚点解析/旋转互逆/XML 等价与往返）。
+
 ## 4.13 尺寸语义：统一到 `size`（破坏性变更，v2）
 
 ### 4.13.1 旧语义的六个陷阱（全部实测）
@@ -1022,7 +1089,11 @@ cube 的 height 无效、torus 的 radius 是中心线半径）。
 | `tools/fetch_assets.ps1` | 素材获取（Khronos 官方样例，不进仓库） |
 | `tests/llm_readiness_test.cpp` | 大模型可用性 20 条：未知字段（9 层）、清单防漂移、往返一致性、自检 9 类 |
 | `tools/llm_usability_probe.cpp` | 模拟大模型常见错误，量报错质量（静默错误 5 → 0） |
-| `tools/st_api.cpp` | 机读能力清单 / 按形状查尺寸 / 校验自检 / 读入再写出 |
+| `tools/st_api.cpp` | 机读能力清单 / 按形状查尺寸 / 校验自检 / 读入再写出（JSON 与 XML 双形态） |
+| `tests/scene_xml_test.cpp` | XML 形态 14 条：全图元解析与往返、报错带行号与候选、别名与大小写、Group/Object、与 JSON 等价 |
+| `src/raster/scene_constraints.cpp` | 装配约束解算器：锚点语法/attach/connect/align/旋转（四元数→XYZ 欧拉互逆） |
+| `tests/scene_constraint_test.cpp` | 约束 9 条：attach 链数值、联动跟随、connect 中点/长度/旋转、前向引用、互斥、auto 误用、XML 等价 |
+| `tools/constraint_lamp_probe.cpp` | 约束渲染验证：台灯装配 + 台面升高全灯联动（像素级对照） |
 | `tests/geom_size_test.cpp` | 尺寸语义 7 条：9 个形状精确包围盒、旧字段等价、size 优先级 |
 | `tests/geom_scene_integration_test.cpp` | 22 个图元**真的画出像素**、旧形状语义不变、参数生效、导出→读回、焊接/变换/OBJ 往返 |
 | `tools/primitives_gallery_probe.cpp` | 22 格总览 PNG + 每个图元的 `.glb`（可拖进 Blender 对照） |

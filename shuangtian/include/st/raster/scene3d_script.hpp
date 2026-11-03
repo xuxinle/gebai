@@ -261,6 +261,17 @@ struct SceneObjectSpec {
   /// JSON 里没法表达「先画谁」这种顺序依赖，所以用一个字段显式区分，
   /// 由渲染器负责排顺序。
   bool ground{false};
+
+  // ── 装配约束（2026-11-03，声明式：attach / connect / align）──
+  //
+  // 三个字段互斥（同时写两个是建模错误）；解算发生在解析后、建树前，
+  // 结果写回 translate/rotation/size——下游零改动。语义与解算器见
+  // `scene_constraints.hpp`（锚点语法、依赖规则、与 pivot_at 的分工都在那）。
+  std::string attach{};
+  std::string connect{};
+  std::string align{};
+  /// `connect` 时 size 的 Y 项是否自动（写 "auto"）——解算时填真实长度。
+  bool connect_auto_length{false};
 };
 
 /// 一段动画的**脚本层形态**说明（真正的数据结构是 `Clip`，见 `st/raster/animation.hpp`）。

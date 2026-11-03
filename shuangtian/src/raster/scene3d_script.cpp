@@ -6,6 +6,8 @@
 #include "st/raster/animation.hpp"
 #include "st/raster/scene_schema.hpp"
 #include "st/raster/scene_graph.hpp"
+#include "st/raster/scene_constraints.hpp"
+#include "st/raster/mesh_ops.hpp"
 
 #include <set>
 #include "st/raster/primitives.hpp"
@@ -483,6 +485,18 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
   //
   // `size` 接受标量（球类是直径）或数组（按形状定顺序）。
   if (const Json* size_value = json_find(node, "size"); size_value != nullptr) {
+    // `"auto"`（字符串或数组元素）：connect 的自动长度标记——语义在下面
+    // 约束段校验（必须与 connect 同用）；这里放行，解算时填真值。
+    const bool is_auto_string =
+        size_value->is_string() && size_value->get<std::string>() == "auto";
+    std::size_t auto_index = std::size_t(-1);  // 数组里 auto 的位置（本版仅 Y 项=1）
+    if (size_value->is_array()) {
+      for (std::size_t i = 0; i < size_value->size(); ++i) {
+        if ((*size_value)[i].is_string() && (*size_value)[i].get<std::string>() == "auto") {
+          auto_index = i;
+        }
+      }
+    }
     if (size_value->is_number()) {
       obj.size.x = static_cast<float>(size_value->get<double>());
       obj.size_count = 1;
@@ -494,7 +508,7 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
                         size_value->size()));
       }
       for (std::size_t i = 0; i < size_value->size(); ++i) {
-        if (!(*size_value)[i].is_number()) {
+        if (!(*size_value)[i].is_number() && i != auto_index) {
           return st::unexpected(ErrorCode::Parse,
                                 std::format("{}:size[{}]：期望数字，收到 {}", path, i,
                                             json_type_name((*size_value)[i])));
@@ -502,25 +516,33 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
       }
       obj.size.x = static_cast<float>((*size_value)[0].get<double>());
       if (size_value->size() >= 2U) {
-        obj.size.y = static_cast<float>((*size_value)[1].get<double>());
+        obj.size.y = auto_index == 1U
+                         ? 0.0f
+                         : static_cast<float>((*size_value)[1].get<double>());
       }
       if (size_value->size() >= 3U) {
-        obj.size.z = static_cast<float>((*size_value)[2].get<double>());
+        obj.size.z = auto_index == 2U
+                         ? 0.0f
+                         : static_cast<float>((*size_value)[2].get<double>());
       }
       obj.size_count = static_cast<std::uint8_t>(size_value->size());
-    } else {
+    } else if (!is_auto_string) {
       return st::unexpected(ErrorCode::Parse,
                             std::format("{}:size：期望数字或数组，收到 {}", path,
                                         json_type_name(*size_value)));
     }
-    // 尺寸必须为正（0 或负会让几何退化或翻面，且不会报错）
-    for (std::size_t i = 0; i < 3U; ++i) {
-      const float value = (i == 0) ? obj.size.x : ((i == 1) ? obj.size.y : obj.size.z);
-      if (i < obj.size_count && value <= 0.0f) {
-        return st::unexpected(ErrorCode::Parse,
-                              std::format("{}:size[{}]：必须 > 0（收到 {}）；"
-                                          "size 是**全长**，不是半径",
-                                          path, i, value));
+    // 尺寸必须为正（0 或负会让几何退化或翻面，且不会报错）；
+    // auto 占位跳过（解算时填真值）。
+    const bool has_auto = is_auto_string || auto_index != std::size_t(-1);
+    if (!has_auto) {
+      for (std::size_t i = 0; i < 3U; ++i) {
+        const float value = (i == 0) ? obj.size.x : ((i == 1) ? obj.size.y : obj.size.z);
+        if (i < obj.size_count && value <= 0.0f) {
+          return st::unexpected(ErrorCode::Parse,
+                                std::format("{}:size[{}]：必须 > 0（收到 {}）；"
+                                            "size 是**全长**，不是半径",
+                                            path, i, value));
+        }
       }
     }
   }
@@ -577,6 +599,47 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
         ErrorCode::Parse,
         std::format("{}.pivot_at：只接受 {}，收到 \"{}\"", path,
                     st::raster::pivot_preset_names(), obj.pivot_at));
+  }
+  // ── 装配约束（attach/connect/align 互斥；解算在建树前，见 parse_scene_spec）──
+  obj.attach = json_get_string(node, "attach", obj.attach);
+  obj.connect = json_get_string(node, "connect", obj.connect);
+  obj.align = json_get_string(node, "align", obj.align);
+  {
+    int constraint_count = 0;
+    if (!obj.attach.empty()) ++constraint_count;
+    if (!obj.connect.empty()) ++constraint_count;
+    if (!obj.align.empty()) ++constraint_count;
+    if (constraint_count > 1) {
+      return st::unexpected(ErrorCode::Parse,
+                            std::format("{}：attach/connect/align 三选一（同时写多个是建模错误；"
+                                        "复杂关系用分组节点拆分）",
+                                        path));
+    }
+  }
+  // `size` 的 Y 项写 "auto"（字符串或数组元素）：connect 时长度自动 = 两端距离。
+  // 在这里把标志位记下来、占位清零；解算时填真值（serialize 只写真值）。
+  {
+    const Json* size_node = json_find(node, "size");
+    const bool whole_auto =
+        size_node != nullptr && size_node->is_string() &&
+        size_node->get<std::string>() == "auto";
+    bool elem_auto = false;
+    if (size_node != nullptr && size_node->is_array()) {
+      for (const Json& element : *size_node) {
+        if (element.is_string() && element.get<std::string>() == "auto") elem_auto = true;
+      }
+    }
+    if (whole_auto || elem_auto) {
+      obj.connect_auto_length = true;
+      obj.size.y = 0.0f;
+      obj.size_count = std::max<std::uint8_t>(obj.size_count, 2U);
+    }
+    // connect_auto_length 只在 connect 时有意义（别处写 auto 是拼错，报错）
+    if (obj.connect_auto_length && obj.connect.empty()) {
+      return st::unexpected(ErrorCode::Parse,
+                            std::format("{}.size：\"auto\" 只能与 connect 一起用（长度=两端距离）",
+                                        path));
+    }
   }
   if (const Json* child_list = json_find(node, "children"); child_list != nullptr) {
     if (!child_list->is_array()) {
@@ -697,6 +760,210 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
   return obj;
 }
 }  // namespace
+
+/// ── 装配约束解算（解析后、建树前；详见 scene_constraints.hpp）──
+///
+/// 遍历顺序：先序（父与兄先于子）。每解算一个对象，把它的**世界包围盒**
+/// 登记进缓存——后续约束引用它时拿到的已是解算后的位形。
+/// 前向引用在查缓存时自然报错（目标不在缓存里 = 尚未解算）。
+///
+/// ## 为什么世界包围盒增量登记能支撑「父动子动」
+///
+/// 子对象的约束引用父对象时，父的包围盒**含其局部 TRS**；解算发生在建树前，
+/// 所以「世界」在这里等价于「顶层 spec 的展平坐标系」。若约束对象自身有父
+/// （嵌套写法），约定：**约束一律在展平坐标系解算，然后写回顶层 translate**
+/// ——即约束对象的局部 translate 被覆盖为世界值。带变换父的子对象要约束时，
+/// 请用扁平写法（parent 留空、位置全由约束接管）——这条限制刻意保留，
+/// 避免「父变换与约束叠加」的歧义。
+auto solve_constraints(std::vector<SceneObjectSpec>& objects,
+                       const std::string& asset_basis) -> Status {
+  // 名字 → 世界包围盒（已解算部分）。
+  std::map<std::string, st::raster::Bounds> solved_boxes;
+
+  // 单对象的局部包围盒（几何或分组并集；不含自身 TRS——加 TRS 得世界盒）。
+  const auto local_bounds_of = [&asset_basis](auto&& self, const SceneObjectSpec& object)
+      -> st::raster::Bounds {
+    st::raster::Bounds box = st::raster::Bounds::empty();
+    if (!object.group) {
+      SceneObjectSpec probe = object;
+      if (object.shape.rfind("obj:", 0) == 0) {
+        probe.shape = "obj:" + resolve_shape_path(object.shape.substr(4), asset_basis);
+      }
+      if (!object.gltf.empty()) {
+        const std::string reference =
+            object.gltf.rfind("gltf:", 0) == 0 ? object.gltf.substr(5) : object.gltf;
+        probe.shape = "gltf:" + resolve_shape_path(reference, asset_basis);
+      }
+      if (probe.shape.rfind("gltf:", 0) != 0) {
+        if (const auto mesh = build_mesh(probe); mesh.has_value()) {
+          box = st::raster::bounds(*mesh);
+        }
+      }
+    }
+    for (const SceneObjectSpec& child : object.children) {
+      const st::raster::Bounds child_box = self(self, child);
+      if (child_box.is_empty()) continue;
+      const st::raster::SceneNode child_node = to_node(child);
+      const auto matrix = st::raster::local_matrix(child_node);
+      for (int mask = 0; mask < 8; ++mask) {
+        const math::Vec3 corner{(mask & 1) != 0 ? child_box.max.x : child_box.min.x,
+                                (mask & 2) != 0 ? child_box.max.y : child_box.min.y,
+                                (mask & 4) != 0 ? child_box.max.z : child_box.min.z};
+        box = box.union_with(math::Vec3{
+            matrix.value(0, 0) * corner.x + matrix.value(0, 1) * corner.y +
+                matrix.value(0, 2) * corner.z + matrix.value(0, 3),
+            matrix.value(1, 0) * corner.x + matrix.value(1, 1) * corner.y +
+                matrix.value(1, 2) * corner.z + matrix.value(1, 3),
+            matrix.value(2, 0) * corner.x + matrix.value(2, 1) * corner.y +
+                matrix.value(2, 2) * corner.z + matrix.value(2, 3)});
+      }
+    }
+    return box;
+  };
+
+  // 约束解算上下文：查已解算对象的世界锚点/包围盒。
+  const st::raster::ConstraintContext context{
+      .world_bounds_of =
+          [&](const std::string& name) -> std::optional<st::raster::Bounds> {
+            const auto found = solved_boxes.find(name);
+            if (found == solved_boxes.end()) return std::nullopt;
+            return found->second;
+          },
+      .world_anchor_of =
+          [&](const std::string& name,
+              st::raster::AnchorKind anchor) -> std::optional<math::Vec3> {
+            const auto found = solved_boxes.find(name);
+            if (found == solved_boxes.end()) return std::nullopt;
+            return st::raster::anchor_of_bounds(found->second, anchor);
+          },
+  };
+
+  // 先序遍历解算（递归 lambda；每对象：解算自身约束 → 登记世界盒 → 递归子）。
+  const auto walk = [&](auto&& self, SceneObjectSpec& object,
+                        const std::string& path) -> Status {
+    const bool has_constraint =
+        !object.attach.empty() || !object.connect.empty() || !object.align.empty();
+    if (has_constraint) {
+      // 我的局部几何包围盒（锚点差量计算用；未旋转时局部锚点=世界锚点-平移）。
+      const st::raster::Bounds my_box = local_bounds_of(local_bounds_of, object);
+      if (!object.attach.empty()) {
+        // 语法：`[anchor_of:]target[+off]`——锚点词描述【目标】的哪个面
+        //（读作「贴到桌子的顶面」）。我的锚点固定用 bottom（坐上去）
+        // 或 center（用 center_of: 前缀显式写）。
+        std::string target_text = object.attach;
+        st::raster::AnchorKind my_anchor{st::raster::AnchorKind::Bottom};
+        // 前缀 `center_of:`/`bottom_of:`/`top_of:` 出现在**开头**时是我的锚点
+        //（读作「我的中心对准…」）；否则整个串是目标描述（锚点属于目标）。
+        for (const std::string_view word : {"bottom", "center", "top", "left",
+                                            "right", "front", "back"}) {
+          const std::string prefix = std::string(word) + "_to:";
+          if (target_text.rfind(prefix, 0) == 0) {
+            const auto parsed = st::raster::AnchorKind::parse(word);
+            if (parsed) my_anchor = *parsed;
+            target_text = target_text.substr(prefix.size());
+            break;
+          }
+        }
+        const auto target = st::raster::parse_anchor_ref(target_text);
+        if (!target) return st::forward_error(target.error());
+        const st::raster::AnchorRef mine_ref{.anchor = my_anchor, .target = object.name};
+        const auto world_point = st::raster::solve_attach(mine_ref, *target, context);
+        if (!world_point) return st::forward_error(world_point.error());
+        // 差量 = 目标世界点 - 我的锚点局部偏移（约束对象在展平系；translate 直接覆盖）。
+        const math::Vec3 mine_local =
+            my_box.is_empty() ? math::Vec3{} : st::raster::anchor_of_bounds(my_box, my_anchor);
+        object.translate = *world_point - mine_local;
+      } else if (!object.connect.empty()) {
+        // 语法：`A -> B`（箭头分隔两端；每端是 `[anchor_of:]name[+off]`，
+        // 省略 anchor 默认 A=bottom、B=top）。用箭头而不是冒号：
+        // 端内的锚点已经用了冒号（`top_of:lamp`），再用冒号分隔端会歧义。
+        constexpr std::string_view kArrow = " -> ";
+        const auto sep = object.connect.find("->");
+        if (sep == std::string::npos) {
+          return st::unexpected(ErrorCode::Parse,
+                                path + ".connect：要写 \"A -> B\"（箭头分隔两个锚点，"
+                                        "如 \"col_cap -> reactor_base\"）");
+        }
+        const std::string from_text = object.connect.substr(0, sep);
+        const std::string to_text = object.connect.substr(sep + kArrow.size() - 2);
+        const auto trim = [](std::string s) {
+          const auto first = s.find_first_not_of(" \t");
+          const auto last = s.find_last_not_of(" \t");
+          return first == std::string::npos ? std::string{} : s.substr(first, last - first + 1);
+        };
+        const auto from = st::raster::parse_anchor_ref(trim(from_text));
+        if (!from) return st::forward_error(from.error());
+        const auto to = st::raster::parse_anchor_ref(trim(to_text));
+        if (!to) return st::forward_error(to.error());
+        const auto solution = st::raster::solve_connect(*from, *to, context);
+        if (!solution) return st::forward_error(solution.error());
+        object.translate = solution->midpoint;
+        // rotation_deg 是度；spec 内部存弧度（序列化层才转回度——
+        // 与手写 JSON rotation 的解析同一条路）。
+        constexpr float kDeg2Rad = 3.14159265358979323846f / 180.0f;
+        object.rotation = st::math::Vec3{
+            solution->rotation_deg.x * kDeg2Rad,
+            solution->rotation_deg.y * kDeg2Rad,
+            solution->rotation_deg.z * kDeg2Rad};
+        if (object.connect_auto_length) {
+          object.size.y = solution->length;
+          object.size_count = std::max<std::uint8_t>(object.size_count, 2U);
+          object.connect_auto_length = false;  // 已填真值；serialize 写数值
+        }
+      } else if (!object.align.empty()) {
+        // 语法：`axis:target[+off]`（axis 关键字固定）。
+        std::string target_text = object.align;
+        if (target_text.rfind("axis:", 0) == 0) target_text = target_text.substr(5);
+        const auto target = st::raster::parse_anchor_ref(target_text);
+        if (!target) return st::forward_error(target.error());
+        const auto solved = st::raster::solve_align(*target, object.translate.y, context);
+        if (!solved) return st::forward_error(solved.error());
+        object.translate = *solved;
+      }
+    }
+    // 登记我的世界包围盒（含子树、含刚解算的 translate）。
+    {
+      st::raster::Bounds world = st::raster::Bounds::empty();
+      const st::raster::Bounds box = local_bounds_of(local_bounds_of, object);
+      if (!box.is_empty()) {
+        // 旋转/缩放对包围盒的影响：取八角保守包围（约束对象通常轴对齐，
+        // 但 connect 会写旋转——保守包围足够后续 attach 引用）。
+        const st::raster::SceneNode node = to_node(object);
+        const auto matrix = st::raster::local_matrix(node);
+        for (int mask = 0; mask < 8; ++mask) {
+          const math::Vec3 corner{(mask & 1) != 0 ? box.max.x : box.min.x,
+                                  (mask & 2) != 0 ? box.max.y : box.min.y,
+                                  (mask & 4) != 0 ? box.max.z : box.min.z};
+          world = world.union_with(math::Vec3{
+              matrix.value(0, 0) * corner.x + matrix.value(0, 1) * corner.y +
+                  matrix.value(0, 2) * corner.z + matrix.value(0, 3),
+              matrix.value(1, 0) * corner.x + matrix.value(1, 1) * corner.y +
+                  matrix.value(1, 2) * corner.z + matrix.value(1, 3),
+              matrix.value(2, 0) * corner.x + matrix.value(2, 1) * corner.y +
+                  matrix.value(2, 2) * corner.z + matrix.value(2, 3)});
+        }
+      }
+      if (!object.name.empty()) solved_boxes.emplace(object.name, world);
+    }
+    std::size_t child_index = 0;
+    for (SceneObjectSpec& child : object.children) {
+      const auto status = self(self, child,
+                               std::format("{}/{}[{}]", path, child.name, child_index));
+      if (!status) return st::forward_error(status.error());
+      ++child_index;
+    }
+    return st::ok();
+  };
+
+  std::size_t index = 0;
+  for (SceneObjectSpec& object : objects) {
+    const auto status =
+        walk(walk, object, std::format("objects[{}]", index));
+    if (!status) return st::forward_error(status.error());
+    ++index;
+  }
+  return st::ok();
+}
 
 auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
   if (!json.is_object()) {
@@ -1045,6 +1312,23 @@ auto parse_scene_spec(const Json& json) -> Result<SceneSpec> {
       };
       spec.objects.push_back(graft(graft, root));
     }
+  }
+
+  // ── 装配约束解算（解析后、建树前；写回 translate/rotation/size）──
+  //
+  // 顺序：先序遍历（父与兄先于子），每解算一个对象就把它的**世界包围盒**
+  // 登记进缓存——后续约束引用它时拿到的已是解算后的位形。这保证一遍拓扑序
+  // 完成，无迭代；前向引用（引用后面才出现的名字）在查缓存时自然报错。
+  if (std::any_of(spec.objects.begin(), spec.objects.end(), [](const SceneObjectSpec& object) {
+        const auto has = [](auto&& self, const SceneObjectSpec& o) -> bool {
+          return !o.attach.empty() || !o.connect.empty() || !o.align.empty() ||
+                 std::any_of(o.children.begin(), o.children.end(),
+                             [&](const SceneObjectSpec& c) { return self(self, c); });
+        };
+        return has(has, object);
+      })) {
+    const auto status = solve_constraints(spec.objects, spec.asset_basis);
+    if (!status) return st::forward_error(status.error());
   }
   return spec;
 }
