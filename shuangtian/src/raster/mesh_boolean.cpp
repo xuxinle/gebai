@@ -268,7 +268,8 @@ auto mesh_to_polygons(const Mesh& mesh) -> std::vector<Polygon> {
   return polygons;
 }
 
-auto polygons_to_mesh(const std::vector<Polygon>& polygons) -> Mesh {
+auto polygons_to_mesh(const std::vector<Polygon>& polygons, math::Vec3 vertex_color)
+    -> Mesh {
   Mesh mesh;
   std::map<std::tuple<float, float, float>, std::uint32_t> unique;
   const auto emit = [&](const math::Vec3& point, const math::Vec3& normal) {
@@ -276,9 +277,12 @@ auto polygons_to_mesh(const std::vector<Polygon>& polygons) -> Mesh {
     const auto found = unique.find(key);
     if (found != unique.end()) return found->second;
     const std::uint32_t index = static_cast<std::uint32_t>(mesh.vertices.size() / 9U);
+    // 顶点色继承自基体：布尔结果直接用作网格时，颜色必须跟场景里写的
+    // `color` 一致——旧的固定 0.8 灰会让布尔件在画面里是一块中性灰
+    //（实测：塔的底座与楼板全部发灰，与周围暖色调判若两个场景）。
     mesh.vertices.insert(mesh.vertices.end(),
                          {point.x, point.y, point.z, normal.x, normal.y, normal.z,
-                          0.8f, 0.8f, 0.8f});
+                          vertex_color.x, vertex_color.y, vertex_color.z});
     unique.emplace(key, index);
     return index;
   };
@@ -358,6 +362,11 @@ auto boolean(const Mesh& a, const Mesh& b, BooleanOp op, bool check_closed) -> R
 
   std::vector<Polygon> polys_a = mesh_to_polygons(a);
   std::vector<Polygon> polys_b = mesh_to_polygons(b);
+  // 结果顶点色 = 基体首顶点的颜色（布尔不该改变对象的外观色）。
+  const math::Vec3 base_color =
+      a.vertices.size() >= 9U
+          ? math::Vec3{a.vertices[6], a.vertices[7], a.vertices[8]}
+          : math::Vec3{0.8f, 0.8f, 0.8f};
   normalize_winding(polys_a);
   normalize_winding(polys_b);
 
@@ -372,10 +381,10 @@ auto boolean(const Mesh& a, const Mesh& b, BooleanOp op, bool check_closed) -> R
       case BooleanOp::Union: {
         std::vector<Polygon> all = polys_a;
         all.insert(all.end(), polys_b.begin(), polys_b.end());
-        return polygons_to_mesh(all);
+        return polygons_to_mesh(all, base_color);
       }
       case BooleanOp::Subtract:
-        return polygons_to_mesh(polys_a);
+        return polygons_to_mesh(polys_a, base_color);
       case BooleanOp::Intersect:
         return st::unexpected(ErrorCode::Invalid,
                               "布尔 Intersect：两网格包围盒不相交，交集为空");
@@ -427,7 +436,7 @@ auto boolean(const Mesh& a, const Mesh& b, BooleanOp op, bool check_closed) -> R
   if (result.empty()) {
     return st::unexpected(ErrorCode::Invalid, "布尔运算：结果为空（基体被完全去除？）");
   }
-  return polygons_to_mesh(result);
+  return polygons_to_mesh(result, base_color);
 }
 
 auto boolean_chain(std::span<const Mesh> operands, BooleanOp op) -> Result<Mesh> {

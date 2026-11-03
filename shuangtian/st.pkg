@@ -588,6 +588,12 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "新图元渲染验证：型钢四型 / 螺旋楼梯 / 星形十字柱 / 紧固件"
     },
+    "showcase_tower_probe": {
+      "kind": "executable",
+      "sources": ["tools/showcase_tower_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "精美场景：黄昏螺旋观景塔（Part/Use + 布尔 + 楼梯 + 型钢 + 阵列 + 车削）"
+    },
     "expressiveness_fan_probe": {
       "kind": "executable",
       "sources": ["tools/expressiveness_fan_probe.cpp"],

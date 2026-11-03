@@ -31,6 +31,18 @@ namespace {
   return degrees * 3.14159265358979323846f / 180.0f;
 }
 
+/// sRGB 字节 → **线性**浮点颜色（顶点色/材质色在下游全是线性）。
+///
+/// 直接用 `/255` 是错的：那是把 sRGB 值当线性值用，所有颜色会被洗亮。
+[[nodiscard]] auto srgb_to_linear(st::math::Color color) noexcept -> math::Vec3 {
+  const auto channel = [](std::uint8_t value) {
+    const float srgb = static_cast<float>(value) / 255.0f;
+    return srgb <= 0.04045f ? srgb / 12.92f
+                            : std::pow((srgb + 0.055f) / 1.055f, 2.4f);
+  };
+  return math::Vec3{channel(color.r), channel(color.g), channel(color.b)};
+}
+
 /// 弧度 → 度（序列化反向路径用；脚本 → JSON 的序列化尚未接线，函数语义已定型）。
 [[nodiscard]] [[maybe_unused]] constexpr auto to_degrees(float radians) noexcept -> float {
   return radians * 180.0f / 3.14159265358979323846f;
@@ -1505,6 +1517,19 @@ auto build_mesh(const SceneObjectSpec& object) -> Result<Mesh> {
                              current.z > 1e-6f ? target.z / current.z : 1.0f};
       mesh = st::raster::transform(
           mesh, st::math::Mat4::scaling(scale));
+    }
+    // 顶点色统一为对象色：布尔结果的顶点来自各操作体（各自的颜色），
+    // 而场景层只认 `object.color`——不覆盖会出现“同一块板上两种颜色”。
+    //
+    // ⚠ 必须走 sRGB→线性转换：顶点色是**线性**的，而 `object.color` 是
+    // sRGB 字节。直接 `/255` 会把颜色洗亮（#7a6a58 的 0.478 直通，
+    // 正确线性值 0.195）——实测症状：布尔件在画面里是一块发白的浅灰，
+    // 与周围件的包浆色判若两个场景。
+    const math::Vec3 linear = srgb_to_linear(object.color);
+    for (std::size_t i = 0; i + 8 < mesh.vertices.size(); i += 9U) {
+      mesh.vertices[i + 6U] = linear.x;
+      mesh.vertices[i + 7U] = linear.y;
+      mesh.vertices[i + 8U] = linear.z;
     }
     return mesh;
   }

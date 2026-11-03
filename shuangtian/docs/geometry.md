@@ -994,6 +994,21 @@ Extrude 后掠叶片×9 环形阵列——这些形状在只有 24 个原子图�
 测试：`tests/scene_primitive_extra_test.cpp` 6 条（型钢四型截面面积/楼梯
 阶梯增长/星形十字体积关系/紧固件三件套/XML 字段往返/别名解析）。
 
+### 4.12.11 ⑩ 顶点色契约（sRGB vs 线性）
+
+`object.color` 是 **sRGB 字节**，而网格顶点色与材质色在下游全是**线性**浮点。
+两者不能直接 `/255` 互转：
+
+- **布尔结果重新着色时必须过 sRGB→线性**：`#7a6a58` 的 sRGB 归一值是 0.478，
+  而它的线性值只有 0.195。错用直通会把布尔件洗成一块发白的浅灰（实测：
+  塔场景的楼板与底座是一块块中性灰板，与周围暖色件判若两个场景）。
+- 生成器内部（`primitives::linear_color`）已是正确的；场景层后处理（布尔
+  结果的 resize/重新着色）必须用同一转换。
+
+另外：**同一场景里不要放两块 `ground="true"` 平面**——重叠导致大面积
+z-fighting，症状同样是“画面里一块块发亮的灰”（实测灰像素从 13.9% 降到 4.0%
+只靠删掉一块地面）。
+
 测试：`tests/scene_constraint_test.cpp` 9 条（数值断言/联动/前向引用/互斥/
 auto 误用/锚点解析/旋转互逆/XML 等价与往返）。
 
@@ -1231,6 +1246,7 @@ cube 的 height 无效、torus 的 radius 是中心线半径）。
 | `tools/expressiveness_fan_probe.cpp` | 表达能力 showcase：轴流风扇（布尔散热孔 + 车削导流罩 + 挤出叶片阵列） |
 | `tests/scene_primitive_extra_test.cpp` | 型材/楼梯/装饰/紧固件 6 条：截面面积/阶梯增长/体积关系/XML 往返/别名 |
 | `tools/new_primitives_probe.cpp` | 新图元渲染验证：型钢四型 + 螺旋楼梯 + 星形十字 + 紧固件 |
+| `tools/showcase_tower_probe.cpp` | 精美场景：黄昏螺旋观景塔（Part/Use + 布尔开孔 + 楼梯 + 型钢 + 阵列 + 车削 + 装饰） |
 | `tests/geom_size_test.cpp` | 尺寸语义 7 条：9 个形状精确包围盒、旧字段等价、size 优先级 |
 | `tests/geom_scene_integration_test.cpp` | 22 个图元**真的画出像素**、旧形状语义不变、参数生效、导出→读回、焊接/变换/OBJ 往返 |
 | `tools/primitives_gallery_probe.cpp` | 22 格总览 PNG + 每个图元的 `.glb`（可拖进 Blender 对照） |
