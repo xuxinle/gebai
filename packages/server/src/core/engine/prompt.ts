@@ -1,8 +1,10 @@
 /** 系统提示词构建（自 engine.ts 拆分）：总Agent 主提示词（buildSystemPrompt）与子Agent 提示词段落
  *  （buildAgentSection）、动态描述（agentDescription）与项目注记。engine 注入 PromptDeps（项目解析、
  *  AGENTS.md 读取等引擎方法）委托调用。 */
+import { existsSync } from "node:fs"
+import { join } from "node:path"
 import type { PresetProject, SubAgentDef } from "../base/types"
-import { SELF_PROJECT_NAME } from "../tools/projects"
+import { SELF_PROJECT_NAME, SELF_PROJECT_ALIAS } from "../tools/projects"
 import type { ServerConfig } from "../base/config"
 import type { Sandbox } from "../security/sandbox"
 import type { SubAgentManager } from "../agents/subagents"
@@ -122,7 +124,7 @@ export function buildSystemPrompt(deps: PromptDeps, sessionId: string, user: str
     { key: "parallel_sessions", text: `同一任务的并行多路推进（多方案对比、多文件并行修改、多角度调研等互不依赖的线）用 subsession_run 的 inherit_context:true（fork 父会话上下文）——可用 subsessions 数组一次派生多个（每个可单独传 model 走不同模型接口并行更快），报告完成即自动合入父会话；长耗子会话传 async:true 后台执行，可用 subsession_merge 随时合入阶段性成果。` },
     // 内置项目（歌白自身）：与文件工作台的项目列表同源——工作台能看到的项目，模型可按名寻址
     { key: "builtin_projects", text: builtinProjects(deps, user)
-      .map((p) => `内置项目「${p.name}」：${p.path}（project 参数可按名寻址）`)
+      .map((p) => `内置项目「${p.name}」${p.aliases?.length ? `（别名 ${p.aliases.join("/")}）` : ""}：${p.path}（project 参数可按名寻址）`)
       .join("") },
     { key: "channel", text: deps.channelNote(sessionId) ?? "" },
     // 项目绑定声明：装载模式下总Agent 直接使用子Agent 工具时按名操作绑定项目；
@@ -171,18 +173,20 @@ export function subAgentProjectNote(deps: PromptDeps, user: string, env: Record<
   return lines.length ? `\n\n${lines.join("\n")}` : ""
 }
 
-/** 内置项目：歌白自身（家目录——dev/源码形态下即歌白仓库根）与预置项目同清单（本地模式恒可寻址；
- *  服务模式与 `{AGENT}_PROJECTS` 同规则不生效）。用户配置同名项目时以其配置为准。 */
+/** 内置项目：歌白自身（家目录——dev/源码形态下即歌白仓库根）与霜天框架（家目录/shuangtian，存在时）
+ *  与预置项目同清单（本地模式恒可寻址；服务模式与 `{AGENT}_PROJECTS` 同规则不生效）。用户配置同名项目时以其配置为准。 */
 export function builtinProjects(deps: PromptDeps, user: string): PresetProject[] {
   if (deps.sandbox.enforcedFor(user)) return []
-  return [{ name: SELF_PROJECT_NAME, path: deps.config.gebaiHome, description: "歌白自身（家目录：源码、用户数据与资源）" }]
+  const out: PresetProject[] = [{ name: SELF_PROJECT_NAME, path: deps.config.gebaiHome, description: "歌白自身（家目录：源码、用户数据与资源）", aliases: [SELF_PROJECT_ALIAS] }]
+  const stRoot = join(deps.config.gebaiHome, "shuangtian")
+  if (existsSync(stRoot)) out.push({ name: "霜天", path: stRoot, description: "霜天框架（C++ 原生桌面应用框架：源码、示例与文档）", aliases: ["shuangtian"] })
+  return out
 }
 
-/** 并入内置项目（同名已被占用时保持原清单——配置优先）。 */
+/** 并入内置项目（同名已被占用时保持原清单——配置优先，逐项判定）。 */
 export function withBuiltinProjects(deps: PromptDeps, user: string, list: PresetProject[]): PresetProject[] {
-  const builtin = builtinProjects(deps, user)
-  if (!builtin.length || list.some((p) => p.name === SELF_PROJECT_NAME)) return list
-  return [...list, ...builtin]
+  const occupied = new Set(list.map((p) => p.name))
+  return [...list, ...builtinProjects(deps, user).filter((p) => !occupied.has(p.name))]
 }
 
 /** 汇总所有已注册子Agent 的预置项目注册表（{AGENT_NAME_UPPER}_PROJECTS）：装载模式下总Agent 直接使用子Agent 工具时 project 参数路由用；同名去重（首个生效）；末尾附内置项目。 */

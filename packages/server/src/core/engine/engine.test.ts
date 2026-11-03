@@ -58,7 +58,7 @@ class FakeProvider implements LLMProvider {
   usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedTokens?: number } | undefined = undefined
   /** 每次 chat 调用入口的探针（第几次调用，从 1 开始）：运行中状态（落盘值/列表口径）断言用。 */
   onChat?: (call: number) => void | Promise<void>
-  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" | "parallel" | "mixapprove" | "mixmissing" | "subparallel" | "subunknown" | "subrev" | "manytools" = "tool") {}
+  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subalias" | "subalias2" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" | "parallel" | "mixapprove" | "mixmissing" | "subparallel" | "subunknown" | "subrev" | "manytools" = "tool") {}
   capabilities(): LLMCapabilities {
     return { streaming: true, toolCalling: true, multimodal: this.multimodal, maxContextTokens: 10000, ...(this.model ? { model: this.model } : {}) }
   }
@@ -406,7 +406,7 @@ class FakeProvider implements LLMProvider {
   }
 }
 
-async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" | "parallel" | "mixapprove" | "mixmissing" | "subparallel" | "subunknown" | "subrev" | "manytools" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false, extraOpts: Record<string, unknown> = {}) {
+async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subalias" | "subalias2" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" | "parallel" | "mixapprove" | "mixmissing" | "subparallel" | "subunknown" | "subrev" | "manytools" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false, extraOpts: Record<string, unknown> = {}) {
   const home = mkdtempSync(join(tmpdir(), "gebai-test-"))
   mkdirSync(join(home, "users", "default"), { recursive: true })
   const config = loadConfig({
@@ -3871,6 +3871,41 @@ describe("context compaction", () => {
     // 未知预置项目：工具结果注入错误，引导模型修正（子Agent 内部消息可见）
     const errChat = s.provider.seenChats.find((msgs) => msgs.some((m) => m.role === "tool" && typeof m.content === "string" && m.content.includes("未知预置项目: nope")))
     expect(errChat).toBeDefined()
+    rmSync(projA, { recursive: true, force: true })
+    cleanup(s.home)
+  })
+
+  test("builtin project alias: project=gebai 寻址内置「歌白」（系统提示词注明别名）", async () => {
+    const s = await setup("subalias")
+    const session = await s.store.createSession("default", "t")
+    // 内置项目别名：gebai → 歌白家目录（引擎内置注入，无需 CODE_PROJECTS 配置）
+    s.provider.toolArgs = { project: "gebai", path: "alias-probe.txt", content: "hi" }
+    await s.store.setEnv(session.id, "default", { GEBAI_APPROVAL_SKIP: "true" })
+    await s.engine.run(session.id, "default", "modify builtin project via alias")
+    // 系统提示词内置项目注记含别名（模型可见 gebai 与歌白同源）
+    const sys = String(s.provider.seenChats[0].find((m) => m.role === "system")!.content)
+    expect(sys).toContain("内置项目「歌白」（别名 gebai）")
+    // 别名寻址解析到歌白家目录（工具桩实际调 ls：其输出中的解析路径 = home 根，非会话 tmp；未知项目则报「未知预置项目」）
+    const toolOut = s.provider.seenChats.flat().filter((m) => m.role === "tool").map((m) => String(m.content)).join("\n")
+    expect(toolOut).not.toContain("未知预置项目")
+    expect(toolOut).toContain(join(s.home, "alias-probe.txt"))
+    cleanup(s.home)
+  })
+
+  test("preset projects: CODE_PROJECTS 项目可配 aliases（别名寻址）", async () => {
+    const s = await setup("subalias2")
+    const projA = mkdtempSync(join(tmpdir(), "gebai-pal-"))
+    const session = await s.store.createSession("default", "t")
+    s.provider.toolArgs = { project: "alt", path: "out.txt", content: "hi" }
+    await s.store.setEnv(session.id, "default", {
+      CODE_PROJECTS: JSON.stringify([{ name: "app", path: projA, aliases: ["alt", "tmp"] }]),
+      GEBAI_APPROVAL_SKIP: "true",
+    })
+    await s.engine.run(session.id, "default", "modify preset project via alias")
+    // 别名 alt 寻址到 app 项目根；保留名 tmp 被过滤不生效（仍指向会话工作区）
+    const toolOut = s.provider.seenChats.flat().filter((m) => m.role === "tool").map((m) => String(m.content)).join("\n")
+    expect(toolOut).not.toContain("未知预置项目")
+    expect(toolOut).toContain(join(projA, "out.txt"))
     rmSync(projA, { recursive: true, force: true })
     cleanup(s.home)
   })

@@ -15,6 +15,9 @@ export const RESERVED_PROJECT_TMP = "tmp"
 /** 内置项目名：歌白自身（家目录——dev/源码形态下即歌白仓库根；本地模式恒在预置项目清单中）。 */
 export const SELF_PROJECT_NAME = "歌白"
 
+/** 内置项目英文名（别名）：仓库名 gebai——`project=gebai` 同「歌白」寻址。 */
+export const SELF_PROJECT_ALIAS = "gebai"
+
 export const PROJECT_PARAM = {
         project: { type: "string", description: `预置项目名/项目根路径/保留名 ${RESERVED_PROJECT_TMP}（会话工作区）——相对路径按此根解析` },
 

@@ -11,6 +11,7 @@ import type { EventBus } from "../base/event-bus"
 import type { ServerConfig } from "../base/config"
 import type { SubAgentManager } from "../agents/subagents"
 import type { ToolContext, ToolResult, Tool, PresetProject, ChoiceResult, ChoiceOption, ChoicePlan, InteractionMode, OutputMode, SessionData, DynamicToolDef, SubAgentDef, ToolResultImage, SessionRunOptions } from "../base/types"
+import { projectMatches } from "@gebai/sdk"
 import { ToolRegistry as BaseToolRegistry } from "../base/registry"
 import { normalizeToolArgs, tolerantToolName } from "../base/tool-args"
 import { agentListTool, agentLoadTool, subSessionRunTool, subSessionMergeTool, bgTaskTool, createGlobalTools, isGlobalToolExcluded, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput, walkDirFiles, todoSnapshot } from "../tools"
@@ -1795,7 +1796,7 @@ private activeSchemas(sessionId: string) {
         self.publish(sessionId, type, opts?.ownerRunId && type === "event.todo.update" ? { ...payload, subSession: true, subSessionId: opts.ownerRunId } : payload),
       projects,
       resolveProjectPath: (name) => {
-        const p = projects.find((x) => x.name === name)
+        const p = projects.find((x) => projectMatches(x, name))
         if (!p) throw new Error(`未知预置项目: ${name}`)
         return p.path
       },
@@ -3173,12 +3174,14 @@ private activeSchemas(sessionId: string) {
       const name = typeof p.name === "string" ? p.name.trim() : ""
       const path = typeof p.path === "string" ? p.path.trim() : ""
       if (!name || !path || seen.has(name)) continue
+      // 别名同规则防占用（tmp）与去重；别名与项目名/其他别名冲突时先到先得（find 首个匹配生效）
+      const aliases = Array.isArray(p.aliases) ? p.aliases.filter((a): a is string => typeof a === "string" && !!a.trim() && a.trim() !== RESERVED_PROJECT_TMP).map((a) => a.trim()) : []
       // 保留名冲突防呆（DESIGN「项目机制」）：启动校验覆盖进程环境变量，此处兜底前端注入的任务级 env
       if (name === RESERVED_PROJECT_TMP) throw new Error(`预置项目名 "${RESERVED_PROJECT_TMP}" 为保留名（会话工作区），请改名（${key} 配置项）`)
       // 项目路径：本地模式语义（绝对路径直用、相对按进程 cwd 解析）——服务模式在方法开头已返回空
       const root = isAbsolute(path) ? path : resolve(process.cwd(), path)
       seen.add(name)
-      out.push({ name, path: root, description: typeof p.description === "string" && p.description.trim() ? p.description.trim() : undefined })
+      out.push({ name, path: root, description: typeof p.description === "string" && p.description.trim() ? p.description.trim() : undefined, aliases: aliases.length ? aliases : undefined })
     }
     return out
   }

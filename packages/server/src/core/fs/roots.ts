@@ -13,6 +13,7 @@
 import { existsSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { isAbsolute, join, relative, resolve } from "node:path"
+import { projectMatches } from "@gebai/sdk"
 import { assertNoSymlinkEscape, isValidSessionId, sessionPath } from "../base/paths"
 
 export type RootKind = "sess" | "proj" | "user" | "abs"
@@ -65,8 +66,8 @@ export interface RootContext {
   sandboxed: boolean
   /** 全局写开关（GEBAI_FS_WRITE=false → 所有根只读） */
   writable: boolean
-  /** 预置项目（与模型 project 参数同源；由引擎提供） */
-  projects: Array<{ name: string; path: string; description?: string }>
+  /** 预置项目（与模型 project 参数同源；由引擎提供，aliases 同名寻址） */
+  projects: Array<{ name: string; path: string; description?: string; aliases?: string[] }>
   /** 额外白名单根（GEBAI_FS_ROOTS / 本地模式盘符与常用目录） */
   extraRoots: FileRoot[]
   /** 会话清单（构建 `sess:` 根） */
@@ -193,7 +194,7 @@ export function resolveRoot(rootId: string, ctx: RootContext): ResolvedRoot {
     return { id: rootId, kind, abs: join(ctx.home, "users", ctx.user), writable: ctx.writable }
   }
   if (kind === "proj") {
-    const p = ctx.projects.find((x) => x.name === id)
+    const p = ctx.projects.find((x) => projectMatches(x, id))
     if (!p) throw new FsError(404, `未知预置项目: ${id}`)
     if (!exists(p.path)) throw new FsError(404, `项目目录不存在: ${id}（${p.path}）`)
     return { id: rootId, kind, abs: resolve(p.path), writable: ctx.writable }

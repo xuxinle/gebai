@@ -51,6 +51,13 @@ export interface PresetProject {
   name: string
   path: string
   description?: string
+  /** 寻址别名（可选）：project 参数传别名同 name 寻址到本项目（内置「歌白」自带 `gebai`）。 */
+  aliases?: string[]
+}
+
+/** 项目是否以给定名寻址（name 精确或 aliases 含之）——引擎按名解析与文件工作台 proj: 根共用。 */
+export function projectMatches(p: PresetProject, name: string): boolean {
+  return p.name === name || (p.aliases ?? []).includes(name)
 }
 
 /**

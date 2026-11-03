@@ -296,6 +296,13 @@ describe("core/fs 根解析（sess:/proj:/user:/abs:）", () => {
     expect(resolveRoot("proj:gebai", ctx(exists)).writable).toBe(true)
   })
 
+  test("resolveRoot：项目别名寻址（name/aliases 均可，与文件工作台同源）", () => {
+    const c = ctx({ isDir: () => true, projects: [{ name: "歌白", path: "/workspaces/gebai", aliases: ["gebai"] }] })
+    expect(resolveRoot("proj:gebai", c).abs).toBe(resolve("/workspaces/gebai"))
+    expect(resolveRoot("proj:歌白", c).abs).toBe(resolve("/workspaces/gebai"))
+    expect(() => resolveRoot("proj:other", c)).toThrow(FsError)
+  })
+
   test("rootCatalog：会话 + 项目 + 用户目录，按 id 去重", () => {
     const list = rootCatalog(ctx())
     const ids = list.map((r) => r.id)
