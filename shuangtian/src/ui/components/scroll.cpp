@@ -153,6 +153,16 @@ ScrollView::ScrollView() {
   // 实测该文本 bounds 为 y=−119 / 高 851，把**标题栏与菜单栏**的点击全吃掉了。
   style_.clip_children = true;
   set_focusable(true);
+  // 但**不画焦点环**：ScrollView 需要焦点只为接键盘滚动（↑↓/PgUp/PgDn），
+  // 而它没有“可操作目标”的语义——VS Code / 浏览器都不给滚动容器画环。
+  //
+  // 不这样做的后果（用户实测报的「后台切前台有灰框，鼠标移上去就没了」）：
+  // 窗口激活时焦点默认落在第一个可聚焦元素（就是这个面板）上，而 `UiRoot`
+  // 的 `focus_ring_visible` 默认是 true（只对**鼠标按下**置 false、键盘输入置 true）——
+  // 于是一圈灰框绕过「键盘导航才画环」的意图直接出来了；鼠标一动就消失，
+  // 正是 `set_focus_ring_visible(false)` 生效。
+  // 用“只读焦点”来表达：要焦点（接键）但不参与焦点环绘制。
+  set_focus_ring_policy(FocusRingPolicy::Never);
   auto bar = std::make_unique<ScrollBar>();
   bar_ = bar.get();
   bar_->set_on_scroll([this](float offset) { scroll_to(offset); });
@@ -319,8 +329,7 @@ void ScrollView::arrange(const RenderContext& context, math::Rect rect) {
 void ScrollView::paint_impl(const RenderContext& context, raster::Surface& canvas) const {
   if (!visible_) return;
   paint_box(context, canvas);
-  paint_content(context, canvas);
-  if (style_.radius > 0.0f) {
+  paint_content(context, canvas);  if (style_.radius > 0.0f) {
     canvas.push_clip_rounded_rect(bounds_, style_.radius);
   } else {
     canvas.push_clip_rect(bounds_);

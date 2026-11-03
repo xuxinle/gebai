@@ -114,9 +114,16 @@
     // 形态互斥：展开态下隐藏 compact 区（标题栏一直可见）
     $('#compact').set({ visible: 'false' });
 
-    // 空状态与卡片区互斥（都用 grow，同时可见会各占一半高度）
-    $('#empty').set({ visible: cards.length === 0 ? 'true' : 'false' });
-    $('#cards').set({ visible: cards.length === 0 ? 'false' : 'true' });
+    // 空状态与卡片区互斥（都占同一块 grow 区域，同时可见会各分一半高度）。
+    // ⚠ 必须隐 **`#cards-scroll`（外层滚动容器）**，不是 `#cards`：
+    //   `#cards` 只是滚动区里的内容列，隐它以后滚动区自己还在布局里，
+    //   照样吃掉一半高度——实测现象就是“空态看起来没居中”（它在半屏内居中）。
+    const emptyNow = cards.length === 0;
+    $('#empty').set({ visible: emptyNow ? 'true' : 'false' });
+    $('#cards-scroll').set({ visible: emptyNow ? 'false' : 'true' });
+    // 「全部忽略」无卡时隐藏：空态下没有任何可忽略的东西，
+    // 留着一个总能点的按钮只会让人以为“有东西被藏起来了”。
+    $('#footer-actions').set({ visible: emptyNow ? 'false' : 'true' });
 
     // 底部连接状态：如实显示（断线与"agent 很安静"必须能区分）
     paintLinkState($('#link-text'), $('#link-icon'));

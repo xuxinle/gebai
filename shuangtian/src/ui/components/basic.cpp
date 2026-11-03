@@ -43,9 +43,18 @@ using components_internal::paint_focus_ring;
 /// 判据问宿主（`HostFocus::focus_ring_visible`）而不是各自推断：
 /// “上一次输入是键盘还是鼠标”是**全局**状态，组件无从知道；分散实现必然
 /// 漂移成“有的按钮带框有的不带”。
+///
+/// ⚠ 但**组件可以否决**（`FocusRingPolicy::Never`）：容器类（滚动/面板/列表）
+/// 要焦点只为接键，本身不是“可操作目标”；全局启发式盖不住它们的场景：
+/// 窗口激活时焦点默认落在第一个可聚焦元素上，而那一下既非键盘也非鼠标，
+/// `focus_ring_visible` 停在默认 true，一整圈灰框就出来了（相期实测：
+/// 切回前台卡片区多一圈灰框，鼠标一动就消失）。把“要不要环”
+/// 从全局启发式降维成组件声明，两类场景各得其所。
 [[nodiscard]] auto focus_ring_wanted(const Element& element) -> bool {
-  const auto* host = element.host();
-  return host == nullptr || host->focus_ring_visible();
+  // 唯一判定处已上提到 `Element::wants_focus_ring()`（容器可以否决）。
+  // 这里保留一个同名转发，是因为多个组件已经写了 `focus_ring_wanted(*this)`；
+  // 新代码建议直接用 `element.wants_focus_ring()`。
+  return element.wants_focus_ring();
 }
 
 [[nodiscard]] auto port_of(const RenderContext& context) -> const TextPort& {

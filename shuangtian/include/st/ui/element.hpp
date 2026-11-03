@@ -463,7 +463,16 @@ class Element {
   [[nodiscard]] auto style() const noexcept -> const Style& { return style_; }
   void set_style(Style style) { style_ = std::move(style); }
   [[nodiscard]] auto visible() const noexcept -> bool { return visible_; }
-  void set_visible(bool visible) noexcept { visible_ = visible; }
+  void set_visible(bool visible) noexcept {
+    if (visible_ == visible) return;
+    visible_ = visible;
+    // **必须标脏布局**：可见性是布局输入（`measure`/`layout_children` 都跳过
+    // 不可见子元素），不标脏的话“运行时隐藏一个兄弟”不会让剩下的重新分空间——
+    // 现象是隐藏了但位置没变、剩下那个还在原处占一半（相期实测：
+    // 空态隐了卡片区，空态却仍在半屏内居中，看起来“没居中”）。
+    // 这里用 `mark_layout_dirty()` 而不是仅 `mark_dirty()`：前者会连带重测父级。
+    mark_layout_dirty();
+  }
 
   /// **悬停提示**（提示气泡文本；空串 = 不提示）。
   ///
@@ -642,6 +651,44 @@ class Element {
   }
   [[nodiscard]] auto pressed() const noexcept -> bool { return pressed_; }
   [[nodiscard]] auto focused() const noexcept -> bool { return focused_; }
+  /// 焦点环策略（组件级声明，不是运行时状态）。
+  ///
+  /// ## 为何需要这个开关
+  ///
+  /// 「焦点环只在键盘导航时画」默认是对的（鼠标点出来的焦点不该留边框），
+  /// 但它有两个前提不总成立：
+  ///
+  /// 1. **窗口激活时焦点默认落在第一个可聚焦元素上**，而那一下既不是键盘
+  ///    也不是鼠标——`UiRoot::focus_ring_visible` 默认 true，于是绕过启发式
+  ///    直接画出环。相期实测：切回前台，整个卡片区一圈灰框；鼠标一动就消失。
+  /// 2. **有些控件要焦点但不该有环**：滚动容器（要接 ↑↓/PgUp）、
+  ///    面板/列表容器（要接快捷键）——它们没有「可操作目标」的语义，
+  ///    VS Code / 浏览器也都不给它们画环。
+  ///
+  /// 所以把「要不要环」从**全局启发式**降维成**组件声明**：
+  /// 容器类声明 `Never`，交互控件保持默认 `Auto`。
+  enum class FocusRingPolicy : std::uint8_t {
+    Auto,   ///< 默认：宿主说该画就画（键盘导航时）
+    Never,  ///< 永不画（容器类：要焦点接键，但不是操作目标）
+  };
+  [[nodiscard]] auto focus_ring_policy() const noexcept -> FocusRingPolicy { return focus_ring_policy_; }
+  void set_focus_ring_policy(FocusRingPolicy policy) noexcept {
+    if (focus_ring_policy_ == policy) return;
+    focus_ring_policy_ = policy;
+    mark_dirty();
+  }
+  /// 此刻是否该画焦点环（**唯一判定处**，组件不得各自推导）。
+  ///
+  /// 三个条件：
+  /// 1. 自己确实有焦点；
+  /// 2. 组件没有否决（`FocusRingPolicy::Never`）；
+  /// 3. 宿主认为该画（上一次输入是键盘）——没宿主（离屏/单测）时视为该画。
+  [[nodiscard]] auto wants_focus_ring() const noexcept -> bool {
+    if (!focused_) return false;
+    if (focus_ring_policy_ == FocusRingPolicy::Never) return false;
+    const auto* h = host();
+    return h == nullptr || h->focus_ring_visible();
+  }
   void set_hovered(bool value) noexcept { hovered_ = value; }
   void set_pressed(bool value) noexcept { pressed_ = value; }
   /// 焦点是视觉状态（焦点环/终端光标闪烁都随它变化）——变化必须标脏。
@@ -1123,6 +1170,7 @@ class Element {
   mutable double wake_at_{-1.0};
   bool pressed_{false};
   bool focused_{false};
+  FocusRingPolicy focus_ring_policy_{FocusRingPolicy::Auto};
   bool dirty_{true};
   bool layout_dirty_{true};
   /// 宿主（`UiRoot`），由 UiRoot 在挂载/摘除时维护；未上树为 nullptr。
