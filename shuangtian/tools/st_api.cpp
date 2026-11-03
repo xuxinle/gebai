@@ -29,6 +29,7 @@
 #include "st/raster/scene3d_script.hpp"
 #include "st/raster/scene_schema.hpp"
 #include "st/raster/scene_serialize.hpp"
+#include "st/raster/scene_xml.hpp"
 #include "st/ui/theme.hpp"
 
 int main(int argc, char** argv) {
@@ -39,6 +40,9 @@ int main(int argc, char** argv) {
   std::string normalize_path;
   std::string shape_query;
   bool theme_only = false;
+  // 显式指定形态（xml/json）。check/normalize 缺省按**内容自动识别**
+  // （`looks_like_scene_xml`）；example 缺省 json。
+  std::string format;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--compact") {
@@ -47,6 +51,8 @@ int main(int argc, char** argv) {
       example_only = true;
     } else if (arg == "--scopes") {
       scopes_only = true;
+    } else if (arg == "--format" && i + 1 < argc) {
+      format = argv[++i];
     } else if (arg == "--check" && i + 1 < argc) {
       check_path = argv[++i];
     } else if (arg == "--normalize" && i + 1 < argc) {
@@ -60,17 +66,31 @@ int main(int argc, char** argv) {
           "用法: st_api [选项]\n"
           "  无参数      输出完整能力清单（JSON，缩进）\n"
           "  --compact   单行 JSON\n"
-          "  --example   只输出最小可运行脚本\n"
+          "  --example   只输出最小可运行脚本（--format xml 出 XML 形态）\n"
           "  --scopes    只列各层名字（objects[] / animation.tracks[] ...）\n"
           "  --shape <n> 某个形状的 size 怎么写（含义/示例/旧写法换算）\n"
           "  --theme     主题令牌清单（颜色 + 尺寸）\n"
+          "  --format <xml|json>  强制指定形态（check/normalize 缺省按内容识别）\n"
           "  --check <f>      校验场景脚本并输出自检摘要（退出码非 0 = 有问题）\n"
-          "  --normalize <f>  读入后重新写出（看引擎理解成了什么）\n");
+          "  --normalize <f>  读入后重新写出，XML 进 XML 出（看引擎理解成了什么）\n");
       return 0;
     }
   }
 
   if (example_only) {
+    if (format == "xml") {
+      // XML 起步样例由 JSON 样例转换生成（parse → serialize）——
+      // 两个形态永不错位：改 JSON 样例，XML 自动跟上。
+      const auto spec = st::raster::parse_scene_spec_text(
+          st::raster::minimal_example_script());
+      if (!spec.has_value()) {
+        std::fprintf(stderr, "内部错误：起步脚本解析失败：%s\n",
+                     spec.error().message.c_str());
+        return 2;
+      }
+      std::printf("%s\n", st::raster::serialize_scene_xml(*spec).c_str());
+      return 0;
+    }
     std::printf("%s\n", st::raster::minimal_example_script().c_str());
     return 0;
   }
@@ -123,7 +143,12 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "读取失败：%s\n", text.error().message.c_str());
       return 1;
     }
-    const auto spec = st::raster::parse_scene_spec_text(*text);
+    // XML/JSON 按内容识别（--format 可强制）：以 `<` 开头且根标签是
+    // Scene 或图元 → XML 路，否则 JSON 路。
+    const bool as_xml = format == "xml" ||
+                        (format.empty() && st::raster::looks_like_scene_xml(*text));
+    const auto spec = as_xml ? st::raster::parse_scene_xml(*text)
+                             : st::raster::parse_scene_spec_text(*text);
     if (!spec.has_value()) {
       // 解析失败时**只打错误**（此时没有可自检的东西）
       std::fprintf(stderr, "解析失败：%s\n", spec.error().message.c_str());
@@ -136,18 +161,29 @@ int main(int argc, char** argv) {
   }
 
   // ── 重新写出（看理解）──
+  //
+  // XML 进 XML 出、JSON 进 JSON 出（--format 可强制输出另一种）——
+  // 「理解成了什么」要在**写进去的同一形态**里看才直观。
   if (!normalize_path.empty()) {
     const auto text = st::fs::read_text(normalize_path);
     if (!text.has_value()) {
       std::fprintf(stderr, "读取失败：%s\n", text.error().message.c_str());
       return 1;
     }
-    const auto spec = st::raster::parse_scene_spec_text(*text);
+    const bool input_is_xml =
+        format == "xml" || (format != "json" && st::raster::looks_like_scene_xml(*text));
+    const auto spec = input_is_xml ? st::raster::parse_scene_xml(*text)
+                                   : st::raster::parse_scene_spec_text(*text);
     if (!spec.has_value()) {
       std::fprintf(stderr, "解析失败：%s\n", spec.error().message.c_str());
       return 2;
     }
-    std::printf("%s\n", st::raster::serialize_scene_text(*spec, true).c_str());
+    const bool output_xml = format == "xml" || (format != "json" && input_is_xml);
+    if (output_xml) {
+      std::printf("%s\n", st::raster::serialize_scene_xml(*spec).c_str());
+    } else {
+      std::printf("%s\n", st::raster::serialize_scene_text(*spec, true).c_str());
+    }
     return 0;
   }
 
