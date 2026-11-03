@@ -425,6 +425,14 @@ struct SceneSpec {
 [[nodiscard]] auto render_scene_at(const SceneSpec& spec, float time, Surface& canvas,
                                    math::Color background) -> Result<void>;
 
+/// 场景树里**会被绘制**的节点名（按先序；不含被跳过的）。
+///
+/// 用途是验证「哪些对象真的进了场景树」而不依赖出图像素：典型场景是
+/// **布尔/阵列的操作体**——它们只是运算输入，几何已经烤进父对象的结果
+/// 网格，不该再当独立实体画一次。
+[[nodiscard]] auto collect_drawable_node_names(const SceneSpec& spec)
+    -> std::vector<std::string>;
+
 /// 同上，但复用调用方已有的场景实例（裁云导出时用这条）。
 [[nodiscard]] auto render_scene_at_into(const SceneSpec& spec, float time, Scene3D& scene,
                                         Surface& canvas, math::Color background) -> Result<void>;

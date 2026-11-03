@@ -943,10 +943,21 @@ translate 与零件叠加，其余字段模板优先。
 实例化后 merge 成单网格（一次绘制、可直接当布尔输入）。`ring` 绕 Y 均分
 并各自朝向；`row` 沿向量等距。
 
-**布尔/阵列对象的渲染契约**：它们 `shape=group` 但**有实体几何**（几何由
-children 运算产出）。`to_node` 的 `has_geometry` 与 `paint` 的绘制判据都
-必须是 `!group || !op.empty() || !pattern.empty()`——两处不一致的症状是
-「能建出来但画不出来」（实测：阵列完全不可见，只在包围盒里占位）。
+**布尔/阵列对象的渲染契约**（两条必须同时成立）：
+
+1. **自己有几何**：它们 `shape=group` 但**有实体几何**（几何由 children
+   运算产出）。`to_node` 的 `has_geometry` 与 `paint` 的绘制判据都必须是
+   `!group || !op.empty() || !pattern.empty()`——两处不一致的症状是
+   「能建出来但画不出来」（实测：阵列完全不可见，只在包围盒里占位）。
+
+2. **children 不进场景树**：children 是**操作体/原型**，它们的几何已经
+   烤进父对象的结果网格，若再当独立实体画一次就会重叠在成品上。实测的
+   用户可见症状：Subtract 的挖孔圆柱变成一个**纯白的鼓状物**、阵列原型
+   额外出现在原点——两者叠上去，看起来像“一堆白鼓”和“贯穿全塔的螺旋黑线”。
+   普通层级容器（`<Group>`）的 children **仍必须**进树（层级装配靠它）。
+
+回归判据：`collect_drawable_node_names(spec)` 列出的名字里不得含操作体
+（测试 `scene_operand_children_not_in_tree`）。
 
 测试：`tests/scene_boolean_test.cpp` 11 条（三运算体积/通孔/确定性/水密
 拒绝/布尔标签几何/错误报路/凹轮廓挤出/车削圆柱/阵列份数与铺开/阵列内

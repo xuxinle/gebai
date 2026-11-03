@@ -249,3 +249,40 @@ ST_TEST(scene_profile_errors) {
   ST_REQUIRE(!mesh3.has_value());
   ST_CHECK(mesh3.error().message.find("profile") != std::string::npos);
 }
+
+// ── 12. 布尔/阵列的子元素**不得**进场景树（否则被重复绘制）───────────────
+//
+// 子元素（操作体/原型）的几何已经被 `build_mesh` 烤进父对象结果网格；
+// 若还进场景树就会被当独立实体再画一次。实测的用户可见症状：
+// Subtract 的挖孔圆柱变成一个纯白的鼓状物、阵列原型额外出现在原点
+//——两者都叠在成品上，看着像“一堆白鼓”与“螺旋黑线”。
+ST_TEST(scene_operand_children_not_in_tree) {
+  const auto spec = st::raster::parse_scene_xml(R"XML(<Scene>
+  <Subtract name="plate">
+    <Box name="base_part" size="2, 0.3, 2"/>
+    <Cylinder name="hole_part" size="0.5, 1"/>
+  </Subtract>
+  <Ring name="ring" pattern_count="8" pattern_radius="1.5">
+    <Box name="proto" size="0.2, 0.2, 0.2"/>
+  </Ring>
+  <Group name="real_group">
+    <Box name="real_child" size="0.2, 0.2, 0.2"/>
+  </Group>
+</Scene>)XML");
+  ST_REQUIRE(spec.has_value());
+
+  // 渲染入口把 spec 转成场景树：布尔/阵列的 children 应被排除，
+  // 而普通 Group 的 children 必须保留（层级装配靠它）。
+  const auto names = st::raster::collect_drawable_node_names(*spec);
+  auto has = [&](const char* name) {
+    return std::find(names.begin(), names.end(), name) != names.end();
+  };
+  // 操作体 / 原型不得出现
+  ST_CHECK(!has("base_part"));
+  ST_CHECK(!has("hole_part"));
+  ST_CHECK(!has("proto"));
+  // 父对象本身（有实几何）与普通 group 的子元素必须出现
+  ST_CHECK(has("plate"));
+  ST_CHECK(has("ring"));
+  ST_CHECK(has("real_child"));
+}

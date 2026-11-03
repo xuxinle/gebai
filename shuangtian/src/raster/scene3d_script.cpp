@@ -425,8 +425,19 @@ auto read_shadow(const Json& json) -> Result<PlanarShadow> {
   node.local.scale = object.scale;
   node.pivot = object.pivot;
   node.visible = object.visible;
-  node.children.reserve(object.children.size());
-  for (const SceneObjectSpec& child : object.children) node.children.push_back(to_node(child));
+  // ## 布尔/阵列的子元素是**操作体/原型**，不是独立物体
+  //
+  // 它们的几何已经被 `build_mesh` 烤进父对象的结果网格里了。若还进场景树，
+  // 就会被当独立实体再画一次——实测症状：Subtract 的挖孔圆柱变成一个
+  // 纯白的鼓状物、阵列原型额外出现在原点（用户看到的就是“一堆白鼓”与
+  // “螺旋黑线”）。所以只有**层级容器**（普通 group）的子元素进树。
+  const bool operands_only = !object.op.empty() || !object.pattern.empty();
+  if (!operands_only) {
+    node.children.reserve(object.children.size());
+    for (const SceneObjectSpec& child : object.children) {
+      node.children.push_back(to_node(child));
+    }
+  }
   return node;
 }
 
@@ -1739,6 +1750,20 @@ auto render_scene_at(const SceneSpec& spec, float time, Surface& canvas, math::C
     return st::unexpected(ErrorCode::Unsupported, "无法创建三维场景（后端不可用）");
   }
   return render_impl(spec, time, **scene, canvas, background);
+}
+
+auto collect_drawable_node_names(const SceneSpec& spec) -> std::vector<std::string> {
+  std::vector<std::string> names;
+  const auto walk = [&](auto&& self, const SceneObjectSpec& object, bool inside_operand) -> void {
+    // 布尔/阵列的 children 是操作体/原型（几何已烤进父对象结果网格），不进树。
+    const bool operands_only = !object.op.empty() || !object.pattern.empty();
+    const bool drawable = !object.group || operands_only;
+    if (drawable && !inside_operand) names.push_back(object.name);
+    if (operands_only) return;   // 子元素不再往下走
+    for (const SceneObjectSpec& child : object.children) self(self, child, inside_operand);
+  };
+  for (const SceneObjectSpec& object : spec.objects) walk(walk, object, false);
+  return names;
 }
 
 auto render_impl(const SceneSpec& spec, const std::optional<float>& time, Scene3D& scene,
