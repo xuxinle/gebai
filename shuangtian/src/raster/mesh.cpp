@@ -324,7 +324,10 @@ auto Mesh::cylinder(float radius, float height, int segments, math::Color color)
   }
   for (int i = 0; i < sides; ++i) {
     const auto a = static_cast<std::uint32_t>(i * 2);
-    mesh.indices.insert(mesh.indices.end(), {a, a + 2U, a + 1U, a + 1U, a + 2U, a + 3U});
+    // 绕序逆时针（从外侧看）：下_i → 上_i → 上_i+1（老实现写的是
+    // 下_i → 下_i+1 → 上_i，几何法线朝内，整柱有向体积为负——
+    // 布尔运算会把它当“负实体”，merge 多段时体积正负相消）。
+    mesh.indices.insert(mesh.indices.end(), {a, a + 1U, a + 3U, a, a + 3U, a + 2U});
   }
   // 顶盖与底盖：各自独立的顶点（法线朝上/朝下，才能与侧壁分开着色）
   for (int side = 0; side < 2; ++side) {
@@ -342,10 +345,13 @@ auto Mesh::cylinder(float radius, float height, int segments, math::Color color)
     }
     for (int i = 0; i < sides; ++i) {
       const auto a = static_cast<std::uint32_t>(center + 1U + static_cast<std::uint32_t>(i));
+      // 顶盖（法线 +Y）逆时针看 = center → a → a+1；
+      // 底盖（法线 -Y）从下往上看逆时针 = center → a+1 → a。
+      // 老实现把两边**反着写**了：绕序与顶点法线相反，有向体积为负。
       if (side == 0) {
-        mesh.indices.insert(mesh.indices.end(), {center, a, a + 1U});
-      } else {
         mesh.indices.insert(mesh.indices.end(), {center, a + 1U, a});
+      } else {
+        mesh.indices.insert(mesh.indices.end(), {center, a, a + 1U});
       }
     }
   }

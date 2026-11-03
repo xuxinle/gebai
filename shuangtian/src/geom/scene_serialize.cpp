@@ -164,6 +164,8 @@ auto serialize_object(const SceneObjectSpec& object) -> Json {
   if (object.twist != defaults.twist) item["twist"] = number_json(object.twist);
   if (object.turns != defaults.turns) item["turns"] = number_json(object.turns);
   if (object.taper != defaults.taper) item["taper"] = number_json(object.taper);
+  if (object.thickness != defaults.thickness) item["thickness"] = number_json(object.thickness);
+  if (object.section != defaults.section) item["section"] = object.section;
   if (object.knot_p != defaults.knot_p) item["knot_p"] = object.knot_p;
   if (object.knot_q != defaults.knot_q) item["knot_q"] = object.knot_q;
   if (object.face_camera) item["face_camera"] = true;

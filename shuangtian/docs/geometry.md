@@ -956,6 +956,44 @@ children 运算产出）。`to_node` 的 `has_geometry` 与 `paint` 的绘制判
 环形阵列（散热孔）、Revolve 双层车削再 Subtract 挖内腔（薄壁导流罩）、
 Extrude 后掠叶片×9 环形阵列——这些形状在只有 24 个原子图元时无法表达。
 
+### 4.12.10 ⑨ 型材 / 螺旋楼梯 / 装饰 / 紧固件
+
+四类高频结构件（代码里一个 `section` 字段选型，不必手写轮廓）：
+
+```xml
+<Beam section="i"       size="0.4, 2.2" thickness="0.05"/>  <!-- 工字钢 -->
+<Beam section="channel" size="0.4, 2.2" thickness="0.05"/>  <!-- 槽钢 -->
+<Beam section="angle"   size="0.4, 2.2" thickness="0.05"/>  <!-- 角钢 -->
+<Beam section="box"     size="0.4, 2.2" thickness="0.05"/>  <!-- 方管（空心）-->
+
+<Staircase size="0.85" turns="1.5" teeth="18" thickness="0.16"/>   <!-- 螺旋楼梯 -->
+
+<Ornament section="star"  sides="5" size="0.5, 0.22"/>   <!-- 星形柱 -->
+<Ornament section="cross" size="0.46, 0.22" thickness="0.15"/>  <!-- 十字柱 -->
+
+<Fastener section="bolt"   size="0.14, 0.1" thickness="0.05" turns="5"/>
+<Fastener section="nut"    size="0.14, 0.09" thickness="0.05"/>
+<Fastener section="washer" size="0.17, 0.1" thickness="0.05"/>
+```
+
+- **Beam**：截面由 `section` 选（i/channel/angle/box）；`size[0]` 截面宽、
+  `size[1]` 长度、`height` 截面高、`thickness` 壁厚。**方管必须靠布尔差**
+  ——带孔轮廓（外圈+内圈）耳切法无法正确表达（实测体积 0.1221 vs 0.1628）。
+- **Staircase**：中心柱 + 扇形踏步螺旋上升；`turns` 圈数、`teeth` 级数、
+  `thickness` 踏面厚。踏步用 extrude 生成后各自平移 merge。
+- **Ornament**：星形（`sides` 角、`tooth_height` 锐利度）与十字形。
+- **Fastener**：`bolt` 六角头+杆（杆长 = `turns` × 头厚）、`nut` 六角减内孔、
+  `washer` 扁环（布尔差）。
+
+**绕序契约（踩过的坑）**：`Mesh::cylinder`（mesh.cpp 的旧静态工厂）与
+`primitives::make_cylinder` 是**两套实现**，前者侧面与两个盖的绕序都反
+（有向体积为负）。症状：布尔运算把它当负实体（立方减圆柱得到 A∩B）、
+多段 merge 时体积正负相消（螺栓 0.009 → 0.0012）。两套实现已统一修好，
+新增图元一律走 `primitives::make_*`。
+
+测试：`tests/scene_primitive_extra_test.cpp` 6 条（型钢四型截面面积/楼梯
+阶梯增长/星形十字体积关系/紧固件三件套/XML 字段往返/别名解析）。
+
 测试：`tests/scene_constraint_test.cpp` 9 条（数值断言/联动/前向引用/互斥/
 auto 误用/锚点解析/旋转互逆/XML 等价与往返）。
 
@@ -1191,6 +1229,8 @@ cube 的 height 无效、torus 的 radius 是中心线半径）。
 | `src/raster/mesh_boolean.cpp` | 布尔内核：BSP 剪裁（csg.js 语义）+ 绕序归一 + 确定性 |
 | `tests/scene_boolean_test.cpp` | 建模运算 11 条：三运算体积/通孔/确定性/水密/挤出/车削/阵列/嵌套 |
 | `tools/expressiveness_fan_probe.cpp` | 表达能力 showcase：轴流风扇（布尔散热孔 + 车削导流罩 + 挤出叶片阵列） |
+| `tests/scene_primitive_extra_test.cpp` | 型材/楼梯/装饰/紧固件 6 条：截面面积/阶梯增长/体积关系/XML 往返/别名 |
+| `tools/new_primitives_probe.cpp` | 新图元渲染验证：型钢四型 + 螺旋楼梯 + 星形十字 + 紧固件 |
 | `tests/geom_size_test.cpp` | 尺寸语义 7 条：9 个形状精确包围盒、旧字段等价、size 优先级 |
 | `tests/geom_scene_integration_test.cpp` | 22 个图元**真的画出像素**、旧形状语义不变、参数生效、导出→读回、焊接/变换/OBJ 往返 |
 | `tools/primitives_gallery_probe.cpp` | 22 格总览 PNG + 每个图元的 `.glb`（可拖进 Blender 对照） |

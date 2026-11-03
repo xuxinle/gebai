@@ -97,6 +97,10 @@ enum class PrimitiveKind : std::uint8_t {
   Helix,        ///< `helix`：螺旋管（弹簧/螺纹）
   Extrude,      ///< `extrude`：2D 轮廓拉伸（params.profile）
   Revolve,      ///< `revolve`：2D 轮廓绕 Y 车削（params.profile）
+  Beam,         ///< `beam`：型钢（工字/槽钢/角钢/方管，`section` 选型）
+  Staircase,    ///< `staircase`：螺旋楼梯（`turns` 圈、`teeth` 级）
+  Ornament,     ///< `ornament`：星形/十字柱（`section` 选型）
+  Fastener,     ///< `fastener`：螺栓/螺母/垫圈（`section` 选型）
 };
 
 /// 规范名（写进脚本/glTF/日志的**唯一**名字）。
@@ -169,6 +173,12 @@ struct PrimitiveParams {
   /// 螺旋：圈数、每圈半径收缩量。
   float turns{3.0f};
   float taper{0.0f};
+
+  /// 壁厚（型钢/管件/紧固件的内外差；0 = 按比例取默认）。
+  float thickness{0.0f};
+  /// 截面选型（`beam` 的 i/channel/angle/box；`ornament` 的 star/cross；
+  /// `fastener` 的 bolt/nut/washer）。空 = 该图元的默认选型。
+  std::string section{};
 
   /// 草图轮廓（extrude/revolve）：(x, y) 点列（空 = 不适用）。
   ///
@@ -257,6 +267,36 @@ struct PrimitiveParams {
   ///
   /// 花瓶/杯子/轴类的主力：一条侧壁曲线换一台回转体。profile 至少 2 点。
   [[nodiscard]] auto make_revolve(const PrimitiveParams& params) -> Mesh;
+
+  /// **型钢（工字钢/槽钢/角钢/方管）**：结构件的基础截面。
+  ///
+  /// 截面由 `section` 选：`"i"`（工字）/`"channel"`（槽钢·C 形）/
+  /// `"angle"`（角钢·L 形）/`"box"`（方管·空心）。
+  /// 尺寸：`radius` = 截面宽度（外接），`depth` = 长度，
+  /// `height` = 截面高度（默认 = radius），`thickness` = 壁厚。
+  ///
+  /// 为何不用 extrude + profile：型钢是建筑/工业结构的**高频基础件**，
+  /// 每次手写 12 个点的 I 形轮廓既易错又难读；一个名字就能表达。
+  [[nodiscard]] auto make_beam(const PrimitiveParams& params) -> Mesh;
+
+  /// **螺旋楼梯**：踏步绕中心柱螺旋上升（建筑/游戏场景高频）。
+  ///
+  /// `turns` = 圈数，`teeth` = 踏步数（复用该字段），`radius` = 梯半径，
+  /// `depth` = 中心柱直径（0 = 无柱）。每级踏步是一块独立板（merge 成单网格）。
+  [[nodiscard]] auto make_staircase(const PrimitiveParams& params) -> Mesh;
+
+  /// **星形柱 / 十字柱**：装饰、奖章、栓杆截面。
+  ///
+  /// `section`：`"star"`（`sides` = 角数，`tooth_depth` 控制锐利度）/
+  /// `"cross"`（十字，`thickness` 控制臂宽）。`depth` = 拉伸长度。
+  [[nodiscard]] auto make_ornament(const PrimitiveParams& params) -> Mesh;
+
+  /// **螺栓 / 螺母 / 垫圈**：机械装配的三件套。
+  ///
+  /// `section`：`"bolt"`（六角头 + 杆，杆长 = `turns`×`depth` 的杆部分）/
+  /// `"nut"`（六角环形）/`"washer"`（圆环扁片）。
+  /// `radius` = 对边外接圆半径，`depth` = 头部厚度，`thickness` = 内孔/杆半径。
+  [[nodiscard]] auto make_fastener(const PrimitiveParams& params) -> Mesh;
 
 /// 按种类分派（脚本层与界面共用这一个入口）。
 [[nodiscard]] auto make(PrimitiveKind kind, const PrimitiveParams& params) -> Mesh;

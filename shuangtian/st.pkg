@@ -582,6 +582,12 @@
       "exclude_sources": ["src/pkg/*"],
       "//note": "静态 rotation 是否影响渲染（判断 model 矩阵是否生效）"
     },
+    "new_primitives_probe": {
+      "kind": "executable",
+      "sources": ["tools/new_primitives_probe.cpp"],
+      "exclude_sources": ["src/pkg/*"],
+      "//note": "新图元渲染验证：型钢四型 / 螺旋楼梯 / 星形十字柱 / 紧固件"
+    },
     "expressiveness_fan_probe": {
       "kind": "executable",
       "sources": ["tools/expressiveness_fan_probe.cpp"],

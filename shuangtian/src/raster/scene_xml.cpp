@@ -48,6 +48,8 @@ const std::map<std::string, std::string, std::less<>>& tag_to_shape_table() {
       {"Icosahedron", "icosahedron"}, {"Helix", "helix"},
       {"Extrude", "extrude"},      {"Revolve", "revolve"},
       {"Lathe", "revolve"},
+      {"Beam", "beam"},            {"Staircase", "staircase"},
+      {"Ornament", "ornament"},    {"Fastener", "fastener"},
       // 别名标签
       {"Ball", "sphere"},           {"Donut", "torus"},
       {"Spring", "helix"},          {"Cog", "gear"},
@@ -72,6 +74,8 @@ const std::map<std::string, std::string_view>& shape_to_tag_table() {
       {"octahedron", "Octahedron"}, {"dodecahedron", "Dodecahedron"},
       {"icosahedron", "Icosahedron"}, {"helix", "Helix"},
       {"extrude", "Extrude"},      {"revolve", "Revolve"},
+      {"beam", "Beam"},            {"staircase", "Staircase"},
+      {"ornament", "Ornament"},    {"fastener", "Fastener"},
   };
   return table;
 }

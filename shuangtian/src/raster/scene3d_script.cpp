@@ -566,6 +566,8 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
   obj.twist = static_cast<float>(json_get_double(node, "twist", obj.twist));
   obj.turns = static_cast<float>(json_get_double(node, "turns", obj.turns));
   obj.taper = static_cast<float>(json_get_double(node, "taper", obj.taper));
+  obj.thickness = static_cast<float>(json_get_double(node, "thickness", obj.thickness));
+  obj.section = json_get_string(node, "section", obj.section);
   obj.knot_p = static_cast<int>(json_get_i64(node, "knot_p", obj.knot_p));
   obj.knot_q = static_cast<int>(json_get_i64(node, "knot_q", obj.knot_q));
   obj.face_camera = json_get_bool(node, "face_camera", obj.face_camera);
@@ -771,7 +773,8 @@ auto read_object(const Json& node, std::size_t index) -> Result<SceneObjectSpec>
       "cube",     "ico_sphere",  "cone",    "capsule",   "disc",     "circle",
       "grid",     "tube",        "prism",   "gear",      "torus_knot", "arrow",
       "wedge",    "tetrahedron", "octahedron", "dodecahedron", "icosahedron", "helix",
-      "extrude",  "revolve"};
+      "extrude",  "revolve",     "beam",     "staircase",
+      "ornament", "fastener"};
   const bool is_obj_shape = obj.shape.rfind("obj:", 0) == 0;
   // 给了 `gltf` 时 `shape` 不参与几何选择（它只作为兜底默认值存在），
   // 所以不必强制它是内置图元名——否则写 `{"gltf": "a.glb"}` 会因为默认 `sphere`
@@ -1531,6 +1534,8 @@ auto build_mesh(const SceneObjectSpec& object) -> Result<Mesh> {
   params.knot_q = object.knot_q;
   params.turns = object.turns;
   params.taper = object.taper;
+  params.thickness = object.thickness;
+  params.section = object.section;
   // 草图轮廓（extrude/revolve）："x,y x,y …"（空格分点、逗号分坐标）。
   // 解析失败报错指路（点名与期望格式）；顺逆时针都收，生成器归一。
   if (!object.profile.empty()) {

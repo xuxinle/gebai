@@ -1,5 +1,7 @@
 #include "st/raster/primitives.hpp"
 
+#include "st/raster/mesh_ops.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -193,6 +195,10 @@ auto kind_name(PrimitiveKind kind) noexcept -> std::string_view {
     case PrimitiveKind::Helix: return "helix";
     case PrimitiveKind::Extrude: return "extrude";
     case PrimitiveKind::Revolve: return "revolve";
+    case PrimitiveKind::Beam: return "beam";
+    case PrimitiveKind::Staircase: return "staircase";
+    case PrimitiveKind::Ornament: return "ornament";
+    case PrimitiveKind::Fastener: return "fastener";
   }
   return "unknown";
 }
@@ -263,6 +269,16 @@ auto parse_kind(std::string_view name) -> std::optional<PrimitiveKind> {
       {"spring", PrimitiveKind::Helix},         {"coil", PrimitiveKind::Helix},
       {"extrude", PrimitiveKind::Extrude},      {"revolve", PrimitiveKind::Revolve},
       {"lathe", PrimitiveKind::Revolve},
+      // 结构件 / 装饰件 / 紧固件
+      {"beam", PrimitiveKind::Beam},            {"ibeam", PrimitiveKind::Beam},
+      {"i_beam", PrimitiveKind::Beam},          {"channel", PrimitiveKind::Beam},
+      {"angle_iron", PrimitiveKind::Beam},      {"box_beam", PrimitiveKind::Beam},
+      {"staircase", PrimitiveKind::Staircase},  {"spiral_stair", PrimitiveKind::Staircase},
+      {"stairs", PrimitiveKind::Staircase},
+      {"ornament", PrimitiveKind::Ornament},    {"star", PrimitiveKind::Ornament},
+      {"star_prism", PrimitiveKind::Ornament},  {"cross", PrimitiveKind::Ornament},
+      {"fastener", PrimitiveKind::Fastener},   {"bolt", PrimitiveKind::Fastener},
+      {"nut", PrimitiveKind::Fastener},        {"washer", PrimitiveKind::Fastener},
   };
   for (const Alias& alias : kAliases) {
     if (key == alias.name) return alias.kind;
@@ -282,6 +298,7 @@ auto sanitized(PrimitiveParams params) -> PrimitiveParams {
   params.minor_radius = std::min(params.minor_radius, params.major_radius);
   if (!(params.depth > kMinRadius)) params.depth = kMinRadius;
   if (params.height < 0.0f) params.height = 0.0f;
+  if (params.thickness < 0.0f) params.thickness = 0.0f;
   params.top_radius = std::clamp(params.top_radius, 0.0f, params.radius);
 
   // 3 是闭合环的下限（2 段会退化成一片"双面三角形"，法线无从定义）
@@ -955,10 +972,21 @@ auto sweep_profile(const std::vector<std::pair<float, float>>& profile, int segm
       const float a1 = angle_at(j, segments);
       const float u0 = static_cast<float>(i) / static_cast<float>(segments);
       const float u1 = static_cast<float>(j) / static_cast<float>(segments);
-      out.triangle(Vec3{0.0f, y, 0.0f}, twisted(ring_point(shape[level].first, a0, y), y, half_height, twist),
-                   twisted(ring_point(shape[level].first, a1, y), y, half_height, twist), normal,
-                   normal, normal, {0.5f, 0.5f}, {0.5f + 0.5f * u0, 0.5f + 0.5f * u0},
-                   {0.5f + 0.5f * u1, 0.5f + 0.5f * u1});
+      // 底盖绕序必须与顶盖**反向**（法线朝下）：否则整柱的有向体积为负，
+      // 散度定理把实体算成“倒扣的空壳”——布尔运算会把它当负实体（实测：
+      // 立方减贯通圆柱得到 A∩B 而非差集），merge 多段时体积还会正负相消。
+      const Vec3 p0{0.0f, y, 0.0f};
+      const Vec3 p1 = twisted(ring_point(shape[level].first, a0, y), y, half_height, twist);
+      const Vec3 p2 = twisted(ring_point(shape[level].first, a1, y), y, half_height, twist);
+      if (bottom) {
+        out.triangle(p0, p2, p1, normal, normal, normal, {0.5f, 0.5f},
+                     {0.5f + 0.5f * u1, 0.5f + 0.5f * u1},
+                     {0.5f + 0.5f * u0, 0.5f + 0.5f * u0});
+      } else {
+        out.triangle(p0, p1, p2, normal, normal, normal, {0.5f, 0.5f},
+                     {0.5f + 0.5f * u0, 0.5f + 0.5f * u0},
+                     {0.5f + 0.5f * u1, 0.5f + 0.5f * u1});
+      }
     }
   };
   if (cap_bottom) cap(0U, true);
@@ -1461,6 +1489,10 @@ auto make(PrimitiveKind kind, const PrimitiveParams& params) -> Mesh {
     case PrimitiveKind::Helix: return make_helix(params);
     case PrimitiveKind::Extrude: return make_extrude(params);
     case PrimitiveKind::Revolve: return make_revolve(params);
+    case PrimitiveKind::Beam: return make_beam(params);
+    case PrimitiveKind::Staircase: return make_staircase(params);
+    case PrimitiveKind::Ornament: return make_ornament(params);
+    case PrimitiveKind::Fastener: return make_fastener(params);
   }
   return Mesh{};
 }
@@ -1533,6 +1565,217 @@ auto make_revolve(const PrimitiveParams& params) -> Mesh {
   if (first_radius > 1e-5f) cap(rings.front(), false);
   if (last_radius > 1e-5f) cap(rings.back(), true);
   return out.finish();
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// 型材与结构件（截面 = 多边形 → 复用 extrude_polygon）
+// ────────────────────────────────────────────────────────────────────────────
+
+/// 工字钢截面（I 形），12 点，以中心为原点。
+/// `w` 全宽、`h` 全高、`t` 壁厚。
+auto i_section(float w, float h, float t) -> std::vector<std::pair<float, float>> {
+  const float hw = w * 0.5f;
+  const float hh = h * 0.5f;
+  const float ht = t * 0.5f;
+  return {{-hw, -hh}, {hw, -hh}, {hw, -hh + t}, {ht, -hh + t}, {ht, hh - t},
+          {hw, hh - t}, {hw, hh}, {-hw, hh}, {-hw, hh - t}, {-ht, hh - t},
+          {-ht, -hh + t}, {-hw, -hh + t}};
+}
+
+/// 槽钢截面（C 形/开口）——I 形去掉一侧翼缘的对称半边。
+auto channel_section(float w, float h, float t)
+    -> std::vector<std::pair<float, float>> {
+  const float hw = w * 0.5f;
+  const float hh = h * 0.5f;
+  return {{-hw, -hh}, {hw, -hh}, {hw, -hh + t}, {-hw + t, -hh + t},
+          {-hw + t, hh - t}, {hw, hh - t}, {hw, hh}, {-hw, hh}};
+}
+
+/// 角钢截面（L 形）。
+auto angle_section(float w, float h, float t)
+    -> std::vector<std::pair<float, float>> {
+  const float hw = w * 0.5f;
+  const float hh = h * 0.5f;
+  return {{-hw, -hh}, {hw, -hh}, {hw, -hh + t}, {-hw + t, -hh + t},
+          {-hw + t, hh}, {-hw, hh}};
+}
+
+/// 方管截面（空心矩形）——**不靠单多边形**（带孔轮廓耳切法无法正确表达），
+/// 而是“外套减内套”两段拉伸的布尔差。
+auto make_beam(const PrimitiveParams& params) -> Mesh {
+  const PrimitiveParams p = sanitized(params);
+  const float w = p.radius * 2.0f;
+  const float h = p.height > 0.0f ? p.height : p.radius * 2.0f;
+  const float t = p.thickness > 0.0f ? p.thickness : std::min(w, h) * 0.12f;
+  const std::string& kind = p.section;
+  if (kind == "box" || kind == "tube") {
+    // 空心：外套减内套（长度方向两端都堶一点，保证内腔贯穿）
+    const float hw = w * 0.5f;
+    const float hh = h * 0.5f;
+    const float extra = p.depth * 0.25f;   // 内腔沿长度方向超出（保证贯穿）
+    const std::vector<std::pair<float, float>> outer = {
+        {-hw, -hh}, {hw, -hh}, {hw, hh}, {-hw, hh}};
+    const std::vector<std::pair<float, float>> inner = {
+        {-hw + t, -hh + t}, {hw - t, -hh + t}, {hw - t, hh - t}, {-hw + t, hh - t}};
+    Mesh shell = extrude_polygon(outer, p.depth * 0.5f, 0.0f, linear_color(p.color),
+                                 p.with_uv);
+    Mesh cavity = extrude_polygon(inner, p.depth * 0.5f + extra, 0.0f,
+                                  linear_color(p.color), p.with_uv);
+    const auto result = boolean(shell, cavity, BooleanOp::Subtract);
+    return result.has_value() ? *result : shell;
+  }
+  std::vector<std::pair<float, float>> section;
+  if (kind == "channel" || kind == "c") {
+    section = channel_section(w, h, t);
+  } else if (kind == "angle" || kind == "l") {
+    section = angle_section(w, h, t);
+  } else {
+    section = i_section(w, h, t);
+  }
+  return extrude_polygon(std::move(section), p.depth * 0.5f, 0.0f,
+                         linear_color(p.color), p.with_uv);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// 装饰截面（星形 / 十字形）
+// ────────────────────────────────────────────────────────────────────────────
+
+auto make_ornament(const PrimitiveParams& params) -> Mesh {
+  const PrimitiveParams p = sanitized(params);
+  const int points = std::max(p.sides > 0 ? p.sides : p.teeth, 3);
+  std::vector<std::pair<float, float>> polygon;
+  if (p.section == "cross" || p.section == "plus") {
+    const float arm = p.thickness > 0.0f ? p.thickness : p.radius * 0.42f;
+    const float reach = p.radius;
+    polygon = {{-arm, -reach}, {arm, -reach}, {arm, -arm}, {reach, -arm},
+               {reach, arm}, {arm, arm},   {arm, reach}, {-arm, reach},
+               {-arm, arm}, {-reach, arm}, {-reach, -arm}, {-arm, -arm}};
+  } else {
+    // 星形：内外交替。`tooth_height` 控制锐利度（外半径 - 内半径）。
+    const float outer = p.radius;
+    const float inner = p.tooth_height > 0.0f ? std::max(p.radius - p.tooth_height, p.radius * 0.15f)
+                                             : p.radius * 0.45f;
+    polygon.reserve(static_cast<std::size_t>(points) * 2U);
+    for (int i = 0; i < points * 2; ++i) {
+      const float r = (i % 2 == 0) ? outer : inner;
+      const float theta = kPi * static_cast<float>(i) / static_cast<float>(points);
+      polygon.emplace_back(r * std::sin(theta), r * std::cos(theta));
+    }
+  }
+  return extrude_polygon(std::move(polygon), p.depth * 0.5f, 0.0f,
+                         linear_color(p.color), p.with_uv);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// 螺旋楼梯
+// ────────────────────────────────────────────────────────────────────────────
+
+auto make_staircase(const PrimitiveParams& params) -> Mesh {
+  const PrimitiveParams p = sanitized(params);
+  const int steps = std::max(p.teeth, 3);
+  const float turns = std::max(p.turns, 0.25f);
+  const float radius = p.radius;           // 踏面外半径
+  const float rise = p.depth * 0.5f;       // 总升高的一半（depth = 总高）
+  const float column = p.height > 0.0f ? p.height : radius * 0.14f;  // 中心柱直径
+  const float tread = std::max(radius * 0.07f, 0.01f);               // 踏面厚度
+  std::vector<Mesh> parts;
+
+  // 中心柱
+  if (column > 1e-4f) {
+    parts.push_back(Mesh::cylinder(column * 0.5f, rise * 2.0f + tread * 2.0f, 24,
+                                   p.color));
+  }
+  // 每级踏步：一块扇形板（角度 = 一圈 / 每圈级数的一半，保证相邻踩得着）
+  const float total = turns * 2.0f * kPi;
+  const float step_angle = total / static_cast<float>(steps);
+  for (int i = 0; i < steps; ++i) {
+    const float theta0 = static_cast<float>(i) * step_angle;
+    const float theta1 = theta0 + step_angle * 0.9f;  // 90% 占空，留缝
+    const float y = -rise + (rise * 2.0f) * (static_cast<float>(i) / static_cast<float>(steps - 1));
+    // 扇形轮廓（内半径从中心柱起，外半径到 radius）
+    const float inner_r = column * 0.5f;
+    std::vector<std::pair<float, float>> sector;
+    constexpr int kArcSegments = 4;
+    for (int k = 0; k <= kArcSegments; ++k) {
+      const float a = theta0 + (theta1 - theta0) * static_cast<float>(k) /
+                                    static_cast<float>(kArcSegments);
+      sector.emplace_back(radius * std::sin(a), radius * std::cos(a));
+    }
+    for (int k = kArcSegments; k >= 0; --k) {
+      const float a = theta0 + (theta1 - theta0) * static_cast<float>(k) /
+                                    static_cast<float>(kArcSegments);
+      sector.emplace_back(inner_r * std::sin(a), inner_r * std::cos(a));
+    }
+    Mesh tread_mesh = extrude_polygon(std::move(sector), tread * 0.5f, 0.0f,
+                                      linear_color(p.color), p.with_uv);
+    tread_mesh = transform(tread_mesh, math::Mat4::translation(Vec3{0.0f, y, 0.0f}));
+    parts.push_back(std::move(tread_mesh));
+  }
+  return merge(parts);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// 紧固件（螺栓 / 螺母 / 垫圈）
+// ────────────────────────────────────────────────────────────────────────────
+
+auto make_fastener(const PrimitiveParams& params) -> Mesh {
+  const PrimitiveParams p = sanitized(params);
+  const int sides = std::max(p.sides > 0 ? p.sides : 6, 3);  // 六角默认
+  const float outer = p.radius;
+  const float head_h = p.depth;
+  const float hole_r = p.thickness > 0.0f ? p.thickness : outer * 0.38f;
+  std::vector<Mesh> parts;
+  const std::string& kind = p.section;
+
+  // 统一走 primitives 的生成器：`Mesh::cylinder` 是另一套旧实现，绕序与
+  // 这里的生成器**相反**（有向体积为负）——混用会让散度定理体积正负相消
+  //（实测：螺栓 0.009 → 0.0012）。两者只该留一套，此处一律用 primitives。
+  const auto cylinder = [&](float radius, float height, int segments) {
+    PrimitiveParams cp{};
+    cp.radius = radius;
+    cp.depth = height;
+    cp.segments = segments;
+    cp.color = p.color;
+    cp.with_uv = p.with_uv;
+    return make_cylinder(cp);
+  };
+  if (kind == "washer") {
+    // 垫圈：扁环（外圆柱减内圆柱）
+    const float h = std::max(head_h * 0.22f, 0.004f);
+    auto ring = boolean(cylinder(outer, h, 32), cylinder(hole_r, h * 2.0f, 24),
+                        BooleanOp::Subtract);
+    if (ring.has_value()) return *ring;
+    return cylinder(outer, h, 32);
+  }
+  if (kind == "nut") {
+    // 螺母：六角棱柱 - 内孔
+    PrimitiveParams hex = p;
+    hex.sides = sides;
+    hex.segments = sides;
+    Mesh body = make_prism(hex);
+    const auto drilled = boolean(body, cylinder(hole_r, head_h * 2.0f, 24),
+                                BooleanOp::Subtract);
+    return drilled.has_value() ? *drilled : body;
+  }
+  // 螺栓（默认）：六角头 + 杆
+  //
+  // ⚠ 两段必须先**绕序归一**再 merge：`Mesh::prism`（棱柱）是正绕序，
+  // 而 `Mesh::cylinder` 是负绕序（法线朝内）——直接 merge 会让散度定理
+  // 体积正负相消（实测 0.009 → 0.0012）。布尔内核已内置归一，
+  // 这里手工做同一件事：合并前统一翻成正实体。
+  PrimitiveParams hex = p;
+  hex.sides = sides;
+  hex.segments = sides;
+  hex.depth = head_h;
+  Mesh head = make_prism(hex);
+  head = transform(head, math::Mat4::translation(Vec3{0.0f, head_h * 0.5f, 0.0f}));
+  parts.push_back(std::move(head));
+  // 杆：从头的底面往下（长度 = turns × 头厚，至少 2 倍头厚）
+  const float shank = std::max(p.turns, 2.0f) * head_h;
+  Mesh shaft = cylinder(hole_r, shank, 20);
+  shaft = transform(shaft, math::Mat4::translation(Vec3{0.0f, -shank * 0.5f, 0.0f}));
+  parts.push_back(std::move(shaft));
+  return merge(parts);
 }
 
 auto make_from_name(std::string_view name, const PrimitiveParams& params) -> Result<Mesh> {

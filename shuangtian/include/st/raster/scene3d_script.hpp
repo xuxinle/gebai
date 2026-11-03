@@ -139,6 +139,11 @@ struct SceneObjectSpec {
   /// 螺旋的圈数与收缩；纽结的 (p, q)。
   float turns{3.0f};
   float taper{0.0f};
+  /// 壁厚（beam 型钢 / fastener 紧固件；0 = 按比例取默认）。
+  float thickness{0.0f};
+  /// 截面/零件选型：beam 的 i/channel/angle/box、ornament 的 star/cross、
+  /// fastener 的 bolt/nut/washer（空 = 该图元默认型）。
+  std::string section{};
   int knot_p{2};
   int knot_q{3};
   /// 平面/盘/环带是否朝 +Z（立面），默认朝 +Y（地面）。
