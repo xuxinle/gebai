@@ -1829,6 +1829,26 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
   // 目标三元组：链接侧必须与编译侧**同一个**（否则拿 A 目标的运行库链 B 目标的对象）
   for (const auto& item : toolchain.target_args()) args.push_back(item);
 
+  // **死代码裁剪**（配合编译侧的 `-ffunction-sections -fdata-sections`）。
+  //
+  // 为何要成对出现：编译期把每个函数/数据分到独立 section，链接期才有粒度去丢。
+  // 不开时链接器只能以 **.o 文件**为单位保留——一个 .o 里有一处被引用，
+  // 整个文件的函数全部进二进制。
+  //
+  // 实测代价与收益（gbcode，2026-11-04）：
+  //   源码对三维/裁云/镂月引用 0 次，二进制里却有 69 个三维符号（286KB）；
+  //   QuickJS（只在 `--enable-script` 时用）完整占 1.07MB。
+  //
+  // 为何对所有档位都开：它只是给链接器删代码的**许可**，不会删掉被引用的东西；
+  // dev/debug 档开着也能让加载/调试对象更小。
+  // 交叉编译时同样适用（GNU ld / lld / mold 都认这个旗标）。
+  // 平台差异：GNU ld / lld / mold 用 `--gc-sections`；macOS 的 ld64 用 `-dead_strip`。
+  if (toolchain.platform == "darwin") {
+    args.emplace_back("-Wl,-dead_strip");
+  } else {
+    args.emplace_back("-Wl,--gc-sections");
+  }
+
   // ⚠ **以下所有 `args` 追加必须发生在 `full_args` 拼接之前**。
   //
   // 踩过的真坑（2026-10-18）：`full_args` 是 `args` 的**快照**（拷贝）。
@@ -2378,30 +2398,40 @@ auto profile_flags(std::string_view profile) -> Result<std::vector<std::string>>
   // 值拷贝——没有任何路径会释放偏移指针。**同一文件同一告警集，`-O1` 干净、`-O2` 报错**。
   // 真越界由 `san` 档的 ASan 在运行期抓（那是判据，不是这里的静态推理）。
   // 它只出现在 release：`dev`/`san` 用 `-O1`，`quick`/`debug` 用 `-O0`。
+  //
+  // 收口：每个档位各自返回本档专属的旗舰，**函数/数据分段在出口统一追加**
+  //（`with_section_flags`）——它不随档位变，且每个 return 都手写一遍必然会漏。
+  const auto with_section_flags = [](std::vector<std::string> flags) {
+    flags.emplace_back("-ffunction-sections");
+    flags.emplace_back("-fdata-sections");
+    return flags;
+  };
   if (profile == "dev") {
     // 快速迭代档（默认）：-O1 兼顾编译速度与运行帧率（日常开发/无头验证用）
-    return std::vector<std::string>{"-O1", "-g1", "-fno-omit-frame-pointer",
-                                    kOptimizerFalsePositives[0], kOptimizerFalsePositives[1],
-                                    kOptimizerFalsePositives[2]};
+    return with_section_flags({"-O1", "-g1", "-fno-omit-frame-pointer",
+                               kOptimizerFalsePositives[0], kOptimizerFalsePositives[1],
+                               kOptimizerFalsePositives[2]});
   }
   if (profile == "quick") {
     // 最速迭代档：-O0（单文件编译最快，适合"改一行看一眼"的内循环）
-    return std::vector<std::string>{"-O0", "-g1"};
+    return with_section_flags({"-O0", "-g1"});
   }
   if (profile == "debug") {
     // 全量调试档：-O0 + 完整 `-g`（逐变量单步、完整类型信息）——只在真的需要调试时用
-    return std::vector<std::string>{"-O0", "-g", "-fno-omit-frame-pointer"};
+    return with_section_flags({"-O0", "-g", "-fno-omit-frame-pointer"});
   }
   if (profile == "release") {
-    return std::vector<std::string>{"-O2", "-DNDEBUG", kOptimizerFalsePositives[0],
-                                    kOptimizerFalsePositives[1], kOptimizerFalsePositives[2],
-                                    kOptimizerFalsePositives[3]};
+    return with_section_flags({"-O2", "-DNDEBUG", kOptimizerFalsePositives[0],
+                               kOptimizerFalsePositives[1], kOptimizerFalsePositives[2],
+                               kOptimizerFalsePositives[3]});
   }
   if (profile == "san") {
     // sanitizer 档同样关掉两个"优化 + 系统头"下的 GCC 误报：
     // `-Wmaybe-uninitialized` 会在 libstdc++ `<regex>`（lint 规则用到）里对 `std::function`
     // 的控制块报"可能未初始化"；真实未初始化读由 UBSan/ASan 在运行期抓，防护强度不受影响。
     // 保留完整 `-g`：崩溃报告里的变量值是可行动信息，不属于"迭代速度"可牺牲的部分。
+    // ⚠ sanitizer 档**不加**分段旗标：ASan 的段表与大量小 section 组合会显著拖慢链接与运行，
+    // 而该档本来就是诊断用、不交付产物。
     return std::vector<std::string>{"-O1", "-g", "-fno-omit-frame-pointer",
                                     "-fsanitize=address,undefined", "-Wno-maybe-uninitialized",
                                     "-Wno-null-dereference", "-Wno-array-bounds",
