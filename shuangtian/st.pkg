@@ -99,6 +99,9 @@
     }
   },
   "targets": {
+    "all": { "kind": "group",
+             "libraries": ["gallery", "gbcode", "louyue", "caiyun", "xmlapp", "xiangqi", "cefu", "gedou"],
+             "//libraries": "group 的 libraries 是**成员目标**（依次构建），不是链接的库——语义见 manifest.hpp 的 TargetSpec::libraries。" },
     "st_core": { "kind": "library",
                  "include_sources": ["src/core/*.cpp", "src/codec/*.cpp", "src/math/*.cpp",
                                      "src/net/*.cpp", "src/xml/*.cpp", "src/test/*.cpp",

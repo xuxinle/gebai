@@ -1992,8 +1992,35 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
   // 同名归档会被后一个目标重建覆盖——并行 `st build A & st build B` 会互相写坏
   //（与 `st test` 的分片并行同一类隐患）。
   std::string library_archive;
-  std::vector<CompileUnit> direct_units = units;
-  if (!units.empty() && target_units != nullptr) {
+  // 直传集 = **目标级单元**（入口与应用自己的源）+ 无归档能力时的库级单元。
+  //
+  // ❗ 这里有两个互相制约的事实，改动前务必都读一遍：
+  //
+  // ① **库级单元不能直传**（否则按需链接失效）：GNU ld 的 `--gc-sections` 对
+  //    “直接写在命令行上的 `.o`”不做段级裁剪，只有归档成员才会按引用拉取。
+  //    把库级单元也直传 = sqlite/QuickJS/未引用组件全部进产物（实测过）。
+  //    ⇒ 库级只进归档（上面那段注释就是它的取证）。
+  //
+  // ② **目标级单元必须直传**（否则入口丢失）：入口符号（main / WinMain）不在
+  //    “已引入的未定义符号”里，归档扫描不会拉它。
+  //
+  // ❗ 曾经的错写法：`direct_units = units; if (!units.empty() && ...) direct_units = *target_units;`
+  //   ——库级为空、目标级非空的工程（最小工程、`tools/` 下的单文件探针）会跳过 if，
+  //   于是**目标 .o 一个都没传**，报 `undefined symbol: WinMain`。
+  //   形状很辟：本仓自己的 `st`（库级与目标级都非空）完全正常，只有小工程会挂。
+  //
+  // 正解：库级只在 `target_units != nullptr`（即“已做库/目标划分”）���进归档，
+  // 否则退回旧的全直传路径；两种情况下**目标级都直传**。
+  const bool split_available = !units.empty() && target_units != nullptr;
+  std::vector<CompileUnit> direct_units;
+  if (!split_available) {
+    // 没归档能力（库级源为空或调用方未给划分信息）——全直传，行为同改造前。
+    direct_units = units;
+  }
+  if (target_units != nullptr) {
+    direct_units.insert(direct_units.end(), target_units->begin(), target_units->end());
+  }
+  if (split_available) {
     const std::string archive_tag = options.target.empty() ? std::string("library")
                                                            : options.target;
     library_archive =
@@ -2002,10 +2029,6 @@ inline constexpr std::size_t kCommandLineHeadroom = 2048;
         !status) {
       return forward_error(status.error());
     }
-    // ⚠ 入口所在单元绝不能进归档：入口符号（main / WinMain）不在“已引入的
-    //   未定义符号”里，归档扫描不会拉它——入口丢了，链接报 undefined reference。
-    //   目标级单元含入口（应用 main / 测试 runner），全部直传。
-    direct_units = *target_units;
   }
 
   // 对象与额外源："一参数一项"，进响应文件（`long_args`）。
@@ -2970,6 +2993,58 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   const TargetSpec* target = manifest.find_target(options.target);
 if (target == nullptr) {
   return unexpected(ErrorCode::NotFound, std::format("目标不存在: {}", options.target));
+}
+
+// ## 合成目标（`kind = "group"`）：按 `libraries` 列的成员依次构建
+//
+// 典型用途：`st build all`（清单里 `all` 是 group，成员 = 全部真实应用）。
+// 为何在**这里**分派而不是在 CLI 层循环：分派在 build() 里做，则
+// `st build all --profile=release`、`--force`、`--jobs` 等选项自然对每个成员生效，
+// 而 CLI 层循环要手写一遍选项传递（且容易漏）。
+//
+// 为何**不并行构建成员**：每个成员的编译已是内部并行（`--jobs` 路上），
+// 两个成员同时跑会共享 `build/<档位>/obj/` 与 PCH——实测相撞会报
+// `io: rename ... .o.tmp: No such file or directory`（并行 `st build A & st build B`
+// 会互相写坏）。串行是这里的正解，不是保守。
+if (target->kind == "group") {
+  std::vector<std::string> built;
+  for (const auto& member : target->libraries) {
+    const TargetSpec* member_target = manifest.find_target(member);
+    if (member_target == nullptr) {
+      return unexpected(ErrorCode::Invalid,
+                        std::format("合成目标 {} 的 libraries 里 '{}' 不存在", target->name, member));
+    }
+    if (member_target->kind == "group") {
+      // 不允许嵌套：group 的成员应当是**真的能出产物的目标**。
+      // （嵌套会带来环检测与构建顺序的额外复杂度，而当前需求只是“一批应用”。）
+      return unexpected(ErrorCode::Invalid,
+                        std::format("合成目标 {} 的成员 '{}' 也是 group（不支持嵌套）",
+                                    target->name, member));
+    }
+    BuildOptions member_options = options;
+    member_options.target = member;
+    // 成员内部仍会走“先递归建它的库依赖”那段逻辑（st_core 等）。
+    auto member_stats = build(manifest, member_options);
+    if (!member_stats) {
+      return unexpected(member_stats.error().code,
+                        std::format("[{}] {}", member, member_stats.error().message));
+    }
+    built.push_back(member);
+    stats.units_total += member_stats->units_total;
+    stats.units_rebuilt += member_stats->units_rebuilt;
+    stats.units_cached += member_stats->units_cached;
+    stats.compile_ms += member_stats->compile_ms;
+    stats.link_ms += member_stats->link_ms;
+  }
+  stats.linked = true;
+  // 产物字段记一行“N 个目标”，而不是最后一个成员的名字（那会误导）。
+  // 拼接走 `vector<string_view>`：`st::join` 只收 string_view（零拷贝，不偷字符串）。
+  std::vector<std::string_view> names_view;
+  names_view.reserve(built.size());
+  for (const auto& name : built) names_view.emplace_back(name);
+  stats.artifact = std::format("{} 个目标（{}）", built.size(), st::join(names_view, " "));
+  stats.elapsed_ms = (time::now_ns() - start_ns) / 1'000'000;
+  return stats;
 }
 
 // ## 先递归构建本目标依赖的库目标

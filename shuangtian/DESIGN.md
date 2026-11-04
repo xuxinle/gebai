@@ -5549,11 +5549,62 @@ gallery（用 3D）仍保留 3D 符号 54 个、体积从 ≈9.5 MB → **6.56 M
 > 被链入，它的 `GpuScene3d` 实现（≈64 KB）随同一 `.o` 成员进产物。要彻底分离需拆文件
 > （`platform_d3d11.cpp` → 画布 / 三维两块），收益 0.8%、风险是动平台层——已记入 `docs/BACKLOG.md` P2。
 
+### 7.5.3 合成目标（`kind = "group"`）：`st build all`
+
+#### 要解决的事
+
+仓里有 150+ 个目标，其中 ~140 个是一次性探针（`tools/*_probe.cpp`）。“把应用全编一遍”
+应当是**8 个真实应用**（带 GUI/图标/嵌入的那批），而不是把探针也带上——那会把 30 秒
+变成十几分钟，而探针本身由各自的实验驱动。
+
+#### 做法：显式列成员，不自动枚举
+
+```json
+"all": { "kind": "group",
+         "libraries": ["gallery", "gbcode", "louyue", "caiyun", "xmlapp", "xiangqi", "cefu", "gedou"] }
+```
+
+- `kind: "group"` 的目标**不编译任何单元**，只是把 `libraries` 里列的成员**依次**构建。
+- 复用 `libraries` 字段：它本来描述“本目标依赖哪些其它目标”，group 只是把“链接它们”
+  换成“构建它们”（语义写在 `manifest.hpp` 的 `TargetSpec::libraries` 上）。
+- **不按 “所有 executable” 自动枚举**：那等于把探针也带上；而“该构建什么”应当是
+  清单里的**事实**，不是从 kind 推出来的猜测。
+
+#### 三个刻意选的边界
+
+| 边界 | 为什么 |
+|---|---|
+| 成员名写错 → **报错**，不静默跳过 | `all` 的全部意义是“一个不漏”；静默跳过会开心返回 0 而少编一个应用 |
+| 不允许嵌套 group | 嵌套要额外写环检测与展开顺序，而需求只是“一批应用” |
+| 成员**串行**构建，不并行 | 每个成员内部已按 `--jobs` 并行；两个成员同时跑会共享 `build/<档位>/obj/` 与 PCH——实测相撞报 `io: rename ... .o.tmp: No such file or directory` |
+
+#### 顺带修掉的一个真 bug（入口丢失）
+
+写 group 的回归测试（最小工程：库级源为空 + 目标级源一个文件）时暴露了按需链接的缺陷：
+
+```cpp
+// 错：库级为空、目标级非空时，整个 if 被跳过 → direct_units 只剩空的 units
+std::vector<CompileUnit> direct_units = units;
+if (!units.empty() && target_units != nullptr) { ... direct_units = *target_units; }
+```
+
+于是**目标 `.o` 一个都没传给链接器**，报 `undefined symbol: WinMain`（入口丢了）。
+可怕的是它的形状：本仓自己的 `st`（库级与目标级都非空）完全正常，**只有最小工程与小工具
+目标会挂**——“大工程好、小工程坏”是最难查的一类。正解是把两部分**合并**进直传集：
+
+```cpp
+std::vector<CompileUnit> direct_units = units;
+if (target_units != nullptr) direct_units.insert(direct_units.end(), ...);
+```
+
+钉住它的用例：`tests/pkg_library_test.cpp` 的 `group_*` 四个（解析/成员写错/嵌套/逐个成员
+产物与运行）。
+
 ### 7.6 CLI
 | 命令 | 作用 |
 |---|---|
 | `st init <name>` | 生成工程骨架 |
-| `st build [target] [--profile dev\|quick\|debug\|release\|san] [--locked] [-j N] [--jobs-large N] [--max-memory MiB]` | 构建 |
+| `st build [target] [--profile dev\|quick\|debug\|release\|san] [--locked] [-j N] [--jobs-large N] [--max-memory MiB]` | 构建。目标省略 = 只编库级源；**`st build all` = 构建全部真实应用**（清单里的 `kind: "group"` 合成目标，不含 ~140 个一次性探针，见 §7.5.3） |
 | `st run <target> [args…]` | 构建并运行。**壳层源码未改时跳过构建**（XML/JS 是运行期读的，改它们不用编；判据：目标第一条 `sources` 比产物新不新，`--force` 强制重建）——改文件即生效见 §4.2.28 |
 | `st test [filter] [--san] [--slow] [--test-jobs N]` | 构建并运行单测（含 sanitizer 档）；`--list` 只列用例不跑；`--format junit [--junit-out 路径]` 写逐用例 XML 报告（CI 消费）；**`--slow` 额外跑慢/环境敏感用例**（默认跳过，见 §8.5）；**`--test-jobs N` 把用例分给 N 个测试进程并行跑**（默认 = 硬件并发/2、上限 16；JUnit 报告由父进程合并） |
 | `st lint [--explain <rule>]` | 禁令静态扫描（`CONVENTIONS.md` §8） |

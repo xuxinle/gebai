@@ -43,15 +43,21 @@ inline constexpr std::array<std::string_view, 22> known_keys{
   if (!json.is_object()) {
     return unexpected(ErrorCode::Parse, std::format("目标 {} 必须是 JSON 对象", name));
   }
-  TargetSpec target;
+    TargetSpec target;
   target.name = name;
   target.kind = json_get_string(json, "kind", "executable");
   // kind 必须显式合法：拼错（如 "lib" / "static-library"）不能静默当 executable——
   // 那会得到一个名叫 `xxx` 的可执行文件，而清单里写的是“库”，排查时看不出。
-  if (target.kind != "executable" && target.kind != "library") {
+  //
+  // `"group"`（2026-11-04 新增）：**合成目标**——本身不编译任何单元，只是把
+  // `targets` 里列的一批目标串起来依次构建（
+  // `st build all` = 构建清单里所有真实应用）。
+  // 为何需要它：仓里有 150+ 个目标，其中 ~140 个是一次性探针（`tools/*_probe.cpp`）；
+  // “把应用全编一遗”不该把所有探针也带上（那是几分钟到十几分钟的差别）。
+  if (target.kind != "executable" && target.kind != "library" && target.kind != "group") {
     return unexpected(ErrorCode::Parse,
-                      std::format("目标 {} 的 kind 非法：{}（只能是 executable 或 library）", name,
-                                  target.kind));
+                      std::format("目标 {} 的 kind 非法：{}（只能是 executable / library / group）",
+                                  name, target.kind));
   }
   target.sources = json_get_string_array(json, "sources");
   target.flags = json_get_string_array(json, "flags");

@@ -188,3 +188,169 @@ auto main() -> int {
   ST_CHECK_EQ(run->exit_code, 0);
   ST_CHECK(run->stdout_text.find("add=5") != std::string::npos);
 }
+
+/// `kind = "group"`：**合成目标**（`st build all` 的机制）。
+///
+/// ## 为什么这批用例必须存在
+///
+/// “全部应用一键构建”很容易写成“遍历所有 executable”——仓里 150+ 目标中 ~140 个
+/// 是一次性探针，那会把 30 秒的事变成十几分钟。所以 group 是**显式列成员**的，
+/// 而显式列就得钉住三件事：
+///
+/// 1. 成员真的被构建（且产物都在），否则“全部编过了”是句假话；
+/// 2. 成员名写错要**明确报错**（而不是默默跳过一个应用）——这是显式清单
+///    最大的风险面；
+/// 3. 不允许嵌套 group（否则要额外写环检测，而当前需求只是“一批应用”）。
+ST_TEST(manifest_parses_group_kind) {
+  TempDir temp("st_group_parse");
+  const std::string pkg = st::fs::join(temp.path(), "st.pkg");
+  ST_REQUIRE(st::fs::write_text(pkg, R"({
+  "shuangtian_pkg_format": 1,
+  "name": "groupprobe",
+  "version": "0.1.0",
+  "kind": "static_library",
+  "cxx_standard": 23,
+  "include_dirs": ["src"],
+  "sources": [],
+  "targets": {
+    "all": { "kind": "group", "libraries": ["a", "b"] },
+    "a": { "kind": "executable", "sources": ["src/a.cpp"] },
+    "b": { "kind": "executable", "sources": ["src/b.cpp"] }
+  }
+})")
+                 .has_value());
+
+  const auto parsed = st::pkg::Manifest::load(pkg);
+  ST_REQUIRE(parsed.has_value());
+  const auto* group = parsed->find_target("all");
+  ST_REQUIRE(group != nullptr);
+  ST_CHECK_EQ(group->kind, std::string("group"));
+  // 成员就在 `libraries` 里（group 与 library 共用同一个字段，语义见 manifest.hpp）
+  ST_CHECK_EQ(group->libraries.size(), std::size_t{2});
+}
+
+/// 合成目标的成员名写错 → 必须报错，**不能静默跳过**。
+///
+/// 为何这条重要：`all` 的存在意义是“一个应用都不漏”。若成员名写错就静默跳过，
+/// `st build all` 会开心地返回 0，而少编了一个应用——那正是这个目标要防的事。
+ST_TEST(group_rejects_unknown_member) {
+  TempDir temp("st_group_bad_member");
+  const std::string root = temp.path();
+  ST_REQUIRE(st::fs::create_directories(st::fs::join(root, "src")).has_value());
+  ST_REQUIRE(st::fs::write_text(st::fs::join(st::fs::join(root, "src"), "a.cpp"),
+                                "auto main() -> int { return 0; }\n")
+                 .has_value());
+  ST_REQUIRE(st::fs::write_text(st::fs::join(root, "st.pkg"), R"({
+  "shuangtian_pkg_format": 1,
+  "name": "groupprobe2",
+  "version": "0.1.0",
+  "kind": "static_library",
+  "cxx_standard": 23,
+  "include_dirs": ["src"],
+  "sources": [],
+  "targets": {
+    "all": { "kind": "group", "libraries": ["a", "no_such_app"] },
+    "a": { "kind": "executable", "sources": ["src/a.cpp"] }
+  }
+})")
+                 .has_value());
+
+  const auto manifest = st::pkg::Manifest::load(st::fs::join(root, "st.pkg"));
+  ST_REQUIRE(manifest.has_value());
+  st::pkg::BuildOptions options{};
+  options.target = "all";
+  options.profile = "dev";
+  options.no_tests = true;
+  const auto stats = st::pkg::build(*manifest, options);
+  ST_REQUIRE(!stats.has_value());   // 必须失败
+  ST_CHECK(stats.error().message.find("no_such_app") != std::string::npos);
+}
+
+/// group 不允许嵌套：成员是 group 就报错。
+///
+/// 不做嵌套的理由：嵌套要额外写环检测与展开顺序，而当前需求只是“一批应用”；
+/// 而且一旦允许，`all` 里列 `all` 这种笔误就会变成无限递归。
+ST_TEST(group_rejects_nested_group) {
+  TempDir temp("st_group_nested");
+  const std::string root = temp.path();
+  ST_REQUIRE(st::fs::create_directories(st::fs::join(root, "src")).has_value());
+  ST_REQUIRE(st::fs::write_text(st::fs::join(st::fs::join(root, "src"), "a.cpp"),
+                                "auto main() -> int { return 0; }\n")
+                 .has_value());
+  ST_REQUIRE(st::fs::write_text(st::fs::join(root, "st.pkg"), R"({
+  "shuangtian_pkg_format": 1,
+  "name": "groupprobe3",
+  "version": "0.1.0",
+  "kind": "static_library",
+  "cxx_standard": 23,
+  "include_dirs": ["src"],
+  "sources": [],
+  "targets": {
+    "all": { "kind": "group", "libraries": ["inner"] },
+    "inner": { "kind": "group", "libraries": ["a"] },
+    "a": { "kind": "executable", "sources": ["src/a.cpp"] }
+  }
+})")
+                 .has_value());
+
+  const auto manifest = st::pkg::Manifest::load(st::fs::join(root, "st.pkg"));
+  ST_REQUIRE(manifest.has_value());
+  st::pkg::BuildOptions options{};
+  options.target = "all";
+  options.profile = "dev";
+  options.no_tests = true;
+  const auto stats = st::pkg::build(*manifest, options);
+  ST_REQUIRE(!stats.has_value());
+  ST_CHECK(stats.error().message.find("group") != std::string::npos);
+}
+
+/// 合成目标真把**每个成员都建了**（两个可执行，产物都在且都能跑）。
+///
+/// “聚合统计”很容易写成“只建了最后一个”：那样 `st build all` 也返回 0、
+/// 也打一行“8 个目标”，而实际只出了一个。所以判据钉在**每个成员产物存在**上。
+ST_TEST(group_builds_every_member) {
+  TempDir temp("st_group_build");
+  const std::string root = temp.path();
+  ST_REQUIRE(st::fs::create_directories(st::fs::join(root, "src")).has_value());
+  ST_REQUIRE(st::fs::write_text(st::fs::join(st::fs::join(root, "src"), "a.cpp"),
+                                "#include <cstdio>\nauto main() -> int { std::puts(\"a-ok\"); return 0; }\n")
+                 .has_value());
+  ST_REQUIRE(st::fs::write_text(st::fs::join(st::fs::join(root, "src"), "b.cpp"),
+                                "#include <cstdio>\nauto main() -> int { std::puts(\"b-ok\"); return 0; }\n")
+                 .has_value());
+  ST_REQUIRE(st::fs::write_text(st::fs::join(root, "st.pkg"), R"({
+  "shuangtian_pkg_format": 1,
+  "name": "groupprobe4",
+  "version": "0.1.0",
+  "kind": "static_library",
+  "cxx_standard": 23,
+  "include_dirs": ["src"],
+  "sources": [],
+  "targets": {
+    "all": { "kind": "group", "libraries": ["a", "b"] },
+    "a": { "kind": "executable", "sources": ["src/a.cpp"] },
+    "b": { "kind": "executable", "sources": ["src/b.cpp"] }
+  }
+})")
+                 .has_value());
+
+  const auto manifest = st::pkg::Manifest::load(st::fs::join(root, "st.pkg"));
+  ST_REQUIRE(manifest.has_value());
+  st::pkg::BuildOptions options{};
+  options.target = "all";
+  options.profile = "dev";
+  options.no_tests = true;
+  const auto stats = st::pkg::build(*manifest, options);
+  ST_REQUIRE(stats.has_value());
+  // 聚合的单元数应当是两个成员之和（不是最后一个）
+  ST_CHECK(stats->units_total >= 2);
+  // 每个成员的产物都存在且能跑
+  for (const auto& name : {std::string("a"), std::string("b")}) {
+    const std::string exe = st::fs::join(st::fs::join(st::fs::join(st::fs::join(root, "build"), "dev"), "bin"), name + ".exe");
+    ST_CHECK(st::fs::is_regular_file(exe));
+    const auto run = st::process::run(exe, {});
+    ST_REQUIRE(run.has_value());
+    ST_CHECK_EQ(run->exit_code, 0);
+    ST_CHECK(run->stdout_text.find(name + "-ok") != std::string::npos);
+  }
+}

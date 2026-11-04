@@ -159,6 +159,8 @@ void print_usage() {
 命令:
   build [target]        构建工程或指定目标（--profile=quick|dev|debug|release|san，默认 dev；
                         -j N，--verbose，--force）
+                        `st build all` = 构建**全部真实应用**（清单里的 `kind: "group"` 合成目标；
+                        不含 ~140 个一次性探针）。新增应用时把它加进 `all` 的 libraries。
                                                 --no-strip 保留产物内调试信息（默认链接后分离到 <产物>.debug，
                         产物本体可小 ~94%；gdb 会自动找分离符号）
                         --no-tests 不刷新过期的测试二进制（默认会**只构建不运行**地
